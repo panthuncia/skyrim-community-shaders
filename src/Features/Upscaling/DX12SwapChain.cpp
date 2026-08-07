@@ -7,29 +7,29 @@
 #include "../Upscaling.h"
 #include "FidelityFX.h"
 #include "Streamline.h"
+#include "RenderGraph/DX12RenderRuntime.h"
 
-void DX12SwapChain::CreateD3D12Device(IDXGIAdapter* a_adapter)
+namespace
 {
-	DX::ThrowIfFailed(D3D12CreateDevice(a_adapter, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&d3d12Device)));
-
-	D3D12_COMMAND_QUEUE_DESC queueDesc = {};
-	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-	queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-	queueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
-	queueDesc.NodeMask = 0;
-
-	DX::ThrowIfFailed(d3d12Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&commandQueue)));
-
-	for (int i = 0; i < 2; i++) {
-		DX::ThrowIfFailed(d3d12Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&commandAllocators[i])));
-		DX::ThrowIfFailed(d3d12Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, commandAllocators[i].get(), nullptr, IID_PPV_ARGS(&commandLists[i])));
-		commandLists[i]->Close();
+	template <class T>
+	void Borrow(winrt::com_ptr<T>& destination, T* source)
+	{
+		if (!source)
+			throw std::runtime_error("DX12 runtime native object is unavailable");
+		destination.copy_from(source);
 	}
 }
 
 void DX12SwapChain::CreateSwapChain(IDXGIAdapter* adapter, DXGI_SWAP_CHAIN_DESC a_swapChainDesc)
 {
-	CreateD3D12Device(adapter);
+	auto& runtime = DX12RenderRuntime::Get();
+	Borrow(d3d12Device, runtime.GetNativeDevice());
+	Borrow(commandQueue, runtime.GetGraphicsQueue());
+	for (int i = 0; i < 2; i++) {
+		DX::ThrowIfFailed(d3d12Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&commandAllocators[i])));
+		DX::ThrowIfFailed(d3d12Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, commandAllocators[i].get(), nullptr, IID_PPV_ARGS(&commandLists[i])));
+		DX::ThrowIfFailed(commandLists[i]->Close());
+	}
 
 	IDXGIFactory4* dxgiFactory;
 	DX::ThrowIfFailed(adapter->GetParent(IID_PPV_ARGS(&dxgiFactory)));
@@ -38,7 +38,6 @@ void DX12SwapChain::CreateSwapChain(IDXGIAdapter* adapter, DXGI_SWAP_CHAIN_DESC 
 	DXGI_FORMAT attemptedFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
 	DXGI_FORMAT negotiatedFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
 	bool fallbackUsed = false;
-
 	// Test R10G10B10A2 support for HDR capability
 	D3D12_FEATURE_DATA_FORMAT_SUPPORT formatSupport = { DXGI_FORMAT_R10G10B10A2_UNORM, D3D12_FORMAT_SUPPORT1_RENDER_TARGET, D3D12_FORMAT_SUPPORT2_NONE };
 	if (SUCCEEDED(d3d12Device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &formatSupport, sizeof(formatSupport)))) {
@@ -160,9 +159,8 @@ HRESULT DX12SwapChain::GetBuffer(UINT buffer, REFIID riid, void** ppSurface)
 	if (buffer != 0 || !swapChainBufferWrapped || !swapChainBufferWrapped->resource11)
 		return DXGI_ERROR_INVALID_CALL;
 
-	// IDXGISwapChain::GetBuffer returns an owned COM reference. Returning the raw
-	// pointer here let the caller's Release destroy the shared texture while the
-	// D3D12 side still retained and submitted its corresponding resource.
+	// IDXGISwapChain::GetBuffer returns an owned COM reference.
+	// Use QueryInterface to keep reference counting correct
 	return swapChainBufferWrapped->resource11->QueryInterface(riid, ppSurface);
 }
 
@@ -284,9 +282,11 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 
 HRESULT DX12SwapChain::GetDevice(REFIID uuid, void** ppDevice)
 {
+	if (!ppDevice)
+		return E_POINTER;
+	*ppDevice = nullptr;
 	if (uuid == __uuidof(ID3D11Device) || uuid == __uuidof(ID3D11Device1) || uuid == __uuidof(ID3D11Device2) || uuid == __uuidof(ID3D11Device3) || uuid == __uuidof(ID3D11Device4) || uuid == __uuidof(ID3D11Device5)) {
-		*ppDevice = d3d11Device.get();
-		return S_OK;
+		return d3d11Device->QueryInterface(uuid, ppDevice);
 	}
 
 	return swapChain->GetDevice(uuid, ppDevice);
@@ -322,19 +322,18 @@ float DX12SwapChain::GetFrameTime() const
 
 WrappedResource::WrappedResource(D3D11_TEXTURE2D_DESC a_texDesc, ID3D11Device5* a_d3d11Device, ID3D12Device* a_d3d12Device)
 {
-	// Create D3D11 shared texture directly instead of wrapping D3D12 resource
+	// D3D11 renders into the shared texture; D3D12 consumes the same allocation.
 	a_texDesc.MiscFlags |= D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
 	DX::ThrowIfFailed(a_d3d11Device->CreateTexture2D(&a_texDesc, nullptr, &resource11));
 
-	// Get shared handle from D3D11 texture to enable D3D12 access
 	winrt::com_ptr<IDXGIResource1> dxgiResource;
 	DX::ThrowIfFailed(resource11->QueryInterface(IID_PPV_ARGS(dxgiResource.put())));
 	HANDLE sharedHandle = nullptr;
 	DX::ThrowIfFailed(dxgiResource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &sharedHandle));
 
-	// Open the shared D3D11 texture as D3D12 resource
-	DX::ThrowIfFailed(a_d3d12Device->OpenSharedHandle(sharedHandle, IID_PPV_ARGS(resource.put())));
+	const HRESULT openResult = a_d3d12Device->OpenSharedHandle(sharedHandle, IID_PPV_ARGS(resource.put()));
 	CloseHandle(sharedHandle);
+	DX::ThrowIfFailed(openResult);
 
 	if (a_texDesc.BindFlags & D3D11_BIND_SHADER_RESOURCE) {
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
@@ -376,10 +375,6 @@ WrappedResource::WrappedResource(D3D11_TEXTURE2D_DESC a_texDesc, ID3D11Device5* 
 
 WrappedResource::~WrappedResource()
 {
-	if (resource11) {
-		resource11->Release();
-		resource11 = nullptr;
-	}
 	if (srv) {
 		srv->Release();
 		srv = nullptr;
@@ -392,6 +387,10 @@ WrappedResource::~WrappedResource()
 		rtv->Release();
 		rtv = nullptr;
 	}
+	if (resource11) {
+		resource11->Release();
+		resource11 = nullptr;
+	}
 	// resource (winrt::com_ptr) will be automatically released
 }
 
@@ -403,10 +402,22 @@ DXGISwapChainProxy::DXGISwapChainProxy(IDXGISwapChain4* a_swapChain)
 /****IUknown****/
 HRESULT STDMETHODCALLTYPE DXGISwapChainProxy::QueryInterface(REFIID riid, void** ppvObj)
 {
-	auto ret = swapChain->QueryInterface(riid, ppvObj);
-	if (*ppvObj)
-		*ppvObj = this;
-	return ret;
+	if (!ppvObj)
+		return E_POINTER;
+
+	*ppvObj = nullptr;
+	if (riid == __uuidof(IUnknown) ||
+		riid == __uuidof(IDXGIObject) ||
+		riid == __uuidof(IDXGIDeviceSubObject) ||
+		riid == __uuidof(IDXGISwapChain)) {
+		*ppvObj = static_cast<IDXGISwapChain*>(this);
+		AddRef();
+		return S_OK;
+	}
+
+	// Do not substitute this IDXGISwapChain-only proxy for newer interfaces whose
+	// additional vtable entries it does not implement.
+	return swapChain->QueryInterface(riid, ppvObj);
 }
 
 ULONG STDMETHODCALLTYPE DXGISwapChainProxy::AddRef()

@@ -8,3 +8,12 @@
 	path = extern/FidelityFX-SDK
 	url = https://github.com/alandtse/FidelityFX-SDK-DX11
 	branch = optiscaler-build
+[submodule "extern/BasicRHI"]
+	path = extern/BasicRHI
+	url = https://github.com/panthuncia/BasicRHI.git
+[submodule "extern/OpenRenderGraph"]
+	path = extern/OpenRenderGraph
+	url = https://github.com/panthuncia/OpenRenderGraph.git
+[submodule "extern/BasicTelemetry"]
+	path = extern/BasicTelemetry
+	url = https://github.com/panthuncia/BasicTelemetry.git

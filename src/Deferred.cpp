@@ -1,4 +1,5 @@
 #include "Deferred.h"
+#include "RenderGraph/DX12RenderRuntime.h"
 
 #include <DDSTextureLoader.h>
 
@@ -431,6 +432,15 @@ void Deferred::EndDeferred()
 
 	auto context = globals::d3d::context;
 	context->OMSetRenderTargets(0, nullptr, nullptr);  // Unbind all bound render targets
+
+	// The graph epoch owns the D3D11 -> D3D12 -> D3D11 queue-fence round trip.
+	// Imported resources are deliberately unbound before this handoff.
+	D3D11_VIEWPORT viewport{};
+	UINT viewportCount = 1;
+	context->RSGetViewports(&viewportCount, &viewport);
+	DX12RenderRuntime::Get().ExecuteDeferredEpoch(
+		static_cast<uint32_t>(viewport.Width),
+		static_cast<uint32_t>(viewport.Height));
 
 	DeferredPasses();  // Perform deferred passes and composite forward buffers
 

@@ -35,6 +35,11 @@ void FidelityFX::LoadFFX()
 		logger::info("[FidelityFX] Loader DLL loaded successfully from plugin directory");
 
 		ffxLoadFunctions(&ffxModule, module);
+		if (!ffxModule.CreateContext || !ffxModule.DestroyContext || !ffxModule.Configure || !ffxModule.Query || !ffxModule.Dispatch) {
+			logger::error("[FidelityFX] Loader is missing one or more required API exports");
+			featureFSR3FG = false;
+			return;
+		}
 
 		if (featureFSR3FG) {
 			logger::info("[FidelityFX] Frame generation DLL found and available");

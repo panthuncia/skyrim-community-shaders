@@ -100,6 +100,33 @@ find_package(Tracy CONFIG REQUIRED)
 find_package(directx-headers CONFIG REQUIRED)
 find_package(effects11 CONFIG REQUIRED)
 
+# CS owns the graphics runtime. Keep the library configuration local and
+# deliberately exclude application-layer and optional backend dependencies.
+set(BASICRHI_ENABLE_D3D12 ON CACHE BOOL "" FORCE)
+set(BASICRHI_ENABLE_VULKAN OFF CACHE BOOL "" FORCE)
+set(BASICRHI_ENABLE_IMGUI OFF CACHE BOOL "" FORCE)
+set(BASICRHI_ENABLE_STREAMLINE OFF CACHE BOOL "" FORCE)
+set(BASICRHI_ENABLE_PIX OFF CACHE BOOL "" FORCE)
+set(BASICRHI_ENABLE_RESHAPE OFF CACHE BOOL "" FORCE)
+set(BASICRHI_ENABLE_TRACY_GPU_PROFILING OFF CACHE BOOL "" FORCE)
+set(BASICRHI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(BASICTELEMETRY_ENABLE_TRACY ON CACHE BOOL "" FORCE)
+set(BASICTELEMETRY_BUILD_ARTIFACTS OFF CACHE BOOL "" FORCE)
+set(BASICTELEMETRY_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(BASICTELEMETRY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(OPENRENDERGRAPH_ENABLE_SUBMODULE_FALLBACK OFF CACHE BOOL "" FORCE)
+set(OPENRENDERGRAPH_ENABLE_DEBUG_UI OFF CACHE BOOL "" FORCE)
+add_subdirectory(extern/BasicRHI)
+add_subdirectory(extern/BasicTelemetry)
+add_subdirectory(extern/OpenRenderGraph)
+
+# Keep dependency-specific warning and Windows macro policy local to the bridge.
+set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/DX12GraphHost.cpp"
+    PROPERTIES
+        COMPILE_DEFINITIONS NOMINMAX
+        COMPILE_OPTIONS "/wd4100")
+
 if(DEVBENCH_BRIDGE)
     find_package(devbench-api CONFIG REQUIRED)
 endif()
@@ -163,6 +190,10 @@ target_link_libraries(
         Microsoft::DirectX-Headers
         ${DETOURS_LIBRARY}
         Microsoft::Effects11
+        BasicRHI::BasicRHI
+        BasicTelemetry::Core
+        BasicTelemetry::Tracy
+        OpenRenderGraph::OpenRenderGraph
         windowsapp
         windowscodecs
 )

@@ -10,6 +10,7 @@
 #include "Upscaling/Streamline.h"
 #include "Utils/Game.h"
 #include "Utils/UI.h"
+#include "RenderGraph/DX12RenderRuntime.h"
 #include <Windows.h>
 #include <algorithm>
 #include <cfloat>
@@ -127,6 +128,15 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 				pFeatureLevel,
 				ppImmediateContext));
 
+			if (!DX12RenderRuntime::Get().Initialize(*ppDevice, *ppImmediateContext)) {
+				logger::warn("[DX12RenderRuntime] Initialization failed; falling back to the normal D3D11 swap chain");
+				(*ppImmediateContext)->Release();
+				(*ppDevice)->Release();
+				*ppImmediateContext = nullptr;
+				*ppDevice = nullptr;
+				shouldProxy = false;
+			} else {
+
 			upscaling.SetProxyD3D11Device(*ppDevice);
 			upscaling.SetProxyD3D11DeviceContext(*ppImmediateContext);
 			upscaling.CreateProxySwapChain(pAdapter, *pSwapChainDesc);
@@ -150,7 +160,8 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 				upscaling.PostBackendDevice();
 			}
 
-			return S_OK;
+				return S_OK;
+			}
 		} else {
 			logger::warn("[Frame Generation] FidelityFX DLLs are not loaded, skipping proxy");
 			upscaling.fidelityFXMissing = true;
@@ -169,6 +180,9 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 		ppDevice,
 		pFeatureLevel,
 		ppImmediateContext);
+
+	if (SUCCEEDED(ret) && !DX12RenderRuntime::Get().Initialize(*ppDevice, *ppImmediateContext))
+		logger::warn("[DX12RenderRuntime] Initialization failed; continuing with the D3D11 renderer");
 
 	if (upscaling.IsBackendInitialized()) {
 		upscaling.UpgradeBackendInterface((void**)&(*ppDevice));

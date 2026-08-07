@@ -29,7 +29,7 @@ struct DXGISwapChainProxy : IDXGISwapChain
 public:
 	DXGISwapChainProxy(IDXGISwapChain4* a_swapChain);
 
-	IDXGISwapChain4* swapChain;
+	IDXGISwapChain4* swapChain = nullptr;
 
 	/****IUnknown****/
 	virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObj) override;
@@ -70,8 +70,8 @@ public:
 
 	DXGI_SWAP_CHAIN_DESC1 swapChainDesc;
 
-	WrappedResource* swapChainBufferWrapped;
-	WrappedResource* uiBufferWrapped;
+	WrappedResource* swapChainBufferWrapped = nullptr;
+	WrappedResource* uiBufferWrapped = nullptr;
 
 	// D3D12 interop resources for frame generation
 	WrappedResource* depthBufferShared12 = nullptr;
@@ -97,7 +97,6 @@ public:
 	// Returns the current frame time (in seconds) for accurate FPS calculation when frame generation is active
 	float GetFrameTime() const;
 
-	void CreateD3D12Device(IDXGIAdapter* a_adapter);
 	void CreateSwapChain(IDXGIAdapter* adapter, DXGI_SWAP_CHAIN_DESC swapChainDesc);
 
 	void CreateInterop();
