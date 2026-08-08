@@ -52,6 +52,7 @@ option(
     ON
 )
 option(TRACY_SUPPORT "Enable support for tracy profiler" OFF)
+option(CS_BUILD_DX12_GRAPH_SAMPLES "Build standalone DX12 graph contributor samples" OFF)
 option(ENABLE_ENB_EXTENDER "Enable ENBExtender reimplementation (weather blending, time-of-day, technique bindings)" ON)
 message("\tAuto plugin deployment: ${AUTO_PLUGIN_DEPLOYMENT}")
 message("\tZip to dist: ${ZIP_TO_DIST}")
@@ -119,6 +120,22 @@ set(OPENRENDERGRAPH_ENABLE_DEBUG_UI OFF CACHE BOOL "" FORCE)
 add_subdirectory(extern/BasicRHI)
 add_subdirectory(extern/BasicTelemetry)
 add_subdirectory(extern/OpenRenderGraph)
+
+option(COMMUNITYSHADERS_ENABLE_ORG_MODULE_SERVICES "Enable optional shared ORG module services" ON)
+if(COMMUNITYSHADERS_ENABLE_ORG_MODULE_SERVICES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/extern/ORGModuleServices/CMakeLists.txt")
+    add_subdirectory(extern/ORGModuleServices)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::ORGModuleServices)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE CS_HAS_ORG_MODULE_SERVICES=1)
+endif()
+
+set(CS_DXC_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/extern/FidelityFX-SDK/framework/cauldron/framework/libs/dxc/bin/x64")
+if(CS_BUILD_DX12_GRAPH_SAMPLES)
+    add_subdirectory(tests/DX12GraphDiagnostic)
+endif()
+
+target_sources(${PROJECT_NAME} PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/LightCulling.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/LightCulling.h")
 
 # Keep dependency-specific warning and Windows macro policy local to the bridge.
 set_source_files_properties(
@@ -489,6 +506,10 @@ install(
     DESTINATION SKSE/Plugins
     COMPONENT SKSE
 )
+if(COMMUNITYSHADERS_ENABLE_ORG_MODULE_SERVICES AND EXISTS "${CS_DXC_RUNTIME_DIR}/dxcompiler.dll")
+    install(FILES "${CS_DXC_RUNTIME_DIR}/dxcompiler.dll" "${CS_DXC_RUNTIME_DIR}/dxil.dll"
+        DESTINATION SKSE/Plugins COMPONENT SKSE)
+endif()
 install(
     DIRECTORY ${CMAKE_SOURCE_DIR}/package/ ${FEATURE_PATHS_SLASH}
     DESTINATION .
@@ -667,6 +688,10 @@ if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
             ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_PDB_FILE:${PROJECT_NAME}>"
             "${AIO_DIR}/SKSE/Plugins/$<TARGET_PDB_FILE_NAME:${PROJECT_NAME}>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CS_DXC_RUNTIME_DIR}/dxcompiler.dll" "${AIO_DIR}/SKSE/Plugins/dxcompiler.dll"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CS_DXC_RUNTIME_DIR}/dxil.dll" "${AIO_DIR}/SKSE/Plugins/dxil.dll"
         COMMENT "Copying built DLL and PDB to AIO package"
         VERBATIM
     )

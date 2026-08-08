@@ -140,6 +140,19 @@
                 "ZIP_TO_DIST": "OFF",
                 "AIO_ZIP_TO_DIST": "OFF"
             }
+        },
+        {
+            "name": "ASAN",
+            "description": "AddressSanitizer runtime diagnostics build for the CS SKSE plugin.",
+            "inherits": "ALL",
+            "binaryDir": "${sourceDir}/build/ASAN-VS",
+            "cacheVariables": {
+                "CMAKE_CXX_FLAGS_RELEASE": "/Od /Ob0 /Zi /bigobj /fsanitize=address /D_DISABLE_VECTOR_ANNOTATION /D_DISABLE_STRING_ANNOTATION /D_DISABLE_OPTIONAL_ANNOTATION /DNDEBUG",
+                "CMAKE_SHARED_LINKER_FLAGS_RELEASE": "/INCREMENTAL:NO /DEBUG /IGNORE:4099",
+                "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "OFF",
+                "ZIP_TO_DIST": "OFF",
+                "AIO_ZIP_TO_DIST": "OFF"
+            }
         }
     ],
     "buildPresets": [
@@ -197,6 +210,13 @@
             "configurePreset": "PR",
             "configuration": "Release",
             "targets": ["Package-AIO-Manual"]
+        },
+        {
+            "name": "ASAN",
+            "description": "Build the AddressSanitizer-instrumented CS DLL.",
+            "configurePreset": "ASAN",
+            "configuration": "Release",
+            "targets": ["CommunityShaders"]
         }
     ]
 }

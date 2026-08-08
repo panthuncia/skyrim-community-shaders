@@ -12,6 +12,7 @@ struct HairSpecular;
 struct HorizonFix;
 struct IBL;
 struct LightLimitFix;
+class DeferredRendering;
 struct LinearLighting;
 struct LODBlending;
 struct InteriorSun;
@@ -101,6 +102,7 @@ namespace globals
 		extern HorizonFix horizonFix;
 		extern IBL ibl;
 		extern LightLimitFix lightLimitFix;
+		extern DeferredRendering deferredRendering;
 		extern LinearLighting linearLighting;
 		extern LODBlending lodBlending;
 		extern InteriorSun interiorSun;

@@ -3,6 +3,7 @@
 #include "Deferred.h"
 #include "Features/CloudShadows.h"
 #include "Features/DynamicCubemaps.h"
+#include "Features/DeferredRendering.h"
 #include "Features/Effects11.h"
 #include "Features/ExponentialHeightFog.h"
 #include "Features/ExtendedMaterials.h"
@@ -66,6 +67,7 @@ namespace globals
 		GrassLighting grassLighting{};
 		IBL ibl{};
 		LightLimitFix lightLimitFix{};
+		DeferredRendering deferredRendering{};
 		LinearLighting linearLighting{};
 		LODBlending lodBlending{};
 		HairSpecular hairSpecular{};

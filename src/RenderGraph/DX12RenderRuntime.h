@@ -28,14 +28,18 @@ public:
 	bool IsAvailable() const noexcept { return available.load(std::memory_order_acquire); }
 	ID3D12Device* GetNativeDevice() const noexcept { return device12.get(); }
 	ID3D12CommandQueue* GetGraphicsQueue() const noexcept { return graphicsQueue.get(); }
+	org::services::ShaderCompiler* GetShaderCompiler() noexcept { return renderGraph ? renderGraph->GetShaderCompiler() : nullptr; }
+	org::services::PipelineService* GetPipelineService() noexcept { return renderGraph ? renderGraph->GetPipelineService() : nullptr; }
 
 	CSDX12Status GetRuntimeInfo(CSDX12RuntimeInfo* out) const noexcept;
 	CSDX12Status Register(const CSDX12ContributorDesc* desc, CSDX12RegistrationHandle* out) noexcept;
 	CSDX12Status Unregister(CSDX12RegistrationHandle handle) noexcept;
 	CSDX12Status DeclareResource(CSDX12BuildHandle build, const CSDX12ResourceDesc* desc, CSDX12ResourceHandle* out) noexcept;
+	CSDX12Status FindResource(CSDX12BuildHandle build, const char* id, CSDX12ResourceHandle* out) noexcept;
 	CSDX12Status DeclarePass(CSDX12BuildHandle build, const CSDX12PassDesc* desc, CSDX12PassHandle* out) noexcept;
 	CSDX12Status RequestRebuild(CSDX12RegistrationHandle handle) noexcept;
-	CSDX12Status GetLastDiagnostic(CSDX12Diagnostic* out) const noexcept;
+	CSDX12Status IsRegistrationRetired(CSDX12RegistrationHandle handle, uint32_t* out) const noexcept;
+	CSDX12Status GetLastDiagnostic(CSDX12RegistrationHandle handle, CSDX12Diagnostic* out) const noexcept;
 
 private:
 	struct Contributor;
@@ -68,26 +72,28 @@ private:
 	winrt::com_ptr<ID3D12CommandQueue> graphicsQueue;
 	winrt::com_ptr<ID3D12CommandQueue> computeQueue;
 	winrt::com_ptr<ID3D12CommandQueue> copyQueue;
+	rhi::TimelinePtr readyTimeline;
+	rhi::TimelinePtr completeTimeline;
 	winrt::com_ptr<ID3D12Fence> readyFence12;
 	winrt::com_ptr<ID3D11Fence> readyFence11;
 	winrt::com_ptr<ID3D12Fence> completeFence12;
 	winrt::com_ptr<ID3D11Fence> completeFence11;
 	static constexpr uint32_t kCommandFrameCount = 3;
-	winrt::com_ptr<ID3D12CommandAllocator> allocators[kCommandFrameCount];
-	winrt::com_ptr<ID3D12GraphicsCommandList> commandLists[kCommandFrameCount];
-	uint64_t allocatorFence[kCommandFrameCount]{};
 
 	std::atomic_bool available{ false };
 	std::atomic_bool registrationOpen{ true };
 	std::atomic_bool rebuildRequested{ true };
 	std::atomic_uint64_t nextHandle{ 1 };
-	std::atomic_uint64_t nextFence{ 1 };
+	std::atomic_uint64_t nextReadyFence{ 1 };
+	std::atomic_uint64_t nextCompleteFence{ 1 };
 	std::atomic_uint64_t nextGeneration{ 1 };
+	std::atomic_uint64_t lastSubmittedCompletion{};
 	uint64_t frameIndex = 0;
 	std::thread::id renderThread;
 
 	mutable std::shared_mutex registryMutex;
 	std::unordered_map<uint64_t, Contributor> contributors;
+	std::unordered_map<uint64_t, Contributor> unregistering;
 	std::unique_ptr<Generation> active;
 	std::deque<std::pair<uint64_t, std::unique_ptr<Generation>>> retired;
 	BuildState* currentBuild = nullptr;

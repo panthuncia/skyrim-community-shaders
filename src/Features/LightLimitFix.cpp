@@ -1,4 +1,6 @@
 #include "LightLimitFix.h"
+
+#include "DeferredRendering.h"
 #include "Effects11.h"
 #include "InverseSquareLighting.h"
 #include "LinearLighting.h"
@@ -295,7 +297,7 @@ void LightLimitFix::BSLightingShader_SetupGeometry_GeometrySetupConstantPointLig
 	}
 }
 
-void LightLimitFix::BSLightingShader_SetupGeometry_After(RE::BSRenderPass*)
+void LightLimitFix::BSLightingShader_SetupGeometry_After(RE::BSRenderPass* a_pass)
 {
 	auto shaderCache = globals::shaderCache;
 	auto context = globals::d3d::context;
@@ -320,6 +322,9 @@ void LightLimitFix::BSLightingShader_SetupGeometry_After(RE::BSRenderPass*)
 		previousRoomIndex = roomIndex;
 		previousShadowBitMask = shadowBitMask;
 	}
+
+	if (a_pass && a_pass->geometry)
+		globals::features::deferredRendering.AssignContext(a_pass, { roomIndex, shadowBitMask, isWorld ? 1u : 0u, 0u });
 
 	if (frameChecker.IsNewFrame()) {
 		ID3D11Buffer* buffer = { strictLightDataCB->CB() };
@@ -501,6 +506,8 @@ void LightLimitFix::UpdateLights()
 	auto context = globals::d3d::context;
 
 	lightCount = std::min((uint)lightsData.size(), MAX_LIGHTS);
+	globals::features::deferredRendering.BeginFrame(
+		std::span<const LightData>{ lightsData.data(), lightCount }, clusterSize, lightsNear, lightsFar);
 
 	D3D11_MAPPED_SUBRESOURCE mapped;
 	DX::ThrowIfFailed(context->Map(lights->resource.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));

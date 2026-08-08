@@ -6,17 +6,17 @@
 
 namespace
 {
-	CSDX12GraphAPI api{ sizeof(api), CS_DX12_GRAPH_API_VERSION_1 };
+	CSDX12GraphAPI api{ sizeof(api), CS_DX12_GRAPH_API_CURRENT };
 	CSDX12RegistrationHandle registration{};
 	std::atomic_uint64_t executedFrame{ UINT64_MAX };
 
-	CSDX12Status CS_DX12_GRAPH_CALL Execute(void*, void* borrowedList, const CSDX12FrameInfo* frame)
+	CSDX12Status CS_DX12_GRAPH_CALL Execute(void*, const CSDX12ExecutionContext* context)
 	{
-		if (!borrowedList || !frame)
+		if (!context || !context->borrowedD3D12GraphicsCommandList || !context->frame)
 			return CS_DX12_E_INVALID_ARGUMENT;
-		auto* list = static_cast<ID3D12GraphicsCommandList*>(borrowedList);
+		auto* list = static_cast<ID3D12GraphicsCommandList*>(context->borrowedD3D12GraphicsCommandList);
 		list->SetMarker(0, "cs-diagnostic-frame-marker", 26);
-		executedFrame.store(frame->frameIndex, std::memory_order_release);
+		executedFrame.store(context->frame->frameIndex, std::memory_order_release);
 		return CS_DX12_OK;
 	}
 
@@ -26,9 +26,9 @@ namespace
 		const char* before[]{ "cs.deferred-lighting.begin" };
 		CSDX12PassDesc pass{};
 		pass.structSize = sizeof(pass);
-		pass.apiVersion = CS_DX12_GRAPH_API_VERSION_1;
+		pass.apiVersion = CS_DX12_GRAPH_API_CURRENT;
 		pass.id = "cs-diagnostic.marker";
-		pass.queue = CS_DX12_QUEUE_GRAPHICS;
+		pass.queuePolicy = CS_DX12_QUEUE_REQUIRE_GRAPHICS;
 		pass.after = after;
 		pass.afterCount = 1;
 		pass.before = before;
@@ -45,11 +45,11 @@ extern "C" __declspec(dllexport) bool CS_Diagnostic_Register()
 	if (!cs)
 		return false;
 	const auto getApi = reinterpret_cast<decltype(&CS_GetDX12GraphAPI)>(GetProcAddress(cs, "CS_GetDX12GraphAPI"));
-	if (!getApi || getApi(CS_DX12_GRAPH_API_VERSION_1, &api) != CS_DX12_OK)
+	if (!getApi || getApi(CS_DX12_GRAPH_API_CURRENT, &api) != CS_DX12_OK)
 		return false;
 	CSDX12ContributorDesc contributor{};
 	contributor.structSize = sizeof(contributor);
-	contributor.apiVersion = CS_DX12_GRAPH_API_VERSION_1;
+	contributor.apiVersion = CS_DX12_GRAPH_API_CURRENT;
 	contributor.id = "cs-diagnostic";
 	contributor.kind = CS_DX12_CONTRIBUTOR_DIAGNOSTIC;
 	contributor.build = &Build;
