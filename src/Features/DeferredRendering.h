@@ -1,31 +1,40 @@
 #pragma once
 
 #include "Feature.h"
-#include "Features/LightLimitFix.h"
+#include "Features/DeferredRendering/DeferredTypes.h"
 
 class DeferredRendering final : public Feature
 {
 public:
-	using LightData = LightLimitFix::LightData;
-	static constexpr std::uint32_t MAX_LIGHTS = LightLimitFix::MAX_LIGHTS;
-	using ContextIndex = std::uint16_t;
-	static constexpr ContextIndex INVALID_CONTEXT = 0xFFFF;
-
-	struct alignas(16) LightingContext
+	struct Settings
 	{
-		std::int32_t roomIndex = -1;
-		std::uint32_t shadowLightMembershipMask = 0;
-		std::uint32_t featureFlags = 0;
-		std::uint32_t reserved = 0;
-
-		auto operator<=>(const LightingContext&) const = default;
+		bool visualizeDeferredCoverage = false;
 	};
-	STATIC_ASSERT_ALIGNAS_16(LightingContext);
+
+	Settings settings;
+	using LightData = CS::Deferred::Light;
+	using LightFlags = CS::Deferred::LightFlags;
+	using LightingContext = CS::Deferred::LightingContext;
+	using ContextIndex = CS::Deferred::ContextIndex;
+	static constexpr std::uint32_t MAX_LIGHTS = CS::Deferred::kMaxLights;
+	static constexpr ContextIndex INVALID_CONTEXT = CS::Deferred::kInvalidContext;
+	enum ContextFeatureFlags : std::uint32_t
+	{
+		kWorld = 1u << 0,
+		kLightingUniformsValid = 1u << 1
+	};
 
 	struct FrameSnapshot
 	{
+		std::uint32_t abiVersion = CS::Deferred::kAbiVersion;
 		std::vector<LightData> lights;
 		std::vector<LightingContext> contexts;
+		Matrix cameraView{};
+		Matrix cameraViewInverse{};
+		Matrix projectionInverse{};
+		CS::Deferred::LightingTransform lightingTransform{};
+		std::uint32_t renderWidth{};
+		std::uint32_t renderHeight{};
 		std::uint32_t clusterSize[3]{};
 		float nearPlane = 1.0f;
 		float farPlane = 16384.0f;
@@ -35,7 +44,16 @@ public:
 	std::string GetShortName() override { return "DeferredRendering"; }
 	std::string_view GetCategory() const override { return FeatureCategories::kLighting; }
 	bool IsCore() const override { return true; }
-	bool IsInMenu() const override { return false; }
+	bool IsInMenu() const override { return true; }
+	bool CanConfigureWhileUnloaded() const override { return true; }
+	void DrawSettings() override;
+	void LoadSettings(json& json) override;
+	void SaveSettings(json& json) override;
+	void RestoreDefaultSettings() override;
+	bool IsCoverageVisualizationEnabled() const noexcept
+	{
+		return settings.visualizeDeferredCoverage || std::getenv("CS_DX12_FORCE_COVERAGE") != nullptr;
+	}
 	std::pair<std::string, std::vector<std::string>> GetFeatureSummary() override
 	{
 		return { "Deferred rendering infrastructure and clustered-light assignment.", {} };
@@ -43,7 +61,10 @@ public:
 
 	void BeginFrame(std::span<const LightData> lights, const std::uint32_t (&clusterDimensions)[3], float cameraNearPlane, float cameraFarPlane);
 	ContextIndex AssignContext(const RE::BSRenderPass* renderPass, const LightingContext& context);
-	FrameSnapshot GetFrameSnapshot() const;
+	void FinalizeFrame();
+	std::shared_ptr<const FrameSnapshot> GetFrameSnapshot() const;
+	void RetainSubmittedFrame(std::shared_ptr<const FrameSnapshot> frame, std::uint64_t completionValue);
+	void RetireFrames(std::uint64_t completedValue);
 	ContextIndex GetContext(const RE::BSRenderPass* renderPass) const;
 
 private:
@@ -56,4 +77,12 @@ private:
 	std::uint32_t clusterSize[3]{};
 	float nearPlane = 1.0f;
 	float farPlane = 16384.0f;
+	Matrix cameraView{};
+	Matrix cameraViewInverse{};
+	Matrix projectionInverse{};
+	CS::Deferred::LightingTransform lightingTransform{};
+	std::uint32_t renderWidth{};
+	std::uint32_t renderHeight{};
+	std::shared_ptr<const FrameSnapshot> finalizedFrame;
+	std::deque<std::pair<std::uint64_t, std::shared_ptr<const FrameSnapshot>>> submittedFrames;
 };

@@ -653,7 +653,7 @@ namespace DevBenchBridge
 		dvb->RegisterTool("communityshaders.capture", captureDesc, &CaptureToolHandler, nullptr);
 
 		static constexpr const char* settingsDesc =
-			R"({"description":"Save, load, or reset the GLOBAL Community Shaders user configuration (Data/SKSE/Plugins/CommunityShaders/*.json). Action-dispatched, all fire-and-forget on the main thread. save: persist current settings (State::Save). load: re-read settings from disk and apply (State::Load). reset: restore every feature to its defaults then persist. Use after communityshaders.feature set/reset to make changes durable, or to roll an A/B session back to the saved baseline.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["save","load","reset"]}},"required":["action"]}})";
+			R"({"description":"Save, load, or reset the GLOBAL Community Shaders user configuration (JSON files under Data/SKSE/Plugins/CommunityShaders). Action-dispatched, all fire-and-forget on the main thread. save: persist current settings (State::Save). load: re-read settings from disk and apply (State::Load). reset: restore every feature to its defaults then persist. Use after communityshaders.feature set/reset to make changes durable, or to roll an A/B session back to the saved baseline.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["save","load","reset"]}},"required":["action"]}})";
 		dvb->RegisterTool("communityshaders.settings", settingsDesc, &SettingsToolHandler, nullptr);
 	}
 }
@@ -662,14 +662,10 @@ namespace DevBenchBridge
 
 namespace DevBenchBridge
 {
-	/**
- * @brief Registers Community Shaders tools with the DevBench bridge if available.
- *
- * When the DevBench interface is present, registers tool handlers for feature management,
- * inspection, shader caching, capture operations, and settings persistence.
- * If DevBench is unavailable, no action is taken.
- */
-void Install() {}  // inert until built with DEVBENCH_BRIDGE_ENABLED
+	__declspec(noinline) void Install()
+	{
+		_ReadWriteBarrier();
+	}
 }
 
 #endif

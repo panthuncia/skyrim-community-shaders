@@ -400,7 +400,7 @@ struct PS_OUTPUT
 	float4 Specular: SV_Target4;
 	float4 Reflectance: SV_Target5;
 	float4 Masks: SV_Target6;
-	float4 Masks2: SV_Target7;
+	uint Masks2: SV_Target7;
 };
 #else
 struct PS_OUTPUT
@@ -915,13 +915,13 @@ PS_OUTPUT main(PS_INPUT input)
 	psout.Albedo = float4(psout.Diffuse.xyz, finalColor.w);
 	psout.Reflectance = float4(psout.Diffuse.xyz, finalColor.w);
 	psout.Masks = float4(Color::RGBToLuminance(psout.Diffuse.xyz).xxx, finalColor.w);
-	psout.Masks2 = float4(0, 0, 0, finalColor.w);
+	psout.Masks2 = 0xF800FFFFu;
 #		else
 	psout.Albedo = float4(psout.Diffuse.xyz * !(Permutation::VertexShaderDescriptor & Permutation::EffectFlags::SkyObject), finalColor.w);
 	psout.Specular = float4(0, 0, 0, finalColor.w);
 	psout.Reflectance = float4(0, 0, 0, finalColor.w);
 	psout.Masks = float4(0, 0, 0, finalColor.w);
-	psout.Masks2 = float4(0, 0, 0, finalColor.w);
+	psout.Masks2 = 0xF800FFFFu;
 #		endif
 
 #	elif defined(MOTIONVECTORS_NORMALS)

@@ -135,7 +135,11 @@ endif()
 
 target_sources(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/LightCulling.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/LightCulling.h")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/LightCulling.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShading.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShading.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/DX12InteropCoordinator.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/DX12InteropCoordinator.h")
 
 # Keep dependency-specific warning and Windows macro policy local to the bridge.
 set_source_files_properties(

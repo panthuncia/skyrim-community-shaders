@@ -22,8 +22,9 @@ namespace
 		float nearPlane;
 		float farPlane;
 		uint32_t lightCount;
+		uint32_t contextCount;
 		uint32_t pageCapacity;
-		uint32_t padding[2];
+		uint32_t padding;
 	};
 
 	constexpr const char* kShader = R"(
@@ -31,21 +32,33 @@ struct Light {
  float3 color; float fade; float radius; float invRadius; float fadeZone; float sizeBias;
  float3 positionWS; uint positionPad; uint4 roomFlags; uint lightFlags; uint shadowMaskIndex; uint2 pad;
 };
+struct LightingContext {
+ float4 directionalLightDirection; float4 directionalLightColor; float4 directionalAmbient[3];
+ float4 ambientSpecularTintAndFresnelPower; int roomIndex; uint shadowMask; uint featureFlags; uint reserved;
+};
 struct Cluster { float4 minPoint; float4 maxPoint; uint numLights; uint ptrFirstPage; uint2 pad; };
 struct LightPage { uint ptrNextPage; uint numLightsInPage; uint lightIndices[12]; };
 cbuffer Frame : register(b0) {
  row_major float4x4 projectionInverse; row_major float4x4 viewMatrix; uint4 grid;
- float2 screen; float nearPlane; float farPlane; uint lightCount; uint pageCapacity; uint2 padding;
+ float2 screen; float nearPlane; float farPlane; uint lightCount; uint contextCount; uint pageCapacity; uint padding;
 };
-StructuredBuffer<Light> lights : register(t0);
+StructuredBuffer<Light> uploadedLights : register(t0);
+StructuredBuffer<LightingContext> uploadedContexts : register(t1);
 RWStructuredBuffer<Cluster> clusters : register(u0);
 RWStructuredBuffer<LightPage> pages : register(u1);
 RWStructuredBuffer<uint> pageCounter : register(u2);
+RWStructuredBuffer<uint> diagnostics : register(u3);
+RWStructuredBuffer<Light> lights : register(u4);
+RWStructuredBuffer<LightingContext> lightingContexts : register(u5);
 float3 ScreenToView(float2 pixel) {
  float3 ndc=float3(2.0*pixel.x/screen.x-1.0,2.0*(screen.y-pixel.y-1.0)/screen.y-1.0,1.0);
  float4 p=mul(float4(ndc,1),projectionInverse); return p.xyz/p.w;
 }
 float3 AtZ(float3 ray,float z) { return ray*(z/ray.z); }
+[numthreads(128,1,1)] void UploadFrameData(uint3 id:SV_DispatchThreadID) {
+ if(id.x<lightCount)lights[id.x]=uploadedLights[id.x];
+ if(id.x<contextCount)lightingContexts[id.x]=uploadedContexts[id.x];
+}
 [numthreads(1,1,1)] void BuildClusters(uint3 id:SV_GroupID) {
  if(any(id>=grid.xyz)) return;
  uint index=id.x+id.y*grid.x+id.z*grid.x*grid.y;
@@ -59,7 +72,7 @@ float3 AtZ(float3 ray,float z) { return ray*(z/ray.z); }
 bool Intersects(float3 center,float radius,Cluster c) {
  float3 closest=max(c.minPoint.xyz,min(center,c.maxPoint.xyz)); float3 d=closest-center; return dot(d,d)<=radius*radius;
 }
-uint AllocatePage() { uint p; InterlockedAdd(pageCounter[0],1,p); return p<pageCapacity?p:0xffffffff; }
+uint AllocatePage() { uint p; InterlockedAdd(pageCounter[0],1,p); if(p>=pageCapacity)InterlockedAdd(diagnostics[0],1); return p<pageCapacity?p:0xffffffff; }
 [numthreads(128,1,1)] void CullLights(uint3 dtid:SV_DispatchThreadID) {
  uint total=grid.x*grid.y*grid.z,index=dtid.x; if(index>=total)return;
  Cluster c=clusters[index]; uint page=AllocatePage(); c.numLights=0;c.ptrFirstPage=page;
@@ -71,19 +84,11 @@ uint AllocatePage() { uint p; InterlockedAdd(pageCounter[0],1,p); return p<pageC
    pages[page].ptrNextPage=old;c.ptrFirstPage=page;inPage=0;}
   pages[page].lightIndices[inPage++]=i;c.numLights++;
  }
- if(page!=0xffffffff)pages[page].numLightsInPage=inPage;clusters[index]=c;
+ if(page!=0xffffffff)pages[page].numLightsInPage=inPage;InterlockedMax(diagnostics[1],c.numLights);clusters[index]=c;
 }
 )";
 
 	struct NativePipeline { winrt::com_ptr<ID3D12PipelineState> state; };
-
-	D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
-	{
-		D3D12_RESOURCE_BARRIER barrier{};
-		barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-		barrier.Transition = { resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after };
-		return barrier;
-	}
 
 	D3D12_RESOURCE_BARRIER Uav(ID3D12Resource* resource)
 	{
@@ -117,12 +122,42 @@ bool DX12LightCulling::Initialize(DX12RenderRuntime& owner) noexcept
 CSDX12Status DX12LightCulling::Build(void* userData, CSDX12BuildHandle build)
 {
 	auto* self = static_cast<DX12LightCulling*>(userData);
+	const uint32_t width = std::max(1u, self->runtime->GetRenderWidth());
+	const uint32_t height = std::max(1u, self->runtime->GetRenderHeight());
+	const uint32_t clusterCount = ((width + 63) / 64) * ((height + 63) / 64) * 32;
+	self->clusterCapacity = clusterCount;
+	self->pageCapacity = clusterCount * kPagesPerCluster;
+	auto declareBuffer = [&](const char* id, uint64_t size, uint32_t stride, uint32_t allowed, CSDX12ResourceHandle& handle) {
+		CSDX12ResourceDesc desc{};
+		desc.structSize = sizeof(desc); desc.apiVersion = CS_DX12_GRAPH_API_CURRENT;
+		desc.id = id; desc.lifetime = CS_DX12_RESOURCE_PERSISTENT; desc.dimension = CS_DX12_RESOURCE_BUFFER;
+		desc.sizing = CS_DX12_SIZE_ABSOLUTE; desc.byteSize = size; desc.structureByteStride = stride;
+		desc.allowedAccess = allowed; desc.initialAccess = CS_DX12_ACCESS_NONE; desc.finalAccess = CS_DX12_ACCESS_SHADER_READ;
+		return self->runtime->DeclareResource(build, &desc, &handle);
+	};
+	const uint32_t sharedReadWrite = CS_DX12_ACCESS_SHADER_READ | CS_DX12_ACCESS_UNORDERED_WRITE | CS_DX12_ACCESS_COPY_DESTINATION;
+	if (declareBuffer("community-shaders.clustered-lighting.lights", uint64_t(kMaxLights) * sizeof(DeferredRendering::LightData), sizeof(DeferredRendering::LightData), sharedReadWrite, self->lightsHandle) != CS_DX12_OK ||
+		declareBuffer("community-shaders.clustered-lighting.contexts", uint64_t(DeferredRendering::INVALID_CONTEXT) * sizeof(DeferredRendering::LightingContext), sizeof(DeferredRendering::LightingContext), sharedReadWrite, self->contextsHandle) != CS_DX12_OK ||
+		declareBuffer("community-shaders.clustered-lighting.clusters", uint64_t(clusterCount) * 48, 48, sharedReadWrite, self->clustersHandle) != CS_DX12_OK ||
+		declareBuffer("community-shaders.clustered-lighting.pages", uint64_t(self->pageCapacity) * 56, 56, sharedReadWrite, self->pagesHandle) != CS_DX12_OK ||
+		declareBuffer("community-shaders.clustered-lighting.page-counter", 4, 4, CS_DX12_ACCESS_UNORDERED_WRITE | CS_DX12_ACCESS_COPY_DESTINATION, self->pageCounterHandle) != CS_DX12_OK ||
+		declareBuffer("community-shaders.clustered-lighting.diagnostics", 16, 4, CS_DX12_ACCESS_UNORDERED_WRITE | CS_DX12_ACCESS_COPY_DESTINATION | CS_DX12_ACCESS_SHADER_READ, self->diagnosticsHandle) != CS_DX12_OK)
+		return CS_DX12_E_INTERNAL;
 	const char* after[]{ "cs.gbuffer.ready" };
 	const char* before[]{ "cs.deferred-lighting.begin" };
+	CSDX12ResourceAccessDesc accesses[] = {
+		{ sizeof(CSDX12ResourceAccessDesc), CS_DX12_GRAPH_API_CURRENT, self->lightsHandle, CS_DX12_ACCESS_UNORDERED_WRITE, {} },
+		{ sizeof(CSDX12ResourceAccessDesc), CS_DX12_GRAPH_API_CURRENT, self->contextsHandle, CS_DX12_ACCESS_UNORDERED_WRITE, {} },
+		{ sizeof(CSDX12ResourceAccessDesc), CS_DX12_GRAPH_API_CURRENT, self->clustersHandle, CS_DX12_ACCESS_UNORDERED_WRITE, {} },
+		{ sizeof(CSDX12ResourceAccessDesc), CS_DX12_GRAPH_API_CURRENT, self->pagesHandle, CS_DX12_ACCESS_UNORDERED_WRITE, {} },
+		{ sizeof(CSDX12ResourceAccessDesc), CS_DX12_GRAPH_API_CURRENT, self->pageCounterHandle, CS_DX12_ACCESS_UNORDERED_WRITE, {} },
+		{ sizeof(CSDX12ResourceAccessDesc), CS_DX12_GRAPH_API_CURRENT, self->diagnosticsHandle, CS_DX12_ACCESS_UNORDERED_WRITE, {} }
+	};
 	CSDX12PassDesc pass{};
 	pass.structSize = sizeof(pass); pass.apiVersion = CS_DX12_GRAPH_API_CURRENT;
 	pass.id = "community-shaders.clustered-lighting.cull"; pass.queuePolicy = CS_DX12_QUEUE_REQUIRE_COMPUTE;
-	pass.after = after; pass.afterCount = 1; pass.before = before; pass.beforeCount = 1; pass.execute = &Execute;
+	pass.after = after; pass.afterCount = 1; pass.before = before; pass.beforeCount = 1;
+	pass.accesses = accesses; pass.accessCount = static_cast<uint32_t>(std::size(accesses)); pass.execute = &Execute;
 	CSDX12PassHandle handle{};
 	return self->runtime->DeclarePass(build, &pass, &handle);
 }
@@ -141,8 +176,8 @@ bool DX12LightCulling::CreatePipeline() noexcept
 	return false;
 #else
 	D3D12_DESCRIPTOR_RANGE ranges[2]{};
-	ranges[0] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0 };
-	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0, 1 };
+	ranges[0] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, 0 };
+	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 6, 0, 0, 2 };
 	D3D12_ROOT_PARAMETER params[2]{};
 	params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; params[0].Descriptor.ShaderRegister = 0; params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 	params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; params[1].DescriptorTable = { 2, ranges }; params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -166,10 +201,14 @@ bool DX12LightCulling::CreatePipeline() noexcept
 		org::services::PipelineRecipe recipe{};
 		recipe.id = id; recipe.layoutKey = reinterpret_cast<uintptr_t>(rootSignature.get()); recipe.shaderKey = artifact.key;
 		recipe.deviceKey = reinterpret_cast<uintptr_t>(device.get());
-		recipe.build = [nativeDevice = device, signature = rootSignature, bytecode = std::move(artifact.binary)]() mutable {
+		recipe.build = [nativeDevice = device, signature = rootSignature, bytecode = std::move(artifact.binary), pipelineName = std::string(id)]() mutable {
 			auto payload = std::make_shared<NativePipeline>();
 			D3D12_COMPUTE_PIPELINE_STATE_DESC desc{}; desc.pRootSignature = signature.get(); desc.CS = { bytecode.data(), bytecode.size() };
-			if (FAILED(nativeDevice->CreateComputePipelineState(&desc, IID_PPV_ARGS(payload->state.put())))) return org::services::PipelinePayload{};
+			const HRESULT result = nativeDevice->CreateComputePipelineState(&desc, IID_PPV_ARGS(payload->state.put()));
+			if (FAILED(result)) {
+				logger::error("[DX12LightCulling] CreateComputePipelineState failed for {} with HRESULT 0x{:08X}", pipelineName, static_cast<unsigned>(result));
+				return org::services::PipelinePayload{};
+			}
 			return std::static_pointer_cast<void>(payload);
 		};
 		auto pipeline = pipelines->Request(std::move(recipe)).get();
@@ -177,68 +216,88 @@ bool DX12LightCulling::CreatePipeline() noexcept
 		output = std::static_pointer_cast<NativePipeline>(pipeline.payload)->state;
 		return true;
 	};
-	const bool result = build(L"BuildClusters", "community-shaders.clustered-lighting.build-clusters", clusterPipeline) &&
+	const bool result = build(L"UploadFrameData", "community-shaders.clustered-lighting.upload-frame", uploadPipeline) &&
+		build(L"BuildClusters", "community-shaders.clustered-lighting.build-clusters", clusterPipeline) &&
 		build(L"CullLights", "community-shaders.clustered-lighting.cull-lights", cullPipeline);
 	pipelines->PublishReady(0);
 	return result;
 #endif
 }
 
-bool DX12LightCulling::EnsureResources(uint32_t width, uint32_t height) noexcept
-{
-	const uint32_t x = (width + 63) / 64, y = (height + 63) / 64, count = x * y * 32;
-	if (count <= clusterCapacity) return true;
-	clusterCapacity = count; pageCapacity = count * kPagesPerCluster;
-	auto buffer = [&](uint64_t bytes, D3D12_HEAP_TYPE heap, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state, winrt::com_ptr<ID3D12Resource>& out) {
-		D3D12_HEAP_PROPERTIES hp{}; hp.Type = heap;
-		D3D12_RESOURCE_DESC rd{ D3D12_RESOURCE_DIMENSION_BUFFER, 0, bytes, 1, 1, 1, DXGI_FORMAT_UNKNOWN,
-			{1,0}, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, flags };
-		return SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(out.put())));
-	};
-	if (!buffer(uint64_t(count) * 48, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, clusters) ||
-		!buffer(uint64_t(pageCapacity) * 56, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, pages) ||
-		!buffer(4, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, pageCounter)) return false;
-	return true;
-}
-
 CSDX12Status DX12LightCulling::Record(const CSDX12ExecutionContext& context) noexcept
 {
 	const auto& frame = *context.frame;
 	auto* commandList = static_cast<ID3D12GraphicsCommandList*>(context.borrowedD3D12GraphicsCommandList);
-	if (!EnsureResources(frame.width, frame.height)) return CS_DX12_E_INTERNAL;
+	if (!context.GetResource) return CS_DX12_E_UNSUPPORTED_CAPABILITY;
+	auto get = [&](CSDX12ResourceHandle handle, ID3D12Resource*& output) {
+		void* resource{};
+		const auto status = context.GetResource(&context, handle, &resource);
+		output = static_cast<ID3D12Resource*>(resource);
+		return status == CS_DX12_OK && output;
+	};
+	ID3D12Resource* lights{}; ID3D12Resource* contexts{}; ID3D12Resource* clusters{};
+	ID3D12Resource* pages{}; ID3D12Resource* pageCounter{}; ID3D12Resource* diagnostics{};
+	if (!get(lightsHandle, lights) || !get(contextsHandle, contexts) || !get(clustersHandle, clusters) ||
+		!get(pagesHandle, pages) || !get(pageCounterHandle, pageCounter) || !get(diagnosticsHandle, diagnostics))
+		return CS_DX12_E_NOT_READY;
 	auto snapshot = globals::features::deferredRendering.GetFrameSnapshot();
+	if (!snapshot) return CS_DX12_E_NOT_READY;
 	if (!context.AllocateUpload || !context.AllocateDescriptors) return CS_DX12_E_UNSUPPORTED_CAPABILITY;
-	CSDX12UploadAllocation lightUpload{}, contextUpload{}, constantsUpload{}, zeroUpload{};
-	if (context.AllocateUpload(&context, std::max<size_t>(1, snapshot.lights.size()) * sizeof(DeferredRendering::LightData), 16, &lightUpload) != CS_DX12_OK ||
-		context.AllocateUpload(&context, std::max<size_t>(1, snapshot.contexts.size()) * sizeof(DeferredRendering::LightingContext), 16, &contextUpload) != CS_DX12_OK ||
-		context.AllocateUpload(&context, 256, 256, &constantsUpload) != CS_DX12_OK ||
-		context.AllocateUpload(&context, 4, 4, &zeroUpload) != CS_DX12_OK) return CS_DX12_E_INTERNAL;
-	std::memcpy(lightUpload.cpuAddress, snapshot.lights.data(), snapshot.lights.size()*sizeof(DeferredRendering::LightData));
-	std::memcpy(contextUpload.cpuAddress, snapshot.contexts.data(), snapshot.contexts.size()*sizeof(DeferredRendering::LightingContext));
-	*static_cast<uint32_t*>(zeroUpload.cpuAddress) = 0;
-	Constants constants{}; constants.projectionInverse=globals::game::frameBufferCached.GetCameraProjInverse(); constants.view=globals::game::frameBufferCached.GetCameraView();
+	CSDX12UploadAllocation lightUpload{}, contextUpload{}, constantsUpload{};
+	if (context.AllocateUpload(&context, std::max<size_t>(1, snapshot->lights.size()) * sizeof(DeferredRendering::LightData), 16, &lightUpload) != CS_DX12_OK ||
+		context.AllocateUpload(&context, std::max<size_t>(1, snapshot->contexts.size()) * sizeof(DeferredRendering::LightingContext), 16, &contextUpload) != CS_DX12_OK ||
+		context.AllocateUpload(&context, 256, 256, &constantsUpload) != CS_DX12_OK) return CS_DX12_E_INTERNAL;
+	if (!snapshot->lights.empty())
+		std::memcpy(lightUpload.cpuAddress, snapshot->lights.data(), snapshot->lights.size() * sizeof(DeferredRendering::LightData));
+	if (!snapshot->contexts.empty())
+		std::memcpy(contextUpload.cpuAddress, snapshot->contexts.data(), snapshot->contexts.size() * sizeof(DeferredRendering::LightingContext));
+	Constants constants{}; constants.projectionInverse=snapshot->projectionInverse; constants.view=snapshot->cameraView;
 	constants.grid[0]=(frame.width+63)/64;constants.grid[1]=(frame.height+63)/64;constants.grid[2]=32;constants.screen[0]=(float)frame.width;constants.screen[1]=(float)frame.height;
-	constants.nearPlane=snapshot.nearPlane;constants.farPlane=snapshot.farPlane;constants.lightCount=(uint32_t)snapshot.lights.size();constants.pageCapacity=pageCapacity;
+	constants.nearPlane=snapshot->nearPlane;constants.farPlane=snapshot->farPlane;constants.lightCount=(uint32_t)snapshot->lights.size();constants.contextCount=(uint32_t)snapshot->contexts.size();constants.pageCapacity=pageCapacity;
 	std::memcpy(constantsUpload.cpuAddress,&constants,sizeof(constants));
 	CSDX12DescriptorAllocation descriptorAllocation{};
-	if (context.AllocateDescriptors(&context, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4, &descriptorAllocation) != CS_DX12_OK) return CS_DX12_E_INTERNAL;
+	if (context.AllocateDescriptors(&context, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 10, &descriptorAllocation) != CS_DX12_OK) return CS_DX12_E_INTERNAL;
 	auto* descriptors = static_cast<ID3D12DescriptorHeap*>(descriptorAllocation.borrowedNativeHeap);
 	D3D12_CPU_DESCRIPTOR_HANDLE cpu{ descriptorAllocation.cpuHandle };
+	auto cpuAt=[&](uint32_t index){auto value=cpu;value.ptr+=uint64_t(index)*descriptorAllocation.descriptorSize;return value;};
+	auto gpuAt=[&](uint32_t index){D3D12_GPU_DESCRIPTOR_HANDLE value{descriptorAllocation.gpuHandle};value.ptr+=uint64_t(index)*descriptorAllocation.descriptorSize;return value;};
 	D3D12_SHADER_RESOURCE_VIEW_DESC srv{}; srv.ViewDimension=D3D12_SRV_DIMENSION_BUFFER; srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 	srv.Buffer.NumElements=std::max<uint32_t>(1, constants.lightCount); srv.Buffer.StructureByteStride=sizeof(DeferredRendering::LightData);
-	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(lightUpload.borrowedNativeResource),&srv,cpu);
-	auto makeUav=[&](ID3D12Resource* resource,uint32_t index,uint32_t elements,uint32_t stride){D3D12_UNORDERED_ACCESS_VIEW_DESC u{};u.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;u.Buffer.NumElements=elements;u.Buffer.StructureByteStride=stride;auto h=cpu;h.ptr+=uint64_t(index)*descriptorAllocation.descriptorSize;device->CreateUnorderedAccessView(resource,nullptr,&u,h);};
-	makeUav(clusters.get(),1,clusterCapacity,48); makeUav(pages.get(),2,pageCapacity,56); makeUav(pageCounter.get(),3,1,4);
-	auto toCopy=Transition(pageCounter.get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_DEST);commandList->ResourceBarrier(1,&toCopy);commandList->CopyBufferRegion(pageCounter.get(),0,static_cast<ID3D12Resource*>(zeroUpload.borrowedNativeResource),0,4);
-	auto toUav=Transition(pageCounter.get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);commandList->ResourceBarrier(1,&toUav);
+	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(lightUpload.borrowedNativeResource),&srv,cpuAt(0));
+	srv.Buffer.NumElements=std::max<uint32_t>(1, constants.contextCount); srv.Buffer.StructureByteStride=sizeof(DeferredRendering::LightingContext);
+	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(contextUpload.borrowedNativeResource),&srv,cpuAt(1));
+	auto makeUav=[&](ID3D12Resource* resource,uint32_t index,uint32_t elements,uint32_t stride){D3D12_UNORDERED_ACCESS_VIEW_DESC u{};u.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;u.Buffer.NumElements=elements;u.Buffer.StructureByteStride=stride;device->CreateUnorderedAccessView(resource,nullptr,&u,cpuAt(index));};
+	makeUav(clusters,2,clusterCapacity,48); makeUav(pages,3,pageCapacity,56); makeUav(pageCounter,4,1,4); makeUav(diagnostics,5,4,4);
+	makeUav(lights,6,kMaxLights,sizeof(DeferredRendering::LightData)); makeUav(contexts,7,DeferredRendering::INVALID_CONTEXT,sizeof(DeferredRendering::LightingContext));
+	// ClearUnorderedAccessView requires its CPU descriptor to come from a
+	// non-shader-visible heap. It also rejects structured UAV descriptors, so
+	// use equivalent raw views solely for clearing the two uint buffers.
+	D3D12_DESCRIPTOR_HEAP_DESC clearHeapDesc{}; clearHeapDesc.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; clearHeapDesc.NumDescriptors=2;
+	winrt::com_ptr<ID3D12DescriptorHeap> clearHeap;
+	if (FAILED(device->CreateDescriptorHeap(&clearHeapDesc, IID_PPV_ARGS(clearHeap.put())))) return CS_DX12_E_INTERNAL;
+	auto clearCpu=clearHeap->GetCPUDescriptorHandleForHeapStart();
+	auto clearCpuAt=[&](uint32_t index){auto value=clearCpu;value.ptr+=uint64_t(index)*descriptorAllocation.descriptorSize;return value;};
+	auto makeRawClearUav=[&](ID3D12Resource* resource,uint32_t index,uint32_t elements){D3D12_UNORDERED_ACCESS_VIEW_DESC u{};u.Format=DXGI_FORMAT_R32_TYPELESS;u.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;u.Buffer.NumElements=elements;u.Buffer.Flags=D3D12_BUFFER_UAV_FLAG_RAW;device->CreateUnorderedAccessView(resource,nullptr,&u,clearCpuAt(index));device->CopyDescriptorsSimple(1,cpuAt(8+index),clearCpuAt(index),D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);};
+	makeRawClearUav(pageCounter,0,1); makeRawClearUav(diagnostics,1,4);
 	ID3D12DescriptorHeap* heaps[]{descriptors};commandList->SetDescriptorHeaps(1,heaps);commandList->SetComputeRootSignature(rootSignature.get());commandList->SetComputeRootConstantBufferView(0,constantsUpload.gpuAddress);commandList->SetComputeRootDescriptorTable(1,{descriptorAllocation.gpuHandle});
-	commandList->SetPipelineState(clusterPipeline.get());commandList->Dispatch(constants.grid[0],constants.grid[1],constants.grid[2]);auto clusterBarrier=Uav(clusters.get());commandList->ResourceBarrier(1,&clusterBarrier);
-	commandList->SetPipelineState(cullPipeline.get());const uint32_t total=constants.grid[0]*constants.grid[1]*constants.grid[2];commandList->Dispatch((total+127)/128,1,1);D3D12_RESOURCE_BARRIER done[]{Uav(clusters.get()),Uav(pages.get()),Uav(pageCounter.get())};commandList->ResourceBarrier(3,done);
-	if (dispatchCount++ == 0) logger::info("[DX12LightCulling] ORG dispatched BasicRenderer-style clustered culling: {} clusters, {} lights, {} contexts, {} page capacity",total,constants.lightCount,snapshot.contexts.size(),pageCapacity);
+	const UINT clear[4]{}; commandList->ClearUnorderedAccessViewUint(gpuAt(8),clearCpuAt(0),pageCounter,clear,0,nullptr); commandList->ClearUnorderedAccessViewUint(gpuAt(9),clearCpuAt(1),diagnostics,clear,0,nullptr);
+	const uint32_t uploadCount = std::max(constants.lightCount, constants.contextCount);
+	if (uploadCount != 0) {
+		commandList->SetPipelineState(uploadPipeline.get());
+		commandList->Dispatch((uploadCount + 127) / 128, 1, 1);
+	}
+	D3D12_RESOURCE_BARRIER uploaded[]{Uav(lights),Uav(contexts)};commandList->ResourceBarrier(2,uploaded);
+	commandList->SetPipelineState(clusterPipeline.get());commandList->Dispatch(constants.grid[0],constants.grid[1],constants.grid[2]);auto clusterBarrier=Uav(clusters);commandList->ResourceBarrier(1,&clusterBarrier);
+	commandList->SetPipelineState(cullPipeline.get());const uint32_t total=constants.grid[0]*constants.grid[1]*constants.grid[2];commandList->Dispatch((total+127)/128,1,1);D3D12_RESOURCE_BARRIER done[]{Uav(clusters),Uav(pages),Uav(pageCounter),Uav(diagnostics)};commandList->ResourceBarrier(4,done);
+	globals::features::deferredRendering.RetainSubmittedFrame(snapshot, frame.completionValue);
+	if (dispatchCount++ == 0 || (constants.lightCount != 0 && !loggedActiveLights)) {
+		logger::info("[DX12LightCulling] ORG dispatched BasicRenderer-style clustered culling: {} clusters, {} lights, {} contexts, {} page capacity",total,constants.lightCount,snapshot->contexts.size(),pageCapacity);
+		loggedActiveLights |= constants.lightCount != 0;
+	}
 	return CS_DX12_OK;
 }
 
 void DX12LightCulling::Shutdown() noexcept
 {
-	pageCounter=nullptr;pages=nullptr;clusters=nullptr;cullPipeline=nullptr;clusterPipeline=nullptr;rootSignature=nullptr;device=nullptr;
+	uploadPipeline=nullptr;cullPipeline=nullptr;clusterPipeline=nullptr;rootSignature=nullptr;device=nullptr;
 }

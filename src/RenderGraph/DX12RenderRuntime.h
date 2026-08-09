@@ -7,6 +7,7 @@
 #include <winrt/base.h>
 #include <rhi.h>
 #include "DX12GraphHost.h"
+#include "DX12InteropCoordinator.h"
 
 #include <atomic>
 #include <deque>
@@ -23,11 +24,17 @@ public:
 	static DX12RenderRuntime& Get();
 
 	bool Initialize(ID3D11Device* device, ID3D11DeviceContext* context) noexcept;
-	void ExecuteDeferredEpoch(uint32_t width, uint32_t height) noexcept;
+	bool ExecuteDeferredEpoch(uint32_t width, uint32_t height, uint32_t allocationWidth, uint32_t allocationHeight) noexcept;
 	void Shutdown() noexcept;
 	bool IsAvailable() const noexcept { return available.load(std::memory_order_acquire); }
 	ID3D12Device* GetNativeDevice() const noexcept { return device12.get(); }
 	ID3D12CommandQueue* GetGraphicsQueue() const noexcept { return graphicsQueue.get(); }
+	ID3D11Device5* GetD3D11Device() const noexcept { return device11.get(); }
+	DX12InteropCoordinator* GetInteropCoordinator() const noexcept { return interopCoordinator.get(); }
+	uint32_t GetRenderWidth() const noexcept { return renderWidth; }
+	uint32_t GetRenderHeight() const noexcept { return renderHeight; }
+	uint32_t GetAllocationWidth() const noexcept { return allocationWidth; }
+	uint32_t GetAllocationHeight() const noexcept { return allocationHeight; }
 	org::services::ShaderCompiler* GetShaderCompiler() noexcept { return renderGraph ? renderGraph->GetShaderCompiler() : nullptr; }
 	org::services::PipelineService* GetPipelineService() noexcept { return renderGraph ? renderGraph->GetPipelineService() : nullptr; }
 
@@ -72,6 +79,7 @@ private:
 	winrt::com_ptr<ID3D12CommandQueue> graphicsQueue;
 	winrt::com_ptr<ID3D12CommandQueue> computeQueue;
 	winrt::com_ptr<ID3D12CommandQueue> copyQueue;
+	std::unique_ptr<DX12InteropCoordinator> interopCoordinator;
 	rhi::TimelinePtr readyTimeline;
 	rhi::TimelinePtr completeTimeline;
 	winrt::com_ptr<ID3D12Fence> readyFence12;
@@ -89,6 +97,10 @@ private:
 	std::atomic_uint64_t nextGeneration{ 1 };
 	std::atomic_uint64_t lastSubmittedCompletion{};
 	uint64_t frameIndex = 0;
+	uint32_t renderWidth{};
+	uint32_t renderHeight{};
+	uint32_t allocationWidth{};
+	uint32_t allocationHeight{};
 	std::thread::id renderThread;
 
 	mutable std::shared_mutex registryMutex;

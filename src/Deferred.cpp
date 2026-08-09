@@ -8,6 +8,9 @@
 #include "Utils/D3D.h"
 
 #include "Features/DynamicCubemaps.h"
+#include "Features/DeferredRendering.h"
+#include "Features/DeferredRendering/DeferredShading.h"
+#include "Features/DeferredRendering/LightCulling.h"
 #include "Features/Effects11.h"
 #include "Features/IBL.h"
 #include "Features/ScreenSpaceGI.h"
@@ -35,13 +38,17 @@ struct BlendStates
 	}
 };
 
-void SetupRenderTarget(RE::RENDER_TARGET target, D3D11_TEXTURE2D_DESC texDesc, D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc, D3D11_RENDER_TARGET_VIEW_DESC rtvDesc, D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc, DXGI_FORMAT format, uint bindFlags)
+void SetupRenderTarget(RE::RENDER_TARGET target, D3D11_TEXTURE2D_DESC texDesc, D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc, D3D11_RENDER_TARGET_VIEW_DESC rtvDesc, D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc, DXGI_FORMAT format, uint bindFlags, bool shared = false)
 {
 	auto renderer = globals::game::renderer;
 	auto device = globals::d3d::device;
 
 	texDesc.BindFlags = bindFlags;
 	texDesc.Format = format;
+	if (shared)
+	{
+		texDesc.MiscFlags |= D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+	}
 	srvDesc.Format = format;
 	rtvDesc.Format = format;
 	uavDesc.Format = format;
@@ -127,17 +134,35 @@ void Deferred::SetupResources()
 		// TEMPORAL_AA_WATER_2
 
 		// Albedo
-		SetupRenderTarget(ALBEDO, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+		SetupRenderTarget(ALBEDO, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
 		// Specular
-		SetupRenderTarget(SPECULAR, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+		SetupRenderTarget(SPECULAR, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
 		// Reflectance
-		SetupRenderTarget(REFLECTANCE, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+		SetupRenderTarget(REFLECTANCE, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
 		// Normal + Roughness
-		SetupRenderTarget(NORMALROUGHNESS, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+		SetupRenderTarget(NORMALROUGHNESS, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
 		// Masks
-		SetupRenderTarget(MASKS, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-		// Masks2 (vertexAO; fp16 to allow blending)
-		SetupRenderTarget(MASKS2, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+		SetupRenderTarget(MASKS, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
+		// Packed deferred context/material identity. Integer MRTs must not blend.
+		SetupRenderTarget(MASKS2, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R32_UINT,
+			D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
+
+		// DeferredLighting consumes the engine shadow mask from D3D12. Preserve
+		// its format and view contract, adding only an NT shared handle so the
+		// producer allocation can be imported directly without a per-frame copy.
+		{
+			auto& shadowMask = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kSHADOW_MASK];
+			D3D11_TEXTURE2D_DESC shadowDesc{};
+			D3D11_SHADER_RESOURCE_VIEW_DESC shadowSRV{};
+			D3D11_RENDER_TARGET_VIEW_DESC shadowRTV{};
+			D3D11_UNORDERED_ACCESS_VIEW_DESC shadowUAV{};
+			shadowMask.texture->GetDesc(&shadowDesc);
+			if (shadowMask.SRV) shadowMask.SRV->GetDesc(&shadowSRV);
+			if (shadowMask.RTV) shadowMask.RTV->GetDesc(&shadowRTV);
+			if (shadowMask.UAV) shadowMask.UAV->GetDesc(&shadowUAV);
+			SetupRenderTarget(RE::RENDER_TARGET::kSHADOW_MASK, shadowDesc, shadowSRV, shadowRTV, shadowUAV,
+				shadowDesc.Format, shadowDesc.BindFlags, true);
+		}
 
 		// TAA water history buffers need RGBA16: alpha stores premultiplied coverage for ISWaterBlend
 		SetupRenderTarget(RE::RENDER_TARGETS::kWATER_1, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
@@ -283,6 +308,10 @@ void Deferred::StartDeferred()
 	stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
 
 	deferredPass = true;
+	// Skyrim has not serviced DIRTY_RENDERTARGET yet. Its later SRTM_CLEAR uses
+	// zero, which is a valid deferred context/material identity, so apply our
+	// integer sentinel only after that target bind/clear has completed.
+	packedIdentityClearPending = true;
 
 	{
 		auto context = globals::d3d::context;
@@ -296,12 +325,24 @@ void Deferred::StartDeferred()
 	OverrideBlendStates();
 }
 
-void Deferred::DeferredPasses()
+void Deferred::ClearPackedIdentityAfterTargetBind(bool isCompute)
+{
+	if (!deferredPass || !packedIdentityClearPending || isCompute)
+		return;
+	if (auto* packedTarget = globals::game::renderer->GetRuntimeData().renderTargets[MASKS2].RTV) {
+		// 65535 is exactly representable as float and converts exactly to the
+		// R32_UINT invalid-context/legacy-material sentinel (0x0000FFFF).
+		constexpr float invalidLegacy[4]{ 65535.0f, 0.0f, 0.0f, 0.0f };
+		globals::d3d::context->ClearRenderTargetView(packedTarget, invalidLegacy);
+		packedIdentityClearPending = false;
+	}
+}
+
+void Deferred::PreDX12DeferredPasses()
 {
 	ZoneScoped;
 	TracyD3D11Zone(globals::state->tracyCtx, "Deferred");
 
-	auto renderer = globals::game::renderer;
 	auto context = globals::d3d::context;
 
 	{
@@ -309,30 +350,9 @@ void Deferred::DeferredPasses()
 		context->CSSetConstantBuffers(12, 1, buffers);
 	}
 
-	auto specular = renderer->GetRuntimeData().renderTargets[SPECULAR];
-	auto albedo = renderer->GetRuntimeData().renderTargets[ALBEDO];
-	auto normalRoughness = renderer->GetRuntimeData().renderTargets[NORMALROUGHNESS];
-	auto masks = renderer->GetRuntimeData().renderTargets[MASKS];
-	auto masks2 = renderer->GetRuntimeData().renderTargets[MASKS2];
-
-	auto main = renderer->GetRuntimeData().renderTargets[forwardRenderTargets[0]];
-	auto normals = renderer->GetRuntimeData().renderTargets[forwardRenderTargets[2]];
-	auto depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
-	auto reflectance = renderer->GetRuntimeData().renderTargets[REFLECTANCE];
-
-	auto motionVectors = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
-
-	bool interior = Util::IsInterior();
-
-	auto& skylighting = globals::features::skylighting;
-
 	auto& ssgi = globals::features::screenSpaceGI;
 	if (ssgi.loaded)
 		ssgi.DrawSSGI();
-	auto [ssgi_ao, ssgi_y, ssgi_cocg, ssgi_gi_spec] = ssgi.GetOutputTextures();
-	bool ssgi_hq_spec = ssgi.settings.EnableExperimentalSpecularGI;
-
-	auto dispatchCount = Util::GetScreenDispatchCount(true);
 
 	auto& sss = globals::features::subsurfaceScattering;
 	if (sss.loaded)
@@ -342,7 +362,33 @@ void Deferred::DeferredPasses()
 	if (dynamicCubemaps.loaded)
 		dynamicCubemaps.UpdateCubemap();
 
+}
+
+void Deferred::RunDX11DeferredComposite()
+{
+	ZoneScoped;
+	TracyD3D11Zone(globals::state->tracyCtx, "Deferred Composite");
+	auto renderer = globals::game::renderer;
+	auto context = globals::d3d::context;
+	ID3D11Buffer* buffers[1] = { *globals::game::perFrame };
+	context->CSSetConstantBuffers(12, 1, buffers);
+	auto specular = renderer->GetRuntimeData().renderTargets[SPECULAR];
+	auto albedo = renderer->GetRuntimeData().renderTargets[ALBEDO];
+	auto normalRoughness = renderer->GetRuntimeData().renderTargets[NORMALROUGHNESS];
+	auto masks = renderer->GetRuntimeData().renderTargets[MASKS];
+	auto masks2 = renderer->GetRuntimeData().renderTargets[MASKS2];
+	auto main = renderer->GetRuntimeData().renderTargets[forwardRenderTargets[0]];
+	auto normals = renderer->GetRuntimeData().renderTargets[forwardRenderTargets[2]];
+	auto reflectance = renderer->GetRuntimeData().renderTargets[REFLECTANCE];
+	auto motionVectors = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
+	const bool interior = Util::IsInterior();
+	auto& skylighting = globals::features::skylighting;
+	auto& ssgi = globals::features::screenSpaceGI;
+	auto [ssgi_ao, ssgi_y, ssgi_cocg, ssgi_gi_spec] = ssgi.GetOutputTextures();
+	const bool ssgi_hq_spec = ssgi.settings.EnableExperimentalSpecularGI;
+	auto& dynamicCubemaps = globals::features::dynamicCubemaps;
 	auto& ibl = globals::features::ibl;
+	const auto dispatchCount = Util::GetScreenDispatchCount(true);
 
 	// Deferred Composite
 	{
@@ -394,12 +440,16 @@ void Deferred::DeferredPasses()
 		ID3D11UnorderedAccessView* uavs[3]{ nullptr, nullptr, nullptr };
 		context->CSSetUnorderedAccessViews(0, ARRAYSIZE(uavs), uavs, nullptr);
 
-		ID3D11Buffer* buffers[1] = { nullptr };
-		context->CSSetConstantBuffers(12, 1, buffers);
+		ID3D11Buffer* nullBuffers[1] = { nullptr };
+		context->CSSetConstantBuffers(12, 1, nullBuffers);
 
 		context->CSSetShader(nullptr, nullptr, 0);
 	}
+}
 
+void Deferred::PostDX12DeferredPasses()
+{
+	auto& dynamicCubemaps = globals::features::dynamicCubemaps;
 	if (dynamicCubemaps.loaded)
 		dynamicCubemaps.PostDeferred();
 
@@ -435,14 +485,56 @@ void Deferred::EndDeferred()
 
 	// The graph epoch owns the D3D11 -> D3D12 -> D3D11 queue-fence round trip.
 	// Imported resources are deliberately unbound before this handoff.
-	D3D11_VIEWPORT viewport{};
-	UINT viewportCount = 1;
-	context->RSGetViewports(&viewportCount, &viewport);
-	DX12RenderRuntime::Get().ExecuteDeferredEpoch(
-		static_cast<uint32_t>(viewport.Width),
-		static_cast<uint32_t>(viewport.Height));
-
-	DeferredPasses();  // Perform deferred passes and composite forward buffers
+	// Produce all D3D11 lighting inputs and the legacy per-pixel fallback before
+	// ownership crosses to D3D12. Post-lighting consumers run only after the
+	// D3D12 completion wait and composite copy.
+	PreDX12DeferredPasses();
+	auto& deferredFeature = globals::features::deferredRendering;
+	const bool visualizeDeferredCoverage = deferredFeature.loaded && deferredFeature.IsCoverageVisualizationEnabled();
+	// In coverage mode, finish the normal D3D11 image first and let DX12 apply
+	// the diagnostic colors last. Otherwise the normal composite can attenuate
+	// or overwrite the deliberately exact green classification overlay.
+	if (visualizeDeferredCoverage)
+		RunDX11DeferredComposite();
+	// The CS configuration window overlays a paused scene. Never run the cross-API
+	// epoch beneath it: scrolling and other UI invalidation can force D3D11 to wait
+	// repeatedly on the interop work and severely degrade cursor responsiveness.
+	const bool settingsMenuOpen = globals::menu && globals::menu->IsEnabled;
+	if (deferredFeature.loaded && !settingsMenuOpen) {
+		auto& dx12Deferred=DX12DeferredShading::Get();
+		deferredFeature.FinalizeFrame();
+		auto& mainTarget=globals::game::renderer->GetRuntimeData().renderTargets[forwardRenderTargets[0]];
+		D3D11_TEXTURE2D_DESC mainDescription{};
+		if(mainTarget.texture)mainTarget.texture->GetDesc(&mainDescription);
+		const auto& graphicsRuntime = globals::game::graphicsState->GetRuntimeData();
+		const auto activeWidth = static_cast<std::uint32_t>(std::ceil(
+			static_cast<float>(mainDescription.Width) * graphicsRuntime.dynamicResolutionWidthRatio));
+		const auto activeHeight = static_cast<std::uint32_t>(std::ceil(
+			static_cast<float>(mainDescription.Height) * graphicsRuntime.dynamicResolutionHeightRatio));
+		if (!dx12Deferred.PrepareLinearDepth(mainDescription.Width,mainDescription.Height))
+			logger::error("[DeferredRendering] Linear-depth preparation failed; the DX12 deferred epoch will retain the compatibility path");
+		auto& shadowMaskTarget=globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kSHADOW_MASK];
+		const bool shadowMaskReady=dx12Deferred.PrepareLocalShadowMask(shadowMaskTarget.texture);
+		if (!shadowMaskReady)
+			logger::error("[DeferredRendering] Local-shadow mirror preparation failed; skipping the DX12 epoch");
+		auto& packedSurfaceTarget=globals::game::renderer->GetRuntimeData().renderTargets[MASKS2];
+		const bool packedSurfaceMirrorReady=dx12Deferred.PreparePackedSurfaceMirror(packedSurfaceTarget.texture);
+		const bool gbufferInputsReady=dx12Deferred.PrepareGBufferInputs();
+		if (!packedSurfaceMirrorReady)
+			logger::error("[DeferredRendering] Packed-surface mirror preparation failed; skipping the DX12 epoch");
+		if(mainDescription.Width&&mainDescription.Height&&shadowMaskReady&&packedSurfaceMirrorReady&&gbufferInputsReady&&dx12Deferred.PrepareCompatibilityInput(mainTarget.texture)) {
+			static std::once_flag epochPreparationLogged;
+			std::call_once(epochPreparationLogged, [] { logger::info("[DeferredRendering] D3D11 producers are ready for the first DX12 epoch"); });
+			const bool submitted = DX12RenderRuntime::Get().ExecuteDeferredEpoch(
+				activeWidth, activeHeight, mainDescription.Width, mainDescription.Height);
+			if(submitted && dx12Deferred.ShouldCommitComposite() && !dx12Deferred.CommitComposite(mainTarget.texture))
+				logger::error("[DeferredRendering] Failed to commit the DX12 composite");
+		}
+	}
+	const bool skipD3D11PostForTelemetry = std::getenv("CS_DX12_SKIP_D3D11_POST") != nullptr;
+	if (!visualizeDeferredCoverage && !skipD3D11PostForTelemetry)
+		RunDX11DeferredComposite();
+	PostDX12DeferredPasses();
 
 	stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
 
@@ -482,6 +574,7 @@ void Deferred::OverrideBlendStates()
 								blendDesc.RenderTarget[i].BlendOpAlpha = blendDesc.RenderTarget[0].BlendOpAlpha;
 								blendDesc.RenderTarget[i].RenderTargetWriteMask = blendDesc.RenderTarget[0].RenderTargetWriteMask;
 							}
+							blendDesc.RenderTarget[7].BlendEnable = false;
 
 							// Normals and motion vectors must use alpha blending
 							for (int i = 1; i < 3; i++) {

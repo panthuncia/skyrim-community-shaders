@@ -152,6 +152,8 @@ public:
 	 * Whether the feature will show up in the GUI menu
 	 */
 	virtual bool IsInMenu() const { return true; }
+	/** Allow an installed feature to expose configuration after its boot toggle is changed but before restart. */
+	virtual bool CanConfigureWhileUnloaded() const { return false; }
 
 	/**
 	 * Whether to print the INI version missing message when this feature is unloaded

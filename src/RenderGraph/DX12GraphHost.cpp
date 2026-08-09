@@ -6,6 +6,11 @@
 #include <Render/MemoryIntrospectionBackend.h>
 #include <RenderPasses/Base/ComputePass.h>
 #include <Interfaces/IDynamicDeclaredResources.h>
+#include <Resources/ExternalBackingResource.h>
+#include <Resources/ExternalTextureResource.h>
+#include <Resources/GPUBacking/GpuBufferBacking.h>
+#include <Resources/PixelBuffer.h>
+#include <rhi_helpers.h>
 #include <rhi_interop_dx12.h>
 #if defined(CS_HAS_ORG_MODULE_SERVICES)
 #include <ORGModuleServices/FrameUploadArena.h>
@@ -14,9 +19,21 @@
 #endif
 #include <deque>
 #include <filesystem>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace
 {
+	struct ExecutionHost
+	{
+#if defined(CS_HAS_ORG_MODULE_SERVICES)
+		org::services::FrameUploadArena* uploads{};
+#endif
+		std::unordered_map<CSDX12ResourceHandle, std::shared_ptr<org::Resource>> resources;
+		std::unordered_set<CSDX12ResourceHandle> d3d11ProducedImports;
+	};
+	constexpr org::ExternalTimelineBinding kD3D11ReadyBinding = 1;
+
 	struct EpochState
 	{
 		rhi::Timeline readyTimeline{};
@@ -25,13 +42,18 @@ namespace
 		uint64_t completeValue{};
 		CSDX12FrameInfo frame{};
 		std::vector<DX12GraphHost::WorkItem> workItems;
-		void* uploads{};
+		ExecutionHost* host{};
 	};
 
-	CSDX12Status CS_DX12_GRAPH_CALL UnsupportedResourceLookup(const CSDX12ExecutionContext*, CSDX12ResourceHandle, void** out)
+	CSDX12Status CS_DX12_GRAPH_CALL ResourceLookup(const CSDX12ExecutionContext* context, CSDX12ResourceHandle handle, void** out)
 	{
-		if (out) *out = nullptr;
-		return CS_DX12_E_UNSUPPORTED_CAPABILITY;
+		if (!context || !context->hostContext || !out) return CS_DX12_E_INVALID_ARGUMENT;
+		*out = nullptr;
+		auto* host = static_cast<ExecutionHost*>(context->hostContext);
+		const auto it = host->resources.find(handle);
+		if (it == host->resources.end() || !it->second) return CS_DX12_E_STALE_HANDLE;
+		*out = rhi::dx12::get_resource(it->second->GetAPIResource());
+		return *out ? CS_DX12_OK : CS_DX12_E_NOT_READY;
 	}
 
 	CSDX12Status CS_DX12_GRAPH_CALL AllocateUpload(const CSDX12ExecutionContext* context, uint64_t size, uint64_t alignment, CSDX12UploadAllocation* out)
@@ -39,7 +61,9 @@ namespace
 #if defined(CS_HAS_ORG_MODULE_SERVICES)
 		if (!context || !context->frame || !context->hostContext || !out || !size) return CS_DX12_E_INVALID_ARGUMENT;
 		try {
-			auto allocation = static_cast<org::services::FrameUploadArena*>(context->hostContext)->Allocate(
+			auto* host = static_cast<ExecutionHost*>(context->hostContext);
+			if (!host->uploads) return CS_DX12_E_UNSUPPORTED_CAPABILITY;
+			auto allocation = host->uploads->Allocate(
 				size, alignment, context->frame->completionValue);
 			*out = { allocation.cpuAddress, allocation.gpuAddress, allocation.size, allocation.resource };
 			return CS_DX12_OK;
@@ -55,7 +79,9 @@ namespace
 #if defined(CS_HAS_ORG_MODULE_SERVICES)
 		if (!context || !context->frame || !context->hostContext || !out) return CS_DX12_E_INVALID_ARGUMENT;
 		try {
-			auto allocation = static_cast<org::services::FrameUploadArena*>(context->hostContext)->AllocateDescriptors(
+			auto* host = static_cast<ExecutionHost*>(context->hostContext);
+			if (!host->uploads) return CS_DX12_E_UNSUPPORTED_CAPABILITY;
+			auto allocation = host->uploads->AllocateDescriptors(
 				heapType, count, context->frame->completionValue);
 			*out = { allocation.cpuHandle, allocation.gpuHandle, allocation.descriptorSize, count, allocation.heap };
 			return CS_DX12_OK;
@@ -66,15 +92,37 @@ namespace
 #endif
 	}
 
-	class EpochPass final : public org::ComputePass
+	class EpochPass final : public org::ComputePass, public org::IDynamicDeclaredResources
 	{
 	public:
 		EpochPass(std::shared_ptr<EpochState> state, size_t workIndex) : state(std::move(state)), workIndex(workIndex) {}
 		void Setup() override {}
 		void Cleanup() override {}
+		bool DeclaredResourcesChanged() const override { return true; }
+		bool RequiresPassRebindAfterDeclarationRefresh() const noexcept override { return false; }
 		void DeclareResourceUsages(org::ComputePassBuilder* builder) override
 		{
-			(void)builder;
+			// D3D11 produces imported textures immediately before the epoch and
+			// signals readyTimeline only after those writes.  Put the external wait
+			// on the queue that will perform this pass's transitions and execution;
+			// relying on a resource-less graphics boundary to propagate the wait to
+			// compute/copy queues can allow an imported resource to be transitioned
+			// or sampled before the D3D11 copy has completed.
+			bool consumesD3D11Import = false;
+			for (const auto& access : state->workItems[workIndex].accesses) {
+				const auto it = state->host->resources.find(access.resource);
+				if (it == state->host->resources.end()) throw std::runtime_error("Missing ORG resource for declared pass access");
+				const bool readsResource = (access.access & (CS_DX12_ACCESS_SHADER_READ |
+					CS_DX12_ACCESS_CONSTANT_BUFFER | CS_DX12_ACCESS_DEPTH_READ |
+					CS_DX12_ACCESS_COPY_SOURCE | CS_DX12_ACCESS_INDIRECT_ARGUMENT)) != 0;
+				consumesD3D11Import |= readsResource && state->host->d3d11ProducedImports.contains(access.resource);
+				const auto& resource = it->second;
+				if (access.access & CS_DX12_ACCESS_UNORDERED_WRITE) builder->WithUnorderedAccess(resource);
+				else if (access.access & (CS_DX12_ACCESS_COPY_DESTINATION | CS_DX12_ACCESS_COPY_SOURCE)) builder->WithLegacyInterop(resource);
+				else if (access.access & CS_DX12_ACCESS_CONSTANT_BUFFER) builder->WithConstantBuffer(resource);
+				else builder->WithShaderResource(resource);
+			}
+			if (consumesD3D11Import) builder->WithExternalWaitBindingBeforeTransitions(kD3D11ReadyBinding);
 		}
 		org::PassReturn Execute(org::PassExecutionContext& context) override
 		{
@@ -86,8 +134,8 @@ namespace
 			execution.apiVersion = CS_DX12_GRAPH_API_CURRENT;
 			execution.frame = &state->frame;
 			execution.borrowedD3D12GraphicsCommandList = native;
-			execution.hostContext = state->uploads;
-			execution.GetResource = &UnsupportedResourceLookup;
+			execution.hostContext = state->host;
+			execution.GetResource = &ResourceLookup;
 			execution.AllocateUpload = &AllocateUpload;
 			execution.AllocateDescriptors = &AllocateDescriptors;
 			const auto status = state->workItems[workIndex].execute(execution);
@@ -119,7 +167,7 @@ namespace
 		bool RequiresPassRebindAfterDeclarationRefresh() const noexcept override { return false; }
 		void DeclareResourceUsages(org::ComputePassBuilder* builder) override
 		{
-			if (begin) builder->WithExternalWaitBeforeTransitions(state->readyTimeline, state->readyValue);
+			if (!begin) for (const auto& [_, resource] : state->host->resources) builder->WithLegacyInterop(resource);
 		}
 		org::PassReturn Execute(org::PassExecutionContext&) override
 		{
@@ -140,6 +188,7 @@ namespace
 			state->readyTimeline = value.readyTimeline; state->readyValue = value.readyValue;
 			state->completeTimeline = value.completeTimeline; state->completeValue = value.completeValue;
 			state->frame = value.frame;
+			state->host = value.host;
 		}
 		void SetWorkItems(std::vector<DX12GraphHost::WorkItem> value) { state->workItems = std::move(value); }
 		std::vector<DX12GraphHost::WorkItem> GetWorkItems() const { return state->workItems; }
@@ -168,7 +217,8 @@ namespace
 				for (const auto& dependency : item.before) point.AlsoBefore(dependency);
 				if ((item.flags & CS_DX12_PASS_PARALLEL_RECORDING_SAFE) == 0 && !previousSerialized.empty())
 					point.AlsoAfter(previousSerialized);
-				auto desc = org::RenderGraph::ExternalPassDesc::Compute(item.name, std::make_shared<EpochPass>(state, i)).At(std::move(point));
+				auto desc = org::RenderGraph::ExternalPassDesc::Compute(
+					item.name, std::make_shared<EpochPass>(state, i)).At(std::move(point));
 				switch (item.queuePolicy) {
 				case CS_DX12_QUEUE_AUTOMATIC: desc.AutomaticQueueAssignment(); break;
 				case CS_DX12_QUEUE_PREFER_COMPUTE:
@@ -199,6 +249,7 @@ public:
 	{
 		std::unique_ptr<org::RenderGraph> graph;
 		EpochExtension* epochExtension{};
+		ExecutionHost host{};
 		uint64_t lastCompletion{};
 		~GraphGeneration() { if (graph) graph->ShutdownExtensions(); }
 	};
@@ -218,7 +269,7 @@ public:
 #endif
 		pipelines = std::make_unique<org::services::PipelineService>();
 #endif
-		active = Compile({});
+		active = Compile({}, {});
 	}
 
 	~Impl()
@@ -228,12 +279,69 @@ public:
 		org::runtime::ShutdownRuntimeDevice();
 	}
 
-	std::unique_ptr<GraphGeneration> Compile(std::vector<DX12GraphHost::WorkItem> workItems)
+	std::unique_ptr<GraphGeneration> Compile(
+		std::vector<DX12GraphHost::ResourceDefinition> resources,
+		std::vector<DX12GraphHost::WorkItem> workItems)
 	{
 		auto generation = std::make_unique<GraphGeneration>();
 		generation->graph = std::make_unique<org::RenderGraph>(device);
+#if defined(CS_HAS_ORG_MODULE_SERVICES)
+		generation->host.uploads = uploads.get();
+#endif
+		for (const auto& definition : resources) {
+			std::shared_ptr<org::Resource> resource;
+			if (definition.desc.dimension == CS_DX12_RESOURCE_BUFFER) {
+				if (definition.desc.byteSize == 0)
+					throw std::runtime_error("CS ORG buffer resource has zero size");
+				const bool unordered = (definition.desc.allowedAccess & CS_DX12_ACCESS_UNORDERED_WRITE) != 0;
+				auto backing = org::GpuBufferBacking::CreateUnique(
+					rhi::HeapType::DeviceLocal, definition.desc.byteSize, definition.handle,
+					unordered, definition.name.c_str());
+				resource = org::ExternalBackingResource::CreateShared(std::move(backing));
+			} else if (definition.desc.dimension == CS_DX12_RESOURCE_TEXTURE_2D) {
+				if (!definition.desc.width || !definition.desc.height || definition.desc.format == DXGI_FORMAT_UNKNOWN)
+					throw std::runtime_error("CS ORG Texture2D resource has an invalid description");
+				org::TextureDescription texture{};
+				texture.imageDimensions.resize((std::max)(1u, definition.desc.mipLevels));
+				uint32_t mipWidth = definition.desc.width;
+				uint32_t mipHeight = definition.desc.height;
+				for (auto& dimensions : texture.imageDimensions) {
+					dimensions.width = mipWidth;
+					dimensions.height = mipHeight;
+					mipWidth = (std::max)(1u, mipWidth >> 1);
+					mipHeight = (std::max)(1u, mipHeight >> 1);
+				}
+				texture.channels = 4;
+				texture.format = rhi::helpers::ToRHI(static_cast<DXGI_FORMAT>(definition.desc.format));
+				texture.arraySize = (std::max)(1u, definition.desc.depthOrArraySize);
+				texture.isArray = texture.arraySize > 1;
+				texture.hasSRV = (definition.desc.allowedAccess & CS_DX12_ACCESS_SHADER_READ) != 0;
+				texture.hasUAV = (definition.desc.allowedAccess & CS_DX12_ACCESS_UNORDERED_WRITE) != 0;
+				texture.hasRTV = (definition.desc.allowedAccess & CS_DX12_ACCESS_RENDER_TARGET) != 0;
+				texture.initialLayout = definition.desc.lifetime == CS_DX12_RESOURCE_PERSISTENT ?
+					rhi::ResourceLayout::Undefined : rhi::ResourceLayout::Common;
+
+				if (definition.desc.lifetime == CS_DX12_RESOURCE_CS_IMPORTED ||
+					definition.desc.lifetime == CS_DX12_RESOURCE_CONTRIBUTOR_IMPORTED) {
+					auto* native = static_cast<ID3D12Resource*>(definition.desc.borrowedNativeResource);
+					rhi::ResourcePtr imported;
+					if (!native || rhi::Failed(rhi::dx12::import_resource(device, native, imported)))
+						throw std::runtime_error("Failed to import native D3D12 texture into BasicRHI");
+					resource = org::ExternalTextureResource::CreateShared(std::move(imported), texture);
+				} else {
+					resource = org::PixelBuffer::CreateShared(texture);
+				}
+			} else {
+				throw std::runtime_error("CS ORG host currently supports buffers and Texture2D resources");
+			}
+			generation->graph->RegisterResource(org::ResourceIdentifier{ definition.name }, resource);
+			generation->host.resources.emplace(definition.handle, std::move(resource));
+			if (definition.desc.lifetime == CS_DX12_RESOURCE_CS_IMPORTED)
+				generation->host.d3d11ProducedImports.insert(definition.handle);
+		}
 		auto extension = std::make_unique<EpochExtension>();
 		generation->epochExtension = extension.get();
+		extension->SetFrame(EpochState{ .host = &generation->host });
 		extension->SetWorkItems(std::move(workItems));
 		generation->graph->RegisterExtension(std::move(extension), "cs.dx12.epoch");
 		generation->graph->Setup();
@@ -262,9 +370,9 @@ std::unique_ptr<DX12GraphHost> DX12GraphHost::Create(rhi::Device device)
 	return std::unique_ptr<DX12GraphHost>(new DX12GraphHost(std::make_unique<Impl>(device)));
 }
 
-void DX12GraphHost::SetStructuralWorkItems(std::vector<WorkItem> workItems)
+void DX12GraphHost::SetStructuralDefinition(std::vector<ResourceDefinition> resources, std::vector<WorkItem> workItems)
 {
-	auto candidate = impl->Compile(std::move(workItems));
+	auto candidate = impl->Compile(std::move(resources), std::move(workItems));
 	if (impl->active) impl->retired.emplace_back(impl->active->lastCompletion, std::move(impl->active));
 	impl->active = std::move(candidate);
 }
@@ -280,9 +388,7 @@ void DX12GraphHost::Execute(
 {
 	EpochState state{}; state.readyTimeline = readyTimeline; state.readyValue = readyValue;
 	state.completeTimeline = completeTimeline; state.completeValue = completeValue; state.frame = frame;
-#if defined(CS_HAS_ORG_MODULE_SERVICES)
-	state.uploads = impl->uploads.get();
-#endif
+	state.host = &impl->active->host;
 	impl->active->epochExtension->SetFrame(std::move(state));
 	org::UpdateExecutionContext update{};
 	update.frameIndex = frameIndex;
@@ -292,6 +398,7 @@ void DX12GraphHost::Execute(
 	execute.device = impl->device;
 	execute.frameIndex = frameIndex;
 	execute.frameFenceValue = frameFenceValue;
+	execute.externalTimelineBindings.push_back({ kD3D11ReadyBinding, { readyTimeline, readyValue } });
 	impl->active->graph->Execute(execute);
 	impl->active->lastCompletion = completeValue;
 }

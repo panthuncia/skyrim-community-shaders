@@ -902,6 +902,10 @@ void FeatureListRenderer::DrawMenuVisitor::RenderFeatureSettings(Feature* feat, 
 				feat->DrawUnloadedUI();
 			} else if (feat->installed) {
 				ImGui::Text("%s", T("menu.features.available_after_restart", "This feature will be available after restart."));
+				if (feat->CanConfigureWhileUnloaded()) {
+					ImGui::Separator();
+					feat->DrawSettings();
+				}
 			} else {
 				feat->DrawUnloadedUI();
 				if (!feat->GetFeatureModLink().empty()) {

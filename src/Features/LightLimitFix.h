@@ -2,10 +2,11 @@
 
 #include "Buffer.h"
 #include "OverlayFeature.h"
+#include "Features/DeferredRendering/DeferredTypes.h"
 
 struct LightLimitFix : OverlayFeature
 {
-	static constexpr uint MAX_LIGHTS = 1024;
+	static constexpr uint MAX_LIGHTS = CS::Deferred::kMaxLights;
 
 	struct ParticleLightConfig
 	{
@@ -63,40 +64,8 @@ public:
 	bool HasShaderDefine(RE::BSShader::Type) override { return true; };
 
 	/** @brief Flags describing light properties for clustered rendering. */
-	enum class LightFlags : std::uint32_t
-	{
-		PortalStrict = (1 << 0),
-		Shadow = (1 << 1),
-		Simple = (1 << 2),
-
-		Initialised = (1 << 8),
-		Disabled = (1 << 9),
-		InverseSquare = (1 << 10),
-		Linear = (1 << 11),
-	};
-
-	struct PositionOpt
-	{
-		float3 data;
-		uint pad0;
-	};
-
-	struct alignas(16) LightData
-	{
-		float3 color;
-		float fade = 1.0f;
-		float radius;
-		float invRadius;
-		float fadeZone;
-		float sizeBias;
-		PositionOpt positionWS;
-		uint128_t roomFlags = uint32_t(0);
-		stl::enumeration<LightFlags> lightFlags;
-		uint32_t shadowMaskIndex = 0;
-		uint pad0;
-		uint pad1;
-	};
-	STATIC_ASSERT_ALIGNAS_16(LightData);
+	using LightFlags = CS::Deferred::LightFlags;
+	using LightData = CS::Deferred::Light;
 
 	void AddParticleLightsToBuffer(eastl::vector<LightData>& a_lightsData);
 
@@ -148,14 +117,21 @@ public:
 		uint NumStrictLights;
 		int RoomIndex;
 		uint ShadowBitMask;
-		uint pad0;
+		uint DeferredPackedSurface = CS::Deferred::kLegacyPackedSurface;
 		LightData StrictLights[15];
 	};
 	STATIC_ASSERT_ALIGNAS_16(StrictLightDataCB);
 
 	StrictLightDataCB strictLightDataTemp;
+	struct alignas(16) DeferredIdentityCB
+	{
+		std::uint32_t PackedSurface = CS::Deferred::kLegacyPackedSurface;
+		std::uint32_t padding[3]{};
+	};
+	STATIC_ASSERT_ALIGNAS_16(DeferredIdentityCB);
 
 	ConstantBuffer* strictLightDataCB = nullptr;
+	ConstantBuffer* deferredIdentityCB = nullptr;
 
 	bool previousEnableLightsVisualisation = settings.EnableLightsVisualisation;
 	bool currentEnableLightsVisualisation = settings.EnableLightsVisualisation;

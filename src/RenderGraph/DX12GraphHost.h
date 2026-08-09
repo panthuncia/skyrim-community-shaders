@@ -18,6 +18,12 @@ public:
 	~DX12GraphHost();
 
 	using ExecutionCallback = std::function<CSDX12Status(const CSDX12ExecutionContext&)>;
+	struct ResourceDefinition
+	{
+		CSDX12ResourceHandle handle{};
+		std::string name;
+		CSDX12ResourceDesc desc{};
+	};
 	struct WorkItem
 	{
 		std::string name;
@@ -25,9 +31,10 @@ public:
 		uint32_t flags{};
 		std::vector<std::string> after;
 		std::vector<std::string> before;
+		std::vector<CSDX12ResourceAccessDesc> accesses;
 		ExecutionCallback execute;
 	};
-	void SetStructuralWorkItems(std::vector<WorkItem> workItems);
+	void SetStructuralDefinition(std::vector<ResourceDefinition> resources, std::vector<WorkItem> workItems);
 	void Execute(
 		uint32_t frameIndex,
 		uint64_t frameFenceValue,

@@ -290,9 +290,11 @@ bool Feature::ToggleAtBootSetting()
 	auto state = globals::state;
 	const std::string featureName = GetShortName();
 	auto disabled = state->IsFeatureDisabled(featureName);
-	state->SetFeatureDisabled(featureName, !disabled);
-
-	return state->IsFeatureDisabled(featureName);  // Return the new state
+	const bool isDisabled = state->SetFeatureDisabled(featureName, !disabled);
+	// A boot toggle is meaningless unless it survives the requested restart.
+	// Persist it immediately instead of relying on the separate global Save action.
+	state->Save();
+	return !isDisabled;
 }
 
 bool Feature::ReapplyOverrideSettings()

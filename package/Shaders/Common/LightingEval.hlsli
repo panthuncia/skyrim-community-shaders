@@ -133,7 +133,8 @@ void EvaluateLighting(DirectContext context, MaterialProperties material, float3
 	const float NdotL = dot(context.worldNormal, context.lightDir);
 	float3 diffuseLightColor = context.lightColor * context.detailedShadow;
 	float3 softLightColor = context.lightColor * context.softShadow;
-	lightingOutput.diffuse = saturate(NdotL) * diffuseLightColor * Color::VanillaNormalization();
+	lightingOutput.diffuse = CSLightingVanillaDiffuse(context.worldNormal, context.lightDir,
+		context.lightColor, context.detailedShadow, Color::VanillaNormalization());
 #	if defined(SOFT_LIGHTING)
 	lightingOutput.diffuse += softLightColor * GetSoftLightMultiplier(NdotL) * material.rimSoftLightColor * Color::VanillaNormalization();
 #	endif

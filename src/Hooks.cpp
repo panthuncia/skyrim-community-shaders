@@ -5,6 +5,8 @@
 
 #include "Feature.h"
 #include "Globals.h"
+#include "Deferred.h"
+#include "Features/DeferredRendering.h"
 #include "Menu.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -402,6 +404,8 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChain(
 void Hooks::BSGraphics_SetDirtyStates::thunk(bool isCompute)
 {
 	func(isCompute);
+	if (globals::deferred)
+		globals::deferred->ClearPackedIdentityAfterTargetBind(isCompute);
 	globals::state->Draw();
 }
 

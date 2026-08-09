@@ -181,6 +181,7 @@ void LightLimitFix::SetupResources()
 
 	{
 		strictLightDataCB = new ConstantBuffer(ConstantBufferDesc<StrictLightDataCB>());
+		deferredIdentityCB = new ConstantBuffer(ConstantBufferDesc<DeferredIdentityCB>());
 	}
 }
 
@@ -315,21 +316,62 @@ void LightLimitFix::BSLightingShader_SetupGeometry_After(RE::BSRenderPass* a_pas
 	const auto roomIndex = strictLightDataTemp.RoomIndex;
 	const auto shadowBitMask = strictLightDataTemp.ShadowBitMask;
 
-	if (!isEmpty || (isEmpty && !wasEmpty) || isWorld != wasWorld || previousRoomIndex != roomIndex || shadowBitMask != previousShadowBitMask) {
-		strictLightDataCB->Update(strictLightDataTemp);
-		wasEmpty = isEmpty;
-		wasWorld = isWorld;
-		previousRoomIndex = roomIndex;
-		previousShadowBitMask = shadowBitMask;
+	if (a_pass && a_pass->geometry) {
+		DeferredRendering::LightingContext lightingContext{};
+		lightingContext.roomIndex = roomIndex;
+		lightingContext.shadowLightMembershipMask = shadowBitMask;
+		lightingContext.featureFlags = isWorld ? DeferredRendering::kWorld : 0u;
+
+		// Capture the exact constants that the active CS lighting permutation will consume.
+		// Replacement shaders retain a CPU-side PerGeometry image, so this does not require
+		// a GPU readback and preserves the values after the draw's b2 allocation is recycled.
+		if (globals::game::currentPixelShader && *globals::game::currentPixelShader) {
+			auto* pixelShader = *globals::game::currentPixelShader;
+			auto& constants = pixelShader->constantBuffers[static_cast<std::size_t>(RE::BSGraphics::ConstantGroupLevel::PerGeometry)];
+			const auto& indices = ShaderConstants::LightingPS::Get();
+			auto copyConstant = [&](std::int32_t index, void* destination, std::size_t bytes) {
+				const auto offset = pixelShader->constantTable[index];
+				if (!constants.data || offset < 0)
+					return false;
+				std::memcpy(destination, reinterpret_cast<const float*>(constants.data) + offset, bytes);
+				return true;
+			};
+			const bool captured =
+				copyConstant(indices.DirLightDirection, &lightingContext.directionalLightDirection, sizeof(float) * 3) &&
+				copyConstant(indices.DirLightColor, &lightingContext.directionalLightColor, sizeof(float) * 3) &&
+				copyConstant(indices.DirectionalAmbient, lightingContext.directionalAmbient, sizeof(lightingContext.directionalAmbient)) &&
+				copyConstant(indices.AmbientSpecularTintAndFresnelPower, &lightingContext.ambientSpecularTintAndFresnelPower, sizeof(float4));
+			if (captured)
+				lightingContext.featureFlags |= DeferredRendering::kLightingUniformsValid;
+		}
+
+		const auto contextIndex = globals::features::deferredRendering.AssignContext(a_pass, lightingContext);
+		// Material coverage is enabled class-by-class. Until the geometry shader
+		// has resolved all inputs required by a class, retain its pre-lit color
+		// while still emitting a valid context index for diagnostics and parity.
+		strictLightDataTemp.DeferredPackedSurface = CS::Deferred::PackSurface(
+			contextIndex, CS::Deferred::MaterialClass::Legacy,
+			CS::Deferred::kSurfaceReceivesDirectional | CS::Deferred::kSurfaceReceivesLocal |
+				CS::Deferred::kSurfaceHasVertexAO);
 	}
 
-	if (a_pass && a_pass->geometry)
-		globals::features::deferredRendering.AssignContext(a_pass, { roomIndex, shadowBitMask, isWorld ? 1u : 0u, 0u });
+	// The packed context is per submitted draw even when the strict-light data
+	// is otherwise unchanged, so this upload cannot use the old state cache.
+	strictLightDataCB->Update(strictLightDataTemp);
+	DeferredIdentityCB identity{};
+	identity.PackedSurface = strictLightDataTemp.DeferredPackedSurface;
+	deferredIdentityCB->Update(identity);
+	wasEmpty = isEmpty;
+	wasWorld = isWorld;
+	previousRoomIndex = roomIndex;
+	previousShadowBitMask = shadowBitMask;
 
 	if (frameChecker.IsNewFrame()) {
 		ID3D11Buffer* buffer = { strictLightDataCB->CB() };
 		context->PSSetConstantBuffers(3, 1, &buffer);
 	}
+	ID3D11Buffer* identityBuffer[]{ deferredIdentityCB->CB() };
+	context->PSSetConstantBuffers(13, 1, identityBuffer);
 }
 
 void LightLimitFix::SetLightPosition(LightLimitFix::LightData& a_light, RE::NiPoint3 a_initialPosition, bool a_cached)
@@ -506,6 +548,12 @@ void LightLimitFix::UpdateLights()
 	auto context = globals::d3d::context;
 
 	lightCount = std::min((uint)lightsData.size(), MAX_LIGHTS);
+	lightsNear = *globals::game::cameraNear;
+	lightsFar = *globals::game::cameraFar;
+	const auto renderSize = Util::ConvertToDynamic(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
+	clusterSize[0] = ((uint)renderSize.x + 63) / 64;
+	clusterSize[1] = ((uint)renderSize.y + 63) / 64;
+	clusterSize[2] = 32;
 	globals::features::deferredRendering.BeginFrame(
 		std::span<const LightData>{ lightsData.data(), lightCount }, clusterSize, lightsNear, lightsFar);
 

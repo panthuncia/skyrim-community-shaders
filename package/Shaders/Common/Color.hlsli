@@ -3,6 +3,7 @@
 
 #include "Common/Math.hlsli"
 #include "Common/SharedData.hlsli"
+#include "Common/LightingParity.hlsli"
 
 #define ENABLE_LL SharedData::linearLightingSettings.enableLinearLighting
 
@@ -220,14 +221,16 @@ namespace Color
 
 	float3 DirectionalLight(float3 color, bool isLinear = false)
 	{
-		return Light(color, isLinear) *
-		       ((ENABLE_LL && !isLinear) ? Math::PI * SharedData::linearLightingSettings.directionalLightMult : 1.0f);
+		return CSLightingTransformLight(color, isLinear, ENABLE_LL,
+			SharedData::linearLightingSettings.lightGamma,
+			SharedData::linearLightingSettings.directionalLightMult, PBRLightingCompensation);
 	}
 
 	float3 PointLight(float3 color, bool isLinear = false)
 	{
-		return Light(color, isLinear) *
-		       ((ENABLE_LL && !isLinear) ? Math::PI * SharedData::linearLightingSettings.pointLightMult : 1.0f);
+		return CSLightingTransformLight(color, isLinear, ENABLE_LL,
+			SharedData::linearLightingSettings.lightGamma,
+			SharedData::linearLightingSettings.pointLightMult, PBRLightingCompensation);
 	}
 #	if defined(LIGHTING)
 	float3 EmitColor(float3 color)
@@ -247,7 +250,9 @@ namespace Color
 
 	float3 Ambient(float3 color)
 	{
-		return ENABLE_LL ? pow(abs(color), SharedData::linearLightingSettings.ambientGamma) * SharedData::linearLightingSettings.ambientMult : color;
+		return CSLightingTransformAmbient(color, ENABLE_LL,
+			SharedData::linearLightingSettings.ambientGamma,
+			SharedData::linearLightingSettings.ambientMult);
 	}
 
 	float3 Fog(float3 color)
@@ -335,7 +340,7 @@ namespace Color
 
 	float3 IrradianceToGamma(float3 color)
 	{
-		return ENABLE_LL ? color : LinearToSkyrimGamma(color);
+		return CSLightingIrradianceToGamma(color, ENABLE_LL);
 	}
 
 	float VanillaNormalization()

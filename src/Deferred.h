@@ -49,8 +49,13 @@ public:
 	/** @brief Restores original forward blend states after deferred pass completes. */
 	void ResetBlendStates();
 
-	/** @brief Dispatches the deferred composite compute shader and post-deferred feature passes. */
-	void DeferredPasses();
+	/** @brief Produces all D3D11 inputs and the legacy compatibility composite before the DX12 epoch. */
+	void PreDX12DeferredPasses();
+	/** @brief Applies CS's existing ambient, GI, skylighting, and IBL composite after DX12 direct lighting. */
+	void RunDX11DeferredComposite();
+
+	/** @brief Runs consumers that require the authoritative post-lighting main target. */
+	void PostDX12DeferredPasses();
 
 	/** @brief Ends deferred rendering, restores forward targets, and triggers DeferredPasses. */
 	void EndDeferred();
@@ -93,6 +98,8 @@ public:
 	Buffer* directionalShadowLights = nullptr;
 
 	bool deferredPass = false;
+	bool packedIdentityClearPending = false;
+	void ClearPackedIdentityAfterTargetBind(bool isCompute);
 
 	ID3D11SamplerState* linearSampler = nullptr;
 	ID3D11SamplerState* pointSampler = nullptr;

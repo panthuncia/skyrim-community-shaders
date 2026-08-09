@@ -753,6 +753,7 @@ void Menu::Init()
  */
 void Menu::DrawSettings()
 {
+	const auto menuDrawStarted = std::chrono::steady_clock::now();
 	if (focusChanged) {
 		OnFocusChanged();
 		focusChanged = false;
@@ -840,6 +841,16 @@ void Menu::DrawSettings()
 		Util::DrawClearShaderCacheConfirmation();
 	}
 	ImGui::End();
+	const auto menuDrawElapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+		std::chrono::steady_clock::now() - menuDrawStarted);
+	if (menuDrawElapsed > std::chrono::milliseconds(8)) {
+		static auto lastSlowMenuLog = std::chrono::steady_clock::time_point{};
+		const auto now = std::chrono::steady_clock::now();
+		if (now - lastSlowMenuLog > std::chrono::seconds(1)) {
+			logger::warn("[MenuTiming] CS menu CPU draw took {:.2f} ms", menuDrawElapsed.count() / 1000.0);
+			lastSlowMenuLog = now;
+		}
+	}
 }
 
 /**
@@ -1033,9 +1044,15 @@ static std::vector<InputCombo> DeriveCSEditorKey(const std::vector<InputCombo>& 
 
 void Menu::ProcessInputEventQueue()
 {
-	std::unique_lock<std::shared_mutex> mutex(_inputEventMutex);
+	const auto inputStarted = std::chrono::steady_clock::now();
+	std::vector<KeyEvent> queuedEvents;
+	{
+		std::unique_lock<std::shared_mutex> mutex(_inputEventMutex);
+		queuedEvents.swap(_keyEventQueue);
+	}
+	const auto queuedEventCount = queuedEvents.size();
 	ImGuiIO& io = ImGui::GetIO();
-	for (auto& event : _keyEventQueue) {
+	for (auto& event : queuedEvents) {
 		if (event.eventType == RE::INPUT_EVENT_TYPE::kChar) {
 			io.AddInputCharacter(event.keyCode);
 			continue;
@@ -1266,7 +1283,16 @@ void Menu::ProcessInputEventQueue()
 		}
 	}
 
-	_keyEventQueue.clear();
+	const auto inputElapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+		std::chrono::steady_clock::now() - inputStarted);
+	if (inputElapsed > std::chrono::milliseconds(4) || queuedEventCount > 64) {
+		static auto lastSlowInputLog = std::chrono::steady_clock::time_point{};
+		const auto now = std::chrono::steady_clock::now();
+		if (now - lastSlowInputLog > std::chrono::seconds(1)) {
+			logger::warn("[MenuTiming] Input queue processed {} events in {:.2f} ms", queuedEventCount, inputElapsed.count() / 1000.0);
+			lastSlowInputLog = now;
+		}
+	}
 }
 
 bool Menu::IsCapturingHotkeyInput() const

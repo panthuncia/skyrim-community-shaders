@@ -1,6 +1,8 @@
 #define CS_DX12_GRAPH_EXPORTS
 #include "DX12RenderRuntime.h"
 #include "Features/DeferredRendering/LightCulling.h"
+#include "Features/DeferredRendering/DeferredShading.h"
+#include "Features/DeferredRendering.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -105,6 +107,11 @@ bool DX12RenderRuntime::Initialize(ID3D11Device* device, ID3D11DeviceContext* co
 			SetDiagnostic(CS_DX12_E_RUNTIME_UNAVAILABLE, "Failed to initialize the CS clustered-lighting contributor");
 			return false;
 		}
+		if (!DX12DeferredShading::Get().Initialize(*this)) {
+			available.store(false, std::memory_order_release);
+			SetDiagnostic(CS_DX12_E_RUNTIME_UNAVAILABLE, "Failed to initialize the CS deferred-shading contributor");
+			return false;
+		}
 		static std::once_flag shutdownRegistered;
 		std::call_once(shutdownRegistered, [] { std::atexit([] { DX12RenderRuntime::Get().Shutdown(); }); });
 		SetDiagnostic(CS_DX12_OK, "DX12 graph runtime initialized on the D3D11 adapter");
@@ -123,7 +130,9 @@ bool DX12RenderRuntime::CreateDeviceOnD3D11Adapter() noexcept
 	rhi::DeviceCreateInfo createInfo{};
 	createInfo.backend = rhi::Backend::D3D12;
 	createInfo.framesInFlight = kCommandFrameCount;
-	createInfo.enableDebug = false;
+	// Keep the debug layer opt-in: GPU validation is too expensive for normal play,
+	// but the host must be diagnosable without requiring a special build.
+	createInfo.enableDebug = std::getenv("CS_DX12_DEBUG") != nullptr;
 	createInfo.nativeAdapter = adapter.get();
 	if (rhi::Failed(rhi::CreateD3D12Device(createInfo, rhiDevice)) || !rhiDevice) {
 		SetDiagnostic(CS_DX12_E_RUNTIME_UNAVAILABLE, "BasicRHI failed to create D3D12 on the D3D11 adapter");
@@ -169,6 +178,24 @@ bool DX12RenderRuntime::CreateInterop() noexcept
 		SetDiagnostic(CS_DX12_E_RUNTIME_UNAVAILABLE, "Failed to create D3D11/D3D12 shared timeline fences");
 		return false;
 	}
+	interopCoordinator = std::make_unique<DX12InteropCoordinator>(device11.get(), device12.get());
+	D3D12_FEATURE_DATA_D3D12_OPTIONS4 options4{};
+	if (SUCCEEDED(device12->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS4, &options4, sizeof(options4))))
+		logger::info("[DX12Interop] Cross-API shared-resource compatibility tier={}",
+			static_cast<unsigned>(options4.SharedResourceCompatibilityTier));
+	else
+		logger::warn("[DX12Interop] Unable to query cross-API shared-resource compatibility tier; restricting transport to tier-0 formats");
+	DX12InteropCoordinator::SharedTexture probe;
+	// Exercise the same strict path used by deferred output: D3D12 owns a
+	// tier-0 RGBA16 UAV/RT allocation and D3D11 opens its NT handle as an SRV.
+	if (!interopCoordinator->CreateD3D12OwnedSharedTexture(1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
+		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		true, probe)) {
+		SetDiagnostic(CS_DX12_E_RUNTIME_UNAVAILABLE, "D3D12-owned cross-API Texture2D capability probe failed");
+		interopCoordinator.reset();
+		return false;
+	}
+	logger::info("[DX12Interop] D3D12-owned RGBA16 UAV/RT handoff capability probe succeeded");
 	return true;
 }
 
@@ -187,6 +214,8 @@ void DX12RenderRuntime::SetDiagnostic(CSDX12Status status, std::string message) 
 	++diagnostic.sequence;
 	std::strncpy(diagnostic.message, message.c_str(), sizeof(diagnostic.message) - 1);
 	diagnostic.message[sizeof(diagnostic.message) - 1] = '\0';
+	if (status != CS_DX12_OK)
+		logger::error("[DX12RenderRuntime] Graph diagnostic {}: {}", static_cast<std::int32_t>(status), message);
 }
 
 CSDX12Status DX12RenderRuntime::Register(const CSDX12ContributorDesc* desc, CSDX12RegistrationHandle* out) noexcept
@@ -361,7 +390,7 @@ bool DX12RenderRuntime::Rebuild() noexcept
 		const auto id = pass.id;
 		const auto execute = pass.execute;
 		void* const userData = pass.userData;
-		workItems.push_back({ id, pass.queuePolicy, pass.flags, pass.after, pass.before, [this, id, execute, userData](const CSDX12ExecutionContext& context) {
+		workItems.push_back({ id, pass.queuePolicy, pass.flags, pass.after, pass.before, pass.accesses, [this, id, execute, userData](const CSDX12ExecutionContext& context) {
 			CSDX12Status status = CS_DX12_E_CALLBACK_FAILED;
 			try { status = execute(userData, &context); } catch (...) { status = CS_DX12_E_CALLBACK_FAILED; }
 			if (status != CS_DX12_OK) SetDiagnostic(status, "Execution callback failed: " + id);
@@ -369,7 +398,11 @@ bool DX12RenderRuntime::Rebuild() noexcept
 		} });
 	}
 	try {
-		renderGraph->SetStructuralWorkItems(std::move(workItems));
+		std::vector<DX12GraphHost::ResourceDefinition> resources;
+		resources.reserve(candidate->resources.size());
+		for (const auto& resource : candidate->resources)
+			resources.push_back({ resource.handle, resource.id, resource.desc });
+		renderGraph->SetStructuralDefinition(std::move(resources), std::move(workItems));
 	} catch (const std::exception& e) {
 		SetDiagnostic(CS_DX12_E_INTERNAL, std::string("ORG structural compile failed: ") + e.what());
 		return false;
@@ -383,22 +416,40 @@ bool DX12RenderRuntime::Rebuild() noexcept
 	return true;
 }
 
-void DX12RenderRuntime::ExecuteDeferredEpoch(uint32_t width, uint32_t height) noexcept
+bool DX12RenderRuntime::ExecuteDeferredEpoch(uint32_t width, uint32_t height, uint32_t resourceWidth, uint32_t resourceHeight) noexcept
 {
+	static bool firstEpoch = true;
+	static bool firstAttempt = true;
 	if (!available.load() || std::this_thread::get_id() != renderThread)
-		return;
-	if (rebuildRequested.exchange(false) && !Rebuild()) { /* keep previous generation */ }
+		return false;
+	if (width != renderWidth || height != renderHeight || resourceWidth != allocationWidth || resourceHeight != allocationHeight) {
+		renderWidth = width;
+		renderHeight = height;
+		allocationWidth = resourceWidth;
+		allocationHeight = resourceHeight;
+		rebuildRequested.store(true);
+	}
+	if (firstAttempt) logger::info("[DX12RenderRuntime] Beginning first deferred epoch ({}x{})", width, height);
+	if (rebuildRequested.exchange(false)) {
+		if (firstAttempt) logger::info("[DX12RenderRuntime] Compiling first graph generation");
+		if (!Rebuild()) { /* keep previous generation */ }
+		if (firstAttempt) logger::info("[DX12RenderRuntime] First graph rebuild returned (active={})", active != nullptr);
+		firstAttempt = false;
+	}
 	if (!active)
-		return;
+		return false;
 	const uint64_t ready = nextReadyFence.fetch_add(1);
 	if (FAILED(context11->Signal(readyFence11.get(), ready)))
-		return;
+		return false;
+	if (firstEpoch) logger::info("[DX12RenderRuntime] D3D11 readiness value {} queued", ready);
 	const uint64_t complete = nextCompleteFence.fetch_add(1);
 	CSDX12FrameInfo frame{ sizeof(frame), CS_DX12_GRAPH_API_CURRENT, frameIndex, active->id, complete,
 		static_cast<uint32_t>(frameIndex % kCommandFrameCount), kCommandFrameCount, width, height };
 	try {
+		if (firstEpoch) logger::info("[DX12RenderRuntime] Submitting first ORG execution");
 		renderGraph->Execute(static_cast<uint32_t>(frameIndex), complete, readyTimeline.Get(), ready,
 			completeTimeline.Get(), complete, frame);
+		if (firstEpoch) logger::info("[DX12RenderRuntime] First ORG execution submitted");
 	} catch (const std::exception& e) {
 		const HRESULT removedReason = device12 ? device12->GetDeviceRemovedReason() : S_OK;
 		logger::error("[DX12RenderRuntime] ORG execution failed: {} (device reason=0x{:08X})", e.what(), static_cast<unsigned>(removedReason));
@@ -420,20 +471,27 @@ void DX12RenderRuntime::ExecuteDeferredEpoch(uint32_t width, uint32_t height) no
 		if (FAILED(removedReason)) {
 			available.store(false);
 			logger::error("[DX12RenderRuntime] D3D12 device was removed; disabling DX12 contributors for the remainder of the process");
+		} else {
+			available.store(false);
+			logger::error("[DX12RenderRuntime] Required DX12 epoch recording failed; disabling further submissions and preserving the D3D11 path");
 		}
-		return;
+		return false;
 	}
 	++frameIndex;
 	active->lastCompletion = complete;
 	lastSubmittedCompletion.store(complete, std::memory_order_release);
 	context11->Wait(completeFence11.get(), complete);
+	if (firstEpoch) logger::info("[DX12RenderRuntime] D3D11 completion wait {} queued", complete);
+	firstEpoch = false;
 	RetireCompleted();
+	return true;
 }
 
 void DX12RenderRuntime::RetireCompleted() noexcept
 {
 	const auto completed = completeFence12 ? completeFence12->GetCompletedValue() : 0;
 	if (renderGraph) renderGraph->Retire(completed);
+	globals::features::deferredRendering.RetireFrames(completed);
 	while (!retired.empty() && retired.front().first <= completed) {
 		for (const auto& contributor : retired.front().second->contributorSnapshot)
 			if (contributor.generationRetired) contributor.generationRetired(contributor.userData, retired.front().second->id);
@@ -461,6 +519,7 @@ void DX12RenderRuntime::Shutdown() noexcept
 	for (auto& [_, contributor] : unregistering) if (contributor.shutdown) contributor.shutdown(contributor.userData);
 	contributors.clear(); unregistering.clear(); active.reset(); retired.clear();
 	renderGraph.reset();
+	interopCoordinator.reset();
 	readyFence11 = nullptr; readyFence12 = nullptr;
 	completeFence11 = nullptr; completeFence12 = nullptr;
 	readyTimeline.Reset(); completeTimeline.Reset();
@@ -473,7 +532,8 @@ void DX12RenderRuntime::Shutdown() noexcept
 CSDX12Status DX12RenderRuntime::GetRuntimeInfo(CSDX12RuntimeInfo* out) const noexcept
 {
 	if (!out || out->structSize < sizeof(*out)) return CS_DX12_E_INVALID_ARGUMENT;
-	uint64_t capabilities = CS_DX12_CAP_ASYNC_COMPUTE | CS_DX12_CAP_COPY_QUEUE | CS_DX12_CAP_NATIVE_ESCAPE_HATCH;
+	uint64_t capabilities = CS_DX12_CAP_ASYNC_COMPUTE | CS_DX12_CAP_COPY_QUEUE |
+		CS_DX12_CAP_MANAGED_RESOURCES | CS_DX12_CAP_NATIVE_ESCAPE_HATCH;
 #if defined(CS_HAS_ORG_MODULE_SERVICES)
 	capabilities |= CS_DX12_CAP_FRAME_UPLOADS | CS_DX12_CAP_MODULE_SERVICES;
 #endif

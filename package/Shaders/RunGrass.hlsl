@@ -280,7 +280,7 @@ struct PS_OUTPUT
 	float4 Albedo: SV_Target3;
 	float4 Specular: SV_Target4;
 	float4 Masks: SV_Target6;
-	float4 Masks2: SV_Target7;
+	uint Masks2: SV_Target7;
 #	endif      // RENDER_DEPTH
 };
 #else
@@ -294,7 +294,7 @@ struct PS_OUTPUT
 	float4 Normal: SV_Target2;
 	float4 Albedo: SV_Target3;
 	float4 Masks: SV_Target6;
-	float4 Masks2: SV_Target7;
+	uint Masks2: SV_Target7;
 #	endif
 };
 #endif
@@ -610,7 +610,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	psout.Specular = float4(specularColor, 1);
 	psout.Masks = float4(0, 0, Color::RGBToYCoCg(directionalAmbientColor).x, 0);
-	psout.Masks2 = float4(1.0 - vertexAO, 0, 0, 0);
+	// Grass remains geometry-lit.  MASKS2 is now R32_UINT, so always stamp an
+	// invalid context/legacy class while retaining quantized AO for consumers.
+	psout.Masks2 = 0x0000FFFFu | ((uint)round(saturate(vertexAO) * 31.0) << 27);
 #		endif
 	return psout;
 }
@@ -759,7 +761,9 @@ PS_OUTPUT main(PS_INPUT input)
 
 	psout.Albedo = float4(albedo, 1);
 	psout.Masks = float4(0, 0, Color::RGBToYCoCg(directionalAmbientColor).x, 0);
-	psout.Masks2 = float4(1.0 - vertexAO, 0, 0, 0);
+	// Grass remains geometry-lit.  Never allow its G-buffer pixels to inherit
+	// the deferred identity of opaque geometry rendered underneath it.
+	psout.Masks2 = 0x0000FFFFu | ((uint)round(saturate(vertexAO) * 31.0) << 27);
 #		endif
 
 	return psout;

@@ -11,7 +11,7 @@ Texture2D<float3> SpecularTexture : register(t0);
 Texture2D<unorm float3> AlbedoTexture : register(t1);
 Texture2D<unorm float3> NormalRoughnessTexture : register(t2);
 Texture2D<float3> MasksTexture : register(t3);
-Texture2D<unorm float> Masks2Texture : register(t9);
+Texture2D<uint> Masks2Texture : register(t9);
 
 RWTexture2D<float4> MainRW : register(u0);
 RWTexture2D<float4> NormalTAAMaskSpecularMaskRW : register(u1);
@@ -120,9 +120,9 @@ void SampleSSGISpecular(uint2 pixCoord, sh2 lobe, inout float ao, out float3 il,
 	float3 ssgiIl;
 	SampleSSGI(dispatchID.xy, normalWS, ssgiAo, ssgiIl);
 
-	// Masks2.x stores 1 - vertexAO (Lighting.hlsl only); cleared to 0 for
-	// pixels with no vertex AO contribution, so vertexAO defaults to 1.
-	float vertexAO = 1.0 - Masks2Texture[dispatchID.xy].x;
+	// MASKS2 is a packed identity target. Vertex AO occupies the upper five
+	// bits, preserving the old SSGI correction without consuming another MRT.
+	float vertexAO = float(Masks2Texture[dispatchID.xy] >> 27) * (1.0 / 31.0);
 	ssgiAo = saturate(ssgiAo / max(vertexAO, EPSILON_DIVISION));
 
 	float3 linAlbedo = Color::IrradianceToLinear(albedo / Color::PBRLightingScale);

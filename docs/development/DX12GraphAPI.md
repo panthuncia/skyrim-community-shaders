@@ -34,3 +34,11 @@ Candidate ORG graphs compile separately from the active graph. Activation is ato
 The ABI distinguishes transient, runtime-persistent, CS-imported, and contributor-imported resources. A native import is the advanced escape hatch: it must provide state and ownership metadata and still participate in the graph. Contributors never submit their own command lists.
 
 `ORGModuleServices` is optional and independent of OpenRenderGraph. When installed, CS advertises frame uploads and fence-retired descriptor allocation. Shader and pipeline service capabilities must be queried before use. A CS build without the package retains core scheduling and native contributors; the clustered-culling proof is disabled because it requires frame-safe allocations.
+
+## D3D11/D3D12 texture interop
+
+Prefer a single producer-owned NT-shared allocation. A D3D11 producer should create its texture with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE` (and the actual RTV/SRV/UAV bind flags it needs), export it through `IDXGIResource1::CreateSharedHandle`, and let CS open that allocation on D3D12. A D3D12 producer should use a shared heap and `D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS`, then let D3D11 open the exported NT handle. Do not create two independently updated textures merely to cross the API boundary when the producer allocation can be shared.
+
+Every imported texture read must be declared on the consuming ORG pass. CS attaches the current D3D11-readiness timeline value to the first consuming batch at execution time. ORG applies that queue wait before its transitions and command list, and the D3D12-to-D3D11 completion timeline is signaled only after all contributing queues complete. Contributors must never cache a concrete per-frame fence value in a compiled graph, issue their own queue waits, or rely on pass vector order.
+
+Use a mirror only when the original engine allocation cannot be shared (unsupported flags, samples, format, or ownership). Queue the D3D11 copy before the readiness signal and import the mirror as a normal declared resource. For D3D12 output, prefer a D3D12-owned shared texture and perform the minimum D3D11 handoff needed by Skyrim. The deferred path, for example, preserves unsupported pixels in Skyrim's main target and selectively overwrites promoted pixels instead of round-tripping the entire compatibility image.

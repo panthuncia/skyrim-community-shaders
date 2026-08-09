@@ -287,6 +287,12 @@ typedef VS_OUTPUT PS_INPUT;
 #endif
 
 #if defined(DEFERRED)
+cbuffer DeferredIdentity : register(b13)
+{
+	uint DeferredPackedSurface;
+	uint3 DeferredIdentityPadding;
+};
+
 struct PS_OUTPUT
 {
 	float4 Diffuse: SV_Target0;
@@ -296,7 +302,7 @@ struct PS_OUTPUT
 	float4 Specular: SV_Target4;
 	float4 Reflectance: SV_Target5;
 	float4 Masks: SV_Target6;
-	float4 Masks2: SV_Target7;
+	uint Masks2: SV_Target7;
 };
 #else
 struct PS_OUTPUT
@@ -2927,7 +2933,21 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	// Stored as 1 - vertexAO so the cleared default (0) means no occlusion
 	// for pixels that do not write to this RT (sky, water, grass, effects).
-	psout.Masks2 = float4(1.0 - vertexAO, 0, 0, psout.Diffuse.w);
+	// The top byte is the deferred surface flag byte. Its upper five bits carry
+	// quantized vertex AO so the existing deferred SSGI correction remains
+	// available after MASKS2 becomes an integer identity target.
+	uint packedVertexAO = (uint)round(saturate(vertexAO) * 31.0);
+	uint deferredMaterialClass = 0u;
+	// Object classes are promoted deliberately.  The first class is static,
+	// non-alpha-tested opaque geometry with a plain diffuse material contract.
+	// Alpha-tested, skinned, vertex-animated, LOD and feature materials remain
+	// geometry-lit even if some of their individual inputs happen to resemble
+	// the static layout.
+#	if !defined(DO_ALPHA_TEST) && !defined(SKINNED) && !defined(TRUE_PBR) && !defined(LANDSCAPE) && !defined(LODLANDSCAPE) && !defined(LOD) && !defined(TREE_ANIM) && !defined(FACEGEN) && !defined(FACEGEN_RGB_TINT) && !defined(DEPTH_WRITE_DECALS) && !defined(HAIR) && !defined(SKIN) && !defined(EYE) && !defined(ENVMAP) && !defined(MULTI_LAYER_PARALLAX) && !defined(SPECULAR) && !defined(SOFT_LIGHTING) && !defined(RIM_LIGHTING) && !defined(BACK_LIGHTING) && !defined(SNOW) && !defined(GLOWMAP) && !defined(PARALLAX) && !defined(PROJECTED_UV)
+	deferredMaterialClass = 1u;
+#	endif
+	psout.Masks2 = (DeferredPackedSurface & 0xFF00FFFFu) |
+		(deferredMaterialClass << 16) | (packedVertexAO << 27);
 
 	float stochasticBlend = (screenNoise * screenNoise) < psout.Diffuse.w ? 1.0 : 0.0;
 	psout.NormalGlossiness.w = stochasticBlend;
