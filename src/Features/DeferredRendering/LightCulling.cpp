@@ -34,7 +34,8 @@ struct Light {
 };
 struct LightingContext {
  float4 directionalLightDirection; float4 directionalLightColor; float4 directionalAmbient[3];
- float4 ambientSpecularTintAndFresnelPower; int roomIndex; uint shadowMask; uint featureFlags; uint reserved;
+ float4 ambientSpecularTintAndFresnelPower; float4 emissiveColor; float4 specularColorAndShininess;
+ int roomIndex; uint shadowMask; uint featureFlags; uint reserved;
 };
 struct Cluster { float4 minPoint; float4 maxPoint; uint numLights; uint ptrFirstPage; uint2 pad; };
 struct LightPage { uint ptrNextPage; uint numLightsInPage; uint lightIndices[12]; };

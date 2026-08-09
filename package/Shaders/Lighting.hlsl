@@ -2504,7 +2504,10 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	}
 #	endif
 
-	float3 directionalAmbientColor = Color::Ambient(max(0, mul(DirectionalAmbient, float4(ambientNormal, 1.0))));
+	float3 directionalAmbientColor = CSLightingDirectionalAmbient(
+		DirectionalAmbient[0], DirectionalAmbient[1], DirectionalAmbient[2], ambientNormal,
+		ENABLE_LL, SharedData::linearLightingSettings.ambientGamma,
+		SharedData::linearLightingSettings.ambientMult);
 
 #	if defined(IBL)
 	if (SharedData::iblSettings.EnableIBL) {
@@ -2938,18 +2941,29 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// available after MASKS2 becomes an integer identity target.
 	uint packedVertexAO = (uint)round(saturate(vertexAO) * 31.0);
 	uint deferredMaterialClass = 0u;
-	// Object classes are promoted deliberately.  The first class is static,
-	// non-alpha-tested opaque geometry with a plain diffuse material contract.
-	// Alpha-tested, skinned, vertex-animated, LOD and feature materials remain
-	// geometry-lit even if some of their individual inputs happen to resemble
-	// the static layout.
-#	if !defined(DO_ALPHA_TEST) && !defined(SKINNED) && !defined(TRUE_PBR) && !defined(LANDSCAPE) && !defined(LODLANDSCAPE) && !defined(LOD) && !defined(TREE_ANIM) && !defined(FACEGEN) && !defined(FACEGEN_RGB_TINT) && !defined(DEPTH_WRITE_DECALS) && !defined(HAIR) && !defined(SKIN) && !defined(EYE) && !defined(ENVMAP) && !defined(MULTI_LAYER_PARALLAX) && !defined(SPECULAR) && !defined(SOFT_LIGHTING) && !defined(RIM_LIGHTING) && !defined(BACK_LIGHTING) && !defined(SNOW) && !defined(GLOWMAP) && !defined(PARALLAX) && !defined(PROJECTED_UV)
+	uint deferredSurfaceFlags = DeferredPackedSurface >> 24;
+	// Classes 1 and 2 share the plain CS diffuse evaluator. Class 2 differs only
+	// in having survived alpha testing during G-buffer generation. Vertex
+	// deformation (skinning/tree animation), FaceGen tint, and ordinary LOD
+	// affect resolved geometry/material inputs, not this lighting contract.
+#	if !defined(TRUE_PBR) && !defined(LANDSCAPE) && !defined(LODLANDSCAPE) && !defined(DEPTH_WRITE_DECALS) && !defined(HAIR) && !defined(SKIN) && !defined(EYE) && !defined(ENVMAP) && !defined(MULTI_LAYER_PARALLAX) && !defined(SOFT_LIGHTING) && !defined(RIM_LIGHTING) && !defined(BACK_LIGHTING) && !defined(SNOW) && !defined(GLOWMAP) && !defined(PARALLAX) && !defined(PROJECTED_UV) && !defined(ANISO_LIGHTING) && !defined(SPARKLE)
+#		if defined(SPECULAR) && defined(DO_ALPHA_TEST)
+	deferredMaterialClass = 4u;
+#		elif defined(SPECULAR)
+	deferredMaterialClass = 3u;
+#		elif defined(DO_ALPHA_TEST)
+	deferredMaterialClass = 2u;
+#		else
 	deferredMaterialClass = 1u;
+#		endif
+#		if defined(LOD)
+	deferredSurfaceFlags &= ~2u;
+#		endif
 	if ((Permutation::PixelShaderDescriptor & Permutation::LightingFlags::CharacterLight) != 0)
 		deferredMaterialClass = 0u;
 #	endif
-	psout.Masks2 = (DeferredPackedSurface & 0xFF00FFFFu) |
-		(deferredMaterialClass << 16) | (packedVertexAO << 27);
+	psout.Masks2 = (DeferredPackedSurface & 0x0000FFFFu) |
+		(deferredMaterialClass << 16) | ((deferredSurfaceFlags & 7u) << 24) | (packedVertexAO << 27);
 
 	float stochasticBlend = (screenNoise * screenNoise) < psout.Diffuse.w ? 1.0 : 0.0;
 	psout.NormalGlossiness.w = stochasticBlend;

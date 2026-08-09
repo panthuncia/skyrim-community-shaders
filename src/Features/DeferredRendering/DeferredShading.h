@@ -45,7 +45,9 @@ private:
 	DX12RenderRuntime* runtime{};
 	CSDX12RegistrationHandle registration{};
 	CSDX12ResourceHandle compositeHandle{};
+	CSDX12ResourceHandle specularCompositeHandle{};
 	DX12InteropCoordinator::SharedTexture composite;
+	DX12InteropCoordinator::SharedTexture specularComposite;
 	DX12InteropCoordinator::SharedTexture linearDepth;
 	DX12InteropCoordinator::SharedTexture localShadowMask;
 	DX12InteropCoordinator::SharedTexture screenSpaceShadow;
@@ -69,6 +71,8 @@ private:
 	winrt::com_ptr<ID3D11PixelShader> compositeCoverageOverlayPS;
 	winrt::com_ptr<ID3D11Texture2D> compositeBlitDestination;
 	winrt::com_ptr<ID3D11RenderTargetView> compositeBlitRTV;
+	winrt::com_ptr<ID3D11Texture2D> specularBlitDestination;
+	winrt::com_ptr<ID3D11RenderTargetView> specularBlitRTV;
 	winrt::com_ptr<ID3D12Device> device;
 	winrt::com_ptr<ID3D12RootSignature> rootSignature;
 	winrt::com_ptr<ID3D12PipelineState> bootstrapPipeline;

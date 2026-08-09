@@ -1,6 +1,11 @@
 Texture2D<float4> Source : register(t0);
 #if defined(COVERAGE_OVERLAY) || defined(SELECTIVE_HANDOFF)
 Texture2D<uint> PackedSurface : register(t1);
+
+bool IsGenericMaterial(uint materialClass)
+{
+	return materialClass >= 1u && materialClass <= 4u;
+}
 #endif
 
 struct FullscreenVertex
@@ -21,12 +26,12 @@ float4 main(FullscreenVertex input) : SV_Target0
 {
 #if defined(COVERAGE_OVERLAY)
 	const uint materialClass = (PackedSurface.Load(int3(uint2(input.position.xy), 0)) >> 16) & 0xFFu;
-	if (materialClass != 1u)
+	if (!IsGenericMaterial(materialClass))
 		discard;
 	return float4(0, 1, 0, 1);
 #elif defined(SELECTIVE_HANDOFF)
 	const uint materialClass = (PackedSurface.Load(int3(uint2(input.position.xy), 0)) >> 16) & 0xFFu;
-	if (materialClass != 1u)
+	if (!IsGenericMaterial(materialClass))
 		discard;
 	return Source.Load(int3(uint2(input.position.xy), 0));
 #endif

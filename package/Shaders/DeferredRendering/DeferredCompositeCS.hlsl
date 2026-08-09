@@ -4,6 +4,7 @@
 // shader writes only promoted material classes; the D3D11 handoff discards all
 // other pixels and therefore preserves their existing geometry-lit color.
 
+Texture2D<float4> SpecularTexture : register(t0);
 Texture2D<float4> AlbedoTexture : register(t1);
 Texture2D<float> LinearDepthTexture : register(t2);
 
@@ -22,6 +23,8 @@ struct LightingContext
 	float4 directionalLightColor;
 	float4 directionalAmbient[3];
 	float4 ambientSpecularTintAndFresnelPower;
+	float4 emissiveColor;
+	float4 specularColorAndShininess;
 	int roomIndex;
 	uint shadowMembership;
 	uint featureFlags;
@@ -58,6 +61,7 @@ Texture2D<float4> MasksTexture : register(t11);
 Texture2D<float> ScreenSpaceShadowTexture : register(t12);
 RWTexture2D<float4> CompositeTexture : register(u0);
 RWTexture2D<uint> FrameMarker : register(u1);
+RWTexture2D<float4> SpecularCompositeTexture : register(u2);
 
 cbuffer DeferredFrame : register(b0)
 {
@@ -93,6 +97,16 @@ bool ContextAcceptsLight(Light light, LightingContext context)
 	return RoomAcceptsLight(light, context.roomIndex);
 }
 
+bool IsGenericMaterial(uint materialClass)
+{
+	return materialClass >= 1u && materialClass <= 4u;
+}
+
+bool HasGenericSpecular(uint materialClass)
+{
+	return materialClass >= 3u && materialClass <= 4u;
+}
+
 float3 DecodeCSNormal(float2 encoded)
 {
 	float2 f = encoded * 2.0f - 1.0f;
@@ -113,6 +127,15 @@ float3 ReconstructWorldPosition(uint2 pixel, float linearDepth)
 	float3 positionVS = ray.xyz / ray.w;
 	positionVS *= linearDepth / max(positionVS.z, 1e-6f);
 	return mul(viewInverse, float4(positionVS, 1.0f)).xyz;
+}
+
+float3 ReconstructWorldViewDirection(uint2 pixel)
+{
+	float2 uv = (float2(pixel) + 0.5f) / screenSize;
+	float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
+	float4 positionVS = mul(projectionInverse, float4(ndc, 1.0f, 1.0f));
+	positionVS.xyz /= max(abs(positionVS.w), 1e-6f);
+	return normalize(mul(viewInverse, float4(-positionVS.xyz, 0.0f)).xyz);
 }
 
 [numthreads(8, 8, 1)]
@@ -136,22 +159,24 @@ void main(uint3 pixel : SV_DispatchThreadID)
 		return;
 	}
 	uint packed = PackedSurfaceTexture.Load(int3(pixel.xy, 0));
+	// Preserve the geometry result for compatibility pixels. Promoted pixels
+	// replace this below with the exact generic direct-specular evaluation.
+	SpecularCompositeTexture[pixel.xy] = SpecularTexture.Load(int3(pixel.xy, 0));
 	uint contextIndex = CSDeferredContextIndex(packed);
 	uint materialClass = CSDeferredMaterialClass(packed);
-	if ((frameFlags & 8u) != 0 && materialClass == 1u) {
+	if ((frameFlags & 8u) != 0 && IsGenericMaterial(materialClass)) {
 		uint ignored;
 		InterlockedAdd(FrameMarker[uint2(4, 0)], 1u, ignored);
 		InterlockedAdd(FrameMarker[uint2(8, 0)], pixel.x, ignored);
 		InterlockedAdd(FrameMarker[uint2(9, 0)], pixel.y, ignored);
 	}
 
-	// Coverage is deliberately independent of lighting evaluation.  It proves
-	// the per-pixel object-class contract before a class is promoted: legacy is
-	// dim compatibility, static opaque is green, alpha-tested is blue, and any
-	// unknown class is magenta.  An invalid context on a promoted class is red.
+	// Coverage is deliberately independent of lighting evaluation. It proves
+	// the per-pixel object-class contract: generic diffuse/specular classes are
+	// green, unknown classes are magenta, and invalid promoted contexts are red.
 	if ((frameFlags & 4u) != 0) {
 		uint ignored;
-		if (materialClass == 1u) {
+		if (IsGenericMaterial(materialClass)) {
 			if ((frameFlags & 8u) == 0)
 				InterlockedAdd(FrameMarker[uint2(4, 0)], 1u, ignored);
 			InterlockedAdd(FrameMarker[uint2(8, 0)], pixel.x, ignored);
@@ -159,28 +184,24 @@ void main(uint3 pixel : SV_DispatchThreadID)
 		}
 		else if (materialClass == CS_LEGACY_MATERIAL)
 			InterlockedAdd(FrameMarker[uint2(5, 0)], 1u, ignored);
-		else if (materialClass == 2u)
-			InterlockedAdd(FrameMarker[uint2(6, 0)], 1u, ignored);
 		else
 			InterlockedAdd(FrameMarker[uint2(7, 0)], 1u, ignored);
 		if (materialClass == CS_LEGACY_MATERIAL) {
 			return;
 		} else if (contextIndex == CS_INVALID_CONTEXT) {
 			CompositeTexture[pixel.xy] = float4(1, 0, 0, 1);
-		} else if (materialClass == 1u) {
+		} else if (IsGenericMaterial(materialClass)) {
 			CompositeTexture[pixel.xy] = float4(0, 1, 0, 1);
-		} else if (materialClass == 2u) {
-			CompositeTexture[pixel.xy] = float4(0, 0.35, 1, 1);
 		} else {
 			CompositeTexture[pixel.xy] = float4(1, 0, 1, 1);
 		}
 		return;
 	}
 
-	// Bit zero promotes only the first independently validated object class.
-	// Bit one is the developer lighting diagnostic and may evaluate that same
-	// class before promotion.  No future/nonzero class is admitted implicitly.
-	const bool staticOpaqueSelected = materialClass == 1u && (frameFlags & 3u) != 0;
+	// Bit zero promotes the independently validated generic classes. Bit one is
+	// the developer lighting diagnostic. No future/nonzero class is admitted
+	// implicitly; IsGenericMaterial is the authoritative allow-list.
+	const bool staticOpaqueSelected = IsGenericMaterial(materialClass) && (frameFlags & 3u) != 0;
 	if (!staticOpaqueSelected) {
 		return;
 	}
@@ -232,6 +253,10 @@ void main(uint3 pixel : SV_DispatchThreadID)
 	float3 normalVS = DecodeCSNormal(normalRoughnessSample.xy);
 	float3 normalWS = normalize(mul(viewInverse, float4(normalVS, 0.0f)).xyz);
 	float3 directIrradiance = 0.0f;
+	float3 directSpecular = 0.0f;
+	float3 viewDirection = ReconstructWorldViewDirection(pixel.xy);
+	float glossiness = normalRoughnessSample.z;
+	uint surfaceFlags = (packed >> 24u) & 7u;
 	float3 directionalColor = CSDeferredTransformLight(
 		lightingContext.directionalLightColor.xyz / max(directionalLightScale, 1e-5f),
 		isDirectionalLightLinear != 0, lightGamma, directionalLightMultiplier,
@@ -246,13 +271,21 @@ void main(uint3 pixel : SV_DispatchThreadID)
 	if ((frameFlags & 128u) != 0 && (lightingContext.featureFlags & 1u) != 0 &&
 		dot(normalWS, directionalLightDirection) >= 0.0f)
 		directionalShadow *= ScreenSpaceShadowTexture.Load(int3(pixel.xy, 0));
-	directIrradiance += CSDeferredVanillaDiffuse(normalWS, directionalLightDirection,
-		directionalColor, directionalShadow, vanillaNormalization);
+	if ((surfaceFlags & 1u) != 0) {
+		const bool hasSpecular = HasGenericSpecular(materialClass);
+		CSGenericDirectLighting directionalLighting = CSLightingEvaluateGenericDirect(
+			normalWS, viewDirection, directionalLightDirection, directionalColor,
+			directionalShadow, lightingContext.specularColorAndShininess.w, glossiness,
+			hasSpecular ? lightingContext.specularColorAndShininess.xyz : 0.0f,
+			vanillaNormalization, hasSpecular);
+		directIrradiance += directionalLighting.diffuse;
+		directSpecular += directionalLighting.specular;
+	}
 
 	uint page = cluster.firstPage;
 	uint traversedPages = 0;
 	uint visitedLights = 0;
-	while (page != CS_NULL_LIGHT_PAGE && page < pageCapacity && traversedPages++ < 64 && visitedLights < cluster.numLights) {
+	while ((surfaceFlags & 2u) != 0 && page != CS_NULL_LIGHT_PAGE && page < pageCapacity && traversedPages++ < 64 && visitedLights < cluster.numLights) {
 		LightPage lightPage = Pages[page];
 		uint count = min(lightPage.numLights, 12);
 		[unroll] for (uint i = 0; i < 12; ++i) {
@@ -279,8 +312,14 @@ void main(uint3 pixel : SV_DispatchThreadID)
 					float3 lightColor = CSDeferredTransformLight(light.color,
 						(light.lightFlags & (1u << 11)) != 0, lightGamma, pointLightMultiplier,
 						enableLinearLighting != 0) * attenuation * light.fade;
-					directIrradiance += CSDeferredVanillaDiffuse(normalWS, toLight / max(distanceToLight, 1e-6f),
-						lightColor, shadow, vanillaNormalization);
+					const bool hasSpecular = HasGenericSpecular(materialClass);
+					CSGenericDirectLighting localLighting = CSLightingEvaluateGenericDirect(
+						normalWS, viewDirection, toLight / max(distanceToLight, 1e-6f), lightColor,
+						shadow, lightingContext.specularColorAndShininess.w, glossiness,
+						hasSpecular ? lightingContext.specularColorAndShininess.xyz : 0.0f,
+						vanillaNormalization, hasSpecular);
+					directIrradiance += localLighting.diffuse;
+					directSpecular += localLighting.specular;
 				}
 			}
 			++visitedLights;
@@ -288,7 +327,7 @@ void main(uint3 pixel : SV_DispatchThreadID)
 		page = lightPage.nextPage;
 	}
 
-	if ((page != CS_NULL_LIGHT_PAGE && (page >= pageCapacity || traversedPages >= 64)) || visitedLights != cluster.numLights) {
+	if ((surfaceFlags & 2u) != 0 && ((page != CS_NULL_LIGHT_PAGE && (page >= pageCapacity || traversedPages >= 64)) || visitedLights != cluster.numLights)) {
 		CompositeTexture[pixel.xy] = float4(1, 0, 1, 1);
 		return;
 	}
@@ -327,7 +366,8 @@ void main(uint3 pixel : SV_DispatchThreadID)
 		ambientTmp = ambientYCoCg.x - ambientYCoCg.z;
 		ambientLit = max(0.0f, float3(ambientTmp + ambientYCoCg.y,
 			ambientYCoCg.x + ambientYCoCg.z, ambientTmp - ambientYCoCg.y));
-		float3 candidate = directIrradiance * albedo + ambientLit;
+		float3 candidate = (directIrradiance + lightingContext.emissiveColor.xyz) * albedo + ambientLit;
+		SpecularCompositeTexture[pixel.xy] = float4(directSpecular, 1.0f);
 		if ((frameFlags & 8u) != 0) {
 			float3 reference = ForwardReferenceTexture.Load(int3(pixel.xy, 0)).rgb;
 			float3 delta = candidate - reference;

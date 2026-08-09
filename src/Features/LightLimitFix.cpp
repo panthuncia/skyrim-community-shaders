@@ -354,6 +354,24 @@ void LightLimitFix::BSLightingShader_SetupGeometry_After(RE::BSRenderPass* a_pas
 				copyConstant(indices.AmbientSpecularTintAndFresnelPower, &lightingContext.ambientSpecularTintAndFresnelPower, sizeof(float4));
 			if (captured)
 				lightingContext.featureFlags |= DeferredRendering::kLightingUniformsValid;
+			copyConstant(indices.SpecularColor, &lightingContext.specularColorAndShininess, sizeof(float4));
+
+			float4 rawEmissive{};
+			if (copyConstant(indices.EmitColor, &rawEmissive, sizeof(float) * 3)) {
+				float emissiveMultiplier = 1.0f;
+				auto& property = a_pass->geometry->GetGeometryRuntimeData().shaderProperty;
+				if (property && property->GetRTTI() == globals::rtti::BSLightingShaderPropertyRTTI.get())
+					emissiveMultiplier = static_cast<RE::BSLightingShaderProperty*>(property.get())->emissiveMult;
+				const auto linear = globals::features::linearLighting.GetCommonBufferData();
+				const float rawChannels[]{ rawEmissive.x, rawEmissive.y, rawEmissive.z };
+				float* resolvedChannels = &lightingContext.emissiveColor.x;
+				for (std::size_t channel = 0; channel < 3; ++channel) {
+					const auto value = rawChannels[channel];
+					resolvedChannels[channel] = linear.enableLinearLighting ?
+						std::pow(std::abs(value / std::max(emissiveMultiplier, 1e-5f)), linear.emitColorGamma) *
+							emissiveMultiplier * linear.emitColorMult : value;
+				}
+			}
 		}
 
 		const auto contextIndex = globals::features::deferredRendering.AssignContext(a_pass, lightingContext);

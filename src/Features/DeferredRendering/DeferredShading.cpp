@@ -125,7 +125,7 @@ bool DX12DeferredShading::CreatePipeline() noexcept
 #else
 	D3D12_DESCRIPTOR_RANGE ranges[2]{};
 	ranges[0] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 13, 0, 0, 0 };
-	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0, 0, 13 };
+	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0, 13 };
 	D3D12_ROOT_PARAMETER parameters[2]{};
 	parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
 	parameters[0].Descriptor.ShaderRegister = 0;
@@ -182,7 +182,7 @@ bool DX12DeferredShading::CreatePipeline() noexcept
 bool DX12DeferredShading::EnsureComposite(uint32_t width, uint32_t height, DXGI_FORMAT format) noexcept
 {
 	constexpr auto transportFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
-	if (composite && composite.description.Width == width && composite.description.Height == height && composite.description.Format == transportFormat)
+	if (composite && specularComposite && composite.description.Width == width && composite.description.Height == height && composite.description.Format == transportFormat)
 		return true;
 	auto* interop = runtime ? runtime->GetInteropCoordinator() : nullptr;
 	if (!interop || !width || !height)
@@ -195,6 +195,15 @@ bool DX12DeferredShading::EnsureComposite(uint32_t width, uint32_t height, DXGI_
 		return false;
 	}
 	composite = std::move(candidate);
+	DX12InteropCoordinator::SharedTexture specularCandidate;
+	if (!interop->CreateD3D12OwnedSharedTexture(width, height, transportFormat,
+		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		true, specularCandidate)) {
+		composite = {};
+		logger::error("[DX12DeferredShading] Failed to create shared specular composite texture");
+		return false;
+	}
+	specularComposite = std::move(specularCandidate);
 	logger::info("[DX12DeferredShading] Created D3D12-owned shared composite transport ({}x{}, transportFormat={}, destinationFormat={})",
 		width, height, static_cast<unsigned>(transportFormat), static_cast<unsigned>(format));
 	return true;
@@ -309,7 +318,7 @@ bool DX12DeferredShading::PrepareGBufferInputs() noexcept
 	// These CS G-buffer allocations are explicitly created with NT shared
 	// handles. Import their allocation directly; the graph's first-use external
 	// wait orders D3D11 rendering before D3D12 reads.
-	constexpr size_t importedIndices[]{ 0, 3, 4 };
+	constexpr size_t importedIndices[]{ 0, 1, 3, 4 };
 	for (const auto index : importedIndices) {
 		auto* source = renderer->GetRuntimeData().renderTargets[kInputs[index].target].texture;
 		if (!source || !interop->ImportReadOnlySharedTexture(source, false, inputs[index].mirror)) {
@@ -348,12 +357,25 @@ bool DX12DeferredShading::EnsureCompositeBlit(ID3D11Texture2D* destination) noex
 		compositeBlitDestination.copy_from(destination);
 		compositeBlitRTV = std::move(view);
 	}
+	auto* specularDestination = globals::game::renderer ?
+		globals::game::renderer->GetRuntimeData().renderTargets[SPECULAR].texture : nullptr;
+	if (!specularDestination)
+		return false;
+	if (specularBlitDestination.get() != specularDestination) {
+		winrt::com_ptr<ID3D11RenderTargetView> view;
+		if (FAILED(globals::d3d::device->CreateRenderTargetView(specularDestination, nullptr, view.put()))) {
+			logger::error("[DX12DeferredShading] Failed to create specular-target RTV for deferred handoff");
+			return false;
+		}
+		specularBlitDestination.copy_from(specularDestination);
+		specularBlitRTV = std::move(view);
+	}
 	return true;
 }
 
 bool DX12DeferredShading::CommitComposite(ID3D11Texture2D* destination) noexcept
 {
-	if(!destination||!composite.d3d11||!frameMarker.d3d11||!globals::d3d::context||!EnsureCompositeBlit(destination))return false;
+	if(!destination||!composite.d3d11||!specularComposite.d3d11||!frameMarker.d3d11||!globals::d3d::context||!EnsureCompositeBlit(destination))return false;
 	if (std::getenv("CS_DX12_DEFERRED_PARITY")) {
 		if (!parityCounterReadback) {
 			D3D11_TEXTURE2D_DESC description{};
@@ -414,6 +436,19 @@ bool DX12DeferredShading::CommitComposite(ID3D11Texture2D* destination) noexcept
 	globals::d3d::context->OMSetDepthStencilState(nullptr, 0);
 	globals::d3d::context->VSSetShader(compositeBlitVS.get(), nullptr, 0);
 	const bool visualizeCoverage = globals::features::deferredRendering.IsCoverageVisualizationEnabled();
+	// The existing D3D11 deferred composite consumes SPECULAR separately from
+	// main color. Replace it first so promoted pixels are not double-lit while
+	// compatibility pixels retain their geometry-evaluated value.
+	auto* specularTarget = specularBlitRTV.get();
+	globals::d3d::context->OMSetRenderTargets(1, &specularTarget, nullptr);
+	globals::d3d::context->PSSetShader(compositeBlitPS.get(), nullptr, 0);
+	ID3D11ShaderResourceView* specularSource[]{ specularComposite.srv11.get() };
+	globals::d3d::context->PSSetShaderResources(0, 1, specularSource);
+	globals::d3d::context->Draw(3, 0);
+	ID3D11ShaderResourceView* nullSpecular{};
+	globals::d3d::context->PSSetShaderResources(0, 1, &nullSpecular);
+
+	globals::d3d::context->OMSetRenderTargets(1, &target, nullptr);
 	globals::d3d::context->PSSetShader(compositeSelectiveBlitPS.get(), nullptr, 0);
 	ID3D11ShaderResourceView* sources[]{ composite.srv11.get(), packedSurfaceMirror.srv11.get() };
 	globals::d3d::context->PSSetShaderResources(0, ARRAYSIZE(sources), sources);
@@ -495,7 +530,8 @@ bool DX12DeferredShading::PrepareLinearDepth(uint32_t width, uint32_t height) no
 
 bool DX12DeferredShading::EnsureGBufferInputs() noexcept
 {
-	return inputs[0].source && inputs[0].mirror && inputs[3].source && inputs[3].mirror;
+	return inputs[0].source && inputs[0].mirror && inputs[1].source && inputs[1].mirror &&
+		inputs[3].source && inputs[3].mirror;
 }
 
 CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
@@ -505,7 +541,7 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	// carry the independently varying active dynamic-resolution extent.
 	const auto width = self->runtime->GetAllocationWidth();
 	const auto height = self->runtime->GetAllocationHeight();
-	if (!self->composite)
+	if (!self->composite || !self->specularComposite)
 		return CS_DX12_E_NOT_READY;
 	if (!self->EnsureGBufferInputs())
 		return CS_DX12_E_NOT_READY;
@@ -521,7 +557,7 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	if (parityEnabled && !self->parityReference)
 		return CS_DX12_E_NOT_READY;
 
-	constexpr size_t importedIndices[]{ 0, 3, 4 };
+	constexpr size_t importedIndices[]{ 0, 1, 3, 4 };
 	for (const auto index : importedIndices) {
 		D3D11_TEXTURE2D_DESC nativeDescription{};
 		self->inputs[index].source->GetDesc(&nativeDescription);
@@ -622,6 +658,11 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	resource.borrowedNativeResource = self->composite.d3d12.get();
 	if (self->runtime->DeclareResource(build, &resource, &self->compositeHandle) != CS_DX12_OK)
 		return CS_DX12_E_INTERNAL;
+	resource.id = "community-shaders.deferred-shading.specular-composite";
+	resource.format = self->specularComposite.description.Format;
+	resource.borrowedNativeResource = self->specularComposite.d3d12.get();
+	if (self->runtime->DeclareResource(build, &resource, &self->specularCompositeHandle) != CS_DX12_OK)
+		return CS_DX12_E_INTERNAL;
 	CSDX12ResourceDesc marker{};
 	marker.structSize = sizeof(marker);
 	marker.apiVersion = CS_DX12_GRAPH_API_CURRENT;
@@ -663,7 +704,7 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 
 	const char* after[]{ "community-shaders.clustered-lighting.cull" };
 	const char* before[]{ CS_DX12_ANCHOR_DEFERRED_LIGHTING_BEGIN };
-	std::array<CSDX12ResourceAccessDesc, 14> accesses{};
+	std::array<CSDX12ResourceAccessDesc, 16> accesses{};
 	accesses[0] = { sizeof(CSDX12ResourceAccessDesc), CS_DX12_GRAPH_API_CURRENT,
 		self->compositeHandle, CS_DX12_ACCESS_UNORDERED_WRITE, {} };
 	accesses[1] = { sizeof(CSDX12ResourceAccessDesc), CS_DX12_GRAPH_API_CURRENT,
@@ -680,8 +721,10 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	accesses[10]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->packedSurfaceMirrorHandle,CS_DX12_ACCESS_SHADER_READ,{}};
 	accesses[11]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->inputs[4].handle,CS_DX12_ACCESS_SHADER_READ,{}};
 	accesses[12]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->screenSpaceShadowHandle,CS_DX12_ACCESS_SHADER_READ,{}};
+	accesses[13]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->specularCompositeHandle,CS_DX12_ACCESS_UNORDERED_WRITE,{}};
+	accesses[14]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->inputs[1].handle,CS_DX12_ACCESS_SHADER_READ,{}};
 	if (parityEnabled)
-		accesses[13]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->parityReferenceHandle,CS_DX12_ACCESS_SHADER_READ,{}};
+		accesses[15]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->parityReferenceHandle,CS_DX12_ACCESS_SHADER_READ,{}};
 	CSDX12PassDesc pass{};
 	pass.structSize = sizeof(pass);
 	pass.apiVersion = CS_DX12_GRAPH_API_CURRENT;
@@ -692,7 +735,7 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	pass.before = before;
 	pass.beforeCount = 1;
 	pass.accesses = accesses.data();
-	pass.accessCount = parityEnabled ? static_cast<uint32_t>(accesses.size()) : 13u;
+	pass.accessCount = parityEnabled ? static_cast<uint32_t>(accesses.size()) : 15u;
 	pass.execute = &Execute;
 	CSDX12PassHandle handle{};
 	return self->runtime->DeclarePass(build, &pass, &handle);
@@ -709,9 +752,11 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 {
 	if (!context.GetResource || !context.AllocateUpload || !context.AllocateDescriptors || !context.borrowedD3D12GraphicsCommandList || !bootstrapPipeline)
 		return CS_DX12_E_UNSUPPORTED_CAPABILITY;
-	void* native{}; void* albedoNative{}; void* masksNative{}; void* depthNative{}; void* lightsNative{}; void* contextsNative{}; void* clustersNative{}; void* pagesNative{}; void* shadowMaskNative{}; void* screenShadowNative{}; void* markerNative{}; void* packedMirrorNative{}; void* parityNative{};
+	void* native{}; void* specularOutputNative{}; void* albedoNative{}; void* specularInputNative{}; void* masksNative{}; void* depthNative{}; void* lightsNative{}; void* contextsNative{}; void* clustersNative{}; void* pagesNative{}; void* shadowMaskNative{}; void* screenShadowNative{}; void* markerNative{}; void* packedMirrorNative{}; void* parityNative{};
 	if (context.GetResource(&context, compositeHandle, &native) != CS_DX12_OK || !native ||
+		context.GetResource(&context, specularCompositeHandle, &specularOutputNative) != CS_DX12_OK || !specularOutputNative ||
 		context.GetResource(&context, inputs[0].handle, &albedoNative) != CS_DX12_OK || !albedoNative ||
+		context.GetResource(&context, inputs[1].handle, &specularInputNative) != CS_DX12_OK || !specularInputNative ||
 		context.GetResource(&context, linearDepthHandle, &depthNative) != CS_DX12_OK || !depthNative ||
 		context.GetResource(&context, lightsHandle, &lightsNative) != CS_DX12_OK || !lightsNative ||
 		context.GetResource(&context, contextsHandle, &contextsNative) != CS_DX12_OK || !contextsNative ||
@@ -762,20 +807,19 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 	}
 	if (staticOpaqueEnabled) {
 		static std::once_flag promotionLogged;
-		std::call_once(promotionLogged, [] { logger::warn("[DX12DeferredShading] Experimental static-opaque deferred promotion is enabled"); });
+		std::call_once(promotionLogged, [] { logger::warn("[DX12DeferredShading] Experimental generic opaque deferred promotion is enabled"); });
 	}
 	std::memcpy(constantsUpload.cpuAddress,&constants,sizeof(constants));
 	CSDX12DescriptorAllocation descriptors{};
-	if (context.AllocateDescriptors(&context, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 15, &descriptors) != CS_DX12_OK)
+	if (context.AllocateDescriptors(&context, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 16, &descriptors) != CS_DX12_OK)
 		return CS_DX12_E_INTERNAL;
 	auto* resource = static_cast<ID3D12Resource*>(native);
 	auto* commandList = static_cast<ID3D12GraphicsCommandList*>(context.borrowedD3D12GraphicsCommandList);
 	D3D12_CPU_DESCRIPTOR_HANDLE visibleCpu{ descriptors.cpuHandle };
 	auto cpuAt=[&](uint32_t index){auto value=visibleCpu;value.ptr+=uint64_t(index)*descriptors.descriptorSize;return value;};
 	D3D12_SHADER_RESOURCE_VIEW_DESC albedoView{}; albedoView.Format=DXGI_FORMAT_R10G10B10A2_UNORM; albedoView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; albedoView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; albedoView.Texture2D.MipLevels=1;
-	// t0 is intentionally unused by the current shader but remains in the
-	// stable descriptor layout; duplicate the valid albedo SRV there.
-	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(albedoNative),&albedoView,cpuAt(0));
+	D3D12_SHADER_RESOURCE_VIEW_DESC specularView=albedoView; specularView.Format=inputs[1].mirror.description.Format;
+	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(specularInputNative),&specularView,cpuAt(0));
 	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(albedoNative),&albedoView,cpuAt(1));
 	D3D12_SHADER_RESOURCE_VIEW_DESC depthView{}; depthView.Format=DXGI_FORMAT_R32_FLOAT; depthView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; depthView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; depthView.Texture2D.MipLevels=1;
 	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(depthNative),&depthView,cpuAt(2));
@@ -809,6 +853,10 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 	markerView.Format = DXGI_FORMAT_R32_UINT;
 	markerView.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
 	runtime->GetNativeDevice()->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(markerNative), nullptr, &markerView, cpuAt(14));
+	D3D12_UNORDERED_ACCESS_VIEW_DESC specularOutputView{};
+	specularOutputView.Format = specularComposite.description.Format;
+	specularOutputView.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+	runtime->GetNativeDevice()->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(specularOutputNative), nullptr, &specularOutputView, cpuAt(15));
 	D3D12_GPU_DESCRIPTOR_HANDLE gpu{ descriptors.gpuHandle };
 	auto gpuAt=[&](uint32_t index){auto value=gpu;value.ptr+=uint64_t(index)*descriptors.descriptorSize;return value;};
 	ID3D12DescriptorHeap* heaps[]{ static_cast<ID3D12DescriptorHeap*>(descriptors.borrowedNativeHeap) };
@@ -823,7 +871,10 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 	D3D12_RESOURCE_BARRIER compositeBarrier{};
 	compositeBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
 	compositeBarrier.UAV.pResource = resource;
-	commandList->ResourceBarrier(1, &compositeBarrier);
+	D3D12_RESOURCE_BARRIER specularBarrier = compositeBarrier;
+	specularBarrier.UAV.pResource = static_cast<ID3D12Resource*>(specularOutputNative);
+	const D3D12_RESOURCE_BARRIER outputBarriers[]{ compositeBarrier, specularBarrier };
+	commandList->ResourceBarrier(ARRAYSIZE(outputBarriers), outputBarriers);
 	if (dispatchCount++ == 0)
 		logger::info("[DX12DeferredShading] ORG traversed clustered lights/contexts using the G-buffer + linear depth");
 	return CS_DX12_OK;
@@ -837,6 +888,7 @@ void DX12DeferredShading::OnShutdown(void* userData)
 void DX12DeferredShading::Shutdown() noexcept
 {
 	composite = {};
+	specularComposite = {};
 	linearDepth = {};
 	localShadowMask = {};
 	screenSpaceShadow = {};
@@ -846,9 +898,12 @@ void DX12DeferredShading::Shutdown() noexcept
 	linearizeDepthShader = nullptr;
 	compositeBlitVS = nullptr;
 	compositeBlitPS = nullptr;
+	compositeSelectiveBlitPS = nullptr;
 	compositeCoverageOverlayPS = nullptr;
 	compositeBlitDestination = nullptr;
 	compositeBlitRTV = nullptr;
+	specularBlitDestination = nullptr;
+	specularBlitRTV = nullptr;
 	bootstrapPipeline = nullptr;
 	rootSignature = nullptr;
 	device = nullptr;
@@ -858,6 +913,7 @@ void DX12DeferredShading::Shutdown() noexcept
 	runtime = nullptr;
 	registration = {};
 	compositeHandle = {};
+	specularCompositeHandle = {};
 	linearDepthHandle = {};
 	frameMarkerHandle = {};
 	packedSurfaceMirrorHandle = {};

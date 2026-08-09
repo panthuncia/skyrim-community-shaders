@@ -133,8 +133,25 @@ void EvaluateLighting(DirectContext context, MaterialProperties material, float3
 	const float NdotL = dot(context.worldNormal, context.lightDir);
 	float3 diffuseLightColor = context.lightColor * context.detailedShadow;
 	float3 softLightColor = context.lightColor * context.softShadow;
+#	if !defined(ANISO_LIGHTING) && !defined(SPARKLE)
+	CSGenericDirectLighting genericLighting = CSLightingEvaluateGenericDirect(
+		context.worldNormal, context.viewDir, context.lightDir, context.lightColor,
+		context.detailedShadow, material.Shininess, material.Glossiness,
+		material.SpecularColor, Color::VanillaNormalization(),
+#		if defined(SPECULAR)
+		true
+#		else
+		false
+#		endif
+	);
+	lightingOutput.diffuse = genericLighting.diffuse;
+	lightingOutput.specular = genericLighting.specular;
+#	else
 	lightingOutput.diffuse = CSLightingVanillaDiffuse(context.worldNormal, context.lightDir,
 		context.lightColor, context.detailedShadow, Color::VanillaNormalization());
+	lightingOutput.specular = VanillaSpecular(context, material.Shininess, uv, uv_ddx, uv_ddy) *
+		material.SpecularColor * material.Glossiness * diffuseLightColor * Color::VanillaNormalization();
+#	endif
 #	if defined(SOFT_LIGHTING)
 	lightingOutput.diffuse += softLightColor * GetSoftLightMultiplier(NdotL) * material.rimSoftLightColor * Color::VanillaNormalization();
 #	endif
@@ -146,7 +163,6 @@ void EvaluateLighting(DirectContext context, MaterialProperties material, float3
 #	if defined(BACK_LIGHTING)
 	lightingOutput.diffuse += softLightColor * saturate(-NdotL) * material.backLightColor * Color::VanillaNormalization();
 #	endif
-	lightingOutput.specular = VanillaSpecular(context, material.Shininess, uv, uv_ddx, uv_ddy) * material.SpecularColor * material.Glossiness * diffuseLightColor * Color::VanillaNormalization();
 #endif
 }
 

@@ -2,7 +2,7 @@
 
 namespace CS::Deferred
 {
-	inline constexpr std::uint32_t kAbiVersion = 1;
+	inline constexpr std::uint32_t kAbiVersion = 3;
 	inline constexpr std::uint32_t kMaxLights = 1024;
 	using ContextIndex = std::uint16_t;
 	inline constexpr ContextIndex kInvalidContext = 0xFFFF;
@@ -96,6 +96,10 @@ namespace CS::Deferred
 		float4 directionalLightColor{};
 		float4 directionalAmbient[3]{};
 		float4 ambientSpecularTintAndFresnelPower{};
+		float4 emissiveColor{};
+		// xyz: the geometry shader's SpecularColor; w: vanilla shininess.
+		// Glossiness remains a resolved per-pixel G-buffer value.
+		float4 specularColorAndShininess{};
 		std::int32_t roomIndex = -1;
 		std::uint32_t shadowLightMembershipMask = 0;
 		std::uint32_t featureFlags = 0;
@@ -107,9 +111,9 @@ namespace CS::Deferred
 		}
 	};
 	STATIC_ASSERT_ALIGNAS_16(LightingContext);
-	static_assert(sizeof(LightingContext) == 112);
-	static_assert(offsetof(LightingContext, roomIndex) == 96);
-	static_assert(offsetof(LightingContext, abiVersion) == 108);
+	static_assert(sizeof(LightingContext) == 144);
+	static_assert(offsetof(LightingContext, roomIndex) == 128);
+	static_assert(offsetof(LightingContext, abiVersion) == 140);
 
 	struct LightingTransform
 	{

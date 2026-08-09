@@ -1,5 +1,6 @@
 #include "Common/Game.hlsli"
 #include "Common/SharedData.hlsli"
+#include "Common/LightingParity.hlsli"
 
 namespace InverseSquareLighting
 {
@@ -9,17 +10,9 @@ namespace InverseSquareLighting
 
 	float GetAttenuation(float distance, LightLimitFix::Light light)
 	{
-		float isEnabled = 1.0f - float((light.lightFlags & LightLimitFix::LightFlags::Disabled) != 0);
-		float isInvSq = float((light.lightFlags & LightLimitFix::LightFlags::InverseSquare) != 0);
-
-		float invSq = SCALED_UNITS_SQ * rcp(distance * distance + light.sizeBias);
-		float t = saturate((light.radius - distance) * light.fadeZone);
-		float fastSmoothstep = t * t * (3.0f - 2.0f * t);
-		invSq *= fastSmoothstep;
-
-		float intensityFactor = saturate(distance * light.invRadius);
-		float reg = 1.0f - intensityFactor * intensityFactor;
-
-		return lerp(reg, invSq, isInvSq) * isEnabled;
+		return CSLightingAttenuation(distance, light.radius, light.invRadius,
+			light.fadeZone, light.sizeBias, SCALED_UNITS_SQ,
+			(light.lightFlags & LightLimitFix::LightFlags::Disabled) != 0,
+			(light.lightFlags & LightLimitFix::LightFlags::InverseSquare) != 0);
 	}
 }
