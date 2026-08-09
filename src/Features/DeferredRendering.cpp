@@ -25,6 +25,7 @@ void DeferredRendering::DrawSettings()
 void DeferredRendering::LoadSettings(json& json)
 {
 	settings = json;
+	runtimeEnabled.store(true, std::memory_order_release);
 }
 
 void DeferredRendering::SaveSettings(json& json)
@@ -37,6 +38,21 @@ void DeferredRendering::RestoreDefaultSettings()
 	settings = {};
 }
 
+bool DeferredRendering::ToggleAtBootSetting()
+{
+	const bool enabled = Feature::ToggleAtBootSetting();
+	runtimeEnabled.store(enabled, std::memory_order_release);
+	if (!enabled) {
+		std::unique_lock lock(snapshotMutex);
+		deferredLights.clear();
+		deferredContexts.clear();
+		drawContexts.clear();
+		finalizedFrame.reset();
+	}
+	logger::info("[DeferredRendering] Runtime execution {} immediately", enabled ? "enabled" : "disabled");
+	return enabled;
+}
+
 #undef I18N_KEY_PREFIX
 
 void DeferredRendering::BeginFrame(
@@ -45,7 +61,7 @@ void DeferredRendering::BeginFrame(
 	float cameraNearPlane,
 	float cameraFarPlane)
 {
-	if (!loaded)
+	if (!IsRuntimeEnabled())
 		return;
 	std::unique_lock lock(snapshotMutex);
 	deferredLights.assign(lights.begin(), lights.end());
@@ -80,7 +96,7 @@ void DeferredRendering::BeginFrame(
 
 DeferredRendering::ContextIndex DeferredRendering::AssignContext(const RE::BSRenderPass* renderPass, const LightingContext& context)
 {
-	if (!loaded)
+	if (!IsRuntimeEnabled())
 		return INVALID_CONTEXT;
 	if (!renderPass || !renderPass->geometry)
 		return INVALID_CONTEXT;
@@ -110,7 +126,7 @@ DeferredRendering::ContextIndex DeferredRendering::InternContext(const LightingC
 
 void DeferredRendering::FinalizeFrame()
 {
-	if (!loaded)
+	if (!IsRuntimeEnabled())
 		return;
 	std::unique_lock lock(snapshotMutex);
 	auto result = std::make_shared<FrameSnapshot>();

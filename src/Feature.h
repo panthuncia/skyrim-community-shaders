@@ -226,6 +226,8 @@ public:
 	 * @return The new disabled state (true = disabled at boot).
 	 */
 	virtual bool ToggleAtBootSetting();
+	/** Whether the boot toggle also gates the already-loaded feature immediately. */
+	virtual bool AppliesBootToggleImmediately() const { return false; }
 
 	/**
 	 * @brief Reapplies override settings for this feature if available

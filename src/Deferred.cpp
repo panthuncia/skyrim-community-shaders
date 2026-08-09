@@ -10,6 +10,7 @@
 #include "Features/DynamicCubemaps.h"
 #include "Features/DeferredRendering.h"
 #include "Features/DeferredRendering/DeferredShading.h"
+#include "Features/ScreenSpaceShadows.h"
 #include "Features/DeferredRendering/LightCulling.h"
 #include "Features/Effects11.h"
 #include "Features/IBL.h"
@@ -490,7 +491,7 @@ void Deferred::EndDeferred()
 	// D3D12 completion wait and composite copy.
 	PreDX12DeferredPasses();
 	auto& deferredFeature = globals::features::deferredRendering;
-	const bool visualizeDeferredCoverage = deferredFeature.loaded && deferredFeature.IsCoverageVisualizationEnabled();
+	const bool visualizeDeferredCoverage = deferredFeature.IsRuntimeEnabled() && deferredFeature.IsCoverageVisualizationEnabled();
 	// In coverage mode, finish the normal D3D11 image first and let DX12 apply
 	// the diagnostic colors last. Otherwise the normal composite can attenuate
 	// or overwrite the deliberately exact green classification overlay.
@@ -500,7 +501,7 @@ void Deferred::EndDeferred()
 	// epoch beneath it: scrolling and other UI invalidation can force D3D11 to wait
 	// repeatedly on the interop work and severely degrade cursor responsiveness.
 	const bool settingsMenuOpen = globals::menu && globals::menu->IsEnabled;
-	if (deferredFeature.loaded && !settingsMenuOpen) {
+	if (deferredFeature.IsRuntimeEnabled() && !settingsMenuOpen) {
 		auto& dx12Deferred=DX12DeferredShading::Get();
 		deferredFeature.FinalizeFrame();
 		auto& mainTarget=globals::game::renderer->GetRuntimeData().renderTargets[forwardRenderTargets[0]];
@@ -517,12 +518,18 @@ void Deferred::EndDeferred()
 		const bool shadowMaskReady=dx12Deferred.PrepareLocalShadowMask(shadowMaskTarget.texture);
 		if (!shadowMaskReady)
 			logger::error("[DeferredRendering] Local-shadow mirror preparation failed; skipping the DX12 epoch");
+		auto& screenSpaceShadows = globals::features::screenSpaceShadows;
+		auto* screenShadowTexture = screenSpaceShadows.loaded ? screenSpaceShadows.screenSpaceShadowsTexture : nullptr;
+		const bool screenShadowReady = !screenSpaceShadows.loaded || (screenShadowTexture &&
+			dx12Deferred.PrepareScreenSpaceShadow(screenShadowTexture->resource.get()));
+		if (!screenShadowReady)
+			logger::error("[DeferredRendering] Screen-space shadow mirror preparation failed; skipping the DX12 epoch");
 		auto& packedSurfaceTarget=globals::game::renderer->GetRuntimeData().renderTargets[MASKS2];
 		const bool packedSurfaceMirrorReady=dx12Deferred.PreparePackedSurfaceMirror(packedSurfaceTarget.texture);
 		const bool gbufferInputsReady=dx12Deferred.PrepareGBufferInputs();
 		if (!packedSurfaceMirrorReady)
 			logger::error("[DeferredRendering] Packed-surface mirror preparation failed; skipping the DX12 epoch");
-		if(mainDescription.Width&&mainDescription.Height&&shadowMaskReady&&packedSurfaceMirrorReady&&gbufferInputsReady&&dx12Deferred.PrepareCompatibilityInput(mainTarget.texture)) {
+		if(mainDescription.Width&&mainDescription.Height&&shadowMaskReady&&screenShadowReady&&packedSurfaceMirrorReady&&gbufferInputsReady&&dx12Deferred.PrepareCompatibilityInput(mainTarget.texture)) {
 			static std::once_flag epochPreparationLogged;
 			std::call_once(epochPreparationLogged, [] { logger::info("[DeferredRendering] D3D11 producers are ready for the first DX12 epoch"); });
 			const bool submitted = DX12RenderRuntime::Get().ExecuteDeferredEpoch(

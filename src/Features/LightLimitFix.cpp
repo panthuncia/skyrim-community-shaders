@@ -321,6 +321,17 @@ void LightLimitFix::BSLightingShader_SetupGeometry_After(RE::BSRenderPass* a_pas
 		lightingContext.roomIndex = roomIndex;
 		lightingContext.shadowLightMembershipMask = shadowBitMask;
 		lightingContext.featureFlags = isWorld ? DeferredRendering::kWorld : 0u;
+		const auto pixelDescriptor = globals::state->currentPixelDescriptor;
+		using LightingFlags = SIE::ShaderCache::LightingShaderFlags;
+		auto hasLightingFlag = [&](LightingFlags flag) {
+			return (pixelDescriptor & static_cast<std::uint32_t>(flag)) != 0;
+		};
+		if (hasLightingFlag(LightingFlags::DefShadow))
+			lightingContext.featureFlags |= DeferredRendering::kReceivesDeferredShadow;
+		if (hasLightingFlag(LightingFlags::ShadowDir))
+			lightingContext.featureFlags |= DeferredRendering::kReceivesDirectionalShadow;
+		if (hasLightingFlag(LightingFlags::CharacterLight))
+			lightingContext.featureFlags |= DeferredRendering::kUsesCharacterLight;
 
 		// Capture the exact constants that the active CS lighting permutation will consume.
 		// Replacement shaders retain a CPU-side PerGeometry image, so this does not require

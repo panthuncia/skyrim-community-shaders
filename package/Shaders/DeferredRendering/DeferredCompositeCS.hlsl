@@ -53,6 +53,9 @@ StructuredBuffer<LightPage> Pages : register(t6);
 Texture2D<uint> PackedSurfaceTexture : register(t7);
 Texture2D<float4> LocalShadowMaskTexture : register(t8);
 Texture2D<float4> NormalRoughnessTexture : register(t9);
+Texture2D<float4> ForwardReferenceTexture : register(t10);
+Texture2D<float4> MasksTexture : register(t11);
+Texture2D<float> ScreenSpaceShadowTexture : register(t12);
 RWTexture2D<float4> CompositeTexture : register(u0);
 RWTexture2D<uint> FrameMarker : register(u1);
 
@@ -103,10 +106,13 @@ float3 ReconstructWorldPosition(uint2 pixel, float linearDepth)
 {
 	float2 uv = (float2(pixel) + 0.5f) / screenSize;
 	float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-	float4 ray = mul(float4(ndc, 1.0f, 1.0f), projectionInverse);
+	// Skyrim/CS camera constants use the matrix-first convention (see
+	// FrameBuffer::ViewToWorld). Keeping row_major storage does not reverse the
+	// mathematical multiplication order.
+	float4 ray = mul(projectionInverse, float4(ndc, 1.0f, 1.0f));
 	float3 positionVS = ray.xyz / ray.w;
 	positionVS *= linearDepth / max(positionVS.z, 1e-6f);
-	return mul(float4(positionVS, 1.0f), viewInverse).xyz;
+	return mul(viewInverse, float4(positionVS, 1.0f)).xyz;
 }
 
 [numthreads(8, 8, 1)]
@@ -224,15 +230,24 @@ void main(uint3 pixel : SV_DispatchThreadID)
 	float3 positionWS = ReconstructWorldPosition(pixel.xy, depth);
 	float4 normalRoughnessSample = NormalRoughnessTexture.Load(int3(pixel.xy, 0));
 	float3 normalVS = DecodeCSNormal(normalRoughnessSample.xy);
-	float3 normalWS = normalize(mul(float4(normalVS, 0.0f), viewInverse).xyz);
+	float3 normalWS = normalize(mul(viewInverse, float4(normalVS, 0.0f)).xyz);
 	float3 directIrradiance = 0.0f;
 	float3 directionalColor = CSDeferredTransformLight(
 		lightingContext.directionalLightColor.xyz / max(directionalLightScale, 1e-5f),
 		isDirectionalLightLinear != 0, lightGamma, directionalLightMultiplier,
 		enableLinearLighting != 0) * directionalLightScale;
-	directIrradiance += CSDeferredVanillaDiffuse(normalWS,
-		normalize(lightingContext.directionalLightDirection.xyz), directionalColor,
-		(frameFlags & 16u) != 0 ? 1.0f : LocalShadowMaskTexture.Load(int3(pixel.xy, 0)).x, vanillaNormalization);
+	float3 directionalLightDirection = normalize(lightingContext.directionalLightDirection.xyz);
+	float directionalShadow =
+		(frameFlags & 16u) != 0 ||
+			(lightingContext.featureFlags & (CS_CONTEXT_RECEIVES_DEFERRED_SHADOW |
+				CS_CONTEXT_RECEIVES_DIRECTIONAL_SHADOW)) !=
+			(CS_CONTEXT_RECEIVES_DEFERRED_SHADOW | CS_CONTEXT_RECEIVES_DIRECTIONAL_SHADOW) ?
+			1.0f : LocalShadowMaskTexture.Load(int3(pixel.xy, 0)).x;
+	if ((frameFlags & 128u) != 0 && (lightingContext.featureFlags & 1u) != 0 &&
+		dot(normalWS, directionalLightDirection) >= 0.0f)
+		directionalShadow *= ScreenSpaceShadowTexture.Load(int3(pixel.xy, 0));
+	directIrradiance += CSDeferredVanillaDiffuse(normalWS, directionalLightDirection,
+		directionalColor, directionalShadow, vanillaNormalization);
 
 	uint page = cluster.firstPage;
 	uint traversedPages = 0;
@@ -257,7 +272,9 @@ void main(uint3 pixel : SV_DispatchThreadID)
 				float attenuation = CSDeferredAttenuation(distanceToLight, light);
 				if (attenuation >= 1e-5f) {
 					float shadow = 1.0f;
-					if ((frameFlags & 16u) == 0 && (light.lightFlags & CS_LIGHT_FLAG_SHADOW) != 0 && light.shadowMaskIndex < 4)
+					if ((frameFlags & 16u) == 0 &&
+						(lightingContext.featureFlags & CS_CONTEXT_RECEIVES_DEFERRED_SHADOW) != 0 &&
+						(light.lightFlags & CS_LIGHT_FLAG_SHADOW) != 0 && light.shadowMaskIndex < 4)
 						shadow = LocalShadowMaskTexture.Load(int3(pixel.xy, 0))[light.shadowMaskIndex];
 					float3 lightColor = CSDeferredTransformLight(light.color,
 						(light.lightFlags & (1u << 11)) != 0, lightGamma, pointLightMultiplier,
@@ -278,8 +295,9 @@ void main(uint3 pixel : SV_DispatchThreadID)
 
 	// Standard opaque has no feature lobes or material specular. Its resolved
 	// albedo already contains the geometry path's base color and vertex color.
-	// This pass replaces geometry-direct lighting only; CS's existing D3D11
-	// deferred composite subsequently applies ambient, SSGI, skylighting and IBL.
+	// Match Lighting.hlsl's DEFERRED geometry output: Main contains direct plus
+	// directional ambient diffuse in irradiance space. The later D3D11 composite
+	// owns SSGI adjustment, reflections, specular composition, and final gamma.
 	if ((frameFlags & 3u) != 0) {
 		float3 albedo = AlbedoTexture.Load(int3(pixel.xy, 0)).rgb;
 		if ((frameFlags & 8u) != 0) {
@@ -295,8 +313,45 @@ void main(uint3 pixel : SV_DispatchThreadID)
 					pixel.y * width + pixel.x + 1u, ignored);
 			}
 		}
-		float3 candidate = CSDeferredIrradianceToGamma(directIrradiance * albedo,
-			enableLinearLighting != 0);
+		float3 ambientIrradiance = CSDeferredAmbient(lightingContext, normalWS,
+			enableLinearLighting != 0, ambientGamma, ambientMultiplier);
+		// Geometry stores the post-IBL/skylighting ambient luminance in Masks.z.
+		// Preserve the raw ambient chroma reconstructed from the same per-draw
+		// matrix while taking the authoritative luminance from the G-buffer, as
+		// the existing D3D11 deferred composite does.
+		float3 ambientLit = ambientIrradiance * albedo;
+		float ambientTmp = 0.25f * (ambientLit.r + ambientLit.b);
+		float3 ambientYCoCg = float3(ambientTmp + 0.5f * ambientLit.g,
+			0.5f * (ambientLit.r - ambientLit.b), -ambientTmp + 0.5f * ambientLit.g);
+		ambientYCoCg.x = MasksTexture.Load(int3(pixel.xy, 0)).z;
+		ambientTmp = ambientYCoCg.x - ambientYCoCg.z;
+		ambientLit = max(0.0f, float3(ambientTmp + ambientYCoCg.y,
+			ambientYCoCg.x + ambientYCoCg.z, ambientTmp - ambientYCoCg.y));
+		float3 candidate = directIrradiance * albedo + ambientLit;
+		if ((frameFlags & 8u) != 0) {
+			float3 reference = ForwardReferenceTexture.Load(int3(pixel.xy, 0)).rgb;
+			float3 delta = candidate - reference;
+			float3 error = abs(delta);
+			uint3 quantized = uint3(min(error, 16.0f) * 4096.0f + 0.5f);
+			int3 signedQuantized = int3(clamp(delta, -16.0f, 16.0f) * 4096.0f);
+			uint3 candidateQuantized = uint3(min(max(candidate, 0.0f), 16.0f) * 4096.0f + 0.5f);
+			uint3 referenceQuantized = uint3(min(max(reference, 0.0f), 16.0f) * 4096.0f + 0.5f);
+			uint ignored;
+			InterlockedAdd(FrameMarker[uint2(16, 0)], 1u, ignored);
+			InterlockedAdd(FrameMarker[uint2(17, 0)], quantized.x, ignored);
+			InterlockedAdd(FrameMarker[uint2(18, 0)], quantized.y, ignored);
+			InterlockedAdd(FrameMarker[uint2(19, 0)], quantized.z, ignored);
+			InterlockedMax(FrameMarker[uint2(20, 0)], max(quantized.x, max(quantized.y, quantized.z)), ignored);
+			InterlockedAdd(FrameMarker[uint2(21, 0)], asuint(signedQuantized.x), ignored);
+			InterlockedAdd(FrameMarker[uint2(22, 0)], asuint(signedQuantized.y), ignored);
+			InterlockedAdd(FrameMarker[uint2(23, 0)], asuint(signedQuantized.z), ignored);
+			InterlockedAdd(FrameMarker[uint2(24, 0)], candidateQuantized.x, ignored);
+			InterlockedAdd(FrameMarker[uint2(25, 0)], candidateQuantized.y, ignored);
+			InterlockedAdd(FrameMarker[uint2(26, 0)], candidateQuantized.z, ignored);
+			InterlockedAdd(FrameMarker[uint2(27, 0)], referenceQuantized.x, ignored);
+			InterlockedAdd(FrameMarker[uint2(28, 0)], referenceQuantized.y, ignored);
+			InterlockedAdd(FrameMarker[uint2(29, 0)], referenceQuantized.z, ignored);
+		}
 		CompositeTexture[pixel.xy] = float4(candidate, 1.0f);
 	}
 }

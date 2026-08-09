@@ -124,8 +124,8 @@ bool DX12DeferredShading::CreatePipeline() noexcept
 	return false;
 #else
 	D3D12_DESCRIPTOR_RANGE ranges[2]{};
-	ranges[0] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 11, 0, 0, 0 };
-	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0, 0, 11 };
+	ranges[0] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 13, 0, 0, 0 };
+	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0, 0, 13 };
 	D3D12_ROOT_PARAMETER parameters[2]{};
 	parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
 	parameters[0].Descriptor.ShaderRegister = 0;
@@ -234,7 +234,7 @@ bool DX12DeferredShading::EnsureFrameMarker() noexcept
 	if (!interop || !globals::d3d::device)
 		return false;
 	D3D11_TEXTURE2D_DESC description{};
-	description.Width = 16;
+	description.Width = 32;
 	description.Height = 1;
 	description.MipLevels = 1;
 	description.ArraySize = 1;
@@ -260,6 +260,11 @@ bool DX12DeferredShading::PrepareCompatibilityInput(ID3D11Texture2D* source) noe
 	if(!source)return false;
 	D3D11_TEXTURE2D_DESC description{}; source->GetDesc(&description);
 	if(!EnsureComposite(description.Width,description.Height,description.Format))return false;
+	if (std::getenv("CS_DX12_DEFERRED_PARITY")) {
+		auto* interop = runtime ? runtime->GetInteropCoordinator() : nullptr;
+		if (!interop || !interop->CopyToMirror(globals::d3d::context, source, parityReference))
+			return false;
+	}
 	return true;
 }
 
@@ -280,6 +285,12 @@ bool DX12DeferredShading::PrepareLocalShadowMask(ID3D11Texture2D* source) noexce
 	return interop->CopyToMirror(globals::d3d::context, source, localShadowMask);
 }
 
+bool DX12DeferredShading::PrepareScreenSpaceShadow(ID3D11Texture2D* source) noexcept
+{
+	auto* interop = runtime ? runtime->GetInteropCoordinator() : nullptr;
+	return interop && source && interop->CopyToMirror(globals::d3d::context, source, screenSpaceShadow);
+}
+
 bool DX12DeferredShading::PreparePackedSurfaceMirror(ID3D11Texture2D* source) noexcept
 {
 	auto* interop = runtime ? runtime->GetInteropCoordinator() : nullptr;
@@ -298,7 +309,7 @@ bool DX12DeferredShading::PrepareGBufferInputs() noexcept
 	// These CS G-buffer allocations are explicitly created with NT shared
 	// handles. Import their allocation directly; the graph's first-use external
 	// wait orders D3D11 rendering before D3D12 reads.
-	constexpr size_t importedIndices[]{ 0, 3 };
+	constexpr size_t importedIndices[]{ 0, 3, 4 };
 	for (const auto index : importedIndices) {
 		auto* source = renderer->GetRuntimeData().renderTargets[kInputs[index].target].texture;
 		if (!source || !interop->ImportReadOnlySharedTexture(source, false, inputs[index].mirror)) {
@@ -343,6 +354,42 @@ bool DX12DeferredShading::EnsureCompositeBlit(ID3D11Texture2D* destination) noex
 bool DX12DeferredShading::CommitComposite(ID3D11Texture2D* destination) noexcept
 {
 	if(!destination||!composite.d3d11||!frameMarker.d3d11||!globals::d3d::context||!EnsureCompositeBlit(destination))return false;
+	if (std::getenv("CS_DX12_DEFERRED_PARITY")) {
+		if (!parityCounterReadback) {
+			D3D11_TEXTURE2D_DESC description{};
+			frameMarker.d3d11->GetDesc(&description);
+			description.Usage = D3D11_USAGE_STAGING;
+			description.BindFlags = 0;
+			description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+			description.MiscFlags = 0;
+			if (FAILED(globals::d3d::device->CreateTexture2D(&description, nullptr, parityCounterReadback.put())))
+				return false;
+		}
+		if (parityCounterPending) {
+			D3D11_MAPPED_SUBRESOURCE mapped{};
+			if (SUCCEEDED(globals::d3d::context->Map(parityCounterReadback.get(), 0, D3D11_MAP_READ,
+				D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped))) {
+				const auto* counters = static_cast<const std::uint32_t*>(mapped.pData);
+				if (counters[16]) {
+					const double scale = 1.0 / (4096.0 * counters[16]);
+					logger::info("[DX12DeferredParity] pixels={}, meanAbsRGB=({:.6f},{:.6f},{:.6f}), maxComponent={:.6f}",
+						counters[16], counters[17] * scale, counters[18] * scale, counters[19] * scale,
+						counters[20] / 4096.0);
+					const auto* signedCounters = reinterpret_cast<const std::int32_t*>(counters);
+					logger::info("[DX12DeferredParity] mean(candidate-reference)=({:.6f},{:.6f},{:.6f}), meanCandidate=({:.6f},{:.6f},{:.6f}), meanReference=({:.6f},{:.6f},{:.6f})",
+						signedCounters[21] * scale, signedCounters[22] * scale, signedCounters[23] * scale,
+						counters[24] * scale, counters[25] * scale, counters[26] * scale,
+						counters[27] * scale, counters[28] * scale, counters[29] * scale);
+				}
+				globals::d3d::context->Unmap(parityCounterReadback.get(), 0);
+				parityCounterPending = false;
+			}
+		}
+		if (!parityCounterPending) {
+			globals::d3d::context->CopyResource(parityCounterReadback.get(), frameMarker.d3d11.get());
+			parityCounterPending = true;
+		}
+	}
 	// The shared transport is guaranteed cross-API RGBA16. Skyrim's main target
 	// can be R11G11B10, which cannot be opened through strict cross-API sharing,
 	// so perform an ordinary D3D11 render-target conversion after the fence wait.
@@ -470,8 +517,11 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 		return CS_DX12_E_NOT_READY;
 	if (!self->localShadowMask)
 		return CS_DX12_E_NOT_READY;
+	const bool parityEnabled = std::getenv("CS_DX12_DEFERRED_PARITY") != nullptr;
+	if (parityEnabled && !self->parityReference)
+		return CS_DX12_E_NOT_READY;
 
-	constexpr size_t importedIndices[]{ 0, 3 };
+	constexpr size_t importedIndices[]{ 0, 3, 4 };
 	for (const auto index : importedIndices) {
 		D3D11_TEXTURE2D_DESC nativeDescription{};
 		self->inputs[index].source->GetDesc(&nativeDescription);
@@ -525,6 +575,28 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	shadowMask.allowedAccess=CS_DX12_ACCESS_SHADER_READ; shadowMask.initialAccess=CS_DX12_ACCESS_SHADER_READ;
 	shadowMask.finalAccess=CS_DX12_ACCESS_SHADER_READ; shadowMask.borrowedNativeResource=self->localShadowMask.d3d12.get();
 	if(self->runtime->DeclareResource(build,&shadowMask,&self->localShadowMaskHandle)!=CS_DX12_OK)return CS_DX12_E_INTERNAL;
+	const auto& screenShadowResource = self->screenSpaceShadow ? self->screenSpaceShadow : self->localShadowMask;
+	CSDX12ResourceDesc screenShadow = shadowMask;
+	screenShadow.id = "community-shaders.deferred-shading.screen-space-shadow";
+	screenShadow.format = screenShadowResource.description.Format;
+	screenShadow.width = screenShadowResource.description.Width;
+	screenShadow.height = screenShadowResource.description.Height;
+	screenShadow.mipLevels = screenShadowResource.description.MipLevels;
+	screenShadow.borrowedNativeResource = screenShadowResource.d3d12.get();
+	if(self->runtime->DeclareResource(build,&screenShadow,&self->screenSpaceShadowHandle)!=CS_DX12_OK)return CS_DX12_E_INTERNAL;
+	if (parityEnabled) {
+		CSDX12ResourceDesc reference{};
+		reference.structSize = sizeof(reference); reference.apiVersion = CS_DX12_GRAPH_API_CURRENT;
+		reference.id = "community-shaders.deferred-shading.forward-reference";
+		reference.lifetime = CS_DX12_RESOURCE_CS_IMPORTED; reference.dimension = CS_DX12_RESOURCE_TEXTURE_2D;
+		reference.sizing = CS_DX12_SIZE_ABSOLUTE; reference.format = self->parityReference.description.Format;
+		reference.width = self->parityReference.description.Width; reference.height = self->parityReference.description.Height;
+		reference.depthOrArraySize = 1; reference.mipLevels = 1; reference.sampleCount = 1;
+		reference.allowedAccess = CS_DX12_ACCESS_SHADER_READ; reference.initialAccess = CS_DX12_ACCESS_SHADER_READ;
+		reference.finalAccess = CS_DX12_ACCESS_SHADER_READ; reference.borrowedNativeResource = self->parityReference.d3d12.get();
+		if (self->runtime->DeclareResource(build, &reference, &self->parityReferenceHandle) != CS_DX12_OK)
+			return CS_DX12_E_INTERNAL;
+	}
 	if (self->runtime->FindResource(build, "community-shaders.clustered-lighting.lights", &self->lightsHandle) != CS_DX12_OK ||
 		self->runtime->FindResource(build, "community-shaders.clustered-lighting.contexts", &self->contextsHandle) != CS_DX12_OK ||
 		self->runtime->FindResource(build, "community-shaders.clustered-lighting.clusters", &self->clustersHandle) != CS_DX12_OK ||
@@ -558,7 +630,7 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	marker.dimension = CS_DX12_RESOURCE_TEXTURE_2D;
 	marker.sizing = CS_DX12_SIZE_ABSOLUTE;
 	marker.format = DXGI_FORMAT_R32_UINT;
-	marker.width = 16;
+	marker.width = 32;
 	marker.height = 1;
 	marker.depthOrArraySize = 1;
 	marker.mipLevels = 1;
@@ -591,7 +663,7 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 
 	const char* after[]{ "community-shaders.clustered-lighting.cull" };
 	const char* before[]{ CS_DX12_ANCHOR_DEFERRED_LIGHTING_BEGIN };
-	std::array<CSDX12ResourceAccessDesc, 11> accesses{};
+	std::array<CSDX12ResourceAccessDesc, 14> accesses{};
 	accesses[0] = { sizeof(CSDX12ResourceAccessDesc), CS_DX12_GRAPH_API_CURRENT,
 		self->compositeHandle, CS_DX12_ACCESS_UNORDERED_WRITE, {} };
 	accesses[1] = { sizeof(CSDX12ResourceAccessDesc), CS_DX12_GRAPH_API_CURRENT,
@@ -606,6 +678,10 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	accesses[8]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->localShadowMaskHandle,CS_DX12_ACCESS_SHADER_READ,{}};
 	accesses[9]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->frameMarkerHandle,CS_DX12_ACCESS_UNORDERED_WRITE,{}};
 	accesses[10]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->packedSurfaceMirrorHandle,CS_DX12_ACCESS_SHADER_READ,{}};
+	accesses[11]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->inputs[4].handle,CS_DX12_ACCESS_SHADER_READ,{}};
+	accesses[12]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->screenSpaceShadowHandle,CS_DX12_ACCESS_SHADER_READ,{}};
+	if (parityEnabled)
+		accesses[13]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->parityReferenceHandle,CS_DX12_ACCESS_SHADER_READ,{}};
 	CSDX12PassDesc pass{};
 	pass.structSize = sizeof(pass);
 	pass.apiVersion = CS_DX12_GRAPH_API_CURRENT;
@@ -616,7 +692,7 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	pass.before = before;
 	pass.beforeCount = 1;
 	pass.accesses = accesses.data();
-	pass.accessCount = static_cast<uint32_t>(accesses.size());
+	pass.accessCount = parityEnabled ? static_cast<uint32_t>(accesses.size()) : 13u;
 	pass.execute = &Execute;
 	CSDX12PassHandle handle{};
 	return self->runtime->DeclarePass(build, &pass, &handle);
@@ -633,7 +709,7 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 {
 	if (!context.GetResource || !context.AllocateUpload || !context.AllocateDescriptors || !context.borrowedD3D12GraphicsCommandList || !bootstrapPipeline)
 		return CS_DX12_E_UNSUPPORTED_CAPABILITY;
-	void* native{}; void* albedoNative{}; void* depthNative{}; void* lightsNative{}; void* contextsNative{}; void* clustersNative{}; void* pagesNative{}; void* shadowMaskNative{}; void* markerNative{}; void* packedMirrorNative{};
+	void* native{}; void* albedoNative{}; void* masksNative{}; void* depthNative{}; void* lightsNative{}; void* contextsNative{}; void* clustersNative{}; void* pagesNative{}; void* shadowMaskNative{}; void* screenShadowNative{}; void* markerNative{}; void* packedMirrorNative{}; void* parityNative{};
 	if (context.GetResource(&context, compositeHandle, &native) != CS_DX12_OK || !native ||
 		context.GetResource(&context, inputs[0].handle, &albedoNative) != CS_DX12_OK || !albedoNative ||
 		context.GetResource(&context, linearDepthHandle, &depthNative) != CS_DX12_OK || !depthNative ||
@@ -642,8 +718,13 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 		context.GetResource(&context, clustersHandle, &clustersNative) != CS_DX12_OK || !clustersNative ||
 		context.GetResource(&context, pagesHandle, &pagesNative) != CS_DX12_OK || !pagesNative ||
 		context.GetResource(&context, localShadowMaskHandle, &shadowMaskNative) != CS_DX12_OK || !shadowMaskNative ||
+		context.GetResource(&context, screenSpaceShadowHandle, &screenShadowNative) != CS_DX12_OK || !screenShadowNative ||
 		context.GetResource(&context, frameMarkerHandle, &markerNative) != CS_DX12_OK || !markerNative ||
-		context.GetResource(&context, packedSurfaceMirrorHandle, &packedMirrorNative) != CS_DX12_OK || !packedMirrorNative)
+		context.GetResource(&context, packedSurfaceMirrorHandle, &packedMirrorNative) != CS_DX12_OK || !packedMirrorNative ||
+		context.GetResource(&context, inputs[4].handle, &masksNative) != CS_DX12_OK || !masksNative)
+		return CS_DX12_E_NOT_READY;
+	const bool parityEnabled = std::getenv("CS_DX12_DEFERRED_PARITY") != nullptr;
+	if (parityEnabled && (context.GetResource(&context, parityReferenceHandle, &parityNative) != CS_DX12_OK || !parityNative))
 		return CS_DX12_E_NOT_READY;
 	auto snapshot=globals::features::deferredRendering.GetFrameSnapshot();
 	if(!snapshot)return CS_DX12_E_NOT_READY;
@@ -670,10 +751,11 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 	const bool diagnosticNoShadows = std::getenv("CS_DX12_DIAGNOSTIC_NO_SHADOWS") != nullptr;
 	const bool diagnosticAlbedo = std::getenv("CS_DX12_DIAGNOSTIC_ALBEDO") != nullptr;
 	const bool diagnosticCompatibility = std::getenv("CS_DX12_DIAGNOSTIC_COMPATIBILITY") != nullptr;
+	const bool hasScreenSpaceShadow = static_cast<bool>(screenSpaceShadow);
 	constants.frameFlags=(staticOpaqueEnabled ? 1u : 0u) | (directDiagnostic ? 2u : 0u) |
-		(coverageDiagnostic ? 4u : 0u) |
+		(coverageDiagnostic ? 4u : 0u) | (parityEnabled ? 8u : 0u) |
 		(diagnosticNoShadows ? 16u : 0u) | (diagnosticAlbedo ? 32u : 0u) |
-		(diagnosticCompatibility ? 64u : 0u);
+		(diagnosticCompatibility ? 64u : 0u) | (hasScreenSpaceShadow ? 128u : 0u);
 	if (directDiagnostic) {
 		static std::once_flag diagnosticLogged;
 		std::call_once(diagnosticLogged, [] { logger::warn("[DX12DeferredShading] Direct-plus-ambient diagnostic output is enabled"); });
@@ -684,7 +766,7 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 	}
 	std::memcpy(constantsUpload.cpuAddress,&constants,sizeof(constants));
 	CSDX12DescriptorAllocation descriptors{};
-	if (context.AllocateDescriptors(&context, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 13, &descriptors) != CS_DX12_OK)
+	if (context.AllocateDescriptors(&context, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 15, &descriptors) != CS_DX12_OK)
 		return CS_DX12_E_INTERNAL;
 	auto* resource = static_cast<ID3D12Resource*>(native);
 	auto* commandList = static_cast<ID3D12GraphicsCommandList*>(context.borrowedD3D12GraphicsCommandList);
@@ -708,22 +790,31 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 		return CS_DX12_E_NOT_READY;
 	D3D12_SHADER_RESOURCE_VIEW_DESC normalView{}; normalView.Format=DXGI_FORMAT_R10G10B10A2_UNORM; normalView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; normalView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; normalView.Texture2D.MipLevels=1;
 	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(normalNative),&normalView,cpuAt(9));
-	D3D12_SHADER_RESOURCE_VIEW_DESC packedMirrorView{}; packedMirrorView.Format=DXGI_FORMAT_R32_UINT; packedMirrorView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; packedMirrorView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; packedMirrorView.Texture2D.MipLevels=1;
-	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(packedMirrorNative),&packedMirrorView,cpuAt(10));
+	if (parityEnabled) {
+		D3D12_SHADER_RESOURCE_VIEW_DESC parityView{}; parityView.Format=parityReference.description.Format; parityView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; parityView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; parityView.Texture2D.MipLevels=1;
+		device->CreateShaderResourceView(static_cast<ID3D12Resource*>(parityNative),&parityView,cpuAt(10));
+	} else {
+		device->CreateShaderResourceView(static_cast<ID3D12Resource*>(albedoNative),&albedoView,cpuAt(10));
+	}
+	D3D12_SHADER_RESOURCE_VIEW_DESC masksView{}; masksView.Format=inputs[4].mirror.description.Format; masksView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; masksView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; masksView.Texture2D.MipLevels=1;
+	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(masksNative),&masksView,cpuAt(11));
+	const auto& screenShadowDescription = screenSpaceShadow ? screenSpaceShadow.description : localShadowMask.description;
+	D3D12_SHADER_RESOURCE_VIEW_DESC screenShadowView{}; screenShadowView.Format=screenShadowDescription.Format; screenShadowView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; screenShadowView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; screenShadowView.Texture2D.MipLevels=1;
+	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(screenShadowNative),&screenShadowView,cpuAt(12));
 	D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
 	view.Format = composite.description.Format;
 	view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-	runtime->GetNativeDevice()->CreateUnorderedAccessView(resource, nullptr, &view, cpuAt(11));
+	runtime->GetNativeDevice()->CreateUnorderedAccessView(resource, nullptr, &view, cpuAt(13));
 	D3D12_UNORDERED_ACCESS_VIEW_DESC markerView{};
 	markerView.Format = DXGI_FORMAT_R32_UINT;
 	markerView.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-	runtime->GetNativeDevice()->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(markerNative), nullptr, &markerView, cpuAt(12));
+	runtime->GetNativeDevice()->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(markerNative), nullptr, &markerView, cpuAt(14));
 	D3D12_GPU_DESCRIPTOR_HANDLE gpu{ descriptors.gpuHandle };
 	auto gpuAt=[&](uint32_t index){auto value=gpu;value.ptr+=uint64_t(index)*descriptors.descriptorSize;return value;};
 	ID3D12DescriptorHeap* heaps[]{ static_cast<ID3D12DescriptorHeap*>(descriptors.borrowedNativeHeap) };
 	commandList->SetDescriptorHeaps(1, heaps);
 	constexpr UINT clearMarker[4]{};
-	commandList->ClearUnorderedAccessViewUint(gpuAt(12), cpuAt(12), static_cast<ID3D12Resource*>(markerNative), clearMarker, 0, nullptr);
+	commandList->ClearUnorderedAccessViewUint(gpuAt(14), cpuAt(14), static_cast<ID3D12Resource*>(markerNative), clearMarker, 0, nullptr);
 	commandList->SetComputeRootSignature(rootSignature.get());
 	commandList->SetComputeRootConstantBufferView(0,constantsUpload.gpuAddress);
 	commandList->SetComputeRootDescriptorTable(1, gpu);
@@ -748,6 +839,8 @@ void DX12DeferredShading::Shutdown() noexcept
 	composite = {};
 	linearDepth = {};
 	localShadowMask = {};
+	screenSpaceShadow = {};
+	parityReference = {};
 	frameMarker = {};
 	packedSurfaceMirror = {};
 	linearizeDepthShader = nullptr;
@@ -760,6 +853,8 @@ void DX12DeferredShading::Shutdown() noexcept
 	rootSignature = nullptr;
 	device = nullptr;
 	inputs = {};
+	parityCounterReadback = nullptr;
+	parityCounterPending = false;
 	runtime = nullptr;
 	registration = {};
 	compositeHandle = {};
@@ -767,5 +862,7 @@ void DX12DeferredShading::Shutdown() noexcept
 	frameMarkerHandle = {};
 	packedSurfaceMirrorHandle = {};
 	localShadowMaskHandle = {};
+	screenSpaceShadowHandle = {};
+	parityReferenceHandle = {};
 	lightsHandle={};contextsHandle={};clustersHandle={};pagesHandle={};
 }

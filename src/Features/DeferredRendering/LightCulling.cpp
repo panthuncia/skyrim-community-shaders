@@ -52,7 +52,7 @@ RWStructuredBuffer<Light> lights : register(u4);
 RWStructuredBuffer<LightingContext> lightingContexts : register(u5);
 float3 ScreenToView(float2 pixel) {
  float3 ndc=float3(2.0*pixel.x/screen.x-1.0,2.0*(screen.y-pixel.y-1.0)/screen.y-1.0,1.0);
- float4 p=mul(float4(ndc,1),projectionInverse); return p.xyz/p.w;
+ float4 p=mul(projectionInverse,float4(ndc,1)); return p.xyz/p.w;
 }
 float3 AtZ(float3 ray,float z) { return ray*(z/ray.z); }
 [numthreads(128,1,1)] void UploadFrameData(uint3 id:SV_DispatchThreadID) {
@@ -78,7 +78,7 @@ uint AllocatePage() { uint p; InterlockedAdd(pageCounter[0],1,p); if(p>=pageCapa
  Cluster c=clusters[index]; uint page=AllocatePage(); c.numLights=0;c.ptrFirstPage=page;
  if(page==0xffffffff){clusters[index]=c;return;} pages[page].ptrNextPage=0xffffffff; uint inPage=0;
  for(uint i=0;i<lightCount;i++) {
-  Light l=lights[i]; float3 center=mul(float4(l.positionWS,1),viewMatrix).xyz;
+  Light l=lights[i]; float3 center=mul(viewMatrix,float4(l.positionWS,1)).xyz;
   if(!Intersects(center,l.radius,c))continue;
   if(inPage>=12){pages[page].numLightsInPage=12;uint old=page;page=AllocatePage();if(page==0xffffffff)break;
    pages[page].ptrNextPage=old;c.ptrFirstPage=page;inPage=0;}

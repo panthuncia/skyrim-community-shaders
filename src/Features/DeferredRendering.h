@@ -21,7 +21,10 @@ public:
 	enum ContextFeatureFlags : std::uint32_t
 	{
 		kWorld = 1u << 0,
-		kLightingUniformsValid = 1u << 1
+		kLightingUniformsValid = 1u << 1,
+		kReceivesDeferredShadow = 1u << 2,
+		kReceivesDirectionalShadow = 1u << 3,
+		kUsesCharacterLight = 1u << 4
 	};
 
 	struct FrameSnapshot
@@ -50,6 +53,9 @@ public:
 	void LoadSettings(json& json) override;
 	void SaveSettings(json& json) override;
 	void RestoreDefaultSettings() override;
+	bool ToggleAtBootSetting() override;
+	bool AppliesBootToggleImmediately() const override { return true; }
+	bool IsRuntimeEnabled() const noexcept { return loaded && runtimeEnabled.load(std::memory_order_acquire); }
 	bool IsCoverageVisualizationEnabled() const noexcept
 	{
 		return settings.visualizeDeferredCoverage || std::getenv("CS_DX12_FORCE_COVERAGE") != nullptr;
@@ -85,4 +91,5 @@ private:
 	std::uint32_t renderHeight{};
 	std::shared_ptr<const FrameSnapshot> finalizedFrame;
 	std::deque<std::pair<std::uint64_t, std::shared_ptr<const FrameSnapshot>>> submittedFrames;
+	std::atomic_bool runtimeEnabled{ false };
 };

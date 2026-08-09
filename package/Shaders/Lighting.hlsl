@@ -2945,6 +2945,8 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// the static layout.
 #	if !defined(DO_ALPHA_TEST) && !defined(SKINNED) && !defined(TRUE_PBR) && !defined(LANDSCAPE) && !defined(LODLANDSCAPE) && !defined(LOD) && !defined(TREE_ANIM) && !defined(FACEGEN) && !defined(FACEGEN_RGB_TINT) && !defined(DEPTH_WRITE_DECALS) && !defined(HAIR) && !defined(SKIN) && !defined(EYE) && !defined(ENVMAP) && !defined(MULTI_LAYER_PARALLAX) && !defined(SPECULAR) && !defined(SOFT_LIGHTING) && !defined(RIM_LIGHTING) && !defined(BACK_LIGHTING) && !defined(SNOW) && !defined(GLOWMAP) && !defined(PARALLAX) && !defined(PROJECTED_UV)
 	deferredMaterialClass = 1u;
+	if ((Permutation::PixelShaderDescriptor & Permutation::LightingFlags::CharacterLight) != 0)
+		deferredMaterialClass = 0u;
 #	endif
 	psout.Masks2 = (DeferredPackedSurface & 0xFF00FFFFu) |
 		(deferredMaterialClass << 16) | (packedVertexAO << 27);

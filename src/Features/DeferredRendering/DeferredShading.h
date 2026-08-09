@@ -16,6 +16,7 @@ public:
 	bool PrepareLinearDepth(uint32_t width, uint32_t height) noexcept;
 	bool PrepareCompatibilityInput(ID3D11Texture2D* source) noexcept;
 	bool PrepareLocalShadowMask(ID3D11Texture2D* source) noexcept;
+	bool PrepareScreenSpaceShadow(ID3D11Texture2D* source) noexcept;
 	bool PreparePackedSurfaceMirror(ID3D11Texture2D* source) noexcept;
 	bool PrepareGBufferInputs() noexcept;
 	bool ShouldCommitComposite() const noexcept;
@@ -47,9 +48,13 @@ private:
 	DX12InteropCoordinator::SharedTexture composite;
 	DX12InteropCoordinator::SharedTexture linearDepth;
 	DX12InteropCoordinator::SharedTexture localShadowMask;
+	DX12InteropCoordinator::SharedTexture screenSpaceShadow;
+	DX12InteropCoordinator::SharedTexture parityReference;
 	DX12InteropCoordinator::SharedTexture frameMarker;
 	DX12InteropCoordinator::SharedTexture packedSurfaceMirror;
 	CSDX12ResourceHandle localShadowMaskHandle{};
+	CSDX12ResourceHandle screenSpaceShadowHandle{};
+	CSDX12ResourceHandle parityReferenceHandle{};
 	CSDX12ResourceHandle linearDepthHandle{};
 	CSDX12ResourceHandle frameMarkerHandle{};
 	CSDX12ResourceHandle packedSurfaceMirrorHandle{};
@@ -68,5 +73,7 @@ private:
 	winrt::com_ptr<ID3D12RootSignature> rootSignature;
 	winrt::com_ptr<ID3D12PipelineState> bootstrapPipeline;
 	std::array<ImportedInput, 6> inputs;
+	winrt::com_ptr<ID3D11Texture2D> parityCounterReadback;
+	bool parityCounterPending{};
 	uint64_t dispatchCount{};
 };

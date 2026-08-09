@@ -740,7 +740,12 @@ void FeatureListRenderer::DrawMenuVisitor::RenderFeatureHeader(Feature* feat, bo
 	}
 
 	if (auto _tt = Util::HoverTooltipWrapper()) {
-		ImGui::Text(
+		if (feat->AppliesBootToggleImmediately()) {
+			ImGui::Text("%s\n%s: %s",
+				T("menu.features.runtime_toggle_tooltip", "Toggle feature execution immediately and persist the state for the next launch."),
+				T("menu.features.current_state", "Current state"),
+				bootEnabled ? T("menu.features.enabled", "Enabled") : T("menu.features.disabled", "Disabled"));
+		} else ImGui::Text(
 			T("menu.features.boot_toggle_tooltip",
 				"Toggle feature loading at boot.\n"
 				"Current state: %s\n"

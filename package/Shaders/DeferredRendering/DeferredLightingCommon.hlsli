@@ -12,6 +12,9 @@ static const uint CS_LEGACY_MATERIAL = 0u;
 static const uint CS_NULL_LIGHT_PAGE = 0xFFFFFFFFu;
 static const uint CS_LIGHT_FLAG_PORTAL_STRICT = 1u << 0;
 static const uint CS_LIGHT_FLAG_SHADOW = 1u << 1;
+static const uint CS_CONTEXT_RECEIVES_DEFERRED_SHADOW = 1u << 2;
+static const uint CS_CONTEXT_RECEIVES_DIRECTIONAL_SHADOW = 1u << 3;
+static const uint CS_CONTEXT_USES_CHARACTER_LIGHT = 1u << 4;
 
 uint CSDeferredContextIndex(uint packedSurface)
 {
@@ -37,7 +40,11 @@ float CSDeferredAttenuation(float distanceToLight, Light light)
 
 float3 CSDeferredTransformLight(float3 color, bool isLinear, float gamma, float multiplier, bool linearLighting)
 {
-	return CSLightingTransformLight(color, isLinear, linearLighting, gamma, multiplier, 1.0f);
+	// Color::DirectionalLight/PointLight compensate traditional (non-linear)
+	// Lambert lighting by PI. Together with VanillaNormalization this is part of
+	// the existing CS visual contract, not an optional energy correction.
+	return CSLightingTransformLight(color, isLinear, linearLighting, gamma, multiplier,
+		linearLighting ? 1.0f : 3.14159265358979323846f);
 }
 
 float3 CSDeferredVanillaDiffuse(float3 normal, float3 lightDirection, float3 lightColor,
