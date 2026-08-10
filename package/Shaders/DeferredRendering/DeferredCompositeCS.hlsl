@@ -4,10 +4,6 @@
 // shader writes only promoted material classes; the D3D11 handoff discards all
 // other pixels and therefore preserves their existing geometry-lit color.
 
-Texture2D<float4> SpecularTexture : register(t0);
-Texture2D<float4> AlbedoTexture : register(t1);
-Texture2D<float> LinearDepthTexture : register(t2);
-
 struct Light
 {
 	float3 color; float fade;
@@ -51,32 +47,7 @@ struct LightPage
 	uint lightIndices[12];
 };
 
-StructuredBuffer<Light> Lights : register(t3);
-StructuredBuffer<LightingContext> Contexts : register(t4);
-StructuredBuffer<Cluster> Clusters : register(t5);
-StructuredBuffer<LightPage> Pages : register(t6);
-Texture2D<uint4> PackedSurfaceTexture : register(t7);
-Texture2D<float4> LocalShadowMaskTexture : register(t8);
-Texture2D<float4> NormalRoughnessTexture : register(t9);
-Texture2D<float4> CompatibilityReferenceTexture : register(t10);
-Texture2D<float4> MasksTexture : register(t11);
-Texture2D<float> ScreenSpaceShadowTexture : register(t12);
-StructuredBuffer<uint2> EvaluatorPixelList : register(t13);
-Texture2D<float4> EnvironmentIBLTexture : register(t14);
-Texture2D<float4> SkyIBLTexture : register(t15);
-Texture2DArray<float4> SkylightingProbeTexture : register(t16);
-Texture2DArray<float> SkylightingVisibilityTexture : register(t17);
-Texture2D<float4> ReflectanceTexture : register(t18);
-StructuredBuffer<PBRMaterialRecord> PBRMaterials : register(t19);
-RWTexture2D<float4> CompositeTexture : register(u0);
-RWTexture2D<uint> FrameMarker : register(u1);
-RWTexture2D<float4> SpecularCompositeTexture : register(u2);
-RWTexture2D<float4> ReflectanceCompositeTexture : register(u3);
-RWTexture2D<float4> AlbedoCompositeTexture : register(u4);
-RWTexture2D<float4> NormalCompositeTexture : register(u5);
-RWTexture2D<float4> MasksCompositeTexture : register(u6);
-
-cbuffer DeferredFrame : register(b0)
+struct DeferredFrameData
 {
 	row_major float4x4 projectionInverse;
 	row_major float4x4 viewInverse;
@@ -96,19 +67,67 @@ cbuffer DeferredFrame : register(b0)
 	float skylightingMinSpecularVisibility; uint pbrMaterialCount; float2 lightingParameterPadding;
 };
 
+#define projectionInverse frame.projectionInverse
+#define viewInverse frame.viewInverse
+#define clusterGrid frame.clusterGrid
+#define lightCount frame.lightCount
+#define screenSize frame.screenSize
+#define nearPlane frame.nearPlane
+#define farPlane frame.farPlane
+#define contextCount frame.contextCount
+#define pageCapacity frame.pageCapacity
+#define frameFlags frame.frameFlags
+#define enableLinearLighting frame.enableLinearLighting
+#define isDirectionalLightLinear frame.isDirectionalLightLinear
+#define directionalLightScale frame.directionalLightScale
+#define lightGamma frame.lightGamma
+#define directionalLightMultiplier frame.directionalLightMultiplier
+#define pointLightMultiplier frame.pointLightMultiplier
+#define vanillaNormalization frame.vanillaNormalization
+#define ambientGamma frame.ambientGamma
+#define ambientMultiplier frame.ambientMultiplier
+#define grassFrameSettings0 frame.grassFrameSettings0
+#define grassFrameSettings1 frame.grassFrameSettings1
+#define iblFlags frame.iblFlags
+#define iblSettings0 frame.iblSettings0
+#define iblSettings1 frame.iblSettings1
+#define skylightingPositionOffset frame.skylightingPositionOffset
+#define skylightingEnabled frame.skylightingEnabled
+#define skylightingArrayOrigin frame.skylightingArrayOrigin
+#define skylightingMinDiffuseVisibility frame.skylightingMinDiffuseVisibility
+#define skylightingMinSpecularVisibility frame.skylightingMinSpecularVisibility
+#define pbrMaterialCount frame.pbrMaterialCount
+
 #include "DeferredIndirectLighting.hlsli"
+
+cbuffer EvaluatorDispatch : register(b1)
+{
+	uint evaluatorID;
+	uint evaluatorBaseOffset;
+	uint evaluatorPixelCount;
+	uint evaluatorDispatchWidth;
+	uint frameConstantsIndex;
+	uint4 descriptorIndices0;
+	uint4 descriptorIndices1;
+	uint4 descriptorIndices2;
+	uint4 descriptorIndices3;
+	uint4 descriptorIndices4;
+	uint4 descriptorIndices5;
+	uint4 descriptorIndices6;
+};
 
 #if defined(CS_DEFERRED_TRUE_PBR)
 #ifndef CSHADER
 #define CSHADER 1
 #endif
+#define CS_GLINT_BINDLESS 1
 #include "Common/PBR.hlsli"
 #include "Common/LightingEval.hlsli"
 
 DirectLightingOutput EvaluateDeferredTruePBRDirect(MaterialProperties material,
 	float3 normal, float3 coatNormal, float3 viewDirection, float3 lightDirection,
 	float3 lightColor, float detailedShadow, float softShadow,
-	float3 wetnessNormal, float wetnessRoughness, float3x3 tbnTr)
+	float3 wetnessNormal, float wetnessRoughness, float3x3 tbnTr, DeferredFrameData frame)
 {
 	DirectContext context = CreateDirectLightingContext(normal, coatNormal, normal,
 		viewDirection, viewDirection, lightDirection, lightDirection, lightColor,
@@ -120,14 +139,6 @@ DirectLightingOutput EvaluateDeferredTruePBRDirect(MaterialProperties material,
 	return output;
 }
 #endif
-
-cbuffer EvaluatorDispatch : register(b1)
-{
-	uint evaluatorID;
-	uint evaluatorBaseOffset;
-	uint evaluatorPixelCount;
-	uint evaluatorDispatchWidth;
-};
 
 bool RoomAcceptsLight(Light light, int roomIndex)
 {
@@ -167,7 +178,7 @@ CSGenericDirectLighting EvaluateDeferredDirect(uint materialClass,
 	LightingContext context, float3 normal, float3 viewDirection,
 	float3 lightDirection, float3 lightColor, float detailedShadow,
 	float softShadow, float glossiness, float3 rimSoftColor,
-	float3 backLightColor)
+	float3 backLightColor, DeferredFrameData frame)
 {
 	const bool hasSpecular = HasGenericSpecular(materialClass);
 	CSGenericDirectLighting result = CSLightingEvaluateGenericDirect(normal,
@@ -202,7 +213,7 @@ float3 DecodeCSNormal(float2 encoded)
 	return -normalize(normal);
 }
 
-float3 ReconstructWorldPosition(uint2 pixel, float linearDepth)
+float3 ReconstructWorldPosition(uint2 pixel, float linearDepth, DeferredFrameData frame)
 {
 	float2 uv = (float2(pixel) + 0.5f) / screenSize;
 	float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
@@ -215,7 +226,7 @@ float3 ReconstructWorldPosition(uint2 pixel, float linearDepth)
 	return mul(viewInverse, float4(positionVS, 1.0f)).xyz;
 }
 
-float3 ReconstructWorldViewDirection(uint2 pixel)
+float3 ReconstructWorldViewDirection(uint2 pixel, DeferredFrameData frame)
 {
 	float2 uv = (float2(pixel) + 0.5f) / screenSize;
 	float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
@@ -224,7 +235,8 @@ float3 ReconstructWorldViewDirection(uint2 pixel)
 	return normalize(mul(viewInverse, float4(-positionVS.xyz, 0.0f)).xyz);
 }
 
-void AccumulateParity(uint baseSlot, uint2 pixel, float3 candidate)
+void AccumulateParity(uint baseSlot, uint2 pixel, float3 candidate,
+	Texture2D<float4> CompatibilityReferenceTexture, RWTexture2D<uint> FrameMarker)
 {
 	float3 reference = CompatibilityReferenceTexture.Load(int3(pixel, 0)).rgb;
 	float3 delta = candidate - reference;
@@ -253,6 +265,35 @@ void AccumulateParity(uint baseSlot, uint2 pixel, float3 candidate)
 [numthreads(64, 1, 1)]
 void main(uint3 dispatchThread : SV_DispatchThreadID)
 {
+	ConstantBuffer<DeferredFrameData> frameBuffer = ResourceDescriptorHeap[frameConstantsIndex];
+	DeferredFrameData frame = frameBuffer;
+	Texture2D<float4> SpecularTexture = ResourceDescriptorHeap[descriptorIndices0.x];
+	Texture2D<float4> AlbedoTexture = ResourceDescriptorHeap[descriptorIndices0.y];
+	Texture2D<float> LinearDepthTexture = ResourceDescriptorHeap[descriptorIndices0.z];
+	StructuredBuffer<Light> Lights = ResourceDescriptorHeap[descriptorIndices0.w];
+	StructuredBuffer<LightingContext> Contexts = ResourceDescriptorHeap[descriptorIndices1.x];
+	StructuredBuffer<Cluster> Clusters = ResourceDescriptorHeap[descriptorIndices1.y];
+	StructuredBuffer<LightPage> Pages = ResourceDescriptorHeap[descriptorIndices1.z];
+	Texture2D<uint4> PackedSurfaceTexture = ResourceDescriptorHeap[descriptorIndices1.w];
+	Texture2D<float4> LocalShadowMaskTexture = ResourceDescriptorHeap[descriptorIndices2.x];
+	Texture2D<float4> NormalRoughnessTexture = ResourceDescriptorHeap[descriptorIndices2.y];
+	Texture2D<float4> CompatibilityReferenceTexture = ResourceDescriptorHeap[descriptorIndices2.z];
+	Texture2D<float4> MasksTexture = ResourceDescriptorHeap[descriptorIndices2.w];
+	Texture2D<float> ScreenSpaceShadowTexture = ResourceDescriptorHeap[descriptorIndices3.x];
+	StructuredBuffer<uint2> EvaluatorPixelList = ResourceDescriptorHeap[descriptorIndices3.y];
+	Texture2D<float4> EnvironmentIBLTexture = ResourceDescriptorHeap[descriptorIndices3.z];
+	Texture2D<float4> SkyIBLTexture = ResourceDescriptorHeap[descriptorIndices3.w];
+	Texture2DArray<float4> SkylightingProbeTexture = ResourceDescriptorHeap[descriptorIndices4.x];
+	Texture2DArray<float> SkylightingVisibilityTexture = ResourceDescriptorHeap[descriptorIndices4.y];
+	Texture2D<float4> ReflectanceTexture = ResourceDescriptorHeap[descriptorIndices4.z];
+	StructuredBuffer<PBRMaterialRecord> PBRMaterials = ResourceDescriptorHeap[descriptorIndices4.w];
+	RWTexture2D<float4> CompositeTexture = ResourceDescriptorHeap[descriptorIndices5.y];
+	RWTexture2D<uint> FrameMarker = ResourceDescriptorHeap[descriptorIndices5.z];
+	RWTexture2D<float4> SpecularCompositeTexture = ResourceDescriptorHeap[descriptorIndices5.w];
+	RWTexture2D<float4> ReflectanceCompositeTexture = ResourceDescriptorHeap[descriptorIndices6.x];
+	RWTexture2D<float4> AlbedoCompositeTexture = ResourceDescriptorHeap[descriptorIndices6.y];
+	RWTexture2D<float4> NormalCompositeTexture = ResourceDescriptorHeap[descriptorIndices6.z];
+	RWTexture2D<float4> MasksCompositeTexture = ResourceDescriptorHeap[descriptorIndices6.w];
 	uint evaluatorPixelIndex = dispatchThread.y * evaluatorDispatchWidth + dispatchThread.x;
 	if (evaluatorID != CS_FIXED_EVALUATOR ||
 		evaluatorPixelIndex >= evaluatorPixelCount)
@@ -320,7 +361,7 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 	}
 
 	LightingContext lightingContext = Contexts[contextIndex];
-	if (lightingContext.abiVersion != abiVersion) {
+	if (lightingContext.abiVersion != frame.abiVersion) {
 		CompositeTexture[pixel.xy] = float4(1, 0, 1, 1);
 		return;
 	}
@@ -342,11 +383,11 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 	uint2 tile = min(pixel.xy / 64, clusterGrid.xy - 1);
 	uint clusterIndex = tile.x + tile.y * clusterGrid.x + slice * clusterGrid.x * clusterGrid.y;
 	Cluster cluster = Clusters[clusterIndex];
-	float3 positionWS = ReconstructWorldPosition(pixel.xy, depth);
+	float3 positionWS = ReconstructWorldPosition(pixel.xy, depth, frame);
 	float4 normalRoughnessSample = NormalRoughnessTexture.Load(int3(pixel.xy, 0));
 	float3 normalVS = DecodeCSNormal(normalRoughnessSample.xy);
 	float3 normalWS = normalize(mul(viewInverse, float4(normalVS, 0.0f)).xyz);
-	float3 viewDirection = ReconstructWorldViewDirection(pixel.xy);
+	float3 viewDirection = ReconstructWorldViewDirection(pixel.xy, frame);
 
 #if defined(CS_DEFERRED_TRUE_PBR)
 	if (evaluatorID == CS_EVALUATOR_TRUE_PBR ||
@@ -360,7 +401,7 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 		// this same check as a hard precondition before promotion.
 		if (materialRecordIndex != 0xFFFFu &&
 			(materialRecordIndex >= pbrMaterialCount ||
-			 PBRMaterials[materialRecordIndex].abiVersion != abiVersion))
+			 PBRMaterials[materialRecordIndex].abiVersion != frame.abiVersion))
 			return;
 		if (evaluatorID == CS_EVALUATOR_TRUE_PBR_GLINT &&
 			materialRecordIndex == 0xFFFFu)
@@ -483,7 +524,7 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 			DirectLightingOutput directional = EvaluateDeferredTruePBRDirect(material,
 				normalWS, coatNormalWS, viewDirection, directionalDirection, directionalColor,
 				directionalShadow, directionalSoftShadow, wetnessNormalWS, wetnessRoughness,
-				pbrTbnTr);
+				pbrTbnTr, frame);
 			direct.diffuse += directional.diffuse;
 			direct.specular += directional.specular;
 			direct.transmission += directional.transmission;
@@ -518,7 +559,7 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 						DirectLightingOutput local = EvaluateDeferredTruePBRDirect(material,
 							normalWS, coatNormalWS, viewDirection, toLight / max(distanceToLight, 1e-6f),
 							lightColor, shadow, shadow, wetnessNormalWS, wetnessRoughness,
-							pbrTbnTr);
+							pbrTbnTr, frame);
 						direct.diffuse += local.diffuse;
 						direct.specular += local.specular;
 						direct.transmission += local.transmission;
@@ -574,7 +615,7 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 				(evaluatorID == CS_EVALUATOR_TRUE_PBR_SUBSURFACE_FUZZ ? 80u :
 				(evaluatorID == CS_EVALUATOR_TRUE_PBR_COAT ? 96u :
 				(evaluatorID == CS_EVALUATOR_TRUE_PBR_TERRAIN ? 112u : 128u)));
-			AccumulateParity(parityBase, pixel.xy, candidate);
+			AccumulateParity(parityBase, pixel.xy, candidate, CompatibilityReferenceTexture, FrameMarker);
 		}
 		CompositeTexture[pixel.xy] = float4(candidate, resolvedCoverage);
 		SpecularCompositeTexture[pixel.xy] = float4(direct.specular, resolvedCoverage);
@@ -616,7 +657,7 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 		SpecularCompositeTexture[pixel.xy] = 0.0f;
 		ReflectanceCompositeTexture[pixel.xy] = 0.0f;
 		if ((frameFlags & 8u) != 0u)
-			AccumulateParity(32u, pixel.xy, candidate);
+			AccumulateParity(32u, pixel.xy, candidate, CompatibilityReferenceTexture, FrameMarker);
 		return;
 	}
 
@@ -707,7 +748,7 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 			CSDeferredApplySkylighting(candidate, ambientLit, albedo, skylightingDiffuse,
 				enableLinearLighting != 0u);
 		if ((frameFlags & 8u) != 0)
-			AccumulateParity(0u, pixel.xy, candidate);
+			AccumulateParity(0u, pixel.xy, candidate, CompatibilityReferenceTexture, FrameMarker);
 		CompositeTexture[pixel.xy] = float4(candidate, 1.0f);
 		SpecularCompositeTexture[pixel.xy] = float4(specular * normalRoughnessSample.z, 1.0f);
 		ReflectanceCompositeTexture[pixel.xy] = 0.0f;
@@ -742,7 +783,7 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 			materialClass, lightingContext, normalWS, viewDirection,
 			directionalLightDirection, directionalColor, directionalShadow,
 			directionalSoftShadow, glossiness, foliageRimSoftColor,
-			foliageBackLightColor);
+			foliageBackLightColor, frame);
 		directIrradiance += directionalLighting.diffuse;
 		directSpecular += directionalLighting.specular;
 	}
@@ -781,7 +822,7 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 						materialClass, lightingContext, normalWS, viewDirection,
 						toLight / max(distanceToLight, 1e-6f), lightColor, shadow,
 						shadow, glossiness, foliageRimSoftColor,
-						foliageBackLightColor);
+						foliageBackLightColor, frame);
 					directIrradiance += localLighting.diffuse;
 					directSpecular += localLighting.specular;
 				}
@@ -845,7 +886,7 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 			ReflectanceCompositeTexture[pixel.xy] = 0.0f;
 		if ((frameFlags & 8u) != 0)
 			AccumulateParity(materialClass == CS_MATERIAL_FoliageSpecial ? 48u : 16u,
-				pixel.xy, candidate);
+				pixel.xy, candidate, CompatibilityReferenceTexture, FrameMarker);
 		CompositeTexture[pixel.xy] = float4(candidate, 1.0f);
 	}
 }

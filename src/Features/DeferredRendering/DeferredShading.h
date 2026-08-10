@@ -1,18 +1,23 @@
 #pragma once
 
-#include <CommunityShaders/DX12GraphAPI.h>
+#include <rhi.h>
 
 #include "Features/DeferredRendering/DeferredTypes.h"
-#include "RenderGraph/DX12InteropCoordinator.h"
+#include "Features/DeferredRendering.h"
+#include "RenderGraph/D3D11InteropBridge.h"
 #include <array>
+#include <cstddef>
 
-class DX12RenderRuntime;
+namespace org { struct PassExecutionContext; class Resource; }
+
+class RenderGraphRuntime;
+class DeferredShadingExtension;
 
 class DX12DeferredShading
 {
 public:
 	static DX12DeferredShading& Get();
-	bool Initialize(DX12RenderRuntime& runtime) noexcept;
+	bool Initialize(RenderGraphRuntime& runtime) noexcept;
 	void Shutdown() noexcept;
 	bool PrepareLinearDepth(uint32_t width, uint32_t height) noexcept;
 	bool PrepareCompatibilityInput(ID3D11Texture2D* source) noexcept;
@@ -25,20 +30,33 @@ public:
 	bool ShouldCommitComposite() const noexcept;
 	bool CommitComposite(ID3D11Texture2D* destination) noexcept;
 	ID3D11ShaderResourceView* GetCompositeSRV() const noexcept { return composite.srv11.get(); }
+	std::uint32_t GetEnabledEvaluatorMask() const noexcept;
+	enum class NativeBinningStage : std::uint32_t { Clear, Histogram, Prefix, Scatter };
+	struct NativeBinningBindings
+	{
+		std::uint32_t packedSurface{ UINT32_MAX };
+		std::uint32_t linearDepth{ UINT32_MAX };
+		std::uint32_t counts{ UINT32_MAX };
+		std::uint32_t offsets{ UINT32_MAX };
+		std::uint32_t cursors{ UINT32_MAX };
+		std::uint32_t pixels{ UINT32_MAX };
+		std::uint32_t indirectArguments{ UINT32_MAX };
+		std::uint32_t marker{ UINT32_MAX };
+	};
+	struct NativeEvaluatorBindings
+	{
+		std::array<std::uint32_t, 28> descriptors{};
+		std::uint32_t frameConstants{ UINT32_MAX };
+		rhi::ResourceHandle indirectArguments{};
+	};
+	bool RecordNativeBinning(org::PassExecutionContext& context,
+		NativeBinningStage stage, const NativeBinningBindings& bindings) noexcept;
+	bool RecordNativeEvaluator(org::PassExecutionContext& context,
+		std::size_t evaluator, const NativeEvaluatorBindings& bindings) noexcept;
+	void UpdateNativeFrame(const std::shared_ptr<org::Resource>& constantsResource);
 
 private:
-	static CSDX12Status CS_DX12_GRAPH_CALL Build(void* userData, CSDX12BuildHandle build);
-	static CSDX12Status CS_DX12_GRAPH_CALL Execute(void* userData, const CSDX12ExecutionContext* context);
-	static CSDX12Status CS_DX12_GRAPH_CALL ExecuteBinClear(void* userData, const CSDX12ExecutionContext* context);
-	static CSDX12Status CS_DX12_GRAPH_CALL ExecuteBinHistogram(void* userData, const CSDX12ExecutionContext* context);
-	static CSDX12Status CS_DX12_GRAPH_CALL ExecuteBinPrefix(void* userData, const CSDX12ExecutionContext* context);
-	static CSDX12Status CS_DX12_GRAPH_CALL ExecuteBinScatter(void* userData, const CSDX12ExecutionContext* context);
-	static void CS_DX12_GRAPH_CALL OnGenerationActivated(void* userData, CSDX12GenerationHandle generation) noexcept;
-	static void CS_DX12_GRAPH_CALL OnDeviceLost(void* userData, std::uint32_t reason) noexcept;
-	static void CS_DX12_GRAPH_CALL OnShutdown(void* userData);
-	CSDX12Status Record(const CSDX12ExecutionContext& context) noexcept;
-	enum class BinningStage { Clear, Histogram, Prefix, Scatter };
-	CSDX12Status RecordBinning(const CSDX12ExecutionContext& context, BinningStage stage) noexcept;
+	friend class DeferredShadingExtension;
 	bool EnsureComposite(uint32_t width, uint32_t height, DXGI_FORMAT format) noexcept;
 	bool EnsureGBufferInputs() noexcept;
 	bool EnsureLinearDepth(uint32_t width, uint32_t height) noexcept;
@@ -46,51 +64,27 @@ private:
 	bool EnsureCompositeBlit(ID3D11Texture2D* destination) noexcept;
 	bool CreatePipeline() noexcept;
 	bool CreateBinningPipelines() noexcept;
-	std::uint32_t GetEnabledEvaluatorMask() const noexcept;
 
 	struct ImportedInput
 	{
 		winrt::com_ptr<ID3D11Texture2D> source;
-		DX12InteropCoordinator::SharedTexture mirror;
-		CSDX12ResourceHandle handle{};
+		D3D11InteropBridge::SharedTexture mirror;
 	};
 
-	DX12RenderRuntime* runtime{};
-	CSDX12RegistrationHandle registration{};
-	CSDX12ResourceHandle compositeHandle{};
-	CSDX12ResourceHandle specularCompositeHandle{};
-	CSDX12ResourceHandle reflectanceCompositeHandle{};
-	CSDX12ResourceHandle albedoCompositeHandle{};
-	CSDX12ResourceHandle normalCompositeHandle{};
-	CSDX12ResourceHandle masksCompositeHandle{};
-	DX12InteropCoordinator::SharedTexture composite;
-	DX12InteropCoordinator::SharedTexture specularComposite;
-	DX12InteropCoordinator::SharedTexture reflectanceComposite;
-	DX12InteropCoordinator::SharedTexture albedoComposite;
-	DX12InteropCoordinator::SharedTexture normalComposite;
-	DX12InteropCoordinator::SharedTexture masksComposite;
-	DX12InteropCoordinator::SharedTexture linearDepth;
-	DX12InteropCoordinator::SharedTexture localShadowMask;
-	DX12InteropCoordinator::SharedTexture screenSpaceShadow;
-	DX12InteropCoordinator::SharedTexture compatibilityReference;
-	DX12InteropCoordinator::SharedTexture frameMarker;
-	DX12InteropCoordinator::SharedTexture packedSurfaceMirror;
-	CSDX12ResourceHandle localShadowMaskHandle{};
-	CSDX12ResourceHandle screenSpaceShadowHandle{};
-	CSDX12ResourceHandle compatibilityReferenceHandle{};
-	CSDX12ResourceHandle linearDepthHandle{};
-	CSDX12ResourceHandle frameMarkerHandle{};
-	CSDX12ResourceHandle packedSurfaceMirrorHandle{};
-	CSDX12ResourceHandle lightsHandle{};
-	CSDX12ResourceHandle contextsHandle{};
-	CSDX12ResourceHandle pbrMaterialsHandle{};
-	CSDX12ResourceHandle clustersHandle{};
-	CSDX12ResourceHandle pagesHandle{};
-	CSDX12ResourceHandle evaluatorCountsHandle{};
-	CSDX12ResourceHandle evaluatorOffsetsHandle{};
-	CSDX12ResourceHandle evaluatorCursorsHandle{};
-	CSDX12ResourceHandle evaluatorPixelListHandle{};
-	CSDX12ResourceHandle evaluatorIndirectArgsHandle{};
+	RenderGraphRuntime* runtime{};
+	std::uint64_t nativeRegistration{};
+	D3D11InteropBridge::SharedTexture composite;
+	D3D11InteropBridge::SharedTexture specularComposite;
+	D3D11InteropBridge::SharedTexture reflectanceComposite;
+	D3D11InteropBridge::SharedTexture albedoComposite;
+	D3D11InteropBridge::SharedTexture normalComposite;
+	D3D11InteropBridge::SharedTexture masksComposite;
+	D3D11InteropBridge::SharedTexture linearDepth;
+	D3D11InteropBridge::SharedTexture localShadowMask;
+	D3D11InteropBridge::SharedTexture screenSpaceShadow;
+	D3D11InteropBridge::SharedTexture compatibilityReference;
+	D3D11InteropBridge::SharedTexture frameMarker;
+	D3D11InteropBridge::SharedTexture packedSurfaceMirror;
 	winrt::com_ptr<ID3D11ComputeShader> linearizeDepthShader;
 	winrt::com_ptr<ID3D11VertexShader> compositeBlitVS;
 	winrt::com_ptr<ID3D11PixelShader> compositeBlitPS;
@@ -109,12 +103,11 @@ private:
 	winrt::com_ptr<ID3D11Texture2D> masksBlitDestination;
 	winrt::com_ptr<ID3D11RenderTargetView> masksBlitRTV;
 	winrt::com_ptr<ID3D11Buffer> handoffConstants;
-	winrt::com_ptr<ID3D12Device> device;
-	winrt::com_ptr<ID3D12RootSignature> rootSignature;
-	std::array<winrt::com_ptr<ID3D12PipelineState>, CS::Deferred::kEvaluatorCount> evaluatorPipelines;
-	winrt::com_ptr<ID3D12RootSignature> binningRootSignature;
-	std::array<winrt::com_ptr<ID3D12PipelineState>, 4> binningPipelines;
-	winrt::com_ptr<ID3D12CommandSignature> evaluatorCommandSignature;
+	rhi::PipelineLayoutPtr evaluatorLayout;
+	std::array<rhi::PipelinePtr, CS::Deferred::kEvaluatorCount> evaluatorPipelines;
+	rhi::PipelineLayoutPtr binningLayout;
+	std::array<rhi::PipelinePtr, 4> binningPipelines;
+	rhi::CommandSignaturePtr evaluatorCommandSignature;
 	std::array<ImportedInput, 6> inputs;
 	ImportedInput envIBLInput;
 	ImportedInput skyIBLInput;
@@ -127,12 +120,8 @@ private:
 	// Deliberately false until material assets can be opened directly by D3D12
 	// (or are natively D3D12-owned). Material textures are never mirrored.
 	bool materialTextureSharingAvailable{};
-	CSDX12ResourceHandle envIBLHandle{};
-	CSDX12ResourceHandle skyIBLHandle{};
-	CSDX12ResourceHandle skylightingProbeHandle{};
-	CSDX12ResourceHandle skylightingVisibilityHandle{};
-	CSDX12ResourceHandle glintNoiseHandle{};
 	winrt::com_ptr<ID3D11Texture2D> parityCounterReadback;
 	bool parityCounterPending{};
 	uint64_t dispatchCount{};
+	std::shared_ptr<const DeferredRendering::FrameSnapshot> nativeFrameSnapshot;
 };

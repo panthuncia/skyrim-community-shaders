@@ -129,21 +129,103 @@ if(COMMUNITYSHADERS_ENABLE_ORG_MODULE_SERVICES AND EXISTS "${CMAKE_CURRENT_SOURC
 endif()
 
 set(CS_DXC_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/extern/FidelityFX-SDK/framework/cauldron/framework/libs/dxc/bin/x64")
+set(CS_DEFERRED_NATIVE_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/DeferredNativeShaders")
+set(CS_DEFERRED_NATIVE_SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/package/Shaders/DeferredRendering/ClusteredLightingCS.hlsl")
+set(CS_DEFERRED_NATIVE_SHADER_OUTPUTS)
+foreach(_entry ClearCounters BuildClusters CullLights)
+    set(_output "${CS_DEFERRED_NATIVE_SHADER_DIR}/ClusteredLighting.${_entry}.dxil")
+    add_custom_command(
+        OUTPUT "${_output}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CS_DEFERRED_NATIVE_SHADER_DIR}"
+        COMMAND "${CS_DXC_RUNTIME_DIR}/dxc.exe" -T cs_6_6 -E ${_entry} -O3 -Fo "${_output}" "${CS_DEFERRED_NATIVE_SHADER_SOURCE}"
+        DEPENDS "${CS_DEFERRED_NATIVE_SHADER_SOURCE}"
+        VERBATIM)
+    list(APPEND CS_DEFERRED_NATIVE_SHADER_OUTPUTS "${_output}")
+endforeach()
+
+# Built-in DeferredRendering must not require the optional runtime compiler.
+# Compile the alpha feature's fixed structural pipeline as package artifacts.
+set(_deferred_shader_root "${CMAKE_CURRENT_SOURCE_DIR}/package/Shaders")
+set(_deferred_composite "${_deferred_shader_root}/DeferredRendering/DeferredCompositeCS.hlsl")
+set(_deferred_binning "${_deferred_shader_root}/DeferredRendering/DeferredPixelBinningCS.hlsl")
+file(GLOB_RECURSE _deferred_shader_dependencies CONFIGURE_DEPENDS
+    "${_deferred_shader_root}/*.hlsl" "${_deferred_shader_root}/*.hlsli"
+    "${_deferred_shader_root}/*.def")
+function(cs_add_deferred_evaluator _name _value)
+    set(_output "${CS_DEFERRED_NATIVE_SHADER_DIR}/DeferredEvaluator.${_name}.dxil")
+    set(_defines -D CS_FIXED_EVALUATOR=${_value})
+    if(ARGC GREATER 2)
+        list(APPEND _defines -D TRUE_PBR=1 -D CS_DEFERRED_TRUE_PBR=1 -D CSHADER=1)
+    endif()
+    if("${_name}" STREQUAL "true-pbr-glint")
+        list(APPEND _defines -D GLINT=1)
+    endif()
+    add_custom_command(OUTPUT "${_output}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CS_DEFERRED_NATIVE_SHADER_DIR}"
+        COMMAND "${CS_DXC_RUNTIME_DIR}/dxc.exe" -T cs_6_6 -E main -O3
+            -I "${_deferred_shader_root}/DeferredRendering" -I "${_deferred_shader_root}"
+            ${_defines} -Fo "${_output}" "${_deferred_composite}"
+        DEPENDS ${_deferred_shader_dependencies} VERBATIM)
+    set(CS_DEFERRED_NATIVE_SHADER_OUTPUTS ${CS_DEFERRED_NATIVE_SHADER_OUTPUTS} "${_output}" PARENT_SCOPE)
+endfunction()
+cs_add_deferred_evaluator(generic 1)
+cs_add_deferred_evaluator(grass 3)
+cs_add_deferred_evaluator(distant-tree 4)
+cs_add_deferred_evaluator(foliage-special 8)
+cs_add_deferred_evaluator(true-pbr-core 2 TRUE_PBR)
+cs_add_deferred_evaluator(true-pbr-subsurface-fuzz 9 TRUE_PBR)
+cs_add_deferred_evaluator(true-pbr-coat 10 TRUE_PBR)
+cs_add_deferred_evaluator(true-pbr-glint 11 TRUE_PBR)
+cs_add_deferred_evaluator(true-pbr-terrain 13 TRUE_PBR)
+
+set(_bin_entries ClearBinsCS HistogramCS PrefixSumAndArgsCS ScatterPixelsCS)
+set(_bin_names clear histogram prefix scatter)
+foreach(_index RANGE 0 3)
+    list(GET _bin_entries ${_index} _entry)
+    list(GET _bin_names ${_index} _name)
+    set(_output "${CS_DEFERRED_NATIVE_SHADER_DIR}/DeferredBinning.${_name}.dxil")
+    add_custom_command(OUTPUT "${_output}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CS_DEFERRED_NATIVE_SHADER_DIR}"
+        COMMAND "${CS_DXC_RUNTIME_DIR}/dxc.exe" -T cs_6_6 -E ${_entry} -O3
+            -I "${_deferred_shader_root}/DeferredRendering" -I "${_deferred_shader_root}"
+            -Fo "${_output}" "${_deferred_binning}"
+        DEPENDS ${_deferred_shader_dependencies} VERBATIM)
+    list(APPEND CS_DEFERRED_NATIVE_SHADER_OUTPUTS "${_output}")
+endforeach()
+add_custom_target(CSDeferredNativeShaders DEPENDS ${CS_DEFERRED_NATIVE_SHADER_OUTPUTS})
+add_dependencies(${PROJECT_NAME} CSDeferredNativeShaders)
 if(CS_BUILD_DX12_GRAPH_SAMPLES)
-    add_subdirectory(tests/DX12GraphDiagnostic)
+    add_subdirectory(tests/RenderGraphDiagnostic)
 endif()
 
 target_sources(${PROJECT_NAME} PRIVATE
+	"${CMAKE_CURRENT_SOURCE_DIR}/tests/RenderGraphAPI/FormatLayout.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/RenderGraphRegistry.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/RenderGraphRegistry.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/NativeRenderGraphRegistry.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/NativeRenderGraphRegistry.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/RenderGraphExecutionContext.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/RenderGraphAPIExports.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/GPUServiceAPI.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/LightCulling.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/LightCulling.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/ClusteredLightingExtension.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/ClusteredLightingExtension.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShadingExtension.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShadingExtension.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShading.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShading.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/DX12InteropCoordinator.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/DX12InteropCoordinator.h")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/D3D11InteropBridge.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/D3D11InteropBridge.h")
 
 # Keep dependency-specific warning and Windows macro policy local to the bridge.
 set_source_files_properties(
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/DX12GraphHost.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/RenderGraphHost.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/NativeRenderGraphRegistry.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/ClusteredLightingExtension.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShadingExtension.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShading.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/LightCulling.cpp"
     PROPERTIES
         COMPILE_DEFINITIONS NOMINMAX
         COMPILE_OPTIONS "/wd4100")
@@ -520,6 +602,8 @@ install(
     COMPONENT Shaders
     PATTERN "Tests" EXCLUDE
 )
+install(FILES ${CS_DEFERRED_NATIVE_SHADER_OUTPUTS}
+    DESTINATION Shaders/DeferredRendering COMPONENT Shaders)
 install(CODE "file(REMOVE \${CMAKE_INSTALL_PREFIX}/Core)" COMPONENT Shaders)
 
 # #######################################################################################################################
@@ -732,6 +816,8 @@ if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
     )
 
     append_copy_if_different(_shader_copy_cmds _package_shaders "${CMAKE_SOURCE_DIR}/package/Shaders" "${AIO_DIR}/Shaders")
+    append_copy_if_different(_shader_copy_cmds CS_DEFERRED_NATIVE_SHADER_OUTPUTS
+        "${CS_DEFERRED_NATIVE_SHADER_DIR}" "${AIO_DIR}/Shaders/DeferredRendering")
 
     # feature shader folders
     foreach(_fpath IN LISTS FEATURE_PATHS)
@@ -755,6 +841,7 @@ if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
         DEPENDS
             ${HLSL_FILES}
             ${SHADER_AUX_FILES}
+			${CS_DEFERRED_NATIVE_SHADER_OUTPUTS}
             ${CMAKE_SOURCE_DIR}/cmake/CleanupStaleEntries.cmake
         COMMENT "Copying changed shaders into AIO/Shaders"
     )
@@ -766,6 +853,7 @@ if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
         DEPENDS copy_shaders.stamp
         COMMENT "Preparing shaders for validation"
     )
+	add_dependencies(${PROJECT_NAME} prepare_shaders)
 endif()
 
 # Automatic deployment to CommunityShaders output directory.

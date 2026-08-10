@@ -1,14 +1,5 @@
 #include "DeferredRendering/DeferredMaterial.hlsli"
 
-Texture2D<uint4> PackedSurfaceTexture : register(t0);
-Texture2D<float> LinearDepthTexture : register(t1);
-RWStructuredBuffer<uint> EvaluatorCounts : register(u0);
-RWStructuredBuffer<uint> EvaluatorOffsets : register(u1);
-RWStructuredBuffer<uint> EvaluatorWriteCursors : register(u2);
-RWStructuredBuffer<uint2> PixelList : register(u3);
-RWByteAddressBuffer IndirectCommands : register(u4);
-RWTexture2D<uint> MaterialClassification : register(u5);
-
 cbuffer PixelBinningConstants : register(b0)
 {
 	uint width;
@@ -18,6 +9,14 @@ cbuffer PixelBinningConstants : register(b0)
 	uint enabledEvaluatorMask;
 	uint classificationEnabled;
 	float farPlane;
+	uint packedSurfaceIndex;
+	uint linearDepthIndex;
+	uint evaluatorCountsIndex;
+	uint evaluatorOffsetsIndex;
+	uint evaluatorCursorsIndex;
+	uint pixelListIndex;
+	uint indirectCommandsIndex;
+	uint materialClassificationIndex;
 };
 
 static const uint CS_CLASSIFICATION_VISIBLE_BASE = 160u;
@@ -45,6 +44,11 @@ static const uint CS_EVALUATOR_GROUP_SIZE = 64u;
 [numthreads(64, 1, 1)]
 void ClearBinsCS(uint3 threadID : SV_DispatchThreadID)
 {
+	RWStructuredBuffer<uint> EvaluatorCounts = ResourceDescriptorHeap[evaluatorCountsIndex];
+	RWStructuredBuffer<uint> EvaluatorOffsets = ResourceDescriptorHeap[evaluatorOffsetsIndex];
+	RWStructuredBuffer<uint> EvaluatorWriteCursors = ResourceDescriptorHeap[evaluatorCursorsIndex];
+	RWByteAddressBuffer IndirectCommands = ResourceDescriptorHeap[indirectCommandsIndex];
+	RWTexture2D<uint> MaterialClassification = ResourceDescriptorHeap[materialClassificationIndex];
 	if (threadID.x < evaluatorCount) {
 		EvaluatorCounts[threadID.x] = 0u;
 		EvaluatorOffsets[threadID.x] = 0u;
@@ -69,6 +73,10 @@ groupshared uint groupUnclassifiedDepth;
 [numthreads(8, 8, 1)]
 void HistogramCS(uint3 threadID : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 {
+	Texture2D<uint4> PackedSurfaceTexture = ResourceDescriptorHeap[packedSurfaceIndex];
+	Texture2D<float> LinearDepthTexture = ResourceDescriptorHeap[linearDepthIndex];
+	RWStructuredBuffer<uint> EvaluatorCounts = ResourceDescriptorHeap[evaluatorCountsIndex];
+	RWTexture2D<uint> MaterialClassification = ResourceDescriptorHeap[materialClassificationIndex];
 	if (groupIndex < evaluatorCount)
 		groupHistogram[groupIndex] = 0u;
 	if (classificationEnabled) {
@@ -129,6 +137,9 @@ void HistogramCS(uint3 threadID : SV_DispatchThreadID, uint groupIndex : SV_Grou
 [numthreads(64, 1, 1)]
 void PrefixSumAndArgsCS(uint3 threadID : SV_DispatchThreadID)
 {
+	RWStructuredBuffer<uint> EvaluatorCounts = ResourceDescriptorHeap[evaluatorCountsIndex];
+	RWStructuredBuffer<uint> EvaluatorOffsets = ResourceDescriptorHeap[evaluatorOffsetsIndex];
+	RWByteAddressBuffer IndirectCommands = ResourceDescriptorHeap[indirectCommandsIndex];
 	if (threadID.x != 0u)
 		return;
 	uint offset = 0u;
@@ -153,6 +164,10 @@ void PrefixSumAndArgsCS(uint3 threadID : SV_DispatchThreadID)
 [numthreads(8, 8, 1)]
 void ScatterPixelsCS(uint3 threadID : SV_DispatchThreadID)
 {
+	Texture2D<uint4> PackedSurfaceTexture = ResourceDescriptorHeap[packedSurfaceIndex];
+	RWStructuredBuffer<uint> EvaluatorOffsets = ResourceDescriptorHeap[evaluatorOffsetsIndex];
+	RWStructuredBuffer<uint> EvaluatorWriteCursors = ResourceDescriptorHeap[evaluatorCursorsIndex];
+	RWStructuredBuffer<uint2> PixelList = ResourceDescriptorHeap[pixelListIndex];
 	if (threadID.x >= width || threadID.y >= height)
 		return;
 	uint materialClass = CSDeferredMaterialClass(PackedSurfaceTexture.Load(int3(threadID.xy, 0)).x);

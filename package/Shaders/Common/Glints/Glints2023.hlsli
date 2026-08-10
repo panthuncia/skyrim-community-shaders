@@ -3,7 +3,14 @@
 
 namespace Glints
 {
+#if defined(CS_GLINT_BINDLESS)
+	// Native ORG passes consume the graph-owned shader-visible heap.  The
+	// deferred evaluator supplies the glint-noise SRV in descriptorIndices5.x;
+	// keeping a fixed t20 declaration here would require a private descriptor
+	// table and defeats the shared bindless contract.
+#else
 	Texture2D<float4> Glint2023NoiseMap : register(t20);
+#endif
 
 	//=======================================================================================
 	// TOOLS
@@ -226,7 +233,12 @@ namespace Glints
 		slopeLerp = frac(slope2);
 		uint2 slopeCoord = uint2(floor(slope2)) % size;
 
+#if defined(CS_GLINT_BINDLESS)
+		Texture2D<float4> glintNoiseMap = ResourceDescriptorHeap[descriptorIndices5.x];
+		float4 packedRead = glintNoiseMap[slopeCoord];
+#else
 		float4 packedRead = Glint2023NoiseMap[slopeCoord];
+#endif
 		UnpackFloatParallel4(packedRead, outUniform, outGaussian);
 	}
 

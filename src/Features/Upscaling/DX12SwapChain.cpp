@@ -2,12 +2,13 @@
 
 #include <FidelityFX/api/include/dx12/ffx_api_dx12.hpp>
 #include <dxgi1_6.h>
+#include <rhi_interop_dx12.h>
 
 #include "../HDRDisplay.h"
 #include "../Upscaling.h"
 #include "FidelityFX.h"
 #include "Streamline.h"
-#include "RenderGraph/DX12RenderRuntime.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
 namespace
 {
@@ -22,9 +23,9 @@ namespace
 
 void DX12SwapChain::CreateSwapChain(IDXGIAdapter* adapter, DXGI_SWAP_CHAIN_DESC a_swapChainDesc)
 {
-	auto& runtime = DX12RenderRuntime::Get();
-	Borrow(d3d12Device, runtime.GetNativeDevice());
-	Borrow(commandQueue, runtime.GetGraphicsQueue());
+	auto& runtime = RenderGraphRuntime::Get();
+	Borrow(d3d12Device, rhi::dx12::get_device(runtime.GetRHIDevice()));
+	Borrow(commandQueue, rhi::dx12::get_queue(runtime.GetRHIDevice().GetQueue(rhi::QueueKind::Graphics)));
 	for (int i = 0; i < 2; i++) {
 		DX::ThrowIfFailed(d3d12Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&commandAllocators[i])));
 		DX::ThrowIfFailed(d3d12Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, commandAllocators[i].get(), nullptr, IID_PPV_ARGS(&commandLists[i])));

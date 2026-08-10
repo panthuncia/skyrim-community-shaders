@@ -1,5 +1,5 @@
 #include "Deferred.h"
-#include "RenderGraph/DX12RenderRuntime.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
 #include <DDSTextureLoader.h>
 
@@ -534,9 +534,9 @@ void Deferred::EndDeferred()
 		if (!packedSurfaceMirrorReady)
 			logger::error("[DeferredRendering] Packed-surface mirror preparation failed; skipping the DX12 epoch");
 		if(mainDescription.Width&&mainDescription.Height&&shadowMaskReady&&screenShadowReady&&packedSurfaceMirrorReady&&gbufferInputsReady&&indirectLightingInputsReady&&glintNoiseReady&&dx12Deferred.PrepareCompatibilityInput(mainTarget.texture)) {
-			static std::once_flag epochPreparationLogged;
-			std::call_once(epochPreparationLogged, [] { logger::info("[DeferredRendering] D3D11 producers are ready for the first DX12 epoch"); });
-			const bool submitted = DX12RenderRuntime::Get().ExecuteDeferredEpoch(
+			static std::once_flag graphPreparationLogged;
+			std::call_once(graphPreparationLogged, [] { logger::info("[DeferredRendering] D3D11 producers are ready for the first ORG execution"); });
+			const bool submitted = RenderGraphRuntime::Get().ExecuteGraph(
 				activeWidth, activeHeight, mainDescription.Width, mainDescription.Height);
 			if(submitted && dx12Deferred.ShouldCommitComposite() && !dx12Deferred.CommitComposite(mainTarget.texture))
 				logger::error("[DeferredRendering] Failed to commit the DX12 composite");

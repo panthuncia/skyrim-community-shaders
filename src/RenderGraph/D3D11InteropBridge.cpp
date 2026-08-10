@@ -1,18 +1,89 @@
-#include "DX12InteropCoordinator.h"
+#include "D3D11InteropBridge.h"
 
 #include "PCH.h"
+#include <rhi_helpers.h>
+#include <rhi_interop_dx12.h>
 
-DX12InteropCoordinator::DX12InteropCoordinator(ID3D11Device5* d3d11, ID3D12Device* d3d12)
+namespace
 {
-	device11.copy_from(d3d11);
-	device12.copy_from(d3d12);
+	DXGI_FORMAT ToDXGI(rhi::Format format) noexcept
+	{
+		if (format == rhi::Format::Unknown) return DXGI_FORMAT_UNKNOWN;
+		for (uint32_t value = 1; value <= static_cast<uint32_t>(DXGI_FORMAT_SAMPLER_FEEDBACK_MIP_REGION_USED_OPAQUE); ++value) {
+			const auto candidate = static_cast<DXGI_FORMAT>(value);
+			if (rhi::helpers::ToRHI(candidate) == format) return candidate;
+		}
+		return DXGI_FORMAT_UNKNOWN;
+	}
+
+	std::shared_ptr<void> RetainNative(ID3D12Resource* native)
+	{
+		if (!native) return {};
+		native->AddRef();
+		return { native, [](void* value) { static_cast<ID3D12Resource*>(value)->Release(); } };
+	}
+
+	bool OpenSharedTexture(rhi::Device device, ID3D11Texture2D* texture, std::shared_ptr<void>& output) noexcept
+	{
+		auto* nativeDevice = rhi::dx12::get_device(device);
+		if (!texture || !nativeDevice) return false;
+		try {
+			D3D11_TEXTURE2D_DESC description{};
+			texture->GetDesc(&description);
+			if (description.Usage != D3D11_USAGE_DEFAULT || description.SampleDesc.Count != 1 ||
+				(description.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) == 0) return false;
+			winrt::com_ptr<IDXGIResource1> dxgiResource;
+			if (FAILED(texture->QueryInterface(dxgiResource.put()))) return false;
+			HANDLE handle{};
+			if (FAILED(dxgiResource->CreateSharedHandle(nullptr,
+				DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &handle))) return false;
+			winrt::com_ptr<ID3D12Resource> native;
+			const auto result = nativeDevice->OpenSharedHandle(handle, IID_PPV_ARGS(native.put()));
+			CloseHandle(handle);
+			if (FAILED(result)) return false;
+			output = RetainNative(native.get());
+			return static_cast<bool>(output);
+		} catch (...) { return false; }
+	}
 }
 
-bool DX12InteropCoordinator::CreateD3D12OwnedSharedTexture(
+D3D11InteropBridge::D3D11InteropBridge(ID3D11Device5* d3d11, rhi::Device graphDevice) : device(graphDevice)
+{
+	device11.copy_from(d3d11);
+}
+
+bool D3D11InteropBridge::OpenTimeline(rhi::Timeline timeline, ID3D11Fence** output) const noexcept
+{
+	if (!output || !device11) return false;
+	*output = nullptr;
+	auto* nativeDevice = rhi::dx12::get_device(device);
+	auto* nativeTimeline = rhi::dx12::get_timeline(timeline);
+	if (!nativeDevice || !nativeTimeline) return false;
+	HANDLE handle{};
+	if (FAILED(nativeDevice->CreateSharedHandle(nativeTimeline, nullptr, GENERIC_ALL, nullptr, &handle))) return false;
+	const auto result = device11->OpenSharedFence(handle, IID_PPV_ARGS(output));
+	CloseHandle(handle);
+	return SUCCEEDED(result);
+}
+
+bool D3D11InteropBridge::ProbeGraphOwnedSharing() const noexcept
+{
+	auto* nativeDevice = rhi::dx12::get_device(device);
+	if (!nativeDevice) return false;
+	D3D12_FEATURE_DATA_D3D12_OPTIONS4 options{};
+	if (SUCCEEDED(nativeDevice->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS4, &options, sizeof(options))))
+		logger::info("[D3D11Interop] Shared-resource compatibility tier={}",
+			static_cast<unsigned>(options.SharedResourceCompatibilityTier));
+	SharedTexture probe;
+	return CreateGraphOwnedSharedTexture(1, 1, rhi::Format::R16G16B16A16_Float,
+		rhi::RF_AllowRenderTarget | rhi::RF_AllowUnorderedAccess, true, probe);
+}
+
+bool D3D11InteropBridge::CreateGraphOwnedSharedTexture(
 	uint32_t width,
 	uint32_t height,
-	DXGI_FORMAT format,
-	D3D12_RESOURCE_FLAGS flags,
+	rhi::Format format,
+	rhi::ResourceFlags flags,
 	bool createD3D11SRV,
 	SharedTexture& output) const noexcept
 {
@@ -21,19 +92,20 @@ bool DX12InteropCoordinator::CreateD3D12OwnedSharedTexture(
 	description.Height = height;
 	description.MipLevels = 1;
 	description.ArraySize = 1;
-	description.Format = format;
+	description.Format = ToDXGI(format);
 	description.SampleDesc.Count = 1;
-	return CreateD3D12OwnedSharedTexture(description, flags, createD3D11SRV, output);
+	return CreateGraphOwnedSharedTexture(description, flags, createD3D11SRV, output);
 }
 
-bool DX12InteropCoordinator::CreateD3D12OwnedSharedTexture(
+bool D3D11InteropBridge::CreateGraphOwnedSharedTexture(
 	const D3D11_TEXTURE2D_DESC& requested,
-	D3D12_RESOURCE_FLAGS flags,
+	rhi::ResourceFlags flags,
 	bool createD3D11SRV,
 	SharedTexture& output) const noexcept
 {
 	output = {};
-	if (!device11 || !device12 || !requested.Width || !requested.Height ||
+	auto* nativeDevice = rhi::dx12::get_device(device);
+	if (!device11 || !nativeDevice || !requested.Width || !requested.Height ||
 		!requested.ArraySize || requested.Format == DXGI_FORMAT_UNKNOWN ||
 		requested.SampleDesc.Count != 1)
 		return false;
@@ -53,18 +125,19 @@ bool DX12InteropCoordinator::CreateD3D12OwnedSharedTexture(
 		description.Format = requested.Format;
 		description.SampleDesc = requested.SampleDesc;
 		description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-		description.Flags = flags | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
-		const HRESULT createResult = device12->CreateCommittedResource(
+		description.Flags = static_cast<D3D12_RESOURCE_FLAGS>(flags) | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+		winrt::com_ptr<ID3D12Resource> nativeResource;
+		const HRESULT createResult = nativeDevice->CreateCommittedResource(
 			&heap, D3D12_HEAP_FLAG_SHARED, &description, D3D12_RESOURCE_STATE_COMMON,
-			nullptr, IID_PPV_ARGS(output.d3d12.put()));
+			nullptr, IID_PPV_ARGS(nativeResource.put()));
 		if (FAILED(createResult)) {
 			logger::error("[DX12Interop] D3D12 CreateCommittedResource(shared) failed: HRESULT=0x{:08X}, format={}, flags=0x{:X}",
 				static_cast<unsigned>(createResult), static_cast<unsigned>(requested.Format), static_cast<unsigned>(description.Flags));
 			return false;
 		}
 		HANDLE handle{};
-		const HRESULT shareResult = device12->CreateSharedHandle(
-			output.d3d12.get(), nullptr, GENERIC_ALL, nullptr, &handle);
+		const HRESULT shareResult = nativeDevice->CreateSharedHandle(
+			nativeResource.get(), nullptr, GENERIC_ALL, nullptr, &handle);
 		if (FAILED(shareResult)) {
 			logger::error("[DX12Interop] D3D12 CreateSharedHandle(Texture2D) failed: HRESULT=0x{:08X}", static_cast<unsigned>(shareResult));
 			output = {};
@@ -83,12 +156,14 @@ bool DX12InteropCoordinator::CreateD3D12OwnedSharedTexture(
 			output = {};
 			return false;
 		}
-		if ((flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0 &&
+		if ((flags & rhi::RF_AllowUnorderedAccess) != 0 &&
 			FAILED(device11->CreateUnorderedAccessView(output.d3d11.get(), nullptr, output.uav11.put()))) {
 			logger::error("[DX12Interop] CreateUnorderedAccessView for D3D12-owned shared texture failed");
 			output = {};
 			return false;
 		}
+		output.graphBacking = RetainNative(nativeResource.get());
+		if (!output.graphBacking) { output = {}; return false; }
 		output.d3d11->GetDesc(&output.description);
 		return true;
 	} catch (...) {
@@ -98,17 +173,19 @@ bool DX12InteropCoordinator::CreateD3D12OwnedSharedTexture(
 	}
 }
 
-bool DX12InteropCoordinator::CreateD3D12OwnedSharedTextureArray(
+bool D3D11InteropBridge::CreateGraphOwnedSharedTextureArray(
 	uint32_t width,
 	uint32_t height,
 	uint16_t arraySize,
-	DXGI_FORMAT format,
-	D3D12_RESOURCE_FLAGS flags,
+	rhi::Format format,
+	rhi::ResourceFlags flags,
 	bool createD3D11SRV,
 	SharedTexture& output) const noexcept
 {
 	output = {};
-	if (!device11 || !device12 || !width || !height || !arraySize || format == DXGI_FORMAT_UNKNOWN)
+	auto* nativeDevice = rhi::dx12::get_device(device);
+	const auto dxgiFormat = ToDXGI(format);
+	if (!device11 || !nativeDevice || !width || !height || !arraySize || dxgiFormat == DXGI_FORMAT_UNKNOWN)
 		return false;
 	try {
 		D3D12_HEAP_PROPERTIES heap{};
@@ -120,16 +197,17 @@ bool DX12InteropCoordinator::CreateD3D12OwnedSharedTextureArray(
 		description.Height = height;
 		description.DepthOrArraySize = arraySize;
 		description.MipLevels = 1;
-		description.Format = format;
+		description.Format = dxgiFormat;
 		description.SampleDesc.Count = 1;
 		description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-		description.Flags = flags | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
-		if (FAILED(device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED,
+		description.Flags = static_cast<D3D12_RESOURCE_FLAGS>(flags) | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+		winrt::com_ptr<ID3D12Resource> nativeResource;
+		if (FAILED(nativeDevice->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED,
 			&description, D3D12_RESOURCE_STATE_COMMON, nullptr,
-			IID_PPV_ARGS(output.d3d12.put()))))
+			IID_PPV_ARGS(nativeResource.put()))))
 			return false;
 		HANDLE handle{};
-		if (FAILED(device12->CreateSharedHandle(output.d3d12.get(), nullptr,
+		if (FAILED(nativeDevice->CreateSharedHandle(nativeResource.get(), nullptr,
 			GENERIC_ALL, nullptr, &handle))) {
 			output = {};
 			return false;
@@ -146,6 +224,8 @@ bool DX12InteropCoordinator::CreateD3D12OwnedSharedTextureArray(
 			output = {};
 			return false;
 		}
+		output.graphBacking = RetainNative(nativeResource.get());
+		if (!output.graphBacking) { output = {}; return false; }
 		output.d3d11->GetDesc(&output.description);
 		return true;
 	} catch (...) {
@@ -155,47 +235,7 @@ bool DX12InteropCoordinator::CreateD3D12OwnedSharedTextureArray(
 	}
 }
 
-bool DX12InteropCoordinator::OpenSharedTexture(ID3D11Texture2D* texture, ID3D12Resource** output) const noexcept
-{
-	if (!texture || !output || !device12)
-		return false;
-	*output = nullptr;
-	try {
-		D3D11_TEXTURE2D_DESC description{};
-		texture->GetDesc(&description);
-		if (description.Usage != D3D11_USAGE_DEFAULT || description.SampleDesc.Count != 1 ||
-			(description.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) == 0) {
-			logger::error("[DX12Interop] Rejected incompatible shared texture: usage={}, samples={}, misc=0x{:X}",
-				static_cast<unsigned>(description.Usage), description.SampleDesc.Count, description.MiscFlags);
-			return false;
-		}
-
-		winrt::com_ptr<IDXGIResource1> dxgiResource;
-		if (FAILED(texture->QueryInterface(dxgiResource.put())))
-			return false;
-		HANDLE handle{};
-		const HRESULT createResult = dxgiResource->CreateSharedHandle(
-			nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &handle);
-		if (FAILED(createResult)) {
-			logger::error("[DX12Interop] CreateSharedHandle(Texture2D) failed: HRESULT=0x{:08X}",
-				static_cast<unsigned>(createResult));
-			return false;
-		}
-		const HRESULT openResult = device12->OpenSharedHandle(handle, IID_PPV_ARGS(output));
-		CloseHandle(handle);
-		if (FAILED(openResult)) {
-			logger::error("[DX12Interop] D3D12 OpenSharedHandle(Texture2D) failed: HRESULT=0x{:08X}",
-				static_cast<unsigned>(openResult));
-			return false;
-		}
-		return true;
-	} catch (...) {
-		logger::error("[DX12Interop] Exception while opening shared Texture2D");
-		return false;
-	}
-}
-
-bool DX12InteropCoordinator::ImportReadOnlySharedTexture(
+bool D3D11InteropBridge::ImportReadOnlySharedTexture(
 	ID3D11Texture2D* source,
 	bool createD3D11SRV,
 	SharedTexture& imported) const noexcept
@@ -204,7 +244,7 @@ bool DX12InteropCoordinator::ImportReadOnlySharedTexture(
 		return false;
 	D3D11_TEXTURE2D_DESC description{};
 	source->GetDesc(&description);
-	if (imported.d3d11.get() == source && imported.d3d12 &&
+	if (imported.d3d11.get() == source && imported.graphBacking &&
 		imported.description.Width == description.Width && imported.description.Height == description.Height &&
 		imported.description.Format == description.Format)
 		return true;
@@ -212,7 +252,7 @@ bool DX12InteropCoordinator::ImportReadOnlySharedTexture(
 	SharedTexture candidate;
 	candidate.d3d11.copy_from(source);
 	candidate.description = description;
-	if (!OpenSharedTexture(source, candidate.d3d12.put()))
+	if (!OpenSharedTexture(device, source, candidate.graphBacking))
 		return false;
 	if (createD3D11SRV && FAILED(device11->CreateShaderResourceView(source, nullptr, candidate.srv11.put()))) {
 		logger::error("[DX12Interop] Failed to create D3D11 SRV for directly imported shared texture");
@@ -222,14 +262,14 @@ bool DX12InteropCoordinator::ImportReadOnlySharedTexture(
 	return true;
 }
 
-bool DX12InteropCoordinator::CreateSharedTexture(
+bool D3D11InteropBridge::CreateSharedTexture(
 	const D3D11_TEXTURE2D_DESC& requested,
 	bool createSRV,
 	bool createUAV,
 	SharedTexture& output) const noexcept
 {
 	output = {};
-	if (!device11 || !device12 || !requested.Width || !requested.Height ||
+	if (!device11 || !device || !requested.Width || !requested.Height ||
 		requested.Format == DXGI_FORMAT_UNKNOWN || requested.SampleDesc.Count != 1)
 		return false;
 	try {
@@ -246,7 +286,7 @@ bool DX12InteropCoordinator::CreateSharedTexture(
 				description.BindFlags, description.MiscFlags);
 			return false;
 		}
-		if (!OpenSharedTexture(output.d3d11.get(), output.d3d12.put())) {
+		if (!OpenSharedTexture(device, output.d3d11.get(), output.graphBacking)) {
 			output = {};
 			return false;
 		}
@@ -267,7 +307,14 @@ bool DX12InteropCoordinator::CreateSharedTexture(
 	}
 }
 
-bool DX12InteropCoordinator::EnsureReadOnlyMirror(ID3D11Texture2D* source, SharedTexture& mirror) const noexcept
+bool D3D11InteropBridge::ImportGraphResource(const SharedTexture& source, rhi::ResourcePtr& output) const noexcept
+{
+	if (!source.graphBacking) return false;
+	return !rhi::Failed(rhi::dx12::import_resource(
+		device, static_cast<ID3D12Resource*>(source.graphBacking.get()), output));
+}
+
+bool D3D11InteropBridge::EnsureReadOnlyMirror(ID3D11Texture2D* source, SharedTexture& mirror) const noexcept
 {
 	if (!source)
 		return false;
@@ -287,14 +334,14 @@ bool DX12InteropCoordinator::EnsureReadOnlyMirror(ID3D11Texture2D* source, Share
 	// Mirrors are the fallback for engine allocations that cannot be directly
 	// imported. The host readiness fence, rather than resource ownership, is what
 	// guarantees visibility of the D3D11 copy to D3D12.
-	if (!CreateD3D12OwnedSharedTexture(sourceDescription,
-		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, true, candidate))
+	if (!CreateGraphOwnedSharedTexture(sourceDescription,
+		rhi::RF_AllowRenderTarget, true, candidate))
 		return false;
 	mirror = std::move(candidate);
 	return true;
 }
 
-bool DX12InteropCoordinator::CopyToMirror(
+bool D3D11InteropBridge::CopyToMirror(
 	ID3D11DeviceContext* context,
 	ID3D11Texture2D* source,
 	SharedTexture& mirror) const noexcept

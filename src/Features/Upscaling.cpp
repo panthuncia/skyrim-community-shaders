@@ -10,7 +10,7 @@
 #include "Upscaling/Streamline.h"
 #include "Utils/Game.h"
 #include "Utils/UI.h"
-#include "RenderGraph/DX12RenderRuntime.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 #include <Windows.h>
 #include <algorithm>
 #include <cfloat>
@@ -128,8 +128,8 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 				pFeatureLevel,
 				ppImmediateContext));
 
-			if (!DX12RenderRuntime::Get().Initialize(*ppDevice, *ppImmediateContext)) {
-				logger::warn("[DX12RenderRuntime] Initialization failed; falling back to the normal D3D11 swap chain");
+			if (!RenderGraphRuntime::Get().Initialize(*ppDevice, *ppImmediateContext)) {
+				logger::warn("[RenderGraphRuntime] Initialization failed; falling back to the normal D3D11 swap chain");
 				(*ppImmediateContext)->Release();
 				(*ppDevice)->Release();
 				*ppImmediateContext = nullptr;
@@ -181,8 +181,8 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 		pFeatureLevel,
 		ppImmediateContext);
 
-	if (SUCCEEDED(ret) && !DX12RenderRuntime::Get().Initialize(*ppDevice, *ppImmediateContext))
-		logger::warn("[DX12RenderRuntime] Initialization failed; continuing with the D3D11 renderer");
+	if (SUCCEEDED(ret) && !RenderGraphRuntime::Get().Initialize(*ppDevice, *ppImmediateContext))
+		logger::warn("[RenderGraphRuntime] Initialization failed; continuing with the D3D11 renderer");
 
 	if (upscaling.IsBackendInitialized()) {
 		upscaling.UpgradeBackendInterface((void**)&(*ppDevice));

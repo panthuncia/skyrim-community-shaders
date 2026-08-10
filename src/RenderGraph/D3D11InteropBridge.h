@@ -1,71 +1,74 @@
 #pragma once
 
 #include <d3d11_4.h>
-#include <d3d12.h>
 #include <winrt/base.h>
+#include <rhi.h>
+#include <memory>
 
-class DX12InteropCoordinator
+class D3D11InteropBridge
 {
 public:
 	struct SharedTexture
 	{
 		winrt::com_ptr<ID3D11Texture2D> d3d11;
-		winrt::com_ptr<ID3D12Resource> d3d12;
+		std::shared_ptr<void> graphBacking;
 		winrt::com_ptr<ID3D11ShaderResourceView> srv11;
 		winrt::com_ptr<ID3D11UnorderedAccessView> uav11;
 		D3D11_TEXTURE2D_DESC description{};
 
-		explicit operator bool() const noexcept { return d3d11 && d3d12; }
+		explicit operator bool() const noexcept { return d3d11 && graphBacking; }
 	};
 
-	DX12InteropCoordinator(ID3D11Device5* device11, ID3D12Device* device12);
+	D3D11InteropBridge(ID3D11Device5* device11, rhi::Device device);
+	bool OpenTimeline(rhi::Timeline timeline, ID3D11Fence** output) const noexcept;
+	bool ProbeGraphOwnedSharing() const noexcept;
 
 	bool CreateSharedTexture(
 		const D3D11_TEXTURE2D_DESC& description,
 		bool createSRV,
 		bool createUAV,
 		SharedTexture& output) const noexcept;
-	// Preferred D3D12 -> D3D11 handoff. The D3D12 device owns a committed
-	// shared-heap allocation and exports its NT handle; D3D11 only opens views.
+	// Preferred graph -> D3D11 handoff. The RHI backend owns the allocation and
+	// exports it through the platform bridge; D3D11 only opens views.
 	// Callers must use a format supported by SharedResourceCompatibilityTier.
 	// Do not re-share the opened D3D11 object or combine legacy KMT handles with
 	// this path. Queue ownership is synchronized exclusively by the host fences.
-	bool CreateD3D12OwnedSharedTexture(
+	bool CreateGraphOwnedSharedTexture(
 		uint32_t width,
 		uint32_t height,
-		DXGI_FORMAT format,
-		D3D12_RESOURCE_FLAGS flags,
+		rhi::Format format,
+		rhi::ResourceFlags flags,
 		bool createD3D11SRV,
 		SharedTexture& output) const noexcept;
 	// Full-description variant for host interop resources whose mip chain/array
 	// shape must survive sharing. Material assets must not use the mirror path;
-	// their future registry requires direct sharing or native D3D12 ownership.
-	// Usage/CPU/bind/misc fields are normalized by the D3D12 owner; dimensions,
+	// their future registry requires direct sharing or graph ownership.
+	// Usage/CPU/bind/misc fields are normalized by the graph owner; dimensions,
 	// format, mip levels, array size and sample description are authoritative.
-	bool CreateD3D12OwnedSharedTexture(
+	bool CreateGraphOwnedSharedTexture(
 		const D3D11_TEXTURE2D_DESC& description,
-		D3D12_RESOURCE_FLAGS flags,
+		rhi::ResourceFlags flags,
 		bool createD3D11SRV,
 		SharedTexture& output) const noexcept;
-	bool CreateD3D12OwnedSharedTextureArray(
+	bool CreateGraphOwnedSharedTextureArray(
 		uint32_t width,
 		uint32_t height,
 		uint16_t arraySize,
-		DXGI_FORMAT format,
-		D3D12_RESOURCE_FLAGS flags,
+		rhi::Format format,
+		rhi::ResourceFlags flags,
 		bool createD3D11SRV,
 		SharedTexture& output) const noexcept;
 
-	bool OpenSharedTexture(ID3D11Texture2D* texture, ID3D12Resource** output) const noexcept;
-	// Preferred D3D11 -> D3D12 read-only path when the producer allocation was
+	// Preferred D3D11 -> graph read-only path when the producer allocation was
 	// created with D3D11_RESOURCE_MISC_SHARED_NTHANDLE. No texture copy is
 	// required: the host readiness fence orders all preceding D3D11 writes before
 	// the first ORG transition/read of this imported allocation.
 	bool ImportReadOnlySharedTexture(ID3D11Texture2D* source, bool createD3D11SRV, SharedTexture& imported) const noexcept;
+	bool ImportGraphResource(const SharedTexture& source, rhi::ResourcePtr& output) const noexcept;
 	bool EnsureReadOnlyMirror(ID3D11Texture2D* source, SharedTexture& mirror) const noexcept;
 	bool CopyToMirror(ID3D11DeviceContext* context, ID3D11Texture2D* source, SharedTexture& mirror) const noexcept;
 
 private:
 	winrt::com_ptr<ID3D11Device5> device11;
-	winrt::com_ptr<ID3D12Device> device12;
+	rhi::Device device{};
 };

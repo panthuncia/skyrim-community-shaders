@@ -19,4 +19,5 @@
 	url = https://github.com/panthuncia/BasicTelemetry.git
 [submodule "extern/ORGModuleServices"]
 	path = extern/ORGModuleServices
-	url = git@github.com:panthuncia/ORGModuleServices.git
+	url = https://github.com/panthuncia/ORGModuleServices.git
+	update = none
