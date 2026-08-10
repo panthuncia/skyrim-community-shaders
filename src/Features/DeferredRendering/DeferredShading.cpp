@@ -36,8 +36,11 @@ namespace
 
 	struct DeferredConstants
 	{
-		Matrix projectionInverse;
 		Matrix viewInverse;
+		Matrix viewProjectionInverse;
+		float cameraData[4];
+		float dynamicResolutionScale[2];
+		float reconstructionPadding[2];
 		uint32_t clusterGrid[3];
 		uint32_t lightCount;
 		float screenSize[2];
@@ -967,8 +970,11 @@ void DX12DeferredShading::UpdateNativeFrame(const std::shared_ptr<org::Resource>
 	const auto& snapshot = nativeFrameSnapshot;
 	if (!snapshot || !constantsResource) return;
 	DeferredConstants constants{};
-	constants.projectionInverse = snapshot->projectionInverse;
 	constants.viewInverse = snapshot->cameraViewInverse;
+	constants.viewProjectionInverse = snapshot->viewProjectionInverse;
+	std::copy_n(&snapshot->cameraData.x, 4, constants.cameraData);
+	constants.dynamicResolutionScale[0] = snapshot->dynamicResolutionParams2.x;
+	constants.dynamicResolutionScale[1] = snapshot->dynamicResolutionParams2.y;
 	constants.clusterGrid[0] = (snapshot->renderWidth + 63) / 64;
 	constants.clusterGrid[1] = (snapshot->renderHeight + 63) / 64;
 	constants.clusterGrid[2] = 32;

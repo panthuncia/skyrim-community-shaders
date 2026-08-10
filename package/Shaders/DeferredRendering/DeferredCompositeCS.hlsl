@@ -49,8 +49,10 @@ struct LightPage
 
 struct DeferredFrameData
 {
-	row_major float4x4 projectionInverse;
 	row_major float4x4 viewInverse;
+	row_major float4x4 viewProjectionInverse;
+	float4 cameraData;
+	float2 dynamicResolutionScale; float2 reconstructionPadding;
 	uint3 clusterGrid; uint lightCount;
 	float2 screenSize; float nearPlane; float farPlane;
 	uint contextCount; uint pageCapacity; uint abiVersion; uint frameFlags;
@@ -67,7 +69,6 @@ struct DeferredFrameData
 	float skylightingMinSpecularVisibility; uint pbrMaterialCount; uint debugView; float lightingParameterPadding;
 };
 
-#define projectionInverse frame.projectionInverse
 #define viewInverse frame.viewInverse
 #define clusterGrid frame.clusterGrid
 #define lightCount frame.lightCount
@@ -216,23 +217,14 @@ float3 DecodeCSNormal(float2 encoded)
 float3 ReconstructWorldPosition(uint2 pixel, float linearDepth, DeferredFrameData frame)
 {
 	float2 uv = (float2(pixel) + 0.5f) / screenSize;
+	uv *= frame.dynamicResolutionScale;
 	float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-	// Skyrim/CS camera constants use the matrix-first convention (see
-	// FrameBuffer::ViewToWorld). Keeping row_major storage does not reverse the
-	// mathematical multiplication order.
-	float4 ray = mul(projectionInverse, float4(ndc, 1.0f, 1.0f));
-	float3 positionVS = ray.xyz / ray.w;
-	positionVS *= linearDepth / max(positionVS.z, 1e-6f);
-	return mul(viewInverse, float4(positionVS, 1.0f)).xyz;
-}
-
-float3 ReconstructWorldViewDirection(uint2 pixel, DeferredFrameData frame)
-{
-	float2 uv = (float2(pixel) + 0.5f) / screenSize;
-	float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-	float4 positionVS = mul(projectionInverse, float4(ndc, 1.0f, 1.0f));
-	positionVS.xyz /= max(abs(positionVS.w), 1e-6f);
-	return normalize(mul(viewInverse, float4(-positionVS.xyz, 0.0f)).xyz);
+	float hardwareDepth = (frame.cameraData.x -
+		frame.cameraData.w / max(linearDepth, 1e-6f)) /
+		frame.cameraData.z;
+	float4 positionWS = mul(frame.viewProjectionInverse,
+		float4(ndc, hardwareDepth, 1.0f));
+	return positionWS.xyz / positionWS.w;
 }
 
 void AccumulateParity(uint baseSlot, uint2 pixel, float3 candidate,
@@ -415,7 +407,7 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 	float4 normalRoughnessSample = NormalRoughnessTexture.Load(int3(pixel.xy, 0));
 	float3 normalVS = DecodeCSNormal(normalRoughnessSample.xy);
 	float3 normalWS = normalize(mul(viewInverse, float4(normalVS, 0.0f)).xyz);
-	float3 viewDirection = ReconstructWorldViewDirection(pixel.xy, frame);
+	float3 viewDirection = normalize(-positionWS);
 
 #if defined(CS_DEFERRED_TRUE_PBR)
 	if (evaluatorID == CS_EVALUATOR_TRUE_PBR ||
@@ -700,6 +692,17 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 		float4 grassParameters = MasksTexture.Load(int3(pixel.xy, 0));
 		float3 albedo = AlbedoTexture.Load(int3(pixel.xy, 0)).rgb;
 		float3 directionalLightDirection = normalize(lightingContext.directionalLightDirection.xyz);
+		float vertexAO = float((packed >> 27u) & 31u) / 31.0f;
+		const bool interior = (lightingContext.featureFlags & 1u) == 0u;
+		float skylightingShadowVisibility = grassParameters.y;
+		float skylightingDiffuse = 1.0f;
+		if (skylightingEnabled != 0u && !interior) {
+			float4 probe = CSDeferredSampleSkylighting(SkylightingProbeTexture,
+				SkylightingVisibilityTexture, positionWS, normalWS, skylightingPositionOffset,
+				skylightingArrayOrigin, skylightingShadowVisibility);
+			skylightingDiffuse = CSDeferredSkylightDiffuse(probe, positionWS, normalWS,
+				vertexAO, skylightingMinDiffuseVisibility);
+		}
 		float3 grassDirectionalColor = CSDeferredTransformLight(
 			lightingContext.directionalLightColor.xyz / max(directionalLightScale, 1e-5f),
 			isDirectionalLightLinear != 0u, lightGamma, directionalLightMultiplier,
@@ -707,7 +710,7 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 		float directionalAngle = dot(normalWS, directionalLightDirection);
 		float3 diffuseIrradiance = grassDirectionalColor * grassVisibility.y *
 			saturate(directionalAngle) * vanillaNormalization;
-		float3 subsurfaceIrradiance = grassDirectionalColor * grassParameters.y *
+		float3 subsurfaceIrradiance = grassDirectionalColor * skylightingShadowVisibility *
 			CSLightingGrassSoftMultiplier(directionalAngle, grassParameters.x) * vanillaNormalization;
 		const bool complexGrass = (((packed >> 24u) & 4u) != 0u);
 		float3 specular = complexGrass ?
@@ -757,23 +760,12 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 			grassVisitedLights != cluster.numLights)
 			return;
 
-		float vertexAO = float((packed >> 27u) & 31u) / 31.0f;
 		float3 ambient = CSDeferredAmbient(lightingContext, normalWS,
 			enableLinearLighting != 0, ambientGamma, ambientMultiplier);
 		float3 ambientAtZero = CSDeferredAmbient(lightingContext, 0.0f,
 			enableLinearLighting != 0, ambientGamma, ambientMultiplier);
-		const bool interior = (lightingContext.featureFlags & 1u) == 0u;
 		ambient = CSDeferredDiffuseIBL(EnvironmentIBLTexture, SkyIBLTexture, ambient, ambientAtZero,
 			-normalWS, iblFlags, iblSettings0, iblSettings1, interior);
-		float skylightingShadowVisibility = grassParameters.y;
-		float skylightingDiffuse = 1.0f;
-		if (skylightingEnabled != 0u && !interior) {
-			float4 probe = CSDeferredSampleSkylighting(SkylightingProbeTexture,
-				SkylightingVisibilityTexture, positionWS, normalWS, skylightingPositionOffset,
-				skylightingArrayOrigin, skylightingShadowVisibility);
-			skylightingDiffuse = CSDeferredSkylightDiffuse(probe, positionWS, normalWS,
-				vertexAO, skylightingMinDiffuseVisibility);
-		}
 		float3 candidate = diffuseIrradiance + ambient + subsurfaceIrradiance * albedo;
 		candidate *= albedo;
 		float3 ambientLit = ambient * albedo;
@@ -801,6 +793,18 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 	float3 foliageBackLightColor = materialClass == CS_MATERIAL_FoliageSpecial ?
 		ReflectanceTexture.Load(int3(pixel.xy, 0)).rgb : 0.0f;
 	uint surfaceFlags = (packed >> 24u) & 7u;
+	float vertexAO = float((packed >> 27u) & 31u) / 31.0f;
+	const bool interior = (lightingContext.featureFlags & 1u) == 0u;
+	float skylightingShadowVisibility = 1.0f;
+	float skylightingDiffuse = 1.0f;
+	if (skylightingEnabled != 0u && !interior) {
+		float4 probe = CSDeferredSampleSkylighting(SkylightingProbeTexture,
+			SkylightingVisibilityTexture, positionWS, normalWS,
+			skylightingPositionOffset, skylightingArrayOrigin,
+			skylightingShadowVisibility);
+		skylightingDiffuse = CSDeferredSkylightDiffuse(probe, positionWS,
+			normalWS, vertexAO, skylightingMinDiffuseVisibility);
+	}
 	float3 directionalColor = CSDeferredTransformLight(
 		lightingContext.directionalLightColor.xyz / max(directionalLightScale, 1e-5f),
 		isDirectionalLightLinear != 0, lightGamma, directionalLightMultiplier,
@@ -817,7 +821,8 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 		directionalShadow *= ScreenSpaceShadowTexture.Load(int3(pixel.xy, 0));
 	if ((surfaceFlags & 1u) != 0) {
 		float directionalSoftShadow = materialClass == CS_MATERIAL_FoliageSpecial ?
-			MasksTexture.Load(int3(pixel.xy, 0)).y : directionalShadow;
+			((skylightingEnabled != 0u && !interior) ?
+				skylightingShadowVisibility : directionalShadow) : directionalShadow;
 		CSGenericDirectLighting directionalLighting = EvaluateDeferredDirect(
 			materialClass, lightingContext, normalWS, viewDirection,
 			directionalLightDirection, directionalColor, directionalShadow,
@@ -900,21 +905,9 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 			enableLinearLighting != 0, ambientGamma, ambientMultiplier);
 		float3 ambientAtZero = CSDeferredAmbient(lightingContext, 0.0f,
 			enableLinearLighting != 0, ambientGamma, ambientMultiplier);
-		const bool interior = (lightingContext.featureFlags & 1u) == 0u;
 		ambientIrradiance = CSDeferredDiffuseIBL(EnvironmentIBLTexture, SkyIBLTexture,
 			ambientIrradiance, ambientAtZero, -normalWS, iblFlags, iblSettings0,
 			iblSettings1, interior);
-		float vertexAO = float((packed >> 27u) & 31u) / 31.0f;
-		float skylightingShadowVisibility = 1.0f;
-		float skylightingDiffuse = 1.0f;
-		if (skylightingEnabled != 0u && !interior) {
-			float4 probe = CSDeferredSampleSkylighting(SkylightingProbeTexture,
-				SkylightingVisibilityTexture, positionWS, normalWS,
-				skylightingPositionOffset, skylightingArrayOrigin,
-				skylightingShadowVisibility);
-			skylightingDiffuse = CSDeferredSkylightDiffuse(probe, positionWS,
-				normalWS, vertexAO, skylightingMinDiffuseVisibility);
-		}
 		float3 ambientLit = ambientIrradiance * albedo;
 		float3 candidate = (directIrradiance + lightingContext.emissiveColor.xyz) * albedo + ambientLit;
 		if (skylightingEnabled != 0u && !interior)

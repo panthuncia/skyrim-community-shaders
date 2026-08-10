@@ -264,6 +264,7 @@ void DeferredRendering::BeginFrame(
 	LightingContext frameContext{};
 	if (globals::state && globals::state->sharedDataCpu) {
 		const auto& shared = *globals::state->sharedDataCpu;
+		cameraData = shared.CameraData;
 		frameContext.directionalLightDirection = shared.DirLightDirection;
 		frameContext.directionalLightColor = shared.DirLightColor;
 		// Convert CS's first-order SH representation into the affine rows used by
@@ -291,6 +292,8 @@ void DeferredRendering::BeginFrame(
 	cameraView = globals::game::frameBufferCached.GetCameraView();
 	cameraViewInverse = globals::game::frameBufferCached.GetCameraViewInverse();
 	projectionInverse = globals::game::frameBufferCached.GetCameraProjInverse();
+	viewProjectionInverse = globals::game::frameBufferCached.GetCameraViewProjInverse();
+	dynamicResolutionParams2 = globals::game::frameBufferCached.GetDynamicResolutionParams2();
 	const auto linearLighting = globals::features::linearLighting.GetCommonBufferData();
 	lightingTransform.enableLinearLighting = linearLighting.enableLinearLighting;
 	lightingTransform.isDirectionalLightLinear = linearLighting.isDirLightLinear;
@@ -383,6 +386,9 @@ void DeferredRendering::FinalizeFrame()
 	result->cameraView = cameraView;
 	result->cameraViewInverse = cameraViewInverse;
 	result->projectionInverse = projectionInverse;
+	result->viewProjectionInverse = viewProjectionInverse;
+	result->cameraData = cameraData;
+	result->dynamicResolutionParams2 = dynamicResolutionParams2;
 	result->lightingTransform = lightingTransform;
 	result->grassLighting = grassLighting;
 	result->ibl = ibl;

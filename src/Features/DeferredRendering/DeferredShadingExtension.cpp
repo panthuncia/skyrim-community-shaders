@@ -62,7 +62,13 @@ public:
 		  accesses_(std::move(accesses)), waits_(waitsForD3D11) {}
 	void Setup() override {
 		for (const auto& access : accesses_) {
-			if (access.usage == Usage::SRV) RegisterSRV(access.id);
+			if (access.usage == Usage::SRV) {
+				if (access.id.name == "community-shaders.deferred-shading.skylighting.probes" ||
+					access.id.name == "community-shaders.deferred-shading.skylighting.shadow-visibility")
+					RegisterSRV(org::SRVViewType::Texture2DArrayFull, access.id);
+				else
+					RegisterSRV(access.id);
+			}
 			else if (access.usage == Usage::UAV) RegisterUAV(access.id);
 			else if (access.usage == Usage::CBV) RegisterCBV(access.id);
 		}

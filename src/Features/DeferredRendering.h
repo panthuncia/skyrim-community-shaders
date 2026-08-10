@@ -70,6 +70,9 @@ public:
 		Matrix cameraView{};
 		Matrix cameraViewInverse{};
 		Matrix projectionInverse{};
+		Matrix viewProjectionInverse{};
+		float4 cameraData{};
+		float4 dynamicResolutionParams2{};
 		CS::Deferred::LightingTransform lightingTransform{};
 		GrassLighting::Settings grassLighting{};
 		IBL::PerFrame ibl{};
@@ -152,6 +155,9 @@ private:
 	Matrix cameraView{};
 	Matrix cameraViewInverse{};
 	Matrix projectionInverse{};
+	Matrix viewProjectionInverse{};
+	float4 cameraData{};
+	float4 dynamicResolutionParams2{};
 	CS::Deferred::LightingTransform lightingTransform{};
 	GrassLighting::Settings grassLighting{};
 	IBL::PerFrame ibl{};
