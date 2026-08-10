@@ -2975,6 +2975,10 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	diagnosticMaterialClass = CS_MATERIAL_Hair;
 #	elif defined(EYE)
 	diagnosticMaterialClass = CS_MATERIAL_EyeEnvmap;
+#	elif defined(LODLANDSCAPE)
+	// LOD land has a separate directional/ambient composition and cannot be
+	// inferred from the ordinary Standard compatibility label.
+	diagnosticMaterialClass = CS_MATERIAL_LodLand;
 #	elif defined(LANDSCAPE)
 #		if defined(SPECULAR)
 	diagnosticMaterialClass = CS_MATERIAL_TerrainSpecular;
@@ -2986,6 +2990,8 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	elif !defined(DEPTH_WRITE_DECALS)
 #		if defined(TREE_ANIM) && !defined(SPECULAR)
 	diagnosticMaterialClass = CS_MATERIAL_Foliage;
+#		elif defined(TREE_ANIM) && defined(SPECULAR)
+	diagnosticMaterialClass = CS_MATERIAL_FoliageSpecular;
 #		elif defined(SPECULAR) && defined(DO_ALPHA_TEST)
 	diagnosticMaterialClass = CS_MATERIAL_AlphaTestedSpecular;
 #		elif defined(SPECULAR)
@@ -3006,6 +3012,8 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// Plain foliage without its special soft/rim/back lobes therefore consumes
 	// the exact same deferred evaluator as ordinary diffuse geometry.
 	deferredMaterialClass = CS_MATERIAL_Foliage;
+#		elif defined(TREE_ANIM) && defined(SPECULAR)
+	deferredMaterialClass = CS_MATERIAL_FoliageSpecular;
 #		elif defined(SPECULAR) && defined(DO_ALPHA_TEST)
 	deferredMaterialClass = CS_MATERIAL_AlphaTestedSpecular;
 #		elif defined(SPECULAR)
@@ -3016,6 +3024,8 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	deferredMaterialClass = CS_MATERIAL_StandardOpaque;
 #		endif
 #		if defined(LOD)
+	deferredMaterialClass = CS_MATERIAL_LodObject;
+	diagnosticMaterialClass = CS_MATERIAL_LodObject;
 	deferredSurfaceFlags &= ~2u;
 #		endif
 	if ((Permutation::PixelShaderDescriptor & Permutation::LightingFlags::CharacterLight) != 0)
@@ -3036,6 +3046,13 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		else
 	deferredMaterialClass = CS_MATERIAL_Terrain;
 #		endif
+#	endif
+	// LOD-land color, normal, vertex color, noise, and optional terrain-variation
+	// sampling are completely resolved by rasterization. Its non-PBR lighting is
+	// the same directional/local/ambient contract consumed by Generic; retain the
+	// source permutation's LOD surface flags so local-light exclusion is unchanged.
+#	if defined(LODLANDSCAPE) && !defined(TRUE_PBR) && !defined(WORLD_MAP) && !defined(SNOW) && !defined(PARALLAX) && !defined(PROJECTED_UV) && !defined(ANISO_LIGHTING) && !defined(SPARKLE) && !defined(SOFT_LIGHTING) && !defined(RIM_LIGHTING) && !defined(BACK_LIGHTING)
+	deferredMaterialClass = CS_MATERIAL_LodLand;
 #	endif
 	// TruePBR promotion is profile-gated. Only the core resolved surface and
 	// non-advanced landscape contracts are admitted here; every feature whose
@@ -3091,7 +3108,12 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// rim-soft/back-light inputs; D3D12 restores both downstream outputs.
 #	if defined(TREE_ANIM) && !defined(TRUE_PBR) && !defined(SPECULAR) && (defined(SOFT_LIGHTING) || defined(RIM_LIGHTING) || defined(BACK_LIGHTING)) && !defined(SKIN) && !defined(HAIR) && !defined(SNOW) && !defined(GLOWMAP) && !defined(PARALLAX) && !defined(PROJECTED_UV) && !defined(ANISO_LIGHTING) && !defined(SPARKLE)
 	deferredMaterialClass = CS_MATERIAL_FoliageSpecial;
-#	elif defined(TREE_ANIM) && (defined(SOFT_LIGHTING) || defined(RIM_LIGHTING) || defined(BACK_LIGHTING) || defined(SPECULAR))
+	// Plain specular foliage is a resolved Generic specular surface: vertex
+	// animation affects position only, and alpha coverage/material inputs are
+	// already final here. Only the special foliage lobes require the dedicated
+	// payload; their specular intersection remains compatibility until that
+	// evaluator carries both contracts.
+#	elif defined(TREE_ANIM) && (defined(SOFT_LIGHTING) || defined(RIM_LIGHTING) || defined(BACK_LIGHTING))
 	deferredMaterialClass = CS_MATERIAL_Legacy;
 #	endif
 	if (!SharedData::DeferredRenderingEnabled)

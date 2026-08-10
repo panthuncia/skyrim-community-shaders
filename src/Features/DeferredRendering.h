@@ -20,6 +20,8 @@ public:
 	{
 		std::array<std::uint32_t, 256> visible{};
 		std::array<std::uint32_t, 256> deferred{};
+		std::uint32_t depthCoveredPixels{};
+		std::uint32_t unclassifiedDepthPixels{};
 		std::uint32_t enabledEvaluatorMask{};
 		std::uint64_t serial{};
 	};
@@ -94,8 +96,12 @@ public:
 		return settings.classifyVisibleMaterials || std::getenv("CS_DX12_CLASSIFY_MATERIALS") != nullptr;
 	}
 	void UpdateMaterialClassification(const std::uint32_t* visible, const std::uint32_t* deferred,
-		std::uint32_t evaluatorMask);
+		std::uint32_t evaluatorMask, std::uint32_t depthCovered, std::uint32_t unclassifiedDepth);
 	MaterialClassification GetMaterialClassification() const;
+	void RecordShaderSelection(RE::BSShader::Type type, std::uint32_t vertexDescriptor,
+		std::uint32_t pixelDescriptor, bool insideDeferred, bool inWorld,
+		bool activeReflections) noexcept;
+	void RecordAppliedRenderTargets(bool isCompute) noexcept;
 	std::pair<std::string, std::vector<std::string>> GetFeatureSummary() override
 	{
 		return { "Deferred rendering infrastructure and clustered-light assignment.", {} };
@@ -141,5 +147,14 @@ private:
 	std::atomic_uint32_t enabledEvaluatorMask{ 0 };
 	mutable std::mutex classificationMutex;
 	MaterialClassification materialClassification;
+	static constexpr std::size_t kSelectionClassCount = 64 + RE::BSShader::Type::Total;
+	std::array<std::atomic_uint32_t, kSelectionClassCount> shaderSelections{};
+	std::array<std::atomic_uint32_t, kSelectionClassCount> shaderSelectionsInsideDeferred{};
+	std::array<std::atomic_uint32_t, kSelectionClassCount> shaderSelectionsWithDeferredPermutation{};
+	std::array<std::atomic_uint32_t, kSelectionClassCount> shaderSelectionsInWorld{};
+	std::array<std::atomic_uint32_t, kSelectionClassCount> shaderSelectionsInWorldOutsideDeferred{};
+	std::array<std::atomic_uint32_t, kSelectionClassCount> shaderSelectionsInReflections{};
+	std::array<std::atomic_uint32_t, kSelectionClassCount> targetApplications{};
+	std::array<std::atomic_uint32_t, kSelectionClassCount> targetApplicationsWithIdentity{};
 };
 #pragma warning(pop)

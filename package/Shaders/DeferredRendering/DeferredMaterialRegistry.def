@@ -12,6 +12,46 @@
 // Registry arguments deliberately use a CSReg prefix. FXC expands macro
 // arguments eagerly, and ordinary names such as TRUE_PBR and HAIR collide
 // with forward-shader permutation macros.
+//
+// Deferred coverage and remaining contracts (keep this ledger beside the ABI):
+//
+//   Active, fully resolved during rasterization:
+//     Generic              Standard/alpha-tested diffuse and specular, plain
+//                          diffuse/specular foliage, terrain, object LOD, and
+//                          non-PBR LOD land.
+//     Grass                Resolved grass surface, IBL/skylighting inputs.
+//     DistantTree          Directional/ambient distant-tree surface.
+//     FoliageSpecial       Non-specular soft/rim/back-light foliage payload.
+//     TruePbr              Core/emissive/projected resolved surface.
+//     TruePbrSubsurfaceFuzz Resolved SSS, thickness, fuzz, and tree transmission.
+//     TruePbrCoat          Resolved coat color/normal/roughness (no interlayer
+//                          displacement).
+//     TruePbrGlint         Raster-resolved cache footprint/noise/tangent inputs.
+//     TruePbrTerrain       Resolved non-advanced landscape surface.
+//
+//   Reserved/compatibility; no material-texture sharing is inherently required:
+//     Skin                 Curvature, dual-specular, SSS/fuzz and wetness payload.
+//     Hair                 Tangent/flow, vertex normal, noise/settings and the
+//                          shared-depth hair self-shadow helper. HairMarschner is
+//                          part of this dedicated evaluator, not TruePBR core.
+//     EyeEnvmap            Eye normal plus raster-resolved environment result.
+//     TruePbrLodBlend      Two independently lit resolved surfaces plus blend data;
+//                          requires the extended-payload/replay contract.
+//     Glow/snow/aniso/sparkle variants need resolved emissive or specialized
+//                          light-dependent parameters and dedicated identities.
+//     Terrain/projected glints can use raster-resolved caches but exceed the
+//                          current inline terrain payload.
+//
+//   Reserved/compatibility until material textures can be shared with D3D12:
+//     TruePbrParallax      Per-light object displacement self-shadow sampling.
+//     TruePbrTerrainAdvanced Per-light terrain displacement/parallax sampling
+//                          (glint-only intersections may later be split out).
+//     Extended-material parallax and multilayer displacement variants likewise
+//                          require per-light sampling of their original textures.
+//
+// Transparent/order-dependent materials remain forward and are not registry
+// candidates. Evaluator availability is still determined from successfully
+// created PSOs; this ledger describes the complete intended material contract.
 CS_DEFERRED_EVALUATOR(CSRegCompatibility, CSREG_COMPATIBILITY, 0, 0.00, 0.00, 0.00)
 CS_DEFERRED_EVALUATOR(CSRegGeneric, CSREG_GENERIC, 1, 0.00, 1.00, 0.00)
 CS_DEFERRED_EVALUATOR(CSRegTruePbr, CSREG_TRUEPBR, 2, 0.00, 0.75, 1.00)
@@ -37,6 +77,10 @@ CS_DEFERRED_MATERIAL(CSRegAlphaTestedSpecular, 4, CSRegGeneric, CSREG_GENERIC)
 CS_DEFERRED_MATERIAL(CSRegFoliage, 5, CSRegGeneric, CSREG_GENERIC)
 CS_DEFERRED_MATERIAL(CSRegTerrain, 6, CSRegGeneric, CSREG_GENERIC)
 CS_DEFERRED_MATERIAL(CSRegTerrainSpecular, 7, CSRegGeneric, CSREG_GENERIC)
+// Geometry LOD is a resolved-surface variant of Generic. Distant landscape
+// still needs its separately composed LOD-land contract and remains diagnostic.
+CS_DEFERRED_MATERIAL(CSRegLodObject, 8, CSRegGeneric, CSREG_GENERIC)
+CS_DEFERRED_MATERIAL(CSRegFoliageSpecular, 9, CSRegGeneric, CSREG_GENERIC)
 CS_DEFERRED_MATERIAL(CSRegTruePbr, 32, CSRegTruePbr, CSREG_TRUEPBR)
 CS_DEFERRED_MATERIAL(CSRegTruePbrTerrain, 33, CSRegTruePbrTerrain, CSREG_TRUEPBR_TERRAIN)
 CS_DEFERRED_MATERIAL(CSRegTruePbrSubsurfaceFuzz, 34, CSRegTruePbrSubsurfaceFuzz, CSREG_TRUEPBR_SUBSURFACE_FUZZ)
@@ -50,6 +94,7 @@ CS_DEFERRED_MATERIAL(CSRegGrass, 64, CSRegGrass, CSREG_GRASS)
 // and complete material contract are available at runtime.
 CS_DEFERRED_MATERIAL(CSRegDistantTree, 65, CSRegDistantTree, CSREG_DISTANT_TREE)
 CS_DEFERRED_MATERIAL(CSRegFoliageSpecial, 66, CSRegFoliageSpecial, CSREG_FOLIAGE_SPECIAL)
+CS_DEFERRED_MATERIAL(CSRegLodLand, 67, CSRegGeneric, CSREG_GENERIC)
 // Reserved contracts remain compatibility pixels until their evaluators exist.
 CS_DEFERRED_MATERIAL(CSRegSkin, 96, CSRegSkin, CSREG_SKIN)
 CS_DEFERRED_MATERIAL(CSRegHair, 97, CSRegHair, CSREG_HAIR)

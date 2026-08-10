@@ -281,11 +281,11 @@ bool DX12DeferredShading::CreateBinningPipelines() noexcept
 	return false;
 #else
 	D3D12_DESCRIPTOR_RANGE ranges[2]{};
-	ranges[0] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0 };
-	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 6, 0, 0, 1 };
+	ranges[0] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, 0 };
+	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 6, 0, 0, 2 };
 	D3D12_ROOT_PARAMETER parameters[2]{};
 	parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-	parameters[0].Constants = { 0, 0, 6 };
+	parameters[0].Constants = { 0, 0, 7 };
 	parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 	parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 	parameters[1].DescriptorTable = { 2, ranges };
@@ -442,7 +442,7 @@ bool DX12DeferredShading::EnsureFrameMarker() noexcept
 	D3D11_TEXTURE2D_DESC description{};
 	// Slots 0..143 retain parity diagnostics. Material classification uses two
 	// 256-entry histograms beginning at slot 160.
-	description.Width = 672;
+	description.Width = 674;
 	description.Height = 1;
 	description.MipLevels = 1;
 	description.ArraySize = 1;
@@ -787,7 +787,8 @@ bool DX12DeferredShading::CommitComposite(ID3D11Texture2D* destination) noexcept
 					constexpr std::uint32_t visibleBase = 160;
 					constexpr std::uint32_t deferredBase = visibleBase + 256;
 					globals::features::deferredRendering.UpdateMaterialClassification(
-						counters + visibleBase, counters + deferredBase, GetEnabledEvaluatorMask());
+						counters + visibleBase, counters + deferredBase, GetEnabledEvaluatorMask(),
+						counters[deferredBase + 256], counters[deferredBase + 257]);
 				}
 				globals::d3d::context->Unmap(parityCounterReadback.get(), 0);
 				parityCounterPending = false;
@@ -1253,6 +1254,7 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 		clearAccesses, &ExecuteBinClear) != CS_DX12_OK) return CS_DX12_E_INTERNAL;
 	const std::array histogramAccesses{
 		access(self->packedSurfaceMirrorHandle, CS_DX12_ACCESS_SHADER_READ),
+		access(self->linearDepthHandle, CS_DX12_ACCESS_SHADER_READ),
 		access(self->evaluatorCountsHandle, CS_DX12_ACCESS_UNORDERED_WRITE),
 		access(self->frameMarkerHandle, CS_DX12_ACCESS_UNORDERED_WRITE) };
 	if (declarePass("community-shaders.deferred-shading.bin-histogram", "community-shaders.deferred-shading.bin-clear",
@@ -1354,9 +1356,10 @@ CSDX12Status DX12DeferredShading::RecordBinning(const CSDX12ExecutionContext& co
 	if (!context.GetResource || !context.AllocateDescriptors || !context.borrowedD3D12GraphicsCommandList ||
 		!binningRootSignature || !binningPipelines[static_cast<std::size_t>(stage)])
 		return CS_DX12_E_UNSUPPORTED_CAPABILITY;
-	void* packedNative{}; void* countsNative{}; void* offsetsNative{}; void* cursorsNative{};
+	void* packedNative{}; void* depthNative{}; void* countsNative{}; void* offsetsNative{}; void* cursorsNative{};
 	void* pixelsNative{}; void* argumentsNative{}; void* markerNative{};
 	if (context.GetResource(&context, packedSurfaceMirrorHandle, &packedNative) != CS_DX12_OK || !packedNative ||
+		context.GetResource(&context, linearDepthHandle, &depthNative) != CS_DX12_OK || !depthNative ||
 		context.GetResource(&context, evaluatorCountsHandle, &countsNative) != CS_DX12_OK || !countsNative ||
 		context.GetResource(&context, evaluatorOffsetsHandle, &offsetsNative) != CS_DX12_OK || !offsetsNative ||
 		context.GetResource(&context, evaluatorCursorsHandle, &cursorsNative) != CS_DX12_OK || !cursorsNative ||
@@ -1365,39 +1368,47 @@ CSDX12Status DX12DeferredShading::RecordBinning(const CSDX12ExecutionContext& co
 		context.GetResource(&context, frameMarkerHandle, &markerNative) != CS_DX12_OK || !markerNative)
 		return CS_DX12_E_NOT_READY;
 	CSDX12DescriptorAllocation descriptors{};
-	if (context.AllocateDescriptors(&context, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 7, &descriptors) != CS_DX12_OK)
+	if (context.AllocateDescriptors(&context, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 8, &descriptors) != CS_DX12_OK)
 		return CS_DX12_E_INTERNAL;
 	auto cpuAt=[&](uint32_t index){D3D12_CPU_DESCRIPTOR_HANDLE value{descriptors.cpuHandle};value.ptr+=uint64_t(index)*descriptors.descriptorSize;return value;};
 	D3D12_SHADER_RESOURCE_VIEW_DESC packedView{};
 	packedView.Format=DXGI_FORMAT_R32G32B32A32_UINT; packedView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
 	packedView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; packedView.Texture2D.MipLevels=1;
 	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(packedNative),&packedView,cpuAt(0));
+	D3D12_SHADER_RESOURCE_VIEW_DESC depthView{};
+	depthView.Format = DXGI_FORMAT_R32_FLOAT;
+	depthView.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	depthView.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	depthView.Texture2D.MipLevels = 1;
+	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(depthNative), &depthView, cpuAt(1));
 	auto structuredUAV=[&](void* native,uint32_t slot,uint32_t stride,uint32_t elements){
 		D3D12_UNORDERED_ACCESS_VIEW_DESC view{}; view.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;
 		view.Buffer.NumElements=elements; view.Buffer.StructureByteStride=stride;
 		device->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(native),nullptr,&view,cpuAt(slot));
 	};
-	structuredUAV(countsNative,1,sizeof(std::uint32_t),CS::Deferred::kEvaluatorCount);
-	structuredUAV(offsetsNative,2,sizeof(std::uint32_t),CS::Deferred::kEvaluatorCount);
-	structuredUAV(cursorsNative,3,sizeof(std::uint32_t),CS::Deferred::kEvaluatorCount);
-	structuredUAV(pixelsNative,4,sizeof(std::uint32_t)*2,context.frame->width*context.frame->height);
+	structuredUAV(countsNative,2,sizeof(std::uint32_t),CS::Deferred::kEvaluatorCount);
+	structuredUAV(offsetsNative,3,sizeof(std::uint32_t),CS::Deferred::kEvaluatorCount);
+	structuredUAV(cursorsNative,4,sizeof(std::uint32_t),CS::Deferred::kEvaluatorCount);
+	structuredUAV(pixelsNative,5,sizeof(std::uint32_t)*2,context.frame->width*context.frame->height);
 	D3D12_UNORDERED_ACCESS_VIEW_DESC argumentView{}; argumentView.Format=DXGI_FORMAT_R32_TYPELESS;
 	argumentView.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;
 	argumentView.Buffer.NumElements=CS::Deferred::kEvaluatorCount*7;
 	argumentView.Buffer.Flags=D3D12_BUFFER_UAV_FLAG_RAW;
-	device->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(argumentsNative),nullptr,&argumentView,cpuAt(5));
+	device->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(argumentsNative),nullptr,&argumentView,cpuAt(6));
 	D3D12_UNORDERED_ACCESS_VIEW_DESC classificationView{};
 	classificationView.Format = DXGI_FORMAT_R32_UINT;
 	classificationView.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
 	device->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(markerNative), nullptr,
-		&classificationView, cpuAt(6));
+		&classificationView, cpuAt(7));
 	auto* commandList=static_cast<ID3D12GraphicsCommandList*>(context.borrowedD3D12GraphicsCommandList);
 	ID3D12DescriptorHeap* heaps[]{static_cast<ID3D12DescriptorHeap*>(descriptors.borrowedNativeHeap)};
 	commandList->SetDescriptorHeaps(1,heaps);
 	commandList->SetComputeRootSignature(binningRootSignature.get());
+	const auto snapshot = globals::features::deferredRendering.GetFrameSnapshot();
 	const std::uint32_t constants[]{context.frame->width,context.frame->height,
 		CS::Deferred::kEvaluatorCount,7u*sizeof(std::uint32_t),GetEnabledEvaluatorMask(),
-		globals::features::deferredRendering.IsMaterialClassificationEnabled() ? 1u : 0u};
+		globals::features::deferredRendering.IsMaterialClassificationEnabled() ? 1u : 0u,
+		std::bit_cast<std::uint32_t>(snapshot ? snapshot->farPlane : 16384.0f)};
 	commandList->SetComputeRoot32BitConstants(0,std::size(constants),constants,0);
 	commandList->SetComputeRootDescriptorTable(1,D3D12_GPU_DESCRIPTOR_HANDLE{descriptors.gpuHandle});
 	commandList->SetPipelineState(binningPipelines[static_cast<std::size_t>(stage)].get());

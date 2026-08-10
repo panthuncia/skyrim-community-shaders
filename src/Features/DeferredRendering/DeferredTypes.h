@@ -132,6 +132,8 @@ namespace CS::Deferred
 		Foliage = CSRegFoliage,
 		Terrain = CSRegTerrain,
 		TerrainSpecular = CSRegTerrainSpecular,
+		LodObject = CSRegLodObject,
+		FoliageSpecular = CSRegFoliageSpecular,
 		TruePBR = CSRegTruePbr,
 		TruePBRTerrain = CSRegTruePbrTerrain,
 		TruePBRSubsurfaceFuzz = CSRegTruePbrSubsurfaceFuzz,
@@ -143,6 +145,7 @@ namespace CS::Deferred
 		Grass = CSRegGrass,
 		DistantTree = CSRegDistantTree,
 		FoliageSpecial = CSRegFoliageSpecial,
+		LodLand = CSRegLodLand,
 		Skin = CSRegSkin,
 		Hair = CSRegHair,
 		EyeEnvmap = CSRegEyeEnvmap,
@@ -230,6 +233,9 @@ namespace CS::Deferred
 	static_assert(GetEvaluator(MaterialClass::FoliageSpecial) == Evaluator::FoliageSpecial);
 	static_assert(GetEvaluator(MaterialClass::DistantTree) == Evaluator::DistantTree);
 	static_assert(GetEvaluator(MaterialClass::Grass) == Evaluator::Grass);
+	static_assert(GetEvaluator(MaterialClass::LodObject) == Evaluator::Generic);
+	static_assert(GetEvaluator(MaterialClass::LodLand) == Evaluator::Generic);
+	static_assert(GetEvaluator(MaterialClass::FoliageSpecular) == Evaluator::Generic);
 	static_assert(GetEvaluator(MaterialClass::TruePBR) == Evaluator::TruePBR);
 	static_assert(GetEvaluator(MaterialClass::TruePBRSubsurfaceFuzz) == Evaluator::TruePBRSubsurfaceFuzz);
 	static_assert(GetEvaluator(MaterialClass::TruePBRCoat) == Evaluator::TruePBRCoat);

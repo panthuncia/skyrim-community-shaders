@@ -132,6 +132,10 @@ bool Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertex
 	state->modifiedPixelDescriptor = pixelDescriptor;
 
 	state->ModifyShaderLookup(*shader, state->modifiedVertexDescriptor, state->modifiedPixelDescriptor);
+	if (globals::deferred)
+		globals::features::deferredRendering.RecordShaderSelection(shader->shaderType.get(),
+			vertexDescriptor, state->modifiedPixelDescriptor,
+			globals::deferred->deferredPass, state->inWorld, state->activeReflections);
 
 	// Only check against non-shader bits
 	state->permutationData.PixelShaderDescriptor &= ~state->modifiedPixelDescriptor;
@@ -404,6 +408,7 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChain(
 void Hooks::BSGraphics_SetDirtyStates::thunk(bool isCompute)
 {
 	func(isCompute);
+	globals::features::deferredRendering.RecordAppliedRenderTargets(isCompute);
 	if (globals::deferred)
 		globals::deferred->ClearPackedIdentityAfterTargetBind(isCompute);
 	globals::state->Draw();

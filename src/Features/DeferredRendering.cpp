@@ -1,6 +1,9 @@
 #include "DeferredRendering.h"
+
+#include "Deferred.h"
 #include "Features/LinearLighting.h"
 #include "Globals.h"
+#include "ShaderCache.h"
 #include "State.h"
 
 #define I18N_KEY_PREFIX "feature.deferred_rendering."
@@ -61,6 +64,10 @@ void DeferredRendering::DrawSettings()
 		const auto classification = GetMaterialClassification();
 		ImGui::Text("Last completed sample: %llu   Evaluator mask: 0x%08X",
 			static_cast<unsigned long long>(classification.serial), classification.enabledEvaluatorMask);
+		ImGui::Text("Depth-covered pixels: %u   Missing material identity: %u (%.1f%%)",
+			classification.depthCoveredPixels, classification.unclassifiedDepthPixels,
+			classification.depthCoveredPixels ? 100.0f * classification.unclassifiedDepthPixels /
+				classification.depthCoveredPixels : 0.0f);
 		if (ImGui::BeginTable("DeferredMaterialClassification", 4,
 			ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
 			ImGui::TableSetupColumn("Material variant");
@@ -86,15 +93,20 @@ void DeferredRendering::DrawSettings()
 }
 
 void DeferredRendering::UpdateMaterialClassification(const std::uint32_t* visible,
-	const std::uint32_t* deferred, std::uint32_t evaluatorMask)
+	const std::uint32_t* deferred, std::uint32_t evaluatorMask,
+	std::uint32_t depthCovered, std::uint32_t unclassifiedDepth)
 {
 	if (!visible || !deferred) return;
 	std::scoped_lock lock(classificationMutex);
 	std::copy_n(visible, materialClassification.visible.size(), materialClassification.visible.begin());
 	std::copy_n(deferred, materialClassification.deferred.size(), materialClassification.deferred.begin());
 	materialClassification.enabledEvaluatorMask = evaluatorMask;
+	materialClassification.depthCoveredPixels = depthCovered;
+	materialClassification.unclassifiedDepthPixels = unclassifiedDepth;
 	++materialClassification.serial;
 	if ((materialClassification.serial % 1800u) == 1u) {
+		logger::info("[DeferredMaterialClassification] depthCovered={}, unclassifiedDepth={}, missingIdentity={:.2f}%",
+			depthCovered, unclassifiedDepth, depthCovered ? 100.0 * unclassifiedDepth / depthCovered : 0.0);
 		for (std::uint32_t id = 0; id < materialClassification.visible.size(); ++id) {
 			const auto total = materialClassification.visible[id];
 			const auto promoted = materialClassification.deferred[id];
@@ -103,6 +115,26 @@ void DeferredRendering::UpdateMaterialClassification(const std::uint32_t* visibl
 					CS::Deferred::GetMaterialClassName(static_cast<CS::Deferred::MaterialClass>(id)),
 					id, total, promoted, total - promoted);
 		}
+		for (std::size_t index = 0; index < kSelectionClassCount; ++index) {
+			const auto total = shaderSelections[index].exchange(0, std::memory_order_relaxed);
+			const auto inside = shaderSelectionsInsideDeferred[index].exchange(0, std::memory_order_relaxed);
+			const auto flagged = shaderSelectionsWithDeferredPermutation[index].exchange(0, std::memory_order_relaxed);
+			const auto inWorld = shaderSelectionsInWorld[index].exchange(0, std::memory_order_relaxed);
+			const auto outsideEpoch = shaderSelectionsInWorldOutsideDeferred[index].exchange(0, std::memory_order_relaxed);
+			const auto reflections = shaderSelectionsInReflections[index].exchange(0, std::memory_order_relaxed);
+			const auto targetBinds = targetApplications[index].exchange(0, std::memory_order_relaxed);
+			const auto identityBinds = targetApplicationsWithIdentity[index].exchange(0, std::memory_order_relaxed);
+			if (!total) continue;
+			static constexpr std::array shaderNames{
+				"None", "Grass", "Sky", "Water", "BloodSplatter", "ImageSpace",
+				"Lighting", "Effect", "Utility", "DistantTree", "Particle"
+			};
+			const auto label = index < 64 ? std::format("LightingTechnique{}", index) :
+				std::format("{}Shader", shaderNames[index - 64]);
+			logger::info("[DeferredShaderSelection] class={}, selections={}, inWorld={}, insideDeferred={}, "
+				"inWorldOutsideEpoch={}, reflections={}, deferredPermutation={}, targetApplications={}, identityTargetBound={}",
+				label, total, inWorld, inside, outsideEpoch, reflections, flagged, targetBinds, identityBinds);
+		}
 	}
 }
 
@@ -110,6 +142,59 @@ DeferredRendering::MaterialClassification DeferredRendering::GetMaterialClassifi
 {
 	std::scoped_lock lock(classificationMutex);
 	return materialClassification;
+}
+
+void DeferredRendering::RecordShaderSelection(RE::BSShader::Type type,
+	std::uint32_t vertexDescriptor, std::uint32_t pixelDescriptor, bool insideDeferred,
+	bool inWorld, bool activeReflections) noexcept
+{
+	if (!IsMaterialClassificationEnabled()) return;
+	std::size_t classification = 64 + std::min<std::size_t>(static_cast<std::size_t>(type),
+		static_cast<std::size_t>(RE::BSShader::Type::Total) - 1u);
+	std::uint32_t deferredBit = 0;
+	if (type == RE::BSShader::Type::Lighting) {
+		classification = std::min<std::size_t>((vertexDescriptor >> 24u) & 0x3Fu, 63u);
+		deferredBit = static_cast<std::uint32_t>(SIE::ShaderCache::LightingShaderFlags::Deferred);
+	} else if (type == RE::BSShader::Type::DistantTree) {
+		classification = 64 + static_cast<std::size_t>(RE::BSShader::Type::DistantTree);
+		deferredBit = static_cast<std::uint32_t>(SIE::ShaderCache::DistantTreeShaderFlags::Deferred);
+	}
+	shaderSelections[classification].fetch_add(1, std::memory_order_relaxed);
+	if (insideDeferred)
+		shaderSelectionsInsideDeferred[classification].fetch_add(1, std::memory_order_relaxed);
+	if (inWorld)
+		shaderSelectionsInWorld[classification].fetch_add(1, std::memory_order_relaxed);
+	if (inWorld && !insideDeferred)
+		shaderSelectionsInWorldOutsideDeferred[classification].fetch_add(1, std::memory_order_relaxed);
+	if (activeReflections)
+		shaderSelectionsInReflections[classification].fetch_add(1, std::memory_order_relaxed);
+	if (deferredBit && (pixelDescriptor & deferredBit) != 0)
+		shaderSelectionsWithDeferredPermutation[classification].fetch_add(1, std::memory_order_relaxed);
+}
+
+void DeferredRendering::RecordAppliedRenderTargets(bool isCompute) noexcept
+{
+	if (isCompute || !IsMaterialClassificationEnabled() || !globals::state->currentShader)
+		return;
+
+	const auto type = globals::state->currentShader->shaderType.get();
+	std::size_t classification = 64 + std::min<std::size_t>(static_cast<std::size_t>(type),
+		static_cast<std::size_t>(RE::BSShader::Type::Total) - 1u);
+	if (type == RE::BSShader::Type::Lighting)
+		classification = std::min<std::size_t>((globals::state->currentVertexDescriptor >> 24u) & 0x3Fu, 63u);
+
+	targetApplications[classification].fetch_add(1, std::memory_order_relaxed);
+	ID3D11RenderTargetView* targets[8]{};
+	globals::d3d::context->OMGetRenderTargets(8, targets, nullptr);
+	const auto* identity = globals::game::renderer->GetRuntimeData().renderTargets[MASKS2].RTV;
+	bool identityBound = false;
+	for (auto*& target : targets) {
+		identityBound |= target == identity;
+		if (target)
+			target->Release();
+	}
+	if (identityBound)
+		targetApplicationsWithIdentity[classification].fetch_add(1, std::memory_order_relaxed);
 }
 
 void DeferredRendering::LoadSettings(json& json)

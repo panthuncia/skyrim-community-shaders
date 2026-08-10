@@ -1,6 +1,7 @@
 #include "DeferredRendering/DeferredMaterial.hlsli"
 
 Texture2D<uint4> PackedSurfaceTexture : register(t0);
+Texture2D<float> LinearDepthTexture : register(t1);
 RWStructuredBuffer<uint> EvaluatorCounts : register(u0);
 RWStructuredBuffer<uint> EvaluatorOffsets : register(u1);
 RWStructuredBuffer<uint> EvaluatorWriteCursors : register(u2);
@@ -16,10 +17,13 @@ cbuffer PixelBinningConstants : register(b0)
 	uint indirectCommandStride;
 	uint enabledEvaluatorMask;
 	uint classificationEnabled;
+	float farPlane;
 };
 
 static const uint CS_CLASSIFICATION_VISIBLE_BASE = 160u;
 static const uint CS_CLASSIFICATION_DEFERRED_BASE = CS_CLASSIFICATION_VISIBLE_BASE + 256u;
+static const uint CS_CLASSIFICATION_DEPTH_COVERED = CS_CLASSIFICATION_DEFERRED_BASE + 256u;
+static const uint CS_CLASSIFICATION_UNCLASSIFIED_DEPTH = CS_CLASSIFICATION_DEPTH_COVERED + 1u;
 
 uint ActiveEvaluatorForMaterial(uint materialClass)
 {
@@ -52,13 +56,15 @@ void ClearBinsCS(uint3 threadID : SV_DispatchThreadID)
 	// This shared diagnostic surface also contains the deferred parity counters.
 	// Clear it once at the structural beginning of the epoch so later passes do
 	// not erase classification results produced here.
-	if (threadID.x < 672u)
+	if (threadID.x < 674u)
 		MaterialClassification[uint2(threadID.x, 0u)] = 0u;
 }
 
 groupshared uint groupHistogram[CS_EVALUATOR_COUNT];
 groupshared uint groupVisibleMaterials[256];
 groupshared uint groupDeferredMaterials[256];
+groupshared uint groupDepthCovered;
+groupshared uint groupUnclassifiedDepth;
 
 [numthreads(8, 8, 1)]
 void HistogramCS(uint3 threadID : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
@@ -66,6 +72,10 @@ void HistogramCS(uint3 threadID : SV_DispatchThreadID, uint groupIndex : SV_Grou
 	if (groupIndex < evaluatorCount)
 		groupHistogram[groupIndex] = 0u;
 	if (classificationEnabled) {
+		if (groupIndex == 0u) {
+			groupDepthCovered = 0u;
+			groupUnclassifiedDepth = 0u;
+		}
 		for (uint index = groupIndex; index < 256u; index += 64u) {
 			groupVisibleMaterials[index] = 0u;
 			groupDeferredMaterials[index] = 0u;
@@ -81,11 +91,22 @@ void HistogramCS(uint3 threadID : SV_DispatchThreadID, uint groupIndex : SV_Grou
 		// This excludes the packed-target clear/background from blind-spot counts.
 		bool compatibilityMarker = materialClass == CS_MATERIAL_Legacy &&
 			(packedSurface.w & 0x80000000u) != 0u;
-		if (classificationEnabled && (materialClass != CS_MATERIAL_Legacy || compatibilityMarker)) {
+		bool classifiedPixel = materialClass != CS_MATERIAL_Legacy || compatibilityMarker;
+		if (classificationEnabled && classifiedPixel) {
 			uint intendedClass = compatibilityMarker ? packedSurface.w & 0xFFu : materialClass;
 			InterlockedAdd(groupVisibleMaterials[intendedClass], 1u);
 			if (evaluator != CS_EVALUATOR_COMPATIBILITY)
 				InterlockedAdd(groupDeferredMaterials[intendedClass], 1u);
+		}
+		if (classificationEnabled) {
+			float linearDepth = LinearDepthTexture.Load(int3(threadID.xy, 0));
+			bool depthCovered = linearDepth > 0.0f && isfinite(linearDepth) &&
+				linearDepth < farPlane * 0.999f;
+			if (depthCovered) {
+				InterlockedAdd(groupDepthCovered, 1u);
+				if (!classifiedPixel)
+					InterlockedAdd(groupUnclassifiedDepth, 1u);
+			}
 		}
 	}
 	GroupMemoryBarrierWithGroupSync();
@@ -97,6 +118,10 @@ void HistogramCS(uint3 threadID : SV_DispatchThreadID, uint groupIndex : SV_Grou
 				InterlockedAdd(MaterialClassification[uint2(CS_CLASSIFICATION_VISIBLE_BASE + index, 0u)], groupVisibleMaterials[index]);
 			if (groupDeferredMaterials[index])
 				InterlockedAdd(MaterialClassification[uint2(CS_CLASSIFICATION_DEFERRED_BASE + index, 0u)], groupDeferredMaterials[index]);
+		}
+		if (groupIndex == 0u) {
+			InterlockedAdd(MaterialClassification[uint2(CS_CLASSIFICATION_DEPTH_COVERED, 0u)], groupDepthCovered);
+			InterlockedAdd(MaterialClassification[uint2(CS_CLASSIFICATION_UNCLASSIFIED_DEPTH, 0u)], groupUnclassifiedDepth);
 		}
 	}
 }
