@@ -1,4 +1,5 @@
 #include "DeferredShading.h"
+#include <OpenRenderGraph/ContributorRuntime.h>
 
 #include "Features/Effects11/D3D11StateBackup.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -6,7 +7,6 @@
 #include "Features/DeferredRendering.h"
 #include "DeferredShadingExtension.h"
 #include "Globals.h"
-#include "RenderGraph/NativeRenderGraphRegistry.h"
 #include "State.h"
 #include "TruePBR.h"
 #include "Utils/D3D.h"
@@ -127,9 +127,9 @@ bool DX12DeferredShading::Initialize(RenderGraphRuntime& owner) noexcept
 	if (!owner.GetRHIDevice() || !CreatePipeline() || !CreateBinningPipelines())
 		return false;
 	try {
-		NativeRenderGraphRegistry::Descriptor native{};
+		org::contributor::ExtensionRegistry::Descriptor native{};
 		native.id = "community-shaders.deferred-shading.native";
-		native.kind = NativeRenderGraphRegistry::Kind::Required;
+		native.kind = org::contributor::ExtensionRegistry::Kind::Required;
 		native.exportedResources = {
 			"community-shaders.deferred-shading.gbuffer.albedo", "community-shaders.deferred-shading.gbuffer.specular",
 			"community-shaders.deferred-shading.gbuffer.reflectance", "community-shaders.deferred-shading.gbuffer.normal-roughness",
@@ -155,7 +155,7 @@ bool DX12DeferredShading::Initialize(RenderGraphRuntime& owner) noexcept
 		};
 		native.retired = [](std::uint64_t) {};
 		native.diagnostic = [](std::string_view message) { logger::error("[DX12DeferredShading] Native graph contributor: {}", message); };
-		nativeRegistration = NativeRenderGraphRegistry::Get().Register(std::move(native));
+		nativeRegistration = owner.GetContributorRuntime()->RegisterExtension(std::move(native));
 		owner.RequestGraphRebuild();
 	} catch (const std::exception& error) {
 		logger::error("[DX12DeferredShading] Native registration failed: {}", error.what());
@@ -248,7 +248,7 @@ bool DX12DeferredShading::EnsureComposite(uint32_t width, uint32_t height, DXGI_
 	auto* interop = runtime ? runtime->GetInteropCoordinator() : nullptr;
 	if (!interop || !width || !height)
 		return false;
-	D3D11InteropBridge::SharedTexture candidate;
+	org::interop::D3D11Interop::SharedTexture candidate;
 	if (!interop->CreateGraphOwnedSharedTexture(width, height, rhi::helpers::ToRHI(transportFormat),
 		rhi::RF_AllowRenderTarget | rhi::RF_AllowUnorderedAccess,
 		true, candidate)) {
@@ -256,7 +256,7 @@ bool DX12DeferredShading::EnsureComposite(uint32_t width, uint32_t height, DXGI_
 		return false;
 	}
 	composite = std::move(candidate);
-	D3D11InteropBridge::SharedTexture specularCandidate;
+	org::interop::D3D11Interop::SharedTexture specularCandidate;
 	if (!interop->CreateGraphOwnedSharedTexture(width, height, rhi::helpers::ToRHI(transportFormat),
 		rhi::RF_AllowRenderTarget | rhi::RF_AllowUnorderedAccess,
 		true, specularCandidate)) {
@@ -265,7 +265,7 @@ bool DX12DeferredShading::EnsureComposite(uint32_t width, uint32_t height, DXGI_
 		return false;
 	}
 	specularComposite = std::move(specularCandidate);
-	D3D11InteropBridge::SharedTexture reflectanceCandidate;
+	org::interop::D3D11Interop::SharedTexture reflectanceCandidate;
 	if (!interop->CreateGraphOwnedSharedTexture(width, height, rhi::helpers::ToRHI(transportFormat),
 		rhi::RF_AllowRenderTarget | rhi::RF_AllowUnorderedAccess,
 		true, reflectanceCandidate)) {
@@ -275,9 +275,9 @@ bool DX12DeferredShading::EnsureComposite(uint32_t width, uint32_t height, DXGI_
 		return false;
 	}
 	reflectanceComposite = std::move(reflectanceCandidate);
-	auto createMaterialOutput = [&](D3D11InteropBridge::SharedTexture& output,
+	auto createMaterialOutput = [&](org::interop::D3D11Interop::SharedTexture& output,
 		std::string_view name) {
-		D3D11InteropBridge::SharedTexture candidateOutput;
+		org::interop::D3D11Interop::SharedTexture candidateOutput;
 		if (!interop->CreateGraphOwnedSharedTexture(width, height, rhi::helpers::ToRHI(transportFormat),
 			rhi::RF_AllowRenderTarget | rhi::RF_AllowUnorderedAccess,
 			true, candidateOutput)) {
@@ -315,7 +315,7 @@ bool DX12DeferredShading::EnsureLinearDepth(uint32_t width, uint32_t height) noe
 	description.SampleDesc.Count = 1;
 	description.Usage = D3D11_USAGE_DEFAULT;
 	description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-	D3D11InteropBridge::SharedTexture candidate;
+	org::interop::D3D11Interop::SharedTexture candidate;
 	if (!interop->CreateSharedTexture(description, true, true, candidate)) {
 		logger::error("[DX12DeferredShading] Failed to create shared linear-depth texture ({}x{})", width, height);
 		return false;
@@ -343,7 +343,7 @@ bool DX12DeferredShading::EnsureFrameMarker() noexcept
 	description.SampleDesc.Count = 1;
 	description.Usage = D3D11_USAGE_DEFAULT;
 	description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-	D3D11InteropBridge::SharedTexture candidate;
+	org::interop::D3D11Interop::SharedTexture candidate;
 	if (!interop->CreateGraphOwnedSharedTexture(description.Width, description.Height,
 		rhi::helpers::ToRHI(description.Format), rhi::RF_AllowRenderTarget |
 			rhi::RF_AllowUnorderedAccess, true, candidate)) {
@@ -979,7 +979,8 @@ void DX12DeferredShading::UpdateNativeFrame(const std::shared_ptr<org::Resource>
 void DX12DeferredShading::Shutdown() noexcept
 {
 	if (nativeRegistration) {
-		NativeRenderGraphRegistry::Get().BeginUnregister(nativeRegistration);
+		if (runtime && runtime->GetContributorRuntime())
+			runtime->GetContributorRuntime()->BeginUnregisterExtension(nativeRegistration);
 		nativeRegistration = 0;
 	}
 	globals::features::deferredRendering.SetEnabledEvaluatorMask(0);

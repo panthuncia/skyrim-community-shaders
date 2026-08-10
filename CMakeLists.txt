@@ -117,9 +117,12 @@ set(BASICTELEMETRY_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(BASICTELEMETRY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(OPENRENDERGRAPH_ENABLE_SUBMODULE_FALLBACK OFF CACHE BOOL "" FORCE)
 set(OPENRENDERGRAPH_ENABLE_DEBUG_UI OFF CACHE BOOL "" FORCE)
+set(OPENRENDERGRAPH_ENABLE_D3D11_INTEROP ON CACHE BOOL "" FORCE)
 add_subdirectory(extern/BasicRHI)
 add_subdirectory(extern/BasicTelemetry)
 add_subdirectory(extern/OpenRenderGraph)
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/extern/ORGModuleServices/cmake/ORGCompileShader.cmake")
 
 option(COMMUNITYSHADERS_ENABLE_ORG_MODULE_SERVICES "Enable optional shared ORG module services" ON)
 if(COMMUNITYSHADERS_ENABLE_ORG_MODULE_SERVICES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/extern/ORGModuleServices/CMakeLists.txt")
@@ -134,12 +137,9 @@ set(CS_DEFERRED_NATIVE_SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/package/Shader
 set(CS_DEFERRED_NATIVE_SHADER_OUTPUTS)
 foreach(_entry ClearCounters BuildClusters CullLights)
     set(_output "${CS_DEFERRED_NATIVE_SHADER_DIR}/ClusteredLighting.${_entry}.dxil")
-    add_custom_command(
-        OUTPUT "${_output}"
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${CS_DEFERRED_NATIVE_SHADER_DIR}"
-        COMMAND "${CS_DXC_RUNTIME_DIR}/dxc.exe" -T cs_6_6 -E ${_entry} -O3 -Fo "${_output}" "${CS_DEFERRED_NATIVE_SHADER_SOURCE}"
-        DEPENDS "${CS_DEFERRED_NATIVE_SHADER_SOURCE}"
-        VERBATIM)
+    org_compile_shader(_compiled COMPILER "${CS_DXC_RUNTIME_DIR}/dxc.exe"
+        SOURCE "${CS_DEFERRED_NATIVE_SHADER_SOURCE}" ENTRY "${_entry}" TARGET cs_6_6
+        OUTPUT "${_output}" OPTIONS -O3)
     list(APPEND CS_DEFERRED_NATIVE_SHADER_OUTPUTS "${_output}")
 endforeach()
 
@@ -153,19 +153,17 @@ file(GLOB_RECURSE _deferred_shader_dependencies CONFIGURE_DEPENDS
     "${_deferred_shader_root}/*.def")
 function(cs_add_deferred_evaluator _name _value)
     set(_output "${CS_DEFERRED_NATIVE_SHADER_DIR}/DeferredEvaluator.${_name}.dxil")
-    set(_defines -D CS_FIXED_EVALUATOR=${_value})
+    set(_defines CS_FIXED_EVALUATOR=${_value})
     if(ARGC GREATER 2)
-        list(APPEND _defines -D TRUE_PBR=1 -D CS_DEFERRED_TRUE_PBR=1 -D CSHADER=1)
+        list(APPEND _defines TRUE_PBR=1 CS_DEFERRED_TRUE_PBR=1 CSHADER=1)
     endif()
     if("${_name}" STREQUAL "true-pbr-glint")
-        list(APPEND _defines -D GLINT=1)
+        list(APPEND _defines GLINT=1)
     endif()
-    add_custom_command(OUTPUT "${_output}"
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${CS_DEFERRED_NATIVE_SHADER_DIR}"
-        COMMAND "${CS_DXC_RUNTIME_DIR}/dxc.exe" -T cs_6_6 -E main -O3
-            -I "${_deferred_shader_root}/DeferredRendering" -I "${_deferred_shader_root}"
-            ${_defines} -Fo "${_output}" "${_deferred_composite}"
-        DEPENDS ${_deferred_shader_dependencies} VERBATIM)
+    org_compile_shader(_compiled COMPILER "${CS_DXC_RUNTIME_DIR}/dxc.exe"
+        SOURCE "${_deferred_composite}" ENTRY main TARGET cs_6_6 OUTPUT "${_output}"
+        INCLUDE_DIRECTORIES "${_deferred_shader_root}/DeferredRendering" "${_deferred_shader_root}"
+        DEFINES ${_defines} OPTIONS -O3 DEPENDS ${_deferred_shader_dependencies})
     set(CS_DEFERRED_NATIVE_SHADER_OUTPUTS ${CS_DEFERRED_NATIVE_SHADER_OUTPUTS} "${_output}" PARENT_SCOPE)
 endfunction()
 cs_add_deferred_evaluator(generic 1)
@@ -184,12 +182,10 @@ foreach(_index RANGE 0 3)
     list(GET _bin_entries ${_index} _entry)
     list(GET _bin_names ${_index} _name)
     set(_output "${CS_DEFERRED_NATIVE_SHADER_DIR}/DeferredBinning.${_name}.dxil")
-    add_custom_command(OUTPUT "${_output}"
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${CS_DEFERRED_NATIVE_SHADER_DIR}"
-        COMMAND "${CS_DXC_RUNTIME_DIR}/dxc.exe" -T cs_6_6 -E ${_entry} -O3
-            -I "${_deferred_shader_root}/DeferredRendering" -I "${_deferred_shader_root}"
-            -Fo "${_output}" "${_deferred_binning}"
-        DEPENDS ${_deferred_shader_dependencies} VERBATIM)
+    org_compile_shader(_compiled COMPILER "${CS_DXC_RUNTIME_DIR}/dxc.exe"
+        SOURCE "${_deferred_binning}" ENTRY "${_entry}" TARGET cs_6_6 OUTPUT "${_output}"
+        INCLUDE_DIRECTORIES "${_deferred_shader_root}/DeferredRendering" "${_deferred_shader_root}"
+        OPTIONS -O3 DEPENDS ${_deferred_shader_dependencies})
     list(APPEND CS_DEFERRED_NATIVE_SHADER_OUTPUTS "${_output}")
 endforeach()
 add_custom_target(CSDeferredNativeShaders DEPENDS ${CS_DEFERRED_NATIVE_SHADER_OUTPUTS})
@@ -200,13 +196,7 @@ endif()
 
 target_sources(${PROJECT_NAME} PRIVATE
 	"${CMAKE_CURRENT_SOURCE_DIR}/tests/RenderGraphAPI/FormatLayout.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/RenderGraphRegistry.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/RenderGraphRegistry.h"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/NativeRenderGraphRegistry.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/NativeRenderGraphRegistry.h"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/RenderGraphExecutionContext.h"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/RenderGraphAPIExports.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/GPUServiceAPI.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/LightCulling.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/LightCulling.h"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/ClusteredLightingExtension.cpp"
@@ -214,14 +204,12 @@ target_sources(${PROJECT_NAME} PRIVATE
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShadingExtension.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShadingExtension.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShading.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShading.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/D3D11InteropBridge.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/D3D11InteropBridge.h")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShading.h")
 
 # Keep dependency-specific warning and Windows macro policy local to the bridge.
 set_source_files_properties(
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/RenderGraphHost.cpp"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/NativeRenderGraphRegistry.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/RenderGraphRuntime.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/RenderGraph/RenderGraphAPIExports.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/ClusteredLightingExtension.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShadingExtension.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/Features/DeferredRendering/DeferredShading.cpp"
@@ -297,6 +285,7 @@ target_link_libraries(
         BasicTelemetry::Core
         BasicTelemetry::Tracy
         OpenRenderGraph::OpenRenderGraph
+        OpenRenderGraph::D3D11Interop
         windowsapp
         windowscodecs
 )

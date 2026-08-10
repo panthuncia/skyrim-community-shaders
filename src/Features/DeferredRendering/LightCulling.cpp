@@ -2,7 +2,7 @@
 #include "ClusteredLightingExtension.h"
 
 #include "RenderGraph/RenderGraphRuntime.h"
-#include "RenderGraph/NativeRenderGraphRegistry.h"
+#include <OpenRenderGraph/ContributorRuntime.h>
 #include "Features/DeferredRendering.h"
 #include "Globals.h"
 
@@ -40,16 +40,16 @@ bool DX12LightCulling::Initialize(RenderGraphRuntime& owner) noexcept
 	runtime = &owner;
 	if (!owner.GetRHIDevice() || !CreatePipeline()) return false;
 	try {
-		NativeRenderGraphRegistry::Descriptor desc{};
+		org::contributor::ExtensionRegistry::Descriptor desc{};
 		desc.id = "community-shaders.clustered-lighting";
-		desc.kind = NativeRenderGraphRegistry::Kind::Required;
+		desc.kind = org::contributor::ExtensionRegistry::Kind::Required;
 		desc.exportedResources = { "community-shaders.clustered-lighting.lights",
 			"community-shaders.clustered-lighting.contexts", "community-shaders.clustered-lighting.pbr-materials",
 			"community-shaders.clustered-lighting.clusters", "community-shaders.clustered-lighting.pages",
 			"community-shaders.clustered-lighting.page-counter", "community-shaders.clustered-lighting.diagnostics" };
 		desc.factory = [this] { return std::make_unique<ClusteredLightingExtension>(*this); };
 		desc.diagnostic = [](std::string_view message) { logger::error("[DX12LightCulling] Native graph contributor: {}", message); };
-		registration = NativeRenderGraphRegistry::Get().Register(std::move(desc));
+		registration = owner.GetContributorRuntime()->RegisterExtension(std::move(desc));
 		owner.RequestGraphRebuild();
 		return true;
 	} catch (const std::exception& error) {
@@ -96,6 +96,9 @@ bool DX12LightCulling::CreatePipeline() noexcept
 
 void DX12LightCulling::Shutdown() noexcept
 {
-	if (registration) { NativeRenderGraphRegistry::Get().BeginUnregister(registration); registration = 0; }
+	if (registration && runtime && runtime->GetContributorRuntime()) {
+		runtime->GetContributorRuntime()->BeginUnregisterExtension(registration);
+		registration = 0;
+	}
 	clearPipeline.Reset(); cullPipeline.Reset(); clusterPipeline.Reset(); layout.Reset();
 }

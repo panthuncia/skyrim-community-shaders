@@ -172,7 +172,7 @@ DeferredShadingExtension::DeferredShadingExtension(DX12DeferredShading& owner) :
 		!owner_.glintNoiseInput.mirror)
 		throw std::runtime_error("Deferred native resources are not ready");
 
-	auto importTexture = [&](const ID& id, const D3D11InteropBridge::SharedTexture& source,
+	auto importTexture = [&](const ID& id, const org::interop::D3D11Interop::SharedTexture& source,
 		bool srv, bool uav) {
 		rhi::ResourcePtr imported;
 		if (!owner_.runtime->GetInteropCoordinator()->ImportGraphResource(source, imported))

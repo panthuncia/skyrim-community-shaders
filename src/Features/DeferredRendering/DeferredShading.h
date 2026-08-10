@@ -4,7 +4,7 @@
 
 #include "Features/DeferredRendering/DeferredTypes.h"
 #include "Features/DeferredRendering.h"
-#include "RenderGraph/D3D11InteropBridge.h"
+#include <OpenRenderGraph/D3D11Interop.h>
 #include <array>
 #include <cstddef>
 
@@ -68,23 +68,23 @@ private:
 	struct ImportedInput
 	{
 		winrt::com_ptr<ID3D11Texture2D> source;
-		D3D11InteropBridge::SharedTexture mirror;
+		org::interop::D3D11Interop::SharedTexture mirror;
 	};
 
 	RenderGraphRuntime* runtime{};
 	std::uint64_t nativeRegistration{};
-	D3D11InteropBridge::SharedTexture composite;
-	D3D11InteropBridge::SharedTexture specularComposite;
-	D3D11InteropBridge::SharedTexture reflectanceComposite;
-	D3D11InteropBridge::SharedTexture albedoComposite;
-	D3D11InteropBridge::SharedTexture normalComposite;
-	D3D11InteropBridge::SharedTexture masksComposite;
-	D3D11InteropBridge::SharedTexture linearDepth;
-	D3D11InteropBridge::SharedTexture localShadowMask;
-	D3D11InteropBridge::SharedTexture screenSpaceShadow;
-	D3D11InteropBridge::SharedTexture compatibilityReference;
-	D3D11InteropBridge::SharedTexture frameMarker;
-	D3D11InteropBridge::SharedTexture packedSurfaceMirror;
+	org::interop::D3D11Interop::SharedTexture composite;
+	org::interop::D3D11Interop::SharedTexture specularComposite;
+	org::interop::D3D11Interop::SharedTexture reflectanceComposite;
+	org::interop::D3D11Interop::SharedTexture albedoComposite;
+	org::interop::D3D11Interop::SharedTexture normalComposite;
+	org::interop::D3D11Interop::SharedTexture masksComposite;
+	org::interop::D3D11Interop::SharedTexture linearDepth;
+	org::interop::D3D11Interop::SharedTexture localShadowMask;
+	org::interop::D3D11Interop::SharedTexture screenSpaceShadow;
+	org::interop::D3D11Interop::SharedTexture compatibilityReference;
+	org::interop::D3D11Interop::SharedTexture frameMarker;
+	org::interop::D3D11Interop::SharedTexture packedSurfaceMirror;
 	winrt::com_ptr<ID3D11ComputeShader> linearizeDepthShader;
 	winrt::com_ptr<ID3D11VertexShader> compositeBlitVS;
 	winrt::com_ptr<ID3D11PixelShader> compositeBlitPS;
