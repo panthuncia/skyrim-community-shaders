@@ -7,7 +7,8 @@
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	DeferredRendering::Settings,
-	visualizeDeferredCoverage)
+	visualizeDeferredCoverage,
+	classifyVisibleMaterials)
 
 void DeferredRendering::DrawSettings()
 {
@@ -24,13 +25,91 @@ void DeferredRendering::DrawSettings()
 		ImGui::Indent();
 		const auto generic = CS::Deferred::GetEvaluatorColor(CS::Deferred::Evaluator::Generic);
 		const auto grass = CS::Deferred::GetEvaluatorColor(CS::Deferred::Evaluator::Grass);
+		const auto distantTree = CS::Deferred::GetEvaluatorColor(CS::Deferred::Evaluator::DistantTree);
+		const auto foliage = CS::Deferred::GetEvaluatorColor(CS::Deferred::Evaluator::FoliageSpecial);
+		const auto truePbr = CS::Deferred::GetEvaluatorColor(CS::Deferred::Evaluator::TruePBR);
+		const auto truePbrSubsurface = CS::Deferred::GetEvaluatorColor(CS::Deferred::Evaluator::TruePBRSubsurfaceFuzz);
+		const auto truePbrCoat = CS::Deferred::GetEvaluatorColor(CS::Deferred::Evaluator::TruePBRCoat);
+		const auto truePbrGlint = CS::Deferred::GetEvaluatorColor(CS::Deferred::Evaluator::TruePBRGlint);
+		const auto truePbrTerrain = CS::Deferred::GetEvaluatorColor(CS::Deferred::Evaluator::TruePBRTerrain);
 		ImGui::TextColored({ generic.red, generic.green, generic.blue, 1.0f }, "Generic");
 		ImGui::SameLine();
 		ImGui::TextColored({ grass.red, grass.green, grass.blue, 1.0f }, "Grass");
 		ImGui::SameLine();
-		ImGui::TextDisabled("(other evaluators use compatibility rendering)");
+		ImGui::TextColored({ distantTree.red, distantTree.green, distantTree.blue, 1.0f }, "Distant Tree");
+		ImGui::SameLine();
+		ImGui::TextColored({ foliage.red, foliage.green, foliage.blue, 1.0f }, "Special Foliage");
+		ImGui::TextColored({ truePbr.red, truePbr.green, truePbr.blue, 1.0f }, "TruePBR Core/Wetness");
+		ImGui::SameLine();
+		ImGui::TextColored({ truePbrSubsurface.red, truePbrSubsurface.green, truePbrSubsurface.blue, 1.0f }, "TruePBR SSS/Fuzz");
+		ImGui::SameLine();
+		ImGui::TextColored({ truePbrCoat.red, truePbrCoat.green, truePbrCoat.blue, 1.0f }, "TruePBR Coat");
+		ImGui::SameLine();
+		ImGui::TextColored({ truePbrGlint.red, truePbrGlint.green, truePbrGlint.blue, 1.0f }, "TruePBR Glint");
+		ImGui::SameLine();
+		ImGui::TextColored({ truePbrTerrain.red, truePbrTerrain.green, truePbrTerrain.blue, 1.0f }, "TruePBR Terrain");
+		ImGui::TextDisabled("Parallax, advanced terrain, and LOD blend are prepared but disabled pending direct material-texture sharing");
+		ImGui::TextDisabled("HairMarschner, skin, hair, and eyes use compatibility rendering");
 		ImGui::Unindent();
 	}
+	if (ImGui::Checkbox(T(TKEY("classify_visible_materials"), "Classify Visible Materials"),
+			&settings.classifyVisibleMaterials))
+		globals::state->Save();
+	if (auto tooltip = Util::HoverTooltipWrapper())
+		ImGui::TextUnformatted("Aggregates the intended material class and actual deferred coverage on the GPU, then asynchronously reads back a small histogram. This includes compatibility-rendered pixels.");
+	if (settings.classifyVisibleMaterials) {
+		const auto classification = GetMaterialClassification();
+		ImGui::Text("Last completed sample: %llu   Evaluator mask: 0x%08X",
+			static_cast<unsigned long long>(classification.serial), classification.enabledEvaluatorMask);
+		if (ImGui::BeginTable("DeferredMaterialClassification", 4,
+			ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+			ImGui::TableSetupColumn("Material variant");
+			ImGui::TableSetupColumn("Visible pixels");
+			ImGui::TableSetupColumn("Deferred pixels");
+			ImGui::TableSetupColumn("Coverage");
+			ImGui::TableHeadersRow();
+			for (std::uint32_t id = 0; id < classification.visible.size(); ++id) {
+				const auto visible = classification.visible[id];
+				if (!visible) continue;
+				const auto deferred = classification.deferred[id];
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::Text("%s (%u)", CS::Deferred::GetMaterialClassName(
+					static_cast<CS::Deferred::MaterialClass>(id)).data(), id);
+				ImGui::TableSetColumnIndex(1); ImGui::Text("%u", visible);
+				ImGui::TableSetColumnIndex(2); ImGui::Text("%u", deferred);
+				ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f%%", 100.0f * deferred / visible);
+			}
+			ImGui::EndTable();
+		}
+	}
+}
+
+void DeferredRendering::UpdateMaterialClassification(const std::uint32_t* visible,
+	const std::uint32_t* deferred, std::uint32_t evaluatorMask)
+{
+	if (!visible || !deferred) return;
+	std::scoped_lock lock(classificationMutex);
+	std::copy_n(visible, materialClassification.visible.size(), materialClassification.visible.begin());
+	std::copy_n(deferred, materialClassification.deferred.size(), materialClassification.deferred.begin());
+	materialClassification.enabledEvaluatorMask = evaluatorMask;
+	++materialClassification.serial;
+	if ((materialClassification.serial % 1800u) == 1u) {
+		for (std::uint32_t id = 0; id < materialClassification.visible.size(); ++id) {
+			const auto total = materialClassification.visible[id];
+			const auto promoted = materialClassification.deferred[id];
+			if (total > promoted)
+				logger::info("[DeferredMaterialClassification] class={}({}), visible={}, deferred={}, compatibility={}",
+					CS::Deferred::GetMaterialClassName(static_cast<CS::Deferred::MaterialClass>(id)),
+					id, total, promoted, total - promoted);
+		}
+	}
+}
+
+DeferredRendering::MaterialClassification DeferredRendering::GetMaterialClassification() const
+{
+	std::scoped_lock lock(classificationMutex);
+	return materialClassification;
 }
 
 void DeferredRendering::LoadSettings(json& json)
@@ -57,7 +136,9 @@ bool DeferredRendering::ToggleAtBootSetting()
 		std::unique_lock lock(snapshotMutex);
 		deferredLights.clear();
 		deferredContexts.clear();
+		deferredPBRMaterials.clear();
 		drawContexts.clear();
+		drawPBRMaterials.clear();
 		finalizedFrame.reset();
 	}
 	logger::info("[DeferredRendering] Runtime execution {} immediately", enabled ? "enabled" : "disabled");
@@ -77,6 +158,7 @@ void DeferredRendering::BeginFrame(
 	std::unique_lock lock(snapshotMutex);
 	deferredLights.assign(lights.begin(), lights.end());
 	deferredContexts.clear();
+	deferredPBRMaterials.clear();
 	// Non-BSLightingShader G-buffer producers (distant trees first, then grass)
 	// need a stable valid identity even when their evaluator consumes only
 	// resolved per-pixel inputs. Keep slot zero ABI-valid for that purpose.
@@ -103,6 +185,7 @@ void DeferredRendering::BeginFrame(
 	}
 	deferredContexts.emplace_back(frameContext);
 	drawContexts.clear();
+	drawPBRMaterials.clear();
 	std::ranges::copy(clusterDimensions, clusterSize);
 	nearPlane = cameraNearPlane;
 	farPlane = cameraFarPlane;
@@ -165,6 +248,30 @@ DeferredRendering::ContextIndex DeferredRendering::InternContext(const LightingC
 	return static_cast<ContextIndex>(deferredContexts.size() - 1);
 }
 
+CS::Deferred::PBRMaterialIndex DeferredRendering::AssignPBRMaterial(
+	const RE::BSRenderPass* renderPass, const CS::Deferred::PBRMaterialRecord& material)
+{
+	if (!IsRuntimeEnabled() || !renderPass || !renderPass->geometry)
+		return CS::Deferred::kInvalidPBRMaterial;
+	std::unique_lock lock(snapshotMutex);
+	const auto index = InternPBRMaterial(material);
+	drawPBRMaterials.insert_or_assign(renderPass, index);
+	return index;
+}
+
+CS::Deferred::PBRMaterialIndex DeferredRendering::InternPBRMaterial(
+	const CS::Deferred::PBRMaterialRecord& material)
+{
+	const auto it = std::ranges::find(deferredPBRMaterials, material);
+	if (it != deferredPBRMaterials.end())
+		return static_cast<CS::Deferred::PBRMaterialIndex>(
+			std::distance(deferredPBRMaterials.begin(), it));
+	if (deferredPBRMaterials.size() >= CS::Deferred::kMaxPBRMaterials)
+		return CS::Deferred::kInvalidPBRMaterial;
+	deferredPBRMaterials.push_back(material);
+	return static_cast<CS::Deferred::PBRMaterialIndex>(deferredPBRMaterials.size() - 1u);
+}
+
 void DeferredRendering::FinalizeFrame()
 {
 	if (!IsRuntimeEnabled())
@@ -173,6 +280,7 @@ void DeferredRendering::FinalizeFrame()
 	auto result = std::make_shared<FrameSnapshot>();
 	result->lights = deferredLights;
 	result->contexts = deferredContexts;
+	result->pbrMaterials = deferredPBRMaterials;
 	result->cameraView = cameraView;
 	result->cameraViewInverse = cameraViewInverse;
 	result->projectionInverse = projectionInverse;
@@ -215,4 +323,12 @@ DeferredRendering::ContextIndex DeferredRendering::GetContext(const RE::BSRender
 	std::shared_lock lock(snapshotMutex);
 	const auto it = drawContexts.find(renderPass);
 	return it == drawContexts.end() ? INVALID_CONTEXT : it->second;
+}
+
+CS::Deferred::PBRMaterialIndex DeferredRendering::GetPBRMaterial(
+	const RE::BSRenderPass* renderPass) const
+{
+	std::shared_lock lock(snapshotMutex);
+	const auto it = drawPBRMaterials.find(renderPass);
+	return it == drawPBRMaterials.end() ? CS::Deferred::kInvalidPBRMaterial : it->second;
 }

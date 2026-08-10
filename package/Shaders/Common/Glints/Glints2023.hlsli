@@ -1,6 +1,5 @@
 #include "Common/Math.hlsli"
 #include "Common/Random.hlsli"
-#include "Common/SharedData.hlsli"
 
 namespace Glints
 {

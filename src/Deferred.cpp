@@ -135,17 +135,17 @@ void Deferred::SetupResources()
 		// TEMPORAL_AA_WATER_2
 
 		// Albedo
-		SetupRenderTarget(ALBEDO, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
+		SetupRenderTarget(ALBEDO, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
 		// Specular
-		SetupRenderTarget(SPECULAR, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
+		SetupRenderTarget(SPECULAR, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
 		// Reflectance
-		SetupRenderTarget(REFLECTANCE, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
+		SetupRenderTarget(REFLECTANCE, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
 		// Normal + Roughness
-		SetupRenderTarget(NORMALROUGHNESS, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
+		SetupRenderTarget(NORMALROUGHNESS, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
 		// Masks
-		SetupRenderTarget(MASKS, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
+		SetupRenderTarget(MASKS, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
 		// Packed deferred context/material identity. Integer MRTs must not blend.
-		SetupRenderTarget(MASKS2, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R32_UINT,
+		SetupRenderTarget(MASKS2, texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R32G32B32A32_UINT,
 			D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, true);
 
 		// DeferredLighting consumes the engine shadow mask from D3D12. Preserve
@@ -331,9 +331,11 @@ void Deferred::ClearPackedIdentityAfterTargetBind(bool isCompute)
 	if (!deferredPass || !packedIdentityClearPending || isCompute)
 		return;
 	if (auto* packedTarget = globals::game::renderer->GetRuntimeData().renderTargets[MASKS2].RTV) {
-		// 65535 is exactly representable as float and converts exactly to the
-		// R32_UINT invalid-context/legacy-material sentinel (0x0000FFFF).
-		constexpr float invalidLegacy[4]{ 65535.0f, 0.0f, 0.0f, 0.0f };
+		// The first component carries the invalid-context/legacy-material sentinel.
+		// The second component is the invalid PBR material-record index.
+		// ClearRenderTargetView accepts floats even for UINT RTVs. Use the exact
+		// low-16-bit sentinel rather than an unrepresentable float(UINT_MAX).
+		constexpr float invalidLegacy[4]{ 65535.0f, 65535.0f, 0.0f, 0.0f };
 		globals::d3d::context->ClearRenderTargetView(packedTarget, invalidLegacy);
 		packedIdentityClearPending = false;
 	}
@@ -528,9 +530,10 @@ void Deferred::EndDeferred()
 		const bool packedSurfaceMirrorReady=dx12Deferred.PreparePackedSurfaceMirror(packedSurfaceTarget.texture);
 		const bool gbufferInputsReady=dx12Deferred.PrepareGBufferInputs();
 		const bool indirectLightingInputsReady=dx12Deferred.PrepareIndirectLightingInputs();
+		const bool glintNoiseReady=dx12Deferred.PrepareGlintNoiseInput();
 		if (!packedSurfaceMirrorReady)
 			logger::error("[DeferredRendering] Packed-surface mirror preparation failed; skipping the DX12 epoch");
-		if(mainDescription.Width&&mainDescription.Height&&shadowMaskReady&&screenShadowReady&&packedSurfaceMirrorReady&&gbufferInputsReady&&indirectLightingInputsReady&&dx12Deferred.PrepareCompatibilityInput(mainTarget.texture)) {
+		if(mainDescription.Width&&mainDescription.Height&&shadowMaskReady&&screenShadowReady&&packedSurfaceMirrorReady&&gbufferInputsReady&&indirectLightingInputsReady&&glintNoiseReady&&dx12Deferred.PrepareCompatibilityInput(mainTarget.texture)) {
 			static std::once_flag epochPreparationLogged;
 			std::call_once(epochPreparationLogged, [] { logger::info("[DeferredRendering] D3D11 producers are ready for the first DX12 epoch"); });
 			const bool submitted = DX12RenderRuntime::Get().ExecuteDeferredEpoch(

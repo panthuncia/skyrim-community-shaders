@@ -351,7 +351,8 @@ public:
 		float MipBias;
 		float WaterSystemHeight;  // TES::GetWaterHeight in camera-relative Z; -NI_INFINITY when no water body found
 		uint DeferredRenderingEnabled;
-		float2 pad0;
+		uint DeferredEnabledEvaluatorMask;
+		float pad0;
 		float4 AmbientSHR;
 		float4 AmbientSHG;
 		float4 AmbientSHB;

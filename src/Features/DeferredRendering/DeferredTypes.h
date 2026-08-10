@@ -2,13 +2,88 @@
 
 namespace CS::Deferred
 {
-	inline constexpr std::uint32_t kAbiVersion = 4;
+	inline constexpr std::uint32_t kAbiVersion = 7;
 	inline constexpr std::uint32_t kMaxLights = 1024;
 	using ContextIndex = std::uint16_t;
 	inline constexpr ContextIndex kInvalidContext = 0xFFFF;
 	// Context zero is reserved for frame-global/non-BSLightingShader producers.
 	// Draw-specific interned contexts begin at one.
 	inline constexpr ContextIndex kFrameGlobalContext = 0;
+	using PBRMaterialIndex = std::uint16_t;
+	inline constexpr PBRMaterialIndex kInvalidPBRMaterial = 0xFFFF;
+	// Keep the persistent material table bounded. The index ABI remains 16-bit,
+	// leaving room to grow this without changing the packed G-buffer identity.
+	inline constexpr std::uint32_t kMaxPBRMaterials = 4096;
+
+	enum class PBRPayloadProfile : std::uint8_t
+	{
+		Core = 0,
+		SubsurfaceFuzz = 1,
+		Coat = 2,
+		Glint = 3,
+		Parallax = 4,
+		TerrainAdvanced = 5,
+		LodBlend = 6,
+	};
+
+	struct PackedPBRIdentity
+	{
+		std::uint32_t surface{};
+		std::uint32_t materialProfileAux = kInvalidPBRMaterial;
+		std::uint32_t payload0{};
+		std::uint32_t payload1{};
+	};
+	static_assert(sizeof(PackedPBRIdentity) == 16);
+	static_assert(offsetof(PackedPBRIdentity, materialProfileAux) == 4);
+
+	constexpr std::uint32_t PackPBRMaterialProfileAux(PBRMaterialIndex material,
+		PBRPayloadProfile profile, std::uint8_t auxiliary) noexcept
+	{
+		return std::uint32_t(material) |
+			(std::uint32_t(profile) << 16u) | (std::uint32_t(auxiliary) << 24u);
+	}
+	static_assert(PackPBRMaterialProfileAux(kInvalidPBRMaterial,
+		PBRPayloadProfile::Core, 0) == 0x0000FFFFu);
+
+	inline constexpr std::uint32_t kInvalidTextureDescriptor = 0xFFFFFFFFu;
+	struct alignas(16) PBRLandscapeLayerRecord
+	{
+		std::uint32_t baseColorTexture = kInvalidTextureDescriptor;
+		std::uint32_t normalTexture = kInvalidTextureDescriptor;
+		std::uint32_t rmaosTexture = kInvalidTextureDescriptor;
+		std::uint32_t displacementTexture = kInvalidTextureDescriptor;
+		// xyz: roughness, displacement, specular; w: active/PBR layer.
+		float4 materialParameters{};
+		float4 glintParameters{};
+	};
+	static_assert(sizeof(PBRLandscapeLayerRecord) == 48);
+
+	// Fence-retired, immutable material record ABI. Descriptor fields remain
+	// invalid for raster-resolved profiles. Texture-dependent evaluators remain
+	// disabled until a future direct-share/native-D3D12 texture registry can
+	// populate every descriptor they require; material textures are never mirrored.
+	struct alignas(16) PBRMaterialRecord
+	{
+		std::uint32_t abiVersion = kAbiVersion;
+		std::uint32_t flags{};
+		std::uint32_t samplerPolicy{};
+		std::uint32_t generation{};
+		std::uint32_t objectTextures[8]{
+			kInvalidTextureDescriptor, kInvalidTextureDescriptor,
+			kInvalidTextureDescriptor, kInvalidTextureDescriptor,
+			kInvalidTextureDescriptor, kInvalidTextureDescriptor,
+			kInvalidTextureDescriptor, kInvalidTextureDescriptor };
+		float4 materialParameters[6]{};
+		PBRLandscapeLayerRecord landscapeLayers[6]{};
+
+		bool operator==(const PBRMaterialRecord& other) const noexcept
+		{
+			return std::memcmp(this, std::addressof(other), sizeof(*this)) == 0;
+		}
+	};
+	STATIC_ASSERT_ALIGNAS_16(PBRMaterialRecord);
+	static_assert(sizeof(PBRMaterialRecord) == 432);
+	static_assert(offsetof(PBRMaterialRecord, landscapeLayers) == 144);
 
 	enum class LightFlags : std::uint32_t
 	{
@@ -59,6 +134,12 @@ namespace CS::Deferred
 		TerrainSpecular = CSRegTerrainSpecular,
 		TruePBR = CSRegTruePbr,
 		TruePBRTerrain = CSRegTruePbrTerrain,
+		TruePBRSubsurfaceFuzz = CSRegTruePbrSubsurfaceFuzz,
+		TruePBRCoat = CSRegTruePbrCoat,
+		TruePBRGlint = CSRegTruePbrGlint,
+		TruePBRParallax = CSRegTruePbrParallax,
+		TruePBRTerrainAdvanced = CSRegTruePbrTerrainAdvanced,
+		TruePBRLodBlend = CSRegTruePbrLodBlend,
 		Grass = CSRegGrass,
 		DistantTree = CSRegDistantTree,
 		FoliageSpecial = CSRegFoliageSpecial,
@@ -82,7 +163,15 @@ namespace CS::Deferred
 		Skin = CSRegSkin,
 		Hair = CSRegHair,
 		EyeEnvmap = CSRegEyeEnvmap,
-		Count = 8,
+		FoliageSpecial = CSRegFoliageSpecial,
+		TruePBRSubsurfaceFuzz = CSRegTruePbrSubsurfaceFuzz,
+		TruePBRCoat = CSRegTruePbrCoat,
+		TruePBRGlint = CSRegTruePbrGlint,
+		TruePBRParallax = CSRegTruePbrParallax,
+		TruePBRTerrain = CSRegTruePbrTerrain,
+		TruePBRTerrainAdvanced = CSRegTruePbrTerrainAdvanced,
+		TruePBRLodBlend = CSRegTruePbrLodBlend,
+		Count = 16,
 	};
 	inline constexpr std::uint32_t kEvaluatorCount = static_cast<std::uint32_t>(Evaluator::Count);
 	static_assert(kEvaluatorCount <= 256);
@@ -96,6 +185,17 @@ namespace CS::Deferred
 	#undef CS_DEFERRED_MATERIAL
 		default:
 			return Evaluator::Compatibility;
+		}
+	}
+
+	constexpr std::string_view GetMaterialClassName(MaterialClass materialClass) noexcept
+	{
+		switch (materialClass) {
+	#define CS_DEFERRED_MATERIAL(name, value, cppEvaluator, hlslEvaluator) \
+		case MaterialClass::name: return std::string_view(#name).substr(5);
+	#include "../../../package/Shaders/DeferredRendering/DeferredMaterialRegistry.def"
+	#undef CS_DEFERRED_MATERIAL
+		default: return "Unknown";
 		}
 	}
 
@@ -127,9 +227,14 @@ namespace CS::Deferred
 		}
 	}
 
-	static_assert(GetEvaluator(MaterialClass::FoliageSpecial) == Evaluator::Compatibility);
-	static_assert(GetEvaluator(MaterialClass::DistantTree) == Evaluator::Compatibility);
+	static_assert(GetEvaluator(MaterialClass::FoliageSpecial) == Evaluator::FoliageSpecial);
+	static_assert(GetEvaluator(MaterialClass::DistantTree) == Evaluator::DistantTree);
 	static_assert(GetEvaluator(MaterialClass::Grass) == Evaluator::Grass);
+	static_assert(GetEvaluator(MaterialClass::TruePBR) == Evaluator::TruePBR);
+	static_assert(GetEvaluator(MaterialClass::TruePBRSubsurfaceFuzz) == Evaluator::TruePBRSubsurfaceFuzz);
+	static_assert(GetEvaluator(MaterialClass::TruePBRCoat) == Evaluator::TruePBRCoat);
+	static_assert(GetEvaluator(MaterialClass::TruePBRGlint) == Evaluator::TruePBRGlint);
+	static_assert(GetEvaluator(MaterialClass::TruePBRTerrain) == Evaluator::TruePBRTerrain);
 	static_assert(IsEvaluatorEnabled(EvaluatorBit(Evaluator::Generic), Evaluator::Generic));
 
 	enum SurfaceFlags : std::uint8_t
@@ -184,6 +289,9 @@ namespace CS::Deferred
 		// xyz: the geometry shader's SpecularColor; w: vanilla shininess.
 		// Glossiness remains a resolved per-pixel G-buffer value.
 		float4 specularColorAndShininess{};
+		// x: soft-light rolloff; y: rim exponent. These are draw-uniform inputs
+		// to the existing CS foliage lobes.
+		float4 lightingEffectParams{};
 		std::int32_t roomIndex = -1;
 		std::uint32_t shadowLightMembershipMask = 0;
 		std::uint32_t featureFlags = 0;
@@ -195,9 +303,9 @@ namespace CS::Deferred
 		}
 	};
 	STATIC_ASSERT_ALIGNAS_16(LightingContext);
-	static_assert(sizeof(LightingContext) == 144);
-	static_assert(offsetof(LightingContext, roomIndex) == 128);
-	static_assert(offsetof(LightingContext, abiVersion) == 140);
+	static_assert(sizeof(LightingContext) == 160);
+	static_assert(offsetof(LightingContext, roomIndex) == 144);
+	static_assert(offsetof(LightingContext, abiVersion) == 156);
 
 	struct LightingTransform
 	{

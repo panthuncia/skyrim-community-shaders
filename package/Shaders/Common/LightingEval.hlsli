@@ -9,7 +9,7 @@
 #endif
 
 #if defined(TRUE_PBR)
-DirectContext CreateDirectLightingContext(float3 worldNormal, float3 coatWorldNormal, float3 vertexNormal, float3 viewDir, float3 coatViewDir, float3 lightDir, float3 coatLightDir, float3 lightColor, float detailedShadow, float softShadow)
+DirectContext CreateDirectLightingContext(float3 worldNormal, float3 coatWorldNormal, float3 vertexNormal, float3 viewDir, float3 coatViewDir, float3 lightDir, float3 coatLightDir, float3 lightColor, float detailedShadow, float softShadow, uint materialFlags)
 #else
 DirectContext CreateDirectLightingContext(float3 worldNormal, float3 vertexNormal, float3 viewDir, float3 lightDir, float3 lightColor, float detailedShadow, float softShadow)
 #endif
@@ -28,7 +28,7 @@ DirectContext CreateDirectLightingContext(float3 worldNormal, float3 vertexNorma
 	context.coatViewDir = normalize(coatViewDir);
 	context.coatLightDir = normalize(coatLightDir);
 	context.coatHalfVector = normalize(context.coatViewDir + context.coatLightDir);
-	[branch] if ((PBRFlags & PBR::Flags::InterlayerParallax) != 0)
+	[branch] if ((materialFlags & PBR::Flags::InterlayerParallax) != 0)
 	{
 		context.coatLightColor = lightColor * softShadow;
 	}
@@ -200,7 +200,7 @@ void GetIndirectLobeWeights(out IndirectLobeWeights lobeWeights, IndirectContext
 #endif
 }
 
-#if defined(WETNESS_EFFECTS)
+#if defined(WETNESS_EFFECTS) || defined(CS_DEFERRED_TRUE_PBR)
 void EvaluateWetnessLighting(float3 wetnessNormal, DirectContext context, float roughness, inout DirectLightingOutput lightingOutput)
 {
 	const float wetnessStrength = saturate(1 - roughness);

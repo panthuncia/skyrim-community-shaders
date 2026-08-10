@@ -16,8 +16,26 @@ bool DX12InteropCoordinator::CreateD3D12OwnedSharedTexture(
 	bool createD3D11SRV,
 	SharedTexture& output) const noexcept
 {
+	D3D11_TEXTURE2D_DESC description{};
+	description.Width = width;
+	description.Height = height;
+	description.MipLevels = 1;
+	description.ArraySize = 1;
+	description.Format = format;
+	description.SampleDesc.Count = 1;
+	return CreateD3D12OwnedSharedTexture(description, flags, createD3D11SRV, output);
+}
+
+bool DX12InteropCoordinator::CreateD3D12OwnedSharedTexture(
+	const D3D11_TEXTURE2D_DESC& requested,
+	D3D12_RESOURCE_FLAGS flags,
+	bool createD3D11SRV,
+	SharedTexture& output) const noexcept
+{
 	output = {};
-	if (!device11 || !device12 || !width || !height || format == DXGI_FORMAT_UNKNOWN)
+	if (!device11 || !device12 || !requested.Width || !requested.Height ||
+		!requested.ArraySize || requested.Format == DXGI_FORMAT_UNKNOWN ||
+		requested.SampleDesc.Count != 1)
 		return false;
 	try {
 		D3D12_HEAP_PROPERTIES heap{};
@@ -28,12 +46,12 @@ bool DX12InteropCoordinator::CreateD3D12OwnedSharedTexture(
 		heap.VisibleNodeMask = 1;
 		D3D12_RESOURCE_DESC description{};
 		description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-		description.Width = width;
-		description.Height = height;
-		description.DepthOrArraySize = 1;
-		description.MipLevels = 1;
-		description.Format = format;
-		description.SampleDesc.Count = 1;
+		description.Width = requested.Width;
+		description.Height = requested.Height;
+		description.DepthOrArraySize = static_cast<UINT16>(requested.ArraySize);
+		description.MipLevels = static_cast<UINT16>(requested.MipLevels);
+		description.Format = requested.Format;
+		description.SampleDesc = requested.SampleDesc;
 		description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 		description.Flags = flags | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
 		const HRESULT createResult = device12->CreateCommittedResource(
@@ -41,7 +59,7 @@ bool DX12InteropCoordinator::CreateD3D12OwnedSharedTexture(
 			nullptr, IID_PPV_ARGS(output.d3d12.put()));
 		if (FAILED(createResult)) {
 			logger::error("[DX12Interop] D3D12 CreateCommittedResource(shared) failed: HRESULT=0x{:08X}, format={}, flags=0x{:X}",
-				static_cast<unsigned>(createResult), static_cast<unsigned>(format), static_cast<unsigned>(description.Flags));
+				static_cast<unsigned>(createResult), static_cast<unsigned>(requested.Format), static_cast<unsigned>(description.Flags));
 			return false;
 		}
 		HANDLE handle{};
@@ -56,7 +74,7 @@ bool DX12InteropCoordinator::CreateD3D12OwnedSharedTexture(
 		CloseHandle(handle);
 		if (FAILED(openResult)) {
 			logger::error("[DX12Interop] D3D11 OpenSharedResource1(D3D12 Texture2D) failed: HRESULT=0x{:08X}, format={}, flags=0x{:X}",
-				static_cast<unsigned>(openResult), static_cast<unsigned>(format), static_cast<unsigned>(description.Flags));
+				static_cast<unsigned>(openResult), static_cast<unsigned>(requested.Format), static_cast<unsigned>(description.Flags));
 			output = {};
 			return false;
 		}
@@ -269,8 +287,8 @@ bool DX12InteropCoordinator::EnsureReadOnlyMirror(ID3D11Texture2D* source, Share
 	// Mirrors are the fallback for engine allocations that cannot be directly
 	// imported. The host readiness fence, rather than resource ownership, is what
 	// guarantees visibility of the D3D11 copy to D3D12.
-	if (!CreateD3D12OwnedSharedTexture(sourceDescription.Width, sourceDescription.Height,
-		sourceDescription.Format, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, true, candidate))
+	if (!CreateD3D12OwnedSharedTexture(sourceDescription,
+		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, true, candidate))
 		return false;
 	mirror = std::move(candidate);
 	return true;

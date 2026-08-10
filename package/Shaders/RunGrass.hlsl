@@ -281,7 +281,7 @@ struct PS_OUTPUT
 	float4 Albedo: SV_Target3;
 	float4 Specular: SV_Target4;
 	float4 Masks: SV_Target6;
-	uint Masks2: SV_Target7;
+	uint4 Masks2: SV_Target7;
 #	endif      // RENDER_DEPTH
 };
 #else
@@ -295,7 +295,7 @@ struct PS_OUTPUT
 	float4 Normal: SV_Target2;
 	float4 Albedo: SV_Target3;
 	float4 Masks: SV_Target6;
-	uint Masks2: SV_Target7;
+	uint4 Masks2: SV_Target7;
 #	endif
 };
 #endif
@@ -615,14 +615,20 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	psout.Specular = float4(specularColor, 1);
 	psout.Masks = float4(0, 0, Color::RGBToYCoCg(directionalAmbientColor).x, 0);
 	uint packedVertexAO = (uint)round(saturate(vertexAO) * 31.0);
-	psout.Masks2 = 0x0000FFFFu | (packedVertexAO << 27);
-	if (SharedData::DeferredRenderingEnabled) {
+	psout.Masks2 = uint4(0x0000FFFFu | (packedVertexAO << 27), 0xFFFFFFFFu, 0u,
+		0x80000000u | CS_MATERIAL_Grass);
+	if (SharedData::DeferredRenderingEnabled &&
+		CSDeferredEvaluatorEnabled(CS_EVALUATOR_GRASS,
+			SharedData::DeferredEnabledEvaluatorMask)) {
 		uint surfaceFlags = 3u | (complex ? 4u : 0u);
-		psout.Masks2 = (CS_MATERIAL_Grass << 16u) | (surfaceFlags << 24u) | (packedVertexAO << 27);
+		psout.Masks2 = uint4((CS_MATERIAL_Grass << 16u) | (surfaceFlags << 24u) | (packedVertexAO << 27),
+			0xFFFFFFFFu, 0u, 0x80000000u | CS_MATERIAL_Grass);
 	}
 	// Store resolved surface and visibility inputs for the real grass evaluator.
 	// IBL and skylighting remain unevaluated and are sampled by D3D12.
-	if (SharedData::DeferredRenderingEnabled) {
+	if (SharedData::DeferredRenderingEnabled &&
+		CSDeferredEvaluatorEnabled(CS_EVALUATOR_GRASS,
+			SharedData::DeferredEnabledEvaluatorMask)) {
 		psout.NormalGlossiness.z = specColor.w * SharedData::grassLightingSettings.SpecularStrength;
 		// Visibility is a resolved raster input, not pre-evaluated lighting.
 		// D3D12 reconstructs directional color from the lighting context.
@@ -781,7 +787,8 @@ PS_OUTPUT main(PS_INPUT input)
 	psout.Masks = float4(0, 0, Color::RGBToYCoCg(directionalAmbientColor).x, 0);
 	// Grass remains geometry-lit.  Never allow its G-buffer pixels to inherit
 	// the deferred identity of opaque geometry rendered underneath it.
-	psout.Masks2 = 0x0000FFFFu | ((uint)round(saturate(vertexAO) * 31.0) << 27);
+	psout.Masks2 = uint4(0x0000FFFFu | ((uint)round(saturate(vertexAO) * 31.0) << 27),
+		0xFFFFFFFFu, 0u, 0x80000000u | CS_MATERIAL_Grass);
 #		endif
 
 	return psout;

@@ -5,6 +5,7 @@
 #include "Common/Permutation.hlsli"
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"
+#include "DeferredRendering/DeferredMaterial.hlsli"
 #if !defined(DYNAMIC_CUBEMAPS) && defined(IBL)
 #	undef IBL
 #endif
@@ -87,6 +88,7 @@ struct PS_OUTPUT
 	float4 Normal: SV_Target2;
 	float4 Albedo: SV_Target3;
 	float4 Masks: SV_Target6;
+	uint4 Masks2: SV_Target7;
 #	endif  // DEFERRED
 #endif      // !RENDER_DEPTH
 };
@@ -199,21 +201,24 @@ PS_OUTPUT main(PS_INPUT input)
 	float2 screenUV = FrameBuffer::ViewToUV(viewPosition);
 	float screenNoise = Random::InterleavedGradientNoise(input.Position.xy, SharedData::FrameCount);
 
-	float dirShadow = 1;
+	float screenSpaceVisibility = 1;
 
 #			if defined(SCREEN_SPACE_SHADOWS)
-	dirShadow = lerp(1.0, ScreenSpaceShadows::GetScreenSpaceShadow(input.Position.xyz, screenUV, screenNoise), 0.8);
+	screenSpaceVisibility = lerp(1.0, ScreenSpaceShadows::GetScreenSpaceShadow(input.Position.xyz, screenUV, screenNoise), 0.8);
 #			endif
 
-	if (dirShadow != 0.0)
-		dirShadow *= ShadowSampling::GetWorldShadow(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
+	float directionalEnvironmentVisibility = 1.0f;
+	if (screenSpaceVisibility != 0.0)
+		directionalEnvironmentVisibility *= ShadowSampling::GetWorldShadow(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
 
 	float llDirLightMult = (SharedData::linearLightingSettings.enableLinearLighting && !SharedData::linearLightingSettings.isDirLightLinear) ? SharedData::linearLightingSettings.dirLightMult : 1.0f;
-	float3 diffuseColor = Color::DirectionalLight(SharedData::DirLightColor.xyz / max(llDirLightMult, 1e-5), SharedData::linearLightingSettings.isDirLightLinear) * dirShadow * 0.5 * llDirLightMult * Color::VanillaNormalization();
+	float3 diffuseColor = Color::DirectionalLight(SharedData::DirLightColor.xyz / max(llDirLightMult, 1e-5), SharedData::linearLightingSettings.isDirLightLinear) * screenSpaceVisibility * directionalEnvironmentVisibility * 0.5 * llDirLightMult * Color::VanillaNormalization();
 
 #			if defined(EXP_HEIGHT_FOG)
 	if (SharedData::exponentialHeightFogSettings.enabled) {
-		diffuseColor *= ExponentialHeightFog::GetSunlightFogAttenuation(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
+		float sunlightFogVisibility = ExponentialHeightFog::GetSunlightFogAttenuation(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
+		directionalEnvironmentVisibility *= sunlightFogVisibility;
+		diffuseColor *= sunlightFogVisibility;
 	}
 #			endif
 
@@ -244,7 +249,21 @@ PS_OUTPUT main(PS_INPUT input)
 	psout.Normal.zw = 0;
 
 	psout.Albedo = float4(baseColor.xyz, 1);
-	psout.Masks = float4(0, 0, 1, 0);
+	psout.Masks = float4(directionalEnvironmentVisibility, 0, 1, 0);
+	uint distantTreeMaterial = CS_MATERIAL_Legacy;
+	if (SharedData::DeferredRenderingEnabled &&
+		CSDeferredEvaluatorEnabled(CS_EVALUATOR_DISTANT_TREE,
+			SharedData::DeferredEnabledEvaluatorMask)
+#			if defined(EXP_HEIGHT_FOG)
+		&& !inReflection
+#			endif
+	) {
+		distantTreeMaterial = CS_MATERIAL_DistantTree;
+	}
+	// Slot zero is the frame-global lighting context reserved for non-lighting
+	// shader producers. Distant trees receive directional light only.
+	psout.Masks2 = uint4((distantTreeMaterial << 16u) | (1u << 24u) | (31u << 27u),
+		0xFFFFFFFFu, 0u, 0x80000000u | CS_MATERIAL_DistantTree);
 #		else
 	float dirShadow = ShadowSampling::GetWorldShadow(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
 

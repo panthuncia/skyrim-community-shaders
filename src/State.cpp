@@ -1038,6 +1038,8 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 
 		data.WaterSystemHeight = -RE::NI_INFINITY;
 		data.DeferredRenderingEnabled = globals::features::deferredRendering.IsRuntimeEnabled();
+		data.DeferredEnabledEvaluatorMask =
+			globals::features::deferredRendering.GetEnabledEvaluatorMask();
 
 		data.InInterior = Util::IsInterior();
 		data.HasDirectionalShadows = HasDirectionalShadows();

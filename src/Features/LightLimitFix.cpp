@@ -332,6 +332,12 @@ void LightLimitFix::BSLightingShader_SetupGeometry_After(RE::BSRenderPass* a_pas
 			lightingContext.featureFlags |= DeferredRendering::kReceivesDirectionalShadow;
 		if (hasLightingFlag(LightingFlags::CharacterLight))
 			lightingContext.featureFlags |= DeferredRendering::kUsesCharacterLight;
+		if (hasLightingFlag(LightingFlags::SoftLighting))
+			lightingContext.featureFlags |= DeferredRendering::kUsesSoftLighting;
+		if (hasLightingFlag(LightingFlags::RimLighting))
+			lightingContext.featureFlags |= DeferredRendering::kUsesRimLighting;
+		if (hasLightingFlag(LightingFlags::BackLighting))
+			lightingContext.featureFlags |= DeferredRendering::kUsesBackLighting;
 
 		// Capture the exact constants that the active CS lighting permutation will consume.
 		// Replacement shaders retain a CPU-side PerGeometry image, so this does not require
@@ -355,6 +361,7 @@ void LightLimitFix::BSLightingShader_SetupGeometry_After(RE::BSRenderPass* a_pas
 			if (captured)
 				lightingContext.featureFlags |= DeferredRendering::kLightingUniformsValid;
 			copyConstant(indices.SpecularColor, &lightingContext.specularColorAndShininess, sizeof(float4));
+			copyConstant(indices.LightingEffectParams, &lightingContext.lightingEffectParams, sizeof(float4));
 
 			float4 rawEmissive{};
 			if (copyConstant(indices.EmitColor, &rawEmissive, sizeof(float) * 3)) {
@@ -389,6 +396,7 @@ void LightLimitFix::BSLightingShader_SetupGeometry_After(RE::BSRenderPass* a_pas
 	strictLightDataCB->Update(strictLightDataTemp);
 	DeferredIdentityCB identity{};
 	identity.PackedSurface = strictLightDataTemp.DeferredPackedSurface;
+	identity.PBRMaterialIndex = globals::features::deferredRendering.GetPBRMaterial(a_pass);
 	deferredIdentityCB->Update(identity);
 	wasEmpty = isEmpty;
 	wasWorld = isWorld;

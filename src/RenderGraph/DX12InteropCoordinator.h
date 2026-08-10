@@ -37,6 +37,16 @@ public:
 		D3D12_RESOURCE_FLAGS flags,
 		bool createD3D11SRV,
 		SharedTexture& output) const noexcept;
+	// Full-description variant for host interop resources whose mip chain/array
+	// shape must survive sharing. Material assets must not use the mirror path;
+	// their future registry requires direct sharing or native D3D12 ownership.
+	// Usage/CPU/bind/misc fields are normalized by the D3D12 owner; dimensions,
+	// format, mip levels, array size and sample description are authoritative.
+	bool CreateD3D12OwnedSharedTexture(
+		const D3D11_TEXTURE2D_DESC& description,
+		D3D12_RESOURCE_FLAGS flags,
+		bool createD3D11SRV,
+		SharedTexture& output) const noexcept;
 	bool CreateD3D12OwnedSharedTextureArray(
 		uint32_t width,
 		uint32_t height,

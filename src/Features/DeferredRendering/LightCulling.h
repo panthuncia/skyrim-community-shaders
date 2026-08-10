@@ -29,6 +29,7 @@ private:
 	winrt::com_ptr<ID3D12PipelineState> cullPipeline;
 	CSDX12ResourceHandle lightsHandle{};
 	CSDX12ResourceHandle contextsHandle{};
+	CSDX12ResourceHandle pbrMaterialsHandle{};
 	CSDX12ResourceHandle clustersHandle{};
 	CSDX12ResourceHandle pagesHandle{};
 	CSDX12ResourceHandle pageCounterHandle{};

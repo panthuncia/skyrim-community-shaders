@@ -3,11 +3,16 @@
 #include "Common/LightingCommon.hlsli"
 
 #include "Common/BRDF.hlsli"
+#if !defined(CS_DEFERRED_TRUE_PBR)
 #include "Common/Color.hlsli"
+#endif
+#include "Common/LightingParity.hlsli"
 #include "Common/Math.hlsli"
 #include "Common/PBRMath.hlsli"
 #include "Common/Shading.hlsli"
+#if !defined(CS_DEFERRED_TRUE_PBR)
 #include "Common/SharedData.hlsli"
+#endif
 
 namespace PBR
 {
@@ -99,7 +104,7 @@ namespace PBR
 		const float wrap = 1;
 		float wrappedNdotL = saturate((dot(fakeN, L) + wrap) / ((1 + wrap) * (1 + wrap)));
 		float diffuseScatter = (1 / Math::PI) * lerp(wrappedNdotL, diffuseKajiya, 0.33);
-		float luma = Color::RGBToLuminance(material.BaseColor);
+		float luma = CSLightingRGBToLuminance(material.BaseColor);
 		float3 scatterTint = pow(material.BaseColor / max(luma, 1e-5), 1 - shadow);
 		S += sqrt(material.BaseColor) * diffuseScatter * scatterTint;
 
@@ -145,7 +150,7 @@ namespace PBR
 		float satVdotH = saturate(VdotH);
 
 #if !defined(LANDSCAPE) && !defined(LODLANDSCAPE)
-		[branch] if ((PBRFlags & Flags::HairMarschner) != 0)
+		[branch] if ((material.Flags & Flags::HairMarschner) != 0)
 		{
 			lightingOutput.transmission += softLightColor * GetHairColorMarschner(N, V, L, NdotL, NdotV, VdotL, 0, 1, 0, material);
 		}
@@ -165,14 +170,31 @@ namespace PBR
 			lightingOutput.specular += Fr * detailedLightColor * satNdotL;
 
 #if !defined(LANDSCAPE) && !defined(LODLANDSCAPE)
-			[branch] if ((PBRFlags & Flags::Fuzz) != 0)
+			[branch] if ((material.Flags & Flags::Fuzz) != 0)
 			{
 				float3 fuzzSpecular = SpecularMicroflakes(material.Roughness, material.FuzzColor, satNdotL, satNdotV, satNdotH, satVdotH) * detailedLightColor * satNdotL;
 				lightingOutput.specular = lerp(lightingOutput.specular, fuzzSpecular, material.FuzzWeight);
 			}
 
-			[branch] if ((PBRFlags & Flags::Subsurface) != 0)
-#	if !defined(TREE_ANIM)
+			[branch] if ((material.Flags & Flags::Subsurface) != 0)
+#	if defined(CS_DEFERRED_TRUE_PBR)
+			{
+				[branch] if ((material.Flags & Flags::DeferredTreeAnim) != 0u) {
+					float subsurfaceFoliage = saturate(-NdotL) * (1.0f - material.Thickness);
+					lightingOutput.transmission += material.SubsurfaceColor * subsurfaceFoliage *
+						detailedLightColor * BRDF::Diffuse_Lambert() * kD;
+				} else {
+					const float subsurfacePower = 12.234f;
+					float forwardScatter = exp2(saturate(-VdotL) * subsurfacePower - subsurfacePower);
+					float backScatter = saturate(satNdotL * material.Thickness +
+						(1.0f - material.Thickness)) * 0.5f;
+					float subsurface = lerp(backScatter, 1.0f, forwardScatter) *
+						(1.0f - material.Thickness);
+					lightingOutput.transmission += material.SubsurfaceColor * subsurface *
+						softLightColor * BRDF::Diffuse_Lambert() * kD;
+				}
+			}
+#	elif !defined(TREE_ANIM)
 			{
 				const float subsurfacePower = 12.234;
 				float forwardScatter = exp2(saturate(-VdotL) * subsurfacePower - subsurfacePower);
@@ -186,13 +208,13 @@ namespace PBR
 				lightingOutput.transmission += material.SubsurfaceColor * subsurfaceFoliage * detailedLightColor * BRDF::Diffuse_Lambert() * kD;
 			}
 #	endif
-			else if ((PBRFlags & Flags::TwoLayer) != 0)
+			else if ((material.Flags & Flags::TwoLayer) != 0)
 			{
 				float coatNdotL = satNdotL;
 				float coatNdotV = satNdotV;
 				float coatNdotH = satNdotH;
 				float coatVdotH = satVdotH;
-				[branch] if ((PBRFlags & Flags::CoatNormal) != 0)
+				[branch] if ((material.Flags & Flags::CoatNormal) != 0)
 				{
 					coatNdotL = clamp(dot(coatN, coatL), EPSILON_DOT_CLAMP, 1);
 					coatNdotV = saturate(abs(dot(coatN, coatV)) + EPSILON_DOT_CLAMP);
@@ -224,7 +246,7 @@ namespace PBR
 		float NdotV = saturate(dot(N, V));
 
 #if !defined(LANDSCAPE) && !defined(LODLANDSCAPE)
-		[branch] if ((PBRFlags & Flags::HairMarschner) != 0)
+		[branch] if ((material.Flags & Flags::HairMarschner) != 0)
 		{
 			float3 L = normalize(V - N * dot(V, N));
 			float NdotL = dot(N, L);
@@ -237,11 +259,11 @@ namespace PBR
 			lobeWeights.diffuse = material.BaseColor;
 
 #if !defined(LANDSCAPE) && !defined(LODLANDSCAPE)
-			[branch] if ((PBRFlags & Flags::Subsurface) != 0)
+			[branch] if ((material.Flags & Flags::Subsurface) != 0)
 			{
 				lobeWeights.diffuse += material.SubsurfaceColor * (1 - material.Thickness) / Math::PI;
 			}
-			[branch] if ((PBRFlags & Flags::Fuzz) != 0)
+			[branch] if ((material.Flags & Flags::Fuzz) != 0)
 			{
 				lobeWeights.diffuse += material.FuzzColor * material.FuzzWeight;
 			}
@@ -253,7 +275,7 @@ namespace PBR
 			lobeWeights.diffuse *= 1 - lobeWeights.specular;
 
 #if !defined(LANDSCAPE) && !defined(LODLANDSCAPE)
-			[branch] if ((PBRFlags & Flags::TwoLayer) != 0)
+			[branch] if ((material.Flags & Flags::TwoLayer) != 0)
 			{
 				float2 coatSpecularBRDF = BRDF::EnvBRDF(material.CoatRoughness, NdotV);
 				float3 coatSpecularLobeSpecular = material.CoatF0 * coatSpecularBRDF.x + coatSpecularBRDF.y;
@@ -262,7 +284,7 @@ namespace PBR
 				lobeWeights.diffuse *= layerAttenuation;
 				lobeWeights.specular *= layerAttenuation;
 
-				[branch] if ((PBRFlags & Flags::ColoredCoat) != 0)
+				[branch] if ((material.Flags & Flags::ColoredCoat) != 0)
 				{
 					float3 coatDiffuseLobeWeight = material.CoatColor * (1 - coatSpecularLobeSpecular);
 					lobeWeights.diffuse += coatDiffuseLobeWeight * material.CoatStrength;

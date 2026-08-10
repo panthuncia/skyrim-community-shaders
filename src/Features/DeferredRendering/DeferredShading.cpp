@@ -6,6 +6,7 @@
 #include "Features/DeferredRendering.h"
 #include "Globals.h"
 #include "State.h"
+#include "TruePBR.h"
 #include "Utils/D3D.h"
 
 #include <ORGModuleServices/ShaderCompiler.h>
@@ -54,7 +55,8 @@ namespace
 		uint32_t skylightingArrayOrigin[3]{};
 		float skylightingMinDiffuseVisibility{};
 		float skylightingMinSpecularVisibility{};
-		float lightingParameterPadding[3]{};
+		uint32_t pbrMaterialCount{};
+		float lightingParameterPadding[2]{};
 	};
 	static_assert(sizeof(DeferredConstants) <= 512);
 
@@ -114,6 +116,15 @@ std::uint32_t DX12DeferredShading::GetEnabledEvaluatorMask() const noexcept
 		if (evaluatorPipelines[index])
 			mask |= 1u << static_cast<std::uint32_t>(index);
 	}
+	if (!materialTextureSharingAvailable) {
+		constexpr auto textureDependentEvaluators =
+			CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRParallax) |
+			CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRTerrainAdvanced) |
+			CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRLodBlend);
+		mask &= ~textureDependentEvaluators;
+	}
+	if (!glintNoiseAvailable)
+		mask &= ~CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRGlint);
 	return mask;
 }
 
@@ -135,8 +146,14 @@ bool DX12DeferredShading::Initialize(DX12RenderRuntime& owner) noexcept
 	description.kind = CS_DX12_CONTRIBUTOR_REQUIRED;
 	description.userData = this;
 	description.build = &Build;
+	description.generationActivated = &OnGenerationActivated;
+	description.deviceLost = &OnDeviceLost;
 	description.shutdown = &OnShutdown;
-	return owner.Register(&description, &registration) == CS_DX12_OK;
+	const bool registered = owner.Register(&description, &registration) == CS_DX12_OK;
+	// Promotion begins only after ORG activates a fully compiled generation.
+	// The first build therefore renders one compatibility frame by design.
+	globals::features::deferredRendering.SetEnabledEvaluatorMask(0u);
+	return registered;
 #endif
 }
 
@@ -146,8 +163,8 @@ bool DX12DeferredShading::CreatePipeline() noexcept
 	return false;
 #else
 	D3D12_DESCRIPTOR_RANGE ranges[2]{};
-	ranges[0] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 18, 0, 0, 0 };
-	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0, 18 };
+	ranges[0] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 21, 0, 0, 0 };
+	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 7, 0, 0, 21 };
 	D3D12_ROOT_PARAMETER parameters[3]{};
 	parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
 	parameters[0].Descriptor.ShaderRegister = 0;
@@ -191,13 +208,27 @@ bool DX12DeferredShading::CreatePipeline() noexcept
 		request.entryPoint = L"main";
 		request.target = L"cs_6_0";
 		request.defines.push_back({ L"CS_FIXED_EVALUATOR", std::wstring(defineValue) });
+		if (evaluator == CS::Deferred::Evaluator::TruePBR ||
+			evaluator == CS::Deferred::Evaluator::TruePBRSubsurfaceFuzz ||
+			evaluator == CS::Deferred::Evaluator::TruePBRCoat ||
+			evaluator == CS::Deferred::Evaluator::TruePBRTerrain ||
+			evaluator == CS::Deferred::Evaluator::TruePBRGlint) {
+			request.defines.push_back({ L"TRUE_PBR", L"1" });
+			request.defines.push_back({ L"CS_DEFERRED_TRUE_PBR", L"1" });
+			request.defines.push_back({ L"CSHADER", L"1" });
+			if (evaluator == CS::Deferred::Evaluator::TruePBRGlint)
+				request.defines.push_back({ L"GLINT", L"1" });
+		}
 		request.includeDirectories.push_back(shaderDirectory);
 		request.includeDirectories.push_back(shaderDirectory.parent_path());
 		request.dependencyFiles.push_back(shaderDirectory / L"DeferredLightingCommon.hlsli");
 		request.dependencyFiles.push_back(shaderDirectory / L"DeferredMaterial.hlsli");
 		request.dependencyFiles.push_back(shaderDirectory / L"DeferredMaterialRegistry.def");
+		request.dependencyFiles.push_back(shaderDirectory / L"DeferredTruePBR.hlsli");
 		request.dependencyFiles.push_back(shaderDirectory / L"DeferredIndirectLighting.hlsli");
 		request.dependencyFiles.push_back((shaderDirectory / L".." / L"Common" / L"LightingParity.hlsli").lexically_normal());
+		request.dependencyFiles.push_back((shaderDirectory / L".." / L"Common" / L"PBR.hlsli").lexically_normal());
+		request.dependencyFiles.push_back((shaderDirectory / L".." / L"Common" / L"LightingEval.hlsli").lexically_normal());
 		auto artifact = compiler->Compile(request);
 		if (!artifact) {
 			logger::error("[DX12DeferredShading] DXC failed for {} evaluator: {}", pipelineName, artifact.diagnostics);
@@ -223,8 +254,23 @@ bool DX12DeferredShading::CreatePipeline() noexcept
 	if (!createEvaluator(CS::Deferred::Evaluator::Generic, L"1", "generic") ||
 		!createEvaluator(CS::Deferred::Evaluator::Grass, L"3", "grass"))
 		return false;
+	auto createOptionalEvaluator = [&](CS::Deferred::Evaluator evaluator,
+		std::wstring_view defineValue, std::string_view pipelineName) {
+		if (!createEvaluator(evaluator, defineValue, pipelineName))
+			logger::warn("[DX12DeferredShading] {} evaluator is unavailable; its pixels remain compatibility-lit",
+				pipelineName);
+	};
+	createOptionalEvaluator(CS::Deferred::Evaluator::DistantTree, L"4", "distant-tree");
+	createOptionalEvaluator(CS::Deferred::Evaluator::FoliageSpecial, L"8", "foliage-special");
+	createOptionalEvaluator(CS::Deferred::Evaluator::TruePBR, L"2", "true-pbr-core");
+	createOptionalEvaluator(CS::Deferred::Evaluator::TruePBRSubsurfaceFuzz, L"9",
+		"true-pbr-subsurface-fuzz");
+	createOptionalEvaluator(CS::Deferred::Evaluator::TruePBRCoat, L"10", "true-pbr-coat");
+	createOptionalEvaluator(CS::Deferred::Evaluator::TruePBRGlint, L"11", "true-pbr-glint");
+	createOptionalEvaluator(CS::Deferred::Evaluator::TruePBRTerrain, L"13", "true-pbr-terrain");
 	pipelines->PublishReady(0);
-	logger::info("[DX12DeferredShading] Enabled evaluator mask: 0x{:08X}", GetEnabledEvaluatorMask());
+	const auto enabledMask = GetEnabledEvaluatorMask();
+	logger::info("[DX12DeferredShading] Enabled evaluator mask: 0x{:08X}", enabledMask);
 	return true;
 #endif
 }
@@ -236,10 +282,10 @@ bool DX12DeferredShading::CreateBinningPipelines() noexcept
 #else
 	D3D12_DESCRIPTOR_RANGE ranges[2]{};
 	ranges[0] = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0 };
-	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 5, 0, 0, 1 };
+	ranges[1] = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 6, 0, 0, 1 };
 	D3D12_ROOT_PARAMETER parameters[2]{};
 	parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-	parameters[0].Constants = { 0, 0, 5 };
+	parameters[0].Constants = { 0, 0, 6 };
 	parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 	parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 	parameters[1].DescriptorTable = { 2, ranges };
@@ -301,7 +347,10 @@ bool DX12DeferredShading::CreateBinningPipelines() noexcept
 bool DX12DeferredShading::EnsureComposite(uint32_t width, uint32_t height, DXGI_FORMAT format) noexcept
 {
 	constexpr auto transportFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
-	if (composite && specularComposite && composite.description.Width == width && composite.description.Height == height && composite.description.Format == transportFormat)
+	if (composite && specularComposite && reflectanceComposite && albedoComposite &&
+		normalComposite && masksComposite &&
+		composite.description.Width == width && composite.description.Height == height &&
+		composite.description.Format == transportFormat)
 		return true;
 	auto* interop = runtime ? runtime->GetInteropCoordinator() : nullptr;
 	if (!interop || !width || !height)
@@ -323,6 +372,35 @@ bool DX12DeferredShading::EnsureComposite(uint32_t width, uint32_t height, DXGI_
 		return false;
 	}
 	specularComposite = std::move(specularCandidate);
+	DX12InteropCoordinator::SharedTexture reflectanceCandidate;
+	if (!interop->CreateD3D12OwnedSharedTexture(width, height, transportFormat,
+		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+		true, reflectanceCandidate)) {
+		composite = {};
+		specularComposite = {};
+		logger::error("[DX12DeferredShading] Failed to create shared reflectance composite texture");
+		return false;
+	}
+	reflectanceComposite = std::move(reflectanceCandidate);
+	auto createMaterialOutput = [&](DX12InteropCoordinator::SharedTexture& output,
+		std::string_view name) {
+		DX12InteropCoordinator::SharedTexture candidateOutput;
+		if (!interop->CreateD3D12OwnedSharedTexture(width, height, transportFormat,
+			D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+			true, candidateOutput)) {
+			logger::error("[DX12DeferredShading] Failed to create shared {} composite texture", name);
+			return false;
+		}
+		output = std::move(candidateOutput);
+		return true;
+	};
+	if (!createMaterialOutput(albedoComposite, "albedo") ||
+		!createMaterialOutput(normalComposite, "normal") ||
+		!createMaterialOutput(masksComposite, "masks")) {
+		composite = {}; specularComposite = {}; reflectanceComposite = {};
+		albedoComposite = {}; normalComposite = {}; masksComposite = {};
+		return false;
+	}
 	logger::info("[DX12DeferredShading] Created D3D12-owned shared composite transport ({}x{}, transportFormat={}, destinationFormat={})",
 		width, height, static_cast<unsigned>(transportFormat), static_cast<unsigned>(format));
 	return true;
@@ -362,7 +440,9 @@ bool DX12DeferredShading::EnsureFrameMarker() noexcept
 	if (!interop || !globals::d3d::device)
 		return false;
 	D3D11_TEXTURE2D_DESC description{};
-	description.Width = 32;
+	// Slots 0..143 retain parity diagnostics. Material classification uses two
+	// 256-entry histograms beginning at slot 160.
+	description.Width = 672;
 	description.Height = 1;
 	description.MipLevels = 1;
 	description.ArraySize = 1;
@@ -450,7 +530,7 @@ bool DX12DeferredShading::PrepareGBufferInputs() noexcept
 	// These CS G-buffer allocations are explicitly created with NT shared
 	// handles. Import their allocation directly; the graph's first-use external
 	// wait orders D3D11 rendering before D3D12 reads.
-	constexpr size_t importedIndices[]{ 0, 1, 3, 4 };
+	constexpr size_t importedIndices[]{ 0, 1, 2, 3, 4 };
 	for (const auto index : importedIndices) {
 		auto* source = renderer->GetRuntimeData().renderTargets[kInputs[index].target].texture;
 		if (!source || !interop->ImportReadOnlySharedTexture(source, false, inputs[index].mirror)) {
@@ -528,6 +608,49 @@ bool DX12DeferredShading::PrepareIndirectLightingInputs() noexcept
 	return true;
 }
 
+bool DX12DeferredShading::PrepareGlintNoiseInput() noexcept
+{
+	auto* interop = runtime ? runtime->GetInteropCoordinator() : nullptr;
+	auto& truePBR = globals::features::truePBR;
+	if (!interop)
+		return false;
+	auto ensureDisabledPlaceholder = [&]() {
+		if (glintNoiseInput.mirror)
+			return true;
+		D3D11_TEXTURE2D_DESC description{};
+		description.Width = 1;
+		description.Height = 1;
+		description.MipLevels = 1;
+		description.ArraySize = 1;
+		description.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+		description.SampleDesc.Count = 1;
+		description.Usage = D3D11_USAGE_DEFAULT;
+		description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		return interop->CreateSharedTexture(description, true, false, glintNoiseInput.mirror);
+	};
+	if (!truePBR.glintsNoiseTexture || !truePBR.glintsNoiseTexture->resource) {
+		glintNoiseAvailable = false;
+		return ensureDisabledPlaceholder();
+	}
+	auto* source = truePBR.glintsNoiseTexture->resource.get();
+	if (glintNoiseInput.source.get() == source && glintNoiseInput.mirror)
+		return true;
+	glintNoiseInput.source.copy_from(source);
+	if (interop->ImportReadOnlySharedTexture(source, false, glintNoiseInput.mirror)) {
+		glintNoiseAvailable = true;
+		return true;
+	}
+	glintNoiseAvailable = false;
+	glintNoiseInput.mirror = {};
+	if (!ensureDisabledPlaceholder())
+		return false;
+	static std::once_flag warning;
+	std::call_once(warning, [] {
+		logger::warn("[DX12DeferredShading] Direct glint-noise sharing is unavailable; only deferred glints remain compatibility-lit");
+	});
+	return true;
+}
+
 bool DX12DeferredShading::EnsureCompositeBlit(ID3D11Texture2D* destination) noexcept
 {
 	if (!destination || !globals::d3d::device)
@@ -578,13 +701,46 @@ bool DX12DeferredShading::EnsureCompositeBlit(ID3D11Texture2D* destination) noex
 		specularBlitDestination.copy_from(specularDestination);
 		specularBlitRTV = std::move(view);
 	}
+	auto* reflectanceDestination = globals::game::renderer ?
+		globals::game::renderer->GetRuntimeData().renderTargets[REFLECTANCE].texture : nullptr;
+	if (!reflectanceDestination)
+		return false;
+	if (reflectanceBlitDestination.get() != reflectanceDestination) {
+		winrt::com_ptr<ID3D11RenderTargetView> view;
+		if (FAILED(globals::d3d::device->CreateRenderTargetView(reflectanceDestination, nullptr, view.put()))) {
+			logger::error("[DX12DeferredShading] Failed to create reflectance-target RTV for deferred handoff");
+			return false;
+		}
+		reflectanceBlitDestination.copy_from(reflectanceDestination);
+		reflectanceBlitRTV = std::move(view);
+	}
+	auto ensureMaterialDestination = [&](RE::RENDER_TARGET target,
+		winrt::com_ptr<ID3D11Texture2D>& cachedTexture,
+		winrt::com_ptr<ID3D11RenderTargetView>& cachedView) {
+		auto* texture = globals::game::renderer->GetRuntimeData().renderTargets[target].texture;
+		if (!texture) return false;
+		if (cachedTexture.get() == texture) return true;
+		winrt::com_ptr<ID3D11RenderTargetView> view;
+		if (FAILED(globals::d3d::device->CreateRenderTargetView(texture, nullptr, view.put())))
+			return false;
+		cachedTexture.copy_from(texture); cachedView = std::move(view); return true;
+	};
+	if (!ensureMaterialDestination(ALBEDO, albedoBlitDestination, albedoBlitRTV) ||
+		!ensureMaterialDestination(NORMALROUGHNESS, normalBlitDestination, normalBlitRTV) ||
+		!ensureMaterialDestination(MASKS, masksBlitDestination, masksBlitRTV))
+		return false;
 	return true;
 }
 
 bool DX12DeferredShading::CommitComposite(ID3D11Texture2D* destination) noexcept
 {
-	if(!destination||!composite.d3d11||!specularComposite.d3d11||!frameMarker.d3d11||!globals::d3d::context||!EnsureCompositeBlit(destination))return false;
-	if (std::getenv("CS_DX12_DEFERRED_PARITY")) {
+	if(!destination||!composite.d3d11||!specularComposite.d3d11||
+		!reflectanceComposite.d3d11||!albedoComposite.d3d11||!normalComposite.d3d11||
+		!masksComposite.d3d11||!frameMarker.d3d11||!globals::d3d::context||
+		!EnsureCompositeBlit(destination))return false;
+	const bool parityReadbackEnabled = std::getenv("CS_DX12_DEFERRED_PARITY") != nullptr;
+	const bool classificationReadbackEnabled = globals::features::deferredRendering.IsMaterialClassificationEnabled();
+	if (parityReadbackEnabled || classificationReadbackEnabled) {
 		if (!parityCounterReadback) {
 			D3D11_TEXTURE2D_DESC description{};
 			frameMarker.d3d11->GetDesc(&description);
@@ -616,8 +772,23 @@ bool DX12DeferredShading::CommitComposite(ID3D11Texture2D* destination) noexcept
 						counters[base + 10] * scale, counters[base + 11] * scale,
 						counters[base + 12] * scale, counters[base + 13] * scale);
 				};
-				report(0, "grass");
-				report(16, "generic");
+				if (parityReadbackEnabled) {
+					report(0, "grass");
+					report(16, "generic");
+					report(32, "distant-tree");
+					report(48, "foliage-special");
+					report(64, "true-pbr-core");
+					report(80, "true-pbr-subsurface-fuzz");
+					report(96, "true-pbr-coat");
+					report(112, "true-pbr-terrain");
+					report(128, "true-pbr-glint");
+				}
+				if (classificationReadbackEnabled) {
+					constexpr std::uint32_t visibleBase = 160;
+					constexpr std::uint32_t deferredBase = visibleBase + 256;
+					globals::features::deferredRendering.UpdateMaterialClassification(
+						counters + visibleBase, counters + deferredBase, GetEnabledEvaluatorMask());
+				}
 				globals::d3d::context->Unmap(parityCounterReadback.get(), 0);
 				parityCounterPending = false;
 			}
@@ -666,6 +837,53 @@ bool DX12DeferredShading::CommitComposite(ID3D11Texture2D* destination) noexcept
 	globals::d3d::context->Draw(3, 0);
 	ID3D11ShaderResourceView* nullSpecular[2]{};
 	globals::d3d::context->PSSetShaderResources(0, ARRAYSIZE(nullSpecular), nullSpecular);
+
+	// Special foliage and TruePBR temporarily repurpose REFLECTANCE as raster
+	// payload. Restore its canonical downstream value only for those evaluators.
+	const std::uint32_t reflectanceHandoffData[4]{
+		GetEnabledEvaluatorMask() &
+			(CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::FoliageSpecial) |
+			 CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBR) |
+			 CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRSubsurfaceFuzz) |
+			 CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRCoat) |
+			 CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRGlint) |
+			 CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRTerrain)), 0, 0, 0 };
+	globals::d3d::context->UpdateSubresource(handoffConstants.get(), 0, nullptr,
+		reflectanceHandoffData, 0, 0);
+	auto* reflectanceTarget = reflectanceBlitRTV.get();
+	globals::d3d::context->OMSetRenderTargets(1, &reflectanceTarget, nullptr);
+	ID3D11ShaderResourceView* reflectanceSource[]{
+		reflectanceComposite.srv11.get(), packedSurfaceMirror.srv11.get() };
+	globals::d3d::context->PSSetShaderResources(0, ARRAYSIZE(reflectanceSource), reflectanceSource);
+	globals::d3d::context->Draw(3, 0);
+	globals::d3d::context->PSSetShaderResources(0, ARRAYSIZE(nullSpecular), nullSpecular);
+	globals::d3d::context->UpdateSubresource(handoffConstants.get(), 0, nullptr,
+		handoffData, 0, 0);
+	// TruePBR temporarily repurposes all material G-buffer fields. Restore the
+	// canonical outputs only for parity-gated TruePBR evaluators.
+	const std::uint32_t pbrHandoffData[4]{
+		GetEnabledEvaluatorMask() &
+			(CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBR) |
+			 CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRSubsurfaceFuzz) |
+			 CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRCoat) |
+			 CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRGlint) |
+			 CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRTerrain)), 0, 0, 0 };
+	globals::d3d::context->UpdateSubresource(handoffConstants.get(), 0, nullptr,
+		pbrHandoffData, 0, 0);
+	auto restoreMaterialTarget = [&](ID3D11RenderTargetView* targetView,
+		ID3D11ShaderResourceView* sourceView) {
+		globals::d3d::context->OMSetRenderTargets(1, &targetView, nullptr);
+		ID3D11ShaderResourceView* materialSources[]{ sourceView, packedSurfaceMirror.srv11.get() };
+		globals::d3d::context->PSSetShaderResources(0, ARRAYSIZE(materialSources), materialSources);
+		globals::d3d::context->Draw(3, 0);
+		ID3D11ShaderResourceView* nullMaterialSources[2]{};
+		globals::d3d::context->PSSetShaderResources(0, ARRAYSIZE(nullMaterialSources), nullMaterialSources);
+	};
+	restoreMaterialTarget(albedoBlitRTV.get(), albedoComposite.srv11.get());
+	restoreMaterialTarget(normalBlitRTV.get(), normalComposite.srv11.get());
+	restoreMaterialTarget(masksBlitRTV.get(), masksComposite.srv11.get());
+	globals::d3d::context->UpdateSubresource(handoffConstants.get(), 0, nullptr,
+		handoffData, 0, 0);
 
 	globals::d3d::context->OMSetRenderTargets(1, &target, nullptr);
 	globals::d3d::context->PSSetShader(compositeSelectiveBlitPS.get(), nullptr, 0);
@@ -750,7 +968,7 @@ bool DX12DeferredShading::PrepareLinearDepth(uint32_t width, uint32_t height) no
 bool DX12DeferredShading::EnsureGBufferInputs() noexcept
 {
 	return inputs[0].source && inputs[0].mirror && inputs[1].source && inputs[1].mirror &&
-		inputs[3].source && inputs[3].mirror;
+		inputs[2].source && inputs[2].mirror && inputs[3].source && inputs[3].mirror;
 }
 
 CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
@@ -760,7 +978,8 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	// carry the independently varying active dynamic-resolution extent.
 	const auto width = self->runtime->GetAllocationWidth();
 	const auto height = self->runtime->GetAllocationHeight();
-	if (!self->composite || !self->specularComposite)
+	if (!self->composite || !self->specularComposite || !self->reflectanceComposite ||
+		!self->albedoComposite || !self->normalComposite || !self->masksComposite)
 		return CS_DX12_E_NOT_READY;
 	if (!self->EnsureGBufferInputs())
 		return CS_DX12_E_NOT_READY;
@@ -775,10 +994,11 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	if (!self->compatibilityReference)
 		return CS_DX12_E_NOT_READY;
 	if (!self->envIBLInput.mirror || !self->skyIBLInput.mirror ||
-		!self->skylightingProbeInput.mirror || !self->skylightingVisibilityInput.mirror)
+		!self->skylightingProbeInput.mirror || !self->skylightingVisibilityInput.mirror ||
+		!self->glintNoiseInput.mirror)
 		return CS_DX12_E_NOT_READY;
 
-	constexpr size_t importedIndices[]{ 0, 1, 3, 4 };
+	constexpr size_t importedIndices[]{ 0, 1, 2, 3, 4 };
 	for (const auto index : importedIndices) {
 		D3D11_TEXTURE2D_DESC nativeDescription{};
 		self->inputs[index].source->GetDesc(&nativeDescription);
@@ -824,7 +1044,9 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 		declareLightingInput(self->skyIBLInput, "community-shaders.deferred-shading.ibl.sky-sh", self->skyIBLHandle) != CS_DX12_OK ||
 		declareLightingInput(self->skylightingProbeInput, "community-shaders.deferred-shading.skylighting.probes", self->skylightingProbeHandle) != CS_DX12_OK ||
 		declareLightingInput(self->skylightingVisibilityInput, "community-shaders.deferred-shading.skylighting.shadow-visibility",
-			self->skylightingVisibilityHandle) != CS_DX12_OK)
+			self->skylightingVisibilityHandle) != CS_DX12_OK ||
+		declareLightingInput(self->glintNoiseInput, "community-shaders.deferred-shading.true-pbr.glint-noise",
+			self->glintNoiseHandle) != CS_DX12_OK)
 		return CS_DX12_E_INTERNAL;
 
 	CSDX12ResourceDesc depthInput{};
@@ -880,6 +1102,7 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	}
 	if (self->runtime->FindResource(build, "community-shaders.clustered-lighting.lights", &self->lightsHandle) != CS_DX12_OK ||
 		self->runtime->FindResource(build, "community-shaders.clustered-lighting.contexts", &self->contextsHandle) != CS_DX12_OK ||
+		self->runtime->FindResource(build, "community-shaders.clustered-lighting.pbr-materials", &self->pbrMaterialsHandle) != CS_DX12_OK ||
 		self->runtime->FindResource(build, "community-shaders.clustered-lighting.clusters", &self->clustersHandle) != CS_DX12_OK ||
 		self->runtime->FindResource(build, "community-shaders.clustered-lighting.pages", &self->pagesHandle) != CS_DX12_OK)
 		return CS_DX12_E_MISSING_DEPENDENCY;
@@ -908,6 +1131,24 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	resource.borrowedNativeResource = self->specularComposite.d3d12.get();
 	if (self->runtime->DeclareResource(build, &resource, &self->specularCompositeHandle) != CS_DX12_OK)
 		return CS_DX12_E_INTERNAL;
+	resource.id = "community-shaders.deferred-shading.reflectance-composite";
+	resource.format = self->reflectanceComposite.description.Format;
+	resource.borrowedNativeResource = self->reflectanceComposite.d3d12.get();
+	if (self->runtime->DeclareResource(build, &resource, &self->reflectanceCompositeHandle) != CS_DX12_OK)
+		return CS_DX12_E_INTERNAL;
+	auto declareMaterialOutput = [&](const char* id,
+		DX12InteropCoordinator::SharedTexture& output, CSDX12ResourceHandle& handle) {
+		resource.id = id; resource.format = output.description.Format;
+		resource.borrowedNativeResource = output.d3d12.get();
+		return self->runtime->DeclareResource(build, &resource, &handle) == CS_DX12_OK;
+	};
+	if (!declareMaterialOutput("community-shaders.deferred-shading.albedo-composite",
+			self->albedoComposite, self->albedoCompositeHandle) ||
+		!declareMaterialOutput("community-shaders.deferred-shading.normal-composite",
+			self->normalComposite, self->normalCompositeHandle) ||
+		!declareMaterialOutput("community-shaders.deferred-shading.masks-composite",
+			self->masksComposite, self->masksCompositeHandle))
+		return CS_DX12_E_INTERNAL;
 	CSDX12ResourceDesc marker{};
 	marker.structSize = sizeof(marker);
 	marker.apiVersion = CS_DX12_GRAPH_API_CURRENT;
@@ -916,7 +1157,7 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	marker.dimension = CS_DX12_RESOURCE_TEXTURE_2D;
 	marker.sizing = CS_DX12_SIZE_ABSOLUTE;
 	marker.format = DXGI_FORMAT_R32_UINT;
-	marker.width = 32;
+	marker.width = 144;
 	marker.height = 1;
 	marker.depthOrArraySize = 1;
 	marker.mipLevels = 1;
@@ -934,7 +1175,7 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	packedMirror.lifetime = CS_DX12_RESOURCE_CS_IMPORTED;
 	packedMirror.dimension = CS_DX12_RESOURCE_TEXTURE_2D;
 	packedMirror.sizing = CS_DX12_SIZE_ABSOLUTE;
-	packedMirror.format = DXGI_FORMAT_R32_UINT;
+	packedMirror.format = DXGI_FORMAT_R32G32B32A32_UINT;
 	packedMirror.width = self->packedSurfaceMirror.description.Width;
 	packedMirror.height = self->packedSurfaceMirror.description.Height;
 	packedMirror.depthOrArraySize = 1;
@@ -1006,12 +1247,14 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 		access(self->evaluatorCountsHandle, CS_DX12_ACCESS_UNORDERED_WRITE),
 		access(self->evaluatorOffsetsHandle, CS_DX12_ACCESS_UNORDERED_WRITE),
 		access(self->evaluatorCursorsHandle, CS_DX12_ACCESS_UNORDERED_WRITE),
-		access(self->evaluatorIndirectArgsHandle, CS_DX12_ACCESS_UNORDERED_WRITE) };
+		access(self->evaluatorIndirectArgsHandle, CS_DX12_ACCESS_UNORDERED_WRITE),
+		access(self->frameMarkerHandle, CS_DX12_ACCESS_UNORDERED_WRITE) };
 	if (declarePass("community-shaders.deferred-shading.bin-clear", "community-shaders.clustered-lighting.cull",
 		clearAccesses, &ExecuteBinClear) != CS_DX12_OK) return CS_DX12_E_INTERNAL;
 	const std::array histogramAccesses{
 		access(self->packedSurfaceMirrorHandle, CS_DX12_ACCESS_SHADER_READ),
-		access(self->evaluatorCountsHandle, CS_DX12_ACCESS_UNORDERED_WRITE) };
+		access(self->evaluatorCountsHandle, CS_DX12_ACCESS_UNORDERED_WRITE),
+		access(self->frameMarkerHandle, CS_DX12_ACCESS_UNORDERED_WRITE) };
 	if (declarePass("community-shaders.deferred-shading.bin-histogram", "community-shaders.deferred-shading.bin-clear",
 		histogramAccesses, &ExecuteBinHistogram) != CS_DX12_OK) return CS_DX12_E_INTERNAL;
 	const std::array prefixAccesses{
@@ -1030,7 +1273,7 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 
 	const char* after[]{ "community-shaders.deferred-shading.bin-scatter" };
 	const char* before[]{ CS_DX12_ANCHOR_DEFERRED_LIGHTING_BEGIN };
-	std::array<CSDX12ResourceAccessDesc, 22> accesses{};
+	std::array<CSDX12ResourceAccessDesc, 29> accesses{};
 	accesses[0] = { sizeof(CSDX12ResourceAccessDesc), CS_DX12_GRAPH_API_CURRENT,
 		self->compositeHandle, CS_DX12_ACCESS_UNORDERED_WRITE, {} };
 	accesses[1] = { sizeof(CSDX12ResourceAccessDesc), CS_DX12_GRAPH_API_CURRENT,
@@ -1056,6 +1299,13 @@ CSDX12Status DX12DeferredShading::Build(void* userData, CSDX12BuildHandle build)
 	accesses[19]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->skyIBLHandle,CS_DX12_ACCESS_SHADER_READ,{}};
 	accesses[20]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->skylightingProbeHandle,CS_DX12_ACCESS_SHADER_READ,{}};
 	accesses[21]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->skylightingVisibilityHandle,CS_DX12_ACCESS_SHADER_READ,{}};
+	accesses[22]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->inputs[2].handle,CS_DX12_ACCESS_SHADER_READ,{}};
+	accesses[23]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->reflectanceCompositeHandle,CS_DX12_ACCESS_UNORDERED_WRITE,{}};
+	accesses[24]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->albedoCompositeHandle,CS_DX12_ACCESS_UNORDERED_WRITE,{}};
+	accesses[25]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->normalCompositeHandle,CS_DX12_ACCESS_UNORDERED_WRITE,{}};
+	accesses[26]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->masksCompositeHandle,CS_DX12_ACCESS_UNORDERED_WRITE,{}};
+	accesses[27]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->pbrMaterialsHandle,CS_DX12_ACCESS_SHADER_READ,{}};
+	accesses[28]={sizeof(CSDX12ResourceAccessDesc),CS_DX12_GRAPH_API_CURRENT,self->glintNoiseHandle,CS_DX12_ACCESS_SHADER_READ,{}};
 	CSDX12PassDesc pass{};
 	pass.structSize = sizeof(pass);
 	pass.apiVersion = CS_DX12_GRAPH_API_CURRENT;
@@ -1105,20 +1355,21 @@ CSDX12Status DX12DeferredShading::RecordBinning(const CSDX12ExecutionContext& co
 		!binningRootSignature || !binningPipelines[static_cast<std::size_t>(stage)])
 		return CS_DX12_E_UNSUPPORTED_CAPABILITY;
 	void* packedNative{}; void* countsNative{}; void* offsetsNative{}; void* cursorsNative{};
-	void* pixelsNative{}; void* argumentsNative{};
+	void* pixelsNative{}; void* argumentsNative{}; void* markerNative{};
 	if (context.GetResource(&context, packedSurfaceMirrorHandle, &packedNative) != CS_DX12_OK || !packedNative ||
 		context.GetResource(&context, evaluatorCountsHandle, &countsNative) != CS_DX12_OK || !countsNative ||
 		context.GetResource(&context, evaluatorOffsetsHandle, &offsetsNative) != CS_DX12_OK || !offsetsNative ||
 		context.GetResource(&context, evaluatorCursorsHandle, &cursorsNative) != CS_DX12_OK || !cursorsNative ||
 		context.GetResource(&context, evaluatorPixelListHandle, &pixelsNative) != CS_DX12_OK || !pixelsNative ||
-		context.GetResource(&context, evaluatorIndirectArgsHandle, &argumentsNative) != CS_DX12_OK || !argumentsNative)
+		context.GetResource(&context, evaluatorIndirectArgsHandle, &argumentsNative) != CS_DX12_OK || !argumentsNative ||
+		context.GetResource(&context, frameMarkerHandle, &markerNative) != CS_DX12_OK || !markerNative)
 		return CS_DX12_E_NOT_READY;
 	CSDX12DescriptorAllocation descriptors{};
-	if (context.AllocateDescriptors(&context, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 6, &descriptors) != CS_DX12_OK)
+	if (context.AllocateDescriptors(&context, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 7, &descriptors) != CS_DX12_OK)
 		return CS_DX12_E_INTERNAL;
 	auto cpuAt=[&](uint32_t index){D3D12_CPU_DESCRIPTOR_HANDLE value{descriptors.cpuHandle};value.ptr+=uint64_t(index)*descriptors.descriptorSize;return value;};
 	D3D12_SHADER_RESOURCE_VIEW_DESC packedView{};
-	packedView.Format=DXGI_FORMAT_R32_UINT; packedView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+	packedView.Format=DXGI_FORMAT_R32G32B32A32_UINT; packedView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
 	packedView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; packedView.Texture2D.MipLevels=1;
 	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(packedNative),&packedView,cpuAt(0));
 	auto structuredUAV=[&](void* native,uint32_t slot,uint32_t stride,uint32_t elements){
@@ -1135,17 +1386,23 @@ CSDX12Status DX12DeferredShading::RecordBinning(const CSDX12ExecutionContext& co
 	argumentView.Buffer.NumElements=CS::Deferred::kEvaluatorCount*7;
 	argumentView.Buffer.Flags=D3D12_BUFFER_UAV_FLAG_RAW;
 	device->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(argumentsNative),nullptr,&argumentView,cpuAt(5));
+	D3D12_UNORDERED_ACCESS_VIEW_DESC classificationView{};
+	classificationView.Format = DXGI_FORMAT_R32_UINT;
+	classificationView.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+	device->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(markerNative), nullptr,
+		&classificationView, cpuAt(6));
 	auto* commandList=static_cast<ID3D12GraphicsCommandList*>(context.borrowedD3D12GraphicsCommandList);
 	ID3D12DescriptorHeap* heaps[]{static_cast<ID3D12DescriptorHeap*>(descriptors.borrowedNativeHeap)};
 	commandList->SetDescriptorHeaps(1,heaps);
 	commandList->SetComputeRootSignature(binningRootSignature.get());
 	const std::uint32_t constants[]{context.frame->width,context.frame->height,
-		CS::Deferred::kEvaluatorCount,7u*sizeof(std::uint32_t),GetEnabledEvaluatorMask()};
+		CS::Deferred::kEvaluatorCount,7u*sizeof(std::uint32_t),GetEnabledEvaluatorMask(),
+		globals::features::deferredRendering.IsMaterialClassificationEnabled() ? 1u : 0u};
 	commandList->SetComputeRoot32BitConstants(0,std::size(constants),constants,0);
 	commandList->SetComputeRootDescriptorTable(1,D3D12_GPU_DESCRIPTOR_HANDLE{descriptors.gpuHandle});
 	commandList->SetPipelineState(binningPipelines[static_cast<std::size_t>(stage)].get());
 	switch(stage){
-	case BinningStage::Clear: commandList->Dispatch(1,1,1); break;
+	case BinningStage::Clear: commandList->Dispatch(11u,1,1); break;
 	case BinningStage::Histogram:
 	case BinningStage::Scatter: commandList->Dispatch((context.frame->width+7)/8,(context.frame->height+7)/8,1); break;
 	case BinningStage::Prefix: commandList->Dispatch(1,1,1); break;
@@ -1157,14 +1414,20 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 {
 	if (!context.GetResource || !context.AllocateUpload || !context.AllocateDescriptors || !context.borrowedD3D12GraphicsCommandList || GetEnabledEvaluatorMask() == 0 || !evaluatorCommandSignature)
 		return CS_DX12_E_UNSUPPORTED_CAPABILITY;
-	void* native{}; void* specularOutputNative{}; void* albedoNative{}; void* specularInputNative{}; void* masksNative{}; void* depthNative{}; void* lightsNative{}; void* contextsNative{}; void* clustersNative{}; void* pagesNative{}; void* shadowMaskNative{}; void* screenShadowNative{}; void* markerNative{}; void* packedMirrorNative{}; void* parityNative{}; void* evaluatorPixelsNative{}; void* evaluatorArgsNative{}; void* envIBLNative{}; void* skyIBLNative{}; void* skylightingProbeNative{}; void* skylightingVisibilityNative{};
+	void* native{}; void* specularOutputNative{}; void* reflectanceOutputNative{}; void* albedoOutputNative{}; void* normalOutputNative{}; void* masksOutputNative{}; void* albedoNative{}; void* specularInputNative{}; void* reflectanceInputNative{}; void* masksNative{}; void* depthNative{}; void* lightsNative{}; void* contextsNative{}; void* pbrMaterialsNative{}; void* clustersNative{}; void* pagesNative{}; void* shadowMaskNative{}; void* screenShadowNative{}; void* markerNative{}; void* packedMirrorNative{}; void* parityNative{}; void* evaluatorPixelsNative{}; void* evaluatorArgsNative{}; void* envIBLNative{}; void* skyIBLNative{}; void* skylightingProbeNative{}; void* skylightingVisibilityNative{}; void* glintNoiseNative{};
 	if (context.GetResource(&context, compositeHandle, &native) != CS_DX12_OK || !native ||
 		context.GetResource(&context, specularCompositeHandle, &specularOutputNative) != CS_DX12_OK || !specularOutputNative ||
+		context.GetResource(&context, reflectanceCompositeHandle, &reflectanceOutputNative) != CS_DX12_OK || !reflectanceOutputNative ||
+		context.GetResource(&context, albedoCompositeHandle, &albedoOutputNative) != CS_DX12_OK || !albedoOutputNative ||
+		context.GetResource(&context, normalCompositeHandle, &normalOutputNative) != CS_DX12_OK || !normalOutputNative ||
+		context.GetResource(&context, masksCompositeHandle, &masksOutputNative) != CS_DX12_OK || !masksOutputNative ||
 		context.GetResource(&context, inputs[0].handle, &albedoNative) != CS_DX12_OK || !albedoNative ||
 		context.GetResource(&context, inputs[1].handle, &specularInputNative) != CS_DX12_OK || !specularInputNative ||
+		context.GetResource(&context, inputs[2].handle, &reflectanceInputNative) != CS_DX12_OK || !reflectanceInputNative ||
 		context.GetResource(&context, linearDepthHandle, &depthNative) != CS_DX12_OK || !depthNative ||
 		context.GetResource(&context, lightsHandle, &lightsNative) != CS_DX12_OK || !lightsNative ||
 		context.GetResource(&context, contextsHandle, &contextsNative) != CS_DX12_OK || !contextsNative ||
+		context.GetResource(&context, pbrMaterialsHandle, &pbrMaterialsNative) != CS_DX12_OK || !pbrMaterialsNative ||
 		context.GetResource(&context, clustersHandle, &clustersNative) != CS_DX12_OK || !clustersNative ||
 		context.GetResource(&context, pagesHandle, &pagesNative) != CS_DX12_OK || !pagesNative ||
 		context.GetResource(&context, localShadowMaskHandle, &shadowMaskNative) != CS_DX12_OK || !shadowMaskNative ||
@@ -1177,7 +1440,8 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 		context.GetResource(&context, envIBLHandle, &envIBLNative) != CS_DX12_OK || !envIBLNative ||
 		context.GetResource(&context, skyIBLHandle, &skyIBLNative) != CS_DX12_OK || !skyIBLNative ||
 		context.GetResource(&context, skylightingProbeHandle, &skylightingProbeNative) != CS_DX12_OK || !skylightingProbeNative ||
-		context.GetResource(&context, skylightingVisibilityHandle, &skylightingVisibilityNative) != CS_DX12_OK || !skylightingVisibilityNative)
+		context.GetResource(&context, skylightingVisibilityHandle, &skylightingVisibilityNative) != CS_DX12_OK || !skylightingVisibilityNative ||
+		context.GetResource(&context, glintNoiseHandle, &glintNoiseNative) != CS_DX12_OK || !glintNoiseNative)
 		return CS_DX12_E_NOT_READY;
 	const bool parityEnabled = std::getenv("CS_DX12_DEFERRED_PARITY") != nullptr;
 	if (context.GetResource(&context, compatibilityReferenceHandle, &parityNative) != CS_DX12_OK || !parityNative)
@@ -1191,6 +1455,7 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 	constants.lightCount=static_cast<uint32_t>(snapshot->lights.size()); constants.screenSize[0]=static_cast<float>(context.frame->width); constants.screenSize[1]=static_cast<float>(context.frame->height);
 	constants.nearPlane=snapshot->nearPlane; constants.farPlane=snapshot->farPlane; constants.contextCount=static_cast<uint32_t>(snapshot->contexts.size());
 	constants.pageCapacity=constants.clusterGrid[0]*constants.clusterGrid[1]*constants.clusterGrid[2]*10;
+	constants.pbrMaterialCount=static_cast<uint32_t>(snapshot->pbrMaterials.size());
 	constants.abiVersion=CS::Deferred::kAbiVersion;
 	constants.lightingTransform=snapshot->lightingTransform;
 	constants.grassSettings0[0] = snapshot->grassLighting.Glossiness;
@@ -1241,13 +1506,13 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 	}
 	std::memcpy(constantsUpload.cpuAddress,&constants,sizeof(constants));
 	CSDX12DescriptorAllocation descriptors{};
-	if (context.AllocateDescriptors(&context, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 21, &descriptors) != CS_DX12_OK)
+	if (context.AllocateDescriptors(&context, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 28, &descriptors) != CS_DX12_OK)
 		return CS_DX12_E_INTERNAL;
 	auto* resource = static_cast<ID3D12Resource*>(native);
 	auto* commandList = static_cast<ID3D12GraphicsCommandList*>(context.borrowedD3D12GraphicsCommandList);
 	D3D12_CPU_DESCRIPTOR_HANDLE visibleCpu{ descriptors.cpuHandle };
 	auto cpuAt=[&](uint32_t index){auto value=visibleCpu;value.ptr+=uint64_t(index)*descriptors.descriptorSize;return value;};
-	D3D12_SHADER_RESOURCE_VIEW_DESC albedoView{}; albedoView.Format=DXGI_FORMAT_R10G10B10A2_UNORM; albedoView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; albedoView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; albedoView.Texture2D.MipLevels=1;
+	D3D12_SHADER_RESOURCE_VIEW_DESC albedoView{}; albedoView.Format=inputs[0].mirror.description.Format; albedoView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; albedoView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; albedoView.Texture2D.MipLevels=1;
 	D3D12_SHADER_RESOURCE_VIEW_DESC specularView=albedoView; specularView.Format=inputs[1].mirror.description.Format;
 	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(specularInputNative),&specularView,cpuAt(0));
 	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(albedoNative),&albedoView,cpuAt(1));
@@ -1255,14 +1520,14 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(depthNative),&depthView,cpuAt(2));
 	auto structured=[&](void* nativeBuffer,uint32_t slot,uint32_t stride){auto* buffer=static_cast<ID3D12Resource*>(nativeBuffer);D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.Buffer.NumElements=static_cast<UINT>(buffer->GetDesc().Width/stride);srv.Buffer.StructureByteStride=stride;device->CreateShaderResourceView(buffer,&srv,cpuAt(slot));};
 	structured(lightsNative,3,sizeof(DeferredRendering::LightData)); structured(contextsNative,4,sizeof(DeferredRendering::LightingContext)); structured(clustersNative,5,48); structured(pagesNative,6,56);
-	D3D12_SHADER_RESOURCE_VIEW_DESC packedView{}; packedView.Format=DXGI_FORMAT_R32_UINT; packedView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; packedView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; packedView.Texture2D.MipLevels=1;
+	D3D12_SHADER_RESOURCE_VIEW_DESC packedView{}; packedView.Format=DXGI_FORMAT_R32G32B32A32_UINT; packedView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; packedView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; packedView.Texture2D.MipLevels=1;
 	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(packedMirrorNative),&packedView,cpuAt(7));
 	D3D12_SHADER_RESOURCE_VIEW_DESC shadowMaskView{}; shadowMaskView.Format=localShadowMask.description.Format; shadowMaskView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; shadowMaskView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; shadowMaskView.Texture2D.MipLevels=localShadowMask.description.MipLevels;
 	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(shadowMaskNative),&shadowMaskView,cpuAt(8));
 	void* normalNative{};
 	if (context.GetResource(&context, inputs[3].handle, &normalNative) != CS_DX12_OK || !normalNative)
 		return CS_DX12_E_NOT_READY;
-	D3D12_SHADER_RESOURCE_VIEW_DESC normalView{}; normalView.Format=DXGI_FORMAT_R10G10B10A2_UNORM; normalView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; normalView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; normalView.Texture2D.MipLevels=1;
+	D3D12_SHADER_RESOURCE_VIEW_DESC normalView{}; normalView.Format=inputs[3].mirror.description.Format; normalView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; normalView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; normalView.Texture2D.MipLevels=1;
 	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(normalNative),&normalView,cpuAt(9));
 	D3D12_SHADER_RESOURCE_VIEW_DESC parityView{}; parityView.Format=compatibilityReference.description.Format; parityView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; parityView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; parityView.Texture2D.MipLevels=1;
 	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(parityNative),&parityView,cpuAt(10));
@@ -1288,25 +1553,41 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 	D3D12_SHADER_RESOURCE_VIEW_DESC visibilityView=probeView; visibilityView.Format=DXGI_FORMAT_R8_UNORM;
 	visibilityView.Texture2DArray.ArraySize=skylightingVisibilityInput.mirror.description.ArraySize;
 	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(skylightingVisibilityNative),&visibilityView,cpuAt(17));
+	D3D12_SHADER_RESOURCE_VIEW_DESC reflectanceView=specularView;
+	reflectanceView.Format=inputs[2].mirror.description.Format;
+	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(reflectanceInputNative),&reflectanceView,cpuAt(18));
+	structured(pbrMaterialsNative,19,sizeof(CS::Deferred::PBRMaterialRecord));
+	D3D12_SHADER_RESOURCE_VIEW_DESC glintNoiseView{};
+	glintNoiseView.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+	glintNoiseView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+	glintNoiseView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	glintNoiseView.Texture2D.MipLevels=1;
+	device->CreateShaderResourceView(static_cast<ID3D12Resource*>(glintNoiseNative),&glintNoiseView,cpuAt(20));
 	D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
 	view.Format = composite.description.Format;
 	view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-	runtime->GetNativeDevice()->CreateUnorderedAccessView(resource, nullptr, &view, cpuAt(18));
+	runtime->GetNativeDevice()->CreateUnorderedAccessView(resource, nullptr, &view, cpuAt(21));
 	D3D12_UNORDERED_ACCESS_VIEW_DESC markerView{};
 	markerView.Format = DXGI_FORMAT_R32_UINT;
 	markerView.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-	runtime->GetNativeDevice()->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(markerNative), nullptr, &markerView, cpuAt(19));
+	runtime->GetNativeDevice()->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(markerNative), nullptr, &markerView, cpuAt(22));
 	D3D12_UNORDERED_ACCESS_VIEW_DESC specularOutputView{};
 	specularOutputView.Format = specularComposite.description.Format;
 	specularOutputView.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-	runtime->GetNativeDevice()->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(specularOutputNative), nullptr, &specularOutputView, cpuAt(20));
+	runtime->GetNativeDevice()->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(specularOutputNative), nullptr, &specularOutputView, cpuAt(23));
+	D3D12_UNORDERED_ACCESS_VIEW_DESC reflectanceOutputView{};
+	reflectanceOutputView.Format = reflectanceComposite.description.Format;
+	reflectanceOutputView.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+	runtime->GetNativeDevice()->CreateUnorderedAccessView(
+		static_cast<ID3D12Resource*>(reflectanceOutputNative), nullptr,
+		&reflectanceOutputView, cpuAt(24));
+	runtime->GetNativeDevice()->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(albedoOutputNative), nullptr, &reflectanceOutputView, cpuAt(25));
+	runtime->GetNativeDevice()->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(normalOutputNative), nullptr, &reflectanceOutputView, cpuAt(26));
+	runtime->GetNativeDevice()->CreateUnorderedAccessView(static_cast<ID3D12Resource*>(masksOutputNative), nullptr, &reflectanceOutputView, cpuAt(27));
 	D3D12_GPU_DESCRIPTOR_HANDLE gpu{ descriptors.gpuHandle };
 	auto gpuAt=[&](uint32_t index){auto value=gpu;value.ptr+=uint64_t(index)*descriptors.descriptorSize;return value;};
 	ID3D12DescriptorHeap* heaps[]{ static_cast<ID3D12DescriptorHeap*>(descriptors.borrowedNativeHeap) };
 	commandList->SetDescriptorHeaps(1, heaps);
-	constexpr UINT clearMarker[4]{};
-	if (parityEnabled)
-		commandList->ClearUnorderedAccessViewUint(gpuAt(19), cpuAt(19), static_cast<ID3D12Resource*>(markerNative), clearMarker, 0, nullptr);
 	commandList->SetComputeRootSignature(rootSignature.get());
 	commandList->SetComputeRootConstantBufferView(0,constantsUpload.gpuAddress);
 	commandList->SetComputeRootDescriptorTable(1, gpu);
@@ -1327,10 +1608,19 @@ CSDX12Status DX12DeferredShading::Record(const CSDX12ExecutionContext& context) 
 	compositeBarrier.UAV.pResource = resource;
 	D3D12_RESOURCE_BARRIER specularBarrier = compositeBarrier;
 	specularBarrier.UAV.pResource = static_cast<ID3D12Resource*>(specularOutputNative);
-	const D3D12_RESOURCE_BARRIER outputBarriers[]{ compositeBarrier, specularBarrier };
+	D3D12_RESOURCE_BARRIER reflectanceBarrier = compositeBarrier;
+	reflectanceBarrier.UAV.pResource = static_cast<ID3D12Resource*>(reflectanceOutputNative);
+	D3D12_RESOURCE_BARRIER albedoBarrier = compositeBarrier;
+	albedoBarrier.UAV.pResource = static_cast<ID3D12Resource*>(albedoOutputNative);
+	D3D12_RESOURCE_BARRIER normalBarrier = compositeBarrier;
+	normalBarrier.UAV.pResource = static_cast<ID3D12Resource*>(normalOutputNative);
+	D3D12_RESOURCE_BARRIER masksBarrier = compositeBarrier;
+	masksBarrier.UAV.pResource = static_cast<ID3D12Resource*>(masksOutputNative);
+	const D3D12_RESOURCE_BARRIER outputBarriers[]{ compositeBarrier, specularBarrier,
+		reflectanceBarrier, albedoBarrier, normalBarrier, masksBarrier };
 	commandList->ResourceBarrier(ARRAYSIZE(outputBarriers), outputBarriers);
 	if (dispatchCount++ == 0)
-		logger::info("[DX12DeferredShading] ORG executed generic lighting from histogram/prefix-sum pixel bins using ExecuteIndirect");
+		logger::info("[DX12DeferredShading] ORG executed enabled material evaluators from histogram/prefix-sum pixel bins using ExecuteIndirect");
 	return CS_DX12_OK;
 }
 
@@ -1339,16 +1629,37 @@ void DX12DeferredShading::OnShutdown(void* userData)
 	static_cast<DX12DeferredShading*>(userData)->Shutdown();
 }
 
+void DX12DeferredShading::OnGenerationActivated(void* userData,
+	CSDX12GenerationHandle) noexcept
+{
+	auto* self = static_cast<DX12DeferredShading*>(userData);
+	globals::features::deferredRendering.SetEnabledEvaluatorMask(
+		self ? self->GetEnabledEvaluatorMask() : 0u);
+}
+
+void DX12DeferredShading::OnDeviceLost(void*, std::uint32_t) noexcept
+{
+	globals::features::deferredRendering.SetEnabledEvaluatorMask(0u);
+}
+
 void DX12DeferredShading::Shutdown() noexcept
 {
+	globals::features::deferredRendering.SetEnabledEvaluatorMask(0);
 	composite = {};
 	specularComposite = {};
+	reflectanceComposite = {};
+	albedoComposite = {};
+	normalComposite = {};
+	masksComposite = {};
 	linearDepth = {};
 	localShadowMask = {};
 	screenSpaceShadow = {};
 	compatibilityReference = {};
 	frameMarker = {};
 	packedSurfaceMirror = {};
+	glintNoiseInput = {};
+	materialTextureSharingAvailable = false;
+	glintNoiseAvailable = false;
 	linearizeDepthShader = nullptr;
 	compositeBlitVS = nullptr;
 	compositeBlitPS = nullptr;
@@ -1358,6 +1669,14 @@ void DX12DeferredShading::Shutdown() noexcept
 	compositeBlitRTV = nullptr;
 	specularBlitDestination = nullptr;
 	specularBlitRTV = nullptr;
+	reflectanceBlitDestination = nullptr;
+	reflectanceBlitRTV = nullptr;
+	albedoBlitDestination = nullptr;
+	albedoBlitRTV = nullptr;
+	normalBlitDestination = nullptr;
+	normalBlitRTV = nullptr;
+	masksBlitDestination = nullptr;
+	masksBlitRTV = nullptr;
 	handoffConstants = nullptr;
 	evaluatorPipelines = {};
 	rootSignature = nullptr;
@@ -1372,6 +1691,10 @@ void DX12DeferredShading::Shutdown() noexcept
 	registration = {};
 	compositeHandle = {};
 	specularCompositeHandle = {};
+	reflectanceCompositeHandle = {};
+	albedoCompositeHandle = {};
+	normalCompositeHandle = {};
+	masksCompositeHandle = {};
 	evaluatorCountsHandle = {};
 	evaluatorOffsetsHandle = {};
 	evaluatorCursorsHandle = {};
@@ -1383,5 +1706,6 @@ void DX12DeferredShading::Shutdown() noexcept
 	localShadowMaskHandle = {};
 	screenSpaceShadowHandle = {};
 	compatibilityReferenceHandle = {};
-	lightsHandle={};contextsHandle={};clustersHandle={};pagesHandle={};
+	glintNoiseHandle = {};
+	lightsHandle={};contextsHandle={};pbrMaterialsHandle={};clustersHandle={};pagesHandle={};
 }

@@ -437,8 +437,10 @@ bool DX12RenderRuntime::ExecuteDeferredEpoch(uint32_t width, uint32_t height, ui
 		if (firstAttempt) logger::info("[DX12RenderRuntime] First graph rebuild returned (active={})", active != nullptr);
 		firstAttempt = false;
 	}
-	if (!active)
+	if (!active) {
+		globals::features::deferredRendering.SetEnabledEvaluatorMask(0u);
 		return false;
+	}
 	const uint64_t ready = nextReadyFence.fetch_add(1);
 	if (FAILED(context11->Signal(readyFence11.get(), ready)))
 		return false;
@@ -470,12 +472,17 @@ bool DX12RenderRuntime::ExecuteDeferredEpoch(uint32_t width, uint32_t height, ui
 		if (rhi::g_breakCallback) rhi::g_breakCallback();
 		SetDiagnostic(CS_DX12_E_INTERNAL, std::string("ORG execution failed: ") + e.what());
 		if (FAILED(removedReason)) {
+			for (const auto& contributor : active->contributorSnapshot)
+				if (contributor.deviceLost)
+					contributor.deviceLost(contributor.userData,
+						static_cast<std::uint32_t>(removedReason));
 			available.store(false);
 			logger::error("[DX12RenderRuntime] D3D12 device was removed; disabling DX12 contributors for the remainder of the process");
 		} else {
 			available.store(false);
 			logger::error("[DX12RenderRuntime] Required DX12 epoch recording failed; disabling further submissions and preserving the D3D11 path");
 		}
+		globals::features::deferredRendering.SetEnabledEvaluatorMask(0u);
 		return false;
 	}
 	++frameIndex;

@@ -4,6 +4,7 @@
 #include "TruePBR/BSLightingShaderMaterialPBRLandscape.h"
 
 #include "Features/InteriorSun.h"
+#include "Features/DeferredRendering.h"
 #include "Hooks.h"
 #include "I18n/I18n.h"
 #include "ShaderCache.h"
@@ -361,7 +362,10 @@ void TruePBR::SetupGlintsTexture()
 		.Usage = D3D11_USAGE_DEFAULT,
 		.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
 		.CPUAccessFlags = 0,
-		.MiscFlags = 0
+		// The D3D12 glint evaluator opens this exact CS-owned allocation. It is
+		// never mirrored; the normal D3D11->D3D12 epoch fence publishes the
+		// one-time UAV initialization before any ORG read.
+		.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE
 	};
 	D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {
 		.Format = tex_desc.Format,
@@ -376,7 +380,15 @@ void TruePBR::SetupGlintsTexture()
 		.Texture2D = { .MipSlice = 0 }
 	};
 
-	glintsNoiseTexture = eastl::make_unique<Texture2D>(tex_desc);
+	try {
+		glintsNoiseTexture = eastl::make_unique<Texture2D>(tex_desc);
+	} catch (...) {
+		// Direct sharing is optional for forward TruePBR. Preserve the existing
+		// D3D11 glint path and let the deferred host mask out only its glint PSO.
+		logger::warn("[TruePBR] Shared glint-noise allocation is unavailable; deferred glints remain compatibility-lit");
+		tex_desc.MiscFlags = 0;
+		glintsNoiseTexture = eastl::make_unique<Texture2D>(tex_desc);
+	}
 	glintsNoiseTexture->CreateSRV(srv_desc);
 	glintsNoiseTexture->CreateUAV(uav_desc);
 
@@ -1062,11 +1074,98 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 
 struct BSLightingShader_SetupGeometry
 {
+	static void CaptureDeferredMaterial(RE::BSRenderPass* pass)
+	{
+		if (!pass || !pass->geometry ||
+			!globals::features::deferredRendering.IsRuntimeEnabled())
+			return;
+		auto& property = pass->geometry->GetGeometryRuntimeData().shaderProperty;
+		if (!property || property->GetRTTI() != globals::rtti::BSLightingShaderPropertyRTTI.get())
+			return;
+		auto* lightingProperty = static_cast<RE::BSLightingShaderProperty*>(property.get());
+		if (!lightingProperty->material)
+			return;
+		auto* material = lightingProperty->material;
+		CS::Deferred::PBRMaterialRecord record{};
+		const auto objectIt = BSLightingShaderMaterialPBR::All.find(
+			reinterpret_cast<BSLightingShaderMaterialPBR*>(material));
+		if (objectIt != BSLightingShaderMaterialPBR::All.end()) {
+			auto* pbr = objectIt->first;
+			auto mapFlag = [&](PBRFlags source, PBRShaderFlags destination) {
+				if (pbr->pbrFlags.any(source))
+					record.flags |= static_cast<std::uint32_t>(destination);
+			};
+			mapFlag(PBRFlags::Subsurface, PBRShaderFlags::Subsurface);
+			mapFlag(PBRFlags::TwoLayer, PBRShaderFlags::TwoLayer);
+			mapFlag(PBRFlags::ColoredCoat, PBRShaderFlags::ColoredCoat);
+			mapFlag(PBRFlags::InterlayerParallax, PBRShaderFlags::InterlayerParallax);
+			mapFlag(PBRFlags::CoatNormal, PBRShaderFlags::CoatNormal);
+			mapFlag(PBRFlags::Fuzz, PBRShaderFlags::Fuzz);
+			mapFlag(PBRFlags::HairMarschner, PBRShaderFlags::HairMarschner);
+			if (pbr->emissiveTexture)
+				record.flags |= static_cast<std::uint32_t>(PBRShaderFlags::HasEmissive);
+			if (pbr->displacementTexture)
+				record.flags |= static_cast<std::uint32_t>(PBRShaderFlags::HasDisplacement);
+			if (pbr->featuresTexture0)
+				record.flags |= static_cast<std::uint32_t>(PBRShaderFlags::HasFeaturesTexture0);
+			if (pbr->featuresTexture1)
+				record.flags |= static_cast<std::uint32_t>(PBRShaderFlags::HasFeaturesTexture1);
+			if (pbr->GetGlintParameters().enabled)
+				record.flags |= static_cast<std::uint32_t>(PBRShaderFlags::Glint);
+			if (pbr->GetProjectedMaterialGlintParameters().enabled)
+				record.flags |= static_cast<std::uint32_t>(PBRShaderFlags::ProjectedGlint);
+			record.materialParameters[0] = { pbr->GetRoughnessScale(),
+				pbr->GetDisplacementScale(), pbr->GetSpecularLevel(), 0.0f };
+			const auto& subsurface = pbr->GetSubsurfaceColor();
+			record.materialParameters[1] = { subsurface.red, subsurface.green,
+				subsurface.blue, pbr->GetSubsurfaceOpacity() };
+			const auto& coat = pbr->GetCoatColor();
+			record.materialParameters[2] = { coat.red, coat.green, coat.blue,
+				pbr->GetCoatStrength() };
+			record.materialParameters[3] = { pbr->GetCoatRoughness(),
+				pbr->GetCoatSpecularLevel(), 0.0f, 0.0f };
+			const auto& fuzz = pbr->GetFuzzColor();
+			record.materialParameters[4] = { fuzz.red, fuzz.green, fuzz.blue,
+				pbr->GetFuzzWeight() };
+			const auto& glint = pbr->GetGlintParameters();
+			record.materialParameters[5] = { glint.screenSpaceScale,
+				glint.logMicrofacetDensity, glint.microfacetRoughness,
+				glint.densityRandomization };
+			globals::features::deferredRendering.AssignPBRMaterial(pass, record);
+			return;
+		}
+		const auto landscapeIt = BSLightingShaderMaterialPBRLandscape::All.find(
+			reinterpret_cast<BSLightingShaderMaterialPBRLandscape*>(material));
+		if (landscapeIt == BSLightingShaderMaterialPBRLandscape::All.end())
+			return;
+		auto* landscape = landscapeIt->first;
+		for (std::size_t layerIndex = 0;
+			layerIndex < BSLightingShaderMaterialPBRLandscape::NumTiles; ++layerIndex) {
+			auto& layer = record.landscapeLayers[layerIndex];
+			if (landscape->isPbr[layerIndex])
+				record.flags |= 1u << static_cast<std::uint32_t>(layerIndex);
+			if (landscape->landscapeDisplacementTextures[layerIndex])
+				record.flags |= 1u << (6u + static_cast<std::uint32_t>(layerIndex));
+			if (landscape->glintParameters[layerIndex].enabled)
+				record.flags |= 1u << (12u + static_cast<std::uint32_t>(layerIndex));
+			layer.materialParameters = { landscape->roughnessScales[layerIndex],
+				landscape->displacementScales[layerIndex],
+				landscape->specularLevels[layerIndex],
+				landscape->isPbr[layerIndex] ? 1.0f : 0.0f };
+			const auto& glint = landscape->glintParameters[layerIndex];
+			layer.glintParameters = { glint.screenSpaceScale,
+				glint.logMicrofacetDensity, glint.microfacetRoughness,
+				glint.densityRandomization };
+		}
+		globals::features::deferredRendering.AssignPBRMaterial(pass, record);
+	}
+
 	static void thunk(RE::BSLightingShader* shader, RE::BSRenderPass* pass, uint32_t renderFlags)
 	{
 		const auto originalTechnique = shader->currentRawTechnique;
 
 		if ((shader->currentRawTechnique & static_cast<uint32_t>(SIE::ShaderCache::LightingShaderFlags::TruePbr)) != 0) {
+			CaptureDeferredMaterial(pass);
 			shader->currentRawTechnique |= static_cast<uint32_t>(SIE::ShaderCache::LightingShaderFlags::AmbientSpecular);
 			shader->currentRawTechnique ^= static_cast<uint32_t>(SIE::ShaderCache::LightingShaderFlags::AnisoLighting);
 		}

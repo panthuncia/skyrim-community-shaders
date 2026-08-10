@@ -1,6 +1,6 @@
 Texture2D<float4> Source : register(t0);
 #if defined(COVERAGE_OVERLAY) || defined(SELECTIVE_HANDOFF)
-Texture2D<uint> PackedSurface : register(t1);
+Texture2D<uint4> PackedSurface : register(t1);
 #include "DeferredRendering/DeferredMaterial.hlsli"
 
 cbuffer HandoffConstants : register(b0)
@@ -26,13 +26,13 @@ FullscreenVertex main(uint vertexID : SV_VertexID)
 float4 main(FullscreenVertex input) : SV_Target0
 {
 #if defined(COVERAGE_OVERLAY)
-	const uint materialClass = (PackedSurface.Load(int3(uint2(input.position.xy), 0)) >> 16) & 0xFFu;
+	const uint materialClass = (PackedSurface.Load(int3(uint2(input.position.xy), 0)).x >> 16) & 0xFFu;
 	const uint evaluator = CSDeferredEvaluatorForMaterial(materialClass);
 	if (!CSDeferredEvaluatorEnabled(evaluator, EnabledEvaluatorMask))
 		discard;
 	return float4(CSDeferredEvaluatorDebugColor(evaluator), 1);
 #elif defined(SELECTIVE_HANDOFF)
-	const uint materialClass = (PackedSurface.Load(int3(uint2(input.position.xy), 0)) >> 16) & 0xFFu;
+	const uint materialClass = (PackedSurface.Load(int3(uint2(input.position.xy), 0)).x >> 16) & 0xFFu;
 	const uint evaluator = CSDeferredEvaluatorForMaterial(materialClass);
 	if (!CSDeferredEvaluatorEnabled(evaluator, EnabledEvaluatorMask))
 		discard;

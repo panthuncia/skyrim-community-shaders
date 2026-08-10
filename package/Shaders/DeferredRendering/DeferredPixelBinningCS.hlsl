@@ -1,11 +1,12 @@
 #include "DeferredRendering/DeferredMaterial.hlsli"
 
-Texture2D<uint> PackedSurfaceTexture : register(t0);
+Texture2D<uint4> PackedSurfaceTexture : register(t0);
 RWStructuredBuffer<uint> EvaluatorCounts : register(u0);
 RWStructuredBuffer<uint> EvaluatorOffsets : register(u1);
 RWStructuredBuffer<uint> EvaluatorWriteCursors : register(u2);
 RWStructuredBuffer<uint2> PixelList : register(u3);
 RWByteAddressBuffer IndirectCommands : register(u4);
+RWTexture2D<uint> MaterialClassification : register(u5);
 
 cbuffer PixelBinningConstants : register(b0)
 {
@@ -14,7 +15,11 @@ cbuffer PixelBinningConstants : register(b0)
 	uint evaluatorCount;
 	uint indirectCommandStride;
 	uint enabledEvaluatorMask;
+	uint classificationEnabled;
 };
+
+static const uint CS_CLASSIFICATION_VISIBLE_BASE = 160u;
+static const uint CS_CLASSIFICATION_DEFERRED_BASE = CS_CLASSIFICATION_VISIBLE_BASE + 256u;
 
 uint ActiveEvaluatorForMaterial(uint materialClass)
 {
@@ -36,32 +41,64 @@ static const uint CS_EVALUATOR_GROUP_SIZE = 64u;
 [numthreads(64, 1, 1)]
 void ClearBinsCS(uint3 threadID : SV_DispatchThreadID)
 {
-	if (threadID.x >= evaluatorCount)
-		return;
-	EvaluatorCounts[threadID.x] = 0u;
-	EvaluatorOffsets[threadID.x] = 0u;
-	EvaluatorWriteCursors[threadID.x] = 0u;
-	uint command = threadID.x * indirectCommandStride;
-	[unroll] for (uint byteOffset = 0u; byteOffset < 28u; byteOffset += 4u)
-		IndirectCommands.Store(command + byteOffset, 0u);
+	if (threadID.x < evaluatorCount) {
+		EvaluatorCounts[threadID.x] = 0u;
+		EvaluatorOffsets[threadID.x] = 0u;
+		EvaluatorWriteCursors[threadID.x] = 0u;
+		uint command = threadID.x * indirectCommandStride;
+		[unroll] for (uint byteOffset = 0u; byteOffset < 28u; byteOffset += 4u)
+			IndirectCommands.Store(command + byteOffset, 0u);
+	}
+	// This shared diagnostic surface also contains the deferred parity counters.
+	// Clear it once at the structural beginning of the epoch so later passes do
+	// not erase classification results produced here.
+	if (threadID.x < 672u)
+		MaterialClassification[uint2(threadID.x, 0u)] = 0u;
 }
 
 groupshared uint groupHistogram[CS_EVALUATOR_COUNT];
+groupshared uint groupVisibleMaterials[256];
+groupshared uint groupDeferredMaterials[256];
 
 [numthreads(8, 8, 1)]
 void HistogramCS(uint3 threadID : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 {
 	if (groupIndex < evaluatorCount)
 		groupHistogram[groupIndex] = 0u;
+	if (classificationEnabled) {
+		for (uint index = groupIndex; index < 256u; index += 64u) {
+			groupVisibleMaterials[index] = 0u;
+			groupDeferredMaterials[index] = 0u;
+		}
+	}
 	GroupMemoryBarrierWithGroupSync();
 	if (threadID.x < width && threadID.y < height) {
-		uint materialClass = CSDeferredMaterialClass(PackedSurfaceTexture.Load(int3(threadID.xy, 0)));
+		uint4 packedSurface = PackedSurfaceTexture.Load(int3(threadID.xy, 0));
+		uint materialClass = CSDeferredMaterialClass(packedSurface.x);
 		uint evaluator = ActiveEvaluatorForMaterial(materialClass);
 		InterlockedAdd(groupHistogram[evaluator], 1u);
+		// Rasterization sets bit 31 only for pixels written by a material shader.
+		// This excludes the packed-target clear/background from blind-spot counts.
+		bool compatibilityMarker = materialClass == CS_MATERIAL_Legacy &&
+			(packedSurface.w & 0x80000000u) != 0u;
+		if (classificationEnabled && (materialClass != CS_MATERIAL_Legacy || compatibilityMarker)) {
+			uint intendedClass = compatibilityMarker ? packedSurface.w & 0xFFu : materialClass;
+			InterlockedAdd(groupVisibleMaterials[intendedClass], 1u);
+			if (evaluator != CS_EVALUATOR_COMPATIBILITY)
+				InterlockedAdd(groupDeferredMaterials[intendedClass], 1u);
+		}
 	}
 	GroupMemoryBarrierWithGroupSync();
 	if (groupIndex < evaluatorCount)
 		InterlockedAdd(EvaluatorCounts[groupIndex], groupHistogram[groupIndex]);
+	if (classificationEnabled) {
+		for (uint index = groupIndex; index < 256u; index += 64u) {
+			if (groupVisibleMaterials[index])
+				InterlockedAdd(MaterialClassification[uint2(CS_CLASSIFICATION_VISIBLE_BASE + index, 0u)], groupVisibleMaterials[index]);
+			if (groupDeferredMaterials[index])
+				InterlockedAdd(MaterialClassification[uint2(CS_CLASSIFICATION_DEFERRED_BASE + index, 0u)], groupDeferredMaterials[index]);
+		}
+	}
 }
 
 [numthreads(64, 1, 1)]
@@ -93,7 +130,7 @@ void ScatterPixelsCS(uint3 threadID : SV_DispatchThreadID)
 {
 	if (threadID.x >= width || threadID.y >= height)
 		return;
-	uint materialClass = CSDeferredMaterialClass(PackedSurfaceTexture.Load(int3(threadID.xy, 0)));
+	uint materialClass = CSDeferredMaterialClass(PackedSurfaceTexture.Load(int3(threadID.xy, 0)).x);
 	uint evaluator = ActiveEvaluatorForMaterial(materialClass);
 	uint localOffset;
 	InterlockedAdd(EvaluatorWriteCursors[evaluator], 1u, localOffset);

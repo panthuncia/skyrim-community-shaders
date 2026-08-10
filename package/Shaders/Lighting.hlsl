@@ -291,7 +291,8 @@ typedef VS_OUTPUT PS_INPUT;
 cbuffer DeferredIdentity : register(b13)
 {
 	uint DeferredPackedSurface;
-	uint3 DeferredIdentityPadding;
+	uint DeferredPBRMaterialIndex;
+	uint2 DeferredIdentityPadding;
 };
 
 struct PS_OUTPUT
@@ -303,7 +304,7 @@ struct PS_OUTPUT
 	float4 Specular: SV_Target4;
 	float4 Reflectance: SV_Target5;
 	float4 Masks: SV_Target6;
-	uint Masks2: SV_Target7;
+	uint4 Masks2: SV_Target7;
 };
 #else
 struct PS_OUTPUT
@@ -588,18 +589,12 @@ cbuffer AlphaTestRefBuffer : register(b11)
 
 float GetSoftLightMultiplier(float angle)
 {
-	float softLightParam = saturate((LightingEffectParams.x + angle) / (1 + LightingEffectParams.x));
-	float arg1 = (softLightParam * softLightParam) * (3 - 2 * softLightParam);
-	float clampedAngle = saturate(angle);
-	float arg2 = (clampedAngle * clampedAngle) * (3 - 2 * clampedAngle);
-	float softLigtMul = saturate(arg1 - arg2);
-	return softLigtMul;
+	return CSLightingSoftMultiplier(angle, LightingEffectParams.x);
 }
 
 float GetRimLightMultiplier(float3 L, float3 V, float3 N)
 {
-	float NdotV = saturate(dot(N, V));
-	return exp2(LightingEffectParams.y * log2(1 - NdotV)) * saturate(dot(V, -L));
+	return CSLightingRimMultiplier(L, V, N, LightingEffectParams.y);
 }
 
 #	if !defined(TRUE_PBR)
@@ -1717,6 +1712,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	material.Roughness = 1;
 
 #	if defined(TRUE_PBR)
+	material.Flags = PBRFlags;
 	material.Noise = screenNoise;
 
 	material.Roughness = clamp(rawRMAOS.x, PBR::Constants::MinRoughness, PBR::Constants::MaxRoughness);
@@ -2222,7 +2218,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	DirectContext dirLightContext;
 	DirectLightingOutput dirLightOutput;
 #	if defined(TRUE_PBR)
-	dirLightContext = CreateDirectLightingContext(worldNormal.xyz, coatWorldNormal, vertexNormal.xyz, refractedViewDirection, viewDirection, refractedDirLightDirection, DirLightDirection, dirLightColor, dirDetailedShadow, dirSoftShadow);
+	dirLightContext = CreateDirectLightingContext(worldNormal.xyz, coatWorldNormal, vertexNormal.xyz, refractedViewDirection, viewDirection, refractedDirLightDirection, DirLightDirection, dirLightColor, dirDetailedShadow, dirSoftShadow, material.Flags);
 #	else
 	dirLightContext = CreateDirectLightingContext(worldNormal.xyz, vertexNormal.xyz, viewDirection, DirLightDirection, dirLightColor, dirDetailedShadow, dirSoftShadow);
 #		if defined(HAIR) && defined(CS_HAIR)
@@ -2284,7 +2280,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 					refractedLightDirection = -refract(-normalizedLightDirection, coatWorldNormal, eta);
 			}
 #				endif
-			pointLightContext = CreateDirectLightingContext(worldNormal.xyz, coatWorldNormal, vertexNormal.xyz, refractedViewDirection, viewDirection, refractedLightDirection, normalizedLightDirection, lightColor, lightShadow, lightShadow);
+		pointLightContext = CreateDirectLightingContext(worldNormal.xyz, coatWorldNormal, vertexNormal.xyz, refractedViewDirection, viewDirection, refractedLightDirection, normalizedLightDirection, lightColor, lightShadow, lightShadow, material.Flags);
 		}
 #			else
 		pointLightContext = CreateDirectLightingContext(worldNormal.xyz, vertexNormal.xyz, viewDirection, normalizedLightDirection, lightColor, lightShadow, lightShadow);
@@ -2401,7 +2397,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		DirectLightingOutput pointLightOutput;
 		float pointLightShadow = lightShadow * parallaxShadow;
 #			if defined(TRUE_PBR)
-		pointLightContext = CreateDirectLightingContext(worldNormal.xyz, coatWorldNormal, vertexNormal.xyz, refractedViewDirection, viewDirection, refractedLightDirection, normalizedLightDirection, lightColor, pointLightShadow, pointLightShadow);
+		pointLightContext = CreateDirectLightingContext(worldNormal.xyz, coatWorldNormal, vertexNormal.xyz, refractedViewDirection, viewDirection, refractedLightDirection, normalizedLightDirection, lightColor, pointLightShadow, pointLightShadow, material.Flags);
 #			else
 		pointLightContext = CreateDirectLightingContext(worldNormal.xyz, vertexNormal.xyz, viewDirection, normalizedLightDirection, lightColor, pointLightShadow, pointLightShadow);
 #				if defined(HAIR) && defined(CS_HAIR)
@@ -2951,7 +2947,55 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// available after MASKS2 becomes an integer identity target.
 	uint packedVertexAO = (uint)round(saturate(vertexAO) * 31.0);
 	uint deferredMaterialClass = CS_MATERIAL_Legacy;
+	uint diagnosticMaterialClass = CS_MATERIAL_Legacy;
 	uint deferredSurfaceFlags = DeferredPackedSurface >> 24;
+	// Diagnostic classification is deliberately independent of evaluator
+	// availability. It records what this visible pixel would require even when
+	// the authoritative forward result remains in Main.
+#	if defined(TRUE_PBR) && defined(LOD_LAND_BLEND)
+	diagnosticMaterialClass = CS_MATERIAL_TruePBRLodBlend;
+#	elif defined(TRUE_PBR) && defined(LANDSCAPE)
+	const bool diagnosticTerrainAdvanced = (PBRFlags & (0xFC0u | 0x3F000u)) != 0u;
+	diagnosticMaterialClass = diagnosticTerrainAdvanced ?
+		CS_MATERIAL_TruePBRTerrainAdvanced : CS_MATERIAL_TruePBRTerrain;
+#	elif defined(TRUE_PBR)
+	bool diagnosticPbrParallax = false;
+#		if defined(EMAT)
+	diagnosticPbrParallax = PBRParallax;
+#		endif
+	diagnosticMaterialClass = (PBRFlags & PBR::Flags::HairMarschner) != 0u ? CS_MATERIAL_Hair :
+		diagnosticPbrParallax || (PBRFlags & PBR::Flags::InterlayerParallax) != 0u ? CS_MATERIAL_TruePBRParallax :
+		(PBRFlags & (PBR::Flags::Glint | PBR::Flags::ProjectedGlint)) != 0u ? CS_MATERIAL_TruePBRGlint :
+		(PBRFlags & PBR::Flags::TwoLayer) != 0u ? CS_MATERIAL_TruePBRCoat :
+		(PBRFlags & (PBR::Flags::Subsurface | PBR::Flags::Fuzz)) != 0u ? CS_MATERIAL_TruePBRSubsurfaceFuzz :
+		CS_MATERIAL_TruePBR;
+#	elif defined(SKIN)
+	diagnosticMaterialClass = CS_MATERIAL_Skin;
+#	elif defined(HAIR)
+	diagnosticMaterialClass = CS_MATERIAL_Hair;
+#	elif defined(EYE)
+	diagnosticMaterialClass = CS_MATERIAL_EyeEnvmap;
+#	elif defined(LANDSCAPE)
+#		if defined(SPECULAR)
+	diagnosticMaterialClass = CS_MATERIAL_TerrainSpecular;
+#		else
+	diagnosticMaterialClass = CS_MATERIAL_Terrain;
+#		endif
+#	elif defined(TREE_ANIM) && (defined(SOFT_LIGHTING) || defined(RIM_LIGHTING) || defined(BACK_LIGHTING))
+	diagnosticMaterialClass = CS_MATERIAL_FoliageSpecial;
+#	elif !defined(DEPTH_WRITE_DECALS)
+#		if defined(TREE_ANIM) && !defined(SPECULAR)
+	diagnosticMaterialClass = CS_MATERIAL_Foliage;
+#		elif defined(SPECULAR) && defined(DO_ALPHA_TEST)
+	diagnosticMaterialClass = CS_MATERIAL_AlphaTestedSpecular;
+#		elif defined(SPECULAR)
+	diagnosticMaterialClass = CS_MATERIAL_StandardSpecular;
+#		elif defined(DO_ALPHA_TEST)
+	diagnosticMaterialClass = CS_MATERIAL_AlphaTestedOpaque;
+#		else
+	diagnosticMaterialClass = CS_MATERIAL_StandardOpaque;
+#		endif
+#	endif
 	// Classes 1 and 2 share the plain CS diffuse evaluator. Class 2 differs only
 	// in having survived alpha testing during G-buffer generation. Vertex
 	// deformation (skinning/tree animation), FaceGen tint, and ordinary LOD
@@ -2993,18 +3037,181 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	deferredMaterialClass = CS_MATERIAL_Terrain;
 #		endif
 #	endif
-	// Animated foliage with dedicated soft/rim/back lobes remains authoritative
-	// on the forward path until those lobe parameters are exported to a dedicated
-	// foliage material contract.
-#	if defined(TREE_ANIM) && (defined(SOFT_LIGHTING) || defined(RIM_LIGHTING) || defined(BACK_LIGHTING) || defined(SPECULAR))
+	// TruePBR promotion is profile-gated. Only the core resolved surface and
+	// non-advanced landscape contracts are admitted here; every feature whose
+	// payload/evaluator is not complete remains geometry-lit compatibility.
+#	if defined(TRUE_PBR) && !defined(LANDSCAPE) && !defined(LODLANDSCAPE)
+	const uint deferredPbrUnsupportedFlags = PBR::Flags::HairMarschner |
+		PBR::Flags::ProjectedGlint;
+	bool deferredPbrHasParallax = false;
+#		if defined(EMAT)
+	deferredPbrHasParallax = PBRParallax;
+#		endif
+	if ((PBRFlags & deferredPbrUnsupportedFlags) == 0u && !deferredPbrHasParallax &&
+		(Permutation::PixelShaderDescriptor & Permutation::LightingFlags::CharacterLight) == 0u) {
+		if ((PBRFlags & PBR::Flags::Glint) != 0u) {
+			// The inline glint payload is intentionally limited to an otherwise
+			// ordinary resolved surface. Intersections use the later extended
+			// payload/replay profile rather than dropping another lobe.
+			const uint unsupportedGlintIntersection = PBR::Flags::TwoLayer |
+				PBR::Flags::Subsurface | PBR::Flags::Fuzz;
+			deferredMaterialClass = (PBRFlags & unsupportedGlintIntersection) == 0u &&
+				waterRoughnessSpecular >= 1.0f && DeferredPBRMaterialIndex != 0xFFFFu ?
+				CS_MATERIAL_TruePBRGlint : CS_MATERIAL_Legacy;
+		}
+		else if ((PBRFlags & PBR::Flags::TwoLayer) != 0u) {
+			// A resolved coat normal fits losslessly enough in the two spare
+			// profile channels. Interlayer refraction still depends on displacement
+			// replay and remains assigned to Compatibility.
+			const uint unsupportedCoatIntersection =
+				PBR::Flags::InterlayerParallax | PBR::Flags::Subsurface | PBR::Flags::Fuzz;
+			deferredMaterialClass = (PBRFlags & unsupportedCoatIntersection) == 0u &&
+				waterRoughnessSpecular >= 1.0f ?
+				CS_MATERIAL_TruePBRCoat : CS_MATERIAL_Legacy;
+		}
+		else if ((PBRFlags & (PBR::Flags::Subsurface | PBR::Flags::Fuzz)) != 0u)
+			deferredMaterialClass = waterRoughnessSpecular >= 1.0f ?
+				CS_MATERIAL_TruePBRSubsurfaceFuzz : CS_MATERIAL_Legacy;
+		else
+			deferredMaterialClass = CS_MATERIAL_TruePBR;
+	}
+#	elif defined(TRUE_PBR) && defined(LANDSCAPE) && !defined(LOD_LAND_BLEND)
+	const bool deferredPbrTerrainHasDisplacement = (PBRFlags & 0xFC0u) != 0u;
+	const bool deferredPbrTerrainHasGlint = (PBRFlags & 0x3F000u) != 0u;
+	bool deferredPbrTerrainParallaxEnabled = false;
+#		if defined(EMAT)
+	deferredPbrTerrainParallaxEnabled = LANDSCAPE_PARALLAX_ENABLED;
+#		endif
+	if (!deferredPbrTerrainHasGlint &&
+		!(deferredPbrTerrainParallaxEnabled && deferredPbrTerrainHasDisplacement))
+		deferredMaterialClass = CS_MATERIAL_TruePBRTerrain;
+#	endif
+	// The non-specular special-foliage contract uses
+	// the otherwise lighting-output Specular/Reflectance targets as resolved
+	// rim-soft/back-light inputs; D3D12 restores both downstream outputs.
+#	if defined(TREE_ANIM) && !defined(TRUE_PBR) && !defined(SPECULAR) && (defined(SOFT_LIGHTING) || defined(RIM_LIGHTING) || defined(BACK_LIGHTING)) && !defined(SKIN) && !defined(HAIR) && !defined(SNOW) && !defined(GLOWMAP) && !defined(PARALLAX) && !defined(PROJECTED_UV) && !defined(ANISO_LIGHTING) && !defined(SPARKLE)
+	deferredMaterialClass = CS_MATERIAL_FoliageSpecial;
+#	elif defined(TREE_ANIM) && (defined(SOFT_LIGHTING) || defined(RIM_LIGHTING) || defined(BACK_LIGHTING) || defined(SPECULAR))
 	deferredMaterialClass = CS_MATERIAL_Legacy;
 #	endif
 	if (!SharedData::DeferredRenderingEnabled)
 		deferredMaterialClass = CS_MATERIAL_Legacy;
-	if (CSDeferredEvaluatorForMaterial(deferredMaterialClass) == CS_EVALUATOR_GENERIC)
+	uint deferredEvaluator = CSDeferredEvaluatorForMaterial(deferredMaterialClass);
+	if (!CSDeferredEvaluatorEnabled(deferredEvaluator,
+		SharedData::DeferredEnabledEvaluatorMask))
+		deferredMaterialClass = CS_MATERIAL_Legacy;
+	if (CSDeferredEvaluatorForMaterial(deferredMaterialClass) == CS_EVALUATOR_GENERIC ||
+		CSDeferredEvaluatorForMaterial(deferredMaterialClass) == CS_EVALUATOR_FOLIAGE_SPECIAL)
 		psout.Masks.x = directionalEnvironmentVisibility;
-	psout.Masks2 = (DeferredPackedSurface & 0x0000FFFFu) |
-		(deferredMaterialClass << 16) | ((deferredSurfaceFlags & 7u) << 24) | (packedVertexAO << 27);
+	if (deferredMaterialClass == CS_MATERIAL_FoliageSpecial) {
+#		if defined(RIM_LIGHTING) || defined(SOFT_LIGHTING)
+		psout.Specular.xyz = rimSoftLightColor.xyz;
+#		else
+		psout.Specular.xyz = 0.0f;
+#		endif
+#		if defined(BACK_LIGHTING)
+		psout.Reflectance.xyz = backLightColor.xyz;
+#		else
+		psout.Reflectance.xyz = 0.0f;
+#		endif
+		psout.Masks.y = dirSoftShadow;
+	}
+#	if defined(TRUE_PBR)
+	if (deferredMaterialClass == CS_MATERIAL_TruePBR ||
+		deferredMaterialClass == CS_MATERIAL_TruePBRTerrain ||
+		deferredMaterialClass == CS_MATERIAL_TruePBRSubsurfaceFuzz ||
+		deferredMaterialClass == CS_MATERIAL_TruePBRCoat ||
+		deferredMaterialClass == CS_MATERIAL_TruePBRGlint) {
+		// These targets become resolved TruePBR material inputs until D3D12
+		// restores the canonical downstream G-buffer values during handoff.
+		psout.Albedo = float4(material.BaseColor, psout.Diffuse.w);
+		psout.Specular = float4(material.F0, material.AO);
+		psout.Reflectance = float4(
+#		if defined(LANDSCAPE)
+			0.0f.xxx,
+#		else
+			(PBRFlags & PBR::Flags::HasEmissive) != 0u ? emitColor.xyz : 0.0f,
+#		endif
+			psout.Diffuse.w);
+		psout.Masks = float4(directionalEnvironmentVisibility, material.Metallic,
+			vertexAO, psout.Diffuse.w);
+	}
+#	endif
+	uint deferredPayloadProfile = 0u;
+	uint deferredPayloadAux = 0u;
+	uint deferredPayload0 = 0u;
+	uint deferredPayload1 = 0u;
+#	if defined(TRUE_PBR) && defined(WETNESS_EFFECTS)
+	if ((deferredMaterialClass == CS_MATERIAL_TruePBR ||
+		deferredMaterialClass == CS_MATERIAL_TruePBRTerrain) &&
+		waterRoughnessSpecular < 1.0f) {
+		deferredPayloadAux = 1u
+#		if defined(DYNAMIC_CUBEMAPS)
+			| 2u
+#		endif
+			;
+		// The standard normal target already contains the resolved water-film
+		// normal. Preserve the dry material normal for base-lobe evaluation.
+		deferredPayload0 = (f32tof16(worldNormal.x) & 0xFFFFu) |
+			(f32tof16(worldNormal.y) << 16u);
+		deferredPayload1 = (f32tof16(worldNormal.z) & 0xFFFFu) |
+			(f32tof16(waterRoughnessSpecular) << 16u);
+	}
+#	endif
+#	if defined(TRUE_PBR) && !defined(LANDSCAPE) && !defined(LODLANDSCAPE)
+	if (deferredMaterialClass == CS_MATERIAL_TruePBRSubsurfaceFuzz) {
+		deferredPayloadProfile = CS_PBR_PAYLOAD_SUBSURFACE_FUZZ;
+		deferredPayloadAux =
+			(((PBRFlags & PBR::Flags::Subsurface) != 0u) ? 1u : 0u) |
+			(((PBRFlags & PBR::Flags::Fuzz) != 0u) ? 2u : 0u)
+#		if defined(TREE_ANIM)
+			| 4u
+#		endif
+			| ((uint)round(saturate(dirSoftShadow) * 31.0f) << 3u);
+		deferredPayload0 = (f32tof16(material.SubsurfaceColor.x) & 0xFFFFu) |
+			(f32tof16(material.SubsurfaceColor.y) << 16u);
+		deferredPayload1 = (f32tof16(material.SubsurfaceColor.z) & 0xFFFFu) |
+			(f32tof16(material.Thickness) << 16u);
+		psout.Reflectance.a = material.FuzzWeight;
+		psout.Masks.yzw = material.FuzzColor;
+	}
+	if (deferredMaterialClass == CS_MATERIAL_TruePBRCoat) {
+		deferredPayloadProfile = CS_PBR_PAYLOAD_COAT;
+		deferredPayloadAux =
+			(((PBRFlags & PBR::Flags::ColoredCoat) != 0u) ? 1u : 0u) |
+			(((PBRFlags & PBR::Flags::CoatNormal) != 0u) ? 2u : 0u);
+		deferredPayload0 = (f32tof16(material.CoatColor.x) & 0xFFFFu) |
+			(f32tof16(material.CoatColor.y) << 16u);
+		deferredPayload1 = (f32tof16(material.CoatColor.z) & 0xFFFFu) |
+			(f32tof16(material.CoatRoughness) << 16u);
+		psout.Reflectance.a = material.CoatStrength;
+		psout.Masks.y = material.CoatF0.x;
+		if ((PBRFlags & PBR::Flags::CoatNormal) != 0u)
+			psout.Masks.zw = GBuffer::EncodeNormal(normalize(
+				FrameBuffer::WorldToView(coatWorldNormal, false)));
+	}
+#	if defined(GLINT)
+	if (deferredMaterialClass == CS_MATERIAL_TruePBRGlint) {
+		deferredPayloadProfile = CS_PBR_PAYLOAD_GLINT;
+		deferredPayloadAux = dot(cross(tbnTr[0], tbnTr[1]), tbnTr[2]) < 0.0f ? 1u : 0u;
+		deferredPayload0 = (f32tof16(material.GlintCache.uv.x) & 0xFFFFu) |
+			(f32tof16(material.GlintCache.uv.y) << 16u);
+		deferredPayload1 = material.GlintCache.gridSeed;
+		// Profile-only channels. D3D12 restores the canonical material outputs.
+		psout.Albedo.a = material.Metallic;
+		psout.Reflectance.a = material.GlintCache.footprintArea;
+		psout.Masks.y = material.Noise;
+		psout.Masks.zw = GBuffer::EncodeNormal(normalize(
+			FrameBuffer::WorldToView(tbnTr[0], false)));
+	}
+#	endif
+#	endif
+	psout.Masks2 = uint4((DeferredPackedSurface & 0x0000FFFFu) |
+		(deferredMaterialClass << 16) | ((deferredSurfaceFlags & 7u) << 24) | (packedVertexAO << 27),
+		(DeferredPBRMaterialIndex & 0xFFFFu) | (deferredPayloadProfile << 16u) |
+			(deferredPayloadAux << 24u),
+		deferredPayload0, deferredMaterialClass == CS_MATERIAL_Legacy ?
+			(0x80000000u | diagnosticMaterialClass) : deferredPayload1);
 
 	float stochasticBlend = (screenNoise * screenNoise) < psout.Diffuse.w ? 1.0 : 0.0;
 	psout.NormalGlossiness.w = stochasticBlend;

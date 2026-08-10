@@ -35,6 +35,24 @@ float CSLightingGrassSoftMultiplier(float angle, float rolloff)
 	return saturate(softCurve - diffuseCurve);
 }
 
+float CSLightingSoftMultiplier(float angle, float rolloff)
+{
+	float softLight = saturate((rolloff + angle) / (1.0f + rolloff));
+	float softCurve = softLight * softLight * (3.0f - 2.0f * softLight);
+	float clampedAngle = saturate(angle);
+	float diffuseCurve = clampedAngle * clampedAngle *
+		(3.0f - 2.0f * clampedAngle);
+	return saturate(softCurve - diffuseCurve);
+}
+
+float CSLightingRimMultiplier(float3 lightDirection, float3 viewDirection,
+	float3 normal, float rimPower)
+{
+	float NdotV = saturate(dot(normal, viewDirection));
+	return exp2(rimPower * log2(1.0f - NdotV)) *
+		saturate(dot(viewDirection, -lightDirection));
+}
+
 float3 CSLightingGrassSpecular(float3 lightDirection, float3 viewDirection,
 	float3 normal, float3 lightColor, float shininess)
 {
@@ -99,6 +117,25 @@ float3 CSLightingDirectionalAmbient(float4 ambientRow0, float4 ambientRow1,
 float3 CSLightingIrradianceToGamma(float3 color, bool linearLighting)
 {
 	return linearLighting ? color : pow(abs(color), 1.0f / 1.6f);
+}
+
+// Dependency-free color transforms used by both the forward and SM6 deferred
+// adapters.  Keep these coefficients/order identical to Color.hlsli.
+float CSLightingRGBToLuminance(float3 color)
+{
+	return dot(color, float3(0.2125f, 0.7154f, 0.0721f));
+}
+
+float3 CSLightingRGBToYCoCg(float3 color)
+{
+	float tmp = 0.25f * (color.r + color.b);
+	return float3(tmp + 0.5f * color.g, 0.5f * (color.r - color.b),
+		-tmp + 0.5f * color.g);
+}
+
+float CSLightingPBRScale(bool linearLighting)
+{
+	return linearLighting ? 1.0f : 0.65f;
 }
 
 float CSLightingLuminance(float3 color)

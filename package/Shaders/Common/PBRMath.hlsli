@@ -33,6 +33,9 @@ namespace PBR
 		static const uint HairMarschner = (1 << 10);
 		static const uint Glint = (1 << 11);
 		static const uint ProjectedGlint = (1 << 12);
+		// Deferred-only resolved-surface discriminator. It never appears in a
+		// TruePBR material asset and is set only by the SM6 adapter.
+		static const uint DeferredTreeAnim = (1u << 31);
 	}
 
 	namespace TerrainFlags

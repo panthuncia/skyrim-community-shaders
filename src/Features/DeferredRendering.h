@@ -14,6 +14,14 @@ public:
 	struct Settings
 	{
 		bool visualizeDeferredCoverage = false;
+		bool classifyVisibleMaterials = false;
+	};
+	struct MaterialClassification
+	{
+		std::array<std::uint32_t, 256> visible{};
+		std::array<std::uint32_t, 256> deferred{};
+		std::uint32_t enabledEvaluatorMask{};
+		std::uint64_t serial{};
 	};
 
 	Settings settings;
@@ -29,7 +37,10 @@ public:
 		kLightingUniformsValid = 1u << 1,
 		kReceivesDeferredShadow = 1u << 2,
 		kReceivesDirectionalShadow = 1u << 3,
-		kUsesCharacterLight = 1u << 4
+		kUsesCharacterLight = 1u << 4,
+		kUsesSoftLighting = 1u << 5,
+		kUsesRimLighting = 1u << 6,
+		kUsesBackLighting = 1u << 7
 	};
 
 	struct FrameSnapshot
@@ -37,6 +48,7 @@ public:
 		std::uint32_t abiVersion = CS::Deferred::kAbiVersion;
 		std::vector<LightData> lights;
 		std::vector<LightingContext> contexts;
+		std::vector<CS::Deferred::PBRMaterialRecord> pbrMaterials;
 		Matrix cameraView{};
 		Matrix cameraViewInverse{};
 		Matrix projectionInverse{};
@@ -65,10 +77,25 @@ public:
 	bool ToggleAtBootSetting() override;
 	bool AppliesBootToggleImmediately() const override { return true; }
 	bool IsRuntimeEnabled() const noexcept { return loaded && runtimeEnabled.load(std::memory_order_acquire); }
+	std::uint32_t GetEnabledEvaluatorMask() const noexcept
+	{
+		return enabledEvaluatorMask.load(std::memory_order_acquire);
+	}
+	void SetEnabledEvaluatorMask(std::uint32_t mask) noexcept
+	{
+		enabledEvaluatorMask.store(mask, std::memory_order_release);
+	}
 	bool IsCoverageVisualizationEnabled() const noexcept
 	{
 		return settings.visualizeDeferredCoverage || std::getenv("CS_DX12_FORCE_COVERAGE") != nullptr;
 	}
+	bool IsMaterialClassificationEnabled() const noexcept
+	{
+		return settings.classifyVisibleMaterials || std::getenv("CS_DX12_CLASSIFY_MATERIALS") != nullptr;
+	}
+	void UpdateMaterialClassification(const std::uint32_t* visible, const std::uint32_t* deferred,
+		std::uint32_t evaluatorMask);
+	MaterialClassification GetMaterialClassification() const;
 	std::pair<std::string, std::vector<std::string>> GetFeatureSummary() override
 	{
 		return { "Deferred rendering infrastructure and clustered-light assignment.", {} };
@@ -76,19 +103,25 @@ public:
 
 	void BeginFrame(std::span<const LightData> lights, const std::uint32_t (&clusterDimensions)[3], float cameraNearPlane, float cameraFarPlane);
 	ContextIndex AssignContext(const RE::BSRenderPass* renderPass, const LightingContext& context);
+	CS::Deferred::PBRMaterialIndex AssignPBRMaterial(const RE::BSRenderPass* renderPass,
+		const CS::Deferred::PBRMaterialRecord& material);
 	void FinalizeFrame();
 	std::shared_ptr<const FrameSnapshot> GetFrameSnapshot() const;
 	void RetainSubmittedFrame(std::shared_ptr<const FrameSnapshot> frame, std::uint64_t completionValue);
 	void RetireFrames(std::uint64_t completedValue);
 	ContextIndex GetContext(const RE::BSRenderPass* renderPass) const;
+	CS::Deferred::PBRMaterialIndex GetPBRMaterial(const RE::BSRenderPass* renderPass) const;
 
 private:
 	ContextIndex InternContext(const LightingContext& context);
+	CS::Deferred::PBRMaterialIndex InternPBRMaterial(const CS::Deferred::PBRMaterialRecord& material);
 
 	mutable std::shared_mutex snapshotMutex;
 	std::vector<LightData> deferredLights;
 	std::vector<LightingContext> deferredContexts;
+	std::vector<CS::Deferred::PBRMaterialRecord> deferredPBRMaterials;
 	eastl::hash_map<const RE::BSRenderPass*, ContextIndex> drawContexts;
+	eastl::hash_map<const RE::BSRenderPass*, CS::Deferred::PBRMaterialIndex> drawPBRMaterials;
 	std::uint32_t clusterSize[3]{};
 	float nearPlane = 1.0f;
 	float farPlane = 16384.0f;
@@ -105,5 +138,8 @@ private:
 	std::shared_ptr<const FrameSnapshot> finalizedFrame;
 	std::deque<std::pair<std::uint64_t, std::shared_ptr<const FrameSnapshot>>> submittedFrames;
 	std::atomic_bool runtimeEnabled{ false };
+	std::atomic_uint32_t enabledEvaluatorMask{ 0 };
+	mutable std::mutex classificationMutex;
+	MaterialClassification materialClassification;
 };
 #pragma warning(pop)

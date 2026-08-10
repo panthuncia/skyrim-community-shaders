@@ -21,6 +21,7 @@ public:
 	bool PreparePackedSurfaceMirror(ID3D11Texture2D* source) noexcept;
 	bool PrepareGBufferInputs() noexcept;
 	bool PrepareIndirectLightingInputs() noexcept;
+	bool PrepareGlintNoiseInput() noexcept;
 	bool ShouldCommitComposite() const noexcept;
 	bool CommitComposite(ID3D11Texture2D* destination) noexcept;
 	ID3D11ShaderResourceView* GetCompositeSRV() const noexcept { return composite.srv11.get(); }
@@ -32,6 +33,8 @@ private:
 	static CSDX12Status CS_DX12_GRAPH_CALL ExecuteBinHistogram(void* userData, const CSDX12ExecutionContext* context);
 	static CSDX12Status CS_DX12_GRAPH_CALL ExecuteBinPrefix(void* userData, const CSDX12ExecutionContext* context);
 	static CSDX12Status CS_DX12_GRAPH_CALL ExecuteBinScatter(void* userData, const CSDX12ExecutionContext* context);
+	static void CS_DX12_GRAPH_CALL OnGenerationActivated(void* userData, CSDX12GenerationHandle generation) noexcept;
+	static void CS_DX12_GRAPH_CALL OnDeviceLost(void* userData, std::uint32_t reason) noexcept;
 	static void CS_DX12_GRAPH_CALL OnShutdown(void* userData);
 	CSDX12Status Record(const CSDX12ExecutionContext& context) noexcept;
 	enum class BinningStage { Clear, Histogram, Prefix, Scatter };
@@ -56,8 +59,16 @@ private:
 	CSDX12RegistrationHandle registration{};
 	CSDX12ResourceHandle compositeHandle{};
 	CSDX12ResourceHandle specularCompositeHandle{};
+	CSDX12ResourceHandle reflectanceCompositeHandle{};
+	CSDX12ResourceHandle albedoCompositeHandle{};
+	CSDX12ResourceHandle normalCompositeHandle{};
+	CSDX12ResourceHandle masksCompositeHandle{};
 	DX12InteropCoordinator::SharedTexture composite;
 	DX12InteropCoordinator::SharedTexture specularComposite;
+	DX12InteropCoordinator::SharedTexture reflectanceComposite;
+	DX12InteropCoordinator::SharedTexture albedoComposite;
+	DX12InteropCoordinator::SharedTexture normalComposite;
+	DX12InteropCoordinator::SharedTexture masksComposite;
 	DX12InteropCoordinator::SharedTexture linearDepth;
 	DX12InteropCoordinator::SharedTexture localShadowMask;
 	DX12InteropCoordinator::SharedTexture screenSpaceShadow;
@@ -72,6 +83,7 @@ private:
 	CSDX12ResourceHandle packedSurfaceMirrorHandle{};
 	CSDX12ResourceHandle lightsHandle{};
 	CSDX12ResourceHandle contextsHandle{};
+	CSDX12ResourceHandle pbrMaterialsHandle{};
 	CSDX12ResourceHandle clustersHandle{};
 	CSDX12ResourceHandle pagesHandle{};
 	CSDX12ResourceHandle evaluatorCountsHandle{};
@@ -88,6 +100,14 @@ private:
 	winrt::com_ptr<ID3D11RenderTargetView> compositeBlitRTV;
 	winrt::com_ptr<ID3D11Texture2D> specularBlitDestination;
 	winrt::com_ptr<ID3D11RenderTargetView> specularBlitRTV;
+	winrt::com_ptr<ID3D11Texture2D> reflectanceBlitDestination;
+	winrt::com_ptr<ID3D11RenderTargetView> reflectanceBlitRTV;
+	winrt::com_ptr<ID3D11Texture2D> albedoBlitDestination;
+	winrt::com_ptr<ID3D11RenderTargetView> albedoBlitRTV;
+	winrt::com_ptr<ID3D11Texture2D> normalBlitDestination;
+	winrt::com_ptr<ID3D11RenderTargetView> normalBlitRTV;
+	winrt::com_ptr<ID3D11Texture2D> masksBlitDestination;
+	winrt::com_ptr<ID3D11RenderTargetView> masksBlitRTV;
 	winrt::com_ptr<ID3D11Buffer> handoffConstants;
 	winrt::com_ptr<ID3D12Device> device;
 	winrt::com_ptr<ID3D12RootSignature> rootSignature;
@@ -100,12 +120,18 @@ private:
 	ImportedInput skyIBLInput;
 	ImportedInput skylightingProbeInput;
 	ImportedInput skylightingVisibilityInput;
+	ImportedInput glintNoiseInput;
 	bool iblInputsAvailable{};
 	bool skylightingInputsAvailable{};
+	bool glintNoiseAvailable{};
+	// Deliberately false until material assets can be opened directly by D3D12
+	// (or are natively D3D12-owned). Material textures are never mirrored.
+	bool materialTextureSharingAvailable{};
 	CSDX12ResourceHandle envIBLHandle{};
 	CSDX12ResourceHandle skyIBLHandle{};
 	CSDX12ResourceHandle skylightingProbeHandle{};
 	CSDX12ResourceHandle skylightingVisibilityHandle{};
+	CSDX12ResourceHandle glintNoiseHandle{};
 	winrt::com_ptr<ID3D11Texture2D> parityCounterReadback;
 	bool parityCounterPending{};
 	uint64_t dispatchCount{};

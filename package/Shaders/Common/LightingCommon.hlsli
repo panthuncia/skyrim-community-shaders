@@ -83,6 +83,7 @@ struct MaterialProperties
 	float FuzzWeight;
 #	endif
 #else
+	uint Flags;
 	float Roughness;
 	float Metallic;
 	float AO;

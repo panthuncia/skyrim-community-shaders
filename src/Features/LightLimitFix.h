@@ -126,7 +126,8 @@ public:
 	struct alignas(16) DeferredIdentityCB
 	{
 		std::uint32_t PackedSurface = CS::Deferred::kLegacyPackedSurface;
-		std::uint32_t padding[3]{};
+		std::uint32_t PBRMaterialIndex = CS::Deferred::kInvalidPBRMaterial;
+		std::uint32_t padding[2]{};
 	};
 	STATIC_ASSERT_ALIGNAS_16(DeferredIdentityCB);
 
