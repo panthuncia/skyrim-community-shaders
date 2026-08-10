@@ -1,0 +1,50 @@
+// Intentionally has no include guard: C++ and HLSL include this file multiple
+// times with one of the two macros defined. Keep this file preprocessor-only.
+#ifndef CS_DEFERRED_EVALUATOR
+#define CS_DEFERRED_EVALUATOR(cppName, hlslName, value, red, green, blue)
+#define CS_DEFERRED_UNDEF_EVALUATOR
+#endif
+#ifndef CS_DEFERRED_MATERIAL
+#define CS_DEFERRED_MATERIAL(name, value, cppEvaluator, hlslEvaluator)
+#define CS_DEFERRED_UNDEF_MATERIAL
+#endif
+
+// Registry arguments deliberately use a CSReg prefix. FXC expands macro
+// arguments eagerly, and ordinary names such as TRUE_PBR and HAIR collide
+// with forward-shader permutation macros.
+CS_DEFERRED_EVALUATOR(CSRegCompatibility, CSREG_COMPATIBILITY, 0, 0.00, 0.00, 0.00)
+CS_DEFERRED_EVALUATOR(CSRegGeneric, CSREG_GENERIC, 1, 0.00, 1.00, 0.00)
+CS_DEFERRED_EVALUATOR(CSRegTruePbr, CSREG_TRUEPBR, 2, 0.00, 0.75, 1.00)
+CS_DEFERRED_EVALUATOR(CSRegGrass, CSREG_GRASS, 3, 1.00, 1.00, 0.00)
+CS_DEFERRED_EVALUATOR(CSRegDistantTree, CSREG_DISTANT_TREE, 4, 1.00, 0.35, 0.00)
+CS_DEFERRED_EVALUATOR(CSRegSkin, CSREG_SKIN, 5, 1.00, 0.00, 0.45)
+CS_DEFERRED_EVALUATOR(CSRegHair, CSREG_HAIR, 6, 0.65, 0.00, 1.00)
+CS_DEFERRED_EVALUATOR(CSRegEyeEnvmap, CSREG_EYE_ENVMAP, 7, 0.00, 0.25, 1.00)
+
+CS_DEFERRED_MATERIAL(CSRegLegacy, 0, CSRegCompatibility, CSREG_COMPATIBILITY)
+CS_DEFERRED_MATERIAL(CSRegStandardOpaque, 1, CSRegGeneric, CSREG_GENERIC)
+CS_DEFERRED_MATERIAL(CSRegAlphaTestedOpaque, 2, CSRegGeneric, CSREG_GENERIC)
+CS_DEFERRED_MATERIAL(CSRegStandardSpecular, 3, CSRegGeneric, CSREG_GENERIC)
+CS_DEFERRED_MATERIAL(CSRegAlphaTestedSpecular, 4, CSRegGeneric, CSREG_GENERIC)
+CS_DEFERRED_MATERIAL(CSRegFoliage, 5, CSRegGeneric, CSREG_GENERIC)
+CS_DEFERRED_MATERIAL(CSRegTerrain, 6, CSRegGeneric, CSREG_GENERIC)
+CS_DEFERRED_MATERIAL(CSRegTerrainSpecular, 7, CSRegGeneric, CSREG_GENERIC)
+CS_DEFERRED_MATERIAL(CSRegTruePbr, 32, CSRegTruePbr, CSREG_TRUEPBR)
+CS_DEFERRED_MATERIAL(CSRegTruePbrTerrain, 33, CSRegTruePbr, CSREG_TRUEPBR)
+CS_DEFERRED_MATERIAL(CSRegGrass, 64, CSRegGrass, CSREG_GRASS)
+// These classes retain stable IDs for future dedicated contracts, but are
+// compatibility pixels until those contracts exist.
+CS_DEFERRED_MATERIAL(CSRegDistantTree, 65, CSRegCompatibility, CSREG_COMPATIBILITY)
+CS_DEFERRED_MATERIAL(CSRegFoliageSpecial, 66, CSRegCompatibility, CSREG_COMPATIBILITY)
+CS_DEFERRED_MATERIAL(CSRegSkin, 96, CSRegSkin, CSREG_SKIN)
+CS_DEFERRED_MATERIAL(CSRegHair, 97, CSRegHair, CSREG_HAIR)
+CS_DEFERRED_MATERIAL(CSRegEyeEnvmap, 98, CSRegEyeEnvmap, CSREG_EYE_ENVMAP)
+
+#ifdef CS_DEFERRED_UNDEF_EVALUATOR
+#undef CS_DEFERRED_EVALUATOR
+#undef CS_DEFERRED_UNDEF_EVALUATOR
+#endif
+#ifdef CS_DEFERRED_UNDEF_MATERIAL
+#undef CS_DEFERRED_MATERIAL
+#undef CS_DEFERRED_UNDEF_MATERIAL
+#endif

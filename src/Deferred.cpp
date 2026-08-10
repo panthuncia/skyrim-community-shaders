@@ -527,9 +527,10 @@ void Deferred::EndDeferred()
 		auto& packedSurfaceTarget=globals::game::renderer->GetRuntimeData().renderTargets[MASKS2];
 		const bool packedSurfaceMirrorReady=dx12Deferred.PreparePackedSurfaceMirror(packedSurfaceTarget.texture);
 		const bool gbufferInputsReady=dx12Deferred.PrepareGBufferInputs();
+		const bool indirectLightingInputsReady=dx12Deferred.PrepareIndirectLightingInputs();
 		if (!packedSurfaceMirrorReady)
 			logger::error("[DeferredRendering] Packed-surface mirror preparation failed; skipping the DX12 epoch");
-		if(mainDescription.Width&&mainDescription.Height&&shadowMaskReady&&screenShadowReady&&packedSurfaceMirrorReady&&gbufferInputsReady&&dx12Deferred.PrepareCompatibilityInput(mainTarget.texture)) {
+		if(mainDescription.Width&&mainDescription.Height&&shadowMaskReady&&screenShadowReady&&packedSurfaceMirrorReady&&gbufferInputsReady&&indirectLightingInputsReady&&dx12Deferred.PrepareCompatibilityInput(mainTarget.texture)) {
 			static std::once_flag epochPreparationLogged;
 			std::call_once(epochPreparationLogged, [] { logger::info("[DeferredRendering] D3D11 producers are ready for the first DX12 epoch"); });
 			const bool submitted = DX12RenderRuntime::Get().ExecuteDeferredEpoch(

@@ -2,7 +2,12 @@
 
 #include "Feature.h"
 #include "Features/DeferredRendering/DeferredTypes.h"
+#include "Features/GrassLighting.h"
+#include "Features/IBL.h"
+#include "Features/Skylighting.h"
 
+#pragma warning(push)
+#pragma warning(disable : 4324) // Frame snapshot intentionally embeds 16-byte shader ABI records.
 class DeferredRendering final : public Feature
 {
 public:
@@ -36,6 +41,10 @@ public:
 		Matrix cameraViewInverse{};
 		Matrix projectionInverse{};
 		CS::Deferred::LightingTransform lightingTransform{};
+		GrassLighting::Settings grassLighting{};
+		IBL::PerFrame ibl{};
+		Skylighting::SkylightingCB skylighting{};
+		bool skylightingEnabled{};
 		std::uint32_t renderWidth{};
 		std::uint32_t renderHeight{};
 		std::uint32_t clusterSize[3]{};
@@ -87,9 +96,14 @@ private:
 	Matrix cameraViewInverse{};
 	Matrix projectionInverse{};
 	CS::Deferred::LightingTransform lightingTransform{};
+	GrassLighting::Settings grassLighting{};
+	IBL::PerFrame ibl{};
+	Skylighting::SkylightingCB skylighting{};
+	bool skylightingEnabled{};
 	std::uint32_t renderWidth{};
 	std::uint32_t renderHeight{};
 	std::shared_ptr<const FrameSnapshot> finalizedFrame;
 	std::deque<std::pair<std::uint64_t, std::shared_ptr<const FrameSnapshot>>> submittedFrames;
 	std::atomic_bool runtimeEnabled{ false };
 };
+#pragma warning(pop)

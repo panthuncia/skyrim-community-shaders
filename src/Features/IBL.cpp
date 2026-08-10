@@ -365,7 +365,9 @@ void IBL::SetupResources()
 			.Usage = D3D11_USAGE_DEFAULT,
 			.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
 			.CPUAccessFlags = 0,
-			.MiscFlags = 0
+			// The coefficients are a canonical cross-API lighting input. D3D11
+			// continues to produce them; ORG imports the same allocation read-only.
+			.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE
 		};
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
 			.Format = texDesc.Format,

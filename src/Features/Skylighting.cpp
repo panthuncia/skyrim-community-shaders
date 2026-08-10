@@ -83,52 +83,62 @@ void Skylighting::SetupResources()
 	}
 
 	{
-		D3D11_TEXTURE3D_DESC texDesc{
+		D3D11_TEXTURE2D_DESC texDesc{
 			.Width = probeArrayDims[0],
 			.Height = probeArrayDims[1],
-			.Depth = probeArrayDims[2],
 			.MipLevels = 1,
+			.ArraySize = probeArrayDims[2],
 			.Format = DXGI_FORMAT_R16G16B16A16_FLOAT,
+			.SampleDesc = { 1, 0 },
 			.Usage = D3D11_USAGE_DEFAULT,
 			.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
 			.CPUAccessFlags = 0,
-			.MiscFlags = 0
+			// Probe data is consumed directly by ORG through an NT shared handle.
+			.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE
 		};
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
 			.Format = texDesc.Format,
-			.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D,
-			.Texture3D = {
+			.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY,
+			.Texture2DArray = {
 				.MostDetailedMip = 0,
-				.MipLevels = texDesc.MipLevels }
+				.MipLevels = texDesc.MipLevels,
+				.FirstArraySlice = 0,
+				.ArraySize = texDesc.ArraySize }
 		};
 		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {
 			.Format = texDesc.Format,
-			.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE3D,
-			.Texture3D = {
+			.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY,
+			.Texture2DArray = {
 				.MipSlice = 0,
-				.FirstWSlice = 0,
-				.WSize = texDesc.Depth }
+				.FirstArraySlice = 0,
+				.ArraySize = texDesc.ArraySize }
 		};
 
-		texProbeArray = new Texture3D(texDesc, "Skylighting::ProbeArray");
+		texProbeArray = new Texture2D(texDesc, "Skylighting::ProbeArray");
 		texProbeArray->CreateSRV(srvDesc);
 		texProbeArray->CreateUAV(uavDesc);
 
+		// Accumulation and bitmask arrays are producer-private and include formats
+		// outside the portable D3D11/D3D12 shared-resource format set.
+		texDesc.MiscFlags = 0;
 		texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R8_UINT;
 
-		texAccumFramesArray = new Texture3D(texDesc, "Skylighting::AccumFramesArray");
+		texAccumFramesArray = new Texture2D(texDesc, "Skylighting::AccumFramesArray");
 		texAccumFramesArray->CreateSRV(srvDesc);
 		texAccumFramesArray->CreateUAV(uavDesc);
 
 		texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R32_UINT;
 
-		texShadowBitmask = new Texture3D(texDesc, "Skylighting::ShadowBitmask");
+		texShadowBitmask = new Texture2D(texDesc, "Skylighting::ShadowBitmask");
 		texShadowBitmask->CreateSRV(srvDesc);
 		texShadowBitmask->CreateUAV(uavDesc);
 
+		// Shadow visibility is the second final product consumed by ORG. R8_UNORM
+		// sharing is capability-gated when imported by DeferredRendering.
+		texDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
 		texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R8_UNORM;
 
-		texShadowVisibility = new Texture3D(texDesc, "Skylighting::ShadowVisibility");
+		texShadowVisibility = new Texture2D(texDesc, "Skylighting::ShadowVisibility");
 		texShadowVisibility->CreateSRV(srvDesc);
 		texShadowVisibility->CreateUAV(uavDesc);
 	}

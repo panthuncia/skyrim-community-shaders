@@ -80,6 +80,63 @@ bool DX12InteropCoordinator::CreateD3D12OwnedSharedTexture(
 	}
 }
 
+bool DX12InteropCoordinator::CreateD3D12OwnedSharedTextureArray(
+	uint32_t width,
+	uint32_t height,
+	uint16_t arraySize,
+	DXGI_FORMAT format,
+	D3D12_RESOURCE_FLAGS flags,
+	bool createD3D11SRV,
+	SharedTexture& output) const noexcept
+{
+	output = {};
+	if (!device11 || !device12 || !width || !height || !arraySize || format == DXGI_FORMAT_UNKNOWN)
+		return false;
+	try {
+		D3D12_HEAP_PROPERTIES heap{};
+		heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+		heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+		D3D12_RESOURCE_DESC description{};
+		description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		description.Width = width;
+		description.Height = height;
+		description.DepthOrArraySize = arraySize;
+		description.MipLevels = 1;
+		description.Format = format;
+		description.SampleDesc.Count = 1;
+		description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+		description.Flags = flags | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+		if (FAILED(device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED,
+			&description, D3D12_RESOURCE_STATE_COMMON, nullptr,
+			IID_PPV_ARGS(output.d3d12.put()))))
+			return false;
+		HANDLE handle{};
+		if (FAILED(device12->CreateSharedHandle(output.d3d12.get(), nullptr,
+			GENERIC_ALL, nullptr, &handle))) {
+			output = {};
+			return false;
+		}
+		const HRESULT opened = device11->OpenSharedResource1(handle,
+			IID_PPV_ARGS(output.d3d11.put()));
+		CloseHandle(handle);
+		if (FAILED(opened)) {
+			output = {};
+			return false;
+		}
+		if (createD3D11SRV && FAILED(device11->CreateShaderResourceView(
+			output.d3d11.get(), nullptr, output.srv11.put()))) {
+			output = {};
+			return false;
+		}
+		output.d3d11->GetDesc(&output.description);
+		return true;
+	} catch (...) {
+		output = {};
+		logger::error("[DX12Interop] Exception while creating D3D12-owned shared Texture2DArray");
+		return false;
+	}
+}
+
 bool DX12InteropCoordinator::OpenSharedTexture(ID3D11Texture2D* texture, ID3D12Resource** output) const noexcept
 {
 	if (!texture || !output || !device12)

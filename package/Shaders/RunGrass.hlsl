@@ -6,6 +6,7 @@
 #include "Common/Permutation.hlsli"
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"
+#include "DeferredRendering/DeferredMaterial.hlsli"
 
 #define DEFERRED
 
@@ -364,11 +365,7 @@ cbuffer AlphaTestRefCB : register(b11)
 
 float GetSoftLightMultiplier(float angle, float rolloff)
 {
-	float softLight = saturate((rolloff + angle) / (1 + rolloff));
-	float arg1 = (softLight * softLight) * (3 - 2 * softLight);
-	float clampedAngle = saturate(angle);
-	float arg2 = (clampedAngle * clampedAngle) * (3 - 2 * clampedAngle);
-	return saturate(arg1 - arg2);
+	return CSLightingGrassSoftMultiplier(angle, rolloff);
 }
 
 PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
@@ -444,10 +441,13 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float llDirLightMult = (SharedData::linearLightingSettings.enableLinearLighting && !SharedData::linearLightingSettings.isDirLightLinear) ? SharedData::linearLightingSettings.dirLightMult : 1.0f;
 	float3 dirLightColor = Color::DirectionalLight(SharedData::DirLightColor.xyz / max(llDirLightMult, 1e-5), SharedData::linearLightingSettings.isDirLightLinear) * llDirLightMult;
 	float3 dirLightColorMultiplier = 1;
+	float directionalEnvironmentAttenuation = 1.0f;
 
 #			if defined(EXP_HEIGHT_FOG)
 	if (SharedData::exponentialHeightFogSettings.enabled) {
-		dirLightColor *= ExponentialHeightFog::GetSunlightFogAttenuation(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
+		float sunlightFogAttenuation = ExponentialHeightFog::GetSunlightFogAttenuation(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
+		dirLightColor *= sunlightFogAttenuation;
+		directionalEnvironmentAttenuation *= sunlightFogAttenuation;
 	}
 #			endif
 
@@ -457,7 +457,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	// Apply world shadow (terrain shadows, cloud shadows) directly to light color
 	if (!SharedData::InInterior)
-		dirLightColor *= ShadowSampling::GetWorldShadow(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
+	{
+		float worldShadow = ShadowSampling::GetWorldShadow(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
+		dirLightColor *= worldShadow;
+		directionalEnvironmentAttenuation *= worldShadow;
+	}
 
 	float dirDetailedShadow = 1.0;
 
@@ -610,9 +614,23 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	psout.Specular = float4(specularColor, 1);
 	psout.Masks = float4(0, 0, Color::RGBToYCoCg(directionalAmbientColor).x, 0);
-	// Grass remains geometry-lit.  MASKS2 is now R32_UINT, so always stamp an
-	// invalid context/legacy class while retaining quantized AO for consumers.
-	psout.Masks2 = 0x0000FFFFu | ((uint)round(saturate(vertexAO) * 31.0) << 27);
+	uint packedVertexAO = (uint)round(saturate(vertexAO) * 31.0);
+	psout.Masks2 = 0x0000FFFFu | (packedVertexAO << 27);
+	if (SharedData::DeferredRenderingEnabled) {
+		uint surfaceFlags = 3u | (complex ? 4u : 0u);
+		psout.Masks2 = (CS_MATERIAL_Grass << 16u) | (surfaceFlags << 24u) | (packedVertexAO << 27);
+	}
+	// Store resolved surface and visibility inputs for the real grass evaluator.
+	// IBL and skylighting remain unevaluated and are sampled by D3D12.
+	if (SharedData::DeferredRenderingEnabled) {
+		psout.NormalGlossiness.z = specColor.w * SharedData::grassLightingSettings.SpecularStrength;
+		// Visibility is a resolved raster input, not pre-evaluated lighting.
+		// D3D12 reconstructs directional color from the lighting context.
+		psout.Specular = float4(directionalEnvironmentAttenuation, dirDetailedShadow, dirSoftShadow, 0.0f);
+		psout.Masks.x = softLightRolloff;
+		psout.Masks.y = dirSoftShadow;
+		psout.Masks.w = SharedData::grassLightingSettings.Glossiness;
+	}
 #		endif
 	return psout;
 }

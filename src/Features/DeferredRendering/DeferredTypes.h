@@ -2,10 +2,13 @@
 
 namespace CS::Deferred
 {
-	inline constexpr std::uint32_t kAbiVersion = 3;
+	inline constexpr std::uint32_t kAbiVersion = 4;
 	inline constexpr std::uint32_t kMaxLights = 1024;
 	using ContextIndex = std::uint16_t;
 	inline constexpr ContextIndex kInvalidContext = 0xFFFF;
+	// Context zero is reserved for frame-global/non-BSLightingShader producers.
+	// Draw-specific interned contexts begin at one.
+	inline constexpr ContextIndex kFrameGlobalContext = 0;
 
 	enum class LightFlags : std::uint32_t
 	{
@@ -43,10 +46,91 @@ namespace CS::Deferred
 
 	enum class MaterialClass : std::uint8_t
 	{
-		Legacy = 0,
-		StandardOpaque = 1,
-		AlphaTestedOpaque = 2,
+	#define CS_DEFERRED_MATERIAL(name, value, cppEvaluator, hlslEvaluator) name = value,
+	#include "../../../package/Shaders/DeferredRendering/DeferredMaterialRegistry.def"
+	#undef CS_DEFERRED_MATERIAL
+		Legacy = CSRegLegacy,
+		StandardOpaque = CSRegStandardOpaque,
+		AlphaTestedOpaque = CSRegAlphaTestedOpaque,
+		StandardSpecular = CSRegStandardSpecular,
+		AlphaTestedSpecular = CSRegAlphaTestedSpecular,
+		Foliage = CSRegFoliage,
+		Terrain = CSRegTerrain,
+		TerrainSpecular = CSRegTerrainSpecular,
+		TruePBR = CSRegTruePbr,
+		TruePBRTerrain = CSRegTruePbrTerrain,
+		Grass = CSRegGrass,
+		DistantTree = CSRegDistantTree,
+		FoliageSpecial = CSRegFoliageSpecial,
+		Skin = CSRegSkin,
+		Hair = CSRegHair,
+		EyeEnvmap = CSRegEyeEnvmap,
 	};
+
+	// Stable evaluator-family ABI. MaterialClass describes resolved surface
+	// variants; Evaluator selects the compute kernel that consumes those data.
+	enum class Evaluator : std::uint8_t
+	{
+	#define CS_DEFERRED_EVALUATOR(cppName, hlslName, value, red, green, blue) cppName = value,
+	#include "../../../package/Shaders/DeferredRendering/DeferredMaterialRegistry.def"
+	#undef CS_DEFERRED_EVALUATOR
+		Compatibility = CSRegCompatibility,
+		Generic = CSRegGeneric,
+		TruePBR = CSRegTruePbr,
+		Grass = CSRegGrass,
+		DistantTree = CSRegDistantTree,
+		Skin = CSRegSkin,
+		Hair = CSRegHair,
+		EyeEnvmap = CSRegEyeEnvmap,
+		Count = 8,
+	};
+	inline constexpr std::uint32_t kEvaluatorCount = static_cast<std::uint32_t>(Evaluator::Count);
+	static_assert(kEvaluatorCount <= 256);
+
+	constexpr Evaluator GetEvaluator(MaterialClass materialClass) noexcept
+	{
+		switch (materialClass) {
+	#define CS_DEFERRED_MATERIAL(name, value, cppEvaluator, hlslEvaluator) \
+		case MaterialClass::name: return Evaluator::cppEvaluator;
+	#include "../../../package/Shaders/DeferredRendering/DeferredMaterialRegistry.def"
+	#undef CS_DEFERRED_MATERIAL
+		default:
+			return Evaluator::Compatibility;
+		}
+	}
+
+	constexpr std::uint32_t EvaluatorBit(Evaluator evaluator) noexcept
+	{
+		return 1u << static_cast<std::uint32_t>(evaluator);
+	}
+
+	constexpr bool IsEvaluatorEnabled(std::uint32_t mask, Evaluator evaluator) noexcept
+	{
+		return evaluator != Evaluator::Compatibility && (mask & EvaluatorBit(evaluator)) != 0;
+	}
+
+	struct EvaluatorColor
+	{
+		float red;
+		float green;
+		float blue;
+	};
+
+	constexpr EvaluatorColor GetEvaluatorColor(Evaluator evaluator) noexcept
+	{
+		switch (evaluator) {
+	#define CS_DEFERRED_EVALUATOR(cppName, hlslName, value, red, green, blue) \
+		case Evaluator::cppName: return { red##f, green##f, blue##f };
+	#include "../../../package/Shaders/DeferredRendering/DeferredMaterialRegistry.def"
+	#undef CS_DEFERRED_EVALUATOR
+		default: return {};
+		}
+	}
+
+	static_assert(GetEvaluator(MaterialClass::FoliageSpecial) == Evaluator::Compatibility);
+	static_assert(GetEvaluator(MaterialClass::DistantTree) == Evaluator::Compatibility);
+	static_assert(GetEvaluator(MaterialClass::Grass) == Evaluator::Grass);
+	static_assert(IsEvaluatorEnabled(EvaluatorBit(Evaluator::Generic), Evaluator::Generic));
 
 	enum SurfaceFlags : std::uint8_t
 	{

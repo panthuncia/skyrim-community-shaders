@@ -118,6 +118,7 @@ namespace
 				consumesD3D11Import |= readsResource && state->host->d3d11ProducedImports.contains(access.resource);
 				const auto& resource = it->second;
 				if (access.access & CS_DX12_ACCESS_UNORDERED_WRITE) builder->WithUnorderedAccess(resource);
+				else if (access.access & CS_DX12_ACCESS_INDIRECT_ARGUMENT) builder->WithIndirectArguments(resource);
 				else if (access.access & (CS_DX12_ACCESS_COPY_DESTINATION | CS_DX12_ACCESS_COPY_SOURCE)) builder->WithLegacyInterop(resource);
 				else if (access.access & CS_DX12_ACCESS_CONSTANT_BUFFER) builder->WithConstantBuffer(resource);
 				else builder->WithShaderResource(resource);

@@ -9,6 +9,7 @@
 #include "Features/CSEditor.h"
 #include "Features/CloudShadows.h"
 #include "Features/Effects11.h"
+#include "Features/DeferredRendering.h"
 #include "Features/ExponentialHeightFog.h"
 #include "Features/SkySync.h"
 #include "Features/HDRDisplay.h"
@@ -1036,6 +1037,7 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		}
 
 		data.WaterSystemHeight = -RE::NI_INFINITY;
+		data.DeferredRenderingEnabled = globals::features::deferredRendering.IsRuntimeEnabled();
 
 		data.InInterior = Util::IsInterior();
 		data.HasDirectionalShadows = HasDirectionalShadows();
@@ -1112,6 +1114,9 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 
 		data.HDRData = globals::features::hdrDisplay.GetSharedDataHDR();
 
+		if (!sharedDataCpu)
+			sharedDataCpu = std::make_unique<SharedDataCB>();
+		*sharedDataCpu = data;
 		sharedDataCB->Update(data);
 	}
 

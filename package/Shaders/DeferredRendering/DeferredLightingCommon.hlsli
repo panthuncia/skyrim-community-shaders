@@ -2,29 +2,18 @@
 #define CS_DEFERRED_LIGHTING_COMMON_HLSLI
 
 #include "../Common/LightingParity.hlsli"
+#include "DeferredMaterial.hlsli"
 
 // Mechanical helpers shared by the D3D12 deferred passes. Visual lighting
 // equations remain owned by Community Shaders and will move here only after
 // the corresponding D3D11 geometry helper has been parameterized and tested.
-static const uint CS_DEFERRED_ABI_VERSION = 3u;
-static const uint CS_INVALID_CONTEXT = 0xFFFFu;
-static const uint CS_LEGACY_MATERIAL = 0u;
+static const uint CS_DEFERRED_ABI_VERSION = 4u;
 static const uint CS_NULL_LIGHT_PAGE = 0xFFFFFFFFu;
 static const uint CS_LIGHT_FLAG_PORTAL_STRICT = 1u << 0;
 static const uint CS_LIGHT_FLAG_SHADOW = 1u << 1;
 static const uint CS_CONTEXT_RECEIVES_DEFERRED_SHADOW = 1u << 2;
 static const uint CS_CONTEXT_RECEIVES_DIRECTIONAL_SHADOW = 1u << 3;
 static const uint CS_CONTEXT_USES_CHARACTER_LIGHT = 1u << 4;
-
-uint CSDeferredContextIndex(uint packedSurface)
-{
-	return packedSurface & 0xFFFFu;
-}
-
-uint CSDeferredMaterialClass(uint packedSurface)
-{
-	return (packedSurface >> 16u) & 0xFFu;
-}
 
 float CSDeferredAttenuation(float distanceToLight, Light light)
 {

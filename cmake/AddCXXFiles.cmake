@@ -51,7 +51,17 @@ function(add_cxx_files TARGET)
 		"Package/**/*.hlsli"
 	)
 
+	# A .def file is a linker module-definition file to Visual Studio, so shader
+	# X-macro registries must not be added to target_sources. Track them solely
+	# as deployment dependencies.
+	file(GLOB_RECURSE SHADER_AUX_FILES
+		LIST_DIRECTORIES false
+		CONFIGURE_DEPENDS
+		"Package/Shaders/**/*.def"
+	)
+
 	set(HLSL_FILES ${HLSL_FILES} PARENT_SCOPE)
+	set(SHADER_AUX_FILES ${SHADER_AUX_FILES} PARENT_SCOPE)
 
 	list(APPEND CPP_SOURCES ${HEADER_FILES})
 	list(APPEND CPP_SOURCES ${SOURCE_FILES})

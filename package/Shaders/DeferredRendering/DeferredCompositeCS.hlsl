@@ -56,9 +56,14 @@ StructuredBuffer<LightPage> Pages : register(t6);
 Texture2D<uint> PackedSurfaceTexture : register(t7);
 Texture2D<float4> LocalShadowMaskTexture : register(t8);
 Texture2D<float4> NormalRoughnessTexture : register(t9);
-Texture2D<float4> ForwardReferenceTexture : register(t10);
+Texture2D<float4> CompatibilityReferenceTexture : register(t10);
 Texture2D<float4> MasksTexture : register(t11);
 Texture2D<float> ScreenSpaceShadowTexture : register(t12);
+StructuredBuffer<uint2> EvaluatorPixelList : register(t13);
+Texture2D<float4> EnvironmentIBLTexture : register(t14);
+Texture2D<float4> SkyIBLTexture : register(t15);
+Texture2DArray<float4> SkylightingProbeTexture : register(t16);
+Texture2DArray<float> SkylightingVisibilityTexture : register(t17);
 RWTexture2D<float4> CompositeTexture : register(u0);
 RWTexture2D<uint> FrameMarker : register(u1);
 RWTexture2D<float4> SpecularCompositeTexture : register(u2);
@@ -73,7 +78,24 @@ cbuffer DeferredFrame : register(b0)
 	uint enableLinearLighting; uint isDirectionalLightLinear; float directionalLightScale; float lightGamma;
 	float directionalLightMultiplier; float pointLightMultiplier; float vanillaNormalization; float ambientGamma;
 	float ambientMultiplier; float3 ambientPadding;
-	uint frameIndex; uint cameraSignature; uint2 instrumentationPadding;
+	float4 grassFrameSettings0;
+	float4 grassFrameSettings1;
+	uint4 iblFlags;
+	float4 iblSettings0;
+	float4 iblSettings1;
+	float3 skylightingPositionOffset; uint skylightingEnabled;
+	uint3 skylightingArrayOrigin; float skylightingMinDiffuseVisibility;
+	float skylightingMinSpecularVisibility; float3 lightingParameterPadding;
+};
+
+#include "DeferredIndirectLighting.hlsli"
+
+cbuffer EvaluatorDispatch : register(b1)
+{
+	uint evaluatorID;
+	uint evaluatorBaseOffset;
+	uint evaluatorPixelCount;
+	uint evaluatorDispatchWidth;
 };
 
 bool RoomAcceptsLight(Light light, int roomIndex)
@@ -99,12 +121,14 @@ bool ContextAcceptsLight(Light light, LightingContext context)
 
 bool IsGenericMaterial(uint materialClass)
 {
-	return materialClass >= 1u && materialClass <= 4u;
+	return CSDeferredEvaluatorForMaterial(materialClass) == CS_EVALUATOR_GENERIC;
 }
 
 bool HasGenericSpecular(uint materialClass)
 {
-	return materialClass >= 3u && materialClass <= 4u;
+	return materialClass == CS_MATERIAL_StandardSpecular ||
+		materialClass == CS_MATERIAL_AlphaTestedSpecular ||
+		materialClass == CS_MATERIAL_TerrainSpecular;
 }
 
 float3 DecodeCSNormal(float2 encoded)
@@ -138,20 +162,44 @@ float3 ReconstructWorldViewDirection(uint2 pixel)
 	return normalize(mul(viewInverse, float4(-positionVS.xyz, 0.0f)).xyz);
 }
 
-[numthreads(8, 8, 1)]
-void main(uint3 pixel : SV_DispatchThreadID)
+void AccumulateParity(uint baseSlot, uint2 pixel, float3 candidate)
 {
+	float3 reference = CompatibilityReferenceTexture.Load(int3(pixel, 0)).rgb;
+	float3 delta = candidate - reference;
+	uint3 absoluteError = uint3(min(abs(delta), 16.0f) * 4096.0f + 0.5f);
+	int3 signedError = int3(clamp(delta, -16.0f, 16.0f) * 4096.0f);
+	uint3 candidateValue = uint3(min(max(candidate, 0.0f), 16.0f) * 4096.0f + 0.5f);
+	uint3 referenceValue = uint3(min(max(reference, 0.0f), 16.0f) * 4096.0f + 0.5f);
+	uint ignored;
+	InterlockedAdd(FrameMarker[uint2(baseSlot + 0u, 0)], 1u, ignored);
+	InterlockedAdd(FrameMarker[uint2(baseSlot + 1u, 0)], absoluteError.x, ignored);
+	InterlockedAdd(FrameMarker[uint2(baseSlot + 2u, 0)], absoluteError.y, ignored);
+	InterlockedAdd(FrameMarker[uint2(baseSlot + 3u, 0)], absoluteError.z, ignored);
+	InterlockedMax(FrameMarker[uint2(baseSlot + 4u, 0)],
+		max(absoluteError.x, max(absoluteError.y, absoluteError.z)), ignored);
+	InterlockedAdd(FrameMarker[uint2(baseSlot + 5u, 0)], asuint(signedError.x), ignored);
+	InterlockedAdd(FrameMarker[uint2(baseSlot + 6u, 0)], asuint(signedError.y), ignored);
+	InterlockedAdd(FrameMarker[uint2(baseSlot + 7u, 0)], asuint(signedError.z), ignored);
+	InterlockedAdd(FrameMarker[uint2(baseSlot + 8u, 0)], candidateValue.x, ignored);
+	InterlockedAdd(FrameMarker[uint2(baseSlot + 9u, 0)], candidateValue.y, ignored);
+	InterlockedAdd(FrameMarker[uint2(baseSlot + 10u, 0)], candidateValue.z, ignored);
+	InterlockedAdd(FrameMarker[uint2(baseSlot + 11u, 0)], referenceValue.x, ignored);
+	InterlockedAdd(FrameMarker[uint2(baseSlot + 12u, 0)], referenceValue.y, ignored);
+	InterlockedAdd(FrameMarker[uint2(baseSlot + 13u, 0)], referenceValue.z, ignored);
+}
+
+[numthreads(64, 1, 1)]
+void main(uint3 dispatchThread : SV_DispatchThreadID)
+{
+	uint evaluatorPixelIndex = dispatchThread.y * evaluatorDispatchWidth + dispatchThread.x;
+	if (evaluatorID != CS_FIXED_EVALUATOR ||
+		evaluatorPixelIndex >= evaluatorPixelCount)
+		return;
+	uint2 pixel = EvaluatorPixelList[evaluatorBaseOffset + evaluatorPixelIndex];
 	uint width, height;
 	CompositeTexture.GetDimensions(width, height);
 	if (pixel.x >= width || pixel.y >= height)
 		return;
-	if (all(pixel.xy == uint2(0, 0))) {
-		const uint2 samplePixel = uint2(width / 2, height / 2);
-		FrameMarker[uint2(0, 0)] = frameIndex;
-		FrameMarker[uint2(1, 0)] = cameraSignature;
-		FrameMarker[uint2(2, 0)] = asuint(AlbedoTexture.Load(int3(samplePixel, 0)).x);
-		FrameMarker[uint2(3, 0)] = PackedSurfaceTexture.Load(int3(samplePixel, 0));
-	}
 	// Material promotion is explicit. Until the host advertises at least one
 	// parity-tested class, no packed value (including output from an older or
 	// non-lighting permutation) is allowed to select deferred evaluation.
@@ -159,41 +207,17 @@ void main(uint3 pixel : SV_DispatchThreadID)
 		return;
 	}
 	uint packed = PackedSurfaceTexture.Load(int3(pixel.xy, 0));
-	// Preserve the geometry result for compatibility pixels. Promoted pixels
-	// replace this below with the exact generic direct-specular evaluation.
-	SpecularCompositeTexture[pixel.xy] = SpecularTexture.Load(int3(pixel.xy, 0));
 	uint contextIndex = CSDeferredContextIndex(packed);
 	uint materialClass = CSDeferredMaterialClass(packed);
-	if ((frameFlags & 8u) != 0 && IsGenericMaterial(materialClass)) {
-		uint ignored;
-		InterlockedAdd(FrameMarker[uint2(4, 0)], 1u, ignored);
-		InterlockedAdd(FrameMarker[uint2(8, 0)], pixel.x, ignored);
-		InterlockedAdd(FrameMarker[uint2(9, 0)], pixel.y, ignored);
-	}
-
-	// Coverage is deliberately independent of lighting evaluation. It proves
-	// the per-pixel object-class contract: generic diffuse/specular classes are
-	// green, unknown classes are magenta, and invalid promoted contexts are red.
+	if (CSDeferredEvaluatorForMaterial(materialClass) != evaluatorID)
+		return;
+	// Pixel binning already applied the host's enabled-evaluator mask, so every
+	// invocation here represents an evaluator that actually recorded work.
 	if ((frameFlags & 4u) != 0) {
-		uint ignored;
-		if (IsGenericMaterial(materialClass)) {
-			if ((frameFlags & 8u) == 0)
-				InterlockedAdd(FrameMarker[uint2(4, 0)], 1u, ignored);
-			InterlockedAdd(FrameMarker[uint2(8, 0)], pixel.x, ignored);
-			InterlockedAdd(FrameMarker[uint2(9, 0)], pixel.y, ignored);
-		}
-		else if (materialClass == CS_LEGACY_MATERIAL)
-			InterlockedAdd(FrameMarker[uint2(5, 0)], 1u, ignored);
-		else
-			InterlockedAdd(FrameMarker[uint2(7, 0)], 1u, ignored);
-		if (materialClass == CS_LEGACY_MATERIAL) {
-			return;
-		} else if (contextIndex == CS_INVALID_CONTEXT) {
+		if (contextIndex == CS_INVALID_CONTEXT) {
 			CompositeTexture[pixel.xy] = float4(1, 0, 0, 1);
-		} else if (IsGenericMaterial(materialClass)) {
-			CompositeTexture[pixel.xy] = float4(0, 1, 0, 1);
 		} else {
-			CompositeTexture[pixel.xy] = float4(1, 0, 1, 1);
+			CompositeTexture[pixel.xy] = float4(CSDeferredEvaluatorDebugColor(evaluatorID), 1);
 		}
 		return;
 	}
@@ -201,7 +225,7 @@ void main(uint3 pixel : SV_DispatchThreadID)
 	// Bit zero promotes the independently validated generic classes. Bit one is
 	// the developer lighting diagnostic. No future/nonzero class is admitted
 	// implicitly; IsGenericMaterial is the authoritative allow-list.
-	const bool staticOpaqueSelected = IsGenericMaterial(materialClass) && (frameFlags & 3u) != 0;
+	const bool staticOpaqueSelected = (frameFlags & 3u) != 0;
 	if (!staticOpaqueSelected) {
 		return;
 	}
@@ -252,15 +276,108 @@ void main(uint3 pixel : SV_DispatchThreadID)
 	float4 normalRoughnessSample = NormalRoughnessTexture.Load(int3(pixel.xy, 0));
 	float3 normalVS = DecodeCSNormal(normalRoughnessSample.xy);
 	float3 normalWS = normalize(mul(viewInverse, float4(normalVS, 0.0f)).xyz);
+	float3 viewDirection = ReconstructWorldViewDirection(pixel.xy);
+
+	if (evaluatorID == CS_EVALUATOR_GRASS) {
+		float4 grassVisibility = SpecularTexture.Load(int3(pixel.xy, 0));
+		float4 grassParameters = MasksTexture.Load(int3(pixel.xy, 0));
+		if (!(grassParameters.w > 0.0f)) return;
+		float3 albedo = AlbedoTexture.Load(int3(pixel.xy, 0)).rgb;
+		float3 directionalLightDirection = normalize(lightingContext.directionalLightDirection.xyz);
+		float3 grassDirectionalColor = CSDeferredTransformLight(
+			lightingContext.directionalLightColor.xyz / max(directionalLightScale, 1e-5f),
+			isDirectionalLightLinear != 0u, lightGamma, directionalLightMultiplier,
+			enableLinearLighting != 0u) * directionalLightScale * grassVisibility.x;
+		float directionalAngle = dot(normalWS, directionalLightDirection);
+		float3 diffuseIrradiance = grassDirectionalColor * grassVisibility.y *
+			saturate(directionalAngle) * vanillaNormalization;
+		float3 subsurfaceIrradiance = grassDirectionalColor * grassParameters.y *
+			CSLightingGrassSoftMultiplier(directionalAngle, grassParameters.x) * vanillaNormalization;
+		const bool complexGrass = (((packed >> 24u) & 4u) != 0u);
+		float3 specular = complexGrass ?
+			grassVisibility.y * CSLightingGrassSpecular(directionalLightDirection,
+				viewDirection, normalWS, grassDirectionalColor, grassParameters.w) * vanillaNormalization : 0.0f;
+
+		uint grassPage = cluster.firstPage;
+		uint grassTraversedPages = 0u;
+		uint grassVisitedLights = 0u;
+		while (grassPage != CS_NULL_LIGHT_PAGE && grassPage < pageCapacity &&
+			grassTraversedPages++ < 64u && grassVisitedLights < cluster.numLights) {
+			LightPage lightPage = Pages[grassPage];
+			uint count = min(lightPage.numLights, 12u);
+			[unroll] for (uint i = 0u; i < 12u; ++i) {
+				if (i >= count || grassVisitedLights >= cluster.numLights)
+					break;
+				uint lightIndex = lightPage.lightIndices[i];
+				if (lightIndex >= lightCount)
+					return;
+				Light light = Lights[lightIndex];
+				float3 toLight = light.positionWS - positionWS;
+				float distanceToLight = length(toLight);
+				float attenuation = CSDeferredAttenuation(distanceToLight, light);
+				if (attenuation >= 1e-5f) {
+					float shadow = 1.0f;
+					if ((frameFlags & 16u) == 0 && (light.lightFlags & CS_LIGHT_FLAG_SHADOW) != 0u &&
+						light.shadowMaskIndex < 4u)
+						shadow = LocalShadowMaskTexture.Load(int3(pixel.xy, 0))[light.shadowMaskIndex];
+					float3 lightColor = CSDeferredTransformLight(light.color,
+						(light.lightFlags & (1u << 11)) != 0u, lightGamma, pointLightMultiplier,
+						enableLinearLighting != 0u) * attenuation * light.fade * shadow;
+					float3 lightDirection = toLight / max(distanceToLight, 1e-6f);
+					float angle = dot(normalWS, lightDirection);
+					diffuseIrradiance += lightColor * saturate(angle) * vanillaNormalization;
+					subsurfaceIrradiance += lightColor *
+						CSLightingGrassSoftMultiplier(angle, grassParameters.x) * vanillaNormalization;
+					if (complexGrass)
+						specular += CSLightingGrassSpecular(lightDirection, viewDirection, normalWS,
+							lightColor, grassParameters.w) * vanillaNormalization;
+				}
+				++grassVisitedLights;
+			}
+			grassPage = lightPage.nextPage;
+		}
+		if ((grassPage != CS_NULL_LIGHT_PAGE &&
+			(grassPage >= pageCapacity || grassTraversedPages >= 64u)) ||
+			grassVisitedLights != cluster.numLights)
+			return;
+
+		float vertexAO = float((packed >> 27u) & 31u) / 31.0f;
+		float3 ambient = CSDeferredAmbient(lightingContext, normalWS,
+			enableLinearLighting != 0, ambientGamma, ambientMultiplier);
+		float3 ambientAtZero = CSDeferredAmbient(lightingContext, 0.0f,
+			enableLinearLighting != 0, ambientGamma, ambientMultiplier);
+		const bool interior = (lightingContext.featureFlags & 1u) == 0u;
+		ambient = CSDeferredDiffuseIBL(EnvironmentIBLTexture, SkyIBLTexture, ambient, ambientAtZero,
+			-normalWS, iblFlags, iblSettings0, iblSettings1, interior);
+		float skylightingShadowVisibility = grassParameters.y;
+		float skylightingDiffuse = 1.0f;
+		if (skylightingEnabled != 0u && !interior) {
+			float4 probe = CSDeferredSampleSkylighting(SkylightingProbeTexture,
+				SkylightingVisibilityTexture, positionWS, normalWS, skylightingPositionOffset,
+				skylightingArrayOrigin, skylightingShadowVisibility);
+			skylightingDiffuse = CSDeferredSkylightDiffuse(probe, positionWS, normalWS,
+				vertexAO, skylightingMinDiffuseVisibility);
+		}
+		float3 candidate = diffuseIrradiance + ambient + subsurfaceIrradiance * albedo;
+		candidate *= albedo;
+		float3 ambientLit = ambient * albedo;
+		if (skylightingEnabled != 0u && !interior)
+			CSDeferredApplySkylighting(candidate, ambientLit, albedo, skylightingDiffuse,
+				enableLinearLighting != 0u);
+		if ((frameFlags & 8u) != 0)
+			AccumulateParity(0u, pixel.xy, candidate);
+		CompositeTexture[pixel.xy] = float4(candidate, 1.0f);
+		SpecularCompositeTexture[pixel.xy] = float4(specular * normalRoughnessSample.z, 1.0f);
+		return;
+	}
 	float3 directIrradiance = 0.0f;
 	float3 directSpecular = 0.0f;
-	float3 viewDirection = ReconstructWorldViewDirection(pixel.xy);
 	float glossiness = normalRoughnessSample.z;
 	uint surfaceFlags = (packed >> 24u) & 7u;
 	float3 directionalColor = CSDeferredTransformLight(
 		lightingContext.directionalLightColor.xyz / max(directionalLightScale, 1e-5f),
 		isDirectionalLightLinear != 0, lightGamma, directionalLightMultiplier,
-		enableLinearLighting != 0) * directionalLightScale;
+		enableLinearLighting != 0) * directionalLightScale * MasksTexture.Load(int3(pixel.xy, 0)).x;
 	float3 directionalLightDirection = normalize(lightingContext.directionalLightDirection.xyz);
 	float directionalShadow =
 		(frameFlags & 16u) != 0 ||
@@ -354,44 +471,31 @@ void main(uint3 pixel : SV_DispatchThreadID)
 		}
 		float3 ambientIrradiance = CSDeferredAmbient(lightingContext, normalWS,
 			enableLinearLighting != 0, ambientGamma, ambientMultiplier);
-		// Geometry stores the post-IBL/skylighting ambient luminance in Masks.z.
-		// Preserve the raw ambient chroma reconstructed from the same per-draw
-		// matrix while taking the authoritative luminance from the G-buffer, as
-		// the existing D3D11 deferred composite does.
-		float3 ambientLit = ambientIrradiance * albedo;
-		float ambientTmp = 0.25f * (ambientLit.r + ambientLit.b);
-		float3 ambientYCoCg = float3(ambientTmp + 0.5f * ambientLit.g,
-			0.5f * (ambientLit.r - ambientLit.b), -ambientTmp + 0.5f * ambientLit.g);
-		ambientYCoCg.x = MasksTexture.Load(int3(pixel.xy, 0)).z;
-		ambientTmp = ambientYCoCg.x - ambientYCoCg.z;
-		ambientLit = max(0.0f, float3(ambientTmp + ambientYCoCg.y,
-			ambientYCoCg.x + ambientYCoCg.z, ambientTmp - ambientYCoCg.y));
-		float3 candidate = (directIrradiance + lightingContext.emissiveColor.xyz) * albedo + ambientLit;
-		SpecularCompositeTexture[pixel.xy] = float4(directSpecular, 1.0f);
-		if ((frameFlags & 8u) != 0) {
-			float3 reference = ForwardReferenceTexture.Load(int3(pixel.xy, 0)).rgb;
-			float3 delta = candidate - reference;
-			float3 error = abs(delta);
-			uint3 quantized = uint3(min(error, 16.0f) * 4096.0f + 0.5f);
-			int3 signedQuantized = int3(clamp(delta, -16.0f, 16.0f) * 4096.0f);
-			uint3 candidateQuantized = uint3(min(max(candidate, 0.0f), 16.0f) * 4096.0f + 0.5f);
-			uint3 referenceQuantized = uint3(min(max(reference, 0.0f), 16.0f) * 4096.0f + 0.5f);
-			uint ignored;
-			InterlockedAdd(FrameMarker[uint2(16, 0)], 1u, ignored);
-			InterlockedAdd(FrameMarker[uint2(17, 0)], quantized.x, ignored);
-			InterlockedAdd(FrameMarker[uint2(18, 0)], quantized.y, ignored);
-			InterlockedAdd(FrameMarker[uint2(19, 0)], quantized.z, ignored);
-			InterlockedMax(FrameMarker[uint2(20, 0)], max(quantized.x, max(quantized.y, quantized.z)), ignored);
-			InterlockedAdd(FrameMarker[uint2(21, 0)], asuint(signedQuantized.x), ignored);
-			InterlockedAdd(FrameMarker[uint2(22, 0)], asuint(signedQuantized.y), ignored);
-			InterlockedAdd(FrameMarker[uint2(23, 0)], asuint(signedQuantized.z), ignored);
-			InterlockedAdd(FrameMarker[uint2(24, 0)], candidateQuantized.x, ignored);
-			InterlockedAdd(FrameMarker[uint2(25, 0)], candidateQuantized.y, ignored);
-			InterlockedAdd(FrameMarker[uint2(26, 0)], candidateQuantized.z, ignored);
-			InterlockedAdd(FrameMarker[uint2(27, 0)], referenceQuantized.x, ignored);
-			InterlockedAdd(FrameMarker[uint2(28, 0)], referenceQuantized.y, ignored);
-			InterlockedAdd(FrameMarker[uint2(29, 0)], referenceQuantized.z, ignored);
+		float3 ambientAtZero = CSDeferredAmbient(lightingContext, 0.0f,
+			enableLinearLighting != 0, ambientGamma, ambientMultiplier);
+		const bool interior = (lightingContext.featureFlags & 1u) == 0u;
+		ambientIrradiance = CSDeferredDiffuseIBL(EnvironmentIBLTexture, SkyIBLTexture,
+			ambientIrradiance, ambientAtZero, -normalWS, iblFlags, iblSettings0,
+			iblSettings1, interior);
+		float vertexAO = float((packed >> 27u) & 31u) / 31.0f;
+		float skylightingShadowVisibility = 1.0f;
+		float skylightingDiffuse = 1.0f;
+		if (skylightingEnabled != 0u && !interior) {
+			float4 probe = CSDeferredSampleSkylighting(SkylightingProbeTexture,
+				SkylightingVisibilityTexture, positionWS, normalWS,
+				skylightingPositionOffset, skylightingArrayOrigin,
+				skylightingShadowVisibility);
+			skylightingDiffuse = CSDeferredSkylightDiffuse(probe, positionWS,
+				normalWS, vertexAO, skylightingMinDiffuseVisibility);
 		}
+		float3 ambientLit = ambientIrradiance * albedo;
+		float3 candidate = (directIrradiance + lightingContext.emissiveColor.xyz) * albedo + ambientLit;
+		if (skylightingEnabled != 0u && !interior)
+			CSDeferredApplySkylighting(candidate, ambientLit, albedo,
+				skylightingDiffuse, enableLinearLighting != 0u);
+		SpecularCompositeTexture[pixel.xy] = float4(directSpecular, 1.0f);
+		if ((frameFlags & 8u) != 0)
+			AccumulateParity(16u, pixel.xy, candidate);
 		CompositeTexture[pixel.xy] = float4(candidate, 1.0f);
 	}
 }

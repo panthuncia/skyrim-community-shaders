@@ -1,12 +1,10 @@
+#include "Common/LightingParity.hlsli"
+
 namespace GrassLighting
 {
 	float3 GetLightSpecularInput(float3 L, float3 V, float3 N, float3 lightColor, float shininess)
 	{
-		float3 H = normalize(V + L);
-		float HdotN = saturate(dot(H, N));
-
-		float lightColorMultiplier = exp2(shininess * log2(HdotN));
-		return lightColor * lightColorMultiplier.xxx;
+		return CSLightingGrassSpecular(L, V, N, lightColor, shininess);
 	}
 
 	float3 TransformNormal(float3 normal)

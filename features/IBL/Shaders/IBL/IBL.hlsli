@@ -6,6 +6,7 @@
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"
 #include "Common/Spherical Harmonics/SphericalHarmonics.hlsli"
+#include "Common/LightingParity.hlsli"
 
 namespace ImageBasedLighting
 {
@@ -102,13 +103,19 @@ namespace ImageBasedLighting
 	float3 GetDiffuseIBL(float3 vanillaDALC, float3 rayDir)
 	{
 		float3 linEnv, linSky;
-		if (SharedData::iblSettings.DALCMode >= 2) {
-			linEnv = vanillaDALC * SharedData::iblSettings.DALCAmount;
-			linSky = GetSkyIBLColor(rayDir);
-		} else {
-			linEnv = GetEnvIBLColor(rayDir);
-			linSky = GetSkyIBLColor(rayDir);
+		float3 environment = 0.0f;
+		float3 environmentAtZero = 0.0f;
+		if (SharedData::iblSettings.DALCMode < 2) {
+			environment = GetEnvIBL(rayDir);
+			environmentAtZero = GetEnvIBL(0.0f);
 		}
+		CSLightingDiffuseIBLComponents(vanillaDALC,
+			Color::Ambient(SharedData::GetAmbient(0.0f)), environment,
+			environmentAtZero, GetSkyIBL(rayDir), SharedData::iblSettings.DALCMode,
+			SharedData::iblSettings.DALCAmount, SharedData::iblSettings.EnvIBLScale,
+			SharedData::iblSettings.SkyIBLScale, SharedData::iblSettings.EnvIBLSaturation,
+			SharedData::iblSettings.SkyIBLSaturation, SharedData::InInterior,
+			linEnv, linSky);
 #if defined(EFFECTS11)
 		if (SharedData::enbSettings.Enable)
 			linSky *= saturate(-rayDir.z * 0.65 + 0.35);

@@ -19,7 +19,18 @@ void DeferredRendering::DrawSettings()
 	}
 	if (auto tooltip = Util::HoverTooltipWrapper())
 		ImGui::TextUnformatted(T(TKEY("visualize_deferred_coverage_tooltip"),
-			"Draws supported pixels in green after the Community Shaders menu is closed. Legacy and unsupported materials retain their normal color."));
+			"Draws deferred pixels in a bold evaluator-family color after the Community Shaders menu is closed. Legacy and unsupported materials retain their normal color."));
+	if (settings.visualizeDeferredCoverage) {
+		ImGui::Indent();
+		const auto generic = CS::Deferred::GetEvaluatorColor(CS::Deferred::Evaluator::Generic);
+		const auto grass = CS::Deferred::GetEvaluatorColor(CS::Deferred::Evaluator::Grass);
+		ImGui::TextColored({ generic.red, generic.green, generic.blue, 1.0f }, "Generic");
+		ImGui::SameLine();
+		ImGui::TextColored({ grass.red, grass.green, grass.blue, 1.0f }, "Grass");
+		ImGui::SameLine();
+		ImGui::TextDisabled("(other evaluators use compatibility rendering)");
+		ImGui::Unindent();
+	}
 }
 
 void DeferredRendering::LoadSettings(json& json)
@@ -66,6 +77,31 @@ void DeferredRendering::BeginFrame(
 	std::unique_lock lock(snapshotMutex);
 	deferredLights.assign(lights.begin(), lights.end());
 	deferredContexts.clear();
+	// Non-BSLightingShader G-buffer producers (distant trees first, then grass)
+	// need a stable valid identity even when their evaluator consumes only
+	// resolved per-pixel inputs. Keep slot zero ABI-valid for that purpose.
+	LightingContext frameContext{};
+	if (globals::state && globals::state->sharedDataCpu) {
+		const auto& shared = *globals::state->sharedDataCpu;
+		frameContext.directionalLightDirection = shared.DirLightDirection;
+		frameContext.directionalLightColor = shared.DirLightColor;
+		// Convert CS's first-order SH representation into the affine rows used by
+		// the deferred lighting-context ABI: dot(row, float4(normal, 1)).
+		constexpr float l0 = 0.28209479177387814f;
+		constexpr float l1 = 0.4886025119029199f;
+		auto ambientRow = [&](const float4& sh) {
+			return float4{ -l1 * sh.w, -l1 * sh.y, l1 * sh.z, l0 * sh.x };
+		};
+		const auto rowR = ambientRow(shared.AmbientSHR);
+		const auto rowG = ambientRow(shared.AmbientSHG);
+		const auto rowB = ambientRow(shared.AmbientSHB);
+		frameContext.directionalAmbient[0] = { rowR.x, rowR.y, rowR.z, rowR.w };
+		frameContext.directionalAmbient[1] = { rowG.x, rowG.y, rowG.z, rowG.w };
+		frameContext.directionalAmbient[2] = { rowB.x, rowB.y, rowB.z, rowB.w };
+		frameContext.featureFlags = shared.InInterior ? 0u : kWorld;
+		frameContext.featureFlags |= kLightingUniformsValid;
+	}
+	deferredContexts.emplace_back(frameContext);
 	drawContexts.clear();
 	std::ranges::copy(clusterDimensions, clusterSize);
 	nearPlane = cameraNearPlane;
@@ -83,6 +119,11 @@ void DeferredRendering::BeginFrame(
 	lightingTransform.vanillaNormalization = linearLighting.enableLinearLighting ? (1.0f / DirectX::XM_PI) : 1.0f;
 	lightingTransform.ambientGamma = linearLighting.ambientGamma;
 	lightingTransform.ambientMultiplier = linearLighting.ambientMult;
+	grassLighting = globals::features::grassLighting.settings;
+	ibl = globals::features::ibl.GetCommonBufferData();
+	const bool inWorld = !globals::state->isMapMenuOpen && !Util::IsInterior();
+	skylightingEnabled = globals::features::skylighting.loaded && inWorld;
+	skylighting = globals::features::skylighting.GetCommonBufferData(skylightingEnabled);
 	renderWidth = globals::game::graphicsState ? globals::game::graphicsState->screenWidth : 0;
 	renderHeight = globals::game::graphicsState ? globals::game::graphicsState->screenHeight : 0;
 
@@ -136,6 +177,10 @@ void DeferredRendering::FinalizeFrame()
 	result->cameraViewInverse = cameraViewInverse;
 	result->projectionInverse = projectionInverse;
 	result->lightingTransform = lightingTransform;
+	result->grassLighting = grassLighting;
+	result->ibl = ibl;
+	result->skylighting = skylighting;
+	result->skylightingEnabled = skylightingEnabled;
 	result->renderWidth = renderWidth;
 	result->renderHeight = renderHeight;
 	std::copy(clusterSize, clusterSize + 3, result->clusterSize);

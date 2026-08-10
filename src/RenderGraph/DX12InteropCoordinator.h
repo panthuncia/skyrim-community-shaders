@@ -37,6 +37,14 @@ public:
 		D3D12_RESOURCE_FLAGS flags,
 		bool createD3D11SRV,
 		SharedTexture& output) const noexcept;
+	bool CreateD3D12OwnedSharedTextureArray(
+		uint32_t width,
+		uint32_t height,
+		uint16_t arraySize,
+		DXGI_FORMAT format,
+		D3D12_RESOURCE_FLAGS flags,
+		bool createD3D11SRV,
+		SharedTexture& output) const noexcept;
 
 	bool OpenSharedTexture(ID3D11Texture2D* texture, ID3D12Resource** output) const noexcept;
 	// Preferred D3D11 -> D3D12 read-only path when the producer allocation was

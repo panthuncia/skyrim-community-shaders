@@ -350,7 +350,8 @@ public:
 		uint HideSky;
 		float MipBias;
 		float WaterSystemHeight;  // TES::GetWaterHeight in camera-relative Z; -NI_INFINITY when no water body found
-		float3 pad0;
+		uint DeferredRenderingEnabled;
+		float2 pad0;
 		float4 AmbientSHR;
 		float4 AmbientSHG;
 		float4 AmbientSHB;
@@ -359,6 +360,10 @@ public:
 	STATIC_ASSERT_ALIGNAS_16(SharedDataCB);
 
 	ConstantBuffer* sharedDataCB = nullptr;
+	// CPU mirror of the exact constants uploaded to SharedDataCB this frame.
+	// Non-BSLightingShader deferred producers use it to build frame-global
+	// lighting contexts without GPU readback.
+	std::unique_ptr<SharedDataCB> sharedDataCpu;
 	ConstantBuffer* featureDataCB = nullptr;
 
 	PermutationCB permutationData{};

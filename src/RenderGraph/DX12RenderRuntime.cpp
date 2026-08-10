@@ -353,7 +353,8 @@ bool DX12RenderRuntime::Rebuild() noexcept
 			candidate->passes.erase(std::remove_if(candidate->passes.begin(), candidate->passes.end(), [&](const Pass& p) { return p.owner == contributor.id; }), candidate->passes.end());
 			candidate->resources.erase(std::remove_if(candidate->resources.begin(), candidate->resources.end(), [&](const Resource& r) { return r.owner == contributor.id; }), candidate->resources.end());
 			if (contributor.kind == CS_DX12_CONTRIBUTOR_REQUIRED) {
-				SetDiagnostic(result, "Required contributor failed: " + contributor.id);
+				SetDiagnostic(result, "Required contributor failed: " + contributor.id +
+					" (status=" + std::to_string(static_cast<unsigned>(result)) + ")");
 				return false;
 			}
 		}

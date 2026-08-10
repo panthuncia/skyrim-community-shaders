@@ -5,17 +5,18 @@
 #include "Common/Shading.hlsli"
 #include "Common/SharedData.hlsli"
 #include "Common/Spherical Harmonics/SphericalHarmonics.hlsli"
+#include "Common/LightingParity.hlsli"
 
 namespace Skylighting
 {
 #if defined(SKYLIGHTING_PROBE_REGISTER)
-	Texture3D<sh2> SkylightingProbeArray : register(SKYLIGHTING_PROBE_REGISTER);
+	Texture2DArray<sh2> SkylightingProbeArray : register(SKYLIGHTING_PROBE_REGISTER);
 #elif defined(PSHADER)
-	Texture3D<sh2> SkylightingProbeArray : register(t50);
+	Texture2DArray<sh2> SkylightingProbeArray : register(t50);
 #endif
 
 #if defined(SKYLIGHTING_SHADOW_VIS)
-	Texture3D<float> ShadowVisibilityProbeArray : register(t53);
+	Texture2DArray<float> ShadowVisibilityProbeArray : register(t53);
 #endif
 
 	const static sh2 UNIT_SH = float4(sqrt(4.0 * Math::PI), 0, 0, 0);
@@ -68,22 +69,9 @@ namespace Skylighting
 #if defined(PSHADER)
 	void ApplySkylighting(inout float3 diffuseColor, inout float3 directionalAmbientColor, float3 albedo, float skylightingDiffuse)
 	{
-		float maxScale = 1.0;
-		if (directionalAmbientColor.x > 0.0)
-			maxScale = min(maxScale, diffuseColor.x / directionalAmbientColor.x);
-		if (directionalAmbientColor.y > 0.0)
-			maxScale = min(maxScale, diffuseColor.y / directionalAmbientColor.y);
-		if (directionalAmbientColor.z > 0.0)
-			maxScale = min(maxScale, diffuseColor.z / directionalAmbientColor.z);
-		directionalAmbientColor *= maxScale;
-
-		diffuseColor = max(0.0, diffuseColor - directionalAmbientColor);
-
-		float3 linAmbient = Color::IrradianceToLinear(directionalAmbientColor);
-		float3 multiBounceSkylighting = MultiBounceAO(albedo, skylightingDiffuse);
-		directionalAmbientColor = Color::IrradianceToGamma(linAmbient * multiBounceSkylighting);
-
-		diffuseColor += directionalAmbientColor;
+		CSLightingApplySkylighting(diffuseColor, directionalAmbientColor,
+			MultiBounceAO(albedo, skylightingDiffuse),
+			SharedData::linearLightingSettings.enableLinearLighting != 0u);
 	}
 #endif
 

@@ -83,10 +83,13 @@ public:
 	winrt::com_ptr<ID3D11SamplerState> comparisonSampler = nullptr;
 
 	Texture2D* texOcclusion = nullptr;
-	Texture3D* texProbeArray = nullptr;
-	Texture3D* texAccumFramesArray = nullptr;
-	Texture3D* texShadowBitmask = nullptr;
-	Texture3D* texShadowVisibility = nullptr;
+	// Stored as 2D arrays rather than Texture3D. Skylighting performs explicit
+	// texel loads and manual trilinear interpolation, so the layouts are
+	// sampling-equivalent. Texture2D arrays can also be shared with D3D12.
+	Texture2D* texProbeArray = nullptr;
+	Texture2D* texAccumFramesArray = nullptr;
+	Texture2D* texShadowBitmask = nullptr;
+	Texture2D* texShadowVisibility = nullptr;
 
 	ID3D11ShaderResourceView* shadowCascadeSRV = nullptr;
 

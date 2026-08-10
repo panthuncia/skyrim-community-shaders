@@ -15,10 +15,10 @@ struct DirectionalShadowLightData
 };
 StructuredBuffer<DirectionalShadowLightData> DirectionalShadowLights : register(t2);
 
-RWTexture3D<sh2> outProbeArray : register(u0);
-RWTexture3D<uint> outAccumFramesArray : register(u1);
-RWTexture3D<uint> outShadowBitmask : register(u2);
-RWTexture3D<float> outShadowVisibility : register(u3);
+RWTexture2DArray<sh2> outProbeArray : register(u0);
+RWTexture2DArray<uint> outAccumFramesArray : register(u1);
+RWTexture2DArray<uint> outShadowBitmask : register(u2);
+RWTexture2DArray<float> outShadowVisibility : register(u3);
 
 SamplerComparisonState comparisonSampler : register(s0);
 

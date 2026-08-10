@@ -12,6 +12,7 @@
 #include "Common/SharedData.hlsli"
 #include "Common/Skinned.hlsli"
 #include "Common/Triplanar.hlsli"
+#include "DeferredRendering/DeferredMaterial.hlsli"
 
 #if defined(FACEGEN) || defined(FACEGEN_RGB_TINT)
 #	define SKIN
@@ -2102,10 +2103,16 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	float llDirLightMult = SharedData::linearLightingSettings.enableLinearLighting && !SharedData::linearLightingSettings.isDirLightLinear && (inWorld || inReflection) && !SharedData::InInterior ? SharedData::linearLightingSettings.dirLightMult : 1.0f;
 	float3 dirLightColor = Color::DirectionalLight(DirLightColor.xyz / max(llDirLightMult, 1e-5), SharedData::linearLightingSettings.isDirLightLinear) * llDirLightMult;
+	// Raster-only visibility inputs that depend on Skyrim/CS textures not yet
+	// imported by the D3D12 evaluator. This remains a scalar: both producers are
+	// scalar attenuations in the authoritative forward path.
+	float directionalEnvironmentVisibility = 1.0f;
 
 #	if defined(EXP_HEIGHT_FOG)
 	if (SharedData::exponentialHeightFogSettings.enabled) {
-		dirLightColor *= ExponentialHeightFog::GetSunlightFogAttenuation(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
+		float sunlightFogVisibility = ExponentialHeightFog::GetSunlightFogAttenuation(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
+		directionalEnvironmentVisibility *= sunlightFogVisibility;
+		dirLightColor *= sunlightFogVisibility;
 	}
 #	endif
 
@@ -2114,8 +2121,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	endif
 
 	// Apply world shadow (terrain shadows, cloud shadows) directly to light color
-	if (inWorld || inReflection)
-		dirLightColor *= ShadowSampling::GetWorldShadow(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
+	if (inWorld || inReflection) {
+		float worldShadowVisibility = ShadowSampling::GetWorldShadow(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
+		directionalEnvironmentVisibility *= worldShadowVisibility;
+		dirLightColor *= worldShadowVisibility;
+	}
 
 	float dirLightAngle = dot(worldNormal.xyz, DirLightDirection.xyz);
 
@@ -2940,28 +2950,59 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// quantized vertex AO so the existing deferred SSGI correction remains
 	// available after MASKS2 becomes an integer identity target.
 	uint packedVertexAO = (uint)round(saturate(vertexAO) * 31.0);
-	uint deferredMaterialClass = 0u;
+	uint deferredMaterialClass = CS_MATERIAL_Legacy;
 	uint deferredSurfaceFlags = DeferredPackedSurface >> 24;
 	// Classes 1 and 2 share the plain CS diffuse evaluator. Class 2 differs only
 	// in having survived alpha testing during G-buffer generation. Vertex
 	// deformation (skinning/tree animation), FaceGen tint, and ordinary LOD
 	// affect resolved geometry/material inputs, not this lighting contract.
 #	if !defined(TRUE_PBR) && !defined(LANDSCAPE) && !defined(LODLANDSCAPE) && !defined(DEPTH_WRITE_DECALS) && !defined(HAIR) && !defined(SKIN) && !defined(EYE) && !defined(ENVMAP) && !defined(MULTI_LAYER_PARALLAX) && !defined(SOFT_LIGHTING) && !defined(RIM_LIGHTING) && !defined(BACK_LIGHTING) && !defined(SNOW) && !defined(GLOWMAP) && !defined(PARALLAX) && !defined(PROJECTED_UV) && !defined(ANISO_LIGHTING) && !defined(SPARKLE)
-#		if defined(SPECULAR) && defined(DO_ALPHA_TEST)
-	deferredMaterialClass = 4u;
+#		if defined(TREE_ANIM) && !defined(SPECULAR)
+	// Vertex animation and alpha coverage are fully resolved by rasterization.
+	// Plain foliage without its special soft/rim/back lobes therefore consumes
+	// the exact same deferred evaluator as ordinary diffuse geometry.
+	deferredMaterialClass = CS_MATERIAL_Foliage;
+#		elif defined(SPECULAR) && defined(DO_ALPHA_TEST)
+	deferredMaterialClass = CS_MATERIAL_AlphaTestedSpecular;
 #		elif defined(SPECULAR)
-	deferredMaterialClass = 3u;
+	deferredMaterialClass = CS_MATERIAL_StandardSpecular;
 #		elif defined(DO_ALPHA_TEST)
-	deferredMaterialClass = 2u;
+	deferredMaterialClass = CS_MATERIAL_AlphaTestedOpaque;
 #		else
-	deferredMaterialClass = 1u;
+	deferredMaterialClass = CS_MATERIAL_StandardOpaque;
 #		endif
 #		if defined(LOD)
 	deferredSurfaceFlags &= ~2u;
 #		endif
 	if ((Permutation::PixelShaderDescriptor & Permutation::LightingFlags::CharacterLight) != 0)
-		deferredMaterialClass = 0u;
+		deferredMaterialClass = CS_MATERIAL_Legacy;
+#		if defined(IBL)
+	// Static diffuse IBL samples a cubemap that is not part of the current ORG
+	// resource contract. Keep those pixels authoritative on the forward path.
+	if (SharedData::iblSettings.EnableIBL && SharedData::iblSettings.UseStaticIBL &&
+		!inWorld && !inReflection)
+		deferredMaterialClass = CS_MATERIAL_Legacy;
+#		endif
 #	endif
+	// First terrain milestone: resolved vanilla landscape without any
+	// light-direction-dependent or separately-lit LOD/PBR features.
+#	if defined(LANDSCAPE) && !defined(TRUE_PBR) && !defined(LODLANDSCAPE) && !defined(SNOW) && !defined(PARALLAX) && !defined(PROJECTED_UV) && !defined(ANISO_LIGHTING) && !defined(SPARKLE) && !defined(SOFT_LIGHTING) && !defined(RIM_LIGHTING) && !defined(BACK_LIGHTING)
+#		if defined(SPECULAR)
+	deferredMaterialClass = CS_MATERIAL_TerrainSpecular;
+#		else
+	deferredMaterialClass = CS_MATERIAL_Terrain;
+#		endif
+#	endif
+	// Animated foliage with dedicated soft/rim/back lobes remains authoritative
+	// on the forward path until those lobe parameters are exported to a dedicated
+	// foliage material contract.
+#	if defined(TREE_ANIM) && (defined(SOFT_LIGHTING) || defined(RIM_LIGHTING) || defined(BACK_LIGHTING) || defined(SPECULAR))
+	deferredMaterialClass = CS_MATERIAL_Legacy;
+#	endif
+	if (!SharedData::DeferredRenderingEnabled)
+		deferredMaterialClass = CS_MATERIAL_Legacy;
+	if (CSDeferredEvaluatorForMaterial(deferredMaterialClass) == CS_EVALUATOR_GENERIC)
+		psout.Masks.x = directionalEnvironmentVisibility;
 	psout.Masks2 = (DeferredPackedSurface & 0x0000FFFFu) |
 		(deferredMaterialClass << 16) | ((deferredSurfaceFlags & 7u) << 24) | (packedVertexAO << 27);
 

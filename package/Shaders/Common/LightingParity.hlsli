@@ -26,6 +26,23 @@ float3 CSLightingVanillaDiffuse(float3 normal, float3 lightDirection,
 	return saturate(dot(normal, lightDirection)) * lightColor * shadow * vanillaNormalization;
 }
 
+float CSLightingGrassSoftMultiplier(float angle, float rolloff)
+{
+	float softLight = saturate((rolloff + angle) / (1.0f + rolloff));
+	float softCurve = softLight * softLight * (3.0f - 2.0f * softLight);
+	float clampedAngle = saturate(angle);
+	float diffuseCurve = clampedAngle * clampedAngle * (3.0f - 2.0f * clampedAngle);
+	return saturate(softCurve - diffuseCurve);
+}
+
+float3 CSLightingGrassSpecular(float3 lightDirection, float3 viewDirection,
+	float3 normal, float3 lightColor, float shininess)
+{
+	float3 halfVector = normalize(viewDirection + lightDirection);
+	float HdotN = saturate(dot(halfVector, normal));
+	return lightColor * exp2(shininess * log2(HdotN));
+}
+
 float CSLightingVanillaSpecularMultiplier(float3 normal, float3 viewDirection,
 	float3 lightDirection, float shininess, bool exponentialSpecular)
 {
@@ -82,6 +99,56 @@ float3 CSLightingDirectionalAmbient(float4 ambientRow0, float4 ambientRow1,
 float3 CSLightingIrradianceToGamma(float3 color, bool linearLighting)
 {
 	return linearLighting ? color : pow(abs(color), 1.0f / 1.6f);
+}
+
+float CSLightingLuminance(float3 color)
+{
+	return dot(color, float3(0.2125f, 0.7154f, 0.0721f));
+}
+
+float3 CSLightingSaturation(float3 color, float saturation)
+{
+	float grey = CSLightingLuminance(color);
+	return max(lerp(grey.xxx, color, saturation), 0.0f);
+}
+
+void CSLightingDiffuseIBLComponents(float3 vanillaAmbient, float3 ambientAtZero,
+	float3 environment, float3 environmentAtZero, float3 sky, uint dalcMode, float dalcAmount,
+	float environmentScale, float skyScale, float environmentSaturation,
+	float skySaturation, bool interior, out float3 environmentResult,
+	out float3 skyResult)
+{
+	skyResult = interior ? 0.0f : CSLightingSaturation(sky, skySaturation) * skyScale;
+	if (dalcMode >= 2u) {
+		environmentResult = vanillaAmbient * dalcAmount;
+		return;
+	}
+	float3 ratio;
+	if (dalcMode == 1u)
+		ratio = lerp(1.0f, ambientAtZero / max(environmentAtZero, 0.001f), dalcAmount);
+	else {
+		float environmentLuminance = CSLightingLuminance(environmentAtZero);
+		float scalarRatio = environmentLuminance > 0.001f ?
+			CSLightingLuminance(ambientAtZero) / environmentLuminance : 1.0f;
+		ratio = lerp(1.0f, scalarRatio.xxx, dalcAmount);
+	}
+	environmentResult = CSLightingSaturation(environment, environmentSaturation) *
+		environmentScale * ratio;
+}
+
+void CSLightingApplySkylighting(inout float3 diffuse, inout float3 ambient,
+	float3 multiBounceVisibility, bool linearLighting)
+{
+	float scale = 1.0f;
+	if (ambient.x > 0.0f) scale = min(scale, diffuse.x / ambient.x);
+	if (ambient.y > 0.0f) scale = min(scale, diffuse.y / ambient.y);
+	if (ambient.z > 0.0f) scale = min(scale, diffuse.z / ambient.z);
+	ambient *= scale;
+	diffuse = max(0.0f, diffuse - ambient);
+	float3 linearAmbient = linearLighting ? ambient : pow(abs(ambient), 1.6f);
+	ambient = CSLightingIrradianceToGamma(linearAmbient * multiBounceVisibility,
+		linearLighting);
+	diffuse += ambient;
 }
 
 #endif
