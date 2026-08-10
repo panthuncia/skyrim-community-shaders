@@ -11,10 +11,26 @@
 class DeferredRendering final : public Feature
 {
 public:
+	enum class DebugView : std::uint32_t
+	{
+		Final,
+		Compatibility,
+		Albedo,
+		Specular,
+		Reflectance,
+		Normal,
+		Masks,
+		MaterialIdentity,
+		LinearDepth,
+		DirectLighting,
+		AmbientLighting,
+		SubsurfaceLighting
+	};
 	struct Settings
 	{
 		bool visualizeDeferredCoverage = false;
 		bool classifyVisibleMaterials = false;
+		DebugView debugView = DebugView::Final;
 	};
 	struct MaterialClassification
 	{
@@ -95,6 +111,8 @@ public:
 	{
 		return settings.classifyVisibleMaterials || std::getenv("CS_DX12_CLASSIFY_MATERIALS") != nullptr;
 	}
+	DebugView GetDebugView() const noexcept { return settings.debugView; }
+	bool IsDebugViewEnabled() const noexcept { return settings.debugView != DebugView::Final; }
 	void UpdateMaterialClassification(const std::uint32_t* visible, const std::uint32_t* deferred,
 		std::uint32_t evaluatorMask, std::uint32_t depthCovered, std::uint32_t unclassifiedDepth);
 	MaterialClassification GetMaterialClassification() const;

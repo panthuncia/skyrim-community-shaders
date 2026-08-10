@@ -148,6 +148,7 @@ endforeach()
 set(_deferred_shader_root "${CMAKE_CURRENT_SOURCE_DIR}/package/Shaders")
 set(_deferred_composite "${_deferred_shader_root}/DeferredRendering/DeferredCompositeCS.hlsl")
 set(_deferred_binning "${_deferred_shader_root}/DeferredRendering/DeferredPixelBinningCS.hlsl")
+set(_deferred_seed "${_deferred_shader_root}/DeferredRendering/DeferredSeedCS.hlsl")
 file(GLOB_RECURSE _deferred_shader_dependencies CONFIGURE_DEPENDS
     "${_deferred_shader_root}/*.hlsl" "${_deferred_shader_root}/*.hlsli"
     "${_deferred_shader_root}/*.def")
@@ -188,6 +189,12 @@ foreach(_index RANGE 0 3)
         OPTIONS -O3 DEPENDS ${_deferred_shader_dependencies})
     list(APPEND CS_DEFERRED_NATIVE_SHADER_OUTPUTS "${_output}")
 endforeach()
+set(_seed_output "${CS_DEFERRED_NATIVE_SHADER_DIR}/DeferredSeed.dxil")
+org_compile_shader(_compiled COMPILER "${CS_DXC_RUNTIME_DIR}/dxc.exe"
+    SOURCE "${_deferred_seed}" ENTRY main TARGET cs_6_6 OUTPUT "${_seed_output}"
+    INCLUDE_DIRECTORIES "${_deferred_shader_root}/DeferredRendering" "${_deferred_shader_root}"
+    OPTIONS -O3 DEPENDS ${_deferred_shader_dependencies})
+list(APPEND CS_DEFERRED_NATIVE_SHADER_OUTPUTS "${_seed_output}")
 add_custom_target(CSDeferredNativeShaders DEPENDS ${CS_DEFERRED_NATIVE_SHADER_OUTPUTS})
 add_dependencies(${PROJECT_NAME} CSDeferredNativeShaders)
 if(CS_BUILD_DX12_GRAPH_SAMPLES)

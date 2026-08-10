@@ -59,7 +59,8 @@ namespace
 		float skylightingMinDiffuseVisibility{};
 		float skylightingMinSpecularVisibility{};
 		uint32_t pbrMaterialCount{};
-		float lightingParameterPadding[2]{};
+		uint32_t debugView{};
+		float lightingParameterPadding{};
 	};
 	static_assert(sizeof(DeferredConstants) <= 512);
 
@@ -217,10 +218,15 @@ bool DX12DeferredShading::CreateBinningPipelines() noexcept
 {
 	auto rhiDevice = runtime ? runtime->GetRHIDevice() : rhi::Device{};
 	rhi::PushConstantRangeDesc binningConstants[]{
-		{ rhi::ShaderStage::Compute, 15, 0, 0, rhi::PushConstantRangeType::RootConstants32 }
+		{ rhi::ShaderStage::Compute, 17, 0, 0, rhi::PushConstantRangeType::RootConstants32 }
 	};
 	if (!rhiDevice || !rhi::IsOk(rhiDevice.CreatePipelineLayout(
 		{ {}, binningConstants, {}, rhi::PF_None }, binningLayout))) return false;
+	if (!CreateComputePipeline(rhiDevice, binningLayout,
+		LoadPrecompiledShader(L"DeferredSeed.dxil"), "main", seedPipeline)) {
+		logger::error("[DX12DeferredShading] Required precompiled seed DXIL is unavailable");
+		return false;
+	}
 	constexpr const wchar_t* precompiled[]{ L"DeferredBinning.clear.dxil",
 		L"DeferredBinning.histogram.dxil", L"DeferredBinning.prefix.dxil",
 		L"DeferredBinning.scatter.dxil" };
@@ -232,6 +238,7 @@ bool DX12DeferredShading::CreateBinningPipelines() noexcept
 			binningPipelines[index])) { loaded = false; break; }
 	}
 	if (loaded) return true;
+	seedPipeline.Reset();
 	for (auto& pipeline : binningPipelines) pipeline.Reset();
 	logger::error("[DX12DeferredShading] Required precompiled binning DXIL is unavailable");
 	return false;
@@ -335,7 +342,9 @@ bool DX12DeferredShading::EnsureFrameMarker() noexcept
 	D3D11_TEXTURE2D_DESC description{};
 	// Slots 0..143 retain parity diagnostics. Material classification uses two
 	// 256-entry histograms beginning at slot 160.
-	description.Width = 674;
+	// 0..673 are parity/classification counters. 674+ are reserved for
+	// frame-control validation written by native evaluator passes.
+	description.Width = 678;
 	description.Height = 1;
 	description.MipLevels = 1;
 	description.ArraySize = 1;
@@ -364,20 +373,10 @@ bool DX12DeferredShading::PrepareCompatibilityInput(ID3D11Texture2D* source) noe
 	auto* interop = runtime ? runtime->GetInteropCoordinator() : nullptr;
 	if (!interop)
 		return false;
-	// Compatibility pixels are never read from this texture: the selective
-	// D3D11 handoff simply leaves Skyrim's main target untouched. Keep only a
-	// tiny valid SRV in ordinary frames, and allocate/copy the full-size forward
-	// reference exclusively for the opt-in same-frame parity diagnostic.
-	if (!std::getenv("CS_DX12_DEFERRED_PARITY")) {
-		if (compatibilityReference && compatibilityReference.description.Width == 1 &&
-			compatibilityReference.description.Height == 1 &&
-			compatibilityReference.description.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
-			return true;
-		return interop->CreateGraphOwnedSharedTexture(1, 1,
-			rhi::Format::R16G16B16A16_Float,
-			rhi::RF_AllowRenderTarget, true,
-			compatibilityReference);
-	}
+	// Every persistent graph output is seeded from this current-frame image
+	// before selective evaluators run. Without a full-size refresh, pixels that
+	// leave a material bin retain arbitrary history from the previous camera
+	// position (most visibly coverage-debug colors).
 	return interop->EnsureReadOnlyMirror(source, compatibilityReference) &&
 		interop->CopyToMirror(globals::d3d::context, source, compatibilityReference);
 }
@@ -632,8 +631,9 @@ bool DX12DeferredShading::CommitComposite(ID3D11Texture2D* destination) noexcept
 		!masksComposite.d3d11||!frameMarker.d3d11||!globals::d3d::context||
 		!EnsureCompositeBlit(destination))return false;
 	const bool parityReadbackEnabled = std::getenv("CS_DX12_DEFERRED_PARITY") != nullptr;
+	const bool debugViewReadbackEnabled = globals::features::deferredRendering.IsDebugViewEnabled();
 	const bool classificationReadbackEnabled = globals::features::deferredRendering.IsMaterialClassificationEnabled();
-	if (parityReadbackEnabled || classificationReadbackEnabled) {
+	if (parityReadbackEnabled || classificationReadbackEnabled || debugViewReadbackEnabled) {
 		if (!parityCounterReadback) {
 			D3D11_TEXTURE2D_DESC description{};
 			frameMarker.d3d11->GetDesc(&description);
@@ -682,6 +682,14 @@ bool DX12DeferredShading::CommitComposite(ID3D11Texture2D* destination) noexcept
 					globals::features::deferredRendering.UpdateMaterialClassification(
 						counters + visibleBase, counters + deferredBase, GetEnabledEvaluatorMask(),
 						counters[deferredBase + 256], counters[deferredBase + 257]);
+				}
+				if (debugViewReadbackEnabled) {
+					static std::uint32_t lastReportedView = UINT32_MAX;
+					if (lastReportedView != counters[674]) {
+						lastReportedView = counters[674];
+						logger::info("[DeferredRendering] GPU consumed component view {} in {} evaluator dispatches",
+							counters[674], counters[675]);
+					}
 				}
 				globals::d3d::context->Unmap(parityCounterReadback.get(), 0);
 				parityCounterPending = false;
@@ -865,6 +873,33 @@ bool DX12DeferredShading::EnsureGBufferInputs() noexcept
 		inputs[2].source && inputs[2].mirror && inputs[3].source && inputs[3].mirror;
 }
 
+bool DX12DeferredShading::RecordNativeSeed(org::PassExecutionContext& context,
+	const NativeSeedBindings& bindings) noexcept
+{
+	if (!seedPipeline || !binningLayout)
+		return false;
+	const auto width = runtime ? runtime->GetAllocationWidth() : 0u;
+	const auto height = runtime ? runtime->GetAllocationHeight() : 0u;
+	if (!width || !height)
+		return false;
+	std::array<std::uint32_t, 17> constants{};
+	constants[0] = width;
+	constants[1] = height;
+	constants[2] = static_cast<std::uint32_t>(
+		globals::features::deferredRendering.GetDebugView());
+	std::copy(bindings.descriptors.begin(), bindings.descriptors.end(), constants.begin() + 3);
+	auto heap = org::runtime::GetActiveSRVDescriptorHeap();
+	if (!heap)
+		return false;
+	context.commandList.SetDescriptorHeaps(heap.GetHandle(), std::nullopt);
+	context.commandList.BindLayout(binningLayout->GetHandle());
+	context.commandList.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0,
+		static_cast<std::uint32_t>(constants.size()), constants.data());
+	context.commandList.BindPipeline(seedPipeline->GetHandle());
+	context.commandList.Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+	return true;
+}
+
 bool DX12DeferredShading::RecordNativeBinning(org::PassExecutionContext& context,
 	NativeBinningStage stage, const NativeBinningBindings& bindings) noexcept
 {
@@ -904,11 +939,14 @@ bool DX12DeferredShading::RecordNativeEvaluator(org::PassExecutionContext& conte
 		return false;
 	auto heap = org::runtime::GetActiveSRVDescriptorHeap();
 	if (!heap) return false;
-	// Constants 0..3 are supplied by ExecuteIndirect.  The directly-bound tail
-	// starts at DWORD 4; descriptors start at DWORD 8 after HLSL's uint4
-	// alignment padding.
+	// Constants 0..3 are supplied by ExecuteIndirect. The directly-bound tail
+	// starts at DWORD 4. Pass frame-local control values as immediate constants;
+	// they must not depend on the scheduled-upload path used for bulk frame data.
+	// Descriptors start at DWORD 8 after HLSL's uint4 alignment padding.
 	std::array<std::uint32_t, 32> constants{};
 	constants[0] = bindings.frameConstants;
+	constants[1] = static_cast<std::uint32_t>(
+		globals::features::deferredRendering.GetDebugView());
 	std::copy(bindings.descriptors.begin(), bindings.descriptors.end(), constants.begin() + 4);
 	context.commandList.SetDescriptorHeaps(heap.GetHandle(), std::nullopt);
 	context.commandList.BindLayout(evaluatorLayout->GetHandle());
@@ -961,10 +999,13 @@ void DX12DeferredShading::UpdateNativeFrame(const std::shared_ptr<org::Resource>
 	constants.iblSettings1[0] = snapshot->ibl.SkyIBLSaturation;
 	constants.iblSettings1[1] = snapshot->ibl.FogAmount;
 	std::copy_n(&snapshot->skylighting.PosOffset.x, 3, constants.skylightingPositionOffset);
-	constants.skylightingEnabled = snapshot->skylightingEnabled && skylightingInputsAvailable ? 1u : 0u;
+	constants.skylightingEnabled = snapshot->skylightingEnabled && skylightingInputsAvailable &&
+		std::getenv("CS_DX12_DIAGNOSTIC_NO_SKYLIGHTING") == nullptr ? 1u : 0u;
 	std::copy_n(snapshot->skylighting.ArrayOrigin, 3, constants.skylightingArrayOrigin);
 	constants.skylightingMinDiffuseVisibility = snapshot->skylighting.MinDiffuseVisibility;
 	constants.skylightingMinSpecularVisibility = snapshot->skylighting.MinSpecularVisibility;
+	constants.debugView = static_cast<std::uint32_t>(
+		globals::features::deferredRendering.GetDebugView());
 	constants.frameFlags = (std::getenv("CS_DX12_DEFERRED_DISABLE_STATIC_OPAQUE") == nullptr ? 1u : 0u) |
 		(std::getenv("CS_DX12_DEFERRED_DIRECT_DIAGNOSTIC") ? 2u : 0u) |
 		(globals::features::deferredRendering.IsCoverageVisualizationEnabled() ? 4u : 0u) |
@@ -1020,6 +1061,7 @@ void DX12DeferredShading::Shutdown() noexcept
 	handoffConstants = nullptr;
 	for (auto& pipeline : evaluatorPipelines) pipeline.Reset();
 	evaluatorLayout.Reset();
+	seedPipeline.Reset();
 	for (auto& pipeline : binningPipelines) pipeline.Reset();
 	binningLayout.Reset();
 	evaluatorCommandSignature.Reset();

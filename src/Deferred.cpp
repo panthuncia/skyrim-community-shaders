@@ -494,6 +494,7 @@ void Deferred::EndDeferred()
 	PreDX12DeferredPasses();
 	auto& deferredFeature = globals::features::deferredRendering;
 	const bool visualizeDeferredCoverage = deferredFeature.IsRuntimeEnabled() && deferredFeature.IsCoverageVisualizationEnabled();
+	const bool visualizeDeferredComponent = deferredFeature.IsRuntimeEnabled() && deferredFeature.IsDebugViewEnabled();
 	// In coverage mode, finish the normal D3D11 image first and let DX12 apply
 	// the diagnostic colors last. Otherwise the normal composite can attenuate
 	// or overwrite the deliberately exact green classification overlay.
@@ -543,7 +544,11 @@ void Deferred::EndDeferred()
 		}
 	}
 	const bool skipD3D11PostForTelemetry = std::getenv("CS_DX12_SKIP_D3D11_POST") != nullptr;
-	if (!visualizeDeferredCoverage && !skipD3D11PostForTelemetry)
+	// Component diagnostics are final graph outputs, not replacement G-buffer
+	// inputs. Running the legacy composite over them would apply SSGI, specular,
+	// reflections, and gamma conversion and make the displayed resource values
+	// misleading. The normal Final view retains the complete compatibility post.
+	if (!visualizeDeferredCoverage && !visualizeDeferredComponent && !skipD3D11PostForTelemetry)
 		RunDX11DeferredComposite();
 	PostDX12DeferredPasses();
 

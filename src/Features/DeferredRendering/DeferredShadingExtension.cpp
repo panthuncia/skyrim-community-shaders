@@ -55,7 +55,7 @@ struct Access { ID id; Usage usage; };
 class DeferredPass final : public org::ComputePass
 {
 public:
-	enum class Operation { BinClear, BinHistogram, BinPrefix, BinScatter, Evaluator };
+	enum class Operation { BinClear, BinHistogram, BinPrefix, BinScatter, Evaluator, Seed };
 	DeferredPass(DeferredShadingExtension& extension, DX12DeferredShading& owner,
 		Operation operation, std::size_t evaluator, std::vector<Access> accesses, bool waitsForD3D11)
 		: extension_(extension), owner_(owner), operation_(operation), evaluator_(evaluator),
@@ -68,7 +68,7 @@ public:
 		}
 	}
 	void Update(const org::UpdateExecutionContext&) override {
-		if (operation_ == Operation::BinClear)
+		if (operation_ == Operation::Seed)
 			owner_.UpdateNativeFrame(extension_.Resource(kFrameConstants));
 	}
 	void Cleanup() override {}
@@ -90,7 +90,27 @@ public:
 	}
 	org::PassReturn Execute(org::PassExecutionContext& context) override {
 		bool succeeded{};
-		if (operation_ != Operation::Evaluator) {
+		if (operation_ == Operation::Seed) {
+			DX12DeferredShading::NativeSeedBindings bindings{};
+			const ID descriptorResources[]{
+				{ "community-shaders.deferred-shading.compatibility-reference" },
+				{ "community-shaders.deferred-shading.gbuffer.specular" },
+				{ "community-shaders.deferred-shading.gbuffer.reflectance" },
+				{ "community-shaders.deferred-shading.gbuffer.albedo" },
+				{ "community-shaders.deferred-shading.gbuffer.normal-roughness" },
+				{ "community-shaders.deferred-shading.gbuffer.masks" },
+				kPacked, kDepth,
+				{ "community-shaders.deferred-shading.composite" },
+				{ "community-shaders.deferred-shading.specular-composite" },
+				{ "community-shaders.deferred-shading.reflectance-composite" },
+				{ "community-shaders.deferred-shading.albedo-composite" },
+				{ "community-shaders.deferred-shading.normal-composite" },
+				{ "community-shaders.deferred-shading.masks-composite" }
+			};
+			for (std::size_t index = 0; index < std::size(descriptorResources); ++index)
+				bindings.descriptors[index] = Index(descriptorResources[index]);
+			succeeded = owner_.RecordNativeSeed(context, bindings);
+		} else if (operation_ != Operation::Evaluator) {
 			DX12DeferredShading::NativeBinningBindings bindings{};
 			bindings.packedSurface = Index(kPacked); bindings.linearDepth = Index(kDepth);
 			bindings.counts = Index(kCounts); bindings.offsets = Index(kOffsets);
@@ -283,12 +303,28 @@ void DeferredShadingExtension::GatherStructuralPasses(org::RenderGraph&,
 			std::make_shared<DeferredPass>(*this, owner_, operation, evaluator, std::move(accesses), waits))
 			.At(std::move(point)).PreferQueue(org::QueueKind::Compute));
 	};
-	add("community-shaders.deferred-shading.bin-clear", "community-shaders.clustered-lighting.cull-lights",
+	add("community-shaders.deferred-shading.seed-outputs", "community-shaders.clustered-lighting.cull-lights",
+		DeferredPass::Operation::Seed, 0, {
+			{ ID{ "community-shaders.deferred-shading.compatibility-reference" }, Usage::SRV },
+			{ ID{ "community-shaders.deferred-shading.gbuffer.specular" }, Usage::SRV },
+			{ ID{ "community-shaders.deferred-shading.gbuffer.reflectance" }, Usage::SRV },
+			{ ID{ "community-shaders.deferred-shading.gbuffer.albedo" }, Usage::SRV },
+			{ ID{ "community-shaders.deferred-shading.gbuffer.normal-roughness" }, Usage::SRV },
+			{ ID{ "community-shaders.deferred-shading.gbuffer.masks" }, Usage::SRV },
+			{ kPacked, Usage::SRV }, { kDepth, Usage::SRV },
+			{ ID{ "community-shaders.deferred-shading.composite" }, Usage::UAV },
+			{ ID{ "community-shaders.deferred-shading.specular-composite" }, Usage::UAV },
+			{ ID{ "community-shaders.deferred-shading.reflectance-composite" }, Usage::UAV },
+			{ ID{ "community-shaders.deferred-shading.albedo-composite" }, Usage::UAV },
+			{ ID{ "community-shaders.deferred-shading.normal-composite" }, Usage::UAV },
+			{ ID{ "community-shaders.deferred-shading.masks-composite" }, Usage::UAV }
+		}, true);
+	add("community-shaders.deferred-shading.bin-clear", "community-shaders.deferred-shading.seed-outputs",
 		DeferredPass::Operation::BinClear, 0, { { kCounts, Usage::UAV }, { kOffsets, Usage::UAV },
 			{ kCursors, Usage::UAV }, { kArgs, Usage::UAV }, { kMarker, Usage::UAV } }, false);
 	add("community-shaders.deferred-shading.bin-histogram", "community-shaders.deferred-shading.bin-clear",
 		DeferredPass::Operation::BinHistogram, 0, { { kPacked, Usage::SRV }, { kDepth, Usage::SRV },
-			{ kCounts, Usage::UAV }, { kMarker, Usage::UAV } }, true);
+			{ kCounts, Usage::UAV }, { kMarker, Usage::UAV } }, false);
 	add("community-shaders.deferred-shading.bin-prefix", "community-shaders.deferred-shading.bin-histogram",
 		DeferredPass::Operation::BinPrefix, 0, { { kCounts, Usage::UAV }, { kOffsets, Usage::UAV }, { kArgs, Usage::UAV } }, false);
 	add("community-shaders.deferred-shading.bin-scatter", "community-shaders.deferred-shading.bin-prefix",

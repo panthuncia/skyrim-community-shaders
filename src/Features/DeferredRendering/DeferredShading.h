@@ -49,6 +49,12 @@ public:
 		std::uint32_t frameConstants{ UINT32_MAX };
 		rhi::ResourceHandle indirectArguments{};
 	};
+	struct NativeSeedBindings
+	{
+		std::array<std::uint32_t, 14> descriptors{};
+	};
+	bool RecordNativeSeed(org::PassExecutionContext& context,
+		const NativeSeedBindings& bindings) noexcept;
 	bool RecordNativeBinning(org::PassExecutionContext& context,
 		NativeBinningStage stage, const NativeBinningBindings& bindings) noexcept;
 	bool RecordNativeEvaluator(org::PassExecutionContext& context,
@@ -106,6 +112,7 @@ private:
 	rhi::PipelineLayoutPtr evaluatorLayout;
 	std::array<rhi::PipelinePtr, CS::Deferred::kEvaluatorCount> evaluatorPipelines;
 	rhi::PipelineLayoutPtr binningLayout;
+	rhi::PipelinePtr seedPipeline;
 	std::array<rhi::PipelinePtr, 4> binningPipelines;
 	rhi::CommandSignaturePtr evaluatorCommandSignature;
 	std::array<ImportedInput, 6> inputs;

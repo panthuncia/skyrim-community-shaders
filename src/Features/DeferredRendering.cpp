@@ -11,10 +11,24 @@
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	DeferredRendering::Settings,
 	visualizeDeferredCoverage,
-	classifyVisibleMaterials)
+	classifyVisibleMaterials,
+	debugView)
 
 void DeferredRendering::DrawSettings()
 {
+	static constexpr const char* debugViews[]{
+		"Final image", "Compatibility input", "Albedo", "Specular / visibility",
+		"Reflectance", "Decoded normal", "Material masks", "Material identity",
+		"Linear depth", "Direct lighting", "Ambient lighting", "Subsurface lighting"
+	};
+	int debugView = static_cast<int>(settings.debugView);
+	if (ImGui::Combo("Deferred component view", &debugView, debugViews,
+		static_cast<int>(std::size(debugViews)))) {
+		settings.debugView = static_cast<DebugView>(debugView);
+		globals::state->Save();
+	}
+	if (auto tooltip = Util::HoverTooltipWrapper())
+		ImGui::TextUnformatted("Displays the current graph inputs or reconstructed lighting components. Resource views cover the full frame; lighting-component views are populated for promoted pixels.");
 	if (ImGui::Checkbox(T(TKEY("visualize_deferred_coverage"), "Visualize Deferred Coverage"),
 			&settings.visualizeDeferredCoverage)) {
 		// Diagnostic state is expected to survive closing/restarting while testing;

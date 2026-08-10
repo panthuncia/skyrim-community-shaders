@@ -64,7 +64,7 @@ struct DeferredFrameData
 	float4 iblSettings1;
 	float3 skylightingPositionOffset; uint skylightingEnabled;
 	uint3 skylightingArrayOrigin; float skylightingMinDiffuseVisibility;
-	float skylightingMinSpecularVisibility; uint pbrMaterialCount; float2 lightingParameterPadding;
+	float skylightingMinSpecularVisibility; uint pbrMaterialCount; uint debugView; float lightingParameterPadding;
 };
 
 #define projectionInverse frame.projectionInverse
@@ -97,7 +97,6 @@ struct DeferredFrameData
 #define skylightingMinDiffuseVisibility frame.skylightingMinDiffuseVisibility
 #define skylightingMinSpecularVisibility frame.skylightingMinSpecularVisibility
 #define pbrMaterialCount frame.pbrMaterialCount
-
 #include "DeferredIndirectLighting.hlsli"
 
 cbuffer EvaluatorDispatch : register(b1)
@@ -107,6 +106,7 @@ cbuffer EvaluatorDispatch : register(b1)
 	uint evaluatorPixelCount;
 	uint evaluatorDispatchWidth;
 	uint frameConstantsIndex;
+	uint debugView;
 	uint4 descriptorIndices0;
 	uint4 descriptorIndices1;
 	uint4 descriptorIndices2;
@@ -289,6 +289,11 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 	StructuredBuffer<PBRMaterialRecord> PBRMaterials = ResourceDescriptorHeap[descriptorIndices4.w];
 	RWTexture2D<float4> CompositeTexture = ResourceDescriptorHeap[descriptorIndices5.y];
 	RWTexture2D<uint> FrameMarker = ResourceDescriptorHeap[descriptorIndices5.z];
+	if (dispatchThread.x == 0u) {
+		uint ignored;
+		InterlockedExchange(FrameMarker[uint2(674u, 0u)], debugView, ignored);
+		InterlockedAdd(FrameMarker[uint2(675u, 0u)], 1u, ignored);
+	}
 	RWTexture2D<float4> SpecularCompositeTexture = ResourceDescriptorHeap[descriptorIndices5.w];
 	RWTexture2D<float4> ReflectanceCompositeTexture = ResourceDescriptorHeap[descriptorIndices6.x];
 	RWTexture2D<float4> AlbedoCompositeTexture = ResourceDescriptorHeap[descriptorIndices6.y];
@@ -315,6 +320,29 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 	uint materialClass = CSDeferredMaterialClass(packed);
 	if (CSDeferredEvaluatorForMaterial(materialClass) != evaluatorID)
 		return;
+	if (debugView >= 1u && debugView <= 8u) {
+		if (debugView == 1u)
+			CompositeTexture[pixel.xy] = CompatibilityReferenceTexture.Load(int3(pixel.xy, 0));
+		else if (debugView == 2u)
+			CompositeTexture[pixel.xy] = AlbedoTexture.Load(int3(pixel.xy, 0));
+		else if (debugView == 3u)
+			CompositeTexture[pixel.xy] = SpecularTexture.Load(int3(pixel.xy, 0));
+		else if (debugView == 4u)
+			CompositeTexture[pixel.xy] = ReflectanceTexture.Load(int3(pixel.xy, 0));
+		else if (debugView == 5u)
+			CompositeTexture[pixel.xy] = float4(
+				DecodeCSNormal(NormalRoughnessTexture.Load(int3(pixel.xy, 0)).xy) * 0.5f + 0.5f, 1.0f);
+		else if (debugView == 6u)
+			CompositeTexture[pixel.xy] = MasksTexture.Load(int3(pixel.xy, 0));
+		else if (debugView == 7u)
+			CompositeTexture[pixel.xy] = float4(CSDeferredEvaluatorDebugColor(evaluatorID), 1.0f);
+		else {
+			float normalizedDepth = saturate(log2(1.0f + max(
+				LinearDepthTexture.Load(int3(pixel.xy, 0)), 0.0f)) / 16.0f);
+			CompositeTexture[pixel.xy] = normalizedDepth.xxxx;
+		}
+		return;
+	}
 	// Pixel binning already applied the host's enabled-evaluator mask, so every
 	// invocation here represents an evaluator that actually recorded work.
 	// TruePBR repurposes several raster payload targets and must still execute
@@ -610,6 +638,12 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 			CSDeferredApplySkylighting(candidate, ambientLit, outputAlbedo,
 				skylightingDiffuse, enableLinearLighting != 0u);
 		}
+		if (debugView == 9u)
+			candidate = (directDiffuse + direct.transmission) * pbrScale;
+		else if (debugView == 10u)
+			candidate = ambient * outputAlbedo;
+		else if (debugView == 11u)
+			candidate = 0.0f;
 		if ((frameFlags & 8u) != 0u) {
 			uint parityBase = evaluatorID == CS_EVALUATOR_TRUE_PBR ? 64u :
 				(evaluatorID == CS_EVALUATOR_TRUE_PBR_SUBSURFACE_FUZZ ? 80u :
@@ -664,7 +698,6 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 	if (evaluatorID == CS_EVALUATOR_GRASS) {
 		float4 grassVisibility = SpecularTexture.Load(int3(pixel.xy, 0));
 		float4 grassParameters = MasksTexture.Load(int3(pixel.xy, 0));
-		if (!(grassParameters.w > 0.0f)) return;
 		float3 albedo = AlbedoTexture.Load(int3(pixel.xy, 0)).rgb;
 		float3 directionalLightDirection = normalize(lightingContext.directionalLightDirection.xyz);
 		float3 grassDirectionalColor = CSDeferredTransformLight(
@@ -747,6 +780,12 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 		if (skylightingEnabled != 0u && !interior)
 			CSDeferredApplySkylighting(candidate, ambientLit, albedo, skylightingDiffuse,
 				enableLinearLighting != 0u);
+		if (debugView == 9u)
+			candidate = diffuseIrradiance * albedo;
+		else if (debugView == 10u)
+			candidate = ambient * albedo;
+		else if (debugView == 11u)
+			candidate = subsurfaceIrradiance * albedo * albedo;
 		if ((frameFlags & 8u) != 0)
 			AccumulateParity(0u, pixel.xy, candidate, CompatibilityReferenceTexture, FrameMarker);
 		CompositeTexture[pixel.xy] = float4(candidate, 1.0f);
@@ -881,6 +920,12 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 		if (skylightingEnabled != 0u && !interior)
 			CSDeferredApplySkylighting(candidate, ambientLit, albedo,
 				skylightingDiffuse, enableLinearLighting != 0u);
+		if (debugView == 9u)
+			candidate = directIrradiance * albedo;
+		else if (debugView == 10u)
+			candidate = ambientIrradiance * albedo;
+		else if (debugView == 11u)
+			candidate = 0.0f;
 		SpecularCompositeTexture[pixel.xy] = float4(directSpecular, 1.0f);
 		if (materialClass == CS_MATERIAL_FoliageSpecial)
 			ReflectanceCompositeTexture[pixel.xy] = 0.0f;
