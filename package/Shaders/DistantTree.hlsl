@@ -211,20 +211,29 @@ PS_OUTPUT main(PS_INPUT input)
 	if (screenSpaceVisibility != 0.0)
 		directionalEnvironmentVisibility *= ShadowSampling::GetWorldShadow(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
 
-	float llDirLightMult = (SharedData::linearLightingSettings.enableLinearLighting && !SharedData::linearLightingSettings.isDirLightLinear) ? SharedData::linearLightingSettings.dirLightMult : 1.0f;
-	float3 diffuseColor = Color::DirectionalLight(SharedData::DirLightColor.xyz / max(llDirLightMult, 1e-5), SharedData::linearLightingSettings.isDirLightLinear) * screenSpaceVisibility * directionalEnvironmentVisibility * 0.5 * llDirLightMult * Color::VanillaNormalization();
-
 #			if defined(EXP_HEIGHT_FOG)
+	float sunlightFogVisibility = 1.0f;
 	if (SharedData::exponentialHeightFogSettings.enabled) {
-		float sunlightFogVisibility = ExponentialHeightFog::GetSunlightFogAttenuation(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
+		sunlightFogVisibility = ExponentialHeightFog::GetSunlightFogAttenuation(
+			input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
 		directionalEnvironmentVisibility *= sunlightFogVisibility;
-		diffuseColor *= sunlightFogVisibility;
 	}
 #			endif
 
 	float3 ddx = ddx_coarse(input.WorldPosition.xyz);
 	float3 ddy = ddy_coarse(input.WorldPosition.xyz);
 	float3 normal = -normalize(cross(ddx, ddy));
+
+	// The dedicated G-buffer variant retains visibility/material production but
+	// leaves the authoritative color to the D3D12 distant-tree evaluator.
+#			if !defined(DEFERRED_GBUFFER)
+	float llDirLightMult = (SharedData::linearLightingSettings.enableLinearLighting && !SharedData::linearLightingSettings.isDirLightLinear) ? SharedData::linearLightingSettings.dirLightMult : 1.0f;
+	float3 diffuseColor = Color::DirectionalLight(SharedData::DirLightColor.xyz / max(llDirLightMult, 1e-5), SharedData::linearLightingSettings.isDirLightLinear) * screenSpaceVisibility * directionalEnvironmentVisibility * 0.5 * llDirLightMult * Color::VanillaNormalization();
+
+#			if defined(EXP_HEIGHT_FOG)
+	if (SharedData::exponentialHeightFogSettings.enabled)
+		diffuseColor *= sunlightFogVisibility;
+#			endif
 
 	float3 directionalAmbientColor = max(0, Color::Ambient(SharedData::GetAmbient(normal)));
 #			if defined(IBL)
@@ -241,6 +250,9 @@ PS_OUTPUT main(PS_INPUT input)
 	if (inReflection && SharedData::exponentialHeightFogSettings.enabled) {
 		ApplyReflectionExponentialHeightFog(psout.Diffuse.xyz, input.WorldPosition.xyz, input.Position);
 	}
+#			endif
+#			else
+	psout.Diffuse = float4(0.0f, 0.0f, 0.0f, 1.0f);
 #			endif
 
 	psout.MotionVector = MotionBlur::GetSSMotionVector(input.WorldPosition, input.PreviousWorldPosition);

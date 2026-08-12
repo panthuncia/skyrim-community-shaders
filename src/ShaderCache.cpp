@@ -194,6 +194,9 @@ namespace SIE
 			if (descriptor & static_cast<uint32_t>(ShaderCache::DistantTreeShaderFlags::Deferred)) {
 				defines[lastIndex++] = { "DEFERRED", nullptr };
 			}
+			if (descriptor & static_cast<uint32_t>(ShaderCache::DistantTreeShaderFlags::DeferredGBuffer)) {
+				defines[lastIndex++] = { "DEFERRED_GBUFFER", nullptr };
+			}
 
 			for (auto* feature : Feature::GetFeatureList()) {
 				if (feature->loaded && feature->HasShaderDefine(RE::BSShader::Type::DistantTree)) {
@@ -289,6 +292,9 @@ namespace SIE
 			}
 			if (descriptor & static_cast<uint32_t>(ShaderCache::GrassShaderFlags::AlphaTest)) {
 				defines[lastIndex++] = { "DO_ALPHA_TEST", nullptr };
+			}
+			if (descriptor & static_cast<uint32_t>(ShaderCache::GrassShaderFlags::DeferredGBuffer)) {
+				defines[lastIndex++] = { "DEFERRED_GBUFFER", nullptr };
 			}
 
 			for (auto* feature : Feature::GetFeatureList()) {

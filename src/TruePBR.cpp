@@ -1074,17 +1074,17 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 
 struct BSLightingShader_SetupGeometry
 {
-	static void CaptureDeferredMaterial(RE::BSRenderPass* pass)
+	static bool CaptureDeferredMaterial(RE::BSRenderPass* pass)
 	{
 		if (!pass || !pass->geometry ||
 			!globals::features::deferredRendering.IsRuntimeEnabled())
-			return;
+			return false;
 		auto& property = pass->geometry->GetGeometryRuntimeData().shaderProperty;
 		if (!property || property->GetRTTI() != globals::rtti::BSLightingShaderPropertyRTTI.get())
-			return;
+			return false;
 		auto* lightingProperty = static_cast<RE::BSLightingShaderProperty*>(property.get());
 		if (!lightingProperty->material)
-			return;
+			return false;
 		auto* material = lightingProperty->material;
 		CS::Deferred::PBRMaterialRecord record{};
 		const auto objectIt = BSLightingShaderMaterialPBR::All.find(
@@ -1131,13 +1131,18 @@ struct BSLightingShader_SetupGeometry
 			record.materialParameters[5] = { glint.screenSpaceScale,
 				glint.logMicrofacetDensity, glint.microfacetRoughness,
 				glint.densityRandomization };
-			globals::features::deferredRendering.AssignPBRMaterial(pass, record);
-			return;
+			const auto materialIndex = globals::features::deferredRendering.AssignPBRMaterial(pass, record);
+			const bool specialized = pbr->pbrFlags.any(PBRFlags::Subsurface) ||
+				pbr->pbrFlags.any(PBRFlags::TwoLayer) || pbr->pbrFlags.any(PBRFlags::InterlayerParallax) ||
+				pbr->pbrFlags.any(PBRFlags::CoatNormal) || pbr->pbrFlags.any(PBRFlags::Fuzz) ||
+				pbr->pbrFlags.any(PBRFlags::HairMarschner) || pbr->GetGlintParameters().enabled ||
+				pbr->GetProjectedMaterialGlintParameters().enabled || pbr->displacementTexture;
+			return materialIndex != CS::Deferred::kInvalidPBRMaterial && !specialized;
 		}
 		const auto landscapeIt = BSLightingShaderMaterialPBRLandscape::All.find(
 			reinterpret_cast<BSLightingShaderMaterialPBRLandscape*>(material));
 		if (landscapeIt == BSLightingShaderMaterialPBRLandscape::All.end())
-			return;
+			return false;
 		auto* landscape = landscapeIt->first;
 		for (std::size_t layerIndex = 0;
 			layerIndex < BSLightingShaderMaterialPBRLandscape::NumTiles; ++layerIndex) {
@@ -1158,6 +1163,7 @@ struct BSLightingShader_SetupGeometry
 				glint.densityRandomization };
 		}
 		globals::features::deferredRendering.AssignPBRMaterial(pass, record);
+		return false;
 	}
 
 	static void thunk(RE::BSLightingShader* shader, RE::BSRenderPass* pass, uint32_t renderFlags)
@@ -1165,7 +1171,9 @@ struct BSLightingShader_SetupGeometry
 		const auto originalTechnique = shader->currentRawTechnique;
 
 		if ((shader->currentRawTechnique & static_cast<uint32_t>(SIE::ShaderCache::LightingShaderFlags::TruePbr)) != 0) {
-			CaptureDeferredMaterial(pass);
+			if (CaptureDeferredMaterial(pass))
+				shader->currentRawTechnique |= static_cast<uint32_t>(
+					SIE::ShaderCache::LightingShaderFlags::DeferredMaterialResolved);
 			shader->currentRawTechnique |= static_cast<uint32_t>(SIE::ShaderCache::LightingShaderFlags::AmbientSpecular);
 			shader->currentRawTechnique ^= static_cast<uint32_t>(SIE::ShaderCache::LightingShaderFlags::AnisoLighting);
 		}

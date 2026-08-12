@@ -592,6 +592,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	specularColor += lightsSpecularColor;
 	specularColor *= specColor.w * SharedData::grassLightingSettings.SpecularStrength;
 
+#			if defined(DEFERRED_GBUFFER)
+	// The graph owns the final color for this permutation. Keeping this a real
+	// variant lets FXC eliminate the direct/local grass-lighting work above.
+	psout.Diffuse = float4(0.0f, 0.0f, 0.0f, 1.0f);
+#			else
 #			if defined(LIGHT_LIMIT_FIX) && defined(LLFDEBUG)
 	if (SharedData::lightLimitFixSettings.EnableLightsVisualisation) {
 		if (SharedData::lightLimitFixSettings.LightsVisualisationMode == 0) {
@@ -607,6 +612,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #			else
 	psout.Diffuse.xyz = diffuseColor;
 #			endif
+#			endif
 
 	float3 normalVS = normalize(FrameBuffer::WorldToView(normal, false));
 	psout.Albedo = float4(albedo, 1);
@@ -617,6 +623,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	uint packedVertexAO = (uint)round(saturate(vertexAO) * 31.0);
 	psout.Masks2 = uint4(0x0000FFFFu | (packedVertexAO << 27), 0xFFFFFFFFu, 0u,
 		0x80000000u | CS_MATERIAL_Grass);
+#			if defined(DEFERRED_GBUFFER)
+	uint surfaceFlags = 3u | (complex ? 4u : 0u);
+	psout.Masks2 = uint4((CS_MATERIAL_Grass << 16u) | (surfaceFlags << 24u) | (packedVertexAO << 27),
+		0xFFFFFFFFu, 0u, 0x80000000u | CS_MATERIAL_Grass);
+#			else
 	if (SharedData::DeferredRenderingEnabled &&
 		CSDeferredEvaluatorEnabled(CS_EVALUATOR_GRASS,
 			SharedData::DeferredEnabledEvaluatorMask)) {
@@ -624,8 +635,16 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		psout.Masks2 = uint4((CS_MATERIAL_Grass << 16u) | (surfaceFlags << 24u) | (packedVertexAO << 27),
 			0xFFFFFFFFu, 0u, 0x80000000u | CS_MATERIAL_Grass);
 	}
+#			endif
 	// Store resolved surface and visibility inputs for the real grass evaluator.
 	// IBL and skylighting remain unevaluated and are sampled by D3D12.
+#			if defined(DEFERRED_GBUFFER)
+	psout.NormalGlossiness.z = specColor.w * SharedData::grassLightingSettings.SpecularStrength;
+	psout.Specular = float4(directionalEnvironmentAttenuation, dirDetailedShadow, dirSoftShadow, 0.0f);
+	psout.Masks.x = softLightRolloff;
+	psout.Masks.y = dirSoftShadow;
+	psout.Masks.w = SharedData::grassLightingSettings.Glossiness;
+#			else
 	if (SharedData::DeferredRenderingEnabled &&
 		CSDeferredEvaluatorEnabled(CS_EVALUATOR_GRASS,
 			SharedData::DeferredEnabledEvaluatorMask)) {
@@ -637,6 +656,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		psout.Masks.y = dirSoftShadow;
 		psout.Masks.w = SharedData::grassLightingSettings.Glossiness;
 	}
+#			endif
 #		endif
 	return psout;
 }

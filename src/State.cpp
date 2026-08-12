@@ -922,8 +922,11 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 					using Flags = SIE::ShaderCache::LightingShaderFlags;
 					using Technique = SIE::ShaderCache::LightingShaderTechniques;
 					const auto technique = static_cast<Technique>((a_vertexDescriptor >> 24u) & 0x3Fu);
-					const auto excludedFlags = static_cast<uint32_t>(Flags::TruePbr) |
-						static_cast<uint32_t>(Flags::ProjectedUV) |
+					const bool truePbr = (sourcePixelDescriptor &
+						static_cast<uint32_t>(Flags::TruePbr)) != 0u;
+					const bool resolvedTruePbr = truePbr && (sourcePixelDescriptor &
+						static_cast<uint32_t>(Flags::DeferredMaterialResolved)) != 0u;
+					const auto excludedFlags = static_cast<uint32_t>(Flags::ProjectedUV) |
 						static_cast<uint32_t>(Flags::AnisoLighting) |
 						static_cast<uint32_t>(Flags::WorldMap) |
 						static_cast<uint32_t>(Flags::BaseObjectIsSnow) |
@@ -941,11 +944,15 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 						(sourcePixelDescriptor & specialFoliageFlags) != 0u;
 					const bool unsupportedSpecialLighting = !specialFoliage &&
 						(sourcePixelDescriptor & specialFoliageFlags) != 0u;
-					const auto requiredEvaluator = specialFoliage ?
+					const auto requiredEvaluator = resolvedTruePbr ?
+						CS::Deferred::Evaluator::TruePBR : specialFoliage ?
 						CS::Deferred::Evaluator::FoliageSpecial : CS::Deferred::Evaluator::Generic;
 					const auto requiredEvaluatorBit =
 						1u << static_cast<std::uint32_t>(requiredEvaluator);
-					if (resolvedTechnique && (sourcePixelDescriptor & excludedFlags) == 0u &&
+					const auto effectiveExcludedFlags = resolvedTruePbr ?
+						excludedFlags & ~static_cast<uint32_t>(Flags::AnisoLighting) : excludedFlags;
+					if (resolvedTechnique && (!truePbr || resolvedTruePbr) &&
+						(sourcePixelDescriptor & effectiveExcludedFlags) == 0u &&
 						!unsupportedSpecialLighting &&
 						(globals::features::deferredRendering.GetEnabledEvaluatorMask() & requiredEvaluatorBit) != 0u)
 						a_pixelDescriptor |= static_cast<uint32_t>(Flags::DeferredGBuffer);
@@ -996,6 +1003,23 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 			{
 				if (deferred->deferredPass || a_forceDeferred)
 					a_pixelDescriptor |= (uint32_t)SIE::ShaderCache::DistantTreeShaderFlags::Deferred;
+				if (deferred->deferredPass && globals::features::deferredRendering.IsRuntimeEnabled() &&
+					(globals::features::deferredRendering.GetEnabledEvaluatorMask() &
+						CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::DistantTree)) != 0u)
+					a_pixelDescriptor |= static_cast<uint32_t>(
+						SIE::ShaderCache::DistantTreeShaderFlags::DeferredGBuffer);
+			}
+			break;
+		case RE::BSShader::Type::Grass:
+			{
+				const auto technique = a_pixelDescriptor & 0xFu;
+				if (deferred->deferredPass &&
+					technique != static_cast<uint32_t>(SIE::ShaderCache::GrassShaderTechniques::RenderDepth) &&
+					globals::features::deferredRendering.IsRuntimeEnabled() &&
+					(globals::features::deferredRendering.GetEnabledEvaluatorMask() &
+						CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::Grass)) != 0u)
+					a_pixelDescriptor |= static_cast<uint32_t>(
+						SIE::ShaderCache::GrassShaderFlags::DeferredGBuffer);
 			}
 			break;
 		case RE::BSShader::Type::Sky:

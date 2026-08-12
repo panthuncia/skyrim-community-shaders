@@ -563,6 +563,9 @@ namespace SIE
 			// have a deferred evaluator, so forward direct lighting can be compiled
 			// out instead of calculated and subsequently overwritten.
 			DeferredGBuffer = 1 << 5,
+			// Draw-level marker set by material setup after proving that a runtime
+			// TruePBR material can never classify to Compatibility.
+			DeferredMaterialResolved = 1 << 6,
 			// Community Shaders end
 			Specular = 1 << 9,
 			SoftLighting = 1 << 10,
@@ -596,6 +599,7 @@ namespace SIE
 		enum class DistantTreeShaderFlags
 		{
 			Deferred = 1 << 8,
+			DeferredGBuffer = 1 << 9,
 			AlphaTest = 1 << 16,
 		};
 
@@ -619,6 +623,7 @@ namespace SIE
 
 		enum class GrassShaderFlags
 		{
+			DeferredGBuffer = 1 << 8,
 			AlphaTest = 0x10000,
 		};
 

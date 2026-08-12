@@ -187,9 +187,16 @@ void DeferredRendering::RecordShaderSelection(RE::BSShader::Type type,
 		shaderSelectionsInReflections[classification].fetch_add(1, std::memory_order_relaxed);
 	if (deferredBit && (pixelDescriptor & deferredBit) != 0)
 		shaderSelectionsWithDeferredPermutation[classification].fetch_add(1, std::memory_order_relaxed);
-	if (type == RE::BSShader::Type::Lighting &&
+	bool gbufferOnly = type == RE::BSShader::Type::Lighting &&
 		(pixelDescriptor & static_cast<std::uint32_t>(
-			SIE::ShaderCache::LightingShaderFlags::DeferredGBuffer)) != 0)
+			SIE::ShaderCache::LightingShaderFlags::DeferredGBuffer)) != 0;
+	gbufferOnly |= type == RE::BSShader::Type::DistantTree &&
+		(pixelDescriptor & static_cast<std::uint32_t>(
+			SIE::ShaderCache::DistantTreeShaderFlags::DeferredGBuffer)) != 0;
+	gbufferOnly |= type == RE::BSShader::Type::Grass &&
+		(pixelDescriptor & static_cast<std::uint32_t>(
+			SIE::ShaderCache::GrassShaderFlags::DeferredGBuffer)) != 0;
+	if (gbufferOnly)
 		shaderSelectionsWithGBufferPermutation[classification].fetch_add(1, std::memory_order_relaxed);
 }
 

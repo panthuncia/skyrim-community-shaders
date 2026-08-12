@@ -117,10 +117,8 @@ bool RenderGraphRuntime::ExecuteGraph(uint32_t width, uint32_t height,
 	frame.outputWidth = resourceWidth; frame.outputHeight = resourceHeight;
 	frame.readyTimeline = readyTimeline.Get(); frame.readyValue = ready;
 	frame.completeTimeline = completeTimeline.Get(); frame.completeValue = complete;
-	if (!runtime->Execute(frame)) {
-		globals::features::deferredRendering.SetEnabledEvaluatorMask(0u);
+	if (!runtime->Execute(frame))
 		return false;
-	}
 	deviceBundle.context11->Wait(completeFence11.get(), complete);
 	globals::features::deferredRendering.RetireFrames(GetCompletedGraphValue());
 	return true;

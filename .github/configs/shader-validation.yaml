@@ -2111,6 +2111,11 @@ shaders:
                     defines:
                         - DO_ALPHA_TEST
                         - DEFERRED
+                  - entry: DistantTree:Pixel:10300
+                    defines:
+                        - DO_ALPHA_TEST
+                        - DEFERRED
+                        - DEFERRED_GBUFFER
                   - entry: DistantTree:Pixel:10001
                     defines:
                         - RENDER_DEPTH
@@ -2157,6 +2162,21 @@ shaders:
                         - DO_ALPHA_TEST
     - file: RunGrass.hlsl
       configs:
+          PSHADER:
+              common_defines:
+                  - D3DCOMPILE_DEBUG
+                  - D3DCOMPILE_SKIP_OPTIMIZATION
+                  - PSHADER
+                  - IBL
+                  - LIGHT_LIMIT_FIX
+                  - SCREEN_SPACE_SHADOWS
+                  - SKYLIGHTING
+                  - GRASS_LIGHTING
+                  - ISL
+              entries:
+                  - entry: Grass:Pixel:100
+                    defines:
+                        - DEFERRED_GBUFFER
           VSHADER:
               common_defines:
                   - D3DCOMPILE_DEBUG
@@ -15088,6 +15108,39 @@ shaders:
                         - DEFERRED
                   - entry: Lighting:Pixel:31
                     defines:
+                        - DEFERRED
+                        - DEFERRED_GBUFFER
+                  - entry: Lighting:Pixel:79
+                    defines:
+                        - DEFERRED
+                        - DEFERRED_GBUFFER
+                        - TRUE_PBR
+                  - entry: Lighting:Pixel:100231
+                    defines:
+                        - VC
+                        - SPECULAR
+                        - DO_ALPHA_TEST
+                        - DEFERRED
+                        - DEFERRED_GBUFFER
+                  - entry: Lighting:Pixel:C100031
+                    defines:
+                        - VC
+                        - TREE_ANIM
+                        - DO_ALPHA_TEST
+                        - DEFERRED
+                        - DEFERRED_GBUFFER
+                  - entry: Lighting:Pixel:8000031
+                    defines:
+                        - VC
+                        - MULTI_TEXTURE
+                        - LANDSCAPE
+                        - DEFERRED
+                        - DEFERRED_GBUFFER
+                  - entry: Lighting:Pixel:D100031
+                    defines:
+                        - VC
+                        - LODOBJECTS
+                        - DO_ALPHA_TEST
                         - DEFERRED
                         - DEFERRED_GBUFFER
                   - entry: Lighting:Pixel:1011
