@@ -17,9 +17,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 void DeferredRendering::DrawSettings()
 {
 	static constexpr const char* debugViews[]{
-		"Final image", "Compatibility input", "Albedo", "Specular / visibility",
+		"Final image", "Compatibility-only contribution", "Albedo", "Specular / visibility",
 		"Reflectance", "Decoded normal", "Material masks", "Material identity",
-		"Linear depth", "Direct lighting", "Ambient lighting", "Subsurface lighting"
+		"Linear depth", "Direct lighting", "Ambient lighting", "Subsurface lighting",
+		"Raw forward input"
 	};
 	int debugView = static_cast<int>(settings.debugView);
 	if (ImGui::Combo("Deferred component view", &debugView, debugViews,
@@ -28,7 +29,7 @@ void DeferredRendering::DrawSettings()
 		globals::state->Save();
 	}
 	if (auto tooltip = Util::HoverTooltipWrapper())
-		ImGui::TextUnformatted("Displays the current graph inputs or reconstructed lighting components. Resource views cover the full frame; lighting-component views are populated for promoted pixels.");
+		ImGui::TextUnformatted("Compatibility-only shows the forward contribution retained by the final composite and blacks out promoted pixels. Raw forward input shows the unmasked D3D11 render target and exposes residual forward work. Other resource views cover the full frame; lighting-component views are populated for promoted pixels.");
 	if (ImGui::Checkbox(T(TKEY("visualize_deferred_coverage"), "Visualize Deferred Coverage"),
 			&settings.visualizeDeferredCoverage)) {
 		// Diagnostic state is expected to survive closing/restarting while testing;

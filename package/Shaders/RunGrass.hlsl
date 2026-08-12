@@ -294,6 +294,7 @@ struct PS_OUTPUT
 	float2 MotionVectors: SV_Target1;
 	float4 Normal: SV_Target2;
 	float4 Albedo: SV_Target3;
+	float4 Specular: SV_Target4;
 	float4 Masks: SV_Target6;
 	uint4 Masks2: SV_Target7;
 #	endif
@@ -611,6 +612,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	}
 #			else
 	psout.Diffuse.xyz = diffuseColor;
+#		if defined(DEFERRED_GBUFFER)
+	psout.Diffuse.xyz = 0.0f;
+#		endif
 #			endif
 #			endif
 
@@ -628,13 +632,8 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	psout.Masks2 = uint4((CS_MATERIAL_Grass << 16u) | (surfaceFlags << 24u) | (packedVertexAO << 27),
 		0xFFFFFFFFu, 0u, 0x80000000u | CS_MATERIAL_Grass);
 #			else
-	if (SharedData::DeferredRenderingEnabled &&
-		CSDeferredEvaluatorEnabled(CS_EVALUATOR_GRASS,
-			SharedData::DeferredEnabledEvaluatorMask)) {
-		uint surfaceFlags = 3u | (complex ? 4u : 0u);
-		psout.Masks2 = uint4((CS_MATERIAL_Grass << 16u) | (surfaceFlags << 24u) | (packedVertexAO << 27),
-			0xFFFFFFFFu, 0u, 0x80000000u | CS_MATERIAL_Grass);
-	}
+	// Compatibility permutations retain the legacy identity. Only the real
+	// DEFERRED_GBUFFER variant above is eligible for evaluator binning.
 #			endif
 	// Store resolved surface and visibility inputs for the real grass evaluator.
 	// IBL and skylighting remain unevaluated and are sampled by D3D12.
@@ -805,10 +804,24 @@ PS_OUTPUT main(PS_INPUT input)
 
 	psout.Albedo = float4(albedo, 1);
 	psout.Masks = float4(0, 0, Color::RGBToYCoCg(directionalAmbientColor).x, 0);
-	// Grass remains geometry-lit.  Never allow its G-buffer pixels to inherit
-	// the deferred identity of opaque geometry rendered underneath it.
-	psout.Masks2 = uint4(0x0000FFFFu | ((uint)round(saturate(vertexAO) * 31.0) << 27),
+	uint packedVertexAO = (uint)round(saturate(vertexAO) * 31.0);
+#		if defined(DEFERRED_GBUFFER)
+	// Basic grass uses the same evaluator with the complex flag clear. Supply
+	// resolved visibility inputs and a real identity instead of silently binding
+	// a G-buffer permutation that still executed the complete forward path.
+	psout.Specular = float4(dirDetailedShadow, dirDetailedShadow, dirDetailedShadow, 0.0f);
+	psout.Normal.z = 0.0f;
+	psout.Masks.x = 0.0f;
+	psout.Masks.y = dirDetailedShadow;
+	psout.Masks.w = SharedData::grassLightingSettings.Glossiness;
+	psout.Masks2 = uint4((CS_MATERIAL_Grass << 16u) | (3u << 24u) | (packedVertexAO << 27),
 		0xFFFFFFFFu, 0u, 0x80000000u | CS_MATERIAL_Grass);
+#		else
+	// Compatibility permutations must explicitly clear identity so geometry
+	// underneath cannot leak into the deferred classifier.
+	psout.Masks2 = uint4(0x0000FFFFu | (packedVertexAO << 27),
+		0xFFFFFFFFu, 0u, 0x80000000u | CS_MATERIAL_Grass);
+#		endif
 #		endif
 
 	return psout;

@@ -708,7 +708,6 @@ bool DX12DeferredShading::CommitComposite(ID3D11Texture2D* destination) noexcept
 	globals::d3d::context->UpdateSubresource(handoffConstants.get(), 0, nullptr, handoffData, 0, 0);
 	ID3D11Buffer* handoffBuffers[]{ handoffConstants.get() };
 	globals::d3d::context->PSSetConstantBuffers(0, 1, handoffBuffers);
-	const bool visualizeCoverage = globals::features::deferredRendering.IsCoverageVisualizationEnabled();
 	// The existing D3D11 deferred composite consumes SPECULAR separately from
 	// main color. Replace it first so promoted pixels are not double-lit while
 	// compatibility pixels retain their geometry-evaluated value.
@@ -764,26 +763,47 @@ bool DX12DeferredShading::CommitComposite(ID3D11Texture2D* destination) noexcept
 	};
 	restoreMaterialTarget(albedoBlitRTV.get(), albedoComposite.srv11.get());
 	restoreMaterialTarget(normalBlitRTV.get(), normalComposite.srv11.get());
-	restoreMaterialTarget(masksBlitRTV.get(), masksComposite.srv11.get());
 	globals::d3d::context->UpdateSubresource(handoffConstants.get(), 0, nullptr,
 		handoffData, 0, 0);
+	// Every evaluator now produces the canonical downstream mask values. Restore
+	// them for all promoted pixels so raster variants do not retain forward
+	// ambient-lighting work merely for the later D3D11 composite.
+	restoreMaterialTarget(masksBlitRTV.get(), masksComposite.srv11.get());
 
 	globals::d3d::context->OMSetRenderTargets(1, &target, nullptr);
 	globals::d3d::context->PSSetShader(compositeSelectiveBlitPS.get(), nullptr, 0);
 	ID3D11ShaderResourceView* sources[]{ composite.srv11.get(), packedSurfaceMirror.srv11.get() };
 	globals::d3d::context->PSSetShaderResources(0, ARRAYSIZE(sources), sources);
 	globals::d3d::context->Draw(3, 0);
-	if (visualizeCoverage && packedSurfaceMirror.srv11) {
-		sources[0] = nullptr;
-		sources[1] = packedSurfaceMirror.srv11.get();
-		globals::d3d::context->PSSetShaderResources(0, ARRAYSIZE(sources), sources);
-		globals::d3d::context->PSSetShader(compositeCoverageOverlayPS.get(), nullptr, 0);
-		globals::d3d::context->Draw(3, 0);
-	}
 	ID3D11ShaderResourceView* nullSources[2]{};
 	globals::d3d::context->PSSetShaderResources(0, ARRAYSIZE(nullSources), nullSources);
 	state.Restore(globals::d3d::context);
 	state.Release();
+	// Deterministic developer capture of the exact post-handoff image. This is
+	// intentionally opt-in and one-shot: synchronous staging readback is too
+	// expensive for normal gameplay, but is more reliable than injected input
+	// while validating component views under MO2.
+	static bool diagnosticCaptureComplete = false;
+	static std::uint32_t diagnosticCaptureDelay = 120;
+	if (!diagnosticCaptureComplete && diagnosticCaptureDelay > 0)
+		--diagnosticCaptureDelay;
+	if (!diagnosticCaptureComplete && diagnosticCaptureDelay == 0) {
+		wchar_t capturePath[32768]{};
+		const auto capturePathLength = GetEnvironmentVariableW(
+			L"CS_DX12_DEFERRED_CAPTURE_PATH", capturePath,
+			static_cast<DWORD>(std::size(capturePath)));
+		if (capturePathLength > 0 && capturePathLength < std::size(capturePath)) {
+			diagnosticCaptureComplete = true;
+			const auto result = Util::SaveTextureToFile(globals::d3d::device,
+				globals::d3d::context, capturePath, destination);
+			if (SUCCEEDED(result))
+				logger::info("[DeferredRendering] Captured post-composite debug image to {}",
+					std::filesystem::path(capturePath).string());
+			else
+				logger::error("[DeferredRendering] Failed post-composite debug capture: HRESULT=0x{:08X}",
+					static_cast<std::uint32_t>(result));
+		}
+	}
 	return true;
 }
 

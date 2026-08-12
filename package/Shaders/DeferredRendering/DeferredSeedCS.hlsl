@@ -71,7 +71,7 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 		float depth = linearDepth.Load(sourcePixel);
 		float normalizedDepth = saturate(log2(1.0f + max(depth, 0.0f)) / 16.0f);
 		displayed = normalizedDepth.xxxx;
-	} else if (debugView >= 9u)
+	} else if (debugView >= 9u && debugView != 12u)
 		displayed = 0.0f;
 	compositeOutput[dispatchThread.xy] = displayed;
 	specularOutput[dispatchThread.xy] = specular.Load(sourcePixel);

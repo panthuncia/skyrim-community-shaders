@@ -312,9 +312,12 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 	uint materialClass = CSDeferredMaterialClass(packed);
 	if (CSDeferredEvaluatorForMaterial(materialClass) != evaluatorID)
 		return;
-	if (debugView >= 1u && debugView <= 8u) {
+	if ((debugView >= 1u && debugView <= 8u) || debugView == 12u) {
 		if (debugView == 1u)
-			CompositeTexture[pixel.xy] = CompatibilityReferenceTexture.Load(int3(pixel.xy, 0));
+			// This dispatch represents a promoted pixel. Its forward input is not
+			// part of the compatibility-only contribution, even when a legacy
+			// permutation still happened to shade it before graph execution.
+			CompositeTexture[pixel.xy] = 0.0f;
 		else if (debugView == 2u)
 			CompositeTexture[pixel.xy] = AlbedoTexture.Load(int3(pixel.xy, 0));
 		else if (debugView == 3u)
@@ -328,11 +331,12 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 			CompositeTexture[pixel.xy] = MasksTexture.Load(int3(pixel.xy, 0));
 		else if (debugView == 7u)
 			CompositeTexture[pixel.xy] = float4(CSDeferredEvaluatorDebugColor(evaluatorID), 1.0f);
-		else {
+		else if (debugView == 8u) {
 			float normalizedDepth = saturate(log2(1.0f + max(
 				LinearDepthTexture.Load(int3(pixel.xy, 0)), 0.0f)) / 16.0f);
 			CompositeTexture[pixel.xy] = normalizedDepth.xxxx;
-		}
+		} else
+			CompositeTexture[pixel.xy] = CompatibilityReferenceTexture.Load(int3(pixel.xy, 0));
 		return;
 	}
 	// Pixel binning already applied the host's enabled-evaluator mask, so every
@@ -643,6 +647,8 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 				(evaluatorID == CS_EVALUATOR_TRUE_PBR_TERRAIN ? 112u : 128u)));
 			AccumulateParity(parityBase, pixel.xy, candidate, CompatibilityReferenceTexture, FrameMarker);
 		}
+		if ((frameFlags & 4u) != 0u)
+			candidate = CSDeferredEvaluatorDebugColor(evaluatorID);
 		CompositeTexture[pixel.xy] = float4(candidate, resolvedCoverage);
 		SpecularCompositeTexture[pixel.xy] = float4(direct.specular, resolvedCoverage);
 		ReflectanceCompositeTexture[pixel.xy] = float4(indirect.specular + wetnessReflectance,
@@ -682,6 +688,8 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 		CompositeTexture[pixel.xy] = float4(candidate, 1.0f);
 		SpecularCompositeTexture[pixel.xy] = 0.0f;
 		ReflectanceCompositeTexture[pixel.xy] = 0.0f;
+		MasksCompositeTexture[pixel.xy] = float4(0.0f, 0.0f,
+			CSLightingRGBToYCoCg(ambient * albedo).x, 1.0f);
 		if ((frameFlags & 8u) != 0u)
 			AccumulateParity(32u, pixel.xy, candidate, CompatibilityReferenceTexture, FrameMarker);
 		return;
@@ -783,6 +791,8 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 		CompositeTexture[pixel.xy] = float4(candidate, 1.0f);
 		SpecularCompositeTexture[pixel.xy] = float4(specular * normalRoughnessSample.z, 1.0f);
 		ReflectanceCompositeTexture[pixel.xy] = 0.0f;
+		MasksCompositeTexture[pixel.xy] = float4(0.0f, 0.0f,
+			CSLightingRGBToYCoCg(ambientLit).x, 1.0f);
 		return;
 	}
 	float3 directIrradiance = 0.0f;
@@ -920,8 +930,9 @@ void main(uint3 dispatchThread : SV_DispatchThreadID)
 		else if (debugView == 11u)
 			candidate = 0.0f;
 		SpecularCompositeTexture[pixel.xy] = float4(directSpecular, 1.0f);
-		if (materialClass == CS_MATERIAL_FoliageSpecial)
-			ReflectanceCompositeTexture[pixel.xy] = 0.0f;
+		ReflectanceCompositeTexture[pixel.xy] = 0.0f;
+		MasksCompositeTexture[pixel.xy] = float4(0.0f, 0.0f,
+			CSLightingRGBToYCoCg(ambientLit).x, 1.0f);
 		if ((frameFlags & 8u) != 0)
 			AccumulateParity(materialClass == CS_MATERIAL_FoliageSpecial ? 48u : 16u,
 				pixel.xy, candidate, CompatibilityReferenceTexture, FrameMarker);

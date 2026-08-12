@@ -263,15 +263,12 @@ PS_OUTPUT main(PS_INPUT input)
 	psout.Albedo = float4(baseColor.xyz, 1);
 	psout.Masks = float4(directionalEnvironmentVisibility, 0, 1, 0);
 	uint distantTreeMaterial = CS_MATERIAL_Legacy;
+#			if defined(DEFERRED_GBUFFER)
 	if (SharedData::DeferredRenderingEnabled &&
 		CSDeferredEvaluatorEnabled(CS_EVALUATOR_DISTANT_TREE,
-			SharedData::DeferredEnabledEvaluatorMask)
-#			if defined(EXP_HEIGHT_FOG)
-		&& !inReflection
-#			endif
-	) {
+			SharedData::DeferredEnabledEvaluatorMask))
 		distantTreeMaterial = CS_MATERIAL_DistantTree;
-	}
+#			endif
 	// Slot zero is the frame-global lighting context reserved for non-lighting
 	// shader producers. Distant trees receive directional light only.
 	psout.Masks2 = uint4((distantTreeMaterial << 16u) | (1u << 24u) | (31u << 27u),

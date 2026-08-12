@@ -3124,6 +3124,12 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	elif defined(TREE_ANIM) && (defined(SOFT_LIGHTING) || defined(RIM_LIGHTING) || defined(BACK_LIGHTING))
 	deferredMaterialClass = CS_MATERIAL_Legacy;
 #	endif
+	// Promotion is a property of the bound shader variant, not a per-pixel
+	// opportunistic decision. A compatibility-producing permutation must never
+	// enter an evaluator: doing so shades the pixel once here and once in D3D12.
+#	if !defined(DEFERRED_GBUFFER)
+	deferredMaterialClass = CS_MATERIAL_Legacy;
+#	endif
 	if (!SharedData::DeferredRenderingEnabled)
 		deferredMaterialClass = CS_MATERIAL_Legacy;
 	uint deferredEvaluator = CSDeferredEvaluatorForMaterial(deferredMaterialClass);
@@ -3245,6 +3251,18 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	float stochasticBlend = (screenNoise * screenNoise) < psout.Diffuse.w ? 1.0 : 0.0;
 	psout.NormalGlossiness.w = stochasticBlend;
+#	endif
+
+#	if defined(DEFERRED_GBUFFER)
+	// The resolved payload above is authoritative. Make the raw compatibility
+	// input an unambiguous audit of draw-level G-buffer-only selection instead of
+	// retaining ambient/emissive color that merely looks forward-lit.
+	psout.Diffuse.xyz = 0.0f;
+	psout.Masks.z = 0.0f;
+	if (CSDeferredEvaluatorForMaterial(deferredMaterialClass) == CS_EVALUATOR_GENERIC) {
+		psout.Specular = 0.0f;
+		psout.Reflectance = 0.0f;
+	}
 #	endif
 
 #	if !defined(HDR_OUTPUT)  // Do not apply gamma correction before we pass to ISHDR.

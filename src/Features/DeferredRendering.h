@@ -24,7 +24,8 @@ public:
 		LinearDepth,
 		DirectLighting,
 		AmbientLighting,
-		SubsurfaceLighting
+		SubsurfaceLighting,
+		RawForwardInput
 	};
 	struct Settings
 	{
