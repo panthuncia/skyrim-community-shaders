@@ -2214,6 +2214,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	float3 lodLandDiffuseColor = 0;
 
+	// DEFERRED_GBUFFER is selected only for draw-level contracts guaranteed to
+	// use a fully resolved deferred evaluator. Surface/material resolution above and
+	// ambient visibility below are still raster responsibilities; the expensive
+	// direct-light BRDF and local-light loops are exclusively forward work.
+#	if !defined(DEFERRED_GBUFFER)
 	// Directiontal Lighting
 	DirectContext dirLightContext;
 	DirectLightingOutput dirLightOutput;
@@ -2425,13 +2430,16 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	diffuseColor += lightsDiffuseColor;
 	specularColor += lightsSpecularColor;
+#	endif
 
 #	if !defined(LANDSCAPE)
+#		if !defined(DEFERRED_GBUFFER)
 	if (Permutation::PixelShaderDescriptor & Permutation::LightingFlags::CharacterLight) {
 		float charLightMul = saturate(dot(viewDirection, worldNormal.xyz)) * CharacterLightParams.x + CharacterLightParams.y * saturate(dot(float2(0.164398998, -0.986393988), worldNormal.yz));
 		float charLightColor = min(CharacterLightParams.w, max(0, CharacterLightParams.z * TexCharacterLightProjNoiseSampler.Sample(SampCharacterLightProjNoiseSampler, baseShadowUV).x));
 		diffuseColor += (charLightMul * charLightColor).xxx;
 	}
+#		endif
 #	endif
 
 #	if defined(EYE) && defined(VANILLA_EYE_NORMAL)

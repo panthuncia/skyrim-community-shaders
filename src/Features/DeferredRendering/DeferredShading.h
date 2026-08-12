@@ -17,7 +17,7 @@ class DX12DeferredShading
 {
 public:
 	static DX12DeferredShading& Get();
-	bool Initialize(RenderGraphRuntime& runtime) noexcept;
+	bool Initialize(RenderGraphRuntime& runtime);
 	void Shutdown() noexcept;
 	bool PrepareLinearDepth(uint32_t width, uint32_t height) noexcept;
 	bool PrepareCompatibilityInput(ID3D11Texture2D* source) noexcept;
@@ -26,7 +26,7 @@ public:
 	bool PreparePackedSurfaceMirror(ID3D11Texture2D* source) noexcept;
 	bool PrepareGBufferInputs() noexcept;
 	bool PrepareIndirectLightingInputs() noexcept;
-	bool PrepareGlintNoiseInput() noexcept;
+	bool PrepareGlintNoiseInput();
 	bool ShouldCommitComposite() const noexcept;
 	bool CommitComposite(ID3D11Texture2D* destination) noexcept;
 	ID3D11ShaderResourceView* GetCompositeSRV() const noexcept { return composite.srv11.get(); }
@@ -68,7 +68,7 @@ private:
 	bool EnsureLinearDepth(uint32_t width, uint32_t height) noexcept;
 	bool EnsureFrameMarker() noexcept;
 	bool EnsureCompositeBlit(ID3D11Texture2D* destination) noexcept;
-	bool CreatePipeline() noexcept;
+	bool CreatePipeline();
 	bool CreateBinningPipelines() noexcept;
 
 	struct ImportedInput

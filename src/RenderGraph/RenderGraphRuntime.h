@@ -20,7 +20,7 @@ class RenderGraphRuntime
 public:
 	static RenderGraphRuntime& Get();
 
-	bool Initialize(ID3D11Device* device, ID3D11DeviceContext* context) noexcept;
+	bool Initialize(ID3D11Device* device, ID3D11DeviceContext* context);
 	bool ExecuteGraph(uint32_t width, uint32_t height, uint32_t allocationWidth, uint32_t allocationHeight) noexcept;
 	void Shutdown() noexcept;
 	bool IsAvailable() const noexcept { return available.load(std::memory_order_acquire); }

@@ -307,6 +307,7 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 {
 	json settings;
 	bool errorDetected = false;
+	bool migratedRequiredDeferredBootPolicy = false;
 
 	auto configFolderPath = std::filesystem::path(GetConfigPath(a_configMode)).parent_path().string();
 	auto defaultConfigFilePath = GetConfigPath(ConfigMode::DEFAULT);
@@ -417,6 +418,17 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 				logger::warn("Invalid entry for feature '{}' in 'Disable at Boot', expected boolean.", featureName);
 			}
 		}
+		auto& migrations = settings["Migrations"];
+		if (!migrations.is_object())
+			migrations = json::object();
+		if (!migrations.value("DeferredRenderingRequired", false)) {
+			if (disabledFeatures["DeferredRendering"])
+				logger::warn("Removing legacy automatic Disable at Boot state for required Deferred Rendering");
+			disabledFeatures["DeferredRendering"] = false;
+			disabledFeaturesJson["DeferredRendering"] = false;
+			migrations["DeferredRenderingRequired"] = true;
+			migratedRequiredDeferredBootPolicy = true;
+		}
 		for (auto* feature : Feature::GetFeatureList()) {
 			try {
 				const std::string featureName = feature->GetShortName();
@@ -482,7 +494,8 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 		if (settings["Version"].is_string() && settings["Version"].get<std::string>() != Plugin::VERSION.string()) {
 			logger::info("Found older config for version {}; upgrading to {}", (std::string)settings["Version"], Plugin::VERSION.string());
 			Save(a_configMode);  // Use original config mode
-		}
+		} else if (migratedRequiredDeferredBootPolicy)
+			Save(a_configMode);
 
 		FeatureIssues::ScanForOrphanedFeatureINIs();
 
@@ -868,6 +881,7 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 		switch (a_shader.shaderType.get()) {
 		case RE::BSShader::Type::Lighting:
 			{
+				const auto sourcePixelDescriptor = a_pixelDescriptor;
 				a_vertexDescriptor &= ~((uint32_t)SIE::ShaderCache::LightingShaderFlags::AdditionalAlphaMask |
 										(uint32_t)SIE::ShaderCache::LightingShaderFlags::AmbientSpecular |
 										(uint32_t)SIE::ShaderCache::LightingShaderFlags::DoAlphaTest |
@@ -897,6 +911,45 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 
 				if (deferred->deferredPass || a_forceDeferred)
 					a_pixelDescriptor |= (uint32_t)SIE::ShaderCache::LightingShaderFlags::Deferred;
+
+				// Keep the compatibility-producing DEFERRED permutation available for
+				// mixed/dynamic material contracts. The G-buffer-only variant is much
+				// narrower: every pixel in the draw must map to an evaluator using only
+				// resolved G-buffer inputs. In particular, TruePBR and advanced material
+				// techniques stay out until their texture dependencies have an explicit
+				// deferred resource contract.
+				if (deferred->deferredPass && globals::features::deferredRendering.IsRuntimeEnabled()) {
+					using Flags = SIE::ShaderCache::LightingShaderFlags;
+					using Technique = SIE::ShaderCache::LightingShaderTechniques;
+					const auto technique = static_cast<Technique>((a_vertexDescriptor >> 24u) & 0x3Fu);
+					const auto excludedFlags = static_cast<uint32_t>(Flags::TruePbr) |
+						static_cast<uint32_t>(Flags::ProjectedUV) |
+						static_cast<uint32_t>(Flags::AnisoLighting) |
+						static_cast<uint32_t>(Flags::WorldMap) |
+						static_cast<uint32_t>(Flags::BaseObjectIsSnow) |
+						static_cast<uint32_t>(Flags::Snow) |
+						static_cast<uint32_t>(Flags::CharacterLight);
+					const bool resolvedTechnique = technique == Technique::None ||
+						technique == Technique::MTLand || technique == Technique::LODLand ||
+						technique == Technique::TreeAnim || technique == Technique::LODObjects ||
+						technique == Technique::LODObjectHD || technique == Technique::LODLandNoise;
+					const auto specialFoliageFlags = static_cast<uint32_t>(Flags::SoftLighting) |
+						static_cast<uint32_t>(Flags::RimLighting) |
+						static_cast<uint32_t>(Flags::BackLighting);
+					const bool specialFoliage = technique == Technique::TreeAnim &&
+						(sourcePixelDescriptor & static_cast<uint32_t>(Flags::Specular)) == 0u &&
+						(sourcePixelDescriptor & specialFoliageFlags) != 0u;
+					const bool unsupportedSpecialLighting = !specialFoliage &&
+						(sourcePixelDescriptor & specialFoliageFlags) != 0u;
+					const auto requiredEvaluator = specialFoliage ?
+						CS::Deferred::Evaluator::FoliageSpecial : CS::Deferred::Evaluator::Generic;
+					const auto requiredEvaluatorBit =
+						1u << static_cast<std::uint32_t>(requiredEvaluator);
+					if (resolvedTechnique && (sourcePixelDescriptor & excludedFlags) == 0u &&
+						!unsupportedSpecialLighting &&
+						(globals::features::deferredRendering.GetEnabledEvaluatorMask() & requiredEvaluatorBit) != 0u)
+						a_pixelDescriptor |= static_cast<uint32_t>(Flags::DeferredGBuffer);
+				}
 
 				{
 					uint32_t technique = 0x3F & (a_vertexDescriptor >> 24);

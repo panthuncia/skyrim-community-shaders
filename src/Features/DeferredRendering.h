@@ -89,6 +89,9 @@ public:
 	std::string GetShortName() override { return "DeferredRendering"; }
 	std::string_view GetCategory() const override { return FeatureCategories::kLighting; }
 	bool IsCore() const override { return true; }
+	// Deferred rendering is foundational infrastructure on this branch. Alpha
+	// status is informational and must never silently place it in Disable at Boot.
+	bool IsDisabledByDefault() const override { return false; }
 	bool IsInMenu() const override { return true; }
 	bool CanConfigureWhileUnloaded() const override { return true; }
 	void DrawSettings() override;
@@ -175,6 +178,7 @@ private:
 	std::array<std::atomic_uint32_t, kSelectionClassCount> shaderSelections{};
 	std::array<std::atomic_uint32_t, kSelectionClassCount> shaderSelectionsInsideDeferred{};
 	std::array<std::atomic_uint32_t, kSelectionClassCount> shaderSelectionsWithDeferredPermutation{};
+	std::array<std::atomic_uint32_t, kSelectionClassCount> shaderSelectionsWithGBufferPermutation{};
 	std::array<std::atomic_uint32_t, kSelectionClassCount> shaderSelectionsInWorld{};
 	std::array<std::atomic_uint32_t, kSelectionClassCount> shaderSelectionsInWorldOutsideDeferred{};
 	std::array<std::atomic_uint32_t, kSelectionClassCount> shaderSelectionsInReflections{};

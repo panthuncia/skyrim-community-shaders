@@ -8,7 +8,7 @@ class DX12LightCulling
 {
 public:
 	static DX12LightCulling& Get();
-	bool Initialize(RenderGraphRuntime& runtime) noexcept;
+	bool Initialize(RenderGraphRuntime& runtime);
 	void Shutdown() noexcept;
 	rhi::PipelineLayoutHandle GetLayout() const noexcept { return layout ? layout->GetHandle() : rhi::PipelineLayoutHandle{}; }
 	rhi::PipelineHandle GetClearPipeline() const noexcept { return clearPipeline ? clearPipeline->GetHandle() : rhi::PipelineHandle{}; }

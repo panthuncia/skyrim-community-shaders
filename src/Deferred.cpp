@@ -506,42 +506,58 @@ void Deferred::EndDeferred()
 	const bool settingsMenuOpen = globals::menu && globals::menu->IsEnabled;
 	if (deferredFeature.IsRuntimeEnabled() && !settingsMenuOpen) {
 		auto& dx12Deferred=DX12DeferredShading::Get();
+		auto requireDeferred = [](bool condition, std::string_view message) {
+			if (!condition)
+				throw std::runtime_error(std::string(message));
+		};
 		deferredFeature.FinalizeFrame();
 		auto& mainTarget=globals::game::renderer->GetRuntimeData().renderTargets[forwardRenderTargets[0]];
 		D3D11_TEXTURE2D_DESC mainDescription{};
-		if(mainTarget.texture)mainTarget.texture->GetDesc(&mainDescription);
+		requireDeferred(mainTarget.texture != nullptr,
+			"Deferred rendering main target is unavailable");
+		mainTarget.texture->GetDesc(&mainDescription);
 		const auto& graphicsRuntime = globals::game::graphicsState->GetRuntimeData();
 		const auto activeWidth = static_cast<std::uint32_t>(std::ceil(
 			static_cast<float>(mainDescription.Width) * graphicsRuntime.dynamicResolutionWidthRatio));
 		const auto activeHeight = static_cast<std::uint32_t>(std::ceil(
 			static_cast<float>(mainDescription.Height) * graphicsRuntime.dynamicResolutionHeightRatio));
-		if (!dx12Deferred.PrepareLinearDepth(mainDescription.Width,mainDescription.Height))
-			logger::error("[DeferredRendering] Linear-depth preparation failed; the DX12 deferred epoch will retain the compatibility path");
+		requireDeferred(dx12Deferred.PrepareLinearDepth(mainDescription.Width,mainDescription.Height),
+			"Deferred linear-depth preparation failed");
 		auto& shadowMaskTarget=globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kSHADOW_MASK];
 		const bool shadowMaskReady=dx12Deferred.PrepareLocalShadowMask(shadowMaskTarget.texture);
-		if (!shadowMaskReady)
-			logger::error("[DeferredRendering] Local-shadow mirror preparation failed; skipping the DX12 epoch");
+		requireDeferred(shadowMaskReady,
+			"Deferred local-shadow mirror preparation failed");
 		auto& screenSpaceShadows = globals::features::screenSpaceShadows;
 		auto* screenShadowTexture = screenSpaceShadows.loaded ? screenSpaceShadows.screenSpaceShadowsTexture : nullptr;
 		const bool screenShadowReady = !screenSpaceShadows.loaded || (screenShadowTexture &&
 			dx12Deferred.PrepareScreenSpaceShadow(screenShadowTexture->resource.get()));
-		if (!screenShadowReady)
-			logger::error("[DeferredRendering] Screen-space shadow mirror preparation failed; skipping the DX12 epoch");
+		requireDeferred(screenShadowReady,
+			"Deferred screen-space shadow mirror preparation failed");
 		auto& packedSurfaceTarget=globals::game::renderer->GetRuntimeData().renderTargets[MASKS2];
 		const bool packedSurfaceMirrorReady=dx12Deferred.PreparePackedSurfaceMirror(packedSurfaceTarget.texture);
 		const bool gbufferInputsReady=dx12Deferred.PrepareGBufferInputs();
 		const bool indirectLightingInputsReady=dx12Deferred.PrepareIndirectLightingInputs();
 		const bool glintNoiseReady=dx12Deferred.PrepareGlintNoiseInput();
-		if (!packedSurfaceMirrorReady)
-			logger::error("[DeferredRendering] Packed-surface mirror preparation failed; skipping the DX12 epoch");
-		if(mainDescription.Width&&mainDescription.Height&&shadowMaskReady&&screenShadowReady&&packedSurfaceMirrorReady&&gbufferInputsReady&&indirectLightingInputsReady&&glintNoiseReady&&dx12Deferred.PrepareCompatibilityInput(mainTarget.texture)) {
-			static std::once_flag graphPreparationLogged;
-			std::call_once(graphPreparationLogged, [] { logger::info("[DeferredRendering] D3D11 producers are ready for the first ORG execution"); });
-			const bool submitted = RenderGraphRuntime::Get().ExecuteGraph(
-				activeWidth, activeHeight, mainDescription.Width, mainDescription.Height);
-			if(submitted && dx12Deferred.ShouldCommitComposite() && !dx12Deferred.CommitComposite(mainTarget.texture))
-				logger::error("[DeferredRendering] Failed to commit the DX12 composite");
-		}
+		requireDeferred(mainDescription.Width != 0 && mainDescription.Height != 0,
+			"Deferred rendering target has zero dimensions");
+		requireDeferred(packedSurfaceMirrorReady,
+			"Deferred packed-surface mirror preparation failed");
+		requireDeferred(gbufferInputsReady,
+			"Deferred G-buffer import failed");
+		requireDeferred(indirectLightingInputsReady,
+			"Deferred indirect-lighting input preparation failed");
+		requireDeferred(glintNoiseReady,
+			"Deferred glint-noise preparation failed");
+		requireDeferred(dx12Deferred.PrepareCompatibilityInput(mainTarget.texture),
+			"Deferred compatibility input preparation failed");
+		static std::once_flag graphPreparationLogged;
+		std::call_once(graphPreparationLogged, [] { logger::info("[DeferredRendering] D3D11 producers are ready for the first ORG execution"); });
+		requireDeferred(RenderGraphRuntime::Get().ExecuteGraph(
+			activeWidth, activeHeight, mainDescription.Width, mainDescription.Height),
+			"Deferred render-graph execution failed");
+		if (dx12Deferred.ShouldCommitComposite())
+			requireDeferred(dx12Deferred.CommitComposite(mainTarget.texture),
+				"Deferred composite commit failed");
 	}
 	const bool skipD3D11PostForTelemetry = std::getenv("CS_DX12_SKIP_D3D11_POST") != nullptr;
 	// Component diagnostics are final graph outputs, not replacement G-buffer

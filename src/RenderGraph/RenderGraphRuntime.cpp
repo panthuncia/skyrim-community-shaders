@@ -29,17 +29,18 @@ RenderGraphRuntime& RenderGraphRuntime::Get()
 
 RenderGraphRuntime::~RenderGraphRuntime() = default;
 
-bool RenderGraphRuntime::Initialize(ID3D11Device* device, ID3D11DeviceContext* context) noexcept
+bool RenderGraphRuntime::Initialize(ID3D11Device* device, ID3D11DeviceContext* context)
 {
 	if (available.load(std::memory_order_acquire)) return true;
 	try {
 		if (!org::interop::D3D11Interop::CreateDeviceBundle(device, context, kCommandFrameCount,
 			std::getenv("CS_DX12_DEBUG") != nullptr, deviceBundle)) {
 			SetDiagnostic(ORG_RG_E_RUNTIME_UNAVAILABLE, "Cannot create D3D12 on Skyrim's D3D11 adapter");
-			return false;
+			throw std::runtime_error("Cannot create D3D12 on Skyrim's D3D11 adapter");
 		}
 		graphicsQueue = deviceBundle.graphDevice->GetQueue(rhi::QueueKind::Graphics);
-		if (!graphicsQueue || !CreateInterop()) return false;
+		if (!graphicsQueue || !CreateInterop())
+			throw std::runtime_error("Required D3D11/D3D12 render-graph interop is unavailable");
 
 		ORGHostDescriptor host{ sizeof(host), ORG_RENDER_GRAPH_API_CURRENT,
 			CS_RENDER_GRAPH_HOST_ID, CS_RENDER_GRAPH_HOST_DISPLAY_NAME, CS_RENDER_GRAPH_HOST_VERSION,
@@ -63,8 +64,7 @@ bool RenderGraphRuntime::Initialize(ID3D11Device* device, ID3D11DeviceContext* c
 		available.store(true, std::memory_order_release);
 		if (!DX12LightCulling::Get().Initialize(*this) || !DX12DeferredShading::Get().Initialize(*this)) {
 			SetDiagnostic(ORG_RG_E_RUNTIME_UNAVAILABLE, "Failed to install CS native graph extensions");
-			Shutdown();
-			return false;
+			throw std::runtime_error("Failed to install required deferred graph extensions");
 		}
 		static std::once_flag shutdownRegistered;
 		std::call_once(shutdownRegistered, [] { std::atexit([] { RenderGraphRuntime::Get().Shutdown(); }); });
@@ -73,11 +73,11 @@ bool RenderGraphRuntime::Initialize(ID3D11Device* device, ID3D11DeviceContext* c
 	} catch (const std::exception& error) {
 		SetDiagnostic(ORG_RG_E_INTERNAL, error.what());
 		Shutdown();
-		return false;
+		throw;
 	} catch (...) {
 		SetDiagnostic(ORG_RG_E_INTERNAL, "Exception while initializing render graph runtime");
 		Shutdown();
-		return false;
+		throw;
 	}
 }
 

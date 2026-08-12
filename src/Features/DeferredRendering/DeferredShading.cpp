@@ -120,16 +120,14 @@ std::uint32_t DX12DeferredShading::GetEnabledEvaluatorMask() const noexcept
 			CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRLodBlend);
 		mask &= ~textureDependentEvaluators;
 	}
-	if (!glintNoiseAvailable)
-		mask &= ~CS::Deferred::EvaluatorBit(CS::Deferred::Evaluator::TruePBRGlint);
 	return mask;
 }
 
-bool DX12DeferredShading::Initialize(RenderGraphRuntime& owner) noexcept
+bool DX12DeferredShading::Initialize(RenderGraphRuntime& owner)
 {
 	runtime = &owner;
 	if (!owner.GetRHIDevice() || !CreatePipeline() || !CreateBinningPipelines())
-		return false;
+		throw std::runtime_error("Required deferred shading pipelines could not be created");
 	try {
 		org::contributor::ExtensionRegistry::Descriptor native{};
 		native.id = "community-shaders.deferred-shading.native";
@@ -162,8 +160,8 @@ bool DX12DeferredShading::Initialize(RenderGraphRuntime& owner) noexcept
 		nativeRegistration = owner.GetContributorRuntime()->RegisterExtension(std::move(native));
 		owner.RequestGraphRebuild();
 	} catch (const std::exception& error) {
-		logger::error("[DX12DeferredShading] Native registration failed: {}", error.what());
-		return false;
+		throw std::runtime_error(std::format(
+			"Deferred native graph registration failed: {}", error.what()));
 	}
 	// Promotion begins only after ORG activates a fully compiled generation.
 	// The first build therefore renders one compatibility frame by design.
@@ -171,7 +169,7 @@ bool DX12DeferredShading::Initialize(RenderGraphRuntime& owner) noexcept
 	return true;
 }
 
-bool DX12DeferredShading::CreatePipeline() noexcept
+bool DX12DeferredShading::CreatePipeline()
 {
 	auto rhiDevice = runtime ? runtime->GetRHIDevice() : rhi::Device{};
 	rhi::PushConstantRangeDesc evaluatorConstants[]{
@@ -199,22 +197,21 @@ bool DX12DeferredShading::CreatePipeline() noexcept
 		return CreateComputePipeline(rhiDevice, evaluatorLayout, bytecode, "main",
 			evaluatorPipelines[static_cast<size_t>(evaluator)]);
 	};
-	const bool requiredPrecompiled =
+	const bool allActiveEvaluatorsLoaded =
 		createPrecompiled(CS::Deferred::Evaluator::Generic, L"DeferredEvaluator.generic.dxil") &&
-		createPrecompiled(CS::Deferred::Evaluator::Grass, L"DeferredEvaluator.grass.dxil");
-	if (requiredPrecompiled) {
-		createPrecompiled(CS::Deferred::Evaluator::DistantTree, L"DeferredEvaluator.distant-tree.dxil");
-		createPrecompiled(CS::Deferred::Evaluator::FoliageSpecial, L"DeferredEvaluator.foliage-special.dxil");
-		createPrecompiled(CS::Deferred::Evaluator::TruePBR, L"DeferredEvaluator.true-pbr-core.dxil");
-		createPrecompiled(CS::Deferred::Evaluator::TruePBRSubsurfaceFuzz, L"DeferredEvaluator.true-pbr-subsurface-fuzz.dxil");
-		createPrecompiled(CS::Deferred::Evaluator::TruePBRCoat, L"DeferredEvaluator.true-pbr-coat.dxil");
-		createPrecompiled(CS::Deferred::Evaluator::TruePBRGlint, L"DeferredEvaluator.true-pbr-glint.dxil");
+		createPrecompiled(CS::Deferred::Evaluator::Grass, L"DeferredEvaluator.grass.dxil") &&
+		createPrecompiled(CS::Deferred::Evaluator::DistantTree, L"DeferredEvaluator.distant-tree.dxil") &&
+		createPrecompiled(CS::Deferred::Evaluator::FoliageSpecial, L"DeferredEvaluator.foliage-special.dxil") &&
+		createPrecompiled(CS::Deferred::Evaluator::TruePBR, L"DeferredEvaluator.true-pbr-core.dxil") &&
+		createPrecompiled(CS::Deferred::Evaluator::TruePBRSubsurfaceFuzz, L"DeferredEvaluator.true-pbr-subsurface-fuzz.dxil") &&
+		createPrecompiled(CS::Deferred::Evaluator::TruePBRCoat, L"DeferredEvaluator.true-pbr-coat.dxil") &&
+		createPrecompiled(CS::Deferred::Evaluator::TruePBRGlint, L"DeferredEvaluator.true-pbr-glint.dxil") &&
 		createPrecompiled(CS::Deferred::Evaluator::TruePBRTerrain, L"DeferredEvaluator.true-pbr-terrain.dxil");
-		logger::info("[DX12DeferredShading] Loaded precompiled evaluator mask: 0x{:08X}", GetEnabledEvaluatorMask());
-		return true;
-	}
-	logger::error("[DX12DeferredShading] Required precompiled evaluator DXIL is unavailable");
-	return false;
+	if (!allActiveEvaluatorsLoaded)
+		throw std::runtime_error(
+			"One or more active deferred material evaluator pipelines are unavailable");
+	logger::info("[DX12DeferredShading] Loaded precompiled evaluator mask: 0x{:08X}", GetEnabledEvaluatorMask());
+	return true;
 }
 
 bool DX12DeferredShading::CreateBinningPipelines() noexcept
@@ -503,29 +500,15 @@ bool DX12DeferredShading::PrepareIndirectLightingInputs() noexcept
 	return true;
 }
 
-bool DX12DeferredShading::PrepareGlintNoiseInput() noexcept
+bool DX12DeferredShading::PrepareGlintNoiseInput()
 {
 	auto* interop = runtime ? runtime->GetInteropCoordinator() : nullptr;
 	auto& truePBR = globals::features::truePBR;
 	if (!interop)
-		return false;
-	auto ensureDisabledPlaceholder = [&]() {
-		if (glintNoiseInput.mirror)
-			return true;
-		D3D11_TEXTURE2D_DESC description{};
-		description.Width = 1;
-		description.Height = 1;
-		description.MipLevels = 1;
-		description.ArraySize = 1;
-		description.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-		description.SampleDesc.Count = 1;
-		description.Usage = D3D11_USAGE_DEFAULT;
-		description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		return interop->CreateSharedTexture(description, true, false, glintNoiseInput.mirror);
-	};
+		throw std::runtime_error("Deferred glint-noise import has no interop coordinator");
 	if (!truePBR.glintsNoiseTexture || !truePBR.glintsNoiseTexture->resource) {
-		glintNoiseAvailable = false;
-		return ensureDisabledPlaceholder();
+		throw std::runtime_error(
+			"Deferred TruePBR glint evaluator is active but its noise texture is unavailable");
 	}
 	auto* source = truePBR.glintsNoiseTexture->resource.get();
 	if (glintNoiseInput.source.get() == source && glintNoiseInput.mirror)
@@ -537,13 +520,8 @@ bool DX12DeferredShading::PrepareGlintNoiseInput() noexcept
 	}
 	glintNoiseAvailable = false;
 	glintNoiseInput.mirror = {};
-	if (!ensureDisabledPlaceholder())
-		return false;
-	static std::once_flag warning;
-	std::call_once(warning, [] {
-		logger::warn("[DX12DeferredShading] Direct glint-noise sharing is unavailable; only deferred glints remain compatibility-lit");
-	});
-	return true;
+	throw std::runtime_error(
+		"Deferred TruePBR glint-noise sharing failed; refusing to disable the material evaluator");
 }
 
 bool DX12DeferredShading::EnsureCompositeBlit(ID3D11Texture2D* destination) noexcept

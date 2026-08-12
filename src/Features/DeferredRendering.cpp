@@ -133,6 +133,7 @@ void DeferredRendering::UpdateMaterialClassification(const std::uint32_t* visibl
 			const auto total = shaderSelections[index].exchange(0, std::memory_order_relaxed);
 			const auto inside = shaderSelectionsInsideDeferred[index].exchange(0, std::memory_order_relaxed);
 			const auto flagged = shaderSelectionsWithDeferredPermutation[index].exchange(0, std::memory_order_relaxed);
+			const auto gbufferOnly = shaderSelectionsWithGBufferPermutation[index].exchange(0, std::memory_order_relaxed);
 			const auto inWorld = shaderSelectionsInWorld[index].exchange(0, std::memory_order_relaxed);
 			const auto outsideEpoch = shaderSelectionsInWorldOutsideDeferred[index].exchange(0, std::memory_order_relaxed);
 			const auto reflections = shaderSelectionsInReflections[index].exchange(0, std::memory_order_relaxed);
@@ -146,8 +147,10 @@ void DeferredRendering::UpdateMaterialClassification(const std::uint32_t* visibl
 			const auto label = index < 64 ? std::format("LightingTechnique{}", index) :
 				std::format("{}Shader", shaderNames[index - 64]);
 			logger::info("[DeferredShaderSelection] class={}, selections={}, inWorld={}, insideDeferred={}, "
-				"inWorldOutsideEpoch={}, reflections={}, deferredPermutation={}, targetApplications={}, identityTargetBound={}",
-				label, total, inWorld, inside, outsideEpoch, reflections, flagged, targetBinds, identityBinds);
+				"inWorldOutsideEpoch={}, reflections={}, deferredPermutation={}, gbufferOnlyPermutation={}, "
+				"targetApplications={}, identityTargetBound={}",
+				label, total, inWorld, inside, outsideEpoch, reflections, flagged, gbufferOnly,
+				targetBinds, identityBinds);
 		}
 	}
 }
@@ -184,6 +187,10 @@ void DeferredRendering::RecordShaderSelection(RE::BSShader::Type type,
 		shaderSelectionsInReflections[classification].fetch_add(1, std::memory_order_relaxed);
 	if (deferredBit && (pixelDescriptor & deferredBit) != 0)
 		shaderSelectionsWithDeferredPermutation[classification].fetch_add(1, std::memory_order_relaxed);
+	if (type == RE::BSShader::Type::Lighting &&
+		(pixelDescriptor & static_cast<std::uint32_t>(
+			SIE::ShaderCache::LightingShaderFlags::DeferredGBuffer)) != 0)
+		shaderSelectionsWithGBufferPermutation[classification].fetch_add(1, std::memory_order_relaxed);
 }
 
 void DeferredRendering::RecordAppliedRenderTargets(bool isCompute) noexcept

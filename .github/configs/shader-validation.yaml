@@ -15086,6 +15086,10 @@ shaders:
                   - entry: Lighting:Pixel:11
                     defines:
                         - DEFERRED
+                  - entry: Lighting:Pixel:31
+                    defines:
+                        - DEFERRED
+                        - DEFERRED_GBUFFER
                   - entry: Lighting:Pixel:1011
                     defines:
                         - BACK_LIGHTING

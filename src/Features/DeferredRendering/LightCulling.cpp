@@ -35,10 +35,11 @@ namespace
 
 DX12LightCulling& DX12LightCulling::Get() { static DX12LightCulling value; return value; }
 
-bool DX12LightCulling::Initialize(RenderGraphRuntime& owner) noexcept
+bool DX12LightCulling::Initialize(RenderGraphRuntime& owner)
 {
 	runtime = &owner;
-	if (!owner.GetRHIDevice() || !CreatePipeline()) return false;
+	if (!owner.GetRHIDevice() || !CreatePipeline())
+		throw std::runtime_error("Required deferred light-culling pipeline could not be created");
 	try {
 		org::contributor::ExtensionRegistry::Descriptor desc{};
 		desc.id = "community-shaders.clustered-lighting";
@@ -53,8 +54,8 @@ bool DX12LightCulling::Initialize(RenderGraphRuntime& owner) noexcept
 		owner.RequestGraphRebuild();
 		return true;
 	} catch (const std::exception& error) {
-		logger::error("[DX12LightCulling] Native registration failed: {}", error.what());
-		return false;
+		throw std::runtime_error(std::format(
+			"Deferred light-culling graph registration failed: {}", error.what()));
 	}
 }
 

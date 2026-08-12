@@ -558,6 +558,11 @@ namespace SIE
 			// Community Shaders start
 			TruePbr = 1 << 3,
 			Deferred = 1 << 4,
+			// A real G-buffer-only pixel-shader variant. Unlike Deferred, this
+			// permutation is selected only when the complete draw is guaranteed to
+			// have a deferred evaluator, so forward direct lighting can be compiled
+			// out instead of calculated and subsequently overwritten.
+			DeferredGBuffer = 1 << 5,
 			// Community Shaders end
 			Specular = 1 << 9,
 			SoftLighting = 1 << 10,

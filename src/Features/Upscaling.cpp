@@ -128,14 +128,7 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 				pFeatureLevel,
 				ppImmediateContext));
 
-			if (!RenderGraphRuntime::Get().Initialize(*ppDevice, *ppImmediateContext)) {
-				logger::warn("[RenderGraphRuntime] Initialization failed; falling back to the normal D3D11 swap chain");
-				(*ppImmediateContext)->Release();
-				(*ppDevice)->Release();
-				*ppImmediateContext = nullptr;
-				*ppDevice = nullptr;
-				shouldProxy = false;
-			} else {
+			RenderGraphRuntime::Get().Initialize(*ppDevice, *ppImmediateContext);
 
 			upscaling.SetProxyD3D11Device(*ppDevice);
 			upscaling.SetProxyD3D11DeviceContext(*ppImmediateContext);
@@ -161,7 +154,6 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 			}
 
 				return S_OK;
-			}
 		} else {
 			logger::warn("[Frame Generation] FidelityFX DLLs are not loaded, skipping proxy");
 			upscaling.fidelityFXMissing = true;
@@ -181,8 +173,8 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 		pFeatureLevel,
 		ppImmediateContext);
 
-	if (SUCCEEDED(ret) && !RenderGraphRuntime::Get().Initialize(*ppDevice, *ppImmediateContext))
-		logger::warn("[RenderGraphRuntime] Initialization failed; continuing with the D3D11 renderer");
+	if (SUCCEEDED(ret))
+		RenderGraphRuntime::Get().Initialize(*ppDevice, *ppImmediateContext);
 
 	if (upscaling.IsBackendInitialized()) {
 		upscaling.UpgradeBackendInterface((void**)&(*ppDevice));
