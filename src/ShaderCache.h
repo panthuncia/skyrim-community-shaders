@@ -566,6 +566,9 @@ namespace SIE
 			// Draw-level marker set by material setup after proving that a runtime
 			// TruePBR material can never classify to Compatibility.
 			DeferredMaterialResolved = 1 << 6,
+			// Terrain-blend receivers emit the canonical resolved PBR MRT layout so
+			// PBR landscape can interpolate into the same representation in place.
+			TerrainBlendReceiver = 1 << 7,
 			// Community Shaders end
 			Specular = 1 << 9,
 			SoftLighting = 1 << 10,

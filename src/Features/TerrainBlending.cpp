@@ -338,6 +338,15 @@ void TerrainBlending::Hooks::BSBatchRenderer__RenderPassImmediately::thunk(RE::B
 						singleton.renderPasses.push_back(call);
 						return;
 					}
+
+					// Landscape is replayed later with alpha blending. Keep a lit forward
+					// underlay for draws which can receive that replay; a G-buffer-only
+					// variant would leave black in Main and produce a dark transition seam.
+					const bool previousBlendReceiver = singleton.renderingBlendReceiver;
+					singleton.renderingBlendReceiver = true;
+					func(a_pass, a_technique, a_alphaTest, a_renderFlags);
+					singleton.renderingBlendReceiver = previousBlendReceiver;
+					return;
 				}
 			}
 		}
@@ -390,8 +399,10 @@ void TerrainBlending::RenderTerrainBlendingPasses()
 		// Enable rendering for depth below the surface
 		context->OMSetDepthStencilState(terrainDepthStencilState, 0xFF);
 
+		renderingTerrainReplay = true;
 		for (auto& renderPass : terrainRenderPasses)
 			Hooks::BSBatchRenderer__RenderPassImmediately::func(renderPass.a_pass, renderPass.a_technique, renderPass.a_alphaTest, renderPass.a_renderFlags);
+		renderingTerrainReplay = false;
 
 		// Reset alpha blending
 		alphaBlendMode = 0;

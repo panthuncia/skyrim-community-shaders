@@ -788,11 +788,50 @@ bool DX12DeferredShading::CommitComposite(ID3D11Texture2D* destination) noexcept
 	if (!diagnosticCaptureComplete && diagnosticCaptureDelay > 0)
 		--diagnosticCaptureDelay;
 	if (!diagnosticCaptureComplete && diagnosticCaptureDelay == 0) {
+		wchar_t bundlePath[32768]{};
+		const auto bundlePathLength = GetEnvironmentVariableW(
+			L"CS_DX12_DEFERRED_CAPTURE_BUNDLE_PATH", bundlePath,
+			static_cast<DWORD>(std::size(bundlePath)));
+		if (bundlePathLength > 0 && bundlePathLength < std::size(bundlePath)) {
+			diagnosticCaptureComplete = true;
+			const std::filesystem::path directory(bundlePath);
+			std::error_code error;
+			std::filesystem::create_directories(directory, error);
+			if (error) {
+				logger::error("Could not create deferred diagnostic directory '{}': {}",
+					directory.string(), error.message());
+				return false;
+			}
+			auto save = [&](std::wstring_view name, ID3D11Texture2D* texture) {
+				if (!texture)
+					return false;
+				const auto result = Util::SaveTextureToFile(globals::d3d::device,
+					globals::d3d::context, directory / name, texture);
+				if (FAILED(result))
+					logger::error("Deferred diagnostic capture '{}' failed: HRESULT=0x{:08X}",
+						std::filesystem::path(name).string(), static_cast<std::uint32_t>(result));
+				return SUCCEEDED(result);
+			};
+			const bool captured =
+				save(L"00-final.dds", destination) &&
+				save(L"01-compatibility.dds", compatibilityReference.d3d11.get()) &&
+				save(L"02-deferred-candidate.dds", composite.d3d11.get()) &&
+				save(L"03-packed-surface.dds", packedSurfaceMirror.d3d11.get()) &&
+				save(L"04-albedo.dds", inputs[0].source.get()) &&
+				save(L"05-specular.dds", inputs[1].source.get()) &&
+				save(L"06-reflectance.dds", inputs[2].source.get()) &&
+				save(L"07-normal-roughness.dds", inputs[3].source.get()) &&
+				save(L"08-masks.dds", inputs[4].source.get()) &&
+				save(L"09-linear-depth.dds", linearDepth.d3d11.get());
+			if (!captured)
+				return false;
+			logger::info("[DeferredRendering] Captured diagnostic bundle to {}", directory.string());
+		}
 		wchar_t capturePath[32768]{};
 		const auto capturePathLength = GetEnvironmentVariableW(
 			L"CS_DX12_DEFERRED_CAPTURE_PATH", capturePath,
 			static_cast<DWORD>(std::size(capturePath)));
-		if (capturePathLength > 0 && capturePathLength < std::size(capturePath)) {
+		if (!diagnosticCaptureComplete && capturePathLength > 0 && capturePathLength < std::size(capturePath)) {
 			diagnosticCaptureComplete = true;
 			const auto result = Util::SaveTextureToFile(globals::d3d::device,
 				globals::d3d::context, capturePath, destination);

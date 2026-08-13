@@ -146,6 +146,9 @@ namespace SIE
 			if (descriptor & static_cast<uint32_t>(ShaderCache::LightingShaderFlags::DeferredGBuffer)) {
 				defines[lastIndex++] = { "DEFERRED_GBUFFER", nullptr };
 			}
+			if (descriptor & static_cast<uint32_t>(ShaderCache::LightingShaderFlags::TerrainBlendReceiver)) {
+				defines[lastIndex++] = { "DEFERRED_TERRAIN_BLEND_RECEIVER", nullptr };
+			}
 			if ((descriptor & static_cast<uint32_t>(ShaderCache::LightingShaderFlags::TruePbr)) != 0) {
 				defines[lastIndex++] = { "TRUE_PBR", nullptr };
 				if ((descriptor & static_cast<uint32_t>(ShaderCache::LightingShaderFlags::AnisoLighting)) != 0) {

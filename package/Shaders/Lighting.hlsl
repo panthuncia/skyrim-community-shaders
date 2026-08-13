@@ -2957,6 +2957,10 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	uint deferredMaterialClass = CS_MATERIAL_Legacy;
 	uint diagnosticMaterialClass = CS_MATERIAL_Legacy;
 	uint deferredSurfaceFlags = DeferredPackedSurface >> 24;
+#	if defined(DEFERRED_TERRAIN_BLEND_RECEIVER)
+	deferredMaterialClass = CS_MATERIAL_BlendedPBR;
+	diagnosticMaterialClass = CS_MATERIAL_BlendedPBR;
+#	endif
 	// Diagnostic classification is deliberately independent of evaluator
 	// availability. It records what this visible pixel would require even when
 	// the authoritative forward result remains in Main.
@@ -3054,6 +3058,27 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		else
 	deferredMaterialClass = CS_MATERIAL_Terrain;
 #		endif
+#		if defined(TERRAIN_BLENDING)
+	// The landscape replay alpha-blends every float MRT over the receiver. MASKS2
+	// is integer and deliberately does not blend, so label fractional pixels with
+	// the evaluator contract matching those already-interpolated attributes.
+	if (SharedData::terrainBlendingSettings.Enabled && blendFactorTerrain > 0.0f &&
+		blendFactorTerrain < 1.0f) {
+#			if defined(SPECULAR)
+		deferredMaterialClass = CS_MATERIAL_BlendedGenericSpecular;
+#			else
+		deferredMaterialClass = CS_MATERIAL_BlendedGeneric;
+#			endif
+	}
+#		endif
+#	endif
+	// PBR landscape is already resolved into the canonical PBR MRT layout during
+	// rasterization. Fractional replay pixels retain that layout after hardware
+	// interpolation with a canonical receiver and use the blended-PBR identity.
+#	if defined(TRUE_PBR) && defined(LANDSCAPE) && defined(TERRAIN_BLENDING)
+	if (SharedData::terrainBlendingSettings.Enabled && blendFactorTerrain > 0.0f &&
+		blendFactorTerrain < 1.0f)
+		deferredMaterialClass = CS_MATERIAL_BlendedPBR;
 #	endif
 	// LOD-land color, normal, vertex color, noise, and optional terrain-variation
 	// sampling are completely resolved by rasterization. Its non-PBR lighting is
@@ -3109,7 +3134,8 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		endif
 	if (!deferredPbrTerrainHasGlint &&
 		!(deferredPbrTerrainParallaxEnabled && deferredPbrTerrainHasDisplacement))
-		deferredMaterialClass = CS_MATERIAL_TruePBRTerrain;
+		if (deferredMaterialClass != CS_MATERIAL_BlendedPBR)
+			deferredMaterialClass = CS_MATERIAL_TruePBRTerrain;
 #	endif
 	// The non-specular special-foliage contract uses
 	// the otherwise lighting-output Specular/Reflectance targets as resolved
@@ -3123,6 +3149,12 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// evaluator carries both contracts.
 #	elif defined(TREE_ANIM) && (defined(SOFT_LIGHTING) || defined(RIM_LIGHTING) || defined(BACK_LIGHTING))
 	deferredMaterialClass = CS_MATERIAL_Legacy;
+#	endif
+#	if defined(DEFERRED_TERRAIN_BLEND_RECEIVER)
+	// Receiver textures, including Projected UV, have already been sampled. Use
+	// the same canonical PBR representation as the landscape replay so hardware
+	// MRT blending produces one self-contained surface for deferred lighting.
+	deferredMaterialClass = CS_MATERIAL_BlendedPBR;
 #	endif
 	// Promotion is a property of the bound shader variant, not a per-pixel
 	// opportunistic decision. A compatibility-producing permutation must never
@@ -3248,6 +3280,16 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			(deferredPayloadAux << 24u),
 		deferredPayload0, deferredMaterialClass == CS_MATERIAL_Legacy ?
 			(0x80000000u | diagnosticMaterialClass) : deferredPayload1);
+
+#	if defined(DEFERRED_TERRAIN_BLEND_RECEIVER)
+	// Canonical resolved PBR representation used by both receiver-only and
+	// fractionally blended pixels. This deliberately avoids material textures in
+	// the lighting pass; all texture sampling remains in rasterization.
+	psout.Albedo = float4(outputAlbedo, psout.Diffuse.w);
+	psout.Specular = float4(saturate(specularColor), saturate(vertexAO));
+	psout.Reflectance = float4(0.0f, 0.0f, 0.0f, psout.Diffuse.w);
+	psout.Masks = float4(directionalEnvironmentVisibility, 0.0f, vertexAO, psout.Diffuse.w);
+#	endif
 
 	float stochasticBlend = (screenNoise * screenNoise) < psout.Diffuse.w ? 1.0 : 0.0;
 	psout.NormalGlossiness.w = stochasticBlend;

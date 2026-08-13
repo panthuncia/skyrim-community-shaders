@@ -81,6 +81,12 @@ CS_DEFERRED_MATERIAL(CSRegTerrainSpecular, 7, CSRegGeneric, CSREG_GENERIC)
 // still needs its separately composed LOD-land contract and remains diagnostic.
 CS_DEFERRED_MATERIAL(CSRegLodObject, 8, CSRegGeneric, CSREG_GENERIC)
 CS_DEFERRED_MATERIAL(CSRegFoliageSpecular, 9, CSRegGeneric, CSREG_GENERIC)
+// Raster-resolved terrain blending classes. Float MRTs contain the in-place
+// interpolation of receiver and terrain; identity remains discrete in MASKS2.
+// Keep these distinct so a future canonical-PBR blend contract can dispatch to
+// a dedicated evaluator without changing the generic ABI.
+CS_DEFERRED_MATERIAL(CSRegBlendedGeneric, 10, CSRegGeneric, CSREG_GENERIC)
+CS_DEFERRED_MATERIAL(CSRegBlendedGenericSpecular, 11, CSRegGeneric, CSREG_GENERIC)
 CS_DEFERRED_MATERIAL(CSRegTruePbr, 32, CSRegTruePbr, CSREG_TRUEPBR)
 CS_DEFERRED_MATERIAL(CSRegTruePbrTerrain, 33, CSRegTruePbrTerrain, CSREG_TRUEPBR_TERRAIN)
 CS_DEFERRED_MATERIAL(CSRegTruePbrSubsurfaceFuzz, 34, CSRegTruePbrSubsurfaceFuzz, CSREG_TRUEPBR_SUBSURFACE_FUZZ)
@@ -89,6 +95,8 @@ CS_DEFERRED_MATERIAL(CSRegTruePbrGlint, 36, CSRegTruePbrGlint, CSREG_TRUEPBR_GLI
 CS_DEFERRED_MATERIAL(CSRegTruePbrParallax, 37, CSRegTruePbrParallax, CSREG_TRUEPBR_PARALLAX)
 CS_DEFERRED_MATERIAL(CSRegTruePbrTerrainAdvanced, 38, CSRegTruePbrTerrainAdvanced, CSREG_TRUEPBR_TERRAIN_ADVANCED)
 CS_DEFERRED_MATERIAL(CSRegTruePbrLodBlend, 39, CSRegTruePbrLodBlend, CSREG_TRUEPBR_LOD_BLEND)
+// Reserved: mixed PBR/legacy receivers require canonicalized PBR MRT semantics.
+CS_DEFERRED_MATERIAL(CSRegBlendedPbr, 40, CSRegTruePbr, CSREG_TRUEPBR)
 CS_DEFERRED_MATERIAL(CSRegGrass, 64, CSRegGrass, CSREG_GRASS)
 // Dedicated non-generic evaluators. Each class is enabled only when its PSO
 // and complete material contract are available at runtime.

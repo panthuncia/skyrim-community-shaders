@@ -924,8 +924,10 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 					const auto technique = static_cast<Technique>((a_vertexDescriptor >> 24u) & 0x3Fu);
 					const bool truePbr = (sourcePixelDescriptor &
 						static_cast<uint32_t>(Flags::TruePbr)) != 0u;
-					const bool resolvedTruePbr = truePbr && (sourcePixelDescriptor &
-						static_cast<uint32_t>(Flags::DeferredMaterialResolved)) != 0u;
+					const bool terrainReplay = globals::features::terrainBlending.renderingTerrainReplay;
+					const bool resolvedTruePbr = truePbr &&
+						((sourcePixelDescriptor & static_cast<uint32_t>(Flags::DeferredMaterialResolved)) != 0u ||
+							terrainReplay);
 					const auto excludedFlags = static_cast<uint32_t>(Flags::ProjectedUV) |
 						static_cast<uint32_t>(Flags::AnisoLighting) |
 						static_cast<uint32_t>(Flags::WorldMap) |
@@ -935,7 +937,8 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 					const bool resolvedTechnique = technique == Technique::None ||
 						technique == Technique::MTLand || technique == Technique::LODLand ||
 						technique == Technique::TreeAnim || technique == Technique::LODObjects ||
-						technique == Technique::LODObjectHD || technique == Technique::LODLandNoise;
+						technique == Technique::LODObjectHD || technique == Technique::LODLandNoise ||
+						technique == Technique::MTLandLODBlend;
 					const auto specialFoliageFlags = static_cast<uint32_t>(Flags::SoftLighting) |
 						static_cast<uint32_t>(Flags::RimLighting) |
 						static_cast<uint32_t>(Flags::BackLighting);
@@ -944,18 +947,23 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 						(sourcePixelDescriptor & specialFoliageFlags) != 0u;
 					const bool unsupportedSpecialLighting = !specialFoliage &&
 						(sourcePixelDescriptor & specialFoliageFlags) != 0u;
-					const auto requiredEvaluator = resolvedTruePbr ?
-						CS::Deferred::Evaluator::TruePBR : specialFoliage ?
-						CS::Deferred::Evaluator::FoliageSpecial : CS::Deferred::Evaluator::Generic;
-					const auto requiredEvaluatorBit =
-						1u << static_cast<std::uint32_t>(requiredEvaluator);
-					const auto effectiveExcludedFlags = resolvedTruePbr ?
+					auto effectiveExcludedFlags = resolvedTruePbr ?
 						excludedFlags & ~static_cast<uint32_t>(Flags::AnisoLighting) : excludedFlags;
-					if (resolvedTechnique && (!truePbr || resolvedTruePbr) &&
+					// Projected-UV textures are fully resolved during rasterization. For a
+					// terrain-blend receiver, encode that resolved result in the canonical
+					// mixed-PBR layout; the lighting pass never needs those textures.
+					if (globals::features::terrainBlending.renderingBlendReceiver && !truePbr)
+						effectiveExcludedFlags &= ~static_cast<uint32_t>(Flags::ProjectedUV);
+					const bool deferredEligible = resolvedTechnique && (!truePbr || resolvedTruePbr) &&
 						(sourcePixelDescriptor & effectiveExcludedFlags) == 0u &&
 						!unsupportedSpecialLighting &&
-						(globals::features::deferredRendering.GetEnabledEvaluatorMask() & requiredEvaluatorBit) != 0u)
+						(!globals::features::terrainBlending.renderingBlendReceiver || !truePbr);
+					if (deferredEligible) {
 						a_pixelDescriptor |= static_cast<uint32_t>(Flags::DeferredGBuffer);
+						if (globals::features::terrainBlending.renderingBlendReceiver && !truePbr &&
+							(sourcePixelDescriptor & static_cast<uint32_t>(Flags::ProjectedUV)) != 0u)
+							a_pixelDescriptor |= static_cast<uint32_t>(Flags::TerrainBlendReceiver);
+					}
 				}
 
 				{

@@ -63,6 +63,10 @@ public:
 	bool renderDepth = false;
 	bool renderTerrainDepth = false;
 	bool renderAltTerrain = false;
+	// True only while submitting a lighting draw that may receive the later
+	// alpha-blended landscape replay.
+	bool renderingBlendReceiver = false;
+	bool renderingTerrainReplay = false;
 
 	RE::NiPoint3 eyePosition;
 

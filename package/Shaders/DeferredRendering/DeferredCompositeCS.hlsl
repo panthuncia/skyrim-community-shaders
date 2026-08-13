@@ -172,7 +172,8 @@ bool HasGenericSpecular(uint materialClass)
 	return materialClass == CS_MATERIAL_StandardSpecular ||
 		materialClass == CS_MATERIAL_AlphaTestedSpecular ||
 		materialClass == CS_MATERIAL_FoliageSpecular ||
-		materialClass == CS_MATERIAL_TerrainSpecular;
+		materialClass == CS_MATERIAL_TerrainSpecular ||
+		materialClass == CS_MATERIAL_BlendedGenericSpecular;
 }
 
 CSGenericDirectLighting EvaluateDeferredDirect(uint materialClass,
