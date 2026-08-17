@@ -164,6 +164,9 @@ public:
 	[[nodiscard]] bool DiscardPendingPresentWaitSemaphore();
 	/** @brief Reconciles the one-shot semaphore after DXVK acknowledges the outer present. */
 	void NotifyPresentWaitQueued();
+	/** @brief Associates Streamline input completion with the command-ring slot used by a present. */
+	[[nodiscard]] bool TrackInputCompletion(uint64_t a_presentWaitGeneration,
+		VkSemaphore a_semaphore, uint64_t a_value);
 
 	/** @brief Defers image-view destruction until the current ring slot completes. */
 	void QueueViewsForDeferredDelete(const CommandTransaction& a_transaction,
@@ -213,6 +216,11 @@ private:
 		uint32_t slot = UINT32_MAX;
 		uint64_t generation = 0;
 	};
+	struct InputCompletion
+	{
+		VkSemaphore semaphore = VK_NULL_HANDLE;
+		uint64_t value = 0;
+	};
 
 	using GetPresenterSurfaceStateFn = uint64_t (*)(uint32_t*, uint32_t*, uint32_t*);
 	using GetPresenterSurfaceState2Fn = uint64_t (*)(uint32_t*, uint32_t*, uint32_t*, uint32_t*);
@@ -223,6 +231,7 @@ private:
 	static bool PresenterStateMatches(
 		const PresenterSurfaceState& a_state, VkColorSpaceKHR a_requestedColorSpace);
 	bool ClearReleasedPresentWaitsAfterIdle();
+	bool IsInputCompletionReady(uint32_t a_slot);
 	void ReleaseRetainedFSRResourcesIfSafe();
 
 	bool available = false;
@@ -254,9 +263,8 @@ private:
 	std::vector<VkFence> commandFences;
 	std::vector<VkSemaphore> presentWaitSemaphores;
 	std::vector<bool> presentWaitInUse;
+	std::vector<InputCompletion> inputCompletions;
 	uint32_t pendingPresentWaitSlot = UINT32_MAX;
-	uint32_t pushedPresentWaitSlot = UINT32_MAX;
-	uint64_t pushedPresentWaitGeneration = 0;
 	std::vector<PresentWaitSubmission> outstandingPresentWaitSubmissions;
 	uint64_t (*pushPresentWaitSemaphore)(VkSemaphore) = nullptr;
 	uint32_t (*getPresentWaitSemaphoreState)(uint64_t) = nullptr;

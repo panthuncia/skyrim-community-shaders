@@ -326,23 +326,21 @@ struct IDXGISwapChain_Present
 	static HRESULT WINAPI thunk(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 	{
 		globals::state->Reset();
+		const auto& upscaling = globals::features::upscaling;
+		const bool dlssgActive = upscaling.IsFrameGenerationActive() &&
+		                         upscaling.GetFrameGenMethod() == Upscaling::FrameGenMethod::kDLSSG;
 
 		// DLSS-G on Vulkan requires SyncInterval 0.
 		{
-			auto& up = globals::features::upscaling;
-			const bool dlssgActive = up.IsFrameGenerationActive() &&
-			                         up.GetFrameGenMethod() == Upscaling::FrameGenMethod::kDLSSG;
-			SyncInterval = dlssgActive ? 0u : (up.settings.vsync ? 1u : 0u);
-			if (dlssgActive) {
-				auto* sl = Streamline::GetSingleton();
-				sl->QueryDLSSGCapabilities();
-			}
+			SyncInterval = dlssgActive ? 0u : (upscaling.settings.vsync ? 1u : 0u);
 		}
 
 		auto* streamline = Streamline::GetSingleton();
 		streamline->SetPCLMarker(Streamline::PclMarker::RenderSubmitEnd);
 		streamline->SetPCLMarker(Streamline::PclMarker::TriggerFlash);
-		streamline->SetPCLMarker(Streamline::PclMarker::PresentStart);
+		const bool bridgedPresentMarkers = dlssgActive && streamline->QueueDLSSGPresentMarkers();
+		if (!bridgedPresentMarkers)
+			streamline->SetPCLMarker(Streamline::PclMarker::PresentStart);
 
 		HRESULT retval = globals::features::hdrDisplay.HandleSwapChainPresent(
 			This,
@@ -354,7 +352,8 @@ struct IDXGISwapChain_Present
 					[&](IDXGISwapChain* sc, UINT si, UINT f) { return func(sc, si, f); });
 			});
 
-		streamline->SetPCLMarker(Streamline::PclMarker::PresentEnd);
+		if (!bridgedPresentMarkers)
+			streamline->SetPCLMarker(Streamline::PclMarker::PresentEnd);
 
 		auto* dxvk = DXVKInterop::GetSingleton();
 		const bool presentSucceeded = SUCCEEDED(retval);
@@ -363,7 +362,6 @@ struct IDXGISwapChain_Present
 		if (retval == S_OK && streamline->IsFSRFGPresentOwner())
 			dxvk->NotifyFSRFrameConsumed();
 		dxvk->NotifyPresentWaitQueued();
-		streamline->CaptureDLSSGPresentState();
 
 		globals::features::screenshotFeature.ProcessCaptureRequest();
 
@@ -509,7 +507,14 @@ struct BSInputDeviceManager_PollInputDevices
 			auto& upscaling = globals::features::upscaling;
 			const bool wantReflex = upscaling.GetEffectiveReflex();
 			const int targetFps = upscaling.GetTargetFrameRate();
-			const uint32_t reflexLimitUs = (wantReflex && targetFps > 0) ? static_cast<uint32_t>(1000000.0 / targetFps) : 0u;
+			const bool dlssgActive = upscaling.IsFrameGenerationActive() &&
+			                         upscaling.GetFrameGenMethod() == Upscaling::FrameGenMethod::kDLSSG;
+			uint32_t reflexLimitUs = 0;
+			if (wantReflex && targetFps > 0) {
+				const uint32_t multiplier = dlssgActive && !upscaling.settings.dlssgDynamic ?
+					std::max(2u, upscaling.settings.frameGenMultiplier) : 1u;
+				reflexLimitUs = static_cast<uint32_t>(std::lround(1000000.0 * multiplier / targetFps));
+			}
 			Streamline::GetSingleton()->UpdateReflex(wantReflex, wantReflex && upscaling.settings.reflexBoost, reflexLimitUs);
 			// FSR-FG generates one frame per real present, so cap real presents at half the target.
 			double dxvkFps = 0.0;

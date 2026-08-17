@@ -730,34 +730,6 @@ bool DXVKInterop::ClearReleasedPresentWaitsAfterIdle()
 		outstandingPresentWaitSubmissions.erase(outstandingPresentWaitSubmissions.begin() + i);
 	}
 
-	if (pushedPresentWaitSlot == UINT32_MAX)
-		return true;
-
-	const PresentWaitStateAttempt stateAttempt = GetPresentWaitSemaphoreStateSEH(
-		getPresentWaitSemaphoreState, pushedPresentWaitGeneration);
-	if (stateAttempt.exceptionCode) {
-		latchTerminalFault("idle-released pushed present-wait query", stateAttempt.exceptionCode);
-		return false;
-	}
-	if (stateAttempt.state != kPresentWaitReleased) {
-		if (stateAttempt.state == kPresentWaitUncertain || stateAttempt.state == kPresentWaitNone)
-			latchTerminalFault("idle-released pushed present-wait state is unsafe");
-		return false;
-	}
-	if (pushedPresentWaitSlot >= presentWaitInUse.size()) {
-		latchTerminalFault("idle-released pushed present-wait slot is invalid");
-		return false;
-	}
-	const PresentWaitStateAttempt clearAttempt = ClearPresentWaitSemaphoreSEH(
-		clearPresentWaitSemaphore, pushedPresentWaitGeneration);
-	if (clearAttempt.exceptionCode || !clearAttempt.state) {
-		latchTerminalFault("idle-released pushed present-wait generation could not be cleared",
-			clearAttempt.exceptionCode);
-		return false;
-	}
-	presentWaitInUse[pushedPresentWaitSlot] = false;
-	pushedPresentWaitSlot = UINT32_MAX;
-	pushedPresentWaitGeneration = 0;
 	return true;
 }
 
@@ -901,6 +873,7 @@ bool DXVKInterop::CreateCommandResources(uint32_t a_framesInFlight)
 		}
 	}
 	presentWaitInUse.assign(framesInFlight, false);
+	inputCompletions.assign(framesInFlight, {});
 
 	commandFrameIndex = 0;
 	pendingViewDeletes.assign(framesInFlight, {});
@@ -918,13 +891,11 @@ void DXVKInterop::DestroyCommandResources()
 		logger::error("[DXVKInterop] Vulkan resource cleanup is terminally quarantined after a destruction fault");
 		return;
 	}
-	if (presentWaitInteropTerminalFault &&
-		(pendingPresentWaitSlot != UINT32_MAX || pushedPresentWaitSlot != UINT32_MAX)) {
+	if (presentWaitInteropTerminalFault && pendingPresentWaitSlot != UINT32_MAX) {
 		logger::error("[DXVKInterop] present-wait handle remains quarantined after a terminal bridge fault");
 		return;
 	}
-	const bool hasRegisteredPresentWaits =
-		pushedPresentWaitSlot != UINT32_MAX || !outstandingPresentWaitSubmissions.empty();
+	const bool hasRegisteredPresentWaits = !outstandingPresentWaitSubmissions.empty();
 	const bool requiresDeviceIdle = commandRingFaulted || submissionQueueLockUncertain ||
 		hasRegisteredPresentWaits ||
 		std::find(presentWaitInUse.begin(), presentWaitInUse.end(), true) != presentWaitInUse.end();
@@ -1006,9 +977,8 @@ void DXVKInterop::DestroyCommandResources()
 	}
 	presentWaitSemaphores.clear();
 	presentWaitInUse.clear();
+	inputCompletions.clear();
 	pendingPresentWaitSlot = UINT32_MAX;
-	pushedPresentWaitSlot = UINT32_MAX;
-	pushedPresentWaitGeneration = 0;
 	for (VkFence& f : commandFences) {
 		if (f == VK_NULL_HANDLE)
 			continue;
@@ -1052,8 +1022,7 @@ bool DXVKInterop::DrainCommandRing()
 		return true;
 	if (device == VK_NULL_HANDLE)
 		return false;
-	const bool hasRegisteredPresentWaits =
-		pushedPresentWaitSlot != UINT32_MAX || !outstandingPresentWaitSubmissions.empty();
+	const bool hasRegisteredPresentWaits = !outstandingPresentWaitSubmissions.empty();
 	const bool requiresDeviceIdle = commandRingFaulted || hasRegisteredPresentWaits;
 	if (requiresDeviceIdle && !WaitDeviceIdle()) {
 		logger::error("[DXVKInterop] command-ring resources remain quarantined because device idle could not be proven");
@@ -1182,7 +1151,9 @@ DXVKInterop::CommandTransaction DXVKInterop::BeginFrameCommandBuffer()
 	if (commandPool == VK_NULL_HANDLE || commandRingFaulted || submissionQueueLockUncertain)
 		return {};
 
-	// Avoid waiting while Streamline owns the presenting queue; grow the ring if needed.
+	// Never block the render thread on Streamline input processing. Reuse only a
+	// slot whose command submission and Streamline timeline have both completed;
+	// grow the ring when all existing slots remain in flight.
 	constexpr uint32_t kMaxRingDepth = 64;
 	uint32_t next = (commandFrameIndex + 1) % framesInFlight;
 	VulkanResultAttempt nextFenceAttempt = GetFenceStatusSEH(device, commandFences[next]);
@@ -1198,7 +1169,10 @@ DXVKInterop::CommandTransaction DXVKInterop::BeginFrameCommandBuffer()
 		}
 		return {};
 	}
-	if (presentWaitInUse[next] || nextFenceAttempt.result == VK_NOT_READY) {
+	const bool nextInputReady = nextFenceAttempt.result == VK_SUCCESS && IsInputCompletionReady(next);
+	if (commandRingFaulted)
+		return {};
+	if (presentWaitInUse[next] || nextFenceAttempt.result == VK_NOT_READY || !nextInputReady) {
 		uint32_t freeSlot = UINT32_MAX;
 		for (uint32_t i = 0; i < framesInFlight; ++i) {
 			const uint32_t cand = (next + i) % framesInFlight;
@@ -1217,10 +1191,12 @@ DXVKInterop::CommandTransaction DXVKInterop::BeginFrameCommandBuffer()
 				}
 				return {};
 			}
-			if (candidateAttempt.result == VK_SUCCESS) {
+			if (candidateAttempt.result == VK_SUCCESS && IsInputCompletionReady(cand)) {
 				freeSlot = cand;
 				break;
 			}
+			if (commandRingFaulted)
+				return {};
 		}
 		if (freeSlot != UINT32_MAX) {
 			next = freeSlot;
@@ -1263,6 +1239,7 @@ DXVKInterop::CommandTransaction DXVKInterop::BeginFrameCommandBuffer()
 				commandFences.push_back(newFence);
 				presentWaitSemaphores.push_back(newSemaphore);
 				presentWaitInUse.push_back(false);
+				inputCompletions.emplace_back();
 				pendingViewDeletes.emplace_back();
 				pendingResourceReleases.emplace_back();
 				next = framesInFlight;
@@ -1412,7 +1389,7 @@ bool DXVKInterop::SubmitFrameCommandBuffer(CommandTransaction& a_transaction,
 	const VkCommandBuffer commandBuffer = a_transaction.commandBuffer;
 	if (a_signalForNextPresent &&
 		(!PresentWaitInteropReady() || pendingPresentWaitSlot != UINT32_MAX ||
-		 pushedPresentWaitSlot != UINT32_MAX || slot >= presentWaitSemaphores.size() ||
+		 slot >= presentWaitSemaphores.size() ||
 		 presentWaitSemaphores[slot] == VK_NULL_HANDLE || presentWaitInUse[slot])) {
 		logger::error("[DXVKInterop] no safe semaphore slot is available for the next present");
 		return false;
@@ -1486,7 +1463,7 @@ bool DXVKInterop::PushPendingPresentWaitSemaphore()
 {
 	std::lock_guard lock(commandRingMutex);
 	if (!PresentWaitInteropReady() || pendingPresentWaitSlot == UINT32_MAX ||
-		pushedPresentWaitSlot != UINT32_MAX || pendingPresentWaitSlot >= presentWaitSemaphores.size())
+		pendingPresentWaitSlot >= presentWaitSemaphores.size())
 		return false;
 
 	const uint32_t slot = pendingPresentWaitSlot;
@@ -1511,8 +1488,11 @@ bool DXVKInterop::PushPendingPresentWaitSemaphore()
 		logger::error("[DXVKInterop] DXVK rejected the present-wait semaphore");
 		return false;
 	}
-	pushedPresentWaitSlot = slot;
-	pushedPresentWaitGeneration = pushAttempt.generation;
+	// Registration transfers the one-shot to DXVK immediately. Its asynchronous
+	// presenter may leave it Pending for several render frames, so track it with
+	// the other in-flight generations rather than requiring same-frame attach.
+	outstandingPresentWaitSubmissions.push_back(
+		PresentWaitSubmission{ slot, pushAttempt.generation });
 	pendingPresentWaitSlot = UINT32_MAX;
 	return true;
 }
@@ -1522,7 +1502,7 @@ bool DXVKInterop::HasPendingPresentWaitSemaphore() const
 	std::lock_guard lock(commandRingMutex);
 	return pendingPresentWaitSlot != UINT32_MAX ||
 	       (presentWaitInteropTerminalFault &&
-			(pushedPresentWaitSlot != UINT32_MAX || !outstandingPresentWaitSubmissions.empty()));
+			!outstandingPresentWaitSubmissions.empty());
 }
 
 bool DXVKInterop::DiscardPendingPresentWaitSemaphore()
@@ -1532,8 +1512,7 @@ bool DXVKInterop::DiscardPendingPresentWaitSemaphore()
 		return false;
 	if (pendingPresentWaitSlot == UINT32_MAX)
 		return true;
-	if (pushedPresentWaitSlot != UINT32_MAX ||
-		pendingPresentWaitSlot >= presentWaitSemaphores.size() ||
+	if (pendingPresentWaitSlot >= presentWaitSemaphores.size() ||
 		presentWaitSemaphores[pendingPresentWaitSlot] == VK_NULL_HANDLE)
 		return false;
 	if (!WaitDeviceIdle())
@@ -1574,7 +1553,7 @@ void DXVKInterop::NotifyPresentWaitQueued()
 			latchTerminalFault("present-wait release query", stateAttempt.exceptionCode);
 			return;
 		}
-		if (stateAttempt.state == kPresentWaitQueued) {
+		if (stateAttempt.state == kPresentWaitPending || stateAttempt.state == kPresentWaitQueued) {
 			++i;
 			continue;
 		}
@@ -1593,64 +1572,65 @@ void DXVKInterop::NotifyPresentWaitQueued()
 		presentWaitInUse[submission.slot] = false;
 		outstandingPresentWaitSubmissions.erase(outstandingPresentWaitSubmissions.begin() + i);
 	}
+}
 
-	if (pushedPresentWaitSlot == UINT32_MAX)
-		return;
-	const PresentWaitStateAttempt stateAttempt = GetPresentWaitSemaphoreStateSEH(
-		getPresentWaitSemaphoreState, pushedPresentWaitGeneration);
-	if (stateAttempt.exceptionCode) {
-		latchTerminalFault("present-wait state query", stateAttempt.exceptionCode);
-		return;
+bool DXVKInterop::TrackInputCompletion(uint64_t a_presentWaitGeneration,
+	VkSemaphore a_semaphore, uint64_t a_value)
+{
+	std::lock_guard lock(commandRingMutex);
+	if (!a_presentWaitGeneration || a_semaphore == VK_NULL_HANDLE || !a_value)
+		return false;
+	const auto submission = std::find_if(outstandingPresentWaitSubmissions.begin(),
+		outstandingPresentWaitSubmissions.end(), [&](const PresentWaitSubmission& a_submission) {
+			return a_submission.generation == a_presentWaitGeneration;
+		});
+	if (submission == outstandingPresentWaitSubmissions.end() || submission->slot >= inputCompletions.size()) {
+		logger::error("[DXVKInterop] cannot associate Streamline completion value {} with present-wait generation {}",
+			a_value, a_presentWaitGeneration);
+		return false;
 	}
-	if (stateAttempt.state == kPresentWaitQueued) {
-		outstandingPresentWaitSubmissions.push_back(
-			PresentWaitSubmission{ pushedPresentWaitSlot, pushedPresentWaitGeneration });
-		pushedPresentWaitSlot = UINT32_MAX;
-		pushedPresentWaitGeneration = 0;
-		return;
-	}
-	if (stateAttempt.state == kPresentWaitReleased) {
-		if (pushedPresentWaitSlot >= presentWaitInUse.size()) {
-			latchTerminalFault("released present-wait slot is invalid");
-			return;
-		}
-		const PresentWaitStateAttempt clearAttempt = ClearPresentWaitSemaphoreSEH(
-			clearPresentWaitSemaphore, pushedPresentWaitGeneration);
-		if (clearAttempt.exceptionCode || !clearAttempt.state) {
-			latchTerminalFault("released present-wait generation could not be cleared",
-				clearAttempt.exceptionCode);
-			return;
-		}
-		presentWaitInUse[pushedPresentWaitSlot] = false;
-		pushedPresentWaitSlot = UINT32_MAX;
-		pushedPresentWaitGeneration = 0;
-		return;
-	}
-	if (stateAttempt.state == kPresentWaitPending) {
-		if (pushedPresentWaitSlot >= presentWaitSemaphores.size()) {
-			latchTerminalFault("pending present-wait slot is invalid");
-			return;
-		}
-		const PresentWaitStateAttempt cancelAttempt = CancelPresentWaitSemaphoreSEH(
-			cancelPresentWaitSemaphore, presentWaitSemaphores[pushedPresentWaitSlot]);
-		if (cancelAttempt.exceptionCode || !cancelAttempt.state) {
-			latchTerminalFault("pending present-wait registration could not be cancelled",
-				cancelAttempt.exceptionCode);
-			return;
-		}
-		if (!WaitDeviceIdle()) {
-			commandRingFaulted = true;
-			logger::error("[DXVKInterop] cancelled present-wait semaphore remains quarantined because device idle could not be proven");
-			return;
-		}
-		pushedPresentWaitSlot = UINT32_MAX;
-		pushedPresentWaitGeneration = 0;
+	inputCompletions[submission->slot] = InputCompletion{ a_semaphore, a_value };
+	return true;
+}
+
+bool DXVKInterop::IsInputCompletionReady(uint32_t a_slot)
+{
+	if (a_slot >= inputCompletions.size()) {
 		commandRingFaulted = true;
-		logger::warn("[DXVKInterop] quarantined an unpresented one-shot semaphore for command-ring recovery");
-		return;
+		return false;
 	}
-	latchTerminalFault(stateAttempt.state == kPresentWaitUncertain ?
-		"present-wait consumption is uncertain" : "present-wait state is invalid");
+	InputCompletion& completion = inputCompletions[a_slot];
+	if (completion.semaphore == VK_NULL_HANDLE || !completion.value)
+		return true;
+	if (!vkGetDeviceProcAddr || device == VK_NULL_HANDLE) {
+		commandRingFaulted = true;
+		return false;
+	}
+	auto getCounter = reinterpret_cast<PFN_vkGetSemaphoreCounterValue>(
+		vkGetDeviceProcAddr(device, "vkGetSemaphoreCounterValue"));
+	if (!getCounter) {
+		commandRingFaulted = true;
+		logger::error("[DXVKInterop] vkGetSemaphoreCounterValue is unavailable");
+		return false;
+	}
+	uint64_t value = 0;
+	VkResult result = VK_ERROR_UNKNOWN;
+	__try {
+		result = getCounter(device, completion.semaphore, &value);
+	} __except (EXCEPTION_EXECUTE_HANDLER) {
+		commandRingFaulted = true;
+		logger::error("[DXVKInterop] Streamline input-completion query faulted (SEH {:#x})", GetExceptionCode());
+		return false;
+	}
+	if (result != VK_SUCCESS) {
+		commandRingFaulted = true;
+		logger::error("[DXVKInterop] Streamline input-completion query failed ({})", static_cast<int>(result));
+		return false;
+	}
+	if (value < completion.value)
+		return false;
+	completion = {};
+	return true;
 }
 
 void DXVKInterop::QueueViewsForDeferredDelete(const CommandTransaction& a_transaction,

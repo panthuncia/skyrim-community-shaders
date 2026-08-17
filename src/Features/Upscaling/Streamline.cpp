@@ -8,9 +8,12 @@
 #include "../../Utils/Game.h"
 
 #include <atomic>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 
 #define NV_WINDOWS
 #pragma warning(push)
@@ -44,6 +47,7 @@ namespace
 		PFun_slEvaluateFeature* slEvaluateFeature = nullptr;
 		PFun_slGetFeatureFunction* slGetFeatureFunction = nullptr;
 		PFun_slSetFeatureLoaded* slSetFeatureLoaded = nullptr;
+		PFun_slIsFeatureLoaded* slIsFeatureLoaded = nullptr;
 
 		PFun_slDLSSGetOptimalSettings* slDLSSGetOptimalSettings = nullptr;
 		PFun_slDLSSSetOptions* slDLSSSetOptions = nullptr;
@@ -72,7 +76,8 @@ namespace
 		uint32_t reflexCachedFrameLimitUs = 0;
 
 		bool dlssgModeCached = false;
-		bool dlssgModeOn = false;
+		std::atomic<bool> dlssgModeOn{ false };
+		uint32_t dlssgCachedRenderW = 0, dlssgCachedRenderH = 0;
 		uint32_t dlssgCachedDisplayW = 0, dlssgCachedDisplayH = 0;
 		uint32_t dlssgCachedNumFrames = 0;
 		bool dlssgCachedAuto = false;
@@ -81,11 +86,52 @@ namespace
 		std::atomic<uint32_t> dlssgMaxFramesToGenerate = 0;
 		std::atomic<bool> dlssgDynamicSupported = false;
 		std::atomic<uint32_t> frameGenerationMultiplier = 1;
+		sl::DLSSGOptions dlssgPendingOptions{};
+		std::atomic<bool> dlssgOptionsPending{ false };
+		bool dlssgPendingEnable = false;
+		uint32_t dlssgPendingRenderW = 0, dlssgPendingRenderH = 0;
+		uint32_t dlssgPendingDisplayW = 0, dlssgPendingDisplayH = 0;
 
 		// Present requires either a valid or passthrough tag every frame.
 		bool dlssgTaggedThisFrame = false;
+		uint32_t viewport0ConstantsFrame = UINT32_MAX;
 		std::atomic<bool> dlssgCloneTagsPrimed{ false };
+
+		// slDLSSGGetState is not thread-safe. The state query runs on DXVK's
+		// Vulkan present thread, while option changes originate on the game thread.
+		std::mutex dlssgApiMutex;
+		std::array<std::atomic<uint32_t>, 64> presentMarkerFrames{};
+		std::atomic<uint32_t> presentMarkerHead{ 0 };
+		std::atomic<uint32_t> presentMarkerTail{ 0 };
+		std::atomic<uint32_t> activePresentMarkerFrame{ 0 };
+		std::atomic<uint32_t> dlssgOptionsEpoch{ 0 };
+		std::atomic<uint32_t> dlssgLedgerBudget{ 0 };
+		std::atomic<uint64_t> activeDxvkFrameId{ 0 };
+		std::atomic<uint64_t> activeSwapchainSerial{ 0 };
+		std::atomic<uint64_t> activePresentStartNs{ 0 };
 	} g_sl;
+
+	struct DxvkPresentCallbackInfo
+	{
+		uint32_t size;
+		uint32_t version;
+		uint32_t frameGenOwner;
+		uint32_t imageIndex;
+		uint64_t frameId;
+		uint64_t swapchain;
+		uint64_t swapchainSerial;
+		uint64_t presenter;
+		uint64_t queue;
+		uint64_t presentWaitGeneration;
+		uint32_t pendingPresentWaitCount;
+		int32_t presentResult;
+	};
+
+	uint64_t PresentClockNs()
+	{
+		return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count());
+	}
 
 	// Feature load changes are applied only while the swapchain is torn down.
 	std::atomic<bool> g_dlssgDesiredLoaded{ false };
@@ -102,6 +148,44 @@ namespace
 			return true;
 		if (!g_sl.slSetFeatureLoaded || g_sl.dispatchFaulted.load(std::memory_order_acquire))
 			return false;
+
+		// The present thread calls into DLSS-G through SetOptions/GetState. Serialize
+		// feature load changes with those calls so Streamline cannot tear down its
+		// Vulkan dispatch state while one of them is still submitting work. Publish
+		// the unloaded state before calling Streamline so newly arriving callbacks
+		// bail out instead of waiting to use stale entry points.
+		if (a_feature == sl::kFeatureDLSS_G) {
+			g_sl.dlssgApiMutex.lock();
+			const bool lockedWant = a_desired.load(std::memory_order_acquire);
+			const bool wasLoaded = a_current.load(std::memory_order_acquire);
+			if (lockedWant == wasLoaded) {
+				g_sl.dlssgApiMutex.unlock();
+				return true;
+			}
+
+			if (!lockedWant)
+				a_current.store(false, std::memory_order_release);
+
+			bool succeeded = false;
+			__try {
+				succeeded = g_sl.slSetFeatureLoaded(a_feature, lockedWant) == sl::Result::eOk;
+				if (succeeded && lockedWant) {
+					g_sl.slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGSetOptions", reinterpret_cast<void*&>(g_sl.slDLSSGSetOptions));
+					g_sl.slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGGetState", reinterpret_cast<void*&>(g_sl.slDLSSGGetState));
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				g_sl.dispatchFaulted = true;
+			}
+
+			if (succeeded) {
+				a_current.store(lockedWant, std::memory_order_release);
+			} else {
+				a_current.store(wasLoaded, std::memory_order_release);
+			}
+			g_sl.dlssgApiMutex.unlock();
+			return succeeded;
+		}
+
 		__try {
 			if (g_sl.slSetFeatureLoaded(a_feature, want) != sl::Result::eOk)
 				return false;
@@ -132,11 +216,17 @@ namespace
 	{
 		if (g_sl.dispatchFaulted.load(std::memory_order_acquire))
 			return false;
+		const bool wantDLSSG = g_dlssgDesiredLoaded.load(std::memory_order_acquire);
+		const bool wantFSRFG = g_fsrfgDesiredLoaded.load(std::memory_order_acquire);
+		if (wantDLSSG && wantFSRFG) {
+			logger::error("[Streamline] refusing to load both frame-generation present plugins");
+			return false;
+		}
 
 		// Per-swapchain options and semaphores are invalid after teardown.
 		g_sl.dlssgModeCached = false;
 		g_sl.dlssgModeOn = false;
-
+		g_sl.dlssgOptionsPending = false;
 		g_sl.dlssgCloneTagsPrimed.store(false, std::memory_order_release);
 
 		if (g_fsrfgCurrentlyLoaded.load(std::memory_order_acquire)) {
@@ -154,21 +244,33 @@ namespace
 			DXVKInterop::GetSingleton()->ReleaseRetainedPresentResourcesAfterFSRSwapchainTeardown();
 		}
 
-		const bool dlssgReconciled = ReconcileFgFeatureLoad(
-			sl::kFeatureDLSS_G, g_dlssgDesiredLoaded, g_dlssgCurrentlyLoaded);
-		const bool fsrfgReconciled = ReconcileFgFeatureLoad(
-			sl::kFeatureFSR_G, g_fsrfgDesiredLoaded, g_fsrfgCurrentlyLoaded);
-		return dlssgReconciled && fsrfgReconciled;
+		// Remove the outgoing WSI hook set before mapping the incoming one. This
+		// keeps the interposer's hook table single-owner throughout a method switch.
+		if (!wantDLSSG && !ReconcileFgFeatureLoad(
+				sl::kFeatureDLSS_G, g_dlssgDesiredLoaded, g_dlssgCurrentlyLoaded))
+			return false;
+		if (!wantFSRFG && !ReconcileFgFeatureLoad(
+				sl::kFeatureFSR_G, g_fsrfgDesiredLoaded, g_fsrfgCurrentlyLoaded))
+			return false;
+		if (wantDLSSG && !ReconcileFgFeatureLoad(
+				sl::kFeatureDLSS_G, g_dlssgDesiredLoaded, g_dlssgCurrentlyLoaded))
+			return false;
+		if (wantFSRFG && !ReconcileFgFeatureLoad(
+				sl::kFeatureFSR_G, g_fsrfgDesiredLoaded, g_fsrfgCurrentlyLoaded))
+			return false;
+		return true;
 	}
 
-	bool DxvkFrameGenerationOwnsSwapchain(VkSwapchainKHR a_swapchain)
+	// DXVK uses the owner kind to preserve DLSS-G's present ID while still
+	// stripping unsupported pNext structures from FSR's replacement swapchain.
+	uint32_t DxvkFrameGenerationOwnsSwapchain(VkSwapchainKHR a_swapchain)
 	{
 		if (g_dlssgCurrentlyLoaded.load(std::memory_order_acquire))
-			return true;
+			return 2u;
 		if (g_sl.dispatchFaulted.load(std::memory_order_acquire))
-			return g_fsrfgOwnsPresent.load(std::memory_order_acquire);
+			return g_fsrfgOwnsPresent.load(std::memory_order_acquire) ? 1u : 0u;
 		if (!g_fsrfgOwnsPresent.load(std::memory_order_acquire) || !g_sl.slFSRFrameGenerationOwnsSwapchain)
-			return false;
+			return 0u;
 
 		bool ownsSwapchain = false;
 		__try {
@@ -176,7 +278,213 @@ namespace
 		} __except (EXCEPTION_EXECUTE_HANDLER) {
 			g_sl.dispatchFaulted = true;
 		}
-		return ownsSwapchain;
+		return ownsSwapchain ? 1u : 0u;
+	}
+
+	uint32_t EmitBridgedPresentMarker(bool a_begin)
+	{
+		if (!g_sl.slPCLSetMarker || g_sl.dispatchFaulted.load(std::memory_order_acquire))
+			return 0;
+
+		uint32_t frameId = 0;
+		if (a_begin) {
+			const uint32_t head = g_sl.presentMarkerHead.load(std::memory_order_relaxed);
+			if (head == g_sl.presentMarkerTail.load(std::memory_order_acquire))
+				return 0;
+			frameId = g_sl.presentMarkerFrames[head % g_sl.presentMarkerFrames.size()].load(std::memory_order_relaxed);
+			g_sl.presentMarkerHead.store(head + 1u, std::memory_order_release);
+			g_sl.activePresentMarkerFrame.store(frameId, std::memory_order_release);
+		} else {
+			frameId = g_sl.activePresentMarkerFrame.exchange(0u, std::memory_order_acq_rel);
+			if (!frameId)
+				return 0;
+		}
+
+		__try {
+			sl::FrameToken* token = nullptr;
+			if (g_sl.slGetNewFrameToken(token, &frameId) == sl::Result::eOk && token)
+				g_sl.slPCLSetMarker(a_begin ? sl::PCLMarker::ePresentStart : sl::PCLMarker::ePresentEnd, *token);
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			g_sl.dispatchFaulted = true;
+		}
+		return frameId;
+	}
+
+	// Apply pending options immediately before the real, Streamline-interposed
+	// vkQueuePresentKHR. This makes the mode change and the Present that consumes
+	// it unambiguous and avoids racing DXVK's asynchronous presenter.
+	void DxvkPresentBeginCallback(const DxvkPresentCallbackInfo* a_info)
+	{
+		if (!a_info || a_info->size < sizeof(DxvkPresentCallbackInfo) ||
+			a_info->version != 1u || a_info->frameGenOwner != 2u) {
+			logger::critical("[DLSSG-Ledger] rejected invalid DXVK present callback payload");
+			g_sl.dispatchFaulted = true;
+			return;
+		}
+		if (!g_dlssgCurrentlyLoaded.load(std::memory_order_acquire) ||
+			!g_sl.slDLSSGSetOptions || g_sl.dispatchFaulted.load(std::memory_order_acquire))
+			return;
+
+		g_sl.dlssgApiMutex.lock();
+		if (!g_dlssgCurrentlyLoaded.load(std::memory_order_acquire) ||
+			!g_sl.slDLSSGSetOptions || g_sl.dispatchFaulted.load(std::memory_order_acquire)) {
+			g_sl.dlssgApiMutex.unlock();
+			return;
+		}
+		if (!g_sl.dlssgOptionsPending.load(std::memory_order_acquire)) {
+			g_sl.dlssgApiMutex.unlock();
+			const uint32_t markerFrame = EmitBridgedPresentMarker(true);
+			g_sl.activeDxvkFrameId.store(a_info->frameId, std::memory_order_release);
+			g_sl.activeSwapchainSerial.store(a_info->swapchainSerial, std::memory_order_release);
+			g_sl.activePresentStartNs.store(PresentClockNs(), std::memory_order_release);
+			if (g_sl.dlssgLedgerBudget.load(std::memory_order_acquire)) {
+				logger::info("[DLSSG-Ledger] begin epoch={} dxvkFrame={} markerFrame={} swapchain={:#x}/{} presenter={:#x} image={} queue={:#x} waitGen={} pendingWaits={} markerDepth={} tid={}",
+					g_sl.dlssgOptionsEpoch.load(std::memory_order_acquire), a_info->frameId, markerFrame,
+					a_info->swapchain, a_info->swapchainSerial, a_info->presenter, a_info->imageIndex,
+					a_info->queue, a_info->presentWaitGeneration, a_info->pendingPresentWaitCount,
+					g_sl.presentMarkerTail.load(std::memory_order_acquire) - g_sl.presentMarkerHead.load(std::memory_order_acquire),
+					GetCurrentThreadId());
+			}
+			return;
+		}
+
+		bool succeeded = false;
+		__try {
+			const sl::Result result = g_sl.slDLSSGSetOptions(g_sl.viewport, g_sl.dlssgPendingOptions);
+			if (result == sl::Result::eOk) {
+				succeeded = true;
+				g_sl.dlssgModeOn.store(g_sl.dlssgPendingEnable, std::memory_order_release);
+				logger::info("[Streamline] applied present-ordered DLSS-G mode={} numFrames={} render={}x{} display={}x{}",
+					g_sl.dlssgPendingEnable, g_sl.dlssgPendingOptions.numFramesToGenerate,
+					g_sl.dlssgPendingRenderW, g_sl.dlssgPendingRenderH,
+					g_sl.dlssgPendingDisplayW, g_sl.dlssgPendingDisplayH);
+			} else {
+				logger::warn("[Streamline] present-thread slDLSSGSetOptions failed (result {})", static_cast<int>(result));
+			}
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			g_sl.dispatchFaulted = true;
+			logger::error("[Streamline] present-thread DLSS-G SetOptions faulted - Streamline disabled for this session");
+		}
+		g_sl.dlssgOptionsPending.store(false, std::memory_order_release);
+		if (!succeeded)
+			g_sl.dlssgModeCached = false;
+		g_sl.dlssgApiMutex.unlock();
+
+		// The marker pair and the present must observe the same DLSS-G mode.
+		// In particular, enabling after PresentStart can make the pacer wait for
+		// work that was never scheduled for that frame.
+		const uint32_t markerFrame = EmitBridgedPresentMarker(true);
+		g_sl.activeDxvkFrameId.store(a_info->frameId, std::memory_order_release);
+		g_sl.activeSwapchainSerial.store(a_info->swapchainSerial, std::memory_order_release);
+		g_sl.activePresentStartNs.store(PresentClockNs(), std::memory_order_release);
+		if (g_sl.dlssgLedgerBudget.load(std::memory_order_acquire)) {
+			logger::info("[DLSSG-Ledger] begin epoch={} dxvkFrame={} markerFrame={} swapchain={:#x}/{} presenter={:#x} image={} queue={:#x} waitGen={} pendingWaits={} markerDepth={} tid={}",
+				g_sl.dlssgOptionsEpoch.load(std::memory_order_acquire), a_info->frameId, markerFrame,
+				a_info->swapchain, a_info->swapchainSerial, a_info->presenter, a_info->imageIndex,
+				a_info->queue, a_info->presentWaitGeneration, a_info->pendingPresentWaitCount,
+				g_sl.presentMarkerTail.load(std::memory_order_acquire) - g_sl.presentMarkerHead.load(std::memory_order_acquire),
+				GetCurrentThreadId());
+		}
+	}
+
+	// DXVK invokes this after the real, Streamline-interposed vkQueuePresentKHR
+	// returns. NVIDIA requires slDLSSGGetState to run on that present thread.
+	// In queue-parallel mode, associate the input-completion timeline with the
+	// command-ring slot for this present. Slot selection later polls completion
+	// without blocking; a Vulkan queue wait here could form a GPU queue cycle.
+	void DxvkPresentCompletedCallback(const DxvkPresentCallbackInfo* a_info)
+	{
+		if (!a_info || a_info->size < sizeof(DxvkPresentCallbackInfo) ||
+			a_info->version != 1u || a_info->frameGenOwner != 2u) {
+			logger::critical("[DLSSG-Ledger] rejected invalid DXVK present completion payload");
+			g_sl.dispatchFaulted = true;
+			return;
+		}
+		const uint64_t beginNs = g_sl.activePresentStartNs.exchange(0u, std::memory_order_acq_rel);
+		const uint64_t durationUs = beginNs ? (PresentClockNs() - beginNs) / 1000u : 0u;
+		const uint64_t activeFrame = g_sl.activeDxvkFrameId.exchange(0u, std::memory_order_acq_rel);
+		const uint64_t activeSwapchainSerial = g_sl.activeSwapchainSerial.exchange(0u, std::memory_order_acq_rel);
+		if (!activeFrame)
+			return;
+
+		// Close the PCL present interval immediately after vkQueuePresentKHR.
+		// Querying state inside that interval can make the pacer observe an
+		// incomplete marker pair while it flushes the just-presented frame.
+		const uint32_t markerFrame = EmitBridgedPresentMarker(false);
+		const uint32_t budget = g_sl.dlssgLedgerBudget.load(std::memory_order_acquire);
+		if (budget) {
+			logger::info("[DLSSG-Ledger] end epoch={} dxvkFrame={} activeFrame={} markerFrame={} swapchain={:#x}/{} activeSerial={} image={} waitGen={} result={} presentUs={} tid={}",
+				g_sl.dlssgOptionsEpoch.load(std::memory_order_acquire), a_info->frameId, activeFrame,
+				markerFrame, a_info->swapchain, a_info->swapchainSerial, activeSwapchainSerial,
+				a_info->imageIndex, a_info->presentWaitGeneration, a_info->presentResult, durationUs,
+				GetCurrentThreadId());
+			g_sl.dlssgLedgerBudget.fetch_sub(1u, std::memory_order_acq_rel);
+		}
+		if (activeFrame != a_info->frameId || activeSwapchainSerial != a_info->swapchainSerial) {
+			logger::critical("[DLSSG-Ledger] present identity mismatch beginFrame={} endFrame={} beginSerial={} endSerial={}",
+				activeFrame, a_info->frameId, activeSwapchainSerial, a_info->swapchainSerial);
+			g_sl.dispatchFaulted = true;
+		}
+
+		if (!g_dlssgCurrentlyLoaded.load(std::memory_order_acquire) ||
+			!g_sl.slDLSSGGetState || g_sl.dispatchFaulted.load(std::memory_order_acquire))
+			return;
+
+		g_sl.dlssgApiMutex.lock();
+		if (!g_dlssgCurrentlyLoaded.load(std::memory_order_acquire) ||
+			!g_sl.slDLSSGGetState || g_sl.dispatchFaulted.load(std::memory_order_acquire)) {
+			g_sl.dlssgApiMutex.unlock();
+			return;
+		}
+		__try {
+			sl::DLSSGState state{};
+			if (g_sl.slDLSSGGetState(g_sl.viewport, state, nullptr) == sl::Result::eOk) {
+				if (g_sl.dlssgLedgerBudget.load(std::memory_order_acquire)) {
+					logger::info("[DLSSG-Ledger] state completionFence={:#x} completionValue={} status={} presented={}",
+						reinterpret_cast<uintptr_t>(state.inputsProcessingCompletionFence),
+						state.lastPresentInputsProcessingCompletionFenceValue,
+						static_cast<uint32_t>(state.status), state.numFramesActuallyPresented);
+				}
+				if (g_sl.dlssgModeOn.load(std::memory_order_acquire) &&
+					state.inputsProcessingCompletionFence &&
+					state.lastPresentInputsProcessingCompletionFenceValue) {
+					const bool tracked = DXVKInterop::GetSingleton()->TrackInputCompletion(
+						a_info->presentWaitGeneration,
+						reinterpret_cast<VkSemaphore>(state.inputsProcessingCompletionFence),
+						state.lastPresentInputsProcessingCompletionFenceValue);
+					if (g_sl.dlssgLedgerBudget.load(std::memory_order_acquire))
+						logger::info("[DLSSG-Ledger] completion tracked waitGen={} value={} tracked={}",
+							a_info->presentWaitGeneration,
+							state.lastPresentInputsProcessingCompletionFenceValue, tracked);
+					if (!tracked) {
+						g_sl.dispatchFaulted = true;
+						logger::error("[Streamline] DLSS-G input completion could not be associated with its tagged slot; disabling Streamline for this session");
+					}
+				}
+				// A successful state query after Present proves that the proxy swapchain
+				// and its cloned buffers are ready, even while interpolation is off.
+				g_sl.dlssgCloneTagsPrimed.store(true, std::memory_order_release);
+				if (state.numFramesToGenerateMax > 0u) {
+					const uint32_t previous = g_sl.dlssgMaxFramesToGenerate.exchange(
+						state.numFramesToGenerateMax, std::memory_order_acq_rel);
+					g_sl.dlssgDynamicSupported.store(
+						state.bIsDynamicMFGSupported == sl::Boolean::eTrue, std::memory_order_release);
+					if (!previous) {
+						logger::info("[Streamline] DLSS-G numFramesToGenerateMax = {} (max {}x multiplier), DynamicMFG supported = {}",
+							state.numFramesToGenerateMax, state.numFramesToGenerateMax + 1u,
+							state.bIsDynamicMFGSupported == sl::Boolean::eTrue);
+					}
+				}
+
+				if (g_sl.dlssgModeOn.load(std::memory_order_acquire)) {
+					g_sl.frameGenerationMultiplier.store(
+						std::max(state.numFramesActuallyPresented, 1u), std::memory_order_release);
+				}
+			}
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			g_sl.dispatchFaulted = true;
+		}
+		g_sl.dlssgApiMutex.unlock();
 	}
 
 	// Suppress exact known-benign diagnostics; pass all other messages through.
@@ -352,7 +660,8 @@ bool Streamline::Initialize()
 		Resolve(g_sl.slSetTagForFrame, "slSetTagForFrame") &&
 		Resolve(g_sl.slSetConstants, "slSetConstants") &&
 		Resolve(g_sl.slEvaluateFeature, "slEvaluateFeature") &&
-		Resolve(g_sl.slGetFeatureFunction, "slGetFeatureFunction");
+		Resolve(g_sl.slGetFeatureFunction, "slGetFeatureFunction") &&
+		Resolve(g_sl.slIsFeatureLoaded, "slIsFeatureLoaded");
 
 	Resolve(g_sl.slSetFeatureLoaded, "slSetFeatureLoaded");
 	if (!resolved) {
@@ -363,17 +672,18 @@ bool Streamline::Initialize()
 
 	const auto slDirWide = slDir.wstring();
 	const wchar_t* pluginPaths[] = { slDirWide.c_str() };
-	// The controller keeps at most one frame-generation feature loaded at runtime.
+	// Request both supported frame-generation plugins so support probing, menu
+	// population, and later runtime switching have access to both interfaces.
+	// They must not both retain Vulkan WSI hooks once a swapchain exists; the
+	// inactive plugin is disabled after probing and before the first swapchain.
 	dlssgHardware = ProbeDLSSGHardware();
 
 	std::vector<sl::Feature> featuresToLoad = { sl::kFeatureDLSS, sl::kFeatureReflex, sl::kFeaturePCL,
 		sl::kFeatureFSR, sl::kFeatureFSR_G, sl::kFeatureXeSS };
 	if (dlssgHardware) {
 		featuresToLoad.push_back(sl::kFeatureDLSS_G);
-		g_dlssgDesiredLoaded.store(true, std::memory_order_release);
 		g_dlssgCurrentlyLoaded.store(true, std::memory_order_release);
 	}
-	g_fsrfgDesiredLoaded.store(true, std::memory_order_release);
 	g_fsrfgCurrentlyLoaded.store(true, std::memory_order_release);
 
 	sl::Preferences pref{};
@@ -436,6 +746,21 @@ void Streamline::SetVulkanDevice()
 	featureFSR = supported(sl::kFeatureFSR);
 	featureFSRFG = supported(sl::kFeatureFSR_G);
 
+	// A requested plugin can be rejected during device startup even though it
+	// was mapped at slInit. Seed reconciliation from Streamline's actual state;
+	// otherwise unloading an already-rejected plugin fails and can mask the
+	// other frame-generation method from the menu.
+	const auto refreshLoadedState = [&](sl::Feature a_feature, bool a_supported,
+									  std::atomic<bool>& a_current) {
+		bool loaded = false;
+		if (g_sl.slIsFeatureLoaded(a_feature, loaded) == sl::Result::eOk)
+			a_current.store(loaded, std::memory_order_release);
+		else if (!a_supported)
+			a_current.store(false, std::memory_order_release);
+	};
+	refreshLoadedState(sl::kFeatureDLSS_G, featureDLSSG, g_dlssgCurrentlyLoaded);
+	refreshLoadedState(sl::kFeatureFSR_G, featureFSRFG, g_fsrfgCurrentlyLoaded);
+
 	if (featureDLSS) {
 		g_sl.slGetFeatureFunction(sl::kFeatureDLSS, "slDLSSGetOptimalSettings", reinterpret_cast<void*&>(g_sl.slDLSSGetOptimalSettings));
 		g_sl.slGetFeatureFunction(sl::kFeatureDLSS, "slDLSSSetOptions", reinterpret_cast<void*&>(g_sl.slDLSSSetOptions));
@@ -481,10 +806,25 @@ void Streamline::SetVulkanDevice()
 		GetProcAddress(dxvkModule, "dxvkSetSwapchainTornDownCallback") &&
 		GetProcAddress(dxvkModule, "dxvkSetFrameGenOwnershipQuery");
 	const bool dlssgInteropReady = frameGenerationInteropReady &&
-		GetProcAddress(dxvkModule, "dxvkSetSkipFrameLatencySync");
-	featureDLSSG = featureDLSSG && dlssgHardware && dlssgInteropReady && dxvk->PresentWaitInteropReady();
+		GetProcAddress(dxvkModule, "dxvkSetPresentBeginCallback") &&
+		GetProcAddress(dxvkModule, "dxvkSetPresentCompletedCallback");
+	featureDLSSG = featureDLSSG && dlssgHardware && dlssgInteropReady &&
+	               dxvk->FrameGenerationQueueInteropReady();
 	featureFSRFG = featureFSRFG && frameGenerationInteropReady &&
 	               dxvk->FrameGenerationQueueInteropReady();
+
+	// Cache support while both requested plugins are still loaded, then leave
+	// exactly one present owner enabled before swapchain creation. This preserves
+	// both menu choices without stacking the FFX and DLSS-G WSI proxies. Runtime
+	// switches repeat this operation in DXVK's no-swapchain callback.
+	g_dlssgDesiredLoaded.store(featureDLSSG, std::memory_order_release);
+	g_fsrfgDesiredLoaded.store(!featureDLSSG && featureFSRFG, std::memory_order_release);
+	if (!ReconcileFgFeatureLoad(sl::kFeatureDLSS_G, g_dlssgDesiredLoaded, g_dlssgCurrentlyLoaded) ||
+		!ReconcileFgFeatureLoad(sl::kFeatureFSR_G, g_fsrfgDesiredLoaded, g_fsrfgCurrentlyLoaded)) {
+		featureDLSSG = false;
+		featureFSRFG = false;
+		logger::error("[Streamline] failed to isolate frame-generation plugins before swapchain creation");
+	}
 
 	logger::info("[Streamline] feature support: DLSS={} Reflex={} DLSS-G={} FSR={} FSR-G={} XeSS={} (FSR-FG fns {})",
 		featureDLSS, featureReflex, featureDLSSG, featureFSR, featureFSRFG, featureXeSS,
@@ -600,23 +940,6 @@ bool Streamline::DiscardFSRFrameGenerationPreparedFrame()
 	return true;
 }
 
-void Streamline::CaptureDLSSGPresentState()
-{
-	if (!initialized || !featureDLSSG || g_sl.dispatchFaulted ||
-		!g_dlssgCurrentlyLoaded.load(std::memory_order_acquire) || !g_sl.dlssgModeOn)
-		return;
-	__try {
-		sl::DLSSGState state{};
-		if (g_sl.slDLSSGGetState(g_sl.viewport, state, nullptr) == sl::Result::eOk) {
-			g_sl.frameGenerationMultiplier.store(
-				std::max(state.numFramesActuallyPresented, 1u), std::memory_order_release);
-			g_sl.dlssgCloneTagsPrimed.store(true, std::memory_order_release);
-		}
-	} __except (EXCEPTION_EXECUTE_HANDLER) {
-		g_sl.dispatchFaulted = true;
-	}
-}
-
 void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimitUs)
 {
 	if (!initialized || !featureReflex || g_sl.dispatchFaulted)
@@ -683,6 +1006,22 @@ void Streamline::SetPCLMarker(PclMarker a_marker)
 		g_sl.dispatchFaulted = true;
 		logger::error("[Streamline] PCL marker faulted — Streamline disabled for this session");
 	}
+}
+
+bool Streamline::QueueDLSSGPresentMarkers()
+{
+	if (!initialized || !g_sl.slPCLSetMarker || g_sl.dispatchFaulted.load(std::memory_order_acquire))
+		return false;
+	const uint32_t tail = g_sl.presentMarkerTail.load(std::memory_order_relaxed);
+	const uint32_t head = g_sl.presentMarkerHead.load(std::memory_order_acquire);
+	if (tail - head >= g_sl.presentMarkerFrames.size()) {
+		logger::warn("[Streamline] Vulkan present-marker queue overflow; using app-thread markers");
+		return false;
+	}
+	g_sl.presentMarkerFrames[tail % g_sl.presentMarkerFrames.size()].store(
+		g_sl.renderFrameId, std::memory_order_relaxed);
+	g_sl.presentMarkerTail.store(tail + 1u, std::memory_order_release);
+	return true;
 }
 
 // Returns false until the engine camera matrices are finite and invertible.
@@ -1023,6 +1362,10 @@ static bool cs_SubmitPresentTags(DXVKInterop* a_dxvk, sl::FrameToken& a_token,
 		a_token, a_viewport, a_tags, a_tagCount, transaction.GetCommandBuffer());
 	if (a_tagResult != sl::Result::eOk)
 		return false;
+	// Signal the slot semaphore so DXVK can add it to the matching present's
+	// wait list. The presenter may use a different Vulkan queue and can otherwise
+	// overtake this tag/copy submission even though it was queued first on the
+	// graphics queue.
 	if (!a_dxvk->SubmitFrameCommandBuffer(transaction, true)) {
 		if (transaction.SubmissionMayBeInFlight()) {
 			a_dxvk->QueueViewsForDeferredDelete(transaction, a_views, a_viewCount);
@@ -1103,6 +1446,8 @@ static sl::Result cs_EvaluateFeatureCore(sl::Feature a_feature, const sl::Viewpo
 				return constantsRes;
 			}
 			s_constFrameByVp[vpId] = g_sl.renderFrameId;
+			if (vpId == 0)
+				g_sl.viewport0ConstantsFrame = g_sl.renderFrameId;
 		}
 	} else {
 		sl::Constants consts;
@@ -1564,7 +1909,8 @@ bool Streamline::EvaluateFSRFrameGen(ID3D11Resource* a_depth, ID3D11Resource* a_
 	return accepted;
 }
 
-bool Streamline::SetDLSSGMode(bool a_enable, uint32_t a_displayWidth, uint32_t a_displayHeight,
+bool Streamline::SetDLSSGMode(bool a_enable, uint32_t a_renderWidth, uint32_t a_renderHeight,
+	uint32_t a_displayWidth, uint32_t a_displayHeight,
 	uint32_t a_numFramesToGenerate, bool a_autoMode, bool a_dynamic, float a_dynamicTargetFps)
 {
 	if (!initialized || !featureDLSSG || g_sl.dispatchFaulted)
@@ -1573,6 +1919,11 @@ bool Streamline::SetDLSSGMode(bool a_enable, uint32_t a_displayWidth, uint32_t a
 	// Do not call the options entry point while DLSS-G is runtime-unloaded.
 	if (!g_dlssgCurrentlyLoaded.load(std::memory_order_acquire))
 		return false;
+	// Starting interpolation without matching current-frame constants and real
+	// input tags can wedge Streamline's Vulkan pacer on its first flush.
+	if (a_enable && (!g_sl.dlssgCloneTagsPrimed.load(std::memory_order_acquire) ||
+		!g_sl.dlssgTaggedThisFrame || g_sl.viewport0ConstantsFrame != g_sl.renderFrameId))
+		return false;
 
 	// Clamp the requested multiplier to the reported hardware limit.
 	const uint32_t maxFrames = g_sl.dlssgMaxFramesToGenerate.load(std::memory_order_acquire);
@@ -1580,26 +1931,22 @@ bool Streamline::SetDLSSGMode(bool a_enable, uint32_t a_displayWidth, uint32_t a
 	if (maxFrames > 0u && numFrames > maxFrames)
 		numFrames = maxFrames;
 
-	// Reissue options each frame; cached values only suppress duplicate logging.
-	const bool changed = !(g_sl.dlssgModeCached && g_sl.dlssgModeOn == a_enable &&
-		g_sl.dlssgCachedNumFrames == numFrames && g_sl.dlssgCachedAuto == a_autoMode &&
-		g_sl.dlssgCachedDynamic == a_dynamic && g_sl.dlssgCachedDynamicFps == a_dynamicTargetFps &&
-		g_sl.dlssgCachedDisplayW == a_displayWidth && g_sl.dlssgCachedDisplayH == a_displayHeight);
-	const bool wasModeOn = g_sl.dlssgModeOn;
+	const bool dynamicResolution = a_renderWidth < a_displayWidth || a_renderHeight < a_displayHeight;
+	{
+		std::lock_guard lock(g_sl.dlssgApiMutex);
+		// The cache represents the latest published request; the present callback
+		// updates dlssgModeOn only after Streamline accepts it. Keep the cache and
+		// pending-option check under the same lock as the present callback.
+		const bool changed = !(g_sl.dlssgModeCached &&
+			g_sl.dlssgCachedNumFrames == numFrames && g_sl.dlssgCachedAuto == a_autoMode &&
+			g_sl.dlssgCachedDynamic == a_dynamic && g_sl.dlssgCachedDynamicFps == a_dynamicTargetFps &&
+			g_sl.dlssgCachedRenderW == a_renderWidth && g_sl.dlssgCachedRenderH == a_renderHeight &&
+			g_sl.dlssgCachedDisplayW == a_displayWidth && g_sl.dlssgCachedDisplayH == a_displayHeight &&
+			g_sl.dlssgPendingEnable == a_enable);
+		if (!changed)
+			return !g_sl.dlssgOptionsPending.load(std::memory_order_acquire) &&
+			       g_sl.dlssgModeOn.load(std::memory_order_acquire) == a_enable;
 
-	static void (*s_setSkipFrameLatencySync)(uint32_t) = nullptr;
-	static bool s_skipFrameLatencySyncResolved = false;
-	if (!s_skipFrameLatencySyncResolved) {
-		s_skipFrameLatencySyncResolved = true;
-		if (HMODULE module = GetModuleHandleW(L"dxvk_d3d11.dll"))
-			s_setSkipFrameLatencySync = reinterpret_cast<void (*)(uint32_t)>(
-				GetProcAddress(module, "dxvkSetSkipFrameLatencySync"));
-		if (!s_setSkipFrameLatencySync)
-			logger::warn("[Streamline] dxvkSetSkipFrameLatencySync not found - DLSS-G blocking mode may deadlock");
-	}
-
-	bool succeeded = false;
-	__try {
 		sl::DLSSGOptions options{};
 		options.mode = !a_enable ? sl::DLSSGMode::eOff :
 		               a_dynamic ? sl::DLSSGMode::eDynamic :
@@ -1610,40 +1957,50 @@ bool Streamline::SetDLSSGMode(bool a_enable, uint32_t a_displayWidth, uint32_t a
 			options.dynamicTargetFrameRate = a_dynamicTargetFps;
 		// Retain resources across temporary loading-screen and menu disables.
 		options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
+		if (dynamicResolution) {
+			options.flags |= sl::DLSSGFlags::eDynamicResolutionEnabled;
+			options.dynamicResWidth = a_renderWidth;
+			options.dynamicResHeight = a_renderHeight;
+		}
 		options.mvecDepthWidth = a_displayWidth;
 		options.mvecDepthHeight = a_displayHeight;
 		options.colorWidth = a_displayWidth;
 		options.colorHeight = a_displayHeight;
-		// Volatile inputs are copied into Streamline-owned resources before present.
+		// DXVK presents on a dedicated Vulkan queue. Let Streamline block that
+		// queue until its input reads complete instead of manually inserting the
+		// eBlockNoClientQueues completion fence into the graphics queue. An
+		// immediate graphics-queue wait can be ordered before SL's internal signal
+		// submission and permanently wedge both queues.
+		// Vulkan queue-parallel mode keeps Streamline from parking a client queue
+		// inside the driver. Completion is observed on the present thread below;
+		// any required reuse wait must be applied at the resource reuse point, not
+		// immediately submitted ahead of Streamline's signal-producing work.
 		options.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockNoClientQueues;
-		const sl::Result res = g_sl.slDLSSGSetOptions(g_sl.viewport, options);
-		if (res != sl::Result::eOk) {
-			if (changed)
-				logger::warn("[Streamline] slDLSSGSetOptions failed (result {})", static_cast<int>(res));
-		} else {
-			succeeded = true;
-			if (s_setSkipFrameLatencySync)
-				s_setSkipFrameLatencySync(a_enable ? 1u : 0u);
-			g_sl.dlssgModeCached = true;
-			g_sl.dlssgModeOn = a_enable;
-			g_sl.dlssgCachedNumFrames = numFrames;
-			g_sl.dlssgCachedAuto = a_autoMode;
-			g_sl.dlssgCachedDynamic = a_dynamic;
-			g_sl.dlssgCachedDynamicFps = a_dynamicTargetFps;
-			g_sl.dlssgCachedDisplayW = a_displayWidth;
-			g_sl.dlssgCachedDisplayH = a_displayHeight;
-			if (!a_enable || !wasModeOn)
-				g_sl.dlssgCloneTagsPrimed.store(false, std::memory_order_release);
-			if (changed)
-				logger::info("[Streamline] DLSS-G mode={} ({}) numFrames={} targetFps={} (max {}) display={}x{}", a_enable,
-					!a_enable ? "off" : a_dynamic ? "dynamic" : a_autoMode ? "auto" : "on", numFrames, a_dynamicTargetFps, maxFrames,
-					a_displayWidth, a_displayHeight);
-		}
-	} __except (EXCEPTION_EXECUTE_HANDLER) {
-		g_sl.dispatchFaulted = true;
-		logger::error("[Streamline] DLSS-G SetOptions faulted — Streamline disabled for this session");
+		g_sl.dlssgPendingOptions = options;
+		g_sl.dlssgOptionsPending.store(true, std::memory_order_release);
+		g_sl.dlssgPendingEnable = a_enable;
+		g_sl.dlssgPendingRenderW = a_renderWidth;
+		g_sl.dlssgPendingRenderH = a_renderHeight;
+		g_sl.dlssgPendingDisplayW = a_displayWidth;
+		g_sl.dlssgPendingDisplayH = a_displayHeight;
+		g_sl.dlssgOptionsEpoch.fetch_add(1u, std::memory_order_acq_rel);
+		g_sl.dlssgLedgerBudget.store(32u, std::memory_order_release);
+		g_sl.dlssgModeCached = true;
+		g_sl.dlssgCachedNumFrames = numFrames;
+		g_sl.dlssgCachedAuto = a_autoMode;
+		g_sl.dlssgCachedDynamic = a_dynamic;
+		g_sl.dlssgCachedDynamicFps = a_dynamicTargetFps;
+		g_sl.dlssgCachedRenderW = a_renderWidth;
+		g_sl.dlssgCachedRenderH = a_renderHeight;
+		g_sl.dlssgCachedDisplayW = a_displayWidth;
+		g_sl.dlssgCachedDisplayH = a_displayHeight;
 	}
-	return succeeded;
+	logger::info("[Streamline] queued present-ordered DLSS-G mode={} ({}) numFrames={} targetFps={} (max {}) render={}x{} display={}x{} drs={}", a_enable,
+		!a_enable ? "off" : a_dynamic ? "dynamic" : a_autoMode ? "auto" : "on", numFrames, a_dynamicTargetFps, maxFrames,
+		a_renderWidth, a_renderHeight, a_displayWidth, a_displayHeight, dynamicResolution);
+	// Delivery completes in DxvkPresentBeginCallback. Returning false keeps the
+	// controller from draining/unloading the device before eOff has taken effect.
+	return false;
 }
 
 bool Streamline::SetFSRFrameGen(bool a_enable, bool a_hdr,
@@ -1697,27 +2054,6 @@ void Streamline::CaptureFSRFrameGenState()
 	}
 }
 
-void Streamline::QueryDLSSGCapabilities()
-{
-	// Streamline requires this state query on the present thread.
-	if (!initialized || !featureDLSSG || g_sl.dispatchFaulted ||
-		!g_dlssgCurrentlyLoaded.load(std::memory_order_acquire))
-		return;
-	if (g_sl.dlssgMaxFramesToGenerate.load(std::memory_order_acquire) != 0u)
-		return;
-	__try {
-		sl::DLSSGState state{};
-		if (g_sl.slDLSSGGetState(g_sl.viewport, state, nullptr) == sl::Result::eOk && state.numFramesToGenerateMax > 0u) {
-			g_sl.dlssgMaxFramesToGenerate.store(state.numFramesToGenerateMax, std::memory_order_release);
-			g_sl.dlssgDynamicSupported.store(state.bIsDynamicMFGSupported == sl::Boolean::eTrue, std::memory_order_release);
-			logger::info("[Streamline] DLSS-G numFramesToGenerateMax = {} (max {}x multiplier), DynamicMFG supported = {}",
-				state.numFramesToGenerateMax, state.numFramesToGenerateMax + 1u, state.bIsDynamicMFGSupported == sl::Boolean::eTrue);
-		}
-	} __except (EXCEPTION_EXECUTE_HANDLER) {
-		g_sl.dispatchFaulted = true;
-	}
-}
-
 uint32_t Streamline::GetDLSSGMaxFramesToGenerate() const
 {
 	return g_sl.dlssgMaxFramesToGenerate.load(std::memory_order_acquire);
@@ -1731,6 +2067,13 @@ uint32_t Streamline::GetFrameGenerationMultiplier() const
 bool Streamline::IsDLSSGDynamicSupported() const
 {
 	return g_sl.dlssgDynamicSupported.load(std::memory_order_acquire);
+}
+
+bool Streamline::IsDLSSGFrameReady() const
+{
+	return g_sl.dlssgCloneTagsPrimed.load(std::memory_order_acquire) &&
+	       g_sl.dlssgTaggedThisFrame &&
+	       g_sl.viewport0ConstantsFrame == g_sl.renderFrameId;
 }
 
 void Streamline::TagDLSSGResources(ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
@@ -1956,7 +2299,7 @@ void Streamline::RegisterDxvkOwnershipPredicate()
 		logger::warn("[Streamline] DXVK module not loaded — cannot register ownership predicate");
 		return;
 	}
-	using SetQueryFn = void (*)(bool (*)(VkSwapchainKHR));
+	using SetQueryFn = void (*)(uint32_t (*)(VkSwapchainKHR));
 	auto setQuery = reinterpret_cast<SetQueryFn>(GetProcAddress(dxvkModule, "dxvkSetFrameGenOwnershipQuery"));
 	if (!setQuery) {
 		logger::warn("[Streamline] dxvkSetFrameGenOwnershipQuery not found in DXVK module");
@@ -1964,6 +2307,21 @@ void Streamline::RegisterDxvkOwnershipPredicate()
 	}
 	setQuery(&DxvkFrameGenerationOwnsSwapchain);
 	logger::info("[Streamline] registered DXVK frame-generation ownership predicate");
+
+	using PresentCallbackFn = void (*)(const DxvkPresentCallbackInfo*);
+	using SetPresentCompletedFn = void (*)(PresentCallbackFn);
+	using SetPresentBeginFn = void (*)(PresentCallbackFn);
+	auto setPresentBegin = reinterpret_cast<SetPresentBeginFn>(
+		GetProcAddress(dxvkModule, "dxvkSetPresentBeginCallback"));
+	auto setPresentCompleted = reinterpret_cast<SetPresentCompletedFn>(
+		GetProcAddress(dxvkModule, "dxvkSetPresentCompletedCallback"));
+	if (setPresentBegin && setPresentCompleted) {
+		setPresentBegin(&DxvkPresentBeginCallback);
+		setPresentCompleted(&DxvkPresentCompletedCallback);
+		logger::info("[Streamline] registered DXVK Vulkan present-thread options/state callbacks");
+	} else {
+		logger::warn("[Streamline] DXVK DLSS-G present-thread bridge unavailable");
+	}
 
 	// Streamline features may only be loaded or unloaded while no swapchain exists.
 	using SetTornDownFn = void (*)(bool (*)());

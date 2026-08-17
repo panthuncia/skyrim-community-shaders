@@ -3,7 +3,9 @@
 	url = https://github.com/alandtse/CommonLibVR.git
 [submodule "extern/Streamline"]
 	path = extern/Streamline
-	url = https://github.com/doodlum/Streamline.git
+	url = git@github.com:panthuncia/Streamline.git
+	branch = main
 [submodule "extern/dxvk"]
 	path = extern/dxvk
-	url = https://github.com/doodlum/dxvk.git
+	url = git@github.com:panthuncia/dxvk.git
+	branch = main

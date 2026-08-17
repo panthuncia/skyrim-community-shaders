@@ -356,9 +356,13 @@ void Upscaling::DataLoaded()
 
 void Upscaling::Load()
 {
-	// Frame-generation proxies require synchronous present from the first frame.
-	if (DxvkLoader::IsLoaded())
-		Streamline::PushDxvkSyncPresent(settings.frameGeneration);
+	// FSR-G requires synchronous present bookkeeping. DLSS-G leaves the
+	// application's D3D11 Present asynchronous.
+	if (DxvkLoader::IsLoaded()) {
+		const bool fsrFrameGeneration = settings.frameGeneration &&
+			static_cast<FrameGenMethod>(settings.frameGenMethod) == FrameGenMethod::kFSR;
+		Streamline::PushDxvkSyncPresent(fsrFrameGeneration);
+	}
 
 	if (DxvkLoader::IsLoaded()) {
 		// Interposition must be selected from saved settings before DXVK creates VkInstance.
@@ -613,8 +617,12 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 		const uint32_t displayWidth = globals::game::graphicsState ? globals::game::graphicsState->screenWidth : 0;
 		const uint32_t displayHeight = globals::game::graphicsState ? globals::game::graphicsState->screenHeight : 0;
 		if (!streamline->HasDispatchFaulted() && streamline->IsDLSSGLoaded() &&
-			!streamline->SetDLSSGMode(false, displayWidth, displayHeight)) {
-			logger::error("[Upscaling] DLSS-G mode-off failed; continuing with device-idle teardown");
+			!streamline->SetDLSSGMode(false, displayWidth, displayHeight, displayWidth, displayHeight)) {
+			// SetOptions is delivered on the Vulkan present thread. Let this Present
+			// apply eOff and retry teardown on the next frame; draining before that
+			// acknowledgement can race the still-active plugin.
+			logger::info("[Upscaling] DLSS-G mode-off queued; deferring fault teardown until after Present");
+			return a_present(a_swapChain, a_syncInterval, a_flags);
 		}
 		const bool completionProven = dxvk->HasPendingPresentWaitSemaphore() ?
 			dxvk->DiscardPendingPresentWaitSemaphore() : dxvk->WaitDeviceIdle();
@@ -657,7 +665,11 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 		return a_present(a_swapChain, a_syncInterval, a_flags);
 	}
 
-	// DLSS-G requires a valid or passthrough tag for every present.
+	// DLSS-G requires a valid or passthrough tag for every present. The tag work
+	// is submitted on the graphics queue, while DXVK may present on a dedicated
+	// queue, so explicitly make the matching present wait on its completion
+	// semaphore. This preserves asynchronous CPU/GPU execution without allowing
+	// the present queue to overtake the inputs.
 	if ((dxvk->HasPendingPresentWaitSemaphore() || streamline->EnsureDLSSGPresentTag()) &&
 		dxvk->PushPendingPresentWaitSemaphore())
 		return a_present(a_swapChain, a_syncInterval, a_flags);
@@ -1592,8 +1604,6 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 	auto& motionVector = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
 
 	if (fgMethod == FrameGenMethod::kDLSSG) {
-		FrameGen::Controller::GetSingleton()->EngageDLSSG();
-
 		if (gameplay) {
 			const auto displaySize = float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
 			const auto renderSize = Util::ConvertToDynamic(displaySize, true);
@@ -1620,6 +1630,8 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 					(uint32_t)renderSize.x, (uint32_t)renderSize.y,
 					(uint32_t)displaySize.x, (uint32_t)displaySize.y);
 			}
+			// Enable only after this frame's constants and real input tags exist.
+			FrameGen::Controller::GetSingleton()->EngageDLSSG();
 		}
 	} else if (fgMethod == FrameGenMethod::kFSR && gameplay) {
 		const auto displaySize = float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };

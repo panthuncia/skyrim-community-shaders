@@ -126,8 +126,13 @@ if (-not $msbuild -or -not (Test-Path $msbuild)) {
     exit 0
 }
 
-# Generate the project tree only when it is missing.
-if (-not (Test-Path $Sln)) {
+# Regenerate when the solution or any requested project is missing.  The
+# generated tree is ignored by Streamline and can survive a submodule update;
+# checking only streamline.sln leaves it stale when the fork adds a plugin.
+$missingProjects = $plugins | Where-Object {
+    -not (Test-Path (Join-Path $ProjDir "$_.vcxproj"))
+}
+if ((-not (Test-Path $Sln)) -or $missingProjects) {
     Write-Host "[build-streamline] generating VS solution (setup.bat: packman + premake)..."
     # setup.bat requires the Streamline root as cmd's working directory.
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'

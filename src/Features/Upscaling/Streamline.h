@@ -92,9 +92,12 @@ public:
 	};
 
 	void SetPCLMarker(PclMarker a_marker);
+	/** @brief Queues this app frame's PCL present markers for DXVK's real Vulkan present thread. */
+	[[nodiscard]] bool QueueDLSSGPresentMarkers();
 
 	/** @brief Updates DLSS-G mode and generated-frame count. */
-	bool SetDLSSGMode(bool a_enable, uint32_t a_displayWidth, uint32_t a_displayHeight,
+	bool SetDLSSGMode(bool a_enable, uint32_t a_renderWidth, uint32_t a_renderHeight,
+		uint32_t a_displayWidth, uint32_t a_displayHeight,
 		uint32_t a_numFramesToGenerate = 1, bool a_autoMode = false, bool a_dynamic = false,
 		float a_dynamicTargetFps = 0.0f);
 
@@ -103,16 +106,12 @@ public:
 	/** @brief Discards any prepared FSR frame that did not reach Present. */
 	[[nodiscard]] bool DiscardFSRFrameGenerationPreparedFrame();
 
-	/** @brief Queries and caches DLSS-G capabilities on the present thread. */
-	void QueryDLSSGCapabilities();
-
-	/** @brief Updates DLSS-G state after the real present completes. */
-	void CaptureDLSSGPresentState();
 	[[nodiscard]] uint32_t GetDLSSGMaxFramesToGenerate() const;
 
 	/** @brief Returns the latest number of frames presented per rendered frame. */
 	[[nodiscard]] uint32_t GetFrameGenerationMultiplier() const;
 	[[nodiscard]] bool IsDLSSGDynamicSupported() const;
+	[[nodiscard]] bool IsDLSSGFrameReady() const;
 
 	/** @brief Sets the desired DLSS-G runtime load state. */
 	void SetDLSSGDesiredLoaded(bool a_loaded);

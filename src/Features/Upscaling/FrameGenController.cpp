@@ -138,7 +138,7 @@ namespace FrameGen
 
 		if (sl->IsDLSSGLoaded()) {
 			const auto dims = CurrentDims(false);
-			if (!sl->SetDLSSGMode(false, dims.displayWidth, dims.displayHeight))
+			if (!sl->SetDLSSGMode(false, dims.renderWidth, dims.renderHeight, dims.displayWidth, dims.displayHeight))
 				return;
 			owner = Method::kDLSSG;
 		} else if (sl->IsFSRFGLoaded()) {
@@ -165,7 +165,7 @@ namespace FrameGen
 		// Streamline requires DLSS-G to be disabled and drained before teardown.
 		if (dlssgModeOn && a_target != Method::kDLSSG) {
 			const auto dims = CurrentDims(false);
-			if (!sl->SetDLSSGMode(false, dims.displayWidth, dims.displayHeight))
+			if (!sl->SetDLSSGMode(false, dims.renderWidth, dims.renderHeight, dims.displayWidth, dims.displayHeight))
 				return false;
 			if (!DXVKInterop::GetSingleton()->WaitDeviceIdle()) {
 				logger::error("[FrameGen] DLSS-G teardown deferred because device idle could not be proven");
@@ -204,14 +204,18 @@ namespace FrameGen
 		const bool wantDLSSG = a_target == Method::kDLSSG;
 		const bool wantFSRFG = a_target == Method::kFSR;
 
-		// Enable synchronous present before installing either present proxy.
-		if (wantDLSSG || wantFSRFG)
-			Streamline::PushDxvkSyncPresent(true);
+		// Both frame-generation present proxies require the real Vulkan present to
+		// stay inside the matching D3D11 Present call. In particular, DLSS-G option
+		// changes are applied on the Vulkan present thread; allowing an async backlog
+		// can apply eOn to an older frame whose tags and markers were produced while
+		// interpolation was still off. This is a CPU queue drain only; the GPU-side
+		// tag and present dependencies remain semaphore ordered.
+		Streamline::PushDxvkSyncPresent(wantDLSSG || wantFSRFG);
 
 		if (sl->IsDLSSGLoaded() == wantDLSSG && sl->IsFSRFGLoaded() == wantFSRFG) {
 			if (wantDLSSG && owner != Method::kDLSSG) {
 				const auto dims = CurrentDims(false);
-				if (!sl->SetDLSSGMode(false, dims.displayWidth, dims.displayHeight))
+				if (!sl->SetDLSSGMode(false, dims.renderWidth, dims.renderHeight, dims.displayWidth, dims.displayHeight))
 					return;
 				owner = Method::kDLSSG;
 				logger::info("[FrameGen] DLSS-G already loaded - registered + adopted as present owner");
@@ -301,7 +305,13 @@ namespace FrameGen
 	void Controller::EngageDLSSG()
 	{
 		auto* sl = Streamline::GetSingleton();
-		if (phase != Phase::kIdle || !sl->IsDLSSGLoaded())
+		// StepLoadState first adopts an already-loaded DLSS-G presenter by
+		// delivering and acknowledging eOff. Do not overwrite that pending
+		// request with eOn in the same frame; doing so leaves owner unset and
+		// repeats the off/on sequence on every subsequent frame.
+		if (phase != Phase::kIdle || owner != Method::kDLSSG || !sl->IsDLSSGLoaded())
+			return;
+		if (!sl->IsDLSSGFrameReady())
 			return;
 
 		auto& upscaling = globals::features::upscaling;
@@ -315,7 +325,7 @@ namespace FrameGen
 		const uint32_t numFramesToGenerate = s.frameGenMultiplier > 1 ? s.frameGenMultiplier - 1 : 1;
 		const float dynTargetFps = dynamic ? static_cast<float>(upscaling.GetTargetFrameRate()) : 0.0f;
 
-		if (sl->SetDLSSGMode(true, dims.displayWidth, dims.displayHeight,
+		if (sl->SetDLSSGMode(true, dims.renderWidth, dims.renderHeight, dims.displayWidth, dims.displayHeight,
 				numFramesToGenerate, useAuto, useDynamic, dynTargetFps))
 			dlssgModeOn = true;
 	}
