@@ -220,6 +220,28 @@ namespace
 		return false;
 	}
 
+	bool IsRenderAdapterDifferentFromDisplayAdapter(IDXGISwapChain* swapChain)
+	{
+		DISPLAYCONFIG_PATH_INFO displayPath{};
+		if (!GetDisplayConfigPathInfo(swapChain, displayPath))
+			return false;
+
+		winrt::com_ptr<IDXGIDevice> dxgiDevice;
+		if (!globals::d3d::device || FAILED(globals::d3d::device->QueryInterface(IID_PPV_ARGS(dxgiDevice.put()))))
+			return false;
+
+		winrt::com_ptr<IDXGIAdapter> renderAdapter;
+		if (FAILED(dxgiDevice->GetAdapter(renderAdapter.put())))
+			return false;
+
+		DXGI_ADAPTER_DESC renderDesc{};
+		if (FAILED(renderAdapter->GetDesc(&renderDesc)))
+			return false;
+
+		return renderDesc.AdapterLuid.HighPart != displayPath.sourceInfo.adapterId.HighPart ||
+		       renderDesc.AdapterLuid.LowPart != displayPath.sourceInfo.adapterId.LowPart;
+	}
+
 	// Hook structs for the HDR pipeline - installed in PostPostLoad when Upscaling is not loaded.
 	// When Upscaling IS loaded, it installs equivalent hooks covering the same addresses.
 	struct HDR_Main_UpdateJitter
@@ -291,7 +313,15 @@ void HDRDisplay::DrawSettings()
 {
 	auto hdrWarningPopupTitle = std::format("{}##HDRDisplay", T(TKEY("warning_popup_title"), "HDR Warning"));
 
-	if (isHDRMonitor) {
+	if (hdrOutputCapabilityKnown && !hdrOutputAvailable) {
+		Util::Text::Warning(T(TKEY("hdr10_output_unavailable"), "HDR10 Output Unavailable"));
+		ImGui::TextWrapped("%s", T(TKEY("hdr10_output_unavailable_detail"),
+			"The active graphics presentation path does not expose the 10-bit HDR10 format required by Community Shaders."));
+		if (hdrBlockedByCrossAdapterPresentation) {
+			Util::Text::WrappedWarning(T(TKEY("hdr10_mux_hint"),
+				"The game is rendering on a different GPU from the one that owns this display. This system may support HDR by switching its MUX/GPU mode to Discrete Graphics, then restarting Windows."));
+		}
+	} else if (isHDRMonitor) {
 		Util::Text::Success(T(TKEY("display_detected"), "HDR Display Detected"));
 	} else if (isHDRCapableMonitor) {
 		Util::Text::Warning(T(TKEY("capable_display_windows_hdr_off"), "HDR Capable Display (Windows HDR is off)"));
@@ -322,9 +352,11 @@ void HDRDisplay::DrawSettings()
 		currentEnableHDR = settings.enableHDR;
 	}
 
-	// Disable the checkbox only when no HDR monitor is detected AND HDR is not already on
-	// (allow disabling HDR even on SDR if it was enabled from saved settings).
-	if (!isHDRMonitor && !currentEnableHDR) {
+	const bool hdrFormatUnavailable = hdrOutputCapabilityKnown && !hdrOutputAvailable;
+	// A missing presenter format is not safely overrideable: PQ pixels would be
+	// interpreted as SDR. Detection-only failures retain the existing override.
+	const bool disableHDRCheckbox = hdrFormatUnavailable || (!isHDRMonitor && !currentEnableHDR);
+	if (disableHDRCheckbox) {
 		ImGui::BeginDisabled();
 	}
 
@@ -340,12 +372,14 @@ void HDRDisplay::DrawSettings()
 		}
 	}
 
-	if (!isHDRMonitor && !oldEnableHDR) {
+	if (disableHDRCheckbox) {
 		ImGui::EndDisabled();
 	}
 
 	if (auto _tt = Util::HoverTooltipWrapper()) {
-		if (isHDRMonitor) {
+		if (hdrFormatUnavailable) {
+			ImGui::TextUnformatted(T(TKEY("enable_hdr_tooltip_format_unavailable"), "HDR is locked off because the graphics presenter does not expose a compatible HDR10 format."));
+		} else if (isHDRMonitor) {
 			ImGui::TextUnformatted(T(TKEY("enable_hdr_tooltip"), "Enable HDR output. Matches vanilla visuals with extended dynamic range."));
 		} else if (isHDRCapableMonitor) {
 			ImGui::TextUnformatted(T(TKEY("enable_hdr_tooltip_windows_off"), "Monitor supports HDR but Windows HDR is off. Enable HDR in Windows Display Settings, then restart the game."));
@@ -355,7 +389,7 @@ void HDRDisplay::DrawSettings()
 	}
 
 	// Advanced override button — shown when HDR is neither active nor auto-detected
-	if (!isHDRMonitor && !oldEnableHDR) {
+	if (!hdrFormatUnavailable && !isHDRMonitor && !oldEnableHDR) {
 		ImGui::SameLine();
 		if (ImGui::Button(T(TKEY("advanced"), "Advanced"))) {
 			bool dontShowWarning;
@@ -617,6 +651,25 @@ void HDRDisplay::SetupResources()
 
 	DetectHDR();
 
+	hdrOutputCapabilityKnown = false;
+	hdrOutputAvailable = true;
+	hdrBlockedByCrossAdapterPresentation = false;
+	if (globals::d3d::swapChain) {
+		winrt::com_ptr<IDXGISwapChain3> swapChain3;
+		if (SUCCEEDED(globals::d3d::swapChain->QueryInterface(IID_PPV_ARGS(swapChain3.put())))) {
+			UINT support = 0;
+			const HRESULT hr = swapChain3->CheckColorSpaceSupport(
+				DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support);
+			hdrOutputCapabilityKnown = true;
+			hdrOutputAvailable = SUCCEEDED(hr) &&
+				(support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) != 0;
+			hdrBlockedByCrossAdapterPresentation = !hdrOutputAvailable &&
+				IsRenderAdapterDifferentFromDisplayAdapter(globals::d3d::swapChain);
+			logger::info("[HDR] HDR10 presenter capability: available={}, support={:#x}, hr={:#010x}, crossAdapterPresentation={}",
+				hdrOutputAvailable, support, static_cast<uint32_t>(hr), hdrBlockedByCrossAdapterPresentation);
+		}
+	}
+
 	if (pendingAutoDetect) {
 		pendingAutoDetect = false;
 		std::lock_guard<std::mutex> lock(settingsMutex);
@@ -626,6 +679,10 @@ void HDRDisplay::SetupResources()
 	}
 	{
 		std::lock_guard<std::mutex> lock(settingsMutex);
+		if (hdrOutputCapabilityKnown && !hdrOutputAvailable && settings.enableHDR) {
+			settings.enableHDR = false;
+			logger::warn("[HDR] HDR setting forced off because the presenter has no compatible HDR10 format");
+		}
 		hdrEnabledForFrame = settings.enableHDR;
 	}
 
@@ -1479,7 +1536,7 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 			// The HGiG approach is to handle highlights compression in the shader instead.
 			swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
 		} else {
-			logger::warn("[HDR] Failed to set HDR10 color space");
+			logger::warn("[HDR] Failed to set HDR10 color space ({:#010x})", static_cast<uint32_t>(hr));
 			dxvk->CancelPresenterColorSpaceTransition(true);
 		}
 	} else {
@@ -1488,7 +1545,7 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 			logger::info("[HDR] Set swap chain color space to SDR (sRGB)");
 			swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
 		} else {
-			logger::warn("[HDR] Failed to set SDR color space");
+			logger::warn("[HDR] Failed to set SDR color space ({:#010x})", static_cast<uint32_t>(hr));
 			dxvk->CancelPresenterColorSpaceTransition(false);
 		}
 	}

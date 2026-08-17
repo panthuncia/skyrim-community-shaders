@@ -2225,7 +2225,8 @@ bool Streamline::SetFSRFrameGen(bool a_enable, bool a_hdr,
 			g_fsrfgOwnsPresent.store(a_enable, std::memory_order_release);
 			if (!a_enable)
 				g_sl.frameGenerationMultiplier.store(1, std::memory_order_release);
-			logger::info("[Streamline] FSR frame generation {}", a_enable ? "enabled" : "disabled");
+			logger::info("[Streamline] FSR frame generation {} (HDR={})",
+				a_enable ? "enabled" : "disabled", a_hdr);
 		}
 	} __except (EXCEPTION_EXECUTE_HANDLER) {
 		g_sl.dispatchFaulted = true;

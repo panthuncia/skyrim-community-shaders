@@ -191,6 +191,9 @@ public:
 	static bool isHDRMonitor;            // Windows HDR is active (enabled in OS settings)
 	static bool isHDRCapableMonitor;     // Monitor supports HDR but Windows HDR may be off
 	static bool wasExclusiveFullscreen;  // EFS detected at swapchain creation; incompatible with HDR
+	bool hdrOutputCapabilityKnown = false;
+	bool hdrOutputAvailable = true;
+	bool hdrBlockedByCrossAdapterPresentation = false;
 	bool pendingAutoDetect = false;
 
 	/** @brief Queries the DXGI output for the display's maximum luminance in nits. */
