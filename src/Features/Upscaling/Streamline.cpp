@@ -139,6 +139,15 @@ namespace
 		const char* value = std::getenv("CS_REFLEX_DIAGNOSTIC_UNLIMITED");
 		return value && value[0] != '\0' && value[0] != '0';
 	}();
+	const bool g_skipReflexSleep = [] {
+		const char* value = std::getenv("CS_REFLEX_DIAGNOSTIC_NO_SLEEP");
+		return value && value[0] != '\0' && value[0] != '0';
+	}();
+	const uint32_t g_reflexSleepIntervalOverride = [] {
+		const char* value = std::getenv("CS_REFLEX_DIAGNOSTIC_SLEEP_INTERVAL");
+		return value ? std::max(1, std::atoi(value)) : 0;
+	}();
+	std::atomic_uint32_t g_reflexSleepInterval{ 1 };
 
 	void LogReflexPacingBatch(
 		const std::array<ReflexSleepSample, 8>& a_samples,
@@ -1090,10 +1099,13 @@ bool Streamline::DiscardFSRFrameGenerationPreparedFrame()
 	return true;
 }
 
-void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimitUs)
+void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimitUs, uint32_t a_sleepInterval)
 {
 	if (!initialized || !featureReflex || g_sl.dispatchFaulted)
 		return;
+	g_reflexSleepInterval.store(
+		g_reflexSleepIntervalOverride ? g_reflexSleepIntervalOverride : std::max(1u, a_sleepInterval),
+		std::memory_order_relaxed);
 
 	const sl::ReflexMode mode = (!a_enable || g_forceReflexOff) ? sl::ReflexMode::eOff :
 	                            a_boost   ? sl::ReflexMode::eLowLatencyWithBoost :
@@ -1129,7 +1141,9 @@ void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimit
 			const uint32_t simFrame = SimFrameId();
 			if (s_lastSleepFrame != simFrame) {
 				s_lastSleepFrame = simFrame;
-				if (sl::FrameToken* token = TokenForFrame(simFrame)) {
+				if (sl::FrameToken* token = TokenForFrame(simFrame);
+					token && !g_skipReflexSleep &&
+						simFrame % g_reflexSleepInterval.load(std::memory_order_relaxed) == 0) {
 					const auto sleepStart = std::chrono::steady_clock::now();
 					s_sleepResult = g_sl.slReflexSleep(*token);
 					const uint64_t sleepUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(

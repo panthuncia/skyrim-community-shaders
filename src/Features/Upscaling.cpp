@@ -1679,16 +1679,22 @@ void Upscaling::Main_UpdateJitter::thunk(RE::BSGraphics::State* a_state)
 	// sleep and SimulationStart together on this deterministic render hook.
 	const bool wantReflex = upscaling.GetEffectiveReflex();
 	const double renderedFpsLimit = upscaling.GetRenderedFrameRateLimit();
-	// Reflex/DLSS-G applies the frame-generation multiplier internally. Feed it
-	// the requested final-output target; pre-dividing here causes the driver to
-	// halve the limit a second time. The DXVK fallback used without Reflex still
-	// consumes the rendered-frame target below.
+	// Reflex low-latency mode and its frame-rate limiter are independent.  The
+	// driver's limiter accounts for DLSS-G internally, but its control loop can
+	// oscillate badly around the generated-frame present cadence.  Keep Reflex
+	// mode, sleep, and markers active while letting DXVK pace fixed-MFG rendered
+	// frames directly.  Dynamic MFG continues to own its output target.
 	const int outputFpsLimit = upscaling.GetTargetFrameRate();
-	const uint32_t reflexLimitUs = (wantReflex && outputFpsLimit > 0) ?
+	const bool externallyPaceFixedDLSSG = wantReflex && upscaling.IsFrameGenerationActive() &&
+	                                     upscaling.GetFrameGenMethod() == FrameGenMethod::kDLSSG &&
+	                                     !upscaling.settings.dlssgDynamic;
+	const uint32_t reflexLimitUs = (wantReflex && !externallyPaceFixedDLSSG && outputFpsLimit > 0) ?
 		static_cast<uint32_t>(std::lround(1000000.0 / outputFpsLimit)) : 0u;
 	auto* streamline = Streamline::GetSingleton();
-	streamline->UpdateReflex(wantReflex, wantReflex && upscaling.settings.reflexBoost, reflexLimitUs);
-	upscaling.ApplyDxvkFrameRateLimit(!wantReflex ? renderedFpsLimit : 0.0);
+	streamline->UpdateReflex(
+		wantReflex, wantReflex && upscaling.settings.reflexBoost, reflexLimitUs,
+		externallyPaceFixedDLSSG ? 2u : 1u);
+	upscaling.ApplyDxvkFrameRateLimit((!wantReflex || externallyPaceFixedDLSSG) ? renderedFpsLimit : 0.0);
 	streamline->SetPCLMarker(Streamline::PclMarker::SimulationStart);
 	upscaling.BeginRenderFrame();
 	streamline->BeginRenderFrame();

@@ -77,7 +77,7 @@ public:
 	void CaptureFSRFrameGenState();
 
 	/** @brief Updates Reflex and its optional frame-limit interval in microseconds. */
-	void UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimitUs = 0);
+	void UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimitUs = 0, uint32_t a_sleepInterval = 1);
 
 	enum class PclMarker : uint32_t
 	{
