@@ -13,6 +13,19 @@
 
 struct IDXGIVkInteropDevice;
 
+// DXVK's public Reflex interop ABI. Keep this declaration in sync with
+// ID3DLowLatencyDevice in dxvk/src/d3d11/d3d11_interfaces.h.
+MIDL_INTERFACE("f3112584-41f9-348d-a59b-00b7e1d285d6")
+ID3DLowLatencyDevice : public IUnknown
+{
+	virtual BOOL STDMETHODCALLTYPE SupportsLowLatency() = 0;
+	virtual HRESULT STDMETHODCALLTYPE LatencySleep() = 0;
+	virtual HRESULT STDMETHODCALLTYPE SetLatencySleepMode(
+		BOOL LowLatencyEnable, BOOL LowLatencyBoost, UINT32 MinIntervalUs) = 0;
+	virtual HRESULT STDMETHODCALLTYPE SetLatencyMarker(UINT64 FrameId, UINT32 MarkerType) = 0;
+	virtual HRESULT STDMETHODCALLTYPE GetLatencyInfo(void* pLowLatencyResults) = 0;
+};
+
 MIDL_INTERFACE("5546cf8c-77e7-4341-b05d-8d4d5000e77d")
 IDXGIVkInteropSurface : public IUnknown
 {
@@ -119,6 +132,15 @@ public:
 	VkDevice GetDevice() const { return device; }
 	PFN_vkGetInstanceProcAddr GetInstanceProcAddr() const { return vkGetInstanceProcAddr; }
 	PFN_vkGetDeviceProcAddr GetDeviceProcAddr() const { return vkGetDeviceProcAddr; }
+
+	/** @brief Whether DXVK can drive Reflex for the Vulkan swapchain it presents. */
+	bool ReflexAvailable() const;
+	/** @brief Configures DXVK's VK_NV_low_latency2 controller and render interval. */
+	bool SetReflexMode(bool a_enable, bool a_boost, uint32_t a_minIntervalUs);
+	/** @brief Performs the frame-begin sleep through DXVK's latency controller. */
+	bool ReflexSleep();
+	/** @brief Adds an application marker to DXVK's frame-to-present mapping. */
+	bool SetReflexMarker(uint64_t a_frameId, uint32_t a_marker);
 
 	/** @brief Maps a D3D11 resource to its backing DXVK image. */
 	bool GetVkImage(ID3D11Resource* a_resource, VkImage* a_outImage,
@@ -232,6 +254,7 @@ private:
 	bool available = false;
 
 	winrt::com_ptr<IDXGIVkInteropDevice> interopDevice;
+	winrt::com_ptr<ID3DLowLatencyDevice> lowLatencyDevice;
 
 	VkInstance instance = VK_NULL_HANDLE;
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;

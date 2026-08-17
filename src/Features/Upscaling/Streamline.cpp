@@ -56,6 +56,7 @@ namespace
 		PFun_slReflexGetState* slReflexGetState = nullptr;
 		PFun_slReflexSetOptions* slReflexSetOptions = nullptr;
 		PFun_slReflexSleep* slReflexSleep = nullptr;
+		sl::Result (*slReflexSetExternalPacing)(bool) = nullptr;
 		PFun_slPCLSetMarker* slPCLSetMarker = nullptr;
 		PFun_slDLSSGSetOptions* slDLSSGSetOptions = nullptr;
 		PFun_slDLSSGGetState* slDLSSGGetState = nullptr;
@@ -109,6 +110,7 @@ namespace
 		std::atomic<uint32_t> presentMarkerHead{ 0 };
 		std::atomic<uint32_t> presentMarkerTail{ 0 };
 		std::atomic<uint32_t> activePresentMarkerFrame{ 0 };
+		std::atomic<uint32_t> activeDxvkAppPresentFrame{ 0 };
 		std::atomic<uint32_t> dlssgOptionsEpoch{ 0 };
 		std::atomic<uint32_t> dlssgLedgerBudget{ 0 };
 		std::atomic<uint64_t> activeDxvkFrameId{ 0 };
@@ -143,11 +145,7 @@ namespace
 		const char* value = std::getenv("CS_REFLEX_DIAGNOSTIC_NO_SLEEP");
 		return value && value[0] != '\0' && value[0] != '0';
 	}();
-	const uint32_t g_reflexSleepIntervalOverride = [] {
-		const char* value = std::getenv("CS_REFLEX_DIAGNOSTIC_SLEEP_INTERVAL");
-		return value ? std::max(1, std::atoi(value)) : 0;
-	}();
-	std::atomic_uint32_t g_reflexSleepInterval{ 1 };
+	std::atomic_bool g_dxvkOwnsReflex{ false };
 
 	void LogReflexPacingBatch(
 		const std::array<ReflexSleepSample, 8>& a_samples,
@@ -921,6 +919,7 @@ void Streamline::SetVulkanDevice()
 	if (featureReflex) {
 		g_sl.slGetFeatureFunction(sl::kFeatureReflex, "slReflexSetOptions", reinterpret_cast<void*&>(g_sl.slReflexSetOptions));
 		g_sl.slGetFeatureFunction(sl::kFeatureReflex, "slReflexSleep", reinterpret_cast<void*&>(g_sl.slReflexSleep));
+		g_sl.slGetFeatureFunction(sl::kFeatureReflex, "slReflexSetExternalPacing", reinterpret_cast<void*&>(g_sl.slReflexSetExternalPacing));
 		g_sl.slGetFeatureFunction(sl::kFeatureReflex, "slReflexGetState", reinterpret_cast<void*&>(g_sl.slReflexGetState));
 		featureReflex = g_sl.slReflexSetOptions != nullptr && g_sl.slReflexSleep != nullptr &&
 		                g_sl.slReflexGetState != nullptr;
@@ -1099,15 +1098,28 @@ bool Streamline::DiscardFSRFrameGenerationPreparedFrame()
 	return true;
 }
 
-void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimitUs, uint32_t a_sleepInterval)
+void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimitUs)
 {
 	if (!initialized || !featureReflex || g_sl.dispatchFaulted)
 		return;
-	g_reflexSleepInterval.store(
-		g_reflexSleepIntervalOverride ? g_reflexSleepIntervalOverride : std::max(1u, a_sleepInterval),
-		std::memory_order_relaxed);
 
-	const sl::ReflexMode mode = (!a_enable || g_forceReflexOff) ? sl::ReflexMode::eOff :
+	const bool requested = a_enable && !g_forceReflexOff;
+	auto* dxvk = DXVKInterop::GetSingleton();
+	const bool useDxvkReflex = requested && dxvk->ReflexAvailable() && g_sl.slReflexSetExternalPacing;
+	const bool previousDxvkOwner = g_dxvkOwnsReflex.exchange(useDxvkReflex, std::memory_order_acq_rel);
+	if (previousDxvkOwner != useDxvkReflex) {
+		logger::info("[Streamline] Reflex pacing owner={}", useDxvkReflex ? "DXVK-presented swapchain" : "Streamline Vulkan");
+		g_sl.slReflexSetExternalPacing(useDxvkReflex);
+	}
+	if (dxvk->ReflexAvailable() &&
+		!dxvk->SetReflexMode(useDxvkReflex, useDxvkReflex && a_boost, useDxvkReflex ? a_frameLimitUs : 0u))
+		logger::warn("[Streamline] Failed to configure DXVK-presented swapchain Reflex controller");
+
+	// DLSS-G validates Streamline's Reflex state at present time, so leave the
+	// feature logically enabled. External pacing suppresses only Streamline's
+	// driver-facing sleep, mode, and marker calls; its token/PCL bookkeeping stays
+	// active while DXVK drives VK_NV_low_latency2 for the swapchain it presents.
+	const sl::ReflexMode mode = !requested ? sl::ReflexMode::eOff :
 	                            a_boost   ? sl::ReflexMode::eLowLatencyWithBoost :
 	                                        sl::ReflexMode::eLowLatency;
 	if (g_forceReflexOff || g_forceReflexUnlimited)
@@ -1141,11 +1153,14 @@ void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimit
 			const uint32_t simFrame = SimFrameId();
 			if (s_lastSleepFrame != simFrame) {
 				s_lastSleepFrame = simFrame;
-				if (sl::FrameToken* token = TokenForFrame(simFrame);
-					token && !g_skipReflexSleep &&
-						simFrame % g_reflexSleepInterval.load(std::memory_order_relaxed) == 0) {
+				if (sl::FrameToken* token = TokenForFrame(simFrame); token && !g_skipReflexSleep) {
 					const auto sleepStart = std::chrono::steady_clock::now();
-					s_sleepResult = g_sl.slReflexSleep(*token);
+					if (useDxvkReflex) {
+						const bool dxvkSlept = dxvk->ReflexSleep();
+						const sl::Result slResult = g_sl.slReflexSleep(*token);
+						s_sleepResult = dxvkSlept ? slResult : sl::Result::eErrorIO;
+					} else
+						s_sleepResult = g_sl.slReflexSleep(*token);
 					const uint64_t sleepUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
 						std::chrono::steady_clock::now() - sleepStart).count());
 					s_sleepTotalUs += sleepUs;
@@ -1206,6 +1221,9 @@ void Streamline::SetPCLMarker(PclMarker a_marker)
 		                            TokenForFrame(simFrame ? simFrame : SimFrameId());
 		if (token)
 			g_sl.slPCLSetMarker(static_cast<sl::PCLMarker>(a_marker), *token);
+		if (token && g_dxvkOwnsReflex.load(std::memory_order_acquire))
+			DXVKInterop::GetSingleton()->SetReflexMarker(
+				static_cast<uint64_t>(*token), static_cast<uint32_t>(a_marker));
 	} __except (EXCEPTION_EXECUTE_HANDLER) {
 		g_sl.dispatchFaulted = true;
 		logger::error("[Streamline] PCL marker faulted — Streamline disabled for this session");
@@ -1225,7 +1243,26 @@ bool Streamline::QueueDLSSGPresentMarkers()
 	g_sl.presentMarkerFrames[tail % g_sl.presentMarkerFrames.size()].store(
 		g_sl.renderFrameId, std::memory_order_relaxed);
 	g_sl.presentMarkerTail.store(tail + 1u, std::memory_order_release);
+	// Streamline consumes this frame on DXVK's later Vulkan-present thread.
+	// DXVK instead needs PresentStart now, before D3D11 Present enters its frame
+	// mapper; CompleteDXVKPresentMarker closes that app-side interval on return.
+	if (g_dxvkOwnsReflex.load(std::memory_order_acquire)) {
+		const uint32_t previous = g_sl.activeDxvkAppPresentFrame.exchange(
+			g_sl.renderFrameId, std::memory_order_acq_rel);
+		if (previous)
+			logger::warn("[Streamline] DXVK app-present marker {} was not closed before frame {}", previous, g_sl.renderFrameId);
+		DXVKInterop::GetSingleton()->SetReflexMarker(
+			g_sl.renderFrameId, static_cast<uint32_t>(PclMarker::PresentStart));
+	}
 	return true;
+}
+
+void Streamline::CompleteDXVKPresentMarker()
+{
+	const uint32_t frameId = g_sl.activeDxvkAppPresentFrame.exchange(0u, std::memory_order_acq_rel);
+	if (frameId && g_dxvkOwnsReflex.load(std::memory_order_acquire))
+		DXVKInterop::GetSingleton()->SetReflexMarker(
+			frameId, static_cast<uint32_t>(PclMarker::PresentEnd));
 }
 
 // Returns false until the engine camera matrices are finite and invertible.

@@ -342,7 +342,6 @@ struct IDXGISwapChain_Present
 
 		auto* streamline = Streamline::GetSingleton();
 		streamline->SetPCLMarker(Streamline::PclMarker::RenderSubmitEnd);
-		streamline->SetPCLMarker(Streamline::PclMarker::TriggerFlash);
 		const bool bridgedPresentMarkers = dlssgActive && streamline->QueueDLSSGPresentMarkers();
 		if (!bridgedPresentMarkers)
 			streamline->SetPCLMarker(Streamline::PclMarker::PresentStart);
@@ -359,6 +358,8 @@ struct IDXGISwapChain_Present
 
 		if (!bridgedPresentMarkers)
 			streamline->SetPCLMarker(Streamline::PclMarker::PresentEnd);
+		else
+			streamline->CompleteDXVKPresentMarker();
 
 		auto* dxvk = DXVKInterop::GetSingleton();
 		const bool presentSucceeded = SUCCEEDED(retval);

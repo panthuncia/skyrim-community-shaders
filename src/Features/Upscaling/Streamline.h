@@ -77,7 +77,7 @@ public:
 	void CaptureFSRFrameGenState();
 
 	/** @brief Updates Reflex and its optional frame-limit interval in microseconds. */
-	void UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimitUs = 0, uint32_t a_sleepInterval = 1);
+	void UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimitUs = 0);
 
 	enum class PclMarker : uint32_t
 	{
@@ -92,8 +92,10 @@ public:
 	};
 
 	void SetPCLMarker(PclMarker a_marker);
-	/** @brief Queues this app frame's PCL present markers for DXVK's real Vulkan present thread. */
+	/** @brief Queues Streamline's Vulkan-present marker and opens DXVK's app-present interval. */
 	[[nodiscard]] bool QueueDLSSGPresentMarkers();
+	/** @brief Closes DXVK's app-side present interval when D3D11 Present returns. */
+	void CompleteDXVKPresentMarker();
 
 	/** @brief Updates DLSS-G mode and generated-frame count. */
 	bool SetDLSSGMode(bool a_enable, uint32_t a_renderWidth, uint32_t a_renderHeight,

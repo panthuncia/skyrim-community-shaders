@@ -1673,28 +1673,22 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 void Upscaling::Main_UpdateJitter::thunk(RE::BSGraphics::State* a_state)
 {
 	auto& upscaling = globals::features::upscaling;
-	// Reflex sleep is a frame-begin operation. Skyrim's input polling can run on
-	// different worker threads and at irregular points within a frame, which
-	// turns the driver's sleep into visible pacing jitter. Keep option delivery,
-	// sleep and SimulationStart together on this deterministic render hook.
+	// Skyrim's main update cadence is decoupled from render submission. Keep
+	// Reflex sleep and SimulationStart on this once-per-render-frame boundary.
 	const bool wantReflex = upscaling.GetEffectiveReflex();
 	const double renderedFpsLimit = upscaling.GetRenderedFrameRateLimit();
-	// Reflex low-latency mode and its frame-rate limiter are independent.  The
-	// driver's limiter accounts for DLSS-G internally, but its control loop can
-	// oscillate badly around the generated-frame present cadence.  Keep Reflex
-	// mode, sleep, and markers active while letting DXVK pace fixed-MFG rendered
-	// frames directly.  Dynamic MFG continues to own its output target.
 	const int outputFpsLimit = upscaling.GetTargetFrameRate();
-	const bool externallyPaceFixedDLSSG = wantReflex && upscaling.IsFrameGenerationActive() &&
-	                                     upscaling.GetFrameGenMethod() == FrameGenMethod::kDLSSG &&
-	                                     !upscaling.settings.dlssgDynamic;
-	const uint32_t reflexLimitUs = (wantReflex && !externallyPaceFixedDLSSG && outputFpsLimit > 0) ?
-		static_cast<uint32_t>(std::lround(1000000.0 / outputFpsLimit)) : 0u;
+	// slReflexSleep paces rendered simulation frames, not generated presents.
+	// Give its limiter the rendered cadence for fixed frame generation so there
+	// is only one pacing controller. The final-output target would otherwise run
+	// Reflex at the wrong rate and an additional DXVK limiter would form a second,
+	// delayed feedback loop through the asynchronous presenter.
+	const double reflexFpsLimit = upscaling.IsFrameGenerationActive() ? renderedFpsLimit : outputFpsLimit;
+	const uint32_t reflexLimitUs = (wantReflex && reflexFpsLimit > 0.0) ?
+		static_cast<uint32_t>(std::lround(1000000.0 / reflexFpsLimit)) : 0u;
 	auto* streamline = Streamline::GetSingleton();
-	streamline->UpdateReflex(
-		wantReflex, wantReflex && upscaling.settings.reflexBoost, reflexLimitUs,
-		externallyPaceFixedDLSSG ? 2u : 1u);
-	upscaling.ApplyDxvkFrameRateLimit((!wantReflex || externallyPaceFixedDLSSG) ? renderedFpsLimit : 0.0);
+	streamline->UpdateReflex(wantReflex, wantReflex && upscaling.settings.reflexBoost, reflexLimitUs);
+	upscaling.ApplyDxvkFrameRateLimit(wantReflex ? 0.0 : renderedFpsLimit);
 	streamline->SetPCLMarker(Streamline::PclMarker::SimulationStart);
 	upscaling.BeginRenderFrame();
 	streamline->BeginRenderFrame();

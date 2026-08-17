@@ -492,6 +492,14 @@ bool DXVKInterop::Initialize()
 	}
 
 	interopDevice = dev;
+	winrt::com_ptr<ID3DLowLatencyDevice> reflex;
+	if (SUCCEEDED(d3dDevice->QueryInterface(__uuidof(ID3DLowLatencyDevice), reflex.put_void())) &&
+		reflex->SupportsLowLatency()) {
+		lowLatencyDevice = std::move(reflex);
+		logger::info("[DXVKInterop] DXVK-presented swapchain Reflex controller available");
+	} else {
+		logger::info("[DXVKInterop] DXVK-presented swapchain Reflex controller unavailable");
+	}
 	interopDevice->GetVulkanHandles(&instance, &physicalDevice, &device);
 	interopDevice->GetSubmissionQueue(&queue, &queueFamilyIndex);
 
@@ -566,6 +574,27 @@ bool DXVKInterop::Initialize()
 
 	available = true;
 	return true;
+}
+
+bool DXVKInterop::ReflexAvailable() const
+{
+	return lowLatencyDevice != nullptr;
+}
+
+bool DXVKInterop::SetReflexMode(bool a_enable, bool a_boost, uint32_t a_minIntervalUs)
+{
+	return lowLatencyDevice && SUCCEEDED(lowLatencyDevice->SetLatencySleepMode(
+		a_enable, a_boost, a_minIntervalUs));
+}
+
+bool DXVKInterop::ReflexSleep()
+{
+	return lowLatencyDevice && SUCCEEDED(lowLatencyDevice->LatencySleep());
+}
+
+bool DXVKInterop::SetReflexMarker(uint64_t a_frameId, uint32_t a_marker)
+{
+	return lowLatencyDevice && SUCCEEDED(lowLatencyDevice->SetLatencyMarker(a_frameId, a_marker));
 }
 
 bool DXVKInterop::GetVkImage(ID3D11Resource* a_resource, VkImage* a_outImage,

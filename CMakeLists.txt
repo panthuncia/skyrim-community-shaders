@@ -529,7 +529,7 @@ endif()
 # Only stage plugins requested by Streamline initialization. Explicit paths make
 # a missing build output fail package installation instead of silently omitting it.
 set(_SL_FORK_DLLS)
-foreach(_plugin IN ITEMS sl.interposer sl.fsr sl.fsr_g sl.xess)
+foreach(_plugin IN ITEMS sl.interposer sl.reflex sl.fsr sl.fsr_g sl.xess)
     list(APPEND _SL_FORK_DLLS "${CMAKE_SOURCE_DIR}/extern/Streamline/_artifacts/${_plugin}/Develop_x64/${_plugin}.dll")
 endforeach()
 install(
