@@ -15,7 +15,7 @@ namespace FrameGen
 		Method DesiredMethod()
 		{
 			auto& upscaling = globals::features::upscaling;
-			if (!upscaling.settings.frameGeneration)
+			if (!upscaling.IsFrameGenerationActive())
 				return Method::kNone;
 			return upscaling.GetFrameGenMethod() == Upscaling::FrameGenMethod::kDLSSG
 			           ? Method::kDLSSG
@@ -322,7 +322,7 @@ namespace FrameGen
 		const bool dynamic = s.dlssgDynamic;
 		const bool useDynamic = dynamic && sl->IsDLSSGDynamicSupported();
 		const bool useAuto = dynamic && !useDynamic;
-		const uint32_t numFramesToGenerate = s.frameGenMultiplier > 1 ? s.frameGenMultiplier - 1 : 1;
+		const uint32_t numFramesToGenerate = upscaling.GetFixedDLSSGMultiplier() - 1u;
 		const float dynTargetFps = dynamic ? static_cast<float>(upscaling.GetTargetFrameRate()) : 0.0f;
 
 		if (sl->SetDLSSGMode(true, dims.renderWidth, dims.renderHeight, dims.displayWidth, dims.displayHeight,

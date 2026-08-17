@@ -111,8 +111,6 @@ public:
 	PresenterEncoding GetPresenterEncodingForFrame() const;
 	/** @brief Returns the Vulkan surface format latched for this render frame. */
 	VkFormat GetPresenterFormatForFrame() const;
-	/** @brief Whether DXVK gamma-encodes the HDR10-to-scRGB present blit for this render frame. */
-	bool PresenterGammaEncodesHDR10ToScRGBForFrame() const;
 	/** @brief Whether the latched presenter state exactly matches this frame's output mode. */
 	bool IsPresenterStateReadyForFrame(bool a_hdr) const;
 
@@ -202,7 +200,6 @@ private:
 		VkFormat format = VK_FORMAT_UNDEFINED;
 		VkColorSpaceKHR requestedColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 		VkColorSpaceKHR effectiveColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-		uint32_t flags = 0;
 	};
 
 	struct FSRPresentViewGroup
@@ -223,8 +220,6 @@ private:
 	};
 
 	using GetPresenterSurfaceStateFn = uint64_t (*)(uint32_t*, uint32_t*, uint32_t*);
-	using GetPresenterSurfaceState2Fn = uint64_t (*)(uint32_t*, uint32_t*, uint32_t*, uint32_t*);
-	static constexpr uint32_t kPresenterSurfaceFlagGammaEncodeHDR10ToScRGB = 1u << 0;
 
 	static VkColorSpaceKHR RequestedPresenterColorSpace(bool a_hdr);
 	static PresenterEncoding ClassifyPresenterEncoding(const PresenterSurfaceState& a_state);
@@ -248,7 +243,6 @@ private:
 	PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr = nullptr;
 	PFN_vkDestroyImageView vkDestroyImageView = nullptr;
 	GetPresenterSurfaceStateFn getPresenterSurfaceState = nullptr;
-	GetPresenterSurfaceState2Fn getPresenterSurfaceState2 = nullptr;
 
 	mutable std::mutex presenterStateMutex;
 	PresenterSurfaceState observedPresenterState;

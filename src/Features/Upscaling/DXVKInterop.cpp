@@ -409,16 +409,13 @@ bool DXVKInterop::PresenterStateMatches(
 
 bool DXVKInterop::RefreshPresenterSurfaceState()
 {
-	if (!getPresenterSurfaceState && !getPresenterSurfaceState2)
+	if (!getPresenterSurfaceState)
 		return false;
 
 	uint32_t format = VK_FORMAT_UNDEFINED;
 	uint32_t requestedColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 	uint32_t effectiveColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-	uint32_t flags = 0;
-	const uint64_t serial = getPresenterSurfaceState2 ?
-		getPresenterSurfaceState2(&format, &requestedColorSpace, &effectiveColorSpace, &flags) :
-		getPresenterSurfaceState(&format, &requestedColorSpace, &effectiveColorSpace);
+	const uint64_t serial = getPresenterSurfaceState(&format, &requestedColorSpace, &effectiveColorSpace);
 	if (!serial)
 		return false;
 
@@ -430,9 +427,8 @@ bool DXVKInterop::RefreshPresenterSurfaceState()
 	observedPresenterState.format = static_cast<VkFormat>(format);
 	observedPresenterState.requestedColorSpace = static_cast<VkColorSpaceKHR>(requestedColorSpace);
 	observedPresenterState.effectiveColorSpace = static_cast<VkColorSpaceKHR>(effectiveColorSpace);
-	observedPresenterState.flags = flags;
-	logger::info("[DXVKInterop] Observed presenter surface serial {}: format={}, requestedColorSpace={}, effectiveColorSpace={}, flags=0x{:X}",
-		serial, format, requestedColorSpace, effectiveColorSpace, flags);
+	logger::info("[DXVKInterop] Observed presenter surface serial {}: format={}, requestedColorSpace={}, effectiveColorSpace={}",
+		serial, format, requestedColorSpace, effectiveColorSpace);
 	return true;
 }
 
@@ -453,6 +449,10 @@ void DXVKInterop::CommitPresenterSurfaceStateForRenderFrame()
 	committedPresenterState = observedPresenterState;
 	logger::info("[DXVKInterop] Committed presenter surface serial {} for render frames",
 		committedPresenterState.serial);
+	if (ClassifyPresenterEncoding(committedPresenterState) == PresenterEncoding::kHDR10ScRGBFallback) {
+		logger::warn("[DXVKInterop] HDR frame generation disabled for the scRGB presenter fallback; "
+		             "a HUD-less image rendered directly in the presenter encoding is required");
+	}
 }
 
 void DXVKInterop::BeginPresenterColorSpaceTransition(bool a_hdr, bool a_requireNewSerial)
@@ -503,21 +503,13 @@ VkFormat DXVKInterop::GetPresenterFormatForFrame() const
 	return presenterTransitionPending ? VK_FORMAT_UNDEFINED : committedPresenterState.format;
 }
 
-bool DXVKInterop::PresenterGammaEncodesHDR10ToScRGBForFrame() const
-{
-	std::lock_guard lock(presenterStateMutex);
-	return !presenterTransitionPending &&
-	       (committedPresenterState.flags & kPresenterSurfaceFlagGammaEncodeHDR10ToScRGB) != 0;
-}
-
 bool DXVKInterop::IsPresenterStateReadyForFrame(bool a_hdr) const
 {
 	std::lock_guard lock(presenterStateMutex);
 	if (presenterTransitionPending ||
 		!PresenterStateMatches(committedPresenterState, RequestedPresenterColorSpace(a_hdr)))
 		return false;
-	return ClassifyPresenterEncoding(committedPresenterState) != PresenterEncoding::kHDR10ScRGBFallback ||
-	       getPresenterSurfaceState2 != nullptr;
+	return ClassifyPresenterEncoding(committedPresenterState) != PresenterEncoding::kHDR10ScRGBFallback;
 }
 
 bool DXVKInterop::Initialize()
@@ -582,8 +574,6 @@ bool DXVKInterop::Initialize()
 		synchronousPresentControlAvailable = GetProcAddress(module, "dxvkSetSyncPresent") != nullptr;
 		getPresenterSurfaceState = reinterpret_cast<GetPresenterSurfaceStateFn>(
 			GetProcAddress(module, "dxvkGetPresenterSurfaceState"));
-		getPresenterSurfaceState2 = reinterpret_cast<GetPresenterSurfaceState2Fn>(
-			GetProcAddress(module, "dxvkGetPresenterSurfaceState2"));
 	}
 	char splitValue[2]{};
 	presentQueueSplit = GetEnvironmentVariableA("DXVK_PRESENT_QUEUE_SPLIT", splitValue,
@@ -593,10 +583,8 @@ bool DXVKInterop::Initialize()
 		logger::warn("[DXVKInterop] acknowledged present-wait semaphore interop is unavailable - DLSS-G disabled");
 	if (!synchronousPresentControlAvailable)
 		logger::warn("[DXVKInterop] dxvkSetSyncPresent is unavailable - DLSS-G disabled");
-	if (!getPresenterSurfaceState && !getPresenterSurfaceState2)
+	if (!getPresenterSurfaceState)
 		logger::warn("[DXVKInterop] dxvkGetPresenterSurfaceState is unavailable - frame generation disabled");
-	else if (!getPresenterSurfaceState2)
-		logger::warn("[DXVKInterop] dxvkGetPresenterSurfaceState2 is unavailable - scRGB frame generation disabled");
 	if (presentQueueSplit)
 		logger::warn("[DXVKInterop] DXVK_PRESENT_QUEUE_SPLIT is incompatible with reusable DLSS-G present semaphores");
 

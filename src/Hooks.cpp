@@ -506,24 +506,11 @@ struct BSInputDeviceManager_PollInputDevices
 		{
 			auto& upscaling = globals::features::upscaling;
 			const bool wantReflex = upscaling.GetEffectiveReflex();
-			const int targetFps = upscaling.GetTargetFrameRate();
-			const bool dlssgActive = upscaling.IsFrameGenerationActive() &&
-			                         upscaling.GetFrameGenMethod() == Upscaling::FrameGenMethod::kDLSSG;
-			uint32_t reflexLimitUs = 0;
-			if (wantReflex && targetFps > 0) {
-				const uint32_t multiplier = dlssgActive && !upscaling.settings.dlssgDynamic ?
-					std::max(2u, upscaling.settings.frameGenMultiplier) : 1u;
-				reflexLimitUs = static_cast<uint32_t>(std::lround(1000000.0 * multiplier / targetFps));
-			}
+			const double renderedFpsLimit = upscaling.GetRenderedFrameRateLimit();
+			const uint32_t reflexLimitUs = (wantReflex && renderedFpsLimit > 0.0) ?
+				static_cast<uint32_t>(std::lround(1000000.0 / renderedFpsLimit)) : 0u;
 			Streamline::GetSingleton()->UpdateReflex(wantReflex, wantReflex && upscaling.settings.reflexBoost, reflexLimitUs);
-			// FSR-FG generates one frame per real present, so cap real presents at half the target.
-			double dxvkFps = 0.0;
-			if (!wantReflex && targetFps > 0) {
-				const bool fsrFg = upscaling.IsFrameGenerationActive() &&
-				                   upscaling.GetFrameGenMethod() == Upscaling::FrameGenMethod::kFSR;
-				dxvkFps = fsrFg ? targetFps / 2.0 : static_cast<double>(targetFps);
-			}
-			upscaling.ApplyDxvkFrameRateLimit(dxvkFps);
+			upscaling.ApplyDxvkFrameRateLimit(!wantReflex ? renderedFpsLimit : 0.0);
 			Streamline::GetSingleton()->SetPCLMarker(Streamline::PclMarker::SimulationStart);
 		}
 

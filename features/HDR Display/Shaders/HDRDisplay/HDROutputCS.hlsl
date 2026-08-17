@@ -20,7 +20,7 @@ cbuffer PerFrame : register(b0)
 	float uiBrightness : packoffset(c1.x);
 	float isSceneLinear : packoffset(c1.y);
 	float isMainOrLoadingMenu : packoffset(c1.z);
-	float hdrPad1 : packoffset(c1.w);
+	float fgTweenMenuMidAlphaBoost : packoffset(c1.w);  ///< TweenMenu: soften AA band when compositing here (UIBrightnessCS skips while paused)
 	float previewSDR : packoffset(c2.x);                ///< 1.0 = emit sRGB SDR (crop preview) instead of PQ HDR10
 	float applyAutoHDR : packoffset(c2.y);              ///< 1.0 = Effects11 replaced ISHDR, so expand its SDR result into HDR
 }
@@ -65,6 +65,14 @@ cbuffer PerFrame : register(b0)
 				uiLinear *= uiBrightness;
 				uiGamma = Color::LinearToSrgb(uiLinear);
 			}
+#if 0
+            if (fgTweenMenuMidAlphaBoost > 0.5 && ui.a > 1e-3) {
+                float midBand = smoothstep(0.3, 0.35, ui.a) * (1.0 - smoothstep(0.55, 0.6, ui.a));
+                const float fgMidAlphaBoost = 0.12;
+                ui.a = saturate(ui.a + midBand * fgMidAlphaBoost);
+            }
+#endif
+
 			float3 compositedColorGamma = uiGamma + sceneGamma * (1.0 - ui.a);
 
 			// Non-LL path: ISHDR output is gamma-encoded at this stage.

@@ -530,6 +530,10 @@ bool Upscaling::IsFrameGenerationActive() const
 	if (Streamline::GetSingleton()->HasDispatchFaulted() ||
 		DXVKInterop::GetSingleton()->HasCommandRingFault())
 		return false;
+	const auto& hdr = globals::features::hdrDisplay;
+	const bool hdrActive = hdr.loaded && hdr.IsHDREnabledForFrame();
+	if (!DXVKInterop::GetSingleton()->IsPresenterStateReadyForFrame(hdrActive))
+		return false;
 	auto fgMethod = GetFrameGenMethod();
 	if (fgMethod == FrameGenMethod::kDLSSG)
 		return Streamline::GetSingleton()->IsDLSSGSupported();
@@ -587,6 +591,34 @@ int Upscaling::GetTargetFrameRate() const
 	if (divisor <= 0)
 		return 0;
 	return std::max(1, static_cast<int>(std::lround(static_cast<double>(GetMonitorRefreshRate()) / divisor)));
+}
+
+uint32_t Upscaling::GetFixedDLSSGMultiplier() const
+{
+	uint32_t multiplier = std::clamp(settings.frameGenMultiplier, 2u, 6u);
+	const uint32_t maxFrames = Streamline::GetSingleton()->GetDLSSGMaxFramesToGenerate();
+	if (maxFrames > 0u)
+		multiplier = std::min(multiplier, maxFrames + 1u);
+	return multiplier;
+}
+
+double Upscaling::GetRenderedFrameRateLimit() const
+{
+	const int targetFps = GetTargetFrameRate();
+	if (targetFps <= 0 || !IsFrameGenerationActive())
+		return static_cast<double>(targetFps);
+
+	switch (GetFrameGenMethod()) {
+	case FrameGenMethod::kFSR:
+		return static_cast<double>(targetFps) / 2.0;
+	case FrameGenMethod::kDLSSG:
+		// Dynamic MFG owns the final-output target. Fixed MFG needs the rendered
+		// cadence reduced so real + generated frames add up to that target.
+		return settings.dlssgDynamic ? static_cast<double>(targetFps) :
+		                               static_cast<double>(targetFps) / GetFixedDLSSGMultiplier();
+	default:
+		return static_cast<double>(targetFps);
+	}
 }
 
 void Upscaling::ApplyDxvkFrameRateLimit(double a_fps)
@@ -728,9 +760,8 @@ void Upscaling::CreateHudlessTexture()
 	const auto encoding = dxvk->GetPresenterEncodingForFrame();
 	const VkFormat presenterFormat = dxvk->GetPresenterFormatForFrame();
 	const bool nativeHDR = hdrActive && encoding == DXVKInterop::PresenterEncoding::kHDR10;
-	const bool scRGBFallback = hdrActive && encoding == DXVKInterop::PresenterEncoding::kHDR10ScRGBFallback;
 	if (hdrActive) {
-		if ((!nativeHDR && !scRGBFallback) || !hdr.outputTexture || !hdr.outputTexture->resource)
+		if (!nativeHDR || !hdr.outputTexture || !hdr.outputTexture->resource)
 			return;
 		hdr.outputTexture->resource->GetDesc(&texDesc);
 		if (nativeHDR && texDesc.Format != DXGI_FORMAT_R10G10B10A2_UNORM) {
@@ -754,8 +785,6 @@ void Upscaling::CreateHudlessTexture()
 	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 	if (nativeHDR && presenterFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {
 		format = DXGI_FORMAT_R10G10B10A2_UNORM;
-	} else if (scRGBFallback && presenterFormat == VK_FORMAT_R16G16B16A16_SFLOAT) {
-		format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	} else if (!hdrActive && encoding == DXVKInterop::PresenterEncoding::kSDR) {
 		if (presenterFormat == VK_FORMAT_B8G8R8A8_UNORM)
 			format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -783,9 +812,7 @@ void Upscaling::CreateHudlessTexture()
 
 	texDesc.Format = format;
 	texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-	if (scRGBFallback)
-		texDesc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
-	else if (!hdrActive)
+	if (!hdrActive)
 		texDesc.BindFlags |= D3D11_BIND_RENDER_TARGET;
 
 	hudlessTexture = new Texture2D(texDesc);
@@ -798,12 +825,7 @@ void Upscaling::CreateHudlessTexture()
 	srvDesc.Texture2D.MipLevels = 1;
 	hudlessTexture->CreateSRV(srvDesc);
 
-	if (scRGBFallback) {
-		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-		uavDesc.Format = texDesc.Format;
-		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
-		hudlessTexture->CreateUAV(uavDesc);
-	} else if (!hdrActive) {
+	if (!hdrActive) {
 		D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
 		rtvDesc.Format = texDesc.Format;
 		rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
@@ -825,31 +847,6 @@ bool Upscaling::DestroyHudlessTexture(bool a_commandRingDrained)
 		hudlessTexture = nullptr;
 		logger::debug("[Upscaling] Destroyed hudless texture");
 	}
-	return true;
-}
-
-bool Upscaling::ConvertHDRToScRGB(ID3D11ShaderResourceView* a_source)
-{
-	if (!a_source || !hudlessTexture || !hudlessTexture->uav)
-		return false;
-
-	auto* shader = GetHDRToScRGBCS();
-	if (!shader)
-		return false;
-
-	auto* context = globals::d3d::context;
-	ID3D11ShaderResourceView* sources[] = { a_source };
-	ID3D11UnorderedAccessView* outputs[] = { hudlessTexture->uav.get() };
-	context->CSSetShaderResources(0, ARRAYSIZE(sources), sources);
-	context->CSSetUnorderedAccessViews(0, ARRAYSIZE(outputs), outputs, nullptr);
-	context->CSSetShader(shader, nullptr, 0);
-	context->Dispatch((hudlessTexture->desc.Width + 7) / 8, (hudlessTexture->desc.Height + 7) / 8, 1);
-
-	sources[0] = nullptr;
-	outputs[0] = nullptr;
-	context->CSSetShaderResources(0, ARRAYSIZE(sources), sources);
-	context->CSSetUnorderedAccessViews(0, ARRAYSIZE(outputs), outputs, nullptr);
-	context->CSSetShader(nullptr, nullptr, 0);
 	return true;
 }
 
@@ -925,10 +922,6 @@ ID3D11Resource* Upscaling::CaptureHudlessColor()
 			return hudlessTexture->resource.get();
 		}
 
-		if (encoding == DXVKInterop::PresenterEncoding::kHDR10ScRGBFallback &&
-			hdr.outputTexture && hdr.outputTexture->srv &&
-			ConvertHDRToScRGB(hdr.outputTexture->srv.get()))
-			return hudlessTexture->resource.get();
 		return nullptr;
 	}
 
@@ -1000,26 +993,6 @@ ID3D11VertexShader* Upscaling::GetUpscaleVS()
 		upscaleVS.attach((ID3D11VertexShader*)Util::CompileShader(L"Data/Shaders/Upscaling/UpscaleVS.hlsl", {}, "vs_5_0"));
 	}
 	return upscaleVS.get();
-}
-
-ID3D11ComputeShader* Upscaling::GetHDRToScRGBCS()
-{
-	auto* dxvk = DXVKInterop::GetSingleton();
-	const auto encoding = dxvk->GetPresenterEncodingForFrame();
-	if (encoding != DXVKInterop::PresenterEncoding::kHDR10ScRGBFallback)
-		return nullptr;
-
-	const bool gammaEncode = dxvk->PresenterGammaEncodesHDR10ToScRGBForFrame();
-	auto& shader = gammaEncode ? hdrToScRGBFallbackGammaCS : hdrToScRGBFallbackCS;
-	if (!shader) {
-		logger::debug("Compiling HDRToScRGBCS.hlsl");
-		std::vector<std::pair<const char*, const char*>> defines;
-		if (gammaEncode)
-			defines.emplace_back("HDR10_SCRGB_GAMMA_ENCODE", "1");
-		shader.attach((ID3D11ComputeShader*)Util::CompileShader(
-			L"Data/Shaders/Upscaling/HDRToScRGBCS.hlsl", defines, "cs_5_0"));
-	}
-	return shader.get();
 }
 
 ID3D11PixelShader* Upscaling::GetCopyHudlessPS()
@@ -1229,8 +1202,6 @@ void Upscaling::ClearShaderCache()
 	depthRefractionUpscalePS = nullptr;
 	underwaterMaskUpscalePS = nullptr;
 	upscaleVS = nullptr;
-	hdrToScRGBFallbackCS = nullptr;
-	hdrToScRGBFallbackGammaCS = nullptr;
 	copyHudlessPS = nullptr;
 }
 

@@ -104,6 +104,7 @@ cmake --install ./build/ALL --config Release --prefix $MOD_FOLDER
 -   If you prefer to run the VC environment manually, launch Developer PowerShell or the x64 Native Tools prompt instead of calling vcvarsall.bat directly from PowerShell.
 -   `BuildRelease.bat` is the supported one-command release build and fails if the required DXVK or Streamline outputs cannot be produced.
 -   Runtime DLLs and their notices are staged under `SKSE/Plugins/CommunityShaders/bin`; the old split `dxvk` and `Streamline` directories are not used.
+-   HDR frame generation currently requires DXVK to present native HDR10. The HDR10-to-scRGB presenter fallback disables frame generation because its HUD-less input is not available in the effective swapchain encoding. Supporting that path requires the HDR pipeline to render a same-frame, UI-free image directly in the presenter's format and transfer function rather than converting the completed HDR10 image afterward.
 
 #### Build a package
 
