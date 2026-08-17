@@ -317,14 +317,12 @@ void Upscaling::DrawSettings()
 		ImGui::SeparatorText(T(TKEY("ll_header"), "Low Latency"));
 		const std::vector<const char*> reflexStates = { "Off", "On", T(TKEY("reflex_on_boost"), "On + Boost") };
 		const bool fgForcesReflex = IsFrameGenerationActive() &&
-		                            (GetFrameGenMethod() == FrameGenMethod::kDLSSG || GetFrameGenMethod() == FrameGenMethod::kFSR);
+		                            GetFrameGenMethod() == FrameGenMethod::kFSR;
 		if (fgForcesReflex) {
 			int idx = GetEffectiveReflex() ? (settings.reflexBoost ? 2 : 1) : 0;
 			DrawStepper(T(TKEY("nv_reflex"), "NVIDIA Reflex Low Latency"), &idx, reflexStates, /*disabled=*/true);
 			ImGui::SameLine();
-			ImGui::TextDisabled("%s", GetFrameGenMethod() == FrameGenMethod::kDLSSG ?
-			                              T(TKEY("reflex_forced_dlssg"), "(forced on by DLSS-G)") :
-			                              T(TKEY("reflex_forced_fsrfg"), "(forced off by FSR frame gen)"));
+			ImGui::TextDisabled("%s", T(TKEY("reflex_forced_fsrfg"), "(forced off by FSR frame gen)"));
 		} else {
 			int idx = settings.reflexEnabled ? (settings.reflexBoost ? 2 : 1) : 0;
 			if (DrawStepper(T(TKEY("nv_reflex"), "NVIDIA Reflex Low Latency"), &idx, reflexStates)) {
@@ -600,7 +598,7 @@ bool Upscaling::GetEffectiveReflex() const
 	if (IsFrameGenerationActive()) {
 		switch (GetFrameGenMethod()) {
 		case FrameGenMethod::kDLSSG:
-			return true;
+			return settings.reflexEnabled;
 		case FrameGenMethod::kFSR:
 			return false;
 		default:

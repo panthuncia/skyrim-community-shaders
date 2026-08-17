@@ -11,6 +11,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -52,6 +53,7 @@ namespace
 
 		PFun_slDLSSGetOptimalSettings* slDLSSGetOptimalSettings = nullptr;
 		PFun_slDLSSSetOptions* slDLSSSetOptions = nullptr;
+		PFun_slReflexGetState* slReflexGetState = nullptr;
 		PFun_slReflexSetOptions* slReflexSetOptions = nullptr;
 		PFun_slReflexSleep* slReflexSleep = nullptr;
 		PFun_slPCLSetMarker* slPCLSetMarker = nullptr;
@@ -117,6 +119,70 @@ namespace
 		std::atomic<bool> watchdogTriggered{ false };
 		std::jthread watchdog;
 	} g_sl;
+
+	struct ReflexSleepSample
+	{
+		uint32_t frame;
+		uint64_t sleepUs;
+	};
+
+	sl::ReflexState g_reflexTraceState{};
+	const bool g_tracePacing = [] {
+		const char* value = std::getenv("CS_PACING_TRACE");
+		return value && value[0] != '\0' && value[0] != '0';
+	}();
+	const bool g_forceReflexOff = [] {
+		const char* value = std::getenv("CS_REFLEX_DIAGNOSTIC_OFF");
+		return value && value[0] != '\0' && value[0] != '0';
+	}();
+	const bool g_forceReflexUnlimited = [] {
+		const char* value = std::getenv("CS_REFLEX_DIAGNOSTIC_UNLIMITED");
+		return value && value[0] != '\0' && value[0] != '0';
+	}();
+
+	void LogReflexPacingBatch(
+		const std::array<ReflexSleepSample, 8>& a_samples,
+		sl::Result a_stateResult,
+		const sl::ReflexState& a_state)
+	{
+		std::string sleepPayload;
+		sleepPayload.reserve(128);
+		for (const auto& sample : a_samples) {
+			if (!sleepPayload.empty())
+				sleepPayload.push_back(';');
+			sleepPayload += std::format("{},{}", sample.frame, sample.sleepUs);
+		}
+
+		std::array<const sl::ReflexReport*, sl::kReflexFrameReportCount> reports{};
+		uint32_t reportCount = 0;
+		if (a_stateResult == sl::Result::eOk && a_state.latencyReportAvailable) {
+			for (const auto& candidate : a_state.frameReport) {
+				if (candidate.frameID)
+					reports[reportCount++] = &candidate;
+			}
+			std::sort(reports.begin(), reports.begin() + reportCount,
+				[](const auto* a_left, const auto* a_right) { return a_left->frameID < a_right->frameID; });
+		}
+		std::string reportPayload;
+		reportPayload.reserve(2048);
+		const uint32_t firstReport = reportCount > 8 ? reportCount - 8 : 0;
+		for (uint32_t i = firstReport; i < reportCount; i++) {
+			const auto* report = reports[i];
+			if (!reportPayload.empty())
+				reportPayload.push_back(';');
+			reportPayload += std::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+					report->frameID, report->simStartTime, report->simEndTime,
+					report->renderSubmitStartTime, report->renderSubmitEndTime,
+					report->presentStartTime, report->presentEndTime,
+					report->driverStartTime, report->driverEndTime,
+					report->osRenderQueueStartTime, report->osRenderQueueEndTime,
+					report->gpuRenderStartTime, report->gpuRenderEndTime,
+					report->gpuActiveRenderTimeUs, report->gpuFrameTimeUs);
+		}
+		logger::info("[PacingTrace] stateResult={} available={} sleep={} reports={}",
+			static_cast<int32_t>(a_stateResult), a_state.latencyReportAvailable,
+			sleepPayload, reportPayload);
+	}
 
 	struct DxvkPresentCallbackInfo
 	{
@@ -846,7 +912,9 @@ void Streamline::SetVulkanDevice()
 	if (featureReflex) {
 		g_sl.slGetFeatureFunction(sl::kFeatureReflex, "slReflexSetOptions", reinterpret_cast<void*&>(g_sl.slReflexSetOptions));
 		g_sl.slGetFeatureFunction(sl::kFeatureReflex, "slReflexSleep", reinterpret_cast<void*&>(g_sl.slReflexSleep));
-		featureReflex = g_sl.slReflexSetOptions != nullptr && g_sl.slReflexSleep != nullptr;
+		g_sl.slGetFeatureFunction(sl::kFeatureReflex, "slReflexGetState", reinterpret_cast<void*&>(g_sl.slReflexGetState));
+		featureReflex = g_sl.slReflexSetOptions != nullptr && g_sl.slReflexSleep != nullptr &&
+		                g_sl.slReflexGetState != nullptr;
 	}
 	g_sl.slGetFeatureFunction(sl::kFeaturePCL, "slPCLSetMarker", reinterpret_cast<void*&>(g_sl.slPCLSetMarker));
 	logger::info("[Streamline] PCL latency markers {}", g_sl.slPCLSetMarker ? "available" : "unavailable");
@@ -989,7 +1057,11 @@ void Streamline::BeginRenderFrame()
 	if (g_fsrfgCurrentlyLoaded.load(std::memory_order_acquire) &&
 		!g_sl.dispatchFaulted.load(std::memory_order_acquire))
 		(void)DiscardFSRFrameGenerationPreparedFrame();
-	g_sl.renderFrameId = globals::state->frameCount;
+	// Present increments State::frameCount at the end of a frame.  The render
+	// hook therefore prepares frame N+1, matching the token already used by
+	// Reflex Sleep and SimulationStart at this same hook.  Using frameCount
+	// directly split one logical frame's Reflex markers across N and N+1.
+	g_sl.renderFrameId = SimFrameId();
 	g_sl.dlssgTaggedThisFrame = false;
 }
 
@@ -1023,9 +1095,11 @@ void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimit
 	if (!initialized || !featureReflex || g_sl.dispatchFaulted)
 		return;
 
-	const sl::ReflexMode mode = !a_enable ? sl::ReflexMode::eOff :
+	const sl::ReflexMode mode = (!a_enable || g_forceReflexOff) ? sl::ReflexMode::eOff :
 	                            a_boost   ? sl::ReflexMode::eLowLatencyWithBoost :
 	                                        sl::ReflexMode::eLowLatency;
+	if (g_forceReflexOff || g_forceReflexUnlimited)
+		a_frameLimitUs = 0;
 
 	__try {
 		static uint32_t s_sleepSamples = 0;
@@ -1049,7 +1123,7 @@ void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimit
 			s_sleepMaxUs = 0;
 			s_sleepResult = sl::Result::eOk;
 		}
-		if (mode != sl::ReflexMode::eOff) {
+		{
 			// PollInputDevices can run more than once per rendered frame.
 			static uint32_t s_lastSleepFrame = UINT32_MAX;
 			const uint32_t simFrame = SimFrameId();
@@ -1062,6 +1136,20 @@ void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimit
 						std::chrono::steady_clock::now() - sleepStart).count());
 					s_sleepTotalUs += sleepUs;
 					s_sleepMaxUs = std::max(s_sleepMaxUs, sleepUs);
+
+					// The Reflex report is the only timing source that sees the driver's
+					// hardware metering path.  Keep this opt-in and batch the output so
+					// diagnostics do not turn per-frame logging into a pacing input.
+					static std::array<ReflexSleepSample, 8> s_traceBatch{};
+					static uint32_t s_traceCount = 0;
+					if (g_tracePacing) {
+						s_traceBatch[s_traceCount++] = { simFrame, sleepUs };
+						if (s_traceCount == s_traceBatch.size()) {
+							const sl::Result stateResult = g_sl.slReflexGetState(g_reflexTraceState);
+							LogReflexPacingBatch(s_traceBatch, stateResult, g_reflexTraceState);
+							s_traceCount = 0;
+						}
+					}
 					if (++s_sleepSamples == 600u) {
 						logger::info("[Streamline] Reflex sleep samples=600 averageUs={} maxUs={} lastResult={}",
 							s_sleepTotalUs / s_sleepSamples, s_sleepMaxUs, static_cast<int32_t>(s_sleepResult));
