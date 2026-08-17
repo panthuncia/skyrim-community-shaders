@@ -145,7 +145,7 @@ namespace FrameGen
 			owner = Method::kFSR;
 		} else {
 			owner = Method::kNone;
-			Streamline::PushDxvkSyncPresent(false);
+			Streamline::PushDxvkPresentQueueDepth(UINT32_MAX);
 		}
 
 		phase = Phase::kIdle;
@@ -204,13 +204,17 @@ namespace FrameGen
 		const bool wantDLSSG = a_target == Method::kDLSSG;
 		const bool wantFSRFG = a_target == Method::kFSR;
 
-		// Both frame-generation present proxies require the real Vulkan present to
-		// stay inside the matching D3D11 Present call. In particular, DLSS-G option
-		// changes are applied on the Vulkan present thread; allowing an async backlog
-		// can apply eOn to an older frame whose tags and markers were produced while
-		// interpolation was still off. This is a CPU queue drain only; the GPU-side
-		// tag and present dependencies remain semaphore ordered.
-		Streamline::PushDxvkSyncPresent(wantDLSSG || wantFSRFG);
+		// FSR-G requires synchronous present continuously. DLSS-G transitions are
+		// fully drained, while steady state permits one overlapping intercepted
+		// present (depth two including the call being queued).
+		const bool dlssgTransition = wantDLSSG &&
+			(owner != Method::kDLSSG || sl->IsDLSSGOptionsPending());
+		// The FIFO interop-submit contract makes a tag semaphore presenter-visible
+		// only after its signal submission executes, so this bounded overlap cannot
+		// recreate the older-present/future-semaphore cycle.
+		const uint32_t presentQueueDepth = wantFSRFG ? 0u :
+			dlssgTransition ? 0u : wantDLSSG ? 2u : UINT32_MAX;
+		Streamline::PushDxvkPresentQueueDepth(presentQueueDepth);
 
 		if (sl->IsDLSSGLoaded() == wantDLSSG && sl->IsFSRFGLoaded() == wantFSRFG) {
 			if (wantDLSSG && owner != Method::kDLSSG) {

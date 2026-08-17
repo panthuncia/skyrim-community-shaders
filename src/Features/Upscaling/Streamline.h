@@ -112,6 +112,8 @@ public:
 	[[nodiscard]] uint32_t GetFrameGenerationMultiplier() const;
 	[[nodiscard]] bool IsDLSSGDynamicSupported() const;
 	[[nodiscard]] bool IsDLSSGFrameReady() const;
+	/** @brief Whether a present-thread DLSS-G option request still awaits acknowledgment. */
+	[[nodiscard]] bool IsDLSSGOptionsPending() const;
 
 	/** @brief Sets the desired DLSS-G runtime load state. */
 	void SetDLSSGDesiredLoaded(bool a_loaded);
@@ -137,8 +139,9 @@ public:
 	/** @brief Requests a Vulkan swapchain recreation. */
 	static void RequestDxvkSwapchainRecreate(const char* a_reason = "FG method switch");
 
-	/** @brief Enables synchronous present while a frame-generation proxy is active. */
+	/** @brief Controls DXVK synchronous present for FG ownership transitions and FSR-G. */
 	static void PushDxvkSyncPresent(bool a_sync);
+	static void PushDxvkPresentQueueDepth(uint32_t a_depth);
 
 private:
 	Streamline() = default;

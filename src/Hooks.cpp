@@ -333,6 +333,11 @@ struct IDXGISwapChain_Present
 		// DLSS-G on Vulkan requires SyncInterval 0.
 		{
 			SyncInterval = dlssgActive ? 0u : (upscaling.settings.vsync ? 1u : 0u);
+			if (upscaling.IsFrameGenerationActive() && upscaling.settings.fgAllowTearing &&
+				Upscaling::IsTearingSupported() && upscaling.isWindowed && SyncInterval == 0u)
+				Flags |= DXGI_PRESENT_ALLOW_TEARING;
+			else
+				Flags &= ~DXGI_PRESENT_ALLOW_TEARING;
 		}
 
 		auto* streamline = Streamline::GetSingleton();

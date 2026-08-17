@@ -14,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <thread>
 
 #define NV_WINDOWS
 #pragma warning(push)
@@ -109,6 +110,10 @@ namespace
 		std::atomic<uint64_t> activeDxvkFrameId{ 0 };
 		std::atomic<uint64_t> activeSwapchainSerial{ 0 };
 		std::atomic<uint64_t> activePresentStartNs{ 0 };
+		std::atomic<uint64_t> renderHeartbeatNs{ 0 };
+		std::atomic<uint64_t> presentHeartbeatNs{ 0 };
+		std::atomic<bool> watchdogTriggered{ false };
+		std::jthread watchdog;
 	} g_sl;
 
 	struct DxvkPresentCallbackInfo
@@ -131,6 +136,65 @@ namespace
 	{
 		return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
 			std::chrono::steady_clock::now().time_since_epoch()).count());
+	}
+
+	bool IsForegroundSkyrim()
+	{
+		HWND window = GetForegroundWindow();
+		if (!window)
+			return false;
+		DWORD processId = 0;
+		GetWindowThreadProcessId(window, &processId);
+		return processId == GetCurrentProcessId();
+	}
+
+	void RequestForcedTdr()
+	{
+		wchar_t systemDir[MAX_PATH]{};
+		if (!GetSystemDirectoryW(systemDir, MAX_PATH))
+			return;
+		std::wstring command = L"\"" + std::wstring(systemDir) +
+			L"\\schtasks.exe\" /Run /TN \"CommunityShaders GPU Recovery\"";
+		STARTUPINFOW startup{ sizeof(startup) };
+		PROCESS_INFORMATION process{};
+		if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
+			CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
+			CloseHandle(process.hThread);
+			CloseHandle(process.hProcess);
+			logger::critical("[DLSSG-Watchdog] requested forced TDR through scheduled recovery task");
+		} else {
+			logger::critical("[DLSSG-Watchdog] recovery task launch failed (Win32 error {}); run community_shaders_recover_hung_gpu.ps1 manually",
+				GetLastError());
+		}
+	}
+
+	void StartDlssgWatchdog()
+	{
+		if (g_sl.watchdog.joinable())
+			return;
+		g_sl.watchdog = std::jthread([](std::stop_token stop) {
+			SetThreadDescription(GetCurrentThread(), L"CS DLSS-G hang watchdog");
+			while (!stop.stop_requested()) {
+				std::this_thread::sleep_for(std::chrono::seconds(1));
+				if (!g_sl.dlssgModeOn.load(std::memory_order_acquire)) {
+					g_sl.watchdogTriggered.store(false, std::memory_order_release);
+					continue;
+				}
+				const uint64_t now = PresentClockNs();
+				const uint64_t render = g_sl.renderHeartbeatNs.load(std::memory_order_acquire);
+				const uint64_t present = g_sl.presentHeartbeatNs.load(std::memory_order_acquire);
+				constexpr uint64_t timeoutNs = 8'000'000'000ull;
+				if (!render || !present || now - render < timeoutNs || now - present < timeoutNs ||
+					!IsForegroundSkyrim())
+					continue;
+				bool expected = false;
+				if (g_sl.watchdogTriggered.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+					logger::critical("[DLSSG-Watchdog] render and present stalled for {} ms; forcing WDDM recovery",
+						(now - std::max(render, present)) / 1'000'000ull);
+					RequestForcedTdr();
+				}
+			}
+		});
 	}
 
 	// Feature load changes are applied only while the swapchain is torn down.
@@ -485,6 +549,7 @@ namespace
 			g_sl.dispatchFaulted = true;
 		}
 		g_sl.dlssgApiMutex.unlock();
+		g_sl.presentHeartbeatNs.store(PresentClockNs(), std::memory_order_release);
 	}
 
 	// Suppress exact known-benign diagnostics; pass all other messages through.
@@ -711,6 +776,7 @@ bool Streamline::Initialize()
 	}
 
 	initialized = true;
+	StartDlssgWatchdog();
 	logger::info("[Streamline] initialized on Vulkan (SDK {}.{}.{})",
 		SL_VERSION_MAJOR, SL_VERSION_MINOR, SL_VERSION_PATCH);
 	return true;
@@ -908,6 +974,7 @@ static uint32_t SimFrameId()
 
 void Streamline::BeginRenderFrame()
 {
+	g_sl.renderHeartbeatNs.store(PresentClockNs(), std::memory_order_release);
 	if (g_fsrfgCurrentlyLoaded.load(std::memory_order_acquire) &&
 		!g_sl.dispatchFaulted.load(std::memory_order_acquire))
 		(void)DiscardFSRFrameGenerationPreparedFrame();
@@ -1947,6 +2014,11 @@ bool Streamline::SetDLSSGMode(bool a_enable, uint32_t a_renderWidth, uint32_t a_
 			return !g_sl.dlssgOptionsPending.load(std::memory_order_acquire) &&
 			       g_sl.dlssgModeOn.load(std::memory_order_acquire) == a_enable;
 
+		// Drain DXVK's asynchronous presenter only for this option transition.
+		// The present-thread callback is the acknowledgment boundary; the
+		// controller restores asynchronous DLSS-G presentation afterward.
+		PushDxvkPresentQueueDepth(0u);
+
 		sl::DLSSGOptions options{};
 		options.mode = !a_enable ? sl::DLSSGMode::eOff :
 		               a_dynamic ? sl::DLSSGMode::eDynamic :
@@ -2074,6 +2146,11 @@ bool Streamline::IsDLSSGFrameReady() const
 	return g_sl.dlssgCloneTagsPrimed.load(std::memory_order_acquire) &&
 	       g_sl.dlssgTaggedThisFrame &&
 	       g_sl.viewport0ConstantsFrame == g_sl.renderFrameId;
+}
+
+bool Streamline::IsDLSSGOptionsPending() const
+{
+	return g_sl.dlssgOptionsPending.load(std::memory_order_acquire);
 }
 
 void Streamline::TagDLSSGResources(ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
@@ -2395,7 +2472,11 @@ void Streamline::RequestDxvkSwapchainRecreate(const char* a_reason)
 
 void Streamline::PushDxvkSyncPresent(bool a_sync)
 {
-	// Frame-generation proxies require present to complete before the D3D11 hook returns.
+	static std::atomic<int> s_applied{ -1 };
+	const int requested = a_sync ? 1 : 0;
+	if (s_applied.load(std::memory_order_acquire) == requested)
+		return;
+
 	static auto setSync = []() -> void (*)(uint32_t) {
 		HMODULE dxvkModule = GetModuleHandleW(L"dxvk_d3d11.dll");
 		if (!dxvkModule)
@@ -2404,11 +2485,37 @@ void Streamline::PushDxvkSyncPresent(bool a_sync)
 	}();
 	if (setSync) {
 		setSync(a_sync ? 1u : 0u);
+		s_applied.store(requested, std::memory_order_release);
+		logger::info("[Streamline] DXVK synchronous present {}", a_sync ? "enabled" : "disabled");
 	} else {
 		static bool s_warned = false;
 		if (!s_warned) {
 			s_warned = true;
 			logger::warn("[Streamline] dxvkSetSyncPresent not found - synchronous present control inactive");
 		}
+	}
+}
+
+void Streamline::PushDxvkPresentQueueDepth(uint32_t a_depth)
+{
+	static std::atomic<uint32_t> s_applied{ UINT32_MAX - 1u };
+	if (s_applied.load(std::memory_order_acquire) == a_depth)
+		return;
+
+	static auto setDepth = []() -> void (*)(uint32_t) {
+		HMODULE dxvkModule = GetModuleHandleW(L"dxvk_d3d11.dll");
+		return dxvkModule ? reinterpret_cast<void (*)(uint32_t)>(
+			GetProcAddress(dxvkModule, "dxvkSetPresentQueueDepth")) : nullptr;
+	}();
+	if (setDepth) {
+		setDepth(a_depth);
+		s_applied.store(a_depth, std::memory_order_release);
+		if (a_depth == UINT32_MAX)
+			logger::info("[Streamline] DXVK present queue depth unrestricted");
+		else
+			logger::info("[Streamline] DXVK present queue depth set to {}", a_depth);
+	} else {
+		// Preserve compatibility with builds predating bounded presentation.
+		PushDxvkSyncPresent(a_depth == 0u);
 	}
 }

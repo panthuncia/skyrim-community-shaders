@@ -6,16 +6,12 @@
 
 namespace
 {
-	struct QueueSubmitAttempt
+	struct EnqueueInteropAttempt
 	{
 		VkResult endResult = VK_ERROR_DEVICE_LOST;
 		VkResult resetResult = VK_ERROR_DEVICE_LOST;
-		VkResult submitResult = VK_ERROR_DEVICE_LOST;
+		uint64_t generation = 0;
 		DWORD exceptionCode = 0;
-		bool queueLockAttempted = false;
-		bool queueLockAcquired = false;
-		bool queueReleaseCompleted = false;
-		bool faulted = false;
 	};
 
 	struct VulkanResultAttempt
@@ -28,12 +24,6 @@ namespace
 	{
 		DWORD exceptionCode = 0;
 		bool completed = false;
-	};
-
-	struct PresentWaitGenerationAttempt
-	{
-		uint64_t generation = 0;
-		DWORD exceptionCode = 0;
 	};
 
 	struct PresentWaitStateAttempt
@@ -177,19 +167,6 @@ namespace
 		return attempt;
 	}
 
-	PresentWaitGenerationAttempt PushPresentWaitSemaphoreSEH(
-		uint64_t (*a_push)(VkSemaphore), VkSemaphore a_semaphore) noexcept
-	{
-		PresentWaitGenerationAttempt attempt{};
-		__try {
-			if (a_push)
-				attempt.generation = a_push(a_semaphore);
-		} __except (EXCEPTION_EXECUTE_HANDLER) {
-			attempt.exceptionCode = GetExceptionCode();
-		}
-		return attempt;
-	}
-
 	PresentWaitStateAttempt GetPresentWaitSemaphoreStateSEH(
 		uint32_t (*a_getState)(uint64_t), uint64_t a_generation) noexcept
 	{
@@ -247,36 +224,21 @@ namespace
 		return attempt;
 	}
 
-	QueueSubmitAttempt SubmitQueueSEH(IDXGIVkInteropDevice* a_interopDevice, VkDevice a_device,
-		VkQueue a_queue, VkCommandBuffer a_commandBuffer, VkFence a_fence,
-		const VkSubmitInfo* a_submitInfo) noexcept
+	EnqueueInteropAttempt EnqueueInteropSEH(IDXGIVkInteropDevice* a_interopDevice,
+		VkDevice a_device, VkCommandBuffer a_commandBuffer, VkSemaphore a_signalSemaphore,
+		VkFence a_fence, uint64_t (*a_enqueue)(VkCommandBuffer, VkSemaphore, VkFence)) noexcept
 	{
-		QueueSubmitAttempt attempt{};
+		EnqueueInteropAttempt attempt{};
 		__try {
 			attempt.endResult = vkEndCommandBuffer(a_commandBuffer);
 			if (attempt.endResult == VK_SUCCESS) {
 				attempt.resetResult = vkResetFences(a_device, 1, &a_fence);
 				if (attempt.resetResult == VK_SUCCESS) {
 					a_interopDevice->FlushRenderingCommands();
-					__try {
-						attempt.queueLockAttempted = true;
-						a_interopDevice->LockSubmissionQueue();
-						attempt.queueLockAcquired = true;
-						attempt.submitResult = vkQueueSubmit(a_queue, 1, a_submitInfo, a_fence);
-					} __finally {
-						if (attempt.queueLockAcquired) {
-							const QueueReleaseAttempt release = ReleaseSubmissionQueueSEH(a_interopDevice);
-							attempt.queueReleaseCompleted = release.completed;
-							if (!release.completed) {
-								attempt.faulted = true;
-								attempt.exceptionCode = release.exceptionCode;
-							}
-						}
-					}
+					attempt.generation = a_enqueue(a_commandBuffer, a_signalSemaphore, a_fence);
 				}
 			}
 		} __except (EXCEPTION_EXECUTE_HANDLER) {
-			attempt.faulted = true;
 			attempt.exceptionCode = GetExceptionCode();
 		}
 		return attempt;
@@ -561,8 +523,8 @@ bool DXVKInterop::Initialize()
 		vkGetDeviceProcAddr(device, "vkDestroyImageView"));
 
 	if (HMODULE module = GetModuleHandleW(L"dxvk_d3d11.dll")) {
-		pushPresentWaitSemaphore = reinterpret_cast<uint64_t (*)(VkSemaphore)>(
-			GetProcAddress(module, "dxvkPushPresentWaitSemaphore"));
+		enqueueInteropCommandBuffer = reinterpret_cast<uint64_t (*)(VkCommandBuffer, VkSemaphore, VkFence)>(
+			GetProcAddress(module, "dxvkEnqueueInteropCommandBuffer"));
 		getPresentWaitSemaphoreState = reinterpret_cast<uint32_t (*)(uint64_t)>(
 			GetProcAddress(module, "dxvkGetPresentWaitSemaphoreState"));
 		clearPresentWaitSemaphore = reinterpret_cast<uint32_t (*)(uint64_t)>(
@@ -578,7 +540,7 @@ bool DXVKInterop::Initialize()
 	char splitValue[2]{};
 	presentQueueSplit = GetEnvironmentVariableA("DXVK_PRESENT_QUEUE_SPLIT", splitValue,
 		static_cast<DWORD>(std::size(splitValue))) != 0 && splitValue[0] == '1';
-	if (!pushPresentWaitSemaphore || !getPresentWaitSemaphoreState || !clearPresentWaitSemaphore ||
+	if (!enqueueInteropCommandBuffer || !getPresentWaitSemaphoreState || !clearPresentWaitSemaphore ||
 		!cancelPresentWaitSemaphore || !releaseQueuedPresentWaitSemaphoresAfterIdle)
 		logger::warn("[DXVKInterop] acknowledged present-wait semaphore interop is unavailable - DLSS-G disabled");
 	if (!synchronousPresentControlAvailable)
@@ -647,7 +609,7 @@ bool DXVKInterop::WaitDeviceIdle()
 		commandRingSubmissionsIdleProven = attempt.result == VK_SUCCESS;
 		commandRingFaulted = true;
 		presentWaitInteropTerminalFault = true;
-		pushPresentWaitSemaphore = nullptr;
+		enqueueInteropCommandBuffer = nullptr;
 		logger::critical("[DXVKInterop] queued present-wait release faulted after device idle (SEH {:#x}); present interop is quarantined",
 			attempt.exceptionCode);
 		return false;
@@ -681,7 +643,7 @@ bool DXVKInterop::ClearReleasedPresentWaitsAfterIdle()
 	const auto latchTerminalFault = [&](const char* a_operation, DWORD a_exceptionCode = 0) {
 		commandRingFaulted = true;
 		presentWaitInteropTerminalFault = true;
-		pushPresentWaitSemaphore = nullptr;
+		enqueueInteropCommandBuffer = nullptr;
 		if (a_exceptionCode) {
 			logger::critical("[DXVKInterop] {} faulted (SEH {:#x}); present interop is quarantined",
 				a_operation, a_exceptionCode);
@@ -829,7 +791,7 @@ bool DXVKInterop::CreateCommandResources(uint32_t a_framesInFlight)
 					logger::error("[DXVKInterop] vkCreateSemaphore failed ({}) - DLSS-G present synchronization unavailable",
 						static_cast<int>(semaphoreAttempt.result));
 				}
-				pushPresentWaitSemaphore = nullptr;
+				enqueueInteropCommandBuffer = nullptr;
 				if (semaphoreAttempt.exceptionCode)
 					return false;
 				bool destructionFaulted = false;
@@ -967,6 +929,7 @@ void DXVKInterop::DestroyCommandResources()
 	presentWaitInUse.clear();
 	inputCompletions.clear();
 	pendingPresentWaitSlot = UINT32_MAX;
+	pendingPresentWaitGeneration = 0;
 	for (VkFence& f : commandFences) {
 		if (f == VK_NULL_HANDLE)
 			continue;
@@ -1120,7 +1083,7 @@ bool DXVKInterop::RecoverCommandRing()
 bool DXVKInterop::PresentWaitInteropReady() const
 {
 	std::lock_guard lock(commandRingMutex);
-	return pushPresentWaitSemaphore != nullptr && getPresentWaitSemaphoreState != nullptr &&
+	return enqueueInteropCommandBuffer != nullptr && getPresentWaitSemaphoreState != nullptr &&
 	       clearPresentWaitSemaphore != nullptr && cancelPresentWaitSemaphore != nullptr &&
 	       releaseQueuedPresentWaitSemaphoresAfterIdle != nullptr &&
 	       !presentWaitInteropTerminalFault && synchronousPresentControlAvailable &&
@@ -1384,43 +1347,19 @@ bool DXVKInterop::SubmitFrameCommandBuffer(CommandTransaction& a_transaction,
 	}
 
 	VkFence& fence = commandFences[slot];
-	VkSubmitInfo submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &commandBuffer;
 	VkSemaphore signalSemaphore = VK_NULL_HANDLE;
-	if (a_signalForNextPresent) {
+	if (a_signalForNextPresent)
 		signalSemaphore = presentWaitSemaphores[slot];
-		submitInfo.signalSemaphoreCount = 1;
-		submitInfo.pSignalSemaphores = &signalSemaphore;
-	}
 
 	commandRingSubmissionsIdleProven = false;
-	const QueueSubmitAttempt attempt = SubmitQueueSEH(
-		interopDevice.get(), device, queue, commandBuffer, fence, &submitInfo);
-	if (attempt.queueLockAttempted &&
-		(!attempt.queueLockAcquired || !attempt.queueReleaseCompleted)) {
-		submissionQueueLockUncertain = true;
-		logger::error("[DXVKInterop] submission queue lock state became uncertain during foreign queue submission");
-	}
-	const bool ambiguousSubmitFailure =
-		attempt.endResult == VK_SUCCESS && attempt.resetResult == VK_SUCCESS &&
-		attempt.queueLockAcquired && attempt.submitResult != VK_SUCCESS &&
-		attempt.submitResult != VK_ERROR_OUT_OF_HOST_MEMORY &&
-		attempt.submitResult != VK_ERROR_OUT_OF_DEVICE_MEMORY;
-	if (attempt.faulted || ambiguousSubmitFailure || attempt.endResult != VK_SUCCESS ||
-		attempt.resetResult != VK_SUCCESS || attempt.submitResult != VK_SUCCESS) {
+	const EnqueueInteropAttempt attempt = EnqueueInteropSEH(interopDevice.get(), device,
+		commandBuffer, signalSemaphore, fence, enqueueInteropCommandBuffer);
+	if (attempt.exceptionCode || attempt.endResult != VK_SUCCESS ||
+		attempt.resetResult != VK_SUCCESS || !attempt.generation) {
 		commandRingFaulted = true;
-		if (attempt.faulted || ambiguousSubmitFailure) {
-			if (attempt.faulted) {
-				logger::error("[DXVKInterop] foreign queue submission faulted (SEH {:#x})",
-					attempt.exceptionCode);
-			} else {
-				logger::error("[DXVKInterop] foreign queue submission returned an ambiguous failure ({})",
-					static_cast<int>(attempt.submitResult));
-			}
-			// The fault may have occurred after vkQueueSubmit accepted the work. Keep the original
-			// fence, command buffer, semaphore and every attached resource quarantined until a real
-			// device-idle succeeds; a synthetic signaled fence cannot prove GPU completion.
+		if (attempt.exceptionCode) {
+			logger::error("[DXVKInterop] foreign submission enqueue faulted (SEH {:#x})",
+				attempt.exceptionCode);
 			a_transaction.submissionMayBeInFlight = true;
 			if (a_signalForNextPresent)
 				presentWaitInUse[slot] = true;
@@ -1431,10 +1370,8 @@ bool DXVKInterop::SubmitFrameCommandBuffer(CommandTransaction& a_transaction,
 		} else if (attempt.resetResult != VK_SUCCESS) {
 			logger::error("[DXVKInterop] vkResetFences failed ({})",
 				static_cast<int>(attempt.resetResult));
-		} else {
-			logger::error("[DXVKInterop] vkQueueSubmit failed ({})",
-				static_cast<int>(attempt.submitResult));
-		}
+		} else
+			logger::error("[DXVKInterop] DXVK rejected the foreign submission enqueue");
 		return false;
 	}
 	a_transaction.submitted = true;
@@ -1442,46 +1379,27 @@ bool DXVKInterop::SubmitFrameCommandBuffer(CommandTransaction& a_transaction,
 	if (a_signalForNextPresent) {
 		presentWaitInUse[slot] = true;
 		pendingPresentWaitSlot = slot;
+		pendingPresentWaitGeneration = attempt.generation;
 	}
 
 	return true;
 }
 
-bool DXVKInterop::PushPendingPresentWaitSemaphore()
+bool DXVKInterop::CommitPendingPresentWait()
 {
 	std::lock_guard lock(commandRingMutex);
 	if (!PresentWaitInteropReady() || pendingPresentWaitSlot == UINT32_MAX ||
-		pendingPresentWaitSlot >= presentWaitSemaphores.size())
+		pendingPresentWaitSlot >= presentWaitSemaphores.size() || !pendingPresentWaitGeneration)
 		return false;
 
 	const uint32_t slot = pendingPresentWaitSlot;
-	const PresentWaitGenerationAttempt pushAttempt =
-		PushPresentWaitSemaphoreSEH(pushPresentWaitSemaphore, presentWaitSemaphores[slot]);
-	if (pushAttempt.exceptionCode) {
-		const PresentWaitStateAttempt cancelAttempt = CancelPresentWaitSemaphoreSEH(
-			cancelPresentWaitSemaphore, presentWaitSemaphores[slot]);
-		commandRingFaulted = true;
-		pushPresentWaitSemaphore = nullptr;
-		if (cancelAttempt.exceptionCode || !cancelAttempt.state) {
-			presentWaitInteropTerminalFault = true;
-			logger::critical("[DXVKInterop] dxvkPushPresentWaitSemaphore faulted (SEH {:#x}) and exact-handle cancellation {} - present is blocked",
-				pushAttempt.exceptionCode, cancelAttempt.exceptionCode ? "faulted" : "failed");
-		} else {
-			logger::error("[DXVKInterop] dxvkPushPresentWaitSemaphore faulted (SEH {:#x}); exact-handle registration cancelled",
-				pushAttempt.exceptionCode);
-		}
-		return false;
-	}
-	if (!pushAttempt.generation) {
-		logger::error("[DXVKInterop] DXVK rejected the present-wait semaphore");
-		return false;
-	}
-	// Registration transfers the one-shot to DXVK immediately. Its asynchronous
-	// presenter may leave it Pending for several render frames, so track it with
-	// the other in-flight generations rather than requiring same-frame attach.
+	// DXVK reserved the generation when it accepted the foreign command buffer.
+	// It becomes presenter-visible only after the submission thread executes the
+	// signal submission, so an older present can never consume a future wait.
 	outstandingPresentWaitSubmissions.push_back(
-		PresentWaitSubmission{ slot, pushAttempt.generation });
+		PresentWaitSubmission{ slot, pendingPresentWaitGeneration });
 	pendingPresentWaitSlot = UINT32_MAX;
+	pendingPresentWaitGeneration = 0;
 	return true;
 }
 
@@ -1505,10 +1423,22 @@ bool DXVKInterop::DiscardPendingPresentWaitSemaphore()
 		return false;
 	if (!WaitDeviceIdle())
 		return false;
+	if (pendingPresentWaitGeneration) {
+		const PresentWaitStateAttempt clearAttempt = ClearPresentWaitSemaphoreSEH(
+			clearPresentWaitSemaphore, pendingPresentWaitGeneration);
+		if (clearAttempt.exceptionCode || !clearAttempt.state) {
+			presentWaitInteropTerminalFault = true;
+			enqueueInteropCommandBuffer = nullptr;
+			logger::critical("[DXVKInterop] failed to clear abandoned reserved present wait after device idle{}",
+				clearAttempt.exceptionCode ? std::format(" (SEH {:#x})", clearAttempt.exceptionCode) : "");
+			return false;
+		}
+	}
 
 	pendingPresentWaitSlot = UINT32_MAX;
+	pendingPresentWaitGeneration = 0;
 	commandRingFaulted = true;
-	logger::warn("[DXVKInterop] quarantined an unpushed present-wait semaphore for command-ring recovery after device idle");
+	logger::warn("[DXVKInterop] abandoned a reserved present wait after device idle; command-ring recovery required");
 	return true;
 }
 
@@ -1524,7 +1454,7 @@ void DXVKInterop::NotifyPresentWaitQueued()
 	const auto latchTerminalFault = [&](const char* a_operation, DWORD a_exceptionCode = 0) {
 		commandRingFaulted = true;
 		presentWaitInteropTerminalFault = true;
-		pushPresentWaitSemaphore = nullptr;
+		enqueueInteropCommandBuffer = nullptr;
 		if (a_exceptionCode) {
 			logger::critical("[DXVKInterop] {} faulted (SEH {:#x}); present is blocked",
 				a_operation, a_exceptionCode);

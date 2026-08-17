@@ -154,11 +154,11 @@ public:
 	bool SubmitFrameCommandBuffer(CommandTransaction& a_transaction,
 		bool a_signalForNextPresent = false);
 
-	/** @brief Gives DXVK the semaphore signaled by the latest present-tag submission. */
-	bool PushPendingPresentWaitSemaphore();
-	/** @brief Whether a submitted present-tag semaphore still needs to be pushed. */
+	/** @brief Commits the DXVK-reserved wait generation to present-lifetime tracking. */
+	bool CommitPendingPresentWait();
+	/** @brief Whether an accepted tag submission still needs present-lifetime tracking. */
 	bool HasPendingPresentWaitSemaphore() const;
-	/** @brief Replaces an unpushed semaphore after proving its signal submission complete. */
+	/** @brief Abandons a reserved wait safely after proving the device idle. */
 	[[nodiscard]] bool DiscardPendingPresentWaitSemaphore();
 	/** @brief Reconciles the one-shot semaphore after DXVK acknowledges the outer present. */
 	void NotifyPresentWaitQueued();
@@ -259,8 +259,9 @@ private:
 	std::vector<bool> presentWaitInUse;
 	std::vector<InputCompletion> inputCompletions;
 	uint32_t pendingPresentWaitSlot = UINT32_MAX;
+	uint64_t pendingPresentWaitGeneration = 0;
 	std::vector<PresentWaitSubmission> outstandingPresentWaitSubmissions;
-	uint64_t (*pushPresentWaitSemaphore)(VkSemaphore) = nullptr;
+	uint64_t (*enqueueInteropCommandBuffer)(VkCommandBuffer, VkSemaphore, VkFence) = nullptr;
 	uint32_t (*getPresentWaitSemaphoreState)(uint64_t) = nullptr;
 	uint32_t (*clearPresentWaitSemaphore)(uint64_t) = nullptr;
 	uint32_t (*cancelPresentWaitSemaphore)(VkSemaphore) = nullptr;

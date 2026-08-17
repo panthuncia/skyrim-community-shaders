@@ -41,7 +41,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	fgDebugPacingLines,
 	hardwareDefaultsApplied,
 	vsync,
-	frameRateLimitDivisor);
+	fgAllowTearing,
+	frameRateLimitDivisor,
+	frameRateLimit);
 
 decltype(&D3D11CreateDeviceAndSwapChain) ptrD3D11CreateDeviceAndSwapChainUpscaling;
 
@@ -69,6 +71,19 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 	pSwapChainDesc->SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 	if (pSwapChainDesc->BufferCount < 2)
 		pSwapChainDesc->BufferCount = 2;
+	const bool tearingSupported = Upscaling::IsTearingSupported();
+	const bool allowTearing = upscaling.settings.fgAllowTearing && tearingSupported && pSwapChainDesc->Windowed;
+	if (HMODULE dxvk = GetModuleHandleW(L"dxvk_d3d11.dll")) {
+		using SetTearingPreferenceFn = void (*)(uint32_t);
+		if (auto setTearingPreference = reinterpret_cast<SetTearingPreferenceFn>(
+				GetProcAddress(dxvk, "dxvkSetTearingPreference")))
+			setTearingPreference(upscaling.settings.frameGeneration ? (allowTearing ? 1u : 0u) : 2u);
+	}
+	if (allowTearing)
+		pSwapChainDesc->Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+	logger::info("[Upscaling] Frame-generation tearing {} (requested={} supported={} windowed={} swapchainFlags=0x{:X})",
+		allowTearing ? "enabled" : "disabled", upscaling.settings.fgAllowTearing,
+		tearingSupported, pSwapChainDesc->Windowed, pSwapChainDesc->Flags);
 
 	if (globals::features::hdrDisplay.loaded) {
 		logger::info("[Upscaling] Upgrading swap chain format from {} to R10G10B10A2_UNORM for HDR", static_cast<int>(pSwapChainDesc->BufferDesc.Format));
@@ -152,34 +167,56 @@ void Upscaling::DrawSettings()
 		} else {
 			DrawToggleStepper(T(TKEY("vsync"), "Vertical Synchronisation"), &settings.vsync);
 		}
+		const bool tearingSupported = IsTearingSupported();
+		if (DrawToggleStepper(T(TKEY("fg_allow_tearing"), "Allow Tearing with Frame Generation"),
+				&settings.fgAllowTearing, !tearingSupported)) {
+			if (HMODULE dxvk = GetModuleHandleW(L"dxvk_d3d11.dll")) {
+				using SetTearingPreferenceFn = void (*)(uint32_t);
+				if (auto setTearingPreference = reinterpret_cast<SetTearingPreferenceFn>(
+						GetProcAddress(dxvk, "dxvkSetTearingPreference")))
+					setTearingPreference(settings.fgAllowTearing ? 1u : 0u);
+			}
+			Streamline::RequestDxvkSwapchainRecreate("frame-generation tearing preference changed");
+		}
+		if (!tearingSupported) {
+			ImGui::SameLine();
+			ImGui::TextDisabled("%s", T(TKEY("tearing_unsupported"), "(not supported by this display path)"));
+		}
 
 		const int refresh = GetMonitorRefreshRate();
-		std::vector<int> divisorOptions;
+		std::vector<int> fpsOptions;
 		for (int d = 4; d >= 1; --d) {
 			if (refresh / d >= 30)
-				divisorOptions.push_back(d);
+				fpsOptions.push_back(refresh / d);
 		}
-		if (divisorOptions.empty())
-			divisorOptions.push_back(1);
-		divisorOptions.push_back(0);
+		for (int fps : { 30, 40, 48, 50, 60, 72, 90, 100, 120, 144, 165, 180, 200, 240 })
+			if (fps <= refresh)
+				fpsOptions.push_back(fps);
+		fpsOptions.push_back(refresh);
+		std::sort(fpsOptions.begin(), fpsOptions.end());
+		fpsOptions.erase(std::unique(fpsOptions.begin(), fpsOptions.end()), fpsOptions.end());
+		fpsOptions.push_back(0);
 
 		std::vector<std::string> fpsStrings;
-		for (int d : divisorOptions)
-			fpsStrings.push_back(d == 0 ?
+		for (int fps : fpsOptions)
+			fpsStrings.push_back(fps == 0 ?
 			                         std::string(T(TKEY("frame_rate_unlocked"), "Unlocked (variable)")) :
-			                         std::format("{} FPS", refresh / d));
+			                         std::format("{} FPS", fps));
 		std::vector<const char*> fpsLabels;
 		for (auto& s : fpsStrings)
 			fpsLabels.push_back(s.c_str());
 
-		const int maxSel = static_cast<int>(divisorOptions.size()) - 1;
+		const int maxSel = static_cast<int>(fpsOptions.size()) - 1;
 		int sel = maxSel > 0 ? maxSel - 1 : 0;
+		const int currentTarget = GetTargetFrameRate();
 		for (int i = 0; i <= maxSel; ++i) {
-			if (divisorOptions[i] == settings.frameRateLimitDivisor)
+			if (fpsOptions[i] == currentTarget)
 				sel = i;
 		}
-		DrawStepper(T(TKEY("frame_rate"), "Frame Rate"), &sel, fpsLabels);
-		settings.frameRateLimitDivisor = divisorOptions[std::clamp(sel, 0, maxSel)];
+		if (DrawStepper(T(TKEY("frame_rate"), "Frame Rate"), &sel, fpsLabels)) {
+			settings.frameRateLimit = fpsOptions[std::clamp(sel, 0, maxSel)];
+			settings.frameRateLimitDivisor = 0;
+		}
 	}
 
 	ImGui::SeparatorText(T(TKEY("upscaling_header"), "Upscaling"));
@@ -356,12 +393,13 @@ void Upscaling::DataLoaded()
 
 void Upscaling::Load()
 {
-	// FSR-G requires synchronous present bookkeeping. DLSS-G leaves the
-	// application's D3D11 Present asynchronous.
+	// FSR-G requires synchronous present bookkeeping continuously. DLSS-G is
+	// synchronous only around acknowledged option/ownership transitions.
 	if (DxvkLoader::IsLoaded()) {
-		const bool fsrFrameGeneration = settings.frameGeneration &&
-			static_cast<FrameGenMethod>(settings.frameGenMethod) == FrameGenMethod::kFSR;
-		Streamline::PushDxvkSyncPresent(fsrFrameGeneration);
+		const auto fgMethod = static_cast<FrameGenMethod>(settings.frameGenMethod);
+		const uint32_t queueDepth = !settings.frameGeneration ? UINT32_MAX :
+			fgMethod == FrameGenMethod::kFSR ? 0u : 2u;
+		Streamline::PushDxvkPresentQueueDepth(queueDepth);
 	}
 
 	if (DxvkLoader::IsLoaded()) {
@@ -587,10 +625,25 @@ int Upscaling::GetTargetFrameRate() const
 {
 	if (!loaded)
 		return 0;
+	if (settings.frameRateLimit >= 0)
+		return settings.frameRateLimit;
 	const int divisor = settings.frameRateLimitDivisor;
 	if (divisor <= 0)
 		return 0;
 	return std::max(1, static_cast<int>(std::lround(static_cast<double>(GetMonitorRefreshRate()) / divisor)));
+}
+
+bool Upscaling::IsTearingSupported()
+{
+	static const bool supported = [] {
+		winrt::com_ptr<IDXGIFactory5> factory;
+		if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory5), factory.put_void())))
+			return false;
+		BOOL allowTearing = FALSE;
+		return SUCCEEDED(factory->CheckFeatureSupport(
+			DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing))) && allowTearing;
+	}();
+	return supported;
 }
 
 uint32_t Upscaling::GetFixedDLSSGMultiplier() const
@@ -685,14 +738,14 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 	}
 
 	if (!IsFrameGenerationActive()) {
-		if (dxvk->HasPendingPresentWaitSemaphore() && !dxvk->PushPendingPresentWaitSemaphore())
+		if (dxvk->HasPendingPresentWaitSemaphore() && !dxvk->CommitPendingPresentWait())
 			return requestFaultTeardown("DLSS-G present synchronization failed");
 		return a_present(a_swapChain, a_syncInterval, a_flags);
 	}
 
 	auto fgMethod = GetFrameGenMethod();
 	if (fgMethod != FrameGenMethod::kDLSSG) {
-		if (dxvk->HasPendingPresentWaitSemaphore() && !dxvk->PushPendingPresentWaitSemaphore())
+		if (dxvk->HasPendingPresentWaitSemaphore() && !dxvk->CommitPendingPresentWait())
 			return requestFaultTeardown("DLSS-G present synchronization failed");
 		return a_present(a_swapChain, a_syncInterval, a_flags);
 	}
@@ -703,7 +756,7 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 	// semaphore. This preserves asynchronous CPU/GPU execution without allowing
 	// the present queue to overtake the inputs.
 	if ((dxvk->HasPendingPresentWaitSemaphore() || streamline->EnsureDLSSGPresentTag()) &&
-		dxvk->PushPendingPresentWaitSemaphore())
+		dxvk->CommitPendingPresentWait())
 		return a_present(a_swapChain, a_syncInterval, a_flags);
 
 	return requestFaultTeardown("DLSS-G present synchronization failed");

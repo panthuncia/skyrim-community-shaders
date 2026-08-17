@@ -70,8 +70,11 @@ public:
 		bool hardwareDefaultsApplied = false;
 
 		bool vsync = false;
+		bool fgAllowTearing = true;
 		// Zero disables the cap; positive values divide the monitor refresh rate.
 		int frameRateLimitDivisor = 1;
+		// Explicit output FPS. -1 migrates legacy divisor-based settings; zero is unlocked.
+		int frameRateLimit = -1;
 	};
 
 	Settings settings;
@@ -90,6 +93,7 @@ public:
 
 	/** @brief Returns whether the game window is minimized. */
 	static bool IsWindowMinimized();
+	static bool IsTearingSupported();
 
 	static void NotifyWindowFocus(bool a_focused);        // WM_ACTIVATEAPP / WM_ACTIVATE
 	static void NotifyWindowModifying(bool a_modifying);  // WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE
