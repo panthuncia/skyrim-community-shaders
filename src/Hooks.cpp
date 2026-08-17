@@ -508,17 +508,6 @@ struct BSInputDeviceManager_PollInputDevices
 {
 	static void thunk(RE::BSTEventSource<RE::InputEvent*>* a_dispatcher, RE::InputEvent* const* a_events)
 	{
-		{
-			auto& upscaling = globals::features::upscaling;
-			const bool wantReflex = upscaling.GetEffectiveReflex();
-			const double renderedFpsLimit = upscaling.GetRenderedFrameRateLimit();
-			const uint32_t reflexLimitUs = (wantReflex && renderedFpsLimit > 0.0) ?
-				static_cast<uint32_t>(std::lround(1000000.0 / renderedFpsLimit)) : 0u;
-			Streamline::GetSingleton()->UpdateReflex(wantReflex, wantReflex && upscaling.settings.reflexBoost, reflexLimitUs);
-			upscaling.ApplyDxvkFrameRateLimit(!wantReflex ? renderedFpsLimit : 0.0);
-			Streamline::GetSingleton()->SetPCLMarker(Streamline::PclMarker::SimulationStart);
-		}
-
 		bool blockedDevice = true;
 
 		auto menu = globals::menu;

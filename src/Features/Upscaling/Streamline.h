@@ -114,6 +114,8 @@ public:
 	[[nodiscard]] bool IsDLSSGFrameReady() const;
 	/** @brief Whether a present-thread DLSS-G option request still awaits acknowledgment. */
 	[[nodiscard]] bool IsDLSSGOptionsPending() const;
+	/** @brief Whether the newly enabled DLSS-G pacer has completed synchronous warm-up. */
+	[[nodiscard]] bool IsDLSSGTransitionSettled() const;
 
 	/** @brief Sets the desired DLSS-G runtime load state. */
 	void SetDLSSGDesiredLoaded(bool a_loaded);

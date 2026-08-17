@@ -89,6 +89,8 @@ namespace
 		std::atomic<uint32_t> frameGenerationMultiplier = 1;
 		sl::DLSSGOptions dlssgPendingOptions{};
 		std::atomic<bool> dlssgOptionsPending{ false };
+		std::atomic<uint32_t> dlssgTransitionPresentAcks{ 0 };
+		std::atomic<uint64_t> dlssgTransitionCompletionValue{ 0 };
 		bool dlssgPendingEnable = false;
 		uint32_t dlssgPendingRenderW = 0, dlssgPendingRenderH = 0;
 		uint32_t dlssgPendingDisplayW = 0, dlssgPendingDisplayH = 0;
@@ -418,6 +420,8 @@ namespace
 			if (result == sl::Result::eOk) {
 				succeeded = true;
 				g_sl.dlssgModeOn.store(g_sl.dlssgPendingEnable, std::memory_order_release);
+				g_sl.dlssgTransitionPresentAcks.store(0u, std::memory_order_release);
+				g_sl.dlssgTransitionCompletionValue.store(0u, std::memory_order_release);
 				logger::info("[Streamline] applied present-ordered DLSS-G mode={} numFrames={} render={}x{} display={}x{}",
 					g_sl.dlssgPendingEnable, g_sl.dlssgPendingOptions.numFramesToGenerate,
 					g_sl.dlssgPendingRenderW, g_sl.dlssgPendingRenderH,
@@ -512,6 +516,13 @@ namespace
 				if (g_sl.dlssgModeOn.load(std::memory_order_acquire) &&
 					state.inputsProcessingCompletionFence &&
 					state.lastPresentInputsProcessingCompletionFenceValue) {
+					const uint64_t previousTransitionValue =
+						g_sl.dlssgTransitionCompletionValue.exchange(
+							state.lastPresentInputsProcessingCompletionFenceValue,
+							std::memory_order_acq_rel);
+					if (state.numFramesActuallyPresented > 1u &&
+						state.lastPresentInputsProcessingCompletionFenceValue > previousTransitionValue)
+						g_sl.dlssgTransitionPresentAcks.fetch_add(1u, std::memory_order_acq_rel);
 					const bool tracked = DXVKInterop::GetSingleton()->TrackInputCompletion(
 						a_info->presentWaitGeneration,
 						reinterpret_cast<VkSemaphore>(state.inputsProcessingCompletionFence),
@@ -1017,15 +1028,26 @@ void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimit
 	                                        sl::ReflexMode::eLowLatency;
 
 	__try {
+		static uint32_t s_sleepSamples = 0;
+		static uint64_t s_sleepTotalUs = 0;
+		static uint64_t s_sleepMaxUs = 0;
+		static sl::Result s_sleepResult = sl::Result::eOk;
 		if (!g_sl.reflexCacheValid || g_sl.reflexCachedMode != mode || g_sl.reflexCachedFrameLimitUs != a_frameLimitUs) {
 			sl::ReflexOptions options{};
 			options.mode = mode;
 			options.frameLimitUs = a_frameLimitUs;
-			if (g_sl.slReflexSetOptions(options) == sl::Result::eOk) {
+			const sl::Result result = g_sl.slReflexSetOptions(options);
+			if (result == sl::Result::eOk) {
 				g_sl.reflexCachedMode = mode;
 				g_sl.reflexCachedFrameLimitUs = a_frameLimitUs;
 				g_sl.reflexCacheValid = true;
 			}
+			logger::info("[Streamline] Reflex options mode={} frameLimitUs={} result={}",
+				static_cast<uint32_t>(mode), a_frameLimitUs, static_cast<int32_t>(result));
+			s_sleepSamples = 0;
+			s_sleepTotalUs = 0;
+			s_sleepMaxUs = 0;
+			s_sleepResult = sl::Result::eOk;
 		}
 		if (mode != sl::ReflexMode::eOff) {
 			// PollInputDevices can run more than once per rendered frame.
@@ -1033,8 +1055,21 @@ void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimit
 			const uint32_t simFrame = SimFrameId();
 			if (s_lastSleepFrame != simFrame) {
 				s_lastSleepFrame = simFrame;
-				if (sl::FrameToken* token = TokenForFrame(simFrame))
-					g_sl.slReflexSleep(*token);
+				if (sl::FrameToken* token = TokenForFrame(simFrame)) {
+					const auto sleepStart = std::chrono::steady_clock::now();
+					s_sleepResult = g_sl.slReflexSleep(*token);
+					const uint64_t sleepUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+						std::chrono::steady_clock::now() - sleepStart).count());
+					s_sleepTotalUs += sleepUs;
+					s_sleepMaxUs = std::max(s_sleepMaxUs, sleepUs);
+					if (++s_sleepSamples == 600u) {
+						logger::info("[Streamline] Reflex sleep samples=600 averageUs={} maxUs={} lastResult={}",
+							s_sleepTotalUs / s_sleepSamples, s_sleepMaxUs, static_cast<int32_t>(s_sleepResult));
+						s_sleepSamples = 0;
+						s_sleepTotalUs = 0;
+						s_sleepMaxUs = 0;
+					}
+				}
 			}
 		}
 	} __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -2151,6 +2186,18 @@ bool Streamline::IsDLSSGFrameReady() const
 bool Streamline::IsDLSSGOptionsPending() const
 {
 	return g_sl.dlssgOptionsPending.load(std::memory_order_acquire);
+}
+
+bool Streamline::IsDLSSGTransitionSettled() const
+{
+	// SetOptions acceptance only acknowledges option delivery. The Vulkan pacer
+	// is created asynchronously inside the first intercepted presents, so retain
+	// the transition barrier until it has produced and retired a short run of
+	// monotonically advancing generated frames.
+	constexpr uint32_t requiredPresentAcks = 8u;
+	return !g_sl.dlssgOptionsPending.load(std::memory_order_acquire) &&
+		g_sl.dlssgModeOn.load(std::memory_order_acquire) &&
+		g_sl.dlssgTransitionPresentAcks.load(std::memory_order_acquire) >= requiredPresentAcks;
 }
 
 void Streamline::TagDLSSGResources(ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,

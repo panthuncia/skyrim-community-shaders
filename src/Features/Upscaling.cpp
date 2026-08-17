@@ -1675,8 +1675,25 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 void Upscaling::Main_UpdateJitter::thunk(RE::BSGraphics::State* a_state)
 {
 	auto& upscaling = globals::features::upscaling;
+	// Reflex sleep is a frame-begin operation. Skyrim's input polling can run on
+	// different worker threads and at irregular points within a frame, which
+	// turns the driver's sleep into visible pacing jitter. Keep option delivery,
+	// sleep and SimulationStart together on this deterministic render hook.
+	const bool wantReflex = upscaling.GetEffectiveReflex();
+	const double renderedFpsLimit = upscaling.GetRenderedFrameRateLimit();
+	// Reflex/DLSS-G applies the frame-generation multiplier internally. Feed it
+	// the requested final-output target; pre-dividing here causes the driver to
+	// halve the limit a second time. The DXVK fallback used without Reflex still
+	// consumes the rendered-frame target below.
+	const int outputFpsLimit = upscaling.GetTargetFrameRate();
+	const uint32_t reflexLimitUs = (wantReflex && outputFpsLimit > 0) ?
+		static_cast<uint32_t>(std::lround(1000000.0 / outputFpsLimit)) : 0u;
+	auto* streamline = Streamline::GetSingleton();
+	streamline->UpdateReflex(wantReflex, wantReflex && upscaling.settings.reflexBoost, reflexLimitUs);
+	upscaling.ApplyDxvkFrameRateLimit(!wantReflex ? renderedFpsLimit : 0.0);
+	streamline->SetPCLMarker(Streamline::PclMarker::SimulationStart);
 	upscaling.BeginRenderFrame();
-	Streamline::GetSingleton()->BeginRenderFrame();
+	streamline->BeginRenderFrame();
 	upscaling.ConfigureTAA();
 	func(a_state);
 	upscaling.ConfigureUpscaling(a_state);

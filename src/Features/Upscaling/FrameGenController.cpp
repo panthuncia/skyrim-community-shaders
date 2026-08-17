@@ -208,7 +208,7 @@ namespace FrameGen
 		// fully drained, while steady state permits one overlapping intercepted
 		// present (depth two including the call being queued).
 		const bool dlssgTransition = wantDLSSG &&
-			(owner != Method::kDLSSG || sl->IsDLSSGOptionsPending());
+			(owner != Method::kDLSSG || !sl->IsDLSSGTransitionSettled());
 		// The FIFO interop-submit contract makes a tag semaphore presenter-visible
 		// only after its signal submission executes, so this bounded overlap cannot
 		// recreate the older-present/future-semaphore cycle.
