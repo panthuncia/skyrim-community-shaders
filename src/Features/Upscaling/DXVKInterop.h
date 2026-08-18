@@ -1,7 +1,7 @@
 #pragma once
 
+#include "DXVKInteropComponents.h"
 #include "DXVKPresenterState.h"
-#include "DXVKInteropState.h"
 
 // DXVK COM interfaces used to access its Vulkan device, queue, and backing images.
 // Keep the declarations ABI-compatible with DXVK's dxgi_interfaces.h.
@@ -60,7 +60,7 @@ IDXGIVkInteropDevice : public IUnknown
 };
 
 /** @brief Accesses DXVK's Vulkan device through its D3D11 interop interfaces. */
-class DXVKInterop : private DXVKCommandRingState, private DXVKResourceRetirementState
+class DXVKInterop
 {
 public:
 	using PresenterEncoding = DXVKPresenterState::Encoding;
@@ -104,7 +104,7 @@ public:
 	bool Initialize();
 
 	/** @brief Whether the DXVK Vulkan device was resolved successfully. */
-	bool IsAvailable() const { return available; }
+	bool IsAvailable() const { return deviceQueue.available; }
 
 	/** @brief Reads the latest successfully created presenter surface state from DXVK. */
 	bool RefreshPresenterSurfaceState();
@@ -124,11 +124,11 @@ public:
 	/** @brief Whether the latched presenter state exactly matches this frame's output mode. */
 	bool IsPresenterStateReadyForFrame(bool a_hdr) const;
 
-	VkInstance GetInstance() const { return instance; }
-	VkPhysicalDevice GetPhysicalDevice() const { return physicalDevice; }
-	VkDevice GetDevice() const { return device; }
-	PFN_vkGetInstanceProcAddr GetInstanceProcAddr() const { return vkGetInstanceProcAddr; }
-	PFN_vkGetDeviceProcAddr GetDeviceProcAddr() const { return vkGetDeviceProcAddr; }
+	VkInstance GetInstance() const { return deviceQueue.instance; }
+	VkPhysicalDevice GetPhysicalDevice() const { return deviceQueue.physicalDevice; }
+	VkDevice GetDevice() const { return deviceQueue.device; }
+	PFN_vkGetInstanceProcAddr GetInstanceProcAddr() const { return deviceQueue.vkGetInstanceProcAddr; }
+	PFN_vkGetDeviceProcAddr GetDeviceProcAddr() const { return deviceQueue.vkGetDeviceProcAddr; }
 
 	/** @brief Whether DXVK can drive Reflex for the Vulkan swapchain it presents. */
 	bool ReflexAvailable() const;
@@ -211,26 +211,63 @@ public:
 	void ReleaseRetainedPresentResourcesAfterFSRSwapchainTeardown();
 
 private:
-	DXVKInterop() = default;
+	DXVKInterop();
 
 	bool ClearReleasedPresentWaitsAfterIdle();
 	bool IsInputCompletionReady(uint32_t a_slot);
 	void ReleaseRetainedFSRResourcesIfSafe();
 
-	bool available = false;
-
-	winrt::com_ptr<IDXGIVkInteropDevice> interopDevice;
-	winrt::com_ptr<ID3DLowLatencyDevice> lowLatencyDevice;
-
-	VkInstance instance = VK_NULL_HANDLE;
-	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-	VkDevice device = VK_NULL_HANDLE;
-	VkQueue queue = VK_NULL_HANDLE;
-	uint32_t queueFamilyIndex = 0;
-
-	PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr = nullptr;
-	PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr = nullptr;
-	PFN_vkDestroyImageView vkDestroyImageView = nullptr;
+	DXVKDeviceQueueInteropOwner deviceQueue;
+	DXVKCommandRing commandRing;
+	DXVKPresentWaitTracker presentWait;
+	DXVKResourceRetirementQueue retirement;
 	DXVKPresenterState presenterState;
+
+	// Implementation bindings preserve the façade's established conservative
+	// control flow while storage and synchronization belong to owned components.
+	using PresentWaitSubmission = DXVKPresentWaitTracker::Submission;
+	using InputCompletion = DXVKPresentWaitTracker::InputCompletion;
+	using FSRPresentViewGroup = DXVKResourceRetirementQueue::FSRPresentViewGroup;
+	std::recursive_mutex& commandRingMutex;
+	VkCommandPool& commandPool;
+	std::vector<VkCommandBuffer>& commandBuffers;
+	std::vector<VkFence>& commandFences;
+	bool& commandRingFaulted;
+	bool& commandRingSubmissionsIdleProven;
+	uint32_t& framesInFlight;
+	uint32_t& commandFrameIndex;
+	std::vector<VkSemaphore>& presentWaitSemaphores;
+	std::vector<bool>& presentWaitInUse;
+	std::vector<InputCompletion>& inputCompletions;
+	uint32_t& pendingPresentWaitSlot;
+	uint64_t& pendingPresentWaitGeneration;
+	std::vector<PresentWaitSubmission>& outstandingPresentWaitSubmissions;
+	PFN_csDxvkEnqueueInteropCommandBuffer& enqueueInteropCommandBuffer;
+	PFN_csDxvkGetPresentWaitSemaphoreState& getPresentWaitSemaphoreState;
+	PFN_csDxvkClearPresentWaitSemaphore& clearPresentWaitSemaphore;
+	PFN_csDxvkCancelPresentWaitSemaphore& cancelPresentWaitSemaphore;
+	PFN_csDxvkReleaseQueuedPresentWaitSemaphoresAfterIdle& releaseQueuedPresentWaitSemaphoresAfterIdle;
+	bool& presentWaitInteropTerminalFault;
+	bool& synchronousPresentControlAvailable;
+	bool& presentQueueSplit;
+	bool& available;
+	winrt::com_ptr<IDXGIVkInteropDevice>& interopDevice;
+	winrt::com_ptr<ID3DLowLatencyDevice>& lowLatencyDevice;
+	VkInstance& instance;
+	VkPhysicalDevice& physicalDevice;
+	VkDevice& device;
+	VkQueue& queue;
+	uint32_t& queueFamilyIndex;
+	PFN_vkGetInstanceProcAddr& vkGetInstanceProcAddr;
+	PFN_vkGetDeviceProcAddr& vkGetDeviceProcAddr;
+	PFN_vkDestroyImageView& vkDestroyImageView;
+	bool& submissionQueueLockUncertain;
+	bool& vulkanResourceDestructionTerminalFault;
+	std::vector<std::vector<VkImageView>>& pendingViewDeletes;
+	std::vector<std::vector<winrt::com_ptr<ID3D11Resource>>>& pendingResourceReleases;
+	std::vector<winrt::com_ptr<ID3D11Resource>>& retainedPresentResources;
+	std::vector<FSRPresentViewGroup>& pendingFSRPresentViewGroups;
+	std::vector<FSRPresentViewGroup>& quarantinedFSRPresentViewGroups;
+	bool& fsrSwapchainTeardownConfirmed;
 
 };

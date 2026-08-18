@@ -332,6 +332,50 @@ DXVKInterop* DXVKInterop::GetSingleton()
 	return &singleton;
 }
 
+DXVKInterop::DXVKInterop() :
+	commandRingMutex(commandRing.mutex),
+	commandPool(commandRing.pool),
+	commandBuffers(commandRing.commandBuffers),
+	commandFences(commandRing.fences),
+	commandRingFaulted(commandRing.faulted),
+	commandRingSubmissionsIdleProven(commandRing.submissionsIdleProven),
+	framesInFlight(commandRing.framesInFlight),
+	commandFrameIndex(commandRing.frameIndex),
+	presentWaitSemaphores(presentWait.semaphores),
+	presentWaitInUse(presentWait.inUse),
+	inputCompletions(presentWait.inputCompletions),
+	pendingPresentWaitSlot(presentWait.pendingSlot),
+	pendingPresentWaitGeneration(presentWait.pendingGeneration),
+	outstandingPresentWaitSubmissions(presentWait.outstanding),
+	enqueueInteropCommandBuffer(presentWait.enqueueCommandBuffer),
+	getPresentWaitSemaphoreState(presentWait.getState),
+	clearPresentWaitSemaphore(presentWait.clear),
+	cancelPresentWaitSemaphore(presentWait.cancel),
+	releaseQueuedPresentWaitSemaphoresAfterIdle(presentWait.releaseAfterIdle),
+	presentWaitInteropTerminalFault(presentWait.terminalFault),
+	synchronousPresentControlAvailable(presentWait.synchronousPresentControlAvailable),
+	presentQueueSplit(presentWait.presentQueueSplit),
+	available(deviceQueue.available),
+	interopDevice(deviceQueue.interopDevice),
+	lowLatencyDevice(deviceQueue.lowLatencyDevice),
+	instance(deviceQueue.instance),
+	physicalDevice(deviceQueue.physicalDevice),
+	device(deviceQueue.device),
+	queue(deviceQueue.queue),
+	queueFamilyIndex(deviceQueue.queueFamilyIndex),
+	vkGetInstanceProcAddr(deviceQueue.vkGetInstanceProcAddr),
+	vkGetDeviceProcAddr(deviceQueue.vkGetDeviceProcAddr),
+	vkDestroyImageView(deviceQueue.vkDestroyImageView),
+	submissionQueueLockUncertain(deviceQueue.submissionQueueLockUncertain),
+	vulkanResourceDestructionTerminalFault(retirement.destructionTerminalFault),
+	pendingViewDeletes(retirement.pendingViewDeletes),
+	pendingResourceReleases(retirement.pendingResourceReleases),
+	retainedPresentResources(retirement.retainedPresentResources),
+	pendingFSRPresentViewGroups(retirement.pendingFSRPresentViewGroups),
+	quarantinedFSRPresentViewGroups(retirement.quarantinedFSRPresentViewGroups),
+	fsrSwapchainTeardownConfirmed(retirement.fsrSwapchainTeardownConfirmed)
+{}
+
 bool DXVKInterop::RefreshPresenterSurfaceState()
 {
 	return presenterState.Refresh();
@@ -369,6 +413,8 @@ bool DXVKInterop::IsPresenterStateReadyForFrame(bool a_hdr) const
 
 bool DXVKInterop::Initialize()
 {
+	std::lock_guard deviceLock(deviceQueue.mutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
 	if (available)
 		return true;
 
@@ -464,28 +510,33 @@ bool DXVKInterop::Initialize()
 
 bool DXVKInterop::ReflexAvailable() const
 {
+	std::lock_guard deviceLock(deviceQueue.mutex);
 	return lowLatencyDevice != nullptr;
 }
 
 bool DXVKInterop::SetReflexMode(bool a_enable, bool a_boost, uint32_t a_minIntervalUs)
 {
+	std::lock_guard deviceLock(deviceQueue.mutex);
 	return lowLatencyDevice && SUCCEEDED(lowLatencyDevice->SetLatencySleepMode(
 		a_enable, a_boost, a_minIntervalUs));
 }
 
 bool DXVKInterop::ReflexSleep()
 {
+	std::lock_guard deviceLock(deviceQueue.mutex);
 	return lowLatencyDevice && SUCCEEDED(lowLatencyDevice->LatencySleep());
 }
 
 bool DXVKInterop::SetReflexMarker(uint64_t a_frameId, uint32_t a_marker)
 {
+	std::lock_guard deviceLock(deviceQueue.mutex);
 	return lowLatencyDevice && SUCCEEDED(lowLatencyDevice->SetLatencyMarker(a_frameId, a_marker));
 }
 
 bool DXVKInterop::GetVkImage(ID3D11Resource* a_resource, VkImage* a_outImage,
 	VkImageLayout* a_outLayout, VkImageCreateInfo* a_outInfo) const
 {
+	std::lock_guard deviceLock(deviceQueue.mutex);
 	if (!available || !a_resource)
 		return false;
 
@@ -506,6 +557,8 @@ bool DXVKInterop::GetVkImage(ID3D11Resource* a_resource, VkImage* a_outImage,
 bool DXVKInterop::WaitDeviceIdle()
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard deviceLock(deviceQueue.mutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
 	if (!interopDevice || !vkGetDeviceProcAddr || device == VK_NULL_HANDLE)
 		return false;
 	if (submissionQueueLockUncertain) {
@@ -549,6 +602,7 @@ bool DXVKInterop::WaitDeviceIdle()
 
 bool DXVKInterop::ClearReleasedPresentWaitsAfterIdle()
 {
+	std::lock_guard presentWaitLock(presentWait.mutex);
 	if (presentWaitInteropTerminalFault || !getPresentWaitSemaphoreState || !clearPresentWaitSemaphore)
 		return false;
 
@@ -599,6 +653,9 @@ bool DXVKInterop::ClearReleasedPresentWaitsAfterIdle()
 bool DXVKInterop::CreateCommandResources(uint32_t a_framesInFlight)
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard deviceLock(deviceQueue.mutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
+	std::lock_guard retirementLock(retirement.mutex);
 	if (!available || vulkanResourceDestructionTerminalFault)
 		return false;
 	if (submissionQueueLockUncertain)
@@ -748,6 +805,9 @@ bool DXVKInterop::CreateCommandResources(uint32_t a_framesInFlight)
 void DXVKInterop::DestroyCommandResources()
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard deviceLock(deviceQueue.mutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
+	std::lock_guard retirementLock(retirement.mutex);
 	if (device == VK_NULL_HANDLE)
 		return;
 	if (vulkanResourceDestructionTerminalFault) {
@@ -878,6 +938,9 @@ void DXVKInterop::DestroyCommandResources()
 bool DXVKInterop::DrainCommandRing()
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard deviceLock(deviceQueue.mutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
+	std::lock_guard retirementLock(retirement.mutex);
 	if (vulkanResourceDestructionTerminalFault)
 		return false;
 	if (submissionQueueLockUncertain)
@@ -956,6 +1019,8 @@ bool DXVKInterop::DrainCommandRing()
 bool DXVKInterop::CommandResourcesReady() const
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard deviceLock(deviceQueue.mutex);
+	std::lock_guard retirementLock(retirement.mutex);
 	return commandPool != VK_NULL_HANDLE && !commandRingFaulted &&
 	       !vulkanResourceDestructionTerminalFault && !submissionQueueLockUncertain;
 }
@@ -963,12 +1028,17 @@ bool DXVKInterop::CommandResourcesReady() const
 bool DXVKInterop::HasCommandRingFault() const
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard deviceLock(deviceQueue.mutex);
+	std::lock_guard retirementLock(retirement.mutex);
 	return commandRingFaulted || vulkanResourceDestructionTerminalFault || submissionQueueLockUncertain;
 }
 
 bool DXVKInterop::RecoverCommandRing()
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard deviceLock(deviceQueue.mutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
+	std::lock_guard retirementLock(retirement.mutex);
 	if (vulkanResourceDestructionTerminalFault)
 		return false;
 	if (!commandRingFaulted)
@@ -996,6 +1066,7 @@ bool DXVKInterop::RecoverCommandRing()
 bool DXVKInterop::PresentWaitInteropReady() const
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
 	return enqueueInteropCommandBuffer != nullptr && getPresentWaitSemaphoreState != nullptr &&
 	       clearPresentWaitSemaphore != nullptr && cancelPresentWaitSemaphore != nullptr &&
 	       releaseQueuedPresentWaitSemaphoresAfterIdle != nullptr &&
@@ -1006,12 +1077,17 @@ bool DXVKInterop::PresentWaitInteropReady() const
 bool DXVKInterop::FrameGenerationQueueInteropReady() const
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard deviceLock(deviceQueue.mutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
 	return available && !presentQueueSplit && !submissionQueueLockUncertain;
 }
 
 DXVKInterop::CommandTransaction DXVKInterop::BeginFrameCommandBuffer()
 {
 	std::unique_lock ringLock(commandRingMutex);
+	std::lock_guard deviceLock(deviceQueue.mutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
+	std::lock_guard retirementLock(retirement.mutex);
 	if (commandPool == VK_NULL_HANDLE || commandRingFaulted || submissionQueueLockUncertain)
 		return {};
 
@@ -1243,6 +1319,8 @@ DXVKInterop::CommandTransaction DXVKInterop::BeginFrameCommandBuffer()
 bool DXVKInterop::SubmitFrameCommandBuffer(CommandTransaction& a_transaction,
 	bool a_signalForNextPresent)
 {
+	std::lock_guard deviceLock(deviceQueue.mutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
 	if (a_transaction.owner != this || !a_transaction.ringLock.owns_lock() ||
 		a_transaction.submitted || a_transaction.slot >= commandBuffers.size() ||
 		a_transaction.commandBuffer == VK_NULL_HANDLE ||
@@ -1301,6 +1379,7 @@ bool DXVKInterop::SubmitFrameCommandBuffer(CommandTransaction& a_transaction,
 bool DXVKInterop::CommitPendingPresentWait()
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
 	if (!PresentWaitInteropReady() || pendingPresentWaitSlot == UINT32_MAX ||
 		pendingPresentWaitSlot >= presentWaitSemaphores.size() || !pendingPresentWaitGeneration)
 		return false;
@@ -1319,6 +1398,7 @@ bool DXVKInterop::CommitPendingPresentWait()
 bool DXVKInterop::HasPendingPresentWaitSemaphore() const
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
 	return pendingPresentWaitSlot != UINT32_MAX ||
 	       (presentWaitInteropTerminalFault &&
 			!outstandingPresentWaitSubmissions.empty());
@@ -1327,6 +1407,8 @@ bool DXVKInterop::HasPendingPresentWaitSemaphore() const
 bool DXVKInterop::DiscardPendingPresentWaitSemaphore()
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard deviceLock(deviceQueue.mutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
 	if (presentWaitInteropTerminalFault)
 		return false;
 	if (pendingPresentWaitSlot == UINT32_MAX)
@@ -1358,6 +1440,7 @@ bool DXVKInterop::DiscardPendingPresentWaitSemaphore()
 void DXVKInterop::NotifyPresentWaitQueued()
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
 	if (presentWaitInteropTerminalFault)
 		return;
 	const auto latchTerminalFault = [&](const char* a_operation, DWORD a_exceptionCode = 0) {
@@ -1406,6 +1489,7 @@ bool DXVKInterop::TrackInputCompletion(uint64_t a_presentWaitGeneration,
 	VkSemaphore a_semaphore, uint64_t a_value)
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard presentWaitLock(presentWait.mutex);
 	if (!a_presentWaitGeneration || a_semaphore == VK_NULL_HANDLE || !a_value)
 		return false;
 	const auto submission = std::find_if(outstandingPresentWaitSubmissions.begin(),
@@ -1423,6 +1507,9 @@ bool DXVKInterop::TrackInputCompletion(uint64_t a_presentWaitGeneration,
 
 bool DXVKInterop::IsInputCompletionReady(uint32_t a_slot)
 {
+	// Called only while BeginFrameCommandBuffer holds the command-ring,
+	// device-owner, and present-wait component locks. Keep this leaf free of
+	// objects requiring unwinding because the Vulkan query is SEH-guarded.
 	if (a_slot >= inputCompletions.size()) {
 		commandRingFaulted = true;
 		return false;
@@ -1464,6 +1551,7 @@ bool DXVKInterop::IsInputCompletionReady(uint32_t a_slot)
 void DXVKInterop::QueueViewsForDeferredDelete(const CommandTransaction& a_transaction,
 	const VkImageView* a_views, uint32_t a_count)
 {
+	std::lock_guard retirementLock(retirement.mutex);
 	if (a_transaction.owner != this || !a_transaction.ringLock.owns_lock() ||
 		(!a_transaction.submitted && !a_transaction.submissionMayBeInFlight) ||
 		!a_views || a_transaction.slot >= pendingViewDeletes.size())
@@ -1477,6 +1565,7 @@ void DXVKInterop::QueueViewsForDeferredDelete(const CommandTransaction& a_transa
 void DXVKInterop::QueueResourcesForDeferredRelease(const CommandTransaction& a_transaction,
 	ID3D11Resource* const* a_resources, uint32_t a_count)
 {
+	std::lock_guard retirementLock(retirement.mutex);
 	if (a_transaction.owner != this || !a_transaction.ringLock.owns_lock() ||
 		(!a_transaction.submitted && !a_transaction.submissionMayBeInFlight) ||
 		!a_resources || a_transaction.slot >= pendingResourceReleases.size())
@@ -1494,6 +1583,7 @@ void DXVKInterop::QueueResourcesForDeferredRelease(const CommandTransaction& a_t
 void DXVKInterop::QueueResourcesForPresent(const CommandTransaction& a_transaction,
 	ID3D11Resource* const* a_resources, uint32_t a_count)
 {
+	std::lock_guard retirementLock(retirement.mutex);
 	if (a_transaction.owner != this || !a_transaction.ringLock.owns_lock() ||
 		!a_resources)
 		return;
@@ -1517,6 +1607,7 @@ void DXVKInterop::QuarantineResourcesAfterVulkanDestructionFault(
 	ID3D11Resource* const* a_resources, uint32_t a_count)
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard retirementLock(retirement.mutex);
 	commandRingFaulted = true;
 	vulkanResourceDestructionTerminalFault = true;
 	if (!a_resources)
@@ -1538,6 +1629,7 @@ void DXVKInterop::QuarantineResourcesAfterVulkanDestructionFault(
 
 void DXVKInterop::ReleaseRetainedFSRResourcesIfSafe()
 {
+	std::lock_guard retirementLock(retirement.mutex);
 	if (vulkanResourceDestructionTerminalFault || !fsrSwapchainTeardownConfirmed ||
 		!pendingFSRPresentViewGroups.empty() ||
 		!quarantinedFSRPresentViewGroups.empty())
@@ -1554,6 +1646,7 @@ void DXVKInterop::ReleaseRetainedFSRResourcesIfSafe()
 void DXVKInterop::QueueViewsForFSRPresent(const CommandTransaction& a_transaction,
 	const VkImageView* a_views, uint32_t a_count)
 {
+	std::lock_guard retirementLock(retirement.mutex);
 	if (a_transaction.owner != this || !a_transaction.ringLock.owns_lock() ||
 		!a_views || a_transaction.slot >= pendingViewDeletes.size())
 		return;
@@ -1572,6 +1665,7 @@ void DXVKInterop::QueueViewsForFSRPresent(const CommandTransaction& a_transactio
 void DXVKInterop::QuarantineViewsUntilFSRSwapchainTeardown(const CommandTransaction& a_transaction,
 	const VkImageView* a_views, uint32_t a_count)
 {
+	std::lock_guard retirementLock(retirement.mutex);
 	if (a_transaction.owner != this || !a_transaction.ringLock.owns_lock() ||
 		!a_views || a_transaction.slot >= pendingViewDeletes.size())
 		return;
@@ -1590,6 +1684,7 @@ void DXVKInterop::QuarantineViewsUntilFSRSwapchainTeardown(const CommandTransact
 void DXVKInterop::NotifyFSRFrameConsumed()
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard retirementLock(retirement.mutex);
 	for (auto& group : pendingFSRPresentViewGroups) {
 		if (group.slot < pendingViewDeletes.size()) {
 			auto& slot = pendingViewDeletes[group.slot];
@@ -1604,6 +1699,7 @@ void DXVKInterop::NotifyFSRFrameConsumed()
 void DXVKInterop::QuarantineUnconsumedFSRPresentViews()
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard retirementLock(retirement.mutex);
 	for (auto& group : pendingFSRPresentViewGroups)
 		quarantinedFSRPresentViewGroups.push_back(std::move(group));
 	pendingFSRPresentViewGroups.clear();
@@ -1612,6 +1708,7 @@ void DXVKInterop::QuarantineUnconsumedFSRPresentViews()
 void DXVKInterop::ReleaseRetainedPresentResourcesAfterFSRSwapchainTeardown()
 {
 	std::lock_guard lock(commandRingMutex);
+	std::lock_guard retirementLock(retirement.mutex);
 	fsrSwapchainTeardownConfirmed = true;
 	for (auto& group : pendingFSRPresentViewGroups)
 		quarantinedFSRPresentViewGroups.push_back(std::move(group));
