@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "Features/Upscaling/DXVKPresenterState.h"
+#include "Features/Upscaling/FrameGenWatchdog.h"
 
 namespace
 {
@@ -122,4 +123,31 @@ TEST_CASE("scRGB fallback matches HDR but is not frame-generation ready")
 
 	CHECK(state.GetEncodingForFrame() == DXVKPresenterState::Encoding::kHDR10ScRGBFallback);
 	CHECK_FALSE(state.IsReadyForFrame(true));
+}
+
+TEST_CASE("frame generation stall detector requires both stale heartbeats in the foreground")
+{
+	FrameGenStallDetector detector;
+	constexpr uint64_t now = FrameGenStallDetector::kTimeoutNs * 2;
+	constexpr uint64_t stale = 1;
+	constexpr uint64_t healthy = now - 1;
+
+	CHECK_FALSE(detector.Poll(false, stale, stale, now, true));
+	CHECK_FALSE(detector.Poll(true, 0, stale, now, true));
+	CHECK_FALSE(detector.Poll(true, stale, 0, now, true));
+	CHECK_FALSE(detector.Poll(true, healthy, stale, now, true));
+	CHECK_FALSE(detector.Poll(true, stale, healthy, now, true));
+	CHECK_FALSE(detector.Poll(true, stale, stale, now, false));
+	CHECK(detector.Poll(true, stale, stale, now, true));
+}
+
+TEST_CASE("frame generation stall detector triggers once until disabled")
+{
+	FrameGenStallDetector detector;
+	constexpr uint64_t now = FrameGenStallDetector::kTimeoutNs * 2;
+
+	CHECK(detector.Poll(true, 1, 1, now, true));
+	CHECK_FALSE(detector.Poll(true, 1, 1, now + 1, true));
+	CHECK_FALSE(detector.Poll(false, 1, 1, now + 2, true));
+	CHECK(detector.Poll(true, 1, 1, now + 3, true));
 }

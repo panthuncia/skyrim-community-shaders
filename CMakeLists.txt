@@ -177,6 +177,7 @@ if(DXVK_CLEANUP_TESTS)
         DXVKCleanupTests
         tests/DXVKPresenterStateTests.cpp
         src/Features/Upscaling/DXVKPresenterState.cpp
+        src/Features/Upscaling/FrameGenWatchdog.cpp
     )
     target_include_directories(
         DXVKCleanupTests

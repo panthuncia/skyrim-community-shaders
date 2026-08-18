@@ -3,6 +3,7 @@
 #include "DXVKInterop.h"
 #include "FrameGenController.h"
 #include "FrameGenWatchdog.h"
+#include "WindowsGpuRecovery.h"
 
 #include "../../DxvkLoader.h"
 #include "../../Globals.h"
@@ -202,7 +203,8 @@ namespace
 
 	void StartDlssgWatchdog()
 	{
-		g_frameGenWatchdog.Start(g_sl.dlssgModeOn, g_sl.renderHeartbeatNs, g_sl.presentHeartbeatNs);
+		g_frameGenWatchdog.Start(g_sl.dlssgModeOn, g_sl.renderHeartbeatNs, g_sl.presentHeartbeatNs,
+			WindowsGpuRecovery::Request);
 	}
 
 	// Feature load changes are applied only while the swapchain is torn down.
