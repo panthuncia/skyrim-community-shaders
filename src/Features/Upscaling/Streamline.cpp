@@ -266,10 +266,9 @@ namespace
 			if (a_feature == sl::kFeatureFSR_G && !want)
 				g_fsrfgOwnsPresent.store(false, std::memory_order_release);
 			if (want) {
-				if (a_feature == sl::kFeatureDLSS_G) {
-					g_sl.slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGSetOptions", reinterpret_cast<void*&>(g_sl.slDLSSGSetOptions));
-					g_sl.slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGGetState", reinterpret_cast<void*&>(g_sl.slDLSSGGetState));
-				} else if (a_feature == sl::kFeatureFSR_G) {
+				// DLSS-G returned through the serialized path above. Only FSR-G
+				// reaches this generic feature-load path.
+				if (a_feature == sl::kFeatureFSR_G) {
 					g_sl.slGetFeatureFunction(sl::kFeatureFSR_G, "slFSRFrameGenerationSetOptions", reinterpret_cast<void*&>(g_sl.slFSRFrameGenerationSetOptions));
 					g_sl.slGetFeatureFunction(sl::kFeatureFSR_G, "slFSRGetFrameGenState", reinterpret_cast<void*&>(g_sl.slFSRGetFrameGenState));
 					g_sl.slGetFeatureFunction(sl::kFeatureFSR_G, "slFSRFrameGenerationDiscardPreparedFrame", reinterpret_cast<void*&>(g_sl.slFSRFrameGenerationDiscardPreparedFrame));

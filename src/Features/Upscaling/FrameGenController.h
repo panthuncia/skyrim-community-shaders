@@ -52,6 +52,12 @@ namespace FrameGen
 			kTransitioning
 		};
 
+		enum class FSRDelivery : uint8_t
+		{
+			kPending,
+			kDelivered,
+		};
+
 		void StepPhaseCompletion();
 		bool StepModeTeardown(Method a_target);
 		void StepLoadState(Method a_target);
@@ -64,8 +70,7 @@ namespace FrameGen
 
 		bool dlssgModeOn = false;
 
-		// -1 until sl.fsr_g accepts its first state update.
-		int fsrDelivered = -1;
+		FSRDelivery fsrDelivery = FSRDelivery::kPending;
 		uint32_t fsrDebugSigDelivered = 0;
 		bool fsrHDRDelivered = false;
 		// FFX bakes VSync into its wrapped swapchain.
