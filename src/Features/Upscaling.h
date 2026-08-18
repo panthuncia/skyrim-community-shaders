@@ -148,6 +148,9 @@ public:
 	void ConfigureUpscaling(RE::BSGraphics::State* a_state);
 	void Upscale();
 
+	/** @brief Whether frame generation is configured and has a supported backend. */
+	bool IsFrameGenerationRequested() const;
+	/** @brief Whether requested frame generation is ready for use this frame. */
 	bool IsFrameGenerationActive() const;
 
 	/** @brief Returns the Reflex state required by the active frame generator. */

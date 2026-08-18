@@ -15,7 +15,10 @@ namespace FrameGen
 		Method DesiredMethod()
 		{
 			auto& upscaling = globals::features::upscaling;
-			if (!upscaling.IsFrameGenerationActive())
+			// Reconcile persistent configuration intent, not transient presenter
+			// readiness. A swapchain transition deliberately makes Active false;
+			// treating that as intent would tear down the transition being awaited.
+			if (!upscaling.IsFrameGenerationRequested())
 				return Method::kNone;
 			return upscaling.GetFrameGenMethod() == Upscaling::FrameGenMethod::kDLSSG
 			           ? Method::kDLSSG
@@ -287,9 +290,15 @@ namespace FrameGen
 			logger::info("[FrameGen] FSR-FG enable delivered - present owner: {}", Name(owner));
 
 			// FFX installs its interpolation swapchain during vkCreateSwapchainKHR.
+			// On the enable edge, its present hook must first present once on the
+			// existing plain swapchain and return VK_SUBOPTIMAL_KHR. That gives FFX
+			// a safe present/fence hand-off before DXVK recreates and wraps on the
+			// following acquire. Keep the presenter transition barrier so frame-gen
+			// evaluation waits for the resulting serial, but do not force recreation
+			// from acquireNextImage and bypass that required present.
 			if (enableEdge) {
 				BeginPresenterRecreateTransition();
-				Streamline::RequestDxvkSwapchainRecreate("FSR-FG wrap");
+				logger::info("[FrameGen] awaiting present-ordered FSR-FG swapchain wrap");
 			} else if (hdrChanged) {
 				BeginPresenterRecreateTransition();
 				Streamline::RequestDxvkSwapchainRecreate("FSR-FG HDR transfer change");

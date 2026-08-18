@@ -550,9 +550,18 @@ Upscaling::FrameGenMethod Upscaling::GetFrameGenMethod() const
 	                                FrameGenMethod::kFSR;
 }
 
-bool Upscaling::IsFrameGenerationActive() const
+bool Upscaling::IsFrameGenerationRequested() const
 {
 	if (!loaded || !settings.frameGeneration)
+		return false;
+	const auto method = GetFrameGenMethod();
+	return method == FrameGenMethod::kDLSSG ? Streamline::GetSingleton()->IsDLSSGSupported() :
+	                                         Streamline::GetSingleton()->IsFSRFGSupported();
+}
+
+bool Upscaling::IsFrameGenerationActive() const
+{
+	if (!IsFrameGenerationRequested())
 		return false;
 	if (Streamline::GetSingleton()->HasDispatchFaulted() ||
 		DXVKInterop::GetSingleton()->HasCommandRingFault())
@@ -561,10 +570,7 @@ bool Upscaling::IsFrameGenerationActive() const
 	const bool hdrActive = hdr.loaded && hdr.IsHDREnabledForFrame();
 	if (!DXVKInterop::GetSingleton()->IsPresenterStateReadyForFrame(hdrActive))
 		return false;
-	auto fgMethod = GetFrameGenMethod();
-	if (fgMethod == FrameGenMethod::kDLSSG)
-		return Streamline::GetSingleton()->IsDLSSGSupported();
-	return Streamline::GetSingleton()->IsFSRFGSupported();
+	return true;
 }
 
 void Upscaling::BeginRenderFrame()
