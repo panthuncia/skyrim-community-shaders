@@ -886,10 +886,8 @@ void Streamline::SetVulkanDevice()
 		featureXeSS = g_sl.slXeSSSetOptions != nullptr;
 	}
 
-	const auto& dxvkApi = DxvkLoader::GetApi();
-	const bool frameGenerationInteropReady = dxvkApi.HasFrameGenerationControl();
-	const bool dlssgInteropReady = frameGenerationInteropReady &&
-		dxvkApi.setPresentBeginCallback && dxvkApi.setPresentCompletedCallback;
+	const bool frameGenerationInteropReady = DxvkLoader::HasFrameGenerationControl();
+	const bool dlssgInteropReady = frameGenerationInteropReady && DxvkLoader::HasPresentCallbacks();
 	featureDLSSG = featureDLSSG && dlssgHardware && dlssgInteropReady &&
 	               dxvk->FrameGenerationQueueInteropReady();
 	featureFSRFG = featureFSRFG && frameGenerationInteropReady &&
@@ -2487,29 +2485,26 @@ bool Streamline::EnsureDLSSGPresentTag()
 void Streamline::RegisterDxvkOwnershipPredicate()
 {
 	// Streamline-owned swapchains must bypass DXVK's present-wait worker.
-	const auto& api = DxvkLoader::GetApi();
-	if (!api.d3d11Module) {
+	if (!DxvkLoader::IsLoaded()) {
 		logger::warn("[Streamline] DXVK module not loaded — cannot register ownership predicate");
 		return;
 	}
-	if (!api.setFrameGenOwnershipQuery) {
+	if (!DxvkLoader::HasFrameGenerationOwnershipCallback()) {
 		logger::warn("[Streamline] dxvkSetFrameGenOwnershipQuery not found in DXVK module");
 		return;
 	}
-	api.setFrameGenOwnershipQuery(&DxvkFrameGenerationOwnsSwapchain);
+	DxvkLoader::RegisterFrameGenerationCallbacks(&DxvkFrameGenerationOwnsSwapchain,
+		&DxvkPresentBeginCallback, &DxvkPresentCompletedCallback, &DxvkSwapchainTornDownCallback);
 	logger::info("[Streamline] registered DXVK frame-generation ownership predicate");
 
-	if (api.setPresentBeginCallback && api.setPresentCompletedCallback) {
-		api.setPresentBeginCallback(&DxvkPresentBeginCallback);
-		api.setPresentCompletedCallback(&DxvkPresentCompletedCallback);
+	if (DxvkLoader::HasPresentCallbacks()) {
 		logger::info("[Streamline] registered DXVK Vulkan present-thread options/state callbacks");
 	} else {
 		logger::warn("[Streamline] DXVK DLSS-G present-thread bridge unavailable");
 	}
 
 	// Streamline features may only be loaded or unloaded while no swapchain exists.
-	if (api.setSwapchainTornDownCallback) {
-		api.setSwapchainTornDownCallback(&DxvkSwapchainTornDownCallback);
+	if (DxvkLoader::HasSwapchainTeardownCallback()) {
 		logger::info("[Streamline] registered DXVK swapchain-torn-down callback");
 	} else {
 		logger::warn("[Streamline] dxvkSetSwapchainTornDownCallback not found — frame-generation switching disabled");
@@ -2562,9 +2557,7 @@ bool Streamline::IsFSRFGPresentOwner() const
 void Streamline::RequestDxvkSwapchainRecreate(const char* a_reason)
 {
 	// Recreate the Vulkan swapchain to apply runtime feature load changes.
-	auto requestRecreate = DxvkLoader::GetApi().requestSwapchainRecreate;
-	if (requestRecreate) {
-		requestRecreate();
+	if (DxvkLoader::RequestSwapchainRecreate()) {
 		logger::info("[Streamline] requested DXVK swapchain recreate ({})", a_reason);
 	} else {
 		logger::warn("[Streamline] dxvkRequestSwapchainRecreate not found — {} cannot take effect", a_reason);
@@ -2578,9 +2571,7 @@ void Streamline::PushDxvkSyncPresent(bool a_sync)
 	if (s_applied.load(std::memory_order_acquire) == requested)
 		return;
 
-	auto setSync = DxvkLoader::GetApi().setSyncPresent;
-	if (setSync) {
-		setSync(a_sync ? 1u : 0u);
+	if (DxvkLoader::SetSynchronousPresent(a_sync)) {
 		s_applied.store(requested, std::memory_order_release);
 		logger::info("[Streamline] DXVK synchronous present {}", a_sync ? "enabled" : "disabled");
 	} else {
@@ -2598,9 +2589,7 @@ void Streamline::PushDxvkPresentQueueDepth(uint32_t a_depth)
 	if (s_applied.load(std::memory_order_acquire) == a_depth)
 		return;
 
-	auto setDepth = DxvkLoader::GetApi().setPresentQueueDepth;
-	if (setDepth) {
-		setDepth(a_depth);
+	if (DxvkLoader::SetPresentQueueDepth(a_depth)) {
 		s_applied.store(a_depth, std::memory_order_release);
 		if (a_depth == UINT32_MAX)
 			logger::info("[Streamline] DXVK present queue depth unrestricted");

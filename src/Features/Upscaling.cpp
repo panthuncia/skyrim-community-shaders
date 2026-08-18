@@ -73,8 +73,7 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 		pSwapChainDesc->BufferCount = 2;
 	const bool tearingSupported = Upscaling::IsTearingSupported();
 	const bool allowTearing = upscaling.settings.fgAllowTearing && tearingSupported && pSwapChainDesc->Windowed;
-	if (auto setTearingPreference = DxvkLoader::GetApi().setTearingPreference)
-		setTearingPreference(upscaling.settings.frameGeneration ? (allowTearing ? 1u : 0u) : 2u);
+	DxvkLoader::SetTearingPreference(upscaling.settings.frameGeneration ? (allowTearing ? 1u : 0u) : 2u);
 	if (allowTearing)
 		pSwapChainDesc->Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
 	logger::info("[Upscaling] Frame-generation tearing {} (requested={} supported={} windowed={} swapchainFlags=0x{:X})",
@@ -166,8 +165,7 @@ void Upscaling::DrawSettings()
 		const bool tearingSupported = IsTearingSupported();
 		if (DrawToggleStepper(T(TKEY("fg_allow_tearing"), "Allow Tearing with Frame Generation"),
 				&settings.fgAllowTearing, !tearingSupported)) {
-			if (auto setTearingPreference = DxvkLoader::GetApi().setTearingPreference)
-				setTearingPreference(settings.fgAllowTearing ? 1u : 0u);
+			DxvkLoader::SetTearingPreference(settings.fgAllowTearing ? 1u : 0u);
 			Streamline::RequestDxvkSwapchainRecreate("frame-generation tearing preference changed");
 		}
 		if (!tearingSupported) {
@@ -667,9 +665,8 @@ double Upscaling::GetRenderedFrameRateLimit() const
 void Upscaling::ApplyDxvkFrameRateLimit(double a_fps)
 {
 	static double lastFps = -2.0;
-	if (auto fn = DxvkLoader::GetApi().setTargetFrameRate; fn && a_fps != lastFps) {
+	if (a_fps != lastFps && DxvkLoader::SetTargetFrameRate(a_fps > 0.0 ? a_fps : 0.0)) {
 		lastFps = a_fps;
-		fn(a_fps > 0.0 ? a_fps : 0.0);
 	}
 }
 

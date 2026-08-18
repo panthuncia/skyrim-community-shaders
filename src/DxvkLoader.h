@@ -9,28 +9,16 @@
 // Skyrim's process-wide System32 d3d11.dll and dxgi.dll modules.
 namespace DxvkLoader
 {
-	struct Api
+	struct PresentWaitInterop
 	{
-		HMODULE d3d11Module = nullptr;
-		HMODULE dxgiModule = nullptr;
-		PFN_csDxvkSetTearingPreference setTearingPreference = nullptr;
 		PFN_csDxvkGetPresenterSurfaceState getPresenterSurfaceState = nullptr;
-		PFN_csDxvkSetFrameGenOwnershipQuery setFrameGenOwnershipQuery = nullptr;
-		PFN_csDxvkSetPresentCallback setPresentBeginCallback = nullptr;
-		PFN_csDxvkSetPresentCallback setPresentCompletedCallback = nullptr;
-		PFN_csDxvkRequestSwapchainRecreate requestSwapchainRecreate = nullptr;
-		PFN_csDxvkSetSwapchainTornDownCallback setSwapchainTornDownCallback = nullptr;
-		PFN_csDxvkSetTargetFrameRate setTargetFrameRate = nullptr;
-		PFN_csDxvkSetSyncPresent setSyncPresent = nullptr;
-		PFN_csDxvkSetPresentQueueDepth setPresentQueueDepth = nullptr;
 		PFN_csDxvkEnqueueInteropCommandBuffer enqueueInteropCommandBuffer = nullptr;
 		PFN_csDxvkGetPresentWaitSemaphoreState getPresentWaitSemaphoreState = nullptr;
 		PFN_csDxvkClearPresentWaitSemaphore clearPresentWaitSemaphore = nullptr;
 		PFN_csDxvkCancelPresentWaitSemaphore cancelPresentWaitSemaphore = nullptr;
 		PFN_csDxvkReleaseQueuedPresentWaitSemaphoresAfterIdle releaseQueuedPresentWaitSemaphoresAfterIdle = nullptr;
 
-		[[nodiscard]] bool HasFrameGenerationControl() const;
-		[[nodiscard]] bool HasPresentWaitInterop() const;
+		[[nodiscard]] bool IsComplete() const;
 	};
 
 	/** @brief Loads DXVK before the game creates its D3D11 device. */
@@ -38,8 +26,20 @@ namespace DxvkLoader
 
 	/** @brief Returns whether DXVK loaded successfully. */
 	bool IsLoaded();
-	/** @brief Returns the validated DXVK extension table, or an empty table in native mode. */
-	const Api& GetApi();
+	[[nodiscard]] bool HasFrameGenerationControl();
+	[[nodiscard]] bool HasPresentCallbacks();
+	[[nodiscard]] bool HasFrameGenerationOwnershipCallback();
+	[[nodiscard]] bool HasSwapchainTeardownCallback();
+	[[nodiscard]] bool SupportsSynchronousPresent();
+	[[nodiscard]] PresentWaitInterop GetPresentWaitInterop();
+	bool SetTearingPreference(uint32_t a_preference);
+	bool SetTargetFrameRate(double a_fps);
+	bool RegisterFrameGenerationCallbacks(PFN_csDxvkFrameGenOwnershipQuery a_ownership,
+		PFN_csDxvkPresentCallback a_begin, PFN_csDxvkPresentCallback a_completed,
+		PFN_csDxvkSwapchainTornDownCallback a_tornDown);
+	bool RequestSwapchainRecreate();
+	bool SetSynchronousPresent(bool a_enabled);
+	bool SetPresentQueueDepth(uint32_t a_depth);
 
 	/** @brief Returns whether settings or CS_NATIVE_D3D11 request the native runtime. */
 	bool NativeModeRequested();

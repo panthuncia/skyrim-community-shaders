@@ -423,13 +423,13 @@ bool DXVKInterop::Initialize()
 	vkDestroyImageView = reinterpret_cast<PFN_vkDestroyImageView>(
 		vkGetDeviceProcAddr(device, "vkDestroyImageView"));
 
-	const auto& api = DxvkLoader::GetApi();
+	const auto api = DxvkLoader::GetPresentWaitInterop();
 	enqueueInteropCommandBuffer = api.enqueueInteropCommandBuffer;
 	getPresentWaitSemaphoreState = api.getPresentWaitSemaphoreState;
 	clearPresentWaitSemaphore = api.clearPresentWaitSemaphore;
 	cancelPresentWaitSemaphore = api.cancelPresentWaitSemaphore;
 	releaseQueuedPresentWaitSemaphoresAfterIdle = api.releaseQueuedPresentWaitSemaphoresAfterIdle;
-	synchronousPresentControlAvailable = api.setSyncPresent != nullptr;
+	synchronousPresentControlAvailable = DxvkLoader::SupportsSynchronousPresent();
 	presenterState.SetQuery(api.getPresenterSurfaceState);
 	char splitValue[2]{};
 	presentQueueSplit = GetEnvironmentVariableA("DXVK_PRESENT_QUEUE_SPLIT", splitValue,

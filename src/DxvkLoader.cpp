@@ -10,6 +10,27 @@ namespace DxvkLoader
 {
 	namespace
 	{
+		struct Api
+		{
+			HMODULE d3d11Module = nullptr;
+			HMODULE dxgiModule = nullptr;
+			PFN_csDxvkSetTearingPreference setTearingPreference = nullptr;
+			PFN_csDxvkGetPresenterSurfaceState getPresenterSurfaceState = nullptr;
+			PFN_csDxvkSetFrameGenOwnershipQuery setFrameGenOwnershipQuery = nullptr;
+			PFN_csDxvkSetPresentCallback setPresentBeginCallback = nullptr;
+			PFN_csDxvkSetPresentCallback setPresentCompletedCallback = nullptr;
+			PFN_csDxvkRequestSwapchainRecreate requestSwapchainRecreate = nullptr;
+			PFN_csDxvkSetSwapchainTornDownCallback setSwapchainTornDownCallback = nullptr;
+			PFN_csDxvkSetTargetFrameRate setTargetFrameRate = nullptr;
+			PFN_csDxvkSetSyncPresent setSyncPresent = nullptr;
+			PFN_csDxvkSetPresentQueueDepth setPresentQueueDepth = nullptr;
+			PFN_csDxvkEnqueueInteropCommandBuffer enqueueInteropCommandBuffer = nullptr;
+			PFN_csDxvkGetPresentWaitSemaphoreState getPresentWaitSemaphoreState = nullptr;
+			PFN_csDxvkClearPresentWaitSemaphore clearPresentWaitSemaphore = nullptr;
+			PFN_csDxvkCancelPresentWaitSemaphore cancelPresentWaitSemaphore = nullptr;
+			PFN_csDxvkReleaseQueuedPresentWaitSemaphoresAfterIdle releaseQueuedPresentWaitSemaphoresAfterIdle = nullptr;
+		};
+
 		bool g_attempted = false;
 		bool g_loaded = false;
 		Api g_api;
@@ -42,13 +63,7 @@ namespace DxvkLoader
 		};
 	}
 
-	bool Api::HasFrameGenerationControl() const
-	{
-		return requestSwapchainRecreate && setSyncPresent && getPresenterSurfaceState &&
-		       setSwapchainTornDownCallback && setFrameGenOwnershipQuery;
-	}
-
-	bool Api::HasPresentWaitInterop() const
+	bool PresentWaitInterop::IsComplete() const
 	{
 		return enqueueInteropCommandBuffer && getPresentWaitSemaphoreState && clearPresentWaitSemaphore &&
 		       cancelPresentWaitSemaphore && releaseQueuedPresentWaitSemaphoresAfterIdle;
@@ -171,7 +186,71 @@ namespace DxvkLoader
 	}
 
 	bool IsLoaded() { return g_loaded; }
-	const Api& GetApi() { return g_api; }
+	bool HasFrameGenerationControl()
+	{
+		return g_api.requestSwapchainRecreate && g_api.setSyncPresent && g_api.getPresenterSurfaceState &&
+		       g_api.setSwapchainTornDownCallback && g_api.setFrameGenOwnershipQuery;
+	}
+	bool HasPresentCallbacks() { return g_api.setPresentBeginCallback && g_api.setPresentCompletedCallback; }
+	bool HasFrameGenerationOwnershipCallback() { return g_api.setFrameGenOwnershipQuery != nullptr; }
+	bool HasSwapchainTeardownCallback() { return g_api.setSwapchainTornDownCallback != nullptr; }
+	bool SupportsSynchronousPresent() { return g_api.setSyncPresent != nullptr; }
+	PresentWaitInterop GetPresentWaitInterop()
+	{
+		return { g_api.getPresenterSurfaceState, g_api.enqueueInteropCommandBuffer,
+			g_api.getPresentWaitSemaphoreState, g_api.clearPresentWaitSemaphore,
+			g_api.cancelPresentWaitSemaphore, g_api.releaseQueuedPresentWaitSemaphoresAfterIdle };
+	}
+	bool SetTearingPreference(uint32_t a_preference)
+	{
+		if (!g_api.setTearingPreference)
+			return false;
+		g_api.setTearingPreference(a_preference);
+		return true;
+	}
+	bool SetTargetFrameRate(double a_fps)
+	{
+		if (!g_api.setTargetFrameRate)
+			return false;
+		g_api.setTargetFrameRate(a_fps);
+		return true;
+	}
+	bool RegisterFrameGenerationCallbacks(PFN_csDxvkFrameGenOwnershipQuery a_ownership,
+		PFN_csDxvkPresentCallback a_begin, PFN_csDxvkPresentCallback a_completed,
+		PFN_csDxvkSwapchainTornDownCallback a_tornDown)
+	{
+		if (!g_loaded || !g_api.setFrameGenOwnershipQuery)
+			return false;
+		g_api.setFrameGenOwnershipQuery(a_ownership);
+		if (g_api.setPresentBeginCallback && g_api.setPresentCompletedCallback) {
+			g_api.setPresentBeginCallback(a_begin);
+			g_api.setPresentCompletedCallback(a_completed);
+		}
+		if (g_api.setSwapchainTornDownCallback)
+			g_api.setSwapchainTornDownCallback(a_tornDown);
+		return true;
+	}
+	bool RequestSwapchainRecreate()
+	{
+		if (!g_api.requestSwapchainRecreate)
+			return false;
+		g_api.requestSwapchainRecreate();
+		return true;
+	}
+	bool SetSynchronousPresent(bool a_enabled)
+	{
+		if (!g_api.setSyncPresent)
+			return false;
+		g_api.setSyncPresent(a_enabled ? 1u : 0u);
+		return true;
+	}
+	bool SetPresentQueueDepth(uint32_t a_depth)
+	{
+		if (!g_api.setPresentQueueDepth)
+			return false;
+		g_api.setPresentQueueDepth(a_depth);
+		return true;
+	}
 	decltype(&D3D11CreateDeviceAndSwapChain) GetD3D11CreateDeviceAndSwapChain() { return g_d3d11Create; }
 	decltype(&CreateDXGIFactory) GetCreateDXGIFactory() { return g_createFactory; }
 }
