@@ -14,7 +14,7 @@ namespace DxvkLoader
 	/** @brief Returns whether DXVK loaded successfully. */
 	bool IsLoaded();
 
-	/** @brief Returns whether CS_NATIVE_D3D11 requests the native runtime. */
+	/** @brief Returns whether settings or CS_NATIVE_D3D11 request the native runtime. */
 	bool NativeModeRequested();
 
 	/** @brief Returns the module-relative renderer runtime directory. */

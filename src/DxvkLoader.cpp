@@ -1,5 +1,8 @@
 #include "DxvkLoader.h"
 
+#include "Globals.h"
+#include "State.h"
+
 #include <filesystem>
 
 namespace DxvkLoader
@@ -32,12 +35,13 @@ namespace DxvkLoader
 
 	bool NativeModeRequested()
 	{
-		// Debug override for testing against the native D3D11 runtime.
-		static const bool s_native = [] {
+		// The environment variable remains an early diagnostic override. The
+		// persisted setting is already loaded before InstallEarlyHooks runs.
+		static const bool s_environmentOverride = [] {
 			char buf[8] = {};
 			return GetEnvironmentVariableA("CS_NATIVE_D3D11", buf, sizeof(buf)) && buf[0] == '1';
 		}();
-		return s_native;
+		return s_environmentOverride || !globals::state->enableDXVK;
 	}
 
 	bool Load()
@@ -48,7 +52,7 @@ namespace DxvkLoader
 		g_attempted = true;
 
 		if (NativeModeRequested()) {
-			logger::info("[DXVK] CS_NATIVE_D3D11=1 -- skipping DXVK, using the system D3D11 runtime");
+			logger::info("[DXVK] Disabled at boot -- using the system D3D11/DXGI runtime");
 			return false;
 		}
 

@@ -510,6 +510,7 @@ void State::SaveToJson(nlohmann::json& settings)
 	advanced["Dump Shaders"] = shaderCache->IsDump();
 	advanced["Log Level"] = logLevel;
 	advanced["Developer Mode"] = enableDeveloperMode;
+	advanced["Enable DXVK"] = enableDXVK;
 	advanced["Shader Defines"] = shaderDefinesString;
 	advanced["Compiler Threads"] = shaderCache->compilationThreadCount;
 	advanced["Background Compiler Threads"] = shaderCache->backgroundCompilationThreadCount;
@@ -583,6 +584,8 @@ void State::LoadFromJson(nlohmann::json& settings)
 			logLevel = magic_enum::enum_cast<spdlog::level::level_enum>(advanced["Log Level"].get<int>()).value_or(spdlog::level::info);
 		if (advanced.contains("Developer Mode") && advanced["Developer Mode"].is_boolean())
 			enableDeveloperMode = advanced["Developer Mode"];
+		if (advanced.contains("Enable DXVK") && advanced["Enable DXVK"].is_boolean())
+			enableDXVK = advanced["Enable DXVK"];
 		if (advanced.contains("Shader Defines") && advanced["Shader Defines"].is_string())
 			SetDefines(advanced["Shader Defines"]);
 		if (advanced.contains("Compiler Threads") && advanced["Compiler Threads"].is_number_integer())

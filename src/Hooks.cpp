@@ -1126,7 +1126,7 @@ namespace Hooks
 		}
 		if (nativeMode) {
 			globals::features::upscaling.loaded = false;
-			logger::info("[Native] CS_NATIVE_D3D11=1: DXVK + upscaling disabled, using system d3d11/dxgi");
+			logger::info("[Native] DXVK and Vulkan upscaling disabled; Community Shaders is using system D3D11/DXGI");
 		}
 
 		if (!globals::features::upscaling.loaded) {
