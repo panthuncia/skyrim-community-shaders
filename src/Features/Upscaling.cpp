@@ -385,9 +385,10 @@ void Upscaling::Load()
 	// synchronous only around acknowledged option/ownership transitions.
 	if (DxvkLoader::IsLoaded()) {
 		const auto fgMethod = static_cast<FrameGenMethod>(settings.frameGenMethod);
-		const uint32_t queueDepth = !settings.frameGeneration ? UINT32_MAX :
-			fgMethod == FrameGenMethod::kFSR ? 0u : 2u;
-		Streamline::PushDxvkPresentQueueDepth(queueDepth);
+		const auto queuePolicy = !settings.frameGeneration ? Streamline::PresentQueuePolicy::kUnrestricted :
+			fgMethod == FrameGenMethod::kFSR ? Streamline::PresentQueuePolicy::kSynchronous :
+			                                  Streamline::PresentQueuePolicy::kBoundedOverlap;
+		Streamline::PushDxvkPresentQueueDepth(queuePolicy);
 	}
 
 	if (DxvkLoader::IsLoaded()) {

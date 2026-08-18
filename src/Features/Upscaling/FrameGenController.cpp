@@ -145,7 +145,7 @@ namespace FrameGen
 			owner = Method::kFSR;
 		} else {
 			owner = Method::kNone;
-			Streamline::PushDxvkPresentQueueDepth(UINT32_MAX);
+			Streamline::PushDxvkPresentQueueDepth(Streamline::PresentQueuePolicy::kUnrestricted);
 		}
 
 		phase = Phase::kIdle;
@@ -212,9 +212,11 @@ namespace FrameGen
 		// The FIFO interop-submit contract makes a tag semaphore presenter-visible
 		// only after its signal submission executes, so this bounded overlap cannot
 		// recreate the older-present/future-semaphore cycle.
-		const uint32_t presentQueueDepth = wantFSRFG ? 0u :
-			dlssgTransition ? 0u : wantDLSSG ? 2u : UINT32_MAX;
-		Streamline::PushDxvkPresentQueueDepth(presentQueueDepth);
+		const auto presentQueuePolicy = wantFSRFG ? Streamline::PresentQueuePolicy::kSynchronous :
+			dlssgTransition ? Streamline::PresentQueuePolicy::kSynchronous :
+			wantDLSSG ? Streamline::PresentQueuePolicy::kBoundedOverlap :
+			             Streamline::PresentQueuePolicy::kUnrestricted;
+		Streamline::PushDxvkPresentQueueDepth(presentQueuePolicy);
 
 		if (sl->IsDLSSGLoaded() == wantDLSSG && sl->IsFSRFGLoaded() == wantFSRFG) {
 			if (wantDLSSG && owner != Method::kDLSSG) {

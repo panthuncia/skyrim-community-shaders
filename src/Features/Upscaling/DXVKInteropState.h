@@ -7,6 +7,15 @@
 #include <vulkan/vulkan.h>
 #include <winrt/base.h>
 
+enum class DXVKPresentWaitState : uint32_t
+{
+	kNone = 0,
+	kPending = 1,
+	kQueued = 2,
+	kUncertain = 3,
+	kReleased = 4,
+};
+
 class DXVKCommandRingState
 {
 protected:

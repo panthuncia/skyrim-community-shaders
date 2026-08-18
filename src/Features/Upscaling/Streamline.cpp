@@ -2118,7 +2118,7 @@ bool Streamline::SetDLSSGMode(bool a_enable, uint32_t a_renderWidth, uint32_t a_
 		// Drain DXVK's asynchronous presenter only for this option transition.
 		// The present-thread callback is the acknowledgment boundary; the
 		// controller restores asynchronous DLSS-G presentation afterward.
-		PushDxvkPresentQueueDepth(0u);
+		PushDxvkPresentQueueDepth(PresentQueuePolicy::kSynchronous);
 
 		sl::DLSSGOptions options{};
 		options.mode = !a_enable ? sl::DLSSGMode::eOff :
@@ -2583,20 +2583,21 @@ void Streamline::PushDxvkSyncPresent(bool a_sync)
 	}
 }
 
-void Streamline::PushDxvkPresentQueueDepth(uint32_t a_depth)
+void Streamline::PushDxvkPresentQueueDepth(PresentQueuePolicy a_policy)
 {
+	const uint32_t depth = static_cast<uint32_t>(a_policy);
 	static std::atomic<uint32_t> s_applied{ UINT32_MAX - 1u };
-	if (s_applied.load(std::memory_order_acquire) == a_depth)
+	if (s_applied.load(std::memory_order_acquire) == depth)
 		return;
 
-	if (DxvkLoader::SetPresentQueueDepth(a_depth)) {
-		s_applied.store(a_depth, std::memory_order_release);
-		if (a_depth == UINT32_MAX)
+	if (DxvkLoader::SetPresentQueueDepth(depth)) {
+		s_applied.store(depth, std::memory_order_release);
+		if (a_policy == PresentQueuePolicy::kUnrestricted)
 			logger::info("[Streamline] DXVK present queue depth unrestricted");
 		else
-			logger::info("[Streamline] DXVK present queue depth set to {}", a_depth);
+			logger::info("[Streamline] DXVK present queue depth set to {}", depth);
 	} else {
 		// Preserve compatibility with builds predating bounded presentation.
-		PushDxvkSyncPresent(a_depth == 0u);
+		PushDxvkSyncPresent(a_policy == PresentQueuePolicy::kSynchronous);
 	}
 }

@@ -552,9 +552,6 @@ bool DXVKInterop::ClearReleasedPresentWaitsAfterIdle()
 	if (presentWaitInteropTerminalFault || !getPresentWaitSemaphoreState || !clearPresentWaitSemaphore)
 		return false;
 
-	constexpr uint32_t kPresentWaitNone = 0;
-	constexpr uint32_t kPresentWaitUncertain = 3;
-	constexpr uint32_t kPresentWaitReleased = 4;
 	const auto latchTerminalFault = [&](const char* a_operation, DWORD a_exceptionCode = 0) {
 		commandRingFaulted = true;
 		presentWaitInteropTerminalFault = true;
@@ -575,8 +572,9 @@ bool DXVKInterop::ClearReleasedPresentWaitsAfterIdle()
 			latchTerminalFault("idle-released present-wait query", stateAttempt.exceptionCode);
 			return false;
 		}
-		if (stateAttempt.state != kPresentWaitReleased) {
-			if (stateAttempt.state == kPresentWaitUncertain || stateAttempt.state == kPresentWaitNone)
+		const auto state = static_cast<DXVKPresentWaitState>(stateAttempt.state);
+		if (state != DXVKPresentWaitState::kReleased) {
+			if (state == DXVKPresentWaitState::kUncertain || state == DXVKPresentWaitState::kNone)
 				latchTerminalFault("idle-released present-wait state is unsafe");
 			return false;
 		}
@@ -1362,10 +1360,6 @@ void DXVKInterop::NotifyPresentWaitQueued()
 	std::lock_guard lock(commandRingMutex);
 	if (presentWaitInteropTerminalFault)
 		return;
-	constexpr uint32_t kPresentWaitPending = 1;
-	constexpr uint32_t kPresentWaitQueued = 2;
-	constexpr uint32_t kPresentWaitUncertain = 3;
-	constexpr uint32_t kPresentWaitReleased = 4;
 	const auto latchTerminalFault = [&](const char* a_operation, DWORD a_exceptionCode = 0) {
 		commandRingFaulted = true;
 		presentWaitInteropTerminalFault = true;
@@ -1386,12 +1380,13 @@ void DXVKInterop::NotifyPresentWaitQueued()
 			latchTerminalFault("present-wait release query", stateAttempt.exceptionCode);
 			return;
 		}
-		if (stateAttempt.state == kPresentWaitPending || stateAttempt.state == kPresentWaitQueued) {
+		const auto state = static_cast<DXVKPresentWaitState>(stateAttempt.state);
+		if (state == DXVKPresentWaitState::kPending || state == DXVKPresentWaitState::kQueued) {
 			++i;
 			continue;
 		}
-		if (stateAttempt.state != kPresentWaitReleased || submission.slot >= presentWaitInUse.size()) {
-			latchTerminalFault(stateAttempt.state == kPresentWaitUncertain ?
+		if (state != DXVKPresentWaitState::kReleased || submission.slot >= presentWaitInUse.size()) {
+			latchTerminalFault(state == DXVKPresentWaitState::kUncertain ?
 				"present-wait consumption is uncertain" : "present-wait release state is invalid");
 			return;
 		}

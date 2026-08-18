@@ -8,6 +8,12 @@
 class Streamline
 {
 public:
+	enum class PresentQueuePolicy : uint32_t
+	{
+		kSynchronous = 0,
+		kBoundedOverlap = 2,
+		kUnrestricted = UINT32_MAX,
+	};
 	static Streamline* GetSingleton();
 
 	/** @brief Maps the interposer before DXVK creates its Vulkan instance. */
@@ -188,7 +194,7 @@ public:
 
 	/** @brief Controls DXVK synchronous present for FG ownership transitions and FSR-G. */
 	static void PushDxvkSyncPresent(bool a_sync);
-	static void PushDxvkPresentQueueDepth(uint32_t a_depth);
+	static void PushDxvkPresentQueueDepth(PresentQueuePolicy a_policy);
 
 private:
 	Streamline() = default;
