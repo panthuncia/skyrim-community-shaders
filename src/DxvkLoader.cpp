@@ -1,5 +1,8 @@
 #include "DxvkLoader.h"
 
+#include "DxvkApi.h"
+#include "DxvkModulePath.h"
+
 #include "Globals.h"
 #include "State.h"
 
@@ -10,32 +13,9 @@ namespace DxvkLoader
 {
 	namespace
 	{
-		struct Api
-		{
-			HMODULE d3d11Module = nullptr;
-			HMODULE dxgiModule = nullptr;
-			PFN_csDxvkSetTearingPreference setTearingPreference = nullptr;
-			PFN_csDxvkGetPresenterSurfaceState getPresenterSurfaceState = nullptr;
-			PFN_csDxvkSetFrameGenOwnershipQuery setFrameGenOwnershipQuery = nullptr;
-			PFN_csDxvkSetPresentCallback setPresentBeginCallback = nullptr;
-			PFN_csDxvkSetPresentCallback setPresentCompletedCallback = nullptr;
-			PFN_csDxvkRequestSwapchainRecreate requestSwapchainRecreate = nullptr;
-			PFN_csDxvkSetSwapchainTornDownCallback setSwapchainTornDownCallback = nullptr;
-			PFN_csDxvkSetTargetFrameRate setTargetFrameRate = nullptr;
-			PFN_csDxvkSetSyncPresent setSyncPresent = nullptr;
-			PFN_csDxvkSetPresentQueueDepth setPresentQueueDepth = nullptr;
-			PFN_csDxvkEnqueueInteropCommandBuffer enqueueInteropCommandBuffer = nullptr;
-			PFN_csDxvkGetPresentWaitSemaphoreState getPresentWaitSemaphoreState = nullptr;
-			PFN_csDxvkClearPresentWaitSemaphore clearPresentWaitSemaphore = nullptr;
-			PFN_csDxvkCancelPresentWaitSemaphore cancelPresentWaitSemaphore = nullptr;
-			PFN_csDxvkReleaseQueuedPresentWaitSemaphoresAfterIdle releaseQueuedPresentWaitSemaphoresAfterIdle = nullptr;
-		};
-
 		bool g_attempted = false;
 		bool g_loaded = false;
-		Api g_api;
-		decltype(&D3D11CreateDeviceAndSwapChain) g_d3d11Create = nullptr;
-		decltype(&CreateDXGIFactory) g_createFactory = nullptr;
+		Detail::Api g_api;
 
 		template <class T>
 		T Resolve(HMODULE a_module, const char* a_name)
@@ -79,12 +59,10 @@ namespace DxvkLoader
 				&self)) {
 			return {};
 		}
-		wchar_t buf[MAX_PATH]{};
-		const DWORD n = ::GetModuleFileNameW(self, buf, MAX_PATH);
-		if (n == 0 || n >= MAX_PATH) {
+		const auto modulePath = Detail::ResolveModulePath(self, ::GetModuleFileNameW);
+		if (modulePath.empty())
 			return {};
-		}
-		return std::filesystem::path(buf).parent_path() / L"CommunityShaders" / L"bin";
+		return modulePath.parent_path() / L"CommunityShaders" / L"bin";
 	}
 
 	bool NativeModeRequested()
@@ -137,19 +115,22 @@ namespace DxvkLoader
 			return false;
 		}
 
-		auto d3d11Create = Resolve<decltype(g_d3d11Create)>(d3d11Mod.get(), "D3D11CreateDeviceAndSwapChain");
-		auto createFactory = Resolve<decltype(g_createFactory)>(dxgiMod.get(), "CreateDXGIFactory");
+		auto d3d11Create = Resolve<decltype(g_api.d3d11Create)>(d3d11Mod.get(), "D3D11CreateDeviceAndSwapChain");
+		auto createFactory = Resolve<decltype(g_api.createFactory)>(dxgiMod.get(), "CreateDXGIFactory");
 		auto getApiVersion = Resolve<PFN_csDxvkGetApiVersion>(d3d11Mod.get(), "dxvkGetCsApiVersion");
 
-		if (!d3d11Create || !createFactory || !getApiVersion || getApiVersion() != CS_DXVK_API_VERSION) {
+		Detail::Api api{};
+		api.d3d11Module = d3d11Mod.get();
+		api.dxgiModule = dxgiMod.get();
+		api.d3d11Create = d3d11Create;
+		api.createFactory = createFactory;
+		api.getApiVersion = getApiVersion;
+		if (!api.HasCoreRenderer()) {
 			logger::error("[DXVK] DLL validation failed (d3d11={}, dxgi={}, apiVersion={})",
 				d3d11Create != nullptr, createFactory != nullptr, getApiVersion ? getApiVersion() : 0u);
 			return false;
 		}
 
-		Api api{};
-		api.d3d11Module = d3d11Mod.get();
-		api.dxgiModule = dxgiMod.get();
 #define CS_RESOLVE(member, name) api.member = Resolve<decltype(api.member)>(d3d11Mod.get(), name)
 		CS_RESOLVE(setTearingPreference, "dxvkSetTearingPreference");
 		CS_RESOLVE(getPresenterSurfaceState, "dxvkGetPresenterSurfaceState");
@@ -168,8 +149,6 @@ namespace DxvkLoader
 		CS_RESOLVE(releaseQueuedPresentWaitSemaphoresAfterIdle, "dxvkReleaseQueuedPresentWaitSemaphoresAfterIdle");
 #undef CS_RESOLVE
 
-		g_d3d11Create = d3d11Create;
-		g_createFactory = createFactory;
 		g_api = api;
 		d3d11Mod.release();
 		dxgiMod.release();
@@ -186,12 +165,12 @@ namespace DxvkLoader
 	}
 
 	bool IsLoaded() { return g_loaded; }
+	bool HasCoreRenderer() { return g_api.HasCoreRenderer(); }
 	bool HasFrameGenerationControl()
 	{
-		return g_api.requestSwapchainRecreate && g_api.setSyncPresent && g_api.getPresenterSurfaceState &&
-		       g_api.setSwapchainTornDownCallback && g_api.setFrameGenOwnershipQuery;
+		return g_api.HasFrameGenerationControl();
 	}
-	bool HasPresentCallbacks() { return g_api.setPresentBeginCallback && g_api.setPresentCompletedCallback; }
+	bool HasPresentCallbacks() { return g_api.HasPresentCallbacks(); }
 	bool HasFrameGenerationOwnershipCallback() { return g_api.setFrameGenOwnershipQuery != nullptr; }
 	bool HasSwapchainTeardownCallback() { return g_api.setSwapchainTornDownCallback != nullptr; }
 	bool SupportsSynchronousPresent() { return g_api.setSyncPresent != nullptr; }
@@ -251,6 +230,6 @@ namespace DxvkLoader
 		g_api.setPresentQueueDepth(a_depth);
 		return true;
 	}
-	decltype(&D3D11CreateDeviceAndSwapChain) GetD3D11CreateDeviceAndSwapChain() { return g_d3d11Create; }
-	decltype(&CreateDXGIFactory) GetCreateDXGIFactory() { return g_createFactory; }
+	decltype(&D3D11CreateDeviceAndSwapChain) GetD3D11CreateDeviceAndSwapChain() { return g_api.d3d11Create; }
+	decltype(&CreateDXGIFactory) GetCreateDXGIFactory() { return g_api.createFactory; }
 }

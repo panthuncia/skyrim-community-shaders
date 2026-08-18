@@ -176,6 +176,8 @@ if(DXVK_CLEANUP_TESTS)
     add_executable(
         DXVKCleanupTests
         tests/DXVKPresenterStateTests.cpp
+        tests/DxvkModulePathTests.cpp
+        src/DxvkModulePath.cpp
         src/Features/Upscaling/DXVKPresenterState.cpp
         src/Features/Upscaling/FrameGenWatchdog.cpp
     )
@@ -184,6 +186,7 @@ if(DXVK_CLEANUP_TESTS)
         PRIVATE
         "${CMAKE_SOURCE_DIR}/src"
         "${CMAKE_SOURCE_DIR}/include"
+        "${CMAKE_SOURCE_DIR}/extern/dxvk/include"
         "${CMAKE_CURRENT_BINARY_DIR}/cmake"
     )
     target_compile_features(DXVKCleanupTests PRIVATE cxx_std_23)

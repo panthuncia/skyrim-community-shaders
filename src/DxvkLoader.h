@@ -26,6 +26,7 @@ namespace DxvkLoader
 
 	/** @brief Returns whether DXVK loaded successfully. */
 	bool IsLoaded();
+	[[nodiscard]] bool HasCoreRenderer();
 	[[nodiscard]] bool HasFrameGenerationControl();
 	[[nodiscard]] bool HasPresentCallbacks();
 	[[nodiscard]] bool HasFrameGenerationOwnershipCallback();

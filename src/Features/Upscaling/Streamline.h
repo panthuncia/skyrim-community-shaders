@@ -5,7 +5,7 @@
 #include <memory>
 
 class VulkanDeviceContext;
-struct StreamlineState;
+class StreamlineRuntime;
 
 // Streamline and community upscalers run on DXVK's Vulkan device through full
 // interposition. The session is process-lifetime owned by UpscalingRuntime.
@@ -15,6 +15,7 @@ struct StreamlineState;
 class StreamlineSession
 {
 	friend class UpscalingRuntime;
+	friend class UpscalerEvaluator;
 public:
 	/** @brief Maps the interposer before DXVK creates its Vulkan instance. */
 	void PreloadInterposer();
@@ -204,5 +205,5 @@ private:
 	bool isNvidiaGPU = false;
 	bool isRTXBelow40Series = false;
 	VulkanDeviceContext& vulkan;
-	std::unique_ptr<StreamlineState> state;
+	std::unique_ptr<StreamlineRuntime> state;
 };

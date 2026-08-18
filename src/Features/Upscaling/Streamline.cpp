@@ -3,12 +3,17 @@
 #include "../Upscaling.h"
 #include "DXVKInterop.h"
 #include "DlssgPresenterState.h"
+#include "EvaluationCleanupPolicy.h"
 #include "FrameGenController.h"
 #include "FrameGenWatchdog.h"
+#include "FrameGenerationBridge.h"
 #include "ReflexController.h"
 #include "StreamlineSdk.h"
+#include "StreamlineRuntime.h"
 #include "UpscalerEvaluatorState.h"
+#include "UpscalerEvaluator.h"
 #include "UpscalingRuntime.h"
+#include "VulkanResourceBridge.h"
 #include "WindowsGpuRecovery.h"
 
 #include "../../DxvkLoader.h"
@@ -44,74 +49,11 @@
 #include <sl_version.h>
 #pragma warning(pop)
 
-struct StreamlineState
-{
-	bool Load(const std::filesystem::path& a_path)
-	{
-		if (interposer)
-			return true;
-		interposer = LoadLibraryExW(a_path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-		return interposer != nullptr;
-	}
-
-	void Unload()
-	{
-		if (interposer) {
-			FreeLibrary(interposer);
-			interposer = nullptr;
-		}
-	}
-
-	template <typename T>
-	bool Resolve(T*& a_fn, const char* a_name)
-	{
-		a_fn = reinterpret_cast<T*>(GetProcAddress(interposer, a_name));
-		return a_fn != nullptr;
-	}
-
-	HMODULE interposer = nullptr;
-	PFun_slInit* slInit = nullptr;
-	PFun_slIsFeatureSupported* slIsFeatureSupported = nullptr;
-	PFun_slGetNewFrameToken* slGetNewFrameToken = nullptr;
-	PFun_slSetTagForFrame* slSetTagForFrame = nullptr;
-	PFun_slSetConstants* slSetConstants = nullptr;
-	PFun_slEvaluateFeature* slEvaluateFeature = nullptr;
-	PFun_slGetFeatureFunction* slGetFeatureFunction = nullptr;
-	PFun_slSetFeatureLoaded* slSetFeatureLoaded = nullptr;
-	PFun_slIsFeatureLoaded* slIsFeatureLoaded = nullptr;
-	PFun_slDLSSGetOptimalSettings* slDLSSGetOptimalSettings = nullptr;
-	PFun_slDLSSSetOptions* slDLSSSetOptions = nullptr;
-	PFun_slReflexGetState* slReflexGetState = nullptr;
-	PFun_slReflexSetOptions* slReflexSetOptions = nullptr;
-	PFun_slReflexSleep* slReflexSleep = nullptr;
-	sl::Result (*slReflexSetExternalPacing)(bool) = nullptr;
-	PFun_slPCLSetMarker* slPCLSetMarker = nullptr;
-	PFun_slDLSSGSetOptions* slDLSSGSetOptions = nullptr;
-	PFun_slDLSSGGetState* slDLSSGGetState = nullptr;
-	PFun_slFSRSetOptions* slFSRSetOptions = nullptr;
-	PFun_slFSRFrameGenerationSetOptions* slFSRFrameGenerationSetOptions = nullptr;
-	PFun_slFSRGetFrameGenState* slFSRGetFrameGenState = nullptr;
-	PFun_slFSRFrameGenerationDiscardPreparedFrame* slFSRFrameGenerationDiscardPreparedFrame = nullptr;
-	PFun_slFSRFrameGenerationOwnsSwapchain* slFSRFrameGenerationOwnsSwapchain = nullptr;
-	PFun_slFSRFrameGenerationCompleteSwapchainTeardown* slFSRFrameGenerationCompleteSwapchainTeardown = nullptr;
-	PFun_slXeSSSetOptions* slXeSSSetOptions = nullptr;
-
-	UpscalerEvaluatorState evaluator;
-	DlssgPresenterState dlssg;
-	ReflexController reflex;
-	FrameGenWatchdog watchdog;
-	std::atomic<bool> dlssgDesiredLoaded{ false };
-	std::atomic<bool> dlssgCurrentlyLoaded{ false };
-	std::atomic<bool> fsrfgDesiredLoaded{ false };
-	std::atomic<bool> fsrfgCurrentlyLoaded{ false };
-	std::atomic<bool> fsrfgOwnsPresent{ false };
-};
-
 namespace
 {
-	StreamlineState* g_activeState = nullptr;
+	StreamlineRuntime* g_activeState = nullptr;
 
-	StreamlineState& ActiveState()
+	StreamlineRuntime& ActiveState()
 	{
 		assert(g_activeState);
 		return *g_activeState;
@@ -548,7 +490,7 @@ namespace
 	}
 }
 
-StreamlineSession::StreamlineSession(VulkanDeviceContext& a_vulkan) : vulkan(a_vulkan), state(std::make_unique<StreamlineState>())
+StreamlineSession::StreamlineSession(VulkanDeviceContext& a_vulkan) : vulkan(a_vulkan), state(std::make_unique<StreamlineRuntime>())
 {
 	assert(!g_activeState);
 	g_activeState = state.get();
@@ -1328,112 +1270,23 @@ static cs_VulkanVoidAttempt cs_PipelineBarrierSEH(VkCommandBuffer a_commandBuffe
 	return attempt;
 }
 
-// Streamline's Vulkan backend requires a matching VkImageView for every resource.
-static bool cs_WrapInteropImage(VulkanDeviceContext* a_dxvk, VkDevice a_device, PFN_vkCreateImageView a_createView,
-	ID3D11Resource* a_res, sl::Resource& a_out, sl::SubresourceRange& a_subresource,
-	VkImageView& a_outView, bool& a_terminalFault)
-{
-	a_outView = VK_NULL_HANDLE;
-	VkImage image = VK_NULL_HANDLE;
-	VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
-	VkImageCreateInfo info{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-	const cs_GetVkImageAttempt imageAttempt =
-		cs_GetVkImageSEH(a_dxvk, a_res, &image, &layout, &info);
-	if (imageAttempt.exceptionCode) {
-		a_terminalFault = true;
-		ID3D11Resource* resource = a_res;
-		a_dxvk->QuarantineResourcesAfterVulkanDestructionFault(&resource, 1);
-		ActiveState().evaluator.dispatchFaulted = true;
-		logger::error("[Streamline] DXVK image interop faulted (SEH {:#x})",
-			imageAttempt.exceptionCode);
-		return false;
-	}
-	if (!imageAttempt.succeeded || image == VK_NULL_HANDLE)
-		return false;
-	VkImageView view = VK_NULL_HANDLE;
-	if (!a_createView)
-		return false;
-	VkImageViewCreateInfo ci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-	ci.image = image;
-	ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-	ci.format = info.format;
-	ci.subresourceRange.aspectMask = cs_ImageAspect(info.format);
-	ci.subresourceRange.levelCount = 1;
-	ci.subresourceRange.layerCount = 1;
-	const cs_VulkanResultAttempt createAttempt =
-		cs_CreateImageViewSEH(a_createView, a_device, &ci, &view);
-	if (createAttempt.exceptionCode || createAttempt.result != VK_SUCCESS || view == VK_NULL_HANDLE) {
-		if (createAttempt.exceptionCode || view != VK_NULL_HANDLE) {
-			a_terminalFault = true;
-			ID3D11Resource* resource = a_res;
-			a_dxvk->QuarantineResourcesAfterVulkanDestructionFault(&resource, 1);
-		}
-		view = VK_NULL_HANDLE;
-		ActiveState().evaluator.dispatchFaulted = true;
-		logger::error("[Streamline] Vulkan image-view creation failed (result {}, SEH {:#x})",
-			static_cast<int>(createAttempt.result), createAttempt.exceptionCode);
-		a_outView = VK_NULL_HANDLE;
-		return false;
-	}
-	a_outView = view;
-	a_out = sl::Resource{ sl::ResourceType::eTex2d, image, nullptr, view, static_cast<uint32_t>(layout) };
-	a_out.width = info.extent.width;
-	a_out.height = info.extent.height;
-	a_out.nativeFormat = static_cast<uint32_t>(info.format);
-	a_out.mipLevels = info.mipLevels;
-	a_out.arrayLayers = info.arrayLayers;
-	a_out.usage = static_cast<uint32_t>(info.usage);
-	a_out.flags = static_cast<uint32_t>(info.flags);
-	a_subresource.aspectMask = ci.subresourceRange.aspectMask;
-	a_subresource.baseMipLevel = 0;
-	a_subresource.levelCount = 1;
-	a_subresource.baseArrayLayer = 0;
-	a_subresource.layerCount = 1;
-	a_out.next = &a_subresource;
-	return true;
-}
-
 static bool cs_DestroyViews(VulkanDeviceContext* a_dxvk, VkDevice a_device,
 	PFN_vkDestroyImageView a_destroyImageView, VkImageView* a_views, uint32_t a_count,
 	ID3D11Resource* const* a_resources = nullptr, uint32_t a_resourceCount = 0)
 {
-	if (!a_destroyImageView)
+	if (!a_dxvk)
 		return false;
-	for (uint32_t i = 0; i < a_count; ++i) {
-		if (a_views[i] == VK_NULL_HANDLE)
-			continue;
-		const cs_VulkanVoidAttempt destroyAttempt =
-			cs_DestroyImageViewSEH(a_destroyImageView, a_device, a_views[i]);
-		if (!destroyAttempt.completed) {
-			a_views[i] = VK_NULL_HANDLE;
-			ActiveState().evaluator.dispatchFaulted = true;
-			if (a_dxvk)
-				a_dxvk->QuarantineResourcesAfterVulkanDestructionFault(
-					a_resources, a_resourceCount);
-			return false;
-		}
-		a_views[i] = VK_NULL_HANDLE;
-	}
-	return true;
+	VulkanResourceBridge bridge(*a_dxvk, ActiveState().evaluator.dispatchFaulted);
+	return bridge.DestroyViews(a_device, a_destroyImageView, a_views, a_count, a_resources, a_resourceCount);
 }
 
-static bool cs_BarrierUpscalerOutput(VkCommandBuffer a_commandBuffer, const sl::Resource& a_output)
+static bool cs_BarrierUpscalerOutput(VulkanDeviceContext* a_dxvk,
+	VkCommandBuffer a_commandBuffer, const sl::Resource& a_output)
 {
-	VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-	barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-	barrier.oldLayout = static_cast<VkImageLayout>(a_output.state);
-	barrier.newLayout = static_cast<VkImageLayout>(a_output.state);
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.image = static_cast<VkImage>(a_output.native);
-	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	barrier.subresourceRange.levelCount = a_output.mipLevels;
-	barrier.subresourceRange.layerCount = a_output.arrayLayers;
-	const cs_VulkanVoidAttempt barrierAttempt = cs_PipelineBarrierSEH(a_commandBuffer, &barrier);
-	if (!barrierAttempt.completed)
-		ActiveState().evaluator.dispatchFaulted = true;
-	return barrierAttempt.completed;
+	if (!a_dxvk)
+		return false;
+	VulkanResourceBridge bridge(*a_dxvk, ActiveState().evaluator.dispatchFaulted);
+	return bridge.BarrierUpscalerOutput(a_commandBuffer, a_output);
 }
 
 static bool cs_SubmitPresentTags(VulkanDeviceContext* a_dxvk, sl::FrameToken& a_token,
@@ -1551,40 +1404,20 @@ static sl::Result cs_EvaluateFeatureCore(VulkanDeviceContext* a_dxvk,
 			return constantsRes;
 	}
 
-	VkDevice vkDevice = dxvk->GetDevice();
-	const cs_VulkanProcAttempt createProcAttempt = cs_GetDeviceProcAddrSEH(
-		dxvk->GetDeviceProcAddr(), vkDevice, "vkCreateImageView");
-	const cs_VulkanProcAttempt destroyProcAttempt = cs_GetDeviceProcAddrSEH(
-		dxvk->GetDeviceProcAddr(), vkDevice, "vkDestroyImageView");
-	if (createProcAttempt.exceptionCode || destroyProcAttempt.exceptionCode) {
-		ActiveState().evaluator.dispatchFaulted = true;
-		return sl::Result::eErrorExceptionHandler;
-	}
-	auto vkCreateImageView = reinterpret_cast<PFN_vkCreateImageView>(createProcAttempt.function);
-	auto vkDestroyImageView = reinterpret_cast<PFN_vkDestroyImageView>(destroyProcAttempt.function);
+	VulkanResourceBridge resourceBridge(*dxvk, ActiveState().evaluator.dispatchFaulted);
+	auto vkCreateImageView = reinterpret_cast<PFN_vkCreateImageView>(
+		resourceBridge.GetDeviceProcAddress("vkCreateImageView"));
+	auto vkDestroyImageView = reinterpret_cast<PFN_vkDestroyImageView>(
+		resourceBridge.GetDeviceProcAddress("vkDestroyImageView"));
 	if (!vkCreateImageView || !vkDestroyImageView)
 		return sl::Result::eErrorNotInitialized;
-	ID3D11Resource* resources[] = {
+	std::array<ID3D11Resource*, EvaluationResourceTransaction::kMaxResources> resources = {
 		a_colorIn, a_colorOut, a_depth, a_motionVectors, a_hudlessColor
 	};
-	VkImageView views[5] = {};
-	sl::SubresourceRange subresources[5]{};
-	int nv = 0;
-	int nr = 0;
-	bool viewCreationTerminalFault = false;
+	EvaluationResourceTransaction evaluationResources(
+		*dxvk, resourceBridge, vkCreateImageView, vkDestroyImageView, resources);
 	const auto wrap = [&](ID3D11Resource* a_res, sl::Resource& a_out) -> bool {
-		VkImageView v = VK_NULL_HANDLE;
-		if (nr >= static_cast<int>(std::size(subresources)))
-			return false;
-		const bool wrapped = cs_WrapInteropImage(
-			dxvk, vkDevice, vkCreateImageView, a_res, a_out, subresources[nr], v,
-			viewCreationTerminalFault);
-		if (v != VK_NULL_HANDLE && nv < static_cast<int>(std::size(views)))
-			views[nv++] = v;
-		if (!wrapped)
-			return false;
-		++nr;
-		return true;
+		return evaluationResources.Wrap(a_res, a_out);
 	};
 
 	const bool haveColor = (a_colorIn && a_colorOut);
@@ -1598,14 +1431,12 @@ static sl::Result cs_EvaluateFeatureCore(VulkanDeviceContext* a_dxvk,
 	if (ok && haveHudless)
 		ok = wrap(a_hudlessColor, hudlessRes);
 	if (!ok) {
-		if (viewCreationTerminalFault) {
-			dxvk->QuarantineResourcesAfterVulkanDestructionFault(
-				resources, static_cast<uint32_t>(std::size(resources)));
-			std::fill(std::begin(views), std::end(views), VK_NULL_HANDLE);
-		} else {
-			cs_DestroyViews(dxvk, vkDevice, vkDestroyImageView, views, static_cast<uint32_t>(nv),
-				resources, static_cast<uint32_t>(std::size(resources)));
-		}
+		const auto cleanup = SelectEvaluationCleanup(
+			evaluationResources.HasTerminalFault(), false, true, false);
+		if (cleanup == EvaluationCleanupAction::kQuarantine)
+			evaluationResources.Quarantine();
+		else
+			(void)evaluationResources.Destroy();
 		return sl::Result::eErrorMissingInputParameter;
 	}
 
@@ -1634,11 +1465,10 @@ static sl::Result cs_EvaluateFeatureCore(VulkanDeviceContext* a_dxvk,
 				static_cast<uint32_t>(a_feature), vpId, static_cast<int>(tagRes));
 			const bool canRelease = a_feature != sl::kFeatureFSR_G ||
 				cs_CanReleaseFailedFSRFrame(dxvk, transaction, a_viewport,
-					views, static_cast<uint32_t>(nv), resources, static_cast<uint32_t>(std::size(resources)));
+					evaluationResources.Views(), evaluationResources.ViewCount(), evaluationResources.Resources(),
+					EvaluationResourceTransaction::kMaxResources);
 			if (canRelease)
-				cs_DestroyViews(dxvk, vkDevice, vkDestroyImageView, views,
-					static_cast<uint32_t>(nv), resources,
-					static_cast<uint32_t>(std::size(resources)));
+				(void)evaluationResources.Destroy();
 			return tagRes;
 		}
 
@@ -1646,30 +1476,23 @@ static sl::Result cs_EvaluateFeatureCore(VulkanDeviceContext* a_dxvk,
 		if (evalRes != sl::Result::eOk) {
 			const bool canRelease = a_feature != sl::kFeatureFSR_G ||
 				cs_CanReleaseFailedFSRFrame(dxvk, transaction, a_viewport,
-					views, static_cast<uint32_t>(nv), resources, static_cast<uint32_t>(std::size(resources)));
+					evaluationResources.Views(), evaluationResources.ViewCount(), evaluationResources.Resources(),
+					EvaluationResourceTransaction::kMaxResources);
 			if (canRelease)
-				cs_DestroyViews(dxvk, vkDevice, vkDestroyImageView, views,
-					static_cast<uint32_t>(nv), resources,
-					static_cast<uint32_t>(std::size(resources)));
+				(void)evaluationResources.Destroy();
 			return evalRes;
 		}
 
-		if (haveColor && !cs_BarrierUpscalerOutput(cmd, colorOutRes)) {
-			dxvk->QuarantineResourcesAfterVulkanDestructionFault(
-				resources, static_cast<uint32_t>(std::size(resources)));
-			std::fill(std::begin(views), std::end(views), VK_NULL_HANDLE);
+		if (haveColor && !cs_BarrierUpscalerOutput(dxvk, cmd, colorOutRes)) {
+			evaluationResources.Quarantine();
 			return sl::Result::eErrorExceptionHandler;
 		}
 
 		if (dxvk->SubmitFrameCommandBuffer(transaction)) {
 			if (a_feature == sl::kFeatureFSR_G) {
-				dxvk->QueueResourcesForPresent(
-					transaction, resources, static_cast<uint32_t>(std::size(resources)));
-				dxvk->QueueViewsForFSRPresent(transaction, views, static_cast<uint32_t>(nv));
+				evaluationResources.RetainForFSRPresent(transaction);
 			} else {
-				dxvk->QueueResourcesForDeferredRelease(
-					transaction, resources, static_cast<uint32_t>(std::size(resources)));
-				dxvk->QueueViewsForDeferredDelete(transaction, views, static_cast<uint32_t>(nv));
+				evaluationResources.Defer(transaction);
 			}
 			if (a_outputReady)
 				*a_outputReady = true;
@@ -1678,26 +1501,22 @@ static sl::Result cs_EvaluateFeatureCore(VulkanDeviceContext* a_dxvk,
 		} else {
 			if (a_feature == sl::kFeatureFSR_G) {
 				const bool canRelease = cs_CanReleaseFailedFSRFrame(dxvk, transaction, a_viewport,
-					views, static_cast<uint32_t>(nv), resources, static_cast<uint32_t>(std::size(resources)));
+					evaluationResources.Views(), evaluationResources.ViewCount(), evaluationResources.Resources(),
+					EvaluationResourceTransaction::kMaxResources);
 				if (canRelease)
-					cs_DestroyViews(dxvk, vkDevice, vkDestroyImageView, views,
-						static_cast<uint32_t>(nv), resources,
-						static_cast<uint32_t>(std::size(resources)));
-			} else if (transaction.SubmissionMayBeInFlight()) {
-				dxvk->QueueResourcesForDeferredRelease(
-					transaction, resources, static_cast<uint32_t>(std::size(resources)));
-				dxvk->QueueViewsForDeferredDelete(transaction, views, static_cast<uint32_t>(nv));
+					(void)evaluationResources.Destroy();
 			} else {
-				cs_DestroyViews(dxvk, vkDevice, vkDestroyImageView, views,
-					static_cast<uint32_t>(nv), resources,
-					static_cast<uint32_t>(std::size(resources)));
+				const auto cleanup = SelectEvaluationCleanup(
+					false, false, true, transaction.SubmissionMayBeInFlight());
+				if (cleanup == EvaluationCleanupAction::kDefer)
+					evaluationResources.Defer(transaction);
+				else
+					(void)evaluationResources.Destroy();
 			}
 			evalRes = sl::Result::eErrorExceptionHandler;
 		}
 	} else {
-		cs_DestroyViews(dxvk, vkDevice, vkDestroyImageView, views,
-			static_cast<uint32_t>(nv), resources,
-			static_cast<uint32_t>(std::size(resources)));
+		(void)evaluationResources.Destroy();
 	}
 	return evalRes;
 }
@@ -1705,35 +1524,12 @@ static sl::Result cs_EvaluateFeatureCore(VulkanDeviceContext* a_dxvk,
 static StreamlineSession::EvaluationResult cs_ClassifyEvaluation(
 	sl::Result a_result, bool a_outputReady, bool a_skipped)
 {
-	if (a_result != sl::Result::eOk)
-		return StreamlineSession::EvaluationResult::kFailed;
-	if (a_outputReady)
-		return StreamlineSession::EvaluationResult::kReady;
-	return a_skipped ? StreamlineSession::EvaluationResult::kSkipped : StreamlineSession::EvaluationResult::kFailed;
+	return UpscalerEvaluator::Classify(static_cast<int32_t>(a_result), a_outputReady, a_skipped);
 }
 
 StreamlineSession::EvaluationResult StreamlineSession::EvaluateUpscaler(const UpscaleRequest& a_request)
 {
-	const auto& resources = a_request.resources;
-	const auto& dimensions = a_request.dimensions;
-	const auto& options = a_request.options;
-
-	switch (a_request.upscaler) {
-	case Upscaler::kDLSS:
-		return EvaluateDLSS(resources.colorIn, resources.colorOut, resources.depth, resources.motionVectors,
-			dimensions.renderWidth, dimensions.renderHeight, dimensions.outputWidth, dimensions.outputHeight,
-			options.qualityMode, options.jitterX, options.jitterY);
-	case Upscaler::kXeSS:
-		return EvaluateXeSS(resources.colorIn, resources.colorOut, resources.depth, resources.motionVectors,
-			dimensions.renderWidth, dimensions.renderHeight, dimensions.outputWidth, dimensions.outputHeight,
-			options.qualityMode, options.sharpness, options.jitterX, options.jitterY);
-	case Upscaler::kFSR:
-		return EvaluateFSR(resources.colorIn, resources.colorOut, resources.depth, resources.motionVectors,
-			dimensions.renderWidth, dimensions.renderHeight, dimensions.outputWidth, dimensions.outputHeight,
-			options.qualityMode, options.sharpness, options.jitterX, options.jitterY);
-	}
-
-	return EvaluationResult::kFailed;
+	return UpscalerEvaluator(*this).Evaluate(a_request);
 }
 
 StreamlineSession::EvaluationResult StreamlineSession::EvaluateDLSS(ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut,
@@ -2439,8 +2235,12 @@ void StreamlineSession::RegisterDxvkOwnershipPredicate()
 		logger::warn("[Streamline] dxvkSetFrameGenOwnershipQuery not found in DXVK module");
 		return;
 	}
-	DxvkLoader::RegisterFrameGenerationCallbacks(&DxvkFrameGenerationOwnsSwapchain,
-		&DxvkPresentBeginCallback, &DxvkPresentCompletedCallback, &DxvkSwapchainTornDownCallback);
+	const FrameGenerationBridge frameGenerationBridge;
+	if (!frameGenerationBridge.Register({ &DxvkFrameGenerationOwnsSwapchain,
+			&DxvkPresentBeginCallback, &DxvkPresentCompletedCallback, &DxvkSwapchainTornDownCallback })) {
+		logger::warn("[Streamline] failed to register DXVK frame-generation callbacks");
+		return;
+	}
 	logger::info("[Streamline] registered DXVK frame-generation ownership predicate");
 
 	if (DxvkLoader::HasPresentCallbacks()) {
