@@ -3,6 +3,7 @@
 #include "../HDRDisplay.h"
 #include "../Upscaling.h"
 #include "DXVKInterop.h"
+#include "DxvkControl.h"
 #include "Streamline.h"
 
 #include "../../Globals.h"
@@ -55,13 +56,14 @@ namespace FrameGen
 			return hdr.loaded && hdr.IsHDREnabledForFrame();
 		}
 
-		void BeginPresenterRecreateTransition()
-		{
-			DXVKInterop::GetSingleton()->BeginPresenterColorSpaceTransition(IsHDRActive(), true);
-		}
 	}
 
-	const char* Controller::Name(Method a_method)
+	void FrameGenerationCoordinator::BeginPresenterRecreateTransition()
+	{
+		vulkan.BeginPresenterColorSpaceTransition(IsHDRActive(), true);
+	}
+
+	const char* FrameGenerationCoordinator::Name(Method a_method)
 	{
 		switch (a_method) {
 		case Method::kFSR:
@@ -73,44 +75,48 @@ namespace FrameGen
 		}
 	}
 
-	void Controller::Reconcile()
+	Method FrameGenerationCoordinator::GetDesiredMethod() const
+	{
+		return DesiredMethod();
+	}
+
+	void FrameGenerationCoordinator::Reconcile()
 	{
 		// Wait for settings and hardware fallbacks to settle.
 		if (!globals::features::upscaling.loaded ||
-			!Streamline::GetSingleton()->IsFeatureSupportResolved() ||
+			!streamline.IsFeatureSupportResolved() ||
 			!globals::game::graphicsState)
 			return;
 
 		if (Upscaling::IsWindowUnusable())
 			return;
 
-		auto* streamline = Streamline::GetSingleton();
-		const bool dispatchFaulted = streamline->HasDispatchFaulted();
+		auto* streamlineBackend = &streamline;
+		const bool dispatchFaulted = streamlineBackend->HasDispatchFaulted();
 		if (dispatchFaulted)
 			globals::features::upscaling.settings.frameGeneration = false;
 
 		if (dispatchFaulted || faultRecoveryRequested) {
 			if (!faultRecoveryRequested) {
-				auto* dxvk = DXVKInterop::GetSingleton();
-				const bool completionProven = dxvk->HasPendingPresentWaitSemaphore() ?
-					dxvk->DiscardPendingPresentWaitSemaphore() : dxvk->WaitDeviceIdle();
+				const bool completionProven = vulkan.HasPendingPresentWaitSemaphore() ?
+					vulkan.DiscardPendingPresentWaitSemaphore() : vulkan.WaitDeviceIdle();
 				if (!completionProven) {
 					logger::error("[FrameGen] Streamline fault teardown deferred because GPU completion could not be proven");
 					return;
 				}
-				streamline->SetDLSSGDesiredLoaded(false);
-				streamline->SetFSRFGDesiredLoaded(false);
+				streamlineBackend->SetDLSSGDesiredLoaded(false);
+				streamlineBackend->SetFSRFGDesiredLoaded(false);
 				faultRecoveryRequested = true;
 				BeginPresenterRecreateTransition();
-				Streamline::RequestDxvkSwapchainRecreate("Streamline dispatch fault");
+				dxvk.RequestSwapchainRecreate("Streamline dispatch fault");
 				phase = Phase::kTransitioning;
 				logger::error("[FrameGen] Streamline faulted; forcing frame-generation teardown at swapchain recreation");
 			}
 			if (phase == Phase::kTransitioning) {
-				if (!streamline->IsDLSSGLoadSettled() || !streamline->IsFSRFGLoadSettled() ||
-					streamline->IsDLSSGLoaded() || streamline->IsFSRFGLoaded())
+				if (!streamlineBackend->IsDLSSGLoadSettled() || !streamlineBackend->IsFSRFGLoadSettled() ||
+					streamlineBackend->IsDLSSGLoaded() || streamlineBackend->IsFSRFGLoaded())
 					return;
-				if (!DXVKInterop::GetSingleton()->DrainCommandRing()) {
+				if (!vulkan.DrainCommandRing()) {
 					logger::error("[FrameGen] Streamline fault cleanup deferred because command completion could not be proven");
 					return;
 				}
@@ -130,12 +136,12 @@ namespace FrameGen
 		StepFSRDelivery(target);
 	}
 
-	void Controller::StepPhaseCompletion()
+	void FrameGenerationCoordinator::StepPhaseCompletion()
 	{
 		if (phase != Phase::kTransitioning)
 			return;
 
-		auto* sl = Streamline::GetSingleton();
+		auto* sl = &streamline;
 		if (!sl->IsDLSSGLoadSettled() || !sl->IsFSRFGLoadSettled())
 			return;
 
@@ -148,16 +154,16 @@ namespace FrameGen
 			owner = Method::kFSR;
 		} else {
 			owner = Method::kNone;
-			Streamline::PushDxvkPresentQueueDepth(Streamline::PresentQueuePolicy::kUnrestricted);
+			dxvk.SetPresentQueuePolicy(DxvkControl::PresentQueuePolicy::kUnrestricted);
 		}
 
 		phase = Phase::kIdle;
 		logger::info("[FrameGen] FG method switch settled - present owner: {}", Name(owner));
 	}
 
-	bool Controller::StepModeTeardown(Method a_target)
+	bool FrameGenerationCoordinator::StepModeTeardown(Method a_target)
 	{
-		auto* sl = Streamline::GetSingleton();
+		auto* sl = &streamline;
 		if (!sl->IsDLSSGLoaded() && (dlssgModeOn || owner == Method::kDLSSG)) {
 			dlssgModeOn = false;
 			if (owner == Method::kDLSSG)
@@ -170,7 +176,7 @@ namespace FrameGen
 			const auto dims = CurrentDims(false);
 			if (!sl->SetDLSSGMode(false, dims.renderWidth, dims.renderHeight, dims.displayWidth, dims.displayHeight))
 				return false;
-			if (!DXVKInterop::GetSingleton()->WaitDeviceIdle()) {
+			if (!vulkan.WaitDeviceIdle()) {
 				logger::error("[FrameGen] DLSS-G teardown deferred because device idle could not be proven");
 				return false;
 			}
@@ -180,7 +186,7 @@ namespace FrameGen
 		}
 
 		if (fsrDelivery == FSRDelivery::kDelivered && a_target != Method::kFSR) {
-			if (!DXVKInterop::GetSingleton()->DrainCommandRing()) {
+			if (!vulkan.DrainCommandRing()) {
 				logger::error("[FrameGen] FSR-FG teardown deferred because command completion could not be proven");
 				return false;
 			}
@@ -198,12 +204,12 @@ namespace FrameGen
 		return true;
 	}
 
-	void Controller::StepLoadState(Method a_target)
+	void FrameGenerationCoordinator::StepLoadState(Method a_target)
 	{
 		if (phase != Phase::kIdle)
 			return;
 
-		auto* sl = Streamline::GetSingleton();
+		auto* sl = &streamline;
 		const bool wantDLSSG = a_target == Method::kDLSSG;
 		const bool wantFSRFG = a_target == Method::kFSR;
 
@@ -215,11 +221,11 @@ namespace FrameGen
 		// The FIFO interop-submit contract makes a tag semaphore presenter-visible
 		// only after its signal submission executes, so this bounded overlap cannot
 		// recreate the older-present/future-semaphore cycle.
-		const auto presentQueuePolicy = wantFSRFG ? Streamline::PresentQueuePolicy::kSynchronous :
-			dlssgTransition ? Streamline::PresentQueuePolicy::kSynchronous :
-			wantDLSSG ? Streamline::PresentQueuePolicy::kBoundedOverlap :
-			             Streamline::PresentQueuePolicy::kUnrestricted;
-		Streamline::PushDxvkPresentQueueDepth(presentQueuePolicy);
+		const auto presentQueuePolicy = wantFSRFG ? DxvkControl::PresentQueuePolicy::kSynchronous :
+			dlssgTransition ? DxvkControl::PresentQueuePolicy::kSynchronous :
+			wantDLSSG ? DxvkControl::PresentQueuePolicy::kBoundedOverlap :
+			             DxvkControl::PresentQueuePolicy::kUnrestricted;
+		dxvk.SetPresentQueuePolicy(presentQueuePolicy);
 
 		if (sl->IsDLSSGLoaded() == wantDLSSG && sl->IsFSRFGLoaded() == wantFSRFG) {
 			if (wantDLSSG && owner != Method::kDLSSG) {
@@ -238,7 +244,7 @@ namespace FrameGen
 		sl->SetDLSSGDesiredLoaded(wantDLSSG);
 		sl->SetFSRFGDesiredLoaded(wantFSRFG);
 		BeginPresenterRecreateTransition();
-		Streamline::RequestDxvkSwapchainRecreate("FG method switch");
+		dxvk.RequestSwapchainRecreate("FG method switch");
 		phase = Phase::kTransitioning;
 		if (owner == Method::kDLSSG && !wantDLSSG)
 			owner = Method::kNone;
@@ -248,10 +254,10 @@ namespace FrameGen
 			wantDLSSG, wantFSRFG);
 	}
 
-	void Controller::StepFSRDelivery(Method a_target)
+	void FrameGenerationCoordinator::StepFSRDelivery(Method a_target)
 	{
 		auto& upscaling = globals::features::upscaling;
-		auto* sl = Streamline::GetSingleton();
+		auto* sl = &streamline;
 		const bool wantFSR = a_target == Method::kFSR;
 
 		if (!wantFSR || phase != Phase::kIdle || !sl->IsFSRFGLoaded())
@@ -265,7 +271,7 @@ namespace FrameGen
 				fsrVsyncRebakePending = false;
 				fsrWrapVsync = upscaling.settings.vsync;
 				BeginPresenterRecreateTransition();
-				Streamline::RequestDxvkSwapchainRecreate("FSR-FG vsync change");
+				dxvk.RequestSwapchainRecreate("FSR-FG vsync change");
 			}
 		} else {
 			fsrVsyncRebakePending = false;
@@ -301,25 +307,25 @@ namespace FrameGen
 				logger::info("[FrameGen] awaiting present-ordered FSR-FG swapchain wrap");
 			} else if (hdrChanged) {
 				BeginPresenterRecreateTransition();
-				Streamline::RequestDxvkSwapchainRecreate("FSR-FG HDR transfer change");
+				dxvk.RequestSwapchainRecreate("FSR-FG HDR transfer change");
 			}
 		}
 	}
 
-	bool Controller::IsFSRPresenterReady() const
+	bool FrameGenerationCoordinator::IsFSRPresenterReady() const
 	{
 		if (phase != Phase::kIdle || DesiredMethod() != Method::kFSR || fsrDelivery != FSRDelivery::kDelivered ||
-			!Streamline::GetSingleton()->IsFSRFGLoaded())
+			!streamline.IsFSRFGLoaded())
 			return false;
 
 		const bool hdr = IsHDRActive();
 		return fsrHDRDelivered == hdr &&
-		       DXVKInterop::GetSingleton()->IsPresenterStateReadyForFrame(hdr);
+		       vulkan.IsPresenterStateReadyForFrame(hdr);
 	}
 
-	void Controller::EngageDLSSG()
+	void FrameGenerationCoordinator::EngageDLSSG()
 	{
-		auto* sl = Streamline::GetSingleton();
+		auto* sl = &streamline;
 		// StepLoadState first adopts an already-loaded DLSS-G presenter by
 		// delivering and acknowledging eOff. Do not overwrite that pending
 		// request with eOn in the same frame; doing so leaves owner unset and
@@ -345,7 +351,7 @@ namespace FrameGen
 			dlssgModeOn = true;
 	}
 
-	void Controller::NotifyFaultTeardownRequested()
+	void FrameGenerationCoordinator::NotifyFaultTeardownRequested()
 	{
 		dlssgModeOn = false;
 		faultRecoveryRequested = true;

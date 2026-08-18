@@ -2,20 +2,20 @@
 
 #include <cstdint>
 #include <d3d11.h>
+#include <memory>
 
-// Streamline and community upscalers run on DXVK's Vulkan device through full interposition.
+class VulkanDeviceContext;
+struct StreamlineState;
 
-class Streamline
+// Streamline and community upscalers run on DXVK's Vulkan device through full
+// interposition. The session is process-lifetime owned by UpscalingRuntime.
+// Render-frame methods run on the render thread; SDK present callbacks enter
+// through static thunks and serialize shared DLSS-G state with apiMutex.
+
+class StreamlineSession
 {
+	friend class UpscalingRuntime;
 public:
-	enum class PresentQueuePolicy : uint32_t
-	{
-		kSynchronous = 0,
-		kBoundedOverlap = 2,
-		kUnrestricted = UINT32_MAX,
-	};
-	static Streamline* GetSingleton();
-
 	/** @brief Maps the interposer before DXVK creates its Vulkan instance. */
 	void PreloadInterposer();
 
@@ -68,49 +68,21 @@ public:
 		float jitterX = 0.0f;
 		float jitterY = 0.0f;
 	};
-
-	[[nodiscard]] EvaluationResult EvaluateDLSS(
-		const FrameResources& a_resources, const RenderDimensions& a_dimensions, const EvaluationOptions& a_options)
+	enum class Upscaler : uint8_t
 	{
-		return EvaluateDLSS(a_resources.colorIn, a_resources.colorOut, a_resources.depth, a_resources.motionVectors,
-			a_dimensions.renderWidth, a_dimensions.renderHeight, a_dimensions.outputWidth, a_dimensions.outputHeight,
-			a_options.qualityMode, a_options.jitterX, a_options.jitterY);
-	}
-	[[nodiscard]] EvaluationResult EvaluateXeSS(
-		const FrameResources& a_resources, const RenderDimensions& a_dimensions, const EvaluationOptions& a_options)
+		kDLSS,
+		kXeSS,
+		kFSR,
+	};
+	struct UpscaleRequest
 	{
-		return EvaluateXeSS(a_resources.colorIn, a_resources.colorOut, a_resources.depth, a_resources.motionVectors,
-			a_dimensions.renderWidth, a_dimensions.renderHeight, a_dimensions.outputWidth, a_dimensions.outputHeight,
-			a_options.qualityMode, a_options.sharpness, a_options.jitterX, a_options.jitterY);
-	}
-	[[nodiscard]] EvaluationResult EvaluateFSR(
-		const FrameResources& a_resources, const RenderDimensions& a_dimensions, const EvaluationOptions& a_options)
-	{
-		return EvaluateFSR(a_resources.colorIn, a_resources.colorOut, a_resources.depth, a_resources.motionVectors,
-			a_dimensions.renderWidth, a_dimensions.renderHeight, a_dimensions.outputWidth, a_dimensions.outputHeight,
-			a_options.qualityMode, a_options.sharpness, a_options.jitterX, a_options.jitterY);
-	}
+		Upscaler upscaler = Upscaler::kFSR;
+		FrameResources resources;
+		RenderDimensions dimensions;
+		EvaluationOptions options;
+	};
 
-	[[nodiscard]] EvaluationResult EvaluateDLSS(ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut,
-		ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
-		uint32_t a_renderWidth, uint32_t a_renderHeight,
-		uint32_t a_outputWidth, uint32_t a_outputHeight,
-		uint32_t a_qualityMode,
-		float a_jitterX, float a_jitterY);
-
-	[[nodiscard]] EvaluationResult EvaluateXeSS(ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut,
-		ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
-		uint32_t a_renderWidth, uint32_t a_renderHeight,
-		uint32_t a_outputWidth, uint32_t a_outputHeight,
-		uint32_t a_qualityMode, float a_sharpness,
-		float a_jitterX, float a_jitterY);
-
-	[[nodiscard]] EvaluationResult EvaluateFSR(ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut,
-		ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
-		uint32_t a_renderWidth, uint32_t a_renderHeight,
-		uint32_t a_outputWidth, uint32_t a_outputHeight,
-		uint32_t a_qualityMode, float a_sharpness,
-		float a_jitterX, float a_jitterY);
+	[[nodiscard]] EvaluationResult EvaluateUpscaler(const UpscaleRequest& a_request);
 
 	/** @brief Prepares FSR frame generation independently of the active upscaler. */
 	[[nodiscard]] bool EvaluateFSRFrameGen(ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
@@ -189,15 +161,30 @@ public:
 	/** @brief Registers Streamline ownership of DXVK present pacing. */
 	static void RegisterDxvkOwnershipPredicate();
 
-	/** @brief Requests a Vulkan swapchain recreation. */
-	static void RequestDxvkSwapchainRecreate(const char* a_reason = "FG method switch");
-
-	/** @brief Controls DXVK synchronous present for FG ownership transitions and FSR-G. */
-	static void PushDxvkSyncPresent(bool a_sync);
-	static void PushDxvkPresentQueueDepth(PresentQueuePolicy a_policy);
-
 private:
-	Streamline() = default;
+	[[nodiscard]] EvaluationResult EvaluateDLSS(ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut,
+		ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
+		uint32_t a_renderWidth, uint32_t a_renderHeight,
+		uint32_t a_outputWidth, uint32_t a_outputHeight,
+		uint32_t a_qualityMode,
+		float a_jitterX, float a_jitterY);
+
+	[[nodiscard]] EvaluationResult EvaluateXeSS(ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut,
+		ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
+		uint32_t a_renderWidth, uint32_t a_renderHeight,
+		uint32_t a_outputWidth, uint32_t a_outputHeight,
+		uint32_t a_qualityMode, float a_sharpness,
+		float a_jitterX, float a_jitterY);
+
+	[[nodiscard]] EvaluationResult EvaluateFSR(ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut,
+		ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
+		uint32_t a_renderWidth, uint32_t a_renderHeight,
+		uint32_t a_outputWidth, uint32_t a_outputHeight,
+		uint32_t a_qualityMode, float a_sharpness,
+		float a_jitterX, float a_jitterY);
+
+	explicit StreamlineSession(VulkanDeviceContext& a_vulkan);
+	~StreamlineSession();
 
 	bool triedInit = false;
 	bool initialized = false;
@@ -216,4 +203,6 @@ private:
 
 	bool isNvidiaGPU = false;
 	bool isRTXBelow40Series = false;
+	VulkanDeviceContext& vulkan;
+	std::unique_ptr<StreamlineState> state;
 };

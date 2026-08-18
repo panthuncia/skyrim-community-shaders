@@ -3,8 +3,15 @@
 #include <atomic>
 #include <cstdint>
 
+class UpscalingRuntime;
+class VulkanDeviceContext;
+class DxvkControl;
+class StreamlineSession;
+
 // Serializes DLSS-G and FSR-FG ownership changes on the render thread. Feature
-// load changes are applied together while DXVK's swapchain is torn down.
+// load changes are applied together while DXVK's swapchain is torn down. The
+// coordinator never holds Streamline's present-thread apiMutex while waiting
+// for Vulkan completion; acknowledgements are observed on a later reconcile.
 namespace FrameGen
 {
 	enum class Method : uint8_t
@@ -14,24 +21,10 @@ namespace FrameGen
 		kDLSSG,
 	};
 
-	class Controller
+	class FrameGenerationCoordinator
 	{
+		friend class ::UpscalingRuntime;
 	public:
-		struct RuntimeState
-		{
-			std::atomic<bool> dlssgDesiredLoaded{ false };
-			std::atomic<bool> dlssgCurrentlyLoaded{ false };
-			std::atomic<bool> fsrfgDesiredLoaded{ false };
-			std::atomic<bool> fsrfgCurrentlyLoaded{ false };
-			std::atomic<bool> fsrfgOwnsPresent{ false };
-		};
-
-		static Controller* GetSingleton()
-		{
-			static Controller singleton;
-			return &singleton;
-		}
-
 		/** @brief Reconciles the active frame-generation method. */
 		void Reconcile();
 
@@ -41,10 +34,11 @@ namespace FrameGen
 		void NotifyFaultTeardownRequested();
 		/** @brief Whether FSR frame generation can consume resources for this render frame. */
 		[[nodiscard]] bool IsFSRPresenterReady() const;
-		RuntimeState& GetRuntimeState() { return runtimeState; }
+		[[nodiscard]] Method GetDesiredMethod() const;
 
 	private:
-		Controller() = default;
+		FrameGenerationCoordinator(VulkanDeviceContext& a_vulkan, StreamlineSession& a_streamline, DxvkControl& a_dxvk) :
+			vulkan(a_vulkan), streamline(a_streamline), dxvk(a_dxvk) {}
 
 		enum class Phase : uint8_t
 		{
@@ -62,6 +56,7 @@ namespace FrameGen
 		bool StepModeTeardown(Method a_target);
 		void StepLoadState(Method a_target);
 		void StepFSRDelivery(Method a_target);
+		void BeginPresenterRecreateTransition();
 
 		static const char* Name(Method a_method);
 
@@ -77,6 +72,8 @@ namespace FrameGen
 		bool fsrWrapVsync = false;
 		bool fsrVsyncRebakePending = false;
 		bool faultRecoveryRequested = false;
-		RuntimeState runtimeState;
+		VulkanDeviceContext& vulkan;
+		StreamlineSession& streamline;
+		DxvkControl& dxvk;
 	};
 }

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "StreamlineApi.h"
+#include "StreamlineSdk.h"
 
 #include <array>
 #include <atomic>

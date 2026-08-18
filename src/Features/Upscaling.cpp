@@ -137,13 +137,13 @@ static bool DrawToggleStepper(const char* a_label, bool* a_value, bool a_disable
 
 void Upscaling::DrawSettings()
 {
-	auto* streamline = Streamline::GetSingleton();
-	const bool dlssAvailable = streamline->IsDLSSSupported();
-	const bool xessAvailable = streamline->IsXeSSSupported();
-
-	const bool dlssgAvailable = streamline->IsDLSSGSupported();
-	const bool fsrfgAvailable = streamline->IsFSRFGSupported();
-	const bool reflexAvailable = streamline->IsReflexSupported();
+	auto* streamline = &Runtime().Session();
+	const auto capabilities = Runtime().GetCapabilities();
+	const bool dlssAvailable = capabilities.dlss;
+	const bool xessAvailable = capabilities.xess;
+	const bool dlssgAvailable = capabilities.dlssg;
+	const bool fsrfgAvailable = capabilities.fsrfg;
+	const bool reflexAvailable = capabilities.reflex;
 
 	auto selectUpscaler = [&](UpscaleMethod a_m) {
 		settings.upscaleMethod = (uint)a_m;
@@ -166,7 +166,7 @@ void Upscaling::DrawSettings()
 		if (DrawToggleStepper(T(TKEY("fg_allow_tearing"), "Allow Tearing with Frame Generation"),
 				&settings.fgAllowTearing, !tearingSupported)) {
 			DxvkLoader::SetTearingPreference(settings.fgAllowTearing ? 1u : 0u);
-			Streamline::RequestDxvkSwapchainRecreate("frame-generation tearing preference changed");
+			Runtime().Dxvk().RequestSwapchainRecreate("frame-generation tearing preference changed");
 		}
 		if (!tearingSupported) {
 			ImGui::SameLine();
@@ -385,10 +385,10 @@ void Upscaling::Load()
 	// synchronous only around acknowledged option/ownership transitions.
 	if (DxvkLoader::IsLoaded()) {
 		const auto fgMethod = static_cast<FrameGenMethod>(settings.frameGenMethod);
-		const auto queuePolicy = !settings.frameGeneration ? Streamline::PresentQueuePolicy::kUnrestricted :
-			fgMethod == FrameGenMethod::kFSR ? Streamline::PresentQueuePolicy::kSynchronous :
-			                                  Streamline::PresentQueuePolicy::kBoundedOverlap;
-		Streamline::PushDxvkPresentQueueDepth(queuePolicy);
+		const auto queuePolicy = !settings.frameGeneration ? DxvkControl::PresentQueuePolicy::kUnrestricted :
+			fgMethod == FrameGenMethod::kFSR ? DxvkControl::PresentQueuePolicy::kSynchronous :
+			                                  DxvkControl::PresentQueuePolicy::kBoundedOverlap;
+		Runtime().Dxvk().SetPresentQueuePolicy(queuePolicy);
 	}
 
 	if (DxvkLoader::IsLoaded()) {
@@ -400,9 +400,9 @@ void Upscaling::Load()
 		                     settings.reflexEnabled ||
 		                     (GetEnvironmentVariableA("CS_FORCE_SL_LOAD", forceSL, sizeof(forceSL)) && forceSL[0] == '1');
 		if (needsSL) {
-			Streamline::GetSingleton()->PreloadInterposer();
+			Runtime().Session().PreloadInterposer();
 		} else {
-			Streamline::GetSingleton()->SetDisabledByConfig();
+			Runtime().Session().SetDisabledByConfig();
 			logger::info("[Upscaling] Streamline disabled by config (upscaleMethod={}, frameGeneration=off) - "
 			             "DXVK runs on the real Vulkan driver; enabling an SL upscaler or frame generation requires a restart",
 				settings.upscaleMethod);
@@ -459,10 +459,16 @@ void Upscaling::PostPostLoad()
 
 #undef I18N_KEY_PREFIX
 
+UpscalingRuntime& Upscaling::Runtime()
+{
+	return globals::features::upscaling.runtime;
+}
+
 Upscaling::UpscaleMethod Upscaling::GetUpscaleMethod() const
 {
-	auto* streamline = Streamline::GetSingleton();
-	auto* dxvk = DXVKInterop::GetSingleton();
+	auto* streamline = &Runtime().Session();
+	auto* dxvk = &Runtime().Vulkan();
+	const auto capabilities = Runtime().GetCapabilities();
 	if (streamline->HasDispatchFaulted() ||
 		(dxvk->IsAvailable() && !dxvk->CommandResourcesReady()))
 		return UpscaleMethod::kTAA;
@@ -470,19 +476,19 @@ Upscaling::UpscaleMethod Upscaling::GetUpscaleMethod() const
 	auto method = static_cast<UpscaleMethod>(settings.upscaleMethod);
 	for (uint32_t fallback = 0; fallback < 3; ++fallback) {
 		if (method == UpscaleMethod::kDLSS &&
-			(!streamline->IsDLSSSupported() || IsUpscaleMethodFailed(method))) {
+			(!capabilities.dlss || IsUpscaleMethodFailed(method))) {
 			method = static_cast<UpscaleMethod>(settings.upscaleMethodNoDLSS);
 			if (method == UpscaleMethod::kDLSS)
 				method = UpscaleMethod::kFSR;
 			continue;
 		}
 		if (method == UpscaleMethod::kXeSS &&
-			(!streamline->IsXeSSSupported() || IsUpscaleMethodFailed(method))) {
+			(!capabilities.xess || IsUpscaleMethodFailed(method))) {
 			method = UpscaleMethod::kFSR;
 			continue;
 		}
 		if (method == UpscaleMethod::kFSR &&
-			(!streamline->IsFSRSupported() || IsUpscaleMethodFailed(method)))
+			(!capabilities.fsr || IsUpscaleMethodFailed(method)))
 			return UpscaleMethod::kTAA;
 		return method;
 	}
@@ -518,7 +524,7 @@ void Upscaling::ApplyHardwareDefaults()
 		return;
 	settings.hardwareDefaultsApplied = true;
 
-	auto* sl = Streamline::GetSingleton();
+	auto* sl = &Runtime().Session();
 
 	if (settings.upscaleMethod == (uint)UpscaleMethod::kFSR) {
 		if (sl->IsDLSSSupported()) {
@@ -541,12 +547,12 @@ void Upscaling::ApplyHardwareDefaults()
 
 Upscaling::FrameGenMethod Upscaling::GetFrameGenMethod() const
 {
-	auto* sl = Streamline::GetSingleton();
+	const auto capabilities = Runtime().GetCapabilities();
 	const auto selected = static_cast<FrameGenMethod>(settings.frameGenMethod);
 	if (selected == FrameGenMethod::kDLSSG)
-		return sl->IsDLSSGSupported() ? FrameGenMethod::kDLSSG : FrameGenMethod::kFSR;
-	return sl->IsFSRFGSupported() ? FrameGenMethod::kFSR :
-	       sl->IsDLSSGSupported() ? FrameGenMethod::kDLSSG :
+		return capabilities.dlssg ? FrameGenMethod::kDLSSG : FrameGenMethod::kFSR;
+	return capabilities.fsrfg ? FrameGenMethod::kFSR :
+	       capabilities.dlssg ? FrameGenMethod::kDLSSG :
 	                                FrameGenMethod::kFSR;
 }
 
@@ -555,29 +561,25 @@ bool Upscaling::IsFrameGenerationRequested() const
 	if (!loaded || !settings.frameGeneration)
 		return false;
 	const auto method = GetFrameGenMethod();
-	return method == FrameGenMethod::kDLSSG ? Streamline::GetSingleton()->IsDLSSGSupported() :
-	                                         Streamline::GetSingleton()->IsFSRFGSupported();
+	const auto capabilities = Runtime().GetCapabilities();
+	return method == FrameGenMethod::kDLSSG ? capabilities.dlssg : capabilities.fsrfg;
 }
 
 bool Upscaling::IsFrameGenerationActive() const
 {
 	if (!IsFrameGenerationRequested())
 		return false;
-	if (Streamline::GetSingleton()->HasDispatchFaulted() ||
-		DXVKInterop::GetSingleton()->HasCommandRingFault())
-		return false;
 	const auto& hdr = globals::features::hdrDisplay;
 	const bool hdrActive = hdr.loaded && hdr.IsHDREnabledForFrame();
-	if (!DXVKInterop::GetSingleton()->IsPresenterStateReadyForFrame(hdrActive))
-		return false;
-	return true;
+	const auto status = Runtime().GetFrameGenerationStatus(hdrActive);
+	return status.presenterReady && !status.dispatchFaulted && !status.submissionFaulted;
 }
 
 void Upscaling::BeginRenderFrame()
 {
-	auto* dxvk = DXVKInterop::GetSingleton();
+	auto* dxvk = &Runtime().Vulkan();
 	if (dxvk->HasCommandRingFault() &&
-		!Streamline::GetSingleton()->IsFSRFGLoaded() &&
+		!Runtime().Session().IsFSRFGLoaded() &&
 		!dxvk->RecoverCommandRing()) {
 		settings.frameGeneration = false;
 		logger::error("[Upscaling] Vulkan command-ring recovery failed; falling back to TAA");
@@ -587,7 +589,7 @@ void Upscaling::BeginRenderFrame()
 	if (hdr.loaded)
 		hdr.BeginRenderFrame();
 	else
-		DXVKInterop::GetSingleton()->CommitPresenterSurfaceStateForRenderFrame();
+		Runtime().Vulkan().CommitPresenterSurfaceStateForRenderFrame();
 }
 
 bool Upscaling::GetEffectiveReflex() const
@@ -644,7 +646,7 @@ bool Upscaling::IsTearingSupported()
 uint32_t Upscaling::GetFixedDLSSGMultiplier() const
 {
 	uint32_t multiplier = std::clamp(settings.frameGenMultiplier, 2u, 6u);
-	const uint32_t maxFrames = Streamline::GetSingleton()->GetDLSSGMaxFramesToGenerate();
+	const uint32_t maxFrames = Runtime().Session().GetDLSSGMaxFramesToGenerate();
 	if (maxFrames > 0u)
 		multiplier = std::min(multiplier, maxFrames + 1u);
 	return multiplier;
@@ -680,8 +682,8 @@ void Upscaling::ApplyDxvkFrameRateLimit(double a_fps)
 HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT a_syncInterval, UINT a_flags,
 	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& a_present)
 {
-	auto* dxvk = DXVKInterop::GetSingleton();
-	auto* streamline = Streamline::GetSingleton();
+	auto* dxvk = &Runtime().Vulkan();
+	auto* streamline = &Runtime().Session();
 	auto requestFaultTeardown = [&](const char* a_reason) -> HRESULT {
 		logger::error("[Upscaling] {} - disabling frame generation", a_reason);
 		settings.frameGeneration = false;
@@ -711,8 +713,8 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 		dxvk->BeginPresenterColorSpaceTransition(hdr.loaded && hdr.IsHDREnabledForFrame(), true);
 		streamline->SetDLSSGDesiredLoaded(false);
 		streamline->SetFSRFGDesiredLoaded(false);
-		Streamline::RequestDxvkSwapchainRecreate(a_reason);
-		FrameGen::Controller::GetSingleton()->NotifyFaultTeardownRequested();
+		Runtime().Dxvk().RequestSwapchainRecreate(a_reason);
+		Runtime().FrameGeneration().NotifyFaultTeardownRequested();
 		return a_present(a_swapChain, a_syncInterval, a_flags);
 	};
 	if (streamline->HasDispatchFaulted() || dxvk->HasCommandRingFault()) {
@@ -746,6 +748,67 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 		return a_present(a_swapChain, a_syncInterval, a_flags);
 
 	return requestFaultTeardown("DLSS-G present synchronization failed");
+}
+
+bool Upscaling::BeginPresentMarkers()
+{
+	auto& session = Runtime().Session();
+	session.SetPCLMarker(StreamlineSession::PclMarker::RenderSubmitEnd);
+	const bool dlssgActive = IsFrameGenerationActive() && GetFrameGenMethod() == FrameGenMethod::kDLSSG;
+	const bool bridged = dlssgActive && session.QueueDLSSGPresentMarkers();
+	if (!bridged)
+		session.SetPCLMarker(StreamlineSession::PclMarker::PresentStart);
+	return bridged;
+}
+
+void Upscaling::EndPresentMarkers(bool a_bridgedPresentMarkers)
+{
+	if (a_bridgedPresentMarkers)
+		Runtime().Session().CompleteDXVKPresentMarker();
+	else
+		Runtime().Session().SetPCLMarker(StreamlineSession::PclMarker::PresentEnd);
+}
+
+void Upscaling::NotifyPresentResult(HRESULT a_result)
+{
+	auto& vulkan = Runtime().Vulkan();
+	if (SUCCEEDED(a_result))
+		vulkan.RefreshPresenterSurfaceState();
+	if (a_result == S_OK && Runtime().Session().IsFSRFGPresentOwner())
+		vulkan.NotifyFSRFrameConsumed();
+	vulkan.NotifyPresentWaitQueued();
+}
+
+bool Upscaling::DrainBackendWork()
+{
+	return Runtime().Vulkan().DrainCommandRing();
+}
+
+void Upscaling::CommitPresenterStateForRenderFrame()
+{
+	Runtime().Vulkan().CommitPresenterSurfaceStateForRenderFrame();
+}
+
+void Upscaling::BeginPresenterColorSpaceTransition(bool a_hdr)
+{
+	auto& vulkan = Runtime().Vulkan();
+	if (vulkan.IsAvailable() || vulkan.Initialize())
+		vulkan.BeginPresenterColorSpaceTransition(a_hdr);
+}
+
+void Upscaling::CancelPresenterColorSpaceTransition(bool a_hdr)
+{
+	Runtime().Vulkan().CancelPresenterColorSpaceTransition(a_hdr);
+}
+
+bool Upscaling::IsDLSSGRuntimeLoaded() const
+{
+	return Runtime().Session().IsDLSSGLoaded();
+}
+
+uint32_t Upscaling::GetFrameGenerationMultiplier() const
+{
+	return Runtime().Session().GetFrameGenerationMultiplier();
 }
 
 void Upscaling::CreateUpscaledTexture()
@@ -795,10 +858,10 @@ void Upscaling::CreateHudlessTexture()
 	D3D11_TEXTURE2D_DESC texDesc{};
 	auto& hdr = globals::features::hdrDisplay;
 	const bool hdrActive = hdr.loaded && hdr.IsHDREnabledForFrame();
-	auto* dxvk = DXVKInterop::GetSingleton();
+	auto* dxvk = &Runtime().Vulkan();
 	const auto encoding = dxvk->GetPresenterEncodingForFrame();
 	const VkFormat presenterFormat = dxvk->GetPresenterFormatForFrame();
-	const bool nativeHDR = hdrActive && encoding == DXVKInterop::PresenterEncoding::kHDR10;
+	const bool nativeHDR = hdrActive && encoding == VulkanDeviceContext::PresenterEncoding::kHDR10;
 	if (hdrActive) {
 		if (!nativeHDR || !hdr.outputTexture || !hdr.outputTexture->resource)
 			return;
@@ -824,7 +887,7 @@ void Upscaling::CreateHudlessTexture()
 	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 	if (nativeHDR && presenterFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {
 		format = DXGI_FORMAT_R10G10B10A2_UNORM;
-	} else if (!hdrActive && encoding == DXVKInterop::PresenterEncoding::kSDR) {
+	} else if (!hdrActive && encoding == VulkanDeviceContext::PresenterEncoding::kSDR) {
 		if (presenterFormat == VK_FORMAT_B8G8R8A8_UNORM)
 			format = DXGI_FORMAT_B8G8R8A8_UNORM;
 		else if (presenterFormat == VK_FORMAT_R8G8B8A8_UNORM)
@@ -878,7 +941,7 @@ void Upscaling::CreateHudlessTexture()
 bool Upscaling::DestroyHudlessTexture(bool a_commandRingDrained)
 {
 	if (hudlessTexture) {
-		if (!a_commandRingDrained && !DXVKInterop::GetSingleton()->DrainCommandRing()) {
+		if (!a_commandRingDrained && !Runtime().Vulkan().DrainCommandRing()) {
 			logger::error("[Upscaling] hudless texture destruction deferred because command completion could not be proven");
 			return false;
 		}
@@ -944,8 +1007,8 @@ ID3D11Resource* Upscaling::CaptureHudlessColor()
 		if (!composed)
 			return nullptr;
 
-		const auto encoding = DXVKInterop::GetSingleton()->GetPresenterEncodingForFrame();
-		if (encoding == DXVKInterop::PresenterEncoding::kHDR10) {
+		const auto encoding = Runtime().Vulkan().GetPresenterEncodingForFrame();
+		if (encoding == VulkanDeviceContext::PresenterEncoding::kHDR10) {
 			D3D11_TEXTURE2D_DESC sourceDesc{};
 			composed->GetDesc(&sourceDesc);
 			const auto& destinationDesc = hudlessTexture->desc;
@@ -986,7 +1049,7 @@ void Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 		                  previousUpscalingWasActive;
 		if (hadUpscale) {
 			// DXVK does not track resources referenced by foreign Vulkan submissions.
-			if (!DXVKInterop::GetSingleton()->DrainCommandRing()) {
+			if (!Runtime().Vulkan().DrainCommandRing()) {
 				logger::error("[Upscaling] method change deferred because command completion could not be proven");
 				return;
 			}
@@ -1004,7 +1067,7 @@ void Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
 		previousUpscalingWasActive = IsUpscalingActive();
 	}
 
-	FrameGen::Controller::GetSingleton()->Reconcile();
+	Runtime().FrameGeneration().Reconcile();
 }
 
 ID3D11PixelShader* Upscaling::GetDepthRefractionUpscalePS()
@@ -1213,7 +1276,7 @@ void Upscaling::SetupResources()
 
 	CheckResources(GetUpscaleMethod());
 
-	auto* dxvk = DXVKInterop::GetSingleton();
+	auto* dxvk = &Runtime().Vulkan();
 	if (dxvk->Initialize()) {
 		VkImage probeImage = VK_NULL_HANDLE;
 		VkImageCreateInfo probeInfo{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
@@ -1226,10 +1289,10 @@ void Upscaling::SetupResources()
 
 		dxvk->CreateCommandResources(3);
 
-		auto* streamline = Streamline::GetSingleton();
+		auto* streamline = &Runtime().Session();
 		if (streamline->Initialize()) {
 			streamline->SetVulkanDevice();
-			Streamline::RegisterDxvkOwnershipPredicate();
+			StreamlineSession::RegisterDxvkOwnershipPredicate();
 		}
 
 		ApplyHardwareDefaults();
@@ -1397,40 +1460,38 @@ void Upscaling::Upscale()
 		auto& depthTex = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 		const auto displaySize = float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
 		const auto renderSize = Util::ConvertToDynamic(displaySize);
-		auto result = Streamline::EvaluationResult::kFailed;
+		auto result = StreamlineSession::EvaluationResult::kFailed;
 
 		if (upscaledTexture && upscaledTexture->resource) {
+			StreamlineSession::UpscaleRequest request{
+				.resources = { main.texture, upscaledTexture->resource.get(), depthTex.texture, motionVector.texture },
+				.dimensions = { (uint32_t)renderSize.x, (uint32_t)renderSize.y,
+					(uint32_t)displaySize.x, (uint32_t)displaySize.y },
+				.options = { settings.qualityMode, 0.0f, jitter.x, jitter.y },
+			};
 			switch (method) {
 			case UpscaleMethod::kFSR:
-				result = Streamline::GetSingleton()->EvaluateFSR(
-					main.texture, upscaledTexture->resource.get(), depthTex.texture, motionVector.texture,
-					(uint32_t)renderSize.x, (uint32_t)renderSize.y,
-					(uint32_t)displaySize.x, (uint32_t)displaySize.y,
-					settings.qualityMode, settings.sharpnessFSR, jitter.x, jitter.y);
+				request.upscaler = StreamlineSession::Upscaler::kFSR;
+				request.options.sharpness = settings.sharpnessFSR;
 				break;
 			case UpscaleMethod::kDLSS:
-				result = Streamline::GetSingleton()->EvaluateDLSS(
-					main.texture, upscaledTexture->resource.get(), depthTex.texture, motionVector.texture,
-					(uint32_t)renderSize.x, (uint32_t)renderSize.y,
-					(uint32_t)displaySize.x, (uint32_t)displaySize.y,
-					settings.qualityMode, jitter.x, jitter.y);
+				request.upscaler = StreamlineSession::Upscaler::kDLSS;
 				break;
 			case UpscaleMethod::kXeSS:
-				result = Streamline::GetSingleton()->EvaluateXeSS(
-					main.texture, upscaledTexture->resource.get(), depthTex.texture, motionVector.texture,
-					(uint32_t)renderSize.x, (uint32_t)renderSize.y,
-					(uint32_t)displaySize.x, (uint32_t)displaySize.y,
-					settings.qualityMode, settings.sharpnessFSR, jitter.x, jitter.y);
+				request.upscaler = StreamlineSession::Upscaler::kXeSS;
+				request.options.sharpness = settings.sharpnessFSR;
 				break;
 			default:
-				result = Streamline::EvaluationResult::kSkipped;
+				result = StreamlineSession::EvaluationResult::kSkipped;
 				break;
 			}
+			if (method == UpscaleMethod::kFSR || method == UpscaleMethod::kDLSS || method == UpscaleMethod::kXeSS)
+				result = Runtime().EvaluateUpscaler(request);
 		}
 
-		if (result == Streamline::EvaluationResult::kReady)
+		if (result == StreamlineSession::EvaluationResult::kReady)
 			context->CopyResource(main.texture, upscaledTexture->resource.get());
-		else if (result == Streamline::EvaluationResult::kFailed)
+		else if (result == StreamlineSession::EvaluationResult::kFailed)
 			MarkUpscaleMethodFailed(method);
 
 		state->EndPerfEvent();
@@ -1605,9 +1666,9 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 	const auto fgMethod = GetFrameGenMethod();
 	auto& hdr = globals::features::hdrDisplay;
 	const bool hdrActive = hdr.loaded && hdr.IsHDREnabledForFrame();
-	if (!DXVKInterop::GetSingleton()->IsPresenterStateReadyForFrame(hdrActive) ||
+	if (!Runtime().Vulkan().IsPresenterStateReadyForFrame(hdrActive) ||
 		(fgMethod == FrameGenMethod::kFSR &&
-		 !FrameGen::Controller::GetSingleton()->IsFSRPresenterReady()))
+		 !Runtime().FrameGeneration().IsFSRPresenterReady()))
 		return;
 
 	auto* renderer = globals::game::renderer;
@@ -1625,23 +1686,26 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 				CreateUpscaledTexture();
 				auto& mainColor = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 				if (upscaledTexture && upscaledTexture->resource && mainColor.texture)
-					(void)Streamline::GetSingleton()->EvaluateFSR(
-						mainColor.texture, upscaledTexture->resource.get(), fgDepth, motionVector.texture,
-						(uint32_t)displaySize.x, (uint32_t)displaySize.y, (uint32_t)displaySize.x, (uint32_t)displaySize.y,
-						0, 0.0f, jitter.x, jitter.y);
+					(void)Runtime().EvaluateUpscaler({
+						.upscaler = StreamlineSession::Upscaler::kFSR,
+						.resources = { mainColor.texture, upscaledTexture->resource.get(), fgDepth, motionVector.texture },
+						.dimensions = { (uint32_t)displaySize.x, (uint32_t)displaySize.y,
+							(uint32_t)displaySize.x, (uint32_t)displaySize.y },
+						.options = { 0, 0.0f, jitter.x, jitter.y },
+					});
 			}
 
 			static uint32_t s_lastTagFrame = UINT32_MAX;
 			const uint32_t tagFrame = globals::state->frameCount;
 			if (s_lastTagFrame != tagFrame) {
 				s_lastTagFrame = tagFrame;
-				Streamline::GetSingleton()->TagDLSSGResources(
+				Runtime().Session().TagDLSSGResources(
 					fgDepth, motionVector.texture, a_hudlessColor,
 					(uint32_t)renderSize.x, (uint32_t)renderSize.y,
 					(uint32_t)displaySize.x, (uint32_t)displaySize.y);
 			}
 			// Enable only after this frame's constants and real input tags exist.
-			FrameGen::Controller::GetSingleton()->EngageDLSSG();
+			Runtime().FrameGeneration().EngageDLSSG();
 		}
 	} else if (fgMethod == FrameGenMethod::kFSR && gameplay) {
 		const auto displaySize = float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
@@ -1649,12 +1713,12 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 		auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 		auto& depthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN_COPY];
 		ID3D11Resource* fgDepth = (IsUpscalingActive() && depthCopy.texture) ? depthCopy.texture : depth.texture;
-		(void)Streamline::GetSingleton()->EvaluateFSRFrameGen(
+		(void)Runtime().Session().EvaluateFSRFrameGen(
 			fgDepth, motionVector.texture, a_hudlessColor,
 			(uint32_t)renderSize.x, (uint32_t)renderSize.y,
 			(uint32_t)displaySize.x, (uint32_t)displaySize.y,
 			jitter.x, jitter.y);
-		Streamline::GetSingleton()->CaptureFSRFrameGenState();
+		Runtime().Session().CaptureFSRFrameGenState();
 	}
 }
 
@@ -1674,10 +1738,10 @@ void Upscaling::Main_UpdateJitter::thunk(RE::BSGraphics::State* a_state)
 	const double reflexFpsLimit = upscaling.IsFrameGenerationActive() ? renderedFpsLimit : outputFpsLimit;
 	const uint32_t reflexLimitUs = (wantReflex && reflexFpsLimit > 0.0) ?
 		static_cast<uint32_t>(std::lround(1000000.0 / reflexFpsLimit)) : 0u;
-	auto* streamline = Streamline::GetSingleton();
+	auto* streamline = &Runtime().Session();
 	streamline->UpdateReflex(wantReflex, wantReflex && upscaling.settings.reflexBoost, reflexLimitUs);
 	upscaling.ApplyDxvkFrameRateLimit(wantReflex ? 0.0 : renderedFpsLimit);
-	streamline->SetPCLMarker(Streamline::PclMarker::SimulationStart);
+	streamline->SetPCLMarker(StreamlineSession::PclMarker::SimulationStart);
 	upscaling.BeginRenderFrame();
 	streamline->BeginRenderFrame();
 	upscaling.ConfigureTAA();
@@ -1706,14 +1770,14 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	// Keep markers, evaluation, tagging, and present on the same usable-window frame.
 	const bool windowUsable = !Upscaling::IsWindowUnusable();
 
-	auto* streamline = Streamline::GetSingleton();
+	auto* streamline = &Runtime().Session();
 	if (windowUsable && upscaling.GetEffectiveReflex()) {
 		static uint32_t s_lastSimEndFrame = UINT32_MAX;
 		const uint32_t gameFrame = globals::state->frameCount;
 		if (s_lastSimEndFrame != gameFrame) {
 			s_lastSimEndFrame = gameFrame;
-			streamline->SetPCLMarker(Streamline::PclMarker::SimulationEnd);
-			streamline->SetPCLMarker(Streamline::PclMarker::RenderSubmitStart);
+			streamline->SetPCLMarker(StreamlineSession::PclMarker::SimulationEnd);
+			streamline->SetPCLMarker(StreamlineSession::PclMarker::RenderSubmitStart);
 		}
 	}
 
@@ -1735,9 +1799,9 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 		const auto& hdr = globals::features::hdrDisplay;
 		const bool hdrActive = hdr.loaded && hdr.IsHDREnabledForFrame();
 		const auto fgMethod = upscaling.GetFrameGenMethod();
-		const bool presenterReady = DXVKInterop::GetSingleton()->IsPresenterStateReadyForFrame(hdrActive);
+		const bool presenterReady = Runtime().Vulkan().IsPresenterStateReadyForFrame(hdrActive);
 		const bool fsrReady = fgMethod != FrameGenMethod::kFSR ||
-		                      FrameGen::Controller::GetSingleton()->IsFSRPresenterReady();
+		                      Runtime().FrameGeneration().IsFSRPresenterReady();
 		if (presenterReady && fsrReady)
 			upscaling.PrepareFrameGeneration(upscaling.CaptureHudlessColor());
 	}

@@ -1984,7 +1984,7 @@ void PerformanceOverlay::UpdateGraphValues()
 
 	if (state.isFrameGenerationActive) {
 		const float multiplier = static_cast<float>(
-			Streamline::GetSingleton()->GetFrameGenerationMultiplier());
+			globals::features::upscaling.GetFrameGenerationMultiplier());
 		state.postFGFrameTimeMs = state.frameTimeMs / multiplier;
 		state.postFGFps = state.fps * multiplier;
 		state.postFGFrameTimeHistory.Push(state.postFGFrameTimeMs);

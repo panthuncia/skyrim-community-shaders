@@ -4,6 +4,7 @@
 
 #include "BackgroundBlur.h"
 #include "../Features/HDRDisplay.h"
+#include "../Features/Upscaling.h"
 #include "../Features/Upscaling/Streamline.h"
 #include "../Globals.h"
 #include "../ShaderCache.h"
@@ -545,7 +546,7 @@ namespace BackgroundBlur
 			return;
 		}
 
-		if (Streamline::GetSingleton()->IsDLSSGLoaded()) {
+		if (globals::features::upscaling.IsDLSSGRuntimeLoaded()) {
 			return;
 		}
 

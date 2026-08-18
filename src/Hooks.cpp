@@ -340,11 +340,7 @@ struct IDXGISwapChain_Present
 				Flags &= ~DXGI_PRESENT_ALLOW_TEARING;
 		}
 
-		auto* streamline = Streamline::GetSingleton();
-		streamline->SetPCLMarker(Streamline::PclMarker::RenderSubmitEnd);
-		const bool bridgedPresentMarkers = dlssgActive && streamline->QueueDLSSGPresentMarkers();
-		if (!bridgedPresentMarkers)
-			streamline->SetPCLMarker(Streamline::PclMarker::PresentStart);
+		const bool bridgedPresentMarkers = globals::features::upscaling.BeginPresentMarkers();
 
 		HRESULT retval = globals::features::hdrDisplay.HandleSwapChainPresent(
 			This,
@@ -356,18 +352,8 @@ struct IDXGISwapChain_Present
 					[&](IDXGISwapChain* sc, UINT si, UINT f) { return func(sc, si, f); });
 			});
 
-		if (!bridgedPresentMarkers)
-			streamline->SetPCLMarker(Streamline::PclMarker::PresentEnd);
-		else
-			streamline->CompleteDXVKPresentMarker();
-
-		auto* dxvk = DXVKInterop::GetSingleton();
-		const bool presentSucceeded = SUCCEEDED(retval);
-		if (presentSucceeded)
-			dxvk->RefreshPresenterSurfaceState();
-		if (retval == S_OK && streamline->IsFSRFGPresentOwner())
-			dxvk->NotifyFSRFrameConsumed();
-		dxvk->NotifyPresentWaitQueued();
+		globals::features::upscaling.EndPresentMarkers(bridgedPresentMarkers);
+		globals::features::upscaling.NotifyPresentResult(retval);
 
 		globals::features::screenshotFeature.ProcessCaptureRequest();
 

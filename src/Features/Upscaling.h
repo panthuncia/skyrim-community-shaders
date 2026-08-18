@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Feature.h"
+#include "Upscaling/UpscalingRuntime.h"
 #include <array>
 #include <atomic>
 #include <d3d11_4.h>
@@ -169,6 +170,18 @@ public:
 
 	HRESULT PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT a_syncInterval, UINT a_flags,
 		const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& a_present);
+	/** @brief Emits render/present markers and returns whether DLSS-G bridged the present marker. */
+	[[nodiscard]] bool BeginPresentMarkers();
+	/** @brief Completes markers that surround the outer DXGI Present call. */
+	void EndPresentMarkers(bool a_bridgedPresentMarkers);
+	/** @brief Reconciles presenter and submission lifetimes after DXGI Present returns. */
+	void NotifyPresentResult(HRESULT a_result);
+	[[nodiscard]] bool DrainBackendWork();
+	void CommitPresenterStateForRenderFrame();
+	void BeginPresenterColorSpaceTransition(bool a_hdr);
+	void CancelPresenterColorSpaceTransition(bool a_hdr);
+	[[nodiscard]] bool IsDLSSGRuntimeLoaded() const;
+	[[nodiscard]] uint32_t GetFrameGenerationMultiplier() const;
 
 	// D3D11 textures
 	Texture2D* upscaledTexture = nullptr;
@@ -191,8 +204,10 @@ public:
 	void UpscaleDepth();
 
 	static double GetRefreshRate(HWND a_window);
+	static UpscalingRuntime& Runtime();
 
 private:
+	UpscalingRuntime runtime;
 	static constexpr size_t kUpscaleMethodCount = static_cast<size_t>(UpscaleMethod::kXeSS) + 1;
 	std::array<bool, kUpscaleMethodCount> failedUpscaleMethods{};
 

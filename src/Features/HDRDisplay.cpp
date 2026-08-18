@@ -642,7 +642,7 @@ void HDRDisplay::PostPostLoad()
 void HDRDisplay::SetupResources()
 {
 	if (hdrTexture || outputTexture || uiTexture || hdrDataCB) {
-		if (!DXVKInterop::GetSingleton()->DrainCommandRing()) {
+		if (!globals::features::upscaling.DrainBackendWork()) {
 			logger::error("[HDR] resource rebuild deferred because command completion could not be proven");
 			return;
 		}
@@ -775,7 +775,7 @@ void HDRDisplay::SetupResources()
 
 void HDRDisplay::BeginRenderFrame()
 {
-	DXVKInterop::GetSingleton()->CommitPresenterSurfaceStateForRenderFrame();
+	globals::features::upscaling.CommitPresenterStateForRenderFrame();
 	globals::features::effects11.BeginRenderFrame();
 
 	bool requestedHDR;
@@ -1524,9 +1524,7 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 	if (!swapChain4)
 		return;
 
-	auto* dxvk = DXVKInterop::GetSingleton();
-	if (dxvk->IsAvailable() || dxvk->Initialize())
-		dxvk->BeginPresenterColorSpaceTransition(IsHDREnabledForFrame());
+	globals::features::upscaling.BeginPresenterColorSpaceTransition(IsHDREnabledForFrame());
 
 	if (IsHDREnabledForFrame()) {
 		HRESULT hr = swapChain4->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
@@ -1537,7 +1535,7 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 			swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
 		} else {
 			logger::warn("[HDR] Failed to set HDR10 color space ({:#010x})", static_cast<uint32_t>(hr));
-			dxvk->CancelPresenterColorSpaceTransition(true);
+			globals::features::upscaling.CancelPresenterColorSpaceTransition(true);
 		}
 	} else {
 		HRESULT hr = swapChain4->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
@@ -1546,7 +1544,7 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 			swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
 		} else {
 			logger::warn("[HDR] Failed to set SDR color space ({:#010x})", static_cast<uint32_t>(hr));
-			dxvk->CancelPresenterColorSpaceTransition(false);
+			globals::features::upscaling.CancelPresenterColorSpaceTransition(false);
 		}
 	}
 
