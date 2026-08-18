@@ -136,6 +136,20 @@ jobs:
                   configurePreset: ${{ matrix.compiler.cmake-preset }}
                   buildPreset: ${{ matrix.compiler.cmake-preset }}
 
+            - name: Run DXVK state tests
+              if: matrix.compiler.cmake-preset == 'PR'
+              shell: pwsh
+              run: |
+                  cmake --build '${{ matrix.compiler.build-dir }}' --config Release --target DXVKCleanupTests
+                  if ($LASTEXITCODE -ne 0) { throw "DXVK test build failed with exit code $LASTEXITCODE" }
+                  ctest --test-dir '${{ matrix.compiler.build-dir }}' -C Release --output-on-failure -R '^DXVKCleanupTests$'
+                  if ($LASTEXITCODE -ne 0) { throw "DXVK state tests failed with exit code $LASTEXITCODE" }
+
+            - name: Run dependency build tests
+              if: matrix.compiler.cmake-preset == 'PR'
+              shell: pwsh
+              run: ./tests/DependencyBuildTests.ps1
+
             - name: Verify packaged Vulkan runtimes
               shell: pwsh
               run: |

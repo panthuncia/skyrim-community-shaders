@@ -173,9 +173,21 @@ target_link_libraries(
 if(DXVK_CLEANUP_TESTS)
     enable_testing()
     find_package(Catch2 CONFIG REQUIRED)
-    add_executable(DXVKCleanupTests tests/DXVKPresenterStateTests.cpp)
-    target_include_directories(DXVKCleanupTests PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(DXVKCleanupTests PRIVATE Catch2::Catch2WithMain Vulkan::Vulkan)
+    add_executable(
+        DXVKCleanupTests
+        tests/DXVKPresenterStateTests.cpp
+        src/Features/Upscaling/DXVKPresenterState.cpp
+    )
+    target_include_directories(
+        DXVKCleanupTests
+        PRIVATE
+        "${CMAKE_SOURCE_DIR}/src"
+        "${CMAKE_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_BINARY_DIR}/cmake"
+    )
+    target_compile_features(DXVKCleanupTests PRIVATE cxx_std_23)
+    target_precompile_headers(DXVKCleanupTests PRIVATE include/PCH.h)
+    target_link_libraries(DXVKCleanupTests PRIVATE Catch2::Catch2WithMain Vulkan::Vulkan CommonLibSSE)
     add_test(NAME DXVKCleanupTests COMMAND DXVKCleanupTests)
     find_program(POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
     add_test(
