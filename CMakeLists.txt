@@ -507,6 +507,8 @@ install(CODE
 )
 
 # Stage prefixed DXVK DLLs without colliding with the system D3D modules.
+include(cmake/DxvkRuntimeManifest.cmake)
+cs_write_dxvk_runtime_manifest("${CMAKE_CURRENT_BINARY_DIR}/dxvk-runtime-manifest.txt")
 set(DXVK_BUILD_DIR "${CMAKE_SOURCE_DIR}/extern/dxvk/build/src")
 set(_DXVK_RUNTIME_DLLS
     "${DXVK_BUILD_DIR}/d3d11/dxvk_d3d11.dll"

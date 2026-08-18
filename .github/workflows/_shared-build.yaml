@@ -155,31 +155,8 @@ jobs:
               run: |
                   $aioDir = '${{ matrix.compiler.build-dir }}/aio'
                   $runtimeDir = Join-Path $aioDir 'SKSE/Plugins/CommunityShaders/bin'
-                  $required = @(
-                    'amd_fidelityfx_vk.dll',
-                    'dxvk_d3d11.dll',
-                    'dxvk_dxgi.dll',
-                    'dxvk.license.txt',
-                    'fidelityfx.license.txt',
-                    'libxess.dll',
-                    'license.txt',
-                    'NvLowLatencyVk.dll',
-                    'nvngx_dlss.dll',
-                    'nvngx_dlss.license.txt',
-                    'nvngx_dlssg.dll',
-                    'reflex.license.txt',
-                    'sl.common.dll',
-                    'sl.dlss.dll',
-                    'sl.dlss_g.dll',
-                    'sl.fsr.dll',
-                    'sl.fsr_g.dll',
-                    'sl.interposer.dll',
-                    'sl.pcl.dll',
-                    'sl.reflex.dll',
-                    'sl.xess.dll',
-                    'xess.license.txt',
-                    'xess.third-party-programs.txt'
-                  )
+                  $manifest = Join-Path '${{ matrix.compiler.build-dir }}' 'dxvk-runtime-manifest.txt'
+                  $required = @(Get-Content -LiteralPath $manifest | Where-Object { $_ })
                   $missing = @($required | Where-Object {
                     -not (Test-Path (Join-Path $runtimeDir $_) -PathType Leaf)
                   })
@@ -193,6 +170,14 @@ jobs:
                   if ($legacy.Count -ne 0) {
                     throw "AIO contains legacy DX12 runtimes: $($legacy.FullName -join ', ')"
                   }
+
+                  $installRoot = Join-Path '${{ matrix.compiler.build-dir }}' 'runtime-install-test'
+                  cmake --install '${{ matrix.compiler.build-dir }}' --config Release --prefix $installRoot
+                  if ($LASTEXITCODE -ne 0) { throw "Runtime install failed with exit code $LASTEXITCODE" }
+                  ./tests/RuntimeManifestTests.ps1 `
+                    -Manifest $manifest `
+                    -InstalledRuntime (Join-Path $installRoot 'SKSE/Plugins/CommunityShaders/bin') `
+                    -AioRuntime $runtimeDir
 
                   $archives = @(Get-ChildItem -LiteralPath dist -File | Where-Object {
                     $_.Name -match '^CommunityShaders_AIO-.*\.(7z|zip)$'
