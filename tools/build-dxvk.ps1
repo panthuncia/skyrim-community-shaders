@@ -18,6 +18,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $ScriptDir 'DependencyBuild.Common.ps1')
 $RepoRoot  = Split-Path -Parent $ScriptDir
 $DxvkSrc   = Join-Path $RepoRoot 'extern\dxvk'
 $BuildDir  = Join-Path $DxvkSrc 'build'
@@ -51,71 +52,11 @@ if ($missingSources.Count -ne 0) {
     exit 0
 }
 
-$sha = ''
-try { $sha = (& git -C $DxvkSrc rev-parse HEAD 2>$null) } catch {}
-if ($LASTEXITCODE -ne 0 -or -not $sha) {
-    if ($Required) {
-        Write-Error "[build-dxvk] could not resolve the extern/dxvk revision"
-        exit 1
-    }
-    $sha = 'unknown'
-}
-$short = $sha.Substring(0, [Math]::Min(8, $sha.Length))
-$statusOutput = $null
-try { $statusOutput = (& git -C $DxvkSrc status --porcelain --untracked-files=no --ignore-submodules=none 2>$null) } catch {}
-if ($LASTEXITCODE -ne 0) {
-    if ($Required) {
-        Write-Error "[build-dxvk] could not verify the extern/dxvk working tree"
-        exit 1
-    }
-    $dirty = $true
-    $stampReusable = $false
-} else {
-    $dirty = [bool]$statusOutput
-    $stampReusable = $true
-
-    # A parent diff records only that a nested submodule is dirty, not the
-    # contents of its working tree. Do not claim a reproducible required build
-    # from an input that cannot be fingerprinted by this stamp.
-    $nestedSubmoduleDirty = @($statusOutput | Where-Object { $_ -cmatch '^.m\s' }).Count -ne 0
-    if ($nestedSubmoduleDirty) {
-        if ($Required) {
-            Write-Error "[build-dxvk] a nested DXVK submodule has uncommitted changes"
-            exit 1
-        }
-        $stampReusable = $false
-    }
-}
-
-$diffHash = 'clean'
-if ($dirty) {
-    $diffHash = ''
-    $diffFile = Join-Path ([System.IO.Path]::GetTempPath()) ("cs-dxvk-diff-{0}.patch" -f [guid]::NewGuid())
-    try {
-        $diffOutputArg = "--output=$diffFile"
-        & git -C $DxvkSrc diff --no-ext-diff --binary --ignore-submodules=none --submodule=diff $diffOutputArg HEAD
-        $diffExitCode = $LASTEXITCODE
-        if ($diffExitCode -eq 0) {
-            $diffHash = (& git -C $DxvkSrc hash-object $diffFile 2>$null)
-            $hashExitCode = $LASTEXITCODE
-        } else {
-            $hashExitCode = 1
-        }
-    } catch {
-        $diffExitCode = 1
-        $hashExitCode = 1
-    } finally {
-        Remove-Item -LiteralPath $diffFile -Force -ErrorAction SilentlyContinue
-    }
-    if ($diffExitCode -ne 0 -or $hashExitCode -ne 0 -or -not $diffHash) {
-        if ($Required) {
-            Write-Error "[build-dxvk] could not fingerprint the extern/dxvk changes"
-            exit 1
-        }
-        $diffHash = 'unavailable'
-        $stampReusable = $false
-    }
-}
+$gitState = Get-DependencyGitState -Path $DxvkSrc -Label 'build-dxvk' -Required:$Required -IncludeSubmodules
+$sha = $gitState.Sha
+$short = $gitState.Short
+$diffHash = $gitState.DiffHash
+$stampReusable = $gitState.StampReusable
 
 $haveDlls = (Test-Path $D3d11Dll) -and (Test-Path $DxgiDll)
 $buildKey = "$sha-$diffHash|$BuildType|b_ndebug=true|cpp_args=/arch:AVX2|apis=d3d11,dxgi"

@@ -52,6 +52,7 @@ option(
     ON
 )
 option(TRACY_SUPPORT "Enable support for tracy profiler" OFF)
+option(DXVK_CLEANUP_TESTS "Build behavior-preserving DXVK state tests" OFF)
 option(ENABLE_ENB_EXTENDER "Enable ENBExtender reimplementation (weather blending, time-of-day, technique bindings)" ON)
 message("\tAuto plugin deployment: ${AUTO_PLUGIN_DEPLOYMENT}")
 message("\tZip to dist: ${ZIP_TO_DIST}")
@@ -137,6 +138,7 @@ target_include_directories(
         ${CLIB_UTIL_INCLUDE_DIRS}
         "${CMAKE_SOURCE_DIR}/package/Shaders"
         "${CMAKE_SOURCE_DIR}/extern/sk_hdr_png/include"
+        "${CMAKE_SOURCE_DIR}/extern/dxvk/include"
         ${DETOURS_INCLUDE_DIRS}
 )
 
@@ -167,6 +169,21 @@ target_link_libraries(
         Vulkan::Vulkan
         Streamline
 )
+
+if(DXVK_CLEANUP_TESTS)
+    enable_testing()
+    find_package(Catch2 CONFIG REQUIRED)
+    add_executable(DXVKCleanupTests tests/DXVKPresenterStateTests.cpp)
+    target_include_directories(DXVKCleanupTests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(DXVKCleanupTests PRIVATE Catch2::Catch2WithMain Vulkan::Vulkan)
+    add_test(NAME DXVKCleanupTests COMMAND DXVKCleanupTests)
+    find_program(POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
+    add_test(
+        NAME DependencyBuildTests
+        COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile -ExecutionPolicy Bypass
+            -File "${CMAKE_SOURCE_DIR}/tests/DependencyBuildTests.ps1"
+    )
+endif()
 
 # devbench bridge: opt-out via -DDEVBENCH_BRIDGE=OFF. When off, the port isn't required
 # and DevBenchBridge.cpp compiles to an empty Install().

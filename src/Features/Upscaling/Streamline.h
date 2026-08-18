@@ -41,6 +41,49 @@ public:
 		kSkipped,
 		kFailed,
 	};
+	struct FrameResources
+	{
+		ID3D11Resource* colorIn = nullptr;
+		ID3D11Resource* colorOut = nullptr;
+		ID3D11Resource* depth = nullptr;
+		ID3D11Resource* motionVectors = nullptr;
+	};
+	struct RenderDimensions
+	{
+		uint32_t renderWidth = 0;
+		uint32_t renderHeight = 0;
+		uint32_t outputWidth = 0;
+		uint32_t outputHeight = 0;
+	};
+	struct EvaluationOptions
+	{
+		uint32_t qualityMode = 0;
+		float sharpness = 0.0f;
+		float jitterX = 0.0f;
+		float jitterY = 0.0f;
+	};
+
+	[[nodiscard]] EvaluationResult EvaluateDLSS(
+		const FrameResources& a_resources, const RenderDimensions& a_dimensions, const EvaluationOptions& a_options)
+	{
+		return EvaluateDLSS(a_resources.colorIn, a_resources.colorOut, a_resources.depth, a_resources.motionVectors,
+			a_dimensions.renderWidth, a_dimensions.renderHeight, a_dimensions.outputWidth, a_dimensions.outputHeight,
+			a_options.qualityMode, a_options.jitterX, a_options.jitterY);
+	}
+	[[nodiscard]] EvaluationResult EvaluateXeSS(
+		const FrameResources& a_resources, const RenderDimensions& a_dimensions, const EvaluationOptions& a_options)
+	{
+		return EvaluateXeSS(a_resources.colorIn, a_resources.colorOut, a_resources.depth, a_resources.motionVectors,
+			a_dimensions.renderWidth, a_dimensions.renderHeight, a_dimensions.outputWidth, a_dimensions.outputHeight,
+			a_options.qualityMode, a_options.sharpness, a_options.jitterX, a_options.jitterY);
+	}
+	[[nodiscard]] EvaluationResult EvaluateFSR(
+		const FrameResources& a_resources, const RenderDimensions& a_dimensions, const EvaluationOptions& a_options)
+	{
+		return EvaluateFSR(a_resources.colorIn, a_resources.colorOut, a_resources.depth, a_resources.motionVectors,
+			a_dimensions.renderWidth, a_dimensions.renderHeight, a_dimensions.outputWidth, a_dimensions.outputHeight,
+			a_options.qualityMode, a_options.sharpness, a_options.jitterX, a_options.jitterY);
+	}
 
 	[[nodiscard]] EvaluationResult EvaluateDLSS(ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut,
 		ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,

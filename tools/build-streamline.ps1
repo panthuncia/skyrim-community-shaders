@@ -18,6 +18,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $ScriptDir 'DependencyBuild.Common.ps1')
 $RepoRoot  = Split-Path -Parent $ScriptDir
 $SlSrc     = Join-Path $RepoRoot 'extern\Streamline'
 $Artifacts = Join-Path $SlSrc '_artifacts'
@@ -67,33 +68,16 @@ if ((-not (Test-Path $ffxInc)) -or (-not (Test-Path $xessInc))) {
 }
 
 # Dirty tracked sources bypass the commit-based incremental skip.
-$sha = ''
-try { $sha = (& git -C $SlSrc rev-parse HEAD 2>$null) } catch {}
-if ($LASTEXITCODE -ne 0 -or -not $sha) {
-    if ($Required) {
-        Write-Error "[build-streamline] could not resolve the extern/Streamline revision"
-        exit 1
-    }
-    $sha = 'unknown'
-}
-$short = $sha.Substring(0, [Math]::Min(8, $sha.Length))
-$statusOutput = $null
-try { $statusOutput = (& git -C $SlSrc status --porcelain --untracked-files=no 2>$null) } catch {}
-if ($LASTEXITCODE -ne 0) {
-    if ($Required) {
-        Write-Error "[build-streamline] could not verify the extern/Streamline working tree"
-        exit 1
-    }
-    $dirty = $true
-} else {
-    $dirty = [bool]$statusOutput
-}
+$gitState = Get-DependencyGitState -Path $SlSrc -Label 'build-streamline' -Required:$Required
+$sha = $gitState.Sha
+$short = $gitState.Short
+$buildKey = "$sha-$($gitState.DiffHash)|$Config"
 $Stamp = Join-Path $Artifacts ".cs-sl-sha-$Config"
 
 $dlls     = $plugins | ForEach-Object { Get-PluginDll $_ }
 $haveDlls = ($dlls | ForEach-Object { Test-Path $_ }) -notcontains $false
 
-if (-not $dirty -and $haveDlls -and (Test-Path $Stamp) -and ((Get-Content $Stamp -Raw).Trim() -eq $sha)) {
+if ($gitState.StampReusable -and $haveDlls -and (Test-Path $Stamp) -and ((Get-Content $Stamp -Raw).Trim() -eq $buildKey)) {
     Write-Host "[build-streamline] fork plugins up to date ($short) - skipping"
     exit 0
 }
@@ -157,6 +141,6 @@ if ($missing) {
     exit 1
 }
 
-Set-Content -Path $Stamp -Value $sha -Encoding ascii
+Set-Content -Path $Stamp -Value $buildKey -Encoding ascii
 Write-Host "[build-streamline] done ($short)"
 exit 0

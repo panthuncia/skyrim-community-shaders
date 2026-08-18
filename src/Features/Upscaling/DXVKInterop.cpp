@@ -1,5 +1,6 @@
 #include "DXVKInterop.h"
 
+#include "../../DxvkLoader.h"
 #include "Globals.h"
 
 #include <algorithm>
@@ -331,147 +332,39 @@ DXVKInterop* DXVKInterop::GetSingleton()
 	return &singleton;
 }
 
-VkColorSpaceKHR DXVKInterop::RequestedPresenterColorSpace(bool a_hdr)
-{
-	return a_hdr ? VK_COLOR_SPACE_HDR10_ST2084_EXT : VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-}
-
-DXVKInterop::PresenterEncoding DXVKInterop::ClassifyPresenterEncoding(const PresenterSurfaceState& a_state)
-{
-	if (!a_state.serial)
-		return PresenterEncoding::kUnknown;
-
-	if (a_state.requestedColorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR &&
-		a_state.effectiveColorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
-		return PresenterEncoding::kSDR;
-
-	if (a_state.requestedColorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
-		if (a_state.effectiveColorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT)
-			return PresenterEncoding::kHDR10;
-		if (a_state.effectiveColorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT)
-			return PresenterEncoding::kHDR10ScRGBFallback;
-	}
-
-	return PresenterEncoding::kUnknown;
-}
-
-bool DXVKInterop::PresenterStateMatches(
-	const PresenterSurfaceState& a_state, VkColorSpaceKHR a_requestedColorSpace)
-{
-	if (!a_state.serial || a_state.requestedColorSpace != a_requestedColorSpace)
-		return false;
-
-	const PresenterEncoding encoding = ClassifyPresenterEncoding(a_state);
-	if (a_requestedColorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT)
-		return encoding == PresenterEncoding::kHDR10 ||
-		       encoding == PresenterEncoding::kHDR10ScRGBFallback;
-	return a_requestedColorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR &&
-	       encoding == PresenterEncoding::kSDR;
-}
-
 bool DXVKInterop::RefreshPresenterSurfaceState()
 {
-	if (!getPresenterSurfaceState)
-		return false;
-
-	uint32_t format = VK_FORMAT_UNDEFINED;
-	uint32_t requestedColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-	uint32_t effectiveColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-	const uint64_t serial = getPresenterSurfaceState(&format, &requestedColorSpace, &effectiveColorSpace);
-	if (!serial)
-		return false;
-
-	std::lock_guard lock(presenterStateMutex);
-	if (serial <= observedPresenterState.serial)
-		return false;
-
-	observedPresenterState.serial = serial;
-	observedPresenterState.format = static_cast<VkFormat>(format);
-	observedPresenterState.requestedColorSpace = static_cast<VkColorSpaceKHR>(requestedColorSpace);
-	observedPresenterState.effectiveColorSpace = static_cast<VkColorSpaceKHR>(effectiveColorSpace);
-	logger::info("[DXVKInterop] Observed presenter surface serial {}: format={}, requestedColorSpace={}, effectiveColorSpace={}",
-		serial, format, requestedColorSpace, effectiveColorSpace);
-	return true;
+	return presenterState.Refresh();
 }
 
 void DXVKInterop::CommitPresenterSurfaceStateForRenderFrame()
 {
-	std::lock_guard lock(presenterStateMutex);
-	if (!observedPresenterState.serial ||
-		observedPresenterState.serial <= committedPresenterState.serial)
-		return;
-
-	if (presenterTransitionPending) {
-		if (observedPresenterState.serial <= presenterTransitionBaselineSerial ||
-			observedPresenterState.requestedColorSpace != presenterTransitionRequestedColorSpace)
-			return;
-		presenterTransitionPending = false;
-	}
-
-	committedPresenterState = observedPresenterState;
-	logger::info("[DXVKInterop] Committed presenter surface serial {} for render frames",
-		committedPresenterState.serial);
-	if (ClassifyPresenterEncoding(committedPresenterState) == PresenterEncoding::kHDR10ScRGBFallback) {
-		logger::warn("[DXVKInterop] HDR frame generation disabled for the scRGB presenter fallback; "
-		             "a HUD-less image rendered directly in the presenter encoding is required");
-	}
+	presenterState.CommitForRenderFrame();
 }
 
 void DXVKInterop::BeginPresenterColorSpaceTransition(bool a_hdr, bool a_requireNewSerial)
 {
-	const VkColorSpaceKHR requestedColorSpace = RequestedPresenterColorSpace(a_hdr);
-	std::lock_guard lock(presenterStateMutex);
-
-	if (presenterTransitionPending &&
-		presenterTransitionRequestedColorSpace == requestedColorSpace)
-		return;
-
-	if (!presenterTransitionPending && !a_requireNewSerial &&
-		(PresenterStateMatches(committedPresenterState, requestedColorSpace) ||
-		 PresenterStateMatches(observedPresenterState, requestedColorSpace)))
-		return;
-
-	presenterTransitionPending = true;
-	presenterTransitionRequestedColorSpace = requestedColorSpace;
-	presenterTransitionBaselineSerial = observedPresenterState.serial > committedPresenterState.serial
-	                                    ? observedPresenterState.serial
-	                                    : committedPresenterState.serial;
-	logger::info("[DXVKInterop] Presenter color-space transition started: target={}, baselineSerial={}",
-		static_cast<uint32_t>(requestedColorSpace), presenterTransitionBaselineSerial);
+	presenterState.BeginTransition(a_hdr, a_requireNewSerial);
 }
 
 void DXVKInterop::CancelPresenterColorSpaceTransition(bool a_hdr)
 {
-	const VkColorSpaceKHR requestedColorSpace = RequestedPresenterColorSpace(a_hdr);
-	std::lock_guard lock(presenterStateMutex);
-	if (presenterTransitionPending &&
-		presenterTransitionRequestedColorSpace == requestedColorSpace) {
-		presenterTransitionPending = false;
-		logger::warn("[DXVKInterop] Presenter color-space transition cancelled for target={}",
-			static_cast<uint32_t>(requestedColorSpace));
-	}
+	presenterState.CancelTransition(a_hdr);
 }
 
 DXVKInterop::PresenterEncoding DXVKInterop::GetPresenterEncodingForFrame() const
 {
-	std::lock_guard lock(presenterStateMutex);
-	return presenterTransitionPending ? PresenterEncoding::kUnknown :
-	                                    ClassifyPresenterEncoding(committedPresenterState);
+	return presenterState.GetEncodingForFrame();
 }
 
 VkFormat DXVKInterop::GetPresenterFormatForFrame() const
 {
-	std::lock_guard lock(presenterStateMutex);
-	return presenterTransitionPending ? VK_FORMAT_UNDEFINED : committedPresenterState.format;
+	return presenterState.GetFormatForFrame();
 }
 
 bool DXVKInterop::IsPresenterStateReadyForFrame(bool a_hdr) const
 {
-	std::lock_guard lock(presenterStateMutex);
-	if (presenterTransitionPending ||
-		!PresenterStateMatches(committedPresenterState, RequestedPresenterColorSpace(a_hdr)))
-		return false;
-	return ClassifyPresenterEncoding(committedPresenterState) != PresenterEncoding::kHDR10ScRGBFallback;
+	return presenterState.IsReadyForFrame(a_hdr);
 }
 
 bool DXVKInterop::Initialize()
@@ -530,21 +423,14 @@ bool DXVKInterop::Initialize()
 	vkDestroyImageView = reinterpret_cast<PFN_vkDestroyImageView>(
 		vkGetDeviceProcAddr(device, "vkDestroyImageView"));
 
-	if (HMODULE module = GetModuleHandleW(L"dxvk_d3d11.dll")) {
-		enqueueInteropCommandBuffer = reinterpret_cast<uint64_t (*)(VkCommandBuffer, VkSemaphore, VkFence)>(
-			GetProcAddress(module, "dxvkEnqueueInteropCommandBuffer"));
-		getPresentWaitSemaphoreState = reinterpret_cast<uint32_t (*)(uint64_t)>(
-			GetProcAddress(module, "dxvkGetPresentWaitSemaphoreState"));
-		clearPresentWaitSemaphore = reinterpret_cast<uint32_t (*)(uint64_t)>(
-			GetProcAddress(module, "dxvkClearPresentWaitSemaphore"));
-		cancelPresentWaitSemaphore = reinterpret_cast<uint32_t (*)(VkSemaphore)>(
-			GetProcAddress(module, "dxvkCancelPresentWaitSemaphore"));
-		releaseQueuedPresentWaitSemaphoresAfterIdle = reinterpret_cast<uint32_t (*)()>(
-			GetProcAddress(module, "dxvkReleaseQueuedPresentWaitSemaphoresAfterIdle"));
-		synchronousPresentControlAvailable = GetProcAddress(module, "dxvkSetSyncPresent") != nullptr;
-		getPresenterSurfaceState = reinterpret_cast<GetPresenterSurfaceStateFn>(
-			GetProcAddress(module, "dxvkGetPresenterSurfaceState"));
-	}
+	const auto& api = DxvkLoader::GetApi();
+	enqueueInteropCommandBuffer = api.enqueueInteropCommandBuffer;
+	getPresentWaitSemaphoreState = api.getPresentWaitSemaphoreState;
+	clearPresentWaitSemaphore = api.clearPresentWaitSemaphore;
+	cancelPresentWaitSemaphore = api.cancelPresentWaitSemaphore;
+	releaseQueuedPresentWaitSemaphoresAfterIdle = api.releaseQueuedPresentWaitSemaphoresAfterIdle;
+	synchronousPresentControlAvailable = api.setSyncPresent != nullptr;
+	presenterState.SetQuery(api.getPresenterSurfaceState);
 	char splitValue[2]{};
 	presentQueueSplit = GetEnvironmentVariableA("DXVK_PRESENT_QUEUE_SPLIT", splitValue,
 		static_cast<DWORD>(std::size(splitValue))) != 0 && splitValue[0] == '1';
@@ -553,7 +439,7 @@ bool DXVKInterop::Initialize()
 		logger::warn("[DXVKInterop] acknowledged present-wait semaphore interop is unavailable - DLSS-G disabled");
 	if (!synchronousPresentControlAvailable)
 		logger::warn("[DXVKInterop] dxvkSetSyncPresent is unavailable - DLSS-G disabled");
-	if (!getPresenterSurfaceState)
+	if (!api.getPresenterSurfaceState)
 		logger::warn("[DXVKInterop] dxvkGetPresenterSurfaceState is unavailable - frame generation disabled");
 	if (presentQueueSplit)
 		logger::warn("[DXVKInterop] DXVK_PRESENT_QUEUE_SPLIT is incompatible with reusable DLSS-G present semaphores");

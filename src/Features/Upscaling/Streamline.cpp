@@ -1,6 +1,8 @@
 #include "Streamline.h"
 
 #include "DXVKInterop.h"
+#include "FrameGenController.h"
+#include "FrameGenWatchdog.h"
 
 #include "../../DxvkLoader.h"
 #include "../../Globals.h"
@@ -118,9 +120,8 @@ namespace
 		std::atomic<uint64_t> activePresentStartNs{ 0 };
 		std::atomic<uint64_t> renderHeartbeatNs{ 0 };
 		std::atomic<uint64_t> presentHeartbeatNs{ 0 };
-		std::atomic<bool> watchdogTriggered{ false };
-		std::jthread watchdog;
 	} g_sl;
+	FrameGenWatchdog g_frameGenWatchdog;
 
 	struct ReflexSleepSample
 	{
@@ -191,21 +192,7 @@ namespace
 			sleepPayload, reportPayload);
 	}
 
-	struct DxvkPresentCallbackInfo
-	{
-		uint32_t size;
-		uint32_t version;
-		uint32_t frameGenOwner;
-		uint32_t imageIndex;
-		uint64_t frameId;
-		uint64_t swapchain;
-		uint64_t swapchainSerial;
-		uint64_t presenter;
-		uint64_t queue;
-		uint64_t presentWaitGeneration;
-		uint32_t pendingPresentWaitCount;
-		int32_t presentResult;
-	};
+	using DxvkPresentCallbackInfo = CsDxvkPresentCallbackInfo;
 
 	uint64_t PresentClockNs()
 	{
@@ -213,71 +200,18 @@ namespace
 			std::chrono::steady_clock::now().time_since_epoch()).count());
 	}
 
-	bool IsForegroundSkyrim()
-	{
-		HWND window = GetForegroundWindow();
-		if (!window)
-			return false;
-		DWORD processId = 0;
-		GetWindowThreadProcessId(window, &processId);
-		return processId == GetCurrentProcessId();
-	}
-
-	void RequestForcedTdr()
-	{
-		wchar_t systemDir[MAX_PATH]{};
-		if (!GetSystemDirectoryW(systemDir, MAX_PATH))
-			return;
-		std::wstring command = L"\"" + std::wstring(systemDir) +
-			L"\\schtasks.exe\" /Run /TN \"CommunityShaders GPU Recovery\"";
-		STARTUPINFOW startup{ sizeof(startup) };
-		PROCESS_INFORMATION process{};
-		if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
-			CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
-			CloseHandle(process.hThread);
-			CloseHandle(process.hProcess);
-			logger::critical("[DLSSG-Watchdog] requested forced TDR through scheduled recovery task");
-		} else {
-			logger::critical("[DLSSG-Watchdog] recovery task launch failed (Win32 error {}); run community_shaders_recover_hung_gpu.ps1 manually",
-				GetLastError());
-		}
-	}
-
 	void StartDlssgWatchdog()
 	{
-		if (g_sl.watchdog.joinable())
-			return;
-		g_sl.watchdog = std::jthread([](std::stop_token stop) {
-			SetThreadDescription(GetCurrentThread(), L"CS DLSS-G hang watchdog");
-			while (!stop.stop_requested()) {
-				std::this_thread::sleep_for(std::chrono::seconds(1));
-				if (!g_sl.dlssgModeOn.load(std::memory_order_acquire)) {
-					g_sl.watchdogTriggered.store(false, std::memory_order_release);
-					continue;
-				}
-				const uint64_t now = PresentClockNs();
-				const uint64_t render = g_sl.renderHeartbeatNs.load(std::memory_order_acquire);
-				const uint64_t present = g_sl.presentHeartbeatNs.load(std::memory_order_acquire);
-				constexpr uint64_t timeoutNs = 8'000'000'000ull;
-				if (!render || !present || now - render < timeoutNs || now - present < timeoutNs ||
-					!IsForegroundSkyrim())
-					continue;
-				bool expected = false;
-				if (g_sl.watchdogTriggered.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-					logger::critical("[DLSSG-Watchdog] render and present stalled for {} ms; forcing WDDM recovery",
-						(now - std::max(render, present)) / 1'000'000ull);
-					RequestForcedTdr();
-				}
-			}
-		});
+		g_frameGenWatchdog.Start(g_sl.dlssgModeOn, g_sl.renderHeartbeatNs, g_sl.presentHeartbeatNs);
 	}
 
 	// Feature load changes are applied only while the swapchain is torn down.
-	std::atomic<bool> g_dlssgDesiredLoaded{ false };
-	std::atomic<bool> g_dlssgCurrentlyLoaded{ false };
-	std::atomic<bool> g_fsrfgDesiredLoaded{ false };
-	std::atomic<bool> g_fsrfgCurrentlyLoaded{ false };
-	std::atomic<bool> g_fsrfgOwnsPresent{ false };
+	auto& g_frameGenRuntime = FrameGen::Controller::GetSingleton()->GetRuntimeState();
+	auto& g_dlssgDesiredLoaded = g_frameGenRuntime.dlssgDesiredLoaded;
+	auto& g_dlssgCurrentlyLoaded = g_frameGenRuntime.dlssgCurrentlyLoaded;
+	auto& g_fsrfgDesiredLoaded = g_frameGenRuntime.fsrfgDesiredLoaded;
+	auto& g_fsrfgCurrentlyLoaded = g_frameGenRuntime.fsrfgCurrentlyLoaded;
+	auto& g_fsrfgOwnsPresent = g_frameGenRuntime.fsrfgOwnsPresent;
 
 	// Keep this free of C++ unwinding because it executes inside __try.
 	bool ReconcileFgFeatureLoad(sl::Feature a_feature, std::atomic<bool>& a_desired, std::atomic<bool>& a_current)
@@ -405,11 +339,11 @@ namespace
 	uint32_t DxvkFrameGenerationOwnsSwapchain(VkSwapchainKHR a_swapchain)
 	{
 		if (g_dlssgCurrentlyLoaded.load(std::memory_order_acquire))
-			return 2u;
+			return CS_DXVK_FRAME_GEN_DLSS_G;
 		if (g_sl.dispatchFaulted.load(std::memory_order_acquire))
-			return g_fsrfgOwnsPresent.load(std::memory_order_acquire) ? 1u : 0u;
+			return g_fsrfgOwnsPresent.load(std::memory_order_acquire) ? CS_DXVK_FRAME_GEN_FSR : CS_DXVK_FRAME_GEN_NONE;
 		if (!g_fsrfgOwnsPresent.load(std::memory_order_acquire) || !g_sl.slFSRFrameGenerationOwnsSwapchain)
-			return 0u;
+			return CS_DXVK_FRAME_GEN_NONE;
 
 		bool ownsSwapchain = false;
 		__try {
@@ -417,7 +351,7 @@ namespace
 		} __except (EXCEPTION_EXECUTE_HANDLER) {
 			g_sl.dispatchFaulted = true;
 		}
-		return ownsSwapchain ? 1u : 0u;
+		return ownsSwapchain ? CS_DXVK_FRAME_GEN_FSR : CS_DXVK_FRAME_GEN_NONE;
 	}
 
 	uint32_t EmitBridgedPresentMarker(bool a_begin)
@@ -951,16 +885,10 @@ void Streamline::SetVulkanDevice()
 		featureXeSS = g_sl.slXeSSSetOptions != nullptr;
 	}
 
-	HMODULE dxvkModule = GetModuleHandleW(L"dxvk_d3d11.dll");
-	const bool frameGenerationInteropReady = dxvkModule &&
-		GetProcAddress(dxvkModule, "dxvkRequestSwapchainRecreate") &&
-		GetProcAddress(dxvkModule, "dxvkSetSyncPresent") &&
-		GetProcAddress(dxvkModule, "dxvkGetPresenterSurfaceState") &&
-		GetProcAddress(dxvkModule, "dxvkSetSwapchainTornDownCallback") &&
-		GetProcAddress(dxvkModule, "dxvkSetFrameGenOwnershipQuery");
+	const auto& dxvkApi = DxvkLoader::GetApi();
+	const bool frameGenerationInteropReady = dxvkApi.HasFrameGenerationControl();
 	const bool dlssgInteropReady = frameGenerationInteropReady &&
-		GetProcAddress(dxvkModule, "dxvkSetPresentBeginCallback") &&
-		GetProcAddress(dxvkModule, "dxvkSetPresentCompletedCallback");
+		dxvkApi.setPresentBeginCallback && dxvkApi.setPresentCompletedCallback;
 	featureDLSSG = featureDLSSG && dlssgHardware && dlssgInteropReady &&
 	               dxvk->FrameGenerationQueueInteropReady();
 	featureFSRFG = featureFSRFG && frameGenerationInteropReady &&
@@ -2558,39 +2486,29 @@ bool Streamline::EnsureDLSSGPresentTag()
 void Streamline::RegisterDxvkOwnershipPredicate()
 {
 	// Streamline-owned swapchains must bypass DXVK's present-wait worker.
-	HMODULE dxvkModule = GetModuleHandleW(L"dxvk_d3d11.dll");
-	if (!dxvkModule) {
+	const auto& api = DxvkLoader::GetApi();
+	if (!api.d3d11Module) {
 		logger::warn("[Streamline] DXVK module not loaded — cannot register ownership predicate");
 		return;
 	}
-	using SetQueryFn = void (*)(uint32_t (*)(VkSwapchainKHR));
-	auto setQuery = reinterpret_cast<SetQueryFn>(GetProcAddress(dxvkModule, "dxvkSetFrameGenOwnershipQuery"));
-	if (!setQuery) {
+	if (!api.setFrameGenOwnershipQuery) {
 		logger::warn("[Streamline] dxvkSetFrameGenOwnershipQuery not found in DXVK module");
 		return;
 	}
-	setQuery(&DxvkFrameGenerationOwnsSwapchain);
+	api.setFrameGenOwnershipQuery(&DxvkFrameGenerationOwnsSwapchain);
 	logger::info("[Streamline] registered DXVK frame-generation ownership predicate");
 
-	using PresentCallbackFn = void (*)(const DxvkPresentCallbackInfo*);
-	using SetPresentCompletedFn = void (*)(PresentCallbackFn);
-	using SetPresentBeginFn = void (*)(PresentCallbackFn);
-	auto setPresentBegin = reinterpret_cast<SetPresentBeginFn>(
-		GetProcAddress(dxvkModule, "dxvkSetPresentBeginCallback"));
-	auto setPresentCompleted = reinterpret_cast<SetPresentCompletedFn>(
-		GetProcAddress(dxvkModule, "dxvkSetPresentCompletedCallback"));
-	if (setPresentBegin && setPresentCompleted) {
-		setPresentBegin(&DxvkPresentBeginCallback);
-		setPresentCompleted(&DxvkPresentCompletedCallback);
+	if (api.setPresentBeginCallback && api.setPresentCompletedCallback) {
+		api.setPresentBeginCallback(&DxvkPresentBeginCallback);
+		api.setPresentCompletedCallback(&DxvkPresentCompletedCallback);
 		logger::info("[Streamline] registered DXVK Vulkan present-thread options/state callbacks");
 	} else {
 		logger::warn("[Streamline] DXVK DLSS-G present-thread bridge unavailable");
 	}
 
 	// Streamline features may only be loaded or unloaded while no swapchain exists.
-	using SetTornDownFn = void (*)(bool (*)());
-	if (auto setTornDown = reinterpret_cast<SetTornDownFn>(GetProcAddress(dxvkModule, "dxvkSetSwapchainTornDownCallback"))) {
-		setTornDown(&DxvkSwapchainTornDownCallback);
+	if (api.setSwapchainTornDownCallback) {
+		api.setSwapchainTornDownCallback(&DxvkSwapchainTornDownCallback);
 		logger::info("[Streamline] registered DXVK swapchain-torn-down callback");
 	} else {
 		logger::warn("[Streamline] dxvkSetSwapchainTornDownCallback not found — frame-generation switching disabled");
@@ -2643,12 +2561,7 @@ bool Streamline::IsFSRFGPresentOwner() const
 void Streamline::RequestDxvkSwapchainRecreate(const char* a_reason)
 {
 	// Recreate the Vulkan swapchain to apply runtime feature load changes.
-	static auto requestRecreate = []() -> void (*)() {
-		HMODULE dxvkModule = GetModuleHandleW(L"dxvk_d3d11.dll");
-		if (!dxvkModule)
-			return nullptr;
-		return reinterpret_cast<void (*)()>(GetProcAddress(dxvkModule, "dxvkRequestSwapchainRecreate"));
-	}();
+	auto requestRecreate = DxvkLoader::GetApi().requestSwapchainRecreate;
 	if (requestRecreate) {
 		requestRecreate();
 		logger::info("[Streamline] requested DXVK swapchain recreate ({})", a_reason);
@@ -2664,12 +2577,7 @@ void Streamline::PushDxvkSyncPresent(bool a_sync)
 	if (s_applied.load(std::memory_order_acquire) == requested)
 		return;
 
-	static auto setSync = []() -> void (*)(uint32_t) {
-		HMODULE dxvkModule = GetModuleHandleW(L"dxvk_d3d11.dll");
-		if (!dxvkModule)
-			return nullptr;
-		return reinterpret_cast<void (*)(uint32_t)>(GetProcAddress(dxvkModule, "dxvkSetSyncPresent"));
-	}();
+	auto setSync = DxvkLoader::GetApi().setSyncPresent;
 	if (setSync) {
 		setSync(a_sync ? 1u : 0u);
 		s_applied.store(requested, std::memory_order_release);
@@ -2689,11 +2597,7 @@ void Streamline::PushDxvkPresentQueueDepth(uint32_t a_depth)
 	if (s_applied.load(std::memory_order_acquire) == a_depth)
 		return;
 
-	static auto setDepth = []() -> void (*)(uint32_t) {
-		HMODULE dxvkModule = GetModuleHandleW(L"dxvk_d3d11.dll");
-		return dxvkModule ? reinterpret_cast<void (*)(uint32_t)>(
-			GetProcAddress(dxvkModule, "dxvkSetPresentQueueDepth")) : nullptr;
-	}();
+	auto setDepth = DxvkLoader::GetApi().setPresentQueueDepth;
 	if (setDepth) {
 		setDepth(a_depth);
 		s_applied.store(a_depth, std::memory_order_release);

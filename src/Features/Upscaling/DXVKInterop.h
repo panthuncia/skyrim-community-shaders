@@ -1,5 +1,8 @@
 #pragma once
 
+#include "DXVKPresenterState.h"
+#include "DXVKInteropState.h"
+
 // DXVK COM interfaces used to access its Vulkan device, queue, and backing images.
 // Keep the declarations ABI-compatible with DXVK's dxgi_interfaces.h.
 
@@ -57,16 +60,10 @@ IDXGIVkInteropDevice : public IUnknown
 };
 
 /** @brief Accesses DXVK's Vulkan device through its D3D11 interop interfaces. */
-class DXVKInterop
+class DXVKInterop : private DXVKCommandRingState, private DXVKResourceRetirementState
 {
 public:
-	enum class PresenterEncoding : uint8_t
-	{
-		kUnknown,
-		kSDR,
-		kHDR10,
-		kHDR10ScRGBFallback,
-	};
+	using PresenterEncoding = DXVKPresenterState::Encoding;
 
 	class CommandTransaction
 	{
@@ -216,37 +213,6 @@ public:
 private:
 	DXVKInterop() = default;
 
-	struct PresenterSurfaceState
-	{
-		uint64_t serial = 0;
-		VkFormat format = VK_FORMAT_UNDEFINED;
-		VkColorSpaceKHR requestedColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-		VkColorSpaceKHR effectiveColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-	};
-
-	struct FSRPresentViewGroup
-	{
-		uint32_t slot = UINT32_MAX;
-		std::vector<VkImageView> views;
-	};
-
-	struct PresentWaitSubmission
-	{
-		uint32_t slot = UINT32_MAX;
-		uint64_t generation = 0;
-	};
-	struct InputCompletion
-	{
-		VkSemaphore semaphore = VK_NULL_HANDLE;
-		uint64_t value = 0;
-	};
-
-	using GetPresenterSurfaceStateFn = uint64_t (*)(uint32_t*, uint32_t*, uint32_t*);
-
-	static VkColorSpaceKHR RequestedPresenterColorSpace(bool a_hdr);
-	static PresenterEncoding ClassifyPresenterEncoding(const PresenterSurfaceState& a_state);
-	static bool PresenterStateMatches(
-		const PresenterSurfaceState& a_state, VkColorSpaceKHR a_requestedColorSpace);
 	bool ClearReleasedPresentWaitsAfterIdle();
 	bool IsInputCompletionReady(uint32_t a_slot);
 	void ReleaseRetainedFSRResourcesIfSafe();
@@ -265,45 +231,6 @@ private:
 	PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr = nullptr;
 	PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr = nullptr;
 	PFN_vkDestroyImageView vkDestroyImageView = nullptr;
-	GetPresenterSurfaceStateFn getPresenterSurfaceState = nullptr;
+	DXVKPresenterState presenterState;
 
-	mutable std::mutex presenterStateMutex;
-	PresenterSurfaceState observedPresenterState;
-	PresenterSurfaceState committedPresenterState;
-	bool presenterTransitionPending = false;
-	uint64_t presenterTransitionBaselineSerial = 0;
-	VkColorSpaceKHR presenterTransitionRequestedColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-
-	mutable std::recursive_mutex commandRingMutex;
-	VkCommandPool commandPool = VK_NULL_HANDLE;
-	std::vector<VkCommandBuffer> commandBuffers;
-	std::vector<VkFence> commandFences;
-	std::vector<VkSemaphore> presentWaitSemaphores;
-	std::vector<bool> presentWaitInUse;
-	std::vector<InputCompletion> inputCompletions;
-	uint32_t pendingPresentWaitSlot = UINT32_MAX;
-	uint64_t pendingPresentWaitGeneration = 0;
-	std::vector<PresentWaitSubmission> outstandingPresentWaitSubmissions;
-	uint64_t (*enqueueInteropCommandBuffer)(VkCommandBuffer, VkSemaphore, VkFence) = nullptr;
-	uint32_t (*getPresentWaitSemaphoreState)(uint64_t) = nullptr;
-	uint32_t (*clearPresentWaitSemaphore)(uint64_t) = nullptr;
-	uint32_t (*cancelPresentWaitSemaphore)(VkSemaphore) = nullptr;
-	uint32_t (*releaseQueuedPresentWaitSemaphoresAfterIdle)() = nullptr;
-	bool presentWaitInteropTerminalFault = false;
-	bool synchronousPresentControlAvailable = false;
-	bool presentQueueSplit = false;
-	bool commandRingFaulted = false;
-	bool vulkanResourceDestructionTerminalFault = false;
-	mutable bool commandRingSubmissionsIdleProven = false;
-	mutable bool submissionQueueLockUncertain = false;
-	// Indexed with the command ring.
-	std::vector<std::vector<VkImageView>> pendingViewDeletes;
-	std::vector<std::vector<winrt::com_ptr<ID3D11Resource>>> pendingResourceReleases;
-	// FFX may consume tagged images on its own queues after host evaluation.
-	std::vector<winrt::com_ptr<ID3D11Resource>> retainedPresentResources;
-	std::vector<FSRPresentViewGroup> pendingFSRPresentViewGroups;
-	std::vector<FSRPresentViewGroup> quarantinedFSRPresentViewGroups;
-	bool fsrSwapchainTeardownConfirmed = false;
-	uint32_t framesInFlight = 0;
-	uint32_t commandFrameIndex = 0;
 };

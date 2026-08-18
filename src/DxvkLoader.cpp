@@ -4,6 +4,7 @@
 #include "State.h"
 
 #include <filesystem>
+#include <utility>
 
 namespace DxvkLoader
 {
@@ -11,8 +12,46 @@ namespace DxvkLoader
 	{
 		bool g_attempted = false;
 		bool g_loaded = false;
+		Api g_api;
 		decltype(&D3D11CreateDeviceAndSwapChain) g_d3d11Create = nullptr;
 		decltype(&CreateDXGIFactory) g_createFactory = nullptr;
+
+		template <class T>
+		T Resolve(HMODULE a_module, const char* a_name)
+		{
+			return reinterpret_cast<T>(::GetProcAddress(a_module, a_name));
+		}
+
+		class UniqueModule
+		{
+		public:
+			explicit UniqueModule(HMODULE a_module = nullptr) : module(a_module) {}
+			~UniqueModule() { reset(); }
+			UniqueModule(const UniqueModule&) = delete;
+			UniqueModule& operator=(const UniqueModule&) = delete;
+			HMODULE get() const { return module; }
+			HMODULE release() { return std::exchange(module, nullptr); }
+			void reset()
+			{
+				if (module)
+					::FreeLibrary(std::exchange(module, nullptr));
+			}
+
+		private:
+			HMODULE module;
+		};
+	}
+
+	bool Api::HasFrameGenerationControl() const
+	{
+		return requestSwapchainRecreate && setSyncPresent && getPresenterSurfaceState &&
+		       setSwapchainTornDownCallback && setFrameGenOwnershipQuery;
+	}
+
+	bool Api::HasPresentWaitInterop() const
+	{
+		return enqueueInteropCommandBuffer && getPresentWaitSemaphoreState && clearPresentWaitSemaphore &&
+		       cancelPresentWaitSemaphore && releaseQueuedPresentWaitSemaphoresAfterIdle;
 	}
 
 	// Resolve relative to the plugin for mod-manager VFS compatibility.
@@ -70,31 +109,59 @@ namespace DxvkLoader
 		const auto d3d11Path = (dir / L"dxvk_d3d11.dll").wstring();
 
 		// dxvk_d3d11.dll imports dxvk_dxgi.dll by base name.
-		const HMODULE dxgiMod = ::LoadLibraryExW(dxgiPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-		if (!dxgiMod) {
+		UniqueModule dxgiMod(::LoadLibraryExW(dxgiPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH));
+		if (!dxgiMod.get()) {
 			const DWORD err = ::GetLastError();
 			logger::error("[DXVK] Failed to load dxvk_dxgi.dll from '{}' (error {})", dir.string(), err);
 			return false;
 		}
-		const HMODULE d3d11Mod = ::LoadLibraryExW(d3d11Path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-		if (!d3d11Mod) {
+		UniqueModule d3d11Mod(::LoadLibraryExW(d3d11Path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH));
+		if (!d3d11Mod.get()) {
 			const DWORD err = ::GetLastError();
 			logger::error("[DXVK] Failed to load dxvk_d3d11.dll from '{}' (error {})", dir.string(), err);
 			return false;
 		}
 
-		g_d3d11Create = reinterpret_cast<decltype(g_d3d11Create)>(::GetProcAddress(d3d11Mod, "D3D11CreateDeviceAndSwapChain"));
-		g_createFactory = reinterpret_cast<decltype(g_createFactory)>(::GetProcAddress(dxgiMod, "CreateDXGIFactory"));
+		auto d3d11Create = Resolve<decltype(g_d3d11Create)>(d3d11Mod.get(), "D3D11CreateDeviceAndSwapChain");
+		auto createFactory = Resolve<decltype(g_createFactory)>(dxgiMod.get(), "CreateDXGIFactory");
+		auto getApiVersion = Resolve<PFN_csDxvkGetApiVersion>(d3d11Mod.get(), "dxvkGetCsApiVersion");
 
-		if (!g_d3d11Create || !g_createFactory) {
-			logger::error("[DXVK] Resolved DXVK DLLs but missing exports (d3d11create={}, createfactory={})",
-				g_d3d11Create != nullptr, g_createFactory != nullptr);
+		if (!d3d11Create || !createFactory || !getApiVersion || getApiVersion() != CS_DXVK_API_VERSION) {
+			logger::error("[DXVK] DLL validation failed (d3d11={}, dxgi={}, apiVersion={})",
+				d3d11Create != nullptr, createFactory != nullptr, getApiVersion ? getApiVersion() : 0u);
 			return false;
 		}
 
+		Api api{};
+		api.d3d11Module = d3d11Mod.get();
+		api.dxgiModule = dxgiMod.get();
+#define CS_RESOLVE(member, name) api.member = Resolve<decltype(api.member)>(d3d11Mod.get(), name)
+		CS_RESOLVE(setTearingPreference, "dxvkSetTearingPreference");
+		CS_RESOLVE(getPresenterSurfaceState, "dxvkGetPresenterSurfaceState");
+		CS_RESOLVE(setFrameGenOwnershipQuery, "dxvkSetFrameGenOwnershipQuery");
+		CS_RESOLVE(setPresentBeginCallback, "dxvkSetPresentBeginCallback");
+		CS_RESOLVE(setPresentCompletedCallback, "dxvkSetPresentCompletedCallback");
+		CS_RESOLVE(requestSwapchainRecreate, "dxvkRequestSwapchainRecreate");
+		CS_RESOLVE(setSwapchainTornDownCallback, "dxvkSetSwapchainTornDownCallback");
+		CS_RESOLVE(setTargetFrameRate, "dxvkSetTargetFrameRate");
+		CS_RESOLVE(setSyncPresent, "dxvkSetSyncPresent");
+		CS_RESOLVE(setPresentQueueDepth, "dxvkSetPresentQueueDepth");
+		CS_RESOLVE(enqueueInteropCommandBuffer, "dxvkEnqueueInteropCommandBuffer");
+		CS_RESOLVE(getPresentWaitSemaphoreState, "dxvkGetPresentWaitSemaphoreState");
+		CS_RESOLVE(clearPresentWaitSemaphore, "dxvkClearPresentWaitSemaphore");
+		CS_RESOLVE(cancelPresentWaitSemaphore, "dxvkCancelPresentWaitSemaphore");
+		CS_RESOLVE(releaseQueuedPresentWaitSemaphoresAfterIdle, "dxvkReleaseQueuedPresentWaitSemaphoresAfterIdle");
+#undef CS_RESOLVE
+
+		g_d3d11Create = d3d11Create;
+		g_createFactory = createFactory;
+		g_api = api;
+		d3d11Mod.release();
+		dxgiMod.release();
+
 		// Frame generation enables synchronous present when it takes ownership.
-		if (auto setSync = reinterpret_cast<void (*)(uint32_t)>(::GetProcAddress(d3d11Mod, "dxvkSetSyncPresent")))
-			setSync(0u);
+		if (g_api.setSyncPresent)
+			g_api.setSyncPresent(0u);
 		else
 			logger::warn("[DXVK] dxvkSetSyncPresent export missing -- present stays at the fork default (sync)");
 
@@ -104,6 +171,7 @@ namespace DxvkLoader
 	}
 
 	bool IsLoaded() { return g_loaded; }
+	const Api& GetApi() { return g_api; }
 	decltype(&D3D11CreateDeviceAndSwapChain) GetD3D11CreateDeviceAndSwapChain() { return g_d3d11Create; }
 	decltype(&CreateDXGIFactory) GetCreateDXGIFactory() { return g_createFactory; }
 }

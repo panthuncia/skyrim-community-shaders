@@ -73,12 +73,8 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 		pSwapChainDesc->BufferCount = 2;
 	const bool tearingSupported = Upscaling::IsTearingSupported();
 	const bool allowTearing = upscaling.settings.fgAllowTearing && tearingSupported && pSwapChainDesc->Windowed;
-	if (HMODULE dxvk = GetModuleHandleW(L"dxvk_d3d11.dll")) {
-		using SetTearingPreferenceFn = void (*)(uint32_t);
-		if (auto setTearingPreference = reinterpret_cast<SetTearingPreferenceFn>(
-				GetProcAddress(dxvk, "dxvkSetTearingPreference")))
-			setTearingPreference(upscaling.settings.frameGeneration ? (allowTearing ? 1u : 0u) : 2u);
-	}
+	if (auto setTearingPreference = DxvkLoader::GetApi().setTearingPreference)
+		setTearingPreference(upscaling.settings.frameGeneration ? (allowTearing ? 1u : 0u) : 2u);
 	if (allowTearing)
 		pSwapChainDesc->Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
 	logger::info("[Upscaling] Frame-generation tearing {} (requested={} supported={} windowed={} swapchainFlags=0x{:X})",
@@ -170,12 +166,8 @@ void Upscaling::DrawSettings()
 		const bool tearingSupported = IsTearingSupported();
 		if (DrawToggleStepper(T(TKEY("fg_allow_tearing"), "Allow Tearing with Frame Generation"),
 				&settings.fgAllowTearing, !tearingSupported)) {
-			if (HMODULE dxvk = GetModuleHandleW(L"dxvk_d3d11.dll")) {
-				using SetTearingPreferenceFn = void (*)(uint32_t);
-				if (auto setTearingPreference = reinterpret_cast<SetTearingPreferenceFn>(
-						GetProcAddress(dxvk, "dxvkSetTearingPreference")))
-					setTearingPreference(settings.fgAllowTearing ? 1u : 0u);
-			}
+			if (auto setTearingPreference = DxvkLoader::GetApi().setTearingPreference)
+				setTearingPreference(settings.fgAllowTearing ? 1u : 0u);
 			Streamline::RequestDxvkSwapchainRecreate("frame-generation tearing preference changed");
 		}
 		if (!tearingSupported) {
@@ -674,16 +666,8 @@ double Upscaling::GetRenderedFrameRateLimit() const
 
 void Upscaling::ApplyDxvkFrameRateLimit(double a_fps)
 {
-	using SetFrameRateFn = void (*)(double);
-	static SetFrameRateFn fn = nullptr;
-	static bool resolved = false;
-	if (!resolved) {
-		resolved = true;
-		if (HMODULE m = GetModuleHandleW(L"dxvk_d3d11.dll"))
-			fn = reinterpret_cast<SetFrameRateFn>(GetProcAddress(m, "dxvkSetTargetFrameRate"));
-	}
 	static double lastFps = -2.0;
-	if (fn && a_fps != lastFps) {
+	if (auto fn = DxvkLoader::GetApi().setTargetFrameRate; fn && a_fps != lastFps) {
 		lastFps = a_fps;
 		fn(a_fps > 0.0 ? a_fps : 0.0);
 	}
