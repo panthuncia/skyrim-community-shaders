@@ -19,6 +19,7 @@
 #include "Features/InteriorSun.h"
 #include "Features/InverseSquareLighting.h"
 #include "Features/LODBlending.h"
+#include "Features/DrawcallLimitFix.h"
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
 #include "Features/PerformanceOverlay.h"
@@ -229,6 +230,7 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 		&globals::features::extendedMaterials,
 		&globals::features::wetnessEffects,
 		&globals::features::lightLimitFix,
+		&globals::features::drawcallLimitFix,
 		&globals::features::dynamicCubemaps,
 		&globals::features::cloudShadows,
 		&globals::features::waterEffects,

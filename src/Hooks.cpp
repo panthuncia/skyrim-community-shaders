@@ -15,6 +15,7 @@
 #include "State.h"
 #include "Util.h"
 
+#include "Features/DrawcallLimitFix.h"
 #include "Features/Effects11.h"
 #include "Features/HDRDisplay.h"
 #include "Features/InteriorSun.h"
@@ -222,6 +223,8 @@ namespace LightingExtensions
 		{
 			globals::state->UpdateLightingShaderPermutation(pass);
 			func(shader, pass, renderFlags);
+			if (globals::features::drawcallLimitFix.loaded)
+				globals::features::drawcallLimitFix.OnNativeLightingDraw(pass, renderFlags);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};

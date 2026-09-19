@@ -17,6 +17,8 @@
 #include "Features/InteriorSun.h"
 #include "Features/InverseSquareLighting.h"
 #include "Features/LODBlending.h"
+#include "Features/DrawcallLimitFix.h"
+#include "Features/DrawcallLimitFix/CaptureParity.h"
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
 #include "Features/PerformanceOverlay.h"
@@ -65,6 +67,7 @@ namespace globals
 		ExtendedMaterials extendedMaterials{};
 		GrassCollision grassCollision{};
 		GrassLighting grassLighting{};
+		DrawcallLimitFix drawcallLimitFix{};
 		GrassOptimizations grassOptimizations{};
 		IBL ibl{};
 		LightLimitFix lightLimitFix{};
@@ -281,6 +284,8 @@ namespace globals
 			if (hr == S_OK) {
 				if (*globals::game::perFrame.get() == pResource)
 					globals::game::mappedFrameBuffer = pMappedResource;
+				if (DCLF::CaptureParity::Enabled())
+					DCLF::CaptureParity::Get().OnMap(pResource, pMappedResource->pData);
 			}
 			return hr;
 		}
@@ -299,6 +304,8 @@ namespace globals
 			if (*globals::game::perFrame.get() == pResource && globals::game::mappedFrameBuffer) {
 				CacheFramebuffer();
 			}
+			if (DCLF::CaptureParity::Enabled())
+				DCLF::CaptureParity::Get().OnUnmap(pResource);
 			func(This, pResource, Subresource);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;

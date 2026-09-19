@@ -5,6 +5,8 @@
 -   **[VSCode Setup](./vscode-setup.md)** - IDE configuration, extensions, and auto-deploy
 -   **[Shader Workflow](./shader-workflow.md)** - Fast shader iteration and deployment
 -   **[OpenRenderGraph on DXVK](./render-graph.md)** - How features run render-graph work on DXVK's Vulkan device
+-   **[Drawcall Limit Fix](./drawcall-limit-fix.md)** - GPU-driven indirect drawing of the opaque scene (in progress)
+-   **[Skyrim engine notes](./skyrim-engine-notes.md)** - What the decompiled game binary does, where features depend on it
 
 ## Quick Links
 

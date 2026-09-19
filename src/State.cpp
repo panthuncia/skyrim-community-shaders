@@ -883,10 +883,15 @@ void State::SetupResources()
 
 void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescriptor, uint& a_pixelDescriptor, bool a_forceDeferred)
 {
+	ModifyShaderLookup(a_shader.shaderType.get(), a_vertexDescriptor, a_pixelDescriptor, a_forceDeferred);
+}
+
+void State::ModifyShaderLookup(RE::BSShader::Type a_shaderType, uint& a_vertexDescriptor, uint& a_pixelDescriptor, bool a_forceDeferred)
+{
 	auto deferred = globals::deferred;
 
-	if (a_shader.shaderType.get() != RE::BSShader::Type::Utility && a_shader.shaderType.get() != RE::BSShader::Type::ImageSpace) {
-		switch (a_shader.shaderType.get()) {
+	if (a_shaderType != RE::BSShader::Type::Utility && a_shaderType != RE::BSShader::Type::ImageSpace) {
+		switch (a_shaderType) {
 		case RE::BSShader::Type::Lighting:
 			{
 				a_vertexDescriptor &= ~((uint32_t)SIE::ShaderCache::LightingShaderFlags::AdditionalAlphaMask |

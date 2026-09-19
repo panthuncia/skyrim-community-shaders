@@ -194,6 +194,7 @@ public:
 	 * @param a_forceDeferred If true, forces the Deferred flag regardless of current pass.
 	 */
 	void ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescriptor, uint& a_pixelDescriptor, bool a_forceDeferred = false);
+	void ModifyShaderLookup(RE::BSShader::Type a_shaderType, uint& a_vertexDescriptor, uint& a_pixelDescriptor, bool a_forceDeferred = false);
 
 	/** @brief Opens a named GPU performance event (D3D annotation + Tracy zone). */
 	void BeginPerfEvent(std::string_view title);

@@ -1,0 +1,96 @@
+#pragma once
+
+#include <array>
+#include <cstdint>
+
+struct ID3D11ShaderResourceView;
+
+namespace DCLF
+{
+	/** @brief Lighting shader constant variable counts (ShaderCache GetVariableIndices / ShaderConstants). */
+	inline constexpr std::uint32_t kLightingVSVariables = 17;
+	inline constexpr std::uint32_t kLightingPSVariables = 51;
+	inline constexpr std::uint32_t kPixelTextureSlots = 16;
+
+	/** @brief Bit pattern of constant components the engine did not write (a quiet NaN no engine code produces; a signaling NaN would be quietened by float copies). */
+	inline constexpr std::uint32_t kUnwrittenBits = 0x7fdadbadu;  // quiet NaN: survives float copies unchanged
+
+	/** @brief Floats in a constant block: every offset a constant-table byte can express, plus a float4. */
+	inline constexpr std::uint32_t kConstantBlockFloats = 256 + 4;
+
+	/**
+	 * @brief Where each Lighting variable lives in a ConstantBlock (in floats) and how many floats it has.
+	 * Matrices take 12, the per-geometry point light arrays share a scratch region, the rest 4.
+	 */
+	struct StageLayout
+	{
+		std::uint32_t count;
+		std::array<std::uint8_t, 64> offset;
+		std::array<std::uint8_t, 64> size;
+	};
+	const StageLayout& LightingVSLayout();
+	const StageLayout& LightingPSLayout();
+
+	/** @brief One constant group's values in StageLayout order; unwritten components hold kUnwrittenBits. */
+	struct ConstantBlock
+	{
+		alignas(16) std::array<float, kConstantBlockFloats> floats;
+
+		void Reset();
+		bool Written(std::uint32_t a_float) const { return std::bit_cast<std::uint32_t>(floats[a_float]) != kUnwrittenBits; }
+	};
+
+	/** @brief What BSLightingShader::SetupMaterial binds for one (material, pass descriptor) pair. */
+	struct MaterialRecord
+	{
+		ConstantBlock vs;  // PerMaterial group
+		ConstantBlock ps;
+		std::array<ID3D11ShaderResourceView*, kPixelTextureSlots> textures{};
+		std::array<std::uint32_t, kPixelTextureSlots> addressModes{};
+		std::uint32_t textureWritten = 0;
+	};
+
+	/** @brief What BSLightingShader::SetupGeometry writes into the PerGeometry groups for one pass. */
+	struct GeometryConstants
+	{
+		ConstantBlock vs;
+		ConstantBlock ps;
+	};
+
+	/**
+	 * @brief Runs BSLightingShader's SetupMaterial / SetupGeometry outside the render loop.
+	 *
+	 * The shadow state's current shaders are swapped for stand-ins whose constant tables point at
+	 * ConstantBlocks and whose constant buffers are null (so nothing is mapped), the shader's raw
+	 * technique is set to the pass descriptor, and the renderer shadow state and the D3D11 constant
+	 * buffer bindings are restored afterwards. The result is exactly what the native draw binds,
+	 * including every Community Shaders hook on those functions.
+	 */
+	class ConstantEvaluator
+	{
+	public:
+		static ConstantEvaluator& Get();
+
+		/** @brief The BSLightingShader instance; learned from any lighting render pass. */
+		void SetLightingShader(RE::BSShader* a_shader) { lightingShader = a_shader; }
+		bool HasLightingShader() const { return lightingShader != nullptr; }
+
+		/** @brief True while a stand-in call runs (hooks on the shader functions must ignore it). */
+		static bool Evaluating() { return evaluating; }
+
+		bool EvaluateMaterial(const RE::BSShaderMaterial* a_material, std::uint32_t a_passDescriptor, MaterialRecord& a_out);
+
+		/**
+		 * @brief SetupGeometry for a copy of a_templatePass (a lighting pass of a representative object,
+		 * which supplies the scene light list the engine reads the sun from).
+		 */
+		bool EvaluateGeometry(const RE::BSRenderPass& a_templatePass, std::uint32_t a_passDescriptor, std::uint32_t a_renderFlags, GeometryConstants& a_out);
+
+	private:
+		template <class Call>
+		bool RunStandIn(std::uint32_t a_level, std::uint32_t a_passDescriptor, ConstantBlock& a_vs, ConstantBlock& a_ps, Call&& a_call);
+
+		RE::BSShader* lightingShader = nullptr;
+		static inline bool evaluating = false;
+	};
+}

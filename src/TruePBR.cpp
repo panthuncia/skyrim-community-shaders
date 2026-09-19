@@ -880,13 +880,13 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 				const size_t GlintParametersStartIndex = lightingPSConstants.LandscapeTexture1GlintParameters;
 
 				for (uint32_t textureIndex = 0; textureIndex < BSLightingShaderMaterialPBRLandscape::NumTiles; ++textureIndex) {
-					std::array<float, 3> PBRParams;
+					std::array<float, 3> PBRParams{};
 					PBRParams[0] = pbrMaterial->roughnessScales[textureIndex];
 					PBRParams[1] = pbrMaterial->displacementScales[textureIndex];
 					PBRParams[2] = pbrMaterial->specularLevels[textureIndex];
 					shadowState->SetPSConstant(PBRParams, RE::BSGraphics::ConstantGroupLevel::PerMaterial, PBRParamsStartIndex + textureIndex);
 
-					std::array<float, 4> glintParameters;
+					std::array<float, 4> glintParameters{};
 					glintParameters[0] = pbrMaterial->glintParameters[textureIndex].screenSpaceScale;
 					glintParameters[1] = 40.f - pbrMaterial->glintParameters[textureIndex].logMicrofacetDensity;
 					glintParameters[2] = pbrMaterial->glintParameters[textureIndex].microfacetRoughness;
@@ -896,7 +896,7 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 			}
 
 			{
-				std::array<float, 4> lodTexParams;
+				std::array<float, 4> lodTexParams{};
 				lodTexParams[0] = pbrMaterial->terrainTexOffsetX;
 				lodTexParams[1] = pbrMaterial->terrainTexOffsetY;
 				lodTexParams[2] = 1.f;
@@ -937,14 +937,14 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 					shaderFlags.set(PBRShaderFlags::ColoredCoat);
 				}
 
-				std::array<float, 4> PBRParams2;
+				std::array<float, 4> PBRParams2{};
 				PBRParams2[0] = pbrMaterial->GetCoatColor().red;
 				PBRParams2[1] = pbrMaterial->GetCoatColor().green;
 				PBRParams2[2] = pbrMaterial->GetCoatColor().blue;
 				PBRParams2[3] = pbrMaterial->GetCoatStrength();
 				shadowState->SetPSConstant(PBRParams2, RE::BSGraphics::ConstantGroupLevel::PerMaterial, lightingPSConstants.PBRParams2);
 
-				std::array<float, 4> PBRParams3;
+				std::array<float, 4> PBRParams3{};
 				PBRParams3[0] = pbrMaterial->GetCoatRoughness();
 				PBRParams3[1] = pbrMaterial->GetCoatSpecularLevel();
 				shadowState->SetPSConstant(PBRParams3, RE::BSGraphics::ConstantGroupLevel::PerMaterial, lightingPSConstants.MultiLayerParallaxData);
@@ -954,7 +954,7 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 				if (pbrMaterial->pbrFlags.any(PBRFlags::Subsurface)) {
 					shaderFlags.set(PBRShaderFlags::Subsurface);
 
-					std::array<float, 4> PBRParams2;
+					std::array<float, 4> PBRParams2{};
 					PBRParams2[0] = pbrMaterial->GetSubsurfaceColor().red;
 					PBRParams2[1] = pbrMaterial->GetSubsurfaceColor().green;
 					PBRParams2[2] = pbrMaterial->GetSubsurfaceColor().blue;
@@ -964,7 +964,7 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 				if (pbrMaterial->pbrFlags.any(PBRFlags::Fuzz)) {
 					shaderFlags.set(PBRShaderFlags::Fuzz);
 
-					std::array<float, 4> PBRParams3;
+					std::array<float, 4> PBRParams3{};
 					PBRParams3[0] = pbrMaterial->GetFuzzColor().red;
 					PBRParams3[1] = pbrMaterial->GetFuzzColor().green;
 					PBRParams3[2] = pbrMaterial->GetFuzzColor().blue;
@@ -974,7 +974,7 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 					if (pbrMaterial->GetGlintParameters().enabled) {
 						shaderFlags.set(PBRShaderFlags::Glint);
 
-						std::array<float, 4> GlintParameters;
+						std::array<float, 4> GlintParameters{};
 						GlintParameters[0] = pbrMaterial->GetGlintParameters().screenSpaceScale;
 						GlintParameters[1] = 40.f - pbrMaterial->GetGlintParameters().logMicrofacetDensity;
 						GlintParameters[2] = pbrMaterial->GetGlintParameters().microfacetRoughness;
@@ -984,7 +984,7 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 					if ((lightingFlags & static_cast<uint32_t>(SIE::ShaderCache::LightingShaderFlags::ProjectedUV)) != 0 && pbrMaterial->GetProjectedMaterialGlintParameters().enabled) {
 						shaderFlags.set(PBRShaderFlags::ProjectedGlint);
 
-						std::array<float, 4> ProjectedGlintParameters;
+						std::array<float, 4> ProjectedGlintParameters{};
 						ProjectedGlintParameters[0] = pbrMaterial->GetProjectedMaterialGlintParameters().screenSpaceScale;
 						ProjectedGlintParameters[1] = 40.f - pbrMaterial->GetProjectedMaterialGlintParameters().logMicrofacetDensity;
 						ProjectedGlintParameters[2] = pbrMaterial->GetProjectedMaterialGlintParameters().microfacetRoughness;
@@ -995,13 +995,13 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 			}
 
 			{
-				std::array<float, 4> PBRProjectedUVParams1;
+				std::array<float, 4> PBRProjectedUVParams1{};
 				PBRProjectedUVParams1[0] = pbrMaterial->GetProjectedMaterialBaseColorScale()[0];
 				PBRProjectedUVParams1[1] = pbrMaterial->GetProjectedMaterialBaseColorScale()[1];
 				PBRProjectedUVParams1[2] = pbrMaterial->GetProjectedMaterialBaseColorScale()[2];
 				shadowState->SetPSConstant(PBRProjectedUVParams1, RE::BSGraphics::ConstantGroupLevel::PerMaterial, lightingPSConstants.MaterialObjectRGBScale);
 
-				std::array<float, 4> PBRProjectedUVParams2;
+				std::array<float, 4> PBRProjectedUVParams2{};
 				PBRProjectedUVParams2[0] = pbrMaterial->GetProjectedMaterialRoughness();
 				PBRProjectedUVParams2[1] = pbrMaterial->GetProjectedMaterialSpecularLevel();
 				shadowState->SetPSConstant(PBRProjectedUVParams2, RE::BSGraphics::ConstantGroupLevel::PerMaterial, lightingPSConstants.ParallaxOccData);
@@ -1048,7 +1048,7 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 			}
 
 			{
-				std::array<float, 3> PBRParams1;
+				std::array<float, 3> PBRParams1{};
 				PBRParams1[0] = pbrMaterial->GetRoughnessScale();
 				PBRParams1[1] = pbrMaterial->GetDisplacementScale();
 				PBRParams1[2] = pbrMaterial->GetSpecularLevel();
@@ -1059,7 +1059,7 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 		{
 			const uint32_t bufferIndex = smState->textureTransformCurrentBuffer;
 
-			std::array<float, 4> texCoordOffsetScale;
+			std::array<float, 4> texCoordOffsetScale{};
 			texCoordOffsetScale[0] = material->texCoordOffset[bufferIndex].x;
 			texCoordOffsetScale[1] = material->texCoordOffset[bufferIndex].y;
 			texCoordOffsetScale[2] = material->texCoordScale[bufferIndex].x;
