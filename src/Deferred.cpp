@@ -6,6 +6,7 @@
 #include "State.h"
 #include "Utils/D3D.h"
 
+#include "Features/DrawcallLimitFix.h"
 #include "Features/DynamicCubemaps.h"
 #include "Features/Effects11.h"
 #include "Features/IBL.h"
@@ -431,6 +432,9 @@ void Deferred::EndDeferred()
 
 	auto context = globals::d3d::context;
 	context->OMSetRenderTargets(0, nullptr, nullptr);  // Unbind all bound render targets
+
+	if (globals::features::drawcallLimitFix.loaded)
+		globals::features::drawcallLimitFix.BeforeDeferredComposite();
 
 	DeferredPasses();  // Perform deferred passes and composite forward buffers
 

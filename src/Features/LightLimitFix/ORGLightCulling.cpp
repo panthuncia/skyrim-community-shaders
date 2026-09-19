@@ -101,6 +101,15 @@ namespace
 		std::atomic<std::shared_ptr<const Snapshot>> snapshot;
 	};
 
+	// The frame's snapshot, or null outside the light culling segment (the graph's other epochs run
+	// these passes too, as empty passes).
+	std::shared_ptr<const Snapshot> CurrentSnapshot(const Resources& a_resources)
+	{
+		if (RenderGraphRuntime::Get().CurrentSegment() != RenderGraphRuntime::Segment::LightCulling)
+			return nullptr;
+		return a_resources.snapshot.load(std::memory_order_acquire);
+	}
+
 	struct DispatchFrame
 	{
 		std::shared_ptr<const Program> program;
@@ -163,7 +172,7 @@ namespace
 		// is reused while they are unchanged.
 		void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>& a_out) const
 		{
-			const auto snapshot = resources->snapshot.load(std::memory_order_acquire);
+			const auto snapshot = CurrentSnapshot(*resources);
 			if (!snapshot) {
 				a_out.push_back(0);
 				return;
@@ -176,7 +185,7 @@ namespace
 		DispatchFrame Prepare(const BuildBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
 		{
 			DispatchFrame frame{};
-			const auto snapshot = resources->snapshot.load(std::memory_order_acquire);
+			const auto snapshot = CurrentSnapshot(*resources);
 			if (!snapshot)
 				return frame;
 			frame.program = resources->build;
@@ -225,7 +234,7 @@ namespace
 
 		void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>& a_out) const
 		{
-			const auto snapshot = resources->snapshot.load(std::memory_order_acquire);
+			const auto snapshot = CurrentSnapshot(*resources);
 			if (!snapshot) {
 				a_out.push_back(0);
 				return;
@@ -236,7 +245,7 @@ namespace
 		DispatchFrame Prepare(const CullBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
 		{
 			DispatchFrame frame{};
-			const auto snapshot = resources->snapshot.load(std::memory_order_acquire);
+			const auto snapshot = CurrentSnapshot(*resources);
 			if (!snapshot)
 				return frame;
 			const auto& inputs = snapshot->inputs;
@@ -406,7 +415,7 @@ bool ORGLightCulling::Execute(const FrameInputs& a_inputs)
 
 	const auto resources = impl->resources;
 	const size_t bytes = size_t((std::min)(a_inputs.lightCount, impl->maxLights)) * impl->lightStride;
-	const bool ok = RenderGraphRuntime::Get().ExecuteEpoch([&](org::RenderGraph&) {
+	const bool ok = RenderGraphRuntime::Get().ExecuteEpoch(RenderGraphRuntime::Segment::LightCulling, [&](org::RenderGraph&) {
 		if (bytes && a_inputs.lights)
 			BUFFER_UPLOAD(a_inputs.lights, bytes, org::runtime::UploadTarget::FromShared(resources->lights), 0);
 	});
@@ -430,6 +439,17 @@ ID3D11ShaderResourceView* ORGLightCulling::GetLightGridSRV() const
 	return impl ? impl->lightGridSRV.get() : nullptr;
 }
 
+bool ORGLightCulling::GetShaderResourceIndices(uint32_t& a_lights, uint32_t& a_lightIndexList, uint32_t& a_lightGrid) const
+{
+	if (!IsActive())
+		return false;
+	const auto& resources = *impl->resources;
+	a_lights = resources.lights->GetSRVInfo(0).slot.index;
+	a_lightIndexList = resources.lightIndexList->GetSRVInfo(0).slot.index;
+	a_lightGrid = resources.lightGrid->GetSRVInfo(0).slot.index;
+	return true;
+}
+
 #else  // !CS_HAS_RENDER_GRAPH
 
 // Built without OpenRenderGraph: Light Limit Fix always culls with D3D11.
@@ -450,4 +470,5 @@ bool ORGLightCulling::Execute(const FrameInputs&) { return false; }
 bool ORGLightCulling::IsActive() const { return false; }
 ID3D11ShaderResourceView* ORGLightCulling::GetLightIndexListSRV() const { return nullptr; }
 ID3D11ShaderResourceView* ORGLightCulling::GetLightGridSRV() const { return nullptr; }
+bool ORGLightCulling::GetShaderResourceIndices(uint32_t&, uint32_t&, uint32_t&) const { return false; }
 #endif

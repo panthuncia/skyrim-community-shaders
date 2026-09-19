@@ -11,9 +11,13 @@
 #include "RenderGraph/DxvkOrgInterop.h"
 
 #include <OpenRenderGraph/PersistentGraphHost.h>
+#if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#	include <ORGModuleServices/ShaderCompiler.h>
+#endif
 #include <Resources/Resource.h>
 
 #include <atomic>
+#include <filesystem>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -26,9 +30,12 @@ namespace
 	// descriptor indexing, scalar block layout, dynamic rendering, maintenance5).
 	// DXVK enables vulkanMemoryModel, which makes the Device-scope atomics DXC emits
 	// invalid unless vulkanMemoryModelDeviceScope is enabled as well.
+	// Drawcall Limit Fix draws through device-generated commands (optional: without it the graph
+	// runs, and DCLF stays off).
 	constexpr DxvkOrgInteropFeature kRequestedFeatures[] = {
 		{ VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME, "descriptorHeap" },
 		{ nullptr, "vulkanMemoryModelDeviceScope" },
+		{ VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME, "deviceGeneratedCommands" },
 	};
 
 	bool EnvDisabled()
@@ -71,6 +78,10 @@ struct RenderGraphRuntime::Impl
 	PFN_dxvkCreateBufferFromVkBuffer createBufferFromVkBuffer = nullptr;
 	PFN_dxvkSetDeviceTeardownCallback setTeardownCallback = nullptr;
 	PFN_dxvkEnqueueInteropSubmission enqueueSubmission = nullptr;
+	PFN_dxvkGetInteropResourceInfo getResourceInfo = nullptr;
+#if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+	std::unique_ptr<org::services::ShaderCompiler> shaderCompiler;
+#endif
 	PFN_vkQueueSubmit2 queueSubmit2 = nullptr;
 	rhi::DevicePtr device;
 	std::unique_ptr<org::PersistentGraphHost> host;
@@ -230,6 +241,8 @@ bool RenderGraphRuntime::Initialize()
 	state->setTeardownCallback = ResolveExport<PFN_dxvkSetDeviceTeardownCallback>(d3d11, "dxvkSetDeviceTeardownCallback");
 	if (!getInfo || !state->createBufferFromVkBuffer || !state->setTeardownCallback)
 		return disable("the DXVK build lacks the render graph interop exports");
+	// Optional: game resources for the graph (Drawcall Limit Fix).
+	state->getResourceInfo = ResolveExport<PFN_dxvkGetInteropResourceInfo>(d3d11, "dxvkGetInteropResourceInfo");
 	// Optional: without it, each epoch flushes and waits for DXVK's command stream instead.
 	state->enqueueSubmission = ResolveExport<PFN_dxvkEnqueueInteropSubmission>(d3d11, "dxvkEnqueueInteropSubmission");
 	if (EnvEquals("CS_ORG_SUBMIT", "flush"))
@@ -290,6 +303,26 @@ bool RenderGraphRuntime::Initialize()
 	logger::info("[ORG] Render graph adopted DXVK's Vulkan device (queue family {}, index {}); submissions {}",
 		info.graphicsQueueFamily, info.graphicsQueueIndex,
 		impl->enqueueSubmission ? "go through DXVK's command stream" : "flush DXVK each epoch");
+#if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+	{
+		// DXC ships beside the DXVK DLLs; load it from there, not by name (another dxcompiler.dll,
+		// without SPIR-V support, may already be in the process).
+		wchar_t dxvkPath[MAX_PATH]{};
+		std::filesystem::path compilerDirectory;
+		if (::GetModuleFileNameW(d3d11, dxvkPath, MAX_PATH))
+			compilerDirectory = std::filesystem::path(dxvkPath).parent_path();
+		impl->shaderCompiler = std::make_unique<org::services::ShaderCompiler>(std::filesystem::path(L"Data/ShaderCache/ORG"), compilerDirectory);
+		logger::info("[ORG] Runtime SPIR-V compilation {}", impl->shaderCompiler->Available() ? "available" : "unavailable (no dxcompiler.dll beside the DXVK DLLs)");
+		if (!impl->shaderCompiler->Available())
+			impl->shaderCompiler.reset();
+	}
+#endif
+	IndirectCommandsFeatureInfo indirect{};
+	if (impl->device->QueryFeatureInfo(&indirect.header) == rhi::Result::Ok) {
+		logger::info("[ORG] Indirect commands: generated commands {}, index buffer arguments {}, pipeline sets {} (up to {} pipelines); game resource export {}",
+			indirect.constantArguments, indirect.indexBufferArguments, indirect.pipelineSets, indirect.maxPipelineSetCount,
+			impl->getResourceInfo ? "available" : "missing");
+	}
 	return true;
 }
 
@@ -350,10 +383,12 @@ org::PersistentGraphHost* RenderGraphRuntime::Host()
 	return IsActive() ? impl->host.get() : nullptr;
 }
 
-bool RenderGraphRuntime::ExecuteEpoch(const std::function<void(org::RenderGraph&)>& a_beforePrepare)
+bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare)
 {
 	if (!IsActive())
 		return false;
+	// Read by passes while the frame prepares and records, all before ExecuteFrame returns.
+	segment = a_segment;
 	const auto start = std::chrono::steady_clock::now();
 	if (impl->enqueueSubmission) {
 		// The graph's batches go into DXVK's command stream at this point, so they land between
@@ -376,6 +411,24 @@ bool RenderGraphRuntime::ExecuteEpoch(const std::function<void(org::RenderGraph&
 		disabledReason = e.what();
 		return false;
 	}
+}
+
+org::services::ShaderCompiler* RenderGraphRuntime::ShaderCompiler()
+{
+#if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+	return impl ? impl->shaderCompiler.get() : nullptr;
+#else
+	return nullptr;
+#endif
+}
+
+bool RenderGraphRuntime::DescribeResource(IUnknown* a_object, DxvkOrgInteropResourceInfo& a_info)
+{
+	if (!impl || !impl->getResourceInfo || !a_object)
+		return false;
+	a_info = {};
+	a_info.version = DXVK_ORG_INTEROP_VERSION;
+	return SUCCEEDED(impl->getResourceInfo(globals::d3d::device, a_object, &a_info));
 }
 
 winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc)
@@ -425,6 +478,8 @@ RenderGraphRuntime::~RenderGraphRuntime() = default;
 bool RenderGraphRuntime::IsActive() const { return false; }
 const std::string& RenderGraphRuntime::GetDisabledReason() const { return disabledReason; }
 org::PersistentGraphHost* RenderGraphRuntime::Host() { return nullptr; }
-bool RenderGraphRuntime::ExecuteEpoch(const std::function<void(org::RenderGraph&)>&) { return false; }
+bool RenderGraphRuntime::ExecuteEpoch(Segment, const std::function<void(org::RenderGraph&)>&) { return false; }
+bool RenderGraphRuntime::DescribeResource(IUnknown*, DxvkOrgInteropResourceInfo&) { return false; }
+org::services::ShaderCompiler* RenderGraphRuntime::ShaderCompiler() { return nullptr; }
 winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource&, const D3D11_BUFFER_DESC&) { return nullptr; }
 #endif

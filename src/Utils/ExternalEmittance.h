@@ -15,6 +15,9 @@ namespace ExternalEmittance
 	 */
 	bool ShouldSuppress(const RE::BSRenderPass* a_pass);
 
+	/** @brief ShouldSuppress for a geometry and its shader property, without a render pass. */
+	bool ShouldSuppress(const RE::BSShaderProperty* a_shaderProperty, const RE::BSGeometry* a_geometry);
+
 	/**
 	 * @brief Update the extra shader descriptor bitmask for external emittance suppression.
 	 *

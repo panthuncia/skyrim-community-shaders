@@ -1,6 +1,15 @@
 #include "SceneStore.h"
 
+#include "GpuResources.h"
 #include "SceneTracker.h"
+#include "VertexInput.h"
+
+#include <chrono>
+
+#include "Features/ExtendedTranslucency.h"
+#include "Features/LightLimitFix.h"
+#include "State.h"
+#include "Utils/ExternalEmittance.h"
 
 namespace DCLF
 {
@@ -13,6 +22,7 @@ namespace DCLF
 		constexpr std::uint32_t kIndexFormatR16 = 57;  // DXGI_FORMAT_R16_UINT
 		constexpr std::uint32_t kSpecularBit = 0x200;  // pass descriptor Specular
 		constexpr std::uint32_t kTechniqueEnvmap = 1;
+		constexpr std::uint32_t kDoAlphaTestBit = 1u << 20;  // pass descriptor DoAlphaTest
 
 		const RE::BSRenderPass* FindLightingPass(RE::BSShaderProperty* a_property)
 		{
@@ -71,8 +81,11 @@ namespace DCLF
 		pipelines.clear();
 		materials.clear();
 		shading.clear();
+		lights.clear();
 		geometryConstants.clear();
 		geometryConstantsValid.clear();
+		techniqueConstants.clear();
+		permutations.clear();
 		draws.clear();
 	}
 
@@ -127,9 +140,30 @@ namespace DCLF
 						current.insert(node);
 				}
 			}
+			// References the engine moves out of the category nodes into multibounds (exteriors) and the
+			// portal graph's rooms (interiors), all under ObjectLODRoot (engine notes: cell multibounds and rooms).
+			if (auto* multiBound = loaded->multiBoundNode.get())
+				current.insert(multiBound);
+			if (auto* graph = loaded->portalGraph.get()) {
+				for (auto& room : graph->rooms) {
+					if (room)
+						current.insert(room.get());
+				}
+				if (auto* shared = graph->portalSharedNode.get())
+					current.insert(shared);
+			}
 		};
 
 		if (auto* tes = RE::TES::GetSingleton()) {
+			// Multibounds: the engine moves references out of the category nodes into BSMultiBoundNodes
+			// under ObjectLODRoot (TES::objRoot), in exteriors and (holding the rooms) in interiors
+			// (engine notes: multibounds and rooms).
+			if (auto* objRoot = tes->objRoot) {
+				for (auto& child : objRoot->GetChildren()) {
+					if (auto* multiBound = child ? netimmerse_cast<RE::BSMultiBoundNode*>(child.get()) : nullptr)
+						current.insert(multiBound);
+				}
+			}
 			if (tes->interiorCell) {
 				addCell(tes->interiorCell);
 			} else if (auto* grid = tes->gridCells) {
@@ -272,7 +306,7 @@ namespace DCLF
 		}
 	}
 
-	Ineligible SceneStore::ClassifyStatic(RE::BSGeometry& a_geometry, LightingDescriptors* a_descriptors)
+	Ineligible SceneStore::ClassifyStatic(RE::BSGeometry& a_geometry, LightingDescriptors* a_descriptors, const AccumulatedPass* a_accumulated)
 	{
 		if (a_geometry.GetType().get() != RE::BSGeometry::Type::kTriShape)
 			return Ineligible::NotTriShape;
@@ -293,7 +327,7 @@ namespace DCLF
 			return Ineligible::AlphaBlend;
 
 		LightingDescriptors descriptors;
-		const Ineligible reason = DeriveLightingDescriptors(*property, a_geometry, descriptors);
+		const Ineligible reason = DeriveLightingDescriptors(*property, a_geometry, a_accumulated, descriptors);
 		if (reason == Ineligible::None && a_descriptors)
 			*a_descriptors = descriptors;
 		return reason;
@@ -304,12 +338,14 @@ namespace DCLF
 		if (a_tracked.unsupportedParent)
 			return Ineligible::UnsupportedParent;
 
-		// App-culled or hidden anywhere between the leaf and its category node.
+		// App-culled or hidden anywhere between the leaf and its category node; part of an actor.
 		for (const RE::NiAVObject* object = a_tracked.geometry.get(); object; object = object->parent) {
 			if (IsHidden(object))
 				return Ineligible::Hidden;
 			if (object == a_tracked.categoryNode)
 				break;
+			if (auto* ref = object->GetUserData(); ref && ref->IsActor())
+				return Ineligible::Actor;
 		}
 
 		auto* property = a_tracked.geometry->GetGeometryRuntimeData().shaderProperty.get();
@@ -319,16 +355,92 @@ namespace DCLF
 		return Ineligible::None;
 	}
 
+	void SceneStore::CollectAccumulatedPasses()
+	{
+		accumulatedPasses.clear();
+		auto* accumulator = *globals::game::currentAccumulator.get();
+		auto* batch = accumulator ? accumulator->GetRuntimeData().batchRenderer : nullptr;
+		if (!batch)
+			return;
+
+		// BSBatchRenderer::renderPass holds PassGroup structs inline (the engine indexes it as
+		// data + (pass + group * 6) * 8), not the PassGroup pointers CommonLib declares; each of the five
+		// entries heads a list chained through passGroupNext. renderPassMap maps each group's technique
+		// (what SetupTechnique receives) to its index; the engine reads it as buckets of
+		// { key, value, next } at +0x48, bucket count at +0x2C (engine notes: batch renderer).
+		struct MapEntry
+		{
+			std::uint32_t key;
+			std::uint32_t value;
+			const MapEntry* next;
+		};
+		auto addBatch = [&](const RE::BSBatchRenderer* a_batch) {
+			const auto* base = reinterpret_cast<const std::uint8_t*>(a_batch);
+			const auto* buckets = *reinterpret_cast<const MapEntry* const*>(base + 0x48);
+			const std::uint32_t bucketCount = *reinterpret_cast<const std::uint32_t*>(base + 0x2c);
+			const auto* groups = reinterpret_cast<const RE::BSBatchRenderer::PassGroup*>(a_batch->renderPass.data());
+			const std::uint32_t groupCount = a_batch->renderPass.size();
+			for (std::uint32_t b = 0; buckets && groups && b < bucketCount; ++b) {
+				const auto& entry = buckets[b];
+				if (!entry.next || entry.value >= groupCount)
+					continue;  // empty bucket
+				const std::uint32_t technique = entry.key;
+				const auto& group = groups[entry.value];
+				for (std::uint32_t subPass = 0; subPass < 5; ++subPass) {
+					for (auto* pass = group.passes[subPass]; pass; pass = pass->passGroupNext) {
+						if (pass->geometry && pass->shader && pass->shader->shaderType.get() == RE::BSShader::Type::Lighting)
+							accumulatedPasses.try_emplace(pass->geometry, AccumulatedPass{ pass, PassDescriptorOf(technique), subPass, pass->passEnum });
+					}
+				}
+			}
+		};
+		addBatch(batch);
+		// Geometry groups sort their passes in batch renderers of their own.
+		for (auto* group : batch->geometryGroups) {
+			if (group && group->batchRenderer)
+				addBatch(group->batchRenderer);
+		}
+	}
+
+	const AccumulatedPass* SceneStore::FindAccumulatedPass(const RE::BSGeometry* a_geometry) const
+	{
+		auto it = accumulatedPasses.find(a_geometry);
+		return it == accumulatedPasses.end() ? nullptr : &it->second;
+	}
+
+	namespace
+	{
+		// Adds the time since the last call to a_bucket.
+		struct PartTimer
+		{
+			std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+			void Add(double& a_bucket)
+			{
+				const auto now = std::chrono::steady_clock::now();
+				a_bucket += std::chrono::duration<double, std::milli>(now - last).count();
+				last = now;
+			}
+		};
+	}
+
 	void SceneStore::BuildFrame()
 	{
 		++frame;
+		PartTimer timer;
 		RefreshLodFadeSettings();
+		CollectAccumulatedPasses();
+		auto& gpu = GpuResources::Get();
+		gpu.BeginFrame(frame);
+		const bool resolveBuffers = gpu.Enabled();
+		timer.Add(stats.partMs[0]);
 		tables.Clear();
 		objectIndex.clear();
 		stats.ineligible.fill(0);
+		stats.shadowMaskPipelines = 0;
+		stats.derivationChecked = stats.derivationDiffers = stats.derivationBits = stats.derivationNative = 0;
 
 		ankerl::unordered_dense::map<const RE::BSGraphics::TriShape*, std::uint32_t> geometryIndex;
-		ankerl::unordered_dense::map<std::uint64_t, std::uint32_t> pipelineIndex;
+		ankerl::unordered_dense::map<PipelineKey, std::uint32_t, PipelineKeyHash> pipelineIndex;
 		ankerl::unordered_dense::map<std::pair<const RE::BSShaderMaterial*, std::uint32_t>, std::uint32_t> materialIndex;
 		auto& evaluator = ConstantEvaluator::Get();
 		if (!evaluator.HasLightingShader())
@@ -338,14 +450,39 @@ namespace DCLF
 		tables.objectGeometry.reserve(tracked.size());
 		tables.draws.reserve(tracked.size());
 
-		for (auto& [geometry, entry] : tracked) {
+		// Only what the main-camera accumulator holds can be drawn by the main pass this frame; the rest of
+		// the tracked set (culled by the engine) is not classified. Phase 5, which takes objects out of the
+		// accumulator, needs the whole set again.
+		for (auto& [accumulatedGeometry, accumulatedPass] : accumulatedPasses) {
+			auto trackedIt = tracked.find(const_cast<RE::BSGeometry*>(accumulatedGeometry));
+			if (trackedIt == tracked.end())
+				continue;
+			auto* geometry = trackedIt->first;
+			const auto& entry = trackedIt->second;
+			const auto* accumulated = &accumulatedPass;
 			LightingDescriptors descriptors;
-			Ineligible reason = ClassifyStatic(*geometry, &descriptors);
+			timer.Add(stats.partMs[1] /* the rest of the previous object counts as classification */);
+			Ineligible reason = ClassifyStatic(*geometry, &descriptors, accumulated);
 			if (reason == Ineligible::None)
 				reason = ClassifyFrame(entry);
+			// The renderer draws batch lists 1, 3 and 4 with alpha testing. When the technique the pass was
+			// registered under lacks DoAlphaTest, the technique drawn sometimes gains it after the tables are
+			// built (engine notes: batch renderer, open question); leave those to the native loop.
+			if (reason == Ineligible::None && accumulated && accumulated->subPass != 0 && accumulated->subPass != 2 &&
+				!(accumulated->technique & kDoAlphaTestBit))
+				reason = Ineligible::AlphaTestState;
 			++stats.ineligible[static_cast<std::size_t>(reason)];
 			if (reason != Ineligible::None)
 				continue;
+			if (descriptors.derivedPass == kNotDerived) {
+				++stats.derivationNative;
+			} else {
+				++stats.derivationChecked;
+				if (const std::uint32_t bits = (descriptors.derivedPass ^ descriptors.pass) & ~kRuntimePassBits) {
+					++stats.derivationDiffers;
+					stats.derivationBits |= bits;
+				}
+			}
 
 			auto& data = geometry->GetGeometryRuntimeData();
 			auto* property = data.shaderProperty.get();
@@ -355,6 +492,18 @@ namespace DCLF
 
 			// Geometry, shared between every object drawing the same TriShape.
 			auto* triShape = data.rendererData;
+			const GpuResources::Buffer* vertexBuffer = nullptr;
+			const GpuResources::Buffer* indexBuffer = nullptr;
+			if (resolveBuffers) {
+				// The render graph reads the game's buffers in place; they must never move (GpuResources).
+				vertexBuffer = gpu.Resolve(reinterpret_cast<ID3D11Buffer*>(triShape->vertexBuffer));
+				indexBuffer = gpu.Resolve(reinterpret_cast<ID3D11Buffer*>(triShape->indexBuffer));
+				if (!vertexBuffer || !indexBuffer) {
+					--stats.ineligible[static_cast<std::size_t>(Ineligible::None)];
+					++stats.ineligible[static_cast<std::size_t>(Ineligible::UnstableBuffer)];
+					continue;
+				}
+			}
 			auto [geometryIt, newGeometry] = geometryIndex.try_emplace(triShape, static_cast<std::uint32_t>(tables.geometries.size()));
 			if (newGeometry) {
 				const auto& shape = static_cast<RE::BSTriShape*>(geometry)->GetTrishapeRuntimeData();
@@ -366,14 +515,20 @@ namespace DCLF
 				record.vertexCount = shape.vertexCount;
 				record.indexCount = static_cast<std::uint32_t>(shape.triangleCount) * 3;
 				record.firstIndex = 0;
+				if (vertexBuffer && indexBuffer) {
+					record.vertexAddress = vertexBuffer->address;
+					record.vertexBytes = vertexBuffer->size;
+					record.indexAddress = indexBuffer->address;
+					record.indexBytes = indexBuffer->size;
+				}
 				tables.geometries.push_back(record);
 			}
 
-			PipelineKey key{ descriptors.vertex, descriptors.pixel, twoSided ? kRasterTwoSided : 0u, descriptors.pass };
-			const std::uint64_t keyHash = (static_cast<std::uint64_t>(key.passDescriptor) << 32) ^ key.pixelDescriptor ^ (static_cast<std::uint64_t>(key.vertexDescriptor) << 13) ^
-			                              (static_cast<std::uint64_t>(key.rasterFlags) << 62);
-			auto [pipelineIt, newPipeline] = pipelineIndex.try_emplace(keyHash, static_cast<std::uint32_t>(tables.pipelines.size()));
+			const PipelineKey key{ descriptors.vertex, descriptors.pixel, twoSided ? kRasterTwoSided : 0u, descriptors.pass,
+				VertexLayoutOf(tables.geometries[geometryIt->second].vertexDesc) };
+			auto [pipelineIt, newPipeline] = pipelineIndex.try_emplace(key, static_cast<std::uint32_t>(tables.pipelines.size()));
 			if (newPipeline) {
+				timer.Add(stats.partMs[1]);
 				tables.pipelines.push_back(key);
 				// Per-frame PerGeometry values for this pass descriptor, from any object's lighting pass
 				// (it supplies the scene light list the engine reads the sun from).
@@ -382,12 +537,30 @@ namespace DCLF
 				const bool valid = templatePass && evaluator.EvaluateGeometry(*templatePass, descriptors.pass, mainPassRenderFlags, constants);
 				tables.geometryConstants.push_back(constants);
 				tables.geometryConstantsValid.push_back(valid ? 1 : 0);
+
+				TechniqueConstants technique;
+				EvaluateTechnique(descriptors.pass, technique);
+				stats.shadowMaskPipelines += technique.shadowMask ? 1 : 0;
+				tables.techniqueConstants.push_back(technique);
+
+				PipelinePermutation permutation;
+				permutation.vertexShaderDescriptor = descriptors.rawVertex;
+				permutation.pixelShaderDescriptor = descriptors.rawPixel & ~descriptors.pixel;
+				permutation.extraShaderDescriptor = static_cast<std::uint32_t>(State::ExtraShaderDescriptors::InWorld);
+				// Extended Translucency disables its material model for opaque geometry.
+				permutation.extraFeatureDescriptor = globals::features::extendedTranslucency.loaded ?
+				                                         static_cast<std::uint32_t>(ExtendedTranslucency::MaterialModel::DescriptorDisabled)
+				                                             << ExtendedTranslucency::ExtraFeatureDescriptorShift :
+				                                         0u;
+				tables.permutations.push_back(permutation);
+				timer.Add(stats.partMs[2]);
 			}
 
 			// Material state as the engine's SetupMaterial produces it for this pass descriptor.
 			const auto* material = property->material;
 			auto [materialIt, newMaterial] = materialIndex.try_emplace(std::pair{ material, descriptors.pass }, static_cast<std::uint32_t>(tables.materials.size()));
 			if (newMaterial) {
+				timer.Add(stats.partMs[1]);
 				MaterialRecord record;
 				if (!evaluator.EvaluateMaterial(material, descriptors.pass, record)) {
 					// No shader instance yet (nothing drawn so far): stay native this frame.
@@ -397,6 +570,7 @@ namespace DCLF
 					continue;
 				}
 				tables.materials.push_back(record);
+				timer.Add(stats.partMs[3]);
 			}
 
 			const auto objectId = static_cast<std::uint32_t>(tables.objects.size());
@@ -411,18 +585,28 @@ namespace DCLF
 			object.materialIndex = materialIt->second;
 			object.pipelineIndex = pipelineIt->second;
 			object.flags = (alphaTest ? kObjectAlphaTest : 0u) | (twoSided ? kObjectTwoSided : 0u) |
+			               (ExternalEmittance::ShouldSuppress(property, geometry) ? kObjectSuppressExternalEmittance : 0u) |
 			               (alphaTest ? static_cast<std::uint32_t>(alpha->alphaThreshold) << kObjectAlphaThresholdShift : 0u);
 			tables.objects.push_back(object);
 			tables.objectGeometry.push_back(geometry);
 			tables.shading.push_back(MakeShading(*static_cast<RE::BSLightingShaderProperty*>(property), descriptors, mainPassRenderFlags));
+			ObjectLights lights;
+			if (globals::features::lightLimitFix.loaded) {
+				lights.roomIndex = globals::features::lightLimitFix.GetRoomIndex(geometry);
+				if (accumulated)
+					lights.shadowBitMask = LightLimitFix::GetShadowBitMask(accumulated->pass);
+			}
+			tables.lights.push_back(lights);
 			objectIndex.emplace(geometry, objectId);
 
 			const auto& geometryRecord = tables.geometries[object.geometryIndex];
 			DrawSequence draw{};
 			draw.pipelineIndex = object.pipelineIndex;
-			draw.drawId = objectId;
-			draw.indexBufferAddress = 0;  // resolved in Phase 2
-			draw.indexBufferSize = geometryRecord.indexCount * 2;
+			draw.vertexBufferAddress = geometryRecord.vertexAddress;
+			draw.vertexBufferSize = static_cast<std::uint32_t>(std::min<std::uint64_t>(geometryRecord.vertexBytes, UINT32_MAX));
+			draw.vertexStride = geometryRecord.vertexStride;
+			draw.indexBufferAddress = geometryRecord.indexAddress;
+			draw.indexBufferSize = static_cast<std::uint32_t>(std::min<std::uint64_t>(geometryRecord.indexBytes, UINT32_MAX));
 			draw.indexFormat = kIndexFormatR16;
 			draw.indexCount = geometryRecord.indexCount;
 			draw.instanceCount = 1;

@@ -19,6 +19,7 @@
 #include "Features/LODBlending.h"
 #include "Features/DrawcallLimitFix.h"
 #include "Features/DrawcallLimitFix/CaptureParity.h"
+#include "Features/DrawcallLimitFix/ConstantMirror.h"
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
 #include "Features/PerformanceOverlay.h"
@@ -286,6 +287,8 @@ namespace globals
 					globals::game::mappedFrameBuffer = pMappedResource;
 				if (DCLF::CaptureParity::Enabled())
 					DCLF::CaptureParity::Get().OnMap(pResource, pMappedResource->pData);
+				if (auto& mirror = DCLF::ConstantMirror::Get(); mirror.Any())
+					mirror.OnMap(pResource, pMappedResource->pData);
 			}
 			return hr;
 		}
@@ -306,7 +309,22 @@ namespace globals
 			}
 			if (DCLF::CaptureParity::Enabled())
 				DCLF::CaptureParity::Get().OnUnmap(pResource);
+			if (auto& mirror = DCLF::ConstantMirror::Get(); mirror.Any())
+				mirror.OnUnmap(pResource);
 			func(This, pResource, Subresource);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	/** @brief Feeds Drawcall Limit Fix's constant buffer mirror (buffers updated without Map). */
+	struct ID3D11DeviceContext_UpdateSubresource
+	{
+		static void thunk(ID3D11DeviceContext* This, ID3D11Resource* pDstResource, UINT DstSubresource, const D3D11_BOX* pDstBox, const void* pSrcData, UINT SrcRowPitch,
+			UINT SrcDepthPitch)
+		{
+			if (auto& mirror = DCLF::ConstantMirror::Get(); mirror.Any())
+				mirror.OnUpdateSubresource(pDstResource, pDstBox, pSrcData);
+			func(This, pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -315,5 +333,6 @@ namespace globals
 	{
 		stl::detour_vfunc<14, ID3D11DeviceContext_Map>(a_context);
 		stl::detour_vfunc<15, ID3D11DeviceContext_Unmap>(a_context);
+		stl::detour_vfunc<48, ID3D11DeviceContext_UpdateSubresource>(a_context);
 	}
 }

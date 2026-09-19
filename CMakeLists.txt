@@ -557,6 +557,11 @@ install(
     COMPONENT DXVK
 )
 
+# DXC for the render graph's runtime SPIR-V compilation, beside the DXVK DLLs (RenderGraphRuntime loads it from there).
+if(CS_DXC_RUNTIME_DLLS)
+    install(FILES ${CS_DXC_RUNTIME_DLLS} DESTINATION SKSE/Plugins/CommunityShaders/bin COMPONENT DXVK)
+endif()
+
 # Prebuilt runtimes ship from package/; locally built fork plugins are staged below.
 # FSR requires the pinned Vulkan runtime to be present and unmodified.
 set(_FFX_VK_RUNTIME "${CMAKE_SOURCE_DIR}/package/SKSE/Plugins/CommunityShaders/bin/amd_fidelityfx_vk.dll")
@@ -804,6 +809,9 @@ if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
             -Src "${DXVK_BUILD_DIR}"
             -Dst "${_aio_runtime_dir}"
     )
+    foreach(_dxc IN LISTS CS_DXC_RUNTIME_DLLS)
+        list(APPEND _prepare_aio_cmds COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dxc}" "${_aio_runtime_dir}/")
+    endforeach()
 
     # Stage locally built Streamline fork plugins.
     foreach(_sl IN LISTS _SL_FORK_DLLS)

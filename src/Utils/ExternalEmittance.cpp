@@ -31,7 +31,7 @@ namespace ExternalEmittance
 		return a_shaderProperty && a_shaderProperty->flags.any(ExternalEmittanceFlag);
 	}
 
-	static bool ShouldSuppress(const RE::BSShaderProperty* a_shaderProperty, const RE::BSGeometry* a_geometry)
+	bool ShouldSuppress(const RE::BSShaderProperty* a_shaderProperty, const RE::BSGeometry* a_geometry)
 	{
 		return Util::IsInterior() && HasExternalEmittance(a_shaderProperty) && !HasEmittanceSource(a_geometry);
 	}

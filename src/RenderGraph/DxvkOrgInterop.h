@@ -49,6 +49,47 @@ struct DxvkOrgInteropDeviceInfo
 	uint32_t deniedFeatureCount;
 };
 
+enum DxvkOrgInteropResourceKind : uint32_t
+{
+	DXVK_ORG_INTEROP_RESOURCE_BUFFER = 1,
+	DXVK_ORG_INTEROP_RESOURCE_IMAGE = 2,
+};
+
+struct DxvkOrgInteropBufferInfo
+{
+	VkBuffer buffer;  // a D3D11 buffer is a range of a (possibly shared) VkBuffer
+	VkDeviceSize offset;
+	VkDeviceSize size;
+	VkDeviceAddress address;  // of the range's first byte
+	VkBufferUsageFlags usage;
+};
+
+struct DxvkOrgInteropImageInfo
+{
+	VkImage image;
+	VkImageType type;
+	VkFormat format;
+	VkImageCreateFlags flags;
+	VkExtent3D extent;
+	uint32_t mipLevels;
+	uint32_t arrayLayers;
+	VkSampleCountFlagBits samples;
+	VkImageUsageFlags usage;
+	VkImageLayout layout;  // the layout DXVK keeps the image in between its own commands
+	VkImageViewType viewType;  // the SRV's view, or the whole image for a texture
+	VkFormat viewFormat;
+	VkComponentMapping components;
+	VkImageSubresourceRange subresourceRange;
+};
+
+struct DxvkOrgInteropResourceInfo
+{
+	uint32_t version;
+	uint32_t kind;  // DxvkOrgInteropResourceKind
+	DxvkOrgInteropBufferInfo buffer;
+	DxvkOrgInteropImageInfo image;
+};
+
 typedef void (*PFN_dxvkOrgInteropTeardown)(void* user, VkDevice device);
 typedef void (*PFN_dxvkOrgInteropSubmitted)(void* user, VkResult result);
 
@@ -72,4 +113,7 @@ typedef HRESULT(__stdcall* PFN_dxvkCreateBufferFromVkBuffer)(ID3D11Device* pDevi
 	const D3D11_BUFFER_DESC* pDesc, VkBuffer buffer, ID3D11Buffer** ppBuffer);
 typedef HRESULT(__stdcall* PFN_dxvkSetDeviceTeardownCallback)(PFN_dxvkOrgInteropTeardown pCallback, void* pUser);
 typedef HRESULT(__stdcall* PFN_dxvkEnqueueInteropSubmission)(ID3D11Device* pDevice, const DxvkOrgInteropSubmission* pSubmission);
+// Describes a buffer, texture or SRV and marks it stable (never relocated or renamed from then on).
+// Buffers the application can map are rejected (E_INVALIDARG): discard maps rename them.
+typedef HRESULT(__stdcall* PFN_dxvkGetInteropResourceInfo)(ID3D11Device* pDevice, IUnknown* pObject, DxvkOrgInteropResourceInfo* pInfo);
 }

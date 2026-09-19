@@ -4,8 +4,8 @@ Drawcall Limit Fix (DCLF) replaces the game's per-object opaque draw loop with G
 that the render graph executes on DXVK's Vulkan device (see [OpenRenderGraph on DXVK](./render-graph.md)).
 It is built in phases:
 
-1.  **Scene capture** (current): CPU tables describing every object DCLF will draw.
-2.  **Indirect pipeline**: Vulkan device-generated commands, shaders recompiled for the render graph,
+1.  **Scene capture** (done): CPU tables describing every object DCLF will draw.
+2.  **Indirect pipeline** (current): Vulkan device-generated commands, shaders recompiled for the render graph,
     tables uploaded to the GPU.
 3.  **Integration and parity**: the native loop skips what DCLF draws; the images must match.
 4.  **GPU culling**: two-pass object occlusion culling at the Z-prepass.
@@ -20,72 +20,254 @@ Source: `src/Features/DrawcallLimitFix.{h,cpp}` and `src/Features/DrawcallLimitF
 
 ### Which objects
 
-Static rigid geometry: a `BSTriShape` (not dynamic, multi-index or LOD) with no skin, a
-`BSLightingShaderProperty`, a technique DCLF supports (None, Envmap, Glowmap, Parallax, including TruePBR
-materials), no alpha blending, no decal flags, no projected UV or refraction, and not under a
-`NiSwitchNode` or `BSOrderedNode`. Per frame it must also be visible (not app-culled or hidden up to its
-cell node) and fully faded in. Objects whose LOD fade inputs are undefined in the engine (see
-`LightingDescriptors.cpp`) stay native. Anything else stays on the native loop, which draws it as before.
+Static rigid geometry:
+-   a `BSTriShape` (not dynamic, multi-index or LOD) with no skin;
+-   a `BSLightingShaderProperty`;
+-   a technique DCLF supports: None, Envmap, Glowmap or Parallax, including TruePBR materials;
+-   no alpha blending, no decal flags, no LOD flags, no projected UV and no refraction;
+-   not under a `NiSwitchNode` or `BSOrderedNode`, and not part of an actor.
+
+Per frame it must also:
+-   be visible, meaning not app-culled or hidden up to its tracked root;
+-   be fully faded in.
+
+Objects whose LOD fade inputs are undefined in the engine (see `LightingDescriptors.cpp`) stay native. So do
+the few objects whose drawn technique cannot be known when the tables are built (`alpha-test-state`, see
+the engine notes' batch renderer open question). Anything else stays on the native loop, which draws it as
+before.
 
 The reasons are counted per frame (`CS_DCLF_STATS=1`, or the feature's settings page).
 
 ### Tracking
 
-`SceneTracker` detours the `NiNode` child functions (`AttachChild`, `DetachChild*`, `SetAt*`) and pushes
-events onto a lock-free stack from whatever thread attaches or detaches. Detach events carry the
+`SceneTracker` detours the `NiNode` child functions (`AttachChild`, `DetachChild*`, `SetAt*`). From
+whatever thread attaches or detaches, it pushes events onto a lock-free stack. Detach events carry the
 geometry leaves collected on that thread while the subtree is intact.
 
 `SceneStore` belongs to the render thread. Every Present (`Feature::Reset`, so also in menus) it:
 
-1.  refreshes the set of tracked cell category nodes: Static, Dynamic and MultiBound of each attached cell
-    (interior cell or loaded grid). New cells are scanned and removed cells dropped;
-2.  applies the queued events in order;
-3.  re-checks a slice of tracked geometry against its category node, as a safety net for missed detaches.
+1.  Refreshes the set of tracked roots. New roots are scanned and removed roots dropped. The roots are:
+    -   the Static, Dynamic and MultiBound category nodes of each attached cell (the interior cell, or
+        the loaded grid);
+    -   the `BSMultiBoundNode` children of `TES::objRoot`, where the engine moves references into
+        multibounds (exteriors) and rooms (interiors);
+    -   the interior portal graph's rooms and shared node.
+2.  Applies the queued events in order.
+3.  Re-checks a slice of tracked geometry against its root, as a safety net for missed detaches.
 
 ### Tables
 
-At the start of the main pass (`Feature::Prepass`, when `Deferred::StartDeferred` runs) `BuildFrame`
-rebuilds, for the eligible set:
+At the start of the main pass (`Feature::Prepass`, when `Deferred::StartDeferred` runs), `BuildFrame`
+first walks the main-camera accumulator's batches. That yields, for every geometry, the pass the main pass
+will draw this frame and the technique it is registered under. It then rebuilds the tables from the
+tracked geometry the accumulator holds; the rest of the tracked set was culled by the engine and cannot be
+drawn this frame. Phase 5 takes objects out of the accumulator, so it will need the whole set again.
 
 | Table | Content |
 | --- | --- |
-| `objects` (`ObjectRecord`, 128 bytes, GPU layout) | world and previous world 3×4, world bounding sphere, geometry / material / pipeline indices, flags (alpha test, two-sided, alpha threshold) |
+| `objects` (`ObjectRecord`, 128 bytes, GPU layout) | world and previous world 3×4, world bounding sphere, geometry / material / pipeline indices, flags (alpha test, two-sided, alpha threshold, external emittance suppression) |
 | `geometries` (`GeometryRecord`) | the game's vertex and index buffer, vertex description and stride, index count |
 | `pipelines` (`PipelineKey`) | final vertex and pixel shader descriptors (as `State::ModifyShaderLookup` produces them for the deferred pass), two-sided, and the raw pass descriptor |
 | `geometryConstants` (per pipeline) | the per-frame `PerGeometry` constants for that pass descriptor |
-| `materials` (`MaterialRecord`) | the `PerMaterial` constants, textures and address modes for each (material, pass descriptor) |
+| `techniqueConstants` (per pipeline) | the `PerTechnique` constants (fog, colour output clamp, `VPOSOffset`), sampler filter modes, and the shadow mask binding |
+| `permutations` (per pipeline) | Community Shaders' permutation buffer (b4) for the draw |
+| `materials` (`MaterialRecord`) | the `PerMaterial` constants, textures, address and filter modes for each (material, pass descriptor) |
 | `shading` (`ObjectShading`, 32 bytes) | the per-object `PerGeometry` pixel constants (LOD fades, alpha, emissive colour, SSR specular) |
+| `lights` (`ObjectLights`) | Light Limit Fix's per-object `StrictLightData` (b3): room index and shadow mask channels |
 | `draws` (`DrawSequence`, 48 bytes) | one indirect draw per object in the device-generated-commands token order, addresses filled in Phase 2 |
 
-The shader descriptors are derived from the property flags (`LightingDescriptors.cpp` follows
-`GetRenderPasses` and `SetupTechnique`, including the specular and envmap LOD fades and TruePBR's
-changes).
+The pass descriptor is the accumulated technique: it is what `SetupTechnique` receives. Deriving it from
+the property flags is not reliable while the native loop runs, for three reasons:
+-   Some bits come from per-frame engine state: the light and shadow assignment, and DoAlphaTest, which
+    depends on an early-Z global.
+-   `GetRenderPasses` rebuilds a pass only when the light state changes, so the specular and envmap fade
+    decisions a pass carries can be older than the current fade metric.
+-   The fade values the draw reads are the property fields that same call stored.
 
-Constants are not ported: `ConstantEvaluator` runs the engine's own `BSLightingShader::SetupMaterial` and
-`SetupGeometry` outside the render loop against stand-in shader objects (engine notes: "Evaluating the
-Setup functions outside the render loop"). The results therefore include every Community Shaders hook on
-those functions. Materials are evaluated once per (material, pass descriptor) per frame, and geometry
-constants once per pipeline per frame. Only World, PreviousWorld, the LOD fades, alpha, emissive colour
-and SSR specular are per object; they are stored in `objects` and `shading`.
+`LightingDescriptors.cpp` still derives the descriptor from the flags, following `GetRenderPasses` and
+`SetupTechnique` with the LOD fades and TruePBR's changes, because Phase 5 will need it. `CS_DCLF_STATS`
+reports how often the derivation disagrees with the drawn technique outside the per-frame bits: in the
+coverage runs, at most one object per frame, a specular fade crossing.
+
+Material and geometry constants are not ported. `ConstantEvaluator` runs the engine's own
+`BSLightingShader::SetupMaterial` and `SetupGeometry` outside the render loop, against stand-in shader
+objects (engine notes: "Evaluating the Setup functions outside the render loop"). The results therefore
+include every Community Shaders hook on those functions.
+-   **Evaluation frequency:** materials once per (material, pass descriptor) per frame, geometry
+    constants once per pipeline per frame.
+-   **Per-object values:** World, PreviousWorld, the LOD fades, alpha, emissive colour and SSR specular,
+    stored in `objects` and `shading`.
+-   **The one port:** `SetupTechnique` binds real shaders, so it is ported (`EvaluateTechnique`) from the
+    decompile.
+
+Constant components the engine does not write keep a sentinel (`kUnwrittenBits`). Phase 2 uploads zero for
+them. The engine leaves them undefined too; they belong to variables the permutation does not read.
+
+What Community Shaders binds on top of the engine was checked draw by draw (see below):
+-   **Per object:** the permutation buffer (b4), Light Limit Fix's `StrictLightData` (b3), and the
+    alpha-test reference (b11).
+-   **Per pass:** everything else Community Shaders binds for these permutations (b5, b6, b12, and every
+    feature texture outside t0–t15). DCLF can bind it once per pass.
+-   **Never read by these permutations:** the bone palettes (b9, b10) and Skin's buffers and textures
+    (b7, t71, t74, t75).
 
 ### Checking it: capture parity
 
 `CS_DCLF_CAPTURE_PARITY=1` compares every native main-pass lighting draw of an object in the tables with
 the tables, and logs every 300 frames:
 
--   `capture parity OK|MISMATCH`: shader descriptors, world transform, `PerMaterial` constants, textures and
-    address modes, and `PerGeometry` constants (with the per-object values applied). Native constants are
-    captured from the Map/Unmap detours; only components the engine writes are compared. Also counted:
-    eligible geometry under a tracked category node that is not tracked (tracking misses).
--   `draw parity OK|MISMATCH`: `DrawIndexed` arguments and the bound index and vertex buffers.
+-   `location`: the player's cell.
+-   `capture parity OK|MISMATCH` covers (bit for bit, except `EmitColor`, compared within 0.1% because
+    time-of-day emittance moves between the table build and the draw):
+    -   that the drawn pass is the one the accumulator walk found;
+    -   the full pass descriptor, and the final shader descriptors;
+    -   the world transform;
+    -   `PerMaterial` constants, textures and address modes;
+    -   `PerGeometry` constants (with the per-object values applied);
+    -   `PerTechnique` constants (re-read at the draw because of the late `VPOSOffset` write), filter
+        modes and the shadow mask binding;
+    -   tracking misses: eligible geometry under a tracked root that is not tracked.
+
+    Native constants are captured from the Map/Unmap detours, and only components the engine writes are
+    compared.
+-   `draw parity`: the `DrawIndexed` arguments and the bound index and vertex buffers.
+-   `light data parity`: Light Limit Fix's `StrictLightData` (no strict lights in the main pass, room
+    index, shadow mask channels).
+-   `permutation parity`: the permutation buffer (b4), limited to the extra bits the Lighting shader reads.
+    `IsSun` and `GrassSphereNormal` stay set from other shaders' draws.
+-   `feature binding parity`: within a frame, every constant buffer b3+ and shader resource outside t0–t15
+    must stay the same, and must not be rewritten, across the eligible draws. The exceptions are the
+    per-draw buffers listed above.
 -   `render state … ->`: the cull, depth, stencil, blend and alpha-test state the native draw used, per
     property-derived key. A key marked `VARIES` means the state is not a function of the key.
+-   Diagnostics:
+    -   statically eligible geometry drawn outside the tracked roots, with the parent chains of a few;
+    -   variables the native shaders have that DCLF leaves unwritten.
 
-Whiterun, `CS_DCLF_CAPTURE_PARITY=1`: about 1,300 objects in the tables; about 365 of them drawn natively
-per frame; 0 mismatches in every check; 0 tracking misses.
+Results with `CS_DCLF_TEST_COMMANDS=600:coc WhiterunDragonsreach;1800:coc BleakFallsBarrow01;3000:coc Riverwood`:
 
-Community Shaders fixes that came out of it: TruePBR wrote partly initialized constant arrays
-(`TruePBR.cpp`, now value-initialized).
+| Location | Tracked geometry | Objects in the tables per frame | Checked draws per frame | Table CPU per frame | Mismatches |
+| --- | --- | --- | --- | --- | --- |
+| Whiterun (exterior) | 9,256 | 915 | about 910 | 1.05 ms | 0 |
+| Dragonsreach (interior, rooms and portals) | 2,690 | 921 | about 920 | 0.69 ms | 0 |
+| Bleak Falls Temple (interior) | 6,442 | about 300 | about 300 | 0.30 ms | 0 |
+| Riverwood (exterior, after the cell transition) | 10,078 | 200 to 1,200 (camera moving) | 540 to 1,200 | 0.63 to 1.23 ms | 0 |
+
+Every other check (draw, light data, permutation, feature bindings) is OK in all four.
+
+Community Shaders fixes that came out of it:
+-   TruePBR wrote partly initialized constant arrays (`TruePBR.cpp`, now value-initialized).
+-   Light Limit Fix's room index and shadow mask derivation moved into `LightLimitFix::GetRoomIndex` /
+    `GetShadowBitMask`, shared with DCLF.
+
+## Phase 2: indirect pipeline (done)
+
+DCLF's objects are drawn every frame by the render graph with one indirect command stream per pass, into
+off-screen copies of the main pass's targets; the frame itself is unchanged. `CS_DCLF_DEBUG_VIEW=1` copies
+those targets over the native ones before the deferred composite, so the frame shows only what DCLF drew.
+
+### Game resources
+
+-   **Buffers and images.** The DXVK fork exports `dxvkGetInteropResourceInfo` (ordinal 135). Given a D3D11
+    buffer, texture or shader resource view, it returns the Vulkan handle, offset, size and device address
+    (images: create info, view, swizzle and the layout DXVK keeps them in) and marks the resource stable,
+    the same lock DXVK's NVX interop uses. Buffers the game can map are rejected. `GpuResources` resolves
+    each geometry's vertex and index buffers once and holds a reference while they are cached (Whiterun:
+    806 buffers, 0 rejected).
+-   **Textures** (`GpuTextures`). DXVK keeps every image it hands out in `VK_IMAGE_LAYOUT_GENERAL` and uses
+    it between the graph's commands, which is D3D12's simultaneous-access contract. Each shader resource
+    view is imported into BasicRHI without ownership, with simultaneous access, and gets a view in ORG's
+    shader-visible heap (a slot from ORG's descriptor service, retired against ORG's fences on eviction).
+    A null view (the engine binds none) reads zero through a null descriptor, as D3D11's null SRV does.
+-   **Samplers** are copies of the renderer's own D3D11 sampler states, the table the engine selects from by
+    the shadow state's address and filter modes (engine notes: samplers).
+-   **Per-frame constant buffers and dynamic structured buffers** are never locked: `ConstantMirror` keeps
+    a CPU copy of each one DCLF watches, fed by the immediate context's `Map`/`Unmap` and
+    `UpdateSubresource`, and re-reads mapped buffers from their last mapping (the engine writes some
+    constants after `Unmap`). CPU-written structured buffers the pass reads (t98) are copied into graph
+    buffers each epoch. Light Limit Fix's lights, light list and light grid (t35-t37) are its graph buffers.
+
+### Pipelines and bindings
+
+Every draw pushes one address, of its binding record (`DrawBindings`, 800 bytes: vertex and pixel constant
+buffer addresses for b0-b13, resource heap indices for t0-t127, sampler heap indices for s0-s15). The
+pipeline layout maps the shaders' registers onto that record with `VK_EXT_descriptor_heap`'s indirect
+mappings; vertices come through the `VertexBuffer` argument. Lighting.hlsl needs no binding changes.
+
+-   **SPIR-V.** `ShaderPrograms` compiles each pipeline key's Lighting VS and PS at run time through
+    ORGModuleServices, with the defines of the D3D11 build (`ShaderCache::GetCompileDefines`), HLSL 2018,
+    and register shifts per class (`ShaderPrograms.h`). DXC scopes cbuffers declared inside namespaces
+    differently from FXC; those members are declared through `Common/NamespacedCBuffer.hlsli` (FXC output
+    byte-identical).
+-   **Pipelines** (`DrawPipelines`) are built asynchronously through ORGModuleServices' `PipelineService`,
+    two per key: the main pass's (color, depth test EQUAL, no depth writes) and DCLF's own Z-prepass (depth
+    only, LESS, writes). Vertex input is the engine's input layout for (VS input mask & geometry
+    `VertexDesc`), ported from its builder (`VertexInput.cpp`); the pipeline key includes the geometry's
+    vertex layout. A pipeline whose shaders read a register the layout cannot map, or a vertex input the
+    geometry lacks, fails and its objects stay native. Both variants of a key get the same index in their
+    indirect pipeline sets.
+-   **Constants** are packed with the native shaders' constant tables (`LightingConstants`, shared with the
+    capture parity check): PerTechnique per pipeline, PerMaterial per (material, pipeline), PerGeometry per
+    object, Light Limit Fix's StrictLightData per (room, shadow mask), the permutation per (pipeline, object
+    flags), the alpha-test reference per threshold, Linear Lighting's `LLPerGeometry` (PS b8, per object;
+    Phase 1 missed that it is per draw) per multiplier, and every other bound buffer from its mirror.
+
+### An epoch
+
+At the first lighting draw of the main pass DCLF records what the pass binds; just before the deferred
+composite (`Deferred::EndDeferred`) it runs the graph's `MainOpaque` segment. Its callback assembles and
+uploads the constants, records, draw inputs and geometry table (about 2.5 ms of render-thread CPU and
+1.6 MB for 915 objects in Whiterun). Then:
+
+1.  `BuildDrawsCS` (compute) writes one `DrawSequence` per draw from the inputs and appends it with an
+    atomic count, the shape Phase 4's culling will extend.
+2.  The main-opaque pass executes the sequences twice with the GPU count: the depth variant into DCLF's own
+    D24S8 depth, then the color variant (EQUAL) into eight graph-owned targets with the main pass's formats.
+    The render area, viewport and depth range are the main pass's (the engine draws with depth range
+    [0, 0.999998]; BasicRHI's `PassBeginInfo` gained the range).
+
+The graph holds every feature's passes and each epoch executes all of them; passes record only in their own
+segment (`RenderGraphRuntime::Segment`: LightCulling, MainOpaque, DebugView) and include it in their
+invocation revision. An empty pass is effectively free.
+
+### Gate
+
+-   `CS_DCLF_BUILD_PARITY=1`: BuildDraws' output (read back through D3D11 wrappers of the graph buffers)
+    equals the CPU templates. OK on every check in Whiterun (915 draws), Dragonsreach (921) and Bleak Falls
+    Barrow (about 300).
+-   The debug view shows the drawn objects textured, lit and depth-tested; nothing is skipped.
+-   No validation errors besides the upstream `vkQueueSubmit2-semaphore-03868`.
+-   One ExecuteIndirect per pass (two passes: depth, color) by construction; not yet confirmed in a capture.
+
+### Fixed in shared components on the way
+
+-   **ORG** `PersistentGraphHost` never released upload pages or retired descriptors: every page leaked
+    (about 9 GB after a minute of DCLF uploads). It now keeps a per-slot frame timeline, waits for a slot's
+    previous frame before reusing it, and calls the upload and descriptor deferred releases.
+-   **ORG** persistent execution ignored `commonLayoutOnly` on external textures and transitioned DXVK's
+    depth buffer out of GENERAL; `CompileResourceShape` now carries it and compiled states keep layout
+    Common. `ExternalTextureResource` also reports the view flags its description implies (persistent graphs
+    rejected its depth-stencil views).
+-   **BasicRHI**: per-stage descriptor-heap mappings; depth-stencil and packed 10/11-bit formats; images
+    imported with simultaneous access (views, attachments and transfers in GENERAL); SRV component mappings
+    on Vulkan; null SRVs on both backends (Vulkan: `robustness2` `nullDescriptor`, which the DXVK fork now
+    reports); the viewport depth range in `PassBeginInfo`.
+
+### Open
+
+-   **DCLF's depth does not match the native Z-prepass.** With the native depth as attachment, EQUAL and even
+    LESS_EQUAL reject nearly every DCLF fragment; the error grows as objects get nearer (a -400 unit bias
+    still leaves near objects out). The inputs were checked equal: constants (Phase 1 parity), the vertex
+    shader's per-frame buffer (hashed at a native draw and at the epoch), camera offsets, viewport and depth
+    range, and the depth buffer itself. DXVK's DXBC path marks positions invariant and keeps `precise`
+    multiply-adds fused, while DXC emits NoContraction, but that explains ULP-level differences only, and
+    compiling with `-Gis` changed nothing. Phase 3's design does not need cross-compiler equality (DCLF
+    draws its own Z-prepass and tests against it, as Phase 2 does now), but the cause should be understood
+    before image parity: it could hide a geometric difference.
+-   The sampler table is read at its AE 1.6.1170 address; other runtimes need its Address Library ID.
+-   Material textures are imported per shader resource view; views of one image share nothing yet.
+-   Records and constants are rebuilt and uploaded every frame; Phase 4 moves to persistent tables with
+    dirty-range uploads.
 
 ## Switches
 
@@ -93,14 +275,67 @@ Community Shaders fixes that came out of it: TruePBR wrote partly initialized co
 | --- | --- |
 | `CS_DCLF_STATS=1` | Every 300 frames, log how many objects are tracked, why the rest stay native, and the CPU time scene capture takes. |
 | `CS_DCLF_CAPTURE_PARITY=1` | Compare the tables with the native draws (see above). Costs CPU on every draw. |
+| `CS_DCLF_DEBUG_VIEW=1` | Before the deferred composite, copy DCLF's off-screen targets over the native ones: the frame shows only what the indirect draws produced. |
+| `CS_DCLF_BUILD_PARITY=1` | Every 300 epochs, read BuildDraws' output back and compare it with the CPU templates (`BuildDraws parity OK/MISMATCH`). |
+| `CS_DCLF_TEST_COMMANDS=<frame>:<command>;…` | Test runs: run each console command on the main thread once the main pass has run that many frames (loading screens do not count), for coverage runs from the auto-loaded save. |
+
+## Known upstream issues
+
+Found while building DCLF. None is caused by DCLF; each is recorded here until it is fixed or ruled out.
+
+| Where | Issue | Status |
+| --- | --- | --- |
+| DXVK fork (`extern/dxvk`) | Intermittent validation error `VUID-vkQueueSubmit2-semaphore-03868`: a binary semaphore in a submit's signal list is still signaled. 0 to 5 per run, in the swapchain/present path. It started in this branch's runs; DCLF issues no Vulkan calls. The newest `extern/dxvk` commits include a presenter revert, the suspected cause. | Open, not investigated |
+| Community Shaders, Subsurface Scattering | `ExtraShaderDescriptors::IsBeastRace` is set or cleared only in the face/skin `SetupGeometry` path (`SubsurfaceScattering::BSLightingShader_SetupSkin`), but `Lighting.hlsl` writes `!IsBeastRace` into the G-buffer mask (`psout.Masks.y`) for every object. After a beast-race face draw, the static objects drawn next inherit the bit. DCLF uses the intended value (0), so once DCLF draws them, its output can differ from native in that mask channel. | Open; not seen in the coverage runs (no beast-race faces in view) |
+| Community Shaders, permutation buffer | `IsSun` and `GrassSphereNormal` stay set in `ExtraShaderDescriptor` from the last sky/grass draw. The Lighting shader does not read them, so this is harmless today, but any shader that starts reading them inherits stale values. | Harmless for now |
+| Community Shaders, TruePBR | Constant arrays passed to the shader were only partly initialized (e.g. `ParallaxOccData` zw). | Fixed (`TruePBR.cpp`, value-initialized) |
+| Community Shaders, Effects11 | Logs `[E] Required effect file not found: enbseries\enbeffect.fx` on every start without ENB files. | Unrelated noise |
+| Skyrim, `BSLightingShader::SetupTechnique` | Writes `VPOSOffset` after unmapping the PerTechnique buffer. It works on DXVK, where dynamic buffers stay mapped. On a native D3D11 driver the write is undefined. | Engine behaviour; DCLF reproduces the value |
+| Skyrim, fog constants | `FogFarColor.w` is copied from uninitialized stack memory. | Engine behaviour; the shader does not read it |
+| CommonLibSSE-NG | `BSBatchRenderer::renderPass` is declared as `BSTArray<PassGroup*>` but holds `PassGroup` structs inline. | DCLF works around it; not fixed in the library |
+| Tooling | The CS deploy step (`*_plugin.stamp`) sometimes fails on its first run and succeeds on the next. Once (`dclf16`) the game recompiled all 3,473 shaders despite logging "Using disk cache"; the cause was not found. | Open, cosmetic |
+
+## Open questions and assumptions (Phase 1)
+
+-   **DoAlphaTest gained after the tables are built.** Passes in alpha-test batch lists whose registered
+    technique lacks DoAlphaTest are sometimes drawn with it (engine notes, batch renderer). The source of
+    the change was not found. These objects stay native (`alpha-test-state`).
+-   **Parentless interior geometry.** About 30 draws per frame in Dragonsreach and Bleak Falls Barrow have
+    no parent node; probably the portal graph's `alwaysRenderChildren` or its other object lists. Not
+    tracked, so these stay native.
+-   **Emissive drift.** `EmitColor` differs from the drawn value by up to about 1e-4 relative on emissive
+    windows: the time-of-day emittance moves between the table build and the draw. Where it is updated
+    was not traced. Parity compares it within 0.1%.
+-   **Shadow mask size.** `VPOSOffset` uses the shadow mask render target's size. The engine uses globals
+    at AE `0x14328be9c`. The two were equal at 1920×1080; not checked with a different mask size
+    (`iShadowMaskQuarter`) or dynamic resolution.
+-   **Early-Z global.** Whether DoAlphaTest is set for alpha-tested geometry depends on which offscreen
+    renders ran before (engine notes). Phase 5 must decide how to derive it.
+-   **Stand-in side effects.** Evaluation calls `SetupMaterial`/`SetupGeometry` through the vtable, so every
+    Community Shaders hook runs. The engine shadow state and CS's permutation data are restored.
+    Light Limit Fix's hook uploads its `StrictLightData` for the template pass. It records what it
+    uploaded, so its upload cache stays consistent, and the next native draw overwrites it. A hook added
+    later that keeps other global state would need the same review.
+-   **Template pass for geometry constants.** Per-pipeline `PerGeometry` constants are evaluated with a
+    copy of any object's lighting pass (for the sun light). This is valid because everything per object
+    is replaced afterwards (engine notes, `SetupGeometry`: what is per object); parity confirms it for the
+    main pass only.
+-   **Actors.** Geometry under an actor's 3D is excluded, including rigid items carried by actors.
+-   **Unwritten constants.** Components the engine never writes are uploaded as zero in Phase 2. The
+    engine leaves them undefined, and the permutations do not read them.
+-   **SE 1.5.97 and VR.** Only AE 1.6.1170 was tested. DCLF uses two raw offsets, into
+    `BSBatchRenderer`'s `renderPassMap` (`+0x2C`, `+0x48`); their SE layout is assumed identical. VR is
+    disabled.
 
 ## Still open in Phase 1
 
--   `PerTechnique` constants (fog, output clamp) and filter modes, which `SetupTechnique` sets; it binds
-    real shaders, so it cannot be evaluated with stand-ins and needs a port.
--   Community Shaders' own per-draw data: the permutation buffer (b4, `ExtraShaderDescriptor` bits such as
-    additive lighting), and the feature resources `State::Draw` binds.
--   Coverage runs in an interior, a dungeon and across a cell transition.
--   Cost: rebuilding the tables takes about 1.0 ms of render-thread CPU per frame in Whiterun (peaks about
-    1.5-2 ms), most of it the per-frame stand-in evaluations of 167 materials and 17 pipelines; tracking takes
-    0.05 ms. Re-evaluating only what changed is the obvious next step.
+-   Parentless geometry in interiors (about 30 draws per frame in Dragonsreach and Bleak Falls Barrow)
+    stays native; probably the portal graph's always-render lists.
+-   The alpha-test-state objects (engine notes, batch renderer open question) stay native.
+-   **Cost:** see the results table; tracking adds about 0.05 ms. In Whiterun, 0.54 ms of the 1.05 ms is
+    classification and record building (about 1,450 accumulated tracked geometries) and 0.38 ms is the
+    stand-in evaluation of 295 materials. Caching materials across frames is the obvious next saving; it
+    needs a reference on the material so that a reused address cannot hit a stale entry.
+-   Phase 5 cuts the native loop, so the accumulator walk will no longer supply the per-frame technique
+    bits. They then have to be derived: the light and shadow assignment (`FUN_1414fcf80`) and the early-Z
+    global.

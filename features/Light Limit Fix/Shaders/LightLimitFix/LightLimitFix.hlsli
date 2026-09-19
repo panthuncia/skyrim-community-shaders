@@ -1,4 +1,6 @@
 
+#include "Common/NamespacedCBuffer.hlsli"
+
 namespace LightLimitFix
 {
 
@@ -6,12 +8,17 @@ namespace LightLimitFix
 
 	cbuffer StrictLightData : register(b3)
 	{
-		uint NumStrictLights;
-		int RoomIndex;
-		uint ShadowBitMask;
-		uint pad0;
-		Light StrictLights[15];
+		uint NSCB(LightLimitFix, NumStrictLights);
+		int NSCB(LightLimitFix, RoomIndex);
+		uint NSCB(LightLimitFix, ShadowBitMask);
+		uint NSCB(LightLimitFix, pad0);
+		Light NSCB(LightLimitFix, StrictLights)[15];
 	};
+	NSCB_ALIAS(LightLimitFix, uint, NumStrictLights)
+	NSCB_ALIAS(LightLimitFix, int, RoomIndex)
+	NSCB_ALIAS(LightLimitFix, uint, ShadowBitMask)
+	NSCB_ALIAS(LightLimitFix, uint, pad0)
+	NSCB_ARRAY_ALIAS(LightLimitFix, Light, StrictLights, 15)
 
 	StructuredBuffer<Light> lights : register(t35);
 	StructuredBuffer<uint> lightList : register(t36);       //MAX_CLUSTER_LIGHTS * 16^3

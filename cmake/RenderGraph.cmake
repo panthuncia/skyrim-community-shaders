@@ -16,6 +16,7 @@ set(CS_ORG_ROOT "${CMAKE_SOURCE_DIR}/extern" CACHE PATH
 set(CS_HAS_RENDER_GRAPH OFF)
 set(CS_GENERATED_SHADER_DIR "${CMAKE_BINARY_DIR}/generated/Shaders")
 set(CS_RENDER_GRAPH_SPIRV)
+set(CS_DXC_RUNTIME_DLLS)
 
 if(CS_RENDER_GRAPH)
     set(_cs_org_missing)
@@ -52,6 +53,26 @@ if(CS_RENDER_GRAPH)
 
         add_subdirectory("${CS_ORG_ROOT}/OpenRenderGraph" "${CMAKE_BINARY_DIR}/extern/OpenRenderGraph" EXCLUDE_FROM_ALL)
 
+        # Runtime SPIR-V compilation (Drawcall Limit Fix's Lighting permutations): ORGModuleServices'
+        # content-addressed DXC service. Optional; without it DCLF cannot build pipelines.
+        if(EXISTS "${CS_ORG_ROOT}/ORGModuleServices/CMakeLists.txt")
+            set(ORG_MODULE_SERVICES_ENABLE_DXC ON CACHE BOOL "" FORCE)
+            set(ORG_MODULE_SERVICES_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
+            set(ORG_MODULE_SERVICES_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+            add_subdirectory("${CS_ORG_ROOT}/ORGModuleServices" "${CMAKE_BINARY_DIR}/extern/ORGModuleServices" EXCLUDE_FROM_ALL)
+            target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::ORGModuleServices)
+            target_compile_definitions(${PROJECT_NAME} PRIVATE CS_HAS_ORG_MODULE_SERVICES=1)
+            # The Vulkan SDK's DXC: it has SPIR-V code generation (the Windows SDK's does not).
+            foreach(_dll IN ITEMS dxcompiler.dll dxil.dll)
+                if(EXISTS "$ENV{VULKAN_SDK}/Bin/${_dll}")
+                    list(APPEND CS_DXC_RUNTIME_DLLS "$ENV{VULKAN_SDK}/Bin/${_dll}")
+                endif()
+            endforeach()
+            if(NOT CS_DXC_RUNTIME_DLLS)
+                message(WARNING "CS_RENDER_GRAPH: VULKAN_SDK has no dxcompiler.dll; runtime SPIR-V compilation will be unavailable in game")
+            endif()
+        endif()
+
         # SPIR-V for the render-graph passes, with the descriptor-heap ABI BasicRHI expects.
         include("${CS_ORG_ROOT}/BasicRHI/cmake/BasicRHIShaderFlags.cmake")
         set(_llf_shader_dir "${CMAKE_SOURCE_DIR}/features/Light Limit Fix/Shaders")
@@ -69,7 +90,17 @@ if(CS_RENDER_GRAPH)
                     "${_llf_shader_dir}/LightLimitFix/OrgBindless.hlsli")
             list(APPEND CS_RENDER_GRAPH_SPIRV "${_spv}")
         endforeach()
-        add_custom_target(CSRenderGraphShaders DEPENDS ${CS_RENDER_GRAPH_SPIRV})
+        # Drawcall Limit Fix's draw building.
+        set(_dclf_shader_dir "${CMAKE_SOURCE_DIR}/features/Drawcall Limit Fix/Shaders")
+        set(_dclf_spv "${CS_GENERATED_SHADER_DIR}/DrawcallLimitFix/ORG/BuildDrawsCS.spv")
+        basicrhi_compile_spirv(
+            OUTPUT "${_dclf_spv}"
+            SOURCE "${_dclf_shader_dir}/DrawcallLimitFix/BuildDrawsCS.hlsl"
+            ENTRY main
+            PROFILE cs_6_6
+            INCLUDE_DIRS "${_dclf_shader_dir}")
+        set(CS_DCLF_SPIRV "${_dclf_spv}")
+        add_custom_target(CSRenderGraphShaders DEPENDS ${CS_RENDER_GRAPH_SPIRV} ${CS_DCLF_SPIRV})
         add_dependencies(${PROJECT_NAME} CSRenderGraphShaders)
 
         target_link_libraries(${PROJECT_NAME} PRIVATE OpenRenderGraph::OpenRenderGraph BasicRHI::BasicRHI)
@@ -80,6 +111,13 @@ if(CS_RENDER_GRAPH)
             DESTINATION Shaders/LightLimitFix/ORG
             COMPONENT Shaders
         )
+        install(
+            FILES ${CS_DCLF_SPIRV}
+            DESTINATION Shaders/DrawcallLimitFix/ORG
+            COMPONENT Shaders
+        )
+        # From here on the list feeds the AIO copy, which keeps each file's path under the generated directory.
+        list(APPEND CS_RENDER_GRAPH_SPIRV ${CS_DCLF_SPIRV})
 
         set(CS_HAS_RENDER_GRAPH ON)
         message(STATUS "CS_RENDER_GRAPH: OpenRenderGraph from ${CS_ORG_ROOT}")

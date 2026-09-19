@@ -6,10 +6,10 @@
  * @brief Drawcall Limit Fix: replaces the native opaque render loop with GPU-driven indirect draws
  * executed by the render graph on DXVK's Vulkan device.
  *
- * Phase 1 (this state): scene capture only. Static rigid geometry under the Static, Dynamic and
- * MultiBound nodes of attached cells is tracked and turned into CPU tables each frame (objects,
- * geometry, pipeline keys, indirect draw templates). Nothing is drawn yet; CS_DCLF_CAPTURE_PARITY=1
- * checks the tables against the native draws. See docs/development/drawcall-limit-fix.md.
+ * Phase 2 (this state): static rigid geometry under the Static, Dynamic and MultiBound nodes of attached
+ * cells is tracked and turned into tables each frame (Phase 1), and drawn by the render graph with indirect
+ * commands into off-screen copies of the main pass's targets (IndirectDraws); the frame itself still comes
+ * from the native draws. See docs/development/drawcall-limit-fix.md.
  */
 struct DrawcallLimitFix : Feature
 {
@@ -29,6 +29,9 @@ struct DrawcallLimitFix : Feature
 	virtual void Reset() override;
 	virtual void Prepass() override;
 	virtual void DrawSettings() override;
+
+	/** @brief Deferred::EndDeferred, before the deferred composite (Phase 2 debug view). */
+	void BeforeDeferredComposite();
 
 	/** @brief Called after the Lighting shader's SetupGeometry for every native lighting draw. */
 	void OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags);

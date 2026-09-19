@@ -2,6 +2,8 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -42,21 +44,24 @@ namespace DCLF
 		{
 			ID3D11Resource* buffer = nullptr;
 			void* mapped = nullptr;
+			void* lastMapped = nullptr;  // still valid after Unmap: DXVK keeps dynamic buffers persistently mapped
 			std::uint32_t size = 0;
 			std::array<std::uint8_t, 1024> bytes{};
 			bool valid = false;
 		};
 
-		// Snapshot slots: [stage][level], stage 0 = VS, 1 = PS; levels PerMaterial (1) and PerGeometry (2).
+		// Snapshot slots: [stage][level], stage 0 = VS, 1 = PS; levels PerTechnique (0), PerMaterial (1) and PerGeometry (2).
 		ConstantSnapshot& Slot(std::uint32_t a_stage, std::uint32_t a_level) { return snapshots[a_stage][a_level]; }
 
 		void NoteMismatch(std::string a_message);
 		static void Snapshot(ConstantSnapshot& a_snapshot, ID3D11Resource* a_resource);
 		bool CompareBlock(const RE::BSGeometry* a_geometry, const char* a_what, const ConstantBlock& a_expected, const StageLayout& a_layout,
 			const std::int8_t* a_nativeTable, std::size_t a_nativeTableSize, const ConstantSnapshot& a_native, ID3D11Resource* a_boundBuffer,
-			std::uint32_t a_firstVariable, std::uint64_t a_skip);
+			std::uint32_t a_firstVariable, std::uint64_t a_variables, std::uint64_t a_tolerant);
 		bool CompareMaterial(const RE::BSGeometry* a_geometry, std::uint32_t a_materialIndex);
 		bool CompareGeometry(const RE::BSGeometry* a_geometry, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags);
+		bool CompareTechnique(const RE::BSGeometry* a_geometry, std::uint32_t a_objectIndex);
+		void ComparePermutation(const RE::BSGeometry* a_geometry, std::uint32_t a_objectIndex);
 
 		std::array<std::array<ConstantSnapshot, 3>, 2> snapshots;
 
@@ -95,6 +100,40 @@ namespace DCLF
 		std::uint64_t mismatchedDraws = 0;     // ... whose state differs
 		std::uint64_t materialMismatches = 0;  // ... in PerMaterial constants or textures
 		std::uint64_t geometryMismatches = 0;  // ... in PerGeometry constants
+		std::uint64_t techniqueMismatches = 0; // ... in PerTechnique constants or filter modes
+		std::uint64_t inheritedFilters = 0;    // bound material textures whose filter mode neither SetupTechnique nor SetupMaterial sets
+		std::uint64_t lightChecks = 0;
+		std::uint64_t lightMismatches = 0;  // StrictLightData (LLF, PS b3) differs
+		std::uint64_t permutationChecks = 0;
+		std::uint64_t permutationMismatches = 0;
+		// Bindings Community Shaders owns (constant buffers b3 and up, shader resources outside the
+		// engine's material and technique slots): they must be the same for every eligible draw of a
+		// frame, so that DCLF can bind them once per pass. Baseline = the frame's first eligible draw.
+		void CompareFeatureBindings(ID3D11DeviceContext* a_context);
+		static constexpr std::uint32_t kFirstFeatureConstantBuffer = 3;
+		static constexpr std::uint32_t kConstantBufferSlots = D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT;
+		static constexpr std::uint32_t kResourceSlots = 128;
+		struct FeatureBindings
+		{
+			std::array<ID3D11Buffer*, kConstantBufferSlots> vsBuffers{}, psBuffers{};
+			std::array<ID3D11ShaderResourceView*, kResourceSlots> vsResources{}, psResources{};
+		};
+		FeatureBindings baseline;
+		bool baselineValid = false;
+		// Baseline constant buffers mapped since the last eligible draw (bit = slot; VS in 0-15, PS in 16-31),
+		// counted as rewritten only when another eligible draw of the frame follows.
+		std::uint32_t pendingRewrites = 0;
+		// Differences from the baseline and rewrites of a baseline constant buffer, keyed by "<what> <slot>".
+		std::map<std::string, std::uint64_t> bindingChanges;
+
+		// Diagnostics: statically eligible geometry drawn natively outside the tracked category nodes.
+		std::uint64_t outsideCategories = 0;
+		std::set<std::string> outsideChains;
+
+		// Variables the native shader has in a group that DCLF leaves entirely unwritten, as "<group> <variable>".
+		std::map<std::string, std::uint64_t> unevaluated;
+		// Differing permutation buffer bits: key = field index << 32 | differing bits.
+		ankerl::unordered_dense::map<std::uint64_t, std::uint64_t> permutationDiffs;
 		std::uint64_t untrackedEligible = 0;   // eligible geometry under a drawn category node, not tracked
 		std::uint64_t notInTables = 0;         // tracked geometry drawn natively but excluded this frame
 		ankerl::unordered_dense::set<std::uint32_t> renderFlagsSeen;

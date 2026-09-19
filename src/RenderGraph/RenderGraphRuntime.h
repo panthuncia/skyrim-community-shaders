@@ -1,10 +1,18 @@
 #pragma once
 
 #include <d3d11.h>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 #include <winrt/base.h>
+
+struct DxvkOrgInteropResourceInfo;
+
+namespace org::services
+{
+	class ShaderCompiler;
+}
 
 namespace org
 {
@@ -25,7 +33,9 @@ namespace org
  * after the graph without semaphores.
  *
  * Graph-owned outputs are handed to D3D11 as wrappers over the graph's own Vulkan
- * objects (WrapBuffer); nothing the game or DXVK owns is pinned or relocated.
+ * objects (WrapBuffer). Game resources the graph reads directly (Drawcall Limit Fix's
+ * static geometry and textures) are described through DescribeResource, which marks
+ * them stable in DXVK; nothing else the game or DXVK owns is pinned or relocated.
  *
  * Header deliberately free of ORG/BasicRHI/Vulkan includes: those require volk
  * ahead of any Vulkan header, which only the implementation files arrange.
@@ -33,6 +43,18 @@ namespace org
 class RenderGraphRuntime
 {
 public:
+	/**
+	 * @brief Where in the frame an epoch runs. The graph holds every feature's passes and each epoch
+	 * executes all of them (an empty pass is effectively free), so passes record work only in their own
+	 * segment (CurrentSegment) and include it in their invocation revision.
+	 */
+	enum class Segment : std::uint32_t
+	{
+		LightCulling,  // Light Limit Fix, before the main pass
+		MainOpaque,    // Drawcall Limit Fix, at the start of the main (deferred) pass
+		DebugView,     // Drawcall Limit Fix debug view, before the deferred composite
+	};
+
 	static RenderGraphRuntime& Get();
 
 	/** @brief Asks DXVK to enable the device features BasicRHI needs. Call before the D3D11 device exists. */
@@ -59,7 +81,24 @@ public:
 	 *        prepare: queue this frame's uploads (BUFFER_UPLOAD) here.
 	 * @return false when inactive or the graph failed; callers fall back to their D3D11 path.
 	 */
-	bool ExecuteEpoch(const std::function<void(org::RenderGraph&)>& a_beforePrepare = {});
+	bool ExecuteEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare = {});
+
+	/** @brief The segment of the epoch being executed (valid while passes prepare and record). */
+	Segment CurrentSegment() const { return segment; }
+
+	/**
+	 * @brief The Vulkan resource behind a D3D11 buffer, texture or SRV (dxvkGetInteropResourceInfo).
+	 * Marks it stable in DXVK; keep a reference on the D3D11 object while using the result. Fails for
+	 * buffers the game can map. Synchronizes with DXVK's worker thread: resolve once and cache.
+	 */
+	bool DescribeResource(IUnknown* a_object, DxvkOrgInteropResourceInfo& a_info);
+
+	/**
+	 * @brief Runtime DXC compilation to SPIR-V with BasicRHI's ABI (ORGModuleServices), content-addressed
+	 * with a disk cache under Data/ShaderCache/ORG. Null when inactive, or when the build or the
+	 * installation has no DXC (dxcompiler.dll beside the DXVK DLLs).
+	 */
+	org::services::ShaderCompiler* ShaderCompiler();
 
 	/** @brief Wraps a materialized graph-owned buffer as a D3D11 buffer (DEFAULT usage, no CPU access). */
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(org::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc);
@@ -72,5 +111,6 @@ private:
 	struct Impl;
 	std::unique_ptr<Impl> impl;
 	std::string disabledReason = "not initialized";
+	Segment segment = Segment::LightCulling;
 	bool attempted = false;
 };

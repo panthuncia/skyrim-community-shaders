@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <type_traits>
 
 struct ID3D11Buffer;
 
@@ -29,6 +30,7 @@ namespace DCLF
 	{
 		kObjectAlphaTest = 1u << 0,  // alpha test on, reference = threshold / 255 (as the native draw's AlphaTestRef)
 		kObjectTwoSided = 1u << 1,   // no culling (the native main pass culls back faces otherwise)
+		kObjectSuppressExternalEmittance = 1u << 2,  // ExtraShaderDescriptors::SuppressExternalEmittance in the permutation buffer
 		kObjectAlphaThresholdShift = 8,
 	};
 
@@ -45,6 +47,35 @@ namespace DCLF
 		std::uint32_t vertexCount = 0;
 		std::uint32_t indexCount = 0;
 		std::uint32_t firstIndex = 0;
+		// Phase 2: the buffers' device addresses (GpuResources), 0 when the render graph is off.
+		std::uint64_t vertexAddress = 0;
+		std::uint64_t indexAddress = 0;
+		std::uint64_t vertexBytes = 0;
+		std::uint64_t indexBytes = 0;
+	};
+
+	/**
+	 * @brief Per-object light assignment Light Limit Fix passes per draw (StrictLightData, PS b3). In the
+	 * main pass there are no strict lights (NumStrictLights is 0); what varies is the object's room in
+	 * interiors and the shadow mask channels of its shadow-casting lights.
+	 */
+	struct ObjectLights
+	{
+		std::int32_t roomIndex = -1;
+		std::uint32_t shadowBitMask = 0;
+	};
+
+	/**
+	 * @brief Community Shaders' permutation buffer (State::PermutationCB, b4) for a pipeline, as
+	 * BeginTechnique and the SetupGeometry hooks leave it for the draw. Per-object bits
+	 * (kObjectSuppressExternalEmittance) are added on top of extraShaderDescriptor.
+	 */
+	struct PipelinePermutation
+	{
+		std::uint32_t vertexShaderDescriptor = 0;  // descriptor BeginTechnique receives
+		std::uint32_t pixelShaderDescriptor = 0;   // received pixel descriptor bits the shader lookup dropped
+		std::uint32_t extraShaderDescriptor = 0;
+		std::uint32_t extraFeatureDescriptor = 0;
 	};
 
 	/** @brief Everything that selects a pipeline: the final shader descriptors and fixed-function state. */
@@ -54,8 +85,19 @@ namespace DCLF
 		std::uint32_t pixelDescriptor = 0;
 		std::uint32_t rasterFlags = 0;     // PipelineRasterFlags
 		std::uint32_t passDescriptor = 0;  // raw technique the Setup* functions read (selects the per-frame constants)
+		std::uint64_t vertexLayout = 0;    // geometry's BSGraphics::VertexDesc without the stride (VertexInput.h)
 
 		bool operator==(const PipelineKey&) const = default;
+	};
+	static_assert(std::has_unique_object_representations_v<PipelineKey>);
+
+	struct PipelineKeyHash
+	{
+		using is_avalanching = void;
+		std::uint64_t operator()(const PipelineKey& a_key) const noexcept
+		{
+			return ankerl::unordered_dense::detail::wyhash::hash(&a_key, sizeof(a_key));
+		}
 	};
 
 	/**
@@ -81,16 +123,22 @@ namespace DCLF
 	static_assert(sizeof(ObjectShading) == 32);
 
 	/**
-	 * @brief One indirect draw, in the token order of the DGC layout:
-	 * execution-set index, push constant (draw id), index buffer view, DrawIndexed.
-	 * The index buffer view has D3D12's IBV layout, which VK_EXT_device_generated_commands
-	 * reads with VK_INDIRECT_COMMANDS_INPUT_MODE_DXGI_INDEX_BUFFER_EXT.
+	 * @brief One indirect draw, in the argument order of the command signature (BasicRHI packs arguments
+	 * like D3D12, 4-byte aligned): pipeline set index, push data (the DrawBindings record's address),
+	 * vertex buffer view, index buffer view (D3D12 VBV / IBV layouts), DrawIndexed.
+	 *
+	 * The scene tables hold the geometry part with the pipeline's table index; the main-pass epoch
+	 * replaces it with the pipeline set index and fills in the record address.
 	 */
+#pragma pack(push, 4)
 	struct DrawSequence
 	{
 		std::uint32_t pipelineIndex;
-		std::uint32_t drawId;
-		std::uint64_t indexBufferAddress;  // filled in Phase 2
+		std::uint64_t bindingsAddress;
+		std::uint64_t vertexBufferAddress;  // GeometryRecord::vertexAddress (0 without the render graph)
+		std::uint32_t vertexBufferSize;
+		std::uint32_t vertexStride;
+		std::uint64_t indexBufferAddress;  // GeometryRecord::indexAddress
 		std::uint32_t indexBufferSize;
 		std::uint32_t indexFormat;  // DXGI_FORMAT_R16_UINT
 		std::uint32_t indexCount;
@@ -98,9 +146,11 @@ namespace DCLF
 		std::uint32_t firstIndex;
 		std::int32_t vertexOffset;
 		std::uint32_t firstInstance;
-		std::uint32_t pad;
 	};
-	static_assert(sizeof(DrawSequence) == 48);
-	static_assert(offsetof(DrawSequence, indexBufferAddress) == 8);
-	static_assert(offsetof(DrawSequence, indexCount) == 24);
+#pragma pack(pop)
+	static_assert(sizeof(DrawSequence) == 64);
+	static_assert(offsetof(DrawSequence, bindingsAddress) == 4);
+	static_assert(offsetof(DrawSequence, vertexBufferAddress) == 12);
+	static_assert(offsetof(DrawSequence, indexBufferAddress) == 28);
+	static_assert(offsetof(DrawSequence, indexCount) == 44);
 }

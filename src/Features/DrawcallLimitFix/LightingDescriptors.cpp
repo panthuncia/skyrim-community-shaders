@@ -67,6 +67,7 @@ namespace DCLF
 			return std::bit_cast<float>(a_fadeNode->GetRuntimeData().unk144);
 		}
 
+
 		// BSLightingShader::SetupTechnique splits the pass descriptor (engine notes, SetupTechnique).
 		constexpr std::uint32_t VertexDescriptorFromPass(std::uint32_t d)
 		{
@@ -129,10 +130,13 @@ namespace DCLF
 		return t;
 	}
 
-	Ineligible DeriveLightingDescriptors(const RE::BSLightingShaderProperty& a_property, const RE::BSGeometry& a_geometry, LightingDescriptors& a_out)
+	Ineligible DeriveLightingDescriptors(const RE::BSLightingShaderProperty& a_property, const RE::BSGeometry& a_geometry,
+		const AccumulatedPass* a_accumulated, LightingDescriptors& a_out)
 	{
 		std::uint64_t f = a_property.flags.underlying();
 
+		if (f & (Bit(Flag::kLODObjects) | Bit(Flag::kHDLODObjects) | Bit(Flag::kLODLandscape)))
+			return Ineligible::Lod;
 		if (f & (Bit(Flag::kDecal) | Bit(Flag::kDynamicDecal)))
 			return Ineligible::Decal;
 		if (f & Bit(Flag::kSkinned))
@@ -143,76 +147,108 @@ namespace DCLF
 		if (f & (Bit(Flag::kRefraction) | Bit(Flag::kTempRefraction)))
 			return Ineligible::Technique;
 
-		// Distance LOD fades GetRenderPasses applies before choosing the technique: specular and the
-		// environment map switch off past their [LightingShader] thresholds.
-		float specularFade = a_property.specularLODFade;
-		float envmapFade = a_property.envmapLODFade;
-		// Without a fade node GetRenderPasses never computes these fades, so the property fields the draw
-		// reads may be stale. Leave such objects native rather than guess.
-		if (!a_property.fadeNode && (f & (Bit(Flag::kSpecular) | Bit(Flag::kMultiIndexSnow) | Bit(Flag::kEnvMap))))
-			return Ineligible::Fading;
-		if (const auto* fadeNode = a_property.fadeNode) {
-			const float metric = FadeNodeLodMetric(fadeNode);
-			// A non-finite metric leaves the engine's fades undefined (its clamp keeps the NaN); leave it native.
-			if (!std::isfinite(metric))
-				return Ineligible::Fading;
-			if ((f & (Bit(Flag::kSpecular) | Bit(Flag::kMultiIndexSnow))) && !LodFadeVisible(metric, lodFade.specularStart, lodFade.specularEnd, specularFade))
-				f &= ~Bit(Flag::kSpecular);
-			if ((f & Bit(Flag::kEnvMap)) && !LodFadeVisible(metric, lodFade.envmapStart, lodFade.envmapEnd, envmapFade)) {
-				// kSnow keeps the envmap past its fade distance, but then the engine never writes the fade and
-				// the draw reads a stale property field. Leave that case native.
-				if (f & Bit(Flag::kSnow))
-					return Ineligible::Fading;
-				f &= ~Bit(Flag::kEnvMap);
-			}
-		}
-
-		const std::uint32_t technique = SelectLightingTechnique(f);
-		if (!IsSupportedTechnique(technique))
-			return Ineligible::Technique;
-
 		const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
 		if (alpha && alpha->GetAlphaBlending())
 			return Ineligible::AlphaBlend;
 
-		// Pass descriptor as GetRenderPasses builds it for an opaque, fully faded-in object.
-		// Light counts (bits 3-8) and the shadow bits never reach the deferred shaders, so they are left out.
-		std::uint32_t d = technique << 24;
-		if (f & Bit(Flag::kVertexColors))
-			d |= Bit(LightingFlag::VC);
-		if (f & Bit(Flag::kModelSpaceNormals))
-			d |= Bit(LightingFlag::ModelSpaceNormals);
-		if (f & (Bit(Flag::kSpecular) | Bit(Flag::kMultiIndexSnow)))
-			d |= Bit(LightingFlag::Specular);
-		if (f & Bit(Flag::kSoftLighting))
-			d |= Bit(LightingFlag::SoftLighting);
-		if (f & Bit(Flag::kRimLighting))
-			d |= Bit(LightingFlag::RimLighting);
-		if (f & Bit(Flag::kBackLighting))
-			d |= Bit(LightingFlag::BackLighting);
-		if (f & Bit(Flag::kAnisotropicLighting))
-			d |= Bit(LightingFlag::AnisoLighting);
-		if (alpha && alpha->GetAlphaTesting())
-			d |= Bit(LightingFlag::DoAlphaTest);
+		// The descriptor derived from the property, as GetRenderPasses builds it for an opaque, fully
+		// faded-in object. Phase 5 (no native accumulation) depends on it; while the accumulator holds the
+		// pass it is only compared with the drawn technique (SceneStore stats, derivation disagreements).
+		std::uint32_t derived = 0;
+		float specularFade = a_property.specularLODFade;
+		float envmapFade = a_property.envmapLODFade;
+		const Ineligible derivedReason = [&] {
+			// Distance LOD fades GetRenderPasses applies before choosing the technique: specular and the
+			// environment map switch off past their [LightingShader] thresholds.
+			// Without a fade node GetRenderPasses never computes these fades, so the property fields the draw
+			// reads may be stale. Leave such objects native rather than guess.
+			if (!a_property.fadeNode && (f & (Bit(Flag::kSpecular) | Bit(Flag::kMultiIndexSnow) | Bit(Flag::kEnvMap))))
+				return Ineligible::Fading;
+			if (const auto* fadeNode = a_property.fadeNode) {
+				const float metric = FadeNodeLodMetric(fadeNode);
+				// A non-finite metric leaves the engine's fades undefined (its clamp keeps the NaN); leave it native.
+				if (!std::isfinite(metric))
+					return Ineligible::Fading;
+				if ((f & (Bit(Flag::kSpecular) | Bit(Flag::kMultiIndexSnow))) && !LodFadeVisible(metric, lodFade.specularStart, lodFade.specularEnd, specularFade))
+					f &= ~Bit(Flag::kSpecular);
+				if ((f & Bit(Flag::kEnvMap)) && !LodFadeVisible(metric, lodFade.envmapStart, lodFade.envmapEnd, envmapFade)) {
+					// kSnow keeps the envmap past its fade distance, but then the engine never writes the fade and
+					// the draw reads a stale property field. Leave that case native.
+					if (f & Bit(Flag::kSnow))
+						return Ineligible::Fading;
+					f &= ~Bit(Flag::kEnvMap);
+				}
+			}
 
-		// Community Shaders' GetRenderPasses hook (TruePBR.cpp): PBR materials swap Specular for TruePbr,
-		// and glint turns on AnisoLighting.
-		const auto* material = a_property.material;
-		const bool isPbr = (f & Bit(Flag::kVertexLighting)) && material &&
-		                   (material->GetFeature() == RE::BSShaderMaterial::Feature::kDefault ||
-							   material->GetFeature() == RE::BSShaderMaterial::Feature::kMultiTexLandLODBlend);
-		if (isPbr) {
-			d |= Bit(LightingFlag::TruePbr);
-			d &= ~Bit(LightingFlag::Specular);
-			if (static_cast<const BSLightingShaderMaterialPBR*>(material)->glintParameters.enabled)
+			const std::uint32_t technique = SelectLightingTechnique(f);
+			if (!IsSupportedTechnique(technique))
+				return Ineligible::Technique;
+
+			std::uint32_t d = technique << 24;
+			if (f & Bit(Flag::kVertexColors))
+				d |= Bit(LightingFlag::VC);
+			if (f & Bit(Flag::kModelSpaceNormals))
+				d |= Bit(LightingFlag::ModelSpaceNormals);
+			if (f & (Bit(Flag::kSpecular) | Bit(Flag::kMultiIndexSnow)))
+				d |= Bit(LightingFlag::Specular);
+			if (f & Bit(Flag::kSoftLighting))
+				d |= Bit(LightingFlag::SoftLighting);
+			if (f & Bit(Flag::kRimLighting))
+				d |= Bit(LightingFlag::RimLighting);
+			if (f & Bit(Flag::kBackLighting))
+				d |= Bit(LightingFlag::BackLighting);
+			if (f & Bit(Flag::kAnisotropicLighting))
 				d |= Bit(LightingFlag::AnisoLighting);
+			if (alpha && alpha->GetAlphaTesting())
+				d |= Bit(LightingFlag::DoAlphaTest);
+			if (f & Bit(Flag::kCharacterLighting))
+				d |= Bit(LightingFlag::CharacterLight);
+
+			// Community Shaders' GetRenderPasses hook (TruePBR.cpp): PBR materials swap Specular for TruePbr,
+			// and glint turns on AnisoLighting.
+			const auto* material = a_property.material;
+			const bool isPbr = (f & Bit(Flag::kVertexLighting)) && material &&
+			                   (material->GetFeature() == RE::BSShaderMaterial::Feature::kDefault ||
+								   material->GetFeature() == RE::BSShaderMaterial::Feature::kMultiTexLandLODBlend);
+			if (isPbr) {
+				d |= Bit(LightingFlag::TruePbr);
+				d &= ~Bit(LightingFlag::Specular);
+				if (static_cast<const BSLightingShaderMaterialPBR*>(material)->glintParameters.enabled)
+					d |= Bit(LightingFlag::AnisoLighting);
+			}
+			derived = d;
+			return Ineligible::None;
+		}();
+
+		std::uint32_t d = 0;
+		if (a_accumulated) {
+			// The technique the accumulator registered the pass under is what SetupTechnique receives. Its fade
+			// decisions and the property's fade values come from the same GetRenderPasses call, which the
+			// engine only repeats when the light state changes; a fresh derivation can differ near a fade
+			// threshold.
+			d = a_accumulated->technique;
+			if (!IsSupportedTechnique((d >> 24) & 0x3f))
+				return Ineligible::Technique;
+			if (d & Bit(LightingFlag::AdditionalAlphaMask))
+				return Ineligible::Fading;
+			specularFade = a_property.specularLODFade;
+			envmapFade = a_property.envmapLODFade;
+			a_out.derivedPass = derivedReason == Ineligible::None ? derived : kNotDerived;
+		} else {
+			if (derivedReason != Ineligible::None)
+				return derivedReason;
+			// Without an accumulated pass the per-frame bits are unknown; the derivation's guesses stand.
+			d = derived;
+			a_out.derivedPass = derived;
 		}
 
 		uint vertex = VertexDescriptorFromPass(d);
 		uint pixel = PixelDescriptorFromPass(d);
+		a_out.rawVertex = vertex;
+		a_out.rawPixel = pixel;
 		globals::state->ModifyShaderLookup(RE::BSShader::Type::Lighting, vertex, pixel, true);
 
-		a_out.technique = technique;
+		a_out.technique = (d >> 24) & 0x3f;
 		a_out.pass = d;
 		a_out.vertex = vertex;
 		a_out.pixel = pixel;

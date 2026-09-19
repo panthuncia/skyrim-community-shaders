@@ -2675,6 +2675,30 @@ namespace SIE
 		return SIE::SShaderCache::MergeDefinesString(defines, true);
 	}
 
+	std::vector<std::pair<std::string, std::string>> ShaderCache::GetCompileDefines(const RE::BSShader& shader, ShaderClass shaderClass, uint32_t descriptor)
+	{
+		// Same composition as the D3DCompile path in CompileShader.
+		std::vector<std::pair<std::string, std::string>> result;
+		if (shaderClass == ShaderClass::Vertex)
+			result.emplace_back("VSHADER", "");
+		else if (shaderClass == ShaderClass::Pixel)
+			result.emplace_back("PSHADER", "");
+		else if (shaderClass == ShaderClass::Compute)
+			result.emplace_back("CSHADER", "");
+		if (auto* stateDefines = globals::state->GetDefines()) {
+			for (const auto& define : *stateDefines)
+				result.push_back(define);
+		}
+		std::array<D3D_SHADER_MACRO, 64> defines{};
+		SIE::SShaderCache::GetShaderDefines(shader, descriptor, std::span{ defines });
+		for (const auto& define : defines) {
+			if (!define.Name)
+				break;
+			result.emplace_back(define.Name, define.Definition ? define.Definition : "");
+		}
+		return result;
+	}
+
 	uint64_t ShaderCache::GetCachedHitTasks()
 	{
 		return compilationSet.cacheHitTasks;

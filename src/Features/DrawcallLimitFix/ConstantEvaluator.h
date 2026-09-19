@@ -15,6 +15,9 @@ namespace DCLF
 	/** @brief Bit pattern of constant components the engine did not write (a quiet NaN no engine code produces; a signaling NaN would be quietened by float copies). */
 	inline constexpr std::uint32_t kUnwrittenBits = 0x7fdadbadu;  // quiet NaN: survives float copies unchanged
 
+	/** @brief Filter mode value for a sampler slot nothing set (the draw inherits whatever the previous draw left). */
+	inline constexpr std::uint32_t kUnwrittenFilterMode = 0xffffffffu;
+
 	/** @brief Floats in a constant block: every offset a constant-table byte can express, plus a float4. */
 	inline constexpr std::uint32_t kConstantBlockFloats = 256 + 4;
 
@@ -47,8 +50,29 @@ namespace DCLF
 		ConstantBlock ps;
 		std::array<ID3D11ShaderResourceView*, kPixelTextureSlots> textures{};
 		std::array<std::uint32_t, kPixelTextureSlots> addressModes{};
+		std::array<std::uint32_t, kPixelTextureSlots> filterModes{};  // kUnwrittenFilterMode where SetupMaterial leaves it
 		std::uint32_t textureWritten = 0;
 	};
+
+	/**
+	 * @brief What BSLightingShader::SetupTechnique writes for one pass descriptor: the PerTechnique
+	 * groups (fog, colour output clamp) and the sampler filter modes. Ported (engine notes:
+	 * SetupTechnique), because it binds real shaders and so cannot run against stand-ins.
+	 */
+	struct TechniqueConstants
+	{
+		ConstantBlock vs;
+		ConstantBlock ps;
+		std::array<std::uint32_t, kPixelTextureSlots> filterModes{};  // kUnwrittenFilterMode where SetupTechnique leaves it
+		bool shadowMask = false;  // the technique binds the shadow mask to t14 (clamp) and sets VPOSOffset
+		ID3D11ShaderResourceView* shadowMaskTexture = nullptr;
+	};
+
+	/** @brief Texture slot SetupTechnique binds the shadow mask to. */
+	inline constexpr std::uint32_t kShadowMaskSlot = 14;
+
+	/** @brief Evaluates SetupTechnique's writes for a pass descriptor from the current frame's fog and settings. */
+	void EvaluateTechnique(std::uint32_t a_passDescriptor, TechniqueConstants& a_out);
 
 	/** @brief What BSLightingShader::SetupGeometry writes into the PerGeometry groups for one pass. */
 	struct GeometryConstants
@@ -74,6 +98,7 @@ namespace DCLF
 		/** @brief The BSLightingShader instance; learned from any lighting render pass. */
 		void SetLightingShader(RE::BSShader* a_shader) { lightingShader = a_shader; }
 		bool HasLightingShader() const { return lightingShader != nullptr; }
+		RE::BSShader* GetLightingShader() const { return lightingShader; }
 
 		/** @brief True while a stand-in call runs (hooks on the shader functions must ignore it). */
 		static bool Evaluating() { return evaluating; }

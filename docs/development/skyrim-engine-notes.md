@@ -29,13 +29,13 @@ The main lighting pass stores its technique ID in `BSRenderPass::passEnum` as
 | 10 (`0x400`) | SoftLighting | `kSoftLighting` (bit 57) |
 | 11 (`0x800`) | RimLighting | `kRimLighting` (bit 58) |
 | 12 (`0x1000`) | BackLighting | `kBackLighting` (bit 59) |
-| 13 (`0x2000`) | ShadowDir | directional shadow applies |
-| 14 (`0x4000`) | DefShadow | shadow mask applies |
+| 13 (`0x2000`) | ShadowDir | directional shadow applies (light assignment, `FUN_1414fcf80`) |
+| 14 (`0x4000`) | DefShadow | shadow mask applies (the accumulator's deferred-shadow flag at `+0x178`, distance and alpha conditions) |
 | 15 (`0x8000`) | ProjectedUV | `kProjectedUV` (bit 23) with snow/material conditions |
 | 16 (`0x10000`) | AnisoLighting | `kAnisotropicLighting` (bit 53) |
 | 17 (`0x20000`) | AmbientSpecular | decal/fade conditions |
 | 18 (`0x40000`) | WorldMap | LOD objects/land with `kMenuScreen` (bit 55) |
-| 20 (`0x100000`) | DoAlphaTest | `NiAlphaProperty` alpha test (flag bit 9) and the global alpha-test toggle, or dynamic decals |
+| 20 (`0x100000`) | DoAlphaTest | `NiAlphaProperty` alpha test (flag bit 9) and either the early-Z global or alpha blending/fading; or decals without `kMultiIndexSnow` (see below) |
 | 21 (`0x200000`) | Snow | snow shader enabled and `kSnow` |
 | 22 (`0x400000`) | CharacterLight | `kCharacterLighting` (bit 40) |
 | 23 (`0x800000`) | AdditionalAlphaMask | screen-door fade (`kScreendoorAlphaFade` off, fade node fading) |
@@ -62,6 +62,17 @@ Technique selection (bits 24–29), later tests win:
 | 14 MultiIndexSparkle | `kMultiIndexSnow` (bit 41) and `kProjectedUV` (bit 23) |
 | 16 Eye | `kEyeReflect` (bit 17) |
 
+Bits 6–8, 13, 14 and 20 depend on per-frame engine state rather than on the property:
+
+-   ShadowDir, DefShadow and the shadow light count come from the light and shadow assignment.
+-   DoAlphaTest for alpha-tested geometry is `alphaTest && (earlyZ || alphaBlended || fading)`. `earlyZ` is
+    the byte at AE `0x14328cc79`: the `ToggleEarlyZ` console command flips it, and two offscreen renders
+    set it and clear it around their work (`FUN_1406d2120`, and `FUN_140972590` for mode 1). Whether it
+    is set in the main pass therefore depends on what rendered before: after a fresh load it was set in
+    Whiterun, after `coc` into Dragonsreach it was clear.
+
+Drawcall Limit Fix takes these bits from the pass the main-camera accumulator holds (see "Batch renderer").
+
 `accumulationHint` (`BSRenderPass+0x1C`) records the batch group the pass goes to: 1 when alpha-blended
 and fully faded in, 2/3 for decals, 9/10 for fading, 11 for TreeAnim, 15 for plain opaque with no shadow
 work, and so on.
@@ -81,9 +92,30 @@ Converts `passEnum` back to a descriptor with `d = passEnum - 0x4800002D`, then:
     address modes and writes the PerTechnique constants.
 
 Community Shaders then rewrites both descriptors in `State::ModifyShaderLookup` (strips shadow, snow,
-ambient-specular and lighting-model bits and adds Deferred). As a result, for the opaque deferred pass
-the final descriptors depend only on the property flags, the alpha property, the fade state and a few
-globals, not on the per-frame light assignment.
+ambient-specular and lighting-model bits and adds Deferred). The stripped bits still matter: Community
+Shaders passes them to the shader in its permutation buffer, and SetupTechnique binds the shadow mask from
+them (below).
+
+What SetupTechnique writes (ported in `ConstantEvaluator.cpp` `EvaluateTechnique`):
+
+-   **Sampler filter modes** (`PSTextureFilterMode`): slots 0 and 1 anisotropic (3) always; Envmap adds 4
+    and 5, Glowmap 6, Parallax 3. SetupMaterial leaves filter modes alone for the vanilla material types
+    (TruePBR's hook sets its own).
+-   **VS PerTechnique** (`FUN_1414dfad0`): from the fog property of the current scene graph,
+    `BSShaderManager::State` (AE `0x142033060`) → `shadowSceneNode[sceneGraph (+0xC0)]` →
+    `ShadowSceneNode+0x220` (`BSFogProperty`):
+    -   `FogParam` = `(near / (far − near), 1 / (far − near), power (+0x84), clamp (+0x88))`, or
+        `(5000000, 0.1, 1, 0)` when both distances are 0;
+    -   `FogNearColor` = `(nearColor (+0x38), BSShaderManager::State::invFrameBufferRange (+0x9C))`;
+    -   `FogFarColor` = `farColor (+0x44)`; w is whatever was on the stack.
+-   **PS PerTechnique**: `FogColor` = `FogNearColor`; `ColourOutputClamp` = `(fLightingOutputColourClampPostLit,
+    PostEnv, PostSpec, 0)` (`[General]` settings at AE `0x142035498`, copied into globals at `0x14338ca0c`
+    when the shader is constructed, `FUN_1414dad00`).
+-   **Shadow mask** when `(ShadowDir || shadow lights) && DefShadow`: t14 = the shadow mask render
+    target's SRV, address mode 0, filter mode `iShadowMaskQuarter:Display != 4 ? 1 : 0`; PS `VPOSOffset` =
+    `(1 / width, 1 / height, 0, 0)` of the globals at AE `0x14328be9c` (the shadow mask size).
+    **The VPOSOffset write happens after the buffer is unmapped.** On DXVK the dynamic buffer stays mapped,
+    so the draw still sees it.
 
 ### `BSLightingShader::SetupGeometry` (vtable slot 6, AE `0x1414dd040`)
 
@@ -114,13 +146,31 @@ set of child nodes, indexed by position in `cell3D->children`:
 | 2 | Land | terrain (`BSLightingShader` MTLand) |
 | 3 | Static | static references |
 | 4 | Dynamic | movable references (Havok clutter, doors, activators) |
-| 5 | MultiBound | room and multibound nodes (interior statics are parented here, under rooms) |
+| 5 | MultiBound | multibound nodes |
 | 6 | Water | water planes |
 
 Source: the `ToggleCellNode` console command (`ConsoleFunc::handler::ToggleCellNode`, AE `0x14036ef60`,
 help string "0-Actor, 1-Marker, 2-Land, 3-Static, 4-Dynamic, 5-Multibound, 6-Water"), which calls
 `FUN_14019f8b0(TES, index, show)`. That helper reads `cell3D->children[index]` and toggles bit 0 of
 `NiAVObject::flags` (`+0xF4`, `kHidden`/app-culled) for every loaded cell and the sky cell.
+
+### Multibounds, rooms and portals: where references really hang
+
+References start under the category nodes, but the engine moves many of them elsewhere, and those are
+still drawn by the main pass. Everything below is under `TES::objRoot` (`TES+0x80`, named
+`ObjectLODRoot`):
+
+-   **Exteriors:** `objRoot` → `BSMultiBoundNode` (no user data) → `NiNode` → the reference's `BSFadeNode`.
+    In Whiterun this held about 60% of the eligible static draws (walls, houses, rocks). It is not the
+    cell's `loadedData->multiBoundNode`.
+-   **Interiors with a portal graph:** the interior cell's `cell3D` is itself a `BSMultiBoundNode` child of
+    `objRoot`. The rooms (`BSMultiBoundRoom`, also listed in `loadedData->portalGraph->rooms`) hang under a
+    plain `NiNode` child of it, as does `NiNode 'Shared Portal Geometry'` → `BSPortalSharedNode 'Portal
+    Shared Geometry'` (`portalGraph->portalSharedNode`). References are moved into their room, including
+    actors.
+-   Some interior geometry is drawn with **no parent at all** (about 30 draws per frame in Dragonsreach and
+    Bleak Falls Barrow), probably the portal graph's `alwaysRenderChildren` or its other object lists.
+    Not confirmed.
 
 ### `NiNode` child management overrides
 
@@ -214,6 +264,33 @@ zeroes the model-space flag), everything `SetupGeometry` writes is per frame exc
 
 The main (deferred) pass calls it with render flags `0x41` or `0x45`.
 
+## Batch renderer: what the main pass will draw
+
+The main-camera `BSShaderAccumulator` (`currentAccumulator`, batch renderer at `+0x130`) holds every pass
+the main pass draws; walking it at the start of the main pass gives exactly the passes drawn this frame.
+
+-   `BSBatchRenderer::renderPass` (`+0x08`) is an array of **`PassGroup` structs inline** (0x30 bytes:
+    `passes[5]`, `validPassBits`), not the array of pointers CommonLib declares. The engine indexes it
+    as `data + (list + group * 6) * 8` (`FUN_1414f39c0`).
+-   Each `passes[list]` heads a list chained through `BSRenderPass::passGroupNext` (`+0x30`).
+-   `renderPassMap` maps each group's technique ID to its index. The engine reads it raw: bucket count at
+    `+0x2C`, buckets of `{ uint32 key, uint32 value, entry* next }` at `+0x48`, end sentinel at `+0x38`.
+    An empty bucket has `next == nullptr`.
+-   The group's technique ID is what `SetupTechnique` receives, and it can differ from the pass's own
+    `passEnum`.
+-   `RegisterPass` (AE `0x1414f2a20`, list chosen in `FUN_1414f4790`) puts a pass in list
+    `(kTwoSided ? 2 : 0) | (NiAlphaProperty alpha-test bit ? 1 : 0)`, or list 4 for
+    `kNoTransparencyMultiSample`. `RenderActivePassRange` draws lists 1, 3 and 4 with alpha testing.
+-   A geometry group (`geometryGroups[i]`, 16 of them) has a batch renderer of its own (`+0x00`), which
+    `RenderBatches` (AE `0x1414b4fe0`) uses when called with a group index.
+-   `BSShaderProperty::renderPassList` holds whatever the **last** `GetRenderPasses` call built. That may
+    be another camera's (reflections, cubemaps), so it is not a reliable view of the main pass.
+
+Open question: a pass in an alpha-test list whose group technique lacks DoAlphaTest is sometimes drawn with
+DoAlphaTest set in its `passEnum` (about 27 draws per frame in Dragonsreach). Nothing on the draw path
+between the start of the main pass and `SetupGeometry` was found to set it: not `RenderActivePassRange`,
+`SetupAndDrawPass` (AE `0x1414f3dc0`), `FUN_1414f5cf0`, nor any Community Shaders hook.
+
 ## Native main-pass render state for opaque lighting objects
 
 Observed at `DrawIndexed` for every eligible draw in the main pass:
@@ -223,3 +300,42 @@ Observed at `DrawIndexed` for every eligible draw in the main pass:
 -   Depth mode `kTestEqual` (the Z-prepass already wrote depth), stencil mode 0, blend mode 0, depth bias 0.
 -   Cull mode 0 (none) for `kTwoSided`, 1 (back) otherwise.
 -   Alpha test enabled exactly when the `NiAlphaProperty` tests, with reference `alphaThreshold / 255`.
+    This is the batch list the pass is in (lists 1, 3 and 4), not the DoAlphaTest descriptor bit.
+
+## Vertex input
+
+When the shadow state's vertex description or vertex shader changes, the renderer looks up an input layout
+by `key = currentVertexShader->vertexDesc & shadowState.vertexDesc` (AE `FUN_140e4b5b0`, shadow state
++0x340 and +0x348) in a hash map and builds a missing one with `FUN_140e4bf20`. The key uses the
+`VertexDesc` encoding: the stride / 4 in bits 0-3, an offset nibble (in dwords) per attribute `a` at bits
+`4a+4`, and presence flags at bits `44+a` (stream 0) and `54+a` (stream 1, dynamic geometry). The shader's
+mask sets both flags and the offset nibble of every attribute it consumes (Community Shaders computes it by
+reflection in `ShaderCache`). Elements, per attribute present:
+
+| Attribute | Elements | Format |
+| --- | --- | --- |
+| Position (always emitted, offset 0) | POSITION0 | R32G32B32A32_FLOAT |
+| Texcoord0 | TEXCOORD0 | R16G16_FLOAT |
+| Texcoord1 | TEXCOORD1 | R16G16B16A16_FLOAT |
+| Normal, Binormal, Color | NORMAL0, BINORMAL0, COLOR0 | R8G8B8A8_UNORM |
+| Skinning | BLENDWEIGHT0 (+0), BLENDINDICES0 (+8) | R16G16B16A16_FLOAT, R8G8B8A8_UNORM |
+| Land data | TEXCOORD2 (+0), TEXCOORD3 (+4) | R8G8B8A8_UNORM |
+| Eye data | TEXCOORD2 | R32_FLOAT |
+| Instance data | TEXCOORD4-7 (+0, +8, +16, +24), per instance | R16G16B16A16_FLOAT |
+
+Bit 54 doubles as the geometry flag CommonLib calls `VF_FULLPREC`; the builder never emits a half-precision
+position. DCLF (`VertexInput.cpp`) ports this table.
+
+## Samplers
+
+The state-apply function (AE `FUN_140e4b5b0`) binds each dirty pixel shader sampler slot `s` with
+`PSSetSamplers(s, 1, &samplers[PSTextureAddressMode[s] * 5 + PSTextureFilterMode[s]])`, where `samplers` is a
+table of `ID3D11SamplerState*` at AE `0x143288210` (4 address modes x 5 filter modes), just before the
+`Renderer` singleton. DCLF copies these states' descriptions (`GpuTextures::Sampler`); the table's Address
+Library ID is not known yet.
+
+## Main-pass viewport
+
+The main (deferred) pass draws with the viewport at the origin, the dynamic-resolution size (2560 x 1440 of a
+3840 x 2160 target at 1.5x upscaling), and depth range [0, 0.999998]. Anything that has to reproduce its depth
+values must use the same range.

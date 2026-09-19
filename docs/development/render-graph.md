@@ -39,9 +39,8 @@ stream has reached the queue, then submit directly under DXVK's queue lock, so t
 is preserved.
 
 With a DXVK build that lacks the export (or `CS_ORG_SUBMIT=flush`), each epoch instead flushes and
-waits for DXVK, then submits under the queue lock. On an RTX 3090 Ti in Whiterun that cost about 10 ms
-of render-thread time per epoch, against about 0.4 ms for the stream path. That scene is GPU-bound,
-so the frame rate did not change.
+waits for DXVK, then submits under the queue lock. This is undesirable, and will likely be downgraded 
+to a failure in the future.
 
 ## Resources crossing the boundary
 

@@ -267,14 +267,32 @@ void LightLimitFix::BSLightingShader_SetupGeometry_Before(RE::BSRenderPass* a_pa
 	strictLightDataTemp.NumStrictLights = 0;
 	strictLightDataTemp.ShadowBitMask = 0;
 
-	strictLightDataTemp.RoomIndex = -1;
+	strictLightDataTemp.RoomIndex = GetRoomIndex(a_pass->geometry);
+}
+
+int LightLimitFix::GetRoomIndex(RE::NiAVObject* a_object) const
+{
 	if (!roomNodes.empty()) {
-		if (RE::NiNode* roomNode = GetParentRoomNode(a_pass->geometry)) {
+		if (RE::NiNode* roomNode = GetParentRoomNode(a_object)) {
 			if (auto it = roomNodes.find(roomNode); it != roomNodes.cend()) {
-				strictLightDataTemp.RoomIndex = it->second;
+				return it->second;
 			}
 		}
 	}
+	return -1;
+}
+
+uint LightLimitFix::GetShadowBitMask(const RE::BSRenderPass* a_pass)
+{
+	uint mask = 0;
+	for (uint32_t i = 0; i < a_pass->numShadowLights; i++) {
+		auto bsLight = a_pass->sceneLights[i + 1];
+		if (!bsLight)
+			continue;
+		auto* shadowLight = static_cast<RE::BSShadowLight*>(bsLight);
+		mask |= (1u << shadowLight->GetRuntimeData().maskIndex);
+	}
+	return mask;
 }
 
 void LightLimitFix::BSLightingShader_SetupGeometry_GeometrySetupConstantPointLights(RE::BSRenderPass* a_pass)
@@ -327,15 +345,7 @@ void LightLimitFix::BSLightingShader_SetupGeometry_GeometrySetupConstantPointLig
 		strictLightDataTemp.StrictLights[writeIdx++] = light;
 	}
 	strictLightDataTemp.NumStrictLights = writeIdx;
-
-	for (uint32_t i = 0; i < a_pass->numShadowLights; i++) {
-		auto bsLight = a_pass->sceneLights[i + 1];
-		if (!bsLight)
-			continue;
-		auto* shadowLight = static_cast<RE::BSShadowLight*>(bsLight);
-		auto& maskIndex = shadowLight->GetRuntimeData().maskIndex;
-		strictLightDataTemp.ShadowBitMask |= (1u << maskIndex);
-	}
+	strictLightDataTemp.ShadowBitMask |= GetShadowBitMask(a_pass);
 }
 
 void LightLimitFix::BSLightingShader_SetupGeometry_After(RE::BSRenderPass*)

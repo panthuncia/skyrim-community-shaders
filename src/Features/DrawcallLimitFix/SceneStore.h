@@ -31,9 +31,12 @@ namespace DCLF
 			std::vector<PipelineKey> pipelines;
 			std::vector<MaterialRecord> materials;
 			std::vector<ObjectShading> shading;                   // parallel to objects
+			std::vector<ObjectLights> lights;                     // parallel to objects
 			std::vector<GeometryConstants> geometryConstants;     // parallel to pipelines (per-frame PerGeometry values)
 			std::vector<std::uint8_t> geometryConstantsValid;     // parallel to pipelines
-			std::vector<DrawSequence> draws;  // one per object, drawId == object index
+			std::vector<TechniqueConstants> techniqueConstants;   // parallel to pipelines (per-frame PerTechnique values, filter modes)
+			std::vector<PipelinePermutation> permutations;        // parallel to pipelines
+			std::vector<DrawSequence> draws;  // one per object (templates: pipelineIndex is the table index)
 
 			void Clear();
 		};
@@ -45,12 +48,25 @@ namespace DCLF
 			std::uint32_t geometries = 0;
 			std::uint32_t pipelines = 0;
 			std::uint32_t materials = 0;
+			std::uint32_t shadowMaskPipelines = 0;  // pipelines whose technique binds the shadow mask (not derived yet)
 			std::uint32_t categoryNodes = 0;
 			std::uint64_t attachedEvents = 0;
 			std::uint64_t detachedEvents = 0;
 			std::uint64_t validationDrops = 0;
 			std::array<std::uint32_t, static_cast<std::size_t>(Ineligible::Count)> ineligible{};
+			// BuildFrame time by part, summed since the last ResetTimes (ms): accumulator walk, classification,
+			// per-pipeline evaluation, material evaluation.
+			std::array<double, 4> partMs{};
+			// The property-derived descriptor against the accumulated one, outside kRuntimePassBits (Phase 5
+			// readiness): objects compared, objects that differ, the differing bits, and objects the
+			// derivation would have left native.
+			std::uint32_t derivationChecked = 0;
+			std::uint32_t derivationDiffers = 0;
+			std::uint32_t derivationBits = 0;
+			std::uint32_t derivationNative = 0;
 		};
+
+		void ResetTimes() { stats.partMs = {}; }
 
 		static SceneStore& Get();
 
@@ -84,7 +100,10 @@ namespace DCLF
 		Ineligible Classify(RE::BSGeometry* a_geometry) const;
 
 		/** @brief Static eligibility of an arbitrary geometry, without the per-frame checks. */
-		static Ineligible ClassifyStatic(RE::BSGeometry& a_geometry, LightingDescriptors* a_descriptors);
+		static Ineligible ClassifyStatic(RE::BSGeometry& a_geometry, LightingDescriptors* a_descriptors, const AccumulatedPass* a_accumulated = nullptr);
+
+		/** @brief The lighting pass the main-camera accumulator holds for a geometry this frame, or null. */
+		const AccumulatedPass* FindAccumulatedPass(const RE::BSGeometry* a_geometry) const;
 
 	private:
 		struct Tracked
@@ -100,6 +119,7 @@ namespace DCLF
 		void AddGeometry(RE::BSGeometry* a_geometry, RE::NiNode* a_categoryNode, bool a_unsupportedParent);
 		void ValidateSlice();
 		void FindLightingShader();
+		void CollectAccumulatedPasses();
 		Ineligible ClassifyFrame(const Tracked& a_tracked) const;
 
 		ankerl::unordered_dense::map<RE::BSGeometry*, Tracked> tracked;
@@ -108,6 +128,8 @@ namespace DCLF
 
 		Tables tables;
 		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint32_t> objectIndex;
+		// Lighting passes of the main-camera accumulator's batches this frame, by geometry.
+		ankerl::unordered_dense::map<const RE::BSGeometry*, AccumulatedPass> accumulatedPasses;
 		std::uint32_t frame = 0;
 		std::uint32_t mainPassRenderFlags = 0;
 		Stats stats;

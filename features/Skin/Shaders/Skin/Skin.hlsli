@@ -8,6 +8,8 @@
 #include "Common/Shading.hlsli"
 #include "Common/SharedData.hlsli"
 
+#include "Common/NamespacedCBuffer.hlsli"
+
 namespace Skin
 {
 	float CalculateCurvature(float3 N)
@@ -20,8 +22,9 @@ namespace Skin
 #if defined(PSHADER)
 	cbuffer SkinPerGeometry : register(b7)
 	{
-		float4 skinPerGeometry;
+		float4 NSCB(Skin, skinPerGeometry);
 	};
+	NSCB_ALIAS(Skin, float4, skinPerGeometry)
 #endif
 #if defined(SKIN)
 	Texture2D<float4> TexSkinDetailNormal : register(t72);
