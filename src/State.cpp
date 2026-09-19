@@ -21,6 +21,7 @@
 #include "Features/Upscaling.h"
 #include "Features/VolumetricShadows.h"
 #include "Menu.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 #include "SceneSettingsManager.h"
 #include "SettingsOverrideManager.h"
 #include "ShaderCache.h"
@@ -290,6 +291,10 @@ void State::Setup()
 	// Probe typed UAV load support before features set up their resources, so any
 	// gating logic that wants to read the log can run during feature SetupResources.
 	CheckTypedUAVLoadSupport();
+
+	// Adopt DXVK's Vulkan device for the render graph before features create
+	// resources; features fall back to their D3D11 paths when it stays inactive.
+	RenderGraphRuntime::Get().Initialize();
 
 	Feature::ForEachLoadedFeature("SetupResources", [](Feature* feature) { feature->SetupResources(); });
 	globals::deferred->SetupResources();

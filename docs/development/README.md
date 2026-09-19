@@ -4,6 +4,7 @@
 
 -   **[VSCode Setup](./vscode-setup.md)** - IDE configuration, extensions, and auto-deploy
 -   **[Shader Workflow](./shader-workflow.md)** - Fast shader iteration and deployment
+-   **[OpenRenderGraph on DXVK](./render-graph.md)** - How features run render-graph work on DXVK's Vulkan device
 
 ## Quick Links
 

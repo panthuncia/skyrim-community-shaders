@@ -1,5 +1,19 @@
-#include "Common/FrameBuffer.hlsli"
 #include "LightLimitFix/Common.hlsli"
+
+// See ClusterBuildingCS.hlsl for the LLF_ORG_BINDLESS build.
+#if defined(LLF_ORG_BINDLESS)
+#	include "LightLimitFix/OrgBindless.hlsli"
+#	define LLF_WORLD_TO_VIEW(p) LLFWorldToView(p)
+#	define LLF_DECLARE_RESOURCES \
+		StructuredBuffer<ClusterAABB> clusters = ResourceDescriptorHeap[ClustersIndex]; \
+		StructuredBuffer<Light> lights = ResourceDescriptorHeap[LightsIndex]; \
+		RWStructuredBuffer<uint> lightIndexCounter = ResourceDescriptorHeap[LightIndexCounterIndex]; \
+		RWStructuredBuffer<uint> lightIndexList = ResourceDescriptorHeap[LightIndexListIndex]; \
+		RWStructuredBuffer<LightGrid> lightGrid = ResourceDescriptorHeap[LightGridIndex];
+#else
+#	include "Common/FrameBuffer.hlsli"
+#	define LLF_WORLD_TO_VIEW(p) FrameBuffer::WorldToView(p)
+#	define LLF_DECLARE_RESOURCES
 
 cbuffer PerFrame : register(b0)
 {
@@ -8,15 +22,16 @@ cbuffer PerFrame : register(b0)
 	uint4 ClusterSize;
 }
 
-//references
-//https://github.com/pezcode/Cluster
-
 StructuredBuffer<ClusterAABB> clusters : register(t0);
 StructuredBuffer<Light> lights : register(t1);
 
 RWStructuredBuffer<uint> lightIndexCounter : register(u0);
 RWStructuredBuffer<uint> lightIndexList : register(u1);
 RWStructuredBuffer<LightGrid> lightGrid : register(u2);
+#endif
+
+//references
+//https://github.com/pezcode/Cluster
 
 groupshared Light sharedLights[GROUP_SIZE];
 
@@ -30,6 +45,8 @@ bool LightIntersectsCluster(float3 position, float radiusSquared, ClusterAABB cl
 
 [numthreads(NUMTHREAD_X, NUMTHREAD_Y, NUMTHREAD_Z)] void main(
 	uint3 groupId : SV_GroupID, uint3 dispatchThreadId : SV_DispatchThreadID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex) {
+	LLF_DECLARE_RESOURCES
+
 	if (any(dispatchThreadId >= uint3(ClusterSize.x, ClusterSize.y, ClusterSize.z)))
 		return;
 
@@ -61,7 +78,7 @@ bool LightIntersectsCluster(float3 position, float radiusSquared, ClusterAABB cl
 
 		float radiusSquared = light.radius * light.radius;
 
-		float3 positionVS = FrameBuffer::WorldToView(light.positionWS.xyz);
+		float3 positionVS = LLF_WORLD_TO_VIEW(light.positionWS.xyz);
 
 		[branch] if (LightIntersectsCluster(positionVS, radiusSquared, cluster))
 		{
@@ -81,7 +98,7 @@ bool LightIntersectsCluster(float3 position, float radiusSquared, ClusterAABB cl
 
 		float radiusSquared = light.radius * light.radius;
 
-		float3 positionVS = FrameBuffer::WorldToView(light.positionWS.xyz);
+		float3 positionVS = LLF_WORLD_TO_VIEW(light.positionWS.xyz);
 
 		[branch] if (LightIntersectsCluster(positionVS, radiusSquared, cluster))
 		{
