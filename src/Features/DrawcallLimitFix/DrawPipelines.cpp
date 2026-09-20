@@ -267,12 +267,8 @@ namespace DCLF
 				const bool depthOnly = variant == kDepthVariant;
 				rhi::SubobjRaster raster{};
 				raster.rs.cull = (a_key.rasterFlags & kRasterTwoSided) ? rhi::CullMode::None : rhi::CullMode::Back;
-				// The graph renders with a y-flipped viewport (BasicRHI negates the viewport height, as DXVK
-				// does for D3D11), which mirrors the winding in framebuffer space. The engine's meshes are
-				// wound for D3D's "clockwise is front", so the front face has to be the counter-clockwise one
-				// here; without this the pipelines cull exactly the faces that should be drawn, which leaves
-				// flat surfaces missing and shows the far side of everything else.
-				raster.rs.frontCCW = true;
+				// frontCCW stays false: the engine's meshes are wound for D3D's "clockwise is front", which
+				// is what RasterState's default means on every backend.
 				rhi::SubobjDepth depth{};
 				depth.ds.depthEnable = true;
 				// The depth variant is DCLF's own Z-prepass; the color variant tests against it, like the

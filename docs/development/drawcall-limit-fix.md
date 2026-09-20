@@ -298,11 +298,6 @@ constants, which are available. That is also the segment Phase 4 wants for culli
 
 -   **The Z-prepass still runs at the first draw of the main pass, not inside `RenderDepth`.** See above:
     it needs the depth-only pipeline variant first.
--   **BasicRHI's front face means opposite things on its two backends.** `RasterState::frontCCW` is passed
-    straight to `VK_FRONT_FACE_*` on Vulkan, where the viewport is y-flipped, and straight to
-    `FrontCounterClockwise` on D3D12, where it is not: the same state culls opposite faces. DCLF sets
-    `frontCCW = true` to get D3D's convention. The gap belongs in the RHI, but changing it there flips the
-    meaning for every existing caller (SARP's renderer), so it needs a decision and a visual check.
 -   The sampler table is read at its AE 1.6.1170 address; other runtimes need its Address Library ID.
 -   Material textures are imported per shader resource view; views of one image share nothing yet.
 -   Records and constants are rebuilt and uploaded every frame; Phase 4 moves to persistent tables with
@@ -315,7 +310,7 @@ fragment, and the error grew as objects came nearer. The answer turned out to be
 the vertex shaders nor the camera: **the pipelines drew the wrong side of every triangle.**
 
 BasicRHI renders with a y-flipped viewport (it negates the viewport height, as DXVK does for D3D11), which
-mirrors the winding of a triangle in framebuffer space. Its `RasterState::frontCCW` is passed straight
+mirrors the winding of a triangle in framebuffer space. Its `RasterState::frontCCW` was passed straight
 through to `VK_FRONT_FACE_*`, so leaving it at its default made the clockwise faces front-facing in flipped
 space - the opposite of what the engine's meshes, wound for D3D's "clockwise is front", require. Every
 pipeline therefore culled the faces it should have drawn and drew the ones it should have culled.
@@ -329,7 +324,11 @@ That single mistake produced all of the symptoms:
 -   Depth EQUAL against the native prepass therefore failed almost everywhere, which is why Phase 2 needed
     a Z-prepass of its own.
 
-`DrawPipelines` now sets `frontCCW = true` explicitly, with the reason recorded next to it.
+The gap was closed in BasicRHI rather than worked around here. `RasterState::frontCCW` is now defined in
+clip space - false, the default, is D3D's "clockwise is front"; true is glTF's - and the Vulkan backend
+inverts it when it fills `VkPipelineRasterizationStateCreateInfo`, so one pipeline description means the
+same thing on both backends and no caller branches on the API. DCLF therefore leaves `frontCCW` at its
+default, which is already the convention the engine's meshes are wound for.
 
 **How it was measured.** A throwaway depth probe allocated DCLF's depth as a readable texture and compared
 it with the native depth on the CPU, with `CS_DCLF_ONLY_ELIGIBLE=1` restricting the native frame to the
