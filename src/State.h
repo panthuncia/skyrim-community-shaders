@@ -366,6 +366,18 @@ public:
 	ConstantBuffer* sharedDataCB = nullptr;
 	ConstantBuffer* featureDataCB = nullptr;
 
+	/**
+	 * @brief The last SharedData uploaded to sharedDataCB.
+	 *
+	 * Drawcall Limit Fix packs this buffer's contents into its own per-draw constants, and it cannot read
+	 * them back from the GPU buffer: the constant mirror only sees writes made through the hooked device
+	 * context, which this one is not. Keeping the struct is exact and costs a copy per frame.
+	 */
+	SharedDataCB lastSharedData{};
+
+	/** @brief The last FeatureData uploaded to featureDataCB, for the same reason as lastSharedData. */
+	std::vector<std::byte> lastFeatureData;
+
 	PermutationCB permutationData{};
 	PermutationCB permutationDataPrevious{};
 

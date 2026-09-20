@@ -42,6 +42,7 @@ namespace DCLF
 			Sampler,
 			Constants,  // a constant buffer the shaders read is not available
 			Capacity,
+			NotSkippedNatively,  // Z-prepass only: the native loop still draws this object, so it owns its depth
 			Count
 		};
 
@@ -57,6 +58,9 @@ namespace DCLF
 			double cpuMs = 0.0;                              // last epoch, assembly and epoch
 			std::uint32_t notReady = 0;                      // epochs skipped (mirrors, targets or pipelines not ready)
 			std::uint32_t shortBuffers = 0;        // draws whose vertex or index slice does not cover them
+			std::uint32_t cullDrawn = 0;     // sequences BuildDraws wrote, last sampled epoch
+			std::uint32_t cullRejected = 0;  // draws its culling rejected (CS_DCLF_CULL)
+			std::uint32_t cullTested = 0;    // draws it tested at all: 0 means the culling did not run
 			std::uint32_t buildParityChecks = 0;   // CS_DCLF_BUILD_PARITY
 			std::uint32_t buildParityMismatches = 0;
 		};
@@ -79,6 +83,7 @@ namespace DCLF
 		/** @brief At the first lighting draw of the main pass: what the pass binds (buffers, views, targets, viewport). */
 		void CaptureMainPass();
 
+
 		/**
 		 * @brief Before the deferred composite: assemble this frame's draws and execute them. Constant buffer
 		 * contents are read here, once the main pass has drawn with them (the engine updates its per-frame
@@ -87,15 +92,28 @@ namespace DCLF
 		void Execute();
 
 		/**
-		 * @brief Hybrid path, at the first draw of the main pass: assemble this frame's draws and write their
-		 * depth into the main depth buffer. It runs here, and not with the colour pass, because everything
-		 * the rest of the frame does with depth - the native draws' own depth test, the sky, and the effects
-		 * that read the depth buffer - has to see DCLF's objects.
+		 * @brief Hybrid path, at the end of the native depth pass: assemble this frame's draws and write
+		 * their depth into the depth buffer the pass just finished.
+		 *
+		 * It runs here, and not with the colour pass, because everything the rest of the frame does with
+		 * depth - the native draws' own depth test, the sky, Terrain Blending's blended depth and every
+		 * effect that reads it - is derived from the depth buffer at this point and has to see DCLF's
+		 * objects. Only the vertex stage's bindings are needed, which the depth pass has bound; the pixel
+		 * stage is the DCLF_DEPTH_ONLY build, which reads nothing that is not bound yet.
 		 */
-		void ExecuteZPrepass();
+		void CaptureDepthPass();
 
 		/** @brief Hybrid path, before the deferred composite: the colour pass, against the depth above. */
 		void ExecuteColour();
+
+		/**
+		 * @brief CS_DCLF_GBUFFER_PROBE=<x>x<y>: read one texel of every main-pass target back and log it.
+		 *
+		 * Called either side of the colour epoch, it says what DCLF changed in the G-buffer the composite
+		 * then consumes, in the same frame and at the same texel - which a comparison between two runs
+		 * cannot, because the camera never lands in exactly the same place twice.
+		 */
+		void ProbeTargets(const char* a_label);
 
 		/** @brief Before the deferred composite: with CS_DCLF_DEBUG_VIEW=1, replace the main pass's targets with DCLF's. */
 		void ShowDebugView();
@@ -117,5 +135,5 @@ namespace DCLF
 	};
 
 	inline constexpr std::array<const char*, static_cast<std::size_t>(IndirectDraws::Skip::Count)> kSkipNames{ "pipeline", "geometry", "texture", "sampler",
-		"constants", "capacity" };
+		"constants", "capacity", "not-skipped-natively" };
 }

@@ -107,8 +107,8 @@ namespace DCLF
 		/** @brief Adds finished pipelines to the set (call once per frame). */
 		void Update();
 
-		/** @brief The registers of the pipeline at a set index (one Find returned). */
-		const RegisterUsage& Usage(std::uint32_t a_index) const { return usage[a_index]; }
+		/** @brief The registers of a variant of the pipeline at a set index (one Find returned). */
+		const RegisterUsage& Usage(std::uint32_t a_index, std::uint32_t a_variant = kColorVariant) const { return usage[a_index][a_variant]; }
 
 		/** @brief Increments whenever the set is recreated (target change): indices from before are stale. */
 		std::uint32_t Generation() const { return generation; }
@@ -122,7 +122,7 @@ namespace DCLF
 		struct Impl;
 		std::unique_ptr<Impl> impl;
 		TargetFormats targets;
-		std::vector<RegisterUsage> usage;  // by set index
+		std::vector<std::array<RegisterUsage, kVariantCount>> usage;  // by set index, then variant
 		std::uint32_t generation = 0;
 		Stats stats;
 

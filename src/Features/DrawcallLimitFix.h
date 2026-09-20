@@ -89,6 +89,7 @@ private:
 
 	bool installed = false;
 	bool inDepthPass = false;
+	std::uint32_t captureFrame = ~0u;  // the frame whose main-pass bindings have been captured
 	SkipStats skipStats;
 	SkipStats skipCounters;  // accumulating; published into skipStats every frame
 	std::vector<std::string> skipSamples;  // names of a few skipped passes, for the report

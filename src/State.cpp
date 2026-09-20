@@ -1137,11 +1137,17 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 
 		data.HDRData = globals::features::hdrDisplay.GetSharedDataHDR();
 
+		lastSharedData = data;  // Drawcall Limit Fix packs these bytes itself; see State::lastSharedData
 		sharedDataCB->Update(data);
 	}
 
 	{
 		auto [data, size] = GetFeatureBufferData(a_inWorld);
+
+		// Kept for Drawcall Limit Fix, for the same reason as lastSharedData: it packs these bytes into its
+		// own per-draw constants and cannot read them back from the GPU buffer.
+		lastFeatureData.assign(static_cast<const std::byte*>(static_cast<const void*>(data)),
+			static_cast<const std::byte*>(static_cast<const void*>(data)) + size);
 
 		featureDataCB->Update(data, size);
 	}

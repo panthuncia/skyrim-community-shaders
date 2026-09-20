@@ -1,4 +1,6 @@
 #include "CaptureParity.h"
+
+#include "Switches.h"
 #include "LightingConstants.h"
 
 #include <cstring>
@@ -85,8 +87,7 @@ namespace DCLF
 	bool CaptureParity::Enabled()
 	{
 		static const bool enabled = [] {
-			char buf[4] = {};
-			return GetEnvironmentVariableA("CS_DCLF_CAPTURE_PARITY", buf, sizeof(buf)) && buf[0] == '1';
+			return SwitchEnabled("CS_DCLF_CAPTURE_PARITY");
 		}();
 		return enabled;
 	}

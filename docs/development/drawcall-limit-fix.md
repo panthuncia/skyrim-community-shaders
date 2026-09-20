@@ -260,12 +260,34 @@ those objects to it (`DrawcallLimitFix::SkipNativePass`, on the `RenderPassImmed
 Limit Fix hooks, inside the main camera's depth and opaque ranges only). The decision is one frame old,
 because the epoch runs after the native passes.
 
-Depth is written in its own segment (`RenderGraphRuntime::Segment::ZPrepass`) at the **first draw of the
-main pass**, not with the colour pass: everything the rest of the frame does with depth - the native draws'
-own EQUAL test, the sky, and the effects that read the depth buffer - has to see DCLF's objects. The colour
-pass then runs before the composite and tests EQUAL against it, as the native main pass does.
+Depth is written in its own segment (`RenderGraphRuntime::Segment::ZPrepass`), at the **end of the native
+depth pass**: everything the rest of the frame derives from the depth buffer - the native draws' own EQUAL
+test, the sky, Terrain Blending's blended depth and every effect that reads it - has to see DCLF's objects.
+The colour pass then runs before the composite and tests EQUAL against it, as the native main pass does.
+
+The two epochs assemble separately, from their own captures, because the depth pass has not bound the main
+pass's pixel-stage state yet. They draw the same tables with the same camera, so their depths agree. Only
+the colour epoch records what it drew (`drawnFrame`), so the native loop can never skip an object that the
+Z-prepass drew but the colour pass then left out - that would leave a hole that writes depth and shows the
+background.
 
 Whiterun exterior: 942 objects drawn, 1884 native passes skipped, 2.7 ms of render-thread CPU.
+
+#### The depth-only pipeline variant
+
+Running the Z-prepass inside the native depth pass is only possible because its pixel stage reads nothing
+that is not bound yet. Both pipeline variants used to share the full Lighting pixel shader, which reads the
+main pass's per-frame constants and textures. The depth variant is now built from its own SPIR-V of
+`Lighting.hlsl`, compiled with `DCLF_DEPTH_ONLY`, which returns immediately after the alpha test:
+
+-   alpha testing is a compile-time permutation (`DO_ALPHA_TEST`), so the cut is exact - the alpha-tested
+    permutations keep their discard, the rest compile down to nothing;
+-   everything past it is dead code, so the compiler drops the per-frame pixel bindings with it;
+-   `RegisterUsage` is now kept per variant, so a draw only has to supply what its own variant declares.
+
+The assembly for that epoch therefore skips the pixel-stage per-frame constants, the frame textures at t16
+and up, and the structured-buffer copies - all of which come from the main pass's capture - and keeps the
+material textures, samplers and vertex-stage constants, which come from the tables.
 
 #### The ghost background, and what depth the rest of the frame reads
 
@@ -287,17 +309,50 @@ the depth buffer as it now stands: it re-runs `TerrainBlending::BlendPrepassDept
 into the prepass copy, saving and restoring the render targets around it because the main pass is mid-draw.
 That clears the wash completely in Whiterun exterior.
 
-This is the interim placement. The durable one is to run the Z-prepass **inside** the native depth pass, so
-nothing has to be rebuilt. That needs a depth-only pipeline variant - the position-only VS and alpha-test
-discard PS the plan describes - because today both variants share the full Lighting pixel shader, so even
-the depth pass's draws need the main pass's pixel-stage bindings, which are not bound yet during
-`RenderDepth`. With a depth-only variant the assembly there needs only the tables and the vertex-stage
-constants, which are available. That is also the segment Phase 4 wants for culling.
+With the Z-prepass now running inside the native depth pass, almost none of that rebuilding is needed:
+Terrain Blending builds its blended depth further up the same call site, after DCLF's thunk returns, so it
+already sees DCLF's objects. DCLF installs its `Main_RenderDepth` hook before Terrain Blending does, which
+is what makes its thunk the inner one of the chain and puts the prepass ahead of the blend.
+`RefreshDepthConsumers` is now only the engine's prepass depth copy, and only when Terrain Blending is off
+to redirect it - that copy is taken inside the depth pass, before the prepass runs.
+
+#### The Z-prepass must draw exactly what the colour pass draws
+
+Splitting the depth and the colour into two epochs introduced a trap that took a long time to find,
+because every symptom pointed somewhere else: DCLF's objects rendered flat and grey, as though unlit.
+
+The cause is an invariant, not a bug in any one pass. The Z-prepass was assembled without the main pass's
+pixel-stage bindings, so it could draw objects the colour epoch would later drop for a missing constant.
+Such an object ends up with depth in the buffer and nothing to shade it:
+
+-   DCLF's own colour pass skipped it, so it writes no G-buffer;
+-   the native loop would have drawn it - it is not in `drawnFrame`, so it is not skipped - but the native
+    main pass tests depth EQUAL, and the depth it now finds is the one DCLF computed rather than the one
+    the native prepass wrote, so every one of its fragments is rejected too.
+
+Two changes keep the two sets equal:
+
+-   The Z-prepass only draws objects the native loop is actually leaving to DCLF, which is the set the
+    colour epoch drew in the frame before - the same rule `SkipNativePass` uses. Anything else keeps its
+    native depth, and the native draw that owns it still works.
+-   The three per-frame pixel buffers the depth-only shader reads before its alpha test - b5 SharedData,
+    b6 FeatureData and b12 the game's PerFrame - are supplied from Community Shaders and from the game's
+    own cache rather than from the main pass's bindings or the constant mirror, so the prepass can satisfy
+    them during `RenderDepth`. With those in place both epochs assemble the same objects: Whiterun
+    exterior and Dragonsreach both report **915 and 921 drawn with nothing skipped**.
+
+Both epochs also rasterise with the main pass's viewport depth range. The game's depth pass and its main
+pass do not use the same one - `[0, 0.999968]` against `[0, 0.999998]` - and the range scales the value
+written to the buffer, so the same vertex would land about 500 D24 units apart in the two passes.
+
+**How it was found.** By readback, after a long detour of guessing. The instrument that worked copies one
+texel of every target, and of the depth, into a buffer from *inside* the epoch, as graph passes ordered
+against the draws, and reads that buffer back a few frames later (`CS_DCLF_GBUFFER_PROBE=<x>x<y>`). An
+equivalent D3D11 readback issued around the epoch is **not** ordered against ORG's submissions and
+silently reports that nothing ever changes; it produced several confident and wrong conclusions before a
+control - sampling a pixel only DCLF draws, and seeing no change - exposed it.
 
 ### Open
-
--   **The Z-prepass still runs at the first draw of the main pass, not inside `RenderDepth`.** See above:
-    it needs the depth-only pipeline variant first.
 -   The sampler table is read at its AE 1.6.1170 address; other runtimes need its Address Library ID.
 -   Material textures are imported per shader resource view; views of one image share nothing yet.
 -   Records and constants are rebuilt and uploaded every frame; Phase 4 moves to persistent tables with

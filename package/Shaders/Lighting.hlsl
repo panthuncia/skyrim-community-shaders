@@ -2825,6 +2825,14 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	}
 #		endif      // DO_ALPHA_TEST
 
+#		if defined(DCLF_DEPTH_ONLY)
+	// Drawcall Limit Fix's Z-prepass builds this permutation with DCLF_DEPTH_ONLY: the pass has no render
+	// targets and only needs the depth, so everything past the alpha test is dead. Returning here lets the
+	// compiler drop it, which is what makes the prepass cheap and, more importantly, keeps the shader from
+	// reading the per-frame pixel-stage bindings - they are not bound yet while the native depth pass runs.
+	return (PS_OUTPUT)0;
+#		endif  // DCLF_DEPTH_ONLY
+
 #		if defined(ANISOTROPIC_ALPHA)
 	// Uniform alpha material settings
 	uint AlphaMaterialModel = ExtendedTranslucency::GetMaterialModelFromDescriptor(Permutation::ExtraFeatureDescriptor);

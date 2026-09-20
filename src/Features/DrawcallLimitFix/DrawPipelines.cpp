@@ -5,6 +5,7 @@
 
 #	include "DrawPipelines.h"
 #	include "DrawPipelinesRhi.h"
+#	include "Switches.h"
 
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "SpirvReflection.h"
@@ -183,7 +184,9 @@ namespace DCLF
 		struct Built
 		{
 			std::array<rhi::PipelinePtr, kVariantCount> pipelines;
-			RegisterUsage usage;
+			// Per variant: the Z-prepass build of the pixel stage reads far less than the colour one, and a
+			// draw only has to supply what its own variant declares.
+			std::array<RegisterUsage, kVariantCount> usage;
 		};
 
 		// One set per variant; a key has the same index in both.
@@ -247,18 +250,22 @@ namespace DCLF
 		static org::services::PipelinePayload Build(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout, PipelineKey a_key, const ShaderPrograms::Program* a_program,
 			TargetFormats a_targets)
 		{
-			SpirvReflection vertex, pixel;
-			if (!vertex.Parse(a_program->vertex) || !pixel.Parse(a_program->pixel))
+			SpirvReflection vertex, pixel, depthPixel;
+			if (!vertex.Parse(a_program->vertex) || !pixel.Parse(a_program->pixel) || !depthPixel.Parse(a_program->depthPixel))
 				throw std::runtime_error("not SPIR-V");
 			CheckBindings(vertex, false);
 			CheckBindings(pixel, true);
+			CheckBindings(depthPixel, true);
 			auto built = std::make_shared<Built>();
-			AddUsage(vertex, false, built->usage);
-			AddUsage(pixel, true, built->usage);
+			AddUsage(vertex, false, built->usage[kColorVariant]);
+			AddUsage(pixel, true, built->usage[kColorVariant]);
+			AddUsage(vertex, false, built->usage[kDepthVariant]);
+			AddUsage(depthPixel, true, built->usage[kDepthVariant]);
 
 			const rhi::SubobjLayout layout{ a_layout };
 			const rhi::SubobjShader vertexShader{ rhi::ShaderStage::Vertex, { a_program->vertex.data(), static_cast<std::uint32_t>(a_program->vertex.size()) }, "main" };
 			const rhi::SubobjShader pixelShader{ rhi::ShaderStage::Pixel, { a_program->pixel.data(), static_cast<std::uint32_t>(a_program->pixel.size()) }, "main" };
+			const rhi::SubobjShader depthPixelShader{ rhi::ShaderStage::Pixel, { a_program->depthPixel.data(), static_cast<std::uint32_t>(a_program->depthPixel.size()) }, "main" };
 			const rhi::SubobjDSV depthFormat{ rhi::helpers::ToRHI(a_targets.depth) };
 			const rhi::SubobjPrimitiveTopology topology{ rhi::PrimitiveTopology::TriangleList };
 			const rhi::SubobjInputLayout input{ BuildInputLayout(vertex, a_key.vertexLayout) };
@@ -270,11 +277,28 @@ namespace DCLF
 				// frontCCW stays false: the engine's meshes are wound for D3D's "clockwise is front", which
 				// is what RasterState's default means on every backend.
 				rhi::SubobjDepth depth{};
-				depth.ds.depthEnable = true;
-				// The depth variant is DCLF's own Z-prepass; the color variant tests against it, like the
-				// native main pass tests against the native Z-prepass.
-				depth.ds.depthWrite = depthOnly;
-				depth.ds.depthFunc = depthOnly ? rhi::CompareOp::Less : rhi::CompareOp::Equal;
+				// CS_DCLF_NO_DEPTH_TEST=1: the colour variant stops testing depth, to tell "the depth test
+				// rejects every fragment" apart from "the draws are not reaching the rasteriser at all".
+				static const bool noDepthTest = SwitchEnabled("CS_DCLF_NO_DEPTH_TEST");
+				depth.ds.depthEnable = !(noDepthTest && !depthOnly);
+				// The depth variant is DCLF's own Z-prepass. The colour variant tests LESS_EQUAL against it
+				// rather than the EQUAL the native main pass uses. EQUAL is the engine's way of avoiding
+				// overdraw when the same pass wrote the depth; here the two are separate epochs assembled
+				// from separate captures, so a value can differ in its last bits and EQUAL then rejects the
+				// fragment outright - which left DCLF's objects unshaded and grey. LESS_EQUAL gives the same
+				// visibility, because the prepass already stored the nearest surface and anything behind it
+				// still fails, and it tolerates the last-bit differences.
+				// CS_DCLF_COLOUR_DEPTH_WRITE=1: the colour variant stops testing and writes its own depth, so
+				// a readback says exactly what it computes for a pixel - the number its depth test compares
+				// against the one the Z-prepass stored.
+				static const bool colourWritesDepth = SwitchEnabled("CS_DCLF_COLOUR_DEPTH_WRITE");
+				if (!depthOnly && colourWritesDepth) {
+					depth.ds.depthWrite = true;
+					depth.ds.depthFunc = rhi::CompareOp::Always;
+				} else {
+					depth.ds.depthWrite = depthOnly;
+					depth.ds.depthFunc = depthOnly ? rhi::CompareOp::Less : rhi::CompareOp::LessEqual;
+				}
 				rhi::SubobjBlend blend{};
 				rhi::SubobjRTVs targets{};
 				if (!depthOnly) {
@@ -286,7 +310,7 @@ namespace DCLF
 					blend.bs.numAttachments = 0;
 				}
 				const rhi::PipelineStreamItem items[] = {
-					rhi::Make(layout), rhi::Make(vertexShader), rhi::Make(pixelShader), rhi::Make(raster), rhi::Make(depth), rhi::Make(blend),
+					rhi::Make(layout), rhi::Make(vertexShader), rhi::Make(depthOnly ? depthPixelShader : pixelShader), rhi::Make(raster), rhi::Make(depth), rhi::Make(blend),
 					rhi::Make(targets), rhi::Make(depthFormat), rhi::Make(topology), rhi::Make(input), rhi::Make(flags),
 				};
 				if (const auto result = a_device.CreatePipeline(items, static_cast<std::uint32_t>(std::size(items)), built->pipelines[variant]); result != rhi::Result::Ok)

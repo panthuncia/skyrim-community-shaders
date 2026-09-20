@@ -32,6 +32,7 @@ namespace DCLF
 #if defined(DCLF_HAS_SHADER_COMPILER)
 		std::shared_future<org::services::ShaderArtifact> vertex;
 		std::shared_future<org::services::ShaderArtifact> pixel;
+		std::shared_future<org::services::ShaderArtifact> depthPixel;
 #endif
 		std::unique_ptr<Program> program;
 		bool failed = false;
@@ -80,7 +81,7 @@ namespace DCLF
 	namespace
 	{
 		std::shared_future<org::services::ShaderArtifact> RequestStage(std::span<const std::byte> a_source, const std::vector<std::filesystem::path>& a_dependencies,
-			RE::BSShader& a_lighting, bool a_pixel, std::uint32_t a_descriptor)
+			RE::BSShader& a_lighting, bool a_pixel, std::uint32_t a_descriptor, bool a_depthOnly = false)
 		{
 			org::services::ShaderCompileRequest request{};
 			request.sourceName = kSourcePath;
@@ -95,13 +96,17 @@ namespace DCLF
 			for (const auto& [name, value] : SIE::ShaderCache::GetCompileDefines(a_lighting, a_pixel ? SIE::ShaderClass::Pixel : SIE::ShaderClass::Vertex, a_descriptor))
 				request.defines.push_back({ Widen(name), Widen(value) });
 			request.defines.push_back({ L"DCLF_ORG", L"1" });
+			// The Z-prepass build of the pixel stage: everything past the alpha test is compiled away, so it
+			// reads only what the discard needs and none of the per-frame pixel bindings.
+			if (a_depthOnly)
+				request.defines.push_back({ L"DCLF_DEPTH_ONLY", L"1" });
 			// The first few define sets, to reproduce builds with the DXC command line.
 			static std::atomic<std::uint32_t> logged = 0;
 			if (logged.fetch_add(1) < 4) {
 				std::string text;
 				for (const auto& define : request.defines)
 					text += fmt::format(" -D {}{}{}", Util::WStringToString(define.name), define.value.empty() ? "" : "=", Util::WStringToString(define.value));
-				logger::info("[DCLF] SPIR-V build of Lighting {} {:08X} defines:{}", a_pixel ? "PS" : "VS", a_descriptor, text);
+				logger::info("[DCLF] SPIR-V build of Lighting {} {:08X} defines:{}", a_pixel ? (a_depthOnly ? "PS (depth)" : "PS") : "VS", a_descriptor, text);
 			}
 			const auto shift = [&](const wchar_t* a_flag, std::uint32_t a_value) {
 				request.arguments.insert(request.arguments.end(), { a_flag, std::to_wstring(a_value), L"0" });
@@ -126,6 +131,7 @@ namespace DCLF
 #if defined(DCLF_HAS_SHADER_COMPILER)
 			it->second->vertex = RequestStage(source, dependencies, a_lighting, false, a_key.vertexDescriptor);
 			it->second->pixel = RequestStage(source, dependencies, a_lighting, true, a_key.pixelDescriptor);
+			it->second->depthPixel = RequestStage(source, dependencies, a_lighting, true, a_key.pixelDescriptor, true);
 #else
 			(void)a_lighting;
 			it->second->failed = true;
@@ -143,11 +149,12 @@ namespace DCLF
 		};
 		for (auto& [id, entryPointer] : entries) {
 			auto& entry = *entryPointer;
-			if (entry.program || entry.failed || !ready(entry.vertex) || !ready(entry.pixel))
+			if (entry.program || entry.failed || !ready(entry.vertex) || !ready(entry.pixel) || !ready(entry.depthPixel))
 				continue;
 			const auto& vertex = entry.vertex.get();
 			const auto& pixel = entry.pixel.get();
-			if (!vertex || !pixel) {
+			const auto& depthPixel = entry.depthPixel.get();
+			if (!vertex || !pixel || !depthPixel) {
 				entry.failed = true;
 				++stats.failed;
 				if (loggedFailures++ < kMaxLoggedFailures) {
@@ -158,9 +165,9 @@ namespace DCLF
 				}
 				continue;
 			}
-			entry.program = std::make_unique<Program>(Program{ vertex.binary, pixel.binary });
+			entry.program = std::make_unique<Program>(Program{ vertex.binary, pixel.binary, depthPixel.binary });
 			++stats.ready;
-			stats.fromCache += (vertex.fromCache ? 1 : 0) + (pixel.fromCache ? 1 : 0);
+			stats.fromCache += (vertex.fromCache ? 1 : 0) + (pixel.fromCache ? 1 : 0) + (depthPixel.fromCache ? 1 : 0);
 		}
 #endif
 	}

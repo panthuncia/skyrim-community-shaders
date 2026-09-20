@@ -216,6 +216,10 @@ namespace DCLF
 
 	void SceneStore::AddSubtree(RE::NiAVObject* a_root)
 	{
+		// The attach event is drained a frame or more after it was queued, so its node can already be gone
+		// (a cell transition releases the subtree). Walking it then dereferences null.
+		if (!a_root)
+			return;
 		bool unsupportedAbove = false;
 		RE::NiNode* category = FindCategoryNode(a_root, &unsupportedAbove);
 		if (!category)
@@ -227,6 +231,8 @@ namespace DCLF
 		while (!stack.empty()) {
 			auto [object, unsupported] = stack.back();
 			stack.pop_back();
+			if (!object)
+				continue;
 			if (auto* geometry = object->AsGeometry()) {
 				AddGeometry(geometry, category, unsupported);
 				continue;

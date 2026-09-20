@@ -37,6 +37,7 @@ namespace DCLF
 		{
 			std::vector<std::byte> vertex;  // SPIR-V
 			std::vector<std::byte> pixel;
+			std::vector<std::byte> depthPixel;  // the same permutation built with DCLF_DEPTH_ONLY
 		};
 
 		struct Stats
