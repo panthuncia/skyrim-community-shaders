@@ -253,21 +253,119 @@ invocation revision. An empty pass is effectively free.
     on Vulkan; null SRVs on both backends (Vulkan: `robustness2` `nullDescriptor`, which the DXVK fork now
     reports); the viewport depth range in `PassBeginInfo`.
 
+### The hybrid path (Phase 3, in progress)
+
+`CS_DCLF_HYBRID=1` makes DCLF draw into the main pass's own targets and depth, and the native loop leave
+those objects to it (`DrawcallLimitFix::SkipNativePass`, on the `RenderPassImmediately` call sites Light
+Limit Fix hooks, inside the main camera's depth and opaque ranges only). The decision is one frame old,
+because the epoch runs after the native passes.
+
+Depth is written in its own segment (`RenderGraphRuntime::Segment::ZPrepass`) at the **first draw of the
+main pass**, not with the colour pass: everything the rest of the frame does with depth - the native draws'
+own EQUAL test, the sky, and the effects that read the depth buffer - has to see DCLF's objects. The colour
+pass then runs before the composite and tests EQUAL against it, as the native main pass does.
+
+Whiterun exterior: 942 objects drawn, 1884 native passes skipped, 2.7 ms of render-thread CPU.
+
+#### The ghost background, and what depth the rest of the frame reads
+
+Writing the depth at the first draw of the main pass fixed the native draws, the sky and the composite, but
+the frame still showed terrain and LOD washed over DCLF's objects. The cause is that the two depth
+resources the rest of the frame actually reads are built at the **end of the native depth pass**, before
+DCLF has drawn anything:
+
+-   the engine's prepass depth copy (`kPOST_ZPREPASS_COPY`), and
+-   with Terrain Blending on, its blended depth - which it also points `kMAIN` and `kPOST_ZPREPASS_COPY`'s
+    depth SRVs at for the whole rest of the frame (`TerrainBlending::Hooks::Main_RenderDepth`), so every
+    effect reached through `Util::GetCurrentSceneDepthSRV` reads it.
+
+Both therefore held a scene without DCLF's objects, and each depth-reading effect painted the background
+over them.
+
+`DrawcallLimitFix::RefreshDepthConsumers`, called straight after the Z-prepass epoch, rebuilds both from
+the depth buffer as it now stands: it re-runs `TerrainBlending::BlendPrepassDepths` and re-copies `kMAIN`
+into the prepass copy, saving and restoring the render targets around it because the main pass is mid-draw.
+That clears the wash completely in Whiterun exterior.
+
+This is the interim placement. The durable one is to run the Z-prepass **inside** the native depth pass, so
+nothing has to be rebuilt. That needs a depth-only pipeline variant - the position-only VS and alpha-test
+discard PS the plan describes - because today both variants share the full Lighting pixel shader, so even
+the depth pass's draws need the main pass's pixel-stage bindings, which are not bound yet during
+`RenderDepth`. With a depth-only variant the assembly there needs only the tables and the vertex-stage
+constants, which are available. That is also the segment Phase 4 wants for culling.
+
 ### Open
 
--   **DCLF's depth does not match the native Z-prepass.** With the native depth as attachment, EQUAL and even
-    LESS_EQUAL reject nearly every DCLF fragment; the error grows as objects get nearer (a -400 unit bias
-    still leaves near objects out). The inputs were checked equal: constants (Phase 1 parity), the vertex
-    shader's per-frame buffer (hashed at a native draw and at the epoch), camera offsets, viewport and depth
-    range, and the depth buffer itself. DXVK's DXBC path marks positions invariant and keeps `precise`
-    multiply-adds fused, while DXC emits NoContraction, but that explains ULP-level differences only, and
-    compiling with `-Gis` changed nothing. Phase 3's design does not need cross-compiler equality (DCLF
-    draws its own Z-prepass and tests against it, as Phase 2 does now), but the cause should be understood
-    before image parity: it could hide a geometric difference.
+-   **The Z-prepass still runs at the first draw of the main pass, not inside `RenderDepth`.** See above:
+    it needs the depth-only pipeline variant first.
+-   **BasicRHI's front face means opposite things on its two backends.** `RasterState::frontCCW` is passed
+    straight to `VK_FRONT_FACE_*` on Vulkan, where the viewport is y-flipped, and straight to
+    `FrontCounterClockwise` on D3D12, where it is not: the same state culls opposite faces. DCLF sets
+    `frontCCW = true` to get D3D's convention. The gap belongs in the RHI, but changing it there flips the
+    meaning for every existing caller (SARP's renderer), so it needs a decision and a visual check.
 -   The sampler table is read at its AE 1.6.1170 address; other runtimes need its Address Library ID.
 -   Material textures are imported per shader resource view; views of one image share nothing yet.
 -   Records and constants are rebuilt and uploaded every frame; Phase 4 moves to persistent tables with
     dirty-range uploads.
+
+### Why the indirect draws did not match the native ones
+
+Phase 2 left an open question: testing depth EQUAL against the native Z-prepass rejected nearly every
+fragment, and the error grew as objects came nearer. The answer turned out to be neither the arithmetic of
+the vertex shaders nor the camera: **the pipelines drew the wrong side of every triangle.**
+
+BasicRHI renders with a y-flipped viewport (it negates the viewport height, as DXVK does for D3D11), which
+mirrors the winding of a triangle in framebuffer space. Its `RasterState::frontCCW` is passed straight
+through to `VK_FRONT_FACE_*`, so leaving it at its default made the clockwise faces front-facing in flipped
+space - the opposite of what the engine's meshes, wound for D3D's "clockwise is front", require. Every
+pipeline therefore culled the faces it should have drawn and drew the ones it should have culled.
+
+That single mistake produced all of the symptoms:
+
+-   A flat surface (a floor tile, a wall panel) has no second side, so it disappeared entirely.
+-   A closed object still rendered, from its far side, so it looked plausible but sat one object-thickness
+    too deep. That is what made the depth comparison look like a systematic scale: along a floor, DCLF's
+    view depth was a constant 1.0141 times the native one.
+-   Depth EQUAL against the native prepass therefore failed almost everywhere, which is why Phase 2 needed
+    a Z-prepass of its own.
+
+`DrawPipelines` now sets `frontCCW = true` explicitly, with the reason recorded next to it.
+
+**How it was measured.** A throwaway depth probe allocated DCLF's depth as a readable texture and compared
+it with the native depth on the CPU, with `CS_DCLF_ONLY_ELIGIBLE=1` restricting the native frame to the
+objects DCLF also draws, so the two held the same scene and could be compared pixel for pixel. In
+Dragonsreach:
+
+| | before | after |
+| --- | --- | --- |
+| pixels DCLF covers | 2 508 133 | 3 667 129 |
+| pixels only the native frame covers | 1 156 228 | 0 |
+| pixels equal to the bit | 517 (0.02%) | 1 284 595 (35%) |
+| difference, 5th to 95th percentile | +34 to +194 470 D24 units | -3 to +3 D24 units |
+| view depth ratio | 1.0073 to 1.0202 | 1.00000 |
+
+The remaining few D24 units are the FXC/DXC difference described below, which is two orders of magnitude
+smaller than the bug it was hiding behind.
+
+### The residual: FXC against DXC
+
+The native shaders are compiled by FXC and reach the GPU through DXVK's DXBC path, which marks positions
+invariant and keeps `precise` multiply-adds fused; DCLF's are compiled by DXC, which emits NoContraction.
+Lighting.hlsl's vertex shader composes `mul(ViewProj, world4x4)` per vertex, whose intermediate terms carry
+the object's world position, so the orders differ in the last bits and the perspective divide amplifies the
+difference as objects come nearer. It is worth a few D24 units, and no correctness gate should depend on
+the two compilers agreeing exactly: DCLF owns the depth of the objects it draws, and the native loop skips
+them.
+
+### A gap this left in the checks
+
+Every parity check of Phases 1 and 2 passed while the frame was visibly wrong, because each of them
+compares what DCLF *would* submit with what the engine submits: the tables, the constants (276 300 draws,
+every block compared), the draw arguments and bound buffers, and the generated sequences. None of them
+looked at what the indirect draws actually produced. The depth comparison above is that missing check, and
+it is the one that found this. It was a throwaway instrument and has been removed again; Phase 3's image
+parity (`CS_DCLF_PARITY`) is its durable form, and `CS_DCLF_ONLY_ELIGIBLE` is what gives it a native frame
+holding the same objects.
 
 ## Switches
 
@@ -276,6 +374,9 @@ invocation revision. An empty pass is effectively free.
 | `CS_DCLF_STATS=1` | Every 300 frames, log how many objects are tracked, why the rest stay native, and the CPU time scene capture takes. |
 | `CS_DCLF_CAPTURE_PARITY=1` | Compare the tables with the native draws (see above). Costs CPU on every draw. |
 | `CS_DCLF_DEBUG_VIEW=1` | Before the deferred composite, copy DCLF's off-screen targets over the native ones: the frame shows only what the indirect draws produced. |
+| `CS_DCLF_HYBRID=1` | DCLF draws into the main pass's own targets and depth, and the native loop skips the objects it drew. |
+| `CS_DCLF_HYBRID_NOSKIP=1` | With the hybrid path, keep drawing everything natively, so what DCLF fails to draw is still visible. |
+| `CS_DCLF_ONLY_ELIGIBLE=1` | The reverse skip: the native frame draws only the objects DCLF draws, so the two can be compared pixel for pixel. |
 | `CS_DCLF_BUILD_PARITY=1` | Every 300 epochs, read BuildDraws' output back and compare it with the CPU templates (`BuildDraws parity OK/MISMATCH`). |
 | `CS_DCLF_TEST_COMMANDS=<frame>:<command>;…` | Test runs: run each console command on the main thread once the main pass has run that many frames (loading screens do not count), for coverage runs from the auto-loaded save. |
 

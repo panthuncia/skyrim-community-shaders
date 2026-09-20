@@ -142,6 +142,7 @@ namespace DCLF
 			std::uint32_t drawCount = 0;
 			std::uint32_t width = 0, height = 0;  // render area: the main pass viewport
 			float minDepth = 0.0f, maxDepth = 1.0f;  // its depth range (the engine uses [0, 0.999998])
+			bool hybrid = false;
 			rhi::DescriptorHeapHandle resourceHeap{};
 			rhi::DescriptorHeapHandle samplerHeap{};
 			IndirectState indirect{};
@@ -173,9 +174,15 @@ namespace DCLF
 			std::uint64_t constantsAddress = 0, recordsAddress = 0;
 			std::array<std::shared_ptr<org::PixelBuffer>, kColorTargets> targets;
 			std::uint32_t targetCount = 0;
-			std::shared_ptr<org::PixelBuffer> depth;  // DCLF's own Z-prepass (the objects it draws)
-			// CS_DCLF_DEBUG_VIEW: the native main-pass targets, overwritten with DCLF's before the composite.
+			std::shared_ptr<org::Resource> depth;  // DCLF's own Z-prepass (the objects it draws)
+			// The native main-pass targets: overwritten with DCLF's before the composite (CS_DCLF_DEBUG_VIEW),
+			// or drawn into directly (CS_DCLF_HYBRID, where the native loop skips DCLF's objects instead).
 			std::array<std::shared_ptr<org::ExternalTextureResource>, kColorTargets> native;
+			std::shared_ptr<org::ExternalTextureResource> nativeDepth;
+			// What the passes bind: the native targets on the hybrid path, DCLF's own copies otherwise.
+			std::array<std::shared_ptr<org::Resource>, kColorTargets> drawTargets;
+			std::shared_ptr<org::Resource> drawDepth;
+			bool hybrid = false;
 			std::uint32_t width = 0, height = 0;
 			bool lightLimitFix = false;  // LLF's graph buffers are registered (they are read at t35-t37)
 			std::atomic<std::shared_ptr<const PassFrame>> frame;
@@ -197,9 +204,15 @@ namespace DCLF
 			std::uint32_t targetCount = 0;
 		};
 
+		bool DrawingSegment()
+		{
+			const auto segment = RenderGraphRuntime::Get().CurrentSegment();
+			return segment == RenderGraphRuntime::Segment::ZPrepass || segment == RenderGraphRuntime::Segment::MainOpaque;
+		}
+
 		std::shared_ptr<const PassFrame> CurrentFrame(const Resources& a_resources)
 		{
-			if (RenderGraphRuntime::Get().CurrentSegment() != RenderGraphRuntime::Segment::MainOpaque)
+			if (!DrawingSegment())
 				return nullptr;
 			return a_resources.frame.load(std::memory_order_acquire);
 		}
@@ -215,8 +228,8 @@ namespace DCLF
 				a_builder.PreferQueue(org::QueueKind::Graphics);
 				PassBindings bindings{};
 				for (std::uint32_t i = 0; i < resources->targetCount; ++i)
-					bindings.targets[i] = a_builder.BindRenderTarget(resources->targets[i]);  // cleared by the pass's load op
-				bindings.depth = a_builder.BindDepthReadWrite(resources->depth);
+					bindings.targets[i] = a_builder.BindRenderTarget(resources->drawTargets[i]);
+				bindings.depth = a_builder.BindDepthReadWrite(resources->drawDepth);
 				bindings.sequences = a_builder.BindIndirectArguments(resources->sequences);
 				bindings.count = a_builder.BindIndirectArguments(resources->count);
 				// Read through device addresses; declared so the graph orders them after their uploads.
@@ -236,6 +249,7 @@ namespace DCLF
 			{
 				const auto frame = CurrentFrame(*resources);
 				a_out.push_back(frame ? frame->serial : 0);
+				a_out.push_back(static_cast<std::uint64_t>(RenderGraphRuntime::Get().CurrentSegment()));
 			}
 
 			PreparedDraws Prepare(const PassBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
@@ -262,10 +276,13 @@ namespace DCLF
 				std::array<rhi::ColorAttachment, kColorTargets> colors{};
 				for (std::uint32_t i = 0; i < a_prepared.targetCount; ++i) {
 					colors[i].rtv = a_recording.Resolve(a_prepared.targetViews[i]);
-					colors[i].loadOp = rhi::LoadOp::Clear;
+					colors[i].loadOp = frame.hybrid ? rhi::LoadOp::Load : rhi::LoadOp::Clear;
 					colors[i].storeOp = rhi::StoreOp::Store;
 					colors[i].resource = a_recording.Resolve(a_bindings.targets[i]).GetHandle();
 				}
+				const bool zPrepass = RenderGraphRuntime::Get().CurrentSegment() == RenderGraphRuntime::Segment::ZPrepass;
+				if (zPrepass && !frame.hybrid)
+					return;  // off the hybrid path both passes run together in the main segment
 				const auto sequences = a_recording.Resolve(a_bindings.sequences).GetHandle();
 				const auto count = a_recording.Resolve(a_bindings.count).GetHandle();
 				rhi::PassBeginInfo begin{};
@@ -274,26 +291,34 @@ namespace DCLF
 				begin.minDepth = frame.minDepth;
 				begin.maxDepth = frame.maxDepth;
 
-				// DCLF's Z-prepass: depth only, like the native one.
+				// DCLF's Z-prepass: depth only, like the native one. On the hybrid path it adds DCLF's objects
+				// to the depth the native passes already wrote, so they occlude and are occluded correctly.
 				rhi::DepthAttachment depth{};
 				depth.dsv = a_recording.Resolve(a_prepared.depthView);
-				depth.depthLoad = rhi::LoadOp::Clear;
+				depth.depthLoad = frame.hybrid ? rhi::LoadOp::Load : rhi::LoadOp::Clear;
 				depth.depthStore = rhi::StoreOp::Store;
-				depth.stencilLoad = rhi::LoadOp::Clear;
-				depth.stencilStore = rhi::StoreOp::DontCare;
+				depth.stencilLoad = frame.hybrid ? rhi::LoadOp::Load : rhi::LoadOp::Clear;
+				depth.stencilStore = frame.hybrid ? rhi::StoreOp::Store : rhi::StoreOp::DontCare;
 				depth.clear.depthStencil.depth = 1.0f;
 				begin.depth = &depth;
 				begin.debugName = "DCLF depth";
-				commands.BeginPass(begin);
-				commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
-				commands.BindLayout(frame.indirect.layout);
-				commands.ExecuteIndirect(frame.indirect.signatures[kDepthVariant], sequences, 0, count, 0, frame.drawCount);
-				commands.EndPass();
+				// DCLF's Z-prepass. On the hybrid path it runs in its own segment, at the first draw of the
+				// native main pass, so that the rest of the frame - the native draws that test depth, the sky
+				// and everything that reads the depth buffer afterwards - sees DCLF's objects.
+				if (!frame.hybrid || zPrepass) {
+					commands.BeginPass(begin);
+					commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
+					commands.BindLayout(frame.indirect.layout);
+					commands.ExecuteIndirect(frame.indirect.signatures[kDepthVariant], sequences, 0, count, 0, frame.drawCount);
+					commands.EndPass();
+				}
 
 				// The main pass: depth test EQUAL against it (its pipelines do not write depth; the attachment
 				// stays in the layout the pass declared).
 				depth.depthLoad = rhi::LoadOp::Load;
 				depth.stencilLoad = rhi::LoadOp::Load;
+				if (zPrepass)
+					return;  // the colour pass belongs to the main segment
 				begin.colors = { colors.data(), a_prepared.targetCount };
 				begin.debugName = "DCLF main opaque";
 				commands.BeginPass(begin);
@@ -379,6 +404,17 @@ namespace DCLF
 			static const bool enabled = [] {
 				char buf[4] = {};
 				return GetEnvironmentVariableA("CS_DCLF_DEBUG_VIEW", buf, sizeof(buf)) && buf[0] == '1';
+			}();
+			return enabled;
+		}
+
+		// CS_DCLF_HYBRID=1: DCLF draws into the main pass's own targets and depth, and the native loop skips
+		// the objects it drew (DrawcallLimitFix's RenderPassImmediately hooks).
+		bool HybridEnabled()
+		{
+			static const bool enabled = [] {
+				char buf[4] = {};
+				return GetEnvironmentVariableA("CS_DCLF_HYBRID", buf, sizeof(buf)) && buf[0] == '1';
 			}();
 			return enabled;
 		}
@@ -506,6 +542,8 @@ namespace DCLF
 					a_graph.RegisterResource(org::ResourceIdentifier(fmt::format("cs.dclf.frame-buffer.t{}", frameBuffer.textureRegister)), frameBuffer.copy);
 				for (std::uint32_t i = 0; i < resources->targetCount && resources->native[0]; ++i)
 					a_graph.RegisterResource(org::ResourceIdentifier(fmt::format("cs.dclf.native-target{}", i)), resources->native[i]);
+				if (resources->nativeDepth)
+					a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.native-depth"), resources->nativeDepth);
 			}
 
 			void GatherStructuralPasses(org::RenderGraph&, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
@@ -515,7 +553,7 @@ namespace DCLF
 						.PreferQueue(org::QueueKind::Graphics));
 				a_out.push_back(org::RenderGraph::ExternalPassDesc::Render("cs.dclf.main-opaque",
 					std::static_pointer_cast<org::RenderPass>(std::make_shared<MainOpaquePass>(resources))));
-				if (resources->native[0])
+				if (resources->native[0] && !resources->hybrid)
 					a_out.push_back(org::RenderGraph::ExternalPassDesc::Render("cs.dclf.debug-view",
 						std::static_pointer_cast<org::RenderPass>(std::make_shared<DebugViewPass>(resources))));
 			}
@@ -535,6 +573,9 @@ namespace DCLF
 			std::uint32_t targetCount = 0;
 			std::uint32_t viewportWidth = 0, viewportHeight = 0;
 			float minDepth = 0.0f, maxDepth = 1.0f;
+			// The camera the main pass draws with: the world transforms are stored relative to it, and the
+			// engine has moved it on by the time the epoch packs the constants.
+			RE::NiPoint3 eye, previousEye;
 
 			void Release()
 			{
@@ -575,6 +616,9 @@ namespace DCLF
 				capture.depth = resource.try_as<ID3D11Texture2D>();
 				depth->Release();
 			}
+			auto& shadowState = globals::game::shadowState->GetRuntimeData();
+			capture.eye = shadowState.posAdjust.getEye();
+			capture.previousEye = shadowState.previousPosAdjust.getEye();
 			D3D11_VIEWPORT viewport{};
 			UINT count = 1;
 			context->RSGetViewports(&count, &viewport);
@@ -660,6 +704,10 @@ namespace DCLF
 		std::vector<DrawSequence> sequences;  // CPU templates of BuildDraws' output
 		std::vector<DrawInput> inputs;
 		std::vector<GeometryDraw> geometryDraws;
+
+		// The frame each geometry was last drawn by DCLF: the native loop skips a pass whose geometry the
+		// epoch drew, and the epoch runs after the native passes, so the decision uses the frame before.
+		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint32_t> drawnFrame;
 
 		// CS_DCLF_BUILD_PARITY: GPU output copied to staging after an epoch, compared a few frames later.
 		struct ParityReadback
@@ -762,24 +810,41 @@ namespace DCLF
 			depthDesc.channels = 1;
 			depthDesc.hasDSV = true;
 			depthDesc.dsvFormat = depthDesc.format;
-			state->depth = org::PixelBuffer::CreateSharedUnmaterialized(depthDesc);
-			state->depth->SetName("cs.dclf.depth");
+			{
+				auto depth = org::PixelBuffer::CreateSharedUnmaterialized(depthDesc);
+				depth->SetName("cs.dclf.depth");
+				state->depth = std::move(depth);
+			}
 			state->width = target.Width;
 			state->height = target.Height;
 
-			if (DebugViewEnabled()) {
+			state->hybrid = HybridEnabled();
+			if (DebugViewEnabled() || state->hybrid) {
 				for (std::uint32_t i = 0; i < targets.colorCount; ++i) {
 					DxvkOrgInteropResourceInfo info{};
 					if (!a_capture.targets[i] || !RenderGraphRuntime::Get().DescribeResource(a_capture.targets[i].get(), info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
-						return NotReady(5, "a main-pass target cannot be described (debug view)");
+						return NotReady(5, "a main-pass target cannot be described");
 					org::TextureDescription desc{};
 					desc.format = rhi::helpers::ToRHI(targets.colors[i]);
 					desc.channels = 4;
+					desc.hasRTV = true;
+					desc.rtvFormat = desc.format;
 					state->native[i] = ImportImage(device, info.image, desc, "DCLF native target");
 					if (!state->native[i])
-						return NotReady(6, "a main-pass target could not be imported (debug view)");
+						return NotReady(6, "a main-pass target could not be imported");
 				}
 			}
+			if (state->hybrid) {
+				DxvkOrgInteropResourceInfo info{};
+				if (!a_capture.depth || !RenderGraphRuntime::Get().DescribeResource(a_capture.depth.get(), info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
+					return NotReady(10, "the main-pass depth cannot be described (hybrid)");
+				state->nativeDepth = ImportImage(device, info.image, depthDesc, "DCLF native depth");
+				if (!state->nativeDepth)
+					return NotReady(11, "the main-pass depth could not be imported (hybrid)");
+			}
+			for (std::uint32_t i = 0; i < targets.colorCount; ++i)
+				state->drawTargets[i] = state->hybrid ? std::static_pointer_cast<org::Resource>(state->native[i]) : std::static_pointer_cast<org::Resource>(state->targets[i]);
+			state->drawDepth = state->hybrid ? std::static_pointer_cast<org::Resource>(state->nativeDepth) : state->depth;
 
 			state->lightLimitFix = lightLimitFix;
 			for (auto& frameBuffer : frameBuffers) {
@@ -817,6 +882,17 @@ namespace DCLF
 		return DrawPipelines::Get().Enabled();
 	}
 
+	bool IndirectDraws::Hybrid()
+	{
+		return HybridEnabled();
+	}
+
+	bool IndirectDraws::DrewLastFrame(const RE::BSGeometry* a_geometry, std::uint32_t a_frame) const
+	{
+		const auto drawn = impl->drawnFrame.find(a_geometry);
+		return drawn != impl->drawnFrame.end() && a_frame - drawn->second <= 1;
+	}
+
 	void IndirectDraws::CaptureMainPass()
 	{
 		if (impl->pending)
@@ -825,6 +901,27 @@ namespace DCLF
 	}
 
 	void IndirectDraws::Execute()
+	{
+		if (Hybrid())
+			return;  // the hybrid path assembles at the first draw of the main pass instead
+		RunEpoch(RenderGraphRuntime::Segment::MainOpaque);
+	}
+
+	void IndirectDraws::ExecuteZPrepass()
+	{
+		if (Hybrid())
+			RunEpoch(RenderGraphRuntime::Segment::ZPrepass);
+	}
+
+	void IndirectDraws::ExecuteColour()
+	{
+		if (!Hybrid() || failed || !impl->resources)
+			return;
+		if (!RenderGraphRuntime::Get().ExecuteEpoch(RenderGraphRuntime::Segment::MainOpaque))
+			logger::error("[DCLF] The main-pass colour epoch failed; the render graph is disabled");
+	}
+
+	void IndirectDraws::RunEpoch(RenderGraphRuntime::Segment a_segment)
 	{
 		const auto start = std::chrono::steady_clock::now();
 		if (!impl->pending)
@@ -852,6 +949,7 @@ namespace DCLF
 		}
 
 		auto& store = SceneStore::Get();
+		const std::uint32_t frameNumber = store.GetFrame();
 		const auto& tables = store.GetTables();
 		auto& programs = ShaderPrograms::Get();
 		auto& cache = SIE::ShaderCache::Instance();
@@ -862,7 +960,7 @@ namespace DCLF
 		stats.missingVertexConstants = stats.missingPixelConstants = 0;
 		std::uint32_t missingNext = 0;
 
-		const bool ok = RenderGraphRuntime::Get().ExecuteEpoch(RenderGraphRuntime::Segment::MainOpaque, [&](org::RenderGraph&) {
+		const bool ok = RenderGraphRuntime::Get().ExecuteEpoch(a_segment, [&](org::RenderGraph&) {
 			auto& arena = impl->arena;
 			auto& records = impl->records;
 			auto& sequences = impl->sequences;
@@ -1038,7 +1136,7 @@ namespace DCLF
 					materialBlock.first = pack(material.vs, LightingVSLayout(), blocks.vs->constantTable, kVSGroups[kPerMaterial], kVSFirstVariable[kPerMaterial]);
 					materialBlock.second = pack(material.ps, LightingPSLayout(), blocks.ps->constantTable, kPSGroups[kPerMaterial], kPSFirstVariable[kPerMaterial]);
 				}
-				const auto geometryConstants = ObjectGeometryConstants(tables, o, renderFlags);
+				const auto geometryConstants = ObjectGeometryConstants(tables, o, renderFlags, capture.eye, capture.previousEye);
 				std::uint64_t geometryVS = 0, geometryPS = 0;
 				{
 					const auto vsSize = ConstantGroupSize(LightingVSLayout(), blocks.vs->constantTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry]);
@@ -1122,6 +1220,20 @@ namespace DCLF
 				impl->inputs.push_back({ blocks.setIndex, static_cast<std::uint32_t>(records.size()), object.geometryIndex, object.flags });
 				records.push_back(bindings);
 				sequences.push_back(sequence);
+				if (o < tables.objectGeometry.size())
+					impl->drawnFrame[tables.objectGeometry[o]] = frameNumber;
+				// The indirect draw fetches vertices and indices through the buffer's device address and size:
+				// a slice that does not cover the draw reads zeros, and the object collapses without any
+				// other sign. Checked here because nothing on the D3D11 side sees the Vulkan slice.
+				const std::uint64_t vertexNeeded = std::uint64_t(geometry.vertexCount) * geometry.vertexStride;
+				const std::uint64_t indexNeeded = (std::uint64_t(geometry.firstIndex) + geometry.indexCount) * sizeof(std::uint16_t);
+				if (geometry.vertexBytes < vertexNeeded || geometry.indexBytes < indexNeeded) {
+					++stats.shortBuffers;
+					if (stats.shortBuffers == 1)
+						logger::warn("[DCLF] '{}' draws past its buffers: {} vertices x {} bytes needs {}, the slice holds {}; indices to {} need {}, the slice holds {}",
+							tables.objectGeometry[o] ? tables.objectGeometry[o]->name.c_str() : "?", geometry.vertexCount, geometry.vertexStride, vertexNeeded,
+							geometry.vertexBytes, geometry.firstIndex + geometry.indexCount, indexNeeded, geometry.indexBytes);
+				}
 			}
 
 			// Upload (the graph's upload pass runs ahead of every pass of this epoch).
@@ -1155,6 +1267,7 @@ namespace DCLF
 			frame->resourceHeap = org::runtime::GetActiveSRVDescriptorHeap().GetHandle();
 			frame->samplerHeap = org::runtime::GetActiveSamplerDescriptorHeap().GetHandle();
 			frame->indirect = GetIndirectState();
+			frame->hybrid = resources->hybrid;
 			stats.drawn = frame->drawCount;
 			resources->frame.store(std::move(frame), std::memory_order_release);
 		});
@@ -1260,8 +1373,13 @@ namespace DCLF
 		return draws;
 	}
 	bool IndirectDraws::Enabled() const { return false; }
+	bool IndirectDraws::Hybrid() { return false; }
+	bool IndirectDraws::DrewLastFrame(const RE::BSGeometry*, std::uint32_t) const { return false; }
 	void IndirectDraws::CaptureMainPass() {}
 	void IndirectDraws::Execute() {}
+	void IndirectDraws::ExecuteZPrepass() {}
+	void IndirectDraws::ExecuteColour() {}
+	void IndirectDraws::RunEpoch(RenderGraphRuntime::Segment) {}
 	void IndirectDraws::ShowDebugView() {}
 }
 

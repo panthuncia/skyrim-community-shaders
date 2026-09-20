@@ -92,6 +92,9 @@ namespace DCLF
 			bool operator==(const RenderStateValue&) const = default;
 		};
 		ankerl::unordered_dense::map<RenderStateKey, std::vector<RenderStateValue>, RenderStateKeyHash> renderStates;
+		// How often each constant block was actually compared against a native buffer, and how often there
+		// was no snapshot to compare with (which is not a passing check).
+		ankerl::unordered_dense::map<std::string, std::pair<std::uint64_t, std::uint64_t>> blockCoverage;
 		std::uint64_t drawMismatches = 0;  // draw arguments or bound buffers differ
 		std::uint64_t drawsChecked = 0;
 

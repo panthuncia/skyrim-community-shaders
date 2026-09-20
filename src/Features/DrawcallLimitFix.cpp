@@ -10,6 +10,7 @@
 #include "DrawcallLimitFix/ShaderPrograms.h"
 #include "DrawcallLimitFix/SceneStore.h"
 #include "DrawcallLimitFix/SceneTracker.h"
+#include "TerrainBlending.h"
 
 namespace
 {
@@ -123,6 +124,7 @@ void DrawcallLimitFix::PostPostLoad()
 		return;
 	}
 	DCLF::SceneTracker::Get().Install();
+	Hooks::Install();
 	installed = true;
 }
 
@@ -162,6 +164,11 @@ void DrawcallLimitFix::Prepass()
 		pipelines.Update();
 	}
 
+	skipStats = skipCounters;
+	skipCounters = {};
+	if ((store.GetFrame() % kReportInterval) == 1)
+		skipSamples.clear();  // collected again for the next report
+
 	const std::uint32_t frame = store.GetFrame();
 	static TestCommands testCommands;
 	testCommands.OnFrame(frame);
@@ -196,6 +203,20 @@ void DrawcallLimitFix::Prepass()
 			draws.drawn, skipped, draws.missingTextures[0], draws.missingTextures[1], draws.missingTextures[2], draws.missingTextures[3], draws.missingVertexConstants,
 			draws.missingPixelConstants, draws.uploadBytes / 1048576.0,
 			draws.cpuMs, draws.epochs, draws.notReady, textures.cached, textures.rejected[1], textures.rejected[2], textures.rejected[3], textures.samplers);
+		if (DCLF::IndirectDraws::Hybrid())
+			logger::info("[DCLF] hybrid (last frame): {} of {} native passes left to the indirect draws ({} in the depth pass, {} in the opaque pass)",
+				skipStats.skipped, skipStats.offered, skipStats.skippedInDepth, skipStats.skippedInOpaque);
+		if (DCLF::IndirectDraws::Hybrid() && !skipSamples.empty()) {
+			std::string names;
+			for (const auto& name : skipSamples)
+				names += fmt::format("{}'{}'", names.empty() ? "" : ", ", name);
+			logger::info("[DCLF] hybrid: passes left to the indirect draws include {}", names);
+		}
+		logger::info("[DCLF] parity: {} native passes kept, {} skipped", skipStats.kept, skipStats.skipped);
+		if (DCLF::IndirectDraws::Hybrid() && skipStats.notInTables)
+			logger::warn("[DCLF] hybrid (last frame): {} native passes were kept because their geometry left the tables", skipStats.notInTables);
+		if (draws.shortBuffers)
+			logger::warn("[DCLF] {} draws of the last epoch reach past their vertex or index buffer slice", draws.shortBuffers);
 		const auto& gpu = DCLF::GpuResources::Get().GetStats();
 		logger::info("[DCLF] game buffers for the render graph: {} stable, {} rejected; {} resolved so far in {:.1f} ms (slowest {:.3f} ms)", gpu.cached, gpu.rejected,
 			gpu.resolvedTotal, gpu.resolveMsTotal, gpu.resolveMsMax);
@@ -210,6 +231,88 @@ void DrawcallLimitFix::Prepass()
 	}
 }
 
+bool DrawcallLimitFix::SkipNativePass(RE::BSRenderPass* a_pass)
+{
+	// CS_DCLF_HYBRID_NOSKIP=1: DCLF draws into the frame but the native loop keeps drawing everything, so
+	// what DCLF fails to draw is still visible. It tells apart the two ways an object can go missing.
+	static const bool noSkip = [] {
+		char buf[4] = {};
+		return GetEnvironmentVariableA("CS_DCLF_HYBRID_NOSKIP", buf, sizeof(buf)) && buf[0] == '1';
+	}();
+	// CS_DCLF_ONLY_ELIGIBLE=1: the reverse skip, for parity. The native loop draws only what the indirect
+	// draws also draw, so the native depth and G-buffer hold the same object set as DCLF's own targets and
+	// the two can be compared pixel for pixel.
+	static const bool onlyEligible = [] {
+		char buf[4] = {};
+		return GetEnvironmentVariableA("CS_DCLF_ONLY_ELIGIBLE", buf, sizeof(buf)) && buf[0] == '1';
+	}();
+	if (noSkip && !onlyEligible)
+		return false;
+	if (!installed || !a_pass || !a_pass->geometry || (!DCLF::IndirectDraws::Hybrid() && !onlyEligible))
+		return false;
+	if (!inDepthPass && !globals::deferred->deferredPass)
+		return false;  // shadows, reflections and cubemaps keep drawing everything
+	if (onlyEligible) {
+		// Membership of this frame's tables, not what the epoch drew: the epoch only runs once the main pass
+		// has drawn, so a rule based on the frame before would skip everything and never start.
+		if (DCLF::SceneStore::Get().FindObject(a_pass->geometry) >= 0) {
+			++skipCounters.kept;
+			if (skipCounters.kept == 1)
+				logger::info("[DCLF] parity: keeping '{}' (depth pass {}, deferred {})", a_pass->geometry->name.c_str() ? a_pass->geometry->name.c_str() : "?",
+					inDepthPass, globals::deferred->deferredPass);
+			return false;
+		}
+		++skipCounters.skipped;
+		return true;
+	}
+	auto& store = DCLF::SceneStore::Get();
+	if (!DCLF::IndirectDraws::Get().DrewLastFrame(a_pass->geometry, store.GetFrame()))
+		return false;
+	// A geometry the epoch drew in the frame before but that is not in this frame's tables would be left
+	// out of the frame entirely: the pass stays native and the mismatch is reported.
+	if (skipSamples.size() < 12 && a_pass->geometry->name.c_str())
+		skipSamples.emplace_back(a_pass->geometry->name.c_str());
+	if (store.FindObject(a_pass->geometry) < 0) {
+		++skipCounters.notInTables;
+		if (skipCounters.notInTables == 1 && a_pass->geometry->name.c_str())
+			logger::warn("[DCLF] hybrid: '{}' was drawn last frame but is not in this frame's tables; it stays native", a_pass->geometry->name.c_str());
+		return false;
+	}
+	return true;
+}
+
+void DrawcallLimitFix::Hooks::Main_RenderDepth::thunk(bool a_a1, bool a_a2)
+{
+	auto& feature = globals::features::drawcallLimitFix;
+	feature.inDepthPass = true;
+	func(a_a1, a_a2);
+	feature.inDepthPass = false;
+}
+
+template <int N>
+void DrawcallLimitFix::Hooks::BSBatchRenderer_RenderPassImmediately<N>::thunk(RE::BSRenderPass* a_pass, std::uint32_t a_technique, bool a_alphaTest, std::uint32_t a_renderFlags)
+{
+	auto& feature = globals::features::drawcallLimitFix;
+	++feature.skipCounters.offered;
+	if (feature.SkipNativePass(a_pass)) {
+		++(feature.inDepthPass ? feature.skipCounters.skippedInDepth : feature.skipCounters.skippedInOpaque);
+		++feature.skipCounters.skipped;
+		return;
+	}
+	func(a_pass, a_technique, a_alphaTest, a_renderFlags);
+}
+
+void DrawcallLimitFix::Hooks::Install()
+{
+	// The main camera's depth pass, hooked where Terrain Blending hooks it.
+	stl::write_thunk_call<Main_RenderDepth>(REL::RelocationID(35560, 36559).address() + Util::VersionedRelocation::Select(0x395, 0x395, 0x3B3));
+	stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<1>>(REL::RelocationID(100877, 107667).address() + REL::Relocate(0x1E5, 0xED));
+	stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<2>>(REL::RelocationID(100852, 107642).address() + REL::Relocate(0x29E, 0x28F));
+	if (REL::Module::IsSE())  // this call site only exists in SE, as Light Limit Fix's hooks show
+		stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<3>>(REL::RelocationID(100871, 107661).address() + 0xEE);
+	logger::info("[DCLF] Native pass hooks installed");
+}
+
 void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags)
 {
 	if (!installed || DCLF::ConstantEvaluator::Evaluating())
@@ -217,25 +320,76 @@ void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint3
 	if (globals::deferred->deferredPass) {
 		auto& store = DCLF::SceneStore::Get();
 		// The main pass's target formats, once per frame from its first lighting draw.
+		// The first lighting draw of the frame whose targets are bound: the engine binds the main pass's
+		// targets while it applies a draw's state, so the first draw of the pass can still see none (which
+		// is what the parity switches, where most passes are skipped, run into).
 		static std::uint32_t formatsFrame = ~0u;
 		if (formatsFrame != store.GetFrame()) {
-			formatsFrame = store.GetFrame();
-			DCLF::DrawPipelines::Get().SetTargetFormats(CurrentTargetFormats());
-			// Phase 2: what the main pass binds, for this frame's indirect draws (run before the composite).
-			DCLF::IndirectDraws::Get().CaptureMainPass();
+			const auto formats = CurrentTargetFormats();
+			if (formats.colorCount != 0 && formats.depth != DXGI_FORMAT_UNKNOWN) {
+				formatsFrame = store.GetFrame();
+				DCLF::DrawPipelines::Get().SetTargetFormats(formats);
+				// Phase 2: what the main pass binds, for this frame's indirect draws (run before the composite).
+				DCLF::IndirectDraws::Get().CaptureMainPass();
+				// Hybrid path: the depth of DCLF's objects goes into the main depth buffer here, at the first
+				// draw of the pass, so the native draws that follow and everything that reads depth later see
+				// it. The colour pass runs before the composite.
+				DCLF::IndirectDraws::Get().ExecuteZPrepass();
+				RefreshDepthConsumers();
+			}
 		}
 	}
 	if (DCLF::CaptureParity::Enabled())
 		DCLF::CaptureParity::Get().OnNativeLightingDraw(a_pass, a_renderFlags);
 }
 
+void DrawcallLimitFix::RefreshDepthConsumers()
+{
+	// Everything the rest of the frame reads depth through is built at the end of the native depth pass,
+	// before the indirect draws have written theirs: the engine's prepass copy, and - when Terrain Blending
+	// is on - its blended depth, which it also points every depth SRV at for the rest of the frame. Neither
+	// holds DCLF's objects, so the effects that read depth paint the background over them. Rebuild both from
+	// the depth buffer now that the Z-prepass has added them.
+	//
+	// This is the interim placement. The durable one is to run the Z-prepass inside the native depth pass,
+	// which needs a depth-only pipeline variant (the one the plan describes: position-only VS, a discard PS
+	// for alpha-tested objects) so that assembling it does not depend on the main pass's pixel bindings.
+	auto* context = globals::d3d::context;
+	auto* renderer = globals::game::renderer;
+	if (!context || !renderer)
+		return;
+
+	// The pass is mid-draw: whatever it had bound has to go back before it draws.
+	ID3D11RenderTargetView* targets[8] = {};
+	ID3D11DepthStencilView* depthView = nullptr;
+	context->OMGetRenderTargets(static_cast<UINT>(std::size(targets)), targets, &depthView);
+
+	auto& terrainBlending = globals::features::terrainBlending;
+	if (terrainBlending.loaded && terrainBlending.settings.Enabled && terrainBlending.blendedDepthTexture)
+		terrainBlending.BlendPrepassDepths();
+
+	const auto& depthStencils = renderer->GetDepthStencilData().depthStencils;
+	const auto& main = depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
+	const auto& prepassCopy = depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
+	if (main.texture && prepassCopy.texture)
+		context->CopyResource(prepassCopy.texture, main.texture);
+
+	context->OMSetRenderTargets(static_cast<UINT>(std::size(targets)), targets, depthView);
+	for (auto* target : targets)
+		if (target)
+			target->Release();
+	if (depthView)
+		depthView->Release();
+	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+}
+
 void DrawcallLimitFix::BeforeDeferredComposite()
 {
 	if (!installed)
 		return;
-	// Phase 2: this frame's objects, drawn by the graph into off-screen targets.
 	auto& draws = DCLF::IndirectDraws::Get();
-	draws.Execute();
+	draws.Execute();       // off the hybrid path: assemble and draw into the off-screen targets
+	draws.ExecuteColour();  // on it: the colour pass, against the depth written at the first draw
 	draws.ShowDebugView();
 }
 

@@ -4,6 +4,13 @@
 #include <cstdint>
 #include <memory>
 
+#include "RenderGraph/RenderGraphRuntime.h"
+
+namespace RE
+{
+	class BSGeometry;
+}
+
 namespace DCLF
 {
 	/**
@@ -49,6 +56,7 @@ namespace DCLF
 			std::uint64_t uploadBytes = 0;                   // last epoch
 			double cpuMs = 0.0;                              // last epoch, assembly and epoch
 			std::uint32_t notReady = 0;                      // epochs skipped (mirrors, targets or pipelines not ready)
+			std::uint32_t shortBuffers = 0;        // draws whose vertex or index slice does not cover them
 			std::uint32_t buildParityChecks = 0;   // CS_DCLF_BUILD_PARITY
 			std::uint32_t buildParityMismatches = 0;
 		};
@@ -56,6 +64,17 @@ namespace DCLF
 		static IndirectDraws& Get();
 
 		bool Enabled() const;
+
+		/** @brief CS_DCLF_HYBRID=1: DCLF draws into the main pass's targets and the native loop skips its objects. */
+		static bool Hybrid();
+
+		/**
+		 * @brief Whether the epoch drew this geometry in the frame before, which is what the native loop
+		 * skips: the epoch runs after the native passes, so its decision is one frame old. An object that
+		 * has just become ineligible is missing for one frame; one that has just become eligible is drawn
+		 * twice for one frame.
+		 */
+		bool DrewLastFrame(const RE::BSGeometry* a_geometry, std::uint32_t a_frame) const;
 
 		/** @brief At the first lighting draw of the main pass: what the pass binds (buffers, views, targets, viewport). */
 		void CaptureMainPass();
@@ -67,6 +86,17 @@ namespace DCLF
 		 */
 		void Execute();
 
+		/**
+		 * @brief Hybrid path, at the first draw of the main pass: assemble this frame's draws and write their
+		 * depth into the main depth buffer. It runs here, and not with the colour pass, because everything
+		 * the rest of the frame does with depth - the native draws' own depth test, the sky, and the effects
+		 * that read the depth buffer - has to see DCLF's objects.
+		 */
+		void ExecuteZPrepass();
+
+		/** @brief Hybrid path, before the deferred composite: the colour pass, against the depth above. */
+		void ExecuteColour();
+
 		/** @brief Before the deferred composite: with CS_DCLF_DEBUG_VIEW=1, replace the main pass's targets with DCLF's. */
 		void ShowDebugView();
 
@@ -76,6 +106,9 @@ namespace DCLF
 
 	private:
 		IndirectDraws();
+
+		/** @brief Assembles this frame's draws, uploads them and runs one epoch of the given segment. */
+		void RunEpoch(RenderGraphRuntime::Segment a_segment);
 
 		struct Impl;
 		std::unique_ptr<Impl> impl;

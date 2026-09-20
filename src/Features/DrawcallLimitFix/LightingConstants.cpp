@@ -25,17 +25,16 @@ namespace DCLF
 		}
 	}
 
-	GeometryConstants ObjectGeometryConstants(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags)
+	GeometryConstants ObjectGeometryConstants(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags, const RE::NiPoint3& a_eye,
+		const RE::NiPoint3& a_previousEye)
 	{
 		const auto& object = a_tables.objects[a_objectIndex];
 		GeometryConstants constants = a_tables.geometryConstants[object.pipelineIndex];
-		auto& state = globals::game::shadowState->GetRuntimeData();
 		const auto& vsLayout = LightingVSLayout();
 		const auto& psLayout = LightingPSLayout();
-		StoreRelative(&constants.vs.floats[vsLayout.offset[kVSWorld]], object.world, state.posAdjust.getEye());
+		StoreRelative(&constants.vs.floats[vsLayout.offset[kVSWorld]], object.world, a_eye);
 		// Render flag 0x10: the previous transform is the current one (engine notes: SetupGeometry).
-		StoreRelative(&constants.vs.floats[vsLayout.offset[kVSPreviousWorld]], (a_renderFlags & 0x10) ? object.world : object.previousWorld,
-			state.previousPosAdjust.getEye());
+		StoreRelative(&constants.vs.floats[vsLayout.offset[kVSPreviousWorld]], (a_renderFlags & 0x10) ? object.world : object.previousWorld, a_previousEye);
 		const auto& shading = a_tables.shading[a_objectIndex];
 		std::memcpy(&constants.ps.floats[psLayout.offset[kPSMaterialData]], shading.materialData, sizeof(shading.materialData));
 		std::memcpy(&constants.ps.floats[psLayout.offset[kPSEmitColor]], shading.emitColor, sizeof(shading.emitColor));

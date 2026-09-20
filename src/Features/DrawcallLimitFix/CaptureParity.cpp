@@ -155,8 +155,15 @@ namespace DCLF
 		const std::int8_t* a_nativeTable, std::size_t a_nativeTableSize, const ConstantSnapshot& a_native, ID3D11Resource* a_boundBuffer,
 		std::uint32_t a_firstVariable, std::uint64_t a_variables, std::uint64_t a_tolerant)
 	{
-		if (!a_native.valid || a_boundBuffer != a_native.buffer)
+		// A block is only compared when the buffer the draw binds is the one the Map/Unmap detours
+		// snapshotted; otherwise there is nothing to compare against and the draw silently counts as OK.
+		// The counts are reported, because a block that is never compared is not a passing check.
+		auto& coverage = blockCoverage[a_what];
+		if (!a_native.valid || a_boundBuffer != a_native.buffer) {
+			++coverage.second;
 			return true;
+		}
+		++coverage.first;
 
 		bool ok = true;
 		for (std::uint32_t i = 0; i < a_layout.count && i < a_nativeTableSize; ++i) {
@@ -236,7 +243,8 @@ namespace DCLF
 			return true;
 
 		// Expected values: the per-frame block for this pass descriptor with the per-object values on top.
-		const GeometryConstants expected = ObjectGeometryConstants(tables, a_objectIndex, a_renderFlags);
+		auto& shadowState = globals::game::shadowState->GetRuntimeData();
+		const GeometryConstants expected = ObjectGeometryConstants(tables, a_objectIndex, a_renderFlags, shadowState.posAdjust.getEye(), shadowState.previousPosAdjust.getEye());
 		const auto& vsLayout = LightingVSLayout();
 		const auto& psLayout = LightingPSLayout();
 
@@ -610,6 +618,10 @@ namespace DCLF
 			diffs += fmt::format(" {} {:X} x{}", kFieldNames[key >> 32], static_cast<std::uint32_t>(key), count);
 		logger::info("[DCLF] permutation parity {}: {} draws checked, {} differ; material textures with inherited filter modes: {};{}",
 			permutationMismatches == 0 ? "OK" : "MISMATCH", permutationChecks, permutationMismatches, inheritedFilters, diffs.empty() ? " no differing bits" : diffs);
+		std::string blocks;
+		for (const auto& [what, counts] : blockCoverage)
+			blocks += fmt::format("{}{}: {} compared, {} not", blocks.empty() ? "" : ", ", what, counts.first, counts.second);
+		logger::info("[DCLF] constant block coverage: {}", blocks.empty() ? "nothing compared" : blocks);
 		for (const auto& [key, values] : renderStates) {
 			std::string text;
 			for (const auto& v : values)
@@ -642,6 +654,7 @@ namespace DCLF
 		outsideCategories = 0;
 		outsideChains.clear();
 		renderStates.clear();
+		blockCoverage.clear();
 		renderFlagsSeen.clear();
 		samples.clear();
 	}

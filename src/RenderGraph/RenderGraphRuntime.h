@@ -51,7 +51,8 @@ public:
 	enum class Segment : std::uint32_t
 	{
 		LightCulling,  // Light Limit Fix, before the main pass
-		MainOpaque,    // Drawcall Limit Fix, at the start of the main (deferred) pass
+		ZPrepass,      // Drawcall Limit Fix's depth, at the first draw of the main (deferred) pass
+		MainOpaque,    // Drawcall Limit Fix's colour, before the deferred composite
 		DebugView,     // Drawcall Limit Fix debug view, before the deferred composite
 	};
 

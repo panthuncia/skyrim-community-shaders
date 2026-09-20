@@ -50,7 +50,15 @@ namespace DCLF
 	 * @brief An object's PerGeometry values as its native draw binds them: the per-frame block of its pass
 	 * descriptor with the object's transforms (camera-relative) and shading on top.
 	 */
-	GeometryConstants ObjectGeometryConstants(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags);
+	/**
+	 * @brief The per-object PerGeometry constants, with the world transforms relative to the camera.
+	 *
+	 * The eye positions are passed in rather than read from the shadow state, because the indirect draws
+	 * pack their constants after the main pass has drawn, by when the engine has moved the camera on: a
+	 * world transform made relative to the wrong eye shifts the object by the camera's movement.
+	 */
+	GeometryConstants ObjectGeometryConstants(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags, const RE::NiPoint3& a_eye,
+		const RE::NiPoint3& a_previousEye);
 
 	/**
 	 * @brief Writes a constant group into the byte layout of a shader's cbuffer, using the shader's constant
