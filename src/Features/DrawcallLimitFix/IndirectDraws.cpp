@@ -50,7 +50,32 @@ namespace DCLF
 		constexpr std::uint64_t kConstantAlignment = 256;  // uniform buffer address alignment (conservative)
 		constexpr std::uint32_t kColorTargets = 8;
 		constexpr std::uint32_t kMaxGeometries = kMaxDraws;
+		// BuildDrawsCS's counter words: [0] drawn, [1] culled, [2] tested, [3] engine-culled and gated out,
+		// [4] false negatives (the engine kept it, the culling rejected it), [5] rescued.
+		constexpr std::uint32_t kCountWords = 20;
 		constexpr const wchar_t* kBuildDrawsShader = L"Data\\Shaders\\DrawcallLimitFix\\ORG\\BuildDrawsCS.spv";
+		constexpr const wchar_t* kHzbShader = L"Data\\Shaders\\DrawcallLimitFix\\ORG\\HzbCS.spv";
+		// HzbCS.hlsl's constants: source, target, target size, source size, from-depth, padding.
+		constexpr std::uint32_t kHzbConstantWords = 8;
+
+		// The format that reads a depth resource's depth aspect in a shader, as DXGI names it.
+		rhi::Format DepthReadFormat(rhi::Format a_format)
+		{
+			switch (a_format) {
+			case rhi::Format::D24_UNorm_S8_UInt:
+			case rhi::Format::R24G8_Typeless:
+				return rhi::Format::R24_UNorm_X8_Typeless;
+			case rhi::Format::D32_Float_S8X24_UInt:
+			case rhi::Format::R32G8X24_Typeless:
+				return rhi::Format::R32_Float_X8X24_Typeless;
+			case rhi::Format::D32_Float:
+				return rhi::Format::R32_Float;
+			case rhi::Format::D16_UNorm:
+				return rhi::Format::R16_UNorm;
+			default:
+				return a_format;
+			}
+		}
 
 		// BuildDrawsCS.hlsl's inputs (byte-address buffers).
 		struct DrawInput
@@ -89,10 +114,17 @@ namespace DCLF
 			std::uint32_t recordsAddressLo;
 			std::uint32_t recordsAddressHi;
 			std::uint32_t recordStride;
-			std::uint32_t cullMode;  // CullMode
+			std::uint32_t cullFlags;  // CullFlags: mode in the low bits, RequireNativeVisible at bit 8
 			float eye[3];            // the camera ViewProj is relative to
 			float viewProj[16];      // row-major, as the shader's float4x4 with mul(M, v)
+			std::uint32_t hzbIndex;        // 0 when there is no HZB to test against
+			std::uint32_t hzbSizePacked;   // mip 0: width in the low 16 bits, height in the high 16
+			std::uint32_t hzbMips;
+			std::uint32_t hzbUvScalePacked;  // rendered area over the area the HZB covers, 16-bit fixed point
 		};
+		// Push constants: Vulkan guarantees only 128 bytes of them, and this block is exactly that. Anything
+		// added here has to displace something, not extend it.
+		static_assert(sizeof(BuildDrawsConstants) == 128);
 		constexpr std::uint32_t kBuildDrawsConstantWords = sizeof(BuildDrawsConstants) / 4;
 
 		struct ComputeProgram
@@ -175,6 +207,7 @@ namespace DCLF
 			std::uint64_t serial = 0;
 			std::uint32_t drawCount = 0;
 			std::uint32_t cullMode = 0;
+			std::uint32_t requireNativeVisible = 1;
 			bool offscreen = false;  // colour drawn into DCLF's own targets even on the hybrid path
 			bool probePixel = false;
 			std::uint32_t probeX = 0, probeY = 0;
@@ -229,6 +262,12 @@ namespace DCLF
 			// all, and silently reports that nothing changed.
 			std::shared_ptr<org::Buffer> probe;
 			winrt::com_ptr<ID3D11Buffer> probeD3D11;
+			// Phase 4's hierarchical depth buffer. Its source is nativeDepth, which is imported with a
+			// shader-resource view as well as a depth-stencil one so that the graph sees the depth the draws
+			// write and the depth the build reads as one resource and orders them.
+			std::shared_ptr<org::PixelBuffer> hzb;
+			std::shared_ptr<const ComputeProgram> hzbProgram;
+			std::uint32_t hzbWidth = 0, hzbHeight = 0, hzbMips = 0;
 			bool hybrid = false;
 			bool offscreen = false;
 			std::uint32_t width = 0, height = 0;
@@ -387,7 +426,7 @@ namespace DCLF
 
 		struct BuildDrawsBindings
 		{
-			org::ResourceBindingToken inputs, geometries, sequences, count;
+			org::ResourceBindingToken inputs, geometries, sequences, count, hzb;
 		};
 
 		struct BuildDrawsFrame
@@ -407,8 +446,16 @@ namespace DCLF
 			BuildDrawsBindings Declare(org::PassBuilder& a_builder)
 			{
 				a_builder.PreferQueue(org::QueueKind::Graphics);
-				return { a_builder.BindShaderResource(resources->inputs), a_builder.BindShaderResource(resources->geometries),
-					a_builder.BindUnorderedAccess(resources->sequences), a_builder.BindUnorderedAccess(resources->count) };
+				BuildDrawsBindings bindings{};
+				bindings.inputs = a_builder.BindShaderResource(resources->inputs);
+				bindings.geometries = a_builder.BindShaderResource(resources->geometries);
+				bindings.sequences = a_builder.BindUnorderedAccess(resources->sequences);
+				bindings.count = a_builder.BindUnorderedAccess(resources->count);
+				// Last frame's HZB in the depth segment, this frame's in the colour segment: the build runs
+				// at the end of the depth pass, between the two.
+				if (resources->hzb)
+					bindings.hzb = a_builder.BindShaderResource(resources->hzb);
+				return bindings;
 			}
 
 			void InvocationRevision(const org::PassPrepareContext&, std::vector<std::uint64_t>& a_out) const
@@ -433,11 +480,24 @@ namespace DCLF
 				constants.recordsAddressLo = static_cast<std::uint32_t>(resources->recordsAddress);
 				constants.recordsAddressHi = static_cast<std::uint32_t>(resources->recordsAddress >> 32);
 				constants.recordStride = sizeof(DrawBindings);
-				constants.cullMode = frame->hasViewProj ? frame->cullMode : 0u;
+				constants.cullFlags = (frame->hasViewProj ? frame->cullMode : 0u) | (frame->requireNativeVisible ? 0x100u : 0u);
 				constants.eye[0] = frame->eye.x;
 				constants.eye[1] = frame->eye.y;
 				constants.eye[2] = frame->eye.z;
 				std::memcpy(constants.viewProj, frame->viewProj.data(), sizeof(constants.viewProj));
+				if (resources->hzb && frame->cullMode >= 2 && frame->width && frame->height) {
+					constants.hzbIndex = a_preparation.ResolveView(a_bindings.hzb, { org::BindlessViewKind::ShaderResource }).index;
+					constants.hzbSizePacked = (resources->hzbWidth & 0xFFFF) | (resources->hzbHeight << 16);
+					constants.hzbMips = resources->hzbMips;
+					// Mip 0 covers twice its own size in source pixels, of which only the rendered area holds
+					// real depth. A texture coordinate in the image scales by that ratio to reach the HZB.
+					const auto scale = [](std::uint32_t a_rendered, std::uint32_t a_covered) {
+						const double ratio = a_covered ? std::min(1.0, double(a_rendered) / double(a_covered)) : 0.0;
+						return static_cast<std::uint32_t>(std::lround(ratio * 65535.0)) & 0xFFFFu;
+					};
+					constants.hzbUvScalePacked = scale(frame->width, resources->hzbWidth * 2) |
+					                             (scale(frame->height, resources->hzbHeight * 2) << 16);
+				}
 				prepared.groups = (frame->drawCount + 63) / 64;
 				return prepared;
 			}
@@ -451,6 +511,131 @@ namespace DCLF
 				commands.BindPipeline(a_frame.program->pipeline->GetHandle());
 				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kBuildDrawsConstantWords, reinterpret_cast<const std::uint32_t*>(&a_frame.constants));
 				commands.Dispatch(a_frame.groups, 1, 1);
+			}
+
+		private:
+			std::shared_ptr<Resources> resources;
+		};
+
+		struct HzbConstants
+		{
+			std::uint32_t sourceIndex;
+			std::uint32_t targetIndex;
+			std::uint32_t targetSize[2];
+			std::uint32_t sourceSize[2];
+			std::uint32_t fromDepth;
+			std::uint32_t padding;
+		};
+		static_assert(sizeof(HzbConstants) / 4 == kHzbConstantWords);
+
+		struct HzbBindings
+		{
+			org::ResourceBindingToken depth, hzb;
+		};
+
+		struct HzbFrame
+		{
+			std::shared_ptr<const ComputeProgram> program;
+			// One dispatch per mip, each reading the level above (mip 0 reads the scene depth).
+			struct Level
+			{
+				HzbConstants constants{};
+				std::uint32_t groupsX = 0, groupsY = 0;
+			};
+			std::vector<Level> levels;
+		};
+
+		/**
+		 * @brief Builds the hierarchical depth buffer at the end of the native depth pass.
+		 *
+		 * It runs in the ZPrepass segment, after DCLF's own depth draws, so the HZB describes the depth the
+		 * frame actually has: the native occluders the engine drew (terrain and everything ineligible) plus
+		 * the objects DCLF drew itself.
+		 *
+		 * The whole mip chain is one pass with a full memory barrier between the dispatches, rather than one
+		 * pass per level. Levels of a single texture are not separate resources to the graph, so a per-level
+		 * pass would declare the same resource as both its input and its output and the ordering would not
+		 * mean what it reads as.
+		 */
+		class HzbPass final : public org::TypedRenderGraphPass<HzbPass, HzbFrame, HzbBindings>
+		{
+		public:
+			explicit HzbPass(std::shared_ptr<Resources> a_resources) :
+				resources(std::move(a_resources)) {}
+
+			HzbBindings Declare(org::PassBuilder& a_builder)
+			{
+				a_builder.PreferQueue(org::QueueKind::Graphics);
+				HzbBindings bindings{};
+				bindings.depth = a_builder.BindShaderResource(resources->nativeDepth);
+				bindings.hzb = a_builder.BindUnorderedAccess(resources->hzb);
+				return bindings;
+			}
+
+			void InvocationRevision(const org::PassPrepareContext&, std::vector<std::uint64_t>& a_out) const
+			{
+				const auto frame = CurrentFrame(*resources);
+				a_out.push_back(frame ? frame->serial : 0);
+				a_out.push_back(static_cast<std::uint64_t>(RenderGraphRuntime::Get().CurrentSegment()));
+			}
+
+			HzbFrame Prepare(const HzbBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
+			{
+				HzbFrame prepared{};
+				// Only at the end of the depth pass: anywhere else the depth is not final.
+				if (RenderGraphRuntime::Get().CurrentSegment() != RenderGraphRuntime::Segment::ZPrepass)
+					return prepared;
+				if (!resources->hzb || !resources->hzbProgram)
+					return prepared;
+				const auto frame = CurrentFrame(*resources);
+				const std::uint32_t renderWidth = frame && frame->width ? frame->width : resources->width;
+				const std::uint32_t renderHeight = frame && frame->height ? frame->height : resources->height;
+				prepared.program = resources->hzbProgram;
+				const std::uint32_t depthIndex = a_preparation.ResolveView(a_bindings.depth, { org::BindlessViewKind::ShaderResource }).index;
+				for (std::uint32_t mip = 0; mip < resources->hzbMips; ++mip) {
+					HzbFrame::Level level{};
+					level.constants.targetIndex = a_preparation.ResolveView(a_bindings.hzb, { org::BindlessViewKind::UnorderedAccess, UINT32_MAX, mip }).index;
+					level.constants.targetSize[0] = std::max(1u, resources->hzbWidth >> mip);
+					level.constants.targetSize[1] = std::max(1u, resources->hzbHeight >> mip);
+					if (mip == 0) {
+						level.constants.fromDepth = 1;
+						level.constants.sourceIndex = depthIndex;
+						// The rendered area, not the texture: the depth image can be larger than the viewport
+						// the draws use, and everything past that viewport is untouched. Bounding the read
+						// here makes those texels answer the far plane, which suppresses culling.
+						level.constants.sourceSize[0] = renderWidth;
+						level.constants.sourceSize[1] = renderHeight;
+					} else {
+						level.constants.fromDepth = 0;
+						level.constants.sourceIndex = prepared.levels.back().constants.targetIndex;
+						level.constants.sourceSize[0] = prepared.levels.back().constants.targetSize[0];
+						level.constants.sourceSize[1] = prepared.levels.back().constants.targetSize[1];
+					}
+					level.groupsX = (level.constants.targetSize[0] + 7) / 8;
+					level.groupsY = (level.constants.targetSize[1] + 7) / 8;
+					prepared.levels.push_back(level);
+				}
+				return prepared;
+			}
+
+			static void Record(const HzbBindings&, const HzbFrame& a_frame, org::PassRecordContext& a_recording)
+			{
+				if (!a_frame.program || a_frame.levels.empty())
+					return;
+				auto& commands = a_recording.Commands();
+				commands.BindLayout(a_frame.program->layout->GetHandle());
+				commands.BindPipeline(a_frame.program->pipeline->GetHandle());
+				for (std::size_t i = 0; i < a_frame.levels.size(); ++i) {
+					const auto& level = a_frame.levels[i];
+					if (i != 0) {
+						// The level below must be complete before this one reads it.
+						const rhi::GlobalBarrier global = rhi::FullMemoryBarrier();
+						const rhi::BarrierBatch batch{ {}, {}, { &global, 1 } };
+						commands.Barriers(batch);
+					}
+					commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kHzbConstantWords, reinterpret_cast<const std::uint32_t*>(&level.constants));
+					commands.Dispatch(level.groupsX, level.groupsY, 1);
+				}
 			}
 
 		private:
@@ -583,15 +768,34 @@ namespace DCLF
 		}
 
 		// CS_DCLF_CULL=off|frustum: how BuildDrawsCS filters this frame's draws before it writes their
-		// sequences. The objects come from the engine's accumulator, which has already frustum-culled them,
-		// so frustum mode should reject almost nothing - a large rejection count means the projection here
-		// disagrees with the one the draws use.
+		// sequences. The draw inputs are the whole tracked set, including what the engine's own culling
+		// rejected, so frustum mode has real work to do and its rejection count is meaningful. What it must
+		// never reject is an object the engine kept (kObjectNativeVisible): those are counted separately as
+		// false negatives, and any non-zero count is a defect in the projection here.
 		std::uint32_t CullingMode()
 		{
 			static const std::uint32_t mode = [] {
-				return SwitchValue("CS_DCLF_CULL") == "frustum" ? 1u : 0u;
+				const auto value = SwitchValue("CS_DCLF_CULL");
+				if (value == "occlusion")
+					return 2u;  // frustum, then the HZB
+				return value == "frustum" ? 1u : 0u;
 			}();
 			return mode;
+		}
+
+		// CS_DCLF_CULL_INPUT=native|tracked: which of the candidates may actually be drawn.
+		//
+		// native (the default) draws only what the engine's culling kept, so the frame contains exactly what
+		// it does today while the culling counters still measure the whole tracked set. tracked hands the
+		// decision to the GPU culling alone, which is what Phase 4 is building towards and what Phase 5
+		// needs; until the HZB lands it draws everything the engine occluded, so it costs frames and the
+		// objects outside the accumulator carry derived per-frame bits rather than measured ones.
+		bool RequireNativeVisible()
+		{
+			static const bool require = [] {
+				return SwitchValue("CS_DCLF_CULL_INPUT") != "tracked";
+			}();
+			return require;
 		}
 
 		// CS_DCLF_HYBRID=1: DCLF draws into the main pass's own targets and depth, and the native loop skips
@@ -728,6 +932,8 @@ namespace DCLF
 					a_graph.RegisterResource(org::ResourceIdentifier(fmt::format("cs.dclf.native-target{}", i)), resources->native[i]);
 				if (resources->nativeDepth)
 					a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.native-depth"), resources->nativeDepth);
+				if (resources->hzb)
+					a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.hzb"), resources->hzb);
 			}
 
 			void GatherStructuralPasses(org::RenderGraph&, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
@@ -743,6 +949,12 @@ namespace DCLF
 				if (resources->probe)
 					a_out.push_back(org::RenderGraph::ExternalPassDesc::Copy("cs.dclf.probe-after",
 						std::static_pointer_cast<org::RenderPass>(std::make_shared<ProbePass>(resources, true))));
+				// After the draws, so the depth it reduces is the frame's finished depth. It only does work
+				// in the ZPrepass segment, which is where that is true.
+				if (resources->hzb)
+					a_out.push_back(org::RenderGraph::ExternalPassDesc::Compute("cs.dclf.hzb",
+						std::static_pointer_cast<org::RenderPass>(std::make_shared<HzbPass>(resources)))
+							.PreferQueue(org::QueueKind::Graphics));
 				if (resources->native[0] && !resources->hybrid)
 					a_out.push_back(org::RenderGraph::ExternalPassDesc::Render("cs.dclf.debug-view",
 						std::static_pointer_cast<org::RenderPass>(std::make_shared<DebugViewPass>(resources))));
@@ -1027,7 +1239,7 @@ namespace DCLF
 			state->constants = buffer(kConstantBytes, "cs.dclf.constants");
 			state->records = buffer(std::uint64_t(kMaxDraws) * sizeof(DrawBindings), "cs.dclf.records");
 			state->sequences = CreateWords(std::uint64_t(kMaxDraws) * sizeof(DrawSequence) / 4, true, "cs.dclf.sequences");
-			state->count = CreateWords(4, true, "cs.dclf.draw-count");  // [0] draws written, [1] culled, [2] tested
+			state->count = CreateWords(kCountWords, true, "cs.dclf.draw-count");
 			state->inputs = CreateWords(std::uint64_t(kMaxDraws) * sizeof(DrawInput) / 4, false, "cs.dclf.draw-inputs");
 			state->geometries = CreateWords(std::uint64_t(kMaxGeometries) * sizeof(GeometryDraw) / 4, false, "cs.dclf.geometries");
 			state->buildDraws = LoadComputeProgram(device, kBuildDrawsShader, kBuildDrawsConstantWords);
@@ -1058,9 +1270,11 @@ namespace DCLF
 				state->probeD3D11 = RenderGraphRuntime::Get().WrapBuffer(*state->probe, desc);
 			}
 			{
-				// The draw-count buffer is read back for the culling counters whether or not parity is on.
+				// The draw-count buffer is read back for the culling counters whether or not parity is on. The
+				// width must cover every counter word: a view that stops short reads zeros for the rest, and
+				// a counter that is always zero reads exactly like a clean result.
 				D3D11_BUFFER_DESC desc{};
-				desc.ByteWidth = 4 * sizeof(std::uint32_t);
+				desc.ByteWidth = kCountWords * sizeof(std::uint32_t);
 				desc.Usage = D3D11_USAGE_DEFAULT;
 				desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 				desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
@@ -1125,7 +1339,14 @@ namespace DCLF
 				DxvkOrgInteropResourceInfo info{};
 				if (!a_capture.depth || !RenderGraphRuntime::Get().DescribeResource(a_capture.depth.get(), info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
 					return NotReady(10, "the main-pass depth cannot be described (hybrid)");
-				state->nativeDepth = ImportImage(device, info.image, depthDesc, "DCLF native depth");
+				// Attachable and readable, from one import. The HZB build reads the same image the draws
+				// write, and importing it twice would give the graph two resources it believes are unrelated:
+				// it would order nothing between the depth draws and the read, and insert no barrier, so the
+				// build would reduce whatever happened to be there - in practice the cleared far plane.
+				org::TextureDescription nativeDepthDesc = depthDesc;
+				nativeDepthDesc.hasSRV = true;
+				nativeDepthDesc.srvFormat = DepthReadFormat(nativeDepthDesc.format);
+				state->nativeDepth = ImportImage(device, info.image, nativeDepthDesc, "DCLF native depth");
 				if (!state->nativeDepth)
 					return NotReady(11, "the main-pass depth could not be imported (hybrid)");
 			}
@@ -1138,6 +1359,45 @@ namespace DCLF
 			for (std::uint32_t i = 0; i < targets.colorCount; ++i)
 				state->drawTargets[i] = offscreenColour ? std::static_pointer_cast<org::Resource>(state->targets[i]) : std::static_pointer_cast<org::Resource>(state->native[i]);
 			state->drawDepth = state->hybrid ? std::static_pointer_cast<org::Resource>(state->nativeDepth) : state->depth;
+
+			// Phase 4: the hierarchical depth buffer.
+			//
+			// Mip 0 is half the next power of two of the depth, so the chain is a clean sequence of halvings
+			// and a mip level can be chosen from a screen-space extent by log2 alone. Padding to a power of
+			// two is what makes that true; the padded texels are outside the real depth and the build fills
+			// them with the far plane, which suppresses culling rather than causing it.
+			if (state->hybrid) {
+				auto nextPowerOfTwo = [](std::uint32_t a_value) {
+					std::uint32_t result = 1;
+					while (result < a_value)
+						result <<= 1;
+					return result;
+				};
+				state->hzbWidth = std::max(1u, nextPowerOfTwo(state->width) / 2);
+				state->hzbHeight = std::max(1u, nextPowerOfTwo(state->height) / 2);
+				state->hzbMips = 1;
+				for (std::uint32_t size = std::max(state->hzbWidth, state->hzbHeight); size > 1; size >>= 1)
+					++state->hzbMips;
+
+				org::TextureDescription hzbDesc{};
+				for (std::uint32_t mip = 0; mip < state->hzbMips; ++mip)
+					hzbDesc.imageDimensions.push_back({ std::max(1u, state->hzbWidth >> mip), std::max(1u, state->hzbHeight >> mip), 0, 0 });
+				hzbDesc.format = rhi::Format::R32_Float;
+				hzbDesc.channels = 1;
+				hzbDesc.hasUAV = true;
+				hzbDesc.uavFormat = hzbDesc.format;
+				hzbDesc.hasSRV = true;
+				hzbDesc.srvFormat = hzbDesc.format;
+				state->hzb = org::PixelBuffer::CreateSharedUnmaterialized(hzbDesc);
+				state->hzb->SetName("cs.dclf.hzb");
+
+				state->hzbProgram = LoadComputeProgram(device, kHzbShader, kHzbConstantWords);
+				if (!state->hzbProgram) {
+					// The culling falls back to frustum only; the frame is unaffected.
+					logger::warn("[DCLF] The HZB compute program could not be created; occlusion culling stays off");
+					state->hzb.reset();
+				}
+			}
 
 			state->lightLimitFix = lightLimitFix;
 			for (auto& frameBuffer : frameBuffers) {
@@ -1635,7 +1895,14 @@ namespace DCLF
 					{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius });
 				records.push_back(bindings);
 				sequences.push_back(sequence);
-				if (!depthOnly && o < tables.objectGeometry.size())
+				// Only what BuildDraws will actually write a sequence for counts as drawn. The tables now hold
+				// the whole tracked set, so a candidate the gate drops must not be recorded here: the native
+				// loop would skip its pass (it has none while the engine culls it, but it regains one the
+				// moment the engine sees it again) and, worse, the Z-prepass draws exactly what the colour
+				// epoch drew last frame, so a stale mark would write depth for an object nothing then shades.
+				// The gate is a per-object flag test and so is predictable here; frustum rejection is not,
+				// which is what the false-negative counter exists to catch.
+				if (!depthOnly && o < tables.objectGeometry.size() && (!RequireNativeVisible() || (object.flags & kObjectNativeVisible)))
 					impl->drawnFrame[tables.objectGeometry[o]] = frameNumber;
 				// The indirect draw fetches vertices and indices through the buffer's device address and size:
 				// a slice that does not cover the draw reads zeros, and the object collapses without any
@@ -1663,7 +1930,7 @@ namespace DCLF
 				geometryDraws[g] = { geometry.vertexAddress, static_cast<std::uint32_t>(std::min<std::uint64_t>(geometry.vertexBytes, UINT32_MAX)), geometry.vertexStride,
 					geometry.indexAddress, static_cast<std::uint32_t>(std::min<std::uint64_t>(geometry.indexBytes, UINT32_MAX)), geometry.indexCount, geometry.firstIndex, 0 };
 			}
-			const std::uint32_t zero[4] = { 0, 0, 0, 0 };
+			const std::uint32_t zero[kCountWords] = {};
 			BUFFER_UPLOAD(zero, sizeof(zero), org::runtime::UploadTarget::FromShared(resources->count), 0);
 			if (!records.empty()) {
 				BUFFER_UPLOAD(records.data(), records.size() * sizeof(DrawBindings), org::runtime::UploadTarget::FromShared(resources->records), 0);
@@ -1685,6 +1952,7 @@ namespace DCLF
 			frame->samplerHeap = org::runtime::GetActiveSamplerDescriptorHeap().GetHandle();
 			frame->indirect = GetIndirectState();
 			frame->cullMode = CullingMode();
+			frame->requireNativeVisible = RequireNativeVisible() ? 1u : 0u;
 			frame->eye = capture.eye;
 			// The main pass's ViewProj (VS_PerFrame c8), which the draws project with: the culling has to
 			// use the same matrix or it would reject what the draws would have put on screen.
@@ -1746,7 +2014,10 @@ namespace DCLF
 		++stats.epochs;
 		if (ok && BuildParityEnabled())
 			impl->CheckBuildParity(resources, stats);
-		if (ok)
+		// Only the colour epoch's counters. Both epochs run BuildDraws into the same count buffer, and the
+		// Z-prepass builds from the far smaller set the colour epoch drew last frame, so sampling whichever
+		// ran most recently alternates between two unrelated populations.
+		if (ok && !depthOnly)
 			impl->ReadCullCounters(resources, stats);
 
 		stats.cpuMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -1833,6 +2104,27 @@ namespace DCLF
 				a_stats.cullDrawn = words[0];
 				a_stats.cullRejected = words[1];
 				a_stats.cullTested = words[2];
+				a_stats.cullEngineCulled = words[3];
+				a_stats.cullFalseNegatives = words[4];
+				a_stats.cullRescued = words[5];
+				a_stats.cullOccluded = words[6];
+				a_stats.hzbNear = words[7];
+				a_stats.hzbFar = words[8];
+				a_stats.hzbSampled = words[9];
+				if (words[10]) {
+					a_stats.hzbSample.valid = true;
+					std::memcpy(&a_stats.hzbSample.farthest, &words[11], sizeof(float));
+					std::memcpy(&a_stats.hzbSample.nearestZ, &words[12], sizeof(float));
+					a_stats.hzbSample.uvMin[0] = (words[13] & 0xFFFF) / 65535.0f;
+					a_stats.hzbSample.uvMin[1] = (words[13] >> 16) / 65535.0f;
+					a_stats.hzbSample.uvMax[0] = (words[14] & 0xFFFF) / 65535.0f;
+					a_stats.hzbSample.uvMax[1] = (words[14] >> 16) / 65535.0f;
+					a_stats.hzbSample.mip = words[15] & 0xFF;
+					a_stats.hzbSample.nativeVisible = (words[15] >> 8) != 0;
+				} else {
+					a_stats.hzbSample.valid = false;
+				}
+				a_stats.cullOccludedVisible = words[16];
 				context->Unmap(cullReadback->count.get(), 0);
 			}
 			cullReadback.reset();
@@ -1918,7 +2210,17 @@ namespace DCLF
 		ParityReadback readback;
 		readback.sequences = staging(a_resources->sequencesD3D11.get());
 		readback.count = staging(a_resources->countD3D11.get());
-		readback.expected = sequences;
+		// The templates cover every candidate; the gate drops the ones the engine culled before BuildDraws
+		// writes a sequence for them, and it is a pure per-object flag test, so the expectation can apply it
+		// exactly. Frustum culling cannot be predicted here, which is why parity and culling are separate
+		// switches. inputs is parallel to sequences.
+		readback.expected.clear();
+		readback.expected.reserve(sequences.size());
+		for (std::size_t i = 0; i < sequences.size(); ++i) {
+			if (RequireNativeVisible() && i < inputs.size() && !(inputs[i].flags & kObjectNativeVisible))
+				continue;
+			readback.expected.push_back(sequences[i]);
+		}
 		readback.framesLeft = 3;
 		if (readback.sequences && readback.count)
 			parity = std::move(readback);

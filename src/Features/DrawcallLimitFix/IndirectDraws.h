@@ -61,6 +61,23 @@ namespace DCLF
 			std::uint32_t cullDrawn = 0;     // sequences BuildDraws wrote, last sampled epoch
 			std::uint32_t cullRejected = 0;  // draws its culling rejected (CS_DCLF_CULL)
 			std::uint32_t cullTested = 0;    // draws it tested at all: 0 means the culling did not run
+			// Against the engine's own culling, which the draw inputs carry per object (kObjectNativeVisible).
+			std::uint32_t cullEngineCulled = 0;     // candidates the engine culled and CS_DCLF_CULL_INPUT=native dropped
+			std::uint32_t cullFalseNegatives = 0;   // the engine kept it, the culling here rejected it: a defect
+			std::uint32_t cullRescued = 0;          // the engine culled it, the culling here kept it
+			std::uint32_t cullOccluded = 0;         // rejected by the HZB rather than by the frustum
+			std::uint32_t cullOccludedVisible = 0;  // of those, ones the engine's own culling had kept
+			// What the HZB held under the tested objects: all-near or all-far means the build is wrong.
+			std::uint32_t hzbNear = 0, hzbFar = 0, hzbSampled = 0;
+			// One rejection in full, so an implausible count can be read instead of guessed at.
+			struct HzbSample
+			{
+				bool valid = false;
+				bool nativeVisible = false;
+				float farthest = 0.0f, nearestZ = 0.0f;
+				float uvMin[2]{}, uvMax[2]{};
+				std::uint32_t mip = 0;
+			} hzbSample;
 			std::uint32_t buildParityChecks = 0;   // CS_DCLF_BUILD_PARITY
 			std::uint32_t buildParityMismatches = 0;
 		};

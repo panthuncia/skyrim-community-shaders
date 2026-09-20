@@ -456,16 +456,20 @@ namespace DCLF
 		tables.objectGeometry.reserve(tracked.size());
 		tables.draws.reserve(tracked.size());
 
-		// Only what the main-camera accumulator holds can be drawn by the main pass this frame; the rest of
-		// the tracked set (culled by the engine) is not classified. Phase 5, which takes objects out of the
-		// accumulator, needs the whole set again.
-		for (auto& [accumulatedGeometry, accumulatedPass] : accumulatedPasses) {
-			auto trackedIt = tracked.find(const_cast<RE::BSGeometry*>(accumulatedGeometry));
-			if (trackedIt == tracked.end())
-				continue;
-			auto* geometry = trackedIt->first;
-			const auto& entry = trackedIt->second;
-			const auto* accumulated = &accumulatedPass;
+		// The whole tracked set is classified, not only what the main-camera accumulator holds. The
+		// accumulator has already run the engine's culling, so building from it left the GPU culling nothing
+		// to reject and no way to be measured; Phase 5 needs the whole set in any case, once objects stop
+		// going into the accumulator at all. An object the accumulator does not hold is still a candidate
+		// here: it carries kObjectNativeVisible unset, and whether it is actually drawn is BuildDrawsCS's
+		// decision (RequireNativeVisible), not this loop's.
+		//
+		// Objects outside the accumulator have no pass to read the per-frame bits from, so their descriptors
+		// come from the property derivation alone, with its guesses for kRuntimePassBits and no shadow bit
+		// mask. That is exactly the derivation Phase 5 has to stand on, and the derivation counters below
+		// measure it against the accumulated objects every frame.
+		for (auto& [trackedGeometry, entry] : tracked) {
+			auto* geometry = trackedGeometry;
+			const auto* accumulated = FindAccumulatedPass(geometry);
 			LightingDescriptors descriptors;
 			timer.Add(stats.partMs[1] /* the rest of the previous object counts as classification */);
 			Ineligible reason = ClassifyStatic(*geometry, &descriptors, accumulated);
@@ -591,6 +595,7 @@ namespace DCLF
 			object.materialIndex = materialIt->second;
 			object.pipelineIndex = pipelineIt->second;
 			object.flags = (alphaTest ? kObjectAlphaTest : 0u) | (twoSided ? kObjectTwoSided : 0u) |
+			               (accumulated ? kObjectNativeVisible : 0u) |
 			               (ExternalEmittance::ShouldSuppress(property, geometry) ? kObjectSuppressExternalEmittance : 0u) |
 			               (alphaTest ? static_cast<std::uint32_t>(alpha->alphaThreshold) << kObjectAlphaThresholdShift : 0u);
 			tables.objects.push_back(object);
@@ -623,6 +628,9 @@ namespace DCLF
 		}
 
 		stats.objects = static_cast<std::uint32_t>(tables.objects.size());
+		stats.nativeVisible = 0;
+		for (const auto& object : tables.objects)
+			stats.nativeVisible += (object.flags & kObjectNativeVisible) ? 1 : 0;
 		stats.geometries = static_cast<std::uint32_t>(tables.geometries.size());
 		stats.pipelines = static_cast<std::uint32_t>(tables.pipelines.size());
 		stats.materials = static_cast<std::uint32_t>(tables.materials.size());

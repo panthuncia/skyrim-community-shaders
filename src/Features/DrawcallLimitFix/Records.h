@@ -31,6 +31,11 @@ namespace DCLF
 		kObjectAlphaTest = 1u << 0,  // alpha test on, reference = threshold / 255 (as the native draw's AlphaTestRef)
 		kObjectTwoSided = 1u << 1,   // no culling (the native main pass culls back faces otherwise)
 		kObjectSuppressExternalEmittance = 1u << 2,  // ExtraShaderDescriptors::SuppressExternalEmittance in the permutation buffer
+		// The engine's main-camera accumulator holds this object this frame, so its own culling (frustum,
+		// occlusion planes, rooms and portals) kept it. The tables carry the whole tracked set so that the
+		// GPU culling has a real input to reject from; this bit is what tells the two apart, and it is the
+		// reference the culling is measured against (BuildDrawsCS: RequireNativeVisible).
+		kObjectNativeVisible = 1u << 3,
 		kObjectAlphaThresholdShift = 8,
 	};
 

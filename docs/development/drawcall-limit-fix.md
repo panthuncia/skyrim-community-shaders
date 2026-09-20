@@ -421,6 +421,157 @@ it is the one that found this. It was a throwaway instrument and has been remove
 parity (`CS_DCLF_PARITY`) is its durable form, and `CS_DCLF_ONLY_ELIGIBLE` is what gives it a native frame
 holding the same objects.
 
+## Phase 4: what the culling is given to cull
+
+The tables used to be built from Skyrim's main-camera accumulator, which is the engine's output *after* it
+has run its own frustum, occlusion-plane and room/portal culling. That made GPU culling impossible to
+evaluate: in Whiterun the accumulator held 915 objects out of 9256 tracked, and frustum culling rejected
+0 of them. A rejection count of zero reads like a clean pass, but it only meant the engine had already
+removed everything the test could have caught.
+
+`SceneStore::BuildFrame` now classifies the whole tracked set, and the engine's decision is kept per object
+as `kObjectNativeVisible` rather than thrown away. Two things follow.
+
+**The culling has real work.** The same Whiterun frame offers 3057 candidates, of which frustum culling
+rejects 932.
+
+**The engine is the reference oracle.** Because every candidate carries what the engine decided,
+BuildDrawsCS cross-tabulates the two for free:
+
+| | GPU keeps | GPU rejects |
+| --- | --- | --- |
+| **engine kept** | drawn | **false negative — a defect** |
+| **engine culled** | rescued (expected: the GPU culling is the more conservative of the two until the HZB lands) | agreement |
+
+The false-negative count is the gate. It is reported every 300 frames whether or not `CS_DCLF_STATS` is on,
+because an object the engine kept and the culling here dropped is missing from the frame.
+
+### The gate: which candidates may be drawn
+
+`CS_DCLF_CULL_INPUT` decides whether a candidate the engine culled may actually be drawn. It defaults to
+`native`, which draws only what the engine kept, so the frame is exactly what it was before while the
+counters still measure the whole set. Whiterun, `native`, with frustum culling on:
+
+    culling: 915 draws written, 932 of 3057 tested were rejected (30.5%);
+    against the engine: 1210 it culled were gated out, 1210 it culled were kept, 0 it kept were rejected
+
+915 + 932 + 1210 = 3057, and no false negatives. The frame is unchanged and there are no validation errors.
+
+Two hazards came with widening the input, both worth remembering:
+
+-   **Anything that marks an object "drawn" must be gated by what will actually be drawn.** The hybrid skip
+    and the Z-prepass both key off `drawnFrame`. Marking a candidate the gate drops would make the native
+    loop skip a pass DCLF never drew, and — because the Z-prepass draws exactly what the colour epoch drew
+    last frame — would write depth for an object nothing then shades. That is the grey-object failure of
+    Phase 3 all over again. The gate is a per-object flag test and so is predictable on the CPU; frustum
+    rejection is not, which is precisely what the false-negative counter is for.
+-   **Widen the readback with the counters.** The draw-count buffer grew to eight words but its D3D11 view
+    was still four, so the two new counters read past its end and came back zero — indistinguishable from a
+    clean result. The first run duly reported zero false negatives and zero rescued, and only the arithmetic
+    (rescued had to equal the 1210 gated out) gave it away.
+
+### `CS_DCLF_CULL_INPUT=tracked` is not yet correct
+
+Handing the decision to the GPU culling alone works mechanically: 2125 objects draw, nothing is skipped for
+missing resources, no buffer overruns, no validation errors. The shading is wrong, in a way that saturates
+the frame red — so this mode is a Phase 4/5 target, not a usable setting.
+
+Two known reasons, both structural rather than incidental:
+
+-   Objects outside the accumulator never went through the engine's per-frame light and shadow assignment,
+    so their pass descriptors come from the property derivation alone, with its guesses for
+    `kRuntimePassBits`, and their `shadowBitMask` is zero. Making that derivation authoritative is Phase 5's
+    stated prerequisite.
+-   The colour pass tests depth `EQUAL`, and the Z-prepass draws only what the colour epoch drew last frame.
+    An object the engine culled has depth from neither pass, so DCLF does not own its depth in the way the
+    main pass requires.
+
+The CPU cost of the wider input is also real and unaddressed: building bindings for 3057 candidates instead
+of 915 takes 8.4 ms per frame against 3.2 ms. The culling has to move ahead of the per-object binding build
+before this set size is affordable.
+
+### The HZB and occlusion culling
+
+`CS_DCLF_CULL=occlusion` adds a hierarchical-depth test after the frustum test. The pyramid is built by
+`HzbCS.hlsl` in a pass at the end of the ZPrepass segment, which is the end of the native depth pass, so it
+describes the depth the frame actually has: the native occluders the engine drew, plus DCLF's own depth
+draws.
+
+Decisions worth keeping:
+
+-   **It stores raw NDC depth, not linear view depth.** Skyrim's projection is monotonic in distance and
+    the test only ever compares two depths for order, so linearising would add a step that can be got wrong
+    without making any comparison more correct.
+-   **Every level is the maximum of the level below**, so a texel holds the farthest surface under it, and
+    a footprint that is partly empty sky keeps a large value and nothing under it is culled. Texels outside
+    the rendered area read the far plane for the same reason.
+-   **Mip 0 is half the next power of two** of the depth, so the chain is a clean sequence of halvings and a
+    level can be chosen from a screen extent by `log2` alone.
+-   **The whole chain is one pass** with a full memory barrier between dispatches. Levels of one texture are
+    not separate resources to the graph, so a pass per level would declare the same resource as its own
+    input and output.
+-   **A margin on the comparison.** The object's nearest corner is in raw clip space while the HZB holds
+    what was stored, which the viewport depth range scaled — and the native depth pass and DCLF do not use
+    the same range (`[0, 0.999968]` against `[0, 0.999998]`). The gap is small but systematically in the
+    direction that culls, and it bites hardest on flat objects lying against the surface behind them.
+
+Dragonsreach, with the whole tracked set as input:
+
+    culling: 825 draws written, 865 of 1962 tested were rejected (44.1%: 181 outside the frustum,
+    684 occluded, 96 of those the engine had kept); against the engine: 0 it kept the frustum test rejected
+
+One validation VUID (the upstream semaphore one), and the frame is pixel-identical to a frustum-only
+control run of the same scene.
+
+#### The engine is not an oracle for occlusion
+
+The cross-tabulation against the engine is a real instrument for the **frustum** test, where the engine is
+exact and the two must agree — it holds at zero disagreement in both Whiterun and Dragonsreach. It is
+**not** one for occlusion, and reading it that way cost a detour here.
+
+The first occlusion runs reported dozens of "false negatives": objects the engine kept that the HZB
+rejected. Recording one rejection in full rather than guessing at the count settled it in a single run:
+
+    HZB rejection sample: farthest 0.997283 against nearest 0.998389, uv (0.4537 0.1599)-(0.4573 0.1624),
+    mip 3, engine kept it
+
+Those depths are w ≈ 5434 and w ≈ 9066, so the object was some 3600 units behind its occluder. It was
+genuinely hidden. The engine's occlusion is planes, boxes and room/portal visibility, all of which keep
+plenty of geometry that is in fact invisible — which is the whole reason for testing against a depth
+pyramid. An object the engine kept and the HZB rejected is the expected win, not a defect. The counters now
+keep the two apart, and whether such a rejection was correct is a question about visibility that only a
+depth test can answer, not one the engine's opinion can settle.
+
+#### Getting there: two wrong HZBs first
+
+Both failures looked like plausible culling results and neither was:
+
+-   **The depth was imported twice**, once for the draws to attach and once for the build to sample. The
+    graph then saw two resources it believed unrelated, ordered nothing between them and inserted no
+    barrier. One import carrying both a depth-stencil and a shader-resource view fixes it.
+-   **The UVs were never scaled for the power-of-two padding.** The HZB covers a larger, power-of-two area
+    than the rendered image, so a texture coordinate in the image is not one in the HZB. Without the scale
+    the culling sampled mostly padding, which is all far plane, and the HZB looked uniformly empty however
+    correctly it had been built.
+
+What found both was a counter, not a screenshot: the number of sampled footprints whose farthest depth came
+back `~0` or `~1`. 918 of 927 all-far says "this pyramid is empty" in one run, and no amount of staring at
+a frame says that. The same counters are still there, and so is the one recorded rejection.
+
+#### Still open in Phase 4
+
+-   **The false-negative detector** (`CS_DCLF_CULL_VALIDATE`) is not built. It is the real gate: draw every
+    culled object against the final depth with `LESS_EQUAL`, no writes and early-fragment tests, and flag
+    any object that would have produced a fragment. Until it exists, "no objects were wrongly culled" rests
+    on frame comparisons, which is weaker than the plan asks for.
+-   **The two-phase replay** is not built. Today occlusion culling decides once, in the colour epoch,
+    against the HZB built earlier in the same frame; there is no phase-1 list tested against the previous
+    frame's HZB and no second depth draw to rescue its rejects. The consequence is that an object that
+    becomes visible is drawn a frame late rather than rescued within the frame.
+-   **Rigorous image parity** needs a scene that is not clipped. The Dragonsreach comparison is
+    pixel-identical by eye, but the frame after a `coc` teleport is so overexposed that per-pixel deltas
+    there measure the clipping, not the geometry.
+
 ## Switches
 
 | Variable | Effect |
@@ -431,6 +582,8 @@ holding the same objects.
 | `CS_DCLF_HYBRID=1` | DCLF draws into the main pass's own targets and depth, and the native loop skips the objects it drew. |
 | `CS_DCLF_HYBRID_NOSKIP=1` | With the hybrid path, keep drawing everything natively, so what DCLF fails to draw is still visible. |
 | `CS_DCLF_ONLY_ELIGIBLE=1` | The reverse skip: the native frame draws only the objects DCLF draws, so the two can be compared pixel for pixel. |
+| `CS_DCLF_CULL=off\|frustum\|occlusion` | How BuildDrawsCS filters the candidates before writing their sequences: nothing, the frustum, or the frustum and then the HZB. |
+| `CS_DCLF_CULL_INPUT=native\|tracked` | Which candidates may be drawn: only what the engine's culling kept (the default), or whatever the GPU culling keeps. `tracked` still shades incorrectly (see Phase 4). |
 | `CS_DCLF_BUILD_PARITY=1` | Every 300 epochs, read BuildDraws' output back and compare it with the CPU templates (`BuildDraws parity OK/MISMATCH`). |
 | `CS_DCLF_TEST_COMMANDS=<frame>:<command>;…` | Test runs: run each console command on the main thread once the main pass has run that many frames (loading screens do not count), for coverage runs from the auto-loaded save. |
 

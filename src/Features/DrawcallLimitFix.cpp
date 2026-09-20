@@ -183,9 +183,24 @@ void DrawcallLimitFix::Prepass()
 	// whether GPU culling is running and how much it rejects.
 	if ((frame % kReportInterval) == 0) {
 		const auto& draws = DCLF::IndirectDraws::Get().GetStats();
-		if (draws.cullDrawn || draws.cullRejected)
-			logger::info("[DCLF] culling: {} draws written, {} of {} tested were rejected ({:.1f}%)", draws.cullDrawn, draws.cullRejected, draws.cullTested,
-				draws.cullTested ? 100.0 * draws.cullRejected / draws.cullTested : 0.0);
+		if (draws.cullDrawn || draws.cullRejected || draws.cullOccluded) {
+			const std::uint32_t rejected = draws.cullRejected + draws.cullOccluded;
+			logger::info("[DCLF] culling: {} draws written, {} of {} tested were rejected ({:.1f}%: {} outside the frustum, {} occluded, {} of those the engine had kept); against the engine: {} it culled were gated out, {} it culled were kept, {} it kept the frustum test rejected{}",
+				draws.cullDrawn, rejected, draws.cullTested,
+				draws.cullTested ? 100.0 * rejected / draws.cullTested : 0.0,
+				draws.cullRejected, draws.cullOccluded, draws.cullOccludedVisible,
+				draws.cullEngineCulled, draws.cullRescued, draws.cullFalseNegatives,
+				draws.cullFalseNegatives ? " <- FALSE NEGATIVES" : "");
+			if (draws.hzbSampled)
+				logger::info("[DCLF] HZB: {} footprints sampled, {} came back all-near (~0), {} all-far (~1)",
+					draws.hzbSampled, draws.hzbNear, draws.hzbFar);
+			if (draws.hzbSample.valid) {
+				const auto& sample = draws.hzbSample;
+				logger::info("[DCLF] HZB rejection sample: farthest {:.6f} against nearest {:.6f}, uv ({:.4f} {:.4f})-({:.4f} {:.4f}), mip {}, engine {}",
+					sample.farthest, sample.nearestZ, sample.uvMin[0], sample.uvMin[1], sample.uvMax[0], sample.uvMax[1],
+					sample.mip, sample.nativeVisible ? "kept it" : "culled it");
+			}
+		}
 	}
 	if ((frame % kReportInterval) == 0 && !StatsEnabled()) {
 		timing = {};
@@ -211,7 +226,7 @@ void DrawcallLimitFix::Prepass()
 				skipped += fmt::format(" {}={}", DCLF::kSkipNames[i], draws.skipped[i]);
 		}
 		const auto& textures = DCLF::GpuTextures::Get().GetStats();
-		logger::info("[DCLF] indirect draws (last frame): {} drawn, skipped:{} (missing t{} t{} t{} t{}, VS b{:04X} PS b{:04X}); {:.1f} MB uploaded, {:.3f} ms CPU; {} epochs, {} not ready; textures {} cached, rejected {}/{}/{}, {} samplers",
+		logger::info("[DCLF] indirect draws (last frame): {} candidates built, skipped:{} (missing t{} t{} t{} t{}, VS b{:04X} PS b{:04X}); {:.1f} MB uploaded, {:.3f} ms CPU; {} epochs, {} not ready; textures {} cached, rejected {}/{}/{}, {} samplers",
 			draws.drawn, skipped, draws.missingTextures[0], draws.missingTextures[1], draws.missingTextures[2], draws.missingTextures[3], draws.missingVertexConstants,
 			draws.missingPixelConstants, draws.uploadBytes / 1048576.0,
 			draws.cpuMs, draws.epochs, draws.notReady, textures.cached, textures.rejected[1], textures.rejected[2], textures.rejected[3], textures.samplers);
@@ -234,8 +249,8 @@ void DrawcallLimitFix::Prepass()
 			gpu.resolvedTotal, gpu.resolveMsTotal, gpu.resolveMsMax);
 		logger::info("[DCLF] derivation (last frame): {} objects compared, {} differ from the drawn technique (bits {:08X}), {} would stay native", stats.derivationChecked,
 			stats.derivationDiffers, stats.derivationBits, stats.derivationNative);
-		logger::info("[DCLF] tracked {} under {} category nodes: {} objects, {} geometries, {} pipelines, {} materials; left native:{}; events +{} -{}, validation drops {}; CPU per frame: events {:.3f} ms, tables {:.3f} ms (max {:.3f}; walk {:.3f}, classify {:.3f}, pipelines {:.3f}, materials {:.3f})",
-			stats.tracked, stats.categoryNodes, stats.objects, stats.geometries, stats.pipelines, stats.materials, reasons,
+		logger::info("[DCLF] tracked {} under {} category nodes: {} objects ({} the engine also kept), {} geometries, {} pipelines, {} materials; left native:{}; events +{} -{}, validation drops {}; CPU per frame: events {:.3f} ms, tables {:.3f} ms (max {:.3f}; walk {:.3f}, classify {:.3f}, pipelines {:.3f}, materials {:.3f})",
+			stats.tracked, stats.categoryNodes, stats.objects, stats.nativeVisible, stats.geometries, stats.pipelines, stats.materials, reasons,
 			stats.attachedEvents, stats.detachedEvents, stats.validationDrops, timing.eventsMs / frames, timing.buildMs / frames, timing.buildMaxMs,
 			stats.partMs[0] / frames, stats.partMs[1] / frames, stats.partMs[2] / frames, stats.partMs[3] / frames);
 		timing = {};
@@ -394,7 +409,7 @@ void DrawcallLimitFix::DrawSettings()
 	const auto& stats = DCLF::SceneStore::Get().GetStats();
 	ImGui::TextUnformatted("Phase 2: tracked objects are also drawn by the render graph, off screen; the frame still comes from the native draws.");
 	ImGui::Text("Tracked geometry: %u (under %u category nodes)", stats.tracked, stats.categoryNodes);
-	ImGui::Text("Objects this frame: %u, geometries: %u, pipelines: %u", stats.objects, stats.geometries, stats.pipelines);
+	ImGui::Text("Objects this frame: %u (%u the engine's culling also kept), geometries: %u, pipelines: %u", stats.objects, stats.nativeVisible, stats.geometries, stats.pipelines);
 	for (std::size_t i = 1; i < stats.ineligible.size(); ++i) {
 		if (stats.ineligible[i])
 			ImGui::Text("Left native (%s): %u", DCLF::kIneligibleNames[i].data(), stats.ineligible[i]);

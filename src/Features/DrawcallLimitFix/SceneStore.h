@@ -45,6 +45,9 @@ namespace DCLF
 		{
 			std::uint32_t tracked = 0;
 			std::uint32_t objects = 0;
+			// Of those objects, the ones the engine's main-camera accumulator also holds this frame. The
+			// remainder are candidates the engine culled, which the GPU culling is measured against.
+			std::uint32_t nativeVisible = 0;
 			std::uint32_t geometries = 0;
 			std::uint32_t pipelines = 0;
 			std::uint32_t materials = 0;

@@ -14,10 +14,61 @@ cbuffer BuildDrawsConstants : register(b0)
 	uint RecordStride;
 	// Phase 4 culling. ViewProj is the main pass's, so it is camera-relative: the bounds are absolute
 	// world space and Eye (the camera's posAdjust) is subtracted before projecting them.
-	uint CullMode;  // 0 off, 1 frustum
+	// Low bits: 0 off, 1 frustum, 2 frustum then the HZB. Bit 8 is RequireNativeVisible, folded in here
+	// because these are push constants and the block is already at Vulkan's guaranteed 128 bytes.
+	uint CullFlags;
 	float3 Eye;
 	row_major float4x4 ViewProj;  // as the engine stores it (row 2 is the z row, row 3 the w row)
+	// Occlusion culling against the hierarchical depth buffer built at the end of the depth pass
+	// (HzbCS.hlsl). HzbIndex is zero when there is no HZB, which includes the first frame.
+	//
+	// Sizes are packed into single words because these are push constants: Vulkan only guarantees 128
+	// bytes of them, and the block is exactly that with this packing.
+	uint HzbIndex;
+	uint HzbSizePacked;  // mip 0: width in the low 16 bits, height in the high 16
+	uint HzbMips;
+	// The HZB covers a power-of-two area that is larger than the rendered image, so a texture coordinate in
+	// the image is NOT one in the HZB. This is the ratio between them, per axis, as 16-bit fixed point.
+	// Leaving it out makes the culling sample the padding, which is all far plane, and the HZB then looks
+	// uniformly empty however correctly it was built.
+	uint HzbUvScalePacked;
 }
+
+uint CullMode() { return CullFlags & 0xF; }
+// When set, only objects the engine's own culling kept (kObjectNativeVisible) may be drawn, which is what
+// the native loop skips and therefore what the frame has to contain. When clear, the GPU culling alone
+// decides and DCLF draws objects the engine culled. The counters are written either way, so the
+// cross-tabulation below measures the culling against the engine even while the gate is on.
+bool RequireNativeVisible() { return (CullFlags & 0x100) != 0; }
+
+// Not a static global: its value comes from a constant buffer, so it has to be read where it is used.
+uint2 HzbBaseSize() { return uint2(HzbSizePacked & 0xFFFF, HzbSizePacked >> 16); }
+float2 HzbUvScale() { return float2(HzbUvScalePacked & 0xFFFF, HzbUvScalePacked >> 16) / 65535.0; }
+
+// Object flags (Records.h), as the draw input carries them.
+static const uint kObjectNativeVisible = 1u << 3;
+
+// Counter words in the count buffer (zeroed before the dispatch).
+static const uint kCountDrawn = 0;          // sequences written
+static const uint kCountCulled = 4;         // rejected by this frame's culling
+static const uint kCountTested = 8;         // looked at by the culling at all
+static const uint kCountEngineCulled = 12;  // candidates the engine culled and the gate dropped
+static const uint kCountFalseNegative = 16; // the engine kept it and the culling rejected it: a defect
+static const uint kCountRescued = 20;       // the engine culled it and the culling kept it
+static const uint kCountOccluded = 24;      // rejected by the HZB rather than by the frustum
+// What the HZB actually held under the objects that were tested, so that a suspicious rejection count can
+// be told apart from an HZB that is uniformly empty or uniformly full without a texture readback.
+static const uint kCountHzbNear = 28;       // the footprint's farthest depth was ~0: the build wrote nothing
+static const uint kCountHzbFar = 32;        // it was ~1: all far plane, so nothing can ever be occluded
+static const uint kCountHzbSampled = 36;    // footprints sampled, to give the two above a denominator
+// One rejection, recorded in full (see Occluded).
+static const uint kSampleTaken = 40;
+static const uint kSampleFarthest = 44;
+static const uint kSampleNearestZ = 48;
+static const uint kSampleUvMin = 52;
+static const uint kSampleUvMax = 56;
+static const uint kSampleMip = 60;
+static const uint kCountOccludedVisible = 64;  // the HZB rejected it and the engine had kept it: the win
 
 // DrawInput: 32 bytes (pipeline/record/geometry/flags, then the world-space bounding sphere).
 static const uint kInputStride = 32;
@@ -54,6 +105,111 @@ bool Culled(float3 boundCentre, float boundRadius)
 	return any(planes != 0) || any(depthPlanes != 0);
 }
 
+// The bounding sphere's screen-space extent and its nearest depth, in the same clip space the draws use.
+// Returns false when the projection cannot be trusted - a corner behind the near plane - so that the
+// object is kept.
+bool ScreenExtent(float3 boundCentre, float boundRadius, out float2 uvMin, out float2 uvMax, out float nearestZ)
+{
+	uvMin = float2(1, 1);
+	uvMax = float2(0, 0);
+	nearestZ = 1;
+	const float3 centre = boundCentre - Eye;
+	float2 ndcMin = float2(1e30, 1e30);
+	float2 ndcMax = float2(-1e30, -1e30);
+	float minZ = 1e30;
+	[unroll] for (uint corner = 0; corner < 8; ++corner) {
+		const float3 offset = float3((corner & 1) ? boundRadius : -boundRadius,
+			(corner & 2) ? boundRadius : -boundRadius,
+			(corner & 4) ? boundRadius : -boundRadius);
+		const float4 clip = mul(ViewProj, float4(centre + offset, 1.0));
+		if (clip.w <= 1e-4)
+			return false;
+		const float3 ndc = clip.xyz / clip.w;
+		ndcMin = min(ndcMin, ndc.xy);
+		ndcMax = max(ndcMax, ndc.xy);
+		minZ = min(minZ, ndc.z);
+	}
+	// Clip space to texture space. The y axis flips: clip space is y-up, the depth buffer y-down.
+	// Clip space to texture space. The y axis flips: the draws use a y-flipped viewport, which puts clip
+	// y = +1 at the top of the image, where v = 0. Measured: the other orientation gives 571 false
+	// negatives against 45, so this is not a guess.
+	uvMin = saturate(float2(ndcMin.x, -ndcMax.y) * 0.5 + 0.5);
+	uvMax = saturate(float2(ndcMax.x, -ndcMin.y) * 0.5 + 0.5);
+	nearestZ = minZ;
+	return true;
+}
+
+// True when every depth under the object's screen extent is NEARER than the object's nearest point, which
+// means the object is entirely behind what has already been drawn.
+//
+// The HZB holds the FARTHEST depth under each texel, so one value per corner of the extent at a mip whose
+// texels are large enough that four of them cover it. Taking the maximum of those four and requiring it to
+// be nearer than the object is conservative twice over: the mip is a max reduction, and the object is
+// represented by the nearest point of a box that already contains its sphere.
+bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample)
+{
+	if (HzbIndex == 0 || HzbMips == 0)
+		return false;
+	float2 uvMin, uvMax;
+	float nearestZ;
+	if (!ScreenExtent(boundCentre, boundRadius, uvMin, uvMax, nearestZ))
+		return false;
+	if (nearestZ <= 0.0)
+		return false;  // in front of the near plane: nothing can occlude it
+
+	// Image texture space to HZB texture space, before anything is measured in HZB texels.
+	const float2 scale = HzbUvScale();
+	uvMin *= scale;
+	uvMax *= scale;
+
+	const uint2 baseSize = HzbBaseSize();
+	const float2 extent = (uvMax - uvMin) * float2(baseSize);
+	// A mip whose texels are at least half the extent, so the four corner taps cover the whole rectangle.
+	int mip = (int)ceil(log2(max(max(extent.x, extent.y), 1.0)));
+	mip = clamp(mip, 0, (int)HzbMips - 1);
+	const int2 mipSize = max(int2(baseSize) >> mip, int2(1, 1));
+	const int2 texelMin = clamp(int2(uvMin * float2(mipSize)), int2(0, 0), mipSize - 1);
+	const int2 texelMax = clamp(int2(uvMax * float2(mipSize)), int2(0, 0), mipSize - 1);
+
+	Texture2D<float> hzb = ResourceDescriptorHeap[HzbIndex];
+	const float farthest = max(
+		max(hzb.Load(int3(texelMin.x, texelMin.y, mip)), hzb.Load(int3(texelMax.x, texelMin.y, mip))),
+		max(hzb.Load(int3(texelMin.x, texelMax.y, mip)), hzb.Load(int3(texelMax.x, texelMax.y, mip))));
+
+	RWByteAddressBuffer counters = ResourceDescriptorHeap[CountIndex];
+	uint scratch;
+	counters.InterlockedAdd(kCountHzbSampled, 1, scratch);
+	if (farthest <= 1e-6)
+		counters.InterlockedAdd(kCountHzbNear, 1, scratch);
+	else if (farthest >= 0.9999)
+		counters.InterlockedAdd(kCountHzbFar, 1, scratch);
+
+	// A margin, because the two sides of this comparison are not in the same space. nearestZ is raw clip
+	// space, while the HZB holds what was actually stored, which the viewport depth range has scaled - and
+	// the native depth pass and DCLF's own draws do not even use the same range ([0, 0.999968] against
+	// [0, 0.999998]). The gap is small but it is systematically in the direction that culls, and it bites
+	// hardest on flat objects lying against the surface behind them, whose nearest corner is barely in
+	// front of their own stored depth. Erring towards drawing is free; erring the other way loses objects.
+	const float kDepthMargin = 1e-4;
+	const bool occluded = farthest < nearestZ - kDepthMargin;
+
+	// One sample of a rejection, so that a suspicious count can be read rather than guessed at: what the
+	// HZB held, what the object's nearest corner was, where it was sampled and at which level. Written by
+	// whichever thread gets there first; only the first rejection of the dispatch lands.
+	if (occluded) {
+		uint previous;
+		counters.InterlockedCompareExchange(kSampleTaken, 0, 1, previous);
+		if (previous == 0) {
+			counters.Store(kSampleFarthest, asuint(farthest));
+			counters.Store(kSampleNearestZ, asuint(nearestZ));
+			counters.Store(kSampleUvMin, (uint(saturate(uvMin.x) * 65535.0) & 0xFFFF) | (uint(saturate(uvMin.y) * 65535.0) << 16));
+			counters.Store(kSampleUvMax, (uint(saturate(uvMax.x) * 65535.0) & 0xFFFF) | (uint(saturate(uvMax.y) * 65535.0) << 16));
+			counters.Store(kSampleMip, uint(mip) | (uint(nativeVisibleForSample) << 8));
+		}
+	}
+	return occluded;
+}
+
 [numthreads(64, 1, 1)] void main(uint3 dispatchID : SV_DispatchThreadID)
 {
 	const uint draw = dispatchID.x;
@@ -67,16 +223,44 @@ bool Culled(float3 boundCentre, float boundRadius)
 
 	const uint inputOffset = draw * kInputStride;
 	const uint4 input = inputs.Load4(inputOffset);  // pipeline index, record index, geometry index, flags
-	if (CullMode != 0) {
-		uint tested;
-		count.InterlockedAdd(8, 1, tested);  // word 2: how many the culling looked at, so that a count of
-		                                     // zero rejections can be told apart from culling not running
+	const bool nativeVisible = (input.w & kObjectNativeVisible) != 0;
+	uint scratch;
+	bool cullRejected = false, frustumRejected = false, occlusionRejected = false;
+	if (CullMode() != 0) {
+		// Word 2 separates "the culling rejected nothing" from "the culling did not run".
+		count.InterlockedAdd(kCountTested, 1, scratch);
 		const float4 bound = asfloat(inputs.Load4(inputOffset + 16));  // centre (world), radius
-		if (Culled(bound.xyz, bound.w)) {
-			uint culled;
-			count.InterlockedAdd(4, 1, culled);  // word 1: how many this frame's culling rejected
-			return;
+		frustumRejected = Culled(bound.xyz, bound.w);
+		if (frustumRejected) {
+			count.InterlockedAdd(kCountCulled, 1, scratch);
+		} else if (CullMode() >= 2 && Occluded(bound.xyz, bound.w, nativeVisible)) {
+			occlusionRejected = true;
+			count.InterlockedAdd(kCountOccluded, 1, scratch);
 		}
+		cullRejected = frustumRejected || occlusionRejected;
+	}
+
+	// The engine's own decision is a useful reference, but only for the frustum test, where the engine is
+	// exact and the two should agree: rejecting something it kept is then a defect, and is counted as one.
+	//
+	// It is NOT a reference for occlusion. The engine's occlusion is planes, boxes and room/portal
+	// visibility, all of which keep plenty of geometry that is in fact hidden - that is the whole reason
+	// for testing against a depth pyramid. An object the engine kept and the HZB rejected is therefore the
+	// expected win, not a defect, and is counted separately so the two can never be confused. Whether such
+	// a rejection was correct is a question about visibility, which only a depth test can answer
+	// (CS_DCLF_CULL_VALIDATE), not one the engine's opinion can settle.
+	if (frustumRejected && nativeVisible)
+		count.InterlockedAdd(kCountFalseNegative, 1, scratch);
+	if (occlusionRejected && nativeVisible)
+		count.InterlockedAdd(kCountOccludedVisible, 1, scratch);
+	if (!cullRejected && !nativeVisible)
+		count.InterlockedAdd(kCountRescued, 1, scratch);
+
+	if (cullRejected)
+		return;
+	if (RequireNativeVisible() && !nativeVisible) {
+		count.InterlockedAdd(kCountEngineCulled, 1, scratch);
+		return;
 	}
 	const uint geometryOffset = input.z * kGeometryStride;
 	const uint4 vertexBuffer = geometries.Load4(geometryOffset);        // address lo, hi, size, stride
@@ -89,7 +273,7 @@ bool Culled(float3 boundCentre, float boundRadius)
 	const uint recordHi = RecordsAddressHi + (recordLo < RecordsAddressLo ? 1 : 0);
 
 	uint slot;
-	count.InterlockedAdd(0, 1, slot);
+	count.InterlockedAdd(kCountDrawn, 1, slot);
 	const uint base = slot * kSequenceStride;
 	sequences.Store(base + 0, input.x);
 	sequences.Store2(base + 4, uint2(recordLo, recordHi));

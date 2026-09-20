@@ -100,6 +100,15 @@ if(CS_RENDER_GRAPH)
             PROFILE cs_6_6
             INCLUDE_DIRS "${_dclf_shader_dir}")
         set(CS_DCLF_SPIRV "${_dclf_spv}")
+        # The hierarchical depth buffer the occlusion culling tests against.
+        set(_dclf_hzb_spv "${CS_GENERATED_SHADER_DIR}/DrawcallLimitFix/ORG/HzbCS.spv")
+        basicrhi_compile_spirv(
+            OUTPUT "${_dclf_hzb_spv}"
+            SOURCE "${_dclf_shader_dir}/DrawcallLimitFix/HzbCS.hlsl"
+            ENTRY main
+            PROFILE cs_6_6
+            INCLUDE_DIRS "${_dclf_shader_dir}")
+        list(APPEND CS_DCLF_SPIRV "${_dclf_hzb_spv}")
         add_custom_target(CSRenderGraphShaders DEPENDS ${CS_RENDER_GRAPH_SPIRV} ${CS_DCLF_SPIRV})
         add_dependencies(${PROJECT_NAME} CSRenderGraphShaders)
 
