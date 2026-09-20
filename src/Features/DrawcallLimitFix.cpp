@@ -50,8 +50,20 @@ namespace
 			}
 		}
 
-		void OnFrame(std::uint32_t a_frame)
+		/**
+		 * @brief Advances the counter and runs whatever is due.
+		 *
+		 * The counter lives here rather than being SceneStore's frame number, because the commands have to
+		 * fire at the same point in a run whether or not the feature is installed. Driven off SceneStore's
+		 * frame, a CS_DCLF=0 run never ran them at all, so a "baseline" pinned to a given hour was in fact
+		 * whatever hour the save happened to be at - which is precisely the drift that makes screenshot
+		 * comparisons worthless. Loading screens do not count, so the two runs stay in step.
+		 */
+		void OnFrame()
 		{
+			if (DCLF::SceneStore::IsLoadingScreenUp())
+				return;
+			const std::uint32_t a_frame = ++frame;
 			while (next < commands.size() && a_frame >= commands[next].frame) {
 				auto command = commands[next++].command;
 				logger::info("[DCLF] test command at frame {}: {}", a_frame, command);
@@ -76,6 +88,7 @@ namespace
 		};
 		std::vector<Command> commands;
 		std::size_t next = 0;
+		std::uint32_t frame = 0;
 	};
 
 	// Render-thread CPU spent on scene capture, averaged over a report interval.
@@ -123,6 +136,14 @@ void DrawcallLimitFix::PostPostLoad()
 		logger::info("[DCLF] Not supported on VR; scene tracking stays off");
 		return;
 	}
+	// CS_DCLF=0 is the off switch every gate in this work compares against, and until now nothing read it:
+	// the switch appeared in the summary line below and nowhere else, so runs labelled "CS_DCLF=0 baseline"
+	// had the feature fully installed and were not baselines at all. Unset still means on, which is the
+	// behaviour everything else here was built against.
+	if (DCLF::SwitchValue("CS_DCLF") == "0") {
+		logger::info("[DCLF] CS_DCLF=0; the feature stays off and the game renders natively");
+		return;
+	}
 	DCLF::SceneTracker::Get().Install();
 	Hooks::Install();
 	installed = true;
@@ -134,6 +155,11 @@ void DrawcallLimitFix::PostPostLoad()
 
 void DrawcallLimitFix::Reset()
 {
+	// The test commands run before the installed check, so a CS_DCLF=0 baseline reaches the same place at
+	// the same in-game hour as the run it is compared against.
+	static TestCommands testCommands;
+	testCommands.OnFrame();
+
 	// Every Present, in menus too: the tracker's queue holds references to attached subtrees and
 	// must not grow while the world is not rendered.
 	if (!installed)
@@ -174,8 +200,6 @@ void DrawcallLimitFix::Prepass()
 		skipSamples.clear();  // collected again for the next report
 
 	const std::uint32_t frame = store.GetFrame();
-	static TestCommands testCommands;
-	testCommands.OnFrame(frame);
 	if (DCLF::CaptureParity::Enabled())
 		DCLF::CaptureParity::Get().Report(frame, kReportInterval);
 
@@ -191,6 +215,9 @@ void DrawcallLimitFix::Prepass()
 				draws.cullRejected, draws.cullOccluded, draws.cullOccludedVisible,
 				draws.cullEngineCulled, draws.cullRescued, draws.cullFalseNegatives,
 				draws.cullFalseNegatives ? " <- FALSE NEGATIVES" : "");
+			if (draws.cullRescuedByPhaseTwo || draws.cullDrawnPhaseTwo)
+				logger::info("[DCLF] two-phase culling: phase 2 brought back {} objects the stale HZB had rejected, and drew depth for {} of them",
+					draws.cullRescuedByPhaseTwo, draws.cullDrawnPhaseTwo);
 			if (draws.hzbSampled)
 				logger::info("[DCLF] HZB: {} footprints sampled, {} came back all-near (~0), {} all-far (~1)",
 					draws.hzbSampled, draws.hzbNear, draws.hzbFar);
@@ -247,8 +274,20 @@ void DrawcallLimitFix::Prepass()
 		const auto& gpu = DCLF::GpuResources::Get().GetStats();
 		logger::info("[DCLF] game buffers for the render graph: {} stable, {} rejected; {} resolved so far in {:.1f} ms (slowest {:.3f} ms)", gpu.cached, gpu.rejected,
 			gpu.resolvedTotal, gpu.resolveMsTotal, gpu.resolveMsMax);
-		logger::info("[DCLF] derivation (last frame): {} objects compared, {} differ from the drawn technique (bits {:08X}), {} would stay native", stats.derivationChecked,
-			stats.derivationDiffers, stats.derivationBits, stats.derivationNative);
+		// Two halves, because they mean different things: outside kRuntimePassBits the derivation is meant
+		// to be exact and any difference is a defect; inside it the derivation is guessing at what
+		// GetRenderPasses computes per frame, and that number is what decides whether GetRenderPasses can
+		// be skipped outright rather than merely withheld from the batch renderer.
+		std::string bitBreakdown;
+		for (std::uint32_t bit = 0; bit < 32; ++bit) {
+			if (!stats.derivationBitCounts[bit])
+				continue;
+			bitBreakdown += std::format("{} bit {}{}={}", bitBreakdown.empty() ? "" : ",", bit,
+				((1u << bit) & DCLF::kRuntimePassBits) ? "*" : "", stats.derivationBitCounts[bit]);
+		}
+		logger::info("[DCLF] derivation (last frame): {} objects compared, {} would stay native; property bits: {} differ ({:08X}); runtime bits: {} differ ({:08X}); per bit (* = runtime):{}",
+			stats.derivationChecked, stats.derivationNative, stats.derivationDiffers, stats.derivationBits,
+			stats.derivationRuntimeDiffers, stats.derivationRuntimeBits, bitBreakdown.empty() ? std::string(" none") : bitBreakdown);
 		logger::info("[DCLF] tracked {} under {} category nodes: {} objects ({} the engine also kept), {} geometries, {} pipelines, {} materials; left native:{}; events +{} -{}, validation drops {}; CPU per frame: events {:.3f} ms, tables {:.3f} ms (max {:.3f}; walk {:.3f}, classify {:.3f}, pipelines {:.3f}, materials {:.3f})",
 			stats.tracked, stats.categoryNodes, stats.objects, stats.nativeVisible, stats.geometries, stats.pipelines, stats.materials, reasons,
 			stats.attachedEvents, stats.detachedEvents, stats.validationDrops, timing.eventsMs / frames, timing.buildMs / frames, timing.buildMaxMs,

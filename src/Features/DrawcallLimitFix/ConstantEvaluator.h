@@ -103,6 +103,9 @@ namespace DCLF
 		/** @brief True while a stand-in call runs (hooks on the shader functions must ignore it). */
 		static bool Evaluating() { return evaluating; }
 
+		/** @brief Start of a frame's evaluations (CS_DCLF_EVAL=audit budget). */
+		static void ResetFrameAudits() { auditsThisFrame = 0; }
+
 		bool EvaluateMaterial(const RE::BSShaderMaterial* a_material, std::uint32_t a_passDescriptor, MaterialRecord& a_out);
 
 		/**
@@ -117,5 +120,8 @@ namespace DCLF
 
 		RE::BSShader* lightingShader = nullptr;
 		static inline bool evaluating = false;
+		// CS_DCLF_EVAL=audit only: how many evaluations have been audited this frame, so the cost of the
+		// snapshots stays bounded. Reset by ResetFrameAudits once per BuildFrame.
+		static inline std::uint32_t auditsThisFrame = 0;
 	};
 }

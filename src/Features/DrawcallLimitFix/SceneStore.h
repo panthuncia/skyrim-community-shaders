@@ -60,12 +60,24 @@ namespace DCLF
 			// BuildFrame time by part, summed since the last ResetTimes (ms): accumulator walk, classification,
 			// per-pipeline evaluation, material evaluation.
 			std::array<double, 4> partMs{};
-			// The property-derived descriptor against the accumulated one, outside kRuntimePassBits (Phase 5
-			// readiness): objects compared, objects that differ, the differing bits, and objects the
-			// derivation would have left native.
+			// The property-derived descriptor against the accumulated one (Phase 5 readiness): objects
+			// compared, and objects the derivation would have left native.
+			//
+			// The comparison is reported in two halves, because they mean different things. Outside
+			// kRuntimePassBits the derivation is meant to be exact, and a difference is a defect. Inside
+			// kRuntimePassBits it is guessing at values GetRenderPasses computes from per-frame light and
+			// shadow assignment, so a difference there is expected until those bits are derived properly —
+			// and how large it is decides whether GetRenderPasses can ever be skipped outright. The earlier
+			// counter masked the runtime half out entirely, which made "0 differ" read as a much stronger
+			// result than it was.
 			std::uint32_t derivationChecked = 0;
-			std::uint32_t derivationDiffers = 0;
-			std::uint32_t derivationBits = 0;
+			std::uint32_t derivationDiffers = 0;        // differ outside kRuntimePassBits
+			std::uint32_t derivationBits = 0;           // OR of those differing bits
+			std::uint32_t derivationRuntimeDiffers = 0;  // differ inside kRuntimePassBits
+			std::uint32_t derivationRuntimeBits = 0;     // OR of those differing bits
+			// Objects differing per bit position, over the whole descriptor, so a single dominant bit can
+			// be told apart from a smear across several.
+			std::array<std::uint32_t, 32> derivationBitCounts{};
 			std::uint32_t derivationNative = 0;
 		};
 
@@ -75,6 +87,14 @@ namespace DCLF
 
 		/** @brief Present-time: follow loaded cells and apply queued scene graph events. */
 		void ProcessEvents();
+
+		/**
+		 * @brief Whether a load screen is up, i.e. the scene graph is being rebuilt under us.
+		 *
+		 * Nothing may walk the scene graph while this holds, and frame counters meant to be comparable
+		 * between runs should not advance across it.
+		 */
+		static bool IsLoadingScreenUp();
 
 		/** @brief Main-pass start: rebuild the CPU tables from the tracked set. */
 		void BuildFrame();
@@ -128,6 +148,9 @@ namespace DCLF
 		ankerl::unordered_dense::map<RE::BSGeometry*, Tracked> tracked;
 		ankerl::unordered_dense::set<RE::NiNode*> categoryNodes;
 		std::size_t validationCursor = 0;
+		// Set while a load screen is up, so the first frame after it rebuilds the tracked set from
+		// scratch instead of trusting anything discovered across the load (ProcessEvents).
+		bool rescanPending = false;
 
 		Tables tables;
 		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint32_t> objectIndex;

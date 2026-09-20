@@ -67,6 +67,9 @@ namespace DCLF
 			std::uint32_t cullRescued = 0;          // the engine culled it, the culling here kept it
 			std::uint32_t cullOccluded = 0;         // rejected by the HZB rather than by the frustum
 			std::uint32_t cullOccludedVisible = 0;  // of those, ones the engine's own culling had kept
+			// The second phase, which re-tests what the first rejected against the rebuilt HZB.
+			std::uint32_t cullDrawnPhaseTwo = 0;      // depth draws it added
+			std::uint32_t cullRescuedByPhaseTwo = 0;  // objects it brought back
 			// What the HZB held under the tested objects: all-near or all-far means the build is wrong.
 			std::uint32_t hzbNear = 0, hzbFar = 0, hzbSampled = 0;
 			// One rejection in full, so an implausible count can be read instead of guessed at.

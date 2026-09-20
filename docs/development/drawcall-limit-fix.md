@@ -572,6 +572,146 @@ a frame says that. The same counters are still there, and so is the one recorded
     pixel-identical by eye, but the frame after a `coc` teleport is so overexposed that per-pixel deltas
     there measure the clipping, not the geometry.
 
+## Phase 4.5 Step 0 and Step 1: the derivation, and what the stand-in leaks
+
+### Step 0: the derivation counter now says what it measures
+
+The counter that reports the property-only derivation against the accumulated pass descriptor used to be
+masked with `& ~kRuntimePassBits`, so `0 differ` covered the 25 property bits and silently excluded the
+four runtime groups (shadow light count 6-8, ShadowDir 13, DefShadow 14, DoAlphaTest 20) - which are
+exactly the bits `GetRenderPasses` produces, and exactly the ones a Phase 5 that stops calling it would
+have to derive. It also counted every object in the tables, although an object outside the accumulator has
+no pass to compare against: `descriptors.pass` *is* the derivation for those, so they compared the
+derivation with itself and could never differ.
+
+Both are fixed. The report is now two halves plus a per-bit breakdown, over the comparable objects only.
+Whiterun exterior, 3057 tracked:
+
+```
+derivation (last frame): 915 objects compared, 0 would stay native;
+  property bits: 0 differ (00000000);
+  runtime bits: 602 differ (00006000);
+  per bit (* = runtime): bit 13*=602, bit 14*=602
+```
+
+The result is better than expected, and it changes what Step 6 costs:
+
+-   The property half is exact: **0 of 915** differ.
+-   The shadow light count (bits 6-8) and DoAlphaTest (bit 20) are **already derived correctly** - they
+    never appear in the breakdown.
+-   The whole gap is ShadowDir and DefShadow, always together, on about two thirds of the objects.
+
+So skipping `GetRenderPasses` is one binary decision away, not four. Withholding registration (Step 5)
+remains the right first move regardless, because it does not depend on deriving anything.
+
+### Step 1: the artifact was a shared per-pipeline table, not a leak
+
+**A reproduction that is not subtle.** The artifact was first seen as slightly blown-out additive lighting
+in a night exterior, which is a poor instrument: the difference is small, and the time of day and weather
+drift between runs. `coc WhiterunBanneredMare` at hour 22 is the opposite - a lit interior where the
+defect covers the entire frame in white and red and cannot be mistaken for anything else. Every result
+below is from that scene against a `CS_DCLF=0` control taken the same way.
+
+**Two things that made every earlier comparison worthless.** `CS_DCLF=0` was read by nothing: it appeared
+in the startup summary line and in no other code, so the feature installed unconditionally and every run
+previously labelled a "`CS_DCLF=0` baseline" had DCLF fully enabled. And `CS_DCLF_TEST_COMMANDS` was
+driven off `SceneStore`'s frame number inside `Prepass`, which does not run when the feature is off, so a
+control never executed the commands and never reached the same cell at the same hour. Both are fixed: the
+switch is a real gate, and the command driver has its own counter driven from `Reset`, ahead of the
+install check, skipping loading-screen frames so the two runs stay in step.
+
+**The cause.** Several tables are per-*pipeline*, not per-object, and the object that first creates a
+pipeline fixes their contents for every object that shares it. The important one is
+`tables.geometryConstants`, which comes from `FindLightingPass(property)` of that first object and carries
+**that object's scene light list**, from which the engine reads the sun and the per-frame lighting.
+
+While the tables held only the accumulator's output this was harmless: every candidate was visible, in the
+lighting situation being drawn. Widening them to the whole tracked set made it a defect. A candidate the
+engine had culled - in another room, or unlit - would often create the pipeline and hand its lights to the
+visible objects drawn on it. In an interior that is a whole room lit by the wrong light list.
+
+The fix is ordering, in `SceneStore::BuildFrame`: objects the engine kept are classified first, the rest
+afterwards. An object the engine kept is by definition in the lighting situation being drawn, so it is the
+correct template, and objects that cannot be drawn should never displace it. It costs one extra pass over
+a hash map.
+
+**How it was found, and two wrong turns worth recording.**
+
+`CS_DCLF_EVAL` (new) suppresses parts of the stand-in evaluation. The first table it produced looked
+decisive and was not:
+
+| Configuration | Result |
+| --- | --- |
+| `CS_DCLF_TABLES=accumulated` | clean |
+| `CS_DCLF_TABLES=tracked` | whole frame blown out |
+| `… CS_DCLF_EVAL=off` | clean |
+| `… CS_DCLF_EVAL=geometry` (only `SetupGeometry`) | clean |
+| `… CS_DCLF_EVAL=material` (only `SetupMaterial`) | blown out |
+
+This was read as "the per-material stand-in leaks state into the engine", on the further argument that the
+corruption covered actors, which are skinned and never in DCLF's coverage. **Both halves were wrong.**
+Suppressing the material evaluation makes `EvaluateMaterial` fail, which makes its objects ineligible, so
+DCLF draws almost nothing - the "clean" rows were clean because nothing was drawn, not because nothing
+leaked. And the actors were not corrupted; they were being washed out by the over-bright surfaces around
+them.
+
+The control that settled it was one that had never been run: **wide tables and the full evaluation, with
+`CS_DCLF_HYBRID` off** so DCLF still builds and evaluates everything but its output never reaches the
+frame. That frame is clean, which rules out leaked engine state entirely and puts the fault in DCLF's own
+draws. The draw counts said the rest: `tracked` and `accumulated` draw the same ~300 objects in that
+scene, so the difference had to be in what the shared tables contained, not in what was drawn.
+
+The lesson is that a switch which suppresses a computation also suppresses everything downstream of it,
+so "suppress it and see" only localises a fault when the downstream effects are held constant. The
+`HYBRID`-off control does hold them constant, and should have come first.
+
+### `CS_DCLF_EVAL=audit`, and making `RunStandIn` transparent
+
+Before the control above, the leak hypothesis was tested properly rather than by eye.
+`CS_DCLF_EVAL=audit` snapshots the pipeline state around every stand-in call - VS and PS constant buffers,
+PS shader resources 0-127, VS shader resources, PS samplers, and the bytes of the `BSLightingShader`
+object - and reports every slot that differs after the restore, once per distinct finding.
+
+The first version audited only the first 8 of roughly 640 material evaluations a frame and reported
+nothing, which says nothing at all when the leaking call could be any of the other 630. Audited across
+every call, it still reported nothing on the material path: the stand-in genuinely leaks no pipeline
+state, which is what finally broke the wrong hypothesis.
+
+It did find one real leak, on the geometry path: a stand-in `SetupGeometry` left a constant buffer bound
+at PS slot 7 that was not bound before, because a feature hook binds its own per-geometry buffer there and
+`RunStandIn` only restored the one slot matching the level being evaluated. That assumption is now gone -
+all 14 constant buffer slots are saved and restored on both stages, which removes the class of problem
+rather than the instance. The audit now reports zero leaks over a full run.
+
+Light Limit Fix's `BSLightingShader_SetupGeometry_After` was a second real defect found on the way. It
+publishes `strictLightDataCB` conditionally, keyed on four cache variables recording what the buffer
+already holds, and binds b3 through a once-per-frame latch. A stand-in call updated all of it, so the next
+real draw whose lights matched the cache skipped its own upload and shaded with the stand-in's lights.
+`ConstantEvaluator::Evaluating()` - which already existed, documented as "hooks on the shader functions
+must ignore it", and was consulted by nothing - now guards it.
+
+Neither of these was the artifact. Both are fixed, and `RunStandIn` is transparent by the audit's measure.
+
+**Result.** `CS_DCLF_TABLES=tracked` now matches a `CS_DCLF=0` control in the Bannered Mare at hour 22
+with DCLF drawing 953 of 1102 objects, and the audit reports no leaks. `accumulated` is no longer needed
+as a fallback.
+
+### Two crashes and a false trail
+
+`SceneStore::ProcessEvents` walked the scene graph every Present, including while a load screen was up,
+and a load rebuilds `TES::objRoot` and the cell 3D under it. That crashed twice in the same subsystem: in
+`RefreshCategoryNodes`' `objRoot` walk on a child that read back as `0x0001000000020001`, and the day
+before in `AddSubtree`. The walks are now skipped while a load screen is up, the queued events are drained
+but discarded, and the first frame afterwards rebuilds the tracked set from scratch. `BuildFrame` also
+returns empty tables during a load: the tracked entries hold `NiPointer`s to the objects but not to their
+renderer data, so classifying them across a load reads freed `BSGraphics::TriShape` data.
+
+A `VK_ERROR_DEVICE_LOST` then appeared on `coc` teleports and was chased through five builds on the
+assumption that it was one of these changes. It was not: the tree that failed four runs in a row passed
+six times afterwards while byte-identical, so the bisect proved nothing and the fault was a persistent GPU
+context left by the earlier crash. Worth remembering before bisecting an intermittent fault again - the
+control has to be re-run at the end, not only at the start.
+
 ## Switches
 
 | Variable | Effect |
@@ -585,7 +725,11 @@ a frame says that. The same counters are still there, and so is the one recorded
 | `CS_DCLF_CULL=off\|frustum\|occlusion` | How BuildDrawsCS filters the candidates before writing their sequences: nothing, the frustum, or the frustum and then the HZB. |
 | `CS_DCLF_CULL_INPUT=native\|tracked` | Which candidates may be drawn: only what the engine's culling kept (the default), or whatever the GPU culling keeps. `tracked` still shades incorrectly (see Phase 4). |
 | `CS_DCLF_BUILD_PARITY=1` | Every 300 epochs, read BuildDraws' output back and compare it with the CPU templates (`BuildDraws parity OK/MISMATCH`). |
-| `CS_DCLF_TEST_COMMANDS=<frame>:<command>;…` | Test runs: run each console command on the main thread once the main pass has run that many frames (loading screens do not count), for coverage runs from the auto-loaded save. |
+| `CS_DCLF=0` | Turns the feature off entirely: no hooks, no tables, no draws. Anything else, including unset, leaves it on. |
+| `CS_DCLF_TABLES=tracked\|accumulated` | Whether the tables hold the whole tracked set or only what the engine's accumulator kept. `accumulated` was the fallback while the per-pipeline template defect was open; `tracked` is now correct. |
+| `CS_DCLF_EVAL=off\|material\|geometry` | Diagnostic: suppresses parts of the stand-in evaluation. Note that a suppressed evaluation also stops its objects being drawn, so a clean frame under it proves nothing on its own. |
+| `CS_DCLF_EVAL=audit` | Diagnostic: snapshots pipeline state around every stand-in call and reports anything not restored. Very slow; the frame rate collapses. |
+| `CS_DCLF_TEST_COMMANDS=<frame>:<command>;…` | Test runs: run each console command on the main thread once that many frames have been presented (loading screens do not count), for coverage runs from the auto-loaded save. The counter is independent of the feature, so a `CS_DCLF=0` control reaches the same place at the same hour. |
 
 ## Known upstream issues
 

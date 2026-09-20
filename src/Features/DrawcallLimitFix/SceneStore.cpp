@@ -1,9 +1,12 @@
 #include "SceneStore.h"
 
+#include "Switches.h"
+
 #include "GpuResources.h"
 #include "SceneTracker.h"
 #include "VertexInput.h"
 
+#include <bit>
 #include <chrono>
 
 #include "Features/ExtendedTranslucency.h"
@@ -272,11 +275,47 @@ namespace DCLF
 		}
 	}
 
+	bool SceneStore::IsLoadingScreenUp()
+	{
+		auto* ui = RE::UI::GetSingleton();
+		return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
+	}
+
 	void SceneStore::ProcessEvents()
 	{
+		// Nothing here may walk the scene graph while a load screen is up. A load tears down and rebuilds
+		// TES::objRoot and the cell 3D under it, and the attach events queued across it name subtrees that
+		// are still being assembled; walking either gives a pointer that is stale or simply garbage. That
+		// is what crashed in RefreshCategoryNodes' objRoot walk (a child that read back as
+		// 0x0001000000020001) and, the day before, in AddSubtree.
+		//
+		// The queue is still drained, because it holds references to attached subtrees and the comment on
+		// the caller is right that it must not grow while the world is not rendered - but the events are
+		// discarded rather than applied, and the first frame after the load rebuilds the tracked set from
+		// scratch. A load invalidates all of it anyway, so nothing is lost by not trying to track across it.
+		auto& tracker = SceneTracker::Get();
+		if (SceneStore::IsLoadingScreenUp()) {
+			// Only the walking stops. The tracked set is deliberately left alone until the load is over:
+			// dropping it here releases the game buffers the tables reference while the previous frame's
+			// epoch is still in flight, and a draw then reads a freed device address. That is a
+			// VK_ERROR_DEVICE_LOST on the teleport, which is exactly what happened when this branch cleared
+			// eagerly. The entries hold NiPointers, so holding them across the load is the safe direction,
+			// and the rescan below replaces them on a normal frame.
+			rescanPending = true;
+			SceneTracker::FreeEvents(tracker.Drain());
+			return;
+		}
+		if (rescanPending) {
+			// RefreshCategoryNodes treats every category node as newly appeared and walks it, which is
+			// exactly the full rescan wanted here.
+			rescanPending = false;
+			tracked.clear();
+			categoryNodes.clear();
+			validationCursor = 0;
+		}
+
 		RefreshCategoryNodes();
 
-		auto& tracker = SceneTracker::Get();
 		SceneTracker::Event* events = tracker.Drain();
 		for (auto* event = events; event; event = event->next) {
 			if (event->type == SceneTracker::EventType::Attached) {
@@ -432,6 +471,27 @@ namespace DCLF
 	void SceneStore::BuildFrame()
 	{
 		++frame;
+		// Nothing is drawn while a load screen is up, and nothing here may touch the tracked geometry
+		// either. The load frees the renderer data and the vertex and index buffers of the cell being
+		// unloaded, while the NiPointers in `tracked` keep only the NiAVObjects alive; classifying those
+		// entries reads freed BSGraphics::TriShape data and hands the render graph device addresses that no
+		// longer belong to anything, which the GPU answers with VK_ERROR_DEVICE_LOST a few frames later.
+		//
+		// Before ProcessEvents stopped walking the scene graph across loads, this did not arise: the
+		// category-node refresh pruned those entries as the cell's nodes vanished, so they never reached
+		// this loop. Leaving the tables empty is both the safe and the obviously correct thing to draw
+		// during a load screen.
+		if (IsLoadingScreenUp()) {
+			tables.Clear();
+			objectIndex.clear();
+			accumulatedPasses.clear();
+			stats.objects = 0;
+			stats.nativeVisible = 0;
+			stats.geometries = 0;
+			stats.pipelines = 0;
+			stats.materials = 0;
+			return;
+		}
 		PartTimer timer;
 		RefreshLodFadeSettings();
 		CollectAccumulatedPasses();
@@ -444,11 +504,14 @@ namespace DCLF
 		stats.ineligible.fill(0);
 		stats.shadowMaskPipelines = 0;
 		stats.derivationChecked = stats.derivationDiffers = stats.derivationBits = stats.derivationNative = 0;
+		stats.derivationRuntimeDiffers = stats.derivationRuntimeBits = 0;
+		stats.derivationBitCounts.fill(0);
 
 		ankerl::unordered_dense::map<const RE::BSGraphics::TriShape*, std::uint32_t> geometryIndex;
 		ankerl::unordered_dense::map<PipelineKey, std::uint32_t, PipelineKeyHash> pipelineIndex;
 		ankerl::unordered_dense::map<std::pair<const RE::BSShaderMaterial*, std::uint32_t>, std::uint32_t> materialIndex;
 		auto& evaluator = ConstantEvaluator::Get();
+		ConstantEvaluator::ResetFrameAudits();
 		if (!evaluator.HasLightingShader())
 			FindLightingShader();
 
@@ -467,8 +530,40 @@ namespace DCLF
 		// come from the property derivation alone, with its guesses for kRuntimePassBits and no shadow bit
 		// mask. That is exactly the derivation Phase 5 has to stand on, and the derivation counters below
 		// measure it against the accumulated objects every frame.
+		// CS_DCLF_TABLES=accumulated restores the pre-Phase-4 behaviour, where the tables held only what the
+		// engine's accumulator kept. It exists to tell a defect in the culling apart from one caused merely
+		// by classifying and evaluating three times as many objects, which is a different kind of change:
+		// the stand-in evaluation runs the engine's own SetupMaterial and SetupGeometry.
+		static const bool accumulatedOnly = SwitchValue("CS_DCLF_TABLES") == "accumulated";
+
+		// Objects the engine kept are classified first, then the rest.
+		//
+		// Several of the tables are per-pipeline rather than per-object, and the object that *creates* a
+		// pipeline decides their contents for every object that shares it - in particular
+		// tables.geometryConstants, which comes from FindLightingPass(property) of whichever object got
+		// there first and carries that object's scene light list. While the tables held only the
+		// accumulator's output that was harmless, because every candidate was visible and in the same
+		// lighting situation. Widening them to the whole tracked set made it a defect: a candidate the
+		// engine culled - in another room, or unlit - would often create the pipeline and hand its lights
+		// to the visible objects drawn on it, which is the blown-out interior lighting this produced.
+		//
+		// Ordering fixes it at the source and costs one extra pass over a hash map. It is not a tie-break
+		// hack: an object the engine kept is by definition in the lighting situation being drawn, so it is
+		// the correct template, and the ones that cannot be drawn should never displace it.
+		std::vector<std::pair<RE::BSGeometry*, const Tracked*>> order;
+		std::vector<std::pair<RE::BSGeometry*, const Tracked*>> culled;
+		order.reserve(tracked.size());
+		culled.reserve(tracked.size());
 		for (auto& [trackedGeometry, entry] : tracked) {
-			auto* geometry = trackedGeometry;
+			if (FindAccumulatedPass(trackedGeometry))
+				order.emplace_back(trackedGeometry, &entry);
+			else if (!accumulatedOnly)
+				culled.emplace_back(trackedGeometry, &entry);
+		}
+		order.insert(order.end(), culled.begin(), culled.end());
+
+		for (auto& [geometry, trackedEntry] : order) {
+			const auto& entry = *trackedEntry;
 			const auto* accumulated = FindAccumulatedPass(geometry);
 			LightingDescriptors descriptors;
 			timer.Add(stats.partMs[1] /* the rest of the previous object counts as classification */);
@@ -486,11 +581,26 @@ namespace DCLF
 				continue;
 			if (descriptors.derivedPass == kNotDerived) {
 				++stats.derivationNative;
-			} else {
+			} else if (accumulated) {
+				// Only objects the accumulator holds can be compared at all. Without one, descriptors.pass
+				// IS the derivation (LightingDescriptors.cpp: "the derivation's guesses stand"), so counting
+				// those would compare the derivation against itself and report a difference of zero for
+				// every one of them - which is how the first version of this counter turned 588 differing
+				// objects out of 915 comparable ones into "588 of 3057".
 				++stats.derivationChecked;
-				if (const std::uint32_t bits = (descriptors.derivedPass ^ descriptors.pass) & ~kRuntimePassBits) {
+				const std::uint32_t differing = descriptors.derivedPass ^ descriptors.pass;
+				if (const std::uint32_t bits = differing & ~kRuntimePassBits) {
 					++stats.derivationDiffers;
 					stats.derivationBits |= bits;
+				}
+				if (const std::uint32_t bits = differing & kRuntimePassBits) {
+					++stats.derivationRuntimeDiffers;
+					stats.derivationRuntimeBits |= bits;
+				}
+				for (std::uint32_t remaining = differing; remaining;) {
+					const std::uint32_t bit = std::countr_zero(remaining);
+					++stats.derivationBitCounts[bit];
+					remaining &= remaining - 1;
 				}
 			}
 

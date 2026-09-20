@@ -53,6 +53,8 @@ namespace DCLF
 		// BuildDrawsCS's counter words: [0] drawn, [1] culled, [2] tested, [3] engine-culled and gated out,
 		// [4] false negatives (the engine kept it, the culling rejected it), [5] rescued.
 		constexpr std::uint32_t kCountWords = 20;
+		// Byte offsets of the count words the indirect draws read; they must match BuildDrawsCS.hlsl.
+		constexpr std::uint64_t kCountDrawnPhaseTwoBytes = 68;
 		constexpr const wchar_t* kBuildDrawsShader = L"Data\\Shaders\\DrawcallLimitFix\\ORG\\BuildDrawsCS.spv";
 		constexpr const wchar_t* kHzbShader = L"Data\\Shaders\\DrawcallLimitFix\\ORG\\HzbCS.spv";
 		// HzbCS.hlsl's constants: source, target, target size, source size, from-depth, padding.
@@ -83,11 +85,22 @@ namespace DCLF
 			std::uint32_t pipelineIndex;  // in the pipeline sets
 			std::uint32_t recordIndex;    // DrawBindings record
 			std::uint32_t geometryIndex;  // GeometryDraw
-			std::uint32_t flags;
-			float boundCentre[3];  // absolute world space (the eye is subtracted in the shader)
+			std::uint32_t flags;          // object flags, plus kInputDrawable for this epoch
+			float boundCentre[3];         // absolute world space; the camera is folded into the matrix
 			float boundRadius;
+			// Index into the frame's object table. The two segments emit different subsets in different
+			// orders, so this is what lets the colour segment look up the visibility the depth segment
+			// published for the same object.
+			std::uint32_t objectIndex;
+			std::uint32_t padding;
 		};
-		static_assert(sizeof(DrawInput) == 32);
+		static_assert(sizeof(DrawInput) == 40);
+		// BuildDrawsCS.hlsl: set on an input the epoch has built a bindings record for. The depth segment
+		// submits an input for every candidate so the culling covers them all, but builds records only for
+		// the ones it may draw.
+		constexpr std::uint32_t kInputDrawable = 1u << 16;
+		// Where phase 2 appends its sequences; see BuildDrawsCS.hlsl.
+		constexpr std::uint32_t kPhaseTwoSequenceBase = kMaxDraws;
 
 #pragma pack(push, 4)
 		struct GeometryDraw
@@ -114,9 +127,13 @@ namespace DCLF
 			std::uint32_t recordsAddressLo;
 			std::uint32_t recordsAddressHi;
 			std::uint32_t recordStride;
-			std::uint32_t cullFlags;  // CullFlags: mode in the low bits, RequireNativeVisible at bit 8
-			float eye[3];            // the camera ViewProj is relative to
-			float viewProj[16];      // row-major, as the shader's float4x4 with mul(M, v)
+			std::uint32_t cullFlags;        // CullFlags: mode in bits 0-3, phase in 4-7, RequireNativeVisible at 8
+			std::uint32_t visibilityIndex;   // RWByteAddressBuffer: one uint per object in the tables
+			std::uint32_t visibilityStamp;   // marks the verdicts as this frame's; see BuildDrawsCS.hlsl
+			std::uint32_t padding;           // keeps viewProj on a 16-byte boundary, as HLSL packs it
+			// Row-major, as the shader's float4x4 with mul(M, v), with the camera translation folded in so
+			// that an absolute world position projects directly.
+			float viewProj[16];
 			std::uint32_t hzbIndex;        // 0 when there is no HZB to test against
 			std::uint32_t hzbSizePacked;   // mip 0: width in the low 16 bits, height in the high 16
 			std::uint32_t hzbMips;
@@ -204,8 +221,12 @@ namespace DCLF
 		// What the pass of one epoch draws; published before the epoch prepares.
 		struct PassFrame
 		{
-			std::uint64_t serial = 0;
+			std::uint64_t serial = 0;  // per EPOCH, so the two epochs of one frame do not share it
+			std::uint32_t frameNumber = 0;  // per FRAME, which is what the two epochs must agree on
 			std::uint32_t drawCount = 0;
+			// Inputs the culling dispatch covers. In the depth segment this exceeds drawCount, because that
+			// segment submits a cull-only input for every candidate it is not allowed to draw.
+			std::uint32_t inputCount = 0;
 			std::uint32_t cullMode = 0;
 			std::uint32_t requireNativeVisible = 1;
 			bool offscreen = false;  // colour drawn into DCLF's own targets even on the hybrid path
@@ -265,6 +286,7 @@ namespace DCLF
 			// Phase 4's hierarchical depth buffer. Its source is nativeDepth, which is imported with a
 			// shader-resource view as well as a depth-stencil one so that the graph sees the depth the draws
 			// write and the depth the build reads as one resource and orders them.
+			std::shared_ptr<org::Buffer> visibility;  // per-object verdict, published by the depth segment
 			std::shared_ptr<org::PixelBuffer> hzb;
 			std::shared_ptr<const ComputeProgram> hzbProgram;
 			std::uint32_t hzbWidth = 0, hzbHeight = 0, hzbMips = 0;
@@ -289,6 +311,7 @@ namespace DCLF
 			std::array<org::PreparedDescriptorReference, kColorTargets> targetViews{};
 			org::PreparedDescriptorReference depthView{};
 			std::uint32_t targetCount = 0;
+			bool phaseTwo = false;
 		};
 
 		bool DrawingSegment()
@@ -307,8 +330,10 @@ namespace DCLF
 		class MainOpaquePass final : public org::TypedRenderGraphPass<MainOpaquePass, PreparedDraws, PassBindings>
 		{
 		public:
-			explicit MainOpaquePass(std::shared_ptr<Resources> a_resources) :
-				resources(std::move(a_resources)) {}
+			// phaseTwo: the second depth draw of the two-phase culling, which draws only what the rebuilt HZB
+			// brought back, from the reserved part of the sequence buffer.
+			MainOpaquePass(std::shared_ptr<Resources> a_resources, bool a_phaseTwo = false) :
+				resources(std::move(a_resources)), phaseTwo(a_phaseTwo) {}
 
 			PassBindings Declare(org::PassBuilder& a_builder)
 			{
@@ -337,6 +362,7 @@ namespace DCLF
 				const auto frame = CurrentFrame(*resources);
 				a_out.push_back(frame ? frame->serial : 0);
 				a_out.push_back(static_cast<std::uint64_t>(RenderGraphRuntime::Get().CurrentSegment()));
+				a_out.push_back(phaseTwo ? 1 : 0);
 			}
 
 			PreparedDraws Prepare(const PassBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
@@ -345,6 +371,10 @@ namespace DCLF
 				auto frame = CurrentFrame(*resources);
 				if (!frame || !frame->drawCount || !frame->indirect.valid)
 					return prepared;
+				// The rescue draw belongs to the depth segment only.
+				if (phaseTwo && RenderGraphRuntime::Get().CurrentSegment() != RenderGraphRuntime::Segment::ZPrepass)
+					return prepared;
+				prepared.phaseTwo = phaseTwo;
 				prepared.frame = std::move(frame);
 				prepared.targetCount = resources->targetCount;
 				for (std::uint32_t i = 0; i < prepared.targetCount; ++i)
@@ -370,6 +400,8 @@ namespace DCLF
 				const bool zPrepass = RenderGraphRuntime::Get().CurrentSegment() == RenderGraphRuntime::Segment::ZPrepass;
 				if (zPrepass && !frame.hybrid)
 					return;  // off the hybrid path both passes run together in the main segment
+				if (a_prepared.phaseTwo && !(zPrepass && frame.hybrid))
+					return;
 				const auto sequences = a_recording.Resolve(a_bindings.sequences).GetHandle();
 				const auto count = a_recording.Resolve(a_bindings.count).GetHandle();
 				rhi::PassBeginInfo begin{};
@@ -400,10 +432,18 @@ namespace DCLF
 					// done by the depth writes from damage done by the epoch merely running here (its
 					// submission, and the layout the attachment is left in).
 					static const bool empty = SwitchEnabled("CS_DCLF_ZPREPASS_EMPTY");
-					if (!(zPrepass && empty))
-						commands.ExecuteIndirect(frame.indirect.signatures[kDepthVariant], sequences, 0, count, 0, frame.drawCount);
+					if (!(zPrepass && empty)) {
+						// Phase 2 draws only the rescues, from the reserved half of the sequence buffer and
+						// its own counter word. Its argument offset has to be a constant the CPU knows, which
+						// is why the two phases have fixed ranges instead of sharing one.
+						const std::uint64_t argumentOffset = a_prepared.phaseTwo ? std::uint64_t(kPhaseTwoSequenceBase) * sizeof(DrawSequence) : 0;
+						const std::uint64_t countOffset = a_prepared.phaseTwo ? kCountDrawnPhaseTwoBytes : 0;
+						commands.ExecuteIndirect(frame.indirect.signatures[kDepthVariant], sequences, argumentOffset, count, countOffset, frame.drawCount);
+					}
 					commands.EndPass();
 				}
+				if (a_prepared.phaseTwo)
+					return;
 
 				// The main pass: depth test EQUAL against it (its pipelines do not write depth; the attachment
 				// stays in the layout the pass declared).
@@ -422,11 +462,34 @@ namespace DCLF
 
 		private:
 			std::shared_ptr<Resources> resources;
+			bool phaseTwo = false;
 		};
+
+		/**
+		 * @brief Folds the camera translation into the view-projection, so that a bound's absolute world
+		 * position can be projected without carrying the camera separately.
+		 *
+		 * The draws are camera-relative (the engine's posAdjust), so the culling used to subtract the camera
+		 * from every bound before projecting. Doing it here instead is exact - it is the same subtraction,
+		 * one matrix column earlier - and it freed three words of a push-constant block that had reached
+		 * Vulkan's guaranteed 128 bytes.
+		 *
+		 * Row-major, as the shader's `mul(M, v)` reads it: M'(p,1) = M(p-e,1) needs only column 3 changed,
+		 * by subtracting M's upper-left 3x3 applied to the camera.
+		 */
+		void FoldEyeIntoViewProj(const std::array<float, 16>& a_viewProj, const RE::NiPoint3& a_eye, float (&a_out)[16])
+		{
+			std::memcpy(a_out, a_viewProj.data(), sizeof(a_out));
+			for (std::uint32_t row = 0; row < 4; ++row) {
+				a_out[row * 4 + 3] = a_viewProj[row * 4 + 3] -
+				                     (a_viewProj[row * 4 + 0] * a_eye.x + a_viewProj[row * 4 + 1] * a_eye.y +
+									     a_viewProj[row * 4 + 2] * a_eye.z);
+			}
+		}
 
 		struct BuildDrawsBindings
 		{
-			org::ResourceBindingToken inputs, geometries, sequences, count, hzb;
+			org::ResourceBindingToken inputs, geometries, sequences, count, hzb, visibility;
 		};
 
 		struct BuildDrawsFrame
@@ -440,8 +503,10 @@ namespace DCLF
 		class BuildDrawsPass final : public org::TypedRenderGraphPass<BuildDrawsPass, BuildDrawsFrame, BuildDrawsBindings>
 		{
 		public:
-			explicit BuildDrawsPass(std::shared_ptr<Resources> a_resources) :
-				resources(std::move(a_resources)) {}
+			// phase 0 picks itself from the segment (1 in the depth segment, 3 in the colour one); phase 2 is
+			// the rebuilt-HZB pass, registered separately after the HZB build.
+			BuildDrawsPass(std::shared_ptr<Resources> a_resources, std::uint32_t a_phase = 0) :
+				resources(std::move(a_resources)), fixedPhase(a_phase) {}
 
 			BuildDrawsBindings Declare(org::PassBuilder& a_builder)
 			{
@@ -451,8 +516,10 @@ namespace DCLF
 				bindings.geometries = a_builder.BindShaderResource(resources->geometries);
 				bindings.sequences = a_builder.BindUnorderedAccess(resources->sequences);
 				bindings.count = a_builder.BindUnorderedAccess(resources->count);
-				// Last frame's HZB in the depth segment, this frame's in the colour segment: the build runs
-				// at the end of the depth pass, between the two.
+				bindings.visibility = a_builder.BindUnorderedAccess(resources->visibility);
+				// Phase 1 sees the HZB the previous frame left, phase 2 the one just rebuilt from this
+				// frame's depth. Both read the same resource; what differs is where they sit relative to
+				// the build, which is why the ordering below is the whole design.
 				if (resources->hzb)
 					bindings.hzb = a_builder.BindShaderResource(resources->hzb);
 				return bindings;
@@ -462,17 +529,24 @@ namespace DCLF
 			{
 				const auto frame = CurrentFrame(*resources);
 				a_out.push_back(frame ? frame->serial : 0);
+				a_out.push_back(static_cast<std::uint64_t>(RenderGraphRuntime::Get().CurrentSegment()));
+				a_out.push_back(fixedPhase);
 			}
 
 			BuildDrawsFrame Prepare(const BuildDrawsBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
 			{
 				BuildDrawsFrame prepared{};
 				const auto frame = CurrentFrame(*resources);
-				if (!frame || !frame->drawCount || !resources->buildDraws)
+				if (!frame || !frame->inputCount || !resources->buildDraws)
+					return prepared;
+				const std::uint32_t phase = Phase();
+				// The second phase belongs to the depth segment only: it is what re-tests phase 1's rejects
+				// against the HZB that has just been rebuilt from this frame's depth.
+				if (fixedPhase == 2 && RenderGraphRuntime::Get().CurrentSegment() != RenderGraphRuntime::Segment::ZPrepass)
 					return prepared;
 				prepared.program = resources->buildDraws;
 				auto& constants = prepared.constants;
-				constants.drawCount = frame->drawCount;
+				constants.drawCount = frame->inputCount;
 				constants.inputsIndex = a_preparation.ResolveView(a_bindings.inputs, { org::BindlessViewKind::ShaderResource }).index;
 				constants.geometriesIndex = a_preparation.ResolveView(a_bindings.geometries, { org::BindlessViewKind::ShaderResource }).index;
 				constants.sequencesIndex = a_preparation.ResolveView(a_bindings.sequences, { org::BindlessViewKind::UnorderedAccess }).index;
@@ -480,11 +554,13 @@ namespace DCLF
 				constants.recordsAddressLo = static_cast<std::uint32_t>(resources->recordsAddress);
 				constants.recordsAddressHi = static_cast<std::uint32_t>(resources->recordsAddress >> 32);
 				constants.recordStride = sizeof(DrawBindings);
-				constants.cullFlags = (frame->hasViewProj ? frame->cullMode : 0u) | (frame->requireNativeVisible ? 0x100u : 0u);
-				constants.eye[0] = frame->eye.x;
-				constants.eye[1] = frame->eye.y;
-				constants.eye[2] = frame->eye.z;
-				std::memcpy(constants.viewProj, frame->viewProj.data(), sizeof(constants.viewProj));
+				constants.cullFlags = (frame->hasViewProj ? frame->cullMode : 0u) | (frame->requireNativeVisible ? 0x100u : 0u) |
+				                      ((phase & 0xFu) << 4);
+				constants.visibilityIndex = a_preparation.ResolveView(a_bindings.visibility, { org::BindlessViewKind::UnorderedAccess }).index;
+				// The frame number, not the epoch serial: the depth segment publishes and the colour segment
+				// reads within one frame, so the stamp has to be the thing they share.
+				constants.visibilityStamp = frame->frameNumber & 0x3FFFFFFFu;
+				FoldEyeIntoViewProj(frame->viewProj, frame->eye, constants.viewProj);
 				if (resources->hzb && frame->cullMode >= 2 && frame->width && frame->height) {
 					constants.hzbIndex = a_preparation.ResolveView(a_bindings.hzb, { org::BindlessViewKind::ShaderResource }).index;
 					constants.hzbSizePacked = (resources->hzbWidth & 0xFFFF) | (resources->hzbHeight << 16);
@@ -498,7 +574,7 @@ namespace DCLF
 					constants.hzbUvScalePacked = scale(frame->width, resources->hzbWidth * 2) |
 					                             (scale(frame->height, resources->hzbHeight * 2) << 16);
 				}
-				prepared.groups = (frame->drawCount + 63) / 64;
+				prepared.groups = (frame->inputCount + 63) / 64;
 				return prepared;
 			}
 
@@ -513,8 +589,20 @@ namespace DCLF
 				commands.Dispatch(a_frame.groups, 1, 1);
 			}
 
+			std::uint32_t Phase() const
+			{
+				if (fixedPhase)
+					return fixedPhase;
+				// Off the hybrid path there is no depth segment to decide anything, so the colour segment
+				// has to do its own culling exactly as it did before the phases existed.
+				if (!resources->hybrid)
+					return 0;
+				return RenderGraphRuntime::Get().CurrentSegment() == RenderGraphRuntime::Segment::ZPrepass ? 1u : 3u;
+			}
+
 		private:
 			std::shared_ptr<Resources> resources;
+			std::uint32_t fixedPhase = 0;
 		};
 
 		struct HzbConstants
@@ -923,6 +1011,7 @@ namespace DCLF
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.draw-inputs"), resources->inputs);
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.geometries"), resources->geometries);
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.draw-count"), resources->count);
+				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.visibility"), resources->visibility);
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.depth"), resources->depth);
 				for (std::uint32_t i = 0; i < resources->targetCount; ++i)
 					a_graph.RegisterResource(org::ResourceIdentifier(fmt::format("cs.dclf.target{}", i)), resources->targets[i]);
@@ -949,12 +1038,28 @@ namespace DCLF
 				if (resources->probe)
 					a_out.push_back(org::RenderGraph::ExternalPassDesc::Copy("cs.dclf.probe-after",
 						std::static_pointer_cast<org::RenderPass>(std::make_shared<ProbePass>(resources, true))));
-				// After the draws, so the depth it reduces is the frame's finished depth. It only does work
-				// in the ZPrepass segment, which is where that is true.
-				if (resources->hzb)
+				// The two-phase tail, all of it inside the depth segment and all of it in this order:
+				//
+				//   build-draws (phase 1, against the HZB the previous frame left)
+				//   main-opaque (the phase-1 depth draw)
+				//   hzb         (rebuilt from the depth that draw has just finished)
+				//   build-draws-phase2 (phase 1's rejects, re-tested against the rebuilt HZB)
+				//   depth-phase2       (the rescues, so their depth is in the frame too)
+				//
+				// Phase 1 tests against a depth buffer that is a frame old, which is what makes it cheap and
+				// also what makes it wrong at the edges: anything that has just come out from behind an
+				// occluder was hidden in that buffer. Phase 2 exists to take those back, after a rebuild
+				// that can see them.
+				if (resources->hzb) {
 					a_out.push_back(org::RenderGraph::ExternalPassDesc::Compute("cs.dclf.hzb",
 						std::static_pointer_cast<org::RenderPass>(std::make_shared<HzbPass>(resources)))
 							.PreferQueue(org::QueueKind::Graphics));
+					a_out.push_back(org::RenderGraph::ExternalPassDesc::Compute("cs.dclf.build-draws-phase2",
+						std::static_pointer_cast<org::RenderPass>(std::make_shared<BuildDrawsPass>(resources, 2)))
+							.PreferQueue(org::QueueKind::Graphics));
+					a_out.push_back(org::RenderGraph::ExternalPassDesc::Render("cs.dclf.depth-phase2",
+						std::static_pointer_cast<org::RenderPass>(std::make_shared<MainOpaquePass>(resources, true))));
+				}
 				if (resources->native[0] && !resources->hybrid)
 					a_out.push_back(org::RenderGraph::ExternalPassDesc::Render("cs.dclf.debug-view",
 						std::static_pointer_cast<org::RenderPass>(std::make_shared<DebugViewPass>(resources))));
@@ -1238,8 +1343,14 @@ namespace DCLF
 			};
 			state->constants = buffer(kConstantBytes, "cs.dclf.constants");
 			state->records = buffer(std::uint64_t(kMaxDraws) * sizeof(DrawBindings), "cs.dclf.records");
-			state->sequences = CreateWords(std::uint64_t(kMaxDraws) * sizeof(DrawSequence) / 4, true, "cs.dclf.sequences");
+			// Twice kMaxDraws: phase 1 and the colour segment write the first half, phase 2 the second. The
+			// CPU records where phase 2's draw starts, so the two need ranges fixed in advance rather than
+			// one range shared through an atomic counter.
+			state->sequences = CreateWords(2ull * kMaxDraws * sizeof(DrawSequence) / 4, true, "cs.dclf.sequences");
 			state->count = CreateWords(kCountWords, true, "cs.dclf.draw-count");
+			// One word per object in the frame's tables: what the depth segment's culling decided, read by
+			// the colour segment so that it draws exactly the same set.
+			state->visibility = CreateWords(kMaxDraws, true, "cs.dclf.visibility");
 			state->inputs = CreateWords(std::uint64_t(kMaxDraws) * sizeof(DrawInput) / 4, false, "cs.dclf.draw-inputs");
 			state->geometries = CreateWords(std::uint64_t(kMaxGeometries) * sizeof(GeometryDraw) / 4, false, "cs.dclf.geometries");
 			state->buildDraws = LoadComputeProgram(device, kBuildDrawsShader, kBuildDrawsConstantWords);
@@ -1732,6 +1843,13 @@ namespace DCLF
 				// against a depth DCLF computed rather than the one the native prepass wrote. Such an object
 				// keeps its depth but is never shaded, which is what left the architecture flat and grey.
 				if (depthOnly && frameHybrid && !(o < tables.objectGeometry.size() && DrewLastFrame(tables.objectGeometry[o], frameNumber))) {
+					// Cull-only: the object still goes to the culling, because the depth segment is where the
+					// verdict for every candidate is decided and published, and a candidate left out here
+					// would reach the colour segment with no verdict at all. What it does not get is a
+					// bindings record, which is the expensive part and the only part a draw needs.
+					impl->inputs.push_back({ 0, 0, object.geometryIndex, object.flags,
+						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius,
+						static_cast<std::uint32_t>(o), 0 });
 					skip(Skip::NotSkippedNatively);
 					continue;
 				}
@@ -1891,8 +2009,10 @@ namespace DCLF
 				auto sequence = tables.draws[o];
 				sequence.pipelineIndex = blocks.setIndex;
 				sequence.bindingsAddress = resources->recordsAddress + records.size() * sizeof(DrawBindings);
-				impl->inputs.push_back({ blocks.setIndex, static_cast<std::uint32_t>(records.size()), object.geometryIndex, object.flags,
-					{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius });
+				impl->inputs.push_back({ blocks.setIndex, static_cast<std::uint32_t>(records.size()), object.geometryIndex,
+					object.flags | kInputDrawable,
+					{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius,
+					static_cast<std::uint32_t>(o), 0 });
 				records.push_back(bindings);
 				sequences.push_back(sequence);
 				// Only what BuildDraws will actually write a sequence for counts as drawn. The tables now hold
@@ -1930,8 +2050,13 @@ namespace DCLF
 				geometryDraws[g] = { geometry.vertexAddress, static_cast<std::uint32_t>(std::min<std::uint64_t>(geometry.vertexBytes, UINT32_MAX)), geometry.vertexStride,
 					geometry.indexAddress, static_cast<std::uint32_t>(std::min<std::uint64_t>(geometry.indexBytes, UINT32_MAX)), geometry.indexCount, geometry.firstIndex, 0 };
 			}
+			// The depth segment clears every counter; the colour segment clears only the word its own draws
+			// append through. On the hybrid path the culling happens in the depth segment, so clearing the
+			// whole buffer again here would erase the phase 1 and phase 2 numbers before anything read them
+			// - they are written earlier in the same frame.
 			const std::uint32_t zero[kCountWords] = {};
-			BUFFER_UPLOAD(zero, sizeof(zero), org::runtime::UploadTarget::FromShared(resources->count), 0);
+			const std::size_t zeroBytes = (depthOnly || !frameHybrid) ? sizeof(zero) : sizeof(std::uint32_t);
+			BUFFER_UPLOAD(zero, zeroBytes, org::runtime::UploadTarget::FromShared(resources->count), 0);
 			if (!records.empty()) {
 				BUFFER_UPLOAD(records.data(), records.size() * sizeof(DrawBindings), org::runtime::UploadTarget::FromShared(resources->records), 0);
 				BUFFER_UPLOAD(impl->inputs.data(), impl->inputs.size() * sizeof(DrawInput), org::runtime::UploadTarget::FromShared(resources->inputs), 0);
@@ -1941,7 +2066,9 @@ namespace DCLF
 
 			auto frame = std::make_shared<PassFrame>();
 			frame->serial = ++impl->serial;
+			frame->frameNumber = frameNumber;
 			frame->drawCount = static_cast<std::uint32_t>(sequences.size());
+			frame->inputCount = static_cast<std::uint32_t>(impl->inputs.size());
 			frame->width = capture.viewportWidth;
 			frame->height = capture.viewportHeight;
 			// Both epochs rasterise with the main pass's depth range; see Impl::mainMinDepth.
@@ -2125,6 +2252,8 @@ namespace DCLF
 					a_stats.hzbSample.valid = false;
 				}
 				a_stats.cullOccludedVisible = words[16];
+				a_stats.cullDrawnPhaseTwo = words[17];
+				a_stats.cullRescuedByPhaseTwo = words[18];
 				context->Unmap(cullReadback->count.get(), 0);
 			}
 			cullReadback.reset();
@@ -2216,10 +2345,20 @@ namespace DCLF
 		// switches. inputs is parallel to sequences.
 		readback.expected.clear();
 		readback.expected.reserve(sequences.size());
-		for (std::size_t i = 0; i < sequences.size(); ++i) {
-			if (RequireNativeVisible() && i < inputs.size() && !(inputs[i].flags & kObjectNativeVisible))
-				continue;
-			readback.expected.push_back(sequences[i]);
+		{
+			// Cull-only inputs carry no sequence, so the two run at different rates and the drawable ones
+			// have to be counted off rather than indexed in step.
+			std::size_t sequence = 0;
+			for (const auto& input : inputs) {
+				if (!(input.flags & kInputDrawable))
+					continue;
+				if (sequence >= sequences.size())
+					break;
+				const auto& candidate = sequences[sequence++];
+				if (RequireNativeVisible() && !(input.flags & kObjectNativeVisible))
+					continue;
+				readback.expected.push_back(candidate);
+			}
 		}
 		readback.framesLeft = 3;
 		if (readback.sequences && readback.count)

@@ -12,13 +12,26 @@ cbuffer BuildDrawsConstants : register(b0)
 	uint RecordsAddressLo;  // device address of DrawBindings[0]
 	uint RecordsAddressHi;
 	uint RecordStride;
-	// Phase 4 culling. ViewProj is the main pass's, so it is camera-relative: the bounds are absolute
-	// world space and Eye (the camera's posAdjust) is subtracted before projecting them.
-	// Low bits: 0 off, 1 frustum, 2 frustum then the HZB. Bit 8 is RequireNativeVisible, folded in here
-	// because these are push constants and the block is already at Vulkan's guaranteed 128 bytes.
+	// Phase 4 culling. Bits 0-3 are the mode (0 off, 1 frustum, 2 frustum then the HZB), bits 4-7 the
+	// phase, and bit 8 RequireNativeVisible. They share a word because these are push constants and the
+	// block is at Vulkan's guaranteed 128 bytes.
 	uint CullFlags;
-	float3 Eye;
-	row_major float4x4 ViewProj;  // as the engine stores it (row 2 is the z row, row 3 the w row)
+	// RWByteAddressBuffer: one uint per object in the frame's tables, written by the depth segment's two
+	// culling phases and read by the colour segment. This is how the colour pass draws exactly what the
+	// depth passes drew: the decision is made once, in the depth segment, and published here, instead of
+	// each segment testing for itself and quietly disagreeing.
+	uint VisibilityIndex;
+	// Stamps the verdicts this frame publishes. A word that does not carry the current stamp was not
+	// written this frame, and the colour segment then treats the object as visible rather than trusting a
+	// stale verdict. Visible is the safe default: drawing something the depth passes did not cover means
+	// the colour draw's EQUAL test fails and the native pass shades it, while believing a stale "hidden"
+	// would drop an object that has depth and no other draw left to shade it.
+	uint VisibilityStamp;
+	uint CullPadding;  // keeps ViewProj on a 16-byte boundary
+	// The main pass's view-projection with the camera translation already folded into it, so a bound's
+	// absolute world position projects directly. The camera (posAdjust) used to be a separate float3 here;
+	// folding it in freed the words VisibilityIndex now uses.
+	row_major float4x4 ViewProj;
 	// Occlusion culling against the hierarchical depth buffer built at the end of the depth pass
 	// (HzbCS.hlsl). HzbIndex is zero when there is no HZB, which includes the first frame.
 	//
@@ -35,6 +48,21 @@ cbuffer BuildDrawsConstants : register(b0)
 }
 
 uint CullMode() { return CullFlags & 0xF; }
+// 1: the depth segment's first phase, against the HZB left by the previous frame. 2: its second phase,
+// against the HZB just rebuilt from this frame's depth, over what phase 1 rejected. 3: the colour segment,
+// which does not test anything and just reads what the two phases decided.
+uint CullPhase() { return (CullFlags >> 4) & 0xF; }
+static const uint kPhaseSingle = 0;
+static const uint kPhaseOne = 1;
+static const uint kPhaseTwo = 2;
+static const uint kPhaseColour = 3;
+
+// Visibility values. Frustum rejection is final - nothing about a later depth buffer can bring an object
+// back inside the frustum - while an occlusion rejection in phase 1 is provisional, because phase 1 tested
+// against a depth buffer from the previous frame.
+static const uint kVisibilityOccludedRetest = 0;
+static const uint kVisibilityVisible = 1;
+static const uint kVisibilityRejectedFinal = 2;
 // When set, only objects the engine's own culling kept (kObjectNativeVisible) may be drawn, which is what
 // the native loop skips and therefore what the frame has to contain. When clear, the GPU culling alone
 // decides and DCLF draws objects the engine culled. The counters are written either way, so the
@@ -47,6 +75,11 @@ float2 HzbUvScale() { return float2(HzbUvScalePacked & 0xFFFF, HzbUvScalePacked 
 
 // Object flags (Records.h), as the draw input carries them.
 static const uint kObjectNativeVisible = 1u << 3;
+// Set by the epoch rather than by the object: this input carries a usable bindings record, so a sequence
+// may be written for it. The depth segment submits an input for EVERY candidate so that the culling covers
+// them all and the published visibility is complete, but it only builds records for the ones it is allowed
+// to draw - which is what the native loop is skipping. The rest are cull-only.
+static const uint kInputDrawable = 1u << 16;
 
 // Counter words in the count buffer (zeroed before the dispatch).
 static const uint kCountDrawn = 0;          // sequences written
@@ -69,9 +102,16 @@ static const uint kSampleUvMin = 52;
 static const uint kSampleUvMax = 56;
 static const uint kSampleMip = 60;
 static const uint kCountOccludedVisible = 64;  // the HZB rejected it and the engine had kept it: the win
+static const uint kCountDrawnPhaseTwo = 68;    // sequences phase 2 appended, and the count its draw reads
+static const uint kCountRescuedByPhaseTwo = 72;  // objects phase 1 rejected and the rebuilt HZB brought back
+
+// Phase 2 writes into the far half of the sequence buffer. Its draw is recorded on the CPU, which cannot
+// know how many sequences phase 1 wrote, so the two need ranges that are fixed in advance rather than one
+// range shared by an atomic counter.
+static const uint kPhaseTwoSequenceBase = 16384;  // kMaxDraws
 
 // DrawInput: 32 bytes (pipeline/record/geometry/flags, then the world-space bounding sphere).
-static const uint kInputStride = 32;
+static const uint kInputStride = 40;
 // GeometryDraw: 40 bytes (vertex buffer view, index buffer view, index count, first index).
 static const uint kGeometryStride = 40;
 // DrawSequence: 64 bytes, 4-byte packed.
@@ -85,7 +125,7 @@ static const uint kIndexFormatR16 = 57;  // DXGI_FORMAT_R16_UINT
 // A corner behind the near plane makes the projection meaningless, so the object is kept.
 bool Culled(float3 boundCentre, float boundRadius)
 {
-	const float3 centre = boundCentre - Eye;
+	const float3 centre = boundCentre;
 	float4 planes = float4(1, 1, 1, 1);  // all-corners-outside accumulators: -x, +x, -y, +y
 	float2 depthPlanes = float2(1, 1);   // near, far
 	[unroll] for (uint corner = 0; corner < 8; ++corner) {
@@ -113,7 +153,7 @@ bool ScreenExtent(float3 boundCentre, float boundRadius, out float2 uvMin, out f
 	uvMin = float2(1, 1);
 	uvMax = float2(0, 0);
 	nearestZ = 1;
-	const float3 centre = boundCentre - Eye;
+	const float3 centre = boundCentre;
 	float2 ndcMin = float2(1e30, 1e30);
 	float2 ndcMax = float2(-1e30, -1e30);
 	float minZ = 1e30;
@@ -220,17 +260,36 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	ByteAddressBuffer geometries = ResourceDescriptorHeap[GeometriesIndex];
 	RWByteAddressBuffer sequences = ResourceDescriptorHeap[SequencesIndex];
 	RWByteAddressBuffer count = ResourceDescriptorHeap[CountIndex];
+	RWByteAddressBuffer visibility = ResourceDescriptorHeap[VisibilityIndex];
 
 	const uint inputOffset = draw * kInputStride;
 	const uint4 input = inputs.Load4(inputOffset);  // pipeline index, record index, geometry index, flags
+	const uint objectIndex = inputs.Load(inputOffset + 32);
 	const bool nativeVisible = (input.w & kObjectNativeVisible) != 0;
+	const bool drawable = (input.w & kInputDrawable) != 0;
+	const uint phase = CullPhase();
 	uint scratch;
+
+	// Phase 2 only revisits what phase 1 provisionally rejected, and the colour segment tests nothing at
+	// all - it draws what the two phases decided. Reading the decision rather than repeating it is what
+	// keeps the depth and colour passes drawing the same set; the colour pass tests depth EQUAL, so an
+	// object it draws without matching depth is invisible, and one the depth pass writes without a colour
+	// draw is a hole that the native pass can no longer fill.
+	const uint published = visibility.Load(objectIndex * 4);
+	const bool publishedThisFrame = (published >> 2) == VisibilityStamp;
+	const uint verdict = publishedThisFrame ? (published & 3) : kVisibilityVisible;
+	if (phase == kPhaseTwo && !(publishedThisFrame && verdict == kVisibilityOccludedRetest))
+		return;
+	if (phase == kPhaseColour && verdict != kVisibilityVisible)
+		return;
+
 	bool cullRejected = false, frustumRejected = false, occlusionRejected = false;
-	if (CullMode() != 0) {
+	if (phase != kPhaseColour && CullMode() != 0) {
 		// Word 2 separates "the culling rejected nothing" from "the culling did not run".
 		count.InterlockedAdd(kCountTested, 1, scratch);
 		const float4 bound = asfloat(inputs.Load4(inputOffset + 16));  // centre (world), radius
-		frustumRejected = Culled(bound.xyz, bound.w);
+		// Phase 2 has already had its frustum answer from phase 1 and only revisits occlusion.
+		frustumRejected = phase != kPhaseTwo && Culled(bound.xyz, bound.w);
 		if (frustumRejected) {
 			count.InterlockedAdd(kCountCulled, 1, scratch);
 		} else if (CullMode() >= 2 && Occluded(bound.xyz, bound.w, nativeVisible)) {
@@ -253,15 +312,33 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 		count.InterlockedAdd(kCountFalseNegative, 1, scratch);
 	if (occlusionRejected && nativeVisible)
 		count.InterlockedAdd(kCountOccludedVisible, 1, scratch);
-	if (!cullRejected && !nativeVisible)
+	if (!cullRejected && !nativeVisible && phase != kPhaseColour)
 		count.InterlockedAdd(kCountRescued, 1, scratch);
+
+	// Publish the decision. Phase 1 writes one for every candidate, so the buffer is completely rewritten
+	// each frame and nothing stale survives into the colour segment.
+	if (phase == kPhaseOne || phase == kPhaseTwo) {
+		const uint decided = frustumRejected ? kVisibilityRejectedFinal :
+			(occlusionRejected ? (phase == kPhaseOne ? kVisibilityOccludedRetest : kVisibilityRejectedFinal) : kVisibilityVisible);
+		visibility.Store(objectIndex * 4, (VisibilityStamp << 2) | decided);
+		if (phase == kPhaseTwo && !occlusionRejected)
+			count.InterlockedAdd(kCountRescuedByPhaseTwo, 1, scratch);
+	}
 
 	if (cullRejected)
 		return;
 	if (RequireNativeVisible() && !nativeVisible) {
-		count.InterlockedAdd(kCountEngineCulled, 1, scratch);
+		if (phase != kPhaseColour)
+			count.InterlockedAdd(kCountEngineCulled, 1, scratch);
+		// The gate is about what may be DRAWN, so it must not change the published visibility: the colour
+		// segment applies the same gate to the same objects and would otherwise disagree with itself.
 		return;
 	}
+	// Cull-only inputs carry no bindings record, so there is nothing to draw even though the object is
+	// visible and its visibility has been published.
+	if (!drawable)
+		return;
+
 	const uint geometryOffset = input.z * kGeometryStride;
 	const uint4 vertexBuffer = geometries.Load4(geometryOffset);        // address lo, hi, size, stride
 	const uint4 indexBuffer = geometries.Load4(geometryOffset + 16);    // address lo, hi, size, index count
@@ -272,9 +349,11 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	const uint recordLo = RecordsAddressLo + recordOffset;
 	const uint recordHi = RecordsAddressHi + (recordLo < RecordsAddressLo ? 1 : 0);
 
+	// Phase 2 appends into a reserved part of the same buffer, with a counter of its own, because its draw
+	// is recorded separately and the offset a recorded draw starts at has to be known on the CPU.
 	uint slot;
-	count.InterlockedAdd(kCountDrawn, 1, slot);
-	const uint base = slot * kSequenceStride;
+	count.InterlockedAdd(phase == kPhaseTwo ? kCountDrawnPhaseTwo : kCountDrawn, 1, slot);
+	const uint base = (slot + (phase == kPhaseTwo ? kPhaseTwoSequenceBase : 0)) * kSequenceStride;
 	sequences.Store(base + 0, input.x);
 	sequences.Store2(base + 4, uint2(recordLo, recordHi));
 	sequences.Store4(base + 12, vertexBuffer);

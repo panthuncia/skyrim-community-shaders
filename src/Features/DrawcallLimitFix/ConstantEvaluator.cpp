@@ -1,6 +1,12 @@
 #include "ConstantEvaluator.h"
 
+#include "Switches.h"
+
+#include <array>
 #include <cstring>
+#include <string>
+
+#include <ankerl/unordered_dense.h>
 
 #include "State.h"
 
@@ -84,10 +90,128 @@ namespace DCLF
 		return evaluator;
 	}
 
+	namespace
+	{
+		/** @brief Constant buffer slots saved and restored around a stand-in call (D3D11 allows 14). */
+		constexpr std::uint32_t kConstantBufferSlots = 14;
+
+		/**
+		 * @brief A snapshot of the pipeline state a stand-in evaluation could disturb.
+		 *
+		 * CS_DCLF_EVAL=audit captures one of these before the stand-in call and another after the restore,
+		 * and reports every slot that differs. The point is to stop guessing which feature hook leaves
+		 * something behind: whatever the engine's SetupMaterial or a hook on it publishes directly to the
+		 * device, rather than through the shadow state, shows up here by slot number.
+		 *
+		 * Deliberately wider than what RunStandIn restores today, which is only the constant buffer at the
+		 * evaluated level.
+		 */
+		struct PipelineSnapshot
+		{
+			static constexpr std::uint32_t kConstantBuffers = kConstantBufferSlots;
+			static constexpr std::uint32_t kPixelResources = 128;
+			static constexpr std::uint32_t kSamplers = 16;
+			static constexpr std::uint32_t kVertexResources = 16;
+
+			std::array<ID3D11Buffer*, kConstantBuffers> vsConstants{};
+			std::array<ID3D11Buffer*, kConstantBuffers> psConstants{};
+			std::array<ID3D11ShaderResourceView*, kPixelResources> psResources{};
+			std::array<ID3D11ShaderResourceView*, kVertexResources> vsResources{};
+			std::array<ID3D11SamplerState*, kSamplers> psSamplers{};
+
+			// CPU-side memory a hook can leave behind. The bindings above only catch state published to
+			// the device; a field of the real shader object leaks just as effectively and shows up in
+			// neither.
+			std::array<std::byte, 256> shaderObject{};
+
+			// Raw pointers only: the values are compared, never dereferenced, and every reference the
+			// getters hand out is released immediately so the snapshot cannot keep anything alive.
+			void Capture(ID3D11DeviceContext* a_context, const void* a_shader)
+			{
+				auto release = [](auto& a_array) {
+					for (auto*& entry : a_array) {
+						if (entry) {
+							entry->Release();
+						}
+					}
+				};
+				std::memcpy(shaderObject.data(), a_shader, shaderObject.size());
+
+				a_context->VSGetConstantBuffers(0, kConstantBuffers, vsConstants.data());
+				a_context->PSGetConstantBuffers(0, kConstantBuffers, psConstants.data());
+				a_context->PSGetShaderResources(0, kPixelResources, psResources.data());
+				a_context->VSGetShaderResources(0, kVertexResources, vsResources.data());
+				a_context->PSGetSamplers(0, kSamplers, psSamplers.data());
+				release(vsConstants);
+				release(psConstants);
+				release(psResources);
+				release(vsResources);
+				release(psSamplers);
+			}
+		};
+
+		/** @brief Reports each distinct leak once; a per-slot report every frame would be unreadable. */
+		void ReportLeaks(const char* a_what, const PipelineSnapshot& a_before, const PipelineSnapshot& a_after)
+		{
+			static ankerl::unordered_dense::set<std::uint64_t> reported;
+			auto compare = [&](const char* a_kind, const auto& a_lhs, const auto& a_rhs, std::uint32_t a_tag) {
+				for (std::uint32_t slot = 0; slot < a_lhs.size(); ++slot) {
+					if (a_lhs[slot] == a_rhs[slot]) {
+						continue;
+					}
+					const std::uint64_t key = (static_cast<std::uint64_t>(a_tag) << 32) | slot;
+					if (!reported.insert(key).second) {
+						continue;
+					}
+					logger::warn("[DCLF] stand-in leak ({}): {} slot {} was {} and is now {}", a_what, a_kind, slot,
+						static_cast<const void*>(a_lhs[slot]), static_cast<const void*>(a_rhs[slot]));
+				}
+			};
+			compare("VS constant buffer", a_before.vsConstants, a_after.vsConstants, 0);
+			compare("PS constant buffer", a_before.psConstants, a_after.psConstants, 1);
+			compare("PS resource", a_before.psResources, a_after.psResources, 2);
+			compare("VS resource", a_before.vsResources, a_after.vsResources, 3);
+			compare("PS sampler", a_before.psSamplers, a_after.psSamplers, 4);
+
+			// Byte ranges: report the first differing offset of each, once.
+			auto compareBytes = [&](const char* a_kind, const auto& a_lhs, const auto& a_rhs, std::uint32_t a_tag) {
+				for (std::size_t offset = 0; offset < a_lhs.size(); ++offset) {
+					if (a_lhs[offset] == a_rhs[offset]) {
+						continue;
+					}
+					const std::uint64_t key = (static_cast<std::uint64_t>(a_tag) << 32) | offset;
+					if (!reported.insert(key).second) {
+						return;
+					}
+					logger::warn("[DCLF] stand-in leak ({}): {} changed at offset 0x{:x} ({:02x} -> {:02x})", a_what, a_kind,
+						offset, static_cast<unsigned>(a_lhs[offset]), static_cast<unsigned>(a_rhs[offset]));
+					return;
+				}
+			};
+			compareBytes("BSLightingShader object", a_before.shaderObject, a_after.shaderObject, 5);
+		}
+	}
+
 	template <class Call>
 	bool ConstantEvaluator::RunStandIn(std::uint32_t a_level, std::uint32_t a_passDescriptor, ConstantBlock& a_vs, ConstantBlock& a_ps, Call&& a_call)
 	{
 		if (!lightingShader)
+			return false;
+
+		// CS_DCLF_EVAL is a diagnostic, not a mode. Suppressing an evaluation leaves the tables with
+		// unwritten constants, so DCLF's own objects render wrong; what it answers is whether the
+		// *natively* drawn content (actors, anything outside DCLF's coverage) is still corrupted, which
+		// separates state the stand-in leaks into the engine from anything DCLF's own draws do.
+		//
+		//   off       neither SetupMaterial nor SetupGeometry is ever called
+		//   material  only SetupMaterial runs (the per-material evaluation, ~636 calls a frame)
+		//   geometry  only SetupGeometry runs (the per-pipeline evaluation, ~37 calls a frame)
+		static const std::string eval = SwitchValue("CS_DCLF_EVAL");
+		if (eval == "off")
+			return false;
+		if (eval == "material" && a_level != kPerMaterial)
+			return false;
+		if (eval == "geometry" && a_level != kPerGeometry)
 			return false;
 
 		auto& state = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
@@ -120,10 +244,26 @@ namespace DCLF
 		// effect. (Light Limit Fix's hook uploads its StrictLightData and caches what it uploaded; that stays
 		// consistent and is left alone.)
 		const auto savedPermutation = globals::state->permutationData;
-		ID3D11Buffer* savedVS = nullptr;
-		ID3D11Buffer* savedPS = nullptr;
-		context->VSGetConstantBuffers(a_level, 1, &savedVS);
-		context->PSGetConstantBuffers(a_level, 1, &savedPS);
+		// Every constant buffer slot, not just the evaluated level. Restoring only a_level was an
+		// assumption about which slots the shader functions touch, and the audit disproved it: a stand-in
+		// SetupGeometry leaves a buffer bound at PS slot 7 that was not bound before (a feature hook binds
+		// its own per-geometry buffer there). Saving the whole range costs one Get and one Set per stage
+		// and removes the class of problem rather than the instance.
+		std::array<ID3D11Buffer*, kConstantBufferSlots> savedVS{};
+		std::array<ID3D11Buffer*, kConstantBufferSlots> savedPS{};
+		context->VSGetConstantBuffers(0, kConstantBufferSlots, savedVS.data());
+		context->PSGetConstantBuffers(0, kConstantBufferSlots, savedPS.data());
+
+		// The audit is expensive (about 200 device calls a snapshot) and the frame rate collapses under it,
+		// which is acceptable for a diagnostic. It covers *every* evaluation rather than a sample: the
+		// first version audited only the first 8 of roughly 640 material evaluations a frame and reported
+		// nothing, which says nothing at all when the leaking call might be any one of the other 630.
+		const bool audit = eval == "audit" && auditsThisFrame < 4096;
+		PipelineSnapshot before;
+		if (audit) {
+			++auditsThisFrame;
+			before.Capture(context, shader);
+		}
 
 		state.currentVertexShader = vs;
 		state.currentPixelShader = ps;
@@ -144,12 +284,24 @@ namespace DCLF
 		std::memcpy(&state, savedState.get(), sizeof(state));
 		shader->currentRawTechnique = savedTechnique;
 		globals::state->permutationData = savedPermutation;
-		context->VSSetConstantBuffers(a_level, 1, &savedVS);
-		context->PSSetConstantBuffers(a_level, 1, &savedPS);
-		if (savedVS)
-			savedVS->Release();
-		if (savedPS)
-			savedPS->Release();
+		context->VSSetConstantBuffers(0, kConstantBufferSlots, savedVS.data());
+		context->PSSetConstantBuffers(0, kConstantBufferSlots, savedPS.data());
+		for (auto* buffer : savedVS) {
+			if (buffer) {
+				buffer->Release();
+			}
+		}
+		for (auto* buffer : savedPS) {
+			if (buffer) {
+				buffer->Release();
+			}
+		}
+
+		if (audit) {
+			PipelineSnapshot after;
+			after.Capture(context, shader);
+			ReportLeaks(a_level == kPerMaterial ? "material" : "geometry", before, after);
+		}
 		return true;
 	}
 
