@@ -51,6 +51,24 @@ namespace DCLF
 		constexpr std::uint64_t kConstantAlignment = 256;  // uniform buffer address alignment (conservative)
 		constexpr std::uint32_t kColorTargets = 8;
 		constexpr std::uint32_t kMaxGeometries = kMaxDraws;
+		// The per-object record table (ObjectRecord) is indexed by a table index, not a draw index, so it
+		// covers every candidate the frame tracks rather than only the ones drawn.
+		constexpr std::uint32_t kMaxObjects = 32768;
+		// Draw inputs and the visibility buffer are sized by the table, not by the draw count: the depth
+		// segment submits a cull-only input for every candidate it may not draw, and BuildDraws indexes the
+		// visibility word by the object's TABLE index. Sizing either by kMaxDraws is an overrun waiting for
+		// a cell with more than kMaxDraws tracked objects.
+		constexpr std::uint32_t kMaxInputs = kMaxObjects;
+		// Distinct binding records an epoch may hold, and the size of the buffer behind them. Deduplicated
+		// they are one per (material, pipeline) pair: 85 behind 727 candidates in the Bannered Mare, 105
+		// behind 1616 in Dragonsreach. 2048 is about twenty times the worst seen, and 1.6 MB against the
+		// 13.1 MB the undeduplicated buffer needs. Without CS_DCLF_BINDLESS_DRAW there is a record per
+		// draw, so the cap has to stay at the draw cap - the record's contents are still per-object then.
+		constexpr std::uint32_t kMaxRecordsDeduplicated = 2048;
+		// The 32-bit record offset BuildDraws computes (input.y * RecordStride) has to address all of it.
+		static_assert(std::uint64_t(kMaxDraws) * sizeof(DrawBindings) < (std::uint64_t(1) << 32));
+		constexpr std::uint32_t kNoRecord = ~0u;
+		constexpr std::uint32_t kNoSkip = ~0u;
 		// BuildDrawsCS's counter words: [0] drawn, [1] culled, [2] tested, [3] engine-culled and gated out,
 		// [4] false negatives (the engine kept it, the culling rejected it), [5] rescued.
 		constexpr std::uint32_t kCountWords = 20;
@@ -174,6 +192,65 @@ namespace DCLF
 			return program;
 		}
 
+		// CS_DCLF_BINDLESS_PARITY: the per-object record against the packed constant group, variable by
+		// variable. Both are produced from tables.objects and tables.shading by the same rules, so the
+		// comparison is exact rather than tolerant - a tolerance here would only hide a layout mistake.
+		void CheckBindlessRecord(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, const BindlessObject& a_record,
+			const GeometryPatchOffsets& a_offsets, std::span<const std::byte> a_vs, std::span<const std::byte> a_ps, IndirectDraws::Stats& a_stats)
+		{
+			auto compare = [&](std::span<const std::byte> a_group, std::uint32_t a_offset, std::uint32_t a_count, const float* a_expected, const char* a_name) {
+				if (a_offset == ~0u)
+					return;  // the pipeline's shaders do not declare it, so neither form carries a value
+				for (std::uint32_t c = 0; c < a_count; ++c) {
+					const std::size_t at = (std::size_t(a_offset) + c) * 4;
+					if (at + 4 > a_group.size())
+						return;
+					float packed = 0.0f;
+					std::memcpy(&packed, a_group.data() + at, 4);
+					++a_stats.bindlessParityChecks;
+					if (std::bit_cast<std::uint32_t>(packed) == std::bit_cast<std::uint32_t>(a_expected[c]))
+						continue;
+					if (a_stats.bindlessParityMismatches++ == 0)
+						logger::warn("[DCLF] bindless record parity: {}[{}] is {} in the record and {} in the constant group", a_name, c, a_expected[c], packed);
+				}
+			};
+			compare(a_vs, a_offsets.vsWorld, std::min(a_offsets.vsWorldSize, 12u), a_record.world, "World");
+			compare(a_vs, a_offsets.vsPreviousWorld, std::min(a_offsets.vsPreviousWorldSize, 12u), a_record.previousWorld, "PreviousWorld");
+			compare(a_ps, a_offsets.psMaterialData, std::min(a_offsets.psMaterialDataSize, 4u), a_record.shading.materialData, "MaterialData");
+			compare(a_ps, a_offsets.psEmitColor, std::min(a_offsets.psEmitColorSize, 3u), a_record.shading.emitColor, "EmitColor");
+			if (a_offsets.psSSRParams != ~0u && a_offsets.psSSRParamsSize > 3)
+				compare(a_ps, a_offsets.psSSRParams + 3, 1, &a_record.shading.ssrSpecular, "SSRParams.w");
+
+			// The tail has no constant group to compare against once its buffers are gone, so it is checked
+			// against the expressions the epoch used to build those buffers from - which is exactly the
+			// thing being replaced.
+			const auto& object = a_tables.objects[a_objectIndex];
+			const auto& lights = a_tables.lights[a_objectIndex];
+			auto expect = [&](bool a_equal, const char* a_name) {
+				++a_stats.bindlessParityChecks;
+				if (!a_equal && a_stats.bindlessParityMismatches++ == 0)
+					logger::warn("[DCLF] bindless record parity: {} differs for object {}", a_name, a_objectIndex);
+			};
+			expect(a_record.roomIndex == lights.roomIndex, "RoomIndex");
+			expect(a_record.shadowBitMask == lights.shadowBitMask, "ShadowBitMask");
+			const float threshold = (object.flags & kObjectAlphaTest) ? ((object.flags >> kObjectAlphaThresholdShift) & 0xFF) / 255.0f : 0.0f;
+			expect(std::bit_cast<std::uint32_t>(a_record.alphaTestRef) == std::bit_cast<std::uint32_t>(threshold), "AlphaTestRef");
+			// EmissiveMult is the only one of the four whose SOURCE changes, from the scene graph to the
+			// tables, so it was tempting to check it against a live read of the property here. That check
+			// was built, and it fired: ~100 components in half a billion, always on flickering emissives.
+			// It was the check that was wrong. The multiplier is animated, and the shader divides it back
+			// out of the emissive colour before re-applying it - so the record's multiplier has to be the
+			// same SAMPLE that produced this object's emitColor, which is why MakeShading hands both back
+			// together. A live read at epoch time is a strictly later sample, and matching it would break
+			// the cancellation rather than prove anything.
+			//
+			// What is worth checking is the plumbing, because emissiveMult is a new parallel array and a
+			// gap in one of those shifts every later object's index. Whether it is sampled at the right
+			// point in the frame is already covered, and better, by capture parity's EmitColor comparison
+			// against the engine's own draw - which is the check RefreshFrameConstants exists to satisfy.
+			expect(a_tables.emissiveMult.size() == a_tables.objects.size(), "emissiveMult table length");
+		}
+
 		std::shared_ptr<org::Buffer> CreateWords(std::uint64_t a_words, bool a_unorderedAccess, const char* a_name)
 		{
 			auto buffer = org::Buffer::CreateUnmaterializedStructuredBuffer(static_cast<std::uint32_t>(a_words), sizeof(std::uint32_t), a_unorderedAccess);
@@ -264,10 +341,14 @@ namespace DCLF
 		{
 			std::vector<FrameBuffer> frameBuffers;
 			std::shared_ptr<org::Buffer> constants, records;
+			// The per-object records the DCLF_BINDLESS builds read, at t127 of every draw of the epoch.
+			std::shared_ptr<org::Buffer> objects;
+			std::uint32_t objectsIndex = 0;  // its SRV's descriptor heap index
 			std::shared_ptr<org::Buffer> inputs, geometries, sequences, count;  // BuildDraws: in, in, out, out
 			std::shared_ptr<const ComputeProgram> buildDraws;
 			winrt::com_ptr<ID3D11Buffer> sequencesD3D11, countD3D11;  // CS_DCLF_BUILD_PARITY readback
 			std::uint64_t constantsAddress = 0, recordsAddress = 0;
+			std::uint32_t recordCapacity = 0;  // entries in `records`, which deduplication makes far fewer
 			std::array<std::shared_ptr<org::PixelBuffer>, kColorTargets> targets;
 			std::uint32_t targetCount = 0;
 			std::shared_ptr<org::Resource> depth;  // DCLF's own Z-prepass (the objects it draws)
@@ -301,7 +382,7 @@ namespace DCLF
 		struct PassBindings
 		{
 			std::array<org::ResourceBindingToken, kColorTargets> targets{};
-			org::ResourceBindingToken depth, sequences, count, records, constants;
+			org::ResourceBindingToken depth, sequences, count, records, constants, objects;
 			org::ResourceBindingToken lights, lightIndexList, lightGrid;
 			std::vector<org::ResourceBindingToken> frameBuffers;
 		};
@@ -348,6 +429,8 @@ namespace DCLF
 				// Read through device addresses; declared so the graph orders them after their uploads.
 				bindings.records = a_builder.BindShaderResource(resources->records);
 				bindings.constants = a_builder.BindShaderResource(resources->constants);
+				if (resources->objects)
+					bindings.objects = a_builder.BindShaderResource(resources->objects);
 				for (const auto& frameBuffer : resources->frameBuffers)
 					bindings.frameBuffers.push_back(a_builder.BindShaderResource(frameBuffer.copy));
 				if (resources->lightLimitFix) {
@@ -1228,6 +1311,7 @@ namespace DCLF
 		std::vector<DrawSequence> sequences;  // CPU templates of BuildDraws' output
 		std::vector<DrawInput> inputs;
 		std::vector<GeometryDraw> geometryDraws;
+		std::vector<BindlessObject> objectRecords;  // the DCLF_BINDLESS per-object table, rebuilt each epoch
 
 		// The frame each geometry was last drawn by DCLF: the native loop skips a pass whose geometry the
 		// epoch drew. Only the colour epoch records it, so the native loop never skips an object that the
@@ -1343,7 +1427,14 @@ namespace DCLF
 				return created;
 			};
 			state->constants = buffer(kConstantBytes, "cs.dclf.constants");
-			state->records = buffer(std::uint64_t(kMaxDraws) * sizeof(DrawBindings), "cs.dclf.records");
+			state->recordCapacity = BindlessDraws() ? kMaxRecordsDeduplicated : kMaxDraws;
+			state->records = buffer(std::uint64_t(state->recordCapacity) * sizeof(DrawBindings), "cs.dclf.records");
+			// Structured rather than raw, because the shaders read it through an SRV at t127 instead of
+			// through a device address the way the constants and the binding records are read.
+			state->objects = org::Buffer::CreateUnmaterializedStructuredBuffer(kMaxObjects, sizeof(BindlessObject), false);
+			state->objects->SetName("cs.dclf.objects");
+			state->objects->Materialize();
+			state->objectsIndex = state->objects->GetSRVInfo(0).slot.index;
 			// Twice kMaxDraws: phase 1 and the colour segment write the first half, phase 2 the second. The
 			// CPU records where phase 2's draw starts, so the two need ranges fixed in advance rather than
 			// one range shared through an atomic counter.
@@ -1351,8 +1442,8 @@ namespace DCLF
 			state->count = CreateWords(kCountWords, true, "cs.dclf.draw-count");
 			// One word per object in the frame's tables: what the depth segment's culling decided, read by
 			// the colour segment so that it draws exactly the same set.
-			state->visibility = CreateWords(kMaxDraws, true, "cs.dclf.visibility");
-			state->inputs = CreateWords(std::uint64_t(kMaxDraws) * sizeof(DrawInput) / 4, false, "cs.dclf.draw-inputs");
+			state->visibility = CreateWords(kMaxObjects, true, "cs.dclf.visibility");
+			state->inputs = CreateWords(std::uint64_t(kMaxInputs) * sizeof(DrawInput) / 4, false, "cs.dclf.draw-inputs");
 			state->geometries = CreateWords(std::uint64_t(kMaxGeometries) * sizeof(GeometryDraw) / 4, false, "cs.dclf.geometries");
 			state->buildDraws = LoadComputeProgram(device, kBuildDrawsShader, kBuildDrawsConstantWords);
 			if (!state->buildDraws)
@@ -1587,6 +1678,23 @@ namespace DCLF
 			if (frame - drawn <= 1)
 				claims->insert(geometry);
 		}
+		// Churn against the set that was in force this frame.
+		captureStats.claimsAdded = captureStats.claimsDropped = captureStats.droppedAfterCull = 0;
+		if (const auto previous = capture.CurrentClaims()) {
+			for (const auto* geometry : *previous) {
+				if (!claims->contains(geometry)) {
+					++captureStats.claimsDropped;
+					// Still registered by the engine, so the engine will draw it from now on: this is the
+					// signature of culling undoing itself.
+					if (store.FindAccumulatedPass(geometry))
+						++captureStats.droppedAfterCull;
+				}
+			}
+			for (const auto* geometry : *claims) {
+				if (!previous->contains(geometry))
+					++captureStats.claimsAdded;
+			}
+		}
 		capture.PublishClaims(std::move(claims));
 	}
 
@@ -1807,6 +1915,8 @@ namespace DCLF
 			frameTextures.fill(kInvalidIndex);
 			for (std::uint32_t t = 16; t < kTextureRegisters && !depthOnly; ++t)
 				frameTextures[t] = textures.Resolve(capture.psViews[t]);
+			// DCLF's own, in both epochs: the depth stage's alpha test reads MaterialData out of it too.
+			frameTextures[kObjectBufferRegister] = resources->objectsIndex;
 			if (resources->lightLimitFix && !depthOnly)
 				ORGLightCulling::Get().GetShaderResourceIndices(frameTextures[kLightsRegister], frameTextures[kLightsRegister + 1], frameTextures[kLightsRegister + 2]);
 			for (const auto& frameBuffer : depthOnly ? decltype(resources->frameBuffers){} : resources->frameBuffers) {
@@ -1866,6 +1976,12 @@ namespace DCLF
 				bool texturesOk = false;
 				bool samplersOk = false;
 				std::uint32_t missingTexture = 0;  // the register that failed, for the skip sample
+				// Deduplication: once nothing in the binding record is per-object, every draw of a
+				// (material, pipeline) pair wants the same record, so the pair keeps its index here and the
+				// assembly runs once. A pair that could not be assembled keeps the reason instead, because
+				// the skip counters are per DRAW and have to be raised for each of them, not once per pair.
+				std::uint32_t recordIndex = kNoRecord;
+				std::uint32_t skipReason = kNoSkip;
 			};
 			ankerl::unordered_dense::map<std::uint64_t, ResolvedBindings> resolvedBindings;  // (material, pipeline)
 			// The PerGeometry group, packed once per pipeline. Every object on a pipeline shares all of it
@@ -1876,6 +1992,9 @@ namespace DCLF
 				std::vector<std::byte> vs;
 				std::vector<std::byte> ps;
 				GeometryPatchOffsets offsets;
+				// With DCLF_BINDLESS nothing in the group is per-object, so the pipeline's objects share one
+				// pair of arena blocks instead of allocating, copying and patching a pair each.
+				std::uint64_t vsAddress = 0, psAddress = 0;
 			};
 			ankerl::unordered_dense::map<std::uint32_t, GeometryTemplate> geometryTemplates;  // pipeline
 			ankerl::unordered_dense::map<std::uint64_t, std::uint64_t> lightBlocks;        // (room, shadow mask)
@@ -1894,6 +2013,37 @@ namespace DCLF
 				partStart = now;
 			};
 			const bool frameHybrid = resources->hybrid;
+			const bool bindless = BindlessObjects();
+			// The alpha test reference, the emissive multiplier and LLF's room index and shadow bit mask
+			// come from the object record, so the blocks that carried them are not built at all. b3 still
+			// has to resolve to something, because the shader goes on declaring StrictLightData for its
+			// light list - but one zeroed block for the whole epoch does, where it used to be one per
+			// (room, shadow mask) pair.
+			const bool bindlessDraws = BindlessDraws();
+			// Only with that switch is the record identical for every draw of a (material, pipeline) pair:
+			// without it the light, alpha and emissive blocks still differ per object, and so would the
+			// record the cache handed back.
+			const bool dedup = bindlessDraws;
+			static const bool dedupParity = SwitchEnabled("CS_DCLF_DEDUP_PARITY");
+			std::uint64_t sharedLightBlock = 0;
+			static const bool bindlessParity = SwitchEnabled("CS_DCLF_BINDLESS_PARITY");
+			// Scratch for that check only, reused across objects so it costs no allocation per draw.
+			std::vector<std::byte> parityVS, parityPS;
+			// Camera-relative world matrices: the colour epoch must use the eye the Z-prepass used, or the
+			// same vertex lands somewhere else and the EQUAL test rejects it.
+			const auto& eye = replayVertexInputs ? impl->prepassEye : capture.eye;
+			const auto& previousEye = replayVertexInputs ? impl->prepassPreviousEye : capture.previousEye;
+
+			// The per-object record table the DCLF_BINDLESS builds read. It is indexed by the object's table
+			// index, which the draw carries as its third root constant word, so it is filled for every
+			// candidate rather than only the drawn ones - a candidate skipped here still reaches the
+			// culling, and an index that addressed nothing would be worse than one that addresses a record
+			// no draw reads.
+			auto& objectRecords = impl->objectRecords;
+			objectRecords.resize(std::min<std::size_t>(tables.objects.size(), kMaxObjects));
+			for (std::size_t r = 0; r < objectRecords.size(); ++r)
+				BuildObjectRecord(tables, static_cast<std::uint32_t>(r), renderFlags, eye, previousEye, objectRecords[r]);
+
 			for (std::uint32_t o = 0; o < tables.objects.size(); ++o) {
 				const auto& object = tables.objects[o];
 				if (object.flags & kObjectNoBindings) {
@@ -1909,6 +2059,15 @@ namespace DCLF
 				const auto& geometry = tables.geometries[object.geometryIndex];
 				if (!geometry.vertexAddress || !geometry.indexAddress) {
 					skip(Skip::Geometry);
+					continue;
+				}
+				// The object's table index addresses its record and its visibility word, and it travels to
+				// the shaders as the draw's third root constant. Past the table's capacity it addresses
+				// neither, and robust buffer access turns that into zeros - a world matrix of zeros collapses
+				// the object to a point at the eye with no other sign. Both caps come before the cull-only
+				// push below, which used to reach the inputs buffer without passing any check at all.
+				if (o >= kMaxObjects || impl->inputs.size() >= kMaxInputs) {
+					skip(Skip::Capacity);
 					continue;
 				}
 				// The Z-prepass must write depth for exactly the objects the native loop is leaving to DCLF,
@@ -1929,7 +2088,9 @@ namespace DCLF
 					skip(Skip::NotSkippedNatively);
 					continue;
 				}
-				if (records.size() >= kMaxDraws) {
+				// The draw cap: BuildDraws writes into the first half of the sequence buffer, and the count
+				// is ExecuteIndirect's maxCount.
+				if (sequences.size() >= kMaxDraws) {
 					skip(Skip::Capacity);
 					continue;
 				}
@@ -1940,171 +2101,256 @@ namespace DCLF
 
 				auto [resolvedIt, newResolved] = resolvedBindings.try_emplace((std::uint64_t(object.materialIndex) << 32) | object.pipelineIndex);
 				auto& resolved = resolvedIt->second;
-				if (newResolved) {
-					// Textures: the material's, the technique's shadow mask, then the frame's.
-					resolved.texturesOk = true;
-					for (std::uint32_t t = 0; t < kTextureRegisters; ++t) {
-						// Slots below 16 the material and technique leave alone read a null view (natively: whatever
-						// an earlier draw left bound; Phase 3 parity checks it).
-						std::uint32_t index = t < kPixelTextureSlots ? textures.NullIndex() : frameTextures[t];
-						if (!resolveTextures)
-							index = 0;
-						else if (t < kPixelTextureSlots && ((material.textureWritten >> t) & 1))
-							index = textures.Resolve(material.textures[t]);
-						else if (t == kShadowMaskSlot && technique.shadowMask)
-							index = textures.Resolve(technique.shadowMaskTexture);
-						if (index == kInvalidIndex && usage.UsesTexture(t)) {
-							resolved.texturesOk = false;
-							resolved.missingTexture = t;
-							break;
-						}
-						resolved.textures[t] = index == kInvalidIndex ? 0 : index;
-					}
-
-					// Samplers: the modes the material (or, for the shadow mask, the technique) sets.
-					resolved.samplersOk = true;
-					for (std::uint32_t s = 0; s < kSamplerRegisters; ++s) {
-						std::uint32_t address = 0, filter = 0;
-						if (s < kPixelTextureSlots && ((material.textureWritten >> s) & 1)) {
-							address = material.addressModes[s];
-							filter = material.filterModes[s] != kUnwrittenFilterMode ? material.filterModes[s] : technique.filterModes[s];
-						} else if (s == kShadowMaskSlot && technique.shadowMask) {
-							filter = technique.filterModes[s];
-						}
-						if (filter == kUnwrittenFilterMode)
-							filter = 0;
-						const auto index = resolveTextures ? textures.Sampler(address, filter) : 0u;
-						if (index == kInvalidIndex && ((usage.samplers >> s) & 1)) {
-							resolved.samplersOk = false;
-							break;
-						}
-						resolved.samplers[s] = index == kInvalidIndex ? 0 : index;
-					}
-				}
-				if (!resolved.texturesOk) {
-					// The sample is recorded per skipped draw, as it was before, not per distinct pair.
-					if (missingNext < stats.missingTextures.size())
-						stats.missingTextures[missingNext++] = resolved.missingTexture;
-					skip(Skip::Texture);
+				// Assembled once per (material, pipeline) pair when the record no longer varies per object, and per
+				// draw otherwise. Everything in here - the texture and sampler heap indices, the material,
+				// technique, geometry, permutation, light, alpha and emissive blocks, and the per-frame defaults
+				// - is then a property of the pair or of the epoch, so a second draw of the same pair needs
+				// nothing but its index.
+				auto fail = [&](Skip a_reason) {
+					if (dedup)
+						resolved.skipReason = static_cast<std::uint32_t>(a_reason);
+					skip(a_reason);
+				};
+				if (dedup && resolved.skipReason != kNoSkip) {
+					skip(static_cast<Skip>(resolved.skipReason));  // per draw, not once per pair
 					continue;
 				}
-				if (!resolved.samplersOk) {
-					skip(Skip::Sampler);
-					continue;
-				}
-				std::copy(resolved.textures.begin(), resolved.textures.end(), bindings.textures);
-				std::copy(resolved.samplers.begin(), resolved.samplers.end(), bindings.samplers);
-				mark(0);
+				std::uint32_t recordIndex = resolved.recordIndex;
+				if (!dedup || recordIndex == kNoRecord || dedupParity) {
+					if (newResolved) {
+						// Textures: the material's, the technique's shadow mask, then the frame's.
+						resolved.texturesOk = true;
+						for (std::uint32_t t = 0; t < kTextureRegisters; ++t) {
+							// Slots below 16 the material and technique leave alone read a null view (natively: whatever
+							// an earlier draw left bound; Phase 3 parity checks it).
+							std::uint32_t index = t < kPixelTextureSlots ? textures.NullIndex() : frameTextures[t];
+							if (!resolveTextures && t != kObjectBufferRegister)
+								index = 0;
+							else if (t < kPixelTextureSlots && ((material.textureWritten >> t) & 1))
+								index = textures.Resolve(material.textures[t]);
+							else if (t == kShadowMaskSlot && technique.shadowMask)
+								index = textures.Resolve(technique.shadowMaskTexture);
+							if (index == kInvalidIndex && usage.UsesTexture(t)) {
+								resolved.texturesOk = false;
+								resolved.missingTexture = t;
+								break;
+							}
+							resolved.textures[t] = index == kInvalidIndex ? 0 : index;
+						}
 
-				// Constant buffers.
-				auto& materialBlock = materialBlocks[(std::uint64_t(object.materialIndex) << 32) | object.pipelineIndex];
-				if (!materialBlock.first && !materialBlock.second) {
-					auto pack = [&](const ConstantBlock& a_block, const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_first) {
-						const auto size = ConstantGroupSize(a_layout, a_table, a_variables, a_first);
-						const auto address = block(nullptr, size);
-						if (address)
-							PackConstantGroup(a_block, a_layout, a_table, a_variables, a_first, arena.At(address - base, std::max<std::size_t>(size, 16)));
-						return address;
-					};
-					materialBlock.first = pack(material.vs, LightingVSLayout(), blocks.vs->constantTable, kVSGroups[kPerMaterial], kVSFirstVariable[kPerMaterial]);
-					materialBlock.second = pack(material.ps, LightingPSLayout(), blocks.ps->constantTable, kPSGroups[kPerMaterial], kPSFirstVariable[kPerMaterial]);
-				}
-				// Camera-relative world matrices: the colour epoch must use the eye the Z-prepass used, or the
-				// same vertex lands somewhere else and the EQUAL test rejects it.
-				const auto& eye = replayVertexInputs ? impl->prepassEye : capture.eye;
-				const auto& previousEye = replayVertexInputs ? impl->prepassPreviousEye : capture.previousEye;
-				std::uint64_t geometryVS = 0, geometryPS = 0;
-				{
-					auto [templateIt, newTemplate] = geometryTemplates.try_emplace(object.pipelineIndex);
-					auto& geometryTemplate = templateIt->second;
-					if (newTemplate) {
-						const auto vsSize = ConstantGroupSize(LightingVSLayout(), blocks.vs->constantTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry]);
-						const auto psSize = ConstantGroupSize(LightingPSLayout(), blocks.ps->constantTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry]);
-						geometryTemplate.vs.assign(std::max<std::size_t>(vsSize, 16), std::byte{});
-						geometryTemplate.ps.assign(std::max<std::size_t>(psSize, 16), std::byte{});
-						// The pipeline's own values, which is everything the objects do not override.
-						const auto& pipelineConstants = tables.geometryConstants[object.pipelineIndex];
-						PackConstantGroup(pipelineConstants.vs, LightingVSLayout(), blocks.vs->constantTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry],
-							geometryTemplate.vs);
-						PackConstantGroup(pipelineConstants.ps, LightingPSLayout(), blocks.ps->constantTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry],
-							geometryTemplate.ps);
-						geometryTemplate.offsets = GeometryPatchOffsetsOf(blocks.vs->constantTable, blocks.ps->constantTable);
-						geometryTemplate.vs.resize(vsSize);
-						geometryTemplate.ps.resize(psSize);
+						// Samplers: the modes the material (or, for the shadow mask, the technique) sets.
+						resolved.samplersOk = true;
+						for (std::uint32_t s = 0; s < kSamplerRegisters; ++s) {
+							std::uint32_t address = 0, filter = 0;
+							if (s < kPixelTextureSlots && ((material.textureWritten >> s) & 1)) {
+								address = material.addressModes[s];
+								filter = material.filterModes[s] != kUnwrittenFilterMode ? material.filterModes[s] : technique.filterModes[s];
+							} else if (s == kShadowMaskSlot && technique.shadowMask) {
+								filter = technique.filterModes[s];
+							}
+							if (filter == kUnwrittenFilterMode)
+								filter = 0;
+							const auto index = resolveTextures ? textures.Sampler(address, filter) : 0u;
+							if (index == kInvalidIndex && ((usage.samplers >> s) & 1)) {
+								resolved.samplersOk = false;
+								break;
+							}
+							resolved.samplers[s] = index == kInvalidIndex ? 0 : index;
+						}
 					}
-					geometryVS = block(nullptr, geometryTemplate.vs.size());
-					geometryPS = block(nullptr, geometryTemplate.ps.size());
-					if (geometryVS && geometryPS) {
-						auto vsOut = arena.At(geometryVS - base, std::max<std::size_t>(geometryTemplate.vs.size(), 16));
-						auto psOut = arena.At(geometryPS - base, std::max<std::size_t>(geometryTemplate.ps.size(), 16));
-						std::memcpy(vsOut.data(), geometryTemplate.vs.data(), geometryTemplate.vs.size());
-						std::memcpy(psOut.data(), geometryTemplate.ps.data(), geometryTemplate.ps.size());
-						PatchObjectGeometry(tables, o, renderFlags, eye, previousEye, geometryTemplate.offsets,
-							vsOut.subspan(0, geometryTemplate.vs.size()), psOut.subspan(0, geometryTemplate.ps.size()));
+					if (!resolved.texturesOk) {
+						// The sample is recorded per skipped draw, as it was before, not per distinct pair.
+						if (missingNext < stats.missingTextures.size())
+							stats.missingTextures[missingNext++] = resolved.missingTexture;
+						fail(Skip::Texture);
+						continue;
 					}
-				}
-				const auto& lights = tables.lights[o];
-				auto& lightBlock = lightBlocks[(std::uint64_t(static_cast<std::uint32_t>(lights.roomIndex)) << 32) | lights.shadowBitMask];
-				if (!lightBlock) {
-					const std::uint32_t header[4] = { 0, static_cast<std::uint32_t>(lights.roomIndex), lights.shadowBitMask, 0 };
-					lightBlock = block(nullptr, kStrictLightDataBytes);
-					if (lightBlock)
-						std::memcpy(arena.At(lightBlock - base, sizeof(header)).data(), header, sizeof(header));
-				}
-				const auto& permutation = tables.permutations[object.pipelineIndex];
-				const std::uint32_t extra = permutation.extraShaderDescriptor |
-				                            ((object.flags & kObjectSuppressExternalEmittance) ? static_cast<std::uint32_t>(State::ExtraShaderDescriptors::SuppressExternalEmittance) : 0u);
-				auto& permutationBlock = permutationBlocks[(std::uint64_t(object.pipelineIndex) << 32) | extra];
-				if (!permutationBlock) {
-					const std::uint32_t data[8] = { permutation.vertexShaderDescriptor, permutation.pixelShaderDescriptor, extra, permutation.extraFeatureDescriptor, 0, 0, 0, 0 };
-					permutationBlock = block(data, sizeof(data));
-				}
-				const std::uint32_t threshold = (object.flags & kObjectAlphaTest) ? (object.flags >> kObjectAlphaThresholdShift) & 0xFF : 0;
-				auto& alphaBlock = alphaBlocks[threshold];
-				if (!alphaBlock) {
-					const float data[4] = { threshold / 255.0f, 0, 0, 0 };
-					alphaBlock = block(data, sizeof(data));
-				}
+					if (!resolved.samplersOk) {
+						fail(Skip::Sampler);
+						continue;
+					}
+					std::copy(resolved.textures.begin(), resolved.textures.end(), bindings.textures);
+					std::copy(resolved.samplers.begin(), resolved.samplers.end(), bindings.samplers);
+					mark(0);
 
-				mark(1);
-				std::copy(frameVS.begin(), frameVS.end(), bindings.vertexConstants);
-				std::copy(framePS.begin(), framePS.end(), bindings.pixelConstants);
-				bindings.vertexConstants[kPerTechnique] = blocks.techniqueVS;
-				bindings.vertexConstants[kPerMaterial] = materialBlock.first;
-				bindings.vertexConstants[kPerGeometry] = geometryVS;
-				bindings.vertexConstants[4] = permutationBlock;
-				bindings.pixelConstants[kPerTechnique] = blocks.techniquePS;
-				bindings.pixelConstants[kPerMaterial] = materialBlock.second;
-				bindings.pixelConstants[kPerGeometry] = geometryPS;
-				bindings.pixelConstants[3] = lightBlock;
-				bindings.pixelConstants[4] = permutationBlock;
-				bindings.pixelConstants[11] = alphaBlock;
-				// Linear Lighting binds its multiplier per draw only while enabled; otherwise the shader
-				// does not read it.
-				{
-					const auto* property = static_cast<const RE::BSLightingShaderProperty*>(tables.objectGeometry[o]->GetGeometryRuntimeData().shaderProperty.get());
-					const float multiplier = linearLighting ? property->emissiveMult : 1.0f;
-					auto& emissiveBlock = emissiveBlocks[std::bit_cast<std::uint32_t>(multiplier)];
-					if (!emissiveBlock) {
-						const float data[4] = { multiplier, 0, 0, 0 };
-						emissiveBlock = block(data, sizeof(data));
+					// Constant buffers.
+					auto& materialBlock = materialBlocks[(std::uint64_t(object.materialIndex) << 32) | object.pipelineIndex];
+					if (!materialBlock.first && !materialBlock.second) {
+						auto pack = [&](const ConstantBlock& a_block, const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_first) {
+							const auto size = ConstantGroupSize(a_layout, a_table, a_variables, a_first);
+							const auto address = block(nullptr, size);
+							if (address)
+								PackConstantGroup(a_block, a_layout, a_table, a_variables, a_first, arena.At(address - base, std::max<std::size_t>(size, 16)));
+							return address;
+						};
+						materialBlock.first = pack(material.vs, LightingVSLayout(), blocks.vs->constantTable, kVSGroups[kPerMaterial], kVSFirstVariable[kPerMaterial]);
+						materialBlock.second = pack(material.ps, LightingPSLayout(), blocks.ps->constantTable, kPSGroups[kPerMaterial], kPSFirstVariable[kPerMaterial]);
 					}
-					bindings.pixelConstants[kLinearLightingRegister] = emissiveBlock;
-				}
-				bool constantsOk = true;
-				for (std::uint32_t b = 0; b < kConstantBufferRegisters; ++b) {
-					if (((usage.vertexConstants >> b) & 1) && !bindings.vertexConstants[b]) {
-						constantsOk = false;
-						stats.missingVertexConstants |= 1u << b;
+					std::uint64_t geometryVS = 0, geometryPS = 0;
+					{
+						auto [templateIt, newTemplate] = geometryTemplates.try_emplace(object.pipelineIndex);
+						auto& geometryTemplate = templateIt->second;
+						if (newTemplate) {
+							const auto vsSize = ConstantGroupSize(LightingVSLayout(), blocks.vs->constantTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry]);
+							const auto psSize = ConstantGroupSize(LightingPSLayout(), blocks.ps->constantTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry]);
+							geometryTemplate.vs.assign(std::max<std::size_t>(vsSize, 16), std::byte{});
+							geometryTemplate.ps.assign(std::max<std::size_t>(psSize, 16), std::byte{});
+							// The pipeline's own values, which is everything the objects do not override.
+							const auto& pipelineConstants = tables.geometryConstants[object.pipelineIndex];
+							PackConstantGroup(pipelineConstants.vs, LightingVSLayout(), blocks.vs->constantTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry],
+								geometryTemplate.vs);
+							PackConstantGroup(pipelineConstants.ps, LightingPSLayout(), blocks.ps->constantTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry],
+								geometryTemplate.ps);
+							geometryTemplate.offsets = GeometryPatchOffsetsOf(blocks.vs->constantTable, blocks.ps->constantTable);
+							geometryTemplate.vs.resize(vsSize);
+							geometryTemplate.ps.resize(psSize);
+							if (bindless) {
+								auto upload = [&](const std::vector<std::byte>& a_group) {
+									if (a_group.empty())
+										return std::uint64_t{ 0 };  // the stage does not declare the buffer
+									const auto address = block(nullptr, a_group.size());
+									if (address)
+										std::memcpy(arena.At(address - base, std::max<std::size_t>(a_group.size(), 16)).data(), a_group.data(), a_group.size());
+									return address;
+								};
+								geometryTemplate.vsAddress = upload(geometryTemplate.vs);
+								geometryTemplate.psAddress = upload(geometryTemplate.ps);
+							}
+						}
+						if (bindless) {
+							// One pair of blocks for the whole pipeline, written when the template was built.
+							geometryVS = geometryTemplate.vsAddress;
+							geometryPS = geometryTemplate.psAddress;
+						} else {
+							geometryVS = block(nullptr, geometryTemplate.vs.size());
+							geometryPS = block(nullptr, geometryTemplate.ps.size());
+							if (geometryVS && geometryPS) {
+								auto vsOut = arena.At(geometryVS - base, std::max<std::size_t>(geometryTemplate.vs.size(), 16));
+								auto psOut = arena.At(geometryPS - base, std::max<std::size_t>(geometryTemplate.ps.size(), 16));
+								std::memcpy(vsOut.data(), geometryTemplate.vs.data(), geometryTemplate.vs.size());
+								std::memcpy(psOut.data(), geometryTemplate.ps.data(), geometryTemplate.ps.size());
+								PatchObjectGeometry(tables, o, renderFlags, eye, previousEye, geometryTemplate.offsets,
+									vsOut.subspan(0, geometryTemplate.vs.size()), psOut.subspan(0, geometryTemplate.ps.size()));
+							}
+						}
+						// CS_DCLF_BINDLESS_PARITY=1: the record the shaders read against the group the constant
+						// buffer path packs for the same object. The two derive from the same inputs through the
+						// same unwritten-component rule, so anything but bit equality is a defect in the record's
+						// layout or in the way it is filled, caught on the CPU with no readback and without
+						// needing both forms in one run. With DCLF_BINDLESS the group is no longer written for
+						// real, so the check packs its own copy to compare against - which is the point: it keeps
+						// a gate on the record after the path it replaced has gone.
+						if (bindlessParity && o < objectRecords.size()) {
+							parityVS.assign(geometryTemplate.vs.begin(), geometryTemplate.vs.end());
+							parityPS.assign(geometryTemplate.ps.begin(), geometryTemplate.ps.end());
+							PatchObjectGeometry(tables, o, renderFlags, eye, previousEye, geometryTemplate.offsets, parityVS, parityPS);
+							CheckBindlessRecord(tables, o, objectRecords[o], geometryTemplate.offsets, parityVS, parityPS, stats);
+						}
 					}
-					if (((usage.pixelConstants >> b) & 1) && !bindings.pixelConstants[b]) {
-						constantsOk = false;
-						stats.missingPixelConstants |= 1u << b;
+					std::uint64_t lightBlock = 0;
+					if (bindlessDraws) {
+						if (!sharedLightBlock)
+							sharedLightBlock = block(nullptr, kStrictLightDataBytes);  // NumStrictLights 0, and nothing else is read
+						lightBlock = sharedLightBlock;
+					} else {
+						const auto& lights = tables.lights[o];
+						auto& cached = lightBlocks[(std::uint64_t(static_cast<std::uint32_t>(lights.roomIndex)) << 32) | lights.shadowBitMask];
+						if (!cached) {
+							const std::uint32_t header[4] = { 0, static_cast<std::uint32_t>(lights.roomIndex), lights.shadowBitMask, 0 };
+							cached = block(nullptr, kStrictLightDataBytes);
+							if (cached)
+								std::memcpy(arena.At(cached - base, sizeof(header)).data(), header, sizeof(header));
+						}
+						lightBlock = cached;
 					}
-				}
-				if (!constantsOk) {
-					skip(Skip::Constants);
-					continue;
+					const auto& permutation = tables.permutations[object.pipelineIndex];
+					// SuppressExternalEmittance is the only per-object bit DCLF puts in this block, and it is
+					// read at exactly one place in the whole shader tree - Effect.hlsl's GetLightingColor -
+					// never by Lighting.hlsl or anything it includes. So for these pipelines it is dead, and
+					// under bindless the block keys on the pipeline alone, which is what makes the binding
+					// record identical for a (material, pipeline) pair. The non-bindless control keeps the bit,
+					// so CaptureParity::ComparePermutation goes on measuring the real thing against the engine.
+					const std::uint32_t extra = permutation.extraShaderDescriptor |
+					                            ((!bindless && (object.flags & kObjectSuppressExternalEmittance)) ?
+												        static_cast<std::uint32_t>(State::ExtraShaderDescriptors::SuppressExternalEmittance) :
+												        0u);
+					auto& permutationBlock = permutationBlocks[(std::uint64_t(object.pipelineIndex) << 32) | extra];
+					if (!permutationBlock) {
+						const std::uint32_t data[8] = { permutation.vertexShaderDescriptor, permutation.pixelShaderDescriptor, extra, permutation.extraFeatureDescriptor, 0, 0, 0, 0 };
+						permutationBlock = block(data, sizeof(data));
+					}
+					std::uint64_t alphaBlock = 0;
+					if (!bindlessDraws) {
+						const std::uint32_t threshold = (object.flags & kObjectAlphaTest) ? (object.flags >> kObjectAlphaThresholdShift) & 0xFF : 0;
+						auto& cached = alphaBlocks[threshold];
+						if (!cached) {
+							const float data[4] = { threshold / 255.0f, 0, 0, 0 };
+							cached = block(data, sizeof(data));
+						}
+						alphaBlock = cached;
+					}
+
+					mark(1);
+					std::copy(frameVS.begin(), frameVS.end(), bindings.vertexConstants);
+					std::copy(framePS.begin(), framePS.end(), bindings.pixelConstants);
+					bindings.vertexConstants[kPerTechnique] = blocks.techniqueVS;
+					bindings.vertexConstants[kPerMaterial] = materialBlock.first;
+					bindings.vertexConstants[kPerGeometry] = geometryVS;
+					bindings.vertexConstants[4] = permutationBlock;
+					bindings.pixelConstants[kPerTechnique] = blocks.techniquePS;
+					bindings.pixelConstants[kPerMaterial] = materialBlock.second;
+					bindings.pixelConstants[kPerGeometry] = geometryPS;
+					bindings.pixelConstants[3] = lightBlock;
+					bindings.pixelConstants[4] = permutationBlock;
+					bindings.pixelConstants[11] = alphaBlock;
+					// Linear Lighting binds its multiplier per draw only while enabled; otherwise the shader
+					// does not read it. It comes from the tables rather than off the property: the value is
+					// animated and belongs to the same sample as the emissive colour, and reading it here meant
+					// an unguarded objectGeometry index and an unchecked cast in the middle of the epoch.
+					if (!bindlessDraws) {
+						const float multiplier = (linearLighting && o < tables.emissiveMult.size()) ? tables.emissiveMult[o] : 1.0f;
+						auto& emissiveBlock = emissiveBlocks[std::bit_cast<std::uint32_t>(multiplier)];
+						if (!emissiveBlock) {
+							const float data[4] = { multiplier, 0, 0, 0 };
+							emissiveBlock = block(data, sizeof(data));
+						}
+						bindings.pixelConstants[kLinearLightingRegister] = emissiveBlock;
+					}
+					bool constantsOk = true;
+					for (std::uint32_t b = 0; b < kConstantBufferRegisters; ++b) {
+						if (((usage.vertexConstants >> b) & 1) && !bindings.vertexConstants[b]) {
+							constantsOk = false;
+							stats.missingVertexConstants |= 1u << b;
+						}
+						if (((usage.pixelConstants >> b) & 1) && !bindings.pixelConstants[b]) {
+							constantsOk = false;
+							stats.missingPixelConstants |= 1u << b;
+						}
+					}
+					if (!constantsOk) {
+						fail(Skip::Constants);
+						continue;
+					}
+
+					if (dedup && recordIndex != kNoRecord) {
+						// CS_DCLF_DEDUP_PARITY=1: the pair already has a record and this draw just rebuilt
+						// one from scratch, so they must be byte-identical. This is the direct answer to
+						// "is the record really the same for every draw of a pair", and the only check that
+						// would catch a per-object dependency nobody has noticed.
+						++stats.recordParityChecks;
+						if (std::memcmp(&records[recordIndex], &bindings, sizeof(DrawBindings)) != 0 && stats.recordParityMismatches++ == 0)
+							logger::warn("[DCLF] record dedup parity: object {} rebuilds a different record than its (material {}, pipeline {}) pair holds",
+								o, object.materialIndex, object.pipelineIndex);
+					} else {
+						if (records.size() >= resources->recordCapacity) {
+							fail(Skip::RecordCapacity);
+							continue;
+						}
+						recordIndex = static_cast<std::uint32_t>(records.size());
+						records.push_back(bindings);
+						if (dedup)
+							resolved.recordIndex = recordIndex;
+					}
 				}
 
 				// The CPU template of what BuildDraws writes (checked with CS_DCLF_BUILD_PARITY).
@@ -2112,12 +2358,11 @@ namespace DCLF
 				auto sequence = tables.draws[o];
 				sequence.pipelineIndex = blocks.setIndex;
 				sequence.objectIndex = o;
-				sequence.bindingsAddress = resources->recordsAddress + records.size() * sizeof(DrawBindings);
-				impl->inputs.push_back({ blocks.setIndex, static_cast<std::uint32_t>(records.size()), object.geometryIndex,
+				sequence.bindingsAddress = resources->recordsAddress + std::uint64_t(recordIndex) * sizeof(DrawBindings);
+				impl->inputs.push_back({ blocks.setIndex, recordIndex, object.geometryIndex,
 					object.flags | kInputDrawable,
 					{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius,
 					static_cast<std::uint32_t>(o), 0 });
-				records.push_back(bindings);
 				sequences.push_back(sequence);
 				// Only what BuildDraws will actually write a sequence for counts as drawn. The tables now hold
 				// the whole tracked set, so a candidate the gate drops must not be recorded here: the native
@@ -2161,12 +2406,20 @@ namespace DCLF
 			const std::uint32_t zero[kCountWords] = {};
 			const std::size_t zeroBytes = (depthOnly || !frameHybrid) ? sizeof(zero) : sizeof(std::uint32_t);
 			BUFFER_UPLOAD(zero, zeroBytes, org::runtime::UploadTarget::FromShared(resources->count), 0);
-			if (!records.empty()) {
+			if (!objectRecords.empty())
+				BUFFER_UPLOAD(objectRecords.data(), objectRecords.size() * sizeof(BindlessObject), org::runtime::UploadTarget::FromShared(resources->objects), 0);
+			// Three buffers, three conditions. They used to share one: a depth epoch where every candidate is
+			// cull-only has no records and plenty of inputs, and BuildDraws would then dispatch inputCount
+			// work items over whatever the previous epoch left in the buffer.
+			if (!records.empty())
 				BUFFER_UPLOAD(records.data(), records.size() * sizeof(DrawBindings), org::runtime::UploadTarget::FromShared(resources->records), 0);
+			if (!impl->inputs.empty()) {
 				BUFFER_UPLOAD(impl->inputs.data(), impl->inputs.size() * sizeof(DrawInput), org::runtime::UploadTarget::FromShared(resources->inputs), 0);
 				BUFFER_UPLOAD(geometryDraws.data(), geometryDraws.size() * sizeof(GeometryDraw), org::runtime::UploadTarget::FromShared(resources->geometries), 0);
 			}
-			stats.uploadBytes = bytes.size() + records.size() * (sizeof(DrawBindings) + sizeof(DrawInput)) + geometryDraws.size() * sizeof(GeometryDraw);
+			stats.uploadBytes = bytes.size() + records.size() * sizeof(DrawBindings) + impl->inputs.size() * sizeof(DrawInput) +
+			                    geometryDraws.size() * sizeof(GeometryDraw) + objectRecords.size() * sizeof(BindlessObject);
+			stats.records = static_cast<std::uint32_t>(records.size());
 
 			auto frame = std::make_shared<PassFrame>();
 			frame->serial = ++impl->serial;
@@ -2398,27 +2651,47 @@ namespace DCLF
 			std::vector<DrawSequence> built(static_cast<const DrawSequence*>(sequencesMap.pData), static_cast<const DrawSequence*>(sequencesMap.pData) + std::min<std::size_t>(count, kMaxDraws));
 			context->Unmap(parity->count.get(), 0);
 			context->Unmap(parity->sequences.get(), 0);
-			// BuildDraws appends in any order: compare as sets, keyed by the record address.
-			auto byRecord = [](const DrawSequence& a, const DrawSequence& b) { return a.bindingsAddress < b.bindingsAddress; };
-			std::sort(built.begin(), built.end(), byRecord);
+			// BuildDraws appends in any order: compare as sets. The key has to be unique per sequence, which
+			// the object index is and the record address is not - once records deduplicate, dozens of
+			// sequences share an address, the sort stops being a total order, and equal-key runs land in
+			// arbitrary relative order on the two sides. That reports mismatches that are not mismatches.
+			auto byObject = [](const DrawSequence& a, const DrawSequence& b) { return a.objectIndex < b.objectIndex; };
+			std::sort(built.begin(), built.end(), byObject);
 			auto& expected = parity->expected;
-			std::sort(expected.begin(), expected.end(), byRecord);
-			std::size_t differing = 0;
-			std::size_t first = SIZE_MAX;
-			for (std::size_t i = 0; i < std::min(built.size(), expected.size()); ++i) {
-				if (std::memcmp(&built[i], &expected[i], sizeof(DrawSequence)) != 0) {
-					first = std::min(first, i);
+			std::sort(expected.begin(), expected.end(), byObject);
+			// What the GPU writes is a SUBSET of the CPU's templates whenever the culling rejects anything, so
+			// this is a subsequence check, not an element-wise one: every sequence BuildDraws wrote must
+			// appear in the CPU list under the same object index, byte for byte. Comparing position by
+			// position instead reported every sequence past the first culled object as differing - a
+			// mismatch that says nothing, on the configuration DCLF actually ships.
+			std::size_t differing = 0, missing = 0;
+			std::size_t first = SIZE_MAX, firstExpected = 0;
+			for (std::size_t b = 0, e = 0; b < built.size(); ++b) {
+				while (e < expected.size() && expected[e].objectIndex < built[b].objectIndex)
+					++e;  // the CPU built a template the culling rejected
+				if (e == expected.size() || expected[e].objectIndex != built[b].objectIndex) {
+					++missing;  // a sequence with no template at all, which no culling can explain
+					continue;
+				}
+				if (std::memcmp(&built[b], &expected[e], sizeof(DrawSequence)) != 0) {
+					if (first == SIZE_MAX) {
+						first = b;
+						firstExpected = e;
+					}
 					++differing;
 				}
+				++e;
 			}
 			++a_stats.buildParityChecks;
-			if (count == expected.size() && !differing) {
-				logger::info("[DCLF] BuildDraws parity OK: {} sequences match the CPU templates ({} culled on the GPU)", count, culled);
+			if (!differing && !missing) {
+				logger::info("[DCLF] BuildDraws parity OK: {} of {} sequences match the CPU templates ({} rejected by the culling)", count, expected.size(),
+					expected.size() - count);
 			} else {
 				++a_stats.buildParityMismatches;
-				logger::warn("[DCLF] BuildDraws parity MISMATCH: GPU count {}, CPU {} ({} culled on the GPU); {} sequences differ{}", count, expected.size(), culled, differing,
-					first != SIZE_MAX ? fmt::format(" (first: pipeline {} vs {}, index count {} vs {})", built[first].pipelineIndex, expected[first].pipelineIndex,
-											built[first].indexCount, expected[first].indexCount) :
+				logger::warn("[DCLF] BuildDraws parity MISMATCH: GPU wrote {}, CPU templated {} ({} counted culled); {} differ, {} have no template{}", count,
+					expected.size(), culled, differing, missing,
+					first != SIZE_MAX ? fmt::format(" (first: object {}, pipeline {} vs {}, index count {} vs {})", built[first].objectIndex, built[first].pipelineIndex,
+											expected[firstExpected].pipelineIndex, built[first].indexCount, expected[firstExpected].indexCount) :
 										"");
 			}
 			parity.reset();

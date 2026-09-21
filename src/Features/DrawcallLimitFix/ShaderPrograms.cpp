@@ -7,6 +7,7 @@
 
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "ShaderCache.h"
+#include "Switches.h"
 
 #if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
 #	include <ORGModuleServices/ShaderCompiler.h>
@@ -25,6 +26,20 @@ namespace DCLF
 		{
 			return std::wstring(a_value.begin(), a_value.end());
 		}
+	}
+
+	bool BindlessObjects()
+	{
+		// Default off: the permutations are compiled against this answer, so the two forms cannot be
+		// compared within one run, and the control has to be the behaviour that is already gated.
+		static const bool enabled = SwitchEnabled("CS_DCLF_BINDLESS");
+		return enabled;
+	}
+
+	bool BindlessDraws()
+	{
+		static const bool enabled = BindlessObjects() && SwitchEnabled("CS_DCLF_BINDLESS_DRAW");
+		return enabled;
 	}
 
 	struct ShaderPrograms::Entry
@@ -100,6 +115,14 @@ namespace DCLF
 			// reads only what the discard needs and none of the per-frame pixel bindings.
 			if (a_depthOnly)
 				request.defines.push_back({ L"DCLF_DEPTH_ONLY", L"1" });
+			// The five per-object PerGeometry variables come from a GPU-resident table indexed by the draw's
+			// own object index instead of from its constant buffer. CS_DCLF_BINDLESS=0 builds the constant
+			// buffer form instead, which is the control the two are compared against.
+			if (BindlessObjects())
+				request.defines.push_back({ L"DCLF_BINDLESS", L"1" });
+			// The three registers that still made the binding record per-object read from the record too.
+			if (BindlessDraws())
+				request.defines.push_back({ L"DCLF_BINDLESS_DRAW", L"1" });
 			// The first few define sets, to reproduce builds with the DXC command line.
 			static std::atomic<std::uint32_t> logged = 0;
 			if (logged.fetch_add(1) < 4) {

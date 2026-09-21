@@ -26,7 +26,11 @@ namespace DCLF
 		constexpr std::uint32_t kMaxLoggedFailures = 8;
 
 		// Register classes as shifted by the SPIR-V builds (ShaderPrograms.h); set 0.
-		constexpr std::uint32_t kRecordAddressBinding = 190;   // push data; no shader reads it directly
+		// Push data. The DCLF_BINDLESS builds declare a cbuffer here to read the object index out of it;
+		// the address words beside it are still consumed by the layout's indirect ranges, not by a shader.
+		constexpr std::uint32_t kRecordAddressBinding = 190;
+		// The one texture register the vertex stage may declare: the per-object record buffer.
+		constexpr std::uint32_t kObjectBufferBinding = kBindingShiftT + kObjectBufferRegister;
 		constexpr std::uint32_t kDescriptorHeapBindings = 1000000;  // DXC's ResourceDescriptorHeap bindings (BasicRHI maps them)
 
 		bool InRange(std::uint32_t a_binding, std::uint32_t a_first, std::uint32_t a_count)
@@ -60,11 +64,13 @@ namespace DCLF
 				bool mapped = binding.set == 0;
 				switch (binding.kind) {
 				case Kind::ConstantBuffer:
-					mapped = mapped && InRange(binding.binding, kBindingShiftB, kConstantBufferRegisters);
+					mapped = mapped && (InRange(binding.binding, kBindingShiftB, kConstantBufferRegisters) || binding.binding == kRecordAddressBinding);
 					break;
 				case Kind::Texture:
 				case Kind::StorageBuffer:
-					mapped = mapped && a_pixel && InRange(binding.binding, kBindingShiftT, kTextureRegisters);
+					// The layout maps the whole t range for the pixel stage, and the object buffer alone for
+					// the vertex stage - which is all the vertex half of DCLF_BINDLESS needs.
+					mapped = mapped && (a_pixel ? InRange(binding.binding, kBindingShiftT, kTextureRegisters) : binding.binding == kObjectBufferBinding);
 					break;
 				case Kind::Sampler:
 					mapped = mapped && a_pixel && InRange(binding.binding, kBindingShiftS, kSamplerRegisters);
@@ -85,6 +91,8 @@ namespace DCLF
 			for (const auto& binding : a_module.bindings) {
 				if (binding.binding >= kDescriptorHeapBindings)
 					continue;
+				if (binding.binding == kRecordAddressBinding)
+					continue;  // push data, not a DrawBindings entry (and 1u << 190 is not a shift)
 				switch (binding.kind) {
 				case Kind::ConstantBuffer:
 					(a_pixel ? a_usage.pixelConstants : a_usage.vertexConstants) |= 1u << (binding.binding - kBindingShiftB);
@@ -236,6 +244,10 @@ namespace DCLF
 				range(kBindingShiftB, kConstantBufferRegisters, rhi::ShaderStage::Pixel, rhi::LayoutRangeSource::IndirectAddress, offsetof(DrawBindings, pixelConstants)),
 				range(kBindingShiftT, kTextureRegisters, rhi::ShaderStage::Pixel, rhi::LayoutRangeSource::IndirectIndex, offsetof(DrawBindings, textures)),
 				range(kBindingShiftS, kSamplerRegisters, rhi::ShaderStage::Pixel, rhi::LayoutRangeSource::IndirectIndex, offsetof(DrawBindings, samplers), true),
+				// The vertex stage sees one texture register, the per-object record buffer, reading the same
+				// DrawBindings entry the pixel stage does.
+				range(kObjectBufferBinding, 1, rhi::ShaderStage::Vertex, rhi::LayoutRangeSource::IndirectIndex,
+					offsetof(DrawBindings, textures) + 4 * std::size_t{ kObjectBufferRegister }),
 			};
 			const rhi::PipelineLayoutDesc desc{ .ranges = { ranges, static_cast<std::uint32_t>(std::size(ranges)) }, .pushConstants = { &recordAddress, 1 },
 				.staticSamplers = {}, .flags = rhi::PF_AllowInputAssembler };

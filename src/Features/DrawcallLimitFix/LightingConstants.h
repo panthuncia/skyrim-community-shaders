@@ -100,5 +100,35 @@ namespace DCLF
 		const RE::NiPoint3& a_eye, const RE::NiPoint3& a_previousEye, const GeometryPatchOffsets& a_offsets,
 		std::span<std::byte> a_vsOut, std::span<std::byte> a_psOut);
 
+	/**
+	 * @brief One object's entry in the per-object record table the DCLF_BINDLESS builds read
+	 * (DCLFObjectRecord in Lighting.hlsl): the five PerGeometry variables that are not per-pipeline.
+	 *
+	 * The two transforms are stored the way the VS constant buffer stores them, eye-relative and
+	 * row-major, and the shading half is ObjectShading unchanged, which is why they can be copied
+	 * straight through.
+	 */
+	struct BindlessObject
+	{
+		float world[12];
+		float previousWorld[12];
+		ObjectShading shading;  // MaterialData, EmitColor, and SSRParams.w in the last float
+		// The values that used to reach the shader as constant buffers of their own, which is what kept the
+		// binding record per-object: Light Limit Fix's room index and shadow bit mask (PS b3), the alpha
+		// test reference (PS b11) and Linear Lighting's emissive multiplier (PS b8). Deliberately a row of
+		// their own rather than packed into the spare ObjectShading::materialData[3]: that struct is shared
+		// with ObjectGeometryConstants and PatchObjectGeometry, so anything parked there would leak into
+		// the non-bindless build's MaterialData.w and into the parity comparison of that group.
+		std::int32_t roomIndex;
+		std::uint32_t shadowBitMask;
+		float alphaTestRef;
+		float emissiveMult;
+	};
+	static_assert(sizeof(BindlessObject) == 144);
+
+	/** @brief Fills one, from the same inputs PatchObjectGeometry writes into a packed group. */
+	void BuildObjectRecord(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags,
+		const RE::NiPoint3& a_eye, const RE::NiPoint3& a_previousEye, BindlessObject& a_out);
+
 	std::size_t ConstantGroupSize(const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable);
 }

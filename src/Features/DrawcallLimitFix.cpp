@@ -255,6 +255,23 @@ void DrawcallLimitFix::Prepass()
 			}
 		}
 	}
+	// The bindless record's own gate, reported whenever it is on: it says whether the table the shaders
+	// read holds what the constant buffer path would have given them, which no screenshot can say.
+	if ((frame % kReportInterval) == 0) {
+		const auto& draws = DCLF::IndirectDraws::Get().GetStats();
+		if (draws.recordParityChecks) {
+			if (draws.recordParityMismatches)
+				logger::warn("[DCLF] record dedup parity MISMATCH: {} of {} rebuilt records differ from their pair's", draws.recordParityMismatches, draws.recordParityChecks);
+			else
+				logger::info("[DCLF] record dedup parity OK: {} rebuilt records match their pair's byte for byte", draws.recordParityChecks);
+		}
+		if (draws.bindlessParityChecks) {
+			if (draws.bindlessParityMismatches)
+				logger::warn("[DCLF] bindless record parity MISMATCH: {} of {} components differ", draws.bindlessParityMismatches, draws.bindlessParityChecks);
+			else
+				logger::info("[DCLF] bindless record parity OK: {} components match the constant groups", draws.bindlessParityChecks);
+		}
+	}
 	if ((frame % kReportInterval) == 0 && !StatsEnabled()) {
 		timing = {};
 		store.ResetTimes();
@@ -279,8 +296,8 @@ void DrawcallLimitFix::Prepass()
 				skipped += fmt::format(" {}={}", DCLF::kSkipNames[i], draws.skipped[i]);
 		}
 		const auto& textures = DCLF::GpuTextures::Get().GetStats();
-		logger::info("[DCLF] indirect draws (last frame): {} candidates built, skipped:{} (missing t{} t{} t{} t{}, VS b{:04X} PS b{:04X}); {:.1f} MB uploaded, {:.3f} ms CPU; {} epochs, {} not ready; textures {} cached, rejected {}/{}/{}, {} samplers",
-			draws.drawn, skipped, draws.missingTextures[0], draws.missingTextures[1], draws.missingTextures[2], draws.missingTextures[3], draws.missingVertexConstants,
+		logger::info("[DCLF] indirect draws (last frame): {} candidates built from {} binding records, skipped:{} (missing t{} t{} t{} t{}, VS b{:04X} PS b{:04X}); {:.1f} MB uploaded, {:.3f} ms CPU; {} epochs, {} not ready; textures {} cached, rejected {}/{}/{}, {} samplers",
+			draws.drawn, draws.records, skipped, draws.missingTextures[0], draws.missingTextures[1], draws.missingTextures[2], draws.missingTextures[3], draws.missingVertexConstants,
 			draws.missingPixelConstants, draws.uploadBytes / 1048576.0,
 			draws.cpuMs, draws.epochs, draws.notReady, textures.cached, textures.rejected[1], textures.rejected[2], textures.rejected[3], textures.samplers);
 		logger::info("[DCLF] indirect epoch CPU by part: textures/samplers {:.3f} ms, constant groups {:.3f} ms, binding record {:.3f} ms, rest {:.3f} ms",
@@ -324,6 +341,9 @@ void DrawcallLimitFix::Prepass()
 		if (DCLF::PassCapture::WithholdingEnabled())
 			logger::info("[DCLF] static ownership: {} passes withheld from the batch renderer, {} objects claimed, {} claimed but not drawn{}",
 				capture.withheld, capture.claimed, capture.holes, capture.holes ? " <- HOLES" : "");
+		if (DCLF::PassCapture::WithholdingEnabled())
+			logger::info("[DCLF] claim churn: +{} -{} ({} of the drops still had an engine pass, so the native loop takes them back)",
+				capture.claimsAdded, capture.claimsDropped, capture.droppedAfterCull);
 		logger::info("[DCLF] material evaluations (last frame): {} evaluated, {} skipped as undrawable; probe: {} unchanged since last frame, {} changed",
 			stats.materialsEvaluated, stats.materialsSkipped, stats.materialsUnchanged, stats.materialsChanged);
 		logger::info("[DCLF] tracked {} under {} category nodes: {} objects ({} the engine also kept), {} geometries, {} pipelines, {} materials; left native:{}; events +{} -{}, validation drops {}; CPU per frame: events {:.3f} ms, tables {:.3f} ms (max {:.3f}; walk {:.3f}, classify {:.3f}, pipelines {:.3f}, materials {:.3f})",

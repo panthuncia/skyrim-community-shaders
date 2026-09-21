@@ -1,5 +1,6 @@
 
 #include "Common/NamespacedCBuffer.hlsli"
+#include "Common/DCLFObjects.hlsli"
 
 namespace LightLimitFix
 {
@@ -15,8 +16,18 @@ namespace LightLimitFix
 		Light NSCB(LightLimitFix, StrictLights)[15];
 	};
 	NSCB_ALIAS(LightLimitFix, uint, NumStrictLights)
+#if defined(DCLF_BINDLESS_DRAW)
+	// Drawcall Limit Fix supplies these two per object from its own record, so that the StrictLightData
+	// buffer stops being what makes a draw's binding record unique - DCLF writes nothing else into it, and
+	// with NumStrictLights at 0 the StrictLights tail is never read. The cbuffer above keeps its
+	// declaration and its layout: only the names change source, and NSCB_ALIAS is already exactly this
+	// shape of static under DXC. Every other includer of this header compiles the aliases unchanged.
+	static const int RoomIndex = DCLFObjects[DCLFObjectIndex].RoomIndex;
+	static const uint ShadowBitMask = DCLFObjects[DCLFObjectIndex].ShadowBitMask;
+#else
 	NSCB_ALIAS(LightLimitFix, int, RoomIndex)
 	NSCB_ALIAS(LightLimitFix, uint, ShadowBitMask)
+#endif  // DCLF_BINDLESS_DRAW
 	NSCB_ALIAS(LightLimitFix, uint, pad0)
 	NSCB_ARRAY_ALIAS(LightLimitFix, Light, StrictLights, 15)
 

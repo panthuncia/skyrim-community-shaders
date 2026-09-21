@@ -59,6 +59,11 @@ namespace DCLF
 			// Claimed but not drawn this frame. Withholding means nothing else will draw them either, so
 			// any of these is a visible hole - the one failure mode static ownership introduces.
 			std::uint32_t holes = 0;
+			// Claim churn. A claim that goes away hands the object back to the native loop, so if culling
+			// an object unclaims it the engine simply draws it again and the culling saves nothing.
+			std::uint32_t claimsAdded = 0;
+			std::uint32_t claimsDropped = 0;
+			std::uint32_t droppedAfterCull = 0;  // dropped while the engine still had a pass for it
 		};
 
 		/** @brief The set of geometries DCLF owns; registration is withheld for these. */

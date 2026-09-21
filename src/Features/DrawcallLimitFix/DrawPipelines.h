@@ -19,6 +19,15 @@ namespace DCLF
 	inline constexpr std::uint32_t kTextureRegisters = 128;
 	/** @brief Pixel shader sampler registers s0-s15. */
 	inline constexpr std::uint32_t kSamplerRegisters = 16;
+	/**
+	 * @brief t127: the per-object record buffer the DCLF_BINDLESS builds read (DCLFObjects in
+	 * Lighting.hlsl), and the one texture register the layout also maps for the vertex stage.
+	 *
+	 * It rides the ordinary DrawBindings::textures mechanism rather than needing a binding kind of its
+	 * own; every draw of an epoch carries the same heap index in it. The register is the top of the range
+	 * because the engine binds nothing there, so nothing the frame capture resolves is displaced.
+	 */
+	inline constexpr std::uint32_t kObjectBufferRegister = kTextureRegisters - 1;
 
 	/**
 	 * @brief Everything one indirect draw binds, in GPU memory: its address is the draw's only push data,

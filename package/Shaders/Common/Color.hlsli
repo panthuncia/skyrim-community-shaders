@@ -7,11 +7,18 @@
 #define ENABLE_LL SharedData::linearLightingSettings.enableLinearLighting
 
 #if defined(PSHADER) && defined(LIGHTING)
+#	include "Common/DCLFObjects.hlsli"
+#	if defined(DCLF_BINDLESS_DRAW)
+// From the per-object record rather than b8, so the binding record stops varying with it. The outer
+// guard is LIGHTING, so Effect/Particle/Water/RunGrass never reach either branch.
+static const float emissiveMult = DCLFObjects[DCLFObjectIndex].EmissiveMult;
+#	else
 cbuffer LLPerGeometry : register(b8)
 {
 	float emissiveMult;
 	float3 pad0;
 };
+#	endif  // DCLF_BINDLESS_DRAW
 #endif
 
 // Float limits

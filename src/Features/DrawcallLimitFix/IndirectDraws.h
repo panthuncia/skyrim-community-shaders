@@ -44,6 +44,7 @@ namespace DCLF
 			Capacity,
 			NotSkippedNatively,  // Z-prepass only: the native loop still draws this object, so it owns its depth
 			CandidateOnly,       // kept for the GPU culling to reject, but not drawable, so it has no bindings
+			RecordCapacity,      // too many DISTINCT (material, pipeline) pairs, which is not the draw cap
 			Count
 		};
 
@@ -55,6 +56,7 @@ namespace DCLF
 			std::array<std::uint32_t, 4> missingTextures{};  // registers of the last unresolved textures (diagnostics)
 			std::uint32_t missingVertexConstants = 0;       // constant buffer registers without an address (bits)
 			std::uint32_t missingPixelConstants = 0;
+			std::uint32_t records = 0;                       // binding records built, last epoch
 			std::uint64_t uploadBytes = 0;                   // last epoch
 			double cpuMs = 0.0;                              // last epoch, assembly and epoch
 			// Where that time goes, so the per-draw work is optimised against a measurement rather than a
@@ -88,6 +90,15 @@ namespace DCLF
 			} hzbSample;
 			std::uint32_t buildParityChecks = 0;   // CS_DCLF_BUILD_PARITY
 			std::uint32_t buildParityMismatches = 0;
+			// CS_DCLF_BINDLESS_PARITY: the per-object record the DCLF_BINDLESS builds read, checked against
+			// the constant group the non-bindless path packs for the same object. Counted per variable
+			// component, because that is the granularity at which a layout mistake shows.
+			std::uint32_t bindlessParityChecks = 0;
+			std::uint32_t bindlessParityMismatches = 0;
+			// CS_DCLF_DEDUP_PARITY: a binding record rebuilt per draw against the one its (material,
+			// pipeline) pair holds. Zero mismatches is what says the deduplication is sound.
+			std::uint32_t recordParityChecks = 0;
+			std::uint32_t recordParityMismatches = 0;
 		};
 
 		static IndirectDraws& Get();
@@ -170,5 +181,5 @@ namespace DCLF
 	};
 
 	inline constexpr std::array<const char*, static_cast<std::size_t>(IndirectDraws::Skip::Count)> kSkipNames{ "pipeline", "geometry", "texture", "sampler",
-		"constants", "capacity", "not-skipped-natively", "candidate-only" };
+		"constants", "capacity", "not-skipped-natively", "candidate-only", "record-capacity" };
 }

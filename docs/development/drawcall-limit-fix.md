@@ -982,6 +982,262 @@ ran, so anything phase 1 rejected got no native draw, no DCLF depth and therefor
 ownership there is no skip decision to get wrong: the engine never draws a claimed object, so DCLF
 culling one is simply correct. The Z-prepass no longer gates on `DrewLastFrame` under static ownership.
 
+## Two-pass culling, switched back on
+
+`CS_DCLF_CULL` had been unset since Phase 4, because a culling verdict could not mean anything while the
+native loop decided ownership a frame late. With the table generations aligned (Step 3) and the engine no
+longer drawing what DCLF owns (static ownership), it runs.
+
+### Results
+
+Dragonsreach, `CS_DCLF_OWNERSHIP=static`, `CS_DCLF_CULL=occlusion`:
+
+- 1949 candidates tested, 835 rejected (42.8%): 159 outside the frustum, **676 occluded**.
+- **158 of the occluded were objects the engine had kept** - the win the HZB exists for, since the
+  engine's occlusion is planes, boxes and portals.
+- Phase 2 brought back **75** objects the stale HZB had rejected and drew depth for 23 of them, so the
+  two-phase rescue is doing its job.
+- HZB: 1795 footprints sampled, 0 all-near, 264 all-far.
+- **0 claimed but not drawn**, 0 VUIDs, no crashes.
+
+Whiterun exterior, occlusion against a frustum-only control at the same place and hour:
+
+| | Draws written | Rejected |
+| --- | --- | --- |
+| Frustum only | 337 | 162 frustum |
+| Occlusion | **232** | 162 frustum + 250 occluded (210 the engine had kept) |
+
+A 31% cut in DCLF's draws, and the two frames are equivalent - nothing is missing from the occluded one.
+
+### Why claiming on "drawn last frame" does not fight the culling
+
+There was a real worry here: claims are published from `drawnFrame`, so if culling an object stopped it
+being drawn, the claim would lapse, the pass would stop being withheld, and the engine would simply draw
+it again - correct output, no saving.
+
+It does not happen, and the measurement says so rather than the argument. `claim churn: +0 -0` in steady
+state with occlusion on. The reason is that `drawnFrame` records what the **CPU submitted**, not what the
+GPU rasterised: the epoch loop marks every object it builds a record for, and culling happens afterwards
+in `BuildDrawsCS`. So an occluded object stays owned and simply is not rasterised, which is what should
+happen. The churn counters stay in the stats as a guard, since the property is not obvious from the code.
+
+The same distinction is what keeps the hole detector meaningful: it reports objects DCLF failed to submit,
+not objects it deliberately culled.
+
+## Step C: the per-object constants leave the constant buffer
+
+The five PerGeometry variables that differ between the objects of one pipeline - `World`,
+`PreviousWorld`, `MaterialData`, `EmitColor` and the w of `SSRParams` - now come from a GPU-resident
+table indexed by the object index the draw already carried, instead of from a constant buffer packed per
+draw. Built behind `CS_DCLF_BINDLESS=1`, default off.
+
+### How the shader reaches its own index
+
+The draw's push data was already three words: the binding record's address, which the pipeline layout
+consumes to resolve the draw's buffers and descriptors, and the object's table index, which nothing read.
+It turns out no new binding kind is needed to read it.
+
+BasicRHI's descriptor-heap path gives every push constant range a `VkDescriptorSetAndBindingMappingEXT`
+of its own, sourced from `VK_DESCRIPTOR_MAPPING_SOURCE_PUSH_DATA_EXT` at the range's `set` and `binding`
+(`rhi_vulkan.cpp`, the loop over `layout.pushConstantRanges`). The `set`/`binding` fields are documented
+in `rhi.h` as "ignored on Vulkan", which is true of the classic path and not of this one. So a shader
+that declares an ordinary `cbuffer` at the range's register reads push data directly:
+
+```hlsl
+cbuffer DCLFPushData : register(b190)
+{
+	uint2 DCLFRecordAddress : packoffset(c0.x);  // consumed by the layout, not read here
+	uint DCLFObjectIndex : packoffset(c0.z);
+};
+```
+
+The object table itself rides the existing `DrawBindings::textures` mechanism at t127, so it needs no new
+binding kind either. The one layout change is a vertex-stage range for that single register - the pixel
+stage already had the whole t range, and the vertex half needs exactly one SRV. `ResourceDescriptorHeap[]`
+was not needed after all, so the spike the plan reserved for it is not owed.
+
+### The record
+
+```hlsl
+struct DCLFObjectRecord
+{
+	float4 World[3];          // row_major float3x4, already relative to the eye
+	float4 PreviousWorld[3];
+	float4 MaterialData;
+	float4 EmitColor;         // emissive in xyz, the per-object w of SSRParams in w
+};
+```
+
+128 bytes, and its second half is `ObjectShading` unchanged, which is what lets it be copied straight
+through. The five names are reintroduced as `static` globals initialised from the table, so the 21 sites
+that read them are untouched; `SSRParams` stays in the constant buffer, because only its w is per-object
+and it is read at exactly one site.
+
+`BuildObjectRecord` fills a record from the same inputs `PatchObjectGeometry` writes into a packed group,
+through the same unwritten-component rule, and the table is filled for **every** candidate rather than
+only the drawn ones - a candidate skipped by the epoch still reaches the culling, and an index that
+addressed nothing would be worse than one that addresses a record no draw reads.
+
+### The gate is a CPU comparison, not a screenshot
+
+`CS_DCLF_BINDLESS_PARITY=1` compares each record against the constant group the non-bindless path packs
+for the same object, component by component and bit for bit - a tolerance here would only hide a layout
+mistake. It needs no readback and does not need both forms in one run, which matters because the
+permutations are compiled against the switch and the two cannot coexist in one process.
+
+**It held:** 0 of ~500 million components differ, across the Bannered Mare at hour 22 and the Whiterun
+exterior. The frame is correct, static ownership reports 0 claimed-but-undrawn, and the culling still
+reports 0 false negatives.
+
+The second half of that gate is structural rather than counted: under `DCLF_BINDLESS` the vertex stage
+stops declaring the PerGeometry buffer at all - SPIR-V binding 2 is simply absent from the module - so a
+frame with objects in the right places is proof that the transforms came from the table.
+
+### Then the buffer becomes per-pipeline
+
+With nothing per-object left in the group, the objects of a pipeline share one pair of arena blocks
+written once, and the per-object allocate/copy/patch disappears. Bannered Mare, per epoch:
+
+| Part | Per-object buffer | Per-pipeline buffer |
+| --- | --- | --- |
+| Textures and samplers | 0.82 µs/draw | 0.25 µs/draw |
+| **Constant groups** | **0.82 µs/draw** | **0.33 µs/draw** |
+| Binding record | 0.09 µs/draw | 0.08 µs/draw |
+| **Total per draw** | **1.96 µs** | **1.47 µs** |
+
+Upload fell from 1.8 MB to 1.1 MB an epoch, and that is *after* adding the object table, which costs 128
+bytes per candidate and lands in `rest` at no measurable change (0.76 ms against 0.77 ms).
+
+What remains of `constant groups` is the material, light, permutation and alpha blocks, which were
+already deduplicated and are not what this step was aimed at.
+
+A measurement trap worth recording: with `CS_DCLF_BINDLESS_PARITY=1` the epoch still reported 0.85 ms of
+constant groups, because the check repacks the group per object inside the timed region. The switch is a
+gate, not a thing to measure through.
+
+### What is left: deduplicating the binding record
+
+The plan's third item - `DrawBindings` becoming identical for every draw sharing a (material, pipeline)
+pair, so the records deduplicate and the per-draw upload collapses - is **not** reached yet, and the
+reason is specific. Two entries of the record still vary per object:
+
+-   the light block, keyed on (room index, shadow bit mask);
+-   the alpha threshold block.
+
+Both are constant buffer addresses, so the record differs whenever those differ. Moving them into the
+object table is the remaining work, and it is a larger change than this one because the room index and
+shadow mask are read by Light Limit Fix's own `StrictLightData`, not by `Lighting.hlsl` alone.
+
+## Step D: the binding record deduplicates
+
+The 800-byte `DrawBindings` record was assembled and uploaded once per draw. It is now one per
+(material, pipeline) pair: **1616 candidates in Dragonsreach build from 105 records**, and the epoch's
+upload falls from 0.9 MB to 0.5 MB. Behind `CS_DCLF_BINDLESS_DRAW=1`, which implies `CS_DCLF_BINDLESS`.
+
+### Four blocks varied per object, not the two previously recorded
+
+| Register | Keyed on | Where it is read |
+| --- | --- | --- |
+| PS b3 | `(roomIndex, shadowBitMask)` | `LightLimitFix::IsLightIgnored`, one call site in `Lighting.hlsl` |
+| PS b11 | alpha threshold | one site |
+| PS b8 | emissive multiplier | `Color::EmitColor`, one site |
+| VS/PS b4 | `(pipeline, extra)` | - |
+
+Three of those turned out cheaper than they looked:
+
+-   **The permutation block's per-object variation is dead.** The only per-object bit DCLF puts in it is
+    `SuppressExternalEmittance`, and that bit is read at exactly one place in the whole shader tree,
+    `Effect.hlsl`'s `GetLightingColor` - never by `Lighting.hlsl` or anything it includes. So the block
+    keys on the pipeline alone with no shader change at all. The non-bindless build keeps the bit, so
+    capture parity goes on comparing the real thing against the engine.
+-   **The 1216-byte light block was 16 useful bytes.** DCLF writes `{0, roomIndex, shadowBitMask, 0}` and
+    nothing else, so `NumStrictLights` is 0 and the `StrictLights[15]` tail is never read. With the two
+    live values moved, b3 is one zeroed block for the whole epoch.
+-   **The `NSCB_ALIAS` shim made the b3 move nearly free.** `RoomIndex` and `ShadowBitMask` already
+    resolve through `static const` aliases under DXC, so two alias lines become statics reading the object
+    record. The cbuffer keeps its declaration and its layout, and Effect, Particle, Water and RunGrass -
+    which include the same header and never define the macro - are untouched.
+
+The record grew from 128 to 144 bytes to carry the four values. They went in a row of their own rather
+than the spare `ObjectShading::materialData[3]`: that struct is shared with `ObjectGeometryConstants` and
+`PatchObjectGeometry`, so anything parked there would leak into the non-bindless build's `MaterialData.w`
+and into the parity comparison of that group.
+
+`Lighting.hlsl`'s `DCLF_BINDLESS` block moved into `Common/DCLFObjects.hlsli`, because `Color.hlsli`
+consumes the emissive multiplier and is included before the point where the block used to sit.
+
+### Three defects this uncovered, all pre-existing
+
+The capacity check `if (records.size() >= kMaxDraws)` was doing four jobs, and two of the others were
+already wrong:
+
+-   **`inputs` could overrun.** The depth epoch's cull-only push happened *before* that check, so the
+    input count was bounded by the tracked-set size rather than by the buffer. Past 16384 tracked objects
+    the upload would write beyond it and BuildDraws would dispatch over inputs never uploaded.
+-   **`visibility` was indexed out of bounds**, by table index into a buffer sized for draws.
+-   An object past the record table's capacity still got a draw, whose object index read zeros - a world
+    matrix of zeros collapses it to a point at the eye with no other sign.
+
+Both buffers are now sized by the table, and the caps are explicit and separate: object index against the
+table, inputs against their own buffer, sequences against the draw cap, records against their own with a
+`record-capacity` skip reason of their own.
+
+Two more would have made the validation lie rather than fail:
+
+-   **`CS_DCLF_BUILD_PARITY` sorted both sides by `bindingsAddress`.** Once records are shared that is not
+    a total order, and equal-key runs land in arbitrary relative order on the two sides. It now sorts by
+    object index, which is unique per sequence. While fixing it, a second limitation showed up: the check
+    compared position by position, so with culling on it reported every sequence past the first culled
+    object as differing. What the GPU writes is a *subset* of the CPU's templates, so it is now a
+    subsequence check - and works for the first time on the configuration DCLF actually ships.
+-   **The upload guard covered three buffers with one condition.** A depth epoch where every candidate is
+    cull-only has no records and plenty of inputs, and BuildDraws would then run over a stale buffer.
+
+### A parity check that was itself wrong
+
+`emissiveMult` moved from a per-draw scene-graph dereference in the epoch onto the tables, beside the
+shading that `MakeShading` already reads it for. The natural check was the record against a live read of
+the property, and it fired: about 100 components in half a billion, always on flickering emissives.
+
+**The check was what was wrong.** The multiplier is animated, and the shader divides it back out of the
+emissive colour before re-applying it, so the record's multiplier has to be the *same sample* that
+produced that object's `EmitColor` - which is why `MakeShading` now hands both back together. A live read
+at epoch time is a strictly later sample, and matching it would have broken the cancellation rather than
+proved anything. What is checked instead is the plumbing: `emissiveMult` is a new parallel array, and a
+gap in one of those shifts every later object's index. Whether it is sampled at the right point in the
+frame is already covered, and covered better, by capture parity's `EmitColor` comparison against the
+engine's own draw.
+
+### Gates
+
+-   **`CS_DCLF_DEDUP_PARITY=1`**, the check that matters: rebuild the record per draw and compare it byte
+    for byte against the one its pair holds. **3,981,022 rebuilt records, 0 differ.** This is the only
+    check that would catch a fifth per-object dependency nobody had noticed.
+-   `CS_DCLF_BINDLESS_PARITY` extended to the four new values: clean.
+-   `CS_DCLF_BUILD_PARITY` OK with culling on, 825 of 921 sequences matching with 96 rejected.
+-   0 claimed-but-undrawn, 0 VUIDs, correct frames in the Bannered Mare, Whiterun exterior and
+    Dragonsreach - which between them exercise all three moved registers: alpha-tested banners, emissive
+    fires, and portal-strict interior lighting.
+-   Offline, before any run: `DCLF_BINDLESS_DRAW` removes bindings 8 and 11 from the pixel module and
+    keeps 3, which is reflection-level proof the registers really left the shader.
+
+### What it cost and what it bought
+
+Bannered Mare and Dragonsreach, per epoch:
+
+| | Before Step C | After Step C | After Step D |
+| --- | --- | --- | --- |
+| Per draw | 1.96 µs | 1.47 µs | **0.74 µs** |
+| Records per epoch | one per draw | one per draw | one per (material, pipeline) |
+| Upload | 1.8 MB | 1.1 MB | **0.5 MB** |
+
+Distinct pairs measured 85 to 201 across three areas, so the record buffer is sized at 2048 entries
+(1.6 MB) rather than 16384 (13.1 MB) when deduplication is on, and stays at the draw cap when it is not.
+
+**The structural result matters more than the microseconds.** The reason the whole tracked set could not
+be handed to the GPU was that the CPU built a binding record per candidate. It no longer does, so feeding
+every candidate to the culling now costs a draw input and a sequence - and nothing else.
+
 ## Switches
 
 | Variable | Effect |

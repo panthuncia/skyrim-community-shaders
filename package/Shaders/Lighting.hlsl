@@ -1,6 +1,7 @@
 #define LIGHTING
 
 #include "Common/Color.hlsli"
+#include "Common/DCLFObjects.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/GBuffer.hlsli"
 #include "Common/LodLandscape.hlsli"
@@ -108,8 +109,10 @@ cbuffer PerMaterial : register(b1)
 
 cbuffer PerGeometry : register(b2)
 {
+#if !defined(DCLF_BINDLESS)
 	row_major float3x4 World : packoffset(c0);
 	row_major float3x4 PreviousWorld : packoffset(c3);
+#endif  // !DCLF_BINDLESS
 	float4 EyePosition : packoffset(c6);
 	float4 LandBlendParams : packoffset(c7);  // offset in xy, gridPosition in yw
 	float4 TreeParams : packoffset(c8);       // wind magnitude in y, amplitude in z, leaf frequency in w
@@ -118,6 +121,12 @@ cbuffer PerGeometry : register(b2)
 	float IndexScale : packoffset(c13);
 	float4 WorldMapOverlayParameters : packoffset(c14);
 };
+
+#if defined(DCLF_BINDLESS)
+static float3x4 World = float3x4(DCLFObjects[DCLFObjectIndex].World[0], DCLFObjects[DCLFObjectIndex].World[1], DCLFObjects[DCLFObjectIndex].World[2]);
+static float3x4 PreviousWorld = float3x4(DCLFObjects[DCLFObjectIndex].PreviousWorld[0], DCLFObjects[DCLFObjectIndex].PreviousWorld[1],
+	DCLFObjects[DCLFObjectIndex].PreviousWorld[2]);
+#endif  // DCLF_BINDLESS
 
 cbuffer VS_PerFrame : register(b12)
 {
@@ -560,9 +569,13 @@ cbuffer PerGeometry : register(b2)
 	float3 DirLightDirection : packoffset(c0);
 	float3 DirLightColor : packoffset(c1);
 	float4 ShadowLightMaskSelect : packoffset(c2);
+#if !defined(DCLF_BINDLESS)
 	float4 MaterialData : packoffset(c3);  // envmapLODFade in x, specularLODFade in y, alpha in z
+#endif  // !DCLF_BINDLESS
 	float AlphaTestRef : packoffset(c4);
+#if !defined(DCLF_BINDLESS)
 	float3 EmitColor : packoffset(c4.y);
+#endif  // !DCLF_BINDLESS
 	float4 ProjectedUVParams : packoffset(c6);
 	float4 SSRParams : packoffset(c7);
 	float4 WorldMapOverlayParametersPS : packoffset(c8);
@@ -575,10 +588,26 @@ cbuffer PerGeometry : register(b2)
 	float2 NumLightNumShadowLight : packoffset(c29);
 };
 
+#if defined(DCLF_BINDLESS)
+static float4 MaterialData = DCLFObjects[DCLFObjectIndex].MaterialData;
+static float3 EmitColor = DCLFObjects[DCLFObjectIndex].EmitColor.xyz;
+// Only the w of SSRParams is per-object; x, y and z stay in the per-pipeline buffer above.
+static float DCLFSSRSpecular = DCLFObjects[DCLFObjectIndex].EmitColor.w;
+#	define DCLF_SSR_SPECULAR DCLFSSRSpecular
+#else
+#	define DCLF_SSR_SPECULAR SSRParams.w
+#endif  // DCLF_BINDLESS
+
+#if defined(DCLF_BINDLESS_DRAW)
+// The reference comes from the per-object record instead of a constant buffer of its own, so that b11
+// stops being part of what makes a draw's binding record unique. Same value, same single read below.
+static const float AlphaTestRefRS = DCLFObjects[DCLFObjectIndex].AlphaTestRef;
+#else
 cbuffer AlphaTestRefBuffer : register(b11)
 {
 	float AlphaTestRefRS : packoffset(c0);
 }
+#endif  // DCLF_BINDLESS_DRAW
 
 float GetSoftLightMultiplier(float angle)
 {
@@ -2963,7 +2992,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float4 normalAndSSR;
 	normalAndSSR.xy = ssrNormal.xy + 0.5.xx;
 	normalAndSSR.z = 0.0;
-	normalAndSSR.w = SSRParams.w * smoothstep(SSRParams.x - 1e-5, SSRParams.y, normal.w);
+	normalAndSSR.w = DCLF_SSR_SPECULAR * smoothstep(SSRParams.x - 1e-5, SSRParams.y, normal.w);
 
 	const bool outputColorToAuxiliaryTarget = SSRParams.z > 1e-5;
 	psout.NormalGlossiness = outputColorToAuxiliaryTarget ? psout.Diffuse : normalAndSSR;

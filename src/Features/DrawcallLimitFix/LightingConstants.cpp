@@ -108,6 +108,38 @@ namespace DCLF
 		}
 	}
 
+	void BuildObjectRecord(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags,
+		const RE::NiPoint3& a_eye, const RE::NiPoint3& a_previousEye, BindlessObject& a_out)
+	{
+		const auto& object = a_tables.objects[a_objectIndex];
+
+		float world[16] = {};
+		StoreRelative(world, object.world, a_eye);
+		std::memcpy(a_out.world, world, sizeof(a_out.world));
+		// Render flag 0x10: the previous transform is the current one (engine notes: SetupGeometry).
+		StoreRelative(world, (a_renderFlags & 0x10) ? object.world : object.previousWorld, a_previousEye);
+		std::memcpy(a_out.previousWorld, world, sizeof(a_out.previousWorld));
+
+		// The shading half is ObjectShading's own layout, except that an unwritten component packs as zero
+		// the way PackConstantGroup and PatchObjectGeometry make it. The sweep stops at ObjectShading on
+		// purpose: the tail below carries no unwritten sentinel, and 0 is a legal value in all four of its
+		// fields.
+		a_out.shading = a_tables.shading[a_objectIndex];
+		auto* const floats = reinterpret_cast<float*>(&a_out.shading);
+		for (std::size_t i = 0; i < sizeof(ObjectShading) / sizeof(float); ++i) {
+			if (std::bit_cast<std::uint32_t>(floats[i]) == kUnwrittenBits)
+				floats[i] = 0.0f;
+		}
+
+		const auto& lights = a_tables.lights[a_objectIndex];
+		a_out.roomIndex = lights.roomIndex;
+		a_out.shadowBitMask = lights.shadowBitMask;
+		// The same reference the native draw's AlphaTestRefBuffer carries: threshold / 255, and 0 when the
+		// object is not alpha tested (the shader's test is then compiled out anyway).
+		a_out.alphaTestRef = (object.flags & kObjectAlphaTest) ? ((object.flags >> kObjectAlphaThresholdShift) & 0xFF) / 255.0f : 0.0f;
+		a_out.emissiveMult = a_objectIndex < a_tables.emissiveMult.size() ? a_tables.emissiveMult[a_objectIndex] : 1.0f;
+	}
+
 	std::size_t ConstantGroupSize(const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable)
 	{
 		std::size_t end = 0;

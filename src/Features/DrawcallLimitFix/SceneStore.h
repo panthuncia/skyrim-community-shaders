@@ -31,6 +31,11 @@ namespace DCLF
 			std::vector<PipelineKey> pipelines;
 			std::vector<MaterialRecord> materials;
 			std::vector<ObjectShading> shading;                   // parallel to objects
+			// Linear Lighting's per-object emissive multiplier (LLPerGeometry, PS b8). It lives here rather
+			// than being read off the property in the epoch because it is animated, so it has to be sampled
+			// at the same point as the emissive colour that already folds it in - which is why it is written
+			// by MakeShading and resampled by RefreshFrameConstants.
+			std::vector<float> emissiveMult;                      // parallel to objects
 			std::vector<ObjectLights> lights;                     // parallel to objects
 			std::vector<GeometryConstants> geometryConstants;     // parallel to pipelines (per-frame PerGeometry values)
 			std::vector<std::uint8_t> geometryConstantsValid;     // parallel to pipelines

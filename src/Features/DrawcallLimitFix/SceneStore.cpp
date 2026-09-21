@@ -37,7 +37,8 @@ namespace DCLF
 			return nullptr;
 		}
 
-		ObjectShading MakeShading(const RE::BSLightingShaderProperty& a_property, const LightingDescriptors& a_descriptors, std::uint32_t a_renderFlags)
+		ObjectShading MakeShading(const RE::BSLightingShaderProperty& a_property, const LightingDescriptors& a_descriptors, std::uint32_t a_renderFlags,
+			float& a_emissiveMult)
 		{
 			// BSLightingShader::SetupGeometry (engine notes): which components it writes depends on the pass.
 			const float unwritten = std::bit_cast<float>(kUnwrittenBits);
@@ -48,6 +49,9 @@ namespace DCLF
 			shading.materialData[2] = a_property.alpha;
 			shading.materialData[3] = unwritten;
 			const float mult = a_property.emissiveMult;
+			// The same sample the emissive colour below folds in: the shader divides it out again, so the
+			// two must never come from different reads of an animated value.
+			a_emissiveMult = mult;
 			const auto* emissive = a_property.emissiveColor;
 			shading.emitColor[0] = emissive ? emissive->red * mult : unwritten;
 			shading.emitColor[1] = emissive ? emissive->green * mult : unwritten;
@@ -85,6 +89,7 @@ namespace DCLF
 		pipelines.clear();
 		materials.clear();
 		shading.clear();
+		emissiveMult.clear();
 		lights.clear();
 		geometryConstants.clear();
 		geometryConstantsValid.clear();
@@ -443,7 +448,7 @@ namespace DCLF
 			const auto& lighting = *static_cast<RE::BSLightingShaderProperty*>(property);
 			descriptors.specularLODFade = lighting.specularLODFade;
 			descriptors.envmapLODFade = lighting.envmapLODFade;
-			tables.shading[o] = MakeShading(lighting, descriptors, mainPassRenderFlags);
+			tables.shading[o] = MakeShading(lighting, descriptors, mainPassRenderFlags, tables.emissiveMult[o]);
 		}
 	}
 
@@ -879,7 +884,9 @@ namespace DCLF
 			               (alphaTest ? static_cast<std::uint32_t>(alpha->alphaThreshold) << kObjectAlphaThresholdShift : 0u);
 			tables.objects.push_back(object);
 			tables.objectGeometry.push_back(geometry);
-			tables.shading.push_back(MakeShading(*static_cast<RE::BSLightingShaderProperty*>(property), descriptors, mainPassRenderFlags));
+			float emissiveMult = 1.0f;
+			tables.shading.push_back(MakeShading(*static_cast<RE::BSLightingShaderProperty*>(property), descriptors, mainPassRenderFlags, emissiveMult));
+			tables.emissiveMult.push_back(emissiveMult);
 			ObjectLights lights;
 			if (globals::features::lightLimitFix.loaded) {
 				lights.roomIndex = globals::features::lightLimitFix.GetRoomIndex(geometry);
