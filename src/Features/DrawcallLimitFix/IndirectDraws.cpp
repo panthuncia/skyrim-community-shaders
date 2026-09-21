@@ -11,6 +11,7 @@
 #	include "GpuResources.h"
 #	include "GpuTextures.h"
 #	include "LightingConstants.h"
+#	include "PassCapture.h"
 #	include "SceneStore.h"
 #	include "ShaderPrograms.h"
 #	include "Switches.h"
@@ -1551,6 +1552,44 @@ namespace DCLF
 		return HybridEnabled();
 	}
 
+	void IndirectDraws::PublishClaims()
+	{
+		if (!PassCapture::WithholdingEnabled())
+			return;
+		const auto frame = SceneStore::Get().GetFrame();
+		auto& capture = PassCapture::Get();
+
+		// Hole detector. Everything claimed when this frame's passes were registered should have been
+		// drawn by the colour epoch that has just run; the native loop was told not to draw it. Counted on
+		// the CPU, exactly, with no readback.
+		// A hole is an object that was withheld *and* not drawn. Being claimed is not enough on its own:
+		// an object the engine culled this frame is never registered, so it is never withheld either, and
+		// nobody was going to draw it. The test for "the engine would have drawn it" is that its pass was
+		// captured this frame, which is exactly what the tables are built from.
+		auto& store = SceneStore::Get();
+		auto& captureStats = capture.MutableStats();
+		captureStats.claimed = captureStats.holes = 0;
+		if (const auto previous = capture.CurrentClaims()) {
+			for (const auto* geometry : *previous) {
+				if (!store.FindAccumulatedPass(geometry))
+					continue;  // the engine culled it; withholding never came into it
+				++captureStats.claimed;
+				const auto drawn = impl->drawnFrame.find(geometry);
+				if (drawn == impl->drawnFrame.end() || drawn->second != frame)
+					++captureStats.holes;
+			}
+		}
+
+		auto claims = std::make_shared<PassCapture::ClaimSet>();
+		claims->reserve(impl->drawnFrame.size());
+		for (const auto& [geometry, drawn] : impl->drawnFrame) {
+			// The same one-frame tolerance the native skip used: an object drawn last frame is still ours.
+			if (frame - drawn <= 1)
+				claims->insert(geometry);
+		}
+		capture.PublishClaims(std::move(claims));
+	}
+
 	bool IndirectDraws::DrewLastFrame(const RE::BSGeometry* a_geometry, std::uint32_t a_frame) const
 	{
 		const auto drawn = impl->drawnFrame.find(a_geometry);
@@ -1815,6 +1854,30 @@ namespace DCLF
 			}
 
 			ankerl::unordered_dense::map<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>> materialBlocks;  // (material, pipeline) -> VS, PS
+			// Resolved descriptor heap indices, keyed the same way. The texture and sampler loops below
+			// depend on nothing per-object: the material's textures, the pipeline's technique (the shadow
+			// mask) and its register usage, plus this frame's shared textures. Running them per draw meant
+			// 128 + 16 iterations and a heap lookup each for every one of ~950 draws, when there are only
+			// about 150 distinct (material, pipeline) pairs behind them.
+			struct ResolvedBindings
+			{
+				std::array<std::uint32_t, kTextureRegisters> textures{};
+				std::array<std::uint32_t, kSamplerRegisters> samplers{};
+				bool texturesOk = false;
+				bool samplersOk = false;
+				std::uint32_t missingTexture = 0;  // the register that failed, for the skip sample
+			};
+			ankerl::unordered_dense::map<std::uint64_t, ResolvedBindings> resolvedBindings;  // (material, pipeline)
+			// The PerGeometry group, packed once per pipeline. Every object on a pipeline shares all of it
+			// but five variables (the two world matrices and three shading values), so an object copies
+			// this and rewrites only those instead of walking the whole variable table twice.
+			struct GeometryTemplate
+			{
+				std::vector<std::byte> vs;
+				std::vector<std::byte> ps;
+				GeometryPatchOffsets offsets;
+			};
+			ankerl::unordered_dense::map<std::uint32_t, GeometryTemplate> geometryTemplates;  // pipeline
 			ankerl::unordered_dense::map<std::uint64_t, std::uint64_t> lightBlocks;        // (room, shadow mask)
 			ankerl::unordered_dense::map<std::uint64_t, std::uint64_t> permutationBlocks;  // (pipeline, extra bits)
 			ankerl::unordered_dense::map<std::uint32_t, std::uint64_t> alphaBlocks;        // threshold
@@ -1823,9 +1886,21 @@ namespace DCLF
 			const auto renderFlags = store.GetMainPassRenderFlags();
 
 			auto skip = [&](Skip a_reason) { ++stats.skipped[static_cast<std::size_t>(a_reason)]; };
+			stats.partMs = {};
+			auto partStart = std::chrono::steady_clock::now();
+			auto mark = [&](std::size_t a_part) {
+				const auto now = std::chrono::steady_clock::now();
+				stats.partMs[a_part] += std::chrono::duration<double, std::milli>(now - partStart).count();
+				partStart = now;
+			};
 			const bool frameHybrid = resources->hybrid;
 			for (std::uint32_t o = 0; o < tables.objects.size(); ++o) {
 				const auto& object = tables.objects[o];
+				if (object.flags & kObjectNoBindings) {
+					// A culling candidate with no material or pipeline entry; its indices are meaningless.
+					skip(Skip::CandidateOnly);
+					continue;
+				}
 				const auto& blocks = pipelineBlocks[object.pipelineIndex];
 				if (blocks.setIndex == DrawPipelines::kNotReady) {
 					skip(Skip::Pipeline);
@@ -1842,7 +1917,8 @@ namespace DCLF
 				// the native draw that would have cannot either, because its own EQUAL test now compares
 				// against a depth DCLF computed rather than the one the native prepass wrote. Such an object
 				// keeps its depth but is never shaded, which is what left the architecture flat and grey.
-				if (depthOnly && frameHybrid && !(o < tables.objectGeometry.size() && DrewLastFrame(tables.objectGeometry[o], frameNumber))) {
+				if (depthOnly && frameHybrid && !PassCapture::WithholdingEnabled() &&
+					!(o < tables.objectGeometry.size() && DrewLastFrame(tables.objectGeometry[o], frameNumber))) {
 					// Cull-only: the object still goes to the culling, because the depth segment is where the
 					// verdict for every candidate is decided and published, and a candidate left out here
 					// would reach the colour segment with no verdict at all. What it does not get is a
@@ -1862,54 +1938,63 @@ namespace DCLF
 				const auto& technique = tables.techniqueConstants[object.pipelineIndex];
 				DrawBindings bindings{};
 
-				// Textures: the material's, the technique's shadow mask, then the frame's.
-				bool texturesOk = true;
-				for (std::uint32_t t = 0; t < kTextureRegisters; ++t) {
-					// Slots below 16 the material and technique leave alone read a null view (natively: whatever
-					// an earlier draw left bound; Phase 3 parity checks it).
-					std::uint32_t index = t < kPixelTextureSlots ? textures.NullIndex() : frameTextures[t];
-					if (!resolveTextures)
-						index = 0;
-					else if (t < kPixelTextureSlots && ((material.textureWritten >> t) & 1))
-						index = textures.Resolve(material.textures[t]);
-					else if (t == kShadowMaskSlot && technique.shadowMask)
-						index = textures.Resolve(technique.shadowMaskTexture);
-					if (index == kInvalidIndex && usage.UsesTexture(t)) {
-						texturesOk = false;
-						if (missingNext < stats.missingTextures.size())
-							stats.missingTextures[missingNext++] = t;
-						break;
+				auto [resolvedIt, newResolved] = resolvedBindings.try_emplace((std::uint64_t(object.materialIndex) << 32) | object.pipelineIndex);
+				auto& resolved = resolvedIt->second;
+				if (newResolved) {
+					// Textures: the material's, the technique's shadow mask, then the frame's.
+					resolved.texturesOk = true;
+					for (std::uint32_t t = 0; t < kTextureRegisters; ++t) {
+						// Slots below 16 the material and technique leave alone read a null view (natively: whatever
+						// an earlier draw left bound; Phase 3 parity checks it).
+						std::uint32_t index = t < kPixelTextureSlots ? textures.NullIndex() : frameTextures[t];
+						if (!resolveTextures)
+							index = 0;
+						else if (t < kPixelTextureSlots && ((material.textureWritten >> t) & 1))
+							index = textures.Resolve(material.textures[t]);
+						else if (t == kShadowMaskSlot && technique.shadowMask)
+							index = textures.Resolve(technique.shadowMaskTexture);
+						if (index == kInvalidIndex && usage.UsesTexture(t)) {
+							resolved.texturesOk = false;
+							resolved.missingTexture = t;
+							break;
+						}
+						resolved.textures[t] = index == kInvalidIndex ? 0 : index;
 					}
-					bindings.textures[t] = index == kInvalidIndex ? 0 : index;
+
+					// Samplers: the modes the material (or, for the shadow mask, the technique) sets.
+					resolved.samplersOk = true;
+					for (std::uint32_t s = 0; s < kSamplerRegisters; ++s) {
+						std::uint32_t address = 0, filter = 0;
+						if (s < kPixelTextureSlots && ((material.textureWritten >> s) & 1)) {
+							address = material.addressModes[s];
+							filter = material.filterModes[s] != kUnwrittenFilterMode ? material.filterModes[s] : technique.filterModes[s];
+						} else if (s == kShadowMaskSlot && technique.shadowMask) {
+							filter = technique.filterModes[s];
+						}
+						if (filter == kUnwrittenFilterMode)
+							filter = 0;
+						const auto index = resolveTextures ? textures.Sampler(address, filter) : 0u;
+						if (index == kInvalidIndex && ((usage.samplers >> s) & 1)) {
+							resolved.samplersOk = false;
+							break;
+						}
+						resolved.samplers[s] = index == kInvalidIndex ? 0 : index;
+					}
 				}
-				if (!texturesOk) {
+				if (!resolved.texturesOk) {
+					// The sample is recorded per skipped draw, as it was before, not per distinct pair.
+					if (missingNext < stats.missingTextures.size())
+						stats.missingTextures[missingNext++] = resolved.missingTexture;
 					skip(Skip::Texture);
 					continue;
 				}
-
-				// Samplers: the modes the material (or, for the shadow mask, the technique) sets.
-				bool samplersOk = true;
-				for (std::uint32_t s = 0; s < kSamplerRegisters; ++s) {
-					std::uint32_t address = 0, filter = 0;
-					if (s < kPixelTextureSlots && ((material.textureWritten >> s) & 1)) {
-						address = material.addressModes[s];
-						filter = material.filterModes[s] != kUnwrittenFilterMode ? material.filterModes[s] : technique.filterModes[s];
-					} else if (s == kShadowMaskSlot && technique.shadowMask) {
-						filter = technique.filterModes[s];
-					}
-					if (filter == kUnwrittenFilterMode)
-						filter = 0;
-					const auto index = resolveTextures ? textures.Sampler(address, filter) : 0u;
-					if (index == kInvalidIndex && ((usage.samplers >> s) & 1)) {
-						samplersOk = false;
-						break;
-					}
-					bindings.samplers[s] = index == kInvalidIndex ? 0 : index;
-				}
-				if (!samplersOk) {
+				if (!resolved.samplersOk) {
 					skip(Skip::Sampler);
 					continue;
 				}
+				std::copy(resolved.textures.begin(), resolved.textures.end(), bindings.textures);
+				std::copy(resolved.samplers.begin(), resolved.samplers.end(), bindings.samplers);
+				mark(0);
 
 				// Constant buffers.
 				auto& materialBlock = materialBlocks[(std::uint64_t(object.materialIndex) << 32) | object.pipelineIndex];
@@ -1928,19 +2013,35 @@ namespace DCLF
 				// same vertex lands somewhere else and the EQUAL test rejects it.
 				const auto& eye = replayVertexInputs ? impl->prepassEye : capture.eye;
 				const auto& previousEye = replayVertexInputs ? impl->prepassPreviousEye : capture.previousEye;
-				const auto geometryConstants = ObjectGeometryConstants(tables, o, renderFlags, eye, previousEye);
 				std::uint64_t geometryVS = 0, geometryPS = 0;
 				{
-					const auto vsSize = ConstantGroupSize(LightingVSLayout(), blocks.vs->constantTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry]);
-					const auto psSize = ConstantGroupSize(LightingPSLayout(), blocks.ps->constantTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry]);
-					geometryVS = block(nullptr, vsSize);
-					geometryPS = block(nullptr, psSize);
-					if (geometryVS)
-						PackConstantGroup(geometryConstants.vs, LightingVSLayout(), blocks.vs->constantTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry],
-							arena.At(geometryVS - base, std::max<std::size_t>(vsSize, 16)));
-					if (geometryPS)
-						PackConstantGroup(geometryConstants.ps, LightingPSLayout(), blocks.ps->constantTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry],
-							arena.At(geometryPS - base, std::max<std::size_t>(psSize, 16)));
+					auto [templateIt, newTemplate] = geometryTemplates.try_emplace(object.pipelineIndex);
+					auto& geometryTemplate = templateIt->second;
+					if (newTemplate) {
+						const auto vsSize = ConstantGroupSize(LightingVSLayout(), blocks.vs->constantTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry]);
+						const auto psSize = ConstantGroupSize(LightingPSLayout(), blocks.ps->constantTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry]);
+						geometryTemplate.vs.assign(std::max<std::size_t>(vsSize, 16), std::byte{});
+						geometryTemplate.ps.assign(std::max<std::size_t>(psSize, 16), std::byte{});
+						// The pipeline's own values, which is everything the objects do not override.
+						const auto& pipelineConstants = tables.geometryConstants[object.pipelineIndex];
+						PackConstantGroup(pipelineConstants.vs, LightingVSLayout(), blocks.vs->constantTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry],
+							geometryTemplate.vs);
+						PackConstantGroup(pipelineConstants.ps, LightingPSLayout(), blocks.ps->constantTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry],
+							geometryTemplate.ps);
+						geometryTemplate.offsets = GeometryPatchOffsetsOf(blocks.vs->constantTable, blocks.ps->constantTable);
+						geometryTemplate.vs.resize(vsSize);
+						geometryTemplate.ps.resize(psSize);
+					}
+					geometryVS = block(nullptr, geometryTemplate.vs.size());
+					geometryPS = block(nullptr, geometryTemplate.ps.size());
+					if (geometryVS && geometryPS) {
+						auto vsOut = arena.At(geometryVS - base, std::max<std::size_t>(geometryTemplate.vs.size(), 16));
+						auto psOut = arena.At(geometryPS - base, std::max<std::size_t>(geometryTemplate.ps.size(), 16));
+						std::memcpy(vsOut.data(), geometryTemplate.vs.data(), geometryTemplate.vs.size());
+						std::memcpy(psOut.data(), geometryTemplate.ps.data(), geometryTemplate.ps.size());
+						PatchObjectGeometry(tables, o, renderFlags, eye, previousEye, geometryTemplate.offsets,
+							vsOut.subspan(0, geometryTemplate.vs.size()), psOut.subspan(0, geometryTemplate.ps.size()));
+					}
 				}
 				const auto& lights = tables.lights[o];
 				auto& lightBlock = lightBlocks[(std::uint64_t(static_cast<std::uint32_t>(lights.roomIndex)) << 32) | lights.shadowBitMask];
@@ -1965,6 +2066,7 @@ namespace DCLF
 					alphaBlock = block(data, sizeof(data));
 				}
 
+				mark(1);
 				std::copy(frameVS.begin(), frameVS.end(), bindings.vertexConstants);
 				std::copy(framePS.begin(), framePS.end(), bindings.pixelConstants);
 				bindings.vertexConstants[kPerTechnique] = blocks.techniqueVS;
@@ -2006,8 +2108,10 @@ namespace DCLF
 				}
 
 				// The CPU template of what BuildDraws writes (checked with CS_DCLF_BUILD_PARITY).
+				mark(2);
 				auto sequence = tables.draws[o];
 				sequence.pipelineIndex = blocks.setIndex;
+				sequence.objectIndex = o;
 				sequence.bindingsAddress = resources->recordsAddress + records.size() * sizeof(DrawBindings);
 				impl->inputs.push_back({ blocks.setIndex, static_cast<std::uint32_t>(records.size()), object.geometryIndex,
 					object.flags | kInputDrawable,
@@ -2123,8 +2227,8 @@ namespace DCLF
 						viewProjZ = fmt::format("({:.6f} {:.6f} {:.6f} {:.6f})", floats[40], floats[41], floats[42], floats[43]);
 					}
 				}
-				logger::info("[DCLF] {} epoch: render area {}x{}, depth range [{}, {}] (captured [{}, {}]), replay {}, eye ({:.2f} {:.2f} {:.2f}), ViewProj z row {}",
-					depthOnly ? "z-prepass" : "colour", frame->width, frame->height, frame->minDepth, frame->maxDepth,
+				logger::info("[DCLF] {} epoch: tables frame {} holding {} objects; render area {}x{}, depth range [{}, {}] (captured [{}, {}]), replay {}, eye ({:.2f} {:.2f} {:.2f}), ViewProj z row {}",
+					depthOnly ? "z-prepass" : "colour", store.GetFrame(), tables.objects.size(), frame->width, frame->height, frame->minDepth, frame->maxDepth,
 					capture.minDepth, capture.maxDepth, replayVertexInputs ? "on" : "off", capture.eye.x, capture.eye.y, capture.eye.z, viewProjZ);
 			}
 			if (depthOnly) {
@@ -2148,6 +2252,7 @@ namespace DCLF
 			impl->ReadCullCounters(resources, stats);
 
 		stats.cpuMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		stats.partMs[3] = stats.cpuMs - (stats.partMs[0] + stats.partMs[1] + stats.partMs[2]);
 		if (!ok)
 			logger::error("[DCLF] The main-pass epoch failed; the render graph is disabled");
 	}
@@ -2391,6 +2496,7 @@ namespace DCLF
 	}
 	bool IndirectDraws::Enabled() const { return false; }
 	bool IndirectDraws::Hybrid() { return false; }
+	void IndirectDraws::PublishClaims() {}
 	bool IndirectDraws::DrewLastFrame(const RE::BSGeometry*, std::uint32_t) const { return false; }
 	void IndirectDraws::CaptureMainPass() {}
 	void IndirectDraws::Execute() {}

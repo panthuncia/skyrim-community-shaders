@@ -43,6 +43,7 @@ namespace DCLF
 			Constants,  // a constant buffer the shaders read is not available
 			Capacity,
 			NotSkippedNatively,  // Z-prepass only: the native loop still draws this object, so it owns its depth
+			CandidateOnly,       // kept for the GPU culling to reject, but not drawable, so it has no bindings
 			Count
 		};
 
@@ -56,6 +57,10 @@ namespace DCLF
 			std::uint32_t missingPixelConstants = 0;
 			std::uint64_t uploadBytes = 0;                   // last epoch
 			double cpuMs = 0.0;                              // last epoch, assembly and epoch
+			// Where that time goes, so the per-draw work is optimised against a measurement rather than a
+			// guess: resolving textures and samplers, packing constant groups, assembling the binding
+			// record, and everything after the loop (uploads and the epoch itself).
+			std::array<double, 4> partMs{};
 			std::uint32_t notReady = 0;                      // epochs skipped (mirrors, targets or pipelines not ready)
 			std::uint32_t shortBuffers = 0;        // draws whose vertex or index slice does not cover them
 			std::uint32_t cullDrawn = 0;     // sequences BuildDraws wrote, last sampled epoch
@@ -99,6 +104,16 @@ namespace DCLF
 		 * twice for one frame.
 		 */
 		bool DrewLastFrame(const RE::BSGeometry* a_geometry, std::uint32_t a_frame) const;
+
+		/**
+		 * @brief Publishes what DCLF owns, for the registration hook to withhold.
+		 *
+		 * The claim is what the colour epoch actually drew, not what DCLF would like to draw: withholding
+		 * a pass means the native loop will not draw it either, so claiming something DCLF then fails to
+		 * draw (a pipeline still compiling, a texture not resolved) leaves a hole. Drawing it once is the
+		 * evidence that it can be drawn again.
+		 */
+		void PublishClaims();
 
 		/** @brief At the first lighting draw of the main pass: what the pass binds (buffers, views, targets, viewport). */
 		void CaptureMainPass();
@@ -155,5 +170,5 @@ namespace DCLF
 	};
 
 	inline constexpr std::array<const char*, static_cast<std::size_t>(IndirectDraws::Skip::Count)> kSkipNames{ "pipeline", "geometry", "texture", "sampler",
-		"constants", "capacity", "not-skipped-natively" };
+		"constants", "capacity", "not-skipped-natively", "candidate-only" };
 }

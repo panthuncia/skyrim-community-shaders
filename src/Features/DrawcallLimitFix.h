@@ -28,6 +28,7 @@ struct DrawcallLimitFix : Feature
 	virtual void PostPostLoad() override;
 	virtual void Reset() override;
 	virtual void Prepass() override;
+	virtual void EarlyPrepass() override;
 	virtual void DrawSettings() override;
 
 	/** @brief Deferred::EndDeferred, before the deferred composite (Phase 2 debug view). */

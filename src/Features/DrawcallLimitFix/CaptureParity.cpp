@@ -240,7 +240,7 @@ namespace DCLF
 	{
 		const auto& tables = SceneStore::Get().GetTables();
 		const auto& object = tables.objects[a_objectIndex];
-		if (!tables.geometryConstantsValid[object.pipelineIndex])
+		if ((object.flags & kObjectNoBindings) || !tables.geometryConstantsValid[object.pipelineIndex])
 			return true;
 
 		// Expected values: the per-frame block for this pass descriptor with the per-object values on top.
@@ -545,6 +545,8 @@ namespace DCLF
 		++checkedDraws;
 		const auto& tables = store.GetTables();
 		const auto& object = tables.objects[index];
+		if (object.flags & kObjectNoBindings)
+			return;  // a culling candidate only: no material or pipeline entry to compare against
 		const auto& key = tables.pipelines[object.pipelineIndex];
 		const auto* state = globals::state;
 

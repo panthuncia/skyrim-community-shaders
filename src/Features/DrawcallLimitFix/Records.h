@@ -36,6 +36,12 @@ namespace DCLF
 		// GPU culling has a real input to reject from; this bit is what tells the two apart, and it is the
 		// reference the culling is measured against (BuildDrawsCS: RequireNativeVisible).
 		kObjectNativeVisible = 1u << 3,
+		// The object is a culling candidate only: it cannot be drawn this frame, so no material or
+		// pipeline entry was built for it and its materialIndex and pipelineIndex mean nothing. Anything
+		// that indexes the tables with them must check this first - the tables can be empty entirely (the
+		// first frame after a teleport has tracked geometry but nothing accumulated yet), so even index 0
+		// is not safe.
+		kObjectNoBindings = 1u << 5,
 		kObjectAlphaThresholdShift = 8,
 	};
 
@@ -140,6 +146,10 @@ namespace DCLF
 	{
 		std::uint32_t pipelineIndex;
 		std::uint64_t bindingsAddress;
+		// The object's index in SceneStore::Tables::objects, pushed as the third root constant word so the
+		// shaders can reach per-object data without it travelling in the binding record. The three words
+		// are one contiguous Constant indirect argument, so this must stay adjacent to bindingsAddress.
+		std::uint32_t objectIndex;
 		std::uint64_t vertexBufferAddress;  // GeometryRecord::vertexAddress (0 without the render graph)
 		std::uint32_t vertexBufferSize;
 		std::uint32_t vertexStride;
@@ -153,9 +163,10 @@ namespace DCLF
 		std::uint32_t firstInstance;
 	};
 #pragma pack(pop)
-	static_assert(sizeof(DrawSequence) == 64);
+	static_assert(sizeof(DrawSequence) == 68);
 	static_assert(offsetof(DrawSequence, bindingsAddress) == 4);
-	static_assert(offsetof(DrawSequence, vertexBufferAddress) == 12);
-	static_assert(offsetof(DrawSequence, indexBufferAddress) == 28);
-	static_assert(offsetof(DrawSequence, indexCount) == 44);
+	static_assert(offsetof(DrawSequence, objectIndex) == 12);
+	static_assert(offsetof(DrawSequence, vertexBufferAddress) == 16);
+	static_assert(offsetof(DrawSequence, indexBufferAddress) == 32);
+	static_assert(offsetof(DrawSequence, indexCount) == 48);
 }

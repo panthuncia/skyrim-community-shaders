@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 
 struct ID3D11ShaderResourceView;
 
@@ -52,6 +53,12 @@ namespace DCLF
 		std::array<std::uint32_t, kPixelTextureSlots> addressModes{};
 		std::array<std::uint32_t, kPixelTextureSlots> filterModes{};  // kUnwrittenFilterMode where SetupMaterial leaves it
 		std::uint32_t textureWritten = 0;
+
+		/** @brief Byte equality, for measuring whether a record could be cached across frames. */
+		bool operator==(const MaterialRecord& a_other) const
+		{
+			return std::memcmp(this, &a_other, sizeof(MaterialRecord)) == 0;
+		}
 	};
 
 	/**

@@ -8,6 +8,7 @@
 #include "DrawcallLimitFix/GpuTextures.h"
 #include "DrawcallLimitFix/IndirectDraws.h"
 #include "DrawcallLimitFix/ShaderPrograms.h"
+#include "DrawcallLimitFix/PassCapture.h"
 #include "DrawcallLimitFix/SceneStore.h"
 #include "DrawcallLimitFix/SceneTracker.h"
 #include "DrawcallLimitFix/Switches.h"
@@ -145,6 +146,10 @@ void DrawcallLimitFix::PostPostLoad()
 		return;
 	}
 	DCLF::SceneTracker::Get().Install();
+	// Capture at registration, the foundation for static ownership: withholding a pass from the batch
+	// renderer removes the very data the tables are built from today, so the capture has to prove itself
+	// first (it claims nothing and withholds nothing yet).
+	DCLF::PassCapture::Get().Install();
 	Hooks::Install();
 	installed = true;
 	// The switches this process actually sees, once. Several reports below are gated on them, so without
@@ -169,11 +174,19 @@ void DrawcallLimitFix::Reset()
 	timing.eventsMs += MillisecondsSince(start);
 }
 
-void DrawcallLimitFix::Prepass()
+void DrawcallLimitFix::EarlyPrepass()
 {
 	if (!installed)
 		return;
 
+	// The tables are built here, from Main_RenderShadowMaps, rather than in Prepass from StartDeferred.
+	// Both DCLF epochs then read the same generation: the Z-prepass runs at the end of Main_RenderDepth,
+	// which is after this and before Prepass, so it used to see the *previous* frame's tables and the
+	// per-object visibility verdicts it wrote could not be applied by index in the colour epoch.
+	//
+	// This is only possible because the accumulator is already complete here - the cull job finishes
+	// before the shadow maps (Main::Draw) - and because the tables read the latched accumulator rather
+	// than `currentAccumulator`, which is not set this early.
 	auto& store = DCLF::SceneStore::Get();
 	const auto start = std::chrono::steady_clock::now();
 	store.BuildFrame();
@@ -193,7 +206,20 @@ void DrawcallLimitFix::Prepass()
 		programs.Update();
 		pipelines.Update();
 	}
+}
 
+void DrawcallLimitFix::Prepass()
+{
+	if (!installed)
+		return;
+
+	auto& store = DCLF::SceneStore::Get();
+	// The one point in the frame where the main camera's accumulator is identifiable: EarlyPrepass, where
+	// the tables are now built, is too early for `currentAccumulator` to be set.
+	store.LatchAccumulator();
+	// The camera-dependent half of the per-frame constants, now that the main camera's shadow state is
+	// current (BuildFrame ran at EarlyPrepass, where it still belonged to the shadow-map camera).
+	store.RefreshFrameConstants();
 	skipStats = skipCounters;
 	skipCounters = {};
 	if ((store.GetFrame() % kReportInterval) == 1)
@@ -257,6 +283,8 @@ void DrawcallLimitFix::Prepass()
 			draws.drawn, skipped, draws.missingTextures[0], draws.missingTextures[1], draws.missingTextures[2], draws.missingTextures[3], draws.missingVertexConstants,
 			draws.missingPixelConstants, draws.uploadBytes / 1048576.0,
 			draws.cpuMs, draws.epochs, draws.notReady, textures.cached, textures.rejected[1], textures.rejected[2], textures.rejected[3], textures.samplers);
+		logger::info("[DCLF] indirect epoch CPU by part: textures/samplers {:.3f} ms, constant groups {:.3f} ms, binding record {:.3f} ms, rest {:.3f} ms",
+			draws.partMs[0], draws.partMs[1], draws.partMs[2], draws.partMs[3]);
 		if (DCLF::IndirectDraws::Hybrid())
 			logger::info("[DCLF] hybrid (last frame): {} of {} native passes left to the indirect draws ({} in the depth pass, {} in the opaque pass)",
 				skipStats.skipped, skipStats.offered, skipStats.skippedInDepth, skipStats.skippedInOpaque);
@@ -288,6 +316,16 @@ void DrawcallLimitFix::Prepass()
 		logger::info("[DCLF] derivation (last frame): {} objects compared, {} would stay native; property bits: {} differ ({:08X}); runtime bits: {} differ ({:08X}); per bit (* = runtime):{}",
 			stats.derivationChecked, stats.derivationNative, stats.derivationDiffers, stats.derivationBits,
 			stats.derivationRuntimeDiffers, stats.derivationRuntimeBits, bitBreakdown.empty() ? std::string(" none") : bitBreakdown);
+		const auto& capture = DCLF::PassCapture::Get().GetStats();
+		logger::info("[DCLF] pass capture: {} registrations from {} threads ({} overflowed); against the accumulator: {} compared, {} missing, {} extra, {} technique differs, {} subPass differs{}",
+			capture.captured, capture.threads, capture.overflowed, capture.compared, capture.missing, capture.extra,
+			capture.techniqueDiffers, capture.subPassDiffers,
+			(capture.missing || capture.techniqueDiffers || capture.subPassDiffers) ? "" : " <- OK");
+		if (DCLF::PassCapture::WithholdingEnabled())
+			logger::info("[DCLF] static ownership: {} passes withheld from the batch renderer, {} objects claimed, {} claimed but not drawn{}",
+				capture.withheld, capture.claimed, capture.holes, capture.holes ? " <- HOLES" : "");
+		logger::info("[DCLF] material evaluations (last frame): {} evaluated, {} skipped as undrawable; probe: {} unchanged since last frame, {} changed",
+			stats.materialsEvaluated, stats.materialsSkipped, stats.materialsUnchanged, stats.materialsChanged);
 		logger::info("[DCLF] tracked {} under {} category nodes: {} objects ({} the engine also kept), {} geometries, {} pipelines, {} materials; left native:{}; events +{} -{}, validation drops {}; CPU per frame: events {:.3f} ms, tables {:.3f} ms (max {:.3f}; walk {:.3f}, classify {:.3f}, pipelines {:.3f}, materials {:.3f})",
 			stats.tracked, stats.categoryNodes, stats.objects, stats.nativeVisible, stats.geometries, stats.pipelines, stats.materials, reasons,
 			stats.attachedEvents, stats.detachedEvents, stats.validationDrops, timing.eventsMs / frames, timing.buildMs / frames, timing.buildMaxMs,
@@ -440,6 +478,10 @@ void DrawcallLimitFix::BeforeDeferredComposite()
 	draws.Execute();       // off the hybrid path: assemble and draw into the off-screen targets
 	draws.ExecuteColour();  // on it: the colour pass, against the depth written at the first draw
 	draws.ProbeTargets("after colour");
+	// Publish what DCLF owns now that the colour epoch has said what it actually drew. The registration
+	// hook reads this on the next frame, before BuildFrame - which is the point: a claim is a standing
+	// statement of ownership, not a per-frame decision.
+	draws.PublishClaims();
 	draws.ShowDebugView();
 }
 

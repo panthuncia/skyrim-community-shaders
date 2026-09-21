@@ -69,5 +69,36 @@ namespace DCLF
 		std::uint32_t a_firstVariable, std::span<std::byte> a_out);
 
 	/** @brief Bytes a group spans in a shader's cbuffer layout (16-byte multiple). */
+	/**
+	 * @brief Where the five per-object PerGeometry variables land in a packed constant group.
+	 *
+	 * The PerGeometry group is the same for every object on a pipeline apart from these five, so the group
+	 * is packed once per pipeline and each object only rewrites them. Offsets and sizes are in floats;
+	 * an offset of ~0 means the permutation does not declare that variable.
+	 */
+	struct GeometryPatchOffsets
+	{
+		std::uint32_t vsWorld = ~0u, vsWorldSize = 0;
+		std::uint32_t vsPreviousWorld = ~0u, vsPreviousWorldSize = 0;
+		std::uint32_t psMaterialData = ~0u, psMaterialDataSize = 0;
+		std::uint32_t psEmitColor = ~0u, psEmitColorSize = 0;
+		std::uint32_t psSSRParams = ~0u, psSSRParamsSize = 0;
+	};
+
+	/** @brief Resolves those offsets for one pipeline's shader pair. */
+	GeometryPatchOffsets GeometryPatchOffsetsOf(std::span<const std::int8_t> a_vsTable, std::span<const std::int8_t> a_psTable);
+
+	/**
+	 * @brief Writes one object's five PerGeometry variables over an already packed group.
+	 *
+	 * Equivalent to ObjectGeometryConstants followed by PackConstantGroup, without walking the whole
+	 * variable table per object: everything else in the group comes from the pipeline's template. A
+	 * component the object leaves unwritten packs as zero, which is what PackConstantGroup's initial
+	 * memset produces for it.
+	 */
+	void PatchObjectGeometry(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags,
+		const RE::NiPoint3& a_eye, const RE::NiPoint3& a_previousEye, const GeometryPatchOffsets& a_offsets,
+		std::span<std::byte> a_vsOut, std::span<std::byte> a_psOut);
+
 	std::size_t ConstantGroupSize(const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable);
 }

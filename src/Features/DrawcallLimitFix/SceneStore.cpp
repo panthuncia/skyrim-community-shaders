@@ -3,6 +3,7 @@
 #include "Switches.h"
 
 #include "GpuResources.h"
+#include "PassCapture.h"
 #include "SceneTracker.h"
 #include "VertexInput.h"
 
@@ -87,6 +88,7 @@ namespace DCLF
 		lights.clear();
 		geometryConstants.clear();
 		geometryConstantsValid.clear();
+		geometryTemplate.clear();
 		techniqueConstants.clear();
 		permutations.clear();
 		draws.clear();
@@ -302,6 +304,12 @@ namespace DCLF
 			// eagerly. The entries hold NiPointers, so holding them across the load is the safe direction,
 			// and the rescan below replaces them on a normal frame.
 			rescanPending = true;
+			// Claims do not survive a load. They name geometry from the cell being torn down, and a claim
+			// withholds the pass from the native loop - so a stale one means nobody draws that object in
+			// the new cell. The hole detector caught exactly this at a `coc`: six claimed objects went
+			// undrawn on the first frame after the transition. Publishing an empty set hands everything
+			// back to the native loop until DCLF has drawn it again and re-earned the claim.
+			PassCapture::Get().PublishClaims(std::make_shared<const PassCapture::ClaimSet>());
 			SceneTracker::FreeEvents(tracker.Drain());
 			return;
 		}
@@ -400,13 +408,73 @@ namespace DCLF
 		return Ineligible::None;
 	}
 
+	void SceneStore::RefreshFrameConstants()
+	{
+		auto& evaluator = ConstantEvaluator::Get();
+		if (!evaluator.HasLightingShader())
+			return;
+		for (std::size_t i = 0; i < tables.pipelines.size() && i < tables.geometryTemplate.size(); ++i) {
+			auto* property = tables.geometryTemplate[i];
+			const auto* templatePass = property ? FindLightingPass(property) : nullptr;
+			if (!templatePass)
+				continue;  // keep what BuildFrame evaluated rather than blanking it
+			GeometryConstants constants;
+			if (evaluator.EvaluateGeometry(*templatePass, tables.pipelines[i].passDescriptor, mainPassRenderFlags, constants)) {
+				tables.geometryConstants[i] = constants;
+				tables.geometryConstantsValid[i] = 1;
+			}
+		}
+
+		// Per-object shading is resampled here too. Its inputs - the property's alpha, emissive colour and
+		// multiplier, and the LOD fades GetRenderPasses leaves on the property - are animated: candle and
+		// chandelier emissives flicker, and sampling them at EarlyPrepass instead of here put them far
+		// enough from the draw that capture parity's 0.1% tolerance on EmitColor stopped covering the
+		// difference. Everything else about an object is camera- and time-independent and stays in
+		// BuildFrame.
+		for (std::size_t o = 0; o < tables.objects.size() && o < tables.objectGeometry.size(); ++o) {
+			const auto* geometry = tables.objectGeometry[o];
+			auto* property = geometry ? geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
+			if (!property || (tables.objects[o].flags & kObjectNoBindings))
+				continue;
+			const std::uint32_t passDescriptor = tables.pipelines[tables.objects[o].pipelineIndex].passDescriptor;
+			LightingDescriptors descriptors;
+			descriptors.pass = passDescriptor;
+			descriptors.technique = (passDescriptor >> 24) & 0x3f;
+			const auto& lighting = *static_cast<RE::BSLightingShaderProperty*>(property);
+			descriptors.specularLODFade = lighting.specularLODFade;
+			descriptors.envmapLODFade = lighting.envmapLODFade;
+			tables.shading[o] = MakeShading(lighting, descriptors, mainPassRenderFlags);
+		}
+	}
+
+	void SceneStore::LatchAccumulator()
+	{
+		auto* accumulator = *globals::game::currentAccumulator.get();
+		if (!accumulator || accumulator == latchedAccumulator)
+			return;
+		if (latchedAccumulator) {
+			static bool logged = false;
+			if (!logged) {
+				logged = true;
+				logger::warn("[DCLF] the main camera's accumulator changed ({} -> {}); the tables follow it",
+					static_cast<const void*>(latchedAccumulator), static_cast<const void*>(accumulator));
+			}
+		}
+		latchedAccumulator = accumulator;
+	}
+
 	void SceneStore::CollectAccumulatedPasses()
 	{
 		accumulatedPasses.clear();
-		auto* accumulator = *globals::game::currentAccumulator.get();
+		// The latched accumulator, not `currentAccumulator`. BuildFrame now runs at EarlyPrepass, before
+		// the depth pass, where `currentAccumulator` is still null because nothing is being rendered yet -
+		// but the accumulator has held its passes since the cull job finished, which `Main::Draw` does
+		// before the shadow maps. Measured: 612 passes at EarlyPrepass, at the end of the depth pass and
+		// at Prepass alike, against 0 from `currentAccumulator` at the first two.
+		auto* accumulator = latchedAccumulator ? latchedAccumulator : *globals::game::currentAccumulator.get();
 		auto* batch = accumulator ? accumulator->GetRuntimeData().batchRenderer : nullptr;
 		if (!batch)
-			return;
+			return;  // before the first latch, i.e. the first frame only
 
 		// BSBatchRenderer::renderPass holds PassGroup structs inline (the engine indexes it as
 		// data + (pass + group * 6) * 8), not the PassGroup pointers CommonLib declares; each of the five
@@ -439,11 +507,67 @@ namespace DCLF
 				}
 			}
 		};
+		mainBatchRenderers.clear();
+		mainBatchRenderers.insert(batch);
 		addBatch(batch);
 		// Geometry groups sort their passes in batch renderers of their own.
 		for (auto* group : batch->geometryGroups) {
-			if (group && group->batchRenderer)
+			if (group && group->batchRenderer) {
+				mainBatchRenderers.insert(group->batchRenderer);
 				addBatch(group->batchRenderer);
+			}
+		}
+		// Published for the registration hook, which runs before this and so uses the previous frame's
+		// set. These pointers are stable across frames, and an empty set on the first frame simply means
+		// nothing is withheld yet.
+		PassCapture::Get().SetMainBatchRenderers(
+			std::make_shared<const ankerl::unordered_dense::set<const RE::BSBatchRenderer*>>(mainBatchRenderers));
+	}
+
+	void SceneStore::CompareCapturedPasses()
+	{
+		auto& capture = PassCapture::Get();
+		if (!capture.Installed())
+			return;
+		const auto entries = capture.Drain();
+		auto& captureStats = capture.MutableStats();
+		captureStats.compared = captureStats.missing = captureStats.extra = captureStats.techniqueDiffers = captureStats.subPassDiffers = 0;
+
+		// Only the main camera's registrations; the shadow cameras register into their own renderers.
+		ankerl::unordered_dense::map<const RE::BSGeometry*, const PassCapture::Entry*> captured;
+		for (const auto& entry : entries) {
+			if (mainBatchRenderers.contains(entry.batch))
+				captured.try_emplace(entry.geometry, &entry);
+		}
+
+		for (const auto& [geometry, accumulated] : accumulatedPasses) {
+			++captureStats.compared;
+			const auto it = captured.find(geometry);
+			if (it == captured.end()) {
+				++captureStats.missing;
+				continue;
+			}
+			if (PassDescriptorOf(it->second->technique) != accumulated.technique)
+				++captureStats.techniqueDiffers;
+			if (it->second->subPass != accumulated.subPass)
+				++captureStats.subPassDiffers;
+		}
+		for (const auto& [geometry, entry] : captured) {
+			if (!accumulatedPasses.contains(geometry))
+				++captureStats.extra;
+		}
+
+		// The tables are built from the capture rather than the accumulator walk once the two agree. The
+		// walk stops working the moment a pass is withheld from the batch renderer, which is the whole
+		// point of static ownership; the capture sees the registration regardless of what happens to it
+		// afterwards. Falling back when the capture is empty keeps the first frame and any unexpected
+		// path working.
+		if (SwitchValue("CS_DCLF_PASS_SOURCE") == "accumulator" || captured.empty())
+			return;
+		accumulatedPasses.clear();
+		for (const auto& [geometry, entry] : captured) {
+			accumulatedPasses.try_emplace(geometry,
+				AccumulatedPass{ entry->pass, PassDescriptorOf(entry->technique), entry->subPass, entry->passEnum });
 		}
 	}
 
@@ -495,6 +619,7 @@ namespace DCLF
 		PartTimer timer;
 		RefreshLodFadeSettings();
 		CollectAccumulatedPasses();
+		CompareCapturedPasses();
 		auto& gpu = GpuResources::Get();
 		gpu.BeginFrame(frame);
 		const bool resolveBuffers = gpu.Enabled();
@@ -506,6 +631,8 @@ namespace DCLF
 		stats.derivationChecked = stats.derivationDiffers = stats.derivationBits = stats.derivationNative = 0;
 		stats.derivationRuntimeDiffers = stats.derivationRuntimeBits = 0;
 		stats.derivationBitCounts.fill(0);
+		stats.materialsEvaluated = stats.materialsSkipped = 0;
+		stats.materialsUnchanged = stats.materialsChanged = 0;
 
 		ankerl::unordered_dense::map<const RE::BSGraphics::TriShape*, std::uint32_t> geometryIndex;
 		ankerl::unordered_dense::map<PipelineKey, std::uint32_t, PipelineKeyHash> pipelineIndex;
@@ -562,9 +689,19 @@ namespace DCLF
 		}
 		order.insert(order.end(), culled.begin(), culled.end());
 
+		// An object the engine culled cannot be drawn while the draws are gated on the engine's own
+		// visibility (IndirectDraws' RequireNativeVisible, i.e. CS_DCLF_CULL_INPUT=native). It is kept in
+		// the tables so the GPU culling still has it as a candidate and can be measured against the
+		// engine, but everything downstream of being drawn - the material's stand-in evaluation, the
+		// pipeline's per-frame constants - is pure waste for it, and the stand-in evaluation is the
+		// single most expensive thing in this loop.
+		static const bool drawCulledCandidates = SwitchValue("CS_DCLF_CULL_INPUT") == "tracked";
+		static const bool probeCache = SwitchValue("CS_DCLF_MATERIAL_CACHE") == "probe";
+
 		for (auto& [geometry, trackedEntry] : order) {
 			const auto& entry = *trackedEntry;
 			const auto* accumulated = FindAccumulatedPass(geometry);
+			const bool drawable = accumulated || drawCulledCandidates;
 			LightingDescriptors descriptors;
 			timer.Add(stats.partMs[1] /* the rest of the previous object counts as classification */);
 			Ineligible reason = ClassifyStatic(*geometry, &descriptors, accumulated);
@@ -647,7 +784,13 @@ namespace DCLF
 			const PipelineKey key{ descriptors.vertex, descriptors.pixel, twoSided ? kRasterTwoSided : 0u, descriptors.pass,
 				VertexLayoutOf(tables.geometries[geometryIt->second].vertexDesc) };
 			auto [pipelineIt, newPipeline] = pipelineIndex.try_emplace(key, static_cast<std::uint32_t>(tables.pipelines.size()));
-			if (newPipeline) {
+			if (newPipeline && !drawable) {
+				// Nothing would ever use it. Leaving the entry out keeps the pipeline table to what is
+				// actually drawn, which is also what the ordering above relies on: a culled candidate must
+				// never be the object that fixes a pipeline's per-frame lighting constants.
+				pipelineIndex.erase(pipelineIt);
+				pipelineIt = pipelineIndex.end();
+			} else if (newPipeline) {
 				timer.Add(stats.partMs[1]);
 				tables.pipelines.push_back(key);
 				// Per-frame PerGeometry values for this pass descriptor, from any object's lighting pass
@@ -657,6 +800,7 @@ namespace DCLF
 				const bool valid = templatePass && evaluator.EvaluateGeometry(*templatePass, descriptors.pass, mainPassRenderFlags, constants);
 				tables.geometryConstants.push_back(constants);
 				tables.geometryConstantsValid.push_back(valid ? 1 : 0);
+				tables.geometryTemplate.push_back(property);
 
 				TechniqueConstants technique;
 				EvaluateTechnique(descriptors.pass, technique);
@@ -679,7 +823,11 @@ namespace DCLF
 			// Material state as the engine's SetupMaterial produces it for this pass descriptor.
 			const auto* material = property->material;
 			auto [materialIt, newMaterial] = materialIndex.try_emplace(std::pair{ material, descriptors.pass }, static_cast<std::uint32_t>(tables.materials.size()));
-			if (newMaterial) {
+			if (newMaterial && !drawable) {
+				++stats.materialsSkipped;
+				materialIndex.erase(materialIt);
+				materialIt = materialIndex.end();
+			} else if (newMaterial) {
 				timer.Add(stats.partMs[1]);
 				MaterialRecord record;
 				if (!evaluator.EvaluateMaterial(material, descriptors.pass, record)) {
@@ -688,6 +836,18 @@ namespace DCLF
 					++stats.ineligible[static_cast<std::size_t>(Ineligible::NotLightingShader)];
 					--stats.ineligible[static_cast<std::size_t>(Ineligible::None)];
 					continue;
+				}
+				++stats.materialsEvaluated;
+				if (probeCache) {
+					const std::pair probeKey{ material, descriptors.pass };
+					if (auto it = materialProbe.find(probeKey); it != materialProbe.end()) {
+						(it->second.record == record ? stats.materialsUnchanged : stats.materialsChanged) += 1;
+						it->second.record = record;
+					} else {
+						auto& probe = materialProbe[probeKey];
+						probe.material.reset(const_cast<RE::BSShaderMaterial*>(material));
+						probe.record = record;
+					}
 				}
 				tables.materials.push_back(record);
 				timer.Add(stats.partMs[3]);
@@ -702,10 +862,19 @@ namespace DCLF
 			object.boundCenter[2] = geometry->worldBound.center.z;
 			object.boundRadius = geometry->worldBound.radius;
 			object.geometryIndex = geometryIt->second;
-			object.materialIndex = materialIt->second;
-			object.pipelineIndex = pipelineIt->second;
+			// A candidate that cannot be drawn has no material or pipeline entry. The indices are left at
+			// zero rather than at a sentinel because nothing reads them: kObjectNativeVisible is unset, so
+			// BuildDrawsCS rejects it before it ever looks at them. All of the parallel per-object arrays
+			// are still appended below, which is what the first attempt at this got wrong - skipping one
+			// of them shifts every later object's index.
+			const bool hasBindings = materialIt != materialIndex.end() && pipelineIt != pipelineIndex.end();
+			object.materialIndex = hasBindings ? materialIt->second : 0u;
+			object.pipelineIndex = hasBindings ? pipelineIt->second : 0u;
+			// kObjectNoBindings, not a zero index: the pipeline and material tables can be empty (the
+			// first frame after a teleport has tracked geometry but nothing accumulated), so index 0 is
+			// out of bounds as readily as any other.
 			object.flags = (alphaTest ? kObjectAlphaTest : 0u) | (twoSided ? kObjectTwoSided : 0u) |
-			               (accumulated ? kObjectNativeVisible : 0u) |
+			               (accumulated ? kObjectNativeVisible : 0u) | (hasBindings ? 0u : kObjectNoBindings) |
 			               (ExternalEmittance::ShouldSuppress(property, geometry) ? kObjectSuppressExternalEmittance : 0u) |
 			               (alphaTest ? static_cast<std::uint32_t>(alpha->alphaThreshold) << kObjectAlphaThresholdShift : 0u);
 			tables.objects.push_back(object);

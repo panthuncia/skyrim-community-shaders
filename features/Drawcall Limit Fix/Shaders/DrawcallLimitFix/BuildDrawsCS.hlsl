@@ -114,8 +114,9 @@ static const uint kPhaseTwoSequenceBase = 16384;  // kMaxDraws
 static const uint kInputStride = 40;
 // GeometryDraw: 40 bytes (vertex buffer view, index buffer view, index count, first index).
 static const uint kGeometryStride = 40;
-// DrawSequence: 64 bytes, 4-byte packed.
-static const uint kSequenceStride = 64;
+// DrawSequence: 68 bytes, 4-byte packed. Words 1-3 are the root constants (DrawBindings address, then
+// the object index), which is why the object index sits between the record address and the vertex buffer.
+static const uint kSequenceStride = 68;
 static const uint kIndexFormatR16 = 57;  // DXGI_FORMAT_R16_UINT
 
 // The bounding sphere's world-space AABB, projected corner by corner. The box contains the sphere, so
@@ -355,9 +356,9 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	count.InterlockedAdd(phase == kPhaseTwo ? kCountDrawnPhaseTwo : kCountDrawn, 1, slot);
 	const uint base = (slot + (phase == kPhaseTwo ? kPhaseTwoSequenceBase : 0)) * kSequenceStride;
 	sequences.Store(base + 0, input.x);
-	sequences.Store2(base + 4, uint2(recordLo, recordHi));
-	sequences.Store4(base + 12, vertexBuffer);
-	sequences.Store4(base + 28, uint4(indexBuffer.xyz, kIndexFormatR16));
-	sequences.Store4(base + 44, uint4(indexBuffer.w, 1, firstIndex, 0));
-	sequences.Store(base + 60, 0);
+	sequences.Store3(base + 4, uint3(recordLo, recordHi, objectIndex));
+	sequences.Store4(base + 16, vertexBuffer);
+	sequences.Store4(base + 32, uint4(indexBuffer.xyz, kIndexFormatR16));
+	sequences.Store4(base + 48, uint4(indexBuffer.w, 1, firstIndex, 0));
+	sequences.Store(base + 64, 0);
 }

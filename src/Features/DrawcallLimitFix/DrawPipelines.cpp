@@ -216,7 +216,7 @@ namespace DCLF
 
 			rhi::PushConstantRangeDesc recordAddress{};
 			recordAddress.visibility = rhi::ShaderStage::AllGraphics;
-			recordAddress.num32BitValues = 2;
+			recordAddress.num32BitValues = 3;  // DrawBindings address (2) + the object index
 			recordAddress.set = 0;
 			recordAddress.binding = kRecordAddressBinding;
 
@@ -325,7 +325,7 @@ namespace DCLF
 			rhi::IndirectArg args[5]{};
 			args[0].kind = rhi::IndirectArgKind::PipelineIndex;
 			args[1].kind = rhi::IndirectArgKind::Constant;
-			args[1].u.rootConstants = { 0, 0, 2 };  // DrawBindings address -> the layout's push data
+			args[1].u.rootConstants = { 0, 0, 3 };  // DrawBindings address + object index -> the layout's push data
 			args[2].kind = rhi::IndirectArgKind::VertexBuffer;
 			args[2].u.vertexBuffer.slot = 0;
 			args[3].kind = rhi::IndirectArgKind::IndexBuffer;

@@ -665,6 +665,38 @@ The lesson is that a switch which suppresses a computation also suppresses every
 so "suppress it and see" only localises a fault when the downstream effects are held constant. The
 `HYBRID`-off control does hold them constant, and should have come first.
 
+### The rest of Step 1: evaluations that were pure waste
+
+A candidate the engine culled cannot be drawn while the draws are gated on the engine's own visibility
+(`CS_DCLF_CULL_INPUT=native`). It is still kept in the tables so the GPU culling has it as a candidate and
+can be measured, but everything downstream of being drawn was being computed for it anyway - the
+material's stand-in evaluation and the pipeline's per-frame constants, which are the two most expensive
+things in `BuildFrame`.
+
+Skipping those for undrawable candidates, in Whiterun exterior at night:
+
+| | Before | After |
+| --- | --- | --- |
+| Material evaluations per frame | 636 | **132** (1783 skipped) |
+| Material evaluation cost | 0.39 ms | **0.237 ms** |
+
+The parallel per-object arrays are all still appended for a skipped candidate, with its material and
+pipeline indices left at zero - nothing reads them, because `kObjectNativeVisible` is unset and
+`BuildDrawsCS` rejects it first. That is what the earlier attempt at this got wrong: skipping one of the
+arrays shifts every later object's index.
+
+**The cross-frame material cache is not worth building, and the measurement says so.**
+`CS_DCLF_MATERIAL_CACHE=probe` keeps the previous frame's record per (material, pass descriptor) and
+compares it with a fresh evaluation. It reports **131 unchanged against 1 changed** per frame, so a cache
+would hit about 99% - the worry that `SetupMaterial` reads enough per-frame engine state to make caching
+unsound turns out to be wrong in practice.
+
+But it would now save only the remaining 0.237 ms, against classification at 2.450 ms and the indirect
+epoch at roughly 3 ms twice over. It also cannot be made exactly safe: the one record that does change
+each frame is evidence that something outside the material's own fields feeds the result, so any cache
+needs either a validity token that provably covers it or bounded-staleness re-evaluation, and neither is
+worth it at this size. The probe switch stays so the decision can be revisited if the balance changes.
+
 ### `CS_DCLF_EVAL=audit`, and making `RunStandIn` transparent
 
 Before the control above, the leak hypothesis was tested properly rather than by eye.
@@ -712,6 +744,244 @@ six times afterwards while byte-identical, so the bisect proved nothing and the 
 context left by the earlier crash. Worth remembering before bisecting an intermittent fault again - the
 control has to be re-run at the end, not only at the start.
 
+## Step 2: the per-draw epoch cost
+
+The indirect epoch assembles one `DrawBindings` record per draw and runs twice a frame, for the depth
+pass and the colour pass. The plan assumed the 128-iteration texture loop was the expensive part. It was
+not, and the first thing built here was the instrument that says so: `CS_DCLF_STATS` now breaks the epoch
+down by part. Bannered Mare at hour 22, 959 draws:
+
+| Part | Before | After | |
+| --- | --- | --- | --- |
+| Textures and samplers | 0.286 ms | 0.258 ms | resolved per (material, pipeline) |
+| **Constant groups** | **1.613 ms** | **0.538 ms** | packed per pipeline, patched per object |
+| Binding record | 0.089 ms | 0.073 ms | |
+| Rest (uploads, the epoch itself) | 0.710 ms | 0.773 ms | untouched |
+| **Total per epoch** | **2.74 ms** | **1.62 ms** | 2.85 → 1.91 µs per draw |
+
+### Textures and samplers, resolved once per (material, pipeline)
+
+Neither loop depends on anything per-object: they read the material's textures, the pipeline's technique
+(for the shadow mask) and its register usage, plus the frame's shared textures. Running them per draw
+meant 128 + 16 iterations and a descriptor heap lookup each for every draw, when about 150 distinct
+(material, pipeline) pairs stand behind ~950 of them. They are now resolved on first use and copied
+afterwards, exactly as the constant blocks already were.
+
+This is the CPU half of the plan's step 2a. The other half - having the shader read
+`ResourceDescriptorHeap[…]` so the indices need not travel in the record at all - is not done, and on this
+measurement is worth less than it looked: the loops were 10% of the epoch, not the bulk of it.
+
+### The PerGeometry group: pack per pipeline, patch per object
+
+This was the real cost. `PackConstantGroup` walks every variable in the layout and every component of
+each, checking a written-sentinel and copying four bytes at a time; it ran twice per object, over a group
+that is identical for every object on a pipeline apart from **five variables** - the two world matrices
+and three shading values (`MaterialData`, `EmitColor`, and the w of `SSRParams`).
+
+The group is now packed once per pipeline into a template, and each object copies the template and
+rewrites only those five, at byte offsets resolved once per pipeline (`GeometryPatchOffsetsOf` /
+`PatchObjectGeometry` in `LightingConstants.cpp`). An unwritten component still packs as zero, which is
+what the full pack's initial `memset` produced for it.
+
+It also removes the `GeometryConstants` struct copy per object - two `ConstantBlock`s, about 2 KB - which
+`ObjectGeometryConstants` made only to patch four fields in it. That function stays, because the capture
+parity check uses it as the reference implementation.
+
+**Validated by capture parity, not by eye.** With `CS_DCLF_HYBRID` off so the native loop still draws
+everything and the check has something to compare against: **125,100 draws checked, 0 mismatched (0
+material, 0 per-geometry, 0 technique)**. That is a much stronger statement than a screenshot, and it is
+the right gate for a change that only ever alters constant *values*.
+
+### A crash this introduced, and the shape of it
+
+Skipping the material and pipeline entries for undrawable candidates left their `materialIndex` and
+`pipelineIndex` meaningless, and the first version left them at zero. The first frame after a teleport has
+tracked geometry but nothing accumulated yet, so *every* candidate is undrawable, the pipeline table is
+empty, and `pipelineBlocks[0]` is out of bounds - an access violation on `coc`. Index zero is not a safe
+placeholder when the table can be empty. There is now an explicit `kObjectNoBindings` flag, checked before
+anything indexes the tables with those fields, and such objects are reported under their own skip reason
+(`candidate-only`) rather than being conflated with pipelines that are not ready yet.
+
+### What is left of step 2
+
+The record is still 800 bytes and still uploaded per draw; `rest` (uploads and the epoch) is now the
+largest single part at about 0.8 ms. Cutting it means the bindless work proper - the shader reading its
+textures and per-object constants out of GPU-resident tables indexed by a single object index, so
+`DrawBindings` and the `IndirectAddress`/`IndirectIndex` ranges disappear. That is a pipeline layout and
+`Lighting.hlsl` change (a `DCLF_BINDLESS` permutation beside `DCLF_DEPTH_ONLY`), and it is not started.
+
+## Step 3: both epochs now share a table generation
+
+The Z-prepass epoch runs at the end of `Main_RenderDepth` and `BuildFrame` ran at `Prepass`, from
+`StartDeferred`, which is after it. So the depth segment read the **previous** frame's tables while the
+colour segment read the current ones, and the per-object visibility verdicts the depth segment writes
+could not be applied by index in the colour segment at all - object index *i* meant a different object in
+each. That is what blocked two-pass culling.
+
+### The measurement that was wrong, and the one that settled it
+
+An earlier probe counted the accumulated passes at each candidate hook point and found 0 before the depth
+pass against 604 at `Prepass`, and this was written up as "`BuildFrame` cannot run any earlier". **That was
+wrong**, and the Ghidra decompilation is what exposed it:
+
+-   `Main::Draw` (`0x1406444b0`) queues `DrawWorld_BuildSceneLists` (`0x14064bc20`) on the
+    `gJobList_SceneListAccumCulling` job list and **`JobList__Finish`es it before**
+    `NiCamera::CalculateAndDrawShadowCasterLights`, i.e. before the shadow maps and long before the depth
+    pass.
+-   `BSShaderAccumulator::FinishAccumulating` (`0x1414b2240`) is `FinishAccumulatingPreResolveDepth` then
+    `FinishAccumulatingPostResolveDepth`; for the main render mode the first of those (`FUN_1414b2d90`)
+    **draws** the accumulated passes, over ranges of technique ids, reading the early-Z global at
+    `0x14328cc79`. It does not assemble anything.
+
+So the accumulator is complete early, and `globals::game::currentAccumulator` is a *currently rendering*
+pointer that is simply not set yet. Re-probing against the accumulator latched from a frame where the
+global was set:
+
+| Hook point | via latched accumulator | via `currentAccumulator` |
+| --- | --- | --- |
+| `EarlyPrepass` (before the depth pass) | **612** | 0 |
+| end of `Main_RenderDepth` | **612** | 0 |
+| `Prepass` | 612 | 612 |
+
+The passes were there the whole time.
+
+### What was done
+
+`BuildFrame` and the pipeline/program build move to `EarlyPrepass`, which runs from
+`Main_RenderShadowMaps`. `CollectAccumulatedPasses` reads `SceneStore::latchedAccumulator`, refreshed by
+`LatchAccumulator()` from `Prepass` where `currentAccumulator` is valid; a change of accumulator is logged
+once. The first frame has no latch and builds empty tables, which is harmless.
+
+`DrewLastFrame`'s one-frame tolerance absorbs the shift in when the frame counter advances, so the hybrid
+skip needed no change.
+
+### Two things that had to move back, and what caught them
+
+Capture parity caught both; neither was visible in a screenshot.
+
+1.  **`EyePosition` (VS PerGeometry variable 2): 134,700 mismatches of 157,800.** Most of what
+    `SetupGeometry` writes is per frame, and `EyePosition` is relative to `posAdjust`. At `EarlyPrepass`
+    the renderer's shadow state still belongs to the shadow-map camera just drawn, so the evaluation
+    produced that camera's eye (113.07) where the main pass writes 0.
+2.  **`EmitColor` (PS PerGeometry variable 8): 6-21 mismatches.** Candle and chandelier emissives flicker,
+    and sampling `emissiveMult` at `EarlyPrepass` put it far enough from the draw that the parity check's
+    0.1% relative tolerance on `EmitColor` no longer covered the difference (0.49074 against 0.49183, and
+    1.2350 against 1.2546).
+
+`SceneStore::RefreshFrameConstants()`, called from `Prepass`, re-evaluates the per-pipeline per-frame
+constants and resamples the per-object shading against the main camera's state. To do that it needs the
+property whose lighting pass supplied each pipeline's constants, so `tables.geometryTemplate` is kept
+parallel to `tables.pipelines`. The object, geometry and material tables are camera- and
+time-independent and stay in `BuildFrame`.
+
+The Z-prepass epoch runs between the two and so uses the previous frame's values for those constants.
+That is harmless: vertex position comes from `World`, which is patched per object at epoch time with that
+epoch's own eye, and never from these.
+
+**Gate:** capture parity **OK, 254,698 draws checked, 0 mismatched**; `CS_DCLF_BUILD_PARITY` OK on 959
+sequences; the two epochs now report consecutive table generations (colour 5764, then the next frame's
+z-prepass 5765) where they used to report the same one; no crashes, no device loss, 0 VUIDs.
+
+## The object index reaches the shaders
+
+Groundwork for the bindless step, landed and verified on its own.
+
+`DrawSequence` now carries the object's index in `SceneStore::Tables::objects` as a third root constant
+word, beside the two that already hold the `DrawBindings` address. The record grows from 64 to 68 bytes;
+the push constant range and the `Constant` indirect argument both go from 2 words to 3, and because the
+command signature's arguments are positional the vertex buffer, index buffer and draw arguments shift with
+it.
+
+Nothing reads it yet. It is the piece the shader needs in order to fetch per-object data from a
+GPU-resident table instead of receiving it through a per-draw constant buffer, and it is what makes the
+rest of the bindless work possible:
+
+-   Of the PerGeometry group, only **five variables are per-object** - `World`, `PreviousWorld`,
+    `MaterialData`, `EmitColor` and the w of `SSRParams` (this is the same finding the Step 2 template
+    rests on). Everything else is per-pipeline.
+-   Once the shader reads those five from a structured buffer indexed by this word, the PerGeometry
+    cbuffer becomes *per-pipeline*, so the per-object arena allocations and packing disappear entirely.
+-   With no per-object constant addresses left in it, `DrawBindings` becomes identical for every draw
+    sharing a (material, pipeline) pair, so the records deduplicate and the per-draw upload collapses.
+
+That last point is the one that matters for culling: the reason the whole tracked set cannot be handed to
+the GPU today is that the CPU builds a binding record per candidate. When records are per-(material,
+pipeline), feeding every candidate costs nothing per candidate, and the culling genuinely happens before
+any per-draw work exists.
+
+**Gate:** `CS_DCLF_BUILD_PARITY` reports 337 sequences matching the CPU templates byte for byte with the
+new 68-byte layout, and the frame is unchanged. Only 21 sites in `Lighting.hlsl` reference those five
+variables, so the shader change is small.
+
+## Static ownership: capture at registration, then withhold
+
+DCLF was a guest in the engine's per-frame loop. It now owns a set of objects outright: their passes are
+built, lit and shadowed exactly as before, and then kept out of the main camera's batch renderer so the
+native loop has nothing to draw.
+
+### Capture belongs at `BSBatchRenderer::RegisterPass`, not at `GetRenderPasses`
+
+The plan called for hooking `BSLightingShaderProperty::GetRenderPasses` (vfunc 0x2A). That cannot work:
+the two fields the tables depend on do not exist when it returns. `AccumulatedPass::technique` is the
+batch group's key, which the *caller* computes and hands to registration - it differs from the pass's own
+`passEnum` because DoAlphaTest is added there - and `subPass` is chosen inside registration.
+
+`BSBatchRenderer::RegisterPass(BSRenderPass*, std::uint32_t techniqueID)` (vfunc **0x02**, CommonLib
+declares it) is the right place. It receives the technique as an argument, and it is also where
+withholding belongs: not calling the original is exactly "the batch renderer never receives this pass".
+
+`subPass` is derived rather than observed. The engine's classifier (`FUN_1414f4790`, called from
+`RegisterPass` at `0x1414f2a20`) reads **only** the shader property's flags and the geometry's alpha
+property: flag bit 54 alone puts a pass in list 4, otherwise the list is bit 36 as value 2, plus whether
+`NiAlphaProperty::alphaFlags` bit 9 (alpha testing) is set. Nothing per-frame enters it, which is what
+lets DCLF keep the field once passes stop reaching a batch renderer at all.
+
+**Gate:** 634 registrations captured, 634 compared against the accumulator walk, **0 missing, 0 extra, 0
+technique differs, 0 subPass differs**. The derivation matches the engine on every pass. The tables are
+now built from the capture (`CS_DCLF_PASS_SOURCE=accumulator` restores the walk), and capture parity
+stayed OK over 157,800 draws through the switch-over.
+
+Incidentally, registration turns out to be **single-threaded** in practice, despite running under a job
+list and despite the engine's classifier taking a mutex. The capture buffer is lock-free anyway, and
+reports the thread count so a change would be noticed.
+
+### Withholding
+
+`CS_DCLF_OWNERSHIP=static`. The hook consults an immutable claim set, published whole once per frame and
+read from whatever thread registers; a claim is a standing statement that DCLF owns an object, not the
+per-frame decision the old `drawnFrame` skip was.
+
+The claim is **what the colour epoch actually drew**, not what DCLF would like to draw. Withholding means
+the native loop will not draw it either, so claiming something DCLF then fails to draw - a pipeline still
+compiling, a texture not resolved - leaves a hole. Having drawn it once is the evidence that it can be
+drawn again. Claims are dropped across a load screen, because they name geometry from the cell being torn
+down.
+
+Only the main camera's batch renderers are affected; the shadow cameras keep their passes. The native
+**depth** pass is also untouched, because it registers through a different virtual
+(`BSLightingShaderProperty::GetRenderDepthPass`, `0x1414aff30`) into a different renderer - so DCLF's
+existing hybrid depth skip still does that half.
+
+### The hole detector, and what it caught
+
+Per frame on the CPU, with no readback: an object that was **withheld and not drawn** is a hole.
+
+Being claimed is not sufficient on its own, and the first version got this wrong - it counted every
+claimed object that went undrawn, which over-reported badly at cell transitions (6, then 14 "holes"). An
+object the engine culled this frame is never registered, so it is never withheld either, and nobody was
+going to draw it. The test for "the engine would have drawn it" is that its pass was captured this frame.
+
+**Gate:** Bannered Mare, then `coc` to Whiterun, then to Dragonsreach - 921 passes withheld in steady
+state, **0 claimed but not drawn** at every report including across all three transitions; no crashes, no
+device loss, 0 VUIDs; the native opaque pass now has nothing left to skip (`0 in the opaque pass`).
+
+### What this unblocks
+
+The Phase 4 defect was that the native loop had already skipped an object by the time the depth segment
+ran, so anything phase 1 rejected got no native draw, no DCLF depth and therefore no DCLF colour. With
+ownership there is no skip decision to get wrong: the engine never draws a claimed object, so DCLF
+culling one is simply correct. The Z-prepass no longer gates on `DrewLastFrame` under static ownership.
+
 ## Switches
 
 | Variable | Effect |
@@ -728,6 +998,9 @@ control has to be re-run at the end, not only at the start.
 | `CS_DCLF=0` | Turns the feature off entirely: no hooks, no tables, no draws. Anything else, including unset, leaves it on. |
 | `CS_DCLF_TABLES=tracked\|accumulated` | Whether the tables hold the whole tracked set or only what the engine's accumulator kept. `accumulated` was the fallback while the per-pipeline template defect was open; `tracked` is now correct. |
 | `CS_DCLF_EVAL=off\|material\|geometry` | Diagnostic: suppresses parts of the stand-in evaluation. Note that a suppressed evaluation also stops its objects being drawn, so a clean frame under it proves nothing on its own. |
+| `CS_DCLF_OWNERSHIP=static` | Withhold claimed passes from the main camera's batch renderer, so DCLF owns those objects outright. Default off. |
+| `CS_DCLF_PASS_SOURCE=accumulator` | Build the tables from the accumulator walk instead of the captured registrations. |
+| `CS_DCLF_MATERIAL_CACHE=probe` | Diagnostic: measures how many material records are unchanged from the previous frame, i.e. whether a cross-frame cache could work. |
 | `CS_DCLF_EVAL=audit` | Diagnostic: snapshots pipeline state around every stand-in call and reports anything not restored. Very slow; the frame rate collapses. |
 | `CS_DCLF_TEST_COMMANDS=<frame>:<command>;…` | Test runs: run each console command on the main thread once that many frames have been presented (loading screens do not count), for coverage runs from the auto-loaded save. The counter is independent of the feature, so a `CS_DCLF=0` control reaches the same place at the same hour. |
 
