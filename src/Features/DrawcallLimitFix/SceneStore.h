@@ -103,6 +103,7 @@ namespace DCLF
 			std::array<std::uint32_t, static_cast<std::size_t>(Ineligible::Count)> ineligible{};
 			// CS_DCLF_CLASSIFY_CACHE: objects served from the cached verdict, and - under `probe` - how
 			// many were recomputed and how many disagreed. Zero disagreements is the gate.
+			std::uint32_t castResolved = 0;  // RTTI casts actually walked (the rest reused a witness)
 			std::uint32_t classifyHits = 0;
 			std::uint32_t classifyChecked = 0;
 			std::uint32_t classifyDiffers = 0;
@@ -242,7 +243,8 @@ namespace DCLF
 		/** @brief Static eligibility of an arbitrary geometry, without the per-frame checks. */
 		/** @brief Whether a negative verdict follows only from what the pointer witnesses cover. */
 		static bool CacheableVerdict(Ineligible a_reason);
-		static Ineligible ClassifyStatic(RE::BSGeometry& a_geometry, LightingDescriptors* a_descriptors, const AccumulatedPass* a_accumulated = nullptr);
+		static Ineligible ClassifyStatic(RE::BSGeometry& a_geometry, LightingDescriptors* a_descriptors, const AccumulatedPass* a_accumulated = nullptr,
+			bool a_wantDerived = true, RE::BSLightingShaderProperty** a_castCache = nullptr);
 
 		/** @brief The lighting pass the main-camera accumulator holds for a geometry this frame, or null. */
 		const AccumulatedPass* FindAccumulatedPass(const RE::BSGeometry* a_geometry) const;
@@ -283,6 +285,19 @@ namespace DCLF
 				std::uint8_t fadeState = 0;
 			};
 			StaticVerdict verdict;
+
+			/**
+			 * @brief The RTTI cast result, remembered against the property pointer that produced it.
+			 *
+			 * `netimmerse_cast` walks a chain of RTTI pointers. They are pointers, not strings, so it is
+			 * cheap in instructions - but every step is a dependent load into a different allocation, and
+			 * at ~3000 classifications a frame those misses are the one part of ClassifyStatic that is
+			 * neither computation a memo can remove nor memory BuildFrame re-reads later anyway. Whether
+			 * a property is a BSLightingShaderProperty is a property of its type, so the pointer is a
+			 * complete witness.
+			 */
+			const RE::BSShaderProperty* castProperty = nullptr;
+			RE::BSLightingShaderProperty* castResult = nullptr;
 		};
 
 		void RefreshCategoryNodes(bool a_force = false);

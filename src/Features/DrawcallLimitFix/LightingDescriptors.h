@@ -117,6 +117,16 @@ namespace DCLF
 	 * from the property is kept in derivedPass for comparison. Without it the derivation stands, with its
 	 * guesses for the kRuntimePassBits.
 	 */
+	/**
+	 * @param a_wantDerived Compute derivedPass even when the accumulator supplies the real one.
+	 *
+	 * For an object the accumulator holds, the property derivation's ONLY surviving effect is
+	 * derivedPass, which nothing but the CS_DCLF_DERIVE_PROBE diagnostic reads: the pass descriptor comes
+	 * from the accumulated technique, the flag edits the derivation makes are not used afterwards, and
+	 * the two LOD fades it computes are overwritten from the property two lines later. Skipping it there
+	 * removes the fade metric, SelectLightingTechnique, ten flag tests and a virtual GetFeature() call
+	 * from every eligible object, every frame.
+	 */
 	Ineligible DeriveLightingDescriptors(const RE::BSLightingShaderProperty& a_property, const RE::BSGeometry& a_geometry,
-		const AccumulatedPass* a_accumulated, LightingDescriptors& a_out);
+		const AccumulatedPass* a_accumulated, LightingDescriptors& a_out, bool a_wantDerived = true);
 }

@@ -454,7 +454,8 @@ namespace DCLF
 		}
 	}
 
-	Ineligible SceneStore::ClassifyStatic(RE::BSGeometry& a_geometry, LightingDescriptors* a_descriptors, const AccumulatedPass* a_accumulated)
+	Ineligible SceneStore::ClassifyStatic(RE::BSGeometry& a_geometry, LightingDescriptors* a_descriptors, const AccumulatedPass* a_accumulated,
+		bool a_wantDerived, RE::BSLightingShaderProperty** a_castCache)
 	{
 		if (a_geometry.GetType().get() != RE::BSGeometry::Type::kTriShape)
 			return Ineligible::NotTriShape;
@@ -465,7 +466,10 @@ namespace DCLF
 		if (!data.rendererData || !data.rendererData->vertexBuffer || !data.rendererData->indexBuffer)
 			return Ineligible::NoRendererData;
 
-		auto* property = netimmerse_cast<RE::BSLightingShaderProperty*>(data.shaderProperty.get());
+		// The caller may already know what this property is (see Tracked::castProperty); the cast is a walk
+		// of dependent RTTI pointer loads, which is the part of this function that neither a memo nor the
+		// reads BuildFrame makes later can remove.
+		auto* property = a_castCache ? *a_castCache : netimmerse_cast<RE::BSLightingShaderProperty*>(data.shaderProperty.get());
 		if (!property)
 			return Ineligible::NotLightingShader;
 
@@ -475,7 +479,7 @@ namespace DCLF
 			return Ineligible::AlphaBlend;
 
 		LightingDescriptors descriptors;
-		const Ineligible reason = DeriveLightingDescriptors(*property, a_geometry, a_accumulated, descriptors);
+		const Ineligible reason = DeriveLightingDescriptors(*property, a_geometry, a_accumulated, descriptors, a_wantDerived);
 		if (reason == Ineligible::None && a_descriptors)
 			*a_descriptors = descriptors;
 		return reason;
@@ -841,7 +845,7 @@ namespace DCLF
 		materialPatchValuesFresh = false;
 		stats.templateUpgrades = stats.templateDefects = stats.pipelinesCulledOnly = 0;
 		stats.nativeVisible = 0;  // counted as the objects are built, not in a second pass over the table
-		stats.classifyHits = stats.classifyChecked = stats.classifyDiffers = 0;
+		stats.classifyHits = stats.classifyChecked = stats.classifyDiffers = stats.castResolved = 0;
 
 		// Members: cleared rather than constructed, so the buckets are reused instead of being allocated
 		// and freed every frame.
@@ -954,7 +958,11 @@ namespace DCLF
 		static const bool materialProbeAll = SwitchValue("CS_DCLF_MATERIAL_CACHE") == "probe";
 		// The derivation counters feed exactly one log line, which only CS_DCLF_STATS prints. Computing
 		// them per object per frame when nothing reads them was pure overhead.
-		static const bool derivationStats = SwitchEnabled("CS_DCLF_STATS");
+		// CS_DCLF_DERIVE_PROBE, not CS_DCLF_STATS. The counters feed one log line, but computing them also
+		// forces the property derivation to run for every accumulated object, and for such an object that
+		// derivation has no other effect at all. Gating them on CS_DCLF_STATS meant every reporting run
+		// measured a configuration nobody ships.
+		static const bool derivationStats = SwitchEnabled("CS_DCLF_DERIVE_PROBE");
 		// CS_DCLF_CLASSIFY_CACHE=off|on|probe. `probe` uses the cached verdict and *also* recomputes it,
 		// comparing the two; it is the gate, and it costs more than either path alone.
 		static const std::string classifyCacheMode = SwitchValue("CS_DCLF_CLASSIFY_CACHE");
@@ -983,6 +991,15 @@ namespace DCLF
 			auto* witnessProperty = runtime.shaderProperty.get();
 			const auto* witnessMaterial = witnessProperty ? witnessProperty->material : nullptr;
 			const std::uint8_t fadeState = FadeStateOf(witnessProperty);
+			// Resolve the RTTI cast once per property pointer rather than once per frame. Both outcomes
+			// are remembered: castResult stays null for a property that is not a lighting one, and the
+			// pointer witness is what makes that null trustworthy.
+			if (trackedEntry->castProperty != witnessProperty) {
+				trackedEntry->castProperty = witnessProperty;
+				trackedEntry->castResult = netimmerse_cast<RE::BSLightingShaderProperty*>(witnessProperty);
+				++stats.castResolved;
+			}
+			RE::BSLightingShaderProperty* castCache = trackedEntry->castResult;
 			const bool hit = classifyCache && verdict.cached && verdict.rendererData == runtime.rendererData &&
 			                 verdict.property == witnessProperty && verdict.material == witnessMaterial &&
 			                 verdict.fadeState == fadeState;
@@ -991,7 +1008,7 @@ namespace DCLF
 				reason = verdict.reason;
 				++stats.classifyHits;
 			} else {
-				reason = ClassifyStatic(*geometry, &descriptors, accumulated);
+				reason = ClassifyStatic(*geometry, &descriptors, accumulated, derivationStats, &castCache);
 				if (hit) {
 					// probe: the cache said one thing and the computation another, which is a defect.
 					++stats.classifyChecked;
@@ -1313,8 +1330,16 @@ namespace DCLF
 
 			const auto objectId = static_cast<std::uint32_t>(tables.objects.size());
 			ObjectRecord object{};
-			StoreTransform(geometry->world, object.world);
-			StoreTransform(geometry->previousWorld, object.previousWorld);
+			// CS_DCLF_TRANSFORM_PROBE=skip: a COST BOUND, not a mode. It renders wrong - every object
+			// collapses to the origin - and exists only to answer how much of `record` the two transform
+			// stores are, which is what decides whether Stage 5's transform witness can pay for itself.
+			// A witness would read two 52-byte NiTransforms to avoid 18 multiplies, so the answer has to
+			// be large for it to be worth the extra memory traffic.
+			static const bool skipTransforms = SwitchValue("CS_DCLF_TRANSFORM_PROBE") == "skip";
+			if (!skipTransforms) {
+				StoreTransform(geometry->world, object.world);
+				StoreTransform(geometry->previousWorld, object.previousWorld);
+			}
 			object.boundCenter[0] = geometry->worldBound.center.x;
 			object.boundCenter[1] = geometry->worldBound.center.y;
 			object.boundCenter[2] = geometry->worldBound.center.z;

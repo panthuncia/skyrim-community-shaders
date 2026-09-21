@@ -1600,6 +1600,55 @@ live draw arguments, which is the device-loss hazard `BuildFrame` already docume
 
 `resolve` went 0.326 → 0.176 ms in the exterior, 0.110 → 0.072 in Dragonsreach.
 
+### The property derivation is dead work for an accumulated object
+
+For an object the accumulator holds, `DeriveLightingDescriptors`' derivation block has exactly one
+surviving effect: `a_out.derivedPass`. The pass descriptor comes from `a_accumulated->technique`; the
+flag edits the block makes to `f` are never read afterwards; the two LOD fades it computes are
+overwritten from the property two lines later; and its return value is not consulted to reject the
+object. Only the derivation diagnostic reads `derivedPass`.
+
+So for those objects the fade metric, `SelectLightingTechnique`, ten flag tests and a virtual
+`GetFeature()` call were being run and thrown away. They are skipped now unless the diagnostic asks for
+them, which also moved that diagnostic from `CS_DCLF_STATS` to its own `CS_DCLF_DERIVE_PROBE`: gating it
+on the stats switch meant every reporting run measured a configuration nobody ships. The report line is
+gated too, because printed unconditionally it read "0 objects compared, 0 differ", which scans as a
+passing check rather than one that never ran.
+
+The saving is smaller than it looks — `classify-static` 0.363 → 0.338 ms in Dragonsreach, and nothing
+measurable in the Whiterun exterior. The reason is worth recording: in the exterior most candidates are
+*not* accumulated (3057 objects, ~915 engine-kept), and for those the derivation **is** the pass
+descriptor, so it has to run. The work removed scales with what the engine kept, not with what DCLF
+tracks.
+
+What remains in `classify-static` is not computation. A descriptor memo keyed on the pass descriptor was
+tried in an earlier stage and measured neutral, and `ModifyShaderLookup` is pure bit manipulation on that
+descriptor. The remaining ~300 ns per call is dominated by touching the geometry, property, material,
+alpha property and fade node — five separate allocations, each a likely cache miss. Removing it means
+not touching them at all, which is a *positive* verdict cache, not a cheaper derivation.
+
+### The RTTI cast is resolved once per property, and that is where classify-static stops
+
+`netimmerse_cast` is cheap in instructions — it walks a chain of RTTI *pointers*, not strings — but every
+step is a dependent load into a different allocation. At ~3000 classifications a frame it was the one
+part of `ClassifyStatic` that was neither computation a memo could remove nor memory `BuildFrame`
+re-reads later anyway. Whether a property is a `BSLightingShaderProperty` follows from its type, so the
+property pointer is a complete witness, and `Tracked` now remembers both the pointer and the result
+(null included, which is what makes a negative trustworthy).
+
+**RTTI casts walked per frame: 0.** `classify-static` 1.011 → 0.945 ms in the exterior, 0.363 → 0.312 in
+Dragonsreach, with the classification probe still at 0 differ and capture parity clean.
+
+That is ~11%, and it is the end of the road for this part. With the casts at zero and the derivation
+skipped for accumulated objects, `classify-static` is still 0.945 ms over ~3060 calls — about 310 ns
+each — and what remains is memory: the geometry runtime data, the property, the material, the alpha
+property and the fade node, five allocations touched per object. A *positive* verdict cache cannot
+recover much of it, because its own witnesses must read the geometry, the property and the fade node,
+and `BuildFrame` re-reads the alpha property and the material downstream for the two-sided flag, the
+alpha test and the material key. What is left is the pointer chasing the data layout implies, not work
+that can be cached away.
+
+
 ### Result
 
 **Dragonsreach 1.531 → ~1.31 ms** a frame, unprofiled, over ten steady-state intervals. Gates: capture
@@ -1610,3 +1659,119 @@ the upstream semaphore one.
 **Still open.** Caching the *table slots* on `Tracked` — the remaining `dedup-hit`, 0.373 ms — needs the
 tables to persist first, because a slot is only worth caching if it is stable. The plan had that
 dependency the other way round.
+
+## Stage 5, attribution: the epoch, and a switch that was off
+
+Splitting `BuildFrame` twice had shown the same failure both times — a bucket named after one thing that
+mostly contained another. The epoch's four parts had never been split at all, and "rest" was a
+subtraction. Splitting it found two things, the second of which matters more than any optimisation in
+this document.
+
+### The parts are per record, not per draw
+
+`mark(0..2)` all sit inside `if (!dedup || recordIndex == kNoRecord || dedupParity)`. Since Step D
+deduplicated the binding record to one per (material, pipeline) pair, that block runs ~105 times an
+epoch rather than ~1500. So "textures/samplers", "constant groups" and "binding record" were per
+*record*, while the per-*draw* work — the loop prologue with its `resolvedBindings` probe, and the tail
+that builds the sequence and the draw input — was invisible inside "rest", together with the uploads and
+the graph execution.
+
+### Step D's deduplication was never switched on
+
+The split's first measurement read `1538 candidates built from 1538 binding records`. `dedup` is
+`BindlessDraws()`, which requires `CS_DCLF_BINDLESS_DRAW`, and that defaults off — so **every
+measurement taken since Step D has had its deduplication disabled**, and "constant groups 0.715 ms" was
+~465 ns of constant packing per draw rather than per pair.
+
+With the switch on, in Dragonsreach, 1521 candidates collapse to **105 binding records**:
+
+| part | dedup off | dedup on |
+| --- | --- | --- |
+| textures/samplers | 0.131 | 0.047 |
+| constant groups | 0.715 | 0.162 |
+| record push | 0.160 | 0.060 |
+| per-draw tail | 0.117 | 0.102 |
+| per-draw prologue | 0.188 | 0.118 |
+| epoch prologue | — | 0.052 |
+| graph execute | — | ~0.61 |
+| **epoch total** | **~1.98** | **~1.15** |
+
+That is ~1.6 ms a frame across the two epochs, from a feature already written, tested and gated. Its
+gates hold: record dedup parity 4.8M rebuilt records matching their pair byte for byte, bindless record
+parity 204M components matching the constant groups, no mismatches, no VUIDs beyond the upstream
+semaphore one, and Dragonsreach renders identically.
+
+It is **not** defaulted on here, because the standing debt lists a live test matrix — kill cams, the map
+menu, first person, water reflections, Dynamic Cubemaps, save and load — that has to be worked through
+before any switch flips, and `CS_DCLF_BINDLESS_DRAW` changes the shader build as well as the CPU path.
+
+### What is left is not per-object
+
+Fully split, with dedup on:
+
+| part | ms | scales with |
+| --- | --- | --- |
+| **graph execute** | **~0.61** | **nothing — fixed per epoch** |
+| constant groups | 0.162 | records |
+| per-draw prologue | 0.118 | candidates |
+| per-draw tail | 0.102 | candidates |
+| record push | 0.060 | records |
+| textures/samplers | 0.047 | records |
+| epoch prologue | 0.052 | nothing |
+| uploads | 0.000 | deferred to the graph's upload pass |
+
+Half the epoch is the graph execution and the `PassFrame` build — fixed cost, independent of object
+count, and paid twice a frame. The genuinely per-candidate part is the prologue plus the tail: about
+**145 ns per candidate per epoch**, not the ~1.2 us a division of the old total implied.
+
+## Stage 5: the transform witness cannot pay for itself
+
+The plan's Stage 5 rested on one idea: most of a Skyrim cell never moves, so a 48-byte transform compare
+should skip the record write and the upload for most objects. Stable object slots — a free list, one
+array indexed by slot, per-slot frame stamps, every table consumer changed — existed mainly to make that
+possible.
+
+Three measurements say it does not work, and none of them needed the slots built.
+
+**The transform stores are 13 ns an object.** `CS_DCLF_TRANSFORM_PROBE=skip` removes both
+`StoreTransform` calls outright — it renders wrong, and exists only to bound the cost. In Dragonsreach,
+1962 objects: `record` 0.413 → 0.387 ms. That 0.026 ms is the *ceiling* on anything a transform cache
+could save. A witness would read two 52-byte `NiTransform`s and copy 48 bytes to avoid 18 multiplies, so
+it adds more memory traffic than the arithmetic it removes. It would be a net loss.
+
+**The record build is 26 ns an object.** `BuildObjectRecord` runs for every object before the epoch loop,
+and that whole prologue measures 0.052 ms for 1962 objects.
+
+**The upload is already free on the CPU.** `BUFFER_UPLOAD` reaches `UploadService::UploadData`, which
+records the pointer and size; the copy happens in the graph's upload pass. The measured "uploads" part is
+0.000 ms. The copy is real, but it lands inside `graph execute`, and turning the bindless object table
+on and off — 282 KB an epoch — moves `graph execute` by less than run-to-run noise.
+
+So the three things Stage 5 was going to avoid cost 13 ns, 26 ns and approximately nothing. **Stable
+object slots are not worth building for this.** They may still be worth building for a different reason —
+they would remove the `objectIndex` insert, which `dedup-hit` measures at ~119 ns a draw — but that is a
+different argument from the one in the plan, and it should be made on its own evidence.
+
+## The live test matrix for CS_DCLF_BINDLESS_DRAW
+
+Driven through `CS_DCLF_TEST_COMMANDS`, with record-dedup and BuildDraws parity on throughout.
+
+| case | how | result |
+| --- | --- | --- |
+| interiors with rooms and portals | `coc WhiterunDragonsreach`, `coc WhiterunBanneredMare` | clean |
+| exteriors | Whiterun, `coc Riverwood` | clean |
+| cell transitions | six, across both runs | clean |
+| worldspace change (fast-travel equivalent) | `coc Riverwood`, `coc Whiterun` | clean |
+| night lighting / emissives | `set gamehour to 22` | clean |
+| dungeon, alpha-tested foliage, god rays | `coc BleakFallsBarrow01` | clean |
+| save | `save dclfm2` | clean |
+| **load** | `load dclfm2` | clean — the path that frees renderer data |
+
+Across both runs: **0 mismatches**, 21/21 BuildDraws parity OK, 20/20 record dedup parity OK, 0 rejected
+buffers, and no VUIDs beyond the upstream semaphore one. Images correct in Dragonsreach, Bleak Falls
+Barrow and Riverwood.
+
+**Not covered, because they need input the console cannot drive:** kill cams, the map menu, first
+person, Screenshot and Remote Control. Dynamic Cubemaps is not installed in this profile, so it was not
+exercised either. The switch is therefore left **off by default** — the automatable part of the matrix is
+clean, but the matrix is not complete, and that last step is a human one.

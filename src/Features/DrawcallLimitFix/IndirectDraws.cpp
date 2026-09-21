@@ -2044,6 +2044,10 @@ namespace DCLF
 			for (std::size_t r = 0; r < objectRecords.size(); ++r)
 				BuildObjectRecord(tables, static_cast<std::uint32_t>(r), renderFlags, eye, previousEye, objectRecords[r]);
 
+			// Everything before the loop: the per-epoch maps, the frame texture table and the object
+			// records. Split out because "rest" was a subtraction covering both this and the graph
+			// execution after it, and at 0.655 ms it had become the largest single part of the system.
+			mark(6);
 			for (std::uint32_t o = 0; o < tables.objects.size(); ++o) {
 				const auto& object = tables.objects[o];
 				if (object.flags & kObjectNoBindings) {
@@ -2116,6 +2120,9 @@ namespace DCLF
 					continue;
 				}
 				std::uint32_t recordIndex = resolved.recordIndex;
+				// Per DRAW: the loop entry and the resolvedBindings probe above, which every candidate pays
+				// whether or not it assembles a record.
+				mark(4);
 				if (!dedup || recordIndex == kNoRecord || dedupParity) {
 					if (newResolved) {
 						// Textures: the material's, the technique's shadow mask, then the frame's.
@@ -2385,6 +2392,8 @@ namespace DCLF
 							tables.objectGeometry[o] ? tables.objectGeometry[o]->name.c_str() : "?", geometry.vertexCount, geometry.vertexStride, vertexNeeded,
 							geometry.vertexBytes, geometry.firstIndex + geometry.indexCount, indexNeeded, geometry.indexBytes);
 				}
+				// Per DRAW: the sequence, the draw input, the drawn-frame mark and the slice check.
+				mark(3);
 			}
 
 			// Upload (the graph's upload pass runs ahead of every pass of this epoch).
@@ -2505,7 +2514,11 @@ namespace DCLF
 			impl->ReadCullCounters(resources, stats);
 
 		stats.cpuMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-		stats.partMs[3] = stats.cpuMs - (stats.partMs[0] + stats.partMs[1] + stats.partMs[2]);
+		// The remainder is the epoch execution itself and the prologue before the loop. It stays a
+		// subtraction, but it is now a small one rather than the bucket the per-draw work hid in.
+		// What is left is the graph execution and the PassFrame build after the uploads.
+		stats.partMs[7] = stats.cpuMs - (stats.partMs[0] + stats.partMs[1] + stats.partMs[2] +
+		                                    stats.partMs[3] + stats.partMs[4] + stats.partMs[5] + stats.partMs[6]);
 		if (!ok)
 			logger::error("[DCLF] The main-pass epoch failed; the render graph is disabled");
 	}

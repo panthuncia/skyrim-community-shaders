@@ -308,8 +308,10 @@ void DrawcallLimitFix::Prepass()
 			draws.drawn, draws.records, skipped, draws.missingTextures[0], draws.missingTextures[1], draws.missingTextures[2], draws.missingTextures[3], draws.missingVertexConstants,
 			draws.missingPixelConstants, draws.uploadBytes / 1048576.0,
 			draws.cpuMs, draws.epochs, draws.notReady, textures.cached, textures.rejected[1], textures.rejected[2], textures.rejected[3], textures.samplers);
-		logger::info("[DCLF] indirect epoch CPU by part: textures/samplers {:.3f} ms, constant groups {:.3f} ms, binding record {:.3f} ms, rest {:.3f} ms",
-			draws.partMs[0], draws.partMs[1], draws.partMs[2], draws.partMs[3]);
+		std::string epochParts;
+		for (std::size_t i = 0; i < draws.partMs.size(); ++i)
+			epochParts += fmt::format("{}{} {:.3f} ms", epochParts.empty() ? "" : ", ", DCLF::kEpochPartNames[i], draws.partMs[i]);
+		logger::info("[DCLF] indirect epoch CPU by part: {}", epochParts);
 		if (DCLF::IndirectDraws::Hybrid())
 			logger::info("[DCLF] hybrid (last frame): {} of {} native passes left to the indirect draws ({} in the depth pass, {} in the opaque pass)",
 				skipStats.skipped, skipStats.offered, skipStats.skippedInDepth, skipStats.skippedInOpaque);
@@ -332,15 +334,20 @@ void DrawcallLimitFix::Prepass()
 		// GetRenderPasses computes per frame, and that number is what decides whether GetRenderPasses can
 		// be skipped outright rather than merely withheld from the batch renderer.
 		std::string bitBreakdown;
-		for (std::uint32_t bit = 0; bit < 32; ++bit) {
-			if (!stats.derivationBitCounts[bit])
-				continue;
-			bitBreakdown += std::format("{} bit {}{}={}", bitBreakdown.empty() ? "" : ",", bit,
-				((1u << bit) & DCLF::kRuntimePassBits) ? "*" : "", stats.derivationBitCounts[bit]);
+		// Only when CS_DCLF_DERIVE_PROBE measured it. Printed unconditionally this line read
+		// "0 objects compared, 0 differ" with the probe off, which scans as a passing check rather
+		// than as one that never ran.
+		if (DCLF::SwitchEnabled("CS_DCLF_DERIVE_PROBE")) {
+			for (std::uint32_t bit = 0; bit < 32; ++bit) {
+				if (!stats.derivationBitCounts[bit])
+					continue;
+				bitBreakdown += std::format("{} bit {}{}={}", bitBreakdown.empty() ? "" : ",", bit,
+					((1u << bit) & DCLF::kRuntimePassBits) ? "*" : "", stats.derivationBitCounts[bit]);
+			}
+			logger::info("[DCLF] derivation (last frame): {} objects compared, {} would stay native; property bits: {} differ ({:08X}); runtime bits: {} differ ({:08X}); per bit (* = runtime):{}",
+				stats.derivationChecked, stats.derivationNative, stats.derivationDiffers, stats.derivationBits,
+				stats.derivationRuntimeDiffers, stats.derivationRuntimeBits, bitBreakdown.empty() ? std::string(" none") : bitBreakdown);
 		}
-		logger::info("[DCLF] derivation (last frame): {} objects compared, {} would stay native; property bits: {} differ ({:08X}); runtime bits: {} differ ({:08X}); per bit (* = runtime):{}",
-			stats.derivationChecked, stats.derivationNative, stats.derivationDiffers, stats.derivationBits,
-			stats.derivationRuntimeDiffers, stats.derivationRuntimeBits, bitBreakdown.empty() ? std::string(" none") : bitBreakdown);
 		const auto& capture = DCLF::PassCapture::Get().GetStats();
 		logger::info("[DCLF] pass capture: {} registrations from {} threads ({} overflowed); against the accumulator: {} compared, {} missing, {} extra, {} technique differs, {} subPass differs{}",
 			capture.captured, capture.threads, capture.overflowed, capture.compared, capture.missing, capture.extra,
@@ -367,8 +374,8 @@ void DrawcallLimitFix::Prepass()
 			logger::info("[DCLF] claim churn: +{} -{} ({} of the drops still had an engine pass, so the native loop takes them back)",
 				capture.claimsAdded, capture.claimsDropped, capture.droppedAfterCull);
 		if (stats.classifyHits || stats.classifyChecked)
-			logger::info("[DCLF] classification cache (last frame): {} served from the cache, {} recomputed and compared, {} differ{}",
-				stats.classifyHits, stats.classifyChecked, stats.classifyDiffers, stats.classifyDiffers ? " <- STALE" : "");
+			logger::info("[DCLF] classification cache (last frame): {} served from the cache, {} recomputed and compared, {} differ{}; RTTI casts walked {}",
+				stats.classifyHits, stats.classifyChecked, stats.classifyDiffers, stats.classifyDiffers ? " <- STALE" : "", stats.castResolved);
 		// The Stage 4c gate. A pipeline's per-frame lighting template must come from an object the engine
 		// itself kept; anything else hands a culled object's scene light list to the visible objects drawn
 		// on that pipeline, which is the blown-out interior lighting defect.

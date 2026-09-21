@@ -155,7 +155,7 @@ namespace DCLF
 	}
 
 	Ineligible DeriveLightingDescriptors(const RE::BSLightingShaderProperty& a_property, const RE::BSGeometry& a_geometry,
-		const AccumulatedPass* a_accumulated, LightingDescriptors& a_out)
+		const AccumulatedPass* a_accumulated, LightingDescriptors& a_out, bool a_wantDerived)
 	{
 		std::uint64_t f = a_property.flags.underlying();
 
@@ -181,7 +181,10 @@ namespace DCLF
 		std::uint32_t derived = 0;
 		float specularFade = a_property.specularLODFade;
 		float envmapFade = a_property.envmapLODFade;
-		const Ineligible derivedReason = [&] {
+		// Skipped entirely for an accumulated object unless the probe wants the comparison: see the
+		// header. Everything below this point that the accumulated path reads is recomputed there.
+		const bool deriveNeeded = !a_accumulated || a_wantDerived;
+		const Ineligible derivedReason = !deriveNeeded ? Ineligible::None : [&] {
 			// Distance LOD fades GetRenderPasses applies before choosing the technique: specular and the
 			// environment map switch off past their [LightingShader] thresholds.
 			// Without a fade node GetRenderPasses never computes these fades, so the property fields the draw
@@ -257,7 +260,7 @@ namespace DCLF
 				return Ineligible::Fading;
 			specularFade = a_property.specularLODFade;
 			envmapFade = a_property.envmapLODFade;
-			a_out.derivedPass = derivedReason == Ineligible::None ? derived : kNotDerived;
+			a_out.derivedPass = deriveNeeded && derivedReason == Ineligible::None ? derived : kNotDerived;
 		} else {
 			if (derivedReason != Ineligible::None)
 				return derivedReason;

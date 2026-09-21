@@ -60,9 +60,14 @@ namespace DCLF
 			std::uint64_t uploadBytes = 0;                   // last epoch
 			double cpuMs = 0.0;                              // last epoch, assembly and epoch
 			// Where that time goes, so the per-draw work is optimised against a measurement rather than a
-			// guess: resolving textures and samplers, packing constant groups, assembling the binding
-			// record, and everything after the loop (uploads and the epoch itself).
-			std::array<double, 4> partMs{};
+			// guess.
+			//
+			// Parts 0-2 are PER BINDING RECORD, not per draw: since Step D deduplicated the record to one
+			// per (material, pipeline) pair they run ~100 times an epoch, not ~1500. The per-draw work -
+			// the loop prologue with its resolvedBindings probe, and the tail that builds the sequence and
+			// the draw input - was invisible, folded into "rest" with the uploads and the epoch execution.
+			// This is the Stage 0 lesson applied to the epoch.
+			std::array<double, 8> partMs{};
 			std::uint32_t notReady = 0;                      // epochs skipped (mirrors, targets or pipelines not ready)
 			std::uint32_t shortBuffers = 0;        // draws whose vertex or index slice does not cover them
 			std::uint32_t cullDrawn = 0;     // sequences BuildDraws wrote, last sampled epoch
@@ -178,6 +183,11 @@ namespace DCLF
 		std::unique_ptr<Impl> impl;
 		Stats stats;
 		bool failed = false;
+	};
+
+	inline constexpr std::array<const char*, 8> kEpochPartNames{
+		"textures/samplers", "constant groups", "record push", "per-draw tail", "per-draw prologue",
+		"uploads", "epoch prologue", "graph execute"
 	};
 
 	inline constexpr std::array<const char*, static_cast<std::size_t>(IndirectDraws::Skip::Count)> kSkipNames{ "pipeline", "geometry", "texture", "sampler",
