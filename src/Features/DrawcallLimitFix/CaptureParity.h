@@ -97,6 +97,13 @@ namespace DCLF
 		ankerl::unordered_dense::map<std::string, std::pair<std::uint64_t, std::uint64_t>> blockCoverage;
 		std::uint64_t drawMismatches = 0;  // draw arguments or bound buffers differ
 		std::uint64_t drawsChecked = 0;
+		// CS_DCLF_SKINNED: the bone palettes the native draw bound at VS b9/b10 against the rows the tables
+		// copied from the skin instance. The buffers are the engine's dynamic ring, so their contents are
+		// read through the pointer their last Map returned, which DXVK keeps valid until the next Map.
+		std::uint32_t treeSamples = 0;  // tree amplitude diagnostics logged this session
+		std::uint64_t boneChecks = 0;
+		std::uint64_t boneMismatches = 0;
+		std::map<ID3D11Resource*, void*> lastMappedAny;
 
 		std::uint64_t nativeDraws = 0;         // native lighting draws in the main pass
 		std::uint64_t checkedDraws = 0;        // ... of geometry in the DCLF tables
@@ -135,6 +142,9 @@ namespace DCLF
 
 		// Variables the native shader has in a group that DCLF leaves entirely unwritten, as "<group> <variable>".
 		std::map<std::string, std::uint64_t> unevaluated;
+		// Mismatches per block and variable. The sample list is capped and a standing difference fills
+		// it, so a count per variable is what actually says where a new object class is going wrong.
+		std::map<std::string, std::uint32_t> mismatchByVariable;
 		// Differing permutation buffer bits: key = field index << 32 | differing bits.
 		ankerl::unordered_dense::map<std::uint64_t, std::uint64_t> permutationDiffs;
 		std::uint64_t untrackedEligible = 0;   // eligible geometry under a drawn category node, not tracked

@@ -1775,3 +1775,613 @@ Barrow and Riverwood.
 person, Screenshot and Remote Control. Dynamic Cubemaps is not installed in this profile, so it was not
 exercised either. The switch is therefore left **off by default** — the automatable part of the matrix is
 clean, but the matrix is not complete, and that last step is a human one.
+
+## CS_DCLF_BINDLESS_DRAW defaults on
+
+Validated over the live test matrix and enabled by default, together with `CS_DCLF_BINDLESS` that it
+depends on. Both are disabled with `=0`, and `=0` is the control every pre-Step-D measurement in this
+document was taken with.
+
+With no switches set, Dragonsreach now builds **85 binding records** from ~1500 candidates and the epoch
+costs ~1.02 ms against ~1.98 before. Gates on the default path: 11/11 BuildDraws parity, 11/11 record
+dedup parity, 0 mismatches, no VUIDs beyond the upstream semaphore one. The map menu and the
+first-person camera were checked by hand; the console-driven part of the matrix (interiors with rooms
+and portals, exteriors, six cell transitions, a worldspace change, night lighting, a dungeon with
+alpha-tested foliage, save and load) was clean.
+
+## Bringing in a new object class: trees
+
+### Which class, decided by histogram
+
+`Ineligible::Technique` counted 847-1337 objects in the Whiterun exterior with no indication of what was
+in it. Recording the rejecting technique gives:
+
+| cell | rejected |
+| --- | --- |
+| Whiterun exterior | **treeAnim(12) = 1237**, MTLandLODBlend(19) = 96, MTLand(8) = 4 |
+| Dragonsreach | refraction(63) = 5 |
+
+One technique is 92% of the class. That is the one to bring in.
+
+**The first version of this histogram read `none(0)=1337` and meant nothing.** `ClassifyStatic` copies
+its descriptors to the caller only when the verdict is `None`, so on a rejection the caller kept a
+default-initialised `rejectedTechnique` — and 0 is `none`, a *supported* technique. An empty field that
+reads as a plausible value is the same failure as the material probe comparing padding and the validator
+re-checking a fixed sample. The default is now 62, which cannot be mistaken for a real answer.
+
+### What trees need, measured rather than guessed
+
+`CS_DCLF_TREES=1` adds technique 12 to the supported set. Coverage in the Whiterun exterior goes from
+~2900 to **3863 objects**, and `treeAnim` leaves the rejection histogram.
+
+Capture parity then fails, identically with bindless on and off, so it is the trees and not the newly
+defaulted switch. The sample list could not say why — it is capped, and the standing `PS PerMaterial 29`
+difference filled it, so 83,396 per-geometry mismatches produced not one sample. Counting mismatches
+**per variable** instead names them at once:
+
+| variable | mismatches |
+| --- | --- |
+| **VS PerGeometry 5 — WindTimers** | 83,390 |
+| **VS PerGeometry 4 — TreeParams** | 47,851 |
+| PS PerMaterial 29 — IBLParams (standing) | 57,300 |
+
+Declaration order in `Lighting.hlsl`'s VS PerGeometry block is World, PreviousWorld, EyePosition,
+LandBlendParams, **TreeParams**, **WindTimers**, so 4 and 5 are exactly the two constants tree animation
+displaces its vertices with.
+
+This is the defect the switch was put there to catch, and it is the same shape as the culled lighting
+template: **DCLF's PerGeometry constants are per PIPELINE**, taken from one template object, while
+TreeParams is a property of the individual tree and WindTimers advances during the frame. One template
+tree's wind is handed to every other tree sharing its pipeline.
+
+### What finishing it requires
+
+TreeParams and WindTimers have to become per-object values carried in the object record, exactly as Step
+C did for World, PreviousWorld and MaterialData: add them to `BindlessObject`, read them per object in
+`BuildFrame`, and take them from the record in the shader under `DCLF_BINDLESS_DRAW` (and through
+`PatchObjectGeometry` otherwise). Where the engine computes TreeParams for a given tree still has to be
+established — `BSLightingShader::SetupGeometry` is the place to read it from, the same way IBLParams was
+traced to the shader object. `CS_DCLF_TREES` stays off until that lands.
+
+### Where the engine gets TreeParams and WindTimers
+
+`BSLightingShader::SetupGeometry` is vtable slot 6 — `BSLightingShader::Func6` at `1414dd040`. Its
+`case 0xc` is technique 12, TreeAnim. The VS constant table base is `0x50` (the PS one is `0x40`, which
+`SetupMaterial`'s `0x5d` for variable 29 confirmed), so `0x54` is variable 4, TreeParams, and `0x55` is
+variable 5, WindTimers.
+
+The data comes from a **`BSTreeNode`**, reached from the shader property:
+
+```
+property->fadeNode                     // BSShaderProperty + 0x60
+    ->vfunc[0x1f8 / 8 = 63]()          // downcast; null for anything that is not a tree
+```
+
+`BSTreeNode` is a real engine class — it registers by that name alongside `BSFadeNode` in the class
+table at `FUN_14147e2c0`. Its wind state:
+
+| offset | meaning |
+| --- | --- |
+| `+0x158` | squared distance (the code takes its square root with the `0x5f3759df` fast inverse square root and one Newton step) |
+| `+0x15c` | maximum amplitude |
+| `+0x160` | leaf frequency |
+| `+0x164` | wind timer |
+| `+0x168` | previous wind timer |
+
+and the derivation, with `node` null giving `distance = 0` and `maxAmplitude = 1`:
+
+```
+TreeParams.x = 0
+TreeParams.y = *(0x142033060 + 0x304)                       // global wind magnitude
+TreeParams.z = clamp((1 - (sqrt(node[0x158]) - A) / (B - A)) * maxAmplitude, 0, maxAmplitude)
+TreeParams.w = node ? node[0x160] : 1
+WindTimers.x = node ? node[0x164] * K : 0
+WindTimers.y = node ? node[0x168] * K : 0
+```
+
+`A` = `DAT_142033100` and `B` = `DAT_142033104` — a distance fade, written by one function and read by
+`BSUtilityShader::SetupGeometry` as well. `K` = `DAT_141ad28bc`, a timer scale.
+
+**SetupGeometry mutates the node.** Its last act in this case is
+
+```c
+*(undefined4 *)(lVar22 + 0x168) = *(undefined4 *)(lVar22 + 0x164);   // previousWindTimer = windTimer
+```
+
+so the engine advances each tree's animation state as a side effect of setting up its draw. Two
+consequences. A per-object *stand-in* evaluation — calling the engine's SetupGeometry once per tree the
+way `EvaluateMaterial` does for materials — would advance every tree twice a frame and is therefore not
+an option here. And whenever DCLF does own the tree pass outright, it has to perform that write itself,
+exactly once, or tree motion stops.
+
+The remaining work is bounded: carry TreeParams and WindTimers per object (a parallel array plus two
+more `GeometryPatchOffsets` entries is enough for the non-bindless path, and needs no shader change),
+derive them as above, and let capture parity's new per-variable histogram confirm it — a wrong constant
+shows up immediately as `VS PerGeometry 4` or `5`, which is what makes replicating engine arithmetic
+safe to attempt at all. Only then do the two values need adding to `BindlessObject` and the shader.
+
+### Trees, landed
+
+`CS_DCLF_TREES=1` brings technique 12 into coverage. The Whiterun exterior goes from ~2900 to **3862
+objects**, and `treeAnim` leaves the rejection histogram entirely.
+
+TreeParams and WindTimers are carried per object: a `tables.treeAnim` array parallel to `objects`, two
+more `GeometryPatchOffsets` entries for the constant-buffer path, and an `ObjectTreeAnim` at the end of
+`BindlessObject` (144 -> 176 bytes) with matching `float4`s in the GPU record, since under bindless the
+PerGeometry block is one pair for the whole pipeline. `windTimers` is a `float4` using only `xy` so the
+two layouts cannot disagree about padding.
+
+Two defects on the way, both caught by the per-variable histogram within one run each.
+
+**The first version wrote zeroes over every object in the frame.** `tables.treeAnim` is filled for all
+objects and `PatchObjectGeometry` wrote it unconditionally, so every *non*-tree lost the TreeParams and
+WindTimers its pipeline template had supplied. Parity went from 47,851/83,390 mismatches to
+126,942/124,505 — worse, and the samples read `DCLF 0, native 1`, which is what a clobber looks like.
+Writing them only under a new `kObjectTreeAnim` object flag took WindTimers to **0** and TreeParams to
+**600**.
+
+**The last 600 were the square root.** The engine does not call `sqrtf`: it puts the squared distance
+through the `0x5f3759df` fast inverse square root with one Newton step and multiplies back by x.
+Substituting `std::sqrt` agreed for every tree that clamps at one end of the fade band and disagreed for
+exactly the population inside it — 600 draws a frame, 0.7%. Reproducing the approximation bit for bit
+closes it.
+
+**Gates.** Constant-buffer path: capture parity **0 per-geometry mismatches** across four intervals,
+against a no-trees control on the same build with identical material numbers (57,300 + ~3,000, both
+pre-existing). Bindless path: **443M bindless record components matching**, 20/20 record dedup parity,
+21/21 BuildDraws parity, 0 mismatches, no new VUIDs, and trees render correctly.
+
+`CS_DCLF_TREES` is left **off by default**: the gates are clean, but it is a large coverage change and
+the project's practice is that a switch defaults on only after someone has looked at it moving.
+
+### A correction to earlier measurements in this document
+
+Several "capture parity 0 mismatched" readings above were taken from the *tail* of a run's log, which is
+always the cell the run `coc`s into — Dragonsreach. The Whiterun exterior intervals of those same runs
+were not clean: 22,228 material mismatches, all `PS PerMaterial 29` (IBLParams).
+
+This is not caused by the material cache, and the cache is not a regression — with the cache **off** the
+same exterior reads **297,589**, five times worse, because nothing then resamples IBLParams at Prepass.
+The residue is the sub-frame lag already described: outdoors the value moves far more within a frame
+than it does inside Dragonsreach, and one sample at Prepass no longer covers it. `VS PerMaterial 11`
+(TexcoordOffset, animated per material) contributes a further ~3,000 and is genuinely uncacheable.
+
+The lesson is the same one the instruments keep teaching: **read every interval, not the tail.** A run
+that visits two cells reports two different answers.
+
+## BSEffectShader: investigated, and not worth doing
+
+`not-lighting-shader` is the largest rejection class by tracked count — 3057 in the Whiterun exterior
+after trees — so it looked like the obvious next coverage target, and the assumption was that it meant
+repeating Steps A-D for a second shader. Three measurements say otherwise, and together they redirect
+the work.
+
+**What the class actually is.** Recording the rejected property's RTTI rather than just counting:
+
+| cell | property types |
+| --- | --- |
+| Whiterun exterior | BSEffectShaderProperty 2701, *no property at all* 343, BSWaterShaderProperty 13 |
+| Dragonsreach | BSEffectShaderProperty 235, *no property* 1 |
+
+343 of them have no shader property, so nothing could ever draw them.
+
+**Over half is alpha blended.** 1717 blended against 1340 opaque outdoors, and 208 against 28 inside.
+Blended geometry is not drawn in the pass DCLF owns: it goes after the deferred composite, forward and
+sorted back to front, while the epoch writes the G-buffer with depth test EQUAL before the composite.
+Covering it would mean a **new epoch**, not another shader in the existing one.
+
+**And almost none of it is drawn in the main pass anyway.** The `RegisterPass` probe, counted per report
+interval (~300 frames) and split by whether the batch renderer belongs to the main camera:
+
+| shader type | into a main renderer / total | per frame |
+| --- | --- | --- |
+| **Lighting (6)** | 603,974 / 618,674 | **~2013** |
+| **Effect (7)** | 3,900 / 3,900 | **~13** |
+| Grass (1) | 3,300 / 6,600 | ~11 |
+| Water (3) | 11,700 / 11,700 | ~39 |
+| Utility (8) | 0 / 1,537,933 | 0 |
+
+**BSEffectShader registers about thirteen passes a frame.** The 2701 tracked effect objects are
+overwhelmingly magic and environment effects that are not currently drawing. A second shader pipeline —
+its own stand-in evaluation, constant layout, permutation compilation, pass-capture filter and record
+shape — would buy thirteen draws.
+
+### Where the remaining coverage actually is
+
+DCLF claims 1464 of the ~2013 Lighting passes a frame. **The gap is ~549 draws a frame, and all of it is
+inside the Lighting shader**, where every piece of machinery already exists. Tracked counts for what is
+still rejected in the Whiterun exterior, trees on:
+
+| reason | tracked | what it needs |
+| --- | --- | --- |
+| projected-uv | 860 | the ProjectedUV constants, per object |
+| skinned | 633 | the bone palette in the record |
+| unsupported-parent | 630 | scene-graph shapes the tracker declines to follow |
+| decal | 601 | blending and depth handling |
+| not-trishape | 274 | dynamic tri shapes |
+| technique (MTLand, MTLandLODBlend) | 100 | terrain, the per-object constant question trees had |
+
+Trees were worth doing because 1237 tracked objects turned into real draws. These are the classes to
+rank next, by how many of their tracked objects the engine actually draws — a number the registration
+probe can give per class, and the one that should decide the order rather than the tracked count that
+made BSEffectShader look like the prize.
+
+## Ranking the remaining coverage by what the engine actually draws
+
+Tracked count is the wrong measure, and ranking by it is what made BSEffectShader look like the prize.
+The right one is: of the objects DCLF rejects, how many did the engine itself register a main-pass
+lighting draw for this frame? That is `accumulated != nullptr` at the point of rejection, so it costs a
+counter and no new machinery.
+
+Whiterun exterior, trees on, per frame:
+
+| reason | tracked | **drawn** | of tracked |
+| --- | --- | --- | --- |
+| **decal** | 601 | **181** | 30% |
+| **skinned** | 633 | **150** | 24% |
+| projected-uv | 860 | 53 | 6% |
+| not-trishape | 274 | 44 | 16% |
+| technique (MTLand, MTLandLODBlend) | 100 | 33 | 33% |
+| actor | 27 | 21 | 78% |
+| unsupported-parent | 630 | 7 | 1% |
+| **not-lighting-shader** | **3057** | **0** | **0%** |
+
+Dragonsreach agrees: decal 88 -> 35, skinned 52 -> 30, not-trishape 52 -> 26, not-lighting-shader
+51 -> **0**.
+
+The order is almost the reverse of the tracked counts. `projected-uv` led on tracked objects (860) and
+is sixth on drawn ones; `unsupported-parent` has 630 tracked and draws seven. And
+**not-lighting-shader draws nothing at all** — stronger than the ~13 a frame the registration probe
+suggested, and a complete answer on BSEffectShader.
+
+Everything still rejected totals ~490 drawn a frame, against the 1464 DCLF claims.
+
+### Feasibility, which does not follow the same order
+
+DCLF's pipeline expresses exactly one piece of fixed-function state, `kRasterTwoSided`; depth test EQUAL
+with no write, and blending and depth bias off, are assumptions baked into every pipeline it builds. The
+VS layout gives Bones no real storage. So:
+
+-   **decal (181)** needs depth bias and blending in the `PipelineKey`, and an ordering guarantee
+    against the base geometry underneath. Structural.
+-   **skinned (150)** needs a bone palette per object — a variable-length array, unlike every per-object
+    value the record carries today. Structural.
+-   **projected-uv (53)** needs the ProjectedUV constants, and `TextureProj` is **already** VS
+    PerGeometry variable 6 in the layout. Plausibly the trees pattern again: derive it per object, patch
+    it, gate with capture parity.
+-   **technique MTLand / MTLandLODBlend (33)** is terrain, and wants per-object `LandBlendParams` —
+    VS PerGeometry variable 3, also already in the layout. The same pattern once more.
+
+So the two largest classes are the two that need new architecture, and the two that fit the existing
+machinery are worth ~86 draws a frame between them. That is the trade to decide before any of it is
+built, and it is not what either the tracked counts or the drawn counts say on their own.
+
+## Decals: a second draw pass, and a single culling phase
+
+The ranking put decals first at 181 drawn a frame in the Whiterun exterior, and the feasibility read said
+they needed depth bias and blending in the pipeline key and an ordering guarantee against the geometry
+underneath. Both turned out to be true and neither turned out to be large, because the engine's own
+decal path answers the question that decides the architecture: **can a decal change the silhouette of
+what it sits on?**
+
+It cannot, and `docs/development/skyrim-engine-notes.md` ("Decals") has the decompile that says so. The
+main pass draws its two decal groups after every opaque object, under a depth test against them, and
+the opaque group's depth write is the host's depth pulled a bias toward the camera. A decal never
+occludes anything its host does not. So decals are **occludees only**: they never enter the Z-prepass or
+the two-phase replay, they are culled **once**, in the colour segment, against the HZB that the depth
+segment rebuilt from this frame's depth, and they are drawn by a **second pass** in the same segment,
+after the opaque colour pass, that tests LESS_EQUAL with the engine's bias and writes no depth at all.
+
+### What the probe found before anything was built
+
+`CS_DCLF_DECAL_PROBE=1` records, at every native decal draw, the accumulation hint, the alpha property,
+the depth flags and the `RendererShadowState` indices the draw was issued with, and reads the D3D11
+description of every distinct state object once. It corrected the decompile-derived plan in one place -
+the group index is the hint plus one - and settled two things the decompile could not: which render flags
+each group runs with (0x41 for hint 2, so the alpha property is not applied; 0x45 for hint 3, so it is),
+and that both blend states the groups use fit BasicRHI's `BlendFactor` without an RHI change.
+
+Whiterun exterior, per frame: 199 native decal draws, 140 in the opaque group and 58 in the blended one;
+Dragonsreach 30 (17 / 13). The `RenderPassImmediately` thunks see every one of them (211 offered against
+199 drawn), which is the hook-coverage question answered: withholding a decal's pass stops its native
+draw.
+
+### The pipeline key carries the engine's state indices
+
+`PipelineKey::rasterFlags` was one bit (two-sided). It now packs the decal group and the engine's own
+`rasterStateDepthBiasMode`, `alphaBlendMode`, `alphaBlendAlphaToCoverage`, `alphaBlendWriteMode` and
+`alphaBlendModeExtra` (Records.h). Every opaque key keeps all of those at zero, so nothing about an
+existing pipeline changed - the pipeline count did not move.
+
+The indices are translated by reading the engine's state objects, not by re-deriving what each index
+means: `DrawPipelines::CaptureEngineStates` takes `GetDesc` of the rasterizer and blend states behind
+each key's bits (EngineStates.h: the tables at `RelocationID(524748, 411363)` and `(524749, 411364)`) and
+keeps them in RHI terms for the asynchronous build. It runs from the first lighting draw of the deferred
+pass, deliberately: Community Shaders swaps the blend table for its deferred variants between
+`StartDeferred` and `ResetBlendStates`, and those - with RT1-2 forced to alpha blend - are what a native
+decal in the G-buffer uses. A key whose state has not been captured is simply not ready.
+
+Where the indices come from once DCLF owns the decal and there is no native draw to copy: the bias mode
+from `DecalDepthBiasMode` (the `ToggleDepthBias` byte and `DrawWorld::disableSunShadows`, so interiors get
+the no-bias modes 7 and 11), the blend mode from the alpha property's functions as `FUN_14150bc80`
+chooses it, the write mode as the group function and SetupGeometry leave it (10; 1 with `kZBufferWrite`,
+else 11). The probe checks the derivation against every native decal draw it still sees: **0 of 4,800
+mismatched in Dragonsreach, 300 of 52,800 in the exterior**, every one of them write mode 11 derived
+against 1 observed on a decal without `kZBufferWrite`. That is a leak from Community Shaders' Terrain
+Blending, which sets write mode 1 for its own passes from the same hook that precedes the blended decals;
+the only difference between the two modes is RT0's alpha mask, and the deferred composite never reads it.
+
+### Ordering, by fixed slots rather than by an atomic append
+
+Overlapping decals are drawn in the engine's order - the opaque group, then the blended one; within a
+group the technique buckets ascending, each bucket's five lists, each list's chain - and RegisterPass
+prepends, so a chain is drawn in reverse registration order. An atomic append in BuildDraws cannot promise
+that order, and two overlapping decals landing in a different order each frame would flicker.
+
+So a decal's sequence goes to a **fixed slot**: SceneStore sorts the frame's decals by that key
+(`Tables::decalOrdinal`), the epoch hands each its ordinal in its `DrawInput`, and BuildDrawsCS writes
+`sequences[kDecalSequenceBase + group * kMaxDecalDraws + ordinal]` - either the draw, or the same
+sequence with an index count of zero when the culling rejected it or the epoch could not build its
+record. Every decal input writes its slot, culled or not, so nothing a previous frame left there can be
+executed; a guard in the epoch loop pushes a blank input on every path that gives up on a decal. Each
+group's draw reads its slot count from its own count word, which the CPU uploads.
+
+### The second pass
+
+`MainOpaquePass::Record` begins a second pass on the same attachments, all loaded, after the opaque
+`ExecuteIndirect`, and issues one indirect draw per group from that group's range. The depth segment
+never sees a decal: its epoch skips them before the cull-only push, so they get no visibility verdict and
+none is needed - the colour segment's BuildDraws tests them itself, frustum and HZB, and the HZB bound
+there is the one rebuilt at the end of this frame's depth segment, so it is final. A decal with
+`kZBufferWrite` keeps its native depth-pass draw (`SkipNativePass` exempts decals inside the depth pass):
+DCLF writes no decal depth, and a depth-writing decal withheld from that pass would lose its depth
+entirely.
+
+Two instrument corrections came out of the parity runs. The per-geometry check compared TreeParams and
+WindTimers for every object, and they compared clean by accident: SetupGeometry writes them for technique
+12 only, the native buffer keeps whatever the last tree left, and no eligible object had been drawn after
+a tree in the main range - until decals, which the engine draws after everything. The check now ignores
+those two variables for non-trees. And the capped sample list is now two samples per variable, because
+the standing PS PerMaterial 29 difference had filled it on its own for three stages running.
+
+### Decals, landed (behind `CS_DCLF_DECALS`)
+
+Whiterun exterior on the hybrid path (`CS_DCLF_OWNERSHIP=static`, `CS_DCLF_CULL=occlusion`,
+`CS_DCLF_TABLES=tracked`), per frame: **176 decals submitted to the second pass** (136 in the opaque
+group, 40 in the blended one), 28 of them culled; `decal ... 0 drawn` left native, down from 181. Claims
+1465 -> 1641 with **0 claimed but not drawn**, decal build parity **176 slots, 0 differ**, opaque build
+parity unchanged, 0 validation messages. Dragonsreach: 16 submitted, 3 culled, 0 differ.
+
+Cost, profiled, against a control with the switch off at the same place: the table build 4.52 against
+4.51 ms (noise), the colour epoch 2.06 against 1.90 ms - 0.16 ms for 176 more draws, most of it the graph
+execution (+0.06-0.09) and the epoch prologue (+0.03). The native loop gives up the 176 draws.
+
+**And the image got better, not merely equal.** The control frame is missing the cobblestone road to the
+right of the player; the decal frame has it. The road is a blended decal (hint 3), which the engine draws
+with depth test only, before `EndDeferred`; DCLF's opaque colour pass then ran at `BeforeDeferredComposite`,
+after it, and painted the ground back over it - a standing defect of the hybrid path that nothing had
+measured, because capture parity compares constants and the decal's constants were fine. Owning the decal
+and drawing it after DCLF's own opaque pass is what restores the order the engine has. Opaque decals
+(hint 2) survived before because their depth write wins the host's LESS_EQUAL test.
+
+Left off by default, as trees are, until someone has watched decals in motion (blood, overlapping placed
+decals, cell transitions). The switch set that validated it is the one above plus `CS_DCLF_DECALS=1`;
+`CS_DCLF_DECAL_PROBE=1` reports the state parity and stays useful whenever ownership is off.
+
+## Skinned objects: the engine's palette, DCLF's buffer
+
+Skinned objects were the second-largest class by drawn count (150 a frame in the exterior, ~100 in
+Dragonsreach) and the one the feasibility read called structural, because a bone palette is a
+variable-length per-object array and nothing in the record was. The structural part turned out to be
+small, because the engine already does the hard half: `docs/development/skyrim-engine-notes.md`
+("Skinning") has the decompile. `NiSkinInstance::boneMatrices` holds the whole palette as three float4
+rows a bone, in absolute world space, refreshed once a frame by `FUN_140e4ff90` under a frame stamp, with
+the previous frame's palette kept beside it. The bone setter that runs from the native draw copies those
+rows into b10 and b9 and nothing more. So DCLF has no skeleton, no bind pose and no palette builder. It
+runs the same update from `BuildFrame` (the native draw it withholds would otherwise have been the only
+caller), copies the rows into `Tables::bones` / `previousBones`, and gives each object an offset.
+
+### What went where
+
+-   **The buffers.** A skinned draw binds `partition->buffData`, the skin partition's own `TriShape`,
+    not `geometry->rendererData` (measured: never the same object). The geometry entry for a skinned
+    shape is built from the partition, with `partition->vertices` and `partition->triangles`, and it
+    resolves through `GpuResources` like any other TriShape. Draw parity confirms the binding on every
+    native draw.
+-   **The palette buffer.** `DCLFBones`, a `StructuredBuffer<float4>` at VS t126 beside the object
+    table, sized 65,536 rows; the pipeline layout's vertex-stage SRV range is now two registers. The
+    epoch packs the frame's rows **eye-relative** the way it packs World - each row's translation loses
+    the eye's component for that row - current rows first, then the previous frame's relative to the
+    previous eye. The shader's pivot is therefore zero, and the depth epoch, which has its own eye, is
+    right by construction; `BonesPivot` in the mirrored per-frame buffer (measured equal to `posAdjust`
+    on all 62,000 draws checked) is not read at all.
+-   **The record.** `BindlessObject` grew a row: `boneOffset`, `previousBoneOffset`, `boneRows`
+    (176 -> 192 bytes). Under `DCLF_BINDLESS` the SKINNED vertex path calls
+    `Skinned::GetBoneTransformMatrixBindless` / `GetBoneRSMatrixBindless` on `DCLFBones` at the object's
+    offsets and declares no b9/b10 at all. The record deduplication is untouched: nothing per object
+    entered the binding record.
+-   **Eligibility** (`CS_DCLF_SKINNED=1`): a `BSTriShape` with an accumulated pass whose skin instance is
+    exactly a `NiSkinInstance` with one partition and at most 80 bones (`skin-shape` counts the rest); the
+    `kSkinned` property flag then selects the SKINNED permutation as before.
+
+### Measured
+
+Gate 1, ownership off, capture parity on. **Bone palette parity: 0 of 7,800 palettes differ in the
+exterior, 0 of 42,000 in Dragonsreach** - the rows DCLF copies are byte-identical to the ones the native
+draw bound at b9 and b10. Draw parity 0 differ, bindless record parity 0 differ over the new row, no new
+material mismatches. The one new per-geometry class was World / PreviousWorld on skinned draws, which
+SetupGeometry does not write for a skinned pass and the SKINNED vertex shader does not read; the parity
+instrument now skips them for skinned objects, as it skips the wind variables for non-trees.
+
+Gate 2, the hybrid path with static ownership and occlusion culling:
+
+| | Dragonsreach | Whiterun exterior |
+| --- | --- | --- |
+| skinned candidates a frame | 250 | 33 |
+| claims (control -> skinned) | 920 -> 990 | 1465 -> 1478 |
+| claimed but not drawn | 0 | 0 |
+| build parity | OK | OK |
+| frustum false negatives | 0 | 0 |
+| `skinning` build part | 0.071 ms | 0.009 ms |
+| tables, profiled | 2.26 vs 1.83 ms | 4.83 ms |
+| colour epoch | 1.36 vs 1.21 ms | 2.20 ms |
+
+The A/B screenshots in Dragonsreach are the same frame; the banners are DCLF's in one and native in the
+other. `CS_DCLF_SKINNED` stays off by default until someone has watched skinned objects in motion.
+
+### What the probe put next
+
+The exterior's single-partition class is small (33) because most of its skinned draws are elsewhere:
+`skin-shape` leaves 94 a frame native there, 24 in Dragonsreach. The biggest piece is the
+three-partition, tree-animated shape (29 a frame, hint 11, technique 12) whose partitions carry LOD bytes
+1/2/0: the engine draws the partition the pass's LOD mode enables, through the table at `0x14202a030`,
+so covering it means one DCLF object per enabled partition and reading that table. Then
+`BSDismemberSkinInstance` (actor parts, one or two draws each, partitions toggled per frame). The
+static-pose skip the plan reserved is not worth building: 191 of 201 palettes in the exterior change
+every frame.
+
+## ProjectedUV and terrain: the trees pattern, twice
+
+Both classes were the "trees pattern": one per-object PerGeometry value the engine computes in
+`SetupGeometry`, derived on the CPU and carried per object. They turned out to be that plus two things
+the ranking could not see: ProjectedUV has three per-object *pixel* constants and four pipeline-level
+textures as well as its matrix, and terrain is owned by Terrain Blending in this profile.
+
+The per-object values live in the epoch's row buffer, after the bone palettes: `kExtraRows` (seven float4
+rows) per object that needs them - LandBlendParams, the three rows of TextureProj, then ProjectedUVParams,
+2 and 3 - with `BindlessObject::extraOffset` pointing at them and `DCLFObjects.hlsli`'s statics reading
+them under `DCLF_BINDLESS`. The constant-buffer path patches the same variables through
+`PatchObjectGeometry`, which is what capture parity compares. `SceneStore::RefreshObjectExtras` fills the
+rows at Prepass, where the main camera's `posAdjust` is current, and it calls the engine's own
+NiTransform-to-matrix and `D3DXMatrixMultiply` routines so that `TextureProj` is the native value to the
+bit. The derivations themselves are in `docs/development/skyrim-engine-notes.md` ("ProjectedUV and
+MTLand").
+
+### What the gates found
+
+`CS_DCLF_PROJECTED_UV=1 CS_DCLF_MTLAND=1`, ownership off, capture parity on, Whiterun exterior: 53
+projected and 100 terrain candidates a frame; **no mismatches on LandBlendParams, TextureProj or the three
+ProjectedUVParams** - the derivations are exact - and `projected-uv` and `technique` gone from the
+left-native list. Two other things surfaced and were fixed:
+
+-   **Terrain drew with the wrong vertex stride.** Draw parity reported every terrain draw with stride
+    32 against the native 40. CommonLib's `VertexDesc::GetSize` sums the attribute sizes it knows and
+    leaves the landscape data out; the engine binds the desc's stride nibble times four, which the engine
+    notes had recorded all along. The geometry record now takes the nibble. It never showed before because
+    no eligible object had landscape data.
+-   **One tree a frame with amplitude 0 against 9.** Shrubs and ferns that are both tree-animated and
+    projected became eligible, and one of them (`L2_SwordFern03`) holds an uninitialised negative squared
+    distance on its node. The engine's fast square root shifts the bit pattern arithmetically and its
+    result clamps to the maximum amplitude; DCLF's shifted logically and clamped to zero. A diagnostic
+    that prints the derivation's inputs beside the live node's found it in one run; `FastSqrt` now
+    matches the engine's shift.
+
+### Terrain and Terrain Blending
+
+Terrain Blending, on by default here, intercepts every `kMultiTextureLandscape` pass at
+`RenderPassImmediately`, holds it, and redraws it after the opaque pass with alpha blending and its own
+depth-stencil state (drawing below the surface, against a separate terrain depth). An opaque DCLF draw of
+the same terrain would run under that, so `MtLandEnabled()` is false whenever Terrain Blending is loaded
+and enabled *and* DCLF is drawing into the frame (the hybrid path). The tables and the parity still
+exercise the derivation with the feature on, because its redraws happen inside the deferred pass where the
+parity hook sees them; ownership of terrain needs either the feature off or a terrain sub-pass that does
+what it does. The hybrid run with every class on reports 0 terrain candidates, as intended.
+
+### Everything on
+
+Hybrid, `CS_DCLF_TREES CS_DCLF_DECALS CS_DCLF_SKINNED CS_DCLF_PROJECTED_UV CS_DCLF_MTLAND`, Whiterun
+exterior: claims 1478 -> **1712**, 0 claimed but not drawn, build parity OK, 0 frustum false negatives,
+one validation message (the semaphore one). Left native and drawn: skin-shape 89, unsupported-parent 51,
+not-trishape 48, technique 35 (terrain, gated), actor 35, alpha-test-state 1.
+
+## Persistent tables: the build that stops re-deriving the frame
+
+`BuildFrame` used to rebuild every table from scratch each frame. In the Whiterun exterior that was 4.3 ms
+for 10,000 tracked objects of which ~1,700 are drawn, and profiled by part it was almost all re-derivation
+of things that do not change: the static classification (1.2 ms), the per-frame hidden/fade check for
+every candidate (0.7), the record (0.95) and the pipeline/material dedup (0.5). Two steps, both behind
+gates that read 0, took it to **2.1 ms**.
+
+### A1: nothing for what cannot be drawn
+
+With the draws gated on the engine's visibility (`CS_DCLF_CULL_INPUT=native`, the default) an object the
+accumulator does not hold is a culling candidate and nothing more: it needs bounds, `kObjectNoBindings`
+and a place in every parallel array. It now gets exactly that, and only that, and the depth segment still
+submits it cull-only, so the culling's cross-tabulation is unchanged (5,577 tested before and after).
+`=tracked` keeps the full path because it wants records for them.
+
+Whether such an object is a candidate at all is the classification's answer, and that answer is kept on
+the tracked entry (`Tracked::candidateReason`) and refreshed every 64 frames rather than recomputed per
+frame: once the derived cache below had removed the classification itself, the loop head - the witness
+loads and the negative-cache probe for ~8,300 objects - was most of what "classify-static" still measured.
+A verdict a few frames old costs at most a diagnostic, because a candidate is tested by the culling and
+drawn by nothing. The ineligibility histogram counts the kept verdicts, so it reads as before.
+
+### A2: slot-stable tables and the derived cache
+
+The three shared tables - geometries, pipelines, materials - keep their slots across frames. Each slot has
+a `lastUsed` frame and its key; a sweep every 16 frames frees slots idle for 64 and erases their map
+entries; the per-object arrays are still appended per frame (`Tables::ClearFrame`). Everything that reads
+a pipeline by index (the epoch's blocks, EarlyPrepass's pipeline requests, `RefreshFrameConstants`) is
+restricted to the slots used this frame.
+
+Over that, `Tracked::Derived` caches the positive derivation for an accumulated object: the descriptors,
+the static object flags, the pipeline key and the three slots. Its witnesses are the Stage 3 pointers
+(TriShape, property, material) plus the fade state, the accumulated technique / sub-pass / hint, the
+interior flag, whether the material alpha is below one, the frame's decal bias modes and the table
+generation; and the slots are checked against their keys before they are served, so a swept and reused
+slot cannot be handed back. A hit skips `ClassifyStatic` and the whole derived section; `ClassifyFrame`,
+the alpha-test-state rule, the transforms, shading, palettes and the draw sequence still run.
+`CS_DCLF_DERIVED_CACHE=off|on|probe` (`probe` serves the cache and recomputes, comparing slots, flags, key
+and descriptors): **0 differ** over 1,712 objects a frame in the exterior, through Dragonsreach, back,
+and a save/load, with the sweeps retiring 1,000-1,600 slots at each transition and 0 slot violations.
+
+Three things the persistence surfaced, each of which was a one-frame artefact before and a standing one
+after, which is the general lesson of this step - every value in a persistent slot has to be either
+fixed or refreshed on purpose:
+
+-   **The technique constants are the frame's** (fog, settings, and the shadow mask's view). They are now
+    re-evaluated at Prepass for the used pipelines, with the geometry templates. Serving the slot's first
+    evaluation was a parity regression and, at startup, a stale view pointer.
+-   **The per-frame drift floats** (PS PerMaterial 29) were learned by re-evaluating a cached material,
+    which a persistent slot never does. The rolling validation slice (8 live materials a frame,
+    re-evaluated and compared with what their slot serves) now learns them, seeds the patch source, and
+    heals a stale record in place; at startup it reports a handful of stale slots as values settle, then
+    0. Capture parity with every class on: PerMaterial 29 x91,200 and VS PerMaterial 11 x5,860 over
+    523,000 checked draws, against x67,200 / x3,000 over 465,000 before - the same residue (standing debt),
+    at a slightly higher rate that belongs with it.
+-   **`GpuResources::Resolve` returned a pointer into a map whose storage moves.** Resolving the index
+    buffer could reallocate the map and the vertex buffer's pointer then read garbage; rebuilt every frame
+    the bad record lasted one frame, kept in a slot it lost the device on the first draw (3 of 14 startups,
+    always at the first epoch). `CS_DCLF_SLOT_PROBE=1` - a fresh evaluation and a fresh resolve for every
+    used slot, logged against what the slot serves - caught it in one failing run
+    (`vb 0xb2104741d736cab1 -> 0x2562278000`, index address correct). `Resolve` returns by value now;
+    0 of 6 startups after, 0 probe differences.
+
+Also kept from this: a geometry slot found by address whose buffers no longer match (a TriShape
+reallocated at the same address), or whose buffer references were evicted, or which was resolved while
+the graph was off, is resolved again in place; the buffer references are touched on the slot's first use
+of a frame; a pipeline's template is always a property of an object of the frame; `CheckObjectSlots`
+neutralises any object naming a slot not of this frame and counts it (the gate: 0); the teardown paths
+reset the maps and bump the generation.
+
+### Measured, and the A3 decision
+
+Whiterun exterior, hybrid, every class on, `CS_DCLF_PROFILE=1`, same place and hour:
+
+| tables, ms      | control | A1   | A1+A2 |
+|-----------------|---------|------|-------|
+| total           | 4.8     | 4.3  | 2.12  |
+| classify-static | 1.29    | 1.15 | 0.21  |
+| classify-frame  | 0.68    | 0.69 | 0.19  |
+| record          | 0.95    | 0.78 | 0.67  |
+| dedup-hit       | 0.53    | 0.18 | 0.10  |
+| loop-tail       | 0.38    | 0.36 | 0.36  |
+| walk + lookup   | 0.47    | 0.48 | 0.46  |
+
+Claims 1712 -> 1712, 0 claimed but not drawn, build parity OK, 5,578 tested / 0 frustum false negatives,
+bone palette parity 0 of 7,800. What remains is per frame by nature: the walk and pass lookup (0.46), the
+iteration over 10,000 tracked entries (0.36), and for the drawn objects their transforms, bounds, room
+probe, shading and sequence (0.67 for 1,712 plus the 3,225 cull-only pushes). A3 - persistent object
+slots - would save the pushes and the `objectIndex` insert, on the order of 0.2-0.3 ms of the 2.1, and is
+not built; the next structural gain is Stage 6, where the engine's own per-object main-pass work is.

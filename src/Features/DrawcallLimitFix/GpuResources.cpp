@@ -18,16 +18,16 @@ namespace DCLF
 		return RenderGraphRuntime::Get().IsActive();
 	}
 
-	const GpuResources::Buffer* GpuResources::Resolve(ID3D11Buffer* a_buffer)
+	std::optional<GpuResources::Buffer> GpuResources::Resolve(ID3D11Buffer* a_buffer)
 	{
 		if (!a_buffer)
-			return nullptr;
+			return std::nullopt;
 
 		auto [it, inserted] = entries.try_emplace(a_buffer);
 		auto& entry = it->second;
 		entry.lastUsed = frame;
 		if (!inserted)
-			return entry.stable ? &entry.buffer : nullptr;
+			return entry.stable ? std::optional{ entry.buffer } : std::nullopt;
 
 		// First use: hold a reference for as long as the entry lives, so the address cannot be reused.
 		const auto start = std::chrono::steady_clock::now();
@@ -49,7 +49,16 @@ namespace DCLF
 		stats.resolveMs += ms;
 		stats.resolveMsTotal += ms;
 		stats.resolveMsMax = std::max(stats.resolveMsMax, ms);
-		return entry.stable ? &entry.buffer : nullptr;
+		return entry.stable ? std::optional{ entry.buffer } : std::nullopt;
+	}
+
+	bool GpuResources::Touch(ID3D11Buffer* a_buffer)
+	{
+		auto it = entries.find(a_buffer);
+		if (it == entries.end() || !it->second.stable)
+			return false;
+		it->second.lastUsed = frame;
+		return true;
 	}
 
 	void GpuResources::BeginFrame(std::uint32_t a_frame)

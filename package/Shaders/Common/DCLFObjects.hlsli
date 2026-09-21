@@ -25,6 +25,18 @@ struct DCLFObjectRecord
 	uint ShadowBitMask;
 	float AlphaTestRef;
 	float EmissiveMult;
+	// Tree animation (technique 12). Per object: under DCLF_BINDLESS the PerGeometry buffer is one
+	// block for the whole pipeline, and a tree's wind amplitude and clock are its own.
+	float4 DCLFTreeParams;
+	float4 DCLFWindTimers;  // xy used
+	// Skinning: this object's bone palette rows in DCLFBones (three float4 rows a bone, current palette
+	// at DCLFBoneOffset, the previous frame's at DCLFPreviousBoneOffset), already relative to the eye.
+	uint DCLFBoneOffset;
+	uint DCLFPreviousBoneOffset;
+	uint DCLFBoneRows;
+	// The object's rows of further per-object PerGeometry values in the same buffer, after every
+	// palette: LandBlendParams, the three rows of TextureProj, then ProjectedUVParams, 2 and 3.
+	uint DCLFExtraOffset;
 };
 
 // The indirect draw's push data. The first two words are the binding record's address, which the pipeline
@@ -36,6 +48,9 @@ cbuffer DCLFPushData : register(b190)
 };
 
 StructuredBuffer<DCLFObjectRecord> DCLFObjects : register(t127);
+// The epoch's row buffer (IndirectDraws: kBonesBufferRegister): every skinned object's bone palette
+// rows end to end, current then previous, and after them the per-object extras rows (DCLFExtraOffset).
+StructuredBuffer<float4> DCLFBones : register(t126);
 
 #endif  // DCLF_BINDLESS
 #endif  // __DCLF_OBJECTS_DEPENDENCY_HLSL__

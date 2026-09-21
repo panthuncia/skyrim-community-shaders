@@ -27,6 +27,16 @@ namespace DCLF
 		}
 	}
 
+	const float* ExtraRowsOf(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex)
+	{
+		if (a_objectIndex >= a_tables.extraOffset.size())
+			return nullptr;
+		const std::uint32_t offset = a_tables.extraOffset[a_objectIndex];
+		if (offset == kNoExtraRows || std::size_t(offset + kExtraRows) * 4 > a_tables.extraRows.size())
+			return nullptr;
+		return &a_tables.extraRows[std::size_t(offset) * 4];
+	}
+
 	GeometryConstants ObjectGeometryConstants(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags, const RE::NiPoint3& a_eye,
 		const RE::NiPoint3& a_previousEye)
 	{
@@ -41,6 +51,27 @@ namespace DCLF
 		std::memcpy(&constants.ps.floats[psLayout.offset[kPSMaterialData]], shading.materialData, sizeof(shading.materialData));
 		std::memcpy(&constants.ps.floats[psLayout.offset[kPSEmitColor]], shading.emitColor, sizeof(shading.emitColor));
 		constants.ps.floats[psLayout.offset[kPSSSRParams] + 3] = shading.ssrSpecular;
+		if ((object.flags & kObjectTreeAnim) && a_objectIndex < a_tables.treeAnim.size()) {
+			const auto& tree = a_tables.treeAnim[a_objectIndex];
+			std::memcpy(&constants.vs.floats[vsLayout.offset[kVSTreeParams]], tree.treeParams, sizeof(tree.treeParams));
+			std::memcpy(&constants.vs.floats[vsLayout.offset[kVSWindTimers]], tree.windTimers, 2 * sizeof(float));
+		}
+		// The extras rows (SceneStore::RefreshFrameConstants fills them). ProjectedUVParams.y is never
+		// written by the engine, so it keeps whatever the template left - the unwritten sentinel.
+		if (const float* rows = ExtraRowsOf(a_tables, a_objectIndex)) {
+			if (object.flags & kObjectLandBlend)
+				std::memcpy(&constants.vs.floats[vsLayout.offset[kVSLandBlendParams]], rows + kExtraRowLandBlend * 4, 4 * sizeof(float));
+			if (object.flags & kObjectProjectedUV) {
+				std::memcpy(&constants.vs.floats[vsLayout.offset[kVSTextureProj]], rows + kExtraRowTextureProj * 4, 12 * sizeof(float));
+				const float* params = rows + kExtraRowProjectedParams * 4;
+				float* out = &constants.ps.floats[psLayout.offset[kPSProjectedUVParams]];
+				out[0] = params[0];
+				out[2] = params[2];
+				out[3] = params[3];
+				std::memcpy(&constants.ps.floats[psLayout.offset[kPSProjectedUVParams + 1]], params + 4, 4 * sizeof(float));
+				std::memcpy(&constants.ps.floats[psLayout.offset[kPSProjectedUVParams + 2]], params + 8, 4 * sizeof(float));
+			}
+		}
 		return constants;
 	}
 
@@ -59,6 +90,18 @@ namespace DCLF
 		offsets.psEmitColorSize = psLayout.size[kPSEmitColor];
 		offsets.psSSRParams = OffsetOf(a_psTable, kPSSSRParams, kPSFirstVariable[kPerGeometry]);
 		offsets.psSSRParamsSize = psLayout.size[kPSSSRParams];
+		offsets.vsTreeParams = OffsetOf(a_vsTable, kVSTreeParams, kVSFirstVariable[kPerGeometry]);
+		offsets.vsTreeParamsSize = vsLayout.size[kVSTreeParams];
+		offsets.vsWindTimers = OffsetOf(a_vsTable, kVSWindTimers, kVSFirstVariable[kPerGeometry]);
+		offsets.vsWindTimersSize = vsLayout.size[kVSWindTimers];
+		offsets.vsLandBlendParams = OffsetOf(a_vsTable, kVSLandBlendParams, kVSFirstVariable[kPerGeometry]);
+		offsets.vsLandBlendParamsSize = vsLayout.size[kVSLandBlendParams];
+		offsets.vsTextureProj = OffsetOf(a_vsTable, kVSTextureProj, kVSFirstVariable[kPerGeometry]);
+		offsets.vsTextureProjSize = vsLayout.size[kVSTextureProj];
+		for (std::uint32_t i = 0; i < 3; ++i) {
+			offsets.psProjectedUVParams[i] = OffsetOf(a_psTable, kPSProjectedUVParams + i, kPSFirstVariable[kPerGeometry]);
+			offsets.psProjectedUVParamsSize[i] = psLayout.size[kPSProjectedUVParams + i];
+		}
 		return offsets;
 	}
 
@@ -96,6 +139,27 @@ namespace DCLF
 			static_cast<std::uint32_t>(std::size(shading.materialData)));
 		write(a_psOut, a_offsets.psEmitColor, a_offsets.psEmitColorSize, shading.emitColor,
 			static_cast<std::uint32_t>(std::size(shading.emitColor)));
+		if ((object.flags & kObjectTreeAnim) && a_objectIndex < a_tables.treeAnim.size()) {
+			const auto& tree = a_tables.treeAnim[a_objectIndex];
+			write(a_vsOut, a_offsets.vsTreeParams, a_offsets.vsTreeParamsSize, tree.treeParams, 4);
+			write(a_vsOut, a_offsets.vsWindTimers, a_offsets.vsWindTimersSize, tree.windTimers, 2);
+		}
+		if (const float* rows = ExtraRowsOf(a_tables, a_objectIndex)) {
+			if (object.flags & kObjectLandBlend)
+				write(a_vsOut, a_offsets.vsLandBlendParams, a_offsets.vsLandBlendParamsSize, rows + kExtraRowLandBlend * 4, 4);
+			if (object.flags & kObjectProjectedUV) {
+				write(a_vsOut, a_offsets.vsTextureProj, a_offsets.vsTextureProjSize, rows + kExtraRowTextureProj * 4, 12);
+				const float* params = rows + kExtraRowProjectedParams * 4;
+				// x, then z and w: the engine never writes y (the template's zero stays).
+				if (a_offsets.psProjectedUVParams[0] != ~0u) {
+					write(a_psOut, a_offsets.psProjectedUVParams[0], 1, params, 1);
+					if (a_offsets.psProjectedUVParamsSize[0] >= 4)
+						write(a_psOut, a_offsets.psProjectedUVParams[0] + 2, 2, params + 2, 2);
+				}
+				write(a_psOut, a_offsets.psProjectedUVParams[1], a_offsets.psProjectedUVParamsSize[1], params + 4, 4);
+				write(a_psOut, a_offsets.psProjectedUVParams[2], a_offsets.psProjectedUVParamsSize[2], params + 8, 4);
+			}
+		}
 		// Only the w component of SSRParams is per-object; the rest stays as the template packed it.
 		if (a_offsets.psSSRParams != ~0u && a_offsets.psSSRParamsSize > 3) {
 			const std::size_t at = (std::size_t(a_offsets.psSSRParams) + 3) * 4;
@@ -138,6 +202,16 @@ namespace DCLF
 		// object is not alpha tested (the shader's test is then compiled out anyway).
 		a_out.alphaTestRef = (object.flags & kObjectAlphaTest) ? ((object.flags >> kObjectAlphaThresholdShift) & 0xFF) / 255.0f : 0.0f;
 		a_out.emissiveMult = a_objectIndex < a_tables.emissiveMult.size() ? a_tables.emissiveMult[a_objectIndex] : 1.0f;
+		a_out.tree = a_objectIndex < a_tables.treeAnim.size() ? a_tables.treeAnim[a_objectIndex] : ObjectTreeAnim{};
+		// Skinning: the offsets are into the frame's bone tables, which the epoch packs into its bones
+		// buffer in the same order (current rows first, then the previous rows after all of them).
+		const bool skinned = (object.flags & kObjectSkinned) && a_objectIndex < a_tables.boneOffset.size();
+		a_out.boneOffset = skinned ? a_tables.boneOffset[a_objectIndex] : 0u;
+		a_out.boneRows = skinned ? a_tables.boneRows[a_objectIndex] : 0u;
+		a_out.previousBoneOffset = skinned ? a_tables.boneOffset[a_objectIndex] + static_cast<std::uint32_t>(a_tables.bones.size() / 4) : 0u;
+		// The extras rows follow every palette (current then previous) in the row buffer.
+		const bool extras = a_objectIndex < a_tables.extraOffset.size() && a_tables.extraOffset[a_objectIndex] != kNoExtraRows;
+		a_out.extraOffset = extras ? static_cast<std::uint32_t>(a_tables.bones.size() / 4) * 2 + a_tables.extraOffset[a_objectIndex] : 0u;
 	}
 
 	std::size_t ConstantGroupSize(const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable)

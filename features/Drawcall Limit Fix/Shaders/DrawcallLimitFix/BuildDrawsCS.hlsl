@@ -75,6 +75,13 @@ float2 HzbUvScale() { return float2(HzbUvScalePacked & 0xFFFF, HzbUvScalePacked 
 
 // Object flags (Records.h), as the draw input carries them.
 static const uint kObjectNativeVisible = 1u << 3;
+// A decal, with its group (1 = the engine's opaque decal group, 2 = the blended one) in bits 20-21.
+// Decals are never occluders: they are not submitted to the depth segment at all, and the colour segment
+// tests them ONCE, here, against the HZB rebuilt at the end of this frame's depth segment - which is final
+// by then - and writes their sequences to fixed slots (kDecalSequenceBase) rather than appending them, so
+// that overlapping decals are drawn in the engine's order every frame.
+static const uint kObjectDecal = 1u << 7;
+static const uint kObjectDecalGroupShift = 20;
 // Set by the epoch rather than by the object: this input carries a usable bindings record, so a sequence
 // may be written for it. The depth segment submits an input for EVERY candidate so that the culling covers
 // them all and the published visibility is complete, but it only builds records for the ones it is allowed
@@ -104,11 +111,20 @@ static const uint kSampleMip = 60;
 static const uint kCountOccludedVisible = 64;  // the HZB rejected it and the engine had kept it: the win
 static const uint kCountDrawnPhaseTwo = 68;    // sequences phase 2 appended, and the count its draw reads
 static const uint kCountRescuedByPhaseTwo = 72;  // objects phase 1 rejected and the rebuilt HZB brought back
+// Decals: the two groups' slot counts (uploaded by the CPU, read by their draws) and the culling's tallies.
+static const uint kCountDecalGroup1 = 76;
+static const uint kCountDecalGroup2 = 80;
+static const uint kCountDecalsCulled = 84;
+static const uint kCountDecalsTested = 88;
 
 // Phase 2 writes into the far half of the sequence buffer. Its draw is recorded on the CPU, which cannot
 // know how many sequences phase 1 wrote, so the two need ranges that are fixed in advance rather than one
 // range shared by an atomic counter.
 static const uint kPhaseTwoSequenceBase = 16384;  // kMaxDraws
+// The decal ranges follow phase 2's: one range of kMaxDecalDraws slots per group, slot = the decal's
+// ordinal in the engine's draw order (IndirectDraws.cpp keeps the CPU side of these in step).
+static const uint kDecalSequenceBase = 32768;  // 2 * kMaxDraws
+static const uint kMaxDecalDraws = 2048;
 
 // DrawInput: 32 bytes (pipeline/record/geometry/flags, then the world-space bounding sphere).
 static const uint kInputStride = 40;
@@ -270,6 +286,41 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	const bool drawable = (input.w & kInputDrawable) != 0;
 	const uint phase = CullPhase();
 	uint scratch;
+
+	// Decals: single-phase, fixed slot. Every decal input writes its slot, culled or not, so nothing a
+	// previous frame left there can be executed: a culled or undrawable decal writes the same sequence
+	// with an index count of zero, which the indirect draw fetches and skips.
+	const uint decalGroup = (input.w & kObjectDecal) ? (input.w >> kObjectDecalGroupShift) & 3 : 0;
+	if (decalGroup != 0) {
+		if (phase != kPhaseColour && phase != kPhaseSingle)
+			return;  // the depth segment never submits one; belt and braces
+		const uint decalOrdinal = inputs.Load(inputOffset + 36);
+		if (decalOrdinal >= kMaxDecalDraws)
+			return;
+		bool culled = !drawable;
+		if (drawable && CullMode() != 0) {
+			count.InterlockedAdd(kCountDecalsTested, 1, scratch);
+			const float4 bound = asfloat(inputs.Load4(inputOffset + 16));
+			culled = Culled(bound.xyz, bound.w) || (CullMode() >= 2 && Occluded(bound.xyz, bound.w, nativeVisible));
+			if (culled)
+				count.InterlockedAdd(kCountDecalsCulled, 1, scratch);
+		}
+		const uint geometryOffset = input.z * kGeometryStride;
+		const uint4 vertexBuffer = geometries.Load4(geometryOffset);
+		const uint4 indexBuffer = geometries.Load4(geometryOffset + 16);
+		const uint firstIndex = geometries.Load(geometryOffset + 32);
+		const uint recordOffset = input.y * RecordStride;
+		const uint recordLo = RecordsAddressLo + recordOffset;
+		const uint recordHi = RecordsAddressHi + (recordLo < RecordsAddressLo ? 1 : 0);
+		const uint base = (kDecalSequenceBase + (decalGroup - 1) * kMaxDecalDraws + decalOrdinal) * kSequenceStride;
+		sequences.Store(base + 0, input.x);
+		sequences.Store3(base + 4, uint3(recordLo, recordHi, objectIndex));
+		sequences.Store4(base + 16, vertexBuffer);
+		sequences.Store4(base + 32, uint4(indexBuffer.xyz, kIndexFormatR16));
+		sequences.Store4(base + 48, uint4(culled ? 0 : indexBuffer.w, 1, firstIndex, 0));
+		sequences.Store(base + 64, 0);
+		return;
+	}
 
 	// Phase 2 only revisits what phase 1 provisionally rejected, and the colour segment tests nothing at
 	// all - it draws what the two phases decided. Reading the decision rather than repeating it is what

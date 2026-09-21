@@ -108,6 +108,7 @@ namespace DCLF
 	{
 		if (ConstantEvaluator::Evaluating())
 			return;
+		lastMappedAny[a_resource] = a_data;
 		if (baselineValid) {
 			// The permutation buffer (b4) changes per draw by design and is checked separately.
 			for (std::uint32_t slot = kFirstFeatureConstantBuffer; slot < kConstantBufferSlots; ++slot) {
@@ -198,10 +199,17 @@ namespace DCLF
 			}
 			if (differs) {
 				ok = false;
-				float native = 0;
-				std::memcpy(&native, &a_native.bytes[(nativeOffset + firstComponent) * 4], 4);
-				NoteMismatch(fmt::format("{} {} variable {} component {}: DCLF {}, native {}", Describe(a_geometry), a_what, i, firstComponent,
-					a_expected.floats[ourOffset + firstComponent], native));
+				// A histogram as well as a sample. The sample list is capped, so once a known standing
+				// difference fills it nothing else is ever seen - which is exactly what happened when trees
+				// were brought in: 83,396 per-geometry mismatches and not one of them in the samples.
+				// Two samples per variable: a standing difference in one variable (PS PerMaterial 29) used
+				// to fill the capped list on its own, and every other variable's mismatches went unsampled.
+				if (++mismatchByVariable[fmt::format("{} {}", a_what, i)] <= 2) {
+					float native = 0;
+					std::memcpy(&native, &a_native.bytes[(nativeOffset + firstComponent) * 4], 4);
+					NoteMismatch(fmt::format("{} {} variable {} component {}: DCLF {}, native {}", Describe(a_geometry), a_what, i, firstComponent,
+						a_expected.floats[ourOffset + firstComponent], native));
+				}
 			}
 		}
 		return ok;
@@ -252,9 +260,37 @@ namespace DCLF
 		auto* vs = *globals::game::currentVertexShader;
 		auto* ps = *globals::game::currentPixelShader;
 		bool ok = true;
+		// TreeParams and WindTimers are written by SetupGeometry for technique 12 only; for anything else
+		// the native buffer holds whatever the last tree left there, and the shader never reads them. They
+		// used to compare clean by accident - no eligible object was drawn after a tree in the main range -
+		// until decals, which the engine draws after everything, made the leftover visible: 382 mismatches
+		// an interval on values nothing consumes.
+		// Likewise World and PreviousWorld for a skinned object: SetupGeometry writes them for everything
+		// that is not skinned (engine notes), and the SKINNED vertex shader positions from the palette.
+		const std::uint64_t vsMask = kVSGroups[kPerGeometry] &
+		                             ((object.flags & kObjectTreeAnim) ? ~0ull : ~((1ull << kVSTreeParams) | (1ull << kVSWindTimers))) &
+		                             ((object.flags & kObjectSkinned) ? ~((1ull << kVSWorld) | (1ull << kVSPreviousWorld)) : ~0ull);
 		if (vs)
 			ok &= CompareBlock(a_geometry, "VS PerGeometry", expected.vs, vsLayout, vs->constantTable.data(),
-				vs->constantTable.size(), Slot(0, kPerGeometry), reinterpret_cast<ID3D11Resource*>(vs->constantBuffers[kPerGeometry].buffer), kVSWorld, kVSGroups[kPerGeometry], 0);
+				vs->constantTable.size(), Slot(0, kPerGeometry), reinterpret_cast<ID3D11Resource*>(vs->constantBuffers[kPerGeometry].buffer), kVSWorld, vsMask, 0);
+		// A tree whose amplitude differs: say what the derivation saw against what the node holds now.
+		if (vs && !ok && (object.flags & kObjectTreeAnim) && a_objectIndex < tables.treeAnim.size() && treeSamples < 4) {
+			const auto& tree = tables.treeAnim[a_objectIndex];
+			const auto* fadeNode = a_geometry->GetGeometryRuntimeData().shaderProperty ? a_geometry->GetGeometryRuntimeData().shaderProperty->fadeNode : nullptr;
+			float liveDistance = -2.0f, liveAmplitude = -2.0f;
+			if (fadeNode) {
+				const auto* vtable = *reinterpret_cast<const std::uintptr_t* const*>(fadeNode);
+				using Fn = const void* (*)(const RE::BSFadeNode*);
+				if (const void* node = reinterpret_cast<Fn>(vtable[0x1f8 / 8])(fadeNode)) {
+					liveDistance = *reinterpret_cast<const float*>(static_cast<const std::byte*>(node) + 0x158);
+					liveAmplitude = *reinterpret_cast<const float*>(static_cast<const std::byte*>(node) + 0x15c);
+				}
+			}
+			++treeSamples;
+			logger::warn("[DCLF] tree parity: '{}' derived amplitude {} from distance^2 {} / max {} at BuildFrame; the node now holds {} / {} (fade node {})",
+				a_geometry->name.c_str() ? a_geometry->name.c_str() : "?", tree.treeParams[2], tree.windTimers[2], tree.windTimers[3], liveDistance, liveAmplitude,
+				fmt::ptr(fadeNode));
+		}
 		if (ps)
 			ok &= CompareBlock(a_geometry, "PS PerGeometry", expected.ps, psLayout, ps->constantTable.data(), ps->constantTable.size(), Slot(1, kPerGeometry),
 				reinterpret_cast<ID3D11Resource*>(ps->constantBuffers[kPerGeometry].buffer), kPSDirLightDirection,
@@ -462,6 +498,36 @@ namespace DCLF
 		// State::Draw has uploaded the permutation buffer for this draw by now.
 		ComparePermutation(geometry, static_cast<std::uint32_t>(index));
 
+		// Skinned: the palettes the bone setter bound at b10 (current) and b9 (previous), against the rows
+		// BuildFrame copied out of the skin instance after running the same update the setter runs.
+		if ((object.flags & kObjectSkinned) && static_cast<std::size_t>(index) < tables.boneOffset.size() && tables.boneRows[index]) {
+			ID3D11Buffer* boneBuffers[2] = {};
+			a_context->VSGetConstantBuffers(9, 2, boneBuffers);
+			const std::uint32_t rows = tables.boneRows[index];
+			const std::size_t offset = std::size_t(tables.boneOffset[index]) * 4;
+			auto check = [&](ID3D11Buffer* a_buffer, const std::vector<float>& a_rows, const char* a_what) {
+				++boneChecks;
+				const auto mapped = a_buffer ? lastMappedAny.find(a_buffer) : lastMappedAny.end();
+				if (mapped == lastMappedAny.end() || !mapped->second || offset + std::size_t(rows) * 4 > a_rows.size()) {
+					++boneMismatches;
+					NoteMismatch(fmt::format("{} {}: no mapped palette to compare (buffer {}, {} rows)", Describe(geometry), a_what, fmt::ptr(a_buffer), rows));
+					return;
+				}
+				if (std::memcmp(mapped->second, &a_rows[offset], std::size_t(rows) * 16) != 0) {
+					++boneMismatches;
+					const auto* native = static_cast<const float*>(mapped->second);
+					NoteMismatch(fmt::format("{} {}: row 0 DCLF ({} {} {} {}), native ({} {} {} {}), {} rows", Describe(geometry), a_what,
+						a_rows[offset], a_rows[offset + 1], a_rows[offset + 2], a_rows[offset + 3], native[0], native[1], native[2], native[3], rows));
+				}
+			};
+			check(boneBuffers[1], tables.bones, "Bones (b10)");
+			check(boneBuffers[0], tables.previousBones, "PreviousBones (b9)");
+			for (auto* buffer : boneBuffers) {
+				if (buffer)
+					buffer->Release();
+			}
+		}
+
 		// Light Limit Fix's StrictLightData as its SetupGeometry hook left it (it uploads when these change).
 		if (globals::features::lightLimitFix.loaded) {
 			const auto& native = globals::features::lightLimitFix.strictLightDataTemp;
@@ -611,6 +677,9 @@ namespace DCLF
 		logger::info("[DCLF] capture parity {}: {} native main-pass lighting draws, {} checked against the tables, {} mismatched ({} material, {} per-geometry, {} technique), {} untracked eligible, {} tracked but excluded; tables hold {} objects / {} geometries / {} pipelines ({} with shadow mask) / {} materials from {} tracked; render flags seen:{}",
 			ok ? "OK" : "MISMATCH", nativeDraws, checkedDraws, mismatchedDraws, materialMismatches, geometryMismatches, techniqueMismatches, untrackedEligible,
 			notInTables, stats.objects, stats.geometries, stats.pipelines, stats.shadowMaskPipelines, stats.materials, stats.tracked, flags);
+		if (boneChecks)
+			logger::info("[DCLF] bone palette parity {}: {} palettes checked, {} differ", boneMismatches == 0 ? "OK" : "MISMATCH", boneChecks, boneMismatches);
+		boneChecks = boneMismatches = 0;
 		logger::info("[DCLF] draw parity {}: {} draws checked, {} with different arguments or bound buffers", drawMismatches == 0 ? "OK" : "MISMATCH",
 			drawsChecked, drawMismatches);
 		logger::info("[DCLF] light data parity {}: {} draws checked, {} with different StrictLightData", lightMismatches == 0 ? "OK" : "MISMATCH", lightChecks,
@@ -644,6 +713,16 @@ namespace DCLF
 		std::string missing;
 		for (const auto& [name, count] : unevaluated)
 			missing += fmt::format(" [{} x{}]", name, count);
+		{
+			std::string byVariable;
+			std::vector<std::pair<std::string, std::uint32_t>> sorted(mismatchByVariable.begin(), mismatchByVariable.end());
+			std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+			for (const auto& [name, count] : sorted)
+				byVariable += fmt::format(" [{} x{}]", name, count);
+			if (!byVariable.empty())
+				logger::info("[DCLF] parity mismatches by variable:{}", byVariable);
+			mismatchByVariable.clear();
+		}
 		logger::info("[DCLF] variables the native shaders have that DCLF leaves unwritten:{}", missing.empty() ? " none" : missing);
 		for (const auto& sample : samples)
 			logger::info("[DCLF]   {}", sample);

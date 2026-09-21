@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <string_view>
 
+#include "Records.h"  // ObjectTreeAnim
+
 namespace DCLF
 {
 	/** @brief Why an object stays on the native render loop. */
@@ -25,6 +27,7 @@ namespace DCLF
 		AlphaTestState,      // in an alpha-test batch list without DoAlphaTest: the drawn technique is not known up front (per frame)
 		Lod,                 // object or landscape LOD
 		UnstableBuffer,      // a vertex or index buffer DXVK cannot make stable (the game can map it)
+		SkinShape,           // skinned, but not a shape the skinned path takes: dismember instance, several partitions, too many bones
 		Count
 	};
 
@@ -45,6 +48,7 @@ namespace DCLF
 		"alpha-test-state",
 		"lod",
 		"unstable-buffer",
+		"skin-shape",
 	};
 
 	struct LightingDescriptors
@@ -58,7 +62,24 @@ namespace DCLF
 		float specularLODFade = 1.0f;  // what GetRenderPasses stores in the property for the PS constants
 		float envmapLODFade = 1.0f;
 		std::uint32_t derivedPass = 0;  // the pass descriptor derived from the property (kNotDerived if it cannot be)
+		// Which technique produced Ineligible::Technique, so coverage can be widened against a histogram
+		// rather than a guess. kRefractionReject marks the refraction rejection, which is not a technique.
+		std::uint32_t rejectedTechnique = 62;  // 62 = never set, so an empty field cannot read as `none`
+		// CS_DCLF_DECALS: 0 for anything that is not a decal, else the decal group (1 = accumulation hint
+		// 2, the engine's opaque decal group; 2 = hint 3, the blended one) and the alpha-property half of
+		// the engine's fixed-function state for it: alphaBlendMode as BSShader's alpha setup
+		// (FUN_14150bc80) picks it from the blend functions, and alphaBlendWriteMode as the group function
+		// and SetupGeometry leave it. The depth-bias mode is frame state and SceneStore adds it.
+		std::uint32_t decalGroup = 0;
+		std::uint32_t decalBlendMode = 0;
+		std::uint32_t decalWriteMode = 0;
+		// The pass descriptor's ProjectedUV bit (CS_DCLF_PROJECTED_UV): the object needs the per-object
+		// texture matrix and pixel parameters, and the projected textures on its pipeline.
+		bool projectedUV = false;
 	};
+
+	/** @brief LightingDescriptors::rejectedTechnique for the refraction rejection, which has no technique. */
+	inline constexpr std::uint32_t kRefractionReject = 63;
 
 	/** @brief LightingDescriptors::derivedPass when the derivation leaves the object native. */
 	inline constexpr std::uint32_t kNotDerived = ~0u;
@@ -109,6 +130,13 @@ namespace DCLF
 		std::uint32_t technique = 0;  // pass descriptor (key minus the Lighting base)
 		std::uint32_t subPass = 0;    // PassGroup list 0-4; the renderer draws 1, 3 and 4 with alpha testing
 		std::uint32_t passEnum = 0;   // the pass's own passEnum when the tables were built (diagnostics)
+		// The pass's accumulation hint (BSRenderPass+0x1C): which geometry group of the batch renderer it
+		// was drawn from, and for decals which of the two decal groups. Kept because the pass pointer is
+		// not dereferenced again once the tables are built.
+		std::uint32_t hint = 0;
+		// Where in its pass-group chain the pass sits, so that decals can be drawn in the engine's order
+		// (group, technique bucket, list, chain) rather than in whatever order the culling appends.
+		std::uint32_t chainIndex = 0;
 	};
 
 	/**
@@ -127,6 +155,34 @@ namespace DCLF
 	 * removes the fade metric, SelectLightingTechnique, ten flag tests and a virtual GetFeature() call
 	 * from every eligible object, every frame.
 	 */
+	/**
+	 * @brief The tree-animation constants for one object, as BSLightingShader::SetupGeometry computes
+	 *        them (engine notes: Func6 at 1414dd040, case 0xc).
+	 *
+	 * Reads the BSTreeNode the property's fade node downcasts to; leaves the engine's defaults when
+	 * there is none. It deliberately does NOT perform SetupGeometry's write back of
+	 * previousWindTimer = windTimer: the native draw still does that, and doing it here as well would
+	 * advance every tree's animation twice a frame.
+	 */
+	void DeriveTreeAnim(const RE::BSShaderProperty& a_property, ObjectTreeAnim& a_out);
+
+	/** @brief CS_DCLF_DECALS=1: decals (accumulation hints 2 and 3) are eligible, drawn by the second pass. */
+	bool DecalsEnabled();
+
+	/** @brief CS_DCLF_SKINNED=1: single-partition NiSkinInstance shapes are eligible, palettes from the engine. */
+	bool SkinnedEnabled();
+
+	/** @brief CS_DCLF_PROJECTED_UV=1: kProjectedUV objects (snow and moss projection) are eligible. */
+	bool ProjectedUvEnabled();
+
+	/**
+	 * @brief CS_DCLF_MTLAND=1: the MTLand and MTLandLODBlend techniques (terrain) are eligible - unless
+	 * Terrain Blending is on and DCLF is drawing into the frame, because that feature intercepts every
+	 * terrain pass and redraws it blended with its own depth state, which an opaque owned draw would break.
+	 * Off the hybrid path the tables and their parity still exercise the derivation.
+	 */
+	bool MtLandEnabled();
+
 	Ineligible DeriveLightingDescriptors(const RE::BSLightingShaderProperty& a_property, const RE::BSGeometry& a_geometry,
 		const AccumulatedPass* a_accumulated, LightingDescriptors& a_out, bool a_wantDerived = true);
 }

@@ -3,6 +3,8 @@
 #include "Deferred.h"
 #include "DrawcallLimitFix/CaptureParity.h"
 #include "DrawcallLimitFix/ConstantEvaluator.h"
+#include "DrawcallLimitFix/DecalProbe.h"
+#include "DrawcallLimitFix/SkinProbe.h"
 #include "DrawcallLimitFix/DrawPipelines.h"
 #include "DrawcallLimitFix/GpuResources.h"
 #include "DrawcallLimitFix/GpuTextures.h"
@@ -199,9 +201,12 @@ void DrawcallLimitFix::EarlyPrepass()
 	auto& programs = DCLF::ShaderPrograms::Get();
 	auto& pipelines = DCLF::DrawPipelines::Get();
 	if (auto* lighting = DCLF::ConstantEvaluator::Get().GetLightingShader(); lighting && programs.Enabled()) {
-		for (const auto& key : store.GetTables().pipelines) {
-			if (const auto* program = programs.Find(key, *lighting))
-				pipelines.Find(key, *program);
+		const auto& tables = store.GetTables();
+		for (std::size_t p = 0; p < tables.pipelines.size(); ++p) {
+			if (!tables.PipelineUsed(p, store.GetFrame()))
+				continue;
+			if (const auto* program = programs.Find(tables.pipelines[p], *lighting))
+				pipelines.Find(tables.pipelines[p], *program);
 		}
 		programs.Update();
 		pipelines.Update();
@@ -228,6 +233,10 @@ void DrawcallLimitFix::Prepass()
 	const std::uint32_t frame = store.GetFrame();
 	if (DCLF::CaptureParity::Enabled())
 		DCLF::CaptureParity::Get().Report(frame, kReportInterval);
+	if (DCLF::DecalProbe::Enabled())
+		DCLF::DecalProbe::Get().Report(frame, kReportInterval);
+	if (DCLF::SkinProbe::Enabled())
+		DCLF::SkinProbe::Get().Report(frame, kReportInterval);
 
 	// The culling's counters, reported whether or not the full statistics are on: they are what says
 	// whether GPU culling is running and how much it rejects.
@@ -281,7 +290,7 @@ void DrawcallLimitFix::Prepass()
 		std::string reasons;
 		for (std::size_t i = 1; i < stats.ineligible.size(); ++i) {
 			if (stats.ineligible[i])
-				reasons += fmt::format(" {}={}", DCLF::kIneligibleNames[i], stats.ineligible[i]);
+				reasons += fmt::format(" {}={}({} drawn)", DCLF::kIneligibleNames[i], stats.ineligible[i], stats.ineligibleDrawn[i]);
 		}
 		const double frames = std::max(1u, timing.frames);
 		// The per-part breakdown appears only under CS_DCLF_PROFILE=1, because that is the only time it is
@@ -312,6 +321,14 @@ void DrawcallLimitFix::Prepass()
 		for (std::size_t i = 0; i < draws.partMs.size(); ++i)
 			epochParts += fmt::format("{}{} {:.3f} ms", epochParts.empty() ? "" : ", ", DCLF::kEpochPartNames[i], draws.partMs[i]);
 		logger::info("[DCLF] indirect epoch CPU by part: {}", epochParts);
+		if (stats.projectedUV || stats.landBlend)
+			logger::info("[DCLF] projected UV / terrain (last frame): {} projected candidates, {} terrain candidates, projected textures {}",
+				stats.projectedUV, stats.landBlend, store.GetProjectedTextures().valid ? "captured" : "not seen yet");
+		if (stats.skinned || draws.boneRows)
+			logger::info("[DCLF] skinned (last frame): {} candidates, {} palette rows in the tables, {} rows uploaded by the epoch", stats.skinned, stats.boneRows, draws.boneRows);
+		if (stats.decals[0] || stats.decals[1] || draws.decalsDrawn)
+			logger::info("[DCLF] decals (last frame): {} candidates ({} in the opaque group, {} in the blended group), {} submitted to the second pass, {} of {} tested were culled",
+				stats.decals[0] + stats.decals[1], stats.decals[0], stats.decals[1], draws.decalsDrawn, draws.decalsCulled, draws.decalsTested);
 		if (DCLF::IndirectDraws::Hybrid())
 			logger::info("[DCLF] hybrid (last frame): {} of {} native passes left to the indirect draws ({} in the depth pass, {} in the opaque pass)",
 				skipStats.skipped, skipStats.offered, skipStats.skippedInDepth, skipStats.skippedInOpaque);
@@ -373,12 +390,39 @@ void DrawcallLimitFix::Prepass()
 		if (DCLF::PassCapture::WithholdingEnabled())
 			logger::info("[DCLF] claim churn: +{} -{} ({} of the drops still had an engine pass, so the native loop takes them back)",
 				capture.claimsAdded, capture.claimsDropped, capture.droppedAfterCull);
+		logger::info("[DCLF] derived cache (last frame): {} served, {} recomputed and compared, {} differ{}; slots alive {} geometries / {} pipelines / {} materials, {} swept, {} geometries refreshed in place, {} slot violations{}",
+			stats.derivedHits, stats.derivedChecked, stats.derivedDiffers, stats.derivedDiffers ? " <- STALE" : "",
+			stats.geometriesAlive, stats.pipelinesAlive, stats.materialsAlive, stats.slotsSwept, stats.geometriesRefreshed,
+			stats.slotViolations, stats.slotViolations ? " <- SLOT VIOLATION" : "");
 		if (stats.classifyHits || stats.classifyChecked)
 			logger::info("[DCLF] classification cache (last frame): {} served from the cache, {} recomputed and compared, {} differ{}; RTTI casts walked {}",
 				stats.classifyHits, stats.classifyChecked, stats.classifyDiffers, stats.classifyDiffers ? " <- STALE" : "", stats.castResolved);
 		// The Stage 4c gate. A pipeline's per-frame lighting template must come from an object the engine
 		// itself kept; anything else hands a culled object's scene light list to the visible objects drawn
 		// on that pipeline, which is the blown-out interior lighting defect.
+		{
+			static constexpr const char* kTechniqueNames[20] = { "none", "envmap", "glowmap", "parallax", "facegen",
+				"facegenRGBTint", "hair", "parallaxOcc", "MTLand", "LODLand", "snow", "multilayerParallax", "treeAnim",
+				"LODObjects", "multiIndexSparkle", "LODObjectHD", "eye", "cloud", "LODLandNoise", "MTLandLODBlend" };
+			std::string techniques;
+			for (std::size_t t = 0; t < stats.techniqueRejects.size(); ++t) {
+				if (!stats.techniqueRejects[t])
+					continue;
+				const char* name = t == 63 ? "refraction" : (t < 20 ? kTechniqueNames[t] : "?");
+				techniques += fmt::format("{}{}({})={}", techniques.empty() ? "" : " ", name, t, stats.techniqueRejects[t]);
+			}
+			if (!techniques.empty())
+				logger::info("[DCLF] left native by technique: {}", techniques);
+		}
+		if (!stats.propertyRejects.empty()) {
+			std::vector<std::pair<const RE::NiRTTI*, std::uint32_t>> sorted(stats.propertyRejects.begin(), stats.propertyRejects.end());
+			std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+			std::string byProperty;
+			for (const auto& [rtti, count] : sorted)
+				byProperty += fmt::format(" {}={}", rtti && rtti->name ? rtti->name : "?", count);
+			logger::info("[DCLF] left native by property type:{}; {} alpha blended, {} opaque ({} alpha tested)",
+				byProperty, stats.rejectedBlended, stats.rejectedOpaque, stats.rejectedOpaqueAlphaTest);
+		}
 		logger::info("[DCLF] pipeline templates: {} of {} drawn only by culled candidates, {} taken over this frame; {} visible objects on a culled template{}",
 			stats.pipelinesCulledOnly, stats.pipelines, stats.templateUpgrades, stats.templateDefects,
 			stats.templateDefects ? " <- CULLED TEMPLATE" : "");
@@ -421,6 +465,13 @@ bool DrawcallLimitFix::SkipNativePass(RE::BSRenderPass* a_pass)
 		return false;
 	if (!inDepthPass && !globals::deferred->deferredPass)
 		return false;  // shadows, reflections and cubemaps keep drawing everything
+	// A decal's depth-pass draw stays native. DCLF draws decals in a second colour pass that writes no
+	// depth (they are not occluders), so a decal with kZBufferWrite that the native depth pass would
+	// have written must still get that write from the native pass; skipping it here would leave the
+	// decal's depth out of the frame entirely.
+	if (inDepthPass && a_pass->shaderProperty &&
+		a_pass->shaderProperty->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kDecal, RE::BSShaderProperty::EShaderPropertyFlag::kDynamicDecal))
+		return false;
 	if (onlyEligible) {
 		// Membership of this frame's tables, not what the epoch drew: the epoch only runs once the main pass
 		// has drawn, so a rule based on the frame before would skip everything and never start.
@@ -469,6 +520,8 @@ void DrawcallLimitFix::Hooks::BSBatchRenderer_RenderPassImmediately<N>::thunk(RE
 {
 	auto& feature = globals::features::drawcallLimitFix;
 	++feature.skipCounters.offered;
+	if (DCLF::DecalProbe::Enabled())
+		DCLF::DecalProbe::Get().OnPassOffered(a_pass, feature.inDepthPass);
 	if (feature.SkipNativePass(a_pass)) {
 		++(feature.inDepthPass ? feature.skipCounters.skippedInDepth : feature.skipCounters.skippedInOpaque);
 		++feature.skipCounters.skipped;
@@ -494,6 +547,10 @@ void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint3
 		return;
 	if (globals::deferred->deferredPass) {
 		auto& store = DCLF::SceneStore::Get();
+		// A ProjectedUV draw has SetupGeometry's four projected textures bound now: keep them for the
+		// pipelines DCLF builds with that bit (the Hair technique binds none).
+		if ((DCLF::PassDescriptorOf(a_pass->passEnum) & 0x8000u) && ((DCLF::PassDescriptorOf(a_pass->passEnum) >> 24) & 0x3f) != 6)
+			store.NoteProjectedTextures();
 		// The main pass's target formats, once per frame from its first lighting draw.
 		// The first lighting draw of the frame whose targets are bound: the engine binds the main pass's
 		// targets while it applies a draw's state, so the first draw of the pass can still see none (which
@@ -505,11 +562,18 @@ void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint3
 				DCLF::DrawPipelines::Get().SetTargetFormats(formats);
 				// Phase 2: what the main pass binds, for this frame's indirect draws (run before the composite).
 				DCLF::IndirectDraws::Get().CaptureMainPass();
+				// The engine's state objects behind any key that carries state bits (decals), read here
+				// because this is inside the deferred pass, where the blend table holds the deferred variants.
+				DCLF::DrawPipelines::Get().CaptureEngineStates(store.GetTables().pipelines);
 			}
 		}
 	}
 	if (DCLF::CaptureParity::Enabled())
 		DCLF::CaptureParity::Get().OnNativeLightingDraw(a_pass, a_renderFlags);
+	if (DCLF::DecalProbe::Enabled())
+		DCLF::DecalProbe::Get().OnNativeLightingDraw(a_pass, a_renderFlags);
+	if (DCLF::SkinProbe::Enabled())
+		DCLF::SkinProbe::Get().OnNativeLightingDraw(a_pass, a_renderFlags);
 }
 
 void DrawcallLimitFix::RefreshDepthConsumers()

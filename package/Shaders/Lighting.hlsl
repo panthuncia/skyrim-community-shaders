@@ -114,10 +114,12 @@ cbuffer PerGeometry : register(b2)
 	row_major float3x4 PreviousWorld : packoffset(c3);
 #endif  // !DCLF_BINDLESS
 	float4 EyePosition : packoffset(c6);
+#if !defined(DCLF_BINDLESS)
 	float4 LandBlendParams : packoffset(c7);  // offset in xy, gridPosition in yw
 	float4 TreeParams : packoffset(c8);       // wind magnitude in y, amplitude in z, leaf frequency in w
 	float2 WindTimers : packoffset(c9);
 	row_major float3x4 TextureProj : packoffset(c10);
+#endif  // !DCLF_BINDLESS
 	float IndexScale : packoffset(c13);
 	float4 WorldMapOverlayParameters : packoffset(c14);
 };
@@ -126,6 +128,15 @@ cbuffer PerGeometry : register(b2)
 static float3x4 World = float3x4(DCLFObjects[DCLFObjectIndex].World[0], DCLFObjects[DCLFObjectIndex].World[1], DCLFObjects[DCLFObjectIndex].World[2]);
 static float3x4 PreviousWorld = float3x4(DCLFObjects[DCLFObjectIndex].PreviousWorld[0], DCLFObjects[DCLFObjectIndex].PreviousWorld[1],
 	DCLFObjects[DCLFObjectIndex].PreviousWorld[2]);
+// Tree animation is per object for the same reason World is: with DCLF_BINDLESS the PerGeometry
+// buffer is one block for the whole pipeline, and a tree's wind amplitude and clock are its own.
+static float4 TreeParams = DCLFObjects[DCLFObjectIndex].DCLFTreeParams;
+static float2 WindTimers = DCLFObjects[DCLFObjectIndex].DCLFWindTimers.xy;
+// Likewise the landscape blend parameters (MTLand) and the ProjectedUV texture matrix, from the object's
+// extras rows in the row buffer. An object without extras points at row 0, which nothing reads for it.
+static float4 LandBlendParams = DCLFBones[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 0];
+static row_major float3x4 TextureProj = float3x4(DCLFBones[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 1],
+	DCLFBones[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 2], DCLFBones[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 3]);
 #endif  // DCLF_BINDLESS
 
 cbuffer VS_PerFrame : register(b12)
@@ -172,12 +183,21 @@ VS_OUTPUT main(VS_INPUT input)
 #	if defined(SKINNED)
 	precise int4 actualIndices = 765.01.xxxx * input.BoneIndices.xyzw;
 
+#		if defined(DCLF_BINDLESS)
+	float3x4 previousWorldMatrix =
+		Skinned::GetBoneTransformMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFPreviousBoneOffset, actualIndices, input.BoneWeights);
+#		else
 	float3x4 previousWorldMatrix =
 		Skinned::GetBoneTransformMatrix(PreviousBones, actualIndices, PreviousBonesPivot, input.BoneWeights);
+#		endif
 	precise float4 previousWorldPosition =
 		float4(mul(inputPosition, transpose(previousWorldMatrix)), 1);
 
+#		if defined(DCLF_BINDLESS)
+	float3x4 worldMatrix = Skinned::GetBoneTransformMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFBoneOffset, actualIndices, input.BoneWeights);
+#		else
 	float3x4 worldMatrix = Skinned::GetBoneTransformMatrix(Bones, actualIndices, BonesPivot, input.BoneWeights);
+#		endif
 	precise float4 worldPosition = float4(mul(inputPosition, transpose(worldMatrix)), 1);
 
 	float4 viewPos = mul(ViewProj, worldPosition);
@@ -209,7 +229,11 @@ VS_OUTPUT main(VS_INPUT input)
 #	endif
 
 #	if defined(SKINNED)
+#		if defined(DCLF_BINDLESS)
+	float3x3 boneRSMatrix = Skinned::GetBoneRSMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFBoneOffset, actualIndices, input.BoneWeights);
+#		else
 	float3x3 boneRSMatrix = Skinned::GetBoneRSMatrix(Bones, actualIndices, input.BoneWeights);
+#		endif
 #	endif
 
 #	if !defined(MODELSPACENORMALS)
@@ -576,11 +600,15 @@ cbuffer PerGeometry : register(b2)
 #if !defined(DCLF_BINDLESS)
 	float3 EmitColor : packoffset(c4.y);
 #endif  // !DCLF_BINDLESS
+#if !defined(DCLF_BINDLESS)
 	float4 ProjectedUVParams : packoffset(c6);
+#endif  // !DCLF_BINDLESS
 	float4 SSRParams : packoffset(c7);
 	float4 WorldMapOverlayParametersPS : packoffset(c8);
+#if !defined(DCLF_BINDLESS)
 	float4 ProjectedUVParams2 : packoffset(c9);
 	float4 ProjectedUVParams3 : packoffset(c10);  // fProjectedUVDiffuseNormalTilingScale in x, fProjectedUVNormalDetailTilingScale in y, EnableProjectedNormals in w
+#endif  // !DCLF_BINDLESS
 	row_major float3x4 DirectionalAmbient : packoffset(c11);
 	float4 AmbientSpecularTintAndFresnelPower : packoffset(c14);  // Fresnel power in z, color in xyz
 	float4 PointLightPosition[7] : packoffset(c15);               // point light radius in w
@@ -593,6 +621,10 @@ static float4 MaterialData = DCLFObjects[DCLFObjectIndex].MaterialData;
 static float3 EmitColor = DCLFObjects[DCLFObjectIndex].EmitColor.xyz;
 // Only the w of SSRParams is per-object; x, y and z stay in the per-pipeline buffer above.
 static float DCLFSSRSpecular = DCLFObjects[DCLFObjectIndex].EmitColor.w;
+// ProjectedUV's three pixel parameters are per object too (the property's, plus two globals).
+static float4 ProjectedUVParams = DCLFBones[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 4];
+static float4 ProjectedUVParams2 = DCLFBones[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 5];
+static float4 ProjectedUVParams3 = DCLFBones[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 6];
 #	define DCLF_SSR_SPECULAR DCLFSSRSpecular
 #else
 #	define DCLF_SSR_SPECULAR SSRParams.w

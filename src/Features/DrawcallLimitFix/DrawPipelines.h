@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <dxgiformat.h>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,8 @@ namespace DCLF
 	 * because the engine binds nothing there, so nothing the frame capture resolves is displaced.
 	 */
 	inline constexpr std::uint32_t kObjectBufferRegister = kTextureRegisters - 1;
+	/** @brief t126: the epoch's bone palette rows (DCLFBones), the other vertex-stage register. */
+	inline constexpr std::uint32_t kBonesBufferRegister = kTextureRegisters - 2;
 
 	/**
 	 * @brief Everything one indirect draw binds, in GPU memory: its address is the draw's only push data,
@@ -115,6 +118,17 @@ namespace DCLF
 
 		/** @brief Adds finished pipelines to the set (call once per frame). */
 		void Update();
+
+		/**
+		 * @brief Reads the engine's rasterizer and blend state objects behind the state bits of these keys
+		 * (decals: Records.h PipelineRasterFlags), so that Find can build them.
+		 *
+		 * Call inside the deferred pass: Community Shaders swaps the engine's blend table for its deferred
+		 * variants between StartDeferred and ResetBlendStates, and those are what a native decal draw in the
+		 * G-buffer uses. Read outside that window the same index names the forward state. A key whose
+		 * state has not been captured yet is simply not ready; nothing is guessed.
+		 */
+		void CaptureEngineStates(std::span<const PipelineKey> a_keys);
 
 		/** @brief The registers of a variant of the pipeline at a set index (one Find returned). */
 		const RegisterUsage& Usage(std::uint32_t a_index, std::uint32_t a_variant = kColorVariant) const { return usage[a_index][a_variant]; }

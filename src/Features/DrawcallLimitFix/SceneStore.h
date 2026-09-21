@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <map>
 #include <vector>
 
 #include "LightingDescriptors.h"
@@ -41,13 +42,14 @@ namespace DCLF
 		// The two that "record" used to absorb, which is why it read as the largest part.
 		DedupHit,   // the three map probes on the HIT path; Dedup above only ever measured the misses
 		LoopTail,   // per TRACKED object: the continue path of a rejected one, and the iteration itself
+		Skinning,   // skinned objects: the engine's palette update and the row copy
 		Count
 	};
 
 	inline constexpr std::array<const char*, static_cast<std::size_t>(BuildPart::Count)> kBuildPartNames{
 		"walk", "pass-lookup", "classify-static", "classify-frame", "diagnostics",
 		"resolve", "dedup", "pipeline-eval", "material-eval", "record",
-		"dedup-hit", "loop-tail"
+		"dedup-hit", "loop-tail", "skinning"
 	};
 
 	class SceneStore
@@ -67,6 +69,9 @@ namespace DCLF
 			// by MakeShading and resampled by RefreshFrameConstants.
 			std::vector<float> emissiveMult;                      // parallel to objects
 			std::vector<ObjectLights> lights;                     // parallel to objects
+			// Tree animation, per object. Only technique 12 fills it; everything else leaves the engine's
+			// defaults, which is what the template block already carried for them.
+			std::vector<ObjectTreeAnim> treeAnim;                 // parallel to objects
 			std::vector<GeometryConstants> geometryConstants;     // parallel to pipelines (per-frame PerGeometry values)
 			std::vector<std::uint8_t> geometryConstantsValid;     // parallel to pipelines
 			// The property whose lighting pass supplied each pipeline's per-frame constants, kept so
@@ -81,7 +86,54 @@ namespace DCLF
 			std::vector<TechniqueConstants> techniqueConstants;   // parallel to pipelines (per-frame PerTechnique values, filter modes)
 			std::vector<PipelinePermutation> permutations;        // parallel to pipelines
 			std::vector<DrawSequence> draws;  // one per object (templates: pipelineIndex is the table index)
+			// Decals (CS_DCLF_DECALS): each decal object's slot in its group's draw range, in the engine's
+			// own draw order (group, technique bucket, batch list, chain position), and how many slots
+			// each group has. The colour epoch writes a decal's sequence to its slot - either the draw or
+			// a zero-count one when culled - so that overlapping decals land in the same order every
+			// frame, which an atomic append cannot promise. ~0u for everything that is not a decal.
+			std::vector<std::uint32_t> decalOrdinal;  // parallel to objects
+			std::array<std::uint32_t, 2> decalCount{};
+			// Skinning (CS_DCLF_SKINNED): every skinned object's bone palette rows end to end - the engine's
+			// own NiSkinInstance::boneMatrices (three float4 rows a bone, absolute world space), copied
+			// after its per-frame update - and the previous frame's palettes in the same layout. The epoch
+			// packs both eye-relative into its bones buffer, current rows first. Per object, where its rows
+			// start and how many; 0 for anything that is not skinned.
+			std::vector<float> bones;
+			std::vector<float> previousBones;
+			std::vector<std::uint32_t> boneOffset;  // parallel to objects, in rows
+			std::vector<std::uint32_t> boneRows;    // parallel to objects
+			// Per-object extras (Records.h kExtraRows): the landscape blend parameters and the ProjectedUV
+			// matrix and pixel parameters, filled at Prepass by RefreshFrameConstants for the objects that
+			// carry kObjectLandBlend / kObjectProjectedUV. Rows of float4; per object the row offset, or
+			// kNoExtraRows. The epoch appends them to the row buffer after the palettes.
+			std::vector<float> extraRows;
+			std::vector<std::uint32_t> extraOffset;  // parallel to objects
 
+			/**
+			 * @brief The three shared tables keep their slots across frames (CS_DCLF_DERIVED_CACHE).
+			 *
+			 * A slot is alive while its lastUsed frame is not kSlotFree, used this frame when it equals the
+			 * frame, and swept (map entry erased, slot on the free list) after kSlotIdleFrames without use.
+			 * The sweep runs before the loop, so no object of the frame can point at a slot it reuses. The
+			 * keys are kept per slot so the sweep can find the map entry, and so a cached slot index can be
+			 * checked against what it was derived for.
+			 */
+			static constexpr std::uint32_t kSlotFree = ~0u;
+			static constexpr std::uint32_t kSlotIdleFrames = 64;
+			std::vector<std::uint32_t> geometryLastUsed;  // parallel to geometries
+			std::vector<const RE::BSGraphics::TriShape*> geometrySlotKey;
+			std::vector<std::uint32_t> geometryFree;
+			std::vector<std::uint32_t> pipelineLastUsed;  // parallel to pipelines
+			std::vector<std::uint32_t> pipelineFree;
+			std::vector<std::uint32_t> materialLastUsed;  // parallel to materials
+			std::vector<std::pair<const RE::BSShaderMaterial*, std::uint32_t>> materialSlotKey;
+			std::vector<std::uint32_t> materialFree;
+			bool PipelineUsed(std::size_t a_slot, std::uint32_t a_frame) const { return a_slot < pipelineLastUsed.size() && pipelineLastUsed[a_slot] == a_frame; }
+			bool PipelineAlive(std::size_t a_slot) const { return a_slot < pipelineLastUsed.size() && pipelineLastUsed[a_slot] != kSlotFree; }
+
+			/** @brief Drops the per-object arrays; the slot tables persist. */
+			void ClearFrame();
+			/** @brief Drops everything. */
 			void Clear();
 		};
 
@@ -101,8 +153,42 @@ namespace DCLF
 			std::uint64_t detachedEvents = 0;
 			std::uint64_t validationDrops = 0;
 			std::array<std::uint32_t, static_cast<std::size_t>(Ineligible::Count)> ineligible{};
+			// Of those, the ones the engine ITSELF drew in the main pass this frame - it registered a
+			// lighting pass for them and DCLF declined it. This is what a coverage class is worth.
+			//
+			// Tracked count is not: it counts objects the engine culled as well, and ranking by it is what
+			// made BSEffectShader look like the largest prize at 3057 when it draws ~13 a frame.
+			std::array<std::uint32_t, static_cast<std::size_t>(Ineligible::Count)> ineligibleDrawn{};
+			// Decal candidates this frame, by group (Records.h ObjectDecalGroup - 1).
+			std::array<std::uint32_t, 2> decals{};
+			std::uint32_t skinned = 0;  // skinned candidates this frame, and their palette rows
+			std::uint32_t boneRows = 0;
+			std::uint32_t projectedUV = 0;  // candidates with the ProjectedUV bit, and terrain ones
+			std::uint32_t landBlend = 0;
+			// CS_DCLF_DERIVED_CACHE: accumulated objects served from their cached derivation, and under
+			// `probe` how many were recomputed and how many disagreed (the gate: 0).
+			std::uint32_t derivedHits = 0;
+			std::uint32_t derivedChecked = 0;
+			std::uint32_t derivedDiffers = 0;
+			std::uint32_t slotsSwept = 0;
+			std::uint32_t geometriesRefreshed = 0;
+			std::uint32_t slotViolations = 0;  // objects whose slots failed CheckObjectSlots (the gate: 0)  // slots re-resolved in place: TriShape reallocated at its address, or references evicted
+			std::uint32_t geometriesAlive = 0, pipelinesAlive = 0, materialsAlive = 0;
 			// CS_DCLF_CLASSIFY_CACHE: objects served from the cached verdict, and - under `probe` - how
 			// many were recomputed and how many disagreed. Zero disagreements is the gate.
+			// Objects left native by Ineligible::Technique, by technique id (index 63 = refraction). This
+			// is what says which technique to bring into coverage next, instead of guessing.
+			std::array<std::uint32_t, 64> techniqueRejects{};
+			// CS_DCLF_COVERAGE_PROBE=1: objects left native by NotLightingShader, by property type. The
+			// class is the largest one outside coverage and "not a lighting property" says nothing about
+			// which shader would have to be brought in.
+			std::map<const RE::NiRTTI*, std::uint32_t> propertyRejects;
+			// Of those, how many are alpha blended. This is the scoping question for a second shader:
+			// blended geometry is not drawn in the pass DCLF owns at all, so covering it would mean a new
+			// epoch after the deferred composite rather than another shader inside the existing one.
+			std::uint32_t rejectedBlended = 0;
+			std::uint32_t rejectedOpaque = 0;
+			std::uint32_t rejectedOpaqueAlphaTest = 0;
 			std::uint32_t castResolved = 0;  // RTTI casts actually walked (the rest reused a witness)
 			std::uint32_t classifyHits = 0;
 			std::uint32_t classifyChecked = 0;
@@ -217,6 +303,21 @@ namespace DCLF
 		 */
 		void RefreshFrameConstants();
 
+		/**
+		 * @brief The four textures the engine binds for a ProjectedUV draw (pixel slots 3, 8, 10 and 11:
+		 * the projected diffuse, normal and detail maps and the projection noise), as SetupGeometry left
+		 * them at a native draw. They are globals of the engine, changed only by the ReloadProjectedUVTextures
+		 * console command, so one capture stands; it is refreshed by every native projected draw seen.
+		 */
+		struct ProjectedTextures
+		{
+			static constexpr std::array<std::uint32_t, 4> kSlots{ 3, 8, 10, 11 };
+			std::array<ID3D11ShaderResourceView*, 4> views{};
+			bool valid = false;
+		};
+		void NoteProjectedTextures();
+		const ProjectedTextures& GetProjectedTextures() const { return projectedTextures; }
+
 		/** @brief Render flags the native main pass passes to SetupGeometry (learned from native draws). */
 		void SetMainPassRenderFlags(std::uint32_t a_flags) { mainPassRenderFlags = a_flags; }
 		std::uint32_t GetMainPassRenderFlags() const { return mainPassRenderFlags; }
@@ -298,6 +399,51 @@ namespace DCLF
 			 */
 			const RE::BSShaderProperty* castProperty = nullptr;
 			RE::BSLightingShaderProperty* castResult = nullptr;
+			// The property's own type, recorded when the cast is resolved so the coverage probe costs a
+			// pointer rather than an RTTI walk. Only meaningful when castResult is null.
+			const RE::NiRTTI* castRtti = nullptr;
+
+			/**
+			 * @brief The positive derivation, cached (CS_DCLF_DERIVED_CACHE): everything the loop derives
+			 * for an accumulated object that is fixed until a witness changes - the descriptors, the static
+			 * object flags, the pipeline key and the three table slots. The witnesses are the four pointers
+			 * StaticVerdict uses, the fade state, the accumulated pass's technique / sub-pass / hint (the
+			 * per-frame bits live in the technique), the interior flag, whether the material alpha is
+			 * below one, and the decal bias modes of the frame; a slot is also checked against its key
+			 * before it is served, so a swept and reused slot cannot be handed back.
+			 */
+			struct Derived
+			{
+				bool valid = false;
+				std::uint32_t generation = 0;  // the slot tables' generation the slots belong to
+				const RE::BSGraphics::TriShape* triShape = nullptr;
+				const RE::BSShaderProperty* property = nullptr;
+				const RE::BSShaderMaterial* material = nullptr;
+				std::uint8_t fadeState = 0;
+				bool interior = false;
+				bool alphaBelowOne = false;
+				std::uint32_t technique = 0;
+				std::uint32_t subPass = 0;
+				std::uint32_t hint = 0;
+				std::uint32_t biasWitness = 0;
+				LightingDescriptors descriptors;
+				std::uint32_t staticFlags = 0;
+				PipelineKey key{};
+				std::uint32_t geometrySlot = ~0u;
+				std::uint32_t pipelineSlot = ~0u;
+				std::uint32_t materialSlot = ~0u;
+			};
+			Derived derived;
+
+			/**
+			 * @brief The cull-only verdict (CS_DCLF_CULL_INPUT=native): whether the object is a culling
+			 * candidate when the engine did not keep it, as the full classification last found it, with
+			 * the frame it was found on. Refreshed every kCandidateRefreshFrames; a candidate is tested by
+			 * the culling and drawn by nothing, so a verdict a few frames old costs at most a diagnostic.
+			 */
+			std::uint32_t candidateFrame = 0;  // 0: never classified
+			Ineligible candidateReason = Ineligible::None;
+			static constexpr std::uint32_t kCandidateRefreshFrames = 64;
 		};
 
 		void RefreshCategoryNodes(bool a_force = false);
@@ -334,6 +480,14 @@ namespace DCLF
 			const AccumulatedPass* accumulated;
 		};
 		std::vector<OrderEntry> order;
+		// The decal objects of the frame with their engine draw-order key, sorted after the loop into
+		// Tables::decalOrdinal. A member for its capacity, like `order`.
+		struct DecalOrderEntry
+		{
+			std::uint64_t key;  // group, technique, list, chain index - in that significance
+			std::uint32_t object;
+		};
+		std::vector<DecalOrderEntry> decalOrder;
 		ankerl::unordered_dense::set<RE::NiNode*> categoryNodes;
 		std::size_t validationCursor = 0;
 		// Set while a load screen is up, so the first frame after it rebuilds the tracked set from
@@ -409,7 +563,30 @@ namespace DCLF
 		static constexpr std::uint32_t kMaterialValidationStride = 4;
 		static constexpr std::uint32_t kMaterialCacheIdleFrames = 64;
 		std::uint32_t frame = 0;
+		std::uint32_t tablesGeneration = 0;
+		bool graphWasActive = false;  // resolveBuffers of the previous BuildFrame, to log the flip
 		std::uint32_t mainPassRenderFlags = 0;
+		ProjectedTextures projectedTextures;
+		/** @brief Fills one object's extras rows (Prepass: the main camera's state is current). */
+		void RefreshObjectExtras(std::size_t a_object, const RE::BSLightingShaderProperty& a_property, const RE::BSGeometry& a_geometry);
+		/** @brief Frees the slots unused for kSlotIdleFrames and their map entries; before the loop. */
+		void SweepSlots();
+		/**
+		 * @brief Drops the slot tables, their maps and every cached derivation (by generation): the
+		 * teardown paths, where the tables are cleared outright, must not leave a map or a Derived
+		 * pointing at slots that no longer exist.
+		 */
+		void ResetSlotTables();
+		/** @brief After the loop: every object with bindings names live slots of this frame, or is neutralised. */
+		void CheckObjectSlots(bool a_resolveBuffers);
+		/**
+		 * @brief CS_DCLF_SLOT_PROBE: re-derives what the used slots serve (a fresh material evaluation, a
+		 * fresh buffer resolve) and logs the first difference of the frame. Startup diagnostics for the
+		 * persistent tables; every frame, so it is a probe and not a mode.
+		 */
+		void ProbeSlots(bool a_resolveBuffers);
+		/** @brief Re-evaluates a few live materials a frame against what their slots serve. */
+		void ValidateMaterialSlice();
 		Stats stats;
 	};
 }

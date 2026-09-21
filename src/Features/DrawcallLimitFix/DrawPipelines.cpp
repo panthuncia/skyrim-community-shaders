@@ -5,6 +5,7 @@
 
 #	include "DrawPipelines.h"
 #	include "DrawPipelinesRhi.h"
+#	include "EngineStates.h"
 #	include "Switches.h"
 
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -29,8 +30,11 @@ namespace DCLF
 		// Push data. The DCLF_BINDLESS builds declare a cbuffer here to read the object index out of it;
 		// the address words beside it are still consumed by the layout's indirect ranges, not by a shader.
 		constexpr std::uint32_t kRecordAddressBinding = 190;
-		// The one texture register the vertex stage may declare: the per-object record buffer.
+		// The two texture registers the vertex stage may declare: the bone palette buffer and, above it,
+		// the per-object record buffer.
 		constexpr std::uint32_t kObjectBufferBinding = kBindingShiftT + kObjectBufferRegister;
+		constexpr std::uint32_t kBonesBufferBinding = kBindingShiftT + kBonesBufferRegister;
+		constexpr std::uint32_t kVertexTextureCount = kObjectBufferRegister - kBonesBufferRegister + 1;
 		constexpr std::uint32_t kDescriptorHeapBindings = 1000000;  // DXC's ResourceDescriptorHeap bindings (BasicRHI maps them)
 
 		bool InRange(std::uint32_t a_binding, std::uint32_t a_first, std::uint32_t a_count)
@@ -70,7 +74,7 @@ namespace DCLF
 				case Kind::StorageBuffer:
 					// The layout maps the whole t range for the pixel stage, and the object buffer alone for
 					// the vertex stage - which is all the vertex half of DCLF_BINDLESS needs.
-					mapped = mapped && (a_pixel ? InRange(binding.binding, kBindingShiftT, kTextureRegisters) : binding.binding == kObjectBufferBinding);
+					mapped = mapped && (a_pixel ? InRange(binding.binding, kBindingShiftT, kTextureRegisters) : InRange(binding.binding, kBonesBufferBinding, kVertexTextureCount));
 					break;
 				case Kind::Sampler:
 					mapped = mapped && a_pixel && InRange(binding.binding, kBindingShiftS, kSamplerRegisters);
@@ -197,6 +201,96 @@ namespace DCLF
 			std::array<RegisterUsage, kVariantCount> usage;
 		};
 
+		/**
+		 * @brief The engine's fixed-function state behind a key's state bits (RasterStateBits), read once
+		 * from its D3D11 state objects and kept in RHI terms so the asynchronous build never touches D3D11.
+		 */
+		struct EngineState
+		{
+			float depthBias = 0.0f;
+			float depthBiasClamp = 0.0f;
+			float slopeScaledDepthBias = 0.0f;
+			rhi::BlendState blend{};
+			bool valid = false;  // false: a state object was missing or used something the RHI cannot express
+		};
+		ankerl::unordered_dense::map<std::uint32_t, EngineState> engineStates;  // by RasterStateBits
+		std::uint32_t loggedStateFailures = 0;
+
+		static bool ToRHI(D3D11_BLEND a_factor, rhi::BlendFactor& a_out)
+		{
+			switch (a_factor) {
+			case D3D11_BLEND_ONE: a_out = rhi::BlendFactor::One; return true;
+			case D3D11_BLEND_ZERO: a_out = rhi::BlendFactor::Zero; return true;
+			case D3D11_BLEND_SRC_COLOR: a_out = rhi::BlendFactor::SrcColor; return true;
+			case D3D11_BLEND_INV_SRC_COLOR: a_out = rhi::BlendFactor::InvSrcColor; return true;
+			case D3D11_BLEND_SRC_ALPHA: a_out = rhi::BlendFactor::SrcAlpha; return true;
+			case D3D11_BLEND_INV_SRC_ALPHA: a_out = rhi::BlendFactor::InvSrcAlpha; return true;
+			case D3D11_BLEND_DEST_COLOR: a_out = rhi::BlendFactor::DstColor; return true;
+			case D3D11_BLEND_INV_DEST_COLOR: a_out = rhi::BlendFactor::InvDstColor; return true;
+			case D3D11_BLEND_DEST_ALPHA: a_out = rhi::BlendFactor::DstAlpha; return true;
+			case D3D11_BLEND_INV_DEST_ALPHA: a_out = rhi::BlendFactor::InvDstAlpha; return true;
+			default: return false;  // SRC_ALPHA_SAT, BLEND_FACTOR and the SRC1 family: not in the RHI
+			}
+		}
+
+		static bool ToRHI(D3D11_BLEND_OP a_op, rhi::BlendOp& a_out)
+		{
+			switch (a_op) {
+			case D3D11_BLEND_OP_ADD: a_out = rhi::BlendOp::Add; return true;
+			case D3D11_BLEND_OP_SUBTRACT: a_out = rhi::BlendOp::Sub; return true;
+			case D3D11_BLEND_OP_REV_SUBTRACT: a_out = rhi::BlendOp::RevSub; return true;
+			case D3D11_BLEND_OP_MIN: a_out = rhi::BlendOp::Min; return true;
+			case D3D11_BLEND_OP_MAX: a_out = rhi::BlendOp::Max; return true;
+			default: return false;
+			}
+		}
+
+		/** @brief The engine's state objects for these state bits, in RHI terms. */
+		EngineState ReadEngineState(std::uint32_t a_stateBits, std::string& a_error)
+		{
+			EngineState state{};
+			const std::uint32_t bias = RasterDepthBiasMode(a_stateBits);
+			const std::uint32_t blendMode = RasterBlendMode(a_stateBits);
+			const std::uint32_t writeMode = RasterWriteMode(a_stateBits);
+			const std::uint32_t alphaToCoverage = (a_stateBits & kRasterAlphaToCoverage) ? 1u : 0u;
+			const std::uint32_t extra = (a_stateBits & kRasterBlendExtra) ? 1u : 0u;
+			if (bias >= 12 || blendMode >= 7 || writeMode >= 13) {
+				a_error = fmt::format("state indices out of range (bias {}, blend {}, write {})", bias, blendMode, writeMode);
+				return state;
+			}
+			// Fill solid, cull back, no scissor: the pipeline's own cull mode comes from the key, and the
+			// bias values are the same across the cull modes of the engine's table.
+			auto* raster = EngineRasterStates()[0][1][bias][0];
+			auto* blend = EngineBlendStates()[blendMode][alphaToCoverage][writeMode][extra];
+			if (!raster || !blend) {
+				a_error = fmt::format("no engine state object at bias {} / blend [{}][{}][{}][{}]", bias, blendMode, alphaToCoverage, writeMode, extra);
+				return state;
+			}
+			D3D11_RASTERIZER_DESC rasterDesc{};
+			raster->GetDesc(&rasterDesc);
+			state.depthBias = static_cast<float>(rasterDesc.DepthBias);
+			state.depthBiasClamp = rasterDesc.DepthBiasClamp;
+			state.slopeScaledDepthBias = rasterDesc.SlopeScaledDepthBias;
+			D3D11_BLEND_DESC blendDesc{};
+			blend->GetDesc(&blendDesc);
+			state.blend.alphaToCoverage = blendDesc.AlphaToCoverageEnable != FALSE;
+			state.blend.independentBlend = true;
+			state.blend.numAttachments = 8;
+			for (std::uint32_t i = 0; i < 8; ++i) {
+				const auto& source = blendDesc.RenderTarget[blendDesc.IndependentBlendEnable ? i : 0];
+				auto& target = state.blend.attachments[i];
+				target.enable = source.BlendEnable != FALSE;
+				target.writeMask = static_cast<rhi::ColorWriteEnable>(source.RenderTargetWriteMask & 0xF);
+				if (!ToRHI(source.SrcBlend, target.srcColor) || !ToRHI(source.DestBlend, target.dstColor) || !ToRHI(source.BlendOp, target.colorOp) ||
+					!ToRHI(source.SrcBlendAlpha, target.srcAlpha) || !ToRHI(source.DestBlendAlpha, target.dstAlpha) || !ToRHI(source.BlendOpAlpha, target.alphaOp)) {
+					a_error = fmt::format("blend [{}][{}][{}][{}] target {} uses a blend factor or op the RHI does not express", blendMode, alphaToCoverage, writeMode, extra, i);
+					return state;
+				}
+			}
+			state.valid = true;
+			return state;
+		}
+
 		// One set per variant; a key has the same index in both.
 		std::array<rhi::IndirectPipelineSetPtr, kVariantCount> sets;
 		std::array<rhi::CommandSignaturePtr, kVariantCount> signatures;
@@ -246,8 +340,8 @@ namespace DCLF
 				range(kBindingShiftS, kSamplerRegisters, rhi::ShaderStage::Pixel, rhi::LayoutRangeSource::IndirectIndex, offsetof(DrawBindings, samplers), true),
 				// The vertex stage sees one texture register, the per-object record buffer, reading the same
 				// DrawBindings entry the pixel stage does.
-				range(kObjectBufferBinding, 1, rhi::ShaderStage::Vertex, rhi::LayoutRangeSource::IndirectIndex,
-					offsetof(DrawBindings, textures) + 4 * std::size_t{ kObjectBufferRegister }),
+				range(kBonesBufferBinding, kVertexTextureCount, rhi::ShaderStage::Vertex, rhi::LayoutRangeSource::IndirectIndex,
+					offsetof(DrawBindings, textures) + 4 * std::size_t{ kBonesBufferRegister }),
 			};
 			const rhi::PipelineLayoutDesc desc{ .ranges = { ranges, static_cast<std::uint32_t>(std::size(ranges)) }, .pushConstants = { &recordAddress, 1 },
 				.staticSamplers = {}, .flags = rhi::PF_AllowInputAssembler };
@@ -260,7 +354,7 @@ namespace DCLF
 		}
 
 		static org::services::PipelinePayload Build(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout, PipelineKey a_key, const ShaderPrograms::Program* a_program,
-			TargetFormats a_targets)
+			TargetFormats a_targets, EngineState a_state)
 		{
 			SpirvReflection vertex, pixel, depthPixel;
 			if (!vertex.Parse(a_program->vertex) || !pixel.Parse(a_program->pixel) || !depthPixel.Parse(a_program->depthPixel))
@@ -286,6 +380,15 @@ namespace DCLF
 				const bool depthOnly = variant == kDepthVariant;
 				rhi::SubobjRaster raster{};
 				raster.rs.cull = (a_key.rasterFlags & kRasterTwoSided) ? rhi::CullMode::None : rhi::CullMode::Back;
+				// A decal's depth bias, as the engine's rasterizer state for its bias mode holds it. The
+				// integer DepthBias goes through as the constant factor: the main depth is D24S8, for which
+				// Vulkan's default representation is the least representable value of the format, which is
+				// exactly what D3D11 (and DXVK, which forces it for UNORM formats) means by it.
+				if (!depthOnly && a_state.valid) {
+					raster.rs.depthBias = a_state.depthBias;
+					raster.rs.depthBiasClamp = a_state.depthBiasClamp;
+					raster.rs.slopeScaledDepthBias = a_state.slopeScaledDepthBias;
+				}
 				// frontCCW stays false: the engine's meshes are wound for D3D's "clockwise is front", which
 				// is what RasterState's default means on every backend.
 				rhi::SubobjDepth depth{};
@@ -314,6 +417,10 @@ namespace DCLF
 				rhi::SubobjBlend blend{};
 				rhi::SubobjRTVs targets{};
 				if (!depthOnly) {
+					// A decal blends (or not) exactly as the engine's blend state for its indices says, per
+					// target, including the write masks. Everything else keeps the RHI default: no blending.
+					if (a_state.valid)
+						blend.bs = a_state.blend;
 					blend.bs.numAttachments = a_targets.colorCount;
 					targets.rt.count = a_targets.colorCount;
 					for (std::uint32_t i = 0; i < a_targets.colorCount; ++i)
@@ -404,20 +511,48 @@ namespace DCLF
 			return it->second.index;
 		if (impl->inFlight >= kMaxInFlight || impl->setPipelines.size() >= kMaxPipelines)
 			return kNotReady;  // asked again next frame
+		// A key with engine state bits needs that state captured first (CaptureEngineStates); until then
+		// it is not ready and nothing is requested, so the object simply stays native.
+		Impl::EngineState state{};
+		if (const auto bits = RasterStateBits(a_key.rasterFlags)) {
+			const auto it = impl->engineStates.find(bits);
+			if (it == impl->engineStates.end() || !it->second.valid)
+				return kNotReady;
+			state = it->second;
+		}
 
 		org::services::PipelineRecipe recipe;
 		recipe.id = fmt::format("dclf.lighting.{:08X}.{:08X}.{:08X}.{:X}.{:016X}", a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.passDescriptor, a_key.rasterFlags,
 			a_key.vertexLayout);
 		recipe.shaderKey = PipelineKeyHash{}(a_key);
 		recipe.fixedFunctionKey = ankerl::unordered_dense::detail::wyhash::hash(&targets, sizeof(targets));
-		recipe.build = [device = impl->device, layout = impl->layout->GetHandle(), key = a_key, program = &a_program, formats = targets] {
-			return Impl::Build(device, layout, key, program, formats);
+		recipe.build = [device = impl->device, layout = impl->layout->GetHandle(), key = a_key, program = &a_program, formats = targets, state] {
+			return Impl::Build(device, layout, key, program, formats, state);
 		};
 		auto& entry = impl->entries[a_key];
 		entry.future = impl->service.Request(std::move(recipe));
 		++impl->inFlight;
 		++stats.requested;
 		return kNotReady;
+	}
+
+	void DrawPipelines::CaptureEngineStates(std::span<const PipelineKey> a_keys)
+	{
+		for (const auto& key : a_keys) {
+			const auto bits = RasterStateBits(key.rasterFlags);
+			if (!bits || impl->engineStates.contains(bits))
+				continue;
+			std::string error;
+			auto state = impl->ReadEngineState(bits, error);
+			if (!state.valid && impl->loggedStateFailures++ < kMaxLoggedFailures)
+				logger::warn("[DCLF] pipeline state {:05X} cannot be built: {}; its objects stay native", bits, error);
+			else if (state.valid)
+				logger::info("[DCLF] pipeline state {:05X}: depth bias {} (clamp {}, slope {}), blend rt0 {} mask {:X}, rt1 {} mask {:X}",
+					bits, state.depthBias, state.depthBiasClamp, state.slopeScaledDepthBias, state.blend.attachments[0].enable ? "on" : "off",
+					static_cast<unsigned>(state.blend.attachments[0].writeMask), state.blend.attachments[1].enable ? "on" : "off",
+					static_cast<unsigned>(state.blend.attachments[1].writeMask));
+			impl->engineStates.emplace(bits, state);
+		}
 	}
 
 	void DrawPipelines::Update()
@@ -509,6 +644,7 @@ namespace DCLF
 	void DrawPipelines::SetTargetFormats(const TargetFormats& a_formats) { targets = a_formats; }
 	std::uint32_t DrawPipelines::Find(const PipelineKey&, const ShaderPrograms::Program&) { return kNotReady; }
 	void DrawPipelines::Update() {}
+	void DrawPipelines::CaptureEngineStates(std::span<const PipelineKey>) {}
 }
 
 #endif

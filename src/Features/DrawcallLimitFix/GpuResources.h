@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include <cstdint>
 
 #include <winrt/base.h>
@@ -43,8 +45,21 @@ namespace DCLF
 		/** @brief Whether resolution is possible (the render graph runs on DXVK's device). */
 		bool Enabled() const;
 
-		/** @brief The buffer's Vulkan view, resolving it on first use; null if it cannot be made stable. */
-		const Buffer* Resolve(ID3D11Buffer* a_buffer);
+		/**
+		 * @brief The buffer's Vulkan view, resolving it on first use; nullopt if it cannot be made stable.
+		 *
+		 * By value: the entries live in a map whose storage moves when it grows, so a pointer into it is
+		 * only good until the next first-time Resolve. Returning one was how a vertex address came out as
+		 * garbage whenever the index buffer's insert reallocated the map - harmless while the table was
+		 * rebuilt every frame, a device loss once a slot kept the record.
+		 */
+		std::optional<Buffer> Resolve(ID3D11Buffer* a_buffer);
+		/**
+		 * @brief Marks a resolved buffer as used this frame without resolving it: what a persistent
+		 * geometry slot does each frame so the reference it depends on is not evicted. False if the
+		 * buffer is not held (the slot must resolve again).
+		 */
+		bool Touch(ID3D11Buffer* a_buffer);
 
 		/** @brief Once per frame, before the tables are built: releases entries unused for kEvictFrames. */
 		void BeginFrame(std::uint32_t a_frame);

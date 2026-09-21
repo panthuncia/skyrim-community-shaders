@@ -1,5 +1,7 @@
 #include "SceneStore.h"
 
+#include "EngineStates.h"
+
 #include "Switches.h"
 
 #include "GpuResources.h"
@@ -26,6 +28,7 @@ namespace DCLF
 		constexpr std::uint32_t kIndexFormatR16 = 57;  // DXGI_FORMAT_R16_UINT
 		constexpr std::uint32_t kSpecularBit = 0x200;  // pass descriptor Specular
 		constexpr std::uint32_t kTechniqueEnvmap = 1;
+		constexpr std::uint32_t kTechniqueTreeAnim = 12;
 		constexpr std::uint32_t kDoAlphaTestBit = 1u << 20;  // pass descriptor DoAlphaTest
 
 		const RE::BSRenderPass* FindLightingPass(RE::BSShaderProperty* a_property)
@@ -81,8 +84,35 @@ namespace DCLF
 		}
 	}
 
+	void SceneStore::Tables::ClearFrame()
+	{
+		objects.clear();
+		objectGeometry.clear();
+		shading.clear();
+		emissiveMult.clear();
+		lights.clear();
+		treeAnim.clear();
+		draws.clear();
+		decalOrdinal.clear();
+		decalCount = {};
+		bones.clear();
+		previousBones.clear();
+		boneOffset.clear();
+		boneRows.clear();
+		extraRows.clear();
+		extraOffset.clear();
+	}
+
 	void SceneStore::Tables::Clear()
 	{
+		geometryLastUsed.clear();
+		geometrySlotKey.clear();
+		geometryFree.clear();
+		pipelineLastUsed.clear();
+		pipelineFree.clear();
+		materialLastUsed.clear();
+		materialSlotKey.clear();
+		materialFree.clear();
 		objects.clear();
 		objectGeometry.clear();
 		geometries.clear();
@@ -91,6 +121,7 @@ namespace DCLF
 		shading.clear();
 		emissiveMult.clear();
 		lights.clear();
+		treeAnim.clear();
 		geometryConstants.clear();
 		geometryConstantsValid.clear();
 		geometryTemplate.clear();
@@ -98,6 +129,14 @@ namespace DCLF
 		techniqueConstants.clear();
 		permutations.clear();
 		draws.clear();
+		decalOrdinal.clear();
+		decalCount = {};
+		bones.clear();
+		previousBones.clear();
+		boneOffset.clear();
+		boneRows.clear();
+		extraRows.clear();
+		extraOffset.clear();
 	}
 
 	SceneStore& SceneStore::Get()
@@ -110,7 +149,7 @@ namespace DCLF
 	{
 		tracked.clear();
 		categoryNodes.clear();
-		tables.Clear();
+		ResetSlotTables();
 		objectIndex.clear();
 		// They hold raw pointers into game allocations now that they outlive the frame, so the teardown
 		// paths have to drop them rather than leave them to the next BuildFrame.
@@ -461,10 +500,26 @@ namespace DCLF
 			return Ineligible::NotTriShape;
 
 		auto& data = a_geometry.GetGeometryRuntimeData();
-		if (data.skinInstance)
-			return Ineligible::Skinned;
-		if (!data.rendererData || !data.rendererData->vertexBuffer || !data.rendererData->indexBuffer)
+		if (auto* skin = data.skinInstance.get()) {
+			if (!SkinnedEnabled())
+				return Ineligible::Skinned;
+			// The skinned path (engine notes: skinning): exactly a NiSkinInstance - a BSDismemberSkinInstance
+			// hides partitions per frame - with one partition, so the object is one draw of one buffer, and
+			// a palette the native shader could index (240 rows). The draw reads the PARTITION's buffer, not
+			// the geometry's rendererData, which for a skinned shape is a different TriShape.
+			static const REL::Relocation<const RE::NiRTTI*> niSkinInstance{ RE::NiSkinInstance::Ni_RTTI };
+			if (skin->GetRTTI() != niSkinInstance.get())
+				return Ineligible::SkinShape;
+			auto* partition = skin->skinPartition.get();
+			auto* skinData = skin->skinData.get();
+			if (!partition || !skinData || partition->numPartitions != 1 || skinData->GetBoneCount() == 0 || skinData->GetBoneCount() * 3 > 240)
+				return Ineligible::SkinShape;
+			auto* buffData = partition->partitions[0].buffData;
+			if (!buffData || !buffData->vertexBuffer || !buffData->indexBuffer)
+				return Ineligible::NoRendererData;
+		} else if (!data.rendererData || !data.rendererData->vertexBuffer || !data.rendererData->indexBuffer) {
 			return Ineligible::NoRendererData;
+		}
 
 		// The caller may already know what this property is (see Tracked::castProperty); the cast is a walk
 		// of dependent RTTI pointer loads, which is the part of this function that neither a memo nor the
@@ -480,8 +535,16 @@ namespace DCLF
 
 		LightingDescriptors descriptors;
 		const Ineligible reason = DeriveLightingDescriptors(*property, a_geometry, a_accumulated, descriptors, a_wantDerived);
-		if (reason == Ineligible::None && a_descriptors)
-			*a_descriptors = descriptors;
+		if (a_descriptors) {
+			if (reason == Ineligible::None) {
+				*a_descriptors = descriptors;
+			} else {
+				// The rejection diagnostics have to survive the rejection. Copying the descriptors only on
+				// success left rejectedTechnique at its default 0, and 0 is `none` - a SUPPORTED technique -
+				// so the histogram read "none(0)=1337" and looked like a finding rather than an empty field.
+				a_descriptors->rejectedTechnique = descriptors.rejectedTechnique;
+			}
+		}
 		return reason;
 	}
 
@@ -537,6 +600,13 @@ namespace DCLF
 		if (!evaluator.HasLightingShader())
 			return;
 		for (std::size_t i = 0; i < tables.pipelines.size() && i < tables.geometryTemplate.size(); ++i) {
+			if (!tables.PipelineUsed(i, frame))
+				continue;
+			// The technique constants are the frame's (fog, settings, and the shadow mask's view), so a
+			// pipeline slot that outlives the frame takes them fresh here, as it did when the pipeline
+			// table was rebuilt every frame. Serving the slot's first evaluation instead was both a parity
+			// regression and, at startup, a stale view pointer handed to the render graph.
+			EvaluateTechnique(tables.pipelines[i].passDescriptor, tables.techniqueConstants[i]);
 			auto* property = tables.geometryTemplate[i];
 			const auto* templatePass = property ? FindLightingPass(property) : nullptr;
 			if (!templatePass)
@@ -567,7 +637,134 @@ namespace DCLF
 			descriptors.specularLODFade = lighting.specularLODFade;
 			descriptors.envmapLODFade = lighting.envmapLODFade;
 			tables.shading[o] = MakeShading(lighting, descriptors, mainPassRenderFlags, tables.emissiveMult[o]);
+			if (tables.objects[o].flags & (kObjectProjectedUV | kObjectLandBlend))
+				RefreshObjectExtras(o, lighting, *geometry);
 		}
+	}
+
+	namespace
+	{
+		float GlobalFloatAt(const REL::Relocation<std::uintptr_t>& a_at)
+		{
+			return *reinterpret_cast<const float*>(a_at.address());
+		}
+	}
+
+	void SceneStore::RefreshObjectExtras(std::size_t a_object, const RE::BSLightingShaderProperty& a_property, const RE::BSGeometry& a_geometry)
+	{
+		if (a_object >= tables.extraOffset.size() || tables.extraOffset[a_object] == kNoExtraRows)
+			return;
+		float* rows = &tables.extraRows[std::size_t(tables.extraOffset[a_object]) * 4];
+		const auto& object = tables.objects[a_object];
+		auto& state = globals::game::shadowState->GetRuntimeData();
+		const auto eye = state.posAdjust.getEye();
+
+		if (object.flags & kObjectLandBlend) {
+			// BSLightingShader::SetupGeometry, techniques 8 and 19 (engine notes: per-object constants):
+			// xy from the landscape material, zw a blend between two BSShaderManager::State positions by
+			// a clock the same state holds, minus the geometry's world translation. Module-relative reads.
+			static const REL::Relocation<std::uintptr_t> blendClock{ REL::Offset(0x2033080) };
+			static const REL::Relocation<std::uintptr_t> blendClockStart{ REL::Offset(0x2033118) };
+			static const REL::Relocation<std::uintptr_t> blendDuration{ REL::Offset(0x20330f8) };
+			static const REL::Relocation<std::uintptr_t> blendRate{ REL::Offset(0x1ad2840) };
+			static const REL::Relocation<std::uintptr_t> blendFromX{ REL::Offset(0x2033108) };
+			static const REL::Relocation<std::uintptr_t> blendFromY{ REL::Offset(0x203310c) };
+			static const REL::Relocation<std::uintptr_t> blendToX{ REL::Offset(0x2033110) };
+			static const REL::Relocation<std::uintptr_t> blendToY{ REL::Offset(0x2033114) };
+			float t = (GlobalFloatAt(blendClock) - GlobalFloatAt(blendClockStart)) * (GlobalFloatAt(blendRate) / GlobalFloatAt(blendDuration));
+			if (t <= 0.0f)
+				t = 0.0f;
+			if (1.0f <= t)
+				t = 1.0f;
+			const float x = (GlobalFloatAt(blendToX) - GlobalFloatAt(blendFromX)) * t + GlobalFloatAt(blendFromX);
+			const float y = (GlobalFloatAt(blendToY) - GlobalFloatAt(blendFromY)) * t + GlobalFloatAt(blendFromY);
+			const auto* material = static_cast<const RE::BSLightingShaderMaterialLandscape*>(a_property.material);
+			float* land = rows + kExtraRowLandBlend * 4;
+			land[0] = material ? material->landBlendParams.red : 0.0f;
+			land[1] = material ? material->landBlendParams.green : 0.0f;
+			land[2] = x - a_geometry.world.translate.x;
+			land[3] = y - a_geometry.world.translate.y;
+		}
+
+		if (object.flags & kObjectProjectedUV) {
+			// The texture matrix, as SetupGeometry builds it for a ProjectedUV pass (engine notes): the
+			// projection is a fixed rotation about Z placed at posAdjust, converted with the engine's own
+			// NiTransform-to-matrix routine (which subtracts posAdjust, so its translation is zero); for
+			// every technique but Envmap it is multiplied onto the geometry's world matrix, converted the
+			// same way and with posAdjust added back. The engine's two routines are called so that the
+			// result is the native one to the bit, and this runs at Prepass so posAdjust is the main
+			// camera's. TextureProj's rows are the product's columns.
+			using ToMatrix = void (*)(float*, const RE::NiTransform*);
+			using Multiply = void* (*)(float*, const float*, const float*);
+			static const REL::Relocation<ToMatrix> toMatrix{ REL::Offset(0x14aaf10) };
+			static const REL::Relocation<Multiply> multiply{ REL::Offset(0x153d3c8) };
+			RE::NiTransform projection;
+			projection.rotate.entry[0][0] = 0.0f;
+			projection.rotate.entry[0][1] = 1.0f;
+			projection.rotate.entry[0][2] = 0.0f;
+			projection.rotate.entry[1][0] = -1.0f;
+			projection.rotate.entry[1][1] = 0.0f;
+			projection.rotate.entry[1][2] = 0.0f;
+			projection.rotate.entry[2][0] = 0.0f;
+			projection.rotate.entry[2][1] = 0.0f;
+			projection.rotate.entry[2][2] = 1.0f;
+			projection.translate = eye;
+			projection.scale = 1.0f;
+			float p[16], m[16];
+			toMatrix(p, &projection);
+			const std::uint32_t technique = (tables.pipelines[object.pipelineIndex].passDescriptor >> 24) & 0x3f;
+			if (technique == 1) {
+				std::memcpy(m, p, sizeof(m));
+			} else {
+				float w[16];
+				toMatrix(w, &a_geometry.world);
+				w[12] += eye.x;
+				w[13] += eye.y;
+				w[14] += eye.z;
+				multiply(m, w, p);
+			}
+			float* proj = rows + kExtraRowTextureProj * 4;
+			for (std::uint32_t r = 0; r < 3; ++r) {
+				proj[r * 4 + 0] = m[0 + r];
+				proj[r * 4 + 1] = m[4 + r];
+				proj[r * 4 + 2] = m[8 + r];
+				proj[r * 4 + 3] = m[12 + r];
+			}
+			// The pixel parameters (FUN_1414e00c0): the property's projectedUVParams folded by its w, its
+			// projectedUVColor, and the two tiling globals with the projected-normals switch.
+			static const REL::Relocation<std::uintptr_t> tilingDiffuse{ REL::Offset(0x2035560) };
+			static const REL::Relocation<std::uintptr_t> tilingDetail{ REL::Offset(0x2035578) };
+			static const REL::Relocation<std::uintptr_t> projectedNormals{ REL::Offset(0x2035518) };
+			const auto& params = a_property.projectedUVParams;
+			const auto& colour = a_property.projectedUVColor;
+			float* out = rows + kExtraRowProjectedParams * 4;
+			const float fade = 1.0f - params.alpha;
+			out[0] = fade * params.red;
+			out[1] = 0.0f;  // never written by the engine
+			out[2] = params.blue;
+			out[3] = fade * params.green + params.alpha;
+			out[4] = colour.red;
+			out[5] = colour.green;
+			out[6] = colour.blue;
+			out[7] = colour.alpha;
+			out[8] = GlobalFloatAt(tilingDiffuse);
+			out[9] = GlobalFloatAt(tilingDetail);
+			out[10] = 0.0f;
+			out[11] = *reinterpret_cast<const std::uint8_t*>(projectedNormals.address()) ? 1.0f : 0.0f;
+		}
+	}
+
+	void SceneStore::NoteProjectedTextures()
+	{
+		auto& state = globals::game::shadowState->GetRuntimeData();
+		ProjectedTextures seen{};
+		for (std::size_t i = 0; i < ProjectedTextures::kSlots.size(); ++i) {
+			seen.views[i] = reinterpret_cast<ID3D11ShaderResourceView*>(state.PSTexture[ProjectedTextures::kSlots[i]]);
+			if (!seen.views[i])
+				return;
+		}
+		seen.valid = true;
+		projectedTextures = seen;
 	}
 
 	void SceneStore::LatchAccumulator()
@@ -643,9 +840,11 @@ namespace DCLF
 				const std::uint32_t technique = entry.key;
 				const auto& group = groups[entry.value];
 				for (std::uint32_t subPass = 0; subPass < 5; ++subPass) {
-					for (auto* pass = group.passes[subPass]; pass; pass = pass->passGroupNext) {
+					std::uint32_t chainIndex = 0;
+					for (auto* pass = group.passes[subPass]; pass; pass = pass->passGroupNext, ++chainIndex) {
 						if (pass->geometry && pass->shader && pass->shader->shaderType.get() == RE::BSShader::Type::Lighting)
-							accumulatedPasses.try_emplace(pass->geometry, AccumulatedPass{ pass, PassDescriptorOf(technique), subPass, pass->passEnum });
+							accumulatedPasses.try_emplace(pass->geometry, AccumulatedPass{ pass, PassDescriptorOf(technique), subPass, pass->passEnum,
+																			   pass->accumulationHint, chainIndex });
 					}
 				}
 			}
@@ -705,8 +904,14 @@ namespace DCLF
 			return;
 		accumulatedPasses.clear();
 		for (const auto& [geometry, entry] : captured) {
+			// The hint is read off the pass now, on the render thread, while the pass is alive for the
+			// frame. RegisterPass PREPENDS to its list (Ghidra: passGroupNext = head; head = pass), so the
+			// engine draws a bucket in reverse registration order; the chain position is reversed here so
+			// that an ascending sort on it is the draw order, as it is for the accumulator walk.
 			accumulatedPasses.try_emplace(geometry,
-				AccumulatedPass{ entry->pass, PassDescriptorOf(entry->technique), entry->subPass, entry->passEnum });
+				AccumulatedPass{ entry->pass, PassDescriptorOf(entry->technique), entry->subPass, entry->passEnum,
+					entry->pass ? static_cast<std::uint32_t>(entry->pass->accumulationHint) : 0u,
+					0xFFFFFFu - static_cast<std::uint32_t>(std::min<std::size_t>(static_cast<std::size_t>(entry - entries.data()), 0xFFFFFFu)) });
 		}
 	}
 
@@ -796,7 +1001,7 @@ namespace DCLF
 		// this loop. Leaving the tables empty is both the safe and the obviously correct thing to draw
 		// during a load screen.
 		if (IsLoadingScreenUp()) {
-			tables.Clear();
+			ResetSlotTables();
 			objectIndex.clear();
 			accumulatedPasses.clear();
 			stats.objects = 0;
@@ -829,10 +1034,19 @@ namespace DCLF
 		auto& gpu = GpuResources::Get();
 		gpu.BeginFrame(frame);
 		const bool resolveBuffers = gpu.Enabled();
+		if (resolveBuffers != graphWasActive) {
+			logger::info("[DCLF] tables frame {}: the render graph is {} (slots alive {} geometries / {} pipelines / {} materials)", frame,
+				resolveBuffers ? "active from this frame" : "inactive from this frame", stats.geometriesAlive, stats.pipelinesAlive, stats.materialsAlive);
+			graphWasActive = resolveBuffers;
+		}
 		timer.Add(BuildPart::Walk);
-		tables.Clear();
+		tables.ClearFrame();
 		objectIndex.clear();
 		stats.ineligible.fill(0);
+		stats.ineligibleDrawn.fill(0);
+		stats.techniqueRejects.fill(0);
+		stats.propertyRejects.clear();
+		stats.rejectedBlended = stats.rejectedOpaque = stats.rejectedOpaqueAlphaTest = 0;
 		stats.shadowMaskPipelines = 0;
 		stats.derivationChecked = stats.derivationDiffers = stats.derivationBits = stats.derivationNative = 0;
 		stats.derivationRuntimeDiffers = stats.derivationRuntimeBits = 0;
@@ -847,11 +1061,9 @@ namespace DCLF
 		stats.nativeVisible = 0;  // counted as the objects are built, not in a second pass over the table
 		stats.classifyHits = stats.classifyChecked = stats.classifyDiffers = stats.castResolved = 0;
 
-		// Members: cleared rather than constructed, so the buckets are reused instead of being allocated
-		// and freed every frame.
-		geometryIndex.clear();
-		pipelineIndex.clear();
-		materialIndex.clear();
+		// The slot tables and their maps persist across frames; the sweep is what retires what is no
+		// longer used (CS_DCLF_DERIVED_CACHE).
+		SweepSlots();
 		auto& evaluator = ConstantEvaluator::Get();
 		ConstantEvaluator::ResetFrameAudits();
 		if (!evaluator.HasLightingShader())
@@ -866,8 +1078,53 @@ namespace DCLF
 		tables.shading.reserve(tracked.size());
 		tables.emissiveMult.reserve(tracked.size());
 		tables.lights.reserve(tracked.size());
+		tables.treeAnim.reserve(tracked.size());
 		objectIndex.reserve(tracked.size());
 		geometryIndex.reserve(tracked.size());
+		// CS_DCLF_DERIVED_CACHE=off|on|probe: `probe` serves the cache and recomputes, comparing the two.
+		static const std::string derivedCacheMode = SwitchValue("CS_DCLF_DERIVED_CACHE");
+		static const bool derivedCache = derivedCacheMode != "off";
+		static const bool derivedProbe = derivedCacheMode == "probe";
+		stats.derivedHits = stats.derivedChecked = stats.derivedDiffers = 0;
+		// Slot allocation: the free list first, else a new slot on every parallel array of the table.
+		auto allocateGeometry = [&]() {
+			if (!tables.geometryFree.empty()) {
+				const auto slot = tables.geometryFree.back();
+				tables.geometryFree.pop_back();
+				return slot;
+			}
+			tables.geometries.emplace_back();
+			tables.geometryLastUsed.push_back(Tables::kSlotFree);
+			tables.geometrySlotKey.push_back(nullptr);
+			return static_cast<std::uint32_t>(tables.geometries.size() - 1);
+		};
+		auto allocatePipeline = [&]() {
+			if (!tables.pipelineFree.empty()) {
+				const auto slot = tables.pipelineFree.back();
+				tables.pipelineFree.pop_back();
+				return slot;
+			}
+			tables.pipelines.emplace_back();
+			tables.geometryConstants.emplace_back();
+			tables.geometryConstantsValid.push_back(0);
+			tables.geometryTemplate.push_back(nullptr);
+			tables.geometryTemplateNative.push_back(0);
+			tables.techniqueConstants.emplace_back();
+			tables.permutations.emplace_back();
+			tables.pipelineLastUsed.push_back(Tables::kSlotFree);
+			return static_cast<std::uint32_t>(tables.pipelines.size() - 1);
+		};
+		auto allocateMaterial = [&]() {
+			if (!tables.materialFree.empty()) {
+				const auto slot = tables.materialFree.back();
+				tables.materialFree.pop_back();
+				return slot;
+			}
+			tables.materials.emplace_back();
+			tables.materialLastUsed.push_back(Tables::kSlotFree);
+			tables.materialSlotKey.emplace_back(nullptr, 0u);
+			return static_cast<std::uint32_t>(tables.materials.size() - 1);
+		};
 
 		// The whole tracked set is classified, not only what the main-camera accumulator holds. The
 		// accumulator has already run the engine's culling, so building from it left the GPU culling nothing
@@ -963,6 +1220,9 @@ namespace DCLF
 		// derivation has no other effect at all. Gating them on CS_DCLF_STATS meant every reporting run
 		// measured a configuration nobody ships.
 		static const bool derivationStats = SwitchEnabled("CS_DCLF_DERIVE_PROBE");
+		// CS_DCLF_COVERAGE_PROBE=1: which shader the uncovered objects actually use. A map bump per
+		// rejected object, so it stays behind its own switch rather than riding on CS_DCLF_STATS.
+		static const bool coverageProbe = SwitchEnabled("CS_DCLF_COVERAGE_PROBE");
 		// CS_DCLF_CLASSIFY_CACHE=off|on|probe. `probe` uses the cached verdict and *also* recomputes it,
 		// comparing the two; it is the gate, and it costs more than either path alone.
 		static const std::string classifyCacheMode = SwitchValue("CS_DCLF_CLASSIFY_CACHE");
@@ -973,6 +1233,13 @@ namespace DCLF
 		// frame.
 		const bool interior = Util::IsInterior();
 		const bool lightLimitFixLoaded = globals::features::lightLimitFix.loaded;
+		// The depth-bias mode of each decal group is frame state (a console toggle and whether sun
+		// shadows are off), read once here rather than per decal.
+		const std::array<std::uint32_t, 3> decalBiasMode{ 0u, DecalDepthBiasMode(1), DecalDepthBiasMode(2) };
+		decalOrder.clear();
+		stats.decals = {};
+		stats.skinned = stats.boneRows = 0;
+		stats.projectedUV = stats.landBlend = 0;
 
 		timer.Add(BuildPart::PassLookup);
 		for (auto& [geometry, trackedEntry, accumulated] : order) {
@@ -982,6 +1249,46 @@ namespace DCLF
 			// looked like the biggest cost in the loop.
 			timer.Add(BuildPart::LoopTail);
 			const bool drawable = accumulated || drawCulledCandidates;
+			// An object the engine did not accumulate cannot be drawn while the draws are gated on the
+			// engine's visibility (CS_DCLF_CULL_INPUT=native, the default): it is a culling candidate and
+			// nothing more. It gets its bounds, the flags the culling reads and a place in every parallel
+			// array; the geometry entry and its resolve, the transforms, the shading, the room probe and
+			// the draw template that the full path would build for it are never read for such an object.
+			// (=tracked wants records for them and keeps the full path.)
+			//
+			// Whether it is a candidate at all is the classification's answer, and that answer is kept on
+			// the entry (Tracked::candidateReason) and refreshed every kCandidateRefreshFrames rather than
+			// recomputed per frame: with ~8,300 of the exterior's 10,000 tracked objects on this path, the
+			// loop head - the witness loads, the negative cache probe - was most of what "classify-static"
+			// still measured once the derived cache had removed the classification itself. The
+			// ineligibility histogram counts the kept verdicts, so it reads as before.
+			const bool cullOnly = !accumulated && !drawCulledCandidates;
+			if (cullOnly && trackedEntry->candidateFrame != 0 && frame - trackedEntry->candidateFrame < Tracked::kCandidateRefreshFrames) {
+				if (trackedEntry->candidateReason != Ineligible::None) {
+					++stats.ineligible[static_cast<std::size_t>(trackedEntry->candidateReason)];
+					continue;
+				}
+				const auto candidateId = static_cast<std::uint32_t>(tables.objects.size());
+				ObjectRecord candidate{};
+				candidate.boundCenter[0] = geometry->worldBound.center.x;
+				candidate.boundCenter[1] = geometry->worldBound.center.y;
+				candidate.boundCenter[2] = geometry->worldBound.center.z;
+				candidate.boundRadius = geometry->worldBound.radius;
+				candidate.flags = kObjectNoBindings;
+				tables.objects.push_back(candidate);
+				tables.objectGeometry.push_back(geometry);
+				tables.shading.push_back(ObjectShading{});
+				tables.emissiveMult.push_back(1.0f);
+				tables.lights.push_back(ObjectLights{});
+				tables.treeAnim.push_back(ObjectTreeAnim{});
+				tables.boneOffset.push_back(0);
+				tables.boneRows.push_back(0);
+				tables.extraOffset.push_back(kNoExtraRows);
+				tables.draws.push_back(DrawSequence{});
+				objectIndex.emplace(geometry, candidateId);
+				timer.Add(BuildPart::Record);
+				continue;
+			}
 			LightingDescriptors descriptors;
 			// The cached-negative fast path. The witnesses come off one cache line of the geometry's
 			// runtime data, and an object that has already been shown undrawable never reaches the RTTI
@@ -997,14 +1304,47 @@ namespace DCLF
 			if (trackedEntry->castProperty != witnessProperty) {
 				trackedEntry->castProperty = witnessProperty;
 				trackedEntry->castResult = netimmerse_cast<RE::BSLightingShaderProperty*>(witnessProperty);
+				trackedEntry->castRtti = witnessProperty ? witnessProperty->GetRTTI() : nullptr;
 				++stats.castResolved;
 			}
 			RE::BSLightingShaderProperty* castCache = trackedEntry->castResult;
 			const bool hit = classifyCache && verdict.cached && verdict.rendererData == runtime.rendererData &&
 			                 verdict.property == witnessProperty && verdict.material == witnessMaterial &&
 			                 verdict.fadeState == fadeState;
+			// The positive cache (Tracked::Derived): for an accumulated object whose witnesses all match
+			// and whose three slots still carry the keys they were derived for, the classification and the
+			// whole derived section below are skipped, and the cached descriptors, flags and slots are used.
+			auto& derived = trackedEntry->derived;
+			const RE::BSGraphics::TriShape* witnessTriShape =
+				runtime.skinInstance && runtime.skinInstance->skinPartition ? runtime.skinInstance->skinPartition->partitions[0].buffData : runtime.rendererData;
+			const bool alphaBelowOne = castCache && witnessMaterial && static_cast<const RE::BSLightingShaderMaterialBase*>(witnessMaterial)->materialAlpha < 1.0f;
+			const std::uint32_t biasWitness = decalBiasMode[1] | (decalBiasMode[2] << 8);
+			bool derivedHit = derivedCache && accumulated && derived.valid && derived.generation == tablesGeneration &&
+			                  derived.triShape == witnessTriShape && derived.property == witnessProperty &&
+			                  derived.material == witnessMaterial && derived.fadeState == fadeState && derived.technique == accumulated->technique &&
+			                  derived.subPass == accumulated->subPass && derived.hint == accumulated->hint && derived.interior == interior &&
+			                  derived.alphaBelowOne == alphaBelowOne && derived.biasWitness == biasWitness;
+			if (derivedHit) {
+				// The slots: alive, and still holding the keys the derivation produced.
+				// A TriShape freed and reallocated at the same address is caught by its buffers: the slot's
+				// record names the ID3D11 buffers it was resolved from, and GpuResources holds a reference on
+				// each, so a different TriShape at that address cannot present the same two pointers.
+				derivedHit = witnessTriShape && derived.geometrySlot < tables.geometrySlotKey.size() && tables.geometrySlotKey[derived.geometrySlot] == witnessTriShape &&
+				             tables.geometryLastUsed[derived.geometrySlot] != Tables::kSlotFree &&
+				             tables.geometries[derived.geometrySlot].vertexBuffer == reinterpret_cast<ID3D11Buffer*>(witnessTriShape->vertexBuffer) &&
+				             tables.geometries[derived.geometrySlot].indexBuffer == reinterpret_cast<ID3D11Buffer*>(witnessTriShape->indexBuffer) &&
+				             (!resolveBuffers || tables.geometries[derived.geometrySlot].vertexAddress != 0) &&
+				             derived.pipelineSlot < tables.pipelines.size() && tables.pipelineLastUsed[derived.pipelineSlot] != Tables::kSlotFree &&
+				             tables.pipelines[derived.pipelineSlot] == derived.key &&
+				             derived.materialSlot < tables.materialSlotKey.size() && tables.materialLastUsed[derived.materialSlot] != Tables::kSlotFree &&
+				             tables.materialSlotKey[derived.materialSlot] == std::pair{ derived.material, derived.descriptors.pass };
+			}
 			Ineligible reason;
-			if (hit && !classifyProbe) {
+			if (derivedHit && !derivedProbe) {
+				reason = Ineligible::None;
+				descriptors = derived.descriptors;
+				++stats.derivedHits;
+			} else if (hit && !classifyProbe) {
 				reason = verdict.reason;
 				++stats.classifyHits;
 			} else {
@@ -1037,6 +1377,25 @@ namespace DCLF
 				!(accumulated->technique & kDoAlphaTestBit))
 				reason = Ineligible::AlphaTestState;
 			++stats.ineligible[static_cast<std::size_t>(reason)];
+			if (cullOnly) {
+				trackedEntry->candidateFrame = frame;
+				trackedEntry->candidateReason = reason;
+			}
+			if (accumulated)
+				++stats.ineligibleDrawn[static_cast<std::size_t>(reason)];
+			if (reason == Ineligible::Technique)
+				++stats.techniqueRejects[descriptors.rejectedTechnique & 63];
+			if (coverageProbe && reason == Ineligible::NotLightingShader) {
+				++stats.propertyRejects[trackedEntry->castRtti];
+				const auto* rejectedAlpha = geometry->GetGeometryRuntimeData().alphaProperty.get();
+				if (rejectedAlpha && rejectedAlpha->GetAlphaBlending()) {
+					++stats.rejectedBlended;
+				} else {
+					++stats.rejectedOpaque;
+					if (rejectedAlpha && rejectedAlpha->GetAlphaTesting())
+						++stats.rejectedOpaqueAlphaTest;
+				}
+			}
 			if (reason != Ineligible::None)
 				continue;
 			// Only computed when something will report them: this whole block, including the popcount
@@ -1069,17 +1428,96 @@ namespace DCLF
 			}
 			timer.Add(BuildPart::Diagnostics);
 
+
+			if (cullOnly) {
+				// Classified this frame (see the head of the loop): keep the verdict and take the short path.
+				trackedEntry->candidateFrame = frame;
+				trackedEntry->candidateReason = Ineligible::None;
+				const auto candidateId = static_cast<std::uint32_t>(tables.objects.size());
+				ObjectRecord candidate{};
+				candidate.boundCenter[0] = geometry->worldBound.center.x;
+				candidate.boundCenter[1] = geometry->worldBound.center.y;
+				candidate.boundCenter[2] = geometry->worldBound.center.z;
+				candidate.boundRadius = geometry->worldBound.radius;
+				candidate.flags = kObjectNoBindings;
+				tables.objects.push_back(candidate);
+				tables.objectGeometry.push_back(geometry);
+				tables.shading.push_back(ObjectShading{});
+				tables.emissiveMult.push_back(1.0f);
+				tables.lights.push_back(ObjectLights{});
+				tables.treeAnim.push_back(ObjectTreeAnim{});
+				tables.boneOffset.push_back(0);
+				tables.boneRows.push_back(0);
+				tables.extraOffset.push_back(kNoExtraRows);
+				tables.draws.push_back(DrawSequence{});
+				objectIndex.emplace(geometry, candidateId);
+				timer.Add(BuildPart::Record);
+				continue;
+			}
 			auto& data = geometry->GetGeometryRuntimeData();
 			auto* property = data.shaderProperty.get();
+			std::uint32_t geometrySlot = Tables::kSlotFree, pipelineSlot = Tables::kSlotFree, materialSlot = Tables::kSlotFree, staticFlags = 0;
+			if (derivedHit && !derivedProbe) {
+				geometrySlot = derived.geometrySlot;
+				pipelineSlot = derived.pipelineSlot;
+				materialSlot = derived.materialSlot;
+				staticFlags = derived.staticFlags;
+				if (tables.geometryLastUsed[geometrySlot] != frame && resolveBuffers) {
+					// First use of the slot this frame: keep the buffer references alive (GpuResources
+					// evicts what nothing touches). A reference that is gone means the slot must resolve
+					// again, which is a miss.
+					const auto& record = tables.geometries[geometrySlot];
+					if (!gpu.Touch(record.vertexBuffer) || !gpu.Touch(record.indexBuffer)) {
+						tables.geometryLastUsed[geometrySlot] = Tables::kSlotFree;
+						tables.geometrySlotKey[geometrySlot] = nullptr;
+						geometryIndex.erase(witnessTriShape);
+						tables.geometryFree.push_back(geometrySlot);
+						derived.valid = false;
+						++stats.slotsSwept;
+						continue;  // the object is not lost: next frame re-derives it
+					}
+				}
+				tables.geometryLastUsed[geometrySlot] = frame;
+				tables.materialLastUsed[materialSlot] = frame;
+				// The per-frame template: a pipeline's template is always a property of an object of this
+				// frame (the first to use the slot, upgraded to a native-visible one by the election), so a
+				// persistent slot never points at a property the game has since freed. The constants are
+				// evaluated from it at Prepass (RefreshFrameConstants).
+				if (tables.pipelineLastUsed[pipelineSlot] != frame) {
+					tables.pipelineLastUsed[pipelineSlot] = frame;
+					tables.geometryTemplate[pipelineSlot] = property;
+					tables.geometryTemplateNative[pipelineSlot] = 1;
+				} else if (!tables.geometryTemplateNative[pipelineSlot]) {
+					tables.geometryTemplate[pipelineSlot] = property;
+					tables.geometryTemplateNative[pipelineSlot] = 1;
+					++stats.templateUpgrades;
+				}
+				timer.Add(BuildPart::DedupHit);
+			} else {
 			const bool twoSided = property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kTwoSided);
 			const auto* alpha = data.alphaProperty.get();
 			const bool alphaTest = alpha && alpha->GetAlphaTesting();
 
-			// Geometry, shared between every object drawing the same TriShape.
+			// Geometry, shared between every object drawing the same TriShape. A skinned shape draws its
+			// skin partition's own buffer (ClassifyStatic has checked there is exactly one).
 			timer.Add(BuildPart::Record /* the property and alpha reads above */);
-			auto* triShape = data.rendererData;
-			auto [geometryIt, newGeometry] = geometryIndex.try_emplace(triShape, static_cast<std::uint32_t>(tables.geometries.size()));
-			if (newGeometry) {
+			const RE::NiSkinPartition::Partition* skinPartition =
+				data.skinInstance && data.skinInstance->skinPartition ? &data.skinInstance->skinPartition->partitions[0] : nullptr;
+			auto* triShape = skinPartition ? skinPartition->buffData : data.rendererData;
+			auto geometryIt = geometryIndex.find(triShape);
+			const bool newGeometry = geometryIt == geometryIndex.end();
+			// A slot found by address but describing other buffers is a TriShape reallocated at the same
+			// address: it is resolved again into the same slot. A slot whose buffer references were
+			// evicted (nothing touched them for kEvictFrames) is resolved again the same way.
+			const bool staleGeometry = !newGeometry &&
+			                           ((resolveBuffers && tables.geometries[geometryIt->second].vertexAddress == 0) ||
+			                               tables.geometries[geometryIt->second].vertexBuffer != reinterpret_cast<ID3D11Buffer*>(triShape->vertexBuffer) ||
+			                               tables.geometries[geometryIt->second].indexBuffer != reinterpret_cast<ID3D11Buffer*>(triShape->indexBuffer) ||
+			                               (resolveBuffers && tables.geometryLastUsed[geometryIt->second] != frame &&
+			                                   (!gpu.Touch(tables.geometries[geometryIt->second].vertexBuffer) || !gpu.Touch(tables.geometries[geometryIt->second].indexBuffer))));
+			if (staleGeometry)
+				++stats.geometriesRefreshed;
+			if (newGeometry || staleGeometry) {
 				// The buffers are resolved once per TRISHAPE, not once per object.
 				//
 				// Both Resolve results were only ever read inside this branch; for an object whose
@@ -1093,16 +1531,22 @@ namespace DCLF
 				// drops that reference when an entry goes kEvictFrames without a Resolve. Resolving per
 				// TriShape still touches every entry DCLF depends on every frame, so nothing is evicted
 				// out from under the tables.
-				const GpuResources::Buffer* vertexBuffer = nullptr;
-				const GpuResources::Buffer* indexBuffer = nullptr;
+				std::optional<GpuResources::Buffer> vertexBuffer;
+				std::optional<GpuResources::Buffer> indexBuffer;
 				if (resolveBuffers) {
 					// The render graph reads the game's buffers in place; they must never move (GpuResources).
 					vertexBuffer = gpu.Resolve(reinterpret_cast<ID3D11Buffer*>(triShape->vertexBuffer));
 					indexBuffer = gpu.Resolve(reinterpret_cast<ID3D11Buffer*>(triShape->indexBuffer));
 					if (!vertexBuffer || !indexBuffer) {
-						// Leave the slot unclaimed so the next object sharing this TriShape retries,
-						// exactly as it did when every object resolved for itself.
-						geometryIndex.erase(geometryIt);
+						// Nothing was inserted, so the next object sharing this TriShape retries, exactly
+						// as it did when every object resolved for itself. A stale slot is freed: its
+						// record no longer describes anything.
+						if (staleGeometry) {
+							tables.geometryLastUsed[geometryIt->second] = Tables::kSlotFree;
+							tables.geometrySlotKey[geometryIt->second] = nullptr;
+							tables.geometryFree.push_back(geometryIt->second);
+							geometryIndex.erase(geometryIt);
+						}
 						--stats.ineligible[static_cast<std::size_t>(Ineligible::None)];
 						++stats.ineligible[static_cast<std::size_t>(Ineligible::UnstableBuffer)];
 						timer.Add(BuildPart::Resolve);
@@ -1114,9 +1558,12 @@ namespace DCLF
 				record.vertexBuffer = reinterpret_cast<ID3D11Buffer*>(triShape->vertexBuffer);
 				record.indexBuffer = reinterpret_cast<ID3D11Buffer*>(triShape->indexBuffer);
 				record.vertexDesc = std::bit_cast<std::uint64_t>(triShape->vertexDesc);
-				record.vertexStride = triShape->vertexDesc.GetSize();
-				record.vertexCount = shape.vertexCount;
-				record.indexCount = static_cast<std::uint32_t>(shape.triangleCount) * 3;
+				// The stride the engine binds is the desc's low nibble in dwords (engine notes: vertex input).
+				// CommonLib's GetSize sums the attribute sizes it knows and leaves out the landscape data, so
+				// terrain came out at 32 against the native 40.
+				record.vertexStride = static_cast<std::uint32_t>(record.vertexDesc & 0xFu) * 4u;
+				record.vertexCount = skinPartition ? skinPartition->vertices : shape.vertexCount;
+				record.indexCount = static_cast<std::uint32_t>(skinPartition ? skinPartition->triangles : shape.triangleCount) * 3;
 				record.firstIndex = 0;
 				if (vertexBuffer && indexBuffer) {
 					record.vertexAddress = vertexBuffer->address;
@@ -1124,38 +1571,56 @@ namespace DCLF
 					record.indexAddress = indexBuffer->address;
 					record.indexBytes = indexBuffer->size;
 				}
-				tables.geometries.push_back(record);
+				const std::uint32_t slot = staleGeometry ? geometryIt->second : allocateGeometry();
+				tables.geometries[slot] = record;
+				tables.geometrySlotKey[slot] = triShape;
+				if (!staleGeometry)
+					geometryIt = geometryIndex.emplace(triShape, slot).first;
 				timer.Add(BuildPart::Resolve);
 			}
+			tables.geometryLastUsed[geometryIt->second] = frame;
 
-			const PipelineKey key{ descriptors.vertex, descriptors.pixel, twoSided ? kRasterTwoSided : 0u, descriptors.pass,
+			// A decal's key carries the engine's fixed-function state indices as well (Records.h): the
+			// depth-bias mode from the frame, blend and write modes from the alpha property (derived with
+			// the descriptors). Zero for everything else, so an opaque key is exactly what it was.
+			std::uint32_t rasterFlags = twoSided ? kRasterTwoSided : 0u;
+			if (descriptors.decalGroup)
+				rasterFlags |= PackDecalRasterFlags(descriptors.decalGroup, decalBiasMode[descriptors.decalGroup & 3], descriptors.decalBlendMode, descriptors.decalWriteMode);
+			const PipelineKey key{ descriptors.vertex, descriptors.pixel, rasterFlags, descriptors.pass,
 				VertexLayoutOf(tables.geometries[geometryIt->second].vertexDesc) };
-			auto [pipelineIt, newPipeline] = pipelineIndex.try_emplace(key, static_cast<std::uint32_t>(tables.pipelines.size()));
+			auto pipelineIt = pipelineIndex.find(key);
+			const bool newPipeline = pipelineIt == pipelineIndex.end();
+			if (!newPipeline && tables.pipelineLastUsed[pipelineIt->second] != frame) {
+				// The slot's first use this frame: this object's property is the template until the
+				// election finds a native-visible one (see the cached path).
+				tables.pipelineLastUsed[pipelineIt->second] = frame;
+				tables.geometryTemplate[pipelineIt->second] = property;
+				tables.geometryTemplateNative[pipelineIt->second] = accumulated ? 1 : 0;
+			}
 			if (newPipeline && !drawable) {
 				// Nothing would ever use it: leaving the entry out keeps the pipeline table, and the
 				// per-pipeline evaluations that go with it, to what is actually drawn. It also means a
 				// culled candidate cannot create a pipeline in the first place, so in the default
 				// configuration the election below never has to take a template over - which is exactly
 				// what its counter reading 0 says.
-				pipelineIndex.erase(pipelineIt);
-				pipelineIt = pipelineIndex.end();
 			} else if (newPipeline) {
 				timer.Add(BuildPart::Dedup);
-				tables.pipelines.push_back(key);
+				const std::uint32_t slot = allocatePipeline();
+				tables.pipelines[slot] = key;
 				// Per-frame PerGeometry values for this pass descriptor, from any object's lighting pass
 				// (it supplies the scene light list the engine reads the sun from).
-				GeometryConstants constants;
+				GeometryConstants constants{};
 				const auto* templatePass = FindLightingPass(property);
 				const bool valid = templatePass && evaluator.EvaluateGeometry(*templatePass, descriptors.pass, mainPassRenderFlags, constants);
-				tables.geometryConstants.push_back(constants);
-				tables.geometryConstantsValid.push_back(valid ? 1 : 0);
-				tables.geometryTemplate.push_back(property);
-				tables.geometryTemplateNative.push_back(accumulated ? 1 : 0);
+				tables.geometryConstants[slot] = constants;
+				tables.geometryConstantsValid[slot] = valid ? 1 : 0;
+				tables.geometryTemplate[slot] = property;
+				tables.geometryTemplateNative[slot] = accumulated ? 1 : 0;
 
 				TechniqueConstants technique;
 				EvaluateTechnique(descriptors.pass, technique);
 				stats.shadowMaskPipelines += technique.shadowMask ? 1 : 0;
-				tables.techniqueConstants.push_back(technique);
+				tables.techniqueConstants[slot] = technique;
 
 				PipelinePermutation permutation;
 				permutation.vertexShaderDescriptor = descriptors.rawVertex;
@@ -1166,7 +1631,8 @@ namespace DCLF
 				                                         static_cast<std::uint32_t>(ExtendedTranslucency::MaterialModel::DescriptorDisabled)
 				                                             << ExtendedTranslucency::ExtraFeatureDescriptorShift :
 				                                         0u;
-				tables.permutations.push_back(permutation);
+				tables.permutations[slot] = permutation;
+				pipelineIt = pipelineIndex.emplace(key, slot).first;
 				timer.Add(BuildPart::PipelineEval);
 			} else if (accumulated && pipelineIt != pipelineIndex.end() &&
 			           pipelineIt->second < tables.geometryTemplateNative.size() &&
@@ -1191,12 +1657,13 @@ namespace DCLF
 			}
 
 			// Material state as the engine's SetupMaterial produces it for this pass descriptor.
+			if (pipelineIt != pipelineIndex.end())
+				tables.pipelineLastUsed[pipelineIt->second] = frame;
 			const auto* material = property->material;
-			auto [materialIt, newMaterial] = materialIndex.try_emplace(std::pair{ material, descriptors.pass }, static_cast<std::uint32_t>(tables.materials.size()));
+			auto materialIt = materialIndex.find(std::pair{ material, descriptors.pass });
+			const bool newMaterial = materialIt == materialIndex.end();
 			if (newMaterial && !drawable) {
 				++stats.materialsSkipped;
-				materialIndex.erase(materialIt);
-				materialIt = materialIndex.end();
 			} else if (newMaterial) {
 				timer.Add(BuildPart::Dedup);
 				MaterialRecord record;
@@ -1230,7 +1697,6 @@ namespace DCLF
 				} else {
 					if (!evaluator.EvaluateMaterial(material, descriptors.pass, record)) {
 						// No shader instance yet (nothing drawn so far): stay native this frame.
-						materialIndex.erase(materialIt);
 						++stats.ineligible[static_cast<std::size_t>(Ineligible::NotLightingShader)];
 						--stats.ineligible[static_cast<std::size_t>(Ineligible::None)];
 						continue;
@@ -1319,14 +1785,61 @@ namespace DCLF
 				}
 				if (auto it = materialCache.find(cacheKey); it != materialCache.end())
 					it->second.lastUsed = frame;
-				tables.materials.push_back(record);
+				const std::uint32_t slot = allocateMaterial();
+				tables.materials[slot] = record;
+				tables.materialSlotKey[slot] = cacheKey;
+				materialIt = materialIndex.emplace(cacheKey, slot).first;
 				timer.Add(BuildPart::MaterialEval);
 			}
+			if (materialIt != materialIndex.end())
+				tables.materialLastUsed[materialIt->second] = frame;
 			// The geometry, pipeline and material probes above, on the path where all three hit - which is
 			// nearly every object. The Dedup part only ever fired inside the miss branches, so these three
 			// hashes (one of them over the five-field PipelineKey) fell through to the next iteration and
 			// were billed to `record`.
 			timer.Add(BuildPart::DedupHit);
+
+			geometrySlot = geometryIt->second;
+			pipelineSlot = pipelineIt != pipelineIndex.end() ? pipelineIt->second : Tables::kSlotFree;
+			materialSlot = materialIt != materialIndex.end() ? materialIt->second : Tables::kSlotFree;
+			staticFlags = (alphaTest ? kObjectAlphaTest : 0u) | (twoSided ? kObjectTwoSided : 0u) |
+			              (ExternalEmittance::ShouldSuppress(interior, property, geometry) ? kObjectSuppressExternalEmittance : 0u) |
+			              (descriptors.technique == kTechniqueTreeAnim ? kObjectTreeAnim : 0u) |
+			              (alphaTest ? static_cast<std::uint32_t>(alpha->alphaThreshold) << kObjectAlphaThresholdShift : 0u) |
+			              (descriptors.decalGroup ? kObjectDecal | (descriptors.decalGroup << kObjectDecalGroupShift) : 0u);
+			if (derivedCache && accumulated && drawable && pipelineSlot != Tables::kSlotFree && materialSlot != Tables::kSlotFree) {
+				if (derivedHit && derivedProbe) {
+					++stats.derivedChecked;
+					const bool same = derived.geometrySlot == geometrySlot && derived.pipelineSlot == pipelineSlot && derived.materialSlot == materialSlot &&
+					                  derived.staticFlags == staticFlags && derived.key == key && derived.descriptors.vertex == descriptors.vertex &&
+					                  derived.descriptors.pixel == descriptors.pixel && derived.descriptors.pass == descriptors.pass;
+					if (!same && stats.derivedDiffers++ == 0)
+						logger::warn("[DCLF] derived cache: '{}' differs on recompute (slots {}/{}/{} vs {}/{}/{}, flags {:X} vs {:X})",
+							geometry->name.c_str() ? geometry->name.c_str() : "?", derived.geometrySlot, derived.pipelineSlot, derived.materialSlot,
+							geometrySlot, pipelineSlot, materialSlot, derived.staticFlags, staticFlags);
+				}
+				derived.valid = true;
+				derived.generation = tablesGeneration;
+				derived.triShape = witnessTriShape;
+				derived.property = witnessProperty;
+				derived.material = witnessMaterial;
+				derived.fadeState = fadeState;
+				derived.interior = interior;
+				derived.alphaBelowOne = alphaBelowOne;
+				derived.technique = accumulated->technique;
+				derived.subPass = accumulated->subPass;
+				derived.hint = accumulated->hint;
+				derived.biasWitness = biasWitness;
+				derived.descriptors = descriptors;
+				derived.staticFlags = staticFlags;
+				derived.key = key;
+				derived.geometrySlot = geometrySlot;
+				derived.pipelineSlot = pipelineSlot;
+				derived.materialSlot = materialSlot;
+			} else {
+				derived.valid = false;
+			}
+			}  // the derived section
 
 			const auto objectId = static_cast<std::uint32_t>(tables.objects.size());
 			ObjectRecord object{};
@@ -1344,23 +1857,67 @@ namespace DCLF
 			object.boundCenter[1] = geometry->worldBound.center.y;
 			object.boundCenter[2] = geometry->worldBound.center.z;
 			object.boundRadius = geometry->worldBound.radius;
-			object.geometryIndex = geometryIt->second;
+			object.geometryIndex = geometrySlot;
 			// A candidate that cannot be drawn has no material or pipeline entry. The indices are left at
 			// zero rather than at a sentinel because nothing reads them: kObjectNativeVisible is unset, so
 			// BuildDrawsCS rejects it before it ever looks at them. All of the parallel per-object arrays
 			// are still appended below, which is what the first attempt at this got wrong - skipping one
 			// of them shifts every later object's index.
-			const bool hasBindings = materialIt != materialIndex.end() && pipelineIt != pipelineIndex.end();
-			object.materialIndex = hasBindings ? materialIt->second : 0u;
-			object.pipelineIndex = hasBindings ? pipelineIt->second : 0u;
+			const bool hasBindings = materialSlot != Tables::kSlotFree && pipelineSlot != Tables::kSlotFree;
+			object.materialIndex = hasBindings ? materialSlot : 0u;
+			object.pipelineIndex = hasBindings ? pipelineSlot : 0u;
 			// kObjectNoBindings, not a zero index: the pipeline and material tables can be empty (the
 			// first frame after a teleport has tracked geometry but nothing accumulated), so index 0 is
 			// out of bounds as readily as any other.
-			object.flags = (alphaTest ? kObjectAlphaTest : 0u) | (twoSided ? kObjectTwoSided : 0u) |
-			               (accumulated ? kObjectNativeVisible : 0u) | (hasBindings ? 0u : kObjectNoBindings) |
-			               (ExternalEmittance::ShouldSuppress(interior, property, geometry) ? kObjectSuppressExternalEmittance : 0u) |
-			               (alphaTest ? static_cast<std::uint32_t>(alpha->alphaThreshold) << kObjectAlphaThresholdShift : 0u);
+			object.flags = staticFlags | (accumulated ? kObjectNativeVisible : 0u) | (hasBindings ? 0u : kObjectNoBindings);
+			// Skinning: the engine's own palette. Its per-frame update (AE FUN_140e4ff90) is what the bone
+			// setter runs from the native draw this object no longer gets; it is idempotent within a frame
+			// (frameID), copies the current palette to the previous one first, and writes three float4 rows
+			// a bone in absolute world space - which is what the shader indexes, so the rows are copied as
+			// they are and made eye-relative by the epoch, like World.
+			std::uint32_t objectBoneOffset = 0, objectBoneRows = 0;
+			if (auto* skin = data.skinInstance.get(); skin && SkinnedEnabled()) {
+				timer.Add(BuildPart::Record);
+				using UpdateSkinInstance = void (*)(RE::NiSkinInstance*, const RE::NiTransform*);
+				static const REL::Relocation<UpdateSkinInstance> updateSkinInstance{ REL::Offset(0xe4ff90) };
+				updateSkinInstance(skin, &geometry->world);
+				const std::uint32_t rows = skin->numMatrices * 3;
+				if (rows && skin->boneMatrices && skin->prevBoneMatrices && rows <= 240) {
+					objectBoneOffset = static_cast<std::uint32_t>(tables.bones.size() / 4);
+					objectBoneRows = rows;
+					const auto* current = static_cast<const float*>(skin->boneMatrices);
+					const auto* previous = static_cast<const float*>(skin->prevBoneMatrices);
+					tables.bones.insert(tables.bones.end(), current, current + std::size_t(rows) * 4);
+					tables.previousBones.insert(tables.previousBones.end(), previous, previous + std::size_t(rows) * 4);
+					object.flags |= kObjectSkinned;
+					++stats.skinned;
+					stats.boneRows += rows;
+				}
+				timer.Add(BuildPart::Skinning);
+			}
+			tables.boneOffset.push_back(objectBoneOffset);
+			tables.boneRows.push_back(objectBoneRows);
+			// Extras rows for the objects that need them; filled at Prepass (RefreshObjectExtras), where
+			// the main camera's state is current for the projection matrix.
+			const bool landBlend = descriptors.technique == 8 || descriptors.technique == 19;
+			if (descriptors.projectedUV || landBlend) {
+				object.flags |= (descriptors.projectedUV ? kObjectProjectedUV : 0u) | (landBlend ? kObjectLandBlend : 0u);
+				stats.projectedUV += descriptors.projectedUV ? 1 : 0;
+				stats.landBlend += landBlend ? 1 : 0;
+				tables.extraOffset.push_back(static_cast<std::uint32_t>(tables.extraRows.size() / 4));
+				tables.extraRows.resize(tables.extraRows.size() + std::size_t(kExtraRows) * 4, 0.0f);
+			} else {
+				tables.extraOffset.push_back(kNoExtraRows);
+			}
 			stats.nativeVisible += accumulated ? 1 : 0;
+			if (descriptors.decalGroup && accumulated) {
+				// The engine's draw order for decals: the opaque group first, then within a group the
+				// technique buckets in ascending order, each bucket's lists 0-4, each list's chain.
+				++stats.decals[(descriptors.decalGroup - 1) & 1];
+				decalOrder.push_back({ (std::uint64_t(descriptors.decalGroup) << 60) | (std::uint64_t(accumulated->technique & 0x3FFFFFFF) << 28) |
+										   (std::uint64_t(accumulated->subPass & 7) << 24) | (accumulated->chainIndex & 0xFFFFFF),
+					objectId });
+			}
 			tables.objects.push_back(object);
 			tables.objectGeometry.push_back(geometry);
 			float emissiveMult = 1.0f;
@@ -1373,6 +1930,11 @@ namespace DCLF
 					lights.shadowBitMask = LightLimitFix::GetShadowBitMask(accumulated->pass);
 			}
 			tables.lights.push_back(lights);
+			// Per object, and only for trees: everything else keeps the pipeline template's values.
+			ObjectTreeAnim tree{};
+			if (object.flags & kObjectTreeAnim)
+				DeriveTreeAnim(*property, tree);
+			tables.treeAnim.push_back(tree);
 			objectIndex.emplace(geometry, objectId);
 
 			const auto& geometryRecord = tables.geometries[object.geometryIndex];
@@ -1394,14 +1956,37 @@ namespace DCLF
 		}
 
 		stats.objects = static_cast<std::uint32_t>(tables.objects.size());
-		stats.geometries = static_cast<std::uint32_t>(tables.geometries.size());
-		stats.pipelines = static_cast<std::uint32_t>(tables.pipelines.size());
+		CheckObjectSlots(resolveBuffers);
+		static const bool slotProbe = SwitchValue("CS_DCLF_SLOT_PROBE") == "1";
+		if (slotProbe)
+			ProbeSlots(resolveBuffers);
+		stats.geometries = stats.pipelines = 0;
+		stats.geometriesAlive = stats.pipelinesAlive = stats.materialsAlive = 0;
+		for (const auto used : tables.geometryLastUsed) {
+			stats.geometries += used == frame ? 1u : 0u;
+			stats.geometriesAlive += used != Tables::kSlotFree ? 1u : 0u;
+		}
+		for (const auto used : tables.pipelineLastUsed) {
+			stats.pipelines += used == frame ? 1u : 0u;
+			stats.pipelinesAlive += used != Tables::kSlotFree ? 1u : 0u;
+		}
+		// Decal draw order: sort the frame's decals by the engine's key and hand each its slot in its
+		// group. Tens to a few hundred entries; the sort is the whole cost.
+		tables.decalOrdinal.assign(tables.objects.size(), ~0u);
+		tables.decalCount = {};
+		if (!decalOrder.empty()) {
+			std::sort(decalOrder.begin(), decalOrder.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
+			for (const auto& entry : decalOrder) {
+				const std::uint32_t group = static_cast<std::uint32_t>(entry.key >> 60) - 1;
+				tables.decalOrdinal[entry.object] = tables.decalCount[group & 1]++;
+			}
+		}
 		// The 4c gate, checked over the finished tables rather than asserted from the election: no
 		// native-visible object may draw on a pipeline whose lighting template came from a culled one.
 		stats.templateDefects = 0;
 		stats.pipelinesCulledOnly = 0;
-		for (const auto native : tables.geometryTemplateNative)
-			stats.pipelinesCulledOnly += native ? 0u : 1u;
+		for (std::size_t p = 0; p < tables.geometryTemplateNative.size(); ++p)
+			stats.pipelinesCulledOnly += (tables.PipelineUsed(p, frame) && !tables.geometryTemplateNative[p]) ? 1u : 0u;
 		if (stats.pipelinesCulledOnly) {
 			for (const auto& object : tables.objects) {
 				if (!(object.flags & kObjectNativeVisible) || (object.flags & kObjectNoBindings))
@@ -1410,21 +1995,217 @@ namespace DCLF
 					++stats.templateDefects;
 			}
 		}
-		stats.materials = static_cast<std::uint32_t>(tables.materials.size());
-		// The eviction the probe never had. Without it a long session accumulates every material of every
-		// cell it has visited, each holding a reference that keeps the material itself alive - a slow leak
-		// rather than a crash, which is why it needs a counter and not just a comment.
-		if ((frame % kMaterialCacheIdleFrames) == 0) {
-			for (auto it = materialCache.begin(); it != materialCache.end();) {
-				if (frame - it->second.lastUsed > kMaterialCacheIdleFrames) {
-					it = materialCache.erase(it);
-					++stats.materialCacheEvicted;
-				} else {
-					++it;
+		stats.materials = 0;
+		for (const auto used : tables.materialLastUsed) {
+			stats.materials += used == frame ? 1u : 0u;
+			stats.materialsAlive += used != Tables::kSlotFree ? 1u : 0u;
+		}
+		// The material cache is evicted with the material slots (SweepSlots), which is the only path
+		// that touches a slot's lastUsed on the cached path.
+		stats.materialCacheEntries = static_cast<std::uint32_t>(materialCache.size());
+		ValidateMaterialSlice();
+	}
+
+	void SceneStore::ResetSlotTables()
+	{
+		tables.Clear();
+		geometryIndex.clear();
+		pipelineIndex.clear();
+		materialIndex.clear();
+		++tablesGeneration;
+	}
+
+	void SceneStore::CheckObjectSlots(bool a_resolveBuffers)
+	{
+		stats.slotViolations = 0;
+		for (std::size_t o = 0; o < tables.objects.size(); ++o) {
+			auto& object = tables.objects[o];
+			if (object.flags & kObjectNoBindings)
+				continue;
+			const char* what = nullptr;
+			if (object.geometryIndex >= tables.geometries.size() || tables.geometryLastUsed[object.geometryIndex] != frame)
+				what = "geometry slot not of this frame";
+			else if (a_resolveBuffers && (!tables.geometries[object.geometryIndex].vertexAddress || !tables.geometries[object.geometryIndex].indexAddress))
+				what = "geometry slot unresolved";
+			else if (object.pipelineIndex >= tables.pipelines.size() || tables.pipelineLastUsed[object.pipelineIndex] != frame)
+				what = "pipeline slot not of this frame";
+			else if (object.materialIndex >= tables.materials.size() || tables.materialLastUsed[object.materialIndex] != frame)
+				what = "material slot not of this frame";
+			else if (!tables.geometryTemplate[object.pipelineIndex])
+				what = "pipeline without a template";
+			if (!what)
+				continue;
+			if (stats.slotViolations++ == 0) {
+				const auto* geometry = tables.objectGeometry[o];
+				logger::error("[DCLF] slot check: object {} '{}' {} (geometry {} used {}, pipeline {} used {}, material {} used {}, frame {})",
+					o, geometry && geometry->name.c_str() ? geometry->name.c_str() : "?", what,
+					object.geometryIndex, object.geometryIndex < tables.geometryLastUsed.size() ? tables.geometryLastUsed[object.geometryIndex] : ~0u,
+					object.pipelineIndex, object.pipelineIndex < tables.pipelineLastUsed.size() ? tables.pipelineLastUsed[object.pipelineIndex] : ~0u,
+					object.materialIndex, object.materialIndex < tables.materialLastUsed.size() ? tables.materialLastUsed[object.materialIndex] : ~0u, frame);
+			}
+			// Neutralised: nothing downstream may draw from slots that are not this frame's.
+			object.flags = (object.flags & ~kObjectNativeVisible) | kObjectNoBindings;
+			object.geometryIndex = object.pipelineIndex = object.materialIndex = 0;
+		}
+	}
+
+	void SceneStore::ProbeSlots(bool a_resolveBuffers)
+	{
+		static std::uint32_t logged = 0;
+		if (logged >= 40)
+			return;
+		auto& evaluator = ConstantEvaluator::Get();
+		auto& gpu = GpuResources::Get();
+		std::uint32_t materialDiffers = 0, geometryDiffers = 0, materialsProbed = 0, geometriesProbed = 0;
+		std::string first;
+		if (evaluator.HasLightingShader()) {
+			for (std::uint32_t slot = 0; slot < tables.materials.size(); ++slot) {
+				if (tables.materialLastUsed[slot] != frame)
+					continue;
+				const auto key = tables.materialSlotKey[slot];
+				MaterialRecord live;
+				if (!key.first || !evaluator.EvaluateMaterial(key.first, key.second, live))
+					continue;
+				++materialsProbed;
+				const auto& served = tables.materials[slot];
+				for (std::size_t t = 0; t < served.textures.size(); ++t) {
+					if (served.textures[t] != live.textures[t]) {
+						if (materialDiffers++ == 0)
+							first = fmt::format("material slot {} (pass {:X}) texture[{}] {} -> {}", slot, key.second, t,
+								static_cast<const void*>(served.textures[t]), static_cast<const void*>(live.textures[t]));
+						break;
+					}
 				}
 			}
 		}
-		stats.materialCacheEntries = static_cast<std::uint32_t>(materialCache.size());
+		if (a_resolveBuffers) {
+			for (std::uint32_t slot = 0; slot < tables.geometries.size(); ++slot) {
+				if (tables.geometryLastUsed[slot] != frame)
+					continue;
+				++geometriesProbed;
+				const auto& record = tables.geometries[slot];
+				const auto* triShape = tables.geometrySlotKey[slot];
+				const auto vertex = gpu.Resolve(record.vertexBuffer);
+				const auto index = gpu.Resolve(record.indexBuffer);
+				const bool same = triShape && vertex && index && vertex->address == record.vertexAddress && index->address == record.indexAddress &&
+				                  reinterpret_cast<ID3D11Buffer*>(triShape->vertexBuffer) == record.vertexBuffer &&
+				                  reinterpret_cast<ID3D11Buffer*>(triShape->indexBuffer) == record.indexBuffer;
+				if (!same && geometryDiffers++ == 0 && first.empty())
+					first = fmt::format("geometry slot {} vb {:#x} -> {:#x} ib {:#x} -> {:#x} (trishape {} buffers {}/{} vs {}/{})", slot,
+						record.vertexAddress, vertex ? vertex->address : 0ull, record.indexAddress, index ? index->address : 0ull,
+						static_cast<const void*>(triShape), static_cast<const void*>(record.vertexBuffer), static_cast<const void*>(record.indexBuffer),
+						triShape ? static_cast<const void*>(triShape->vertexBuffer) : nullptr, triShape ? static_cast<const void*>(triShape->indexBuffer) : nullptr);
+			}
+		}
+		if (materialDiffers || geometryDiffers || frame < 12) {
+			++logged;
+			logger::info("[DCLF] slot probe frame {}: {} of {} used materials differ, {} of {} used geometries differ{}{}", frame, materialDiffers, materialsProbed,
+				geometryDiffers, geometriesProbed, first.empty() ? "" : "; first: ", first);
+		}
+	}
+
+	void SceneStore::SweepSlots()
+	{
+		if ((frame % 16) != 0)
+			return;
+		auto sweep = [&](std::vector<std::uint32_t>& a_lastUsed, std::vector<std::uint32_t>& a_free, auto&& a_erase) {
+			for (std::uint32_t slot = 0; slot < a_lastUsed.size(); ++slot) {
+				if (a_lastUsed[slot] == Tables::kSlotFree || frame - a_lastUsed[slot] <= Tables::kSlotIdleFrames)
+					continue;
+				a_erase(slot);
+				a_lastUsed[slot] = Tables::kSlotFree;
+				a_free.push_back(slot);
+				++stats.slotsSwept;
+			}
+		};
+		sweep(tables.geometryLastUsed, tables.geometryFree, [&](std::uint32_t a_slot) {
+			geometryIndex.erase(tables.geometrySlotKey[a_slot]);
+			tables.geometrySlotKey[a_slot] = nullptr;
+		});
+		sweep(tables.pipelineLastUsed, tables.pipelineFree, [&](std::uint32_t a_slot) {
+			pipelineIndex.erase(tables.pipelines[a_slot]);
+			tables.geometryTemplate[a_slot] = nullptr;
+			tables.geometryConstantsValid[a_slot] = 0;
+		});
+		sweep(tables.materialLastUsed, tables.materialFree, [&](std::uint32_t a_slot) {
+			materialIndex.erase(tables.materialSlotKey[a_slot]);
+			if (materialCache.erase(tables.materialSlotKey[a_slot]))
+				++stats.materialCacheEvicted;
+			tables.materialSlotKey[a_slot] = { nullptr, 0u };
+		});
+	}
+
+	void SceneStore::ValidateMaterialSlice()
+	{
+		// The standing alarm of the material cache, now that a served slot is not re-evaluated on the
+		// cached path at all: a few live materials a frame, re-evaluated and compared with what their
+		// slot serves (the patched positions carry this frame's live values on both sides). A difference
+		// is counted as stale, its floats join the patched set, and the slot takes the live record.
+		// Live values are read from the fresh evaluation itself, so the patch values need not be current.
+		if (!MaterialCacheEnabled() || tables.materials.empty())
+			return;
+		auto& evaluator = ConstantEvaluator::Get();
+		if (!evaluator.HasLightingShader())
+			return;
+		std::uint32_t looked = 0;
+		for (std::uint32_t n = 0; n < kMaterialValidationsPerFrame * kMaterialValidationStride && looked < kMaterialValidationsPerFrame; ++n) {
+			const std::uint32_t slot = materialValidationCursor++ % static_cast<std::uint32_t>(tables.materials.size());
+			if (tables.materialLastUsed[slot] != frame)
+				continue;
+			++looked;
+			const auto key = tables.materialSlotKey[slot];
+			MaterialRecord live;
+			if (!key.first || !evaluator.EvaluateMaterial(key.first, key.second, live))
+				continue;
+			++stats.materialsValidated;
+			MaterialRecord served = tables.materials[slot];
+			for (std::size_t i = 0; i < materialPatched.size(); ++i)
+				served.ps.floats[materialPatched[i]] = live.ps.floats[materialPatched[i]];
+			if (served == live)
+				continue;
+			++stats.materialCacheStale;
+			// The patch source: any material whose evaluation works. With persistent slots a material is
+			// evaluated once, so this slice is where the frame-global drift floats (PS PerMaterial 29) are
+			// learned, and RefreshMaterialPatch needs a material to resample them from at Prepass.
+			if (!materialPatchSource) {
+				materialPatchSource.reset(const_cast<RE::BSShaderMaterial*>(key.first));
+				materialPatchSourcePass = key.second;
+			}
+			static std::uint32_t staleLogged = 0;
+			if (staleLogged++ < 4) {
+				std::string what;
+				for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f) {
+					if (served.vs.floats[f] != live.vs.floats[f]) {
+						what += fmt::format(" vs[{}] {}->{}", f, served.vs.floats[f], live.vs.floats[f]);
+						break;
+					}
+				}
+				for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f) {
+					if (served.ps.floats[f] != live.ps.floats[f]) {
+						what += fmt::format(" ps[{}] {}->{}", f, served.ps.floats[f], live.ps.floats[f]);
+						break;
+					}
+				}
+				for (std::size_t t = 0; t < served.textures.size(); ++t) {
+					if (served.textures[t] != live.textures[t] || served.addressModes[t] != live.addressModes[t] || served.filterModes[t] != live.filterModes[t]) {
+						what += fmt::format(" texture[{}] {}/{}/{} -> {}/{}/{}", t, static_cast<const void*>(served.textures[t]), served.addressModes[t], served.filterModes[t],
+							static_cast<const void*>(live.textures[t]), live.addressModes[t], live.filterModes[t]);
+						break;
+					}
+				}
+				if (served.textureWritten != live.textureWritten)
+					what += fmt::format(" written {:X}->{:X}", served.textureWritten, live.textureWritten);
+				logger::warn("[DCLF] material slot {} (pass {:X}) is stale:{}", slot, key.second, what);
+			}
+			for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f) {
+				if (served.ps.floats[f] != live.ps.floats[f])
+					NotePatchedFloat(f);
+			}
+			stats.materialDriftFloats = static_cast<std::uint32_t>(materialPatched.size());
+			tables.materials[slot] = live;
+			if (auto it = materialCache.find(key); it != materialCache.end())
+				it->second.record = live;
+		}
 	}
 
 	std::int32_t SceneStore::FindObject(const RE::BSGeometry* a_geometry) const

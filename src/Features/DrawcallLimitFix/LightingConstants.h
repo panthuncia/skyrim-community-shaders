@@ -17,6 +17,10 @@ namespace DCLF
 	// Lighting variable indices (ShaderConstants::LightingVS / LightingPS).
 	inline constexpr std::uint32_t kVSWorld = 0;
 	inline constexpr std::uint32_t kVSPreviousWorld = 1;
+	inline constexpr std::uint32_t kVSLandBlendParams = 3;  // MTLand, per object
+	inline constexpr std::uint32_t kVSTreeParams = 4;   // TreeAnim wind, per object
+	inline constexpr std::uint32_t kVSWindTimers = 5;
+	inline constexpr std::uint32_t kVSTextureProj = 6;      // ProjectedUV, per object
 	inline constexpr std::uint32_t kVSLeftEyeCenter = 9;     // first PerMaterial VS variable
 	inline constexpr std::uint32_t kVSHighDetailRange = 12;  // first PerTechnique VS variable
 	inline constexpr std::uint32_t kPSNumLights = 0;
@@ -26,6 +30,7 @@ namespace DCLF
 	inline constexpr std::uint32_t kPSMaterialData = 7;
 	inline constexpr std::uint32_t kPSEmitColor = 8;
 	inline constexpr std::uint32_t kPSShadowLightMaskSelect = 10;
+	inline constexpr std::uint32_t kPSProjectedUVParams = 12;  // ProjectedUV, per object: 12, 13 (colour), 14 (globals)
 	inline constexpr std::uint32_t kPSSSRParams = 16;
 	inline constexpr std::uint32_t kPSFogColor = 19;      // first PerTechnique PS variable
 	inline constexpr std::uint32_t kPSLODTexParams = 24;  // first PerMaterial PS variable
@@ -83,7 +88,16 @@ namespace DCLF
 		std::uint32_t psMaterialData = ~0u, psMaterialDataSize = 0;
 		std::uint32_t psEmitColor = ~0u, psEmitColorSize = 0;
 		std::uint32_t psSSRParams = ~0u, psSSRParamsSize = 0;
+		std::uint32_t vsTreeParams = ~0u, vsTreeParamsSize = 0;
+		std::uint32_t vsWindTimers = ~0u, vsWindTimersSize = 0;
+		std::uint32_t vsLandBlendParams = ~0u, vsLandBlendParamsSize = 0;
+		std::uint32_t vsTextureProj = ~0u, vsTextureProjSize = 0;
+		std::array<std::uint32_t, 3> psProjectedUVParams{ ~0u, ~0u, ~0u };
+		std::array<std::uint32_t, 3> psProjectedUVParamsSize{};
 	};
+
+	/** @brief The object's kExtraRows rows in Tables::extraRows, or null when it has none. */
+	const float* ExtraRowsOf(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex);
 
 	/** @brief Resolves those offsets for one pipeline's shader pair. */
 	GeometryPatchOffsets GeometryPatchOffsetsOf(std::span<const std::int8_t> a_vsTable, std::span<const std::int8_t> a_psTable);
@@ -123,8 +137,19 @@ namespace DCLF
 		std::uint32_t shadowBitMask;
 		float alphaTestRef;
 		float emissiveMult;
+		// Tree animation, per object (technique 12). Under bindless the PerGeometry block is one pair for
+		// the whole pipeline, so these cannot stay in it the way they can on the constant-buffer path.
+		ObjectTreeAnim tree;
+		// Skinning (kObjectSkinned): where this object's bone palette rows start in the epoch's bones
+		// buffer (VS t126, DCLFBones), current then previous, and how many rows (three a bone). The rows
+		// are packed eye-relative by the epoch, like World, so the shader's pivot is zero. 0/0/0 otherwise.
+		std::uint32_t boneOffset;
+		std::uint32_t previousBoneOffset;
+		std::uint32_t boneRows;
+		// The object's kExtraRows rows in the same buffer (after every palette), or 0 when it has none.
+		std::uint32_t extraOffset;
 	};
-	static_assert(sizeof(BindlessObject) == 144);
+	static_assert(sizeof(BindlessObject) == 192);
 
 	/** @brief Fills one, from the same inputs PatchObjectGeometry writes into a packed group. */
 	void BuildObjectRecord(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags,

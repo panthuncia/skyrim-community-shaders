@@ -36,14 +36,44 @@ namespace DCLF
 		// GPU culling has a real input to reject from; this bit is what tells the two apart, and it is the
 		// reference the culling is measured against (BuildDrawsCS: RequireNativeVisible).
 		kObjectNativeVisible = 1u << 3,
+		// A skinned object (CS_DCLF_SKINNED): its vertices come from the skin partition's own buffer and its
+		// vertex shader reads the bone palette rows at BindlessObject::boneOffset / previousBoneOffset.
+		kObjectSkinned = 1u << 4,
 		// The object is a culling candidate only: it cannot be drawn this frame, so no material or
 		// pipeline entry was built for it and its materialIndex and pipelineIndex mean nothing. Anything
 		// that indexes the tables with them must check this first - the tables can be empty entirely (the
 		// first frame after a teleport has tracked geometry but nothing accumulated yet), so even index 0
 		// is not safe.
 		kObjectNoBindings = 1u << 5,
+		// Technique 12. Only a tree's TreeParams and WindTimers are its own; for everything else those
+		// two variables belong to the pipeline template, and writing a zeroed per-object copy over them
+		// clobbers values the native draw does use - which is what the first attempt at trees did, to
+		// every object in the frame rather than only to trees.
+		kObjectTreeAnim = 1u << 6,
+		// A decal (CS_DCLF_DECALS). Never an occluder: it is left out of the depth segment entirely and
+		// drawn by the colour segment's second pass, after the opaque draws, in the engine's group order.
+		// The group is in bits 20-21 (kObjectDecalGroupShift): 1 = accumulation hint 2 (the engine's
+		// opaque decal group, drawn first), 2 = hint 3 (the blended one, drawn second).
+		kObjectDecal = 1u << 7,
 		kObjectAlphaThresholdShift = 8,
+		// Per-object PerGeometry values beyond World and the tree pair, kept in the epoch's row buffer at
+		// BindlessObject::extraOffset (Records: kExtraRows rows, layout in SceneStore::RefreshFrameConstants):
+		// the ProjectedUV texture matrix and pixel parameters (CS_DCLF_PROJECTED_UV), and the landscape
+		// blend parameters of the MTLand techniques (CS_DCLF_MTLAND).
+		kObjectProjectedUV = 1u << 18,
+		kObjectLandBlend = 1u << 19,
+		kObjectDecalGroupShift = 20,
 	};
+
+	/** @brief Rows of per-object extras in the row buffer: LandBlendParams, TextureProj x3, ProjectedUVParams x3. */
+	inline constexpr std::uint32_t kExtraRows = 7;
+	inline constexpr std::uint32_t kExtraRowLandBlend = 0;
+	inline constexpr std::uint32_t kExtraRowTextureProj = 1;
+	inline constexpr std::uint32_t kExtraRowProjectedParams = 4;
+	inline constexpr std::uint32_t kNoExtraRows = ~0u;
+
+	/** @brief ObjectFlags -> decal group (0 for anything that is not a decal). */
+	inline constexpr std::uint32_t ObjectDecalGroup(std::uint32_t a_flags) { return (a_flags & kObjectDecal) ? (a_flags >> kObjectDecalGroupShift) & 3u : 0u; }
 
 	/**
 	 * @brief Geometry shared by every object that uses the same BSGraphics::TriShape.
@@ -112,14 +142,44 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief Fixed-function state of the native main (deferred) pass for eligible objects, as the draw
-	 * parity check observed it: depth test EQUAL against the Z-prepass (no write), stencil, blending and
-	 * depth bias off, back-face culling unless two-sided.
+	 * @brief Fixed-function state of a pipeline, packed.
+	 *
+	 * For an opaque object only bit 0 is ever set: the native main (deferred) pass draws it with depth
+	 * test EQUAL against the Z-prepass (no write), stencil, blending and depth bias off, back-face
+	 * culling unless two-sided, and none of that needs stating.
+	 *
+	 * A decal is drawn by the engine with a depth bias and, in its blended group, with the geometry's
+	 * alpha property applied, so its key also carries the INDICES of the engine's own state objects -
+	 * RendererShadowState's rasterStateDepthBiasMode, alphaBlendMode, alphaBlendAlphaToCoverage,
+	 * alphaBlendWriteMode and alphaBlendModeExtra - which DrawPipelines reads back from the engine's
+	 * state tables (EngineStates.h) rather than re-deriving what each index means. Zero for everything
+	 * that is not a decal, so every existing key is unchanged.
 	 */
 	enum PipelineRasterFlags : std::uint32_t
 	{
 		kRasterTwoSided = 1u << 0,
+		kRasterDecalGroupShift = 1,  // 2 bits: ObjectDecalGroup
+		kRasterDepthBiasShift = 4,   // 4 bits: rasterStateDepthBiasMode (0-11)
+		kRasterBlendModeShift = 8,   // 3 bits: alphaBlendMode (0-6)
+		kRasterAlphaToCoverage = 1u << 11,
+		kRasterWriteModeShift = 12,  // 4 bits: alphaBlendWriteMode (0-12)
+		kRasterBlendExtra = 1u << 16,
 	};
+
+	inline constexpr std::uint32_t RasterDecalGroup(std::uint32_t a_flags) { return (a_flags >> kRasterDecalGroupShift) & 3u; }
+	inline constexpr std::uint32_t RasterDepthBiasMode(std::uint32_t a_flags) { return (a_flags >> kRasterDepthBiasShift) & 15u; }
+	inline constexpr std::uint32_t RasterBlendMode(std::uint32_t a_flags) { return (a_flags >> kRasterBlendModeShift) & 7u; }
+	inline constexpr std::uint32_t RasterWriteMode(std::uint32_t a_flags) { return (a_flags >> kRasterWriteModeShift) & 15u; }
+	/** @brief Everything but the two-sided bit: what selects the engine's state objects. */
+	inline constexpr std::uint32_t RasterStateBits(std::uint32_t a_flags) { return a_flags & ~kRasterTwoSided; }
+
+	/** @brief Packs a decal's state indices (EngineStates.h says where each comes from). */
+	inline constexpr std::uint32_t PackDecalRasterFlags(std::uint32_t a_group, std::uint32_t a_depthBiasMode, std::uint32_t a_blendMode,
+		std::uint32_t a_writeMode)
+	{
+		return ((a_group & 3u) << kRasterDecalGroupShift) | ((a_depthBiasMode & 15u) << kRasterDepthBiasShift) |
+		       ((a_blendMode & 7u) << kRasterBlendModeShift) | ((a_writeMode & 15u) << kRasterWriteModeShift);
+	}
 
 	/**
 	 * @brief Per-object values of the PerGeometry pixel constants (everything else in that group is
@@ -132,6 +192,25 @@ namespace DCLF
 		float ssrSpecular;      // SSRParams.w: specular LOD fade (0 when the pass disables it)
 	};
 	static_assert(sizeof(ObjectShading) == 32);
+
+	/**
+	 * @brief The two PerGeometry variables tree animation displaces its vertices with (technique 12).
+	 *
+	 * Per object, not per pipeline. Every other PerGeometry value DCLF treats as a property of the
+	 * pipeline, taken from one template object, and for trees that is wrong twice over: TreeParams
+	 * carries the individual tree's amplitude and leaf frequency, and WindTimers is a per-tree clock
+	 * the engine advances as it sets the draw up. Left per-pipeline, one template tree's wind is handed
+	 * to every tree sharing its pipeline - capture parity counted 47,851 and 83,390 mismatched draws.
+	 *
+	 * windTimers uses only xy; it is a float4 so the struct keeps 16-byte alignment on both sides of
+	 * the GPU record, where a float2 would let HLSL pad and the two layouts disagree.
+	 */
+	struct ObjectTreeAnim
+	{
+		float treeParams[4]{};   // 0, wind magnitude, amplitude, leaf frequency
+		float windTimers[4]{};   // wind timer, previous wind timer, unused, unused
+	};
+	static_assert(sizeof(ObjectTreeAnim) == 32);
 
 	/**
 	 * @brief One indirect draw, in the argument order of the command signature (BasicRHI packs arguments

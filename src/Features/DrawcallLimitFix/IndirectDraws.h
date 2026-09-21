@@ -82,6 +82,12 @@ namespace DCLF
 			// The second phase, which re-tests what the first rejected against the rebuilt HZB.
 			std::uint32_t cullDrawnPhaseTwo = 0;      // depth draws it added
 			std::uint32_t cullRescuedByPhaseTwo = 0;  // objects it brought back
+			// Decals (CS_DCLF_DECALS): submitted to the second colour pass by the CPU, and what its
+			// single-phase culling did with them (GPU counters, sampled like the others).
+			std::uint32_t decalsDrawn = 0;
+			std::uint32_t decalsCulled = 0;
+			std::uint32_t decalsTested = 0;
+			std::uint32_t boneRows = 0;  // bone palette rows uploaded by the last epoch (current and previous)
 			// What the HZB held under the tested objects: all-near or all-far means the build is wrong.
 			std::uint32_t hzbNear = 0, hzbFar = 0, hzbSampled = 0;
 			// One rejection in full, so an implausible count can be read instead of guessed at.

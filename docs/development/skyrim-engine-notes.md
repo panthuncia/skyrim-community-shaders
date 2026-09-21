@@ -339,3 +339,157 @@ Library ID is not known yet.
 The main (deferred) pass draws with the viewport at the origin, the dynamic-resolution size (2560 x 1440 of a
 3840 x 2160 target at 1.5x upscaling), and depth range [0, 0.999998]. Anything that has to reproduce its depth
 values must use the same range.
+
+## Decals: where the main pass draws them, and with what state
+
+Decompiled from AE 1.6.1170 and then measured with `CS_DCLF_DECAL_PROBE=1`, which records the
+`RendererShadowState` fields at every native Lighting draw of a decal property inside the deferred pass
+and reads the D3D11 descriptions of the state objects they index.
+
+`BSShaderAccumulator::FinishAccumulatingPreResolveDepth` for render mode 0 is `FUN_1414b2d90`: the whole
+opaque G-buffer pass. In order: the Lighting range (`1..0x5c00002f`), geometry group 9, grass
+(`0x5c000030..0x5c00005c`), groups 8, 1 and 0, sky, group 13, then with `alphaBlendWriteMode = 10`
+**`FUN_1414b3bb0`** and with `alphaBlendWriteMode = 11` **`FUN_1414b3d50`**, then the water stencils.
+Community Shaders' `Main_RenderWorld_BlendedDecals` hook wraps the second of those and calls `EndDeferred`
+after it, so both decal groups draw **inside the deferred pass, into the G-buffer**.
+
+`BSLightingShaderProperty::GetRenderPasses` gives a Lighting pass of a `kDecal | kDynamicDecal` property
+accumulation hint `2 + (alpha < 1 || NiAlphaProperty blending)`. **A hint `h` lands in
+`geometryGroups[h + 1]`** (measured: hint 2 draws with the first function's state, hint 3 with the
+second's). Hint 4 passes are Utility-shader passes, not Lighting.
+
+| hint | function | groups | depth mode | `rasterStateDepthBiasMode` | write mode | render flags |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | `FUN_1414b3bb0` | 3 then 2 | 3 (test and write) | `6 + b` while the `ToggleDepthBias` byte at `0x142032ff6` is set, else 0 (group 3); `8 + b` (group 2) | 10 | 0x41 |
+| 3 | `FUN_1414b3d50` | 4 | 1 (test only) | `10 + b`, unconditionally | 11 | 0x45 |
+
+`b` is `DrawWorld::disableSunShadows` (`+0x51`), so interiors use modes 7 and 11. The rasterizer states:
+modes 6 and 10 hold `DepthBias -1, DepthBiasClamp -100, SlopeScaledDepthBias -0.65`; modes 7 and 11 hold
+no bias at all.
+
+Render flag `0x4` is what applies the geometry's `NiAlphaProperty` (`FUN_1414f5cf0` calls
+`FUN_14150bc80(shader, alphaProperty, shaderProperty, alphaTest)` before `SetupGeometry`), so it applies
+to hint 3 and not to hint 2. `FUN_14150bc80` sets `alphaBlendMode` from the blend functions when the
+property blends: 1 for `SrcAlpha / InvSrcAlpha`, 2 for `SrcAlpha / One`, `One / One` and
+`SrcAlpha / InvDestAlpha`, 3 for `DestColor / InvSrcAlpha`, 4 for `Zero / SrcColor` and
+`DestColor / Zero`; any other pair leaves the mode as it was. With no blending and `shaderProperty->alpha`
+below 1 it picks mode 1 (a fading object). It sets `alphaTestEnabled` from the property's test flag.
+
+`BSLightingShader::SetupGeometry` (`Func6`) treats a decal pass specially in one place: for hint 3 with
+`kZBufferWrite` it saves the write mode to `0x142035488` and sets **1**; `RestoreGeometry`
+(`1414de3d0`, unnamed in Ghidra) puts the saved value back unless the slot holds its sentinel 13. For a
+non-decal pass SetupGeometry is what drops the depth mode to 1 without `kZBufferWrite` and to 0 without
+`kZBufferTest`; decal passes keep the group function's depth mode.
+
+The blend states (indices `[alphaBlendMode][alphaToCoverage][writeMode][extra]`, the table at
+`RelocationID(524749, 411364)`), as Community Shaders' deferred override leaves them: `[0][0][10][0]` is
+blending off on every target with mask F; `[1][0][1][0]` is `SrcAlpha / InvSrcAlpha` on every target with
+mask 7 on RT0 and RT3-7 and F on RT1-2; `[1][0][11][0]` is the same blend with mask F everywhere. The
+only difference between write modes 1 and 11 is therefore RT0's alpha channel, which the deferred
+composite never reads (it writes 1.0 into it).
+
+Measured, Whiterun exterior, per frame: 137.5 hint-2 draws alpha-tested without `kZBufferWrite` plus a
+few with; 40.7 hint-3 draws blended and alpha-tested with `kZBufferWrite`, 11.8 blended only without it,
+5.9 blended only with it. Dragonsreach: 17 hint 2, 13 hint 3. About 0.5% of hint-3 draws without
+`kZBufferWrite` were issued with write mode 1 rather than 11: Community Shaders' Terrain Blending sets
+`alphaBlendWriteMode = 1` for its own passes from the same hook, just before the blended decals, and the
+first decals after it inherit that until a `kZBufferWrite` decal's save and restore resets it.
+
+## Skinning: the palette the engine keeps, and the buffers a skinned draw uses
+
+Decompiled from AE 1.6.1170 for Drawcall Limit Fix's skinned coverage, and measured with
+`CS_DCLF_SKIN_PROBE=1`.
+
+**The draw.** `SetupAndDrawPass` (`FUN_1414f3dc0`) takes a different branch when `geometry->skinInstance`
+(`RUNTIME_DATA+0x10`) is set: after the shader's `SetupGeometry` it calls the skin instance's vtable slot
+`0x25` (`NiSkinInstance::Func37`, `140d451f0`), which walks `skinPartition->numPartitions` and calls
+`NiSkinPartition::Unk_25(args, i)` (`140d43a10`) for each. `BSDismemberSkinInstance::Unk_25` (`140d31f40`)
+does the same but skips the partitions whose dismember flag is clear.
+
+**Per partition** (`140d43a10`): a partition whose LOD byte (`Partition+0x42`, CommonLib's `pad42`) is not
+enabled in the table at `0x14202a030` for the pass's LOD mode is skipped. Otherwise it calls the shader's
+bone setter `NiBoneMatrixSetterI::Func1(skinInstance, &partition, &geometry->world)` and draws
+**`partition->buffData`**, the partition's own `BSGraphics::TriShape`, for `partition->triangles`
+triangles (renderer vtable `+0x38`, or the instanced `+0x30`). `geometry->rendererData` is a different
+TriShape and is not what a skinned shape draws (measured: never equal).
+
+**The setter** (`14150be30`): once per (skin instance, thread) it runs the palette update below, then
+copies `skinData->bones * 3` float4 rows from `NiSkinInstance::boneMatrices` (`+0x48`) into a dynamic
+constant buffer bound at **VS b10** (`Bones`) and `prevBoneMatrices` (`+0x50`) into **VS b9**
+(`PreviousBones`). It is the whole skin's palette, whichever partition is being drawn.
+
+**The update** (`FUN_140e4ff90(skinInstance, const NiTransform* world)`): under the instance's critical
+section (`+0x60`), only when `frameID` (`+0x38`) differs from `gFrameCounter`: copies the current palette
+to the previous one, (re)allocates `bones * 48` bytes when needed, sets `numMatrices = bones` and
+`numRegisters = 3`, builds skin-to-world from `rootParent->world` (`+0x20`), `skinData->rootParentToSkin`
+and the world passed in, and writes for every bone with a `boneWorldTransforms[i]`:
+`boneWorld * skinToBone`, as **three float4 rows** - row-major 3x4, absolute world space, scale folded in,
+translation in each row's `.w`. Idempotent within a frame, so whoever calls it first does the work; a
+draw that is withheld from the batch renderer means nobody does, which is why DCLF calls it itself.
+
+**The shader** (`Common/Skinned.hlsli`, `Lighting.hlsl` SKINNED): `actualIndices = 765.01 * BoneIndices`
+(the UNORM byte times 255 times 3 is the row index), `GetBoneTransformMatrix` sums four `float3x4` rows
+minus a pivot, and the pivot is `VS_PerFrame` c40 (`BonesPivot`) / c41 (`PreviousBonesPivot`) - measured
+equal to `posAdjust` / `previousPosAdjust` on every one of 62,000 draws. The skinned position never reads
+`World`; `SetupGeometry` does not write `World` / `PreviousWorld` for a skinned pass, so the buffer holds
+whatever the previous draw left, and `GetBoneRSMatrix` builds the normal basis from the same rows.
+
+**What the main pass draws, per frame.** Whiterun exterior: ~200 skinned Lighting draws, all tracked;
+the largest class is one-partition `NiSkinInstance` shapes with 4 bones (47, technique 0), then
+three-partition shapes with LOD bytes 1/2/0 and technique 12 (29, hint 11: tree-animated, one partition
+per LOD level), then actor parts (`BSDismemberSkinInstance`, one or two draws each). Dragonsreach: ~130,
+dominated by one-partition books (`Book01a`, 3 bones, hint 15) and banners (2 bones). 191 of 201 palettes
+in the exterior and 288 of 328 in Dragonsreach changed between consecutive frames, so a static-pose skip
+would buy little.
+
+## ProjectedUV and MTLand: the per-object constants and where they come from
+
+Decompiled from AE 1.6.1170 for Drawcall Limit Fix's coverage of the two techniques; both are
+`BSLightingShader::SetupGeometry` (`Func6`, `1414dd040`) work, and one helper.
+
+**MTLand and MTLandLODBlend (techniques 8 and 19): `LandBlendParams`** (VS PerGeometry variable 3).
+`xy` are `BSLightingShaderMaterialLandscape::landBlendParams.rg` (the property's material, `+0x108`).
+`zw` are a position blended between two `BSShaderManager::State` points minus the geometry's world
+translation:
+
+    t  = clamp((State+0x20 - State+0xb8) * (float at 0x141ad2840 / State+0x98), 0, 1)
+    z  = lerp(State+0xa8, State+0xb0, t) - world.translate.x
+    w  = lerp(State+0xac, State+0xb4, t) - world.translate.y
+
+with `State` at `0x142033060`. When `t` reaches 1 the function also clears the byte at `0x14332a394`.
+Nothing else in the case is per object; the six landscape texture sets come from `SetupMaterial`.
+
+**ProjectedUV (descriptor bit 15, any technique but Hair): `TextureProj`** (VS PerGeometry variable 6,
+three rows). The projection is a `NiTransform` with a fixed rotation about Z
+(`[[0,1,0],[-1,0,0],[0,0,1]]`, from the constant at `0x141abe6a0`), translation `posAdjust`, scale 1,
+converted by `FUN_1414aaf10` (NiTransform to row-major 4x4, translation minus `posAdjust`, so it comes
+out at zero). For technique 1 (Envmap) the matrix is that projection alone; for everything else the
+geometry's world transform is converted the same way, `posAdjust` is added back to its translation (so it
+is the absolute world matrix, with one rounding trip), and `D3DXMatrixMultiply(world, projection)`
+(`14153d3c8`) gives `M`. `TextureProj` row `r` is **column** `r` of `M`: `(M[0][r], M[1][r], M[2][r],
+M[3][r])`.
+
+The same block binds four pixel textures with address mode 3 and filter mode 1: slot 11 from
+`BSShaderManager::State+0x48 -> +0x10` and slots 3, 8 and 10 from the three `NiTexture` globals at
+`0x14328cc28/30/38` (through `rendererTexture` `+0x48` then `+0x10`), the ones the
+`ReloadProjectedUVTextures` console command replaces. DCLF captures the four views from a native
+projected draw rather than dereferencing the globals.
+
+**The pixel parameters** (PS PerGeometry variables 12-14) are written by `FUN_1414e00c0(shader,
+dynamicData, property, projectedNormals)` at the end of that block, for a static shape from the
+**property's** fields:
+
+| variable | value |
+| --- | --- |
+| 12 `ProjectedUVParams` | `x = (1 - p.a) * p.r`, `z = p.b`, `w = (1 - p.a) * p.g + p.a` from `projectedUVParams` (`+0x10C`); **y is never written** |
+| 13 `ProjectedUVParams2` | `projectedUVColor` (`+0x11C`), all four |
+| 14 `ProjectedUVParams3` | `(float at 0x142035560, float at 0x142035578, 0, projectedNormals ? 1 : 0)` |
+
+`projectedNormals` is the byte at `0x142035518`, unless render flag `0x8` is set together with the byte
+at `0x142035530` (the main pass runs with `0x41` / `0x45`, so it is the first byte alone).
+
+**The tree amplitude's square root, on garbage.** `SetupGeometry`'s TreeAnim case takes the node's
+squared distance (`+0x158`) through `0x5f3759df - (bits >> 1)` with an **arithmetic** shift of the bit
+pattern. A fern-type node can hold an uninitialised negative value there; the engine's estimate then
+overflows in the direction that clamps the amplitude to its maximum, and a logical shift does not. DCLF
+reproduces the signed shift.

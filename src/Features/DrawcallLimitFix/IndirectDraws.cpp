@@ -71,7 +71,12 @@ namespace DCLF
 		constexpr std::uint32_t kNoSkip = ~0u;
 		// BuildDrawsCS's counter words: [0] drawn, [1] culled, [2] tested, [3] engine-culled and gated out,
 		// [4] false negatives (the engine kept it, the culling rejected it), [5] rescued.
-		constexpr std::uint32_t kCountWords = 20;
+		constexpr std::uint32_t kCountWords = 24;
+		// Decals: the two groups' slot counts, written by the CPU and read by their draws, then the culling's
+		// own tallies. Byte offsets must match BuildDrawsCS.hlsl.
+		constexpr std::uint32_t kCountDecalGroupWord = 19;  // group 1 at word 19, group 2 at word 20
+		constexpr std::uint32_t kCountDecalsCulledWord = 21;
+		constexpr std::uint32_t kCountDecalsTestedWord = 22;
 		// Byte offsets of the count words the indirect draws read; they must match BuildDrawsCS.hlsl.
 		constexpr std::uint64_t kCountDrawnPhaseTwoBytes = 68;
 		constexpr const wchar_t* kBuildDrawsShader = L"Data\\Shaders\\DrawcallLimitFix\\ORG\\BuildDrawsCS.spv";
@@ -111,7 +116,7 @@ namespace DCLF
 			// orders, so this is what lets the colour segment look up the visibility the depth segment
 			// published for the same object.
 			std::uint32_t objectIndex;
-			std::uint32_t padding;
+			std::uint32_t decalOrdinal;  // decals only: the slot in the group's range
 		};
 		static_assert(sizeof(DrawInput) == 40);
 		// BuildDrawsCS.hlsl: set on an input the epoch has built a bindings record for. The depth segment
@@ -120,6 +125,17 @@ namespace DCLF
 		constexpr std::uint32_t kInputDrawable = 1u << 16;
 		// Where phase 2 appends its sequences; see BuildDrawsCS.hlsl.
 		constexpr std::uint32_t kPhaseTwoSequenceBase = kMaxDraws;
+		// The decal ranges: one of kMaxDecalDraws fixed slots per group after phase 2's range. A decal's
+		// sequence goes to the slot of its ordinal in the engine's draw order (SceneStore::Tables::
+		// decalOrdinal), so the second pass draws decals in that order every frame; a culled one is the
+		// same sequence with an index count of zero.
+		constexpr std::uint32_t kMaxDecalDraws = 2048;
+		// The bones buffer (VS t126): every skinned object's palette rows, current then previous, per epoch.
+		// 65,536 float4 rows is 1 MB; the exterior needs ~13,500.
+		constexpr std::uint32_t kMaxBoneRows = 65536;
+		constexpr std::uint32_t kDecalGroups = 2;
+		constexpr std::uint32_t kDecalSequenceBase = 2 * kMaxDraws;
+		constexpr std::uint32_t kSequenceSlots = kDecalSequenceBase + kDecalGroups * kMaxDecalDraws;
 
 #pragma pack(push, 4)
 		struct GeometryDraw
@@ -235,6 +251,12 @@ namespace DCLF
 			expect(a_record.shadowBitMask == lights.shadowBitMask, "ShadowBitMask");
 			const float threshold = (object.flags & kObjectAlphaTest) ? ((object.flags >> kObjectAlphaThresholdShift) & 0xFF) / 255.0f : 0.0f;
 			expect(std::bit_cast<std::uint32_t>(a_record.alphaTestRef) == std::bit_cast<std::uint32_t>(threshold), "AlphaTestRef");
+			const bool skinned = (object.flags & kObjectSkinned) && a_objectIndex < a_tables.boneOffset.size();
+			expect(a_record.boneOffset == (skinned ? a_tables.boneOffset[a_objectIndex] : 0u), "BoneOffset");
+			expect(a_record.boneRows == (skinned ? a_tables.boneRows[a_objectIndex] : 0u), "BoneRows");
+			expect(a_record.previousBoneOffset == (skinned ? a_tables.boneOffset[a_objectIndex] + static_cast<std::uint32_t>(a_tables.bones.size() / 4) : 0u), "PreviousBoneOffset");
+			const bool extras = a_objectIndex < a_tables.extraOffset.size() && a_tables.extraOffset[a_objectIndex] != kNoExtraRows;
+			expect(a_record.extraOffset == (extras ? static_cast<std::uint32_t>(a_tables.bones.size() / 4) * 2 + a_tables.extraOffset[a_objectIndex] : 0u), "ExtraOffset");
 			// EmissiveMult is the only one of the four whose SOURCE changes, from the scene graph to the
 			// tables, so it was tempting to check it against a live read of the property here. That check
 			// was built, and it fired: ~100 components in half a billion, always on flickering emissives.
@@ -302,6 +324,7 @@ namespace DCLF
 			std::uint64_t serial = 0;  // per EPOCH, so the two epochs of one frame do not share it
 			std::uint32_t frameNumber = 0;  // per FRAME, which is what the two epochs must agree on
 			std::uint32_t drawCount = 0;
+			std::array<std::uint32_t, kDecalGroups> decalCount{};  // slots per decal group (second colour pass)
 			// Inputs the culling dispatch covers. In the depth segment this exceeds drawCount, because that
 			// segment submits a cull-only input for every candidate it is not allowed to draw.
 			std::uint32_t inputCount = 0;
@@ -344,6 +367,9 @@ namespace DCLF
 			// The per-object records the DCLF_BINDLESS builds read, at t127 of every draw of the epoch.
 			std::shared_ptr<org::Buffer> objects;
 			std::uint32_t objectsIndex = 0;  // its SRV's descriptor heap index
+			// The bone palette rows the skinned draws read, at t126 (kBonesBufferRegister).
+			std::shared_ptr<org::Buffer> bones;
+			std::uint32_t bonesIndex = 0;
 			std::shared_ptr<org::Buffer> inputs, geometries, sequences, count;  // BuildDraws: in, in, out, out
 			std::shared_ptr<const ComputeProgram> buildDraws;
 			winrt::com_ptr<ID3D11Buffer> sequencesD3D11, countD3D11;  // CS_DCLF_BUILD_PARITY readback
@@ -382,7 +408,7 @@ namespace DCLF
 		struct PassBindings
 		{
 			std::array<org::ResourceBindingToken, kColorTargets> targets{};
-			org::ResourceBindingToken depth, sequences, count, records, constants, objects;
+			org::ResourceBindingToken depth, sequences, count, records, constants, objects, bones;
 			org::ResourceBindingToken lights, lightIndexList, lightGrid;
 			std::vector<org::ResourceBindingToken> frameBuffers;
 		};
@@ -431,6 +457,8 @@ namespace DCLF
 				bindings.constants = a_builder.BindShaderResource(resources->constants);
 				if (resources->objects)
 					bindings.objects = a_builder.BindShaderResource(resources->objects);
+				if (resources->bones)
+					bindings.bones = a_builder.BindShaderResource(resources->bones);
 				for (const auto& frameBuffer : resources->frameBuffers)
 					bindings.frameBuffers.push_back(a_builder.BindShaderResource(frameBuffer.copy));
 				if (resources->lightLimitFix) {
@@ -453,7 +481,7 @@ namespace DCLF
 			{
 				PreparedDraws prepared{};
 				auto frame = CurrentFrame(*resources);
-				if (!frame || !frame->drawCount || !frame->indirect.valid)
+				if (!frame || (!frame->drawCount && !frame->decalCount[0] && !frame->decalCount[1]) || !frame->indirect.valid)
 					return prepared;
 				// The rescue draw belongs to the depth segment only.
 				if (phaseTwo && RenderGraphRuntime::Get().CurrentSegment() != RenderGraphRuntime::Segment::ZPrepass)
@@ -540,8 +568,30 @@ namespace DCLF
 				commands.BeginPass(begin);
 				commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
 				commands.BindLayout(frame.indirect.layout);
-				commands.ExecuteIndirect(frame.indirect.signatures[kColorVariant], sequences, 0, count, 0, frame.drawCount);
+				if (frame.drawCount)
+					commands.ExecuteIndirect(frame.indirect.signatures[kColorVariant], sequences, 0, count, 0, frame.drawCount);
 				commands.EndPass();
+
+				// The second pass: decals, after every opaque draw, in the engine's order - its opaque decal
+				// group and then its blended one, each from its own fixed-slot range and its own count word.
+				// The pipelines test depth LESS_EQUAL with the engine's decal bias and write none, so this
+				// pass changes nothing the depth buffer's readers see. Same attachments, all loaded.
+				if (frame.decalCount[0] || frame.decalCount[1]) {
+					for (std::uint32_t i = 0; i < a_prepared.targetCount; ++i)
+						colors[i].loadOp = rhi::LoadOp::Load;
+					begin.debugName = "DCLF decals";
+					commands.BeginPass(begin);
+					commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
+					commands.BindLayout(frame.indirect.layout);
+					for (std::uint32_t group = 0; group < kDecalGroups; ++group) {
+						if (!frame.decalCount[group])
+							continue;
+						const std::uint64_t argumentOffset = std::uint64_t(kDecalSequenceBase + group * kMaxDecalDraws) * sizeof(DrawSequence);
+						const std::uint64_t countOffset = std::uint64_t(kCountDecalGroupWord + group) * sizeof(std::uint32_t);
+						commands.ExecuteIndirect(frame.indirect.signatures[kColorVariant], sequences, argumentOffset, count, countOffset, frame.decalCount[group]);
+					}
+					commands.EndPass();
+				}
 			}
 
 		private:
@@ -1096,6 +1146,8 @@ namespace DCLF
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.geometries"), resources->geometries);
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.draw-count"), resources->count);
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.visibility"), resources->visibility);
+				if (resources->bones)
+					a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.bones"), resources->bones);
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.depth"), resources->depth);
 				for (std::uint32_t i = 0; i < resources->targetCount; ++i)
 					a_graph.RegisterResource(org::ResourceIdentifier(fmt::format("cs.dclf.target{}", i)), resources->targets[i]);
@@ -1309,9 +1361,12 @@ namespace DCLF
 		ConstantArena arena;
 		std::vector<DrawBindings> records;
 		std::vector<DrawSequence> sequences;  // CPU templates of BuildDraws' output
+		std::array<std::vector<DrawSequence>, kDecalGroups> decalTemplates;  // by group and slot
+		std::array<std::uint32_t, 4> decalWords{};  // the count buffer's decal words, uploaded per colour epoch
 		std::vector<DrawInput> inputs;
 		std::vector<GeometryDraw> geometryDraws;
 		std::vector<BindlessObject> objectRecords;  // the DCLF_BINDLESS per-object table, rebuilt each epoch
+		std::vector<float> boneRows;  // the epoch's bone palette rows, eye-relative, current then previous
 
 		// The frame each geometry was last drawn by DCLF: the native loop skips a pass whose geometry the
 		// epoch drew. Only the colour epoch records it, so the native loop never skips an object that the
@@ -1363,6 +1418,9 @@ namespace DCLF
 		{
 			winrt::com_ptr<ID3D11Buffer> sequences, count;
 			std::vector<DrawSequence> expected;
+			// Per decal group, by slot: what the CPU expects there (a culled slot reads back with an index
+			// count of zero and is otherwise identical).
+			std::array<std::vector<DrawSequence>, kDecalGroups> expectedDecals;
 			std::uint32_t framesLeft = 0;
 		};
 		std::optional<ParityReadback> parity;
@@ -1435,10 +1493,14 @@ namespace DCLF
 			state->objects->SetName("cs.dclf.objects");
 			state->objects->Materialize();
 			state->objectsIndex = state->objects->GetSRVInfo(0).slot.index;
+			state->bones = org::Buffer::CreateUnmaterializedStructuredBuffer(kMaxBoneRows, 16, false);
+			state->bones->SetName("cs.dclf.bones");
+			state->bones->Materialize();
+			state->bonesIndex = state->bones->GetSRVInfo(0).slot.index;
 			// Twice kMaxDraws: phase 1 and the colour segment write the first half, phase 2 the second. The
 			// CPU records where phase 2's draw starts, so the two need ranges fixed in advance rather than
 			// one range shared through an atomic counter.
-			state->sequences = CreateWords(2ull * kMaxDraws * sizeof(DrawSequence) / 4, true, "cs.dclf.sequences");
+			state->sequences = CreateWords(std::uint64_t(kSequenceSlots) * sizeof(DrawSequence) / 4, true, "cs.dclf.sequences");
 			state->count = CreateWords(kCountWords, true, "cs.dclf.draw-count");
 			// One word per object in the frame's tables: what the depth segment's culling decided, read by
 			// the colour segment so that it draws exactly the same set.
@@ -1458,7 +1520,7 @@ namespace DCLF
 					desc.StructureByteStride = sizeof(std::uint32_t);
 					return RenderGraphRuntime::Get().WrapBuffer(a_buffer, desc);
 				};
-				state->sequencesD3D11 = wrap(*state->sequences, std::uint64_t(kMaxDraws) * sizeof(DrawSequence));
+				state->sequencesD3D11 = wrap(*state->sequences, std::uint64_t(kSequenceSlots) * sizeof(DrawSequence));
 
 			}
 			if (!SwitchValue("CS_DCLF_GBUFFER_PROBE").empty()) {
@@ -1917,6 +1979,7 @@ namespace DCLF
 				frameTextures[t] = textures.Resolve(capture.psViews[t]);
 			// DCLF's own, in both epochs: the depth stage's alpha test reads MaterialData out of it too.
 			frameTextures[kObjectBufferRegister] = resources->objectsIndex;
+			frameTextures[kBonesBufferRegister] = resources->bonesIndex;
 			if (resources->lightLimitFix && !depthOnly)
 				ORGLightCulling::Get().GetShaderResourceIndices(frameTextures[kLightsRegister], frameTextures[kLightsRegister + 1], frameTextures[kLightsRegister + 2]);
 			for (const auto& frameBuffer : depthOnly ? decltype(resources->frameBuffers){} : resources->frameBuffers) {
@@ -1943,6 +2006,12 @@ namespace DCLF
 			for (std::size_t p = 0; p < tables.pipelines.size(); ++p) {
 				const auto& key = tables.pipelines[p];
 				auto& blocks = pipelineBlocks[p];
+				// The pipeline table keeps its slots across frames; only the ones this frame's objects use
+				// get blocks (a swept or idle slot has no object pointing at it).
+				if (!tables.PipelineUsed(p, frameNumber)) {
+					blocks.setIndex = DrawPipelines::kNotReady;
+					continue;
+				}
 				const auto* program = programs.Find(key, *lighting);
 				blocks.setIndex = program ? pipelines.Find(key, *program) : DrawPipelines::kNotReady;
 				blocks.vs = cache.GetVertexShader(*lighting, key.vertexDescriptor);
@@ -2005,6 +2074,8 @@ namespace DCLF
 			const auto renderFlags = store.GetMainPassRenderFlags();
 
 			auto skip = [&](Skip a_reason) { ++stats.skipped[static_cast<std::size_t>(a_reason)]; };
+			if (!depthOnly)
+				stats.decalsDrawn = 0;
 			stats.partMs = {};
 			auto partStart = std::chrono::steady_clock::now();
 			auto mark = [&](std::size_t a_part) {
@@ -2048,12 +2119,55 @@ namespace DCLF
 			// records. Split out because "rest" was a subtraction covering both this and the graph
 			// execution after it, and at 0.655 ms it had become the largest single part of the system.
 			mark(6);
+			std::array<std::uint32_t, kDecalGroups> decalCount{};
+			std::array<std::vector<DrawSequence>, kDecalGroups>& decalTemplates = impl->decalTemplates;
+			for (auto& templates : decalTemplates)
+				templates.clear();
+			if (!depthOnly) {
+				for (std::uint32_t group = 0; group < kDecalGroups; ++group) {
+					decalCount[group] = std::min(tables.decalCount[group], kMaxDecalDraws);
+					decalTemplates[group].resize(decalCount[group]);
+				}
+			}
 			for (std::uint32_t o = 0; o < tables.objects.size(); ++o) {
 				const auto& object = tables.objects[o];
 				if (object.flags & kObjectNoBindings) {
 					// A culling candidate with no material or pipeline entry; its indices are meaningless.
+					// The depth segment still submits it cull-only, with its bounds: that is what the tables
+					// carry the whole tracked set for, and what the culling is measured against the engine
+					// with. Before the candidate-only short path in BuildFrame most of these happened to have
+					// bindings (a pipeline some drawn object had created) and reached the culling that way.
+					if (depthOnly && frameHybrid && o < kMaxObjects && impl->inputs.size() < kMaxInputs) {
+						impl->inputs.push_back({ 0, 0, object.geometryIndex, object.flags,
+							{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius,
+							static_cast<std::uint32_t>(o), 0 });
+					}
 					skip(Skip::CandidateOnly);
 					continue;
+				}
+				// Decals never reach the depth segment: they are not occluders, and they are drawn by the
+				// colour segment's second pass (BuildDrawsCS.hlsl, MainOpaquePass::Record).
+				const std::uint32_t decalGroup = ObjectDecalGroup(object.flags);
+				if (decalGroup && (depthOnly || o >= tables.decalOrdinal.size() || tables.decalOrdinal[o] >= decalCount[(decalGroup - 1) & 1]))
+					continue;
+				// A decal that cannot be drawn this epoch must still reach BuildDraws, so that its slot is
+				// written as a zero-count draw rather than left holding whatever a previous frame put there.
+				// This guard does that on every `continue` between here and the drawable push below.
+				struct DecalSlot
+				{
+					std::vector<DrawInput>* inputs = nullptr;
+					DrawInput blank{};
+					~DecalSlot()
+					{
+						if (inputs)
+							inputs->push_back(blank);
+					}
+				} decalSlot;
+				if (decalGroup) {
+					decalSlot.inputs = &impl->inputs;
+					decalSlot.blank = { 0, 0, object.geometryIndex, object.flags,
+						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius,
+						static_cast<std::uint32_t>(o), tables.decalOrdinal[o] };
 				}
 				const auto& blocks = pipelineBlocks[object.pipelineIndex];
 				if (blocks.setIndex == DrawPipelines::kNotReady) {
@@ -2093,14 +2207,27 @@ namespace DCLF
 					continue;
 				}
 				// The draw cap: BuildDraws writes into the first half of the sequence buffer, and the count
-				// is ExecuteIndirect's maxCount.
-				if (sequences.size() >= kMaxDraws) {
+				// is ExecuteIndirect's maxCount. Decals have their own ranges.
+				if (!decalGroup && sequences.size() >= kMaxDraws) {
 					skip(Skip::Capacity);
 					continue;
 				}
 				const auto& usage = pipelines.Usage(blocks.setIndex, depthOnly ? kDepthVariant : kColorVariant);
 				const auto& material = tables.materials[object.materialIndex];
 				const auto& technique = tables.techniqueConstants[object.pipelineIndex];
+				// A ProjectedUV pipeline binds the engine's four projected textures (SceneStore captured them
+				// from a native draw) at the slots SetupGeometry fills, with its wrap/anisotropic modes.
+				const bool projectedPipeline = (tables.pipelines[object.pipelineIndex].passDescriptor & 0x8000u) != 0;
+				const auto& projected = store.GetProjectedTextures();
+				auto projectedSlot = [&](std::uint32_t a_slot) -> std::int32_t {
+					if (!projectedPipeline || !projected.valid)
+						return -1;
+					for (std::size_t i = 0; i < SceneStore::ProjectedTextures::kSlots.size(); ++i) {
+						if (SceneStore::ProjectedTextures::kSlots[i] == a_slot)
+							return static_cast<std::int32_t>(i);
+					}
+					return -1;
+				};
 				DrawBindings bindings{};
 
 				auto [resolvedIt, newResolved] = resolvedBindings.try_emplace((std::uint64_t(object.materialIndex) << 32) | object.pipelineIndex);
@@ -2137,6 +2264,8 @@ namespace DCLF
 								index = textures.Resolve(material.textures[t]);
 							else if (t == kShadowMaskSlot && technique.shadowMask)
 								index = textures.Resolve(technique.shadowMaskTexture);
+							else if (const auto p = projectedSlot(t); p >= 0)
+								index = textures.Resolve(projected.views[p]);
 							if (index == kInvalidIndex && usage.UsesTexture(t)) {
 								resolved.texturesOk = false;
 								resolved.missingTexture = t;
@@ -2154,6 +2283,9 @@ namespace DCLF
 								filter = material.filterModes[s] != kUnwrittenFilterMode ? material.filterModes[s] : technique.filterModes[s];
 							} else if (s == kShadowMaskSlot && technique.shadowMask) {
 								filter = technique.filterModes[s];
+							} else if (projectedSlot(s) >= 0) {
+								address = 3;  // SetupGeometry: wrap, anisotropic (engine notes: samplers)
+								filter = 1;
 							}
 							if (filter == kUnwrittenFilterMode)
 								filter = 0;
@@ -2366,11 +2498,22 @@ namespace DCLF
 				sequence.pipelineIndex = blocks.setIndex;
 				sequence.objectIndex = o;
 				sequence.bindingsAddress = resources->recordsAddress + std::uint64_t(recordIndex) * sizeof(DrawBindings);
-				impl->inputs.push_back({ blocks.setIndex, recordIndex, object.geometryIndex,
-					object.flags | kInputDrawable,
-					{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius,
-					static_cast<std::uint32_t>(o), 0 });
-				sequences.push_back(sequence);
+				if (decalGroup) {
+					const std::uint32_t ordinal = tables.decalOrdinal[o];
+					decalSlot.inputs = nullptr;  // drawn: the blank is not needed
+					impl->inputs.push_back({ blocks.setIndex, recordIndex, object.geometryIndex,
+						object.flags | kInputDrawable,
+						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius,
+						static_cast<std::uint32_t>(o), ordinal });
+					decalTemplates[(decalGroup - 1) & 1][ordinal] = sequence;
+					++stats.decalsDrawn;
+				} else {
+					impl->inputs.push_back({ blocks.setIndex, recordIndex, object.geometryIndex,
+						object.flags | kInputDrawable,
+						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius,
+						static_cast<std::uint32_t>(o), 0 });
+					sequences.push_back(sequence);
+				}
 				// Only what BuildDraws will actually write a sequence for counts as drawn. The tables now hold
 				// the whole tracked set, so a candidate the gate drops must not be recorded here: the native
 				// loop would skip its pass (it has none while the engine culls it, but it regains one the
@@ -2415,8 +2558,40 @@ namespace DCLF
 			const std::uint32_t zero[kCountWords] = {};
 			const std::size_t zeroBytes = (depthOnly || !frameHybrid) ? sizeof(zero) : sizeof(std::uint32_t);
 			BUFFER_UPLOAD(zero, zeroBytes, org::runtime::UploadTarget::FromShared(resources->count), 0);
+			// The decal words: each group's slot count for its draw, and the tallies zeroed. Written by the
+			// colour segment only, which is the one that submits decals.
+			if (!depthOnly) {
+				impl->decalWords = { decalCount[0], decalCount[1], 0u, 0u };
+				BUFFER_UPLOAD(impl->decalWords.data(), impl->decalWords.size() * sizeof(std::uint32_t), org::runtime::UploadTarget::FromShared(resources->count),
+					kCountDecalGroupWord * sizeof(std::uint32_t));
+			}
 			if (!objectRecords.empty())
 				BUFFER_UPLOAD(objectRecords.data(), objectRecords.size() * sizeof(BindlessObject), org::runtime::UploadTarget::FromShared(resources->objects), 0);
+			// The bone palettes, made relative to this epoch's eye the way World is: each row's translation
+			// (its .w) loses the eye's component for that row. Current rows first, then the previous frame's
+			// relative to the previous eye, which is the layout BuildObjectRecord's offsets assume.
+			auto& boneRows = impl->boneRows;
+			boneRows.clear();
+			if ((!tables.bones.empty() || !tables.extraRows.empty()) && resources->bones) {
+				boneRows.reserve(tables.bones.size() + tables.previousBones.size() + tables.extraRows.size());
+				auto pack = [&](const std::vector<float>& a_rows, const RE::NiPoint3& a_eye) {
+					const float axis[3] = { a_eye.x, a_eye.y, a_eye.z };
+					for (std::size_t r = 0; r + 1 <= a_rows.size() / 4; ++r) {
+						const float* row = &a_rows[r * 4];
+						boneRows.push_back(row[0]);
+						boneRows.push_back(row[1]);
+						boneRows.push_back(row[2]);
+						boneRows.push_back(row[3] - axis[r % 3]);
+					}
+				};
+				pack(tables.bones, eye);
+				pack(tables.previousBones, previousEye);
+				// The extras rows go after every palette, verbatim: BuildObjectRecord's extraOffset counts on it.
+				boneRows.insert(boneRows.end(), tables.extraRows.begin(), tables.extraRows.end());
+				const std::size_t boneBytes = std::min<std::size_t>(boneRows.size() * sizeof(float), std::size_t(kMaxBoneRows) * 16);
+				BUFFER_UPLOAD(boneRows.data(), boneBytes, org::runtime::UploadTarget::FromShared(resources->bones), 0);
+			}
+			stats.boneRows = static_cast<std::uint32_t>(boneRows.size() / 4);
 			// Three buffers, three conditions. They used to share one: a depth epoch where every candidate is
 			// cull-only has no records and plenty of inputs, and BuildDraws would then dispatch inputCount
 			// work items over whatever the previous epoch left in the buffer.
@@ -2434,6 +2609,7 @@ namespace DCLF
 			frame->serial = ++impl->serial;
 			frame->frameNumber = frameNumber;
 			frame->drawCount = static_cast<std::uint32_t>(sequences.size());
+			frame->decalCount = depthOnly ? std::array<std::uint32_t, kDecalGroups>{} : decalCount;
 			frame->inputCount = static_cast<std::uint32_t>(impl->inputs.size());
 			frame->width = capture.viewportWidth;
 			frame->height = capture.viewportHeight;
@@ -2625,6 +2801,8 @@ namespace DCLF
 				a_stats.cullOccludedVisible = words[16];
 				a_stats.cullDrawnPhaseTwo = words[17];
 				a_stats.cullRescuedByPhaseTwo = words[18];
+				a_stats.decalsCulled = words[kCountDecalsCulledWord];
+				a_stats.decalsTested = words[kCountDecalsTestedWord];
 				context->Unmap(cullReadback->count.get(), 0);
 			}
 			cullReadback.reset();
@@ -2661,7 +2839,26 @@ namespace DCLF
 			}
 			const std::uint32_t count = static_cast<const std::uint32_t*>(countMap.pData)[0];
 			const std::uint32_t culled = static_cast<const std::uint32_t*>(countMap.pData)[1];
-			std::vector<DrawSequence> built(static_cast<const DrawSequence*>(sequencesMap.pData), static_cast<const DrawSequence*>(sequencesMap.pData) + std::min<std::size_t>(count, kMaxDraws));
+			const auto* gpuSequences = static_cast<const DrawSequence*>(sequencesMap.pData);
+			std::vector<DrawSequence> built(gpuSequences, gpuSequences + std::min<std::size_t>(count, kMaxDraws));
+			// The decal slots: fixed, so they compare in place. A culled slot is the template with an index
+			// count of zero; anything else differing is a defect.
+			std::size_t decalDiffering = 0, decalCulled = 0, decalSlots = 0;
+			for (std::uint32_t group = 0; group < kDecalGroups; ++group) {
+				const auto& expectedDecals = parity->expectedDecals[group];
+				const auto* slots = gpuSequences + kDecalSequenceBase + group * kMaxDecalDraws;
+				for (std::size_t slot = 0; slot < expectedDecals.size() && slot < kMaxDecalDraws; ++slot, ++decalSlots) {
+					// A zero-count slot draws nothing whatever its other fields hold: it is either a decal
+					// the culling rejected or a blank the epoch pushed for one it could not build a record
+					// for (whose template is then empty). Either way only the count matters.
+					if (slots[slot].indexCount == 0) {
+						++decalCulled;
+						continue;
+					}
+					if (std::memcmp(&slots[slot], &expectedDecals[slot], sizeof(DrawSequence)) != 0)
+						++decalDiffering;
+				}
+			}
 			context->Unmap(parity->count.get(), 0);
 			context->Unmap(parity->sequences.get(), 0);
 			// BuildDraws appends in any order: compare as sets. The key has to be unique per sequence, which
@@ -2696,6 +2893,10 @@ namespace DCLF
 				++e;
 			}
 			++a_stats.buildParityChecks;
+			if (decalSlots)
+				logger::info("[DCLF] BuildDraws decal parity {}: {} slots, {} culled, {} differ", decalDiffering ? "MISMATCH" : "OK", decalSlots, decalCulled, decalDiffering);
+			if (decalDiffering)
+				++a_stats.buildParityMismatches;
 			if (!differing && !missing) {
 				logger::info("[DCLF] BuildDraws parity OK: {} of {} sequences match the CPU templates ({} rejected by the culling)", count, expected.size(),
 					expected.size() - count);
@@ -2736,12 +2937,14 @@ namespace DCLF
 		// switches. inputs is parallel to sequences.
 		readback.expected.clear();
 		readback.expected.reserve(sequences.size());
+		for (std::uint32_t group = 0; group < kDecalGroups; ++group)
+			readback.expectedDecals[group] = decalTemplates[group];
 		{
 			// Cull-only inputs carry no sequence, so the two run at different rates and the drawable ones
-			// have to be counted off rather than indexed in step.
+			// have to be counted off rather than indexed in step. Decals have their own slots and templates.
 			std::size_t sequence = 0;
 			for (const auto& input : inputs) {
-				if (!(input.flags & kInputDrawable))
+				if (!(input.flags & kInputDrawable) || (input.flags & kObjectDecal))
 					continue;
 				if (sequence >= sequences.size())
 					break;
