@@ -85,6 +85,30 @@ namespace DCLF
 		}
 	}
 
+	std::uint8_t FadeStateOf(const RE::BSShaderProperty* a_property)
+	{
+		// The camera dependence of the derivation, reduced to what the classification actually reads. The
+		// LOD metric feeds DeriveLightingDescriptors in exactly three ways - reject on !isfinite, clear
+		// kSpecular past its fade end, clear kEnvMap past its - so two bits and an invalid marker capture
+		// all of it. The fade *floats* the metric also produces are overwritten from the property by
+		// RefreshFrameConstants before any draw reads them, so they do not belong in the witness.
+		//
+		// An object with none of the fade-sensitive flags has no camera dependence at all and returns 0
+		// without touching the node, which is the common case.
+		if (!a_property)
+			return 0;
+		const std::uint64_t f = a_property->flags.underlying();
+		if (!(f & (Bit(Flag::kSpecular) | Bit(Flag::kMultiIndexSnow) | Bit(Flag::kEnvMap))))
+			return 0;
+		const auto* fadeNode = a_property->fadeNode;
+		if (!fadeNode)
+			return kFadeNoNode;
+		const float metric = FadeNodeLodMetric(fadeNode);
+		if (!std::isfinite(metric))
+			return kFadeInvalid;
+		return static_cast<std::uint8_t>((lodFade.specularEnd < metric ? 1u : 0u) | (lodFade.envmapEnd < metric ? 2u : 0u));
+	}
+
 	void RefreshLodFadeSettings()
 	{
 		lodFade.specularStart = ReadSetting("fSpecularLODFadeStart:LightingShader", 0.09f);

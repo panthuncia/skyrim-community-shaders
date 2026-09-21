@@ -63,6 +63,20 @@ namespace DCLF
 	/** @brief LightingDescriptors::derivedPass when the derivation leaves the object native. */
 	inline constexpr std::uint32_t kNotDerived = ~0u;
 
+	/** @brief FadeStateOf: the object has a fade-sensitive flag but no fade node, or a non-finite metric. */
+	inline constexpr std::uint8_t kFadeNoNode = 0x40;
+	inline constexpr std::uint8_t kFadeInvalid = 0x80;
+
+	/**
+	 * @brief The whole camera dependence of the classification, in one byte.
+	 *
+	 * Two bits say whether the specular and environment-map LOD fades have run out, which is all the fade
+	 * metric contributes to the derived technique. An object with none of the fade-sensitive flags has no
+	 * camera dependence and returns 0 without reading the fade node. Comparing this per frame is what lets
+	 * the rest of the classification be cached.
+	 */
+	std::uint8_t FadeStateOf(const RE::BSShaderProperty* a_property);
+
 	/**
 	 * @brief Pass descriptor bits GetRenderPasses sets from per-frame engine state rather than from the
 	 * property: ShadowDir (13), DefShadow (14) and the shadow light count (6-8) from the light and shadow

@@ -35,6 +35,19 @@ namespace DCLF
 
 	void PassCapture::Record(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint32_t a_technique)
 	{
+		// CS_DCLF_REGISTER_PROBE=1: what else comes through RegisterPass, so that owning the depth pass
+		// can be planned against evidence rather than against the shape of GetRenderDepthPass. Reports the
+		// shader type and whether the batch renderer is one of the main camera's.
+		static const bool probe = SwitchEnabled("CS_DCLF_REGISTER_PROBE");
+		if (probe && a_pass && a_pass->shader) {
+			const auto type = static_cast<std::uint32_t>(a_pass->shader->shaderType.get());
+			if (type < probeCounts.size()) {
+				probeCounts[type].fetch_add(1, std::memory_order_relaxed);
+				const auto renderers = std::atomic_load(&mainRenderers);
+				if (renderers && renderers->contains(a_batch))
+					probeMain[type].fetch_add(1, std::memory_order_relaxed);
+			}
+		}
 		if (!a_pass || !a_pass->geometry || !a_pass->shader || a_pass->shader->shaderType.get() != RE::BSShader::Type::Lighting)
 			return;
 

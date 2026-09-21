@@ -94,6 +94,7 @@ namespace DCLF
 		geometryConstants.clear();
 		geometryConstantsValid.clear();
 		geometryTemplate.clear();
+		geometryTemplateNative.clear();
 		techniqueConstants.clear();
 		permutations.clear();
 		draws.clear();
@@ -111,6 +112,16 @@ namespace DCLF
 		categoryNodes.clear();
 		tables.Clear();
 		objectIndex.clear();
+		// They hold raw pointers into game allocations now that they outlive the frame, so the teardown
+		// paths have to drop them rather than leave them to the next BuildFrame.
+		geometryIndex.clear();
+		pipelineIndex.clear();
+		materialIndex.clear();
+		materialCache.clear();
+		materialPatched.clear();
+		materialPatchValues.clear();
+		materialPatchValuesFresh = false;
+		materialPatchSource.reset();
 		validationCursor = 0;
 	}
 
@@ -132,8 +143,58 @@ namespace DCLF
 		return nullptr;
 	}
 
-	void SceneStore::RefreshCategoryNodes()
+	std::uint64_t SceneStore::CategorySignature() const
 	{
+		// A cheap stand-in for "the set of category nodes may have changed". It has to be conservative in
+		// one direction only: if it misses a change, geometry attached under a newly appeared node is
+		// never tracked, because AddSubtree needs the category node to already be known. So it folds in
+		// everything the refresh below reads to *find* nodes - the interior cell, the grid cells, each
+		// cell's loaded data and cell3D and how many children it has, and objRoot's child count - rather
+		// than just the cell pointers.
+		std::uint64_t hash = 0xcbf29ce484222325ull;
+		auto mix = [&hash](auto a_value) {
+			hash = (hash ^ static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(a_value))) * 0x100000001b3ull;
+		};
+		auto mixCell = [&](RE::TESObjectCELL* a_cell) {
+			mix(a_cell);
+			if (!a_cell || !a_cell->IsAttached())
+				return;
+			auto* loaded = a_cell->GetRuntimeData().loadedData;
+			mix(loaded);
+			RE::NiNode* cell3D = loaded ? loaded->cell3D.get() : nullptr;
+			mix(cell3D);
+			if (cell3D)
+				hash = (hash ^ cell3D->GetChildren().size()) * 0x100000001b3ull;
+		};
+		if (auto* tes = RE::TES::GetSingleton()) {
+			if (auto* objRoot = tes->objRoot)
+				hash = (hash ^ objRoot->GetChildren().size()) * 0x100000001b3ull;
+			mix(tes->objRoot);
+			mix(tes->interiorCell);
+			if (tes->interiorCell) {
+				mixCell(tes->interiorCell);
+			} else if (auto* grid = tes->gridCells) {
+				const std::uint32_t count = grid->length * grid->length;
+				for (std::uint32_t i = 0; i < count; ++i)
+					mixCell(grid->cells[i]);
+			}
+		}
+		return hash;
+	}
+
+	void SceneStore::RefreshCategoryNodes(bool a_force)
+	{
+		// This used to rebuild and diff the whole set on every Present, including an O(tracked) scan
+		// whenever any node had gone. Its *content* changes only when a cell attaches or detaches, so it
+		// now runs when the signature says something moved, when a detach was seen, or on a slow backstop
+		// cadence in case both miss something.
+		constexpr std::uint32_t kBackstopFrames = 30;
+		const std::uint64_t signature = CategorySignature();
+		if (!a_force && signature == categorySignature && ++categoryIdleFrames < kBackstopFrames)
+			return;
+		categorySignature = signature;
+		categoryIdleFrames = 0;
+
 		ankerl::unordered_dense::set<RE::NiNode*> current;
 
 		auto addCell = [&](RE::TESObjectCELL* a_cell) {
@@ -318,6 +379,7 @@ namespace DCLF
 			SceneTracker::FreeEvents(tracker.Drain());
 			return;
 		}
+		const bool rescanned = rescanPending;
 		if (rescanPending) {
 			// RefreshCategoryNodes treats every category node as newly appeared and walks it, which is
 			// exactly the full rescan wanted here.
@@ -327,9 +389,14 @@ namespace DCLF
 			validationCursor = 0;
 		}
 
-		RefreshCategoryNodes();
-
+		// Drained before the category refresh, so a detach this frame can force it: a detach can take a
+		// category node with it, and the signature cannot see that until the cell itself goes.
 		SceneTracker::Event* events = tracker.Drain();
+		bool sawDetach = false;
+		for (const auto* event = events; event && !sawDetach; event = event->next)
+			sawDetach = event->type == SceneTracker::EventType::Detached;
+		RefreshCategoryNodes(sawDetach || rescanned);
+
 		for (auto* event = events; event; event = event->next) {
 			if (event->type == SceneTracker::EventType::Attached) {
 				++stats.attachedEvents;
@@ -361,6 +428,29 @@ namespace DCLF
 					return;
 				}
 			}
+		}
+	}
+
+	bool SceneStore::CacheableVerdict(Ineligible a_reason)
+	{
+		// Only the verdicts that follow from the geometry's own shape - its type, its skin instance, its
+		// renderer data and the *type* of its shader property. Those are exactly what the pointer
+		// witnesses cover.
+		//
+		// Everything decided later is deliberately left out, because its inputs can change without any
+		// witness noticing. AlphaBlend reads `materialAlpha`, which is animated and lives behind an
+		// unchanged material pointer; the reasons DeriveLightingDescriptors produces (Decal, Technique,
+		// ProjectedUV, Lod, Fading) read property *flags*, which Community Shaders' own features set in
+		// place behind an unchanged property pointer. Caching those would trade a real correctness
+		// surface for the cheapest third of the population.
+		switch (a_reason) {
+		case Ineligible::NotTriShape:
+		case Ineligible::Skinned:
+		case Ineligible::NoRendererData:
+		case Ineligible::NotLightingShader:
+			return true;
+		default:
+			return false;
 		}
 	}
 
@@ -413,8 +503,32 @@ namespace DCLF
 		return Ineligible::None;
 	}
 
+	void SceneStore::RefreshMaterialPatch()
+	{
+		if (!MaterialCacheEnabled() || materialPatched.empty() || !materialPatchSource || tables.materials.empty())
+			return;
+		auto& evaluator = ConstantEvaluator::Get();
+		if (!evaluator.HasLightingShader())
+			return;
+		MaterialRecord live;
+		if (!evaluator.EvaluateMaterial(materialPatchSource.get(), materialPatchSourcePass, live))
+			return;
+		// The patched positions are shader-level, so one sample answers for every record. If that ever
+		// stops being true the rolling validator says so, because it compares a served record against a
+		// live evaluation of that material.
+		for (std::size_t i = 0; i < materialPatched.size(); ++i) {
+			const std::uint32_t index = materialPatched[i];
+			const float value = live.ps.floats[index];
+			materialPatchValues[i] = value;
+			for (auto& record : tables.materials)
+				record.ps.floats[index] = value;
+		}
+		++stats.materialPatchResamples;
+	}
+
 	void SceneStore::RefreshFrameConstants()
 	{
+		RefreshMaterialPatch();
 		auto& evaluator = ConstantEvaluator::Get();
 		if (!evaluator.HasLightingShader())
 			return;
@@ -468,6 +582,26 @@ namespace DCLF
 		latchedAccumulator = accumulator;
 	}
 
+	bool SceneStore::RefreshMainBatchRenderers()
+	{
+		auto* accumulator = latchedAccumulator ? latchedAccumulator : *globals::game::currentAccumulator.get();
+		auto* batch = accumulator ? accumulator->GetRuntimeData().batchRenderer : nullptr;
+		if (!batch)
+			return false;  // before the first latch, i.e. the first frame only
+		mainBatchRenderers.clear();
+		mainBatchRenderers.insert(batch);
+		for (auto* group : batch->geometryGroups) {
+			if (group && group->batchRenderer)
+				mainBatchRenderers.insert(group->batchRenderer);
+		}
+		// Published for the registration hook, which runs before this and so uses the previous frame's
+		// set. These pointers are stable across frames, and an empty set on the first frame simply means
+		// nothing is withheld yet.
+		PassCapture::Get().SetMainBatchRenderers(
+			std::make_shared<const ankerl::unordered_dense::set<const RE::BSBatchRenderer*>>(mainBatchRenderers));
+		return true;
+	}
+
 	void SceneStore::CollectAccumulatedPasses()
 	{
 		accumulatedPasses.clear();
@@ -512,28 +646,21 @@ namespace DCLF
 				}
 			}
 		};
-		mainBatchRenderers.clear();
-		mainBatchRenderers.insert(batch);
 		addBatch(batch);
 		// Geometry groups sort their passes in batch renderers of their own.
 		for (auto* group : batch->geometryGroups) {
-			if (group && group->batchRenderer) {
-				mainBatchRenderers.insert(group->batchRenderer);
+			if (group && group->batchRenderer)
 				addBatch(group->batchRenderer);
-			}
 		}
-		// Published for the registration hook, which runs before this and so uses the previous frame's
-		// set. These pointers are stable across frames, and an empty set on the first frame simply means
-		// nothing is withheld yet.
-		PassCapture::Get().SetMainBatchRenderers(
-			std::make_shared<const ankerl::unordered_dense::set<const RE::BSBatchRenderer*>>(mainBatchRenderers));
 	}
 
-	void SceneStore::CompareCapturedPasses()
+	void SceneStore::CompareCapturedPasses(bool a_compare)
 	{
 		auto& capture = PassCapture::Get();
 		if (!capture.Installed())
 			return;
+		// Always drained, whether or not anything is compared: the capture buffer is fixed-capacity and a
+		// frame that does not drain it overflows.
 		const auto entries = capture.Drain();
 		auto& captureStats = capture.MutableStats();
 		captureStats.compared = captureStats.missing = captureStats.extra = captureStats.techniqueDiffers = captureStats.subPassDiffers = 0;
@@ -545,7 +672,7 @@ namespace DCLF
 				captured.try_emplace(entry.geometry, &entry);
 		}
 
-		for (const auto& [geometry, accumulated] : accumulatedPasses) {
+		for (const auto& [geometry, accumulated] : a_compare ? accumulatedPasses : decltype(accumulatedPasses){}) {
 			++captureStats.compared;
 			const auto it = captured.find(geometry);
 			if (it == captured.end()) {
@@ -557,9 +684,11 @@ namespace DCLF
 			if (it->second->subPass != accumulated.subPass)
 				++captureStats.subPassDiffers;
 		}
-		for (const auto& [geometry, entry] : captured) {
-			if (!accumulatedPasses.contains(geometry))
-				++captureStats.extra;
+		if (a_compare) {
+			for (const auto& [geometry, entry] : captured) {
+				if (!accumulatedPasses.contains(geometry))
+					++captureStats.extra;
+			}
 		}
 
 		// The tables are built from the capture rather than the accumulator walk once the two agree. The
@@ -567,7 +696,8 @@ namespace DCLF
 		// point of static ownership; the capture sees the registration regardless of what happens to it
 		// afterwards. Falling back when the capture is empty keeps the first frame and any unexpected
 		// path working.
-		if (SwitchValue("CS_DCLF_PASS_SOURCE") == "accumulator" || captured.empty())
+		static const bool fromAccumulator = SwitchValue("CS_DCLF_PASS_SOURCE") == "accumulator";
+		if (fromAccumulator || captured.empty())
 			return;
 		accumulatedPasses.clear();
 		for (const auto& [geometry, entry] : captured) {
@@ -584,17 +714,68 @@ namespace DCLF
 
 	namespace
 	{
-		// Adds the time since the last call to a_bucket.
+		/**
+		 * @brief Attributes the time since the last call to one BuildPart.
+		 *
+		 * Inert unless CS_DCLF_PROFILE=1: with profiling off `parts` is null and Add() is a null test, so
+		 * the loop makes no clock calls. That matters because the calls themselves were ~4000 a frame,
+		 * about 0.1 ms, which is 6% of what BuildFrame was being measured at.
+		 *
+		 * Timing a loop from inside it perturbs what it measures, so the profiled and unprofiled totals
+		 * are both reported and the difference is the instrument's own cost.
+		 */
 		struct PartTimer
 		{
-			std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
-			void Add(double& a_bucket)
+			std::array<double, static_cast<std::size_t>(BuildPart::Count)>* parts = nullptr;
+			std::chrono::steady_clock::time_point last;
+
+			explicit PartTimer(std::array<double, static_cast<std::size_t>(BuildPart::Count)>& a_parts)
 			{
+				if (SceneStore::ProfileEnabled()) {
+					parts = &a_parts;
+					last = std::chrono::steady_clock::now();
+				}
+			}
+
+			void Add(BuildPart a_part)
+			{
+				if (!parts)
+					return;
 				const auto now = std::chrono::steady_clock::now();
-				a_bucket += std::chrono::duration<double, std::milli>(now - last).count();
+				(*parts)[static_cast<std::size_t>(a_part)] += std::chrono::duration<double, std::milli>(now - last).count();
 				last = now;
 			}
 		};
+	}
+
+	bool SceneStore::MaterialCacheEnabled()
+	{
+		// Default ON. It is not merely parity-neutral, it is parity-*better* than evaluating every
+		// material: because RefreshMaterialPatch resamples the frame's lighting floats at Prepass rather
+		// than at EarlyPrepass, the cache fixes a pre-existing mismatch the uncached path has. Measured
+		// over the same route, mismatched draws per report interval:
+		//
+		//                       cache off   cache on
+		//   cell change (coc)      253239      20572
+		//   `set gamehour` step    248670          0
+		//   steady state                0          0
+		static const std::string mode = SwitchValue("CS_DCLF_MATERIAL_CACHE");
+		static const bool enabled = mode != "off";
+		return enabled;
+	}
+
+	void SceneStore::NotePatchedFloat(std::uint32_t a_index)
+	{
+		if (std::find(materialPatched.begin(), materialPatched.end(), a_index) != materialPatched.end())
+			return;
+		materialPatched.push_back(a_index);
+		materialPatchValues.push_back(0.0f);
+	}
+
+	bool SceneStore::ProfileEnabled()
+	{
+		static const bool enabled = SwitchEnabled("CS_DCLF_PROFILE");
+		return enabled;
 	}
 
 	void SceneStore::BuildFrame()
@@ -621,14 +802,30 @@ namespace DCLF
 			stats.materials = 0;
 			return;
 		}
-		PartTimer timer;
+		PartTimer timer(stats.partMs);
 		RefreshLodFadeSettings();
-		CollectAccumulatedPasses();
-		CompareCapturedPasses();
+		// The pass table is filled from the capture, which is the source that keeps working once passes
+		// are withheld from the batch renderer. The accumulator walk is the cross-check, and it used to
+		// run every frame: the walk filled the table, the comparison built a second map of the same size,
+		// and then the table was discarded and refilled from it - three ~600-entry maps a frame to end up
+		// with the capture's answer. Now the walk runs only for the comparison, or as the first-frame
+		// fallback when the capture has nothing yet.
+		static const bool passParity = SwitchEnabled("CS_DCLF_PASS_PARITY");
+		static const bool fromAccumulator = SwitchValue("CS_DCLF_PASS_SOURCE") == "accumulator";
+		const bool haveAccumulator = RefreshMainBatchRenderers();
+		if (fromAccumulator || passParity)
+			CollectAccumulatedPasses();
+		else
+			accumulatedPasses.clear();
+		CompareCapturedPasses(passParity || fromAccumulator);
+		// The capture had nothing and the walk was skipped: take the walk after all, so the first frame
+		// after a latch is not empty.
+		if (accumulatedPasses.empty() && haveAccumulator && !fromAccumulator && !passParity)
+			CollectAccumulatedPasses();
 		auto& gpu = GpuResources::Get();
 		gpu.BeginFrame(frame);
 		const bool resolveBuffers = gpu.Enabled();
-		timer.Add(stats.partMs[0]);
+		timer.Add(BuildPart::Walk);
 		tables.Clear();
 		objectIndex.clear();
 		stats.ineligible.fill(0);
@@ -637,19 +834,36 @@ namespace DCLF
 		stats.derivationRuntimeDiffers = stats.derivationRuntimeBits = 0;
 		stats.derivationBitCounts.fill(0);
 		stats.materialsEvaluated = stats.materialsSkipped = 0;
-		stats.materialsUnchanged = stats.materialsChanged = 0;
+		stats.materialsUnchanged = stats.materialsChanged = stats.materialDiffMask = 0;
+		stats.materialsFromCache = stats.materialsValidated = stats.materialCacheStale = 0;
+		// Relearned every frame: the whole point of the drift is that it moves, and a stale set of
+		// positions patched into a served record is exactly the defect this cache could produce.
+		materialPatchValuesFresh = false;
+		stats.templateUpgrades = stats.templateDefects = stats.pipelinesCulledOnly = 0;
+		stats.nativeVisible = 0;  // counted as the objects are built, not in a second pass over the table
+		stats.classifyHits = stats.classifyChecked = stats.classifyDiffers = 0;
 
-		ankerl::unordered_dense::map<const RE::BSGraphics::TriShape*, std::uint32_t> geometryIndex;
-		ankerl::unordered_dense::map<PipelineKey, std::uint32_t, PipelineKeyHash> pipelineIndex;
-		ankerl::unordered_dense::map<std::pair<const RE::BSShaderMaterial*, std::uint32_t>, std::uint32_t> materialIndex;
+		// Members: cleared rather than constructed, so the buckets are reused instead of being allocated
+		// and freed every frame.
+		geometryIndex.clear();
+		pipelineIndex.clear();
+		materialIndex.clear();
 		auto& evaluator = ConstantEvaluator::Get();
 		ConstantEvaluator::ResetFrameAudits();
 		if (!evaluator.HasLightingShader())
 			FindLightingShader();
 
+		// Every per-object container, not only three of them. The three that were left out reallocated
+		// their way back up every frame, and objectIndex - cleared just above - rehashed its way up to
+		// ~2900 entries in the Whiterun exterior, which the profile billed to `record`.
 		tables.objects.reserve(tracked.size());
 		tables.objectGeometry.reserve(tracked.size());
 		tables.draws.reserve(tracked.size());
+		tables.shading.reserve(tracked.size());
+		tables.emissiveMult.reserve(tracked.size());
+		tables.lights.reserve(tracked.size());
+		objectIndex.reserve(tracked.size());
+		geometryIndex.reserve(tracked.size());
 
 		// The whole tracked set is classified, not only what the main-camera accumulator holds. The
 		// accumulator has already run the engine's culling, so building from it left the GPU culling nothing
@@ -668,7 +882,13 @@ namespace DCLF
 		// the stand-in evaluation runs the engine's own SetupMaterial and SetupGeometry.
 		static const bool accumulatedOnly = SwitchValue("CS_DCLF_TABLES") == "accumulated";
 
-		// Objects the engine kept are classified first, then the rest.
+		// One pass over the tracked set, in whatever order the map holds.
+		//
+		// It used to be two: engine-kept objects into `order`, the rest into `culled`, then `culled`
+		// appended - up to a ~6000-entry memcpy a frame - purely so that an engine-kept object would
+		// always reach a pipeline first and fix its per-frame lighting constants. That guarantee is now
+		// made explicitly by the template election below, which does not depend on iteration order and
+		// therefore survives a table that persists across frames.
 		//
 		// Several of the tables are per-pipeline rather than per-object, and the object that *creates* a
 		// pipeline decides their contents for every object that shares it - in particular
@@ -679,20 +899,23 @@ namespace DCLF
 		// engine culled - in another room, or unlit - would often create the pipeline and hand its lights
 		// to the visible objects drawn on it, which is the blown-out interior lighting this produced.
 		//
-		// Ordering fixes it at the source and costs one extra pass over a hash map. It is not a tie-break
-		// hack: an object the engine kept is by definition in the lighting situation being drawn, so it is
-		// the correct template, and the ones that cannot be drawn should never displace it.
-		std::vector<std::pair<RE::BSGeometry*, const Tracked*>> order;
-		std::vector<std::pair<RE::BSGeometry*, const Tracked*>> culled;
+		// The election below fixes it at the source, and it is not a tie-break hack: an object the engine
+		// kept is by definition in the lighting situation being drawn, so it is the correct template, and
+		// the ones that cannot be drawn must never displace it. Ordering used to enforce that implicitly;
+		// stating it as a rule about the objects is what lets the table outlive the frame.
+		// The pass each object was found under is carried along rather than looked up again in the loop:
+		// nothing mutates accumulatedPasses while the loop runs, so the pointer stays good, and this is
+		// the difference between two hash lookups per tracked object per frame and one.
+		//
+		// The vector is a member so its capacity survives the frame. It was a local, so a 9000-object
+		// exterior allocated and freed two ~140 KB buffers every frame to hold the same thing.
+		order.clear();
 		order.reserve(tracked.size());
-		culled.reserve(tracked.size());
 		for (auto& [trackedGeometry, entry] : tracked) {
-			if (FindAccumulatedPass(trackedGeometry))
-				order.emplace_back(trackedGeometry, &entry);
-			else if (!accumulatedOnly)
-				culled.emplace_back(trackedGeometry, &entry);
+			const auto* pass = FindAccumulatedPass(trackedGeometry);
+			if (pass || !accumulatedOnly)
+				order.push_back({ trackedGeometry, &entry, pass });
 		}
-		order.insert(order.end(), culled.begin(), culled.end());
 
 		// An object the engine culled cannot be drawn while the draws are gated on the engine's own
 		// visibility (IndirectDraws' RequireNativeVisible, i.e. CS_DCLF_CULL_INPUT=native). It is kept in
@@ -701,17 +924,95 @@ namespace DCLF
 		// pipeline's per-frame constants - is pure waste for it, and the stand-in evaluation is the
 		// single most expensive thing in this loop.
 		static const bool drawCulledCandidates = SwitchValue("CS_DCLF_CULL_INPUT") == "tracked";
-		static const bool probeCache = SwitchValue("CS_DCLF_MATERIAL_CACHE") == "probe";
+		// CS_DCLF_MATERIAL_CACHE=off|on|probe. `on` serves a cached record instead of calling
+		// EvaluateMaterial; `probe` serves it AND evaluates, comparing the two.
+		//
+		// EvaluateMaterial is the most expensive call in this loop - a heap allocation, a full
+		// RendererShadowState memcpy, six ~1 KB ConstantBlock resets, 28 COM releases and the engine's real
+		// SetupMaterial with every CS hook on it - and it ran ~104 times a frame in Dragonsreach.
+		//
+		// It is NOT a pure function of (material, pass descriptor), and the reason is worth stating because
+		// the first attempt at this cache was wrecked by it. Decompiling BSLightingShader::SetupMaterial
+		// (vtable slot 4) shows that the PS PerMaterial group's variable 29 - IBLParams, ShaderCache.h - is
+		// not read from the material at all: it comes from fields of the BSLightingShader object itself
+		// (this+0xcc, and this+0xd0/0xd8 or this+0xe0/0xe8 chosen by a day/night flag at this+0xf0). So it
+		// holds the same value for every material in a frame and moves as the frame's lighting does, which
+		// is why min == max across all 104 materials while every record still differed between frames.
+		//
+		// Those positions are therefore patched from one live evaluation a frame, and the set of positions
+		// is cumulative - see materialPatched, which documents the step-change failure that taught it.
+		// The values are sampled here and then RESAMPLED at Prepass by RefreshMaterialPatch, because
+		// sampling them at EarlyPrepass alone leaves them a fraction of a frame behind what the native
+		// draws read - visible as IBLParams differing in the sixth decimal across a fast lighting
+		// transition. With the resample, capture parity is exact in steady state and better than the
+		// uncached path across a transition.
+		const bool materialCacheOn = MaterialCacheEnabled();
+		// =probe validates EVERY served record against a live evaluation instead of the production
+		// sample. The sample is 8 entries behind a stride off a cursor that restarts each frame, so with
+		// a stable iteration order it re-checks the same 8 materials for ever - which is exactly how it
+		// reported "0 stale" while capture parity was failing on 80% of draws.
+		static const bool materialProbeAll = SwitchValue("CS_DCLF_MATERIAL_CACHE") == "probe";
+		// The derivation counters feed exactly one log line, which only CS_DCLF_STATS prints. Computing
+		// them per object per frame when nothing reads them was pure overhead.
+		static const bool derivationStats = SwitchEnabled("CS_DCLF_STATS");
+		// CS_DCLF_CLASSIFY_CACHE=off|on|probe. `probe` uses the cached verdict and *also* recomputes it,
+		// comparing the two; it is the gate, and it costs more than either path alone.
+		static const std::string classifyCacheMode = SwitchValue("CS_DCLF_CLASSIFY_CACHE");
+		static const bool classifyCache = classifyCacheMode != "off";
+		static const bool classifyProbe = classifyCacheMode == "probe";
+		// Frame-globals that were being read per object. ShouldSuppress in particular is three terms, and
+		// only one of them is per object - the interior test is the same answer for every object in the
+		// frame.
+		const bool interior = Util::IsInterior();
+		const bool lightLimitFixLoaded = globals::features::lightLimitFix.loaded;
 
-		for (auto& [geometry, trackedEntry] : order) {
+		timer.Add(BuildPart::PassLookup);
+		for (auto& [geometry, trackedEntry, accumulated] : order) {
 			const auto& entry = *trackedEntry;
-			const auto* accumulated = FindAccumulatedPass(geometry);
+			// Per TRACKED object, not per eligible one: for a rejected object this is its `continue` and
+			// the iteration itself. It used to be billed to `record`, which is a large part of why `record`
+			// looked like the biggest cost in the loop.
+			timer.Add(BuildPart::LoopTail);
 			const bool drawable = accumulated || drawCulledCandidates;
 			LightingDescriptors descriptors;
-			timer.Add(stats.partMs[1] /* the rest of the previous object counts as classification */);
-			Ineligible reason = ClassifyStatic(*geometry, &descriptors, accumulated);
+			// The cached-negative fast path. The witnesses come off one cache line of the geometry's
+			// runtime data, and an object that has already been shown undrawable never reaches the RTTI
+			// cast, the flag tests or the fade metric again.
+			auto& verdict = trackedEntry->verdict;
+			auto& runtime = geometry->GetGeometryRuntimeData();
+			auto* witnessProperty = runtime.shaderProperty.get();
+			const auto* witnessMaterial = witnessProperty ? witnessProperty->material : nullptr;
+			const std::uint8_t fadeState = FadeStateOf(witnessProperty);
+			const bool hit = classifyCache && verdict.cached && verdict.rendererData == runtime.rendererData &&
+			                 verdict.property == witnessProperty && verdict.material == witnessMaterial &&
+			                 verdict.fadeState == fadeState;
+			Ineligible reason;
+			if (hit && !classifyProbe) {
+				reason = verdict.reason;
+				++stats.classifyHits;
+			} else {
+				reason = ClassifyStatic(*geometry, &descriptors, accumulated);
+				if (hit) {
+					// probe: the cache said one thing and the computation another, which is a defect.
+					++stats.classifyChecked;
+					if (reason != verdict.reason) {
+						++stats.classifyDiffers;
+						if (stats.classifyDiffers == 1)
+							logger::warn("[DCLF] classify cache: '{}' is cached as {} but recomputes as {}",
+								geometry->name.c_str() ? geometry->name.c_str() : "?",
+								kIneligibleNames[static_cast<std::size_t>(verdict.reason)], kIneligibleNames[static_cast<std::size_t>(reason)]);
+					}
+					reason = verdict.reason;  // the cache is what the frame would have used
+				} else if (classifyCache && CacheableVerdict(reason)) {
+					verdict = { true, reason, runtime.rendererData, witnessProperty, witnessMaterial, fadeState };
+				} else if (classifyCache) {
+					verdict.cached = false;
+				}
+			}
+			timer.Add(BuildPart::ClassifyStatic);
 			if (reason == Ineligible::None)
 				reason = ClassifyFrame(entry);
+			timer.Add(BuildPart::ClassifyFrame);
 			// The renderer draws batch lists 1, 3 and 4 with alpha testing. When the technique the pass was
 			// registered under lacks DoAlphaTest, the technique drawn sometimes gains it after the tables are
 			// built (engine notes: batch renderer, open question); leave those to the native loop.
@@ -721,7 +1022,11 @@ namespace DCLF
 			++stats.ineligible[static_cast<std::size_t>(reason)];
 			if (reason != Ineligible::None)
 				continue;
-			if (descriptors.derivedPass == kNotDerived) {
+			// Only computed when something will report them: this whole block, including the popcount
+			// loop, exists to feed one log line, and it ran per object per frame regardless.
+			if (!derivationStats) {
+				// nothing to do
+			} else if (descriptors.derivedPass == kNotDerived) {
 				++stats.derivationNative;
 			} else if (accumulated) {
 				// Only objects the accumulator holds can be compared at all. Without one, descriptors.pass
@@ -745,6 +1050,7 @@ namespace DCLF
 					remaining &= remaining - 1;
 				}
 			}
+			timer.Add(BuildPart::Diagnostics);
 
 			auto& data = geometry->GetGeometryRuntimeData();
 			auto* property = data.shaderProperty.get();
@@ -753,21 +1059,39 @@ namespace DCLF
 			const bool alphaTest = alpha && alpha->GetAlphaTesting();
 
 			// Geometry, shared between every object drawing the same TriShape.
+			timer.Add(BuildPart::Record /* the property and alpha reads above */);
 			auto* triShape = data.rendererData;
-			const GpuResources::Buffer* vertexBuffer = nullptr;
-			const GpuResources::Buffer* indexBuffer = nullptr;
-			if (resolveBuffers) {
-				// The render graph reads the game's buffers in place; they must never move (GpuResources).
-				vertexBuffer = gpu.Resolve(reinterpret_cast<ID3D11Buffer*>(triShape->vertexBuffer));
-				indexBuffer = gpu.Resolve(reinterpret_cast<ID3D11Buffer*>(triShape->indexBuffer));
-				if (!vertexBuffer || !indexBuffer) {
-					--stats.ineligible[static_cast<std::size_t>(Ineligible::None)];
-					++stats.ineligible[static_cast<std::size_t>(Ineligible::UnstableBuffer)];
-					continue;
-				}
-			}
 			auto [geometryIt, newGeometry] = geometryIndex.try_emplace(triShape, static_cast<std::uint32_t>(tables.geometries.size()));
 			if (newGeometry) {
+				// The buffers are resolved once per TRISHAPE, not once per object.
+				//
+				// Both Resolve results were only ever read inside this branch; for an object whose
+				// geometry was already in the table they were computed and thrown away. With ~3.8 objects
+				// per TriShape in the Whiterun exterior that is most of the calls, and in steady state a
+				// Resolve is a hash probe (DescribeResource only runs on first insert), so it was ~0.33 ms
+				// a frame of pure repetition.
+				//
+				// Skipping the call altogether is NOT safe and is why this is a move rather than a cache:
+				// GpuResources holds a reference on each buffer so its address cannot be reused, and it
+				// drops that reference when an entry goes kEvictFrames without a Resolve. Resolving per
+				// TriShape still touches every entry DCLF depends on every frame, so nothing is evicted
+				// out from under the tables.
+				const GpuResources::Buffer* vertexBuffer = nullptr;
+				const GpuResources::Buffer* indexBuffer = nullptr;
+				if (resolveBuffers) {
+					// The render graph reads the game's buffers in place; they must never move (GpuResources).
+					vertexBuffer = gpu.Resolve(reinterpret_cast<ID3D11Buffer*>(triShape->vertexBuffer));
+					indexBuffer = gpu.Resolve(reinterpret_cast<ID3D11Buffer*>(triShape->indexBuffer));
+					if (!vertexBuffer || !indexBuffer) {
+						// Leave the slot unclaimed so the next object sharing this TriShape retries,
+						// exactly as it did when every object resolved for itself.
+						geometryIndex.erase(geometryIt);
+						--stats.ineligible[static_cast<std::size_t>(Ineligible::None)];
+						++stats.ineligible[static_cast<std::size_t>(Ineligible::UnstableBuffer)];
+						timer.Add(BuildPart::Resolve);
+						continue;
+					}
+				}
 				const auto& shape = static_cast<RE::BSTriShape*>(geometry)->GetTrishapeRuntimeData();
 				GeometryRecord record;
 				record.vertexBuffer = reinterpret_cast<ID3D11Buffer*>(triShape->vertexBuffer);
@@ -784,19 +1108,22 @@ namespace DCLF
 					record.indexBytes = indexBuffer->size;
 				}
 				tables.geometries.push_back(record);
+				timer.Add(BuildPart::Resolve);
 			}
 
 			const PipelineKey key{ descriptors.vertex, descriptors.pixel, twoSided ? kRasterTwoSided : 0u, descriptors.pass,
 				VertexLayoutOf(tables.geometries[geometryIt->second].vertexDesc) };
 			auto [pipelineIt, newPipeline] = pipelineIndex.try_emplace(key, static_cast<std::uint32_t>(tables.pipelines.size()));
 			if (newPipeline && !drawable) {
-				// Nothing would ever use it. Leaving the entry out keeps the pipeline table to what is
-				// actually drawn, which is also what the ordering above relies on: a culled candidate must
-				// never be the object that fixes a pipeline's per-frame lighting constants.
+				// Nothing would ever use it: leaving the entry out keeps the pipeline table, and the
+				// per-pipeline evaluations that go with it, to what is actually drawn. It also means a
+				// culled candidate cannot create a pipeline in the first place, so in the default
+				// configuration the election below never has to take a template over - which is exactly
+				// what its counter reading 0 says.
 				pipelineIndex.erase(pipelineIt);
 				pipelineIt = pipelineIndex.end();
 			} else if (newPipeline) {
-				timer.Add(stats.partMs[1]);
+				timer.Add(BuildPart::Dedup);
 				tables.pipelines.push_back(key);
 				// Per-frame PerGeometry values for this pass descriptor, from any object's lighting pass
 				// (it supplies the scene light list the engine reads the sun from).
@@ -806,6 +1133,7 @@ namespace DCLF
 				tables.geometryConstants.push_back(constants);
 				tables.geometryConstantsValid.push_back(valid ? 1 : 0);
 				tables.geometryTemplate.push_back(property);
+				tables.geometryTemplateNative.push_back(accumulated ? 1 : 0);
 
 				TechniqueConstants technique;
 				EvaluateTechnique(descriptors.pass, technique);
@@ -822,7 +1150,27 @@ namespace DCLF
 				                                             << ExtendedTranslucency::ExtraFeatureDescriptorShift :
 				                                         0u;
 				tables.permutations.push_back(permutation);
-				timer.Add(stats.partMs[2]);
+				timer.Add(BuildPart::PipelineEval);
+			} else if (accumulated && pipelineIt != pipelineIndex.end() &&
+			           pipelineIt->second < tables.geometryTemplateNative.size() &&
+			           !tables.geometryTemplateNative[pipelineIt->second]) {
+				// The election. This pipeline's per-frame lighting template belongs to an object the
+				// engine culled, and here is one it kept: take the template over. An object the engine
+				// kept is by definition in the lighting situation being drawn, so it is the correct
+				// template, and this is the ordering guarantee stated as a rule about the objects rather
+				// than as a rule about the order they are visited in - which is what a persistent
+				// pipeline table needs, because it has no visit order to rely on.
+				const auto slot = pipelineIt->second;
+				GeometryConstants constants;
+				const auto* templatePass = FindLightingPass(property);
+				if (templatePass && evaluator.EvaluateGeometry(*templatePass, descriptors.pass, mainPassRenderFlags, constants)) {
+					tables.geometryConstants[slot] = constants;
+					tables.geometryConstantsValid[slot] = 1;
+				}
+				tables.geometryTemplate[slot] = property;
+				tables.geometryTemplateNative[slot] = 1;
+				++stats.templateUpgrades;
+				timer.Add(BuildPart::PipelineEval);
 			}
 
 			// Material state as the engine's SetupMaterial produces it for this pass descriptor.
@@ -833,30 +1181,135 @@ namespace DCLF
 				materialIndex.erase(materialIt);
 				materialIt = materialIndex.end();
 			} else if (newMaterial) {
-				timer.Add(stats.partMs[1]);
+				timer.Add(BuildPart::Dedup);
 				MaterialRecord record;
-				if (!evaluator.EvaluateMaterial(material, descriptors.pass, record)) {
-					// No shader instance yet (nothing drawn so far): stay native this frame.
-					materialIndex.erase(materialIt);
-					++stats.ineligible[static_cast<std::size_t>(Ineligible::NotLightingShader)];
-					--stats.ineligible[static_cast<std::size_t>(Ineligible::None)];
-					continue;
-				}
-				++stats.materialsEvaluated;
-				if (probeCache) {
-					const std::pair probeKey{ material, descriptors.pass };
-					if (auto it = materialProbe.find(probeKey); it != materialProbe.end()) {
-						(it->second.record == record ? stats.materialsUnchanged : stats.materialsChanged) += 1;
-						it->second.record = record;
-					} else {
-						auto& probe = materialProbe[probeKey];
-						probe.material.reset(const_cast<RE::BSShaderMaterial*>(material));
-						probe.record = record;
+				// The cross-frame material cache.
+				//
+				// EvaluateMaterial is the single most expensive call in this loop: a heap allocation, a full
+				// RendererShadowState memcpy, six ~1 KB ConstantBlock resets, 28 COM releases and the engine's
+				// real SetupMaterial with every CS hook on it. It ran ~104 times a frame in Dragonsreach for a
+				// result that is almost entirely the same every time.
+				//
+				// "Almost": measurement found exactly three adjacent PS floats that move between frames, and
+				// they hold the SAME value for every material in a frame (min == max across all 104), drifting
+				// as the time of day advances. So the record is cached, and those frame-global floats are
+				// patched from one live evaluation per frame. Their positions are LEARNED rather than written
+				// in here, because the reason a value is frame-global belongs to the engine, not to this file,
+				// and a hard-coded index would silently rot when a feature changes the constant layout.
+				const std::pair cacheKey{ material, descriptors.pass };
+				auto cached = materialCache.find(cacheKey);
+				const bool canServe = materialCacheOn && cached != materialCache.end() && materialPatchValuesFresh;
+				// One live evaluation a frame teaches the drift; the validator below re-evaluates a rolling
+				// slice so a material that starts varying in some OTHER field cannot go unnoticed.
+				const bool validating = materialCacheOn && cached != materialCache.end() && materialPatchValuesFresh &&
+				                        (materialProbeAll ||
+				                            (stats.materialsValidated < kMaterialValidationsPerFrame &&
+				                                (materialValidationCursor++ % kMaterialValidationStride) == 0));
+				if (canServe && !validating) {
+					record = cached->second.record;
+					for (std::size_t i = 0; i < materialPatched.size(); ++i)
+						record.ps.floats[materialPatched[i]] = materialPatchValues[i];
+					++stats.materialsFromCache;
+				} else {
+					if (!evaluator.EvaluateMaterial(material, descriptors.pass, record)) {
+						// No shader instance yet (nothing drawn so far): stay native this frame.
+						materialIndex.erase(materialIt);
+						++stats.ineligible[static_cast<std::size_t>(Ineligible::NotLightingShader)];
+						--stats.ineligible[static_cast<std::size_t>(Ineligible::None)];
+						continue;
 					}
+					++stats.materialsEvaluated;
+					if (cached != materialCache.end()) {
+						const auto& previous = cached->second.record;
+						if (!materialPatchValuesFresh) {
+							// Any position that differs from this material's own cached copy joins the set
+							// permanently; then every known position takes this frame's live value.
+							for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f) {
+								if (previous.ps.floats[f] != record.ps.floats[f])
+									NotePatchedFloat(f);
+							}
+							for (std::size_t i = 0; i < materialPatched.size(); ++i)
+								materialPatchValues[i] = record.ps.floats[materialPatched[i]];
+							materialPatchValuesFresh = true;
+							materialPatchSource.reset(const_cast<RE::BSShaderMaterial*>(material));
+							materialPatchSourcePass = descriptors.pass;
+							stats.materialDriftFloats = static_cast<std::uint32_t>(materialPatched.size());
+						} else if (validating) {
+							// The standing alarm: what the cache WOULD have served, against a live evaluation.
+							// It runs in production, not only under a probe switch, because the failure it
+							// guards against is a material quietly rendering with another material's constants.
+							MaterialRecord served = previous;
+							for (std::size_t i = 0; i < materialPatched.size(); ++i)
+								served.ps.floats[materialPatched[i]] = materialPatchValues[i];
+							++stats.materialsValidated;
+							// Stage 3's probe shape: the frame must behave exactly as it would with the cache
+							// on, or the probe measures a configuration nobody ships. The live record is
+							// only the yardstick; what goes into the tables is what the cache would serve.
+							const MaterialRecord fresh = record;
+							record = served;
+							++stats.materialsFromCache;
+							if (!(served == fresh)) {
+								++stats.materialCacheStale;
+								// Self-healing: a float the cache got wrong is, by definition, one that is not
+								// a fixed property of the material. Adopt it into the patched set so the next
+								// frame serves it live instead of from the cache.
+								for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f) {
+									if (served.ps.floats[f] != fresh.ps.floats[f]) {
+										NotePatchedFloat(f);
+										for (std::size_t i = 0; i < materialPatched.size(); ++i) {
+											if (materialPatched[i] == f)
+												materialPatchValues[i] = fresh.ps.floats[f];
+										}
+									}
+								}
+								if (served.vs.floats != fresh.vs.floats)
+									stats.materialDiffMask |= 1u << 0;
+								if (served.ps.floats != fresh.ps.floats)
+									stats.materialDiffMask |= 1u << 1;
+								if (served.textures != fresh.textures)
+									stats.materialDiffMask |= 1u << 2;
+								if (served.addressModes != fresh.addressModes)
+									stats.materialDiffMask |= 1u << 3;
+								if (served.filterModes != fresh.filterModes)
+									stats.materialDiffMask |= 1u << 4;
+								if (served.textureWritten != fresh.textureWritten)
+									stats.materialDiffMask |= 1u << 5;
+								if (!stats.materialDiffLogged) {
+									stats.materialDiffLogged = true;
+									std::string moved;
+									for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f) {
+										if (served.vs.floats[f] != fresh.vs.floats[f])
+											moved += fmt::format(" vs[{}]=c{}.{} ({} -> {})", f, f / 4, "xyzw"[f % 4], served.vs.floats[f], fresh.vs.floats[f]);
+										if (served.ps.floats[f] != fresh.ps.floats[f])
+											moved += fmt::format(" ps[{}]=c{}.{} ({} -> {})", f, f / 4, "xyzw"[f % 4], served.ps.floats[f], fresh.ps.floats[f]);
+									}
+									if (served.textures != fresh.textures)
+										moved += " textures";
+									if (served.addressModes != fresh.addressModes || served.filterModes != fresh.filterModes)
+										moved += " samplers";
+									logger::warn("[DCLF] material cache STALE for a material:{}", moved);
+								}
+							}
+						}
+					}
+					auto& cacheEntry = cached != materialCache.end() ? cached->second : materialCache[cacheKey];
+					// The reference is what makes the key safe: BSShaderMaterial is intrusively ref-counted, so
+					// holding one means a freed material cannot be mistaken for a new allocation at the same
+					// address - which is the one way this cache could hand an object another material's state.
+					if (!cacheEntry.material)
+						cacheEntry.material.reset(const_cast<RE::BSShaderMaterial*>(material));
+					cacheEntry.record = record;
 				}
+				if (auto it = materialCache.find(cacheKey); it != materialCache.end())
+					it->second.lastUsed = frame;
 				tables.materials.push_back(record);
-				timer.Add(stats.partMs[3]);
+				timer.Add(BuildPart::MaterialEval);
 			}
+			// The geometry, pipeline and material probes above, on the path where all three hit - which is
+			// nearly every object. The Dedup part only ever fired inside the miss branches, so these three
+			// hashes (one of them over the five-field PipelineKey) fell through to the next iteration and
+			// were billed to `record`.
+			timer.Add(BuildPart::DedupHit);
 
 			const auto objectId = static_cast<std::uint32_t>(tables.objects.size());
 			ObjectRecord object{};
@@ -880,15 +1333,16 @@ namespace DCLF
 			// out of bounds as readily as any other.
 			object.flags = (alphaTest ? kObjectAlphaTest : 0u) | (twoSided ? kObjectTwoSided : 0u) |
 			               (accumulated ? kObjectNativeVisible : 0u) | (hasBindings ? 0u : kObjectNoBindings) |
-			               (ExternalEmittance::ShouldSuppress(property, geometry) ? kObjectSuppressExternalEmittance : 0u) |
+			               (ExternalEmittance::ShouldSuppress(interior, property, geometry) ? kObjectSuppressExternalEmittance : 0u) |
 			               (alphaTest ? static_cast<std::uint32_t>(alpha->alphaThreshold) << kObjectAlphaThresholdShift : 0u);
+			stats.nativeVisible += accumulated ? 1 : 0;
 			tables.objects.push_back(object);
 			tables.objectGeometry.push_back(geometry);
 			float emissiveMult = 1.0f;
 			tables.shading.push_back(MakeShading(*static_cast<RE::BSLightingShaderProperty*>(property), descriptors, mainPassRenderFlags, emissiveMult));
 			tables.emissiveMult.push_back(emissiveMult);
 			ObjectLights lights;
-			if (globals::features::lightLimitFix.loaded) {
+			if (lightLimitFixLoaded) {
 				lights.roomIndex = globals::features::lightLimitFix.GetRoomIndex(geometry);
 				if (accumulated)
 					lights.shadowBitMask = LightLimitFix::GetShadowBitMask(accumulated->pass);
@@ -911,15 +1365,41 @@ namespace DCLF
 			draw.vertexOffset = 0;
 			draw.firstInstance = 0;
 			tables.draws.push_back(draw);
+			timer.Add(BuildPart::Record);
 		}
 
 		stats.objects = static_cast<std::uint32_t>(tables.objects.size());
-		stats.nativeVisible = 0;
-		for (const auto& object : tables.objects)
-			stats.nativeVisible += (object.flags & kObjectNativeVisible) ? 1 : 0;
 		stats.geometries = static_cast<std::uint32_t>(tables.geometries.size());
 		stats.pipelines = static_cast<std::uint32_t>(tables.pipelines.size());
+		// The 4c gate, checked over the finished tables rather than asserted from the election: no
+		// native-visible object may draw on a pipeline whose lighting template came from a culled one.
+		stats.templateDefects = 0;
+		stats.pipelinesCulledOnly = 0;
+		for (const auto native : tables.geometryTemplateNative)
+			stats.pipelinesCulledOnly += native ? 0u : 1u;
+		if (stats.pipelinesCulledOnly) {
+			for (const auto& object : tables.objects) {
+				if (!(object.flags & kObjectNativeVisible) || (object.flags & kObjectNoBindings))
+					continue;
+				if (object.pipelineIndex < tables.geometryTemplateNative.size() && !tables.geometryTemplateNative[object.pipelineIndex])
+					++stats.templateDefects;
+			}
+		}
 		stats.materials = static_cast<std::uint32_t>(tables.materials.size());
+		// The eviction the probe never had. Without it a long session accumulates every material of every
+		// cell it has visited, each holding a reference that keeps the material itself alive - a slow leak
+		// rather than a crash, which is why it needs a counter and not just a comment.
+		if ((frame % kMaterialCacheIdleFrames) == 0) {
+			for (auto it = materialCache.begin(); it != materialCache.end();) {
+				if (frame - it->second.lastUsed > kMaterialCacheIdleFrames) {
+					it = materialCache.erase(it);
+					++stats.materialCacheEvicted;
+				} else {
+					++it;
+				}
+			}
+		}
+		stats.materialCacheEntries = static_cast<std::uint32_t>(materialCache.size());
 	}
 
 	std::int32_t SceneStore::FindObject(const RE::BSGeometry* a_geometry) const

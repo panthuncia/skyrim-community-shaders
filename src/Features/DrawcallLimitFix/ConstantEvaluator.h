@@ -54,10 +54,21 @@ namespace DCLF
 		std::array<std::uint32_t, kPixelTextureSlots> filterModes{};  // kUnwrittenFilterMode where SetupMaterial leaves it
 		std::uint32_t textureWritten = 0;
 
-		/** @brief Byte equality, for measuring whether a record could be cached across frames. */
+		/**
+		 * @brief Value equality, for measuring whether a record could be cached across frames.
+		 *
+		 * Member-wise, NOT memcmp over the object. The members total 2340 bytes while the struct is
+		 * 16-aligned because of ConstantBlock, so there are 12 bytes of trailing padding that nothing
+		 * ever writes. memcmp compared that padding: a record built on the stack carried whatever
+		 * garbage was there, the copy held in the probe map carried different garbage, and every single
+		 * comparison came out unequal. That is what "104 evaluated, 0 unchanged, 104 changed" was
+		 * reporting - the instrument, not the materials.
+		 */
 		bool operator==(const MaterialRecord& a_other) const
 		{
-			return std::memcmp(this, &a_other, sizeof(MaterialRecord)) == 0;
+			return vs.floats == a_other.vs.floats && ps.floats == a_other.ps.floats &&
+			       textures == a_other.textures && addressModes == a_other.addressModes &&
+			       filterModes == a_other.filterModes && textureWritten == a_other.textureWritten;
 		}
 	};
 

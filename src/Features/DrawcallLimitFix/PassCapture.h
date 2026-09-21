@@ -130,5 +130,13 @@ namespace DCLF
 		friend struct Hook;
 		void Record(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint32_t a_technique);
 		bool Withhold(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass);
+
+	public:
+		/** @brief CS_DCLF_REGISTER_PROBE: registrations by shader type, and how many into a main renderer. */
+		static constexpr std::size_t kShaderTypes = 16;
+		std::array<std::atomic<std::uint32_t>, kShaderTypes> probeCounts{};
+		std::array<std::atomic<std::uint32_t>, kShaderTypes> probeMain{};
+
+	private:
 	};
 }

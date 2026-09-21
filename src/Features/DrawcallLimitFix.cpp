@@ -284,6 +284,14 @@ void DrawcallLimitFix::Prepass()
 				reasons += fmt::format(" {}={}", DCLF::kIneligibleNames[i], stats.ineligible[i]);
 		}
 		const double frames = std::max(1u, timing.frames);
+		// The per-part breakdown appears only under CS_DCLF_PROFILE=1, because that is the only time it is
+		// measured. Timing from inside the loop perturbs it, so compare a profiled run's parts against an
+		// unprofiled run's total rather than treating the parts as free.
+		std::string parts;
+		if (DCLF::SceneStore::ProfileEnabled()) {
+			for (std::size_t i = 0; i < stats.partMs.size(); ++i)
+				parts += fmt::format("{}{} {:.3f}", parts.empty() ? "; by part: " : ", ", DCLF::kBuildPartNames[i], stats.partMs[i] / frames);
+		}
 		const auto& shaders = DCLF::ShaderPrograms::Get().GetStats();
 		logger::info("[DCLF] SPIR-V programs: {} requested, {} ready ({} stages from cache), {} failed", shaders.requested, shaders.ready, shaders.fromCache, shaders.failed);
 		const auto& indirect = DCLF::DrawPipelines::Get().GetStats();
@@ -338,18 +346,50 @@ void DrawcallLimitFix::Prepass()
 			capture.captured, capture.threads, capture.overflowed, capture.compared, capture.missing, capture.extra,
 			capture.techniqueDiffers, capture.subPassDiffers,
 			(capture.missing || capture.techniqueDiffers || capture.subPassDiffers) ? "" : " <- OK");
+		// CS_DCLF_REGISTER_PROBE=1: what reaches RegisterPass besides the lighting passes, and how much of
+		// it lands in one of the main camera's batch renderers. This is what says whether the depth pass
+		// can be owned the same way the opaque pass is.
+		if (DCLF::SwitchEnabled("CS_DCLF_REGISTER_PROBE")) {
+			auto& probeCapture = DCLF::PassCapture::Get();
+			std::string byType;
+			for (std::size_t i = 0; i < probeCapture.probeCounts.size(); ++i) {
+				const auto total = probeCapture.probeCounts[i].exchange(0);
+				const auto main = probeCapture.probeMain[i].exchange(0);
+				if (total)
+					byType += fmt::format(" type{}={}/{}", i, main, total);
+			}
+			logger::info("[DCLF] RegisterPass by shader type (into a main renderer / total):{}", byType.empty() ? " none" : byType);
+		}
 		if (DCLF::PassCapture::WithholdingEnabled())
 			logger::info("[DCLF] static ownership: {} passes withheld from the batch renderer, {} objects claimed, {} claimed but not drawn{}",
 				capture.withheld, capture.claimed, capture.holes, capture.holes ? " <- HOLES" : "");
 		if (DCLF::PassCapture::WithholdingEnabled())
 			logger::info("[DCLF] claim churn: +{} -{} ({} of the drops still had an engine pass, so the native loop takes them back)",
 				capture.claimsAdded, capture.claimsDropped, capture.droppedAfterCull);
-		logger::info("[DCLF] material evaluations (last frame): {} evaluated, {} skipped as undrawable; probe: {} unchanged since last frame, {} changed",
-			stats.materialsEvaluated, stats.materialsSkipped, stats.materialsUnchanged, stats.materialsChanged);
-		logger::info("[DCLF] tracked {} under {} category nodes: {} objects ({} the engine also kept), {} geometries, {} pipelines, {} materials; left native:{}; events +{} -{}, validation drops {}; CPU per frame: events {:.3f} ms, tables {:.3f} ms (max {:.3f}; walk {:.3f}, classify {:.3f}, pipelines {:.3f}, materials {:.3f})",
+		if (stats.classifyHits || stats.classifyChecked)
+			logger::info("[DCLF] classification cache (last frame): {} served from the cache, {} recomputed and compared, {} differ{}",
+				stats.classifyHits, stats.classifyChecked, stats.classifyDiffers, stats.classifyDiffers ? " <- STALE" : "");
+		// The Stage 4c gate. A pipeline's per-frame lighting template must come from an object the engine
+		// itself kept; anything else hands a culled object's scene light list to the visible objects drawn
+		// on that pipeline, which is the blown-out interior lighting defect.
+		logger::info("[DCLF] pipeline templates: {} of {} drawn only by culled candidates, {} taken over this frame; {} visible objects on a culled template{}",
+			stats.pipelinesCulledOnly, stats.pipelines, stats.templateUpgrades, stats.templateDefects,
+			stats.templateDefects ? " <- CULLED TEMPLATE" : "");
+		// The material cache and its standing alarm. materialCacheStale must be 0: it is the count of
+		// entries that were re-evaluated live and disagreed with what the cache would have served.
+		logger::info("[DCLF] materials: {} evaluated, {} served from the cache, {} skipped as undrawable; {} floats patched per record; cache {} entries (+{} evicted); validated {}, stale {}{}",
+			stats.materialsEvaluated, stats.materialsFromCache, stats.materialsSkipped, stats.materialDriftFloats,
+			stats.materialCacheEntries, stats.materialCacheEvicted, stats.materialsValidated, stats.materialCacheStale,
+			stats.materialCacheStale ? " <- STALE MATERIAL" : "");
+		if (stats.materialCacheStale)
+			logger::warn("[DCLF] material cache staleness is in: {}{}{}{}{}{}",
+				(stats.materialDiffMask & 1) ? "vs " : "", (stats.materialDiffMask & 2) ? "ps " : "",
+				(stats.materialDiffMask & 4) ? "textures " : "", (stats.materialDiffMask & 8) ? "address " : "",
+				(stats.materialDiffMask & 16) ? "filter " : "", (stats.materialDiffMask & 32) ? "written" : "");
+		logger::info("[DCLF] tracked {} under {} category nodes: {} objects ({} the engine also kept), {} geometries, {} pipelines, {} materials; left native:{}; events +{} -{}, validation drops {}; CPU per frame: events {:.3f} ms, tables {:.3f} ms (max {:.3f}){}",
 			stats.tracked, stats.categoryNodes, stats.objects, stats.nativeVisible, stats.geometries, stats.pipelines, stats.materials, reasons,
 			stats.attachedEvents, stats.detachedEvents, stats.validationDrops, timing.eventsMs / frames, timing.buildMs / frames, timing.buildMaxMs,
-			stats.partMs[0] / frames, stats.partMs[1] / frames, stats.partMs[2] / frames, stats.partMs[3] / frames);
+			parts);
 		timing = {};
 		store.ResetTimes();
 	}

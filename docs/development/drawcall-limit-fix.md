@@ -1238,6 +1238,182 @@ Distinct pairs measured 85 to 201 across three areas, so the record buffer is si
 be handed to the GPU was that the CPU built a binding record per candidate. It no longer does, so feeding
 every candidate to the culling now costs a draw input and a sequence - and nothing else.
 
+## Per-object work, Stage 0: the measurement was lying
+
+`BuildFrame`'s cost was reported in four parts, one of which was called "classification" and read 1.272
+ms a frame in Dragonsreach. It was the largest single DCLF cost and the obvious next target.
+
+It was not one thing. `PartTimer` is called at the *top* of each iteration, so that bucket accrued
+everything since the previous object: both `FindAccumulatedPass` lookups, `ClassifyStatic`,
+`ClassifyFrame`, the derivation counters, two `GpuResources::Resolve` calls, three dedup probes, two
+transforms, `ExternalEmittance::ShouldSuppress`, `GetRoomIndex`, `MakeShading`, the `objectIndex` insert
+and the `DrawSequence` build. Nine things under one label.
+
+The parts are now ten, each measuring one thing, behind `CS_DCLF_PROFILE=1` (default off, so the loop
+makes no clock calls in a normal run). Whiterun exterior, 9022 tracked / 2885 eligible:
+
+| Part | ms | | Part | ms |
+| --- | --- | --- | --- | --- |
+| **record** | **1.444** | | resolve | 0.199 |
+| classify-static | 0.907 | | diagnostics | 0.118 |
+| classify-frame | 0.532 | | dedup | 0.051 |
+| pass-lookup | 0.395 | | pipeline-eval | 0.045 |
+| material-eval | 0.208 | | walk | 0.129 |
+
+**The largest part is not classification.** It is `record` - the object record assembly: transforms,
+bounds, flags, emittance, room index, shading and the draw. Classification is second, and its two halves
+together (1.439 ms) only just match it.
+
+The two scale differently, which is what matters for coverage:
+
+-   **classification scales with the tracked set** (9022 objects, ~160 ns each). It is paid for every
+    object whether or not it is ever drawn - including the 6097 the exterior rejects every frame.
+-   **`record` scales with the eligible set** (2885 objects). It is the cost of actually drawing.
+
+So classification is the part that grows as coverage grows, and `record` is the part that grows as
+coverage *succeeds*. Both need work; the priority between them was not what it looked like.
+
+One caveat the numbers carry: timing a loop from inside it perturbs it. Profiled, the exterior reads
+4.035 ms; unprofiled it is 2.855 ms. The instrument costs 41%, so the parts are upper bounds and only
+their ranking should be trusted.
+
+## Stage 1: dead and duplicate work
+
+No caching yet - only removing work that was being done twice or for nobody.
+
+-   **One pass lookup per object, not two.** The ordering pass called `FindAccumulatedPass` to split
+    engine-kept objects from culled ones, then the loop called it again for the same object. The pointer
+    is now carried in the ordering entry; nothing mutates the map while the loop runs.
+-   **One pass map per frame, not three.** `CollectAccumulatedPasses` walked the batch renderers to fill
+    `accumulatedPasses`, `CompareCapturedPasses` built a second map of the same size to compare against
+    it, and then the first was discarded and refilled from the second. The capture now fills the table
+    directly; the walk and the comparison run only under the new `CS_DCLF_PASS_PARITY=1`, or as the
+    first-frame fallback. The batch-renderer set the capture hook needs is refreshed separately, since
+    that part *is* needed every frame.
+-   **`RefreshCategoryNodes` no longer runs every Present.** It rebuilt and diffed the whole category set
+    on every frame, with a full linear scan over the tracked map whenever any node had gone, to detect
+    something that changes only when a cell attaches or detaches. It now runs when a cheap signature
+    changes, when a detach was drained this frame, or on a 30-frame backstop. The signature deliberately
+    folds in everything the refresh reads to *find* nodes - the interior cell, the grid cells, each
+    cell's loaded data, its cell3D and its child count - because missing a change means geometry attached
+    under a new node is never tracked at all.
+-   **Frame-globals hoisted out of the loop.** `Util::IsInterior()` was being evaluated per object inside
+    `ExternalEmittance::ShouldSuppress`; that function gained an overload taking the answer, so the
+    interior test happens once a frame. Same for the two feature-loaded flags.
+-   **The derivation counters are computed only when they are reported.** The whole block, including a
+    popcount loop, existed to feed one log line that only `CS_DCLF_STATS` prints, and ran per object per
+    frame regardless.
+-   **Two vectors stopped being reallocated.** The ordering vectors were locals, so a 9000-object
+    exterior allocated and freed two ~140 KB buffers every frame; and the engine-kept count was taken in a
+    second pass over the finished table rather than as the objects were built.
+
+### One item was dropped, and the reason is the interesting part
+
+The plan called for removing the duplicated `MakeShading` in `BuildFrame`, on the grounds that
+`RefreshFrameConstants` overwrites it at Prepass. It does - but **the Z-prepass epoch runs between
+them**, and under `DCLF_BINDLESS` it reads `MaterialData` out of the per-object record, which comes from
+exactly that write. `Lighting.hlsl` uses `MaterialData.z` for the alpha test at lines 2833 and 2840,
+*before* the `DCLF_DEPTH_ONLY` return at 2857. The same argument applies to the duplicated
+`EvaluateGeometry`: `RefreshFrameConstants` deliberately keeps `BuildFrame`'s value for a pipeline whose
+template has no lighting pass.
+
+Neither is dead. They are the depth epoch's copy, and the plan's "carefully" was warranted.
+
+### Result
+
+| | Before | After |
+| --- | --- | --- |
+| Whiterun exterior | 2.855 ms | **2.479 ms** |
+| Dragonsreach | 1.676 ms | **1.531 ms** |
+
+**Gates:** `CS_DCLF_PASS_PARITY` reports 1127 compared, 0 missing, 0 extra, 0 technique differs, 0
+subPass differs (with ownership off - with static ownership the walk sees only what is not withheld, so
+921 show as "extra", which is the whole point of capturing at registration instead). Capture parity 0
+mismatched over 276,300 draws. Object, geometry, pipeline and material counts identical across three
+cells and two transitions; 0 claimed-but-undrawn; 0 VUIDs.
+
+## Stage 2: why the depth pass is not owned, measured
+
+Owning the depth pass would delete `SkipNativePass` and the per-draw `drawnFrame` map. The plan assumed
+it was the same mechanism as the opaque pass with a different virtual. It is not, and a probe on
+`RegisterPass` says so directly (`CS_DCLF_REGISTER_PROBE=1`, Dragonsreach, per frame):
+
+| Shader type | Registrations | Into a main-camera batch renderer |
+| --- | --- | --- |
+| Lighting (6) | 1125 | **1125** |
+| Utility (8) | 2396 | **3** |
+
+`BSLightingShaderProperty::GetRenderDepthPass` builds its pass with **`BSUtilityShader`**, not the
+lighting shader, and those passes go into batch renderers that are not the main camera's. Withholding
+filters on `mainBatchRenderers`, so it never sees them.
+
+Owning them means telling the main camera's depth renderer apart from the shadow cameras', which is most
+of that 2396 - and withholding a shadow camera's pass removes the object from every shadow it casts.
+Against that, the measured prize is ~921 hash lookups a frame, on the order of 0.05 ms. **Deferred, with
+the evidence recorded rather than the assumption.** The probe stays behind its switch.
+
+## Stage 3: the classification cache is correct, and buys almost nothing
+
+The plan called this "the main event": in the Whiterun exterior 6097 of 9022 tracked objects run a full
+classification every frame to produce "no", and are discarded. Caching that verdict should have removed
+most of `classify-static`.
+
+It did not.
+
+| | ms |
+| --- | --- |
+| `classify-static`, no cache | 0.952 |
+| `classify-static`, 5959 objects served from the cache | 0.847 |
+| Whole table build, exterior | 2.479 -> 2.460 |
+
+About 17 ns saved per cached object, against the ~160 ns the part costs per tracked object. The reason is
+that the work being cached was cheaper than it looked: `netimmerse_cast` is a walk up a chain of RTTI
+*pointers*, not a string comparison, and most negatives never get that far - `NotTriShape` and `Skinned`
+are decided in the first three lines. What remains in `classify-static` is the witness read itself, which
+has to happen for every tracked object either way.
+
+### The part that matters more than the code
+
+The negative cache helps objects that are **ineligible**. As coverage grows to new object classes,
+objects move from ineligible to eligible - so this cache helps *less* after coverage grows, not more.
+That is backwards from the goal it was written for.
+
+What grows with coverage is the other two:
+
+-   **`record`** (1.218 ms, the largest part) - the object record assembly, paid per *eligible* object.
+-   the **positive** half of the derivation, which cannot be cached as it stands because its result comes
+    from the engine's per-frame render pass.
+
+So the work that makes per-frame cost fall as coverage rises is the record assembly and the positive
+path, not the negative verdict. That is a finding about the plan, not about the code, and it is the
+reason to record it here.
+
+### What was kept, and why it is narrow
+
+The cache is on `Tracked`, validated by four pointer witnesses (renderer data, shader property, material,
+and a one-byte fade state) compared in full every frame. Only four verdicts are cached:
+`NotTriShape`, `Skinned`, `NoRendererData` and `NotLightingShader` - the ones that follow from the
+geometry's own shape, which is exactly what the pointer witnesses cover.
+
+Everything decided later is deliberately excluded, because its inputs change behind an unchanged pointer:
+`AlphaBlend` reads `materialAlpha`, which is animated; and the reasons `DeriveLightingDescriptors`
+produces read property *flags*, which Community Shaders' own features set in place. Caching those would
+have traded a real correctness surface for the cheapest third of the population. The first version did
+cache them, and the restriction is the more defensible code even though it halves an already small win.
+
+**Gate:** `CS_DCLF_CLASSIFY_CACHE=probe` serves the cached verdict *and* recomputes it, comparing the two.
+571 recomputed and compared per frame, **0 differ**, across the Bannered Mare, the Whiterun exterior and
+Dragonsreach with two transitions; table counts identical; 0 claimed-but-undrawn; 0 VUIDs.
+
+### The fade metric, reduced to one byte
+
+`FadeStateOf` is the reusable part of this stage. The LOD metric feeds the derivation in exactly three
+ways - reject on `!isfinite`, clear `kSpecular` past its fade end, clear `kEnvMap` past its - so two bits
+and an invalid marker capture the whole camera dependence of the classification. An object with none of
+the fade-sensitive flags returns 0 without touching the fade node at all. The fade *floats* the metric
+also produces are overwritten from the property by `RefreshFrameConstants` before any draw reads them, so
+they are not part of the witness.
+
 ## Switches
 
 | Variable | Effect |
@@ -1320,3 +1496,117 @@ Found while building DCLF. None is caused by DCLF; each is recorded here until i
 -   Phase 5 cuts the native loop, so the accumulator walk will no longer supply the per-frame technique
     bits. They then have to be derived: the light and shadow assignment (`FUN_1414fcf80`) and the early-Z
     global.
+
+## Stage 4: the per-object loop stops repeating itself
+
+Stage 0 named `record` the largest part of `BuildFrame`. Splitting it showed the label was wrong in the
+same way Stage 0's had been. `timer.Add(BuildPart::Dedup)` fired only inside the miss branches of the
+three dedup maps, so on the hit path — nearly every object — three hash probes fell through to the next
+iteration and were billed to `record`. Whiterun exterior, 3057 objects:
+
+| part | ms |
+| --- | --- |
+| `record` (the real assembly) | 0.615 |
+| `dedup-hit` (the three probes) | 0.396 |
+| `loop-tail` (per *tracked* object) | 0.336 |
+
+Half of what `record` reported was not record assembly. The named work was nearly free in that cell
+anyway: `GetRoomIndex` early-outs on `roomNodes.empty()` outdoors and `ShouldSuppress` short-circuits on
+`!interior`.
+
+**Container churn.** The three dedup maps were locals — three hash maps allocated and freed every frame
+to hold the same contents, the waste Stage 1 removed from the ordering vectors and left here. They are
+members now, and `objectIndex`, `shading`, `emissiveMult` and `lights` are reserved like the other
+per-object containers. The two ordering passes became one: `order` and `culled` were built separately
+and then concatenated, up to a ~6000-entry memcpy a frame, purely to guarantee that an engine-kept
+object reached a pipeline first.
+
+**The pipeline template is elected, not ordered.** That guarantee is now stated as a rule about the
+objects: if a later native-visible object finds a pipeline whose lighting template came from a culled
+one, it takes the template over. This survives a table that outlives the frame, which ordering cannot.
+The first gate statistic counted *pipelines with a culled template* and read 12 of 31 under
+`CS_DCLF_CULL_INPUT=tracked` — a false alarm, because a pipeline drawn only by culled candidates has no
+native-visible object to elect and harms nothing. The invariant that matters is the implication, checked
+over the finished tables rather than asserted from the election: **if a native-visible object draws on
+pipeline p, then `geometryTemplate[p]` came from a native-visible object.** Measured with the election
+doing real work — 10 takeovers a frame — it holds at 0, and Dragonsreach lighting is unchanged.
+
+### The material cache, and why the measurement lied twice
+
+The plan called for promoting `materialProbe`, "a 99% hit rate that only needs promoting". It was not.
+
+The probe compared records with `memcmp` over a struct whose members total 2340 bytes while the struct
+is 16-aligned, so it was comparing **12 bytes of uninitialised trailing padding**; every comparison came
+out unequal. With member-wise equality it still read 104 changed, 0 unchanged — but only the PS block
+moved, at three adjacent floats holding the **same value for every material in the frame** (min == max
+across all 104) and drifting with the time of day.
+
+`BSLightingShader::SetupMaterial` explains it. In Ghidra it is `BSLightingShader::Func4` at `1414dc310`
+— vtable slot 4, named by slot rather than by name. Its tail reads:
+
+```c
+if (*(char *)(this + 0xf0) == '\0') { lo = *(this + 0xe0); hi = *(this + 0xe8); }
+else                                { lo = *(this + 0xd0); hi = *(this + 0xd8); }
+offset = *(byte *)(currentPS + 0x5d);   /* PS constant table[29] */
+```
+
+PS PerMaterial **variable 29 is IBLParams** (`ShaderCache.h:50`), and SetupMaterial does not read it
+from the material at all: it comes from fields of the BSLightingShader object, selected by a day/night
+flag at `this+0xf0`. It is shader-level frame state that happens to live in the per-material group.
+
+So the cache serves the record and patches those positions from a live evaluation. **The positions are
+cumulative for the session**, which a failure taught: learning them each frame as "floats that differ
+from the cached copy" works only while the value drifts continuously. `set gamehour to 22` steps it once
+and then freezes it — the next frame saw no difference, learned an empty set, patched nothing, and
+served every material its pre-step value. Capture parity failed on **220,500 of 276,300 draws**, with
+IBLParams.y reading 0.757 against a native 0.106.
+
+The values are sampled again at Prepass (`RefreshMaterialPatch`), for the same reason and in the same
+place the animated per-object shading is resampled: sampled only at EarlyPrepass they sit a fraction of
+a frame behind what the native draws read, visible as IBLParams differing in the sixth decimal across a
+fast lighting transition.
+
+The result is that the cache is parity-*better* than evaluating every material, because it fixes a
+pre-existing mismatch the uncached path has. Mismatched draws per report interval, same route:
+
+| interval | cache off | cache on |
+| --- | --- | --- |
+| cell change (`coc`) | 253239 | 20572 |
+| `set gamehour` step | 248670 | **0** |
+| steady state | 0 | **0** |
+
+104 evaluations a frame became **9** — one to learn the patch, eight rolling validations — with 103
+served. `material-eval` went 0.443 → 0.106 ms in the exterior and 0.045 in Dragonsreach. It defaults on.
+
+**Two instrument defects, both of the same kind.** The validator's cursor reset every frame, so with a
+stable iteration order it re-checked the same eight materials for ever and reported "0 stale" while
+capture parity was failing on 80% of draws. And `probe` forced the evaluate path, so it measured a
+configuration with no cache in it. Both now follow Stage 3's shape: serve the cached value, recompute
+it, compare, and use the served one — a probe that does not exercise the thing it is probing proves
+nothing.
+
+### Buffers resolve once per TriShape
+
+Both `GpuResources::Resolve` results were only ever read inside the `newGeometry` branch; for an object
+whose geometry was already in the table they were computed and discarded. With ~3.8 objects per TriShape
+in the exterior that is most of the calls, and in steady state a Resolve is a hash probe
+(`DescribeResource` runs only on first insert).
+
+The call was **moved**, not cached, and the distinction is the safety argument: GpuResources holds a
+reference on each buffer so its address cannot be reused, and it drops that reference when an entry goes
+`kEvictFrames` without a Resolve. Resolving per TriShape still touches every entry the tables depend on
+every frame. Skipping the call outright would have let the eviction sweep drop the reference underneath
+live draw arguments, which is the device-loss hazard `BuildFrame` already documents.
+
+`resolve` went 0.326 → 0.176 ms in the exterior, 0.110 → 0.072 in Dragonsreach.
+
+### Result
+
+**Dragonsreach 1.531 → ~1.31 ms** a frame, unprofiled, over ten steady-state intervals. Gates: capture
+parity 0 mismatched over 276,300 draws an interval, classification cache 0 differ, pipeline templates 0
+visible objects on a culled template, material cache 0 stale, 0 claimed-but-undrawn, and no VUIDs beyond
+the upstream semaphore one.
+
+**Still open.** Caching the *table slots* on `Tracked` — the remaining `dedup-hit`, 0.373 ms — needs the
+tables to persist first, because a slot is only worth caching if it is stable. The plan had that
+dependency the other way round.
