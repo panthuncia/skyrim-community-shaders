@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <string>
 
 namespace DCLF
@@ -20,6 +21,9 @@ namespace DCLF
 	 * @return the value, or an empty string when the switch is set in neither place.
 	 */
 	std::string SwitchValue(const char* a_name);
+
+	/** @brief The directory the switches file lives in (the SKSE log directory), outside MO2's virtual file system. */
+	std::filesystem::path SwitchesDirectory();
 
 	/** @brief Whether a switch is set to "1". */
 	bool SwitchEnabled(const char* a_name);

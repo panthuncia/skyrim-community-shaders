@@ -1,6 +1,7 @@
 #include "PassCapture.h"
 
 #include "Switches.h"
+#include "Toggles.h"
 
 #include <span>
 
@@ -18,6 +19,12 @@ namespace DCLF
 	{
 		static PassCapture capture;
 		return capture;
+	}
+
+	PassCapture::PassCapture()
+	{
+		if (SwitchEnabled("CS_DCLF_SHADOW_PROBE"))
+			utilityEntries.resize(kCapacity);
 	}
 
 	std::uint32_t PassCapture::SubPassOf(const RE::BSGeometry* a_geometry, std::uint64_t a_propertyFlags)
@@ -48,7 +55,22 @@ namespace DCLF
 					probeMain[type].fetch_add(1, std::memory_order_relaxed);
 			}
 		}
-		if (!a_pass || !a_pass->geometry || !a_pass->shader || a_pass->shader->shaderType.get() != RE::BSShader::Type::Lighting)
+		if (!a_pass || !a_pass->geometry || !a_pass->shader)
+			return;
+		if (a_pass->shader->shaderType.get() == RE::BSShader::Type::Utility) {
+			// The shadow probe's ring: allocated on first use under the switch, never otherwise.
+			static const bool shadowProbe = SwitchEnabled("CS_DCLF_SHADOW_PROBE");
+			if (!shadowProbe)
+				return;
+			const auto slot = utilityCursor.fetch_add(1, std::memory_order_relaxed);
+			if (slot >= kCapacity) {
+				utilityOverflow.fetch_add(1, std::memory_order_relaxed);
+				return;
+			}
+			utilityEntries[slot] = Entry{ a_pass->geometry, a_pass, a_batch, a_technique, 0, a_pass->passEnum };
+			return;
+		}
+		if (a_pass->shader->shaderType.get() != RE::BSShader::Type::Lighting)
 			return;
 
 		// How many threads register, for the record: the engine classifier takes a mutex and the scene
@@ -74,13 +96,22 @@ namespace DCLF
 		stats.overflowed = overflow.exchange(0, std::memory_order_relaxed);
 		stats.threads = threadCount.exchange(0, std::memory_order_relaxed);
 		stats.withheld = withheld.exchange(0, std::memory_order_relaxed);
+		for (std::uint32_t m = 0; m < kShadowModes; ++m)
+			stats.shadowWithheld[m] = shadowWithheld[m].exchange(0, std::memory_order_relaxed);
 		return { entries.data(), count };
+	}
+
+	std::span<const PassCapture::Entry> PassCapture::DrainUtility()
+	{
+		const auto count = std::min(utilityCursor.exchange(0, std::memory_order_relaxed), kCapacity);
+		if (const auto overflowed = utilityOverflow.exchange(0, std::memory_order_relaxed))
+			logger::warn("[DCLF] shadow probe: {} Utility registrations overflowed the capture ring", overflowed);
+		return { utilityEntries.data(), count };
 	}
 
 	bool PassCapture::WithholdingEnabled()
 	{
-		static const bool enabled = SwitchValue("CS_DCLF_OWNERSHIP") == "static";
-		return enabled;
+		return Toggles::Get().Active().ownership;
 	}
 
 	void PassCapture::PublishClaims(std::shared_ptr<const ClaimSet> a_claims)
@@ -93,20 +124,56 @@ namespace DCLF
 		std::atomic_store(&mainRenderers, std::move(a_renderers));
 	}
 
+	bool PassCapture::ShadowWithholdingEnabled()
+	{
+		const auto toggles = Toggles::Get().Active();
+		return toggles.shadows && toggles.shadowOwnership;
+	}
+
+	void PassCapture::SetShadowBatchRenderers(std::shared_ptr<const ShadowRendererMap> a_renderers)
+	{
+		std::atomic_store(&shadowRenderers, std::move(a_renderers));
+	}
+
+	void PassCapture::PublishShadowClaims(std::uint32_t a_modeIndex, std::shared_ptr<const ClaimSet> a_claims)
+	{
+		if (a_modeIndex < kShadowModes)
+			std::atomic_store(&shadowClaims[a_modeIndex], std::move(a_claims));
+	}
+
 	bool PassCapture::Withhold(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass)
 	{
-		if (!WithholdingEnabled() || !a_pass || !a_pass->geometry)
+		if (!a_pass || !a_pass->geometry)
 			return false;
-		// Only the main camera's renderers: the shadow cameras must keep drawing these objects, and DCLF
-		// does not own their passes.
-		const auto renderers = std::atomic_load(&mainRenderers);
-		if (!renderers || !renderers->contains(a_batch))
-			return false;
-		const auto owned = std::atomic_load(&claims);
-		if (!owned || !owned->contains(a_pass->geometry))
-			return false;
-		withheld.fetch_add(1, std::memory_order_relaxed);
-		return true;
+		const auto toggles = Toggles::Get().Active();
+		// The main camera's renderers: the colour epoch's claims. A shadow camera's renderers are a
+		// separate set with claims of their own, below; a pass into any other renderer (reflections,
+		// cubemaps, the focus shadows until S4) is never withheld.
+		if (toggles.ownership) {
+			const auto renderers = std::atomic_load(&mainRenderers);
+			if (renderers && renderers->contains(a_batch)) {
+				const auto owned = std::atomic_load(&claims);
+				if (owned && owned->contains(a_pass->geometry)) {
+					withheld.fetch_add(1, std::memory_order_relaxed);
+					return true;
+				}
+				return false;
+			}
+		}
+		if (toggles.shadows && toggles.shadowOwnership) {
+			const auto renderers = std::atomic_load(&shadowRenderers);
+			if (!renderers)
+				return false;
+			const auto it = renderers->find(a_batch);
+			if (it == renderers->end() || it->second >= kShadowModes)
+				return false;
+			const auto owned = std::atomic_load(&shadowClaims[it->second]);
+			if (owned && owned->contains(a_pass->geometry)) {
+				shadowWithheld[it->second].fetch_add(1, std::memory_order_relaxed);
+				return true;
+			}
+		}
+		return false;
 	}
 
 	struct PassCapture::Hook
@@ -114,6 +181,10 @@ namespace DCLF
 		static void thunk(RE::BSBatchRenderer* a_this, RE::BSRenderPass* a_pass, std::uint32_t a_techniqueID)
 		{
 			auto& capture = PassCapture::Get();
+			if (capture.bypassed.load(std::memory_order_acquire)) {
+				func(a_this, a_pass, a_techniqueID);
+				return;
+			}
 			capture.Record(a_this, a_pass, a_techniqueID);
 			// Withholding is the whole of static ownership: the pass is built, lit and shadowed exactly as
 			// before - only the batch renderer never receives it, so the native loop has nothing to draw

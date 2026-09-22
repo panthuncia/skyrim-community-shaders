@@ -18,4 +18,15 @@ namespace DCLF
 	};
 
 	IndirectState GetIndirectState();
+
+	/** @brief The shadow views' pipeline set and its command signature (DrawPipelines::FindShadow). */
+	struct ShadowIndirectState
+	{
+		rhi::PipelineLayoutHandle layout{};
+		rhi::IndirectPipelineSetHandle set{};
+		rhi::CommandSignatureHandle signature{};
+		bool valid = false;
+	};
+
+	ShadowIndirectState GetShadowIndirectState();
 }

@@ -1,6 +1,7 @@
 #include "SpirvReflection.h"
 
 #include <cstring>
+#include <string_view>
 
 namespace DCLF
 {
@@ -11,6 +12,10 @@ namespace DCLF
 
 		// Opcodes, decorations and storage classes from the SPIR-V specification.
 		constexpr std::uint16_t kOpName = 5;
+		constexpr std::uint16_t kOpExtInstImport = 11;
+		constexpr std::uint16_t kOpExtInst = 12;
+		constexpr std::uint16_t kOpFunction = 54;
+		constexpr std::uint16_t kOpFunctionEnd = 56;
 		constexpr std::uint16_t kOpTypeImage = 25;
 		constexpr std::uint16_t kOpTypeSampler = 26;
 		constexpr std::uint16_t kOpTypeSampledImage = 27;
@@ -41,6 +46,8 @@ namespace DCLF
 			std::uint32_t binding = kNone;
 			std::uint32_t set = 0;
 			bool builtIn = false;
+			bool referenced = false;  // named by an instruction in a function body
+			bool nonSemantic = false;  // an OpExtInstImport of a NonSemantic.* set
 			std::string name;
 		};
 	}
@@ -57,6 +64,7 @@ namespace DCLF
 			return false;
 		std::vector<Id> ids(words[3]);  // header: id bound
 		auto at = [&](std::uint32_t a_id) -> Id* { return a_id < ids.size() ? &ids[a_id] : nullptr; };
+		bool inFunction = false;
 
 		for (std::size_t offset = kHeaderWords; offset < words.size();) {
 			const std::uint16_t count = static_cast<std::uint16_t>(words[offset] >> 16);
@@ -64,7 +72,25 @@ namespace DCLF
 			if (count == 0 || offset + count > words.size())
 				return false;
 			const std::uint32_t* operands = &words[offset + 1];
+			// A binding counts only if the code uses it. Unoptimized builds (-Od) keep every declared
+			// resource in the module and the entry point's interface, used or not; debug instructions
+			// name variables without accessing them. A literal operand that happens to equal a
+			// variable's id can only keep a binding, which is the conservative direction.
+			if (opcode == kOpFunction)
+				inFunction = true;
+			else if (opcode == kOpFunctionEnd)
+				inFunction = false;
+			else if (inFunction && !(opcode == kOpExtInst && count >= 4 && at(operands[2]) && at(operands[2])->nonSemantic)) {
+				// An extended instruction's number is a literal (GLSL.std.450's NClamp is 80, a plausible id).
+				for (std::uint16_t i = opcode == kOpExtInst ? 4 : 0; i + 1 < count; ++i)
+					if (auto* id = at(operands[i]))
+						id->referenced = true;
+			}
 			switch (opcode) {
+			case kOpExtInstImport:
+				if (auto* id = count >= 3 ? at(operands[0]) : nullptr)
+					id->nonSemantic = std::string_view(reinterpret_cast<const char*>(operands + 1), strnlen(reinterpret_cast<const char*>(operands + 1), (count - 2) * 4)).starts_with("NonSemantic.");
+				break;
 			case kOpName:
 				if (auto* id = count >= 3 ? at(operands[0]) : nullptr)
 					id->name.assign(reinterpret_cast<const char*>(operands + 1), strnlen(reinterpret_cast<const char*>(operands + 1), (count - 2) * 4));
@@ -148,7 +174,7 @@ namespace DCLF
 				inputs.push_back({ std::move(semantic), index, id.location });
 				continue;
 			}
-			if (id.binding == kNone)
+			if (id.binding == kNone || !id.referenced)
 				continue;
 			BindingKind kind = BindingKind::Other;
 			if (id.storage == kStorageUniform)

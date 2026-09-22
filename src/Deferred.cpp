@@ -645,7 +645,11 @@ ID3D11ComputeShader* Deferred::GetComputeMainCompositeInterior()
 
 void Deferred::Hooks::Main_RenderShadowMaps::thunk()
 {
+	// DCLF's pre-hook: the scene graph and the main culling are final here, the shadow views are drawn
+	// inside the call, and the main accumulator's passes are complete only once it returns.
+	globals::features::drawcallLimitFix.BeforeShadowMaps();
 	func();
+	globals::features::drawcallLimitFix.AfterShadowMaps();
 	globals::deferred->EarlyPrepasses();
 };
 

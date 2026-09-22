@@ -9,6 +9,7 @@
 namespace RE
 {
 	class BSGeometry;
+	class NiPoint3;
 }
 
 namespace DCLF
@@ -175,6 +176,74 @@ namespace DCLF
 		/** @brief Before the deferred composite: with CS_DCLF_DEBUG_VIEW=1, replace the main pass's targets with DCLF's. */
 		void ShowDebugView();
 
+		/** @brief CS_DCLF_SHADOWS=1: the shadow views are drawn by the render graph as well. */
+		static bool ShadowsEnabled();
+
+		/**
+		 * @brief BeforeShadowMaps: the shadow frame begins. The eye is the reference every record of the
+		 * frame is packed relative to; each view's epoch adds its own eye delta (Utility.hlsl, DCLFEyeDelta).
+		 */
+		void BeginShadowFrame(const RE::NiPoint3& a_eye);
+
+		/**
+		 * @brief Inside a shadow view's FinishAccumulatingPreResolveDepth, after the native draws: captures
+		 * the view - its target and slice, viewport, eye and the per-frame constants the engine drew it
+		 * with - for the frame's shadow epoch. Nothing is drawn here.
+		 */
+		void ExecuteShadowView(std::uint32_t a_viewId, std::uint32_t a_renderMode);
+
+		/**
+		 * @brief AfterShadowMaps: one epoch that culls the frame's casters against every captured view and
+		 * draws them into the views' slices of the engine's shadow maps.
+		 *
+		 * One epoch for all views, not one per view, because the graph's own execution costs ~0.9 ms of
+		 * CPU per epoch whatever it draws; the views' slices are consumed only after Main_RenderShadowMaps
+		 * returns (the shadow mask, the volumetric lighting), so drawing them all at its end is equivalent
+		 * to drawing each after its native draws (engine notes: shadow maps).
+		 */
+		void ExecuteShadowFrame();
+
+		/** @brief Why a shadow view was offered to the epoch and not drawn (ShadowStats::notReadyReasons). */
+		enum class ShadowNotReady : std::uint32_t
+		{
+			Setup,      // no render graph, no Utility shader, or the shadow resources could not be created
+			Pipelines,  // no shadow pipeline in the set yet
+			Tables,     // the scene phase has not built this frame's tables, or the view is unknown
+			Depth,      // the engine's shadow map could not be imported, or the view draws into an unknown target
+			Epoch,      // the epoch itself failed
+			Capacity,   // more views this frame than the epoch holds (kMaxShadowViews)
+			Count
+		};
+
+		struct ShadowStats
+		{
+			std::uint32_t views = 0;           // views offered (captured by the hook), per report interval
+			std::uint32_t viewsDrawn = 0;      // views drawn by an epoch
+			std::uint32_t epochs = 0;          // shadow epochs run (one per frame with views)
+			std::uint32_t notReady = 0;        // views skipped: resources, pipelines or the depth import not ready
+			std::array<std::uint32_t, static_cast<std::size_t>(ShadowNotReady::Count)> notReadyReasons{};
+			std::uint32_t focusSkipped = 0;    // focus views, native until S4
+			// The culling's GPU counters of one sampled view (the count buffer read back a few frames after
+			// its epoch): what says the frustum test is doing something, and against which view.
+			std::uint32_t cullDrawn = 0, cullRejected = 0, cullTested = 0;
+			std::uint32_t cullSampledView = ~0u, cullSampledMode = 0;
+			// CS_DCLF_SHADOW_OWNERSHIP=static: casters claimed per render mode at the last publication.
+			std::array<std::uint32_t, 3> claimed{};
+			double claimMs = 0.0;              // per report interval, building and publishing the claim sets
+			std::uint32_t inputs = 0;          // casters submitted, last view
+			std::uint32_t skippedPipeline = 0; // casters without a ready shadow pipeline, last view
+			std::uint32_t skippedTexture = 0;  // alpha-tested casters whose diffuse could not be resolved, last view
+			std::uint32_t records = 0;         // binding records, last frame
+			double cpuMs = 0.0;                // per report interval, all views
+			double captureMs = 0.0;            // per report interval, the hooks' captures
+			double prepareMs = 0.0;            // of which the once-per-frame preparation
+			double inputsMs = 0.0;             // of which building (per mode) and uploading the inputs
+			double blocksMs = 0.0;             // of which the view's constant blocks and their uploads
+			double executeMs = 0.0;            // of which the graph's own execution (compile, prepare, record)
+		};
+		const ShadowStats& GetShadowStats() const { return shadowStats; }
+		void ResetShadowStats() { shadowStats = {}; }
+
 		const Stats& GetStats() const { return stats; }
 
 		~IndirectDraws();
@@ -188,12 +257,17 @@ namespace DCLF
 		struct Impl;
 		std::unique_ptr<Impl> impl;
 		Stats stats;
+		ShadowStats shadowStats;
 		bool failed = false;
 	};
 
 	inline constexpr std::array<const char*, 8> kEpochPartNames{
 		"textures/samplers", "constant groups", "record push", "per-draw tail", "per-draw prologue",
 		"uploads", "epoch prologue", "graph execute"
+	};
+
+	inline constexpr std::array<const char*, static_cast<std::size_t>(IndirectDraws::ShadowNotReady::Count)> kShadowNotReadyNames{
+		"setup", "pipelines", "tables", "depth", "epoch", "capacity"
 	};
 
 	inline constexpr std::array<const char*, static_cast<std::size_t>(IndirectDraws::Skip::Count)> kSkipNames{ "pipeline", "geometry", "texture", "sampler",

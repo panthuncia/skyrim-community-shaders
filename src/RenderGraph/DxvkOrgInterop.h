@@ -14,7 +14,7 @@
 #	include <vulkan/vulkan.h>
 #endif
 
-#define DXVK_ORG_INTEROP_VERSION 1u
+#define DXVK_ORG_INTEROP_VERSION 2u
 
 extern "C" {
 
@@ -47,6 +47,8 @@ struct DxvkOrgInteropDeviceInfo
 	const VkPhysicalDeviceFeatures2* enabledFeatures;
 	uint32_t grantedFeatureCount;
 	uint32_t deniedFeatureCount;
+	uint32_t enabledInstanceExtensionCount;  // version 2
+	const char* const* enabledInstanceExtensions;
 };
 
 enum DxvkOrgInteropResourceKind : uint32_t
@@ -105,6 +107,7 @@ struct DxvkOrgInteropSubmission
 	const VkSemaphoreSubmitInfo* signals;
 	PFN_dxvkOrgInteropSubmitted onSubmitted;  // on DXVK's submission thread, after vkQueueSubmit2
 	void* user;
+	const char* label;  // version 2, optional: a queue label around the submission under a capture tool
 };
 
 typedef HRESULT(__stdcall* PFN_dxvkRequestDeviceFeatures)(const DxvkOrgInteropFeatureRequest* pRequest);

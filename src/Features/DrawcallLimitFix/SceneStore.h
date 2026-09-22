@@ -10,6 +10,9 @@
 
 namespace DCLF
 {
+	/** @brief Attributes the time since the last call to one BuildPart (SceneStore.cpp; CS_DCLF_PROFILE). */
+	struct PartTimer;
+
 	/**
 	 * @brief The render thread's view of the static scene content Drawcall Limit Fix can draw.
 	 *
@@ -108,6 +111,16 @@ namespace DCLF
 			// kNoExtraRows. The epoch appends them to the row buffer after the palettes.
 			std::vector<float> extraRows;
 			std::vector<std::uint32_t> extraOffset;  // parallel to objects
+			// The Utility technique each object casts with, without a view's mode bits (ShadowViews.h:
+			// ShadowUtilityTechnique), and why the engine would not draw it into a shadow map. Both are
+			// decided by the scene phase, because every shadow view is drawn before the accumulate phase
+			// runs. 0 and ShadowReject::NotLighting for an object that is not a caster.
+			std::vector<std::uint32_t> shadowTechnique;  // parallel to objects
+			std::vector<std::uint8_t> shadowReject;      // parallel to objects (ShadowReject)
+			// The distinct shadow pipelines the frame's casters need, without a view's mode bits: a
+			// handful in practice (twelve techniques in the Whiterun exterior). What the shadow programs
+			// are compiled for, and what the shadow pipelines are built from once a view's mode is known.
+			std::vector<ShadowPipelineKey> shadowKeysUsed;
 
 			/**
 			 * @brief The three shared tables keep their slots across frames (CS_DCLF_DERIVED_CACHE).
@@ -172,7 +185,13 @@ namespace DCLF
 			std::uint32_t derivedDiffers = 0;
 			std::uint32_t slotsSwept = 0;
 			std::uint32_t geometriesRefreshed = 0;
-			std::uint32_t slotViolations = 0;  // objects whose slots failed CheckObjectSlots (the gate: 0)  // slots re-resolved in place: TriShape reallocated at its address, or references evicted
+			std::uint32_t slotViolations = 0;  // objects whose slots failed CheckObjectSlots (the gate: 0)
+			std::uint32_t shadowCasters = 0;  // records the engine would draw into a shadow map
+			std::array<std::uint32_t, 8> shadowRejects{};  // by ShadowReject, over the frame's records
+			// Objects the engine accumulated that the scene phase had left out of the tables, so the frame
+			// cannot draw them. One frame of staleness at most (the verdict is cleared for them); the gate
+			// is 0 in steady state.
+			std::uint32_t accumulatedWithoutRecord = 0;  // slots re-resolved in place: TriShape reallocated at its address, or references evicted
 			std::uint32_t geometriesAlive = 0, pipelinesAlive = 0, materialsAlive = 0;
 			// CS_DCLF_CLASSIFY_CACHE: objects served from the cached verdict, and - under `probe` - how
 			// many were recomputed and how many disagreed. Zero disagreements is the gate.
@@ -274,8 +293,23 @@ namespace DCLF
 		 */
 		static bool IsLoadingScreenUp();
 
-		/** @brief Main-pass start: rebuild the CPU tables from the tracked set. */
-		void BuildFrame();
+		/**
+		 * @brief Which half of the frame's tables to build.
+		 *
+		 * The shadow views are drawn before the main camera's passes exist (engine notes: shadow maps),
+		 * so the tables are built in two halves. Scene runs before the shadow maps and holds everything
+		 * that does not depend on the accumulator - the object records a shadow epoch reads. Accumulate
+		 * runs at EarlyPrepass, once the registration jobs have finished, and patches those records with
+		 * what the main pass draws them with. Object indices are fixed from Scene onwards.
+		 */
+		enum class Phase : std::uint32_t
+		{
+			Scene,
+			Accumulate
+		};
+
+		/** @brief Rebuilds one half of the CPU tables from the tracked set. */
+		void BuildFrame(Phase a_phase);
 
 		/**
 		 * @brief Latches the main camera's accumulator, from a point in the frame where it is identifiable.
@@ -331,6 +365,9 @@ namespace DCLF
 
 		/** @brief Index into GetTables().objects for this frame, or -1 when the geometry is not drawn by DCLF. */
 		std::int32_t FindObject(const RE::BSGeometry* a_geometry) const;
+
+		/** @brief The main camera's batch renderers, as of the last BuildFrame. */
+		const ankerl::unordered_dense::set<const RE::BSBatchRenderer*>& GetMainBatchRenderers() const { return mainBatchRenderers; }
 
 		/** @brief True when the geometry sits under a tracked category node (used by coverage checks). */
 		bool IsTracked(const RE::BSGeometry* a_geometry) const;
@@ -480,6 +517,10 @@ namespace DCLF
 			const AccumulatedPass* accumulated;
 		};
 		std::vector<OrderEntry> order;
+		// The accumulate phase's iteration: the objects it has anything to do, which off the =tracked
+		// culling input is the engine's accumulated passes rather than the whole tracked set. A member
+		// for its capacity, like `order`.
+		std::vector<OrderEntry> accumulateOrder;
 		// The decal objects of the frame with their engine draw-order key, sorted after the loop into
 		// Tables::decalOrdinal. A member for its capacity, like `order`.
 		struct DecalOrderEntry
@@ -564,11 +605,32 @@ namespace DCLF
 		static constexpr std::uint32_t kMaterialCacheIdleFrames = 64;
 		std::uint32_t frame = 0;
 		std::uint32_t tablesGeneration = 0;
+		// Frame state the scene phase reads once and the accumulate phase reuses, so that both halves of
+		// one frame see the same answer even though they run either side of the shadow maps.
+		bool sceneBuilt = false;  // the scene phase ran and the records are this frame's
+		bool frameResolveBuffers = false;
+		bool frameInterior = false;
+		std::array<std::uint32_t, 3> frameDecalBias{};
 		bool graphWasActive = false;  // resolveBuffers of the previous BuildFrame, to log the flip
 		std::uint32_t mainPassRenderFlags = 0;
 		ProjectedTextures projectedTextures;
 		/** @brief Fills one object's extras rows (Prepass: the main camera's state is current). */
 		void RefreshObjectExtras(std::size_t a_object, const RE::BSLightingShaderProperty& a_property, const RE::BSGeometry& a_geometry);
+		void BuildScenePhase();
+		void BuildAccumulatePhase();
+		std::uint32_t AllocateGeometrySlot();
+		std::uint32_t AllocatePipelineSlot();
+		std::uint32_t AllocateMaterialSlot();
+		/**
+		 * @brief The geometry slot for a TriShape: found, refreshed in place, or newly resolved.
+		 * @return the slot, or Tables::kSlotFree when the buffers cannot be made stable for the graph.
+		 */
+		std::uint32_t ResolveGeometrySlot(RE::BSGeometry& a_geometry, const RE::BSGraphics::TriShape* a_triShape,
+			const RE::NiSkinPartition::Partition* a_skinPartition, PartTimer& a_timer);
+		/** @brief The cross-frame material cache and its validator; false when nothing can be evaluated. */
+		bool EvaluateMaterialForSlot(const RE::BSShaderMaterial* a_material, std::uint32_t a_pass, bool a_cacheOn,
+			bool a_probeAll, MaterialRecord& a_record);
+
 		/** @brief Frees the slots unused for kSlotIdleFrames and their map entries; before the loop. */
 		void SweepSlots();
 		/**
@@ -577,6 +639,16 @@ namespace DCLF
 		 * pointing at slots that no longer exist.
 		 */
 		void ResetSlotTables();
+
+	public:
+		/**
+		 * @brief Drops every cached classification verdict and derivation: a live toggle that enters the
+		 * classification (Toggles.h) changed, and the caches witness the object rather than the switches.
+		 */
+		void InvalidateVerdicts();
+
+	private:
+
 		/** @brief After the loop: every object with bindings names live slots of this frame, or is neutralised. */
 		void CheckObjectSlots(bool a_resolveBuffers);
 		/**

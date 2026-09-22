@@ -1418,7 +1418,7 @@ they are not part of the witness.
 
 | Variable | Effect |
 | --- | --- |
-| `CS_DCLF_STATS=1` | Every 300 frames, log how many objects are tracked, why the rest stay native, and the CPU time scene capture takes. |
+| `CS_DCLF_STATS=1` | Every 300 frames, log how many objects are tracked, why the rest stay native, and the CPU time scene capture takes, plus the GPU time of each render-graph segment and of the passes in it (`[ORG] GPU time from ORG's pass timestamps`; the menu shows the per-segment totals whatever the switch). |
 | `CS_DCLF_CAPTURE_PARITY=1` | Compare the tables with the native draws (see above). Costs CPU on every draw. |
 | `CS_DCLF_DEBUG_VIEW=1` | Before the deferred composite, copy DCLF's off-screen targets over the native ones: the frame shows only what the indirect draws produced. |
 | `CS_DCLF_HYBRID=1` | DCLF draws into the main pass's own targets and depth, and the native loop skips the objects it drew. |
@@ -1431,10 +1431,40 @@ they are not part of the witness.
 | `CS_DCLF_TABLES=tracked\|accumulated` | Whether the tables hold the whole tracked set or only what the engine's accumulator kept. `accumulated` was the fallback while the per-pipeline template defect was open; `tracked` is now correct. |
 | `CS_DCLF_EVAL=off\|material\|geometry` | Diagnostic: suppresses parts of the stand-in evaluation. Note that a suppressed evaluation also stops its objects being drawn, so a clean frame under it proves nothing on its own. |
 | `CS_DCLF_OWNERSHIP=static` | Withhold claimed passes from the main camera's batch renderer, so DCLF owns those objects outright. Default off. |
+| `CS_DCLF_SHADOWS=1` | The shadow views: DCLF culls and draws the frame's casters into the engine's shadow map slices in one epoch per frame (below, "Shadow views, step two"). Default off. Live toggle in the menu. |
+| `CS_DCLF_SHADOW_OWNERSHIP=static` | Withhold the casters DCLF's shadow epoch draws from the shadow views' batch renderers, per render mode. Needs `CS_DCLF_SHADOWS=1`. Default off. Live toggle. |
+| `CS_DCLF_SHADOW_PROBE=1` | Diagnostic: the shadow probe (step one): per-view engine state, registrations, derivation and rule cross-checks, and the engine's shadow CPU. |
 | `CS_DCLF_PASS_SOURCE=accumulator` | Build the tables from the accumulator walk instead of the captured registrations. |
 | `CS_DCLF_MATERIAL_CACHE=probe` | Diagnostic: measures how many material records are unchanged from the previous frame, i.e. whether a cross-frame cache could work. |
 | `CS_DCLF_EVAL=audit` | Diagnostic: snapshots pipeline state around every stand-in call and reports anything not restored. Very slow; the frame rate collapses. |
+| `CS_DCLF_SHADER_DEBUG=1` | Build the Lighting and Utility SPIR-V with source-level debug info (`-Zi`: `OpSource` with every file's text embedded, and `OpLine`), so Nsight and RenderDoc show source for DCLF's draws. Still optimized. Not `-fspv-debug=vulkan`: its `DebugValue`s keep dead loads alive, so stages read resources their passes do not bind and every candidate is skipped; `vulkan-with-source` also fails DXC 1.9's own validator. There is deliberately no `-Od` form either: unoptimized code reads per-frame constant buffers the epochs do not supply (VS b6, PS b7). The Z-prepass stage (`DCLF_DEPTH_ONLY`) compiles the lighting out of `Lighting.hlsl` rather than relying on the optimizer. The debug builds have their own cache keys. The shader files the game sees through MO2's VFS are also copied, keeping their `Data/Shaders/...` layout, to `CS_DCLF_SHADER_SOURCE_DIR` (default `<Documents>\My Games\Skyrim Special Edition\SKSE\CommunityShaders-ShaderSource`). Shaders DXVK translates from DXBC get no source info this way. The build-time SPIR-V (BuildDrawsCS, HzbCS, LLF's cluster shaders) is always built with `-Zi` (`cmake/RenderGraph.cmake`). Dev-Fast builds do not package it: copy `build/Dev-Fast/generated/Shaders/*/ORG/*.spv` into the mod's `Shaders` folder after changing those shaders. |
 | `CS_DCLF_TEST_COMMANDS=<frame>:<command>;…` | Test runs: run each console command on the main thread once that many frames have been presented (loading screens do not count), for coverage runs from the auto-loaded save. The counter is independent of the feature, so a `CS_DCLF=0` control reaches the same place at the same hour. |
+
+### Capture tools and GPU timing
+
+- Every render-graph pass is a `VK_EXT_debug_utils` region named after the pass (`cs.dclf.main-opaque`,
+  `cs.dclf.build-draws`, ...), opened before the pass's entry barriers, so a wait on the previous pass
+  shows up inside the pass that needed it. Each epoch's submission is also a queue label named after its
+  segment (`CS DCLF: main opaque`, ...).
+- DCLF's draws are device-generated commands (`vkCmdExecuteGeneratedCommandsEXT` over an indirect
+  execution set), not `vkCmdDrawIndexedIndirect`. Nsight does not time the generated draws as a draw
+  of their own, and bills their GPU time to the barrier recorded just before them. The pass timestamps
+  are the reference instead. Measured on the auto-loaded save: main opaque 3.08 ms in the draw pass
+  against 0.006 ms in BuildDraws' dispatches; Z-prepass 0.49 ms of draws and 0.10 ms of HZB; shadow
+  views 1.29 ms of draws. The `vkCmdDrawIndexedIndirect` calls outside every DCLF region are DXVK's translation of
+  Grass Optimizations' D3D11 `DrawIndexedInstancedIndirect` calls.
+- RenderDoc (1.46) does not support `VK_EXT_descriptor_heap`. With RenderDoc capture on, the render graph
+  cannot start and DCLF is forced off for the session; the log and the feature's menu page say why.
+
+### Defaults
+
+Unset switches now take the configuration every gate run of this work used: `CS_DCLF_HYBRID=1`,
+`CS_DCLF_OWNERSHIP=static`, `CS_DCLF_CULL=occlusion`, `CS_DCLF_SKINNED=1`, `CS_DCLF_TREES=1`,
+`CS_DCLF_DECALS=1`, `CS_DCLF_PROJECTED_UV=1`, `CS_DCLF_MTLAND=1`, `CS_DCLF_SHADOWS=1` and
+`CS_DCLF_SHADOW_OWNERSHIP=static` (the tables already default to the tracked set). An explicit value
+overrides a default: `0` for the class and path switches, `off` for the two ownership switches and the
+culling. Rows above that say "Default off" describe the switches before this change. All of them are live
+toggles in the menu.
 
 ## Known upstream issues
 
@@ -2385,3 +2415,170 @@ iteration over 10,000 tracked entries (0.36), and for the drawn objects their tr
 probe, shading and sequence (0.67 for 1,712 plus the 3,225 cull-only pushes). A3 - persistent object
 slots - would save the pushes and the `objectIndex` insert, on the order of 0.2-0.3 ms of the 2.1, and is
 not built; the next structural gain is Stage 6, where the engine's own per-object main-pass work is.
+
+## Shadow views, step one: what the engine does, and a frame in two halves
+
+### The probe (`CS_DCLF_SHADOW_PROBE=1`)
+
+`DrawcallLimitFix/ShadowProbe.cpp` measures the shadow half of the frame before DCLF owns any of it: it
+enumerates the views from the shadow scene node before the shadow maps are drawn, records the render
+state at each shadow accumulator's `FinishAccumulatingPreResolveDepth`, samples the Utility draws'
+constants, times each light, and cross-checks every Utility registration against the technique DCLF
+would derive and the caster rule DCLF would apply. What it found is written up in
+`skyrim-engine-notes.md` under "Shadow maps"; the four answers the design needed:
+
+-   **The derivation is exact.** Over ~1M registrations in the exterior and the Bannered Mare, the
+    technique derived from the property's flags and the view's render mode differed from the engine's
+    `passEnum - 0x2B` **zero** times. For a Utility pass the `techniqueID` given to `RegisterPass` is the
+    `passEnum` itself, not a descriptor as it is for Lighting.
+-   **The caster rule is exact.** The rejection rule read off `GetRenderPasses_ShadowMapOrMask` rejected
+    none of the casters the engine registered. Of the main pass's kept objects with no registration in a
+    cascade, all but the alpha-blended ones are simply outside the cascade cull.
+-   **Views need a viewport origin.** A paraboloid light's two hemispheres share one array slice as
+    `(0,0) 4096x2048` and `(0,2048) 4096x2048`, and a focus shadow is `(0,3547) 549x549`. Half the drawn
+    views are sub-rectangles, so `rhi::PassBeginInfo` cannot keep assuming the origin is (0,0).
+-   **The eye is the shadow camera's.** Utility's `World` is eye-relative to the shadow camera's
+    `posAdjust`, up to 15,000 units from the main camera's, and `VS_PerFrame` c8 holds the transpose of
+    that camera's `viewProjMat`. A shadow epoch therefore adds an eye delta per view, as planned.
+
+The cost it measured is the baseline S5 will be judged against: 2.3 ms of render-thread CPU per frame in
+the exterior (2.2 of it in cascade 1's 2,569 draws), 0.5 ms for two point lights at night.
+
+### The two-phase frame
+
+Shadow views are drawn *inside* `Main_RenderShadowMaps`, and the main camera's passes are registered by
+jobs that run concurrently with them - they are complete only when that call returns. So an object record
+a shadow epoch can read has to exist before it, and the accumulator's half of the record cannot.
+`SceneStore::BuildFrame` now takes a phase:
+
+-   **`Phase::Scene`**, from `DrawcallLimitFix::BeforeShadowMaps`: the tracked walk, eligibility, the
+    geometry slots and their buffer resolve, transforms, bounds, bone palettes, and one object record per
+    eligible object - with no pipeline, no material, `kObjectNoBindings` and `kObjectNativeVisible` clear.
+    Object indices are fixed for the frame from here.
+-   **`Phase::Accumulate`**, at `EarlyPrepass` as before: the capture drain, the pipeline and material
+    slots, the per-frame lighting template, shading, light lists, decal order and `kObjectNativeVisible`,
+    patched into those records by object index.
+
+Three things this split taught:
+
+-   **The scene phase must not decide anything that needs the pass.** The decal rule is the one such
+    rule - a decal's group comes from its accumulated pass's accumulation hint - and rejecting on it
+    before the shadow maps left 452 accumulated objects without records and dropped claims from 1712 to
+    1531. Decal verdicts are now deferred: the record is built, and the accumulate phase takes the verdict
+    again with the pass in hand (`DeferredToAccumulate`).
+-   **The per-frame classification still belongs to every frame.** The scene phase's verdict is cached
+    for up to 64 frames, which is right for "is this object drawable at all" and wrong for hidden, actor
+    and fading. The accumulate phase re-runs `ClassifyFrame` even when the derived cache hits, or an
+    object that has just been hidden keeps its bindings.
+-   **The second phase should iterate the passes, not the tracked set.** Walking all 10,053 tracked
+    objects again to look up 1,700 accumulated ones cost 0.4 ms of pure loop; iterating
+    `accumulatedPasses` and finding the tracked entry costs nothing measurable.
+
+Measured against the A1/A2 build at the same place, every main-pass gate holds: claims 1719 (against
+1712) with 0 claimed-but-not-drawn, capture parity clean in steady state, draw parity 0 of 13,843,
+derived cache 1719 served / 0 differ, 0 slot violations.
+
+| | A1/A2 (one phase) | two phases |
+|---|---|---|
+| tables CPU per frame | 2.12 ms | 2.77 ms (scene 1.60, accumulate 1.17) |
+| object records | 4,937 | 5,358 |
+| geometry slots | 645 | 953 |
+
+The extra 0.65 ms is the scene phase giving records, geometry slots and transforms to every eligible
+object rather than bounds alone to the ~3,200 the main camera's culling had rejected. That is the work
+the shadow epochs exist to consume, and it is paid once for all views.
+
+## Shadow views, step two: the views drawn, and the counters that say so
+
+Step S2 of the shadow plan gives DCLF the sun's cascades - every view the engine draws with render mode
+0xD-0xF that is not a focus shadow - behind `CS_DCLF_SHADOWS=1`, with static ownership of their casters
+behind `CS_DCLF_SHADOW_OWNERSHIP=static`. Shadow correctness is judged by counters and readbacks alone
+for now: Community Shaders' shadows are broken in general at the time of writing, so a screenshot says
+nothing about DCLF's part in them.
+
+### What was built
+
+-   **`ShadowViews`** (`DrawcallLimitFix/ShadowViews.{h,cpp}`): the frame's views from the shadow scene
+    node's caster array, in the engine's order, keyed by accumulator (what the 0x2A hook is called on)
+    and by batch renderer (what the engine registers the view's Utility passes with). Each view also
+    carries the accumulator's render mode from its last draw, which is what attributes a registration to
+    a mode's claim set. The batch renderers of the non-focus views are published to `PassCapture` per
+    frame, as the main camera's are.
+-   **The shadow classification** in the scene phase: `ShadowCasterReject` (the engine's rule, 0 false
+    rejections over ~1M registrations in step one) sets `kObjectNoShadow`; `ShadowUtilityTechnique`
+    gives every object its Utility technique without the mode bits; two-sided and the alpha-test
+    threshold are read from the property in the scene phase, because the shadow epoch needs them before
+    the accumulate phase runs.
+-   **Utility programs and the shadow pipeline set**: `ShaderPrograms::FindShadow` compiles
+    `Utility.hlsl` with `DCLF_BINDLESS` per (technique | mode bits); the VS takes `World` from the
+    object record plus a per-view eye delta (`DCLFEyeDelta`, b0 c2), bones from the bone rows with the
+    same delta, `TreeParams` from the record, and `AlphaTestRefRS` from the record's threshold bits.
+    `DrawPipelines::FindShadow` keeps a second pipeline set and indirect signature: depth only, LESS with
+    writes, the engine's rasterizer bias for the key's bias mode, culling from the key, the shadow map's
+    DSV format (`D16_UNORM`).
+-   **Capture, then one epoch.** The 0x2A hook (`BSShaderAccumulator::FinishAccumulatingPreResolveDepth`)
+    only *captures* a view after its native draws: target and slice from the renderer state, the
+    viewport, `posAdjust`, the PerTechnique block (parabola parameters from the two globals, the eye
+    delta) and a copy of `VS_PerFrame` as the engine wrote it for the view. `ExecuteShadowFrame`, at
+    `AfterShadowMaps`, then runs *one* graph epoch for every captured view: the object records, bone rows,
+    geometry table and binding records once; the draw inputs once per render mode present (a caster with a
+    ready pipeline under that mode); per view a slot holding its two blocks at the head of the constant
+    arena, its own copy of the binding records naming them, its sequence and count buffers, one
+    `BuildDrawsCS` dispatch (frustum only, single phase, no engine-visibility gate) and one
+    `ExecuteIndirect` into its slice through a per-slice DSV at the view's viewport origin
+    (`rhi::PassBeginInfo::x,y`, added to BasicRHI for this).
+-   **The volumetric copy.** The engine draws each cascade twice: into `kSHADOWMAPS_ESRAM` (4096², two
+    slices) and again, through the same batch renderer, into `kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM`
+    (512², two slices) for the volumetric lighting. A caster withheld from the renderer is missing from
+    both draws, so under ownership DCLF must draw both: target 3 is the third imported shadow depth
+    target. Before it was, exactly two views a frame reported "not ready (depth)".
+-   **Static shadow ownership.** After a successful epoch the inputs of each mode become that mode's
+    claim set (`PassCapture::PublishShadowClaims`); the registration hook withholds a Utility pass whose
+    batch renderer belongs to a view of that mode and whose geometry is claimed. The exterior withholds
+    ~2,150 of the cascades' registrations a frame with 5,176 claimed; the engine still draws the rest
+    natively (actors, grass, LOD, terrain - nothing DCLF has a record for).
+-   **Live toggles.** Every non-default feature - hybrid, ownership, the culling mode and input, the
+    object classes, the shadow views and their ownership, and the diagnostic modes - is a `Toggles`
+    entry seeded from its switch and edited in the DCLF menu. The render thread applies the requested
+    set once per frame at `BeforeShadowMaps`; a change to a toggle that enters the classification drops
+    every cached verdict and derivation (`SceneStore::InvalidateVerdicts`). The shadow system has its own
+    switch there so it can be excluded while everything else is tested.
+
+### The counters
+
+Riverwood exterior, the standard switch set plus shadows and shadow ownership, 120 s:
+
+| counter | value |
+|---|---|
+| views offered per frame | 5 (two cascades into target 2, the same two into target 3, one focus view) |
+| views drawn / not ready / focus left native | 4 / 0 / 1 |
+| inputs per mode (0xE) | 5,176 with 0 lacking a pipeline, 0 lacking a texture; 163 binding records |
+| GPU culling, cascade 0 (sampled) | 5,176 tested, 111 drawn, 5,065 outside the frustum |
+| GPU culling, cascade 1 (sampled) | 5,176 tested, 2,308 drawn, 2,868 outside |
+| shadow ownership | 2,149 clamped passes withheld per frame, 5,176 claimed, 0 views not ready |
+| main-pass gates | claims 1,712, 0 claimed-but-not-drawn in steady state (one transient of 2 during churn) |
+| CPU per frame | 1.65 ms: capture 0.01, prepare 0.38, inputs 0.34, blocks 0.05, graph 0.87, claims 0.14 |
+
+Two lessons the counters taught:
+
+-   **The graph's execution is a per-epoch floor.** One epoch per view cost 4.4-6.0 ms a frame, of
+    which 3.5-5.1 ms was the graph's own compile/prepare/record - the main epochs show the same ~0.9 ms
+    "graph execute" part. One epoch for all views brought the shadow path to 1.65 ms with the same four
+    views drawn. Anything that runs per view has to be a dispatch or a pass inside one epoch, never an
+    epoch.
+-   **A "not ready" count needs a reason.** The two unexplained not-ready views a frame were the
+    volumetric copies; the per-reason counters (`setup`, `pipelines`, `tables`, `depth`, `epoch`,
+    `capacity`) said `depth` and a once-per-target log line said target 3.
+
+The engine's own shadow-map CPU with the probe on was 2.7 ms a frame before ownership; what the native
+loop saves under ownership is not measured yet (step S5).
+
+### Open, carried to S3-S5
+
+Spot lights (mode 0xD, the clamped permutation) are built but untested for lack of a spot-lit cell in the
+runs so far; parabolic lights (S3) and the focus views (S4) stay native; `HighDetailRange` is zero, the
+depth bias uses mode 0 only, the samplers are the default wrap/anisotropic; the object records are rebuilt
+per frame for the shadow epoch (0.38 ms) although the scene phase has them; the inputs cost two hash
+lookups per caster per mode (0.34 ms); the claim set is rebuilt per frame (0.14 ms); the hole detector
+counts not-ready views rather than withheld passes per view. The shadow image parity gate from the plan is
+deferred until Community Shaders' shadows are themselves correct.

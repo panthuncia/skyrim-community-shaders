@@ -10,7 +10,7 @@ namespace DCLF
 {
 	/**
 	 * @brief What DCLF needs to know about a DXC SPIR-V module: its stage inputs (by HLSL semantic) and
-	 * the descriptor bindings it declares. Only the instructions DXC emits for these are parsed.
+	 * the descriptor bindings its code uses (not merely declares). Only the instructions DXC emits for these are parsed.
 	 */
 	struct SpirvReflection
 	{

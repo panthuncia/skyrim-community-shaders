@@ -63,6 +63,10 @@ namespace DCLF
 		kObjectProjectedUV = 1u << 18,
 		kObjectLandBlend = 1u << 19,
 		kObjectDecalGroupShift = 20,
+		// The engine would draw no shadow-map pass for this object (ShadowViews.h: ShadowCasterReject),
+		// so no shadow view's culling may accept it. Decided by the scene phase, which is before any
+		// shadow view is drawn.
+		kObjectNoShadow = 1u << 22,
 	};
 
 	/** @brief Rows of per-object extras in the row buffer: LandBlendParams, TextureProj x3, ProjectedUVParams x3. */
@@ -131,6 +135,34 @@ namespace DCLF
 		bool operator==(const PipelineKey&) const = default;
 	};
 	static_assert(std::has_unique_object_representations_v<PipelineKey>);
+
+	/**
+	 * @brief A pipeline of the shadow views: one Utility technique, one vertex layout, one raster state.
+	 *
+	 * Its own key space, not a variant of PipelineKey: a shadow draw runs the Utility shader with the
+	 * technique the engine derives for the caster (ShadowViews.h), which does not follow the Lighting
+	 * descriptors the main pass's key is built from - two objects sharing a Lighting pipeline can cast
+	 * with different Utility techniques, and one Utility technique serves objects of many Lighting
+	 * pipelines. The raster flags carry two-sidedness and the view's depth bias mode.
+	 */
+	struct ShadowPipelineKey
+	{
+		std::uint32_t technique = 0;     // Utility technique, mode bits included
+		std::uint32_t rasterFlags = 0;   // kRasterTwoSided and the bias mode at kRasterDepthBiasShift
+		std::uint64_t vertexLayout = 0;  // as PipelineKey::vertexLayout
+
+		bool operator==(const ShadowPipelineKey&) const = default;
+	};
+	static_assert(std::has_unique_object_representations_v<ShadowPipelineKey>);
+
+	struct ShadowPipelineKeyHash
+	{
+		using is_avalanching = void;
+		std::uint64_t operator()(const ShadowPipelineKey& a_key) const noexcept
+		{
+			return ankerl::unordered_dense::detail::wyhash::hash(&a_key, sizeof(a_key));
+		}
+	};
 
 	struct PipelineKeyHash
 	{

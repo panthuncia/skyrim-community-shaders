@@ -207,6 +207,8 @@ public:
 	void SetAdapterDescription(const std::wstring& description);
 
 	bool frameAnnotations = false;
+	/** @brief Debugger events are being emitted (Frame Annotations, or a capture tool is attached). */
+	bool debuggerEvents = false;
 
 	// Pass D3DCOMPILE_PARTIAL_PRECISION to fxc. With explicit min16float types this is
 	// mostly belt-and-braces in SM5, but it lets the compiler downgrade unmarked float
@@ -470,4 +472,20 @@ public:
 private:
 	std::shared_ptr<REX::W32::ID3DUserDefinedAnnotation> pPerf;
 	std::mutex statsMutex;
+};
+
+/**
+ * @brief A debugger event (Nsight, RenderDoc, PIX) around one scope of GPU work, emitted only while
+ * State::debuggerEvents is on, so the name costs nothing otherwise.
+ */
+class ScopedPerfEvent
+{
+public:
+	explicit ScopedPerfEvent(std::string_view a_name);
+	~ScopedPerfEvent();
+	ScopedPerfEvent(const ScopedPerfEvent&) = delete;
+	ScopedPerfEvent& operator=(const ScopedPerfEvent&) = delete;
+
+private:
+	bool active = false;
 };

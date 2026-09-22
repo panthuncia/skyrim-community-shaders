@@ -99,6 +99,9 @@ namespace DCLF
 			std::uint32_t ready = 0;  // in the set
 			std::uint32_t failed = 0;
 			std::uint32_t targetChanges = 0;
+			std::uint32_t shadowRequested = 0;
+			std::uint32_t shadowReady = 0;
+			std::uint32_t shadowFailed = 0;
 		};
 
 		static DrawPipelines& Get();
@@ -115,6 +118,18 @@ namespace DCLF
 		 * once the program is compiled.
 		 */
 		std::uint32_t Find(const PipelineKey& a_key, const ShaderPrograms::Program& a_program);
+
+		/**
+		 * @brief The shadow key's index in the shadow pipeline set, or kNotReady.
+		 *
+		 * A separate set from the main pass's: its pipelines write depth alone, into the engine's shadow
+		 * map format, with the view's depth bias and no colour attachment (engine notes: shadow maps).
+		 * @param a_depthFormat the shadow map array's format; pipelines are rebuilt if it changes.
+		 */
+		std::uint32_t FindShadow(const ShadowPipelineKey& a_key, const ShaderPrograms::ShadowProgram& a_program, DXGI_FORMAT a_depthFormat);
+
+		/** @brief Reads the engine's rasterizer state behind a shadow key's bias mode (as CaptureEngineStates). */
+		void CaptureShadowStates(std::span<const ShadowPipelineKey> a_keys);
 
 		/** @brief Adds finished pipelines to the set (call once per frame). */
 		void Update();
@@ -133,6 +148,9 @@ namespace DCLF
 		/** @brief The registers of a variant of the pipeline at a set index (one Find returned). */
 		const RegisterUsage& Usage(std::uint32_t a_index, std::uint32_t a_variant = kColorVariant) const { return usage[a_index][a_variant]; }
 
+		/** @brief The registers of the shadow pipeline at a shadow set index (one FindShadow returned). */
+		const RegisterUsage& ShadowUsage(std::uint32_t a_index) const { return shadowUsage[a_index]; }
+
 		/** @brief Increments whenever the set is recreated (target change): indices from before are stale. */
 		std::uint32_t Generation() const { return generation; }
 
@@ -146,9 +164,11 @@ namespace DCLF
 		std::unique_ptr<Impl> impl;
 		TargetFormats targets;
 		std::vector<std::array<RegisterUsage, kVariantCount>> usage;  // by set index, then variant
+		std::vector<RegisterUsage> shadowUsage;                       // by shadow set index
 		std::uint32_t generation = 0;
 		Stats stats;
 
 		friend struct IndirectState GetIndirectState();
+		friend struct ShadowIndirectState GetShadowIndirectState();
 	};
 }

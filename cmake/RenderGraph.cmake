@@ -73,7 +73,11 @@ if(CS_RENDER_GRAPH)
             endif()
         endif()
 
-        # SPIR-V for the render-graph passes, with the descriptor-heap ABI BasicRHI expects.
+        # SPIR-V for the render-graph passes, with the descriptor-heap ABI BasicRHI expects. Always with -Zi's
+        # source-level debug info (embedded HLSL + OpLine), so Nsight and RenderDoc show these compute passes'
+        # source like the runtime-compiled Lighting ones. Debug info only: optimization and bindings unchanged,
+        # and drivers ignore it.
+        set(BASICRHI_SPIRV_DEBUG_INFO ON)
         include("${CS_ORG_ROOT}/BasicRHI/cmake/BasicRHIShaderFlags.cmake")
         set(_llf_shader_dir "${CMAKE_SOURCE_DIR}/features/Light Limit Fix/Shaders")
         foreach(_shader IN ITEMS ClusterBuildingCS ClusterCullingCS)

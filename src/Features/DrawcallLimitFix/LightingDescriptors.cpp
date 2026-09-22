@@ -2,6 +2,7 @@
 
 #include "ShaderCache.h"
 #include "Switches.h"
+#include "Toggles.h"
 #include "State.h"
 #include "TruePBR/BSLightingShaderMaterialPBR.h"
 #include "Features/TerrainBlending.h"
@@ -33,8 +34,7 @@ namespace DCLF
 		 */
 		bool TreesEnabled()
 		{
-			static const bool enabled = SwitchEnabled("CS_DCLF_TREES");
-			return enabled;
+			return Toggles::Get().Active().trees;
 		}
 
 		// Techniques Phase 1 handles. The rest (terrain, faces, LOD, eyes, ...) stay native.
@@ -264,26 +264,22 @@ namespace DCLF
 
 	bool DecalsEnabled()
 	{
-		static const bool enabled = SwitchEnabled("CS_DCLF_DECALS");
-		return enabled;
+		return Toggles::Get().Active().decals;
 	}
 
 	bool SkinnedEnabled()
 	{
-		static const bool enabled = SwitchEnabled("CS_DCLF_SKINNED");
-		return enabled;
+		return Toggles::Get().Active().skinned;
 	}
 
 	bool ProjectedUvEnabled()
 	{
-		static const bool enabled = SwitchEnabled("CS_DCLF_PROJECTED_UV");
-		return enabled;
+		return Toggles::Get().Active().projectedUv;
 	}
 
 	bool MtLandEnabled()
 	{
-		static const bool enabled = SwitchEnabled("CS_DCLF_MTLAND");
-		if (!enabled)
+		if (!Toggles::Get().Active().mtLand)
 			return false;
 		const auto& terrainBlending = globals::features::terrainBlending;
 		const bool terrainBlendingOwnsTerrain = terrainBlending.loaded && terrainBlending.settings.Enabled && IndirectDraws::Hybrid();

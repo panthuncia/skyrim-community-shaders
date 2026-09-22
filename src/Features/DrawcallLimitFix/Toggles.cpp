@@ -1,0 +1,146 @@
+#include "Toggles.h"
+
+#include "Switches.h"
+
+namespace DCLF
+{
+	namespace
+	{
+		// Bit positions of the packed active word.
+		enum : std::uint32_t
+		{
+			kHybrid = 0,
+			kOwnership,
+			kCullMode,  // two bits
+			kCullTracked = 4,
+			kSkinned,
+			kTrees,
+			kDecals,
+			kProjectedUv,
+			kMtLand,
+			kShadows,
+			kShadowOwnership,
+			kDebugView,
+			kHybridNoSkip,
+			kOnlyEligible,
+			kNoZPrepass,
+		};
+
+		// Defaults: the configuration every gate run of this work used. An unset switch takes the default;
+		// an explicit value overrides it ("0" / "off" turns an on-by-default feature off).
+		bool OnUnlessOff(const char* a_name)
+		{
+			const auto value = SwitchValue(a_name);
+			return value.empty() || value == "1";
+		}
+
+		bool StaticUnlessOff(const char* a_name)
+		{
+			const auto value = SwitchValue(a_name);
+			return value.empty() || value == "static";
+		}
+
+		ToggleSet FromSwitches()
+		{
+			ToggleSet set;
+			set.hybrid = OnUnlessOff("CS_DCLF_HYBRID");
+			set.ownership = StaticUnlessOff("CS_DCLF_OWNERSHIP");
+			const auto cull = SwitchValue("CS_DCLF_CULL");
+			set.cullMode = (cull.empty() || cull == "occlusion") ? 2 : cull == "frustum" ? 1 : 0;
+			set.cullTracked = SwitchValue("CS_DCLF_CULL_INPUT") == "tracked";
+			set.skinned = OnUnlessOff("CS_DCLF_SKINNED");
+			set.trees = OnUnlessOff("CS_DCLF_TREES");
+			set.decals = OnUnlessOff("CS_DCLF_DECALS");
+			set.projectedUv = OnUnlessOff("CS_DCLF_PROJECTED_UV");
+			set.mtLand = OnUnlessOff("CS_DCLF_MTLAND");
+			set.shadows = OnUnlessOff("CS_DCLF_SHADOWS");
+			set.shadowOwnership = StaticUnlessOff("CS_DCLF_SHADOW_OWNERSHIP");
+			set.debugView = SwitchEnabled("CS_DCLF_DEBUG_VIEW");
+			set.hybridNoSkip = SwitchEnabled("CS_DCLF_HYBRID_NOSKIP");
+			set.onlyEligible = SwitchEnabled("CS_DCLF_ONLY_ELIGIBLE");
+			set.noZPrepass = SwitchEnabled("CS_DCLF_NO_ZPREPASS");
+			return set;
+		}
+
+		/** @brief The combinations that cannot hold: ownership without the path that draws into the frame. */
+		ToggleSet Normalised(ToggleSet a_set)
+		{
+			a_set.ownership = a_set.ownership && a_set.hybrid;
+			a_set.shadowOwnership = a_set.shadowOwnership && a_set.shadows;
+			return a_set;
+		}
+
+		bool EntersClassification(const ToggleSet& a, const ToggleSet& b)
+		{
+			return a.hybrid != b.hybrid || a.cullTracked != b.cullTracked || a.skinned != b.skinned || a.trees != b.trees ||
+			       a.decals != b.decals || a.projectedUv != b.projectedUv || a.mtLand != b.mtLand;
+		}
+	}
+
+	Toggles& Toggles::Get()
+	{
+		static Toggles toggles;
+		return toggles;
+	}
+
+	Toggles::Toggles() :
+		requested(FromSwitches())
+	{
+		active.store(Pack(Normalised(requested)), std::memory_order_relaxed);
+	}
+
+	std::uint32_t Toggles::Pack(const ToggleSet& s)
+	{
+		std::uint32_t bits = 0;
+		auto put = [&](std::uint32_t a_bit, bool a_on) { bits |= (a_on ? 1u : 0u) << a_bit; };
+		put(kHybrid, s.hybrid);
+		put(kOwnership, s.ownership);
+		bits |= (s.cullMode & 3u) << kCullMode;
+		put(kCullTracked, s.cullTracked);
+		put(kSkinned, s.skinned);
+		put(kTrees, s.trees);
+		put(kDecals, s.decals);
+		put(kProjectedUv, s.projectedUv);
+		put(kMtLand, s.mtLand);
+		put(kShadows, s.shadows);
+		put(kShadowOwnership, s.shadowOwnership);
+		put(kDebugView, s.debugView);
+		put(kHybridNoSkip, s.hybridNoSkip);
+		put(kOnlyEligible, s.onlyEligible);
+		put(kNoZPrepass, s.noZPrepass);
+		return bits;
+	}
+
+	ToggleSet Toggles::Unpack(std::uint32_t a_bits)
+	{
+		ToggleSet s;
+		auto get = [&](std::uint32_t a_bit) { return ((a_bits >> a_bit) & 1u) != 0; };
+		s.hybrid = get(kHybrid);
+		s.ownership = get(kOwnership);
+		s.cullMode = static_cast<std::uint8_t>((a_bits >> kCullMode) & 3u);
+		s.cullTracked = get(kCullTracked);
+		s.skinned = get(kSkinned);
+		s.trees = get(kTrees);
+		s.decals = get(kDecals);
+		s.projectedUv = get(kProjectedUv);
+		s.mtLand = get(kMtLand);
+		s.shadows = get(kShadows);
+		s.shadowOwnership = get(kShadowOwnership);
+		s.debugView = get(kDebugView);
+		s.hybridNoSkip = get(kHybridNoSkip);
+		s.onlyEligible = get(kOnlyEligible);
+		s.noZPrepass = get(kNoZPrepass);
+		return s;
+	}
+
+	bool Toggles::BeginFrame()
+	{
+		const auto next = Normalised(requested);
+		const auto current = Active();
+		if (next == current)
+			return false;
+		active.store(Pack(next), std::memory_order_relaxed);
+		generation.fetch_add(1, std::memory_order_relaxed);
+		return EntersClassification(current, next);
+	}
+}

@@ -54,6 +54,7 @@ public:
 		ZPrepass,      // Drawcall Limit Fix's depth, at the first draw of the main (deferred) pass
 		MainOpaque,    // Drawcall Limit Fix's colour, before the deferred composite
 		DebugView,     // Drawcall Limit Fix debug view, before the deferred composite
+		ShadowView,    // Drawcall Limit Fix's shadow casters, inside one shadow view's draw
 	};
 
 	static RenderGraphRuntime& Get();
@@ -104,6 +105,20 @@ public:
 	/** @brief Wraps a materialized graph-owned buffer as a D3D11 buffer (DEFAULT usage, no CPU access). */
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(org::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc);
 
+	/**
+	 * @brief Totals (and with a_log, logs) the GPU time of every segment and of the passes inside it, from ORG's own pass timestamps,
+	 * averaged over `a_frames` frames, and starts a new window. Render thread.
+	 *
+	 * The measurement to hold a capture tool's attribution against: timestamps bracket each pass as the
+	 * graph records it, each epoch's are read back separately once its slot's GPU work is known complete,
+	 * and a pass's exclusive time is taken along the queue (from the previous pass's end, not its own begin,
+	 * which can run ahead of it), so neither overlapping passes nor epochs sharing a pass double-count.
+	 */
+	void ReportGpuTimings(std::uint32_t a_frames, bool a_log);
+
+	/** @brief One line per segment from the last ReportGpuTimings, for the menu; empty before the first. */
+	const std::string& GpuTimingSummary() const { return gpuTimingSummary; }
+
 	~RenderGraphRuntime();
 
 private:
@@ -112,6 +127,7 @@ private:
 	struct Impl;
 	std::unique_ptr<Impl> impl;
 	std::string disabledReason = "not initialized";
+	std::string gpuTimingSummary;
 	Segment segment = Segment::LightCulling;
 	bool attempted = false;
 };

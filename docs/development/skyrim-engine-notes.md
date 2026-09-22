@@ -493,3 +493,94 @@ squared distance (`+0x158`) through `0x5f3759df - (bits >> 1)` with an **arithme
 pattern. A fern-type node can hold an uninitialised negative value there; the engine's estimate then
 overflows in the direction that clamps the amplitude to its maximum, and a logical shift does not. DCLF
 reproduces the signed shift.
+
+## Shadow maps: views, descriptors and the Utility passes
+
+Measured with `CS_DCLF_SHADOW_PROBE=1` (`DrawcallLimitFix/ShadowProbe.cpp`) on AE 1.6.1170, Whiterun
+exterior by day and the Bannered Mare at hour 22, on top of the Ghidra reading of the functions below.
+
+**Frame order.** `Main::Draw` (`0x1406444b0`) builds the main scene lists and finishes them; then
+`NiCamera::CalculateAndDrawShadowCasterLights` (`0x1414cbb90`) queues each shadow light's list
+accumulation and, inside `CalculateActiveShadowCasterLights` (`0x1414cc570`), walks
+`ShadowSceneNode::GetShadowCasterLightArrayEntry` (`0x1414a4010`, an index into `shadowLightsAccum` at
+`+0x230`) calling `UpdateCamera` (vfunc 0x10) and `Accumulate` (vfunc 0x9, one `FUN_1414f0920` cull per
+descriptor). `FUN_1414cbff0`, the callee of Community Shaders' `Main_RenderShadowMaps` thunk
+(`RelocationID(35560,36559)+0x2EC/0x30A`), then queues the **main camera's pass registration jobs** and,
+while they run, calls every light's `Render` (vfunc 0xA), and only then `JobList__Finish`es. So at
+shadow-draw time the scene graph and the main cull are final, the shadow views' registrations are
+complete, and the main accumulator's passes are not - they are complete when the thunk returns.
+
+**Per light.** `BSShadowDirectionalLight::Render` (`0x141511d60`), `BSShadowFrustumLight::Render`
+(`0x14151aac0`) and `BSShadowParabolicLight::Render` (`0x14151bd10`) loop their `ShadowmapDescriptor`s
+(0xF0 bytes, `RE::BSShadowLight::ShadowmapDescriptor`) into `BSShadowLight::RenderShadowmap`
+(`0x1414f0cf0`, mislabelled `BSShadowParabolicLight::sub`): a free array slice from the bitmask at
+`0x142035797` when `renderTarget == -1`, `SetDepthStencilTarget(descriptor.renderTarget, slice)`, a clear
+when `clearRenderTarget`, then `FUN_1414a90f0(camera, accumulator, flags | 0x400)`:
+`State::SetCameraData` (the shadow camera into `cameraData` and `posAdjust`), `UpdateViewPort`, the
+accumulator's vfunc 0x25, **`FinishAccumulatingPreResolveDepth` (vfunc 0x2A)** and `PostResolveDepth`
+(0x2B); afterwards it writes `descriptor.lightTransform` (what CS uploads to t98). Parabolic lights set
+`0x142035df8` (the light radius) and `0x142035dfc` (+1 / -1) before each hemisphere.
+
+**The views, as drawn.**
+
+| Light | Descriptors | Render mode | Depth target / slice | Viewport |
+|---|---|---|---|---|
+| Directional (sun) | 2 cascades | `0xE` ShadowMapClamped | 2 (`kSHADOWMAPS_ESRAM`), slices 0 and 1 | `(0,0) 4096x4096`, full slice |
+| Directional, focus shadow | descriptor 0 of `focusShadowmapDescriptors` when `drawFocusShadows` | `0xE` | 4, slice 4 | `(0,3547) 549x549` - **an origin** |
+| Parabolic (point) | 2 hemispheres | `0xF` ShadowMapPb | 4, one slice per light | `(0,0) 4096x2048` and `(0,2048) 4096x2048` - **an origin** |
+| Frustum (spot) | (none in the cells measured) | `0xE` by the decompile | | |
+
+`ShadowMapPlain` (`0xD`, technique bits `0x4000`) was never used. The `shadowLightsAccum` list holds a
+second directional light whose descriptors are never drawn, and the focus descriptors 1..3 have a zero
+port and no clear. A view's `port` (`NiRect`: left, right, top, bottom, y up) matches the viewport's
+size; the hemispheres and the focus shadow are sub-rectangles of the slice, so any render pass that
+draws a view needs a viewport origin, not just a size. Render flags at the hook are `0x400`. The
+depth-stencil set mode is 4 (no clear at bind; the clear was done before). Point lights: `parabola =
+(radius, ±1)`, e.g. 579 for a hearth. The main pass's `RenderDepth` accumulations (mode `0xC`) come
+through the same vfunc twice per frame.
+
+**The passes.** `BSLightingShaderProperty::GetRenderPasses_ShadowMapOrMask` (`0x1414af030`, from
+`GetRenderPasses` vfunc 0x2A for modes 0xC..0xF): `technique = DetermineUtilityShaderDecl()` (vfunc
+0x3D) `| 0x80` when the alpha property alpha-tests `| 0x2000` (0xC) / `0x4000` (0xD) / `0xC000` (0xE) /
+`0x14000` (0xF) `| 0x10000` when LOD-dissolving (0xC only) `| 0x8000000` when flags bit 34 or 63
+`| 0x20080` when flags bit 26 or 27; `passEnum = technique + 0x2B`, cached per property in the
+double-buffered `arrayQueue` across views of a frame. **For Utility passes the `techniqueID` handed to
+`BSBatchRenderer::RegisterPass` is the `passEnum` itself** (unlike Lighting, where it is the descriptor).
+The probe derived the technique from the property for ~1M registrations with **0 differing**.
+Accumulation hints seen: 0 (most), 3, 7, 11. Exterior day: ~2,680 Utility registrations per frame into
+the views (216 cascade 0, ~2,450 cascade 1, 9 focus) and ~2,450 `0x2000`-bit (RenderDepth) ones into a
+renderer that is neither a view's nor one of the main pass's batch renderers.
+
+**Who casts.** For the shadow modes the function returns no pass when: the property is not a lighting
+one; hair-tint flag (bit 18) with a decal flag (26/27) unless `kZBufferWrite` (32) and alpha-blended;
+`fadeNode->currentFade * material->materialAlpha < 1`; flags `0x8004` (`kTempRefraction`,
+`kRefraction`); alpha-blended (non-decal); `kCastShadows` (bit 9) clear while the byte at `0x142033498`
+is 1 (it is 1 here; 2 selects volumetric copies for 0xE with the accumulator's `+0x12E` flag);
+`DetermineUtilityShaderDecl() == 0`. The rule reproduced in the probe rejected **none** of the engine's
+registered casters. Of the main pass's kept objects without a registration in a cascade (~475 per
+frame in the exterior), 40 were alpha-blended and the rest eligible - outside the cascades' cull.
+
+**The constants** (`BSUtilityShader::SetupGeometry` `0x1414fae40`, `SetupMaterial` `0x1414faa60`,
+`SetupTechnique` `0x1414fa160`; `package/Shaders/Utility.hlsl`). VS `PerGeometry` (b2): `ShadowFadeParam`
+c0, `World` c1..c4 (row-major, translation in column 3 - the Lighting layout - and **eye-relative to
+the shadow camera's `posAdjust`**: `FUN_1414aaf10` subtracts the current `posAdjust`, which the
+directional camera puts up to 15,000 units from the main eye), `EyePos` c5, `TreeParams` c7. VS
+`PerMaterial` (b1): `TexcoordOffset` c0 (`texCoordOffset`, `texCoordScale`), bound only for alpha-tested
+draws. VS `PerTechnique` (b0): `HighDetailRange` c0, `ParabolaParam` c1 = `(1 / radius, ±1)`. The pixel
+shader is bound only for alpha-tested draws, and its `PerGeometry` group is **not** - the alpha
+reference reaches it as `AlphaTestRefRS` (b11) from `RendererShadowState.alphaTestRef`. `VS_PerFrame`
+(b12) `c8..c11` holds the **transpose** of `cameraData.viewProjMat` at the 0x2A hook, and `posAdjust`
+at the draw equals the one at the hook. Rasterizer state per draw: cull modes 0 and 1 (two-sided and
+back), fill 0; the cascade depth-bias mode is read off the draws in S2.
+
+**Cost.** Exterior day: 2.3 ms of render-thread CPU per frame inside the shadow-map call (max 3.6),
+all in the directional light: cascade 1 with 2,569 draws takes 2.2 ms (0.86 µs per draw), cascade 0
+with 236 draws 0.23 ms, the focus view 0.014 ms. Bannered Mare at night: two point lights, 4
+hemispheres, ~1,500 draws, 0.5 ms.
+
+**The volumetric copy (measured, S2).** Each cascade's accumulator is finished twice per frame: once
+with `depthStencil = kSHADOWMAPS_ESRAM` (target 2, 4096², two slices) and once with
+`kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM` (target 3, 512², two slices, `D16_UNORM` like the others) for
+the volumetric lighting. Both draws walk the same batch renderer, i.e. the same registered passes, so a
+pass withheld from that renderer is absent from both maps. `FinishAccumulatingPreResolveDepth` (vfunc
+0x2A) fires for each, with the same view (accumulator) and render mode 0xE.

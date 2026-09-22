@@ -136,9 +136,15 @@ namespace DCLF
 		}
 	}
 
+	void SceneTracker::Stop()
+	{
+		stopped.store(true, std::memory_order_release);
+		FreeEvents(Drain());
+	}
+
 	void SceneTracker::PushAttached(RE::NiAVObject* a_child)
 	{
-		if (!a_child)
+		if (!a_child || stopped.load(std::memory_order_acquire))
 			return;
 		auto* event = new Event{};
 		event->type = EventType::Attached;
@@ -148,7 +154,7 @@ namespace DCLF
 
 	void SceneTracker::PushDetached(RE::NiAVObject* a_child)
 	{
-		if (!a_child)
+		if (!a_child || stopped.load(std::memory_order_acquire))
 			return;
 		auto* event = new Event{};
 		event->type = EventType::Detached;

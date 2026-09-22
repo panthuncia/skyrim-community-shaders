@@ -14,7 +14,10 @@
 #	include "PassCapture.h"
 #	include "SceneStore.h"
 #	include "ShaderPrograms.h"
+#	include "ShadowViews.h"
+#	include "Toggles.h"
 #	include "Switches.h"
+#	include "VertexInput.h"
 
 #	include "Deferred.h"
 #	include "Features/LinearLighting.h"
@@ -46,6 +49,26 @@ namespace DCLF
 	namespace
 	{
 		constexpr const char* kExtensionId = "cs.dclf.main-opaque";
+		constexpr const char* kShadowExtensionId = "cs.dclf.shadow";
+		// The shadow views' binding records: one for every draw without alpha testing, and one per material
+		// of the alpha-tested casters (their diffuse and texture offset).
+		constexpr std::uint32_t kShadowRecordCapacity = 512;  // per view slot (the exterior needs ~160)
+		// The views one frame's shadow epoch can hold: the exterior has four (two cascades, twice); an
+		// interior with several shadow-casting point lights has two hemispheres per light.
+		constexpr std::uint32_t kMaxShadowViews = 16;
+		constexpr std::uint32_t kShadowModeCount = 3;  // render modes 0xD plain, 0xE clamped, 0xF paraboloid
+		constexpr std::uint64_t kShadowConstantBytes = 1ull << 20;
+		// Fixed slots at the head of the shadow constants: the view's Utility PerTechnique block and its
+		// VS_PerFrame block, rewritten per view so that the records built once a frame can point at them.
+		// The arena's head holds one slot per view: its PerTechnique block (b0) then its VS_PerFrame copy (b12).
+		constexpr std::uint64_t kShadowPerFrameOffset = 256;
+		constexpr std::uint64_t kShadowViewSlotBytes = 256 + 1024;
+		constexpr std::uint64_t kShadowMaterialBlocksOffset = kShadowViewSlotBytes * kMaxShadowViews;
+		// [0] kSHADOWMAPS_ESRAM (cascades, spot lights), [1] kSHADOWMAPS (point and focus lights), and
+		// [2] kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM: the engine draws the cascades a second time into it for
+		// the volumetric lighting, through the same batch renderer, so a caster withheld from the renderer
+		// is missing from both draws and DCLF has to draw both (S2: the two "not ready" views per frame).
+		constexpr std::uint32_t kShadowDepthTargets = 3;
 		constexpr std::uint32_t kMaxDraws = 16384;
 		constexpr std::uint64_t kConstantBytes = 48ull << 20;
 		constexpr std::uint64_t kConstantAlignment = 256;  // uniform buffer address alignment (conservative)
@@ -983,10 +1006,7 @@ namespace DCLF
 
 		bool DebugViewEnabled()
 		{
-			static const bool enabled = [] {
-				return SwitchEnabled("CS_DCLF_DEBUG_VIEW");
-			}();
-			return enabled;
+			return Toggles::Get().Active().debugView;
 		}
 
 		// CS_DCLF_CULL=off|frustum: how BuildDrawsCS filters this frame's draws before it writes their
@@ -996,13 +1016,8 @@ namespace DCLF
 		// false negatives, and any non-zero count is a defect in the projection here.
 		std::uint32_t CullingMode()
 		{
-			static const std::uint32_t mode = [] {
-				const auto value = SwitchValue("CS_DCLF_CULL");
-				if (value == "occlusion")
-					return 2u;  // frustum, then the HZB
-				return value == "frustum" ? 1u : 0u;
-			}();
-			return mode;
+			// 0 off, 1 frustum, 2 frustum then the HZB (Toggles: live from the menu).
+			return Toggles::Get().Active().cullMode;
 		}
 
 		// CS_DCLF_CULL_INPUT=native|tracked: which of the candidates may actually be drawn.
@@ -1014,20 +1029,14 @@ namespace DCLF
 		// objects outside the accumulator carry derived per-frame bits rather than measured ones.
 		bool RequireNativeVisible()
 		{
-			static const bool require = [] {
-				return SwitchValue("CS_DCLF_CULL_INPUT") != "tracked";
-			}();
-			return require;
+			return !Toggles::Get().Active().cullTracked;
 		}
 
 		// CS_DCLF_HYBRID=1: DCLF draws into the main pass's own targets and depth, and the native loop skips
 		// the objects it drew (DrawcallLimitFix's RenderPassImmediately hooks).
 		bool HybridEnabled()
 		{
-			static const bool enabled = [] {
-				return SwitchEnabled("CS_DCLF_HYBRID");
-			}();
-			return enabled;
+			return Toggles::Get().Active().hybrid;
 		}
 
 		// CS_DCLF_BUILD_PARITY=1: compare BuildDraws' output with the CPU templates every 300 epochs.
@@ -1124,12 +1133,328 @@ namespace DCLF
 				return nullptr;
 			a_desc.imageDimensions.clear();
 			a_desc.imageDimensions.push_back({ a_image.extent.width, a_image.extent.height, 0, 0 });
+			// An array image publishes a view per slice (ORG builds one DSV per slice for arrays), which is
+			// how a shadow view's epoch attaches the one slice the engine gave that view.
+			a_desc.isArray = a_image.arrayLayers > 1;
+			a_desc.arraySize = a_desc.isArray ? a_image.arrayLayers : 1;
 			a_desc.initialLayout = rhi::ResourceLayout::Common;
 			auto result = org::ExternalTextureResource::CreateShared(std::move(resource), a_desc, true);
 			if (result)
 				result->SetName(a_name);
 			return result;
 		}
+
+		/**
+		 * @brief What one shadow view's epoch draws; published before the epoch prepares (as PassFrame is).
+		 */
+		/**
+		 * @brief One captured view of the frame's shadow epoch: where to draw its render mode's inputs and
+		 * with which per-view blocks (its record region names them).
+		 */
+		struct ShadowFrameView
+		{
+			std::uint32_t viewId = 0;     // ShadowViews id, for the report
+			std::uint32_t renderMode = 0;
+			std::uint32_t slot = 0;       // the view's sequence and count buffers and its record region
+			std::uint32_t modeIndex = 0;  // the inputs buffer (render mode 0xD, 0xE, 0xF)
+			std::uint32_t inputCount = 0;
+			bool hasViewProj = false;
+			std::array<float, 16> viewProj{};  // VS_PerFrame c8 as the engine wrote it for the view
+			RE::NiPoint3 eye;                  // the view's posAdjust
+			std::uint32_t x = 0, y = 0, width = 0, height = 0;  // the view's viewport, in its slice
+			float minDepth = 0.0f, maxDepth = 1.0f;
+			std::uint32_t target = 0;  // index into ShadowResources::depth
+			std::uint32_t slice = 0;
+			std::uint64_t recordsAddress = 0;  // the slot's copy of the binding records
+		};
+
+		/**
+		 * @brief The frame's shadow epoch: every view the hooks captured, drawn by one graph execution at
+		 * AfterShadowMaps. One epoch rather than one per view because the graph's own execution costs
+		 * ~0.9 ms of CPU per epoch whatever it draws (the main epochs' "graph execute" part), and the
+		 * exterior has four views a frame.
+		 */
+		struct ShadowFrame
+		{
+			std::uint64_t serial = 0;
+			std::uint32_t frameNumber = 0;
+			rhi::DescriptorHeapHandle resourceHeap{};
+			rhi::DescriptorHeapHandle samplerHeap{};
+			ShadowIndirectState indirect{};
+			std::vector<ShadowFrameView> views;
+		};
+
+		/** @brief The shadow views' graph resources: the main path's set, without targets or an HZB, per view slot. */
+		struct ShadowResources
+		{
+			std::shared_ptr<org::Buffer> constants, records, objects, bones, geometries, visibility;
+			std::array<std::shared_ptr<org::Buffer>, kShadowModeCount> inputs;               // per render mode
+			std::array<std::shared_ptr<org::Buffer>, kMaxShadowViews> sequences, count;      // per view slot
+			std::array<winrt::com_ptr<ID3D11Buffer>, kMaxShadowViews> countD3D11;             // the counters, read back
+			std::uint32_t objectsIndex = 0, bonesIndex = 0;
+			std::uint64_t constantsAddress = 0, recordsAddress = 0;
+			std::shared_ptr<const ComputeProgram> buildDraws;
+			// The engine's shadow map arrays, imported once each (re-imported when the engine recreates
+			// them), with a depth-stencil view per slice.
+			std::array<std::shared_ptr<org::ExternalTextureResource>, kShadowDepthTargets> depth;
+			std::array<ID3D11Texture2D*, kShadowDepthTargets> depthTexture{};
+			std::array<std::uint32_t, kShadowDepthTargets> depthLayers{};
+			std::atomic<std::shared_ptr<const ShadowFrame>> frame;
+		};
+
+		std::shared_ptr<const ShadowFrame> CurrentShadowFrame(const ShadowResources& a_resources)
+		{
+			if (RenderGraphRuntime::Get().CurrentSegment() != RenderGraphRuntime::Segment::ShadowView)
+				return nullptr;
+			return a_resources.frame.load(std::memory_order_acquire);
+		}
+
+		struct ShadowBuildBindings
+		{
+			std::array<org::ResourceBindingToken, kShadowModeCount> inputs;
+			std::array<org::ResourceBindingToken, kMaxShadowViews> sequences, count;
+			org::ResourceBindingToken geometries, visibility;
+		};
+
+		struct ShadowBuildPrepared
+		{
+			std::shared_ptr<const ComputeProgram> program;
+			struct Dispatch
+			{
+				BuildDrawsConstants constants{};
+				std::uint32_t groups = 0;
+			};
+			std::vector<Dispatch> dispatches;  // one per captured view
+		};
+
+		/** @brief The shadow views' culling: BuildDrawsCS in its single phase, frustum only, one dispatch per view. */
+		class ShadowBuildDrawsPass final : public org::TypedRenderGraphPass<ShadowBuildDrawsPass, ShadowBuildPrepared, ShadowBuildBindings>
+		{
+		public:
+			explicit ShadowBuildDrawsPass(std::shared_ptr<ShadowResources> a_resources) :
+				resources(std::move(a_resources)) {}
+
+			ShadowBuildBindings Declare(org::PassBuilder& a_builder)
+			{
+				a_builder.PreferQueue(org::QueueKind::Graphics);
+				ShadowBuildBindings bindings{};
+				for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
+					bindings.inputs[m] = a_builder.BindShaderResource(resources->inputs[m]);
+				for (std::uint32_t s = 0; s < kMaxShadowViews; ++s) {
+					bindings.sequences[s] = a_builder.BindUnorderedAccess(resources->sequences[s]);
+					bindings.count[s] = a_builder.BindUnorderedAccess(resources->count[s]);
+				}
+				bindings.geometries = a_builder.BindShaderResource(resources->geometries);
+				bindings.visibility = a_builder.BindUnorderedAccess(resources->visibility);
+				return bindings;
+			}
+
+			void InvocationRevision(const org::PassPrepareContext&, std::vector<std::uint64_t>& a_out) const
+			{
+				const auto frame = CurrentShadowFrame(*resources);
+				a_out.push_back(frame ? frame->serial : 0);
+			}
+
+			ShadowBuildPrepared Prepare(const ShadowBuildBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
+			{
+				ShadowBuildPrepared prepared{};
+				const auto frame = CurrentShadowFrame(*resources);
+				if (!frame || frame->views.empty() || !resources->buildDraws)
+					return prepared;
+				prepared.program = resources->buildDraws;
+				const auto geometriesIndex = a_preparation.ResolveView(a_bindings.geometries, { org::BindlessViewKind::ShaderResource }).index;
+				const auto visibilityIndex = a_preparation.ResolveView(a_bindings.visibility, { org::BindlessViewKind::UnorderedAccess }).index;
+				for (const auto& view : frame->views) {
+					if (!view.inputCount || view.slot >= kMaxShadowViews || view.modeIndex >= kShadowModeCount)
+						continue;
+					ShadowBuildPrepared::Dispatch dispatch{};
+					auto& constants = dispatch.constants;
+					constants.drawCount = view.inputCount;
+					constants.inputsIndex = a_preparation.ResolveView(a_bindings.inputs[view.modeIndex], { org::BindlessViewKind::ShaderResource }).index;
+					constants.geometriesIndex = geometriesIndex;
+					constants.sequencesIndex = a_preparation.ResolveView(a_bindings.sequences[view.slot], { org::BindlessViewKind::UnorderedAccess }).index;
+					constants.countIndex = a_preparation.ResolveView(a_bindings.count[view.slot], { org::BindlessViewKind::UnorderedAccess }).index;
+					constants.recordsAddressLo = static_cast<std::uint32_t>(view.recordsAddress);
+					constants.recordsAddressHi = static_cast<std::uint32_t>(view.recordsAddress >> 32);
+					constants.recordStride = sizeof(DrawBindings);
+					// Frustum culling alone (mode 1), the single phase, and no engine-visibility gate: a caster
+					// is drawn whether or not the main camera kept it, which is the whole point of a shadow.
+					constants.cullFlags = view.hasViewProj ? 1u : 0u;
+					// The visibility words are written per object by every dispatch; nothing reads them here.
+					constants.visibilityIndex = visibilityIndex;
+					constants.visibilityStamp = frame->frameNumber & 0x3FFFFFFFu;
+					FoldEyeIntoViewProj(view.viewProj, view.eye, constants.viewProj);
+					dispatch.groups = (view.inputCount + 63) / 64;
+					prepared.dispatches.push_back(dispatch);
+				}
+				return prepared;
+			}
+
+			static void Record(const ShadowBuildBindings&, const ShadowBuildPrepared& a_prepared, org::PassRecordContext& a_recording)
+			{
+				if (!a_prepared.program || a_prepared.dispatches.empty())
+					return;
+				auto& commands = a_recording.Commands();
+				commands.BindLayout(a_prepared.program->layout->GetHandle());
+				commands.BindPipeline(a_prepared.program->pipeline->GetHandle());
+				for (const auto& dispatch : a_prepared.dispatches) {
+					commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kBuildDrawsConstantWords, reinterpret_cast<const std::uint32_t*>(&dispatch.constants));
+					commands.Dispatch(dispatch.groups, 1, 1);
+				}
+			}
+
+		private:
+			std::shared_ptr<ShadowResources> resources;
+		};
+
+		struct ShadowPassBindings
+		{
+			std::array<org::ResourceBindingToken, kShadowDepthTargets> depth{};
+			std::array<org::ResourceBindingToken, kMaxShadowViews> sequences, count;
+			org::ResourceBindingToken records, constants, objects, bones;
+		};
+
+		struct ShadowPrepared
+		{
+			std::shared_ptr<const ShadowFrame> frame;
+			struct View
+			{
+				std::uint32_t index = 0;  // into frame->views
+				org::PreparedDescriptorReference depthView{};
+			};
+			std::vector<View> views;
+		};
+
+		/** @brief The shadow views' draws: each view's culled sequences into its slice and viewport, in one pass. */
+		class ShadowViewPass final : public org::TypedRenderGraphPass<ShadowViewPass, ShadowPrepared, ShadowPassBindings>
+		{
+		public:
+			explicit ShadowViewPass(std::shared_ptr<ShadowResources> a_resources) :
+				resources(std::move(a_resources)) {}
+
+			ShadowPassBindings Declare(org::PassBuilder& a_builder)
+			{
+				a_builder.PreferQueue(org::QueueKind::Graphics);
+				ShadowPassBindings bindings{};
+				for (std::uint32_t i = 0; i < kShadowDepthTargets; ++i) {
+					if (resources->depth[i])
+						bindings.depth[i] = a_builder.BindDepthReadWrite(resources->depth[i]);
+				}
+				for (std::uint32_t s = 0; s < kMaxShadowViews; ++s) {
+					bindings.sequences[s] = a_builder.BindIndirectArguments(resources->sequences[s]);
+					bindings.count[s] = a_builder.BindIndirectArguments(resources->count[s]);
+				}
+				bindings.records = a_builder.BindShaderResource(resources->records);
+				bindings.constants = a_builder.BindShaderResource(resources->constants);
+				bindings.objects = a_builder.BindShaderResource(resources->objects);
+				bindings.bones = a_builder.BindShaderResource(resources->bones);
+				return bindings;
+			}
+
+			void InvocationRevision(const org::PassPrepareContext&, std::vector<std::uint64_t>& a_out) const
+			{
+				const auto frame = CurrentShadowFrame(*resources);
+				a_out.push_back(frame ? frame->serial : 0);
+			}
+
+			ShadowPrepared Prepare(const ShadowPassBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
+			{
+				ShadowPrepared prepared{};
+				auto frame = CurrentShadowFrame(*resources);
+				if (!frame || frame->views.empty() || !frame->indirect.valid)
+					return prepared;
+				for (std::uint32_t i = 0; i < frame->views.size(); ++i) {
+					const auto& view = frame->views[i];
+					if (!view.inputCount || view.slot >= kMaxShadowViews || view.target >= kShadowDepthTargets || !resources->depth[view.target])
+						continue;
+					if (view.slice >= resources->depthLayers[view.target])
+						continue;
+					org::BindlessViewRequest request{};
+					request.kind = org::BindlessViewKind::DepthStencil;
+					request.slice = view.slice;
+					prepared.views.push_back({ i, a_preparation.CaptureView(a_bindings.depth[view.target], request) });
+				}
+				if (!prepared.views.empty())
+					prepared.frame = std::move(frame);
+				return prepared;
+			}
+
+			static void Record(const ShadowPassBindings& a_bindings, const ShadowPrepared& a_prepared, org::PassRecordContext& a_recording)
+			{
+				if (!a_prepared.frame)
+					return;
+				const auto& frame = *a_prepared.frame;
+				auto& commands = a_recording.Commands();
+				commands.SetDescriptorHeaps(frame.resourceHeap, frame.samplerHeap);
+				for (const auto& prepared : a_prepared.views) {
+					const auto& view = frame.views[prepared.index];
+					rhi::PassBeginInfo begin{};
+					begin.x = view.x;
+					begin.y = view.y;
+					begin.width = view.width;
+					begin.height = view.height;
+					begin.minDepth = view.minDepth;
+					begin.maxDepth = view.maxDepth;
+					// The slice the engine drew its own casters into: loaded, added to, stored.
+					rhi::DepthAttachment depth{};
+					depth.dsv = a_recording.Resolve(prepared.depthView);
+					depth.depthLoad = rhi::LoadOp::Load;
+					depth.depthStore = rhi::StoreOp::Store;
+					depth.stencilLoad = rhi::LoadOp::Load;
+					depth.stencilStore = rhi::StoreOp::Store;
+					begin.depth = &depth;
+					begin.debugName = "DCLF shadow view";
+					commands.BeginPass(begin);
+					commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
+					commands.BindLayout(frame.indirect.layout);
+					commands.ExecuteIndirect(frame.indirect.signature, a_recording.Resolve(a_bindings.sequences[view.slot]).GetHandle(), 0,
+						a_recording.Resolve(a_bindings.count[view.slot]).GetHandle(), 0, view.inputCount);
+					commands.EndPass();
+				}
+			}
+
+		private:
+			std::shared_ptr<ShadowResources> resources;
+		};
+
+		class ShadowExtension final : public org::RenderGraph::IRenderGraphExtension
+		{
+		public:
+			explicit ShadowExtension(std::shared_ptr<ShadowResources> a_resources) :
+				resources(std::move(a_resources)) {}
+
+			void PrepareForBuild(org::RenderGraph& a_graph) override
+			{
+				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.shadow.constants"), resources->constants);
+				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.shadow.records"), resources->records);
+				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.shadow.objects"), resources->objects);
+				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.shadow.bones"), resources->bones);
+				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.shadow.geometries"), resources->geometries);
+				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.shadow.visibility"), resources->visibility);
+				for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
+					a_graph.RegisterResource(org::ResourceIdentifier(fmt::format("cs.dclf.shadow.draw-inputs{}", m)), resources->inputs[m]);
+				for (std::uint32_t s = 0; s < kMaxShadowViews; ++s) {
+					a_graph.RegisterResource(org::ResourceIdentifier(fmt::format("cs.dclf.shadow.sequences{}", s)), resources->sequences[s]);
+					a_graph.RegisterResource(org::ResourceIdentifier(fmt::format("cs.dclf.shadow.draw-count{}", s)), resources->count[s]);
+				}
+				for (std::uint32_t i = 0; i < kShadowDepthTargets; ++i) {
+					if (resources->depth[i])
+						a_graph.RegisterResource(org::ResourceIdentifier(fmt::format("cs.dclf.shadow.depth{}", i)), resources->depth[i]);
+				}
+			}
+
+			void GatherStructuralPasses(org::RenderGraph&, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
+			{
+				a_out.push_back(org::RenderGraph::ExternalPassDesc::Compute("cs.dclf.shadow.build-draws",
+					std::static_pointer_cast<org::RenderPass>(std::make_shared<ShadowBuildDrawsPass>(resources)))
+						.PreferQueue(org::QueueKind::Graphics));
+				a_out.push_back(org::RenderGraph::ExternalPassDesc::Render("cs.dclf.shadow.view",
+					std::static_pointer_cast<org::RenderPass>(std::make_shared<ShadowViewPass>(resources))));
+			}
+
+		private:
+			std::shared_ptr<ShadowResources> resources;
+		};
 
 		class MainOpaqueExtension final : public org::RenderGraph::IRenderGraphExtension
 		{
@@ -1357,6 +1682,62 @@ namespace DCLF
 		std::uint32_t pipelineGeneration = ~0u;
 		std::uint64_t serial = 0;
 		std::optional<Capture> pending;  // this frame's main-pass bindings, until the epoch runs
+
+		// The shadow views (CS_DCLF_SHADOWS). Their own resources and CPU staging, so the main path's are
+		// untouched; the frame's shared uploads happen in the first view's epoch.
+		std::shared_ptr<ShadowResources> shadow;
+		bool shadowSetupFailed = false;
+		// One view's culling counters, sampled every so many epochs and mapped a few frames later.
+		struct ShadowCullReadback
+		{
+			winrt::com_ptr<ID3D11Buffer> count;
+			std::uint32_t copiedFrame = 0;
+			std::uint32_t view = 0, mode = 0;
+		};
+		std::optional<ShadowCullReadback> shadowCullReadback;
+		std::uint32_t shadowCullEpochs = 0;
+		std::uint32_t shadowLoggedTargets = 0;
+		void ReadShadowCullCounters(std::uint32_t a_frame, IndirectDraws::ShadowStats& a_stats);
+		/** @brief A view the hook captured for the frame's epoch (ExecuteShadowView, ExecuteShadowFrame). */
+		struct PendingView
+		{
+			std::uint32_t viewId = 0, renderMode = 0, modeIndex = 0, targetIndex = 0, slice = 0;
+			std::uint32_t x = 0, y = 0, width = 0, height = 0;
+			float minDepth = 0.0f, maxDepth = 1.0f;
+			RE::NiPoint3 eye;
+			bool hasViewProj = false;
+			std::array<float, 16> viewProj{};
+			float viewBlock[12] = {};  // PerTechnique: HighDetailRange, ParabolaParam, EyeDelta
+			std::array<std::byte, 1024> perFrame{};
+			std::uint32_t perFrameBytes = 0;
+			DXGI_FORMAT dsvFormat = DXGI_FORMAT_UNKNOWN;
+		};
+		std::vector<PendingView> pendingViews;
+		std::vector<DrawBindings> shadowSlotRecords;  // one slot's copy of the records, while it uploads
+		// CS_DCLF_SHADOW_OWNERSHIP=static: the claim set built from the inputs of a mode, published once per
+		// input rebuild (the views of one frame that share a mode share the inputs and the claims).
+		void PublishShadowClaims(std::uint32_t a_renderMode, IndirectDraws::ShadowStats& a_stats);
+		RE::NiPoint3 shadowRefEye;
+		std::uint64_t shadowSerial = 0;
+		ConstantArena shadowArena;
+		std::vector<DrawBindings> shadowRecords;
+		std::array<std::vector<DrawInput>, kShadowModeCount> shadowInputs;  // per render mode
+		std::vector<GeometryDraw> shadowGeometries;
+		std::vector<BindlessObject> shadowObjects;
+		std::vector<float> shadowBoneRows;
+		std::vector<std::uint32_t> shadowObjectRecord;  // per object: its binding record, or ~0u when it cannot draw
+		ankerl::unordered_dense::map<const RE::BSShaderMaterial*, std::uint32_t> shadowRecordByMaterial;
+		std::uint32_t shadowLoggedReasons = 0;
+		bool ShadowNotReady(std::uint32_t a_reason, const char* a_what)
+		{
+			if (!((shadowLoggedReasons >> a_reason) & 1)) {
+				shadowLoggedReasons |= 1u << a_reason;
+				logger::info("[DCLF] shadow views not ready: {}", a_what);
+			}
+			return false;
+		}
+		bool SetupShadow();
+		bool ImportShadowDepth(std::uint32_t a_index, std::uint32_t a_target);
 
 		ConstantArena arena;
 		std::vector<DrawBindings> records;
@@ -1683,6 +2064,572 @@ namespace DCLF
 		}
 	};
 
+	bool IndirectDraws::Impl::SetupShadow()
+	{
+		if (shadow)
+			return true;
+		if (shadowSetupFailed)
+			return false;
+		auto* host = RenderGraphRuntime::Get().Host();
+		if (!host)
+			return ShadowNotReady(0, "no render graph");
+		auto device = host->GetDesc().device;
+		auto state = std::make_shared<ShadowResources>();
+		auto buffer = [&](std::uint64_t a_bytes, const char* a_name) {
+			auto created = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, a_bytes, false);
+			created->SetName(a_name);
+			return created;
+		};
+		state->constants = buffer(kShadowConstantBytes, "cs.dclf.shadow.constants");
+		state->records = buffer(std::uint64_t(kMaxShadowViews) * kShadowRecordCapacity * sizeof(DrawBindings), "cs.dclf.shadow.records");
+		state->objects = org::Buffer::CreateUnmaterializedStructuredBuffer(kMaxObjects, sizeof(BindlessObject), false);
+		state->objects->SetName("cs.dclf.shadow.objects");
+		state->objects->Materialize();
+		state->objectsIndex = state->objects->GetSRVInfo(0).slot.index;
+		state->bones = org::Buffer::CreateUnmaterializedStructuredBuffer(kMaxBoneRows, 16, false);
+		state->bones->SetName("cs.dclf.shadow.bones");
+		state->bones->Materialize();
+		state->bonesIndex = state->bones->GetSRVInfo(0).slot.index;
+		for (std::uint32_t s = 0; s < kMaxShadowViews; ++s) {
+			state->sequences[s] = CreateWords(std::uint64_t(kMaxDraws) * sizeof(DrawSequence) / 4, true, fmt::format("cs.dclf.shadow.sequences{}", s).c_str());
+			state->count[s] = CreateWords(kCountWords, true, fmt::format("cs.dclf.shadow.draw-count{}", s).c_str());
+			D3D11_BUFFER_DESC desc{};
+			desc.ByteWidth = kCountWords * sizeof(std::uint32_t);
+			desc.Usage = D3D11_USAGE_DEFAULT;
+			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+			desc.StructureByteStride = sizeof(std::uint32_t);
+			state->countD3D11[s] = RenderGraphRuntime::Get().WrapBuffer(*state->count[s], desc);
+		}
+		state->visibility = CreateWords(kMaxObjects, true, "cs.dclf.shadow.visibility");
+		for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
+			state->inputs[m] = CreateWords(std::uint64_t(kMaxInputs) * sizeof(DrawInput) / 4, false, fmt::format("cs.dclf.shadow.draw-inputs{}", m).c_str());
+		state->geometries = CreateWords(std::uint64_t(kMaxGeometries) * sizeof(GeometryDraw) / 4, false, "cs.dclf.shadow.geometries");
+		state->buildDraws = LoadComputeProgram(device, kBuildDrawsShader, kBuildDrawsConstantWords);
+		if (!state->buildDraws) {
+			shadowSetupFailed = true;
+			return ShadowNotReady(1, "the BuildDraws compute program could not be created");
+		}
+		state->constantsAddress = device.GetBufferDeviceAddress({ state->constants->GetAPIResource().GetHandle(), 0 });
+		state->recordsAddress = device.GetBufferDeviceAddress({ state->records->GetAPIResource().GetHandle(), 0 });
+		if (!state->constantsAddress || !state->recordsAddress) {
+			shadowSetupFailed = true;
+			return ShadowNotReady(2, "no device address for the shadow buffers");
+		}
+		shadow = state;
+		host->AddExtension(kShadowExtensionId, [state] { return std::make_unique<ShadowExtension>(state); });
+		logger::info("[DCLF] shadow view graph resources created");
+		return true;
+	}
+
+	bool IndirectDraws::Impl::ImportShadowDepth(std::uint32_t a_index, std::uint32_t a_target)
+	{
+		auto* renderer = globals::game::renderer;
+		auto* host = RenderGraphRuntime::Get().Host();
+		if (!renderer || !host || !shadow || a_index >= kShadowDepthTargets)
+			return false;
+		const auto& data = renderer->GetDepthStencilData().depthStencils[a_target];
+		if (!data.texture || !data.views[0])
+			return ShadowNotReady(3, "the shadow map has no texture");
+		if (shadow->depth[a_index] && shadow->depthTexture[a_index] == data.texture)
+			return true;
+		DxvkOrgInteropResourceInfo info{};
+		if (!RenderGraphRuntime::Get().DescribeResource(data.texture, info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
+			return ShadowNotReady(4, "the shadow map cannot be described");
+		D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+		data.views[0]->GetDesc(&dsvDesc);
+		org::TextureDescription desc{};
+		desc.format = rhi::helpers::ToRHI(dsvDesc.Format);
+		desc.channels = 1;
+		desc.hasDSV = true;
+		desc.dsvFormat = desc.format;
+		static constexpr const char* kNames[kShadowDepthTargets] = { "DCLF shadow maps (ESRAM)", "DCLF shadow maps", "DCLF volumetric shadow maps (ESRAM)" };
+		auto imported = ImportImage(host->GetDesc().device, info.image, desc, kNames[a_index]);
+		if (!imported)
+			return ShadowNotReady(5, "the shadow map could not be imported (not in the general layout?)");
+		shadow->depth[a_index] = std::move(imported);
+		shadow->depthTexture[a_index] = data.texture;
+		shadow->depthLayers[a_index] = info.image.arrayLayers;
+		// A new resource for the passes to bind: the graph is rebuilt on the next epoch.
+		host->AddExtension(kShadowExtensionId, [state = shadow] { return std::make_unique<ShadowExtension>(state); });
+		logger::info("[DCLF] shadow map {} imported: {}x{}, {} slices, format {}", a_target, info.image.extent.width, info.image.extent.height,
+			info.image.arrayLayers, static_cast<int>(dsvDesc.Format));
+		return true;
+	}
+
+	bool IndirectDraws::ShadowsEnabled()
+	{
+		return Toggles::Get().Active().shadows;
+	}
+
+	void IndirectDraws::BeginShadowFrame(const RE::NiPoint3& a_eye)
+	{
+		impl->shadowRefEye = a_eye;
+		impl->pendingViews.clear();
+	}
+
+	void IndirectDraws::ExecuteShadowView(std::uint32_t a_viewId, std::uint32_t a_renderMode)
+	{
+		// The hook's half: capture the view - where the engine has just drawn, and the constants it drew
+		// with - for the frame's single epoch (ExecuteShadowFrame). Nothing is drawn here.
+		if (!ShadowsEnabled() || failed)
+			return;
+		const auto start = std::chrono::steady_clock::now();
+		++shadowStats.views;
+		auto& pipelines = DrawPipelines::Get();
+		auto* utility = globals::game::utilityShader;
+		auto notReady = [&](ShadowNotReady a_reason) {
+			++shadowStats.notReady;
+			++shadowStats.notReadyReasons[static_cast<std::size_t>(a_reason)];
+		};
+		if (!pipelines.Enabled() || !utility || !impl->SetupShadow())
+			return notReady(ShadowNotReady::Setup);
+		auto& store = SceneStore::Get();
+		const auto& tables = store.GetTables();
+		const auto* shadowView = ShadowViews::Get().At(a_viewId);
+		if (tables.objects.empty() || tables.shadowTechnique.size() != tables.objects.size() || !shadowView)
+			return notReady(ShadowNotReady::Tables);
+		if (a_renderMode < PassCapture::kFirstShadowMode || a_renderMode >= PassCapture::kFirstShadowMode + kShadowModeCount)
+			return notReady(ShadowNotReady::Tables);
+		// A focus shadow holds one actor's casters, not the scene's: it stays native until S4 decides its set.
+		if (shadowView->focus) {
+			++shadowStats.focusSkipped;
+			return;
+		}
+		// Where the engine has just drawn: the target and slice come from the renderer's state, because the
+		// descriptor's own fields are filled only when the draw allocates them (engine notes: shadow maps).
+		auto& shadowState = globals::game::shadowState->GetRuntimeData();
+		const std::uint32_t target = shadowState.depthStencil;
+		const std::uint32_t slice = shadowState.depthStencilSlice;
+		const std::uint32_t targetIndex = target == RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS_ESRAM                     ? 0u :
+		                                  target == RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS                           ? 1u :
+		                                  target == RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM ? 2u :
+		                                                                                                                     ~0u;
+		if (targetIndex == ~0u || !impl->ImportShadowDepth(targetIndex, target)) {
+			// Which target, once per target: anything here is a view the design has not met.
+			if (target < 32 && !((impl->shadowLoggedTargets >> target) & 1)) {
+				impl->shadowLoggedTargets |= 1u << target;
+				logger::info("[DCLF] shadow view {} ({}, light {} descriptor {}, mode {:#x}) draws into depth target {} slice {}; it stays native",
+					a_viewId, ShadowViews::KindName(shadowView->kind), shadowView->lightIndex, shadowView->descriptor, a_renderMode, target, slice);
+			}
+			return notReady(ShadowNotReady::Depth);
+		}
+		if (impl->pendingViews.size() >= kMaxShadowViews)
+			return notReady(ShadowNotReady::Capacity);
+
+		auto& view = impl->pendingViews.emplace_back();
+		view.viewId = a_viewId;
+		view.renderMode = a_renderMode;
+		view.modeIndex = a_renderMode - PassCapture::kFirstShadowMode;
+		view.targetIndex = targetIndex;
+		view.slice = slice;
+		if (auto* dsv = globals::game::renderer->GetDepthStencilData().depthStencils[target].views[0]) {
+			D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+			dsv->GetDesc(&dsvDesc);
+			view.dsvFormat = dsvDesc.Format;
+		}
+		view.x = static_cast<std::uint32_t>(std::max(0.0f, shadowState.viewPort.TopLeftX));
+		view.y = static_cast<std::uint32_t>(std::max(0.0f, shadowState.viewPort.TopLeftY));
+		view.width = static_cast<std::uint32_t>(shadowState.viewPort.Width);
+		view.height = static_cast<std::uint32_t>(shadowState.viewPort.Height);
+		view.minDepth = shadowState.viewPort.MinDepth;
+		view.maxDepth = shadowState.viewPort.MaxDepth;
+		view.eye = shadowState.posAdjust.getEye();
+		// The view's PerTechnique block (b0): HighDetailRange (LOD landscape only; zero until owned),
+		// ParabolaParam from the engine's two globals as its SetupTechnique reads them, and the eye delta
+		// from the frame's reference eye to this view's.
+		{
+			static const REL::Relocation<float*> parabolaRadius{ REL::Offset(0x2035df8) };
+			static const REL::Relocation<float*> parabolaSide{ REL::Offset(0x2035dfc) };
+			const float radius = *parabolaRadius.get();
+			view.viewBlock[4] = radius != 0.0f ? 1.0f / radius : 0.0f;
+			view.viewBlock[5] = *parabolaSide.get();
+			view.viewBlock[8] = impl->shadowRefEye.x - view.eye.x;
+			view.viewBlock[9] = impl->shadowRefEye.y - view.eye.y;
+			view.viewBlock[10] = impl->shadowRefEye.z - view.eye.z;
+		}
+		// VS_PerFrame (b12) as the engine wrote it for this view, taken now because the next view rewrites
+		// it: from the mirror, or from Community Shaders' copy of the same buffer (Globals: CacheFramebuffer)
+		// until the mirror has seen a write.
+		auto& mirror = ConstantMirror::Get();
+		if (auto* perFrame = *globals::game::perFrame.get()) {
+			mirror.Watch(perFrame);
+			const auto contents = mirror.Contents(perFrame);
+			if (contents.size() >= 48 * sizeof(float)) {
+				view.perFrameBytes = static_cast<std::uint32_t>(std::min<std::size_t>(contents.size(), view.perFrame.size()));
+				std::memcpy(view.perFrame.data(), contents.data(), view.perFrameBytes);
+			}
+		}
+		if (!view.perFrameBytes) {
+			const auto& cached = globals::game::frameBufferCached.data;
+			static_assert(sizeof(cached) >= 48 * sizeof(float) && sizeof(cached) <= 1024);
+			view.perFrameBytes = sizeof(cached);
+			std::memcpy(view.perFrame.data(), &cached, sizeof(cached));
+		}
+		std::memcpy(view.viewProj.data(), reinterpret_cast<const float*>(view.perFrame.data()) + 32, sizeof(float) * 16);
+		view.hasViewProj = true;
+		shadowStats.captureMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+	}
+
+	void IndirectDraws::ExecuteShadowFrame()
+	{
+		auto& pending = impl->pendingViews;
+		if (!ShadowsEnabled() || failed || pending.empty()) {
+			pending.clear();
+			return;
+		}
+		const auto start = std::chrono::steady_clock::now();
+		auto notReady = [&](ShadowNotReady a_reason) {
+			shadowStats.notReady += static_cast<std::uint32_t>(pending.size());
+			shadowStats.notReadyReasons[static_cast<std::size_t>(a_reason)] += static_cast<std::uint32_t>(pending.size());
+			pending.clear();
+		};
+		auto& pipelines = DrawPipelines::Get();
+		auto& programs = ShaderPrograms::Get();
+		auto* utility = globals::game::utilityShader;
+		if (!pipelines.Enabled() || !utility || !impl->shadow)
+			return notReady(ShadowNotReady::Setup);
+		const auto indirect = GetShadowIndirectState();
+		if (!indirect.valid) {
+			impl->ShadowNotReady(6, "no shadow pipeline in the set yet");
+			return notReady(ShadowNotReady::Pipelines);
+		}
+		auto& store = SceneStore::Get();
+		const auto& tables = store.GetTables();
+		if (tables.objects.empty() || tables.shadowTechnique.size() != tables.objects.size())
+			return notReady(ShadowNotReady::Tables);
+		const std::uint32_t frameNumber = store.GetFrame();
+		auto resources = impl->shadow;
+		auto& textures = GpuTextures::Get();
+		std::array<bool, kShadowModeCount> modeUsed{};
+		for (const auto& view : pending)
+			modeUsed[view.modeIndex] = true;
+		// One pipeline set per shadow map format: every target the engine has is D16 (engine notes), and a
+		// view whose target differed would rebuild the set on every epoch, so the first view's is taken.
+		const DXGI_FORMAT dsvFormat = pending.front().dsvFormat;
+		double prepareMs = 0.0, inputsMs = 0.0, blocksMs = 0.0, bodyMs = 0.0;
+
+		const bool ok = RenderGraphRuntime::Get().ExecuteEpoch(RenderGraphRuntime::Segment::ShadowView, [&](org::RenderGraph&) {
+			struct BodyTimer
+			{
+				std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+				double& out;
+				~BodyTimer() { out = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(); }
+			} bodyTimer{ {}, bodyMs };
+			bodyTimer.start = std::chrono::steady_clock::now();
+			const std::uint64_t base = resources->constantsAddress;
+			auto& arena = impl->shadowArena;
+			auto& records = impl->shadowRecords;
+			auto block = [&](const void* a_data, std::size_t a_size) -> std::uint64_t {
+				const auto offset = arena.Allocate(a_size);
+				if (offset == ~0ull)
+					return 0;
+				if (a_data)
+					std::memcpy(arena.At(offset, a_size).data(), a_data, a_size);
+				return base + offset;
+			};
+
+			// ---- What every view shares: the object records, bone rows, geometry table, binding records.
+			const auto prepareStart = std::chrono::steady_clock::now();
+			textures.BeginFrame(frameNumber);
+			const auto& refEye = impl->shadowRefEye;
+			auto& objects = impl->shadowObjects;
+			objects.resize(std::min<std::size_t>(tables.objects.size(), kMaxObjects));
+			const auto renderFlags = store.GetMainPassRenderFlags();
+			for (std::size_t r = 0; r < objects.size(); ++r)
+				BuildObjectRecord(tables, static_cast<std::uint32_t>(r), renderFlags, refEye, refEye, objects[r]);
+			if (!objects.empty())
+				BUFFER_UPLOAD(objects.data(), objects.size() * sizeof(BindlessObject), org::runtime::UploadTarget::FromShared(resources->objects), 0);
+			auto& boneRows = impl->shadowBoneRows;
+			boneRows.clear();
+			if (!tables.bones.empty() || !tables.extraRows.empty()) {
+				boneRows.reserve(tables.bones.size() + tables.previousBones.size() + tables.extraRows.size());
+				const float axis[3] = { refEye.x, refEye.y, refEye.z };
+				auto pack = [&](const std::vector<float>& a_rows) {
+					for (std::size_t r = 0; r + 1 <= a_rows.size() / 4; ++r) {
+						const float* row = &a_rows[r * 4];
+						boneRows.push_back(row[0]);
+						boneRows.push_back(row[1]);
+						boneRows.push_back(row[2]);
+						boneRows.push_back(row[3] - axis[r % 3]);
+					}
+				};
+				pack(tables.bones);
+				pack(tables.previousBones);
+				boneRows.insert(boneRows.end(), tables.extraRows.begin(), tables.extraRows.end());
+				const std::size_t boneBytes = std::min<std::size_t>(boneRows.size() * sizeof(float), std::size_t(kMaxBoneRows) * 16);
+				BUFFER_UPLOAD(boneRows.data(), boneBytes, org::runtime::UploadTarget::FromShared(resources->bones), 0);
+			}
+			auto& geometries = impl->shadowGeometries;
+			geometries.clear();
+			geometries.reserve(tables.geometries.size());
+			for (const auto& geometry : tables.geometries) {
+				geometries.push_back({ geometry.vertexAddress, static_cast<std::uint32_t>(std::min<std::uint64_t>(geometry.vertexBytes, UINT32_MAX)), geometry.vertexStride,
+					geometry.indexAddress, static_cast<std::uint32_t>(std::min<std::uint64_t>(geometry.indexBytes, UINT32_MAX)), geometry.indexCount, geometry.firstIndex, 0 });
+			}
+			if (!geometries.empty())
+				BUFFER_UPLOAD(geometries.data(), std::min<std::size_t>(geometries.size(), kMaxGeometries) * sizeof(GeometryDraw), org::runtime::UploadTarget::FromShared(resources->geometries), 0);
+			// The binding records, built once with the per-view registers (b0, b12) unset; each view slot
+			// uploads its own copy of them naming its blocks at the head of the arena.
+			arena.Reset();
+			(void)arena.Allocate(kShadowMaterialBlocksOffset);
+			records.clear();
+			impl->shadowRecordByMaterial.clear();
+			DrawBindings plain{};
+			// No register the Utility shaders declare may be left at address zero: a pipeline that reads
+			// one arrives from the background compiler seconds after the first epoch, and a null read is
+			// a device loss. Everything not supplied below reads zeros.
+			static constexpr std::size_t kZeroBlockBytes = 1024;
+			const std::uint64_t zeros = block(nullptr, kZeroBlockBytes);
+			for (auto& address : plain.vertexConstants)
+				address = zeros;
+			for (auto& address : plain.pixelConstants)
+				address = zeros;
+			// Community Shaders' SharedData (b5) and FeatureData (b6): the alpha-tested pixel stage samples
+			// its diffuse with SharedData::MipBias. Packed from the structs CS keeps, as the main epochs do.
+			if (auto* csState = globals::state) {
+				plain.pixelConstants[kSharedDataRegister] = block(&csState->lastSharedData, sizeof(State::SharedDataCB));
+				plain.vertexConstants[kSharedDataRegister] = plain.pixelConstants[kSharedDataRegister];
+				if (!csState->lastFeatureData.empty()) {
+					plain.pixelConstants[kFeatureDataRegister] = block(csState->lastFeatureData.data(), csState->lastFeatureData.size());
+					plain.vertexConstants[kFeatureDataRegister] = plain.pixelConstants[kFeatureDataRegister];
+				}
+			}
+			for (auto& index : plain.textures)
+				index = textures.NullIndex();
+			plain.textures[kObjectBufferRegister] = resources->objectsIndex;
+			plain.textures[kBonesBufferRegister] = resources->bonesIndex;
+			for (auto& index : plain.samplers)
+				index = textures.Sampler(static_cast<std::uint32_t>(RE::BSGraphics::TextureAddressMode::kWrapSWrapT), static_cast<std::uint32_t>(RE::BSGraphics::TextureFilterMode::kAnisotropic));
+			records.push_back(plain);  // record 0: every caster without alpha testing
+			auto& objectRecord = impl->shadowObjectRecord;
+			objectRecord.assign(tables.objects.size(), ~0u);
+			shadowStats.skippedTexture = 0;
+			for (std::size_t o = 0; o < tables.objects.size() && o < kMaxObjects; ++o) {
+				const auto& object = tables.objects[o];
+				if (object.flags & kObjectNoShadow)
+					continue;
+				if (!(tables.shadowTechnique[o] & 0x80)) {
+					objectRecord[o] = 0;
+					continue;
+				}
+				// Alpha-tested: the material's diffuse and texture offset, one record per material.
+				auto* geometry = tables.objectGeometry[o];
+				auto* property = geometry ? geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
+				const auto* material = property ? static_cast<const RE::BSLightingShaderMaterialBase*>(property->material) : nullptr;
+				if (!material) {
+					++shadowStats.skippedTexture;
+					continue;
+				}
+				if (auto it = impl->shadowRecordByMaterial.find(material); it != impl->shadowRecordByMaterial.end()) {
+					objectRecord[o] = it->second;
+					continue;
+				}
+				auto* texture = material->diffuseTexture ? material->diffuseTexture->rendererTexture : nullptr;
+				auto* srv = texture ? texture->resourceView : nullptr;
+				const std::uint32_t textureIndex = srv ? textures.Resolve(srv) : GpuTextures::kInvalid;
+				if (textureIndex == GpuTextures::kInvalid || records.size() >= kShadowRecordCapacity) {
+					++shadowStats.skippedTexture;
+					continue;
+				}
+				DrawBindings bindings = plain;
+				const float texcoord[4] = { material->texCoordOffset[0].x, material->texCoordOffset[0].y, material->texCoordScale[0].x, material->texCoordScale[0].y };
+				bindings.vertexConstants[1] = block(texcoord, sizeof(texcoord));
+				bindings.textures[0] = textureIndex;
+				const auto index = static_cast<std::uint32_t>(records.size());
+				records.push_back(bindings);
+				impl->shadowRecordByMaterial.emplace(material, index);
+				objectRecord[o] = index;
+			}
+			shadowStats.records = static_cast<std::uint32_t>(records.size());
+			prepareMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - prepareStart).count();
+
+			// ---- The inputs per render mode among the captured views: every caster with a ready pipeline
+			// for its technique under that mode. The cascades share one set; a spot light has its own.
+			const auto inputsStart = std::chrono::steady_clock::now();
+			shadowStats.skippedPipeline = 0;
+			for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
+				auto& inputs = impl->shadowInputs[m];
+				inputs.clear();
+				if (!modeUsed[m])
+					continue;
+				const std::uint32_t modeBits = ShadowModeBits(PassCapture::kFirstShadowMode + m);
+				for (std::size_t o = 0; o < tables.objects.size() && o < kMaxObjects && inputs.size() < kMaxInputs; ++o) {
+					const auto& object = tables.objects[o];
+					if ((object.flags & kObjectNoShadow) || objectRecord[o] == ~0u)
+						continue;
+					const std::uint32_t technique = tables.shadowTechnique[o] | modeBits;
+					const ShadowPipelineKey key{ technique, (object.flags & kObjectTwoSided) ? kRasterTwoSided : 0u,
+						VertexLayoutOf(tables.geometries[object.geometryIndex].vertexDesc) };
+					const auto* program = programs.FindShadow(technique, *utility);
+					const std::uint32_t pipelineIndex = program ? pipelines.FindShadow(key, *program, dsvFormat) : DrawPipelines::kNotReady;
+					if (pipelineIndex == DrawPipelines::kNotReady) {
+						++shadowStats.skippedPipeline;
+						continue;
+					}
+					inputs.push_back({ pipelineIndex, objectRecord[o], object.geometryIndex, (object.flags & ~kObjectDecal) | kInputDrawable,
+						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius, static_cast<std::uint32_t>(o), 0 });
+				}
+				if (!inputs.empty())
+					BUFFER_UPLOAD(inputs.data(), inputs.size() * sizeof(DrawInput), org::runtime::UploadTarget::FromShared(resources->inputs[m]), 0);
+				shadowStats.inputs = static_cast<std::uint32_t>(inputs.size());
+			}
+			inputsMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - inputsStart).count();
+
+			// ---- Per view: its blocks at its slot of the arena's head, its copy of the records naming them,
+			// its count buffer zeroed, and the view for the passes.
+			const auto blocksStart = std::chrono::steady_clock::now();
+			auto frame = std::make_shared<ShadowFrame>();
+			frame->serial = ++impl->shadowSerial;
+			frame->frameNumber = frameNumber;
+			frame->resourceHeap = org::runtime::GetActiveSRVDescriptorHeap().GetHandle();
+			frame->samplerHeap = org::runtime::GetActiveSamplerDescriptorHeap().GetHandle();
+			frame->indirect = indirect;
+			auto& slotRecords = impl->shadowSlotRecords;
+			static const std::uint32_t zero[kCountWords] = {};
+			for (std::uint32_t slot = 0; slot < pending.size(); ++slot) {
+				const auto& view = pending[slot];
+				const std::uint64_t viewBlockOffset = std::uint64_t(slot) * kShadowViewSlotBytes;
+				const std::uint64_t perFrameOffset = viewBlockOffset + kShadowPerFrameOffset;
+				std::memcpy(arena.At(viewBlockOffset, sizeof(view.viewBlock)).data(), view.viewBlock, sizeof(view.viewBlock));
+				std::memcpy(arena.At(perFrameOffset, view.perFrameBytes).data(), view.perFrame.data(), view.perFrameBytes);
+				slotRecords = records;
+				for (auto& record : slotRecords) {
+					record.vertexConstants[0] = base + viewBlockOffset;
+					record.pixelConstants[0] = base + viewBlockOffset;
+					record.vertexConstants[kPerFrameVertexRegister] = base + perFrameOffset;
+					record.pixelConstants[kPerFrameVertexRegister] = base + perFrameOffset;
+				}
+				const std::uint64_t recordsOffset = std::uint64_t(slot) * kShadowRecordCapacity * sizeof(DrawBindings);
+				BUFFER_UPLOAD(slotRecords.data(), slotRecords.size() * sizeof(DrawBindings), org::runtime::UploadTarget::FromShared(resources->records), recordsOffset);
+				BUFFER_UPLOAD(zero, sizeof(zero), org::runtime::UploadTarget::FromShared(resources->count[slot]), 0);
+				ShadowFrameView out{};
+				out.viewId = view.viewId;
+				out.renderMode = view.renderMode;
+				out.slot = slot;
+				out.modeIndex = view.modeIndex;
+				out.inputCount = static_cast<std::uint32_t>(impl->shadowInputs[view.modeIndex].size());
+				out.hasViewProj = view.hasViewProj;
+				out.viewProj = view.viewProj;
+				out.eye = view.eye;
+				out.x = view.x;
+				out.y = view.y;
+				out.width = view.width;
+				out.height = view.height;
+				out.minDepth = view.minDepth;
+				out.maxDepth = view.maxDepth;
+				out.target = view.targetIndex;
+				out.slice = view.slice;
+				out.recordsAddress = resources->recordsAddress + recordsOffset;
+				frame->views.push_back(out);
+			}
+			const auto& bytes = arena.Bytes();
+			if (!bytes.empty())
+				BUFFER_UPLOAD(bytes.data(), bytes.size(), org::runtime::UploadTarget::FromShared(resources->constants), 0);
+			blocksMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - blocksStart).count();
+			static std::uint32_t logged = 0;
+			if (logged++ % 600 == 0) {
+				std::string views;
+				for (const auto& view : frame->views)
+					views += fmt::format("{}view {} mode {:#x} target {} slice {} at ({} {}) {}x{} {} inputs", views.empty() ? "" : "; ", view.viewId, view.renderMode,
+						view.target, view.slice, view.x, view.y, view.width, view.height, view.inputCount);
+				logger::info("[DCLF] shadow epoch: {} views ({} without a pipeline, {} without a texture), {} records: {}", frame->views.size(),
+					shadowStats.skippedPipeline, shadowStats.skippedTexture, shadowStats.records, views);
+			}
+			resources->frame.store(std::move(frame), std::memory_order_release);
+		});
+		const double totalMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		shadowStats.prepareMs += prepareMs;
+		shadowStats.inputsMs += inputsMs;
+		shadowStats.blocksMs += blocksMs;
+		shadowStats.executeMs += totalMs - bodyMs;  // the graph's own compile, prepare and record
+		if (ok) {
+			++shadowStats.epochs;
+			shadowStats.viewsDrawn += static_cast<std::uint32_t>(pending.size());
+			impl->ReadShadowCullCounters(frameNumber, shadowStats);
+			// Static shadow ownership: what this frame's epoch drew for a mode is what that mode's views'
+			// registrations are withheld for, from the next frame on.
+			if (PassCapture::ShadowWithholdingEnabled()) {
+				for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
+					if (modeUsed[m])
+						impl->PublishShadowClaims(PassCapture::kFirstShadowMode + m, shadowStats);
+				}
+			}
+			pending.clear();
+		} else {
+			logger::error("[DCLF] the shadow epoch failed; the render graph is disabled");
+			notReady(ShadowNotReady::Epoch);
+		}
+		shadowStats.cpuMs += totalMs;
+	}
+
+	void IndirectDraws::Impl::ReadShadowCullCounters(std::uint32_t a_frame, IndirectDraws::ShadowStats& a_stats)
+	{
+		auto* context = globals::d3d::context;
+		if (shadowCullReadback) {
+			// Frames, not epochs: several views run per frame, and the copy needs the GPU to have finished
+			// the sampled view's epoch, which three Presents later it has.
+			if (a_frame - shadowCullReadback->copiedFrame < 3)
+				return;
+			D3D11_MAPPED_SUBRESOURCE mapped{};
+			if (SUCCEEDED(context->Map(shadowCullReadback->count.get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+				const auto* words = static_cast<const std::uint32_t*>(mapped.pData);
+				a_stats.cullDrawn = words[0];
+				a_stats.cullRejected = words[1];
+				a_stats.cullTested = words[2];
+				a_stats.cullSampledView = shadowCullReadback->view;
+				a_stats.cullSampledMode = shadowCullReadback->mode;
+				context->Unmap(shadowCullReadback->count.get(), 0);
+			}
+			shadowCullReadback.reset();
+			return;
+		}
+		// One epoch in 127, and within it the views in turn, so every view of the frame gets sampled.
+		const auto epoch = shadowCullEpochs++;
+		const auto frame = shadow ? shadow->frame.load(std::memory_order_acquire) : nullptr;
+		if ((epoch % 127) != 0 || !frame || frame->views.empty())
+			return;
+		const auto& view = frame->views[(epoch / 127) % frame->views.size()];
+		if (view.slot >= kMaxShadowViews || !shadow->countD3D11[view.slot])
+			return;
+		D3D11_BUFFER_DESC desc{};
+		shadow->countD3D11[view.slot]->GetDesc(&desc);
+		desc.Usage = D3D11_USAGE_STAGING;
+		desc.BindFlags = 0;
+		desc.MiscFlags = 0;
+		desc.StructureByteStride = 0;
+		desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		ShadowCullReadback readback;
+		if (FAILED(globals::d3d::device->CreateBuffer(&desc, nullptr, readback.count.put())))
+			return;
+		ScopedPerfEvent event("CS DCLF: shadow culling readback");
+		context->CopyResource(readback.count.get(), shadow->countD3D11[view.slot].get());
+		readback.copiedFrame = a_frame;
+		readback.view = view.viewId;
+		readback.mode = view.renderMode;
+		shadowCullReadback = std::move(readback);
+	}
+
+	void IndirectDraws::Impl::PublishShadowClaims(std::uint32_t a_renderMode, IndirectDraws::ShadowStats& a_stats)
+	{
+		if (a_renderMode < PassCapture::kFirstShadowMode || a_renderMode >= PassCapture::kFirstShadowMode + PassCapture::kShadowModes)
+			return;
+		const auto start = std::chrono::steady_clock::now();
+		const auto modeIndex = a_renderMode - PassCapture::kFirstShadowMode;
+		const auto& tables = SceneStore::Get().GetTables();
+		const auto& modeInputs = shadowInputs[modeIndex];
+		auto claims = std::make_shared<PassCapture::ClaimSet>();
+		claims->reserve(modeInputs.size());
+		for (const auto& input : modeInputs) {
+			if (input.objectIndex < tables.objectGeometry.size())
+				if (const auto* geometry = tables.objectGeometry[input.objectIndex])
+					claims->insert(geometry);
+		}
+		a_stats.claimed[modeIndex] = static_cast<std::uint32_t>(claims->size());
+		PassCapture::Get().PublishShadowClaims(modeIndex, std::move(claims));
+		a_stats.claimMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+	}
+
 	IndirectDraws::IndirectDraws() :
 		impl(std::make_unique<Impl>())
 	{}
@@ -1786,7 +2733,7 @@ namespace DCLF
 		// CS_DCLF_NO_ZPREPASS=1: leave the depth to the native pass, so the hybrid path runs a single epoch
 		// per frame again. Its objects are then missing from the depth the rest of the frame reads, which is
 		// only useful for telling a one-epoch frame apart from a two-epoch one.
-		static const bool skip = SwitchEnabled("CS_DCLF_NO_ZPREPASS");
+		const bool skip = Toggles::Get().Active().noZPrepass;
 		if (!Hybrid() || skip)
 			return;
 		auto capture = CaptureBindings();
@@ -2748,6 +3695,7 @@ namespace DCLF
 		winrt::com_ptr<ID3D11Buffer> staging;
 		if (FAILED(globals::d3d::device->CreateBuffer(&desc, nullptr, staging.put())))
 			return;
+		ScopedPerfEvent event("CS DCLF: G-buffer probe readback");
 		context->CopyResource(staging.get(), resources->probeD3D11.get());
 		gbufferStaging = std::move(staging);
 		gbufferFramesLeft = 4;
@@ -2820,6 +3768,7 @@ namespace DCLF
 		CullReadback readback;
 		if (FAILED(globals::d3d::device->CreateBuffer(&desc, nullptr, readback.count.put())))
 			return;
+		ScopedPerfEvent event("CS DCLF: culling readback");
 		context->CopyResource(readback.count.get(), a_resources->countD3D11.get());
 		readback.framesLeft = 3;
 		cullReadback = std::move(readback);
@@ -2994,6 +3943,10 @@ namespace DCLF
 	void IndirectDraws::ProbeTargets(const char*) {}
 	void IndirectDraws::RunEpoch(RenderGraphRuntime::Segment) {}
 	void IndirectDraws::ShowDebugView() {}
+	bool IndirectDraws::ShadowsEnabled() { return false; }
+	void IndirectDraws::BeginShadowFrame(const RE::NiPoint3&) {}
+	void IndirectDraws::ExecuteShadowView(std::uint32_t, std::uint32_t) {}
+	void IndirectDraws::ExecuteShadowFrame() {}
 }
 
 #endif

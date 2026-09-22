@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -55,6 +56,9 @@ namespace DCLF
 			std::uint32_t techniqueDiffers = 0;
 			std::uint32_t subPassDiffers = 0;
 			std::uint32_t withheld = 0;  // passes kept out of the main camera's batch renderer
+			// CS_DCLF_SHADOW_OWNERSHIP=static: Utility passes kept out of the shadow views' batch renderers,
+			// by the view's render mode (plain 0xD, clamped 0xE, paraboloid 0xF).
+			std::array<std::uint32_t, 3> shadowWithheld{};
 			std::uint32_t claimed = 0;   // objects DCLF said it owns
 			// Claimed but not drawn this frame. Withholding means nothing else will draw them either, so
 			// any of these is a visible hole - the one failure mode static ownership introduces.
@@ -73,6 +77,8 @@ namespace DCLF
 
 		void Install();
 		bool Installed() const { return installed; }
+		/** @brief Makes the hook a plain pass-through, for good: DCLF was forced off after install. */
+		void Bypass() { bypassed.store(true, std::memory_order_release); }
 
 		/**
 		 * @brief Publishes the claim set for the frames that follow; render thread only.
@@ -94,8 +100,35 @@ namespace DCLF
 		/** @brief CS_DCLF_OWNERSHIP=static: withhold claimed passes from the main camera's batch renderer. */
 		static bool WithholdingEnabled();
 
+		/** @brief The shadow views' render modes with claims of their own: 0xD plain, 0xE clamped, 0xF paraboloid. */
+		static constexpr std::uint32_t kShadowModes = 3;
+		static constexpr std::uint32_t kFirstShadowMode = 0xD;
+		/** @brief Which batch renderers belong to shadow views, each with its view's render mode index. */
+		using ShadowRendererMap = ankerl::unordered_dense::map<const RE::BSBatchRenderer*, std::uint8_t>;
+		void SetShadowBatchRenderers(std::shared_ptr<const ShadowRendererMap> a_renderers);
+		/**
+		 * @brief CS_DCLF_SHADOW_OWNERSHIP=static: the casters DCLF's shadow epochs draw under a render mode,
+		 * withheld from every shadow view of that mode from the next registration on. Published by the
+		 * epoch that submitted them, as the main claims are published by the colour epoch.
+		 */
+		void PublishShadowClaims(std::uint32_t a_modeIndex, std::shared_ptr<const ClaimSet> a_claims);
+		std::shared_ptr<const ClaimSet> CurrentShadowClaims(std::uint32_t a_modeIndex) const
+		{
+			return a_modeIndex < kShadowModes ? std::atomic_load(&shadowClaims[a_modeIndex]) : nullptr;
+		}
+		/** @brief CS_DCLF_SHADOW_OWNERSHIP=static (live: Toggles.h): withhold claimed casters from the shadow views. */
+		static bool ShadowWithholdingEnabled();
+
 		/** @brief Takes everything registered since the last call; render thread only. */
 		std::span<const Entry> Drain();
+
+		/**
+		 * @brief CS_DCLF_SHADOW_PROBE: the BSUtilityShader registrations since the last call (the shadow
+		 * views' passes, and the main camera's RenderDepth ones), kept in a ring of their own so that the
+		 * Lighting capture the tables are built from is untouched; render thread only, after the
+		 * registration jobs have finished.
+		 */
+		std::span<const Entry> DrainUtility();
 
 		const Stats& GetStats() const { return stats; }
 		Stats& MutableStats() { return stats; }
@@ -111,9 +144,11 @@ namespace DCLF
 		static std::uint32_t SubPassOf(const RE::BSGeometry* a_geometry, std::uint64_t a_propertyFlags);
 
 	private:
+		PassCapture();
 		static constexpr std::size_t kCapacity = 32768;
 
 		bool installed = false;
+		std::atomic<bool> bypassed{ false };
 		std::vector<Entry> entries{ kCapacity };
 		std::atomic<std::size_t> cursor{ 0 };
 		std::atomic<std::uint32_t> overflow{ 0 };
@@ -121,10 +156,16 @@ namespace DCLF
 		std::atomic<std::uint32_t> threadCount{ 0 };
 		Stats stats;
 		std::atomic<std::uint32_t> withheld{ 0 };
+		std::vector<Entry> utilityEntries;
+		std::atomic<std::size_t> utilityCursor{ 0 };
+		std::atomic<std::uint32_t> utilityOverflow{ 0 };
 		// Published whole by the render thread, read by the registering thread. shared_ptr's atomic
 		// load/store keeps the readers safe while the next one is being built.
 		std::shared_ptr<const ClaimSet> claims;
 		std::shared_ptr<const ankerl::unordered_dense::set<const RE::BSBatchRenderer*>> mainRenderers;
+		std::shared_ptr<const ShadowRendererMap> shadowRenderers;
+		std::array<std::shared_ptr<const ClaimSet>, kShadowModes> shadowClaims;
+		std::array<std::atomic<std::uint32_t>, kShadowModes> shadowWithheld{};
 
 		struct Hook;
 		friend struct Hook;

@@ -10,10 +10,15 @@
 #include "DrawcallLimitFix/GpuTextures.h"
 #include "DrawcallLimitFix/IndirectDraws.h"
 #include "DrawcallLimitFix/ShaderPrograms.h"
+#include "DrawcallLimitFix/ShadowProbe.h"
+#include "DrawcallLimitFix/ShadowViews.h"
+#include "DrawcallLimitFix/Toggles.h"
 #include "DrawcallLimitFix/PassCapture.h"
 #include "DrawcallLimitFix/SceneStore.h"
 #include "DrawcallLimitFix/SceneTracker.h"
 #include "DrawcallLimitFix/Switches.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "State.h"
 #include "TerrainBlending.h"
 
 namespace
@@ -98,8 +103,10 @@ namespace
 	struct CaptureTiming
 	{
 		double eventsMs = 0.0;
-		double buildMs = 0.0;
+		double buildMs = 0.0;  // the accumulate phase, at EarlyPrepass
 		double buildMaxMs = 0.0;
+		double sceneMs = 0.0;  // the scene phase, before the shadow maps
+		double sceneMaxMs = 0.0;
 		std::uint32_t frames = 0;
 	} timing;
 
@@ -152,12 +159,28 @@ void DrawcallLimitFix::PostPostLoad()
 	// renderer removes the very data the tables are built from today, so the capture has to prove itself
 	// first (it claims nothing and withholds nothing yet).
 	DCLF::PassCapture::Get().Install();
+	DCLF::ShadowProbe::Get().Install();
 	Hooks::Install();
 	installed = true;
 	// The switches this process actually sees, once. Several reports below are gated on them, so without
 	// this a silent log is indistinguishable from a switch that never reached the game - which is exactly
 	// what happened when they came from the environment alone (see Switches.h).
 	logger::info("[DCLF] switches: {}", DCLF::SwitchSummary());
+}
+
+void DrawcallLimitFix::SetupResources()
+{
+	// Runs right after the render graph tried to adopt DXVK's device (State::SetupResources). The hooks went in
+	// at PostPostLoad, before any device existed; without the graph there is nothing to draw with, and left
+	// on, DCLF would track, classify and skip for nothing while the frame silently stays native. So it is
+	// forced off here, with the reason in the log and in the menu instead of only a line of zeroes in the stats.
+	if (!installed || RenderGraphRuntime::Get().IsActive())
+		return;
+	unavailableReason = RenderGraphRuntime::Get().GetDisabledReason();
+	installed = false;
+	DCLF::SceneTracker::Get().Stop();
+	DCLF::PassCapture::Get().Bypass();
+	logger::warn("[DCLF] Forced off: the render graph is unavailable ({}); the game renders natively", unavailableReason);
 }
 
 void DrawcallLimitFix::Reset()
@@ -176,6 +199,42 @@ void DrawcallLimitFix::Reset()
 	timing.eventsMs += MillisecondsSince(start);
 }
 
+void DrawcallLimitFix::BeforeShadowMaps()
+{
+	if (!installed)
+		return;
+	// The scene half of the tables, before the engine draws the shadow maps: the scene graph and the
+	// main camera's culling are final here, and the records a shadow view needs exist from this point.
+	// The accumulator's half follows at EarlyPrepass, once the registration jobs have finished.
+	auto& store = DCLF::SceneStore::Get();
+	// The frame's toggles, before anything reads them. A change that enters the classification drops the
+	// cached verdicts, so the next frame classifies every object under the new switches.
+	if (DCLF::Toggles::Get().BeginFrame())
+		store.InvalidateVerdicts();
+	const auto start = std::chrono::steady_clock::now();
+	store.BuildFrame(DCLF::SceneStore::Phase::Scene);
+	// The frame's shadow views, in the order the engine is about to render them. Everything downstream -
+	// the capture's attribution, the claims, the epochs - identifies a view by this list.
+	DCLF::ShadowViews::Get().Rebuild();
+	if (DCLF::IndirectDraws::ShadowsEnabled())
+		DCLF::IndirectDraws::Get().BeginShadowFrame(globals::game::shadowState->GetRuntimeData().posAdjust.getEye());
+	const double sceneMs = MillisecondsSince(start);
+	timing.sceneMs += sceneMs;
+	timing.sceneMaxMs = std::max(timing.sceneMaxMs, sceneMs);
+	if (DCLF::ShadowProbe::Enabled())
+		DCLF::ShadowProbe::Get().OnBeforeShadowMaps();
+}
+
+void DrawcallLimitFix::AfterShadowMaps()
+{
+	if (!installed)
+		return;
+	// The frame's shadow epoch: every view the 0x2A hook captured, drawn in one graph execution.
+	DCLF::IndirectDraws::Get().ExecuteShadowFrame();
+	if (DCLF::ShadowProbe::Enabled())
+		DCLF::ShadowProbe::Get().OnAfterShadowMaps();
+}
+
 void DrawcallLimitFix::EarlyPrepass()
 {
 	if (!installed)
@@ -191,11 +250,15 @@ void DrawcallLimitFix::EarlyPrepass()
 	// than `currentAccumulator`, which is not set this early.
 	auto& store = DCLF::SceneStore::Get();
 	const auto start = std::chrono::steady_clock::now();
-	store.BuildFrame();
+	store.BuildFrame(DCLF::SceneStore::Phase::Accumulate);
 	const double buildMs = MillisecondsSince(start);
 	timing.buildMs += buildMs;
 	timing.buildMaxMs = std::max(timing.buildMaxMs, buildMs);
 	++timing.frames;
+	// The shadow probe reads this frame's tables (the main pass's kept objects) and the Utility
+	// registrations, which are complete now that the thunk has returned.
+	if (DCLF::ShadowProbe::Enabled())
+		DCLF::ShadowProbe::Get().OnFrameBuilt();
 
 	// Phase 2: SPIR-V programs and indirect pipelines for the pipelines drawn this frame (built once, asynchronously).
 	auto& programs = DCLF::ShaderPrograms::Get();
@@ -210,6 +273,45 @@ void DrawcallLimitFix::EarlyPrepass()
 		}
 		programs.Update();
 		pipelines.Update();
+	}
+
+	// The shadow views' programs: one Utility build per technique of the frame's casters, per render mode
+	// among the views the engine drew. Requested here, beside the Lighting builds, so they are compiled
+	// long before a shadow epoch would draw with them.
+	if (auto* utility = globals::game::utilityShader; utility && programs.Enabled()) {
+		std::uint32_t modeBits = 0;
+		for (const auto& view : DCLF::ShadowViews::Get().All()) {
+			// Clamped for cascades and spot lights, the paraboloid warp for point lights; the engine
+			// picks the render mode from the light, not from the descriptor (engine notes: shadow maps).
+			modeBits |= DCLF::ShadowModeBits(view.kind == DCLF::ShadowViews::Kind::Parabolic ? 0xFu : 0xEu);
+		}
+		const auto& tables = store.GetTables();
+		// The shadow map array the views draw into; its format is what a shadow pipeline is built for.
+		DXGI_FORMAT shadowFormat = DXGI_FORMAT_UNKNOWN;
+		if (auto* renderer = globals::game::renderer) {
+			const auto& depthStencils = renderer->GetDepthStencilData().depthStencils;
+			// The depth-stencil view's format, not the texture's: the texture is typeless (R16_TYPELESS)
+			// and a pipeline is built against the view it renders through (D16_UNORM), as the epoch does.
+			if (auto* view = depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS_ESRAM].views[0]) {
+				D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
+				view->GetDesc(&desc);
+				shadowFormat = desc.Format;
+			}
+		}
+		std::vector<DCLF::ShadowPipelineKey> shadowKeys;
+		shadowKeys.reserve(tables.shadowKeysUsed.size() * 2);
+		for (const auto& key : tables.shadowKeysUsed) {
+			for (std::uint32_t mode : { 0xEu, 0xFu }) {
+				const std::uint32_t bits = DCLF::ShadowModeBits(mode);
+				if (!(modeBits & bits))
+					continue;
+				const DCLF::ShadowPipelineKey viewKey{ key.technique | bits, key.rasterFlags, key.vertexLayout };
+				shadowKeys.push_back(viewKey);
+				if (const auto* program = programs.FindShadow(viewKey.technique, *utility))
+					pipelines.FindShadow(viewKey, *program, shadowFormat);
+			}
+		}
+		pipelines.CaptureShadowStates(shadowKeys);
 	}
 }
 
@@ -237,6 +339,8 @@ void DrawcallLimitFix::Prepass()
 		DCLF::DecalProbe::Get().Report(frame, kReportInterval);
 	if (DCLF::SkinProbe::Enabled())
 		DCLF::SkinProbe::Get().Report(frame, kReportInterval);
+	if (DCLF::ShadowProbe::Enabled())
+		DCLF::ShadowProbe::Get().Report(frame, kReportInterval);
 
 	// The culling's counters, reported whether or not the full statistics are on: they are what says
 	// whether GPU culling is running and how much it rejects.
@@ -281,6 +385,9 @@ void DrawcallLimitFix::Prepass()
 				logger::info("[DCLF] bindless record parity OK: {} components match the constant groups", draws.bindlessParityChecks);
 		}
 	}
+	// What the GPU spent on each segment, measured by the graph itself; the menu shows the latest window.
+	if ((frame % kReportInterval) == 0)
+		RenderGraphRuntime::Get().ReportGpuTimings(kReportInterval, StatsEnabled());
 	if ((frame % kReportInterval) == 0 && !StatsEnabled()) {
 		timing = {};
 		store.ResetTimes();
@@ -302,10 +409,11 @@ void DrawcallLimitFix::Prepass()
 				parts += fmt::format("{}{} {:.3f}", parts.empty() ? "; by part: " : ", ", DCLF::kBuildPartNames[i], stats.partMs[i] / frames);
 		}
 		const auto& shaders = DCLF::ShaderPrograms::Get().GetStats();
-		logger::info("[DCLF] SPIR-V programs: {} requested, {} ready ({} stages from cache), {} failed", shaders.requested, shaders.ready, shaders.fromCache, shaders.failed);
+		logger::info("[DCLF] SPIR-V programs: {} requested, {} ready ({} stages from cache), {} failed; shadow (Utility): {} requested, {} ready, {} failed",
+			shaders.requested, shaders.ready, shaders.fromCache, shaders.failed, shaders.shadowRequested, shaders.shadowReady, shaders.shadowFailed);
 		const auto& indirect = DCLF::DrawPipelines::Get().GetStats();
-		logger::info("[DCLF] indirect pipelines: {} requested, {} in the set, {} failed; target changes {}", indirect.requested, indirect.ready, indirect.failed,
-			indirect.targetChanges);
+		logger::info("[DCLF] indirect pipelines: {} requested, {} in the set, {} failed; target changes {}; shadow: {} requested, {} in the set, {} failed",
+			indirect.requested, indirect.ready, indirect.failed, indirect.targetChanges, indirect.shadowRequested, indirect.shadowReady, indirect.shadowFailed);
 		const auto& draws = DCLF::IndirectDraws::Get().GetStats();
 		std::string skipped;
 		for (std::size_t i = 0; i < draws.skipped.size(); ++i) {
@@ -321,6 +429,28 @@ void DrawcallLimitFix::Prepass()
 		for (std::size_t i = 0; i < draws.partMs.size(); ++i)
 			epochParts += fmt::format("{}{} {:.3f} ms", epochParts.empty() ? "" : ", ", DCLF::kEpochPartNames[i], draws.partMs[i]);
 		logger::info("[DCLF] indirect epoch CPU by part: {}", epochParts);
+		if (DCLF::IndirectDraws::ShadowsEnabled()) {
+			const auto& shadow = DCLF::IndirectDraws::Get().GetShadowStats();
+			std::string notReadyReasons;
+			for (std::size_t r = 0; r < shadow.notReadyReasons.size(); ++r) {
+				if (shadow.notReadyReasons[r])
+					notReadyReasons += fmt::format(" {}={}", DCLF::kShadowNotReadyNames[r], shadow.notReadyReasons[r]);
+			}
+			logger::info("[DCLF] shadow views: {} offered, {} drawn in {} epochs, {} not ready ({}), {} focus views left native; last mode {} inputs ({} without a pipeline, {} without a texture), {} records; CPU {:.3f} ms per frame ({:.3f} capturing, {:.3f} preparing, {:.3f} inputs, {:.3f} blocks, {:.3f} graph, {:.3f} claiming)",
+				shadow.views, shadow.viewsDrawn, shadow.epochs, shadow.notReady, notReadyReasons.empty() ? "-" : notReadyReasons.c_str() + 1, shadow.focusSkipped, shadow.inputs, shadow.skippedPipeline,
+				shadow.skippedTexture, shadow.records, (shadow.cpuMs + shadow.captureMs) / frames, shadow.captureMs / frames, shadow.prepareMs / frames, shadow.inputsMs / frames, shadow.blocksMs / frames,
+				shadow.executeMs / frames, shadow.claimMs / frames);
+			if (shadow.cullTested)
+				logger::info("[DCLF] shadow culling (view {} mode {:#x}, sampled): {} tested, {} drawn, {} rejected by the frustum",
+					shadow.cullSampledView, shadow.cullSampledMode, shadow.cullTested, shadow.cullDrawn, shadow.cullRejected);
+			if (DCLF::PassCapture::ShadowWithholdingEnabled()) {
+				const auto& captured = DCLF::PassCapture::Get().GetStats();
+				logger::info("[DCLF] shadow ownership: withheld plain {} / clamped {} / paraboloid {} passes (last frame); claimed {} / {} / {} casters; {} views not ready under ownership{}",
+					captured.shadowWithheld[0], captured.shadowWithheld[1], captured.shadowWithheld[2], shadow.claimed[0], shadow.claimed[1], shadow.claimed[2],
+					shadow.notReady, shadow.notReady ? " <- HOLES" : "");
+			}
+			DCLF::IndirectDraws::Get().ResetShadowStats();
+		}
 		if (stats.projectedUV || stats.landBlend)
 			logger::info("[DCLF] projected UV / terrain (last frame): {} projected candidates, {} terrain candidates, projected textures {}",
 				stats.projectedUV, stats.landBlend, store.GetProjectedTextures().valid ? "captured" : "not seen yet");
@@ -437,10 +567,23 @@ void DrawcallLimitFix::Prepass()
 				(stats.materialDiffMask & 1) ? "vs " : "", (stats.materialDiffMask & 2) ? "ps " : "",
 				(stats.materialDiffMask & 4) ? "textures " : "", (stats.materialDiffMask & 8) ? "address " : "",
 				(stats.materialDiffMask & 16) ? "filter " : "", (stats.materialDiffMask & 32) ? "written" : "");
-		logger::info("[DCLF] tracked {} under {} category nodes: {} objects ({} the engine also kept), {} geometries, {} pipelines, {} materials; left native:{}; events +{} -{}, validation drops {}; CPU per frame: events {:.3f} ms, tables {:.3f} ms (max {:.3f}){}",
+		logger::info("[DCLF] tracked {} under {} category nodes: {} objects ({} the engine also kept), {} geometries, {} pipelines, {} materials; left native:{}; events +{} -{}, validation drops {}; CPU per frame: events {:.3f} ms, tables {:.3f} ms (scene {:.3f}, max {:.3f}; accumulate {:.3f}, max {:.3f}){}",
 			stats.tracked, stats.categoryNodes, stats.objects, stats.nativeVisible, stats.geometries, stats.pipelines, stats.materials, reasons,
-			stats.attachedEvents, stats.detachedEvents, stats.validationDrops, timing.eventsMs / frames, timing.buildMs / frames, timing.buildMaxMs,
+			stats.attachedEvents, stats.detachedEvents, stats.validationDrops, timing.eventsMs / frames,
+			(timing.sceneMs + timing.buildMs) / frames, timing.sceneMs / frames, timing.sceneMaxMs, timing.buildMs / frames, timing.buildMaxMs,
 			parts);
+		{
+			std::string rejects;
+			for (std::size_t r = 1; r < stats.shadowRejects.size(); ++r) {
+				if (stats.shadowRejects[r])
+					rejects += fmt::format(" {}={}", DCLF::ShadowRejectName(static_cast<DCLF::ShadowReject>(r)), stats.shadowRejects[r]);
+			}
+			logger::info("[DCLF] shadow casters (last frame): {} of {} records would be drawn into a shadow map; not casters:{}; {} views this frame",
+				stats.shadowCasters, stats.objects, rejects.empty() ? " none" : rejects, DCLF::ShadowViews::Get().All().size());
+		}
+		if (stats.accumulatedWithoutRecord)
+			logger::warn("[DCLF] two-phase frame: {} objects the engine accumulated had no record from the scene phase, so they stayed native",
+				stats.accumulatedWithoutRecord);
 		timing = {};
 		store.ResetTimes();
 	}
@@ -450,15 +593,12 @@ bool DrawcallLimitFix::SkipNativePass(RE::BSRenderPass* a_pass)
 {
 	// CS_DCLF_HYBRID_NOSKIP=1: DCLF draws into the frame but the native loop keeps drawing everything, so
 	// what DCLF fails to draw is still visible. It tells apart the two ways an object can go missing.
-	static const bool noSkip = [] {
-		return DCLF::SwitchEnabled("CS_DCLF_HYBRID_NOSKIP");
-	}();
+	const auto toggles = DCLF::Toggles::Get().Active();
+	const bool noSkip = toggles.hybridNoSkip;
 	// CS_DCLF_ONLY_ELIGIBLE=1: the reverse skip, for parity. The native loop draws only what the indirect
 	// draws also draw, so the native depth and G-buffer hold the same object set as DCLF's own targets and
 	// the two can be compared pixel for pixel.
-	static const bool onlyEligible = [] {
-		return DCLF::SwitchEnabled("CS_DCLF_ONLY_ELIGIBLE");
-	}();
+	const bool onlyEligible = toggles.onlyEligible;
 	if (noSkip && !onlyEligible)
 		return false;
 	if (!installed || !a_pass || !a_pass->geometry || (!DCLF::IndirectDraws::Hybrid() && !onlyEligible))
@@ -530,8 +670,23 @@ void DrawcallLimitFix::Hooks::BSBatchRenderer_RenderPassImmediately<N>::thunk(RE
 	func(a_pass, a_technique, a_alphaTest, a_renderFlags);
 }
 
+void DrawcallLimitFix::Hooks::BSShaderAccumulator_FinishAccumulating::thunk(RE::BSGraphics::BSShaderAccumulator* a_accumulator, std::uint32_t a_renderFlags)
+{
+	func(a_accumulator, a_renderFlags);
+	const auto mode = static_cast<std::uint32_t>(a_accumulator->GetRuntimeData().renderMode);
+	if (mode < 0xD || mode > 0xF)
+		return;  // shadow-map modes only: plain, clamped, paraboloid (engine notes: shadow maps)
+	const auto view = DCLF::ShadowViews::Get().ViewOfAccumulator(a_accumulator);
+	if (view != ~0u)
+		DCLF::IndirectDraws::Get().ExecuteShadowView(view, mode);
+}
+
 void DrawcallLimitFix::Hooks::Install()
 {
+	// Always installed: the shadow views are a live toggle (Toggles.h), and the thunk costs one compare per
+	// accumulator finish when they are off.
+	stl::write_vfunc<0x2A, BSShaderAccumulator_FinishAccumulating>(RE::VTABLE_BSShaderAccumulator[0]);
+	logger::info("[DCLF] shadow view hook installed on BSShaderAccumulator::FinishAccumulatingPreResolveDepth");
 	// The main camera's depth pass, hooked where Terrain Blending hooks it.
 	stl::write_thunk_call<Main_RenderDepth>(REL::RelocationID(35560, 36559).address() + Util::VersionedRelocation::Select(0x395, 0x395, 0x3B3));
 	stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<1>>(REL::RelocationID(100877, 107667).address() + REL::Relocate(0x1E5, 0xED));
@@ -595,8 +750,10 @@ void DrawcallLimitFix::RefreshDepthConsumers()
 	const auto& depthStencils = renderer->GetDepthStencilData().depthStencils;
 	const auto& main = depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 	const auto& prepassCopy = depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
-	if (main.texture && prepassCopy.texture)
+	if (main.texture && prepassCopy.texture) {
+		ScopedPerfEvent event("CS DCLF: post-Z-prepass depth copy");
 		context->CopyResource(prepassCopy.texture, main.texture);
+	}
 	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 }
 
@@ -619,11 +776,76 @@ void DrawcallLimitFix::BeforeDeferredComposite()
 void DrawcallLimitFix::DrawSettings()
 {
 	const auto& stats = DCLF::SceneStore::Get().GetStats();
-	ImGui::TextUnformatted("Phase 2: tracked objects are also drawn by the render graph, off screen; the frame still comes from the native draws.");
-	ImGui::Text("Tracked geometry: %u (under %u category nodes)", stats.tracked, stats.categoryNodes);
-	ImGui::Text("Objects this frame: %u (%u the engine's culling also kept), geometries: %u, pipelines: %u", stats.objects, stats.nativeVisible, stats.geometries, stats.pipelines);
-	for (std::size_t i = 1; i < stats.ineligible.size(); ++i) {
-		if (stats.ineligible[i])
-			ImGui::Text("Left native (%s): %u", DCLF::kIneligibleNames[i].data(), stats.ineligible[i]);
+	if (!unavailableReason.empty()) {
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.3f, 1.0f));
+		ImGui::TextUnformatted("Unavailable this session: the render graph could not start, so everything renders natively.");
+		ImGui::PopStyleColor();
+		ImGui::TextWrapped("Reason: %s", unavailableReason.c_str());
+		return;
+	}
+	if (!installed) {
+		ImGui::TextUnformatted("Not installed (CS_DCLF=0 or VR).");
+		return;
+	}
+	// The live toggles: every non-default feature, for A/B comparisons without a restart. They are the
+	// REQUESTED set; the render thread applies them at the start of the next frame (Toggles.h).
+	auto& toggles = DCLF::Toggles::Get().Requested();
+	const auto active = DCLF::Toggles::Get().Active();
+	if (ImGui::TreeNodeEx("Live toggles (A/B)", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::TextWrapped("Each is seeded from its CS_DCLF_* switch and applied at the next frame. A change to an object class drops the classification caches, so the frame after it re-classifies everything.");
+		ImGui::SeparatorText("Main pass");
+		ImGui::Checkbox("Hybrid: draw into the frame, skip natively (CS_DCLF_HYBRID)", &toggles.hybrid);
+		ImGui::BeginDisabled(!toggles.hybrid);
+		ImGui::Checkbox("Static ownership: withhold claimed passes (CS_DCLF_OWNERSHIP=static)", &toggles.ownership);
+		ImGui::EndDisabled();
+		int cull = toggles.cullMode;
+		if (ImGui::Combo("GPU culling (CS_DCLF_CULL)", &cull, "off\0frustum\0frustum + occlusion\0"))
+			toggles.cullMode = static_cast<std::uint8_t>(cull);
+		ImGui::Checkbox("Cull the tracked set, not only what the engine kept (CS_DCLF_CULL_INPUT=tracked)", &toggles.cullTracked);
+		ImGui::SeparatorText("Object classes");
+		ImGui::Checkbox("Skinned (CS_DCLF_SKINNED)", &toggles.skinned);
+		ImGui::Checkbox("Trees (CS_DCLF_TREES)", &toggles.trees);
+		ImGui::Checkbox("Decals (CS_DCLF_DECALS)", &toggles.decals);
+		ImGui::Checkbox("Projected UV (CS_DCLF_PROJECTED_UV)", &toggles.projectedUv);
+		ImGui::Checkbox("Terrain (CS_DCLF_MTLAND)", &toggles.mtLand);
+		ImGui::SeparatorText("Shadow views");
+		ImGui::Checkbox("Draw the shadow views (CS_DCLF_SHADOWS)", &toggles.shadows);
+		ImGui::BeginDisabled(!toggles.shadows);
+		ImGui::Checkbox("Static shadow ownership: withhold claimed casters (CS_DCLF_SHADOW_OWNERSHIP=static)", &toggles.shadowOwnership);
+		ImGui::EndDisabled();
+		ImGui::SeparatorText("Diagnostics");
+		ImGui::Checkbox("Debug view: show DCLF's targets (CS_DCLF_DEBUG_VIEW)", &toggles.debugView);
+		ImGui::Checkbox("Hybrid without skipping: the native loop draws everything too (CS_DCLF_HYBRID_NOSKIP)", &toggles.hybridNoSkip);
+		ImGui::Checkbox("Only eligible: the native loop draws only DCLF's set (CS_DCLF_ONLY_ELIGIBLE)", &toggles.onlyEligible);
+		ImGui::Checkbox("No Z-prepass (CS_DCLF_NO_ZPREPASS)", &toggles.noZPrepass);
+		ImGui::TreePop();
+	}
+	if (ImGui::TreeNodeEx("This frame", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::Text("Active: hybrid %d, ownership %d, cull %u%s, skinned %d, trees %d, decals %d, projected %d, terrain %d, shadows %d, shadow ownership %d",
+			active.hybrid, active.ownership, active.cullMode, active.cullTracked ? " (tracked)" : "", active.skinned, active.trees, active.decals,
+			active.projectedUv, active.mtLand, active.shadows, active.shadowOwnership);
+		ImGui::Text("Tracked geometry: %u (under %u category nodes)", stats.tracked, stats.categoryNodes);
+		ImGui::Text("Objects this frame: %u (%u the engine's culling also kept), geometries: %u, pipelines: %u", stats.objects, stats.nativeVisible, stats.geometries, stats.pipelines);
+		for (std::size_t i = 1; i < stats.ineligible.size(); ++i) {
+			if (stats.ineligible[i])
+				ImGui::Text("Left native (%s): %u", DCLF::kIneligibleNames[i].data(), stats.ineligible[i]);
+		}
+		const auto& draws = DCLF::IndirectDraws::Get().GetStats();
+		ImGui::Text("Indirect draws: %u drawn from %u records, %u epochs; culling tested %u, rejected %u, false negatives %u",
+			draws.drawn, draws.records, draws.epochs, draws.cullTested, draws.cullRejected, draws.cullFalseNegatives);
+		if (const auto& gpu = RenderGraphRuntime::Get().GpuTimingSummary(); !gpu.empty())
+			ImGui::TextUnformatted(("GPU (ORG pass timestamps, last report):\n" + gpu).c_str());
+		const auto& capture = DCLF::PassCapture::Get().GetStats();
+		if (active.ownership)
+			ImGui::Text("Ownership: %u withheld, %u claimed, %u holes", capture.withheld, capture.claimed, capture.holes);
+		if (active.shadows) {
+			const auto& shadow = DCLF::IndirectDraws::Get().GetShadowStats();
+			ImGui::Text("Shadow views (since the last report): %u offered, %u drawn, %u not ready; last view %u inputs, %u records; sampled culling: %u tested, %u rejected",
+				shadow.views, shadow.viewsDrawn, shadow.notReady, shadow.inputs, shadow.records, shadow.cullTested, shadow.cullRejected);
+			if (active.shadowOwnership)
+				ImGui::Text("Shadow ownership: withheld %u / %u / %u (plain / clamped / paraboloid), claimed %u / %u / %u",
+					capture.shadowWithheld[0], capture.shadowWithheld[1], capture.shadowWithheld[2], shadow.claimed[0], shadow.claimed[1], shadow.claimed[2]);
+		}
+		ImGui::TreePop();
 	}
 }

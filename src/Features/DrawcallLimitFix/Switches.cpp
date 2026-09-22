@@ -16,12 +16,8 @@ namespace DCLF
 
 		std::filesystem::path SwitchesPath()
 		{
-			PWSTR documents = nullptr;
-			if (FAILED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &documents)))
-				return {};
-			std::filesystem::path path(documents);
-			CoTaskMemFree(documents);
-			return path / L"My Games" / L"Skyrim Special Edition" / L"SKSE" / kFileName;
+			const auto directory = SwitchesDirectory();
+			return directory.empty() ? directory : directory / kFileName;
 		}
 
 		// NAME=value per line; blank lines and lines starting with ';' or '#' are ignored.
@@ -71,6 +67,16 @@ namespace DCLF
 		}
 	}
 
+	std::filesystem::path SwitchesDirectory()
+	{
+		PWSTR documents = nullptr;
+		if (FAILED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &documents)))
+			return {};
+		std::filesystem::path path(documents);
+		CoTaskMemFree(documents);
+		return path / L"My Games" / L"Skyrim Special Edition" / L"SKSE";
+	}
+
 	std::string SwitchValue(const char* a_name)
 	{
 		const std::lock_guard lock(ResolvedMutex());
@@ -108,7 +114,8 @@ namespace DCLF
 		for (const auto& [name, value] : FileValues())
 			add(name);
 		for (const char* name : { "CS_DCLF", "CS_DCLF_HYBRID", "CS_DCLF_CULL", "CS_DCLF_STATS", "CS_DCLF_DEBUG_VIEW",
-				 "CS_DCLF_BUILD_PARITY", "CS_DCLF_CAPTURE_PARITY", "CS_DCLF_HYBRID_NOSKIP", "CS_DCLF_ONLY_ELIGIBLE" }) {
+				 "CS_DCLF_BUILD_PARITY", "CS_DCLF_CAPTURE_PARITY", "CS_DCLF_HYBRID_NOSKIP", "CS_DCLF_ONLY_ELIGIBLE",
+				 "CS_DCLF_SHADER_DEBUG", "CS_DCLF_SHADER_SOURCE_DIR" }) {
 			if (!FileValues().contains(name))
 				add(name);
 		}

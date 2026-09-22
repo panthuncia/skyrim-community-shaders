@@ -872,12 +872,22 @@ void State::SetupResources()
 
 	globals::profiler->Initialize(globals::d3d::device, globals::d3d::context);
 
-	if (frameAnnotations) {
+	// Debugger events (Nsight, RenderDoc, PIX) around CS's own GPU work: the profiler's passes and each
+	// feature's frame callbacks. With Frame Annotations on, or whenever a capture tool is attached, which
+	// DXVK reports through GetStatus (it forwards D3D11 events only then).
+	const bool captureAttached = pPerf && pPerf->GetStatus();
+	debuggerEvents = pPerf && (frameAnnotations || captureAttached);
+	if (debuggerEvents) {
+		logger::info("Debugger events on ({})", frameAnnotations ? "Frame Annotations" : "capture tool attached");
 		globals::profiler->SetPerfEventCallbacks(
 			[this](std::string_view name) { BeginPerfEvent(name); },
 			[this](std::string_view) { EndPerfEvent(); });
+		Feature::SetGpuEventCallbacks(
+			[](std::string_view name) { globals::state->BeginPerfEvent(name); },
+			[] { globals::state->EndPerfEvent(); });
 	} else {
 		globals::profiler->SetPerfEventCallbacks({}, {});
+		Feature::SetGpuEventCallbacks(nullptr, nullptr);
 	}
 }
 
@@ -1009,6 +1019,19 @@ void State::EndPerfEvent()
 	}
 #endif
 	pPerf->EndEvent();
+}
+
+ScopedPerfEvent::ScopedPerfEvent(std::string_view a_name) :
+	active(globals::state && globals::state->debuggerEvents)
+{
+	if (active)
+		globals::state->BeginPerfEvent(a_name);
+}
+
+ScopedPerfEvent::~ScopedPerfEvent()
+{
+	if (active)
+		globals::state->EndPerfEvent();
 }
 
 void State::SetPerfMarker(std::string_view title)

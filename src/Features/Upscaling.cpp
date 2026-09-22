@@ -12,6 +12,7 @@
 #include "Upscaling/Streamline.h"
 #include "Utils/Game.h"
 #include "Utils/UI.h"
+#include "Utils/ImportCallSites.h"
 #include "Utils/VersionedRelocation.h"
 #include <Windows.h>
 #include <algorithm>
@@ -427,6 +428,9 @@ void Upscaling::Load()
 	*(uintptr_t*)&ptrD3D11CreateDeviceAndSwapChainUpscaling = DxvkLoader::IsLoaded() ?
 	                                                              reinterpret_cast<uintptr_t>(DxvkLoader::GetD3D11CreateDeviceAndSwapChain()) :
 	                                                              iatOriginal;
+	// The IAT patch alone does not survive RenderDoc; see RedirectImportCallSites.
+	Util::RedirectImportCallSites(::GetModuleHandleW(nullptr), "d3d11.dll", "D3D11CreateDeviceAndSwapChain",
+		reinterpret_cast<void*>(&hk_D3D11CreateDeviceAndSwapChainUpscaling));
 }
 
 struct BSImageSpace_Init_FXAA

@@ -71,6 +71,9 @@ namespace DCLF
 			std::uint32_t ready = 0;
 			std::uint32_t failed = 0;
 			std::uint32_t fromCache = 0;  // artifacts found in the memory or disk cache
+			std::uint32_t shadowRequested = 0;  // Utility techniques (shadow views)
+			std::uint32_t shadowReady = 0;
+			std::uint32_t shadowFailed = 0;
 		};
 
 		static ShaderPrograms& Get();
@@ -80,6 +83,22 @@ namespace DCLF
 
 		/** @brief The key's program once both stages compiled; requests them on first call. Null otherwise. */
 		const Program* Find(const PipelineKey& a_key, RE::BSShader& a_lighting);
+
+		/**
+		 * @brief SPIR-V builds of one Utility technique, for a shadow view's draws.
+		 *
+		 * The same mechanism as the Lighting builds, from `Data/Shaders/Utility.hlsl` with the technique's
+		 * own compile defines plus DCLF_BINDLESS: a shadow draw's World, tree parameters, bone palette and
+		 * alpha reference come from the per-object record, because one pipeline draws every object of a
+		 * view (engine notes: shadow maps). Both stages are compiled; a technique without alpha testing
+		 * simply has a pixel stage that writes nothing anyone reads.
+		 */
+		struct ShadowProgram
+		{
+			std::vector<std::byte> vertex;
+			std::vector<std::byte> pixel;
+		};
+		const ShadowProgram* FindShadow(std::uint32_t a_technique, RE::BSShader& a_utility);
 
 		/** @brief Programs are never freed: the reference stays valid for the process (pipeline builds keep it). */
 
@@ -93,10 +112,13 @@ namespace DCLF
 		~ShaderPrograms();
 
 		struct Entry;  // compilation futures; defined with the compiler (ShaderPrograms.cpp)
+		struct ShadowEntry;
 		bool LoadSources();
 
 		ankerl::unordered_dense::map<std::uint64_t, std::unique_ptr<Entry>> entries;
+		ankerl::unordered_dense::map<std::uint32_t, std::unique_ptr<ShadowEntry>> shadowEntries;
 		std::vector<std::byte> source;
+		std::vector<std::byte> utilitySource;
 		std::vector<std::filesystem::path> dependencies;
 		bool sourcesLoaded = false;
 		bool sourcesMissing = false;

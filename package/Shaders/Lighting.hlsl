@@ -1741,6 +1741,12 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	baseColor.xyz = GetWorldMapBaseColor(rawBaseColor.xyz, baseColor.xyz, projWeight);
 #	endif  // WORLD_MAP
 
+#	if !defined(DCLF_DEPTH_ONLY)
+	// Drawcall Limit Fix's Z-prepass (DCLF_DEPTH_ONLY) needs only the alpha test, and nothing between here
+	// and it changes baseColor.w or discards. Compiling the lighting out here, rather than leaving it to the
+	// optimizer behind the depth-only return, keeps its reads of the per-frame pixel bindings out of the module
+	// even in debug builds (CS_DCLF_SHADER_DEBUG), where DXC keeps them alive for their debug values.
+
 #	if defined(MODELSPACENORMALS)
 	float3 vertexNormal = worldNormal;
 #	endif
@@ -2822,6 +2828,8 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	color.xyz = 0;
 #	endif
 
+#	endif  // !DCLF_DEPTH_ONLY
+
 #	if defined(LANDSCAPE) && !defined(LOD_LAND_BLEND)
 	psout.Diffuse.w = 0;
 #	else
@@ -2886,15 +2894,8 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	}
 #		endif      // DO_ALPHA_TEST
 
-#		if defined(DCLF_DEPTH_ONLY)
-	// Drawcall Limit Fix's Z-prepass builds this permutation with DCLF_DEPTH_ONLY: the pass has no render
-	// targets and only needs the depth, so everything past the alpha test is dead. Returning here lets the
-	// compiler drop it, which is what makes the prepass cheap and, more importantly, keeps the shader from
-	// reading the per-frame pixel-stage bindings - they are not bound yet while the native depth pass runs.
-	return (PS_OUTPUT)0;
-#		endif  // DCLF_DEPTH_ONLY
-
-#		if defined(ANISOTROPIC_ALPHA)
+#		if !defined(DCLF_DEPTH_ONLY)
+#			if defined(ANISOTROPIC_ALPHA)
 	// Uniform alpha material settings
 	uint AlphaMaterialModel = ExtendedTranslucency::GetMaterialModelFromDescriptor(Permutation::ExtraFeatureDescriptor);
 	float AlphaMaterialReduction = 0.f;
@@ -2933,10 +2934,13 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			alpha = lerp(alpha, originalAlpha, AlphaMaterialStrength);
 		}
 	}
-#		endif  // ANISOTROPIC_ALPHA
+#			endif  // ANISOTROPIC_ALPHA
 
 	psout.Diffuse.w = alpha;
+#		endif  // !DCLF_DEPTH_ONLY
 #	endif
+
+#	if !defined(DCLF_DEPTH_ONLY)
 
 #	if defined(LIGHT_LIMIT_FIX) && defined(LLFDEBUG)
 	if (SharedData::lightLimitFixSettings.EnableLightsVisualisation) {
@@ -3031,12 +3035,23 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	psout.MotionVectors = outputColorToAuxiliaryTarget ? float4(1, 0, 0, 1) : float4(screenMotionVector, 0, 1);
 #	endif
 
+#	endif  // !DCLF_DEPTH_ONLY
+
 #	if defined(EMAT)
 #		undef COMPUTE_TERRAIN_SHADOW_BASE
 #		undef EVAL_TERRAIN_DIR_SHADOW
 #		undef LANDSCAPE_PARALLAX_ENABLED
 #	endif
 
+#	if defined(DCLF_DEPTH_ONLY)
+	// Drawcall Limit Fix's Z-prepass builds this permutation with DCLF_DEPTH_ONLY: the pass has no render
+	// targets and only needs the depth, so it keeps the alpha test and nothing else - the lighting before it
+	// and the outputs after it are compiled out (see above). That makes the prepass cheap and, more
+	// importantly, keeps the shader from reading the per-frame pixel-stage bindings: they are not bound
+	// while the native depth pass runs.
+	return (PS_OUTPUT)0;
+#	else
 	return psout;
+#	endif
 }
 #endif  // PSHADER

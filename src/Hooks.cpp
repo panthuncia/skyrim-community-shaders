@@ -28,6 +28,7 @@
 #include "Features/Upscaling/DXVKInterop.h"
 #include "Features/Upscaling/Streamline.h"
 #include "Features/VolumetricLighting.h"
+#include "Utils/ImportCallSites.h"
 
 #include <xmmintrin.h>
 #include <unordered_map>
@@ -1296,6 +1297,9 @@ namespace Hooks
 			*(uintptr_t*)&ptrD3D11CreateDeviceAndSwapChain = dxvkLoaded ?
 			                                                     reinterpret_cast<uintptr_t>(DxvkLoader::GetD3D11CreateDeviceAndSwapChain()) :
 			                                                     iatOriginal;
+			// The IAT patch alone does not survive RenderDoc; see RedirectImportCallSites.
+			Util::RedirectImportCallSites(::GetModuleHandleW(nullptr), "d3d11.dll", "D3D11CreateDeviceAndSwapChain",
+				reinterpret_cast<void*>(&hk_D3D11CreateDeviceAndSwapChain));
 		}
 
 		logger::info("Hooking CreateDXGIFactory");
@@ -1303,5 +1307,7 @@ namespace Hooks
 		*(uintptr_t*)&ptrCreateDXGIFactory = dxvkLoaded ?
 		                                         reinterpret_cast<uintptr_t>(DxvkLoader::GetCreateDXGIFactory()) :
 		                                         dxgiOriginal;
+		Util::RedirectImportCallSites(::GetModuleHandleW(nullptr), "dxgi.dll", "CreateDXGIFactory",
+			reinterpret_cast<void*>(&hk_CreateDXGIFactory));
 	}
 }

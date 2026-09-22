@@ -192,6 +192,14 @@ namespace DCLF
 		bool attempted = false;
 		org::services::PipelineService service;
 		ankerl::unordered_dense::map<PipelineKey, Entry, PipelineKeyHash> entries;
+		// The shadow views' own set: one pipeline per (Utility technique, vertex layout, raster state),
+		// depth only, into the engine's shadow map format.
+		ankerl::unordered_dense::map<ShadowPipelineKey, Entry, ShadowPipelineKeyHash> shadowEntries;
+		rhi::IndirectPipelineSetPtr shadowSet;
+		rhi::CommandSignaturePtr shadowSignature;
+		std::vector<org::services::PipelinePayload> shadowSetPipelines;
+		DXGI_FORMAT shadowDepthFormat = DXGI_FORMAT_UNKNOWN;
+		std::uint32_t shadowInFlight = 0;
 		// What a build produces: the pipelines of both variants and the registers the shaders read.
 		struct Built
 		{
@@ -438,6 +446,75 @@ namespace DCLF
 			return built;
 		}
 
+		/**
+		 * @brief One shadow pipeline: the Utility permutation, depth only, with the view's bias.
+		 *
+		 * No colour attachment and no blending - a shadow map holds depth alone - and the depth test is
+		 * the engine's own for a shadow pass: write, compare LESS. The bias comes from the rasterizer
+		 * state the engine had bound when it drew the view, read back through the same table the decal
+		 * keys use.
+		 */
+		static org::services::PipelinePayload BuildShadow(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout, ShadowPipelineKey a_key,
+			const ShaderPrograms::ShadowProgram* a_program, DXGI_FORMAT a_depthFormat, EngineState a_state)
+		{
+			SpirvReflection vertex, pixel;
+			if (!vertex.Parse(a_program->vertex) || !pixel.Parse(a_program->pixel))
+				throw std::runtime_error("not SPIR-V");
+			CheckBindings(vertex, false);
+			CheckBindings(pixel, true);
+			auto built = std::make_shared<Built>();
+			AddUsage(vertex, false, built->usage[kColorVariant]);
+			AddUsage(pixel, true, built->usage[kColorVariant]);
+
+			const rhi::SubobjLayout layout{ a_layout };
+			const rhi::SubobjShader vertexShader{ rhi::ShaderStage::Vertex, { a_program->vertex.data(), static_cast<std::uint32_t>(a_program->vertex.size()) }, "main" };
+			const rhi::SubobjShader pixelShader{ rhi::ShaderStage::Pixel, { a_program->pixel.data(), static_cast<std::uint32_t>(a_program->pixel.size()) }, "main" };
+			const rhi::SubobjDSV depthFormat{ rhi::helpers::ToRHI(a_depthFormat) };
+			const rhi::SubobjPrimitiveTopology topology{ rhi::PrimitiveTopology::TriangleList };
+			const rhi::SubobjInputLayout input{ BuildInputLayout(vertex, a_key.vertexLayout) };
+			const rhi::SubobjFlags flags{ rhi::PipelineFlags_IndirectBindable };
+			rhi::SubobjRaster raster{};
+			raster.rs.cull = (a_key.rasterFlags & kRasterTwoSided) ? rhi::CullMode::None : rhi::CullMode::Back;
+			if (a_state.valid) {
+				raster.rs.depthBias = a_state.depthBias;
+				raster.rs.depthBiasClamp = a_state.depthBiasClamp;
+				raster.rs.slopeScaledDepthBias = a_state.slopeScaledDepthBias;
+			}
+			rhi::SubobjDepth depth{};
+			depth.ds.depthEnable = true;
+			depth.ds.depthWrite = true;
+			depth.ds.depthFunc = rhi::CompareOp::Less;
+			rhi::SubobjBlend blend{};
+			blend.bs.numAttachments = 0;
+			rhi::SubobjRTVs targets{};
+			targets.rt.count = 0;
+			const rhi::PipelineStreamItem items[] = {
+				rhi::Make(layout), rhi::Make(vertexShader), rhi::Make(pixelShader), rhi::Make(raster), rhi::Make(depth), rhi::Make(blend),
+				rhi::Make(targets), rhi::Make(depthFormat), rhi::Make(topology), rhi::Make(input), rhi::Make(flags),
+			};
+			if (const auto result = a_device.CreatePipeline(items, static_cast<std::uint32_t>(std::size(items)), built->pipelines[kColorVariant]); result != rhi::Result::Ok)
+				throw std::runtime_error(fmt::format("CreatePipeline (shadow) failed ({})", static_cast<int>(result)));
+			return built;
+		}
+
+		/** @brief The shadow set's command signature; the same DrawSequence stream as the main pass's. */
+		bool CreateShadowSignature()
+		{
+			rhi::IndirectArg args[5]{};
+			args[0].kind = rhi::IndirectArgKind::PipelineIndex;
+			args[1].kind = rhi::IndirectArgKind::Constant;
+			args[1].u.rootConstants = { 0, 0, 3 };
+			args[2].kind = rhi::IndirectArgKind::VertexBuffer;
+			args[2].u.vertexBuffer.slot = 0;
+			args[3].kind = rhi::IndirectArgKind::IndexBuffer;
+			args[4].kind = rhi::IndirectArgKind::DrawIndexed;
+			rhi::CommandSignatureDesc desc{};
+			desc.args = { args, 5 };
+			desc.byteStride = sizeof(DrawSequence);
+			desc.pipelineSet = shadowSet->GetHandle();
+			return device.CreateCommandSignature(desc, layout->GetHandle(), shadowSignature) == rhi::Result::Ok;
+		}
+
 		// The command signature of DrawSequence (Records.h), created with the set it selects from.
 		bool CreateSignature(std::uint32_t a_variant)
 		{
@@ -536,6 +613,66 @@ namespace DCLF
 		return kNotReady;
 	}
 
+	std::uint32_t DrawPipelines::FindShadow(const ShadowPipelineKey& a_key, const ShaderPrograms::ShadowProgram& a_program, DXGI_FORMAT a_depthFormat)
+	{
+		if (a_depthFormat == DXGI_FORMAT_UNKNOWN || !Enabled())
+			return kNotReady;
+		if (impl->shadowDepthFormat != a_depthFormat) {
+			if (impl->shadowDepthFormat != DXGI_FORMAT_UNKNOWN) {
+				// The shadow maps were recreated in another format: every pipeline depended on it.
+				logger::info("[DCLF] shadow map format changed ({} -> {}); rebuilding {} shadow pipelines",
+					static_cast<int>(impl->shadowDepthFormat), static_cast<int>(a_depthFormat), impl->shadowSetPipelines.size());
+				impl->shadowEntries.clear();
+				impl->shadowSignature.Reset();
+				impl->shadowSet.Reset();
+				impl->shadowSetPipelines.clear();
+				shadowUsage.clear();
+				impl->shadowInFlight = 0;
+				stats.shadowRequested = stats.shadowReady = stats.shadowFailed = 0;
+			}
+			impl->shadowDepthFormat = a_depthFormat;
+		}
+		if (auto it = impl->shadowEntries.find(a_key); it != impl->shadowEntries.end())
+			return it->second.index;
+		if (impl->shadowInFlight >= kMaxInFlight || impl->shadowSetPipelines.size() >= kMaxPipelines)
+			return kNotReady;
+		Impl::EngineState state{};
+		if (const auto bits = RasterStateBits(a_key.rasterFlags)) {
+			const auto it = impl->engineStates.find(bits);
+			if (it == impl->engineStates.end() || !it->second.valid)
+				return kNotReady;
+			state = it->second;
+		}
+		org::services::PipelineRecipe recipe;
+		recipe.id = fmt::format("dclf.shadow.{:08X}.{:X}.{:016X}", a_key.technique, a_key.rasterFlags, a_key.vertexLayout);
+		recipe.shaderKey = ShadowPipelineKeyHash{}(a_key);
+		recipe.fixedFunctionKey = static_cast<std::uint64_t>(a_depthFormat);
+		recipe.build = [device = impl->device, layout = impl->layout->GetHandle(), key = a_key, program = &a_program, format = a_depthFormat, state] {
+			return Impl::BuildShadow(device, layout, key, program, format, state);
+		};
+		auto& entry = impl->shadowEntries[a_key];
+		entry.future = impl->service.Request(std::move(recipe));
+		++impl->shadowInFlight;
+		++stats.shadowRequested;
+		return kNotReady;
+	}
+
+	void DrawPipelines::CaptureShadowStates(std::span<const ShadowPipelineKey> a_keys)
+	{
+		for (const auto& key : a_keys) {
+			const auto bits = RasterStateBits(key.rasterFlags);
+			if (!bits || impl->engineStates.contains(bits))
+				continue;
+			std::string error;
+			auto state = impl->ReadEngineState(bits, error);
+			if (!state.valid && impl->loggedStateFailures++ < kMaxLoggedFailures)
+				logger::warn("[DCLF] shadow pipeline state {:05X} cannot be built: {}; its casters stay native", bits, error);
+			else if (state.valid)
+				logger::info("[DCLF] shadow pipeline state {:05X}: depth bias {} (clamp {}, slope {})", bits, state.depthBias, state.depthBiasClamp, state.slopeScaledDepthBias);
+			impl->engineStates.emplace(bits, state);
+		}
+	}
+
 	void DrawPipelines::CaptureEngineStates(std::span<const PipelineKey> a_keys)
 	{
 		for (const auto& key : a_keys) {
@@ -603,7 +740,61 @@ namespace DCLF
 			entry.index = index;
 			++stats.ready;
 		}
+		for (auto& [key, entry] : impl->shadowEntries) {
+			if (entry.index != kNotReady || entry.failed || !entry.future.valid() || entry.future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+				continue;
+			--impl->shadowInFlight;
+			const auto& artifact = entry.future.get();
+			entry.future = {};
+			if (!artifact) {
+				entry.failed = true;
+				++stats.shadowFailed;
+				if (impl->loggedFailures++ < kMaxLoggedFailures)
+					logger::warn("[DCLF] shadow pipeline technique {:08X} layout {:016X} failed: {}", key.technique, key.vertexLayout, artifact.error);
+				continue;
+			}
+			const auto* built = static_cast<const Impl::Built*>(artifact.payload.get());
+			const auto index = static_cast<std::uint32_t>(impl->shadowSetPipelines.size());
+			const auto pipeline = built->pipelines[kColorVariant]->GetHandle();
+			rhi::Result result = rhi::Result::Ok;
+			if (!impl->shadowSet) {
+				result = impl->device.CreateIndirectPipelineSet(rhi::IndirectPipelineSetDesc{ pipeline, kMaxPipelines }, impl->shadowSet);
+				if (result == rhi::Result::Ok) {
+					impl->shadowSet->SetName("DCLF indirect pipelines (shadow)");
+					if (!impl->CreateShadowSignature()) {
+						logger::error("[DCLF] Could not create the shadow command signature");
+						impl->shadowSet.Reset();
+						result = rhi::Result::Failed;
+					}
+				}
+			} else {
+				result = impl->device.UpdateIndirectPipelineSet(impl->shadowSet->GetHandle(), index, { &pipeline, 1 });
+			}
+			if (result != rhi::Result::Ok) {
+				entry.failed = true;
+				++stats.shadowFailed;
+				logger::warn("[DCLF] Could not add shadow pipeline {} to the set ({})", index, static_cast<int>(result));
+				continue;
+			}
+			impl->shadowSetPipelines.push_back(artifact.payload);
+			shadowUsage.push_back(built->usage[kColorVariant]);
+			entry.index = index;
+			++stats.shadowReady;
+		}
 		impl->service.PublishReady(0);
+	}
+
+	ShadowIndirectState GetShadowIndirectState()
+	{
+		const auto& impl = *DrawPipelines::Get().impl;
+		ShadowIndirectState state;
+		if (!impl.layout || !impl.shadowSet || !impl.shadowSignature)
+			return state;
+		state.layout = impl.layout->GetHandle();
+		state.set = impl.shadowSet->GetHandle();
+		state.signature = impl.shadowSignature->GetHandle();
+		state.valid = true;
+		return state;
 	}
 
 	IndirectState GetIndirectState()
@@ -643,6 +834,8 @@ namespace DCLF
 	bool DrawPipelines::Enabled() const { return false; }
 	void DrawPipelines::SetTargetFormats(const TargetFormats& a_formats) { targets = a_formats; }
 	std::uint32_t DrawPipelines::Find(const PipelineKey&, const ShaderPrograms::Program&) { return kNotReady; }
+	std::uint32_t DrawPipelines::FindShadow(const ShadowPipelineKey&, const ShaderPrograms::ShadowProgram&, DXGI_FORMAT) { return kNotReady; }
+	void DrawPipelines::CaptureShadowStates(std::span<const ShadowPipelineKey>) {}
 	void DrawPipelines::Update() {}
 	void DrawPipelines::CaptureEngineStates(std::span<const PipelineKey>) {}
 }

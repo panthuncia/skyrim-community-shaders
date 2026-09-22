@@ -9,6 +9,7 @@
 #include "Features/Upscaling/DXVKInteropInterfaces.h"
 #include "Globals.h"
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "State.h"
 
 #include <OpenRenderGraph/PersistentGraphHost.h>
 #if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
@@ -16,8 +17,10 @@
 #endif
 #include <Resources/Resource.h>
 
+#include <array>
 #include <atomic>
 #include <filesystem>
+#include <map>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -101,6 +104,77 @@ struct RenderGraphRuntime::Impl
 	double epochTotalUs = 0.0;
 	double epochMaxUs = 0.0;
 
+	// ORG's pass timestamps, per segment. An epoch is one host frame; the segment it ran is remembered by
+	// frame number until its timestamps come back, framesInFlight frames later.
+	static constexpr std::size_t kSegments = 5;
+	static constexpr std::size_t kSegmentRing = 16;
+	struct PassTime
+	{
+		double inclusiveMs = 0.0;
+		double exclusiveMs = 0.0;
+	};
+	struct SegmentTime
+	{
+		std::map<std::string, PassTime> passes;
+		double spanMs = 0.0;
+		std::uint32_t epochs = 0;
+	};
+	std::array<Segment, kSegmentRing> frameSegments{};
+	std::array<SegmentTime, kSegments> segmentTimes{};
+	std::uint32_t timedEpochs = 0;
+	std::uint32_t completedFrames = 0;  // callbacks, timed or not: tells "no readback" from "no timestamps"
+
+	void OnCompletedFrame(std::uint64_t a_frameNumber, const org::runtime::IStatisticsService& a_stats)
+	{
+		const auto segmentIndex = static_cast<std::size_t>(frameSegments[a_frameNumber % kSegmentRing]);
+		if (segmentIndex >= kSegments)
+			return;
+		const auto& stats = a_stats.GetPassStats();
+		const auto& names = a_stats.GetPassNames();
+		const double toMs = a_stats.GetGpuTicksToMilliseconds();
+		const std::uint64_t serial = a_stats.GetFrameSerial();
+		++completedFrames;
+		static std::uint32_t described = 0;
+		if (described < 3) {
+			++described;
+			std::size_t matching = 0, zeroTicks = 0;
+			std::uint64_t newest = 0;
+			for (const auto& pass : stats) {
+				newest = (std::max)(newest, pass.gpuSampleSerial);
+				matching += pass.gpuSampleSerial == serial;
+				zeroTicks += pass.gpuSampleSerial == serial && !pass.gpuBeginTick;
+			}
+			logger::info("[ORG] completed frame {}: {} passes registered, statistics serial {}, {} read back for it ({} without ticks), newest sample serial {}, {:.6f} ms per tick",
+				a_frameNumber, stats.size(), serial, matching, zeroTicks, newest, toMs);
+		}
+		struct Sample
+		{
+			std::size_t pass;
+			std::uint64_t begin;
+			std::uint64_t end;
+		};
+		std::vector<Sample> samples;
+		for (std::size_t i = 0; i < stats.size() && i < names.size(); ++i) {
+			if (stats[i].gpuSampleSerial == serial && stats[i].gpuEndTick >= stats[i].gpuBeginTick && stats[i].gpuBeginTick)
+				samples.push_back({ i, stats[i].gpuBeginTick, stats[i].gpuEndTick });
+		}
+		if (samples.empty() || toMs <= 0.0)
+			return;
+		std::sort(samples.begin(), samples.end(), [](const Sample& a, const Sample& b) { return a.begin < b.begin; });
+		auto& segmentTime = segmentTimes[segmentIndex];
+		std::uint64_t previousEnd = samples.front().begin;
+		for (const auto& sample : samples) {
+			auto& pass = segmentTime.passes[names[sample.pass]];
+			pass.inclusiveMs += double(sample.end - sample.begin) * toMs;
+			const std::uint64_t from = (std::max)(previousEnd, sample.begin);
+			pass.exclusiveMs += sample.end > from ? double(sample.end - from) * toMs : 0.0;
+			previousEnd = (std::max)(previousEnd, sample.end);
+		}
+		segmentTime.spanMs += double(previousEnd - samples.front().begin) * toMs;
+		++segmentTime.epochs;
+		++timedEpochs;
+	}
+
 	void RecordEpoch(std::chrono::steady_clock::duration a_elapsed)
 	{
 		const double us = std::chrono::duration<double, std::micro>(a_elapsed).count();
@@ -149,6 +223,23 @@ struct RenderGraphRuntime::Impl
 	}
 
 	// BasicRHI hands every queue submission here instead of calling vkQueueSubmit.
+	static const char* SegmentLabel(Segment a_segment)
+	{
+		switch (a_segment) {
+		case Segment::LightCulling:
+			return "CS LLF: light culling";
+		case Segment::ZPrepass:
+			return "CS DCLF: Z-prepass";
+		case Segment::MainOpaque:
+			return "CS DCLF: main opaque";
+		case Segment::DebugView:
+			return "CS DCLF: debug view";
+		case Segment::ShadowView:
+			return "CS DCLF: shadow view";
+		}
+		return "CS render graph";
+	}
+
 	static VkResult Submit(void* a_user, VkQueue a_queue, const VkSubmitInfo2& a_submit)
 	{
 		auto* self = static_cast<Impl*>(a_user);
@@ -165,6 +256,9 @@ struct RenderGraphRuntime::Impl
 			submission.signals = a_submit.pSignalSemaphoreInfos;
 			submission.onSubmitted = &Impl::OnStreamSubmitted;
 			submission.user = self;
+			// Nsight and RenderDoc group the epoch's command buffers under this (DXVK adds it only
+			// while a capture tool is attached).
+			submission.label = SegmentLabel(RenderGraphRuntime::Get().CurrentSegment());
 			self->streamEnqueued.fetch_add(1, std::memory_order_acq_rel);
 			if (FAILED(self->enqueueSubmission(globals::d3d::device, &submission))) {
 				self->streamEnqueued.fetch_sub(1, std::memory_order_acq_rel);
@@ -257,8 +351,13 @@ bool RenderGraphRuntime::Initialize()
 	info.version = DXVK_ORG_INTEROP_VERSION;
 	if (FAILED(getInfo(d3dDevice, &info)))
 		return disable("DXVK could not describe its Vulkan device");
-	if (!HasExtension(info, VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME))
-		return disable("the device was created without VK_EXT_descriptor_heap");
+	if (!HasExtension(info, VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME)) {
+		// The one cause seen in practice, named so the menu does not leave it to be guessed.
+		if (::GetModuleHandleW(L"renderdoc.dll"))
+			return disable("the device was created without VK_EXT_descriptor_heap: RenderDoc is loaded, and RenderDoc does not support "
+						   "descriptor heaps yet (its capture layer hides the extension). Turn off RenderDoc capture to use the render graph.");
+		return disable("the device was created without VK_EXT_descriptor_heap (the driver or a Vulkan layer does not expose it)");
+	}
 
 	rhi::vulkan::AdoptedVulkanDeviceInfo adopt{};
 	adopt.getInstanceProcAddr = info.getInstanceProcAddr;
@@ -268,6 +367,9 @@ bool RenderGraphRuntime::Initialize()
 	adopt.device = info.device;
 	adopt.enabledDeviceExtensions = info.enabledExtensions;
 	adopt.enabledDeviceExtensionCount = info.enabledExtensionCount;
+	// Whether VK_EXT_debug_utils is on, so that BasicRHI names objects and labels passes only then.
+	adopt.enabledInstanceExtensions = info.enabledInstanceExtensions;
+	adopt.enabledInstanceExtensionCount = info.enabledInstanceExtensionCount;
 	adopt.enabledFeatureChain = info.enabledFeatures;
 	adopt.queues[0] = { info.graphicsQueue, info.graphicsQueueFamily, info.graphicsQueueIndex };
 	adopt.submissionHooks = { state.get(), &Impl::LockQueue, &Impl::UnlockQueue, nullptr };
@@ -298,6 +400,9 @@ bool RenderGraphRuntime::Initialize()
 	}
 
 	state->setTeardownCallback(&Impl::OnDxvkTeardown, nullptr);
+	state->host->SetCompletedFrameCallback([self = state.get()](std::uint64_t a_frameNumber, const org::runtime::IStatisticsService& a_stats) {
+		self->OnCompletedFrame(a_frameNumber, a_stats);
+	});
 	impl = std::move(state);
 	disabledReason.clear();
 	logger::info("[ORG] Render graph adopted DXVK's Vulkan device (queue family {}, index {}); submissions {}",
@@ -389,6 +494,10 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 		return false;
 	// Read by passes while the frame prepares and records, all before ExecuteFrame returns.
 	segment = a_segment;
+	// Where the epoch's submissions land in the D3D11 stream; the submissions themselves carry a queue
+	// label of the same name (Submit).
+	if (globals::state && globals::state->debuggerEvents)
+		globals::state->SetPerfMarker(Impl::SegmentLabel(a_segment));
 	const auto start = std::chrono::steady_clock::now();
 	if (impl->enqueueSubmission) {
 		// The graph's batches go into DXVK's command stream at this point, so they land between
@@ -399,6 +508,7 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 		// so far, then submit the graph directly under DXVK's queue lock.
 		impl->interop->FlushRenderingCommands();
 	}
+	impl->frameSegments[impl->host->FramesExecuted() % Impl::kSegmentRing] = a_segment;
 	try {
 		impl->host->ExecuteFrame(nullptr, a_beforePrepare);
 		if (impl->epochStats)
@@ -411,6 +521,40 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 		disabledReason = e.what();
 		return false;
 	}
+}
+
+void RenderGraphRuntime::ReportGpuTimings(std::uint32_t a_frames, bool a_log)
+{
+	if (!impl || !a_frames)
+		return;
+	const double frames = double(a_frames);
+	std::string summary;
+	if (a_log)
+		logger::info("[ORG] GPU time from ORG's pass timestamps, ms per frame over {} frames ({} epochs read back, {} completed):", a_frames, impl->timedEpochs, impl->completedFrames);
+	for (std::size_t s = 0; s < Impl::kSegments; ++s) {
+		auto& segmentTime = impl->segmentTimes[s];
+		if (!segmentTime.epochs)
+			continue;
+		const char* label = Impl::SegmentLabel(static_cast<Segment>(s));
+		std::vector<std::pair<std::string, Impl::PassTime>> passes(segmentTime.passes.begin(), segmentTime.passes.end());
+		std::sort(passes.begin(), passes.end(), [](const auto& a, const auto& b) { return a.second.exclusiveMs > b.second.exclusiveMs; });
+		double exclusiveTotal = 0.0;
+		std::string detail;
+		for (const auto& [name, time] : passes) {
+			exclusiveTotal += time.exclusiveMs;
+			// Every epoch runs every pass; the ones with nothing to do in this segment cost ~nothing.
+			if (time.exclusiveMs / frames >= 0.005)
+				detail += fmt::format("{}{} {:.3f} ({:.3f} incl)", detail.empty() ? "" : ", ", name, time.exclusiveMs / frames, time.inclusiveMs / frames);
+		}
+		if (a_log)
+			logger::info("[ORG]   {}: {:.3f} ms span, {:.3f} ms in passes, {:.1f} epochs/frame; by pass (exclusive): {}",
+				label, segmentTime.spanMs / frames, exclusiveTotal / frames, segmentTime.epochs / frames, detail.empty() ? "-" : detail);
+		summary += fmt::format("{}{}: {:.3f} ms/frame ({:.1f} epochs/frame)", summary.empty() ? "" : "\n", label, segmentTime.spanMs / frames, segmentTime.epochs / frames);
+		segmentTime = {};
+	}
+	impl->timedEpochs = 0;
+	impl->completedFrames = 0;
+	gpuTimingSummary = std::move(summary);
 }
 
 org::services::ShaderCompiler* RenderGraphRuntime::ShaderCompiler()
@@ -482,4 +626,5 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment, const std::function<void(org::Ren
 bool RenderGraphRuntime::DescribeResource(IUnknown*, DxvkOrgInteropResourceInfo&) { return false; }
 org::services::ShaderCompiler* RenderGraphRuntime::ShaderCompiler() { return nullptr; }
 winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource&, const D3D11_BUFFER_DESC&) { return nullptr; }
+void RenderGraphRuntime::ReportGpuTimings(std::uint32_t, bool) {}
 #endif

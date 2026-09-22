@@ -19,12 +19,47 @@ namespace DCLF
 	namespace
 	{
 		constexpr const char* kSourcePath = "Data/Shaders/Lighting.hlsl";
+		constexpr const char* kUtilitySourcePath = "Data/Shaders/Utility.hlsl";
 		constexpr const char* kShaderDirectory = "Data/Shaders";
 		constexpr std::size_t kMaxLoggedFailures = 8;
 
 		std::wstring Widen(const std::string& a_value)
 		{
 			return std::wstring(a_value.begin(), a_value.end());
+		}
+
+		// CS_DCLF_SHADER_DEBUG=1 builds the SPIR-V with source-level debug info (for Nsight and
+		// RenderDoc; the source is embedded, and SnapshotSources' copy is there for editing), still optimized. Part of the
+		// compile key, so the debug builds are cached beside the release ones. There is deliberately no
+		// -Od form: unoptimized code reads per-frame constant buffers (VS b6, PS b7) that the epochs do
+		// not supply, so every candidate is skipped and DCLF draws nothing.
+		bool ShaderDebug()
+		{
+			static const bool enabled = SwitchEnabled("CS_DCLF_SHADER_DEBUG");
+			return enabled;
+		}
+
+		// The shader tree as the game sees it through MO2's virtual file system, copied to a real
+		// directory a debugger outside the VFS can use as a source search path. The debug info names
+		// files relative to the game directory (Data/Shaders/...), so the copy keeps that layout.
+		void SnapshotSources(const std::vector<std::filesystem::path>& a_files)
+		{
+			auto root = std::filesystem::path(SwitchValue("CS_DCLF_SHADER_SOURCE_DIR"));
+			if (root.empty()) {
+				root = SwitchesDirectory();
+				if (root.empty())
+					return;
+				root /= L"CommunityShaders-ShaderSource";
+			}
+			std::size_t copied = 0;
+			for (const auto& file : a_files) {
+				std::error_code ec;
+				const auto destination = root / file.lexically_normal();
+				std::filesystem::create_directories(destination.parent_path(), ec);
+				if (!ec && std::filesystem::copy_file(file, destination, std::filesystem::copy_options::overwrite_existing, ec))
+					++copied;
+			}
+			logger::info("[DCLF] Shader debug info on; {} of {} shader files copied to {}", copied, a_files.size(), root.string());
 		}
 	}
 
@@ -50,6 +85,16 @@ namespace DCLF
 		static const bool enabled = BindlessObjects() && SwitchValue("CS_DCLF_BINDLESS_DRAW") != "0";
 		return enabled;
 	}
+
+	struct ShaderPrograms::ShadowEntry
+	{
+#if defined(DCLF_HAS_SHADER_COMPILER)
+		std::shared_future<org::services::ShaderArtifact> vertex;
+		std::shared_future<org::services::ShaderArtifact> pixel;
+#endif
+		std::unique_ptr<ShadowProgram> program;
+		bool failed = false;
+	};
 
 	struct ShaderPrograms::Entry
 	{
@@ -96,8 +141,19 @@ namespace DCLF
 			if (it->is_regular_file() && (extension == ".hlsl" || extension == ".hlsli"))
 				dependencies.push_back(it->path());
 		}
+		{
+			std::ifstream utility(kUtilitySourcePath, std::ios::binary);
+			std::vector<char> utilityBytes((std::istreambuf_iterator<char>(utility)), std::istreambuf_iterator<char>());
+			utilitySource.resize(utilityBytes.size());
+			if (!utilityBytes.empty())
+				std::memcpy(utilitySource.data(), utilityBytes.data(), utilityBytes.size());
+			else
+				logger::warn("[DCLF] {} is missing; the shadow views stay native", kUtilitySourcePath);
+		}
 		sourcesLoaded = true;
 		logger::info("[DCLF] SPIR-V builds of {}: {} shader files tracked as dependencies", kSourcePath, dependencies.size());
+		if (ShaderDebug())
+			SnapshotSources(dependencies);
 		return true;
 	}
 
@@ -105,15 +161,16 @@ namespace DCLF
 	namespace
 	{
 		std::shared_future<org::services::ShaderArtifact> RequestStage(std::span<const std::byte> a_source, const std::vector<std::filesystem::path>& a_dependencies,
-			RE::BSShader& a_lighting, bool a_pixel, std::uint32_t a_descriptor, bool a_depthOnly = false)
+			RE::BSShader& a_lighting, bool a_pixel, std::uint32_t a_descriptor, bool a_depthOnly = false, const char* a_sourceName = kSourcePath)
 		{
 			org::services::ShaderCompileRequest request{};
-			request.sourceName = kSourcePath;
+			request.sourceName = a_sourceName;
 			request.source = a_source;
 			request.entryPoint = L"main";
 			request.target = a_pixel ? L"ps_6_6" : L"vs_6_6";
 			request.format = org::services::ShaderBinaryFormat::Spirv;
 			request.warningsAsErrors = false;
+			request.debugInfo = ShaderDebug();
 			request.languageVersion = L"2018";  // CS's shaders are written for FXC's semantics
 			request.includeDirectories = { kShaderDirectory };
 			request.dependencyFiles = a_dependencies;
@@ -138,7 +195,8 @@ namespace DCLF
 				std::string text;
 				for (const auto& define : request.defines)
 					text += fmt::format(" -D {}{}{}", Util::WStringToString(define.name), define.value.empty() ? "" : "=", Util::WStringToString(define.value));
-				logger::info("[DCLF] SPIR-V build of Lighting {} {:08X} defines:{}", a_pixel ? (a_depthOnly ? "PS (depth)" : "PS") : "VS", a_descriptor, text);
+				logger::info("[DCLF] SPIR-V build of {} {} {:08X} defines:{}", a_sourceName == kSourcePath ? "Lighting" : "Utility",
+					a_pixel ? (a_depthOnly ? "PS (depth)" : "PS") : "VS", a_descriptor, text);
 			}
 			const auto shift = [&](const wchar_t* a_flag, std::uint32_t a_value) {
 				request.arguments.insert(request.arguments.end(), { a_flag, std::to_wstring(a_value), L"0" });
@@ -173,6 +231,27 @@ namespace DCLF
 		return it->second->program.get();
 	}
 
+	const ShaderPrograms::ShadowProgram* ShaderPrograms::FindShadow(std::uint32_t a_technique, RE::BSShader& a_utility)
+	{
+		if (!Enabled() || !LoadSources() || utilitySource.empty())
+			return nullptr;
+		auto [it, inserted] = shadowEntries.try_emplace(a_technique);
+		if (inserted) {
+			it->second = std::make_unique<ShadowEntry>();
+#if defined(DCLF_HAS_SHADER_COMPILER)
+			// Both stages take the same technique: Utility's descriptor is the technique itself, not a
+			// pair of vertex and pixel descriptors as the Lighting shader's is.
+			it->second->vertex = RequestStage(utilitySource, dependencies, a_utility, false, a_technique, false, kUtilitySourcePath);
+			it->second->pixel = RequestStage(utilitySource, dependencies, a_utility, true, a_technique, false, kUtilitySourcePath);
+#else
+			(void)a_utility;
+			it->second->failed = true;
+#endif
+			++stats.shadowRequested;
+		}
+		return it->second->program.get();
+	}
+
 	void ShaderPrograms::Update()
 	{
 #if defined(DCLF_HAS_SHADER_COMPILER)
@@ -200,6 +279,25 @@ namespace DCLF
 			entry.program = std::make_unique<Program>(Program{ vertex.binary, pixel.binary, depthPixel.binary });
 			++stats.ready;
 			stats.fromCache += (vertex.fromCache ? 1 : 0) + (pixel.fromCache ? 1 : 0) + (depthPixel.fromCache ? 1 : 0);
+		}
+		for (auto& [technique, entryPointer] : shadowEntries) {
+			auto& entry = *entryPointer;
+			if (entry.program || entry.failed || !ready(entry.vertex) || !ready(entry.pixel))
+				continue;
+			const auto& vertex = entry.vertex.get();
+			const auto& pixel = entry.pixel.get();
+			if (!vertex || !pixel) {
+				entry.failed = true;
+				++stats.shadowFailed;
+				if (loggedFailures++ < kMaxLoggedFailures) {
+					const auto& failed = !vertex ? vertex : pixel;
+					logger::warn("[DCLF] SPIR-V build of Utility {} {:08X} failed:\n{}", !vertex ? "VS" : "PS", technique, failed.diagnostics.substr(0, 1500));
+				}
+				continue;
+			}
+			entry.program = std::make_unique<ShadowProgram>(ShadowProgram{ vertex.binary, pixel.binary });
+			++stats.shadowReady;
+			stats.fromCache += (vertex.fromCache ? 1 : 0) + (pixel.fromCache ? 1 : 0);
 		}
 #endif
 	}

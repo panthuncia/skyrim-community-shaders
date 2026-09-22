@@ -315,11 +315,24 @@ Streamline* Streamline::GetSingleton()
 	return &singleton;
 }
 
+// RenderDoc's Vulkan layer does not expose VK_NVX_binary_import or VK_NVX_image_view_handle, and the
+// interposer's vkCreateDevice fails with VK_ERROR_EXTENSION_NOT_PRESENT without them, which takes DXVK's
+// device (normal and safe mode alike) and the game down with it. DLSS cannot run under RenderDoc anyway,
+// so Streamline stands down and DXVK talks to the real loader.
+static bool RenderDocLoaded()
+{
+	return GetModuleHandleW(L"renderdoc.dll") != nullptr;
+}
+
 void Streamline::PreloadInterposer()
 {
 	// Preload before DXVK creates VkInstance so its Vulkan loader aliases the interposer.
 	if (g_sl.interposer)
 		return;
+	if (RenderDocLoaded()) {
+		logger::info("[Streamline] renderdoc.dll is loaded: interposer not preloaded, DXVK uses the real Vulkan loader");
+		return;
+	}
 	const auto slDir = GetStreamlineDir();
 	if (slDir.empty())
 		return;
@@ -398,6 +411,12 @@ bool Streamline::Initialize()
 	if (triedInit)
 		return initialized;
 	triedInit = true;
+
+	if (RenderDocLoaded()) {
+		logger::info("[Streamline] renderdoc.dll is loaded: Streamline features disabled for this session");
+		MarkUnavailable();
+		return false;
+	}
 
 	const auto slDir = GetStreamlineDir();
 	if (slDir.empty()) {

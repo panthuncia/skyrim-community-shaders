@@ -26,6 +26,7 @@ struct DrawcallLimitFix : Feature
 	}
 
 	virtual void PostPostLoad() override;
+	virtual void SetupResources() override;
 	virtual void Reset() override;
 	virtual void Prepass() override;
 	virtual void EarlyPrepass() override;
@@ -33,6 +34,15 @@ struct DrawcallLimitFix : Feature
 
 	/** @brief Deferred::EndDeferred, before the deferred composite (Phase 2 debug view). */
 	void BeforeDeferredComposite();
+
+	/**
+	 * @brief Main_RenderShadowMaps, before the engine draws the shadow maps: the scene graph and the main
+	 * camera's culling are final, the main accumulator's passes are not yet (their registration jobs run
+	 * concurrently with the shadow draws). The shadow views are drawn between this and EarlyPrepass.
+	 */
+	void BeforeShadowMaps();
+	/** @brief Main_RenderShadowMaps, after the call returned (before EarlyPrepasses). */
+	void AfterShadowMaps();
 
 	/** @brief Called after the Lighting shader's SetupGeometry for every native lighting draw. */
 	void OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags);
@@ -77,6 +87,17 @@ private:
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/**
+		 * @brief BSShaderAccumulator::FinishAccumulatingPreResolveDepth (vfunc 0x2A): a shadow view's draw.
+		 * After the native draws of the view, DCLF's epoch culls the frame's casters and draws them into the
+		 * same slice (CS_DCLF_SHADOWS=1).
+		 */
+		struct BSShaderAccumulator_FinishAccumulating
+		{
+			static void thunk(RE::BSGraphics::BSShaderAccumulator* a_accumulator, std::uint32_t a_renderFlags);
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		/** @brief The call sites of BSBatchRenderer::RenderPassImmediately, as Light Limit Fix hooks them. */
 		template <int N>
 		struct BSBatchRenderer_RenderPassImmediately
@@ -89,6 +110,8 @@ private:
 	};
 
 	bool installed = false;
+	// Why DCLF was forced off after install (the render graph could not come up); shown in the menu.
+	std::string unavailableReason;
 	bool inDepthPass = false;
 	std::uint32_t captureFrame = ~0u;  // the frame whose main-pass bindings have been captured
 	SkipStats skipStats;
