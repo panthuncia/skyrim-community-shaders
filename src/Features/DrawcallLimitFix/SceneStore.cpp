@@ -8,6 +8,7 @@
 #include "GpuResources.h"
 #include "PassCapture.h"
 #include "SceneTracker.h"
+#include "ShadowProbe.h"
 #include "ShadowViews.h"
 #include "VertexInput.h"
 
@@ -84,6 +85,50 @@ namespace DCLF
 		{
 			return a_object->GetFlags().any(RE::NiAVObject::Flag::kHidden);
 		}
+
+		/**
+		 * @brief The engine's per-frame palette update (AE FUN_140e4ff90): what the bone setter runs from the
+		 * native draw an owned object no longer gets. Idempotent within a frame (frameID); it copies the current
+		 * palette to the previous one first and writes three float4 rows a bone in absolute world space.
+		 * Render thread only.
+		 */
+		void UpdateSkin(RE::NiSkinInstance* a_skin, const RE::NiTransform& a_world)
+		{
+			using UpdateSkinInstance = void (*)(RE::NiSkinInstance*, const RE::NiTransform*);
+			static const REL::Relocation<UpdateSkinInstance> updateSkinInstance{ REL::Offset(0xe4ff90) };
+			updateSkinInstance(a_skin, &a_world);
+		}
+
+		/** @brief CS_DCLF_ASYNC=probe: the scene walk's per-object arrays, two walks compared byte for byte. */
+		bool SameSceneTables(const SceneStore::Tables& a, const SceneStore::Tables& b, std::string& a_difference)
+		{
+			auto differs = [&](const char* a_name, const auto& a_lhs, const auto& a_rhs) {
+				using T = std::remove_cvref_t<decltype(*a_lhs.data())>;
+				const std::size_t lhsBytes = a_lhs.size() * sizeof(T), rhsBytes = a_rhs.size() * sizeof(T);
+				if (lhsBytes != rhsBytes) {
+					a_difference = fmt::format("{}: {} vs {} entries", a_name, a_lhs.size(), a_rhs.size());
+					return true;
+				}
+				if (lhsBytes && std::memcmp(a_lhs.data(), a_rhs.data(), lhsBytes) != 0) {
+					const auto* l = reinterpret_cast<const std::uint8_t*>(a_lhs.data());
+					const auto* r = reinterpret_cast<const std::uint8_t*>(a_rhs.data());
+					std::size_t k = 0;
+					while (l[k] == r[k])
+						++k;
+					a_difference = fmt::format("{}: entry {} of {} (byte {} of the entry)", a_name, k / sizeof(T), a_lhs.size(), k % sizeof(T));
+					return true;
+				}
+				return false;
+			};
+			return !(differs("objects", a.objects, b.objects) || differs("object geometry", a.objectGeometry, b.objectGeometry) ||
+					 differs("draws", a.draws, b.draws) || differs("bones", a.bones, b.bones) || differs("previous bones", a.previousBones, b.previousBones) ||
+					 differs("bone offsets", a.boneOffset, b.boneOffset) || differs("bone rows", a.boneRows, b.boneRows) ||
+					 differs("shadow techniques", a.shadowTechnique, b.shadowTechnique) || differs("shadow rejects", a.shadowReject, b.shadowReject) ||
+					 differs("shadow diffuse", a.shadowDiffuse, b.shadowDiffuse) || differs("shadow texcoords", a.shadowTexcoord, b.shadowTexcoord) ||
+					 differs("shadow materials", a.shadowMaterial, b.shadowMaterial) || differs("shadow keys", a.shadowKeysUsed, b.shadowKeysUsed) ||
+					 differs("shadow textures", a.shadowTextureSet, b.shadowTextureSet) || differs("extra offsets", a.extraOffset, b.extraOffset) ||
+					 differs("geometry slots used", a.geometryLastUsed, b.geometryLastUsed));
+		}
 	}
 
 	void SceneStore::Tables::ClearFrame()
@@ -105,6 +150,11 @@ namespace DCLF
 		extraOffset.clear();
 		shadowTechnique.clear();
 		shadowReject.clear();
+		shadowDiffuse.clear();
+		shadowTexcoord.clear();
+		shadowMaterial.clear();
+		shadowTextureSet.clear();
+		shadowTextureSeen.clear();
 		shadowKeysUsed.clear();
 	}
 
@@ -123,6 +173,7 @@ namespace DCLF
 		geometries.clear();
 		pipelines.clear();
 		materials.clear();
+		materialVersion.clear();
 		shading.clear();
 		emissiveMult.clear();
 		lights.clear();
@@ -144,6 +195,11 @@ namespace DCLF
 		extraOffset.clear();
 		shadowTechnique.clear();
 		shadowReject.clear();
+		shadowDiffuse.clear();
+		shadowTexcoord.clear();
+		shadowMaterial.clear();
+		shadowTextureSet.clear();
+		shadowTextureSeen.clear();
 		shadowKeysUsed.clear();
 	}
 
@@ -155,10 +211,11 @@ namespace DCLF
 
 	void SceneStore::Clear()
 	{
+		AbandonSceneJob();
 		tracked.clear();
 		categoryNodes.clear();
 		ResetSlotTables();
-		objectIndex.clear();
+		InvalidateObjectIndices();
 		// They hold raw pointers into game allocations now that they outlive the frame, so the teardown
 		// paths have to drop them rather than leave them to the next BuildFrame.
 		geometryIndex.clear();
@@ -1155,6 +1212,7 @@ namespace DCLF
 			return slot;
 		}
 		tables.materials.emplace_back();
+		tables.materialVersion.push_back(0);
 		tables.materialLastUsed.push_back(Tables::kSlotFree);
 		tables.materialSlotKey.emplace_back(nullptr, 0u);
 		return static_cast<std::uint32_t>(tables.materials.size() - 1);
@@ -1200,6 +1258,9 @@ namespace DCLF
 	 */
 	void SceneStore::BuildScenePhase()
 	{
+		// A walk still pending here was never joined (no consumer of the tables ran): it is dropped, and
+		// there are never two.
+		AbandonSceneJob();
 		++frame;
 		// Nothing is drawn while a load screen is up, and nothing here may touch the tracked geometry
 		// either. The load frees the renderer data and the vertex and index buffers of the cell being
@@ -1214,13 +1275,14 @@ namespace DCLF
 		sceneBuilt = false;
 		if (IsLoadingScreenUp()) {
 			ResetSlotTables();
-			objectIndex.clear();
+			InvalidateObjectIndices();
 			accumulatedPasses.clear();
 			stats.objects = 0;
 			stats.nativeVisible = 0;
 			stats.geometries = 0;
 			stats.pipelines = 0;
 			stats.materials = 0;
+			skinnedLastFrame.clear();
 			return;
 		}
 		PartTimer timer(stats.partMs);
@@ -1241,9 +1303,44 @@ namespace DCLF
 		frameInterior = Util::IsInterior();
 		frameDecalBias = { 0u, DecalDepthBiasMode(1), DecalDepthBiasMode(2) };
 		timer.Add(BuildPart::Walk);
+		// The slot tables and their maps persist across frames; the sweep is what retires what is no
+		// longer used (CS_DCLF_DERIVED_CACHE).
+		SweepSlots();
+		auto& evaluator = ConstantEvaluator::Get();
+		ConstantEvaluator::ResetFrameAudits();
+		if (!evaluator.HasLightingShader())
+			FindLightingShader();
 
+		geometryIndex.reserve(tracked.size());
+
+		// The whole tracked set, in whatever order the map holds; the order is the object indices of the
+		// frame, and BuildAccumulatePhase walks the same vector.
+		order.clear();
+		order.reserve(tracked.size());
+		for (auto& [trackedGeometry, entry] : tracked)
+			order.push_back({ trackedGeometry, &entry, nullptr });
+
+		// CS_DCLF_ASYNC: the walk on the worker, from here to AfterShadowMaps - the engine's whole shadow-map
+		// pass. Nothing reads the per-object tables in between (ExecuteShadowView does not; the shadow probe
+		// keeps the walk here), the tracked set changes only at Present, and the engine data the walk reads is
+		// the data the render thread reads here today: the scene graph and the culling are final from this
+		// point. The shadow build queued behind it reads what it writes.
+		if (AsyncJobEnabled("scene") && !ShadowProbe::Enabled()) {
+			PrepareSceneJob();
+			++sceneAsync.kicked;
+			sceneJob = AsyncWorker::Get().Submit("scene", [this](std::stop_token) { sceneJobResult = SceneWalk(false); });
+			return;
+		}
+		SceneWalk(true);
+		skinnedLastFrame = skinnedObjects;
+		stats.objects = static_cast<std::uint32_t>(tables.objects.size());
+		sceneBuilt = true;
+	}
+
+	void SceneStore::BeginWalk()
+	{
 		tables.ClearFrame();
-		objectIndex.clear();
+		InvalidateObjectIndices();
 		stats.ineligible.fill(0);
 		stats.ineligibleDrawn.fill(0);
 		stats.techniqueRejects.fill(0);
@@ -1271,13 +1368,7 @@ namespace DCLF
 		stats.shadowRejects = {};
 		decalOrder.clear();
 
-		// The slot tables and their maps persist across frames; the sweep is what retires what is no
-		// longer used (CS_DCLF_DERIVED_CACHE).
-		SweepSlots();
-		auto& evaluator = ConstantEvaluator::Get();
-		ConstantEvaluator::ResetFrameAudits();
-		if (!evaluator.HasLightingShader())
-			FindLightingShader();
+		skinnedObjects.clear();
 
 		// Every per-object container, not only three of them. The three that were left out reallocated
 		// their way back up every frame, and objectIndex - cleared just above - rehashed its way up to
@@ -1289,15 +1380,14 @@ namespace DCLF
 		tables.emissiveMult.reserve(tracked.size());
 		tables.lights.reserve(tracked.size());
 		tables.treeAnim.reserve(tracked.size());
-		objectIndex.reserve(tracked.size());
-		geometryIndex.reserve(tracked.size());
 
-		// The whole tracked set, in whatever order the map holds; the order is the object indices of the
-		// frame, and BuildAccumulatePhase walks the same vector.
-		order.clear();
-		order.reserve(tracked.size());
-		for (auto& [trackedGeometry, entry] : tracked)
-			order.push_back({ trackedGeometry, &entry, nullptr });
+	}
+
+	SceneStore::WalkResult SceneStore::SceneWalk(bool a_renderThread)
+	{
+		WalkResult result;
+		BeginWalk();
+		PartTimer timer(stats.partMs);
 
 		// CS_DCLF_CLASSIFY_CACHE=off|on|probe. `probe` uses the cached verdict and *also* recomputes it,
 		// comparing the two; it is the gate, and it costs more than either path alone.
@@ -1398,7 +1488,12 @@ namespace DCLF
 			const RE::NiSkinPartition::Partition* skinPartition =
 				data.skinInstance && data.skinInstance->skinPartition ? &data.skinInstance->skinPartition->partitions[0] : nullptr;
 			auto* triShape = skinPartition ? skinPartition->buffData : data.rendererData;
-			const std::uint32_t geometrySlot = ResolveGeometrySlot(*geometry, triShape, skinPartition, timer);
+			bool geometryMiss = false;
+			const std::uint32_t geometrySlot = ResolveGeometrySlot(*geometry, triShape, skinPartition, timer, a_renderThread, geometryMiss);
+			if (geometryMiss) {
+				++result.geometryMisses;
+				continue;
+			}
 			if (geometrySlot == Tables::kSlotFree) {
 				--stats.ineligible[static_cast<std::size_t>(Ineligible::None)];
 				++stats.ineligible[static_cast<std::size_t>(Ineligible::UnstableBuffer)];
@@ -1443,9 +1538,17 @@ namespace DCLF
 			std::uint32_t objectBoneOffset = 0, objectBoneRows = 0;
 			if (auto* skin = data.skinInstance.get(); skin && SkinnedEnabled()) {
 				timer.Add(BuildPart::Record);
-				using UpdateSkinInstance = void (*)(RE::NiSkinInstance*, const RE::NiTransform*);
-				static const REL::Relocation<UpdateSkinInstance> updateSkinInstance{ REL::Offset(0xe4ff90) };
-				updateSkinInstance(skin, &geometry->world);
+				if (trackedEntry->skinUpdatedFrame != frame) {
+					// The palette update is the render thread's: off it, a skin PrepareSceneJob did not update
+					// ahead (a newly eligible skinned object) is a miss, and the join rebuilds inline.
+					if (!a_renderThread) {
+						++result.skinMisses;
+						continue;
+					}
+					UpdateSkin(skin, geometry->world);
+					trackedEntry->skinUpdatedFrame = frame;
+				}
+				skinnedObjects.push_back(geometry);
 				const std::uint32_t rows = skin->numMatrices * 3;
 				if (rows && skin->boneMatrices && skin->prevBoneMatrices && rows <= 240) {
 					objectBoneOffset = static_cast<std::uint32_t>(tables.bones.size() / 4);
@@ -1468,10 +1571,25 @@ namespace DCLF
 			const auto* shadowProperty = data.shaderProperty.get();
 			const auto shadowReject = ShadowCasterReject(shadowProperty, geometry);
 			++stats.shadowRejects[static_cast<std::size_t>(shadowReject) & 7];
+			ID3D11ShaderResourceView* shadowDiffuse = nullptr;
+			std::array<float, 4> shadowTexcoord{};
+			const RE::BSShaderMaterial* shadowMaterial = nullptr;
 			if (shadowReject == ShadowReject::None) {
 				++stats.shadowCasters;
 				const std::uint32_t shadowTechnique = ShadowUtilityTechnique(shadowProperty, geometry);
 				tables.shadowTechnique.push_back(shadowTechnique);
+				// An alpha-tested caster samples its diffuse: what the shadow epoch's binding record names, read
+				// here so the epoch's build never touches the property.
+				if (shadowTechnique & 0x80) {
+					if (const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(shadowProperty->material)) {
+						shadowMaterial = material;
+						auto* texture = material->diffuseTexture ? material->diffuseTexture->rendererTexture : nullptr;
+						shadowDiffuse = texture ? texture->resourceView : nullptr;
+						shadowTexcoord = { material->texCoordOffset[0].x, material->texCoordOffset[0].y, material->texCoordScale[0].x, material->texCoordScale[0].y };
+						if (shadowDiffuse && tables.shadowTextureSeen.insert(shadowDiffuse).second)
+							tables.shadowTextureSet.push_back(shadowDiffuse);
+					}
+				}
 				const ShadowPipelineKey shadowKey{ shadowTechnique,
 					shadowProperty->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kTwoSided) ? kRasterTwoSided : 0u,
 					VertexLayoutOf(tables.geometries[geometrySlot].vertexDesc) };
@@ -1482,6 +1600,9 @@ namespace DCLF
 				tables.shadowTechnique.push_back(0);
 			}
 			tables.shadowReject.push_back(static_cast<std::uint8_t>(shadowReject));
+			tables.shadowDiffuse.push_back(shadowDiffuse);
+			tables.shadowTexcoord.push_back(shadowTexcoord);
+			tables.shadowMaterial.push_back(shadowMaterial);
 			// The extras rows are allocated by the accumulate phase, which is where the descriptors that
 			// decide whether an object needs them are derived.
 			tables.extraOffset.push_back(kNoExtraRows);
@@ -1491,7 +1612,8 @@ namespace DCLF
 			tables.emissiveMult.push_back(1.0f);
 			tables.lights.push_back(ObjectLights{});
 			tables.treeAnim.push_back(ObjectTreeAnim{});
-			objectIndex.emplace(geometry, objectId);
+			trackedEntry->objectStamp = objectStamp;
+			trackedEntry->objectId = objectId;
 
 			const auto& geometryRecord = tables.geometries[geometrySlot];
 			DrawSequence draw{};
@@ -1511,8 +1633,115 @@ namespace DCLF
 			timer.Add(BuildPart::Record);
 		}
 
+		return result;
+	}
+
+	void SceneStore::PrepareSceneJob()
+	{
+		// The two things the walk does that only the render thread may: keep the geometry slots' buffer
+		// references alive (GpuResources::Touch, which also finds an eviction) and run the engine's palette
+		// update. Both are done here for what last frame used - in steady state exactly what this frame uses -
+		// and the walk counts anything else as a miss.
+		if (frameResolveBuffers) {
+			auto& gpu = GpuResources::Get();
+			geometryTouched.resize(tables.geometries.size(), 0);
+			for (std::size_t slot = 0; slot < tables.geometries.size() && slot < tables.geometryLastUsed.size(); ++slot) {
+				if (tables.geometryLastUsed[slot] != frame - 1)
+					continue;
+				const auto& record = tables.geometries[slot];
+				if (gpu.Touch(record.vertexBuffer) && gpu.Touch(record.indexBuffer))
+					geometryTouched[slot] = frame;
+				else
+					++sceneAsync.touchFailures;
+			}
+		}
+		if (SkinnedEnabled()) {
+			for (auto* geometry : skinnedLastFrame) {
+				const auto it = tracked.find(geometry);
+				if (it == tracked.end())
+					continue;  // detached at Present
+				if (auto* skin = geometry->GetGeometryRuntimeData().skinInstance.get()) {
+					UpdateSkin(skin, geometry->world);
+					it->second.skinUpdatedFrame = frame;
+				}
+			}
+		}
+	}
+
+	void SceneStore::JoinScenePhase()
+	{
+		if (!sceneJob)
+			return;
+		auto& worker = AsyncWorker::Get();
+		const auto start = std::chrono::steady_clock::now();
+		// Unbounded in effect: the frame cannot go on without its tables, and a walk cannot be restarted for
+		// less than it costs to finish it.
+		const auto joined = worker.Wait(sceneJob, std::chrono::seconds(10));
+		if (joined == AsyncWorker::WaitResult::Late)
+			worker.Cancel(sceneJob);
+		sceneJob = {};
+		const double waitedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		sceneAsync.waitMs += waitedMs;
+		sceneAsync.waitMaxMs = std::max(sceneAsync.waitMaxMs, waitedMs);
+		const WalkResult walked = sceneJobResult;
+		const bool usable = joined == AsyncWorker::WaitResult::Done && !walked.geometryMisses && !walked.skinMisses;
+		const bool probe = usable && AsyncModeSetting() == AsyncMode::Probe;
+		// A job queued behind the walk (the shadow build) reads the tables: it finishes before they are
+		// rewritten, and a rebuild makes it stale (GetSceneRebuilds).
+		if (!usable || probe)
+			worker.WaitIdle();
+		if (!usable) {
+			if (joined != AsyncWorker::WaitResult::Done)
+				++sceneAsync.failed;
+			sceneAsync.geometryMisses += walked.geometryMisses;
+			sceneAsync.skinMisses += walked.skinMisses;
+			++sceneAsync.rebuilt;
+			++sceneRebuilds;
+			SceneWalk(true);
+		} else {
+			++sceneAsync.used;
+			if (probe) {
+				// The worker's arrays against the same walk on the render thread, now. A difference is either a
+				// walk that is not a function of its inputs or engine data that changed during the shadow maps.
+				const Tables worker_ = tables;
+				const std::size_t workerObjects = tables.objects.size();
+				SceneWalk(true);
+				++sceneAsync.probeCompared;
+				std::string difference;
+				if (!SameSceneTables(worker_, tables, difference) || workerObjects != tables.objects.size()) {
+					if (sceneAsync.probeDiffer++ == 0)
+						logger::warn("[DCLF] async scene probe: the worker's walk differs from the render thread's: {}", difference.empty() ? "the object index" : difference);
+				}
+			}
+		}
+		skinnedLastFrame = skinnedObjects;
 		stats.objects = static_cast<std::uint32_t>(tables.objects.size());
 		sceneBuilt = true;
+	}
+
+	void SceneStore::AbandonSceneJob()
+	{
+		if (!sceneJob)
+			return;
+		auto& worker = AsyncWorker::Get();
+		worker.Cancel(sceneJob);
+		sceneJob = {};
+		worker.WaitIdle();
+		// The walk's partial output is nobody's frame.
+		tables.ClearFrame();
+		InvalidateObjectIndices();
+		sceneBuilt = false;
+	}
+
+	std::string SceneStore::SceneAsyncReport()
+	{
+		auto& a = sceneAsync;
+		if (!a.kicked)
+			return {};
+		auto text = fmt::format("[DCLF] async scene: {} walks kicked, {} used, {} rebuilt inline ({} geometry misses, {} skin misses, {} failed), {} slot touches failed ahead; join waited {:.3f}/{:.3f} ms; probe: {} compared, {} differ\n",
+			a.kicked, a.used, a.rebuilt, a.geometryMisses, a.skinMisses, a.failed, a.touchFailures, a.waitMs / a.kicked, a.waitMaxMs, a.probeCompared, a.probeDiffer);
+		a = {};
+		return text;
 	}
 
 	/**
@@ -1521,7 +1750,7 @@ namespace DCLF
 	 * @return the slot, or Tables::kSlotFree when the buffers cannot be made stable for the render graph.
 	 */
 	std::uint32_t SceneStore::ResolveGeometrySlot(RE::BSGeometry& a_geometry, const RE::BSGraphics::TriShape* a_triShape,
-		const RE::NiSkinPartition::Partition* a_skinPartition, PartTimer& a_timer)
+		const RE::NiSkinPartition::Partition* a_skinPartition, PartTimer& a_timer, bool a_renderThread, bool& a_miss)
 	{
 		if (!a_triShape)
 			return Tables::kSlotFree;
@@ -1529,6 +1758,20 @@ namespace DCLF
 		const bool resolveBuffers = frameResolveBuffers;
 		auto geometryIt = geometryIndex.find(a_triShape);
 		const bool newGeometry = geometryIt == geometryIndex.end();
+		// First use of the slot this frame needs a Touch, unless PrepareSceneJob already touched it.
+		const bool touchedAhead = !newGeometry && geometryIt->second < geometryTouched.size() && geometryTouched[geometryIt->second] == frame;
+		const bool needsTouch = !newGeometry && resolveBuffers && tables.geometryLastUsed[geometryIt->second] != frame && !touchedAhead;
+		if (!a_renderThread) {
+			// The worker may neither resolve nor touch: anything that would need either is a miss.
+			const auto& known = newGeometry ? GeometryRecord{} : tables.geometries[geometryIt->second];
+			const bool changed = !newGeometry && ((resolveBuffers && known.vertexAddress == 0) ||
+													 known.vertexBuffer != reinterpret_cast<ID3D11Buffer*>(a_triShape->vertexBuffer) ||
+													 known.indexBuffer != reinterpret_cast<ID3D11Buffer*>(a_triShape->indexBuffer));
+			if (newGeometry || changed || needsTouch) {
+				a_miss = true;
+				return Tables::kSlotFree;
+			}
+		}
 		// A slot found by address but describing other buffers is a TriShape reallocated at the same
 		// address: it is resolved again into the same slot. A slot whose buffer references were
 		// evicted (nothing touched them for kEvictFrames) is resolved again the same way.
@@ -1536,7 +1779,7 @@ namespace DCLF
 		                           ((resolveBuffers && tables.geometries[geometryIt->second].vertexAddress == 0) ||
 		                               tables.geometries[geometryIt->second].vertexBuffer != reinterpret_cast<ID3D11Buffer*>(a_triShape->vertexBuffer) ||
 		                               tables.geometries[geometryIt->second].indexBuffer != reinterpret_cast<ID3D11Buffer*>(a_triShape->indexBuffer) ||
-		                               (resolveBuffers && tables.geometryLastUsed[geometryIt->second] != frame &&
+		                               (needsTouch &&
 		                                   (!gpu.Touch(tables.geometries[geometryIt->second].vertexBuffer) || !gpu.Touch(tables.geometries[geometryIt->second].indexBuffer))));
 		if (staleGeometry)
 			++stats.geometriesRefreshed;
@@ -1677,8 +1920,7 @@ namespace DCLF
 			timer.Add(BuildPart::LoopTail);
 			if (!accumulated && !(drawCulledCandidates && !accumulatedOnly))
 				continue;
-			const auto indexIt = objectIndex.find(geometry);
-			if (indexIt == objectIndex.end()) {
+			if (trackedEntry->objectStamp != objectStamp) {
 				// No record: the scene phase found it ineligible, which is where the histogram's "drawn"
 				// column comes from. A verdict of None here means the record itself failed (an unstable
 				// buffer) or the cached verdict was stale, so that one is cleared and reported.
@@ -1691,7 +1933,7 @@ namespace DCLF
 				}
 				continue;
 			}
-			const std::uint32_t objectId = indexIt->second;
+			const std::uint32_t objectId = trackedEntry->objectId;
 			auto& object = tables.objects[objectId];
 			const std::uint32_t geometrySlot = object.geometryIndex;
 
@@ -1888,6 +2130,7 @@ namespace DCLF
 					}
 					const std::uint32_t slot = AllocateMaterialSlot();
 					tables.materials[slot] = record;
+					tables.materialVersion[slot] = ++materialVersions;
 					tables.materialSlotKey[slot] = std::pair{ material, descriptors.pass };
 					materialIt = materialIndex.emplace(std::pair{ material, descriptors.pass }, slot).first;
 					timer.Add(BuildPart::MaterialEval);
@@ -2033,6 +2276,7 @@ namespace DCLF
 
 	void SceneStore::InvalidateVerdicts()
 	{
+		AbandonSceneJob();
 		// Every cached negative, candidate verdict and positive derivation: they witness the object, not
 		// the toggles, so a toggle that enters the classification leaves all of them stale at once.
 		for (auto& [geometry, entry] : tracked) {
@@ -2045,7 +2289,9 @@ namespace DCLF
 
 	void SceneStore::ResetSlotTables()
 	{
+		AbandonSceneJob();
 		tables.Clear();
+		geometryTouched.clear();
 		geometryIndex.clear();
 		pipelineIndex.clear();
 		materialIndex.clear();
@@ -2240,6 +2486,7 @@ namespace DCLF
 			}
 			stats.materialDriftFloats = static_cast<std::uint32_t>(materialPatched.size());
 			tables.materials[slot] = live;
+			tables.materialVersion[slot] = ++materialVersions;
 			if (auto it = materialCache.find(key); it != materialCache.end())
 				it->second.record = live;
 		}
@@ -2247,8 +2494,8 @@ namespace DCLF
 
 	std::int32_t SceneStore::FindObject(const RE::BSGeometry* a_geometry) const
 	{
-		auto it = objectIndex.find(a_geometry);
-		return it == objectIndex.end() ? -1 : static_cast<std::int32_t>(it->second);
+		const auto it = tracked.find(const_cast<RE::BSGeometry*>(a_geometry));
+		return it == tracked.end() || it->second.objectStamp != objectStamp ? -1 : static_cast<std::int32_t>(it->second.objectId);
 	}
 
 	Ineligible SceneStore::Classify(RE::BSGeometry* a_geometry) const

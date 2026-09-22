@@ -172,17 +172,18 @@ namespace DCLF
 		}
 	}
 
-	void BuildObjectRecord(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags,
-		const RE::NiPoint3& a_eye, const RE::NiPoint3& a_previousEye, BindlessObject& a_out)
+	void StoreRelativeTo(float* a_out, const float (&a_world)[12], const RE::NiPoint3& a_eye)
+	{
+		StoreRelative(a_out, a_world, a_eye);
+	}
+
+	void BuildObjectRecord(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags, BindlessObject& a_out)
 	{
 		const auto& object = a_tables.objects[a_objectIndex];
 
-		float world[16] = {};
-		StoreRelative(world, object.world, a_eye);
-		std::memcpy(a_out.world, world, sizeof(a_out.world));
+		std::memcpy(a_out.world, object.world, sizeof(a_out.world));
 		// Render flag 0x10: the previous transform is the current one (engine notes: SetupGeometry).
-		StoreRelative(world, (a_renderFlags & 0x10) ? object.world : object.previousWorld, a_previousEye);
-		std::memcpy(a_out.previousWorld, world, sizeof(a_out.previousWorld));
+		std::memcpy(a_out.previousWorld, (a_renderFlags & 0x10) ? object.world : object.previousWorld, sizeof(a_out.previousWorld));
 
 		// The shading half is ObjectShading's own layout, except that an unwritten component packs as zero
 		// the way PackConstantGroup and PatchObjectGeometry make it. The sweep stops at ObjectShading on
@@ -212,6 +213,20 @@ namespace DCLF
 		// The extras rows follow every palette (current then previous) in the row buffer.
 		const bool extras = a_objectIndex < a_tables.extraOffset.size() && a_tables.extraOffset[a_objectIndex] != kNoExtraRows;
 		a_out.extraOffset = extras ? static_cast<std::uint32_t>(a_tables.bones.size() / 4) * 2 + a_tables.extraOffset[a_objectIndex] : 0u;
+	}
+
+	std::uint32_t PackedPositionOf(const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable,
+		std::uint32_t a_float)
+	{
+		for (std::uint32_t i = 0; i < a_layout.count; ++i) {
+			const std::uint32_t first = a_layout.offset[i];
+			const std::uint32_t end = first + a_layout.size[i];
+			if (!((a_variables >> i) & 1) || a_float < first || a_float >= end)
+				continue;
+			const auto offset = OffsetOf(a_table, i, a_firstVariable);
+			return offset == ~0u ? ~0u : offset + (a_float - first);
+		}
+		return ~0u;
 	}
 
 	std::size_t ConstantGroupSize(const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable)

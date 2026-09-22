@@ -4,8 +4,10 @@
 #include <map>
 #include <vector>
 
+#include "AsyncWorker.h"
 #include "LightingDescriptors.h"
 #include "ConstantEvaluator.h"
+#include "Lookups.h"
 #include "Records.h"
 
 namespace DCLF
@@ -65,6 +67,11 @@ namespace DCLF
 			std::vector<GeometryRecord> geometries;
 			std::vector<PipelineKey> pipelines;
 			std::vector<MaterialRecord> materials;
+			// Parallel to materials: a session-unique number, new whenever the slot's record is (re)written - a
+			// first evaluation, or a stale record replaced by validation - but not when RefreshMaterialPatch writes
+			// the frame's floats into it. A consumer that kept something derived from the record compares this
+			// instead of the record's 2.3 KB.
+			std::vector<std::uint32_t> materialVersion;
 			std::vector<ObjectShading> shading;                   // parallel to objects
 			// Linear Lighting's per-object emissive multiplier (LLPerGeometry, PS b8). It lives here rather
 			// than being read off the property in the epoch because it is animated, so it has to be sampled
@@ -117,6 +124,17 @@ namespace DCLF
 			// runs. 0 and ShadowReject::NotLighting for an object that is not a caster.
 			std::vector<std::uint32_t> shadowTechnique;  // parallel to objects
 			std::vector<std::uint8_t> shadowReject;      // parallel to objects (ShadowReject)
+			// What an alpha-tested caster's shadow draw samples: its material's diffuse view and texture
+			// coordinate offset/scale, and the material as the key its binding record is shared under. Read
+			// off the property here so that the shadow epoch's build reads no engine memory. Null / zero for
+			// every other object.
+			std::vector<ID3D11ShaderResourceView*> shadowDiffuse;    // parallel to objects
+			std::vector<std::array<float, 4>> shadowTexcoord;         // parallel to objects
+			std::vector<const RE::BSShaderMaterial*> shadowMaterial;  // parallel to objects
+			// The distinct diffuse views among them (a few hundred), so the lookups are refreshed per view
+			// rather than per caster.
+			std::vector<ID3D11ShaderResourceView*> shadowTextureSet;
+			ankerl::unordered_dense::set<ID3D11ShaderResourceView*> shadowTextureSeen;
 			// The distinct shadow pipelines the frame's casters need, without a view's mode bits: a
 			// handful in practice (twelve techniques in the Whiterun exterior). What the shadow programs
 			// are compiled for, and what the shadow pipelines are built from once a view's mode is known.
@@ -312,6 +330,22 @@ namespace DCLF
 		void BuildFrame(Phase a_phase);
 
 		/**
+		 * @brief CS_DCLF_ASYNC: the scene phase's walk runs on the worker from BeforeShadowMaps; this waits for it
+		 * and completes the phase on the render thread (a rebuild inline when the walk met anything only the
+		 * render thread may resolve). A no-op when nothing is pending. Every consumer of the scene tables after
+		 * BeforeShadowMaps calls it first: AfterShadowMaps, EarlyPrepass, Present.
+		 */
+		void JoinScenePhase();
+		/** @brief Drops a pending walk without completing the phase (teardown, the live toggle): no tables this frame. */
+		void AbandonSceneJob();
+		/** @brief Whether the scene walk is on the worker: nothing may read the per-object tables until the join. */
+		bool ScenePending() const { return static_cast<bool>(sceneJob); }
+		/** @brief Bumped when the join replaces the worker's walk with an inline one: anything built from the worker's is stale. */
+		std::uint32_t GetSceneRebuilds() const { return sceneRebuilds; }
+		/** @brief The `[DCLF] async scene` report line since the last call, or empty. */
+		std::string SceneAsyncReport();
+
+		/**
 		 * @brief Latches the main camera's accumulator, from a point in the frame where it is identifiable.
 		 *
 		 * Call where `globals::game::currentAccumulator` is set - it is a *currently rendering* pointer, so
@@ -362,6 +396,20 @@ namespace DCLF
 		const Tables& GetTables() const { return tables; }
 		const Stats& GetStats() const { return stats; }
 		std::uint32_t GetFrame() const { return frame; }
+		/**
+		 * @brief The PS PerMaterial float positions RefreshMaterialPatch rewrites into every material each frame:
+		 * shader-level values (IBLParams), not the material's. Cumulative for the session; see materialPatched.
+		 */
+		const std::vector<std::uint32_t>& GetMaterialPatchedFloats() const { return materialPatched; }
+		/** @brief Bumped whenever the slot tables are reset or every cached verdict is dropped (InvalidateVerdicts). */
+		std::uint32_t GetTablesGeneration() const { return tablesGeneration; }
+
+		/**
+		 * @brief The pre-resolved service results an epoch's build reads (Lookups.h). Filled by the render
+		 * thread: the pipeline entries at EarlyPrepass, the descriptor entries inside an epoch's preparation.
+		 */
+		const Lookups& GetLookups() const { return lookups; }
+		Lookups& MutableLookups() { return lookups; }
 
 		/** @brief Index into GetTables().objects for this frame, or -1 when the geometry is not drawn by DCLF. */
 		std::int32_t FindObject(const RE::BSGeometry* a_geometry) const;
@@ -481,6 +529,12 @@ namespace DCLF
 			std::uint32_t candidateFrame = 0;  // 0: never classified
 			Ineligible candidateReason = Ineligible::None;
 			static constexpr std::uint32_t kCandidateRefreshFrames = 64;
+			std::uint32_t skinUpdatedFrame = 0;  // the frame the engine's palette update last ran for it (render thread)
+			// Its index in this walk's tables, valid while objectStamp equals SceneStore::objectStamp. Kept here
+			// rather than in a geometry -> index map rebuilt by every walk: the map's insert was ~0.12 us an object,
+			// and every consumer already has the entry (the accumulate phase) or looks it up by the same key.
+			std::uint32_t objectStamp = 0;
+			std::uint32_t objectId = 0;
 		};
 
 		void RefreshCategoryNodes(bool a_force = false);
@@ -536,7 +590,10 @@ namespace DCLF
 		bool rescanPending = false;
 
 		Tables tables;
-		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint32_t> objectIndex;
+		// The walk whose object indices the Tracked entries' objectStamp must match; a new walk or a teardown
+		// takes a new value, which invalidates every entry's index at once.
+		std::uint32_t objectStamp = 1;
+		void InvalidateObjectIndices() { ++objectStamp; }
 		// The per-frame dedup maps. Members, not locals, so their buckets survive the frame: as locals
 		// they were three hash maps allocated and freed every frame to hold the same contents, which is
 		// the waste Stage 1 removed from the ordering vectors and left here. They are cleared, reserved
@@ -605,6 +662,8 @@ namespace DCLF
 		static constexpr std::uint32_t kMaterialCacheIdleFrames = 64;
 		std::uint32_t frame = 0;
 		std::uint32_t tablesGeneration = 0;
+		std::uint32_t materialVersions = 0;  // the last Tables::materialVersion handed out
+		Lookups lookups;
 		// Frame state the scene phase reads once and the accumulate phase reuses, so that both halves of
 		// one frame see the same answer even though they run either side of the shadow maps.
 		bool sceneBuilt = false;  // the scene phase ran and the records are this frame's
@@ -618,6 +677,34 @@ namespace DCLF
 		void RefreshObjectExtras(std::size_t a_object, const RE::BSLightingShaderProperty& a_property, const RE::BSGeometry& a_geometry);
 		void BuildScenePhase();
 		void BuildAccumulatePhase();
+		/**
+		 * @brief The scene phase's loop over the tracked set. On the render thread it resolves what it meets; on
+		 * the worker (a_renderThread false) it may not call GpuResources or the engine's palette update, and
+		 * counts a geometry slot or a skin that would need one as a miss instead - the join rebuilds inline.
+		 */
+		struct WalkResult
+		{
+			std::uint32_t geometryMisses = 0;
+			std::uint32_t skinMisses = 0;
+		};
+		WalkResult SceneWalk(bool a_renderThread);
+		/** @brief Clears the per-object tables and the walk's per-frame counters. */
+		void BeginWalk();
+		/** @brief Before the worker's walk: the render-thread calls it would make - Touch last frame's slots, update last frame's skins. */
+		void PrepareSceneJob();
+		AsyncWorker::JobHandle sceneJob;
+		WalkResult sceneJobResult;
+		std::vector<RE::BSGeometry*> skinnedObjects;    // this walk's skinned objects, in object order
+		std::vector<RE::BSGeometry*> skinnedLastFrame;  // what PrepareSceneJob updates ahead
+		std::vector<std::uint32_t> geometryTouched;     // per geometry slot: the frame PrepareSceneJob touched it
+		std::uint32_t sceneRebuilds = 0;
+		struct SceneAsync
+		{
+			std::uint32_t kicked = 0, used = 0, rebuilt = 0, failed = 0;
+			std::uint32_t geometryMisses = 0, skinMisses = 0, touchFailures = 0;
+			std::uint32_t probeCompared = 0, probeDiffer = 0;
+			double waitMs = 0.0, waitMaxMs = 0.0;
+		} sceneAsync;
 		std::uint32_t AllocateGeometrySlot();
 		std::uint32_t AllocatePipelineSlot();
 		std::uint32_t AllocateMaterialSlot();
@@ -626,7 +713,7 @@ namespace DCLF
 		 * @return the slot, or Tables::kSlotFree when the buffers cannot be made stable for the graph.
 		 */
 		std::uint32_t ResolveGeometrySlot(RE::BSGeometry& a_geometry, const RE::BSGraphics::TriShape* a_triShape,
-			const RE::NiSkinPartition::Partition* a_skinPartition, PartTimer& a_timer);
+			const RE::NiSkinPartition::Partition* a_skinPartition, PartTimer& a_timer, bool a_renderThread, bool& a_miss);
 		/** @brief The cross-frame material cache and its validator; false when nothing can be evaluated. */
 		bool EvaluateMaterialForSlot(const RE::BSShaderMaterial* a_material, std::uint32_t a_pass, bool a_cacheOn,
 			bool a_probeAll, MaterialRecord& a_record);

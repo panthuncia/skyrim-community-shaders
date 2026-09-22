@@ -1440,6 +1440,11 @@ they are not part of the witness.
 | `CS_DCLF_SHADER_DEBUG=1` | Build the Lighting and Utility SPIR-V with source-level debug info (`-Zi`: `OpSource` with every file's text embedded, and `OpLine`), so Nsight and RenderDoc show source for DCLF's draws. Still optimized. Not `-fspv-debug=vulkan`: its `DebugValue`s keep dead loads alive, so stages read resources their passes do not bind and every candidate is skipped; `vulkan-with-source` also fails DXC 1.9's own validator. There is deliberately no `-Od` form either: unoptimized code reads per-frame constant buffers the epochs do not supply (VS b6, PS b7). The Z-prepass stage (`DCLF_DEPTH_ONLY`) compiles the lighting out of `Lighting.hlsl` rather than relying on the optimizer. The debug builds have their own cache keys. The shader files the game sees through MO2's VFS are also copied, keeping their `Data/Shaders/...` layout, to `CS_DCLF_SHADER_SOURCE_DIR` (default `<Documents>\My Games\Skyrim Special Edition\SKSE\CommunityShaders-ShaderSource`). Shaders DXVK translates from DXBC get no source info this way. The build-time SPIR-V (BuildDrawsCS, HzbCS, LLF's cluster shaders) is always built with `-Zi` (`cmake/RenderGraph.cmake`). Dev-Fast builds do not package it: copy `build/Dev-Fast/generated/Shaders/*/ORG/*.spv` into the mod's `Shaders` folder after changing those shaders. |
 | `CS_DCLF_TEST_TOGGLE=<off>:<on>` | Test runs: flips the feature's menu toggle off and back on at those frames (loading screens not counted), to exercise the live on/off. |
 | `CS_DCLF_TEST_COMMANDS=<frame>:<command>;…` | Test runs: run each console command on the main thread once that many frames have been presented (loading screens do not count), for coverage runs from the auto-loaded save. The counter is independent of the feature, so a `CS_DCLF=0` control reaches the same place at the same hour. |
+| `CS_DCLF_ASYNC=off\|on\|probe` | Where the epochs' payloads are built (see "Payloads built off the render thread"). `off` (default): inline, as before. `on`: the enabled jobs build on the `CS DCLF worker` thread and the epoch commits the result. `probe`: build on the worker *and* inline, and byte-compare the two payloads (`probe: N compared, N differ`). Bindless path only; the non-bindless path always builds inline. |
+| `CS_DCLF_ASYNC_JOBS=colour,zprepass,shadow,scene` | Which jobs `on`/`probe` move to the worker (default: all four). For bisecting. |
+| `CS_DCLF_ASYNC_WAIT_MS=<ms>` | How long an epoch waits for its job before building inline instead (default 3). |
+| `CS_DCLF_ASYNC_PRIORITY=normal` | Run the worker at normal priority instead of above normal. |
+| `CS_GPU_IDLE_TRACE=<frames>` / `CS_PROFILER_LOG=<frames>` | Not DCLF's, but the gates below read them: the GPU idle trace and its `[GpuIdle] summary` lines, and the profiler's averages in the log. See [render-graph.md](render-graph.md). |
 
 ### Capture tools and GPU timing
 
@@ -2587,3 +2592,395 @@ per frame for the shadow epoch (0.38 ms) although the scene phase has them; the 
 lookups per caster per mode (0.34 ms); the claim set is rebuilt per frame (0.14 ms); the hole detector
 counts not-ready views rather than withheld passes per view. The shadow image parity gate from the plan is
 deferred until Community Shaders' shadows are themselves correct.
+
+## Payloads built off the render thread
+
+The GPU idle trace (`CS_GPU_IDLE_TRACE`) showed the GPU waiting 2-5 ms a ~24 ms frame for the render
+thread, most of it DCLF's own CPU work at points where the GPU had already drained everything submitted:
+0.8-1.5 ms before the main-opaque epoch, 0.8-1.4 ms before the Z-prepass, 0.2-0.5 ms before the shadow
+epoch and 0.3-0.6 ms for the scene tables at the start of the frame. Reflex keeps the queue deliberately
+shallow, so queue depth cannot hide those gaps. The work has to leave the render thread's path between
+dependent GPU work. The work is split into phases, each gated on its own. All five have landed.
+
+### The contract: prepare, build, commit
+
+-   **Prepare** (render thread, at the kick): everything the build reads that is not fixed until the join
+    is copied into an inputs struct: frame, eye pair, render flags, frame-slot masks, the resources'
+    addresses, and the tables' and lookups' generations.
+-   **Build** (`BuildMainPayload`, `BuildShadowPayload`): a pure function of the inputs, the tables and
+    the lookups. It makes no engine, service or D3D11 call, and it writes only its payload. `probe` runs
+    it twice for exactly this reason.
+-   **Commit** (render thread, inside the epoch's `beforePrepare`): checks that the job's inputs equal the
+    epoch's (`SameInputs`; a mismatch is *stale* and the epoch builds inline), then copies the frame
+    blocks into their slots, patches the frame textures, uploads, and hands the frame to the graph.
+    `BUFFER_UPLOAD`, the descriptor service and `ConstantEvaluator` stay on this thread.
+
+**Lookups** (`DrawcallLimitFix/Lookups.h`, owned by `SceneStore`) replace what the build used to ask
+services for. The render thread fills them where the service is legal: pipelines (set index, constant
+tables, register usage per variant) at `EarlyPrepass`, material textures, samplers and projected
+textures at the epoch's commit, and shadow pipelines and textures at the shadow commit. Frame constant
+blocks moved into `frameConstants`, a buffer of fixed 64 KB slots (`FrameSlotOffset(stage, register)`),
+so a record can name a block's address before the block exists.
+
+**The worker** (`DrawcallLimitFix/AsyncWorker.{h,cpp}`) is one dedicated thread, `CS DCLF worker`, with
+a small FIFO and a bounded join. A job that is late (`CS_DCLF_ASYNC_WAIT_MS`), fails or is stale falls
+back to the inline build, and the worker's payload is dropped. `EndFrame` counts any job still
+outstanding at the end of the frame as `leaked`. `SetActive(false)` drains the worker. ORG's task
+service and the shader compilation pool were ruled out: the first is what `ExecuteFrame` fans onto while
+the render thread waits on it, and the second is saturated exactly when a new cell loads.
+
+### Phase 1 gate: the split, still inline
+
+Every parity line matched the pre-split build: record dedup, bindless record, `BuildDraws` and decal
+parity OK; capture parity at its standing material residue (the same windows as before, ±3%);
+`0 claimed but not drawn`; shadow `0 views not ready`; `derived cache 0 differ, 0 slot violations`;
+live toggle 900:960 clean. The idle trace did not change beyond noise. The shadow epoch's lookup
+refresh first cost 0.8-1.0 ms because it walked the shadow textures per view. Collecting the alpha-tested
+casters' diffuse textures once in the scene phase (`Tables::shadowTextureSet`) removed that cost.
+
+### Phase 2: the colour job
+
+The colour epoch replays the Z-prepass's eye and constants (the hybrid path), so its inputs are final at
+`DrawcallLimitFix::Prepass`, right after `RefreshFrameConstants`, the frame's last writer of the tables.
+The job is kicked there (`IndirectDraws::KickColourBuild`) and joined in `RunEpoch(MainOpaque)`. That
+leaves 1.5-2 ms of native rendering between the kick and the join. The frame-slot masks the epoch will
+supply are predicted from the previous colour epoch and checked like every other input. They change only
+when the set of bound frame blocks changes, which happens on the first frame of a cell and on a load.
+
+The join comes before the epoch refreshes the material lookups, and the order matters. The worker reads
+the lookups until it finishes, so a refresh that grows them underneath the job is a data race. A refresh
+that adds or changes an entry bumps the lookups' generation, which marks the job stale.
+
+Gate (exterior → Dragonsreach → Riverwood, live toggle at 900:960, save and load, ~2,700 frames):
+
+| check | `probe` | `on` |
+|---|---|---|
+| epochs using the worker's build | 295-300 of 300 per window | 295-300 of 300 per window |
+| stale | 1-2 at `coc`/`load` (predicted masks), otherwise 0 | the same |
+| late / failed / cancelled / leaked | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| payload comparison | 295-300 compared, **0 differ** | - |
+| other parity lines and ownership | unchanged from Phase 1 | `0 claimed but not drawn` in every window |
+
+GPU idle attributed to the main-opaque epoch (`main opaque inputs` + `main opaque` in the
+`[GpuIdle] summary`, ms per frame, 300-frame windows): **0.42-1.55 before, 0.04-0.55 after**. The rest
+is ORG's prepare/record/submit floor and the join's wait. The Z-prepass epoch is still built inline, and
+its share swings by ±0.5 ms from run to run.
+
+### Phase 3: the Z-prepass job, on a predicted eye
+
+Between `EarlyPrepass` and the end of `Main_RenderDepth` nothing writes the tables: the accumulate phase
+is their last writer, and `RefreshFrameConstants` runs later, at `Prepass`. The Z-prepass job is kicked
+at the end of `EarlyPrepass` (`IndirectDraws::KickZPrepassBuild`) and joined by `RunEpoch(ZPrepass)`.
+The only input not yet known at the kick is the eye, which the epoch captures from `posAdjust`. At
+`EarlyPrepass`, `posAdjust` still holds the shadow cameras' eye, so the job uses a prediction:
+`RE::Main::WorldRootCamera()->world.translate` for the eye, and last frame's captured eye for the
+previous eye. The epoch compares both exactly with its capture, and a miss makes the job stale.
+The miss count is reported on its own line (`[DCLF] async zprepass eye`). `drewLastFrame`, the gate the
+Z-prepass uses without withholding, is snapshotted at the kick. The render thread's colour epoch is the
+only writer of `drawnFrame`, and it runs after the join.
+
+Two defects surfaced on the way, and both are fixed:
+
+-   **One job could cancel another.** Dropping a job used `CancelPending()`, which empties the whole
+    queue. With two jobs a frame, dropping the colour job could cancel a queued Z-prepass job.
+    `AsyncWorker::Cancel(handle)` ends one job: it is dequeued, or waited for if it is already running.
+-   **A newly resolved lookup did not make a job stale.** The lookups' generation was bumped only when an
+    already-resolved entry changed. A material resolved for the first time in the epoch's refresh left
+    the job looking current, yet the job had deferred those draws. The probe caught it right after a
+    `coc` (`constants: 4912 vs 82720 bytes`). Under ownership that would be one frame of missing depth
+    for the claimed objects. Any change a build can observe now bumps the generation, including an
+    entry resolved for the first time. As a result, the Z job goes stale for 2-3 frames after a cell
+    change and while textures stream in at startup.
+
+`CS_DCLF_ASYNC_EYE` was dropped: the prediction has not missed once, and `CS_DCLF_ASYNC_JOBS` without
+`zprepass` already keeps the Z-prepass inline.
+
+Gate (the same route and switches as Phase 2):
+
+| check | `probe` | `on` |
+|---|---|---|
+| Z-prepass epochs using the worker's build | 296-300 of 300 per window | 285-300 of 300 per window |
+| stale | 3 at each `coc` | 2-11 (startup streaming, `coc`, `load`), 0 in steady state |
+| predicted eye missed | 0 | 0 |
+| late / failed / cancelled / leaked | 0 | 0 |
+| payload comparison | 296-300 compared, **0 differ** (colour and Z-prepass) | - |
+| other parity lines | record dedup, bindless record, `BuildDraws` OK; derived cache 0 differ, 0 slot violations | - |
+| ownership | 0 claimed but not drawn | 3 in the startup window only (the standing transient: every run since the Phase 0 baseline has 1-3) |
+
+GPU idle attributed to the Z-prepass epoch (`Z-prepass inputs` + `Z-prepass`, ms per frame, 300-frame
+windows): **0.61-1.40 before, 0.06-0.40 after**. The main-opaque share stays at 0.01-0.43.
+
+### Phase 4: the shadow inputs job
+
+The shadow epoch's inputs are final at `BeforeShadowMaps`, right after the scene phase and
+`BeginShadowFrame` (the reference eye). Between there and `AfterShadowMaps` nothing writes the tables:
+every writer is in the scene phase (before) or the accumulate phase (after), and `ExecuteShadowView`
+and the shadow probe only read. The job is kicked there (`IndirectDraws::KickShadowBuild`) and joined by
+`ExecuteShadowFrame`. Its window is the engine's entire shadow-map pass. Two inputs are unknown until
+the views are captured: the render modes, and the DSV format the shadow pipelines are looked up for.
+The job builds for last frame's modes. The epoch compares the modes with its own set, and a DSV format
+change shows up as a changed shadow pipeline lookup, which bumps the generation. Either makes the job
+stale. `SharedData` and `FeatureData` are copied at the kick and compared as well.
+
+Gate (same route and switches):
+
+| check | `probe` | `on` |
+|---|---|---|
+| shadow epochs using the worker's build | 290-300 of 300 per window | 290-300 of 300 per window |
+| stale | 6 at startup (lookups resolving), 1-3 at a mode change (`coc` into Dragonsreach's paraboloid views and back) | the same |
+| late / failed / cancelled / leaked | 0 | 0 |
+| payload comparison | 290-300 compared, **0 differ**, in both the cascades (0xE) and the paraboloid views (0xF) | - |
+| shadow ownership | 0 views not ready outside the startup window (the standing 12) | the same |
+| join wait | ≤0.001 ms average | ≤0.001 ms average |
+
+Shadow epoch CPU per frame on the render thread: **1.93 ms before, 1.14 ms after** (preparing 0.79 →
+0.04 ms). What is left is the graph's own compile/prepare/record (0.95 ms) and publishing the claims
+(0.15 ms). GPU idle attributed to the shadow epoch is 0.22-0.34 ms/frame, against 0.16-0.54 before:
+the ORG floor.
+
+### Phase 5: the scene walk
+
+The scene phase cost the render thread 1.8-2.3 ms a frame in the exterior (26 ms on the frame after a
+load), more than any epoch. `BuildScenePhase` is now split into three parts:
+
+-   **Prologue** (render thread, `BeforeShadowMaps`): the load-screen branch, the frame globals,
+    `SweepSlots`, the lighting shader, and the iteration order over `tracked`. When the walk is going to
+    the worker, `PrepareSceneJob` also makes the two calls the walk would otherwise make that only the
+    render thread may: `GpuResources::Touch` for every geometry slot used last frame, and the engine's
+    palette update (`UpdateSkin`, AE `0xe4ff90`) for last frame's skinned objects.
+-   **Walk** (`SceneWalk`, on the worker or inline): today's loop, unchanged except for what it may not do
+    off the render thread. A geometry slot that is new, changed, or not touched ahead, and a skin the
+    prologue did not update, count as *misses* instead. That happens on the frame after a cell change
+    (thousands of misses) and when a new skinned object becomes eligible.
+-   **Join** (`JoinScenePhase`, render thread): at `AfterShadowMaps`, so the window is the engine's whole
+    shadow-map pass. `EarlyPrepass` and Present also call it, in case the frame drew no shadow maps. A
+    walk with misses is replaced by an inline walk, which resolves them. The shadow build queued behind the
+    walk is first allowed to finish (`AsyncWorker::WaitIdle`), then made stale by `GetSceneRebuilds`.
+
+The window was audited rather than assumed:
+
+-   `tracked` changes only in `ProcessEvents`, at Present.
+-   The skip hook returns before `FindObject` for every pass outside the depth and deferred passes, so
+    the native shadow draws never read `objectIndex`.
+-   `ExecuteShadowView` no longer reads the tables. It only checks whether they are ready, and
+    `ExecuteShadowFrame` makes the same check after the join.
+-   The shadow probe reads the tables in the window, so the walk stays inline while
+    `CS_DCLF_SHADOW_PROBE=1`.
+-   The engine data the walk reads (world and previous-world transforms, bounds, runtime data, properties,
+    materials, fade nodes, the parent chain, palettes) is the data the render thread read at this same
+    point before. Its only calls are side-effect-free virtuals (`GetRTTI`, `GetType`, `GetUserData`,
+    `GetFeature`).
+
+`probe` re-walks on the render thread at the join and compares the per-object arrays byte for byte,
+including the slots-used vector. A difference would mean either a walk that is not a function of its
+inputs, or engine data that changed during the shadow maps.
+
+Gate (same route and switches):
+
+| check | `probe` | `on` |
+|---|---|---|
+| walks used | 299-300 of 300 per window | 299-300 of 300 per window |
+| rebuilt inline | 1 per cell change (2,266-5,349 geometry misses, 0-12 skin misses) | the same |
+| slot touches failed ahead | 0 | 0 |
+| comparison | 299-300 compared, **0 differ** | - |
+| every other job | 0 differ, 0 late, 0 leaked | 0 late, 0 leaked |
+| parity and ownership | slot probe 0 differ; bone palettes 0 differ; derived cache 0 differ, 0 slot violations; capture parity at its standing residue; 0 claimed but not drawn | 0 claimed but not drawn except 4 in the startup window (the standing transient) |
+
+Render-thread CPU of the scene phase: **1.8-2.3 ms before, 0.14-0.18 ms after** (the prologue).
+Scene-phase GPU idle: 0.06-0.64 ms/frame before, ≤0.04 after.
+
+What moved rather than disappeared: the walk (1.1-1.5 ms on the worker) and the shadow build chained
+behind it (0.5-0.7 ms) take longer than the engine's shadow-map pass. The render thread therefore waits
+0.6-0.9 ms on average at `AfterShadowMaps` (0.3-0.6 of it for the shadow build). The GPU has the shadow
+maps to draw during that wait, so little of it shows as idle.
+
+### All five jobs, `on`
+
+GPU idle per frame, 300-frame windows, the same route (exterior → Dragonsreach → Riverwood, save, load):
+
+| window | idle before (Phase 0) | idle after | `CS DCLF` share before | after |
+|---|---|---|---|---|
+| exterior, startup | 0.81 | 0.37 | 0.71 | 0.32 |
+| Dragonsreach | 2.34-2.98 | 1.48-3.77 | 1.32-2.47 | 0.47-0.83 |
+| Riverwood and after save/load | 2.02-4.96 | 0.27-2.04 | 1.66-4.03 | 0.22-1.33 |
+
+The `CS DCLF` share that remains is ORG's own prepare/record/submit per epoch, plus the joins' waits.
+In Dragonsreach the total idle did not fall with the DCLF share: what remains there is not DCLF's.
+Frame rate is not a usable signal on this route: medians ranged from 36.5 to 46.1 fps across runs with
+no trend by phase.
+
+Open:
+
+-   The worker's builds take 0.8-2.0 ms, against ~1.0 ms for the same build inline. The 9800X3D has no
+    hybrid cores, so the likely cause is contention with the render thread's native rendering. The colour
+    join therefore still waits 0.1-0.5 ms on average. The Z-prepass join barely waits (≤0.02 ms average)
+    because its window is longer. Next is a cheaper build: the two main epochs still build their object
+    records, bone rows and geometry table separately.
+-   The join at `AfterShadowMaps` waits 0.6-0.9 ms. The scene walk and the shadow build need a longer
+    window than the shadow-map pass, or a cheaper walk.
+-   The standing startup transient of 1-4 claimed-but-not-drawn objects in the first 300 frames: present
+    since the Phase 0 baseline, and not yet traced.
+
+## Epoch costs: measured, and the first two cuts
+
+`CS_ORG_EPOCH_STATS=1` now splits each epoch's render-thread time by segment and by phase of ORG's host frame
+(`PersistentGraphHost::LastFrameTimings`, `RenderGraph::LastPersistentExecuteTimings`), and counts the queue
+submissions the graph hands to DXVK. Baseline after the async work (µs per epoch, exterior):
+
+| epoch | total | inputs (commit + join) | prepare | admission | record | other ORG | submissions |
+|---|---|---|---|---|---|---|---|
+| LLF light culling | 579 | 6 | 245 | 84 | 110 | 134 | 5 |
+| Z-prepass | 822 | 159 | 216 | 86 | 221 | 140 | 5 |
+| main opaque | 1,296 | 634 | 175 | 89 | 237 | 161 | 5 |
+| shadow views | 1,354 | 677 | 219 | 95 | 213 | 150 | 5 |
+| debug view | 300 | 0 | 59 | 63 | 64 | 114 | 3 |
+
+What that showed:
+
+-   **The inputs phase is mostly the join wait.** The colour join waits 0.52 ms and the shadow join 0.57 ms,
+    because the worker's builds are slower than their windows. The table work (the next steps) removes this.
+-   **ORG costs 0.55-0.65 ms per epoch** whatever the epoch does: prepare, admission and record dominate,
+    because every epoch prepares and records every pass of every feature.
+-   **`HostWait` is cheap** (25-50 µs). The GPU is not what holds the render thread at an epoch's start.
+-   **The debug-view epoch ran every frame** on the hybrid path: its targets are imported there anyway, and their
+    presence was the only gate. It is now gated on the debug-view toggle, which removes 0.3 ms of render thread and
+    three submissions a frame.
+-   **DXVK held the pre-epoch D3D11 work back.** It closes its command list only when the epoch's first
+    submission is enqueued, after ORG has prepared and recorded. So the D3D11 commands issued just before an epoch
+    sat on the CPU for 0.5-1 ms while the GPU ran dry. `ExecuteEpoch` now flushes the immediate context first
+    (`CS_ORG_EARLY_FLUSH=0` restores the old behaviour); the enqueue then finds nothing pending, so the
+    submission count is unchanged.
+
+A/B with the same build (Riverwood windows, GPU idle attributed to `CS DCLF`, ms per frame): early flush off
+1.23-2.17, on **0.56-1.08**; total idle 2.28-4.70 against 0.97-2.24. What remains is the main-opaque epoch
+(ORG 0.26-0.35, the colour join 0.19-0.32); shadow and Z-prepass are down to 0.05-0.23.
+
+## Less work per build: the eye on the GPU, a build cache, no per-frame object map
+
+### The eye moved to the GPU
+
+The object records and bone rows were made eye-relative on the CPU (`StoreRelative`, `PackBoneRows`). That is
+why the shadow, Z-prepass and colour builds could not share them, and why the Z-prepass job needed a predicted
+eye. Every DCLF draw already receives its epoch's `VS_PerFrame` (b12). A check on every epoch and every shadow view
+confirmed, bit for bit, that its `CameraPosAdjust` (c40) is the eye the records were made relative to, and its
+`CameraPreviousPosAdjust` (c41) the previous eye: 6,000 main epochs and 13,200 shadow views, 0 different.
+
+-   Records and bone rows are absolute now. `Lighting.hlsl` subtracts `BonesPivot`/`PreviousBonesPivot`
+    (c40/c41 of its own `VS_PerFrame`, now declared under `DCLF_BINDLESS` as well as `SKINNED`) with `precise`.
+    That is the same single float subtraction the CPU did, so the depth and colour epochs agree to the bit.
+-   `Skinned::GetBoneTransformMatrixBindless` takes the pivot and subtracts it per bone before the blend, as the
+    engine's own `GetBoneTransformMatrix` does.
+-   `Utility.hlsl` subtracts the drawing view's own `CameraPosAdjust`, so `DCLFEyeDelta` is no longer read (left
+    zero). The shadow result is now closer to the engine's own, which subtracts the view's eye from the absolute
+    matrix, than the old two-step delta was.
+-   The bindless parity check makes the absolute record relative with the same subtraction before comparing:
+    `bindless record parity OK` over 245M components.
+-   A bindless build no longer reads the eye unless the parity checks are on (`BuildReadsEye`), so the eye is
+    not an input of the Z-prepass job and cannot make it stale.
+
+Gate: capture parity at its standing residue, `BuildDraws parity OK`, `0 claimed but not drawn` (the Z/colour
+EQUAL test holds), every job `probe 0 differ`.
+
+### A build cache for the (material, pipeline) pairs
+
+`BuildCache` (`CS_DCLF_BUILD_CACHE`, default on, `=0` off), one per main epoch kind, keeps each pair's resolved
+texture and sampler indices and packed PerMaterial groups across frames, and each pipeline's packed PerTechnique
+groups and PerGeometry template. An entry keeps a copy of every input it was derived from and is reused only when
+this build's inputs are byte-identical, so it cannot serve a stale value. `CS_DCLF_ASYNC=probe` checks that every
+epoch: the worker's build uses the cache and the inline build does not, and their bytes are compared.
+
+Three things the numbers corrected:
+
+-   **The drifting IBL floats.** `RefreshMaterialPatch` writes them into every material each frame, which
+    rebuilt every pair every frame (hit rate ~0%). The signature now leaves out the patched positions
+    (`MainInputs::materialPatchedFloats`), and a reused PS group gets this frame's values written at their packed
+    offsets (`PackedPositionOf`), exactly as `PackConstantGroup` would.
+-   **The signature must be cheaper than what it saves.** Copying the 2.3 KB material record into each pair's
+    signature cost more than the texture loops it replaced. `Tables::materialVersion`, a session-unique number
+    set whenever a slot's record is written, apart from the patch, now stands in for it.
+-   **Pipelines still rebuild in the exterior.** Their evaluated PerTechnique and PerGeometry constants change
+    every frame (EyePosition, fog). There are only 48 of them, so they are left alone.
+
+Result: 99.5-100% of pairs reused. The colour build takes 1.22 ms instead of 1.50, its join waits 0.21 ms instead
+of 0.53, and the GPU idle during `main opaque inputs` fell from 0.19-0.32 to 0.04-0.09 ms per frame.
+
+### No per-frame object map
+
+The scene walk rebuilt a geometry-to-index hash map every frame for about 5,300 objects. The index now lives in
+the object's `Tracked` entry (`objectStamp`, `objectId`), valid while it matches the walk's stamp. The accumulate
+phase already holds the entry, and `FindObject` looks it up in the persistent tracked map. The accumulate phase got
+0.1 ms faster; the walk did not. Its cost is reading scattered engine memory for every object (world and previous
+world, bounds, properties, the parent chain), not the tables it writes: the same conclusion as "the transform
+witness cannot pay for itself" above. Skipping unchanged objects would still have to read them to know.
+
+### Where the frame's DCLF bubbles stand
+
+After early flush, the debug-view fix, the GPU eye and the build cache, DCLF-attributed GPU idle is about 1 ms per
+frame in the exterior, split roughly as follows:
+
+-   the shadow epoch, 0.5-0.7 ms: ORG, plus the wait at `AfterShadowMaps` for the scene walk (1.1-1.6 ms on the
+    worker) and the shadow build chained behind it;
+-   ORG in the main-opaque epoch, 0.3-0.45 ms;
+-   the Z-prepass, 0.1-0.2 ms.
+
+ORG costs 0.55-0.65 ms of render thread per epoch whatever the epoch does, because every epoch prepares, admits
+and records every pass of every feature. That is the next lever: epoch variants (plan step O2), and after them
+worker-side recording.
+
+## Epochs: each submission point runs only its own passes
+
+Every ORG epoch used to prepare, admit, record and submit every pass of every feature. The shadow epoch prepared
+LLF's culling passes and DCLF's colour passes, which then returned empty work. ORG now has host epochs
+(`extern/OpenRenderGraph/docs/persistent-epochs.md`).
+
+-   **One epoch-aware compile.** The persistent program compiles once over the whole frame, epochs in frame
+    order, so scheduling and transient aliasing see every segment's lifetimes. Transients in different epochs
+    can share memory.
+-   **Per-epoch executables.** Each epoch also gets an executable compiled from its own passes over the same
+    bindings and placements. It is what runs at that epoch, and its entry states come from the admission
+    ledger, so an epoch that did not run is harmless.
+
+This was chosen over one compile per epoch because that would have given each epoch its own alias plan (no
+memory shared across epochs) and turned every resource crossing epochs into an external one.
+
+CS's side (`CS_ORG_EPOCHS`, default on, `=0` for the old behaviour):
+
+-   Each segment is an epoch, in frame order: shadow views, Z-prepass, light culling, main opaque, debug view.
+-   Every pass declares its segment.
+-   The Z-prepass has its own `cs.dclf.z.build-draws` and `cs.dclf.z.depth` instances, where before one
+    `build-draws`/`main-opaque` pair served both the depth and colour segments.
+
+One thing the first run found: ORG derives hazards in authored (registration) order. Across epochs that order
+meant nothing, and the epoch edges then closed a cycle ("Captured dependency graph contains a cycle"). The
+program now reassigns authored order by epoch rank, then registration order.
+
+Measured, same build, `CS_ORG_EPOCHS=0` against on. ORG's render-thread µs per epoch, everything but the feature
+inputs:
+
+| epoch | before | after |
+|---|---|---|
+| LLF light culling | 638 | 491 |
+| Z-prepass | 712 | 598 |
+| main opaque | 675 | 564 |
+| shadow views | 689 | 591 |
+
+That is about 0.5 ms of render thread per frame. Admission, recording and commit fell with the pass count. The
+rest of each epoch is fixed cost, which the split does not touch:
+
+-   ORG's per-frame polls and statistics setup, about 100 µs;
+-   the host upload pass, 44 µs every epoch;
+-   retirement and command-list acquisition;
+-   five queue submissions per epoch.
+
+ORG's per-pass preparation is only 3-19 µs a pass. The idle trace does not separate the two runs beyond noise.
+
+Gate: probe 0 differ for every job, `BuildDraws parity OK`, capture parity at its residue, `0 claimed but not
+drawn`, and save/load and the live toggle clean. ORG's test suite passes in the CS embedding configuration,
+including a new epoch test in `PersistentGraphTests`.
+
+What remains per epoch is fixed ORG cost, which the next steps in the plan address:
+
+-   one submission per epoch instead of five (O1c);
+-   invocations that are reused rather than re-prepared, with no per-epoch serial in their revisions (O3);
+-   retained command buffers (O4);
+-   worker-side recording (O5).

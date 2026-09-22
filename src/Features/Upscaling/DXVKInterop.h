@@ -197,6 +197,8 @@ private:
 	double timestampPeriodNs = 0.0;
 	/// Label of the timed submission each slot still holds results for (nullptr: none).
 	std::vector<const char*> slotTimingLabels;
+	/// When each slot's timed submission was handed to the queue (QueryPerformanceCounter), for GpuIdleTrace.
+	std::vector<int64_t> slotSubmitQpc;
 	/// Harvested (label, milliseconds) pairs awaiting PublishCommandTimings.
 	std::vector<std::pair<const char*, float>> harvestedTimings;
 

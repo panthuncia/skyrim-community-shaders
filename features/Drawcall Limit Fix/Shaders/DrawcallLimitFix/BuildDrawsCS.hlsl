@@ -2,9 +2,14 @@
 // from the per-draw inputs and the geometry table, appending them with an atomic count. Compiled to SPIR-V
 // for the render graph (BasicRHI's descriptor-heap ABI); buffers are fetched from the descriptor heap by index.
 
+// Push constants: only what is fixed for a pass across executions (descriptor indices, addresses, the
+// culling phase, the HZB's shape). Everything that changes from one execution to the next is read from
+// the pass's region of the latch block (org::LatchBlock), which the host writes just before submission;
+// the recorded commands then never change with the frame, which is what lets them be reused or recorded
+// ahead of it. Must match BuildDrawsConstants and BuildDrawsLatch in IndirectDraws.cpp.
 cbuffer BuildDrawsConstants : register(b0)
 {
-	uint DrawCount;
+	uint LatchIndex;       // ByteAddressBuffer: the latch block
 	uint InputsIndex;      // ByteAddressBuffer: DrawInput[DrawCount]
 	uint GeometriesIndex;  // ByteAddressBuffer: GeometryDraw[]
 	uint SequencesIndex;   // RWByteAddressBuffer: DrawSequence[]
@@ -12,39 +17,55 @@ cbuffer BuildDrawsConstants : register(b0)
 	uint RecordsAddressLo;  // device address of DrawBindings[0]
 	uint RecordsAddressHi;
 	uint RecordStride;
-	// Phase 4 culling. Bits 0-3 are the mode (0 off, 1 frustum, 2 frustum then the HZB), bits 4-7 the
-	// phase, and bit 8 RequireNativeVisible. They share a word because these are push constants and the
-	// block is at Vulkan's guaranteed 128 bytes.
-	uint CullFlags;
+	// Bits 4-7: the culling phase, which is the pass's; the mode and the native-visible gate are the
+	// frame's and come from the latch.
+	uint PhaseBits;
 	// RWByteAddressBuffer: one uint per object in the frame's tables, written by the depth segment's two
 	// culling phases and read by the colour segment. This is how the colour pass draws exactly what the
 	// depth passes drew: the decision is made once, in the depth segment, and published here, instead of
 	// each segment testing for itself and quietly disagreeing.
 	uint VisibilityIndex;
-	// Stamps the verdicts this frame publishes. A word that does not carry the current stamp was not
-	// written this frame, and the colour segment then treats the object as visible rather than trusting a
-	// stale verdict. Visible is the safe default: drawing something the depth passes did not cover means
-	// the colour draw's EQUAL test fails and the native pass shades it, while believing a stale "hidden"
-	// would drop an object that has depth and no other draw left to shade it.
-	uint VisibilityStamp;
-	uint CullPadding;  // keeps ViewProj on a 16-byte boundary
-	// The main pass's view-projection with the camera translation already folded into it, so a bound's
-	// absolute world position projects directly. The camera (posAdjust) used to be a separate float3 here;
-	// folding it in freed the words VisibilityIndex now uses.
-	row_major float4x4 ViewProj;
+	uint LatchOffset;  // this dispatch's BuildDrawsLatch, in bytes into the latch block
+	uint ConstantsPadding;
 	// Occlusion culling against the hierarchical depth buffer built at the end of the depth pass
 	// (HzbCS.hlsl). HzbIndex is zero when there is no HZB, which includes the first frame.
-	//
-	// Sizes are packed into single words because these are push constants: Vulkan only guarantees 128
-	// bytes of them, and the block is exactly that with this packing.
 	uint HzbIndex;
 	uint HzbSizePacked;  // mip 0: width in the low 16 bits, height in the high 16
 	uint HzbMips;
-	// The HZB covers a power-of-two area that is larger than the rendered image, so a texture coordinate in
-	// the image is NOT one in the HZB. This is the ratio between them, per axis, as 16-bit fixed point.
-	// Leaving it out makes the culling sample the padding, which is all far plane, and the HZB then looks
-	// uniformly empty however correctly it was built.
-	uint HzbUvScalePacked;
+	uint HzbPadding;
+}
+
+// The execution's values, from the latch (BuildDrawsLatch): read once per thread at the top of main. The
+// first three words of the latch are this dispatch's own indirect arguments.
+static uint DrawCount;
+// Bits 0-3 are the mode (0 off, 1 frustum, 2 frustum then the HZB), bits 4-7 the phase (from the push
+// constants), and bit 8 RequireNativeVisible.
+static uint CullFlags;
+// Stamps the verdicts this frame publishes. A word that does not carry the current stamp was not
+// written this frame, and the colour segment then treats the object as visible rather than trusting a
+// stale verdict. Visible is the safe default: drawing something the depth passes did not cover means
+// the colour draw's EQUAL test fails and the native pass shades it, while believing a stale "hidden"
+// would drop an object that has depth and no other draw left to shade it.
+static uint VisibilityStamp;
+// The HZB covers a power-of-two area that is larger than the rendered image, so a texture coordinate in
+// the image is NOT one in the HZB. This is the ratio between them, per axis, as 16-bit fixed point.
+// Leaving it out makes the culling sample the padding, which is all far plane, and the HZB then looks
+// uniformly empty however correctly it was built.
+static uint HzbUvScalePacked;
+// The main pass's view-projection with the camera translation already folded into it, so a bound's
+// absolute world position projects directly.
+static float4x4 ViewProj;
+
+void LoadLatch()
+{
+	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
+	const uint4 head = latch.Load4(LatchOffset + 12);  // after the dispatch arguments
+	DrawCount = head.x;
+	CullFlags = (head.y & ~0xF0u) | (PhaseBits & 0xF0u);
+	VisibilityStamp = head.z;
+	HzbUvScalePacked = head.w;
+	ViewProj = float4x4(asfloat(latch.Load4(LatchOffset + 32)), asfloat(latch.Load4(LatchOffset + 48)),
+		asfloat(latch.Load4(LatchOffset + 64)), asfloat(latch.Load4(LatchOffset + 80)));
 }
 
 uint CullMode() { return CullFlags & 0xF; }
@@ -69,7 +90,6 @@ static const uint kVisibilityRejectedFinal = 2;
 // cross-tabulation below measures the culling against the engine even while the gate is on.
 bool RequireNativeVisible() { return (CullFlags & 0x100) != 0; }
 
-// Not a static global: its value comes from a constant buffer, so it has to be read where it is used.
 uint2 HzbBaseSize() { return uint2(HzbSizePacked & 0xFFFF, HzbSizePacked >> 16); }
 float2 HzbUvScale() { return float2(HzbUvScalePacked & 0xFFFF, HzbUvScalePacked >> 16) / 65535.0; }
 
@@ -269,6 +289,7 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 
 [numthreads(64, 1, 1)] void main(uint3 dispatchID : SV_DispatchThreadID)
 {
+	LoadLatch();
 	const uint draw = dispatchID.x;
 	if (draw >= DrawCount)
 		return;

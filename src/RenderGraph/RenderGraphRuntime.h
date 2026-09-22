@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d11.h>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -59,6 +60,17 @@ public:
 
 	static RenderGraphRuntime& Get();
 
+	/**
+	 * @brief CS_ORG_EPOCHS (default on, =0 off): each segment is an ORG host epoch. The graph compiles once
+	 * over the whole frame - scheduling and transient aliasing see every segment's lifetimes, in frame order -
+	 * and each ExecuteEpoch prepares, admits, records and submits only its own segment's passes. Off, every
+	 * epoch runs every pass of every feature and the passes no-op outside their segment, as before.
+	 */
+	static bool EpochsEnabled();
+
+	/** @brief The ORG epoch a segment's passes declare (ExternalPassDesc::Epoch); every epoch when EpochsEnabled is off. */
+	static std::uint32_t EpochOf(Segment a_segment);
+
 	/** @brief Asks DXVK to enable the device features BasicRHI needs. Call before the D3D11 device exists. */
 	static void RequestDeviceFeatures(HMODULE a_dxvkD3D11);
 
@@ -87,6 +99,26 @@ public:
 
 	/** @brief The segment of the epoch being executed (valid while passes prepare and record). */
 	Segment CurrentSegment() const { return segment; }
+
+	/**
+	 * @brief CS_ORG_EPOCH_STATS: a feature's whole call around one epoch (its inputs, joins and bookkeeping
+	 * before and after ExecuteEpoch), on the render thread. Counted only when an epoch ran inside it.
+	 */
+	class EpochBodyScope
+	{
+	public:
+		explicit EpochBodyScope(Segment a_segment);
+		~EpochBodyScope();
+		EpochBodyScope(const EpochBodyScope&) = delete;
+		EpochBodyScope& operator=(const EpochBodyScope&) = delete;
+
+	private:
+		Segment segment;
+		std::chrono::steady_clock::time_point start;
+	};
+
+	/** @brief Time the render thread spent waiting on a worker inside the current EpochBodyScope. */
+	static void AddEpochJoinWait(std::chrono::steady_clock::duration a_waited);
 
 	/**
 	 * @brief The Vulkan resource behind a D3D11 buffer, texture or SRV (dxvkGetInteropResourceInfo).

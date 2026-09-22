@@ -1,6 +1,7 @@
 #include "DrawcallLimitFix.h"
 
 #include "Deferred.h"
+#include "DrawcallLimitFix/AsyncWorker.h"
 #include "DrawcallLimitFix/CaptureParity.h"
 #include "DrawcallLimitFix/ConstantEvaluator.h"
 #include "DrawcallLimitFix/DecalProbe.h"
@@ -18,6 +19,7 @@
 #include "DrawcallLimitFix/SceneTracker.h"
 #include "DrawcallLimitFix/Switches.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "ShaderCache.h"
 #include "State.h"
 #include "TerrainBlending.h"
 
@@ -231,6 +233,9 @@ void DrawcallLimitFix::Reset()
 	if (!installed)
 		return;
 	const auto start = std::chrono::steady_clock::now();
+	// A worker job the frame never joined must not cross into the next frame's tables.
+	DCLF::SceneStore::Get().JoinScenePhase();
+	DCLF::IndirectDraws::Get().EndFrame();
 	DCLF::SceneStore::Get().ProcessEvents();
 	timing.eventsMs += MillisecondsSince(start);
 	// The menu's toggle, between frames. Scene events keep flowing above while off, so the tracked set is
@@ -249,6 +254,10 @@ void DrawcallLimitFix::UpdateActive()
 void DrawcallLimitFix::SetActive(bool a_active)
 {
 	switchedOn = a_active;
+	if (!a_active) {
+		DCLF::SceneStore::Get().AbandonSceneJob();
+		DCLF::IndirectDraws::Get().DrainAsync();
+	}
 	auto& capture = DCLF::PassCapture::Get();
 	// Off: every pass reaches the batch renderers again, and no claim outlives the switch. Back on, the claims
 	// are empty until the first frame republishes them, so nothing is withheld that DCLF has not drawn.
@@ -277,13 +286,17 @@ void DrawcallLimitFix::BeforeShadowMaps()
 	// cached verdicts, so the next frame classifies every object under the new switches.
 	if (DCLF::Toggles::Get().BeginFrame())
 		store.InvalidateVerdicts();
+	ScopedPerfEvent event("CS DCLF: scene tables and shadow views");
 	const auto start = std::chrono::steady_clock::now();
 	store.BuildFrame(DCLF::SceneStore::Phase::Scene);
 	// The frame's shadow views, in the order the engine is about to render them. Everything downstream -
 	// the capture's attribution, the claims, the epochs - identifies a view by this list.
 	DCLF::ShadowViews::Get().Rebuild();
-	if (DCLF::IndirectDraws::ShadowsEnabled())
+	if (DCLF::IndirectDraws::ShadowsEnabled()) {
 		DCLF::IndirectDraws::Get().BeginShadowFrame(globals::game::shadowState->GetRuntimeData().posAdjust.getEye());
+		// The shadow epoch's build, on the worker, while the engine draws the shadow maps (CS_DCLF_ASYNC).
+		DCLF::IndirectDraws::Get().KickShadowBuild();
+	}
 	const double sceneMs = MillisecondsSince(start);
 	timing.sceneMs += sceneMs;
 	timing.sceneMaxMs = std::max(timing.sceneMaxMs, sceneMs);
@@ -293,6 +306,9 @@ void DrawcallLimitFix::BeforeShadowMaps()
 
 void DrawcallLimitFix::AfterShadowMaps()
 {
+	RenderGraphRuntime::EpochBodyScope body(RenderGraphRuntime::Segment::ShadowView);
+	// The scene walk (CS_DCLF_ASYNC), before anything reads the tables it writes.
+	DCLF::SceneStore::Get().JoinScenePhase();
 	if (!Running())
 		return;
 	// The frame's shadow epoch: every view the 0x2A hook captured, drawn in one graph execution.
@@ -303,6 +319,7 @@ void DrawcallLimitFix::AfterShadowMaps()
 
 void DrawcallLimitFix::EarlyPrepass()
 {
+	DCLF::SceneStore::Get().JoinScenePhase();  // normally joined at AfterShadowMaps already
 	if (!Running())
 		return;
 
@@ -315,6 +332,7 @@ void DrawcallLimitFix::EarlyPrepass()
 	// before the shadow maps (Main::Draw) - and because the tables read the latched accumulator rather
 	// than `currentAccumulator`, which is not set this early.
 	auto& store = DCLF::SceneStore::Get();
+	ScopedPerfEvent event("CS DCLF: accumulator tables and pipelines");
 	const auto start = std::chrono::steady_clock::now();
 	store.BuildFrame(DCLF::SceneStore::Phase::Accumulate);
 	const double buildMs = MillisecondsSince(start);
@@ -339,6 +357,50 @@ void DrawcallLimitFix::EarlyPrepass()
 		}
 		programs.Update();
 		pipelines.Update();
+		// The pipeline lookups an epoch's build reads (Lookups.h): the set index of every pipeline used this
+		// frame, its shaders' constant tables and its register usage, after Update has admitted this frame's
+		// finished builds. Resolved here, where the GPU is busy with the shadow maps, rather than in the epoch.
+		auto& lookups = store.MutableLookups();
+		if (lookups.pipelineSetGeneration != pipelines.Generation()) {
+			// The set was recreated (a target change): every index a build may hold is stale.
+			lookups.pipelineSetGeneration = pipelines.Generation();
+			++lookups.generation;
+		}
+		lookups.pipelines.resize(tables.pipelines.size());
+		auto& cache = SIE::ShaderCache::Instance();
+		for (std::size_t p = 0; p < tables.pipelines.size(); ++p) {
+			auto& entry = lookups.pipelines[p];
+			if (!tables.PipelineUsed(p, store.GetFrame())) {
+				entry.setIndex = DCLF::Lookups::kNone;
+				continue;
+			}
+			const auto& key = tables.pipelines[p];
+			const auto* program = programs.Find(key, *lighting);
+			const std::uint32_t setIndex = program ? pipelines.Find(key, *program) : DCLF::DrawPipelines::kNotReady;
+			auto* vs = cache.GetVertexShader(*lighting, key.vertexDescriptor);
+			auto* ps = cache.GetPixelShader(*lighting, key.pixelDescriptor);
+			const std::uint32_t resolved = (setIndex != DCLF::DrawPipelines::kNotReady && vs && ps) ? setIndex : DCLF::Lookups::kNone;
+			if (!(entry.key == key)) {
+				entry.key = key;
+				entry.setIndex = DCLF::Lookups::kNone;
+				entry.shadowMaskIndex = DCLF::Lookups::kNone;
+			}
+			if (entry.setIndex != DCLF::Lookups::kNone && entry.setIndex != resolved)
+				++lookups.generation;  // a build may hold the old index
+			entry.setIndex = resolved;
+			if (resolved == DCLF::Lookups::kNone)
+				continue;
+			entry.vsTable.assign(vs->constantTable.begin(), vs->constantTable.end());
+			entry.psTable.assign(ps->constantTable.begin(), ps->constantTable.end());
+			for (std::uint32_t variant = 0; variant < 2; ++variant) {
+				const auto& usage = pipelines.Usage(resolved, variant);
+				auto& bits = entry.usage[variant];
+				bits.vertexConstants = usage.vertexConstants;
+				bits.pixelConstants = usage.pixelConstants;
+				bits.textures = usage.textures;
+				bits.samplers = usage.samplers;
+			}
+		}
 	}
 
 	// The shadow views' programs: one Utility build per technique of the frame's casters, per render mode
@@ -379,6 +441,9 @@ void DrawcallLimitFix::EarlyPrepass()
 		}
 		pipelines.CaptureShadowStates(shadowKeys);
 	}
+
+	// The Z-prepass epoch's build, on the worker, from here to the end of Main_RenderDepth (CS_DCLF_ASYNC).
+	DCLF::IndirectDraws::Get().KickZPrepassBuild();
 }
 
 void DrawcallLimitFix::Prepass()
@@ -393,6 +458,8 @@ void DrawcallLimitFix::Prepass()
 	// The camera-dependent half of the per-frame constants, now that the main camera's shadow state is
 	// current (BuildFrame ran at EarlyPrepass, where it still belonged to the shadow-map camera).
 	store.RefreshFrameConstants();
+	// The colour epoch's build, on the worker, from here to the epoch (CS_DCLF_ASYNC).
+	DCLF::IndirectDraws::Get().KickColourBuild();
 	skipStats = skipCounters;
 	skipCounters = {};
 	if ((store.GetFrame() % kReportInterval) == 1)
@@ -494,7 +561,23 @@ void DrawcallLimitFix::Prepass()
 		std::string epochParts;
 		for (std::size_t i = 0; i < draws.partMs.size(); ++i)
 			epochParts += fmt::format("{}{} {:.3f} ms", epochParts.empty() ? "" : ", ", DCLF::kEpochPartNames[i], draws.partMs[i]);
-		logger::info("[DCLF] indirect epoch CPU by part: {}", epochParts);
+		// Under CS_DCLF_ASYNC the build's parts are measured on the worker when it built the payload, and
+		// "graph execute" is then everything the render thread spent on the epoch.
+		logger::info("[DCLF] indirect epoch CPU by part{}: {}", DCLF::AsyncModeSetting() != DCLF::AsyncMode::Off ? " (build parts on the worker when it built)" : "", epochParts);
+		if (draws.commitEpochs) {
+			static constexpr std::array<const char*, 7> kCommitParts{ "join", "lookups", "frame textures and patches", "frame blocks",
+				"payload uploads", "drawn set", "rest" };
+			std::string commitParts;
+			for (std::size_t i = 0; i < kCommitParts.size(); ++i)
+				commitParts += fmt::format("{}{} {:.1f}", commitParts.empty() ? "" : ", ", kCommitParts[i], draws.commitUs[i] / draws.commitEpochs);
+			logger::info("[DCLF] main epoch commit on the render thread, us per epoch over {} epochs: {}", draws.commitEpochs, commitParts);
+			DCLF::IndirectDraws::Get().ResetCommitTimings();
+		}
+		if (DCLF::AsyncModeSetting() != DCLF::AsyncMode::Off) {
+			std::istringstream asyncLines(DCLF::IndirectDraws::Get().AsyncReport() + DCLF::SceneStore::Get().SceneAsyncReport());
+			for (std::string line; std::getline(asyncLines, line);)
+				logger::info("{}", line);
+		}
 		if (DCLF::IndirectDraws::ShadowsEnabled()) {
 			const auto& shadow = DCLF::IndirectDraws::Get().GetShadowStats();
 			std::string notReadyReasons;

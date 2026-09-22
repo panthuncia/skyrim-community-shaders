@@ -116,10 +116,46 @@ typedef HRESULT(__stdcall* PFN_dxvkCreateBufferFromVkBuffer)(ID3D11Device* pDevi
 	const D3D11_BUFFER_DESC* pDesc, VkBuffer buffer, ID3D11Buffer** ppBuffer);
 typedef HRESULT(__stdcall* PFN_dxvkSetDeviceTeardownCallback)(PFN_dxvkOrgInteropTeardown pCallback, void* pUser);
 typedef HRESULT(__stdcall* PFN_dxvkEnqueueInteropSubmission)(ID3D11Device* pDevice, const DxvkOrgInteropSubmission* pSubmission);
+
+// Several submissions as one (dxvkEnqueueInteropSubmissions): one flush, one stream entry, one vkQueueSubmit2.
+struct DxvkOrgInteropSubmissionBatch
+{
+	uint32_t version;
+	uint32_t submitCount;
+	const VkSubmitInfo2* submits;  // pNext and flags ignored
+	PFN_dxvkOrgInteropSubmitted onSubmitted;
+	void* user;
+	const char* label;
+};
+typedef HRESULT(__stdcall* PFN_dxvkEnqueueInteropSubmissions)(ID3D11Device* pDevice, const DxvkOrgInteropSubmissionBatch* pBatch);
 // Describes a buffer, texture or SRV and marks it stable (never relocated or renamed from then on).
 // Buffers the application can map are rejected (E_INVALIDARG): discard maps rename them.
 typedef HRESULT(__stdcall* PFN_dxvkGetInteropResourceInfo)(ID3D11Device* pDevice, IUnknown* pObject, DxvkOrgInteropResourceInfo* pInfo);
 // Address of the immediate context's submission counter: +1 each time DXVK closes a command list (implicit
 // flushes, Flush(), the flush ahead of an enqueued submission). Read on the immediate context's thread.
 typedef HRESULT(__stdcall* PFN_dxvkGetSubmissionCounter)(ID3D11Device* pDevice, const volatile uint64_t** ppCounter);
+
+// Submission trace (diagnostics): every submission on DXVK's graphics queue, bracketed by timestamps.
+enum DxvkOrgSubmissionKind
+{
+	DXVK_ORG_SUBMISSION_COMMAND_LIST = 0,
+	DXVK_ORG_SUBMISSION_EXTERNAL = 1,
+	DXVK_ORG_SUBMISSION_PRESENT = 2,
+};
+
+struct DxvkOrgSubmissionTraceRecord
+{
+	uint32_t kind;          // DxvkOrgSubmissionKind
+	uint32_t flushType;     // command lists: the GpuFlushType that closed it, ~0u if unknown
+	uint64_t submissionId;  // command lists flushed by the immediate context: its submission counter value
+	int64_t appQpc;         // command lists: the application thread issued the flush
+	int64_t csQpc;          // command lists: DXVK's CS thread closed the list
+	int64_t queueQpc;       // the submission thread handed it to the queue
+	uint64_t gpuBegin;      // timestamp ticks when the GPU reached it (0 for presents)
+	uint64_t gpuEnd;        // timestamp ticks once everything up to its end completed (0 for presents)
+	char label[64];         // flush reason, or the external submission's label
+};
+
+typedef HRESULT(__stdcall* PFN_dxvkSetSubmissionTrace)(ID3D11Device* pDevice, BOOL enable);
+typedef HRESULT(__stdcall* PFN_dxvkReadSubmissionTrace)(ID3D11Device* pDevice, DxvkOrgSubmissionTraceRecord* pRecords, uint32_t capacity, uint32_t* pCount);
 }

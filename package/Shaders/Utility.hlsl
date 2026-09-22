@@ -104,13 +104,13 @@ cbuffer PerGeometry : register(b2)
 #if defined(DCLF_BINDLESS)
 // Drawcall Limit Fix draws the shadow views indirectly: every object of a view shares one pipeline and
 // one PerGeometry block, so the values that differ between them come from the per-object record instead
-// (Common/DCLFObjects.hlsli). World is packed once per frame relative to the main camera's eye, and
-// DCLFEyeDelta carries this view's eye back out of it - the engine's own Utility World is relative to
+// (Common/DCLFObjects.hlsli). World is absolute in the record and made relative here to the drawing
+// view's own eye, the view's VS_PerFrame CameraPosAdjust - the engine's own Utility World is relative to
 // whichever camera is drawing (engine notes: shadow maps).
-static row_major float4x4 World = float4x4(
-	DCLFObjects[DCLFObjectIndex].World[0] + float4(0, 0, 0, DCLFEyeDelta.x),
-	DCLFObjects[DCLFObjectIndex].World[1] + float4(0, 0, 0, DCLFEyeDelta.y),
-	DCLFObjects[DCLFObjectIndex].World[2] + float4(0, 0, 0, DCLFEyeDelta.z),
+static precise row_major float4x4 World = float4x4(
+	DCLFObjects[DCLFObjectIndex].World[0] - float4(0, 0, 0, FrameBuffer::CameraPosAdjust.x),
+	DCLFObjects[DCLFObjectIndex].World[1] - float4(0, 0, 0, FrameBuffer::CameraPosAdjust.y),
+	DCLFObjects[DCLFObjectIndex].World[2] - float4(0, 0, 0, FrameBuffer::CameraPosAdjust.z),
 	float4(0, 0, 0, 1));
 static float4 TreeParams = DCLFObjects[DCLFObjectIndex].DCLFTreeParams;
 #endif
@@ -159,11 +159,8 @@ VS_OUTPUT main(VS_INPUT input)
 	precise int4 boneIndices = 765.01.xxxx * input.BoneIndices.xyzw;
 
 #			if defined(DCLF_BINDLESS)
-	// The rows are packed relative to the main camera's eye, so this view's delta applies to them too.
-	float3x4 worldMatrix = Skinned::GetBoneTransformMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFBoneOffset, boneIndices, input.BoneWeights);
-	worldMatrix[0].w += DCLFEyeDelta.x;
-	worldMatrix[1].w += DCLFEyeDelta.y;
-	worldMatrix[2].w += DCLFEyeDelta.z;
+	// The rows are absolute: the pivot is this view's eye.
+	float3x4 worldMatrix = Skinned::GetBoneTransformMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFBoneOffset, boneIndices, FrameBuffer::CameraPosAdjust.xyz, input.BoneWeights);
 #			else
 	float3x4 worldMatrix = Skinned::GetBoneTransformMatrix(Bones, boneIndices, FrameBuffer::CameraPosAdjust.xyz, input.BoneWeights);
 #			endif

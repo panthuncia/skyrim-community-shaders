@@ -1,12 +1,16 @@
 #include "DXVKInterop.h"
 
 #include "Globals.h"
+#include "GpuIdleTrace.h"
 #include "Profiler.h"
 
 #include <algorithm>
 
 namespace
 {
+	/// Times a buffer that has no profiler label while GpuIdleTrace runs; never published to the profiler.
+	constexpr const char kTraceOnlyLabel[] = "Streamline interop (unlabelled)";
+
 	struct QueueSubmitAttempt
 	{
 		VkResult endResult = VK_ERROR_DEVICE_LOST;
@@ -532,6 +536,7 @@ bool DXVKInterop::CreateCommandResources(uint32_t a_framesInFlight)
 	pendingViewDeletes.assign(framesInFlight, {});
 	pendingResourceReleases.assign(framesInFlight, {});
 	slotTimingLabels.assign(framesInFlight, nullptr);
+	slotSubmitQpc.assign(framesInFlight, 0);
 	CreateTimingPool();
 	logger::info("[DXVKInterop] Command ring created ({} frames in flight, queueFamily {})", framesInFlight, queueFamilyIndex);
 	return true;
@@ -598,6 +603,7 @@ void DXVKInterop::DestroyCommandResources()
 		timingPool = VK_NULL_HANDLE;
 	}
 	slotTimingLabels.clear();
+	slotSubmitQpc.clear();
 	harvestedTimings.clear();
 
 	if (commandPool != VK_NULL_HANDLE) {
@@ -741,6 +747,10 @@ void DXVKInterop::HarvestSlotTiming(uint32_t a_slot)
 	if (vkGetQueryPoolResults(device, timingPool, a_slot * 2, 2, sizeof(ticks), ticks, sizeof(uint64_t),
 			VK_QUERY_RESULT_64_BIT) != VK_SUCCESS || ticks[1] < ticks[0])
 		return;
+	if (a_slot < slotSubmitQpc.size())
+		GpuIdleTrace::AddInteropSpan(label, ticks[0], ticks[1], slotSubmitQpc[a_slot]);
+	if (label == kTraceOnlyLabel)
+		return;
 	const double ms = static_cast<double>(ticks[1] - ticks[0]) * timestampPeriodNs * 1e-6;
 	if (harvestedTimings.size() < 256)
 		harvestedTimings.emplace_back(label, static_cast<float>(ms));
@@ -820,6 +830,7 @@ DXVKInterop::CommandTransaction DXVKInterop::BeginFrameCommandBuffer(const char*
 				commandFences.push_back(newFence);
 				pendingViewDeletes.emplace_back();
 				slotTimingLabels.push_back(nullptr);
+				slotSubmitQpc.push_back(0);
 				pendingResourceReleases.emplace_back();
 				next = framesInFlight;
 				++framesInFlight;
@@ -888,6 +899,8 @@ DXVKInterop::CommandTransaction DXVKInterop::BeginFrameCommandBuffer(const char*
 		return {};
 	}
 	CommandTransaction transaction(this, commandFrameIndex, cb, std::move(ringLock));
+	if (!a_timingLabel && GpuIdleTrace::Requested())
+		a_timingLabel = kTraceOnlyLabel;
 	if (a_timingLabel && timingPool != VK_NULL_HANDLE && commandFrameIndex < kMaxTimedSlots) {
 		// ALL_COMMANDS: written once every earlier command on the queue has finished, so the pair
 		// measures this buffer's work and not the tail of the D3D11 frame flushed ahead of it.
@@ -913,6 +926,8 @@ bool DXVKInterop::SubmitFrameCommandBuffer(CommandTransaction& a_transaction)
 
 	if (a_transaction.timingLabel)
 		vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, timingPool, slot * 2 + 1);
+	LARGE_INTEGER submitQpc{};
+	QueryPerformanceCounter(&submitQpc);
 
 	const QueueSubmitAttempt attempt = DirectQueueSubmitSEH(
 		interopDevice.get(), device, queue, commandBuffer, fence);
@@ -936,8 +951,10 @@ bool DXVKInterop::SubmitFrameCommandBuffer(CommandTransaction& a_transaction)
 		return false;
 	}
 	a_transaction.submitted = true;
-	if (a_transaction.timingLabel && slot < slotTimingLabels.size())
+	if (a_transaction.timingLabel && slot < slotTimingLabels.size()) {
 		slotTimingLabels[slot] = a_transaction.timingLabel;
+		slotSubmitQpc[slot] = submitQpc.QuadPart;
+	}
 	return true;
 }
 

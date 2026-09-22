@@ -8,6 +8,7 @@
 
 #include <ankerl/unordered_dense.h>
 
+#include "FrameAnnotations.h"
 #include "State.h"
 
 namespace DCLF
@@ -352,6 +353,11 @@ namespace DCLF
 			void operator()(ShadowStateData&)
 			{
 				CallVirtual<void (*)(RE::BSShader*, RE::BSRenderPass*, std::uint32_t)>(shader, kSetupGeometrySlot, &pass, renderFlags);
+				// Frame Annotations' SetupGeometry hook opened a debugger event for this pass, which its
+				// RestoreGeometry hook would close; the stand-in never restores, so close it here or every
+				// evaluation leaves one open (about 37 a frame, nesting the rest of the frame under them).
+				if (FrameAnnotations::GeometryEventsEnabled())
+					globals::state->EndPerfEvent();
 			}
 
 			void Collect(ShadowStateData&) {}

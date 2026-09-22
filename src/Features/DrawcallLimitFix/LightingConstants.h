@@ -151,9 +151,22 @@ namespace DCLF
 	};
 	static_assert(sizeof(BindlessObject) == 192);
 
-	/** @brief Fills one, from the same inputs PatchObjectGeometry writes into a packed group. */
-	void BuildObjectRecord(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags,
-		const RE::NiPoint3& a_eye, const RE::NiPoint3& a_previousEye, BindlessObject& a_out);
+	/**
+	 * @brief Fills one, from the same inputs PatchObjectGeometry writes into a packed group. World and
+	 * PreviousWorld are absolute: the shaders subtract the drawing camera's eye (VS_PerFrame c40/c41), so
+	 * one record serves every epoch and every camera.
+	 */
+	void BuildObjectRecord(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex, std::uint32_t a_renderFlags, BindlessObject& a_out);
+
+	/** @brief World made relative to an eye the way the engine does it (and the shaders do for a record). */
+	void StoreRelativeTo(float* a_out, const float (&a_world)[12], const RE::NiPoint3& a_eye);
+
+	/**
+	 * @brief Where PackConstantGroup puts a block's float: its dword offset in the packed group, or ~0 when no
+	 * variable of the group covers it (the float is then not packed at all).
+	 */
+	std::uint32_t PackedPositionOf(const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable,
+		std::uint32_t a_float);
 
 	std::size_t ConstantGroupSize(const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable);
 }

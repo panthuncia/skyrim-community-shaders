@@ -49,6 +49,12 @@ namespace DCLF
 			Count
 		};
 
+		void ResetCommitTimings()
+		{
+			stats.commitUs = {};
+			stats.commitEpochs = 0;
+		}
+
 		struct Stats
 		{
 			std::uint32_t epochs = 0;
@@ -69,8 +75,18 @@ namespace DCLF
 			// the draw input - was invisible, folded into "rest" with the uploads and the epoch execution.
 			// This is the Stage 0 lesson applied to the epoch.
 			std::array<double, 8> partMs{};
+			// The render thread's part of the main epochs (the commit and what surrounds it inside the epoch),
+			// summed over commitEpochs since the last report: join, lookups, frame textures and patches, frame
+			// blocks, payload uploads, the drawn set, the rest (shape, latch, stats).
+			std::array<double, 7> commitUs{};
+			std::uint32_t commitEpochs = 0;
 			std::uint32_t notReady = 0;                      // epochs skipped (mirrors, targets or pipelines not ready)
 			std::uint32_t shortBuffers = 0;        // draws whose vertex or index slice does not cover them
+			// Draws skipped because a material's textures were not in the lookups yet (Lookups.h): resolved
+			// by this epoch's commit, they land next frame. Steady state 0.
+			std::uint32_t deferredTextures = 0;
+			// Frame textures (t16 and up) a record reads that the pass had not bound at the commit, last epoch.
+			std::uint32_t frameTexturesMissing = 0;
 			std::uint32_t cullDrawn = 0;     // sequences BuildDraws wrote, last sampled epoch
 			std::uint32_t cullRejected = 0;  // draws its culling rejected (CS_DCLF_CULL)
 			std::uint32_t cullTested = 0;    // draws it tested at all: 0 means the culling did not run
@@ -111,6 +127,25 @@ namespace DCLF
 			// pipeline) pair holds. Zero mismatches is what says the deduplication is sound.
 			std::uint32_t recordParityChecks = 0;
 			std::uint32_t recordParityMismatches = 0;
+			// CS_DCLF_ASYNC: per job kind (colour, Z-prepass, shadow), per report interval.
+			struct Async
+			{
+				std::uint32_t kicked = 0;      // jobs submitted to the worker
+				std::uint32_t notKicked = 0;   // epochs whose conditions kept the build inline (no replay, not bindless, ...)
+				std::uint32_t used = 0;        // epochs that committed the worker's build
+				std::uint32_t builtInline = 0; // epochs that built on the render thread (no job, or the job could not be used)
+				std::uint32_t late = 0;        // the job was still running at the join
+				std::uint32_t failed = 0;      // the job threw
+				std::uint32_t cancelled = 0;
+				std::uint32_t stale = 0;       // the job's inputs differed from the epoch's
+				std::uint32_t dropped = 0;     // jobs discarded without an epoch to serve
+				std::uint32_t leaked = 0;      // jobs still pending at Present (a defect)
+				std::uint32_t probeCompared = 0;
+				std::uint32_t probeDiffer = 0;
+				std::uint32_t eyeMismatches = 0;          // Z-prepass: the predicted eye pair differed from the captured one
+				std::uint32_t previousEyeMismatches = 0;  // of which the previous eye alone
+			};
+			std::array<Async, 3> async{};
 		};
 
 		static IndirectDraws& Get();
@@ -163,6 +198,34 @@ namespace DCLF
 
 		/** @brief Hybrid path, before the deferred composite: the colour pass, against the depth above. */
 		void ExecuteColour();
+
+		/**
+		 * @brief CS_DCLF_ASYNC: at Prepass, after RefreshFrameConstants, submits the colour epoch's build to the
+		 * worker (AsyncWorker.h). The epoch joins it; a job that cannot serve the epoch is rebuilt inline.
+		 */
+		void KickColourBuild();
+
+		/**
+		 * @brief CS_DCLF_ASYNC: at the end of EarlyPrepass, after the pipeline lookups, submits the Z-prepass
+		 * epoch's build with a predicted eye (the main camera's, and last frame's captured eye as the previous
+		 * one). The epoch checks the prediction against its capture exactly; a miss is stale and built inline.
+		 */
+		void KickZPrepassBuild();
+
+		/**
+		 * @brief CS_DCLF_ASYNC: at BeforeShadowMaps, after the scene phase and BeginShadowFrame, submits the shadow
+		 * epoch's build for last frame's render modes. ExecuteShadowFrame joins it; a change of modes is stale.
+		 */
+		void KickShadowBuild();
+
+		/** @brief At Present: a job the frame never joined is dropped and counted (Stats::Async::leaked). */
+		void EndFrame();
+
+		/** @brief Drops every job and waits for the worker: the live toggle, teardown. */
+		void DrainAsync();
+
+		/** @brief The `[DCLF] async` report lines for the interval, and resets the interval's async counters. */
+		std::string AsyncReport();
 
 		/**
 		 * @brief CS_DCLF_GBUFFER_PROBE=<x>x<y>: read one texel of every main-pass target back and log it.
@@ -233,6 +296,8 @@ namespace DCLF
 			std::uint32_t inputs = 0;          // casters submitted, last view
 			std::uint32_t skippedPipeline = 0; // casters without a ready shadow pipeline, last view
 			std::uint32_t skippedTexture = 0;  // alpha-tested casters whose diffuse could not be resolved, last view
+			std::uint32_t deferredTextures = 0;   // of those, ones whose diffuse the lookups had not resolved yet (next frame)
+			std::uint32_t deferredPipelines = 0;  // casters whose shadow pipeline the lookups had no entry for yet
 			std::uint32_t records = 0;         // binding records, last frame
 			double cpuMs = 0.0;                // per report interval, all views
 			double captureMs = 0.0;            // per report interval, the hooks' captures

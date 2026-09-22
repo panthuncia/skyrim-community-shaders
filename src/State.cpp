@@ -5,6 +5,7 @@
 #include <pystring/pystring.h>
 
 #include "Deferred.h"
+#include "GpuIdleTrace.h"
 #include "FeatureIssues.h"
 #include "Features/CSEditor.h"
 #include "Features/CloudShadows.h"
@@ -533,7 +534,7 @@ void State::SaveToJson(nlohmann::json& settings)
 	advanced["Compiler Threads"] = shaderCache->compilationThreadCount;
 	advanced["Background Compiler Threads"] = shaderCache->backgroundCompilationThreadCount;
 	advanced["Use FileWatcher"] = shaderCache->UseFileWatcher();
-	advanced["Frame Annotations"] = frameAnnotations;
+	advanced["Frame Annotations"] = frameAnnotationsSetting.value_or(frameAnnotations);
 	advanced["Partial Precision"] = enablePartialPrecision.load(std::memory_order_relaxed);
 	settings["Advanced"] = advanced;
 
@@ -612,6 +613,11 @@ void State::LoadFromJson(nlohmann::json& settings)
 			shaderCache->SetFileWatcher(advanced["Use FileWatcher"]);
 		if (advanced.contains("Frame Annotations") && advanced["Frame Annotations"].is_boolean())
 			frameAnnotations = advanced["Frame Annotations"];
+		// The GPU idle trace attributes gaps to the engine's render phases, which only the annotations mark.
+		if (GpuIdleTrace::Requested() && !frameAnnotations) {
+			frameAnnotationsSetting = frameAnnotations;
+			frameAnnotations = true;
+		}
 		if (advanced.contains("Partial Precision") && advanced["Partial Precision"].is_boolean())
 			enablePartialPrecision.store(advanced["Partial Precision"].get<bool>(), std::memory_order_relaxed);
 	}
@@ -1006,6 +1012,7 @@ void State::BeginPerfEvent(std::string_view title)
 	s_tracyPerfZones.push_back(ctx);
 #endif
 	pPerf->BeginEvent(std::wstring(title.begin(), title.end()).c_str());
+	GpuIdleTrace::BeginEvent(title);
 }
 
 void State::EndPerfEvent()
@@ -1019,6 +1026,7 @@ void State::EndPerfEvent()
 	}
 #endif
 	pPerf->EndEvent();
+	GpuIdleTrace::EndEvent();
 }
 
 ScopedPerfEvent::ScopedPerfEvent(std::string_view a_name) :
@@ -1037,6 +1045,7 @@ ScopedPerfEvent::~ScopedPerfEvent()
 void State::SetPerfMarker(std::string_view title)
 {
 	pPerf->SetMarker(std::wstring(title.begin(), title.end()).c_str());
+	GpuIdleTrace::Mark(title);
 }
 
 void State::SetAdapterDescription(const std::wstring& description)

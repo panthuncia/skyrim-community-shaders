@@ -13,8 +13,8 @@
 
 struct DCLFObjectRecord
 {
-	float4 World[3];          // row_major float3x4, already relative to the eye
-	float4 PreviousWorld[3];  // likewise, relative to the previous eye
+	float4 World[3];          // row_major float3x4, absolute: the vertex stage subtracts the drawing camera's eye
+	float4 PreviousWorld[3];  // likewise, against the previous eye
 	float4 MaterialData;
 	float4 EmitColor;         // emissive in xyz, the per-object w of SSRParams in w
 	// The values that used to reach the shader as constant buffers of their own: Light Limit Fix's room
@@ -30,7 +30,7 @@ struct DCLFObjectRecord
 	float4 DCLFTreeParams;
 	float4 DCLFWindTimers;  // xy used
 	// Skinning: this object's bone palette rows in DCLFBones (three float4 rows a bone, current palette
-	// at DCLFBoneOffset, the previous frame's at DCLFPreviousBoneOffset), already relative to the eye.
+	// at DCLFBoneOffset, the previous frame's at DCLFPreviousBoneOffset), absolute like World.
 	uint DCLFBoneOffset;
 	uint DCLFPreviousBoneOffset;
 	uint DCLFBoneRows;

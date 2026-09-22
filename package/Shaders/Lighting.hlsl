@@ -124,10 +124,32 @@ cbuffer PerGeometry : register(b2)
 	float4 WorldMapOverlayParameters : packoffset(c14);
 };
 
+cbuffer VS_PerFrame : register(b12)
+{
+	row_major float3x3 ScreenProj : packoffset(c0);
+	row_major float4x4 ViewProj : packoffset(c8);
+#	if defined(SKINNED) || defined(DCLF_BINDLESS)
+	// posAdjust and its previous value (FrameBuffer's CameraPosAdjust and CameraPreviousPosAdjust): the
+	// skinning pivot, and under DCLF_BINDLESS also the eye the absolute object records are made relative to.
+	float3 BonesPivot : packoffset(c40);
+	float3 PreviousBonesPivot : packoffset(c41);
+#	endif  // SKINNED || DCLF_BINDLESS
+};
+
 #if defined(DCLF_BINDLESS)
-static float3x4 World = float3x4(DCLFObjects[DCLFObjectIndex].World[0], DCLFObjects[DCLFObjectIndex].World[1], DCLFObjects[DCLFObjectIndex].World[2]);
-static float3x4 PreviousWorld = float3x4(DCLFObjects[DCLFObjectIndex].PreviousWorld[0], DCLFObjects[DCLFObjectIndex].PreviousWorld[1],
-	DCLFObjects[DCLFObjectIndex].PreviousWorld[2]);
+// The record holds World and PreviousWorld absolute, so one record serves every epoch and every camera;
+// the vertex stage makes them relative to this epoch's eye and previous eye, the subtraction the engine
+// does on the CPU for its own draws. `precise` keeps it the same single float subtraction (so the depth
+// and colour epochs, and the native draws, agree to the bit) rather than something folded into the
+// transform that follows.
+static precise float3x4 World = float3x4(
+	DCLFObjects[DCLFObjectIndex].World[0] - float4(0, 0, 0, BonesPivot.x),
+	DCLFObjects[DCLFObjectIndex].World[1] - float4(0, 0, 0, BonesPivot.y),
+	DCLFObjects[DCLFObjectIndex].World[2] - float4(0, 0, 0, BonesPivot.z));
+static precise float3x4 PreviousWorld = float3x4(
+	DCLFObjects[DCLFObjectIndex].PreviousWorld[0] - float4(0, 0, 0, PreviousBonesPivot.x),
+	DCLFObjects[DCLFObjectIndex].PreviousWorld[1] - float4(0, 0, 0, PreviousBonesPivot.y),
+	DCLFObjects[DCLFObjectIndex].PreviousWorld[2] - float4(0, 0, 0, PreviousBonesPivot.z));
 // Tree animation is per object for the same reason World is: with DCLF_BINDLESS the PerGeometry
 // buffer is one block for the whole pipeline, and a tree's wind amplitude and clock are its own.
 static float4 TreeParams = DCLFObjects[DCLFObjectIndex].DCLFTreeParams;
@@ -138,16 +160,6 @@ static float4 LandBlendParams = DCLFBones[DCLFObjects[DCLFObjectIndex].DCLFExtra
 static row_major float3x4 TextureProj = float3x4(DCLFBones[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 1],
 	DCLFBones[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 2], DCLFBones[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 3]);
 #endif  // DCLF_BINDLESS
-
-cbuffer VS_PerFrame : register(b12)
-{
-	row_major float3x3 ScreenProj : packoffset(c0);
-	row_major float4x4 ViewProj : packoffset(c8);
-#	if defined(SKINNED)
-	float3 BonesPivot : packoffset(c40);
-	float3 PreviousBonesPivot : packoffset(c41);
-#	endif  // SKINNED
-};
 
 #	if defined(TREE_ANIM)
 float2 GetTreeShiftVector(float4 position, float4 color)
@@ -185,7 +197,7 @@ VS_OUTPUT main(VS_INPUT input)
 
 #		if defined(DCLF_BINDLESS)
 	float3x4 previousWorldMatrix =
-		Skinned::GetBoneTransformMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFPreviousBoneOffset, actualIndices, input.BoneWeights);
+		Skinned::GetBoneTransformMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFPreviousBoneOffset, actualIndices, PreviousBonesPivot, input.BoneWeights);
 #		else
 	float3x4 previousWorldMatrix =
 		Skinned::GetBoneTransformMatrix(PreviousBones, actualIndices, PreviousBonesPivot, input.BoneWeights);
@@ -194,7 +206,7 @@ VS_OUTPUT main(VS_INPUT input)
 		float4(mul(inputPosition, transpose(previousWorldMatrix)), 1);
 
 #		if defined(DCLF_BINDLESS)
-	float3x4 worldMatrix = Skinned::GetBoneTransformMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFBoneOffset, actualIndices, input.BoneWeights);
+	float3x4 worldMatrix = Skinned::GetBoneTransformMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFBoneOffset, actualIndices, BonesPivot, input.BoneWeights);
 #		else
 	float3x4 worldMatrix = Skinned::GetBoneTransformMatrix(Bones, actualIndices, BonesPivot, input.BoneWeights);
 #		endif
