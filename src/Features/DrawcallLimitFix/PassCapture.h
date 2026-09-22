@@ -77,8 +77,8 @@ namespace DCLF
 
 		void Install();
 		bool Installed() const { return installed; }
-		/** @brief Makes the hook a plain pass-through, for good: DCLF was forced off after install. */
-		void Bypass() { bypassed.store(true, std::memory_order_release); }
+		/** @brief Makes the hook a plain pass-through while set: DCLF is off (forced, or switched off in the menu). */
+		void SetBypassed(bool a_bypassed) { bypassed.store(a_bypassed, std::memory_order_release); }
 
 		/**
 		 * @brief Publishes the claim set for the frames that follow; render thread only.

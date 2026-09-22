@@ -119,4 +119,7 @@ typedef HRESULT(__stdcall* PFN_dxvkEnqueueInteropSubmission)(ID3D11Device* pDevi
 // Describes a buffer, texture or SRV and marks it stable (never relocated or renamed from then on).
 // Buffers the application can map are rejected (E_INVALIDARG): discard maps rename them.
 typedef HRESULT(__stdcall* PFN_dxvkGetInteropResourceInfo)(ID3D11Device* pDevice, IUnknown* pObject, DxvkOrgInteropResourceInfo* pInfo);
+// Address of the immediate context's submission counter: +1 each time DXVK closes a command list (implicit
+// flushes, Flush(), the flush ahead of an enqueued submission). Read on the immediate context's thread.
+typedef HRESULT(__stdcall* PFN_dxvkGetSubmissionCounter)(ID3D11Device* pDevice, const volatile uint64_t** ppCounter);
 }

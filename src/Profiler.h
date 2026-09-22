@@ -66,6 +66,10 @@ public:
 		float cpuP95Ms = 0.0f;
 		float cpuP99Ms = 0.0f;
 		bool valid = false;
+		// Share of recent samples whose begin and end timestamps landed in different DXVK submissions.
+		// Such a span also counts any time the GPU sat idle waiting for the later submission, so it
+		// overstates the pass; see Profiler.cpp.
+		float splitFraction = 0.0f;
 
 		const float* historyBuffer = nullptr;
 		uint32_t historyHead = 0;
@@ -119,6 +123,16 @@ public:
 	/** @brief Ends the current profiling frame and advances the ring buffer write cursor. */
 	void EndFrame();
 
+	/**
+	 * @brief Adds GPU time measured outside the D3D11 queries: the render graph's pass timestamps, and the
+	 * Streamline interop buffers' own timestamps. Work submitted outside DXVK's command lists must not also be
+	 * bracketed by a D3D11 timer, whose span would straddle the submission (see TimerResult::splitFraction).
+	 *
+	 * Samples accumulate until the next collected frame and are averaged over the frames that passed since the
+	 * last one, so a source that reports late or in bursts still yields a per-frame figure.
+	 */
+	void AddExternalSample(std::string_view a_name, float a_gpuMs);
+
 	/** @brief Gets the per-pass timing results from the last collected frame. */
 	const std::vector<TimerResult>& GetResults() const { return results; }
 
@@ -163,6 +177,8 @@ private:
 			std::string name;
 			LARGE_INTEGER cpuBegin{};
 			float cpuMs = 0.0f;
+			uint64_t submissionAtBegin = 0;
+			bool split = false;
 		};
 		std::vector<TimerPair> timers;
 		uint32_t activeCount = 0;
@@ -189,11 +205,16 @@ private:
 		std::string name;
 		RollingHistory gpu;
 		RollingHistory cpu;
+		RollingHistory split;
 		uint64_t lastSampleFrame = 0;
 	};
+	std::unordered_map<std::string, float> pendingExternal;
+	uint32_t framesSinceExternalMerge = 0;
 	std::vector<KnownTimer> knownTimers;
 	std::unordered_map<std::string, size_t> knownTimerIndex;
 	uint64_t collectedFrames = 0;
+	// DXVK's submission counter (dxvkGetSubmissionCounter), or null on native D3D11 or an older DXVK.
+	const volatile uint64_t* submissionCounter = nullptr;
 	float totalTimeMs = 0.0f;
 	float cpuTotalTimeMs = 0.0f;
 
@@ -201,6 +222,7 @@ private:
 
 	/** @brief Drops timers that have not been sampled for kTimerRetireFrames, so disabled passes stop reporting stale values. */
 	void RetireStaleTimers();
+	void LogResultsIfRequested() const;
 
 	/** @brief Repoints knownTimerIndex at the current knownTimers positions after an erase. */
 	void RebuildTimerIndex();

@@ -1,6 +1,7 @@
 #include "DXVKInterop.h"
 
 #include "Globals.h"
+#include "Profiler.h"
 
 #include <algorithm>
 
@@ -530,6 +531,8 @@ bool DXVKInterop::CreateCommandResources(uint32_t a_framesInFlight)
 	commandFrameIndex = 0;
 	pendingViewDeletes.assign(framesInFlight, {});
 	pendingResourceReleases.assign(framesInFlight, {});
+	slotTimingLabels.assign(framesInFlight, nullptr);
+	CreateTimingPool();
 	logger::info("[DXVKInterop] Command ring created ({} frames in flight, queueFamily {})", framesInFlight, queueFamilyIndex);
 	return true;
 }
@@ -589,6 +592,13 @@ void DXVKInterop::DestroyCommandResources()
 		f = VK_NULL_HANDLE;
 	}
 	commandFences.clear();
+
+	if (timingPool != VK_NULL_HANDLE) {
+		vkDestroyQueryPool(device, timingPool, nullptr);
+		timingPool = VK_NULL_HANDLE;
+	}
+	slotTimingLabels.clear();
+	harvestedTimings.clear();
 
 	if (commandPool != VK_NULL_HANDLE) {
 		DestroyCommandPool(device, commandPool);
@@ -691,7 +701,71 @@ bool DXVKInterop::FrameGenerationQueueInteropReady() const
 	return available;
 }
 
-DXVKInterop::CommandTransaction DXVKInterop::BeginFrameCommandBuffer()
+void DXVKInterop::CreateTimingPool()
+{
+	if (timingPool != VK_NULL_HANDLE || physicalDevice == VK_NULL_HANDLE)
+		return;
+
+	VkPhysicalDeviceProperties props{};
+	vkGetPhysicalDeviceProperties(physicalDevice, &props);
+	uint32_t familyCount = 0;
+	vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, nullptr);
+	std::vector<VkQueueFamilyProperties> families(familyCount);
+	vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, families.data());
+	if (queueFamilyIndex >= familyCount || families[queueFamilyIndex].timestampValidBits == 0 ||
+		props.limits.timestampPeriod <= 0.0f) {
+		logger::info("[DXVKInterop] Queue family {} has no timestamps; interop GPU timings are off", queueFamilyIndex);
+		return;
+	}
+
+	VkQueryPoolCreateInfo info{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+	info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+	info.queryCount = kMaxTimedSlots * 2;
+	if (vkCreateQueryPool(device, &info, nullptr, &timingPool) != VK_SUCCESS) {
+		timingPool = VK_NULL_HANDLE;
+		logger::warn("[DXVKInterop] vkCreateQueryPool failed; interop GPU timings are off");
+		return;
+	}
+	timestampPeriodNs = props.limits.timestampPeriod;
+}
+
+void DXVKInterop::HarvestSlotTiming(uint32_t a_slot)
+{
+	if (a_slot >= slotTimingLabels.size() || !slotTimingLabels[a_slot])
+		return;
+	const char* label = std::exchange(slotTimingLabels[a_slot], nullptr);
+	if (timingPool == VK_NULL_HANDLE)
+		return;
+
+	uint64_t ticks[2] = {};
+	if (vkGetQueryPoolResults(device, timingPool, a_slot * 2, 2, sizeof(ticks), ticks, sizeof(uint64_t),
+			VK_QUERY_RESULT_64_BIT) != VK_SUCCESS || ticks[1] < ticks[0])
+		return;
+	const double ms = static_cast<double>(ticks[1] - ticks[0]) * timestampPeriodNs * 1e-6;
+	if (harvestedTimings.size() < 256)
+		harvestedTimings.emplace_back(label, static_cast<float>(ms));
+}
+
+void DXVKInterop::PublishCommandTimings()
+{
+	std::vector<std::pair<const char*, float>> timings;
+	{
+		std::lock_guard lock(commandRingMutex);
+		if (device == VK_NULL_HANDLE || commandRingFaulted)
+			return;
+		for (uint32_t slot = 0; slot < slotTimingLabels.size() && slot < commandFences.size(); ++slot) {
+			if (slotTimingLabels[slot] && GetFenceStatusSEH(device, commandFences[slot]).result == VK_SUCCESS)
+				HarvestSlotTiming(slot);
+		}
+		timings.swap(harvestedTimings);
+	}
+	if (!globals::profiler)
+		return;
+	for (const auto& [label, ms] : timings)
+		globals::profiler->AddExternalSample(label, ms);
+}
+
+DXVKInterop::CommandTransaction DXVKInterop::BeginFrameCommandBuffer(const char* a_timingLabel)
 {
 	std::unique_lock ringLock(commandRingMutex);
 	if (commandPool == VK_NULL_HANDLE || commandRingFaulted)
@@ -745,6 +819,7 @@ DXVKInterop::CommandTransaction DXVKInterop::BeginFrameCommandBuffer()
 				commandBuffers.push_back(newCb);
 				commandFences.push_back(newFence);
 				pendingViewDeletes.emplace_back();
+				slotTimingLabels.push_back(nullptr);
 				pendingResourceReleases.emplace_back();
 				next = framesInFlight;
 				++framesInFlight;
@@ -772,6 +847,8 @@ DXVKInterop::CommandTransaction DXVKInterop::BeginFrameCommandBuffer()
 	}
 	commandFrameIndex = next;
 	VkCommandBuffer cb = commandBuffers[commandFrameIndex];
+	// The slot's fence has signalled, so its previous timestamps are final; take them before reuse.
+	HarvestSlotTiming(commandFrameIndex);
 
 	if (commandFrameIndex < pendingViewDeletes.size()) {
 		auto& dead = pendingViewDeletes[commandFrameIndex];
@@ -810,7 +887,15 @@ DXVKInterop::CommandTransaction DXVKInterop::BeginFrameCommandBuffer()
 			static_cast<int>(beginAttempt.result));
 		return {};
 	}
-	return CommandTransaction(this, commandFrameIndex, cb, std::move(ringLock));
+	CommandTransaction transaction(this, commandFrameIndex, cb, std::move(ringLock));
+	if (a_timingLabel && timingPool != VK_NULL_HANDLE && commandFrameIndex < kMaxTimedSlots) {
+		// ALL_COMMANDS: written once every earlier command on the queue has finished, so the pair
+		// measures this buffer's work and not the tail of the D3D11 frame flushed ahead of it.
+		vkCmdResetQueryPool(cb, timingPool, commandFrameIndex * 2, 2);
+		vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, timingPool, commandFrameIndex * 2);
+		transaction.timingLabel = a_timingLabel;
+	}
+	return transaction;
 }
 
 bool DXVKInterop::SubmitFrameCommandBuffer(CommandTransaction& a_transaction)
@@ -825,6 +910,9 @@ bool DXVKInterop::SubmitFrameCommandBuffer(CommandTransaction& a_transaction)
 	const VkCommandBuffer commandBuffer = a_transaction.commandBuffer;
 
 	VkFence& fence = commandFences[slot];
+
+	if (a_transaction.timingLabel)
+		vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, timingPool, slot * 2 + 1);
 
 	const QueueSubmitAttempt attempt = DirectQueueSubmitSEH(
 		interopDevice.get(), device, queue, commandBuffer, fence);
@@ -848,6 +936,8 @@ bool DXVKInterop::SubmitFrameCommandBuffer(CommandTransaction& a_transaction)
 		return false;
 	}
 	a_transaction.submitted = true;
+	if (a_transaction.timingLabel && slot < slotTimingLabels.size())
+		slotTimingLabels[slot] = a_transaction.timingLabel;
 	return true;
 }
 

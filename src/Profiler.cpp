@@ -1,5 +1,7 @@
 #include "Profiler.h"
 
+#include "RenderGraph/DxvkOrgInterop.h"
+
 #include <algorithm>
 #include <unordered_map>
 
@@ -57,6 +59,19 @@ void Profiler::Initialize(ID3D11Device* device, ID3D11DeviceContext* a_context)
 		frame.inFlight = false;
 	}
 
+	// DXVK's timestamp queries are written at ALL_COMMANDS, so a pair inside one submission measures just
+	// the work between them. A pair across a submission boundary (an implicit flush, the flush ahead of an
+	// interop or render-graph submission) also counts the time the queue waited for the later submission,
+	// so those samples are flagged.
+	submissionCounter = nullptr;
+	if (HMODULE dxvk = GetModuleHandleW(L"dxvk_d3d11.dll")) {
+		if (auto getCounter = reinterpret_cast<PFN_dxvkGetSubmissionCounter>(
+				reinterpret_cast<void*>(GetProcAddress(dxvk, "dxvkGetSubmissionCounter")));
+			getCounter && FAILED(getCounter(device, &submissionCounter)))
+			submissionCounter = nullptr;
+	}
+	logger::info("[Profiler] DXVK submission counter {}", submissionCounter ? "found: split timers are flagged" : "unavailable");
+
 	writeFrame = 0;
 	readFrame = 0;
 	framesSinceInit = 0;
@@ -92,6 +107,7 @@ void Profiler::BeginFrame()
 	frame.activeCount = 0;
 	frame.inFlight = true;
 	frameActive = true;
+	++framesSinceExternalMerge;
 	context->Begin(frame.disjoint.get());
 }
 
@@ -111,6 +127,7 @@ void Profiler::BeginPass(const std::string& name)
 	timer.name = name;
 	context->End(timer.begin.get());
 	QueryPerformanceCounter(&timer.cpuBegin);
+	timer.submissionAtBegin = submissionCounter ? *submissionCounter : 0;
 
 	if (beginPerfEvent)
 		beginPerfEvent(name);
@@ -132,10 +149,18 @@ void Profiler::EndPass()
 	timer.cpuMs = static_cast<float>(static_cast<double>(cpuEnd.QuadPart - timer.cpuBegin.QuadPart) * cpuTicksToMs);
 
 	context->End(timer.end.get());
+	timer.split = submissionCounter && *submissionCounter != timer.submissionAtBegin;
 	frame.activeCount++;
 
 	if (endPerfEvent)
 		endPerfEvent({});
+}
+
+void Profiler::AddExternalSample(std::string_view a_name, float a_gpuMs)
+{
+	if (!initialized)
+		return;
+	pendingExternal[std::string(a_name)] += a_gpuMs;
 }
 
 void Profiler::EndFrame()
@@ -204,9 +229,31 @@ void Profiler::CollectResults()
 			auto& known = knownTimers[it->second];
 			known.gpu.PushSample(ms);
 			known.cpu.PushSample(timer.cpuMs);
+			known.split.PushSample(timer.split ? 1.0f : 0.0f);
 			known.lastSampleFrame = collectedFrames;
 		}
 	}
+
+	// The render graph's passes: GPU time from its own timestamps, per frame over the frames since the last
+	// merge. Independent of the D3D11 disjoint flag, which says nothing about the graph's queries.
+	const float externalFrames = static_cast<float>(std::max(1u, framesSinceExternalMerge));
+	for (const auto& [name, gpuMs] : pendingExternal) {
+		const float ms = gpuMs / externalFrames;
+		activeTimers[name].gpuMs += ms;
+		activeTotalMs += ms;
+		auto [it, inserted] = knownTimerIndex.try_emplace(name, knownTimers.size());
+		if (inserted) {
+			KnownTimer kt;
+			kt.name = name;
+			knownTimers.push_back(std::move(kt));
+		}
+		auto& known = knownTimers[it->second];
+		known.gpu.PushSample(ms);
+		known.cpu.PushSample(0.0f);
+		known.lastSampleFrame = collectedFrames;
+	}
+	pendingExternal.clear();
+	framesSinceExternalMerge = 0;
 
 	RetireStaleTimers();
 
@@ -233,11 +280,41 @@ void Profiler::CollectResults()
 		result.cpuP95Ms = known.cpu.GetPercentile(95.0f);
 		result.cpuP99Ms = known.cpu.GetPercentile(99.0f);
 		result.valid = true;
+		result.splitFraction = known.split.count ? known.split.GetAverage() : 0.0f;
 		result.historyBuffer = known.gpu.history;
 		result.historyHead = known.gpu.head;
 		result.historyCount = known.gpu.count;
 		results.push_back(std::move(result));
 	}
+
+	LogResultsIfRequested();
+}
+
+void Profiler::LogResultsIfRequested() const
+{
+	// CS_PROFILER_LOG=<frames>: log the rolling averages every that many collected frames, for runs where
+	// the menu cannot be read (automated validation, comparing two configurations from their logs).
+	static const uint64_t interval = [] {
+		char value[32] = {};
+		const DWORD length = GetEnvironmentVariableA("CS_PROFILER_LOG", value, sizeof(value));
+		return length && length < sizeof(value) ? std::strtoull(value, nullptr, 10) : 0ull;
+	}();
+	if (interval == 0 || collectedFrames % interval != 0)
+		return;
+
+	std::vector<const TimerResult*> sorted;
+	for (const auto& r : results)
+		sorted.push_back(&r);
+	std::sort(sorted.begin(), sorted.end(), [](const auto* a, const auto* b) { return a->avgMs > b->avgMs; });
+	std::string line;
+	for (const auto* r : sorted) {
+		if (r->avgMs < 0.01f)
+			continue;
+		line += fmt::format(" | {} {:.2f}/p95 {:.2f}", r->name, r->avgMs, r->p95Ms);
+		if (r->splitFraction > 0.0f)
+			line += fmt::format(" [split {:.0f}%]", r->splitFraction * 100.0f);
+	}
+	logger::info("[Profiler] frame {} total {:.2f} ms{}", collectedFrames, totalTimeMs, line);
 }
 void Profiler::RetireStaleTimers()
 {

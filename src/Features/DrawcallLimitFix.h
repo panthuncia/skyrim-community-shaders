@@ -27,6 +27,7 @@ struct DrawcallLimitFix : Feature
 
 	virtual void PostPostLoad() override;
 	virtual void SetupResources() override;
+	virtual bool AppliesBootToggleLive() const override { return true; }
 	virtual void Reset() override;
 	virtual void Prepass() override;
 	virtual void EarlyPrepass() override;
@@ -110,6 +111,14 @@ private:
 	};
 
 	bool installed = false;
+	// The menu's on/off toggle, applied at the next Present. Off keeps the hooks and the scene tracking (so
+	// switching back on needs no rescan) but does no frame work: nothing is built, drawn, skipped or withheld.
+	bool switchedOn = true;
+	bool Running() const { return installed && switchedOn; }
+	// Off when the menu's toggle is off or the feature is unloaded (Feature::loaded, which the remote toggle
+	// flips): either way nothing may keep drawing, skipping or withholding.
+	void UpdateActive();
+	void SetActive(bool a_active);
 	// Why DCLF was forced off after install (the render graph could not come up); shown in the menu.
 	std::string unavailableReason;
 	bool inDepthPass = false;

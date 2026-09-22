@@ -1597,8 +1597,12 @@ void Upscaling::Upscale()
 
 	auto& motionVector = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
 
+	if (auto* dxvk = DXVKInterop::GetSingleton(); dxvk && dxvk->IsAvailable())
+		dxvk->PublishCommandTimings();
+
 	{
-		globals::profiler->BeginPass("Upscaling::Upscale");
+		// GPU time comes from the interop buffer's own timestamps (PublishCommandTimings above); a D3D11 timer
+		// around the evaluation would straddle that buffer's submission and count the queue's idle time.
 		state->BeginPerfEvent("Upscaling");
 		TracyD3D11Zone(globals::state->tracyCtx, "Upscaling Dispatch");
 
@@ -1637,11 +1641,12 @@ void Upscaling::Upscale()
 			}
 		}
 
+		// Not timed: this is the first use of either image in DXVK's next command list, so DXVK moves the copy
+		// into that list's init buffer, ahead of any timestamp a D3D11 timer here would write.
 		if (result == Streamline::EvaluationResult::kReady)
 			context->CopyResource(main.texture, upscaledTexture->resource.get());
 
 		state->EndPerfEvent();
-		globals::profiler->EndPass();
 	}
 }
 

@@ -8,6 +8,7 @@
 #include "DxvkLoader.h"
 #include "Features/Upscaling/DXVKInteropInterfaces.h"
 #include "Globals.h"
+#include "Profiler.h"
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "State.h"
 
@@ -163,16 +164,46 @@ struct RenderGraphRuntime::Impl
 		std::sort(samples.begin(), samples.end(), [](const Sample& a, const Sample& b) { return a.begin < b.begin; });
 		auto& segmentTime = segmentTimes[segmentIndex];
 		std::uint64_t previousEnd = samples.front().begin;
+		const auto epochSegment = static_cast<Segment>(segmentIndex);
 		for (const auto& sample : samples) {
-			auto& pass = segmentTime.passes[names[sample.pass]];
+			const auto& name = names[sample.pass];
+			auto& pass = segmentTime.passes[name];
 			pass.inclusiveMs += double(sample.end - sample.begin) * toMs;
 			const std::uint64_t from = (std::max)(previousEnd, sample.begin);
-			pass.exclusiveMs += sample.end > from ? double(sample.end - from) * toMs : 0.0;
+			const double exclusiveMs = sample.end > from ? double(sample.end - from) * toMs : 0.0;
+			pass.exclusiveMs += exclusiveMs;
 			previousEnd = (std::max)(previousEnd, sample.end);
+			// Into the main profiling window. Every epoch runs every pass, and one with nothing to do in this
+			// segment costs a few microseconds of empty timestamps: leave those out rather than list each pass
+			// under every segment.
+			if (globals::profiler && exclusiveMs >= kProfilerMinPassMs)
+				globals::profiler->AddExternalSample(ProfilerName(epochSegment, name), static_cast<float>(exclusiveMs));
 		}
 		segmentTime.spanMs += double(previousEnd - samples.front().begin) * toMs;
 		++segmentTime.epochs;
 		++timedEpochs;
+	}
+
+	static constexpr double kProfilerMinPassMs = 0.003;
+
+	// "<Feature>::<segment> / <pass>", so the profiling window groups graph passes under their feature. These are
+	// the only timings of an epoch: a D3D11 timer around ExecuteEpoch would straddle its submission and also count
+	// the queue's idle time between DXVK's command lists.
+	static std::string ProfilerName(Segment a_segment, const std::string& a_pass)
+	{
+		switch (a_segment) {
+		case Segment::LightCulling:
+			return "LightLimitFix::RenderGraphCull / " + a_pass;
+		case Segment::ZPrepass:
+			return "DrawcallLimitFix::Z-prepass / " + a_pass;
+		case Segment::MainOpaque:
+			return "DrawcallLimitFix::Main opaque / " + a_pass;
+		case Segment::DebugView:
+			return "DrawcallLimitFix::Debug view / " + a_pass;
+		case Segment::ShadowView:
+			return "DrawcallLimitFix::Shadow views / " + a_pass;
+		}
+		return "RenderGraph::" + a_pass;
 	}
 
 	void RecordEpoch(std::chrono::steady_clock::duration a_elapsed)

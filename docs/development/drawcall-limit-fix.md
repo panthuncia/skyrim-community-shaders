@@ -1427,7 +1427,7 @@ they are not part of the witness.
 | `CS_DCLF_CULL=off\|frustum\|occlusion` | How BuildDrawsCS filters the candidates before writing their sequences: nothing, the frustum, or the frustum and then the HZB. |
 | `CS_DCLF_CULL_INPUT=native\|tracked` | Which candidates may be drawn: only what the engine's culling kept (the default), or whatever the GPU culling keeps. `tracked` still shades incorrectly (see Phase 4). |
 | `CS_DCLF_BUILD_PARITY=1` | Every 300 epochs, read BuildDraws' output back and compare it with the CPU templates (`BuildDraws parity OK/MISMATCH`). |
-| `CS_DCLF=0` | Turns the feature off entirely: no hooks, no tables, no draws. Anything else, including unset, leaves it on. |
+| `CS_DCLF=0` | Turns the feature off entirely: no hooks, no tables, no draws. Anything else, including unset, leaves it on. The feature list's on/off toggle, by contrast, applies live: off keeps the hooks and the scene tracking but does no frame work (nothing built, drawn, skipped or withheld, claims dropped), and back on resumes at the next frame without a rescan. Unloading the feature (`Feature::loaded`, the remote toggle) does the same. |
 | `CS_DCLF_TABLES=tracked\|accumulated` | Whether the tables hold the whole tracked set or only what the engine's accumulator kept. `accumulated` was the fallback while the per-pipeline template defect was open; `tracked` is now correct. |
 | `CS_DCLF_EVAL=off\|material\|geometry` | Diagnostic: suppresses parts of the stand-in evaluation. Note that a suppressed evaluation also stops its objects being drawn, so a clean frame under it proves nothing on its own. |
 | `CS_DCLF_OWNERSHIP=static` | Withhold claimed passes from the main camera's batch renderer, so DCLF owns those objects outright. Default off. |
@@ -1438,6 +1438,7 @@ they are not part of the witness.
 | `CS_DCLF_MATERIAL_CACHE=probe` | Diagnostic: measures how many material records are unchanged from the previous frame, i.e. whether a cross-frame cache could work. |
 | `CS_DCLF_EVAL=audit` | Diagnostic: snapshots pipeline state around every stand-in call and reports anything not restored. Very slow; the frame rate collapses. |
 | `CS_DCLF_SHADER_DEBUG=1` | Build the Lighting and Utility SPIR-V with source-level debug info (`-Zi`: `OpSource` with every file's text embedded, and `OpLine`), so Nsight and RenderDoc show source for DCLF's draws. Still optimized. Not `-fspv-debug=vulkan`: its `DebugValue`s keep dead loads alive, so stages read resources their passes do not bind and every candidate is skipped; `vulkan-with-source` also fails DXC 1.9's own validator. There is deliberately no `-Od` form either: unoptimized code reads per-frame constant buffers the epochs do not supply (VS b6, PS b7). The Z-prepass stage (`DCLF_DEPTH_ONLY`) compiles the lighting out of `Lighting.hlsl` rather than relying on the optimizer. The debug builds have their own cache keys. The shader files the game sees through MO2's VFS are also copied, keeping their `Data/Shaders/...` layout, to `CS_DCLF_SHADER_SOURCE_DIR` (default `<Documents>\My Games\Skyrim Special Edition\SKSE\CommunityShaders-ShaderSource`). Shaders DXVK translates from DXBC get no source info this way. The build-time SPIR-V (BuildDrawsCS, HzbCS, LLF's cluster shaders) is always built with `-Zi` (`cmake/RenderGraph.cmake`). Dev-Fast builds do not package it: copy `build/Dev-Fast/generated/Shaders/*/ORG/*.spv` into the mod's `Shaders` folder after changing those shaders. |
+| `CS_DCLF_TEST_TOGGLE=<off>:<on>` | Test runs: flips the feature's menu toggle off and back on at those frames (loading screens not counted), to exercise the live on/off. |
 | `CS_DCLF_TEST_COMMANDS=<frame>:<command>;…` | Test runs: run each console command on the main thread once that many frames have been presented (loading screens do not count), for coverage runs from the auto-loaded save. The counter is independent of the feature, so a `CS_DCLF=0` control reaches the same place at the same hour. |
 
 ### Capture tools and GPU timing
@@ -1453,6 +1454,10 @@ they are not part of the witness.
   against 0.006 ms in BuildDraws' dispatches; Z-prepass 0.49 ms of draws and 0.10 ms of HZB; shadow
   views 1.29 ms of draws. The `vkCmdDrawIndexedIndirect` calls outside every DCLF region are DXVK's translation of
   Grass Optimizations' D3D11 `DrawIndexedInstancedIndirect` calls.
+- The profiling window lists every render-graph pass that did work, from the same timestamps, under its
+  feature: `DrawcallLimitFix::<segment> / <pass>`, and `LightLimitFix::RenderGraphCull / <pass>`. No D3D11
+  timer brackets an epoch: it would straddle the epoch's submission and count the queue's idle time too
+  (see "GPU timing in the profiling window" in [render-graph.md](render-graph.md)).
 - RenderDoc (1.46) does not support `VK_EXT_descriptor_heap`. With RenderDoc capture on, the render graph
   cannot start and DCLF is forced off for the session; the log and the feature's menu page say why.
 

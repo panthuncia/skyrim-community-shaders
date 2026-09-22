@@ -50,6 +50,7 @@ public:
 		DXVKInterop* owner = nullptr;
 		uint32_t slot = UINT32_MAX;
 		VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+		const char* timingLabel = nullptr;
 		bool submitted = false;
 		bool submissionMayBeInFlight = false;
 		std::unique_lock<std::recursive_mutex> ringLock;
@@ -110,11 +111,25 @@ public:
 	/** @brief Whether frame generation shares DXVK's game submission queue. */
 	bool FrameGenerationQueueInteropReady() const;
 
-	/** @brief Begins an available command buffer from the ring. */
-	CommandTransaction BeginFrameCommandBuffer();
+	/**
+	 * @brief Begins an available command buffer from the ring.
+	 * @param a_timingLabel Profiler name to time this buffer's GPU work under, or nullptr. The label must
+	 *        outlive the submission (a string literal). See PublishCommandTimings.
+	 */
+	CommandTransaction BeginFrameCommandBuffer(const char* a_timingLabel = nullptr);
 
 	/** @brief Submits a ring command buffer on DXVK's queue. */
 	bool SubmitFrameCommandBuffer(CommandTransaction& a_transaction);
+
+	/**
+	 * @brief Hands the GPU times of completed, labelled ring submissions to the CS profiler.
+	 *
+	 * These buffers are submitted between two DXVK submissions (SubmitFrameCommandBuffer flushes D3D11
+	 * first), so a D3D11 timestamp pair around them also spans every GPU idle gap until DXVK's next
+	 * submission reaches the queue. Timestamps recorded inside the buffer itself measure only its work.
+	 * Call on the render thread, which owns the profiler.
+	 */
+	void PublishCommandTimings();
 
 	/** @brief Defers image-view destruction until the current ring slot completes. */
 	void QueueViewsForDeferredDelete(const CommandTransaction& a_transaction,
@@ -175,4 +190,16 @@ private:
 	std::vector<std::vector<winrt::com_ptr<ID3D11Resource>>> pendingResourceReleases;
 	uint32_t framesInFlight = 0;
 	uint32_t commandFrameIndex = 0;
+
+	/// Two timestamps per ring slot, sized for the ring's maximum depth.
+	static constexpr uint32_t kMaxTimedSlots = 64;
+	VkQueryPool timingPool = VK_NULL_HANDLE;
+	double timestampPeriodNs = 0.0;
+	/// Label of the timed submission each slot still holds results for (nullptr: none).
+	std::vector<const char*> slotTimingLabels;
+	/// Harvested (label, milliseconds) pairs awaiting PublishCommandTimings.
+	std::vector<std::pair<const char*, float>> harvestedTimings;
+
+	void CreateTimingPool();
+	void HarvestSlotTiming(uint32_t a_slot);
 };

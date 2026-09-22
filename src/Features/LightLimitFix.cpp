@@ -684,10 +684,9 @@ bool LightLimitFix::CullOnRenderGraph(const eastl::vector<LightData>& a_lightsDa
 	std::memcpy(inputs.cameraProjInverse.data(), &globals::game::frameBufferCached.GetCameraProjInverse(), sizeof(float) * 16);
 	std::memcpy(inputs.cameraView.data(), &globals::game::frameBufferCached.GetCameraView(), sizeof(float) * 16);
 
-	globals::profiler->BeginPass("LightLimitFix::RenderGraphCull");
-	const bool culled = orgCulling.Execute(inputs);
-	globals::profiler->EndPass();
-	return culled;
+	// No D3D11 timer here: the epoch is submitted between two DXVK command lists, so one would also count the
+	// queue's idle time. Its passes report their own GPU time (RenderGraphRuntime::ProfilerName).
+	return orgCulling.Execute(inputs);
 }
 
 void LightLimitFix::UpdateStructure()

@@ -229,6 +229,12 @@ public:
 	virtual bool ToggleAtBootSetting();
 
 	/**
+	 * @brief Whether the menu's on/off toggle also takes effect in the running session, not only at the next
+	 * boot. A feature that returns true reads IsFeatureDisabled itself each frame and stands down or resumes.
+	 */
+	virtual bool AppliesBootToggleLive() const { return false; }
+
+	/**
 	 * @brief Reapplies override settings for this feature if available
 	 * @return True if overrides were found and applied, false otherwise
 	 */

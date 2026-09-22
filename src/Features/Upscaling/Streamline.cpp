@@ -1342,7 +1342,9 @@ static sl::Result cs_EvaluateFeatureCore(sl::Feature a_feature, const sl::Viewpo
 		tags[nt++] = sl::ResourceTag{ &hudlessRes, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent };
 
 	sl::Result evalRes = sl::Result::eErrorNotInitialized;
-	auto transaction = dxvk->BeginFrameCommandBuffer();
+	// Timed inside the buffer: a D3D11 timer around it would straddle the submission (DXVKInterop.h).
+	auto transaction = dxvk->BeginFrameCommandBuffer(
+		a_feature == sl::kFeatureFSR_G ? nullptr : "Upscaling::Upscale");
 	if (transaction) {
 		const VkCommandBuffer cmd = transaction.GetCommandBuffer();
 		const sl::Result tagRes = cs_SetTagForFrame(*token, a_viewport, tags, nt, cmd);

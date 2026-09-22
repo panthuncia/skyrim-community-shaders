@@ -99,6 +99,40 @@ namespace
 		std::uint32_t frame = 0;
 	};
 
+	/**
+	 * @brief Test switch CS_DCLF_TEST_TOGGLE="<off frame>:<on frame>": flips the feature's menu toggle (the
+	 * same disabled flag the feature list writes) at those frames, loading screens not counted, to exercise
+	 * switching DCLF off and back on in a running session. The flag is restored to on at the second frame.
+	 */
+	class TestToggle
+	{
+	public:
+		TestToggle()
+		{
+			const std::string value = DCLF::SwitchValue("CS_DCLF_TEST_TOGGLE");
+			if (const auto colon = value.find(':'); colon != std::string::npos) {
+				offFrame = static_cast<std::uint32_t>(std::strtoul(value.substr(0, colon).c_str(), nullptr, 10));
+				onFrame = static_cast<std::uint32_t>(std::strtoul(value.substr(colon + 1).c_str(), nullptr, 10));
+			}
+		}
+
+		void OnFrame(const std::string& a_feature)
+		{
+			if (!offFrame || DCLF::SceneStore::IsLoadingScreenUp())
+				return;
+			++frame;
+			if (frame == offFrame || frame == onFrame) {
+				logger::info("[DCLF] test toggle at frame {}: {}", frame, frame == offFrame ? "off" : "on");
+				globals::state->SetFeatureDisabled(a_feature, frame == offFrame);
+			}
+		}
+
+	private:
+		std::uint32_t offFrame = 0;
+		std::uint32_t onFrame = 0;
+		std::uint32_t frame = 0;
+	};
+
 	// Render-thread CPU spent on scene capture, averaged over a report interval.
 	struct CaptureTiming
 	{
@@ -179,7 +213,7 @@ void DrawcallLimitFix::SetupResources()
 	unavailableReason = RenderGraphRuntime::Get().GetDisabledReason();
 	installed = false;
 	DCLF::SceneTracker::Get().Stop();
-	DCLF::PassCapture::Get().Bypass();
+	DCLF::PassCapture::Get().SetBypassed(true);
 	logger::warn("[DCLF] Forced off: the render graph is unavailable ({}); the game renders natively", unavailableReason);
 }
 
@@ -189,6 +223,8 @@ void DrawcallLimitFix::Reset()
 	// the same in-game hour as the run it is compared against.
 	static TestCommands testCommands;
 	testCommands.OnFrame();
+	static TestToggle testToggle;
+	testToggle.OnFrame(GetShortName());
 
 	// Every Present, in menus too: the tracker's queue holds references to attached subtrees and
 	// must not grow while the world is not rendered.
@@ -197,11 +233,41 @@ void DrawcallLimitFix::Reset()
 	const auto start = std::chrono::steady_clock::now();
 	DCLF::SceneStore::Get().ProcessEvents();
 	timing.eventsMs += MillisecondsSince(start);
+	// The menu's toggle, between frames. Scene events keep flowing above while off, so the tracked set is
+	// current the moment it comes back on.
+	UpdateActive();
+}
+
+void DrawcallLimitFix::UpdateActive()
+{
+	if (!installed)
+		return;
+	if (const bool wanted = loaded && !globals::state->IsFeatureDisabled(GetShortName()); wanted != switchedOn)
+		SetActive(wanted);
+}
+
+void DrawcallLimitFix::SetActive(bool a_active)
+{
+	switchedOn = a_active;
+	auto& capture = DCLF::PassCapture::Get();
+	// Off: every pass reaches the batch renderers again, and no claim outlives the switch. Back on, the claims
+	// are empty until the first frame republishes them, so nothing is withheld that DCLF has not drawn.
+	capture.SetBypassed(!a_active);
+	capture.PublishClaims(nullptr);
+	for (std::uint32_t mode = 0; mode < DCLF::PassCapture::kShadowModes; ++mode)
+		capture.PublishShadowClaims(mode, nullptr);
+	if (a_active)
+		DCLF::SceneStore::Get().InvalidateVerdicts();
+	skipCounters = {};
+	logger::info("[DCLF] {} from the menu", a_active ? "Switched on" : "Switched off; the game renders natively");
 }
 
 void DrawcallLimitFix::BeforeShadowMaps()
 {
-	if (!installed)
+	// Called directly by Deferred every frame, loaded or not: the one place an unload (which stops Reset
+	// from being called) is noticed.
+	UpdateActive();
+	if (!Running())
 		return;
 	// The scene half of the tables, before the engine draws the shadow maps: the scene graph and the
 	// main camera's culling are final here, and the records a shadow view needs exist from this point.
@@ -227,7 +293,7 @@ void DrawcallLimitFix::BeforeShadowMaps()
 
 void DrawcallLimitFix::AfterShadowMaps()
 {
-	if (!installed)
+	if (!Running())
 		return;
 	// The frame's shadow epoch: every view the 0x2A hook captured, drawn in one graph execution.
 	DCLF::IndirectDraws::Get().ExecuteShadowFrame();
@@ -237,7 +303,7 @@ void DrawcallLimitFix::AfterShadowMaps()
 
 void DrawcallLimitFix::EarlyPrepass()
 {
-	if (!installed)
+	if (!Running())
 		return;
 
 	// The tables are built here, from Main_RenderShadowMaps, rather than in Prepass from StartDeferred.
@@ -317,7 +383,7 @@ void DrawcallLimitFix::EarlyPrepass()
 
 void DrawcallLimitFix::Prepass()
 {
-	if (!installed)
+	if (!Running())
 		return;
 
 	auto& store = DCLF::SceneStore::Get();
@@ -601,7 +667,7 @@ bool DrawcallLimitFix::SkipNativePass(RE::BSRenderPass* a_pass)
 	const bool onlyEligible = toggles.onlyEligible;
 	if (noSkip && !onlyEligible)
 		return false;
-	if (!installed || !a_pass || !a_pass->geometry || (!DCLF::IndirectDraws::Hybrid() && !onlyEligible))
+	if (!Running() || !a_pass || !a_pass->geometry || (!DCLF::IndirectDraws::Hybrid() && !onlyEligible))
 		return false;
 	if (!inDepthPass && !globals::deferred->deferredPass)
 		return false;  // shadows, reflections and cubemaps keep drawing everything
@@ -647,6 +713,8 @@ void DrawcallLimitFix::Hooks::Main_RenderDepth::thunk(bool a_a1, bool a_a2)
 	feature.inDepthPass = true;
 	func(a_a1, a_a2);
 	feature.inDepthPass = false;
+	if (!feature.Running())
+		return;
 	// The Z-prepass, at the end of the native depth pass: DCLF's objects go into the depth buffer before
 	// anything is derived from it. This thunk is the inner one of the chain on this call site (DCLF installs
 	// before Terrain Blending, so Terrain Blending wraps it), which is what puts the prepass ahead of the
@@ -673,6 +741,8 @@ void DrawcallLimitFix::Hooks::BSBatchRenderer_RenderPassImmediately<N>::thunk(RE
 void DrawcallLimitFix::Hooks::BSShaderAccumulator_FinishAccumulating::thunk(RE::BSGraphics::BSShaderAccumulator* a_accumulator, std::uint32_t a_renderFlags)
 {
 	func(a_accumulator, a_renderFlags);
+	if (!globals::features::drawcallLimitFix.Running())
+		return;
 	const auto mode = static_cast<std::uint32_t>(a_accumulator->GetRuntimeData().renderMode);
 	if (mode < 0xD || mode > 0xF)
 		return;  // shadow-map modes only: plain, clamped, paraboloid (engine notes: shadow maps)
@@ -698,7 +768,7 @@ void DrawcallLimitFix::Hooks::Install()
 
 void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags)
 {
-	if (!installed || DCLF::ConstantEvaluator::Evaluating())
+	if (!Running() || DCLF::ConstantEvaluator::Evaluating())
 		return;
 	if (globals::deferred->deferredPass) {
 		auto& store = DCLF::SceneStore::Get();
@@ -759,7 +829,7 @@ void DrawcallLimitFix::RefreshDepthConsumers()
 
 void DrawcallLimitFix::BeforeDeferredComposite()
 {
-	if (!installed)
+	if (!Running())
 		return;
 	auto& draws = DCLF::IndirectDraws::Get();
 	draws.ProbeTargets("before colour");
@@ -785,6 +855,10 @@ void DrawcallLimitFix::DrawSettings()
 	}
 	if (!installed) {
 		ImGui::TextUnformatted("Not installed (CS_DCLF=0 or VR).");
+		return;
+	}
+	if (!switchedOn) {
+		ImGui::TextWrapped("Switched off with the feature's toggle: the game renders natively and DCLF does no frame work. Switch it back on to resume; no restart needed.");
 		return;
 	}
 	// The live toggles: every non-default feature, for A/B comparisons without a restart. They are the
