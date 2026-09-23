@@ -3484,7 +3484,50 @@ frame reads (`textureTransformCurrentBuffer`), as `BSUtilityShader::SetupMateria
     290 of 300 the per-frame t11 caused).
 -   Three `set gamehour` steps with ownership off, every draw compared: about 483,000 draws checked an
     interval, 0 mismatched.
--   Capture parity's "MISMATCH" label on the flight now comes only from "untracked eligible" (distant
-    `ObjectLODRoot` objects), which is older and separate.
+-   Capture parity's "MISMATCH" label on the flight now comes only from "untracked eligible", which is older
+    and separate (see "Scene events before the walk").
 -   `WindTimers.y` is not compared: `SetupGeometry` copies a tree node's current timer over its previous one
     after every native draw, and `Lighting.hlsl` never reads the value.
+
+## Scene events before the walk
+
+Capture parity counted 23-1,365 "untracked eligible" draws an interval on the flight, only while cells
+loaded. These are native draws of statically eligible geometry under a known category node that DCLF did not
+track. The `ObjectLODRoot` trees are counted separately, as "outside the tracked category nodes".
+
+**The trace.** Capture parity now follows each such geometry until it is tracked. It records when it was
+first drawn untracked, on how many frames, and what tracked it in the end: the attach event, a category node
+the refresh found new, or the rescan after a load. `SceneStore` stamps the frame and the source on every new
+tracked entry, and the frame and the refresh's cause on every new category node. On the flight, every one was
+drawn untracked on exactly one frame and tracked by its attach event at that frame's Present. None stayed
+untracked, and no category node was found late.
+
+**The cause.** The attach events were applied only at Present (`DrawcallLimitFix::Reset`). A cell attached
+during the world update was drawn natively on its first frame and joined the tables on the next. The native
+loop drew it, so there was no hole, but it was a handoff to native.
+
+**The fix.** `BeginSceneFrame` applies the queued events (`SceneStore::ProcessEvents`) before the walk. The
+scene graph is final from `Main::Draw` on. Nothing of DCLF's is in flight there, as after `Reset`. `Reset`
+still applies them every Present, in menus too, so the queue cannot grow while the world is not rendered.
+
+**Result:** 0 untracked eligible in every interval of the flight gate, with BuildDraws parity OK, draw
+parity 0 and holes 0.
+
+**Found on the way:**
+
+-   **A loader thread writes materials that are being drawn.** On some runs, the first interval had 8-13
+    `ParallaxOccData` mismatches (DCLF 1, native 0.7), each on one frame. TruePBR's `TESBoundObject::Clone3D`
+    hook applies a static's MATO in place, on the loader thread, to the materials of the freshly cloned model.
+    Those materials are shared with references already on screen, and the previous owner is 0, so they are
+    not forked. The write lands between the accumulate phase's drain and the native draw: native reads it
+    mid-frame, and DCLF picks it up from the next frame's drain.
+
+    Capture parity follows each mismatched material into the next frames' drains ("mismatched materials: ...
+    written after its last mismatch"). A deterministic fix belongs in TruePBR: fork a material another
+    property already uses before writing into it, rather than writing into it in place from a loader thread.
+-   **`IsBeastRace` in the permutation buffer is sticky natively.** Subsurface Scattering's `SetupGeometry`
+    hook sets or clears it only for face draws, so every later draw (bodies, hands, flora) inherits the last
+    face's value. That is capture parity's occasional "permutation parity ... extra 4". DCLF's 0 is the
+    intended value for those draws; the fix belongs in Subsurface Scattering (clear the bit for every other
+    deferred lighting draw).
+-   The materials line counts the last frame only, like the other "(last frame)" lines, and now says so.

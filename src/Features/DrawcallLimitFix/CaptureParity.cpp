@@ -595,9 +595,32 @@ namespace DCLF
 				}
 				++notInTables;
 			} else if (SceneStore::ClassifyStatic(*geometry, nullptr) == Ineligible::None) {
-				if (store.IsUnderDrawnCategory(geometry)) {
-					++untrackedEligible;
-					NoteMismatch(fmt::format("{} eligible but not tracked", Describe(geometry)));
+				if (auto* category = store.CategoryNodeOf(geometry)) {
+					++untrackedEligible;  // followed below and reported with its parents and what tracked it (ResolveUntracked)
+					const std::uint32_t frame = store.GetFrame();
+					auto [it, inserted] = untracked.try_emplace(geometry);
+					if (inserted) {
+						it->second.firstFrame = frame;
+						std::string chain;
+						for (const RE::NiAVObject* node = geometry->parent; node; node = node->parent) {
+							const auto* rtti = node->GetRTTI();
+							const char* name = node->name.c_str();
+							chain += fmt::format(" < {}'{}'", rtti && rtti->name ? rtti->name : "?", name ? name : "");
+							if (node == category) {
+								std::uint32_t found = 0;
+								std::uint8_t cause = 0;
+								if (store.GetCategoryInfo(category, found, cause))
+									chain += fmt::format("[CATEGORY found frame {} ({} before), cause {}]", found, frame - found, cause);
+								else
+									chain += "[CATEGORY]";
+							}
+							chain += DescribeRole(node);
+						}
+						it->second.chain = std::move(chain);
+					}
+					if (inserted || it->second.lastFrame != frame)
+						++it->second.frames;
+					it->second.lastFrame = frame;
 				} else {
 					// Statically eligible content outside the tracked category nodes: where does it live?
 					++outsideCategories;
@@ -665,6 +688,17 @@ namespace DCLF
 		if (!mismatch && !CompareMaterial(geometry, object.materialIndex)) {
 			mismatch = true;
 			++materialMismatches;
+			const auto* drawn = a_pass->shaderProperty ? a_pass->shaderProperty->material : nullptr;
+			const auto* recorded = object.materialIndex < tables.materialSlotKey.size() ? tables.materialSlotKey[object.materialIndex].first : nullptr;
+			const std::uint32_t frame = store.GetFrame();
+			auto& follow = materialMismatchFollow[drawn];
+			if (follow.frames == 0)
+				follow.firstFrame = frame;
+			if (follow.frames == 0 || follow.lastFrame != frame)
+				++follow.frames;
+			follow.lastFrame = frame;
+			follow.keyDiffers |= drawn != recorded;
+			follow.writtenBefore |= store.GetWrittenMaterials().contains(drawn);
 		}
 		if (!mismatch && !CompareGeometry(geometry, static_cast<std::uint32_t>(index), a_renderFlags)) {
 			mismatch = true;
@@ -700,13 +734,77 @@ namespace DCLF
 			pendingObject = -1;
 	}
 
+	void CaptureParity::ResolveUntracked(std::uint32_t a_frame)
+	{
+		constexpr std::uint32_t kStuckFrames = 60;
+		static constexpr const char* kSources[] = { "attach event", "category appeared", "rescan" };
+		auto& store = SceneStore::Get();
+		std::erase_if(untracked, [&](auto& a_entry) {
+			auto& [geometry, entry] = a_entry;
+			std::uint32_t frame = 0;
+			SceneStore::TrackSource source{};
+			if (store.GetTrackInfo(geometry, frame, source)) {
+				++untrackedResolved[fmt::format("{}, tracked {} frames after first drawn untracked, drawn untracked on {} frames",
+					kSources[static_cast<std::size_t>(source)], static_cast<std::int32_t>(frame - entry.firstFrame), entry.frames)];
+				return true;
+			}
+			if (a_frame - entry.lastFrame > kStuckFrames) {
+				if (untrackedStuck.size() < 16)
+					untrackedStuck.push_back(fmt::format("drawn untracked on {} frames ({}..{}), never tracked:{}", entry.frames, entry.firstFrame,
+						entry.lastFrame, entry.chain));
+				return true;
+			}
+			return false;
+		});
+	}
+
 	void CaptureParity::Report(std::uint32_t a_frame, std::uint32_t a_interval)
 	{
 		// Called at the start of every main pass: a new frame, a new baseline.
 		baselineValid = false;
 		pendingRewrites = 0;
+		ResolveUntracked(SceneStore::Get().GetFrame());
+		{
+			// A mismatched material, one frame on: this frame's drain has run (the accumulate phase is before
+			// the main pass).
+			auto& store = SceneStore::Get();
+			const std::uint32_t frame = store.GetFrame();
+			std::erase_if(materialMismatchFollow, [&](const auto& a_entry) {
+				const auto& [material, follow] = a_entry;
+				if (follow.lastFrame >= frame)
+					return false;
+				const bool written = store.GetWrittenMaterials().contains(material);
+				if (!written && frame - follow.lastFrame < 4)
+					return false;
+				++materialMismatchResolved[fmt::format("{} {}mismatched on {} frames (first {}), {}{}", fmt::ptr(material), follow.keyDiffers ? "record keyed by another material, " : "",
+					follow.frames, follow.firstFrame, written ? fmt::format("written after its last mismatch (drained {} frames later)", frame - follow.lastFrame) : "no write event within 3 frames",
+					follow.writtenBefore ? ", also written before a mismatching draw" : "")];
+				return true;
+			});
+		}
 		if (a_interval == 0 || (a_frame % a_interval) != 0)
 			return;
+
+		{
+			std::size_t pendingStuck = 0;
+			for (const auto& [geometry, entry] : untracked)
+				pendingStuck += entry.frames > 1 ? 1 : 0;
+			logger::info("[DCLF] untracked eligible geometry: {} still followed ({} drawn untracked on more than one frame)", untracked.size(), pendingStuck);
+			for (const auto& [what, count] : untrackedResolved)
+				logger::info("[DCLF]   {} geometries: {}", count, what);
+			for (const auto& chain : untrackedStuck)
+				logger::info("[DCLF]   {}", chain);
+			std::size_t shown = 0;
+			for (const auto& [geometry, entry] : untracked) {
+				if (entry.frames > 1 && shown++ < 4)
+					logger::info("[DCLF]   pending, drawn untracked on {} frames ({}..{}):{}", entry.frames, entry.firstFrame, entry.lastFrame, entry.chain);
+			}
+			untrackedResolved.clear();
+			untrackedStuck.clear();
+			for (const auto& [what, count] : materialMismatchResolved)
+				logger::info("[DCLF] mismatched materials: {} {}", count, what);
+			materialMismatchResolved.clear();
+		}
 
 		const auto& stats = SceneStore::Get().GetStats();
 		const bool ok = mismatchedDraws == 0 && untrackedEligible == 0 && drawMismatches == 0 && permutationMismatches == 0 && lightMismatches == 0;

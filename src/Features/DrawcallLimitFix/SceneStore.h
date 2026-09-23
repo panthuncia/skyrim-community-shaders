@@ -480,6 +480,23 @@ namespace DCLF
 		/** @brief True when the geometry sits under a tracked category node (used by coverage checks). */
 		bool IsTracked(const RE::BSGeometry* a_geometry) const;
 
+		/** @brief How a tracked geometry came to be tracked (diagnostics: CaptureParity's untracked draws). */
+		enum class TrackSource : std::uint8_t
+		{
+			AttachEvent,       // an attach event's subtree walk
+			CategoryAppeared,  // the walk of a category node RefreshCategoryNodes found new
+			Rescan,            // the full rescan after a load
+		};
+		/** @brief The frame a tracked geometry was added, and how; false when it is not tracked. */
+		bool GetTrackInfo(const RE::BSGeometry* a_geometry, std::uint32_t& a_frame, TrackSource& a_source) const;
+		/** @brief The category node an object hangs under, or null (diagnostics). */
+		RE::NiNode* CategoryNodeOf(RE::NiAVObject* a_object) const { return FindCategoryNode(a_object, nullptr); }
+		/**
+		 * @brief The frame a category node was found, and why the refresh that found it ran (0 signature change,
+		 * 1 forced by a detach or rescan, 2 the backstop); false when unknown (diagnostics).
+		 */
+		bool GetCategoryInfo(const RE::NiNode* a_node, std::uint32_t& a_frame, std::uint8_t& a_cause) const;
+
 		/** @brief True when the object hangs under a drawn category node of an attached cell. */
 		bool IsUnderDrawnCategory(RE::NiAVObject* a_object) const { return FindCategoryNode(a_object, nullptr) != nullptr; }
 
@@ -506,6 +523,9 @@ namespace DCLF
 			// (ParentReason in SceneStore.cpp); Switch when a switch node lies there, which ClassifyFrame
 			// decides per frame; else None.
 			Ineligible parentReason = Ineligible::None;
+			// When and how it was added (diagnostics, GetTrackInfo).
+			std::uint32_t trackedFrame = 0;
+			TrackSource trackedBy = TrackSource::AttachEvent;
 
 			/**
 			 * @brief A cached "this object cannot be drawn", and the witnesses that keep it honest.
@@ -655,6 +675,10 @@ namespace DCLF
 		};
 		std::vector<DecalOrderEntry> decalOrder;
 		ankerl::unordered_dense::set<RE::NiNode*> categoryNodes;
+		// Diagnostics: the frame each category node was found and the refresh's cause (GetCategoryInfo), and
+		// the source AddGeometry stamps on new entries.
+		ankerl::unordered_dense::map<const RE::NiNode*, std::pair<std::uint32_t, std::uint8_t>> categoryFound;
+		TrackSource addSource = TrackSource::AttachEvent;
 		std::size_t validationCursor = 0;
 		// Set while a load screen is up, so the first frame after it rebuilds the tracked set from
 		// scratch instead of trusting anything discovered across the load (ProcessEvents).
@@ -713,6 +737,12 @@ namespace DCLF
 		 */
 		void ProcessMaterialWrites();
 		ankerl::unordered_dense::set<const RE::BSShaderMaterial*> writtenMaterials;
+
+	public:
+		/** @brief The materials this frame's accumulate phase drained as written (diagnostics). */
+		const ankerl::unordered_dense::set<const RE::BSShaderMaterial*>& GetWrittenMaterials() const { return writtenMaterials; }
+
+	private:
 		/** @brief The alarm: a record that disagrees with a live evaluation outside its frame-sourced components. */
 		void NoteStaleMaterial(std::uint32_t a_slot, const std::pair<const RE::BSShaderMaterial*, std::uint32_t>& a_key, const MaterialRecord& a_served,
 			const MaterialRecord& a_live);

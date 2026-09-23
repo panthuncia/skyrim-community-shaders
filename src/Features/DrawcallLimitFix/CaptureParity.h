@@ -114,6 +114,18 @@ namespace DCLF
 		std::uint64_t checkedDraws = 0;        // ... of geometry in the DCLF tables
 		std::uint64_t mismatchedDraws = 0;     // ... whose state differs
 		std::uint64_t materialMismatches = 0;  // ... in PerMaterial constants or textures
+		// Each material a draw mismatched on, followed into the following frames' write drains: whether an
+		// event for it arrived after the drain of the frame it mismatched in.
+		struct MaterialMismatch
+		{
+			std::uint32_t firstFrame = 0;
+			std::uint32_t lastFrame = 0;
+			std::uint32_t frames = 0;
+			bool keyDiffers = false;  // the record's material is not the drawn pass's
+			bool writtenBefore = false;  // this frame's drain (before the draw) held it
+		};
+		ankerl::unordered_dense::map<const RE::BSShaderMaterial*, MaterialMismatch> materialMismatchFollow;
+		std::map<std::string, std::uint32_t> materialMismatchResolved;
 		std::uint64_t geometryMismatches = 0;  // ... in PerGeometry constants
 		std::uint64_t techniqueMismatches = 0; // ... in PerTechnique constants or filter modes
 		std::uint64_t inheritedFilters = 0;    // bound material textures whose filter mode neither SetupTechnique nor SetupMaterial sets
@@ -153,6 +165,19 @@ namespace DCLF
 		// Differing permutation buffer bits: key = field index << 32 | differing bits.
 		ankerl::unordered_dense::map<std::uint64_t, std::uint64_t> permutationDiffs;
 		std::uint64_t untrackedEligible = 0;   // eligible geometry under a drawn category node, not tracked
+		// Each untracked eligible geometry followed until it is tracked (identity only, never dereferenced
+		// after its draw): how many frames it was drawn untracked, and what tracked it in the end.
+		struct Untracked
+		{
+			std::uint32_t firstFrame = 0;
+			std::uint32_t lastFrame = 0;
+			std::uint32_t frames = 0;
+			std::string chain;  // its parents at first sight, with the category node's discovery
+		};
+		ankerl::unordered_dense::map<const RE::BSGeometry*, Untracked> untracked;
+		void ResolveUntracked(std::uint32_t a_frame);
+		std::map<std::string, std::uint32_t> untrackedResolved;  // "<source> after <n> frames" -> geometries
+		std::vector<std::string> untrackedStuck;                 // chains of those still untracked after kStuckFrames
 		std::uint64_t notInTables = 0;         // tracked geometry drawn natively but excluded this frame
 		std::uint64_t nativeOnlyPasses = 0;    // native passes of objects DCLF draws that DCLF does not model (hint 10)
 		ankerl::unordered_dense::set<std::uint32_t> renderFlagsSeen;

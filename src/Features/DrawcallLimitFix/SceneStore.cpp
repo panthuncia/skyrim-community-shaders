@@ -360,6 +360,7 @@ namespace DCLF
 		const std::uint64_t signature = CategorySignature();
 		if (!a_force && signature == categorySignature && ++categoryIdleFrames < kBackstopFrames)
 			return;
+		const std::uint8_t cause = a_force ? 1 : signature != categorySignature ? 0 : 2;
 		categorySignature = signature;
 		categoryIdleFrames = 0;
 
@@ -437,17 +438,28 @@ namespace DCLF
 				added.push_back(node);
 		}
 		categoryNodes = std::move(current);
+		std::erase_if(categoryFound, [&](const auto& a_entry) { return !categoryNodes.contains(const_cast<RE::NiNode*>(a_entry.first)); });
+		const TrackSource previousSource = addSource;
+		if (addSource != TrackSource::Rescan)
+			addSource = TrackSource::CategoryAppeared;
 		for (auto* node : added) {
+			categoryFound[node] = { frame, cause };
 			for (auto& child : node->GetChildren()) {
 				if (child)
 					AddSubtree(child.get());
 			}
 		}
+		addSource = previousSource;
 	}
 
 	void SceneStore::AddGeometry(RE::BSGeometry* a_geometry, RE::NiNode* a_categoryNode, Ineligible a_parentReason)
 	{
-		auto& entry = tracked[a_geometry];
+		const auto [it, inserted] = tracked.try_emplace(a_geometry);
+		auto& entry = it->second;
+		if (inserted) {
+			entry.trackedFrame = frame;
+			entry.trackedBy = addSource;
+		}
 		entry.geometry.reset(a_geometry);
 		entry.categoryNode = a_categoryNode;
 		entry.parentReason = a_parentReason;
@@ -563,7 +575,9 @@ namespace DCLF
 		bool sawDetach = false;
 		for (const auto* event = events; event && !sawDetach; event = event->next)
 			sawDetach = event->type == SceneTracker::EventType::Detached;
+		addSource = rescanned ? TrackSource::Rescan : TrackSource::AttachEvent;
 		RefreshCategoryNodes(sawDetach || rescanned);
+		addSource = TrackSource::AttachEvent;
 
 		for (auto* event = events; event; event = event->next) {
 			if (event->type == SceneTracker::EventType::Attached) {
@@ -2690,6 +2704,26 @@ namespace DCLF
 			return Ineligible::NotTriShape;
 		const Ineligible reason = ClassifyStatic(*a_geometry, nullptr);
 		return reason != Ineligible::None ? reason : ClassifyFrame(it->second);
+	}
+
+	bool SceneStore::GetTrackInfo(const RE::BSGeometry* a_geometry, std::uint32_t& a_frame, TrackSource& a_source) const
+	{
+		const auto it = tracked.find(const_cast<RE::BSGeometry*>(a_geometry));
+		if (it == tracked.end())
+			return false;
+		a_frame = it->second.trackedFrame;
+		a_source = it->second.trackedBy;
+		return true;
+	}
+
+	bool SceneStore::GetCategoryInfo(const RE::NiNode* a_node, std::uint32_t& a_frame, std::uint8_t& a_cause) const
+	{
+		const auto it = categoryFound.find(a_node);
+		if (it == categoryFound.end())
+			return false;
+		a_frame = it->second.first;
+		a_cause = it->second.second;
+		return true;
 	}
 
 	bool SceneStore::IsTracked(const RE::BSGeometry* a_geometry) const

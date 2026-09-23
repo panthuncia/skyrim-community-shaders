@@ -400,6 +400,15 @@ bool DrawcallLimitFix::BeginSceneFrame()
 	ScopedPerfEvent event("CS DCLF: scene tables");
 	if (DCLF::TreeTrace::Enabled())
 		DCLF::TreeTrace::Get().BeforeScene();
+	// The scene events of this frame's world update, before the walk reads the tracked set. Present's Reset
+	// applies them too, but a cell attached during the update would otherwise be drawn natively for its first
+	// frame and join the tables only on the next one (capture parity's "untracked eligible": every such
+	// geometry was tracked by its attach event at that frame's Present). Nothing of DCLF's is in flight here,
+	// as after Reset: the previous frame's jobs were joined there, and this frame's start below.
+	store.AbandonSceneJob();  // (a walk never joined; there is none after Reset, but the tracked set must not move under one)
+	const auto eventsStart = std::chrono::steady_clock::now();
+	store.ProcessEvents();
+	timing.eventsMs += MillisecondsSince(eventsStart);
 	const auto start = std::chrono::steady_clock::now();
 	store.BuildFrame(DCLF::SceneStore::Phase::Scene);
 	const double sceneMs = MillisecondsSince(start);
@@ -852,7 +861,7 @@ void DrawcallLimitFix::Prepass()
 			stats.templateDefects ? " <- CULLED TEMPLATE" : "");
 		// The material cache and its standing alarm. materialCacheStale must be 0: it is the count of
 		// entries that were re-evaluated live and disagreed with what the cache would have served.
-		logger::info("[DCLF] materials: {} evaluated, {} served from the cache, {} skipped as undrawable; {} written ({} re-evaluated, {} dropped), {} frame samples; cache {} entries (+{} evicted); validated {}, stale {}{}",
+		logger::info("[DCLF] materials (last frame): {} evaluated, {} served from the cache, {} skipped as undrawable; {} written ({} re-evaluated, {} dropped), {} frame samples; cache {} entries (+{} evicted); validated {}, stale {}{}",
 			stats.materialsEvaluated, stats.materialsFromCache, stats.materialsSkipped, stats.materialWrites, stats.materialsRewritten, stats.materialsDropped,
 			stats.frameMaterialSamples,
 			stats.materialCacheEntries, stats.materialCacheEvicted, stats.materialsValidated, stats.materialCacheStale,
