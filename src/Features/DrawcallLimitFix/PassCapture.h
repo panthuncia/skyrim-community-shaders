@@ -46,6 +46,8 @@ namespace DCLF
 			std::uint32_t passEnum = 0;
 			bool fading = false;                         // FadingAtRegistration
 			bool withheld = false;                       // kept from the batch renderer (Withhold)
+			std::uint8_t fadeState = 0xFF;               // the fade node's LOD state (+0x153) at registration, 0xFF without one
+			std::uint8_t hint = 0;                       // accumulationHint
 		};
 
 		struct Stats
@@ -124,9 +126,12 @@ namespace DCLF
 		/** @brief CS_DCLF_SHADOW_OWNERSHIP=static (live: Toggles.h): withhold claimed casters from the shadow views. */
 		static bool ShadowWithholdingEnabled();
 		/**
-		 * @brief Whether the pass's object is fading as it is registered. The cull has just updated the fade
-		 * (BSFadeNode::OnVisible runs before the node's geometry registers), and this is the one value both
-		 * the withholding and the accumulate phase's fading verdict use (AccumulatedPass::fading).
+		 * @brief Whether the pass's object is fading in a way DCLF leaves to the native loop, as it is
+		 * registered: a LOD cross-fade, a fade the engine draws blended (hint 9) or as a cross-fade copy (hint
+		 * 10), or any fade with CS_DCLF_FADING off. A screen-door fade in an opaque group is DCLF's. The cull
+		 * has just updated the fade (BSFadeNode::OnVisible runs before the node's geometry registers), and this
+		 * is the one value both the withholding and the accumulate phase's fading verdict use
+		 * (AccumulatedPass::fading).
 		 */
 		static bool FadingAtRegistration(const RE::BSRenderPass* a_pass);
 
@@ -151,6 +156,8 @@ namespace DCLF
 
 		/** @brief Takes everything registered since the last call; render thread only. */
 		std::span<const Entry> Drain();
+		/** @brief What the last Drain took (diagnostics); render thread only. */
+		std::span<const Entry> LastDrain() const { return lastDrain; }
 
 		/**
 		 * @brief CS_DCLF_SHADOW_PROBE: the BSUtilityShader registrations since the last call (the shadow

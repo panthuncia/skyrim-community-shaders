@@ -290,6 +290,11 @@ namespace DCLF
 		return Toggles::Get().Active().actors;
 	}
 
+	bool FadingEnabled()
+	{
+		return Toggles::Get().Active().fading;
+	}
+
 	bool ProjectedUvEnabled()
 	{
 		return Toggles::Get().Active().projectedUv;
@@ -479,7 +484,9 @@ namespace DCLF
 				a_out.rejectedTechnique = (d >> 24) & 0x3f;
 				return Ineligible::Technique;
 			}
-			if (d & Bit(LightingFlag::AdditionalAlphaMask))
+			// The screen-door fade: Lighting.hlsl discards against a 4x4 screen pattern and MaterialData.z, so
+			// the object stays opaque and the Z-prepass (which keeps the alpha test) dithers identically.
+			if ((d & Bit(LightingFlag::AdditionalAlphaMask)) && !FadingEnabled())
 				return Ineligible::Fading;
 			specularFade = a_property.specularLODFade;
 			envmapFade = a_property.envmapLODFade;

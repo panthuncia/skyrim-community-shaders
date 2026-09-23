@@ -57,6 +57,9 @@ struct DrawcallLimitFix : Feature
 	 * are never skipped.
 	 */
 	bool SkipNativePass(RE::BSRenderPass* a_pass);
+	// Whether DCLF can draw the geometry this frame: a record with bindings and a built pipeline. Valid from
+	// EarlyPrepass (the accumulate phase and the pipeline lookups) to the end of the frame.
+	static bool DrawableThisFrame(const RE::BSGeometry* a_geometry);
 
 	/**
 	 * @brief After the hybrid Z-prepass: rebuild what was derived from the depth buffer before it ran.
@@ -75,6 +78,7 @@ struct DrawcallLimitFix : Feature
 		std::uint32_t skippedInDepth = 0;
 		std::uint32_t skippedInOpaque = 0;
 		std::uint32_t notInTables = 0;
+		std::uint32_t undrawable = 0;  // drawn last frame, in the tables, but not drawable this frame: kept native
 		std::uint32_t kept = 0;
 	};
 	const SkipStats& GetSkipStats() const { return skipStats; }

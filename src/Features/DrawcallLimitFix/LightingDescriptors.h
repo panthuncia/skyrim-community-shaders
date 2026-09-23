@@ -139,17 +139,19 @@ namespace DCLF
 		// Where in its pass-group chain the pass sits, so that decals can be drawn in the engine's order
 		// (group, technique bucket, list, chain) rather than in whatever order the culling appends.
 		std::uint32_t chainIndex = 0;
-		// Whether the object was fading (its fade node below 1) when the pass was registered - the same
-		// moment the native loop was or was not told to leave it to DCLF (PassCapture::Withhold). The
-		// accumulate phase's fading verdict reads this rather than the fade node later in the frame, so
-		// the two decisions cannot disagree.
+		// Whether the object's fade was the native loop's when the pass was registered
+		// (PassCapture::FadingAtRegistration: a LOD cross-fade, a blended fade, or any fade with CS_DCLF_FADING
+		// off) - the same moment the native loop was or was not told to leave it to DCLF (PassCapture::Withhold).
+		// The accumulate phase's fading verdict reads this rather than the fade node later in the frame, so the
+		// two decisions cannot disagree.
 		bool fading = false;
 		// The pass's LODMode as a row of the engine's partition table (index + singleLevel * 4): which skin
 		// partitions the main camera draws (SceneStore::SkinPartitionMask).
 		std::uint32_t lodRow = 3;
 	};
 
-	inline constexpr std::uint32_t kPassDoAlphaTest = 1u << 20;  // pass descriptor DoAlphaTest
+	inline constexpr std::uint32_t kPassDoAlphaTest = 1u << 20;           // pass descriptor DoAlphaTest
+	inline constexpr std::uint32_t kPassAdditionalAlphaMask = 1u << 23;  // pass descriptor AdditionalAlphaMask (screen-door fade)
 
 	/**
 	 * @brief The pass descriptor DCLF draws a pass registered with a_descriptor in batch list a_subPass with.
@@ -218,6 +220,14 @@ namespace DCLF
 
 	/** @brief CS_DCLF_ACTORS=1: geometry under an actor's 3D is eligible, and the FacegenRGBTint technique (skin). */
 	bool ActorsEnabled();
+
+	/**
+	 * @brief CS_DCLF_FADING=1: an object fading in or out is eligible while the engine fades it with the
+	 * screen-door mask (pass descriptor AdditionalAlphaMask, the fade in MaterialData.z) in an opaque group.
+	 * Blended fades (accumulation hint 9) and the LOD cross-fade copies (hint 10) stay native
+	 * (PassCapture::FadingAtRegistration).
+	 */
+	bool FadingEnabled();
 
 	/** @brief CS_DCLF_PROJECTED_UV=1: kProjectedUV objects (snow and moss projection) are eligible. */
 	bool ProjectedUvEnabled();

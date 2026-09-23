@@ -48,7 +48,13 @@ namespace DCLF
 		if (!fadeNode)
 			return false;
 		const auto& fade = fadeNode->GetRuntimeData();
-		if (fade.currentFade < 1.0f)
+		// A fade the engine draws in an opaque group is DCLF's (CS_DCLF_FADING): the pass is registered as usual
+		// and the fade reaches the shader in MaterialData.z. One it draws blended (accumulation hint 9, drawn
+		// with the transparent objects after the composite) or as a LOD cross-fade copy (hint 10) is not, and
+		// neither is a fading decal (hints 2 and 3). That one is a precaution, not a measurement: the decal
+		// probe's state mismatches turned out not to depend on the fade.
+		const auto hint = a_pass->accumulationHint;
+		if (fade.currentFade < 1.0f && (!FadingEnabled() || hint == 9 || hint == 10 || hint == 2 || hint == 3))
 			return true;
 		// Crossing between LOD levels: for kMeshLOD geometry whose fade node's LOD state (+0x153 & 0x70) is not
 		// 0x20, GetRenderPasses (AE 1414adfb0) adds a second copy of every lighting pass - accumulation hint 10,
@@ -103,7 +109,8 @@ namespace DCLF
 		}
 		auto* property = a_pass->geometry->GetGeometryRuntimeData().shaderProperty.get();
 		entries[slot] = Entry{ a_pass->geometry, a_pass, a_batch, a_technique,
-			SubPassOf(a_pass->geometry, property ? property->flags.underlying() : 0ull), a_pass->passEnum, a_fading, a_withheld };
+			SubPassOf(a_pass->geometry, property ? property->flags.underlying() : 0ull), a_pass->passEnum, a_fading, a_withheld,
+			property && property->fadeNode ? property->fadeNode->GetRuntimeData().unk153 : std::uint8_t{ 0xFF }, static_cast<std::uint8_t>(a_pass->accumulationHint) };
 	}
 
 	std::span<const PassCapture::Entry> PassCapture::Drain()

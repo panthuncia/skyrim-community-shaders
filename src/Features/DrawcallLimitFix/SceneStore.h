@@ -197,6 +197,10 @@ namespace DCLF
 			std::array<std::uint32_t, static_cast<std::size_t>(Ineligible::Count)> ineligibleDrawn{};
 			// Decal candidates this frame, by group (Records.h ObjectDecalGroup - 1).
 			std::array<std::uint32_t, 2> decals{};
+			// CS_DCLF_FADING: objects given bindings with the screen-door fade (AdditionalAlphaMask), summed over
+			// frames until the report takes them (TakeFadingDrawn), since fades are brief.
+			std::uint32_t fadingDrawn = 0;
+			std::uint32_t fadingFrames = 0;  // frames in that sum with at least one
 			std::uint32_t skinned = 0;  // skinned candidates this frame, and their palette rows
 			std::uint32_t boneRows = 0;
 			std::uint32_t projectedUV = 0;  // candidates with the ProjectedUV bit, and terrain ones
@@ -400,6 +404,13 @@ namespace DCLF
 
 		const Tables& GetTables() const { return tables; }
 		const Stats& GetStats() const { return stats; }
+		/** @brief The screen-door fading objects given bindings since the last call, and in how many frames. */
+		std::pair<std::uint32_t, std::uint32_t> TakeFadingDrawn()
+		{
+			const std::pair result{ stats.fadingDrawn, stats.fadingFrames };
+			stats.fadingDrawn = stats.fadingFrames = 0;
+			return result;
+		}
 		std::uint32_t GetFrame() const { return frame; }
 		/**
 		 * @brief The PS PerMaterial float positions RefreshMaterialPatch rewrites into every material each frame:
@@ -477,6 +488,8 @@ namespace DCLF
 
 		/** @brief The lighting pass the main-camera accumulator holds for a geometry this frame, or null. */
 		const AccumulatedPass* FindAccumulatedPass(const RE::BSGeometry* a_geometry) const;
+		/** @brief Every lighting pass the main-camera accumulator holds this frame, by geometry (diagnostics). */
+		const ankerl::unordered_dense::map<const RE::BSGeometry*, AccumulatedPass>& GetAccumulatedPasses() const { return accumulatedPasses; }
 
 	private:
 		struct Tracked

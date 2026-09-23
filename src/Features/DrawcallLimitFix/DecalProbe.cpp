@@ -103,6 +103,7 @@ namespace DCLF
 		// draw with the wrong fixed-function state; the first one is logged in full.
 		std::uint32_t stateChecked = 0;
 		std::uint32_t stateMismatched = 0;
+		std::uint32_t stateMismatchedFading = 0;  // of which the decal was fading (the native loop's, PassCapture)
 		bool stateLogged = false;
 
 		void LogRaster(const Observed& a_seen)
@@ -178,7 +179,10 @@ namespace DCLF
 		if (!a_pass || !a_pass->geometry || !a_pass->shaderProperty || !globals::deferred->deferredPass)
 			return;
 		const std::uint64_t f = a_pass->shaderProperty->flags.underlying();
-		if (!(f & (Bit(RE::BSShaderProperty::EShaderPropertyFlag8::kDecal) | Bit(RE::BSShaderProperty::EShaderPropertyFlag8::kDynamicDecal))))
+		// Decals, and the engine's blended fading group (hint 9), whose state decides whether DCLF's decal
+		// pass could draw it too.
+		if (!(f & (Bit(RE::BSShaderProperty::EShaderPropertyFlag8::kDecal) | Bit(RE::BSShaderProperty::EShaderPropertyFlag8::kDynamicDecal))) &&
+			a_pass->accumulationHint != 9)
 			return;
 		const auto& state = globals::game::shadowState->GetRuntimeData();
 		Observed seen{};
@@ -222,6 +226,8 @@ namespace DCLF
 		if (same)
 			return;
 		++impl->stateMismatched;
+		if (const auto* fadeNode = a_pass->shaderProperty->fadeNode; fadeNode && fadeNode->GetRuntimeData().currentFade < 1.0f)
+			++impl->stateMismatchedFading;
 		if (!impl->stateLogged) {
 			impl->stateLogged = true;
 			logger::warn("[DCLF] decal probe: state MISMATCH for '{}' (hint {}): derived bias {} blend {} write {} alphaTest {} against native bias {} blend {} write {} alphaTest {} (zWrite {}, alpha {})",
@@ -252,9 +258,10 @@ namespace DCLF
 		for (const auto& [key, value] : impl->observed)
 			sorted.push_back(value);
 		std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-		logger::info("[DCLF] decal probe: {:.1f} native decal draws a frame in the deferred pass; hint-2/3 passes offered to the thunks: {:.1f} depth, {:.1f} opaque, {:.1f} elsewhere a frame; state parity: {} checked, {} mismatched{}",
+		logger::info("[DCLF] decal probe: {:.1f} native decal draws a frame in the deferred pass; hint-2/3 passes offered to the thunks: {:.1f} depth, {:.1f} opaque, {:.1f} elsewhere a frame; state parity: {} checked, {} mismatched ({} of them fading, which the native loop draws){}",
 			impl->draws / frames, impl->offeredDepth / frames, impl->offeredOpaque / frames, impl->offeredOther / frames,
-			impl->stateChecked, impl->stateMismatched, impl->stateMismatched ? " <- STATE MISMATCH" : "");
+			impl->stateChecked, impl->stateMismatched, impl->stateMismatchedFading,
+			impl->stateMismatched > impl->stateMismatchedFading ? " <- STATE MISMATCH" : "");
 		for (const auto& [seen, count] : sorted) {
 			logger::info("[DCLF] decal probe: {:.1f}/frame hint {} alpha {} zWrite {} zTest {} twoSided {} flags {:X} | depth {} cull {} bias {} blend {} a2c {} write {} extra {} alphaTest {} fill {}",
 				count / frames, seen.hint, seen.alphaState == 0 ? "none" : seen.alphaState == 1 ? "test" : seen.alphaState == 2 ? "blend" : "test+blend",
@@ -263,6 +270,6 @@ namespace DCLF
 		}
 		impl->observed.clear();
 		impl->draws = impl->offeredDepth = impl->offeredOpaque = impl->offeredOther = 0;
-		impl->stateChecked = impl->stateMismatched = 0;
+		impl->stateChecked = impl->stateMismatched = impl->stateMismatchedFading = 0;
 	}
 }

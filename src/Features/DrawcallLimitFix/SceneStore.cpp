@@ -762,8 +762,10 @@ namespace DCLF
 		// Fading: as the pass was registered when there is one (the withholding decided on that same value),
 		// else as the fade node stands now.
 		auto* property = a_tracked.geometry->GetGeometryRuntimeData().shaderProperty.get();
+		// Without the pass (the scene phase, for the shadow views) a fade is only the native loop's when fades
+		// are not DCLF's at all; the shadow views skip faded casters themselves (ShadowReject::Faded).
 		const bool fading = a_accumulated ? a_accumulated->fading :
-		                                    property && property->fadeNode && property->fadeNode->GetRuntimeData().currentFade < 1.0f;
+		                                    !FadingEnabled() && property && property->fadeNode && property->fadeNode->GetRuntimeData().currentFade < 1.0f;
 		if (fading)
 			return Ineligible::Fading;
 
@@ -2039,6 +2041,7 @@ namespace DCLF
 			return;
 		}
 		PartTimer timer(stats.partMs);
+		std::uint32_t fadingThisFrame = 0;
 		// The pass table is filled from the capture, which is the source that keeps working once passes
 		// are withheld from the batch renderer. The accumulator walk is the cross-check.
 		static const bool passParity = SwitchEnabled("CS_DCLF_PASS_PARITY");
@@ -2376,6 +2379,11 @@ namespace DCLF
 			float emissiveMult = 1.0f;
 			tables.shading[objectId] = MakeShading(*static_cast<RE::BSLightingShaderProperty*>(property), descriptors, mainPassRenderFlags, emissiveMult);
 			tables.emissiveMult[objectId] = emissiveMult;
+			if (descriptors.pass & kPassAdditionalAlphaMask) {
+				if (fadingThisFrame++ == 0)
+					++stats.fadingFrames;
+				++stats.fadingDrawn;
+			}
 			ObjectLights lights;
 			if (lightLimitFixLoaded) {
 				lights.roomIndex = globals::features::lightLimitFix.GetRoomIndex(geometry);

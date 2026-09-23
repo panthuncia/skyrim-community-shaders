@@ -3614,7 +3614,19 @@ namespace DCLF
 			std::uint32_t colourDrawnTotal = 0, depthDrawnTotal = 0;
 			std::uint32_t alphaDepthOnly = 0, alphaColourOnly = 0, alphaWithheldUndrawn = 0;
 			std::uint32_t samples = 0;
+			// One-frame gaps: an object the engine kept on three consecutive frames, drawn on the first and the
+			// third and withheld and GPU-culled on the second - a flicker, unless it really was hidden for that
+			// one frame. By the gap frame's verdict (occluded retest, rejected), and how many were trees.
+			std::uint32_t gaps = 0, gapsRetest = 0, gapsRejected = 0, gapsTree = 0, gapSamples = 0;
 		} setParity;
+		// Per geometry, the last two frames' state for the gap detector: 0 not kept, 1 kept and drawn by someone,
+		// 2 kept, withheld and GPU-culled (verdict in the high bits).
+		struct GapHistory
+		{
+			std::uint32_t frame = 0;
+			std::uint8_t last = 0, before = 0;
+		};
+		ankerl::unordered_dense::map<const RE::BSGeometry*, GapHistory> gapHistory;
 		void CheckSetParity(const std::shared_ptr<Resources>& a_resources, const MainPayload& a_depth, const MainPayload& a_colour);
 
 		void CheckBuildParity(const std::shared_ptr<Resources>& a_resources, const MainPayload& a_payload, IndirectDraws::Stats& a_stats);
@@ -5626,6 +5638,32 @@ namespace DCLF
 						counts.alphaWithheldUndrawn += alpha;
 					}
 				}
+				// The gap detector, by geometry (object indices are rebuilt every frame).
+				if (const auto* geometry = o < snapshot.geometry.size() ? snapshot.geometry[o] : nullptr) {
+					const bool kept = flags & 2;
+					const std::uint8_t state = !kept ? 0 : (withheld && !colourDrawn) ? static_cast<std::uint8_t>(2 | (verdict << 4)) : 1;
+					auto& history = gapHistory[geometry];
+					if (history.frame + 1 == snapshot.frame && state == 1 && (history.last & 3) == 2 && history.before == 1) {
+						++counts.gaps;
+						const std::uint32_t gapVerdict = history.last >> 4;
+						counts.gapsRetest += gapVerdict == 0;
+						counts.gapsRejected += gapVerdict == 2;
+						const RE::TESObjectREFR* owner = nullptr;
+						for (const RE::NiAVObject* node = geometry; node && !owner; node = node->parent)
+							owner = node->GetUserData();
+						const auto* base = owner ? owner->GetBaseObject() : nullptr;
+						const bool tree = base && base->GetFormType() == RE::FormType::Tree;
+						counts.gapsTree += tree;
+						if (counts.gapSamples++ < 12)
+							logger::info("[DCLF] set parity, frame {}: one-frame gap - '{}' ({}{}), culled in frame {} with verdict {}", snapshot.frame,
+								geometry->name.c_str() ? geometry->name.c_str() : "?", base ? RE::FormTypeToString(base->GetFormType()) : "no ref",
+								geometry->GetGeometryRuntimeData().skinInstance ? ", skinned" : "", snapshot.frame - 1,
+								gapVerdict == 0 ? "occluded (retest)" : gapVerdict == 2 ? "rejected" : "other");
+					}
+					history.before = history.frame + 1 == snapshot.frame ? history.last : 0;
+					history.last = state;
+					history.frame = snapshot.frame;
+				}
 				if (!kind)
 					continue;
 				damaged = true;
@@ -5649,7 +5687,12 @@ namespace DCLF
 					counts.frames, counts.framesWithDamage, counts.skipped, counts.depthOnly, counts.alphaDepthOnly, counts.colourOnly, counts.alphaColourOnly,
 					counts.colourUnpublished, counts.withheldUndrawn, counts.alphaWithheldUndrawn, counts.withheldCulled, double(counts.depthDrawnTotal) / counts.frames,
 					double(counts.colourDrawnTotal) / counts.frames);
+				if (counts.gaps)
+					logger::info("[DCLF] set parity over {} frames: {} one-frame gaps (kept, drawn, withheld and GPU-culled, drawn again): {} occluded (retest), {} rejected; {} of them trees",
+						counts.frames, counts.gaps, counts.gapsRetest, counts.gapsRejected, counts.gapsTree);
 				counts = {};
+				// Forget geometries not seen for a while, so the history does not keep every object ever drawn.
+				std::erase_if(gapHistory, [&](const auto& a_entry) { return a_entry.second.frame + 8 < snapshot.frame; });
 			}
 		}
 

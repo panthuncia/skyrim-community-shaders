@@ -27,6 +27,7 @@ namespace DCLF
 			kSwitchNodes,
 			kSkinPartitions,
 			kActors,
+			kFading,
 		};
 
 		// Defaults: the configuration every gate run of this work used. An unset switch takes the default;
@@ -59,6 +60,7 @@ namespace DCLF
 			set.switchNodes = OnUnlessOff("CS_DCLF_SWITCH_NODES");
 			set.skinPartitions = OnUnlessOff("CS_DCLF_SKIN_PARTITIONS");
 			set.actors = OnUnlessOff("CS_DCLF_ACTORS");
+			set.fading = OnUnlessOff("CS_DCLF_FADING");
 			set.shadows = OnUnlessOff("CS_DCLF_SHADOWS");
 			set.shadowOwnership = StaticUnlessOff("CS_DCLF_SHADOW_OWNERSHIP");
 			set.debugView = SwitchEnabled("CS_DCLF_DEBUG_VIEW");
@@ -81,7 +83,7 @@ namespace DCLF
 		{
 			return a.hybrid != b.hybrid || a.cullTracked != b.cullTracked || a.skinned != b.skinned || a.trees != b.trees ||
 			       a.decals != b.decals || a.projectedUv != b.projectedUv || a.mtLand != b.mtLand || a.switchNodes != b.switchNodes ||
-			       a.skinPartitions != b.skinPartitions || a.actors != b.actors;
+			       a.skinPartitions != b.skinPartitions || a.actors != b.actors || a.fading != b.fading;
 		}
 	}
 
@@ -119,6 +121,7 @@ namespace DCLF
 		put(kSwitchNodes, s.switchNodes);
 		put(kSkinPartitions, s.skinPartitions);
 		put(kActors, s.actors);
+		put(kFading, s.fading);
 		return bits;
 	}
 
@@ -144,6 +147,7 @@ namespace DCLF
 		s.switchNodes = get(kSwitchNodes);
 		s.skinPartitions = get(kSkinPartitions);
 		s.actors = get(kActors);
+		s.fading = get(kFading);
 		return s;
 	}
 

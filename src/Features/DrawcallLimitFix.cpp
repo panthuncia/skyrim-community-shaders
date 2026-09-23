@@ -7,6 +7,7 @@
 #include "DrawcallLimitFix/DecalProbe.h"
 #include "DrawcallLimitFix/SkinProbe.h"
 #include "DrawcallLimitFix/NativeProbe.h"
+#include "DrawcallLimitFix/TreeTrace.h"
 #include "DrawcallLimitFix/DrawPipelines.h"
 #include "DrawcallLimitFix/GpuResources.h"
 #include "DrawcallLimitFix/GpuTextures.h"
@@ -47,6 +48,10 @@ namespace
 	public:
 		TestCommands()
 		{
+			// CS_DCLF_TEST_MOVE carries the player faster than it can survive (falls, collisions): god mode
+			// first, once, before anything else runs.
+			if (!DCLF::SwitchValue("CS_DCLF_TEST_MOVE").empty())
+				commands.push_back({ 1, "tgm" });
 			const std::string commandList = DCLF::SwitchValue("CS_DCLF_TEST_COMMANDS");
 			std::string_view text = commandList;
 			if (text.empty())
@@ -146,23 +151,32 @@ namespace
 	public:
 		TestTurn()
 		{
-			const std::string value = DCLF::SwitchValue("CS_DCLF_TEST_TURN");
-			std::string_view text = value;
-			while (!text.empty()) {
-				const auto end = text.find(';');
-				const std::string item(text.substr(0, end));
-				Range range;
-				if (std::sscanf(item.c_str(), "%u:%u:%f", &range.start, &range.end, &range.degrees) == 3)
-					ranges.push_back(range);
-				text = end == std::string_view::npos ? std::string_view{} : text.substr(end + 1);
-			}
+			Parse(DCLF::SwitchValue("CS_DCLF_TEST_TURN"), ranges);
+			Parse(DCLF::SwitchValue("CS_DCLF_TEST_MOVE"), moves);
 		}
 
 		void OnFrame()
 		{
-			if (ranges.empty() || DCLF::SceneStore::IsLoadingScreenUp())
+			if ((ranges.empty() && moves.empty()) || DCLF::SceneStore::IsLoadingScreenUp())
 				return;
 			++frame;
+			// CS_DCLF_TEST_MOVE: the player carried forward along its heading, that many units a frame, so that
+			// objects cross their fade distances in view (a turn alone never fades anything).
+			for (const auto& move : moves) {
+				if (frame < move.start || frame >= move.end)
+					continue;
+				if (auto* tasks = SKSE::GetTaskInterface()) {
+					tasks->AddTask([units = move.degrees] {
+						if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+							auto position = player->GetPosition();
+							const float heading = player->GetAngleZ();
+							position.x += std::sin(heading) * units;
+							position.y += std::cos(heading) * units;
+							player->SetPosition(position, true);
+						}
+					});
+				}
+			}
 			for (const auto& range : ranges) {
 				if (frame < range.start || frame >= range.end)
 					continue;
@@ -182,7 +196,20 @@ namespace
 			std::uint32_t start = 0, end = 0;
 			float degrees = 0.0f;
 		};
+		static void Parse(const std::string& a_value, std::vector<Range>& a_out)
+		{
+			std::string_view text = a_value;
+			while (!text.empty()) {
+				const auto end = text.find(';');
+				const std::string item(text.substr(0, end));
+				Range range;
+				if (std::sscanf(item.c_str(), "%u:%u:%f", &range.start, &range.end, &range.degrees) == 3)
+					a_out.push_back(range);
+				text = end == std::string_view::npos ? std::string_view{} : text.substr(end + 1);
+			}
+		}
 		std::vector<Range> ranges;
+		std::vector<Range> moves;  // CS_DCLF_TEST_MOVE="start:end:units per frame;..."
 		std::uint32_t frame = 0;
 	};
 
@@ -369,6 +396,8 @@ bool DrawcallLimitFix::BeginSceneFrame()
 	if (DCLF::Toggles::Get().BeginFrame())
 		store.InvalidateVerdicts();
 	ScopedPerfEvent event("CS DCLF: scene tables");
+	if (DCLF::TreeTrace::Enabled())
+		DCLF::TreeTrace::Get().BeforeScene();
 	const auto start = std::chrono::steady_clock::now();
 	store.BuildFrame(DCLF::SceneStore::Phase::Scene);
 	const double sceneMs = MillisecondsSince(start);
@@ -503,19 +532,8 @@ void DrawcallLimitFix::EarlyPrepass()
 
 	// What the native loop was told to leave to DCLF but DCLF cannot draw this frame goes back to it now,
 	// before the depth and main passes: an object DCLF has no bindings for, or whose pipeline is not built.
-	if (DCLF::PassCapture::WithholdingEnabled()) {
-		const auto& tables = store.GetTables();
-		const auto& lookups = store.GetLookups();
-		DCLF::PassCapture::Get().HandBackUndrawable([&](const RE::BSGeometry* a_geometry) {
-			const auto object = store.FindObject(a_geometry);
-			if (object < 0 || static_cast<std::size_t>(object) >= tables.objects.size())
-				return false;
-			const auto& record = tables.objects[object];
-			if (record.flags & DCLF::kObjectNoBindings)
-				return false;
-			return record.pipelineIndex < lookups.pipelines.size() && lookups.pipelines[record.pipelineIndex].setIndex != DCLF::Lookups::kNone;
-		});
-	}
+	if (DCLF::PassCapture::WithholdingEnabled())
+		DCLF::PassCapture::Get().HandBackUndrawable(DrawableThisFrame);
 
 	// The shadow views' programs: one Utility build per technique of the frame's casters, per render mode
 	// among the views the engine drew. Requested here, beside the Lighting builds, so they are compiled
@@ -556,6 +574,9 @@ void DrawcallLimitFix::EarlyPrepass()
 		pipelines.CaptureShadowStates(shadowKeys);
 	}
 
+	if (DCLF::TreeTrace::Enabled())
+		DCLF::TreeTrace::Get().AfterAccumulate();
+
 	// The Z-prepass epoch's build, on the worker, from here to the end of Main_RenderDepth (CS_DCLF_ASYNC).
 	DCLF::IndirectDraws::Get().KickZPrepassBuild();
 }
@@ -588,6 +609,8 @@ void DrawcallLimitFix::Prepass()
 		DCLF::SkinProbe::Get().Report(frame, kReportInterval);
 	if (DCLF::NativeProbe::Enabled())
 		DCLF::NativeProbe::Get().Report(frame, kReportInterval);
+	if (DCLF::TreeTrace::Enabled())
+		DCLF::TreeTrace::Get().Report(frame, kReportInterval);
 	if (DCLF::ShadowProbe::Enabled())
 		DCLF::ShadowProbe::Get().Report(frame, kReportInterval);
 
@@ -719,6 +742,8 @@ void DrawcallLimitFix::Prepass()
 		if (stats.projectedUV || stats.landBlend)
 			logger::info("[DCLF] projected UV / terrain (last frame): {} projected candidates, {} terrain candidates, projected textures {}",
 				stats.projectedUV, stats.landBlend, store.GetProjectedTextures().valid ? "captured" : "not seen yet");
+		if (const auto [fading, fadingFrames] = store.TakeFadingDrawn(); fading)
+			logger::info("[DCLF] fading: {} screen-door fading objects drawn by DCLF over {} frames", fading, fadingFrames);
 		if (stats.skinned || draws.boneRows)
 			logger::info("[DCLF] skinned (last frame): {} candidates, {} palette rows in the tables, {} rows uploaded by the epoch", stats.skinned, stats.boneRows, draws.boneRows);
 		if (stats.decals[0] || stats.decals[1] || draws.decalsDrawn)
@@ -736,6 +761,8 @@ void DrawcallLimitFix::Prepass()
 		logger::info("[DCLF] parity: {} native passes kept, {} skipped", skipStats.kept, skipStats.skipped);
 		if (DCLF::IndirectDraws::Hybrid() && skipStats.notInTables)
 			logger::warn("[DCLF] hybrid (last frame): {} native passes were kept because their geometry left the tables", skipStats.notInTables);
+		if (DCLF::IndirectDraws::Hybrid() && skipStats.undrawable)
+			logger::info("[DCLF] hybrid (last frame): {} native passes were kept because DCLF could not draw their object this frame", skipStats.undrawable);
 		if (draws.shortBuffers)
 			logger::warn("[DCLF] {} draws of the last epoch reach past their vertex or index buffer slice", draws.shortBuffers);
 		const auto& gpu = DCLF::GpuResources::Get().GetStats();
@@ -854,6 +881,20 @@ void DrawcallLimitFix::Prepass()
 	}
 }
 
+bool DrawcallLimitFix::DrawableThisFrame(const RE::BSGeometry* a_geometry)
+{
+	const auto& store = DCLF::SceneStore::Get();
+	const auto& tables = store.GetTables();
+	const auto& lookups = store.GetLookups();
+	const auto object = store.FindObject(a_geometry);
+	if (object < 0 || static_cast<std::size_t>(object) >= tables.objects.size())
+		return false;
+	const auto& record = tables.objects[object];
+	if (record.flags & DCLF::kObjectNoBindings)
+		return false;
+	return record.pipelineIndex < lookups.pipelines.size() && lookups.pipelines[record.pipelineIndex].setIndex != DCLF::Lookups::kNone;
+}
+
 bool DrawcallLimitFix::SkipNativePass(RE::BSRenderPass* a_pass)
 {
 	// CS_DCLF_HYBRID_NOSKIP=1: DCLF draws into the frame but the native loop keeps drawing everything, so
@@ -901,6 +942,14 @@ bool DrawcallLimitFix::SkipNativePass(RE::BSRenderPass* a_pass)
 		++skipCounters.notInTables;
 		if (skipCounters.notInTables == 1 && a_pass->geometry->name.c_str())
 			logger::warn("[DCLF] hybrid: '{}' was drawn last frame but is not in this frame's tables; it stays native", a_pass->geometry->name.c_str());
+		return false;
+	}
+	// Nor one DCLF cannot draw this frame although it has a record: the accumulate phase gave it no bindings
+	// (it started fading - a tree's LOD cross-fade begins at a fixed distance - or its switch no longer
+	// selects it) or its pipeline is not built. The skip set is last frame's draws, so this is the frame it
+	// would be drawn by nobody: the flicker trees showed at their LOD distances.
+	if (!DrawableThisFrame(a_pass->geometry)) {
+		++skipCounters.undrawable;
 		return false;
 	}
 	return true;
@@ -1004,6 +1053,8 @@ void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint3
 		DCLF::SkinProbe::Get().OnNativeLightingDraw(a_pass, a_renderFlags);
 	if (DCLF::NativeProbe::Enabled())
 		DCLF::NativeProbe::Get().OnNativeLightingDraw(a_pass, a_renderFlags);
+	if (DCLF::TreeTrace::Enabled())
+		DCLF::TreeTrace::Get().OnNativeLightingDraw(a_pass);
 }
 
 void DrawcallLimitFix::RefreshDepthConsumers()
@@ -1092,6 +1143,7 @@ void DrawcallLimitFix::DrawSettings()
 		ImGui::Checkbox("Skins of several partitions: LOD trees, actor bodies (CS_DCLF_SKIN_PARTITIONS)", &toggles.skinPartitions);
 		ImGui::EndDisabled();
 		ImGui::Checkbox("Actors (CS_DCLF_ACTORS)", &toggles.actors);
+		ImGui::Checkbox("Fading objects: the screen-door fade (CS_DCLF_FADING)", &toggles.fading);
 		ImGui::SeparatorText("Shadow views");
 		ImGui::Checkbox("Draw the shadow views (CS_DCLF_SHADOWS)", &toggles.shadows);
 		ImGui::BeginDisabled(!toggles.shadows);

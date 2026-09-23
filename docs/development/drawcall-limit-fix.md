@@ -1436,6 +1436,9 @@ they are not part of the witness.
 | `CS_DCLF_SWITCH_NODES=1` | Leaves under an `NiSwitchNode` (trees, harvestables) are eligible in the frames every switch on their path selects them ("Trees and actors"). Default on. Live toggle. |
 | `CS_DCLF_SKIN_PARTITIONS=1` | Skins of several partitions and dismember skins (LOD trees, actor bodies) are eligible, one draw per partition the engine draws. Needs `CS_DCLF_SKINNED`. Default on. Live toggle. |
 | `CS_DCLF_ACTORS=1` | Geometry under an actor is eligible, as is the FacegenRGBTint technique. Default on. Live toggle. |
+| `CS_DCLF_FADING=1` | Objects fading with the screen-door mask in an opaque group are eligible ("Fading objects"). Default on. Live toggle. |
+| `CS_DCLF_TREE_TRACE=1` | Diagnostic: every geometry of a TREE reference followed frame by frame (registered, withheld, accumulated, bindings, native and DCLF draws, and the switch, LOD and transforms before the walk and after the cull), with who drew it, gaps and double draws, every 300 frames. |
+| `CS_DCLF_TEST_MOVE=start:end:units` | Test harness: moves the player along their heading by `units` a frame between two frames (several ranges separated by `;`), and runs `tgm` first so the flight is survivable. |
 | `CS_DCLF_NATIVE_PROBE=1` | Diagnostic: every 300 frames, the Lighting draws the main pass still issues natively, by form type, DCLF verdict, technique, skin shape and LODMode, with sampled ancestor chains. |
 | `CS_DCLF_SHADOW_PROBE=1` | Diagnostic: the shadow probe (step one): per-view engine state, registrations, derivation and rule cross-checks, and the engine's shadow CPU. |
 | `CS_DCLF_PASS_SOURCE=accumulator` | Build the tables from the accumulator walk instead of the captured registrations. |
@@ -1475,7 +1478,7 @@ they are not part of the witness.
 Unset switches now take the configuration every gate run of this work used: `CS_DCLF_HYBRID=1`,
 `CS_DCLF_OWNERSHIP=static`, `CS_DCLF_CULL=occlusion`, `CS_DCLF_SKINNED=1`, `CS_DCLF_TREES=1`,
 `CS_DCLF_DECALS=1`, `CS_DCLF_PROJECTED_UV=1`, `CS_DCLF_MTLAND=1`, `CS_DCLF_SWITCH_NODES=1`,
-`CS_DCLF_SKIN_PARTITIONS=1`, `CS_DCLF_ACTORS=1`, `CS_DCLF_SHADOWS=1` and
+`CS_DCLF_SKIN_PARTITIONS=1`, `CS_DCLF_ACTORS=1`, `CS_DCLF_FADING=1`, `CS_DCLF_SHADOWS=1` and
 `CS_DCLF_SHADOW_OWNERSHIP=static` (the tables already default to the tracked set). An explicit value
 overrides a default: `0` for the class and path switches, `off` for the two ownership switches and the
 culling. Rows above that say "Default off" describe the switches before this change. All of them are live
@@ -3297,3 +3300,63 @@ What stays native, by name:
     cull. The native loop draws it, and DCLF's verdict is `hidden`. That is correct and leaves no hole; it
     only means those draws are not DCLF's.
 -   Distant LOD (`no-ref`, under `LODRoot`).
+
+## Fading objects
+
+An object fading in or out used to go back to the native passes for the whole fade. Most fades do not need
+that. The engine draws them in the ordinary opaque groups (hints 0, 11 and 15) with the screen-door mask:
+pass descriptor `AdditionalAlphaMask`, with the fade in `MaterialData.z`. `Lighting.hlsl` discards against a
+4x4 screen pattern, so the object stays opaque, and the Z-prepass, which keeps the alpha test, dithers the
+same pixels.
+
+-   **`CS_DCLF_FADING`** (default on, live toggle) makes those passes eligible. `MaterialData.z` is
+    `property.alpha`, which the material evaluation already resamples every frame at Prepass
+    (`RefreshFrameConstants`).
+-   **What stays native** (`PassCapture::FadingAtRegistration`):
+    -   blended fades (accumulation hint 9, drawn with the transparent objects after the composite);
+    -   the LOD cross-fade copies (hint 10), and so the whole object while a `kMeshLOD` fade node's LOD state
+        (`+0x153 & 0x70`) is not settled (0x20);
+    -   fading decals (hints 2 and 3). Keeping these native is a precaution, not a measurement: the decal
+        probe's state mismatches turned out not to depend on the fade.
+-   Report line: `[DCLF] fading: N screen-door fading objects drawn by DCLF over M frames`.
+
+### The flicker at a tree's LOD distances
+
+Trees (trunks as well as foliage) disappeared for one frame at fixed distances, moving towards them or
+away. Culling was not the cause: the flicker stayed with `CS_DCLF_CULL=off`.
+
+`CS_DCLF_TREE_TRACE=1` found it. It follows every geometry of a TREE reference through the frame:
+registered, withheld, accumulated, given bindings, drawn natively (`SetupGeometry`), drawn by DCLF. It also
+samples the geometry before the scene walk and after the accumulate phase. On a 40-unit-a-frame flight,
+100 to 230 accumulated tree geometries per 300 frames were drawn by nobody, always in the first frame of a
+LOD cross-fade:
+
+-   The fade node's state went from settled (`a4`) to crossing (`c4`) in the cull. At registration the pass
+    was already fading, so it was not withheld and the native loop was meant to draw it.
+-   The accumulate phase gave it no bindings (`fading`), so DCLF did not draw it.
+-   `SkipNativePass`, the hybrid rule on the `RenderPassImmediately` call sites, then skipped the native
+    draw. That rule skips any object the colour epoch drew *last frame* and that has a record this
+    frame. It never asked whether DCLF could draw the object *this* frame.
+
+The fix: `SkipNativePass` keeps the native draw of anything `DrawcallLimitFix::DrawableThisFrame` rejects,
+meaning no record with bindings, or no built pipeline. That is the same test `HandBackUndrawable` uses, and
+the two now share it. The report line is `hybrid (last frame): N native passes were kept because DCLF could
+not draw their object this frame`. After the fix, on the same flight:
+
+| per 300 frames | before | after |
+| --- | --- | --- |
+| accumulated tree geometries drawn by nobody | 98-228 | 0 |
+| one-frame gaps of an accumulated tree | 98-228 | 0 |
+
+The trace also rules out the other suspects: 0 switch changes and 0 bone or world moves between the walk
+and the draw, and 0 stale record transforms. What it still shows is expected:
+
+-   **Drawn twice**, 270-890 object-frames per interval: the frame an object becomes DCLF's again (its fade
+    ends). The claims are last frame's draws, so the native loop draws it once more. It is opaque at the
+    same depth, so this costs a draw and shows nothing.
+-   **One-frame gaps the engine made** (0-12 per interval): small foliage the engine's own cull did not
+    register for a frame (`reg 0`), with nothing withheld.
+
+**Still open:** with occlusion culling on, the set-parity gap detector counts 94-1,572 one-frame phase-2
+rejections per 300 frames on the same flight, against none with `CS_DCLF_CULL=frustum`. Whether those
+objects were really hidden for that frame is not yet measured.

@@ -7,6 +7,7 @@
 -   **[OpenRenderGraph on DXVK](./render-graph.md)** - How features run render-graph work on DXVK's Vulkan device
 -   **[Drawcall Limit Fix](./drawcall-limit-fix.md)** - GPU-driven indirect drawing of the opaque scene (in progress)
 -   **[Skyrim engine notes](./skyrim-engine-notes.md)** - What the decompiled game binary does, where features depend on it
+-   **[Crash catalog](./crash-catalog.md)** - Crashes met during development, their stacks and what is known about each
 
 ## Quick Links
 
