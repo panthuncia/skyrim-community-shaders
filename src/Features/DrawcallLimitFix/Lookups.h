@@ -72,6 +72,12 @@ namespace DCLF
 			std::pair<const RE::BSShaderMaterial*, std::uint32_t> key{};
 			std::array<std::uint32_t, kTextureSlots> textureIndex{};  // descriptor heap indices; kNone where unresolvable
 			bool resolved = false;
+			// What textureIndex was resolved from, so an unchanged material is not resolved again (every epoch
+			// refreshes the lookups): its views, which of them were written, GpuTextures' generation, and when.
+			std::array<ID3D11ShaderResourceView*, kTextureSlots> views{};
+			std::uint32_t written = 0;
+			std::uint32_t texturesGeneration = 0;
+			std::uint32_t resolvedFrame = 0;
 		};
 
 		std::vector<Pipeline> pipelines;

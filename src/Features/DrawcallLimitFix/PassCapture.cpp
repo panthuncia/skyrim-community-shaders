@@ -40,7 +40,13 @@ namespace DCLF
 		return subPass;
 	}
 
-	void PassCapture::Record(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint32_t a_technique)
+	bool PassCapture::FadingAtRegistration(const RE::BSRenderPass* a_pass)
+	{
+		const auto* property = a_pass && a_pass->geometry ? a_pass->geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
+		return property && property->fadeNode && property->fadeNode->GetRuntimeData().currentFade < 1.0f;
+	}
+
+	void PassCapture::Record(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint32_t a_technique, bool a_fading, bool a_withheld)
 	{
 		// CS_DCLF_REGISTER_PROBE=1: what else comes through RegisterPass, so that owning the depth pass
 		// can be planned against evidence rather than against the shape of GetRenderDepthPass. Reports the
@@ -86,7 +92,7 @@ namespace DCLF
 		}
 		auto* property = a_pass->geometry->GetGeometryRuntimeData().shaderProperty.get();
 		entries[slot] = Entry{ a_pass->geometry, a_pass, a_batch, a_technique,
-			SubPassOf(a_pass->geometry, property ? property->flags.underlying() : 0ull), a_pass->passEnum };
+			SubPassOf(a_pass->geometry, property ? property->flags.underlying() : 0ull), a_pass->passEnum, a_fading, a_withheld };
 	}
 
 	std::span<const PassCapture::Entry> PassCapture::Drain()
@@ -98,7 +104,12 @@ namespace DCLF
 		stats.withheld = withheld.exchange(0, std::memory_order_relaxed);
 		for (std::uint32_t m = 0; m < kShadowModes; ++m)
 			stats.shadowWithheld[m] = shadowWithheld[m].exchange(0, std::memory_order_relaxed);
-		return { entries.data(), count };
+		lastDrain = { entries.data(), count };
+		handedBack.clear();
+		withheldThisFrame.clear();
+		withheldBuilt = false;
+		stats.handedBack = 0;
+		return lastDrain;
 	}
 
 	std::span<const PassCapture::Entry> PassCapture::DrainUtility()
@@ -141,7 +152,7 @@ namespace DCLF
 			std::atomic_store(&shadowClaims[a_modeIndex], std::move(a_claims));
 	}
 
-	bool PassCapture::Withhold(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass)
+	bool PassCapture::Withhold(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, bool a_fading)
 	{
 		if (!a_pass || !a_pass->geometry)
 			return false;
@@ -153,7 +164,9 @@ namespace DCLF
 			const auto renderers = std::atomic_load(&mainRenderers);
 			if (renderers && renderers->contains(a_batch)) {
 				const auto owned = std::atomic_load(&claims);
-				if (owned && owned->contains(a_pass->geometry)) {
+				// A fading object is not DCLF's this frame (the accumulate phase gives it no bindings, from this
+				// same value): withholding it would leave it drawn by nobody.
+				if (owned && owned->contains(a_pass->geometry) && !a_fading) {
 					withheld.fetch_add(1, std::memory_order_relaxed);
 					return true;
 				}
@@ -185,16 +198,44 @@ namespace DCLF
 				func(a_this, a_pass, a_techniqueID);
 				return;
 			}
-			capture.Record(a_this, a_pass, a_techniqueID);
+			// Per-frame state is read once, here, and both decisions below use it.
+			const bool fading = FadingAtRegistration(a_pass);
 			// Withholding is the whole of static ownership: the pass is built, lit and shadowed exactly as
 			// before - only the batch renderer never receives it, so the native loop has nothing to draw
-			// and DCLF owns the object outright. Everything the tables need was taken by Record above.
-			if (capture.Withhold(a_this, a_pass))
+			// and DCLF owns the object outright. Everything the tables need is taken by Record.
+			const bool withheld = capture.Withhold(a_this, a_pass, fading);
+			capture.Record(a_this, a_pass, a_techniqueID, fading, withheld);
+			if (withheld)
 				return;
 			func(a_this, a_pass, a_techniqueID);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
+
+	std::uint32_t PassCapture::HandBackUndrawable(const std::function<bool(const RE::BSGeometry*)>& a_drawable)
+	{
+		std::uint32_t count = 0;
+		for (const auto& entry : lastDrain) {
+			if (!entry.withheld || !entry.geometry || !entry.batch || !entry.pass || handedBack.contains(entry.geometry) || a_drawable(entry.geometry))
+				continue;
+			Hook::func(const_cast<RE::BSBatchRenderer*>(entry.batch), const_cast<RE::BSRenderPass*>(entry.pass), entry.technique);
+			handedBack.insert(entry.geometry);
+			++count;
+		}
+		stats.handedBack = count;
+		return count;
+	}
+
+	bool PassCapture::WithheldThisFrame(const RE::BSGeometry* a_geometry)
+	{
+		if (!withheldBuilt) {
+			for (const auto& entry : lastDrain)
+				if (entry.withheld && entry.geometry)
+					withheldThisFrame.insert(entry.geometry);
+			withheldBuilt = true;
+		}
+		return withheldThisFrame.contains(a_geometry) && !handedBack.contains(a_geometry);
+	}
 
 	void PassCapture::Install()
 	{

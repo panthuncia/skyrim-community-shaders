@@ -61,6 +61,17 @@ namespace DCLF
 		/** @brief Once per epoch: releases entries unused for kEvictFrames. */
 		void BeginFrame(std::uint32_t a_frame);
 
+		/**
+		 * @brief Changes whenever an entry is released (eviction, Clear): a view pointer may then be reused by
+		 * a different view. While it is unchanged, an index Resolve returned for a view is still that view's.
+		 */
+		std::uint32_t Generation() const { return generation; }
+		/**
+		 * @brief How often a caller that keeps Resolve's results must resolve its views again, so that what it
+		 * uses is never evicted (Resolve is what marks an entry used).
+		 */
+		static constexpr std::uint32_t kRestampFrames = 32;
+
 		const Stats& GetStats() const { return stats; }
 
 		void Clear();
@@ -71,6 +82,8 @@ namespace DCLF
 		GpuTextures();
 
 		static constexpr std::uint32_t kEvictFrames = 600;
+		static_assert(kRestampFrames + 64 < kEvictFrames, "an entry restamped every kRestampFrames must outlive the eviction sweep");
+		std::uint32_t generation = 0;
 
 		struct Impl;
 		std::unique_ptr<Impl> impl;

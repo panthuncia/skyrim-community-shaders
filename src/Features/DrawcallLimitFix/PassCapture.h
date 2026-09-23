@@ -3,7 +3,9 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <span>
 #include <vector>
 
 #include <ankerl/unordered_dense.h>
@@ -42,6 +44,8 @@ namespace DCLF
 			std::uint32_t technique = 0;                 // techniqueID, the batch group's key
 			std::uint32_t subPass = 0;                   // derived; see SubPassOf
 			std::uint32_t passEnum = 0;
+			bool fading = false;                         // FadingAtRegistration
+			bool withheld = false;                       // kept from the batch renderer (Withhold)
 		};
 
 		struct Stats
@@ -68,6 +72,7 @@ namespace DCLF
 			std::uint32_t claimsAdded = 0;
 			std::uint32_t claimsDropped = 0;
 			std::uint32_t droppedAfterCull = 0;  // dropped while the engine still had a pass for it
+			std::uint32_t handedBack = 0;        // withheld, then returned to the native loop (HandBackUndrawable)
 		};
 
 		/** @brief The set of geometries DCLF owns; registration is withheld for these. */
@@ -118,6 +123,31 @@ namespace DCLF
 		}
 		/** @brief CS_DCLF_SHADOW_OWNERSHIP=static (live: Toggles.h): withhold claimed casters from the shadow views. */
 		static bool ShadowWithholdingEnabled();
+		/**
+		 * @brief Whether the pass's object is fading as it is registered. The cull has just updated the fade
+		 * (BSFadeNode::OnVisible runs before the node's geometry registers), and this is the one value both
+		 * the withholding and the accumulate phase's fading verdict use (AccumulatedPass::fading).
+		 */
+		static bool FadingAtRegistration(const RE::BSRenderPass* a_pass);
+
+		/**
+		 * @brief EarlyPrepass, render thread: returns every pass withheld this frame whose object DCLF cannot
+		 * draw this frame (a_drawable false) to the batch renderer it was kept from, through the original
+		 * RegisterPass, before the native depth and main passes draw.
+		 *
+		 * Withholding is decided at registration from the claims, which are last frame's draws; whether
+		 * DCLF can draw the object this frame is only known once the tables and pipeline lookups are built.
+		 * Whatever falls between the two - a pipeline variant still compiling, an object that lost its
+		 * bindings this frame - would otherwise be drawn by nobody. Returns how many were handed back.
+		 */
+		std::uint32_t HandBackUndrawable(const std::function<bool(const RE::BSGeometry*)>& a_drawable);
+		/** @brief Whether this frame's HandBackUndrawable returned the geometry to the native loop. */
+		bool HandedBack(const RE::BSGeometry* a_geometry) const { return handedBack.contains(a_geometry); }
+		/**
+		 * @brief For the hole reports, render thread: whether a registration of the geometry was withheld from
+		 * the main camera this frame and not handed back - the native loop will not draw it.
+		 */
+		bool WithheldThisFrame(const RE::BSGeometry* a_geometry);
 
 		/** @brief Takes everything registered since the last call; render thread only. */
 		std::span<const Entry> Drain();
@@ -162,6 +192,11 @@ namespace DCLF
 		// Published whole by the render thread, read by the registering thread. shared_ptr's atomic
 		// load/store keeps the readers safe while the next one is being built.
 		std::shared_ptr<const ClaimSet> claims;
+		// The last drain (valid until the next frame's registrations), and what HandBackUndrawable returned.
+		std::span<const Entry> lastDrain;
+		ankerl::unordered_dense::set<const RE::BSGeometry*> handedBack;
+		ankerl::unordered_dense::set<const RE::BSGeometry*> withheldThisFrame;  // built on the first WithheldThisFrame
+		bool withheldBuilt = false;
 		std::shared_ptr<const ankerl::unordered_dense::set<const RE::BSBatchRenderer*>> mainRenderers;
 		std::shared_ptr<const ShadowRendererMap> shadowRenderers;
 		std::array<std::shared_ptr<const ClaimSet>, kShadowModes> shadowClaims;
@@ -169,8 +204,8 @@ namespace DCLF
 
 		struct Hook;
 		friend struct Hook;
-		void Record(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint32_t a_technique);
-		bool Withhold(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass);
+		void Record(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint32_t a_technique, bool a_fading, bool a_withheld);
+		bool Withhold(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, bool a_fading);
 
 	public:
 		/** @brief CS_DCLF_REGISTER_PROBE: registrations by shader type, and how many into a main renderer. */

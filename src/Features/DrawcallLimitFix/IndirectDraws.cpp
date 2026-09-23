@@ -486,6 +486,7 @@ namespace DCLF
 			std::shared_ptr<org::Buffer> inputs, geometries, sequences, count;  // BuildDraws: in, in, out, out
 			std::shared_ptr<const ComputeProgram> buildDraws;
 			winrt::com_ptr<ID3D11Buffer> sequencesD3D11, countD3D11;  // CS_DCLF_BUILD_PARITY readback
+			winrt::com_ptr<ID3D11Buffer> visibilityD3D11;              // CS_DCLF_SET_PARITY readback
 			std::uint64_t constantsAddress = 0, recordsAddress = 0;
 			std::uint32_t recordCapacity = 0;  // entries in `records`, which deduplication makes far fewer
 			// The per-frame constant blocks at fixed slots (FrameSlotOffset), so a build can name them before
@@ -1151,6 +1152,24 @@ namespace DCLF
 		}
 
 		// CS_DCLF_BUILD_PARITY=1: compare BuildDraws' output with the CPU templates every 300 epochs.
+		// MainPayload::objectState values besides the Skip reasons.
+		constexpr std::uint8_t kObjectStateDrawable = 0xF0;
+		constexpr std::uint8_t kObjectStateDecal = 0xF1;
+		constexpr std::uint8_t kObjectStateAbsent = 0xFF;
+
+		/**
+		 * CS_DCLF_SET_PARITY=1: every frame, the per-object visibility words read back after the colour epoch,
+		 * with BuildDrawsCS's two drawn bits (depth, colour), against what the two builds and the native
+		 * withholding decided on the CPU. See CheckSetParity.
+		 */
+		bool SetParityEnabled()
+		{
+			static const bool enabled = [] {
+				return SwitchEnabled("CS_DCLF_SET_PARITY");
+			}();
+			return enabled;
+		}
+
 		bool BuildParityEnabled()
 		{
 			static const bool enabled = [] {
@@ -1907,6 +1926,10 @@ namespace DCLF
 			// can resolve: the build leaves these (record, register) pairs for it.
 			std::vector<std::pair<std::uint32_t, std::uint32_t>> framePatches;
 			std::vector<std::uint32_t> drawn;  // objects the colour epoch drew: the native loop's skip set
+			// Per object in the tables: what this build did with it - kObjectStateDrawable, kObjectStateDecal,
+			// a Skip reason, or kObjectStateAbsent when it never reached the inputs (CS_DCLF_SET_PARITY explains
+			// its mismatches with this).
+			std::vector<std::uint8_t> objectState;
 			std::array<std::uint32_t, kDecalGroups> decalCount{};
 			// The build's stats, merged into IndirectDraws::Stats by the commit.
 			std::array<std::uint32_t, static_cast<std::size_t>(IndirectDraws::Skip::Count)> skipped{};
@@ -1942,6 +1965,7 @@ namespace DCLF
 				geometryDraws.clear();
 				framePatches.clear();
 				drawn.clear();
+				objectState.clear();
 				for (auto& templates : decalTemplates)
 					templates.clear();
 				decalCount = {};
@@ -1980,9 +2004,21 @@ namespace DCLF
 			std::vector<float> boneRows;
 			std::vector<GeometryDraw> geometries;
 			std::uint32_t skippedTexture = 0, skippedPipeline = 0, deferredTextures = 0, deferredPipelines = 0;
+			// The worker's build stages its uploads itself (StageShadowPayload): everything but the arena's view
+			// head, and the records of the first stagedSlots view slots. For the resources it was staged against.
+			std::shared_ptr<org::runtime::StagedUploadBatch> staged;
+			const void* stagedFor = nullptr;
+			std::uint32_t stagedSlots = 0;
+			// The worker's build also builds each used mode's claim set (ShadowClaimSet), which the epoch
+			// publishes; empty for a build made on the render thread, which builds them at the publish.
+			std::array<std::shared_ptr<const PassCapture::ClaimSet>, kShadowModeCount> claims;
 
 			void Reset()
 			{
+				staged.reset();
+				stagedFor = nullptr;
+				stagedSlots = 0;
+				claims = {};
 				arena.Reset();
 				records.clear();
 				objectRecord.clear();
@@ -2270,7 +2306,13 @@ namespace DCLF
 			const bool linearLighting = a_in.linearLighting;
 			const auto renderFlags = a_in.renderFlags;
 
-			auto skip = [&](Skip a_reason) { ++a_out.skipped[static_cast<std::size_t>(a_reason)]; };
+			a_out.objectState.assign(std::min<std::size_t>(a_tables.objects.size(), kMaxObjects), kObjectStateAbsent);
+			std::uint32_t currentObject = ~0u;
+			auto skip = [&](Skip a_reason) {
+				++a_out.skipped[static_cast<std::size_t>(a_reason)];
+				if (currentObject < a_out.objectState.size())
+					a_out.objectState[currentObject] = static_cast<std::uint8_t>(a_reason);
+			};
 			auto partStart = std::chrono::steady_clock::now();
 			auto mark = [&](std::size_t a_part) {
 				const auto now = std::chrono::steady_clock::now();
@@ -2312,6 +2354,7 @@ namespace DCLF
 				}
 			}
 			for (std::uint32_t o = 0; o < a_tables.objects.size(); ++o) {
+				currentObject = o;
 				const auto& object = a_tables.objects[o];
 				if (object.flags & kObjectNoBindings) {
 					// A culling candidate with no material or pipeline entry; its indices are meaningless.
@@ -2847,7 +2890,11 @@ namespace DCLF
 						static_cast<std::uint32_t>(o), ordinal });
 					decalTemplates[(decalGroup - 1) & 1][ordinal] = sequence;
 					++a_out.decalsDrawn;
+					if (o < a_out.objectState.size())
+						a_out.objectState[o] = kObjectStateDecal;
 				} else {
+					if (o < a_out.objectState.size())
+						a_out.objectState[o] = kObjectStateDrawable;
 					drawInputs.push_back({ blocks.setIndex, recordIndex, object.geometryIndex,
 						object.flags | kInputDrawable,
 						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius,
@@ -2886,6 +2933,19 @@ namespace DCLF
 		 * pure. The per-view blocks are the commit's, because the views are captured while the engine draws
 		 * them, after the build may have started.
 		 */
+		// The objects a mode's inputs draw, as the geometry the native shadow loop withholds (PassCapture).
+		std::shared_ptr<const PassCapture::ClaimSet> ShadowClaimSet(const std::vector<DrawInput>& a_inputs, const SceneStore::Tables& a_tables)
+		{
+			auto claims = std::make_shared<PassCapture::ClaimSet>();
+			claims->reserve(a_inputs.size());
+			for (const auto& input : a_inputs) {
+				if (input.objectIndex < a_tables.objectGeometry.size())
+					if (const auto* geometry = a_tables.objectGeometry[input.objectIndex])
+						claims->insert(geometry);
+			}
+			return claims;
+		}
+
 		void BuildShadowPayload(const ShadowInputs& a_in, const SceneStore::Tables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out)
 		{
 			a_out.Reset();
@@ -2977,7 +3037,12 @@ namespace DCLF
 					continue;
 				}
 				DrawBindings bindings = plain;
-				bindings.vertexConstants[1] = block(a_tables.shadowTexcoord[o].data(), sizeof(float) * 4);
+				// The texture transform off the material now, not from the walk: shader-property controllers
+				// (BSLightingShaderPropertyFloatController::Update) move it between Main::Draw, where the walk
+				// starts, and BeforeShadowMaps, where this build is kicked.
+				const std::array<float, 4> texcoord{ material->texCoordOffset[0].x, material->texCoordOffset[0].y, material->texCoordScale[0].x,
+					material->texCoordScale[0].y };
+				bindings.vertexConstants[1] = block(texcoord.data(), sizeof(texcoord));
 				bindings.textures[0] = textureIt->second;
 				const auto index = static_cast<std::uint32_t>(records.size());
 				records.push_back(bindings);
@@ -3053,15 +3118,29 @@ namespace DCLF
 					entry.resolved = false;
 				}
 				const auto& material = a_tables.materials[slot];
+				// Resolved from these same views, with none evicted since, recently enough that they are still
+				// marked used: the indices stand (the shadow, Z-prepass and colour epochs each refresh).
+				if (entry.resolved && entry.written == material.textureWritten && entry.texturesGeneration == textures.Generation() &&
+					a_frame - entry.resolvedFrame < GpuTextures::kRestampFrames) {
+					bool same = true;
+					for (std::uint32_t t = 0; t < kPixelTextureSlots && same; ++t)
+						same = !((material.textureWritten >> t) & 1) || entry.views[t] == material.textures[t];
+					if (same)
+						continue;
+				}
 				for (std::uint32_t t = 0; t < kPixelTextureSlots; ++t) {
 					if (!((material.textureWritten >> t) & 1))
 						continue;
 					const std::uint32_t index = textures.Resolve(material.textures[t]);
 					note(entry.textureIndex[t], index);
+					entry.views[t] = material.textures[t];
 				}
 				if (!entry.resolved)
 					++a_lookups.generation;
 				entry.resolved = true;
+				entry.written = material.textureWritten;
+				entry.texturesGeneration = textures.Generation();
+				entry.resolvedFrame = a_frame;
 			}
 			// The technique's shadow mask, per used pipeline: the frame's view, so it is refreshed every epoch.
 			a_lookups.pipelines.resize(std::max(a_lookups.pipelines.size(), a_tables.pipelines.size()));
@@ -3271,6 +3350,8 @@ namespace DCLF
 	}
 
 	void StageMainPayload(MainPayload& a_payload, const Resources& a_resources, std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>>& a_pool);
+	void StageShadowPayload(ShadowPayload& a_payload, const ShadowResources& a_resources, std::uint32_t a_slots,
+		std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>>& a_pool);
 
 	struct IndirectDraws::Impl
 	{
@@ -3315,7 +3396,8 @@ namespace DCLF
 		std::vector<DrawBindings> shadowSlotRecords;  // one slot's copy of the records, while it uploads
 		// CS_DCLF_SHADOW_OWNERSHIP=static: the claim set built from the inputs of a mode, published once per
 		// input rebuild (the views of one frame that share a mode share the inputs and the claims).
-		void PublishShadowClaims(std::uint32_t a_renderMode, const std::vector<DrawInput>& a_inputs, IndirectDraws::ShadowStats& a_stats);
+		void PublishShadowClaims(std::uint32_t a_renderMode, const std::vector<DrawInput>& a_inputs, std::shared_ptr<const PassCapture::ClaimSet> a_built,
+			IndirectDraws::ShadowStats& a_stats);
 		RE::NiPoint3 shadowRefEye;
 		std::uint64_t shadowSerial = 0;
 		ShadowPayload shadowPayload;
@@ -3328,7 +3410,9 @@ namespace DCLF
 			ShadowInputs inputs;
 			std::array<bool, kShadowModeCount> modes{};
 			bool modesKnown = false;
+			std::uint32_t views = 0;  // last frame's view count: the record slots the job stages
 			std::uint32_t loggedStale = 0;
+			std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>> stagedPool;
 		} shadowJob;
 		ShadowPayload shadowProbePayload;
 		ShadowInputs PrepareShadowInputs(const SceneStore& a_store, const ShadowResources& a_resources, const std::array<bool, kShadowModeCount>& a_modeUsed) const;
@@ -3453,6 +3537,30 @@ namespace DCLF
 
 		void ReadCullCounters(const std::shared_ptr<Resources>& a_resources, IndirectDraws::Stats& a_stats);
 
+		// CS_DCLF_SET_PARITY: one snapshot per frame in flight, read back a few frames later.
+		struct SetParityFrame
+		{
+			winrt::com_ptr<ID3D11Buffer> staging;
+			std::uint32_t frame = 0;
+			std::uint32_t framesLeft = 0;
+			std::vector<std::uint8_t> depthState, colourState;  // MainPayload::objectState of the two builds
+			// Per object: bit 0 withheld from the native loop this frame (claimed, and registered by the
+			// engine), bit 1 native-visible, bit 2 alpha tested, bit 3 claimed.
+			std::vector<std::uint8_t> flags;
+			std::vector<const RE::BSGeometry*> geometry;
+		};
+		std::deque<SetParityFrame> setParityFrames;
+		std::vector<winrt::com_ptr<ID3D11Buffer>> setParityStaging;  // released stagings, reused
+		struct SetParityCounts
+		{
+			std::uint32_t frames = 0, framesWithDamage = 0, skipped = 0;
+			std::uint32_t depthOnly = 0, colourOnly = 0, colourUnpublished = 0, withheldUndrawn = 0, withheldCulled = 0;
+			std::uint32_t colourDrawnTotal = 0, depthDrawnTotal = 0;
+			std::uint32_t alphaDepthOnly = 0, alphaColourOnly = 0, alphaWithheldUndrawn = 0;
+			std::uint32_t samples = 0;
+		} setParity;
+		void CheckSetParity(const std::shared_ptr<Resources>& a_resources, const MainPayload& a_depth, const MainPayload& a_colour);
+
 		void CheckBuildParity(const std::shared_ptr<Resources>& a_resources, const MainPayload& a_payload, IndirectDraws::Stats& a_stats);
 
 		std::uint32_t loggedReasons = 0;
@@ -3563,6 +3671,15 @@ namespace DCLF
 				desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
 				desc.StructureByteStride = sizeof(std::uint32_t);
 				state->countD3D11 = RenderGraphRuntime::Get().WrapBuffer(*state->count, desc);
+			}
+			if (SetParityEnabled()) {
+				D3D11_BUFFER_DESC desc{};
+				desc.ByteWidth = kMaxObjects * sizeof(std::uint32_t);
+				desc.Usage = D3D11_USAGE_DEFAULT;
+				desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+				desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+				desc.StructureByteStride = sizeof(std::uint32_t);
+				state->visibilityD3D11 = RenderGraphRuntime::Get().WrapBuffer(*state->visibility, desc);
 			}
 			state->frameConstants = buffer(kFrameConstantBytes, "cs.dclf.frame-constants");
 			state->constantsAddress = device.GetBufferDeviceAddress({ state->constants->GetAPIResource().GetHandle(), 0 });
@@ -3960,8 +4077,10 @@ namespace DCLF
 		ShadowInputs in = impl->PrepareShadowInputs(store, *resources, modeUsed);
 		impl->shadowJob.modes = modeUsed;
 		impl->shadowJob.modesKnown = true;
+		impl->shadowJob.views = static_cast<std::uint32_t>(pending.size());
 		auto& payload = impl->shadowPayload;
 		auto& async = stats.async[kAsyncShadow];
+		bool usedWorkerBuild = false;
 
 		const bool ok = RenderGraphRuntime::Get().ExecuteEpoch(RenderGraphRuntime::Segment::ShadowView, [&](org::RenderGraph&) {
 			struct BodyTimer
@@ -4018,6 +4137,7 @@ namespace DCLF
 				}
 				job.handle = {};
 			}
+			usedWorkerBuild = useAsync;
 			if (useAsync) {
 				++async.used;
 				if (AsyncModeSetting() == AsyncMode::Probe) {
@@ -4043,14 +4163,23 @@ namespace DCLF
 			const std::uint64_t base = resources->constantsAddress;
 			auto& arena = payload.arena;
 			auto& records = payload.records;
-			if (!payload.objects.empty())
-				uploads(resources->objects, payload.objects.data(), payload.objects.size() * sizeof(BindlessObject), 0);
-			if (!payload.boneRows.empty()) {
-				const std::size_t boneBytes = std::min<std::size_t>(payload.boneRows.size() * sizeof(float), std::size_t(kMaxBoneRows) * 16);
-				uploads(resources->bones, payload.boneRows.data(), boneBytes, 0);
+			// The worker's build staged what does not depend on the views (StageShadowPayload): one submission,
+			// ahead of this commit's own uploads. A build made here, or staged against resources since recreated,
+			// is uploaded from its vectors.
+			const bool staged = useAsync && payload.staged && payload.stagedFor == resources.get();
+			const std::uint32_t stagedSlots = staged ? payload.stagedSlots : 0;
+			if (staged) {
+				org::runtime::GetActiveUploadService()->SubmitStagedUploads(std::move(payload.staged));
+			} else {
+				if (!payload.objects.empty())
+					uploads(resources->objects, payload.objects.data(), payload.objects.size() * sizeof(BindlessObject), 0);
+				if (!payload.boneRows.empty()) {
+					const std::size_t boneBytes = std::min<std::size_t>(payload.boneRows.size() * sizeof(float), std::size_t(kMaxBoneRows) * 16);
+					uploads(resources->bones, payload.boneRows.data(), boneBytes, 0);
+				}
+				if (!payload.geometries.empty())
+					uploads(resources->geometries, payload.geometries.data(), std::min<std::size_t>(payload.geometries.size(), kMaxGeometries) * sizeof(GeometryDraw), 0);
 			}
-			if (!payload.geometries.empty())
-				uploads(resources->geometries, payload.geometries.data(), std::min<std::size_t>(payload.geometries.size(), kMaxGeometries) * sizeof(GeometryDraw), 0);
 			shadowStats.records = static_cast<std::uint32_t>(records.size());
 			shadowStats.skippedTexture = payload.skippedTexture;
 			shadowStats.skippedPipeline = payload.skippedPipeline;
@@ -4060,7 +4189,7 @@ namespace DCLF
 				const auto& inputs = payload.inputList[m];
 				if (!modeUsed[m])
 					continue;
-				if (!inputs.empty())
+				if (!staged && !inputs.empty())
 					uploads(resources->inputs[m], inputs.data(), inputs.size() * sizeof(DrawInput), 0);
 				shadowStats.inputs = static_cast<std::uint32_t>(inputs.size());
 			}
@@ -4082,16 +4211,18 @@ namespace DCLF
 				const std::uint64_t perFrameOffset = viewBlockOffset + kShadowPerFrameOffset;
 				std::memcpy(arena.At(viewBlockOffset, sizeof(view.viewBlock)).data(), view.viewBlock, sizeof(view.viewBlock));
 				std::memcpy(arena.At(perFrameOffset, view.perFrameBytes).data(), view.perFrame.data(), view.perFrameBytes);
-				slotRecords = records;
-				for (auto& record : slotRecords) {
-					record.vertexConstants[0] = base + viewBlockOffset;
-					record.pixelConstants[0] = base + viewBlockOffset;
-					record.vertexConstants[kPerFrameVertexRegister] = base + perFrameOffset;
-					record.pixelConstants[kPerFrameVertexRegister] = base + perFrameOffset;
-				}
 				const std::uint64_t recordsOffset = std::uint64_t(slot) * kShadowRecordCapacity * sizeof(DrawBindings);
-				uploads(resources->records, slotRecords.data(), slotRecords.size() * sizeof(DrawBindings), recordsOffset);
-				uploads(resources->count[slot], zero, sizeof(zero), 0);
+				if (slot >= stagedSlots) {
+					slotRecords = records;
+					for (auto& record : slotRecords) {
+						record.vertexConstants[0] = base + viewBlockOffset;
+						record.pixelConstants[0] = base + viewBlockOffset;
+						record.vertexConstants[kPerFrameVertexRegister] = base + perFrameOffset;
+						record.pixelConstants[kPerFrameVertexRegister] = base + perFrameOffset;
+					}
+					uploads(resources->records, slotRecords.data(), slotRecords.size() * sizeof(DrawBindings), recordsOffset);
+					uploads(resources->count[slot], zero, sizeof(zero), 0);
+				}
 				const auto inputCount = static_cast<std::uint32_t>(payload.inputList[view.modeIndex].size());
 				// The view's values into its latch: frustum culling alone (mode 1), the single phase, and no
 				// engine-visibility gate - a caster is drawn whether or not the main camera kept it.
@@ -4101,7 +4232,7 @@ namespace DCLF
 				latch.dispatch[2] = 1;
 				latch.drawCount = inputCount;
 				latch.cullFlags = view.hasViewProj ? 1u : 0u;
-				latch.visibilityStamp = frameNumber & 0x3FFFFFFFu;
+				latch.visibilityStamp = frameNumber & 0x0FFFFFFFu;  // 28 bits: BuildDrawsCS keeps flags below it
 				FoldEyeIntoViewProj(view.viewProj, view.eye, latch.viewProj);
 				resources->latch->WriteValue(latchSlot, slot * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), latch);
 				resources->labels.push_back({ view.viewId, view.renderMode, slot });
@@ -4125,9 +4256,11 @@ namespace DCLF
 				out.recordsAddress = resources->recordsAddress + recordsOffset;
 				frame->views.push_back(out);
 			}
+			// Staged, only the view head this epoch wrote goes up from here; the rest of the arena is the worker's.
 			const auto& bytes = arena.Bytes();
-			if (!bytes.empty())
-				uploads(resources->constants, bytes.data(), bytes.size(), 0);
+			const std::size_t arenaBytes = staged ? std::min<std::size_t>(bytes.size(), pending.size() * kShadowViewSlotBytes) : bytes.size();
+			if (arenaBytes)
+				uploads(resources->constants, bytes.data(), arenaBytes, 0);
 			blocksMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - blocksStart).count();
 			static std::uint32_t logged = 0;
 			if (logged++ % 600 == 0) {
@@ -4162,7 +4295,7 @@ namespace DCLF
 			if (PassCapture::ShadowWithholdingEnabled()) {
 				for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
 					if (modeUsed[m])
-						impl->PublishShadowClaims(PassCapture::kFirstShadowMode + m, payload.inputList[m], shadowStats);
+						impl->PublishShadowClaims(PassCapture::kFirstShadowMode + m, payload.inputList[m], usedWorkerBuild ? payload.claims[m] : nullptr, shadowStats);
 				}
 			}
 			pending.clear();
@@ -4224,9 +4357,16 @@ namespace DCLF
 		const auto* tablesPtr = &tables;
 		const auto* lookups = &store.GetLookups();
 		auto* payload = &impl->shadowPayload;
+		auto* pool = &job.stagedPool;
 		const ShadowInputs inputs = job.inputs;
-		job.handle = AsyncWorker::Get().Submit("shadow", [inputs, tablesPtr, lookups, payload](std::stop_token) {
+		const bool claims = PassCapture::ShadowWithholdingEnabled();
+		job.handle = AsyncWorker::Get().Submit("shadow", [inputs, tablesPtr, lookups, payload, pool, target = impl->shadow, slots = job.views, claims](std::stop_token) {
 			BuildShadowPayload(inputs, *tablesPtr, *lookups, *payload);
+			StageShadowPayload(*payload, *target, slots, *pool);
+			if (claims)
+				for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
+					if (inputs.modeUsed[m])
+						payload->claims[m] = ShadowClaimSet(payload->inputList[m], *tablesPtr);
 		});
 	}
 
@@ -4285,21 +4425,15 @@ namespace DCLF
 		shadowCullReadback = std::move(readback);
 	}
 
-	void IndirectDraws::Impl::PublishShadowClaims(std::uint32_t a_renderMode, const std::vector<DrawInput>& a_inputs, IndirectDraws::ShadowStats& a_stats)
+	void IndirectDraws::Impl::PublishShadowClaims(std::uint32_t a_renderMode, const std::vector<DrawInput>& a_inputs, std::shared_ptr<const PassCapture::ClaimSet> a_built,
+		IndirectDraws::ShadowStats& a_stats)
 	{
 		if (a_renderMode < PassCapture::kFirstShadowMode || a_renderMode >= PassCapture::kFirstShadowMode + PassCapture::kShadowModes)
 			return;
 		const auto start = std::chrono::steady_clock::now();
 		const auto modeIndex = a_renderMode - PassCapture::kFirstShadowMode;
-		const auto& tables = SceneStore::Get().GetTables();
-		const auto& modeInputs = a_inputs;
-		auto claims = std::make_shared<PassCapture::ClaimSet>();
-		claims->reserve(modeInputs.size());
-		for (const auto& input : modeInputs) {
-			if (input.objectIndex < tables.objectGeometry.size())
-				if (const auto* geometry = tables.objectGeometry[input.objectIndex])
-					claims->insert(geometry);
-		}
+		// The worker's set when its build was the one drawn, else built here from the same inputs.
+		auto claims = a_built ? std::move(a_built) : ShadowClaimSet(a_inputs, SceneStore::Get().GetTables());
 		a_stats.claimed[modeIndex] = static_cast<std::uint32_t>(claims->size());
 		PassCapture::Get().PublishShadowClaims(modeIndex, std::move(claims));
 		a_stats.claimMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -4344,15 +4478,53 @@ namespace DCLF
 		auto& store = SceneStore::Get();
 		auto& captureStats = capture.MutableStats();
 		captureStats.claimed = captureStats.holes = 0;
+		// The report's own interval, so a hole in any frame is seen rather than only in the last one.
+		struct HoleReport
+		{
+			std::uint32_t frames = 0, framesWithHoles = 0, holes = 0, samples = 0;
+			std::array<std::uint32_t, static_cast<std::size_t>(Ineligible::Count)> byReason{};
+			std::uint32_t inTables = 0, handedBack = 0;
+		};
+		static HoleReport report;
+		std::uint32_t frameHoles = 0;
 		if (const auto previous = capture.CurrentClaims()) {
 			for (const auto* geometry : *previous) {
-				if (!store.FindAccumulatedPass(geometry))
+				const auto* accumulated = store.FindAccumulatedPass(geometry);
+				if (!accumulated)
 					continue;  // the engine culled it; withholding never came into it
 				++captureStats.claimed;
+				if (!capture.WithheldThisFrame(geometry))
+					continue;  // not withheld (fading as it registered), or handed back at EarlyPrepass: native
 				const auto drawn = impl->drawnFrame.find(geometry);
-				if (drawn == impl->drawnFrame.end() || drawn->second != frame)
-					++captureStats.holes;
+				if (drawn != impl->drawnFrame.end() && drawn->second == frame)
+					continue;
+				++captureStats.holes;
+				++frameHoles;
+				bool fromAccumulate = false;
+				const Ineligible reason = store.ReasonThisFrame(geometry, &fromAccumulate);
+				++report.byReason[static_cast<std::size_t>(reason)];
+				const std::int32_t object = store.FindObject(geometry);
+				report.inTables += object >= 0;
+				if (report.samples++ < 30) {
+					logger::info("[DCLF] hole, frame {}: '{}' withheld and not drawn - {} ({}), {}, pass technique {:#x} list {}, last drawn by DCLF {}", frame,
+						geometry->name.c_str(), kIneligibleNames[static_cast<std::size_t>(reason)], fromAccumulate ? "this frame's accumulate phase" : "the scene phase",
+						object >= 0 ? fmt::format("object {} in the tables", object) : std::string("not in the tables"), accumulated->technique, accumulated->subPass,
+						drawn == impl->drawnFrame.end() ? std::string("never") : fmt::format("{} frames ago", frame - drawn->second));
+				}
 			}
+		}
+		++report.frames;
+		report.handedBack += captureStats.handedBack;
+		report.holes += frameHoles;
+		report.framesWithHoles += frameHoles != 0;
+		if (report.frames == 300) {
+			std::string reasons;
+			for (std::size_t r = 0; r < report.byReason.size(); ++r)
+				if (report.byReason[r])
+					reasons += fmt::format(" {}={}", kIneligibleNames[r], report.byReason[r]);
+			logger::info("[DCLF] holes over {} frames: {} in {} frames ({} of them in the tables); by reason:{}; {} withheld passes handed back to the native loop",
+				report.frames, report.holes, report.framesWithHoles, report.inTables, reasons.empty() ? " -" : reasons, report.handedBack);
+			report = {};
 		}
 
 		auto claims = std::make_shared<PassCapture::ClaimSet>();
@@ -4592,6 +4764,8 @@ namespace DCLF
 		// ran most recently alternates between two unrelated populations.
 		if (ok && !depthOnly)
 			impl->ReadCullCounters(resources, stats);
+		if (ok && !depthOnly && SetParityEnabled())
+			impl->CheckSetParity(resources, impl->mainPayload[1], payload);
 
 		stats.cpuMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 		// The remainder is the epoch execution itself and the commit. It stays a subtraction, but it is now
@@ -4936,25 +5110,86 @@ namespace DCLF
 
 	// On the worker, after the build: the payload's uploads into a staged batch (a released one from the job's
 	// pool, or a new one), so the commit copies nothing. The records' staging is kept for the commit's patches.
+	namespace
+	{
+		// A released batch from a job's pool (neither a payload nor the upload service still holds it), or a new one.
+		std::shared_ptr<org::runtime::StagedUploadBatch> AcquireStagedBatch(std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>>& a_pool)
+		{
+			std::shared_ptr<org::runtime::StagedUploadBatch> batch;
+			for (const auto& candidate : a_pool) {
+				if (candidate.use_count() == 1) {
+					batch = candidate;
+					break;
+				}
+			}
+			if (!batch) {
+				batch = org::runtime::StagedUploadBatch::Create();
+				a_pool.push_back(batch);
+			}
+			batch->Reset();
+			return batch;
+		}
+	}
+
 	void StageMainPayload(MainPayload& a_payload, const Resources& a_resources, std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>>& a_pool)
 	{
-		std::shared_ptr<org::runtime::StagedUploadBatch> batch;
-		for (const auto& candidate : a_pool) {
-			if (candidate.use_count() == 1) {  // neither a payload nor the upload service still holds it
-				batch = candidate;
-				break;
-			}
-		}
-		if (!batch) {
-			batch = org::runtime::StagedUploadBatch::Create();
-			a_pool.push_back(batch);
-		}
-		batch->Reset();
+		auto batch = AcquireStagedBatch(a_pool);
 		ForEachMainPayloadUpload(a_payload, a_resources, [&](const auto& a_target, const void* a_data, std::size_t a_bytes, bool a_records) {
 			auto* staging = batch->Stage(org::runtime::UploadTarget::FromShared(a_target), 0, a_data, a_bytes);
 			if (a_records)
 				a_payload.stagedRecords = reinterpret_cast<DrawBindings*>(staging);
 		});
+		a_payload.stagedFor = &a_resources;
+		a_payload.staged = std::move(batch);
+	}
+
+	// On the worker, after the shadow build: what the commit would upload that does not depend on the views it
+	// captures - the shared tables, the used modes' inputs, the arena past its view head - and, per view slot the
+	// job expects, the records naming that slot's blocks and its zeroed counters. The commit uploads the view
+	// head and any slot past a_slots itself.
+	void StageShadowPayload(ShadowPayload& a_payload, const ShadowResources& a_resources, std::uint32_t a_slots,
+		std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>>& a_pool)
+	{
+		using org::runtime::UploadTarget;
+		auto batch = AcquireStagedBatch(a_pool);
+		if (!a_payload.objects.empty())
+			batch->Stage(UploadTarget::FromShared(a_resources.objects), 0, a_payload.objects.data(), a_payload.objects.size() * sizeof(BindlessObject));
+		if (!a_payload.boneRows.empty())
+			batch->Stage(UploadTarget::FromShared(a_resources.bones), 0, a_payload.boneRows.data(),
+				std::min<std::size_t>(a_payload.boneRows.size() * sizeof(float), std::size_t(kMaxBoneRows) * 16));
+		if (!a_payload.geometries.empty())
+			batch->Stage(UploadTarget::FromShared(a_resources.geometries), 0, a_payload.geometries.data(),
+				std::min<std::size_t>(a_payload.geometries.size(), kMaxGeometries) * sizeof(GeometryDraw));
+		for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
+			const auto& inputs = a_payload.inputList[m];
+			if (a_payload.inputs.modeUsed[m] && !inputs.empty())
+				batch->Stage(UploadTarget::FromShared(a_resources.inputs[m]), 0, inputs.data(), inputs.size() * sizeof(DrawInput));
+		}
+		const auto& bytes = a_payload.arena.Bytes();
+		if (bytes.size() > kShadowMaterialBlocksOffset)
+			batch->Stage(UploadTarget::FromShared(a_resources.constants), kShadowMaterialBlocksOffset, bytes.data() + kShadowMaterialBlocksOffset,
+				bytes.size() - kShadowMaterialBlocksOffset);
+		const std::uint32_t slots = std::min<std::uint32_t>(a_slots, kMaxShadowViews);
+		const std::uint64_t base = a_payload.inputs.addresses.constants;
+		static const std::uint32_t zero[kCountWords] = {};
+		for (std::uint32_t slot = 0; slot < slots; ++slot) {
+			const std::uint64_t viewBlockOffset = std::uint64_t(slot) * kShadowViewSlotBytes;
+			const std::uint64_t perFrameOffset = viewBlockOffset + kShadowPerFrameOffset;
+			const std::uint64_t recordsOffset = std::uint64_t(slot) * kShadowRecordCapacity * sizeof(DrawBindings);
+			if (auto* staging = batch->Stage(UploadTarget::FromShared(a_resources.records), recordsOffset, a_payload.records.size() * sizeof(DrawBindings))) {
+				// Whole records into write-combined staging, in order: written, never read.
+				for (std::size_t r = 0; r < a_payload.records.size(); ++r) {
+					DrawBindings record = a_payload.records[r];
+					record.vertexConstants[0] = base + viewBlockOffset;
+					record.pixelConstants[0] = base + viewBlockOffset;
+					record.vertexConstants[kPerFrameVertexRegister] = base + perFrameOffset;
+					record.pixelConstants[kPerFrameVertexRegister] = base + perFrameOffset;
+					std::memcpy(staging + r * sizeof(DrawBindings), &record, sizeof(DrawBindings));
+				}
+			}
+			batch->Stage(UploadTarget::FromShared(a_resources.count[slot]), 0, zero, sizeof(zero));
+		}
+		a_payload.stagedSlots = slots;
 		a_payload.stagedFor = &a_resources;
 		a_payload.staged = std::move(batch);
 	}
@@ -5178,7 +5413,7 @@ namespace DCLF
 		latch.cullFlags = (hasViewProj ? frame->cullMode : 0u) | (in.requireNativeVisible ? 0x100u : 0u);
 		// The frame number, not the epoch: the depth segment publishes and the colour segment reads within one
 		// frame, so the stamp has to be the thing they share.
-		latch.visibilityStamp = frameNumber & 0x3FFFFFFFu;
+		latch.visibilityStamp = frameNumber & 0x0FFFFFFFu;  // 28 bits: BuildDrawsCS keeps flags below it
 		if (a_resources->hzb && frame->width && frame->height) {
 			// Mip 0 covers twice its own size in source pixels, of which only the rendered area holds real
 			// depth. A texture coordinate in the image scales by that ratio to reach the HZB.
@@ -5270,6 +5505,144 @@ namespace DCLF
 				gbufferY = static_cast<std::uint32_t>(std::strtoul(pixel.substr(sep + 1).c_str(), nullptr, 10));
 			}
 		}
+	}
+
+	void IndirectDraws::Impl::CheckSetParity(const std::shared_ptr<Resources>& a_resources, const MainPayload& a_depth, const MainPayload& a_colour)
+	{
+		auto* context = globals::d3d::context;
+		auto& store = SceneStore::Get();
+		auto& counts = setParity;
+		auto stateName = [](std::uint8_t a_state) -> std::string {
+			if (a_state == kObjectStateDrawable)
+				return "drawable";
+			if (a_state == kObjectStateDecal)
+				return "decal";
+			if (a_state == kObjectStateAbsent)
+				return "absent";
+			return a_state < kSkipNames.size() ? std::string("skipped: ") + kSkipNames[a_state] : fmt::format("state {}", a_state);
+		};
+
+		// The oldest snapshot, once its frame's copy has had time to land.
+		for (auto& waiting : setParityFrames)
+			if (waiting.framesLeft)
+				--waiting.framesLeft;
+		while (!setParityFrames.empty() && setParityFrames.front().framesLeft == 0) {
+			auto snapshot = std::move(setParityFrames.front());
+			setParityFrames.pop_front();
+			D3D11_MAPPED_SUBRESOURCE mapped{};
+			if (FAILED(context->Map(snapshot.staging.get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+				++counts.skipped;
+				continue;
+			}
+			const auto* words = static_cast<const std::uint32_t*>(mapped.pData);
+			const std::uint32_t stamp = snapshot.frame & 0x0FFFFFFFu;
+			bool damaged = false;
+			for (std::size_t o = 0; o < snapshot.flags.size(); ++o) {
+				const std::uint32_t word = words[o];
+				const bool current = (word >> 4) == stamp;
+				const std::uint32_t verdict = current ? (word & 3) : ~0u;
+				const bool depthDrawn = current && (word & 4);
+				const bool colourDrawn = current && (word & 8);
+				const std::uint8_t flags = snapshot.flags[o];
+				const bool withheld = flags & 1;
+				const bool alpha = flags & 4;
+				counts.depthDrawnTotal += depthDrawn;
+				counts.colourDrawnTotal += colourDrawn;
+				const char* kind = nullptr;
+				const bool decal = o < snapshot.colourState.size() && snapshot.colourState[o] == kObjectStateDecal;
+				// A decal is drawn by the colour segment's decal pass only (the depth segment never draws one), so it
+				// is only checked for being withheld and undrawn.
+				if (!decal && depthDrawn && !colourDrawn) {
+					kind = "depth without colour";
+					++counts.depthOnly;
+					counts.alphaDepthOnly += alpha;
+				} else if (!decal && colourDrawn && !depthDrawn) {
+					kind = verdict == 3 ? "colour without depth (no verdict this frame)" : "colour without depth";
+					++counts.colourOnly;
+					counts.colourUnpublished += verdict == 3;
+					counts.alphaColourOnly += alpha;
+				} else if (withheld && !colourDrawn) {
+					if (verdict == 0 || verdict == 2) {
+						++counts.withheldCulled;  // the GPU culling rejected it: not drawn by anyone, as intended
+					} else {
+						kind = "withheld natively, drawn by nobody";
+						++counts.withheldUndrawn;
+						counts.alphaWithheldUndrawn += alpha;
+					}
+				}
+				if (!kind)
+					continue;
+				damaged = true;
+				if (counts.samples++ < 40) {
+					const auto* geometry = o < snapshot.geometry.size() ? snapshot.geometry[o] : nullptr;
+					const bool alive = geometry && store.IsTracked(geometry);
+					static constexpr const char* kVerdicts[] = { "occluded (retest)", "visible", "rejected", "no verdict" };
+					logger::info("[DCLF] set parity, frame {}: {} - object {} '{}'{}: verdict {}, depth build {}, colour build {}, {}{}{}", snapshot.frame, kind, o,
+						alive ? geometry->name.c_str() : "?", alpha ? " (alpha tested)" : "", current ? kVerdicts[verdict] : "not this frame's",
+						stateName(o < snapshot.depthState.size() ? snapshot.depthState[o] : kObjectStateAbsent),
+						stateName(o < snapshot.colourState.size() ? snapshot.colourState[o] : kObjectStateAbsent),
+						(flags & 2) ? "engine kept it" : "engine culled it", (flags & 8) ? ", claimed" : "", withheld ? ", withheld" : "");
+				}
+			}
+			context->Unmap(snapshot.staging.get(), 0);
+			setParityStaging.push_back(std::move(snapshot.staging));
+			++counts.frames;
+			counts.framesWithDamage += damaged;
+			if (counts.frames == 300) {
+				logger::info("[DCLF] set parity over {} frames ({} with damage, {} unread): depth without colour {} ({} alpha tested), colour without depth {} ({} alpha tested, {} with no verdict), withheld and drawn by nobody {} ({} alpha tested); withheld and GPU-culled {}; per frame {:.0f} depth draws, {:.0f} colour draws",
+					counts.frames, counts.framesWithDamage, counts.skipped, counts.depthOnly, counts.alphaDepthOnly, counts.colourOnly, counts.alphaColourOnly,
+					counts.colourUnpublished, counts.withheldUndrawn, counts.alphaWithheldUndrawn, counts.withheldCulled, double(counts.depthDrawnTotal) / counts.frames,
+					double(counts.colourDrawnTotal) / counts.frames);
+				counts = {};
+			}
+		}
+
+		// This frame: the words as the colour epoch left them, and the CPU side that explains them. Only when
+		// the depth build is this frame's too.
+		if (!a_resources->visibilityD3D11 || a_depth.inputs.frameNumber != a_colour.inputs.frameNumber || setParityFrames.size() >= 8)
+			return;
+		SetParityFrame snapshot;
+		if (!setParityStaging.empty()) {
+			snapshot.staging = std::move(setParityStaging.back());
+			setParityStaging.pop_back();
+		} else {
+			D3D11_BUFFER_DESC desc{};
+			a_resources->visibilityD3D11->GetDesc(&desc);
+			desc.Usage = D3D11_USAGE_STAGING;
+			desc.BindFlags = 0;
+			desc.MiscFlags = 0;
+			desc.StructureByteStride = 0;
+			desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+			if (FAILED(globals::d3d::device->CreateBuffer(&desc, nullptr, snapshot.staging.put())))
+				return;
+		}
+		context->CopyResource(snapshot.staging.get(), a_resources->visibilityD3D11.get());
+		snapshot.frame = a_colour.inputs.frameNumber;
+		snapshot.framesLeft = 3;
+		snapshot.depthState = a_depth.objectState;
+		snapshot.colourState = a_colour.objectState;
+		const auto& tables = store.GetTables();
+		const auto claims = PassCapture::Get().CurrentClaims();
+		const std::size_t objects = std::min<std::size_t>(tables.objects.size(), kMaxObjects);
+		snapshot.flags.assign(objects, 0);
+		snapshot.geometry.assign(objects, nullptr);
+		for (std::size_t o = 0; o < objects && o < tables.objectGeometry.size(); ++o) {
+			const auto* geometry = tables.objectGeometry[o];
+			snapshot.geometry[o] = geometry;
+			const auto objectFlags = tables.objects[o].flags;
+			std::uint8_t flags = 0;
+			if (objectFlags & kObjectNativeVisible)
+				flags |= 2;
+			if (objectFlags & kObjectAlphaTest)
+				flags |= 4;
+			if (geometry && claims && claims->contains(geometry)) {
+				flags |= 8;
+				if (PassCapture::Get().WithheldThisFrame(geometry))
+					flags |= 1;
+			}
+			snapshot.flags[o] = flags;
+		}
+		setParityFrames.push_back(std::move(snapshot));
 	}
 
 	void IndirectDraws::Impl::ReadCullCounters(const std::shared_ptr<Resources>& a_resources, IndirectDraws::Stats& a_stats)

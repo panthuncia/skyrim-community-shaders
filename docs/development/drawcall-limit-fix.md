@@ -1494,9 +1494,9 @@ Found while building DCLF. None is caused by DCLF; each is recorded here until i
 
 ## Open questions and assumptions (Phase 1)
 
--   **DoAlphaTest gained after the tables are built.** Passes in alpha-test batch lists whose registered
-    technique lacks DoAlphaTest are sometimes drawn with it (engine notes, batch renderer). The source of
-    the change was not found. These objects stay native (`alpha-test-state`).
+-   **DoAlphaTest gained after the tables are built.** Resolved: the bit is not a property of the object
+    (engine notes, batch renderer), and DCLF now draws every pass in an alpha-test list with it. See
+    "Holes on alpha-tested objects" below.
 -   **Parentless interior geometry.** About 30 draws per frame in Dragonsreach and Bleak Falls Barrow have
     no parent node; probably the portal graph's `alwaysRenderChildren` or its other object lists. Not
     tracked, so these stay native.
@@ -2978,9 +2978,214 @@ Gate: probe 0 differ for every job, `BuildDraws parity OK`, capture parity at it
 drawn`, and save/load and the live toggle clean. ORG's test suite passes in the CS embedding configuration,
 including a new epoch test in `PersistentGraphTests`.
 
-What remains per epoch is fixed ORG cost, which the next steps in the plan address:
+What remains per epoch is fixed ORG cost, which the next section addresses.
 
--   one submission per epoch instead of five (O1c);
--   invocations that are reused rather than re-prepared, with no per-epoch serial in their revisions (O3);
--   retained command buffers (O4);
--   worker-side recording (O5).
+## Epochs that only submit
+
+The goal: at each epoch point, the render thread takes a ready ticket, writes the epoch's late values, and hands
+one submission to DXVK. Everything else runs earlier, on other threads. ORG's side of the contract is in
+`extern/OpenRenderGraph/docs/persistent-epochs.md` (closed executions, tickets, latches, staged uploads).
+`CS_ORG_ASYNC_EPOCHS=1` switches it on. The default is off, and the synchronous path stays.
+
+Render-thread µs per epoch, feature body included (`CS_ORG_EPOCH_STATS=1`, the "Epoch body" lines). Later
+rows are the async path. Steady exterior; later runs vary by about ±20 µs.
+
+| stage | LLF | Z-prepass | main opaque | shadow views |
+|---|---|---|---|---|
+| before (synchronous) | 197 | 428 | 689 | 1343 |
+| one submission per epoch | 163 | 366 | 343 | 1083 |
+| latched values (LLF) | 100 | | | |
+| tickets | 20 | 163 | 204 | 1044 |
+| payloads staged on the workers | 24 | 71 | 135 | 939 |
+| scene walk from `Main::Draw` | 26 | 74 | 125 | 158 |
+| lookups reused, claims on the worker | 20-22 | 53-64 | 100-126 | 82-120 |
+
+In total, about 2.65 ms of render thread per frame fell to about 0.3 ms. GPU pass times did not change.
+
+### The stages
+
+-   **One submission per epoch.** `PreparedRhiExecutionBatch::Submit` folds its waits and signals into one
+    queue submission. A new DXVK export, `dxvkEnqueueInteropSubmissions`, takes several submit infos into one
+    `vkQueueSubmit2`. CS batches the hook's submissions inside an epoch (`CS_ORG_BATCH_SUBMIT=0` turns that off).
+-   **Latched values.** BuildDraws and LLF read their per-epoch values from an `org::LatchBlock` region:
+    counts, cull flags, the view-projection matrix, the dispatch size, and LLF's lights and matrices. A reused
+    recording is correct without re-recording. Pass shapes (capacities, which grow to powers of two, and
+    generations) replace the per-frame values in the passes' revisions. Invocation reuse went to about 99.9%.
+-   **Closed executions.** Each epoch returns everything it touches to its home state, and admission is cached
+    per epoch (`CS_ORG_CLOSED`, on with epochs). Vulkan synchronization validation was clean for 60 s.
+-   **Tickets.** ORG's host thread prepares each epoch's ticket a frame ahead. The epoch's own cost on the render
+    thread is the feature's commit, a revision check, the upload recording and the submit. The feature's
+    completed-epoch timings reach the render thread through an atomic inbox.
+-   **Staged payloads.** Each DCLF job stages its payload's uploads on the worker, straight into mapped upload
+    pages (`StageMainPayload`, `StageShadowPayload`). The shadow job stages the record copies for the number
+    of views it expects (last frame's count), and the commit uploads only what depends on the captured views.
+    The commits' own small uploads go through one staged batch per commit (`CommitUploads`). The upload pass
+    now records nothing in steady state.
+
+A bug the staging found: ORG's `UploadManager` created its upload instance only on the first `UploadData`. Once
+every DCLF upload was staged, none came, and the staged calls were silently dropped. DCLF's static objects
+disappeared (trees, actors and terrain are native, so they stayed). The manager now creates the instance on the
+first staged call too, and keeps the direct-recording setting for instances created later.
+
+A second one, from synchronization validation with async epochs: when a commit staged its batch but its epoch
+was never submitted, the next epoch's list carried both batches, and their copies into `cs.dclf.constants`
+overlapped with no barrier between them. ORG now orders overlapping copies within a list with a barrier.
+Validation is clean for 120 s, cell changes and the live toggle included.
+
+### The scene walk starts at `Main::Draw` (AE)
+
+After the stages above, the largest render-thread cost was the join on the scene walk at `AfterShadowMaps`,
+about 0.6 ms. The walk (about 1 ms) was kicked at `BeforeShadowMaps`, and only the shadow-map pass (about 0.4
+ms) covered it.
+
+`Main::Draw` (AE 36559, from the Ghidra database) runs, in order:
+
+1.  an `NiUpdateData` update, `FUN_1406452c0`, its first call (`+0xD3`);
+2.  the main camera's cull jobs (`DrawWorld_BuildSceneLists`);
+3.  `CalculateAndDrawShadowCasterLights` and the first-person cull;
+4.  `RenderShadowMaps` (`+0x2EC`, Deferred's hook).
+
+From steps 1 to 4 is about 1.2 ms in the exterior. `DrawcallLimitFix::BeginSceneFrame` now runs from a hook on
+the `+0xD3` call, after it returns. There the toggles begin the frame, and SceneStore's scene phase kicks the
+walk. `CS_DCLF_EARLY_SCENE=0` restores the old kick point. The walk now overlaps the engine's cull jobs, which
+slows it to about 1.2 ms. The join wait fell from 0.57 ms to about 0.02 ms, and whole-frame time did not change.
+
+What the walk reads that changes between the hook and `BeforeShadowMaps`, each found by decompiling:
+
+-   **`BSFadeNode::currentFade`.** Written by `BSFadeNode::OnVisible` in the cull. The walk's eligibility
+    verdicts are cached for `kCandidateRefreshFrames` anyway, and the accumulate phase catches a stale one, so a
+    frame of lag changes nothing.
+-   **A billboard's world rotation.** `NiBillboardNode::OnVisible` turns it to the camera in the cull.
+    Geometry under an `NiBillboardNode` now has its own ineligibility reason, `billboard`, and stays native.
+    A census through the exterior, Dragonsreach and Riverwood found only effect-shader geometry under
+    billboards (flares, fire jets, glow planes), which DCLF does not draw anyway: `billboard` never appears in
+    the histogram. Tree LOD is not billboard geometry. It is `BSDistantTreeShader`, which faces its quads to
+    the camera in its own vertex shader, and like all LOD it lives outside the loaded cells DCLF tracks.
+-   **Animated texture transforms.** `BSLightingShaderPropertyFloatController::Update` moves a material's UV
+    offset in that window. The async scene probe found it, one frame behind on `antsMiddle01`. The walk no
+    longer stores the texture transform: the shadow build, kicked at `BeforeShadowMaps`, reads it off the
+    material.
+
+Only plain `BSTriShape` geometry is eligible, so the cull-time LOD selection of `BSLODMultiIndexTriShape` and its
+relatives does not matter. The skin palette update keys on `gFrameCounter`, which only `Renderer::End` advances,
+so updating from the earlier point stays idempotent within the frame. Every DCLF hook that could fire in the new
+window (water reflections are drawn in it) is gated on the main camera's depth or deferred pass, so nothing on
+the render thread reads the tables while the worker writes them.
+
+The shadow-build probe still differs in about 1-6 of 300 frames, always at the alpha-tested texture-transform
+block. The scroll also moves during the shadow pass itself, so builds made at different moments read different
+offsets. The scene probe used to show the same thing at about 1 in 300 frames.
+
+### Smaller cuts
+
+-   **The ticket's upload list.** Resetting and beginning it (about 6 µs of driver work) moved to the host
+    thread, which already waits for the slot. What remains on the render thread is the copies themselves:
+    `vkCmdCopyBuffer` measured 0.47 µs each, about 15 per epoch, plus a 2.4 µs barrier.
+-   **Material lookups.** `RefreshMaterialLookups` runs in the shadow, Z and colour commits. An unchanged
+    material (same views, same written mask, no GpuTextures eviction since) now keeps its indices. It is
+    resolved again every `GpuTextures::kRestampFrames` (32) frames, because resolving is what keeps an entry
+    from eviction (`kEvictFrames` 600). The cost went from 18 to 5 µs.
+-   **Shadow claims.** The shadow job builds each mode's claim set. The epoch publishes it when it drew the
+    job's build, and otherwise builds it as before. This took 48 µs per frame off the render thread.
+
+### Not yet at the gate
+
+The target was under 50 µs of render thread per epoch. LLF is there, and the others are not:
+
+-   **Upload recording:** about 20 µs per epoch of driver command recording. Moving it off the render thread
+    needs either the producers to record their batches' copies themselves, or a latched copy table run by a
+    pre-recorded GPU copy dispatch.
+-   **Worker joins:** 0-60 µs, varying by run. The colour and shadow jobs finish just in time on average. Track
+    T's work (persistent object slots, GPU-driven candidates) shortens them.
+-   **The skip set (`drawnFrame`):** 9 µs per main commit, a geometry-keyed map the render thread updates. It
+    has four readers across frames.
+-   **ORG's own share:** about 10 µs (checks, releases, submit).
+
+Gates met on this path:
+
+-   probe 0 differ for the colour, Z-prepass and scene jobs;
+-   BuildDraws and decal parity OK;
+-   capture parity at its known residue;
+-   0 claimed but not drawn;
+-   save/load and the toggle clean;
+-   0 ticket waits in steady state;
+-   ORG's tests pass.
+
+## Holes on alpha-tested objects
+
+The symptom: alpha-tested objects (roofs, foliage, thickets, ferns) vanished for a frame at a time, now and
+then when the camera was still and often while it moved. When DCLF's uploads were broken and it drew nothing,
+the same objects instead popped into the native frame. That pointed at ownership (which of the two draws an
+object in a given frame) rather than at a draw going wrong.
+
+### The instruments
+
+-   **`CS_DCLF_SET_PARITY=1`, per object, every frame.** BuildDraws keeps two bits in each object's
+    visibility word, below a 28-bit stamp: "the depth segment appended a draw" and "the colour segment
+    appended a draw". Decals mark their colour draw too. After the colour epoch the words are copied through
+    a D3D11 view into a staging ring. A few frames later each object is classified against a snapshot of the
+    CPU side: each build's per-object state (`MainPayload::objectState`: drawable, cull-only, or its skip
+    reason), and whether the object was claimed and withheld from the native loop. The report counts
+    depth-without-colour, colour-without-depth, and withheld-but-drawn-by-nobody, with named samples.
+-   **The hole report, always on.** "Claimed but not drawn" used to be a snapshot of the report's last frame,
+    so intermittent holes never showed. It now accumulates over the interval and logs samples. Each sample
+    gives the object's reason: SceneStore now records the accumulate phase's per-frame verdict
+    (`Tracked::accumulateReason`, `SceneStore::ReasonThisFrame`).
+-   **`CS_DCLF_TEST_TURN="<start>:<end>:<degrees per frame>"`.** Turns the player every frame, so a
+    scripted run has steady camera motion. The standard script had none.
+
+### What they found
+
+With the camera turning (1.5° per frame) in all three scenes:
+
+-   **Depth and colour agree exactly.** Depth without colour and colour without depth were 0 in every
+    interval.
+-   **Holes were frequent,** and almost all had one cause, `alpha-test-state`:
+
+| scene, turning | holes per 300 frames | frames with holes | reason |
+|---|---|---|---|
+| exterior | 685 | 192 | `alpha-test-state` 683 |
+| Dragonsreach | 397 | 100 | `alpha-test-state` 397 |
+| Riverwood | 1061 | 244 | `alpha-test-state` 1061 |
+
+The accumulate phase left a pass native when it sat in an alpha-test batch list (1, 3, 4) and its registered
+technique lacked DoAlphaTest. The claims, though, are last frame's colour draws, and withholding happens at
+registration. So when an object DCLF drew last frame came in this frame without the bit, the native loop had
+already been told to leave it, and DCLF then declined it. That left a hole for a frame, and the reverse
+flip let the native path draw it again.
+
+### Why the bit comes and goes
+
+Decompiled (engine notes, batch renderer): `GetRenderPasses` sets DoAlphaTest for alpha-tested geometry only
+while the early-Z global is set, or the object is blended, or its `alpha * fade` for the camera being
+registered is below 1. It keeps the build on the shared property until that state changes. The flicker was
+seen on near objects too, not only at fade distance, so which rebuild decides the bit in a given frame is not
+settled. The fix below does not depend on it: what the native frame shows does not depend on the bit, since
+the list alone decides alpha testing, and the main pass tests EQUAL against an alpha-tested prepass.
+
+### The fixes
+
+-   **`DrawnPassDescriptor`.** Every pass in lists 1, 3 and 4 is taken with DoAlphaTest. This applies at
+    both capture sites, the capture comparison and capture parity's native side. `DO_ALPHA_TEST` adds only
+    the discard, so coverage matches the native frame, and these objects are now DCLF's in every frame.
+    The `alpha-test-state` reason is gone.
+-   **Fading is decided once, at registration.** `PassCapture::FadingAtRegistration` feeds both the
+    withholding (a fading object is not withheld) and the accumulate phase's fading verdict
+    (`AccumulatedPass::fading`), where the verdict used to re-read the fade node later in the frame.
+-   **The hand-back.** At EarlyPrepass, once the tables and pipeline lookups exist and before the native
+    depth and main passes draw, every pass withheld this frame whose object DCLF cannot draw goes back to its
+    batch renderer through the original `RegisterPass` (`PassCapture::HandBackUndrawable`). That covers no
+    bindings this frame, and a pipeline variant still compiling (three such cases in the first run after the
+    normalization: `MineOreIron04`, `NorTowerRuinsRamp01`, `DeadSalmon13`). The hole detectors count only
+    what was actually withheld and not handed back (`PassCapture::WithheldThisFrame`).
+
+After the fixes, the same turning runs and a probe run with the toggle and save show 0 holes in every
+interval, with depth and colour still in exact agreement. The user confirmed the flicker is gone. Capture
+parity stays at its known residue.
+
+The shadow-build probe differs more often while turning (up to about 90 of 300 frames). The differing
+bytes are always in the alpha-tested casters' texture-transform blocks: animated UVs read at slightly
+different moments by the two builds (see "The scene walk starts at `Main::Draw`").
+
+Still open: the hand-back runs a lookup for each withheld pass every frame (about 1700 in the exterior). It
+has not been measured against the render-thread budget.

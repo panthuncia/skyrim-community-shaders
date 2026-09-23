@@ -84,6 +84,15 @@ static const uint kPhaseColour = 3;
 static const uint kVisibilityOccludedRetest = 0;
 static const uint kVisibilityVisible = 1;
 static const uint kVisibilityRejectedFinal = 2;
+// Written only by the colour segment, for an object it drew without a verdict published this frame.
+static const uint kVisibilityUnpublished = 3;
+// The word: the verdict in bits 0-1, whether the depth segment drew the object (bit 2) and whether the colour
+// segment did (bit 3), and the stamp above them. The two drawn bits are what CS_DCLF_SET_PARITY reads back: an
+// object with depth and no colour, or colour and no depth, is visible damage.
+static const uint kVisibilityVerdictMask = 3;
+static const uint kVisibilityDepthDrawn = 4;
+static const uint kVisibilityColourDrawn = 8;
+static const uint kVisibilityStampShift = 4;
 // When set, only objects the engine's own culling kept (kObjectNativeVisible) may be drawn, which is what
 // the native loop skips and therefore what the frame has to contain. When clear, the GPU culling alone
 // decides and DCLF draws objects the engine culled. The counters are written either way, so the
@@ -340,6 +349,9 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 		sequences.Store4(base + 32, uint4(indexBuffer.xyz, kIndexFormatR16));
 		sequences.Store4(base + 48, uint4(culled ? 0 : indexBuffer.w, 1, firstIndex, 0));
 		sequences.Store(base + 64, 0);
+		// A decal's word: never drawn in depth, drawn in colour unless culled.
+		if (phase == kPhaseColour)
+			visibility.Store(objectIndex * 4, (VisibilityStamp << kVisibilityStampShift) | (culled ? kVisibilityRejectedFinal : (kVisibilityVisible | kVisibilityColourDrawn)));
 		return;
 	}
 
@@ -349,8 +361,8 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	// object it draws without matching depth is invisible, and one the depth pass writes without a colour
 	// draw is a hole that the native pass can no longer fill.
 	const uint published = visibility.Load(objectIndex * 4);
-	const bool publishedThisFrame = (published >> 2) == VisibilityStamp;
-	const uint verdict = publishedThisFrame ? (published & 3) : kVisibilityVisible;
+	const bool publishedThisFrame = (published >> kVisibilityStampShift) == VisibilityStamp;
+	const uint verdict = publishedThisFrame ? (published & kVisibilityVerdictMask) : kVisibilityVisible;
 	if (phase == kPhaseTwo && !(publishedThisFrame && verdict == kVisibilityOccludedRetest))
 		return;
 	if (phase == kPhaseColour && verdict != kVisibilityVisible)
@@ -388,19 +400,32 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	if (!cullRejected && !nativeVisible && phase != kPhaseColour)
 		count.InterlockedAdd(kCountRescued, 1, scratch);
 
-	// Publish the decision. Phase 1 writes one for every candidate, so the buffer is completely rewritten
-	// each frame and nothing stale survives into the colour segment.
+	// Whether this dispatch appends a draw for the object: past the culling, the engine-visibility gate and
+	// the bindings.
+	const bool gated = RequireNativeVisible() && !nativeVisible;
+	const bool draws = !cullRejected && !gated && drawable;
+
+	// Publish the decision, and whether the depth segment drew the object. Phase 1 writes one for every
+	// candidate, so the buffer is completely rewritten each frame and nothing stale survives into the colour
+	// segment.
 	if (phase == kPhaseOne || phase == kPhaseTwo) {
 		const uint decided = frustumRejected ? kVisibilityRejectedFinal :
 			(occlusionRejected ? (phase == kPhaseOne ? kVisibilityOccludedRetest : kVisibilityRejectedFinal) : kVisibilityVisible);
-		visibility.Store(objectIndex * 4, (VisibilityStamp << 2) | decided);
+		visibility.Store(objectIndex * 4, (VisibilityStamp << kVisibilityStampShift) | decided | (draws ? kVisibilityDepthDrawn : 0));
 		if (phase == kPhaseTwo && !occlusionRejected)
 			count.InterlockedAdd(kCountRescuedByPhaseTwo, 1, scratch);
+	}
+	// The colour segment marks what it draws, in the same word.
+	if (phase == kPhaseColour && draws) {
+		if (publishedThisFrame)
+			visibility.InterlockedOr(objectIndex * 4, kVisibilityColourDrawn, scratch);
+		else
+			visibility.Store(objectIndex * 4, (VisibilityStamp << kVisibilityStampShift) | kVisibilityColourDrawn | kVisibilityUnpublished);
 	}
 
 	if (cullRejected)
 		return;
-	if (RequireNativeVisible() && !nativeVisible) {
+	if (gated) {
 		if (phase != kPhaseColour)
 			count.InterlockedAdd(kCountEngineCulled, 1, scratch);
 		// The gate is about what may be DRAWN, so it must not change the published visibility: the colour

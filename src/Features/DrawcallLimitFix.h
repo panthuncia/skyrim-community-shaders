@@ -39,7 +39,8 @@ struct DrawcallLimitFix : Feature
 	/**
 	 * @brief Main_RenderShadowMaps, before the engine draws the shadow maps: the scene graph and the main
 	 * camera's culling are final, the main accumulator's passes are not yet (their registration jobs run
-	 * concurrently with the shadow draws). The shadow views are drawn between this and EarlyPrepass.
+	 * concurrently with the shadow draws). The shadow views are drawn between this and EarlyPrepass. The
+	 * scene phase starts here only when Main::Draw's early hook did not start it (BeginSceneFrame).
 	 */
 	void BeforeShadowMaps();
 	/** @brief Main_RenderShadowMaps, after the call returned (before EarlyPrepasses). */
@@ -89,6 +90,18 @@ private:
 		};
 
 		/**
+		 * @brief Main::Draw's first call (AE +0xD3, after its NiUpdateData update and before the main camera's
+		 * cull jobs are queued): where the frame's scene phase starts (BeginSceneFrame), ~1 ms ahead of
+		 * Main_RenderShadowMaps. AE only: the SE and VR offsets are unverified, and there the phase starts at
+		 * BeforeShadowMaps as before.
+		 */
+		struct Main_Draw_Early
+		{
+			static std::int64_t thunk(void* a_main);
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/**
 		 * @brief BSShaderAccumulator::FinishAccumulatingPreResolveDepth (vfunc 0x2A): a shadow view's draw.
 		 * After the native draws of the view, DCLF's epoch culls the frame's casters and draws them into the
 		 * same slice (CS_DCLF_SHADOWS=1).
@@ -115,6 +128,10 @@ private:
 	// switching back on needs no rescan) but does no frame work: nothing is built, drawn, skipped or withheld.
 	bool switchedOn = true;
 	bool Running() const { return installed && switchedOn; }
+	// The frame's scene phase (toggles, then SceneStore's scene half, whose walk goes to the worker), from
+	// Main::Draw's early hook or else from BeforeShadowMaps. Returns Running().
+	bool BeginSceneFrame();
+	bool sceneFrameBegun = false;  // BeginSceneFrame ran for the frame BeforeShadowMaps is about to continue
 	// Off when the menu's toggle is off or the feature is unloaded (Feature::loaded, which the remote toggle
 	// flips): either way nothing may keep drawing, skipping or withholding.
 	void UpdateActive();

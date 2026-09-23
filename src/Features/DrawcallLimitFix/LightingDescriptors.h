@@ -24,10 +24,10 @@ namespace DCLF
 		Hidden,              // app-culled or hidden this frame (per frame)
 		Fading,              // fade node not fully faded in (per frame)
 		Actor,               // part of an actor's 3D (carried items; interiors keep actors in the rooms)
-		AlphaTestState,      // in an alpha-test batch list without DoAlphaTest: the drawn technique is not known up front (per frame)
 		Lod,                 // object or landscape LOD
 		UnstableBuffer,      // a vertex or index buffer DXVK cannot make stable (the game can map it)
 		SkinShape,           // skinned, but not a shape the skinned path takes: dismember instance, several partitions, too many bones
+		Billboard,           // under an NiBillboardNode: the main cull turns it to the camera
 		Count
 	};
 
@@ -45,10 +45,10 @@ namespace DCLF
 		"hidden",
 		"fading",
 		"actor",
-		"alpha-test-state",
 		"lod",
 		"unstable-buffer",
 		"skin-shape",
+		"billboard",
 	};
 
 	struct LightingDescriptors
@@ -137,7 +137,33 @@ namespace DCLF
 		// Where in its pass-group chain the pass sits, so that decals can be drawn in the engine's order
 		// (group, technique bucket, list, chain) rather than in whatever order the culling appends.
 		std::uint32_t chainIndex = 0;
+		// Whether the object was fading (its fade node below 1) when the pass was registered - the same
+		// moment the native loop was or was not told to leave it to DCLF (PassCapture::Withhold). The
+		// accumulate phase's fading verdict reads this rather than the fade node later in the frame, so
+		// the two decisions cannot disagree.
+		bool fading = false;
 	};
+
+	inline constexpr std::uint32_t kPassDoAlphaTest = 1u << 20;  // pass descriptor DoAlphaTest
+
+	/**
+	 * @brief The pass descriptor DCLF draws a pass registered with a_descriptor in batch list a_subPass with.
+	 *
+	 * The renderer draws lists 1, 3 and 4 with alpha testing, whatever the registered technique says (engine
+	 * notes, batch renderer). The technique's DoAlphaTest bit is not a property of the object:
+	 * BSLightingShaderProperty::GetRenderPasses sets it for an alpha-tested property only while the early-Z
+	 * global is set, or the object is alpha-blended, or its alpha times its fade is below one for the camera
+	 * the passes were last built for - and it keeps that build until the state changes. So it comes and goes
+	 * from frame to frame while the pixels on screen do not: the native main pass tests depth EQUAL against
+	 * an alpha-tested prepass either way. DO_ALPHA_TEST only adds the discard, so DCLF draws every pass in an
+	 * alpha-test list with it, which keeps the object DCLF's in every frame. It used to leave the frames
+	 * without the bit native (alpha-test-state), and each switch between the two left a frame in which the
+	 * native loop had been told not to draw the object and DCLF did not either.
+	 */
+	inline std::uint32_t DrawnPassDescriptor(std::uint32_t a_descriptor, std::uint32_t a_subPass)
+	{
+		return (a_subPass == 1 || a_subPass == 3 || a_subPass == 4) ? (a_descriptor | kPassDoAlphaTest) : a_descriptor;
+	}
 
 	/**
 	 * @param a_accumulated The geometry's accumulated pass this frame (SceneStore::FindAccumulatedPass), or

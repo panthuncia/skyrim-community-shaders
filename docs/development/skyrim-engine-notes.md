@@ -286,10 +286,29 @@ the main pass draws; walking it at the start of the main pass gives exactly the 
 -   `BSShaderProperty::renderPassList` holds whatever the **last** `GetRenderPasses` call built. That may
     be another camera's (reflections, cubemaps), so it is not a reliable view of the main pass.
 
-Open question: a pass in an alpha-test list whose group technique lacks DoAlphaTest is sometimes drawn with
-DoAlphaTest set in its `passEnum` (about 27 draws per frame in Dragonsreach). Nothing on the draw path
-between the start of the main pass and `SetupGeometry` was found to set it: not `RenderActivePassRange`,
-`SetupAndDrawPass` (AE `0x1414f3dc0`), `FUN_1414f5cf0`, nor any Community Shaders hook.
+A pass's DoAlphaTest bit is not a stable property of the object. `BSLightingShaderProperty::GetRenderPasses`
+sets it for an alpha-tested property (`NiAlphaProperty` flag bit 9) when either:
+
+-   the early-Z global (AE `0x14328cc79`) is set; or
+-   the property is alpha-blended (flag bit 0); or
+-   its `alpha * fade`, as computed for the camera the call is building passes for, is below 1.
+
+The product is stored on the property. The pass list is rebuilt only when the property's state changes, and
+it is shared by every camera that calls `GetRenderPasses`. The early-Z global is written only by the loading
+and menu render loops (`FUN_1406d2120`, `FUN_140972590`) and the `ToggleEarlyZ` console command, so it is
+stable in gameplay. Even so, the same object's registered technique gains and loses the bit from frame to
+frame, most often while the camera moves, and near objects as well as distant ones. Which camera's
+rebuild decides it in a given frame was not pinned down.
+
+What is drawn does not depend on the bit:
+
+-   `SetupAndDrawPass` (AE `0x1414f3dc0`) passes `alphaTest || earlyZ` as the draw's alpha-test flag, and
+    lists 1, 3 and 4 are drawn with alpha testing.
+-   The main pass tests depth EQUAL against an alpha-tested prepass.
+-   In `Lighting.hlsl`, `DO_ALPHA_TEST` adds only the discard (and the screen-door path when
+    `AdditionalAlphaMask` is set).
+
+Drawcall Limit Fix therefore draws every pass in lists 1, 3 and 4 with the bit (`DrawnPassDescriptor`).
 
 ## Native main-pass render state for opaque lighting objects
 

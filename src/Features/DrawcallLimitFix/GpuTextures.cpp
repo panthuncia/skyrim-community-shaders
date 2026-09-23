@@ -313,6 +313,7 @@ namespace DCLF
 				++it;
 				continue;
 			}
+			++generation;
 			if (entry.index != kInvalid) {
 				--stats.cached;
 				if (service)
@@ -327,6 +328,7 @@ namespace DCLF
 
 	void GpuTextures::Clear()
 	{
+		++generation;
 		impl->entries.clear();
 		impl->graveyard.clear();
 		impl->samplers.fill(kInvalid);

@@ -135,6 +135,56 @@ namespace
 		std::uint32_t frame = 0;
 	};
 
+	/**
+	 * @brief Test switch CS_DCLF_TEST_TURN="<start frame>:<end frame>:<degrees per frame>": turns the player's
+	 * heading every frame between the two (loading screens not counted), so a scripted run has steady camera
+	 * motion. Several ranges may be given, separated by ';'.
+	 */
+	class TestTurn
+	{
+	public:
+		TestTurn()
+		{
+			const std::string value = DCLF::SwitchValue("CS_DCLF_TEST_TURN");
+			std::string_view text = value;
+			while (!text.empty()) {
+				const auto end = text.find(';');
+				const std::string item(text.substr(0, end));
+				Range range;
+				if (std::sscanf(item.c_str(), "%u:%u:%f", &range.start, &range.end, &range.degrees) == 3)
+					ranges.push_back(range);
+				text = end == std::string_view::npos ? std::string_view{} : text.substr(end + 1);
+			}
+		}
+
+		void OnFrame()
+		{
+			if (ranges.empty() || DCLF::SceneStore::IsLoadingScreenUp())
+				return;
+			++frame;
+			for (const auto& range : ranges) {
+				if (frame < range.start || frame >= range.end)
+					continue;
+				const float radians = range.degrees * 0.017453292f;
+				if (auto* tasks = SKSE::GetTaskInterface()) {
+					tasks->AddTask([radians] {
+						if (auto* player = RE::PlayerCharacter::GetSingleton())
+							player->SetHeading(player->GetAngleZ() + radians);
+					});
+				}
+			}
+		}
+
+	private:
+		struct Range
+		{
+			std::uint32_t start = 0, end = 0;
+			float degrees = 0.0f;
+		};
+		std::vector<Range> ranges;
+		std::uint32_t frame = 0;
+	};
+
 	// Render-thread CPU spent on scene capture, averaged over a report interval.
 	struct CaptureTiming
 	{
@@ -227,6 +277,8 @@ void DrawcallLimitFix::Reset()
 	testCommands.OnFrame();
 	static TestToggle testToggle;
 	testToggle.OnFrame(GetShortName());
+	static TestTurn testTurn;
+	testTurn.OnFrame();
 
 	// Every Present, in menus too: the tracker's queue holds references to attached subtrees and
 	// must not grow while the world is not rendered.
@@ -271,24 +323,69 @@ void DrawcallLimitFix::SetActive(bool a_active)
 	logger::info("[DCLF] {} from the menu", a_active ? "Switched on" : "Switched off; the game renders natively");
 }
 
-void DrawcallLimitFix::BeforeShadowMaps()
+namespace
 {
-	// Called directly by Deferred every frame, loaded or not: the one place an unload (which stops Reset
-	// from being called) is noticed.
+	// CS_DCLF_EARLY_SCENE=0: the scene phase starts at BeforeShadowMaps, as it did before the early hook.
+	bool EarlySceneEnabled()
+	{
+		static const bool enabled = [] {
+			const char* value = std::getenv("CS_DCLF_EARLY_SCENE");
+			return !(value && value[0] == '0');
+		}();
+		return enabled;
+	}
+}
+
+std::int64_t DrawcallLimitFix::Hooks::Main_Draw_Early::thunk(void* a_main)
+{
+	const auto result = func(a_main);
+	auto& feature = globals::features::drawcallLimitFix;
+	if (EarlySceneEnabled()) {
+		feature.sceneFrameBegun = true;
+		feature.BeginSceneFrame();
+	}
+	return result;
+}
+
+bool DrawcallLimitFix::BeginSceneFrame()
+{
+	// Called every frame, loaded or not: the one place an unload (which stops Reset from being called) is
+	// noticed.
 	UpdateActive();
 	if (!Running())
-		return;
-	// The scene half of the tables, before the engine draws the shadow maps: the scene graph and the
-	// main camera's culling are final here, and the records a shadow view needs exist from this point.
-	// The accumulator's half follows at EarlyPrepass, once the registration jobs have finished.
+		return false;
+	// The scene half of the tables. From Main::Draw's early hook it starts before the main camera's cull,
+	// which is what gives the walk its time on the worker: everything the walk reads is final from Main::Draw
+	// on (the world update is done, and the palette update's frame counter moves only at Renderer::End),
+	// except what is written between here and BeforeShadowMaps: BSFadeNode::currentFade (the main cull),
+	// which the walk's cached verdicts already take up to kCandidateRefreshFrames late; a billboard's rotation
+	// (the main cull), which keeps billboards native (SceneStore::FindCategoryNode); and animated texture
+	// transforms, which the shadow build reads off the material itself. The accumulator's half follows at
+	// EarlyPrepass, once the registration jobs have finished.
 	auto& store = DCLF::SceneStore::Get();
 	// The frame's toggles, before anything reads them. A change that enters the classification drops the
 	// cached verdicts, so the next frame classifies every object under the new switches.
 	if (DCLF::Toggles::Get().BeginFrame())
 		store.InvalidateVerdicts();
-	ScopedPerfEvent event("CS DCLF: scene tables and shadow views");
+	ScopedPerfEvent event("CS DCLF: scene tables");
 	const auto start = std::chrono::steady_clock::now();
 	store.BuildFrame(DCLF::SceneStore::Phase::Scene);
+	const double sceneMs = MillisecondsSince(start);
+	timing.sceneMs += sceneMs;
+	timing.sceneMaxMs = std::max(timing.sceneMaxMs, sceneMs);
+	return true;
+}
+
+void DrawcallLimitFix::BeforeShadowMaps()
+{
+	if (!std::exchange(sceneFrameBegun, false)) {
+		if (!BeginSceneFrame())
+			return;
+	} else if (!Running()) {
+		return;
+	}
+	ScopedPerfEvent event("CS DCLF: shadow views");
+	const auto start = std::chrono::steady_clock::now();
 	// The frame's shadow views, in the order the engine is about to render them. Everything downstream -
 	// the capture's attribution, the claims, the epochs - identifies a view by this list.
 	DCLF::ShadowViews::Get().Rebuild();
@@ -401,6 +498,22 @@ void DrawcallLimitFix::EarlyPrepass()
 				bits.samplers = usage.samplers;
 			}
 		}
+	}
+
+	// What the native loop was told to leave to DCLF but DCLF cannot draw this frame goes back to it now,
+	// before the depth and main passes: an object DCLF has no bindings for, or whose pipeline is not built.
+	if (DCLF::PassCapture::WithholdingEnabled()) {
+		const auto& tables = store.GetTables();
+		const auto& lookups = store.GetLookups();
+		DCLF::PassCapture::Get().HandBackUndrawable([&](const RE::BSGeometry* a_geometry) {
+			const auto object = store.FindObject(a_geometry);
+			if (object < 0 || static_cast<std::size_t>(object) >= tables.objects.size())
+				return false;
+			const auto& record = tables.objects[object];
+			if (record.flags & DCLF::kObjectNoBindings)
+				return false;
+			return record.pipelineIndex < lookups.pipelines.size() && lookups.pipelines[record.pipelineIndex].setIndex != DCLF::Lookups::kNone;
+		});
 	}
 
 	// The shadow views' programs: one Utility build per technique of the frame's casters, per render mode
@@ -846,6 +959,10 @@ void DrawcallLimitFix::Hooks::Install()
 	stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<2>>(REL::RelocationID(100852, 107642).address() + REL::Relocate(0x29E, 0x28F));
 	if (REL::Module::IsSE())  // this call site only exists in SE, as Light Limit Fix's hooks show
 		stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<3>>(REL::RelocationID(100871, 107661).address() + 0xEE);
+	if (REL::Module::IsAE()) {
+		stl::write_thunk_call<Main_Draw_Early>(REL::RelocationID(35560, 36559).address() + 0xD3);
+		logger::info("[DCLF] scene phase hook installed on Main::Draw ({})", EarlySceneEnabled() ? "the walk starts there" : "off: CS_DCLF_EARLY_SCENE=0");
+	}
 	logger::info("[DCLF] Native pass hooks installed");
 }
 

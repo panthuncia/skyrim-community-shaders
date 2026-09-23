@@ -623,13 +623,19 @@ namespace DCLF
 			NoteMismatch(fmt::format("{} drawn pass {} is not the accumulated pass {}", Describe(geometry), fmt::ptr(a_pass),
 				fmt::ptr(accumulated ? accumulated->pass : nullptr)));
 		}
-		if (key.passDescriptor != PassDescriptorOf(a_pass->passEnum)) {
+		// A pass in an alpha-test list is drawn by DCLF with DoAlphaTest whatever the native draw's technique
+		// carries this frame (DrawnPassDescriptor), so the native side is compared as DCLF normalises it.
+		const std::uint32_t list = accumulated ? accumulated->subPass : 0u;
+		const std::uint32_t nativeDescriptor = DrawnPassDescriptor(PassDescriptorOf(a_pass->passEnum), list);
+		if (key.passDescriptor != nativeDescriptor) {
 			mismatch = true;
 			NoteMismatch(fmt::format("{} pass descriptor: DCLF {:08X}, native {:08X} (flags {:016X}; accumulated technique {:08X} list {} passEnum then {:08X})",
 				Describe(geometry), key.passDescriptor, PassDescriptorOf(a_pass->passEnum), a_pass->shaderProperty ? a_pass->shaderProperty->flags.underlying() : 0ull,
 				accumulated ? accumulated->technique : 0u, accumulated ? accumulated->subPass : 0u, accumulated ? PassDescriptorOf(accumulated->passEnum) : 0u));
 		}
-		if (key.vertexDescriptor != state->modifiedVertexDescriptor || key.pixelDescriptor != state->modifiedPixelDescriptor) {
+		// The shader descriptors likewise, with that one bit left out of the comparison in an alpha-test list.
+		const std::uint32_t ignored = DrawnPassDescriptor(0, list);
+		if (((key.vertexDescriptor ^ state->modifiedVertexDescriptor) & ~ignored) != 0 || ((key.pixelDescriptor ^ state->modifiedPixelDescriptor) & ~ignored) != 0) {
 			mismatch = true;
 			NoteMismatch(fmt::format("{} descriptors: DCLF VS {:08X} PS {:08X}, native VS {:08X} PS {:08X} (pass {:08X}, flags {:016X})",
 				Describe(geometry), key.vertexDescriptor, key.pixelDescriptor, state->modifiedVertexDescriptor, state->modifiedPixelDescriptor,

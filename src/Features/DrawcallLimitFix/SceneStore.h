@@ -124,12 +124,12 @@ namespace DCLF
 			// runs. 0 and ShadowReject::NotLighting for an object that is not a caster.
 			std::vector<std::uint32_t> shadowTechnique;  // parallel to objects
 			std::vector<std::uint8_t> shadowReject;      // parallel to objects (ShadowReject)
-			// What an alpha-tested caster's shadow draw samples: its material's diffuse view and texture
-			// coordinate offset/scale, and the material as the key its binding record is shared under. Read
-			// off the property here so that the shadow epoch's build reads no engine memory. Null / zero for
-			// every other object.
+			// What an alpha-tested caster's shadow draw samples: its material's diffuse view, and the material
+			// as the key its binding record is shared under. Read off the property here; the shadow epoch's
+			// build reads only the material's texture transform, which shader-property controllers
+			// (BSLightingShaderPropertyFloatController) move between Main::Draw, where this walk starts, and
+			// BeforeShadowMaps (the async scene probe saw a scrolling UV one frame behind). Null otherwise.
 			std::vector<ID3D11ShaderResourceView*> shadowDiffuse;    // parallel to objects
-			std::vector<std::array<float, 4>> shadowTexcoord;         // parallel to objects
 			std::vector<const RE::BSShaderMaterial*> shadowMaterial;  // parallel to objects
 			// The distinct diffuse views among them (a few hundred), so the lookups are refreshed per view
 			// rather than per caster.
@@ -413,6 +413,12 @@ namespace DCLF
 
 		/** @brief Index into GetTables().objects for this frame, or -1 when the geometry is not drawn by DCLF. */
 		std::int32_t FindObject(const RE::BSGeometry* a_geometry) const;
+		/**
+		 * @brief For reports: why a tracked geometry has no bindings this frame - the accumulate phase's
+		 * verdict if it made one this frame (a_accumulate set), else the scene phase's cached one. None when it
+		 * is eligible or not tracked.
+		 */
+		Ineligible ReasonThisFrame(const RE::BSGeometry* a_geometry, bool* a_accumulate = nullptr) const;
 
 		/** @brief The main camera's batch renderers, as of the last BuildFrame. */
 		const ankerl::unordered_dense::set<const RE::BSBatchRenderer*>& GetMainBatchRenderers() const { return mainBatchRenderers; }
@@ -440,7 +446,9 @@ namespace DCLF
 		{
 			RE::NiPointer<RE::BSGeometry> geometry;
 			RE::NiNode* categoryNode = nullptr;
-			bool unsupportedParent = false;
+			// Ineligible::UnsupportedParent or Billboard for what lies between the leaf and its category node
+			// (ParentReason in SceneStore.cpp), else None.
+			Ineligible parentReason = Ineligible::None;
 
 			/**
 			 * @brief A cached "this object cannot be drawn", and the witnesses that keep it honest.
@@ -529,6 +537,10 @@ namespace DCLF
 			std::uint32_t candidateFrame = 0;  // 0: never classified
 			Ineligible candidateReason = Ineligible::None;
 			static constexpr std::uint32_t kCandidateRefreshFrames = 64;
+			// The accumulate phase's verdict when it left the object without bindings, and the frame it did so
+			// (ReasonThisFrame).
+			Ineligible accumulateReason = Ineligible::None;
+			std::uint32_t accumulateReasonFrame = 0;
 			std::uint32_t skinUpdatedFrame = 0;  // the frame the engine's palette update last ran for it (render thread)
 			// Its index in this walk's tables, valid while objectStamp equals SceneStore::objectStamp. Kept here
 			// rather than in a geometry -> index map rebuilt by every walk: the map's insert was ~0.12 us an object,
@@ -542,9 +554,9 @@ namespace DCLF
 		// unchanged; the backstop rebuild exists for anything the signature cannot see.
 		std::uint64_t categorySignature = 0;
 		std::uint32_t categoryIdleFrames = 0;
-		RE::NiNode* FindCategoryNode(RE::NiAVObject* a_object, bool* a_unsupportedParent) const;
+		RE::NiNode* FindCategoryNode(RE::NiAVObject* a_object, Ineligible* a_parentReason) const;
 		void AddSubtree(RE::NiAVObject* a_root);
-		void AddGeometry(RE::BSGeometry* a_geometry, RE::NiNode* a_categoryNode, bool a_unsupportedParent);
+		void AddGeometry(RE::BSGeometry* a_geometry, RE::NiNode* a_categoryNode, Ineligible a_parentReason);
 		void ValidateSlice();
 		void FindLightingShader();
 		void CollectAccumulatedPasses();
@@ -555,7 +567,8 @@ namespace DCLF
 		void CompareCapturedPasses(bool a_compare);
 		/** @brief A cheap hash of everything RefreshCategoryNodes reads to find category nodes. */
 		std::uint64_t CategorySignature() const;
-		Ineligible ClassifyFrame(const Tracked& a_tracked) const;
+		// a_accumulated: the frame's registered pass, whose captured fade state then stands in for the live one.
+		Ineligible ClassifyFrame(const Tracked& a_tracked, const AccumulatedPass* a_accumulated = nullptr) const;
 
 		ankerl::unordered_dense::map<RE::BSGeometry*, Tracked> tracked;
 		/**

@@ -32,7 +32,6 @@ namespace DCLF
 		constexpr std::uint32_t kSpecularBit = 0x200;  // pass descriptor Specular
 		constexpr std::uint32_t kTechniqueEnvmap = 1;
 		constexpr std::uint32_t kTechniqueTreeAnim = 12;
-		constexpr std::uint32_t kDoAlphaTestBit = 1u << 20;  // pass descriptor DoAlphaTest
 
 		const RE::BSRenderPass* FindLightingPass(RE::BSShaderProperty* a_property)
 		{
@@ -124,8 +123,7 @@ namespace DCLF
 					 differs("draws", a.draws, b.draws) || differs("bones", a.bones, b.bones) || differs("previous bones", a.previousBones, b.previousBones) ||
 					 differs("bone offsets", a.boneOffset, b.boneOffset) || differs("bone rows", a.boneRows, b.boneRows) ||
 					 differs("shadow techniques", a.shadowTechnique, b.shadowTechnique) || differs("shadow rejects", a.shadowReject, b.shadowReject) ||
-					 differs("shadow diffuse", a.shadowDiffuse, b.shadowDiffuse) || differs("shadow texcoords", a.shadowTexcoord, b.shadowTexcoord) ||
-					 differs("shadow materials", a.shadowMaterial, b.shadowMaterial) || differs("shadow keys", a.shadowKeysUsed, b.shadowKeysUsed) ||
+					 differs("shadow diffuse", a.shadowDiffuse, b.shadowDiffuse) || differs("shadow materials", a.shadowMaterial, b.shadowMaterial) || differs("shadow keys", a.shadowKeysUsed, b.shadowKeysUsed) ||
 					 differs("shadow textures", a.shadowTextureSet, b.shadowTextureSet) || differs("extra offsets", a.extraOffset, b.extraOffset) ||
 					 differs("geometry slots used", a.geometryLastUsed, b.geometryLastUsed));
 		}
@@ -151,7 +149,6 @@ namespace DCLF
 		shadowTechnique.clear();
 		shadowReject.clear();
 		shadowDiffuse.clear();
-		shadowTexcoord.clear();
 		shadowMaterial.clear();
 		shadowTextureSet.clear();
 		shadowTextureSeen.clear();
@@ -196,7 +193,6 @@ namespace DCLF
 		shadowTechnique.clear();
 		shadowReject.clear();
 		shadowDiffuse.clear();
-		shadowTexcoord.clear();
 		shadowMaterial.clear();
 		shadowTextureSet.clear();
 		shadowTextureSeen.clear();
@@ -229,20 +225,41 @@ namespace DCLF
 		validationCursor = 0;
 	}
 
-	RE::NiNode* SceneStore::FindCategoryNode(RE::NiAVObject* a_object, bool* a_unsupportedParent) const
+	namespace
 	{
-		bool unsupported = false;
+		// What a node between a leaf and its category node makes of the leaf. A switch node draws one child at
+		// a time and an ordered node depends on draw order; neither survives being drawn out of the native
+		// loop. A billboard turns to the camera in the main cull (NiBillboardNode::OnVisible), after the scene
+		// walk read its world transform.
+		Ineligible ParentReason(RE::NiNode* a_node)
+		{
+			if (netimmerse_cast<RE::NiSwitchNode*>(a_node) || netimmerse_cast<RE::BSOrderedNode*>(a_node))
+				return Ineligible::UnsupportedParent;
+			if (netimmerse_cast<RE::NiBillboardNode*>(a_node))
+				return Ineligible::Billboard;
+			return Ineligible::None;
+		}
+
+		// The stronger of two parent reasons: an unsupported parent outranks a billboard.
+		Ineligible CombineParentReasons(Ineligible a_lhs, Ineligible a_rhs)
+		{
+			if (a_lhs == Ineligible::UnsupportedParent || a_rhs == Ineligible::UnsupportedParent)
+				return Ineligible::UnsupportedParent;
+			return a_lhs != Ineligible::None ? a_lhs : a_rhs;
+		}
+	}
+
+	RE::NiNode* SceneStore::FindCategoryNode(RE::NiAVObject* a_object, Ineligible* a_parentReason) const
+	{
+		Ineligible reason = Ineligible::None;
 		RE::NiNode* node = a_object ? a_object->parent : nullptr;
 		for (std::uint32_t depth = 0; node && depth < kMaxParentDepth; ++depth, node = node->parent) {
 			if (categoryNodes.contains(node)) {
-				if (a_unsupportedParent)
-					*a_unsupportedParent = unsupported;
+				if (a_parentReason)
+					*a_parentReason = reason;
 				return node;
 			}
-			// A switch node draws one child at a time and an ordered node depends on draw order;
-			// neither survives being drawn out of the native loop.
-			if (netimmerse_cast<RE::NiSwitchNode*>(node) || netimmerse_cast<RE::BSOrderedNode*>(node))
-				unsupported = true;
+			reason = CombineParentReasons(reason, ParentReason(node));
 		}
 		return nullptr;
 	}
@@ -381,12 +398,12 @@ namespace DCLF
 		}
 	}
 
-	void SceneStore::AddGeometry(RE::BSGeometry* a_geometry, RE::NiNode* a_categoryNode, bool a_unsupportedParent)
+	void SceneStore::AddGeometry(RE::BSGeometry* a_geometry, RE::NiNode* a_categoryNode, Ineligible a_parentReason)
 	{
 		auto& entry = tracked[a_geometry];
 		entry.geometry.reset(a_geometry);
 		entry.categoryNode = a_categoryNode;
-		entry.unsupportedParent = a_unsupportedParent;
+		entry.parentReason = a_parentReason;
 	}
 
 	void SceneStore::AddSubtree(RE::NiAVObject* a_root)
@@ -395,25 +412,25 @@ namespace DCLF
 		// (a cell transition releases the subtree). Walking it then dereferences null.
 		if (!a_root)
 			return;
-		bool unsupportedAbove = false;
-		RE::NiNode* category = FindCategoryNode(a_root, &unsupportedAbove);
+		Ineligible reasonAbove = Ineligible::None;
+		RE::NiNode* category = FindCategoryNode(a_root, &reasonAbove);
 		if (!category)
 			return;
 
-		// Walk down, carrying whether a switch/ordered node lies between the category node and the leaf.
-		std::vector<std::pair<RE::NiAVObject*, bool>> stack;
-		stack.emplace_back(a_root, unsupportedAbove);
+		// Walk down, carrying what the nodes between the category node and the leaf make of it (ParentReason).
+		std::vector<std::pair<RE::NiAVObject*, Ineligible>> stack;
+		stack.emplace_back(a_root, reasonAbove);
 		while (!stack.empty()) {
-			auto [object, unsupported] = stack.back();
+			auto [object, reason] = stack.back();
 			stack.pop_back();
 			if (!object)
 				continue;
 			if (auto* geometry = object->AsGeometry()) {
-				AddGeometry(geometry, category, unsupported);
+				AddGeometry(geometry, category, reason);
 				continue;
 			}
 			if (auto* node = object->AsNode()) {
-				const bool below = unsupported || netimmerse_cast<RE::NiSwitchNode*>(node) || netimmerse_cast<RE::BSOrderedNode*>(node);
+				const Ineligible below = CombineParentReasons(reason, ParentReason(node));
 				for (auto& child : node->GetChildren()) {
 					if (child)
 						stack.emplace_back(child.get(), below);
@@ -435,11 +452,11 @@ namespace DCLF
 			validationCursor = (validationCursor + 1) % size;
 			// The map's storage is a dense vector, so the cursor walks it without hashing.
 			auto it = tracked.begin() + static_cast<std::ptrdiff_t>(validationCursor);
-			bool unsupported = false;
-			if (FindCategoryNode(it->first, &unsupported) != it->second.categoryNode)
+			Ineligible reason = Ineligible::None;
+			if (FindCategoryNode(it->first, &reason) != it->second.categoryNode)
 				stale.push_back(it->first);
 			else
-				it->second.unsupportedParent = unsupported;
+				it->second.parentReason = reason;
 		}
 		for (auto* geometry : stale) {
 			tracked.erase(geometry);
@@ -613,10 +630,10 @@ namespace DCLF
 		return reason;
 	}
 
-	Ineligible SceneStore::ClassifyFrame(const Tracked& a_tracked) const
+	Ineligible SceneStore::ClassifyFrame(const Tracked& a_tracked, const AccumulatedPass* a_accumulated) const
 	{
-		if (a_tracked.unsupportedParent)
-			return Ineligible::UnsupportedParent;
+		if (a_tracked.parentReason != Ineligible::None)
+			return a_tracked.parentReason;
 
 		// App-culled or hidden anywhere between the leaf and its category node; part of an actor.
 		for (const RE::NiAVObject* object = a_tracked.geometry.get(); object; object = object->parent) {
@@ -628,8 +645,12 @@ namespace DCLF
 				return Ineligible::Actor;
 		}
 
+		// Fading: as the pass was registered when there is one (the withholding decided on that same value),
+		// else as the fade node stands now.
 		auto* property = a_tracked.geometry->GetGeometryRuntimeData().shaderProperty.get();
-		if (property && property->fadeNode && property->fadeNode->GetRuntimeData().currentFade < 1.0f)
+		const bool fading = a_accumulated ? a_accumulated->fading :
+		                                    property && property->fadeNode && property->fadeNode->GetRuntimeData().currentFade < 1.0f;
+		if (fading)
 			return Ineligible::Fading;
 
 		return Ineligible::None;
@@ -908,8 +929,8 @@ namespace DCLF
 					std::uint32_t chainIndex = 0;
 					for (auto* pass = group.passes[subPass]; pass; pass = pass->passGroupNext, ++chainIndex) {
 						if (pass->geometry && pass->shader && pass->shader->shaderType.get() == RE::BSShader::Type::Lighting)
-							accumulatedPasses.try_emplace(pass->geometry, AccumulatedPass{ pass, PassDescriptorOf(technique), subPass, pass->passEnum,
-																			   pass->accumulationHint, chainIndex });
+							accumulatedPasses.try_emplace(pass->geometry, AccumulatedPass{ pass, DrawnPassDescriptor(PassDescriptorOf(technique), subPass), subPass,
+																			   pass->passEnum, pass->accumulationHint, chainIndex, PassCapture::FadingAtRegistration(pass) });
 					}
 				}
 			}
@@ -947,7 +968,7 @@ namespace DCLF
 				++captureStats.missing;
 				continue;
 			}
-			if (PassDescriptorOf(it->second->technique) != accumulated.technique)
+			if (DrawnPassDescriptor(PassDescriptorOf(it->second->technique), it->second->subPass) != accumulated.technique)
 				++captureStats.techniqueDiffers;
 			if (it->second->subPass != accumulated.subPass)
 				++captureStats.subPassDiffers;
@@ -974,9 +995,10 @@ namespace DCLF
 			// engine draws a bucket in reverse registration order; the chain position is reversed here so
 			// that an ascending sort on it is the draw order, as it is for the accumulator walk.
 			accumulatedPasses.try_emplace(geometry,
-				AccumulatedPass{ entry->pass, PassDescriptorOf(entry->technique), entry->subPass, entry->passEnum,
+				AccumulatedPass{ entry->pass, DrawnPassDescriptor(PassDescriptorOf(entry->technique), entry->subPass), entry->subPass, entry->passEnum,
 					entry->pass ? static_cast<std::uint32_t>(entry->pass->accumulationHint) : 0u,
-					0xFFFFFFu - static_cast<std::uint32_t>(std::min<std::size_t>(static_cast<std::size_t>(entry - entries.data()), 0xFFFFFFu)) });
+					0xFFFFFFu - static_cast<std::uint32_t>(std::min<std::size_t>(static_cast<std::size_t>(entry - entries.data()), 0xFFFFFFu)),
+					entry->fading });
 		}
 	}
 
@@ -1244,13 +1266,13 @@ namespace DCLF
 	}
 
 	/**
-	 * @brief The scene half of the frame, at BeforeShadowMaps.
+	 * @brief The scene half of the frame, from Main::Draw's early hook (else at BeforeShadowMaps).
 	 *
 	 * Everything that does not depend on the main camera's accumulator: the tracked walk, eligibility, the
 	 * geometry slots and their buffer resolve, the transforms and bounds, the bone palettes, and one object
-	 * record per eligible object. It runs before the shadow maps are drawn, which is the only point in the
-	 * frame where the scene graph and the engine's culling are final but the shadow views have not yet been
-	 * rendered - so a shadow epoch can read these records.
+	 * record per eligible object. It runs before the shadow maps are drawn - the scene graph is final from
+	 * Main::Draw on, and a shadow epoch reads these records. The early hook is ahead of the main camera's
+	 * cull; what moves before BeforeShadowMaps is listed at DrawcallLimitFix::BeginSceneFrame.
 	 *
 	 * The records leave the accumulator's half unset: no pipeline, no material, kObjectNoBindings, and
 	 * kObjectNativeVisible clear. BuildAccumulatePhase patches them in place by object index, which is
@@ -1320,11 +1342,11 @@ namespace DCLF
 		for (auto& [trackedGeometry, entry] : tracked)
 			order.push_back({ trackedGeometry, &entry, nullptr });
 
-		// CS_DCLF_ASYNC: the walk on the worker, from here to AfterShadowMaps - the engine's whole shadow-map
-		// pass. Nothing reads the per-object tables in between (ExecuteShadowView does not; the shadow probe
-		// keeps the walk here), the tracked set changes only at Present, and the engine data the walk reads is
-		// the data the render thread reads here today: the scene graph and the culling are final from this
-		// point. The shadow build queued behind it reads what it writes.
+		// CS_DCLF_ASYNC: the walk on the worker, from here to AfterShadowMaps - the engine's main cull and its
+		// whole shadow-map pass. Nothing reads the per-object tables in between (ExecuteShadowView does not;
+		// the shadow probe keeps the walk here), the tracked set changes only at Present, and the engine data
+		// the walk reads is the data the render thread reads here (see BuildScenePhase for what the cull
+		// writes). The shadow build queued behind it reads what it writes.
 		if (AsyncJobEnabled("scene") && !ShadowProbe::Enabled()) {
 			PrepareSceneJob();
 			++sceneAsync.kicked;
@@ -1572,7 +1594,6 @@ namespace DCLF
 			const auto shadowReject = ShadowCasterReject(shadowProperty, geometry);
 			++stats.shadowRejects[static_cast<std::size_t>(shadowReject) & 7];
 			ID3D11ShaderResourceView* shadowDiffuse = nullptr;
-			std::array<float, 4> shadowTexcoord{};
 			const RE::BSShaderMaterial* shadowMaterial = nullptr;
 			if (shadowReject == ShadowReject::None) {
 				++stats.shadowCasters;
@@ -1585,7 +1606,6 @@ namespace DCLF
 						shadowMaterial = material;
 						auto* texture = material->diffuseTexture ? material->diffuseTexture->rendererTexture : nullptr;
 						shadowDiffuse = texture ? texture->resourceView : nullptr;
-						shadowTexcoord = { material->texCoordOffset[0].x, material->texCoordOffset[0].y, material->texCoordScale[0].x, material->texCoordScale[0].y };
 						if (shadowDiffuse && tables.shadowTextureSeen.insert(shadowDiffuse).second)
 							tables.shadowTextureSet.push_back(shadowDiffuse);
 					}
@@ -1601,7 +1621,6 @@ namespace DCLF
 			}
 			tables.shadowReject.push_back(static_cast<std::uint8_t>(shadowReject));
 			tables.shadowDiffuse.push_back(shadowDiffuse);
-			tables.shadowTexcoord.push_back(shadowTexcoord);
 			tables.shadowMaterial.push_back(shadowMaterial);
 			// The extras rows are allocated by the accumulate phase, which is where the descriptors that
 			// decide whether an object needs them are derived.
@@ -1975,13 +1994,9 @@ namespace DCLF
 			// kCandidateRefreshFrames old. An object that has just been hidden must lose its bindings now,
 			// or DCLF keeps drawing what the engine has stopped drawing.
 			if (reason == Ineligible::None)
-				reason = ClassifyFrame(*trackedEntry);
-			// The renderer draws batch lists 1, 3 and 4 with alpha testing. When the technique the pass was
-			// registered under lacks DoAlphaTest, the technique drawn sometimes gains it after the tables are
-			// built (engine notes: batch renderer, open question); leave those to the native loop.
-			if (reason == Ineligible::None && accumulated && accumulated->subPass != 0 && accumulated->subPass != 2 &&
-				!(accumulated->technique & kDoAlphaTestBit))
-				reason = Ineligible::AlphaTestState;
+				reason = ClassifyFrame(*trackedEntry, accumulated);
+			// A pass in an alpha-test list is drawn with DoAlphaTest whatever it was registered with
+			// (DrawnPassDescriptor, applied where the passes are taken).
 			// The histogram is the scene phase's, taken over the whole tracked set; where this phase -
 			// which has the accumulated pass, and so the decal group - reaches a different verdict, the
 			// object is moved between the buckets so the report reads as it did before the split.
@@ -1990,6 +2005,8 @@ namespace DCLF
 				++stats.ineligible[static_cast<std::size_t>(reason)];
 			}
 			if (reason != Ineligible::None) {
+				trackedEntry->accumulateReason = reason;
+				trackedEntry->accumulateReasonFrame = frame;
 				// Eligible for a record but not for bindings: it stays native this frame, which is what
 				// its scene record already says (kObjectNoBindings, not native-visible).
 				if (accumulated)
@@ -2510,5 +2527,20 @@ namespace DCLF
 	bool SceneStore::IsTracked(const RE::BSGeometry* a_geometry) const
 	{
 		return tracked.contains(const_cast<RE::BSGeometry*>(a_geometry));
+	}
+
+	Ineligible SceneStore::ReasonThisFrame(const RE::BSGeometry* a_geometry, bool* a_accumulate) const
+	{
+		if (a_accumulate)
+			*a_accumulate = false;
+		const auto it = tracked.find(const_cast<RE::BSGeometry*>(a_geometry));
+		if (it == tracked.end())
+			return Ineligible::None;
+		if (it->second.accumulateReasonFrame == frame) {
+			if (a_accumulate)
+				*a_accumulate = true;
+			return it->second.accumulateReason;
+		}
+		return it->second.candidateReason;
 	}
 }
