@@ -25,7 +25,7 @@ Static rigid geometry:
 -   a `BSLightingShaderProperty`;
 -   a technique DCLF supports: None, Envmap, Glowmap or Parallax, including TruePBR materials;
 -   no alpha blending, no decal flags, no LOD flags, no projected UV and no refraction;
--   not under a `NiSwitchNode` or `BSOrderedNode`, and not part of an actor.
+-   not under a `BSOrderedNode`; under an `NiSwitchNode` only while the switch selects it, and part of an actor only with `CS_DCLF_ACTORS` (see "Trees and actors").
 
 Per frame it must also:
 -   be visible, meaning not app-culled or hidden up to its tracked root;
@@ -1433,6 +1433,10 @@ they are not part of the witness.
 | `CS_DCLF_OWNERSHIP=static` | Withhold claimed passes from the main camera's batch renderer, so DCLF owns those objects outright. Default off. |
 | `CS_DCLF_SHADOWS=1` | The shadow views: DCLF culls and draws the frame's casters into the engine's shadow map slices in one epoch per frame (below, "Shadow views, step two"). Default off. Live toggle in the menu. |
 | `CS_DCLF_SHADOW_OWNERSHIP=static` | Withhold the casters DCLF's shadow epoch draws from the shadow views' batch renderers, per render mode. Needs `CS_DCLF_SHADOWS=1`. Default off. Live toggle. |
+| `CS_DCLF_SWITCH_NODES=1` | Leaves under an `NiSwitchNode` (trees, harvestables) are eligible in the frames every switch on their path selects them ("Trees and actors"). Default on. Live toggle. |
+| `CS_DCLF_SKIN_PARTITIONS=1` | Skins of several partitions and dismember skins (LOD trees, actor bodies) are eligible, one draw per partition the engine draws. Needs `CS_DCLF_SKINNED`. Default on. Live toggle. |
+| `CS_DCLF_ACTORS=1` | Geometry under an actor is eligible, as is the FacegenRGBTint technique. Default on. Live toggle. |
+| `CS_DCLF_NATIVE_PROBE=1` | Diagnostic: every 300 frames, the Lighting draws the main pass still issues natively, by form type, DCLF verdict, technique, skin shape and LODMode, with sampled ancestor chains. |
 | `CS_DCLF_SHADOW_PROBE=1` | Diagnostic: the shadow probe (step one): per-view engine state, registrations, derivation and rule cross-checks, and the engine's shadow CPU. |
 | `CS_DCLF_PASS_SOURCE=accumulator` | Build the tables from the accumulator walk instead of the captured registrations. |
 | `CS_DCLF_MATERIAL_CACHE=probe` | Diagnostic: measures how many material records are unchanged from the previous frame, i.e. whether a cross-frame cache could work. |
@@ -1470,7 +1474,8 @@ they are not part of the witness.
 
 Unset switches now take the configuration every gate run of this work used: `CS_DCLF_HYBRID=1`,
 `CS_DCLF_OWNERSHIP=static`, `CS_DCLF_CULL=occlusion`, `CS_DCLF_SKINNED=1`, `CS_DCLF_TREES=1`,
-`CS_DCLF_DECALS=1`, `CS_DCLF_PROJECTED_UV=1`, `CS_DCLF_MTLAND=1`, `CS_DCLF_SHADOWS=1` and
+`CS_DCLF_DECALS=1`, `CS_DCLF_PROJECTED_UV=1`, `CS_DCLF_MTLAND=1`, `CS_DCLF_SWITCH_NODES=1`,
+`CS_DCLF_SKIN_PARTITIONS=1`, `CS_DCLF_ACTORS=1`, `CS_DCLF_SHADOWS=1` and
 `CS_DCLF_SHADOW_OWNERSHIP=static` (the tables already default to the tracked set). An explicit value
 overrides a default: `0` for the class and path switches, `off` for the two ownership switches and the
 culling. Rows above that say "Default off" describe the switches before this change. All of them are live
@@ -1517,7 +1522,7 @@ Found while building DCLF. None is caused by DCLF; each is recorded here until i
     copy of any object's lighting pass (for the sun light). This is valid because everything per object
     is replaced afterwards (engine notes, `SetupGeometry`: what is per object); parity confirms it for the
     main pass only.
--   **Actors.** Geometry under an actor's 3D is excluded, including rigid items carried by actors.
+-   **Actors.** Resolved: geometry under an actor is eligible with `CS_DCLF_ACTORS` (default on), and the gates hold (see "Trees and actors").
 -   **Unwritten constants.** Components the engine never writes are uploaded as zero in Phase 2. The
     engine leaves them undefined, and the permutations do not read them.
 -   **SE 1.5.97 and VR.** Only AE 1.6.1170 was tested. DCLF uses two raw offsets, into
@@ -3189,3 +3194,106 @@ different moments by the two builds (see "The scene walk starts at `Main::Draw`"
 
 Still open: the hand-back runs a lookup for each withheld pass every frame (about 1700 in the exterior). It
 has not been measured against the render-thread budget.
+
+## Trees and actors
+
+The objects DCLF was drawing as "trees" were the TreeAnim technique: shrubs, ferns and other animated
+foliage. Real trees and actors still went through the native passes. `CS_DCLF_NATIVE_PROBE=1` found why.
+It records every Lighting draw the main pass still issues natively, which under static ownership is exactly
+what DCLF does not cover. For each draw it records DCLF's verdict, the base object's form type, the skin
+shape and the pass's LODMode, and samples the whole ancestor chain.
+
+Native Lighting draws per frame before this change:
+
+| | exterior | Dragonsreach | Riverwood |
+| --- | --- | --- | --- |
+| TREE | 190 | - | 83 |
+| actors | 17 | 100 | 110 |
+
+### Why they stayed native
+
+-   **Every tree hangs under an `NiSwitchNode`** (`BSTreeNode` > `BSMultiBoundNode 'FadeNode Anim'` >
+    `NiSwitchNode` > shapes), and harvestable flora (fish buckets, mushrooms on logs) under another. The
+    tracker rejected anything under a switch node as `unsupported-parent`.
+-   **Most trees are skins of two or three partitions**, one per LOD level (LOD bytes 1/0, or 1/2/0 with
+    TreeAnim). The skinned path took exactly one partition, so the rest were `skin-shape`.
+-   **Actor bodies and armour are `BSDismemberSkinInstance`s** of one to three partitions: `skin-shape`.
+-   **Anything under an actor was rejected by a blanket Phase 1 rule** (`actor`), recorded as an
+    assumption and never measured. Exterior actors also hang under the cell's Actor node, which DCLF did not
+    walk.
+-   Heads, hair, eyes, mouths and brows are `BSDynamicTriShape`s (`not-trishape`), whose vertices the
+    engine rewrites every frame. They stay native.
+
+### What the engine does (engine notes, "Skin partitions" and "Switch nodes")
+
+-   A skinned draw is one `DrawIndexed` per partition the engine draws, each binding that partition's own
+    TriShape. All of them use the whole skin's palette. Partition *i* is drawn when a constant table at
+    `0x14202a030`, indexed by the pass's `LODMode` and the partition's LOD byte, says so. A
+    `BSDismemberSkinInstance` first skips the partitions whose flag is clear.
+-   A pass's `LODMode` is the fade node's LOD level (`+0x152 & 0xF`) for `kMeshLOD` geometry and 3 otherwise.
+    The main-pass and shadow-pass builders use the same level.
+-   While a `kMeshLOD` fade node's LOD state is not settled, `GetRenderPasses` adds a second, single-level
+    copy of every pass (hint 10) for the cross-fade.
+-   `NiSwitchNode::OnVisible` culls `children[index]` alone, and brings that child up to date there when it
+    became the selected one after the last update pass.
+
+### What was built
+
+-   **Switch nodes** (`CS_DCLF_SWITCH_NODES`, reason `switch`). A switch on the path marks the leaf, and
+    `ClassifyFrame` checks every frame that each switch selects the leaf's branch and that the branch is
+    current (`SceneStore::SwitchSelects`). The scene phase re-takes this verdict every frame instead of
+    caching it for 64, because the shadow views draw what that phase admits. The switch's own fields are
+    read at their SE/AE offsets (`SceneStore::ReadSwitch`): CommonLib declares them after `NiNode`, whose
+    declared size in a multi-runtime build is VR's, so its members read the wrong memory. The first version
+    read garbage indices and rejected every tree.
+-   **Skins of several partitions** (`CS_DCLF_SKIN_PARTITIONS`, needs `CS_DCLF_SKINNED`). A skin is one
+    object whose draw writes one sequence per partition the engine draws:
+    -   `Tables::skinPartitions` holds the mask (bit *i* = partition *i*). The scene phase sets it from the fade
+        node for the shadow views, and the accumulate phase replaces it from the registered pass
+        (`AccumulatedPass::lodRow`).
+    -   Every partition's TriShape has a geometry slot, and the slots are linked every frame
+        (`GeometryRecord::nextPartition`, packed into `GeometryDraw`'s spare word).
+    -   `DrawInput` grew a word for the mask (44 bytes), and BuildDrawsCS walks the links.
+    -   An object stays one record, one visibility word and one culling verdict; only its draws multiply.
+    -   A mask of 0 (the engine draws none) is `hidden`. Up to eight partitions sharing the first one's
+        vertex layout are eligible.
+    -   The CPU templates, BuildDraws parity (sorted by object, then index buffer), the draw cap and draw
+        parity all follow the same walk. Draw parity takes each native draw's expected partitions from that
+        draw's own pass, so the hint-10 cross-fade copies are checked against what they really draw.
+-   **The LOD cross-fade is a fade.** `FadingAtRegistration` includes the unsettled `kMeshLOD` state, so an
+    object in a cross-fade is neither withheld nor drawn by DCLF until it ends, like any other fade. Before
+    this, withholding would have swallowed the hint-10 copies too.
+-   **Actors** (`CS_DCLF_ACTORS`). The Actor cell node is always walked, and the toggle is `ClassifyFrame`'s
+    actor rule, so it stays live. The FacegenRGBTint technique (body skin) is supported: it adds only
+    `TintColor`, a PerMaterial constant the material evaluation already captures.
+
+### Results
+
+Same three cells, turning, with `CS_DCLF_ASYNC=probe`, BuildDraws, capture and set parity:
+
+| | exterior | Dragonsreach | Riverwood (steady) |
+| --- | --- | --- | --- |
+| native TREE draws a frame | 190 -> 18 | - | 188 -> 0 |
+| native actor draws a frame | 17 -> 17 | 100 -> 22 | 110 -> 11 |
+| claims | ~1465 -> 1546 | 920 -> 1099 | 1614 |
+
+-   **Gates:**
+    -   BuildDraws parity OK in every interval;
+    -   draw parity 0 differing, and bone palette parity 0 differing;
+    -   set parity: no depth/colour disagreement;
+    -   0 holes, and 0 claimed but not drawn;
+    -   colour and Z-prepass worker builds 0 differing;
+    -   capture parity at its known residue (VS PerTechnique 13, one ulp, at the Dragonsreach cell change; the
+        pre-change run shows the same 1,342).
+-   The shadow-build probe differs in about as many frames as before (110 against 88 in the exterior), in
+    the same texture-transform blocks.
+
+What stays native, by name:
+
+-   The dynamic head parts.
+-   Actors and trees mid-fade.
+-   **The player's own body** (about 6 draws). The engine sets `kHidden` on the player's third-person
+    `Skeleton.nif` while `Main::Draw` begins, which is when the scene walk reads it, and clears it before the
+    cull. The native loop draws it, and DCLF's verdict is `hidden`. That is correct and leaves no hole; it
+    only means those draws are not DCLF's.
+-   Distant LOD (`no-ref`, under `LODRoot`).

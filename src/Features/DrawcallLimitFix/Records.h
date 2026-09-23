@@ -83,6 +83,11 @@ namespace DCLF
 	 * @brief Geometry shared by every object that uses the same BSGraphics::TriShape.
 	 * The buffers are the game's; Phase 2 resolves them to Vulkan handles and addresses.
 	 */
+	/** @brief GeometryRecord::nextPartition: the last partition, or a TriShape that is not one. */
+	inline constexpr std::uint32_t kNoPartition = ~0u;
+	/** @brief The most partitions a skin DCLF draws may have: one bit each in the draw's partition mask. */
+	inline constexpr std::uint32_t kMaxSkinPartitions = 8;
+
 	struct GeometryRecord
 	{
 		ID3D11Buffer* vertexBuffer = nullptr;
@@ -97,6 +102,9 @@ namespace DCLF
 		std::uint64_t indexAddress = 0;
 		std::uint64_t vertexBytes = 0;
 		std::uint64_t indexBytes = 0;
+		// For a skin partition's TriShape: the slot of the same skin's next partition, rewritten every frame the
+		// skin is drawn (SceneStore::LinkPartitions), else kNoPartition. BuildDrawsCS walks it.
+		std::uint32_t nextPartition = kNoPartition;
 	};
 
 	/**

@@ -48,6 +48,9 @@ namespace DCLF
 				return true;
 			case Technique::TreeAnim:
 				return TreesEnabled();
+			// Actor skin (bodies, hands): the Lighting shader's SKIN path with TintColor, a PerMaterial constant.
+			case Technique::FacegenRGBTint:
+				return ActorsEnabled();
 			case Technique::MTLand:
 			case Technique::MTLandLODBlend:
 				return MtLandEnabled();
@@ -270,6 +273,21 @@ namespace DCLF
 	bool SkinnedEnabled()
 	{
 		return Toggles::Get().Active().skinned;
+	}
+
+	bool SwitchNodesEnabled()
+	{
+		return Toggles::Get().Active().switchNodes;
+	}
+
+	bool SkinPartitionsEnabled()
+	{
+		return Toggles::Get().Active().skinPartitions;
+	}
+
+	bool ActorsEnabled()
+	{
+		return Toggles::Get().Active().actors;
 	}
 
 	bool ProjectedUvEnabled()

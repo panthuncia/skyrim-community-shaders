@@ -68,6 +68,11 @@ namespace DCLF
 		void InstallDrawHook();
 		bool drawHookInstalled = false;
 		std::int32_t pendingObject = -1;  // object whose SetupGeometry just ran; its draw is next
+		// The geometry slots the pending object's draws should bind, in order: one, or for a skin of several
+		// partitions one per partition DCLF draws (the engine issues a DrawIndexed for each).
+		std::array<std::uint32_t, 8> pendingSlots{};
+		std::uint32_t pendingSlotCount = 0;
+		std::uint32_t pendingSlotCursor = 0;
 
 		// Render state the native draw used, per property-derived key, to learn (and then encode) the mapping.
 		struct RenderStateKey

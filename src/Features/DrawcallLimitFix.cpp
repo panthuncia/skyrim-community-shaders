@@ -6,6 +6,7 @@
 #include "DrawcallLimitFix/ConstantEvaluator.h"
 #include "DrawcallLimitFix/DecalProbe.h"
 #include "DrawcallLimitFix/SkinProbe.h"
+#include "DrawcallLimitFix/NativeProbe.h"
 #include "DrawcallLimitFix/DrawPipelines.h"
 #include "DrawcallLimitFix/GpuResources.h"
 #include "DrawcallLimitFix/GpuTextures.h"
@@ -585,6 +586,8 @@ void DrawcallLimitFix::Prepass()
 		DCLF::DecalProbe::Get().Report(frame, kReportInterval);
 	if (DCLF::SkinProbe::Enabled())
 		DCLF::SkinProbe::Get().Report(frame, kReportInterval);
+	if (DCLF::NativeProbe::Enabled())
+		DCLF::NativeProbe::Get().Report(frame, kReportInterval);
 	if (DCLF::ShadowProbe::Enabled())
 		DCLF::ShadowProbe::Get().Report(frame, kReportInterval);
 
@@ -999,6 +1002,8 @@ void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint3
 		DCLF::DecalProbe::Get().OnNativeLightingDraw(a_pass, a_renderFlags);
 	if (DCLF::SkinProbe::Enabled())
 		DCLF::SkinProbe::Get().OnNativeLightingDraw(a_pass, a_renderFlags);
+	if (DCLF::NativeProbe::Enabled())
+		DCLF::NativeProbe::Get().OnNativeLightingDraw(a_pass, a_renderFlags);
 }
 
 void DrawcallLimitFix::RefreshDepthConsumers()
@@ -1082,6 +1087,11 @@ void DrawcallLimitFix::DrawSettings()
 		ImGui::Checkbox("Decals (CS_DCLF_DECALS)", &toggles.decals);
 		ImGui::Checkbox("Projected UV (CS_DCLF_PROJECTED_UV)", &toggles.projectedUv);
 		ImGui::Checkbox("Terrain (CS_DCLF_MTLAND)", &toggles.mtLand);
+		ImGui::Checkbox("Under switch nodes: trees, harvestables (CS_DCLF_SWITCH_NODES)", &toggles.switchNodes);
+		ImGui::BeginDisabled(!toggles.skinned);
+		ImGui::Checkbox("Skins of several partitions: LOD trees, actor bodies (CS_DCLF_SKIN_PARTITIONS)", &toggles.skinPartitions);
+		ImGui::EndDisabled();
+		ImGui::Checkbox("Actors (CS_DCLF_ACTORS)", &toggles.actors);
 		ImGui::SeparatorText("Shadow views");
 		ImGui::Checkbox("Draw the shadow views (CS_DCLF_SHADOWS)", &toggles.shadows);
 		ImGui::BeginDisabled(!toggles.shadows);
@@ -1095,9 +1105,9 @@ void DrawcallLimitFix::DrawSettings()
 		ImGui::TreePop();
 	}
 	if (ImGui::TreeNodeEx("This frame", ImGuiTreeNodeFlags_DefaultOpen)) {
-		ImGui::Text("Active: hybrid %d, ownership %d, cull %u%s, skinned %d, trees %d, decals %d, projected %d, terrain %d, shadows %d, shadow ownership %d",
+		ImGui::Text("Active: hybrid %d, ownership %d, cull %u%s, skinned %d, trees %d, decals %d, projected %d, terrain %d, switch nodes %d, skin partitions %d, actors %d, shadows %d, shadow ownership %d",
 			active.hybrid, active.ownership, active.cullMode, active.cullTracked ? " (tracked)" : "", active.skinned, active.trees, active.decals,
-			active.projectedUv, active.mtLand, active.shadows, active.shadowOwnership);
+			active.projectedUv, active.mtLand, active.switchNodes, active.skinPartitions, active.actors, active.shadows, active.shadowOwnership);
 		ImGui::Text("Tracked geometry: %u (under %u category nodes)", stats.tracked, stats.categoryNodes);
 		ImGui::Text("Objects this frame: %u (%u the engine's culling also kept), geometries: %u, pipelines: %u", stats.objects, stats.nativeVisible, stats.geometries, stats.pipelines);
 		for (std::size_t i = 1; i < stats.ineligible.size(); ++i) {

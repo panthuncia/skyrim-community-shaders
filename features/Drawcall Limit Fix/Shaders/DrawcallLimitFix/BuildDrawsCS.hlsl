@@ -155,10 +155,15 @@ static const uint kPhaseTwoSequenceBase = 16384;  // kMaxDraws
 static const uint kDecalSequenceBase = 32768;  // 2 * kMaxDraws
 static const uint kMaxDecalDraws = 2048;
 
-// DrawInput: 32 bytes (pipeline/record/geometry/flags, then the world-space bounding sphere).
-static const uint kInputStride = 40;
-// GeometryDraw: 40 bytes (vertex buffer view, index buffer view, index count, first index).
+// DrawInput: 44 bytes (pipeline/record/geometry/flags, the world-space bounding sphere, the object index, the
+// decal ordinal, and the skin partitions to draw).
+static const uint kInputStride = 44;
+// GeometryDraw: 40 bytes (vertex buffer view, index buffer view, index count, first index, next partition).
 static const uint kGeometryStride = 40;
+// A skin of several partitions is one object drawn once per partition the engine would draw: the input's
+// mask names them (bit i = partition i), and each partition's GeometryDraw links to the next one's.
+static const uint kMaxPartitions = 8;
+static const uint kNoPartition = 0xFFFFFFFFu;
 // DrawSequence: 68 bytes, 4-byte packed. Words 1-3 are the root constants (DrawBindings address, then
 // the object index), which is why the object index sits between the record address and the vertex buffer.
 static const uint kSequenceStride = 68;
@@ -437,25 +442,40 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	if (!drawable)
 		return;
 
-	const uint geometryOffset = input.z * kGeometryStride;
-	const uint4 vertexBuffer = geometries.Load4(geometryOffset);        // address lo, hi, size, stride
-	const uint4 indexBuffer = geometries.Load4(geometryOffset + 16);    // address lo, hi, size, index count
-	const uint firstIndex = geometries.Load(geometryOffset + 32);
-
 	// 64-bit record address = RecordsAddress + record index * RecordStride.
 	const uint recordOffset = input.y * RecordStride;
 	const uint recordLo = RecordsAddressLo + recordOffset;
 	const uint recordHi = RecordsAddressHi + (recordLo < RecordsAddressLo ? 1 : 0);
 
-	// Phase 2 appends into a reserved part of the same buffer, with a counter of its own, because its draw
-	// is recorded separately and the offset a recorded draw starts at has to be known on the CPU.
-	uint slot;
-	count.InterlockedAdd(phase == kPhaseTwo ? kCountDrawnPhaseTwo : kCountDrawn, 1, slot);
-	const uint base = (slot + (phase == kPhaseTwo ? kPhaseTwoSequenceBase : 0)) * kSequenceStride;
-	sequences.Store(base + 0, input.x);
-	sequences.Store3(base + 4, uint3(recordLo, recordHi, objectIndex));
-	sequences.Store4(base + 16, vertexBuffer);
-	sequences.Store4(base + 32, uint4(indexBuffer.xyz, kIndexFormatR16));
-	sequences.Store4(base + 48, uint4(indexBuffer.w, 1, firstIndex, 0));
-	sequences.Store(base + 64, 0);
+	// One draw of the input's geometry, or - for a skin of several partitions - one per partition its mask
+	// names, walking the partitions' GeometryDraw links. Every draw is the same object: one record, one
+	// visibility word, one verdict.
+	const uint partitions = inputs.Load(inputOffset + 40);
+	uint geometryIndex = input.z;
+	[loop] for (uint partition = 0; partition < kMaxPartitions && geometryIndex != kNoPartition; ++partition) {
+		const uint geometryOffset = geometryIndex * kGeometryStride;
+		if (partitions == 0 || ((partitions >> partition) & 1) != 0) {
+			const uint4 vertexBuffer = geometries.Load4(geometryOffset);      // address lo, hi, size, stride
+			const uint4 indexBuffer = geometries.Load4(geometryOffset + 16);  // address lo, hi, size, index count
+			const uint firstIndex = geometries.Load(geometryOffset + 32);
+
+			// Phase 2 appends into a reserved part of the same buffer, with a counter of its own, because its
+			// draw is recorded separately and the offset a recorded draw starts at has to be known on the CPU.
+			// The CPU caps the templates at kMaxDraws; the guard keeps a phase inside its own range regardless.
+			uint slot;
+			count.InterlockedAdd(phase == kPhaseTwo ? kCountDrawnPhaseTwo : kCountDrawn, 1, slot);
+			if (slot >= kPhaseTwoSequenceBase)
+				return;
+			const uint base = (slot + (phase == kPhaseTwo ? kPhaseTwoSequenceBase : 0)) * kSequenceStride;
+			sequences.Store(base + 0, input.x);
+			sequences.Store3(base + 4, uint3(recordLo, recordHi, objectIndex));
+			sequences.Store4(base + 16, vertexBuffer);
+			sequences.Store4(base + 32, uint4(indexBuffer.xyz, kIndexFormatR16));
+			sequences.Store4(base + 48, uint4(indexBuffer.w, 1, firstIndex, 0));
+			sequences.Store(base + 64, 0);
+		}
+		if ((partitions >> (partition + 1)) == 0)
+			break;
+		geometryIndex = geometries.Load(geometryOffset + 36);  // GeometryDraw::nextPartition
+	}
 }

@@ -82,6 +82,11 @@ namespace DCLF
 			// Tree animation, per object. Only technique 12 fills it; everything else leaves the engine's
 			// defaults, which is what the template block already carried for them.
 			std::vector<ObjectTreeAnim> treeAnim;                 // parallel to objects
+			// Skins of several partitions (CS_DCLF_SKIN_PARTITIONS): bit i draws partition i, walking the
+			// geometry slots' nextPartition links from the object's geometryIndex (partition 0). 0 for every
+			// other object, which draws its one geometry. The scene phase sets it from the fade node's LOD level
+			// for the shadow views; the accumulate phase replaces it from the registered pass for the main camera.
+			std::vector<std::uint8_t> skinPartitions;             // parallel to objects
 			std::vector<GeometryConstants> geometryConstants;     // parallel to pipelines (per-frame PerGeometry values)
 			std::vector<std::uint8_t> geometryConstantsValid;     // parallel to pipelines
 			// The property whose lighting pass supplied each pipeline's per-frame constants, kept so
@@ -411,6 +416,38 @@ namespace DCLF
 		const Lookups& GetLookups() const { return lookups; }
 		Lookups& MutableLookups() { return lookups; }
 
+		/**
+		 * @brief An NiSwitchNode's own fields, read at their SE/AE offsets (NiSwitchNode::OnVisible, AE
+		 * 140d29700): CommonLib declares them after NiNode, whose declared size in a multi-runtime build is
+		 * VR's, so its members read the wrong memory. False on VR, which DCLF does not run on.
+		 */
+		struct SwitchState
+		{
+			std::uint16_t flags = 0;  // bit 0: the update pass updates only the selected child
+			std::int32_t index = -1;
+			std::uint32_t revID = 0;
+			const std::uint32_t* childRevID = nullptr;
+			std::uint16_t childRevCapacity = 0;
+		};
+		static bool ReadSwitch(const RE::NiSwitchNode& a_switch, SwitchState& a_out);
+		// Whether the switch node draws a_child (its direct child on the leaf's path) this frame.
+		static bool SwitchSelects(const RE::NiSwitchNode& a_switch, const RE::NiAVObject* a_child);
+
+		/**
+		 * @brief The row of the engine's skin-partition LOD table a pass draws with (NiSkinPartition::Unk_25,
+		 * AE 140d43a10): LODMode.index + LODMode.singleLevel * 4. For a geometry, the row both of
+		 * GetRenderPasses and GetRenderPasses_ShadowMapOrMask give it: a kMeshLOD geometry's fade node LOD
+		 * level (+0x152 & 0xF), cumulative; everything else level 3, every LOD byte.
+		 */
+		static std::uint32_t LodRowOf(const RE::BSGeometry& a_geometry, const RE::BSShaderProperty* a_property);
+		static std::uint32_t LodRowOf(const RE::BSRenderPass& a_pass);
+		/**
+		 * @brief Which partitions of the skin the engine draws with this LOD row (bit i = partition i):
+		 * BSDismemberSkinInstance::Unk_25 (AE 140d31f40) first skips a partition whose flag (Data byte 0) is
+		 * clear, then NiSkinPartition::Unk_25 applies the table. 0 when it draws none.
+		 */
+		static std::uint32_t SkinPartitionMask(const RE::NiSkinInstance& a_skin, std::uint32_t a_lodRow);
+
 		/** @brief Index into GetTables().objects for this frame, or -1 when the geometry is not drawn by DCLF. */
 		std::int32_t FindObject(const RE::BSGeometry* a_geometry) const;
 		/**
@@ -447,7 +484,8 @@ namespace DCLF
 			RE::NiPointer<RE::BSGeometry> geometry;
 			RE::NiNode* categoryNode = nullptr;
 			// Ineligible::UnsupportedParent or Billboard for what lies between the leaf and its category node
-			// (ParentReason in SceneStore.cpp), else None.
+			// (ParentReason in SceneStore.cpp); Switch when a switch node lies there, which ClassifyFrame
+			// decides per frame; else None.
 			Ineligible parentReason = Ineligible::None;
 
 			/**

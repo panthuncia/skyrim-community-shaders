@@ -20,7 +20,7 @@ namespace DCLF
 		AlphaBlend,          // transparency
 		Decal,               // decal batches
 		ProjectedUV,         // snow/moss projection
-		UnsupportedParent,   // under a NiSwitchNode or BSOrderedNode
+		UnsupportedParent,   // under a BSOrderedNode
 		Hidden,              // app-culled or hidden this frame (per frame)
 		Fading,              // fade node not fully faded in (per frame)
 		Actor,               // part of an actor's 3D (carried items; interiors keep actors in the rooms)
@@ -28,6 +28,7 @@ namespace DCLF
 		UnstableBuffer,      // a vertex or index buffer DXVK cannot make stable (the game can map it)
 		SkinShape,           // skinned, but not a shape the skinned path takes: dismember instance, several partitions, too many bones
 		Billboard,           // under an NiBillboardNode: the main cull turns it to the camera
+		Switch,              // under an NiSwitchNode that does not select it this frame (or CS_DCLF_SWITCH_NODES off)
 		Count
 	};
 
@@ -49,6 +50,7 @@ namespace DCLF
 		"unstable-buffer",
 		"skin-shape",
 		"billboard",
+		"switch",
 	};
 
 	struct LightingDescriptors
@@ -142,6 +144,9 @@ namespace DCLF
 		// accumulate phase's fading verdict reads this rather than the fade node later in the frame, so
 		// the two decisions cannot disagree.
 		bool fading = false;
+		// The pass's LODMode as a row of the engine's partition table (index + singleLevel * 4): which skin
+		// partitions the main camera draws (SceneStore::SkinPartitionMask).
+		std::uint32_t lodRow = 3;
 	};
 
 	inline constexpr std::uint32_t kPassDoAlphaTest = 1u << 20;  // pass descriptor DoAlphaTest
@@ -197,6 +202,22 @@ namespace DCLF
 
 	/** @brief CS_DCLF_SKINNED=1: single-partition NiSkinInstance shapes are eligible, palettes from the engine. */
 	bool SkinnedEnabled();
+
+	/**
+	 * @brief CS_DCLF_SWITCH_NODES=1: a leaf under an NiSwitchNode is eligible in the frames every switch on its
+	 * path selects it (SceneStore::SwitchSelects). Trees and harvestables hang under one.
+	 */
+	bool SwitchNodesEnabled();
+
+	/**
+	 * @brief CS_DCLF_SKIN_PARTITIONS=1 (with skinned): skins of several partitions are eligible - the LOD
+	 * partitions of trees and the dismember partitions of actor bodies - drawn one draw per partition the
+	 * engine would draw (SkinPartitionMask).
+	 */
+	bool SkinPartitionsEnabled();
+
+	/** @brief CS_DCLF_ACTORS=1: geometry under an actor's 3D is eligible, and the FacegenRGBTint technique (skin). */
+	bool ActorsEnabled();
 
 	/** @brief CS_DCLF_PROJECTED_UV=1: kProjectedUV objects (snow and moss projection) are eligible. */
 	bool ProjectedUvEnabled();

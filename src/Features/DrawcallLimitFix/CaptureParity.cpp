@@ -460,15 +460,17 @@ namespace DCLF
 	void CaptureParity::OnDrawIndexed(ID3D11DeviceContext* a_context, UINT a_indexCount, UINT a_startIndex, INT a_baseVertex)
 	{
 		const std::int32_t index = pendingObject;
-		pendingObject = -1;
-		if (index < 0 || ConstantEvaluator::Evaluating())
+		const std::uint32_t partition = pendingSlotCursor++;
+		if (pendingSlotCursor >= pendingSlotCount)
+			pendingObject = -1;
+		if (index < 0 || ConstantEvaluator::Evaluating() || partition >= pendingSlotCount)
 			return;
 
 		const auto& tables = SceneStore::Get().GetTables();
-		if (static_cast<std::size_t>(index) >= tables.objects.size())
+		if (static_cast<std::size_t>(index) >= tables.objects.size() || pendingSlots[partition] >= tables.geometries.size())
 			return;
 		const auto& object = tables.objects[index];
-		const auto& geometryRecord = tables.geometries[object.geometryIndex];
+		const auto& geometryRecord = tables.geometries[pendingSlots[partition]];
 		const auto* geometry = tables.objectGeometry[index];
 		++drawsChecked;
 
@@ -496,7 +498,8 @@ namespace DCLF
 			vertexBuffer->Release();
 
 		// State::Draw has uploaded the permutation buffer for this draw by now.
-		ComparePermutation(geometry, static_cast<std::uint32_t>(index));
+		if (partition == 0)
+			ComparePermutation(geometry, static_cast<std::uint32_t>(index));
 
 		// Skinned: the palettes the bone setter bound at b10 (current) and b9 (previous), against the rows
 		// BuildFrame copied out of the skin instance after running the same update the setter runs.
@@ -660,6 +663,28 @@ namespace DCLF
 		if (mismatch)
 			++mismatchedDraws;
 		pendingObject = index;
+		// What its DrawIndexed calls should bind: the object's geometry, or each partition this pass draws - by
+		// the pass's own LODMode, which for a LOD cross-fade's extra single-level pass (hint 10) is not the one
+		// the tables' mask was taken from.
+		pendingSlotCount = pendingSlotCursor = 0;
+		const auto* skin = geometry->GetGeometryRuntimeData().skinInstance.get();
+		const std::uint32_t partitions = skin && skin->skinPartition && skin->skinPartition->numPartitions > 1 ?
+		                                     SceneStore::SkinPartitionMask(*skin, SceneStore::LodRowOf(*a_pass)) :
+		                                     0u;
+		if (skin && skin->skinPartition && skin->skinPartition->numPartitions > 1 && !partitions) {
+			pendingObject = -1;  // the engine draws no partition of it with this pass
+			return;
+		}
+		std::uint32_t slot = tables.objects[index].geometryIndex;
+		for (std::uint32_t i = 0; i < pendingSlots.size() && slot < tables.geometries.size(); ++i) {
+			if (partitions == 0 || ((partitions >> i) & 1))
+				pendingSlots[pendingSlotCount++] = slot;
+			if ((partitions >> (i + 1)) == 0)
+				break;
+			slot = tables.geometries[slot].nextPartition;
+		}
+		if (!pendingSlotCount)
+			pendingObject = -1;
 	}
 
 	void CaptureParity::Report(std::uint32_t a_frame, std::uint32_t a_interval)

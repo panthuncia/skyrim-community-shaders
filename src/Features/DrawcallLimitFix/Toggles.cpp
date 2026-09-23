@@ -24,6 +24,9 @@ namespace DCLF
 			kHybridNoSkip,
 			kOnlyEligible,
 			kNoZPrepass,
+			kSwitchNodes,
+			kSkinPartitions,
+			kActors,
 		};
 
 		// Defaults: the configuration every gate run of this work used. An unset switch takes the default;
@@ -53,6 +56,9 @@ namespace DCLF
 			set.decals = OnUnlessOff("CS_DCLF_DECALS");
 			set.projectedUv = OnUnlessOff("CS_DCLF_PROJECTED_UV");
 			set.mtLand = OnUnlessOff("CS_DCLF_MTLAND");
+			set.switchNodes = OnUnlessOff("CS_DCLF_SWITCH_NODES");
+			set.skinPartitions = OnUnlessOff("CS_DCLF_SKIN_PARTITIONS");
+			set.actors = OnUnlessOff("CS_DCLF_ACTORS");
 			set.shadows = OnUnlessOff("CS_DCLF_SHADOWS");
 			set.shadowOwnership = StaticUnlessOff("CS_DCLF_SHADOW_OWNERSHIP");
 			set.debugView = SwitchEnabled("CS_DCLF_DEBUG_VIEW");
@@ -67,13 +73,15 @@ namespace DCLF
 		{
 			a_set.ownership = a_set.ownership && a_set.hybrid;
 			a_set.shadowOwnership = a_set.shadowOwnership && a_set.shadows;
+			a_set.skinPartitions = a_set.skinPartitions && a_set.skinned;
 			return a_set;
 		}
 
 		bool EntersClassification(const ToggleSet& a, const ToggleSet& b)
 		{
 			return a.hybrid != b.hybrid || a.cullTracked != b.cullTracked || a.skinned != b.skinned || a.trees != b.trees ||
-			       a.decals != b.decals || a.projectedUv != b.projectedUv || a.mtLand != b.mtLand;
+			       a.decals != b.decals || a.projectedUv != b.projectedUv || a.mtLand != b.mtLand || a.switchNodes != b.switchNodes ||
+			       a.skinPartitions != b.skinPartitions || a.actors != b.actors;
 		}
 	}
 
@@ -108,6 +116,9 @@ namespace DCLF
 		put(kHybridNoSkip, s.hybridNoSkip);
 		put(kOnlyEligible, s.onlyEligible);
 		put(kNoZPrepass, s.noZPrepass);
+		put(kSwitchNodes, s.switchNodes);
+		put(kSkinPartitions, s.skinPartitions);
+		put(kActors, s.actors);
 		return bits;
 	}
 
@@ -130,6 +141,9 @@ namespace DCLF
 		s.hybridNoSkip = get(kHybridNoSkip);
 		s.onlyEligible = get(kOnlyEligible);
 		s.noZPrepass = get(kNoZPrepass);
+		s.switchNodes = get(kSwitchNodes);
+		s.skinPartitions = get(kSkinPartitions);
+		s.actors = get(kActors);
 		return s;
 	}
 

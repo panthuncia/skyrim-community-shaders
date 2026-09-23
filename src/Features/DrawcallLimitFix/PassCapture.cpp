@@ -42,8 +42,19 @@ namespace DCLF
 
 	bool PassCapture::FadingAtRegistration(const RE::BSRenderPass* a_pass)
 	{
-		const auto* property = a_pass && a_pass->geometry ? a_pass->geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
-		return property && property->fadeNode && property->fadeNode->GetRuntimeData().currentFade < 1.0f;
+		const auto* geometry = a_pass ? a_pass->geometry : nullptr;
+		const auto* property = geometry ? geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
+		const auto* fadeNode = property ? property->fadeNode : nullptr;
+		if (!fadeNode)
+			return false;
+		const auto& fade = fadeNode->GetRuntimeData();
+		if (fade.currentFade < 1.0f)
+			return true;
+		// Crossing between LOD levels: for kMeshLOD geometry whose fade node's LOD state (+0x153 & 0x70) is not
+		// 0x20, GetRenderPasses (AE 1414adfb0) adds a second copy of every lighting pass - accumulation hint 10,
+		// one LOD level only - which the engine blends over the first. DCLF draws one pass per object, so the
+		// object is the native loop's until the crossing ends, like any other fade.
+		return geometry->GetFlags().any(RE::NiAVObject::Flag::kMeshLOD) && (fade.unk153 & 0x70) != 0x20;
 	}
 
 	void PassCapture::Record(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint32_t a_technique, bool a_fading, bool a_withheld)

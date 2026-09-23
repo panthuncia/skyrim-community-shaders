@@ -146,8 +146,11 @@ namespace DCLF
 			// published for the same object.
 			std::uint32_t objectIndex;
 			std::uint32_t decalOrdinal;  // decals only: the slot in the group's range
+			// Skins of several partitions: bit i draws partition i (Tables::skinPartitions); 0 draws the one
+			// geometry. Left 0 by every input that is not such a skin.
+			std::uint32_t partitions;
 		};
-		static_assert(sizeof(DrawInput) == 40);
+		static_assert(sizeof(DrawInput) == 44);
 		// BuildDrawsCS.hlsl: set on an input the epoch has built a bindings record for. The depth segment
 		// submits an input for every candidate so the culling covers them all, but builds records only for
 		// the ones it may draw.
@@ -176,7 +179,7 @@ namespace DCLF
 			std::uint32_t indexBufferSize;
 			std::uint32_t indexCount;
 			std::uint32_t firstIndex;
-			std::uint32_t pad;
+			std::uint32_t nextPartition;  // GeometryRecord::nextPartition
 		};
 #pragma pack(pop)
 		static_assert(sizeof(GeometryDraw) == 40);
@@ -2045,13 +2048,49 @@ namespace DCLF
 			a_out.insert(a_out.end(), a_tables.extraRows.begin(), a_tables.extraRows.end());
 		}
 
+		/**
+		 * @brief The geometry slots an object's draw writes a sequence for, in BuildDrawsCS's order: its one
+		 * geometry, or for a skin of several partitions each partition its mask names, following the slots'
+		 * nextPartition links from the first.
+		 */
+		template <class F>
+		void ForEachDrawnGeometry(const SceneStore::Tables& a_tables, std::uint32_t a_firstSlot, std::uint32_t a_partitions, F&& a_draw)
+		{
+			std::uint32_t slot = a_firstSlot;
+			for (std::uint32_t i = 0; i < kMaxSkinPartitions && slot < a_tables.geometries.size() && slot < kMaxGeometries; ++i) {
+				if (a_partitions == 0 || ((a_partitions >> i) & 1))
+					a_draw(slot);
+				if ((a_partitions >> (i + 1)) == 0)
+					break;
+				slot = a_tables.geometries[slot].nextPartition;
+			}
+		}
+
+		std::uint32_t PartitionsOf(const SceneStore::Tables& a_tables, std::uint32_t a_object)
+		{
+			return a_object < a_tables.skinPartitions.size() ? a_tables.skinPartitions[a_object] : 0u;
+		}
+
+		// A draw template's geometry half, from a slot (SceneStore builds the object's first the same way).
+		void SetSequenceGeometry(DrawSequence& a_sequence, const GeometryRecord& a_geometry)
+		{
+			a_sequence.vertexBufferAddress = a_geometry.vertexAddress;
+			a_sequence.vertexBufferSize = static_cast<std::uint32_t>(std::min<std::uint64_t>(a_geometry.vertexBytes, UINT32_MAX));
+			a_sequence.vertexStride = a_geometry.vertexStride;
+			a_sequence.indexBufferAddress = a_geometry.indexAddress;
+			a_sequence.indexBufferSize = static_cast<std::uint32_t>(std::min<std::uint64_t>(a_geometry.indexBytes, UINT32_MAX));
+			a_sequence.indexCount = a_geometry.indexCount;
+			a_sequence.firstIndex = a_geometry.firstIndex;
+		}
+
 		void PackGeometryDraws(const SceneStore::Tables& a_tables, std::vector<GeometryDraw>& a_out)
 		{
 			a_out.resize(std::min<std::size_t>(a_tables.geometries.size(), kMaxGeometries));
 			for (std::size_t g = 0; g < a_out.size(); ++g) {
 				const auto& geometry = a_tables.geometries[g];
 				a_out[g] = { geometry.vertexAddress, static_cast<std::uint32_t>(std::min<std::uint64_t>(geometry.vertexBytes, UINT32_MAX)), geometry.vertexStride,
-					geometry.indexAddress, static_cast<std::uint32_t>(std::min<std::uint64_t>(geometry.indexBytes, UINT32_MAX)), geometry.indexCount, geometry.firstIndex, 0 };
+					geometry.indexAddress, static_cast<std::uint32_t>(std::min<std::uint64_t>(geometry.indexBytes, UINT32_MAX)), geometry.indexCount, geometry.firstIndex,
+					geometry.nextPartition < a_out.size() ? geometry.nextPartition : kNoPartition };
 			}
 		}
 
@@ -2429,9 +2468,17 @@ namespace DCLF
 					skip(Skip::NotSkippedNatively);
 					continue;
 				}
+				// A skin of several partitions writes one sequence per partition drawn. A decal has one slot,
+				// so a decal that is such a skin cannot be drawn by the decal pass.
+				const std::uint32_t partitions = PartitionsOf(a_tables, o);
+				if (decalGroup && partitions) {
+					skip(Skip::Geometry);
+					continue;
+				}
 				// The draw cap: BuildDraws writes into the first half of the sequence buffer, and the count
 				// is ExecuteIndirect's maxCount. Decals have their own ranges.
-				if (!decalGroup && sequences.size() >= kMaxDraws) {
+				const std::size_t objectDraws = partitions ? static_cast<std::size_t>(std::popcount(partitions)) : 1;
+				if (!decalGroup && sequences.size() + objectDraws > kMaxDraws) {
 					skip(Skip::Capacity);
 					continue;
 				}
@@ -2898,8 +2945,16 @@ namespace DCLF
 					drawInputs.push_back({ blocks.setIndex, recordIndex, object.geometryIndex,
 						object.flags | kInputDrawable,
 						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius,
-						static_cast<std::uint32_t>(o), 0 });
-					sequences.push_back(sequence);
+						static_cast<std::uint32_t>(o), 0, partitions });
+					if (!partitions) {
+						sequences.push_back(sequence);
+					} else {
+						ForEachDrawnGeometry(a_tables, object.geometryIndex, partitions, [&](std::uint32_t a_slot) {
+							auto partitionSequence = sequence;
+							SetSequenceGeometry(partitionSequence, a_tables.geometries[a_slot]);
+							sequences.push_back(partitionSequence);
+						});
+					}
 				}
 				// Only what BuildDraws will actually write a sequence for counts as drawn. The tables now hold
 				// the whole tracked set, so a candidate the gate drops must not be recorded here: the native
@@ -3075,7 +3130,8 @@ namespace DCLF
 						continue;
 					}
 					inputs.push_back({ pipelineIt->second, objectRecord[o], object.geometryIndex, (object.flags & ~kObjectDecal) | kInputDrawable,
-						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius, static_cast<std::uint32_t>(o), 0 });
+						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius, static_cast<std::uint32_t>(o), 0,
+						PartitionsOf(a_tables, static_cast<std::uint32_t>(o)) });
 				}
 			}
 		}
@@ -5748,7 +5804,10 @@ namespace DCLF
 			// the object index is and the record address is not - once records deduplicate, dozens of
 			// sequences share an address, the sort stops being a total order, and equal-key runs land in
 			// arbitrary relative order on the two sides. That reports mismatches that are not mismatches.
-			auto byObject = [](const DrawSequence& a, const DrawSequence& b) { return a.objectIndex < b.objectIndex; };
+			// A skin of several partitions writes one sequence per partition, which its index buffer tells apart.
+			auto byObject = [](const DrawSequence& a, const DrawSequence& b) {
+				return a.objectIndex != b.objectIndex ? a.objectIndex < b.objectIndex : a.indexBufferAddress < b.indexBufferAddress;
+			};
 			std::sort(built.begin(), built.end(), byObject);
 			auto& expected = parity->expected;
 			std::sort(expected.begin(), expected.end(), byObject);
@@ -5825,16 +5884,19 @@ namespace DCLF
 		{
 			// Cull-only inputs carry no sequence, so the two run at different rates and the drawable ones
 			// have to be counted off rather than indexed in step. Decals have their own slots and templates.
+			// A skin of several partitions has one template per partition drawn, consecutive.
 			std::size_t sequence = 0;
 			for (const auto& input : inputs) {
 				if (!(input.flags & kInputDrawable) || (input.flags & kObjectDecal))
 					continue;
-				if (sequence >= sequences.size())
+				const std::size_t templates = input.partitions ? static_cast<std::size_t>(std::popcount(input.partitions)) : 1;
+				if (sequence + templates > sequences.size())
 					break;
-				const auto& candidate = sequences[sequence++];
+				const std::size_t first = sequence;
+				sequence += templates;
 				if (RequireNativeVisible() && !(input.flags & kObjectNativeVisible))
 					continue;
-				readback.expected.push_back(candidate);
+				readback.expected.insert(readback.expected.end(), sequences.begin() + first, sequences.begin() + sequence);
 			}
 		}
 		readback.framesLeft = 3;

@@ -461,6 +461,46 @@ dominated by one-partition books (`Book01a`, 3 bones, hint 15) and banners (2 bo
 in the exterior and 288 of 328 in Dragonsreach changed between consecutive frames, so a static-pose skip
 would buy little.
 
+### Skin partitions: which ones a draw draws
+
+Decompiled from AE 1.6.1170 for Drawcall Limit Fix's tree and actor coverage.
+
+-   **The test.** `NiSkinPartition::Unk_25` (`140d43a10`) draws partition *i* when the byte at `0x14202a030`
+    indexed by `((LODMode.index + LODMode.singleLevel * 4) * 3 + Partition+0x42)` is non-zero.
+    -   The table is 24 constant bytes (`00 00 00 01 00 00 01 01 00 01 01 01 01 00 00 00 01 00 00 00 01 00 00 00`),
+        read only by this function and `FUN_140d43b00`.
+    -   Cumulative level *n* draws the LOD bytes below *n*. Single-level *n* draws LOD byte *n* alone.
+-   **Dismember skins.** `BSDismemberSkinInstance::Unk_25` (`140d31f40`) first skips partition *i* when byte
+    0 of its 4-byte `Data` entry (`editorVisible`) is clear. With no `Data` array it falls back to the
+    plain loop.
+-   **The level.** `GetRenderPasses` (`1414adfb0`) and `GetRenderPasses_ShadowMapOrMask` (`1414af030`) give a
+    pass `LODMode` 3 (cumulative), or for geometry with `kMeshLOD` (`NiAVObject` flag bit 27) the fade node's
+    `+0x152 & 0xF`. `GetRenderPasses` skips this for an accumulator with `+0xB9` set.
+-   **The cross-fade.** While a `kMeshLOD` geometry's fade node has `(+0x153 & 0x70) != 0x20`,
+    `GetRenderPasses` appends a copy of each lighting pass with accumulation hint 10 and
+    `LODMode = (+0x152 & 0xF) | singleLevel`.
+-   **Buffers.** A tree's partitions share one vertex buffer and have separate index buffers (measured).
+
+### Switch nodes
+
+`NiSwitchNode::OnVisible` (`140d29700`) culls `children[index]` alone, and nothing when `index < 0`. When
+`childRevID[index] != revID` it first runs the child's `UpdateDownwardPass`, from the cull. `UpdateDownwardPass`
+(`140d29240`) with flag bit 0 set bumps `revID` and updates only the selected child; with it clear it
+updates every child like an `NiNode`.
+
+Offsets on SE and AE:
+
+| Offset | Field |
+| --- | --- |
+| `+0x128` | flags (u16) |
+| `+0x12C` | index (i32) |
+| `+0x130` | savedTime |
+| `+0x134` | revID |
+| `+0x138` | childRevID, an `NiTPrimitiveArray`: data at `+0x140`, capacity at `+0x148` |
+
+CommonLib-NG declares these fields after `NiNode`, whose declared size in a multi-runtime build is VR's.
+Reading them as members therefore reads the wrong memory.
+
 ## ProjectedUV and MTLand: the per-object constants and where they come from
 
 Decompiled from AE 1.6.1170 for Drawcall Limit Fix's coverage of the two techniques; both are

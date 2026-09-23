@@ -9,7 +9,7 @@ namespace DCLF
 	 * @brief The feature switches that can change while the game runs, for live A/B comparisons.
 	 *
 	 * Every non-default feature of DCLF - the hybrid path, static ownership, the culling modes, the object
-	 * classes (skinned, trees, decals, projected UV, terrain), the shadow views and their ownership, and
+	 * classes (skinned, trees, decals, projected UV, terrain, switch nodes, skin partitions, actors), the shadow views and their ownership, and
 	 * the diagnostic modes - is seeded from its `CS_DCLF_*` switch (Switches.h) and then edited from the
 	 * feature's menu. Unset, the features default to the tested configuration (everything on, both
 	 * ownerships static, occlusion culling); the diagnostics default off.
@@ -25,6 +25,9 @@ namespace DCLF
 		bool decals = false;          // CS_DCLF_DECALS=1
 		bool projectedUv = false;     // CS_DCLF_PROJECTED_UV=1
 		bool mtLand = false;          // CS_DCLF_MTLAND=1
+		bool switchNodes = false;     // CS_DCLF_SWITCH_NODES=1
+		bool skinPartitions = false;  // CS_DCLF_SKIN_PARTITIONS=1 (needs skinned)
+		bool actors = false;          // CS_DCLF_ACTORS=1
 		bool shadows = false;         // CS_DCLF_SHADOWS=1
 		bool shadowOwnership = false; // CS_DCLF_SHADOW_OWNERSHIP=static (needs shadows)
 		bool debugView = false;       // CS_DCLF_DEBUG_VIEW=1

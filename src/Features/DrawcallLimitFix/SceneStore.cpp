@@ -25,7 +25,9 @@ namespace DCLF
 	namespace
 	{
 		// Cell 3D category nodes Drawcall Limit Fix draws from (engine notes: cell 3D category nodes).
-		constexpr std::array<std::uint32_t, 3> kDrawnCategories{ 3 /*Static*/, 4 /*Dynamic*/, 5 /*MultiBound*/ };
+		// The Actor node holds the actors of an exterior (an interior moves them into its rooms). It is
+		// walked whatever CS_DCLF_ACTORS says: the toggle is ClassifyFrame's Actor rule, so it can change live.
+		constexpr std::array<std::uint32_t, 4> kDrawnCategories{ 0 /*Actor*/, 3 /*Static*/, 4 /*Dynamic*/, 5 /*MultiBound*/ };
 		constexpr std::uint32_t kMaxParentDepth = 64;
 		constexpr std::size_t kValidationSlice = 256;
 		constexpr std::uint32_t kIndexFormatR16 = 57;  // DXGI_FORMAT_R16_UINT
@@ -120,7 +122,7 @@ namespace DCLF
 				return false;
 			};
 			return !(differs("objects", a.objects, b.objects) || differs("object geometry", a.objectGeometry, b.objectGeometry) ||
-					 differs("draws", a.draws, b.draws) || differs("bones", a.bones, b.bones) || differs("previous bones", a.previousBones, b.previousBones) ||
+					 differs("draws", a.draws, b.draws) || differs("skin partitions", a.skinPartitions, b.skinPartitions) || differs("bones", a.bones, b.bones) || differs("previous bones", a.previousBones, b.previousBones) ||
 					 differs("bone offsets", a.boneOffset, b.boneOffset) || differs("bone rows", a.boneRows, b.boneRows) ||
 					 differs("shadow techniques", a.shadowTechnique, b.shadowTechnique) || differs("shadow rejects", a.shadowReject, b.shadowReject) ||
 					 differs("shadow diffuse", a.shadowDiffuse, b.shadowDiffuse) || differs("shadow materials", a.shadowMaterial, b.shadowMaterial) || differs("shadow keys", a.shadowKeysUsed, b.shadowKeysUsed) ||
@@ -137,6 +139,7 @@ namespace DCLF
 		emissiveMult.clear();
 		lights.clear();
 		treeAnim.clear();
+		skinPartitions.clear();
 		draws.clear();
 		decalOrdinal.clear();
 		decalCount = {};
@@ -175,6 +178,7 @@ namespace DCLF
 		emissiveMult.clear();
 		lights.clear();
 		treeAnim.clear();
+		skinPartitions.clear();
 		geometryConstants.clear();
 		geometryConstantsValid.clear();
 		geometryTemplate.clear();
@@ -227,25 +231,70 @@ namespace DCLF
 
 	namespace
 	{
-		// What a node between a leaf and its category node makes of the leaf. A switch node draws one child at
-		// a time and an ordered node depends on draw order; neither survives being drawn out of the native
-		// loop. A billboard turns to the camera in the main cull (NiBillboardNode::OnVisible), after the scene
-		// walk read its world transform.
+		// What a node between a leaf and its category node makes of the leaf. An ordered node depends on draw
+		// order, which does not survive being drawn out of the native loop. A billboard turns to the camera in
+		// the main cull (NiBillboardNode::OnVisible), after the scene walk read its world transform. A switch
+		// node draws one child at a time: Switch marks the leaf for the per-frame test (SwitchSelects).
 		Ineligible ParentReason(RE::NiNode* a_node)
 		{
-			if (netimmerse_cast<RE::NiSwitchNode*>(a_node) || netimmerse_cast<RE::BSOrderedNode*>(a_node))
+			if (a_node->AsSwitchNode())
+				return Ineligible::Switch;
+			if (netimmerse_cast<RE::BSOrderedNode*>(a_node))
 				return Ineligible::UnsupportedParent;
 			if (netimmerse_cast<RE::NiBillboardNode*>(a_node))
 				return Ineligible::Billboard;
 			return Ineligible::None;
 		}
 
-		// The stronger of two parent reasons: an unsupported parent outranks a billboard.
+		// NiSkinPartition::Unk_25 (AE 140d43a10) draws partition i when this table holds a non-zero byte at
+		// (LODMode.index + LODMode.singleLevel * 4) * 3 + the partition's LOD byte (Partition+0x42). Read from
+		// AE 1.6.1170 at 0x14202a030, where nothing writes it: level n draws the LOD bytes below n, and
+		// single-level n draws LOD byte n alone.
+		constexpr std::array<std::uint8_t, 24> kPartitionLodTable{ 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
+	}
+
+	std::uint32_t SceneStore::LodRowOf(const RE::BSGeometry& a_geometry, const RE::BSShaderProperty* a_property)
+	{
+		if (!a_geometry.GetFlags().any(RE::NiAVObject::Flag::kMeshLOD) || !a_property || !a_property->fadeNode)
+			return 3;
+		return a_property->fadeNode->GetRuntimeData().unk152 & 0xF;
+	}
+
+	std::uint32_t SceneStore::LodRowOf(const RE::BSRenderPass& a_pass)
+	{
+		return a_pass.LODMode.index + (a_pass.LODMode.singleLevel ? 4u : 0u);
+	}
+
+	std::uint32_t SceneStore::SkinPartitionMask(const RE::NiSkinInstance& a_skin, std::uint32_t a_lodRow)
+	{
+		const auto* partition = a_skin.skinPartition.get();
+		if (!partition || a_lodRow >= 8)
+			return 0;
+		static const REL::Relocation<const RE::NiRTTI*> dismemberSkinInstance{ RE::BSDismemberSkinInstance::Ni_RTTI };
+		const RE::BSDismemberSkinInstance::Data* shown = a_skin.GetRTTI() == dismemberSkinInstance.get() ?
+		                                                     static_cast<const RE::BSDismemberSkinInstance&>(a_skin).GetRuntimeData().partitions :
+		                                                     nullptr;
+		std::uint32_t mask = 0;
+		for (std::uint32_t i = 0; i < partition->numPartitions && i < kMaxSkinPartitions; ++i) {
+			if (shown && !shown[i].editorVisible)
+				continue;
+			const std::uint32_t lodByte = partition->partitions[i].pad42 & 0xFF;
+			if (lodByte <= 2 && kPartitionLodTable[a_lodRow * 3 + lodByte])
+				mask |= 1u << i;
+		}
+		return mask;
+	}
+
+	namespace
+	{
+		// The stronger of two parent reasons: an unsupported parent outranks a billboard, which outranks a
+		// switch (the only one decided per frame).
 		Ineligible CombineParentReasons(Ineligible a_lhs, Ineligible a_rhs)
 		{
-			if (a_lhs == Ineligible::UnsupportedParent || a_rhs == Ineligible::UnsupportedParent)
-				return Ineligible::UnsupportedParent;
-			return a_lhs != Ineligible::None ? a_lhs : a_rhs;
+			for (const auto reason : { Ineligible::UnsupportedParent, Ineligible::Billboard, Ineligible::Switch })
+				if (a_lhs == reason || a_rhs == reason)
+					return reason;
+			return Ineligible::None;
 		}
 	}
 
@@ -585,20 +634,42 @@ namespace DCLF
 		if (auto* skin = data.skinInstance.get()) {
 			if (!SkinnedEnabled())
 				return Ineligible::Skinned;
-			// The skinned path (engine notes: skinning): exactly a NiSkinInstance - a BSDismemberSkinInstance
-			// hides partitions per frame - with one partition, so the object is one draw of one buffer, and
-			// a palette the native shader could index (240 rows). The draw reads the PARTITION's buffer, not
-			// the geometry's rendererData, which for a skinned shape is a different TriShape.
+			// The skinned path (engine notes: skinning): a NiSkinInstance, or with CS_DCLF_SKIN_PARTITIONS a
+			// BSDismemberSkinInstance or several partitions, and a palette the native shader could index (240
+			// rows). Each partition the engine draws is one draw of that PARTITION's buffer, not the geometry's
+			// rendererData, which for a skinned shape is a different TriShape; which partitions it draws is
+			// SkinPartitionMask's, per frame.
 			static const REL::Relocation<const RE::NiRTTI*> niSkinInstance{ RE::NiSkinInstance::Ni_RTTI };
-			if (skin->GetRTTI() != niSkinInstance.get())
+			static const REL::Relocation<const RE::NiRTTI*> dismemberSkinInstance{ RE::BSDismemberSkinInstance::Ni_RTTI };
+			const bool dismember = skin->GetRTTI() == dismemberSkinInstance.get();
+			if (skin->GetRTTI() != niSkinInstance.get() && !dismember)
 				return Ineligible::SkinShape;
 			auto* partition = skin->skinPartition.get();
 			auto* skinData = skin->skinData.get();
-			if (!partition || !skinData || partition->numPartitions != 1 || skinData->GetBoneCount() == 0 || skinData->GetBoneCount() * 3 > 240)
+			if (!partition || !skinData || partition->numPartitions == 0 || skinData->GetBoneCount() == 0 || skinData->GetBoneCount() * 3 > 240)
 				return Ineligible::SkinShape;
-			auto* buffData = partition->partitions[0].buffData;
-			if (!buffData || !buffData->vertexBuffer || !buffData->indexBuffer)
-				return Ineligible::NoRendererData;
+			if ((partition->numPartitions > 1 || dismember) && !SkinPartitionsEnabled())
+				return Ineligible::SkinShape;
+			if (partition->numPartitions > kMaxSkinPartitions)
+				return Ineligible::SkinShape;
+			// The engine indexes the dismember flags by partition; a flag array of another length is not one it
+			// could have drawn from either.
+			if (dismember) {
+				const auto& flags = static_cast<const RE::BSDismemberSkinInstance*>(skin)->GetRuntimeData();
+				if (flags.partitions && static_cast<std::uint32_t>(flags.numPartitions) != partition->numPartitions)
+					return Ineligible::SkinShape;
+			}
+			// Every partition is drawn with the first one's pipeline, so they share its vertex layout; a LOD
+			// byte past 2 would index the next row of the engine's table.
+			const auto& first = partition->partitions[0];
+			for (std::uint32_t i = 0; i < partition->numPartitions; ++i) {
+				const auto& p = partition->partitions[i];
+				if (!p.buffData || !p.buffData->vertexBuffer || !p.buffData->indexBuffer)
+					return Ineligible::NoRendererData;
+				if (!first.buffData || std::bit_cast<std::uint64_t>(p.buffData->vertexDesc) != std::bit_cast<std::uint64_t>(first.buffData->vertexDesc) ||
+					(p.pad42 & 0xFF) > 2)
+					return Ineligible::SkinShape;
+			}
 		} else if (!data.rendererData || !data.rendererData->vertexBuffer || !data.rendererData->indexBuffer) {
 			return Ineligible::NoRendererData;
 		}
@@ -630,19 +701,62 @@ namespace DCLF
 		return reason;
 	}
 
+	bool SceneStore::ReadSwitch(const RE::NiSwitchNode& a_switch, SwitchState& a_out)
+	{
+		if (REL::Module::IsVR())
+			return false;
+		const auto* base = reinterpret_cast<const std::byte*>(&a_switch);
+		a_out.flags = *reinterpret_cast<const std::uint16_t*>(base + 0x128);
+		a_out.index = *reinterpret_cast<const std::int32_t*>(base + 0x12C);
+		a_out.revID = *reinterpret_cast<const std::uint32_t*>(base + 0x134);
+		// childRevID, an NiTPrimitiveArray at +0x138: its data pointer at +0x8, its capacity at +0x10.
+		a_out.childRevID = *reinterpret_cast<const std::uint32_t* const*>(base + 0x140);
+		a_out.childRevCapacity = *reinterpret_cast<const std::uint16_t*>(base + 0x148);
+		return true;
+	}
+
+	bool SceneStore::SwitchSelects(const RE::NiSwitchNode& a_switch, const RE::NiAVObject* a_child)
+	{
+		// NiSwitchNode::OnVisible (AE 140d29700) culls children[index] and nothing else. A child that has
+		// become the selected one since the last update pass is brought up to date there, in the cull
+		// (childRevID[index] != revID), which is after this walk read its transforms: leave it native for
+		// that frame.
+		// Bounded by capacity, not size: a Gamebryo array is indexed by slot, and size counts the used ones.
+		SwitchState state;
+		if (!ReadSwitch(a_switch, state))
+			return false;
+		const auto& children = a_switch.GetChildren();
+		if (state.index < 0 || static_cast<std::uint32_t>(state.index) >= children.capacity() || !state.childRevID ||
+			static_cast<std::uint32_t>(state.index) >= state.childRevCapacity)
+			return false;
+		const auto index = static_cast<std::uint16_t>(state.index);
+		return children[index].get() == a_child && state.childRevID[index] == state.revID;
+	}
+
 	Ineligible SceneStore::ClassifyFrame(const Tracked& a_tracked, const AccumulatedPass* a_accumulated) const
 	{
-		if (a_tracked.parentReason != Ineligible::None)
+		const bool underSwitch = a_tracked.parentReason == Ineligible::Switch;
+		if (underSwitch && !SwitchNodesEnabled())
+			return Ineligible::Switch;
+		if (a_tracked.parentReason != Ineligible::None && !underSwitch)
 			return a_tracked.parentReason;
 
-		// App-culled or hidden anywhere between the leaf and its category node; part of an actor.
-		for (const RE::NiAVObject* object = a_tracked.geometry.get(); object; object = object->parent) {
+		// App-culled or hidden anywhere between the leaf and its category node; part of an actor; under a
+		// switch node that does not draw this branch.
+		const bool actors = ActorsEnabled();
+		const RE::NiAVObject* child = nullptr;
+		for (const RE::NiAVObject* object = a_tracked.geometry.get(); object; child = object, object = object->parent) {
 			if (IsHidden(object))
 				return Ineligible::Hidden;
 			if (object == a_tracked.categoryNode)
 				break;
-			if (auto* ref = object->GetUserData(); ref && ref->IsActor())
-				return Ineligible::Actor;
+			if (underSwitch && child) {
+				if (auto* switchNode = const_cast<RE::NiAVObject*>(object)->AsSwitchNode(); switchNode && !SwitchSelects(*switchNode, child))
+					return Ineligible::Switch;
+			}
+			if (!actors)
+				if (auto* ref = object->GetUserData(); ref && ref->IsActor())
+					return Ineligible::Actor;
 		}
 
 		// Fading: as the pass was registered when there is one (the withholding decided on that same value),
@@ -930,7 +1044,7 @@ namespace DCLF
 					for (auto* pass = group.passes[subPass]; pass; pass = pass->passGroupNext, ++chainIndex) {
 						if (pass->geometry && pass->shader && pass->shader->shaderType.get() == RE::BSShader::Type::Lighting)
 							accumulatedPasses.try_emplace(pass->geometry, AccumulatedPass{ pass, DrawnPassDescriptor(PassDescriptorOf(technique), subPass), subPass,
-																			   pass->passEnum, pass->accumulationHint, chainIndex, PassCapture::FadingAtRegistration(pass) });
+																			   pass->passEnum, pass->accumulationHint, chainIndex, PassCapture::FadingAtRegistration(pass), LodRowOf(*pass) });
 					}
 				}
 			}
@@ -998,7 +1112,7 @@ namespace DCLF
 				AccumulatedPass{ entry->pass, DrawnPassDescriptor(PassDescriptorOf(entry->technique), entry->subPass), entry->subPass, entry->passEnum,
 					entry->pass ? static_cast<std::uint32_t>(entry->pass->accumulationHint) : 0u,
 					0xFFFFFFu - static_cast<std::uint32_t>(std::min<std::size_t>(static_cast<std::size_t>(entry - entries.data()), 0xFFFFFFu)),
-					entry->fading });
+					entry->fading, entry->pass ? LodRowOf(*entry->pass) : 3u });
 		}
 	}
 
@@ -1402,6 +1516,7 @@ namespace DCLF
 		tables.emissiveMult.reserve(tracked.size());
 		tables.lights.reserve(tracked.size());
 		tables.treeAnim.reserve(tracked.size());
+		tables.skinPartitions.reserve(tracked.size());
 
 	}
 
@@ -1437,6 +1552,13 @@ namespace DCLF
 			Ineligible reason;
 			if (trackedEntry->candidateFrame != 0 && frame - trackedEntry->candidateFrame < Tracked::kCandidateRefreshFrames) {
 				reason = trackedEntry->candidateReason;
+				// Under a switch node the verdict follows the switch's selection, which changes (a harvested
+				// plant, a tree's variant) without anything the cache witnesses: the shadow views draw what
+				// this phase admits, so it is taken again every frame. Static verdicts other than None stand.
+				if (entry.parentReason == Ineligible::Switch && (reason == Ineligible::None || reason == Ineligible::Switch)) {
+					reason = ClassifyFrame(entry);
+					trackedEntry->candidateReason = reason;
+				}
 				++stats.ineligible[static_cast<std::size_t>(reason)];
 				if (reason != Ineligible::None && !DeferredToAccumulate(reason))
 					continue;
@@ -1506,9 +1628,21 @@ namespace DCLF
 
 			auto& data = geometry->GetGeometryRuntimeData();
 			// Geometry, shared between every object drawing the same TriShape. A skinned shape draws its
-			// skin partition's own buffer (ClassifyStatic has checked there is exactly one).
-			const RE::NiSkinPartition::Partition* skinPartition =
-				data.skinInstance && data.skinInstance->skinPartition ? &data.skinInstance->skinPartition->partitions[0] : nullptr;
+			// skin partitions' own buffers, one draw each (ClassifyStatic has checked every one).
+			const auto* skinPartitions = data.skinInstance ? data.skinInstance->skinPartition.get() : nullptr;
+			const RE::NiSkinPartition::Partition* skinPartition = skinPartitions ? &skinPartitions->partitions[0] : nullptr;
+			// Which of them the engine draws: for the shadow views, from the fade node's LOD level as both of
+			// its pass builders read it; the accumulate phase takes the main camera's from its pass. A skin
+			// the engine draws no partition of is not drawn at all.
+			std::uint32_t partitionMask = 0;
+			if (skinPartitions) {
+				partitionMask = SkinPartitionMask(*data.skinInstance, LodRowOf(*geometry, data.shaderProperty.get()));
+				if (!partitionMask) {
+					--stats.ineligible[static_cast<std::size_t>(reason)];
+					++stats.ineligible[static_cast<std::size_t>(Ineligible::Hidden)];
+					continue;
+				}
+			}
 			auto* triShape = skinPartition ? skinPartition->buffData : data.rendererData;
 			bool geometryMiss = false;
 			const std::uint32_t geometrySlot = ResolveGeometrySlot(*geometry, triShape, skinPartition, timer, a_renderThread, geometryMiss);
@@ -1517,9 +1651,37 @@ namespace DCLF
 				continue;
 			}
 			if (geometrySlot == Tables::kSlotFree) {
-				--stats.ineligible[static_cast<std::size_t>(Ineligible::None)];
+				--stats.ineligible[static_cast<std::size_t>(reason)];
 				++stats.ineligible[static_cast<std::size_t>(Ineligible::UnstableBuffer)];
 				continue;
+			}
+			// The other partitions' slots, linked from the first so a draw can walk them. Every partition is
+			// resolved and linked whatever this frame's mask, because the main camera's may differ.
+			if (skinPartitions && skinPartitions->numPartitions > 1) {
+				std::uint32_t previous = geometrySlot;
+				bool unstable = false;
+				for (std::uint32_t i = 1; i < skinPartitions->numPartitions && !geometryMiss && !unstable; ++i) {
+					const auto& part = skinPartitions->partitions[i];
+					const std::uint32_t slot = ResolveGeometrySlot(*geometry, part.buffData, &part, timer, a_renderThread, geometryMiss);
+					if (geometryMiss)
+						break;
+					if (slot == Tables::kSlotFree) {
+						unstable = true;
+						break;
+					}
+					tables.geometries[previous].nextPartition = slot;
+					previous = slot;
+				}
+				if (geometryMiss) {
+					++result.geometryMisses;
+					continue;
+				}
+				if (unstable) {
+					--stats.ineligible[static_cast<std::size_t>(reason)];
+					++stats.ineligible[static_cast<std::size_t>(Ineligible::UnstableBuffer)];
+					continue;
+				}
+				tables.geometries[previous].nextPartition = kNoPartition;
 			}
 
 			const auto objectId = static_cast<std::uint32_t>(tables.objects.size());
@@ -1631,6 +1793,7 @@ namespace DCLF
 			tables.emissiveMult.push_back(1.0f);
 			tables.lights.push_back(ObjectLights{});
 			tables.treeAnim.push_back(ObjectTreeAnim{});
+			tables.skinPartitions.push_back(static_cast<std::uint8_t>(skinPartitions && skinPartitions->numPartitions > 1 ? partitionMask : 0));
 			trackedEntry->objectStamp = objectStamp;
 			trackedEntry->objectId = objectId;
 
@@ -1995,6 +2158,15 @@ namespace DCLF
 			// or DCLF keeps drawing what the engine has stopped drawing.
 			if (reason == Ineligible::None)
 				reason = ClassifyFrame(*trackedEntry, accumulated);
+			// The skin partitions the main camera draws, from its registered pass's LODMode rather than the fade
+			// node the scene phase read for the shadow views. None is not drawn at all.
+			if (reason == Ineligible::None && accumulated && data.skinInstance && data.skinInstance->skinPartition) {
+				const std::uint32_t mask = SkinPartitionMask(*data.skinInstance, accumulated->lodRow);
+				if (!mask)
+					reason = Ineligible::Hidden;
+				else if (objectId < tables.skinPartitions.size())
+					tables.skinPartitions[objectId] = static_cast<std::uint8_t>(data.skinInstance->skinPartition->numPartitions > 1 ? mask : 0);
+			}
 			// A pass in an alpha-test list is drawn with DoAlphaTest whatever it was registered with
 			// (DrawnPassDescriptor, applied where the passes are taken).
 			// The histogram is the scene phase's, taken over the whole tracked set; where this phase -
