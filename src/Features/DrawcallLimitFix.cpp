@@ -7,6 +7,7 @@
 #include "DrawcallLimitFix/DecalProbe.h"
 #include "DrawcallLimitFix/SkinProbe.h"
 #include "DrawcallLimitFix/NativeProbe.h"
+#include "DrawcallLimitFix/MaterialSources.h"
 #include "DrawcallLimitFix/TreeTrace.h"
 #include "DrawcallLimitFix/DrawPipelines.h"
 #include "DrawcallLimitFix/GpuResources.h"
@@ -273,6 +274,7 @@ void DrawcallLimitFix::PostPostLoad()
 	// renderer removes the very data the tables are built from today, so the capture has to prove itself
 	// first (it claims nothing and withholds nothing yet).
 	DCLF::PassCapture::Get().Install();
+	DCLF::MaterialSources::Install();
 	DCLF::ShadowProbe::Get().Install();
 	Hooks::Install();
 	installed = true;
@@ -850,8 +852,9 @@ void DrawcallLimitFix::Prepass()
 			stats.templateDefects ? " <- CULLED TEMPLATE" : "");
 		// The material cache and its standing alarm. materialCacheStale must be 0: it is the count of
 		// entries that were re-evaluated live and disagreed with what the cache would have served.
-		logger::info("[DCLF] materials: {} evaluated, {} served from the cache, {} skipped as undrawable; {} floats patched per record; cache {} entries (+{} evicted); validated {}, stale {}{}",
-			stats.materialsEvaluated, stats.materialsFromCache, stats.materialsSkipped, stats.materialDriftFloats,
+		logger::info("[DCLF] materials: {} evaluated, {} served from the cache, {} skipped as undrawable; {} written ({} re-evaluated, {} dropped), {} frame samples; cache {} entries (+{} evicted); validated {}, stale {}{}",
+			stats.materialsEvaluated, stats.materialsFromCache, stats.materialsSkipped, stats.materialWrites, stats.materialsRewritten, stats.materialsDropped,
+			stats.frameMaterialSamples,
 			stats.materialCacheEntries, stats.materialCacheEvicted, stats.materialsValidated, stats.materialCacheStale,
 			stats.materialCacheStale ? " <- STALE MATERIAL" : "");
 		if (stats.materialCacheStale)
@@ -931,6 +934,10 @@ bool DrawcallLimitFix::SkipNativePass(RE::BSRenderPass* a_pass)
 		++skipCounters.skipped;
 		return true;
 	}
+	// Never a pass DCLF does not model, whoever draws its object: a LOD cross-fade's copy of the old level
+	// (hint 10) is the native loop's while DCLF draws the object's own pass.
+	if (DCLF::PassCapture::FadingAtRegistration(a_pass))
+		return false;
 	auto& store = DCLF::SceneStore::Get();
 	if (!DCLF::IndirectDraws::Get().DrewLastFrame(a_pass->geometry, store.GetFrame()))
 		return false;
@@ -1144,6 +1151,7 @@ void DrawcallLimitFix::DrawSettings()
 		ImGui::EndDisabled();
 		ImGui::Checkbox("Actors (CS_DCLF_ACTORS)", &toggles.actors);
 		ImGui::Checkbox("Fading objects: the screen-door fade (CS_DCLF_FADING)", &toggles.fading);
+		ImGui::Checkbox("LOD cross-fades: keep the object, leave the copy native (CS_DCLF_LOD_CROSSFADE)", &toggles.lodCrossfade);
 		ImGui::SeparatorText("Shadow views");
 		ImGui::Checkbox("Draw the shadow views (CS_DCLF_SHADOWS)", &toggles.shadows);
 		ImGui::BeginDisabled(!toggles.shadows);
@@ -1157,9 +1165,10 @@ void DrawcallLimitFix::DrawSettings()
 		ImGui::TreePop();
 	}
 	if (ImGui::TreeNodeEx("This frame", ImGuiTreeNodeFlags_DefaultOpen)) {
-		ImGui::Text("Active: hybrid %d, ownership %d, cull %u%s, skinned %d, trees %d, decals %d, projected %d, terrain %d, switch nodes %d, skin partitions %d, actors %d, shadows %d, shadow ownership %d",
+		ImGui::Text("Active: hybrid %d, ownership %d, cull %u%s, skinned %d, trees %d, decals %d, projected %d, terrain %d, switch nodes %d, skin partitions %d, actors %d, fading %d, LOD cross-fade %d, shadows %d, shadow ownership %d",
 			active.hybrid, active.ownership, active.cullMode, active.cullTracked ? " (tracked)" : "", active.skinned, active.trees, active.decals,
-			active.projectedUv, active.mtLand, active.switchNodes, active.skinPartitions, active.actors, active.shadows, active.shadowOwnership);
+			active.projectedUv, active.mtLand, active.switchNodes, active.skinPartitions, active.actors, active.fading, active.lodCrossfade, active.shadows,
+			active.shadowOwnership);
 		ImGui::Text("Tracked geometry: %u (under %u category nodes)", stats.tracked, stats.categoryNodes);
 		ImGui::Text("Objects this frame: %u (%u the engine's culling also kept), geometries: %u, pipelines: %u", stats.objects, stats.nativeVisible, stats.geometries, stats.pipelines);
 		for (std::size_t i = 1; i < stats.ineligible.size(); ++i) {

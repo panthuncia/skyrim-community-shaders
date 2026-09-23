@@ -140,7 +140,7 @@ namespace DCLF
 		// (group, technique bucket, list, chain) rather than in whatever order the culling appends.
 		std::uint32_t chainIndex = 0;
 		// Whether the object's fade was the native loop's when the pass was registered
-		// (PassCapture::FadingAtRegistration: a LOD cross-fade, a blended fade, or any fade with CS_DCLF_FADING
+		// (PassCapture::FadingAtRegistration: a hint-10 pass, a blended fade, or any fade with CS_DCLF_FADING
 		// off) - the same moment the native loop was or was not told to leave it to DCLF (PassCapture::Withhold).
 		// The accumulate phase's fading verdict reads this rather than the fade node later in the frame, so the
 		// two decisions cannot disagree.
@@ -228,6 +228,13 @@ namespace DCLF
 	 * (PassCapture::FadingAtRegistration).
 	 */
 	bool FadingEnabled();
+
+	/**
+	 * @brief CS_DCLF_LOD_CROSSFADE=1: an object in a LOD cross-fade stays DCLF's - its own pass draws the new
+	 * level as a settled object's does - and only the engine's hint-10 copy of the old level is left to the
+	 * native loop. Off, the whole object is the native loop's until the crossing ends.
+	 */
+	bool LodCrossfadeEnabled();
 
 	/** @brief CS_DCLF_PROJECTED_UV=1: kProjectedUV objects (snow and moss projection) are eligible. */
 	bool ProjectedUvEnabled();

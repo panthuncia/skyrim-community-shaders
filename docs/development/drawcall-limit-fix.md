@@ -1437,6 +1437,7 @@ they are not part of the witness.
 | `CS_DCLF_SKIN_PARTITIONS=1` | Skins of several partitions and dismember skins (LOD trees, actor bodies) are eligible, one draw per partition the engine draws. Needs `CS_DCLF_SKINNED`. Default on. Live toggle. |
 | `CS_DCLF_ACTORS=1` | Geometry under an actor is eligible, as is the FacegenRGBTint technique. Default on. Live toggle. |
 | `CS_DCLF_FADING=1` | Objects fading with the screen-door mask in an opaque group are eligible ("Fading objects"). Default on. Live toggle. |
+| `CS_DCLF_LOD_CROSSFADE=1` | An object in a LOD cross-fade stays DCLF's (its own pass, the new level); only the engine's hint-10 copy of the old level is native ("LOD cross-fades"). Off: the whole object is native until the crossing ends. Default on. Live toggle. |
 | `CS_DCLF_TREE_TRACE=1` | Diagnostic: every geometry of a TREE reference followed frame by frame (registered, withheld, accumulated, bindings, native and DCLF draws, and the switch, LOD and transforms before the walk and after the cull), with who drew it, gaps and double draws, every 300 frames. |
 | `CS_DCLF_TEST_MOVE=start:end:units` | Test harness: moves the player along their heading by `units` a frame between two frames (several ranges separated by `;`), and runs `tgm` first so the flight is survivable. |
 | `CS_DCLF_NATIVE_PROBE=1` | Diagnostic: every 300 frames, the Lighting draws the main pass still issues natively, by form type, DCLF verdict, technique, skin shape and LODMode, with sampled ancestor chains. |
@@ -1478,7 +1479,8 @@ they are not part of the witness.
 Unset switches now take the configuration every gate run of this work used: `CS_DCLF_HYBRID=1`,
 `CS_DCLF_OWNERSHIP=static`, `CS_DCLF_CULL=occlusion`, `CS_DCLF_SKINNED=1`, `CS_DCLF_TREES=1`,
 `CS_DCLF_DECALS=1`, `CS_DCLF_PROJECTED_UV=1`, `CS_DCLF_MTLAND=1`, `CS_DCLF_SWITCH_NODES=1`,
-`CS_DCLF_SKIN_PARTITIONS=1`, `CS_DCLF_ACTORS=1`, `CS_DCLF_FADING=1`, `CS_DCLF_SHADOWS=1` and
+`CS_DCLF_SKIN_PARTITIONS=1`, `CS_DCLF_ACTORS=1`, `CS_DCLF_FADING=1`, `CS_DCLF_LOD_CROSSFADE=1`,
+`CS_DCLF_SHADOWS=1` and
 `CS_DCLF_SHADOW_OWNERSHIP=static` (the tables already default to the tracked set). An explicit value
 overrides a default: `0` for the class and path switches, `off` for the two ownership switches and the
 culling. Rows above that say "Default off" describe the switches before this change. All of them are live
@@ -1601,6 +1603,9 @@ offset = *(byte *)(currentPS + 0x5d);   /* PS constant table[29] */
 PS PerMaterial **variable 29 is IBLParams** (`ShaderCache.h:50`), and SetupMaterial does not read it
 from the material at all: it comes from fields of the BSLightingShader object, selected by a day/night
 flag at `this+0xf0`. It is shader-level frame state that happens to live in the per-material group.
+
+> **Superseded** by "Material records from their sources": the frame-global positions are now a fixed
+> list from the decompiled SetupMaterial, not learned, and the validator only reports.
 
 So the cache serves the record and patches those positions from a live evaluation. **The positions are
 cumulative for the session**, which a failure taught: learning them each frame as "floats that differ
@@ -2391,7 +2396,8 @@ fixed or refreshed on purpose:
 -   **The technique constants are the frame's** (fog, settings, and the shadow mask's view). They are now
     re-evaluated at Prepass for the used pipelines, with the geometry templates. Serving the slot's first
     evaluation was a parity regression and, at startup, a stale view pointer.
--   **The per-frame drift floats** (PS PerMaterial 29) were learned by re-evaluating a cached material,
+-   **The per-frame drift floats** (PS PerMaterial 29; superseded by "Material records from their
+    sources") were learned by re-evaluating a cached material,
     which a persistent slot never does. The rolling validation slice (8 live materials a frame,
     re-evaluated and compared with what their slot serves) now learns them, seeds the patch source, and
     heals a stale record in place; at startup it reports a handful of stale slots as values settle, then
@@ -3266,6 +3272,8 @@ Native Lighting draws per frame before this change:
 -   **The LOD cross-fade is a fade.** `FadingAtRegistration` includes the unsettled `kMeshLOD` state, so an
     object in a cross-fade is neither withheld nor drawn by DCLF until it ends, like any other fade. Before
     this, withholding would have swallowed the hint-10 copies too.
+    Superseded by the split ("LOD cross-fades: DCLF keeps the object, the copy stays native"): now only the
+    hint-10 copy is native.
 -   **Actors** (`CS_DCLF_ACTORS`). The Actor cell node is always walked, and the toggle is `ClassifyFrame`'s
     actor rule, so it stays live. The FacegenRGBTint technique (body skin) is supported: it adds only
     `TintColor`, a PerMaterial constant the material evaluation already captures.
@@ -3314,8 +3322,8 @@ same pixels.
     (`RefreshFrameConstants`).
 -   **What stays native** (`PassCapture::FadingAtRegistration`):
     -   blended fades (accumulation hint 9, drawn with the transparent objects after the composite);
-    -   the LOD cross-fade copies (hint 10), and so the whole object while a `kMeshLOD` fade node's LOD state
-        (`+0x153 & 0x70`) is not settled (0x20);
+    -   every hint-10 pass: the stencil-dithered fade, and the LOD cross-fade's copy of the old level ("LOD
+        cross-fades" below);
     -   fading decals (hints 2 and 3). Keeping these native is a precaution, not a measurement: the decal
         probe's state mismatches turned out not to depend on the fade.
 -   Report line: `[DCLF] fading: N screen-door fading objects drawn by DCLF over M frames`.
@@ -3360,3 +3368,123 @@ and the draw, and 0 stale record transforms. What it still shows is expected:
 **Still open:** with occlusion culling on, the set-parity gap detector counts 94-1,572 one-frame phase-2
 rejections per 300 frames on the same flight, against none with `CS_DCLF_CULL=frustum`. Whether those
 objects were really hidden for that frame is not yet measured.
+
+### LOD cross-fades: DCLF keeps the object, the copy stays native
+
+The flight above is dominated by trees changing LOD level. Until now each one went back to the native loop for
+the whole crossing, which is two hand-offs per tree per crossing. A hand-off is where the one-frame flicker
+lived, and where the double draws are.
+
+**What the engine does** (engine notes, "Skin partitions", from `BSLightingShader::SetupGeometry`):
+
+-   The object's own pass is untouched. It draws the new level exactly like a settled object.
+-   The hint-10 copy of the old level is different in two ways:
+    -   it is drawn with a stencil dither: stencil mode `0xB`, reference `int(fade * 31)`;
+    -   its `MaterialData.z` is scaled by the fade node's cross-fade factor (`+0x14C`).
+-   So the copy cannot be one draw merged with the object's own, but the object's own pass needs nothing
+    new.
+
+**The split** (`CS_DCLF_LOD_CROSSFADE`, default on, live):
+
+-   **`PassCapture::FadingAtRegistration`:** every hint-10 pass is native, and a crossing no longer makes the
+    object's own pass a fade. That pass is claimed, withheld and drawn by DCLF as before.
+-   **`SceneStore::AddAccumulatedPass`:** a hint-10 pass never stands for an object that has a pass of its own,
+    so the partition mask is the new level's.
+-   **`SkipNativePass`:** never skips a pass `FadingAtRegistration` gives the native loop. Otherwise the copy
+    would be dropped, because DCLF drew the object last frame. The rule is general: the skip only applies to
+    passes DCLF models.
+-   **Capture parity:** does not compare such a pass against the object. It counts it as a "native-only pass
+    of a DCLF object".
+
+**Results** on the same flight (tree trace, culling off):
+
+-   Native tree draws: 1,666-10,248 object-frames per 300 frames before; 0-2,758 after, and the 2,758 is the
+    first interval, before the claims settle.
+-   Tree object-frames with a native copy: 308-3,522 per interval, and every one of them DCLF's otherwise.
+-   0 drawn by nobody, 0 holes, 0 claimed but not drawn.
+
+**Gates** (async probe, BuildDraws, capture and set parity, on the flight):
+
+-   BuildDraws parity OK, draw parity 0 differing, bone palettes 0 differing.
+-   Set parity: no disagreement, and nothing withheld and drawn by nobody.
+-   Capture parity: 29-112 mismatches per interval in `PS PerMaterial 22`, `VS PerMaterial 11` and
+    `VS PerGeometry 5`. The same flight with `CS_DCLF_LOD_CROSSFADE=0` shows the same three variables at
+    24-95, so this is a residue of the flight, not of the split. It is not yet explained.
+
+**Still to do:** the copy itself, drawn by DCLF. The stencil reference has only 32 values, so it can be up to
+32 indirect ranges, each setting the reference. It also needs:
+
+-   a pipeline variant with the engine's stencil mode `0xB`;
+-   a per-object scale for `MaterialData.z`;
+-   an answer to what the stencil buffer holds at that point, and whether the native depth pass draws the
+    copies.
+
+It would save 20-35 native draws a frame, and only while moving.
+
+## Material records from their sources
+
+Capture parity on a fast flight still found stale material records: `TexcoordOffset` (VS PerMaterial 11)
+on scrolling materials, t11 on character-lit materials, and `ParallaxOccData` on some PBR materials. The
+cache assumed a record is fixed apart from a learned set of frame-global PS floats.
+
+A first attempt inferred more of the same by comparing values. It marked a material "volatile" when the
+rolling validator happened to find it stale, and adopted a float as frame-global when two materials held
+the same value. It adopted a coincidental `ParallaxOccData` 0.7 into every material. After a time-of-day
+step it re-evaluated 190-260 materials a frame. It was reverted.
+
+What replaced it is a deterministic account of every input. The engine notes' table ("SetupMaterial: where
+every material constant comes from") lists each constant and texture `BSLightingShader::SetupMaterial`
+writes, and where it comes from. `MaterialSources` keeps each kind of input current by its own rule:
+
+| Input | Rule | Where |
+| --- | --- | --- |
+| The material's own fields | re-evaluated when something writes the material | `ProcessMaterialWrites`, end of the accumulate phase |
+| `TexcoordOffset` | computed every frame from the material's two texture-transform buffers at the engine's selector | `RefreshTextureTransforms`, end of the accumulate phase (the Z-prepass reads it) |
+| Shader object and globals: `IBLParams`, PS 6, `SnowRimLightParameters`, `CharacterLightParams`, `LODTexParams.z`, `LandscapeTexture5to6IsSnow.zw` | one live evaluation per signature (the pass flags that decide which of them are written), copied into every record with that signature | `RefreshFrameMaterials`, Prepass |
+| t11 (the character light's render target) | with the frame components; a change gives the record a new version | the same |
+
+**The write events.** Hooks push the written material into a bounded lock-free ring. Every producer is a
+hook, on any thread. The accumulate phase drains the ring and handles each written material:
+
+-   a slot drawn this frame is re-evaluated;
+-   any other slot of it is dropped, as is its cache entry, so its next use evaluates it afresh.
+
+An overflowing ring treats every material as written. The producers:
+
+-   `BSLightingShaderPropertyFloatController::Update` and `ColorController::Update` (vtable slot 0x27),
+    except the types that write the property rather than the material, and the texture-transform types.
+    The UShort controller's `Update` is `ret`.
+-   `CopyMembers`, `OnLoadTextureSet`, `ClearTextures` and `ReceiveValuesFromRootMaterial` on the 14
+    engine material vtables. The vtable IDs were checked against the decompiled functions.
+-   CS's own writers, which call `MaterialSources::NoteWritten`: the PBR materials' overrides and their data
+    mutators (`ApplyTextureSetData`, `ApplyMaterialObjectData`, `ClearMaterialObjectData`, `LoadBinary`),
+    and `TESObjectLAND_SetupMaterial`, which writes the landscape material after `SetMaterial`'s copy.
+    `ApplyMaterialObjectData` was the `ParallaxOccData` writer: TruePBR stores the projected material's
+    roughness and specular level there.
+
+**The build** repacks the frame-sourced floats into a reused (material, pipeline) group without a new
+version: PS as before, and now VS (`materialPatchedVSFloats`) for `TexcoordOffset`. The colour kick and the
+Z-prepass kick bring the known material textures up to date first (`RefreshKnownMaterialTextures`), so a
+changed t11 index does not leave a pre-built job stale.
+
+**The alarm.** The rolling validator (8 records a frame) and `CS_DCLF_MATERIAL_CACHE=probe` compare a
+record with a live evaluation outside its frame-sourced components. They only report
+(`STALE material record ...: a writer the material events do not cover`). They do not repair: repairing is
+what hid the missing events before.
+
+**Found on the way:** the shadow build read the texture transform's buffer 0. It now reads the buffer the
+frame reads (`textureTransformCurrentBuffer`), as `BSUtilityShader::SetupMaterial` does.
+
+**Results:**
+
+-   The flight gate: capture parity 0 material mismatches in every interval (before: 29-112 an interval in
+    `TexcoordOffset`, t11 and `ParallaxOccData`), 0 stale-material alarms. BuildDraws parity OK, draw parity
+    0, holes 0.
+-   Z-prepass staleness is back to its level before this work (64-188 inline builds an interval, from the
+    290 of 300 the per-frame t11 caused).
+-   Three `set gamehour` steps with ownership off, every draw compared: about 483,000 draws checked an
+    interval, 0 mismatched.
+-   Capture parity's "MISMATCH" label on the flight now comes only from "untracked eligible" (distant
+    `ObjectLODRoot` objects), which is older and separate.
+-   `WindTimers.y` is not compared: `SetupGeometry` copies a tree node's current timer over its previous one
+    after every native draw, and `Lighting.hlsl` never reads the value.

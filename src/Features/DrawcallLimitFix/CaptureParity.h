@@ -154,6 +154,7 @@ namespace DCLF
 		ankerl::unordered_dense::map<std::uint64_t, std::uint64_t> permutationDiffs;
 		std::uint64_t untrackedEligible = 0;   // eligible geometry under a drawn category node, not tracked
 		std::uint64_t notInTables = 0;         // tracked geometry drawn natively but excluded this frame
+		std::uint64_t nativeOnlyPasses = 0;    // native passes of objects DCLF draws that DCLF does not model (hint 10)
 		ankerl::unordered_dense::set<std::uint32_t> renderFlagsSeen;
 		std::vector<std::string> samples;  // first few mismatch descriptions per report
 	};

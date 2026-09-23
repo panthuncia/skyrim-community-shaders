@@ -295,6 +295,11 @@ namespace DCLF
 		return Toggles::Get().Active().fading;
 	}
 
+	bool LodCrossfadeEnabled()
+	{
+		return Toggles::Get().Active().lodCrossfade;
+	}
+
 	bool ProjectedUvEnabled()
 	{
 		return Toggles::Get().Active().projectedUv;

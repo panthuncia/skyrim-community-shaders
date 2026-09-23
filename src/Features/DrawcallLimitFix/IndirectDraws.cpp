@@ -1906,10 +1906,12 @@ namespace DCLF
 			std::uint32_t vsFrameMask = 0, psFrameMask = 0;  // the frame slots the commit supplies
 			std::array<std::uint32_t, kDecalGroups> decalCount{};
 			std::vector<std::uint8_t> drewLastFrame;  // per object; the Z-prepass's hybrid gate without withholding
-			// The PS PerMaterial floats that are the frame's rather than the material's (SceneStore::
-			// GetMaterialPatchedFloats): the build cache leaves them out of a pair's signature and repacks the
-			// PS group, so a drifting IBLParams does not rebuild every pair every frame.
+			// The PerMaterial floats that are the frame's rather than the material's (SceneStore::
+			// GetMaterialPatchedFloats / GetMaterialPatchedVSFloats, MaterialSources): the build cache leaves them
+			// out of a pair's signature and repacks the group, so a drifting IBLParams or a scrolling
+			// TexcoordOffset does not rebuild every pair every frame.
 			std::vector<std::uint32_t> materialPatchedFloats;
+			std::vector<std::uint32_t> materialPatchedVSFloats;
 			ResourceAddresses addresses{};
 			std::uint32_t lookupGeneration = 0, tablesGeneration = 0;
 		};
@@ -2158,9 +2160,11 @@ namespace DCLF
 				ResolvedBindings resolved;  // the resolution fields only; recordIndex and skipReason are per build
 				bool hasResolved = false;
 				PackedGroup vs, ps;         // PerMaterial
-				// Where the frame's floats (MainInputs::materialPatchedFloats, in that order) sit in the packed PS
-				// group, as dword offsets or ~0: a reused group gets this frame's values written there.
+				// Where the frame's floats (MainInputs::materialPatchedFloats / materialPatchedVSFloats, in that
+				// order) sit in the packed groups, as dword offsets or ~0: a reused group gets this frame's values
+				// written there.
 				std::vector<std::uint32_t> psPatchPositions;
+				std::vector<std::uint32_t> vsPatchPositions;
 				std::uint32_t lastUsed = 0;
 			};
 			struct Pipeline
@@ -2529,8 +2533,8 @@ namespace DCLF
 						auto& sources = a_cache->scratch;
 						sources.clear();
 						// The material record by its version (Tables::materialVersion), which is new whenever the record is
-						// rewritten; the frame's floats RefreshMaterialPatch writes into it are not part of it, and a reused
-						// PS group gets them written over below.
+						// rewritten; the frame's floats MaterialSources writes into it are not part of it, and a reused
+						// group gets them written over below.
 						AppendSource(sources, object.materialIndex < a_tables.materialVersion.size() ? a_tables.materialVersion[object.materialIndex] : 0u);
 						AppendSource(sources, a_tables.materialSlotKey[object.materialIndex].first);
 						AppendSource(sources, a_tables.materialSlotKey[object.materialIndex].second);
@@ -2703,8 +2707,25 @@ namespace DCLF
 							}
 							return address;
 						};
+						const bool vsReused = cachedPair && cachedPair->vs.valid && cachedPair->vsPatchPositions.size() == a_in.materialPatchedVSFloats.size();
 						materialBlock.first = pack(material.vs, LightingVSLayout(), blocks.vsTable, kVSGroups[kPerMaterial], kVSFirstVariable[kPerMaterial],
 							cachedPair ? &cachedPair->vs : nullptr);
+						if (cachedPair && !vsReused) {
+							cachedPair->vsPatchPositions.clear();
+							for (const auto index : a_in.materialPatchedVSFloats)
+								cachedPair->vsPatchPositions.push_back(PackedPositionOf(LightingVSLayout(), blocks.vsTable, kVSGroups[kPerMaterial], kVSFirstVariable[kPerMaterial], index));
+						}
+						if (vsReused && materialBlock.first) {
+							auto out = arena.At(materialBlock.first - base, cachedPair->vs.bytes.size());
+							for (std::size_t i = 0; i < cachedPair->vsPatchPositions.size(); ++i) {
+								const auto position = cachedPair->vsPatchPositions[i];
+								const auto index = a_in.materialPatchedVSFloats[i];
+								if (position == ~0u || std::size_t(position) * 4 + 4 > out.size() || index >= material.vs.floats.size())
+									continue;
+								const float value = material.vs.Written(index) ? material.vs.floats[index] : 0.0f;
+								std::memcpy(out.data() + std::size_t(position) * 4, &value, 4);
+							}
+						}
 						// The PS group carries the frame's floats (IBLParams): a reused group has this frame's values
 						// written over them, as PackConstantGroup would write them (an unwritten float packs as zero).
 						const bool psReused = cachedPair && cachedPair->ps.valid && cachedPair->psPatchPositions.size() == a_in.materialPatchedFloats.size();
@@ -3094,9 +3115,12 @@ namespace DCLF
 				DrawBindings bindings = plain;
 				// The texture transform off the material now, not from the walk: shader-property controllers
 				// (BSLightingShaderPropertyFloatController::Update) move it between Main::Draw, where the walk
-				// starts, and BeforeShadowMaps, where this build is kicked.
-				const std::array<float, 4> texcoord{ material->texCoordOffset[0].x, material->texCoordOffset[0].y, material->texCoordScale[0].x,
-					material->texCoordScale[0].y };
+				// starts, and BeforeShadowMaps, where this build is kicked. Of the two buffers, the one the frame
+				// reads (BSShaderManager::State::textureTransformCurrentBuffer, flipped by Main::Update), as
+				// BSUtilityShader::SetupMaterial does; the controllers write the other one.
+				const std::uint32_t transformBuffer = globals::game::smState ? (globals::game::smState->textureTransformCurrentBuffer & 1) : 0u;
+				const std::array<float, 4> texcoord{ material->texCoordOffset[transformBuffer].x, material->texCoordOffset[transformBuffer].y,
+					material->texCoordScale[transformBuffer].x, material->texCoordScale[transformBuffer].y };
 				bindings.vertexConstants[1] = block(texcoord.data(), sizeof(texcoord));
 				bindings.textures[0] = textureIt->second;
 				const auto index = static_cast<std::uint32_t>(records.size());
@@ -3210,6 +3234,44 @@ namespace DCLF
 			}
 		}
 
+		/**
+		 * @brief Outside an epoch (render thread): brings resolved material entries up to date where every view
+		 * that changed is one GpuTextures already knows. A volatile material's textures can change every frame
+		 * - the character light's t11 alternates between two render targets - and a job kicked before the
+		 * epoch's own refresh would otherwise be built against the old indices and go stale. Anything that
+		 * needs an import is left to the epoch (RefreshMaterialLookups), where the descriptor service is active.
+		 */
+		void RefreshKnownMaterialTextures(const SceneStore::Tables& a_tables, std::uint32_t a_frame, Lookups& a_lookups)
+		{
+			auto& textures = GpuTextures::Get();
+			for (std::size_t slot = 0; slot < a_tables.materials.size() && slot < a_lookups.materials.size(); ++slot) {
+				if (slot >= a_tables.materialLastUsed.size() || a_tables.materialLastUsed[slot] != a_frame)
+					continue;
+				auto& entry = a_lookups.materials[slot];
+				const auto& material = a_tables.materials[slot];
+				if (!entry.resolved || entry.key != a_tables.materialSlotKey[slot] || entry.written != material.textureWritten)
+					continue;
+				std::array<std::uint32_t, kPixelTextureSlots> indices{};
+				bool changed = false, known = true;
+				for (std::uint32_t t = 0; t < kPixelTextureSlots && known; ++t) {
+					if (!((material.textureWritten >> t) & 1) || entry.views[t] == material.textures[t])
+						continue;
+					changed = true;
+					known = textures.Known(material.textures[t], indices[t]);
+				}
+				if (!changed || !known)
+					continue;
+				for (std::uint32_t t = 0; t < kPixelTextureSlots; ++t) {
+					if (!((material.textureWritten >> t) & 1) || entry.views[t] == material.textures[t])
+						continue;
+					if (entry.textureIndex[t] != indices[t])
+						++a_lookups.generation;
+					entry.textureIndex[t] = indices[t];
+					entry.views[t] = material.textures[t];
+				}
+			}
+		}
+
 		/** @brief The shadow epoch's entries: the alpha-tested casters' diffuse textures, and the pipelines of the modes in use. */
 		void RefreshShadowLookups(const SceneStore::Tables& a_tables, const std::array<bool, kShadowModeCount>& a_modeUsed, DXGI_FORMAT a_dsvFormat, Lookups& a_lookups)
 		{
@@ -3270,6 +3332,7 @@ namespace DCLF
 			       a_job.renderFlags == a_epoch.renderFlags && sameEye(a_job.eye, a_epoch.eye) && sameEye(a_job.previousEye, a_epoch.previousEye) &&
 			       a_job.vsFrameMask == a_epoch.vsFrameMask && a_job.psFrameMask == a_epoch.psFrameMask && a_job.decalCount == a_epoch.decalCount &&
 			       a_job.drewLastFrame == a_epoch.drewLastFrame && a_job.materialPatchedFloats == a_epoch.materialPatchedFloats &&
+			       a_job.materialPatchedVSFloats == a_epoch.materialPatchedVSFloats &&
 			       a_job.addresses == a_epoch.addresses &&
 			       a_job.lookupGeneration == a_epoch.lookupGeneration && a_job.tablesGeneration == a_epoch.tablesGeneration;
 		}
@@ -4860,6 +4923,10 @@ namespace DCLF
 			++stats.async[kAsyncColour].notKicked;
 			return;
 		}
+		// RefreshFrameMaterials has just written this frame's t11 into the character-lit records: the lookups
+		// follow before the kick, or the epoch's own refresh would leave the job built against last frame's.
+		auto& store = SceneStore::Get();
+		RefreshKnownMaterialTextures(store.GetTables(), store.GetFrame(), store.MutableLookups());
 		impl->KickMainJob(false, nullptr, nullptr, stats);
 	}
 
@@ -4880,6 +4947,12 @@ namespace DCLF
 		}
 		const RE::NiPoint3 eye = camera->world.translate;
 		const RE::NiPoint3 previousEye = impl->prepassEye;
+		// The material lookups, as final as they can be made before the kick: a volatile material's textures
+		// can change every frame (the character light's t11 alternates between two render targets), and
+		// resolving them only in the epoch's own preparation bumped the lookups' generation under a job already
+		// built against them - it went stale in 290 frames of 300.
+		auto& store = SceneStore::Get();
+		RefreshKnownMaterialTextures(store.GetTables(), store.GetFrame(), store.MutableLookups());
 		impl->KickMainJob(true, &eye, &previousEye, stats);
 	}
 
@@ -5104,6 +5177,7 @@ namespace DCLF
 		in.tablesGeneration = a_store.GetTablesGeneration();
 		in.lookupGeneration = a_store.GetLookups().generation;
 		in.materialPatchedFloats = a_store.GetMaterialPatchedFloats();
+		in.materialPatchedVSFloats = a_store.GetMaterialPatchedVSFloats();
 		// The Z-prepass's gate without withholding: what the colour epoch drew last frame, per object. The
 		// map stays the render thread's; the build reads this snapshot.
 		if (a_depthOnly && a_resources.hybrid && !in.withholding) {

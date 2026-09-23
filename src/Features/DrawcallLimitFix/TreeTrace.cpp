@@ -118,6 +118,7 @@ namespace DCLF
 			bool reasonAccumulate = false;
 			// This frame, from the native draws.
 			std::uint32_t nativeDraws = 0;
+			std::uint32_t nativeCopies = 0;  // hint-10 draws (a LOD cross-fade's copy of the old level): always native
 			std::uint8_t nativeLodRow = 0xFF;
 			// Who drew it in the last frames, newest in bit 0: 1 native, 2 DCLF (two bits a frame), and whether
 			// the engine accumulated it.
@@ -140,6 +141,7 @@ namespace DCLF
 			std::uint32_t switchChangedInCull = 0, lodChangedInCull = 0;
 			std::uint32_t gaps = 0, engineGaps = 0;  // drawn, not drawn, drawn: by nobody / not accumulated
 			std::uint32_t handovers = 0;  // the drawer changed between native and DCLF
+			std::uint32_t copies = 0, copiesWithDclf = 0;  // object-frames with native cross-fade copies; of them, DCLF drawing the object
 			std::uint32_t lines = 0;
 		} counts;
 
@@ -188,10 +190,14 @@ namespace DCLF
 				e.drawnHistory = (e.drawnHistory << 2) | drawn;
 				e.accumulatedHistory = (e.accumulatedHistory << 1) | (e.accumulated ? 1u : 0u);
 				const std::string line = fmt::format(
-					"'{}'{}{} acc {} hint {} row {}{} | obj {} flags {:x} mask {:x} reason {}{} | withheld {} handed-back {} | reg {} withheld {} fading {} 153 {:x} hints {:x} | native {} (row {}) dclf {} | pre {} | post {}",
+					"'{}'{}{} acc {} hint {} row {}{} | obj {} flags {:x} mask {:x} reason {}{} | withheld {} handed-back {} | reg {} withheld {} fading {} 153 {:x} hints {:x} | native {} (row {}) copies {} dclf {} | pre {} | post {}",
 					e.name, e.skinned ? " skinned" : "", e.underSwitch ? " switch" : "", e.accumulated, e.hint, e.lodRow, e.fading ? " fading" : "", e.object, e.flags,
 					e.mask, kIneligibleNames[static_cast<std::size_t>(e.reason)], e.reasonAccumulate ? "(acc)" : "", e.withheld, e.handedBack, e.registrations, e.registeredWithheld, e.registeredFading, e.registered153, e.registeredHints, e.nativeDraws,
-					e.nativeLodRow, e.dclfDrew, Describe(e.pre), Describe(e.post));
+					e.nativeLodRow, e.nativeCopies, e.dclfDrew, Describe(e.pre), Describe(e.post));
+				if (e.nativeCopies) {
+					++counts.copies;
+					counts.copiesWithDclf += e.dclfDrew;
+				}
 				if (e.accumulated) {
 					++counts.judged;
 					switch (drawn) {
@@ -288,6 +294,7 @@ namespace DCLF
 			e.flags = 0;
 			e.mask = 0;
 			e.nativeDraws = 0;
+			e.nativeCopies = 0;
 			e.nativeLodRow = 0xFF;
 			e.reason = Ineligible::None;
 		}
@@ -353,6 +360,11 @@ namespace DCLF
 		auto* e = impl->Find(a_pass->geometry);
 		if (!e)
 			return;
+		if (a_pass->accumulationHint == 10) {
+			++e->nativeCopies;
+			e->lastSeen = impl->frame;
+			return;
+		}
 		++e->nativeDraws;
 		e->nativeLodRow = static_cast<std::uint8_t>(SceneStore::LodRowOf(*a_pass));
 		e->lastSeen = impl->frame;
@@ -365,8 +377,8 @@ namespace DCLF
 		const auto& c = impl->counts;
 		logger::info(
 			"[DCLF] tree trace over {} frames: {} accumulated object-frames: {} native, {} DCLF, {} both, {} nobody; one-frame gaps {} (accumulated) + {} (not accumulated); "
-			"{} drawer changes; DCLF stale world {}; bones moved after the walk {} (DCLF) / {} (native); moved in the cull {}; switch changed in the cull {}; LOD state changed in the cull {}",
-			c.frames, c.judged, c.native, c.dclf, c.both, c.nobody, c.gaps, c.engineGaps, c.handovers, c.staleWorld, c.bonesMovedDclf, c.bonesMovedNative, c.movedInCull,
+			"{} drawer changes; {} with native cross-fade copies ({} of them DCLF's otherwise); DCLF stale world {}; bones moved after the walk {} (DCLF) / {} (native); moved in the cull {}; switch changed in the cull {}; LOD state changed in the cull {}",
+			c.frames, c.judged, c.native, c.dclf, c.both, c.nobody, c.gaps, c.engineGaps, c.handovers, c.copies, c.copiesWithDclf, c.staleWorld, c.bonesMovedDclf, c.bonesMovedNative, c.movedInCull,
 			c.switchChangedInCull, c.lodChangedInCull);
 		impl->counts = {};
 		impl->linesByKind = {};

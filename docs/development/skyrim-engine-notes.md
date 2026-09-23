@@ -480,6 +480,22 @@ Decompiled from AE 1.6.1170 for Drawcall Limit Fix's tree and actor coverage.
     `GetRenderPasses` appends a copy of each lighting pass with accumulation hint 10 and
     `LODMode = (+0x152 & 0xF) | singleLevel`.
 -   **Buffers.** A tree's partitions share one vertex buffer and have separate index buffers (measured).
+-   **How the cross-fade copy is drawn.** It is not a plain second draw. `BSLightingShader::SetupGeometry`
+    (`1414dd040`, ID 107300) makes three differences:
+    -   **Material alpha.** For a pass with `LODMode & 0x80` (the single-level copy), the PS constant at
+        `MaterialData.z` is `property.alpha * fadeNode[+0x14C]`, not `property.alpha`.
+    -   **Stencil.** For accumulation hint 10 it sets `depthStencilStencilMode = 0xB` and
+        `stencilRef = int(f * 31.0)` (`0x1419de7e0`). `f` is `fadeNode[+0x14C]` for the copy and
+        `fadeNode[+0x130]` for a hint-10 pass without the single-level bit (the other hint-10 case in
+        `GetRenderPasses`, a fade).
+    -   **Order.** Hint 10 lands in the batch renderer's geometry group 10, which `1414b3390` draws just
+        before the main opaque range.
+    -   So the cross-fade is a stencil dither with 32 levels, against whatever the stencil buffer holds
+        there.
+    -   **The base pass is unchanged.** Hints 0, 11 and 15, cumulative `LODMode` of the new level, get
+        neither change: it draws exactly like a settled object.
+    -   **State layout.** The renderer state is at `0x14202ab70`: `+0x88` depth mode, `+0x90` stencil mode,
+        `+0x94` stencil ref, `+0xA8` blend mode, `+0xB0` write mode (CommonLib's `RendererShadowState`).
 
 ### Switch nodes
 
@@ -500,6 +516,79 @@ Offsets on SE and AE:
 
 CommonLib-NG declares these fields after `NiNode`, whose declared size in a multi-runtime build is VR's.
 Reading them as members therefore reads the wrong memory.
+
+### BSLightingShader::SetupMaterial: where every material constant comes from
+
+Vanilla `BSLightingShader::SetupMaterial` (vfunc 4, `1414dc310`, AE). `this` is the shader, the argument is
+the `BSLightingShaderMaterialBase`, and the technique is `this+0x94`. It writes the PerMaterial groups: PS
+variable *i* through the register table at `0x14202aec0 + 0x40 + i`, VS variable *i* through
+`0x14202aeb8 + 0x50 + i`.
+
+CS replaces the function for TruePBR materials (`TruePBR::BSLightingShader_SetupMaterial`). Advanced Skin
+and TerrainHelper hook it too, but only bind extra textures outside the engine's slots (t71-t74).
+
+Sources:
+
+-   **M:** the material's own fields.
+-   **S:** the shader object, per frame.
+-   **G:** engine globals, per frame.
+-   **R:** a render target, per frame.
+
+| Output | Written when | Source |
+| --- | --- | --- |
+| t0 diffuse | always (not for MTLand / LODLand) | M `+0x48`; or R `renderTargets[M +0x50]` when `+0x50 != -1` |
+| t1 normal | always (same) | M `+0x58` |
+| t2 specular | flag `0x4` with Specular | M `+0x68` |
+| t9 | flag `0x1000` | M `+0x68` |
+| t12 | flag `0x400` or `0x800` | M `+0x60` |
+| t11 character light | flag `0x400000` (CharacterLight) | R `renderTargets[FUN_1414e8b30(0x142033da8)]` |
+| per-technique textures | technique 1-4, 7, 9/0x12, 0xb, 0x10 | M `+0xa0`, `+0xa8`, `+0xb0`, ... |
+| texture address modes | with each texture | M `+0x70` |
+| VS 11 TexcoordOffset | always | M `+0xc/+0x10` offset and `+0x1c/+0x20` scale, pair `[G 0x142033180]` (the texture-transform buffer the frame reads) |
+| VS 9/10 Left/RightEyeCenter | technique 0x10 (eye) | M `+0xb4..+0xc8` |
+| PS 6 | flag `0x20000` | G `0x14203315c..` |
+| PS 21 EnvmapData | technique 1, 0xb | M `+0xb0` / `+0xc8`, and whether the mask texture exists |
+| PS 22 ParallaxOccData | technique 7 only | M `+0xa8`, `+0xac` |
+| PS 23 TintColor | technique 5, 6 | M `+0xa0..+0xa8` |
+| PS 24 LODTexParams | technique 8/0x13, 9/0x12 | M `+0x148..+0x150` or `+0xb8..+0xc0`; `.z` from G `0x142032fda` |
+| PS 25 SpecularColor | flag `0x200` | M `+0x38..+0x40` times `+0x8c`; `.w` M `+0x88` |
+| PS 26 SparkleParams | technique 0xe | M `+0xa0..+0xac` |
+| PS 27 MultiLayerParallaxData | technique 0xb | M `+0xb8..+0xc4` |
+| PS 28 LightingEffectParams | flag `0x400` or `0x800` | M `+0x90`, `+0x94` |
+| PS 29 IBLParams | always | S `+0xcc`, then `+0xd0..` or `+0xe0..` by S `+0xf0` |
+| PS 30-33 landscape snow and spec-power | MTLand, flag `0x200000` | M `+0x118..+0x144`; `.z` of 31 from G `0x142035548`, `.w` 1/G `0x1420355f0` |
+| PS 34 SnowRimLightParameters | flag `0x200000` | G `0x142035590`, `0x1420355a8`, `0x1420355c0`, `0x1420355d8` |
+| PS 35 CharacterLightParams | flag `0x400000` | G `0x14203316c..`, zero unless full-bright mode |
+
+-   **Unlisted variables:** anything not in the table is not written by `SetupMaterial`. The buffer keeps
+    whatever the previous draw left there.
+-   **Where DCLF saw staleness:** every value DCLF found stale in its material records (TexcoordOffset, t11,
+    IBLParams) is an **M** field written after the record was taken, or an **S/G/R** source that changes
+    per frame. No other kind of source exists in this function.
+### Material writers, and the texture-transform buffers
+
+-   **Two texture-transform buffers.** A material keeps two sets of UV offset and scale
+    (`+0x0c/+0x10` and `+0x1c/+0x20`, 8 bytes apart per buffer).
+    -   Every `SetupMaterial` reads the set at `0x142033180` (`BSShaderManager::State::
+        textureTransformCurrentBuffer`): Lighting, Effect and Utility alike.
+    -   `Main::Update` flips it once a frame (`1406460c7`: `xor [0x142033180], 1`); two menu functions
+        flip it too.
+-   **`BSLightingShaderPropertyFloatController::Update`** (`14150dde0`, vtable `0x141ac3be8` slot 0x27)
+    returns early when its value is unchanged. Otherwise it writes, by its type (`+0x50`):
+    -   type 0xb: the property's `+0xf8` (the emissive multiplier);
+    -   types above 0x13: the texture-transform buffer `current ^ [0x142033184]`. That offset is 1 in play,
+        so the write lands in the buffer the next frame reads; `Inventory3DManager::Render` and `StatsMenu`
+        set it to 0;
+    -   anything else: the material (`property+0x78`), at an offset from a table filled at startup
+        (`0x1435ef210`).
+-   **`BSLightingShaderPropertyColorController::Update`** (`14150ea50`, slot 0x27): type 1 writes the
+    property's emissive colour (`+0xf0`); any other type a material colour (table `0x1435ef298`).
+-   **`BSLightingShaderPropertyUShortController::Update`** (`14150e580`) is `ret 0`.
+-   **In-place rewrites.** `BSShaderMaterial::CopyMembers` (02), and `BSLightingShaderMaterialBase::
+    OnLoadTextureSet` (08), `ClearTextures` (09) and `ReceiveValuesFromRootMaterial` (0A). Per class,
+    vtables `0x141ab6eb8` (Base) to `0x141ab7458` (MultiLayerParallax), and `0x14185dc08`
+    (BSLightingShaderMaterial).
+
 
 ## ProjectedUV and MTLand: the per-object constants and where they come from
 

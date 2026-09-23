@@ -1,5 +1,7 @@
 #include "SceneStore.h"
 
+#include "MaterialSources.h"
+
 #include "EngineStates.h"
 
 #include "Switches.h"
@@ -222,10 +224,6 @@ namespace DCLF
 		pipelineIndex.clear();
 		materialIndex.clear();
 		materialCache.clear();
-		materialPatched.clear();
-		materialPatchValues.clear();
-		materialPatchValuesFresh = false;
-		materialPatchSource.reset();
 		validationCursor = 0;
 	}
 
@@ -772,32 +770,106 @@ namespace DCLF
 		return Ineligible::None;
 	}
 
-	void SceneStore::RefreshMaterialPatch()
+	const std::vector<std::uint32_t>& SceneStore::GetMaterialPatchedFloats() const
 	{
-		if (!MaterialCacheEnabled() || materialPatched.empty() || !materialPatchSource || tables.materials.empty())
-			return;
+		return MaterialSources::FramePSFloats();
+	}
+
+	const std::vector<std::uint32_t>& SceneStore::GetMaterialPatchedVSFloats() const
+	{
+		return MaterialSources::FrameVSFloats();
+	}
+
+	void SceneStore::RefreshFrameMaterials()
+	{
+		stats.frameMaterialSamples = 0;
 		auto& evaluator = ConstantEvaluator::Get();
-		if (!evaluator.HasLightingShader())
+		if (tables.materials.empty() || !evaluator.HasLightingShader())
 			return;
-		MaterialRecord live;
-		if (!evaluator.EvaluateMaterial(materialPatchSource.get(), materialPatchSourcePass, live))
-			return;
-		// The patched positions are shader-level, so one sample answers for every record. If that ever
-		// stops being true the rolling validator says so, because it compares a served record against a
-		// live evaluation of that material.
-		for (std::size_t i = 0; i < materialPatched.size(); ++i) {
-			const std::uint32_t index = materialPatched[i];
-			const float value = live.ps.floats[index];
-			materialPatchValues[i] = value;
-			for (auto& record : tables.materials)
-				record.ps.floats[index] = value;
+		// One record drawn this frame per signature is evaluated live; its frame-sourced components are the
+		// same in every record of that signature (MaterialSources).
+		ankerl::unordered_dense::map<std::uint32_t, MaterialRecord> live;
+		for (std::uint32_t slot = 0; slot < tables.materials.size(); ++slot) {
+			if (tables.materialLastUsed[slot] != frame)
+				continue;
+			const auto key = tables.materialSlotKey[slot];
+			const std::uint32_t signature = MaterialSources::Signature(key.second);
+			if (!key.first || live.contains(signature))
+				continue;
+			MaterialRecord record;
+			if (evaluator.EvaluateMaterial(key.first, key.second, record)) {
+				live.emplace(signature, record);
+				++stats.frameMaterialSamples;
+			}
 		}
-		++stats.materialPatchResamples;
+		for (std::uint32_t slot = 0; slot < tables.materials.size(); ++slot) {
+			if (tables.materialLastUsed[slot] != frame)
+				continue;
+			const auto pass = tables.materialSlotKey[slot].second;
+			const auto it = live.find(MaterialSources::Signature(pass));
+			if (it == live.end())
+				continue;
+			// The floats are repacked by every build (GetMaterialPatchedFloats); a texture is part of the version.
+			if (MaterialSources::ApplyFrameComponents(it->second, tables.materials[slot], pass))
+				tables.materialVersion[slot] = ++materialVersions;
+		}
+	}
+
+	void SceneStore::RefreshTextureTransforms()
+	{
+		for (std::uint32_t slot = 0; slot < tables.materials.size(); ++slot)
+			if (tables.materialLastUsed[slot] == frame && tables.materialSlotKey[slot].first)
+				MaterialSources::ApplyTextureTransform(tables.materialSlotKey[slot].first, tables.materials[slot]);
+	}
+
+	void SceneStore::ProcessMaterialWrites()
+	{
+		writtenMaterials.clear();
+		const bool complete = MaterialSources::Drain(writtenMaterials);
+		stats.materialWrites = static_cast<std::uint32_t>(writtenMaterials.size());
+		stats.materialsRewritten = stats.materialsDropped = 0;
+		if (complete && writtenMaterials.empty())
+			return;
+		if (!complete)
+			logger::warn("[DCLF] material write queue overflowed: every material record is re-evaluated");
+		auto& evaluator = ConstantEvaluator::Get();
+		const bool canEvaluate = evaluator.HasLightingShader();
+		auto written = [&](const RE::BSShaderMaterial* a_material) { return !complete || writtenMaterials.contains(a_material); };
+		for (std::uint32_t slot = 0; slot < tables.materials.size(); ++slot) {
+			if (tables.materialLastUsed[slot] == Tables::kSlotFree)
+				continue;
+			const auto key = tables.materialSlotKey[slot];
+			if (!key.first || !written(key.first))
+				continue;
+			MaterialRecord live;
+			if (tables.materialLastUsed[slot] == frame && canEvaluate && evaluator.EvaluateMaterial(key.first, key.second, live)) {
+				if (!(live == tables.materials[slot])) {
+					tables.materials[slot] = live;
+					tables.materialVersion[slot] = ++materialVersions;
+					++stats.materialsRewritten;
+				}
+				if (auto it = materialCache.find(key); it != materialCache.end())
+					it->second.record = live;
+				continue;
+			}
+			// Not drawn this frame (or not evaluable): dropped, so that its next use evaluates it afresh. An
+			// object's cached derivation checks its slot is still allocated to the same key.
+			materialIndex.erase(key);
+			materialCache.erase(key);
+			tables.materialSlotKey[slot] = { nullptr, 0u };
+			tables.materialLastUsed[slot] = Tables::kSlotFree;
+			tables.materialFree.push_back(slot);
+			++stats.materialsDropped;
+		}
+		// Cache entries without a slot.
+		std::erase_if(materialCache, [&](const auto& a_entry) {
+			return written(a_entry.first.first) && !materialIndex.contains(a_entry.first);
+		});
 	}
 
 	void SceneStore::RefreshFrameConstants()
 	{
-		RefreshMaterialPatch();
+		RefreshFrameMaterials();
 		auto& evaluator = ConstantEvaluator::Get();
 		if (!evaluator.HasLightingShader())
 			return;
@@ -1045,8 +1117,8 @@ namespace DCLF
 					std::uint32_t chainIndex = 0;
 					for (auto* pass = group.passes[subPass]; pass; pass = pass->passGroupNext, ++chainIndex) {
 						if (pass->geometry && pass->shader && pass->shader->shaderType.get() == RE::BSShader::Type::Lighting)
-							accumulatedPasses.try_emplace(pass->geometry, AccumulatedPass{ pass, DrawnPassDescriptor(PassDescriptorOf(technique), subPass), subPass,
-																			   pass->passEnum, pass->accumulationHint, chainIndex, PassCapture::FadingAtRegistration(pass), LodRowOf(*pass) });
+							AddAccumulatedPass(pass->geometry, AccumulatedPass{ pass, DrawnPassDescriptor(PassDescriptorOf(technique), subPass), subPass,
+																   pass->passEnum, pass->accumulationHint, chainIndex, PassCapture::FadingAtRegistration(pass), LodRowOf(*pass) });
 					}
 				}
 			}
@@ -1110,12 +1182,21 @@ namespace DCLF
 			// frame. RegisterPass PREPENDS to its list (Ghidra: passGroupNext = head; head = pass), so the
 			// engine draws a bucket in reverse registration order; the chain position is reversed here so
 			// that an ascending sort on it is the draw order, as it is for the accumulator walk.
-			accumulatedPasses.try_emplace(geometry,
+			AddAccumulatedPass(geometry,
 				AccumulatedPass{ entry->pass, DrawnPassDescriptor(PassDescriptorOf(entry->technique), entry->subPass), entry->subPass, entry->passEnum,
 					entry->pass ? static_cast<std::uint32_t>(entry->pass->accumulationHint) : 0u,
 					0xFFFFFFu - static_cast<std::uint32_t>(std::min<std::size_t>(static_cast<std::size_t>(entry - entries.data()), 0xFFFFFFu)),
 					entry->fading, entry->pass ? LodRowOf(*entry->pass) : 3u });
 		}
+	}
+
+	void SceneStore::AddAccumulatedPass(const RE::BSGeometry* a_geometry, const AccumulatedPass& a_pass)
+	{
+		// One pass per object, the first registered - except that a hint-10 pass (a LOD cross-fade's copy of the
+		// old level, the native loop's) never stands for an object that also has a pass of its own.
+		const auto [it, inserted] = accumulatedPasses.try_emplace(a_geometry, a_pass);
+		if (!inserted && it->second.hint == 10 && a_pass.hint != 10)
+			it->second = a_pass;
 	}
 
 	const AccumulatedPass* SceneStore::FindAccumulatedPass(const RE::BSGeometry* a_geometry) const
@@ -1160,7 +1241,7 @@ namespace DCLF
 	bool SceneStore::MaterialCacheEnabled()
 	{
 		// Default ON. It is not merely parity-neutral, it is parity-*better* than evaluating every
-		// material: because RefreshMaterialPatch resamples the frame's lighting floats at Prepass rather
+		// material: because RefreshFrameMaterials resamples the frame's lighting floats at Prepass rather
 		// than at EarlyPrepass, the cache fixes a pre-existing mismatch the uncached path has. Measured
 		// over the same route, mismatched draws per report interval:
 		//
@@ -1173,14 +1254,6 @@ namespace DCLF
 		return enabled;
 	}
 
-	void SceneStore::NotePatchedFloat(std::uint32_t a_index)
-	{
-		if (std::find(materialPatched.begin(), materialPatched.end(), a_index) != materialPatched.end())
-			return;
-		materialPatched.push_back(a_index);
-		materialPatchValues.push_back(0.0f);
-	}
-
 	bool SceneStore::ProfileEnabled()
 	{
 		static const bool enabled = SwitchEnabled("CS_DCLF_PROFILE");
@@ -1190,115 +1263,40 @@ namespace DCLF
 	bool SceneStore::EvaluateMaterialForSlot(const RE::BSShaderMaterial* a_material, std::uint32_t a_pass,
 		bool a_cacheOn, bool a_probeAll, MaterialRecord& a_record)
 	{
-			// The cross-frame material cache.
-			//
-			// EvaluateMaterial is the single most expensive call in this loop: a heap allocation, a full
-			// RendererShadowState memcpy, six ~1 KB ConstantBlock resets, 28 COM releases and the engine's
-			// real SetupMaterial with every CS hook on it. It ran ~104 times a frame in Dragonsreach for a
-			// result that is almost entirely the same every time.
-			//
-			// "Almost": measurement found exactly three adjacent PS floats that move between frames, and
-			// they hold the SAME value for every material in a frame (min == max across all 104), drifting
-			// as the time of day advances. So the record is cached, and those frame-global floats are
-			// patched from one live evaluation per frame. Their positions are LEARNED rather than written
-			// in here, because the reason a value is frame-global belongs to the engine, not to this file,
-			// and a hard-coded index would silently rot when a feature changes the constant layout.
-			const std::pair cacheKey{ a_material, a_pass };
-			auto cached = materialCache.find(cacheKey);
-			const bool canServe = a_cacheOn && cached != materialCache.end() && materialPatchValuesFresh;
-			// One live evaluation a frame teaches the drift; the validator below re-evaluates a rolling
-			// slice so a material that starts varying in some OTHER field cannot go unnoticed.
-			const bool validating = a_cacheOn && cached != materialCache.end() && materialPatchValuesFresh &&
-			                        (a_probeAll ||
-			                            (stats.materialsValidated < kMaterialValidationsPerFrame &&
-			                                (materialValidationCursor++ % kMaterialValidationStride) == 0));
-			if (canServe && !validating) {
-				a_record = cached->second.record;
-				for (std::size_t i = 0; i < materialPatched.size(); ++i)
-					a_record.ps.floats[materialPatched[i]] = materialPatchValues[i];
-				++stats.materialsFromCache;
+		// The cross-frame material cache.
+		//
+		// EvaluateMaterial is the single most expensive call in this loop: a heap allocation, a full
+		// RendererShadowState memcpy, six ~1 KB ConstantBlock resets, 28 COM releases and the engine's real
+		// SetupMaterial with every CS hook on it. A record is a function of the material's own fields, which
+		// change only through a write event (MaterialSources; ProcessMaterialWrites drops or re-evaluates the
+		// material then), and of frame-sourced components refreshed every frame (RefreshTextureTransforms,
+		// RefreshFrameMaterials). So a cached record is served as it is. CS_DCLF_MATERIAL_CACHE=probe
+		// re-evaluates every one anyway and compares: a difference outside the frame-sourced components is a
+		// writer the events do not cover.
+		const std::pair cacheKey{ a_material, a_pass };
+		auto cached = materialCache.find(cacheKey);
+		const bool canServe = a_cacheOn && cached != materialCache.end();
+		if (canServe && !a_probeAll) {
+			a_record = cached->second.record;
+			++stats.materialsFromCache;
+		} else {
+			if (!ConstantEvaluator::Get().EvaluateMaterial(a_material, a_pass, a_record)) {
+				// No shader instance yet (nothing drawn so far): stay native this frame.
+				++stats.ineligible[static_cast<std::size_t>(Ineligible::NotLightingShader)];
+				--stats.ineligible[static_cast<std::size_t>(Ineligible::None)];
+				return false;
+			}
+			++stats.materialsEvaluated;
+			if (canServe) {
+				// The probe: the frame behaves as it would with the cache on, the live record is the yardstick.
+				++stats.materialsValidated;
+				MaterialRecord served = cached->second.record;
+				MaterialSources::CopyFrameComponents(a_record, served, a_pass);
+				if (!(served == a_record))
+					NoteStaleMaterial(~0u, cacheKey, served, a_record);
+				a_record = served;
 			} else {
-				if (!ConstantEvaluator::Get().EvaluateMaterial(a_material, a_pass, a_record)) {
-					// No shader instance yet (nothing drawn so far): stay native this frame.
-					++stats.ineligible[static_cast<std::size_t>(Ineligible::NotLightingShader)];
-					--stats.ineligible[static_cast<std::size_t>(Ineligible::None)];
-					return false;
-				}
-				++stats.materialsEvaluated;
-				if (cached != materialCache.end()) {
-					const auto& previous = cached->second.record;
-					if (!materialPatchValuesFresh) {
-						// Any position that differs from this material's own cached copy joins the set
-						// permanently; then every known position takes this frame's live value.
-						for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f) {
-							if (previous.ps.floats[f] != a_record.ps.floats[f])
-								NotePatchedFloat(f);
-						}
-						for (std::size_t i = 0; i < materialPatched.size(); ++i)
-							materialPatchValues[i] = a_record.ps.floats[materialPatched[i]];
-						materialPatchValuesFresh = true;
-						materialPatchSource.reset(const_cast<RE::BSShaderMaterial*>(a_material));
-						materialPatchSourcePass = a_pass;
-						stats.materialDriftFloats = static_cast<std::uint32_t>(materialPatched.size());
-					} else if (validating) {
-						// The standing alarm: what the cache WOULD have served, against a live evaluation.
-						// It runs in production, not only under a probe switch, because the failure it
-						// guards against is a material quietly rendering with another material's constants.
-						MaterialRecord served = previous;
-						for (std::size_t i = 0; i < materialPatched.size(); ++i)
-							served.ps.floats[materialPatched[i]] = materialPatchValues[i];
-						++stats.materialsValidated;
-						// Stage 3's probe shape: the frame must behave exactly as it would with the cache
-						// on, or the probe measures a configuration nobody ships. The live record is
-						// only the yardstick; what goes into the tables is what the cache would serve.
-						const MaterialRecord fresh = a_record;
-						a_record = served;
-						++stats.materialsFromCache;
-						if (!(served == fresh)) {
-							++stats.materialCacheStale;
-							// Self-healing: a float the cache got wrong is, by definition, one that is not
-							// a fixed property of the material. Adopt it into the patched set so the next
-							// frame serves it live instead of from the cache.
-							for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f) {
-								if (served.ps.floats[f] != fresh.ps.floats[f]) {
-									NotePatchedFloat(f);
-									for (std::size_t i = 0; i < materialPatched.size(); ++i) {
-										if (materialPatched[i] == f)
-											materialPatchValues[i] = fresh.ps.floats[f];
-									}
-								}
-							}
-							if (served.vs.floats != fresh.vs.floats)
-								stats.materialDiffMask |= 1u << 0;
-							if (served.ps.floats != fresh.ps.floats)
-								stats.materialDiffMask |= 1u << 1;
-							if (served.textures != fresh.textures)
-								stats.materialDiffMask |= 1u << 2;
-							if (served.addressModes != fresh.addressModes)
-								stats.materialDiffMask |= 1u << 3;
-							if (served.filterModes != fresh.filterModes)
-								stats.materialDiffMask |= 1u << 4;
-							if (served.textureWritten != fresh.textureWritten)
-								stats.materialDiffMask |= 1u << 5;
-							if (!stats.materialDiffLogged) {
-								stats.materialDiffLogged = true;
-								std::string moved;
-								for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f) {
-									if (served.vs.floats[f] != fresh.vs.floats[f])
-										moved += fmt::format(" vs[{}]=c{}.{} ({} -> {})", f, f / 4, "xyzw"[f % 4], served.vs.floats[f], fresh.vs.floats[f]);
-									if (served.ps.floats[f] != fresh.ps.floats[f])
-										moved += fmt::format(" ps[{}]=c{}.{} ({} -> {})", f, f / 4, "xyzw"[f % 4], served.ps.floats[f], fresh.ps.floats[f]);
-								}
-								if (served.textures != fresh.textures)
-									moved += " textures";
-								if (served.addressModes != fresh.addressModes || served.filterModes != fresh.filterModes)
-									moved += " samplers";
-								logger::warn("[DCLF] material cache STALE for a material:{}", moved);
-							}
-						}
-					}
-				}
-				auto& cacheEntry = cached != materialCache.end() ? cached->second : materialCache[cacheKey];
+				auto& cacheEntry = materialCache[cacheKey];
 				// The reference is what makes the key safe: BSShaderMaterial is intrusively ref-counted, so
 				// holding one means a freed material cannot be mistaken for a new allocation at the same
 				// address - which is the one way this cache could hand an object another material's state.
@@ -1306,9 +1304,46 @@ namespace DCLF
 					cacheEntry.material.reset(const_cast<RE::BSShaderMaterial*>(a_material));
 				cacheEntry.record = a_record;
 			}
-		if (auto it = materialCache.find(std::pair{ a_material, a_pass }); it != materialCache.end())
+		}
+		if (auto it = materialCache.find(cacheKey); it != materialCache.end())
 			it->second.lastUsed = frame;
 		return true;
+	}
+
+	void SceneStore::NoteStaleMaterial(std::uint32_t a_slot, const std::pair<const RE::BSShaderMaterial*, std::uint32_t>& a_key,
+		const MaterialRecord& a_served, const MaterialRecord& a_live)
+	{
+		++stats.materialCacheStale;
+		if (a_served.vs.floats != a_live.vs.floats)
+			stats.materialDiffMask |= 1u << 0;
+		if (a_served.ps.floats != a_live.ps.floats)
+			stats.materialDiffMask |= 1u << 1;
+		if (a_served.textures != a_live.textures)
+			stats.materialDiffMask |= 1u << 2;
+		if (a_served.addressModes != a_live.addressModes)
+			stats.materialDiffMask |= 1u << 3;
+		if (a_served.filterModes != a_live.filterModes)
+			stats.materialDiffMask |= 1u << 4;
+		if (a_served.textureWritten != a_live.textureWritten)
+			stats.materialDiffMask |= 1u << 5;
+		static std::uint32_t logged = 0;
+		if (logged++ >= 16)
+			return;
+		std::string what;
+		for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f) {
+			if (a_served.vs.floats[f] != a_live.vs.floats[f])
+				what += fmt::format(" vs[{}] {}->{}", f, a_served.vs.floats[f], a_live.vs.floats[f]);
+			if (a_served.ps.floats[f] != a_live.ps.floats[f])
+				what += fmt::format(" ps[{}] {}->{}", f, a_served.ps.floats[f], a_live.ps.floats[f]);
+		}
+		for (std::size_t t = 0; t < a_served.textures.size(); ++t)
+			if (a_served.textures[t] != a_live.textures[t] || a_served.addressModes[t] != a_live.addressModes[t] || a_served.filterModes[t] != a_live.filterModes[t])
+				what += fmt::format(" texture[{}] {}/{}/{} -> {}/{}/{}", t, static_cast<const void*>(a_served.textures[t]), a_served.addressModes[t],
+					a_served.filterModes[t], static_cast<const void*>(a_live.textures[t]), a_live.addressModes[t], a_live.filterModes[t]);
+		if (a_served.textureWritten != a_live.textureWritten)
+			what += fmt::format(" written {:X}->{:X}", a_served.textureWritten, a_live.textureWritten);
+		logger::warn("[DCLF] STALE material record{} (material {}, pass {:X}): a writer the material events do not cover:{}",
+			a_slot == ~0u ? std::string() : fmt::format(" in slot {}", a_slot), fmt::ptr(a_key.first), a_key.second, what.substr(0, 600));
 	}
 
 	std::uint32_t SceneStore::AllocateGeometrySlot()
@@ -1491,9 +1526,6 @@ namespace DCLF
 		stats.materialsEvaluated = stats.materialsSkipped = 0;
 		stats.materialsUnchanged = stats.materialsChanged = stats.materialDiffMask = 0;
 		stats.materialsFromCache = stats.materialsValidated = stats.materialCacheStale = 0;
-		// Relearned every frame: the whole point of the drift is that it moves, and a stale set of
-		// positions patched into a served record is exactly the defect this cache could produce.
-		materialPatchValuesFresh = false;
 		stats.templateUpgrades = stats.templateDefects = stats.pipelinesCulledOnly = 0;
 		stats.nativeVisible = 0;
 		stats.classifyHits = stats.classifyChecked = stats.classifyDiffers = stats.castResolved = 0;
@@ -2468,6 +2500,8 @@ namespace DCLF
 		// The material cache is evicted with the material slots (SweepSlots), which is the only path
 		// that touches a slot's lastUsed on the cached path.
 		stats.materialCacheEntries = static_cast<std::uint32_t>(materialCache.size());
+		ProcessMaterialWrites();
+		RefreshTextureTransforms();
 		ValidateMaterialSlice();
 	}
 
@@ -2617,11 +2651,9 @@ namespace DCLF
 
 	void SceneStore::ValidateMaterialSlice()
 	{
-		// The standing alarm of the material cache, now that a served slot is not re-evaluated on the
-		// cached path at all: a few live materials a frame, re-evaluated and compared with what their
-		// slot serves (the patched positions carry this frame's live values on both sides). A difference
-		// is counted as stale, its floats join the patched set, and the slot takes the live record.
-		// Live values are read from the fresh evaluation itself, so the patch values need not be current.
+		// The standing alarm: a few records drawn this frame, re-evaluated live and compared outside their
+		// frame-sourced components. A difference is a material writer the events do not cover; it is
+		// reported, not repaired, because repairing it here is what hid the missing events before.
 		if (!MaterialCacheEnabled() || tables.materials.empty())
 			return;
 		auto& evaluator = ConstantEvaluator::Get();
@@ -2639,53 +2671,9 @@ namespace DCLF
 				continue;
 			++stats.materialsValidated;
 			MaterialRecord served = tables.materials[slot];
-			for (std::size_t i = 0; i < materialPatched.size(); ++i)
-				served.ps.floats[materialPatched[i]] = live.ps.floats[materialPatched[i]];
-			if (served == live)
-				continue;
-			++stats.materialCacheStale;
-			// The patch source: any material whose evaluation works. With persistent slots a material is
-			// evaluated once, so this slice is where the frame-global drift floats (PS PerMaterial 29) are
-			// learned, and RefreshMaterialPatch needs a material to resample them from at Prepass.
-			if (!materialPatchSource) {
-				materialPatchSource.reset(const_cast<RE::BSShaderMaterial*>(key.first));
-				materialPatchSourcePass = key.second;
-			}
-			static std::uint32_t staleLogged = 0;
-			if (staleLogged++ < 4) {
-				std::string what;
-				for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f) {
-					if (served.vs.floats[f] != live.vs.floats[f]) {
-						what += fmt::format(" vs[{}] {}->{}", f, served.vs.floats[f], live.vs.floats[f]);
-						break;
-					}
-				}
-				for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f) {
-					if (served.ps.floats[f] != live.ps.floats[f]) {
-						what += fmt::format(" ps[{}] {}->{}", f, served.ps.floats[f], live.ps.floats[f]);
-						break;
-					}
-				}
-				for (std::size_t t = 0; t < served.textures.size(); ++t) {
-					if (served.textures[t] != live.textures[t] || served.addressModes[t] != live.addressModes[t] || served.filterModes[t] != live.filterModes[t]) {
-						what += fmt::format(" texture[{}] {}/{}/{} -> {}/{}/{}", t, static_cast<const void*>(served.textures[t]), served.addressModes[t], served.filterModes[t],
-							static_cast<const void*>(live.textures[t]), live.addressModes[t], live.filterModes[t]);
-						break;
-					}
-				}
-				if (served.textureWritten != live.textureWritten)
-					what += fmt::format(" written {:X}->{:X}", served.textureWritten, live.textureWritten);
-				logger::warn("[DCLF] material slot {} (pass {:X}) is stale:{}", slot, key.second, what);
-			}
-			for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f) {
-				if (served.ps.floats[f] != live.ps.floats[f])
-					NotePatchedFloat(f);
-			}
-			stats.materialDriftFloats = static_cast<std::uint32_t>(materialPatched.size());
-			tables.materials[slot] = live;
-			tables.materialVersion[slot] = ++materialVersions;
-			if (auto it = materialCache.find(key); it != materialCache.end())
-				it->second.record = live;
+			MaterialSources::CopyFrameComponents(live, served, key.second);
+			if (!(served == live))
+				NoteStaleMaterial(slot, key, served, live);
 		}
 	}
 

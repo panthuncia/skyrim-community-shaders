@@ -43,24 +43,32 @@ namespace DCLF
 	bool PassCapture::FadingAtRegistration(const RE::BSRenderPass* a_pass)
 	{
 		const auto* geometry = a_pass ? a_pass->geometry : nullptr;
-		const auto* property = geometry ? geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
+		if (!geometry)
+			return false;
+		// Accumulation hint 10 is always the native loop's: BSLightingShader::SetupGeometry draws it with the
+		// stencil dither (stencil mode 0xB, reference fade * 31) and, for a LOD cross-fade's single-level copy,
+		// MaterialData.z scaled by the fade node's cross-fade factor. Neither is modelled.
+		if (a_pass->accumulationHint == 10)
+			return true;
+		const auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
 		const auto* fadeNode = property ? property->fadeNode : nullptr;
 		if (!fadeNode)
 			return false;
 		const auto& fade = fadeNode->GetRuntimeData();
 		// A fade the engine draws in an opaque group is DCLF's (CS_DCLF_FADING): the pass is registered as usual
 		// and the fade reaches the shader in MaterialData.z. One it draws blended (accumulation hint 9, drawn
-		// with the transparent objects after the composite) or as a LOD cross-fade copy (hint 10) is not, and
-		// neither is a fading decal (hints 2 and 3). That one is a precaution, not a measurement: the decal
-		// probe's state mismatches turned out not to depend on the fade.
+		// with the transparent objects after the composite) is not, and neither is a fading decal (hints 2 and
+		// 3). That one is a precaution, not a measurement: the decal probe's state mismatches turned out not to
+		// depend on the fade.
 		const auto hint = a_pass->accumulationHint;
-		if (fade.currentFade < 1.0f && (!FadingEnabled() || hint == 9 || hint == 10 || hint == 2 || hint == 3))
+		if (fade.currentFade < 1.0f && (!FadingEnabled() || hint == 9 || hint == 2 || hint == 3))
 			return true;
-		// Crossing between LOD levels: for kMeshLOD geometry whose fade node's LOD state (+0x153 & 0x70) is not
-		// 0x20, GetRenderPasses (AE 1414adfb0) adds a second copy of every lighting pass - accumulation hint 10,
-		// one LOD level only - which the engine blends over the first. DCLF draws one pass per object, so the
-		// object is the native loop's until the crossing ends, like any other fade.
-		return geometry->GetFlags().any(RE::NiAVObject::Flag::kMeshLOD) && (fade.unk153 & 0x70) != 0x20;
+		// A LOD cross-fade (kMeshLOD, fade node LOD state +0x153 & 0x70 not 0x20) is not a fade of the object:
+		// GetRenderPasses (AE 1414adfb0) keeps its pass as it is - the new level, drawn as any settled object
+		// is - and adds the old level as a hint-10 copy, which is the native loop's (above). DCLF keeps the
+		// object through the crossing and the native loop draws only the copy (CS_DCLF_LOD_CROSSFADE); off,
+		// the whole object is the native loop's until the crossing ends.
+		return !LodCrossfadeEnabled() && geometry->GetFlags().any(RE::NiAVObject::Flag::kMeshLOD) && (fade.unk153 & 0x70) != 0x20;
 	}
 
 	void PassCapture::Record(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint32_t a_technique, bool a_fading, bool a_withheld)

@@ -52,6 +52,13 @@ namespace DCLF
 		 */
 		std::uint32_t Resolve(ID3D11ShaderResourceView* a_view);
 
+		/**
+		 * @brief A view Resolve has already seen: its index (a null view: the null descriptor, once created),
+		 * counted as a use. False for anything that would have to be imported, which only works inside an
+		 * epoch - outside one Resolve rejects the view, and the rejection sticks.
+		 */
+		bool Known(ID3D11ShaderResourceView* a_view, std::uint32_t& a_index);
+
 		/** @brief A null view's descriptor heap index (reads zero); kInvalid when unsupported. */
 		std::uint32_t NullIndex();
 

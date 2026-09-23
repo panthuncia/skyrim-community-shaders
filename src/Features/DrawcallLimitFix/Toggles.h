@@ -29,6 +29,7 @@ namespace DCLF
 		bool skinPartitions = false;  // CS_DCLF_SKIN_PARTITIONS=1 (needs skinned)
 		bool actors = false;          // CS_DCLF_ACTORS=1
 		bool fading = false;          // CS_DCLF_FADING=1
+		bool lodCrossfade = false;    // CS_DCLF_LOD_CROSSFADE=1
 		bool shadows = false;         // CS_DCLF_SHADOWS=1
 		bool shadowOwnership = false; // CS_DCLF_SHADOW_OWNERSHIP=static (needs shadows)
 		bool debugView = false;       // CS_DCLF_DEBUG_VIEW=1

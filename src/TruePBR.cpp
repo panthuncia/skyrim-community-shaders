@@ -1,5 +1,7 @@
 #include "TruePBR.h"
 
+#include "Features/DrawcallLimitFix/MaterialSources.h"
+
 #include "TruePBR/BSLightingShaderMaterialPBR.h"
 #include "TruePBR/BSLightingShaderMaterialPBRLandscape.h"
 
@@ -1245,6 +1247,8 @@ bool TruePBR::TESObjectLAND_SetupMaterial(RE::TESObjectLAND* land)
 					SetupLandscapeTexture(*material, *landTexture, textureIndex + 1, textureSets);
 				}
 			}
+			// Written in place after SetMaterial's copy: DCLF's material records follow the material's writes.
+			DCLF::MaterialSources::NoteWritten(material);
 
 			if (globals::game::bEnableLandFade->GetBool()) {
 				shaderProperty->unk108 = false;

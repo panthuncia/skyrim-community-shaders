@@ -280,10 +280,14 @@ namespace DCLF
 			std::uint32_t materialsFromCache = 0;     // records served without calling SetupMaterial
 			std::uint32_t materialsValidated = 0;     // cache entries re-evaluated and compared this frame
 			std::uint32_t materialCacheStale = 0;     // of those, ones that disagreed: must be 0
-			std::uint32_t materialDriftFloats = 0;    // frame-global floats patched into every served record
 			std::uint32_t materialCacheEntries = 0;
 			std::uint32_t materialCacheEvicted = 0;
-			std::uint32_t materialPatchResamples = 0;  // Prepass resamples of the patched floats
+			// MaterialSources: materials written this frame, and what became of their slots; the live
+			// evaluations the frame-sourced components were taken from (one per signature).
+			std::uint32_t materialWrites = 0;
+			std::uint32_t materialsRewritten = 0;
+			std::uint32_t materialsDropped = 0;
+			std::uint32_t frameMaterialSamples = 0;
 			bool materialDiffLogged = false;
 			// The Stage 4c gate, and the invariant it checks:
 			//
@@ -413,10 +417,12 @@ namespace DCLF
 		}
 		std::uint32_t GetFrame() const { return frame; }
 		/**
-		 * @brief The PS PerMaterial float positions RefreshMaterialPatch rewrites into every material each frame:
-		 * shader-level values (IBLParams), not the material's. Cumulative for the session; see materialPatched.
+		 * @brief The PerMaterial float positions refreshed every frame in the records without a new version
+		 * (MaterialSources): the build repacks them into a reused group. PS: the shader object's and the
+		 * engine globals' (RefreshFrameMaterials); VS: TexcoordOffset (RefreshTextureTransforms).
 		 */
-		const std::vector<std::uint32_t>& GetMaterialPatchedFloats() const { return materialPatched; }
+		const std::vector<std::uint32_t>& GetMaterialPatchedFloats() const;
+		const std::vector<std::uint32_t>& GetMaterialPatchedVSFloats() const;
 		/** @brief Bumped whenever the slot tables are reset or every cached verdict is dropped (InvalidateVerdicts). */
 		std::uint32_t GetTablesGeneration() const { return tablesGeneration; }
 
@@ -611,6 +617,7 @@ namespace DCLF
 		void ValidateSlice();
 		void FindLightingShader();
 		void CollectAccumulatedPasses();
+		void AddAccumulatedPass(const RE::BSGeometry* a_geometry, const AccumulatedPass& a_pass);
 		/** @brief Step B gate: the captured registrations against what the accumulator walk found. */
 		/** @brief The main camera's batch renderers, for the capture hook's filter. Cheap; every frame. */
 		bool RefreshMainBatchRenderers();
@@ -687,39 +694,28 @@ namespace DCLF
 		// Unlike the probe it replaced it is swept: entries unused for kMaterialCacheIdleFrames are
 		// dropped, because a cell change retires most of its contents at once and nothing else would.
 		ankerl::unordered_dense::map<std::pair<const RE::BSShaderMaterial*, std::uint32_t>, MaterialProbe> materialCache;
-		// Floats of the PS PerMaterial group that are NOT properties of the material at all: the engine
-		// reads them off the BSLightingShader object (variable 29, IBLParams, comes from this+0xcc..0xf0
-		// with a day/night selector at this+0xf0), so they hold the same value for every material in a
-		// frame and change as the frame's lighting does.
-		//
-		// The POSITIONS are cumulative for the session and the VALUES are refreshed every frame from one
-		// live evaluation. Cumulative is the whole correctness argument. The first version learned the
-		// positions afresh each frame as "floats that differ from the cached copy", which works only
-		// while the value drifts continuously: `set gamehour to 22` steps it once and then freezes it, so
-		// the next frame saw no difference, learned an empty set, patched nothing, and served every
-		// material its pre-step value for ever - capture parity failed on 220,500 of 276,300 draws with
-		// IBLParams.y reading 0.757 against a native 0.106. Once a position is known to vary it stays in
-		// the set, so a step is patched by the same mechanism as a drift.
-		std::vector<std::uint32_t> materialPatched;      // cumulative positions
-		std::vector<float> materialPatchValues;          // this frame's values, parallel
-		bool materialPatchValuesFresh = false;
-		void NotePatchedFloat(std::uint32_t a_index);
 		/** @brief Whether the cross-frame material cache is serving (CS_DCLF_MATERIAL_CACHE). */
 		static bool MaterialCacheEnabled();
-		// One (material, pass) the patched floats can be resampled from. They are shader-level, so any
-		// material answers for all of them; this just keeps a live one to ask.
-		RE::BSTSmartPointer<RE::BSShaderMaterial> materialPatchSource;
-		std::uint32_t materialPatchSourcePass = 0;
 		/**
-		 * @brief Resamples the patched floats at Prepass and rewrites them into every material record.
-		 *
-		 * BuildFrame runs at EarlyPrepass, and the floats it patches are not material properties at all -
-		 * they are the frame's lighting state, read off the BSLightingShader object. Sampling them that
-		 * early left them a fraction of a frame behind what the native draws read, which capture parity
-		 * saw as IBLParams differing in the sixth decimal during a fast lighting transition. This is the
-		 * same reason, and the same place, that the animated per-object shading is resampled.
+		 * @brief The frame-sourced components of every record drawn this frame (MaterialSources): one live
+		 * evaluation per signature at Prepass - the shader object's IBLParams, the engine globals, the
+		 * character light's t11 - copied into every record of that signature. At Prepass, not EarlyPrepass:
+		 * they are the frame's lighting state, and sampling them earlier left IBLParams a fraction of a frame
+		 * behind the native draws during a fast lighting transition. Nothing depth-only reads them.
 		 */
-		void RefreshMaterialPatch();
+		void RefreshFrameMaterials();
+		/** @brief End of the accumulate phase: this frame's TexcoordOffset into every record drawn this frame. */
+		void RefreshTextureTransforms();
+		/**
+		 * @brief End of the accumulate phase: the materials written since the last frame (MaterialSources).
+		 * A slot drawn this frame is re-evaluated; any other slot of such a material is dropped, as is its
+		 * cache entry, so its next use evaluates it afresh.
+		 */
+		void ProcessMaterialWrites();
+		ankerl::unordered_dense::set<const RE::BSShaderMaterial*> writtenMaterials;
+		/** @brief The alarm: a record that disagrees with a live evaluation outside its frame-sourced components. */
+		void NoteStaleMaterial(std::uint32_t a_slot, const std::pair<const RE::BSShaderMaterial*, std::uint32_t>& a_key, const MaterialRecord& a_served,
+			const MaterialRecord& a_live);
 		std::uint32_t materialValidationCursor = 0;
 		static constexpr std::uint32_t kMaterialValidationsPerFrame = 8;
 		static constexpr std::uint32_t kMaterialValidationStride = 4;

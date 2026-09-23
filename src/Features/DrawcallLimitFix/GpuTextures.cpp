@@ -257,6 +257,20 @@ namespace DCLF
 		return entry.index;
 	}
 
+	bool GpuTextures::Known(ID3D11ShaderResourceView* a_view, std::uint32_t& a_index)
+	{
+		if (!a_view) {
+			a_index = impl->nullIndex;
+			return impl->nullIndex != kInvalid;
+		}
+		const auto it = impl->entries.find(a_view);
+		if (it == impl->entries.end())
+			return false;
+		it->second.lastUsed = impl->frame;
+		a_index = it->second.index;
+		return true;
+	}
+
 	std::uint32_t GpuTextures::NullIndex()
 	{
 		if (impl->nullIndex != kInvalid)
@@ -354,6 +368,7 @@ namespace DCLF
 		return textures;
 	}
 	std::uint32_t GpuTextures::Resolve(ID3D11ShaderResourceView*) { return kInvalid; }
+	bool GpuTextures::Known(ID3D11ShaderResourceView*, std::uint32_t&) { return false; }
 	std::uint32_t GpuTextures::NullIndex() { return kInvalid; }
 	std::uint32_t GpuTextures::Sampler(std::uint32_t, std::uint32_t) { return kInvalid; }
 	void GpuTextures::BeginFrame(std::uint32_t) {}

@@ -2,6 +2,7 @@
 
 #include "Switches.h"
 #include "LightingConstants.h"
+#include "PassCapture.h"
 
 #include <cstring>
 
@@ -14,7 +15,7 @@ namespace DCLF
 {
 	namespace
 	{
-		constexpr std::size_t kMaxSamples = 8;
+		constexpr std::size_t kMaxSamples = 24;
 
 		// Constant buffers that change between eligible draws by design: Light Limit Fix's StrictLightData
 		// (PS b3; per object, ObjectLights, checked on its own), the permutation (b4, checked on its own),
@@ -253,9 +254,16 @@ namespace DCLF
 
 		// Expected values: the per-frame block for this pass descriptor with the per-object values on top.
 		auto& shadowState = globals::game::shadowState->GetRuntimeData();
-		const GeometryConstants expected = ObjectGeometryConstants(tables, a_objectIndex, a_renderFlags, shadowState.posAdjust.getEye(), shadowState.previousPosAdjust.getEye());
+		GeometryConstants expected = ObjectGeometryConstants(tables, a_objectIndex, a_renderFlags, shadowState.posAdjust.getEye(), shadowState.previousPosAdjust.getEye());
 		const auto& vsLayout = LightingVSLayout();
 		const auto& psLayout = LightingPSLayout();
+		// WindTimers.y, the previous wind timer, is not compared. SetupGeometry (AE 1414dd040, case 0xc) copies
+		// the tree node's current timer over its previous one (+0x168 = +0x164) after every native draw, so
+		// the value a native draw sees depends on whether another geometry of the same tree was drawn natively
+		// before it that frame - and DCLF does not write the engine's nodes. Lighting.hlsl reads it only into
+		// previousInputPosition, which nothing uses: it reaches no pixel, native or DCLF's.
+		if (vsLayout.size[kVSWindTimers] > 1)
+			expected.vs.floats[vsLayout.offset[kVSWindTimers] + 1] = std::bit_cast<float>(kUnwrittenBits);
 
 		auto* vs = *globals::game::currentVertexShader;
 		auto* ps = *globals::game::currentPixelShader;
@@ -616,6 +624,12 @@ namespace DCLF
 		const auto& object = tables.objects[index];
 		if (object.flags & kObjectNoBindings)
 			return;  // a culling candidate only: no material or pipeline entry to compare against
+		if (PassCapture::FadingAtRegistration(a_pass)) {
+			// The native loop's own pass of an object DCLF draws (a LOD cross-fade's hint-10 copy): nothing of
+			// DCLF's stands for it, so it is neither compared nor counted against the object's draws.
+			++nativeOnlyPasses;
+			return;
+		}
 		const auto& key = tables.pipelines[object.pipelineIndex];
 		const auto* state = globals::state;
 
@@ -663,9 +677,8 @@ namespace DCLF
 		if (mismatch)
 			++mismatchedDraws;
 		pendingObject = index;
-		// What its DrawIndexed calls should bind: the object's geometry, or each partition this pass draws - by
-		// the pass's own LODMode, which for a LOD cross-fade's extra single-level pass (hint 10) is not the one
-		// the tables' mask was taken from.
+		// What its DrawIndexed calls should bind: the object's geometry, or each partition this pass draws, by
+		// the pass's own LODMode.
 		pendingSlotCount = pendingSlotCursor = 0;
 		const auto* skin = geometry->GetGeometryRuntimeData().skinInstance.get();
 		const std::uint32_t partitions = skin && skin->skinPartition && skin->skinPartition->numPartitions > 1 ?
@@ -705,9 +718,9 @@ namespace DCLF
 		const char* cellName = cell ? cell->GetName() : nullptr;
 		logger::info("[DCLF] location: cell {:08X} '{}' ({})", cell ? cell->GetFormID() : 0u, cellName ? cellName : "",
 			cell && cell->IsInteriorCell() ? "interior" : "exterior");
-		logger::info("[DCLF] capture parity {}: {} native main-pass lighting draws, {} checked against the tables, {} mismatched ({} material, {} per-geometry, {} technique), {} untracked eligible, {} tracked but excluded; tables hold {} objects / {} geometries / {} pipelines ({} with shadow mask) / {} materials from {} tracked; render flags seen:{}",
+		logger::info("[DCLF] capture parity {}: {} native main-pass lighting draws, {} checked against the tables, {} mismatched ({} material, {} per-geometry, {} technique), {} untracked eligible, {} tracked but excluded, {} native-only passes of DCLF objects; tables hold {} objects / {} geometries / {} pipelines ({} with shadow mask) / {} materials from {} tracked; render flags seen:{}",
 			ok ? "OK" : "MISMATCH", nativeDraws, checkedDraws, mismatchedDraws, materialMismatches, geometryMismatches, techniqueMismatches, untrackedEligible,
-			notInTables, stats.objects, stats.geometries, stats.pipelines, stats.shadowMaskPipelines, stats.materials, stats.tracked, flags);
+			notInTables, nativeOnlyPasses, stats.objects, stats.geometries, stats.pipelines, stats.shadowMaskPipelines, stats.materials, stats.tracked, flags);
 		if (boneChecks)
 			logger::info("[DCLF] bone palette parity {}: {} palettes checked, {} differ", boneMismatches == 0 ? "OK" : "MISMATCH", boneChecks, boneMismatches);
 		boneChecks = boneMismatches = 0;
@@ -758,7 +771,7 @@ namespace DCLF
 		for (const auto& sample : samples)
 			logger::info("[DCLF]   {}", sample);
 
-		nativeDraws = checkedDraws = mismatchedDraws = untrackedEligible = notInTables = materialMismatches = geometryMismatches = 0;
+		nativeDraws = checkedDraws = mismatchedDraws = untrackedEligible = notInTables = nativeOnlyPasses = materialMismatches = geometryMismatches = 0;
 		drawMismatches = drawsChecked = 0;
 		techniqueMismatches = inheritedFilters = permutationChecks = permutationMismatches = lightChecks = lightMismatches = 0;
 		permutationDiffs.clear();

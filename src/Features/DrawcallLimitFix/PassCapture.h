@@ -126,9 +126,10 @@ namespace DCLF
 		/** @brief CS_DCLF_SHADOW_OWNERSHIP=static (live: Toggles.h): withhold claimed casters from the shadow views. */
 		static bool ShadowWithholdingEnabled();
 		/**
-		 * @brief Whether the pass's object is fading in a way DCLF leaves to the native loop, as it is
-		 * registered: a LOD cross-fade, a fade the engine draws blended (hint 9) or as a cross-fade copy (hint
-		 * 10), or any fade with CS_DCLF_FADING off. A screen-door fade in an opaque group is DCLF's. The cull
+		 * @brief Whether the pass is one DCLF leaves to the native loop because of a fade, as it is registered:
+		 * any accumulation hint 10 (the stencil-dithered fade, and a LOD cross-fade's copy of the old level), a
+		 * fade the engine draws blended (hint 9), or any fade with CS_DCLF_FADING off. A screen-door fade in an
+		 * opaque group is DCLF's, and so is a LOD cross-fade's own pass (the new level). The cull
 		 * has just updated the fade (BSFadeNode::OnVisible runs before the node's geometry registers), and this
 		 * is the one value both the withholding and the accumulate phase's fading verdict use
 		 * (AccumulatedPass::fading).
