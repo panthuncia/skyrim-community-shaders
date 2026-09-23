@@ -50,7 +50,7 @@ namespace DCLF
 			for (std::uint32_t level = 0; level < 3; ++level)
 				a_shader->constantBuffers[level].data = a_blocks[level].floats.data();
 			for (std::uint32_t i = 0; i < a_layout.count && i < a_shader->constantTable.size(); ++i)
-				a_shader->constantTable[i] = static_cast<std::int8_t>(a_layout.offset[i]);
+				a_shader->constantTable[i] = a_layout.offset[i];
 		}
 
 		ID3D11ShaderResourceView* TextureSentinel(std::uint32_t a_slot)

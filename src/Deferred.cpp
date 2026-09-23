@@ -679,6 +679,14 @@ void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumula
 	auto deferred = globals::deferred;
 
 	if (globals::shaderCache->IsEnabled() && globals::state->inWorld) {
+		// The opaque batches are done: DCLF draws its objects where the engine would have, before anything
+		// that blends onto or tests against them.
+		if (globals::features::drawcallLimitFix.loaded) {
+			globals::features::drawcallLimitFix.ProbeOpaqueTarget(false);
+			globals::features::drawcallLimitFix.AfterOpaquePass();
+			globals::features::drawcallLimitFix.ProbeOpaqueTarget(true);
+		}
+
 		auto& terrainBlending = globals::features::terrainBlending;
 		// Defer terrain rendering until after everything else
 		if (terrainBlending.loaded && terrainBlending.settings.Enabled) {

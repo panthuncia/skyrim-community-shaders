@@ -5,6 +5,7 @@
 #include <pystring/pystring.h>
 
 #include "Deferred.h"
+#include "Features/DrawcallLimitFix/Switches.h"
 #include "GpuIdleTrace.h"
 #include "FeatureIssues.h"
 #include "Features/CSEditor.h"
@@ -756,6 +757,13 @@ void State::SetDefines(std::string a_defines)
 
 std::vector<std::pair<std::string, std::string>>* State::GetDefines()
 {
+	// [TEMP] CS_DCLF_SHADOW_DEBUG_OUTPUT: the sun's shadow terms in place of the colour, native and DCLF alike.
+	static const bool shadowDebug = DCLF::SwitchEnabled("CS_DCLF_SHADOW_DEBUG_OUTPUT");
+	if (shadowDebug && std::ranges::none_of(shaderDefines, [](const auto& a_define) { return a_define.first == "DCLF_SHADOW_DEBUG"; })) {
+		shaderDefines.emplace_back("DCLF_SHADOW_DEBUG", "1");
+		// The disk cache's file names carry this string, so the debug builds are cached apart.
+		shaderDefinesString += shaderDefinesString.empty() ? "DCLF_SHADOW_DEBUG=1" : ";DCLF_SHADOW_DEBUG=1";
+	}
 	return &shaderDefines;
 }
 

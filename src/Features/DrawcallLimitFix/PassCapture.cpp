@@ -167,6 +167,18 @@ namespace DCLF
 		return toggles.shadows && toggles.shadowOwnership;
 	}
 
+	bool PassCapture::CascadeProbeEnabled()
+	{
+		static const bool enabled = SwitchEnabled("CS_DCLF_CASCADE_PROBE");
+		return enabled;
+	}
+
+	std::vector<PassCapture::ShadowRegistration> PassCapture::TakeShadowRegistrations()
+	{
+		std::lock_guard lock(shadowRegistrationsLock);
+		return std::exchange(shadowRegistrations, {});
+	}
+
 	void PassCapture::SetShadowBatchRenderers(std::shared_ptr<const ShadowRendererMap> a_renderers)
 	{
 		std::atomic_store(&shadowRenderers, std::move(a_renderers));
@@ -207,7 +219,13 @@ namespace DCLF
 			if (it == renderers->end() || it->second >= kShadowModes)
 				return false;
 			const auto owned = std::atomic_load(&shadowClaims[it->second]);
-			if (owned && owned->contains(a_pass->geometry)) {
+			const bool claimed = owned && owned->contains(a_pass->geometry);
+			if (CascadeProbeEnabled()) {
+				std::lock_guard lock(shadowRegistrationsLock);
+				if (shadowRegistrations.size() < 65536)
+					shadowRegistrations.push_back({ a_batch, a_pass->geometry, claimed });
+			}
+			if (claimed) {
 				shadowWithheld[it->second].fetch_add(1, std::memory_order_relaxed);
 				return true;
 			}

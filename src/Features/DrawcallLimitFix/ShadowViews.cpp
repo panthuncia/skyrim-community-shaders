@@ -26,7 +26,8 @@ namespace DCLF
 
 	const char* ShadowRejectName(ShadowReject a_reason)
 	{
-		constexpr const char* kNames[] = { "eligible", "not-lighting", "decl-0", "faded", "refraction", "alpha-blended", "decal-no-zwrite", "no-cast-shadows" };
+		constexpr const char* kNames[] = { "eligible", "not-lighting", "decl-0", "faded", "refraction", "alpha-blended", "decal-no-zwrite", "no-cast-shadows", "volumetric-only" };
+		static_assert(std::size(kNames) == static_cast<std::size_t>(ShadowReject::Count));
 		const auto index = static_cast<std::size_t>(a_reason);
 		return index < std::size(kNames) ? kNames[index] : "?";
 	}
@@ -39,8 +40,9 @@ namespace DCLF
 		const std::uint64_t flags = lighting->flags.underlying();
 		const auto* alpha = a_geometry->GetGeometryRuntimeData().alphaProperty.get();
 		const bool blended = alpha && (alpha->alphaFlags & 1);
-		const bool decalLike = (flags & Bit(18)) && (flags & (Bit(26) | Bit(27)));
-		if (decalLike && !((flags & Bit(32)) && blended))
+		const bool decal = (flags & (Bit(26) | Bit(27))) != 0;
+		const bool decalLike = decal && (flags & Bit(18));
+		if (decal && !(decalLike && (flags & Bit(32)) && blended))
 			return ShadowReject::DecalNoZWrite;
 		const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(lighting->material);
 		const float fade = lighting->fadeNode ? const_cast<RE::BSFadeNode*>(lighting->fadeNode)->GetRuntimeData().currentFade : 1.0f;
@@ -50,8 +52,14 @@ namespace DCLF
 			return ShadowReject::Refraction;
 		if (blended && !decalLike)
 			return ShadowReject::AlphaBlended;
-		if (!(flags & Bit(9)) && ShadowGlobal() == 1)
-			return ShadowReject::NoCastShadows;
+		// GetRenderPasses_ShadowMapOrMask, for a shadow mode and kCastShadows clear: global 1 registers no pass;
+		// global 2 registers only the volumetric copy's pass (see VolumetricOnly); global 0 casts as usual.
+		if (!(flags & Bit(9))) {
+			if (ShadowGlobal() == 1)
+				return ShadowReject::NoCastShadows;
+			if (ShadowGlobal() == 2)
+				return ShadowReject::VolumetricOnly;
+		}
 		if (const_cast<RE::BSLightingShaderProperty*>(lighting)->DetermineUtilityShaderDecl() == 0)
 			return ShadowReject::DeclZero;
 		return ShadowReject::None;

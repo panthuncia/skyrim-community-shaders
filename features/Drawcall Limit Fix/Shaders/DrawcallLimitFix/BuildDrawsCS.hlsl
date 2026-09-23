@@ -39,7 +39,7 @@ cbuffer BuildDrawsConstants : register(b0)
 // first three words of the latch are this dispatch's own indirect arguments.
 static uint DrawCount;
 // Bits 0-3 are the mode (0 off, 1 frustum, 2 frustum then the HZB), bits 4-7 the phase (from the push
-// constants), and bit 8 RequireNativeVisible.
+// constants), bit 8 RequireNativeVisible, and bit 9 NoNearPlane.
 static uint CullFlags;
 // Stamps the verdicts this frame publishes. A word that does not carry the current stamp was not
 // written this frame, and the colour segment then treats the object as visible rather than trusting a
@@ -55,6 +55,15 @@ static uint HzbUvScalePacked;
 // The main pass's view-projection with the camera translation already folded into it, so a bound's
 // absolute world position projects directly.
 static float4x4 ViewProj;
+// A shadow view's caster volume, as the engine culls its casters (NiCullingProcess::customCullPlanes):
+// absolute world space, (normal, constant), inside where dot(normal, p) - constant >= 0. CullPlaneMask says
+// which are tested; it is 0 for the main camera.
+static uint CullPlaneMask;
+static float4 CullPlanes[6];
+// A shadow view's row of the pipeline map, in bytes into the latch block: its inputs name key slots, and
+// the row holds each slot's pipeline under the view's rasterizer state (depth bias, culling). 0 when the
+// inputs name pipelines themselves (the main camera).
+static uint PipelineMapOffset;
 
 void LoadLatch()
 {
@@ -64,8 +73,24 @@ void LoadLatch()
 	CullFlags = (head.y & ~0xF0u) | (PhaseBits & 0xF0u);
 	VisibilityStamp = head.z;
 	HzbUvScalePacked = head.w;
+	CullPlaneMask = latch.Load(LatchOffset + 28);
+	[unroll] for (uint p = 0; p < 6; ++p)
+		CullPlanes[p] = asfloat(latch.Load4(LatchOffset + 96 + p * 16));
 	ViewProj = float4x4(asfloat(latch.Load4(LatchOffset + 32)), asfloat(latch.Load4(LatchOffset + 48)),
 		asfloat(latch.Load4(LatchOffset + 64)), asfloat(latch.Load4(LatchOffset + 80)));
+	PipelineMapOffset = latch.Load(LatchOffset + 192);
+}
+
+// The draw's pipeline: the input's own, or its key slot's through the view's row of the pipeline map.
+// kNoPipeline when the row has none, which the CPU never lets an input reach; the draw is then dropped
+// rather than executed with an index outside the set.
+static const uint kNoPipeline = 0xFFFFFFFFu;
+uint DrawPipeline(uint a_input)
+{
+	if (PipelineMapOffset == 0)
+		return a_input;
+	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
+	return latch.Load(PipelineMapOffset + a_input * 4);
 }
 
 uint CullMode() { return CullFlags & 0xF; }
@@ -98,6 +123,9 @@ static const uint kVisibilityStampShift = 4;
 // decides and DCLF draws objects the engine culled. The counters are written either way, so the
 // cross-tabulation below measures the culling against the engine even while the gate is on.
 bool RequireNativeVisible() { return (CullFlags & 0x100) != 0; }
+// A clamped shadow view (render mode 0xE) pancakes what lies in front of its near plane onto it
+// (Utility.hlsl: RENDER_SHADOWMAP_CLAMPED), so a caster there still writes depth and must be kept.
+bool NoNearPlane() { return (CullFlags & 0x200) != 0; }
 
 uint2 HzbBaseSize() { return uint2(HzbSizePacked & 0xFFFF, HzbSizePacked >> 16); }
 float2 HzbUvScale() { return float2(HzbUvScalePacked & 0xFFFF, HzbUvScalePacked >> 16) / 65535.0; }
@@ -177,6 +205,10 @@ static const uint kIndexFormatR16 = 57;  // DXGI_FORMAT_R16_UINT
 bool Culled(float3 boundCentre, float boundRadius)
 {
 	const float3 centre = boundCentre;
+	[unroll] for (uint p = 0; p < 6; ++p) {
+		if ((CullPlaneMask & (1u << p)) && dot(CullPlanes[p].xyz, centre) - CullPlanes[p].w < -boundRadius)
+			return true;
+	}
 	float4 planes = float4(1, 1, 1, 1);  // all-corners-outside accumulators: -x, +x, -y, +y
 	float2 depthPlanes = float2(1, 1);   // near, far
 	[unroll] for (uint corner = 0; corner < 8; ++corner) {
@@ -190,7 +222,7 @@ bool Culled(float3 boundCentre, float boundRadius)
 		planes.y *= (clip.x > clip.w) ? 1 : 0;
 		planes.z *= (clip.y < -clip.w) ? 1 : 0;
 		planes.w *= (clip.y > clip.w) ? 1 : 0;
-		depthPlanes.x *= (clip.z < 0) ? 1 : 0;
+		depthPlanes.x *= (clip.z < 0 && !NoNearPlane()) ? 1 : 0;
 		depthPlanes.y *= (clip.z > clip.w) ? 1 : 0;
 	}
 	return any(planes != 0) || any(depthPlanes != 0);
@@ -441,6 +473,9 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	// visible and its visibility has been published.
 	if (!drawable)
 		return;
+	const uint pipeline = DrawPipeline(input.x);
+	if (pipeline == kNoPipeline)
+		return;
 
 	// 64-bit record address = RecordsAddress + record index * RecordStride.
 	const uint recordOffset = input.y * RecordStride;
@@ -467,7 +502,7 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 			if (slot >= kPhaseTwoSequenceBase)
 				return;
 			const uint base = (slot + (phase == kPhaseTwo ? kPhaseTwoSequenceBase : 0)) * kSequenceStride;
-			sequences.Store(base + 0, input.x);
+			sequences.Store(base + 0, pipeline);
 			sequences.Store3(base + 4, uint3(recordLo, recordHi, objectIndex));
 			sequences.Store4(base + 16, vertexBuffer);
 			sequences.Store4(base + 32, uint4(indexBuffer.xyz, kIndexFormatR16));

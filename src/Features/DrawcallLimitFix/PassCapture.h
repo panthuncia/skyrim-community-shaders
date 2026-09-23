@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <vector>
 
@@ -221,6 +222,19 @@ namespace DCLF
 		std::array<std::atomic<std::uint32_t>, kShaderTypes> probeCounts{};
 		std::array<std::atomic<std::uint32_t>, kShaderTypes> probeMain{};
 
+		// [TEMP] CS_DCLF_CASCADE_PROBE: every Utility registration into a shadow view's renderer this frame,
+		// withheld or not, so the far-cascade probe can compare the engine's per-view caster set with DCLF's.
+		struct ShadowRegistration
+		{
+			const RE::BSBatchRenderer* batch;
+			const RE::BSGeometry* geometry;
+			bool withheld;
+		};
+		static bool CascadeProbeEnabled();
+		std::vector<ShadowRegistration> TakeShadowRegistrations();
+
 	private:
+		std::mutex shadowRegistrationsLock;  // [TEMP] diagnostics only
+		std::vector<ShadowRegistration> shadowRegistrations;
 	};
 }

@@ -10,6 +10,7 @@
 #	include "ConstantMirror.h"
 #	include "DrawPipelines.h"
 #	include "DrawPipelinesRhi.h"
+#	include "EngineStates.h"
 #	include "GpuResources.h"
 #	include "GpuTextures.h"
 #	include "LightingConstants.h"
@@ -17,6 +18,10 @@
 #	include "SceneStore.h"
 #	include "ShaderPrograms.h"
 #	include "ShadowViews.h"
+#	include "RE/B/BSShadowLight.h"
+#	include "RE/B/BSShadowDirectionalLight.h"
+#	include "RE/B/BSCullingProcess.h"
+#	include "RE/N/NiCamera.h"
 #	include "Toggles.h"
 #	include "Switches.h"
 #	include "VertexInput.h"
@@ -63,6 +68,8 @@ namespace DCLF
 		// interior with several shadow-casting point lights has two hemispheres per light.
 		constexpr std::uint32_t kMaxShadowViews = 16;
 		constexpr std::uint32_t kShadowModeCount = 3;  // render modes 0xD plain, 0xE clamped, 0xF paraboloid
+		// Key slots a shadow epoch can name (Lookups::shadowSlotKeys): one per caster key and render mode.
+		constexpr std::uint32_t kMaxShadowSlots = 1024;
 		constexpr std::uint64_t kShadowConstantBytes = 1ull << 20;
 		// Fixed slots at the head of the shadow constants: the view's Utility PerTechnique block and its
 		// VS_PerFrame block, rewritten per view so that the records built once a frame can point at them.
@@ -71,9 +78,11 @@ namespace DCLF
 		constexpr std::uint64_t kShadowViewSlotBytes = 256 + 1024;
 		constexpr std::uint64_t kShadowMaterialBlocksOffset = kShadowViewSlotBytes * kMaxShadowViews;
 		// [0] kSHADOWMAPS_ESRAM (cascades, spot lights), [1] kSHADOWMAPS (point and focus lights), and
-		// [2] kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM: the engine draws the cascades a second time into it for
-		// the volumetric lighting, through the same batch renderer, so a caster withheld from the renderer
-		// is missing from both draws and DCLF has to draw both (S2: the two "not ready" views per frame).
+		// [2] kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM, which DCLF leaves alone: the engine's
+		// second draw of the cascades into it, for the volumetric lighting, runs the same batch renderer with
+		// flag 0x100, and that draws batch group 15 alone (FUN_1414b44f0) - the passes registered with
+		// accumulation hint 8, which are the volumetric-only casters (ShadowReject::VolumetricOnly), unclaimed
+		// and so drawn by the engine. See ExecuteShadowView.
 		constexpr std::uint32_t kShadowDepthTargets = 3;
 		constexpr std::uint32_t kMaxDraws = 16384;
 		constexpr std::uint64_t kConstantBytes = 48ull << 20;
@@ -135,7 +144,7 @@ namespace DCLF
 		// BuildDrawsCS.hlsl's inputs (byte-address buffers).
 		struct DrawInput
 		{
-			std::uint32_t pipelineIndex;  // in the pipeline sets
+			std::uint32_t pipelineIndex;  // in the pipeline sets; a shadow input's key slot (Lookups::shadowSlots)
 			std::uint32_t recordIndex;    // DrawBindings record
 			std::uint32_t geometryIndex;  // GeometryDraw
 			std::uint32_t flags;          // object flags, plus kInputDrawable for this epoch
@@ -217,15 +226,32 @@ namespace DCLF
 		{
 			std::uint32_t dispatch[3];      // groups x, y, z
 			std::uint32_t drawCount;        // inputs to cull
-			std::uint32_t cullFlags;        // mode in bits 0-3, RequireNativeVisible at 8 (the phase is pushed)
+			std::uint32_t cullFlags;        // mode in bits 0-3, RequireNativeVisible at 8, NoNearPlane at 9 (the phase is pushed)
 			std::uint32_t visibilityStamp;  // marks the verdicts as this frame's; see BuildDrawsCS.hlsl
 			std::uint32_t hzbUvScalePacked; // rendered area over the area the HZB covers, 16-bit fixed point
-			std::uint32_t padding;
+			std::uint32_t cullPlaneMask;    // which of cullPlanes are tested; 0 for the main camera
 			// Row-major, as the shader's float4x4 with mul(M, v), with the camera translation folded in so
 			// that an absolute world position projects directly.
 			float viewProj[16];
+			// A shadow view's caster volume as the engine culls it: the view's culling process's custom planes
+			// (NiCullingProcess::customCullPlanes), absolute world space, (normal, constant) with the inside
+			// where dot(normal, p) - constant >= 0.
+			float cullPlanes[6][4];
+			// A shadow view's row of the pipeline map, in bytes into the latch block: the view's inputs name key
+			// slots, and the row holds each slot's pipeline under the view's rasterizer state. 0 when the inputs
+			// name pipelines themselves (the main camera).
+			std::uint32_t pipelineMapOffset;
+			std::uint32_t padding[3];
 		};
-		static_assert(sizeof(BuildDrawsLatch) == 96 && offsetof(BuildDrawsLatch, viewProj) == 32);
+		static_assert(sizeof(BuildDrawsLatch) == 208 && offsetof(BuildDrawsLatch, viewProj) == 32 && offsetof(BuildDrawsLatch, cullPlanes) == 96 &&
+					  offsetof(BuildDrawsLatch, pipelineMapOffset) == 192);
+		// The shadow latch block: the views' latches, then one pipeline map row per view rasterizer state.
+		constexpr std::uint32_t kShadowPipelineMapOffset = kMaxShadowViews * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch));
+		constexpr std::uint32_t kShadowPipelineMapRowBytes = kMaxShadowSlots * static_cast<std::uint32_t>(sizeof(std::uint32_t));
+		constexpr std::uint32_t kShadowLatchBytes = kShadowPipelineMapOffset + DrawPipelines::kMaxShadowRasterStates * kShadowPipelineMapRowBytes;
+		// cullFlags: a clamped shadow view (0xE) pancakes casters in front of its near plane onto it
+		// (Utility.hlsl: RENDER_SHADOWMAP_CLAMPED), so the near plane rejects nothing there.
+		constexpr std::uint32_t kCullNoNearPlane = 0x200;
 
 		// A draw's ExecuteIndirect max count: a power of two that only grows, so the recording settles while
 		// the preprocess memory stays near what the frame draws (the GPU count buffer says how many run).
@@ -1992,6 +2018,9 @@ namespace DCLF
 			std::uint32_t renderFlags = 0;
 			RE::NiPoint3 refEye;
 			std::array<bool, kShadowModeCount> modeUsed{};
+			// Per mode, the rasterizer states of its views (bit DrawPipelines::ShadowRasterStateId): a caster is
+			// an input only when its pipeline is ready under every one of them.
+			std::array<std::uint32_t, kShadowModeCount> modeRasterStates{};
 			ResourceAddresses addresses{};
 			// Community Shaders' SharedData (b5) and FeatureData (b6), copied from the structs CS keeps.
 			std::vector<std::byte> sharedData, featureData;
@@ -2206,7 +2235,7 @@ namespace DCLF
 			a_out.insert(a_out.end(), bytes, bytes + sizeof(T));
 		}
 
-		void AppendSource(std::vector<std::byte>& a_out, std::span<const std::int8_t> a_table)
+		void AppendSource(std::vector<std::byte>& a_out, std::span<const std::uint8_t> a_table)
 		{
 			AppendSource(a_out, a_table.size());
 			const auto* bytes = reinterpret_cast<const std::byte*>(a_table.data());
@@ -2271,7 +2300,7 @@ namespace DCLF
 			struct PipelineBlocks
 			{
 				std::uint32_t setIndex = Lookups::kNone;
-				std::span<const std::int8_t> vsTable, psTable;
+				std::span<const std::uint8_t> vsTable, psTable;
 				const Lookups::RegisterUsageBits* usage = nullptr;
 				std::uint32_t shadowMaskIndex = Lookups::kNone;
 				std::uint64_t techniqueVS = 0, techniquePS = 0;
@@ -2312,7 +2341,7 @@ namespace DCLF
 						cached->techniqueVS.valid = cached->techniquePS.valid = cached->hasGeometry = false;
 					}
 				}
-				auto pack = [&](const ConstantBlock& a_block, const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_first,
+				auto pack = [&](const ConstantBlock& a_block, const StageLayout& a_layout, std::span<const std::uint8_t> a_table, std::uint64_t a_variables, std::uint32_t a_first,
 								BuildCache::PackedGroup* a_packed) {
 					if (a_packed && a_packed->valid) {
 						const auto address = block(nullptr, a_packed->size);
@@ -2687,7 +2716,7 @@ namespace DCLF
 							const auto found = a_cache->pairs.find(pairKey);
 							cachedPair = found != a_cache->pairs.end() ? &found->second : nullptr;
 						}
-						auto pack = [&](const ConstantBlock& a_block, const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_first,
+						auto pack = [&](const ConstantBlock& a_block, const StageLayout& a_layout, std::span<const std::uint8_t> a_table, std::uint64_t a_variables, std::uint32_t a_first,
 										BuildCache::PackedGroup* a_packed) {
 							if (a_packed && a_packed->valid) {
 								const auto address = block(nullptr, a_packed->size);
@@ -3144,17 +3173,30 @@ namespace DCLF
 					const std::uint32_t technique = a_tables.shadowTechnique[o] | modeBits;
 					const ShadowPipelineKey key{ technique, (object.flags & kObjectTwoSided) ? kRasterTwoSided : 0u,
 						VertexLayoutOf(a_tables.geometries[object.geometryIndex].vertexDesc) };
-					const auto pipelineIt = a_lookups.shadowPipelines.find(key);
-					if (pipelineIt == a_lookups.shadowPipelines.end()) {
+					const auto slotIt = a_lookups.shadowSlots.find(key);
+					if (slotIt == a_lookups.shadowSlots.end()) {
 						++a_out.deferredPipelines;
 						++a_out.skippedPipeline;
 						continue;
 					}
-					if (pipelineIt->second == Lookups::kNone) {
+					// Every view of the mode has to be able to draw it: the claim withholds the engine's pass
+					// from all of them, so a view without the pipeline would leave the caster to nobody.
+					bool deferred = false, missing = false;
+					for (std::uint32_t states = a_in.modeRasterStates[m]; states; states &= states - 1) {
+						const auto& row = a_lookups.shadowMapRows[std::countr_zero(states)];
+						const std::uint32_t pipeline = slotIt->second < row.size() ? row[slotIt->second] : Lookups::kNone;
+						if (pipeline == Lookups::kNone) {
+							// Not resolved yet, or resolved to nothing: which of the two is in shadowPipelines.
+							const auto pipelineIt = a_lookups.shadowPipelines.find({ technique, WithShadowState(key.rasterFlags, std::countr_zero(states)), key.vertexLayout });
+							(pipelineIt == a_lookups.shadowPipelines.end() ? deferred : missing) = true;
+						}
+					}
+					if (deferred || missing || a_in.modeRasterStates[m] == 0) {
+						a_out.deferredPipelines += deferred ? 1 : 0;
 						++a_out.skippedPipeline;
 						continue;
 					}
-					inputs.push_back({ pipelineIt->second, objectRecord[o], object.geometryIndex, (object.flags & ~kObjectDecal) | kInputDrawable,
+					inputs.push_back({ slotIt->second, objectRecord[o], object.geometryIndex, (object.flags & ~kObjectDecal) | kInputDrawable,
 						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius, static_cast<std::uint32_t>(o), 0,
 						PartitionsOf(a_tables, static_cast<std::uint32_t>(o)) });
 				}
@@ -3274,7 +3316,8 @@ namespace DCLF
 		}
 
 		/** @brief The shadow epoch's entries: the alpha-tested casters' diffuse textures, and the pipelines of the modes in use. */
-		void RefreshShadowLookups(const SceneStore::Tables& a_tables, const std::array<bool, kShadowModeCount>& a_modeUsed, DXGI_FORMAT a_dsvFormat, Lookups& a_lookups)
+		void RefreshShadowLookups(const SceneStore::Tables& a_tables, const std::array<bool, kShadowModeCount>& a_modeUsed,
+			const std::array<std::uint32_t, kShadowModeCount>& a_modeRasterStates, DXGI_FORMAT a_dsvFormat, Lookups& a_lookups)
 		{
 			auto& textures = GpuTextures::Get();
 			auto& pipelines = DrawPipelines::Get();
@@ -3297,14 +3340,32 @@ namespace DCLF
 					if (!a_modeUsed[m])
 						continue;
 					const std::uint32_t modeBits = ShadowModeBits(PassCapture::kFirstShadowMode + m);
-					const ShadowPipelineKey viewKey{ key.technique | modeBits, key.rasterFlags, key.vertexLayout };
-					const auto* program = programs.FindShadow(viewKey.technique, *utility);
-					const std::uint32_t set = program ? pipelines.FindShadow(viewKey, *program, a_dsvFormat) : DrawPipelines::kNotReady;
-					const std::uint32_t index = set == DrawPipelines::kNotReady ? Lookups::kNone : set;
-					auto [it, inserted] = a_lookups.shadowPipelines.try_emplace(viewKey, index);
-					if (inserted || it->second != index) {
+					const ShadowPipelineKey slotKey{ key.technique | modeBits, key.rasterFlags, key.vertexLayout };
+					auto slotIt = a_lookups.shadowSlots.find(slotKey);
+					if (slotIt == a_lookups.shadowSlots.end()) {
+						if (a_lookups.shadowSlotKeys.size() >= kMaxShadowSlots)
+							continue;  // its casters stay native
+						slotIt = a_lookups.shadowSlots.emplace(slotKey, static_cast<std::uint32_t>(a_lookups.shadowSlotKeys.size())).first;
+						a_lookups.shadowSlotKeys.push_back(slotKey);
 						++a_lookups.generation;
-						it->second = index;
+					}
+					const std::uint32_t slot = slotIt->second;
+					const auto* program = programs.FindShadow(slotKey.technique, *utility);
+					// The key under each rasterizer state its mode's views draw with.
+					for (std::uint32_t states = a_modeRasterStates[m]; states; states &= states - 1) {
+						const auto state = static_cast<std::uint32_t>(std::countr_zero(states));
+						const ShadowPipelineKey viewKey{ slotKey.technique, WithShadowState(slotKey.rasterFlags, state), slotKey.vertexLayout };
+						const std::uint32_t set = program ? pipelines.FindShadow(viewKey, *program, a_dsvFormat) : DrawPipelines::kNotReady;
+						const std::uint32_t index = set == DrawPipelines::kNotReady ? Lookups::kNone : set;
+						auto [it, inserted] = a_lookups.shadowPipelines.try_emplace(viewKey, index);
+						if (inserted || it->second != index) {
+							++a_lookups.generation;
+							it->second = index;
+						}
+						auto& row = a_lookups.shadowMapRows[state];
+						if (row.size() <= slot)
+							row.resize(slot + 1, Lookups::kNone);
+						row[slot] = index;
 					}
 				}
 			}
@@ -3342,6 +3403,7 @@ namespace DCLF
 		{
 			return a_job.frameNumber == a_epoch.frameNumber && a_job.renderFlags == a_epoch.renderFlags &&
 			       std::memcmp(&a_job.refEye, &a_epoch.refEye, sizeof(RE::NiPoint3)) == 0 && a_job.modeUsed == a_epoch.modeUsed &&
+			       a_job.modeRasterStates == a_epoch.modeRasterStates &&
 			       a_job.addresses == a_epoch.addresses && a_job.sharedData == a_epoch.sharedData && a_job.featureData == a_epoch.featureData &&
 			       a_job.lookupGeneration == a_epoch.lookupGeneration && a_job.tablesGeneration == a_epoch.tablesGeneration &&
 			       a_job.sceneRebuilds == a_epoch.sceneRebuilds;
@@ -3507,6 +3569,11 @@ namespace DCLF
 			RE::NiPoint3 eye;
 			bool hasViewProj = false;
 			std::array<float, 16> viewProj{};
+			// The engine's caster volume for the view (NiCullingProcess::customCullPlanes), when its culling
+			// process has one; see BuildDrawsLatch::cullPlanes.
+			float cullPlanes[6][4] = {};
+			std::uint32_t cullPlaneMask = 0;
+			std::uint32_t rasterState = 0;  // DrawPipelines::ShadowRasterStateId of the state the engine draws it with
 			float viewBlock[12] = {};  // PerTechnique: HighDetailRange, ParabolaParam, EyeDelta
 			std::array<std::byte, 1024> perFrame{};
 			std::uint32_t perFrameBytes = 0;
@@ -3529,13 +3596,15 @@ namespace DCLF
 			AsyncWorker::JobHandle handle;
 			ShadowInputs inputs;
 			std::array<bool, kShadowModeCount> modes{};
+			std::array<std::uint32_t, kShadowModeCount> rasterStates{};
 			bool modesKnown = false;
 			std::uint32_t views = 0;  // last frame's view count: the record slots the job stages
 			std::uint32_t loggedStale = 0;
 			std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>> stagedPool;
 		} shadowJob;
 		ShadowPayload shadowProbePayload;
-		ShadowInputs PrepareShadowInputs(const SceneStore& a_store, const ShadowResources& a_resources, const std::array<bool, kShadowModeCount>& a_modeUsed) const;
+		ShadowInputs PrepareShadowInputs(const SceneStore& a_store, const ShadowResources& a_resources, const std::array<bool, kShadowModeCount>& a_modeUsed,
+			const std::array<std::uint32_t, kShadowModeCount>& a_modeRasterStates) const;
 		void DropShadowJob(IndirectDraws::Stats& a_stats);
 		std::uint32_t shadowLoggedReasons = 0;
 		bool ShadowNotReady(std::uint32_t a_reason, const char* a_what)
@@ -4003,7 +4072,7 @@ namespace DCLF
 			shadowSetupFailed = true;
 			return ShadowNotReady(1, "the BuildDraws dispatch signature could not be created");
 		}
-		state->latch = std::make_shared<org::LatchBlock>("cs.dclf.shadow.latch", static_cast<std::uint32_t>(kMaxShadowViews * sizeof(BuildDrawsLatch)), host->FrameSlots());
+		state->latch = std::make_shared<org::LatchBlock>("cs.dclf.shadow.latch", kShadowLatchBytes, host->FrameSlots());
 		state->constantsAddress = device.GetBufferDeviceAddress({ state->constants->GetAPIResource().GetHandle(), 0 });
 		state->recordsAddress = device.GetBufferDeviceAddress({ state->records->GetAPIResource().GetHandle(), 0 });
 		if (!state->constantsAddress || !state->recordsAddress) {
@@ -4100,6 +4169,13 @@ namespace DCLF
 		                                  target == RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS                           ? 1u :
 		                                  target == RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM ? 2u :
 		                                                                                                                     ~0u;
+		// The volumetric lighting copy holds only the volumetric-only casters (batch group 15, which is all the
+		// engine's flag-0x100 draw of the view renders), none of them DCLF's: it is left to the engine whole.
+		// Drawing the casters there too filled 20 % more of it than the engine does.
+		if (target == RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM) {
+			++shadowStats.volumetricSkipped;
+			return;
+		}
 		if (targetIndex == ~0u || !impl->ImportShadowDepth(targetIndex, target)) {
 			// Which target, once per target: anything here is a view the design has not met.
 			if (target < 32 && !((impl->shadowLoggedTargets >> target) & 1)) {
@@ -4111,6 +4187,23 @@ namespace DCLF
 		}
 		if (impl->pendingViews.size() >= kMaxShadowViews)
 			return notReady(ShadowNotReady::Capacity);
+		// The rasterizer state the engine draws this view with: its table entry for the renderer's modes, read
+		// now, while the view is drawn - Community Shaders' ShadowmapCascadeRasterizerFix swaps per-cascade
+		// copies with their own depth bias into that table for exactly this window, and the volumetric copy
+		// draws with culling off. DCLF's pipelines for the view are built with it.
+		std::uint32_t rasterState = 0;
+		{
+			const std::uint32_t fill = shadowState.rasterStateFillMode, cull = shadowState.rasterStateCullMode;
+			const std::uint32_t bias = shadowState.rasterStateDepthBiasMode, scissor = shadowState.rasterStateScissorMode;
+			if (fill < 2 && cull < 3 && bias < 12 && scissor < 2)
+				if (auto* engineState = EngineRasterStates()[fill][cull][bias][scissor]) {
+					D3D11_RASTERIZER_DESC desc{};
+					engineState->GetDesc(&desc);
+					rasterState = pipelines.ShadowRasterStateId(desc, a_renderMode);
+				}
+		}
+		if (rasterState == 0)
+			return notReady(ShadowNotReady::Pipelines);
 
 		auto& view = impl->pendingViews.emplace_back();
 		view.viewId = a_viewId;
@@ -4118,6 +4211,7 @@ namespace DCLF
 		view.modeIndex = a_renderMode - PassCapture::kFirstShadowMode;
 		view.targetIndex = targetIndex;
 		view.slice = slice;
+		view.rasterState = rasterState;
 		if (auto* dsv = globals::game::renderer->GetDepthStencilData().depthStencils[target].views[0]) {
 			D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
 			dsv->GetDesc(&dsvDesc);
@@ -4130,6 +4224,24 @@ namespace DCLF
 		view.minDepth = shadowState.viewPort.MinDepth;
 		view.maxDepth = shadowState.viewPort.MaxDepth;
 		view.eye = shadowState.posAdjust.getEye();
+		// The caster volume the engine culled this view's casters against: BSShadowDirectionalLight::UpdateCamera
+		// builds it from the main camera frustum's corners and the light direction into the descriptor's culling
+		// process, and the accumulation's cull (FUN_1414f0920) tests it on top of the shadow camera's frustum. It
+		// is much tighter than the orthographic box: without it DCLF drew into the far cascade the casters of a
+		// whole slice's worth of terrain that no visible receiver can see a shadow from.
+		if (auto& lightData = const_cast<RE::BSShadowLight*>(shadowView->light)->GetRuntimeData(); shadowView->descriptor < lightData.shadowmapDescriptors.size()) {
+			const auto* process = lightData.shadowmapDescriptors[shadowView->descriptor].cullingProcess;
+			if (process && process->doCustomCullPlanes) {
+				const auto& planes = process->customCullPlanes;
+				for (std::uint32_t p = 0; p < RE::NiFrustumPlanes::Planes::kTotal; ++p) {
+					view.cullPlanes[p][0] = planes.cullingPlanes[p].normal.x;
+					view.cullPlanes[p][1] = planes.cullingPlanes[p].normal.y;
+					view.cullPlanes[p][2] = planes.cullingPlanes[p].normal.z;
+					view.cullPlanes[p][3] = planes.cullingPlanes[p].constant;
+				}
+				view.cullPlaneMask = planes.activePlanes.underlying() & 0x3Fu;
+			}
+		}
 		// The view's PerTechnique block (b0): HighDetailRange (LOD landscape only; zero until owned),
 		// ParabolaParam from the engine's two globals as its SetupTechnique reads them, and the eye delta
 		// from the frame's reference eye to this view's.
@@ -4199,15 +4311,19 @@ namespace DCLF
 		auto resources = impl->shadow;
 		auto& textures = GpuTextures::Get();
 		std::array<bool, kShadowModeCount> modeUsed{};
-		for (const auto& view : pending)
+		std::array<std::uint32_t, kShadowModeCount> modeRasterStates{};
+		for (const auto& view : pending) {
 			modeUsed[view.modeIndex] = true;
+			modeRasterStates[view.modeIndex] |= 1u << view.rasterState;
+		}
 		// One pipeline set per shadow map format: every target the engine has is D16 (engine notes), and a
 		// view whose target differed would rebuild the set on every epoch, so the first view's is taken.
 		const DXGI_FORMAT dsvFormat = pending.front().dsvFormat;
 		double prepareMs = 0.0, inputsMs = 0.0, blocksMs = 0.0, bodyMs = 0.0;
 
-		ShadowInputs in = impl->PrepareShadowInputs(store, *resources, modeUsed);
+		ShadowInputs in = impl->PrepareShadowInputs(store, *resources, modeUsed, modeRasterStates);
 		impl->shadowJob.modes = modeUsed;
+		impl->shadowJob.rasterStates = modeRasterStates;
 		impl->shadowJob.modesKnown = true;
 		impl->shadowJob.views = static_cast<std::uint32_t>(pending.size());
 		auto& payload = impl->shadowPayload;
@@ -4237,7 +4353,7 @@ namespace DCLF
 			}
 			auto& lookups = store.MutableLookups();
 			RefreshMaterialLookups(tables, frameNumber, store.GetProjectedTextures(), lookups);
-			RefreshShadowLookups(tables, modeUsed, dsvFormat, lookups);
+			RefreshShadowLookups(tables, modeUsed, modeRasterStates, dsvFormat, lookups);
 			in.lookupGeneration = lookups.generation;
 			bool useAsync = false;
 			if (job.handle) {
@@ -4284,6 +4400,589 @@ namespace DCLF
 				BuildShadowPayload(in, tables, lookups, payload);
 			}
 			prepareMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - prepareStart).count();
+
+			// [TEMP] CS_DCLF_CASCADE_PROBE: per view, the casters DCLF's frustum test keeps (a CPU replica of
+			// BuildDrawsCS Culled against the view's latch matrix) against the ones the engine registered into
+			// that view's batch renderers this frame, and what the difference is made of.
+			if (PassCapture::CascadeProbeEnabled()) {
+				auto registrations = PassCapture::Get().TakeShadowRegistrations();
+				static std::uint32_t probeFrames = 0;
+				if ((probeFrames++ % 300) == 150) {
+					const auto& shadowViews = ShadowViews::Get();
+					ankerl::unordered_dense::map<std::uint32_t, ankerl::unordered_dense::set<const RE::BSGeometry*>> engineByView;
+					ankerl::unordered_dense::set<const RE::BSGeometry*> withheldSet;
+					std::uint32_t unattributed = 0;
+					for (const auto& r : registrations) {
+						const auto id = shadowViews.ViewOfBatch(r.batch);
+						if (id == ~0u) {
+							++unattributed;
+							continue;
+						}
+						engineByView[id].insert(r.geometry);
+						if (r.withheld)
+							withheldSet.insert(r.geometry);
+					}
+					logger::info("[DCLF] cascade probe: {} shadow registrations this frame ({} not attributed to a view)", registrations.size(), unattributed);
+					ankerl::unordered_dense::set<std::uint32_t> seenViews;
+					for (const auto& view : pending) {
+						if (!seenViews.insert(view.viewId).second)
+							continue;
+						float m[16];
+						FoldEyeIntoViewProj(view.viewProj, view.eye, m);
+						struct Clip { float x, y, z, w; };
+						auto project = [&](float px, float py, float pz) {
+							return Clip{ m[0] * px + m[1] * py + m[2] * pz + m[3], m[4] * px + m[5] * py + m[6] * pz + m[7],
+								m[8] * px + m[9] * py + m[10] * pz + m[11], m[12] * px + m[13] * py + m[14] * pz + m[15] };
+						};
+						// 0 kept, 1 rejected by x/y, 2 in front of near, 3 beyond far, 4 kept because a corner has w <= 0,
+						// 5 outside the engine's caster volume (the latch's planes), as BuildDrawsCS Culled now does
+						const bool noNear = view.renderMode == 0xE;
+						auto cull = [&](const DrawInput& a_in) -> int {
+							for (std::uint32_t p = 0; p < 6; ++p) {
+								if ((view.cullPlaneMask & (1u << p)) &&
+									view.cullPlanes[p][0] * a_in.boundCentre[0] + view.cullPlanes[p][1] * a_in.boundCentre[1] + view.cullPlanes[p][2] * a_in.boundCentre[2] - view.cullPlanes[p][3] < -a_in.boundRadius)
+									return 5;
+							}
+							bool nx = true, px = true, ny = true, py = true, zn = !noNear, zf = true;
+							for (std::uint32_t c = 0; c < 8; ++c) {
+								const float r = a_in.boundRadius;
+								const Clip clip = project(a_in.boundCentre[0] + ((c & 1) ? r : -r), a_in.boundCentre[1] + ((c & 2) ? r : -r), a_in.boundCentre[2] + ((c & 4) ? r : -r));
+								if (clip.w <= 1e-4f)
+									return 4;
+								nx &= clip.x < -clip.w;
+								px &= clip.x > clip.w;
+								ny &= clip.y < -clip.w;
+								py &= clip.y > clip.w;
+								zn &= clip.z < 0.0f;
+								zf &= clip.z > clip.w;
+							}
+							return (nx || px || ny || py) ? 1 : zn ? 2 : zf ? 3 : 0;
+						};
+						const auto& engine = engineByView[view.viewId];
+						// The engine's cull volumes for this descriptor: its clipPlanes (the cascade's split slab) and
+						// the culling process's custom planes (+0xAC, 6 NiPlanes, active mask at +0x10C, used when
+						// +0x11F is set; UpdateCamera builds them from the main camera frustum's corners).
+						const RE::NiPlane* clipPlanes = nullptr;
+						const RE::NiCamera* camera = nullptr;
+						std::uint32_t clipMask = 0;
+						const RE::NiPlane* customPlanes = nullptr;
+						std::uint32_t customMask = 0, customFlag = 0;
+						if (const auto* sv = shadowViews.At(view.viewId); sv && sv->light && !sv->focus) {
+							auto& lightData = const_cast<RE::BSShadowLight*>(sv->light)->GetRuntimeData();
+							if (sv->descriptor < lightData.shadowmapDescriptors.size()) {
+								const auto& descriptor = lightData.shadowmapDescriptors[sv->descriptor];
+								clipPlanes = descriptor.clipPlanes.cullingPlanes;
+								camera = descriptor.camera.get();
+								clipMask = descriptor.clipPlanes.activePlanes.underlying();
+								if (const auto* process = reinterpret_cast<const std::byte*>(descriptor.cullingProcess)) {
+									customPlanes = reinterpret_cast<const RE::NiPlane*>(process + 0xAC);
+									customMask = *reinterpret_cast<const std::uint32_t*>(process + 0x10C);
+									customFlag = *reinterpret_cast<const std::uint8_t*>(process + 0x11F);
+								}
+							}
+						}
+						// The engine camera's orthographic frustum: per set (0 both, 1 DCLF only), per bound (0 DCLF's,
+						// 1 the geometry's worldBound), rejections by near, far, left/right, bottom/top.
+						std::uint32_t cameraRejects[2][2][4] = {};
+						auto testCamera = [&](const float* a_c, float a_r, std::uint32_t (&a_out)[4]) {
+							if (!camera)
+								return;
+							const auto& world = camera->world;
+							const auto& f = camera->GetRuntimeData2().viewFrustum;
+							const float d[3] = { a_c[0] - world.translate.x, a_c[1] - world.translate.y, a_c[2] - world.translate.z };
+							auto axis = [&](int k) { return world.rotate.entry[0][k] * d[0] + world.rotate.entry[1][k] * d[1] + world.rotate.entry[2][k] * d[2]; };
+							const float depth = axis(0), up = axis(1), right = axis(2);
+							a_out[0] += depth < f.fNear - a_r;
+							a_out[1] += depth > f.fFar + a_r;
+							a_out[2] += right < f.fLeft - a_r || right > f.fRight + a_r;
+							a_out[3] += up < f.fBottom - a_r || up > f.fTop + a_r;
+						};
+						// The ancestors: per set, how many have an ancestor whose worldBound the custom planes reject,
+						// one flagged hidden (NiAVObject flag bit 0), and the OR of the ancestors' and the geometry's flags.
+						std::uint32_t ancestorOutside[2] = {}, ancestorHidden[2] = {}, ancestorDepthSum[2] = {};
+						std::uint64_t flagsOr[2] = {}, flagsAnd[2] = { ~0ull, ~0ull };
+						std::string ancestry[2];
+						std::uint32_t ancestryLogged[2] = {};
+						auto testAncestors = [&](const RE::BSGeometry* a_geometry, std::uint32_t a_set) {
+							if (!a_geometry)
+								return;
+							std::uint32_t depth = 0;
+							bool outside = false, hidden = false;
+							std::uint64_t flags = a_geometry->GetFlags().underlying();
+							std::string chain;
+							for (const RE::NiAVObject* node = a_geometry->parent; node; node = node->parent, ++depth) {
+								const auto& wb = node->worldBound;
+								bool out = false;
+								for (std::uint32_t p = 0; p < 6 && customPlanes; ++p) {
+									if (!(customMask & (1u << p)))
+										continue;
+									const auto& plane = customPlanes[p];
+									if (plane.normal.x * wb.center.x + plane.normal.y * wb.center.y + plane.normal.z * wb.center.z - plane.constant < -wb.radius)
+										out = true;
+								}
+								outside |= out;
+								const std::uint64_t nodeFlags = node->GetFlags().underlying();
+								hidden |= (nodeFlags & 1) != 0;
+								flags |= nodeFlags;
+								if (ancestryLogged[a_set] < 3 && depth < 6)
+									chain += fmt::format(" > '{}' {} flags {:#x} r {:.0f}{}", node->name.c_str() ? node->name.c_str() : "", node->GetRTTI() ? node->GetRTTI()->name : "?", nodeFlags, wb.radius, out ? " OUT" : "");
+							}
+							ancestorOutside[a_set] += outside;
+							ancestorHidden[a_set] += hidden;
+							ancestorDepthSum[a_set] += depth;
+							flagsOr[a_set] |= flags;
+							flagsAnd[a_set] &= flags;
+							if (ancestryLogged[a_set] < 3) {
+								++ancestryLogged[a_set];
+								ancestry[a_set] += fmt::format(" | '{}' flags {:#x}:{}", a_geometry->name.c_str() ? a_geometry->name.c_str() : "", a_geometry->GetFlags().underlying(), chain);
+							}
+						};
+						// The caster rule's inputs per set: kCastShadows (bit 9), the fade, the material alpha, and
+						// property flag bits that differ between the sets (OR and AND).
+						std::uint32_t noCast[2] = {}, faded[2] = {}, sharedProperty[2] = {};
+						std::uint64_t propOr[2] = {}, propAnd[2] = { ~0ull, ~0ull };
+						std::string ruleSamples[2];
+						std::uint32_t ruleLogged[2] = {};
+						ankerl::unordered_dense::map<const RE::BSShaderProperty*, std::uint32_t> propertyUses;
+						for (const auto& input : payload.inputList[view.modeIndex])
+							if (input.objectIndex < tables.objectGeometry.size())
+								if (const auto* g = tables.objectGeometry[input.objectIndex])
+									if (const auto* prop = g->GetGeometryRuntimeData().shaderProperty.get())
+										++propertyUses[static_cast<const RE::BSShaderProperty*>(prop)];
+						auto testRule = [&](const RE::BSGeometry* a_geometry, std::uint32_t a_set) {
+							if (!a_geometry)
+								return;
+							const auto* prop = static_cast<const RE::BSShaderProperty*>(a_geometry->GetGeometryRuntimeData().shaderProperty.get());
+							const auto* lighting = netimmerse_cast<const RE::BSLightingShaderProperty*>(prop);
+							if (!lighting)
+								return;
+							const std::uint64_t flags = lighting->flags.underlying();
+							noCast[a_set] += !(flags & (1ull << 9));
+							const float fade = lighting->fadeNode ? const_cast<RE::BSFadeNode*>(lighting->fadeNode)->GetRuntimeData().currentFade : 1.0f;
+							const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(lighting->material);
+							const float alpha = material ? material->materialAlpha : 1.0f;
+							faded[a_set] += fade * alpha < 1.0f;
+							propOr[a_set] |= flags;
+							propAnd[a_set] &= flags;
+							const auto uses = propertyUses[prop];
+							sharedProperty[a_set] += uses > 1;
+							if (ruleLogged[a_set] < 6) {
+								++ruleLogged[a_set];
+								ruleSamples[a_set] += fmt::format(" | '{}' flags {:#x} fade {:.2f} alpha {:.2f} reject {} property uses {} material {}", a_geometry->name.c_str() ? a_geometry->name.c_str() : "", flags,
+									fade, alpha, ShadowRejectName(ShadowCasterReject(prop, a_geometry)), uses, static_cast<const void*>(lighting->material));
+							}
+						};
+						// [set: 0 both, 1 DCLF only][volume: 0 clip, 1 custom][sign: 0 n.c-d < -r, 1 n.c-d > r]
+						std::uint32_t planeRejects[2][2][2] = {};
+						auto testPlanes = [&](const RE::NiPlane* a_planes, std::uint32_t a_mask, const float* a_c, float a_r, std::uint32_t (&a_out)[2][2], std::uint32_t a_volume) {
+							if (!a_planes)
+								return;
+							bool outA = false, outB = false;
+							for (std::uint32_t p = 0; p < 6; ++p) {
+								if (!(a_mask & (1u << p)))
+									continue;
+								const auto& plane = a_planes[p];
+								const float d = plane.normal.x * a_c[0] + plane.normal.y * a_c[1] + plane.normal.z * a_c[2] - plane.constant;
+								outA |= d < -a_r;
+								outB |= d > a_r;
+							}
+							a_out[a_volume][0] += outA;
+							a_out[a_volume][1] += outB;
+						};
+						const auto& inputs = payload.inputList[view.modeIndex];
+						std::uint32_t kept = 0, both = 0, dclfOnly = 0, byReason[6] = {};
+						std::uint32_t onlyByRadius[5] = {};  // <64, <256, <1024, <4096, more
+						std::uint32_t onlyZ[3] = {};         // centre depth: in front of near, inside, beyond far
+						std::uint32_t onlyInOtherView = 0;
+						double onlyDistance = 0.0, bothDistance = 0.0;
+						std::string onlyNames;
+						std::uint32_t named = 0;
+						// The engine's candidates: the cascade cull (FUN_140e305c0) walks each full-frustum culling
+						// process's objectArray, skipping hidden entries, and culls every entry recursively. A geometry
+						// not under an entry is never a candidate. Mapped to the entry that covers it.
+						ankerl::unordered_dense::map<const RE::BSGeometry*, const RE::NiAVObject*> candidateEntry;
+						std::uint32_t candidateEntries = 0, candidateProcesses = 0, candidateEntryGeometries = 0;
+						std::vector<const RE::BSCullingProcess*> fullFrustumProcesses;
+						std::string processInfo;
+						ankerl::unordered_dense::map<std::string, std::uint32_t> entryTypes;
+						if (const auto* sv = shadowViews.At(view.viewId); sv && sv->light && !sv->focus &&
+																		  const_cast<RE::BSShadowLight*>(sv->light)->GetIsDirectionalLight()) {
+							auto& directional = static_cast<RE::BSShadowDirectionalLight*>(const_cast<RE::BSShadowLight*>(sv->light))->GetShadowDirectionalLightRuntimeData();
+							std::function<void(const RE::NiAVObject*, const RE::NiAVObject*)> collect = [&](const RE::NiAVObject* a_object, const RE::NiAVObject* a_entry) {
+								if (!a_object || (a_object->GetFlags().underlying() & 1))
+									return;
+								if (const auto* g = const_cast<RE::NiAVObject*>(a_object)->AsGeometry()) {
+									candidateEntry.emplace(g, a_entry);
+									return;
+								}
+								if (auto* node = const_cast<RE::NiAVObject*>(a_object)->AsNode())
+									for (const auto& child : node->GetChildren())
+										collect(child.get(), a_entry);
+							};
+							for (const auto& process : directional.fullFrustumCullingProcessArray) {
+								if (!process)
+									continue;
+								++candidateProcesses;
+								fullFrustumProcesses.push_back(process.get());
+								processInfo += fmt::format(" [{} entries, cullMode {}, compound {}, portal {}, planes {:#x}, custom {} {:#x}, ignorePreprocess {}, camera {}]", process->objectArray.size(),
+									static_cast<int>(process->cullMode.get()), static_cast<const void*>(process->compoundFrustum), static_cast<const void*>(process->portalGraphEntry),
+									process->planes.activePlanes.underlying(), process->doCustomCullPlanes, process->customCullPlanes.activePlanes.underlying(), process->ignorePreprocess,
+									static_cast<const void*>(process->camera));
+								for (const auto& entry : process->objectArray) {
+									++candidateEntries;
+									if (entry && candidateEntries < 20000) {
+										const auto* parent = entry->parent;
+										const auto* grand = parent ? parent->parent : nullptr;
+										++entryTypes[fmt::format("{} {:#x} user {} < {} {:#x} user {} r {:.0f} < {}", entry->GetRTTI() ? entry->GetRTTI()->name : "?", entry->GetFlags().underlying(),
+											const_cast<RE::NiAVObject*>(entry.get())->GetUserData() != nullptr, parent && parent->GetRTTI() ? parent->GetRTTI()->name : "-",
+											parent ? parent->GetFlags().underlying() : 0u, parent && const_cast<RE::NiNode*>(parent)->GetUserData() != nullptr, parent ? parent->worldBound.radius : 0.0f,
+											grand && grand->GetRTTI() ? grand->GetRTTI()->name : "-")];
+										// The entry's siblings that are not entries: what the list left out at the same level.
+										if (parent)
+											for (const auto& sibling : const_cast<RE::NiNode*>(parent)->GetChildren())
+												if (sibling && sibling.get() != entry.get())
+													++entryTypes[fmt::format("  sibling {} {:#x} user {}", sibling->GetRTTI() ? sibling->GetRTTI()->name : "?", sibling->GetFlags().underlying(),
+														sibling->GetUserData() != nullptr)];
+									}
+									candidateEntryGeometries += entry && const_cast<RE::NiAVObject*>(entry.get())->AsGeometry() != nullptr;
+									collect(entry.get(), entry.get());
+								}
+							}
+						}
+						// Per set (0 both, 1 DCLF only): not a candidate; a candidate whose path from its entry has a node
+						// the custom planes reject; one the camera's far/left/right/bottom/top reject; neither.
+						std::uint32_t candidateResult[2][4] = {};
+						std::string candidateSamples;
+						std::uint32_t candidateLogged = 0;
+						auto testCandidate = [&](const RE::BSGeometry* a_geometry, std::uint32_t a_set) {
+							const auto it = candidateEntry.find(a_geometry);
+							if (it == candidateEntry.end()) {
+								++candidateResult[a_set][0];
+								if (a_set == 1 && candidateLogged < 6) {
+									++candidateLogged;
+									const RE::NiAVObject* top = a_geometry;
+									std::string chain;
+									for (const RE::NiAVObject* n = a_geometry; n && chain.size() < 900; n = n->parent) {
+										// Per full-frustum process: the plane indices of its own frustum planes (what
+										// TestBaseVisibility3 tests) that reject this node's worldBound.
+										std::string outs;
+										for (std::size_t k = 0; k < fullFrustumProcesses.size(); ++k) {
+											const auto& fp = fullFrustumProcesses[k]->planes;
+											const auto& wb = n->worldBound;
+											std::string planesOut;
+											for (std::uint32_t q = 0; q < 6; ++q)
+												if ((fp.activePlanes.underlying() & (1u << q)) &&
+													fp.cullingPlanes[q].normal.x * wb.center.x + fp.cullingPlanes[q].normal.y * wb.center.y + fp.cullingPlanes[q].normal.z * wb.center.z - fp.cullingPlanes[q].constant < -wb.radius)
+													planesOut += std::to_string(q);
+											if (!planesOut.empty())
+												outs += fmt::format(" p{}:{}", k, planesOut);
+										}
+										chain += fmt::format(" > '{}' {} flags {:#x} r {:.0f}{}", n->name.c_str() ? n->name.c_str() : "", n->GetRTTI() ? n->GetRTTI()->name : "?", n->GetFlags().underlying(), n->worldBound.radius,
+											outs.empty() ? "" : " OUT" + outs);
+									}
+									(void)top;
+									candidateSamples += fmt::format(" | '{}' not a candidate:{}", a_geometry->name.c_str() ? a_geometry->name.c_str() : "", chain);
+								}
+								return;
+							}
+							const char* planeFail = nullptr;
+							const char* cameraFail = nullptr;
+							std::string failName;
+							for (const RE::NiAVObject* n = a_geometry; n; n = n->parent) {
+								const auto& wb = n->worldBound;
+								if (!planeFail && customPlanes)
+									for (std::uint32_t p = 0; p < 6; ++p)
+										if ((customMask & (1u << p)) && customPlanes[p].normal.x * wb.center.x + customPlanes[p].normal.y * wb.center.y + customPlanes[p].normal.z * wb.center.z - customPlanes[p].constant < -wb.radius) {
+											planeFail = n->GetRTTI() ? n->GetRTTI()->name : "?";
+											failName = n->name.c_str() ? n->name.c_str() : "";
+											break;
+										}
+								if (!cameraFail && camera) {
+									std::uint32_t r[4] = {};
+									const float c[3] = { wb.center.x, wb.center.y, wb.center.z };
+									testCamera(c, wb.radius, r);
+									if (r[1] || r[2] || r[3]) {
+										cameraFail = n->GetRTTI() ? n->GetRTTI()->name : "?";
+										if (failName.empty())
+											failName = n->name.c_str() ? n->name.c_str() : "";
+									}
+								}
+								if (n == it->second)
+									break;
+							}
+							++candidateResult[a_set][planeFail ? 1 : cameraFail ? 2 : 3];
+							if (a_set == 1 && candidateLogged < 6) {
+								++candidateLogged;
+								candidateSamples += fmt::format(" | '{}' candidate under '{}' {}: planes fail at {}, camera fails at {} ('{}')", a_geometry->name.c_str() ? a_geometry->name.c_str() : "",
+									it->second->name.c_str() ? it->second->name.c_str() : "", it->second->GetRTTI() ? it->second->GetRTTI()->name : "?", planeFail ? planeFail : "-", cameraFail ? cameraFail : "-", failName);
+							}
+						};
+						// The full-frustum volume on the geometry's own bound: per set (0 both, 1 DCLF only), outside
+						// the first process's planes / customCullPlanes; and how far planes and customCullPlanes differ.
+						std::uint32_t fullOut[2][2] = {};
+						// On the property's fade node's bound instead: per set, outside; and, for candidates, whether the
+						// entry covering the geometry is that fade node, an ancestor above it, or neither / no fade node.
+						std::uint32_t fadeOut[2] = {}, entryIsFade[2] = {}, entryAboveFade[2] = {}, entryOther[2] = {}, noFade[2] = {};
+						std::string fadeOutBoth, entryOtherSamples;
+						// The reference root (the nearest ancestor, or the geometry, with userData): outside the
+						// full-frustum planes per set, and whether it is the candidate's entry.
+						std::uint32_t rootOut[2] = {}, noRoot[2] = {}, entryIsRoot[2] = {}, entryNotRoot[2] = {};
+						std::string rootOutBoth, entryNotRootSamples;
+						float planesDiff = 0.0f;
+						std::string fullOutBoth;
+						if (!fullFrustumProcesses.empty()) {
+							const auto& a = fullFrustumProcesses[0]->planes;
+							const auto& b = fullFrustumProcesses[0]->customCullPlanes;
+							for (std::uint32_t q = 0; q < 6; ++q) {
+								planesDiff = (std::max)(planesDiff, std::abs(a.cullingPlanes[q].normal.x - b.cullingPlanes[q].normal.x) + std::abs(a.cullingPlanes[q].normal.y - b.cullingPlanes[q].normal.y) +
+																		 std::abs(a.cullingPlanes[q].normal.z - b.cullingPlanes[q].normal.z));
+								planesDiff = (std::max)(planesDiff, std::abs(a.cullingPlanes[q].constant - b.cullingPlanes[q].constant));
+							}
+						}
+						auto testFull = [&](const DrawInput& a_in, const RE::BSGeometry* a_geometry, std::uint32_t a_set) {
+							if (fullFrustumProcesses.empty())
+								return;
+							const RE::NiAVObject* fade = nullptr;
+							if (a_geometry)
+								if (const auto* lighting = netimmerse_cast<const RE::BSLightingShaderProperty*>(const_cast<RE::BSGeometry*>(a_geometry)->GetGeometryRuntimeData().shaderProperty.get()))
+									fade = lighting->fadeNode;
+							if (!fade) {
+								++noFade[a_set];
+							} else {
+								const auto& fp = fullFrustumProcesses[0]->planes;
+								const auto& wb = fade->worldBound;
+								for (std::uint32_t q = 0; q < 6; ++q)
+									if ((fp.activePlanes.underlying() & (1u << q)) &&
+										fp.cullingPlanes[q].normal.x * wb.center.x + fp.cullingPlanes[q].normal.y * wb.center.y + fp.cullingPlanes[q].normal.z * wb.center.z - fp.cullingPlanes[q].constant < -wb.radius) {
+										++fadeOut[a_set];
+										if (a_set == 0 && fadeOutBoth.size() < 400)
+											fadeOutBoth += fmt::format(" '{}'", fade->name.c_str() ? fade->name.c_str() : "");
+										break;
+									}
+							}
+							const RE::NiAVObject* root = nullptr;
+							{
+								// The topmost ancestor carrying the same reference as the nearest one that carries any.
+								const void* reference = nullptr;
+								for (const RE::NiAVObject* n = a_geometry; n; n = n->parent) {
+									const void* user = const_cast<RE::NiAVObject*>(n)->GetUserData();
+									if (!reference && user)
+										reference = user;
+									if (reference && user == reference)
+										root = n;
+									else if (reference && user && user != reference)
+										break;
+								}
+							}
+							if (!root) {
+								++noRoot[a_set];
+							} else {
+								const auto& fp = fullFrustumProcesses[0]->planes;
+								const auto& wb = root->worldBound;
+								for (std::uint32_t q = 0; q < 6; ++q)
+									if ((fp.activePlanes.underlying() & (1u << q)) &&
+										fp.cullingPlanes[q].normal.x * wb.center.x + fp.cullingPlanes[q].normal.y * wb.center.y + fp.cullingPlanes[q].normal.z * wb.center.z - fp.cullingPlanes[q].constant < -wb.radius) {
+										++rootOut[a_set];
+										if (a_set == 0 && rootOutBoth.size() < 400)
+											rootOutBoth += fmt::format(" '{}' root '{}' {}", a_geometry->name.c_str() ? a_geometry->name.c_str() : "", root->name.c_str() ? root->name.c_str() : "", root->GetRTTI() ? root->GetRTTI()->name : "?");
+										break;
+									}
+							}
+							if (const auto it = candidateEntry.find(a_geometry); it != candidateEntry.end()) {
+								if (it->second == root)
+									++entryIsRoot[a_set];
+								else {
+									++entryNotRoot[a_set];
+									if (entryNotRootSamples.size() < 600)
+										entryNotRootSamples += fmt::format(" '{}' entry '{}' {} r {:.0f} children {} user {} parent '{}' {} r {:.0f}, is the root's parent {}; root '{}' {} r {:.0f}", a_geometry->name.c_str() ? a_geometry->name.c_str() : "", it->second->name.c_str() ? it->second->name.c_str() : "",
+											it->second->GetRTTI() ? it->second->GetRTTI()->name : "?", it->second->worldBound.radius,
+											const_cast<RE::NiAVObject*>(it->second)->AsNode() ? const_cast<RE::NiAVObject*>(it->second)->AsNode()->GetChildren().size() : 0,
+											static_cast<const void*>(const_cast<RE::NiAVObject*>(it->second)->GetUserData()),
+											it->second->parent && it->second->parent->name.c_str() ? it->second->parent->name.c_str() : "-", it->second->parent && it->second->parent->GetRTTI() ? it->second->parent->GetRTTI()->name : "-",
+											it->second->parent ? it->second->parent->worldBound.radius : 0.0f, root && root->parent == it->second,
+											root && root->name.c_str() ? root->name.c_str() : "-", root && root->GetRTTI() ? root->GetRTTI()->name : "-", root ? root->worldBound.radius : 0.0f);
+								}
+							}
+							if (const auto it = candidateEntry.find(a_geometry); it != candidateEntry.end()) {
+								if (it->second == fade)
+									++entryIsFade[a_set];
+								else {
+									bool above = false;
+									for (const RE::NiAVObject* n = fade ? fade->parent : nullptr; n; n = n->parent)
+										if (n == it->second)
+											above = true;
+									++(above ? entryAboveFade : entryOther)[a_set];
+									if (entryOtherSamples.size() < 600)
+										entryOtherSamples += fmt::format(" '{}' entry '{}' {} fade '{}'", a_geometry->name.c_str() ? a_geometry->name.c_str() : "", it->second->name.c_str() ? it->second->name.c_str() : "",
+											it->second->GetRTTI() ? it->second->GetRTTI()->name : "?", fade && fade->name.c_str() ? fade->name.c_str() : "-");
+								}
+							}
+							for (std::uint32_t k = 0; k < 2; ++k) {
+								const auto& fp = k == 0 ? fullFrustumProcesses[0]->planes : fullFrustumProcesses[0]->customCullPlanes;
+								for (std::uint32_t q = 0; q < 6; ++q)
+									if ((fp.activePlanes.underlying() & (1u << q)) &&
+										fp.cullingPlanes[q].normal.x * a_in.boundCentre[0] + fp.cullingPlanes[q].normal.y * a_in.boundCentre[1] + fp.cullingPlanes[q].normal.z * a_in.boundCentre[2] - fp.cullingPlanes[q].constant < -a_in.boundRadius) {
+										++fullOut[a_set][k];
+										if (k == 0 && a_set == 0 && fullOutBoth.size() < 600 && a_geometry)
+											fullOutBoth += fmt::format(" '{}' r {:.0f} plane {} by {:.0f}", a_geometry->name.c_str() ? a_geometry->name.c_str() : "", a_in.boundRadius, q,
+												-(fp.cullingPlanes[q].normal.x * a_in.boundCentre[0] + fp.cullingPlanes[q].normal.y * a_in.boundCentre[1] + fp.cullingPlanes[q].normal.z * a_in.boundCentre[2] - fp.cullingPlanes[q].constant) - a_in.boundRadius);
+										break;
+									}
+							}
+						};
+						ankerl::unordered_dense::set<const RE::BSGeometry*> dclfSet;
+						ankerl::unordered_dense::map<const RE::BSGeometry*, int> reasonOf;
+						for (const auto& input : inputs) {
+							const int reason = cull(input);
+							++byReason[reason];
+							if (input.objectIndex < tables.objectGeometry.size())
+								reasonOf[tables.objectGeometry[input.objectIndex]] = reason;
+							if (reason == 1 || reason == 2 || reason == 3 || reason == 5)
+								continue;
+							++kept;
+							const auto* geometry = input.objectIndex < tables.objectGeometry.size() ? tables.objectGeometry[input.objectIndex] : nullptr;
+							dclfSet.insert(geometry);
+							const float dx = input.boundCentre[0] - view.eye.x, dy = input.boundCentre[1] - view.eye.y;
+							const double distance = std::sqrt(double(dx) * dx + double(dy) * dy);
+							const std::uint32_t set = engine.contains(geometry) ? 0u : 1u;
+							testPlanes(clipPlanes, clipMask, input.boundCentre, input.boundRadius, planeRejects[set], 0);
+							testPlanes(customPlanes, customMask, input.boundCentre, input.boundRadius, planeRejects[set], 1);
+							testCamera(input.boundCentre, input.boundRadius, cameraRejects[set][0]);
+							testAncestors(geometry, set);
+							testRule(geometry, set);
+							if (geometry)
+								testCandidate(geometry, set);
+							testFull(input, geometry, set);
+							if (geometry) {
+								const auto& wb = geometry->worldBound;
+								const float wc[3] = { wb.center.x, wb.center.y, wb.center.z };
+								testCamera(wc, wb.radius, cameraRejects[set][1]);
+							}
+							if (engine.contains(geometry)) {
+								++both;
+								bothDistance += distance;
+								continue;
+							}
+							++dclfOnly;
+							onlyDistance += distance;
+							const float r = input.boundRadius;
+							++onlyByRadius[r < 64 ? 0 : r < 256 ? 1 : r < 1024 ? 2 : r < 4096 ? 3 : 4];
+							const Clip centre = project(input.boundCentre[0], input.boundCentre[1], input.boundCentre[2]);
+							++onlyZ[centre.z < 0 ? 0 : centre.z > centre.w ? 2 : 1];
+							for (const auto& [otherId, otherSet] : engineByView)
+								if (otherId != view.viewId && otherSet.contains(geometry)) {
+									++onlyInOtherView;
+									break;
+								}
+							if (geometry && named < 12) {
+								++named;
+								onlyNames += fmt::format("{}'{}' r {:.0f} d {:.0f} z {:.2f}", onlyNames.empty() ? "" : ", ", geometry->name.c_str() ? geometry->name.c_str() : "", r, distance,
+									centre.w != 0 ? centre.z / centre.w : 0.0f);
+							}
+						}
+						std::uint32_t engineOnly = 0, engineOnlyWithheld = 0, engineOnlyReason[7] = {};  // reasons 1-5 as cull(), 6 not an input
+						std::string engineOnlyNames;
+						for (const auto* geometry : engine) {
+							if (dclfSet.contains(geometry))
+								continue;
+							++engineOnly;
+							if (!withheldSet.contains(geometry))
+								continue;
+							++engineOnlyWithheld;
+							const auto it = reasonOf.find(geometry);
+							const int reason = it == reasonOf.end() ? 6 : it->second;
+							++engineOnlyReason[reason];
+							if (geometry && engineOnlyWithheld <= 8) {
+								// Where the geometry is against the box: the worldBound's NDC x/y range, and for a skinned
+								// part the NDC x/y range of its bones' translations (the palette is absolute world).
+								const auto& wb = geometry->worldBound;
+								float bx[2] = { 1e30f, -1e30f }, by[2] = { 1e30f, -1e30f };
+								for (std::uint32_t c = 0; c < 8; ++c) {
+									const float r = wb.radius;
+									const Clip clip = project(wb.center.x + ((c & 1) ? r : -r), wb.center.y + ((c & 2) ? r : -r), wb.center.z + ((c & 4) ? r : -r));
+									const float w = clip.w != 0 ? clip.w : 1.0f;
+									bx[0] = (std::min)(bx[0], clip.x / w), bx[1] = (std::max)(bx[1], clip.x / w);
+									by[0] = (std::min)(by[0], clip.y / w), by[1] = (std::max)(by[1], clip.y / w);
+								}
+								std::string bones = "unskinned";
+								if (const auto* skin = const_cast<RE::BSGeometry*>(geometry)->GetGeometryRuntimeData().skinInstance.get(); skin && skin->boneMatrices && skin->numMatrices) {
+									float kx[2] = { 1e30f, -1e30f }, ky[2] = { 1e30f, -1e30f };
+									const auto* rows = static_cast<const float*>(skin->boneMatrices);
+									for (std::uint32_t b = 0; b < skin->numMatrices; ++b) {
+										const float* m3 = rows + b * 12;
+										const Clip clip = project(m3[3], m3[7], m3[11]);
+										const float w = clip.w != 0 ? clip.w : 1.0f;
+										kx[0] = (std::min)(kx[0], clip.x / w), kx[1] = (std::max)(kx[1], clip.x / w);
+										ky[0] = (std::min)(ky[0], clip.y / w), ky[1] = (std::max)(ky[1], clip.y / w);
+									}
+									const float* m0 = rows;
+									bones = fmt::format("{} bones x {:.2f}..{:.2f} y {:.2f}..{:.2f}, bone0 ({:.0f} {:.0f} {:.0f})", skin->numMatrices, kx[0], kx[1], ky[0], ky[1], m0[3], m0[7], m0[11]);
+								}
+								engineOnlyNames += fmt::format("{}'{}' ({}; centre ({:.0f} {:.0f} {:.0f}) r {:.0f} x {:.2f}..{:.2f} y {:.2f}..{:.2f}; {}; world ({:.0f} {:.0f} {:.0f}))", engineOnlyNames.empty() ? "" : ", ",
+									geometry->name.c_str() ? geometry->name.c_str() : "",
+									reason == 1 ? "x/y" : reason == 2 ? "before near" : reason == 3 ? "beyond far" : reason == 5 ? "engine volume" : reason == 6 ? "not an input" : "?",
+									wb.center.x, wb.center.y, wb.center.z, wb.radius, bx[0], bx[1], by[0], by[1], bones, geometry->world.translate.x, geometry->world.translate.y, geometry->world.translate.z);
+							}
+						}
+						logger::info("[DCLF] cascade probe view {}: engine only {}, of them withheld (drawn by nobody) {}: rejected by DCLF x/y {}, before near {}, beyond far {}, engine volume {}, not an input {}",
+							view.viewId, engineOnly, engineOnlyWithheld, engineOnlyReason[1], engineOnlyReason[2], engineOnlyReason[3], engineOnlyReason[5], engineOnlyReason[6]);
+						logger::info("[DCLF] cascade probe view {} (slice {}, mode {:#x}): {} inputs; DCLF keeps {} (engine volume rejected {}, x/y rejected {}, before near {}, beyond far {}, w<=0 kept {}); engine registered {}; both {}, DCLF only {}, engine only {}",
+							view.viewId, view.slice, view.renderMode, inputs.size(), kept, byReason[5], byReason[1], byReason[2], byReason[3], byReason[4], engine.size(), both, dclfOnly, engineOnly);
+						logger::info("[DCLF] cascade probe view {}: DCLF-only by radius <64 {} <256 {} <1024 {} <4096 {} more {}; centre depth before near {} inside {} beyond far {}; {} of them in another view's engine set; mean horizontal distance DCLF-only {:.0f}, both {:.0f}",
+							view.viewId, onlyByRadius[0], onlyByRadius[1], onlyByRadius[2], onlyByRadius[3], onlyByRadius[4], onlyZ[0], onlyZ[1], onlyZ[2], onlyInOtherView,
+							dclfOnly ? onlyDistance / dclfOnly : 0.0, both ? bothDistance / both : 0.0);
+						logger::info("[DCLF] cascade probe view {}: engine volumes: clip mask {:#x}, custom flag {} mask {:#x}; rejected (sign A / sign B) - both: clip {}/{}, custom {}/{}; DCLF only: clip {}/{}, custom {}/{}",
+							view.viewId, clipMask, customFlag, customMask, planeRejects[0][0][0], planeRejects[0][0][1], planeRejects[0][1][0], planeRejects[0][1][1],
+							planeRejects[1][0][0], planeRejects[1][0][1], planeRejects[1][1][0], planeRejects[1][1][1]);
+						if (camera) {
+							const auto& f = camera->GetRuntimeData2().viewFrustum;
+							logger::info("[DCLF] cascade probe view {}: engine camera at ({:.0f} {:.0f} {:.0f}) frustum l {:.0f} r {:.0f} t {:.0f} b {:.0f} n {:.0f} f {:.0f} ortho {}; rejected by near/far/lr/bt - both, DCLF bound: {}/{}/{}/{}, worldBound: {}/{}/{}/{}; DCLF only, DCLF bound: {}/{}/{}/{}, worldBound: {}/{}/{}/{}",
+								view.viewId, camera->world.translate.x, camera->world.translate.y, camera->world.translate.z, f.fLeft, f.fRight, f.fTop, f.fBottom, f.fNear, f.fFar, f.bOrtho,
+								cameraRejects[0][0][0], cameraRejects[0][0][1], cameraRejects[0][0][2], cameraRejects[0][0][3], cameraRejects[0][1][0], cameraRejects[0][1][1], cameraRejects[0][1][2], cameraRejects[0][1][3],
+								cameraRejects[1][0][0], cameraRejects[1][0][1], cameraRejects[1][0][2], cameraRejects[1][0][3], cameraRejects[1][1][0], cameraRejects[1][1][1], cameraRejects[1][1][2], cameraRejects[1][1][3]);
+						}
+						logger::info("[DCLF] cascade probe view {}: ancestors - both: {} with an ancestor outside the custom planes, {} hidden, mean depth {:.1f}, flags or {:#x} and {:#x}; DCLF only: {} outside, {} hidden, mean depth {:.1f}, flags or {:#x} and {:#x}",
+							view.viewId, ancestorOutside[0], ancestorHidden[0], both ? double(ancestorDepthSum[0]) / both : 0.0, flagsOr[0], flagsAnd[0], ancestorOutside[1], ancestorHidden[1],
+							dclfOnly ? double(ancestorDepthSum[1]) / dclfOnly : 0.0, flagsOr[1], flagsAnd[1]);
+						logger::info("[DCLF] cascade probe view {}: rule - both: {} without kCastShadows, {} faded, {} on a shared property, property flags or {:#x} and {:#x}; DCLF only: {} without kCastShadows, {} faded, {} shared, or {:#x} and {:#x}",
+							view.viewId, noCast[0], faded[0], sharedProperty[0], propOr[0], propAnd[0], noCast[1], faded[1], sharedProperty[1], propOr[1], propAnd[1]);
+						logger::info("[DCLF] cascade probe view {}: candidates - {} processes, {} entries ({} of them geometry), {} geometries; both: {} not a candidate, {} a node outside the planes, {} outside the camera, {} inside; DCLF only: {}/{}/{}/{};{}",
+							view.viewId, candidateProcesses, candidateEntries, candidateEntryGeometries, candidateEntry.size(), candidateResult[0][0], candidateResult[0][1], candidateResult[0][2], candidateResult[0][3],
+							candidateResult[1][0], candidateResult[1][1], candidateResult[1][2], candidateResult[1][3], candidateSamples);
+						{
+							std::string types;
+							for (const auto& [name, count] : entryTypes)
+								types += fmt::format(" | {} x{}", name, count);
+							logger::info("[DCLF] cascade probe view {}: full-frustum processes:{}; entry types:{}", view.viewId, processInfo, types);
+							std::string planes;
+							for (std::size_t k = 0; k < fullFrustumProcesses.size() && k < 2; ++k)
+								for (std::uint32_t q = 0; q < 6; ++q) {
+									const auto& pl = fullFrustumProcesses[k]->planes.cullingPlanes[q];
+									planes += fmt::format(" p{}.{} ({:.3f} {:.3f} {:.3f} {:.0f})", k, q, pl.normal.x, pl.normal.y, pl.normal.z, pl.constant);
+								}
+							logger::info("[DCLF] cascade probe view {}: full-frustum planes:{}", view.viewId, planes);
+							logger::info("[DCLF] cascade probe view {}: full-frustum volume on the geometry bound - planes vs customCullPlanes differ by {:.4f}; both: {} outside planes, {} outside custom; DCLF only: {} / {};{}",
+								view.viewId, planesDiff, fullOut[0][0], fullOut[0][1], fullOut[1][0], fullOut[1][1], fullOutBoth);
+							logger::info("[DCLF] cascade probe view {}: full-frustum volume on the fade node's bound - both: {} outside, DCLF only: {} outside; no fade node: {} / {}; entry is the fade node {} / {}, above it {} / {}, other {} / {};{} | entries not the fade node:{}",
+								view.viewId, fadeOut[0], fadeOut[1], noFade[0], noFade[1], entryIsFade[0], entryIsFade[1], entryAboveFade[0], entryAboveFade[1], entryOther[0], entryOther[1], fadeOutBoth, entryOtherSamples);
+							logger::info("[DCLF] cascade probe view {}: full-frustum volume on the reference root's bound - both: {} outside, DCLF only: {} outside; no root {} / {}; entry is the root {} / {}, not {} / {};{} | entries not the root:{}",
+								view.viewId, rootOut[0], rootOut[1], noRoot[0], noRoot[1], entryIsRoot[0], entryIsRoot[1], entryNotRoot[0], entryNotRoot[1], rootOutBoth, entryNotRootSamples);
+						}
+						logger::info("[DCLF] cascade probe view {}: rule samples both:{}", view.viewId, ruleSamples[0]);
+						logger::info("[DCLF] cascade probe view {}: rule samples DCLF only:{}", view.viewId, ruleSamples[1]);
+						logger::info("[DCLF] cascade probe view {}: ancestry both:{}", view.viewId, ancestry[0]);
+						logger::info("[DCLF] cascade probe view {}: ancestry DCLF only:{}", view.viewId, ancestry[1]);
+						if (clipPlanes && customPlanes) {
+							std::string planes;
+							for (std::uint32_t p = 0; p < 6; ++p)
+								planes += fmt::format(" clip{} ({:.3f} {:.3f} {:.3f} {:.0f}) custom{} ({:.3f} {:.3f} {:.3f} {:.0f})", p, clipPlanes[p].normal.x, clipPlanes[p].normal.y,
+									clipPlanes[p].normal.z, clipPlanes[p].constant, p, customPlanes[p].normal.x, customPlanes[p].normal.y, customPlanes[p].normal.z, customPlanes[p].constant);
+							logger::info("[DCLF] cascade probe view {} planes (eye {:.0f} {:.0f} {:.0f}):{}", view.viewId, view.eye.x, view.eye.y, view.eye.z, planes);
+						}
+						logger::info("[DCLF] cascade probe view {}: DCLF only e.g. {}; withheld engine only e.g. {}", view.viewId, onlyNames, engineOnlyNames);
+					}
+				}
+			}
 
 			// Nothing to draw until this commit publishes the shape again (so a failed one draws nothing, rather
 			// than a reused recording reading latch values this execution never wrote).
@@ -4337,6 +5036,7 @@ namespace DCLF
 			frame->indirect = indirect;
 			auto& slotRecords = impl->shadowSlotRecords;
 			static const std::uint32_t zero[kCountWords] = {};
+			std::uint32_t mapRowsWritten = 0;  // bit per view rasterizer state whose map row is in the latch
 			for (std::uint32_t slot = 0; slot < pending.size(); ++slot) {
 				const auto& view = pending[slot];
 				const std::uint64_t viewBlockOffset = std::uint64_t(slot) * kShadowViewSlotBytes;
@@ -4363,9 +5063,20 @@ namespace DCLF
 				latch.dispatch[1] = 1;
 				latch.dispatch[2] = 1;
 				latch.drawCount = inputCount;
-				latch.cullFlags = view.hasViewProj ? 1u : 0u;
+				latch.cullFlags = view.hasViewProj ? (1u | (view.renderMode == 0xE ? kCullNoNearPlane : 0u)) : 0u;
+				latch.cullPlaneMask = view.cullPlaneMask;
+				std::memcpy(latch.cullPlanes, view.cullPlanes, sizeof(latch.cullPlanes));
 				latch.visibilityStamp = frameNumber & 0x0FFFFFFFu;  // 28 bits: BuildDrawsCS keeps flags below it
 				FoldEyeIntoViewProj(view.viewProj, view.eye, latch.viewProj);
+				// The view's rasterizer state picks its row of the pipeline map, written once per state below.
+				latch.pipelineMapOffset = kShadowPipelineMapOffset + (view.rasterState - 1) * kShadowPipelineMapRowBytes;
+				if (!((mapRowsWritten >> view.rasterState) & 1)) {
+					mapRowsWritten |= 1u << view.rasterState;
+					const auto& row = store.GetLookups().shadowMapRows[view.rasterState];
+					if (!row.empty())
+						resources->latch->Write(latchSlot, latch.pipelineMapOffset,
+							std::as_bytes(std::span(row.data(), std::min<std::size_t>(row.size(), kMaxShadowSlots))));
+				}
 				resources->latch->WriteValue(latchSlot, slot * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), latch);
 				resources->labels.push_back({ view.viewId, view.renderMode, slot });
 				ShadowFrameView out{};
@@ -4438,13 +5149,15 @@ namespace DCLF
 		shadowStats.cpuMs += totalMs;
 	}
 
-	ShadowInputs IndirectDraws::Impl::PrepareShadowInputs(const SceneStore& a_store, const ShadowResources& a_resources, const std::array<bool, kShadowModeCount>& a_modeUsed) const
+	ShadowInputs IndirectDraws::Impl::PrepareShadowInputs(const SceneStore& a_store, const ShadowResources& a_resources, const std::array<bool, kShadowModeCount>& a_modeUsed,
+		const std::array<std::uint32_t, kShadowModeCount>& a_modeRasterStates) const
 	{
 		ShadowInputs in;
 		in.frameNumber = a_store.GetFrame();
 		in.renderFlags = a_store.GetMainPassRenderFlags();
 		in.refEye = shadowRefEye;
 		in.modeUsed = a_modeUsed;
+		in.modeRasterStates = a_modeRasterStates;
 		in.addresses.constants = a_resources.constantsAddress;
 		in.addresses.records = a_resources.recordsAddress;
 		in.addresses.objectsIndex = a_resources.objectsIndex;
@@ -4484,7 +5197,7 @@ namespace DCLF
 			++async.notKicked;
 			return;
 		}
-		job.inputs = impl->PrepareShadowInputs(store, *impl->shadow, job.modes);
+		job.inputs = impl->PrepareShadowInputs(store, *impl->shadow, job.modes, job.rasterStates);
 		++async.kicked;
 		const auto* tablesPtr = &tables;
 		const auto* lookups = &store.GetLookups();
@@ -5093,8 +5806,30 @@ namespace DCLF
 			const auto* bytes = reinterpret_cast<const std::byte*>(&cached);
 			if (a_out.vs[kPerFrameVertexRegister].empty())
 				a_out.vs[kPerFrameVertexRegister].assign(bytes, bytes + sizeof(cached));
+			const bool psFromMirror = !a_out.ps[kPerFrameVertexRegister].empty();
 			if (a_out.ps[kPerFrameVertexRegister].empty())
 				a_out.ps[kPerFrameVertexRegister].assign(bytes, bytes + sizeof(cached));
+			// [TEMP] The colour epoch's PerFrame blocks against the engine's current one (CS's cache).
+			static std::uint32_t tempEpochs = 0;
+			if (!a_depthOnly && (tempEpochs++ % 240) == 0) {
+				auto describe = [&](const std::vector<std::byte>& a_block) {
+					if (a_block.size() < 164 * sizeof(float))
+						return fmt::format("{} bytes", a_block.size());
+					const auto* f = reinterpret_cast<const float*>(a_block.data());
+					const auto* c = reinterpret_cast<const float*>(bytes);
+					std::uint32_t differ = 0, first = ~0u;
+					for (std::uint32_t i = 0; i < std::min<std::size_t>(a_block.size() / 4, sizeof(cached) / 4); ++i)
+						if (std::memcmp(&f[i], &c[i], 4) != 0) {
+							++differ;
+							first = std::min(first, i);
+						}
+					return fmt::format("posAdjust ({:.2f} {:.2f} {:.2f}), {} floats differ from the cache (first c{}.{})", f[160], f[161], f[162], differ, first / 4, first % 4);
+				};
+				const auto* c = reinterpret_cast<const float*>(bytes);
+				logger::info("[TEMP] colour PerFrame: cache posAdjust ({:.2f} {:.2f} {:.2f}); VS {} [{}]; PS {} [{}]", c[160], c[161], c[162],
+					describe(a_out.vs[kPerFrameVertexRegister]), replayVertexInputs ? "replayed" : "mirror",
+					describe(a_out.ps[kPerFrameVertexRegister]), psFromMirror ? "mirror" : "cache");
+			}
 		}
 
 		// b5 is Community Shaders' own SharedData, written through its ConstantBuffer helper rather than
@@ -5378,24 +6113,59 @@ namespace DCLF
 			const auto contents = mirror.Contents(buffer);
 			const std::size_t offset = std::size_t(frameBuffer.firstElement) * frameBuffer.stride;
 			const std::size_t bytes = std::size_t(frameBuffer.elements) * frameBuffer.stride;
-			if (contents.size() < offset + bytes)
+			if (contents.size() < offset + bytes) {
+				// [TEMP] Which structured buffers the commit leaves unfilled (their copy then reads zero).
+				static std::array<std::uint32_t, kTextureRegisters> unfilled{};
+				if ((unfilled[frameBuffer.textureRegister]++ % 600) == 0)
+					logger::warn("[TEMP] frame buffer t{} ({} elements of {} bytes) not filled: the mirror holds {} bytes of it ({} times)", frameBuffer.textureRegister,
+						frameBuffer.elements, frameBuffer.stride, contents.size(), unfilled[frameBuffer.textureRegister]);
 				continue;  // not written since it is watched
+			}
 			uploads(frameBuffer.copy, contents.data() + offset, bytes, 0);
 			frameTextures[frameBuffer.textureRegister] = frameBuffer.copy->GetSRVInfo(0).slot.index;
 		}
 		std::uint32_t frameTexturesMissing = 0;
+		std::array<std::uint64_t, 2> missingRegisters{};
 		for (const auto& [record, t] : a_payload.framePatches) {
 			const std::uint32_t index = frameTextures[t];
 			// A frame texture the pipeline reads but the pass did not bind reads zero, as an unbound view does
-			// natively; counted, because the build could not skip the draw for it.
-			if (index == kInvalidIndex)
+			// natively; counted, because the build could not skip the draw for it. A view bound natively that
+			// could not be resolved (a buffer that is not a CPU-written structured buffer) lands here too, and
+			// reads zero where the native draw reads the resource.
+			if (index == kInvalidIndex) {
 				++frameTexturesMissing;
+				missingRegisters[(t >> 6) & 1] |= 1ull << (t & 63);
+				static std::array<bool, kTextureRegisters> described{};
+				if (t < kTextureRegisters && !std::exchange(described[t], true)) {
+					if (auto* view = a_capture.psViews[t]) {
+						D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
+						view->GetDesc(&viewDesc);
+						winrt::com_ptr<ID3D11Resource> resource;
+						view->GetResource(resource.put());
+						std::string what = fmt::format("view dimension {}, format {}", static_cast<std::uint32_t>(viewDesc.ViewDimension), static_cast<std::uint32_t>(viewDesc.Format));
+						if (auto buffer = resource.try_as<ID3D11Buffer>()) {
+							D3D11_BUFFER_DESC bufferDesc{};
+							buffer->GetDesc(&bufferDesc);
+							what += fmt::format(", buffer of {} bytes, stride {}, usage {}, CPU access {:X}, bind {:X}, misc {:X}", bufferDesc.ByteWidth, bufferDesc.StructureByteStride,
+								static_cast<std::uint32_t>(bufferDesc.Usage), bufferDesc.CPUAccessFlags, bufferDesc.BindFlags, bufferDesc.MiscFlags);
+						}
+						char name[128]{};
+						UINT size = sizeof(name) - 1;
+						if (SUCCEEDED(resource->GetPrivateData(WKPDID_D3DDebugObjectName, &size, name)))
+							what += fmt::format(", '{}'", name);
+						logger::warn("[DCLF] frame texture t{} is bound natively but not resolved: {}", t, what);
+					} else {
+						logger::warn("[DCLF] frame texture t{} is read but nothing is bound there at the capture", t);
+					}
+				}
+			}
 			const std::uint32_t value = index == kInvalidIndex ? (in.resolveTextures && textures.NullIndex() != kInvalidIndex ? textures.NullIndex() : 0u) : index;
 			a_payload.records[record].textures[t] = value;
 			if (a_payload.stagedRecords)
 				a_payload.stagedRecords[record].textures[t] = value;  // write-combined: written, never read
 		}
 		a_stats.frameTexturesMissing = frameTexturesMissing;
+		a_stats.frameTexturesMissingRegisters = missingRegisters;
 		lap(2);
 
 		// The frame slots: each block into its slot, and the zeroed light block every bindless draw's b3 reads.

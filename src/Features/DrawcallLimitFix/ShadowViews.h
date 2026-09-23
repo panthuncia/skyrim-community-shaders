@@ -32,8 +32,24 @@ namespace DCLF
 		Faded,          // fadeNode->currentFade * material->materialAlpha < 1
 		Refraction,     // flags kTempRefraction (2) or kRefraction (15)
 		AlphaBlended,   // alpha blending, outside the decal exception
-		DecalNoZWrite,  // hair-tint with a decal flag, without kZBufferWrite and blending
+		/**
+		 * A decal flag (kDecal 26 or kDynamicDecal 27) outside the one exception: kZBufferWrite (32), bit 18 and
+		 * alpha blending. The sun's and the spot lights' accumulators (their UpdateCamera: drawDecals +0x12C = 0,
+		 * +0x12D = 1) are registered through FUN_1414b2a60 (AE), which drops such a property before it asks for a
+		 * pass; GetRenderPasses_ShadowMapOrMask then drops the bit-18 ones again. A paraboloid light keeps the
+		 * constructor's drawDecals = 1 and casts the ones without bit 18: not a DCLF caster, so left unclaimed the
+		 * engine draws it there and nowhere else.
+		 */
+		DecalNoZWrite,
 		NoCastShadows,  // kCastShadows clear while the engine's shadow global demands it
+		/**
+		 * kCastShadows clear while the shadow global is 2 (volumetric lighting): a clamped view whose accumulator
+		 * has the volumetric flag (+0x12E, which BSShadowDirectionalLight::Accumulate always sets) gives it a pass
+		 * only in the property's volumetricShadowUtilityPasses, drawn into the volumetric lighting copy and never
+		 * into the sun's cascades. Not a DCLF caster: left unclaimed, the engine keeps drawing it wherever it
+		 * does draw it (that copy, and the point and spot lights, where it casts normally).
+		 */
+		VolumetricOnly,
 		Count
 	};
 	const char* ShadowRejectName(ShadowReject a_reason);

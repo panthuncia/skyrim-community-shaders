@@ -87,6 +87,7 @@ namespace DCLF
 			std::uint32_t deferredTextures = 0;
 			// Frame textures (t16 and up) a record reads that the pass had not bound at the commit, last epoch.
 			std::uint32_t frameTexturesMissing = 0;
+			std::array<std::uint64_t, 2> frameTexturesMissingRegisters{};  // which registers, as a bit set
 			std::uint32_t cullDrawn = 0;     // sequences BuildDraws wrote, last sampled epoch
 			std::uint32_t cullRejected = 0;  // draws its culling rejected (CS_DCLF_CULL)
 			std::uint32_t cullTested = 0;    // draws it tested at all: 0 means the culling did not run
@@ -286,6 +287,7 @@ namespace DCLF
 			std::uint32_t notReady = 0;        // views skipped: resources, pipelines or the depth import not ready
 			std::array<std::uint32_t, static_cast<std::size_t>(ShadowNotReady::Count)> notReadyReasons{};
 			std::uint32_t focusSkipped = 0;    // focus views, native until S4
+			std::uint32_t volumetricSkipped = 0;  // volumetric lighting copies: only volumetric-only casters, native
 			// The culling's GPU counters of one sampled view (the count buffer read back a few frames after
 			// its epoch): what says the frustum test is doing something, and against which view.
 			std::uint32_t cullDrawn = 0, cullRejected = 0, cullTested = 0;

@@ -18,11 +18,11 @@ namespace DCLF
 
 		// A variable's dword offset in the shader's cbuffer, or ~0 when the permutation lacks it (offset 0
 		// is also what reflection leaves for missing variables, so it only counts for the group's first).
-		std::uint32_t OffsetOf(std::span<const std::int8_t> a_table, std::uint32_t a_variable, std::uint32_t a_firstVariable)
+		std::uint32_t OffsetOf(std::span<const std::uint8_t> a_table, std::uint32_t a_variable, std::uint32_t a_firstVariable)
 		{
 			if (a_variable >= a_table.size())
 				return ~0u;
-			const std::uint32_t offset = static_cast<std::uint8_t>(a_table[a_variable]);
+			const std::uint32_t offset = a_table[a_variable];
 			return (offset == 0 && a_variable != a_firstVariable) ? ~0u : offset;
 		}
 	}
@@ -75,7 +75,7 @@ namespace DCLF
 		return constants;
 	}
 
-	GeometryPatchOffsets GeometryPatchOffsetsOf(std::span<const std::int8_t> a_vsTable, std::span<const std::int8_t> a_psTable)
+	GeometryPatchOffsets GeometryPatchOffsetsOf(std::span<const std::uint8_t> a_vsTable, std::span<const std::uint8_t> a_psTable)
 	{
 		const auto& vsLayout = LightingVSLayout();
 		const auto& psLayout = LightingPSLayout();
@@ -215,7 +215,7 @@ namespace DCLF
 		a_out.extraOffset = extras ? static_cast<std::uint32_t>(a_tables.bones.size() / 4) * 2 + a_tables.extraOffset[a_objectIndex] : 0u;
 	}
 
-	std::uint32_t PackedPositionOf(const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable,
+	std::uint32_t PackedPositionOf(const StageLayout& a_layout, std::span<const std::uint8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable,
 		std::uint32_t a_float)
 	{
 		for (std::uint32_t i = 0; i < a_layout.count; ++i) {
@@ -229,7 +229,7 @@ namespace DCLF
 		return ~0u;
 	}
 
-	std::size_t ConstantGroupSize(const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable)
+	std::size_t ConstantGroupSize(const StageLayout& a_layout, std::span<const std::uint8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable)
 	{
 		std::size_t end = 0;
 		for (std::uint32_t i = 0; i < a_layout.count; ++i) {
@@ -241,7 +241,7 @@ namespace DCLF
 		return (end + 15) & ~std::size_t(15);
 	}
 
-	std::size_t PackConstantGroup(const ConstantBlock& a_block, const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables,
+	std::size_t PackConstantGroup(const ConstantBlock& a_block, const StageLayout& a_layout, std::span<const std::uint8_t> a_table, std::uint64_t a_variables,
 		std::uint32_t a_firstVariable, std::span<std::byte> a_out)
 	{
 		const std::size_t size = ConstantGroupSize(a_layout, a_table, a_variables, a_firstVariable);

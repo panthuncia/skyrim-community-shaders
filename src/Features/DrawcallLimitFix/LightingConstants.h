@@ -70,7 +70,7 @@ namespace DCLF
 	 * table (variable index -> dword offset, as Community Shaders reflects it). Components the engine
 	 * does not write become 0. Returns the bytes the group spans (0 when the table places nothing).
 	 */
-	std::size_t PackConstantGroup(const ConstantBlock& a_block, const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables,
+	std::size_t PackConstantGroup(const ConstantBlock& a_block, const StageLayout& a_layout, std::span<const std::uint8_t> a_table, std::uint64_t a_variables,
 		std::uint32_t a_firstVariable, std::span<std::byte> a_out);
 
 	/** @brief Bytes a group spans in a shader's cbuffer layout (16-byte multiple). */
@@ -100,7 +100,7 @@ namespace DCLF
 	const float* ExtraRowsOf(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex);
 
 	/** @brief Resolves those offsets for one pipeline's shader pair. */
-	GeometryPatchOffsets GeometryPatchOffsetsOf(std::span<const std::int8_t> a_vsTable, std::span<const std::int8_t> a_psTable);
+	GeometryPatchOffsets GeometryPatchOffsetsOf(std::span<const std::uint8_t> a_vsTable, std::span<const std::uint8_t> a_psTable);
 
 	/**
 	 * @brief Writes one object's five PerGeometry variables over an already packed group.
@@ -165,8 +165,8 @@ namespace DCLF
 	 * @brief Where PackConstantGroup puts a block's float: its dword offset in the packed group, or ~0 when no
 	 * variable of the group covers it (the float is then not packed at all).
 	 */
-	std::uint32_t PackedPositionOf(const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable,
+	std::uint32_t PackedPositionOf(const StageLayout& a_layout, std::span<const std::uint8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable,
 		std::uint32_t a_float);
 
-	std::size_t ConstantGroupSize(const StageLayout& a_layout, std::span<const std::int8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable);
+	std::size_t ConstantGroupSize(const StageLayout& a_layout, std::span<const std::uint8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable);
 }

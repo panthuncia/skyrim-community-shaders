@@ -1465,7 +1465,7 @@ namespace DCLF
 			InvalidateObjectIndices();
 			accumulatedPasses.clear();
 			stats.objects = 0;
-			stats.nativeVisible = 0;
+			stats.nativeVisible = stats.nativeShadowMasked = stats.derivedDescriptors = 0;
 			stats.geometries = 0;
 			stats.pipelines = 0;
 			stats.materials = 0;
@@ -1541,7 +1541,7 @@ namespace DCLF
 		stats.materialsUnchanged = stats.materialsChanged = stats.materialDiffMask = 0;
 		stats.materialsFromCache = stats.materialsValidated = stats.materialCacheStale = 0;
 		stats.templateUpgrades = stats.templateDefects = stats.pipelinesCulledOnly = 0;
-		stats.nativeVisible = 0;
+		stats.nativeVisible = stats.nativeShadowMasked = stats.derivedDescriptors = 0;
 		stats.classifyHits = stats.classifyChecked = stats.classifyDiffers = stats.castResolved = 0;
 		stats.derivedHits = stats.derivedChecked = stats.derivedDiffers = 0;
 		stats.accumulatedWithoutRecord = 0;
@@ -1802,7 +1802,8 @@ namespace DCLF
 			// phase and the next, so a verdict taken later would arrive after the views that need it.
 			const auto* shadowProperty = data.shaderProperty.get();
 			const auto shadowReject = ShadowCasterReject(shadowProperty, geometry);
-			++stats.shadowRejects[static_cast<std::size_t>(shadowReject) & 7];
+			static_assert(static_cast<std::size_t>(ShadowReject::Count) <= std::tuple_size_v<decltype(stats.shadowRejects)>);
+			++stats.shadowRejects[static_cast<std::size_t>(shadowReject)];
 			ID3D11ShaderResourceView* shadowDiffuse = nullptr;
 			const RE::BSShaderMaterial* shadowMaterial = nullptr;
 			if (shadowReject == ShadowReject::None) {
@@ -2453,6 +2454,8 @@ namespace DCLF
 				tables.extraRows.resize(tables.extraRows.size() + std::size_t(kExtraRows) * 4, 0.0f);
 			}
 			stats.nativeVisible += accumulated ? 1 : 0;
+			stats.nativeShadowMasked += accumulated && (descriptors.pass & 0x6000u) == 0x6000u ? 1 : 0;
+			stats.derivedDescriptors += accumulated ? 0 : 1;
 			if (descriptors.decalGroup && accumulated) {
 				// The engine's draw order for decals: the opaque group first, then within a group the
 				// technique buckets in ascending order, each bucket's lists 0-4, each list's chain.

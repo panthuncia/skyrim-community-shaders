@@ -199,6 +199,40 @@ namespace DCLF
 		rhi::CommandSignaturePtr shadowSignature;
 		std::vector<org::services::PipelinePayload> shadowSetPipelines;
 		DXGI_FORMAT shadowDepthFormat = DXGI_FORMAT_UNKNOWN;
+		// The shadow views' rasterizer states, by id - 1 (ShadowRasterStateId), and the render modes each was
+		// seen with (bit mode - 0xC).
+		struct ShadowRasterState
+		{
+			float depthBias = 0.0f;
+			float depthBiasClamp = 0.0f;
+			float slopeScaledDepthBias = 0.0f;
+			rhi::CullMode cull = rhi::CullMode::Back;
+			bool frontCCW = false;
+
+			bool operator==(const ShadowRasterState&) const = default;
+		};
+		std::vector<ShadowRasterState> shadowRasterStates;
+
+		/**
+		 * @brief Which face the engine's rasterizer states make the front one (FrontCounterClockwise), read
+		 * once from its table on the render thread; empty until the table holds a state. Every entry of the
+		 * table has the same winding, and the per-cascade copies Community Shaders swaps in are copies of it.
+		 */
+		std::optional<bool> EngineFrontCCW()
+		{
+			if (!engineFrontCCW) {
+				if (auto* state = EngineRasterStates()[0][1][0][0]) {
+					D3D11_RASTERIZER_DESC desc{};
+					state->GetDesc(&desc);
+					engineFrontCCW = desc.FrontCounterClockwise != FALSE;
+					logger::info("[DCLF] engine rasterizer winding: front face {}", *engineFrontCCW ? "counter-clockwise" : "clockwise");
+				}
+			}
+			return engineFrontCCW;
+		}
+		std::optional<bool> engineFrontCCW;
+		std::vector<std::uint32_t> shadowRasterStateModes;
+		std::uint32_t loggedShadowRasterFailures = 0;
 		std::uint32_t shadowInFlight = 0;
 		// What a build produces: the pipelines of both variants and the registers the shaders read.
 		struct Built
@@ -362,7 +396,7 @@ namespace DCLF
 		}
 
 		static org::services::PipelinePayload Build(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout, PipelineKey a_key, const ShaderPrograms::Program* a_program,
-			TargetFormats a_targets, EngineState a_state)
+			TargetFormats a_targets, EngineState a_state, bool a_frontCCW)
 		{
 			SpirvReflection vertex, pixel, depthPixel;
 			if (!vertex.Parse(a_program->vertex) || !pixel.Parse(a_program->pixel) || !depthPixel.Parse(a_program->depthPixel))
@@ -397,8 +431,9 @@ namespace DCLF
 					raster.rs.depthBiasClamp = a_state.depthBiasClamp;
 					raster.rs.slopeScaledDepthBias = a_state.slopeScaledDepthBias;
 				}
-				// frontCCW stays false: the engine's meshes are wound for D3D's "clockwise is front", which
-				// is what RasterState's default means on every backend.
+				// The engine's winding (EngineFrontCCW): its rasterizer states say which face is the front one,
+				// and RasterState::frontCCW means the same thing on every backend.
+				raster.rs.frontCCW = a_frontCCW;
 				rhi::SubobjDepth depth{};
 				// CS_DCLF_NO_DEPTH_TEST=1: the colour variant stops testing depth, to tell "the depth test
 				// rejects every fragment" apart from "the draws are not reaching the rasteriser at all".
@@ -447,15 +482,15 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief One shadow pipeline: the Utility permutation, depth only, with the view's bias.
+		 * @brief One shadow pipeline: the Utility permutation, depth only, with the view's rasterizer state.
 		 *
 		 * No colour attachment and no blending - a shadow map holds depth alone - and the depth test is
-		 * the engine's own for a shadow pass: write, compare LESS. The bias comes from the rasterizer
-		 * state the engine had bound when it drew the view, read back through the same table the decal
-		 * keys use.
+		 * the engine's own for a shadow pass: write, compare LESS. Depth bias, cull mode and winding are the
+		 * view's (ShadowRasterStateId); a two-sided caster draws without culling whatever the view's mode,
+		 * as the engine's Utility pass switches culling off for one.
 		 */
 		static org::services::PipelinePayload BuildShadow(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout, ShadowPipelineKey a_key,
-			const ShaderPrograms::ShadowProgram* a_program, DXGI_FORMAT a_depthFormat, EngineState a_state)
+			const ShaderPrograms::ShadowProgram* a_program, DXGI_FORMAT a_depthFormat, ShadowRasterState a_state)
 		{
 			SpirvReflection vertex, pixel;
 			if (!vertex.Parse(a_program->vertex) || !pixel.Parse(a_program->pixel))
@@ -474,12 +509,14 @@ namespace DCLF
 			const rhi::SubobjInputLayout input{ BuildInputLayout(vertex, a_key.vertexLayout) };
 			const rhi::SubobjFlags flags{ rhi::PipelineFlags_IndirectBindable };
 			rhi::SubobjRaster raster{};
-			raster.rs.cull = (a_key.rasterFlags & kRasterTwoSided) ? rhi::CullMode::None : rhi::CullMode::Back;
-			if (a_state.valid) {
-				raster.rs.depthBias = a_state.depthBias;
-				raster.rs.depthBiasClamp = a_state.depthBiasClamp;
-				raster.rs.slopeScaledDepthBias = a_state.slopeScaledDepthBias;
-			}
+			raster.rs.cull = (a_key.rasterFlags & kRasterTwoSided) ? rhi::CullMode::None : a_state.cull;
+			raster.rs.frontCCW = a_state.frontCCW;
+			// The integer DepthBias goes through as the constant factor. The shadow maps are D16_UNORM, for
+			// which Vulkan's default representation is the least representable value of the format - what
+			// D3D11 means by it, and what DXVK uses for the engine's own draws.
+			raster.rs.depthBias = a_state.depthBias;
+			raster.rs.depthBiasClamp = a_state.depthBiasClamp;
+			raster.rs.slopeScaledDepthBias = a_state.slopeScaledDepthBias;
 			rhi::SubobjDepth depth{};
 			depth.ds.depthEnable = true;
 			depth.ds.depthWrite = true;
@@ -603,8 +640,11 @@ namespace DCLF
 			a_key.vertexLayout);
 		recipe.shaderKey = PipelineKeyHash{}(a_key);
 		recipe.fixedFunctionKey = ankerl::unordered_dense::detail::wyhash::hash(&targets, sizeof(targets));
-		recipe.build = [device = impl->device, layout = impl->layout->GetHandle(), key = a_key, program = &a_program, formats = targets, state] {
-			return Impl::Build(device, layout, key, program, formats, state);
+		const auto frontCCW = impl->EngineFrontCCW();
+		if (!frontCCW)
+			return kNotReady;
+		recipe.build = [device = impl->device, layout = impl->layout->GetHandle(), key = a_key, program = &a_program, formats = targets, state, frontCCW = *frontCCW] {
+			return Impl::Build(device, layout, key, program, formats, state, frontCCW);
 		};
 		auto& entry = impl->entries[a_key];
 		entry.future = impl->service.Request(std::move(recipe));
@@ -636,13 +676,11 @@ namespace DCLF
 			return it->second.index;
 		if (impl->shadowInFlight >= kMaxInFlight || impl->shadowSetPipelines.size() >= kMaxPipelines)
 			return kNotReady;
-		Impl::EngineState state{};
-		if (const auto bits = RasterStateBits(a_key.rasterFlags)) {
-			const auto it = impl->engineStates.find(bits);
-			if (it == impl->engineStates.end() || !it->second.valid)
-				return kNotReady;
-			state = it->second;
-		}
+		// The view's rasterizer state: every shadow pipeline is built for one (ShadowRasterStateId).
+		const std::uint32_t stateId = RasterShadowState(a_key.rasterFlags);
+		if (stateId == 0 || stateId > impl->shadowRasterStates.size())
+			return kNotReady;
+		const Impl::ShadowRasterState state = impl->shadowRasterStates[stateId - 1];
 		org::services::PipelineRecipe recipe;
 		recipe.id = fmt::format("dclf.shadow.{:08X}.{:X}.{:016X}", a_key.technique, a_key.rasterFlags, a_key.vertexLayout);
 		recipe.shaderKey = ShadowPipelineKeyHash{}(a_key);
@@ -657,20 +695,50 @@ namespace DCLF
 		return kNotReady;
 	}
 
-	void DrawPipelines::CaptureShadowStates(std::span<const ShadowPipelineKey> a_keys)
+	std::uint32_t DrawPipelines::ShadowRasterStateId(const D3D11_RASTERIZER_DESC& a_desc, std::uint32_t a_renderMode)
 	{
-		for (const auto& key : a_keys) {
-			const auto bits = RasterStateBits(key.rasterFlags);
-			if (!bits || impl->engineStates.contains(bits))
-				continue;
-			std::string error;
-			auto state = impl->ReadEngineState(bits, error);
-			if (!state.valid && impl->loggedStateFailures++ < kMaxLoggedFailures)
-				logger::warn("[DCLF] shadow pipeline state {:05X} cannot be built: {}; its casters stay native", bits, error);
-			else if (state.valid)
-				logger::info("[DCLF] shadow pipeline state {:05X}: depth bias {} (clamp {}, slope {})", bits, state.depthBias, state.depthBiasClamp, state.slopeScaledDepthBias);
-			impl->engineStates.emplace(bits, state);
+		// The scissor is not part of it: the epoch's pass is bounded by the view's viewport (its render area).
+		if (a_desc.FillMode != D3D11_FILL_SOLID || !a_desc.DepthClipEnable) {
+			if (impl->loggedShadowRasterFailures++ < kMaxLoggedFailures)
+				logger::warn("[DCLF] shadow view rasterizer state not expressible (fill {}, depth clip {}); the view stays native",
+					static_cast<int>(a_desc.FillMode), a_desc.DepthClipEnable);
+			return 0;
 		}
+		Impl::ShadowRasterState state;
+		state.depthBias = static_cast<float>(a_desc.DepthBias);
+		state.depthBiasClamp = a_desc.DepthBiasClamp;
+		state.slopeScaledDepthBias = a_desc.SlopeScaledDepthBias;
+		state.cull = a_desc.CullMode == D3D11_CULL_NONE ? rhi::CullMode::None : a_desc.CullMode == D3D11_CULL_FRONT ? rhi::CullMode::Front : rhi::CullMode::Back;
+		state.frontCCW = a_desc.FrontCounterClockwise != FALSE;
+		const std::uint32_t modeBit = a_renderMode >= 0xC && a_renderMode < 0xC + 32 ? 1u << (a_renderMode - 0xC) : 0u;
+		auto& states = impl->shadowRasterStates;
+		for (std::size_t i = 0; i < states.size(); ++i) {
+			if (states[i] == state) {
+				impl->shadowRasterStateModes[i] |= modeBit;
+				return static_cast<std::uint32_t>(i + 1);
+			}
+		}
+		if (states.size() >= kMaxShadowRasterStates) {
+			if (impl->loggedShadowRasterFailures++ < kMaxLoggedFailures)
+				logger::warn("[DCLF] more than {} shadow view rasterizer states; the view stays native", kMaxShadowRasterStates);
+			return 0;
+		}
+		states.push_back(state);
+		impl->shadowRasterStateModes.push_back(modeBit);
+		logger::info("[DCLF] shadow view rasterizer state {} (mode {:#x}): depth bias {} (clamp {}, slope {}), cull {}, front {}", states.size(), a_renderMode,
+			state.depthBias, state.depthBiasClamp, state.slopeScaledDepthBias, static_cast<int>(a_desc.CullMode), a_desc.FrontCounterClockwise ? "CCW" : "CW");
+		return static_cast<std::uint32_t>(states.size());
+	}
+
+	std::uint32_t DrawPipelines::ShadowRasterStatesOfMode(std::uint32_t a_renderMode) const
+	{
+		if (a_renderMode < 0xC || a_renderMode >= 0xC + 32)
+			return 0;
+		std::uint32_t mask = 0;
+		for (std::size_t i = 0; i < impl->shadowRasterStateModes.size(); ++i)
+			if (impl->shadowRasterStateModes[i] & (1u << (a_renderMode - 0xC)))
+				mask |= 1u << (i + 1);
+		return mask;
 	}
 
 	void DrawPipelines::CaptureEngineStates(std::span<const PipelineKey> a_keys)
@@ -835,7 +903,8 @@ namespace DCLF
 	void DrawPipelines::SetTargetFormats(const TargetFormats& a_formats) { targets = a_formats; }
 	std::uint32_t DrawPipelines::Find(const PipelineKey&, const ShaderPrograms::Program&) { return kNotReady; }
 	std::uint32_t DrawPipelines::FindShadow(const ShadowPipelineKey&, const ShaderPrograms::ShadowProgram&, DXGI_FORMAT) { return kNotReady; }
-	void DrawPipelines::CaptureShadowStates(std::span<const ShadowPipelineKey>) {}
+	std::uint32_t DrawPipelines::ShadowRasterStateId(const D3D11_RASTERIZER_DESC&, std::uint32_t) { return 0; }
+	std::uint32_t DrawPipelines::ShadowRasterStatesOfMode(std::uint32_t) const { return 0; }
 	void DrawPipelines::Update() {}
 	void DrawPipelines::CaptureEngineStates(std::span<const PipelineKey>) {}
 }

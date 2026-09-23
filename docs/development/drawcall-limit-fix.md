@@ -2340,6 +2340,35 @@ exercise the derivation with the feature on, because its redraws happen inside t
 parity hook sees them; ownership of terrain needs either the feature off or a terrain sub-pass that does
 what it does. The hybrid run with every class on reports 0 terrain candidates, as intended.
 
+#### The terrain blended onto an empty G-buffer
+
+With DCLF on, wherever a DCLF object met the terrain (rocks and dirt mounds half-buried in it), the blend
+zone showed whitish blue instead of a blend into the object. The order in the main pass was:
+
+1.  The engine's opaque batches, with DCLF's objects withheld.
+2.  `Main_RenderWorld_BlendedDecals`: Terrain Blending's held terrain, then the engine's blended decals.
+3.  `EndDeferred`: DCLF's colour epoch (`BeforeDeferredComposite`), then the composite.
+
+The terrain is drawn with alpha blending onto the G-buffer, `LESS_EQUAL` and depth writes, and its alpha is
+its distance to the depth beneath over 10 units (`Lighting.hlsl`, `blendFactorTerrain`). The depth already
+held DCLF's objects from the Z-prepass, so the alpha was right, but the G-buffer did not hold them yet: the
+terrain blended onto its clear values. Then the terrain's depth writes made DCLF's `EQUAL` test fail where it
+covered the object, so the object never filled the zone in.
+
+**The fix:** the colour epoch runs where the opaque batches end, at the start of the `BlendedDecals` hook
+(`DrawcallLimitFix::AfterOpaquePass`), which is the native order. It unbinds the render targets before
+the epoch and marks them dirty afterwards, as the Z-prepass does inside the depth pass.
+`BeforeDeferredComposite` keeps the rest (the path off hybrid, the claims, the debug view).
+
+Terrain Blending also holds the passes of meshes flagged `kNoTransparencyMultiSample` (a flag the engine does
+not use, which marks a mesh the terrain should not blend over) and redraws them after the terrain with
+`EQUAL`. DCLF now draws before the terrain, so those stay native while Terrain Blending is on
+(`Ineligible::TerrainNoBlend`, "terrain-no-blend").
+
+**Result**, the save by the tree roots: DCLF on and off match in screenshots; capture parity 0 mismatched,
+0 untracked eligible; 0 claimed but not drawn. That save has no `kNoTransparencyMultiSample` meshes, so the
+exclusion was not exercised.
+
 ### Everything on
 
 Hybrid, `CS_DCLF_TREES CS_DCLF_DECALS CS_DCLF_SKINNED CS_DCLF_PROJECTED_UV CS_DCLF_MTLAND`, Whiterun
@@ -3578,3 +3607,238 @@ first person it logs a warning once and still draws with the wrong camera.
 
 **Also noted:** the G-buffer probe's "after the z-prepass" depth slot reads `000000` whatever is drawn, so it
 does not measure the prepass.
+
+## Every DCLF draw sampled through an empty sampler descriptor
+
+**Symptom:** the road by the large tree was lit as if in direct sunlight with DCLF on, much brighter than
+native (screenshot mean 175.6 against 110.3). It looked like broken shadowing.
+
+**Tracing it back.** Every shadow input matched native at that pixel (the shadow maps with DCLF's shadow
+views off, the engine's shadow mask, terrain and cloud shadows, the detailed shadow), and so did the direct
+light. The G-buffer, averaged over a 64 x 64 block (`CS_DCLF_TARGET_PROBE`), did not: DCLF's albedo was 1.8
+times native, and everything scaled by it followed. With the Lighting shader writing its intermediates
+(`CS_DCLF_SHADOW_DEBUG_OUTPUT`), the road's BC7 sRGB base colour read 0.310 in DCLF's draw and 0.099 in the
+native one: DCLF's sample was not decoded from sRGB.
+
+What decided it, in DCLF's draw:
+
+| The same texel | Value |
+| --- | --- |
+| `SampleLevel(..., 0)` through the sampler | 0.308 (not decoded) |
+| `Load` (no sampler) | 0.099 (decoded) |
+| The shader's biased `SampleBias` | 0.308, identical to mip 0 |
+
+The texture descriptor was right: the heap slot `GpuTextures` wrote differed from a UNORM view's by exactly
+the sRGB bit, nothing rewrote it, and a swizzle forced on it showed in the draw. The sampler was not: a
+biased sample identical to mip 0 is a sampler that neither filters nor selects mips, and on NVIDIA the sRGB
+conversion is enabled in the sampler descriptor as well.
+
+**The cause.** `GpuTextures::SamplerOf` passes the engine's D3D11 sampler with `BorderPreset::Custom` (it
+copies the border colour). BasicRHI's Vulkan `CreateSampler` returned `Unsupported` for any custom border
+colour without writing the slot, and ORG's `DescriptorHeapManager::CreateIndexedSampler` ignored the result
+and returned the slot index. All 20 of DCLF's samplers were empty heap slots, so every DCLF draw sampled
+without filtering, without mips and without the sRGB decode. Only sRGB textures (TruePBR's) changed
+brightness; everything else lost filtering and mips.
+
+**The fix, in the shared components:**
+
+-   **BasicRHI (Vulkan):** a custom border colour is accepted when no address mode is Border (the colour
+    is then never read) or when it equals one of the three built-in colours exactly
+    (`VkCustomBorderIsExpressible`). A custom colour with border addressing still needs
+    `VK_EXT_custom_border_color`, and says so in the log.
+-   **ORG:** `CreateIndexedSampler` checks the backend's result; on failure it releases the slot, logs and
+    throws instead of handing out an empty descriptor.
+-   **DCLF:** `GpuTextures::Sampler` catches that, logs it once per engine sampler and returns no index, so
+    the draws that need it are skipped rather than drawn through nothing.
+
+**Result**, the road save, DCLF on against off:
+
+| | Before | After | Native |
+| --- | --- | --- | --- |
+| Road (screenshot mean) | 175.6 | 111.6 | 110.3 |
+| Albedo, G-buffer block mean | 0.388 | 0.240 | 0.216 |
+| Diffuse, G-buffer block mean | 0.866 | 0.556 | 0.472 |
+
+The trunk, rock and player regions are back to their native values too: they were darker only because the
+exposure adapted to the bright road. The G-buffer block means still differ by about 10 %; the final image
+does not show it.
+
+## The far cascade: DCLF drew the wrong set of casters
+
+**Symptom:** shadows on distant objects were wrong with DCLF's shadow views on. The sun's far cascade (slice
+1 of `kSHADOWMAPS_ESRAM`) was 20-25 % clear against 46 % natively (`CS_DCLF_SHADOWMAP_PROBE=1`), and
+`CS_DCLF_SHADOWS=0` matched native.
+
+**Tracing it back.** `CS_DCLF_CASCADE_PROBE=1` compares, per shadow view, the casters DCLF's cull keeps (a CPU
+replica of `BuildDrawsCS`'s `Culled` against the view's latch matrix; it agrees with the GPU counters) with
+the ones the engine registered into that view's batch renderers, recorded at `PassCapture::Withhold`. At the
+road save's far cascade, DCLF kept 1146 casters and the engine registered 660; only 396 were in both. The
+difference had four causes, each confirmed against the engine and then in the decompile.
+
+**1. The engine culls against a caster volume, not the orthographic box.** `BSShadowDirectionalLight::UpdateCamera`
+(`0x141512230`) builds six planes from the main camera frustum's corners and the light direction into each
+cascade's culling process (`NiCullingProcess::customCullPlanes`, `doCustomCullPlanes`), and the accumulation's
+cull (`FUN_1414f0920`, via `FUN_1414bf9f0`) tests them on top of the shadow camera. DCLF tested only the
+view-projection box, which covers the whole slice. The planes rejected 0 of the 396 casters both drew and 683
+of DCLF's 750 extras - large, distant rock and mountain meshes no visible receiver can see a shadow from.
+The descriptor's own `clipPlanes` are not the cull volume (four of its six planes are zero).
+
+**2. The near plane rejected casters that clamped views pancake.** In a clamped shadow view (mode `0xE`),
+`Utility.hlsl` writes `positionCS.z = max(0, positionCS.z)` (`RENDER_SHADOWMAP_CLAMPED`): a caster between the
+light and the near plane still writes depth, at 0. `Culled` rejected every caster wholly in front of the near
+plane. With ownership, those were claimed and withheld too, so 228 of the engine's far-cascade casters were
+drawn by nobody - rock shelves and cliffs above the scene towards the sun.
+
+**3. Casters without `kCastShadows` belong to the volumetric copy only.** In
+`GetRenderPasses_ShadowMapOrMask` (`0x1414af030`), a property without `kCastShadows` in a shadow mode gets no
+pass when the global byte at `0x142033498` is 1, and when it is 2 (volumetric lighting, as here) a clamped
+view whose accumulator has the volumetric flag (`+0x12E`, which the directional light's `Accumulate` always
+sets) puts it in `volumetricShadowUtilityPasses` only: drawn into the volumetric lighting copy, never into the
+cascades. DCLF's rule modelled only the first case and drew these 804 objects into every cascade; 89 of the
+far cascade's remaining extras were among them, mountains in front of the near plane that now wrote depth 0.
+
+**4. The sun's and the spot lights' accumulators do not register decals.** The accumulator registers a
+culled geometry through a table indexed by its render mode (`FUN_1414b2140`, table at `0x14332b020` filled by
+`FUN_14147e2c0`); modes `0xC`-`0x11` go to `FUN_1414b2a60`, which asks the property for its passes
+(`GetRenderPasses_ShadowMapOrMask`, vtable `+0x158`) only when the property has neither `kDecal` (26) nor
+`kDynamicDecal` (27), or the accumulator's `drawDecals` (`+0x12C`) is set, or its `+0x12D` is set and the
+property has `kZBufferWrite` (32) and bit 18 and the geometry's alpha blends. The constructor sets
+`drawDecals` to 1, but `BSShadowDirectionalLight::UpdateCamera` and `BSShadowFrustumLight::UpdateCamera`
+(`0x14151ac50`) set it to 0 and `+0x12D` to 1 on the accumulators they create. DCLF's rule modelled only the
+bit-18 case, which `GetRenderPasses_ShadowMapOrMask` repeats, so it drew the decal overlays without bit 18 -
+the `:8` sub-shapes of rock and cliff meshes, 35 in the far cascade and about 250 shadow inputs in all.
+
+**The fix:**
+
+-   **The engine's caster volume in the latch.** `BuildDrawsLatch` grew a six-plane block and a plane mask
+    (the former padding word; 0 for the main camera). `ExecuteShadowView` copies the descriptor's culling
+    process's `customCullPlanes` when `doCustomCullPlanes` is set, and `Culled` rejects a bound wholly
+    outside any active plane.
+-   **No near plane for clamped views:** latch flag `kCullNoNearPlane` (`CullFlags` bit 9), set for mode
+    `0xE`.
+-   **`ShadowReject::VolumetricOnly`:** `kCastShadows` clear while the global is 2. Such an object is not a
+    DCLF caster, so it is not claimed, and the engine keeps drawing it wherever it does: the volumetric copy,
+    and point lights, where it casts normally.
+-   **`ShadowReject::DecalNoZWrite` covers every decal** outside the registration's exception (bits 32 and
+    18, blended). The verdict is one per object for every view, and a paraboloid light keeps `drawDecals`
+    and casts the decals without bit 18; left unclaimed, the engine still draws them there.
+
+**Result**, far cascade at the road save:
+
+| | Before | Planes and near plane | 1-3 | All four | Native |
+| --- | --- | --- | --- | --- | --- |
+| Casters both draw | 396 | 618 | 618 | 577-618 | 619-660 registered |
+| DCLF only | 750 | 124 | 35 | 0-3 | |
+| Engine's, withheld and not drawn by DCLF | 228 | 6 | 6 | 6-7 | |
+| Slice 1 clear | 20-25 % | 9.5 % | 43 % | 45.6 % | 45.8 % |
+| Slice 1 mean depth | 0.26-0.31 | 0.14 | 0.48 | 0.510 | 0.514 |
+
+The last two columns are the readings either side of a live toggle (`CS_DCLF_TEST_TOGGLE=3000:99999`); the
+scene drifts by about as much between two readings (the sun moves). The middle column is why the first three
+are one fix: keeping the pancaked casters without the volumetric rule drew mountains at depth 0 over most of
+the slice. The near cascade went from 53 extras to 0-1.
+
+The engine's casters DCLF withholds and does not draw are not holes. They are one actor's parts (`WarAxe:0`,
+`_Cuirass_1`, `MaleUnderwearBodyArmor`, its head parts) and a grass shape in the far cascade, and two parts
+in the near one, and every one lies wholly outside the view's box: the actor at NDC y -1.02 to -1.04, about
+130 units past the slice's edge, with its bones (the skin palette's translations) in the same range as the
+bound. The engine registers them because its cull is the caster volume, which is wider than the box, and the
+rasterizer clips them; DCLF's x/y test drops them first. What is left is in
+[dclf-open-defects.md](./dclf-open-defects.md).
+
+## Shadow views draw with the view's rasterizer state
+
+**Symptom:** after the caster sets were fixed, the near cascade still stepped at a live toggle (slice 0 mean
+depth 0.2678 with DCLF against 0.2699 native) while its caster sets agreed. DCLF drew the same casters
+closer to the light.
+
+**Cause.** Community Shaders' `ShadowmapCascadeRasterizerFix` (`src/EngineFixes`) swaps the engine's global
+rasterizer table (`[fill][cull][depth bias][scissor]`) for per-cascade copies around each cascade's draw:
+DepthBias 160, slope 3.2, clamp 0.015 for the first; 100, 3.8, 0.015 for the second. It hooks only the cascade
+loop of `BSShadowDirectionalLight::Render`, so the volumetric lighting copy draws with the engine's own states,
+which there cull nothing. Read off the context after each native view (`CS_DCLF_CASCADE_PROBE=1`):
+
+| View | DepthBias | Slope | Clamp | Cull |
+| --- | --- | --- | --- | --- |
+| Cascade 0 (`kSHADOWMAPS_ESRAM` slice 0) | 160 | 3.2 | 0.015 | back |
+| Cascade 1 (slice 1) | 100 | 3.8 | 0.015 | back |
+| Volumetric copy, both slices | 0 | 0 | - | none |
+
+DCLF's shadow pipelines had no bias at all (a shadow key carried only the two-sided bit, so no state was ever
+read for it) and culled back faces everywhere.
+
+**The fix: pipeline variants per view rasterizer state.**
+
+-   `ExecuteShadowView` runs inside the view's draw (from `FinishAccumulating`), so it reads the state the
+    engine binds for the view: `EngineRasterStates()` at the renderer's fill, cull, bias and scissor modes,
+    which is the cascade fix's copy while it is swapped in. `DrawPipelines::ShadowRasterStateId` registers the
+    distinct states (bias, clamp, slope, cull) and names each with an id; the exterior has three.
+-   A shadow pipeline key carries the id (`kRasterShadowStateShift`), and `BuildShadow` takes the state from
+    it. A two-sided caster still draws without culling. The scissor is not part of the state: the pass is
+    bounded by the view's viewport.
+-   The views of a render mode keep sharing one input list, but an input names its caster's **key slot**
+    (`Lookups::shadowSlots`, append-only), not a pipeline. `RefreshShadowLookups` resolves every slot under
+    each state its mode's views use and keeps `Lookups::shadowMapRows[state][slot]`. Each view's latch
+    carries the byte offset of its state's row (`BuildDrawsLatch::pipelineMapOffset`, the latch is now 208
+    bytes), the rows are copied into the shadow latch block after the views' latches, and `BuildDrawsCS`
+    resolves the draw's pipeline through the row. The main camera's offset is 0: its inputs name pipelines.
+-   A caster is an input only when its pipeline is ready under every state its mode's views use: the claim
+    withholds the engine's pass from all of them.
+-   The winding is the state's too (`FrontCounterClockwise`, set in every engine state); see "Front faces:
+    BasicRHI's `frontCCW` has D3D's meaning" below.
+
+**Result** at the road save, the readings either side of a live toggle:
+
+| | DCLF on, before | DCLF on, after | Native |
+| --- | --- | --- | --- |
+| Slice 0 mean depth | 0.2678 | 0.2690 | 0.2688 |
+| Slice 1 clear | 45.6 % | 45.6 % | 45.8 % |
+| Slice 1 mean depth | 0.510 | 0.510 | 0.513 |
+
+The slice-1 differences are within the drift between two readings. 0 claimed but not drawn; 1200 of 1500
+views drawn (the 300 focus views are left native).
+
+## Front faces: BasicRHI's `frontCCW` has D3D's meaning
+
+Every rasterizer state of the engine has `FrontCounterClockwise` set. DXVK draws the engine's passes with a
+y-flipped viewport (negative `VkViewport::height`) and maps that flag straight to
+`VK_FRONT_FACE_COUNTER_CLOCKWISE` (`d3d11_rasterizer.cpp`, `d3d11_context.cpp`). BasicRHI's Vulkan backend
+uses the same flip, but mapped `frontCCW` to the opposite `VkFrontFace` (BasicRHI `fc214cd`, "frontCCW
+parity"): DCLF's main pass pipelines passed `false`, which under the direct mapping culled the engine's front
+faces, and the inversion made that `false` right instead of the caller. It also made BasicRHI's Vulkan
+backend disagree with its D3D12 backend, which passes the flag through.
+
+The contract is now D3D's on both backends: `frontCCW` is the winding of the triangle as it lands on the
+render target, clip space y-up, and the Vulkan backend maps it to the `VkFrontFace` of the same name
+(BasicRHI `rhi.h`, `rhi_vulkan.cpp`, README "Backend-independent conventions"). DCLF passes the engine's own
+winding: the main pass pipelines read it once from the engine's rasterizer table
+(`DrawPipelines::Impl::EngineFrontCCW`), the shadow pipelines from their view's state. At the road save the
+G-buffer after DCLF's colour pass matches native (`CS_DCLF_TARGET_PROBE`), and the shadow maps are
+unchanged. SARP and BasicRenderer set `frontCCW` true for glTF content and have not been run under Vulkan
+since; their D3D12 behaviour is unchanged.
+
+## The volumetric lighting copy is the engine's alone
+
+**Symptom:** Volumetric Shadows' copy of the near cascade (its mip 1, the nearer of the cascade and the
+volumetric lighting copy per texel) stepped at a live toggle, 0.2565 with DCLF against 0.2609, after both
+cascades matched.
+
+**Cause.** `BSShadowDirectionalLight::Render` draws each cascade twice: into
+`kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM` with flag 0x100 while the shadow global is 2, then into
+`kSHADOWMAPS_ESRAM`. Both go through the descriptor's accumulator and batch renderer, but the mode's draw
+(`FUN_1414b44f0`, mode 0xE's entry in the table at `0x14332b120`) branches on the flag: without it, the
+Utility technique ranges and batch groups 1 and 9; with it, batch group 15 alone. Group 15 is where the
+registration puts accumulation hint 8 (`FUN_1414b2a60`), which only `GetRenderPasses_ShadowMapOrMask`'s
+volumetric-only passes carry. So the volumetric copy holds the volumetric-only casters and nothing else, and
+those are not DCLF's (`ShadowReject::VolumetricOnly`, unclaimed). DCLF drew its whole caster set into both
+volumetric views, filling far more of the copy than the engine does:
+
+| Volumetric lighting copy | DCLF drawing it | Native |
+| --- | --- | --- |
+| Slice 0: clear / mean depth | 23.7 % / 0.389 | 44.0 % / 0.594 |
+| Slice 1: clear / mean depth | 23.0 % / 0.252 | 33.1 % / 0.346 |
+
+**The fix:** `ExecuteShadowView` leaves a view whose target is the volumetric lighting copy to the engine
+(`ShadowStats::volumetricSkipped`). Across a toggle afterwards the copy's slices, both cascades and both
+Volumetric Shadows mips match within the drift between readings (slice 0 of the copy 0.4996 against 0.5006,
+37.1 % clear on both; VSM mip 1 0.2091 against 0.2094). DCLF now draws two views a frame instead of four.

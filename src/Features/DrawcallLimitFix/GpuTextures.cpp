@@ -163,6 +163,7 @@ namespace DCLF
 		ankerl::unordered_dense::map<ID3D11ShaderResourceView*, Entry> entries;
 		std::vector<Retired> graveyard;
 		std::array<std::uint32_t, kAddressModes * kFilterModes> samplers{};
+		std::array<bool, kAddressModes * kFilterModes> samplerFailed{};
 		rhi::DescriptorSlot nullSlot{};
 		std::uint32_t nullIndex = kInvalid;
 		std::uint32_t frame = 0;
@@ -172,6 +173,7 @@ namespace DCLF
 		impl(std::make_unique<Impl>())
 	{
 		impl->samplers.fill(kInvalid);
+		impl->samplerFailed.fill(false);
 	}
 
 	GpuTextures::~GpuTextures() = default;
@@ -309,7 +311,18 @@ namespace DCLF
 			return kInvalid;
 		D3D11_SAMPLER_DESC desc{};
 		state->GetDesc(&desc);
-		index = service->CreateIndexedSampler(SamplerOf(desc));
+		// A sampler the backend cannot create is never handed out (the service throws): the draws that need it
+		// are skipped rather than drawn through an empty descriptor. Not retried; the engine's table is fixed.
+		const std::size_t key = a_addressMode * kFilterModes + a_filterMode;
+		if (impl->samplerFailed[key])
+			return kInvalid;
+		try {
+			index = service->CreateIndexedSampler(SamplerOf(desc));
+		} catch (const std::exception& e) {
+			impl->samplerFailed[key] = true;
+			logger::error("[DCLF] Engine sampler (address mode {}, filter mode {}) could not be created; draws that sample with it are skipped: {}", a_addressMode, a_filterMode, e.what());
+			return kInvalid;
+		}
 		++stats.samplers;
 		return index;
 	}
@@ -346,6 +359,7 @@ namespace DCLF
 		impl->entries.clear();
 		impl->graveyard.clear();
 		impl->samplers.fill(kInvalid);
+		impl->samplerFailed.fill(false);
 		impl->nullIndex = kInvalid;
 		impl->nullSlot = {};
 		stats = {};

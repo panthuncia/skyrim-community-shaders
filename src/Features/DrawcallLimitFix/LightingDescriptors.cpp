@@ -305,13 +305,15 @@ namespace DCLF
 		return Toggles::Get().Active().projectedUv;
 	}
 
+	bool TerrainBlendingDefersTerrain()
+	{
+		const auto& terrainBlending = globals::features::terrainBlending;
+		return terrainBlending.loaded && terrainBlending.settings.Enabled && IndirectDraws::Hybrid();
+	}
+
 	bool MtLandEnabled()
 	{
-		if (!Toggles::Get().Active().mtLand)
-			return false;
-		const auto& terrainBlending = globals::features::terrainBlending;
-		const bool terrainBlendingOwnsTerrain = terrainBlending.loaded && terrainBlending.settings.Enabled && IndirectDraws::Hybrid();
-		return !terrainBlendingOwnsTerrain;
+		return Toggles::Get().Active().mtLand && !TerrainBlendingDefersTerrain();
 	}
 
 	namespace
@@ -393,6 +395,11 @@ namespace DCLF
 			return Ineligible::Skinned;
 		if ((f & Bit(Flag::kProjectedUV)) && !ProjectedUvEnabled())
 			return Ineligible::ProjectedUV;
+		// Terrain Blending holds these passes (a mesh opts out of the blend with this otherwise unused flag) and
+		// redraws them after its terrain, testing EQUAL, so the terrain does not blend over them. DCLF draws
+		// before that terrain (DrawcallLimitFix::AfterOpaquePass), so they stay native.
+		if ((f & Bit(Flag::kNoTransparencyMultiSample)) && TerrainBlendingDefersTerrain())
+			return Ineligible::TerrainNoBlend;
 		// Refraction has its own LOD fade that removes the object entirely; leave it to the game.
 		if (f & (Bit(Flag::kRefraction) | Bit(Flag::kTempRefraction))) {
 			a_out.rejectedTechnique = kRefractionReject;

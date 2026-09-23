@@ -61,7 +61,7 @@ namespace DCLF
 			std::uint32_t setIndex = kNone;  // DrawPipelines set index; kNone while compiling or unused
 			// Which cbuffer register each Lighting variable lives at, per stage, copied from the game's shader
 			// objects so the build never touches BSGraphics::*Shader.
-			std::vector<std::int8_t> vsTable, psTable;
+			std::vector<std::uint8_t> vsTable, psTable;
 			std::array<RegisterUsageBits, 2> usage{};  // by variant (kColorVariant, kDepthVariant)
 			std::uint32_t shadowMaskIndex = kNone;     // the technique's shadow mask (t14) this frame, if it binds one
 		};
@@ -91,6 +91,14 @@ namespace DCLF
 		// Shadow pipelines per (technique with mode bits, raster flags, vertex layout), and the alpha-tested
 		// casters' diffuse textures.
 		ankerl::unordered_dense::map<ShadowPipelineKey, std::uint32_t, ShadowPipelineKeyHash> shadowPipelines;
+		// A shadow input names its caster's key slot (technique with mode bits, raster flags without a view
+		// state, vertex layout), not a pipeline: the views of one render mode share the inputs but not the
+		// rasterizer state. Slots are append-only. shadowMapRows[state][slot] is the pipeline of that slot's
+		// key under that view rasterizer state (DrawPipelines::ShadowRasterStateId), kNone where there is none
+		// yet; a view's row goes into the shadow latch block for BuildDrawsCS to resolve its draws through.
+		ankerl::unordered_dense::map<ShadowPipelineKey, std::uint32_t, ShadowPipelineKeyHash> shadowSlots;
+		std::vector<ShadowPipelineKey> shadowSlotKeys;
+		std::array<std::vector<std::uint32_t>, 16> shadowMapRows;
 		ankerl::unordered_dense::map<ID3D11ShaderResourceView*, std::uint32_t> shadowTextures;
 		std::uint32_t pipelineSetGeneration = ~0u;
 		std::uint32_t generation = 0;

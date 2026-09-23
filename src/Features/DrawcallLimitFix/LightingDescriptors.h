@@ -29,6 +29,7 @@ namespace DCLF
 		SkinShape,           // skinned, but not a shape the skinned path takes: dismember instance, several partitions, too many bones
 		Billboard,           // under an NiBillboardNode: the main cull turns it to the camera
 		Switch,              // under an NiSwitchNode that does not select it this frame (or CS_DCLF_SWITCH_NODES off)
+		TerrainNoBlend,      // Terrain Blending redraws it after its terrain (kNoTransparencyMultiSample)
 		Count
 	};
 
@@ -51,6 +52,7 @@ namespace DCLF
 		"skin-shape",
 		"billboard",
 		"switch",
+		"terrain-no-blend",
 	};
 
 	struct LightingDescriptors
@@ -246,6 +248,8 @@ namespace DCLF
 	 * Off the hybrid path the tables and their parity still exercise the derivation.
 	 */
 	bool MtLandEnabled();
+	/** @brief Whether Terrain Blending draws its terrain after the opaque pass, into a frame DCLF draws in. */
+	bool TerrainBlendingDefersTerrain();
 
 	Ineligible DeriveLightingDescriptors(const RE::BSLightingShaderProperty& a_property, const RE::BSGeometry& a_geometry,
 		const AccumulatedPass* a_accumulated, LightingDescriptors& a_out, bool a_wantDerived = true);

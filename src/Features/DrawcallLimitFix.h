@@ -33,6 +33,16 @@ struct DrawcallLimitFix : Feature
 	virtual void EarlyPrepass() override;
 	virtual void DrawSettings() override;
 
+	/**
+	 * @brief The end of the main pass's opaque batches (Deferred's Main_RenderWorld_BlendedDecals hook): DCLF's
+	 * colour epoch. What the engine draws after this point blends onto the G-buffer or tests against the opaque
+	 * depth, so the objects DCLF drew in place of native ones have to be in it: Terrain Blending's deferred
+	 * terrain, then the blended decals.
+	 */
+	void AfterOpaquePass();
+	/** @brief [TEMP] CS_DCLF_TARGET_PROBE=x,y: render target 0 at a pixel where the opaque pass ends, DCLF on or off. */
+	void ProbeOpaqueTarget(bool a_afterDCLF);
+
 	/** @brief Deferred::EndDeferred, before the deferred composite (Phase 2 debug view). */
 	void BeforeDeferredComposite();
 

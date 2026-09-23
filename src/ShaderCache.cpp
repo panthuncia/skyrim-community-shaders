@@ -1152,10 +1152,22 @@ namespace SIE
 					 (0b1111ull << (4 * attribute + 4)));
 		}
 
+		// A constant table entry: the variable's offset in its buffer, in floats. The engine reads entries unsigned,
+		// so a variable has to start within the first 256 floats of its buffer.
+		static uint8_t ConstantTableEntry(uint32_t startOffsetBytes, const char* name, ShaderClass shaderClass, const RE::BSShader& shader, uint32_t descriptor)
+		{
+			const uint32_t offset = startOffsetBytes / 4;
+			if (offset > std::numeric_limits<uint8_t>::max()) {
+				logger::error("Variable {} in {} shader {}::{:X} starts at float {}, beyond what a constant table entry holds",
+					name, magic_enum::enum_name(shaderClass), magic_enum::enum_name(shader.shaderType.get()), descriptor, offset);
+			}
+			return static_cast<uint8_t>(offset);
+		}
+
 		template <size_t MaxOffsetsSize>
 		static void ReflectConstantBuffers(ID3D11ShaderReflection& reflector,
 			std::array<size_t, 3>& bufferSizes,
-			std::array<int8_t, MaxOffsetsSize>& constantOffsets,
+			std::array<uint8_t, MaxOffsetsSize>& constantOffsets,
 			uint64_t& vertexDesc,
 			ShaderClass shaderClass, uint32_t descriptor, const RE::BSShader& shader)
 		{
@@ -1257,7 +1269,7 @@ namespace SIE
 							GetVariableIndex(shaderClass, shader, varDesc.Name);
 						const bool variableFound = variableIndex != -1;
 						if (variableFound) {
-							constantOffsets[variableIndex] = (int8_t)(varDesc.StartOffset / 4);
+							constantOffsets[variableIndex] = ConstantTableEntry(varDesc.StartOffset, varDesc.Name, shaderClass, shader, descriptor);
 						} else {
 							logger::trace("Unknown variable name {} in {} shader {}::{:X}",
 								varDesc.Name, magic_enum::enum_name(shaderClass),
@@ -1275,7 +1287,7 @@ namespace SIE
 									const auto variableArrayIndex =
 										GetVariableIndex(shaderClass, shader, arrayName.c_str());
 									if (variableArrayIndex != -1) {
-										constantOffsets[variableArrayIndex] = static_cast<int8_t>(varDesc.StartOffset / 4);
+										constantOffsets[variableArrayIndex] = ConstantTableEntry(varDesc.StartOffset, arrayName.c_str(), shaderClass, shader, descriptor);
 									} else {
 										logger::debug("Unknown variable name {} in {} shader {}::{:X}",
 											arrayName, magic_enum::enum_name(shaderClass),
@@ -1290,8 +1302,8 @@ namespace SIE
 										const auto variableArrayElementIndex =
 											GetVariableIndex(shaderClass, shader, varName.c_str());
 										if (variableArrayElementIndex != -1) {
-											constantOffsets[variableArrayElementIndex] =
-												static_cast<int8_t>((varDesc.StartOffset + elementSize * arrayIndex) / 4);
+											constantOffsets[variableArrayElementIndex] = ConstantTableEntry(
+												varDesc.StartOffset + elementSize * arrayIndex, varName.c_str(), shaderClass, shader, descriptor);
 										} else {
 											logger::debug(
 												"Unknown variable name {} in {} shader {}::{:X}", varName,
@@ -1315,6 +1327,7 @@ namespace SIE
 
 		std::wstring GetDiskPath(const std::string_view& name, uint32_t descriptor, ShaderClass shaderClass)
 		{
+			globals::state->GetDefines();  // [TEMP] applies CS_DCLF_SHADOW_DEBUG_OUTPUT before the name is taken
 			const auto suffixNarrow = Util::GetShaderDefinesSuffix(globals::state->shaderDefinesString);
 			const std::wstring suffix(suffixNarrow.begin(), suffixNarrow.end());
 
@@ -1656,7 +1669,7 @@ namespace SIE
 					descriptor);
 			} else {
 				std::array<size_t, 3> bufferSizes = { 0, 0, 0 };
-				std::ranges::fill(newShader->constantTable, (int8_t)0);
+				std::ranges::fill(newShader->constantTable, static_cast<uint8_t>(0));
 				uint64_t dummy;
 				ReflectConstantBuffers(*reflector.get(), bufferSizes, newShader->constantTable,
 					dummy,

@@ -151,12 +151,13 @@ namespace DCLF
 	 * technique the engine derives for the caster (ShadowViews.h), which does not follow the Lighting
 	 * descriptors the main pass's key is built from - two objects sharing a Lighting pipeline can cast
 	 * with different Utility techniques, and one Utility technique serves objects of many Lighting
-	 * pipelines. The raster flags carry two-sidedness and the view's depth bias mode.
+	 * pipelines. The raster flags carry two-sidedness and, for a pipeline (not a caster's base key), the
+	 * view's rasterizer state at kRasterShadowStateShift (DrawPipelines::ShadowRasterStateId).
 	 */
 	struct ShadowPipelineKey
 	{
 		std::uint32_t technique = 0;     // Utility technique, mode bits included
-		std::uint32_t rasterFlags = 0;   // kRasterTwoSided and the bias mode at kRasterDepthBiasShift
+		std::uint32_t rasterFlags = 0;   // kRasterTwoSided, and the view's rasterizer state id at kRasterShadowStateShift
 		std::uint64_t vertexLayout = 0;  // as PipelineKey::vertexLayout
 
 		bool operator==(const ShadowPipelineKey&) const = default;
@@ -204,12 +205,19 @@ namespace DCLF
 		kRasterAlphaToCoverage = 1u << 11,
 		kRasterWriteModeShift = 12,  // 4 bits: alphaBlendWriteMode (0-12)
 		kRasterBlendExtra = 1u << 16,
+		// Shadow keys only: 4 bits, the view's rasterizer state (DrawPipelines::ShadowRasterStateId, 1-15).
+		kRasterShadowStateShift = 17,
 	};
 
 	inline constexpr std::uint32_t RasterDecalGroup(std::uint32_t a_flags) { return (a_flags >> kRasterDecalGroupShift) & 3u; }
 	inline constexpr std::uint32_t RasterDepthBiasMode(std::uint32_t a_flags) { return (a_flags >> kRasterDepthBiasShift) & 15u; }
 	inline constexpr std::uint32_t RasterBlendMode(std::uint32_t a_flags) { return (a_flags >> kRasterBlendModeShift) & 7u; }
 	inline constexpr std::uint32_t RasterWriteMode(std::uint32_t a_flags) { return (a_flags >> kRasterWriteModeShift) & 15u; }
+	inline constexpr std::uint32_t RasterShadowState(std::uint32_t a_flags) { return (a_flags >> kRasterShadowStateShift) & 15u; }
+	inline constexpr std::uint32_t WithShadowState(std::uint32_t a_flags, std::uint32_t a_state)
+	{
+		return (a_flags & ~(15u << kRasterShadowStateShift)) | ((a_state & 15u) << kRasterShadowStateShift);
+	}
 	/** @brief Everything but the two-sided bit: what selects the engine's state objects. */
 	inline constexpr std::uint32_t RasterStateBits(std::uint32_t a_flags) { return a_flags & ~kRasterTwoSided; }
 

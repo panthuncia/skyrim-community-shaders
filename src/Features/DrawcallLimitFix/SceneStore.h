@@ -180,6 +180,10 @@ namespace DCLF
 			// Of those objects, the ones the engine's main-camera accumulator also holds this frame. The
 			// remainder are candidates the engine culled, which the GPU culling is measured against.
 			std::uint32_t nativeVisible = 0;
+			// The sun's shadow mask (ShadowDir and DefShadow, pass descriptor bits 13 and 14): which objects'
+			// descriptors carry it. Only an accumulated pass has those bits; a derived descriptor never does.
+			std::uint32_t nativeShadowMasked = 0;   // accumulated, with both bits
+			std::uint32_t derivedDescriptors = 0;   // not accumulated: the property derivation, no shadow bits
 			std::uint32_t geometries = 0;
 			std::uint32_t pipelines = 0;
 			std::uint32_t materials = 0;
@@ -214,7 +218,7 @@ namespace DCLF
 			std::uint32_t geometriesRefreshed = 0;
 			std::uint32_t slotViolations = 0;  // objects whose slots failed CheckObjectSlots (the gate: 0)
 			std::uint32_t shadowCasters = 0;  // records the engine would draw into a shadow map
-			std::array<std::uint32_t, 8> shadowRejects{};  // by ShadowReject, over the frame's records
+			std::array<std::uint32_t, 16> shadowRejects{};  // by ShadowReject, over the frame's records
 			// Objects the engine accumulated that the scene phase had left out of the tables, so the frame
 			// cannot draw them. One frame of staleness at most (the verdict is cleared for them); the gate
 			// is 0 in steady state.
