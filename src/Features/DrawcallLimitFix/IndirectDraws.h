@@ -185,8 +185,8 @@ namespace DCLF
 		void Execute();
 
 		/**
-		 * @brief Hybrid path, at the end of the native depth pass: assemble this frame's draws and write
-		 * their depth into the depth buffer the pass just finished.
+		 * @brief Hybrid path, inside the native depth pass once the world's depth is drawn (AE; at its end
+		 * elsewhere): assemble this frame's draws and write their depth into the engine's main depth.
 		 *
 		 * It runs here, and not with the colour pass, because everything the rest of the frame does with
 		 * depth - the native draws' own depth test, the sky, Terrain Blending's blended depth and every

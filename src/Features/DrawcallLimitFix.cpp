@@ -462,7 +462,7 @@ void DrawcallLimitFix::EarlyPrepass()
 		return;
 
 	// The tables are built here, from Main_RenderShadowMaps, rather than in Prepass from StartDeferred.
-	// Both DCLF epochs then read the same generation: the Z-prepass runs at the end of Main_RenderDepth,
+	// Both DCLF epochs then read the same generation: the Z-prepass runs inside Main_RenderDepth,
 	// which is after this and before Prepass, so it used to see the *previous* frame's tables and the
 	// per-object visibility verdicts it wrote could not be applied by index in the colour epoch.
 	//
@@ -588,7 +588,7 @@ void DrawcallLimitFix::EarlyPrepass()
 	if (DCLF::TreeTrace::Enabled())
 		DCLF::TreeTrace::Get().AfterAccumulate();
 
-	// The Z-prepass epoch's build, on the worker, from here to the end of Main_RenderDepth (CS_DCLF_ASYNC).
+	// The Z-prepass epoch's build, on the worker, from here to the Z-prepass in Main_RenderDepth (CS_DCLF_ASYNC).
 	DCLF::IndirectDraws::Get().KickZPrepassBuild();
 }
 
@@ -971,20 +971,49 @@ bool DrawcallLimitFix::SkipNativePass(RE::BSRenderPass* a_pass)
 	return true;
 }
 
-void DrawcallLimitFix::Hooks::Main_RenderDepth::thunk(bool a_a1, bool a_a2)
+void DrawcallLimitFix::Hooks::Main_RenderDepth::thunk(bool a_firstPerson, bool a_a2)
 {
 	auto& feature = globals::features::drawcallLimitFix;
 	feature.inDepthPass = true;
-	func(a_a1, a_a2);
+	feature.zPrepassInDepthPass = false;
+	func(a_firstPerson, a_a2);
 	feature.inDepthPass = false;
-	if (!feature.Running())
+	if (!feature.Running() || feature.zPrepassInDepthPass)
 		return;
-	// The Z-prepass, at the end of the native depth pass: DCLF's objects go into the depth buffer before
-	// anything is derived from it. This thunk is the inner one of the chain on this call site (DCLF installs
-	// before Terrain Blending, so Terrain Blending wraps it), which is what puts the prepass ahead of the
-	// blended depth Terrain Blending builds.
+	// Where Main_RenderDepth_WorldDrawn is not installed (SE): the Z-prepass at the end of the native depth
+	// pass. This thunk is the inner one of the chain on this call site (DCLF installs before Terrain Blending,
+	// so Terrain Blending wraps it), which puts the prepass ahead of the blended depth Terrain Blending builds.
+	// In first person the camera here is the first-person model's, and the prepass draws the world with it.
+	if (a_firstPerson) {
+		static bool warned = false;
+		if (!std::exchange(warned, true))
+			logger::warn("[DCLF] First person on a runtime without the depth pass's inner hook: DCLF's objects are drawn with the first-person camera and do not show");
+	}
+	feature.RunZPrepass(true);
+}
+
+void DrawcallLimitFix::Hooks::Main_RenderDepth_WorldDrawn::thunk(void* a_accumulator, bool a_a2)
+{
+	func(a_accumulator, a_a2);
+	auto& feature = globals::features::drawcallLimitFix;
+	if (!feature.inDepthPass || !feature.Running())
+		return;
+	// The world's depth draws are done and its camera is still current. The engine's own copy of the depth
+	// (kPOST_ZPREPASS_COPY), at the end of the pass, now includes DCLF's objects, and the first-person model's
+	// depth goes in after the world's, as it does natively, so there is nothing to refresh.
+	feature.zPrepassInDepthPass = true;
+	feature.RunZPrepass(false);
+	// DCLF's epoch leaves the context's bindings to the engine's state tracking: rebind its targets for the
+	// rest of the pass.
+	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+}
+
+void DrawcallLimitFix::RunZPrepass(bool a_refreshConsumers)
+{
+	// DCLF's objects go into the depth buffer before anything is derived from it.
 	DCLF::IndirectDraws::Get().CaptureDepthPass();
-	feature.RefreshDepthConsumers();
+	if (a_refreshConsumers)
+		RefreshDepthConsumers();
 }
 
 template <int N>
@@ -1023,6 +1052,11 @@ void DrawcallLimitFix::Hooks::Install()
 	logger::info("[DCLF] shadow view hook installed on BSShaderAccumulator::FinishAccumulatingPreResolveDepth");
 	// The main camera's depth pass, hooked where Terrain Blending hooks it.
 	stl::write_thunk_call<Main_RenderDepth>(REL::RelocationID(35560, 36559).address() + Util::VersionedRelocation::Select(0x395, 0x395, 0x3B3));
+	// AE only: the SE offset of this call inside Main::RenderDepth is unverified (no database for it).
+	if (REL::Module::IsAE()) {
+		stl::write_thunk_call<Main_RenderDepth_WorldDrawn>(REL::RelocationID(100421, 107139).address() + 0x1AA);
+		logger::info("[DCLF] Z-prepass hook installed inside Main::RenderDepth, after the world's depth draws");
+	}
 	stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<1>>(REL::RelocationID(100877, 107667).address() + REL::Relocate(0x1E5, 0xED));
 	stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<2>>(REL::RelocationID(100852, 107642).address() + REL::Relocate(0x29E, 0x28F));
 	if (REL::Module::IsSE())  // this call site only exists in SE, as Light Limit Fix's hooks show

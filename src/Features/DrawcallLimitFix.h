@@ -89,7 +89,24 @@ private:
 		/** @brief The main camera's depth pass: DCLF's objects are skipped inside it too. */
 		struct Main_RenderDepth
 		{
-			static void thunk(bool a_a1, bool a_a2);
+			static void thunk(bool a_firstPerson, bool a_a2);
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/**
+		 * @brief Inside the depth pass (AE `Main::RenderDepth` +0x1AA), the call that follows the world's depth
+		 * draws: where the Z-prepass runs (RunZPrepass).
+		 *
+		 * It is the last point where the world camera is current. In first person the depth pass then draws the
+		 * first-person model with the first-person camera, whose eye is the player's head (posAdjust) and whose
+		 * VS_PerFrame is its own, and leaves both set: Main::Draw restores the world camera only after the depth
+		 * pass returns. A Z-prepass at the end of the depth pass drew the whole world with that camera, and the
+		 * colour epoch, which replays the prepass's vertex inputs, drew nothing either (engine notes: the depth
+		 * pass and first person).
+		 */
+		struct Main_RenderDepth_WorldDrawn
+		{
+			static void thunk(void* a_accumulator, bool a_a2);
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
@@ -143,6 +160,10 @@ private:
 	// Why DCLF was forced off after install (the render graph could not come up); shown in the menu.
 	std::string unavailableReason;
 	bool inDepthPass = false;
+	// The Z-prepass ran inside this depth pass (Main_RenderDepth_WorldDrawn); the end of the pass then skips it.
+	bool zPrepassInDepthPass = false;
+	/** @brief The Z-prepass epoch, then what was derived from the depth before it (RefreshDepthConsumers). */
+	void RunZPrepass(bool a_refreshConsumers);
 	std::uint32_t captureFrame = ~0u;  // the frame whose main-pass bindings have been captured
 	SkipStats skipStats;
 	SkipStats skipCounters;  // accumulating; published into skipStats every frame

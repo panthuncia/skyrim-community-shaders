@@ -3513,7 +3513,8 @@ still applies them every Present, in menus too, so the queue cannot grow while t
 **Result:** 0 untracked eligible in every interval of the flight gate, with BuildDraws parity OK, draw
 parity 0 and holes 0.
 
-**Found on the way:**
+**Found on the way** (the first two are recorded for their PRs in
+[feature-bugs-found-by-parity.md](./feature-bugs-found-by-parity.md)):
 
 -   **A loader thread writes materials that are being drawn.** On some runs, the first interval had 8-13
     `ParallaxOccData` mismatches (DCLF 1, native 0.7), each on one frame. TruePBR's `TESBoundObject::Clone3D`
@@ -3531,3 +3532,49 @@ parity 0 and holes 0.
     intended value for those draws; the fix belongs in Subsurface Scattering (clear the bit for every other
     deferred lighting draw).
 -   The materials line counts the last frame only, like the other "(last frame)" lines, and now says so.
+
+## First person: the Z-prepass drew the world with the first-person camera
+
+In first person nothing DCLF draws showed. Terrain, water, grass, distant trees and the first-person model
+were drawn, and the objects DCLF draws were missing. Their shadows were drawn (the shadow epoch has its own
+cameras). Every gate passed: capture parity, draw parity, 0 holes. So DCLF's draws executed and put nothing
+on screen.
+
+**The cause.** The Z-prepass ran where the engine's depth pass returns (`Main_RenderDepth`, `Main::Draw`
+`+0x395`). In first person, the depth pass ends by drawing the first-person model with the first-person
+camera and does not restore the world camera (engine notes: "The depth pass and first person").
+
+-   **The Z-prepass captured that camera.** Its eye was `(0, 0, 120.5)` against the main pass's
+    `(17120, -47226, 9.7)`, and its VS_PerFrame projection had the first-person near plane. It drew every
+    object relative to the player's head, off screen.
+-   **The colour epoch replays the Z-prepass's vertex inputs** (its eye and VS constants), so that both
+    epochs rasterise to the same depth, and so it drew nothing either.
+
+In third person the depth pass has no first-person block and the camera at the return is the world's.
+
+**The fix.** On AE, the Z-prepass runs inside the depth pass, after the world's depth draws
+(`Main_RenderDepth_WorldDrawn`, the call at `Main::RenderDepth` `+0x1AA`):
+
+-   **The world camera is current there** in both views.
+-   **It captures the engine's `kMAIN` depth** rather than the bound target, because Terrain Blending
+    alternates the bound target with its own terrain depth while terrain draws. Afterwards it marks the render
+    targets dirty, so the engine rebinds its own for the rest of the pass.
+-   **The engine's own `kPOST_ZPREPASS_COPY`, at the end of the pass, now includes DCLF's objects**, so the
+    copy `RefreshDepthConsumers` made after the pass is not needed on this path. Terrain Blending's blended
+    depth is still built after the pass returns.
+-   **The first-person model's depth is drawn after the world's**, which is the native order.
+-   **The HZB, built in the Z-prepass segment**, leaves out the first-person model and the rooms' stencil
+    draws. That means fewer occluders, never more.
+
+On SE the offset inside `Main::RenderDepth` is unverified, so the Z-prepass stays at the end of the pass. In
+first person it logs a warning once and still draws with the wrong camera.
+
+**Result:**
+
+-   The first-person save renders DCLF's objects: screenshots with DCLF on and off match.
+-   Third person, reached by scrolling the camera back, is unchanged.
+-   The gates stay clean: capture parity OK, draw parity OK, 0 holes, the colour and Z-prepass probes 0
+    differing.
+
+**Also noted:** the G-buffer probe's "after the z-prepass" depth slot reads `000000` whatever is drawn, so it
+does not measure the prepass.

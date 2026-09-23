@@ -8,6 +8,7 @@
 -   **[Drawcall Limit Fix](./drawcall-limit-fix.md)** - GPU-driven indirect drawing of the opaque scene (in progress)
 -   **[Skyrim engine notes](./skyrim-engine-notes.md)** - What the decompiled game binary does, where features depend on it
 -   **[Crash catalog](./crash-catalog.md)** - Crashes met during development, their stacks and what is known about each
+-   **[Feature bugs found by parity](./feature-bugs-found-by-parity.md)** - Bugs in other features that DCLF's parity checks found, each a separate PR
 
 ## Quick Links
 

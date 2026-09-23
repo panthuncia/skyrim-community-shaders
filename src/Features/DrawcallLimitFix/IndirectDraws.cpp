@@ -901,11 +901,12 @@ namespace DCLF
 		};
 
 		/**
-		 * @brief Builds the hierarchical depth buffer at the end of the native depth pass.
+		 * @brief Builds the hierarchical depth buffer after the world's depth draws.
 		 *
 		 * It runs in the ZPrepass segment, after DCLF's own depth draws, so the HZB describes the depth the
 		 * frame actually has: the native occluders the engine drew (terrain and everything ineligible) plus
-		 * the objects DCLF drew itself.
+		 * the objects DCLF drew itself. On AE that is inside the depth pass, before the first-person model's
+		 * depth and the rooms' stencil draws, which it therefore leaves out: fewer occluders, never more.
 		 *
 		 * The whole mip chain is one pass with a full memory barrier between the dispatches, rather than one
 		 * pass per level. Levels of a single texture are not separate resources to the graph, so a per-level
@@ -938,7 +939,7 @@ namespace DCLF
 			HzbFrame Prepare(const HzbBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
 			{
 				HzbFrame prepared{};
-				// Only at the end of the depth pass: anywhere else the depth is not final.
+				// Only in the Z-prepass segment: anywhere else the depth is not the world's final depth.
 				const auto now = segment.Now();
 				if (now != RenderGraphRuntime::Segment::ZPrepass)
 					return prepared;
@@ -4715,6 +4716,14 @@ namespace DCLF
 		if (!Hybrid() || skip)
 			return;
 		auto capture = CaptureBindings();
+		// The engine's main depth, not whatever is bound: inside the depth pass Terrain Blending alternates the
+		// bound target between it and its own terrain depth while terrain draws.
+		if (auto* renderer = globals::game::renderer) {
+			if (auto* main = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture) {
+				capture.depth = nullptr;
+				capture.depth.copy_from(main);
+			}
+		}
 		// The Z-prepass writes into the depth the native pass just finished, which has to be the one the
 		// main pass then tests against; otherwise DCLF's objects would be written somewhere nothing reads.
 		if (!capture.depth || (impl->mainPassDepth && capture.depth.get() != impl->mainPassDepth.get())) {
@@ -4932,7 +4941,7 @@ namespace DCLF
 
 	void IndirectDraws::KickZPrepassBuild()
 	{
-		// The Z-prepass epoch's inputs are final from here to the end of Main_RenderDepth - the accumulate
+		// The Z-prepass epoch's inputs are final from here to the Z-prepass in Main_RenderDepth - the accumulate
 		// phase was the tables' last writer, RefreshFrameConstants runs after the epoch - except the eye,
 		// which the epoch captures from posAdjust. posAdjust still holds the shadow cameras' here, so the eye
 		// is predicted: the main camera's world position, and last frame's captured eye as the previous one.

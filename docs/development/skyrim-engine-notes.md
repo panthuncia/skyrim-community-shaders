@@ -590,6 +590,29 @@ Sources:
     (BSLightingShaderMaterial).
 
 
+## The depth pass and first person
+
+`Main::RenderDepth` (AE `1414ccb30`, ID 107139; SE ID 100421) is called from `Main::Draw` (AE `+0x395`)
+as `RenderDepth(firstPerson, …)`. The flag is set when the player's first-person 3D is shown. In order:
+
+1.  **The world.** `FUN_1414a9190(worldCamera, accumulator, 0x21)` renders the scene: it calls
+    `BSGraphics::State::SetCameraData` for the world camera and runs the accumulator. `FUN_1414b47e0` and
+    `FUN_1414b5120` (called at `+0x1AA`) then clear the accumulator's lists.
+2.  **Rooms.** With portals in play, a loop draws each room again with stencil reference `room + 1`.
+3.  **The first-person model**, when the flag is set:
+    -   it reads the viewport depth range, sets it to `[0, 0.1]` (or another bound for the second argument)
+        and later restores it;
+    -   the model is drawn with the first-person camera (`0x14338c820`), and the eye (`posAdjust`) moves to
+        the player's head;
+    -   **it does not restore the camera.** `Main::Draw` sets the world camera again only after `RenderDepth`
+        returns (`SetCameraData(p0, 1)`, a few calls later). Terrain Blending sets it before calling
+        `RenderDepth` for the same reason.
+4.  **The copy.** `CopyResource(kPOST_ZPREPASS_COPY, kMAIN depth)` on the immediate context (vtable slot 47).
+
+At the call site's return in first person, then, the eye is the first-person camera's (DCLF measured
+`(0, 0, 120.5)` against the world's `(17120, -47226, 9.7)`). The VS_PerFrame projection is also its own, with
+a near plane of 5 against 15, and the viewport depth range is still `[0, 0.1]`.
+
 ## ProjectedUV and MTLand: the per-object constants and where they come from
 
 Decompiled from AE 1.6.1170 for Drawcall Limit Fix's coverage of the two techniques; both are
