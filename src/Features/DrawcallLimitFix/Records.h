@@ -76,6 +76,9 @@ namespace DCLF
 		// not care about, SceneStore::ShadowOnlyReason), but it is a shadow caster, so it has a record for the
 		// shadow epochs alone. It always has kObjectNoBindings; the accumulate phase and the main epochs skip it.
 		kObjectShadowOnly = 1u << 24,
+		// A free object slot (SceneStore's persistent slots): no object at all. It always has kObjectNoBindings and
+		// kObjectNoShadow too, so every loop that skips those skips it; the main build skips it before counting.
+		kObjectFree = 1u << 25,
 	};
 
 	/**

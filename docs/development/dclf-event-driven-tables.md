@@ -1,6 +1,7 @@
 # DCLF: object tables built from events
 
-Status: investigation, 2026-09-24. Nothing here is built. It refines Phase 3 of
+Status, 2026-09-24: the reverse engineering is done ("Reverse-engineering results"), and Phases 1 and 2 are built
+("Phase 1: object slots", "Phase 2: the delta walk"). It refines Phase 3 of
 [dclf-gpu-driven-frame.md](./dclf-gpu-driven-frame.md) ("a persistent GPU scene").
 
 ## The question
@@ -88,8 +89,9 @@ What that says:
 ### Stable object slots, and a live list
 
 Each tracked, eligible geometry holds one object slot for as long as it stays eligible. Every per-object
-column (record, draw, bone offsets, face stream, shadow columns, lights, shading) is indexed by slot. A live
-list, maintained on insert and remove, is what the builds iterate.
+column (record, draw, bone offsets, face stream, shadow columns, lights, shading) is indexed by slot. The builds
+iterate the slots and skip free ones by their flags (Phase 1). A separate live list is only worth adding if
+fragmentation after large cell changes makes that loop measurable.
 
 "The transform witness cannot pay for itself" rejected stable slots as a *performance* change: a record costs
 13-26 ns to write. The argument here is different. Slots are what lets the tables persist across frames, so
@@ -100,81 +102,296 @@ that per-frame work is proportional to what changed and the worker never has to 
 | Input | Event today | What is needed | Per-frame remainder |
 | --- | --- | --- | --- |
 | Membership | `SceneTracker` attach and detach | done; the rolling re-check stays as an alarm | none |
-| Moves (world, previous world, bound) | none | **The movable set.** A slot is movable if it can change transform without a membership event: actor-owned, under the Dynamic category node, physics-driven, or animated by a controller. Only those are read each frame. A static reference is assumed to move only by `TESObjectREFR` position calls (`SetPosition`, `MoveTo`, `Update3DPosition`); hook those, or verify they detach and reattach. The validation walk is the gate: no non-movable slot may ever differ. | about 200 reads a frame instead of 10,000 |
-| Bone palettes | none | read for the movable skinned slots only; the GPU-driven plan's bones-on-GPU removes `UpdateSkin` later | per visible skinned object |
-| Property, material, alpha property, skin instance, renderer data | materials: `MaterialSources` write hooks; renderer data: `GpuResources` | Reverse-engineer the write sites for the property and alpha pointers and the property flags, and hook them. Most swaps come with new geometry (an equip attaches new shapes), which membership covers already. Renderer-data creation and release come from `GpuResources`' own lifetime tracking. | none |
-| Persistent hidden and shown | none | **The hardest input.** The flag is written inline by about 70 engine functions (`or [reg+0xF4], 1`) with no setter to hook. Most are outside the tracked roots (sky, projectiles, inventory and map 3D). The rest need an inventory, including writes through a register (`mov`, `or`, `mov`), which the scan did not cover. Candidates: enable and disable (check whether they detach instead), actor 3D hiding, the player's 3D. | none once hooked |
+| Moves (world, previous world, bound) | membership, for references (a move is a disable and an enable) | **The movable set** (see "Reverse-engineering results"): actor-owned, a controller, a non-fixed rigid body, or a billboard on the chain; and, for the sun entry, anything moving under the reference root (Phase 2). Taken at classification. `SetMotionType` and runtime controller additions are Phase 3's. | the moving slots' placement |
+| Bone palettes | none | every skin, every frame: the wind moves a tree's bones with no controller or body in the reference (Phase 2); the GPU-driven plan's bones-on-GPU removes `UpdateSkin` later | per skinned record |
+| Property, material, alpha property, skin instance, renderer data | materials: `MaterialSources` write hooks; renderer data: `GpuResources` | Flags and materials: hook `BSShaderProperty::SetFlags` and `SetMaterial`. Pointer swaps have no choke point: on movable slots (actors) they are re-read every frame, and static slots take them at attach, with the validation walk as the alarm. | movable slots only |
+| Persistent hidden and shown | membership (disable and enable release and load the 3D) | Movable slots re-read their chain every frame, which covers actors and the visibility controllers. The remaining static writers (portal graph, queued trees, cell paths) are confirmed or hooked as the validation walk finds them. | movable slots only |
 | Per-view hides | none | A per-slot **view mask** for DCLF's views (main, sun, and later the others), set by rules reverse-engineered per writer: the first-person skeleton is only in the first-person view; the player's 3D is hidden in the cube-map reflection; portal traversal's toggles are internal to the cull and don't count. `CaptureCullHiddenBits` is the first, hand-listed version of this. | none |
-| Switch-node selection | none | hook the index writes (`NiSwitchNode` `+0x12C`) | none |
-| Fade, partition LOD | written by the main camera's cull | per frame by nature; the GPU-driven plan computes it from distance on the GPU or a worker | per frame on the GPU |
+| Switch-node selection | none | no setter: switch children stay a per-frame class | one switch-node read per switch child (Phase 2) |
+| Fade | written by the main camera's cull: `BSFadeNode::OnVisible` and the fade update `FUN_14147a160` | **built (Phase 2):** both writers are detoured, and a change is an event for the records that read the node | the records of fading nodes (tens a frame while the camera moves) |
+| Partition LOD | the fade node's LOD level, written by the cull | per frame for skinned records, which are per frame anyway | the skinned records |
 | Face positions | `FaceSnapshots` | done | per morphing head |
 | Animated shading, texture transforms | controller write hooks (`MaterialSources`) | done for shading; texture transforms follow the same hooks | none |
 | Per-frame globals (fog, eye, wind, clocks) | none | GPU (`RefreshFrameConstants`' job, split out) | per frame, not per object |
 
-### One quiet point, and a worker that reads no scene
+### One quiet point, and no walk on the worker
 
-The render thread already has a moment when the scene is final and no cull or reflection update runs: the
-`Main::Draw` hook where the walk is kicked today. At that point it would:
+The render thread has a moment when the scene is final and no cull or reflection update runs: the `Main::Draw`
+hook where the walk used to be kicked. Phase 2 does the table work there, on the render thread. It drains the
+event queues (membership, fades) and evaluates only what they and the per-frame set name. Nothing reads the scene
+for the tables off the render thread, so the whole class of race goes away: nothing can see a transient bit or a
+half-written transform.
 
-1.  Drain the event queues (membership, property, hidden, switch) into a delta list.
-2.  Copy the movable slots' transforms, bounds and bone rows into plain buffers (about 200 objects; tens of
-    microseconds).
-3.  Hand the delta and the copies to the worker.
+The plan was for the render thread to copy the movable slots' inputs and hand them to the worker to apply. It
+didn't survive measurement: the reads are the cost, not the writes, so a hand-off would only add to it (see
+"Phase 2: the delta walk").
 
-The worker applies them to the tables and builds, reading only what it was handed. It never touches an
-`NiAVObject`. The whole class of race goes away: the worker cannot see a transient bit or a half-written
-transform, because it reads no engine memory at all.
-
-Events that arrive from other threads during the frame (loader threads, morph jobs, Havok) queue up and apply
-at the next quiet point. That is the same one-frame rule membership follows today.
+Events that arrive from other threads during the frame (loader threads, the cull jobs' fade writes, morph jobs,
+Havok) queue up and apply at the next quiet point. That is the same one-frame rule membership follows.
 
 ### The full walk as synchronous validation
 
-The current walk stays as the reference. `CS_DCLF_WALK_PARITY=1` would run it on the render thread at the quiet
-point every N frames and compare its tables with the incremental ones, slot by slot. `SameSceneTables` already
-does this for the asynchronous walk's probe. The gate for every step: 0 differences through the standard
+The current walk stays as the reference. `CS_DCLF_WALK_PARITY=1` runs it on the render thread at the quiet
+point every 60 frames and compares its tables with the incremental ones, object by object (built in Phase 1;
+there the "incremental" tables are the slot tables). The gate for every step: 0 differences through the standard
 matrix (road, Riverwood, Dragonsreach, a dungeon, cell changes, save and load, the live toggle), with the full
 featureset.
 
 ## What it needs
 
-**Engineering:**
+What is left after Phases 1 and 2 (the slots, the delta walk and `CS_DCLF_WALK_PARITY` are built):
 
--   Stable slots and the live list, with every table consumer changed to them. That's the bulk of the work:
-    `IndirectDraws`' builds, the shadow build, the accumulate phase's object lookup (`FindObject`, already on
-    `Tracked::objectId`), `RefreshFrameConstants`, and the parity checks.
--   The quiet-point capture and the delta hand-off, replacing `PrepareSceneJob` and the walk's kick.
--   The per-slot view mask, and its use in the shadow build and the draws' visibility.
--   `CS_DCLF_WALK_PARITY`.
+-   the structural events (Phase 3);
+-   the per-slot view mask, and its use in the shadow build and the draws' visibility (Phase 4).
 
-**Reverse engineering, before the matching step:**
+## Reverse-engineering results
 
--   **World-transform writers for static references.** Do position changes always detach and reattach, or do
-    `SetPosition`, `MoveTo` and `Update3DPosition` move 3D in place? The answer decides whether static slots
-    need a move hook.
--   **Persistent `kHidden` writers inside the tracked roots.** Complete the scan (register-mediated writes,
-    `and ~1` clears), and for each writer decide whether it is persistent or view-transient.
--   **Property, alpha-property and property-flag writers.** Which paths change them on geometry that stays
-    attached.
--   **Switch-index writers.**
--   **What the ~100 non-actor movers are** (animated references, critters such as the salmon, physics), to
-    confirm the movable-set rule covers them structurally rather than by observation.
+All from AE 1.6.1170, via the decrypted `.text` scans and Ghidra. Two temporary probes, since removed, ran with
+the walk on the render thread before the culls start.
+
+**A static reference never moves in place.**
+
+-   `TESObjectREFR::SetPosition` (`0x1402ea960`) and `SetAngle` (`0x1402ea6a0`) write only the reference's
+    data. They never touch its 3D.
+-   A script or console move goes through `TESObjectREFR::MoveTo_Impl` (`0x140a447f0`). For a non-actor, that
+    first calls the reference's `Disable` (`0x1402ec7e0`, named `ArrowProjectile::Disable` in the database).
+    `Disable` calls `Set3D(nullptr)` (vtable `+0x360`) through a reentrancy guard (`FUN_14017a6e0`), so the 3D
+    is released: a detach event.
+-   `MoveTo_Impl`'s in-place transform write (local transform, then `NiAVObject::Update`) therefore finds no 3D
+    unless the reference was already disabled, and its 3D is loaded again on `Enable`: an attach event.
+-   Actors take their own path (`Actor` move functions), and actors are movable anyway.
+
+**The movable set is structural, and covers every mover.** A slot is movable when any node from the geometry up
+to its category node has one of these traits. Riverwood, 10,021 tracked geometries:
+
+| Trait | Tracked geometries |
+| --- | --- |
+| owned by an actor | 192-199 |
+| has a time controller (`NiObjectNET::controllers`) | 579-594 |
+| has a rigid body whose motion type isn't `kFixed` | 186-189 |
+| is under an `NiBillboardNode` | 63 |
+| any of them | 915-922 (9% of the tracked set) |
+
+In three 600-frame windows, 416, 251 and 234 geometries moved. Every one was inside the set, and 0 outside it.
+
+-   The movers by base type: actors (about 125 geometries), animated furniture and activators, animated
+    movable statics, and physics clutter settling after the load.
+-   The movable statics with no controller or body of their own are effect planes and water jets under
+    billboards, which DCLF already leaves native (`billboard`).
+
+A slot's traits are fixed at attach, apart from two events that are hookable. A rigid body's motion type can
+change (`SetMotionType`, a grab, a kick), and a controller can be added at runtime. Both are rare.
+
+**`kHidden` has 133 writers.** The complete scan (direct `or`/`and` on `+0xF4`, and register-mediated
+read-modify-writes) found 70 direct sets, 67 direct clears, 34 register sets and 27 register clears, in 133
+functions. Some are false positives: `+0xF4` is a common offset. By caller and by the functions they call:
+
+-   **Outside the tracked roots:** the sky (clouds, moon, stars, sun), the map menu and camera, inventory 3D,
+    projectiles, particles, the water system, and the console toggles (`ToggleCellNode`, `ToggleLODLand`,
+    `ToggleGrass`, `ToggleWaterSystem`, `Show1stPerson`). Nothing to do.
+-   **Before attach:** `LoadGraphics`, `Clone3D`, `Load3D`, `BSRangeNode::LoadBinary`. Membership covers them.
+-   **Render-time, view-transient:**
+    -   `Main::Draw` and first-person culling (`0x140645d30`);
+    -   `ShadowSceneNode::OnVisible`;
+    -   `TESWaterReflections::Update` and its caller;
+    -   the sun and shadow helpers (`0x1414cb640`, `0x1414cb6d0`, `0x1414ccb30`, `0x1414cdaa0`, `0x1404155e0`);
+    -   what looks like the local map's render (`0x140242e00`, `0x140243b00`, `0x140243ea0`).
+
+    These become per-view rules.
+-   **On movable slots, re-read every frame anyway:**
+    -   actors: arrows, shields and weapon draw, biped and body parts, dismemberment, death and resurrection,
+        `PlayerCharacter::Load3D` and `Update`;
+    -   the visibility controllers (`NiVisController::Update`, `BShkVisibilityController`,
+        `BGShkMatFadeController`), whose nodes carry controllers and so are movable.
+-   **Left to confirm, on static references:**
+    -   the portal-graph functions (`0x140e15160`, `0x140e153d0`, `0x140e15490`: clears, called from the
+        render side and from cell load);
+    -   queued trees (`QueuedTree::sub`);
+    -   cell load and attach paths (`0x1401a1590` family, `0x14028b9d0`, `0x1402a8b00`, `0x1402b7840`);
+    -   temporary effects (`0x14050e430`);
+    -   the LOD multi-stream shapes (`0x140552df0`).
+
+    The probe saw 0 hidden changes on static slots at a quiet point. The synchronous validation walk is the
+    gate for these; each difference it finds names a writer to hook.
+
+**Property and alpha-property pointers have no choke point.** Stores to the geometry's `+0x120` (alpha) and
+`+0x128` (shader) are in about 240 functions, and the offsets are too common to tell geometry writes from others.
+The rest:
+
+-   Property flags mostly change through `BSShaderProperty::SetFlags` (`0x14147bee0`, 91 callers), and materials
+    through `BSShaderProperty::SetMaterial` (`0x14147bff0`, 39 callers). Both are hookable.
+-   In steady state the probe saw 0 pointer swaps.
+-   The swaps gameplay causes (equipping, enchantment and invisibility shaders, fading) are on actors, which
+    are movable.
+
+So static slots take their property pointers at attach, and the validation walk is the alarm.
+
+**Switch-node selection** has no named setter. `NiSwitchNode` stores its index at `+0x12C`, and harvesting
+(`TESObjectREFR::SetHarvestedFlag`, `0x1401e0e00`) only sets a reference flag. Switch children are a bounded class
+(532 at Riverwood), and the walk already re-reads them every frame, so they stay a per-frame class: one index read
+per switch node.
 
 ## Phases
 
-1.  **Slots, same walk.** The walk writes into persistent slots instead of rebuilding vectors, and consumers
-    move to slots. No behaviour change. Gate: bit-identical tables against a from-scratch rebuild
-    (`CS_DCLF_WALK_PARITY`).
-2.  **The quiet-point capture.** Movables and bones are copied at the kick. The worker applies deltas and reads
-    no scene; statics are read only at attach. Gate: walk parity, including across the matrix's cell changes
-    and loads.
-3.  **Structural events.** Property, alpha, flags, switch, and persistent hidden: hooks per the RE results.
-    Remove the 64-frame classify cache and its witness.
+1.  **Slots, same walk.** Done; see below.
+2.  **The delta walk.** Done; see below.
+3.  **Structural events.** Property, alpha, flags, switch, persistent hidden, `SetMotionType` and runtime
+    controllers: hooks per the RE results. Remove the 64-frame classify cache and its witness, and with them the
+    refresh queue's re-classifications (110-140 a frame at Riverwood).
 4.  **View masks.** The transient hides become rules. `CaptureCullHiddenBits` is folded in.
-5.  **The walk leaves the frame.** It runs only under `CS_DCLF_WALK_PARITY`.
+5.  **The walk leaves the frame.** Phase 2 already runs it only under `CS_DCLF_WALK_PARITY`, with
+    `CS_DCLF_SCENE_DELTA=0`, and for a full evaluation (a reset, a load, a live toggle). What remains is making
+    those full evaluations incremental too.
 
-The per-frame worker work drops from 1.0-1.6 ms to the size of the delta plus the builds. On the render thread,
-the capture replaces `PrepareSceneJob`, at about the same cost.
+## Phase 1: object slots
+
+`CS_DCLF_OBJECT_SLOTS` (default on; `=0` restores the dense layout for an A/B) gives every object a slot it keeps
+for as long as it has a record.
+
+-   **Slot-indexed arrays.** Every per-object array of `SceneStore::Tables` is indexed by slot and persists
+    across walks. The walk writes each object at its slot (`AcquireObjectSlot`: its own, a free one, or a new
+    one), and stamps it (`objectSeen`).
+-   **Free slots.** After the walk, `SweepObjectSlots` frees every slot the walk did not write. A free slot holds
+    `FreeObjectRecord()`: `kObjectFree` with `kObjectNoBindings` and `kObjectNoShadow`, and a null geometry.
+    So every loop that already skipped unbound or non-casting objects skips it. The main build skips it
+    before its cull-only candidates.
+-   **Leaving the tracked set.** A `Tracked` entry releases its slot when it is erased (detach, validation, a
+    rescan), so a rescan after a load reuses the slots of the entries it replaces.
+-   **What stays per frame.** `bones`, `previousBones`, `extraRows`, `faceStreams`, `actorObjects`, the shadow
+    texture set and keys, and `decalOrdinal` are refilled by every walk and accumulate phase. The slots' offsets
+    into them are rewritten with them.
+-   **One consumer assumed dense order.** Capture parity's actor check binary-searches `actorObjects`, which
+    was sorted only because indices followed walk order. Its skin parity reported 2,556 ownership mismatches on
+    the first slot run. The walk now sorts the list; "sorted by index" is part of the table's contract.
+-   **Tracked entries.** `objectId` is the slot, and `FindObject` works unchanged.
+
+**The gate.** `CS_DCLF_WALK_PARITY=1`: every 60 frames the walk runs on the render thread, then a dense rebuild
+(the walk with `denseWalk` set: new indices in walk order, no `Tracked` entry touched), and the two are compared
+object by object. The comparison covers:
+
+-   every per-object array;
+-   bone offsets and rows;
+-   face streams;
+-   the per-frame lists;
+-   free-slot hygiene and the live count.
+
+Everything the second walk overwrites is restored.
+
+| Run (full featureset) | Result |
+| --- | --- |
+| Riverwood, live toggle, then Dragonsreach | walk parity OK in every window (12,000-31,000 objects compared per report, 0 differ, 0 missing, 0 extra); 0 holes, 0 claimed but not drawn; shadow maps match across the toggle (0.605 / 0.605 on against 0.602 / 0.604 off) |
+| Riverwood, save and load, with BuildDraws and capture parity | walk parity OK, 6,221 slots and 0 free after the load; BuildDraws, decal, bone palette, draw, light data, permutation and skin parity OK; capture parity OK except in the load's window (22 material mismatches; see Phase 2) |
+
+The slot walk was also faster. At Riverwood it built in 0.89-1.00 ms against 1.44-1.55 ms dense, and in
+Dragonsreach in 0.31 ms against 0.51 ms: the per-object vectors are no longer cleared and appended every frame.
+Two findings predate slots and are unchanged by them, both seen with `CS_DCLF_OBJECT_SLOTS=0` and in older logs:
+
+-   **Withheld passes handed back** after a cell change: 15-23 a window.
+-   **"Feature binding parity" at Riverwood** (`t26`, `t55`, `t81`).
+
+## Phase 2: the delta walk
+
+`CS_DCLF_SCENE_DELTA` (default on; it needs the object slots and AE; `=0` restores the full walk, on the worker)
+replaces the per-frame walk. The scene phase evaluates, on the render thread at `Main::Draw`'s early hook, only the
+entries whose inputs can have changed. Every other slot keeps its record. What it evaluates each frame:
+
+| Source | What | Riverwood, per frame |
+| --- | --- | --- |
+| The per-frame set | entries whose inputs change every frame: see below | about 1,690 |
+| Pending | new entries (`AddGeometry`), a changed parent reason, a verdict the accumulate phase found stale, a record `CheckObjectSlots` neutralised, and a static whose previous transform has not caught up with its current one yet | 0 in steady state |
+| The refresh queue | a kept entry whose classification is `kCandidateRefreshFrames` old, which is when the full walk took it again (a FIFO by classification frame) | 110-140 |
+| Fade events | the records that read a fade node whose `currentFade` changed | 0 at rest, 30-70 while moving |
+| Geometry | a kept slot whose geometry slot lost its resolve, or was re-resolved in place for another object | 0 |
+
+Everything else is a full evaluation, the old walk on the render thread: after a reset, a load, a rescan or a live
+toggle that enters the classification. That is also where the frame's worst case moved to: the frame after a
+load, 20-28 ms, which the full walk spent in the join's inline rebuild at `AfterShadowMaps` instead.
+
+**The per-frame set.** An entry is per frame when its verdict lets it have a record (or it is under a switch, or
+is a face shape) and it has one of these traits (`PerFrameTraits`):
+
+-   a face shape, or owned by an actor;
+-   under a switch node;
+-   skinned;
+-   a controller on its shader or alpha property (animated shading);
+-   a controller or a non-fixed rigid body on its chain;
+-   **its reference root moves** (`RootMoves`). A record's sun entry is the bound of its reference's root node, and
+    that bound moves when anything else in the reference moves. Walk parity caught it on the first run: a nail
+    inside a dead salmon's reference, whose Havok body is on another branch, and the frame of an alchemy workbench,
+    whose animated part is on another branch. The root's subtree is walked once per `kCandidateRefreshFrames`.
+
+**The light path.** Most per-frame entries change in one or two known inputs, so while their classification stands
+they take only what the full walk would have taken again:
+
+-   under a switch: the selection, read from the one switch node on the chain. The rest of the chain is a
+    static's, fixed like any kept record's;
+-   animated shading: a hash of what the record reads from the shader and alpha properties (flags, the alpha test
+    and threshold, the material and its alpha, the diffuse view). The record is written in full when it changes;
+-   skinned: the engine's palette update, the palette rows and the partitions the fade node's LOD level draws;
+-   moving: the placement (the transforms, the bound and the sun entry).
+
+Face shapes, actors and anything else go through the full `WriteObject`. At Riverwood 622 per-frame entries a
+frame are kept as they are and 834 only get their placement or palette.
+
+**Kept slots.** Three things make a kept slot read as a fresh walk would have written it:
+
+-   `RestoreAccumulated` puts back the scene half of every slot the last accumulate phase patched (flags, pipeline
+    and material indices, shading, lights, tree animation, extras), from `Tables::sceneFlags`;
+-   `FinishDeltaWalk` keeps their geometry slots (and a skin's partition chain) this frame's, and touches their
+    buffer references every 64 frames, staggered, well inside `GpuResources`' 600-frame eviction;
+-   the shadow texture and pipeline-key sets cover every record, and are rebuilt only when a record's inputs to them
+    changed.
+
+**The fade watch.** `BSFadeNode::currentFade` is written in the cull by `BSFadeNode::OnVisible` (`0x141479f50`),
+directly for one LOD mode and through the fade update `FUN_14147a160` otherwise, and `FUN_1402cff60` calls that
+update outside a cull. Both are detoured. Each compares the value before and after, and pushes the node onto a
+lock-free stack when it moved. `ProcessEvents` drains it, and the delta walk re-evaluates the node's dependents: the
+kept records whose property names it (`fadeDependents`). It is what a record's `Faded` shadow verdict reads.
+
+**The gate.** `CS_DCLF_WALK_PARITY=1` compares the delta walk's tables with a dense full walk every 60 frames. The
+comparison matches palette rows by content, and the shadow texture set as a set, since the two walks visit in
+different orders.
+
+| Run (full featureset) | Result |
+| --- | --- |
+| Riverwood, live toggle, the player carried 4,800 units, then Dragonsreach, shadow-map probe | walk parity OK in every window (12,000-31,000 objects compared per report, 0 differ); 0 holes, 0 claimed but not drawn, 0 slot violations; shadow maps match across the toggle (0.601 / 0.600 on, 0.598 / 0.598 off) |
+| Riverwood, save and load, with BuildDraws and capture parity | walk parity OK; BuildDraws, decal, bone palette, draw, light data, permutation and skin parity OK; capture parity OK except in the load's window (13 material mismatches), which the full walk's run shows too (22 in Phase 1's) |
+| Bleak Falls Barrow, then Whiterun's exterior | walk parity OK; 0 holes; the 13-14 passes handed back after each transition are all pipelines still compiling, the same class as with the full walk |
+
+Walk parity also caught three wrong shortcuts before these runs:
+
+-   **The sun entry of a static in a moving reference** (above).
+-   **A switch child that fades.** Its record's `Faded` verdict went stale: the light path only reads the
+    selection. Switch children are fade dependents now.
+-   **Skins that looked still.** Pine trees are skinned, 505 of them at Riverwood, and the wind moves their bones
+    with no controller or body anywhere in the reference. A "settled palette" shortcut, which kept the rows once the
+    current and previous palettes matched, left 28 stale after a load. Every skin gets its palette update every
+    frame, as before.
+
+One probe sample read every shadow slice 100% clear while the player was carried under the river. The full walk
+does the same at the same spot: the engine draws no sun shadows with the camera deep underwater.
+
+**Cost.** Riverwood, full featureset, no parity (render thread, per frame):
+
+| | Delta walk | Full walk (`CS_DCLF_SCENE_DELTA=0`) |
+| --- | --- | --- |
+| Scene phase | 0.52-0.56 ms | 0.32 ms |
+| Of it, the engine's palette update (669 skins) | 0.19 ms | 0.19 ms (`PrepareSceneJob`) |
+| Walk on the worker | none | 1.0 ms (max 2.8) |
+
+In Bleak Falls Barrow the scene phase is 0.34-0.35 ms against 0.15-0.16 ms, and in Whiterun's exterior 0.43 ms
+against 0.18 ms. So the render thread pays 0.15-0.25 ms more than it did with the full walk, and the worker saves
+1.0 ms a frame. Of the delta walk's time at Riverwood:
+
+-   the evaluations are about 0.42 ms, of which the palette update is 0.19 ms;
+-   scheduling is 0.05 ms, most of it 1,700 hash lookups of the per-frame set;
+-   finishing the kept slots is 0.03 ms.
+
+What would take the rest down:
+
+-   Phase 3 removes the refresh queue's re-classifications;
+-   keeping `Tracked` entries in a stable pool removes the per-frame set's lookups;
+-   bones on the GPU (the GPU-driven plan) remove the palette update.
 
 ## Relation to the GPU-driven plan
 

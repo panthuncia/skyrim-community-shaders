@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <deque>
 #include <map>
 #include <vector>
 
@@ -57,6 +58,8 @@ namespace DCLF
 		"dedup-hit", "loop-tail", "skinning"
 	};
 
+	inline constexpr std::uint32_t kNoObjectSlot = ~0u;
+
 	class SceneStore
 	{
 	public:
@@ -86,7 +89,7 @@ namespace DCLF
 			// Skin::GetWetness, which its SetupGeometry hook binds for every Lighting draw. Zero for everything not owned
 			// by an actor (actorObjects lists those that are); refreshed every frame by RefreshFrameConstants.
 			std::vector<std::array<float, 4>> skinWetness;        // parallel to objects
-			std::vector<std::uint32_t> actorObjects;
+			std::vector<std::uint32_t> actorObjects;  // sorted by object index (the walk sorts it)
 			// Skins of several partitions (CS_DCLF_SKIN_PARTITIONS): bit i draws partition i, walking the
 			// geometry slots' nextPartition links from the object's geometryIndex (partition 0). 0 for every
 			// other object, which draws its one geometry. The scene phase sets it from the fade node's LOD level
@@ -189,8 +192,23 @@ namespace DCLF
 			bool PipelineUsed(std::size_t a_slot, std::uint32_t a_frame) const { return a_slot < pipelineLastUsed.size() && pipelineLastUsed[a_slot] == a_frame; }
 			bool PipelineAlive(std::size_t a_slot) const { return a_slot < pipelineLastUsed.size() && pipelineLastUsed[a_slot] != kSlotFree; }
 
-			/** @brief Drops the per-object arrays; the slot tables persist. */
-			void ClearFrame();
+			// The object slots. With CS_DCLF_OBJECT_SLOTS (default on) an object keeps its index for as long as it
+			// has a record: the per-object arrays above are indexed by slot and persist across walks, a free slot
+			// holds FreeObjectRecord(), and a walk sweeps the slots it did not write. Off, they are rebuilt densely
+			// by every walk, as before.
+			std::vector<std::uint32_t> objectSeen;  // parallel to objects: the walk (walkSerial) that last wrote the slot
+			// Parallel to objects: the flags as the scene phase wrote them. The accumulate phase patches the record in
+			// place; the delta walk (CS_DCLF_SCENE_DELTA) restores the scene half of every slot it patched from here.
+			std::vector<std::uint32_t> sceneFlags;
+			std::vector<std::uint32_t> objectFree;
+			std::uint32_t liveObjects = 0;
+			/** @brief Grows every per-object array to a_count, the new slots free. */
+			void GrowObjects(std::size_t a_count);
+			/** @brief Returns a slot to the free state (not to the free list). */
+			void ResetObject(std::uint32_t a_slot);
+
+			/** @brief Drops the per-frame arrays, and the per-object ones too unless the slots persist. */
+			void ClearFrame(bool a_keepObjects);
 			/** @brief Drops everything. */
 			void Clear();
 		};
@@ -341,6 +359,8 @@ namespace DCLF
 
 		/** @brief Present-time: follow loaded cells and apply queued scene graph events. */
 		void ProcessEvents();
+		/** @brief Hooks the engine's BSFadeNode::currentFade writers, for CS_DCLF_SCENE_DELTA's fade events (AE). */
+		static void InstallFadeWatch();
 
 		/**
 		 * @brief Whether a load screen is up, i.e. the scene graph is being rebuilt under us.
@@ -381,7 +401,7 @@ namespace DCLF
 		bool ScenePending() const { return static_cast<bool>(sceneJob); }
 		/** @brief Bumped when the join replaces the worker's walk with an inline one: anything built from the worker's is stale. */
 		std::uint32_t GetSceneRebuilds() const { return sceneRebuilds; }
-		/** @brief The `[DCLF] async scene` report line since the last call, or empty. */
+		/** @brief The `[DCLF] async scene` and `[DCLF] scene delta` report lines since the last call, or empty. */
 		std::string SceneAsyncReport();
 
 		/**
@@ -658,10 +678,40 @@ namespace DCLF
 			// and every consumer already has the entry (the accumulate phase) or looks it up by the same key.
 			std::uint32_t objectStamp = 0;
 			std::uint32_t objectId = 0;
+			// Its persistent object slot (CS_DCLF_OBJECT_SLOTS, default on): the index objectId holds while the
+			// object keeps a record, walk after walk. kNoObjectSlot while it has none.
+			std::uint32_t slot = kNoObjectSlot;
 			// The node whose bound decides whether the object is a sun caster candidate (SunEntryOf), resolved
 			// once: the scene graph above a tracked geometry does not change while it is tracked.
 			const RE::NiAVObject* sunEntryNode = nullptr;
 			bool sunEntryResolved = false;
+			// CS_DCLF_SCENE_DELTA. perFrame: inputs that change from frame to frame (PerFrameTraits: owned by an actor,
+			// skinned, a face shape, under a switch, or a controller or a non-fixed rigid body on its chain), so the
+			// delta walk evaluates it every frame; set at an evaluation that classified it, and kept. scheduledWalk:
+			// the walk that last scheduled it. bucket: the histogram bucket it is counted in (kNoBucket: none).
+			// fadeNode: the fade node it is listed under in fadeDependents.
+			bool perFrame = false;
+			bool perFrameListed = false;
+			// lightTraits: the entry is per frame only because it moves (kTraitMoves, kTraitRootMoves), follows a switch
+			// (kTraitSwitch), has animated shading (kTraitAnimatedShading) or is skinned (kTraitSkin; a tree's wind moves
+			// its bones). While its classification stands, the full walk would take nothing else again: a switch's
+			// verdict is taken again and the shading's inputs compared (the record is written in full when either
+			// changes), a skin gets its palette (AppendKeptSkin), and a record that moves gets its placement
+			// (MoveObject). 0 for every other entry. movedWalk: the walk that took this path.
+			std::uint32_t lightTraits = 0;
+			std::uint32_t movedWalk = 0;
+			// kTraitAnimatedShading: what the record read from the animated shader and alpha properties when it was
+			// last written in full (ShadingInputsOf); the light path writes it in full again when they differ.
+			std::uint64_t shadingInputs = 0;
+			// kTraitSwitch: the one switch node on its chain and its child on the leaf's path, found at classification,
+			// so the light path reads the selection without walking the chain (null: none, or several).
+			RE::NiSwitchNode* switchNode = nullptr;
+			const RE::NiAVObject* switchChild = nullptr;
+			std::uint32_t fullWalk = 0;  // the walk that must write it in full (an event, not the per-frame set)
+			std::uint8_t bucket = kNoBucket;
+			std::uint32_t scheduledWalk = 0;
+			const RE::BSFadeNode* fadeNode = nullptr;
+			static constexpr std::uint8_t kNoBucket = 0xFF;
 		};
 		/**
 		 * @brief The object's entry bound for the sun's cascade culls. The cascade cull (FUN_140e305c0) walks
@@ -754,6 +804,32 @@ namespace DCLF
 		// takes a new value, which invalidates every entry's index at once.
 		std::uint32_t objectStamp = 1;
 		void InvalidateObjectIndices() { ++objectStamp; }
+		/** @brief CS_DCLF_OBJECT_SLOTS (default on, =0 dense): whether object indices persist across walks. */
+		static bool ObjectSlotsEnabled();
+		// Set only for the dense rebuild CS_DCLF_WALK_PARITY compares against: the walk then lays the objects out
+		// densely and leaves the Tracked entries' slots and indices alone.
+		bool denseWalk = false;
+		/** @brief The slot the walk writes this object at: its own, a free one, or a new one. */
+		std::uint32_t AcquireObjectSlot(Tracked& a_tracked, RE::BSGeometry* a_geometry);
+		/** @brief After a walk: frees every slot it did not write, and sorts the per-frame index lists. */
+		void SweepObjectSlots();
+		/**
+		 * @brief Frees an entry's slot as the entry leaves the tracked set (render thread, outside the walk), so a
+		 * rescan's new entries reuse the slots of the ones it replaces instead of growing the arrays past them.
+		 */
+		void ReleaseObjectSlot(Tracked& a_entry);
+		void EraseTracked(RE::BSGeometry* a_geometry);
+		/** @brief CS_DCLF_WALK_PARITY=1: every 60 frames, the slot tables against a dense rebuild, object by object. */
+		void CheckWalkParity();
+		struct WalkParityStats
+		{
+			std::uint32_t checks = 0;
+			std::uint32_t objects = 0;
+			std::uint32_t differ = 0;
+			std::uint32_t missing = 0;
+			std::uint32_t extra = 0;
+			std::string first;
+		} walkParity;
 		// The per-frame dedup maps. Members, not locals, so their buckets survive the frame: as locals
 		// they were three hash maps allocated and freed every frame to hold the same contents, which is
 		// the waste Stage 1 removed from the ordering vectors and left here. They are cleared, reserved
@@ -843,8 +919,109 @@ namespace DCLF
 			std::uint32_t skinMisses = 0;
 		};
 		WalkResult SceneWalk(bool a_renderThread);
-		/** @brief Clears the per-object tables and the walk's per-frame counters. */
-		void BeginWalk();
+		/** @brief Clears the per-frame tables and the walk's per-frame counters; a_keepIndices: a delta walk's, which keeps the objects' indices. */
+		void BeginWalk(bool a_keepIndices = false);
+
+		/**
+		 * @brief CS_DCLF_SCENE_DELTA (default on; needs the object slots and AE): the scene phase evaluates only the
+		 * objects whose inputs can have changed, on the render thread at Main::Draw's early hook, and every other
+		 * slot keeps its record. What it evaluates:
+		 *
+		 * - the per-frame objects (Tracked::perFrame), every frame;
+		 * - new entries, and entries something marked (pendingEvaluation);
+		 * - entries whose classification is kCandidateRefreshFrames old (refreshQueue), as the full walk did;
+		 * - the dependents of a fade node whose currentFade changed (FadeWatch, fadeDependents);
+		 * - a slot whose geometry slot went stale, or was re-resolved in place for another object.
+		 *
+		 * Everything else about a static slot is fixed while it is tracked (dclf-event-driven-tables.md), and
+		 * CS_DCLF_WALK_PARITY checks it against a full walk.
+		 */
+		static bool SceneDeltaEnabled();
+		void DeltaWalk();
+		/** @brief Lays out the whole tracked set in `order` (the full walk, the parity's dense walk). */
+		void BuildFullOrder();
+		/** @brief One entry of the scene walk: writes its record at its slot; false when it gets none this frame. */
+		bool WriteObject(RE::BSGeometry* a_geometry, Tracked& a_tracked, PartTimer& a_timer, WalkResult& a_result, bool a_renderThread, Ineligible& a_bucket);
+		/** @brief Why an entry's inputs change from frame to frame (Tracked::perFrame): PerFrameTrait bits, 0 when they do not. */
+		enum PerFrameTrait : std::uint32_t
+		{
+			kTraitFace = 1u << 0,
+			kTraitActor = 1u << 1,
+			kTraitSwitch = 1u << 2,
+			kTraitSkin = 1u << 3,
+			kTraitAnimatedShading = 1u << 4,  // a controller on the shader or alpha property
+			kTraitMoves = 1u << 5,            // a controller or a non-fixed rigid body on its chain
+			kTraitRootMoves = 1u << 6,        // its reference root's subtree moves (RootMoves)
+		};
+		static std::uint32_t PerFrameTraits(const Tracked& a_tracked, const RE::BSGeometry& a_geometry);
+		/** @brief Adds an entry to this walk's `order` once; a_full: written in full even if it only moved. */
+		void Schedule(RE::BSGeometry* a_geometry, Tracked& a_tracked, bool a_full = true);
+		/**
+		 * @brief A hash of what a record reads from a geometry's shader and alpha properties and their material (flags,
+		 * the alpha test and threshold, the material alpha, the material and its diffuse view): the inputs a property
+		 * controller can animate.
+		 */
+		static std::uint64_t ShadingInputsOf(const Tracked& a_tracked, const RE::BSGeometry& a_geometry);
+		/**
+		 * @brief A kept skinned record: the engine's palette update and its rows into this walk's lists, and the
+		 * partitions its fade node's LOD level draws, as WriteObject would. False when WriteObject must (no partition
+		 * drawn, or no rows).
+		 */
+		bool AppendKeptSkin(RE::BSGeometry* a_geometry, Tracked& a_tracked);
+		/** @brief A kept record of a moving static: its transforms, its bound and its sun entry, nothing else. */
+		void MoveObject(RE::BSGeometry* a_geometry, Tracked& a_tracked);
+		/**
+		 * @brief Whether a reference root's subtree holds anything that moves (a controller, a non-fixed rigid body, a
+		 * skin): the root's bound is then not fixed, and it is the sun entry of every geometry under it. Walked once per
+		 * kCandidateRefreshFrames per root.
+		 */
+		bool RootMoves(const RE::NiAVObject* a_root);
+		struct RootMotion
+		{
+			std::uint32_t frame = 0;
+			bool moves = false;
+		};
+		ankerl::unordered_dense::map<const RE::NiAVObject*, RootMotion> rootMotion;
+		void MoveBucket(Tracked& a_tracked, Ineligible a_bucket);
+		void ListFadeDependent(RE::BSGeometry* a_geometry, Tracked& a_tracked);
+		void UnlistFadeDependent(RE::BSGeometry* a_geometry, Tracked& a_tracked);
+		/** @brief The scene half of every slot the last accumulate phase patched, back as the scene phase wrote it. */
+		void RestoreAccumulated();
+		/** @brief After the delta walk's evaluations: the geometry slots of the slots it kept, and the shadow sets. */
+		void FinishDeltaWalk(PartTimer& a_timer, WalkResult& a_result);
+		void EvaluateRound(PartTimer& a_timer, WalkResult& a_result, std::size_t a_first);
+		/** @brief A slot's inputs to the frame's shadow sets (the casters' textures and pipelines). */
+		struct ShadowInputs
+		{
+			ID3D11ShaderResourceView* diffuse = nullptr;
+			std::uint64_t vertexDesc = 0;
+			std::uint32_t technique = 0;
+			std::uint32_t flags = 0;
+			std::uint32_t reject = 0;
+			bool operator==(const ShadowInputs&) const = default;
+		};
+		ShadowInputs ShadowInputsOf(std::uint32_t a_slot) const;
+		// Whether a slot's shadow inputs changed this walk: the sets are rebuilt only then (FinishDeltaWalk).
+		bool shadowSetsDirty = true;
+		std::uint32_t keptShadowCasters = 0;
+		std::array<std::uint32_t, 16> keptShadowRejects{};
+		bool fullEvaluation = true;  // the next delta walk evaluates every entry (a reset, a load, a live toggle)
+		std::uint32_t walkSerial = 0;
+		std::vector<RE::BSGeometry*> perFrameSet;
+		std::deque<std::pair<RE::BSGeometry*, std::uint32_t>> refreshQueue;  // (entry, the candidateFrame it was queued for)
+		std::vector<RE::BSGeometry*> pendingEvaluation;
+		std::vector<std::uint32_t> accumulatePatched;
+		std::vector<std::uint32_t> refreshedGeometry;  // geometry slots ResolveGeometrySlot re-resolved in place this walk
+		std::vector<const RE::BSFadeNode*> fadeChanged;  // drained from FadeWatch at ProcessEvents
+		ankerl::unordered_dense::map<const RE::BSFadeNode*, std::vector<RE::BSGeometry*>> fadeDependents;
+		std::array<std::uint32_t, static_cast<std::size_t>(Ineligible::Count)> buckets{};
+		struct DeltaStats
+		{
+			std::uint32_t walks = 0, full = 0;
+			std::uint64_t evaluated = 0, perFrame = 0, pending = 0, refresh = 0, fade = 0, geometryDirty = 0, settling = 0, restored = 0, moved = 0, kept = 0;
+			std::uint64_t live = 0;
+			std::uint32_t evaluatedMax = 0;
+		} delta;
 		/**
 		 * @brief A face shape's region of the positions buffer (Records.h kFacePositionVertices), kept while the
 		 * walks see the shape; kNoFaceRegion when the buffer is full. EndFaceWalk frees the regions of shapes the

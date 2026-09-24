@@ -283,6 +283,7 @@ void DrawcallLimitFix::PostPostLoad()
 		return;
 	}
 	DCLF::SceneTracker::Get().Install();
+	DCLF::SceneStore::InstallFadeWatch();
 	// Capture at registration, the foundation for static ownership: withholding a pass from the batch
 	// renderer removes the very data the tables are built from today, so the capture has to prove itself
 	// first (it claims nothing and withholds nothing yet).

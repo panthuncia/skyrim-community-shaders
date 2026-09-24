@@ -1417,7 +1417,7 @@ they are not part of the witness.
 ## Switches
 
 **Every feature defaults to on, and test runs should leave it that way.** With no switch set, a run exercises
-DCLF's full featureset: the asynchronous builds and scene walk, async epochs, every ownership stage. The startup
+DCLF's full featureset: the asynchronous builds, the delta scene walk, async epochs, every ownership stage. The startup
 log says so on one line, `[DCLF] featureset: full`. A run that sets any feature switch to a reducing value logs
 `[DCLF] featureset: REDUCED by NAME=value, ...` as a warning instead (`DCLF::ReducedFeatures`). Turn a feature off
 only to bisect or to compare, and say so. Diagnostics (probes, parity checks, stats) are not features and don't
@@ -1459,6 +1459,9 @@ through: the shadow pipeline map ("Epochs that only submit") and the NPC head dr
 | `CS_DCLF_TEST_COMMANDS=<frame>:<command>;…` | Test runs: run each console command on the main thread once that many frames have been presented (loading screens do not count), for coverage runs from the auto-loaded save. The counter is independent of the feature, so a `CS_DCLF=0` control reaches the same place at the same hour. |
 | `CS_DCLF_ASYNC=off\|on\|probe` | Where the epochs' payloads are built (see "Payloads built off the render thread"). `on` (default since 2026-09-24): the enabled jobs build on the `CS DCLF worker` thread and the epoch commits the result. `off`: inline. `probe`: build on the worker *and* inline, and byte-compare the two payloads (`probe: N compared, N differ`). Bindless path only; the non-bindless path always builds inline. |
 | `CS_DCLF_ASYNC_JOBS=colour,zprepass,shadow,scene` | Which jobs `on`/`probe` move to the worker (default: all four). For bisecting. |
+| `CS_DCLF_OBJECT_SLOTS=0` | Rebuild the object tables densely every walk instead of keeping each object at a persistent slot ([dclf-event-driven-tables.md](./dclf-event-driven-tables.md), "Phase 1"). Also turns the delta walk off. For A/B. |
+| `CS_DCLF_SCENE_DELTA=0` | Walk the whole tracked set every frame (on the worker, with `CS_DCLF_ASYNC`) instead of the delta walk, which evaluates on the render thread only what can have changed ([dclf-event-driven-tables.md](./dclf-event-driven-tables.md), "Phase 2"). For A/B. |
+| `CS_DCLF_WALK_PARITY=1` | Every 60 frames, run the walk on the render thread, rebuild the tables densely too, and compare them object by object (`walk parity ... <- OK` every 5 checks). |
 | `CS_DCLF_ASYNC_WAIT_MS=<ms>` | How long an epoch waits for its job before building inline instead (default 3). |
 | `CS_DCLF_ASYNC_PRIORITY=normal` | Run the worker at normal priority instead of above normal. |
 | `CS_GPU_IDLE_TRACE=<frames>` / `CS_PROFILER_LOG=<frames>` | Not DCLF's, but the gates below read them: the GPU idle trace and its `[GpuIdle] summary` lines, and the profiler's averages in the log. See [render-graph.md](render-graph.md). |
@@ -3157,6 +3160,11 @@ relatives does not matter. The skin palette update keys on `gFrameCounter`, whic
 so updating from the earlier point stays idempotent within the frame. Every DCLF hook that could fire in the new
 window (water reflections are drawn in it) is gated on the main camera's depth or deferred pass, so nothing on
 the render thread reads the tables while the worker writes them.
+
+**Since Phase 2 of [dclf-event-driven-tables.md](./dclf-event-driven-tables.md) (2026-09-24) the walk no longer runs
+on the worker.** The delta walk evaluates, on the render thread at this hook, only what can have changed, so nothing
+reads the scene while the cull modifies it. The fade is taken from events on its writers instead of from the node
+in the middle of the cull. `CS_DCLF_SCENE_DELTA=0` restores the worker's walk this section describes.
 
 The shadow-build probe still differs in about 1-6 of 300 frames, always at the alpha-tested texture-transform
 block. The scroll also moves during the shadow pass itself, so builds made at different moments read different

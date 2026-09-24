@@ -2554,6 +2554,9 @@ namespace DCLF
 			for (std::uint32_t o = 0; o < a_tables.objects.size(); ++o) {
 				currentObject = o;
 				const auto& object = a_tables.objects[o];
+				// A free slot is no object: not even a culling candidate.
+				if (object.flags & kObjectFree)
+					continue;
 				// A shadow-only record is no main-pass object at all, not even a culling candidate.
 				if (object.flags & kObjectShadowOnly) {
 					skip(Skip::CandidateOnly);
@@ -6559,7 +6562,7 @@ namespace DCLF
 				}
 			}
 			logger::info("[DCLF] {} epoch: tables frame {} holding {} objects; render area {}x{}, depth range [{}, {}] (captured [{}, {}]), replay {}, eye ({:.2f} {:.2f} {:.2f}), ViewProj z row {}",
-				depthOnly ? "z-prepass" : "colour", frameNumber, tables.objects.size(), frame->width, frame->height, frame->minDepth, frame->maxDepth,
+				depthOnly ? "z-prepass" : "colour", frameNumber, tables.liveObjects, frame->width, frame->height, frame->minDepth, frame->maxDepth,
 				a_capture.minDepth, a_capture.maxDepth, replayVertexInputs ? "on" : "off", a_capture.eye.x, a_capture.eye.y, a_capture.eye.z, viewProjZ);
 		}
 		if (depthOnly) {

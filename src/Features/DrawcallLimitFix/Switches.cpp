@@ -142,6 +142,8 @@ namespace DCLF
 			{ "CS_DCLF_MATERIAL_CACHE", offWord },
 			{ "CS_DCLF_CULL", [](const std::string& a_value) { return a_value == "off" || a_value == "frustum"; } },
 			{ "CS_DCLF_EVAL", [](const std::string& a_value) { return a_value == "off" || a_value == "material"; } },
+			{ "CS_DCLF_OBJECT_SLOTS", zero },
+			{ "CS_DCLF_SCENE_DELTA", zero },
 		};
 		std::string text;
 		for (const auto& feature : features) {
