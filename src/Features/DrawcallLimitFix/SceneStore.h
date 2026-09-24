@@ -15,6 +15,7 @@ namespace DCLF
 {
 	/** @brief Attributes the time since the last call to one BuildPart (SceneStore.cpp; CS_DCLF_PROFILE). */
 	struct PartTimer;
+	struct SunCandidates;
 
 	/**
 	 * @brief The render thread's view of the static scene content Drawcall Limit Fix can draw.
@@ -258,6 +259,8 @@ namespace DCLF
 			std::uint32_t geometriesRefreshed = 0;
 			std::uint32_t slotViolations = 0;  // objects whose slots failed CheckObjectSlots (the gate: 0)
 			std::uint32_t shadowCasters = 0;  // records the engine would draw into a shadow map
+			std::uint32_t sunCandidateChanges = 0;    // walks that judged sun entries again (UpdateSunCandidates), since the report
+			std::uint32_t sunCandidateSnapshots = 0;  // ... and snapshots built
 			std::array<std::uint32_t, 16> shadowRejects{};  // by ShadowReject, over the frame's records
 			// Objects the engine accumulated that the scene phase had left out of the tables, so the frame
 			// cannot draw them. One frame of staleness at most (the verdict is cleared for them); the gate
@@ -359,8 +362,11 @@ namespace DCLF
 
 		/** @brief Present-time: follow loaded cells and apply queued scene graph events. */
 		void ProcessEvents();
-		/** @brief Hooks the engine's BSFadeNode::currentFade writers, for CS_DCLF_SCENE_DELTA's fade events (AE). */
-		static void InstallFadeWatch();
+		/**
+		 * @brief Hooks the engine's writers CS_DCLF_SCENE_DELTA takes events from (AE): BSFadeNode::currentFade's, the
+		 * shader properties' flags and materials, Havok's node transforms and the controllers' targets.
+		 */
+		static void InstallSceneEvents();
 
 		/**
 		 * @brief Whether a load screen is up, i.e. the scene graph is being rebuilt under us.
@@ -471,6 +477,9 @@ namespace DCLF
 		const std::vector<std::uint32_t>& GetMaterialPatchedVSFloats() const;
 		/** @brief Bumped whenever the slot tables are reset or every cached verdict is dropped (InvalidateVerdicts). */
 		std::uint32_t GetTablesGeneration() const { return tablesGeneration; }
+		/** @brief The sun entries DCLF can take out of the cascade culls (UpdateSunCandidates), and their generation now. */
+		std::shared_ptr<const SunCandidates> GetSunCandidates() const { return sunCandidates; }
+		std::uint32_t GetSunCandidatesGeneration() const { return sunCandidatesGeneration; }
 
 		/**
 		 * @brief The pre-resolved service results an epoch's build reads (Lookups.h). Filled by the render
@@ -654,7 +663,8 @@ namespace DCLF
 			/**
 			 * @brief The cull-only verdict (CS_DCLF_CULL_INPUT=native): whether the object is a culling
 			 * candidate when the engine did not keep it, as the full classification last found it, with
-			 * the frame it was found on. Refreshed every kCandidateRefreshFrames; a candidate is tested by
+			 * the frame it was found on. Refreshed every kCandidateRefreshFrames by the full walk, and by the
+			 * events CS_DCLF_SCENE_DELTA takes (dclf-event-driven-tables.md, "Phase 3"); a candidate is tested by
 			 * the culling and drawn by nothing, so a verdict a few frames old costs at most a diagnostic.
 			 */
 			std::uint32_t candidateFrame = 0;  // 0: never classified
@@ -707,6 +717,15 @@ namespace DCLF
 			// so the light path reads the selection without walking the chain (null: none, or several).
 			RE::NiSwitchNode* switchNode = nullptr;
 			const RE::NiAVObject* switchChild = nullptr;
+			// The keys it is listed under: its shader and alpha properties in propertyDependents (the last evaluation's),
+			// its sun entry node in rootDependents (for as long as it is tracked).
+			const void* listedProperty = nullptr;
+			const void* listedAlpha = nullptr;
+			const RE::NiAVObject* listedRoot = nullptr;
+			// A per-frame entry written in full (an actor's, a face's): what its classification read from the geometry,
+			// its properties and its material (ClassifyInputsOf), re-read every frame. Its classification is taken again
+			// when they differ; the hidden, actor and switch half is taken again every frame.
+			std::uint64_t classifyInputs = 0;
 			std::uint32_t fullWalk = 0;  // the walk that must write it in full (an event, not the per-frame set)
 			std::uint8_t bucket = kNoBucket;
 			std::uint32_t scheduledWalk = 0;
@@ -722,6 +741,30 @@ namespace DCLF
 		 * reference (a terrain block) has its nearest BSMultiBoundNode.
 		 */
 		static std::array<float, 4> SunEntryOf(Tracked& a_tracked, const RE::BSGeometry& a_geometry);
+
+		/**
+		 * @brief The sun entries whose whole content DCLF can take out of the engine's cascade culls (SunCandidates,
+		 * SunAccumulation), kept from the scene events: at the end of the delta walk, every entry a change touched (a
+		 * dependent attached, detached, or gaining or losing its record or its verdict) is judged again.
+		 *
+		 * Any change bumps the generation at once; the snapshot is rebuilt only on a walk that changed nothing, since
+		 * an exclusion built for an older generation is never applied (SunAccumulation::ExcludeEntries) and a cell
+		 * load would otherwise rebuild it every frame.
+		 */
+		void UpdateSunCandidates(bool a_full);
+		void DropSunCandidates();
+		/** @brief Whether a tracked geometry lets its sun entry leave the cascade culls (UpdateSunCandidates). */
+		static bool SunEntryAllows(const Tracked& a_tracked, bool a_switchNodes);
+		void MarkSunEntryDirty(const RE::NiAVObject* a_entry)
+		{
+			if (a_entry)
+				sunEntriesDirty.push_back(a_entry);
+		}
+		ankerl::unordered_dense::set<const RE::NiAVObject*> sunCandidateSet;
+		std::vector<const RE::NiAVObject*> sunEntriesDirty;
+		std::shared_ptr<const SunCandidates> sunCandidates;
+		std::uint32_t sunCandidatesGeneration = 0;
+		std::uint32_t sunCandidatesBuilt = 0;  // the generation the snapshot was built for
 
 		void RefreshCategoryNodes(bool a_force = false);
 		// The signature the category set was last rebuilt for, and how many Presents it has been
@@ -828,8 +871,15 @@ namespace DCLF
 			std::uint32_t differ = 0;
 			std::uint32_t missing = 0;
 			std::uint32_t extra = 0;
+			std::uint32_t staleVerdicts = 0;  // entries whose kept classification differs from the reference's
+			std::uint32_t staleTraits = 0;    // entries the delta walk keeps that a fresh classification would evaluate every frame
 			std::string first;
+			std::string firstStale;
+			std::string firstStaleTraits;
 		} walkParity;
+		// The dense rebuild classifies every entry from scratch, without the verdict caches, and keeps its verdicts
+		// here: the classification itself is what walk parity checks the kept one against.
+		ankerl::unordered_dense::map<const RE::BSGeometry*, Ineligible> referenceReasons;
 		// The per-frame dedup maps. Members, not locals, so their buckets survive the frame: as locals
 		// they were three hash maps allocated and freed every frame to hold the same contents, which is
 		// the waste Stage 1 removed from the ordering vectors and left here. They are cleared, reserved
@@ -845,12 +895,46 @@ namespace DCLF
 		// Registration is captured from every batch renderer in the game, including the shadow cameras',
 		// so the captured set has to be filtered to these before it can be compared or used.
 		ankerl::unordered_dense::set<const RE::BSBatchRenderer*> mainBatchRenderers;
+		/**
+		 * @brief A reference on a BSShaderMaterial, taken and dropped the way the engine does it (AE).
+		 *
+		 * Materials live in the engine's material database (the manager at 0x143187758), which shares one
+		 * material among every property with the same contents. Its release (FUN_1414f7a40, what
+		 * BSShaderProperty::SetMaterial calls for the old material) decrements the count under the database's
+		 * lock and, at zero, takes the material out of the database before deleting it. A BSTSmartPointer
+		 * deletes it directly instead: when DCLF held the last reference, the database kept pointing at freed
+		 * memory, and the next load whose material hashed to it called into it (a crash on `coc Whiterun`).
+		 */
+		class MaterialReference
+		{
+		public:
+			MaterialReference() = default;
+			MaterialReference(const MaterialReference&) = delete;
+			MaterialReference& operator=(const MaterialReference&) = delete;
+			MaterialReference(MaterialReference&& a_other) noexcept :
+				material(std::exchange(a_other.material, nullptr)) {}
+			MaterialReference& operator=(MaterialReference&& a_other) noexcept
+			{
+				if (this != &a_other) {
+					reset();
+					material = std::exchange(a_other.material, nullptr);
+				}
+				return *this;
+			}
+			~MaterialReference() { reset(); }
+			/** @brief Takes a reference on a_material (null: none), then drops the one held. */
+			void reset(RE::BSShaderMaterial* a_material = nullptr);
+			explicit operator bool() const { return material != nullptr; }
+
+		private:
+			RE::BSShaderMaterial* material = nullptr;
+		};
 		// CS_DCLF_MATERIAL_CACHE=probe only: the previous frame's record per (material, pass descriptor).
 		// It holds a reference on the material so a freed one cannot be mistaken for a new allocation at
 		// the same address (BSShaderMaterial is BSIntrusiveRefCounted).
 		struct MaterialProbe
 		{
-			RE::BSTSmartPointer<RE::BSShaderMaterial> material;
+			MaterialReference material;
 			MaterialRecord record;
 			std::uint32_t lastUsed = 0;
 		};
@@ -929,12 +1013,16 @@ namespace DCLF
 		 *
 		 * - the per-frame objects (Tracked::perFrame), every frame;
 		 * - new entries, and entries something marked (pendingEvaluation);
-		 * - entries whose classification is kCandidateRefreshFrames old (refreshQueue), as the full walk did;
 		 * - the dependents of a fade node whose currentFade changed (FadeWatch, fadeDependents);
+		 * - the dependents of a shader or alpha property whose flags, material or controllers changed
+		 *   (propertyDependents), classified again;
+		 * - the entries under a node Havok moved or gave a controller, and the dependents of every sun entry node
+		 *   above it (rootDependents), classified again;
+		 * - the dependents of a sun entry node something was attached under or detached from;
 		 * - a slot whose geometry slot went stale, or was re-resolved in place for another object.
 		 *
-		 * Everything else about a static slot is fixed while it is tracked (dclf-event-driven-tables.md), and
-		 * CS_DCLF_WALK_PARITY checks it against a full walk.
+		 * A classification stands until one of these events (dclf-event-driven-tables.md, "Phase 3"), and
+		 * CS_DCLF_WALK_PARITY checks it against a full walk that classifies from scratch.
 		 */
 		static bool SceneDeltaEnabled();
 		void DeltaWalk();
@@ -954,6 +1042,13 @@ namespace DCLF
 			kTraitRootMoves = 1u << 6,        // its reference root's subtree moves (RootMoves)
 		};
 		static std::uint32_t PerFrameTraits(const Tracked& a_tracked, const RE::BSGeometry& a_geometry);
+		/**
+		 * @brief Whether an entry with this verdict is evaluated every frame (Tracked::perFrame), and its light path's
+		 * traits (Tracked::lightTraits); a_traits gets its traits. a_freshMotion: walk parity's, which takes the reference
+		 * roots' motion from scratch (RootMovesNow) instead of from rootMotion.
+		 */
+		std::pair<bool, std::uint32_t> PerFrameOf(const Tracked& a_tracked, const RE::BSGeometry& a_geometry, Ineligible a_reason, std::uint32_t& a_traits,
+			ankerl::unordered_dense::map<const RE::NiAVObject*, bool>* a_freshMotion = nullptr);
 		/** @brief Adds an entry to this walk's `order` once; a_full: written in full even if it only moved. */
 		void Schedule(RE::BSGeometry* a_geometry, Tracked& a_tracked, bool a_full = true);
 		/**
@@ -973,15 +1068,30 @@ namespace DCLF
 		/**
 		 * @brief Whether a reference root's subtree holds anything that moves (a controller, a non-fixed rigid body, a
 		 * skin): the root's bound is then not fixed, and it is the sun entry of every geometry under it. Walked once per
-		 * kCandidateRefreshFrames per root.
+		 * root, and again after an event under it (ScheduleRoot).
 		 */
 		bool RootMoves(const RE::NiAVObject* a_root);
-		struct RootMotion
-		{
-			std::uint32_t frame = 0;
-			bool moves = false;
-		};
-		ankerl::unordered_dense::map<const RE::NiAVObject*, RootMotion> rootMotion;
+		static bool RootMovesNow(const RE::NiAVObject* a_root);
+		ankerl::unordered_dense::map<const RE::NiAVObject*, bool> rootMotion;
+		/** @brief Resolves the entry's sun entry node, once (SunEntryOf). */
+		static void ResolveSunEntry(Tracked& a_tracked, const RE::BSGeometry& a_geometry);
+		/** @brief Lists an evaluated entry under its properties; UnlistDependents takes it off every list. */
+		void ListDependents(RE::BSGeometry* a_geometry, Tracked& a_tracked);
+		void UnlistDependents(RE::BSGeometry* a_geometry, Tracked& a_tracked, bool a_root);
+		/** @brief Evaluates the entry this walk with its classification taken again. */
+		void Reclassify(RE::BSGeometry* a_geometry, Tracked& a_tracked);
+		/**
+		 * @brief Whether a placement event (a node moved, a sun entry node's bound changed) can change the entry's tables: it
+		 * has a record, or a verdict of the frame's (None, Hidden, Switch, Actor). A static negative verdict cannot change
+		 * with where the object is, and without a record nothing of it is placed.
+		 */
+		static bool PlacementMatters(const Tracked& a_tracked);
+		/** @brief The dependents of a sun entry node, classified again, and its motion forgotten; a key, never dereferenced. */
+		void ScheduleRoot(const RE::NiAVObject* a_root);
+		/** @brief A node Havok moved or gave a controller: the entries under it and the dependents of every node above it. */
+		void ApplyNodeEvent(RE::NiAVObject* a_node);
+		/** @brief What a classification reads from the geometry, its properties and its material, hashed. */
+		static std::uint64_t ClassifyInputsOf(const RE::BSGeometry& a_geometry);
 		void MoveBucket(Tracked& a_tracked, Ineligible a_bucket);
 		void ListFadeDependent(RE::BSGeometry* a_geometry, Tracked& a_tracked);
 		void UnlistFadeDependent(RE::BSGeometry* a_geometry, Tracked& a_tracked);
@@ -1008,17 +1118,24 @@ namespace DCLF
 		bool fullEvaluation = true;  // the next delta walk evaluates every entry (a reset, a load, a live toggle)
 		std::uint32_t walkSerial = 0;
 		std::vector<RE::BSGeometry*> perFrameSet;
-		std::deque<std::pair<RE::BSGeometry*, std::uint32_t>> refreshQueue;  // (entry, the candidateFrame it was queued for)
 		std::vector<RE::BSGeometry*> pendingEvaluation;
 		std::vector<std::uint32_t> accumulatePatched;
 		std::vector<std::uint32_t> refreshedGeometry;  // geometry slots ResolveGeometrySlot re-resolved in place this walk
 		std::vector<const RE::BSFadeNode*> fadeChanged;  // drained from FadeWatch at ProcessEvents
 		ankerl::unordered_dense::map<const RE::BSFadeNode*, std::vector<RE::BSGeometry*>> fadeDependents;
+		// The structural events (SceneEvents in SceneStore.cpp), drained at ProcessEvents: properties by key, nodes held.
+		std::vector<const void*> propertyChanged;
+		std::vector<RE::NiPointer<RE::NiAVObject>> nodeChanged;
+		// Sun entry nodes something was attached under or detached from since the last walk (keys).
+		std::vector<const RE::NiAVObject*> dirtyRoots;
+		ankerl::unordered_dense::map<const void*, std::vector<RE::BSGeometry*>> propertyDependents;
+		ankerl::unordered_dense::map<const RE::NiAVObject*, std::vector<RE::BSGeometry*>> rootDependents;
 		std::array<std::uint32_t, static_cast<std::size_t>(Ineligible::Count)> buckets{};
 		struct DeltaStats
 		{
 			std::uint32_t walks = 0, full = 0;
-			std::uint64_t evaluated = 0, perFrame = 0, pending = 0, refresh = 0, fade = 0, geometryDirty = 0, settling = 0, restored = 0, moved = 0, kept = 0;
+			std::uint64_t evaluated = 0, perFrame = 0, pending = 0, property = 0, node = 0, roots = 0, fade = 0, geometryDirty = 0, settling = 0, restored = 0, moved = 0, kept = 0;
+			std::uint64_t propertyEvents = 0, nodeEvents = 0, reread = 0;
 			std::uint64_t live = 0;
 			std::uint32_t evaluatedMax = 0;
 		} delta;

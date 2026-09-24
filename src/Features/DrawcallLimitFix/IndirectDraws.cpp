@@ -19,6 +19,7 @@
 #	include "SceneStore.h"
 #	include "ShaderPrograms.h"
 #	include "ShadowViews.h"
+#	include "SunAccumulation.h"
 #	include "RE/B/BSShadowLight.h"
 #	include "RE/B/BSShadowDirectionalLight.h"
 #	include "RE/B/BSCullingProcess.h"
@@ -2070,6 +2071,9 @@ namespace DCLF
 			// is no candidate of the sun's cascade culls (kInputOutsideSunEntry).
 			std::vector<std::array<float, 4>> sunEntryPlanes;  // 6 per process
 			std::vector<std::uint32_t> sunEntryPlaneMasks;     // 1 per process
+			// The sun entries the scene store found DCLF could take out of the cascade culls (SunAccumulation): the build
+			// turns them into the next frame's exclusion, with the claims.
+			std::shared_ptr<const SunCandidates> sunCandidates;
 			ResourceAddresses addresses{};
 			// Community Shaders' SharedData (b5) and FeatureData (b6), copied from the structs CS keeps.
 			std::vector<std::byte> sharedData, featureData;
@@ -2097,6 +2101,7 @@ namespace DCLF
 			// The worker's build also builds each used mode's claim set (ShadowClaimSet), which the epoch
 			// publishes; empty for a build made on the render thread, which builds them at the publish.
 			std::array<std::shared_ptr<const PassCapture::ClaimSet>, kShadowModeCount> claims;
+			std::shared_ptr<SunExclusion> sunExclusion;  // likewise, from the cascades' mode (BuildSunExclusion)
 
 			void Reset()
 			{
@@ -2104,6 +2109,7 @@ namespace DCLF
 				stagedFor = nullptr;
 				stagedSlots = 0;
 				claims = {};
+				sunExclusion.reset();
 				arena.Reset();
 				records.clear();
 				objectRecord.clear();
@@ -3218,6 +3224,39 @@ namespace DCLF
 			return claims;
 		}
 
+		// The cascades' render mode (0xE, ShadowMapClamped) as an index of the shadow modes.
+		constexpr std::uint32_t kSunShadowMode = 0xE - PassCapture::kFirstShadowMode;
+
+		/**
+		 * @brief The next frame's sun entry exclusion, from the candidates and the cascades' mode's inputs, which are
+		 * what that mode's claims hold: a candidate stays in the cascade culls when one of its table objects casts (no
+		 * kObjectNoShadow) and is not an input, since the engine must then still draw it. Null without candidates.
+		 */
+		std::shared_ptr<SunExclusion> BuildSunExclusion(const std::shared_ptr<const SunCandidates>& a_candidates, const std::vector<DrawInput>& a_inputs,
+			const SceneStore::Tables& a_tables)
+		{
+			if (!a_candidates || a_candidates->entries.empty())
+				return nullptr;
+			auto exclusion = std::make_shared<SunExclusion>();
+			exclusion->candidates = a_candidates;
+			const std::size_t count = a_candidates->entries.size();
+			exclusion->excluded.assign(count, 1);
+			std::vector<std::uint8_t> isInput(a_tables.objects.size(), 0);
+			for (const auto& input : a_inputs)
+				if (input.objectIndex < isInput.size())
+					isInput[input.objectIndex] = 1;
+			for (std::size_t o = 0; o < a_tables.objects.size(); ++o) {
+				if ((a_tables.objects[o].flags & (kObjectFree | kObjectNoShadow)) || isInput[o])
+					continue;
+				if (const auto it = a_candidates->geometries.find(a_tables.objectGeometry[o]); it != a_candidates->geometries.end())
+					exclusion->excluded[a_candidates->geometryEntry[it->second]] = 0;
+			}
+			exclusion->excludedCount = static_cast<std::uint32_t>(std::count(exclusion->excluded.begin(), exclusion->excluded.end(), std::uint8_t(1)));
+			exclusion->removed = std::make_unique<std::atomic<std::uint32_t>[]>(count);
+			exclusion->cleared = std::make_unique<std::atomic<std::uint32_t>[]>(a_candidates->geometryEntry.size());
+			return exclusion;
+		}
+
 		// Whether an object's entry is outside every one of the sun's full-frustum processes, so the sun's cascade
 		// culls never reach it (ShadowInputs::sunEntryPlanes).
 		bool OutsideSunEntry(const ShadowInputs& a_in, const SceneStore::Tables& a_tables, std::size_t a_object)
@@ -3615,7 +3654,7 @@ namespace DCLF
 			return a_job.frameNumber == a_epoch.frameNumber && a_job.renderFlags == a_epoch.renderFlags &&
 			       std::memcmp(&a_job.refEye, &a_epoch.refEye, sizeof(RE::NiPoint3)) == 0 && a_job.modeUsed == a_epoch.modeUsed &&
 			       a_job.modeRasterStates == a_epoch.modeRasterStates && a_job.sunEntryPlanes == a_epoch.sunEntryPlanes &&
-			       a_job.sunEntryPlaneMasks == a_epoch.sunEntryPlaneMasks &&
+			       a_job.sunEntryPlaneMasks == a_epoch.sunEntryPlaneMasks && a_job.sunCandidates == a_epoch.sunCandidates &&
 			       a_job.addresses == a_epoch.addresses && a_job.sharedData == a_epoch.sharedData && a_job.featureData == a_epoch.featureData &&
 			       a_job.lookupGeneration == a_epoch.lookupGeneration && a_job.tablesGeneration == a_epoch.tablesGeneration &&
 			       a_job.sceneRebuilds == a_epoch.sceneRebuilds;
@@ -5374,6 +5413,10 @@ namespace DCLF
 					if (modeUsed[m])
 						impl->PublishShadowClaims(PassCapture::kFirstShadowMode + m, payload.inputList[m], usedWorkerBuild ? payload.claims[m] : nullptr, shadowStats);
 				}
+				// The cascades' claims decide which sun entries the next frame's cascade culls may skip.
+				if (modeUsed[kSunShadowMode])
+					SunAccumulation::Get().PublishExclusion(usedWorkerBuild ? payload.sunExclusion :
+					                                                          BuildSunExclusion(payload.inputs.sunCandidates, payload.inputList[kSunShadowMode], SceneStore::Get().GetTables()));
 			}
 			pending.clear();
 		} else {
@@ -5405,6 +5448,7 @@ namespace DCLF
 							planes.cullingPlanes[p].constant });
 					in.sunEntryPlaneMasks.push_back(planes.activePlanes.underlying() & 0x3Fu);
 				}
+		in.sunCandidates = a_store.GetSunCandidates();
 		in.addresses.constants = a_resources.constantsAddress;
 		in.addresses.records = a_resources.recordsAddress;
 		in.addresses.objectsIndex = a_resources.objectsIndex;
@@ -5456,10 +5500,13 @@ namespace DCLF
 		job.handle = AsyncWorker::Get().Submit("shadow", [inputs, tablesPtr, lookups, payload, pool, target = impl->shadow, slots = job.views, claims](std::stop_token) {
 			BuildShadowPayload(inputs, *tablesPtr, *lookups, *payload);
 			StageShadowPayload(*payload, *target, slots, *pool);
-			if (claims)
+			if (claims) {
 				for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
 					if (inputs.modeUsed[m])
 						payload->claims[m] = ShadowClaimSet(payload->inputList[m], *tablesPtr);
+				if (inputs.modeUsed[kSunShadowMode])
+					payload->sunExclusion = BuildSunExclusion(inputs.sunCandidates, payload->inputList[kSunShadowMode], *tablesPtr);
+			}
 		});
 	}
 

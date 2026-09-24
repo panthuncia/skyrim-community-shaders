@@ -1,7 +1,7 @@
 # DCLF: object tables built from events
 
-Status, 2026-09-24: the reverse engineering is done ("Reverse-engineering results"), and Phases 1 and 2 are built
-("Phase 1: object slots", "Phase 2: the delta walk"). It refines Phase 3 of
+Status, 2026-09-24: the reverse engineering is done ("Reverse-engineering results"), and Phases 1 to 3 are built
+("Phase 1: object slots", "Phase 2: the delta walk", "Phase 3: structural events"). It refines Phase 3 of
 [dclf-gpu-driven-frame.md](./dclf-gpu-driven-frame.md) ("a persistent GPU scene").
 
 ## The question
@@ -101,11 +101,11 @@ that per-frame work is proportional to what changed and the worker never has to 
 
 | Input | Event today | What is needed | Per-frame remainder |
 | --- | --- | --- | --- |
-| Membership | `SceneTracker` attach and detach | done; the rolling re-check stays as an alarm | none |
-| Moves (world, previous world, bound) | membership, for references (a move is a disable and an enable) | **The movable set** (see "Reverse-engineering results"): actor-owned, a controller, a non-fixed rigid body, or a billboard on the chain; and, for the sun entry, anything moving under the reference root (Phase 2). Taken at classification. `SetMotionType` and runtime controller additions are Phase 3's. | the moving slots' placement |
+| Membership | `SceneTracker` attach and detach | done; the rolling re-check stays as an alarm. An attach or detach under a sun entry node also re-evaluates that node's other dependents (Phase 3) | none |
+| Moves (world, previous world, bound) | membership, for references (a move is a disable and an enable) | **The movable set** (see "Reverse-engineering results"): actor-owned, a controller, a non-fixed rigid body, or a billboard on the chain; and, for the sun entry, anything moving under the reference root (Phase 2). Taken at classification. **Built (Phase 3):** Havok's node writes and runtime controller additions are events, which take the traits again | the moving slots' placement |
 | Bone palettes | none | every skin, every frame: the wind moves a tree's bones with no controller or body in the reference (Phase 2); the GPU-driven plan's bones-on-GPU removes `UpdateSkin` later | per skinned record |
-| Property, material, alpha property, skin instance, renderer data | materials: `MaterialSources` write hooks; renderer data: `GpuResources` | Flags and materials: hook `BSShaderProperty::SetFlags` and `SetMaterial`. Pointer swaps have no choke point: on movable slots (actors) they are re-read every frame, and static slots take them at attach, with the validation walk as the alarm. | movable slots only |
-| Persistent hidden and shown | membership (disable and enable release and load the 3D) | Movable slots re-read their chain every frame, which covers actors and the visibility controllers. The remaining static writers (portal graph, queued trees, cell paths) are confirmed or hooked as the validation walk finds them. | movable slots only |
+| Property, material, alpha property, skin instance, renderer data | materials: `MaterialSources` write hooks; renderer data: `GpuResources` | **Built (Phase 3):** `BSShaderProperty::SetFlags` and `SetMaterial` are hooked. Pointer swaps have no choke point: an actor's entries re-read them every frame, and static slots take them at attach, with the validation walk as the alarm. | actors' entries only |
+| Persistent hidden and shown | membership (disable and enable release and load the 3D) | **Built (Phase 3):** an actor's entries, and a moving entry whose verdict is hidden, re-read their chain every frame, which covers actors and the visibility controllers. A static the engine accumulates while its kept verdict says hidden is taken again. The remaining static writers (portal graph, queued trees, cell paths) are hooked as the validation walk finds them; it has found none. | actors' entries and hidden movers |
 | Per-view hides | none | A per-slot **view mask** for DCLF's views (main, sun, and later the others), set by rules reverse-engineered per writer: the first-person skeleton is only in the first-person view; the player's 3D is hidden in the cube-map reflection; portal traversal's toggles are internal to the cull and don't count. `CaptureCullHiddenBits` is the first, hand-listed version of this. | none |
 | Switch-node selection | none | no setter: switch children stay a per-frame class | one switch-node read per switch child (Phase 2) |
 | Fade | written by the main camera's cull: `BSFadeNode::OnVisible` and the fade update `FUN_14147a160` | **built (Phase 2):** both writers are detoured, and a change is an event for the records that read the node | the records of fading nodes (tens a frame while the camera moves) |
@@ -139,10 +139,8 @@ featureset.
 
 ## What it needs
 
-What is left after Phases 1 and 2 (the slots, the delta walk and `CS_DCLF_WALK_PARITY` are built):
-
--   the structural events (Phase 3);
--   the per-slot view mask, and its use in the shadow build and the draws' visibility (Phase 4).
+What is left after Phases 1 to 3 (the slots, the delta walk, the structural events and `CS_DCLF_WALK_PARITY` are
+built): the per-slot view mask, and its use in the shadow build and the draws' visibility (Phase 4).
 
 ## Reverse-engineering results
 
@@ -235,9 +233,7 @@ per switch node.
 
 1.  **Slots, same walk.** Done; see below.
 2.  **The delta walk.** Done; see below.
-3.  **Structural events.** Property, alpha, flags, switch, persistent hidden, `SetMotionType` and runtime
-    controllers: hooks per the RE results. Remove the 64-frame classify cache and its witness, and with them the
-    refresh queue's re-classifications (110-140 a frame at Riverwood).
+3.  **Structural events.** Done; see below.
 4.  **View masks.** The transient hides become rules. `CaptureCullHiddenBits` is folded in.
 5.  **The walk leaves the frame.** Phase 2 already runs it only under `CS_DCLF_WALK_PARITY`, with
     `CS_DCLF_SCENE_DELTA=0`, and for a full evaluation (a reset, a load, a live toggle). What remains is making
@@ -299,8 +295,8 @@ entries whose inputs can have changed. Every other slot keeps its record. What i
 | --- | --- | --- |
 | The per-frame set | entries whose inputs change every frame: see below | about 1,690 |
 | Pending | new entries (`AddGeometry`), a changed parent reason, a verdict the accumulate phase found stale, a record `CheckObjectSlots` neutralised, and a static whose previous transform has not caught up with its current one yet | 0 in steady state |
-| The refresh queue | a kept entry whose classification is `kCandidateRefreshFrames` old, which is when the full walk took it again (a FIFO by classification frame) | 110-140 |
-| Fade events | the records that read a fade node whose `currentFade` changed | 0 at rest, 30-70 while moving |
+| The refresh queue (until Phase 3, which replaced it with events) | a kept entry whose classification is `kCandidateRefreshFrames` old, which is when the full walk took it again (a FIFO by classification frame) | 110-140 |
+| Fade events | the records that read a fade node whose `currentFade` changed (the node events themselves are tens a frame while the camera moves) | under 1 |
 | Geometry | a kept slot whose geometry slot lost its resolve, or was re-resolved in place for another object | 0 |
 
 Everything else is a full evaluation, the old walk on the render thread: after a reset, a load, a rescan or a live
@@ -318,7 +314,8 @@ is a face shape) and it has one of these traits (`PerFrameTraits`):
 -   **its reference root moves** (`RootMoves`). A record's sun entry is the bound of its reference's root node, and
     that bound moves when anything else in the reference moves. Walk parity caught it on the first run: a nail
     inside a dead salmon's reference, whose Havok body is on another branch, and the frame of an alchemy workbench,
-    whose animated part is on another branch. The root's subtree is walked once per `kCandidateRefreshFrames`.
+    whose animated part is on another branch. The root's subtree is walked once, and again after an event under it
+(Phase 3).
 
 **The light path.** Most per-frame entries change in one or two known inputs, so while their classification stands
 they take only what the full walk would have taken again:
@@ -389,9 +386,86 @@ against 0.18 ms. So the render thread pays 0.15-0.25 ms more than it did with th
 
 What would take the rest down:
 
--   Phase 3 removes the refresh queue's re-classifications;
+-   Phase 3 removed the refresh queue's re-classifications (see there);
 -   keeping `Tracked` entries in a stable pool removes the per-frame set's lookups;
 -   bones on the GPU (the GPU-driven plan) remove the palette update.
+
+## Phase 3: structural events
+
+A classification now stands until an event takes it again. The 64-frame expiry of the classify cache and the refresh
+queue are gone from the delta walk (the full walk, `CS_DCLF_SCENE_DELTA=0`, keeps them). The events, all AE 1.6.1170,
+installed by `SceneStore::InstallSceneEvents`, pushed from the writer's thread onto lock-free stacks and drained at
+`ProcessEvents`:
+
+| Event | Writer hooked | What the delta walk takes again | Riverwood, per frame |
+| --- | --- | --- | --- |
+| A property changed | `BSShaderProperty::SetFlags` (`0x14147bee0`) and `SetMaterial` (`0x14147bff0`), when the flags or the material pointer changed; `NiObjectNET::PrependController` (`0x140d268d0`, which `NiTimeController::SetTarget` calls) on a property | the entries listed under that shader or alpha property (`propertyDependents`), classified again. The key is never dereferenced | 0.9 events in the load's window, 0 after |
+| Havok moved a node | `FUN_140ea55a0`, which writes a node's transform from its rigid body; every collision object class's `SetNodeTransformsFromWorldTransform` (vfunc `0x2B`) and the island activation listener call it | the tracked entries under the node and the dependents of every sun entry node above it, classified again, except what is placed every frame already and what has neither a record nor a verdict of the frame's | about 10 events (clutter that never sleeps), 0 evaluations |
+| A controller was added to a node | `NiObjectNET::PrependController` | as for a Havok move: the entries under it gain the moving trait | 0 |
+| A sun entry node's membership changed | `SceneTracker`'s attach and detach (`AddGeometry`, `EraseTracked`) | the other dependents of that node (`rootDependents`): its bound takes the new one in, or no longer does | 0 at rest |
+| A fade changed | Phase 2's fade watch | now classified again as well, since a fade is also a classification input | under 1 |
+| A static the engine drew while its kept verdict says hidden or unselected | the accumulate phase | classified again | 0 |
+
+A node event holds a reference to its node, as `SceneTracker`'s attach events do, and is applied only when the node
+hangs under a drawn category node (`FindCategoryNode`), so a subtree still loading is never walked.
+
+**The per-frame set gained one rule.** Walk parity caught a guard's shield and an NPC's chopping axe left hidden after
+they were shown: an actor's equipment is shown, hidden and swapped with no event of its own, and the entries were not
+per frame because a hidden verdict lets them have no record. Now an actor's entries are per frame whatever their
+verdict, and so is a moving entry whose verdict is hidden, unselected or actor (`PerFrameOf`). A per-frame entry
+written in full re-reads its hidden, actor and switch verdict every frame, and its static verdict when what it read
+(the renderer data, skin, properties, flags, material, material alpha and fade state; `ClassifyInputsOf`) changed.
+That added 13 per-frame entries at Riverwood.
+
+**Parity classifies from scratch.** The reference walk used to share the classify cache, so it could not see a stale
+classification. It now classifies every entry from scratch, and the report adds two counts:
+
+-   **stale verdicts:** kept classifications the reference no longer reaches, records or not;
+-   **stale traits:** entries a fresh classification would evaluate every frame, or on a heavier path, while the delta
+    walk keeps them.
+
+With the refresh still in place, a baseline run at Riverwood had 0 of either.
+
+**Synthetic tests** (a temporary harness, since removed) made engine calls whose effect only the events carry:
+
+| Test | Events on | Events dropped |
+| --- | --- | --- |
+| `SetFlags` flips the two-sidedness of 12 kept static records | walk parity OK | 12 records differ in every window after |
+| Without the body trait, so sleeping clutter becomes kept, 6 clutter references are thrown with a velocity | walk parity OK except one keyframed lever (below) | about 185 records differ in every window, from clutter that never sleeps |
+
+-   **The keyframed branch.** Havok moves a keyframed body's node through `NiAVObject::RecalculateWorldTransform`,
+    not `FUN_140ea55a0`. Such a node follows an animation, so the controller trait covers it, and the body trait stays
+    on for non-fixed bodies.
+-   **Fixed bodies stay fixed.** `NiAVObject::SetMotionType(kDynamic)` on a static reference's fixed body returned
+    true but left it `kFixed`.
+
+**What stays with the alarm.** Walk parity is still the only check for four kinds of change on a static slot:
+
+-   pointer swaps (property, alpha property, skin, renderer data) outside attach;
+-   hidden writes;
+-   in-place changes to an alpha property;
+-   in-place changes to a material.
+
+None showed up in the runs below.
+
+**Twelve statics in Bleak Falls Barrow never settle.** Their previous transform differs from their current one, and
+the engine never updates them again. So they are written every frame (`settling 12`), as in Phase 2.
+
+**The gate.** Full featureset, walk parity on:
+
+| Run | Result |
+| --- | --- |
+| Riverwood, live toggle, the player carried 4,800 units, then Dragonsreach, shadow-map probe | walk parity OK in every window: 0 differ, 0 stale verdicts, 0 stale traits. 0 holes. Shadow maps match across the toggle (0.596 / 0.581 on, 0.594 / 0.579 off). The 36 passes handed back after entering Dragonsreach are the cold-pipeline class; Phase 2 handed back 39 in the same window |
+| Riverwood, save and load, with BuildDraws and capture parity | walk parity OK. BuildDraws, bone palette, draw, light data, permutation and skin parity OK. Capture parity OK except in the load's window (15 material mismatches, as before) |
+| Bleak Falls Barrow, then Whiterun's exterior | walk parity OK, 0 holes |
+
+**Cost.** Scene phase, full featureset, no parity (render thread, per frame):
+
+| | Phase 3 | Phase 2 |
+| --- | --- | --- |
+| Riverwood | 0.46-0.49 ms (1,707 evaluated) | 0.52-0.56 ms (1,834) |
+| Bleak Falls Barrow | 0.27-0.28 ms (813) | 0.34-0.35 ms |
+| Whiterun's exterior | 0.38 ms in the window after the load | 0.43 ms |
 
 ## Relation to the GPU-driven plan
 

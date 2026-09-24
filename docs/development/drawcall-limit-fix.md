@@ -1442,6 +1442,9 @@ through: the shadow pipeline map ("Epochs that only submit") and the NPC head dr
 | `CS_DCLF_OWNERSHIP=static` | Withhold claimed passes from the main camera's batch renderer, so DCLF owns those objects outright. Default off. |
 | `CS_DCLF_SHADOWS=1` | The shadow views: DCLF culls and draws the frame's casters into the engine's shadow map slices in one epoch per frame (below, "Shadow views, step two"). Default off. Live toggle in the menu. |
 | `CS_DCLF_SHADOW_OWNERSHIP=static` | Withhold the casters DCLF's shadow epoch draws from the shadow views' batch renderers, per render mode. Needs `CS_DCLF_SHADOWS=1`. Default off. Live toggle. |
+| `CS_DCLF_SUN_SKIP=1` | M1: the sun's registration of a claimed caster writes only its mask ("The sun without the engine's registration"). Needs static shadow ownership. Default on. Live toggle. |
+| `CS_DCLF_SUN_EXCLUDE=1\|0\|probe` | The entries whose content DCLF draws entirely leave the sun's cascade culls, and DCLF writes their sun bits ("The sun's cascades without DCLF's objects"). Needs `CS_DCLF_SUN_SKIP`. Default on. Live toggle. `probe`: a dry run that compares DCLF's bits with the engine's and counts the casters the exclusion would lose. |
+| `CS_DCLF_SUN_TIMING=1` | Diagnostic: times the render thread in the full-frustum cull, `Accumulate` and the sun's registrations. |
 | `CS_DCLF_SWITCH_NODES=1` | Leaves under an `NiSwitchNode` (trees, harvestables) are eligible in the frames every switch on their path selects them ("Trees and actors"). Default on. Live toggle. |
 | `CS_DCLF_SKIN_PARTITIONS=1` | Skins of several partitions and dismember skins (LOD trees, actor bodies) are eligible, one draw per partition the engine draws. Needs `CS_DCLF_SKINNED`. Default on. Live toggle. |
 | `CS_DCLF_ACTORS=1` | Geometry under an actor is eligible, as is the FacegenRGBTint technique. Default on. Live toggle. |
@@ -1461,7 +1464,7 @@ through: the shadow pipeline map ("Epochs that only submit") and the NPC head dr
 | `CS_DCLF_ASYNC_JOBS=colour,zprepass,shadow,scene` | Which jobs `on`/`probe` move to the worker (default: all four). For bisecting. |
 | `CS_DCLF_OBJECT_SLOTS=0` | Rebuild the object tables densely every walk instead of keeping each object at a persistent slot ([dclf-event-driven-tables.md](./dclf-event-driven-tables.md), "Phase 1"). Also turns the delta walk off. For A/B. |
 | `CS_DCLF_SCENE_DELTA=0` | Walk the whole tracked set every frame (on the worker, with `CS_DCLF_ASYNC`) instead of the delta walk, which evaluates on the render thread only what can have changed ([dclf-event-driven-tables.md](./dclf-event-driven-tables.md), "Phase 2"). For A/B. |
-| `CS_DCLF_WALK_PARITY=1` | Every 60 frames, run the walk on the render thread, rebuild the tables densely too, and compare them object by object (`walk parity ... <- OK` every 5 checks). |
+| `CS_DCLF_WALK_PARITY=1` | Every 60 frames, rebuild the tables densely on the render thread, classifying every object from scratch, and compare them with the frame's object by object, along with every entry's classification and per-frame traits (`walk parity ... <- OK` every 5 checks; [dclf-event-driven-tables.md](./dclf-event-driven-tables.md), "Phase 3"). |
 | `CS_DCLF_ASYNC_WAIT_MS=<ms>` | How long an epoch waits for its job before building inline instead (default 3). |
 | `CS_DCLF_ASYNC_PRIORITY=normal` | Run the worker at normal priority instead of above normal. |
 | `CS_GPU_IDLE_TRACE=<frames>` / `CS_PROFILER_LOG=<frames>` | Not DCLF's, but the gates below read them: the GPU idle trace and its `[GpuIdle] summary` lines, and the profiler's averages in the log. See [render-graph.md](render-graph.md). |
@@ -4209,6 +4212,105 @@ shadow ("The sun's accumulation", engine notes), so it can't simply be dropped.
     (1,475-1,504 of 1,910-1,933).
 -   0 holes, 0 claimed but not drawn, BuildDraws parity OK, over the road save and two teleports.
 
-**M2** replaces the culls themselves (full-frustum and cascade) with DCLF's own replica. It is planned but not
-built: an engine-exact replica has to reproduce `BSCullingProcess::Process1` and about 17 `OnVisible` overrides,
-and at most about 0.3-0.5 ms a frame at Riverwood is left to win.
+**M2**, a CPU replica of the engine's culls, was not built. The next section takes DCLF's objects out of the cascade
+culls instead, which needs no replica.
+
+## The sun's cascades without DCLF's objects (stage 3, entry exclusion)
+
+M1 left the engine culling every caster DCLF draws, cascade by cascade, only to skip the registration at the end. At
+Riverwood that was still about 0.6 ms a frame of the render thread in `BSShadowDirectionalLight::Accumulate`. The
+exclusion takes DCLF's objects out of the cascade culls altogether ([dclf-gpu-driven-frame.md](./dclf-gpu-driven-frame.md),
+"The principle").
+
+**Where to cut.** The cascade culls walk only the entries of the full-frustum culling processes' `objectArray` (engine
+notes, "The sun's accumulation"): a `BSTArray<NiPointer<NiAVObject>>` the full-frustum cull rebuilds every frame, which
+nothing but `Accumulate` reads (DCLF reads only the processes' planes). An entry removed from it after the full-frustum
+cull is never traversed by any cascade, so its whole subtree skips the culling, `OnVisible` and the registration. The
+cascade processes set neither `cameraRelatedUpdates` nor `updateAccumulateFlag`, so no fade, tree clock or
+`kAccumulated` state is lost with them.
+
+**Which entries: `SunCandidates`** (`SceneStore::UpdateSunCandidates`, on the render thread at the end of the delta
+walk). An entry (a static reference's root, or a terrain block's multibound node: `SunEntryOf`) is a candidate when
+every tracked geometry under it (`rootDependents`) either:
+
+-   is a table object, whose shadow the shadow epoch draws, or which the caster rule rejects; or
+-   builds no shadow pass in the engine either: not a Lighting geometry, hidden, alpha-blended, fading, or an unselected
+    switch child (`SunEntryAllows`).
+
+Everything else (decals, billboards, non-`BSTriShape`, LOD, and so on) keeps its entry in the culls. The status is
+judged again only for the entries a change touched: a dependent attached, detached, or gaining or losing its record or
+its verdict. Any change bumps a generation at once. The immutable snapshot (entry and geometry indices) is rebuilt on
+the next walk that changes nothing, so a cell load does not rebuild it every frame.
+
+**Which of those, each frame: `SunExclusion`** (`BuildSunExclusion`, with the cascades' claims, on the worker when the
+shadow build runs there). A candidate is excluded unless one of its table objects casts (no `kObjectNoShadow`) and is
+not an input of the cascades' mode, so is not claimed. The exclusion is published with the claims and used once, by the
+next frame's full-frustum cull, and only if the candidates' generation is still the one it was built for. Otherwise the
+engine culls everything that frame (`stale`), which is also what happens during a cell load.
+
+**The filter** (`SunAccumulation::ExcludeEntries`, a thunk on `CalculateAndDrawShadowCasterLights`' call of the
+full-frustum cull). It compacts each process's `objectArray`, releasing the removed pointers. Each process keeps at
+least one entry: the traversal's first entry sets the cascade's planes up (vfunc `0xB8`), and an empty array leaves the
+process with the previous cascade's.
+
+**The bits.** Removing the registration also removes its mask write: the sun's bits in `activeLightMask`, which the
+main pass reads for ShadowDir and DefShadow. DCLF writes them where they are read:
+
+-   When the main camera registers a geometry under a removed entry (the same `FUN_140e28af0` call sites M1 thunks, on
+    the registration jobs), DCLF ORs in the bit of every cascade its world bound meets, before `GetRenderPasses` runs.
+-   The planes are the engine's own for that cascade: copied from the cascade culling process right after its cull
+    (a thunk on `FUN_1414bf320`'s call of `FUN_140e305c0`), with the custom planes when it has them. The cascade and
+    its bit come from a thunk on `Accumulate`'s call of `FUN_1414f0920`.
+-   **The main registration reads the mask and then clears it** (the main accumulators' `+0x160` is `0xFFFF`), so every
+    later registration in the frame, such as the reflections and the depth accumulations, reads 0. DCLF follows that:
+    it writes a geometry's bits until the geometry's first `0xFFFF` registration (a per-geometry stamp), and only from
+    the end of the sun's `Accumulate` until `Main::Draw`'s mask clear (`FUN_1414cb640`) returns. Without the stamp, a
+    fifth of the comparisons below differed.
+
+This is the Geometric rule (stage 3's decisions): each geometry's own bound against the cascade, where the engine
+tests the nodes above it as well.
+
+**The dry run** (`CS_DCLF_SUN_EXCLUDE=probe`): the exclusion is built and the entries marked, but nothing is removed.
+The engine's bits at the main registration are compared with DCLF's, and every cascade registration the engine makes
+under a would-be-removed entry is counted by whether it built a pass (`PassCapture::PassesOnThisThread`).
+
+| Scene | Bits compared per frame | Agree | Engine only | DCLF only | Unclaimed registrations that built a pass |
+| --- | --- | --- | --- | --- | --- |
+| Riverwood | about 2,500 | 99.99 % | 0.2-0.4 | 0.03 | 0 (205 a frame built none) |
+| Whiterun | about 750 | 99.8 % | 0.5-1.0 | 0.3-0.6 | 0 (85 a frame built none) |
+
+The differences, by class:
+
+-   **Clouds** (`CloudDistant*`): effect-shader geometry, so nothing reads the bits.
+-   **Distant cliff pieces, engine only:** accepted through a node the cascade tests as fully inside, whose plane state
+    then spares the geometry its own test; its own bound is outside.
+-   **Small clutter (fish, buckets, crabs), DCLF only:** in the far cascade's volume but not given its bit by the engine.
+    DCLF's bit makes them sample the screen-space shadow mask, which is the more correct result.
+
+**Result** (full featureset, `CS_DCLF_SUN_TIMING`, render thread per frame, SkyrimEngineTelemetry's coarse zones in both):
+
+| Riverwood | M1 (exclusion dry) | Exclusion |
+| --- | --- | --- |
+| `Accumulate` | 0.59-0.65 ms | **0.10-0.11 ms** |
+| … of which registration | 0.26-0.30 ms | 0.04-0.05 ms |
+| Cascade registrations: skipped (claimed) / engine | 2,300 / 330 | 250 / 125 |
+| The filter | - | 0.037 ms (1,358 of 1,450 entries removed; 4,494 candidates, all excluded) |
+| Main registrations given DCLF's bits | - | about 2,330 |
+
+-   The main pass's objects with the sun's shadow mask are the same share of the engine-kept ones: 1,501 of 1,908
+    (78.7 %) with the exclusion, 1,485 of 1,893 (78.4 %) with the engine's bits.
+-   Riverwood, `coc Whiterun`, `coc WhiterunDragonsreach`, `coc Riverwood`: 0 holes, 0 claimed but not drawn, 0 cascade
+    registrations under a removed entry, 0 registrations before the cascades were known. The Whiterun load stood the
+    exclusion down for 47 frames (`stale`).
+-   What the cascades still walk: the actors (an actor's entry is its cell's container, never removed), the entries with
+    a native caster, and the unclaimed ones. The full-frustum cull itself (0.044 ms, mostly jobs) still runs.
+-   Switches: the menu's "Take DCLF's objects out of the engine's sun culls" (`CS_DCLF_SUN_EXCLUDE`, default on) needs
+    M1's switch. Needs the delta walk (`rootDependents`).
+
+**A crash this run found, not of its making.** `coc Whiterun` crashed in the engine's material database on a loader
+thread, with or without the exclusion, and not with DCLF off. The material cache held its materials through a
+`BSTSmartPointer`, whose release deletes the material directly. The engine's own release (`FUN_1414f7a40`, the
+manager at `0x143187758`) takes the database lock and removes the material from the database at zero. So when the
+cache held the last reference, the database kept a pointer to freed memory, and the next load whose material hashed to
+it called into it. The cache now holds its references through `SceneStore::MaterialReference`, which releases through
+the engine's manager (AE only; the cache is off on SE and VR).

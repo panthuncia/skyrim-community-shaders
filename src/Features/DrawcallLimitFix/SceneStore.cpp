@@ -11,6 +11,7 @@
 #include "PassCapture.h"
 #include "SceneTracker.h"
 #include "ShadowProbe.h"
+#include "SunAccumulation.h"
 #include "ShadowViews.h"
 #include "VertexInput.h"
 #include "VolumetricProbe.h"
@@ -168,6 +169,140 @@ namespace DCLF
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+
+		/**
+		 * @brief SceneEvents: CS_DCLF_SCENE_DELTA's structural events (dclf-event-driven-tables.md, "Phase 3"), pushed
+		 * from the engine's writers on whichever thread runs them, drained by the render thread (ProcessEvents).
+		 *
+		 * - A property event: BSShaderProperty::SetFlags (0x14147bee0) or SetMaterial (0x14147bff0) changed a shader
+		 *   property, or a controller was added to a property. It carries the pointer as a key only: the drain looks it
+		 *   up among the tracked entries' properties and never dereferences it.
+		 * - A node event: Havok wrote a node's transform from its rigid body (FUN_140ea55a0, which every collision object
+		 *   class's SetNodeTransformsFromWorldTransform and the island activation listener call), or a controller was
+		 *   added to a node (NiObjectNET::PrependController, FUN_140d268d0, which NiTimeController::SetTarget calls). It
+		 *   holds a reference, as SceneTracker's attach events do, because the drain walks the node's subtree and its
+		 *   ancestors.
+		 */
+		struct PropertyEvent
+		{
+			const void* key;
+			PropertyEvent* next;
+		};
+		struct NodeEvent
+		{
+			RE::NiPointer<RE::NiAVObject> node;
+			NodeEvent* next;
+		};
+		std::atomic<PropertyEvent*> propertyEvents{ nullptr };
+		std::atomic<NodeEvent*> nodeEvents{ nullptr };
+		constexpr std::size_t kMaxStructuralEvents = 1u << 16;
+
+		template <class T>
+		void PushEvent(std::atomic<T*>& a_stack, T* a_event)
+		{
+			a_event->next = a_stack.load(std::memory_order_relaxed);
+			while (!a_stack.compare_exchange_weak(a_event->next, a_event, std::memory_order_release, std::memory_order_relaxed)) {
+			}
+		}
+
+		void PushProperty(const void* a_property)
+		{
+			PushEvent(propertyEvents, new PropertyEvent{ a_property, nullptr });
+		}
+
+		void PushNode(RE::NiAVObject* a_node)
+		{
+			if (a_node)
+				PushEvent(nodeEvents, new NodeEvent{ RE::NiPointer<RE::NiAVObject>(a_node), nullptr });
+		}
+
+		void DrainPropertyEvents(std::vector<const void*>& a_out)
+		{
+			for (auto* event = propertyEvents.exchange(nullptr, std::memory_order_acquire); event;) {
+				a_out.push_back(event->key);
+				auto* next = event->next;
+				delete event;
+				event = next;
+			}
+		}
+
+		void DrainNodeEvents(std::vector<RE::NiPointer<RE::NiAVObject>>& a_out)
+		{
+			for (auto* event = nodeEvents.exchange(nullptr, std::memory_order_acquire); event;) {
+				a_out.push_back(std::move(event->node));
+				auto* next = event->next;
+				delete event;
+				event = next;
+			}
+		}
+
+		struct PropertySetFlags
+		{
+			static void thunk(RE::BSShaderProperty* a_this, RE::BSShaderProperty::EShaderPropertyFlag8 a_flag, bool a_set)
+			{
+				const auto before = a_this->flags.underlying();
+				func(a_this, a_flag, a_set);
+				if (a_this->flags.underlying() != before)
+					PushProperty(a_this);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		struct PropertySetMaterial
+		{
+			static void thunk(RE::BSShaderProperty* a_this, RE::BSShaderMaterial* a_material, bool a_unique)
+			{
+				const auto* before = a_this->material;
+				func(a_this, a_material, a_unique);
+				if (a_this->material != before)
+					PushProperty(a_this);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		struct PrependController
+		{
+			static void thunk(RE::NiObjectNET* a_target, RE::NiTimeController* a_controller)
+			{
+				func(a_target, a_controller);
+				if (!a_target)
+					return;
+				if (auto* object = netimmerse_cast<RE::NiAVObject*>(a_target))
+					PushNode(object);
+				else
+					PushProperty(a_target);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		struct HavokNodeTransform
+		{
+			static void thunk(RE::NiCollisionObject* a_this, const void* a_transform)
+			{
+				func(a_this, a_transform);
+				PushNode(a_this->sceneObject);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/** @brief Takes a geometry off a dependents list; true when others remain under the key. */
+		template <class Map, class Key>
+		bool Unlist(Map& a_map, Key a_key, RE::BSGeometry* a_geometry)
+		{
+			const auto it = a_map.find(a_key);
+			if (it == a_map.end())
+				return false;
+			auto& list = it->second;
+			if (const auto at = std::find(list.begin(), list.end(), a_geometry); at != list.end()) {
+				*at = list.back();
+				list.pop_back();
+			}
+			if (list.empty()) {
+				a_map.erase(it);
+				return false;
+			}
+			return true;
+		}
 
 		bool SameTransform(const RE::NiTransform& a_lhs, const RE::NiTransform& a_rhs)
 		{
@@ -392,12 +527,17 @@ namespace DCLF
 		validationCursor = 0;
 		fullEvaluation = true;
 		perFrameSet.clear();
-		refreshQueue.clear();
 		pendingEvaluation.clear();
 		accumulatePatched.clear();
 		fadeChanged.clear();
 		fadeDependents.clear();
+		propertyChanged.clear();
+		nodeChanged.clear();
+		dirtyRoots.clear();
+		propertyDependents.clear();
+		rootDependents.clear();
 		rootMotion.clear();
+		DropSunCandidates();
 		buckets = {};
 	}
 
@@ -629,6 +769,15 @@ namespace DCLF
 	std::array<float, 4> SceneStore::SunEntryOf(Tracked& a_tracked, const RE::BSGeometry& a_geometry)
 	{
 		constexpr std::array<float, 4> kNeverTested{ 0.0f, 0.0f, 0.0f, -1.0f };
+		ResolveSunEntry(a_tracked, a_geometry);
+		if (!a_tracked.sunEntryNode)
+			return kNeverTested;
+		const auto& bound = a_tracked.sunEntryNode->worldBound;
+		return { bound.center.x, bound.center.y, bound.center.z, bound.radius };
+	}
+
+	void SceneStore::ResolveSunEntry(Tracked& a_tracked, const RE::BSGeometry& a_geometry)
+	{
 		if (!a_tracked.sunEntryResolved) {
 			a_tracked.sunEntryResolved = true;
 			auto* geometry = const_cast<RE::BSGeometry*>(&a_geometry);
@@ -651,10 +800,6 @@ namespace DCLF
 					}
 			}
 		}
-		if (!a_tracked.sunEntryNode)
-			return kNeverTested;
-		const auto& bound = a_tracked.sunEntryNode->worldBound;
-		return { bound.center.x, bound.center.y, bound.center.z, bound.radius };
 	}
 
 	void SceneStore::AddGeometry(RE::BSGeometry* a_geometry, RE::NiNode* a_categoryNode, Ineligible a_parentReason)
@@ -668,6 +813,21 @@ namespace DCLF
 		entry.geometry.reset(a_geometry);
 		entry.categoryNode = a_categoryNode;
 		entry.parentReason = a_parentReason;
+		// Attached (again): its classification stands no more, and every other entry reading the same sun entry node is
+		// evaluated again, since that node's bound takes this one in now (dclf-event-driven-tables.md, "Phase 3").
+		entry.candidateFrame = 0;
+		if (SceneDeltaEnabled()) {
+			UnlistDependents(a_geometry, entry, true);
+			entry.sunEntryResolved = false;
+			entry.sunEntryNode = nullptr;
+			ResolveSunEntry(entry, *a_geometry);
+			if (entry.sunEntryNode) {
+				rootDependents[entry.sunEntryNode].push_back(a_geometry);
+				entry.listedRoot = entry.sunEntryNode;
+				dirtyRoots.push_back(entry.sunEntryNode);
+				MarkSunEntryDirty(entry.sunEntryNode);
+			}
+		}
 		pendingEvaluation.push_back(a_geometry);
 	}
 
@@ -722,6 +882,7 @@ namespace DCLF
 				stale.push_back(it->first);
 			} else if (it->second.parentReason != reason) {
 				it->second.parentReason = reason;
+				it->second.candidateFrame = 0;
 				pendingEvaluation.push_back(it->first);
 			}
 		}
@@ -767,6 +928,10 @@ namespace DCLF
 			SceneTracker::FreeEvents(tracker.Drain());
 			DrainFadeEvents(fadeChanged);
 			fadeChanged.clear();
+			DrainPropertyEvents(propertyChanged);
+			propertyChanged.clear();
+			DrainNodeEvents(nodeChanged);
+			nodeChanged.clear();
 			return;
 		}
 		const bool rescanned = rescanPending;
@@ -781,6 +946,11 @@ namespace DCLF
 			validationCursor = 0;
 			fullEvaluation = true;
 			fadeDependents.clear();
+			propertyDependents.clear();
+			rootDependents.clear();
+			dirtyRoots.clear();
+			rootMotion.clear();
+			DropSunCandidates();
 			buckets = {};
 		}
 
@@ -814,6 +984,16 @@ namespace DCLF
 			fadeChanged.clear();
 			fullEvaluation = true;
 		}
+		// The structural events (SceneEvents): properties whose flags, material or controllers changed, and nodes Havok
+		// moved or gave a controller.
+		DrainPropertyEvents(propertyChanged);
+		DrainNodeEvents(nodeChanged);
+		if (propertyChanged.size() > kMaxStructuralEvents || nodeChanged.size() > kMaxStructuralEvents) {
+			propertyChanged.clear();
+			nodeChanged.clear();
+			fullEvaluation = true;
+		}
+
 		stats.tracked = static_cast<std::uint32_t>(tracked.size());
 		stats.categoryNodes = static_cast<std::uint32_t>(categoryNodes.size());
 	}
@@ -1553,6 +1733,21 @@ namespace DCLF
 			}
 	};
 
+	void SceneStore::MaterialReference::reset(RE::BSShaderMaterial* a_material)
+	{
+		// BSIntrusiveRefCounted's count (+0x8), incremented as the engine takes a reference on a property's material
+		// (FUN_1414ac820); a material being read off a live property has one already, so it cannot be at zero here.
+		if (a_material)
+			InterlockedIncrement(reinterpret_cast<volatile LONG*>(reinterpret_cast<std::byte*>(a_material) + 0x8));
+		if (material) {
+			using Release = void(void*, RE::BSShaderMaterial*);
+			static REL::Relocation<Release*> release{ REL::Offset(0x14f7a40) };  // AE ID 107720
+			static REL::Relocation<void**> manager{ REL::Offset(0x3187758) };     // AE ID 403555
+			release(*manager, material);
+		}
+		material = a_material;
+	}
+
 	bool SceneStore::MaterialCacheEnabled()
 	{
 		// Default ON. It is not merely parity-neutral, it is parity-*better* than evaluating every
@@ -1564,8 +1759,9 @@ namespace DCLF
 		//   cell change (coc)      253239      20572
 		//   `set gamehour` step    248670          0
 		//   steady state                0          0
+		// AE only: its reference goes through the engine's material database (MaterialReference).
 		static const std::string mode = SwitchValue("CS_DCLF_MATERIAL_CACHE");
-		static const bool enabled = mode != "off";
+		static const bool enabled = mode != "off" && REL::Module::IsAE();
 		return enabled;
 	}
 
@@ -2024,7 +2220,8 @@ namespace DCLF
 
 		// Eligibility, and nothing else. This phase needs no lighting descriptors - the pipeline and
 		// material belong to the accumulator's half - so the verdict is taken from Tracked's own
-		// cache (refreshed every kCandidateRefreshFrames) rather than recomputed per object per
+		// cache (refreshed every kCandidateRefreshFrames by the full walk, and by an event with the
+		// delta walk's) rather than recomputed per object per
 		// frame: that cache is what made the cull-only path cheap, and here it covers every object.
 		//
 		// A verdict that is stale in the "eligible" direction costs nothing: the accumulate phase
@@ -2048,12 +2245,26 @@ namespace DCLF
 		bool shadowOnly = false;  // not the main pass's, but a caster the shadow epochs draw (kObjectShadowOnly)
 		// A face shape is classified every frame: its record also depends on its head's snapshot, and the
 		// verdicts it can take (hidden, fading, a decal group) change as the actor does.
-		if (!faceShape && trackedEntry->candidateFrame != 0 && frame - trackedEntry->candidateFrame < Tracked::kCandidateRefreshFrames) {
+		// The dense rebuild (walk parity's reference) classifies from scratch and leaves the caches alone. With
+		// CS_DCLF_SCENE_DELTA a classification stands until an event takes it again, except a per-frame entry's written in
+		// full (an actor's): its inputs are re-read every frame (Tracked::classifyInputs), as its record is.
+		const bool sceneDelta = SceneDeltaEnabled();
+		const bool rereads = sceneDelta && trackedEntry->perFrame && !trackedEntry->lightTraits;
+		bool cached = !denseWalk && !faceShape && trackedEntry->candidateFrame != 0 &&
+		              (sceneDelta || frame - trackedEntry->candidateFrame < Tracked::kCandidateRefreshFrames);
+		if (cached && rereads && ClassifyInputsOf(*geometry) != trackedEntry->classifyInputs) {
+			cached = false;
+			++delta.reread;
+		}
+		if (cached) {
 			reason = trackedEntry->candidateReason;
 			// Under a switch node the verdict follows the switch's selection, which changes (a harvested
 			// plant, a tree's variant) without anything the cache witnesses: the shadow views draw what
 			// this phase admits, so it is taken again every frame. Static verdicts other than None stand.
-			if (entry.parentReason == Ineligible::Switch && (reason == Ineligible::None || reason == Ineligible::Switch)) {
+			// A re-read entry's hidden and actor verdicts are the frame's too.
+			const bool frameVerdict = reason == Ineligible::None || reason == Ineligible::Switch ||
+			                          (rereads && (reason == Ineligible::Hidden || reason == Ineligible::Actor));
+			if ((entry.parentReason == Ineligible::Switch || rereads) && frameVerdict) {
 				reason = ClassifyFrame(entry);
 				trackedEntry->candidateReason = reason;
 			}
@@ -2077,7 +2288,7 @@ namespace DCLF
 				++stats.castResolved;
 			}
 			RE::BSLightingShaderProperty* castCache = trackedEntry->castResult;
-			const bool hit = classifyCache && verdict.cached && verdict.rendererData == runtime.rendererData &&
+			const bool hit = classifyCache && !denseWalk && verdict.cached && verdict.rendererData == runtime.rendererData &&
 			                 verdict.property == witnessProperty && verdict.material == witnessMaterial &&
 			                 verdict.fadeState == fadeState;
 			if (hit && !classifyProbe) {
@@ -2096,6 +2307,7 @@ namespace DCLF
 								kIneligibleNames[static_cast<std::size_t>(verdict.reason)], kIneligibleNames[static_cast<std::size_t>(reason)]);
 					}
 					reason = verdict.reason;  // the cache is what the frame would have used
+				} else if (denseWalk) {
 				} else if (classifyCache && CacheableVerdict(reason)) {
 					verdict = { true, reason, runtime.rendererData, witnessProperty, witnessMaterial, fadeState };
 				} else if (classifyCache) {
@@ -2106,8 +2318,13 @@ namespace DCLF
 			if (reason == Ineligible::None)
 				reason = ClassifyFrame(entry);
 			timer.Add(BuildPart::ClassifyFrame);
-			trackedEntry->candidateFrame = frame;
-			trackedEntry->candidateReason = reason;
+			if (denseWalk) {
+				referenceReasons[geometry] = reason;
+			} else {
+				trackedEntry->candidateFrame = frame;
+				trackedEntry->candidateReason = reason;
+				trackedEntry->classifyInputs = ClassifyInputsOf(*geometry);
+			}
 			++stats.ineligible[static_cast<std::size_t>(reason)];
 			a_bucket = reason;
 			if (reason == Ineligible::Technique)
@@ -2464,9 +2681,9 @@ namespace DCLF
 		std::string text;
 		if (auto& t = delta; t.walks) {
 			const double n = t.walks;
-			text = fmt::format("[DCLF] scene delta: {} walks ({} full), evaluated {:.0f}/frame (max {}; per-frame {:.0f}, of them {:.0f} kept by the light path and {:.0f} moved by it; pending {:.0f}, refresh {:.0f}, fade {:.0f}, geometry {:.0f}), settling {:.1f}, restored {:.0f}, {:.0f} live slots\n",
-				t.walks, t.full, t.evaluated / n, t.evaluatedMax, t.perFrame / n, t.kept / n, t.moved / n, t.pending / n, t.refresh / n, t.fade / n, t.geometryDirty / n,
-				t.settling / n, t.restored / n, t.live / n);
+			text = fmt::format("[DCLF] scene delta: {} walks ({} full), evaluated {:.0f}/frame (max {}; per-frame {:.0f}, of them {:.0f} kept by the light path and {:.0f} moved by it; pending {:.0f}, fade {:.1f}, property {:.1f}, node {:.1f}, sun entry node {:.1f}, geometry {:.1f}), settling {:.1f}, restored {:.0f}, {:.0f} live slots; events per frame: {:.1f} property, {:.1f} node; {:.2f} inputs re-read changed\n",
+				t.walks, t.full, t.evaluated / n, t.evaluatedMax, t.perFrame / n, t.kept / n, t.moved / n, t.pending / n, t.fade / n, t.property / n, t.node / n, t.roots / n,
+				t.geometryDirty / n, t.settling / n, t.restored / n, t.live / n, t.propertyEvents / n, t.nodeEvents / n, t.reread / n);
 			if (rootMotion.size() > (1u << 16))
 				rootMotion.clear();
 			t = {};
@@ -2694,6 +2911,11 @@ namespace DCLF
 						++stats.accumulatedWithoutRecord;
 						trackedEntry->candidateFrame = 0;
 						pendingEvaluation.push_back(geometry);
+					} else if (SceneDeltaEnabled() && (trackedEntry->candidateReason == Ineligible::Hidden || trackedEntry->candidateReason == Ineligible::Switch)) {
+						// The engine drew what the kept verdict calls hidden or unselected: shown since. A static's hidden
+						// bit has no event of its own, and this is the engine's cull saying so.
+						trackedEntry->candidateFrame = 0;
+						pendingEvaluation.push_back(geometry);
 					}
 				}
 				continue;
@@ -2742,8 +2964,8 @@ namespace DCLF
 			}
 			timer.Add(BuildPart::ClassifyStatic);
 			// Per frame whether or not the derivation was cached: hidden, part of an actor and fading are
-			// states of this frame, and the scene phase's verdict for them is up to
-			// kCandidateRefreshFrames old. An object that has just been hidden must lose its bindings now,
+			// states of this frame, and the scene phase's verdict for them is the last classification's
+			// (for a static, the last event's). An object that has just been hidden must lose its bindings now,
 			// or DCLF keeps drawing what the engine has stopped drawing.
 			if (reason == Ineligible::None)
 				reason = ClassifyFrame(*trackedEntry, accumulated);
@@ -3295,6 +3517,7 @@ namespace DCLF
 			ReleaseObjectSlot(it->second);
 			MoveBucket(it->second, Ineligible::Count);
 			UnlistFadeDependent(it->first, it->second);
+			UnlistDependents(it->first, it->second, true);
 			tracked.erase(it);
 		}
 	}
@@ -3338,6 +3561,7 @@ namespace DCLF
 		// The delta walk's `order` holds only what it evaluated; the reference is the whole tracked set.
 		if (SceneDeltaEnabled())
 			BuildFullOrder();
+		referenceReasons.clear();
 		denseWalk = true;
 		SceneWalk(true);
 		denseWalk = false;
@@ -3441,6 +3665,40 @@ namespace DCLF
 			}
 		}
 		walkParity.missing += static_cast<std::uint32_t>(denseIndex.size());
+		// The classifications themselves, records or not: a kept verdict the reference no longer reaches is stale
+		// whether or not it decides a record (a negative one leaves the object to the engine).
+		for (const auto& [geometry, entry] : tracked) {
+			if (entry.candidateFrame == 0)
+				continue;
+			const auto it = referenceReasons.find(geometry);
+			if (it == referenceReasons.end() || it->second == entry.candidateReason)
+				continue;
+			++walkParity.staleVerdicts;
+			if (walkParity.firstStale.empty())
+				walkParity.firstStale = fmt::format("'{}' kept {} ({} frames old, per-frame {}, traits {:X}) now {}", geometry->name.c_str() ? geometry->name.c_str() : "?",
+					kIneligibleNames[static_cast<std::size_t>(entry.candidateReason)], frame - entry.candidateFrame, entry.perFrame, PerFrameTraits(entry, *geometry),
+					kIneligibleNames[static_cast<std::size_t>(it->second)]);
+		}
+		// The traits: an entry a fresh classification would evaluate every frame, or on a heavier path, is one whose event
+		// was missed, even while its record still matches.
+		if (SceneDeltaEnabled()) {
+			ankerl::unordered_dense::map<const RE::NiAVObject*, bool> freshMotion;
+			for (auto& [geometry, entry] : tracked) {
+				if (entry.candidateFrame == 0)
+					continue;
+				const auto it = referenceReasons.find(geometry);
+				if (it == referenceReasons.end() || it->second != entry.candidateReason)
+					continue;
+				std::uint32_t traits = 0;
+				const auto [perFrame, light] = PerFrameOf(entry, *geometry, it->second, traits, &freshMotion);
+				if (!perFrame || (entry.perFrame && (!entry.lightTraits || (light && !(traits & ~entry.lightTraits)))))
+					continue;
+				++walkParity.staleTraits;
+				if (walkParity.firstStaleTraits.empty())
+					walkParity.firstStaleTraits = fmt::format("'{}' {} traits {:X} now {:X} ({} frames since classified)", geometry->name.c_str() ? geometry->name.c_str() : "?",
+						entry.perFrame ? "per-frame with" : "kept, no", entry.lightTraits, traits, frame - entry.candidateFrame);
+			}
+		}
 		if (!denseIndex.empty())
 			note("an object with no slot", denseIndex.begin()->first);
 		if (liveSeen != slots.liveObjects || slots.liveObjects + slots.objectFree.size() != slots.objects.size()) {
@@ -3472,10 +3730,12 @@ namespace DCLF
 			}
 		}
 		if (walkParity.checks % 5 == 0) {
-			const bool ok = !walkParity.differ && !walkParity.missing && !walkParity.extra;
-			logger::info("[DCLF] walk parity: {} checks, {} objects compared, {} differ, {} missing, {} extra ({} slots, {} free){}{}", walkParity.checks,
-				walkParity.objects, walkParity.differ, walkParity.missing, walkParity.extra, tables.objects.size(), tables.objectFree.size(),
-				ok ? " <- OK" : "; first: ", ok ? "" : walkParity.first);
+			const bool ok = !walkParity.differ && !walkParity.missing && !walkParity.extra && !walkParity.staleVerdicts && !walkParity.staleTraits;
+			logger::info("[DCLF] walk parity: {} checks, {} objects compared, {} differ, {} missing, {} extra, {} stale verdicts, {} stale traits ({} slots, {} free){}{}{}{}{}{}",
+				walkParity.checks, walkParity.objects, walkParity.differ, walkParity.missing, walkParity.extra, walkParity.staleVerdicts, walkParity.staleTraits,
+				tables.objects.size(), tables.objectFree.size(), ok ? " <- OK" : "; first: ", ok ? "" : walkParity.first,
+				walkParity.firstStale.empty() ? "" : "; first stale verdict: ", walkParity.firstStale,
+				walkParity.firstStaleTraits.empty() ? "" : "; first stale traits: ", walkParity.firstStaleTraits);
 			walkParity = {};
 		}
 	}
@@ -3487,7 +3747,7 @@ namespace DCLF
 		return enabled;
 	}
 
-	void SceneStore::InstallFadeWatch()
+	void SceneStore::InstallSceneEvents()
 	{
 		static bool installed = false;
 		if (installed || !SceneDeltaEnabled())
@@ -3497,7 +3757,12 @@ namespace DCLF
 		const auto onVisible = reinterpret_cast<const std::uintptr_t*>(vtable.address())[0x34];
 		stl::detour_thunk<FadeOnVisible>(onVisible);
 		stl::detour_thunk<FadeUpdate>(REL::Offset(0x147a160).address());
-		logger::info("[DCLF] fade watch installed (the scene delta's fade events): OnVisible at {:#x}", onVisible - REL::Module::get().base() + 0x140000000);
+		stl::detour_thunk<PropertySetFlags>(REL::Offset(0x147bee0).address());
+		stl::detour_thunk<PropertySetMaterial>(REL::Offset(0x147bff0).address());
+		stl::detour_thunk<PrependController>(REL::Offset(0xd268d0).address());
+		stl::detour_thunk<HavokNodeTransform>(REL::Offset(0xea55a0).address());
+		logger::info("[DCLF] scene events installed (fades, property flags and materials, Havok node transforms, controllers): OnVisible at {:#x}",
+			onVisible - REL::Module::get().base() + 0x140000000);
 	}
 
 	void SceneStore::BuildFullOrder()
@@ -3613,28 +3878,255 @@ namespace DCLF
 		// Only a reference's root: a multibound's bound is its shape's, and an actor's entry is never tested.
 		if (!a_root || !a_root->GetUserData())
 			return false;
-		auto& motion = rootMotion[a_root];
-		if (motion.frame && frame - motion.frame < Tracked::kCandidateRefreshFrames)
-			return motion.moves;
-		motion.frame = frame;
-		motion.moves = false;
+		// Kept until an event under the root forgets it (ScheduleRoot) or its last dependent leaves (UnlistDependents).
+		const auto [motion, inserted] = rootMotion.try_emplace(a_root, false);
+		if (inserted)
+			motion->second = RootMovesNow(a_root);
+		return motion->second;
+	}
+
+	bool SceneStore::RootMovesNow(const RE::NiAVObject* a_root)
+	{
+		if (!a_root || !a_root->GetUserData())
+			return false;
+		bool moves = false;
 		constexpr std::size_t kMaxNodes = 4096;
 		std::vector<const RE::NiAVObject*> stack{ a_root };
-		for (std::size_t visited = 0; !stack.empty() && visited < kMaxNodes && !motion.moves; ++visited) {
+		for (std::size_t visited = 0; !stack.empty() && visited < kMaxNodes && !moves; ++visited) {
 			auto* object = const_cast<RE::NiAVObject*>(stack.back());
 			stack.pop_back();
 			if (object->GetControllers() || NonFixedBody(*object)) {
-				motion.moves = true;
+				moves = true;
 			} else if (auto* geometry = object->AsGeometry()) {
 				// A skin's bound follows its bones, which walk parity found moving with no controller or body in sight.
-				motion.moves = geometry->GetGeometryRuntimeData().skinInstance != nullptr;
+				moves = geometry->GetGeometryRuntimeData().skinInstance != nullptr;
 			} else if (auto* node = object->AsNode()) {
 				for (auto& child : node->GetChildren())
 					if (child)
 						stack.push_back(child.get());
 			}
 		}
-		return motion.moves;
+		return moves;
+	}
+
+	std::uint64_t SceneStore::ClassifyInputsOf(const RE::BSGeometry& a_geometry)
+	{
+		// What ClassifyStatic reads: the renderer data and skin, the property, its flags, material and fade state, the
+		// material alpha, and the alpha property.
+		std::uint64_t hash = 0xcbf29ce484222325ull;
+		auto mix = [&hash](std::uint64_t a_value) { hash = (hash ^ a_value) * 0x100000001b3ull; };
+		const auto& data = a_geometry.GetGeometryRuntimeData();
+		mix(reinterpret_cast<std::uintptr_t>(data.rendererData));
+		mix(reinterpret_cast<std::uintptr_t>(data.skinInstance.get()));
+		const auto* property = data.shaderProperty.get();
+		mix(reinterpret_cast<std::uintptr_t>(property));
+		if (property) {
+			mix(property->flags.underlying());
+			mix(reinterpret_cast<std::uintptr_t>(property->material));
+			mix(FadeStateOf(const_cast<RE::BSShaderProperty*>(property)));
+			if (const auto* lighting = netimmerse_cast<const RE::BSLightingShaderProperty*>(property); lighting && property->material)
+				mix(std::bit_cast<std::uint32_t>(static_cast<const RE::BSLightingShaderMaterialBase*>(property->material)->materialAlpha));
+		}
+		if (const auto* alpha = data.alphaProperty.get()) {
+			mix(reinterpret_cast<std::uintptr_t>(alpha));
+			mix((std::uint64_t(alpha->alphaFlags) << 8) | alpha->alphaThreshold);
+		}
+		return hash;
+	}
+
+	void SceneStore::ListDependents(RE::BSGeometry* a_geometry, Tracked& a_tracked)
+	{
+		// The properties as this evaluation read them: an event on either classifies the entry again. A property swapped
+		// without an event is taken up at the entry's next evaluation, and walk parity is the alarm for one that is not.
+		const auto& data = a_geometry->GetGeometryRuntimeData();
+		const void* property = data.shaderProperty.get();
+		const void* alpha = data.alphaProperty.get();
+		if (property != a_tracked.listedProperty) {
+			if (a_tracked.listedProperty)
+				Unlist(propertyDependents, a_tracked.listedProperty, a_geometry);
+			if (property)
+				propertyDependents[property].push_back(a_geometry);
+			a_tracked.listedProperty = property;
+		}
+		if (alpha != a_tracked.listedAlpha) {
+			if (a_tracked.listedAlpha)
+				Unlist(propertyDependents, a_tracked.listedAlpha, a_geometry);
+			if (alpha)
+				propertyDependents[alpha].push_back(a_geometry);
+			a_tracked.listedAlpha = alpha;
+		}
+	}
+
+	void SceneStore::UnlistDependents(RE::BSGeometry* a_geometry, Tracked& a_tracked, bool a_root)
+	{
+		if (a_tracked.listedProperty)
+			Unlist(propertyDependents, a_tracked.listedProperty, a_geometry);
+		if (a_tracked.listedAlpha)
+			Unlist(propertyDependents, a_tracked.listedAlpha, a_geometry);
+		a_tracked.listedProperty = nullptr;
+		a_tracked.listedAlpha = nullptr;
+		if (a_root && a_tracked.listedRoot) {
+			MarkSunEntryDirty(a_tracked.listedRoot);
+			// The others under it: its bound takes this one in no more. The node is a key here; it may be gone.
+			if (Unlist(rootDependents, a_tracked.listedRoot, a_geometry))
+				dirtyRoots.push_back(a_tracked.listedRoot);
+			else
+				rootMotion.erase(a_tracked.listedRoot);
+			a_tracked.listedRoot = nullptr;
+		}
+	}
+
+	void SceneStore::DropSunCandidates()
+	{
+		sunCandidateSet.clear();
+		sunEntriesDirty.clear();
+		sunCandidates.reset();
+		++sunCandidatesGeneration;
+	}
+
+	bool SceneStore::SunEntryAllows(const Tracked& a_tracked, bool a_switchNodes)
+	{
+		// A table object: its shadow is the shadow epoch's (the claims decide, per frame), or the caster rule rejects it.
+		if (a_tracked.slot != kNoObjectSlot)
+			return true;
+		if (a_tracked.candidateFrame == 0)
+			return false;
+		switch (a_tracked.candidateReason) {
+		case Ineligible::NotLightingShader:  // no class but Lighting casts into the cascades (CS_DCLF_CASCADE_PROBE)
+		case Ineligible::Hidden:             // the cull skips app-culled nodes
+		case Ineligible::AlphaBlend:         // the caster rule: no pass for an alpha-blended property
+		case Ineligible::Fading:             // ... nor for a fade below one
+			return true;
+		case Ineligible::Switch:  // an unselected child: the switch node culls only the selected one
+			return a_switchNodes;
+		default:
+			return false;
+		}
+	}
+
+	void SceneStore::UpdateSunCandidates(bool a_full)
+	{
+		bool changed = a_full;
+		if (a_full) {
+			sunCandidateSet.clear();
+			sunEntriesDirty.clear();
+			for (const auto& [root, dependents] : rootDependents)
+				sunEntriesDirty.push_back(root);
+		}
+		if (!sunEntriesDirty.empty()) {
+			std::sort(sunEntriesDirty.begin(), sunEntriesDirty.end());
+			sunEntriesDirty.erase(std::unique(sunEntriesDirty.begin(), sunEntriesDirty.end()), sunEntriesDirty.end());
+			const bool switchNodes = SwitchNodesEnabled();
+			for (const auto* root : sunEntriesDirty) {
+				bool candidate = false;
+				if (const auto it = rootDependents.find(root); it != rootDependents.end() && !it->second.empty()) {
+					candidate = true;
+					for (auto* geometry : it->second) {
+						const auto entry = tracked.find(geometry);
+						if (entry == tracked.end() || !SunEntryAllows(entry->second, switchNodes)) {
+							candidate = false;
+							break;
+						}
+					}
+				}
+				if (candidate ? sunCandidateSet.insert(root).second : sunCandidateSet.erase(root) != 0)
+					changed = true;
+			}
+			sunEntriesDirty.clear();
+		}
+		if (changed) {
+			++sunCandidatesGeneration;
+			++stats.sunCandidateChanges;
+			return;
+		}
+		if (sunCandidatesBuilt == sunCandidatesGeneration && sunCandidates)
+			return;
+		// A walk that changed nothing: the snapshot for the generation now in force.
+		auto snapshot = std::make_shared<SunCandidates>();
+		snapshot->generation = sunCandidatesGeneration;
+		snapshot->entries.reserve(sunCandidateSet.size());
+		std::uint32_t index = 0;
+		for (const auto* root : sunCandidateSet) {
+			snapshot->entries.emplace(root, index);
+			if (const auto it = rootDependents.find(root); it != rootDependents.end())
+				for (const auto* geometry : it->second)
+					if (snapshot->geometries.emplace(geometry, static_cast<std::uint32_t>(snapshot->geometryEntry.size())).second)
+						snapshot->geometryEntry.push_back(index);
+			++index;
+		}
+		sunCandidates = std::move(snapshot);
+		sunCandidatesBuilt = sunCandidatesGeneration;
+		++stats.sunCandidateSnapshots;
+	}
+
+	void SceneStore::Reclassify(RE::BSGeometry* a_geometry, Tracked& a_tracked)
+	{
+		a_tracked.candidateFrame = 0;
+		Schedule(a_geometry, a_tracked);
+	}
+
+	bool SceneStore::PlacementMatters(const Tracked& a_tracked)
+	{
+		const auto reason = a_tracked.candidateReason;
+		return a_tracked.slot != kNoObjectSlot || a_tracked.candidateFrame == 0 || reason == Ineligible::None || reason == Ineligible::Hidden ||
+		       reason == Ineligible::Switch || reason == Ineligible::Actor;
+	}
+
+	void SceneStore::ScheduleRoot(const RE::NiAVObject* a_root)
+	{
+		rootMotion.erase(a_root);
+		const auto it = rootDependents.find(a_root);
+		if (it == rootDependents.end())
+			return;
+		for (auto* geometry : it->second)
+			if (const auto entry = tracked.find(geometry); entry != tracked.end() && PlacementMatters(entry->second))
+				Reclassify(entry->first, entry->second);
+	}
+
+	void SceneStore::ApplyNodeEvent(RE::NiAVObject* a_node)
+	{
+		// Only the scene the tables cover: a node outside it (a subtree still loading, the sky) is left alone, and not
+		// walked, as AddSubtree does.
+		if (!a_node || !FindCategoryNode(a_node, nullptr))
+			return;
+		// An actor's entries are evaluated every frame anyway, and its sun entry is never tested.
+		if (const auto* reference = a_node->GetUserData(); reference && reference->GetFormType() == RE::FormType::ActorCharacter)
+			return;
+		// Written every frame already, placement included: a record written in full, or one the light path moves.
+		auto placedEveryFrame = [](const Tracked& a_tracked) {
+			return a_tracked.perFrame && (!a_tracked.lightTraits || (a_tracked.lightTraits & (kTraitMoves | kTraitRootMoves)));
+		};
+		// Every sun entry node above it: its bound takes this node in, and its motion may have changed. A root already
+		// known to move has its dependents on the light path's placement.
+		for (const RE::NiAVObject* object = a_node; object; object = object->parent) {
+			const auto dependents = rootDependents.find(object);
+			if (dependents == rootDependents.end())
+				continue;
+			if (const auto motion = rootMotion.find(object); motion != rootMotion.end() && motion->second) {
+				bool placed = true;
+				for (auto* geometry : dependents->second)
+					if (const auto entry = tracked.find(geometry); entry != tracked.end() && !placedEveryFrame(entry->second) && entry->second.slot != kNoObjectSlot)
+						placed = false;
+				if (placed)
+					continue;
+			}
+			ScheduleRoot(object);
+		}
+		// Every entry below it: its placement, and its traits (a body or controller it did not have when classified).
+		constexpr std::size_t kMaxNodes = 4096;
+		std::vector<RE::NiAVObject*> stack{ a_node };
+		for (std::size_t visited = 0; !stack.empty() && visited < kMaxNodes; ++visited) {
+			auto* object = stack.back();
+			stack.pop_back();
+			if (auto* geometry = object->AsGeometry()) {
+				if (const auto entry = tracked.find(geometry); entry != tracked.end() && !placedEveryFrame(entry->second) && PlacementMatters(entry->second))
+					Reclassify(entry->first, entry->second);
+			} else if (auto* node = object->AsNode()) {
+				for (auto& child : node->GetChildren())
+					if (child)
+						stack.push_back(child.get());
+			}
+		}
 	}
 
 	void SceneStore::MoveBucket(Tracked& a_tracked, Ineligible a_bucket)
@@ -3707,6 +4199,38 @@ namespace DCLF
 		return traits;
 	}
 
+	std::pair<bool, std::uint32_t> SceneStore::PerFrameOf(const Tracked& a_tracked, const RE::BSGeometry& a_geometry, Ineligible a_reason, std::uint32_t& a_traits,
+		ankerl::unordered_dense::map<const RE::NiAVObject*, bool>* a_freshMotion)
+	{
+		const bool mayRecord = a_tracked.parentReason == Ineligible::Switch || a_reason == Ineligible::None || DeferredToAccumulate(a_reason) ||
+		                       ShadowOnlyCaster(a_reason, const_cast<RE::BSGeometry&>(a_geometry));
+		std::uint32_t traits = PerFrameTraits(a_tracked, a_geometry);
+		if (mayRecord && !(traits & (kTraitFace | kTraitActor)) && a_tracked.sunEntryNode) {
+			bool moves = false;
+			if (a_freshMotion) {
+				const auto [motion, inserted] = a_freshMotion->try_emplace(a_tracked.sunEntryNode, false);
+				if (inserted)
+					motion->second = RootMovesNow(a_tracked.sunEntryNode);
+				moves = motion->second;
+			} else {
+				moves = RootMoves(a_tracked.sunEntryNode);
+			}
+			if (moves)
+				traits |= kTraitRootMoves;
+		}
+		a_traits = traits;
+		// Per frame when a frame can change its record: its verdict lets it have one (or it is under a switch), and its
+		// inputs change every frame. A movable slot's chain is re-read every frame whatever its verdict, as the design has
+		// it: an actor's equipment is shown, hidden and swapped with no event of its own (walk parity caught a shield and a
+		// chopping axe left hidden), and a visibility controller hides and shows its node.
+		const bool frameVerdict = a_reason == Ineligible::Hidden || a_reason == Ineligible::Switch || a_reason == Ineligible::Actor;
+		const bool perFrame = a_tracked.faceShape || (mayRecord && traits) || (traits & kTraitActor) || (frameVerdict && (traits & kTraitMoves));
+		// The light path takes only a record's placement, palette, switch selection or shading; an entry it cannot have a
+		// record for is written in full, which re-reads its verdict.
+		const std::uint32_t light = perFrame && mayRecord && !(traits & ~(kTraitSwitch | kTraitMoves | kTraitRootMoves | kTraitAnimatedShading | kTraitSkin)) ? traits : 0u;
+		return { perFrame, light };
+	}
+
 	void SceneStore::RestoreAccumulated()
 	{
 		// What BuildAccumulatePhase (and RefreshFrameConstants after it) wrote into a record is this frame's only:
@@ -3737,8 +4261,7 @@ namespace DCLF
 			a_timer.Add(BuildPart::LoopTail);
 			// A static that only moves or follows a switch, whose classification stands: what the full walk would take
 			// again is the switch's verdict (WriteObject's cached branch) and the placement.
-			if (a_first == 0 && entry.lightTraits && entry.perFrame && entry.fullWalk != walkSerial && entry.candidateFrame != 0 &&
-				frame - entry.candidateFrame < Tracked::kCandidateRefreshFrames) {
+			if (a_first == 0 && entry.lightTraits && entry.perFrame && entry.fullWalk != walkSerial && entry.candidateFrame != 0) {
 				const bool recorded = entry.slot != kNoObjectSlot && entry.objectStamp == objectStamp;
 				bool kept = true;
 				if (entry.lightTraits & kTraitSwitch) {
@@ -3762,32 +4285,32 @@ namespace DCLF
 					if (recorded && (entry.lightTraits & (kTraitMoves | kTraitRootMoves | kTraitSkin))) {
 						MoveObject(geometry, entry);
 					} else {
+						entry.movedWalk = walkSerial;  // not written in full: a later round may still write it
 						++delta.kept;
 					}
 					continue;
 				}
 			}
 			const ShadowInputs shadowBefore = ShadowInputsOf(entry.slot);
+			const bool hadSlot = entry.slot != kNoObjectSlot;
+			const Ineligible reasonBefore = entry.candidateReason;
 			Ineligible bucket = Ineligible::Count;
 			const bool written = WriteObject(geometry, entry, a_timer, a_result, true, bucket);
 			MoveBucket(entry, bucket);
 			if (!written && entry.slot != kNoObjectSlot)
 				ReleaseObjectSlot(entry);
+			// What its sun entry's candidacy reads (SunEntryAllows).
+			if (hadSlot != (entry.slot != kNoObjectSlot) || reasonBefore != entry.candidateReason)
+				MarkSunEntryDirty(entry.sunEntryNode);
 			shadowSetsDirty |= !(ShadowInputsOf(written ? entry.slot : kNoObjectSlot) == shadowBefore);
-			// Classified now: a new entry, or its kCandidateRefreshFrames are up. A kept entry is queued for its next
-			// classification, which is when the full walk would take it again.
+			ListDependents(geometry, entry);
+			// Classified now: a new entry, or an event took its classification again.
 			if (entry.candidateFrame == frame) {
 				// Per frame only when a frame can change its record: a face shape (classified every frame), an entry
 				// under a switch, or one whose verdict lets it have a record, with inputs that change every frame. An
 				// entry left out by its verdict is taken again when the verdict is due, like any other.
-				const Ineligible reason = entry.candidateReason;
-				const bool mayRecord = entry.parentReason == Ineligible::Switch || reason == Ineligible::None || DeferredToAccumulate(reason) ||
-				                       ShadowOnlyCaster(reason, *geometry);
-				std::uint32_t traits = PerFrameTraits(entry, *geometry);
-				if (mayRecord && !(traits & (kTraitFace | kTraitActor)) && RootMoves(entry.sunEntryNode))
-					traits |= kTraitRootMoves;
-				entry.perFrame = entry.faceShape || (mayRecord && traits);
-				entry.lightTraits = entry.perFrame && !(traits & ~(kTraitSwitch | kTraitMoves | kTraitRootMoves | kTraitAnimatedShading | kTraitSkin)) ? traits : 0u;
+				std::uint32_t traits = 0;
+				std::tie(entry.perFrame, entry.lightTraits) = PerFrameOf(entry, *geometry, entry.candidateReason, traits);
 				entry.switchNode = nullptr;
 				entry.switchChild = nullptr;
 				if (entry.lightTraits & kTraitSwitch) {
@@ -3804,8 +4327,6 @@ namespace DCLF
 					if (switches != 1)
 						entry.switchNode = nullptr;
 				}
-				if (!entry.perFrame)
-					refreshQueue.emplace_back(geometry, frame);
 			}
 			if (entry.perFrame && !entry.perFrameListed) {
 				entry.perFrameListed = true;
@@ -3844,10 +4365,13 @@ namespace DCLF
 			fullEvaluation = false;
 			++delta.full;
 			perFrameSet.clear();
-			refreshQueue.clear();
 			pendingEvaluation.clear();
 			fadeChanged.clear();
 			fadeDependents.clear();
+			propertyChanged.clear();
+			nodeChanged.clear();
+			dirtyRoots.clear();
+			propertyDependents.clear();
 			accumulatePatched.clear();
 			rootMotion.clear();
 			buckets = {};
@@ -3855,6 +4379,8 @@ namespace DCLF
 				entry.perFrameListed = false;
 				entry.bucket = Tracked::kNoBucket;
 				entry.fadeNode = nullptr;
+				entry.listedProperty = nullptr;
+				entry.listedAlpha = nullptr;
 			}
 			BuildFullOrder();
 		} else {
@@ -3891,19 +4417,34 @@ namespace DCLF
 					continue;
 				for (auto* geometry : dependents->second)
 					if (const auto it = tracked.find(geometry); it != tracked.end())
-						Schedule(it->first, it->second);
+						Reclassify(it->first, it->second);
 			}
 			fadeChanged.clear();
 			count(delta.fade);
-			while (!refreshQueue.empty() && frame - refreshQueue.front().second >= Tracked::kCandidateRefreshFrames) {
-				const auto [geometry, classified] = refreshQueue.front();
-				refreshQueue.pop_front();
-				const auto it = tracked.find(geometry);
-				if (it == tracked.end() || it->second.candidateFrame != classified || it->second.perFrame)
-					continue;  // gone, or classified since (queued again then)
-				Schedule(it->first, it->second);
+			delta.propertyEvents += propertyChanged.size();
+			delta.nodeEvents += nodeChanged.size();
+			for (const void* key : propertyChanged) {
+				const auto dependents = propertyDependents.find(key);
+				if (dependents == propertyDependents.end())
+					continue;
+				for (auto* geometry : dependents->second)
+					if (const auto it = tracked.find(geometry); it != tracked.end())
+						Reclassify(it->first, it->second);
 			}
-			count(delta.refresh);
+			propertyChanged.clear();
+			count(delta.property);
+			std::sort(nodeChanged.begin(), nodeChanged.end(), [](const auto& a_left, const auto& a_right) { return a_left.get() < a_right.get(); });
+			nodeChanged.erase(std::unique(nodeChanged.begin(), nodeChanged.end()), nodeChanged.end());
+			for (auto& node : nodeChanged)
+				ApplyNodeEvent(node.get());
+			nodeChanged.clear();
+			count(delta.node);
+			std::sort(dirtyRoots.begin(), dirtyRoots.end());
+			dirtyRoots.erase(std::unique(dirtyRoots.begin(), dirtyRoots.end()), dirtyRoots.end());
+			for (const auto* root : dirtyRoots)
+				ScheduleRoot(root);
+			dirtyRoots.clear();
+			count(delta.roots);
 		}
 		EvaluateRound(timer, result, 0);
 		if (!shadowSetsDirty) {
@@ -3914,6 +4455,7 @@ namespace DCLF
 		FinishDeltaWalk(timer, result);
 		if (full)
 			SweepObjectSlots();
+		UpdateSunCandidates(full);
 		EndFaceWalk();
 		stats.ineligible = buckets;
 		delta.evaluated += order.size();

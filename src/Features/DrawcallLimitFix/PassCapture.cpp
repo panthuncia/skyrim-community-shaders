@@ -249,10 +249,21 @@ namespace DCLF
 		return false;
 	}
 
+	namespace
+	{
+		thread_local std::uint32_t passesOnThisThread = 0;
+	}
+
+	std::uint32_t PassCapture::PassesOnThisThread()
+	{
+		return passesOnThisThread;
+	}
+
 	struct PassCapture::Hook
 	{
 		static void thunk(RE::BSBatchRenderer* a_this, RE::BSRenderPass* a_pass, std::uint32_t a_techniqueID)
 		{
+			++passesOnThisThread;
 			auto& capture = PassCapture::Get();
 			// [TEMP] CS_DCLF_VOLUMETRIC_PROBE: every Utility registration, and what the engine's took.
 			const bool probe = VolumetricProbe::Enabled() && a_pass && a_pass->shader && a_pass->shader->shaderType.get() == RE::BSShader::Type::Utility;
@@ -358,6 +369,7 @@ namespace DCLF
 	{
 		static void thunk(RE::BSBatchRenderer* a_batch, RE::BSRenderPass* a_pass, std::uint32_t a_group, std::uint32_t a_arg)
 		{
+			++passesOnThisThread;
 			auto& capture = PassCapture::Get();
 			if (capture.WithholdAtGroup(a_batch, a_pass, capture.volumetricWithheld))
 				return;
@@ -377,6 +389,7 @@ namespace DCLF
 	{
 		static void thunk(RE::BSBatchRenderer* a_batch, RE::BSRenderPass* a_pass, std::uint32_t a_group, std::uint32_t a_arg)
 		{
+			++passesOnThisThread;
 			auto& capture = PassCapture::Get();
 			if (capture.WithholdAtGroup(a_batch, a_pass, capture.directWithheld))
 				return;

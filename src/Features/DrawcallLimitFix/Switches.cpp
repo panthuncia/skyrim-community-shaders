@@ -122,6 +122,7 @@ namespace DCLF
 			{ "CS_DCLF_HYBRID", offUnlessOne },
 			{ "CS_DCLF_SHADOWS", offUnlessOne },
 			{ "CS_DCLF_SUN_SKIP", offUnlessOne },
+			{ "CS_DCLF_SUN_EXCLUDE", offUnlessOne },  // `probe` runs it dry
 			{ "CS_DCLF_SKINNED", offUnlessOne },
 			{ "CS_DCLF_SKIN_PARTITIONS", offUnlessOne },
 			{ "CS_DCLF_ACTORS", offUnlessOne },

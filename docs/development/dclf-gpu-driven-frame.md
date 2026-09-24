@@ -22,7 +22,7 @@ Riverwood, DCLF on (about 6,200 table objects, 10,000 tracked geometries):
 | Main camera cull (`DrawWorld_BuildSceneLists`, list accumulation) | engine jobs; render thread waits at `Finish` | object | about 1.0 ms of job CPU; the main thread waits 0.38 ms (0 with DCLF off) |
 | Main camera registration (`GetRenderPasses` per visible object) | engine jobs during the shadow render (`FUN_1414cbff0`) | object | 0.81 ms of job CPU (0.32 with DCLF off: `PassCapture`'s hook); DCLF then withholds the passes |
 | Sun: full-frustum cull | jobs, render thread waits | object | 0.04 ms |
-| Sun: `Accumulate` (cascade culls, then registration or mask writes) | render thread | cascade × object | 0.47 ms with M1 (0.69 ms without) |
+| Sun: `Accumulate` (cascade culls, then registration or mask writes) | render thread | cascade × object | 0.10 ms with the entry exclusion: what is left is the actors and the entries with a native caster (0.59 with M1 alone, 0.69 without) |
 | Point and spot lights: `Accumulate` | render thread (`CalculateActiveShadowCasterLights`) | light × object | not measured (interiors) |
 | Focus view, first person, water reflections, cubemaps | render thread / jobs | view × object | native, not measured |
 | DCLF scene walk | worker | object | 1.2-1.6 ms (worker) |
@@ -225,6 +225,68 @@ What this says:
 
     Both disappear if DCLF's objects leave the engine's walks.
 
+## Baseline, 2026-09-24: per view, after the delta walk
+
+Riverwood, steady state, 20 s Tracy captures (about 1,210 frames), full featureset, the event-driven tables
+([dclf-event-driven-tables.md](./dclf-event-driven-tables.md), Phase 3) and the sun on M1. The run is still
+vsync-bound at 16.7 ms a frame. Three captures, one per SkyrimEngineTelemetry zone set:
+
+| Zone set | Zones per frame | What it is for |
+| --- | --- | --- |
+| Full (992 hooks) | about 185,000 | where the per-object calls happen; its times are inflated |
+| Coarse (the 103 per-object zones off) | about 6,400 | the costs below |
+| Medium (coarse, plus the per-object register and the deferred-cull drain) | about 12,700 | splitting a view's cull from its registration |
+
+The full set inflates culling about 12x: the sun's `Accumulate` reads 4.65 ms under it against 0.39 ms coarse. That
+comes from the per-call zones (about 35 ns each, the hook stub plus Tracy), not from BasicTelemetry, whose capture
+and sampler were off.
+
+**Zone names versus addresses.** Several tentative names in the zones file are wrong. The categories here go by
+address:
+
+| Zone name | Address | What it is |
+| --- | --- | --- |
+| `BSCullingProcess::Process` | `0x1414bf320` | the per-list driver: a cull, then the registration below |
+| `BSCullingProcess::AccumulateVisible` | `0x140e28f70` | `NiCullingProcess::Process`, the traversal: culling |
+| `BSCullingProcess::ProcessJob` | `0x140e28af0` | drains deferred cull work (`FUN_140e28d20`, about 1 us), then registers every visible object: accumulation |
+| `BSShaderAccumulator::BuildJob` | `0x1414b2140` | one object's registration into an accumulator |
+| `BSShadowDirectionalLight::UpdateShadowMap` | `0x141511f30` | the sun's full-frustum cull |
+| `BSAccumProcess::RegisterSceneList` / `...Job` | `0x1414bf730` / `0x1414bf7a0` | the full-frustum cull per scene list / the primary's registration job per scene list (queued by `Main::PreparePlayerView`, `0x1414cbff0`) |
+| `ListAccumulationJob`, `FirstListAccumulationJob` | `0x1414cc3f0`, `0x1414cc260` | the primary's cull, one job per scene list. `NiCamera::CalculateAndDrawShadowCasterLights` queues them with the main camera, runs the sun while they run, and waits in `JobList::Finish` |
+
+**Main thread, ms per frame** (coarse; medium in brackets where it differs):
+
+| View | Cull | Registration | Waiting on jobs | Drawing | Other | Total |
+| --- | --- | --- | --- | --- | --- | --- |
+| Primary | - | - | 0.44 (0.52) | 2.36 | 0.29 | 3.09 |
+| Sun shadow (cascade culls in `Accumulate`, full-frustum cull, render) | 0.27 | 0.12 | 0.03 | 0.03 | 0.10 | 0.55 |
+| Reflection: water cube map, 2 faces a frame | 0.06 | 0.03 | - | 0.35 | 0.08 | 0.52 |
+| Precipitation mask (`Precipitation::SetupMask`, 6 lists) | 0.15 | 0.22 | - | - | - | 0.37 |
+| First person and small views | - | 0.02 | - | - | - | 0.02 |
+| Shadow masks, local map, water wrapper | - | - | - | 0.01 | 0.06 | 0.07 |
+
+The rest of `RenderPlayerView` (DCLF's epochs, image space, the other passes) is 2.5 ms. Per frame, the sun's
+`Accumulate` is 0.37 ms at the median and 0.54 at p95; the cube-map reflection is 0.50 and 0.70.
+
+**Job threads, ms of CPU per frame, summed:**
+
+| View | Cull | Registration |
+| --- | --- | --- |
+| Primary | 1.10 (1.04 in the list accumulation jobs, 0.06 in `DrawWorld_BuildSceneLists`) | 0.89 (4,743 objects a frame) |
+| Sun shadow (full-frustum cull jobs) | 0.09 | - |
+
+What this says:
+
+-   **Culling and registration on the main thread total about 0.9 ms a frame.** That is 0.39 for the sun, 0.37 for
+    the precipitation mask, 0.09 for the reflection and 0.02 for the small views. The sun's cull is still the largest
+    single piece, and the precipitation mask is almost as large, with registration as its bigger half.
+-   **The primary costs the main thread only its wait**: 0.44 ms, for the registration jobs. Its 2 ms of cull and
+    registration run on job threads, the cull overlapping the sun.
+-   **Reflections are mostly drawing** (0.35 of 0.52 ms): the engine redraws the cube map's faces through its
+    own batch renderer.
+-   **Compared with Phase 0,** the primary's wait is 0.44 ms against 0.38, and its registration 0.89 ms against 0.81.
+    The sun's cascade culls are 0.27 ms against 0.28.
+
 ## Reverse-engineering answers
 
 All from AE 1.6.1170. Reader scans were run over the decrypted `.text`: Ghidra's memory, dumped and disassembled
@@ -310,5 +372,9 @@ skip a room, portal or multibound node, because the room state feeds Light Limit
 
 ## Relation to stage 3
 
-M1 (registration-free sun accumulation) stays as the bridge until Phase 1 lands. M2, the CPU replica of the sun's
-culls, is superseded: excluded objects need no engine sun bits, and the residue keeps the engine's own cull.
+The sun is the first view DCLF's objects have left ([drawcall-limit-fix.md](./drawcall-limit-fix.md), "The sun's
+cascades without DCLF's objects"): the entries whose content DCLF draws entirely are removed from the cascade culls'
+input, and DCLF writes their sun bits at the main registration, from the engine's own cascade planes. That is a CPU
+test at a point the engine already visits, not the replica M2 would have been. It lasts until the main pass stops
+registering DCLF's objects (Phase 1), when the bits move into DCLF's derived descriptors. M1 remains for the entries
+that stay in the culls.

@@ -283,7 +283,7 @@ void DrawcallLimitFix::PostPostLoad()
 		return;
 	}
 	DCLF::SceneTracker::Get().Install();
-	DCLF::SceneStore::InstallFadeWatch();
+	DCLF::SceneStore::InstallSceneEvents();
 	// Capture at registration, the foundation for static ownership: withholding a pass from the batch
 	// renderer removes the very data the tables are built from today, so the capture has to prove itself
 	// first (it claims nothing and withholds nothing yet).
@@ -1286,6 +1286,28 @@ void DrawcallLimitFix::Hooks::BSShaderAccumulator_FinishAccumulating::thunk(RE::
 			}
 		}
 	}
+	// [TEMP] CS_DCLF_OCCLUSION_PROBE: every RenderDepth (0xC) view the engine finishes - which accumulator, target,
+	// viewport and camera - to find the precipitation and Skylighting occlusion views.
+	if (static const bool occlusionProbe = DCLF::SwitchEnabled("CS_DCLF_OCCLUSION_PROBE"); occlusionProbe) {
+		static std::uint32_t calls = 0;
+		const auto probeMode = static_cast<std::uint32_t>(a_accumulator->GetRuntimeData().renderMode);
+		auto* sky = globals::game::sky;
+		auto* precip = sky ? sky->precip : nullptr;
+		const bool isPrecip = precip && precip->occlusionData.accumulator.get() == reinterpret_cast<RE::BSShaderAccumulator*>(a_accumulator);
+		if (isPrecip && ((calls++ % 900) < 3)) {
+			auto& shadow = globals::game::shadowState->GetRuntimeData();
+			const auto& vp = shadow.viewPort;
+			const auto cameraData = shadow.cameraData.getEye();
+			float m[16];
+			std::memcpy(m, &cameraData.viewProjMat, sizeof(m));
+			logger::info("[DCLF][TEMP] occlusion probe: mode {:#x} accumulator {} (precipitation's: {}), flags {:#x}, target {} slice {}, viewport ({} {}) {}x{} depth [{} {}], "
+						 "posAdjust ({:.0f} {:.0f} {:.0f}), viewProj row0 ({:.5f} {:.5f} {:.5f} {:.5f}) row2 ({:.5f} {:.5f} {:.5f} {:.5f}), batch {}",
+				probeMode, fmt::ptr(a_accumulator), isPrecip, a_renderFlags, static_cast<std::uint32_t>(shadow.depthStencil), shadow.depthStencilSlice, vp.TopLeftX, vp.TopLeftY,
+				vp.Width, vp.Height, vp.MinDepth, vp.MaxDepth, shadow.posAdjust.getEye().x, shadow.posAdjust.getEye().y, shadow.posAdjust.getEye().z,
+				m[0], m[1], m[2], m[3], m[8], m[9], m[10], m[11],
+				fmt::ptr(a_accumulator->GetRuntimeData().batchRenderer));
+		}
+	}
 	if (!globals::features::drawcallLimitFix.Running())
 		return;
 	const auto mode = static_cast<std::uint32_t>(a_accumulator->GetRuntimeData().renderMode);
@@ -1677,6 +1699,11 @@ void DrawcallLimitFix::DrawSettings()
 		ImGui::Checkbox("Skip the engine's sun shadow culling and registration (CS_DCLF_SUN_SKIP)", &toggles.skipSunAccumulation);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::Text("The engine stops building sun shadow passes for the casters DCLF draws; it still sets their shadow bits for the main pass.");
+		ImGui::BeginDisabled(!toggles.skipSunAccumulation);
+		ImGui::Checkbox("Take DCLF's objects out of the engine's sun culls (CS_DCLF_SUN_EXCLUDE)", &toggles.excludeSunEntries);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("The sun's cascade culls skip every reference whose shadows DCLF draws entirely; DCLF sets those objects' sun shadow bits for the main pass.");
+		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 		ImGui::SeparatorText("Diagnostics");
@@ -1687,10 +1714,10 @@ void DrawcallLimitFix::DrawSettings()
 		ImGui::TreePop();
 	}
 	if (ImGui::TreeNodeEx("This frame", ImGuiTreeNodeFlags_DefaultOpen)) {
-		ImGui::Text("Active: hybrid %d, ownership %d, cull %u%s, skinned %d, trees %d, decals %d, projected %d, terrain %d, switch nodes %d, skin partitions %d, actors %d, fading %d, LOD cross-fade %d, shadows %d, shadow ownership %d, skip sun accumulation %d",
+		ImGui::Text("Active: hybrid %d, ownership %d, cull %u%s, skinned %d, trees %d, decals %d, projected %d, terrain %d, switch nodes %d, skin partitions %d, actors %d, fading %d, LOD cross-fade %d, shadows %d, shadow ownership %d, skip sun accumulation %d, exclude sun entries %d",
 			active.hybrid, active.ownership, active.cullMode, active.cullTracked ? " (tracked)" : "", active.skinned, active.trees, active.decals,
 			active.projectedUv, active.mtLand, active.switchNodes, active.skinPartitions, active.actors, active.fading, active.lodCrossfade, active.shadows,
-			active.shadowOwnership, active.skipSunAccumulation);
+			active.shadowOwnership, active.skipSunAccumulation, active.excludeSunEntries);
 		ImGui::Text("Tracked geometry: %u (under %u category nodes)", stats.tracked, stats.categoryNodes);
 		ImGui::Text("Objects this frame: %u (%u the engine's culling also kept), geometries: %u, pipelines: %u", stats.objects, stats.nativeVisible, stats.geometries, stats.pipelines);
 		for (std::size_t i = 1; i < stats.ineligible.size(); ++i) {

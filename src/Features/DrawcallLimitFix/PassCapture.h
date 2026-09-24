@@ -143,6 +143,12 @@ namespace DCLF
 		 */
 		static bool VolumetricClaimsAvailable();
 		/**
+		 * @brief How many passes this thread has handed to a batch renderer so far (RegisterPass, and the shadow
+		 * modes' direct group insertions), withheld or not: the difference across a registration call is how many
+		 * passes it built. SunAccumulation's probe reads it.
+		 */
+		static std::uint32_t PassesOnThisThread();
+		/**
 		 * @brief Whether the pass is one DCLF leaves to the native loop because of a fade, as it is registered:
 		 * any accumulation hint 10 (the stencil-dithered fade, and a LOD cross-fade's copy of the old level), a
 		 * fade the engine draws blended (hint 9), or any fade with CS_DCLF_FADING off. A screen-door fade in an

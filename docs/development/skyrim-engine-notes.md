@@ -828,10 +828,15 @@ So an object samples the sun's shadow mask in the main pass only if the sun's ac
 in a cascade that frame. Skipping that accumulation changes main-pass techniques unless those bits are
 set some other way. `lastAccumulatedFrameCount` has no reader found yet.
 
-**Who clears the masks.** `FUN_1414cb640`, which `Main::Draw` calls before the shadow lights accumulate,
-sets accumulator `0x14338c840`'s `+0x160` to `0xFFFF` (while `DAT_14338c911` is 0). It then registers culling
-process `0x14338c640`'s culled geometries through that accumulator (`FUN_140e28af0`), and the registration
-zeroes their masks. Each shadow light then ORs its bits in.
+**Who clears the masks.** `FUN_1414cb640`, which `Main::Draw` calls before the shadow lights accumulate (at
+`0x140644d7e`), writes accumulator `0x14338c840`'s `+0x160` as the 8-byte `0xFFFF` (so `+0x164` becomes 0) while
+`DAT_14338c911` is 0. It then registers culling process `0x14338c640`'s culled geometries through that accumulator
+(`FUN_140e28af0`), and the registration zeroes their masks. Each shadow light then ORs its bits in.
+
+**The main camera's registration reads the mask, then clears it.** Its accumulators also have `+0x160 = 0xFFFF`, so
+`FUN_1414b2140` runs `GetRenderPasses` with the frame's bits and then zeroes the mask. Every registration of the same
+geometry later in the frame (the reflections, the depth accumulations) reads 0. Measured with DCLF's sun entry
+exclusion probe: ignoring this, a fifth of the later registrations disagreed.
 
 **`FUN_1414b2140`'s early-outs**, before the mode's registration and the mask write. It returns at once when:
 
@@ -850,6 +855,14 @@ It writes no mask when the accumulator's `+0x160` is 0, or the property's `light
     (count `+0x138`), then its bucketed lists. `FUN_1414bf320(ctx, 2)` gets there through `FUN_140e305c0` and
     `FUN_140e28f70`. `FUN_140e28f70` calls the process's vfunc `0xB8` for the first entry and `0xB0` for the
     rest, and with its `param_4` set it skips entries whose `+0xF4` bit 0 (app-culled) is set.
+-   The array `FUN_140e305c0` hands `FUN_140e28f70` is the full-frustum process's `objectArray` (`+0x128`, a
+    `BSTArray<NiPointer<NiAVObject>>`, size at `+0x138`), the same one for every cascade. The first entry's vfunc
+    `0xB8` (`Process(camera, scene, visibleSet)`) is what sets the cascade process's frustum and planes up from the
+    cascade's camera; with an empty array it keeps the previous cascade's.
+-   The cascade's cull context (`FUN_1414bf2b0` builds it, `FUN_1414f0920` fills it): the accumulator (`+0x48` of the
+    descriptor), the camera (`+0x40`), cull mode 3 or 4 (`light+0x47`), the custom planes from the descriptor's
+    `+0xE0` block when its `+0x11F` is set, and `cameraRelatedUpdates` and `updateAccumulateFlag` both 0. The process
+    is the static one at `0x14332bda0` (the context's `+0x5C` is 0).
 -   The full-frustum cull (`FUN_141511f30`) queues one job per scene list (`FUN_1414bf730`), then runs
     `JobList__Begin` and `Finish` itself, so the render thread waits for it. Each process's `planes` are
     refreshed by that cull, from the light's full-frustum camera (`+0x578`).
@@ -865,6 +878,57 @@ It writes no mask when the accumulator's `+0x160` is 0, or the property's `light
 | … of which registration (about 2,580 geometries) | 0.41 ms | |
 
 The registration figure includes the probe's own timing overhead.
+
+## The occlusion maps: precipitation, and Skylighting's
+
+Two views draw the scene's depth from above into depth target 10 (`kPRECIPITATION_OCCLUSION_MAP`, 512x512): the
+engine's precipitation mask, when there is a current or last precipitation object, and Community Shaders'
+Skylighting height map, every exterior frame. Skylighting replaces the engine's call at `Main::Draw` +0x3A1 with its
+own `RenderOcclusion`, which runs both through the engine's `Precipitation::SetupMask` and `RenderMask`, pointing the
+occlusion camera in a new sky direction each frame and swapping target 10's texture for its own (`texOcclusion`).
+Measured at Riverwood (clear weather, so Skylighting's alone), render thread per frame: `SetupMask` 0.43 ms,
+`RenderMask` 0.34 ms.
+
+-   **`SetupMask`** (`0x1404081c0`): the occlusion camera's projection (`FUN_140408520`), then for each of the six
+    scene lists (`DAT_14338c870`, count `DAT_14338c880`, 0x18 bytes each) `FUN_1414bf320(ctx, 1)`: the list culled
+    by `FUN_140e28f70` with the occlusion data's `BSGeometryListCullingProcess`, cull mode 3, and
+    `cameraRelatedUpdates` 0, then registered through the occlusion accumulator (`FUN_140e28af0`), on the render
+    thread.
+-   **The registration**, render mode `0x1C` (`FUN_1414b2c20` in the table at `0x14332b020`): the property's vfunc
+    `0x2D` (`GetRenderPasses_Occlusion`), each pass inserted straight into batch group 14 with `FUN_1414f5090`. It
+    never reaches `BSBatchRenderer::RegisterPass`. The accumulator's `+0x160` is 0, so no mask is written.
+-   **The Lighting property's passes** (`0x1414afd50`, which Skylighting replaces): one Utility pass, technique
+    `0x201A` (`0x2002` with model-space normals), `+1` with vertex colours, `+0x80` alpha-tested, `+0x8000000` for LOD
+    objects, pass enum technique + `0x2B`. It needs `kZBufferWrite`, and it rejects skinned geometry, refraction,
+    the terrain flags (multi-texture, `kNoLODLandBlend`, LOD landscape), eye reflection, tree animation, decals and
+    flag bit 53. No fade, alpha-blend or `kCastShadows` test.
+-   **Skylighting's replacement** (`Skylighting.cpp`, `GetPrecipitationOcclusionMapRenderPassesImpl`): a
+    `RenderDepth` pass with `Vc`, `Texture` and `AlphaTest`, `LodObject` and `TreeAnim` as the property has them, for
+    geometry with `kZBufferWrite` and a world-bound radius above 32. In its own view (`inOcclusion`) it keeps terrain
+    and skinned trees, and drops references whose fade node's BSX flags mark them a ragdoll, editor marker, dynamic,
+    addon, needing transform updates, magic particles, lights or breakable. Its camera's frustum covers one quarter
+    of the square each frame (`SetViewFrustum`, `frameCount % 4`).
+-   **`RenderMask`** (`0x140408380`): the camera into the renderer state, target 10 bound and cleared, then
+    `FUN_1414a90f0(camera, accumulator, 0)`: the accumulator's `FinishAccumulatingPreResolveDepth` (vfunc `0x2A`),
+    whose mode `0x1C` draw function (`FUN_1414b4750`) renders batch group 14. At that hook: render flags 0, viewport
+    512x512, depth range [0, 1], `posAdjust` at the occlusion camera.
+-   **Who reads them:** the rain particles read the precipitation map; Skylighting's `Prepass` compute (the probe
+    update) reads `texOcclusion`.
+
+## The material database: how a material is shared and released
+
+`BSShaderProperty::SetMaterial` (`0x14147bff0`) never stores the material it is given. It asks the material manager
+(the singleton pointer at `0x143187758`) for the database's copy, `FUN_1414f7790(manager, material, unique, flag)`:
+under the database's spin lock it hashes the material (vfunc `0x20`), walks the bucket and compares with vfunc
+`0x18`, and on a miss creates a copy (vfunc `0x08`, `0x10`) and inserts it. It returns the shared material with its
+count (`+0x8`, `BSIntrusiveRefCounted`) incremented. The old material goes back through `FUN_1414f7a40(manager,
+material)`, which decrements under the same lock and, at zero, takes the material out of the database before deleting
+it.
+
+So a reference to a property's material must be dropped through `FUN_1414f7a40`. A `BSTSmartPointer` deletes it
+directly at zero and leaves the database pointing at freed memory: the next material that hashes to it crashes in
+`FUN_1414f7790` on vfunc `0x18` (DCLF's material cache did this; `drawcall-limit-fix.md`, "The sun's cascades without
+DCLF's objects"). Taking a reference is a plain atomic increment, as the engine does in `FUN_1414ac820`.
 
 ## Face morphing: the only writer of a face's positions
 
@@ -898,3 +962,32 @@ exactly `vertexCount * 16`), guarded by a `BSSpinLock` at `+0x168` (lock `FUN_14
 -   **The layout.** A face partition's `vertexDesc` has the position on stream 1 (bit 54) and nothing else
     there; stream 0 holds UV, colour and skinning (stride 20 for a head).
 -   **Timing.** Frame N's render draws the morphs of frame N-1's post-render stage.
+
+## Scene state writers: where DCLF takes its events
+
+AE 1.6.1170. These are the choke points `SceneStore::InstallSceneEvents` detours for the delta walk
+([dclf-event-driven-tables.md](./dclf-event-driven-tables.md), Phases 2 and 3).
+
+-   **`BSFadeNode::currentFade`** is written in the cull by `BSFadeNode::OnVisible` (vtable slot `0x34`,
+    `0x141479f50`): directly for one LOD mode, and through the fade update `FUN_14147a160` otherwise.
+    `FUN_1402cff60` calls that update outside a cull.
+-   **`BSShaderProperty::SetFlags(flag, set)`** (`0x14147bee0`) sets or clears one bit of the 64-bit flags. It sets
+    `lastRenderPassState = 0x7fffffff` when the bit changes, which makes `GetRenderPasses` rebuild the pass list.
+    Community Shaders' own in-place flag writes are in `TruePBR`'s `LoadBinary`, before the property is attached.
+-   **`BSShaderProperty::SetMaterial(material, unique)`** (`0x14147bff0`) takes the new material from the material
+    manager (`FUN_1414f7790`, which shares one instance between properties unless `unique` is set or the property has
+    controllers) and releases the old one (`FUN_1414f7a40`).
+-   **Controllers.** `NiTimeController::SetTarget` (`0x140d33920`) removes the controller from its old target and
+    calls `NiObjectNET::PrependController` (`FUN_140d268d0`): `controller->next = target->controllers`, then
+    `target->controllers = controller` (`+0x18`). `NiObjectNET::LinkObject` sets the list directly when a NIF loads.
+-   **Havok to the scene.** `FUN_140ea55a0(collisionObject, transform)` writes the node's (`collisionObject+0x10`)
+    transform from its rigid body. Its callers:
+    -   `bhkCollisionObject::Unk_2B` (`0x140e972c0`, `SetNodeTransformsFromWorldTransform`);
+    -   the same slot of `bhkPCollisionObject` and `bhkSPCollisionObject`;
+    -   `bhkBlendCollisionObject` (ragdolls);
+    -   `FOIslandActivationListener`.
+
+    A keyframed body takes the other branch of `Unk_2B`: `NiAVObject::RecalculateWorldTransform`, since its node
+    drives the body. Dynamic clutter that never sleeps calls it every frame, about 10 nodes at Riverwood.
+-   **`NiAVObject::SetMotionType`** (`0x140e87270`) runs a subtree visitor (`FUN_140e87df0`, operation 5). On a
+    static reference's fixed body it returned true and left the motion `kFixed`.

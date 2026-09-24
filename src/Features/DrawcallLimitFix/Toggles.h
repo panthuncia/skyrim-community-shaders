@@ -33,6 +33,7 @@ namespace DCLF
 		bool shadows = false;         // CS_DCLF_SHADOWS=1
 		bool shadowOwnership = false; // CS_DCLF_SHADOW_OWNERSHIP=static (needs shadows)
 		bool skipSunAccumulation = false;  // CS_DCLF_SUN_SKIP=1 (needs shadowOwnership): SunAccumulation
+		bool excludeSunEntries = false;    // CS_DCLF_SUN_EXCLUDE=1 (needs skipSunAccumulation): SunAccumulation's entry exclusion
 		bool debugView = false;       // CS_DCLF_DEBUG_VIEW=1
 		bool hybridNoSkip = false;    // CS_DCLF_HYBRID_NOSKIP=1
 		bool onlyEligible = false;    // CS_DCLF_ONLY_ELIGIBLE=1
