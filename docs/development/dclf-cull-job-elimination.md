@@ -1,6 +1,6 @@
 # DCLF: a frame without the engine's culling jobs
 
-Status: phases 1 and 2 done, 2026-09-24; phase 3 next. The reasoning behind it is in [dclf-status.md](./dclf-status.md), "What removing the culling
+Status: phases 1, 2 and 3 done, 2026-09-24; phase 4 next. The reasoning behind it is in [dclf-status.md](./dclf-status.md), "What removing the culling
 jobs takes". The current state is in [drawcall-limit-fix.md](./drawcall-limit-fix.md), "The primary's cull without
 DCLF's objects".
 
@@ -69,9 +69,24 @@ GPU = CPU exactly, 0 holes, and pipelines 88-90 -> 72-74. Caching the whole synt
 
 Admission from readiness moved to phase 4, where the pass becomes table state.
 
-## Next: phase 3, switch selection as events
+## Phase 3: done
 
--   Reverse engineer the writers of `NiSwitchNode`'s index (`+0x12C`).
--   Make "which child is live" table state.
--   Run the newly selected child's catch-up update (`UpdateDownwardPass`) in the event handler.
--   The per-frame switch test and the stand-in's stale-child fallback then go.
+[drawcall-limit-fix.md](./drawcall-limit-fix.md), "Switch selection by event":
+-   the ten index stores patched (the tree manager, the local map, harvesting) and `NiSwitchNode`'s child edits detoured;
+-   the catch-up (`CatchUpSwitch`) when the walk applies an event, and at attach;
+-   the switch trait off the per-frame set (1,707 -> 1,057 entries at Riverwood);
+-   `memberLive` in the stand-in, and the stale-child fallback gone.
+
+## Next: phase 4, DCLF's entries leave the lists
+
+What the stand-in still does per admitted entry, per frame, in the list jobs:
+-   the fade root's settled check;
+-   the frustum test (and a tree's height test), which picks the synthetic passes;
+-   the hidden walk per member (`kHidden` has 133 writers; walk parity is its alarm);
+-   the hand-over of the engine's members (`AppendVirtual`).
+
+Each of these needs a replacement before an entry can leave the lists:
+-   the synthetic passes as table state, drawn when the GPU's cull finds them;
+-   admission from readiness;
+-   the settled check from the fade events;
+-   entries with engine members staying in the lists until phase 5.

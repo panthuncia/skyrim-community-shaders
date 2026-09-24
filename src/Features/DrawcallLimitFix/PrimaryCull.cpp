@@ -224,6 +224,18 @@ namespace DCLF
 		return SceneStore::ReadSwitch(*a_switch, state) ? state.index : -1;
 	}
 
+	bool PrimaryCull::SwitchProbe()
+	{
+		static const bool probe = SwitchEnabled("CS_DCLF_SWITCH_PROBE");
+		return probe;
+	}
+
+	void PrimaryCull::RefreshLive(std::uint32_t a_e)
+	{
+		for (std::uint32_t m = cut.memberOffsets[a_e]; m < cut.memberOffsets[a_e + 1]; ++m)
+			cut.memberLive[m] = PathSelected(cut.members[m]) ? 1 : 0;
+	}
+
 	bool PrimaryCull::FeedbackProbe()
 	{
 		static const bool probe = SwitchEnabled("CS_DCLF_FEEDBACK_PROBE");
@@ -332,6 +344,9 @@ namespace DCLF
 	void PrimaryCull::PrepareFrame()
 	{
 		++cutStats.frames;
+		// The switches whose selection the walks applied since the last frame; a frame the cut skips drops them, so the
+		// next one reads every switch again.
+		liveStale = SceneStore::Get().TakeSwitchChanges(switchChanges) || liveStale;
 		auto candidates = SceneStore::Get().GetSunCandidates();
 		const std::uint32_t count = Global<std::uint32_t>(kSceneListCount);
 		auto** processes = Global<RE::NiCullingProcess**>(kListProcesses);
@@ -342,14 +357,17 @@ namespace DCLF
 				localShadows = localShadows || (light && light.get() != node->GetRuntimeData().sunShadowDirLight);
 		if (!candidates || candidates->generation != SceneStore::Get().GetSunCandidatesGeneration()) {
 			++cutStats.skippedStale;
+			liveStale = true;
 			return;
 		}
 		if (!processes || !count || count > cut.processes.size() || !SunAccumulation::Get().ExclusionLive() || localShadows) {
 			++cutStats.skippedPreconditions;
+			liveStale = true;
 			return;
 		}
 		const std::int64_t start = Now();
-		if (cut.candidates != candidates) {
+		const bool newSnapshot = cut.candidates != candidates;
+		if (newSnapshot) {
 			// A new snapshot: each entry's geometries, the plans and the eligible roots, again; admission by node.
 			cut.candidates = candidates;
 			const std::uint32_t entries = static_cast<std::uint32_t>(candidates->entries.size());
@@ -406,6 +424,29 @@ namespace DCLF
 			cut.memberObject.resize(cut.members.size());
 			for (std::size_t m = 0; m < cut.members.size(); ++m)
 				cut.memberObject[m] = cut.members[m].engine ? -1 : SceneStore::Get().FindObject(cut.members[m].geometry);
+			cut.switchEntry.clear();
+			for (std::uint32_t e = 0; e < entries; ++e)
+				for (std::uint32_t w = cut.switchOffsets[e]; w < cut.switchOffsets[e + 1]; ++w)
+					cut.switchEntry.emplace(cut.switches[w], e);
+		}
+		// Which members their switches select: the switch events name the entries to read again (dclf-cull-job-elimination.md,
+		// "Phase 3"); a new snapshot, a resync or a skipped frame reads them all.
+		cut.liveEvents = SceneStore::SwitchEventsLive();
+		if (cut.liveEvents) {
+			if (newSnapshot || liveStale) {
+				cut.memberLive.assign(cut.members.size(), 1);
+				for (std::uint32_t e = 0; e + 1 < cut.switchOffsets.size(); ++e)
+					if (cut.switchOffsets[e] != cut.switchOffsets[e + 1])
+						RefreshLive(e);
+				++cutStats.liveAll;
+			} else {
+				for (const auto* node : switchChanges)
+					if (const auto it = cut.switchEntry.find(node); it != cut.switchEntry.end()) {
+						RefreshLive(it->second);
+						++cutStats.liveEntries;
+					}
+			}
+			liveStale = false;
 		}
 		cut.processCount = count;
 		for (std::uint32_t i = 0; i < count; ++i) {
@@ -464,18 +505,40 @@ namespace DCLF
 			return true;
 		}
 		// A switch whose selected child is out of date: NiSwitchNode::OnVisible brings it up to date before culling it
-		// (UpdateDownwardPass), so the engine culls this entry this frame.
-		for (std::uint32_t w = cut.switchOffsets[e]; w < cut.switchOffsets[e + 1]; ++w) {
-			const auto* switchNode = cut.switches[w];
-			SceneStore::SwitchState state;
-			if (!SceneStore::ReadSwitch(*switchNode, state) || state.index < 0)
-				continue;
-			const auto index = static_cast<std::uint16_t>(state.index);
-			if (index < switchNode->GetChildren().capacity() && switchNode->GetChildren()[index] && state.childRevID && index < state.childRevCapacity &&
-				state.childRevID[index] != state.revID) {
-				++out.switchStale;
-				EngineProcess1(a_process, a_object, a_arg);
-				return true;
+		// (UpdateDownwardPass). With the switch events that is done when the selection changes (SceneStore::CatchUpSwitch),
+		// so none is found here (CS_DCLF_SWITCH_PROBE counts them); without them, the engine culls this entry this frame.
+		if (!cut.liveEvents || SwitchProbe()) {
+			for (std::uint32_t w = cut.switchOffsets[e]; w < cut.switchOffsets[e + 1]; ++w) {
+				const auto* switchNode = cut.switches[w];
+				SceneStore::SwitchState state;
+				if (!SceneStore::ReadSwitch(*switchNode, state) || state.index < 0)
+					continue;
+				const auto index = static_cast<std::uint16_t>(state.index);
+				if (index < switchNode->GetChildren().capacity() && switchNode->GetChildren()[index] && state.childRevID && index < state.childRevCapacity &&
+					state.childRevID[index] != state.revID) {
+					if (cut.liveEvents) {
+						// A switch updated every frame (an animated one) has revID one ahead of its selected child while
+						// its own update pass runs alongside the list jobs, which then updates the child: not stale.
+						if (state.childRevID[index] + 1 == state.revID) {
+							++out.switchMidUpdate;
+							continue;
+						}
+						if (++out.switchStaleSeen == 1) {
+							static std::atomic<std::uint32_t> logged{ 0 };
+							if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+								const auto* child = switchNode->GetChildren()[index].get();
+								logger::info("[DCLF][TEMP] switch probe: stale selected child under '{}' ({}): switch '{}' {:#x} index {} of {}, revID {}, childRevID {}, flags {:#x}; child '{}' {}",
+									a_object->name.c_str(), a_object->GetRTTI() ? a_object->GetRTTI()->name : "?", switchNode->name.c_str(), reinterpret_cast<std::uintptr_t>(switchNode),
+									state.index, switchNode->GetChildren().size(), state.revID, state.childRevID[index], state.flags, child->name.c_str(),
+									child->GetRTTI() ? child->GetRTTI()->name : "?");
+							}
+						}
+						continue;
+					}
+					++out.switchStale;
+					EngineProcess1(a_process, a_object, a_arg);
+					return true;
+				}
 			}
 		}
 		++out.skipped;
@@ -515,9 +578,9 @@ namespace DCLF
 		for (std::uint32_t m = cut.memberOffsets[e]; m < cut.memberOffsets[e + 1]; ++m) {
 			const auto& member = cut.members[m];
 			const auto* geometry = member.geometry;
-			bool selected = true;
-			for (std::uint32_t w = member.switchBegin; w < member.switchEnd && selected; ++w)
-				selected = SwitchIndex(cut.switchPaths[w].first) == cut.switchPaths[w].second;
+			const bool selected = cut.liveEvents ? cut.memberLive[m] != 0 : PathSelected(member);
+			if (cut.liveEvents && SwitchProbe() && selected != PathSelected(member))
+				++out.switchMismatch;
 			if (!selected) {
 				++out.unselected;
 				continue;
@@ -566,6 +629,9 @@ namespace DCLF
 			}
 			s.switchStale += out.switchStale;
 			s.unselected += out.unselected;
+			s.switchMismatch += out.switchMismatch;
+			s.switchStaleSeen += out.switchStaleSeen;
+			s.switchMidUpdate += out.switchMidUpdate;
 			for (std::size_t c = 0; c < s.causeGeometries.size(); ++c)
 				s.causeGeometries[c] += out.causeGeometries[c];
 		}
@@ -1124,17 +1190,20 @@ namespace DCLF
 			logger::info("[DCLF] primary exclusion: applied on {} of {} frames ({} stale, {} preconditions); per frame {:.0f} eligible entries reached, "
 						 "{:.0f} stood in for ({:.0f} in view), {:.1f} fading, {:.1f} not yet admitted ({:.1f} admitted); {:.0f} synthetic passes, {:.1f} not modelled "
 						 "({:.1f} built inline, {:.1f} late), {:.1f} hidden, {:.1f} with a local light's shadow bit; {} holes; fades serviced {:.0f}, faded out {:.1f}, "
-						 "handed back {:.1f}; {:.0f} of the engine's members in view registered by it; switches: {:.1f} entries culled by the engine (stale child), {:.0f} members unselected; render thread: prepare {:.3f} ms, after the jobs {:.3f} ms, synthetic join {:.3f} ms",
+						 "handed back {:.1f}; {:.0f} of the engine's members in view registered by it; switches: {:.1f} entries culled by the engine (stale child), {:.0f} members unselected, selection read from every switch on {} frames and from {} events' entries; render thread: prepare {:.3f} ms, after the jobs {:.3f} ms, synthetic join {:.3f} ms",
 				s.appliedFrames, s.frames, s.skippedStale, s.skippedPreconditions, s.seen / applied, s.skipped / applied, s.visibleEntries / applied,
 				s.notSettled / applied, s.notAdmitted / applied, s.admittedNow / applied, s.synthetic / applied, s.unmodelled / applied,
 				s.synthInline / applied, s.synthLate / applied, s.hiddenSkipped / applied, s.localShadowed / applied, s.holes, s.fadeServiced / applied,
-				s.fadedOut / applied, s.handedBack / applied, s.engineMembers / applied, s.switchStale / applied, s.unselected / applied, s.prepareTicks * toMs / applied, s.afterTicks * toMs / applied, s.synthWaitTicks * toMs / applied);
+				s.fadedOut / applied, s.handedBack / applied, s.engineMembers / applied, s.switchStale / applied, s.unselected / applied, s.liveAll, s.liveEntries, s.prepareTicks * toMs / applied, s.afterTicks * toMs / applied, s.synthWaitTicks * toMs / applied);
 			for (std::size_t c = 0; c < s.causeGeometries.size(); ++c)
 				if (s.causeGeometries[c])
 					logger::info("[DCLF][TEMP] primary exclusion kept in view: {:.1f} geometries/frame under entries rejected for {}", s.causeGeometries[c] / applied,
 						c < cut.causes.size() ? cut.causes[c] : std::string("(more)"));
 			for (const auto& [cause, count] : s.planReasons)
 				logger::info("[DCLF][TEMP] primary exclusion plan rejects: {} x {}", count, cause);
+			if (SwitchProbe())
+				logger::info("[DCLF][TEMP] switch probe: {} members whose event-driven selection differs from their switches, {} selected children out of date, {} seen mid-update (every applied frame since the last report)",
+					s.switchMismatch, s.switchStaleSeen, s.switchMidUpdate);
 			cutStats = {};
 			if (FeedbackOn()) {
 				const auto io = IndirectDraws::Get().TakeFeedbackStats();

@@ -514,6 +514,24 @@ Offsets on SE and AE:
 | `+0x134` | revID |
 | `+0x138` | childRevID, an `NiTPrimitiveArray`: data at `+0x140`, capacity at `+0x148` |
 
+`OnVisible`'s catch-up: `childRevID.SetAt(index, &revID)` (`FUN_140d29990`: array, index, pointer to the value), then
+the child's `UpdateDownwardPass` (vtable slot `0x2C`) with an `NiUpdateData` of `{ savedTime, (flags >> 1) & 1 }` and
+0.
+
+**Who writes the index** (every `mov [reg+0x12C]` in `.text`, filtered by function):
+
+| Writer | What | After it |
+| --- | --- | --- |
+| `FUN_140437e50` (`BSTreeManager`'s update, from `FUN_140437d40` in `Main::Update`), five stores; `FUN_140438840`, two | a tree's LOD switch (`BSTreeNode` `+0x180`): `(size - 1 != 0 && !*0x14200d640) ? 1 : 0`, then `size - 1` when `*0x142032dfc` is set and the tree is beyond the manager's distance (`+0x80`), so two stores in one pass | nothing: the cull's catch-up |
+| `FUN_140438580(manager, level)`, from the local map (`FUN_140242e00`) | every tree's LOD switch to a level | nothing |
+| `FUN_1401e8ef0` (harvest: `TESObjectTREE::Activate` and the flora's), `FUN_1401e9450` (a harvestable's 3D setup, from `TESObjectREFR::LoadGame`, `Revert`, `Explosion::Load3D` and vtables) | the root's first child when it is an `NiSwitchNode` with two children: the reference's harvested flag (form flag bit 13) | the switch's `UpdateDownwardPass` (vtable `+0x160`), then `FUN_1414a28b0` |
+| `NiSwitchNode` constructor (`FUN_140d28c30`, -1), `CreateClone`, `LoadBinary`'s copy (`FUN_140d28950`) | before the node is in a scene | |
+| `DetachChild1`, `DetachChildAt1` | -1 when the selected slot is left empty | |
+
+`AttachChild` (`140d28ce0`), `DetachChild*` and `SetAt*` also reset `revID` to 1 and zero the edited slot's
+`childRevID`, so the selected child can be out of date with no store to the index. Every other `+0x12C` store in the
+scan belongs to another class (pathing requests, Havok shapes, `BSValueNode`, `BSFadeNode`'s clone, and so on).
+
 CommonLib-NG declares these fields after `NiNode`, whose declared size in a multi-runtime build is VR's.
 Reading them as members therefore reads the wrong memory.
 

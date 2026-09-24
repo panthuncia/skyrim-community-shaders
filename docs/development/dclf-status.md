@@ -76,8 +76,10 @@ draws.
     -   Hooking those writes gives a deterministic scene event, so "which child is live" becomes table state rather than
         a per-frame test.
     -   The engine also brings a newly selected child up to date the first time it culls it (`UpdateDownwardPass` when
-        `childRevID[index] != revID`). That update moves into the event's handler, on a worker. It tolerates a frame of
-        latency, as the engine itself defers it to the cull.
+        `childRevID[index] != revID`). That update moves into the event's handler.
+    -   Done in phase 3 ([drawcall-limit-fix.md](./drawcall-limit-fix.md), "Switch selection by event"). The writers are
+        the tree manager's LOD selection and harvesting; there are no destructible or lit-state writers. The catch-up
+        runs on the render thread when the walk applies the event, before anything culls.
 -   **Fade.**
     -   `currentFade` steps each frame toward a target computed from the camera distance, the node's fade distances and
         the camera's `lodAdjust` (`FUN_14147b110`), by the frame time up to a cap (`FUN_14147a160`).

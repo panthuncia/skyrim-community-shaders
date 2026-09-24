@@ -1450,6 +1450,7 @@ through: the shadow pipeline map ("Epochs that only submit") and the NPC head dr
 | `CS_DCLF_PRIMARY_EXCLUDE=1\|0\|probe` | DCLF's references leave the main camera's cull and registration; DCLF builds their main passes and runs their fade updates ("The primary's cull without DCLF's objects"). Needs `CS_DCLF_SUN_EXCLUDE` and static ownership. Default on. Live toggle. `probe`: nothing is removed; the census of the lists and the synthetic pass against the registered one. |
 | `CS_DCLF_SKYLIGHT=1\|0` | With Skylighting loaded, DCLF draws its occlusion map and the engine's `SetupMask` is skipped ("Skylighting's occlusion map, drawn by DCLF"). Needs `CS_DCLF_SHADOWS`. Default on. Live toggle. |
 | `CS_DCLF_SKYLIGHT_PARITY=1` | Diagnostic: every 120th map is rendered by the engine and by DCLF in the same frame and compared texel by texel, with the occluders only DCLF drew; `CS_DCLF_SKYLIGHT_DUMP_DIR=<dir>` writes maps that differ over 5 % of their texels as 16-bit PGM. |
+| `CS_DCLF_SWITCH_EVENTS=1\|0` | An `NiSwitchNode`'s selection follows events: the index's writers are patched, a newly selected child is brought up to date when the event is applied, and neither the scene walk nor the primary's list jobs test switches every frame ("Switch selection by event"). Default on with `CS_DCLF_SCENE_DELTA`; read at startup. |
 | `CS_DCLF_SWITCH_NODES=1` | Leaves under an `NiSwitchNode` (trees, harvestables) are eligible in the frames every switch on their path selects them ("Trees and actors"). Default on. Live toggle. |
 | `CS_DCLF_SKIN_PARTITIONS=1` | Skins of several partitions and dismember skins (LOD trees, actor bodies) are eligible, one draw per partition the engine draws. Needs `CS_DCLF_SKINNED`. Default on. Live toggle. |
 | `CS_DCLF_ACTORS=1` | Geometry under an actor is eligible, as is the FacegenRGBTint technique. Default on. Live toggle. |
@@ -4599,3 +4600,86 @@ at Present (`PrimaryCull::EndFrame`), before the next frame's `Main::Update` rea
 -   **Not built:** the fade parity probe of the plan (the engine's update against DCLF's on the same nodes). The decode
     calls the engine's own functions, one frame later; a parity of the state machines themselves would need a node
     both update, which the stand-in rules out by design.
+
+## Switch selection by event (culling-job elimination, phase 3)
+
+Which child an `NiSwitchNode` draws was a per-frame test in two places:
+-   the scene walk, which re-read every entry under a switch every frame (the `kTraitSwitch` light path);
+-   the primary's stand-in, which read every switch on a member's path in the list jobs, and left the entry to the
+    engine when the selected child was out of date.
+
+Both now follow events ([dclf-cull-job-elimination.md](./dclf-cull-job-elimination.md), phase 3).
+
+**The writers** (AE 1.6.1170; every `mov [reg+0x12C]` in `.text`, [skyrim-engine-notes.md](./skyrim-engine-notes.md),
+"Switch nodes"):
+
+-   **`BSTreeManager`'s LOD selection**, in `Main::Update` (`FUN_140437e50`, five stores; `FUN_140438840`, two), and
+    the local map's (`FUN_140438580`, one), on a tree's LOD switch (`BSTreeNode` `+0x180`). They leave the new child
+    as it was, for `NiSwitchNode::OnVisible` to bring up to date in the cull. The manager can store twice in one pass:
+    a level, then the far level.
+-   **Harvesting** (`FUN_1401e8ef0`, from `TESObjectTREE::Activate` and the flora's) and **a harvestable's 3D setup**
+    (`FUN_1401e9450`), on the switch under the reference's root. Both update the switch right after.
+-   **`NiSwitchNode`'s own `AttachChild`, `DetachChild` and `SetAt`** reset `revID` to 1. That leaves the selected
+    child out of date with no store to the index, and `DetachChild` clears the index when the selected slot empties.
+-   Construction, cloning and loading happen before the node is in the scene; the attach covers them.
+
+**The hooks** (`SceneStore::InstallSceneEvents`, `CS_DCLF_SWITCH_EVENTS`, default on with the scene delta):
+
+-   The ten stores are patched with a call to an Xbyak stub, after every site's bytes are checked; if any site
+    differs, none is patched and the switch events stay off. The stub saves the volatile registers, the flags (a store
+    sets none, so the code after it may test flags set before it) and `xmm0-5`, and calls `SwitchIndexStore`. That
+    makes the store itself and pushes an event carrying the index before it, when the value changed.
+-   `NiSwitchNode`'s child edits are detoured (its vtable's implementations of slots `0x35`, `0x37`-`0x3C`) and push a
+    structural event.
+-   The events go on a lock-free stack from the writer's thread. `ProcessEvents` drains them into one pending entry
+    per switch, which keeps the index before the oldest event. A load screen discards them; the rescan's walk covers
+    that.
+
+**Applying them** (`SceneStore::ApplySwitchEvents`, render thread, before the walk's first round):
+
+-   A switch in the scene whose index differs from its oldest event's value, or that had a structural event, is
+    brought up to date. `CatchUpSwitch` is `NiSwitchNode::OnVisible`'s catch-up outside the cull: when
+    `childRevID[index] != revID`, `childRevID.SetAt(index, revID)` (`FUN_140d29990`), then the child's
+    `UpdateDownwardPass` (vtable slot `0x2C`) with `{ savedTime, flags bit 1 }`.
+-   Every tracked entry under the switch is classified again.
+-   The switch is listed for `PrimaryCull` (`TakeSwitchChanges`).
+-   The attach and rescan walk (`AddSubtree`) brings every switch it passes up to date the same way. A newly attached
+    switch's selected child is out of date until its first cull.
+
+So a selected child is never out of date when the walk classifies it or the list jobs reach it. An entry under a switch
+is no longer evaluated every frame for its selection: it drops the switch trait, and an unselected child no longer counts
+as able to get a record (`PerFrameOf`).
+
+**The primary's stand-in** keeps a per-member bit, `memberLive`: every switch on the member's path selects it.
+-   It is read from the switches for a new snapshot, after a resync (a full walk or dropped events), and after a frame
+    the cut skipped.
+-   Otherwise it is read again only for the entries a switch event names (`switchEntry`).
+-   The list jobs read the bit, and the stale-child fallback is gone.
+-   `CS_DCLF_SWITCH_EVENTS=0` restores both per-frame tests.
+
+**Validation** (full featureset, Riverwood, then `coc` to Whiterun, Dragonsreach and back):
+
+-   Walk parity OK in every window (0 stale verdicts, 0 stale traits) and 0 holes.
+-   `CS_DCLF_SWITCH_PROBE=1` (TEMP) reads the switches in the list jobs, as the old test did:
+    -   0 members whose `memberLive` differs from their switches;
+    -   0 selected children out of date.
+    -   A few sightings in 300 frames are animated switches (fish buckets) whose own per-frame update runs alongside
+        the list jobs, caught between its `revID` bump and its child's update (`revID` one ahead). The probe counts
+        them apart: not stale.
+-   The tree manager: 3.2 events a frame after the `coc` to Whiterun, 0.48 net changes, 1.7 entries classified again;
+    none at rest.
+-   `CS_DCLF_TEST_HARVEST=<frame>` (TEMP): the player harvests the flora and trees within 4000 units whose produce is
+    switched.
+    -   Eight harvests (mushrooms, egg nests, a fish): each an event, a net change and a reclassification, with parity
+        OK.
+    -   150 frames later the harness sets the same switches back to child 0 through the stub's handler, with no update
+        pass, as the tree manager leaves a switch: the walk caught up all eight (`CatchUpSwitch`), with parity OK and
+        the probe clean.
+    -   The passes handed back to the native loop in those windows (147, 91) match a run with the events off (143, 84):
+        records made again after a switch change, not holes.
+
+**Cost** (Riverwood, four alternating 45 s runs):
+-   The per-frame set is 1,057 entries, against 1,707 without the events (the light path kept 10, against 633).
+-   The scene phase took 0.61-0.69 ms, against 0.66-0.84 ms without the events.
+-   The event drain is unchanged (0.05-0.06 ms).
+-   The ten stubs take 285 bytes of the SKSE trampoline, which went from 2 to 4 KiB.

@@ -38,9 +38,9 @@ namespace DCLF
 	 *     for synthetic main passes (SyntheticPass, built on the worker and taken by the accumulate phase);
 	 *   - hands every other geometry in view to the engine's registration as the cull would (the process's
 	 *     AppendVirtual, in the traversal's order), so decals, effects and blended objects register as before.
-	 * Switch nodes are followed per frame (a member is drawn while every switch above it selects its path); a switch
-	 * whose selected child is out of date, and a root that is fading or cross-fading LOD, leave the entry to the
-	 * engine's Process1 that frame. An entry is eligible when its nodes are plain (NiNode, BSMultiBoundNode, switch
+	 * Switch nodes are followed by event (a member is drawn while every switch above it selects its path: memberLive,
+	 * updated from SceneStore's switch events, which also bring a newly selected child up to date), and a root that is
+	 * fading or cross-fading LOD leaves the entry to the engine's Process1 that frame. An entry is eligible when its nodes are plain (NiNode, BSMultiBoundNode, switch
 	 * nodes; a fade, leaf or tree root) and its geometries use BSGeometry's OnVisible, with at least one DCLF draws;
 	 * it is admitted once the colour epoch has drawn all of those (Admit). After the jobs the render thread only
 	 * gathers the jobs' output and clears the activeLightMask of what DCLF draws, as the main registration would.
@@ -100,6 +100,11 @@ namespace DCLF
 		/** @brief [TEMP] CS_DCLF_FEEDBACK_PROBE=1: the tree clock under the feedback. */
 		static bool FeedbackProbe();
 		/**
+		 * @brief [TEMP] CS_DCLF_SWITCH_PROBE=1: in the list jobs, the event-driven selection (memberLive) against the
+		 * switches' indices, and selected children found out of date, both counted.
+		 */
+		static bool SwitchProbe();
+		/**
 		 * @brief The colour commit, render thread (IndirectDraws::ArmFeedback): this frame's stood-in entries, carried
 		 * with the frame's feedback copy to its decode. Null when the cut did not apply this frame.
 		 */
@@ -140,7 +145,7 @@ namespace DCLF
 					continue;
 				bool all = true;
 				for (std::uint32_t m = cut.memberOffsets[e]; m < cut.memberOffsets[e + 1] && all; ++m)
-					all = cut.members[m].engine || !MemberShown(cut.members[m], cut.roots[e]) || a_drawn(cut.members[m].geometry);
+					all = cut.members[m].engine || !MemberShown(m, cut.roots[e]) || a_drawn(cut.members[m].geometry);
 				if (all) {
 					cut.admitted[e] = 1;
 					cut.admittedRoots.insert(cut.roots[e]);
@@ -158,17 +163,27 @@ namespace DCLF
 		struct Cut;
 		/** @brief The switch node's selected child index, read at the engine's offset (SceneStore::ReadSwitch; CommonLib's is not AE's). */
 		static std::int32_t SwitchIndex(const RE::NiSwitchNode* a_switch);
-		/** @brief Whether the cull would reach a member: not app-culled up to the root, and every switch above it selects its path. */
-		bool MemberShown(const auto& a_member, const RE::NiAVObject* a_root) const
+		/** @brief Every switch above the member selects its path, read from the switches (the events' input, and their check). */
+		bool PathSelected(const auto& a_member) const
 		{
 			for (std::uint32_t w = a_member.switchBegin; w < a_member.switchEnd; ++w)
 				if (SwitchIndex(cut.switchPaths[w].first) != cut.switchPaths[w].second)
 					return false;
-			for (const RE::NiAVObject* object = a_member.geometry; object; object = object == a_root ? nullptr : object->parent)
+			return true;
+		}
+		/** @brief Whether the cull would reach member a_m: not app-culled up to the root, and selected by every switch above it. */
+		bool MemberShown(std::uint32_t a_m, const RE::NiAVObject* a_root) const
+		{
+			const auto& member = cut.members[a_m];
+			if (!(cut.liveEvents ? cut.memberLive[a_m] != 0 : PathSelected(member)))
+				return false;
+			for (const RE::NiAVObject* object = member.geometry; object; object = object == a_root ? nullptr : object->parent)
 				if (object->GetFlags().any(RE::NiAVObject::Flag::kHidden))
 					return false;
 			return true;
 		}
+		/** @brief Render thread, before the list jobs: memberLive of entry a_e's members, from the switches. */
+		void RefreshLive(std::uint32_t a_e);
 		PrimaryCull() = default;
 
 		struct Hooks;
@@ -309,6 +324,11 @@ namespace DCLF
 			std::vector<std::uint32_t> memberOffsets;  // per candidate entry index: its geometries in members, in the cull's order
 			std::vector<Member> members;
 			std::vector<std::int32_t> memberObject;    // per member: its object index in the tables (-1: none), for the feedback
+			// Per member: every switch above it selects its path. Read from the switches for a new snapshot, then kept by
+			// the switch events (SceneStore::TakeSwitchChanges) for the entries they name (switchEntry).
+			std::vector<std::uint8_t> memberLive;
+			ankerl::unordered_dense::map<const RE::NiAVObject*, std::uint32_t> switchEntry;  // switch node -> entry index
+			bool liveEvents = false;  // memberLive is in force (SceneStore::SwitchEventsLive); else the jobs read the switches
 			std::vector<std::uint32_t> geometryOffsets;       // per candidate entry index: its tracked geometries in geometryIndices
 			std::vector<const RE::BSGeometry*> geometryIndices;
 			std::vector<const RE::NiAVObject*> roots;         // per candidate entry index
@@ -335,6 +355,7 @@ namespace DCLF
 			std::vector<std::uint32_t> stoodIn;  // entries the job left to DCLF this frame, in view or not
 			std::uint64_t seen = 0, skipped = 0, visibleEntries = 0, notSettled = 0, notAdmitted = 0;
 			std::uint64_t fadeServiced = 0, fadedOut = 0, handedBack = 0, hidden = 0, engineMembers = 0, switchStale = 0, unselected = 0;
+			std::uint64_t switchMismatch = 0, switchStaleSeen = 0, switchMidUpdate = 0;  // [TEMP] CS_DCLF_SWITCH_PROBE
 			std::array<std::uint64_t, 64> causeGeometries{};  // [TEMP] geometries under rejected entries in view, by cause
 		};
 		std::array<JobOut, 16> jobOut;
@@ -352,6 +373,9 @@ namespace DCLF
 			std::uint64_t engineMembers = 0;  // the engine's members in view, handed to its registration
 			std::uint64_t switchStale = 0;    // entries the engine culled this frame because a switch's selected child was out of date
 			std::uint64_t unselected = 0;     // members under an unselected switch child
+			std::uint64_t liveAll = 0;        // frames memberLive was read from every switch (a new snapshot, a resync)
+			std::uint64_t liveEntries = 0;    // entries whose memberLive a switch event refreshed
+			std::uint64_t switchMismatch = 0, switchStaleSeen = 0, switchMidUpdate = 0;  // [TEMP] CS_DCLF_SWITCH_PROBE: memberLive wrong; a selected child out of date; one seen mid-update
 			std::uint64_t synthInline = 0, synthLate = 0;                   // synthetic passes built on the render thread; the worker was late
 			std::int64_t prepareTicks = 0, afterTicks = 0, synthWaitTicks = 0;
 			// [TEMP] why entries stay in: plan rejections by cause (per snapshot).
@@ -360,6 +384,8 @@ namespace DCLF
 		};
 		CutStats cutStats;
 		std::vector<const RE::BSGeometry*> frameVisible;  // this frame's visible geometries under left-out entries
+		std::vector<const RE::NiAVObject*> switchChanges;  // scratch: SceneStore::TakeSwitchChanges
+		bool liveStale = true;                             // a frame skipped the switch changes: memberLive is read again
 		std::vector<std::pair<const RE::BSGeometry*, AccumulatedPass>> synthetic;
 		std::shared_ptr<void> synthJob;                    // the worker's synthetic-pass job (an AsyncWorker::JobHandle)
 		std::shared_ptr<void> feedbackJob;                 // the worker's feedback decode (an AsyncWorker::JobHandle)

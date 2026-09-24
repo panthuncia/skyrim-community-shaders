@@ -19,6 +19,7 @@
 #include "FaceSnapshots.h"
 
 #include <bit>
+#include <xbyak/xbyak.h>
 #include <chrono>
 
 #include "Features/ExtendedTranslucency.h"
@@ -286,6 +287,245 @@ namespace DCLF
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+
+		/**
+		 * @brief SwitchEvents: an NiSwitchNode's selection may have changed (dclf-cull-job-elimination.md, "Phase 3"),
+		 * pushed from the writer's thread, drained at ProcessEvents and applied by the next walk (ApplySwitchEvents).
+		 *
+		 * NiSwitchNode::index (+0x12C) has no setter. Its only stores outside construction, cloning and loading (AE
+		 * 1.6.1170, every `mov [reg+0x12c]` in .text) are:
+		 * - BSTreeManager's LOD selection in Main::Update (FUN_140437e50, five stores; FUN_140438840, two) and the local
+		 *   map's (FUN_140438580, one), on a tree's LOD switch (BSTreeNode +0x180). They leave the new child as it was:
+		 *   NiSwitchNode::OnVisible brings it up to date in the cull.
+		 * - Harvesting (FUN_1401e8ef0, from TESObjectTREE::Activate and the flora's) and a harvestable's 3D setup
+		 *   (FUN_1401e9450), on the switch under the reference's root. Both update the switch right after.
+		 * Each store is patched with a call to a stub (SwitchStoreStubs) that makes the store itself and pushes an event
+		 * with the index before it when the value changed. The tree manager can store twice in one pass (a level, then
+		 * the far level), so the event is judged by the net change when applied.
+		 *
+		 * NiSwitchNode's AttachChild, DetachChild and SetAt reset revID to 1, which leaves the selected child out of date
+		 * without a store to the index, and DetachChild clears the index when the selected slot empties: those push a
+		 * structural event.
+		 */
+		struct SwitchEvent
+		{
+			RE::NiPointer<RE::NiAVObject> node;
+			std::int32_t before;
+			bool structural;
+			SwitchEvent* next;
+		};
+		std::atomic<SwitchEvent*> switchEvents{ nullptr };
+		constexpr std::size_t kSwitchIndex = 0x12C;
+		constexpr std::size_t kMaxSwitchChanges = 1u << 14;
+
+		std::int32_t& SwitchIndexOf(RE::NiAVObject* a_switch)
+		{
+			return *reinterpret_cast<std::int32_t*>(reinterpret_cast<std::byte*>(a_switch) + kSwitchIndex);
+		}
+
+		void PushSwitch(RE::NiAVObject* a_switch, std::int32_t a_before, bool a_structural)
+		{
+			if (a_switch)
+				PushEvent(switchEvents, new SwitchEvent{ RE::NiPointer<RE::NiAVObject>(a_switch), a_before, a_structural, nullptr });
+		}
+
+		/** @brief The patched stores' handler (SwitchStoreStubs): the store, and an event when it changed the index. */
+		void SwitchIndexStore(RE::NiAVObject* a_switch, std::int32_t a_index)
+		{
+			auto& index = SwitchIndexOf(a_switch);
+			const std::int32_t before = index;
+			index = a_index;
+			if (before != a_index)
+				PushSwitch(a_switch, before, false);
+		}
+
+		/** @brief After one of NiSwitchNode's own child edits (its vtable's implementations). */
+		void PushSwitchStructural(RE::NiNode* a_switch)
+		{
+			PushSwitch(a_switch, SwitchIndexOf(a_switch), true);
+		}
+
+		struct SwitchAttachChild
+		{
+			static void thunk(RE::NiNode* a_this, RE::NiAVObject* a_child, bool a_firstAvail)
+			{
+				func(a_this, a_child, a_firstAvail);
+				PushSwitchStructural(a_this);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+		struct SwitchDetachChild1
+		{
+			static void thunk(RE::NiNode* a_this, RE::NiAVObject* a_child, RE::NiPointer<RE::NiAVObject>& a_out)
+			{
+				func(a_this, a_child, a_out);
+				PushSwitchStructural(a_this);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+		struct SwitchDetachChild2
+		{
+			static void thunk(RE::NiNode* a_this, RE::NiAVObject* a_child)
+			{
+				func(a_this, a_child);
+				PushSwitchStructural(a_this);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+		struct SwitchDetachChildAt1
+		{
+			static void thunk(RE::NiNode* a_this, std::uint32_t a_index, RE::NiPointer<RE::NiAVObject>& a_out)
+			{
+				func(a_this, a_index, a_out);
+				PushSwitchStructural(a_this);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+		struct SwitchDetachChildAt2
+		{
+			static void thunk(RE::NiNode* a_this, std::uint32_t a_index)
+			{
+				func(a_this, a_index);
+				PushSwitchStructural(a_this);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+		struct SwitchSetAt1
+		{
+			static void thunk(RE::NiNode* a_this, std::uint32_t a_index, RE::NiAVObject* a_child, RE::NiPointer<RE::NiAVObject>& a_out)
+			{
+				func(a_this, a_index, a_child, a_out);
+				PushSwitchStructural(a_this);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+		struct SwitchSetAt2
+		{
+			static void thunk(RE::NiNode* a_this, std::uint32_t a_index, RE::NiAVObject* a_child)
+			{
+				func(a_this, a_index, a_child);
+				PushSwitchStructural(a_this);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		template <class T>
+		void DetourSwitchSlot(std::size_t a_slot)
+		{
+			REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE_NiSwitchNode[0] };
+			stl::detour_thunk<T>(reinterpret_cast<const std::uintptr_t*>(vtable.address())[a_slot]);
+		}
+
+		/** @brief One patched store: `mov dword ptr [base + 0x12c], value`, as the bytes read before patching. */
+		struct SwitchStoreSite
+		{
+			std::uintptr_t offset;  // from the image base
+			std::array<std::uint8_t, 7> bytes;
+			std::uint8_t length;
+			int base;  // Xbyak::Operand register index
+			int value;
+		};
+
+		/**
+		 * @brief The stubs the patched stores call: each loads (switch, value) into the first two argument registers
+		 * and joins a common body that saves every volatile register, the flags (a store sets none, so the code after
+		 * it may test flags set before it) and xmm0-5, calls SwitchIndexStore on an aligned stack, and restores them.
+		 */
+		struct SwitchStoreStubs : Xbyak::CodeGenerator
+		{
+			SwitchStoreStubs(const std::vector<SwitchStoreSite>& a_sites, std::vector<std::size_t>& a_entries) :
+				Xbyak::CodeGenerator(4096)
+			{
+				using namespace Xbyak::util;
+				Xbyak::Label common;
+				// After the three pushes: rdx at [rsp], rcx at [rsp + 8], rax at [rsp + 0x10].
+				auto slotOf = [](int a_index) -> int {
+					return a_index == Xbyak::Operand::RAX ? 0x10 : a_index == Xbyak::Operand::RCX ? 0x8 : a_index == Xbyak::Operand::RDX ? 0x0 : -1;
+				};
+				for (const auto& site : a_sites) {
+					a_entries.push_back(getSize());
+					push(rax);
+					push(rcx);
+					push(rdx);
+					if (const int slot = slotOf(site.base); slot >= 0)
+						mov(rcx, qword[rsp + slot]);
+					else
+						mov(rcx, Xbyak::Reg64(site.base));
+					if (const int slot = slotOf(site.value); slot >= 0)
+						mov(edx, dword[rsp + slot]);
+					else
+						mov(edx, Xbyak::Reg32(site.value));
+					jmp(common, T_NEAR);
+				}
+				L(common);
+				push(r8);
+				push(r9);
+				push(r10);
+				push(r11);
+				push(rbx);
+				pushf();
+				mov(rbx, rsp);
+				and_(rsp, ~std::uint32_t(0xF));
+				sub(rsp, 0x80);
+				for (int i = 0; i < 6; ++i)
+					movdqu(ptr[rsp + 0x20 + 0x10 * i], Xbyak::Xmm(i));
+				mov(rax, reinterpret_cast<std::uintptr_t>(&SwitchIndexStore));
+				call(rax);
+				for (int i = 0; i < 6; ++i)
+					movdqu(Xbyak::Xmm(i), ptr[rsp + 0x20 + 0x10 * i]);
+				mov(rsp, rbx);
+				popf();
+				pop(rbx);
+				pop(r11);
+				pop(r10);
+				pop(r9);
+				pop(r8);
+				pop(rdx);
+				pop(rcx);
+				pop(rax);
+				ret();
+			}
+		};
+
+		bool switchEventsInstalled = false;
+
+		/** @brief Patches the stores (after checking every site's bytes; none is patched when one differs). */
+		bool InstallSwitchStores()
+		{
+			using Xbyak::Operand;
+			const std::vector<SwitchStoreSite> sites{
+				{ 0x438004, { 0x89, 0x91, 0x2c, 0x01, 0x00, 0x00 }, 6, Operand::RCX, Operand::RDX },  // BSTreeManager (FUN_140437e50)
+				{ 0x43805e, { 0x89, 0x91, 0x2c, 0x01, 0x00, 0x00 }, 6, Operand::RCX, Operand::RDX },
+				{ 0x438077, { 0x89, 0x81, 0x2c, 0x01, 0x00, 0x00 }, 6, Operand::RCX, Operand::RAX },
+				{ 0x43812d, { 0x89, 0x91, 0x2c, 0x01, 0x00, 0x00 }, 6, Operand::RCX, Operand::RDX },
+				{ 0x438146, { 0x89, 0x81, 0x2c, 0x01, 0x00, 0x00 }, 6, Operand::RCX, Operand::RAX },
+				{ 0x4385cd, { 0x44, 0x89, 0x82, 0x2c, 0x01, 0x00, 0x00 }, 7, Operand::RDX, Operand::R8 },  // local map (FUN_140438580)
+				{ 0x4388cc, { 0x89, 0x91, 0x2c, 0x01, 0x00, 0x00 }, 6, Operand::RCX, Operand::RDX },  // BSTreeManager (FUN_140438840)
+				{ 0x4388e5, { 0x89, 0x81, 0x2c, 0x01, 0x00, 0x00 }, 6, Operand::RCX, Operand::RAX },
+				{ 0x1e937c, { 0x89, 0x8f, 0x2c, 0x01, 0x00, 0x00 }, 6, Operand::RDI, Operand::RCX },  // harvest (FUN_1401e8ef0)
+				{ 0x1e94ef, { 0x89, 0x8b, 0x2c, 0x01, 0x00, 0x00 }, 6, Operand::RBX, Operand::RCX },  // harvestable 3D (FUN_1401e9450)
+			};
+			const auto base = REL::Module::get().base();
+			for (const auto& site : sites) {
+				if (std::memcmp(reinterpret_cast<const void*>(base + site.offset), site.bytes.data(), site.length) != 0) {
+					logger::warn("[DCLF] switch events not installed: the store at {:#x} is not the expected instruction", 0x140000000 + site.offset);
+					return false;
+				}
+			}
+			std::vector<std::size_t> entries;
+			SwitchStoreStubs stubs(sites, entries);
+			auto* code = static_cast<std::uint8_t*>(SKSE::GetTrampoline().allocate(stubs.getSize()));
+			std::memcpy(code, stubs.getCode(), stubs.getSize());
+			for (std::size_t i = 0; i < sites.size(); ++i) {
+				const std::uintptr_t at = base + sites[i].offset;
+				std::array<std::uint8_t, 7> patch{ 0xE8, 0, 0, 0, 0, 0x90, 0x90 };
+				const auto displacement = static_cast<std::int32_t>(reinterpret_cast<std::intptr_t>(code + entries[i]) - static_cast<std::intptr_t>(at + 5));
+				std::memcpy(patch.data() + 1, &displacement, sizeof(displacement));
+				REL::safe_write(at, patch.data(), sites[i].length);
+			}
+			logger::info("[DCLF] switch events: {} index stores patched ({} bytes of stubs)", sites.size(), stubs.getSize());
+			return true;
+		}
 
 		/** @brief Takes a geometry off a dependents list; true when others remain under the key. */
 		template <class Map, class Key>
@@ -864,6 +1104,11 @@ namespace DCLF
 				continue;
 			}
 			if (auto* node = object->AsNode()) {
+				// Its selected child as the cull would find it (with the switch events, nothing else does it before the
+				// walk classifies it).
+				if (SwitchEventsLive())
+					if (auto* switchNode = node->AsSwitchNode(); switchNode && CatchUpSwitch(*switchNode))
+						++delta.attachCatchUps;
 				const Ineligible below = CombineParentReasons(reason, ParentReason(node));
 				for (auto& child : node->GetChildren()) {
 					if (child)
@@ -941,6 +1186,15 @@ namespace DCLF
 			propertyChanged.clear();
 			DrainNodeEvents(nodeChanged);
 			nodeChanged.clear();
+			// The switches are brought up to date by the rescan's walk (AddSubtree); PrimaryCull reads them all again.
+			for (auto* event = switchEvents.exchange(nullptr, std::memory_order_acquire); event;) {
+				auto* next = event->next;
+				delete event;
+				event = next;
+			}
+			switchPending.clear();
+			switchPendingIndex.clear();
+			switchResync = true;
 			return;
 		}
 		const bool rescanned = rescanPending;
@@ -997,6 +1251,26 @@ namespace DCLF
 		// moved or gave a controller.
 		DrainPropertyEvents(propertyChanged);
 		DrainNodeEvents(nodeChanged);
+		// The switch events, oldest first, one pending entry per switch: its index before the oldest event decides
+		// whether the selection changed (ApplySwitchEvents).
+		SwitchEvent* switches = nullptr;
+		for (auto* event = switchEvents.exchange(nullptr, std::memory_order_acquire); event;) {
+			auto* next = event->next;
+			event->next = switches;
+			switches = event;
+			event = next;
+		}
+		for (auto* event = switches; event;) {
+			++delta.switchEvents;
+			const auto [at, inserted] = switchPendingIndex.try_emplace(event->node.get(), static_cast<std::uint32_t>(switchPending.size()));
+			if (inserted)
+				switchPending.push_back({ std::move(event->node), event->before, event->structural });
+			else
+				switchPending[at->second].structural |= event->structural;
+			auto* next = event->next;
+			delete event;
+			event = next;
+		}
 		if (propertyChanged.size() > kMaxStructuralEvents || nodeChanged.size() > kMaxStructuralEvents) {
 			propertyChanged.clear();
 			nodeChanged.clear();
@@ -2712,9 +2986,10 @@ namespace DCLF
 		std::string text;
 		if (auto& t = delta; t.walks) {
 			const double n = t.walks;
-			text = fmt::format("[DCLF] scene delta: {} walks ({} full), evaluated {:.0f}/frame (max {}; per-frame {:.0f}, of them {:.0f} kept by the light path and {:.0f} moved by it; pending {:.0f}, fade {:.1f}, property {:.1f}, node {:.1f}, sun entry node {:.1f}, geometry {:.1f}), settling {:.1f}, restored {:.0f}, {:.0f} live slots; events per frame: {:.1f} property, {:.1f} node; {:.2f} inputs re-read changed\n",
+			text = fmt::format("[DCLF] scene delta: {} walks ({} full), evaluated {:.0f}/frame (max {}; per-frame {:.0f}, of them {:.0f} kept by the light path and {:.0f} moved by it; pending {:.0f}, fade {:.1f}, property {:.1f}, node {:.1f}, sun entry node {:.1f}, geometry {:.1f}), settling {:.1f}, restored {:.0f}, {:.0f} live slots; events per frame: {:.1f} property, {:.1f} node; {:.2f} inputs re-read changed; switch events {:.2f}/frame: {:.2f} changed, {:.2f} caught up ({:.2f} at attach), {:.1f} entries classified again\n",
 				t.walks, t.full, t.evaluated / n, t.evaluatedMax, t.perFrame / n, t.kept / n, t.moved / n, t.pending / n, t.fade / n, t.property / n, t.node / n, t.roots / n,
-				t.geometryDirty / n, t.settling / n, t.restored / n, t.live / n, t.propertyEvents / n, t.nodeEvents / n, t.reread / n);
+				t.geometryDirty / n, t.settling / n, t.restored / n, t.live / n, t.propertyEvents / n, t.nodeEvents / n, t.reread / n,
+				t.switchEvents / n, t.switchChanges / n, t.switchCatchUps / n, t.attachCatchUps / n, t.switchReclassified / n);
 			if (rootMotion.size() > (1u << 16))
 				rootMotion.clear();
 			t = {};
@@ -3809,8 +4084,106 @@ namespace DCLF
 		stl::detour_thunk<PropertySetMaterial>(REL::Offset(0x147bff0).address());
 		stl::detour_thunk<PrependController>(REL::Offset(0xd268d0).address());
 		stl::detour_thunk<HavokNodeTransform>(REL::Offset(0xea55a0).address());
+		if (SwitchValue("CS_DCLF_SWITCH_EVENTS") != "0" && InstallSwitchStores()) {
+			// NiSwitchNode's own child edits (NiNode vtable slots 0x35, 0x37-0x3C, as SceneTracker's).
+			DetourSwitchSlot<SwitchAttachChild>(0x35);
+			DetourSwitchSlot<SwitchDetachChild1>(0x37);
+			DetourSwitchSlot<SwitchDetachChild2>(0x38);
+			DetourSwitchSlot<SwitchDetachChildAt1>(0x39);
+			DetourSwitchSlot<SwitchDetachChildAt2>(0x3A);
+			DetourSwitchSlot<SwitchSetAt1>(0x3B);
+			DetourSwitchSlot<SwitchSetAt2>(0x3C);
+			switchEventsInstalled = true;
+		}
 		logger::info("[DCLF] scene events installed (fades, property flags and materials, Havok node transforms, controllers): OnVisible at {:#x}",
 			onVisible - REL::Module::get().base() + 0x140000000);
+	}
+
+	bool SceneStore::SwitchEventsLive()
+	{
+		return switchEventsInstalled;
+	}
+
+	void SceneStore::TestSwitchStore(RE::NiSwitchNode* a_switch, std::int32_t a_index)
+	{
+		SwitchIndexStore(a_switch, a_index);
+	}
+
+	bool SceneStore::CatchUpSwitch(RE::NiSwitchNode& a_switch)
+	{
+		// NiSwitchNode::OnVisible: childRevID.SetAt(index, revID) (FUN_140d29990), then the child's UpdateDownwardPass
+		// (vtable slot 0x2C) with NiUpdateData { savedTime (+0x130), flags bit 1 of +0x128 as the update flag }.
+		SwitchState state;
+		if (!ReadSwitch(a_switch, state) || state.index < 0)
+			return false;
+		const auto& children = a_switch.GetChildren();
+		const auto index = static_cast<std::uint32_t>(state.index);
+		if (index >= children.capacity() || !children[static_cast<std::uint16_t>(index)] || !state.childRevID || index >= state.childRevCapacity ||
+			state.childRevID[index] == state.revID)
+			return false;
+		auto* base = reinterpret_cast<std::byte*>(&a_switch);
+		using SetRevision = void (*)(void*, std::uint32_t, const std::uint32_t*);
+		static const REL::Relocation<SetRevision> setRevision{ REL::Offset(0xd29990) };
+		setRevision(base + 0x138, index, reinterpret_cast<const std::uint32_t*>(base + 0x134));
+		struct UpdateData
+		{
+			float time;
+			std::uint32_t flags;
+		} data{ *reinterpret_cast<const float*>(base + 0x130), (state.flags >> 1) & 1u };
+		auto* child = children[static_cast<std::uint16_t>(index)].get();
+		using UpdateDownwardPass = void (*)(RE::NiAVObject*, UpdateData*, std::uint32_t);
+		(*reinterpret_cast<UpdateDownwardPass* const*>(child))[0x2C](child, &data, 0);
+		return true;
+	}
+
+	bool SceneStore::TakeSwitchChanges(std::vector<const RE::NiAVObject*>& a_out)
+	{
+		a_out.clear();
+		a_out.swap(switchesApplied);
+		return std::exchange(switchResync, false) || !SwitchEventsLive();
+	}
+
+	void SceneStore::ApplySwitchEvents(bool a_full)
+	{
+		if (a_full)
+			switchResync = true;
+		for (auto& pending : switchPending) {
+			auto* node = pending.node.get();
+			auto* switchNode = node ? node->AsSwitchNode() : nullptr;
+			// Only the scene the tables cover: a switch still loading is brought up to date by its attach (AddSubtree).
+			if (!switchNode || !FindCategoryNode(node, nullptr))
+				continue;
+			if (!pending.structural && SwitchIndexOf(node) == pending.before)
+				continue;
+			++delta.switchChanges;
+			if (CatchUpSwitch(*switchNode))
+				++delta.switchCatchUps;
+			if (switchesApplied.size() < kMaxSwitchChanges)
+				switchesApplied.push_back(node);
+			else
+				switchResync = true;
+			if (a_full)
+				continue;
+			// Every entry under it: which of them the switch draws is a classification input (ClassifyFrame).
+			constexpr std::size_t kMaxNodes = 4096;
+			std::vector<RE::NiAVObject*> stack{ node };
+			for (std::size_t visited = 0; !stack.empty() && visited < kMaxNodes; ++visited) {
+				auto* object = stack.back();
+				stack.pop_back();
+				if (auto* geometry = object->AsGeometry()) {
+					if (const auto entry = tracked.find(geometry); entry != tracked.end()) {
+						Reclassify(entry->first, entry->second);
+						++delta.switchReclassified;
+					}
+				} else if (auto* inner = object->AsNode()) {
+					for (auto& child : inner->GetChildren())
+						if (child)
+							stack.push_back(child.get());
+				}
+			}
+		}
+		switchPending.clear();
+		switchPendingIndex.clear();
 	}
 
 	void SceneStore::BuildFullOrder()
@@ -4262,7 +4635,8 @@ namespace DCLF
 		std::uint32_t traits = 0;
 		traits |= a_tracked.faceShape ? kTraitFace : 0u;
 		traits |= a_tracked.actorOwned ? kTraitActor : 0u;
-		traits |= a_tracked.parentReason == Ineligible::Switch ? kTraitSwitch : 0u;
+		// A switch's selection changes by event with the switch events (ApplySwitchEvents), not every frame.
+		traits |= a_tracked.parentReason == Ineligible::Switch && !SwitchEventsLive() ? kTraitSwitch : 0u;
 		const auto& data = a_geometry.GetGeometryRuntimeData();
 		traits |= data.skinInstance ? kTraitSkin : 0u;
 		if (const auto* property = data.shaderProperty.get(); property && property->GetControllers())
@@ -4283,7 +4657,9 @@ namespace DCLF
 	std::pair<bool, std::uint32_t> SceneStore::PerFrameOf(const Tracked& a_tracked, const RE::BSGeometry& a_geometry, Ineligible a_reason, std::uint32_t& a_traits,
 		ankerl::unordered_dense::map<const RE::NiAVObject*, bool>* a_freshMotion)
 	{
-		const bool mayRecord = a_tracked.parentReason == Ineligible::Switch || a_reason == Ineligible::None || DeferredToAccumulate(a_reason) ||
+		// An unselected switch child may get a record when its switch selects it: every frame without the switch events,
+		// by event with them (ApplySwitchEvents), like any other verdict.
+		const bool mayRecord = (a_tracked.parentReason == Ineligible::Switch && !SwitchEventsLive()) || a_reason == Ineligible::None || DeferredToAccumulate(a_reason) ||
 		                       ShadowOnlyCaster(a_reason, const_cast<RE::BSGeometry&>(a_geometry));
 		std::uint32_t traits = PerFrameTraits(a_tracked, a_geometry);
 		if (mayRecord && !(traits & (kTraitFace | kTraitActor)) && a_tracked.sunEntryNode) {
@@ -4528,6 +4904,7 @@ namespace DCLF
 			dirtyRoots.clear();
 			count(delta.roots);
 		}
+		ApplySwitchEvents(full);
 		EvaluateRound(timer, result, 0);
 		if (!shadowSetsDirty) {
 			tables.shadowTextureSet = std::move(keptTextureSet);

@@ -225,9 +225,9 @@ The rest:
 So static slots take their property pointers at attach, and the validation walk is the alarm.
 
 **Switch-node selection** has no named setter. `NiSwitchNode` stores its index at `+0x12C`, and harvesting
-(`TESObjectREFR::SetHarvestedFlag`, `0x1401e0e00`) only sets a reference flag. Switch children are a bounded class
-(532 at Riverwood), and the walk already re-reads them every frame, so they stay a per-frame class: one index read
-per switch node.
+(`TESObjectREFR::SetHarvestedFlag`, `0x1401e0e00`) only sets a reference flag. Switch children stayed a per-frame class
+until the culling-job elimination's phase 3 found the stores themselves: the tree manager's, the local map's and
+harvesting's. They are now events ([drawcall-limit-fix.md](./drawcall-limit-fix.md), "Switch selection by event").
 
 ## Phases
 

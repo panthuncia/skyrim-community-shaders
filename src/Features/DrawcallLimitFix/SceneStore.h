@@ -373,6 +373,28 @@ namespace DCLF
 		 * shader properties' flags and materials, Havok's node transforms and the controllers' targets.
 		 */
 		static void InstallSceneEvents();
+		/**
+		 * @brief The switch-selection events are installed (dclf-cull-job-elimination.md, "Phase 3"; CS_DCLF_SWITCH_EVENTS,
+		 * default on, with CS_DCLF_SCENE_DELTA): every writer of an NiSwitchNode's selected index and of its children
+		 * is hooked, the newly selected child is brought up to date when the event is applied (CatchUpSwitch), and an
+		 * entry under a switch is no longer evaluated every frame for its selection.
+		 */
+		static bool SwitchEventsLive();
+		/** @brief [TEMP] CS_DCLF_TEST_HARVEST: a store through the patched stores' handler (the index, and its event). */
+		static void TestSwitchStore(RE::NiSwitchNode* a_switch, std::int32_t a_index);
+		/**
+		 * @brief NiSwitchNode::OnVisible's catch-up (AE 0x140d29700), outside the cull: when the selected child has not
+		 * been updated since the switch's last update pass (childRevID[index] != revID), its revision is marked current
+		 * and it takes UpdateDownwardPass with the switch's saved time. True when it ran. Render thread, the node in the
+		 * scene.
+		 */
+		static bool CatchUpSwitch(RE::NiSwitchNode& a_switch);
+		/**
+		 * @brief PrimaryCull, before the list jobs (render thread): the switch nodes whose selection the walks applied since
+		 * the last call, as keys (never dereferenced). True when the caller must read every switch again instead (a full
+		 * walk, dropped events, or more changes than the list keeps).
+		 */
+		bool TakeSwitchChanges(std::vector<const RE::NiAVObject*>& a_out);
 
 		/**
 		 * @brief Whether a load screen is up, i.e. the scene graph is being rebuilt under us.
@@ -1119,6 +1141,12 @@ namespace DCLF
 		void ScheduleRoot(const RE::NiAVObject* a_root);
 		/** @brief A node Havok moved or gave a controller: the entries under it and the dependents of every node above it. */
 		void ApplyNodeEvent(RE::NiAVObject* a_node);
+		/**
+		 * @brief Before the walk's first round: the drained switch events whose selection changed (the index differs from
+		 * the oldest event's value, or a child was attached, detached or replaced), for switches in the scene. Each is
+		 * brought up to date (CatchUpSwitch) and, in a delta walk, the entries under it are classified again.
+		 */
+		void ApplySwitchEvents(bool a_full);
 		/** @brief What a classification reads from the geometry, its properties and its material, hashed. */
 		static std::uint64_t ClassifyInputsOf(const RE::BSGeometry& a_geometry);
 		void MoveBucket(Tracked& a_tracked, Ineligible a_bucket);
@@ -1156,6 +1184,19 @@ namespace DCLF
 		// The structural events (SceneEvents in SceneStore.cpp), drained at ProcessEvents: properties by key, nodes held.
 		std::vector<const void*> propertyChanged;
 		std::vector<RE::NiPointer<RE::NiAVObject>> nodeChanged;
+		// The switch events (SwitchEvents in SceneStore.cpp) drained so far, one per switch node: the index before its
+		// oldest event, and whether a child changed. Applied, and cleared, by the next walk.
+		struct SwitchPending
+		{
+			RE::NiPointer<RE::NiAVObject> node;
+			std::int32_t before = -1;
+			bool structural = false;
+		};
+		std::vector<SwitchPending> switchPending;
+		ankerl::unordered_dense::map<const RE::NiAVObject*, std::uint32_t> switchPendingIndex;
+		// The switches the walks applied, for PrimaryCull (TakeSwitchChanges); switchResync when it must read them all.
+		std::vector<const RE::NiAVObject*> switchesApplied;
+		bool switchResync = true;
 		// Sun entry nodes something was attached under or detached from since the last walk (keys).
 		std::vector<const RE::NiAVObject*> dirtyRoots;
 		ankerl::unordered_dense::map<const void*, std::vector<RE::BSGeometry*>> propertyDependents;
@@ -1166,6 +1207,7 @@ namespace DCLF
 			std::uint32_t walks = 0, full = 0;
 			std::uint64_t evaluated = 0, perFrame = 0, pending = 0, property = 0, node = 0, roots = 0, fade = 0, geometryDirty = 0, settling = 0, restored = 0, moved = 0, kept = 0;
 			std::uint64_t propertyEvents = 0, nodeEvents = 0, reread = 0;
+			std::uint64_t switchEvents = 0, switchChanges = 0, switchCatchUps = 0, switchReclassified = 0, attachCatchUps = 0;
 			std::uint64_t live = 0;
 			std::uint32_t evaluatedMax = 0;
 		} delta;

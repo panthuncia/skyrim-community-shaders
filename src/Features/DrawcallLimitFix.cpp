@@ -118,6 +118,90 @@ namespace
 	};
 
 	/**
+	 * @brief [TEMP] Test switch CS_DCLF_TEST_HARVEST=<frame>: at that frame (loading screens not counted), the player
+	 * activates the unharvested flora and trees within 4000 units whose produce an NiSwitchNode selects (the root's
+	 * first child, two children). Each harvest stores the switch's index in FUN_1401e8ef0, one of the stores the switch
+	 * events patch (dclf-cull-job-elimination.md, "Phase 3"). 150 frames later the same switches select child 0 again
+	 * through the patched stores' handler with no update pass after it, as the tree manager's stores leave a switch, so
+	 * the walk brings the child up to date (SceneStore::CatchUpSwitch).
+	 */
+	class TestHarvest
+	{
+	public:
+		TestHarvest()
+		{
+			if (const auto value = DCLF::SwitchValue("CS_DCLF_TEST_HARVEST"); !value.empty())
+				at = static_cast<std::uint32_t>(std::strtoul(value.c_str(), nullptr, 10));
+		}
+
+		void OnFrame()
+		{
+			if (!at || DCLF::SceneStore::IsLoadingScreenUp())
+				return;
+			++frame;
+			auto* tasks = SKSE::GetTaskInterface();
+			if (!tasks)
+				return;
+			if (frame == at + 150) {
+				tasks->AddTask([this] {
+					for (auto& node : harvested) {
+						auto* switchNode = node->AsSwitchNode();
+						DCLF::SceneStore::SwitchState before, after;
+						DCLF::SceneStore::ReadSwitch(*switchNode, before);
+						DCLF::SceneStore::TestSwitchStore(switchNode, 0);
+						DCLF::SceneStore::ReadSwitch(*switchNode, after);
+						logger::info("[DCLF][TEMP] test harvest: switch {:#x} back to child 0: index {} -> {}, revID {}, childRevID[0] {}",
+							reinterpret_cast<std::uintptr_t>(switchNode), before.index, after.index, after.revID, after.childRevID ? after.childRevID[0] : 0u);
+					}
+					harvested.clear();
+				});
+				return;
+			}
+			if (frame != at)
+				return;
+			tasks->AddTask([this] {
+				auto* player = RE::PlayerCharacter::GetSingleton();
+				auto* tes = RE::TES::GetSingleton();
+				if (!player || !tes)
+					return;
+				auto switchOf = [](RE::TESObjectREFR* a_ref) -> RE::NiSwitchNode* {
+					auto* root = a_ref->Get3D();
+					auto* node = root ? root->AsNode() : nullptr;
+					if (!node || node->GetChildren().empty() || !node->GetChildren()[0])
+						return nullptr;
+					auto* switchNode = node->GetChildren()[0]->AsSwitchNode();
+					return switchNode && switchNode->GetChildren().size() == 2 ? switchNode : nullptr;
+				};
+				std::vector<RE::TESObjectREFR*> refs;
+				tes->ForEachReferenceInRange(player, 4000.0f, [&](RE::TESObjectREFR* a_ref) {
+					const auto* base = a_ref ? a_ref->GetBaseObject() : nullptr;
+					if (base && (base->GetFormType() == RE::FormType::Flora || base->GetFormType() == RE::FormType::Tree) &&
+						!(a_ref->formFlags & RE::TESObjectREFR::RecordFlags::kHarvested) && switchOf(a_ref) && refs.size() < 8)
+						refs.push_back(a_ref);
+					return RE::BSContainer::ForEachResult::kContinue;
+				});
+				logger::info("[DCLF][TEMP] test harvest: {} harvestable references with a produce switch in range", refs.size());
+				for (auto* ref : refs) {
+					auto* switchNode = switchOf(ref);
+					DCLF::SceneStore::SwitchState before, after;
+					DCLF::SceneStore::ReadSwitch(*switchNode, before);
+					ref->ActivateRef(player, 0, nullptr, 1, false);
+					DCLF::SceneStore::ReadSwitch(*switchNode, after);
+					logger::info("[DCLF][TEMP] test harvest: {:08X} '{}' switch {:#x}: index {} -> {}, revID {} -> {}", ref->GetFormID(),
+						ref->GetBaseObject()->GetName(), reinterpret_cast<std::uintptr_t>(switchNode), before.index, after.index, before.revID, after.revID);
+					if (switchNode->GetFlags().none(RE::NiAVObject::Flag::kHidden) && (after.flags & 1))
+						harvested.emplace_back(switchNode);
+				}
+			});
+		}
+
+	private:
+		std::uint32_t at = 0;
+		std::uint32_t frame = 0;
+		std::vector<RE::NiPointer<RE::NiAVObject>> harvested;
+	};
+
+	/**
 	 * @brief Test switch CS_DCLF_TEST_TOGGLE="<off frame>:<on frame>[:<off frame>:<on frame>...]": flips the
 	 * feature's menu toggle (the same disabled flag the feature list writes) at those frames, loading screens not
 	 * counted, to exercise switching DCLF off and back on in a running session: off at the first, on at the
@@ -336,6 +420,8 @@ void DrawcallLimitFix::Reset()
 	testToggle.OnFrame(GetShortName());
 	static TestTurn testTurn;
 	testTurn.OnFrame();
+	static TestHarvest testHarvest;
+	testHarvest.OnFrame();
 
 	// Every Present, in menus too: the tracker's queue holds references to attached subtrees and
 	// must not grow while the world is not rendered.
