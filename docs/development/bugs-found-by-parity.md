@@ -1,9 +1,15 @@
-# Feature bugs found by DCLF's parity checks
+# Bugs found by DCLF's parity checks
 
-Bugs in other Community Shaders features, found while Drawcall Limit Fix's capture parity compared DCLF's
-draws with the native ones. Each is its own PR. DCLF works around neither; the parity checks report both.
-The investigation that found them is in [drawcall-limit-fix.md](./drawcall-limit-fix.md), "Scene events
-before the walk".
+Bugs found while Drawcall Limit Fix's parity checks compared DCLF's draws with the native ones: in other
+Community Shaders features, and in the engine.
+
+-   **Feature bugs** are each their own PR. DCLF works around none of them; the parity checks report them. The
+    investigation that found the first two is in [drawcall-limit-fix.md](./drawcall-limit-fix.md), "Scene
+    events before the walk".
+-   **Engine bugs** cannot be fixed at the source by a PR. Where the native result is undefined, DCLF picks a
+    deterministic rule, stated in the entry, and the parity checks compare against that rule.
+
+# Community Shaders features
 
 ## TruePBR: a loader thread writes MATO data into materials that are being drawn
 
@@ -97,3 +103,27 @@ per draw, DCLF has to model it:
 -   a per-object permutation bit, like `kObjectSuppressExternalEmittance`.
 
 Capture parity's permutation check will then compare it on every skin draw.
+
+# The engine
+
+## Hair with ProjectedUV shades another object's snow
+
+**Where:** `BSLightingShader::SetupGeometry` (AE `0x1414dd040`), its ProjectedUV block (skyrim-engine-notes.md,
+"ProjectedUV and MTLand"). It writes `TextureProj` (VS PerGeometry 6) and `ProjectedUVParams` 1-3 (PS
+PerGeometry 12-14) for a pass with descriptor bit 15 (ProjectedUV), **for every technique but Hair (6)**.
+
+**What happens.** Hair parts can carry the ProjectedUV flag. The Riverwood NPCs' hairlines, brows and beards
+do: decal-flagged, blended, drawn in the engine's blended decal group (accumulation hint 3). Their pass has
+bit 15, so the Lighting permutation is the projected one and its pixel shader reads those constants, but
+`SetupGeometry` skips them for Hair. The draw shades its snow or moss projection from whatever the previous
+projected draw left in the constant buffers: another object's parameters, which depend on draw order.
+
+**Evidence** (capture parity, `CS_DCLF_OWNERSHIP=0 CS_DCLF_CAPTURE_PARITY=1`, Riverwood): 1,500-2,000
+per-geometry mismatches per 300 frames, all on those four variables and all on hair, with native values such
+as `TextureProj` 2.35e-38 and -9.0e26, and `ProjectedUVParams` 6.2e21, next to plausible leftovers (0.4264488 on
+two different hairlines in one frame).
+
+**DCLF's rule:** hair draws without the projection. `DrawnPassDescriptor` (`LightingDescriptors.h`,
+`HairProjection`) drops bit 15 from a Hair pass, so DCLF's pipeline is the unprojected permutation and writes
+no projected constants. Capture parity leaves that bit out of its descriptor and permutation comparisons for
+such passes, and is then OK (0 mismatched) at Riverwood.

@@ -169,8 +169,23 @@ namespace DCLF
 	 * without the bit native (alpha-test-state), and each switch between the two left a frame in which the
 	 * native loop had been told not to draw the object and DCLF did not either.
 	 */
+	inline constexpr std::uint32_t kPassProjectedUV = 1u << 15;  // pass descriptor ProjectedUV
+
+	/**
+	 * @brief The Hair technique (6) with ProjectedUV: BSLightingShader::SetupGeometry writes the projected-UV
+	 * constants (VS TextureProj, PS ProjectedUVParams 1-3) for every technique but Hair, so the native draw shades
+	 * the projection from whatever the previous projected draw left in them - another object's snow or moss
+	 * (docs/development/bugs-found-by-parity.md). DCLF draws such hair without the projection.
+	 */
+	inline bool HairProjection(std::uint32_t a_descriptor)
+	{
+		return ((a_descriptor >> 24) & 0x3f) == 6 && (a_descriptor & kPassProjectedUV) != 0;
+	}
+
 	inline std::uint32_t DrawnPassDescriptor(std::uint32_t a_descriptor, std::uint32_t a_subPass)
 	{
+		if (HairProjection(a_descriptor))
+			a_descriptor &= ~kPassProjectedUV;
 		return (a_subPass == 1 || a_subPass == 3 || a_subPass == 4) ? (a_descriptor | kPassDoAlphaTest) : a_descriptor;
 	}
 

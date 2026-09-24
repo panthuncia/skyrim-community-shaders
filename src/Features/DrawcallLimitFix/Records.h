@@ -78,6 +78,15 @@ namespace DCLF
 		kObjectShadowOnly = 1u << 24,
 	};
 
+	/**
+	 * @brief The shadow epochs' face positions buffer (FaceSnapshots): one float4 per vertex of every face shape
+	 * drawn, each shape in a region SceneStore keeps for it while it is walked. Bound as a face draw's second
+	 * vertex stream, which is where the engine's own draw puts BSDynamicTriShape::dynamicData.
+	 */
+	inline constexpr std::uint32_t kFacePositionVertices = 1u << 20;
+	inline constexpr std::uint32_t kNoFaceRegion = ~0u;
+	inline constexpr std::uint32_t kNoFaceStream = ~0u;
+
 	/** @brief Rows of per-object extras in the row buffer: LandBlendParams, TextureProj x3, ProjectedUVParams x3. */
 	inline constexpr std::uint32_t kExtraRows = 7;
 	inline constexpr std::uint32_t kExtraRowLandBlend = 0;
@@ -216,7 +225,13 @@ namespace DCLF
 		kRasterBlendExtra = 1u << 16,
 		// Shadow keys only: 4 bits, the view's rasterizer state (DrawPipelines::ShadowRasterStateId, 1-15).
 		kRasterShadowStateShift = 17,
+		// Main keys only: 3 bits, Extended Translucency's material model for the draw XOR DescriptorDisabled (so an
+		// opaque key, whose model is disabled, keeps 0 here). ExtendedTranslucency::MaterialModelOf sets it per
+		// geometry in the feature's SetupGeometry hook; it differs from disabled only for blended geometry (blended
+		// decals, such as NPC hairlines and beards), and it is the permutation's ExtraFeatureDescriptor.
+		kRasterTranslucencyShift = 21,
 	};
+	inline constexpr std::uint32_t kRasterTranslucencyMask = 7u << kRasterTranslucencyShift;
 
 	inline constexpr std::uint32_t RasterDecalGroup(std::uint32_t a_flags) { return (a_flags >> kRasterDecalGroupShift) & 3u; }
 	inline constexpr std::uint32_t RasterDepthBiasMode(std::uint32_t a_flags) { return (a_flags >> kRasterDepthBiasShift) & 15u; }
@@ -227,8 +242,9 @@ namespace DCLF
 	{
 		return (a_flags & ~(15u << kRasterShadowStateShift)) | ((a_state & 15u) << kRasterShadowStateShift);
 	}
-	/** @brief Everything but the two-sided bit: what selects the engine's state objects. */
-	inline constexpr std::uint32_t RasterStateBits(std::uint32_t a_flags) { return a_flags & ~kRasterTwoSided; }
+	/** @brief Everything but the two-sided bit and the translucency model: what selects the engine's state objects. */
+	inline constexpr std::uint32_t RasterStateBits(std::uint32_t a_flags) { return a_flags & ~(kRasterTwoSided | kRasterTranslucencyMask); }
+	inline constexpr std::uint32_t RasterTranslucency(std::uint32_t a_flags) { return (a_flags & kRasterTranslucencyMask) >> kRasterTranslucencyShift; }
 
 	/** @brief Packs a decal's state indices (EngineStates.h says where each comes from). */
 	inline constexpr std::uint32_t PackDecalRasterFlags(std::uint32_t a_group, std::uint32_t a_depthBiasMode, std::uint32_t a_blendMode,
@@ -272,7 +288,11 @@ namespace DCLF
 	/**
 	 * @brief One indirect draw, in the argument order of the command signature (BasicRHI packs arguments
 	 * like D3D12, 4-byte aligned): pipeline set index, push data (the DrawBindings record's address),
-	 * vertex buffer view, index buffer view (D3D12 VBV / IBV layouts), DrawIndexed.
+	 * two vertex buffer views, index buffer view (D3D12 VBV / IBV layouts), DrawIndexed.
+	 *
+	 * The second view is slot 1, where a dynamic shape's positions are (FaceSnapshots; the engine's own draw
+	 * binds BSDynamicTriShape::dynamicData there). Every other draw repeats its slot 0 view, which a layout
+	 * without a second stream never reads.
 	 *
 	 * The scene tables hold the geometry part with the pipeline's table index; the main-pass epoch
 	 * replaces it with the pipeline set index and fills in the record address.
@@ -289,6 +309,9 @@ namespace DCLF
 		std::uint64_t vertexBufferAddress;  // GeometryRecord::vertexAddress (0 without the render graph)
 		std::uint32_t vertexBufferSize;
 		std::uint32_t vertexStride;
+		std::uint64_t streamBufferAddress;  // slot 1: a face shape's positions, else the slot 0 view again
+		std::uint32_t streamBufferSize;
+		std::uint32_t streamStride;
 		std::uint64_t indexBufferAddress;  // GeometryRecord::indexAddress
 		std::uint32_t indexBufferSize;
 		std::uint32_t indexFormat;  // DXGI_FORMAT_R16_UINT
@@ -299,10 +322,11 @@ namespace DCLF
 		std::uint32_t firstInstance;
 	};
 #pragma pack(pop)
-	static_assert(sizeof(DrawSequence) == 68);
+	static_assert(sizeof(DrawSequence) == 84);
 	static_assert(offsetof(DrawSequence, bindingsAddress) == 4);
 	static_assert(offsetof(DrawSequence, objectIndex) == 12);
 	static_assert(offsetof(DrawSequence, vertexBufferAddress) == 16);
-	static_assert(offsetof(DrawSequence, indexBufferAddress) == 32);
-	static_assert(offsetof(DrawSequence, indexCount) == 48);
+	static_assert(offsetof(DrawSequence, streamBufferAddress) == 32);
+	static_assert(offsetof(DrawSequence, indexBufferAddress) == 48);
+	static_assert(offsetof(DrawSequence, indexCount) == 64);
 }

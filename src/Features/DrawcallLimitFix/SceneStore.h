@@ -133,6 +133,19 @@ namespace DCLF
 			// which the cascade culls walk): centre and radius, absolute world space; a negative radius when the
 			// entry is never tested (an actor's, whose entry is its cell's container). SceneStore::SunEntryOf.
 			std::vector<std::array<float, 4>> sunEntry;  // parallel to objects
+			// NPC face shapes (Tracked::faceShape): per face object its positions in the snapshot the walk took
+			// (FaceSnapshots::Shape), valid until the next walk, and the region of the positions buffer they go to.
+			// The shadow epoch uploads a region when its generation changed, and binds it as the second stream.
+			struct FaceStream
+			{
+				std::uint32_t object = 0;
+				std::uint32_t region = kNoFaceRegion;  // first vertex in the positions buffer
+				std::uint32_t vertexCount = 0;
+				std::uint64_t generation = 0;
+				const float* positions = nullptr;
+			};
+			std::vector<FaceStream> faceStreams;
+			std::vector<std::uint32_t> faceStream;  // parallel to objects: index in faceStreams, or kNoFaceStream
 			// What an alpha-tested caster's shadow draw samples: its material's diffuse view, and the material
 			// as the key its binding record is shared under. Read off the property here; the shadow epoch's
 			// build reads only the material's texture transform, which shader-property controllers
@@ -621,6 +634,10 @@ namespace DCLF
 			 */
 			std::uint32_t candidateFrame = 0;  // 0: never classified
 			Ineligible candidateReason = Ineligible::None;
+			// An NPC face shape: a BSDynamicTriShape under a BSFaceGenNiNode, whose positions are FaceSnapshots'.
+			// Resolved once, by the walk.
+			bool faceShape = false;
+			bool faceShapeResolved = false;
 			static constexpr std::uint32_t kCandidateRefreshFrames = 64;
 			// The accumulate phase's verdict when it left the object without bindings, and the frame it did so
 			// (ReasonThisFrame).
@@ -801,6 +818,21 @@ namespace DCLF
 		WalkResult SceneWalk(bool a_renderThread);
 		/** @brief Clears the per-object tables and the walk's per-frame counters. */
 		void BeginWalk();
+		/**
+		 * @brief A face shape's region of the positions buffer (Records.h kFacePositionVertices), kept while the
+		 * walks see the shape; kNoFaceRegion when the buffer is full. EndFaceWalk frees the regions of shapes the
+		 * walk did not see. The walk's thread alone.
+		 */
+		std::uint32_t FaceRegionOf(const RE::BSGeometry* a_geometry, std::uint32_t a_vertexCount);
+		void EndFaceWalk();
+		struct FaceRegion
+		{
+			std::uint32_t first = 0, count = 0, seenWalk = 0;
+		};
+		ankerl::unordered_dense::map<const RE::BSGeometry*, FaceRegion> faceRegions;
+		std::vector<std::pair<std::uint32_t, std::uint32_t>> faceRegionFree;  // (first, count), sorted, coalesced
+		std::uint32_t faceRegionTop = 0;
+		std::uint32_t faceWalk = 0;
 		/** @brief Before the worker's walk: the render-thread calls it would make - Touch last frame's slots, update last frame's skins. */
 		void PrepareSceneJob();
 		AsyncWorker::JobHandle sceneJob;

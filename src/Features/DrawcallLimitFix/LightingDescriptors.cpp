@@ -37,7 +37,7 @@ namespace DCLF
 			return Toggles::Get().Active().trees;
 		}
 
-		// Techniques Phase 1 handles. The rest (terrain, faces, LOD, eyes, ...) stay native.
+		// Techniques Phase 1 handles. The rest (LOD, parallax occlusion, sparkle, ...) stay native.
 		bool IsSupportedTechnique(std::uint32_t a_technique)
 		{
 			switch (static_cast<Technique>(a_technique)) {
@@ -49,7 +49,13 @@ namespace DCLF
 			case Technique::TreeAnim:
 				return TreesEnabled();
 			// Actor skin (bodies, hands): the Lighting shader's SKIN path with TintColor, a PerMaterial constant.
+			// NPC faces (Facegen: the tint and detail maps at t3/t4), hair (Hair: TintColor) and eyes (Eye: the eye
+			// centres, material VS constants): everything they add is written by SetupMaterial, which the material
+			// records take from the engine's own evaluation. A face part's positions are FaceSnapshots'.
 			case Technique::FacegenRGBTint:
+			case Technique::Facegen:
+			case Technique::Hair:
+			case Technique::Eye:
 				return ActorsEnabled();
 			case Technique::MTLand:
 			case Technique::MTLandLODBlend:

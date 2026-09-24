@@ -67,6 +67,7 @@ namespace DCLF
 			// by the view's render mode (plain 0xD, clamped 0xE, paraboloid 0xF).
 			std::array<std::uint32_t, 3> shadowWithheld{};
 			std::uint32_t volumetricWithheld = 0;  // volumetric-only passes (hint 8) kept out of batch group 15
+			std::uint32_t directWithheld = 0;      // shadow passes of hints 11, 7 and 3, which bypass RegisterPass too
 			std::uint32_t claimed = 0;   // objects DCLF said it owns
 			// Claimed but not drawn this frame. Withholding means nothing else will draw them either, so
 			// any of these is a visible hole - the one failure mode static ownership introduces.
@@ -219,8 +220,15 @@ namespace DCLF
 		std::array<std::shared_ptr<const ClaimSet>, kShadowModes> shadowClaims;
 		std::array<std::atomic<std::uint32_t>, kShadowModes> shadowWithheld{};
 		std::atomic<std::uint32_t> volumetricWithheld{ 0 };
+		std::atomic<std::uint32_t> directWithheld{ 0 };
+		/** @brief The shadow claim test at a direct group insertion: true when the pass is withheld. */
+		bool WithholdAtGroup(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::atomic<std::uint32_t>& a_counter);
 		struct VolumetricGroupHook;
 		friend struct VolumetricGroupHook;
+		template <std::uint32_t Hint>
+		struct DirectGroupHook;
+		template <std::uint32_t Hint>
+		friend struct DirectGroupHook;
 
 		struct Hook;
 		friend struct Hook;

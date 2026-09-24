@@ -160,6 +160,7 @@ namespace DCLF
 			rhi::FinalizedInputLayout layout;
 			// The stride is dynamic (set per draw by the VertexBuffer argument).
 			layout.bindings.push_back(rhi::InputBindingDesc{ 0, 16, rhi::InputRate::PerVertex, 1 });
+			bool secondStream = false;
 			for (const auto& input : a_vertex.inputs) {
 				const VertexElement* element = nullptr;
 				for (std::uint32_t i = 0; i < elements.count && !element; ++i) {
@@ -168,11 +169,16 @@ namespace DCLF
 				}
 				if (!element)
 					throw std::runtime_error(fmt::format("vertex input {}{} is not in the geometry's layout {:016X}", input.semantic, input.semanticIndex, a_vertexLayout));
-				if (element->slot != 0 || element->perInstance)
-					throw std::runtime_error(fmt::format("vertex input {}{} comes from stream {} (only static geometry's single stream is supported)", input.semantic,
-						input.semanticIndex, element->slot));
-				layout.attributes.push_back(rhi::InputAttributeDesc{ 0, element->offset, rhi::helpers::ToRHI(element->format), element->semantic, element->semanticIndex, input.location });
+				// Stream 1 is a dynamic shape's positions (BSDynamicTriShape::dynamicData, float4 a vertex): every draw
+				// binds a second vertex buffer (DrawSequence), a face shape's positions or its own buffer again.
+				if (element->slot > 1 || element->perInstance)
+					throw std::runtime_error(fmt::format("vertex input {}{} comes from stream {} (only the geometry's stream and a dynamic shape's positions are supported)",
+						input.semantic, input.semanticIndex, element->slot));
+				secondStream |= element->slot == 1;
+				layout.attributes.push_back(rhi::InputAttributeDesc{ element->slot, element->offset, rhi::helpers::ToRHI(element->format), element->semantic, element->semanticIndex, input.location });
 			}
+			if (secondStream)
+				layout.bindings.push_back(rhi::InputBindingDesc{ 1, 16, rhi::InputRate::PerVertex, 1 });
 			return layout;
 		}
 	}
@@ -537,16 +543,18 @@ namespace DCLF
 		/** @brief The shadow set's command signature; the same DrawSequence stream as the main pass's. */
 		bool CreateShadowSignature()
 		{
-			rhi::IndirectArg args[5]{};
+			rhi::IndirectArg args[6]{};
 			args[0].kind = rhi::IndirectArgKind::PipelineIndex;
 			args[1].kind = rhi::IndirectArgKind::Constant;
 			args[1].u.rootConstants = { 0, 0, 3 };
 			args[2].kind = rhi::IndirectArgKind::VertexBuffer;
 			args[2].u.vertexBuffer.slot = 0;
-			args[3].kind = rhi::IndirectArgKind::IndexBuffer;
-			args[4].kind = rhi::IndirectArgKind::DrawIndexed;
+			args[3].kind = rhi::IndirectArgKind::VertexBuffer;
+			args[3].u.vertexBuffer.slot = 1;
+			args[4].kind = rhi::IndirectArgKind::IndexBuffer;
+			args[5].kind = rhi::IndirectArgKind::DrawIndexed;
 			rhi::CommandSignatureDesc desc{};
-			desc.args = { args, 5 };
+			desc.args = { args, 6 };
 			desc.byteStride = sizeof(DrawSequence);
 			desc.pipelineSet = shadowSet->GetHandle();
 			return device.CreateCommandSignature(desc, layout->GetHandle(), shadowSignature) == rhi::Result::Ok;
@@ -555,16 +563,18 @@ namespace DCLF
 		// The command signature of DrawSequence (Records.h), created with the set it selects from.
 		bool CreateSignature(std::uint32_t a_variant)
 		{
-			rhi::IndirectArg args[5]{};
+			rhi::IndirectArg args[6]{};
 			args[0].kind = rhi::IndirectArgKind::PipelineIndex;
 			args[1].kind = rhi::IndirectArgKind::Constant;
 			args[1].u.rootConstants = { 0, 0, 3 };  // DrawBindings address + object index -> the layout's push data
 			args[2].kind = rhi::IndirectArgKind::VertexBuffer;
 			args[2].u.vertexBuffer.slot = 0;
-			args[3].kind = rhi::IndirectArgKind::IndexBuffer;
-			args[4].kind = rhi::IndirectArgKind::DrawIndexed;
+			args[3].kind = rhi::IndirectArgKind::VertexBuffer;  // a face shape's positions (DrawSequence::streamBuffer*)
+			args[3].u.vertexBuffer.slot = 1;
+			args[4].kind = rhi::IndirectArgKind::IndexBuffer;
+			args[5].kind = rhi::IndirectArgKind::DrawIndexed;
 			rhi::CommandSignatureDesc desc{};
-			desc.args = { args, 5 };
+			desc.args = { args, 6 };
 			desc.byteStride = sizeof(DrawSequence);
 			desc.pipelineSet = sets[a_variant]->GetHandle();
 			return device.CreateCommandSignature(desc, layout->GetHandle(), signatures[a_variant]) == rhi::Result::Ok;

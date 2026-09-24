@@ -828,3 +828,35 @@ So an object samples the sun's shadow mask in the main pass only if the sun's ac
 in a cascade that frame. Skipping that accumulation changes main-pass techniques unless those bits are
 set some other way. `lastAccumulatedFrameCount` has no reader found yet.
 
+## Face morphing: the only writer of a face's positions
+
+An NPC's head, mouth, eyes, brows, hair and beard are `BSDynamicTriShape`s under a `BSFaceGenNiNode`. Their
+positions are not in a vertex buffer: they are `dynamicData` (`+0x160`), one float4 per vertex (`dataSize` is
+exactly `vertexCount * 16`), guarded by a `BSSpinLock` at `+0x168` (lock `FUN_140d38c60`, unlock
+`FUN_140d38cc0`). AE 1.6.1170.
+
+-   **The writer.** The job stage "Face morphing" (`Job_Face_morphing`, `0x1406d36b0`, RELOCATION_ID
+    38139/39096) is in the "Main post render" stage (`SetupJobLists`, job table `0x142011d60`: Face morphing,
+    Sky, Shared particles, Update grass), after the scene and its shadow maps are drawn.
+    `impl_Job_Face_morphing` (`0x140432f90`) queues one job per head on job list 12 (`FUN_1404334e0`, which
+    calls `FUN_140432550(head, flags & 1)` at `+0x13`), then the stage calls `JobList::Finish`
+    (`FUN_140cf6810`, at `0x1406d36fd`). `FUN_140432550` walks the head's direct children (`+0x118` data,
+    `+0x122` count): it resets a shape to its base positions (`FUN_14042b4b0` -> `FUN_140d38d70`, without the
+    lock), then applies each morph under its own lock and unlock (`FUN_14042fcc0`, `FUN_140430600`). So the
+    lock keeps one copy from tearing, not a head: a reader holding it can see a head half morphed.
+-   **Which heads.** `BSFaceGenNiNode::UpdateDownwardPass` queues a head (`FUN_1404330c0`, the list at
+    `0x14313fa18`, count `0x14313fa28`, a spin flag at `0x14313fa30`) only while its face animates or is near.
+    Between jobs the positions do not change.
+-   **Everything else reads.** Decals (`1405f0ea0`, `1405f10c0`, `1405ef640`), hit tests (`140e54370`),
+    `BSFaceGenBaseMorphExtraData` creation (`140431670`, `1404318c0`), and the draws. Particle geometry
+    (`1414c77d0`, `1414c78a0`) is another use of `BSDynamicTriShape`, with its own writer.
+-   **The draw.** `FUN_1414f3dc0` / `FUN_1414f4560` copy the whole `dynamicData` under the lock into the
+    renderer's dynamic vertex ring (`FUN_140e46d60`: three 4 MB buffers mapped `WRITE_NO_OVERWRITE`, reused once a
+    query says the GPU is past them) for every draw of every view, and bind it as stream 1. A skinned shape then
+    draws its partitions (`BSDismemberSkinInstance::Unk_25` -> `NiSkinPartition::Unk_25`, `0x140d43a10`) with the
+    partition's `buffData` as stream 0 and the ring as stream 1. All partitions of a shape share one vertex
+    buffer in the shape's own vertex order (a head: 898 vertices, partitions of 102, 777 and 50 that overlap at
+    their seams), so stream 1 is indexed by the same vertex index.
+-   **The layout.** A face partition's `vertexDesc` has the position on stream 1 (bit 54) and nothing else
+    there; stream 0 holds UV, colour and skinning (stride 20 for a head).
+-   **Timing.** Frame N's render draws the morphs of frame N-1's post-render stage.

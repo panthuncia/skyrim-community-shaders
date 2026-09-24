@@ -132,6 +132,7 @@ namespace DCLF
 		for (std::uint32_t m = 0; m < kShadowModes; ++m)
 			stats.shadowWithheld[m] = shadowWithheld[m].exchange(0, std::memory_order_relaxed);
 		stats.volumetricWithheld = volumetricWithheld.exchange(0, std::memory_order_relaxed);
+		stats.directWithheld = directWithheld.exchange(0, std::memory_order_relaxed);
 		lastDrain = { entries.data(), count };
 		handedBack.clear();
 		withheldThisFrame.clear();
@@ -316,30 +317,56 @@ namespace DCLF
 	 * view's render mode; the claim set is the mode's one, which holds these casters only while DCLF draws the
 	 * copy's views (the inputs of a mode carry them only then).
 	 */
+	bool PassCapture::WithholdAtGroup(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::atomic<std::uint32_t>& a_counter)
+	{
+		if (!a_pass || !a_pass->geometry || bypassed.load(std::memory_order_acquire) || !ShadowWithholdingEnabled())
+			return false;
+		const auto renderers = std::atomic_load(&shadowRenderers);
+		if (!renderers)
+			return false;
+		const auto it = renderers->find(a_batch);
+		if (it == renderers->end() || it->second >= kShadowModes)
+			return false;
+		const auto owned = std::atomic_load(&shadowClaims[it->second]);
+		const bool claimed = owned && owned->contains(a_pass->geometry);
+		// [TEMP] CS_DCLF_CASCADE_PROBE: these registrations belong to the view's caster set too, so the probe can
+		// compare them with DCLF's.
+		if (CascadeProbeEnabled()) {
+			std::lock_guard lock(shadowRegistrationsLock);
+			if (shadowRegistrations.size() < 65536)
+				shadowRegistrations.push_back({ a_batch, a_pass->geometry, claimed });
+		}
+		if (claimed)
+			a_counter.fetch_add(1, std::memory_order_relaxed);
+		return claimed;
+	}
+
 	struct PassCapture::VolumetricGroupHook
 	{
 		static void thunk(RE::BSBatchRenderer* a_batch, RE::BSRenderPass* a_pass, std::uint32_t a_group, std::uint32_t a_arg)
 		{
 			auto& capture = PassCapture::Get();
-			if (a_pass && a_pass->geometry && !capture.bypassed.load(std::memory_order_acquire) && ShadowWithholdingEnabled()) {
-				if (const auto renderers = std::atomic_load(&capture.shadowRenderers)) {
-					if (const auto it = renderers->find(a_batch); it != renderers->end() && it->second < kShadowModes) {
-						const auto owned = std::atomic_load(&capture.shadowClaims[it->second]);
-						const bool claimed = owned && owned->contains(a_pass->geometry);
-						// [TEMP] CS_DCLF_CASCADE_PROBE: the engine's volumetric-only registrations belong to the view's
-						// caster set too, so the probe can compare them with DCLF's.
-						if (CascadeProbeEnabled()) {
-							std::lock_guard lock(capture.shadowRegistrationsLock);
-							if (capture.shadowRegistrations.size() < 65536)
-								capture.shadowRegistrations.push_back({ a_batch, a_pass->geometry, claimed });
-						}
-						if (claimed) {
-							capture.volumetricWithheld.fetch_add(1, std::memory_order_relaxed);
-							return;
-						}
-					}
-				}
-			}
+			if (capture.WithholdAtGroup(a_batch, a_pass, capture.volumetricWithheld))
+				return;
+			func(a_batch, a_pass, a_group, a_arg);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	/**
+	 * @brief The same registration's other direct insertions (FUN_1414b2a60): accumulation hint 11 into batch
+	 * group 9 (+0xC9), hint 7 into group 1 (+0xDB) and hint 3, a decal-flagged caster such as an NPC's face
+	 * part, into group 4 (+0xED). None of them reaches RegisterPass, so a claimed caster registered with one of
+	 * these hints was drawn by both DCLF and the engine until they were withheld here as well.
+	 */
+	template <std::uint32_t Hint>
+	struct PassCapture::DirectGroupHook
+	{
+		static void thunk(RE::BSBatchRenderer* a_batch, RE::BSRenderPass* a_pass, std::uint32_t a_group, std::uint32_t a_arg)
+		{
+			auto& capture = PassCapture::Get();
+			if (capture.WithholdAtGroup(a_batch, a_pass, capture.directWithheld))
+				return;
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -353,6 +380,9 @@ namespace DCLF
 		// AE only: the SE and VR offsets of the call are unverified (no database for them).
 		if (REL::Module::IsAE()) {
 			stl::write_thunk_call<VolumetricGroupHook>(REL::Offset(0x14b2b5f).address());
+			stl::write_thunk_call<DirectGroupHook<11>>(REL::Offset(0x14b2b29).address());
+			stl::write_thunk_call<DirectGroupHook<7>>(REL::Offset(0x14b2b3b).address());
+			stl::write_thunk_call<DirectGroupHook<3>>(REL::Offset(0x14b2b4d).address());
 			volumetricHookInstalled = true;
 		}
 		installed = true;

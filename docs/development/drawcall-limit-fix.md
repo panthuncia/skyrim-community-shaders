@@ -3543,7 +3543,7 @@ still applies them every Present, in menus too, so the queue cannot grow while t
 parity 0 and holes 0.
 
 **Found on the way** (the first two are recorded for their PRs in
-[feature-bugs-found-by-parity.md](./feature-bugs-found-by-parity.md)):
+[bugs-found-by-parity.md](./bugs-found-by-parity.md)):
 
 -   **A loader thread writes materials that are being drawn.** On some runs, the first interval had 8-13
     `ParallaxOccData` mismatches (DCLF 1, native 0.7), each on one frame. TruePBR's `TESBoundObject::Clone3D`
@@ -3954,3 +3954,97 @@ block.
     The far slices step twice during the run, at about the same time in every run and in native periods as
     well: a scene change, not DCLF.
 
+## NPC faces: positions published by the engine's own writer
+
+The last class the engine cast into the sun's views was NPC face shapes (`BSDynamicTriShape` under a
+`BSFaceGenNiNode`): 6 a frame at the road, 45 at Riverwood. Their positions are `dynamicData`, written by the
+face morphing jobs (skyrim-engine-notes.md, "Face morphing"). DCLF never reads it or takes its lock.
+
+-   **Capture in the writer** (`FaceSnapshots`, AE only, `CS_DCLF_FACEGEN=0` turns it off). A thunk on each
+    head's morph call (`0x1404334f3`) copies, on the job's thread, every face shape of that head into a
+    snapshot as soon as the job has morphed it. A thunk after the stage's `JobList::Finish` (`0x1406d36fd`),
+    when no morph job runs, captures the heads that want a first snapshot (new, rebuilt, never animated).
+-   **One head, one slot.** A head's snapshots are a lock-free triple buffer: the writer fills its slot and
+    exchanges it into `latest`; the walk takes the newest at its start. Every shape of a head is read from one
+    slot, so from one job run: a head is never drawn from two updates. Under the engine's schedule the walk
+    reads what the engine's draws read (frame N-1's morphs); if the schedule changes, it reads the newest
+    whole head.
+-   **Lifetime.** The walk alone creates, rebuilds (a head's shapes changed) and retires records. Writers find
+    them through a fixed open-addressed table keyed by the head; a retired record is freed once a morph stage
+    has completed after it, since no job spans a stage's join.
+-   **In the tables.** A face shape was first `Ineligible::FaceGen`, shadow-only; it is now classified like any
+    shape, with its positions as a property of the object (see "NPC face parts in the main pass"). Its
+    positions go to a region of the epoch's positions buffer (a float4 a vertex, kept per shape while walked),
+    uploaded only when the head's snapshot generation changed (about 3 regions a frame at Riverwood).
+-   **The draw.** Shadow sequences are `ShadowDrawSequence` (84 bytes, a second vertex buffer view after the
+    first); `BuildDrawsCS` writes them for the shadow dispatches (`kPhaseBitsShadowSequences`), with the input's
+    `streamIndex` naming a `GeometryDraw` appended after the geometry slots. The shadow pipelines declare
+    binding 1 when their layout reads it. The shadow pass declares the buffer as a vertex buffer
+    (`BindVertexBuffer`, added to ORG's `RenderPassBuilder`), so the graph orders the uploads before the draws.
+-   **Claims.** Face parts register at hints 0 and 3. Hints 11, 7 and 3 bypass `RegisterPass` as hint 8 does
+    (`FUN_1414b2a60`); the same claim test now withholds them at their direct calls (`0x1414b2b29`, `b3b`,
+    `b4d`). Before this about 540 passes a frame of claimed casters with those hints were drawn by the engine
+    as well as by DCLF.
+
+**The defect found on the way.** The first build broke the far cascade (0 % clear against 31 % native).
+Bisecting showed it with face shapes dropped before any snapshot, slot or palette: face parts with the decal
+flag (brows, hairlines) got `Ineligible::Decal` from the derivation, and `Decal` is the verdict the walk defers
+to the accumulate phase with a record. So those dynamic shapes became ordinary casters without their positions,
+and the second stream fell back to their own buffer: UVs and weights drawn as positions. A face shape is now
+`FaceGen` or rejected, never deferred, and an input whose layout reads its position from stream 1 must have a
+face stream.
+
+**Result** at Riverwood across three live toggles: far cascade 31.3 % / 30.9 % clear with DCLF against 31.4 % /
+31.0 % native, VSM mip 0 0.4996 against 0.4984. With DCLF on, the engine draws nothing into the cascades
+or the volumetric copy; the only engine Utility draws left are the focus view's 9 a frame. Snapshot parity with
+`dynamicData` at the walk (TEMP, `CS_DCLF_VOLUMETRIC_PROBE`): 27,600 of 27,600 equal, 0 layout mismatches.
+
+## NPC face parts in the main pass
+
+Face parts are DCLF's in the main pass too. Measured at Riverwood (TEMP, both pass sources agree, so every
+face pass reaches `RegisterPass`):
+
+| Face part | Technique | Pass |
+| --- | --- | --- |
+| heads | Facegen (4) | hint 0, list 0 |
+| mouths | 0, alpha-tested | hint 0, list 1 |
+| hair, beards | Hair (6), alpha-tested | hint 0, list 1 |
+| hairlines, brows, some hair and beards | Hair (6), decal-flagged, blended | hint 3 (the blended decal group) |
+
+-   **A face shape is a property of the object, not a verdict.** `Ineligible::FaceGen` is gone. A face shape
+    (`Tracked::faceShape`, from its type and parent) is classified like any shape, every frame, and the walk
+    gives every record of one its positions stream, whatever the verdict, a deferred decal included. Without a
+    snapshot or a region it gets no record, and the engine keeps it. This is the contract that the shadow-only
+    shortcut broke (the decal-flagged parts drawn without positions, above).
+-   **One sequence layout.** `DrawSequence` is 84 bytes everywhere: a second vertex buffer view (slot 1) after
+    the first, a face shape's positions or its own buffer again. Both main signatures and the shadow signature
+    have the slot-1 argument; `BuildInputLayout` declares binding 1 when a layout reads it. `ShadowDrawSequence`
+    is gone.
+-   **Positions for every epoch.** The main epochs have their own positions buffer (`cs.dclf.face-positions`),
+    with the same per-region generations as the shadow epoch's, uploaded at their commit on the render thread.
+    The main payload appends the stream `GeometryDraw`s after the geometry slots (`AppendFaceStreams`), and an
+    input that is a face shape, or whose pipeline reads its position from stream 1, is drawn only with them.
+    The interior (no sun epoch) works from the main epoch's uploads alone.
+-   **Techniques.** Facegen, Hair and Eye join FacegenRGBTint under `CS_DCLF_ACTORS`. Their constants and
+    textures needed nothing new: the material evaluation runs the engine's own `SetupMaterial` (the tint and
+    detail maps, the hair tint, the eye centres).
+-   **Hair with ProjectedUV** is drawn without the projection: the engine reads another object's snow there
+    ([bugs-found-by-parity.md](./bugs-found-by-parity.md), "The engine").
+-   **Extended Translucency's material model** is per geometry: its `SetupGeometry` hook sets "use default" for
+    blended skinned geometry, an explicit model from `AnisotropicAlphaMaterial`, or "disabled". DCLF had
+    assumed "disabled" for every pipeline, which held until it drew blended skinned geometry (the hair decals).
+    The rule is now `ExtendedTranslucency::MaterialModelOf`, called by the hook and by DCLF, whose main keys
+    carry the model (`kRasterTranslucencyShift`, left out of `RasterStateBits`) and whose permutation is built
+    from it.
+
+**Out of scope:** Community Shaders' Advanced Skin (t71/t74/t75 and its per-geometry buffer) is not bound for
+DCLF's skin draws, bodies or faces; its own step. Feature binding parity reports those slots, as before faces.
+
+**Result** at Riverwood:
+-   Capture parity (`CS_DCLF_OWNERSHIP=0`): OK, about 18,000 draws checked per 300 frames, 0 mismatched.
+    Permutation, draw, light data and bone palette parity OK.
+-   With ownership: 0 native passes kept, 0 holes, `CS_DCLF_BUILD_PARITY` OK in every report (sequences with
+    streams included).
+-   Shadow maps across a live toggle unchanged; 0 engine draws into the cascades or the volumetric copy.
+-   Snapshot parity 35,400 of 35,400 equal.
+-   The Sleeping Giant Inn (interior): 0 holes, BuildDraws parity OK, 0 native passes kept.

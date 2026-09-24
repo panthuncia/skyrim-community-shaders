@@ -374,9 +374,11 @@ namespace DCLF
 		                                             static_cast<std::uint32_t>(Extra::AdditiveLighting);
 		const std::uint32_t extra = expected.extraShaderDescriptor |
 		                            ((object.flags & kObjectSuppressExternalEmittance) ? static_cast<std::uint32_t>(Extra::SuppressExternalEmittance) : 0u);
+		// The ProjectedUV bit of hair, which DCLF drops (HairProjection), is left out of the descriptors' comparison.
+		const std::uint32_t hairProjection = HairProjection(native.VertexShaderDescriptor) ? kPassProjectedUV : 0u;
 		const std::array<std::pair<std::uint32_t, std::uint32_t>, 4> fields{ {
-			{ expected.vertexShaderDescriptor, native.VertexShaderDescriptor },
-			{ expected.pixelShaderDescriptor, native.PixelShaderDescriptor },
+			{ expected.vertexShaderDescriptor, native.VertexShaderDescriptor & ~hairProjection },
+			{ expected.pixelShaderDescriptor, native.PixelShaderDescriptor & ~hairProjection },
 			{ extra, native.ExtraShaderDescriptor & kLightingExtraBits },
 			{ expected.extraFeatureDescriptor, native.ExtraFeatureDescriptor },
 		} };
@@ -673,8 +675,9 @@ namespace DCLF
 				Describe(geometry), key.passDescriptor, PassDescriptorOf(a_pass->passEnum), a_pass->shaderProperty ? a_pass->shaderProperty->flags.underlying() : 0ull,
 				accumulated ? accumulated->technique : 0u, accumulated ? accumulated->subPass : 0u, accumulated ? PassDescriptorOf(accumulated->passEnum) : 0u));
 		}
-		// The shader descriptors likewise, with that one bit left out of the comparison in an alpha-test list.
-		const std::uint32_t ignored = DrawnPassDescriptor(0, list);
+		// The shader descriptors likewise, with that one bit left out of the comparison in an alpha-test list, and the
+		// ProjectedUV bit of hair, which DCLF drops (HairProjection).
+		const std::uint32_t ignored = DrawnPassDescriptor(0, list) | (HairProjection(PassDescriptorOf(a_pass->passEnum)) ? kPassProjectedUV : 0u);
 		if (((key.vertexDescriptor ^ state->modifiedVertexDescriptor) & ~ignored) != 0 || ((key.pixelDescriptor ^ state->modifiedPixelDescriptor) & ~ignored) != 0) {
 			mismatch = true;
 			NoteMismatch(fmt::format("{} descriptors: DCLF VS {:08X} PS {:08X}, native VS {:08X} PS {:08X} (pass {:08X}, flags {:016X})",

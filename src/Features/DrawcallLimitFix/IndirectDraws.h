@@ -288,6 +288,7 @@ namespace DCLF
 			std::array<std::uint32_t, static_cast<std::size_t>(ShadowNotReady::Count)> notReadyReasons{};
 			std::uint32_t focusSkipped = 0;    // focus views, native until S4
 			std::uint32_t volumetricSkipped = 0;  // volumetric lighting copies: only volumetric-only casters, native
+			std::uint32_t faceUploads = 0;        // face position regions uploaded (a head's snapshot changed), per report interval
 			// The culling's GPU counters of one sampled view (the count buffer read back a few frames after
 			// its epoch): what says the frustum test is doing something, and against which view.
 			std::uint32_t cullDrawn = 0, cullRejected = 0, cullTested = 0;

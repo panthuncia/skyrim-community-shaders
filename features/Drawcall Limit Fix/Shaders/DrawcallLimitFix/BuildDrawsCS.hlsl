@@ -193,19 +193,35 @@ static const uint kPhaseTwoSequenceBase = 16384;  // kMaxDraws
 static const uint kDecalSequenceBase = 32768;  // 2 * kMaxDraws
 static const uint kMaxDecalDraws = 2048;
 
-// DrawInput: 44 bytes (pipeline/record/geometry/flags, the world-space bounding sphere, the object index, the
-// decal ordinal, and the skin partitions to draw).
-static const uint kInputStride = 44;
+// DrawInput: 48 bytes (pipeline/record/geometry/flags, the world-space bounding sphere, the object index, the
+// decal ordinal, the skin partitions to draw, and the GeometryDraw of a second vertex stream or ~0).
+static const uint kInputStride = 48;
 // GeometryDraw: 40 bytes (vertex buffer view, index buffer view, index count, first index, next partition).
 static const uint kGeometryStride = 40;
 // A skin of several partitions is one object drawn once per partition the engine would draw: the input's
 // mask names them (bit i = partition i), and each partition's GeometryDraw links to the next one's.
 static const uint kMaxPartitions = 8;
 static const uint kNoPartition = 0xFFFFFFFFu;
-// DrawSequence: 68 bytes, 4-byte packed. Words 1-3 are the root constants (DrawBindings address, then
+// DrawSequence: 84 bytes, 4-byte packed. Words 1-3 are the root constants (DrawBindings address, then
 // the object index), which is why the object index sits between the record address and the vertex buffer.
-static const uint kSequenceStride = 68;
+// The second vertex buffer view (slot 1) is a face shape's positions (FaceSnapshots), else the first again.
+static const uint kSequenceStride = 84;
 static const uint kIndexFormatR16 = 57;  // DXGI_FORMAT_R16_UINT
+static const uint kNoStream = 0xFFFFFFFFu;
+
+// One sequence at a slot of the dispatch's sequence buffer.
+void StoreSequence(RWByteAddressBuffer sequences, uint slot, uint pipeline, uint recordLo, uint recordHi, uint objectIndex, uint4 vertexBuffer,
+	uint4 streamBuffer, uint4 indexBuffer, uint indexCount, uint firstIndex)
+{
+	const uint base = slot * kSequenceStride;
+	sequences.Store(base + 0, pipeline);
+	sequences.Store3(base + 4, uint3(recordLo, recordHi, objectIndex));
+	sequences.Store4(base + 16, vertexBuffer);
+	sequences.Store4(base + 32, streamBuffer);
+	sequences.Store4(base + 48, uint4(indexBuffer.xyz, kIndexFormatR16));
+	sequences.Store4(base + 64, uint4(indexCount, 1, firstIndex, 0));
+	sequences.Store(base + 80, 0);
+}
 
 // The bounding sphere's world-space AABB, projected corner by corner. The box contains the sphere, so
 // every test built on it errs towards keeping the object: an object is only rejected when all eight
@@ -396,13 +412,10 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 		const uint recordOffset = input.y * RecordStride;
 		const uint recordLo = RecordsAddressLo + recordOffset;
 		const uint recordHi = RecordsAddressHi + (recordLo < RecordsAddressLo ? 1 : 0);
-		const uint base = (kDecalSequenceBase + (decalGroup - 1) * kMaxDecalDraws + decalOrdinal) * kSequenceStride;
-		sequences.Store(base + 0, input.x);
-		sequences.Store3(base + 4, uint3(recordLo, recordHi, objectIndex));
-		sequences.Store4(base + 16, vertexBuffer);
-		sequences.Store4(base + 32, uint4(indexBuffer.xyz, kIndexFormatR16));
-		sequences.Store4(base + 48, uint4(culled ? 0 : indexBuffer.w, 1, firstIndex, 0));
-		sequences.Store(base + 64, 0);
+		const uint decalStreamIndex = inputs.Load(inputOffset + 44);
+		const uint4 decalStream = decalStreamIndex != kNoStream ? geometries.Load4(decalStreamIndex * kGeometryStride) : vertexBuffer;
+		StoreSequence(sequences, kDecalSequenceBase + (decalGroup - 1) * kMaxDecalDraws + decalOrdinal, input.x, recordLo, recordHi, objectIndex,
+			vertexBuffer, decalStream, indexBuffer, culled ? 0 : indexBuffer.w, firstIndex);
 		// A decal's word: never drawn in depth, drawn in colour unless culled.
 		if (phase == kPhaseColour)
 			visibility.Store(objectIndex * 4, (VisibilityStamp << kVisibilityStampShift) | (culled ? kVisibilityRejectedFinal : (kVisibilityVisible | kVisibilityColourDrawn)));
@@ -503,6 +516,9 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	// names, walking the partitions' GeometryDraw links. Every draw is the same object: one record, one
 	// visibility word, one verdict.
 	const uint partitions = inputs.Load(inputOffset + 40);
+	// The second stream, the same for every partition: a face shape's positions are the whole shape's.
+	const uint streamIndex = inputs.Load(inputOffset + 44);
+	const uint4 stream = streamIndex != kNoStream ? geometries.Load4(streamIndex * kGeometryStride) : uint4(0, 0, 0, 0);
 	uint geometryIndex = input.z;
 	[loop] for (uint partition = 0; partition < kMaxPartitions && geometryIndex != kNoPartition; ++partition) {
 		const uint geometryOffset = geometryIndex * kGeometryStride;
@@ -518,13 +534,8 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 			count.InterlockedAdd(phase == kPhaseTwo ? kCountDrawnPhaseTwo : kCountDrawn, 1, slot);
 			if (slot >= kPhaseTwoSequenceBase)
 				return;
-			const uint base = (slot + (phase == kPhaseTwo ? kPhaseTwoSequenceBase : 0)) * kSequenceStride;
-			sequences.Store(base + 0, pipeline);
-			sequences.Store3(base + 4, uint3(recordLo, recordHi, objectIndex));
-			sequences.Store4(base + 16, vertexBuffer);
-			sequences.Store4(base + 32, uint4(indexBuffer.xyz, kIndexFormatR16));
-			sequences.Store4(base + 48, uint4(indexBuffer.w, 1, firstIndex, 0));
-			sequences.Store(base + 64, 0);
+			StoreSequence(sequences, slot + (phase == kPhaseTwo ? kPhaseTwoSequenceBase : 0), pipeline, recordLo, recordHi, objectIndex, vertexBuffer,
+				streamIndex != kNoStream ? stream : vertexBuffer, indexBuffer, indexBuffer.w, firstIndex);
 		}
 		if ((partitions >> (partition + 1)) == 0)
 			break;

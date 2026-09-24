@@ -10,6 +10,7 @@
 #include "DrawcallLimitFix/MaterialSources.h"
 #include "DrawcallLimitFix/TreeTrace.h"
 #include "DrawcallLimitFix/DrawPipelines.h"
+#include "DrawcallLimitFix/FaceSnapshots.h"
 #include "DrawcallLimitFix/GpuResources.h"
 #include "DrawcallLimitFix/GpuTextures.h"
 #include "DrawcallLimitFix/IndirectDraws.h"
@@ -288,6 +289,7 @@ void DrawcallLimitFix::PostPostLoad()
 	DCLF::MaterialSources::Install();
 	DCLF::ShadowProbe::Get().Install();
 	DCLF::VolumetricProbe::Get().Install();
+	DCLF::FaceSnapshots::Get().Install();
 	Hooks::Install();
 	installed = true;
 	// The switches this process actually sees, once. Several reports below are gated on them, so without
@@ -951,9 +953,9 @@ void DrawcallLimitFix::Prepass()
 					shadow.cullSampledView, shadow.cullSampledMode, shadow.cullTested, shadow.cullDrawn, shadow.cullRejected);
 			if (DCLF::PassCapture::ShadowWithholdingEnabled()) {
 				const auto& captured = DCLF::PassCapture::Get().GetStats();
-				logger::info("[DCLF] shadow ownership: withheld plain {} / clamped {} / paraboloid {} passes and {} volumetric-only passes (last frame); claimed {} / {} / {} casters; {} views not ready under ownership{}",
-					captured.shadowWithheld[0], captured.shadowWithheld[1], captured.shadowWithheld[2], captured.volumetricWithheld, shadow.claimed[0], shadow.claimed[1], shadow.claimed[2],
-					shadow.notReady, shadow.notReady ? " <- HOLES" : "");
+				logger::info("[DCLF] shadow ownership: withheld plain {} / clamped {} / paraboloid {} passes, {} volumetric-only passes and {} of hints 11, 7 and 3 (last frame); claimed {} / {} / {} casters; {} face regions uploaded; {} views not ready under ownership{}",
+					captured.shadowWithheld[0], captured.shadowWithheld[1], captured.shadowWithheld[2], captured.volumetricWithheld, captured.directWithheld, shadow.claimed[0], shadow.claimed[1],
+					shadow.claimed[2], shadow.faceUploads, shadow.notReady, shadow.notReady ? " <- HOLES" : "");
 			}
 			DCLF::IndirectDraws::Get().ResetShadowStats();
 		}

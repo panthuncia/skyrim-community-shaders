@@ -11,6 +11,7 @@
 #	include "DrawPipelines.h"
 #	include "DrawPipelinesRhi.h"
 #	include "EngineStates.h"
+#	include "FaceSnapshots.h"
 #	include "GpuResources.h"
 #	include "GpuTextures.h"
 #	include "LightingConstants.h"
@@ -158,8 +159,11 @@ namespace DCLF
 			// Skins of several partitions: bit i draws partition i (Tables::skinPartitions); 0 draws the one
 			// geometry. Left 0 by every input that is not such a skin.
 			std::uint32_t partitions;
+			// A shadow input's second vertex stream: the GeometryDraw holding a face shape's positions (the shadow
+			// payload appends them after the geometry slots), or ~0u. The main pass never has one.
+			std::uint32_t streamIndex = ~0u;
 		};
-		static_assert(sizeof(DrawInput) == 44);
+		static_assert(sizeof(DrawInput) == 48);
 		// BuildDrawsCS.hlsl: set on an input the epoch has built a bindings record for. The depth segment
 		// submits an input for every candidate so the culling covers them all, but builds records only for
 		// the ones it may draw.
@@ -522,6 +526,10 @@ namespace DCLF
 			// The bone palette rows the skinned draws read, at t126 (kBonesBufferRegister).
 			std::shared_ptr<org::Buffer> bones;
 			std::uint32_t bonesIndex = 0;
+			// NPC face shapes' positions, the draws' second stream: the shadow epoch's buffer, this epoch's own copy.
+			std::shared_ptr<org::Buffer> facePositions;
+			std::uint64_t facePositionsAddress = 0;
+			ankerl::unordered_dense::map<std::uint32_t, std::uint64_t> faceUploaded;  // region -> generation (render thread)
 			std::shared_ptr<org::Buffer> inputs, geometries, sequences, count;  // BuildDraws: in, in, out, out
 			std::shared_ptr<const ComputeProgram> buildDraws;
 			winrt::com_ptr<ID3D11Buffer> sequencesD3D11, countD3D11;  // CS_DCLF_BUILD_PARITY readback
@@ -622,6 +630,9 @@ namespace DCLF
 					bindings.objects = a_builder.BindShaderResource(resources->objects);
 				if (resources->bones)
 					bindings.bones = a_builder.BindShaderResource(resources->bones);
+				// Read by the input assembler (the face draws' second stream), after the commit's uploads into it.
+				if (resources->facePositions)
+					a_builder.BindVertexBuffer(resources->facePositions);
 				for (const auto& frameBuffer : resources->frameBuffers)
 					bindings.frameBuffers.push_back(a_builder.BindShaderResource(frameBuffer.copy));
 				if (resources->lightLimitFix) {
@@ -1365,6 +1376,11 @@ namespace DCLF
 		struct ShadowResources
 		{
 			std::shared_ptr<org::Buffer> constants, records, objects, bones, geometries, visibility;
+			// NPC face shapes' positions (SceneStore::Tables::faceStreams), a region per shape, read by the draws as
+			// the second vertex stream. A region is uploaded when its snapshot's generation is not the one it holds.
+			std::shared_ptr<org::Buffer> facePositions;
+			std::uint64_t facePositionsAddress = 0;
+			ankerl::unordered_dense::map<std::uint32_t, std::uint64_t> faceUploaded;  // region -> generation (render thread)
 			std::array<std::shared_ptr<org::Buffer>, kShadowModeCount> inputs;               // per render mode
 			std::array<std::shared_ptr<org::Buffer>, kMaxShadowViews> sequences, count;      // per view slot
 			std::array<winrt::com_ptr<ID3D11Buffer>, kMaxShadowViews> countD3D11;             // the counters, read back
@@ -1537,6 +1553,9 @@ namespace DCLF
 				bindings.constants = a_builder.BindShaderResource(resources->constants);
 				bindings.objects = a_builder.BindShaderResource(resources->objects);
 				bindings.bones = a_builder.BindShaderResource(resources->bones);
+				// The face positions are read by the input assembler (the draws' second stream), after the commit's
+				// uploads into them.
+				a_builder.BindVertexBuffer(resources->facePositions);
 				return bindings;
 			}
 
@@ -1618,6 +1637,7 @@ namespace DCLF
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.shadow.records"), resources->records);
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.shadow.objects"), resources->objects);
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.shadow.bones"), resources->bones);
+				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.shadow.face-positions"), resources->facePositions);
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.shadow.geometries"), resources->geometries);
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.shadow.visibility"), resources->visibility);
 				for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
@@ -1665,6 +1685,8 @@ namespace DCLF
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.visibility"), resources->visibility);
 				if (resources->bones)
 					a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.bones"), resources->bones);
+				if (resources->facePositions)
+					a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.face-positions"), resources->facePositions);
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.depth"), resources->depth);
 				for (std::uint32_t i = 0; i < resources->targetCount; ++i)
 					a_graph.RegisterResource(org::ResourceIdentifier(fmt::format("cs.dclf.target{}", i)), resources->targets[i]);
@@ -1926,6 +1948,7 @@ namespace DCLF
 		struct ResourceAddresses
 		{
 			std::uint64_t constants = 0, records = 0, frameConstants = 0;
+			std::uint64_t facePositions = 0;  // the shadow epoch's face positions buffer (kFacePositionVertices float4s)
 			std::uint32_t objectsIndex = 0, bonesIndex = 0, recordCapacity = 0;
 			const void* identity = nullptr;
 
@@ -1962,6 +1985,7 @@ namespace DCLF
 			std::array<std::vector<DrawSequence>, kDecalGroups> decalTemplates;  // by group and slot
 			std::vector<DrawInput> inputList;
 			std::vector<GeometryDraw> geometryDraws;
+			std::vector<SceneStore::Tables::FaceStream> faceStreams;  // the tables', for the commit's uploads
 			std::vector<BindlessObject> objectRecords;  // the DCLF_BINDLESS per-object table
 			std::vector<float> boneRows;                // eye-relative, current then previous, then the extras
 			// The frame's textures (t16 and up) are the epoch's own descriptor indices, which only the commit
@@ -2005,6 +2029,7 @@ namespace DCLF
 				sequences.clear();
 				inputList.clear();
 				geometryDraws.clear();
+				faceStreams.clear();
 				framePatches.clear();
 				drawn.clear();
 				objectState.clear();
@@ -2056,6 +2081,7 @@ namespace DCLF
 			std::vector<BindlessObject> objects;
 			std::vector<float> boneRows;
 			std::vector<GeometryDraw> geometries;
+			std::vector<SceneStore::Tables::FaceStream> faceStreams;  // the tables', for the commit's uploads
 			std::uint32_t skippedTexture = 0, skippedPipeline = 0, deferredTextures = 0, deferredPipelines = 0;
 			// The worker's build stages its uploads itself (StageShadowPayload): everything but the arena's view
 			// head, and the records of the first stagedSlots view slots. For the resources it was staged against.
@@ -2080,6 +2106,7 @@ namespace DCLF
 				objects.clear();
 				boneRows.clear();
 				geometries.clear();
+				faceStreams.clear();
 				skippedTexture = skippedPipeline = deferredTextures = deferredPipelines = 0;
 			}
 		};
@@ -2121,9 +2148,16 @@ namespace DCLF
 			return a_object < a_tables.skinPartitions.size() ? a_tables.skinPartitions[a_object] : 0u;
 		}
 
-		// A draw template's geometry half, from a slot (SceneStore builds the object's first the same way).
-		void SetSequenceGeometry(DrawSequence& a_sequence, const GeometryRecord& a_geometry)
+		// A draw template's geometry half, from a slot (SceneStore builds the object's first the same way). The second
+		// stream repeats the first unless the draw has one of its own (a face shape's positions), which a skin's
+		// partitions share.
+		void SetSequenceGeometry(DrawSequence& a_sequence, const GeometryRecord& a_geometry, bool a_ownStream = false)
 		{
+			if (!a_ownStream) {
+				a_sequence.streamBufferAddress = a_geometry.vertexAddress;
+				a_sequence.streamBufferSize = static_cast<std::uint32_t>(std::min<std::uint64_t>(a_geometry.vertexBytes, UINT32_MAX));
+				a_sequence.streamStride = a_geometry.vertexStride;
+			}
 			a_sequence.vertexBufferAddress = a_geometry.vertexAddress;
 			a_sequence.vertexBufferSize = static_cast<std::uint32_t>(std::min<std::uint64_t>(a_geometry.vertexBytes, UINT32_MAX));
 			a_sequence.vertexStride = a_geometry.vertexStride;
@@ -2142,6 +2176,72 @@ namespace DCLF
 					geometry.indexAddress, static_cast<std::uint32_t>(std::min<std::uint64_t>(geometry.indexBytes, UINT32_MAX)), geometry.indexCount, geometry.firstIndex,
 					geometry.nextPartition < a_out.size() ? geometry.nextPartition : kNoPartition };
 			}
+		}
+
+		// ---- NPC face shapes' positions (FaceSnapshots, SceneStore::Tables::faceStreams). Each face stream has a
+		// GeometryDraw after the geometry slots, whose vertex buffer view is the shape's region of the epoch's
+		// positions buffer; an input names it as its second stream (DrawInput::streamIndex).
+
+		// BSGraphics::VertexDesc: the position attribute's flag in the second stream (bit 54 + attribute 0).
+		constexpr std::uint64_t kPositionInSecondStream = 1ull << 54;
+
+		// The GeometryDraw of object a_object's positions, or ~0u: not a face shape, no positions buffer, or past
+		// kMaxGeometries. AppendFaceStreams writes them at these indices.
+		std::uint32_t FaceStreamGeometry(const SceneStore::Tables& a_tables, std::size_t a_object, std::uint64_t a_positions)
+		{
+			if (!a_positions || a_object >= a_tables.faceStream.size() || a_tables.faceStream[a_object] == kNoFaceStream)
+				return ~0u;
+			const std::size_t index = std::min<std::size_t>(a_tables.geometries.size(), kMaxGeometries) + a_tables.faceStream[a_object];
+			return index < kMaxGeometries ? static_cast<std::uint32_t>(index) : ~0u;
+		}
+
+		bool IsFaceObject(const SceneStore::Tables& a_tables, std::size_t a_object)
+		{
+			return a_object < a_tables.faceStream.size() && a_tables.faceStream[a_object] != kNoFaceStream;
+		}
+
+		// After PackGeometryDraws: the face streams' GeometryDraws, in faceStreams order.
+		void AppendFaceStreams(const SceneStore::Tables& a_tables, std::uint64_t a_positions, std::vector<GeometryDraw>& a_out)
+		{
+			if (!a_positions)
+				return;
+			for (const auto& stream : a_tables.faceStreams) {
+				if (a_out.size() >= kMaxGeometries)
+					break;
+				GeometryDraw draw{};
+				draw.vertexBufferAddress = a_positions + std::uint64_t(stream.region) * 16;
+				draw.vertexBufferSize = stream.vertexCount * 16;
+				draw.vertexStride = 16;
+				draw.nextPartition = kNoPartition;
+				a_out.push_back(draw);
+			}
+		}
+
+		// The second stream of a face object's draw template.
+		void SetSequenceStream(DrawSequence& a_sequence, const SceneStore::Tables& a_tables, std::size_t a_object, std::uint64_t a_positions)
+		{
+			const auto& stream = a_tables.faceStreams[a_tables.faceStream[a_object]];
+			a_sequence.streamBufferAddress = a_positions + std::uint64_t(stream.region) * 16;
+			a_sequence.streamBufferSize = stream.vertexCount * 16;
+			a_sequence.streamStride = 16;
+		}
+
+		// A commit's face uploads (render thread): a region at a time, and only when the head's snapshot is not the
+		// one the epoch's buffer holds. The snapshot stays the walk's until its next walk, which is after the commit.
+		template <class Uploads>
+		std::uint32_t UploadFaceStreams(const std::vector<SceneStore::Tables::FaceStream>& a_streams, const std::shared_ptr<org::Buffer>& a_positions,
+			ankerl::unordered_dense::map<std::uint32_t, std::uint64_t>& a_uploaded, Uploads& a_uploads)
+		{
+			std::uint32_t count = 0;
+			for (const auto& stream : a_streams) {
+				auto& uploaded = a_uploaded[stream.region];
+				if (uploaded == stream.generation)
+					continue;
+				a_uploads(a_positions, stream.positions, std::size_t(stream.vertexCount) * 16, std::uint64_t(stream.region) * 16);
+				uploaded = stream.generation;
+				++count;
+			}
+			return count;
 		}
 
 		// Resolved descriptor heap indices per (material, pipeline) pair. The texture and sampler loops depend on
@@ -2529,6 +2629,14 @@ namespace DCLF
 				// so a decal that is such a skin cannot be drawn by the decal pass.
 				const std::uint32_t partitions = PartitionsOf(a_tables, o);
 				if (decalGroup && partitions) {
+					skip(Skip::Geometry);
+					continue;
+				}
+				// A face shape draws only with its positions as the second stream, and a pipeline that reads its
+				// position from the second stream only with them: the slot would fall back to the geometry's own
+				// buffer and draw its other attributes as positions.
+				const std::uint32_t streamIndex = FaceStreamGeometry(a_tables, o, a_in.addresses.facePositions);
+				if (streamIndex == ~0u && (IsFaceObject(a_tables, o) || (a_tables.pipelines[object.pipelineIndex].vertexLayout & kPositionInSecondStream))) {
 					skip(Skip::Geometry);
 					continue;
 				}
@@ -3002,13 +3110,15 @@ namespace DCLF
 				sequence.pipelineIndex = blocks.setIndex;
 				sequence.objectIndex = o;
 				sequence.bindingsAddress = a_in.addresses.records + std::uint64_t(recordIndex) * sizeof(DrawBindings);
+				if (streamIndex != ~0u)
+					SetSequenceStream(sequence, a_tables, o, a_in.addresses.facePositions);
 				if (decalGroup) {
 					const std::uint32_t ordinal = a_tables.decalOrdinal[o];
 					decalSlot.inputs = nullptr;  // drawn: the blank is not needed
 					drawInputs.push_back({ blocks.setIndex, recordIndex, object.geometryIndex,
 						object.flags | kInputDrawable,
 						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius,
-						static_cast<std::uint32_t>(o), ordinal });
+						static_cast<std::uint32_t>(o), ordinal, 0, streamIndex });
 					decalTemplates[(decalGroup - 1) & 1][ordinal] = sequence;
 					++a_out.decalsDrawn;
 					if (o < a_out.objectState.size())
@@ -3019,13 +3129,13 @@ namespace DCLF
 					drawInputs.push_back({ blocks.setIndex, recordIndex, object.geometryIndex,
 						object.flags | kInputDrawable,
 						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius,
-						static_cast<std::uint32_t>(o), 0, partitions });
+						static_cast<std::uint32_t>(o), 0, partitions, streamIndex });
 					if (!partitions) {
 						sequences.push_back(sequence);
 					} else {
 						ForEachDrawnGeometry(a_tables, object.geometryIndex, partitions, [&](std::uint32_t a_slot) {
 							auto partitionSequence = sequence;
-							SetSequenceGeometry(partitionSequence, a_tables.geometries[a_slot]);
+							SetSequenceGeometry(partitionSequence, a_tables.geometries[a_slot], streamIndex != ~0u);
 							sequences.push_back(partitionSequence);
 						});
 					}
@@ -3053,6 +3163,9 @@ namespace DCLF
 			}
 
 			PackGeometryDraws(a_tables, a_out.geometryDraws);
+			AppendFaceStreams(a_tables, a_in.addresses.facePositions, a_out.geometryDraws);
+			if (a_in.addresses.facePositions)
+				a_out.faceStreams = a_tables.faceStreams;
 			PackBoneRows(a_tables, a_out.boneRows);
 			mark(5);
 		}
@@ -3121,6 +3234,9 @@ namespace DCLF
 				BuildObjectRecord(a_tables, static_cast<std::uint32_t>(r), a_in.renderFlags, objects[r]);
 			PackBoneRows(a_tables, a_out.boneRows);
 			PackGeometryDraws(a_tables, a_out.geometries);
+			AppendFaceStreams(a_tables, a_in.addresses.facePositions, a_out.geometries);
+			if (a_in.addresses.facePositions)
+				a_out.faceStreams = a_tables.faceStreams;
 			// The binding records, built once with the per-view registers (b0, b12) unset; each view slot
 			// uploads its own copy of them naming its blocks at the head of the arena.
 			(void)arena.Allocate(kShadowMaterialBlocksOffset);
@@ -3248,10 +3364,17 @@ namespace DCLF
 						++a_out.skippedPipeline;
 						continue;
 					}
+					// A face shape draws only with its positions: without them (no buffer, the geometry table full) it
+					// is no input, and stays the engine's. And a caster whose layout reads its position from the second
+					// stream (a dynamic shape's) is never an input without one: the slot would fall back to the
+					// geometry's own buffer and draw its other attributes as positions.
+					const std::uint32_t streamIndex = FaceStreamGeometry(a_tables, o, a_in.addresses.facePositions);
+					if (streamIndex == ~0u && (IsFaceObject(a_tables, o) || (key.vertexLayout & kPositionInSecondStream)))
+						continue;
 					inputs.push_back({ slotIt->second, objectRecord[o], object.geometryIndex,
 						(object.flags & ~kObjectDecal) | kInputDrawable | (OutsideSunEntry(a_in, a_tables, o) ? kInputOutsideSunEntry : 0u),
 						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius, static_cast<std::uint32_t>(o), 0,
-						PartitionsOf(a_tables, static_cast<std::uint32_t>(o)) });
+						PartitionsOf(a_tables, static_cast<std::uint32_t>(o)), streamIndex });
 				}
 			}
 		}
@@ -3878,6 +4001,8 @@ namespace DCLF
 			state->bones->SetName("cs.dclf.bones");
 			state->bones->Materialize();
 			state->bonesIndex = state->bones->GetSRVInfo(0).slot.index;
+			state->facePositions = buffer(std::uint64_t(kFacePositionVertices) * 16, "cs.dclf.face-positions");
+			state->facePositionsAddress = device.GetBufferDeviceAddress({ state->facePositions->GetAPIResource().GetHandle(), 0 });
 			// Twice kMaxDraws: phase 1 and the colour segment write the first half, phase 2 the second. The
 			// CPU records where phase 2's draw starts, so the two need ranges fixed in advance rather than
 			// one range shared through an atomic counter.
@@ -4105,6 +4230,7 @@ namespace DCLF
 		state->bones->SetName("cs.dclf.shadow.bones");
 		state->bones->Materialize();
 		state->bonesIndex = state->bones->GetSRVInfo(0).slot.index;
+		state->facePositions = buffer(std::uint64_t(kFacePositionVertices) * 16, "cs.dclf.shadow.face-positions");
 		for (std::uint32_t s = 0; s < kMaxShadowViews; ++s) {
 			state->sequences[s] = CreateWords(std::uint64_t(kMaxDraws) * sizeof(DrawSequence) / 4, true, fmt::format("cs.dclf.shadow.sequences{}", s).c_str());
 			state->count[s] = CreateWords(kCountWords, true, fmt::format("cs.dclf.shadow.draw-count{}", s).c_str());
@@ -4131,6 +4257,7 @@ namespace DCLF
 			return ShadowNotReady(1, "the BuildDraws dispatch signature could not be created");
 		}
 		state->latch = std::make_shared<org::LatchBlock>("cs.dclf.shadow.latch", kShadowLatchBytes, host->FrameSlots());
+		state->facePositionsAddress = device.GetBufferDeviceAddress({ state->facePositions->GetAPIResource().GetHandle(), 0 });
 		state->constantsAddress = device.GetBufferDeviceAddress({ state->constants->GetAPIResource().GetHandle(), 0 });
 		state->recordsAddress = device.GetBufferDeviceAddress({ state->records->GetAPIResource().GetHandle(), 0 });
 		if (!state->constantsAddress || !state->recordsAddress) {
@@ -5078,6 +5205,7 @@ namespace DCLF
 				if (!payload.geometries.empty())
 					uploads(resources->geometries, payload.geometries.data(), std::min<std::size_t>(payload.geometries.size(), kMaxGeometries) * sizeof(GeometryDraw), 0);
 			}
+			shadowStats.faceUploads += UploadFaceStreams(payload.faceStreams, resources->facePositions, resources->faceUploaded, uploads);
 			shadowStats.records = static_cast<std::uint32_t>(records.size());
 			shadowStats.skippedTexture = payload.skippedTexture;
 			shadowStats.skippedPipeline = payload.skippedPipeline;
@@ -5243,6 +5371,7 @@ namespace DCLF
 		in.addresses.records = a_resources.recordsAddress;
 		in.addresses.objectsIndex = a_resources.objectsIndex;
 		in.addresses.bonesIndex = a_resources.bonesIndex;
+		in.addresses.facePositions = FaceSnapshots::Enabled() ? a_resources.facePositionsAddress : 0;
 		in.addresses.recordCapacity = kShadowRecordCapacity;
 		in.addresses.identity = &a_resources;
 		in.tablesGeneration = a_store.GetTablesGeneration();
@@ -5997,6 +6126,7 @@ namespace DCLF
 		in.addresses.frameConstants = a_resources.frameConstantsAddress;
 		in.addresses.objectsIndex = a_resources.objectsIndex;
 		in.addresses.bonesIndex = a_resources.bonesIndex;
+		in.addresses.facePositions = FaceSnapshots::Enabled() ? a_resources.facePositionsAddress : 0;
 		in.addresses.recordCapacity = a_resources.recordCapacity;
 		in.addresses.identity = &a_resources;
 		in.tablesGeneration = a_store.GetTablesGeneration();
@@ -6273,6 +6403,8 @@ namespace DCLF
 		} else if (!bytes.empty()) {
 			uploads(a_resources->constants, bytes.data(), bytes.size(), 0);
 		}
+		if (a_resources->facePositions)
+			UploadFaceStreams(a_payload.faceStreams, a_resources->facePositions, a_resources->faceUploaded, uploads);
 		// The depth segment clears every counter; the colour segment clears only the word its own draws
 		// append through. On the hybrid path the culling happens in the depth segment, so clearing the
 		// whole buffer again here would erase the phase 1 and phase 2 numbers before anything read them

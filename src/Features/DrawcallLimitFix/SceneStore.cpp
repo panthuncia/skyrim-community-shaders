@@ -13,6 +13,8 @@
 #include "ShadowProbe.h"
 #include "ShadowViews.h"
 #include "VertexInput.h"
+#include "VolumetricProbe.h"
+#include "FaceSnapshots.h"
 
 #include <bit>
 #include <chrono>
@@ -127,7 +129,7 @@ namespace DCLF
 					 differs("draws", a.draws, b.draws) || differs("skin partitions", a.skinPartitions, b.skinPartitions) || differs("bones", a.bones, b.bones) || differs("previous bones", a.previousBones, b.previousBones) ||
 					 differs("bone offsets", a.boneOffset, b.boneOffset) || differs("bone rows", a.boneRows, b.boneRows) ||
 					 differs("shadow techniques", a.shadowTechnique, b.shadowTechnique) || differs("shadow rejects", a.shadowReject, b.shadowReject) ||
-					 differs("sun entries", a.sunEntry, b.sunEntry) ||
+					 differs("sun entries", a.sunEntry, b.sunEntry) || differs("face streams", a.faceStream, b.faceStream) ||
 					 differs("shadow diffuse", a.shadowDiffuse, b.shadowDiffuse) || differs("shadow materials", a.shadowMaterial, b.shadowMaterial) || differs("shadow keys", a.shadowKeysUsed, b.shadowKeysUsed) ||
 					 differs("shadow textures", a.shadowTextureSet, b.shadowTextureSet) || differs("extra offsets", a.extraOffset, b.extraOffset) ||
 					 differs("geometry slots used", a.geometryLastUsed, b.geometryLastUsed));
@@ -155,6 +157,8 @@ namespace DCLF
 		shadowTechnique.clear();
 		shadowReject.clear();
 		sunEntry.clear();
+		faceStreams.clear();
+		faceStream.clear();
 		shadowDiffuse.clear();
 		shadowMaterial.clear();
 		shadowTextureSet.clear();
@@ -201,6 +205,8 @@ namespace DCLF
 		shadowTechnique.clear();
 		shadowReject.clear();
 		sunEntry.clear();
+		faceStreams.clear();
+		faceStream.clear();
 		shadowDiffuse.clear();
 		shadowMaterial.clear();
 		shadowTextureSet.clear();
@@ -673,8 +679,36 @@ namespace DCLF
 	Ineligible SceneStore::ClassifyStatic(RE::BSGeometry& a_geometry, LightingDescriptors* a_descriptors, const AccumulatedPass* a_accumulated,
 		bool a_wantDerived, RE::BSLightingShaderProperty** a_castCache)
 	{
-		if (a_geometry.GetType().get() != RE::BSGeometry::Type::kTriShape)
-			return Ineligible::NotTriShape;
+		// An NPC face shape (a dynamic shape under a BSFaceGenNiNode) takes the checks below like any shape. Its
+		// positions are not in its buffers but in FaceSnapshots: the walk gives every record of one its stream
+		// (SceneStore::Tracked::faceShape), whatever the verdict, and the draws bind it as the second stream.
+		const auto type = a_geometry.GetType().get();
+		const bool face = type == RE::BSGeometry::Type::kDynamicTriShape && FaceSnapshots::Enabled() && a_geometry.parent &&
+		                  netimmerse_cast<RE::BSFaceGenNiNode*>(a_geometry.parent);
+		if (type != RE::BSGeometry::Type::kTriShape) {
+			// [TEMP] CS_DCLF_VOLUMETRIC_PROBE: the vertex descriptions of a face shape and its skin partitions.
+			static std::atomic<std::uint32_t> faceShapesLogged{ 0 };
+			if (VolumetricProbe::Enabled() && type == RE::BSGeometry::Type::kDynamicTriShape && a_geometry.parent &&
+				netimmerse_cast<RE::BSFaceGenNiNode*>(a_geometry.parent) && faceShapesLogged.fetch_add(1) < 24) {
+				auto& data = a_geometry.GetGeometryRuntimeData();
+				auto& dynamic = static_cast<RE::BSDynamicTriShape&>(a_geometry).GetDynamicTrishapeRuntimeData();
+				const auto* skin = data.skinInstance.get();
+				const auto* partition = skin ? skin->skinPartition.get() : nullptr;
+				std::string parts;
+				for (std::uint32_t i = 0; partition && i < partition->numPartitions; ++i) {
+					const auto& p = partition->partitions[i];
+					parts += fmt::format(" [{}: desc {:016X} buff {:016X} vb {} verts {} bones {}]", i, std::bit_cast<std::uint64_t>(p.vertexDesc),
+						p.buffData ? std::bit_cast<std::uint64_t>(p.buffData->vertexDesc) : 0ull, p.buffData ? static_cast<const void*>(p.buffData->vertexBuffer) : nullptr, p.vertices, p.numBones);
+				}
+				logger::info("[DCLF][TEMP] face shape '{}': desc {:016X} renderer {:016X} verts {} data {} size {} skin {} partitions {}{}",
+					a_geometry.name.c_str() ? a_geometry.name.c_str() : "?", std::bit_cast<std::uint64_t>(data.vertexDesc),
+					data.rendererData ? std::bit_cast<std::uint64_t>(data.rendererData->vertexDesc) : 0ull,
+					static_cast<RE::BSTriShape&>(a_geometry).GetTrishapeRuntimeData().vertexCount, dynamic.dynamicData, dynamic.dataSize,
+					skin ? skin->GetRTTI()->GetName() : "none", partition ? partition->numPartitions : 0u, parts);
+			}
+			if (!face)
+				return Ineligible::NotTriShape;
+		}
 
 		auto& data = a_geometry.GetGeometryRuntimeData();
 		if (auto* skin = data.skinInstance.get()) {
@@ -1587,10 +1621,74 @@ namespace DCLF
 		sceneBuilt = true;
 	}
 
+	std::uint32_t SceneStore::FaceRegionOf(const RE::BSGeometry* a_geometry, std::uint32_t a_vertexCount)
+	{
+		auto& region = faceRegions[a_geometry];
+		if (region.count != a_vertexCount) {
+			if (region.count)
+				faceRegionFree.push_back({ region.first, region.count });
+			region = {};
+			// First fit among the freed ranges, else the top of the buffer.
+			for (auto it = faceRegionFree.begin(); it != faceRegionFree.end(); ++it) {
+				if (it->second < a_vertexCount)
+					continue;
+				region.first = it->first;
+				region.count = a_vertexCount;
+				it->first += a_vertexCount;
+				it->second -= a_vertexCount;
+				if (it->second == 0)
+					faceRegionFree.erase(it);
+				break;
+			}
+			if (!region.count) {
+				if (faceRegionTop + a_vertexCount > kFacePositionVertices) {
+					faceRegions.erase(a_geometry);
+					return kNoFaceRegion;
+				}
+				region.first = faceRegionTop;
+				region.count = a_vertexCount;
+				faceRegionTop += a_vertexCount;
+			}
+		}
+		region.seenWalk = faceWalk;
+		return region.first;
+	}
+
+	void SceneStore::EndFaceWalk()
+	{
+		for (auto it = faceRegions.begin(); it != faceRegions.end();) {
+			if (it->second.seenWalk == faceWalk) {
+				++it;
+				continue;
+			}
+			faceRegionFree.push_back({ it->second.first, it->second.count });
+			it = faceRegions.erase(it);
+		}
+		// Sorted and coalesced, so a run of freed shapes is one range again.
+		std::sort(faceRegionFree.begin(), faceRegionFree.end());
+		std::size_t out = 0;
+		for (std::size_t i = 0; i < faceRegionFree.size(); ++i) {
+			if (out && faceRegionFree[out - 1].first + faceRegionFree[out - 1].second == faceRegionFree[i].first)
+				faceRegionFree[out - 1].second += faceRegionFree[i].second;
+			else
+				faceRegionFree[out++] = faceRegionFree[i];
+		}
+		faceRegionFree.resize(out);
+		if (!faceRegionFree.empty() && faceRegionFree.back().first + faceRegionFree.back().second == faceRegionTop) {
+			faceRegionTop = faceRegionFree.back().first;
+			faceRegionFree.pop_back();
+		}
+		if (FaceSnapshots::Enabled())
+			FaceSnapshots::Get().EndWalk();
+	}
+
 	void SceneStore::BeginWalk()
 	{
 		tables.ClearFrame();
 		InvalidateObjectIndices();
+		++faceWalk;
+		if (FaceSnapshots::Enabled())
+			FaceSnapshots::Get().BeginWalk();
 		stats.ineligible.fill(0);
 		stats.ineligibleDrawn.fill(0);
 		stats.techniqueRejects.fill(0);
@@ -1660,9 +1758,18 @@ namespace DCLF
 			// classifies again before it hands an object any bindings. A verdict stale the other way
 			// would leave an accumulated object without a record, so that phase clears the cache for it
 			// and counts it (stats.accumulatedWithoutRecord, the gate: 0 in steady state).
+			// An NPC face shape (FaceSnapshots), resolved once: a tracked geometry's type and parent do not change.
+			if (!trackedEntry->faceShapeResolved) {
+				trackedEntry->faceShapeResolved = true;
+				trackedEntry->faceShape = geometry->GetType().get() == RE::BSGeometry::Type::kDynamicTriShape && geometry->parent &&
+				                          netimmerse_cast<RE::BSFaceGenNiNode*>(geometry->parent);
+			}
+			const bool faceShape = trackedEntry->faceShape && FaceSnapshots::Enabled();
 			Ineligible reason;
 			bool shadowOnly = false;  // not the main pass's, but a caster the shadow epochs draw (kObjectShadowOnly)
-			if (trackedEntry->candidateFrame != 0 && frame - trackedEntry->candidateFrame < Tracked::kCandidateRefreshFrames) {
+			// A face shape is classified every frame: its record also depends on its head's snapshot, and the
+			// verdicts it can take (hidden, fading, a decal group) change as the actor does.
+			if (!faceShape && trackedEntry->candidateFrame != 0 && frame - trackedEntry->candidateFrame < Tracked::kCandidateRefreshFrames) {
 				reason = trackedEntry->candidateReason;
 				// Under a switch node the verdict follows the switch's selection, which changes (a harvested
 				// plant, a tree's variant) without anything the cache witnesses: the shadow views draw what
@@ -1741,6 +1848,21 @@ namespace DCLF
 			}
 
 			auto& data = geometry->GetGeometryRuntimeData();
+			// A face shape's positions: its head's snapshot (FaceSnapshots), and the region of the positions buffer
+			// the epochs upload them to. Every record of a face shape has them, whatever its verdict (a deferred decal
+			// included); without a snapshot the shape gets no record, and the engine draws it - and, the snapshot
+			// being the head's, every other shape of its head too.
+			FaceSnapshots::ShapeView face{};
+			std::uint32_t faceRegion = kNoFaceRegion;
+			if (faceShape) {
+				auto* head = geometry->parent ? netimmerse_cast<RE::BSFaceGenNiNode*>(geometry->parent) : nullptr;
+				if (head)
+					face = FaceSnapshots::Get().Shape(static_cast<RE::BSDynamicTriShape&>(*geometry), *head);
+				if (face.positions)
+					faceRegion = FaceRegionOf(geometry, face.vertexCount);
+				if (faceRegion == kNoFaceRegion)
+					continue;
+			}
 			// Geometry, shared between every object drawing the same TriShape. A skinned shape draws its
 			// skin partitions' own buffers, one draw each (ClassifyStatic has checked every one).
 			const auto* skinPartitions = data.skinInstance ? data.skinInstance->skinPartition.get() : nullptr;
@@ -1903,6 +2025,9 @@ namespace DCLF
 			}
 			tables.shadowReject.push_back(static_cast<std::uint8_t>(shadowReject));
 			tables.sunEntry.push_back(SunEntryOf(*trackedEntry, *geometry));
+			tables.faceStream.push_back(face.positions ? static_cast<std::uint32_t>(tables.faceStreams.size()) : kNoFaceStream);
+			if (face.positions)
+				tables.faceStreams.push_back({ objectId, faceRegion, face.vertexCount, face.generation, face.positions });
 			tables.shadowDiffuse.push_back(shadowDiffuse);
 			tables.shadowMaterial.push_back(shadowMaterial);
 			// The extras rows are allocated by the accumulate phase, which is where the descriptors that
@@ -1924,6 +2049,10 @@ namespace DCLF
 			draw.vertexBufferAddress = geometryRecord.vertexAddress;
 			draw.vertexBufferSize = static_cast<std::uint32_t>(std::min<std::uint64_t>(geometryRecord.vertexBytes, UINT32_MAX));
 			draw.vertexStride = geometryRecord.vertexStride;
+			// The second stream repeats the first; the epochs replace it with a face shape's positions.
+			draw.streamBufferAddress = draw.vertexBufferAddress;
+			draw.streamBufferSize = draw.vertexBufferSize;
+			draw.streamStride = draw.vertexStride;
 			draw.indexBufferAddress = geometryRecord.indexAddress;
 			draw.indexBufferSize = static_cast<std::uint32_t>(std::min<std::uint64_t>(geometryRecord.indexBytes, UINT32_MAX));
 			draw.indexFormat = kIndexFormatR16;
@@ -1936,6 +2065,7 @@ namespace DCLF
 			timer.Add(BuildPart::Record);
 		}
 
+		EndFaceWalk();
 		return result;
 	}
 
@@ -2177,6 +2307,27 @@ namespace DCLF
 			CollectAccumulatedPasses();
 		timer.Add(BuildPart::Walk);
 
+		// [TEMP] CS_DCLF_VOLUMETRIC_PROBE: the face parts' main-camera passes - the technique their flags select, the
+		// decal and alpha flags, and the pass the table holds (technique, hint, list), or none - every 600 frames.
+		if (VolumetricProbe::Enabled() && frame % 600 == 0) {
+			std::map<std::string, std::uint32_t> seen;
+			for (const auto& stream : tables.faceStreams) {
+				auto* geometry = stream.object < tables.objectGeometry.size() ? tables.objectGeometry[stream.object] : nullptr;
+				if (!geometry)
+					continue;
+				const auto& runtime = geometry->GetGeometryRuntimeData();
+				const auto* property = netimmerse_cast<RE::BSLightingShaderProperty*>(runtime.shaderProperty.get());
+				const std::uint64_t flags = property ? property->flags.underlying() : 0;
+				const auto* alpha = runtime.alphaProperty.get();
+				const auto* pass = FindAccumulatedPass(geometry);
+				++seen[fmt::format("'{}' flags technique {} decal {}{} alpha test {} blend {} | pass {}", geometry->name.c_str() ? geometry->name.c_str() : "?",
+					SelectLightingTechnique(flags), (flags >> 26) & 1, (flags >> 27) & 1, alpha && alpha->GetAlphaTesting(), alpha && alpha->GetAlphaBlending(),
+					pass ? fmt::format("technique {} hint {} list {}", (pass->technique >> 24) & 0x3f, pass->hint, pass->subPass) : std::string("none"))];
+			}
+			for (const auto& [line, count] : seen)
+				logger::info("[DCLF][TEMP] face part {} x{}", line, count);
+		}
+
 		auto& evaluator = ConstantEvaluator::Get();
 		auto& gpu = GpuResources::Get();
 		const bool resolveBuffers = frameResolveBuffers;
@@ -2371,6 +2522,8 @@ namespace DCLF
 				std::uint32_t rasterFlags = twoSided ? kRasterTwoSided : 0u;
 				if (descriptors.decalGroup)
 					rasterFlags |= PackDecalRasterFlags(descriptors.decalGroup, decalBiasMode[descriptors.decalGroup & 3], descriptors.decalBlendMode, descriptors.decalWriteMode);
+				if (globals::features::extendedTranslucency.loaded)
+					rasterFlags |= ((ExtendedTranslucency::MaterialModel::DescriptorDisabled ^ ExtendedTranslucency::MaterialModelOf(geometry)) & 7u) << kRasterTranslucencyShift;
 				key = PipelineKey{ descriptors.vertex, descriptors.pixel, rasterFlags, descriptors.pass,
 					VertexLayoutOf(tables.geometries[geometrySlot].vertexDesc) };
 				auto pipelineIt = pipelineIndex.find(key);
@@ -2405,9 +2558,10 @@ namespace DCLF
 					permutation.vertexShaderDescriptor = descriptors.rawVertex;
 					permutation.pixelShaderDescriptor = descriptors.rawPixel & ~descriptors.pixel;
 					permutation.extraShaderDescriptor = static_cast<std::uint32_t>(State::ExtraShaderDescriptors::InWorld);
-					// Extended Translucency disables its material model for opaque geometry.
+					// Extended Translucency's material model, as its SetupGeometry hook sets it (the key carries it):
+					// disabled for opaque geometry, the default or the mesh's own for blended geometry.
 					permutation.extraFeatureDescriptor = globals::features::extendedTranslucency.loaded ?
-					                                         static_cast<std::uint32_t>(ExtendedTranslucency::MaterialModel::DescriptorDisabled)
+					                                         (ExtendedTranslucency::MaterialModel::DescriptorDisabled ^ RasterTranslucency(key.rasterFlags))
 					                                             << ExtendedTranslucency::ExtraFeatureDescriptorShift :
 					                                         0u;
 					tables.permutations[slot] = permutation;
