@@ -213,6 +213,8 @@ namespace DCLF
 		// The extras rows follow every palette (current then previous) in the row buffer.
 		const bool extras = a_objectIndex < a_tables.extraOffset.size() && a_tables.extraOffset[a_objectIndex] != kNoExtraRows;
 		a_out.extraOffset = extras ? static_cast<std::uint32_t>(a_tables.bones.size() / 4) * 2 + a_tables.extraOffset[a_objectIndex] : 0u;
+		const auto wetness = a_objectIndex < a_tables.skinWetness.size() ? a_tables.skinWetness[a_objectIndex] : std::array<float, 4>{};
+		std::memcpy(a_out.skinPerGeometry, wetness.data(), sizeof(a_out.skinPerGeometry));
 	}
 
 	std::uint32_t PackedPositionOf(const StageLayout& a_layout, std::span<const std::uint8_t> a_table, std::uint64_t a_variables, std::uint32_t a_firstVariable,

@@ -37,6 +37,9 @@ struct DCLFObjectRecord
 	// The object's rows of further per-object PerGeometry values in the same buffer, after every
 	// palette: LandBlendParams, the three rows of TextureProj, then ProjectedUVParams, 2 and 3.
 	uint DCLFExtraOffset;
+	// Advanced Skin's SkinPerGeometry (b7): the owning actor's wetness, zero for everything else. Only read
+	// when DCLF_BINDLESS_DRAW is also defined (Skin.hlsli).
+	float4 DCLFSkinPerGeometry;
 };
 
 // The indirect draw's push data. The first two words are the binding record's address, which the pipeline

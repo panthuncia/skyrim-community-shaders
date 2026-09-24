@@ -9,6 +9,7 @@
 #include <ankerl/unordered_dense.h>
 
 #include "FrameAnnotations.h"
+#include "Features/Skin.h"
 #include "State.h"
 
 namespace DCLF
@@ -245,6 +246,11 @@ namespace DCLF
 		// effect. (Light Limit Fix's hook uploads its StrictLightData and caches what it uploaded; that stays
 		// consistent and is left alone.)
 		const auto savedPermutation = globals::state->permutationData;
+		// Advanced Skin's SetupMaterial hook leaves its t71/t74 binding pending for the next State::Draw: restored
+		// likewise, or the next native draw that skips SetupMaterial (the same material as the draw before it)
+		// would bind the evaluated material's textures.
+		auto& skin = globals::features::skin;
+		const auto savedSkinTextures = skin.loaded ? skin.GetPendingTextures() : Skin::PendingTextures{};
 		// Every constant buffer slot, not just the evaluated level. Restoring only a_level was an
 		// assumption about which slots the shader functions touch, and the audit disproved it: a stand-in
 		// SetupGeometry leaves a buffer bound at PS slot 7 that was not bound before (a feature hook binds
@@ -285,6 +291,8 @@ namespace DCLF
 		std::memcpy(&state, savedState.get(), sizeof(state));
 		shader->currentRawTechnique = savedTechnique;
 		globals::state->permutationData = savedPermutation;
+		if (skin.loaded)
+			skin.SetPendingTextures(savedSkinTextures);
 		context->VSSetConstantBuffers(0, kConstantBufferSlots, savedVS.data());
 		context->PSSetConstantBuffers(0, kConstantBufferSlots, savedPS.data());
 		for (auto* buffer : savedVS) {
@@ -336,6 +344,12 @@ namespace DCLF
 						out->addressModes[slot] = 0;
 					}
 					out->filterModes[slot] = static_cast<std::uint32_t>(a_state.PSTextureFilterMode[slot].underlying());
+				}
+				// Advanced Skin's, from the rule its hook binds by rather than from what the hook left pending.
+				out->featureTextures = {};
+				if (auto& skin = globals::features::skin; skin.loaded) {
+					if (const auto textures = skin.MaterialTexturesOf(static_cast<const RE::BSLightingShaderMaterialBase*>(material)))
+						out->featureTextures = *textures;
 				}
 			}
 		};

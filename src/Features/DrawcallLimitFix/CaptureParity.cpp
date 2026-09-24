@@ -8,6 +8,7 @@
 
 #include "Deferred.h"
 #include "Features/LightLimitFix.h"
+#include "Features/Skin.h"
 #include "SceneStore.h"
 #include "State.h"
 
@@ -398,6 +399,55 @@ namespace DCLF
 		}
 	}
 
+	void CaptureParity::CompareSkin(ID3D11DeviceContext* a_context, const RE::BSGeometry* a_geometry, std::uint32_t a_objectIndex)
+	{
+		auto& skin = globals::features::skin;
+		if (!skin.loaded)
+			return;
+		const auto& tables = SceneStore::Get().GetTables();
+		const auto& object = tables.objects[a_objectIndex];
+
+		// t71 and t74 as State::Draw bound them from the pending binding the SetupMaterial hook left.
+		if (!(object.flags & kObjectNoBindings) && object.materialIndex < tables.materials.size()) {
+			const auto& expected = tables.materials[object.materialIndex].featureTextures;
+			if (expected[0] || expected[1]) {
+				std::array<ID3D11ShaderResourceView*, kFeatureMaterialTextures> native{};
+				for (std::uint32_t f = 0; f < kFeatureMaterialTextures; ++f)
+					a_context->PSGetShaderResources(kFeatureMaterialRegisters[f], 1, &native[f]);
+				++skinTextureChecks;
+				if (native != expected) {
+					++skinTextureMismatches;
+					NoteMismatch(fmt::format("{} skin textures: DCLF t71 {} t74 {}, native t71 {} t74 {}", Describe(a_geometry), fmt::ptr(expected[0]),
+						fmt::ptr(expected[1]), fmt::ptr(native[0]), fmt::ptr(native[1])));
+				}
+				for (auto* bound : native) {
+					if (bound)
+						bound->Release();
+				}
+			}
+		}
+
+		// b7: what the SetupGeometry hook uploaded for this draw (it binds its buffer only while enabled).
+		if (skin.settings.EnableSkin && a_objectIndex < tables.skinWetness.size()) {
+			const auto& expected = tables.skinWetness[a_objectIndex];
+			const auto& native = skin.currentWetness;
+			++skinWetnessChecks;
+			if (native.x != 0.0f || native.y != 0.0f)
+				++skinWetDraws;
+			if (native.x != expected[0] || native.y != expected[1] || native.z != expected[2] || native.w != expected[3]) {
+				++skinWetnessMismatches;
+				NoteMismatch(fmt::format("{} skin wetness: DCLF ({} {} {} {}), native ({} {} {} {})", Describe(a_geometry), expected[0], expected[1], expected[2],
+					expected[3], native.x, native.y, native.z, native.w));
+			}
+			const auto* owner = a_geometry->GetUserData();
+			const bool actor = owner && owner->GetFormType() == RE::FormType::ActorCharacter;
+			if (actor != std::binary_search(tables.actorObjects.begin(), tables.actorObjects.end(), a_objectIndex)) {
+				++skinOwnerMismatches;
+				NoteMismatch(fmt::format("{} skin wetness: owned by an actor {}, DCLF resolved {}", Describe(a_geometry), actor, !actor));
+			}
+		}
+	}
+
 	void CaptureParity::CompareFeatureBindings(ID3D11DeviceContext* a_context)
 	{
 		FeatureBindings current;
@@ -552,6 +602,8 @@ namespace DCLF
 					expected.roomIndex, expected.shadowBitMask, native.NumStrictLights, native.RoomIndex, native.ShadowBitMask));
 			}
 		}
+
+		CompareSkin(a_context, geometry, static_cast<std::uint32_t>(index));
 
 		CompareFeatureBindings(a_context);
 
@@ -810,7 +862,8 @@ namespace DCLF
 		}
 
 		const auto& stats = SceneStore::Get().GetStats();
-		const bool ok = mismatchedDraws == 0 && untrackedEligible == 0 && drawMismatches == 0 && permutationMismatches == 0 && lightMismatches == 0;
+		const bool ok = mismatchedDraws == 0 && untrackedEligible == 0 && drawMismatches == 0 && permutationMismatches == 0 && lightMismatches == 0 &&
+		                skinTextureMismatches == 0 && skinWetnessMismatches == 0 && skinOwnerMismatches == 0;
 		std::string flags;
 		for (auto value : renderFlagsSeen)
 			flags += fmt::format(" {:X}", value);
@@ -829,6 +882,9 @@ namespace DCLF
 			drawsChecked, drawMismatches);
 		logger::info("[DCLF] light data parity {}: {} draws checked, {} with different StrictLightData", lightMismatches == 0 ? "OK" : "MISMATCH", lightChecks,
 			lightMismatches);
+		logger::info("[DCLF] skin parity {}: {} draws' t71/t74 checked, {} differ; {} draws' wetness checked ({} wet), {} differ, {} with a different actor ownership",
+			skinTextureMismatches == 0 && skinWetnessMismatches == 0 && skinOwnerMismatches == 0 ? "OK" : "MISMATCH", skinTextureChecks, skinTextureMismatches,
+			skinWetnessChecks, skinWetDraws, skinWetnessMismatches, skinOwnerMismatches);
 		std::string diffs;
 		static constexpr const char* kFieldNames[] = { "vertex", "pixel", "extra", "feature" };
 		for (const auto& [key, count] : permutationDiffs)
@@ -875,6 +931,7 @@ namespace DCLF
 		nativeDraws = checkedDraws = mismatchedDraws = untrackedEligible = notInTables = nativeOnlyPasses = materialMismatches = geometryMismatches = 0;
 		drawMismatches = drawsChecked = 0;
 		techniqueMismatches = inheritedFilters = permutationChecks = permutationMismatches = lightChecks = lightMismatches = 0;
+		skinTextureChecks = skinTextureMismatches = skinWetnessChecks = skinWetnessMismatches = skinWetDraws = skinOwnerMismatches = 0;
 		permutationDiffs.clear();
 		unevaluated.clear();
 		bindingChanges.clear();

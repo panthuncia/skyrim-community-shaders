@@ -29,6 +29,7 @@
 
 #	include "Deferred.h"
 #	include "Features/LinearLighting.h"
+#	include "Features/Skin.h"
 #	include "Features/LightLimitFix/ORGLightCulling.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -53,6 +54,7 @@
 #	include <filesystem>
 #	include <fstream>
 #	include <iterator>
+#	include <map>
 #	include <optional>
 #	include <cstring>
 
@@ -417,6 +419,9 @@ namespace DCLF
 			// point in the frame is already covered, and better, by capture parity's EmitColor comparison
 			// against the engine's own draw - which is the check RefreshFrameConstants exists to satisfy.
 			expect(a_tables.emissiveMult.size() == a_tables.objects.size(), "emissiveMult table length");
+			expect(a_tables.skinWetness.size() == a_tables.objects.size() &&
+					   std::memcmp(a_record.skinPerGeometry, a_tables.skinWetness[a_objectIndex].data(), sizeof(a_record.skinPerGeometry)) == 0,
+				"SkinPerGeometry");
 		}
 
 		std::shared_ptr<org::Buffer> CreateWords(std::uint64_t a_words, bool a_unorderedAccess, const char* a_name)
@@ -460,6 +465,7 @@ namespace DCLF
 		constexpr std::uint32_t kSharedDataRegister = 5;   // SharedData (SharedData.hlsli), bound by Community Shaders
 		constexpr std::uint32_t kFeatureDataRegister = 6;  // FeatureData, likewise
 		constexpr std::uint32_t kLinearLightingRegister = 8;  // LLPerGeometry: Linear Lighting's per-object emissive multiplier
+		constexpr std::uint32_t kSkinRegister = 7;             // SkinPerGeometry: Advanced Skin's per-object wetness
 		constexpr std::uint32_t kStrictLightDataBytes = 1216;  // LightLimitFix.hlsli StrictLightData (15 lights)
 		constexpr std::uint32_t kLightsRegister = 35;          // t35-t37: Light Limit Fix's lights, list and grid
 		constexpr std::uint32_t kInvalidIndex = GpuTextures::kInvalid;
@@ -2494,6 +2500,7 @@ namespace DCLF
 			ankerl::unordered_dense::map<std::uint64_t, std::uint64_t> permutationBlocks;  // (pipeline, extra bits)
 			ankerl::unordered_dense::map<std::uint32_t, std::uint64_t> alphaBlocks;        // threshold
 			ankerl::unordered_dense::map<std::uint32_t, std::uint64_t> emissiveBlocks;     // Linear Lighting multiplier bits
+			std::map<std::array<float, 4>, std::uint64_t> skinBlocks;                      // Advanced Skin wetness
 			const bool linearLighting = a_in.linearLighting;
 			const auto renderFlags = a_in.renderFlags;
 
@@ -2704,6 +2711,7 @@ namespace DCLF
 							AppendSource(sources, entry.key.first);
 							AppendSource(sources, entry.key.second);
 							AppendSource(sources, entry.textureIndex);
+							AppendSource(sources, entry.featureIndex);
 							AppendSource(sources, entry.resolved);
 						} else {
 							AppendSource(sources, ~0u);
@@ -2775,6 +2783,16 @@ namespace DCLF
 								index = blocks.shadowMaskIndex;
 							else if (const auto p = projectedSlot(t); p >= 0)
 								index = a_lookups.projectedTextures[p];
+							else if (const int f = FeatureMaterialSlot(t); f >= 0 && material.featureTextures[f]) {
+								// A feature's per-material texture (Advanced Skin's t71, t74).
+								if (!materialResolved) {
+									resolved.deferred = true;
+									resolved.texturesOk = false;
+									resolved.missingTexture = t;
+									break;
+								}
+								index = materialLookup->featureIndex[f];
+							}
 							else if (t >= kPixelTextureSlots && !depthOnly) {
 								index = 0;
 								patch = usage.UsesTexture(t);
@@ -3064,6 +3082,15 @@ namespace DCLF
 							emissiveBlock = block(data, sizeof(data));
 						}
 						bindings.pixelConstants[kLinearLightingRegister] = emissiveBlock;
+						// Advanced Skin binds its wetness per draw (the owning actor's, zero otherwise), which the
+						// DCLF_BINDLESS_DRAW builds read from the object record instead.
+						if (globals::features::skin.loaded) {
+							const auto wetness = o < a_tables.skinWetness.size() ? a_tables.skinWetness[o] : std::array<float, 4>{};
+							auto& wetnessBlock = skinBlocks[wetness];
+							if (!wetnessBlock)
+								wetnessBlock = block(wetness.data(), sizeof(wetness));
+							bindings.pixelConstants[kSkinRegister] = wetnessBlock;
+						}
 					}
 					bool constantsOk = true;
 					for (std::uint32_t b = 0; b < kConstantBufferRegisters; ++b) {
@@ -3421,7 +3448,7 @@ namespace DCLF
 				// marked used: the indices stand (the shadow, Z-prepass and colour epochs each refresh).
 				if (entry.resolved && entry.written == material.textureWritten && entry.texturesGeneration == textures.Generation() &&
 					a_frame - entry.resolvedFrame < GpuTextures::kRestampFrames) {
-					bool same = true;
+					bool same = entry.featureViews == material.featureTextures;
 					for (std::uint32_t t = 0; t < kPixelTextureSlots && same; ++t)
 						same = !((material.textureWritten >> t) & 1) || entry.views[t] == material.textures[t];
 					if (same)
@@ -3433,6 +3460,11 @@ namespace DCLF
 					const std::uint32_t index = textures.Resolve(material.textures[t]);
 					note(entry.textureIndex[t], index);
 					entry.views[t] = material.textures[t];
+				}
+				for (std::uint32_t f = 0; f < kFeatureMaterialTextures; ++f) {
+					const std::uint32_t index = material.featureTextures[f] ? textures.Resolve(material.featureTextures[f]) : Lookups::kNone;
+					note(entry.featureIndex[f], index);
+					entry.featureViews[f] = material.featureTextures[f];
 				}
 				if (!entry.resolved)
 					++a_lookups.generation;

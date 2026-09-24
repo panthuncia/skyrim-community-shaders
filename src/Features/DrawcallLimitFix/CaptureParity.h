@@ -131,12 +131,21 @@ namespace DCLF
 		std::uint64_t inheritedFilters = 0;    // bound material textures whose filter mode neither SetupTechnique nor SetupMaterial sets
 		std::uint64_t lightChecks = 0;
 		std::uint64_t lightMismatches = 0;  // StrictLightData (LLF, PS b3) differs
+		// Advanced Skin: its per-material textures (PS t71, t74) against the material record, its wetness (PS b7)
+		// against the tables, and whether the object's actor ownership (SceneStore::Tracked::actorOwned) still holds.
+		std::uint64_t skinTextureChecks = 0;
+		std::uint64_t skinTextureMismatches = 0;
+		std::uint64_t skinWetnessChecks = 0;
+		std::uint64_t skinWetnessMismatches = 0;
+		std::uint64_t skinWetDraws = 0;  // checked draws with sweat or water wetness (x or y)
+		std::uint64_t skinOwnerMismatches = 0;
 		std::uint64_t permutationChecks = 0;
 		std::uint64_t permutationMismatches = 0;
 		// Bindings Community Shaders owns (constant buffers b3 and up, shader resources outside the
 		// engine's material and technique slots): they must be the same for every eligible draw of a
 		// frame, so that DCLF can bind them once per pass. Baseline = the frame's first eligible draw.
 		void CompareFeatureBindings(ID3D11DeviceContext* a_context);
+		void CompareSkin(ID3D11DeviceContext* a_context, const RE::BSGeometry* a_geometry, std::uint32_t a_objectIndex);
 		static constexpr std::uint32_t kFirstFeatureConstantBuffer = 3;
 		static constexpr std::uint32_t kConstantBufferSlots = D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT;
 		static constexpr std::uint32_t kResourceSlots = 128;

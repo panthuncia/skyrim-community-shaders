@@ -148,8 +148,11 @@ namespace DCLF
 		std::uint32_t boneRows;
 		// The object's kExtraRows rows in the same buffer (after every palette), or 0 when it has none.
 		std::uint32_t extraOffset;
+		// Advanced Skin's SkinPerGeometry (PS b7): the owning actor's wetness (SceneStore::Tables::skinWetness),
+		// zero for everything else. Per object like the rest, so the binding record stays per (material, pipeline).
+		float skinPerGeometry[4];
 	};
-	static_assert(sizeof(BindlessObject) == 192);
+	static_assert(sizeof(BindlessObject) == 208);
 
 	/**
 	 * @brief Fills one, from the same inputs PatchObjectGeometry writes into a packed group. World and

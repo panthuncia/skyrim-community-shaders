@@ -82,6 +82,11 @@ namespace DCLF
 			// Tree animation, per object. Only technique 12 fills it; everything else leaves the engine's
 			// defaults, which is what the template block already carried for them.
 			std::vector<ObjectTreeAnim> treeAnim;                 // parallel to objects
+			// Advanced Skin's SkinPerGeometry (PS b7): the owning actor's sweat, water wetness, height and water depth,
+			// Skin::GetWetness, which its SetupGeometry hook binds for every Lighting draw. Zero for everything not owned
+			// by an actor (actorObjects lists those that are); refreshed every frame by RefreshFrameConstants.
+			std::vector<std::array<float, 4>> skinWetness;        // parallel to objects
+			std::vector<std::uint32_t> actorObjects;
 			// Skins of several partitions (CS_DCLF_SKIN_PARTITIONS): bit i draws partition i, walking the
 			// geometry slots' nextPartition links from the object's geometryIndex (partition 0). 0 for every
 			// other object, which draws its one geometry. The scene phase sets it from the fade node's LOD level
@@ -638,6 +643,10 @@ namespace DCLF
 			// Resolved once, by the walk.
 			bool faceShape = false;
 			bool faceShapeResolved = false;
+			// Owned by an actor (its GetUserData is an ActorCharacter): Advanced Skin gives its draws the actor's
+			// wetness (Tables::skinWetness). Resolved once, by the walk.
+			bool actorOwned = false;
+			bool actorOwnedResolved = false;
 			static constexpr std::uint32_t kCandidateRefreshFrames = 64;
 			// The accumulate phase's verdict when it left the object without bindings, and the frame it did so
 			// (ReasonThisFrame).

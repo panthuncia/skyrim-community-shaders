@@ -8,6 +8,7 @@
 #include "Common/Shading.hlsli"
 #include "Common/SharedData.hlsli"
 
+#include "Common/DCLFObjects.hlsli"
 #include "Common/NamespacedCBuffer.hlsli"
 
 namespace Skin
@@ -20,11 +21,17 @@ namespace Skin
 	}
 
 #if defined(PSHADER)
+#	if defined(DCLF_BINDLESS_DRAW)
+	// Drawcall Limit Fix: per object, from its record rather than a buffer of its own, so that b7 is not part
+	// of what makes a draw's binding record unique.
+	static const float4 skinPerGeometry = DCLFObjects[DCLFObjectIndex].DCLFSkinPerGeometry;
+#	else
 	cbuffer SkinPerGeometry : register(b7)
 	{
 		float4 NSCB(Skin, skinPerGeometry);
 	};
 	NSCB_ALIAS(Skin, float4, skinPerGeometry)
+#	endif
 #endif
 #if defined(SKIN)
 	Texture2D<float4> TexSkinDetailNormal : register(t72);

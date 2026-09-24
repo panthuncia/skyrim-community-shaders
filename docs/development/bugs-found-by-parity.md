@@ -104,6 +104,31 @@ per draw, DCLF has to model it:
 
 Capture parity's permutation check will then compare it on every skin draw.
 
+## Advanced Skin: the RFAOS and wetness textures are never loaded
+
+**Where:** `Skin::SetupExtraTexture` in `src/Features/Skin.cpp`, called the first time its `SetupMaterial` hook
+sees a FaceGen or FaceGenRGBTint material.
+
+**What happens.** The function derives a `_rfaos.dds` and a `_wet.dds` path from the material's specular or
+normal map. It writes those paths into the texture set's environment and multilayer slots. But the two textures
+it keeps for the material, `rfaosTexture` and `wetnessTexture`, are set to the engine's default white texture,
+and nothing replaces them with the files at those paths. The hook then binds them at t71 and t74.
+`Lighting.hlsl` treats a texture of 32 texels or less on a side as absent (`hasSkinExtra`, `hasSkinWetness`),
+so the per-material roughness, fuzz, AO and specular (t71) and the wetness mask and normal (t74) are never
+used.
+
+**Evidence** (a temporary log in capture parity's skin check, Riverwood): every FaceGen material drawn bound
+the same view at t71 and t74, a 16x16 texture. The first was the player's head (`MaleHeadNord`, ref 00000014);
+no other view appeared. It is not even the view the engine's `defaultTextureWhite` resolves to (1x1), so which
+texture ends up bound is worth checking in the PR too.
+
+**Proposed fix:** load the two files when they exist, the way the engine loads a texture set's textures
+(through the texture manager, with the material's usual residency), and fall back to the black default
+otherwise. Keep the material's entry keyed by its hash key, as now.
+
+**DCLF side:** nothing to change. DCLF binds what `Skin::MaterialTexturesOf` returns for the material, so it
+follows the fix. Capture parity's `skin parity` line compares t71 and t74 on every FaceGen draw it checks.
+
 # The engine
 
 ## Hair with ProjectedUV shades another object's snow

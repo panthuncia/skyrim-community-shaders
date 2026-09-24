@@ -21,6 +21,7 @@
 
 #include "Features/ExtendedTranslucency.h"
 #include "Features/LightLimitFix.h"
+#include "Features/Skin.h"
 #include "State.h"
 #include "Utils/ExternalEmittance.h"
 
@@ -144,6 +145,8 @@ namespace DCLF
 		emissiveMult.clear();
 		lights.clear();
 		treeAnim.clear();
+		skinWetness.clear();
+		actorObjects.clear();
 		skinPartitions.clear();
 		draws.clear();
 		decalOrdinal.clear();
@@ -186,6 +189,8 @@ namespace DCLF
 		emissiveMult.clear();
 		lights.clear();
 		treeAnim.clear();
+		skinWetness.clear();
+		actorObjects.clear();
 		skinPartitions.clear();
 		geometryConstants.clear();
 		geometryConstantsValid.clear();
@@ -996,6 +1001,20 @@ namespace DCLF
 			if (tables.objects[o].flags & (kObjectProjectedUV | kObjectLandBlend))
 				RefreshObjectExtras(o, lighting, *geometry);
 		}
+
+		// Advanced Skin's wetness, per actor-owned object. Skin::GetWetness keeps each actor's fading state and
+		// computes it once a frame (the first call; later ones, including its own SetupGeometry hook for the draws
+		// the engine still makes this frame, return the same value), so calling it here for every actor in the
+		// tables advances every actor's fade once a frame, whether or not the engine draws it.
+		auto& skin = globals::features::skin;
+		const bool wetness = skin.loaded && skin.settings.EnableSkin;
+		for (const std::uint32_t o : tables.actorObjects) {
+			auto* geometry = o < tables.objectGeometry.size() ? tables.objectGeometry[o] : nullptr;
+			if (o < tables.skinWetness.size()) {
+				const float4 value = wetness && geometry ? skin.GetWetness(geometry) : float4{};
+				tables.skinWetness[o] = { value.x, value.y, value.z, value.w };
+			}
+		}
 	}
 
 	namespace
@@ -1765,6 +1784,12 @@ namespace DCLF
 				                          netimmerse_cast<RE::BSFaceGenNiNode*>(geometry->parent);
 			}
 			const bool faceShape = trackedEntry->faceShape && FaceSnapshots::Enabled();
+			// Owned by an actor, as Skin::GetWetness decides it; resolved once, like the face shape.
+			if (!trackedEntry->actorOwnedResolved) {
+				trackedEntry->actorOwnedResolved = true;
+				const auto* owner = geometry->GetUserData();
+				trackedEntry->actorOwned = owner && owner->GetFormType() == RE::FormType::ActorCharacter;
+			}
 			Ineligible reason;
 			bool shadowOnly = false;  // not the main pass's, but a caster the shadow epochs draw (kObjectShadowOnly)
 			// A face shape is classified every frame: its record also depends on its head's snapshot, and the
@@ -2039,6 +2064,9 @@ namespace DCLF
 			tables.emissiveMult.push_back(1.0f);
 			tables.lights.push_back(ObjectLights{});
 			tables.treeAnim.push_back(ObjectTreeAnim{});
+			tables.skinWetness.push_back({});
+			if (trackedEntry->actorOwned)
+				tables.actorObjects.push_back(objectId);
 			tables.skinPartitions.push_back(static_cast<std::uint8_t>(skinPartitions && skinPartitions->numPartitions > 1 ? partitionMask : 0));
 			trackedEntry->objectStamp = objectStamp;
 			trackedEntry->objectId = objectId;

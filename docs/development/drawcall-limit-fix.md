@@ -4037,8 +4037,7 @@ face pass reaches `RegisterPass`):
     carry the model (`kRasterTranslucencyShift`, left out of `RasterStateBits`) and whose permutation is built
     from it.
 
-**Out of scope:** Community Shaders' Advanced Skin (t71/t74/t75 and its per-geometry buffer) is not bound for
-DCLF's skin draws, bodies or faces; its own step. Feature binding parity reports those slots, as before faces.
+**Advanced Skin** was left for its own step; see "Advanced Skin in DCLF's draws" below.
 
 **Result** at Riverwood:
 -   Capture parity (`CS_DCLF_OWNERSHIP=0`): OK, about 18,000 draws checked per 300 frames, 0 mismatched.
@@ -4048,3 +4047,64 @@ DCLF's skin draws, bodies or faces; its own step. Feature binding parity reports
 -   Shadow maps across a live toggle unchanged; 0 engine draws into the cascades or the volumetric copy.
 -   Snapshot parity 35,400 of 35,400 equal.
 -   The Sleeping Giant Inn (interior): 0 holes, BuildDraws parity OK, 0 native passes kept.
+
+## Advanced Skin in DCLF's draws
+
+Community Shaders' Advanced Skin (`src/Features/Skin.cpp`) binds four things for Lighting draws, none of them
+through the engine's state. DCLF used to take all four from the frame capture, so every DCLF draw got whatever
+the capture happened to see: one material's t71/t74, one actor's wetness.
+
+| Binding | Set by | Varies per | DCLF |
+| --- | --- | --- | --- |
+| t72, the skin detail normal map | `Prepass` | frame | the frame capture, as before |
+| t71 (RFAOS), t74 (wetness texture) | its `SetupMaterial` hook, bound at `State::Draw` | material (FaceGen and FaceGenRGBTint only) | the material record |
+| b7 `SkinPerGeometry` | its `SetupGeometry` hook, every Lighting draw | owning actor, per frame | per object |
+| t75 | nothing | - | declared by `Lighting.hlsl`, never sampled |
+
+-   **t71/t74: one rule, two callers.** The hook's logic is now `Skin::MaterialTexturesOf(material)`: nullopt for
+    a material that isn't FaceGen or FaceGenRGBTint, otherwise its extra textures or the default black texture
+    for both. The hook binds what it returns, and `ConstantEvaluator::EvaluateMaterial` stores it in the material
+    record (`MaterialRecord::featureTextures`, registers `kFeatureMaterialRegisters`). The lookups resolve those
+    views like the engine's t0-t15 (`Lookups::Material::featureIndex`), and the binding record names them for a
+    pipeline that reads them. One change of behaviour in Skin: a FaceGen material without a hash key now binds
+    black, as a material without extra textures does. Before, it left the previous draw's textures.
+-   **The stand-in no longer leaks Skin's binding.** DCLF's stand-in `SetupMaterial` runs Skin's hook, which
+    leaves the evaluated material's textures pending for the next `State::Draw`. A native draw that skips
+    `SetupMaterial` (the same material as the draw before it) would bind them. `RunStandIn` saves and restores
+    the pending binding (`Skin::GetPendingTextures` / `SetPendingTextures`), as it already does for the
+    permutation data.
+-   **b7: the actor's wetness, per object.** `Skin::GetWetness(geometry)` returns the owning actor's sweat,
+    water wetness, height and water depth: zero unless the geometry's user data is an `ActorCharacter`. It keeps
+    a fading state per actor and computes once a frame; later calls in the frame return the cached value.
+    -   The walk resolves ownership once per tracked geometry (`Tracked::actorOwned`).
+    -   `RefreshFrameConstants` (Prepass, the same frame as the main pass) calls `GetWetness` for every
+        actor-owned object in the tables (`Tables::actorObjects`, `Tables::skinWetness`), while Skin is enabled.
+        Every actor's fade therefore advances once a frame whether or not the engine draws it. Natively it
+        advanced only on frames where the actor was drawn.
+    -   With `DCLF_BINDLESS_DRAW` it is a field of the object record (`BindlessObject::skinPerGeometry`,
+        `DCLFObjectRecord::DCLFSkinPerGeometry`), which `Skin.hlsli` reads in place of its b7 buffer, so the
+        binding record stays one per (material, pipeline). Without it, b7 is a per-draw block deduplicated by
+        value, like Linear Lighting's b8.
+
+**Parity.** Capture parity's `skin parity` line checks every native draw it compares:
+
+-   t71 and t74 as bound at the draw, against the material record (draws of FaceGen materials);
+-   Skin's uploaded wetness against `Tables::skinWetness`;
+-   the geometry's actor ownership against `Tables::actorObjects`.
+
+Bindless record parity checks the record's `SkinPerGeometry` against the tables.
+
+**Result** at Riverwood, with `player.damageav stamina 1000` at frame 1500 so that the player sweats and then
+dries:
+
+-   Capture parity (`CS_DCLF_OWNERSHIP=0`) OK in every report: 0 mismatched. Skin parity OK: up to 215 draws' t71/t74
+    and about 4,200-8,600 draws' wetness per 300 frames, 0 differ, 0 ownership differences. The wet draws (sweat
+    or water) went from 0 to 1,200 per report after the drain and back to 0 as the player recovered, and the
+    fade matched throughout.
+-   With ownership: 0 native passes kept, 0 holes, BuildDraws parity OK, bindless record parity OK, all 42 SPIR-V
+    programs ready. The same with `CS_DCLF_BINDLESS_DRAW=0` (b7 as a per-draw block, no missing pixel constants).
+-   Every FaceGen material bound the same 16x16 view at t71 and t74, below the shader's 32-texel threshold, so
+    the RFAOS and wetness-texture paths never run natively either. That is a Skin bug
+    ([bugs-found-by-parity.md](./bugs-found-by-parity.md)); DCLF binds what Skin binds.
+-   Feature binding parity still reports t26, t55, t81-91 and VS b7 differing within some frames. Those are other
+    features, not Advanced Skin, and were reported before this work.

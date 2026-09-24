@@ -8,6 +8,7 @@
 
 #include <ankerl/unordered_dense.h>
 
+#include "ConstantEvaluator.h"
 #include "Records.h"
 
 struct ID3D11ShaderResourceView;
@@ -75,6 +76,9 @@ namespace DCLF
 			// What textureIndex was resolved from, so an unchanged material is not resolved again (every epoch
 			// refreshes the lookups): its views, which of them were written, GpuTextures' generation, and when.
 			std::array<ID3D11ShaderResourceView*, kTextureSlots> views{};
+			// The feature textures (MaterialRecord::featureTextures, kFeatureMaterialRegisters): indices and views.
+			std::array<std::uint32_t, kFeatureMaterialTextures> featureIndex{};
+			std::array<ID3D11ShaderResourceView*, kFeatureMaterialTextures> featureViews{};
 			std::uint32_t written = 0;
 			std::uint32_t texturesGeneration = 0;
 			std::uint32_t resolvedFrame = 0;

@@ -13,6 +13,22 @@ namespace DCLF
 	inline constexpr std::uint32_t kLightingPSVariables = 51;
 	inline constexpr std::uint32_t kPixelTextureSlots = 16;
 
+	/**
+	 * @brief Per-material textures a Community Shaders hook on SetupMaterial binds outside the engine's slots:
+	 * Advanced Skin's t71 (RFAOS) and t74 (wetness), Skin::MaterialTexturesOf. MaterialRecord::featureTextures
+	 * holds them in this order.
+	 */
+	inline constexpr std::array<std::uint32_t, 2> kFeatureMaterialRegisters{ 71, 74 };
+	inline constexpr std::uint32_t kFeatureMaterialTextures = static_cast<std::uint32_t>(kFeatureMaterialRegisters.size());
+	/** @brief The featureTextures entry of a pixel texture register, or -1. */
+	inline constexpr int FeatureMaterialSlot(std::uint32_t a_register)
+	{
+		for (std::uint32_t i = 0; i < kFeatureMaterialTextures; ++i)
+			if (kFeatureMaterialRegisters[i] == a_register)
+				return static_cast<int>(i);
+		return -1;
+	}
+
 	/** @brief Bit pattern of constant components the engine did not write (a quiet NaN no engine code produces; a signaling NaN would be quietened by float copies). */
 	inline constexpr std::uint32_t kUnwrittenBits = 0x7fdadbadu;  // quiet NaN: survives float copies unchanged
 
@@ -53,6 +69,9 @@ namespace DCLF
 		std::array<std::uint32_t, kPixelTextureSlots> addressModes{};
 		std::array<std::uint32_t, kPixelTextureSlots> filterModes{};  // kUnwrittenFilterMode where SetupMaterial leaves it
 		std::uint32_t textureWritten = 0;
+		// kFeatureMaterialRegisters: null where the feature binds nothing for the material (it leaves the previous
+		// draw's binding; the draws then take the frame's).
+		std::array<ID3D11ShaderResourceView*, kFeatureMaterialTextures> featureTextures{};
 
 		/**
 		 * @brief Value equality, for measuring whether a record could be cached across frames.
@@ -68,7 +87,7 @@ namespace DCLF
 		{
 			return vs.floats == a_other.vs.floats && ps.floats == a_other.ps.floats &&
 			       textures == a_other.textures && addressModes == a_other.addressModes &&
-			       filterModes == a_other.filterModes && textureWritten == a_other.textureWritten;
+			       filterModes == a_other.filterModes && textureWritten == a_other.textureWritten && featureTextures == a_other.featureTextures;
 		}
 	};
 
