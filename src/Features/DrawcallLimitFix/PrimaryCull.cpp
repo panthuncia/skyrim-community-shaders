@@ -3,12 +3,14 @@
 #include "LightingDescriptors.h"
 #include "PassCapture.h"
 #include "SceneStore.h"
+#include "AsyncWorker.h"
 #include "IndirectDraws.h"
 #include "SunAccumulation.h"
 #include "Switches.h"
 #include "Toggles.h"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -22,6 +24,7 @@ namespace DCLF
 		constexpr std::uintptr_t kAfterFullFrustum = 0x14a0840;
 		constexpr std::uintptr_t kListJobsFinishCallSite = 0x14cbf4d;  // ... -> JobList::Finish(scene list culling)
 		constexpr std::uintptr_t kListJobsFinish = 0xcf6810;
+		constexpr std::uintptr_t kProcess1 = 0xe28390;  // BSCullingProcess::Process1, the list processes' vtable slot 0x16
 		constexpr std::uintptr_t kSceneLists = 0x338c870;      // BSTArray<NiPointer<NiAVObject>>*
 		constexpr std::uintptr_t kSceneListCount = 0x338c868;  // std::uint32_t
 		constexpr std::uintptr_t kExtraList = 0x338c888;       // BSTArray<NiPointer<NiAVObject>>, culled by the first job only
@@ -35,6 +38,7 @@ namespace DCLF
 		// NiAVObject / BSFadeNode fields BSFadeNode::OnVisible (AE 0x141479f50) reads before its fade update.
 		constexpr std::size_t kObjectFlags = 0xF4;
 		constexpr std::uint32_t kFlagFadeSettled = 1u << 15;
+		constexpr std::uint32_t kFlagAccumulated = 1u << 26;  // NiAVObject::kAccumulated
 		constexpr std::size_t kFadeAmount = 0x100;
 		constexpr std::size_t kCurrentFade = 0x130;
 		constexpr std::size_t kPropertyLightData = 0x70;
@@ -51,6 +55,12 @@ namespace DCLF
 		constexpr std::uintptr_t kFadeUpdate = 0x147a160;         // FUN_14147a160(node, fadeAmount, camera): the fade state machine
 		constexpr std::uintptr_t kFadeDistance = 0x147b110;       // FUN_14147b110(node, camera, out): the distance and LOD level
 		constexpr std::uintptr_t kLeafLodUpdate = 0x147a430;      // FUN_14147a430(node, level): the leaf and tree LOD transition
+		// BSTreeNode::OnVisible (AE 0x14147d3c0): the height test and the LOD fix-up.
+		constexpr std::size_t kProcessTreeHeightTest = 0x121;     // byte on the culling process
+		constexpr std::uintptr_t kTreeHeightTestOn = 0x2032fb8;   // byte
+		constexpr std::uintptr_t kTreeHeightBase = 0x332a2f0;     // float
+		constexpr std::uintptr_t kTreeHeightLimit = 0x2032fa0;    // float
+		constexpr std::size_t kTreeLodData = 0x180;               // pointer; its +0x12C count
 		constexpr std::size_t kLightDataActiveMask = 0x1C;
 
 		using SceneList = RE::BSTArray<RE::NiPointer<RE::NiAVObject>>;
@@ -99,6 +109,15 @@ namespace DCLF
 			       At<float>(a_node, kCurrentFade) == 1.0f;
 		}
 
+		/**
+		 * @brief A fade root the synthetic pass can stand for: fully faded in, and its LOD state settled (+0x153 & 0x70 is
+		 * 0x20; otherwise GetRenderPasses adds the old level's cross-fade copy, a hint-10 pass, which is the engine's).
+		 */
+		bool Settled(const RE::NiAVObject* a_node)
+		{
+			return At<float>(a_node, kCurrentFade) == 1.0f && At<float>(a_node, kFadeAmount) == 1.0f && (At<std::uint8_t>(a_node, 0x153) & 0x70) == 0x20;
+		}
+
 		/** @brief The engine's sphere test against the active planes (outside when n.c - d < -r). */
 		bool Outside(const RE::NiFrustumPlanes& a_planes, const RE::NiBound& a_bound)
 		{
@@ -111,6 +130,13 @@ namespace DCLF
 					return true;
 			}
 			return false;
+		}
+
+		/** @brief The engine's Process1 (the slot's original, verified at install). */
+		void EngineProcess1(RE::NiCullingProcess* a_process, RE::NiAVObject* a_object, std::int32_t a_arg)
+		{
+			using Fn = void (*)(RE::NiCullingProcess*, RE::NiAVObject*, std::int32_t);
+			reinterpret_cast<Fn>(REL::Module::get().base() + kProcess1)(a_process, a_object, a_arg);
 		}
 
 		std::string NameOf(const RE::NiAVObject* a_object)
@@ -128,6 +154,12 @@ namespace DCLF
 		return instance;
 	}
 
+	bool PrimaryCull::ReasonsProbe()
+	{
+		static const bool probe = SwitchEnabled("CS_DCLF_PRIMARY_REASONS");
+		return probe;
+	}
+
 	bool PrimaryCull::Probe()
 	{
 		static const bool probe = SwitchValue("CS_DCLF_PRIMARY_EXCLUDE") == "probe";
@@ -137,15 +169,17 @@ namespace DCLF
 	bool PrimaryCull::ServiceFade(RE::NiAVObject* a_node, bool a_leaf, const RE::NiCamera& a_camera)
 	{
 		using FadeUpdate = void (*)(RE::NiAVObject*, float, const float*);
-		using FadeDistance = float (*)(RE::NiAVObject*, const float*, std::uint32_t*);
-		using LeafLodUpdate = void (*)(RE::NiAVObject*, std::uint32_t);
+		// FUN_14147b110 writes the LOD distance through its third argument, and FUN_14147a430 takes it in XMM1
+		// (BSLeafAnimNode::OnVisible, AE 0x14147ca3e): floats, not integers.
+		using FadeDistance = float (*)(RE::NiAVObject*, const float*, float*);
+		using LeafLodUpdate = void (*)(RE::NiAVObject*, float);
 		const auto base = REL::Module::get().base();
 		const float camera[4] = { a_camera.world.translate.x, a_camera.world.translate.y, a_camera.world.translate.z, At<float>(&a_camera, kCameraLodAdjust) };
 		auto& lastVisible = At<std::int32_t>(a_node, kLastVisibleFrame);
 		const std::int32_t counter = Global<std::int32_t>(kFadeFrameCounter);
 		// BSLeafAnimNode::OnVisible: its LOD step first, then BSFadeNode::OnVisible.
 		if (a_leaf && Global<std::uint8_t>(kFadeLodUpdates)) {
-			std::uint32_t level = 0;
+			float level = 0.0f;
 			reinterpret_cast<FadeDistance>(base + kFadeDistance)(a_node, camera, &level);
 			reinterpret_cast<LeafLodUpdate>(base + kLeafLodUpdate)(a_node, level);
 			lastVisible = counter;
@@ -156,7 +190,7 @@ namespace DCLF
 		auto& currentFade = At<float>(a_node, kCurrentFade);
 		const float fadeAmount = At<float>(a_node, kFadeAmount);
 		if ((At<std::uint8_t>(a_node, 0x153) & 0xF) == 6 && Global<float>(kFadeSpecialA) == Global<float>(kFadeSpecialB)) {
-			std::uint32_t level = 0;
+			float level = 0.0f;
 			reinterpret_cast<FadeDistance>(base + kFadeDistance)(a_node, camera, &level);
 			std::uint32_t value = flags;
 			if (!Global<std::uint8_t>(kFadeLodUpdates)) {
@@ -184,101 +218,568 @@ namespace DCLF
 		return currentFade > 0.0f && fadeAmount != 0.0f;
 	}
 
-	PrimaryCull::EntryPlan PrimaryCull::PlanOf(std::uint32_t a_entry, const RE::NiAVObject* a_root)
+	std::int32_t PrimaryCull::SwitchIndex(const RE::NiSwitchNode* a_switch)
 	{
-		auto& plan = cut.plans[a_entry];
-		if (plan != EntryPlan::Unknown)
-			return plan;
-		const auto& candidates = *cut.candidates;
-		plan = EntryPlan::Rejected;
-		if (a_entry >= candidates.primary.size() || !candidates.primary[a_entry]) {
-			// [TEMP] the first geometry the verdict fails on, by its table state and reason.
-			std::string why = "snapshot verdict";
-			for (std::uint32_t g = cut.geometryOffsets[a_entry]; g < cut.geometryOffsets[a_entry + 1]; ++g) {
-				const auto* geometry = cut.geometryIndices[g];
-				Ineligible reason = Ineligible::None;
-				const int state = SceneStore::Get().ProbeTableState(geometry, reason);
-				const auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
-				const auto* alpha = geometry->GetGeometryRuntimeData().alphaProperty.get();
-				const bool decal = property && (property->flags.underlying() & 0xc000000ull);
-				const bool blended = alpha && (alpha->alphaFlags & 1);
-				if (state != 2 || reason != Ineligible::None || decal || blended) {
-					why = fmt::format("snapshot verdict: state {} {}{}{}", state, kIneligibleNames[static_cast<std::size_t>(reason)], decal ? " decal" : "", blended ? " blended" : "");
-					break;
-				}
-			}
-			++cutStats.planReasons[why];
-			return plan;
+		SceneStore::SwitchState state;
+		return SceneStore::ReadSwitch(*a_switch, state) ? state.index : -1;
+	}
+
+	bool PrimaryCull::FeedbackProbe()
+	{
+		static const bool probe = SwitchEnabled("CS_DCLF_FEEDBACK_PROBE");
+		return probe;
+	}
+
+	bool PrimaryCull::FeedbackOn()
+	{
+		static const bool on = SwitchValue("CS_DCLF_FEEDBACK") != "0";
+		return on;
+	}
+
+	bool PrimaryCull::TreeAboveLimit(const RE::NiAVObject* a_node, const RE::NiCullingProcess& a_process)
+	{
+		// Above the height limit (worldBound.center.z against a base), with the test on: nothing, and no recursion.
+		return At<std::uint8_t>(&a_process, kProcessTreeHeightTest) && Global<std::uint8_t>(kTreeHeightTestOn) &&
+		       a_node->worldBound.center.z - Global<float>(kTreeHeightBase) > Global<float>(kTreeHeightLimit);
+	}
+
+	bool PrimaryCull::ServiceTree(RE::NiAVObject* a_node, const RE::NiCullingProcess& a_process)
+	{
+		if (TreeAboveLimit(a_node, a_process))
+			return false;
+		return a_process.camera ? ServiceTreeState(a_node, *a_process.camera) : true;
+	}
+
+	bool PrimaryCull::ServiceTreeState(RE::NiAVObject* a_node, const RE::NiCamera& a_camera)
+	{
+		const bool recurse = ServiceFade(a_node, true, a_camera);
+		if (const auto* lod = At<const std::byte*>(a_node, kTreeLodData); lod && At<std::int32_t>(lod, 0x12C) > 0) {
+			auto& state = At<std::uint8_t>(a_node, 0x153);
+			state = static_cast<std::uint8_t>((state & 0xaf) | 0x20);
+			At<float>(a_node, 0x14C) = 0.0f;
 		}
-		std::string cause;
+		return recurse;
+	}
+
+	PrimaryCull::EntryPlan PrimaryCull::PlanOf([[maybe_unused]] std::uint32_t a_entry, const RE::NiAVObject* a_root)
+	{
+		const auto& candidates = *cut.candidates;
+		lastCause.clear();
 		// Only nodes whose OnVisible is the plain recursion (NiNode, and a multibound's frustum cache), under a root that
-		// may also be a fade node; and every geometry one of the entry's tracked ones. Anything else keeps it in.
+		// may also be a fade node; only geometries whose OnVisible is BSGeometry's (the append to the process). A tracked
+		// geometry PrimaryEntryAllows is DCLF's; every other is the engine's, handed to its registration in the cull's order.
+		const std::size_t first = cut.members.size();
+		const std::size_t firstPath = cut.switchPaths.size();
+		const std::size_t firstSwitch = cut.switches.size();
+		std::vector<std::pair<const RE::NiSwitchNode*, std::int32_t>> path;
 		bool rejected = false;
-		std::uint32_t geometries = 0;
+		std::uint32_t ours = 0;
 		const auto visit = [&](const auto& a_self, const RE::NiAVObject* a_object, bool a_isRoot) -> void {
 			if (rejected || !a_object)
 				return;
 			if (const auto* geometry = const_cast<RE::NiAVObject*>(a_object)->AsGeometry()) {
-				++geometries;
-				if (!candidates.geometries.contains(geometry)) {
+				if ((*reinterpret_cast<const std::uintptr_t* const*>(geometry))[0x34] != geometryOnVisible) {
 					rejected = true;
-					cause = fmt::format("untracked geometry {}", a_object->GetRTTI() ? a_object->GetRTTI()->name : "?");
+					lastCause = fmt::format("geometry {} with its own OnVisible", a_object->GetRTTI() ? a_object->GetRTTI()->name : "?");
+					return;
 				}
+				const auto it = candidates.geometries.find(geometry);
+				const bool mine = it != candidates.geometries.end() && it->second < candidates.primaryGeometry.size() && candidates.primaryGeometry[it->second];
+				const auto begin = static_cast<std::uint32_t>(cut.switchPaths.size());
+				cut.switchPaths.insert(cut.switchPaths.end(), path.begin(), path.end());
+				cut.members.push_back({ geometry, !mine, begin, static_cast<std::uint32_t>(cut.switchPaths.size()) });
+				ours += mine ? 1 : 0;
 				return;
 			}
 			auto* node = const_cast<RE::NiAVObject*>(a_object)->AsNode();
+			if (node && !a_isRoot && RttiIs(a_object, "NiSwitchNode")) {
+				const auto* switchNode = static_cast<const RE::NiSwitchNode*>(node);
+				cut.switches.push_back(switchNode);
+				const auto& children = node->GetChildren();
+				for (std::uint16_t c = 0; c < children.size(); ++c) {
+					path.emplace_back(switchNode, static_cast<std::int32_t>(c));
+					a_self(a_self, children[c].get(), false);
+					path.pop_back();
+				}
+				return;
+			}
 			if (!node || !(RttiIs(a_object, "NiNode") || RttiIs(a_object, "BSMultiBoundNode") ||
-							  (a_isRoot && (RttiIs(a_object, "BSFadeNode") || RttiIs(a_object, "BSLeafAnimNode"))))) {
+							  (a_isRoot && (RttiIs(a_object, "BSFadeNode") || RttiIs(a_object, "BSLeafAnimNode") || RttiIs(a_object, "BSTreeNode"))))) {
 				rejected = true;
-				cause = fmt::format("{} node {}", a_isRoot ? "root" : "inner", a_object->GetRTTI() ? a_object->GetRTTI()->name : "?");
+				lastCause = fmt::format("{} node {}", a_isRoot ? "root" : "inner", a_object->GetRTTI() ? a_object->GetRTTI()->name : "?");
 				return;
 			}
 			for (const auto& child : node->GetChildren())
 				a_self(a_self, child.get(), false);
 		};
 		visit(visit, a_root, true);
-		const std::uint32_t tracked = cut.geometryOffsets[a_entry + 1] - cut.geometryOffsets[a_entry];
-		if (rejected || !geometries || geometries != tracked) {
-			++cutStats.planReasons[rejected ? cause : fmt::format("geometry count {} vs {} tracked", geometries < tracked ? "below" : "above", tracked)];
-			return plan;
+		if (!rejected && !ours) {
+			rejected = true;
+			lastCause = "nothing DCLF draws";
 		}
-		plan = RttiIs(a_root, "BSFadeNode") ? EntryPlan::FadeRoot : RttiIs(a_root, "BSLeafAnimNode") ? EntryPlan::LeafRoot : EntryPlan::Plain;
-		return plan;
+		if (rejected) {
+			cut.members.resize(first);
+			cut.switchPaths.resize(firstPath);
+			cut.switches.resize(firstSwitch);
+			++cutStats.planReasons[lastCause];
+			return EntryPlan::Rejected;
+		}
+		return RttiIs(a_root, "BSFadeNode") ? EntryPlan::FadeRoot :
+		       RttiIs(a_root, "BSLeafAnimNode") ? EntryPlan::LeafRoot :
+		       RttiIs(a_root, "BSTreeNode") ? EntryPlan::TreeRoot : EntryPlan::Plain;
 	}
 
-	void PrimaryCull::RestoreLists()
+	void PrimaryCull::PrepareFrame()
 	{
-		if (!cut.filtered)
-			return;
-		cut.filtered = false;
-		auto* lists = Global<SceneList*>(kSceneLists);
+		++cutStats.frames;
+		auto candidates = SceneStore::Get().GetSunCandidates();
 		const std::uint32_t count = Global<std::uint32_t>(kSceneListCount);
-		// Back into their positions, by moves alone: the kept entries slide up from the end, the removed ones drop into
-		// their slots, and no reference count changes.
-		for (std::uint32_t l = 0; l < count && l + 1 < cut.removedBegin.size(); ++l) {
-			std::uint32_t next = cut.removedBegin[l + 1];
-			const std::uint32_t first = cut.removedBegin[l];
-			if (next == first)
-				continue;  // nothing was taken out of this one
-			auto& list = lists[l];
-			std::uint32_t kept = list.size();
-			list.resize(cut.originalSize[l]);
-			for (std::uint32_t i = cut.originalSize[l]; i-- > 0;) {
-				if (next > first && cut.removed[next - 1].first == i)
-					list[i] = std::move(cut.removed[--next].second);
-				else
-					list[i] = std::move(list[--kept]);
+		auto** processes = Global<RE::NiCullingProcess**>(kListProcesses);
+		// A synthetic pass has no point-light shadow: any local light that cast shadows last frame keeps everything in.
+		bool localShadows = false;
+		if (auto* node = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr)
+			for (const auto& light : node->GetRuntimeData().activeShadowLights)
+				localShadows = localShadows || (light && light.get() != node->GetRuntimeData().sunShadowDirLight);
+		if (!candidates || candidates->generation != SceneStore::Get().GetSunCandidatesGeneration()) {
+			++cutStats.skippedStale;
+			return;
+		}
+		if (!processes || !count || count > cut.processes.size() || !SunAccumulation::Get().ExclusionLive() || localShadows) {
+			++cutStats.skippedPreconditions;
+			return;
+		}
+		const std::int64_t start = Now();
+		if (cut.candidates != candidates) {
+			// A new snapshot: each entry's geometries, the plans and the eligible roots, again; admission by node.
+			cut.candidates = candidates;
+			const std::uint32_t entries = static_cast<std::uint32_t>(candidates->entries.size());
+			cut.geometryOffsets.assign(entries + 2, 0);
+			for (const auto entry : candidates->geometryEntry)
+				++cut.geometryOffsets[entry + 2];
+			for (std::size_t e = 2; e < cut.geometryOffsets.size(); ++e)
+				cut.geometryOffsets[e] += cut.geometryOffsets[e - 1];
+			cut.geometryIndices.assign(candidates->geometryEntry.size(), nullptr);
+			for (const auto& [geometry, index] : candidates->geometries)
+				cut.geometryIndices[cut.geometryOffsets[candidates->geometryEntry[index] + 1]++] = geometry;
+			cut.geometryOffsets.pop_back();
+			cut.roots.assign(entries, nullptr);
+			for (const auto& [root, index] : candidates->entries)
+				cut.roots[index] = root;
+			cut.plans.assign(entries, EntryPlan::Rejected);
+			cut.memberOffsets.assign(entries + 1, 0);
+			cut.members.clear();
+			cut.switchPaths.clear();
+			cut.switchOffsets.assign(entries + 1, 0);
+			cut.switches.clear();
+			cut.admitted.assign(entries, 0);
+			cut.eligible.clear();
+			cut.rejected.clear();
+			cut.causes.clear();
+			cut.causeOf.assign(entries, 0);
+			ankerl::unordered_dense::set<const RE::NiAVObject*> admittedRoots;
+			for (std::uint32_t e = 0; e < entries; ++e) {
+				cut.memberOffsets[e] = static_cast<std::uint32_t>(cut.members.size());
+				cut.switchOffsets[e] = static_cast<std::uint32_t>(cut.switches.size());
+				cut.plans[e] = PlanOf(e, cut.roots[e]);
+				cut.memberOffsets[e + 1] = static_cast<std::uint32_t>(cut.members.size());
+				cut.switchOffsets[e + 1] = static_cast<std::uint32_t>(cut.switches.size());
+				if (cut.plans[e] == EntryPlan::Rejected) {
+					if (ReasonsProbe()) {
+						auto found = std::find(cut.causes.begin(), cut.causes.end(), lastCause);
+						if (found == cut.causes.end() && cut.causes.size() < 63)
+							found = cut.causes.insert(cut.causes.end(), lastCause);
+						cut.causeOf[e] = static_cast<std::uint16_t>(found == cut.causes.end() ? 63 : found - cut.causes.begin());
+						cut.rejected.emplace(cut.roots[e], e);
+					}
+					continue;
+				}
+				cut.eligible.emplace(cut.roots[e], e);
+				if (cut.admittedRoots.contains(cut.roots[e])) {
+					cut.admitted[e] = 1;
+					admittedRoots.insert(cut.roots[e]);
+				}
+			}
+			cut.admittedRoots = std::move(admittedRoots);
+			cut.pendingAdmission.clear();
+			// The members' object indices, for reading the feedback (stable while an object stays tracked; a change of
+			// membership is a new snapshot).
+			cut.memberObject.resize(cut.members.size());
+			for (std::size_t m = 0; m < cut.members.size(); ++m)
+				cut.memberObject[m] = cut.members[m].engine ? -1 : SceneStore::Get().FindObject(cut.members[m].geometry);
+		}
+		cut.processCount = count;
+		for (std::uint32_t i = 0; i < count; ++i) {
+			cut.processes[i] = processes[i];
+			auto& out = jobOut[i];
+			out = JobOut{ std::move(out.visible), std::move(out.pending) };
+			out.visible.clear();
+			out.pending.clear();
+		}
+		++cutStats.appliedFrames;
+		cutStats.prepareTicks += Now() - start;
+		// The list jobs are queued after this returns: their queueing orders everything above before their reads.
+		frameLive.store(true, std::memory_order_release);
+		gpuSunFrame = SunOnGpu();
+	}
+
+	int PrimaryCull::SlotOf(const RE::NiCullingProcess* a_process) const
+	{
+		for (std::uint32_t i = 0; i < cut.processCount; ++i)
+			if (cut.processes[i] == a_process)
+				return static_cast<int>(i);
+		return -1;
+	}
+
+	bool PrimaryCull::StandIn(int a_slot, RE::NiCullingProcess* a_process, RE::NiAVObject* a_object, std::int32_t a_arg)
+	{
+		const auto it = cut.eligible.find(a_object);
+		if (it == cut.eligible.end()) {
+			if (ReasonsProbe())
+				if (const auto rejected = cut.rejected.find(a_object); rejected != cut.rejected.end()) {
+					EngineProcess1(a_process, a_object, a_arg);
+					if (a_object->GetFlags().any(RE::NiAVObject::Flag::kAccumulated)) {
+						const std::uint32_t e = rejected->second;
+						jobOut[a_slot].causeGeometries[cut.causeOf[e]] += cut.geometryOffsets[e + 1] - cut.geometryOffsets[e];  // tracked ones
+					}
+					return true;
+				}
+			return false;
+		}
+		const std::uint32_t e = it->second;
+		const auto plan = cut.plans[e];
+		auto& out = jobOut[a_slot];
+		++out.seen;
+		const bool fadeRoot = plan == EntryPlan::FadeRoot || plan == EntryPlan::LeafRoot || plan == EntryPlan::TreeRoot;
+		// Fading: the engine's (its fade, and the registration's fade handling).
+		if (fadeRoot && !Settled(a_object)) {
+			++out.notSettled;
+			return false;
+		}
+		if (!cut.admitted[e]) {
+			// The engine culls it this frame; if it is in view, the colour epoch's draws decide its admission.
+			EngineProcess1(a_process, a_object, a_arg);
+			if (a_object->GetFlags().any(RE::NiAVObject::Flag::kAccumulated))
+				out.pending.push_back(e);
+			++out.notAdmitted;
+			return true;
+		}
+		// A switch whose selected child is out of date: NiSwitchNode::OnVisible brings it up to date before culling it
+		// (UpdateDownwardPass), so the engine culls this entry this frame.
+		for (std::uint32_t w = cut.switchOffsets[e]; w < cut.switchOffsets[e + 1]; ++w) {
+			const auto* switchNode = cut.switches[w];
+			SceneStore::SwitchState state;
+			if (!SceneStore::ReadSwitch(*switchNode, state) || state.index < 0)
+				continue;
+			const auto index = static_cast<std::uint16_t>(state.index);
+			if (index < switchNode->GetChildren().capacity() && switchNode->GetChildren()[index] && state.childRevID && index < state.childRevCapacity &&
+				state.childRevID[index] != state.revID) {
+				++out.switchStale;
+				EngineProcess1(a_process, a_object, a_arg);
+				return true;
 			}
 		}
-		cut.removed.clear();
+		++out.skipped;
+		const bool feedback = FeedbackOn();
+		if (feedback) {
+			// The root's state (fade, LOD, the tree clock's bit) is the visibility feedback's (ConsumeFeedback); what is
+			// left here is what the frame draws. A tree above the height limit draws nothing.
+			out.stoodIn.push_back(e);
+			if (plan == EntryPlan::TreeRoot && TreeAboveLimit(a_object, *a_process))
+				return true;
+			if (Outside(a_process->planes, a_object->worldBound))
+				return true;
+		}
+		// The cull's test, against the job's own planes (its Process2 set them up from the list's first entry), and the
+		// visibility bit Process1 keeps on what it tests (flags bit 26, which the tree clock reads).
+		auto& flags = At<std::uint32_t>(a_object, kObjectFlags);
+		if (!feedback && Outside(a_process->planes, a_object->worldBound)) {
+			flags &= ~kFlagAccumulated;
+			return true;
+		}
+		if (!feedback)
+			flags |= kFlagAccumulated;
+		++out.visibleEntries;
+		// What OnVisible would have done to the root: its fade and LOD state. A root that faded out is not drawn. One that
+		// has started to fade is the engine's this frame: its geometries go into this process's output, which the
+		// registration jobs walk as they walk what the cull found (and the next frame's cull keeps it in).
+		bool engineDraws = false;
+		if (fadeRoot && a_process->camera && !feedback) {
+			++out.fadeServiced;
+			const bool recurse = plan == EntryPlan::TreeRoot ? ServiceTree(a_object, *a_process) : ServiceFade(a_object, plan == EntryPlan::LeafRoot, *a_process->camera);
+			if (!recurse) {
+				++out.fadedOut;
+				return true;
+			}
+			engineDraws = !Settled(a_object);
+		}
+		for (std::uint32_t m = cut.memberOffsets[e]; m < cut.memberOffsets[e + 1]; ++m) {
+			const auto& member = cut.members[m];
+			const auto* geometry = member.geometry;
+			bool selected = true;
+			for (std::uint32_t w = member.switchBegin; w < member.switchEnd && selected; ++w)
+				selected = SwitchIndex(cut.switchPaths[w].first) == cut.switchPaths[w].second;
+			if (!selected) {
+				++out.unselected;
+				continue;
+			}
+			// NiAVObject::Cull skips an app-culled object and everything under it.
+			bool hidden = false;
+			for (const RE::NiAVObject* object = geometry; object && !hidden; object = object == a_object ? nullptr : object->parent)
+				hidden = object->GetFlags().any(RE::NiAVObject::Flag::kHidden);
+			if (hidden) {
+				++out.hidden;
+				continue;
+			}
+			// The engine's: what its cull does for a visible geometry, the test of its bound, then the append to this
+			// process (BSGeometry::OnVisible), in the traversal's order, for the registration jobs to register.
+			if (member.engine || engineDraws) {
+				if (!Outside(a_process->planes, geometry->worldBound)) {
+					a_process->AppendVirtual(*const_cast<RE::BSGeometry*>(geometry), a_arg);
+					++(member.engine ? out.engineMembers : out.handedBack);
+				}
+				continue;
+			}
+			out.visible.push_back(geometry);
+		}
+		return true;
+	}
+
+	void PrimaryCull::AfterListJobs()
+	{
+		if (!frameLive.exchange(false, std::memory_order_acq_rel))
+			return;
+		const std::int64_t start = Now();
+		const std::uint32_t sunBits = SunAccumulation::Get().SunBits();
+		frameVisible.clear();
+		for (std::uint32_t i = 0; i < cut.processCount; ++i) {
+			auto& out = jobOut[i];
+			frameVisible.insert(frameVisible.end(), out.visible.begin(), out.visible.end());
+			cut.pendingAdmission.insert(cut.pendingAdmission.end(), out.pending.begin(), out.pending.end());
+			auto& s = cutStats;
+			s.seen += out.seen, s.skipped += out.skipped, s.visibleEntries += out.visibleEntries, s.notSettled += out.notSettled;
+			s.notAdmitted += out.notAdmitted, s.fadeServiced += out.fadeServiced, s.fadedOut += out.fadedOut, s.handedBack += out.handedBack;
+			s.hiddenSkipped += out.hidden;
+			s.engineMembers += out.engineMembers;
+			if (FeedbackOn()) {
+				stoodInScratch.insert(stoodInScratch.end(), out.stoodIn.begin(), out.stoodIn.end());
+				out.stoodIn.clear();
+			}
+			s.switchStale += out.switchStale;
+			s.unselected += out.unselected;
+			for (std::size_t c = 0; c < s.causeGeometries.size(); ++c)
+				s.causeGeometries[c] += out.causeGeometries[c];
+		}
+		// The main registration reads the mask and clears it (+0x160 = 0xFFFF), so every later registration in the frame
+		// reads 0. Here, after Finish, because the sun's Accumulate writes masks while the list jobs run.
+		for (const auto* geometry : frameVisible)
+			if (const auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get())
+				if (void* lightData = At<void*>(property, kPropertyLightData)) {
+					auto& mask = At<std::uint32_t>(lightData, kLightDataActiveMask);
+					cutStats.localShadowed += (mask & ~sunBits) ? 1 : 0;
+					mask = 0;
+				}
+		// This frame's stood-in entries ride with its feedback copy (IndirectDraws::ArmFeedback), and the frames whose
+		// copies have completed are decoded on the worker: after this frame's list jobs, joined before the next's.
+		if (FeedbackOn()) {
+			auto tag = std::make_shared<FeedbackTag>();
+			tag->candidates = cut.candidates;
+			tag->stoodIn = std::move(stoodInScratch);
+			stoodInScratch.clear();
+			tag->roots.reserve(tag->stoodIn.size());
+			for (const std::uint32_t e : tag->stoodIn)
+				tag->roots.emplace_back(const_cast<RE::NiAVObject*>(cut.roots[e]));
+			pendingTag = std::move(tag);
+		}
+		// The synthetic passes on the worker, joined at the accumulate phase (BuildSyntheticPasses).
+		if (!frameVisible.empty() && AsyncModeSetting() != AsyncMode::Off && AsyncJobEnabled("primary")) {
+			synthJobDone.store(false, std::memory_order_relaxed);
+			auto handle = std::make_shared<AsyncWorker::JobHandle>(AsyncWorker::Get().Submit("primary synthetic passes", [this](std::stop_token) {
+				synthetic.clear();
+				synthJobUnmodelled = 0;
+				BuildSyntheticInto(synthetic, synthJobUnmodelled);
+				synthJobDone.store(true, std::memory_order_release);
+			}));
+			synthJob = std::static_pointer_cast<void>(handle);
+		}
+		cutStats.afterTicks += Now() - start;
+	}
+
+	void PrimaryCull::KickFeedbackDecode()
+	{
+		// The feedback frames whose copies have completed, decoded on the worker every frame (whether or not the cut
+		// applies this one). Kicked after the registration jobs (their CPU is not shared with it), joined at Present
+		// (EndFrame), before the next frame's update reads the tree bits and its list jobs read the fade state.
+		if (!FeedbackOn() || !Toggles::Get().Active().excludePrimaryEntries || feedbackJob)
+			return;
+		auto drain = [this] {
+			IndirectDraws::Get().DrainVisibilityFeedback([this](const IndirectDraws::VisibilityFeedbackFrame& a_frame) {
+				ConsumeFeedback(a_frame.stamp, a_frame.objects, a_frame.words, a_frame.tag);
+			});
+		};
+		if (AsyncModeSetting() != AsyncMode::Off && AsyncJobEnabled("primary"))
+			feedbackJob = std::static_pointer_cast<void>(std::make_shared<AsyncWorker::JobHandle>(
+				AsyncWorker::Get().Submit("primary feedback", [drain](std::stop_token) { drain(); })));
+		else
+			drain();
+	}
+
+	void PrimaryCull::JoinFeedback()
+	{
+		if (!feedbackJob)
+			return;
+		auto handle = std::static_pointer_cast<AsyncWorker::JobHandle>(std::exchange(feedbackJob, {}));
+		// It finished long ago (it runs right after the list jobs); a late one is waited for, as the jobs read the nodes it writes.
+		if (AsyncWorker::Get().Wait(*handle, AsyncWaitBudget()) != AsyncWorker::WaitResult::Done)
+			AsyncWorker::Get().Cancel(*handle);
+		// The decoded frames' roots are released here, on the render thread.
+		retiredTags.clear();
+	}
+
+	void PrimaryCull::ConsumeFeedback(std::uint32_t a_stamp, std::uint32_t a_objects, const std::uint32_t* a_words, const std::shared_ptr<void>& a_tag)
+	{
+		auto& counters = feedbackCounters;
+		counters.frames.fetch_add(1, std::memory_order_relaxed);
+		const auto* tag = static_cast<const FeedbackTag*>(a_tag.get());
+		retiredTags.push_back(a_tag);  // its node references outlive the slot's, until the render thread's join
+		// Another snapshot: the entry indices mean something else now.
+		if (!tag || tag->candidates != cut.candidates) {
+			counters.stale.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		auto** processes = Global<RE::NiCullingProcess**>(kListProcesses);
+		const auto* camera = processes && processes[0] ? processes[0]->camera : nullptr;
+		std::uint64_t visible = 0, serviced = 0, unresolved = 0;
+		for (std::size_t i = 0; i < tag->stoodIn.size(); ++i) {
+			const std::uint32_t e = tag->stoodIn[i];
+			if (e >= cut.roots.size() || i >= tag->roots.size())
+				continue;
+			// In view in that frame: any of the entry's own geometries inside the frustum (the GPU's phase 1).
+			bool inView = false;
+			for (std::uint32_t m = cut.memberOffsets[e]; m < cut.memberOffsets[e + 1] && !inView; ++m) {
+				const std::int32_t object = cut.memberObject[m];
+				if (cut.members[m].engine)
+					continue;
+				if (object < 0 || static_cast<std::uint32_t>(object) >= a_objects) {
+					++unresolved;
+					continue;
+				}
+				inView = a_words[object] == a_stamp;
+			}
+			auto* root = tag->roots[i].get();
+			std::atomic_ref<std::uint32_t> flags(At<std::uint32_t>(root, kObjectFlags));
+			if (!inView) {
+				flags.fetch_and(~kFlagAccumulated, std::memory_order_relaxed);
+				continue;
+			}
+			++visible;
+			flags.fetch_or(kFlagAccumulated, std::memory_order_relaxed);
+			if (!camera)
+				continue;
+			switch (cut.plans[e]) {
+			case EntryPlan::FadeRoot:
+				ServiceFade(root, false, *camera);
+				++serviced;
+				break;
+			case EntryPlan::LeafRoot:
+				ServiceFade(root, true, *camera);
+				++serviced;
+				break;
+			case EntryPlan::TreeRoot:
+				ServiceTreeState(root, *camera);
+				++serviced;
+				if (FeedbackProbe()) {
+					const float clock = At<float>(root, 0x164);
+					const auto [it, inserted] = treeClocks.try_emplace(root, clock);
+					counters.trees.fetch_add(1, std::memory_order_relaxed);
+					if (!inserted && it->second != clock)
+						counters.treesAdvanced.fetch_add(1, std::memory_order_relaxed);
+					it->second = clock;
+				}
+				break;
+			default:
+				break;
+			}
+		}
+		counters.entries.fetch_add(tag->stoodIn.size(), std::memory_order_relaxed);
+		counters.visible.fetch_add(visible, std::memory_order_relaxed);
+		counters.serviced.fetch_add(serviced, std::memory_order_relaxed);
+		counters.unresolved.fetch_add(unresolved, std::memory_order_relaxed);
+	}
+
+	void PrimaryCull::BuildSyntheticInto(std::vector<std::pair<const RE::BSGeometry*, AccumulatedPass>>& a_out, std::uint64_t& a_unmodelled)
+	{
+		for (const auto* geometry : frameVisible) {
+			const auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
+			const auto* lighting = netimmerse_cast<const RE::BSLightingShaderProperty*>(property);
+			if (!lighting) {
+				++a_unmodelled;
+				continue;
+			}
+			auto& cached = derivedCache[geometry];
+			const std::uint8_t fadeState = FadeStateOf(property);
+			if (cached.property != property || cached.material != lighting->material || cached.flags != lighting->flags.underlying() ||
+				cached.fadeState != fadeState) {
+				LightingDescriptors descriptors;
+				const auto reason = DeriveLightingDescriptors(*lighting, *geometry, nullptr, descriptors, true);
+				cached = { property, lighting->material, lighting->flags.underlying(), fadeState, reason == Ineligible::None ? descriptors.derivedPass : kNotDerived };
+			}
+			AccumulatedPass pass;
+			if (!SyntheticPass(*geometry, cached.derivedPass, pass, SunOnGpu())) {
+				++a_unmodelled;
+				continue;
+			}
+			a_out.emplace_back(geometry, pass);
+		}
+	}
+
+	const std::vector<std::pair<const RE::BSGeometry*, AccumulatedPass>>& PrimaryCull::JoinSyntheticPasses()
+	{
+		const std::int64_t start = Now();
+		if (synthJob) {
+			auto handle = std::static_pointer_cast<AsyncWorker::JobHandle>(synthJob);
+			synthJob.reset();
+			const auto result = AsyncWorker::Get().Wait(*handle, AsyncWaitBudget());
+			if (result != AsyncWorker::WaitResult::Done) {
+				// Late or dropped: it is ended (waited for when it has started), and built here when it never ran.
+				++cutStats.synthLate;
+				AsyncWorker::Get().Cancel(*handle);
+			}
+			if (synthJobDone.load(std::memory_order_acquire)) {
+				cutStats.synthetic += synthetic.size();
+				cutStats.unmodelled += synthJobUnmodelled;
+				frameVisible.clear();
+				cutStats.synthWaitTicks += Now() - start;
+				return synthetic;
+			}
+		}
+		synthetic.clear();
+		if (!frameVisible.empty()) {
+			++cutStats.synthInline;
+			std::uint64_t unmodelled = 0;
+			BuildSyntheticInto(synthetic, unmodelled);
+			cutStats.unmodelled += unmodelled;
+			cutStats.synthetic += synthetic.size();
+		}
+		frameVisible.clear();
+		cutStats.synthWaitTicks += Now() - start;
+		return synthetic;
+	}
+
+	const std::vector<std::pair<const RE::BSGeometry*, AccumulatedPass>>& PrimaryCull::BuildSyntheticPasses()
+	{
+		const auto& passes = JoinSyntheticPasses();
+		// After the synthetic job's join, so the decode never delays it on the worker.
+		KickFeedbackDecode();
+		return passes;
 	}
 
 	void PrimaryCull::AfterFullFrustum()
 	{
-		cut.excluded.clear();
-		frameVisible.clear();
+		frameLive.store(false, std::memory_order_relaxed);
+		gpuSunFrame = false;
+		JoinFeedback();
 		if (Toggles::Get().Active().excludePrimaryEntries)
-			FilterLists();
+			PrepareFrame();
 		if (!Probe())
 			return;
 		const std::uint32_t count = Global<std::uint32_t>(kSceneListCount);
@@ -335,205 +836,6 @@ namespace DCLF
 		counting.store(true, std::memory_order_release);
 	}
 
-	void PrimaryCull::FilterLists()
-	{
-		++cutStats.frames;
-		auto candidates = SceneStore::Get().GetSunCandidates();
-		const std::uint32_t count = Global<std::uint32_t>(kSceneListCount);
-		auto* lists = Global<SceneList*>(kSceneLists);
-		// A synthetic pass has no point-light shadow: any local light that cast shadows last frame keeps everything in.
-		bool localShadows = false;
-		if (auto* node = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr)
-			for (const auto& light : node->GetRuntimeData().activeShadowLights)
-				localShadows = localShadows || (light && light.get() != node->GetRuntimeData().sunShadowDirLight);
-		if (!candidates || candidates->generation != SceneStore::Get().GetSunCandidatesGeneration()) {
-			++cutStats.skippedStale;
-			return;
-		}
-		if (!lists || !count || !SunAccumulation::Get().ExclusionLive() || localShadows) {
-			++cutStats.skippedPreconditions;
-			return;
-		}
-		const std::int64_t start = Now();
-		if (cut.candidates != candidates) {
-			// A new snapshot: the plans, and each entry's geometries, again.
-			cut.candidates = candidates;
-			const std::uint32_t entries = static_cast<std::uint32_t>(candidates->entries.size());
-			cut.plans.assign(entries, EntryPlan::Unknown);
-			cut.geometryOffsets.assign(entries + 2, 0);
-			for (const auto entry : candidates->geometryEntry)
-				++cut.geometryOffsets[entry + 2];
-			for (std::size_t e = 2; e < cut.geometryOffsets.size(); ++e)
-				cut.geometryOffsets[e] += cut.geometryOffsets[e - 1];
-			cut.geometryIndices.assign(candidates->geometryEntry.size(), nullptr);
-			for (const auto& [geometry, index] : candidates->geometries)
-				cut.geometryIndices[cut.geometryOffsets[candidates->geometryEntry[index] + 1]++] = geometry;
-			cut.geometryOffsets.pop_back();
-			cut.roots.assign(entries, nullptr);
-			for (const auto& [root, index] : candidates->entries)
-				cut.roots[index] = root;
-			// Admission is kept, by node, for the entries still in the snapshot.
-			std::erase_if(cut.admitted, [&](const RE::NiAVObject* a_root) { return !candidates->entries.contains(a_root); });
-		}
-		const auto frame = SceneStore::Get().GetFrame();
-		const auto& draws = IndirectDraws::Get();
-		cut.originalSize.assign(count, 0);
-		cut.removedBegin.assign(count + 1, 0);
-		cut.removed.clear();
-		for (std::uint32_t l = 0; l < count; ++l) {
-			auto& list = lists[l];
-			std::uint32_t kept = 0;
-			const std::uint32_t size = list.size();
-			cut.originalSize[l] = size;
-			cut.removedBegin[l] = static_cast<std::uint32_t>(cut.removed.size());
-			for (std::uint32_t r = 0; r < size; ++r) {
-				auto* object = list[r].get();
-				bool remove = false;
-				// Entry 0 stays: the job's first entry sets its process's frustum up (Process2).
-				if (r > 0 && object) {
-					if (const auto it = candidates->entries.find(object); it != candidates->entries.end()) {
-						const std::uint32_t e = it->second;
-						const auto plan = PlanOf(e, object);
-						if (plan == EntryPlan::Rejected) {
-							++cutStats.rejectedPlan;
-						} else if ((plan == EntryPlan::FadeRoot || plan == EntryPlan::LeafRoot) && (At<float>(object, kCurrentFade) != 1.0f || At<float>(object, kFadeAmount) != 1.0f)) {
-							// Fading: the engine's cull keeps it (its fade and the registration's fade handling are the engine's).
-							++cutStats.notSettled;
-							if (cutStats.fadeStates.size() < 40)
-								++cutStats.fadeStates[fmt::format("fadeAmount {:.2f}, currentFade {:.2f}, +0x153 {:#x}", At<float>(object, kFadeAmount),
-									At<float>(object, kCurrentFade), At<std::uint8_t>(object, 0x153))];
-							cut.admitted.erase(object);
-						} else if (cut.admitted.contains(object)) {
-							remove = true;
-						} else {
-							remove = true;
-							for (std::uint32_t g = cut.geometryOffsets[e]; g < cut.geometryOffsets[e + 1] && remove; ++g)
-								remove = draws.DrewLastFrame(cut.geometryIndices[g], frame);
-							if (remove)
-								cut.admitted.insert(object);
-							else
-								++cutStats.notAdmitted;
-						}
-						if (remove)
-							cut.excluded.push_back(e);
-					}
-				}
-				++cutStats.entries;
-				if (remove) {
-					cut.removed.emplace_back(r, std::move(list[r]));
-					continue;
-				}
-				if (kept != r)
-					list[kept] = std::move(list[r]);
-				++kept;
-			}
-			if (kept != size) {
-				list.resize(kept);
-				cut.filtered = true;
-			}
-		}
-		cut.removedBegin[count] = static_cast<std::uint32_t>(cut.removed.size());
-		cutStats.removed += cut.excluded.size();
-		++cutStats.appliedFrames;
-		cutStats.filterTicks += Now() - start;
-	}
-
-	void PrimaryCull::AfterListJobs()
-	{
-		RestoreLists();
-		if (cut.excluded.empty() || !cut.candidates)
-			return;
-		const std::int64_t start = Now();
-		// The main camera's planes as the list jobs used them (each job's first entry had Process2 set them up).
-		auto** processes = Global<RE::NiCullingProcess**>(kListProcesses);
-		const auto* process = processes ? processes[0] : nullptr;
-		if (!process)
-			return;
-		const auto& planes = process->planes;
-		const auto* camera = process->camera;
-		const std::uint32_t sunBits = SunAccumulation::Get().SunBits();
-		auto& handBack = At<RE::BSTArray<RE::NiPointer<RE::NiAVObject>>>(process, 0x128);  // BSCullingProcess::objectArray
-		for (const std::uint32_t e : cut.excluded) {
-			const auto* root = cut.roots[e];
-			if (!root || Outside(planes, root->worldBound))
-				continue;
-			++cutStats.visibleEntries;
-			// What OnVisible would have done to the root: its fade and LOD state. A root that faded out is not drawn; one
-			// that has started to fade is the engine's this frame: its geometries go into the list process's output, which
-			// the registration jobs walk as they walk what the cull found (and the next frame's filter keeps it in).
-			const auto plan = cut.plans[e];
-			bool engineDraws = false;
-			if ((plan == EntryPlan::FadeRoot || plan == EntryPlan::LeafRoot) && camera) {
-				++cutStats.fadeServiced;
-				auto* node = const_cast<RE::NiAVObject*>(root);
-				if (!ServiceFade(node, plan == EntryPlan::LeafRoot, *camera)) {
-					++cutStats.fadedOut;
-					continue;
-				}
-				engineDraws = At<float>(node, kCurrentFade) != 1.0f;
-			}
-			for (std::uint32_t g = cut.geometryOffsets[e]; g < cut.geometryOffsets[e + 1]; ++g) {
-				const auto* geometry = cut.geometryIndices[g];
-				// NiAVObject::Cull skips an app-culled object and everything under it.
-				bool hidden = false;
-				for (const RE::NiAVObject* object = geometry; object && !hidden; object = object == root ? nullptr : object->parent)
-					hidden = object->GetFlags().any(RE::NiAVObject::Flag::kHidden);
-				if (hidden) {
-					++cutStats.hiddenSkipped;
-					continue;
-				}
-				if (engineDraws) {
-					handBack.push_back(RE::NiPointer<RE::NiAVObject>(const_cast<RE::BSGeometry*>(geometry)));
-					++cutStats.handedBack;
-					continue;
-				}
-				frameVisible.push_back(geometry);
-				// The main registration reads the mask and clears it (+0x160 = 0xFFFF), so every later registration in
-				// the frame reads 0.
-				if (const auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get())
-					if (void* lightData = At<void*>(property, kPropertyLightData)) {
-						auto& mask = At<std::uint32_t>(lightData, kLightDataActiveMask);
-						cutStats.localShadowed += (mask & ~sunBits) ? 1 : 0;
-						mask = 0;
-					}
-			}
-		}
-		cutStats.afterTicks += Now() - start;
-	}
-
-	const std::vector<std::pair<const RE::BSGeometry*, AccumulatedPass>>& PrimaryCull::BuildSyntheticPasses()
-	{
-		synthetic.clear();
-		if (frameVisible.empty())
-			return synthetic;
-		const std::int64_t start = Now();
-		for (const auto* geometry : frameVisible) {
-			const auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
-			const auto* lighting = netimmerse_cast<const RE::BSLightingShaderProperty*>(property);
-			if (!lighting) {
-				++cutStats.unmodelled;
-				continue;
-			}
-			auto& cached = derivedCache[geometry];
-			const std::uint8_t fadeState = FadeStateOf(property);
-			if (cached.property != property || cached.material != lighting->material || cached.flags != lighting->flags.underlying() ||
-				cached.fadeState != fadeState) {
-				LightingDescriptors descriptors;
-				const auto reason = DeriveLightingDescriptors(*lighting, *geometry, nullptr, descriptors, true);
-				cached = { property, lighting->material, lighting->flags.underlying(), fadeState, reason == Ineligible::None ? descriptors.derivedPass : kNotDerived };
-			}
-			AccumulatedPass pass;
-			if (!SyntheticPass(*geometry, cached.derivedPass, pass)) {
-				++cutStats.unmodelled;
-				continue;
-			}
-			synthetic.emplace_back(geometry, pass);
-		}
-		cutStats.synthetic += synthetic.size();
-		cutStats.synthTicks += Now() - start;
-		return synthetic;
-	}
-
 	void PrimaryCull::NoteRegistration(const void* a_accumulator, const RE::BSGeometry* a_geometry)
 	{
 		const bool main = a_accumulator == Global<void*>(kMainAccumulator);
@@ -552,15 +854,26 @@ namespace DCLF
 			(main ? registrations.mainUnder : registrations.depthUnder).fetch_add(1, std::memory_order_relaxed);
 	}
 
+	bool PrimaryCull::SunOnGpu()
+	{
+		static const bool onGpu = SwitchValue("CS_DCLF_SUN_GPU") != "0";
+		return onGpu;
+	}
+
 	std::uint32_t PrimaryCull::SunShadowBits(const RE::BSGeometry& a_geometry)
+	{
+		const auto inCascades = SunAccumulation::Get().InSunCascades(a_geometry.worldBound);
+		if (!inCascades)
+			return ~0u;
+		return *inCascades ? SunShadowStatic(a_geometry) : 0u;
+	}
+
+	std::uint32_t PrimaryCull::SunShadowStatic(const RE::BSGeometry& a_geometry)
 	{
 		const auto* property = a_geometry.GetGeometryRuntimeData().shaderProperty.get();
 		const auto* lighting = netimmerse_cast<const RE::BSLightingShaderProperty*>(property);
 		if (!lighting)
 			return 0;
-		const auto inCascades = SunAccumulation::Get().InSunCascades(a_geometry.worldBound);
-		if (!inCascades)
-			return ~0u;
 		const std::uint64_t flags = lighting->flags.underlying();
 		const auto* fadeNode = lighting->fadeNode;
 		const float fade = fadeNode ? fadeNode->GetRuntimeData().currentFade : 1.0f;
@@ -578,8 +891,8 @@ namespace DCLF
 		bool deferred = Global<std::uint8_t*>(kMainAccumulator)[kAccumulatorDeferredShadow] != 0;
 		if (!screenDoor || blended)
 			deferred = deferred && !((alpha < 1.0f || blended || (flags & (1ull << 33))) && !(flags & kOpaqueClasses));
-		// FUN_1414fcf80: ShadowDir when a mask bit names the sun (any cascade the bound meets).
-		bool shadowDir = shadowDirAllowed && *inCascades;
+		// FUN_1414fcf80: ShadowDir when a mask bit names the sun (a cascade the bound meets: the caller's test).
+		bool shadowDir = shadowDirAllowed;
 		bool defShadow = deferred;
 		if (!deferred)
 			shadowDir = false;
@@ -590,7 +903,21 @@ namespace DCLF
 		return (shadowDir ? 0x2000u : 0u) | (defShadow ? 0x4000u : 0u);
 	}
 
-	bool PrimaryCull::SyntheticPass(const RE::BSGeometry& a_geometry, std::uint32_t a_derivedPass, AccumulatedPass& a_out)
+	void PrimaryCull::UnifySunBits(const RE::BSGeometry* a_geometry, AccumulatedPass& a_pass) const
+	{
+		if (!gpuSunFrame || !cut.candidates || a_pass.sunTest)
+			return;
+		const auto& candidates = *cut.candidates;
+		const auto it = candidates.geometries.find(a_geometry);
+		if (it == candidates.geometries.end() || it->second >= candidates.primaryGeometry.size() || !candidates.primaryGeometry[it->second])
+			return;
+		const std::uint32_t sun = SunShadowStatic(*a_geometry);
+		a_pass.technique = (a_pass.technique & ~0x6000u) | sun;
+		a_pass.passEnum = a_pass.technique + 0x4800002Du;
+		a_pass.sunTest = sun != 0;
+	}
+
+	bool PrimaryCull::SyntheticPass(const RE::BSGeometry& a_geometry, std::uint32_t a_derivedPass, AccumulatedPass& a_out, bool a_sunOnGpu)
 	{
 		if (a_derivedPass == kNotDerived)
 			return false;
@@ -608,7 +935,8 @@ namespace DCLF
 		// Fading and translucent objects take GetRenderPasses' other hints (1, 9, 10) and the screen-door bit; not modelled.
 		if (fade < 1.0f)
 			return false;
-		const std::uint32_t sun = SunShadowBits(a_geometry);
+		// On the GPU (a_sunOnGpu): the bits the object takes inside a cascade, and BuildDraws drops them on a miss.
+		const std::uint32_t sun = a_sunOnGpu ? SunShadowStatic(a_geometry) : SunShadowBits(a_geometry);
 		if (sun == ~0u)
 			return false;
 		std::uint32_t hint = 0;
@@ -628,6 +956,7 @@ namespace DCLF
 		a_out.passEnum = a_out.technique + 0x4800002Du;
 		a_out.hint = hint;
 		a_out.lodRow = SceneStore::LodRowOf(a_geometry, property);
+		a_out.sunTest = a_sunOnGpu && sun != 0;
 		return true;
 	}
 
@@ -715,6 +1044,24 @@ namespace DCLF
 
 	struct PrimaryCull::Hooks
 	{
+		/**
+		 * @brief BSGeometryListCullingProcess::Process1 (vtable slot 0x16, AE 0x140e28390), which every list job calls for
+		 * each entry after its first and for every child a node's OnVisible culls. The vtable is shared with the sun's
+		 * full-frustum processes and every other list process; only the scene lists' own processes are stood in for.
+		 */
+		struct Process1
+		{
+			static void thunk(RE::NiCullingProcess* a_process, RE::NiAVObject* a_object, std::int32_t a_arg)
+			{
+				auto& self = PrimaryCull::Get();
+				if (a_object && self.frameLive.load(std::memory_order_acquire))
+					if (const int slot = self.SlotOf(a_process); slot >= 0 && self.StandIn(slot, a_process, a_object, a_arg))
+						return;
+				func(a_process, a_object, a_arg);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		/** @brief CalculateAndDrawShadowCasterLights' call of FUN_1414a0840, right after the full-frustum cull. */
 		struct AfterFullFrustum
 		{
@@ -750,8 +1097,17 @@ namespace DCLF
 			logger::warn("[DCLF] primary cull: the calls are not where expected; the engine keeps the primary's cull");
 			return;
 		}
+		// The list processes' Process1 slot must still be the engine's (no other hook in the way).
+		REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE_BSGeometryListCullingProcess[0] };
+		if (reinterpret_cast<const std::uintptr_t*>(vtable.address())[0x16] != base + kProcess1) {
+			logger::warn("[DCLF] primary cull: BSGeometryListCullingProcess::Process1 is not the engine's; the engine keeps the primary's cull");
+			return;
+		}
 		stl::write_thunk_call<Hooks::AfterFullFrustum>(afterFullFrustum);
 		stl::write_thunk_call<Hooks::ListJobsFinish>(finish);
+		stl::write_vfunc<0x16, Hooks::Process1>(RE::VTABLE_BSGeometryListCullingProcess[0]);
+		REL::Relocation<std::uintptr_t> triShape{ RE::VTABLE_BSTriShape[0] };
+		geometryOnVisible = reinterpret_cast<const std::uintptr_t*>(triShape.address())[0x34];
 		installed = true;
 		logger::info("[DCLF] primary cull installed (the scene lists after the full-frustum cull, the list jobs' Finish){}", Probe() ? "; census on" : "");
 	}
@@ -765,20 +1121,36 @@ namespace DCLF
 			QueryPerformanceFrequency(&frequency);
 			const double toMs = 1000.0 / static_cast<double>(frequency.QuadPart);
 			const double applied = std::max<double>(static_cast<double>(s.appliedFrames), 1.0);
-			logger::info("[DCLF] primary exclusion: applied on {} of {} frames ({} stale, {} preconditions); per frame {:.0f} of {:.0f} list entries left out "
-						 "(kept in: {:.0f} by their plan, {:.1f} fading, {:.1f} not yet drawn), {:.0f} of them visible; {:.0f} synthetic passes, {:.1f} not modelled, "
-				"{:.1f} hidden, {:.1f} with a local light's shadow bit; {} holes; fades serviced {:.0f}, faded out {:.1f}, handed back {:.1f}; "
-						 "render thread: filter {:.3f} ms, after the jobs {:.3f} ms, synthetic passes {:.3f} ms",
-				s.appliedFrames, s.frames, s.skippedStale, s.skippedPreconditions, s.removed / applied, s.entries / applied, s.rejectedPlan / applied,
-				s.notSettled / applied, s.notAdmitted / applied, s.visibleEntries / applied, s.synthetic / applied, s.unmodelled / applied,
-				s.hiddenSkipped / applied, s.localShadowed / applied, s.holes, s.fadeServiced / applied, s.fadedOut / applied, s.handedBack / applied,
-				s.filterTicks * toMs / applied, s.afterTicks * toMs / applied,
-				s.synthTicks * toMs / applied);
+			logger::info("[DCLF] primary exclusion: applied on {} of {} frames ({} stale, {} preconditions); per frame {:.0f} eligible entries reached, "
+						 "{:.0f} stood in for ({:.0f} in view), {:.1f} fading, {:.1f} not yet admitted ({:.1f} admitted); {:.0f} synthetic passes, {:.1f} not modelled "
+						 "({:.1f} built inline, {:.1f} late), {:.1f} hidden, {:.1f} with a local light's shadow bit; {} holes; fades serviced {:.0f}, faded out {:.1f}, "
+						 "handed back {:.1f}; {:.0f} of the engine's members in view registered by it; switches: {:.1f} entries culled by the engine (stale child), {:.0f} members unselected; render thread: prepare {:.3f} ms, after the jobs {:.3f} ms, synthetic join {:.3f} ms",
+				s.appliedFrames, s.frames, s.skippedStale, s.skippedPreconditions, s.seen / applied, s.skipped / applied, s.visibleEntries / applied,
+				s.notSettled / applied, s.notAdmitted / applied, s.admittedNow / applied, s.synthetic / applied, s.unmodelled / applied,
+				s.synthInline / applied, s.synthLate / applied, s.hiddenSkipped / applied, s.localShadowed / applied, s.holes, s.fadeServiced / applied,
+				s.fadedOut / applied, s.handedBack / applied, s.engineMembers / applied, s.switchStale / applied, s.unselected / applied, s.prepareTicks * toMs / applied, s.afterTicks * toMs / applied, s.synthWaitTicks * toMs / applied);
+			for (std::size_t c = 0; c < s.causeGeometries.size(); ++c)
+				if (s.causeGeometries[c])
+					logger::info("[DCLF][TEMP] primary exclusion kept in view: {:.1f} geometries/frame under entries rejected for {}", s.causeGeometries[c] / applied,
+						c < cut.causes.size() ? cut.causes[c] : std::string("(more)"));
 			for (const auto& [cause, count] : s.planReasons)
 				logger::info("[DCLF][TEMP] primary exclusion plan rejects: {} x {}", count, cause);
-			for (const auto& [state, count] : s.fadeStates)
-				logger::info("[DCLF][TEMP] primary exclusion fade root not settled: {:.1f}/frame {}", count / applied, state);
 			cutStats = {};
+			if (FeedbackOn()) {
+				const auto io = IndirectDraws::Get().TakeFeedbackStats();
+				auto& c = feedbackCounters;
+				const auto frames = c.frames.exchange(0), stale = c.stale.exchange(0), entries = c.entries.exchange(0);
+				const auto visibleEntries = c.visible.exchange(0), serviced = c.serviced.exchange(0), unresolved = c.unresolved.exchange(0);
+				const double decodedFrames = std::max<double>(static_cast<double>(frames - stale), 1.0);
+				if (FeedbackProbe()) {
+					const auto trees = c.trees.exchange(0), advanced = c.treesAdvanced.exchange(0);
+					logger::info("[DCLF][TEMP] primary feedback probe: {} stood-in tree services in view, {} of them with the tree clock moved since the last decode", trees, advanced);
+				}
+				logger::info("[DCLF] primary feedback: {} frames armed, {} dropped (no free slot), {} abandoned, {} decoded ({} stale); per decoded frame {:.0f} stood-in entries, "
+							 "{:.0f} of them in view, {:.0f} serviced, {:.1f} member objects unresolved",
+					io.armed, io.dropped, io.abandoned, io.decoded, stale, entries / decodedFrames, visibleEntries / decodedFrames, serviced / decodedFrames,
+					unresolved / decodedFrames);
+			}
 		}
 		if (!Probe() || !census.frames)
 			return;

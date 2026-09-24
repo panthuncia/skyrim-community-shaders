@@ -2863,6 +2863,12 @@ namespace DCLF
 		// registration, stand where the engine's would have.
 		for (const auto& [geometry, pass] : PrimaryCull::Get().BuildSyntheticPasses())
 			AddAccumulatedPass(geometry, pass);
+		// The engine's passes for what PrimaryCull draws synthetically take the same sun bits, so both sources of an
+		// object's pass need one pipeline (and the probe still compares against the engine's own bits).
+		if (PrimaryCull::SunOnGpu() && !PrimaryCull::Probe())
+			for (auto& [geometry, pass] : accumulatedPasses)
+				if (pass.pass)
+					PrimaryCull::Get().UnifySunBits(geometry, pass);
 		timer.Add(BuildPart::Walk);
 
 		// [TEMP] CS_DCLF_VOLUMETRIC_PROBE: the face parts' main-camera passes - the technique their flags select, the
@@ -3229,7 +3235,8 @@ namespace DCLF
 			accumulatePatched.push_back(objectId);
 			object.materialIndex = materialSlot;
 			object.pipelineIndex = pipelineSlot;
-			object.flags = (object.flags & (kObjectSkinned | kObjectNoShadow | kObjectVolumetricOnly | kObjectShadowOnly)) | staticFlags | (accumulated ? kObjectNativeVisible : 0u);
+			object.flags = (object.flags & (kObjectSkinned | kObjectNoShadow | kObjectVolumetricOnly | kObjectShadowOnly)) | staticFlags | (accumulated ? kObjectNativeVisible : 0u) |
+			               (accumulated && accumulated->sunTest ? kObjectSunTest : 0u);
 			tables.draws[objectId].pipelineIndex = pipelineSlot;
 			float emissiveMult = 1.0f;
 			tables.shading[objectId] = MakeShading(*static_cast<RE::BSLightingShaderProperty*>(property), descriptors, mainPassRenderFlags, emissiveMult);
@@ -3390,7 +3397,7 @@ namespace DCLF
 			// Neutralised: nothing downstream may draw from slots that are not this frame's. Its record is no
 			// longer the scene phase's, so the next delta walk writes it again.
 			pendingEvaluation.push_back(tables.objectGeometry[o]);
-			object.flags = (object.flags & ~kObjectNativeVisible) | kObjectNoBindings;
+			object.flags = (object.flags & ~(kObjectNativeVisible | kObjectSunTest)) | kObjectNoBindings;
 			object.geometryIndex = object.pipelineIndex = object.materialIndex = 0;
 		}
 	}
@@ -4025,7 +4032,7 @@ namespace DCLF
 	void SceneStore::DropSunCandidates()
 	{
 		sunCandidateSet.clear();
-		primaryEntrySet.clear();
+		primarySignature.clear();
 		sunEntriesDirty.clear();
 		sunCandidates.reset();
 		++sunCandidatesGeneration;
@@ -4067,7 +4074,7 @@ namespace DCLF
 		bool changed = a_full;
 		if (a_full) {
 			sunCandidateSet.clear();
-			primaryEntrySet.clear();
+			primarySignature.clear();
 			sunEntriesDirty.clear();
 			for (const auto& [root, dependents] : rootDependents)
 				sunEntriesDirty.push_back(root);
@@ -4077,22 +4084,31 @@ namespace DCLF
 			sunEntriesDirty.erase(std::unique(sunEntriesDirty.begin(), sunEntriesDirty.end()), sunEntriesDirty.end());
 			const bool switchNodes = SwitchNodesEnabled();
 			for (const auto* root : sunEntriesDirty) {
-				bool candidate = false, primary = false;
+				bool candidate = false;
+				std::uint64_t signature = 1469598103934665603ull;
 				if (const auto it = rootDependents.find(root); it != rootDependents.end() && !it->second.empty()) {
-					candidate = primary = true;
+					candidate = true;
 					for (auto* geometry : it->second) {
 						const auto entry = tracked.find(geometry);
 						if (entry == tracked.end() || !SunEntryAllows(entry->second, switchNodes)) {
-							candidate = primary = false;
+							candidate = false;
 							break;
 						}
-						primary = primary && PrimaryEntryAllows(entry->second, *geometry);
+						const std::uint64_t allows = PrimaryEntryAllows(entry->second, *geometry) ? 1 : 0;
+						signature = (signature ^ (reinterpret_cast<std::uintptr_t>(geometry) * 2 + allows)) * 1099511628211ull;
 					}
 				}
 				if (candidate ? sunCandidateSet.insert(root).second : sunCandidateSet.erase(root) != 0)
 					changed = true;
-				if (primary ? primaryEntrySet.insert(root).second : primaryEntrySet.erase(root) != 0)
-					changed = true;
+				if (candidate) {
+					const auto [slot, inserted] = primarySignature.try_emplace(root, signature);
+					if (!inserted && slot->second != signature) {
+						slot->second = signature;
+						changed = true;
+					}
+				} else {
+					primarySignature.erase(root);
+				}
 			}
 			sunEntriesDirty.clear();
 		}
@@ -4108,14 +4124,15 @@ namespace DCLF
 		snapshot->generation = sunCandidatesGeneration;
 		snapshot->entries.reserve(sunCandidateSet.size());
 		std::uint32_t index = 0;
-		snapshot->primary.reserve(sunCandidateSet.size());
 		for (const auto* root : sunCandidateSet) {
 			snapshot->entries.emplace(root, index);
-			snapshot->primary.push_back(primaryEntrySet.contains(root) ? 1 : 0);
 			if (const auto it = rootDependents.find(root); it != rootDependents.end())
-				for (const auto* geometry : it->second)
-					if (snapshot->geometries.emplace(geometry, static_cast<std::uint32_t>(snapshot->geometryEntry.size())).second)
+				for (auto* geometry : it->second)
+					if (snapshot->geometries.emplace(geometry, static_cast<std::uint32_t>(snapshot->geometryEntry.size())).second) {
 						snapshot->geometryEntry.push_back(index);
+						const auto entry = tracked.find(geometry);
+						snapshot->primaryGeometry.push_back(entry != tracked.end() && PrimaryEntryAllows(entry->second, *geometry) ? 1 : 0);
+					}
 			++index;
 		}
 		sunCandidates = std::move(snapshot);

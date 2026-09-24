@@ -26,7 +26,9 @@ cbuffer BuildDrawsConstants : register(b0)
 	// each segment testing for itself and quietly disagreeing.
 	uint VisibilityIndex;
 	uint LatchOffset;  // this dispatch's BuildDrawsLatch, in bytes into the latch block
-	uint ConstantsPadding;
+	// RWByteAddressBuffer: per object, the stamp of the last frame its bound was inside the main camera's frustum.
+	// Written by the depth segment's first phase only (0 elsewhere): the visibility feedback (IndirectDraws).
+	uint FrustumIndex;
 	// Occlusion culling against the hierarchical depth buffer built at the end of the depth pass
 	// (HzbCS.hlsl). HzbIndex is zero when there is no HZB, which includes the first frame.
 	uint HzbIndex;
@@ -64,6 +66,9 @@ static float4 CullPlanes[6];
 // the row holds each slot's pipeline under the view's rasterizer state (depth bias, culling). 0 when the
 // inputs name pipelines themselves (the main camera).
 static uint PipelineMapOffset;
+// The main colour pass: kSunTestOn and the number of cascades (the latch's sunMasks and sunPlanes follow).
+static uint SunState;
+static const uint kSunTestOn = 0x80000000u;
 
 void LoadLatch()
 {
@@ -79,6 +84,30 @@ void LoadLatch()
 	ViewProj = float4x4(asfloat(latch.Load4(LatchOffset + 32)), asfloat(latch.Load4(LatchOffset + 48)),
 		asfloat(latch.Load4(LatchOffset + 64)), asfloat(latch.Load4(LatchOffset + 80)));
 	PipelineMapOffset = latch.Load(LatchOffset + 192);
+	SunState = latch.Load(LatchOffset + 196);
+}
+
+// A synthetic pass whose pipeline carries the sun's bits (kObjectSunTest): whether its bound meets any of this
+// frame's cascades, with SunAccumulation's sphere test (outside a plane when dot(n, c) - d < -r) against each
+// cascade's planes and custom planes, as the engine's cascade culls used them.
+bool InSunCascades(float3 a_centre, float a_radius)
+{
+	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
+	const uint cascades = min(SunState & 0xFu, 4u);
+	[loop] for (uint c = 0; c < cascades; ++c) {
+		const uint2 masks = latch.Load2(LatchOffset + 208 + c * 8);
+		bool inside = true;
+		[loop] for (uint p = 0; p < 12 && inside; ++p) {
+			const uint mask = p < 6 ? masks.x : masks.y;
+			if ((mask & (1u << (p % 6))) == 0)
+				continue;
+			const float4 plane = asfloat(latch.Load4(LatchOffset + 240 + (c * 12 + p) * 16));
+			inside = dot(plane.xyz, a_centre) - plane.w >= -a_radius;
+		}
+		if (inside)
+			return true;
+	}
+	return false;
 }
 
 // The draw's pipeline: the input's own, or its key slot's through the view's row of the pipeline map.
@@ -140,6 +169,10 @@ float2 HzbUvScale() { return float2(HzbUvScalePacked & 0xFFFF, HzbUvScalePacked 
 
 // Object flags (Records.h), as the draw input carries them.
 static const uint kObjectNativeVisible = 1u << 3;
+// A synthetic main pass with the sun's bits (Records.h), and the object word's mark for a draw that misses every
+// cascade (kObjectSunMiss), which the pixel stage reads (DCLFObjects.hlsli).
+static const uint kObjectSunTest = 1u << 26;
+static const uint kObjectSunMiss = 1u << 31;
 // A volumetric-only caster (Records.h), drawn only by the views of the volumetric lighting copy.
 static const uint kObjectVolumetricOnly = 1u << 23;
 // A decal, with its group (1 = the engine's opaque decal group, 2 = the blended one) in bits 20-21.
@@ -183,6 +216,9 @@ static const uint kCountDecalGroup1 = 76;
 static const uint kCountDecalGroup2 = 80;
 static const uint kCountDecalsCulled = 84;
 static const uint kCountDecalsTested = 88;
+// The sun on the GPU: kObjectSunTest inputs the colour pass tested, and those that missed every cascade.
+static const uint kCountSunTested = 92;
+static const uint kCountSunMissed = 96;
 
 // Phase 2 writes into the far half of the sequence buffer. Its draw is recorded on the CPU, which cannot
 // know how many sequences phase 1 wrote, so the two need ranges that are fixed in advance rather than one
@@ -376,6 +412,20 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	const uint4 input = inputs.Load4(inputOffset);  // pipeline index, record index, geometry index, flags
 	const uint objectIndex = inputs.Load(inputOffset + 32);
 	const bool nativeVisible = (input.w & kObjectNativeVisible) != 0;
+	// The word the draw's root constants carry: the object index, and kObjectSunMiss when a synthetic pass with the
+	// sun's bits meets no cascade this frame. Tested and counted for every such input, drawn or not, so the count
+	// compares with the CPU's over the same inputs.
+	uint objectWord = objectIndex;
+	if ((SunState & kSunTestOn) != 0 && (input.w & kObjectSunTest) != 0) {
+		uint sunScratch;
+		RWByteAddressBuffer sunCount = ResourceDescriptorHeap[CountIndex];
+		sunCount.InterlockedAdd(kCountSunTested, 1, sunScratch);
+		const float4 sunBound = asfloat(inputs.Load4(inputOffset + 16));
+		if (!InSunCascades(sunBound.xyz, sunBound.w)) {
+			objectWord |= kObjectSunMiss;
+			sunCount.InterlockedAdd(kCountSunMissed, 1, sunScratch);
+		}
+	}
 	const bool drawable = (input.w & kInputDrawable) != 0;
 	const uint phase = CullPhase();
 	uint scratch;
@@ -414,7 +464,7 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 		const uint recordHi = RecordsAddressHi + (recordLo < RecordsAddressLo ? 1 : 0);
 		const uint decalStreamIndex = inputs.Load(inputOffset + 44);
 		const uint4 decalStream = decalStreamIndex != kNoStream ? geometries.Load4(decalStreamIndex * kGeometryStride) : vertexBuffer;
-		StoreSequence(sequences, kDecalSequenceBase + (decalGroup - 1) * kMaxDecalDraws + decalOrdinal, input.x, recordLo, recordHi, objectIndex,
+		StoreSequence(sequences, kDecalSequenceBase + (decalGroup - 1) * kMaxDecalDraws + decalOrdinal, input.x, recordLo, recordHi, objectWord,
 			vertexBuffer, decalStream, indexBuffer, culled ? 0 : indexBuffer.w, firstIndex);
 		// A decal's word: never drawn in depth, drawn in colour unless culled.
 		if (phase == kPhaseColour)
@@ -449,6 +499,12 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 			count.InterlockedAdd(kCountOccluded, 1, scratch);
 		}
 		cullRejected = frustumRejected || occlusionRejected;
+	}
+	// The visibility feedback: the frustum alone (occlusion does not stop the engine's OnVisible), for every candidate
+	// phase 1 tests, drawable or not.
+	if (FrustumIndex != 0 && phase == kPhaseOne && !frustumRejected) {
+		RWByteAddressBuffer frustumStamps = ResourceDescriptorHeap[FrustumIndex];
+		frustumStamps.Store(objectIndex * 4, VisibilityStamp);
 	}
 
 	// The engine's own decision is a useful reference, but only for the frustum test, where the engine is
@@ -534,7 +590,7 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 			count.InterlockedAdd(phase == kPhaseTwo ? kCountDrawnPhaseTwo : kCountDrawn, 1, slot);
 			if (slot >= kPhaseTwoSequenceBase)
 				return;
-			StoreSequence(sequences, slot + (phase == kPhaseTwo ? kPhaseTwoSequenceBase : 0), pipeline, recordLo, recordHi, objectIndex, vertexBuffer,
+			StoreSequence(sequences, slot + (phase == kPhaseTwo ? kPhaseTwoSequenceBase : 0), pipeline, recordLo, recordHi, objectWord, vertexBuffer,
 				streamIndex != kNoStream ? stream : vertexBuffer, indexBuffer, indexBuffer.w, firstIndex);
 		}
 		if ((partitions >> (partition + 1)) == 0)

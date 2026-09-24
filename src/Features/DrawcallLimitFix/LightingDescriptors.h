@@ -152,6 +152,9 @@ namespace DCLF
 		// The pass's LODMode as a row of the engine's partition table (index + singleLevel * 4): which skin
 		// partitions the main camera draws (SceneStore::SkinPartitionMask).
 		std::uint32_t lodRow = 3;
+		// A synthetic pass (PrimaryCull) whose technique carries the sun's bits for the GPU to drop on a cascade
+		// miss (kObjectSunTest); the engine's registered passes carry the engine's own bits.
+		bool sunTest = false;
 	};
 
 	inline constexpr std::uint32_t kPassDoAlphaTest = 1u << 20;           // pass descriptor DoAlphaTest

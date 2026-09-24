@@ -43,12 +43,17 @@ struct DCLFObjectRecord
 };
 
 // The indirect draw's push data. The first two words are the binding record's address, which the pipeline
-// layout consumes to resolve this draw's buffers and descriptors; only the object index is read here.
+// layout consumes to resolve this draw's buffers and descriptors; only the object word is read here.
 cbuffer DCLFPushData : register(b190)
 {
 	uint2 DCLFRecordAddress : packoffset(c0.x);
-	uint DCLFObjectIndex : packoffset(c0.z);
+	uint DCLFObjectWord : packoffset(c0.z);
 };
+
+// The object word: the object's index, and in the top bit kObjectSunMiss (Records.h), which BuildDrawsCS sets on
+// a synthetic pass carrying the sun's bits whose bound meets none of this frame's cascades.
+static const uint DCLFObjectIndex = DCLFObjectWord & 0x7FFFFFFFu;
+static const bool DCLFSunMiss = (DCLFObjectWord & 0x80000000u) != 0;
 
 StructuredBuffer<DCLFObjectRecord> DCLFObjects : register(t127);
 // The epoch's row buffer (IndirectDraws: kBonesBufferRegister): every skinned object's bone palette

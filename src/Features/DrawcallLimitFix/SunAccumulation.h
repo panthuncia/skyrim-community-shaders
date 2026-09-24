@@ -26,9 +26,9 @@ namespace DCLF
 		ankerl::unordered_dense::map<const RE::NiAVObject*, std::uint32_t> entries;     // entry node -> entry index
 		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint32_t> geometries;  // every tracked geometry under one -> geometry index
 		std::vector<std::uint32_t> geometryEntry;                                       // geometry index -> entry index
-		// Per entry index: every tracked geometry under it is also a main-pass table object that PrimaryCull can
-		// give a synthetic pass (SceneStore::PrimaryEntryAllows), so the primary's cull may leave the entry out.
-		std::vector<std::uint8_t> primary;
+		// Per geometry index: a main-pass table object PrimaryCull can give a synthetic pass (SceneStore::PrimaryEntryAllows);
+		// the rest under a left-out entry are registered by the engine, handed over as its cull would (PrimaryCull).
+		std::vector<std::uint8_t> primaryGeometry;
 	};
 
 	/**
@@ -99,6 +99,12 @@ namespace DCLF
 		 * Geometric rule). Unknown (the cascades were not captured this frame): nullopt.
 		 */
 		std::optional<bool> InSunCascades(const RE::NiBound& a_bound) const;
+		/**
+		 * @brief This frame's captured cascades as BuildDraws tests them (BuildDrawsLatch): per cascade, 6 planes and
+		 * then 6 custom planes as (normal, constant), and the two active-plane masks (0 custom: none). Render thread,
+		 * after the sun's Accumulate. Returns the number of cascades, 0 when none were captured this frame.
+		 */
+		std::uint32_t GpuCascades(std::uint32_t (&a_masks)[4][2], float (&a_planes)[4][12][4]) const;
 		/** @brief Whether this frame's full-frustum cull applied the entry exclusion (its cascades will be captured). */
 		bool ExclusionLive() const { return exclusionLive.load(std::memory_order_acquire); }
 		/** @brief After the sun's Accumulate: every cascade's activeLightMask bit this frame. */

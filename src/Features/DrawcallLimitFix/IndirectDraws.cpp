@@ -40,6 +40,7 @@
 
 #	include <OpenRenderGraph/PersistentGraphHost.h>
 #	include <Render/LatchBlock.h>
+#	include <Render/Runtime/ExternalSignalReservation.h>
 #	include <Render/Runtime/StagedUploadBatch.h>
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <Render/Runtime/DescriptorServiceAccess.h>
@@ -122,7 +123,10 @@ namespace DCLF
 		constexpr std::uint32_t kNoSkip = ~0u;
 		// BuildDrawsCS's counter words: [0] drawn, [1] culled, [2] tested, [3] engine-culled and gated out,
 		// [4] false negatives (the engine kept it, the culling rejected it), [5] rescued.
-		constexpr std::uint32_t kCountWords = 24;
+		constexpr std::uint32_t kCountWords = 26;
+		// The sun's bits on the GPU: the colour dispatch's inputs with kObjectSunTest, and those that missed every cascade.
+		constexpr std::uint32_t kCountSunTestedWord = 23;
+		constexpr std::uint32_t kCountSunMissedWord = 24;
 		// Decals: the two groups' slot counts, written by the CPU and read by their draws, then the culling's
 		// own tallies. Byte offsets must match BuildDrawsCS.hlsl.
 		constexpr std::uint32_t kCountDecalGroupWord = 19;  // group 1 at word 19, group 2 at word 20
@@ -227,7 +231,7 @@ namespace DCLF
 			std::uint32_t phaseBits;         // the culling phase in bits 4-7 (CullFlags' phase field)
 			std::uint32_t visibilityIndex;   // RWByteAddressBuffer: one uint per object in the tables
 			std::uint32_t latchOffset;       // set at record time: the slot's region plus the dispatch's latch
-			std::uint32_t padding;
+			std::uint32_t frustumIndex;      // RWByteAddressBuffer: per object, the stamp of its last in-frustum frame (depth phase 1 only)
 			std::uint32_t hzbIndex;        // 0 when there is no HZB to test against
 			std::uint32_t hzbSizePacked;   // mip 0: width in the low 16 bits, height in the high 16
 			std::uint32_t hzbMips;
@@ -260,10 +264,36 @@ namespace DCLF
 			// slots, and the row holds each slot's pipeline under the view's rasterizer state. 0 when the inputs
 			// name pipelines themselves (the main camera).
 			std::uint32_t pipelineMapOffset;
-			std::uint32_t padding[3];
+			// The main colour pass only: kSunTestOn and the number of cascades below, which BuildDraws tests every
+			// kObjectSunTest input's bound against (a miss marks the draw kObjectSunMiss). 0 elsewhere.
+			std::uint32_t sunState;
+			std::uint32_t padding[2];
+			// Per cascade: the active masks of its planes and its custom planes (0: none), then 6 planes and 6 custom
+			// planes as (normal, constant), outside when dot(normal, c) - constant < -r (SunAccumulation's test).
+			std::uint32_t sunMasks[4][2];
+			float sunPlanes[4][12][4];
+			std::uint32_t tailPadding[4];
 		};
-		static_assert(sizeof(BuildDrawsLatch) == 208 && offsetof(BuildDrawsLatch, viewProj) == 32 && offsetof(BuildDrawsLatch, cullPlanes) == 96 &&
-					  offsetof(BuildDrawsLatch, pipelineMapOffset) == 192);
+		static_assert(sizeof(BuildDrawsLatch) == 1024 && offsetof(BuildDrawsLatch, viewProj) == 32 && offsetof(BuildDrawsLatch, cullPlanes) == 96 &&
+					  offsetof(BuildDrawsLatch, pipelineMapOffset) == 192 && offsetof(BuildDrawsLatch, sunState) == 196 &&
+					  offsetof(BuildDrawsLatch, sunMasks) == 208 && offsetof(BuildDrawsLatch, sunPlanes) == 240);
+		constexpr std::uint32_t kSunTestOn = 1u << 31;
+
+		/** @brief SunAccumulation's sphere test against one cascade of the latch (what BuildDrawsCS does). */
+		bool InSunCascade(const BuildDrawsLatch& a_latch, std::uint32_t a_cascade, const float a_centre[3], float a_radius)
+		{
+			for (std::uint32_t set = 0; set < 2; ++set) {
+				const std::uint32_t mask = a_latch.sunMasks[a_cascade][set];
+				for (std::uint32_t p = 0; p < 6; ++p) {
+					if (!(mask & (1u << p)))
+						continue;
+					const float* plane = a_latch.sunPlanes[a_cascade][set * 6 + p];
+					if (plane[0] * a_centre[0] + plane[1] * a_centre[1] + plane[2] * a_centre[2] - plane[3] < -a_radius)
+						return false;
+				}
+			}
+			return true;
+		}
 		// The shadow latch block: the views' latches, then one pipeline map row per view rasterizer state.
 		constexpr std::uint32_t kShadowPipelineMapOffset = kMaxShadowViews * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch));
 		constexpr std::uint32_t kShadowPipelineMapRowBytes = kMaxShadowSlots * static_cast<std::uint32_t>(sizeof(std::uint32_t));
@@ -576,6 +606,40 @@ namespace DCLF
 			// shader-resource view as well as a depth-stencil one so that the graph sees the depth the draws
 			// write and the depth the build reads as one resource and orders them.
 			std::shared_ptr<org::Buffer> visibility;  // per-object verdict, published by the depth segment
+			// Per object, the stamp of the last frame the main camera's depth phase 1 found its bound inside the frustum
+			// (occlusion aside: the engine's OnVisible semantics). Never cleared: a stale stamp is simply not this frame's.
+			std::shared_ptr<org::Buffer> frustum;
+			/**
+			 * @brief The main camera's visibility feedback (dclf-cull-job-elimination.md, "Phase 2"): a ring of readback
+			 * slots the frustum stamps are copied into after the colour segment, a timeline of its own signalled after each
+			 * copy completes, and a consumer that decodes completed slots in fence order. Nothing waits for it, and nothing
+			 * assumes one frame in flight: a frame with no free slot records no copy.
+			 */
+			struct Feedback
+			{
+				enum State : std::uint32_t
+				{
+					Free,
+					Recording,  // armed at the colour commit, not yet prepared
+					Submitted,  // its copy is recorded and its fence value reserved
+					Decoding,
+				};
+				struct Slot
+				{
+					std::shared_ptr<org::Buffer> staging;
+					std::atomic<std::uint32_t> state{ Free };
+					std::uint64_t fenceValue = 0;
+					std::uint32_t frame = 0, stamp = 0, objects = 0;
+					std::shared_ptr<void> tag;
+				};
+				std::vector<std::unique_ptr<Slot>> slots;
+				std::shared_ptr<rhi::TimelinePtr> timeline;
+				std::atomic<std::uint64_t> fenceCounter{ 0 };
+				std::atomic<int> armed{ -1 };
+				std::uint32_t cursor = 0;
+				std::atomic<std::uint64_t> statArmed{ 0 }, statDropped{ 0 }, statAbandoned{ 0 }, statDecoded{ 0 };
+			};
+			std::shared_ptr<Feedback> feedback;
 			std::shared_ptr<org::PixelBuffer> hzb;
 			std::shared_ptr<const ComputeProgram> hzbProgram;
 			std::uint32_t hzbWidth = 0, hzbHeight = 0, hzbMips = 0;
@@ -817,7 +881,7 @@ namespace DCLF
 
 		struct BuildDrawsBindings
 		{
-			org::ResourceBindingToken inputs, geometries, sequences, count, hzb, visibility;
+			org::ResourceBindingToken inputs, geometries, sequences, count, hzb, visibility, frustum;
 		};
 
 		struct BuildDrawsFrame
@@ -857,6 +921,8 @@ namespace DCLF
 				bindings.sequences = a_builder.BindUnorderedAccess(resources->sequences);
 				bindings.count = a_builder.BindUnorderedAccess(resources->count);
 				bindings.visibility = a_builder.BindUnorderedAccess(resources->visibility);
+				if (resources->frustum)
+					bindings.frustum = a_builder.BindUnorderedAccess(resources->frustum);
 				// Phase 1 sees the HZB the previous frame left, phase 2 the one just rebuilt from this
 				// frame's depth. Both read the same resource; what differs is where they sit relative to
 				// the build, which is why the ordering below is the whole design.
@@ -900,6 +966,9 @@ namespace DCLF
 				constants.recordStride = sizeof(DrawBindings);
 				constants.phaseBits = (phase & 0xFu) << 4;
 				constants.visibilityIndex = a_preparation.ResolveView(a_bindings.visibility, { org::BindlessViewKind::UnorderedAccess }).index;
+				// The frustum stamps: the depth segment's first phase alone tests every candidate's frustum.
+				if (resources->frustum && phase == 1)
+					constants.frustumIndex = a_preparation.ResolveView(a_bindings.frustum, { org::BindlessViewKind::UnorderedAccess }).index;
 				if (resources->hzb && frame->cullMode >= 2 && frame->width && frame->height) {
 					constants.hzbIndex = a_preparation.ResolveView(a_bindings.hzb, { org::BindlessViewKind::ShaderResource }).index;
 					constants.hzbSizePacked = (resources->hzbWidth & 0xFFFF) | (resources->hzbHeight << 16);
@@ -933,6 +1002,80 @@ namespace DCLF
 			std::shared_ptr<Resources> resources;
 			SegmentBinding segment;
 			std::uint32_t fixedPhase = 0;
+		};
+
+		struct FeedbackBindings
+		{
+			org::ResourceBindingToken source;
+			std::vector<org::ResourceBindingToken> slots;
+		};
+
+		struct FeedbackFrame
+		{
+			int slot = -1;
+			std::uint64_t bytes = 0;
+		};
+
+		/**
+		 * @brief Copies the frustum stamps into the feedback slot the colour commit armed, and reserves the slot's fence
+		 * value on the feedback timeline, which the framework signals after the copy completes (as BasicRenderer's
+		 * CLodStructuralStreamingReadbackCopyPass). No invocation revision: a packet with a reservation is prepared
+		 * every frame. A copy abandoned before submission returns its slot.
+		 */
+		class FeedbackPass final : public org::TypedRenderGraphPass<FeedbackPass, FeedbackFrame, FeedbackBindings>
+		{
+		public:
+			FeedbackPass(std::shared_ptr<Resources> a_resources, SegmentBinding a_segment) :
+				resources(std::move(a_resources)), segment(a_segment) {}
+
+			FeedbackBindings Declare(org::PassBuilder& a_builder)
+			{
+				a_builder.PreferQueue(org::QueueKind::Graphics);
+				FeedbackBindings bindings{};
+				bindings.source = a_builder.BindCopySource(resources->frustum);
+				for (const auto& slot : resources->feedback->slots)
+					bindings.slots.push_back(a_builder.BindCopyDestination(slot->staging));
+				return bindings;
+			}
+
+			FeedbackFrame Prepare(const FeedbackBindings&, const org::PassPrepareContext& a_preparation) const
+			{
+				FeedbackFrame prepared{};
+				if (segment.Now() != RenderGraphRuntime::Segment::MainOpaque)
+					return prepared;
+				auto feedback = resources->feedback;
+				const int index = feedback->armed.exchange(-1, std::memory_order_acq_rel);
+				if (index < 0 || static_cast<std::size_t>(index) >= feedback->slots.size())
+					return prepared;
+				auto& slot = *feedback->slots[index];
+				if (slot.state.load(std::memory_order_acquire) != Resources::Feedback::Recording)
+					return prepared;
+				const std::uint64_t value = feedback->fenceCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+				slot.fenceValue = value;
+				slot.state.store(Resources::Feedback::Submitted, std::memory_order_release);
+				a_preparation.Reserve(std::make_shared<const org::runtime::ExternalSignalReservation>(feedback->timeline, value, [feedback, index] {
+					auto expected = static_cast<std::uint32_t>(Resources::Feedback::Submitted);
+					if (feedback->slots[index]->state.compare_exchange_strong(expected, Resources::Feedback::Free, std::memory_order_acq_rel)) {
+						feedback->slots[index]->tag.reset();
+						feedback->statAbandoned.fetch_add(1, std::memory_order_relaxed);
+					}
+				}));
+				prepared.slot = index;
+				prepared.bytes = std::uint64_t(slot.objects) * sizeof(std::uint32_t);
+				return prepared;
+			}
+
+			static void Record(const FeedbackBindings& a_bindings, const FeedbackFrame& a_frame, org::PassRecordContext& a_recording)
+			{
+				if (a_frame.slot < 0 || !a_frame.bytes)
+					return;
+				a_recording.Commands().CopyBufferRegion(a_recording.Resolve(a_bindings.slots[a_frame.slot]).GetHandle(), 0,
+					a_recording.Resolve(a_bindings.source).GetHandle(), 0, a_frame.bytes);
+			}
+
+		private:
+			std::shared_ptr<Resources> resources;
+			SegmentBinding segment;
 		};
 
 		struct HzbConstants
@@ -1718,6 +1861,11 @@ namespace DCLF
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.geometries"), resources->geometries);
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.draw-count"), resources->count);
 				a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.visibility"), resources->visibility);
+				if (resources->frustum)
+					a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.frustum"), resources->frustum);
+				if (resources->feedback)
+					for (std::size_t i = 0; i < resources->feedback->slots.size(); ++i)
+						a_graph.RegisterResource(org::ResourceIdentifier(fmt::format("cs.dclf.feedback{}", i)), resources->feedback->slots[i]->staging);
 				if (resources->bones)
 					a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.bones"), resources->bones);
 				if (resources->facePositions)
@@ -1765,6 +1913,10 @@ namespace DCLF
 				a_out.push_back(org::RenderGraph::ExternalPassDesc::Render("cs.dclf.main-opaque",
 					std::static_pointer_cast<org::RenderPass>(std::make_shared<MainOpaquePass>(resources, colourSegment)))
 						.Epoch(colour));
+				if (resources->feedback && resources->frustum && resources->hybrid)
+					a_out.push_back(org::RenderGraph::ExternalPassDesc::Copy("cs.dclf.feedback",
+						std::static_pointer_cast<org::RenderPass>(std::make_shared<FeedbackPass>(resources, colourSegment)))
+							.Epoch(colour));
 				if (resources->probe)
 					a_out.push_back(org::RenderGraph::ExternalPassDesc::Copy("cs.dclf.probe-after",
 						std::static_pointer_cast<org::RenderPass>(std::make_shared<ProbePass>(resources, colourSegment, true)))
@@ -4034,11 +4186,49 @@ namespace DCLF
 		{
 			winrt::com_ptr<ID3D11Buffer> count;
 			std::uint32_t framesLeft = 0;
+			std::uint32_t sunCpuTested = 0, sunCpuMissed = 0;
 		};
 		std::optional<CullReadback> cullReadback;
 		std::uint32_t cullEpochs = 0;
+		BuildDrawsLatch sunUpload{};  // the colour epoch's last latch: the cascades its BuildDraws tested against
 
-		void ReadCullCounters(const std::shared_ptr<Resources>& a_resources, IndirectDraws::Stats& a_stats);
+		/**
+		 * @brief The colour commit, render thread: arms a free feedback slot for this frame's copy (FeedbackPass),
+		 * with the consumer's tag (PrimaryCull's stood-in entries). A slot armed but never prepared is returned first;
+		 * with no free slot the frame is dropped, never waited for.
+		 */
+		void ArmFeedback(Resources& a_resources, std::uint32_t a_frame, std::uint32_t a_objects)
+		{
+			auto tag = PrimaryCull::Get().TakeFeedbackTag();
+			if (!a_resources.feedback || !a_resources.frustum || !tag)
+				return;
+			auto& feedback = *a_resources.feedback;
+			if (const int stale = feedback.armed.exchange(-1, std::memory_order_acq_rel); stale >= 0) {
+				auto expected = static_cast<std::uint32_t>(Resources::Feedback::Recording);
+				if (feedback.slots[stale]->state.compare_exchange_strong(expected, Resources::Feedback::Free, std::memory_order_acq_rel))
+					feedback.slots[stale]->tag.reset();
+			}
+			const auto count = static_cast<std::uint32_t>(feedback.slots.size());
+			for (std::uint32_t i = 0; i < count; ++i) {
+				const std::uint32_t index = (feedback.cursor + i) % count;
+				auto& slot = *feedback.slots[index];
+				auto expected = static_cast<std::uint32_t>(Resources::Feedback::Free);
+				if (!slot.state.compare_exchange_strong(expected, Resources::Feedback::Recording, std::memory_order_acq_rel))
+					continue;
+				feedback.cursor = (index + 1) % count;
+				slot.frame = a_frame;
+				slot.stamp = a_frame & 0x0FFFFFFFu;  // BuildDrawsLatch::visibilityStamp
+				slot.objects = a_objects;
+				slot.tag = std::move(tag);
+				slot.fenceValue = 0;
+				feedback.armed.store(static_cast<int>(index), std::memory_order_release);
+				feedback.statArmed.fetch_add(1, std::memory_order_relaxed);
+				return;
+			}
+			feedback.statDropped.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		void ReadCullCounters(const std::shared_ptr<Resources>& a_resources, IndirectDraws::Stats& a_stats, const MainPayload& a_payload);
 
 		// CS_DCLF_SET_PARITY: one snapshot per frame in flight, read back a few frames later.
 		struct SetParityFrame
@@ -4144,6 +4334,25 @@ namespace DCLF
 			// One word per object in the frame's tables: what the depth segment's culling decided, read by
 			// the colour segment so that it draws exactly the same set.
 			state->visibility = CreateWords(kMaxObjects, true, "cs.dclf.visibility");
+			state->frustum = CreateWords(kMaxObjects, true, "cs.dclf.frustum");
+			{
+				// The feedback ring: at least as many slots as frames in flight, and at least 4.
+				auto feedback = std::make_shared<Resources::Feedback>();
+				auto timeline = std::make_shared<rhi::TimelinePtr>();
+				if (rhi::Failed(device.CreateTimeline(*timeline, 0, "cs.dclf.feedback")) || !*timeline) {
+					logger::warn("[DCLF] visibility feedback: no timeline; the feedback is off");
+				} else {
+					feedback->timeline = std::move(timeline);
+					const std::uint32_t slots = std::max<std::uint32_t>(host->FrameSlots(), 4u);
+					for (std::uint32_t i = 0; i < slots; ++i) {
+						auto slot = std::make_unique<Resources::Feedback::Slot>();
+						slot->staging = org::Buffer::CreateShared(rhi::HeapType::Readback, std::uint64_t(kMaxObjects) * sizeof(std::uint32_t));
+						slot->staging->SetName(fmt::format("cs.dclf.feedback{}", i).c_str());
+						feedback->slots.push_back(std::move(slot));
+					}
+					state->feedback = std::move(feedback);
+				}
+			}
 			state->inputs = CreateWords(std::uint64_t(kMaxInputs) * sizeof(DrawInput) / 4, false, "cs.dclf.draw-inputs");
 			state->geometries = CreateWords(std::uint64_t(kMaxGeometries) * sizeof(GeometryDraw) / 4, false, "cs.dclf.geometries");
 			state->buildDraws = LoadComputeProgram(device, kBuildDrawsShader, kBuildDrawsConstantWords);
@@ -5994,6 +6203,11 @@ namespace DCLF
 					geometry->name.c_str(), kIneligibleNames[static_cast<std::size_t>(reason)], fromAccumulate ? "this frame's accumulate phase" : "the scene phase",
 					pass.technique, pass.subPass);
 		}
+		// The entries the primary's cull reached in view and DCLF drew in full are left out from the next frame on.
+		PrimaryCull::Get().Admit([&](const RE::BSGeometry* a_geometry) {
+			const auto drawn = impl->drawnFrame.find(a_geometry);
+			return drawn != impl->drawnFrame.end() && drawn->second == frame;
+		});
 		++report.frames;
 		report.handedBack += captureStats.handedBack;
 		report.holes += frameHoles;
@@ -6039,6 +6253,56 @@ namespace DCLF
 	{
 		const auto drawn = impl->drawnFrame.find(a_geometry);
 		return drawn != impl->drawnFrame.end() && a_frame - drawn->second <= 1;
+	}
+
+	std::uint32_t IndirectDraws::DrainVisibilityFeedback(const std::function<void(const VisibilityFeedbackFrame&)>& a_consume)
+	{
+		const auto resources = impl->resources;
+		if (!resources || !resources->feedback || !resources->feedback->timeline)
+			return 0;
+		auto& feedback = *resources->feedback;
+		const std::uint64_t completed = feedback.timeline->Get().GetCompletedValue();
+		// The completed slots, oldest first.
+		std::vector<std::pair<std::uint64_t, std::size_t>> ready;
+		for (std::size_t i = 0; i < feedback.slots.size(); ++i) {
+			const auto& slot = *feedback.slots[i];
+			if (slot.state.load(std::memory_order_acquire) == Resources::Feedback::Submitted && slot.fenceValue && slot.fenceValue <= completed)
+				ready.emplace_back(slot.fenceValue, i);
+		}
+		std::sort(ready.begin(), ready.end());
+		std::uint32_t decoded = 0;
+		for (const auto& [value, index] : ready) {
+			auto& slot = *feedback.slots[index];
+			auto expected = static_cast<std::uint32_t>(Resources::Feedback::Submitted);
+			if (!slot.state.compare_exchange_strong(expected, Resources::Feedback::Decoding, std::memory_order_acq_rel))
+				continue;
+			auto resource = slot.staging->GetAPIResource();
+			void* mapped = nullptr;
+			resource.Map(&mapped);
+			if (mapped) {
+				VisibilityFeedbackFrame frame{ slot.frame, slot.stamp, slot.objects, static_cast<const std::uint32_t*>(mapped), slot.tag };
+				a_consume(frame);
+				resource.Unmap(0, 0);
+				++decoded;
+			}
+			slot.tag.reset();
+			slot.state.store(Resources::Feedback::Free, std::memory_order_release);
+		}
+		feedback.statDecoded.fetch_add(decoded, std::memory_order_relaxed);
+		return decoded;
+	}
+
+	IndirectDraws::FeedbackStats IndirectDraws::TakeFeedbackStats()
+	{
+		FeedbackStats out;
+		if (const auto resources = impl->resources; resources && resources->feedback) {
+			auto& feedback = *resources->feedback;
+			out.armed = feedback.statArmed.exchange(0);
+			out.dropped = feedback.statDropped.exchange(0);
+			out.abandoned = feedback.statAbandoned.exchange(0);
+			out.decoded = feedback.statDecoded.exchange(0);
+		}
+		return out;
 	}
 
 	void IndirectDraws::CaptureMainPass()
@@ -6252,7 +6516,7 @@ namespace DCLF
 		// Z-prepass builds from the far smaller set the colour epoch drew last frame, so sampling whichever
 		// ran most recently alternates between two unrelated populations.
 		if (ok && !depthOnly)
-			impl->ReadCullCounters(resources, stats);
+			impl->ReadCullCounters(resources, stats, payload);
 		if (ok && !depthOnly && SetParityEnabled())
 			impl->CheckSetParity(resources, impl->mainPayload[1], payload);
 
@@ -6984,6 +7248,12 @@ namespace DCLF
 			latch.hzbUvScalePacked = scale(frame->width, a_resources->hzbWidth * 2) | (scale(frame->height, a_resources->hzbHeight * 2) << 16);
 		}
 		FoldEyeIntoViewProj(viewProj, a_capture.eye, latch.viewProj);
+		// The colour pass: this frame's cascades, for the synthetic passes' sun test. The sun's Accumulate has run.
+		if (!depthOnly) {
+			latch.sunState = kSunTestOn | SunAccumulation::Get().GpuCascades(latch.sunMasks, latch.sunPlanes);
+			sunUpload = latch;
+			ArmFeedback(*a_resources, frameNumber, static_cast<std::uint32_t>(std::min<std::size_t>(tables.objects.size(), kMaxObjects)));
+		}
 		a_resources->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, latch);
 
 		// The shape: the previous one while nothing the recordings depend on changed, so the passes reuse
@@ -7236,7 +7506,7 @@ namespace DCLF
 		setParityFrames.push_back(std::move(snapshot));
 	}
 
-	void IndirectDraws::Impl::ReadCullCounters(const std::shared_ptr<Resources>& a_resources, IndirectDraws::Stats& a_stats)
+	void IndirectDraws::Impl::ReadCullCounters(const std::shared_ptr<Resources>& a_resources, IndirectDraws::Stats& a_stats, const MainPayload& a_payload)
 	{
 		auto* context = globals::d3d::context;
 		if (cullReadback) {
@@ -7273,6 +7543,10 @@ namespace DCLF
 				a_stats.cullRescuedByPhaseTwo = words[18];
 				a_stats.decalsCulled = words[kCountDecalsCulledWord];
 				a_stats.decalsTested = words[kCountDecalsTestedWord];
+				a_stats.sunTested = words[kCountSunTestedWord];
+				a_stats.sunMissed = words[kCountSunMissedWord];
+				a_stats.sunCpuTested = cullReadback->sunCpuTested;
+				a_stats.sunCpuMissed = cullReadback->sunCpuMissed;
 				context->Unmap(cullReadback->count.get(), 0);
 			}
 			cullReadback.reset();
@@ -7293,6 +7567,17 @@ namespace DCLF
 		ScopedPerfEvent event("CS DCLF: culling readback");
 		context->CopyResource(readback.count.get(), a_resources->countD3D11.get());
 		readback.framesLeft = 3;
+		// The CPU's side of the sun test, over the same frame's colour inputs and the same planes.
+		const std::uint32_t cascades = sunUpload.sunState & ~kSunTestOn;
+		for (const auto& input : a_payload.inputList) {
+			if (!(input.flags & kObjectSunTest) || !(sunUpload.sunState & kSunTestOn))
+				continue;
+			++readback.sunCpuTested;
+			bool inside = false;
+			for (std::uint32_t c = 0; c < cascades && !inside; ++c)
+				inside = InSunCascade(sunUpload, c, input.boundCentre, input.boundRadius);
+			readback.sunCpuMissed += inside ? 0 : 1;
+		}
 		cullReadback = std::move(readback);
 	}
 
@@ -7340,6 +7625,9 @@ namespace DCLF
 			// sequences share an address, the sort stops being a total order, and equal-key runs land in
 			// arbitrary relative order on the two sides. That reports mismatches that are not mismatches.
 			// A skin of several partitions writes one sequence per partition, which its index buffer tells apart.
+			// A draw that missed every sun cascade carries kObjectSunMiss in its object word; the CPU's template does not.
+			for (auto& sequence : built)
+				sequence.objectIndex &= ~kObjectSunMiss;
 			auto byObject = [](const DrawSequence& a, const DrawSequence& b) {
 				return a.objectIndex != b.objectIndex ? a.objectIndex < b.objectIndex : a.indexBufferAddress < b.indexBufferAddress;
 			};
@@ -7469,6 +7757,8 @@ namespace DCLF
 	bool IndirectDraws::Hybrid() { return false; }
 	void IndirectDraws::PublishClaims() {}
 	bool IndirectDraws::DrewLastFrame(const RE::BSGeometry*, std::uint32_t) const { return false; }
+	std::uint32_t IndirectDraws::DrainVisibilityFeedback(const std::function<void(const VisibilityFeedbackFrame&)>&) { return 0; }
+	IndirectDraws::FeedbackStats IndirectDraws::TakeFeedbackStats() { return {}; }
 	void IndirectDraws::CaptureMainPass() {}
 	void IndirectDraws::Execute() {}
 	void IndirectDraws::CaptureDepthPass() {}

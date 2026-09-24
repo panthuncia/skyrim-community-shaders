@@ -947,6 +947,19 @@ Measured at Riverwood (clear weather, so Skylighting's alone), render thread per
     incoming flag, and some mask bit naming the sun); DefShadow is the accumulator's deferred flag (`+0x178`) under alpha
     and fade conditions, cleared without ShadowDir or a shadow light; both are cleared for a property with no shadow
     passes unless flags `0x800c000100`. It copies `kSkinned` into descriptor bit 1 and `kProjectedUV` into bit 15.
+-   **`Process1`** (`BSCullingProcess::Process1`, `0x140e28390`, the list processes' vtable slot `0x16`): the bound test
+    (`TestBaseVisibility3`, or the compound frustum with portals), then the object's `OnVisible`, and `kAccumulated`
+    (flags bit 26) set on what it passed and cleared on what it culled. `AppendVirtual(geometry, group)` appends
+    straight to `objectArray` (`AppendNonAccum`) when the process is not grouping alphas and the group is -1, and queues
+    it for an alpha group otherwise.
+-   **`NiSwitchNode::OnVisible`** (`0x140d29700`) culls `children[index]` only, with group -1; when
+    `childRevID[index] != revID` it first brings the child up to date (`UpdateDownwardPass`). The fields, at AE's
+    offsets: flags `+0x128`, `index` `+0x12C`, `savedTime` `+0x130`, `revID` `+0x134`, and `childRevID`'s data `+0x140`
+    and capacity `+0x148`. CommonLib's `NiSwitchNode::index` does not read `+0x12C` in this build.
+-   **`BSTreeNode::OnVisible`** (`0x14147d3c0`): when the process's byte `+0x121` and `0x142032fb8` are set and
+    `worldBound.center.z - *0x14332a2f0 > *0x142032fa0`, nothing at all (no update, no recursion). Otherwise
+    `BSLeafAnimNode::OnVisible`, then, when `+0x180`'s `+0x12C` count is positive, `+0x153 = (+0x153 & 0xAF) | 0x20`
+    and `+0x14C = 0`.
 -   DCLF takes its references out of these lists (`drawcall-limit-fix.md`, "The primary's cull without DCLF's objects").
 
 ## The material database: how a material is shared and released

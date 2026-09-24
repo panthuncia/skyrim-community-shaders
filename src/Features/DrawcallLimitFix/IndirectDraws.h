@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -105,6 +106,10 @@ namespace DCLF
 			std::uint32_t decalsDrawn = 0;
 			std::uint32_t decalsCulled = 0;
 			std::uint32_t decalsTested = 0;
+			// The sun's bits on the GPU (kObjectSunTest), sampled with the culling counters: the colour dispatch's
+			// flagged inputs and how many missed every cascade, against the CPU's count over the same inputs and
+			// planes (the same test in C++).
+			std::uint32_t sunTested = 0, sunMissed = 0, sunCpuTested = 0, sunCpuMissed = 0;
 			std::uint32_t boneRows = 0;  // bone palette rows uploaded by the last epoch (current and previous)
 			// What the HZB held under the tested objects: all-near or all-far means the build is wrong.
 			std::uint32_t hzbNear = 0, hzbFar = 0, hzbSampled = 0;
@@ -163,6 +168,32 @@ namespace DCLF
 		 * twice for one frame.
 		 */
 		bool DrewLastFrame(const RE::BSGeometry* a_geometry, std::uint32_t a_frame) const;
+
+		/**
+		 * @brief One frame of the main camera's visibility feedback, decoded: per object in that frame's tables, the
+		 * stamp of the last frame its bound was inside the frustum (BuildDraws' depth phase 1). The object was in view
+		 * in this frame when its word equals `stamp`. The tag is what the consumer attached when the frame was armed.
+		 */
+		struct VisibilityFeedbackFrame
+		{
+			std::uint32_t frame = 0;
+			std::uint32_t stamp = 0;
+			std::uint32_t objects = 0;
+			const std::uint32_t* words = nullptr;
+			std::shared_ptr<void> tag;
+		};
+		/**
+		 * @brief Any one thread at a time (DCLF's worker): hands every feedback frame whose copy the GPU has completed
+		 * to a_consume, in submission order, and frees its slot. Never waits: frames still in flight are left for a
+		 * later call. Returns the number decoded. See dclf-cull-job-elimination.md, "Phase 2".
+		 */
+		std::uint32_t DrainVisibilityFeedback(const std::function<void(const VisibilityFeedbackFrame&)>& a_consume);
+		/** @brief The feedback's counters since the last call: frames armed, dropped (no free slot), abandoned, decoded. */
+		struct FeedbackStats
+		{
+			std::uint64_t armed = 0, dropped = 0, abandoned = 0, decoded = 0;
+		};
+		FeedbackStats TakeFeedbackStats();
 
 		/**
 		 * @brief Publishes what DCLF owns, for the registration hook to withhold.

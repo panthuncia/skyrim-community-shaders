@@ -79,7 +79,15 @@ namespace DCLF
 		// A free object slot (SceneStore's persistent slots): no object at all. It always has kObjectNoBindings and
 		// kObjectNoShadow too, so every loop that skips those skips it; the main build skips it before counting.
 		kObjectFree = 1u << 25,
+		// A synthetic main pass (PrimaryCull) whose pipeline carries the sun's bits (DefShadow, ShadowDir) because
+		// the object may take the sun's shadow: the colour epoch's BuildDraws tests its bound against this frame's
+		// cascades and, on a miss, marks the draw (kObjectSunMiss) so the pixel stage drops the two bits, as
+		// GetRenderPasses would have left them off. Set per frame by the accumulate phase.
+		kObjectSunTest = 1u << 26,
 	};
+
+	/** @brief The high bit of a draw's object-index word: the draw misses every sun cascade (kObjectSunTest). */
+	inline constexpr std::uint32_t kObjectSunMiss = 1u << 31;
 
 	/**
 	 * @brief The shadow epochs' face positions buffer (FaceSnapshots): one float4 per vertex of every face shape

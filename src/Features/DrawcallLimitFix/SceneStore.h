@@ -788,7 +788,8 @@ namespace DCLF
 				sunEntriesDirty.push_back(a_entry);
 		}
 		ankerl::unordered_dense::set<const RE::NiAVObject*> sunCandidateSet;
-		ankerl::unordered_dense::set<const RE::NiAVObject*> primaryEntrySet;  // the sun candidates PrimaryEntryAllows for every geometry
+		// Per sun candidate, a signature of its geometries' PrimaryEntryAllows verdicts: a change bumps the generation.
+		ankerl::unordered_dense::map<const RE::NiAVObject*, std::uint64_t> primarySignature;
 		std::vector<const RE::NiAVObject*> sunEntriesDirty;
 		std::shared_ptr<const SunCandidates> sunCandidates;
 		std::uint32_t sunCandidatesGeneration = 0;

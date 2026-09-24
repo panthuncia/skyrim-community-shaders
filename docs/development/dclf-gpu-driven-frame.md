@@ -19,8 +19,8 @@ Riverwood, DCLF on (about 6,200 table objects, 10,000 tracked geometries):
 
 | Walk | Thread | Per | Cost / status |
 | --- | --- | --- | --- |
-| Main camera cull (`DrawWorld_BuildSceneLists`, list accumulation) | engine jobs; render thread waits at `Finish` | object | DCLF's references out ([drawcall-limit-fix.md](./drawcall-limit-fix.md), "The primary's cull without DCLF's objects"): 1.0 -> 0.67 ms of job CPU, the wait 0.69 -> 0.45 ms; DCLF's stand-in 0.24 ms of render thread |
-| Main camera registration (`GetRenderPasses` per visible object) | engine jobs during the shadow render (`FUN_1414cbff0`) | object | 0.93 -> 0.54 ms of job CPU with the same cut; DCLF builds the left-out objects' passes itself |
+| Main camera cull (`DrawWorld_BuildSceneLists`, list accumulation) | engine jobs; render thread waits at `Finish` | object | DCLF's references out ([drawcall-limit-fix.md](./drawcall-limit-fix.md), "The primary's cull without DCLF's objects"): 1.0 -> 0.80 ms of job CPU (DCLF's stand-in included), the wait 0.69 -> 0.30 ms; DCLF's render-thread share 0.02 ms |
+| Main camera registration (`GetRenderPasses` per visible object) | engine jobs during the shadow render (`FUN_1414cbff0`) | object | 0.93 -> 0.31 ms of job CPU with the same cut; DCLF builds the left-out objects' passes itself, on its worker |
 | Sun: full-frustum cull | jobs, render thread waits | object | 0.04 ms |
 | Sun: `Accumulate` (cascade culls, then registration or mask writes) | render thread | cascade × object | 0.10 ms with the entry exclusion: what is left is the actors and the entries with a native caster (0.59 with M1 alone, 0.69 without) |
 | Point and spot lights: `Accumulate` | render thread (`CalculateActiveShadowCasterLights`) | light × object | not measured (interiors) |

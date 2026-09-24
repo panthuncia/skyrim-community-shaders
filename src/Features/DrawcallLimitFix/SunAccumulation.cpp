@@ -330,6 +330,27 @@ namespace DCLF
 		return false;
 	}
 
+	std::uint32_t SunAccumulation::GpuCascades(std::uint32_t (&a_masks)[4][2], float (&a_planes)[4][12][4]) const
+	{
+		if (!exclusionLive.load(std::memory_order_acquire))
+			return 0;
+		std::uint32_t count = 0;
+		const auto& state = frameState;
+		for (std::uint32_t c = 0; c < state.cascadeCount && c < state.cascades.size() && count < 4; ++c) {
+			const auto& cascade = state.cascades[c];
+			if (!cascade.captured)
+				continue;
+			for (std::uint32_t p = 0; p < 6; ++p) {
+				std::memcpy(a_planes[count][p], cascade.planes[p].data(), sizeof(float) * 4);
+				std::memcpy(a_planes[count][6 + p], cascade.customPlanes[p].data(), sizeof(float) * 4);
+			}
+			a_masks[count][0] = cascade.planeMask;
+			a_masks[count][1] = cascade.customMask;
+			++count;
+		}
+		return count;
+	}
+
 	std::uint32_t SunAccumulation::RemovedGeometryIndex(const RE::BSGeometry* a_geometry) const
 	{
 		const auto* exclusion = frameState.exclusion.get();

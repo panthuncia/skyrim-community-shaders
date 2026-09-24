@@ -344,6 +344,7 @@ void DrawcallLimitFix::Reset()
 	const auto start = std::chrono::steady_clock::now();
 	// A worker job the frame never joined must not cross into the next frame's tables.
 	DCLF::SceneStore::Get().JoinScenePhase();
+	DCLF::PrimaryCull::Get().EndFrame();
 	DCLF::IndirectDraws::Get().EndFrame();
 	DCLF::SceneStore::Get().ProcessEvents();
 	timing.eventsMs += MillisecondsSince(start);
@@ -1152,6 +1153,10 @@ void DrawcallLimitFix::Prepass()
 		if (stats.decals[0] || stats.decals[1] || draws.decalsDrawn)
 			logger::info("[DCLF] decals (last frame): {} candidates ({} in the opaque group, {} in the blended group), {} submitted to the second pass, {} of {} tested were culled",
 				stats.decals[0] + stats.decals[1], stats.decals[0], stats.decals[1], draws.decalsDrawn, draws.decalsCulled, draws.decalsTested);
+		if (draws.sunTested || draws.sunCpuTested)
+			logger::info("[DCLF] sun on the GPU (sampled frame): {} synthetic draws tested, {} missed every cascade; the CPU over the same inputs: {} tested, {} missed{}",
+				draws.sunTested, draws.sunMissed, draws.sunCpuTested, draws.sunCpuMissed,
+				(draws.sunTested == draws.sunCpuTested && draws.sunMissed == draws.sunCpuMissed) ? " <- OK" : " <- DIFFERS");
 		if (DCLF::IndirectDraws::Hybrid())
 			logger::info("[DCLF] hybrid (last frame): {} of {} native passes left to the indirect draws ({} in the depth pass, {} in the opaque pass)",
 				skipStats.skipped, skipStats.offered, skipStats.skippedInDepth, skipStats.skippedInOpaque);
