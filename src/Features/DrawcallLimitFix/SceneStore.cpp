@@ -23,6 +23,7 @@
 #include "Features/ExtendedTranslucency.h"
 #include "Features/LightLimitFix.h"
 #include "Features/Skin.h"
+#include "Features/Skylighting.h"
 #include "State.h"
 #include "Utils/ExternalEmittance.h"
 
@@ -345,6 +346,7 @@ namespace DCLF
 					 differs("draws", a.draws, b.draws) || differs("skin partitions", a.skinPartitions, b.skinPartitions) || differs("bones", a.bones, b.bones) || differs("previous bones", a.previousBones, b.previousBones) ||
 					 differs("bone offsets", a.boneOffset, b.boneOffset) || differs("bone rows", a.boneRows, b.boneRows) ||
 					 differs("shadow techniques", a.shadowTechnique, b.shadowTechnique) || differs("shadow rejects", a.shadowReject, b.shadowReject) ||
+					 differs("sky techniques", a.skyTechnique, b.skyTechnique) || differs("sky keys", a.skyKeysUsed, b.skyKeysUsed) ||
 					 differs("sun entries", a.sunEntry, b.sunEntry) || differs("face streams", a.faceStream, b.faceStream) ||
 					 differs("shadow diffuse", a.shadowDiffuse, b.shadowDiffuse) || differs("shadow materials", a.shadowMaterial, b.shadowMaterial) || differs("shadow keys", a.shadowKeysUsed, b.shadowKeysUsed) ||
 					 differs("shadow textures", a.shadowTextureSet, b.shadowTextureSet) || differs("extra offsets", a.extraOffset, b.extraOffset) ||
@@ -380,6 +382,7 @@ namespace DCLF
 		extraOffset.resize(a_count, kNoExtraRows);
 		shadowTechnique.resize(a_count, 0);
 		shadowReject.resize(a_count, 0);
+		skyTechnique.resize(a_count, 0);
 		sunEntry.resize(a_count, std::array<float, 4>{});
 		faceStream.resize(a_count, kNoFaceStream);
 		shadowDiffuse.resize(a_count, nullptr);
@@ -404,6 +407,7 @@ namespace DCLF
 		extraOffset[a_slot] = kNoExtraRows;
 		shadowTechnique[a_slot] = 0;
 		shadowReject[a_slot] = 0;
+		skyTechnique[a_slot] = 0;
 		sunEntry[a_slot] = {};
 		faceStream[a_slot] = kNoFaceStream;
 		shadowDiffuse[a_slot] = nullptr;
@@ -429,6 +433,7 @@ namespace DCLF
 			extraOffset.clear();
 			shadowTechnique.clear();
 			shadowReject.clear();
+			skyTechnique.clear();
 			sunEntry.clear();
 			faceStream.clear();
 			shadowDiffuse.clear();
@@ -449,6 +454,7 @@ namespace DCLF
 		shadowTextureSet.clear();
 		shadowTextureSeen.clear();
 		shadowKeysUsed.clear();
+		skyKeysUsed.clear();
 	}
 
 	void SceneStore::Tables::Clear()
@@ -491,6 +497,7 @@ namespace DCLF
 		extraOffset.clear();
 		shadowTechnique.clear();
 		shadowReject.clear();
+		skyTechnique.clear();
 		sunEntry.clear();
 		faceStreams.clear();
 		faceStream.clear();
@@ -499,6 +506,7 @@ namespace DCLF
 		shadowTextureSet.clear();
 		shadowTextureSeen.clear();
 		shadowKeysUsed.clear();
+		skyKeysUsed.clear();
 		objectSeen.clear();
 		sceneFlags.clear();
 		objectFree.clear();
@@ -2527,6 +2535,28 @@ namespace DCLF
 			tables.shadowTechnique[objectId] = 0;
 		}
 		tables.shadowReject[objectId] = static_cast<std::uint8_t>(shadowReject);
+		// Skylighting's occlusion map, when DCLF draws it: whether and how this object draws into it.
+		std::uint32_t skyTechnique = 0;
+		if (SkyOcclusionEnabled())
+			if (const auto* lighting = netimmerse_cast<const RE::BSLightingShaderProperty*>(shadowProperty))
+				skyTechnique = Skylighting::OcclusionTechnique(lighting, geometry, true);
+		tables.skyTechnique[objectId] = skyTechnique;
+		if (skyTechnique) {
+			if ((skyTechnique & 0x80) && !shadowMaterial) {
+				if (const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(shadowProperty->material)) {
+					shadowMaterial = material;
+					auto* texture = material->diffuseTexture ? material->diffuseTexture->rendererTexture : nullptr;
+					shadowDiffuse = texture ? texture->resourceView : nullptr;
+					if (shadowDiffuse && tables.shadowTextureSeen.insert(shadowDiffuse).second)
+						tables.shadowTextureSet.push_back(shadowDiffuse);
+				}
+			}
+			const ShadowPipelineKey skyKey{ skyTechnique,
+				shadowProperty->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kTwoSided) ? kRasterTwoSided : 0u,
+				VertexLayoutOf(tables.geometries[geometrySlot].vertexDesc) };
+			if (std::find(tables.skyKeysUsed.begin(), tables.skyKeysUsed.end(), skyKey) == tables.skyKeysUsed.end())
+				tables.skyKeysUsed.push_back(skyKey);
+		}
 		tables.sunEntry[objectId] = SunEntryOf(*trackedEntry, *geometry);
 		tables.faceStream[objectId] = face.positions ? static_cast<std::uint32_t>(tables.faceStreams.size()) : kNoFaceStream;
 		if (face.positions)
@@ -3821,7 +3851,7 @@ namespace DCLF
 			return {};
 		const auto& object = tables.objects[a_slot];
 		return { tables.shadowDiffuse[a_slot], object.geometryIndex < tables.geometries.size() ? tables.geometries[object.geometryIndex].vertexDesc : 0,
-			tables.shadowTechnique[a_slot], object.flags & (kObjectNoShadow | kObjectTwoSided | kObjectFree), tables.shadowReject[a_slot] };
+			tables.shadowTechnique[a_slot], object.flags & (kObjectNoShadow | kObjectTwoSided | kObjectFree), tables.shadowReject[a_slot], tables.skyTechnique[a_slot] };
 	}
 
 	bool SceneStore::AppendKeptSkin(RE::BSGeometry* a_geometry, Tracked& a_tracked)
@@ -3974,6 +4004,11 @@ namespace DCLF
 				rootMotion.erase(a_tracked.listedRoot);
 			a_tracked.listedRoot = nullptr;
 		}
+	}
+
+	bool SceneStore::SkyOcclusionEnabled()
+	{
+		return Toggles::Get().Active().skyOcclusion && globals::features::skylighting.loaded;
 	}
 
 	void SceneStore::DropSunCandidates()
@@ -4357,6 +4392,7 @@ namespace DCLF
 		auto keptTextureSet = std::move(tables.shadowTextureSet);
 		auto keptTextureSeen = std::move(tables.shadowTextureSeen);
 		auto keptKeys = std::move(tables.shadowKeysUsed);
+		auto keptSkyKeys = std::move(tables.skyKeysUsed);
 		shadowSetsDirty = full || shadowSetsDirty;
 		BeginWalk(!full);
 		PartTimer timer(stats.partMs);
@@ -4451,6 +4487,7 @@ namespace DCLF
 			tables.shadowTextureSet = std::move(keptTextureSet);
 			tables.shadowTextureSeen = std::move(keptTextureSeen);
 			tables.shadowKeysUsed = std::move(keptKeys);
+			tables.skyKeysUsed = std::move(keptSkyKeys);
 		}
 		FinishDeltaWalk(timer, result);
 		if (full)
@@ -4532,6 +4569,7 @@ namespace DCLF
 		tables.shadowTextureSet.clear();
 		tables.shadowTextureSeen.clear();
 		tables.shadowKeysUsed.clear();
+		tables.skyKeysUsed.clear();
 		stats.shadowCasters = 0;
 		stats.shadowRejects = {};
 		for (std::uint32_t s = 0; s < tables.objects.size(); ++s) {
@@ -4539,6 +4577,13 @@ namespace DCLF
 			if (object.flags & kObjectFree)
 				continue;
 			++stats.shadowRejects[tables.shadowReject[s] < stats.shadowRejects.size() ? tables.shadowReject[s] : 0];
+			if (const auto sky = tables.skyTechnique[s]) {
+				if (auto* diffuse = tables.shadowDiffuse[s]; diffuse && tables.shadowTextureSeen.insert(diffuse).second)
+					tables.shadowTextureSet.push_back(diffuse);
+				const ShadowPipelineKey key{ sky, (object.flags & kObjectTwoSided) ? kRasterTwoSided : 0u, VertexLayoutOf(tables.geometries[object.geometryIndex].vertexDesc) };
+				if (std::find(tables.skyKeysUsed.begin(), tables.skyKeysUsed.end(), key) == tables.skyKeysUsed.end())
+					tables.skyKeysUsed.push_back(key);
+			}
 			if (object.flags & kObjectNoShadow)
 				continue;
 			++stats.shadowCasters;

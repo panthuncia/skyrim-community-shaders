@@ -12,6 +12,10 @@
 #include "DrawcallLimitFix/DrawPipelines.h"
 #include "DrawcallLimitFix/FaceSnapshots.h"
 #include "DrawcallLimitFix/SunAccumulation.h"
+#include "Features/Skylighting.h"
+
+#include <filesystem>
+#include <fstream>
 #include "DrawcallLimitFix/GpuResources.h"
 #include "DrawcallLimitFix/GpuTextures.h"
 #include "DrawcallLimitFix/IndirectDraws.h"
@@ -796,8 +800,172 @@ namespace
 	}
 }
 
+namespace
+{
+	/** @brief CS_DCLF_SKYLIGHT_PARITY: the two renders of one map, kept and compared once readable. */
+	struct SkyParity
+	{
+		std::array<winrt::com_ptr<ID3D11Texture2D>, 2> staging;
+		D3D11_TEXTURE2D_DESC desc{};
+		std::uint32_t framesLeft = 0;
+		bool pending = false;
+		bool diagnose = false;  // the next DCLF map lists what it draws that the engine did not register
+	};
+	SkyParity skyParity;
+	std::uint32_t skyNativeFrames = 0;  // Skylighting maps left to the engine (DCLF not ready), per report interval
+
+	bool SkyParityEnabled()
+	{
+		static const bool enabled = DCLF::SwitchEnabled("CS_DCLF_SKYLIGHT_PARITY");
+		return enabled;
+	}
+
+	void CompareSkyParity()
+	{
+		auto& parity = skyParity;
+		if (!parity.pending || --parity.framesLeft)
+			return;
+		parity.pending = false;
+		auto* context = globals::d3d::context;
+		std::array<D3D11_MAPPED_SUBRESOURCE, 2> mapped{};
+		if (FAILED(context->Map(parity.staging[0].get(), 0, D3D11_MAP_READ, 0, &mapped[0])))
+			return;
+		if (FAILED(context->Map(parity.staging[1].get(), 0, D3D11_MAP_READ, 0, &mapped[1]))) {
+			context->Unmap(parity.staging[0].get(), 0);
+			return;
+		}
+		// Depth as the texture holds it: 16-bit UNORM (the engine's D16 maps), else the top 24 of 32 bits, else a float.
+		const auto format = parity.desc.Format;
+		const bool unorm16 = format == DXGI_FORMAT_R16_TYPELESS || format == DXGI_FORMAT_D16_UNORM || format == DXGI_FORMAT_R16_UNORM;
+		const bool float32 = format == DXGI_FORMAT_R32_TYPELESS || format == DXGI_FORMAT_D32_FLOAT || format == DXGI_FORMAT_R32_FLOAT;
+		auto depthAt = [&](std::uint32_t a_image, std::uint32_t x, std::uint32_t y) {
+			const auto* row = static_cast<const std::uint8_t*>(mapped[a_image].pData) + std::size_t(y) * mapped[a_image].RowPitch;
+			if (unorm16)
+				return reinterpret_cast<const std::uint16_t*>(row)[x] / 65535.0;
+			const std::uint32_t word = reinterpret_cast<const std::uint32_t*>(row)[x];
+			if (float32)
+				return static_cast<double>(std::bit_cast<float>(word));
+			return (word & 0xFFFFFF) / 16777215.0;
+		};
+		std::uint64_t texels = 0, equal = 0, dclfFarther = 0, dclfNearer = 0, engineFar = 0, dclfFar = 0, bigDiff = 0;
+		double maxDiff = 0.0, sumDiff = 0.0;
+		for (std::uint32_t y = 0; y < parity.desc.Height; ++y)
+			for (std::uint32_t x = 0; x < parity.desc.Width; ++x) {
+				const double engine = depthAt(0, x, y), dclf = depthAt(1, x, y);
+				++texels;
+				engineFar += engine >= 1.0 ? 1 : 0;
+				dclfFar += dclf >= 1.0 ? 1 : 0;
+				const double diff = std::abs(engine - dclf);
+				if (diff == 0.0) {
+					++equal;
+					continue;
+				}
+				(dclf > engine ? dclfFarther : dclfNearer) += 1;
+				bigDiff += diff > 1.0 / 256.0 ? 1 : 0;
+				sumDiff += diff;
+				maxDiff = std::max(maxDiff, diff);
+			}
+		// Which occluders the differing texels fall under: ranked by the texels in their footprint DCLF drew nearer.
+		{
+			auto& footprints = DCLF::IndirectDraws::Get().skyFootprints;
+			std::vector<std::pair<std::uint64_t, std::string>> ranked;
+			for (const auto& f : footprints) {
+				std::uint64_t nearer = 0, inside = 0;
+				for (std::int32_t y = std::max(f.y0, 0); y <= std::min<std::int32_t>(f.y1, parity.desc.Height - 1); ++y)
+					for (std::int32_t x = std::max(f.x0, 0); x <= std::min<std::int32_t>(f.x1, parity.desc.Width - 1); ++x) {
+						++inside;
+						nearer += depthAt(0, x, y) - depthAt(1, x, y) > 1.0 / 256.0 ? 1 : 0;
+					}
+				if (nearer)
+					ranked.emplace_back(nearer, fmt::format("{} texels of {} in ({} {})-({} {}): {}", nearer, inside, f.x0, f.y0, f.x1, f.y1, f.label));
+			}
+			std::sort(ranked.rbegin(), ranked.rend());
+			for (std::size_t i = 0; i < ranked.size() && i < 12; ++i)
+				logger::info("[DCLF][TEMP]   nearer under {}", ranked[i].second);
+			footprints.clear();
+		}
+		// A map that differs over more than 5% of its texels: both written out (16-bit PGM, the depth scaled to 0..65535).
+		if (bigDiff * 20 > texels) {
+			static std::uint32_t dumps = 0;
+			if (dumps < 4) {
+				const auto directory = std::filesystem::path(DCLF::SwitchValue("CS_DCLF_SKYLIGHT_DUMP_DIR").empty() ? "." : DCLF::SwitchValue("CS_DCLF_SKYLIGHT_DUMP_DIR"));
+				for (std::uint32_t image = 0; image < 2; ++image) {
+					std::ofstream out(directory / fmt::format("sky-parity-{}-{}.pgm", dumps, image ? "dclf" : "engine"), std::ios::binary);
+					out << "P5\n" << parity.desc.Width << " " << parity.desc.Height << "\n65535\n";
+					for (std::uint32_t y = 0; y < parity.desc.Height; ++y)
+						for (std::uint32_t x = 0; x < parity.desc.Width; ++x) {
+							const auto value = static_cast<std::uint16_t>(std::clamp(depthAt(image, x, y), 0.0, 1.0) * 65535.0);
+							const char bytes[2] = { static_cast<char>(value >> 8), static_cast<char>(value & 0xFF) };
+							out.write(bytes, 2);
+						}
+				}
+				logger::info("[DCLF][TEMP] Skylighting occlusion parity: map {} written to {}", dumps, directory.string());
+				++dumps;
+			}
+		}
+		context->Unmap(parity.staging[0].get(), 0);
+		context->Unmap(parity.staging[1].get(), 0);
+		logger::info("[DCLF][TEMP] Skylighting occlusion parity: {}x{} format {}: {} texels equal of {}, DCLF farther {} nearer {} ({} by more than 1/256), max diff {:.6f}, mean diff {:.6f}; clear texels engine {} DCLF {}",
+			parity.desc.Width, parity.desc.Height, static_cast<std::uint32_t>(format), equal, texels, dclfFarther, dclfNearer, bigDiff, maxDiff,
+			texels - equal ? sumDiff / double(texels - equal) : 0.0, engineFar, dclfFar);
+	}
+}
+
+bool DrawcallLimitFix::SkyOcclusionReady()
+{
+	if (!Running() || !DCLF::SceneStore::SkyOcclusionEnabled())
+		return false;
+	const bool ready = DCLF::IndirectDraws::Get().SkyOcclusionReady();
+	skyNativeFrames += ready ? 0 : 1;
+	return ready;
+}
+
+void DrawcallLimitFix::DrawSkyOcclusion()
+{
+	DCLF::IndirectDraws::Get().ExecuteSkyOcclusion(std::exchange(skyParity.diagnose, false));
+}
+
+bool DrawcallLimitFix::SkyOcclusionParityFrame()
+{
+	static std::uint32_t frames = 0;
+	if (!SkyParityEnabled() || skyParity.pending || (frames++ % 120) != 60)
+		return false;
+	(void)DCLF::SunAccumulation::Get().TakeSkyRegistrations();  // this map's registrations only
+	return true;
+}
+
+void DrawcallLimitFix::CopySkyOcclusion(std::uint32_t a_stage)
+{
+	auto* texture = globals::features::skylighting.texOcclusion ? globals::features::skylighting.texOcclusion->resource.get() : nullptr;
+	if (!texture || a_stage > 1)
+		return;
+	auto& parity = skyParity;
+	if (a_stage == 0) {
+		texture->GetDesc(&parity.desc);
+		D3D11_TEXTURE2D_DESC desc = parity.desc;
+		desc.Usage = D3D11_USAGE_STAGING;
+		desc.BindFlags = 0;
+		desc.MiscFlags = 0;
+		desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		for (auto& staging : parity.staging) {
+			staging = nullptr;
+			if (FAILED(globals::d3d::device->CreateTexture2D(&desc, nullptr, staging.put())))
+				return;
+		}
+	}
+	if (!parity.staging[a_stage])
+		return;
+	parity.diagnose = a_stage == 0;
+	globals::d3d::context->CopyResource(parity.staging[a_stage].get(), texture);
+	if (a_stage == 1) {
+		parity.pending = true;
+		parity.framesLeft = 4;
+	}
+}
+
 void DrawcallLimitFix::Prepass()
 {
+	CompareSkyParity();
 	ProbeShadowMask(Running());
 	ProbeShadowMaps(Running());
 	if (DCLF::VolumetricProbe::Enabled())
@@ -965,6 +1133,10 @@ void DrawcallLimitFix::Prepass()
 					captured.shadowWithheld[0], captured.shadowWithheld[1], captured.shadowWithheld[2], captured.volumetricWithheld, captured.directWithheld, shadow.claimed[0], shadow.claimed[1],
 					shadow.claimed[2], shadow.faceUploads, shadow.notReady, shadow.notReady ? " <- HOLES" : "");
 			}
+			if (shadow.skyDrawn || shadow.skyNotReady || skyNativeFrames)
+				logger::info("[DCLF] Skylighting occlusion: DCLF drew {} maps ({} occluders, last), {} it could not draw, {} left to the engine; render thread {:.3f} ms per map",
+					shadow.skyDrawn, shadow.skyInputs, shadow.skyNotReady, skyNativeFrames, shadow.skyDrawn ? shadow.skyMs / shadow.skyDrawn : 0.0);
+			skyNativeFrames = 0;
 			DCLF::IndirectDraws::Get().ResetShadowStats();
 		}
 		if (stats.projectedUV || stats.landBlend)
@@ -1286,31 +1458,18 @@ void DrawcallLimitFix::Hooks::BSShaderAccumulator_FinishAccumulating::thunk(RE::
 			}
 		}
 	}
-	// [TEMP] CS_DCLF_OCCLUSION_PROBE: every RenderDepth (0xC) view the engine finishes - which accumulator, target,
-	// viewport and camera - to find the precipitation and Skylighting occlusion views.
-	if (static const bool occlusionProbe = DCLF::SwitchEnabled("CS_DCLF_OCCLUSION_PROBE"); occlusionProbe) {
-		static std::uint32_t calls = 0;
-		const auto probeMode = static_cast<std::uint32_t>(a_accumulator->GetRuntimeData().renderMode);
-		auto* sky = globals::game::sky;
-		auto* precip = sky ? sky->precip : nullptr;
-		const bool isPrecip = precip && precip->occlusionData.accumulator.get() == reinterpret_cast<RE::BSShaderAccumulator*>(a_accumulator);
-		if (isPrecip && ((calls++ % 900) < 3)) {
-			auto& shadow = globals::game::shadowState->GetRuntimeData();
-			const auto& vp = shadow.viewPort;
-			const auto cameraData = shadow.cameraData.getEye();
-			float m[16];
-			std::memcpy(m, &cameraData.viewProjMat, sizeof(m));
-			logger::info("[DCLF][TEMP] occlusion probe: mode {:#x} accumulator {} (precipitation's: {}), flags {:#x}, target {} slice {}, viewport ({} {}) {}x{} depth [{} {}], "
-						 "posAdjust ({:.0f} {:.0f} {:.0f}), viewProj row0 ({:.5f} {:.5f} {:.5f} {:.5f}) row2 ({:.5f} {:.5f} {:.5f} {:.5f}), batch {}",
-				probeMode, fmt::ptr(a_accumulator), isPrecip, a_renderFlags, static_cast<std::uint32_t>(shadow.depthStencil), shadow.depthStencilSlice, vp.TopLeftX, vp.TopLeftY,
-				vp.Width, vp.Height, vp.MinDepth, vp.MaxDepth, shadow.posAdjust.getEye().x, shadow.posAdjust.getEye().y, shadow.posAdjust.getEye().z,
-				m[0], m[1], m[2], m[3], m[8], m[9], m[10], m[11],
-				fmt::ptr(a_accumulator->GetRuntimeData().batchRenderer));
-		}
-	}
 	if (!globals::features::drawcallLimitFix.Running())
 		return;
 	const auto mode = static_cast<std::uint32_t>(a_accumulator->GetRuntimeData().renderMode);
+	// Skylighting's occlusion map (render mode 0x1C, the precipitation accumulator while Skylighting draws its own map).
+	if (mode == 0x1C) {
+		auto* sky = globals::game::sky;
+		auto* precip = sky ? sky->precip : nullptr;
+		if (globals::features::skylighting.inOcclusion && precip &&
+			precip->occlusionData.accumulator.get() == reinterpret_cast<RE::BSShaderAccumulator*>(a_accumulator))
+			DCLF::IndirectDraws::Get().CaptureSkyOcclusion();
+		return;
+	}
 	if (mode < 0xD || mode > 0xF)
 		return;  // shadow-map modes only: plain, clamped, paraboloid (engine notes: shadow maps)
 	const auto view = DCLF::ShadowViews::Get().ViewOfAccumulator(a_accumulator);
@@ -1705,6 +1864,9 @@ void DrawcallLimitFix::DrawSettings()
 			ImGui::Text("The sun's cascade culls skip every reference whose shadows DCLF draws entirely; DCLF sets those objects' sun shadow bits for the main pass.");
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
+		ImGui::Checkbox("Draw Skylighting's occlusion map (CS_DCLF_SKYLIGHT)", &toggles.skyOcclusion);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("With Skylighting loaded, DCLF draws its sky occlusion height map from its own tables on the GPU, and the engine no longer culls or registers the scene for it.");
 		ImGui::EndDisabled();
 		ImGui::SeparatorText("Diagnostics");
 		ImGui::Checkbox("Debug view: show DCLF's targets (CS_DCLF_DEBUG_VIEW)", &toggles.debugView);

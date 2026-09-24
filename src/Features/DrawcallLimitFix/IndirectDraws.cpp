@@ -71,7 +71,13 @@ namespace DCLF
 		// The views one frame's shadow epoch can hold: the exterior has four (two cascades, twice); an
 		// interior with several shadow-casting point lights has two hemispheres per light.
 		constexpr std::uint32_t kMaxShadowViews = 16;
-		constexpr std::uint32_t kShadowModeCount = 3;  // render modes 0xD plain, 0xE clamped, 0xF paraboloid
+		// Render modes 0xD plain, 0xE clamped, 0xF paraboloid, and kSkyMode: Skylighting's occlusion map (render mode 0x1C),
+		// whose occluders the frame's shadow build lists too and whose own epoch draws them (ExecuteSkyOcclusion).
+		constexpr std::uint32_t kShadowModeCount = 4;
+		constexpr std::uint32_t kSkyMode = 3;
+		constexpr std::uint32_t kSkyRenderMode = 0x1C;
+		// The view slot Skylighting's occlusion map draws through; the shadow views take the others.
+		constexpr std::uint32_t kSkySlot = kMaxShadowViews - 1;
 		// Key slots a shadow epoch can name (Lookups::shadowSlotKeys): one per caster key and render mode.
 		constexpr std::uint32_t kMaxShadowSlots = 1024;
 		constexpr std::uint64_t kShadowConstantBytes = 1ull << 20;
@@ -87,7 +93,9 @@ namespace DCLF
 		// registered with accumulation hint 8, which are the volumetric-only casters
 		// (ShadowReject::VolumetricOnly). DCLF's views of it draw those casters alone (kCullVolumetricOnly).
 		// See ExecuteShadowView.
-		constexpr std::uint32_t kShadowDepthTargets = 3;
+		// [3] depth target 10 as Skylighting swaps it in: its own occlusion map (ExecuteSkyOcclusion).
+		constexpr std::uint32_t kShadowDepthTargets = 4;
+		constexpr std::uint32_t kSkyDepthTarget = 3;
 		constexpr std::uint32_t kMaxDraws = 16384;
 		constexpr std::uint64_t kConstantBytes = 48ull << 20;
 		constexpr std::uint64_t kConstantAlignment = 256;  // uniform buffer address alignment (conservative)
@@ -1401,6 +1409,9 @@ namespace DCLF
 			std::array<std::uint32_t, kShadowDepthTargets> depthLayers{};
 			std::atomic<std::shared_ptr<const ShadowFrame>> frame;
 			std::shared_ptr<const ShadowFrame> published;  // survives a frame without views
+			// Skylighting's occlusion map: its own epoch's one view (ExecuteSkyOcclusion).
+			std::atomic<std::shared_ptr<const ShadowFrame>> skyFrame;
+			std::shared_ptr<const ShadowFrame> skyPublished;
 			std::uint64_t shapeGenerations = 0;
 			// Per frame slot, one BuildDrawsLatch per view slot.
 			std::shared_ptr<org::LatchBlock> latch;
@@ -1415,11 +1426,12 @@ namespace DCLF
 
 		// With epochs these passes run only in the shadow epoch; without, every epoch runs them and they are
 		// empty outside it.
-		std::shared_ptr<const ShadowFrame> CurrentShadowFrame(const ShadowResources& a_resources)
+		std::shared_ptr<const ShadowFrame> CurrentShadowFrame(const ShadowResources& a_resources, bool a_sky)
 		{
-			if (!RenderGraphRuntime::EpochsEnabled() && RenderGraphRuntime::Get().CurrentSegment() != RenderGraphRuntime::Segment::ShadowView)
+			const auto segment = a_sky ? RenderGraphRuntime::Segment::SkyOcclusion : RenderGraphRuntime::Segment::ShadowView;
+			if (!RenderGraphRuntime::EpochsEnabled() && RenderGraphRuntime::Get().CurrentSegment() != segment)
 				return nullptr;
-			return a_resources.frame.load(std::memory_order_acquire);
+			return (a_sky ? a_resources.skyFrame : a_resources.frame).load(std::memory_order_acquire);
 		}
 
 		struct ShadowBuildBindings
@@ -1446,8 +1458,8 @@ namespace DCLF
 		class ShadowBuildDrawsPass final : public org::TypedRenderGraphPass<ShadowBuildDrawsPass, ShadowBuildPrepared, ShadowBuildBindings>
 		{
 		public:
-			explicit ShadowBuildDrawsPass(std::shared_ptr<ShadowResources> a_resources) :
-				resources(std::move(a_resources)) {}
+			ShadowBuildDrawsPass(std::shared_ptr<ShadowResources> a_resources, bool a_sky) :
+				resources(std::move(a_resources)), sky(a_sky) {}
 
 			ShadowBuildBindings Declare(org::PassBuilder& a_builder)
 			{
@@ -1466,14 +1478,14 @@ namespace DCLF
 
 			void InvocationRevision(const org::PassPrepareContext&, std::vector<std::uint64_t>& a_out) const
 			{
-				const auto frame = CurrentShadowFrame(*resources);
+				const auto frame = CurrentShadowFrame(*resources, sky);
 				a_out.push_back(frame ? frame->generation : 0);
 			}
 
 			ShadowBuildPrepared Prepare(const ShadowBuildBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
 			{
 				ShadowBuildPrepared prepared{};
-				const auto frame = CurrentShadowFrame(*resources);
+				const auto frame = CurrentShadowFrame(*resources, sky);
 				if (!frame || frame->views.empty() || !resources->buildDraws || !resources->latch || !resources->dispatchSignature)
 					return prepared;
 				prepared.program = resources->buildDraws;
@@ -1517,6 +1529,7 @@ namespace DCLF
 
 		private:
 			std::shared_ptr<ShadowResources> resources;
+			bool sky = false;
 		};
 
 		struct ShadowPassBindings
@@ -1529,6 +1542,7 @@ namespace DCLF
 		struct ShadowPrepared
 		{
 			std::shared_ptr<const ShadowFrame> frame;
+			bool sky = false;
 			struct View
 			{
 				std::uint32_t index = 0;  // into frame->views
@@ -1541,15 +1555,16 @@ namespace DCLF
 		class ShadowViewPass final : public org::TypedRenderGraphPass<ShadowViewPass, ShadowPrepared, ShadowPassBindings>
 		{
 		public:
-			explicit ShadowViewPass(std::shared_ptr<ShadowResources> a_resources) :
-				resources(std::move(a_resources)) {}
+			ShadowViewPass(std::shared_ptr<ShadowResources> a_resources, bool a_sky) :
+				resources(std::move(a_resources)), sky(a_sky) {}
 
 			ShadowPassBindings Declare(org::PassBuilder& a_builder)
 			{
 				a_builder.PreferQueue(org::QueueKind::Graphics);
 				ShadowPassBindings bindings{};
+				// The shadow views draw into the shadow maps, Skylighting's epoch into its occlusion map alone.
 				for (std::uint32_t i = 0; i < kShadowDepthTargets; ++i) {
-					if (resources->depth[i])
+					if (resources->depth[i] && (i == kSkyDepthTarget) == sky)
 						bindings.depth[i] = a_builder.BindDepthReadWrite(resources->depth[i]);
 				}
 				for (std::uint32_t s = 0; s < kMaxShadowViews; ++s) {
@@ -1568,19 +1583,20 @@ namespace DCLF
 
 			void InvocationRevision(const org::PassPrepareContext&, std::vector<std::uint64_t>& a_out) const
 			{
-				const auto frame = CurrentShadowFrame(*resources);
+				const auto frame = CurrentShadowFrame(*resources, sky);
 				a_out.push_back(frame ? frame->generation : 0);
 			}
 
 			ShadowPrepared Prepare(const ShadowPassBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
 			{
 				ShadowPrepared prepared{};
-				auto frame = CurrentShadowFrame(*resources);
+				auto frame = CurrentShadowFrame(*resources, sky);
 				if (!frame || frame->views.empty() || !frame->indirect.valid)
 					return prepared;
 				for (std::uint32_t i = 0; i < frame->views.size(); ++i) {
 					const auto& view = frame->views[i];
-					if (!view.capacity || view.slot >= kMaxShadowViews || view.target >= kShadowDepthTargets || !resources->depth[view.target])
+					if (!view.capacity || view.slot >= kMaxShadowViews || view.target >= kShadowDepthTargets || !resources->depth[view.target] ||
+						(view.target == kSkyDepthTarget) != sky)
 						continue;
 					if (view.slice >= resources->depthLayers[view.target])
 						continue;
@@ -1591,6 +1607,7 @@ namespace DCLF
 				}
 				if (!prepared.views.empty())
 					prepared.frame = std::move(frame);
+				prepared.sky = sky;
 				return prepared;
 			}
 
@@ -1618,7 +1635,7 @@ namespace DCLF
 					depth.stencilLoad = rhi::LoadOp::Load;
 					depth.stencilStore = rhi::StoreOp::Store;
 					begin.depth = &depth;
-					begin.debugName = "DCLF shadow view";
+					begin.debugName = a_prepared.sky ? "DCLF Skylighting occlusion" : "DCLF shadow view";
 					commands.BeginPass(begin);
 					commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
 					commands.BindLayout(frame.indirect.layout);
@@ -1630,6 +1647,7 @@ namespace DCLF
 
 		private:
 			std::shared_ptr<ShadowResources> resources;
+			bool sky = false;
 		};
 
 		class ShadowExtension final : public org::RenderGraph::IRenderGraphExtension
@@ -1663,12 +1681,21 @@ namespace DCLF
 			{
 				const auto epoch = RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::ShadowView);
 				a_out.push_back(org::RenderGraph::ExternalPassDesc::Compute("cs.dclf.shadow.build-draws",
-					std::static_pointer_cast<org::RenderPass>(std::make_shared<ShadowBuildDrawsPass>(resources)))
+					std::static_pointer_cast<org::RenderPass>(std::make_shared<ShadowBuildDrawsPass>(resources, false)))
 						.PreferQueue(org::QueueKind::Graphics)
 						.Epoch(epoch));
 				a_out.push_back(org::RenderGraph::ExternalPassDesc::Render("cs.dclf.shadow.view",
-					std::static_pointer_cast<org::RenderPass>(std::make_shared<ShadowViewPass>(resources)))
+					std::static_pointer_cast<org::RenderPass>(std::make_shared<ShadowViewPass>(resources, false)))
 						.Epoch(epoch));
+				// Skylighting's occlusion map: the same passes over its one view, in its own epoch after RenderMask.
+				const auto skyEpoch = RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::SkyOcclusion);
+				a_out.push_back(org::RenderGraph::ExternalPassDesc::Compute("cs.dclf.sky.build-draws",
+					std::static_pointer_cast<org::RenderPass>(std::make_shared<ShadowBuildDrawsPass>(resources, true)))
+						.PreferQueue(org::QueueKind::Graphics)
+						.Epoch(skyEpoch));
+				a_out.push_back(org::RenderGraph::ExternalPassDesc::Render("cs.dclf.sky.view",
+					std::static_pointer_cast<org::RenderPass>(std::make_shared<ShadowViewPass>(resources, true)))
+						.Epoch(skyEpoch));
 			}
 
 		private:
@@ -2093,6 +2120,8 @@ namespace DCLF
 			std::vector<GeometryDraw> geometries;
 			std::vector<SceneStore::Tables::FaceStream> faceStreams;  // the tables', for the commit's uploads
 			std::uint32_t skippedTexture = 0, skippedPipeline = 0, deferredTextures = 0, deferredPipelines = 0;
+			// Occluders of Skylighting's map left out (no record, no pipeline yet): the map is then the engine's this frame.
+			std::uint32_t skySkipped = 0;
 			// The worker's build stages its uploads itself (StageShadowPayload): everything but the arena's view
 			// head, and the records of the first stagedSlots view slots. For the resources it was staged against.
 			std::shared_ptr<org::runtime::StagedUploadBatch> staged;
@@ -2120,6 +2149,7 @@ namespace DCLF
 				geometries.clear();
 				faceStreams.clear();
 				skippedTexture = skippedPipeline = deferredTextures = deferredPipelines = 0;
+				skySkipped = 0;
 			}
 		};
 
@@ -3227,6 +3257,12 @@ namespace DCLF
 		// The cascades' render mode (0xE, ShadowMapClamped) as an index of the shadow modes.
 		constexpr std::uint32_t kSunShadowMode = 0xE - PassCapture::kFirstShadowMode;
 
+		/** @brief The technique bits a mode index adds to an object's base technique: none for Skylighting's map, whose are complete. */
+		std::uint32_t ModeBitsOf(std::uint32_t a_mode)
+		{
+			return a_mode == kSkyMode ? 0u : ShadowModeBits(PassCapture::kFirstShadowMode + a_mode);
+		}
+
 		/**
 		 * @brief The next frame's sun entry exclusion, from the candidates and the cascades' mode's inputs, which are
 		 * what that mode's claims hold: a candidate stays in the cascade culls when one of its table objects casts (no
@@ -3345,9 +3381,11 @@ namespace DCLF
 			const bool haveShadowMaterials = a_tables.shadowMaterial.size() == a_tables.objects.size();
 			for (std::size_t o = 0; o < a_tables.objects.size() && o < kMaxObjects; ++o) {
 				const auto& object = a_tables.objects[o];
-				if (object.flags & kObjectNoShadow)
+				// A record for every caster and every occluder of Skylighting's map; the alpha-tested ones name their diffuse.
+				const std::uint32_t sky = o < a_tables.skyTechnique.size() && a_in.modeUsed[kSkyMode] ? a_tables.skyTechnique[o] : 0u;
+				if ((object.flags & kObjectNoShadow) && !sky)
 					continue;
-				if (!(a_tables.shadowTechnique[o] & 0x80)) {
+				if (!(((object.flags & kObjectNoShadow) ? 0u : a_tables.shadowTechnique[o]) & 0x80) && !(sky & 0x80)) {
 					objectRecord[o] = 0;
 					continue;
 				}
@@ -3396,24 +3434,30 @@ namespace DCLF
 				auto& inputs = a_out.inputList[m];
 				if (!a_in.modeUsed[m])
 					continue;
-				const std::uint32_t modeBits = ShadowModeBits(PassCapture::kFirstShadowMode + m);
+				const bool skyMode = m == kSkyMode;
+				const std::uint32_t modeBits = ModeBitsOf(m);
 				for (std::size_t o = 0; o < a_tables.objects.size() && o < kMaxObjects && inputs.size() < kMaxInputs; ++o) {
 					const auto& object = a_tables.objects[o];
-					if ((object.flags & kObjectNoShadow) || objectRecord[o] == ~0u)
+					if (skyMode ? (o >= a_tables.skyTechnique.size() || !a_tables.skyTechnique[o]) : (object.flags & kObjectNoShadow) != 0)
 						continue;
+					if (objectRecord[o] == ~0u) {
+						a_out.skySkipped += skyMode ? 1 : 0;
+						continue;
+					}
 					// The states of the views that draw this caster's class. A volumetric-only caster with no view
 					// of the copy under this mode is no input at all: it is then the engine's, unclaimed.
-					const bool volumetricOnly = (object.flags & kObjectVolumetricOnly) != 0;
+					const bool volumetricOnly = !skyMode && (object.flags & kObjectVolumetricOnly) != 0;
 					const std::uint32_t classStates = volumetricOnly ? (a_in.modeRasterStates[m] >> 16) : (a_in.modeRasterStates[m] & 0xFFFFu);
 					if (volumetricOnly && classStates == 0)
 						continue;
-					const std::uint32_t technique = a_tables.shadowTechnique[o] | modeBits;
+					const std::uint32_t technique = skyMode ? a_tables.skyTechnique[o] : (a_tables.shadowTechnique[o] | modeBits);
 					const ShadowPipelineKey key{ technique, (object.flags & kObjectTwoSided) ? kRasterTwoSided : 0u,
 						VertexLayoutOf(a_tables.geometries[object.geometryIndex].vertexDesc) };
 					const auto slotIt = a_lookups.shadowSlots.find(key);
 					if (slotIt == a_lookups.shadowSlots.end()) {
 						++a_out.deferredPipelines;
 						++a_out.skippedPipeline;
+						a_out.skySkipped += skyMode ? 1 : 0;
 						continue;
 					}
 					// Every view of the mode has to be able to draw it: the claim withholds the engine's pass
@@ -3431,6 +3475,7 @@ namespace DCLF
 					if (deferred || missing || classStates == 0) {
 						a_out.deferredPipelines += deferred ? 1 : 0;
 						++a_out.skippedPipeline;
+						a_out.skySkipped += skyMode ? 1 : 0;
 						continue;
 					}
 					// A face shape draws only with its positions: without them (no buffer, the geometry table full) it
@@ -3438,8 +3483,10 @@ namespace DCLF
 					// stream (a dynamic shape's) is never an input without one: the slot would fall back to the
 					// geometry's own buffer and draw its other attributes as positions.
 					const std::uint32_t streamIndex = FaceStreamGeometry(a_tables, o, a_in.addresses.facePositions);
-					if (streamIndex == ~0u && (IsFaceObject(a_tables, o) || (key.vertexLayout & kPositionInSecondStream)))
+					if (streamIndex == ~0u && (IsFaceObject(a_tables, o) || (key.vertexLayout & kPositionInSecondStream))) {
+						a_out.skySkipped += skyMode ? 1 : 0;
 						continue;
+					}
 					inputs.push_back({ slotIt->second, objectRecord[o], object.geometryIndex,
 						(object.flags & ~kObjectDecal) | kInputDrawable | (OutsideSunEntry(a_in, a_tables, o) ? kInputOutsideSunEntry : 0u),
 						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius, static_cast<std::uint32_t>(o), 0,
@@ -3567,7 +3614,7 @@ namespace DCLF
 
 		/** @brief The shadow epoch's entries: the alpha-tested casters' diffuse textures, and the pipelines of the modes in use. */
 		void RefreshShadowLookups(const SceneStore::Tables& a_tables, const std::array<bool, kShadowModeCount>& a_modeUsed,
-			const std::array<std::uint32_t, kShadowModeCount>& a_modeRasterStates, DXGI_FORMAT a_dsvFormat, Lookups& a_lookups)
+			const std::array<std::uint32_t, kShadowModeCount>& a_modeRasterStates, DXGI_FORMAT a_dsvFormat, DXGI_FORMAT a_skyFormat, Lookups& a_lookups)
 		{
 			auto& textures = GpuTextures::Get();
 			auto& pipelines = DrawPipelines::Get();
@@ -3585,11 +3632,14 @@ namespace DCLF
 			}
 			if (!utility)
 				return;
-			for (const auto& key : a_tables.shadowKeysUsed) {
-				for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
-					if (!a_modeUsed[m])
-						continue;
-					const std::uint32_t modeBits = ShadowModeBits(PassCapture::kFirstShadowMode + m);
+			for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
+				if (!a_modeUsed[m])
+					continue;
+				// Skylighting's map takes its own keys (complete techniques) and its target's format.
+				const auto& keys = m == kSkyMode ? a_tables.skyKeysUsed : a_tables.shadowKeysUsed;
+				const DXGI_FORMAT format = m == kSkyMode ? a_skyFormat : a_dsvFormat;
+				for (const auto& key : keys) {
+					const std::uint32_t modeBits = ModeBitsOf(m);
 					const ShadowPipelineKey slotKey{ key.technique | modeBits, key.rasterFlags, key.vertexLayout };
 					auto slotIt = a_lookups.shadowSlots.find(slotKey);
 					if (slotIt == a_lookups.shadowSlots.end()) {
@@ -3605,7 +3655,7 @@ namespace DCLF
 					for (std::uint32_t states = (a_modeRasterStates[m] & 0xFFFFu) | (a_modeRasterStates[m] >> 16); states; states &= states - 1) {
 						const auto state = static_cast<std::uint32_t>(std::countr_zero(states));
 						const ShadowPipelineKey viewKey{ slotKey.technique, WithShadowState(slotKey.rasterFlags, state), slotKey.vertexLayout };
-						const std::uint32_t set = program ? pipelines.FindShadow(viewKey, *program, a_dsvFormat) : DrawPipelines::kNotReady;
+						const std::uint32_t set = program ? pipelines.FindShadow(viewKey, *program, format) : DrawPipelines::kNotReady;
 						const std::uint32_t index = set == DrawPipelines::kNotReady ? Lookups::kNone : set;
 						auto [it, inserted] = a_lookups.shadowPipelines.try_emplace(viewKey, index);
 						if (inserted || it->second != index) {
@@ -3836,6 +3886,14 @@ namespace DCLF
 		};
 		std::vector<PendingView> pendingViews;
 		std::vector<DrawBindings> shadowSlotRecords;  // one slot's copy of the records, while it uploads
+		// Skylighting's occlusion map (ExecuteSkyOcclusion): the view as the engine's RenderMask set it up (CaptureSkyOcclusion),
+		// the state and format its pipelines are built for, and the frame whose shadow commit uploaded its occluders.
+		PendingView skyView;
+		std::uint32_t skyCapturedFrame = ~0u;
+		std::uint32_t skyRasterState = 0;
+		DXGI_FORMAT skyDsvFormat = DXGI_FORMAT_UNKNOWN;
+		std::uint32_t skyCommittedFrame = ~0u;
+		std::uint32_t skyInputs = 0, skySkipped = 0;
 		// CS_DCLF_SHADOW_OWNERSHIP=static: the claim set built from the inputs of a mode, published once per
 		// input rebuild (the views of one frame that share a mode share the inputs and the claims).
 		void PublishShadowClaims(std::uint32_t a_renderMode, const std::vector<DrawInput>& a_inputs, std::shared_ptr<const PassCapture::ClaimSet> a_built,
@@ -4365,7 +4423,8 @@ namespace DCLF
 		desc.channels = 1;
 		desc.hasDSV = true;
 		desc.dsvFormat = desc.format;
-		static constexpr const char* kNames[kShadowDepthTargets] = { "DCLF shadow maps (ESRAM)", "DCLF shadow maps", "DCLF volumetric shadow maps (ESRAM)" };
+		static constexpr const char* kNames[kShadowDepthTargets] = { "DCLF shadow maps (ESRAM)", "DCLF shadow maps", "DCLF volumetric shadow maps (ESRAM)",
+			"DCLF Skylighting occlusion map" };
 		auto imported = ImportImage(host->GetDesc().device, info.image, desc, kNames[a_index]);
 		if (!imported)
 			return ShadowNotReady(5, "the shadow map could not be imported (not in the general layout?)");
@@ -4445,7 +4504,7 @@ namespace DCLF
 			}
 			return notReady(ShadowNotReady::Depth);
 		}
-		if (impl->pendingViews.size() >= kMaxShadowViews)
+		if (impl->pendingViews.size() >= kSkySlot)
 			return notReady(ShadowNotReady::Capacity);
 		// The rasterizer state the engine draws this view with: its table entry for the renderer's modes, read
 		// now, while the view is drawn - Community Shaders' ShadowmapCascadeRasterizerFix swaps per-cascade
@@ -4540,6 +4599,259 @@ namespace DCLF
 		shadowStats.captureMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 	}
 
+	void IndirectDraws::CaptureSkyOcclusion()
+	{
+		// The hook's half, as ExecuteShadowView: where the engine's RenderMask has just drawn Skylighting's map (the
+		// clear, and whatever SetupMask registered), with which camera and state. Taken whether or not DCLF draws the
+		// map this frame: the state and format are what next frame's build prepares the pipelines for.
+		if (!ShadowsEnabled() || failed || !SceneStore::SkyOcclusionEnabled() || !impl->SetupShadow())
+			return;
+		auto& shadowState = globals::game::shadowState->GetRuntimeData();
+		const std::uint32_t target = shadowState.depthStencil;
+		// The renderer's state at this hook is what the view's last pass left, or whatever came before when nothing
+		// drew; the Utility shader sets the cull mode per pass (engine notes, shadow maps: 0 for a two-sided
+		// property, 1 otherwise). So the view's state is back-face culling at the renderer's fill, bias and scissor
+		// modes, and a two-sided occluder's key draws without culling, as a two-sided caster's does.
+		std::uint32_t rasterState = 0;
+		{
+			const std::uint32_t fill = shadowState.rasterStateFillMode, cull = 1;
+			const std::uint32_t bias = shadowState.rasterStateDepthBiasMode, scissor = shadowState.rasterStateScissorMode;
+			if (fill < 2 && bias < 12 && scissor < 2)
+				if (auto* engineState = EngineRasterStates()[fill][cull][bias][scissor]) {
+					D3D11_RASTERIZER_DESC desc{};
+					engineState->GetDesc(&desc);
+					rasterState = DrawPipelines::Get().ShadowRasterStateId(desc, kSkyRenderMode);
+				}
+		}
+		if (!rasterState || !impl->ImportShadowDepth(kSkyDepthTarget, target))
+			return;
+		auto& view = impl->skyView;
+		view = {};
+		view.viewId = ~0u;
+		view.renderMode = kSkyRenderMode;
+		view.modeIndex = kSkyMode;
+		view.targetIndex = kSkyDepthTarget;
+		view.slice = shadowState.depthStencilSlice;
+		view.rasterState = rasterState;
+		if (auto* dsv = globals::game::renderer->GetDepthStencilData().depthStencils[target].views[0]) {
+			D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+			dsv->GetDesc(&dsvDesc);
+			view.dsvFormat = dsvDesc.Format;
+		}
+		view.x = static_cast<std::uint32_t>(std::max(0.0f, shadowState.viewPort.TopLeftX));
+		view.y = static_cast<std::uint32_t>(std::max(0.0f, shadowState.viewPort.TopLeftY));
+		view.width = static_cast<std::uint32_t>(shadowState.viewPort.Width);
+		view.height = static_cast<std::uint32_t>(shadowState.viewPort.Height);
+		view.minDepth = shadowState.viewPort.MinDepth;
+		view.maxDepth = shadowState.viewPort.MaxDepth;
+		view.eye = shadowState.posAdjust.getEye();
+		// VS_PerFrame (b12) as the engine wrote it for this view: its view-projection is what the draws use.
+		auto& mirror = ConstantMirror::Get();
+		if (auto* perFrame = *globals::game::perFrame.get()) {
+			mirror.Watch(perFrame);
+			const auto contents = mirror.Contents(perFrame);
+			if (contents.size() >= 48 * sizeof(float)) {
+				view.perFrameBytes = static_cast<std::uint32_t>(std::min<std::size_t>(contents.size(), view.perFrame.size()));
+				std::memcpy(view.perFrame.data(), contents.data(), view.perFrameBytes);
+			}
+		}
+		if (!view.perFrameBytes) {
+			const auto& cached = globals::game::frameBufferCached.data;
+			view.perFrameBytes = sizeof(cached);
+			std::memcpy(view.perFrame.data(), &cached, sizeof(cached));
+		}
+		std::memcpy(view.viewProj.data(), reinterpret_cast<const float*>(view.perFrame.data()) + 32, sizeof(float) * 16);
+		view.hasViewProj = true;
+		impl->skyRasterState = rasterState;
+		impl->skyDsvFormat = view.dsvFormat;
+		impl->skyCapturedFrame = SceneStore::Get().GetFrame();
+	}
+
+	bool IndirectDraws::SkyOcclusionReady() const
+	{
+		// This frame's shadow commit uploaded every occluder (none left out for a pipeline or a texture not yet
+		// resolved), and the map's target is imported.
+		return !failed && ShadowsEnabled() && SceneStore::SkyOcclusionEnabled() && impl->shadow && impl->skyRasterState &&
+		       impl->skyCommittedFrame == SceneStore::Get().GetFrame() && impl->skySkipped == 0 && impl->shadow->depth[kSkyDepthTarget];
+	}
+
+	bool IndirectDraws::ExecuteSkyOcclusion(bool a_diagnose)
+	{
+		const auto start = std::chrono::steady_clock::now();
+		auto& store = SceneStore::Get();
+		const std::uint32_t frameNumber = store.GetFrame();
+		if (!SkyOcclusionReady() || impl->skyCapturedFrame != frameNumber || impl->skyView.rasterState != impl->skyRasterState) {
+			++shadowStats.skyNotReady;
+			return false;
+		}
+		const auto indirect = GetShadowIndirectState();
+		if (!indirect.valid) {
+			++shadowStats.skyNotReady;
+			return false;
+		}
+		ScopedPerfEvent event("CS DCLF: Skylighting occlusion (CPU)");
+		auto resources = impl->shadow;
+		auto& payload = impl->shadowPayload;
+		const auto& view = impl->skyView;
+		const auto inputCount = static_cast<std::uint32_t>(payload.inputList[kSkyMode].size());
+		// [TEMP] CS_DCLF_SKYLIGHT_PARITY: the occluders DCLF's frustum test keeps that the engine did not register this map.
+		if (a_diagnose) {
+			const auto engineList = SunAccumulation::Get().TakeSkyRegistrations();
+			const ankerl::unordered_dense::set<const RE::BSGeometry*> engine(engineList.begin(), engineList.end());
+			float m[16];
+			FoldEyeIntoViewProj(view.viewProj, view.eye, m);
+			const auto& tables = store.GetTables();
+			std::vector<std::pair<float, std::string>> extra;
+			std::uint32_t kept = 0, both = 0;
+			skyFootprints.clear();
+			for (const auto& input : payload.inputList[kSkyMode]) {
+				const float* c = input.boundCentre;
+				const float r = input.boundRadius;
+				bool outside = false;
+				// Rows of the (row-major) view-projection: the clip-space planes x, y and z against w.
+				for (int p = 0; p < 6 && !outside; ++p) {
+					const int axis = p / 2;
+					const float sign = (p & 1) ? -1.0f : 1.0f;
+					float plane[4];
+					for (int k = 0; k < 4; ++k)
+						plane[k] = m[12 + k] + sign * m[axis * 4 + k];
+					if (axis == 2 && !(p & 1))
+						for (int k = 0; k < 4; ++k)
+							plane[k] = m[8 + k];  // z >= 0
+					const float length = std::sqrt(plane[0] * plane[0] + plane[1] * plane[1] + plane[2] * plane[2]);
+					outside = length > 0 && (plane[0] * c[0] + plane[1] * c[1] + plane[2] * c[2] + plane[3]) / length < -r;
+				}
+				if (outside)
+					continue;
+				++kept;
+				const auto* geometry = input.objectIndex < tables.objectGeometry.size() ? tables.objectGeometry[input.objectIndex] : nullptr;
+				// Its bound's footprint in the map's texels (the corners of its box, projected; y down).
+				{
+					float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+					for (std::uint32_t corner = 0; corner < 8; ++corner) {
+						const float p[3] = { c[0] + ((corner & 1) ? r : -r), c[1] + ((corner & 2) ? r : -r), c[2] + ((corner & 4) ? r : -r) };
+						const float x = m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3];
+						const float y = m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7];
+						const float w = m[12] * p[0] + m[13] * p[1] + m[14] * p[2] + m[15];
+						const float nx = w != 0 ? x / w : x, ny = w != 0 ? y / w : y;
+						x0 = std::min(x0, nx), x1 = std::max(x1, nx), y0 = std::min(y0, ny), y1 = std::max(y1, ny);
+					}
+					auto texel = [&](float a_ndc, float a_size, bool a_flip) {
+						const float t = a_flip ? (1.0f - a_ndc) * 0.5f : (a_ndc + 1.0f) * 0.5f;
+						return static_cast<std::int32_t>(std::clamp(t * a_size, -1.0f, a_size + 1.0f));
+					};
+					SkyFootprint footprint;
+					footprint.x0 = texel(x0, float(view.width), false) + std::int32_t(view.x);
+					footprint.x1 = texel(x1, float(view.width), false) + std::int32_t(view.x);
+					footprint.y0 = texel(y1, float(view.height), true) + std::int32_t(view.y);
+					footprint.y1 = texel(y0, float(view.height), true) + std::int32_t(view.y);
+					if (geometry) {
+						auto* g = const_cast<RE::BSGeometry*>(geometry);
+						footprint.label = fmt::format("'{}' ({}) r {:.0f} technique {:#x} layout {:#x} flags {:#x} skin {}", g->name.c_str() ? g->name.c_str() : "?",
+							g->GetRTTI() ? g->GetRTTI()->name : "?", r, tables.skyTechnique[input.objectIndex],
+							VertexLayoutOf(tables.geometries[tables.objects[input.objectIndex].geometryIndex].vertexDesc), tables.objects[input.objectIndex].flags,
+							tables.skinPartitions[input.objectIndex]);
+					}
+					skyFootprints.push_back(std::move(footprint));
+				}
+				if (engine.contains(geometry)) {
+					++both;
+					continue;
+				}
+				if (!geometry)
+					continue;
+				auto* g = const_cast<RE::BSGeometry*>(geometry);
+				std::string chain;
+				int depth = 0;
+				for (auto* node = g->parent; node && depth < 5; node = node->parent, ++depth)
+					chain += fmt::format("/{}{}", node->name.c_str() && *node->name.c_str() ? node->name.c_str() : (node->GetRTTI() ? node->GetRTTI()->name : "?"),
+						(node->GetFlags().underlying() & 1) ? "(culled)" : "");
+				const auto* reference = g->GetUserData();
+				extra.emplace_back(r, fmt::format("'{}' r {:.0f} at ({:.0f} {:.0f} {:.0f}) technique {:#x} ref {:X} {} flags {:#x}{}", g->name.c_str() ? g->name.c_str() : "?", r, c[0], c[1], c[2],
+					tables.skyTechnique[input.objectIndex], reference ? reference->GetFormID() : 0, reference ? static_cast<int>(reference->GetFormType()) : -1,
+					g->GetFlags().underlying(), chain));
+			}
+			std::sort(extra.begin(), extra.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+			logger::info("[DCLF][TEMP] Skylighting occlusion diagnosis: {} inputs, {} in DCLF's frustum, {} of them registered by the engine, {} not; engine registered {}",
+				inputCount, kept, both, extra.size(), engine.size());
+			for (std::size_t i = 0; i < extra.size() && i < 20; ++i)
+				logger::info("[DCLF][TEMP]   DCLF only: {}", extra[i].second);
+		}
+		const bool ok = RenderGraphRuntime::Get().ExecuteEpoch(RenderGraphRuntime::Segment::SkyOcclusion, [&](org::RenderGraph&) {
+			resources->skyFrame.store(nullptr, std::memory_order_release);
+			CommitUploads uploads(impl->commitStagedPool);
+			// The view slot's blocks, its copy of the frame's binding records naming them, and its count zeroed. The
+			// occluders, records, objects and geometries were uploaded by this frame's shadow commit.
+			const std::uint64_t base = resources->constantsAddress;
+			const std::uint64_t viewBlockOffset = std::uint64_t(kSkySlot) * kShadowViewSlotBytes;
+			const std::uint64_t perFrameOffset = viewBlockOffset + kShadowPerFrameOffset;
+			uploads(resources->constants, view.viewBlock, sizeof(view.viewBlock), viewBlockOffset);
+			uploads(resources->constants, view.perFrame.data(), view.perFrameBytes, perFrameOffset);
+			auto& slotRecords = impl->shadowSlotRecords;
+			slotRecords = payload.records;
+			for (auto& record : slotRecords) {
+				record.vertexConstants[0] = base + viewBlockOffset;
+				record.pixelConstants[0] = base + viewBlockOffset;
+				record.vertexConstants[kPerFrameVertexRegister] = base + perFrameOffset;
+				record.pixelConstants[kPerFrameVertexRegister] = base + perFrameOffset;
+			}
+			const std::uint64_t recordsOffset = std::uint64_t(kSkySlot) * kShadowRecordCapacity * sizeof(DrawBindings);
+			uploads(resources->records, slotRecords.data(), slotRecords.size() * sizeof(DrawBindings), recordsOffset);
+			static const std::uint32_t zero[kCountWords] = {};
+			uploads(resources->count[kSkySlot], zero, sizeof(zero), 0);
+			// Its latch: frustum culling alone, near plane included as the rasterizer clips, every input drawn.
+			const std::uint32_t latchSlot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
+			BuildDrawsLatch latch{};
+			latch.dispatch[0] = (inputCount + 63) / 64;
+			latch.dispatch[1] = 1;
+			latch.dispatch[2] = 1;
+			latch.drawCount = inputCount;
+			latch.cullFlags = 1u;
+			latch.visibilityStamp = frameNumber & 0x0FFFFFFFu;
+			FoldEyeIntoViewProj(view.viewProj, view.eye, latch.viewProj);
+			const std::uint32_t mapRowOffset = kShadowPipelineMapOffset + (view.rasterState - 1) * kShadowPipelineMapRowBytes;
+			latch.pipelineMapOffset = static_cast<std::uint32_t>(resources->latch->Offset(latchSlot)) + mapRowOffset;
+			const auto& row = store.GetLookups().shadowMapRows[view.rasterState];
+			if (!row.empty())
+				resources->latch->Write(latchSlot, mapRowOffset, std::as_bytes(std::span(row.data(), std::min<std::size_t>(row.size(), kMaxShadowSlots))));
+			resources->latch->WriteValue(latchSlot, kSkySlot * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), latch);
+			auto frame = std::make_shared<ShadowFrame>();
+			frame->resourceHeap = org::runtime::GetActiveSRVDescriptorHeap().GetHandle();
+			frame->samplerHeap = org::runtime::GetActiveSamplerDescriptorHeap().GetHandle();
+			frame->indirect = indirect;
+			ShadowFrameView out{};
+			out.slot = kSkySlot;
+			out.modeIndex = kSkyMode;
+			const auto& previousShape = resources->skyPublished;
+			out.capacity = GrowCapacity(previousShape && !previousShape->views.empty() ? previousShape->views.front().capacity : 0u, inputCount, kMaxDraws);
+			out.x = view.x;
+			out.y = view.y;
+			out.width = view.width;
+			out.height = view.height;
+			out.minDepth = view.minDepth;
+			out.maxDepth = view.maxDepth;
+			out.target = kSkyDepthTarget;
+			out.slice = view.slice;
+			out.recordsAddress = resources->recordsAddress + recordsOffset;
+			frame->views.push_back(out);
+			if (previousShape && previousShape->SameShape(*frame)) {
+				resources->skyFrame.store(previousShape, std::memory_order_release);
+			} else {
+				frame->generation = ++resources->shapeGenerations;
+				resources->skyPublished = frame;
+				resources->skyFrame.store(std::move(frame), std::memory_order_release);
+			}
+		});
+		shadowStats.skyMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		if (!ok) {
+			++shadowStats.skyNotReady;
+			return false;
+		}
+		++shadowStats.skyDrawn;
+		shadowStats.skyInputs = inputCount;
+		return true;
+	}
+
 	void IndirectDraws::ExecuteShadowFrame()
 	{
 		auto& pending = impl->pendingViews;
@@ -4578,6 +4890,12 @@ namespace DCLF
 			modeUsed[view.modeIndex] = true;
 			modeRasterStates[view.modeIndex] |= 1u << (view.rasterState + (view.casterClass ? 16u : 0u));
 		}
+		// Skylighting's occlusion map is drawn later in the frame, by its own epoch, from this build: its occluders
+		// under the state its view drew with last (known once the engine's own draw of the map has been captured).
+		if (SceneStore::SkyOcclusionEnabled() && impl->skyRasterState && impl->skyDsvFormat != DXGI_FORMAT_UNKNOWN) {
+			modeUsed[kSkyMode] = true;
+			modeRasterStates[kSkyMode] = 1u << impl->skyRasterState;
+		}
 		// One pipeline set per shadow map format: every target the engine has is D16 (engine notes), and a
 		// view whose target differed would rebuild the set on every epoch, so the first view's is taken.
 		const DXGI_FORMAT dsvFormat = pending.front().dsvFormat;
@@ -4615,7 +4933,7 @@ namespace DCLF
 			}
 			auto& lookups = store.MutableLookups();
 			RefreshMaterialLookups(tables, frameNumber, store.GetProjectedTextures(), lookups);
-			RefreshShadowLookups(tables, modeUsed, modeRasterStates, dsvFormat, lookups);
+			RefreshShadowLookups(tables, modeUsed, modeRasterStates, dsvFormat, impl->skyDsvFormat, lookups);
 			in.lookupGeneration = lookups.generation;
 			bool useAsync = false;
 			if (job.handle) {
@@ -5405,12 +5723,18 @@ namespace DCLF
 		if (ok) {
 			++shadowStats.epochs;
 			shadowStats.viewsDrawn += static_cast<std::uint32_t>(pending.size());
+			// Skylighting's occluders are uploaded: its map can be DCLF's this frame if none was left out.
+			if (modeUsed[kSkyMode]) {
+				impl->skyCommittedFrame = frameNumber;
+				impl->skyInputs = static_cast<std::uint32_t>(payload.inputList[kSkyMode].size());
+				impl->skySkipped = payload.skySkipped;
+			}
 			impl->ReadShadowCullCounters(frameNumber, shadowStats);
 			// Static shadow ownership: what this frame's epoch drew for a mode is what that mode's views'
 			// registrations are withheld for, from the next frame on.
 			if (PassCapture::ShadowWithholdingEnabled()) {
 				for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
-					if (modeUsed[m])
+					if (modeUsed[m] && m != kSkyMode)
 						impl->PublishShadowClaims(PassCapture::kFirstShadowMode + m, payload.inputList[m], usedWorkerBuild ? payload.claims[m] : nullptr, shadowStats);
 				}
 				// The cascades' claims decide which sun entries the next frame's cascade culls may skip.
@@ -5502,7 +5826,7 @@ namespace DCLF
 			StageShadowPayload(*payload, *target, slots, *pool);
 			if (claims) {
 				for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
-					if (inputs.modeUsed[m])
+					if (inputs.modeUsed[m] && m != kSkyMode)
 						payload->claims[m] = ShadowClaimSet(payload->inputList[m], *tablesPtr);
 				if (inputs.modeUsed[kSunShadowMode])
 					payload->sunExclusion = BuildSunExclusion(inputs.sunCandidates, payload->inputList[kSunShadowMode], *tablesPtr);
@@ -7139,6 +7463,9 @@ namespace DCLF
 	void IndirectDraws::BeginShadowFrame(const RE::NiPoint3&) {}
 	void IndirectDraws::ExecuteShadowView(std::uint32_t, std::uint32_t) {}
 	void IndirectDraws::ExecuteShadowFrame() {}
+	void IndirectDraws::CaptureSkyOcclusion() {}
+	bool IndirectDraws::SkyOcclusionReady() const { return false; }
+	bool IndirectDraws::ExecuteSkyOcclusion(bool) { return false; }
 	void IndirectDraws::KickColourBuild() {}
 	void IndirectDraws::KickZPrepassBuild() {}
 	void IndirectDraws::KickShadowBuild() {}

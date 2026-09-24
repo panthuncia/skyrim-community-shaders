@@ -267,6 +267,24 @@ namespace DCLF
 		 */
 		void ExecuteShadowFrame();
 
+		/**
+		 * @brief Skylighting's occlusion map, drawn by DCLF (Skylighting::RenderOcclusion's variant with DCLF running):
+		 * the engine's RenderMask sets the camera and clears the map, and CaptureSkyOcclusion takes the view at its
+		 * FinishAccumulating hook (render mode 0x1C); ExecuteSkyOcclusion then draws every occluder of the frame's
+		 * shadow build (the objects' Skylighting::OcclusionTechnique) into it, GPU-culled, in its own epoch.
+		 * SkyOcclusionReady says whether it can this frame; when it cannot, the engine's SetupMask registers them.
+		 */
+		void CaptureSkyOcclusion();
+		bool SkyOcclusionReady() const;
+		bool ExecuteSkyOcclusion(bool a_diagnose = false);
+		/** @brief [TEMP] CS_DCLF_SKYLIGHT_PARITY: each diagnosed occluder's footprint in the map (texels), for the comparison. */
+		struct SkyFootprint
+		{
+			std::int32_t x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+			std::string label;
+		};
+		std::vector<SkyFootprint> skyFootprints;
+
 		/** @brief Why a shadow view was offered to the epoch and not drawn (ShadowStats::notReadyReasons). */
 		enum class ShadowNotReady : std::uint32_t
 		{
@@ -308,6 +326,11 @@ namespace DCLF
 			double inputsMs = 0.0;             // of which building (per mode) and uploading the inputs
 			double blocksMs = 0.0;             // of which the view's constant blocks and their uploads
 			double executeMs = 0.0;            // of which the graph's own execution (compile, prepare, record)
+			// Skylighting's occlusion map (ExecuteSkyOcclusion), per report interval.
+			std::uint32_t skyDrawn = 0;        // maps DCLF drew
+			std::uint32_t skyNotReady = 0;     // draws asked for that it could not make
+			std::uint32_t skyInputs = 0;       // occluders, last map
+			double skyMs = 0.0;                // render thread, its epoch
 		};
 		const ShadowStats& GetShadowStats() const { return shadowStats; }
 		void ResetShadowStats() { shadowStats = {}; }

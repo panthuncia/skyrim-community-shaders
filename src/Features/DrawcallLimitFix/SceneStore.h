@@ -138,6 +138,10 @@ namespace DCLF
 			// runs. 0 and ShadowReject::NotLighting for an object that is not a caster.
 			std::vector<std::uint32_t> shadowTechnique;  // parallel to objects
 			std::vector<std::uint8_t> shadowReject;      // parallel to objects (ShadowReject)
+			// The Utility technique Skylighting's occlusion map draws the object with (Skylighting::OcclusionTechnique,
+			// its own map's rule), 0 when it draws none or DCLF's variant of that map is off (SkyOcclusionEnabled). An
+			// alpha-tested one's diffuse is in shadowDiffuse and shadowMaterial, as a caster's is.
+			std::vector<std::uint32_t> skyTechnique;     // parallel to objects
 			// The bound of the object's entry in the sun's full-frustum culling processes (their objectArray,
 			// which the cascade culls walk): centre and radius, absolute world space; a negative radius when the
 			// entry is never tested (an actor's, whose entry is its cell's container). SceneStore::SunEntryOf.
@@ -170,6 +174,8 @@ namespace DCLF
 			// handful in practice (twelve techniques in the Whiterun exterior). What the shadow programs
 			// are compiled for, and what the shadow pipelines are built from once a view's mode is known.
 			std::vector<ShadowPipelineKey> shadowKeysUsed;
+			// The same for the occluders of Skylighting's map: complete techniques (RenderDepth included), no mode bits.
+			std::vector<ShadowPipelineKey> skyKeysUsed;
 
 			/**
 			 * @brief The three shared tables keep their slots across frames (CS_DCLF_DERIVED_CACHE).
@@ -480,6 +486,20 @@ namespace DCLF
 		/** @brief The sun entries DCLF can take out of the cascade culls (UpdateSunCandidates), and their generation now. */
 		std::shared_ptr<const SunCandidates> GetSunCandidates() const { return sunCandidates; }
 		std::uint32_t GetSunCandidatesGeneration() const { return sunCandidatesGeneration; }
+		/**
+		 * @brief Whether DCLF's native variant of Skylighting's occlusion map is on: the toggle (CS_DCLF_SKYLIGHT) and
+		 * the Skylighting feature loaded. The objects' sky techniques are classified only then.
+		 */
+		static bool SkyOcclusionEnabled();
+		/** @brief [TEMP] CS_DCLF_SKYLIGHT_PROBE, render thread: 0 untracked, 1 tracked without a record (a_reason), 2 a table object. */
+		int ProbeTableState(const RE::BSGeometry* a_geometry, Ineligible& a_reason) const
+		{
+			const auto it = tracked.find(const_cast<RE::BSGeometry*>(a_geometry));
+			if (it == tracked.end())
+				return 0;
+			a_reason = it->second.candidateReason;
+			return it->second.slot != kNoObjectSlot ? 2 : 1;
+		}
 
 		/**
 		 * @brief The pre-resolved service results an epoch's build reads (Lookups.h). Filled by the render
@@ -1108,6 +1128,7 @@ namespace DCLF
 			std::uint32_t technique = 0;
 			std::uint32_t flags = 0;
 			std::uint32_t reject = 0;
+			std::uint32_t skyTechnique = 0;
 			bool operator==(const ShadowInputs&) const = default;
 		};
 		ShadowInputs ShadowInputsOf(std::uint32_t a_slot) const;

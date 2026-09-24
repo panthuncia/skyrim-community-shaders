@@ -194,7 +194,7 @@ struct RenderGraphRuntime::Impl
 	bool bodyRanEpoch = false;
 	double bodyEpochUs = 0.0;
 	double bodyJoinUs = 0.0;
-	std::array<EpochSegmentStats, 5> epochSegmentStats{};
+	std::array<EpochSegmentStats, 6> epochSegmentStats{};
 
 	// ORG's pass timestamps, per segment. An epoch is one host frame; the segment it ran is remembered by
 	// frame number until its timestamps come back, framesInFlight frames later.
@@ -352,6 +352,8 @@ struct RenderGraphRuntime::Impl
 			return "DrawcallLimitFix::Debug view / " + a_pass;
 		case Segment::ShadowView:
 			return "DrawcallLimitFix::Shadow views / " + a_pass;
+		case Segment::SkyOcclusion:
+			return "DrawcallLimitFix::Skylighting occlusion / " + a_pass;
 		}
 		return "RenderGraph::" + a_pass;
 	}
@@ -459,6 +461,8 @@ struct RenderGraphRuntime::Impl
 			return "CS DCLF: debug view";
 		case Segment::ShadowView:
 			return "CS DCLF: shadow view";
+		case Segment::SkyOcclusion:
+			return "CS DCLF: Skylighting occlusion";
 		}
 		return "CS render graph";
 	}
@@ -478,6 +482,8 @@ struct RenderGraphRuntime::Impl
 			return "CS DCLF: debug view inputs";
 		case Segment::ShadowView:
 			return "CS DCLF: shadow view inputs";
+		case Segment::SkyOcclusion:
+			return "CS DCLF: Skylighting occlusion inputs";
 		}
 		return "CS render graph: feature inputs";
 	}
@@ -664,7 +670,7 @@ bool RenderGraphRuntime::Initialize()
 		// the end of Main_RenderDepth, Light Limit Fix's culling at Prepass, the colour pass and the debug
 		// view before the deferred composite.
 		if (EpochsEnabled())
-			desc.epochOrder = { EpochOf(Segment::ShadowView), EpochOf(Segment::ZPrepass), EpochOf(Segment::LightCulling),
+			desc.epochOrder = { EpochOf(Segment::ShadowView), EpochOf(Segment::ZPrepass), EpochOf(Segment::SkyOcclusion), EpochOf(Segment::LightCulling),
 				EpochOf(Segment::MainOpaque), EpochOf(Segment::DebugView) };
 		const bool closed = desc.closedExecutions;
 		state->host = std::make_unique<org::PersistentGraphHost>(std::move(desc));
@@ -683,8 +689,8 @@ bool RenderGraphRuntime::Initialize()
 	});
 	if (state->asyncEpochs) {
 		try {
-			std::vector<std::uint32_t> epochs{ EpochOf(Segment::ShadowView), EpochOf(Segment::ZPrepass), EpochOf(Segment::LightCulling),
-				EpochOf(Segment::MainOpaque) };
+			std::vector<std::uint32_t> epochs{ EpochOf(Segment::ShadowView), EpochOf(Segment::ZPrepass), EpochOf(Segment::SkyOcclusion),
+				EpochOf(Segment::LightCulling), EpochOf(Segment::MainOpaque) };
 			if (EnvEquals("CS_DCLF_DEBUG_VIEW", "1"))
 				epochs.push_back(EpochOf(Segment::DebugView));
 			state->host->SetAsyncEpochs(std::move(epochs));

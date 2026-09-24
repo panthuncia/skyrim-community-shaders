@@ -93,6 +93,21 @@ struct DrawcallLimitFix : Feature
 	};
 	const SkipStats& GetSkipStats() const { return skipStats; }
 
+	/**
+	 * @brief Skylighting's occlusion map, drawn by DCLF (Skylighting::RenderOcclusion's variant while DCLF runs;
+	 * docs/development/drawcall-limit-fix.md, "Skylighting's occlusion map, drawn by DCLF"). Render thread.
+	 * SkyOcclusionReady: DCLF draws this frame's map, so the engine's SetupMask is skipped. DrawSkyOcclusion: after
+	 * RenderMask, which set the view up and cleared the map, DCLF's occluders into it.
+	 */
+	bool SkyOcclusionReady();
+	void DrawSkyOcclusion();
+	/**
+	 * @brief CS_DCLF_SKYLIGHT_PARITY=1: every 120th map is rendered both ways, the engine's first; CopySkyOcclusion(0)
+	 * keeps the engine's, CopySkyOcclusion(1) DCLF's, and the two are compared texel by texel a few frames later.
+	 */
+	bool SkyOcclusionParityFrame();
+	void CopySkyOcclusion(std::uint32_t a_stage);
+
 private:
 	struct Hooks
 	{
@@ -159,6 +174,7 @@ private:
 	// switching back on needs no rescan) but does no frame work: nothing is built, drawn, skipped or withheld.
 	bool switchedOn = true;
 	bool Running() const { return installed && switchedOn; }
+
 	// The frame's scene phase (toggles, then SceneStore's scene half, whose walk goes to the worker), from
 	// Main::Draw's early hook or else from BeforeShadowMaps. Returns Running().
 	bool BeginSceneFrame();

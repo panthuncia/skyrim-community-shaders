@@ -56,6 +56,7 @@ public:
 		MainOpaque,    // Drawcall Limit Fix's colour, before the deferred composite
 		DebugView,     // Drawcall Limit Fix debug view, before the deferred composite
 		ShadowView,    // Drawcall Limit Fix's shadow casters, inside one shadow view's draw
+		SkyOcclusion,  // Drawcall Limit Fix's variant of Skylighting's occlusion map, after the engine's RenderMask
 	};
 
 	static RenderGraphRuntime& Get();

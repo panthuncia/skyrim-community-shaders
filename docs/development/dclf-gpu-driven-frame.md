@@ -24,6 +24,7 @@ Riverwood, DCLF on (about 6,200 table objects, 10,000 tracked geometries):
 | Sun: full-frustum cull | jobs, render thread waits | object | 0.04 ms |
 | Sun: `Accumulate` (cascade culls, then registration or mask writes) | render thread | cascade × object | 0.10 ms with the entry exclusion: what is left is the actors and the entries with a native caster (0.59 with M1 alone, 0.69 without) |
 | Point and spot lights: `Accumulate` | render thread (`CalculateActiveShadowCasterLights`) | light × object | not measured (interiors) |
+| Skylighting's occlusion map (`Precipitation::SetupMask`, `RenderMask`) | render thread | object | drawn by DCLF from its tables, the engine's cull skipped: 0.02 ms left of 0.77 ([drawcall-limit-fix.md](./drawcall-limit-fix.md), "Skylighting's occlusion map, drawn by DCLF"); the precipitation mask is still native |
 | Focus view, first person, water reflections, cubemaps | render thread / jobs | view × object | native, not measured |
 | DCLF scene walk | worker | object | 1.2-1.6 ms (worker) |
 | DCLF accumulate phase (the main registration's capture into tables) | render thread, `EarlyPrepass` | object | 0.32 ms (max 0.74) |

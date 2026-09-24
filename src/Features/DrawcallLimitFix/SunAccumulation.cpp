@@ -9,8 +9,11 @@
 
 #include <array>
 #include <cstring>
+#include <map>
+#include <string>
 
 #include "State.h"
+#include "Features/Skylighting.h"
 
 namespace DCLF
 {
@@ -131,6 +134,55 @@ namespace DCLF
 			}
 		};
 		thread_local SunCall* currentCall = nullptr;
+
+		/**
+		 * @brief [TEMP] CS_DCLF_SKYLIGHT_PROBE: what the engine draws into Skylighting's occlusion map (render mode 0x1C
+		 * while Skylighting::inOcclusion), by what DCLF's tables hold of it. Render thread (SetupMask registers there).
+		 */
+		struct SkylightProbe
+		{
+			std::uint64_t calls = 0, withPass = 0;
+			std::array<std::uint64_t, 3> byState{};  // untracked, tracked without a record, table object
+			std::array<std::uint64_t, static_cast<std::size_t>(Ineligible::Count)> byReason{};
+			std::map<std::string, std::uint64_t> untracked;  // "type / property / parent chain" -> count
+			std::uint64_t frames = 0;
+		};
+		SkylightProbe skylightProbe;
+
+		bool SkylightProbeEnabled()
+		{
+			static const bool enabled = SwitchEnabled("CS_DCLF_SKYLIGHT_PROBE") || SwitchEnabled("CS_DCLF_SKYLIGHT_PARITY");
+			return enabled;
+		}
+
+		void NoteSkylightRegistration(RE::BSGeometry* a_geometry)
+		{
+			auto& probe = skylightProbe;
+			++probe.calls;
+			auto* property = a_geometry->GetGeometryRuntimeData().shaderProperty.get();
+			auto* lighting = netimmerse_cast<RE::BSLightingShaderProperty*>(property);
+			if (!lighting || !lighting->occlusionPasses.head)
+				return;
+			++probe.withPass;
+			if (SunAccumulation::Get().skyRegistrations.size() < 65536)
+				SunAccumulation::Get().skyRegistrations.push_back(a_geometry);
+			Ineligible reason = Ineligible::None;
+			const int state = SceneStore::Get().ProbeTableState(a_geometry, reason);
+			++probe.byState[state];
+			if (state == 1)
+				++probe.byReason[static_cast<std::size_t>(reason)];
+			if (state == 0 && probe.untracked.size() < 400) {
+				std::string chain;
+				int depth = 0;
+				for (auto* node = a_geometry->parent; node && depth < 4; node = node->parent, ++depth)
+					chain += fmt::format("/{}", node->name.c_str() && *node->name.c_str() ? node->name.c_str() : (node->GetRTTI() ? node->GetRTTI()->name : "?"));
+				const auto* reference = a_geometry->GetUserData();
+				++probe.untracked[fmt::format("{} {} ref {:X} {}", a_geometry->GetRTTI() ? a_geometry->GetRTTI()->name : "?", a_geometry->name.c_str() ? a_geometry->name.c_str() : "?",
+					reference ? reference->GetFormID() : 0, chain)];
+			} else if (state == 0) {
+				++probe.untracked["(more)"];
+			}
+		}
 		// The sun's accumulators as the last Accumulate saw them, for spotting a sun registration made elsewhere.
 		std::array<std::atomic<const void*>, kMaxCascades> knownAccumulators{};
 
@@ -412,6 +464,11 @@ namespace DCLF
 								break;
 							}
 					}
+					if (SkylightProbeEnabled() && globals::features::skylighting.inOcclusion && At<std::uint32_t>(a_accumulator, 0x150) == 0x1C) {
+						const auto result = func(a_accumulator, a_geometry, a_arg);
+						NoteSkylightRegistration(geometry);
+						return result;
+					}
 					// The main camera's registrations read the mask, then clear it (+0x160 = 0xFFFF) for the next frame.
 					if (self.bitsReady.load(std::memory_order_acquire))
 						self.ApplySunBits(geometry, At<std::uint32_t>(a_accumulator, kAccumulatorLightIndex) == 0xFFFF);
@@ -559,6 +616,23 @@ namespace DCLF
 	{
 		if (!installed || (a_frame % a_interval) != 0)
 			return;
+		if (SkylightProbeEnabled() && skylightProbe.calls) {
+			auto& probe = skylightProbe;
+			const double f = a_interval;
+			std::string reasons;
+			for (std::size_t r = 0; r < probe.byReason.size(); ++r)
+				if (probe.byReason[r])
+					reasons += fmt::format(" {}={:.0f}", kIneligibleNames[r], probe.byReason[r] / f);
+			logger::info("[DCLF][TEMP] skylight probe, per frame: {:.0f} registrations, {:.0f} with a pass: {:.0f} table objects, {:.0f} tracked without a record ({}), {:.0f} untracked",
+				probe.calls / f, probe.withPass / f, probe.byState[2] / f, probe.byState[1] / f, reasons, probe.byState[0] / f);
+			std::vector<std::pair<std::uint64_t, std::string>> top;
+			for (const auto& [key, count] : probe.untracked)
+				top.emplace_back(count, key);
+			std::sort(top.rbegin(), top.rend());
+			for (std::size_t i = 0; i < top.size() && i < 25; ++i)
+				logger::info("[DCLF][TEMP] skylight probe untracked: {:.1f}/frame {}", top[i].first / f, top[i].second);
+			probe = {};
+		}
 		stats.offThread = offThread.exchange(0, std::memory_order_relaxed);
 		if (stats.frames) {
 			LARGE_INTEGER frequency{};

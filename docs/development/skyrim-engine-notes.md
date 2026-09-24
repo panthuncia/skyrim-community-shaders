@@ -914,6 +914,11 @@ Measured at Riverwood (clear weather, so Skylighting's alone), render thread per
     512x512, depth range [0, 1], `posAdjust` at the occlusion camera.
 -   **Who reads them:** the rain particles read the precipitation map; Skylighting's `Prepass` compute (the probe
     update) reads `texOcclusion`.
+-   **The cull mode is per pass:** the Utility shader sets it for each draw (0 for a two-sided property, 1 otherwise),
+    so the renderer's state at the view's `FinishAccumulating` is the last pass's, and with nothing registered, whatever
+    came before. DCLF's variant of the map takes back-face culling as the view's state.
+-   **DCLF's variant** draws Skylighting's map itself when both run, and `SetupMask` is skipped
+    (`drawcall-limit-fix.md`, "Skylighting's occlusion map, drawn by DCLF").
 
 ## The material database: how a material is shared and released
 

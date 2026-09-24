@@ -92,6 +92,13 @@ namespace DCLF
 		/** @brief CS_DCLF_SUN_EXCLUDE=probe: the exclusion runs dry, and DCLF's sun bits are compared with the engine's. */
 		static bool ExclusionProbe();
 
+		/**
+		 * @brief [TEMP] CS_DCLF_SKYLIGHT_PARITY: the geometries the engine registered with a pass into Skylighting's
+		 * occlusion map since the last call (render thread).
+		 */
+		std::vector<const RE::BSGeometry*> TakeSkyRegistrations() { return std::exchange(skyRegistrations, {}); }
+		std::vector<const RE::BSGeometry*> skyRegistrations;
+
 		struct Stats
 		{
 			std::uint32_t frames = 0;         // Accumulate calls for the sun

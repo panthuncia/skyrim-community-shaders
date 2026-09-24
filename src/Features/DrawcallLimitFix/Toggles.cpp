@@ -31,6 +31,7 @@ namespace DCLF
 			kLodCrossfade,
 			kSkipSunAccumulation,
 			kExcludeSunEntries,
+			kSkyOcclusion,
 		};
 
 		// Defaults: the configuration every gate run of this work used. An unset switch takes the default;
@@ -70,6 +71,7 @@ namespace DCLF
 			set.skipSunAccumulation = OnUnlessOff("CS_DCLF_SUN_SKIP");
 			// `probe` runs the exclusion dry (SunAccumulation), which needs the toggle on.
 			set.excludeSunEntries = OnUnlessOff("CS_DCLF_SUN_EXCLUDE") || SwitchValue("CS_DCLF_SUN_EXCLUDE") == "probe";
+			set.skyOcclusion = OnUnlessOff("CS_DCLF_SKYLIGHT");
 			set.debugView = SwitchEnabled("CS_DCLF_DEBUG_VIEW");
 			set.hybridNoSkip = SwitchEnabled("CS_DCLF_HYBRID_NOSKIP");
 			set.onlyEligible = SwitchEnabled("CS_DCLF_ONLY_ELIGIBLE");
@@ -84,6 +86,7 @@ namespace DCLF
 			a_set.shadowOwnership = a_set.shadowOwnership && a_set.shadows;
 			a_set.skipSunAccumulation = a_set.skipSunAccumulation && a_set.shadowOwnership;
 			a_set.excludeSunEntries = a_set.excludeSunEntries && a_set.skipSunAccumulation;
+			a_set.skyOcclusion = a_set.skyOcclusion && a_set.shadows;
 			a_set.skinPartitions = a_set.skinPartitions && a_set.skinned;
 			return a_set;
 		}
@@ -93,7 +96,7 @@ namespace DCLF
 			return a.hybrid != b.hybrid || a.cullTracked != b.cullTracked || a.skinned != b.skinned || a.trees != b.trees ||
 			       a.decals != b.decals || a.projectedUv != b.projectedUv || a.mtLand != b.mtLand || a.switchNodes != b.switchNodes ||
 			       a.skinPartitions != b.skinPartitions || a.actors != b.actors || a.fading != b.fading ||
-			       a.lodCrossfade != b.lodCrossfade;
+			       a.lodCrossfade != b.lodCrossfade || a.skyOcclusion != b.skyOcclusion;
 		}
 	}
 
@@ -135,6 +138,7 @@ namespace DCLF
 		put(kLodCrossfade, s.lodCrossfade);
 		put(kSkipSunAccumulation, s.skipSunAccumulation);
 		put(kExcludeSunEntries, s.excludeSunEntries);
+		put(kSkyOcclusion, s.skyOcclusion);
 		return bits;
 	}
 
@@ -164,6 +168,7 @@ namespace DCLF
 		s.lodCrossfade = get(kLodCrossfade);
 		s.skipSunAccumulation = get(kSkipSunAccumulation);
 		s.excludeSunEntries = get(kExcludeSunEntries);
+		s.skyOcclusion = get(kSkyOcclusion);
 		return s;
 	}
 

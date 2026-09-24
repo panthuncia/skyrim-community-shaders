@@ -1445,6 +1445,8 @@ through: the shadow pipeline map ("Epochs that only submit") and the NPC head dr
 | `CS_DCLF_SUN_SKIP=1` | M1: the sun's registration of a claimed caster writes only its mask ("The sun without the engine's registration"). Needs static shadow ownership. Default on. Live toggle. |
 | `CS_DCLF_SUN_EXCLUDE=1\|0\|probe` | The entries whose content DCLF draws entirely leave the sun's cascade culls, and DCLF writes their sun bits ("The sun's cascades without DCLF's objects"). Needs `CS_DCLF_SUN_SKIP`. Default on. Live toggle. `probe`: a dry run that compares DCLF's bits with the engine's and counts the casters the exclusion would lose. |
 | `CS_DCLF_SUN_TIMING=1` | Diagnostic: times the render thread in the full-frustum cull, `Accumulate` and the sun's registrations. |
+| `CS_DCLF_SKYLIGHT=1\|0` | With Skylighting loaded, DCLF draws its occlusion map and the engine's `SetupMask` is skipped ("Skylighting's occlusion map, drawn by DCLF"). Needs `CS_DCLF_SHADOWS`. Default on. Live toggle. |
+| `CS_DCLF_SKYLIGHT_PARITY=1` | Diagnostic: every 120th map is rendered by the engine and by DCLF in the same frame and compared texel by texel, with the occluders only DCLF drew; `CS_DCLF_SKYLIGHT_DUMP_DIR=<dir>` writes maps that differ over 5 % of their texels as 16-bit PGM. |
 | `CS_DCLF_SWITCH_NODES=1` | Leaves under an `NiSwitchNode` (trees, harvestables) are eligible in the frames every switch on their path selects them ("Trees and actors"). Default on. Live toggle. |
 | `CS_DCLF_SKIN_PARTITIONS=1` | Skins of several partitions and dismember skins (LOD trees, actor bodies) are eligible, one draw per partition the engine draws. Needs `CS_DCLF_SKINNED`. Default on. Live toggle. |
 | `CS_DCLF_ACTORS=1` | Geometry under an actor is eligible, as is the FacegenRGBTint technique. Default on. Live toggle. |
@@ -4314,3 +4316,70 @@ manager at `0x143187758`) takes the database lock and removes the material from 
 cache held the last reference, the database kept a pointer to freed memory, and the next load whose material hashed to
 it called into it. The cache now holds its references through `SceneStore::MaterialReference`, which releases through
 the engine's manager (AE only; the cache is off on SE and VR).
+
+## Skylighting's occlusion map, drawn by DCLF
+
+Community Shaders' Skylighting renders a sky occlusion height map every exterior frame, through the engine's
+precipitation occlusion machinery: `Precipitation::SetupMask` culls and registers the scene from an orthographic
+camera in a new sky direction each frame, and `RenderMask` draws it (engine notes, "The occlusion maps"). At
+Riverwood that was 0.43 ms and 0.34 ms of the render thread a frame, the largest native view left after the sun.
+
+**No ownership exception is needed.** The map is Skylighting's own texture (`texOcclusion`), and nothing but
+Skylighting's `Prepass` compute reads it. So when both features run, DCLF can draw the whole map instead of sharing
+it with the engine: there is no residue to withhold anything from, and no claims.
+
+-   **Coverage, measured first** (`CS_DCLF_SKYLIGHT_PROBE`, TEMP): every geometry that built a pass in this view was
+    a DCLF table object, about 600 a frame at Riverwood and 240 in Whiterun; none tracked without a record, none
+    untracked.
+-   **One rule.** Skylighting's pass rule (its replacement of the Lighting property's vfunc `0x2D`) is now the static
+    `Skylighting::OcclusionTechnique`, which its hook and DCLF's scene phase both call: the scene phase gives every
+    table object its Utility technique for the map (`Tables::skyTechnique`, the keys in `skyKeysUsed`).
+-   **The build.** The frame's shadow build lists the occluders as a fourth input list (`kSkyMode`, no mode bits: the
+    technique already carries `RenderDepth`), with records for the alpha-tested ones even when they cast no shadow,
+    and pipelines for the map's own depth format. No claims are built for it.
+-   **The view.** In Skylighting's `RenderOcclusion`, when `DrawcallLimitFix::SkyOcclusionReady` (this frame's
+    shadow commit uploaded every occluder, none left out for a pipeline or a texture not yet resolved), `SetupMask` is
+    skipped. `RenderMask` still runs: with an empty accumulator it only sets the camera, clears the map and computes
+    the projection Skylighting samples with. DCLF takes the view at its `FinishAccumulating` hook (render mode `0x1C`,
+    the precipitation accumulator, `inOcclusion`): the matrices from `VS_PerFrame`, the viewport, the target (import
+    of target 10 as Skylighting has swapped it in).
+-   **The epoch.** `IndirectDraws::ExecuteSkyOcclusion`, right after `RenderMask`, in its own segment (`SkyOcclusion`,
+    between the Z-prepass and Light Limit Fix's culling): the shadow passes over one reserved view slot (`kSkySlot`),
+    frustum-culled on the GPU, into the map. Everything but the slot's blocks, records and latch was uploaded by the
+    frame's shadow commit.
+-   **The fallback** is the engine: a frame DCLF cannot draw (the first frames, DCLF off, the toggle off, an interior)
+    runs `SetupMask` as before.
+
+**The rasterizer state.** The first parity runs had DCLF nearer over up to 65% of the map on some frames, never
+farther. The Utility shader sets the cull mode per pass (0 for a two-sided property, 1 otherwise), so the state left at
+`FinishAccumulating` is the last pass's, which was two-sided: DCLF drew every occluder without culling, and the back
+faces of large terrain and cliff pieces showed at low sun directions. The view's state is now back-face culling at the
+renderer's fill, bias and scissor modes; a two-sided occluder draws without culling, as a two-sided caster does.
+
+**Parity** (`CS_DCLF_SKYLIGHT_PARITY=1`): every 120th map is rendered both ways in the same frame, the engine's first
+(`SetupMask` and `RenderMask`, copied), then `RenderMask` again and DCLF's (copied), and the two are compared texel by
+texel. The same frame lists the occluders in DCLF's frustum that the engine did not register.
+
+| Riverwood and Whiterun, 13 comparisons | Result |
+| --- | --- |
+| Occluder sets | identical, but one NPC's held axe (`AnimObjectAxe`) now and then |
+| Texels where DCLF is farther (an occluder missing) | 0 in every comparison |
+| Texels where DCLF is nearer | 30 to 900 of 262,144 (0.01-0.3 %), most by one step (1.5e-5); 0 to 290 by more than 1/256 |
+
+The differences above 1/256 are isolated single texels in tree canopies: alpha-tested, wind-animated leaves.
+
+**Result** (Riverwood, Tracy coarse zones, render thread per frame):
+
+| | Engine | DCLF |
+| --- | --- | --- |
+| `Precipitation::SetupMask` | 0.43 ms | not called |
+| `Precipitation::RenderMask` | 0.34 ms | 0.022 ms (the camera, the clear, nothing to draw) |
+| DCLF's epoch | - | 0.025-0.035 ms |
+| `Main::RenderPlayerView` (inclusive) | 7.49 ms | 6.79 ms |
+
+-   DCLF drew 300 maps of 300 in steady state (4,911 occluder inputs at Riverwood, 3,946 in Whiterun); the first 36
+    of a session are the engine's, until the pipelines exist. 0 holes, and the live toggle hands the map back to the
+    engine and takes it again.
+-   The engine's precipitation mask (when there is precipitation) is still the engine's.
+-   Switches: the menu's "Draw Skylighting's occlusion map" (`CS_DCLF_SKYLIGHT`, default on) needs DCLF's shadow
+    views.
