@@ -66,6 +66,8 @@ namespace DCLF
 		float specularLODFade = 1.0f;  // what GetRenderPasses stores in the property for the PS constants
 		float envmapLODFade = 1.0f;
 		std::uint32_t derivedPass = 0;  // the pass descriptor derived from the property (kNotDerived if it cannot be)
+		float derivedSpecularLODFade = 1.0f;  // the LOD fades the derivation computed, beside the property's (derivedPass)
+		float derivedEnvmapLODFade = 1.0f;
 		// Which technique produced Ineligible::Technique, so coverage can be widened against a histogram
 		// rather than a guess. kRefractionReject marks the refraction rejection, which is not a technique.
 		std::uint32_t rejectedTechnique = 62;  // 62 = never set, so an empty field cannot read as `none`

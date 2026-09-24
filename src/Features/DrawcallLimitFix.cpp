@@ -12,6 +12,7 @@
 #include "DrawcallLimitFix/DrawPipelines.h"
 #include "DrawcallLimitFix/FaceSnapshots.h"
 #include "DrawcallLimitFix/SunAccumulation.h"
+#include "DrawcallLimitFix/PrimaryCull.h"
 #include "Features/Skylighting.h"
 
 #include <filesystem>
@@ -297,6 +298,7 @@ void DrawcallLimitFix::PostPostLoad()
 	DCLF::VolumetricProbe::Get().Install();
 	DCLF::FaceSnapshots::Get().Install();
 	DCLF::SunAccumulation::Get().Install();
+	DCLF::PrimaryCull::Get().Install();
 	Hooks::Install();
 	installed = true;
 	// The switches this process actually sees, once. Several reports below are gated on them, so without
@@ -1001,6 +1003,7 @@ void DrawcallLimitFix::Prepass()
 	if (DCLF::ShadowProbe::Enabled())
 		DCLF::ShadowProbe::Get().Report(frame, kReportInterval);
 	DCLF::SunAccumulation::Get().Report(frame, kReportInterval);
+	DCLF::PrimaryCull::Get().Report(frame, kReportInterval);
 
 	// The culling's counters, reported whether or not the full statistics are on: they are what says
 	// whether GPU culling is running and how much it rejects.
@@ -1862,6 +1865,11 @@ void DrawcallLimitFix::DrawSettings()
 		ImGui::Checkbox("Take DCLF's objects out of the engine's sun culls (CS_DCLF_SUN_EXCLUDE)", &toggles.excludeSunEntries);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::Text("The sun's cascade culls skip every reference whose shadows DCLF draws entirely; DCLF sets those objects' sun shadow bits for the main pass.");
+		ImGui::BeginDisabled(!toggles.excludeSunEntries || !toggles.ownership);
+		ImGui::Checkbox("Take DCLF's objects out of the engine's main camera cull (CS_DCLF_PRIMARY_EXCLUDE)", &toggles.excludePrimaryEntries);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("The main camera's cull and registration skip every reference DCLF draws entirely; DCLF builds their main passes itself and runs their fade updates.");
+		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 		ImGui::Checkbox("Draw Skylighting's occlusion map (CS_DCLF_SKYLIGHT)", &toggles.skyOcclusion);

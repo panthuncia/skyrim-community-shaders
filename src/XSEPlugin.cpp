@@ -141,7 +141,8 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	logger::info("Loaded {} {}", Plugin::NAME, Plugin::VERSION.string());
 	ApplyDevEnvironmentFile();
 	SKSE::Init(a_skse);
-	SKSE::AllocTrampoline(1 << 10);
+	// Every write_call/write_branch stub (14 bytes) comes from this block; 1 KiB ran out at about 73 hooks.
+	SKSE::AllocTrampoline(1 << 11);
 	return Load();
 }
 

@@ -12,6 +12,7 @@
 #include "SceneTracker.h"
 #include "ShadowProbe.h"
 #include "SunAccumulation.h"
+#include "PrimaryCull.h"
 #include "ShadowViews.h"
 #include "VertexInput.h"
 #include "VolumetricProbe.h"
@@ -2858,6 +2859,10 @@ namespace DCLF
 		// after a latch is not empty.
 		if (accumulatedPasses.empty() && haveAccumulator && !fromAccumulator && !passParity)
 			CollectAccumulatedPasses();
+		// The objects the primary's cull left out this frame (PrimaryCull): their main passes, built without a
+		// registration, stand where the engine's would have.
+		for (const auto& [geometry, pass] : PrimaryCull::Get().BuildSyntheticPasses())
+			AddAccumulatedPass(geometry, pass);
 		timer.Add(BuildPart::Walk);
 
 		// [TEMP] CS_DCLF_VOLUMETRIC_PROBE: the face parts' main-camera passes - the technique their flags select, the
@@ -2903,6 +2908,9 @@ namespace DCLF
 		const bool materialCacheOn = MaterialCacheEnabled();
 		static const bool materialProbeAll = SwitchValue("CS_DCLF_MATERIAL_CACHE") == "probe";
 		static const bool derivationStats = SwitchEnabled("CS_DCLF_DERIVE_PROBE");
+		// CS_DCLF_PRIMARY_EXCLUDE=probe: what the objects under the primary's candidate entries take from their
+		// registration, against what DCLF derives (PrimaryCull::NoteDerived).
+		const bool primaryProbe = PrimaryCull::Probe() && PrimaryCull::Get().Installed();
 		static const bool classifyProbe = SwitchValue("CS_DCLF_CLASSIFY_CACHE") == "probe";
 
 		// What this phase has anything to do with. Off the =tracked culling input that is the engine's
@@ -2990,9 +2998,10 @@ namespace DCLF
 				descriptors = derived.descriptors;
 				++stats.derivedHits;
 			} else {
-				reason = ClassifyStatic(*geometry, &descriptors, accumulated, derivationStats, &castCache);
+				reason = ClassifyStatic(*geometry, &descriptors, accumulated, derivationStats || primaryProbe, &castCache);
 			}
 			timer.Add(BuildPart::ClassifyStatic);
+			const bool primaryCandidate = primaryProbe && accumulated && PrimaryCull::Get().UnderListedCandidate(geometry);
 			// Per frame whether or not the derivation was cached: hidden, part of an actor and fading are
 			// states of this frame, and the scene phase's verdict for them is the last classification's
 			// (for a static, the last event's). An object that has just been hidden must lose its bindings now,
@@ -3015,6 +3024,8 @@ namespace DCLF
 			// The histogram is the scene phase's, taken over the whole tracked set; where this phase -
 			// which has the accumulated pass, and so the decal group - reaches a different verdict, the
 			// object is moved between the buckets so the report reads as it did before the split.
+			if (primaryCandidate)
+				PrimaryCull::Get().NoteDerived(*geometry, descriptors, *accumulated, reason, LodRowOf(*geometry, property));
 			if (reason != trackedEntry->candidateReason) {
 				--stats.ineligible[static_cast<std::size_t>(trackedEntry->candidateReason)];
 				++stats.ineligible[static_cast<std::size_t>(reason)];
@@ -3232,7 +3243,7 @@ namespace DCLF
 			if (lightLimitFixLoaded) {
 				lights.roomIndex = globals::features::lightLimitFix.GetRoomIndex(geometry);
 				if (accumulated)
-					lights.shadowBitMask = LightLimitFix::GetShadowBitMask(accumulated->pass);
+					lights.shadowBitMask = accumulated->pass ? LightLimitFix::GetShadowBitMask(accumulated->pass) : 0u;  // a synthetic pass has no point-light shadow (PrimaryCull)
 			}
 			tables.lights[objectId] = lights;
 			// Per object, and only for trees: everything else keeps the pipeline template's values.
@@ -4014,6 +4025,7 @@ namespace DCLF
 	void SceneStore::DropSunCandidates()
 	{
 		sunCandidateSet.clear();
+		primaryEntrySet.clear();
 		sunEntriesDirty.clear();
 		sunCandidates.reset();
 		++sunCandidatesGeneration;
@@ -4039,11 +4051,23 @@ namespace DCLF
 		}
 	}
 
+	bool SceneStore::PrimaryEntryAllows(const Tracked& a_tracked, const RE::BSGeometry& a_geometry)
+	{
+		if (a_tracked.slot == kNoObjectSlot || a_tracked.candidateFrame == 0 || a_tracked.candidateReason != Ineligible::None)
+			return false;
+		const auto* property = a_geometry.GetGeometryRuntimeData().shaderProperty.get();
+		if (!property || (property->flags.underlying() & 0xc000000ull))  // the decal flags: their depth is the native depth pass's
+			return false;
+		const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
+		return !(alpha && (alpha->alphaFlags & 1));
+	}
+
 	void SceneStore::UpdateSunCandidates(bool a_full)
 	{
 		bool changed = a_full;
 		if (a_full) {
 			sunCandidateSet.clear();
+			primaryEntrySet.clear();
 			sunEntriesDirty.clear();
 			for (const auto& [root, dependents] : rootDependents)
 				sunEntriesDirty.push_back(root);
@@ -4053,18 +4077,21 @@ namespace DCLF
 			sunEntriesDirty.erase(std::unique(sunEntriesDirty.begin(), sunEntriesDirty.end()), sunEntriesDirty.end());
 			const bool switchNodes = SwitchNodesEnabled();
 			for (const auto* root : sunEntriesDirty) {
-				bool candidate = false;
+				bool candidate = false, primary = false;
 				if (const auto it = rootDependents.find(root); it != rootDependents.end() && !it->second.empty()) {
-					candidate = true;
+					candidate = primary = true;
 					for (auto* geometry : it->second) {
 						const auto entry = tracked.find(geometry);
 						if (entry == tracked.end() || !SunEntryAllows(entry->second, switchNodes)) {
-							candidate = false;
+							candidate = primary = false;
 							break;
 						}
+						primary = primary && PrimaryEntryAllows(entry->second, *geometry);
 					}
 				}
 				if (candidate ? sunCandidateSet.insert(root).second : sunCandidateSet.erase(root) != 0)
+					changed = true;
+				if (primary ? primaryEntrySet.insert(root).second : primaryEntrySet.erase(root) != 0)
 					changed = true;
 			}
 			sunEntriesDirty.clear();
@@ -4081,8 +4108,10 @@ namespace DCLF
 		snapshot->generation = sunCandidatesGeneration;
 		snapshot->entries.reserve(sunCandidateSet.size());
 		std::uint32_t index = 0;
+		snapshot->primary.reserve(sunCandidateSet.size());
 		for (const auto* root : sunCandidateSet) {
 			snapshot->entries.emplace(root, index);
+			snapshot->primary.push_back(primaryEntrySet.contains(root) ? 1 : 0);
 			if (const auto it = rootDependents.find(root); it != rootDependents.end())
 				for (const auto* geometry : it->second)
 					if (snapshot->geometries.emplace(geometry, static_cast<std::uint32_t>(snapshot->geometryEntry.size())).second)

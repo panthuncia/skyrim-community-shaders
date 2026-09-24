@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include <ankerl/unordered_dense.h>
@@ -25,6 +26,9 @@ namespace DCLF
 		ankerl::unordered_dense::map<const RE::NiAVObject*, std::uint32_t> entries;     // entry node -> entry index
 		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint32_t> geometries;  // every tracked geometry under one -> geometry index
 		std::vector<std::uint32_t> geometryEntry;                                       // geometry index -> entry index
+		// Per entry index: every tracked geometry under it is also a main-pass table object that PrimaryCull can
+		// give a synthetic pass (SceneStore::PrimaryEntryAllows), so the primary's cull may leave the entry out.
+		std::vector<std::uint8_t> primary;
 	};
 
 	/**
@@ -88,6 +92,17 @@ namespace DCLF
 		 * applies, once. Null: nothing is excluded.
 		 */
 		void PublishExclusion(std::shared_ptr<SunExclusion> a_exclusion) { pendingExclusion = std::move(a_exclusion); }
+
+		/**
+		 * @brief Render thread, from the end of the sun's Accumulate to the next full-frustum cull: whether the bound
+		 * meets any of this frame's cascades, tested against the planes the engine's own cascade culls used (the
+		 * Geometric rule). Unknown (the cascades were not captured this frame): nullopt.
+		 */
+		std::optional<bool> InSunCascades(const RE::NiBound& a_bound) const;
+		/** @brief Whether this frame's full-frustum cull applied the entry exclusion (its cascades will be captured). */
+		bool ExclusionLive() const { return exclusionLive.load(std::memory_order_acquire); }
+		/** @brief After the sun's Accumulate: every cascade's activeLightMask bit this frame. */
+		std::uint32_t SunBits() const { return frameState.sunBits; }
 
 		/** @brief CS_DCLF_SUN_EXCLUDE=probe: the exclusion runs dry, and DCLF's sun bits are compared with the engine's. */
 		static bool ExclusionProbe();

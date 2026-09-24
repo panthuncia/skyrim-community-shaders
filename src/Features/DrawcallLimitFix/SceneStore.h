@@ -775,12 +775,20 @@ namespace DCLF
 		void DropSunCandidates();
 		/** @brief Whether a tracked geometry lets its sun entry leave the cascade culls (UpdateSunCandidates). */
 		static bool SunEntryAllows(const Tracked& a_tracked, bool a_switchNodes);
+		/**
+		 * @brief Whether a tracked geometry lets its entry leave the primary's cull (PrimaryCull): a main-pass table
+		 * object (a verdict of None) that is not a decal and not alpha-blended, whose main pass the synthetic pass
+		 * reproduces. Anything the main pass draws natively, or that the cull decides per frame (hidden, fading, a
+		 * switch child), keeps the entry in.
+		 */
+		static bool PrimaryEntryAllows(const Tracked& a_tracked, const RE::BSGeometry& a_geometry);
 		void MarkSunEntryDirty(const RE::NiAVObject* a_entry)
 		{
 			if (a_entry)
 				sunEntriesDirty.push_back(a_entry);
 		}
 		ankerl::unordered_dense::set<const RE::NiAVObject*> sunCandidateSet;
+		ankerl::unordered_dense::set<const RE::NiAVObject*> primaryEntrySet;  // the sun candidates PrimaryEntryAllows for every geometry
 		std::vector<const RE::NiAVObject*> sunEntriesDirty;
 		std::shared_ptr<const SunCandidates> sunCandidates;
 		std::uint32_t sunCandidatesGeneration = 0;

@@ -1445,6 +1445,7 @@ through: the shadow pipeline map ("Epochs that only submit") and the NPC head dr
 | `CS_DCLF_SUN_SKIP=1` | M1: the sun's registration of a claimed caster writes only its mask ("The sun without the engine's registration"). Needs static shadow ownership. Default on. Live toggle. |
 | `CS_DCLF_SUN_EXCLUDE=1\|0\|probe` | The entries whose content DCLF draws entirely leave the sun's cascade culls, and DCLF writes their sun bits ("The sun's cascades without DCLF's objects"). Needs `CS_DCLF_SUN_SKIP`. Default on. Live toggle. `probe`: a dry run that compares DCLF's bits with the engine's and counts the casters the exclusion would lose. |
 | `CS_DCLF_SUN_TIMING=1` | Diagnostic: times the render thread in the full-frustum cull, `Accumulate` and the sun's registrations. |
+| `CS_DCLF_PRIMARY_EXCLUDE=1\|0\|probe` | DCLF's references leave the main camera's cull and registration; DCLF builds their main passes and runs their fade updates ("The primary's cull without DCLF's objects"). Needs `CS_DCLF_SUN_EXCLUDE` and static ownership. Default on. Live toggle. `probe`: nothing is removed; the census of the lists and the synthetic pass against the registered one. |
 | `CS_DCLF_SKYLIGHT=1\|0` | With Skylighting loaded, DCLF draws its occlusion map and the engine's `SetupMask` is skipped ("Skylighting's occlusion map, drawn by DCLF"). Needs `CS_DCLF_SHADOWS`. Default on. Live toggle. |
 | `CS_DCLF_SKYLIGHT_PARITY=1` | Diagnostic: every 120th map is rendered by the engine and by DCLF in the same frame and compared texel by texel, with the occluders only DCLF drew; `CS_DCLF_SKYLIGHT_DUMP_DIR=<dir>` writes maps that differ over 5 % of their texels as 16-bit PGM. |
 | `CS_DCLF_SWITCH_NODES=1` | Leaves under an `NiSwitchNode` (trees, harvestables) are eligible in the frames every switch on their path selects them ("Trees and actors"). Default on. Live toggle. |
@@ -4383,3 +4384,90 @@ The differences above 1/256 are isolated single texels in tree canopies: alpha-t
 -   The engine's precipitation mask (when there is precipitation) is still the engine's.
 -   Switches: the menu's "Draw Skylighting's occlusion map" (`CS_DCLF_SKYLIGHT`, default on) needs DCLF's shadow
     views.
+
+## The primary's cull without DCLF's objects (Phase 1 of the GPU-driven frame)
+
+The main camera culled and registered every object DCLF draws, only for `PassCapture` to capture the passes and
+withhold them. At Riverwood that was about 1.0 ms of cull and 0.9 ms of registration on job threads, and a 0.4-0.7 ms
+wait on the render thread (`PreparePlayerView`). `PrimaryCull` takes DCLF's references out of that cull
+([dclf-gpu-driven-frame.md](./dclf-gpu-driven-frame.md), "Phase 1, step 1" for the measurements it rests on).
+
+**Where to cut.** Each primary list job culls its own scene list (engine notes, "The primary's cull"). Nothing reads
+the lists between the sun's full-frustum cull and the list jobs' `Finish`, so an entry taken out right after the first
+and put back right after the second leaves only the primary: its traversal, `OnVisible`, the main registration and the
+depth-prepass registration. The restore moves the entries back into their slots, so no reference count changes.
+
+**Which entries** (render thread, `PrimaryCull::FilterLists`):
+
+-   A sun entry candidate whose every tracked geometry is also a main-pass table object that is neither a decal nor
+    alpha-blended (`SceneStore::PrimaryEntryAllows`, kept with the sun's verdict in the candidates' snapshot as
+    `SunCandidates::primary`).
+-   Whose nodes need nothing from `OnVisible` but what DCLF does itself: plain nodes and multibounds, under a root that
+    may be a `BSFadeNode` or a `BSLeafAnimNode` (the plan, once per snapshot). Trees, switch nodes and other node
+    classes keep the entry in.
+-   Whose root is not fading (`currentFade` and `fadeAmount` both 1).
+-   Admitted: DCLF drew every geometry under it in the last frame the entry was in the lists. Having drawn it is the
+    evidence that it can be drawn; an admitted entry stays out while the rest holds.
+-   Entry 0 of each list stays, because the job's first entry sets its process's frustum up (`Process2`).
+-   Frame preconditions: the sun's entry exclusion is live (its cascades are captured), and no local light cast shadows
+    last frame (a synthetic pass has no point-light shadow). Otherwise, and whenever the candidates changed, the
+    engine culls everything.
+
+**What stands in for the cull** (`AfterListJobs`, after `Finish`):
+
+-   Each left-out entry's bound is tested against the main camera's planes, the list process's as the job set them up.
+-   For a visible fade root, DCLF runs `OnVisible`'s fade and LOD update itself (`ServiceFade`):
+    -   `FUN_14147a160` (the fade state machine), `OnVisible`'s own branch for LOD type 6, and for a leaf-animated node
+        `FUN_14147b110` and `FUN_14147a430` first;
+    -   then the last-visible stamp.
+    -   A root that has faded out draws nothing, as the engine's recursion would stop there.
+    -   One that has started to fade is the engine's for the frame: its geometries go into the list process's output
+        (`objectArray`), which the registration jobs walk as they walk what the cull found. The next frame's filter
+        keeps it in.
+-   Every geometry under a visible entry that is not app-culled has its `activeLightMask` cleared, as the main
+    registration's `0xFFFF` would have.
+-   It also gets a synthetic main pass (`SyntheticPass`), which the accumulate phase takes as if the engine had
+    registered it:
+    -   the derived pass descriptor (cached per property, material, flags and fade state);
+    -   the sun's bits from the cascade test (`SunShadowBits`: the engine's rule in `GetRenderPasses`, with the mask
+        replaced by the geometry's bound against the cascades' own planes);
+    -   the batch list, the accumulation hint and the LOD row.
+-   A synthetic pass the colour epoch did not draw is a hole (the hole detector counts them with the others).
+
+**The gate** was a dry run first (`CS_DCLF_PRIMARY_EXCLUDE=probe`), which compared the synthetic pass with the engine's
+registered one for every object under a listed candidate. Riverwood, per frame, 1,693 objects:
+
+-   1,689 agreed in every field (technique, list, hint, LOD row), and 0 were not modelled.
+-   2-3 differed only in the sun's bits: cascade-edge objects the engine's node-level test spares, as in the sun's
+    exclusion.
+-   1 blended decal differed; decals and blended objects keep their entries in.
+
+**Result** (full featureset, Riverwood, SkyrimEngineTelemetry's coarse zones, 20 s captures):
+
+| ms per frame | Off | On |
+| --- | --- | --- |
+| Primary cull, job threads | 1.00 | 0.66-0.68 |
+| Primary registration, job threads | 0.93 | 0.53-0.56 |
+| Render thread, waiting on the primary's jobs | 0.69 | 0.44-0.47 |
+| Render thread, DCLF's filter, stand-in and synthetic passes | - | 0.23-0.25 |
+| `RenderPlayerView` without `Main::Update`'s share (all views) | 6.07 | 5.77 |
+
+-   About 600 of 4,140 list entries are left out; their 846 geometries a frame get synthetic passes; the captured
+    registrations fall from about 2,360 to 1,160.
+-   0 holes and 0 not modelled at Riverwood, and over `coc Whiterun` (about 220 entries out) and
+    `coc WhiterunDragonsreach` (an interior: the preconditions keep everything in). Capture parity OK, 0 derived-cache
+    differences, and the main pass's share of objects with the sun's shadow mask is unchanged (78.6 %).
+-   What keeps entries in, Riverwood (per snapshot): 1,822 by the snapshot's verdict (618 effect-shader and 248 blended
+    effect geometries, 280 switch children, 574 decals, 100 unsupported techniques), and 1,593 entries not yet drawn,
+    mostly out of view, which the engine rejects at the entry's bound.
+-   Switches: the menu's "Take DCLF's objects out of the engine's main camera cull" (`CS_DCLF_PRIMARY_EXCLUDE`, default
+    on) needs the sun's entry exclusion and static ownership. `probe` runs the census and the comparison instead.
+
+**Open:**
+
+-   The render thread's share (0.23 ms) eats most of the wait it removes: the filter is a hash lookup per list entry,
+    and the fade calls run on the render thread. Both belong on a worker, and the entry filter in the jobs themselves
+    (a `Process1` override on the list processes) would remove the list edits.
+-   Trees (`BSTreeNode`: its `OnVisible` height test and the tree clock's `kAccumulated`), switch nodes, decals (their
+    depth is the native depth pass's), actors (one entry holds them all) and portal interiors (rooms are the entries).
+-   Local shadow lights: the synthetic pass needs the shadow-light part of the light selection (`FUN_1414fcf80`).

@@ -1,6 +1,7 @@
 #include "SunAccumulation.h"
 
 #include "PassCapture.h"
+#include "PrimaryCull.h"
 #include "SceneStore.h"
 #include "ShadowProbe.h"
 #include "Switches.h"
@@ -309,6 +310,26 @@ namespace DCLF
 		stats.filterTicks += Now() - start;
 	}
 
+	std::optional<bool> SunAccumulation::InSunCascades(const RE::NiBound& a_bound) const
+	{
+		// The cascades are captured only on a frame whose full-frustum cull applied the entry exclusion.
+		if (!exclusionLive.load(std::memory_order_acquire))
+			return std::nullopt;
+		const auto& state = frameState;
+		bool captured = false;
+		for (std::uint32_t c = 0; c < state.cascadeCount && c < state.cascades.size(); ++c) {
+			const auto& cascade = state.cascades[c];
+			if (!cascade.captured)
+				continue;
+			captured = true;
+			if (!Outside(cascade.planes, cascade.planeMask, a_bound) && !(cascade.customMask && Outside(cascade.customPlanes, cascade.customMask, a_bound)))
+				return true;
+		}
+		if (!captured)
+			return std::nullopt;
+		return false;
+	}
+
 	std::uint32_t SunAccumulation::RemovedGeometryIndex(const RE::BSGeometry* a_geometry) const
 	{
 		const auto* exclusion = frameState.exclusion.get();
@@ -464,6 +485,8 @@ namespace DCLF
 								break;
 							}
 					}
+					if (PrimaryCull::Probe() && PrimaryCull::Get().Counting())
+						PrimaryCull::Get().NoteRegistration(a_accumulator, geometry);
 					if (SkylightProbeEnabled() && globals::features::skylighting.inOcclusion && At<std::uint32_t>(a_accumulator, 0x150) == 0x1C) {
 						const auto result = func(a_accumulator, a_geometry, a_arg);
 						NoteSkylightRegistration(geometry);

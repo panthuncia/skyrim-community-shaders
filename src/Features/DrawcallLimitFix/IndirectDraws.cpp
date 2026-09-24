@@ -16,6 +16,7 @@
 #	include "GpuTextures.h"
 #	include "LightingConstants.h"
 #	include "PassCapture.h"
+#	include "PrimaryCull.h"
 #	include "SceneStore.h"
 #	include "ShaderPrograms.h"
 #	include "ShadowViews.h"
@@ -5976,6 +5977,22 @@ namespace DCLF
 						drawn == impl->drawnFrame.end() ? std::string("never") : fmt::format("{} frames ago", frame - drawn->second));
 				}
 			}
+		}
+		// The primary's left-out objects (PrimaryCull): nothing registered them, so a synthetic pass the colour epoch did
+		// not draw is a hole whatever the claims say.
+		for (const auto& [geometry, pass] : PrimaryCull::Get().SyntheticPasses()) {
+			const auto drawn = impl->drawnFrame.find(geometry);
+			if (drawn != impl->drawnFrame.end() && drawn->second == frame)
+				continue;
+			PrimaryCull::Get().CountHole();
+			++frameHoles;
+			bool fromAccumulate = false;
+			const Ineligible reason = store.ReasonThisFrame(geometry, &fromAccumulate);
+			++report.byReason[static_cast<std::size_t>(reason)];
+			if (report.samples++ < 30)
+				logger::info("[DCLF] hole, frame {}: '{}' left out of the primary's cull and not drawn - {} ({}), synthetic technique {:#x} list {}", frame,
+					geometry->name.c_str(), kIneligibleNames[static_cast<std::size_t>(reason)], fromAccumulate ? "this frame's accumulate phase" : "the scene phase",
+					pass.technique, pass.subPass);
 		}
 		++report.frames;
 		report.handedBack += captureStats.handedBack;

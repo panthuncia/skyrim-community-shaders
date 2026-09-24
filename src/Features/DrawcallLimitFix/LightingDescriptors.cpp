@@ -458,6 +458,13 @@ namespace DCLF
 			std::uint32_t d = technique << 24;
 			if (f & Bit(Flag::kVertexColors))
 				d |= Bit(LightingFlag::VC);
+			// GetRenderPasses copies the property's kSkinned straight into bit 1, whether or not the geometry has a
+			// skin (static fish and buckets carry it).
+			if (f & Bit(Flag::kSkinned))
+				d |= Bit(LightingFlag::Skinned);
+			// ProjectedUV is kProjectedUV itself; the snow conditions only add bits 19 and 21 on top (not derived).
+			if (f & Bit(Flag::kProjectedUV))
+				d |= Bit(LightingFlag::ProjectedUV);
 			if (f & Bit(Flag::kModelSpaceNormals))
 				d |= Bit(LightingFlag::ModelSpaceNormals);
 			if (f & (Bit(Flag::kSpecular) | Bit(Flag::kMultiIndexSnow)))
@@ -506,6 +513,8 @@ namespace DCLF
 			// the object stays opaque and the Z-prepass (which keeps the alpha test) dithers identically.
 			if ((d & Bit(LightingFlag::AdditionalAlphaMask)) && !FadingEnabled())
 				return Ineligible::Fading;
+			a_out.derivedSpecularLODFade = specularFade;
+			a_out.derivedEnvmapLODFade = envmapFade;
 			specularFade = a_property.specularLODFade;
 			envmapFade = a_property.envmapLODFade;
 			a_out.derivedPass = deriveNeeded && derivedReason == Ineligible::None ? derived : kNotDerived;

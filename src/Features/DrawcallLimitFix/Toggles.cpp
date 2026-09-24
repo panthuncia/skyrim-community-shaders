@@ -32,6 +32,7 @@ namespace DCLF
 			kSkipSunAccumulation,
 			kExcludeSunEntries,
 			kSkyOcclusion,
+			kExcludePrimaryEntries,
 		};
 
 		// Defaults: the configuration every gate run of this work used. An unset switch takes the default;
@@ -72,6 +73,8 @@ namespace DCLF
 			// `probe` runs the exclusion dry (SunAccumulation), which needs the toggle on.
 			set.excludeSunEntries = OnUnlessOff("CS_DCLF_SUN_EXCLUDE") || SwitchValue("CS_DCLF_SUN_EXCLUDE") == "probe";
 			set.skyOcclusion = OnUnlessOff("CS_DCLF_SKYLIGHT");
+			// `probe` is PrimaryCull's census, which removes nothing (and so leaves the cut off).
+			set.excludePrimaryEntries = OnUnlessOff("CS_DCLF_PRIMARY_EXCLUDE");
 			set.debugView = SwitchEnabled("CS_DCLF_DEBUG_VIEW");
 			set.hybridNoSkip = SwitchEnabled("CS_DCLF_HYBRID_NOSKIP");
 			set.onlyEligible = SwitchEnabled("CS_DCLF_ONLY_ELIGIBLE");
@@ -87,6 +90,7 @@ namespace DCLF
 			a_set.skipSunAccumulation = a_set.skipSunAccumulation && a_set.shadowOwnership;
 			a_set.excludeSunEntries = a_set.excludeSunEntries && a_set.skipSunAccumulation;
 			a_set.skyOcclusion = a_set.skyOcclusion && a_set.shadows;
+			a_set.excludePrimaryEntries = a_set.excludePrimaryEntries && a_set.excludeSunEntries && a_set.ownership && !a_set.cullTracked;
 			a_set.skinPartitions = a_set.skinPartitions && a_set.skinned;
 			return a_set;
 		}
@@ -139,6 +143,7 @@ namespace DCLF
 		put(kSkipSunAccumulation, s.skipSunAccumulation);
 		put(kExcludeSunEntries, s.excludeSunEntries);
 		put(kSkyOcclusion, s.skyOcclusion);
+		put(kExcludePrimaryEntries, s.excludePrimaryEntries);
 		return bits;
 	}
 
@@ -169,6 +174,7 @@ namespace DCLF
 		s.skipSunAccumulation = get(kSkipSunAccumulation);
 		s.excludeSunEntries = get(kExcludeSunEntries);
 		s.skyOcclusion = get(kSkyOcclusion);
+		s.excludePrimaryEntries = get(kExcludePrimaryEntries);
 		return s;
 	}
 

@@ -920,6 +920,35 @@ Measured at Riverwood (clear weather, so Skylighting's alone), render thread per
 -   **DCLF's variant** draws Skylighting's map itself when both run, and `SetupMask` is skipped
     (`drawcall-limit-fix.md`, "Skylighting's occlusion map, drawn by DCLF").
 
+## The primary's cull: the scene lists
+
+-   **The lists.** `DAT_14338c870` points at `DAT_14338c868` (6) `BSTArray<NiPointer<NiAVObject>>`, one per list job, filled
+    round robin by `DrawWorld_BuildSceneLists` (`0x14064bc20`) with reference roots (the children of the cell category
+    nodes 2, 3, 5, 6 and 7+; land, water and multibounds; in portal interiors, whole rooms), and `ObjectLODRoot`'s first
+    two children whole. Every actor hangs under `ObjectLODRoot`'s second child, which is one entry. `DAT_14338c888` is an
+    extra list only the first job culls (sky, weather, the LOD roots).
+-   **The order in `CalculateAndDrawShadowCasterLights`** (`0x1414cbb90`): the sun's full-frustum cull
+    (`FUN_141511f30(light, &DAT_14338c870, ...)`, the same lists), `FUN_1414a0840`, one job per list
+    (`ListAccumulationJob`, `FirstListAccumulationJob` for list 0), `CalculateActiveShadowCasterLights` (the sun's
+    `Accumulate` runs here, alongside the jobs), then `JobList::Finish` (`0x1414cbf4d`). Each job culls its list with its
+    own `BSGeometryListCullingProcess` (`DAT_14338c8a0[i]`, `cameraRelatedUpdates` and `updateAccumulateFlag` set); the
+    list's first entry goes through `Process2` (`0xB8`), which sets the frustum up, the rest through `Process1`.
+-   **The registration** (`FUN_1414cbff0`) queues two jobs that walk every list process's output: the depth prepass's
+    accumulator (`*0x14338c828`, render mode 0xC) and the main one (`*0x14338c830`, render mode 0, `+0x160` = `0xFFFF`).
+-   **`BSFadeNode::OnVisible`** (`0x141479f50`), for a process with `cameraRelatedUpdates`: nothing but the recursion
+    when fades are off (`0x142032dfd`) or the node is settled (flags bit 15 with `fadeAmount` (`+0x100`) and
+    `currentFade` (`+0x130`) at 1, which no node at Riverwood was). Otherwise `FUN_14147a160(node, fadeAmount,
+    {camera position, lodAdjust (+0x184)})` and the last-visible stamp (`+0x13C` = `0x142032e50`); for LOD type 6
+    (`+0x153 & 0xF`) with `0x14332a254 == 0x141769578`, its own short step instead. It recurses into the children only
+    while `currentFade > 0` and `fadeAmount != 0`. `BSLeafAnimNode::OnVisible` (`0x14147c9c0`) first runs
+    `FUN_14147b110` and `FUN_14147a430` (the leaf LOD) when `0x142032dfc` is set; `BSTreeNode::OnVisible`
+    (`0x14147d3c0`) also skips the node under a height test.
+-   **`GetRenderPasses`' sun bits** (`0x1414adfb0`): ShadowDir is the light selection's output (`FUN_1414fcf80`: the
+    incoming flag, and some mask bit naming the sun); DefShadow is the accumulator's deferred flag (`+0x178`) under alpha
+    and fade conditions, cleared without ShadowDir or a shadow light; both are cleared for a property with no shadow
+    passes unless flags `0x800c000100`. It copies `kSkinned` into descriptor bit 1 and `kProjectedUV` into bit 15.
+-   DCLF takes its references out of these lists (`drawcall-limit-fix.md`, "The primary's cull without DCLF's objects").
+
 ## The material database: how a material is shared and released
 
 `BSShaderProperty::SetMaterial` (`0x14147bff0`) never stores the material it is given. It asks the material manager

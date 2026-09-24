@@ -19,8 +19,8 @@ Riverwood, DCLF on (about 6,200 table objects, 10,000 tracked geometries):
 
 | Walk | Thread | Per | Cost / status |
 | --- | --- | --- | --- |
-| Main camera cull (`DrawWorld_BuildSceneLists`, list accumulation) | engine jobs; render thread waits at `Finish` | object | about 1.0 ms of job CPU; the main thread waits 0.38 ms (0 with DCLF off) |
-| Main camera registration (`GetRenderPasses` per visible object) | engine jobs during the shadow render (`FUN_1414cbff0`) | object | 0.81 ms of job CPU (0.32 with DCLF off: `PassCapture`'s hook); DCLF then withholds the passes |
+| Main camera cull (`DrawWorld_BuildSceneLists`, list accumulation) | engine jobs; render thread waits at `Finish` | object | DCLF's references out ([drawcall-limit-fix.md](./drawcall-limit-fix.md), "The primary's cull without DCLF's objects"): 1.0 -> 0.67 ms of job CPU, the wait 0.69 -> 0.45 ms; DCLF's stand-in 0.24 ms of render thread |
+| Main camera registration (`GetRenderPasses` per visible object) | engine jobs during the shadow render (`FUN_1414cbff0`) | object | 0.93 -> 0.54 ms of job CPU with the same cut; DCLF builds the left-out objects' passes itself |
 | Sun: full-frustum cull | jobs, render thread waits | object | 0.04 ms |
 | Sun: `Accumulate` (cascade culls, then registration or mask writes) | render thread | cascade × object | 0.10 ms with the entry exclusion: what is left is the actors and the entries with a native caster (0.59 with M1 alone, 0.69 without) |
 | Point and spot lights: `Accumulate` | render thread (`CalculateActiveShadowCasterLights`) | light × object | not measured (interiors) |
@@ -370,6 +370,49 @@ set.
 skip a room, portal or multibound node, because the room state feeds Light Limit Fix's `RoomIndex`.
 
 **The main open item** is the engine's point-light selection rule (`FUN_1414fcf80`), needed only for parity mode.
+
+## Phase 1, step 1: the primary's scene lists, measured
+
+The primary's cull has one input per list job: the scene lists (`DAT_14338c870`, `DAT_14338c868` of them, 6),
+`BSTArray<NiPointer<NiAVObject>>` that `DrawWorld_BuildSceneLists` fills round robin with reference roots.
+`CalculateAndDrawShadowCasterLights` (`0x1414cbb90`) passes them to the sun's full-frustum cull (`FUN_141511f30`,
+whose `objectArray` entries the sun's exclusion already filters), then queues one `ListAccumulationJob` per list and
+waits in `JobList::Finish` (`0x1414cbf4d`). Nothing else reads the lists between those two points, so an entry removed
+there and put back after `Finish` leaves only the primary: its traversal, `OnVisible`, the main registration (mode 0,
+`*0x14338c830`) and the depth-prepass registration (mode 0xC, `*0x14338c828`). Entry 0 of each list stays, because
+`Process2` sets the process's frustum up from it.
+
+**The census** (`CS_DCLF_PRIMARY_EXCLUDE=probe`, `PrimaryCull`; Riverwood, per frame):
+
+| | |
+| --- | --- |
+| List entries | 4,140 in 6 lists (plus 6 in the first job's extra list) |
+| ... that are sun entry candidates (`SunCandidates`) | 4,016 (97 %); 478 candidates are not list entries (nested in multibounds) |
+| Main registrations | 2,360, of which 1,860 (79 %) under a listed candidate |
+| Depth-prepass registrations | the same 2,360 and 1,860 |
+| Not candidates | effect-shader FX (waterfalls, mist, snow), animated objects, `ObjectLODRoot`'s children |
+
+**Actors** are not list entries of their own: the player's third-person root hangs under a `BSMultiBoundNode` under
+`ObjectLODRoot`'s second child, which is one list entry holding every actor. Taking actors out needs the per-object cut
+(`Process1`, filtered on the list processes), not the entry filter.
+
+**What the objects under the candidates take from their registration** (the same probe, in the accumulate phase:
+1,693 registered objects a frame):
+
+-   None is ineligible or left underived, none has a shadowed point light (bits 6-8, Light Limit Fix's mask), none is
+    fading or screen-door, and no skinned LOD row differs.
+-   The derived pass descriptor differed outside the sun's bits on 171: the derivation left out `kSkinned` (bit 1,
+    which `GetRenderPasses` copies from the flag whether or not there is a skin: static fish, buckets) and
+    `kProjectedUV` (bit 15, which it sets from the flag alone; the snow conditions only add bits 19 and 21). Both are
+    derived now; 1 object a frame is left (a hint-3 decal's DoAlphaTest).
+-   **The sun's bits (13, 14) differ on 1,300**, as expected: the derivation never sets them. In `GetRenderPasses`
+    ShadowDir is the light selection's output (`FUN_1414fcf80`, from the sun's mask bits), and DefShadow is the
+    accumulator's deferred flag (`+0x178`) under alpha and fade conditions, cleared when there is neither ShadowDir nor a
+    shadow light, and both are cleared for a property with no shadow passes (`shadowMapOrMaskPasses`) unless flags
+    `0x800c000100` say otherwise. Everything but the mask is per property, so the per-frame input is only whether the
+    bound meets a cascade.
+-   The specular LOD fade differs on 20 (open), and 179 are decals (hints 2 and 3), whose depth the engine's depth
+    registration still draws.
 
 ## Relation to stage 3
 
