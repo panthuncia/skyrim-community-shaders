@@ -2,6 +2,7 @@
 
 #include "Switches.h"
 #include "Toggles.h"
+#include "VolumetricProbe.h"
 
 #include <span>
 
@@ -130,6 +131,7 @@ namespace DCLF
 		stats.withheld = withheld.exchange(0, std::memory_order_relaxed);
 		for (std::uint32_t m = 0; m < kShadowModes; ++m)
 			stats.shadowWithheld[m] = shadowWithheld[m].exchange(0, std::memory_order_relaxed);
+		stats.volumetricWithheld = volumetricWithheld.exchange(0, std::memory_order_relaxed);
 		lastDrain = { entries.data(), count };
 		handedBack.clear();
 		withheldThisFrame.clear();
@@ -238,8 +240,21 @@ namespace DCLF
 		static void thunk(RE::BSBatchRenderer* a_this, RE::BSRenderPass* a_pass, std::uint32_t a_techniqueID)
 		{
 			auto& capture = PassCapture::Get();
-			if (capture.bypassed.load(std::memory_order_acquire)) {
+			// [TEMP] CS_DCLF_VOLUMETRIC_PROBE: every Utility registration, and what the engine's took.
+			const bool probe = VolumetricProbe::Enabled() && a_pass && a_pass->shader && a_pass->shader->shaderType.get() == RE::BSShader::Type::Utility;
+			auto engine = [&] {
+				if (!probe) {
+					func(a_this, a_pass, a_techniqueID);
+					return;
+				}
+				LARGE_INTEGER start{}, end{};
+				QueryPerformanceCounter(&start);
 				func(a_this, a_pass, a_techniqueID);
+				QueryPerformanceCounter(&end);
+				VolumetricProbe::Get().OnRegister(a_this, a_pass, end.QuadPart - start.QuadPart);
+			};
+			if (capture.bypassed.load(std::memory_order_acquire)) {
+				engine();
 				return;
 			}
 			// Per-frame state is read once, here, and both decisions below use it.
@@ -249,9 +264,12 @@ namespace DCLF
 			// and DCLF owns the object outright. Everything the tables need is taken by Record.
 			const bool withheld = capture.Withhold(a_this, a_pass, fading);
 			capture.Record(a_this, a_pass, a_techniqueID, fading, withheld);
-			if (withheld)
+			if (withheld) {
+				if (probe)
+					VolumetricProbe::Get().OnRegister(a_this, a_pass, 0);
 				return;
-			func(a_this, a_pass, a_techniqueID);
+			}
+			engine();
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -281,11 +299,62 @@ namespace DCLF
 		return withheldThisFrame.contains(a_geometry) && !handedBack.contains(a_geometry);
 	}
 
+	namespace
+	{
+		bool volumetricHookInstalled = false;
+	}
+
+	bool PassCapture::VolumetricClaimsAvailable()
+	{
+		return volumetricHookInstalled;
+	}
+
+	/**
+	 * @brief The shadow modes' registration inserting an accumulation hint 8 pass (a volumetric-only caster)
+	 * into batch group 15: AE FUN_1414b2a60's direct call to FUN_1414f5090(batch, pass, 15, 0) at +0xFF. The
+	 * pass is withheld when the batch renderer is a shadow view's and DCLF's epoch drew the geometry under that
+	 * view's render mode; the claim set is the mode's one, which holds these casters only while DCLF draws the
+	 * copy's views (the inputs of a mode carry them only then).
+	 */
+	struct PassCapture::VolumetricGroupHook
+	{
+		static void thunk(RE::BSBatchRenderer* a_batch, RE::BSRenderPass* a_pass, std::uint32_t a_group, std::uint32_t a_arg)
+		{
+			auto& capture = PassCapture::Get();
+			if (a_pass && a_pass->geometry && !capture.bypassed.load(std::memory_order_acquire) && ShadowWithholdingEnabled()) {
+				if (const auto renderers = std::atomic_load(&capture.shadowRenderers)) {
+					if (const auto it = renderers->find(a_batch); it != renderers->end() && it->second < kShadowModes) {
+						const auto owned = std::atomic_load(&capture.shadowClaims[it->second]);
+						const bool claimed = owned && owned->contains(a_pass->geometry);
+						// [TEMP] CS_DCLF_CASCADE_PROBE: the engine's volumetric-only registrations belong to the view's
+						// caster set too, so the probe can compare them with DCLF's.
+						if (CascadeProbeEnabled()) {
+							std::lock_guard lock(capture.shadowRegistrationsLock);
+							if (capture.shadowRegistrations.size() < 65536)
+								capture.shadowRegistrations.push_back({ a_batch, a_pass->geometry, claimed });
+						}
+						if (claimed) {
+							capture.volumetricWithheld.fetch_add(1, std::memory_order_relaxed);
+							return;
+						}
+					}
+				}
+			}
+			func(a_batch, a_pass, a_group, a_arg);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
 	void PassCapture::Install()
 	{
 		if (installed)
 			return;
 		stl::write_vfunc<0x2, Hook>(RE::VTABLE_BSBatchRenderer[0]);
+		// AE only: the SE and VR offsets of the call are unverified (no database for them).
+		if (REL::Module::IsAE()) {
+			stl::write_thunk_call<VolumetricGroupHook>(REL::Offset(0x14b2b5f).address());
+			volumetricHookInstalled = true;
+		}
 		installed = true;
 		logger::info("[DCLF] pass capture installed on BSBatchRenderer::RegisterPass");
 	}

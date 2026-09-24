@@ -67,6 +67,15 @@ namespace DCLF
 		// so no shadow view's culling may accept it. Decided by the scene phase, which is before any
 		// shadow view is drawn.
 		kObjectNoShadow = 1u << 22,
+		// A volumetric-only caster (ShadowReject::VolumetricOnly): the engine draws it into the sun's volumetric
+		// lighting copy and nowhere else (batch group 15, accumulation hint 8). A shadow view of the copy draws
+		// only these inputs, and every other shadow view skips them (BuildDrawsLatch::cullFlags). Set by the
+		// scene phase, and only when PassCapture can withhold the copy's passes (VolumetricClaimsAvailable).
+		kObjectVolumetricOnly = 1u << 23,
+		// A shadow-only object: the main pass cannot take it (its Ineligible reason is one the shadow views do
+		// not care about, SceneStore::ShadowOnlyReason), but it is a shadow caster, so it has a record for the
+		// shadow epochs alone. It always has kObjectNoBindings; the accumulate phase and the main epochs skip it.
+		kObjectShadowOnly = 1u << 24,
 	};
 
 	/** @brief Rows of per-object extras in the row buffer: LandBlendParams, TextureProj x3, ProjectedUVParams x3. */

@@ -66,6 +66,7 @@ namespace DCLF
 			// CS_DCLF_SHADOW_OWNERSHIP=static: Utility passes kept out of the shadow views' batch renderers,
 			// by the view's render mode (plain 0xD, clamped 0xE, paraboloid 0xF).
 			std::array<std::uint32_t, 3> shadowWithheld{};
+			std::uint32_t volumetricWithheld = 0;  // volumetric-only passes (hint 8) kept out of batch group 15
 			std::uint32_t claimed = 0;   // objects DCLF said it owns
 			// Claimed but not drawn this frame. Withholding means nothing else will draw them either, so
 			// any of these is a visible hole - the one failure mode static ownership introduces.
@@ -126,6 +127,13 @@ namespace DCLF
 		}
 		/** @brief CS_DCLF_SHADOW_OWNERSHIP=static (live: Toggles.h): withhold claimed casters from the shadow views. */
 		static bool ShadowWithholdingEnabled();
+		/**
+		 * @brief Whether the volumetric lighting copy's passes can be withheld: its registration (accumulation
+		 * hint 8) bypasses RegisterPass - the shadow modes' registration (AE FUN_1414b2a60) inserts it into batch
+		 * group 15 with a direct call - so it needs a hook of its own on that call, which exists for AE only.
+		 * Until it is installed the volumetric-only casters stay the engine's.
+		 */
+		static bool VolumetricClaimsAvailable();
 		/**
 		 * @brief Whether the pass is one DCLF leaves to the native loop because of a fade, as it is registered:
 		 * any accumulation hint 10 (the stencil-dithered fade, and a LOD cross-fade's copy of the old level), a
@@ -210,6 +218,9 @@ namespace DCLF
 		std::shared_ptr<const ShadowRendererMap> shadowRenderers;
 		std::array<std::shared_ptr<const ClaimSet>, kShadowModes> shadowClaims;
 		std::array<std::atomic<std::uint32_t>, kShadowModes> shadowWithheld{};
+		std::atomic<std::uint32_t> volumetricWithheld{ 0 };
+		struct VolumetricGroupHook;
+		friend struct VolumetricGroupHook;
 
 		struct Hook;
 		friend struct Hook;

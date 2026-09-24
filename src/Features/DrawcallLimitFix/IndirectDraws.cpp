@@ -78,11 +78,11 @@ namespace DCLF
 		constexpr std::uint64_t kShadowViewSlotBytes = 256 + 1024;
 		constexpr std::uint64_t kShadowMaterialBlocksOffset = kShadowViewSlotBytes * kMaxShadowViews;
 		// [0] kSHADOWMAPS_ESRAM (cascades, spot lights), [1] kSHADOWMAPS (point and focus lights), and
-		// [2] kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM, which DCLF leaves alone: the engine's
-		// second draw of the cascades into it, for the volumetric lighting, runs the same batch renderer with
-		// flag 0x100, and that draws batch group 15 alone (FUN_1414b44f0) - the passes registered with
-		// accumulation hint 8, which are the volumetric-only casters (ShadowReject::VolumetricOnly), unclaimed
-		// and so drawn by the engine. See ExecuteShadowView.
+		// [2] kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM, the volumetric lighting copy: the engine's second draw of
+		// each cascade's accumulator, with flag 0x100, draws batch group 15 alone (FUN_1414b44f0) - the passes
+		// registered with accumulation hint 8, which are the volumetric-only casters
+		// (ShadowReject::VolumetricOnly). DCLF's views of it draw those casters alone (kCullVolumetricOnly).
+		// See ExecuteShadowView.
 		constexpr std::uint32_t kShadowDepthTargets = 3;
 		constexpr std::uint32_t kMaxDraws = 16384;
 		constexpr std::uint64_t kConstantBytes = 48ull << 20;
@@ -164,6 +164,9 @@ namespace DCLF
 		// submits an input for every candidate so the culling covers them all, but builds records only for
 		// the ones it may draw.
 		constexpr std::uint32_t kInputDrawable = 1u << 16;
+		// A shadow input whose entry is outside the sun's full-frustum processes (OutsideSunEntry): the sun's views
+		// skip it (kCullSunEntry); a spot light's views, which share the mode's inputs, do not.
+		constexpr std::uint32_t kInputOutsideSunEntry = 1u << 25;
 		// Where phase 2 appends its sequences; see BuildDrawsCS.hlsl.
 		constexpr std::uint32_t kPhaseTwoSequenceBase = kMaxDraws;
 		// The decal ranges: one of kMaxDecalDraws fixed slots per group after phase 2's range. A decal's
@@ -252,6 +255,13 @@ namespace DCLF
 		// cullFlags: a clamped shadow view (0xE) pancakes casters in front of its near plane onto it
 		// (Utility.hlsl: RENDER_SHADOWMAP_CLAMPED), so the near plane rejects nothing there.
 		constexpr std::uint32_t kCullNoNearPlane = 0x200;
+		// cullFlags: which caster class a shadow view draws (kObjectVolumetricOnly). The mode's inputs hold both
+		// classes; a view of the volumetric lighting copy draws the volumetric-only casters alone, every other
+		// shadow view everything else. Neither is set for the main camera.
+		constexpr std::uint32_t kCullCastersOnly = 0x400;
+		constexpr std::uint32_t kCullVolumetricOnly = 0x800;
+		// cullFlags: a view of the sun (its cascades and their volumetric copies), which skips kInputOutsideSunEntry.
+		constexpr std::uint32_t kCullSunEntry = 0x1000;
 
 		// A draw's ExecuteIndirect max count: a power of two that only grows, so the recording settles while
 		// the preprocess memory stays near what the frame draws (the GPU count buffer says how many run).
@@ -2019,8 +2029,16 @@ namespace DCLF
 			RE::NiPoint3 refEye;
 			std::array<bool, kShadowModeCount> modeUsed{};
 			// Per mode, the rasterizer states of its views (bit DrawPipelines::ShadowRasterStateId): a caster is
-			// an input only when its pipeline is ready under every one of them.
+			// an input only when its pipeline is ready under every state of the views that draw its class. Bits
+			// 0-15 are the states of the views of ordinary casters, bits 16-31 those of the views of the
+			// volumetric lighting copy, which draw the volumetric-only casters alone (kObjectVolumetricOnly).
 			std::array<std::uint32_t, kShadowModeCount> modeRasterStates{};
+			// The sun's full-frustum culling processes' planes ((normal, constant), inside where
+			// dot(normal, p) - constant >= 0) and their active masks, as the full-frustum cull (FUN_141511f30)
+			// has just used them: an object whose entry (SceneStore::Tables::sunEntry) is outside every process
+			// is no candidate of the sun's cascade culls (kInputOutsideSunEntry).
+			std::vector<std::array<float, 4>> sunEntryPlanes;  // 6 per process
+			std::vector<std::uint32_t> sunEntryPlaneMasks;     // 1 per process
 			ResourceAddresses addresses{};
 			// Community Shaders' SharedData (b5) and FeatureData (b6), copied from the structs CS keeps.
 			std::vector<std::byte> sharedData, featureData;
@@ -2429,6 +2447,11 @@ namespace DCLF
 			for (std::uint32_t o = 0; o < a_tables.objects.size(); ++o) {
 				currentObject = o;
 				const auto& object = a_tables.objects[o];
+				// A shadow-only record is no main-pass object at all, not even a culling candidate.
+				if (object.flags & kObjectShadowOnly) {
+					skip(Skip::CandidateOnly);
+					continue;
+				}
 				if (object.flags & kObjectNoBindings) {
 					// A culling candidate with no material or pipeline entry; its indices are meaningless.
 					// The depth segment still submits it cull-only, with its bounds: that is what the tables
@@ -3052,6 +3075,29 @@ namespace DCLF
 			return claims;
 		}
 
+		// Whether an object's entry is outside every one of the sun's full-frustum processes, so the sun's cascade
+		// culls never reach it (ShadowInputs::sunEntryPlanes).
+		bool OutsideSunEntry(const ShadowInputs& a_in, const SceneStore::Tables& a_tables, std::size_t a_object)
+		{
+			if (a_in.sunEntryPlaneMasks.empty() || a_object >= a_tables.sunEntry.size())
+				return false;
+			const auto& entry = a_tables.sunEntry[a_object];
+			if (entry[3] < 0.0f)
+				return false;
+			for (std::size_t process = 0; process < a_in.sunEntryPlaneMasks.size(); ++process) {
+				bool outside = false;
+				for (std::uint32_t p = 0; p < 6 && !outside; ++p) {
+					if (!(a_in.sunEntryPlaneMasks[process] & (1u << p)))
+						continue;
+					const auto& plane = a_in.sunEntryPlanes[process * 6 + p];
+					outside = plane[0] * entry[0] + plane[1] * entry[1] + plane[2] * entry[2] - plane[3] < -entry[3];
+				}
+				if (!outside)
+					return false;
+			}
+			return true;
+		}
+
 		void BuildShadowPayload(const ShadowInputs& a_in, const SceneStore::Tables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out)
 		{
 			a_out.Reset();
@@ -3170,6 +3216,12 @@ namespace DCLF
 					const auto& object = a_tables.objects[o];
 					if ((object.flags & kObjectNoShadow) || objectRecord[o] == ~0u)
 						continue;
+					// The states of the views that draw this caster's class. A volumetric-only caster with no view
+					// of the copy under this mode is no input at all: it is then the engine's, unclaimed.
+					const bool volumetricOnly = (object.flags & kObjectVolumetricOnly) != 0;
+					const std::uint32_t classStates = volumetricOnly ? (a_in.modeRasterStates[m] >> 16) : (a_in.modeRasterStates[m] & 0xFFFFu);
+					if (volumetricOnly && classStates == 0)
+						continue;
 					const std::uint32_t technique = a_tables.shadowTechnique[o] | modeBits;
 					const ShadowPipelineKey key{ technique, (object.flags & kObjectTwoSided) ? kRasterTwoSided : 0u,
 						VertexLayoutOf(a_tables.geometries[object.geometryIndex].vertexDesc) };
@@ -3182,7 +3234,7 @@ namespace DCLF
 					// Every view of the mode has to be able to draw it: the claim withholds the engine's pass
 					// from all of them, so a view without the pipeline would leave the caster to nobody.
 					bool deferred = false, missing = false;
-					for (std::uint32_t states = a_in.modeRasterStates[m]; states; states &= states - 1) {
+					for (std::uint32_t states = classStates; states; states &= states - 1) {
 						const auto& row = a_lookups.shadowMapRows[std::countr_zero(states)];
 						const std::uint32_t pipeline = slotIt->second < row.size() ? row[slotIt->second] : Lookups::kNone;
 						if (pipeline == Lookups::kNone) {
@@ -3191,12 +3243,13 @@ namespace DCLF
 							(pipelineIt == a_lookups.shadowPipelines.end() ? deferred : missing) = true;
 						}
 					}
-					if (deferred || missing || a_in.modeRasterStates[m] == 0) {
+					if (deferred || missing || classStates == 0) {
 						a_out.deferredPipelines += deferred ? 1 : 0;
 						++a_out.skippedPipeline;
 						continue;
 					}
-					inputs.push_back({ slotIt->second, objectRecord[o], object.geometryIndex, (object.flags & ~kObjectDecal) | kInputDrawable,
+					inputs.push_back({ slotIt->second, objectRecord[o], object.geometryIndex,
+						(object.flags & ~kObjectDecal) | kInputDrawable | (OutsideSunEntry(a_in, a_tables, o) ? kInputOutsideSunEntry : 0u),
 						{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2] }, object.boundRadius, static_cast<std::uint32_t>(o), 0,
 						PartitionsOf(a_tables, static_cast<std::uint32_t>(o)) });
 				}
@@ -3352,7 +3405,7 @@ namespace DCLF
 					const std::uint32_t slot = slotIt->second;
 					const auto* program = programs.FindShadow(slotKey.technique, *utility);
 					// The key under each rasterizer state its mode's views draw with.
-					for (std::uint32_t states = a_modeRasterStates[m]; states; states &= states - 1) {
+					for (std::uint32_t states = (a_modeRasterStates[m] & 0xFFFFu) | (a_modeRasterStates[m] >> 16); states; states &= states - 1) {
 						const auto state = static_cast<std::uint32_t>(std::countr_zero(states));
 						const ShadowPipelineKey viewKey{ slotKey.technique, WithShadowState(slotKey.rasterFlags, state), slotKey.vertexLayout };
 						const std::uint32_t set = program ? pipelines.FindShadow(viewKey, *program, a_dsvFormat) : DrawPipelines::kNotReady;
@@ -3403,7 +3456,8 @@ namespace DCLF
 		{
 			return a_job.frameNumber == a_epoch.frameNumber && a_job.renderFlags == a_epoch.renderFlags &&
 			       std::memcmp(&a_job.refEye, &a_epoch.refEye, sizeof(RE::NiPoint3)) == 0 && a_job.modeUsed == a_epoch.modeUsed &&
-			       a_job.modeRasterStates == a_epoch.modeRasterStates &&
+			       a_job.modeRasterStates == a_epoch.modeRasterStates && a_job.sunEntryPlanes == a_epoch.sunEntryPlanes &&
+			       a_job.sunEntryPlaneMasks == a_epoch.sunEntryPlaneMasks &&
 			       a_job.addresses == a_epoch.addresses && a_job.sharedData == a_epoch.sharedData && a_job.featureData == a_epoch.featureData &&
 			       a_job.lookupGeneration == a_epoch.lookupGeneration && a_job.tablesGeneration == a_epoch.tablesGeneration &&
 			       a_job.sceneRebuilds == a_epoch.sceneRebuilds;
@@ -3574,6 +3628,10 @@ namespace DCLF
 			float cullPlanes[6][4] = {};
 			std::uint32_t cullPlaneMask = 0;
 			std::uint32_t rasterState = 0;  // DrawPipelines::ShadowRasterStateId of the state the engine draws it with
+			// 0: ordinary casters (kObjectVolumetricOnly inputs skipped); 1: the volumetric lighting copy, which
+			// draws the volumetric-only casters alone.
+			std::uint32_t casterClass = 0;
+			bool sunView = false;  // the directional light's: its casters are its full-frustum entries' (kCullSunEntry)
 			float viewBlock[12] = {};  // PerTechnique: HighDetailRange, ParabolaParam, EyeDelta
 			std::array<std::byte, 1024> perFrame{};
 			std::uint32_t perFrameBytes = 0;
@@ -4170,9 +4228,10 @@ namespace DCLF
 		                                  target == RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM ? 2u :
 		                                                                                                                     ~0u;
 		// The volumetric lighting copy holds only the volumetric-only casters (batch group 15, which is all the
-		// engine's flag-0x100 draw of the view renders), none of them DCLF's: it is left to the engine whole.
-		// Drawing the casters there too filled 20 % more of it than the engine does.
-		if (target == RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM) {
+		// engine's flag-0x100 draw of the view renders): the view draws those alone (casterClass 1). Without the
+		// hook that withholds their passes (PassCapture::VolumetricClaimsAvailable) it is left to the engine whole.
+		const bool volumetricCopy = target == RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM;
+		if (volumetricCopy && !PassCapture::VolumetricClaimsAvailable()) {
 			++shadowStats.volumetricSkipped;
 			return;
 		}
@@ -4212,6 +4271,8 @@ namespace DCLF
 		view.targetIndex = targetIndex;
 		view.slice = slice;
 		view.rasterState = rasterState;
+		view.casterClass = volumetricCopy ? 1u : 0u;
+		view.sunView = shadowView->kind == ShadowViews::Kind::Directional;
 		if (auto* dsv = globals::game::renderer->GetDepthStencilData().depthStencils[target].views[0]) {
 			D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
 			dsv->GetDesc(&dsvDesc);
@@ -4314,7 +4375,7 @@ namespace DCLF
 		std::array<std::uint32_t, kShadowModeCount> modeRasterStates{};
 		for (const auto& view : pending) {
 			modeUsed[view.modeIndex] = true;
-			modeRasterStates[view.modeIndex] |= 1u << view.rasterState;
+			modeRasterStates[view.modeIndex] |= 1u << (view.rasterState + (view.casterClass ? 16u : 0u));
 		}
 		// One pipeline set per shadow map format: every target the engine has is D16 (engine notes), and a
 		// view whose target differed would rebuild the set on every epoch, so the first view's is taken.
@@ -4832,7 +4893,13 @@ namespace DCLF
 						};
 						ankerl::unordered_dense::set<const RE::BSGeometry*> dclfSet;
 						ankerl::unordered_dense::map<const RE::BSGeometry*, int> reasonOf;
+						std::uint32_t sunEntryRejected = 0;
 						for (const auto& input : inputs) {
+							// The sun's entry rule, as BuildDrawsCS applies it for the view (kCullSunEntry).
+							if (view.sunView && (input.flags & kInputOutsideSunEntry)) {
+								++sunEntryRejected;
+								continue;
+							}
 							const int reason = cull(input);
 							++byReason[reason];
 							if (input.objectIndex < tables.objectGeometry.size())
@@ -4926,8 +4993,8 @@ namespace DCLF
 						}
 						logger::info("[DCLF] cascade probe view {}: engine only {}, of them withheld (drawn by nobody) {}: rejected by DCLF x/y {}, before near {}, beyond far {}, engine volume {}, not an input {}",
 							view.viewId, engineOnly, engineOnlyWithheld, engineOnlyReason[1], engineOnlyReason[2], engineOnlyReason[3], engineOnlyReason[5], engineOnlyReason[6]);
-						logger::info("[DCLF] cascade probe view {} (slice {}, mode {:#x}): {} inputs; DCLF keeps {} (engine volume rejected {}, x/y rejected {}, before near {}, beyond far {}, w<=0 kept {}); engine registered {}; both {}, DCLF only {}, engine only {}",
-							view.viewId, view.slice, view.renderMode, inputs.size(), kept, byReason[5], byReason[1], byReason[2], byReason[3], byReason[4], engine.size(), both, dclfOnly, engineOnly);
+						logger::info("[DCLF] cascade probe view {} (slice {}, mode {:#x}): {} inputs; DCLF keeps {} (sun entry rejected {}, engine volume rejected {}, x/y rejected {}, before near {}, beyond far {}, w<=0 kept {}); engine registered {}; both {}, DCLF only {}, engine only {}",
+							view.viewId, view.slice, view.renderMode, inputs.size(), kept, sunEntryRejected, byReason[5], byReason[1], byReason[2], byReason[3], byReason[4], engine.size(), both, dclfOnly, engineOnly);
 						logger::info("[DCLF] cascade probe view {}: DCLF-only by radius <64 {} <256 {} <1024 {} <4096 {} more {}; centre depth before near {} inside {} beyond far {}; {} of them in another view's engine set; mean horizontal distance DCLF-only {:.0f}, both {:.0f}",
 							view.viewId, onlyByRadius[0], onlyByRadius[1], onlyByRadius[2], onlyByRadius[3], onlyByRadius[4], onlyZ[0], onlyZ[1], onlyZ[2], onlyInOtherView,
 							dclfOnly ? onlyDistance / dclfOnly : 0.0, both ? bothDistance / both : 0.0);
@@ -5063,7 +5130,8 @@ namespace DCLF
 				latch.dispatch[1] = 1;
 				latch.dispatch[2] = 1;
 				latch.drawCount = inputCount;
-				latch.cullFlags = view.hasViewProj ? (1u | (view.renderMode == 0xE ? kCullNoNearPlane : 0u)) : 0u;
+				latch.cullFlags = (view.hasViewProj ? (1u | (view.renderMode == 0xE ? kCullNoNearPlane : 0u)) : 0u) |
+				                  (view.casterClass ? kCullVolumetricOnly : kCullCastersOnly) | (view.sunView ? kCullSunEntry : 0u);
 				latch.cullPlaneMask = view.cullPlaneMask;
 				std::memcpy(latch.cullPlanes, view.cullPlanes, sizeof(latch.cullPlanes));
 				latch.visibilityStamp = frameNumber & 0x0FFFFFFFu;  // 28 bits: BuildDrawsCS keeps flags below it
@@ -5158,6 +5226,19 @@ namespace DCLF
 		in.refEye = shadowRefEye;
 		in.modeUsed = a_modeUsed;
 		in.modeRasterStates = a_modeRasterStates;
+		// The sun's full-frustum planes, read on the render thread after the full-frustum cull has run
+		// (NiCamera::CalculateAndDrawShadowCasterLights precedes both the build's kick and the views).
+		if (auto* node = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr)
+			if (auto* sun = node->GetRuntimeData().sunShadowDirLight)
+				for (const auto& process : sun->GetShadowDirectionalLightRuntimeData().fullFrustumCullingProcessArray) {
+					if (!process)
+						continue;
+					const auto& planes = process->planes;
+					for (std::uint32_t p = 0; p < 6; ++p)
+						in.sunEntryPlanes.push_back({ planes.cullingPlanes[p].normal.x, planes.cullingPlanes[p].normal.y, planes.cullingPlanes[p].normal.z,
+							planes.cullingPlanes[p].constant });
+					in.sunEntryPlaneMasks.push_back(planes.activePlanes.underlying() & 0x3Fu);
+				}
 		in.addresses.constants = a_resources.constantsAddress;
 		in.addresses.records = a_resources.recordsAddress;
 		in.addresses.objectsIndex = a_resources.objectsIndex;

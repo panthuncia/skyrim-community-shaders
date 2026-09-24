@@ -127,6 +127,7 @@ namespace DCLF
 					 differs("draws", a.draws, b.draws) || differs("skin partitions", a.skinPartitions, b.skinPartitions) || differs("bones", a.bones, b.bones) || differs("previous bones", a.previousBones, b.previousBones) ||
 					 differs("bone offsets", a.boneOffset, b.boneOffset) || differs("bone rows", a.boneRows, b.boneRows) ||
 					 differs("shadow techniques", a.shadowTechnique, b.shadowTechnique) || differs("shadow rejects", a.shadowReject, b.shadowReject) ||
+					 differs("sun entries", a.sunEntry, b.sunEntry) ||
 					 differs("shadow diffuse", a.shadowDiffuse, b.shadowDiffuse) || differs("shadow materials", a.shadowMaterial, b.shadowMaterial) || differs("shadow keys", a.shadowKeysUsed, b.shadowKeysUsed) ||
 					 differs("shadow textures", a.shadowTextureSet, b.shadowTextureSet) || differs("extra offsets", a.extraOffset, b.extraOffset) ||
 					 differs("geometry slots used", a.geometryLastUsed, b.geometryLastUsed));
@@ -153,6 +154,7 @@ namespace DCLF
 		extraOffset.clear();
 		shadowTechnique.clear();
 		shadowReject.clear();
+		sunEntry.clear();
 		shadowDiffuse.clear();
 		shadowMaterial.clear();
 		shadowTextureSet.clear();
@@ -198,6 +200,7 @@ namespace DCLF
 		extraOffset.clear();
 		shadowTechnique.clear();
 		shadowReject.clear();
+		sunEntry.clear();
 		shadowDiffuse.clear();
 		shadowMaterial.clear();
 		shadowTextureSet.clear();
@@ -450,6 +453,37 @@ namespace DCLF
 			}
 		}
 		addSource = previousSource;
+	}
+
+	std::array<float, 4> SceneStore::SunEntryOf(Tracked& a_tracked, const RE::BSGeometry& a_geometry)
+	{
+		constexpr std::array<float, 4> kNeverTested{ 0.0f, 0.0f, 0.0f, -1.0f };
+		if (!a_tracked.sunEntryResolved) {
+			a_tracked.sunEntryResolved = true;
+			auto* geometry = const_cast<RE::BSGeometry*>(&a_geometry);
+			if (auto* reference = geometry->GetUserData()) {
+				// An actor's entry is its cell's container, which the full-frustum cull never tests.
+				if (reference->GetFormType() == RE::FormType::ActorCharacter) {
+					a_tracked.sunEntryNode = nullptr;
+				} else {
+					const RE::NiAVObject* root = geometry;
+					for (auto* node = geometry->parent; node && node->GetUserData() == reference; node = node->parent)
+						root = node;
+					a_tracked.sunEntryNode = root;
+				}
+			} else {
+				static const REL::Relocation<const RE::NiRTTI*> multiBound{ RE::BSMultiBoundNode::Ni_RTTI };
+				for (auto* node = geometry->parent; node; node = node->parent)
+					if (node->GetRTTI() == multiBound.get()) {
+						a_tracked.sunEntryNode = node;
+						break;
+					}
+			}
+		}
+		if (!a_tracked.sunEntryNode)
+			return kNeverTested;
+		const auto& bound = a_tracked.sunEntryNode->worldBound;
+		return { bound.center.x, bound.center.y, bound.center.z, bound.radius };
 	}
 
 	void SceneStore::AddGeometry(RE::BSGeometry* a_geometry, RE::NiNode* a_categoryNode, Ineligible a_parentReason)
@@ -1420,6 +1454,35 @@ namespace DCLF
 		{
 			return a_reason == Ineligible::Decal;
 		}
+
+		/**
+		 * @brief Whether an object the main pass cannot take is still a shadow caster DCLF can draw: its reason is
+		 * one the shadow views are indifferent to, and the engine would draw it into a shadow map. Measured
+		 * (CS_DCLF_VOLUMETRIC_PROBE, the engine's cascade draws with DCLF on) and reverse engineered per reason:
+		 * - Technique: the lighting technique is outside the main pass's set (the terrain's landscape blocks);
+		 *   a shadow view draws the Utility technique, which ShadowUtilityTechnique derives from the property.
+		 * - UnsupportedParent: under a BSOrderedNode (hay), which orders blended draws and nothing else.
+		 * Not a billboard: NiBillboardNode turns to the culling camera, which for a shadow view is the light's.
+		 */
+		bool ShadowOnlyReason(Ineligible a_reason)
+		{
+			return a_reason == Ineligible::Technique || a_reason == Ineligible::UnsupportedParent;
+		}
+
+		// CS_DCLF_SHADOW_ONLY=0 turns shadow-only objects off (default on).
+		bool ShadowOnlyEnabled()
+		{
+			static const bool enabled = SwitchValue("CS_DCLF_SHADOW_ONLY") != "0";
+			return enabled;
+		}
+
+		bool ShadowOnlyCaster(Ineligible a_reason, RE::BSGeometry& a_geometry)
+		{
+			if (!ShadowOnlyEnabled() || !ShadowOnlyReason(a_reason))
+				return false;
+			const auto reject = ShadowCasterReject(a_geometry.GetGeometryRuntimeData().shaderProperty.get(), &a_geometry);
+			return reject == ShadowReject::None || (reject == ShadowReject::VolumetricOnly && PassCapture::VolumetricClaimsAvailable());
+		}
 	}
 
 	void SceneStore::BuildFrame(Phase a_phase)
@@ -1598,6 +1661,7 @@ namespace DCLF
 			// would leave an accumulated object without a record, so that phase clears the cache for it
 			// and counts it (stats.accumulatedWithoutRecord, the gate: 0 in steady state).
 			Ineligible reason;
+			bool shadowOnly = false;  // not the main pass's, but a caster the shadow epochs draw (kObjectShadowOnly)
 			if (trackedEntry->candidateFrame != 0 && frame - trackedEntry->candidateFrame < Tracked::kCandidateRefreshFrames) {
 				reason = trackedEntry->candidateReason;
 				// Under a switch node the verdict follows the switch's selection, which changes (a harvested
@@ -1608,7 +1672,8 @@ namespace DCLF
 					trackedEntry->candidateReason = reason;
 				}
 				++stats.ineligible[static_cast<std::size_t>(reason)];
-				if (reason != Ineligible::None && !DeferredToAccumulate(reason))
+				shadowOnly = reason != Ineligible::None && !DeferredToAccumulate(reason) && ShadowOnlyCaster(reason, *geometry);
+				if (reason != Ineligible::None && !DeferredToAccumulate(reason) && !shadowOnly)
 					continue;
 			} else {
 				LightingDescriptors descriptors;
@@ -1670,7 +1735,8 @@ namespace DCLF
 							++stats.rejectedOpaqueAlphaTest;
 					}
 				}
-				if (reason != Ineligible::None && !DeferredToAccumulate(reason))
+				shadowOnly = reason != Ineligible::None && !DeferredToAccumulate(reason) && ShadowOnlyCaster(reason, *geometry);
+				if (reason != Ineligible::None && !DeferredToAccumulate(reason) && !shadowOnly)
 					continue;
 			}
 
@@ -1752,7 +1818,7 @@ namespace DCLF
 			// BuildDrawsCS rejects an object with kObjectNoBindings before it looks at the indices.
 			object.materialIndex = 0;
 			object.pipelineIndex = 0;
-			object.flags = kObjectNoBindings;
+			object.flags = kObjectNoBindings | (shadowOnly ? kObjectShadowOnly : 0u);
 			// Two-sidedness is the property's, not the pass's: the shadow epochs key their pipelines on it
 			// before the accumulate phase has computed the static flags, and that phase derives the same bit.
 			if (auto* sceneProperty = data.shaderProperty.get(); sceneProperty && sceneProperty->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kTwoSided))
@@ -1806,8 +1872,13 @@ namespace DCLF
 			++stats.shadowRejects[static_cast<std::size_t>(shadowReject)];
 			ID3D11ShaderResourceView* shadowDiffuse = nullptr;
 			const RE::BSShaderMaterial* shadowMaterial = nullptr;
-			if (shadowReject == ShadowReject::None) {
+			// A volumetric-only caster is one too, for the views of the volumetric lighting copy alone, once the
+			// copy's passes can be withheld (PassCapture::VolumetricClaimsAvailable); until then it is the engine's.
+			const bool volumetricOnly = shadowReject == ShadowReject::VolumetricOnly && PassCapture::VolumetricClaimsAvailable();
+			if (shadowReject == ShadowReject::None || volumetricOnly) {
 				++stats.shadowCasters;
+				if (volumetricOnly)
+					object.flags |= kObjectVolumetricOnly;
 				const std::uint32_t shadowTechnique = ShadowUtilityTechnique(shadowProperty, geometry);
 				tables.shadowTechnique.push_back(shadowTechnique);
 				// An alpha-tested caster samples its diffuse: what the shadow epoch's binding record names, read
@@ -1831,6 +1902,7 @@ namespace DCLF
 				tables.shadowTechnique.push_back(0);
 			}
 			tables.shadowReject.push_back(static_cast<std::uint8_t>(shadowReject));
+			tables.sunEntry.push_back(SunEntryOf(*trackedEntry, *geometry));
 			tables.shadowDiffuse.push_back(shadowDiffuse);
 			tables.shadowMaterial.push_back(shadowMaterial);
 			// The extras rows are allocated by the accumulate phase, which is where the descriptors that
@@ -2168,6 +2240,12 @@ namespace DCLF
 			const std::uint32_t objectId = trackedEntry->objectId;
 			auto& object = tables.objects[objectId];
 			const std::uint32_t geometrySlot = object.geometryIndex;
+			// A shadow-only record: the main pass cannot take it, which the scene phase has already decided.
+			if (object.flags & kObjectShadowOnly) {
+				if (accumulated)
+					++stats.ineligibleDrawn[static_cast<std::size_t>(trackedEntry->candidateReason)];
+				continue;
+			}
 
 			auto& data = geometry->GetGeometryRuntimeData();
 			auto* property = data.shaderProperty.get();
@@ -2421,7 +2499,7 @@ namespace DCLF
 			// record the scene phase appended, at the index that phase fixed.
 			object.materialIndex = materialSlot;
 			object.pipelineIndex = pipelineSlot;
-			object.flags = (object.flags & (kObjectSkinned | kObjectNoShadow)) | staticFlags | (accumulated ? kObjectNativeVisible : 0u);
+			object.flags = (object.flags & (kObjectSkinned | kObjectNoShadow | kObjectVolumetricOnly | kObjectShadowOnly)) | staticFlags | (accumulated ? kObjectNativeVisible : 0u);
 			tables.draws[objectId].pipelineIndex = pipelineSlot;
 			float emissiveMult = 1.0f;
 			tables.shading[objectId] = MakeShading(*static_cast<RE::BSLightingShaderProperty*>(property), descriptors, mainPassRenderFlags, emissiveMult);

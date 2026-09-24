@@ -129,6 +129,10 @@ namespace DCLF
 			// runs. 0 and ShadowReject::NotLighting for an object that is not a caster.
 			std::vector<std::uint32_t> shadowTechnique;  // parallel to objects
 			std::vector<std::uint8_t> shadowReject;      // parallel to objects (ShadowReject)
+			// The bound of the object's entry in the sun's full-frustum culling processes (their objectArray,
+			// which the cascade culls walk): centre and radius, absolute world space; a negative radius when the
+			// entry is never tested (an actor's, whose entry is its cell's container). SceneStore::SunEntryOf.
+			std::vector<std::array<float, 4>> sunEntry;  // parallel to objects
 			// What an alpha-tested caster's shadow draw samples: its material's diffuse view, and the material
 			// as the key its binding record is shared under. Read off the property here; the shadow epoch's
 			// build reads only the material's texture transform, which shader-property controllers
@@ -628,7 +632,20 @@ namespace DCLF
 			// and every consumer already has the entry (the accumulate phase) or looks it up by the same key.
 			std::uint32_t objectStamp = 0;
 			std::uint32_t objectId = 0;
+			// The node whose bound decides whether the object is a sun caster candidate (SunEntryOf), resolved
+			// once: the scene graph above a tracked geometry does not change while it is tracked.
+			const RE::NiAVObject* sunEntryNode = nullptr;
+			bool sunEntryResolved = false;
 		};
+		/**
+		 * @brief The object's entry bound for the sun's cascade culls. The cascade cull (FUN_140e305c0) walks
+		 * only the entries of the full-frustum culling processes' objectArray, which the full-frustum cull
+		 * (FUN_141511f30) fills with the items passing their planes. Measured (CS_DCLF_CASCADE_PROBE, 0 false
+		 * rejects): a static reference's entry is its reference root (the topmost ancestor carrying the
+		 * geometry's userData); an actor's is its cell's container, never tested; a geometry without a
+		 * reference (a terrain block) has its nearest BSMultiBoundNode.
+		 */
+		static std::array<float, 4> SunEntryOf(Tracked& a_tracked, const RE::BSGeometry& a_geometry);
 
 		void RefreshCategoryNodes(bool a_force = false);
 		// The signature the category set was last rebuilt for, and how many Presents it has been

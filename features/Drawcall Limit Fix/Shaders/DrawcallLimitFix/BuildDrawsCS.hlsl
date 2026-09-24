@@ -126,12 +126,22 @@ bool RequireNativeVisible() { return (CullFlags & 0x100) != 0; }
 // A clamped shadow view (render mode 0xE) pancakes what lies in front of its near plane onto it
 // (Utility.hlsl: RENDER_SHADOWMAP_CLAMPED), so a caster there still writes depth and must be kept.
 bool NoNearPlane() { return (CullFlags & 0x200) != 0; }
+// Which caster class a shadow view draws (IndirectDraws.cpp: kCullCastersOnly, kCullVolumetricOnly): a view of
+// the volumetric lighting copy draws the volumetric-only casters alone, every other shadow view the rest.
+bool CastersOnly() { return (CullFlags & 0x400) != 0; }
+bool VolumetricOnly() { return (CullFlags & 0x800) != 0; }
+// A view of the sun: an input whose entry is outside the sun's full-frustum processes is none of its casters
+// (IndirectDraws.cpp: kCullSunEntry, kInputOutsideSunEntry).
+bool SunEntry() { return (CullFlags & 0x1000) != 0; }
+static const uint kInputOutsideSunEntry = 1u << 25;
 
 uint2 HzbBaseSize() { return uint2(HzbSizePacked & 0xFFFF, HzbSizePacked >> 16); }
 float2 HzbUvScale() { return float2(HzbUvScalePacked & 0xFFFF, HzbUvScalePacked >> 16) / 65535.0; }
 
 // Object flags (Records.h), as the draw input carries them.
 static const uint kObjectNativeVisible = 1u << 3;
+// A volumetric-only caster (Records.h), drawn only by the views of the volumetric lighting copy.
+static const uint kObjectVolumetricOnly = 1u << 23;
 // A decal, with its group (1 = the engine's opaque decal group, 2 = the blended one) in bits 20-21.
 // Decals are never occluders: they are not submitted to the depth segment at all, and the colour segment
 // tests them ONCE, here, against the HZB rebuilt at the end of this frame's depth segment - which is final
@@ -353,6 +363,13 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	const bool drawable = (input.w & kInputDrawable) != 0;
 	const uint phase = CullPhase();
 	uint scratch;
+
+	// A shadow view draws one caster class: the mode's inputs hold both.
+	const bool volumetricCaster = (input.w & kObjectVolumetricOnly) != 0;
+	if ((CastersOnly() && volumetricCaster) || (VolumetricOnly() && !volumetricCaster))
+		return;
+	if (SunEntry() && (input.w & kInputOutsideSunEntry) != 0)
+		return;
 
 	// Decals: single-phase, fixed slot. Every decal input writes its slot, culled or not, so nothing a
 	// previous frame left there can be executed: a culled or undrawable decal writes the same sequence

@@ -11,18 +11,9 @@ The cascades' caster sets were fixed (see "The far cascade: DCLF drew the wrong 
 [drawcall-limit-fix.md](./drawcall-limit-fix.md)); the far cascade matches native within the scene's drift
 across a live toggle. What is left, at the road save:
 
--   **0-3 extra casters per far-cascade report** (`RockCliff08:0`, `L1_Thicket01`,
-    `NorTempleExteriorRib01:26`). Cause found, not fixed. The cascade cull (`FUN_140e305c0`) only walks the
-    entries of the directional light's `fullFrustumCullingProcessArray` processes' `objectArray`; every caster
-    both draw is under an entry, and every extra is not. An entry is an item a scene cull passed to
-    `BSCullingProcess::Process1` with `recurseToGeometry` off, tested against the processes' planes (equal to
-    their `customCullPlanes`, set by `UpdateCamera`, slightly tighter than a cascade's). Measured: static
-    references are entries one by one (the entry is the reference's root, the topmost node carrying the
-    geometry's `userData`), and testing that root's bound against the planes drops every extra with no false
-    rejects. But an actor's entry is its cell's category container, flagged `kAlwaysDraw` (bit 11) and so
-    never tested, and the static references' containers have the same flags; which items the scene cull
-    passes is decided by code not yet found (not `BSMultiBoundNode::OnVisible`, `BSFadeNode::OnVisible` or
-    `NiNode`'s). No visual effect: the extras lie outside the volume that holds every visible receiver.
+-   **0-3 extra casters per far-cascade report**: fixed by the sun's entry rule (see "Shadow-only casters,
+    and the sun's entry rule" in [drawcall-limit-fix.md](./drawcall-limit-fix.md)). What remains is 1-2
+    carried items a frame, pruned by the engine at a node below their actor's entry, with no visible effect.
 
 The near cascade's step and Volumetric Shadows' are fixed: see "Shadow views draw with the view's rasterizer
 state" and "The volumetric lighting copy is the engine's alone" in [drawcall-limit-fix.md](./drawcall-limit-fix.md).

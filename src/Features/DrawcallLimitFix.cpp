@@ -21,6 +21,7 @@
 #include "DrawcallLimitFix/SceneStore.h"
 #include "DrawcallLimitFix/SceneTracker.h"
 #include "DrawcallLimitFix/Switches.h"
+#include "DrawcallLimitFix/VolumetricProbe.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -110,9 +111,10 @@ namespace
 	};
 
 	/**
-	 * @brief Test switch CS_DCLF_TEST_TOGGLE="<off frame>:<on frame>": flips the feature's menu toggle (the
-	 * same disabled flag the feature list writes) at those frames, loading screens not counted, to exercise
-	 * switching DCLF off and back on in a running session. The flag is restored to on at the second frame.
+	 * @brief Test switch CS_DCLF_TEST_TOGGLE="<off frame>:<on frame>[:<off frame>:<on frame>...]": flips the
+	 * feature's menu toggle (the same disabled flag the feature list writes) at those frames, loading screens not
+	 * counted, to exercise switching DCLF off and back on in a running session: off at the first, on at the
+	 * second, and so on alternately.
 	 */
 	class TestToggle
 	{
@@ -120,26 +122,34 @@ namespace
 		TestToggle()
 		{
 			const std::string value = DCLF::SwitchValue("CS_DCLF_TEST_TOGGLE");
-			if (const auto colon = value.find(':'); colon != std::string::npos) {
-				offFrame = static_cast<std::uint32_t>(std::strtoul(value.substr(0, colon).c_str(), nullptr, 10));
-				onFrame = static_cast<std::uint32_t>(std::strtoul(value.substr(colon + 1).c_str(), nullptr, 10));
+			std::size_t start = 0;
+			while (start < value.size()) {
+				const auto colon = value.find(':', start);
+				const auto part = value.substr(start, colon == std::string::npos ? std::string::npos : colon - start);
+				if (const auto f = static_cast<std::uint32_t>(std::strtoul(part.c_str(), nullptr, 10)))
+					frames.push_back(f);
+				if (colon == std::string::npos)
+					break;
+				start = colon + 1;
 			}
 		}
 
 		void OnFrame(const std::string& a_feature)
 		{
-			if (!offFrame || DCLF::SceneStore::IsLoadingScreenUp())
+			if (frames.empty() || DCLF::SceneStore::IsLoadingScreenUp())
 				return;
 			++frame;
-			if (frame == offFrame || frame == onFrame) {
-				logger::info("[DCLF] test toggle at frame {}: {}", frame, frame == offFrame ? "off" : "on");
-				globals::state->SetFeatureDisabled(a_feature, frame == offFrame);
+			for (std::size_t i = 0; i < frames.size(); ++i) {
+				if (frame != frames[i])
+					continue;
+				const bool off = (i % 2) == 0;
+				logger::info("[DCLF] test toggle at frame {}: {}", frame, off ? "off" : "on");
+				globals::state->SetFeatureDisabled(a_feature, off);
 			}
 		}
 
 	private:
-		std::uint32_t offFrame = 0;
-		std::uint32_t onFrame = 0;
+		std::vector<std::uint32_t> frames;
 		std::uint32_t frame = 0;
 	};
 
@@ -277,6 +287,7 @@ void DrawcallLimitFix::PostPostLoad()
 	DCLF::PassCapture::Get().Install();
 	DCLF::MaterialSources::Install();
 	DCLF::ShadowProbe::Get().Install();
+	DCLF::VolumetricProbe::Get().Install();
 	Hooks::Install();
 	installed = true;
 	// The switches this process actually sees, once. Several reports below are gated on them, so without
@@ -780,6 +791,8 @@ void DrawcallLimitFix::Prepass()
 {
 	ProbeShadowMask(Running());
 	ProbeShadowMaps(Running());
+	if (DCLF::VolumetricProbe::Enabled())
+		DCLF::VolumetricProbe::Get().EndFrame(Running());
 	if (!Running())
 		return;
 
@@ -938,8 +951,8 @@ void DrawcallLimitFix::Prepass()
 					shadow.cullSampledView, shadow.cullSampledMode, shadow.cullTested, shadow.cullDrawn, shadow.cullRejected);
 			if (DCLF::PassCapture::ShadowWithholdingEnabled()) {
 				const auto& captured = DCLF::PassCapture::Get().GetStats();
-				logger::info("[DCLF] shadow ownership: withheld plain {} / clamped {} / paraboloid {} passes (last frame); claimed {} / {} / {} casters; {} views not ready under ownership{}",
-					captured.shadowWithheld[0], captured.shadowWithheld[1], captured.shadowWithheld[2], shadow.claimed[0], shadow.claimed[1], shadow.claimed[2],
+				logger::info("[DCLF] shadow ownership: withheld plain {} / clamped {} / paraboloid {} passes and {} volumetric-only passes (last frame); claimed {} / {} / {} casters; {} views not ready under ownership{}",
+					captured.shadowWithheld[0], captured.shadowWithheld[1], captured.shadowWithheld[2], captured.volumetricWithheld, shadow.claimed[0], shadow.claimed[1], shadow.claimed[2],
 					shadow.notReady, shadow.notReady ? " <- HOLES" : "");
 			}
 			DCLF::IndirectDraws::Get().ResetShadowStats();
@@ -1127,7 +1140,9 @@ bool DrawcallLimitFix::SkipNativePass(RE::BSRenderPass* a_pass)
 	if (onlyEligible) {
 		// Membership of this frame's tables, not what the epoch drew: the epoch only runs once the main pass
 		// has drawn, so a rule based on the frame before would skip everything and never start.
-		if (DCLF::SceneStore::Get().FindObject(a_pass->geometry) >= 0) {
+		const auto& parityStore = DCLF::SceneStore::Get();
+		const auto parityObject = parityStore.FindObject(a_pass->geometry);
+		if (parityObject >= 0 && !(parityStore.GetTables().objects[parityObject].flags & DCLF::kObjectShadowOnly)) {
 			++skipCounters.kept;
 			if (skipCounters.kept == 1)
 				logger::info("[DCLF] parity: keeping '{}' (depth pass {}, deferred {})", a_pass->geometry->name.c_str() ? a_pass->geometry->name.c_str() : "?",
@@ -1227,7 +1242,21 @@ void DrawcallLimitFix::Hooks::BSBatchRenderer_RenderPassImmediately<N>::thunk(RE
 
 void DrawcallLimitFix::Hooks::BSShaderAccumulator_FinishAccumulating::thunk(RE::BSGraphics::BSShaderAccumulator* a_accumulator, std::uint32_t a_renderFlags)
 {
-	func(a_accumulator, a_renderFlags);
+	// [TEMP] CS_DCLF_VOLUMETRIC_PROBE: the engine's CPU time drawing each shadow view, by target.
+	if (DCLF::VolumetricProbe::Enabled()) {
+		const auto probeMode = static_cast<std::uint32_t>(a_accumulator->GetRuntimeData().renderMode);
+		if (probeMode >= 0xD && probeMode <= 0xF) {
+			const auto target = static_cast<std::uint32_t>(globals::game::shadowState->GetRuntimeData().depthStencil);
+			DCLF::VolumetricProbe::Get().BeginFinish(target);
+			LARGE_INTEGER start{}, end{};
+			QueryPerformanceCounter(&start);
+			func(a_accumulator, a_renderFlags);
+			QueryPerformanceCounter(&end);
+			DCLF::VolumetricProbe::Get().OnFinish(a_accumulator, a_renderFlags, target, end.QuadPart - start.QuadPart);
+		} else
+			func(a_accumulator, a_renderFlags);
+	} else
+		func(a_accumulator, a_renderFlags);
 	// TEMP (CS_DCLF_CASCADE_PROBE): the fixed-function state the engine drew this shadow view with - the
 	// rasterizer bound on the context after its passes, and the renderer's bias and cull modes.
 	if (static const bool probe = DCLF::SwitchEnabled("CS_DCLF_CASCADE_PROBE"); probe) {

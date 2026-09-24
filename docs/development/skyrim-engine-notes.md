@@ -752,6 +752,79 @@ hemispheres, ~1,500 draws, 0.5 ms.
 **The volumetric copy (measured, S2).** Each cascade's accumulator is finished twice per frame: once
 with `depthStencil = kSHADOWMAPS_ESRAM` (target 2, 4096², two slices) and once with
 `kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM` (target 3, 512², two slices, `D16_UNORM` like the others) for
-the volumetric lighting. Both draws walk the same batch renderer, i.e. the same registered passes, so a
-pass withheld from that renderer is absent from both maps. `FinishAccumulatingPreResolveDepth` (vfunc
-0x2A) fires for each, with the same view (accumulator) and render mode 0xE.
+the volumetric lighting. `FinishAccumulatingPreResolveDepth` (vfunc 0x2A) fires for each, with the same
+view (accumulator) and render mode 0xE. They do **not** draw the same passes:
+
+-   `Render` draws the copies first, with flag `0x100`, and only while the byte at `0x142033498` is 2.
+    It is 2 in the current setup; the probe above ran with it at 1.
+-   The mode's draw function (`FUN_1414b44f0`, mode 0xE in the table at `0x14332b120`) draws only batch
+    group 15 when the flag is set, and never draws group 15 without it.
+-   Group 15 holds the passes registered with accumulation hint 8: the volumetric-only casters, meaning
+    Lighting objects without `kCastShadows` while the byte is 2.
+-   Measured (`CS_DCLF_VOLUMETRIC_PROBE`, road, Riverwood, Ivarstead, Winterhold): 71-93 geometries a
+    frame, all static `BSTriShape` terrain pieces (mountains, cliffs, road), none also drawn into a
+    cascade.
+
+**Registration by hint.** The shadow modes' registration function (`FUN_1414b2a60`, modes 0xC-0x11 of the
+table at `0x14332b020`, filled by `FUN_14147e2c0`) sends a pass with hint 11, 7, 3 or 8 straight into
+batch group 9, 1, 4 or 15 with `FUN_1414f5090(batch, pass, group)`, a direct call. Only the other hints
+go through `BSBatchRenderer::RegisterPass` (vfunc 2). The main mode (`FUN_1414b2330`) does the same for
+most hints. Confirmed for hint 8: `VolumetricProbe` saw none arrive at the `RegisterPass` hook, yet about 80
+a frame were drawn. **Unresolved for 3, 7 and 11:** the S1 probe above recorded hints 3, 7 and 11 at that
+hook. Those may be registrations into a geometry group's own batch renderer, which is a different path.
+Before relying on either reading for those hints, check it with a counter on the `FUN_1414f5090` call
+sites.
+
+**The sun's focus shadow is drawn every frame.** In the third-person exterior runs, the directional
+light draws one focus view a frame: target 4 (`kSHADOWMAPS`), slice 4, 546x546, flags `0x400`, about 9 NPC
+draws. It is accumulated by `BSShadowDirectionalLight::sub` (`0x1414f0480`, called from
+`CalculateAndDrawShadowCasterLights` when the setting byte `0x142032fd0` is set and `DAT_14332a498`
+counts focus descriptors). It is drawn by `Render`'s third loop (gated on `unk558`, view type 4).
+
+## The sun's accumulation: what it writes, and who reads it
+
+`NiCamera::CalculateAndDrawShadowCasterLights` (`0x1414cbb90`), for the sun, in order:
+
+1.  `UpdateCamera` (vfunc 0x10).
+2.  The focus accumulation, `BSShadowDirectionalLight::sub`, when enabled.
+3.  The mask bookkeeping: `light+0x520 = count`, and the frame's shadow-light bit into `DAT_14338c90c`.
+4.  The full-frustum cull, `FUN_141511f30(light, &DAT_14338c870, ...)`:
+    -   Per process in `light+0x580`, it queues a cull job (`FUN_1414bf730`) on the scene-list job list,
+        which fills that process's `objectArray` (`+0x128`, count `+0x138`).
+    -   It closes with `FUN_1414bf320(..., 1, 1)`, which culls with no accumulator.
+    -   The only consumer of these arrays found is `Accumulate`, which is passed
+        `&fullFrustumCullingProcessArray`.
+
+`BSShadowDirectionalLight::Accumulate` (vfunc 9, `0x141511c80`), per cascade:
+
+1.  It sets the cascade accumulator's `+0x160` to the global shadow-light count + 1 and `+0x164` to
+    `1 << count`, plus `+0x168` (the cascade index) and `+0x12E` (the volumetric flag).
+2.  `FUN_1414f0920` calls `FUN_1414b47d0(accumulator)`, which is an empty stub.
+3.  `FUN_1414bf320(..., 2)` walks each full-frustum process's `objectArray` against the cascade
+    (`FUN_140e305c0`). `FUN_140e28af0` then hands every culled geometry to the accumulator's registration,
+    `FUN_1414b2140`.
+4.  It **increments the global shadow-light count** (`*param_3 += 1`). The sun's two cascades take two
+    bits, and every later shadow light's bit is offset by them.
+
+`FUN_1414b2140`, for every geometry handed to it:
+
+-   It calls the mode's registration function. For shadows that is `FUN_1414b2a60`, which writes
+    `property->lastAccumulatedFrameCount = gFrameCounter` and registers the passes.
+-   Then **`property->lightData->activeLightMask |= accumulator+0x164`**. When `+0x160` is `0xFFFF`, it
+    clears the mask to 0 instead.
+-   The mask bit is set for every geometry that reaches the call, whether or not it produced a pass.
+
+**Who reads `activeLightMask`: the main pass.** `BSLightingShaderProperty::GetRenderPasses` reads it
+during the main camera's registration, which runs after the shadow lights accumulate:
+
+-   `lastRenderPassState = (mode << 8) | activeLightMask` decides whether the pass list is rebuilt.
+-   `FUN_1414fcdb0(lightData)` counts the non-directional shadow lights among the mask's bits
+    (`pass->shadowLightCount`).
+-   For the sun, it loops over `sunShadowDirLight->shadowMapCount` bits and stores the cascades this
+    object is registered in into pass byte `+0x1D`. When that is 0, the pass descriptor loses
+    `0x61C0`: ShadowDir (13), DefShadow (14) and the shadow light count (6-8).
+
+So an object samples the sun's shadow mask in the main pass only if the sun's accumulation registered it
+in a cascade that frame. Skipping that accumulation changes main-pass techniques unless those bits are
+set some other way. `lastAccumulatedFrameCount` has no reader found yet.
+

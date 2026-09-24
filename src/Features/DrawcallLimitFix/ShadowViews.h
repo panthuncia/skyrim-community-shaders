@@ -46,8 +46,9 @@ namespace DCLF
 		 * kCastShadows clear while the shadow global is 2 (volumetric lighting): a clamped view whose accumulator
 		 * has the volumetric flag (+0x12E, which BSShadowDirectionalLight::Accumulate always sets) gives it a pass
 		 * only in the property's volumetricShadowUtilityPasses, drawn into the volumetric lighting copy and never
-		 * into the sun's cascades. Not a DCLF caster: left unclaimed, the engine keeps drawing it wherever it
-		 * does draw it (that copy, and the point and spot lights, where it casts normally).
+		 * into the sun's cascades (batch group 15, accumulation hint 8). DCLF draws it in the copy's views alone
+		 * (kObjectVolumetricOnly) where PassCapture can withhold that pass (VolumetricClaimsAvailable: AE), and
+		 * leaves it to the engine otherwise.
 		 */
 		VolumetricOnly,
 		Count

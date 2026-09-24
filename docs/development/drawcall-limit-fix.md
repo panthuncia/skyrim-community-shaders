@@ -3817,7 +3817,7 @@ G-buffer after DCLF's colour pass matches native (`CS_DCLF_TARGET_PROBE`), and t
 unchanged. SARP and BasicRenderer set `frontCCW` true for glTF content and have not been run under Vulkan
 since; their D3D12 behaviour is unchanged.
 
-## The volumetric lighting copy is the engine's alone
+## The volumetric lighting copy: only the volumetric-only casters
 
 **Symptom:** Volumetric Shadows' copy of the near cascade (its mip 1, the nearer of the cascade and the
 volumetric lighting copy per texel) stepped at a live toggle, 0.2565 with DCLF against 0.2609, after both
@@ -3842,3 +3842,115 @@ volumetric views, filling far more of the copy than the engine does:
 (`ShadowStats::volumetricSkipped`). Across a toggle afterwards the copy's slices, both cascades and both
 Volumetric Shadows mips match within the drift between readings (slice 0 of the copy 0.4996 against 0.5006,
 37.1 % clear on both; VSM mip 1 0.2091 against 0.2094). DCLF now draws two views a frame instead of four.
+
+**Taking the copy over: measured, not done.** `CS_DCLF_VOLUMETRIC_PROBE=1` (TEMP, `VolumetricProbe.cpp`) counts
+every Utility draw the engine issues inside each shadow view (`BSUtilityShader::SetupGeometry`) and times the
+sun's CPU work. At the road save, Riverwood, Ivarstead and Winterhold:
+
+-   The copy is 71-93 geometries a frame, one draw each (75-94 draws), all hint 8, all static `STAT`
+    `BSTriShape` with `BSLightingShaderProperty` and no `kCastShadows`: mountains, cliffs, road pieces. None
+    is also drawn into a cascade. The engine's draw of both views costs 0.025-0.039 ms a frame.
+-   Their passes never reach `BSBatchRenderer::RegisterPass` (the `PassCapture` hook). `FUN_1414b2a60`, the
+    shadow modes' registration, inserts hints 11, 7, 3 and 8 straight into batch groups 9, 1, 4 and 15
+    with `FUN_1414f5090(batch, pass, group)`, a direct call; only the rest go through the vfunc. Claiming
+    them needs a thunk at that call.
+-   The sun's CPU, native against DCLF: cascade draws 0.29 / 0.76 ms (road / Riverwood, 690 / 2150 draws)
+    against 0.025 / 0.075 ms; `Accumulate` (the cascade culls and registration, `FUN_1414f0920` per
+    cascade) 0.17 / 0.44 ms against 0.22 / 0.54 ms; the full-frustum cull (`FUN_141511f30`) 0.04-0.05 ms.
+-   With DCLF on, the engine still draws 94 casters a frame into the cascades at Riverwood, all eligible
+    by the caster rule but not DCLF's yet: 49 `BSTriShape`, 45 `BSDynamicTriShape`.
+
+So the copy is about 80 draws and 0.03 ms. Taking it over pays only as part of retiring the sun's
+`Accumulate`, and that also needs the cascade residue above.
+
+**DCLF draws the copy (2026-09-23).** This is the first step towards retiring the sun's native
+accumulation.
+
+-   **Tables.** A `ShadowReject::VolumetricOnly` object becomes a shadow caster with
+    `kObjectVolumetricOnly` (`Records.h`), instead of `kObjectNoShadow`. It gets a Utility technique and a
+    pipeline key like any other caster.
+-   **One input list, two caster classes.** A render mode's inputs hold both classes.
+    -   A copy view's latch sets `kCullVolumetricOnly` (cull flag `0x800`) and draws the flagged inputs
+        alone.
+    -   Every other shadow view sets `kCullCastersOnly` (`0x400`) and skips them.
+    -   `BuildDrawsCS` drops the other class before any culling.
+-   **Pipeline readiness per class.** The mode's `modeRasterStates` word keeps the ordinary views' states
+    in bits 0-15 and the copy views' states in bits 16-31. A caster must be ready only in the states of the
+    views that draw its class. A volumetric-only caster with no copy view that frame is no input, and stays
+    the engine's.
+-   **Claims.** A volumetric-only pass never reaches `RegisterPass`. `PassCapture::VolumetricGroupHook`
+    thunks the shadow modes' direct insertion into group 15 (AE `FUN_1414b2a60` + 0xFF, `0x1414b2b5f`) and
+    withholds it when the mode's claim set holds the geometry.
+    -   The claim set stays one per mode. Its ordinary casters' passes reach only `RegisterPass`, and its
+        volumetric-only casters' passes reach only the group-15 call.
+    -   SE and VR: the call's offset is unverified, so `VolumetricClaimsAvailable()` is false there and
+        the copy stays the engine's, as before.
+
+**Result** at the road save across a live toggle, with 0 views not ready, all four sun views drawn a
+frame, and 77-79 volumetric-only passes withheld a frame. The engine's draws into the copy went from
+about 78 a frame to 0 with DCLF on.
+
+| | DCLF on | Native |
+| --- | --- | --- |
+| Copy slice 0: mean / clear | 0.5930 / 44.0 % | 0.5936 / 44.0 % |
+| Copy slice 1: mean / clear | 0.3440 / 33.0 % | 0.3454 / 33.1 % |
+| Volumetric Shadows mip 1 | 0.2620 | 0.2617 |
+
+## Shadow-only casters, and the sun's entry rule
+
+Goal: the engine draws nothing of the sun's own (see "DCLF draws the copy"). With DCLF on, the engine still
+drew these casters into the cascades, all accepted by the caster rule but missing from DCLF's tables, which
+held only main-pass-eligible objects:
+
+| Class | Road | Riverwood |
+| --- | --- | --- |
+| Terrain blocks (`Block (x, y)`, `Ineligible::Technique`) | 37 | 41 |
+| NPC heads, mouths, hair (`BSDynamicTriShape`, hints 0 and 3) | 6 | 45 |
+| Hay under a `BSOrderedNode` (`Ineligible::UnsupportedParent`) | 0 | 7 |
+
+(`CS_DCLF_VOLUMETRIC_PROBE`, the engine's cascade draws with DCLF on, by the scene store's verdict.)
+
+**Shadow-only objects.** A walked object that fails main-pass eligibility only for a reason the shadow views
+do not care about becomes a table object with `kObjectShadowOnly` (plus `kObjectNoBindings`), when the caster
+rule accepts it (`SceneStore.cpp`: `ShadowOnlyReason`, `ShadowOnlyCaster`; `CS_DCLF_SHADOW_ONLY=0` turns it
+off).
+
+-   **Which reasons:**
+    -   `Technique`: the Utility technique does not depend on the lighting technique.
+    -   `UnsupportedParent`: a `BSOrderedNode` only orders blended draws.
+    -   Not billboards: `NiBillboardNode` turns to the culling camera, which for a shadow view is the light's.
+-   **Where it is skipped:** the accumulate phase and the main epochs skip it (not even a culling candidate),
+    and so does the `CS_DCLF_ONLY_ELIGIBLE` parity mode.
+-   **Claims:** the shadow claim set covers it like any caster.
+-   **Result:** with DCLF on, terrain and hay no longer appear in the engine's cascade draws. At Riverwood the
+    only class left is the NPC `BSDynamicTriShape`.
+
+**The sun's entry rule.** The cascade culls walk only the entries of the full-frustum culling processes'
+`objectArray` (engine notes, "The sun's accumulation"), so an object whose entry the full-frustum cull left
+out is never a candidate, however its own bound tests. With terrain added, this mattered: 11 DCLF-only far
+cascade casters at Riverwood, among them a volumetric-only `MountainCliff01` with radius 7,359 and a terrain
+block.
+
+-   **The rule, measured with `CS_DCLF_CASCADE_PROBE`:** it now also records the engine's hint-8
+    registrations. Every process rejects with the same plane (2), at the reference root. The entry is:
+    -   for a static reference, its reference root (the topmost ancestor carrying the geometry's
+        `userData`);
+    -   for an actor, the cell's container, never tested;
+    -   for a geometry without a reference (terrain), its nearest `BSMultiBoundNode`.
+-   **Implementation:**
+    -   `SceneStore::SunEntryOf` caches the entry node per tracked geometry, and the tables carry its bound
+        (`Tables::sunEntry`).
+    -   `PrepareShadowInputs` copies every full-frustum process's planes (render thread, after the
+        full-frustum cull).
+    -   The build flags an input whose entry is outside every process (`kInputOutsideSunEntry`), and only
+        the sun's views skip flagged inputs (`kCullSunEntry`), because spot lights share mode `0xE`'s
+        inputs.
+-   **Result at Riverwood's far cascade:** DCLF-only went from 11 to 2 (a dagger carried by an actor, and one
+    more of that kind, pruned by the engine at a node below the entry), and engine-only is 43 (the NPC
+    shapes, plus one volumetric-only mountain whose bound lies outside the view in x). The near cascade has
+    DCLF-only 0.
+-   **Readbacks** across four live toggles at Riverwood (off, on, off, on) match within the drift between
+    samples, for example far cascade 30.9 % against 30.8 % clear and copy slice 1 60.1 % against 60.4 %.
+    The far slices step twice during the run, at about the same time in every run and in native periods as
+    well: a scene change, not DCLF.
+
