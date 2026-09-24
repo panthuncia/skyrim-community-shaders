@@ -668,11 +668,11 @@ bool RenderGraphRuntime::Initialize()
 				EpochOf(Segment::MainOpaque), EpochOf(Segment::DebugView) };
 		const bool closed = desc.closedExecutions;
 		state->host = std::make_unique<org::PersistentGraphHost>(std::move(desc));
-		// CS_ORG_ASYNC_EPOCHS=1: each epoch's work is prepared, admitted and recorded ahead of its epoch point
-		// on the host's own thread; at the point the render thread only writes the epoch's latches, records the
-		// queued uploads and submits. Needs epochs and closed executions. The debug view's epoch is prepared
-		// only when the debug view is on.
-		state->asyncEpochs = EnvEquals("CS_ORG_ASYNC_EPOCHS", "1") && EpochsEnabled() && closed;
+		// CS_ORG_ASYNC_EPOCHS (default on, =0 off): each epoch's work is prepared, admitted and recorded ahead of
+		// its epoch point on the host's own thread; at the point the render thread only writes the epoch's
+		// latches, records the queued uploads and submits. Needs epochs and closed executions. The debug view's
+		// epoch is prepared only when the debug view is on.
+		state->asyncEpochs = !EnvEquals("CS_ORG_ASYNC_EPOCHS", "0") && EpochsEnabled() && closed;
 	} catch (const std::exception& e) {
 		return disable(std::string("graph host creation failed: ") + e.what());
 	}

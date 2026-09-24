@@ -9,7 +9,7 @@
 
 namespace DCLF
 {
-	/** @brief `CS_DCLF_ASYNC`: off (inline, the default), on (the enabled jobs build on the worker), probe (both, compared). */
+	/** @brief `CS_DCLF_ASYNC`: on (the default: the enabled jobs build on the worker), off (inline), probe (both, compared). */
 	enum class AsyncMode : std::uint8_t
 	{
 		Off,
@@ -79,6 +79,8 @@ namespace DCLF
 			double waitMaxMs = 0.0;
 			double buildTotalMs = 0.0;
 			double buildMaxMs = 0.0;
+			double queuedTotalMs = 0.0;  // submitted to started: time spent behind other jobs
+			double windowTotalMs = 0.0;  // submitted to the join: the window the job had to hide in
 		};
 
 		static AsyncWorker& Get();

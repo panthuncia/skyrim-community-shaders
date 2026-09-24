@@ -193,6 +193,19 @@ namespace DCLF
 			std::atomic_store(&shadowClaims[a_modeIndex], std::move(a_claims));
 	}
 
+	std::shared_ptr<const PassCapture::ClaimSet> PassCapture::ShadowClaimsForBatch(const RE::BSBatchRenderer* a_batch) const
+	{
+		if (!ShadowWithholdingEnabled())
+			return nullptr;
+		const auto renderers = std::atomic_load(&shadowRenderers);
+		if (!renderers)
+			return nullptr;
+		const auto it = renderers->find(a_batch);
+		if (it == renderers->end() || it->second >= kShadowModes)
+			return nullptr;
+		return std::atomic_load(&shadowClaims[it->second]);
+	}
+
 	bool PassCapture::Withhold(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, bool a_fading)
 	{
 		if (!a_pass || !a_pass->geometry)

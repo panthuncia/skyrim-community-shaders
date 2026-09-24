@@ -818,6 +818,44 @@ namespace DCLF
 		return children[index].get() == a_child && state.childRevID[index] == state.revID;
 	}
 
+	void SceneStore::CaptureCullHiddenBits()
+	{
+		cullHiddenBits.clear();
+		for (auto* sceneNode : RE::BSShaderManager::State::GetSingleton().shadowSceneNode) {
+			const auto* graph = sceneNode ? sceneNode->GetRuntimeData().portalGraph : nullptr;
+			if (!graph)
+				continue;
+			for (const auto& child : graph->alwaysRenderChildren)
+				if (child)
+					cullHiddenBits.emplace_back(child.get(), IsHidden(child.get()));
+			if (graph->portalSharedNode)
+				cullHiddenBits.emplace_back(graph->portalSharedNode.get(), IsHidden(graph->portalSharedNode.get()));
+		}
+		if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+			// The third-person skeleton as it is now. TESWaterReflections::Update (AE 0x140520570), on the frames a
+			// cube-map reflection updates, hides the player's 3D while it renders the faces and then restores it.
+			// Main::Draw calls it between the main cull jobs' Begin and Finish, so it runs alongside the walk.
+			const RE::NiAVObject* thirdPerson = player->Get3D(false);
+			if (thirdPerson)
+				cullHiddenBits.emplace_back(thirdPerson, IsHidden(thirdPerson));
+			// The first-person skeleton: Main::Draw (AE 0x1406444b0) hides it right after the call the walk is
+			// kicked from, keeps it hidden through the main camera's cull and the sun's shadow casters, and shows it
+			// only to draw the first-person view with its own camera. For every view the walk serves it is hidden.
+			const RE::NiAVObject* firstPerson = player->Get3D(true);
+			if (firstPerson && firstPerson != thirdPerson)
+				cullHiddenBits.emplace_back(firstPerson, true);
+		}
+		std::sort(cullHiddenBits.begin(), cullHiddenBits.end());
+	}
+
+	bool SceneStore::HiddenForWalk(const RE::NiAVObject* a_object) const
+	{
+		const auto it = std::lower_bound(cullHiddenBits.begin(), cullHiddenBits.end(), a_object, [](const auto& a_entry, const RE::NiAVObject* a_key) { return a_entry.first < a_key; });
+		if (it != cullHiddenBits.end() && it->first == a_object)
+			return it->second;
+		return IsHidden(a_object);
+	}
+
 	Ineligible SceneStore::ClassifyFrame(const Tracked& a_tracked, const AccumulatedPass* a_accumulated) const
 	{
 		const bool underSwitch = a_tracked.parentReason == Ineligible::Switch;
@@ -831,7 +869,7 @@ namespace DCLF
 		const bool actors = ActorsEnabled();
 		const RE::NiAVObject* child = nullptr;
 		for (const RE::NiAVObject* object = a_tracked.geometry.get(); object; child = object, object = object->parent) {
-			if (IsHidden(object))
+			if (HiddenForWalk(object))
 				return Ineligible::Hidden;
 			if (object == a_tracked.categoryNode)
 				break;
@@ -1622,6 +1660,8 @@ namespace DCLF
 		order.reserve(tracked.size());
 		for (auto& [trackedGeometry, entry] : tracked)
 			order.push_back({ trackedGeometry, &entry, nullptr });
+
+		CaptureCullHiddenBits();
 
 		// CS_DCLF_ASYNC: the walk on the worker, from here to AfterShadowMaps - the engine's main cull and its
 		// whole shadow-map pass. Nothing reads the per-object tables in between (ExecuteShadowView does not;

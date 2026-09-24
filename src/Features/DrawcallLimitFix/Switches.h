@@ -30,4 +30,12 @@ namespace DCLF
 
 	/** @brief Every switch that is set, as `NAME=value` pairs, for the startup log. */
 	std::string SwitchSummary();
+
+	/**
+	 * @brief The feature switches set to something other than DCLF's full featureset, as `NAME=value` pairs, or
+	 * empty when the run exercises all of it. Every feature defaults to on; the startup log names a reduced
+	 * run so that a measurement or a validation cannot silently leave a feature out. Diagnostics (probes,
+	 * parity checks, stats) are not features and are not listed.
+	 */
+	std::string ReducedFeatures();
 }

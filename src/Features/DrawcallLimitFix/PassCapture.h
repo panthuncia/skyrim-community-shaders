@@ -89,6 +89,7 @@ namespace DCLF
 		bool Installed() const { return installed; }
 		/** @brief Makes the hook a plain pass-through while set: DCLF is off (forced, or switched off in the menu). */
 		void SetBypassed(bool a_bypassed) { bypassed.store(a_bypassed, std::memory_order_release); }
+		bool Bypassed() const { return bypassed.load(std::memory_order_acquire); }
 
 		/**
 		 * @brief Publishes the claim set for the frames that follow; render thread only.
@@ -122,6 +123,12 @@ namespace DCLF
 		 * epoch that submitted them, as the main claims are published by the colour epoch.
 		 */
 		void PublishShadowClaims(std::uint32_t a_modeIndex, std::shared_ptr<const ClaimSet> a_claims);
+		/**
+		 * @brief The claims Withhold decides a pass into this batch renderer by: its shadow view's render mode's, or
+		 * null when the renderer is not a shadow view's (as far as the last ShadowViews rebuild knows) or shadow
+		 * ownership is off. SunAccumulation skips a claimed geometry's registration by the same test.
+		 */
+		std::shared_ptr<const ClaimSet> ShadowClaimsForBatch(const RE::BSBatchRenderer* a_batch) const;
 		std::shared_ptr<const ClaimSet> CurrentShadowClaims(std::uint32_t a_modeIndex) const
 		{
 			return a_modeIndex < kShadowModes ? std::atomic_load(&shadowClaims[a_modeIndex]) : nullptr;

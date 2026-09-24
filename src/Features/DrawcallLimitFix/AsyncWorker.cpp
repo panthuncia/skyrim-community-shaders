@@ -16,12 +16,13 @@ namespace DCLF
 	AsyncMode AsyncModeSetting()
 	{
 		static const AsyncMode mode = [] {
+			// On unless turned off: the full featureset is what testers and every validation run exercise.
 			const auto value = SwitchValue("CS_DCLF_ASYNC");
-			if (value == "on")
-				return AsyncMode::On;
+			if (value == "off" || value == "0")
+				return AsyncMode::Off;
 			if (value == "probe")
 				return AsyncMode::Probe;
-			return AsyncMode::Off;
+			return AsyncMode::On;
 		}();
 		return mode;
 	}
@@ -198,6 +199,7 @@ namespace DCLF
 		if (!std::exchange(job->waited, true)) {
 			stats.waitTotalMs += waitedMs;
 			stats.waitMaxMs = (std::max)(stats.waitMaxMs, waitedMs);
+			stats.windowTotalMs += std::chrono::duration<double, std::milli>(waitStart - job->submitted).count();
 		}
 		if (!finished) {
 			++stats.late;
@@ -205,6 +207,7 @@ namespace DCLF
 		}
 		const double builtMs = std::chrono::duration<double, std::milli>(job->ended - job->started).count();
 		stats.buildTotalMs += builtMs;
+		stats.queuedTotalMs += std::chrono::duration<double, std::milli>(job->started - job->submitted).count();
 		stats.buildMaxMs = (std::max)(stats.buildMaxMs, builtMs);
 		switch (job->state) {
 		case Job::State::Done:
@@ -299,10 +302,11 @@ namespace DCLF
 			if (!s.kicked)
 				continue;
 			const std::uint32_t joined = s.onTime + s.failed + s.cancelled;
-			text += fmt::format("[DCLF] async {}: {} kicked, {} joined (waited {:.3f}/{:.3f} ms, built {:.3f}/{:.3f} ms), {} late -> inline, {} failed, {} cancelled\n",
+			text += fmt::format("[DCLF] async {}: {} kicked, {} joined (waited {:.3f}/{:.3f} ms, built {:.3f}/{:.3f} ms, queued {:.3f} ms, window {:.3f} ms), {} late -> inline, {} failed, {} cancelled\n",
 				name, s.kicked, joined,
 				s.kicked ? s.waitTotalMs / s.kicked : 0.0, s.waitMaxMs,
 				joined ? s.buildTotalMs / joined : 0.0, s.buildMaxMs,
+				joined ? s.queuedTotalMs / joined : 0.0, s.kicked ? s.windowTotalMs / s.kicked : 0.0,
 				s.late, s.failed, s.cancelled);
 		}
 		return text;

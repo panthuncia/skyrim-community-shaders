@@ -5296,13 +5296,16 @@ namespace DCLF
 				std::memcpy(latch.cullPlanes, view.cullPlanes, sizeof(latch.cullPlanes));
 				latch.visibilityStamp = frameNumber & 0x0FFFFFFFu;  // 28 bits: BuildDrawsCS keeps flags below it
 				FoldEyeIntoViewProj(view.viewProj, view.eye, latch.viewProj);
-				// The view's rasterizer state picks its row of the pipeline map, written once per state below.
-				latch.pipelineMapOffset = kShadowPipelineMapOffset + (view.rasterState - 1) * kShadowPipelineMapRowBytes;
+				// The view's rasterizer state picks its row of the pipeline map, written once per state below. The
+				// shader reads the row at an offset into the whole latch block, so it carries this slot's base: a
+				// slot-relative offset read slot 0's rows, which async epochs never write (every draw got pipeline 0).
+				const std::uint32_t mapRowOffset = kShadowPipelineMapOffset + (view.rasterState - 1) * kShadowPipelineMapRowBytes;
+				latch.pipelineMapOffset = static_cast<std::uint32_t>(resources->latch->Offset(latchSlot)) + mapRowOffset;
 				if (!((mapRowsWritten >> view.rasterState) & 1)) {
 					mapRowsWritten |= 1u << view.rasterState;
 					const auto& row = store.GetLookups().shadowMapRows[view.rasterState];
 					if (!row.empty())
-						resources->latch->Write(latchSlot, latch.pipelineMapOffset,
+						resources->latch->Write(latchSlot, mapRowOffset,
 							std::as_bytes(std::span(row.data(), std::min<std::size_t>(row.size(), kMaxShadowSlots))));
 				}
 				resources->latch->WriteValue(latchSlot, slot * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), latch);

@@ -694,6 +694,24 @@ namespace DCLF
 		std::uint64_t CategorySignature() const;
 		// a_accumulated: the frame's registered pass, whose captured fade state then stands in for the live one.
 		Ineligible ClassifyFrame(const Tracked& a_tracked, const AccumulatedPass* a_accumulated = nullptr) const;
+		/**
+		 * @brief The nodes whose kHidden bit the engine flips while the asynchronous walk runs, with the bit the
+		 * walk's views (the main camera and the sun) see. Taken on the render thread just before the walk is kicked,
+		 * sorted by pointer; ClassifyFrame reads a listed node's bit from here instead of from the node.
+		 *
+		 * - ShadowSceneNode::OnVisible hides a portal graph's always-render children and its shared node for the
+		 *   room traversal, then restores each bit. It runs in the main camera's cull jobs.
+		 * - TESWaterReflections::Update hides the player's 3D while a cube-map reflection updates, then restores
+		 *   it. Main::Draw calls it on the render thread while the cull jobs run.
+		 * - Main::Draw hides the player's first-person skeleton just after the walk is kicked and keeps it hidden
+		 *   for every world view: it is listed as hidden.
+		 *
+		 * Reading the nodes instead took the player's face shapes (classified every frame) out of the tables on
+		 * the frames a reflection updated.
+		 */
+		void CaptureCullHiddenBits();
+		bool HiddenForWalk(const RE::NiAVObject* a_object) const;
+		std::vector<std::pair<const RE::NiAVObject*, bool>> cullHiddenBits;
 
 		ankerl::unordered_dense::map<RE::BSGeometry*, Tracked> tracked;
 		/**

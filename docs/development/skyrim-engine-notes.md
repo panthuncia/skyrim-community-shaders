@@ -828,6 +828,44 @@ So an object samples the sun's shadow mask in the main pass only if the sun's ac
 in a cascade that frame. Skipping that accumulation changes main-pass techniques unless those bits are
 set some other way. `lastAccumulatedFrameCount` has no reader found yet.
 
+**Who clears the masks.** `FUN_1414cb640`, which `Main::Draw` calls before the shadow lights accumulate,
+sets accumulator `0x14338c840`'s `+0x160` to `0xFFFF` (while `DAT_14338c911` is 0). It then registers culling
+process `0x14338c640`'s culled geometries through that accumulator (`FUN_140e28af0`), and the registration
+zeroes their masks. Each shadow light then ORs its bits in.
+
+**`FUN_1414b2140`'s early-outs**, before the mode's registration and the mask write. It returns at once when:
+
+-   the skin instance is a `BSDismemberSkinInstance` whose byte `+0x98` is 0;
+-   the geometry has no shader property (`+0x128`);
+-   it has neither renderer data (`+0x138`) nor a skin instance, its vfunc `0x10` returns null, and its type
+    byte (`+0x150`) is not `0xB`.
+
+It writes no mask when the accumulator's `+0x160` is 0, or the property's `lightData` (`+0x70`) is null.
+
+**The rest of the sun's accumulation** (AE 1.6.1170):
+
+-   `Accumulate` sets each cascade's fields and calls `FUN_1414f0920`. That function calls `FUN_1414b47d0`
+    (an empty stub), culls, registers, and increments the count (`*param_3 += 1`). Nothing else.
+-   `FUN_140e28af0(process, accumulator)` registers everything a culling process kept: its `+0x128` list
+    (count `+0x138`), then its bucketed lists. `FUN_1414bf320(ctx, 2)` gets there through `FUN_140e305c0` and
+    `FUN_140e28f70`. `FUN_140e28f70` calls the process's vfunc `0xB8` for the first entry and `0xB0` for the
+    rest, and with its `param_4` set it skips entries whose `+0xF4` bit 0 (app-culled) is set.
+-   The full-frustum cull (`FUN_141511f30`) queues one job per scene list (`FUN_1414bf730`), then runs
+    `JobList__Begin` and `Finish` itself, so the render thread waits for it. Each process's `planes` are
+    refreshed by that cull, from the light's full-frustum camera (`+0x578`).
+-   The focus view does not depend on any of this. `sub` only builds the focus cameras, and `Render`'s third
+    loop accumulates the focus view itself.
+
+**Measured** (Riverwood, render thread per frame, `CS_DCLF_SUN_TIMING`):
+
+| Part | Mean | Max |
+| --- | --- | --- |
+| Full-frustum cull | 0.044 ms | 0.23 ms |
+| `Accumulate` | 0.69 ms | 1.25 ms |
+| … of which registration (about 2,580 geometries) | 0.41 ms | |
+
+The registration figure includes the probe's own timing overhead.
+
 ## Face morphing: the only writer of a face's positions
 
 An NPC's head, mouth, eyes, brows, hair and beard are `BSDynamicTriShape`s under a `BSFaceGenNiNode`. Their

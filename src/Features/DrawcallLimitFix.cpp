@@ -11,6 +11,7 @@
 #include "DrawcallLimitFix/TreeTrace.h"
 #include "DrawcallLimitFix/DrawPipelines.h"
 #include "DrawcallLimitFix/FaceSnapshots.h"
+#include "DrawcallLimitFix/SunAccumulation.h"
 #include "DrawcallLimitFix/GpuResources.h"
 #include "DrawcallLimitFix/GpuTextures.h"
 #include "DrawcallLimitFix/IndirectDraws.h"
@@ -290,12 +291,17 @@ void DrawcallLimitFix::PostPostLoad()
 	DCLF::ShadowProbe::Get().Install();
 	DCLF::VolumetricProbe::Get().Install();
 	DCLF::FaceSnapshots::Get().Install();
+	DCLF::SunAccumulation::Get().Install();
 	Hooks::Install();
 	installed = true;
 	// The switches this process actually sees, once. Several reports below are gated on them, so without
 	// this a silent log is indistinguishable from a switch that never reached the game - which is exactly
 	// what happened when they came from the environment alone (see Switches.h).
 	logger::info("[DCLF] switches: {}", DCLF::SwitchSummary());
+	if (const auto reduced = DCLF::ReducedFeatures(); reduced.empty())
+		logger::info("[DCLF] featureset: full (every feature on; the menu can still turn some off live)");
+	else
+		logger::warn("[DCLF] featureset: REDUCED by {}; this run does not exercise DCLF's full featureset", reduced);
 }
 
 void DrawcallLimitFix::SetupResources()
@@ -825,6 +831,7 @@ void DrawcallLimitFix::Prepass()
 		DCLF::TreeTrace::Get().Report(frame, kReportInterval);
 	if (DCLF::ShadowProbe::Enabled())
 		DCLF::ShadowProbe::Get().Report(frame, kReportInterval);
+	DCLF::SunAccumulation::Get().Report(frame, kReportInterval);
 
 	// The culling's counters, reported whether or not the full statistics are on: they are what says
 	// whether GPU culling is running and how much it rejects.
@@ -1665,6 +1672,11 @@ void DrawcallLimitFix::DrawSettings()
 		ImGui::Checkbox("Draw the shadow views (CS_DCLF_SHADOWS)", &toggles.shadows);
 		ImGui::BeginDisabled(!toggles.shadows);
 		ImGui::Checkbox("Static shadow ownership: withhold claimed casters (CS_DCLF_SHADOW_OWNERSHIP=static)", &toggles.shadowOwnership);
+		ImGui::BeginDisabled(!toggles.shadowOwnership);
+		ImGui::Checkbox("Skip the engine's sun shadow culling and registration (CS_DCLF_SUN_SKIP)", &toggles.skipSunAccumulation);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("The engine stops building sun shadow passes for the casters DCLF draws; it still sets their shadow bits for the main pass.");
+		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 		ImGui::SeparatorText("Diagnostics");
 		ImGui::Checkbox("Debug view: show DCLF's targets (CS_DCLF_DEBUG_VIEW)", &toggles.debugView);
@@ -1674,10 +1686,10 @@ void DrawcallLimitFix::DrawSettings()
 		ImGui::TreePop();
 	}
 	if (ImGui::TreeNodeEx("This frame", ImGuiTreeNodeFlags_DefaultOpen)) {
-		ImGui::Text("Active: hybrid %d, ownership %d, cull %u%s, skinned %d, trees %d, decals %d, projected %d, terrain %d, switch nodes %d, skin partitions %d, actors %d, fading %d, LOD cross-fade %d, shadows %d, shadow ownership %d",
+		ImGui::Text("Active: hybrid %d, ownership %d, cull %u%s, skinned %d, trees %d, decals %d, projected %d, terrain %d, switch nodes %d, skin partitions %d, actors %d, fading %d, LOD cross-fade %d, shadows %d, shadow ownership %d, skip sun accumulation %d",
 			active.hybrid, active.ownership, active.cullMode, active.cullTracked ? " (tracked)" : "", active.skinned, active.trees, active.decals,
 			active.projectedUv, active.mtLand, active.switchNodes, active.skinPartitions, active.actors, active.fading, active.lodCrossfade, active.shadows,
-			active.shadowOwnership);
+			active.shadowOwnership, active.skipSunAccumulation);
 		ImGui::Text("Tracked geometry: %u (under %u category nodes)", stats.tracked, stats.categoryNodes);
 		ImGui::Text("Objects this frame: %u (%u the engine's culling also kept), geometries: %u, pipelines: %u", stats.objects, stats.nativeVisible, stats.geometries, stats.pipelines);
 		for (std::size_t i = 1; i < stats.ineligible.size(); ++i) {

@@ -29,6 +29,7 @@ namespace DCLF
 			kActors,
 			kFading,
 			kLodCrossfade,
+			kSkipSunAccumulation,
 		};
 
 		// Defaults: the configuration every gate run of this work used. An unset switch takes the default;
@@ -65,6 +66,7 @@ namespace DCLF
 			set.lodCrossfade = OnUnlessOff("CS_DCLF_LOD_CROSSFADE");
 			set.shadows = OnUnlessOff("CS_DCLF_SHADOWS");
 			set.shadowOwnership = StaticUnlessOff("CS_DCLF_SHADOW_OWNERSHIP");
+			set.skipSunAccumulation = OnUnlessOff("CS_DCLF_SUN_SKIP");
 			set.debugView = SwitchEnabled("CS_DCLF_DEBUG_VIEW");
 			set.hybridNoSkip = SwitchEnabled("CS_DCLF_HYBRID_NOSKIP");
 			set.onlyEligible = SwitchEnabled("CS_DCLF_ONLY_ELIGIBLE");
@@ -77,6 +79,7 @@ namespace DCLF
 		{
 			a_set.ownership = a_set.ownership && a_set.hybrid;
 			a_set.shadowOwnership = a_set.shadowOwnership && a_set.shadows;
+			a_set.skipSunAccumulation = a_set.skipSunAccumulation && a_set.shadowOwnership;
 			a_set.skinPartitions = a_set.skinPartitions && a_set.skinned;
 			return a_set;
 		}
@@ -126,6 +129,7 @@ namespace DCLF
 		put(kActors, s.actors);
 		put(kFading, s.fading);
 		put(kLodCrossfade, s.lodCrossfade);
+		put(kSkipSunAccumulation, s.skipSunAccumulation);
 		return bits;
 	}
 
@@ -153,6 +157,7 @@ namespace DCLF
 		s.actors = get(kActors);
 		s.fading = get(kFading);
 		s.lodCrossfade = get(kLodCrossfade);
+		s.skipSunAccumulation = get(kSkipSunAccumulation);
 		return s;
 	}
 

@@ -99,6 +99,62 @@ namespace DCLF
 		return SwitchValue(a_name) == "1";
 	}
 
+	std::string ReducedFeatures()
+	{
+		struct Feature
+		{
+			const char* name;
+			bool (*reduced)(const std::string&);
+		};
+		// Each feature's switch and the values that turn it off or narrow it, as its own reader interprets them.
+		constexpr auto offUnlessOne = [](const std::string& a_value) { return !a_value.empty() && a_value != "1"; };
+		constexpr auto zero = [](const std::string& a_value) { return a_value == "0"; };
+		constexpr auto offWord = [](const std::string& a_value) { return a_value == "off"; };
+		static constexpr Feature features[] = {
+			{ "CS_DCLF_ASYNC", [](const std::string& a_value) { return a_value == "off" || a_value == "0" || a_value == "probe"; } },
+			{ "CS_DCLF_ASYNC_JOBS", [](const std::string& a_value) { return !a_value.empty(); } },
+			{ "CS_ORG_EPOCHS", zero },
+			{ "CS_ORG_ASYNC_EPOCHS", zero },
+			{ "CS_ORG_CLOSED", zero },
+			{ "CS_ORG_BATCH_SUBMIT", zero },
+			{ "CS_ORG_EARLY_FLUSH", zero },
+			{ "CS_DCLF_EARLY_SCENE", zero },
+			{ "CS_DCLF_HYBRID", offUnlessOne },
+			{ "CS_DCLF_SHADOWS", offUnlessOne },
+			{ "CS_DCLF_SUN_SKIP", offUnlessOne },
+			{ "CS_DCLF_SKINNED", offUnlessOne },
+			{ "CS_DCLF_SKIN_PARTITIONS", offUnlessOne },
+			{ "CS_DCLF_ACTORS", offUnlessOne },
+			{ "CS_DCLF_TREES", offUnlessOne },
+			{ "CS_DCLF_DECALS", offUnlessOne },
+			{ "CS_DCLF_FADING", offUnlessOne },
+			{ "CS_DCLF_LOD_CROSSFADE", offUnlessOne },
+			{ "CS_DCLF_MTLAND", offUnlessOne },
+			{ "CS_DCLF_PROJECTED_UV", offUnlessOne },
+			{ "CS_DCLF_SWITCH_NODES", offUnlessOne },
+			{ "CS_DCLF_FACEGEN", zero },
+			{ "CS_DCLF_SHADOW_ONLY", zero },
+			{ "CS_DCLF_BINDLESS", zero },
+			{ "CS_DCLF_BINDLESS_DRAW", zero },
+			{ "CS_DCLF_BUILD_CACHE", zero },
+			{ "CS_DCLF_CLASSIFY_CACHE", offWord },
+			{ "CS_DCLF_DERIVED_CACHE", offWord },
+			{ "CS_DCLF_MATERIAL_CACHE", offWord },
+			{ "CS_DCLF_CULL", [](const std::string& a_value) { return a_value == "off" || a_value == "frustum"; } },
+			{ "CS_DCLF_EVAL", [](const std::string& a_value) { return a_value == "off" || a_value == "material"; } },
+		};
+		std::string text;
+		for (const auto& feature : features) {
+			const auto value = SwitchValue(feature.name);
+			if (!feature.reduced(value))
+				continue;
+			if (!text.empty())
+				text += ", ";
+			text += std::string(feature.name) + "=" + value;
+		}
+		return text;
+	}
+
 	std::string SwitchSummary()
 	{
 		std::string text;

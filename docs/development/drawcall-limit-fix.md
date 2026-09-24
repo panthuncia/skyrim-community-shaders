@@ -1416,6 +1416,15 @@ they are not part of the witness.
 
 ## Switches
 
+**Every feature defaults to on, and test runs should leave it that way.** With no switch set, a run exercises
+DCLF's full featureset: the asynchronous builds and scene walk, async epochs, every ownership stage. The startup
+log says so on one line, `[DCLF] featureset: full`. A run that sets any feature switch to a reducing value logs
+`[DCLF] featureset: REDUCED by NAME=value, ...` as a warning instead (`DCLF::ReducedFeatures`). Turn a feature off
+only to bisect or to compare, and say so. Diagnostics (probes, parity checks, stats) are not features and don't
+count. The async paths were off by default until 2026-09-24, and validating only the synchronous path let two bugs
+through: the shadow pipeline map ("Epochs that only submit") and the NPC head drops ("The scene walk starts at
+`Main::Draw`").
+
 | Variable | Effect |
 | --- | --- |
 | `CS_DCLF_STATS=1` | Every 300 frames, log how many objects are tracked, why the rest stay native, and the CPU time scene capture takes, plus the GPU time of each render-graph segment and of the passes in it (`[ORG] GPU time from ORG's pass timestamps`; the menu shows the per-segment totals whatever the switch). |
@@ -1448,7 +1457,7 @@ they are not part of the witness.
 | `CS_DCLF_SHADER_DEBUG=1` | Build the Lighting and Utility SPIR-V with source-level debug info (`-Zi`: `OpSource` with every file's text embedded, and `OpLine`), so Nsight and RenderDoc show source for DCLF's draws. Still optimized. Not `-fspv-debug=vulkan`: its `DebugValue`s keep dead loads alive, so stages read resources their passes do not bind and every candidate is skipped; `vulkan-with-source` also fails DXC 1.9's own validator. There is deliberately no `-Od` form either: unoptimized code reads per-frame constant buffers the epochs do not supply (VS b6, PS b7). The Z-prepass stage (`DCLF_DEPTH_ONLY`) compiles the lighting out of `Lighting.hlsl` rather than relying on the optimizer. The debug builds have their own cache keys. The shader files the game sees through MO2's VFS are also copied, keeping their `Data/Shaders/...` layout, to `CS_DCLF_SHADER_SOURCE_DIR` (default `<Documents>\My Games\Skyrim Special Edition\SKSE\CommunityShaders-ShaderSource`). Shaders DXVK translates from DXBC get no source info this way. The build-time SPIR-V (BuildDrawsCS, HzbCS, LLF's cluster shaders) is always built with `-Zi` (`cmake/RenderGraph.cmake`). Dev-Fast builds do not package it: copy `build/Dev-Fast/generated/Shaders/*/ORG/*.spv` into the mod's `Shaders` folder after changing those shaders. |
 | `CS_DCLF_TEST_TOGGLE=<off>:<on>` | Test runs: flips the feature's menu toggle off and back on at those frames (loading screens not counted), to exercise the live on/off. |
 | `CS_DCLF_TEST_COMMANDS=<frame>:<command>;…` | Test runs: run each console command on the main thread once that many frames have been presented (loading screens do not count), for coverage runs from the auto-loaded save. The counter is independent of the feature, so a `CS_DCLF=0` control reaches the same place at the same hour. |
-| `CS_DCLF_ASYNC=off\|on\|probe` | Where the epochs' payloads are built (see "Payloads built off the render thread"). `off` (default): inline, as before. `on`: the enabled jobs build on the `CS DCLF worker` thread and the epoch commits the result. `probe`: build on the worker *and* inline, and byte-compare the two payloads (`probe: N compared, N differ`). Bindless path only; the non-bindless path always builds inline. |
+| `CS_DCLF_ASYNC=off\|on\|probe` | Where the epochs' payloads are built (see "Payloads built off the render thread"). `on` (default since 2026-09-24): the enabled jobs build on the `CS DCLF worker` thread and the epoch commits the result. `off`: inline. `probe`: build on the worker *and* inline, and byte-compare the two payloads (`probe: N compared, N differ`). Bindless path only; the non-bindless path always builds inline. |
 | `CS_DCLF_ASYNC_JOBS=colour,zprepass,shadow,scene` | Which jobs `on`/`probe` move to the worker (default: all four). For bisecting. |
 | `CS_DCLF_ASYNC_WAIT_MS=<ms>` | How long an epoch waits for its job before building inline instead (default 3). |
 | `CS_DCLF_ASYNC_PRIORITY=normal` | Run the worker at normal priority instead of above normal. |
@@ -3028,7 +3037,7 @@ What remains per epoch is fixed ORG cost, which the next section addresses.
 The goal: at each epoch point, the render thread takes a ready ticket, writes the epoch's late values, and hands
 one submission to DXVK. Everything else runs earlier, on other threads. ORG's side of the contract is in
 `extern/OpenRenderGraph/docs/persistent-epochs.md` (closed executions, tickets, latches, staged uploads).
-`CS_ORG_ASYNC_EPOCHS=1` switches it on. The default is off, and the synchronous path stays.
+It is on by default since 2026-09-24 (`CS_ORG_ASYNC_EPOCHS=0` returns to the synchronous path, which stays).
 
 Render-thread µs per epoch, feature body included (`CS_ORG_EPOCH_STATS=1`, the "Epoch body" lines). Later
 rows are the async path. Steady exterior; later runs vary by about ±20 µs.
@@ -3075,6 +3084,23 @@ was never submitted, the next epoch's list carried both batches, and their copie
 overlapped with no barrier between them. ORG now orders overlapping copies within a list with a barrier.
 Validation is clean for 120 s, cell changes and the live toggle included.
 
+A third one, found by the shadow-map readbacks (2026-09-24): with async epochs, **every shadow draw used pipeline 0**.
+The far cascade read a mean depth of 0.02 with nothing clear (native: 0.60, 31% clear), and alpha-tested casters
+lost their alpha test.
+-   **Why:** a shadow view's inputs name a key slot, and BuildDraws resolves it through the view's row of the
+    pipeline map in the latch. The shader reads that row at an offset into the whole latch block, but the commit
+    wrote it relative to the slot's region. So every view read slot 0's rows.
+-   **Why it only showed with async epochs:** synchronous epochs write slot 0 every few frames, and the map is
+    stable, so the stale rows matched. Async epochs hand the ring's slots to epochs in turn, and the shadow epoch
+    never took slot 0: its rows stayed zero. Every draw, faces included, got pipeline 0. Faces drawn with a
+    one-stream pipeline read their other attributes as positions and covered the cascade.
+-   **The fix:** `pipelineMapOffset` carries the slot's base, `LatchBlock::Offset(slot)`, as the dispatch's own
+    `LatchOffset` does.
+-   **Verification:** a readback of the far cascade's generated sequences, a temporary probe since removed, showed
+    24 pipelines in the same draw distribution as synchronous epochs (face draws only on face pipelines).
+    With both async switches on, the shadow maps read 0.603 / 0.605 with DCLF on against 0.602 / 0.604 off. The
+    face-positions buffer was byte-identical to the snapshots in both modes, so the data was never at fault.
+
 ### The scene walk starts at `Main::Draw` (AE)
 
 After the stages above, the largest render-thread cost was the join on the scene walk at `AfterShadowMaps`,
@@ -3108,6 +3134,23 @@ What the walk reads that changes between the hook and `BeforeShadowMaps`, each f
     offset in that window. The async scene probe found it, one frame behind on `antsMiddle01`. The walk no
     longer stores the texture transform: the shadow build, kicked at `BeforeShadowMaps`, reads it off the
     material.
+-   **Hidden bits (found 2026-09-24).** Three engine paths set `kHidden` on nodes the walk classifies, for part
+    of this window, and then restore it:
+    -   `ShadowSceneNode::OnVisible` hides a portal graph's always-render children and its shared node during
+        the room traversal (in the cull jobs);
+    -   `TESWaterReflections::Update` (`0x140520570`) hides the player's 3D while a cube-map reflection updates.
+        `Main::Draw` calls it on the render thread between the cull jobs' `Begin` and `Finish`;
+    -   `Main::Draw` hides the player's first-person skeleton right after the walk's hook, and keeps it hidden
+        for every world view.
+
+    The worker read the transient bit on the frames a reflection updated. The player's face shapes, which are
+    classified every frame, left the tables for that frame (the "'MaleHeadNord' was drawn last frame but is not
+    in this frame's tables" warnings, about 250 a run at Riverwood). `SceneStore::CaptureCullHiddenBits` now
+    records those nodes' bits on the render thread before the kick, with the first-person skeleton as hidden,
+    and `ClassifyFrame` reads a listed node's bit from there. After the fix: 0 head drops and 0 withheld passes
+    handed back. Two `Salmon:0` drops a run remain, also only with the asynchronous walk and not yet traced.
+    That is the class of problem "event-driven tables" ([dclf-event-driven-tables.md](./dclf-event-driven-tables.md))
+    removes: a worker reading a scene the engine is modifying.
 
 Only plain `BSTriShape` geometry is eligible, so the cull-time LOD selection of `BSLODMultiIndexTriShape` and its
 relatives does not matter. The skin palette update keys on `gFrameCounter`, which only `Renderer::End` advances,
@@ -4108,3 +4151,56 @@ dries:
     ([bugs-found-by-parity.md](./bugs-found-by-parity.md)); DCLF binds what Skin binds.
 -   Feature binding parity still reports t26, t55, t81-91 and VS b7 differing within some frames. Those are other
     features, not Advanced Skin, and were reported before this work.
+
+## The sun without the engine's registration (stage 3, M1)
+
+DCLF draws every sun caster, but the engine still registered them. `BSShadowDirectionalLight::Accumulate` culled
+each cascade and handed every geometry to the accumulator's registration (`FUN_1414b2140`). That built its shadow
+passes, and `PassCapture` then withheld those passes one by one. The registration also sets the geometry's
+`activeLightMask` bit for the cascade, which the main pass reads to decide whether the object samples the sun's
+shadow ("The sun's accumulation", engine notes), so it can't simply be dropped.
+
+**`SunAccumulation`** (`SunAccumulation.cpp`, AE only):
+
+-   **The hooks.** It hooks `Accumulate` (vtable slot 9) and `FUN_140e28af0`'s two calls of the registration
+    (`0x140e28bc3`, `0x140e28c89`). Each call site is verified before patching.
+-   **Per sun `Accumulate`.** On its thread, it records the cascades' accumulators. For each one it takes the
+    claim set `PassCapture` would withhold that accumulator's passes by: its batch renderer's render mode's
+    (`PassCapture::ShadowClaimsForBatch`, the same test as `Withhold`).
+-   **A registration for one of those accumulators, of a claimed geometry,** runs only the registration's
+    early-outs and its mask write (`WriteMaskOnly`). No pass is built.
+-   **Everything else calls the original,** so an unclaimed caster is registered and drawn by the engine as
+    before, and M1 needs no frame-wide verdict. Under capture parity (`CS_DCLF_OWNERSHIP=0`) nothing is claimed,
+    so everything registers.
+-   **What else stays covered:**
+    -   The volumetric copy's passes come from the same accumulators. A claimed geometry's copy is DCLF's too
+        ("DCLF draws the copy"). M1 requires `PassCapture::VolumetricClaimsAvailable`, so the hint 8/11/7/3
+        withholding it replaces exists.
+    -   `PassCapture`'s per-pass withholding stays, as the backstop.
+-   **Switches:**
+    -   The menu's "Skip the engine's sun shadow culling and registration" (`CS_DCLF_SUN_SKIP`, default on) needs
+        static shadow ownership.
+    -   The diagnostics that need the engine's sun registrations (`CS_DCLF_CASCADE_PROBE`,
+        `CS_DCLF_VOLUMETRIC_PROBE`, `CS_DCLF_SHADOW_PROBE`) keep it off for the run.
+    -   `CS_DCLF_SUN_TIMING=1` times the full-frustum cull, `Accumulate` and the registrations.
+-   **Open:** a skipped geometry misses `FUN_1414b2a60`'s `property->lastAccumulatedFrameCount` write, which has
+    no reader found yet.
+
+**Result** (`CS_DCLF_SUN_TIMING`, render thread per frame):
+
+| | Registered by the engine | Mask only | `Accumulate` | … registration |
+| --- | --- | --- | --- | --- |
+| Riverwood, M1 off | 2,580 | 0 | 0.69 ms (max 1.25) | 0.41 ms |
+| Riverwood, M1 on | 330 | 2,260 | 0.47 ms (max 0.81) | 0.19 ms |
+| Road save, M1 on | 200 | 780 | 0.20 ms (max 0.66) | |
+
+-   The geometries still registered are the unclaimed ones, the same set the engine registered before.
+-   The shadow-map and volumetric readbacks match the M1-off run within the drift between samples (far cascade
+    29.2 % clear in both).
+-   Main-pass objects with the sun's shadow mask are the same share of the engine-kept objects with M1 off and on
+    (1,475-1,504 of 1,910-1,933).
+-   0 holes, 0 claimed but not drawn, BuildDraws parity OK, over the road save and two teleports.
+
+**M2** replaces the culls themselves (full-frustum and cascade) with DCLF's own replica. It is planned but not
+built: an engine-exact replica has to reproduce `BSCullingProcess::Process1` and about 17 `OnVisible` overrides,
+and at most about 0.3-0.5 ms a frame at Riverwood is left to win.
