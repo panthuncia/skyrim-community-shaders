@@ -980,6 +980,42 @@ Measured at Riverwood (clear weather, so Skylighting's alone), render thread per
     and `+0x14C = 0`.
 -   DCLF takes its references out of these lists (`drawcall-limit-fix.md`, "The primary's cull without DCLF's objects").
 
+### Fade distance
+
+-   **The fade value** (`FUN_14147b110(node, {camera position, lodAdjust}, &distance)`). The distance is from the camera
+    to `worldBound.center` (`+0xE4`), written unscaled to the out parameter. Its scale is `lodAdjust` over the LOD
+    type's divisor `0x142032e00[+0x153 & 0xF]`, or the constant `0x141ad2840` when the divisor is not positive (that
+    case also sets flags bit 14 and `currentFade` = 1, except for type 6). With `x` the scaled distance, `n` and `f`
+    the node's `+0x128` and `+0x12C` times `0x142032e48`: the value is 1 up to `n`, then `1 - (x - n) / (f - n)`, and
+    always 1 while `0x142032dfc` is clear. It also writes the LOD metric `+0x144` (`x * 0x141aa6300`, or
+    `0x14332a254` when that differs from `0x141769578`; the previous metric goes to `+0x148`).
+-   **The fade update** (`FUN_14147a160(node, fadeAmount, camera)`). Flags bit 14 is the fade target (faded in).
+    -   A faded-in node fades out below `0x142032e38`, and a faded-out one fades in above `0x142032e34`.
+    -   A node last visible (`+0x13C`) more than 20 frames ago, not type 8, with `+0x134` below a constant, is reset to
+        1 or 0 by that rule.
+    -   A fade step runs only while the node was visible in the last frame (`0x142032e50 - +0x13C < 2`) or is type 8;
+        otherwise the fade snaps to its end.
+    -   `+0x109` bit 0 fades the node out whatever its distance.
+    -   With flags bit 27 set, the update runs the leaf LOD update `FUN_14147a430` first.
+-   **The leaf LOD** (`FUN_14147a430(node, distance)`). The level (`+0x152 & 0xF`) is 3, 2 or 1 as the unscaled
+    distance passes two thresholds (`0x14332a268`/`0x14332a238` for a type-4 `BSTreeNode`, `0x14332a25c`/`0x14332a22c`
+    otherwise, scaled by `+0xF0` through `logf`/`powf` when `+0x109` bit 1 is set). A node not visible for 20 frames
+    snaps to the new level, settled (`+0x153 & 0x70` = `0x20`); otherwise the change is a cross-fade over frames
+    (`+0x14C`).
+-   DCLF tests a resident fade root's distance on the GPU (`drawcall-limit-fix.md`, "Resident entries", step 2).
+
+### The tree manager: distance, LOD switch and wind clock
+
+-   **`FUN_140437e50`** (in `Main::Update`, for every tree the manager holds). It writes `+0x158`, the squared distance
+    from the camera to the tree's world translation (`+0xA0`), and stores the tree LOD switch's index (`+0x180`'s
+    `+0x12C`) from it: the full model within `+0x80` of the manager (squared), the LOD child past it. It sorts the near
+    ones, and past `_LAB_14200d670` of them, forces the rest to the LOD child too. `FUN_140438840` is that tail alone.
+-   **`FUN_1404381e0`** (the tree animation update, `BSFadeNodeCuller`, time-budgeted, under the manager's mutex). For
+    each tree whose `kAccumulated` bit is set, it advances the wind timer `+0x164` by the frame time, refreshes
+    `+0x158`, and within the manager's distance sets the amplitude `+0x15C` to a wave of `+0x78 * +0x164`
+    (`FUN_140438950`) times the tree's base amplitude (its data's `+0xB0`). `BSLightingShader::SetupGeometry` copies
+    `+0x164` to `+0x168` after every native tree draw.
+
 ## The material database: how a material is shared and released
 
 `BSShaderProperty::SetMaterial` (`0x14147bff0`) never stores the material it is given. It asks the material manager

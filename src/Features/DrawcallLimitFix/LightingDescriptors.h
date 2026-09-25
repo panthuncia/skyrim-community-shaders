@@ -103,6 +103,10 @@ namespace DCLF
 	 * the rest of the classification be cached.
 	 */
 	std::uint8_t FadeStateOf(const RE::BSShaderProperty* a_property);
+	/** @brief FadeStateOf's reading of the fade node alone: its LOD metric past the specular and envmap fade ends, or kFadeInvalid. */
+	std::uint8_t LodFadeStateOf(const RE::BSFadeNode* a_fadeNode);
+	/** @brief Whether the property's derivation reads its fade node's LOD metric (FadeStateOf is not constant for it). */
+	bool FadeSensitive(const RE::BSShaderProperty* a_property);
 
 	/**
 	 * @brief Pass descriptor bits GetRenderPasses sets from per-frame engine state rather than from the
@@ -158,6 +162,11 @@ namespace DCLF
 		// A resident object's pass (PrimaryCull, dclf-cull-job-elimination.md "Phase 4 in detail"): the accumulate phase
 		// patches its record once and keeps the patch across frames, instead of restoring it at the next walk.
 		bool resident = false;
+		// A resident pass under a fade root: the distance BuildDraws tests (kObjectFadeTest, PrimaryCull::FadeDistanceOf);
+		// 0 when the root's fade needs no test.
+		float fadeDistance = 0.0f;
+		// A resident tree's pass: BuildDraws applies BSTreeNode::OnVisible's height test (kObjectHeightTest).
+		bool heightTest = false;
 	};
 
 	inline constexpr std::uint32_t kPassDoAlphaTest = 1u << 20;           // pass descriptor DoAlphaTest

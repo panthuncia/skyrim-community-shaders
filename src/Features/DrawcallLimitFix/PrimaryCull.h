@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <limits>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -106,6 +107,11 @@ namespace DCLF
 		 * job returns at once, and the visibility feedback services its root.
 		 */
 		static bool ResidentOn();
+		/**
+		 * @brief CS_DCLF_RESIDENT_PROBATION (default on, with ResidentOn): entries not yet admitted join out of view, and the
+		 * build's draws admit them (dclf-cull-job-elimination.md, "Phase 4 in detail", step 2).
+		 */
+		static bool ProbationOn();
 		/** @brief The accumulate phase: the passes of this frame's joining entries' objects (patched once, then kept). */
 		const std::vector<std::pair<const RE::BSGeometry*, AccumulatedPass>>& ResidentPasses() const { return residentPasses; }
 		/** @brief The accumulate phase: whether this frame's PrepareFrame kept the residents (read once a frame). */
@@ -115,6 +121,13 @@ namespace DCLF
 		void EndAllResidents();
 		/** @brief CS_DCLF_RESIDENT_PARITY: the synthetic pass built from scratch (no cache), for SceneStore's comparison. */
 		static bool FreshSyntheticPass(const RE::BSGeometry& a_geometry, AccumulatedPass& a_out);
+		/**
+		 * @brief This frame's main camera as BSFadeNode::OnVisible measures from it: its position and its LOD factor
+		 * (NiCamera +0x184), for BuildDraws' fade test (kObjectFadeTest). Zero when the cut did not see a camera.
+		 */
+		std::array<float, 4> FadeEye() const { return fadeEye; }
+		/** @brief BSTreeNode::OnVisible's height test this frame, for BuildDraws (kObjectHeightTest): the base and the limit (+infinity: off). */
+		std::array<float, 2> TreeHeightTest() const { return treeHeight; }
 		/**
 		 * @brief [TEMP] CS_DCLF_SWITCH_PROBE=1: in the list jobs, the event-driven selection (memberLive) against the
 		 * switches' indices, and selected children found out of date, both counted.
@@ -156,6 +169,24 @@ namespace DCLF
 		template <class Drawn>
 		void Admit(Drawn&& a_drawn)
 		{
+			// The entries that joined this frame on probation (out of view, never drawn): the build drew every member, so
+			// their pipelines, materials and records are ready, and they are admitted. The rest leave at the next frame's
+			// PrepareFrame, before any list job could return at once for them.
+			for (const auto* root : probationRoots) {
+				const auto it = residents.find(root);
+				if (it == residents.end() || !it->second.probation)
+					continue;
+				bool all = true;
+				for (const auto* geometry : it->second.members)
+					all = all && a_drawn(geometry);
+				if (!all)
+					continue;
+				it->second.probation = false;
+				if (const std::uint32_t e = it->second.entry; e < cut.admitted.size() && cut.roots[e] == root)
+					cut.admitted[e] = 1;
+				cut.admittedRoots.insert(root);
+				++cutStats.probationConfirmed;
+			}
 			for (const std::uint32_t e : cut.pendingAdmission) {
 				if (e >= cut.admitted.size() || cut.admitted[e])
 					continue;
@@ -200,14 +231,59 @@ namespace DCLF
 		}
 		/** @brief Render thread, before the list jobs: memberLive of entry a_e's members, from the switches. */
 		void RefreshLive(std::uint32_t a_e);
-		/** @brief Whether entry a_e of the current snapshot can be resident now (the doc's joining rules). */
-		bool ResidentOk(std::uint32_t a_e) const;
+		/**
+		 * @brief Whether entry a_e of the current snapshot can be resident now (the doc's joining rules); a_probation for
+		 * an entry not yet admitted, which joins out of view and is admitted by the build's draws (Admit).
+		 */
+		bool ResidentOk(std::uint32_t a_e, bool a_probation = false) const { return ResidentRefusal(a_e, a_probation) == Refusal::None; }
+		enum class Refusal : std::uint8_t
+		{
+			None,
+			Plan,             // the plan, or not admitted
+			NotSettled,       // the root is fading or cross-fading
+			EngineMember,     // a member of the engine's is selected (phase 5)
+			HiddenMember,     // a selected member is app-culled
+			MemberNotCapable, // a member's record is not written by events only (SceneStore::ResidentCapable)
+			PassNotBuilt,     // the synthetic pass cannot model a member
+			FadeDecal,        // a decal under the fade test
+			Count,
+		};
+		Refusal ResidentRefusal(std::uint32_t a_e, bool a_probation) const;
+		/** @brief Whether the resident's members are still the ones its entry's switches select (a resync's check). */
+		bool SelectionSame(const auto& a_resident) const
+		{
+			std::size_t mine = 0;
+			for (std::uint32_t m = cut.memberOffsets[a_resident.entry]; m < cut.memberOffsets[a_resident.entry + 1]; ++m) {
+				if (cut.members[m].engine || !PathSelected(cut.members[m]))
+					continue;
+				if (mine >= a_resident.members.size() || a_resident.members[mine++] != cut.members[m].geometry)
+					return false;
+			}
+			return mine == a_resident.members.size();
+		}
+		/**
+		 * @brief The fade root's fade-out distance for BuildDraws (kObjectFadeTest): where FUN_14147b110's fade value falls
+		 * below BSFadeNode::OnVisible's fade-out threshold. > 0: against the distance times the camera's LOD factor; < 0:
+		 * against the distance times a constant, folded in; 0: the root never fades out by distance.
+		 */
+		static float FadeDistanceOf(const RE::NiAVObject* a_root);
+		/**
+		 * @brief What a fade root's resident passes were built from that the feedback's servicing changes: its LOD level
+		 * (+0x152, the LOD row), and with a_sensitive its LOD metric past the specular and envmap fade ends.
+		 */
+		static std::uint16_t FadeWitnessOf(const RE::NiAVObject* a_root, bool a_sensitive);
+		/** @brief The frame globals the residents' patches read (the static sun bits, the fade distances): a change ends them all. */
+		static std::uint32_t ResidentWitness();
+		/** @brief A join (render thread): the entry's passes into residentPasses, and its record; false when refused. */
+		bool JoinEntry(std::uint32_t a_e, bool a_probation);
 		enum class Eviction : std::uint8_t
 		{
 			Record,     // the walk rewrote or released a record, or a patch failed
 			Members,    // something was attached under the root or detached from it
-			Unsettled,  // the feedback found the root fading
+			Unsettled,  // the feedback found the root fading, or its LOD level changed
 			Snapshot,   // the new snapshot's plan no longer allows it
+			NotReady,   // a probation join the build did not draw in full
+			Switch,     // a switch under the root changed its selection
 			Count,
 		};
 		void EvictResident(const RE::NiAVObject* a_root, Eviction a_cause);
@@ -389,6 +465,7 @@ namespace DCLF
 			std::uint64_t switchMismatch = 0, switchStaleSeen = 0, switchMidUpdate = 0;  // [TEMP] CS_DCLF_SWITCH_PROBE
 			std::uint64_t resident = 0;                     // resident entries the job returned at once
 			std::vector<std::uint32_t> joinCandidates;      // entries stood in for (admitted and settled): may join
+			std::vector<std::uint32_t> probeCandidates;     // entries not admitted and out of view: may join on probation
 			std::array<std::uint64_t, 64> causeGeometries{};  // [TEMP] geometries under rejected entries in view, by cause
 		};
 		std::array<JobOut, 16> jobOut;
@@ -408,6 +485,8 @@ namespace DCLF
 			std::uint64_t unselected = 0;     // members under an unselected switch child
 			std::uint64_t residentFrames = 0, residentEntries = 0, residentSkips = 0;  // resident entries per frame; list jobs they returned from
 			std::uint64_t joins = 0, joinRefused = 0, endedAll = 0;
+			std::uint64_t probationJoins = 0, probationConfirmed = 0, probationRefused = 0;
+			std::array<std::uint64_t, static_cast<std::size_t>(Refusal::Count)> refusedBy{};  // the joins' refusals, by Refusal
 			std::array<std::uint64_t, static_cast<std::size_t>(Eviction::Count)> evicted{};
 			std::uint64_t residentsInView = 0, residentsServiced = 0;  // from the feedback (GPU frustum), per decoded frame
 			std::uint64_t liveAll = 0;        // frames memberLive was read from every switch (a new snapshot, a resync)
@@ -428,6 +507,10 @@ namespace DCLF
 			std::uint32_t entry = 0;
 			std::vector<const RE::BSGeometry*> members;
 			RE::NiPointer<RE::NiAVObject> root;
+			bool probation = false;  // joined out of view before its admission; Admit confirms it
+			// A fade root's state its passes were built from (FadeWitnessOf): the feedback evicts it when that changes.
+			std::uint16_t fadeWitness = 0;
+			bool fadeSensitive = false;  // a member's derivation reads the root's LOD metric (LightingDescriptors' FadeSensitive)
 		};
 		// By root. Changed on the render thread only, before and after the list jobs, which read it.
 		ankerl::unordered_dense::map<const RE::NiAVObject*, Resident> residents;
@@ -437,11 +520,15 @@ namespace DCLF
 		std::vector<std::uint8_t> joinQueued;   // per entry
 		std::vector<std::uint64_t> joinBlocked;  // per entry: the frame before which the list jobs do not offer it (joinBackoff, by index)
 		std::vector<std::pair<const RE::BSGeometry*, AccumulatedPass>> residentPasses;
+		std::vector<const RE::NiAVObject*> probationRoots;  // this frame's probation joins, until Admit and the next PrepareFrame
+		std::vector<std::uint32_t> probeScratch;
+		std::array<float, 4> fadeEye{};  // FadeEye, captured in PrepareFrame
+		std::array<float, 2> treeHeight{ 0.0f, std::numeric_limits<float>::infinity() };  // TreeHeightTest, captured in PrepareFrame
 		std::vector<const RE::NiAVObject*> unsettledRoots;  // the decode's (worker), read after its join
 		std::vector<const RE::BSGeometry*> evictedGeometries;
 		std::vector<const RE::NiAVObject*> evictedRoots;
 		std::uint64_t frameCounter = 0;
-		std::uint32_t sunWitness = ~0u;  // the frame globals the static sun bits read, when the residents were patched
+		std::uint32_t sunWitness = ~0u;  // ResidentWitness when the residents were patched
 		bool residentsLive = false;      // this frame kept the residents (TakeResidentsLive)
 		bool standInLive = false;        // this frame's snapshot is current: the stand-in runs for non-residents
 		bool liveStale = true;                             // a frame skipped the switch changes: memberLive is read again
@@ -455,6 +542,8 @@ namespace DCLF
 			std::shared_ptr<const SunCandidates> candidates;
 			std::vector<std::uint32_t> stoodIn;
 			std::uint32_t residentFrom = ~0u;  // stoodIn[residentFrom..] are resident entries
+			// Per resident entry: Resident::fadeWitness, fadeSensitive in bit 16, and a fade root (not Plain) in bit 17.
+			std::vector<std::uint32_t> fadeWitness;
 			// The stood-in entries' roots, held: the decode touches them a frame or more later, when a cell unload may
 			// have freed what the snapshot names. Taken while the list jobs had just traversed them (alive), released on
 			// the render thread (retiredTags), never on the worker.
@@ -467,6 +556,12 @@ namespace DCLF
 		{
 			std::atomic<std::uint64_t> frames{ 0 }, stale{ 0 }, entries{ 0 }, visible{ 0 }, serviced{ 0 }, unresolved{ 0 };
 			std::atomic<std::uint64_t> residents{ 0 }, residentsVisible{ 0 };
+			std::atomic<std::uint64_t> residentsFadeHidden{ 0 };  // residents in view the GPU's fade test dropped (kFrustumFadeHidden)
+			std::atomic<std::uint64_t> residentRecordsInView{ 0 };  // [TEMP] resident members inside the frustum, for the object-count comparison
+			std::atomic<std::uint64_t> residentsWitness{ 0 };     // residents whose level or LOD metric state changed
+			// [TEMP] the fade distance against the engine: residents in view past it (CPU), and whether the servicing then
+			// found them fading.
+			std::atomic<std::uint64_t> fadeBeyondFading{ 0 }, fadeBeyondSettled{ 0 }, fadeWithinFading{ 0 };
 			// [TEMP] CS_DCLF_FEEDBACK_PROBE: stood-in trees in view, and those whose clock (+0x164) moved since the last decode.
 			std::atomic<std::uint64_t> trees{ 0 }, treesAdvanced{ 0 };
 		};

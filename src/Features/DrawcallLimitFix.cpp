@@ -1243,6 +1243,15 @@ void DrawcallLimitFix::Prepass()
 			logger::info("[DCLF] sun on the GPU (sampled frame): {} synthetic draws tested, {} missed every cascade; the CPU over the same inputs: {} tested, {} missed{}",
 				draws.sunTested, draws.sunMissed, draws.sunCpuTested, draws.sunCpuMissed,
 				(draws.sunTested == draws.sunCpuTested && draws.sunMissed == draws.sunCpuMissed) ? " <- OK" : " <- DIFFERS");
+		if (draws.residentInputs || draws.residentResyncs)
+			logger::info("[DCLF] resident draws (last frame): {} persistent inputs, {} sequences, {} pairs at stable record slots, {} not drawable; since the start {} region "
+						 "versions uploaded, {} resyncs; parity {} entries checked, {} differ, {} residents missing{}",
+				draws.residentInputs, draws.residentDraws, draws.residentPairs, draws.residentUndrawable, draws.residentVersions, draws.residentResyncs,
+				draws.residentParityChecks, draws.residentParityMismatches, draws.residentMissing,
+				draws.residentParityChecks ? (draws.residentParityMismatches || draws.residentMissing ? " <- RESIDENT DRAW PARITY" : " <- OK") : "");
+		if (draws.fadeTested)
+			logger::info("[DCLF] fade on the GPU (sampled frame): {} resident draws under a fade root in view, {} dropped past their fade-out distance",
+				draws.fadeTested, draws.fadeHidden);
 		if (DCLF::IndirectDraws::Hybrid())
 			logger::info("[DCLF] hybrid (last frame): {} of {} native passes left to the indirect draws ({} in the depth pass, {} in the opaque pass)",
 				skipStats.skipped, skipStats.offered, skipStats.skippedInDepth, skipStats.skippedInOpaque);

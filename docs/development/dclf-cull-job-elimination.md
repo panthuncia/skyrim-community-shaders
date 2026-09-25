@@ -1,6 +1,7 @@
 # DCLF: a frame without the engine's culling jobs
 
-Status: phases 1-3 and phase 4's step 1 done, 2026-09-24; phase 4's step 2 next. The reasoning behind it is in [dclf-status.md](./dclf-status.md), "What removing the culling
+Status: phases 1-4 done, 2026-09-24 (phase 4's step 4 is phase 5's), and the resident draws persist across frames;
+phase 5 next. The reasoning behind it is in [dclf-status.md](./dclf-status.md), "What removing the culling
 jobs takes". The current state is in [drawcall-limit-fix.md](./drawcall-limit-fix.md), "The primary's cull without
 DCLF's objects".
 
@@ -103,13 +104,13 @@ walk. So nothing about an entry persists from one frame to the next except its a
     (`lastUsed`, and the lighting template when no other object used the pipeline). That is O(residents) writes, not
     patches.
 
-**Joining** (render thread, before the list jobs, when the cut applies, a bounded number a frame):
--   admitted;
--   plan `Plain`, `FadeRoot` or `LeafRoot` (trees wait for the height test on the GPU);
--   every member DCLF's or unselected;
+**Joining** (render thread, when the cut applies, a bounded number a frame):
+-   admitted, or on probation (step 2);
+-   any eligible plan (trees since step 3);
+-   every member the switches select DCLF's;
 -   the root settled;
--   every DCLF member with a record that is written only by events: no face, actor, skin or animated shading, and not
-    written in full every frame.
+-   every selected DCLF member with a record that is written only by events: no face, actor or animated shading, and not
+    written in full every frame (a kept skin qualifies since step 3).
 
 **Leaving** (immediately, in the frame it happens):
 -   **The walk rewrites or releases a resident's record** (`WriteObject`, `ReleaseObjectSlot`, the slot check): an
@@ -129,12 +130,60 @@ accumulate phase leaves a resident's record alone in that case, and static owner
 -   Walk parity, and 0 holes.
 -   Main-pass objects: the engine's kept ones plus the residents in view match a run without the cut.
 
-**Steps:**
-1.  Resident entries as above, with admission from a draw as today. **Done**
-    ([drawcall-limit-fix.md](./drawcall-limit-fix.md), "Resident entries"). At Riverwood about 580 of the 827
-    stood-in entries are resident; the render thread saves about 0.1 ms; the list jobs cost the same.
-2.  Admission from readiness, so entries never seen in view become resident too. That needs the fade distance on the GPU:
-    an out-of-view resident is not serviced, and one that drifted past its fade distance would draw for a frame when it
-    comes into view. That frame of latency exists already for stood-in entries.
-3.  Trees: the height test and the tree animation on the GPU.
+**Steps** (all in [drawcall-limit-fix.md](./drawcall-limit-fix.md), "Resident entries"):
+1.  Resident entries as above, with admission from a draw. **Done.** At Riverwood about 580 of the 827 stood-in entries
+    became resident.
+2.  Admission from readiness (probation) and the fade distance on the GPU. **Done.**
+    -   An entry the engine found out of view joins on probation. The colour epoch's build admits it when it drew every
+        member.
+    -   BuildDraws' depth phase 1 drops a resident past its fade-out distance that was not in view last frame
+        (`kObjectFadeTest`).
+    -   The decode ends a resident whose LOD level or LOD metric state changed, in view or not.
+3.  Trees. **Done.**
+    -   The height test is on the GPU (`kObjectHeightTest`).
+    -   The animation rows are taken from the tree manager's node state every frame. The feedback keeps that state
+        advancing.
+    -   Kept skins can be resident.
 4.  Entries with engine members stay in the stand-in until phase 5.
+
+Riverwood holds about 2,150 resident entries a frame (2,990 records). Resident parity, set parity and holes are 0.
+
+**Found along the way: DCLF's build scales with drawable candidates.** Probation takes about 0.2 ms of cull off the list
+jobs and 0.1 ms of waiting off the render thread. It adds about 0.7 ms of render-thread waiting on the epoch builds,
+which build a draw for every resident each frame: about 4,230 candidates against 1,830. Most of them are
+occluded, and the GPU's HZB rejects them. **Fixed** by the persistent resident draws
+([drawcall-limit-fix.md](./drawcall-limit-fix.md), "Persistent resident draws"): both epoch joins are now below their
+cost with no residency at all.
+
+## Open: an engine crash while loading (to investigate)
+
+First seen 2026-09-24 while building the persistent resident draws. It has crashed 3 times, in 4 runs of the same
+kind; the fourth run did not crash.
+
+-   **Where.** `SkyrimSE.exe+0x783642`, in `FUN_140783590`: `cmp qword ptr [rcx+0x1F8], 0` with `rcx` null, an access
+    violation reading `0x1F8`.
+-   **Call stack.** `PlayerCharacter::sub_1406A4540` (`+0x6A45DC`) ← `FUN_1402eb3c0` ← `FUN_140657fc0` ←
+    `FUN_140653a80` ← `TESObjectREFR::sub_140606640` ← ... ← `FUN_140645f20`, on the main thread. The objects nearby
+    are a `MovementControllerNPC` (RBX) and the `Character` "Geirlund" (R15), which points to NPC movement or AI.
+-   **When.** Right after `coc Riverwood` (test command at frame 1), about 13 s into the run, while frames run at
+    400-460 ms each. The crash logs are `crash-2026-09-24-23-00-10.log`, `crash-2026-09-24-23-04-22.log` and
+    `crash-2026-09-24-23-07-05.log` in `My Games\Skyrim Special Edition\SKSE`, with `CommunityShaders.dmp` from the
+    last one.
+-   **Environment.** Full featureset (`CS_DCLF_ASYNC=on`, `CS_ORG_ASYNC_EPOCHS=1`), with
+    `CS_DCLF_RESIDENT_DRAW_PARITY=1` in every crashing run, and `CS_DCLF_RESIDENT_PARITY=1` plus
+    `CS_DCLF_SET_PARITY=1` in two of them. No DCLF frame is on the probable stack; Community Shaders appears only
+    in the stack scan (`TraverseScenegraphCollision`).
+-   **What it follows.**
+    -   **The `coc` at frame 1.** Every crash came from a run with the `coc Riverwood` test command at frame 1, straight
+        after the save loads, while NPCs such as Geirlund are still being set up. Runs with `coc` at frame 300 have not
+        crashed.
+    -   **Not the parity checks, and not the resident draws being on.** It crashed with none of the parity checks on
+        (rt4, rt5, 23:18) and with `CS_DCLF_RESIDENT_DRAWS=0` (rdE1, 23:11).
+    -   **The builds since the change log.** With `coc` at frame 1, the builds before 23:00 ran 10 times without a
+        crash: the Tracy A/B fa1-fa6, rd2-rd5, and rd1, which lost the device instead. The builds since then crashed 9
+        times in 14 runs. The first of those builds (22:59) turned the resident change feed into an append-only log
+        (`Tables::residentLog`, noted from `MoveObject`, `AppendKeptSkin`, `ResetObject` and the resident mark and
+        drop). That code runs whether the region is on or off, and it only writes DCLF's tables.
+-   **Not yet known:** whether DCLF (or another Community Shaders feature) writes something the engine then reads, or
+    the engine races on its own once the load frames are slow enough. Earlier crash signatures today were different:
+    `FUN_140ea5cc0` (the loader-thread tree crash) and `FUN_1414b2130`.

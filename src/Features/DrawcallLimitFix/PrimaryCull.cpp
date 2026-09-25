@@ -62,6 +62,15 @@ namespace DCLF
 		constexpr std::uintptr_t kTreeHeightLimit = 0x2032fa0;    // float
 		constexpr std::size_t kTreeLodData = 0x180;               // pointer; its +0x12C count
 		constexpr std::size_t kLightDataActiveMask = 0x1C;
+		constexpr std::size_t kJoinsPerFrame = 256;  // resident joins a frame, of each kind (admitted, probation)
+		// FUN_14147b110 (the fade value) and FUN_14147a160 (the fade update): what the fade-out distance is made of.
+		constexpr std::size_t kFadeNear = 0x128;                  // float, on the fade node
+		constexpr std::size_t kFadeFar = 0x12C;                   // float
+		constexpr std::size_t kFadeAlwaysOut = 0x109;             // byte: bit 0 fades the node out whatever its distance
+		constexpr std::uintptr_t kFadeTypeDivisors = 0x2032e00;   // float per LOD type (+0x153 & 0xF): the LOD factor's divisor
+		constexpr std::uintptr_t kFadeDefaultScale = 0x1ad2840;   // float: the scale when the type's divisor is not positive
+		constexpr std::uintptr_t kFadeOutThreshold = 0x2032e38;   // float: a faded-in node fades out below this fade value
+		constexpr std::uintptr_t kFadeDistanceMult = 0x2032e48;   // float: multiplies the node's near and far distances
 
 		using SceneList = RE::BSTArray<RE::NiPointer<RE::NiAVObject>>;
 
@@ -230,6 +239,12 @@ namespace DCLF
 		return on;
 	}
 
+	bool PrimaryCull::ProbationOn()
+	{
+		static const bool on = ResidentOn() && SwitchValue("CS_DCLF_RESIDENT_PROBATION") != "0";
+		return on;
+	}
+
 	bool PrimaryCull::FreshSyntheticPass(const RE::BSGeometry& a_geometry, AccumulatedPass& a_out)
 	{
 		const auto* lighting = netimmerse_cast<const RE::BSLightingShaderProperty*>(a_geometry.GetGeometryRuntimeData().shaderProperty.get());
@@ -244,33 +259,88 @@ namespace DCLF
 		return true;
 	}
 
-	bool PrimaryCull::ResidentOk(std::uint32_t a_e) const
+	PrimaryCull::Refusal PrimaryCull::ResidentRefusal(std::uint32_t a_e, bool a_probation) const
 	{
-		if (a_e >= cut.plans.size() || !cut.admitted[a_e])
-			return false;
-		const auto plan = cut.plans[a_e];
-		// Trees wait for the height test on the GPU (the step after this one).
-		if (plan != EntryPlan::Plain && plan != EntryPlan::FadeRoot && plan != EntryPlan::LeafRoot)
-			return false;
+		if (a_e >= cut.plans.size() || (!a_probation && !cut.admitted[a_e]) || cut.plans[a_e] == EntryPlan::Rejected)
+			return Refusal::Plan;
 		const auto* root = cut.roots[a_e];
-		if (plan != EntryPlan::Plain && !Settled(root))
-			return false;
+		if (cut.plans[a_e] != EntryPlan::Plain && (!Settled(root) || (At<std::uint8_t>(root, kFadeAlwaysOut) & 1)))
+			return Refusal::NotSettled;
 		auto& store = SceneStore::Get();
 		bool any = false;
 		for (std::uint32_t m = cut.memberOffsets[a_e]; m < cut.memberOffsets[a_e + 1]; ++m) {
 			const auto& member = cut.members[m];
-			const bool live = cut.liveEvents ? cut.memberLive[m] != 0 : PathSelected(member);
-			// The engine's members keep the entry in the stand-in (phase 5), unless their switch does not draw them.
-			if (member.engine) {
-				if (live)
-					return false;
+			// A member no switch selects is not drawn, and a switch that changes evicts the entry (PrepareFrame).
+			if (!(cut.liveEvents ? cut.memberLive[m] != 0 : PathSelected(member)))
 				continue;
+			// The engine's members keep the entry in the stand-in (phase 5).
+			if (member.engine)
+				return Refusal::EngineMember;
+			// Nothing app-culled up to the root: a resident record is drawn whenever the GPU finds it.
+			if (!MemberShown(m, root))
+				return Refusal::HiddenMember;
+			if (!store.ResidentCapable(member.geometry)) {
+				// [TEMP] why, by plan and cause.
+				if (a_probation || true) {
+					static std::atomic<std::uint32_t> logged{ 0 };
+					static std::map<std::string, std::uint32_t> seen;
+					const auto key = fmt::format("{} plan, {}", static_cast<int>(cut.plans[a_e]), store.ResidentIncapableReason(member.geometry));
+					if (seen[key]++ == 0 && logged.fetch_add(1) < 24)
+						logger::info("[DCLF][TEMP] resident refusal: '{}' under '{}' ({}): {}", member.geometry->name.c_str() ? member.geometry->name.c_str() : "?",
+							root->name.c_str() ? root->name.c_str() : "?", root->GetRTTI() ? root->GetRTTI()->name : "?", key);
+				}
+				return Refusal::MemberNotCapable;
 			}
-			if (!live || !store.ResidentCapable(member.geometry))
-				return false;
 			any = true;
 		}
-		return any;
+		return any ? Refusal::None : Refusal::Plan;
+	}
+
+	float PrimaryCull::FadeDistanceOf(const RE::NiAVObject* a_root)
+	{
+		// No fade update at all, or no distance term in the fade value (FUN_14147b110 returns 1).
+		if (!Global<std::uint8_t>(kFadesOn) || !Global<std::uint8_t>(kFadeLodUpdates))
+			return 0.0f;
+		const std::uint32_t type = At<std::uint8_t>(a_root, 0x153) & 0xF;
+		// Type 8 fades gradually even from out of view (FUN_14147a160), and OnVisible's type-6 branch never fades out
+		// (ServiceFade): the engine draws either on the frame it comes into view, as the resident is.
+		if (type == 8 || (type == 6 && Global<float>(kFadeSpecialA) == Global<float>(kFadeSpecialB)))
+			return 0.0f;
+		const float mult = Global<float>(kFadeDistanceMult);
+		const float nearDistance = mult * At<float>(a_root, kFadeNear);
+		const float farDistance = mult * At<float>(a_root, kFadeFar);
+		if (!(farDistance > nearDistance))
+			return 0.0f;  // the fade value never falls below 1
+		// The fade value 1 - (x - near) / (far - near), x the scaled distance, reaches the threshold at x = limit.
+		const float limit = nearDistance + (1.0f - Global<float>(kFadeOutThreshold)) * (farDistance - nearDistance);
+		const float divisor = Global<float>(kFadeTypeDivisors + type * 4);
+		// x = distance * lodFactor / divisor, or distance * the default scale when the divisor is not positive.
+		const float distance = divisor > 0.0f ? limit * divisor : -(limit / Global<float>(kFadeDefaultScale));
+		return std::isfinite(distance) ? distance : 0.0f;
+	}
+
+	std::uint16_t PrimaryCull::FadeWitnessOf(const RE::NiAVObject* a_root, bool a_sensitive)
+	{
+		const std::uint32_t level = At<std::uint8_t>(a_root, 0x152) & 0xF;
+		const std::uint32_t metric = a_sensitive ? LodFadeStateOf(static_cast<const RE::BSFadeNode*>(a_root)) : 0u;
+		return static_cast<std::uint16_t>(level | (metric << 8));
+	}
+
+	std::uint32_t PrimaryCull::ResidentWitness()
+	{
+		const auto* accumulator = Global<std::uint8_t*>(kMainAccumulator);
+		std::uint32_t witness = 2166136261u;
+		const auto mix = [&](std::uint32_t a_value) { witness = (witness ^ a_value) * 16777619u; };
+		// The static sun bits (SunShadowStatic).
+		mix(Global<std::uint8_t>(kNoSunShadowDir) | (accumulator && accumulator[kAccumulatorDeferredShadow] ? 2u : 0u) | (Global<std::uint8_t>(kScreenDoorFades) ? 4u : 0u));
+		// The fade distances (FadeDistanceOf).
+		mix(Global<std::uint8_t>(kFadesOn) | (Global<std::uint8_t>(kFadeLodUpdates) << 8) | (Global<float>(kFadeSpecialA) == Global<float>(kFadeSpecialB) ? 0x10000u : 0u));
+		mix(std::bit_cast<std::uint32_t>(Global<float>(kFadeDistanceMult)));
+		mix(std::bit_cast<std::uint32_t>(Global<float>(kFadeOutThreshold)));
+		mix(std::bit_cast<std::uint32_t>(Global<float>(kFadeDefaultScale)));
+		for (std::uint32_t type = 0; type < 13; ++type)
+			mix(std::bit_cast<std::uint32_t>(Global<float>(kFadeTypeDivisors + type * 4)));
+		return witness;
 	}
 
 	void PrimaryCull::EvictResident(const RE::NiAVObject* a_root, Eviction a_cause)
@@ -333,59 +403,98 @@ namespace DCLF
 			EvictResident(root, Eviction::Members);
 		for (const auto* root : std::exchange(unsettledRoots, {}))
 			EvictResident(root, Eviction::Unsettled);
+		// Last frame's probation joins the build did not draw in full: before this frame's list jobs could return at once
+		// for them.
+		for (const auto* root : std::exchange(probationRoots, {}))
+			if (const auto it = residents.find(root); it != residents.end() && it->second.probation)
+				EvictResident(root, Eviction::NotReady);
 		residentPasses.clear();
 		if (!a_current || !ResidentOn())
 			return;
 		// Joins: entries the stand-in reached admitted and settled, a bounded number a frame (each one's objects are
 		// patched in this frame's accumulate phase).
-		constexpr std::size_t kJoinsPerFrame = 256;
 		std::size_t taken = 0, joined = 0;
 		for (; taken < joinQueue.size() && joined < kJoinsPerFrame; ++taken) {
 			const std::uint32_t e = joinQueue[taken];
 			joinQueued[e] = 0;
-			const auto* root = cut.roots[e];
-			if (residents.contains(root))
-				continue;
-			if (const auto backoff = joinBackoff.find(root); backoff != joinBackoff.end()) {
-				if (backoff->second > frameCounter)
-					continue;
-				joinBackoff.erase(backoff);
-			}
-			if (!ResidentOk(e)) {
-				// Its plan, members or fade do not allow it now: it is not asked again for a while.
-				joinBackoff[root] = frameCounter + 120;
-				joinBlocked[e] = frameCounter + 120;
-				++cutStats.joinRefused;
-				continue;
-			}
-			// Every member's pass first: an entry with a member the synthetic pass cannot model stays in the stand-in.
-			const std::size_t firstPass = residentPasses.size();
-			bool built = true;
-			for (std::uint32_t m = cut.memberOffsets[e]; m < cut.memberOffsets[e + 1] && built; ++m)
-				if (!cut.members[m].engine) {
-					AccumulatedPass pass;
-					built = ResidentPassOf(cut.members[m].geometry, pass);
-					if (built)
-						residentPasses.emplace_back(cut.members[m].geometry, pass);
-				}
-			if (!built) {
-				residentPasses.resize(firstPass);
-				joinBackoff[root] = frameCounter + 600;
-				joinBlocked[e] = frameCounter + 600;
-				++cutStats.joinRefused;
-				continue;
-			}
-			Resident resident{ e, {}, RE::NiPointer<RE::NiAVObject>(const_cast<RE::NiAVObject*>(root)) };
-			for (std::uint32_t m = cut.memberOffsets[e]; m < cut.memberOffsets[e + 1]; ++m)
-				if (!cut.members[m].engine) {
-					resident.members.push_back(cut.members[m].geometry);
-					residentMemberRoot[cut.members[m].geometry] = root;
-				}
-			residents.emplace(root, std::move(resident));
-			++joined;
+			joined += JoinEntry(e, false) ? 1 : 0;
 		}
 		joinQueue.erase(joinQueue.begin(), joinQueue.begin() + static_cast<std::ptrdiff_t>(taken));
 		cutStats.joins += joined;
+	}
+
+	bool PrimaryCull::JoinEntry(std::uint32_t a_e, bool a_probation)
+	{
+		const auto* root = cut.roots[a_e];
+		if (residents.contains(root))
+			return false;
+		if (const auto backoff = joinBackoff.find(root); backoff != joinBackoff.end()) {
+			if (backoff->second > frameCounter)
+				return false;
+			joinBackoff.erase(backoff);
+		}
+		const auto refuse = [&](Refusal a_cause, std::uint64_t a_frames) {
+			// Its plan, members, fade or passes do not allow it now: it is not asked again for a while.
+			joinBackoff[root] = frameCounter + a_frames;
+			joinBlocked[a_e] = frameCounter + a_frames;
+			++(a_probation ? cutStats.probationRefused : cutStats.joinRefused);
+			++cutStats.refusedBy[static_cast<std::size_t>(a_cause)];
+			return false;
+		};
+		if (const auto refusal = ResidentRefusal(a_e, a_probation); refusal != Refusal::None)
+			return refuse(refusal, 120);
+		const auto selected = [&](std::uint32_t a_m) {
+			return !cut.members[a_m].engine && (cut.liveEvents ? cut.memberLive[a_m] != 0 : PathSelected(cut.members[a_m]));
+		};
+		// A fade root's objects carry its fade-out distance for BuildDraws' test. Decals are never in the depth segment,
+		// whose first phase tests it, so an entry that needs the test and has one stays in the stand-in.
+		const float fadeDistance = cut.plans[a_e] == EntryPlan::Plain ? 0.0f : FadeDistanceOf(root);
+		// [TEMP] the fade distance's inputs, for the first joins that have one.
+		static std::uint32_t loggedFade = 0;
+		if (fadeDistance != 0.0f && loggedFade < 12) {
+			++loggedFade;
+			const std::uint32_t type = At<std::uint8_t>(root, 0x153) & 0xF;
+			const float dx = root->worldBound.center.x - fadeEye[0], dy = root->worldBound.center.y - fadeEye[1], dz = root->worldBound.center.z - fadeEye[2];
+			const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+			logger::info("[DCLF][TEMP] fade distance: '{}' type {} near {} far {} mult {} threshold {} divisor {} -> {}; now at {} (x LOD factor {} = {}), metric {}",
+				root->name.c_str() ? root->name.c_str() : "?", type, At<float>(root, kFadeNear), At<float>(root, kFadeFar), Global<float>(kFadeDistanceMult),
+				Global<float>(kFadeOutThreshold), Global<float>(kFadeTypeDivisors + type * 4), fadeDistance, distance, fadeEye[3], distance * fadeEye[3],
+				std::bit_cast<float>(At<std::uint32_t>(root, 0x144)));
+		}
+		// Every member's pass first: an entry with a member the synthetic pass cannot model stays in the stand-in.
+		const std::size_t firstPass = residentPasses.size();
+		const bool tree = cut.plans[a_e] == EntryPlan::TreeRoot;
+		for (std::uint32_t m = cut.memberOffsets[a_e]; m < cut.memberOffsets[a_e + 1]; ++m)
+			if (selected(m)) {
+				AccumulatedPass pass;
+				const bool built = ResidentPassOf(cut.members[m].geometry, pass);
+				const bool decal = pass.hint == 2 || pass.hint == 3;
+				// Decals are never in the depth segment, whose first phase makes the fade and height tests.
+				if (!built || (decal && (fadeDistance != 0.0f || tree))) {
+					residentPasses.resize(firstPass);
+					return refuse(built ? Refusal::FadeDecal : Refusal::PassNotBuilt, 600);
+				}
+				pass.fadeDistance = fadeDistance;
+				pass.heightTest = tree;
+				residentPasses.emplace_back(cut.members[m].geometry, pass);
+			}
+		Resident resident{ a_e, {}, RE::NiPointer<RE::NiAVObject>(const_cast<RE::NiAVObject*>(root)), a_probation };
+		for (std::uint32_t m = cut.memberOffsets[a_e]; m < cut.memberOffsets[a_e + 1]; ++m)
+			if (selected(m)) {
+				const auto* geometry = cut.members[m].geometry;
+				resident.members.push_back(geometry);
+				residentMemberRoot[geometry] = root;
+				const auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
+				resident.fadeSensitive = resident.fadeSensitive || (FadeSensitive(property) && property->fadeNode == root);
+			}
+		if (cut.plans[a_e] != EntryPlan::Plain)
+			resident.fadeWitness = FadeWitnessOf(root, resident.fadeSensitive);
+		residents.emplace(root, std::move(resident));
+		if (a_probation) {
+			probationRoots.push_back(root);
+			++cutStats.probationJoins;
+		}
+		return true;
 	}
 
 	bool PrimaryCull::SwitchProbe()
@@ -510,7 +619,23 @@ namespace DCLF
 		++cutStats.frames;
 		// The switches whose selection the walks applied since the last frame; a frame the cut skips drops them, so the
 		// next one reads every switch again.
-		liveStale = SceneStore::Get().TakeSwitchChanges(switchChanges) || liveStale;
+		const bool switchResync = SceneStore::Get().TakeSwitchChanges(switchChanges);
+		liveStale = switchResync || liveStale;
+		// A resident's members are the ones its switches selected at the join: a switch under its root that changed ends it
+		// (the newly selected child's record is not a resident one), and a resync checks every resident's selection.
+		if (!residents.empty()) {
+			for (const auto* node : switchChanges)
+				if (const auto it = cut.switchEntry.find(node); it != cut.switchEntry.end() && it->second < cut.roots.size())
+					EvictResident(cut.roots[it->second], Eviction::Switch);
+			if (switchResync) {
+				std::vector<const RE::NiAVObject*> changed;
+				for (const auto& [root, resident] : residents)
+					if (resident.entry >= cut.roots.size() || cut.roots[resident.entry] != root || !SelectionSame(resident))
+						changed.push_back(root);
+				for (const auto* root : changed)
+					EvictResident(root, Eviction::Switch);
+			}
+		}
 		auto candidates = SceneStore::Get().GetSunCandidates();
 		const std::uint32_t count = Global<std::uint32_t>(kSceneListCount);
 		auto** processes = Global<RE::NiCullingProcess**>(kListProcesses);
@@ -520,8 +645,27 @@ namespace DCLF
 			for (const auto& light : node->GetRuntimeData().activeShadowLights)
 				localShadows = localShadows || (light && light.get() != node->GetRuntimeData().sunShadowDirLight);
 		++frameCounter;
+		// [TEMP] CS_DCLF_TEST_FADE_DIVISOR="<frame>:<value>": the LOD type 1 (objects) fade divisor written at that frame, so
+		// resident objects fall past their fade-out distance within the loaded cells (the GPU's fade test).
+		static const auto testDivisor = [] {
+			const auto value = SwitchValue("CS_DCLF_TEST_FADE_DIVISOR");
+			const auto colon = value.find(':');
+			return colon == std::string::npos ? std::pair{ 0ull, 0.0f } :
+			                                    std::pair{ std::strtoull(value.c_str(), nullptr, 10), std::strtof(value.c_str() + colon + 1, nullptr) };
+		}();
+		if (testDivisor.first && frameCounter == testDivisor.first) {
+			logger::info("[DCLF][TEMP] test: the type 1 fade divisor {} -> {}", Global<float>(kFadeTypeDivisors + 4), testDivisor.second);
+			Global<float>(kFadeTypeDivisors + 4) = testDivisor.second;
+		}
 		standInLive = false;
 		residentsLive = false;
+		// The camera the fade roots' distances are measured from (BuildDraws' fade test).
+		fadeEye = {};
+		if (const auto* camera = processes && count ? processes[0]->camera : nullptr)
+			fadeEye = { camera->world.translate.x, camera->world.translate.y, camera->world.translate.z, At<float>(camera, kCameraLodAdjust) };
+		// BSTreeNode::OnVisible's height test, as the list processes have it this frame (TreeAboveLimit).
+		const bool heightTest = processes && count && processes[0] && At<std::uint8_t>(processes[0], kProcessTreeHeightTest) && Global<std::uint8_t>(kTreeHeightTestOn);
+		treeHeight = { Global<float>(kTreeHeightBase), heightTest ? Global<float>(kTreeHeightLimit) : std::numeric_limits<float>::infinity() };
 		residentPasses.clear();  // only this frame's joins, and none on a frame that keeps no residents
 		if (!processes || !count || count > cut.processes.size() || !SunAccumulation::Get().ExclusionLive() || localShadows) {
 			++cutStats.skippedPreconditions;
@@ -531,11 +675,9 @@ namespace DCLF
 				EndAllResidents();
 			return;
 		}
-		// The frame globals the static sun bits read (SunShadowStatic): the residents' passes carry them.
+		// The frame globals the static sun bits and the fade distances read: the residents' passes carry them.
 		if (ResidentOn()) {
-			const auto* accumulator = Global<std::uint8_t*>(kMainAccumulator);
-			const std::uint32_t witness = Global<std::uint8_t>(kNoSunShadowDir) | (accumulator && accumulator[kAccumulatorDeferredShadow] ? 2u : 0u) |
-			                              (Global<std::uint8_t>(kScreenDoorFades) ? 4u : 0u);
+			const std::uint32_t witness = ResidentWitness();
 			if (witness != sunWitness && !residents.empty())
 				EndAllResidents();
 			sunWitness = witness;
@@ -659,12 +801,8 @@ namespace DCLF
 				bool same = it != cut.eligible.end();
 				if (same) {
 					const std::uint32_t e = it->second;
-					std::size_t mine = 0;
-					for (std::uint32_t m = cut.memberOffsets[e]; m < cut.memberOffsets[e + 1] && same; ++m)
-						if (!cut.members[m].engine)
-							same = mine < resident.members.size() && resident.members[mine++] == cut.members[m].geometry;
-					same = same && mine == resident.members.size() && ResidentOk(e);
 					resident.entry = e;
+					same = SelectionSame(resident) && ResidentOk(e);
 				}
 				if (!same)
 					leaving.push_back(root);
@@ -733,10 +871,13 @@ namespace DCLF
 			return false;
 		}
 		if (!cut.admitted[e]) {
-			// The engine culls it this frame; if it is in view, the colour epoch's draws decide its admission.
+			// The engine culls it this frame; if it is in view, the colour epoch's draws decide its admission. Out of view
+			// it may join on probation: nothing draws it this frame, and the build's draws of its patched records admit it.
 			EngineProcess1(a_process, a_object, a_arg);
 			if (a_object->GetFlags().any(RE::NiAVObject::Flag::kAccumulated))
 				out.pending.push_back(e);
+			else if (ProbationOn() && e < joinBlocked.size() && joinBlocked[e] <= frameCounter)
+				out.probeCandidates.push_back(e);
 			++out.notAdmitted;
 			return true;
 		}
@@ -877,6 +1018,8 @@ namespace DCLF
 					joinQueue.push_back(e);
 				}
 			out.joinCandidates.clear();
+			probeScratch.insert(probeScratch.end(), out.probeCandidates.begin(), out.probeCandidates.end());
+			out.probeCandidates.clear();
 			for (std::size_t c = 0; c < s.causeGeometries.size(); ++c)
 				s.causeGeometries[c] += out.causeGeometries[c];
 		}
@@ -889,6 +1032,15 @@ namespace DCLF
 					cutStats.localShadowed += (mask & ~sunBits) ? 1 : 0;
 					mask = 0;
 				}
+		// Probation joins (dclf-cull-job-elimination.md, "Phase 4 in detail"): entries not yet admitted that the engine found
+		// out of view join now, their records patched in this frame's accumulate phase; the colour epoch's build admits
+		// those it drew in full (Admit), and the next PrepareFrame ends the others.
+		if (standInLive && ResidentOn()) {
+			std::size_t joined = 0;
+			for (std::size_t i = 0; i < probeScratch.size() && joined < kJoinsPerFrame; ++i)
+				joined += JoinEntry(probeScratch[i], true) ? 1 : 0;
+		}
+		probeScratch.clear();
 		// This frame's stood-in entries ride with its feedback copy (IndirectDraws::ArmFeedback), and the frames whose
 		// copies have completed are decoded on the worker: after this frame's list jobs, joined before the next's.
 		if (FeedbackOn()) {
@@ -899,8 +1051,12 @@ namespace DCLF
 			// The residents: the decode services them as it does the stood-in entries (their fade, LOD and kAccumulated),
 			// and reports a root it finds fading (unsettledRoots).
 			tag->residentFrom = static_cast<std::uint32_t>(tag->stoodIn.size());
-			for (const auto& [root, resident] : residents)
+			tag->fadeWitness.reserve(residents.size());
+			for (const auto& [root, resident] : residents) {
 				tag->stoodIn.push_back(resident.entry);
+				tag->fadeWitness.push_back(resident.fadeWitness | (resident.fadeSensitive ? 0x10000u : 0u) |
+										   (cut.plans[resident.entry] != EntryPlan::Plain ? 0x20000u : 0u));
+			}
 			tag->roots.reserve(tag->stoodIn.size());
 			for (const std::uint32_t e : tag->stoodIn)
 				tag->roots.emplace_back(const_cast<RE::NiAVObject*>(cut.roots[e]));
@@ -957,22 +1113,39 @@ namespace DCLF
 		counters.frames.fetch_add(1, std::memory_order_relaxed);
 		const auto* tag = static_cast<const FeedbackTag*>(a_tag.get());
 		retiredTags.push_back(a_tag);  // its node references outlive the slot's, until the render thread's join
-		// Another snapshot: the entry indices mean something else now.
+		// A resident whose passes no longer stand for its root goes back to the stand-in (and so to the engine): the root
+		// started to fade or cross-fade, its LOD level changed (FUN_14147a430: the LOD row), or its LOD metric crossed the
+		// specular or envmap fade end (the pass descriptor). Checked for every resident of every decoded frame, in view or not
+		// and whatever the snapshot: the servicing below is not the roots' only writer (other views' OnVisible).
+		const auto checkResident = [&](RE::NiAVObject* a_root, std::uint32_t a_witness) {
+			if (!(a_witness & 0x20000u))
+				return;
+			if (!Settled(a_root)) {
+				unsettledRoots.push_back(a_root);
+			} else if (FadeWitnessOf(a_root, (a_witness & 0x10000u) != 0) != (a_witness & 0xFFFFu)) {
+				unsettledRoots.push_back(a_root);
+				counters.residentsWitness.fetch_add(1, std::memory_order_relaxed);
+			}
+		};
+		// Another snapshot: the entry indices mean something else now, but the residents' roots are the tag's own.
 		if (!tag || tag->candidates != cut.candidates) {
 			counters.stale.fetch_add(1, std::memory_order_relaxed);
+			if (tag)
+				for (std::size_t i = tag->residentFrom; i < tag->roots.size() && i < tag->stoodIn.size(); ++i)
+					checkResident(tag->roots[i].get(), tag->fadeWitness[i - tag->residentFrom]);
 			return;
 		}
 		auto** processes = Global<RE::NiCullingProcess**>(kListProcesses);
 		const auto* camera = processes && processes[0] ? processes[0]->camera : nullptr;
 		std::uint64_t visible = 0, serviced = 0, unresolved = 0;
-		std::uint64_t residentsVisible = 0;
+		std::uint64_t residentsVisible = 0, residentsFadeHidden = 0, residentRecordsInView = 0;
 		for (std::size_t i = 0; i < tag->stoodIn.size(); ++i) {
 			const std::uint32_t e = tag->stoodIn[i];
 			if (e >= cut.roots.size() || i >= tag->roots.size())
 				continue;
 			const bool resident = i >= tag->residentFrom;
 			// In view in that frame: any of the entry's own geometries inside the frustum (the GPU's phase 1).
-			bool inView = false;
+			bool inView = false, fadeHidden = false;
 			for (std::uint32_t m = cut.memberOffsets[e]; m < cut.memberOffsets[e + 1] && !inView; ++m) {
 				const std::int32_t object = cut.memberObject[m];
 				if (cut.members[m].engine)
@@ -981,29 +1154,63 @@ namespace DCLF
 					++unresolved;
 					continue;
 				}
-				inView = a_words[object] == a_stamp;
+				// The stamp's low 28 bits; bit 31 is the fade test's (BuildDrawsCS.hlsl, kFrustumFadeHidden).
+				inView = (a_words[object] & 0x0FFFFFFFu) == a_stamp;
+				fadeHidden = inView && (a_words[object] & 0x80000000u) != 0;
 			}
+			// [TEMP] every member in view, not only the first.
+			if (i >= tag->residentFrom)
+				for (std::uint32_t m = cut.memberOffsets[e]; m < cut.memberOffsets[e + 1]; ++m)
+					if (const std::int32_t object = cut.memberObject[m]; !cut.members[m].engine && object >= 0 && static_cast<std::uint32_t>(object) < a_objects &&
+																	  (a_words[object] & 0x8FFFFFFFu) == a_stamp)
+						++residentRecordsInView;
 			auto* root = tag->roots[i].get();
 			std::atomic_ref<std::uint32_t> flags(At<std::uint32_t>(root, kObjectFlags));
+			const auto checkThis = [&] {
+				if (resident)
+					checkResident(root, tag->fadeWitness[i - tag->residentFrom]);
+			};
 			if (!inView) {
 				flags.fetch_and(~kFlagAccumulated, std::memory_order_relaxed);
+				checkThis();
 				continue;
 			}
 			++visible;
 			residentsVisible += resident ? 1 : 0;
+			residentsFadeHidden += resident && fadeHidden ? 1 : 0;
 			flags.fetch_or(kFlagAccumulated, std::memory_order_relaxed);
-			if (!camera)
+			if (!camera) {
+				checkThis();
 				continue;
-			switch (cut.plans[e]) {
+			}
+			// [TEMP] the fade distance against the engine's servicing.
+			bool beyond = false;
+			if (resident && (cut.plans[e] == EntryPlan::FadeRoot || cut.plans[e] == EntryPlan::LeafRoot))
+				if (const float distance = FadeDistanceOf(root); distance != 0.0f) {
+					const auto& eye = camera->world.translate;
+					const float dx = root->worldBound.center.x - eye.x, dy = root->worldBound.center.y - eye.y, dz = root->worldBound.center.z - eye.z;
+					beyond = std::sqrt(dx * dx + dy * dy + dz * dz) * (distance > 0.0f ? At<float>(camera, kCameraLodAdjust) : 1.0f) > std::abs(distance);
+				}
+			const auto plan = cut.plans[e];
+			switch (plan) {
 			case EntryPlan::FadeRoot:
 			case EntryPlan::LeafRoot:
-				ServiceFade(root, cut.plans[e] == EntryPlan::LeafRoot, *camera);
+				ServiceFade(root, plan == EntryPlan::LeafRoot, *camera);
+				if (resident) {
+					const bool fading = At<float>(root, kCurrentFade) < 1.0f || !(At<std::uint32_t>(root, kObjectFlags) & kFlagFadeTargetReached);
+					if (beyond)
+						(fading ? counters.fadeBeyondFading : counters.fadeBeyondSettled).fetch_add(1, std::memory_order_relaxed);
+					else if (fading)
+						counters.fadeWithinFading.fetch_add(1, std::memory_order_relaxed);
+				}
 				++serviced;
-				// A resident that started to fade or cross-fade goes back to the stand-in (and so to the engine).
-				if (resident && !Settled(root))
-					unsettledRoots.push_back(root);
 				break;
 			case EntryPlan::TreeRoot:
+				// BSTreeNode::OnVisible does nothing for a tree above the height limit (BuildDraws drops a resident one).
+				if (processes && processes[0] && TreeAboveLimit(root, *processes[0])) {
+					checkThis();
+					continue;
+				}
 				ServiceTreeState(root, *camera);
 				++serviced;
 				if (FeedbackProbe()) {
@@ -1018,6 +1225,7 @@ namespace DCLF
 			default:
 				break;
 			}
+			checkThis();
 		}
 		counters.entries.fetch_add(tag->stoodIn.size(), std::memory_order_relaxed);
 		counters.visible.fetch_add(visible, std::memory_order_relaxed);
@@ -1025,6 +1233,8 @@ namespace DCLF
 		counters.unresolved.fetch_add(unresolved, std::memory_order_relaxed);
 		counters.residents.fetch_add(tag->residentFrom < tag->stoodIn.size() ? tag->stoodIn.size() - tag->residentFrom : 0, std::memory_order_relaxed);
 		counters.residentsVisible.fetch_add(residentsVisible, std::memory_order_relaxed);
+		counters.residentsFadeHidden.fetch_add(residentsFadeHidden, std::memory_order_relaxed);
+		counters.residentRecordsInView.fetch_add(residentRecordsInView, std::memory_order_relaxed);
 	}
 
 	void PrimaryCull::BuildSyntheticInto(std::vector<std::pair<const RE::BSGeometry*, AccumulatedPass>>& a_out, std::uint64_t& a_unmodelled)
@@ -1465,14 +1675,32 @@ namespace DCLF
 				const std::uint64_t residentVisible = feedbackCounters.residentsVisible.exchange(0, std::memory_order_relaxed);
 				const std::uint64_t residentDecoded = feedbackCounters.residents.exchange(0, std::memory_order_relaxed);
 				const double decodedFrames = std::max<double>(static_cast<double>(feedbackCounters.frames.load(std::memory_order_relaxed)), 1.0);
-				logger::info("[DCLF] resident entries: {:.0f} a frame ({} frames), {:.0f} list-job returns; {} joined, {} refused, {} ended all; evicted: {} record, {} members, {} fading, {} snapshot; "
+				logger::info("[DCLF] resident entries: {:.0f} a frame ({} frames), {:.0f} list-job returns; {} joined, {} refused, {} ended all; evicted: {} record, {} members, {} fading, {} snapshot, {} switch; "
 							 "records: {:.0f} resident, {} patched, {} failed ({} the engine's pass, {} no record, {} a frame verdict, {} material or extras), {} rewritten, {} released, {:.1f} a frame registered by the engine anyway; feedback: {:.0f} resident entries, {:.0f} of them in view, per decoded frame",
 					s.residentEntries / std::max<double>(static_cast<double>(s.residentFrames), 1.0), s.residentFrames, s.residentSkips / applied, s.joins, s.joinRefused, s.endedAll,
-					s.evicted[0], s.evicted[1], s.evicted[2], s.evicted[3], r.resident / rf, r.joined, r.failed, r.failedBy[0], r.failedBy[1], r.failedBy[2], r.failedBy[3], r.rewritten, r.released, r.registered / rf,
+					s.evicted[0], s.evicted[1], s.evicted[2], s.evicted[3], s.evicted[5], r.resident / rf, r.joined, r.failed, r.failedBy[0], r.failedBy[1], r.failedBy[2], r.failedBy[3], r.rewritten, r.released, r.registered / rf,
 					residentDecoded / decodedFrames, residentVisible / decodedFrames);
+				logger::info("[DCLF] resident probation: {} joined out of view before admission, {} admitted by the build's draws, {} ended not drawn, {} refused; "
+							 "refusals: {} plan, {} root not settled, {} an engine member, {} a hidden member, {} a member not event-written, {} a pass not built, {} a decal under the "
+							 "GPU's tests; feedback: {} resident entries dropped by the GPU's fade or height test, {} left for a stale LOD level or metric",
+					s.probationJoins, s.probationConfirmed, s.evicted[4], s.probationRefused, s.refusedBy[1], s.refusedBy[2], s.refusedBy[3], s.refusedBy[4], s.refusedBy[5],
+					s.refusedBy[6], s.refusedBy[7],
+					feedbackCounters.residentsFadeHidden.exchange(0, std::memory_order_relaxed), feedbackCounters.residentsWitness.exchange(0, std::memory_order_relaxed));
+				{
+					std::array<std::uint32_t, 5> byPlan{};
+					for (const auto& [root, resident] : residents)
+						if (resident.entry < cut.plans.size())
+							++byPlan[static_cast<std::size_t>(cut.plans[resident.entry])];
+					logger::info("[DCLF][TEMP] residents by plan: {} plain, {} fade, {} leaf, {} tree; {:.0f} resident records in view (GPU frustum, not fade-dropped) per decoded frame",
+						byPlan[0], byPlan[1], byPlan[2], byPlan[3],
+						feedbackCounters.residentRecordsInView.exchange(0, std::memory_order_relaxed) / std::max<double>(static_cast<double>(feedbackCounters.frames.load(std::memory_order_relaxed)), 1.0));
+				}
+				logger::info("[DCLF][TEMP] fade distance probe: residents in view past it {} fading, {} not; within it {} fading",
+					feedbackCounters.fadeBeyondFading.exchange(0, std::memory_order_relaxed), feedbackCounters.fadeBeyondSettled.exchange(0, std::memory_order_relaxed),
+					feedbackCounters.fadeWithinFading.exchange(0, std::memory_order_relaxed));
 				if (r.parityChecks)
-					logger::info("[DCLF] resident parity: {} checks, {} records compared, {} passes differ, {} records differ{}", r.parityChecks, r.parityChecked, r.parityPass,
-						r.parityRecord, r.parityPass || r.parityRecord ? " <- RESIDENT PARITY" : " <- OK");
+					logger::info("[DCLF] resident parity: {} checks, {} records compared, {} passes differ, {} records differ ({} not compared: the root fading, leaving at the next decode){}",
+						r.parityChecks, r.parityChecked, r.parityPass, r.parityRecord, r.parityPending, r.parityPass || r.parityRecord ? " <- RESIDENT PARITY" : " <- OK");
 			}
 			if (SwitchProbe())
 				logger::info("[DCLF][TEMP] switch probe: {} members whose event-driven selection differs from their switches, {} selected children out of date, {} seen mid-update (every applied frame since the last report)",

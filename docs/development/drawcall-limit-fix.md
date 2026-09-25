@@ -1452,6 +1452,9 @@ through: the shadow pipeline map ("Epochs that only submit") and the NPC head dr
 | `CS_DCLF_SKYLIGHT_PARITY=1` | Diagnostic: every 120th map is rendered by the engine and by DCLF in the same frame and compared texel by texel, with the occluders only DCLF drew; `CS_DCLF_SKYLIGHT_DUMP_DIR=<dir>` writes maps that differ over 5 % of their texels as 16-bit PGM. |
 | `CS_DCLF_RESIDENT=1\|0` | Resident entries: an admitted entry that needs nothing per frame keeps its records patched across frames, drawn whenever the GPU's cull finds them, and its list job returns at once ("Resident entries"). Default on with the visibility feedback and the switch events; read at startup. |
 | `CS_DCLF_RESIDENT_PARITY=1` | Every 60 frames, each resident record's synthetic pass is built from scratch and compared with its patch, and the record with the patch. |
+| `CS_DCLF_RESIDENT_DRAWS=1\|0` | The resident records' draw inputs persist across frames at the head of each main segment's input buffer, changed only by SceneStore's change log ("Persistent resident draws"). Default on; read at startup. |
+| `CS_DCLF_RESIDENT_DRAW_PARITY=1` | Every 60 frames, each resident region entry is written again from the tables and compared, and every resident the region should hold is looked for. |
+| `CS_DCLF_RESIDENT_PROBATION=1\|0` | Entries not yet admitted join residency out of view, and the build's draws admit them ("Resident entries", step 2). Default on with `CS_DCLF_RESIDENT`; read at startup. |
 | `CS_DCLF_SWITCH_EVENTS=1\|0` | An `NiSwitchNode`'s selection follows events: the index's writers are patched, a newly selected child is brought up to date when the event is applied, and neither the scene walk nor the primary's list jobs test switches every frame ("Switch selection by event"). Default on with `CS_DCLF_SCENE_DELTA`; read at startup. |
 | `CS_DCLF_SWITCH_NODES=1` | Leaves under an `NiSwitchNode` (trees, harvestables) are eligible in the frames every switch on their path selects them ("Trees and actors"). Default on. Live toggle. |
 | `CS_DCLF_SKIN_PARTITIONS=1` | Skins of several partitions and dismember skins (LOD trees, actor bodies) are eligible, one draw per partition the engine draws. Needs `CS_DCLF_SKINNED`. Default on. Live toggle. |
@@ -4689,7 +4692,7 @@ as able to get a record (`PerFrameOf`).
 -   The event drain is unchanged (0.05-0.06 ms).
 -   The ten stubs take 285 bytes of the SKSE trampoline, which went from 2 to 4 KiB.
 
-## Resident entries (culling-job elimination, phase 4, step 1)
+## Resident entries (culling-job elimination, phase 4)
 
 A stood-in entry still took its list job every frame: the frustum test picked which synthetic passes were built, and
 each synthetic pass went through the accumulate phase, which restored it at the next walk. A **resident** entry needs
@@ -4707,12 +4710,21 @@ neither ([dclf-cull-job-elimination.md](./dclf-cull-job-elimination.md), "Phase 
 **Its list job returns at once** (`StandIn`, a lookup by root). The feedback decode services its root with the stood-in
 entries (fade, LOD, `kAccumulated`).
 
-**Joining** (`PrepareFrame`, render thread, at most 256 a frame), for entries the stand-in reached admitted and settled:
--   plan `Plain`, `FadeRoot` or `LeafRoot` (trees wait for the height test on the GPU);
--   every member DCLF's, or unselected by its switch;
--   every DCLF member `ResidentCapable`: a record written only by events (no face, actor, skin or animated shading, not
-    written in full every frame);
--   every member's synthetic pass built at the join, without extras rows (projected UV, land blending).
+**Joining** (`JoinEntry`, render thread, at most 256 a frame of each kind): entries the stand-in reached admitted and
+settled join in `PrepareFrame`; entries not yet admitted join on probation after the list jobs (below). Either way:
+-   any plan but `Rejected`: plain, fade, leaf and tree roots;
+-   a fade root settled and not fading out whatever its distance (`+0x109` bit 0);
+-   every member the switches select DCLF's (the engine's members keep the entry in the stand-in until phase 5), shown
+    (nothing app-culled up to the root) and `ResidentCapable`: a record written only by events. That excludes faces,
+    actors, animated shading and records written in full every frame. A kept skin qualifies: `AppendKeptSkin` writes
+    its palette rows and partition mask every frame, from the same LOD row the synthetic pass reads, and a skin it
+    cannot keep is written in full, which ends the residency;
+-   every selected member's synthetic pass built at the join, without extras rows (projected UV, land blending), and no
+    decal under the GPU's fade or height test (decals are never in the depth segment, whose first phase makes both).
+
+Members no switch selects are left out of the resident's members; a switch change under the root ends the residency.
+
+`ResidentRefusal` says why an entry was refused, and the report counts it by cause.
 
 A refused entry is not offered again for 120 frames. The list jobs skip offering it (`joinBlocked`), so the render
 thread's cost before the jobs is back to 0.003 ms.
@@ -4720,9 +4732,12 @@ thread's cost before the jobs is back to 0.003 ms.
 **Leaving:**
 -   the walk rewrites or releases a record (`WriteObject`, `ReleaseObjectSlot`, the slot check);
 -   something is attached under the root or detached from it (the walk's dirty sun entry nodes);
--   the decode finds the root fading;
--   the new snapshot's plan or members differ;
--   a patch fails.
+-   a switch under the root changes its selection (`TakeSwitchChanges`; a resync compares every resident's selection,
+    `SelectionSame`);
+-   the decode finds the root fading, or its passes stale (below);
+-   the new snapshot's plan or selected members differ;
+-   a patch fails;
+-   a probation join the build did not draw in full.
 
 **Every resident leaves** on a frame the cut does not apply (a local shadow light, the sun's exclusion not live, the
 menu toggle), and when the frame globals the static sun bits read change. A stale snapshot does not end residency.
@@ -4769,3 +4784,170 @@ menu toggle), and when the frame globals the static sun bits read change. A stal
 -   An earlier build offered every refused entry again every frame. That cost 0.02 ms before the jobs were queued and
     pushed their start back 11-20 µs.
 -   Switches: `CS_DCLF_RESIDENT=0` turns residency off; `CS_DCLF_RESIDENT_PARITY=1` runs the check.
+
+### Step 2: admission from readiness (probation)
+
+An entry the engine never showed was never admitted, so it stayed in its list job for good. Now it joins on probation.
+
+**The join.** The stand-in runs the engine's `Process1` on a non-admitted entry, as before. When that leaves the root
+without `kAccumulated` (out of view, or culled by the engine's occlusion), the entry is offered for probation.
+`AfterListJobs` joins those offers the same frame: their records are patched in this frame's accumulate phase, while
+nothing draws them. The root is outside the engine's view, and the GPU's frustum is the engine's, so no draw depends on
+them yet.
+
+**The admission.** After the colour epoch, `Admit` checks each probation join: when the build drew every member (its
+pipeline, material and record were ready), the entry is admitted. Otherwise the next `PrepareFrame` ends it, before any
+list job can return at once for it, and it is not offered again for 120 frames.
+
+**The fade distance on the GPU.** Nothing on the CPU services a resident while it is out of view. When it comes into
+view past its fade-out distance, BSFadeNode::OnVisible would snap its fade to 0 (FUN_14147a160: a root not visible last
+frame does not fade gradually), but its kept record would draw it for the frame or two the feedback takes. So the depth
+segment's first phase tests it:
+-   **The distance** (`FadeDistanceOf`, engine notes "Fade distance"). The fade value falls below the fade-out
+    threshold (`0x142032e38`) where the root's distance times the camera's LOD factor passes
+    `(n + (1 - threshold)(f - n)) * divisor`. Here `n` and `f` are the node's near and far distances (`+0x128`,
+    `+0x12C`) times `0x142032e48`, and the divisor is the LOD type's (`0x142032e00[type]`). Types 6 and 8, and the
+    fades-off and LOD-updates-off globals, give no test.
+-   **The row.** A resident fade root's objects carry the distance (`Tables::fadeDistance`, `kObjectFadeTest`), and
+    the depth inputs carry it with the entry root's centre (`Tables::sunEntry`, which the walk keeps current when the
+    root moves). The latch carries the main camera's position and LOD factor (`PrimaryCull::FadeEye`). `DrawInput` grew
+    to 64 bytes for the row.
+-   **The rule.** Past the distance and not in view last frame, the draw is dropped as a final verdict, so the colour
+    segment and phase 2 follow it. The frustum stamp's bit 31 (`kFrustumFadeHidden`) remembers the drop, and a dropped
+    object stays dropped while it is past the distance. One that was in view and drawn is drawn on: the engine fades it
+    out over frames, and the feedback hands it over within a frame or two, the latency every stood-in root has.
+-   **Validation.** A TEMP probe compared the CPU form of the distance with the engine's own servicing: 947 residents in
+    view past it were all fading after the servicing, and none within it was. To get objects past their distance inside
+    the loaded cells, a TEMP switch (`CS_DCLF_TEST_FADE_DIVISOR`) lowered the objects' divisor from this INI's 30 to 1.5.
+    With `CS_DCLF_TEST_MOVE` and `CS_DCLF_TEST_TURN` carrying the player 12,000 units and turning back, the GPU dropped
+    12 and then 119 residents in view. The witness ended every resident when the divisor changed, and holes and set
+    parity stayed at 0.
+
+**Stale passes.** The decode checks every resident fade root in every decoded frame, in view or not, and whether or not
+its tag's snapshot is current (the tag holds the roots). A root that is not settled, whose LOD level (`+0x152`, the LOD
+row) changed, or whose LOD metric crossed the specular or envmap fade end (`LodFadeStateOf`, when a member's derivation
+reads it) goes back to the stand-in (`FadeWitnessOf`). The decode's own servicing is not the only writer: the LOD rows
+that went stale in testing belonged to residents out of DCLF's view, which another view's `OnVisible` had updated.
+
+**The frame globals** the passes and the rows read (`ResidentWitness`: the static sun bits, the fade globals, the type
+divisors) end every resident when they change.
+
+### Step 3: trees
+
+-   **The height test on the GPU.** `BSTreeNode::OnVisible` draws nothing of a tree whose root is above the frame's
+    height limit. A resident tree's objects carry `kObjectHeightTest`, the latch carries the base and the limit
+    (`PrimaryCull::TreeHeightTest`; +infinity when the list processes' test is off), and the depth segment's first phase
+    drops them as a final verdict. The decode does not service a tree above the limit, as `OnVisible` would not.
+-   **The animation.** A tree's wind state is the tree manager's (`FUN_1404381e0`: it advances `+0x164` and derives
+    `+0x15C` for the trees whose `kAccumulated` bit is set, which the feedback keeps). `KeepResidentsAlive` takes a
+    resident tree's `TreeParams` and `WindTimers` from the node every frame (`DeriveTreeAnim`), as the accumulate phase
+    does for every other drawn tree. Replacing the tree manager itself on the GPU is not attempted: its update is
+    time-budgeted and runs under a mutex on the engine's side, and nothing else needs the cull for it.
+-   **Skins.** Trees' LOD partitions are skins, and skins were not resident before. A kept skin's per-frame work is the
+    scene half only (above). A defect this uncovered: the accumulate phase added every skinned object to
+    `accumulatePatched` when it set the partition mask, including a joining resident. The next walk then restored the
+    record while the slot stayed resident, which left it drawn by nobody. Resident parity caught 2,285 such records.
+
+### Results (steps 2 and 3)
+
+Full featureset, Riverwood and the tour, `CS_DCLF_RESIDENT_PARITY=1`, `CS_DCLF_SET_PARITY=1`:
+-   **Resident parity: 0 differ** in every window. A root fading at the moment of the check is not compared, and is
+    counted separately: the next decode ends it.
+-   **0 holes, and set parity 0** in every window: no depth without colour, and no colour without depth.
+-   **Riverwood: about 2,150 resident entries a frame** (about 930 fade, 1,000 leaf and 220 tree roots; 2,990 records),
+    against about 580 before step 2. Whiterun: about 1,200.
+-   **The main pass's object count no longer matches a run without the cut, by design.** Probation joins entries the
+    engine culled by occlusion as well as by the frustum. Those are culled by the GPU (frustum and HZB) instead of the
+    engine: at Riverwood about 2,650 resident records are inside the frustum a frame, while the engine kept about 925
+    of them. The engine keeps about 985 objects of its own, against 1,910 without the cut.
+-   **Refusals** are almost all entries with an engine member (1,100-1,700 a window at Riverwood, phase 5), and passes
+    the synthetic pass cannot build (about 300).
+
+**Cost** (Riverwood, 20 s Tracy captures, ms per frame, render thread unless noted):
+
+| | Residency off | Probation off | Probation on |
+| --- | --- | --- | --- |
+| `Main::RenderPlayerView` | 7.07, 7.40 | 6.96, 7.28 | 7.95, 7.71 |
+| Waiting on the primary's list jobs | 0.42, 0.47 | 0.38, 0.43 | 0.35, 0.32 |
+| The list jobs' cull (job threads) | 0.92, 0.99 | 0.89, 0.93 | 0.74, 0.70 |
+| `RenderBatches` (the colour epoch's join) | 2.24, 2.34 | 2.28, 2.35 | 2.79, 2.74 |
+| `Main::RenderDepth` (the z-prepass epoch's join) | 0.56, 0.58 | 0.57, 0.62 | 0.89, 0.84 |
+
+-   Probation takes about 0.2 ms of cull off the list jobs and 0.1 ms of waiting off the render thread.
+-   **It costs more than that in DCLF's own build.** Both epochs' builds grow from about 1,830 drawable candidates to
+    about 4,230. The worker builds take about 0.4 ms longer each, and the render thread waits on them (about +0.5 ms in
+    `RenderBatches`, +0.3 ms in `RenderDepth`). The CPU build is per drawable candidate per frame, however few the GPU
+    then draws. The fix is DCLF's, not the engine's: resident draws that persist across frames instead of being built
+    every frame.
+-   Switches: `CS_DCLF_RESIDENT_PROBATION=0` turns probation off (residents are then admitted from a draw, as in
+    step 1).
+-   The build's cost is fixed by the persistent resident draws (next section).
+
+## Persistent resident draws
+
+The main epochs' builds wrote a draw input, a sequence template and a drawn mark for every drawable candidate every frame.
+With probation that was about 4,230 candidates, and the render thread waited on it. A resident's draw input changes
+only when the resident does, so each main segment now keeps its residents' inputs across frames.
+
+**The region** (`ResidentRegion`, one per segment in its `BuildCache`):
+-   **The inputs.** A dense array of the resident records' draw inputs, at the head of the segment's input buffer. The
+    Z-prepass now has an input buffer of its own (`Resources::inputsDepth`), since each segment's region must survive
+    the other's upload. The frame's own inputs follow the region, and BuildDraws reads both as one list.
+-   **What it holds.** A resident record the per-frame loop would draw as one input with its pair's record. Decals
+    (their slot is a per-frame ordinal), face shapes and second-stream pipelines stay with the loop, and so does
+    anything past half of the input, draw or record capacity. The loop skips the region's objects.
+-   **The records.** Each (material, pipeline) pair the region uses has a stable record slot (`records[0, slotCount)`).
+    Its record is assembled there once per build, which is once per pair, not per draw. The per-object loop's record
+    assembly became a lambda for this (`assembleRecord`). A per-frame draw of the same pair reuses the slot.
+-   **The upload.** When the region's version is not the one the segment's buffer holds (`Resources::residentUploaded`,
+    written by the commit that uploads it), the commit uploads only the entries changed since that version (`dirty`).
+    After a resync it uploads the whole region.
+-   **The rest of the build's output.** The region adds its sequence count to the draw capacity and its inputs to the
+    dispatch count. Its drawable entries go into the drawn set and the per-object states, so the native skip set, the
+    Z-prepass rule and set parity see them as before. The sun's CPU check covers its inputs too.
+
+**What changes it**, and nothing else:
+-   **SceneStore's change log** (`Tables::residentLog`, append-only). It notes a slot when the slot joins, leaves, is
+    patched again or reset, when a resident's placement or entry root centre actually changes (`MoveObject`), and when
+    a resident skin's partition mask changes (`AppendKeptSkin`). `Tables::residentSlot` says which slots are resident.
+    Each region reads the log from its own position. One that fell behind the trimmed head (the log keeps about 64k
+    entries), or whose tables generation changed, reads every resident slot again (a resync).
+-   **A pipeline's set index changing**, or **a pair's record failing or recovering**: that pipeline's or pair's
+    entries are written again (drawable only while both are good).
+-   **The Z-prepass waits** for the colour epoch's first draw of a joiner (`drewLastFrame`) before its depth entry
+    exists (`pendingAdds`): depth only for what colour drew last frame, as the loop's rule has it.
+
+**Defects found:**
+-   **The first change feed lost changes.** It was a per-frame list, cleared when the scene phase began, so a change
+    noted outside the window between that point and the builds never reached the regions. Stale entries then drew a
+    freed slot's old geometry at the slot's new object's transform: the player drawn as a rock and a plant, and
+    mountains where the village should be. The region parity showed 3,788 entries against 2,297 resident slots. The
+    append-only log fixed it: the regions then matched the resident slots exactly.
+-   **The first build lost the device.** It is the same stale-entry defect, as far as can be told: it did not recur
+    once the log replaced the list.
+-   **Every change re-uploaded the whole region.** About 33 residents a frame move (their bound really changes), so the
+    whole region (190 KB) went up every frame. Only the changed entries go now.
+-   **A quadratic pending check.** The Z-prepass's pending joins were searched per log entry; they are marked per slot
+    now.
+
+**Checks** (`CS_DCLF_RESIDENT_DRAW_PARITY=1`, every 60 frames): each region entry is written again from the tables and
+compared byte for byte, and every resident the region should hold is looked for. The tour (Riverwood, Whiterun,
+Dragonsreach) gave 0 differences over 148,787 entry checks and 0 missing, with resident parity, set parity and holes all
+at 0.
+
+**Cost** (Riverwood, 20 s Tracy captures after `coc` at frame 300, probation on, ms per frame):
+
+| | Region off | Region on |
+| --- | --- | --- |
+| `Main::RenderPlayerView` | 7.18, 6.44 | 6.33, 5.94 |
+| `RenderBatches` (the colour epoch's join) | 2.40, 2.29 | 2.02, 2.05 |
+| `Main::RenderDepth` (the Z-prepass epoch's join) | 0.72, 0.69 | 0.41, 0.45 |
+| Colour build on the worker | 1.20, 1.13 | 0.89, 0.90 |
+
+-   About 2,990 persistent inputs (3,410 sequences) behind 240 pairs at Riverwood; about 2,000 in Whiterun.
+-   Both joins are now below their cost with no residency at all (2.34 and 0.58 ms), so probation's cost is gone.
+-   **Still per frame, O(residents):**
+    -   the drawn set and the per-object states the region hands the commit;
+    -   the per-object records (`BindlessObject`) the build writes for every object, resident or not;
+    -   the constants arena.
+-   Switches: `CS_DCLF_RESIDENT_DRAWS=0` turns the region off; `CS_DCLF_RESIDENT_DRAW_PARITY=1` runs the check.

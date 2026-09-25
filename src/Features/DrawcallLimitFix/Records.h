@@ -84,6 +84,14 @@ namespace DCLF
 		// cascades and, on a miss, marks the draw (kObjectSunMiss) so the pixel stage drops the two bits, as
 		// GetRenderPasses would have left them off. Set per frame by the accumulate phase.
 		kObjectSunTest = 1u << 26,
+		// A resident object under a fade root (PrimaryCull, dclf-cull-job-elimination.md "Phase 4 in detail"): the depth
+		// segment's first phase tests its entry root's distance against the fade-out distance (Tables::fadeDistance,
+		// Tables::sunEntry) and drops it, as a final verdict, where BSFadeNode::OnVisible would snap its fade to 0: past
+		// the distance and not in view last frame. Set by the accumulate phase with the resident patch.
+		kObjectFadeTest = 1u << 27,
+		// A resident tree (PrimaryCull): the depth segment's first phase drops it, as a final verdict, where
+		// BSTreeNode::OnVisible's height test would (its entry root's centre above the frame's limit).
+		kObjectHeightTest = 1u << 28,
 	};
 
 	/** @brief The high bit of a draw's object-index word: the draw misses every sun cascade (kObjectSunTest). */

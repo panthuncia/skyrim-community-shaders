@@ -139,10 +139,21 @@ namespace DCLF
 		const auto* fadeNode = a_property->fadeNode;
 		if (!fadeNode)
 			return kFadeNoNode;
-		const float metric = FadeNodeLodMetric(fadeNode);
+		return LodFadeStateOf(fadeNode);
+	}
+
+	std::uint8_t LodFadeStateOf(const RE::BSFadeNode* a_fadeNode)
+	{
+		const float metric = FadeNodeLodMetric(a_fadeNode);
 		if (!std::isfinite(metric))
 			return kFadeInvalid;
 		return static_cast<std::uint8_t>((lodFade.specularEnd < metric ? 1u : 0u) | (lodFade.envmapEnd < metric ? 2u : 0u));
+	}
+
+	bool FadeSensitive(const RE::BSShaderProperty* a_property)
+	{
+		return a_property && a_property->fadeNode &&
+		       (a_property->flags.underlying() & (Bit(Flag::kSpecular) | Bit(Flag::kMultiIndexSnow) | Bit(Flag::kEnvMap)));
 	}
 
 	void RefreshLodFadeSettings()

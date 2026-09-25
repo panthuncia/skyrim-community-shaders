@@ -146,6 +146,24 @@ namespace DCLF
 			// which the cascade culls walk): centre and radius, absolute world space; a negative radius when the
 			// entry is never tested (an actor's, whose entry is its cell's container). SceneStore::SunEntryOf.
 			std::vector<std::array<float, 4>> sunEntry;  // parallel to objects
+			// A resident object's fade-out distance (kObjectFadeTest, AccumulatedPass::fadeDistance), against its entry
+			// root's centre (sunEntry): > 0 scaled by the camera's LOD factor, < 0 unscaled. Meaningless without the flag.
+			std::vector<float> fadeDistance;  // parallel to objects
+			// The resident draws' change feed (IndirectDraws' resident regions, drawcall-limit-fix.md "Persistent resident
+			// draws"): which slots hold a resident record, and an append-only log of the slots whose draw input may have
+			// changed - joined, left, moved, re-masked, reset - whenever that happened. Each region reads the log from its own
+			// position (absolute: residentLogBase is residentLog[0]'s); one that fell behind the trimmed head, or whose
+			// tables generation changed, reads every resident slot again.
+			std::vector<std::uint8_t> residentSlot;  // parallel to objects
+			std::vector<std::uint32_t> residentLog;
+			std::uint64_t residentLogBase = 0;
+			// [TEMP] the notes by cause: reset, skin mask, placement, patched again, joined, left, all ended.
+			std::array<std::uint64_t, 7> residentNotes{};
+			void NoteResidentChange(std::uint32_t a_slot, std::uint32_t a_cause)
+			{
+				residentLog.push_back(a_slot);
+				++residentNotes[a_cause];
+			}
 			// NPC face shapes (Tracked::faceShape): per face object its positions in the snapshot the walk took
 			// (FaceSnapshots::Shape), valid until the next walk, and the region of the positions buffer they go to.
 			// The shadow epoch uploads a region when its generation changed, and binds it as the second stream.
@@ -402,6 +420,8 @@ namespace DCLF
 		 */
 		/** @brief Render thread: the record is written only by events (no face, actor, skin or animated shading, not per frame in full). */
 		bool ResidentCapable(const RE::BSGeometry* a_geometry) const;
+		/** @brief [TEMP] Why ResidentCapable is false, as text. */
+		std::string ResidentIncapableReason(const RE::BSGeometry* a_geometry) const;
 		/** @brief Render thread, before the accumulate phase: ends the geometry's residency now (its accumulated half restored). */
 		void EndResidency(const RE::BSGeometry* a_geometry);
 		/** @brief Render thread: ends every residency now. */
@@ -420,6 +440,7 @@ namespace DCLF
 			std::uint64_t joined = 0, failed = 0, rewritten = 0, released = 0, registered = 0, frames = 0, resident = 0;
 			std::array<std::uint64_t, 4> failedBy{};  // the engine's pass, no record, a frame verdict, material or extras
 			std::uint64_t parityChecks = 0, parityChecked = 0, parityPass = 0, parityRecord = 0;
+			std::uint64_t parityPending = 0;  // residents whose fade root is fading: the feedback's next decode ends them
 		};
 		ResidentStats TakeResidentStats() { return std::exchange(residentStats, {}); }
 

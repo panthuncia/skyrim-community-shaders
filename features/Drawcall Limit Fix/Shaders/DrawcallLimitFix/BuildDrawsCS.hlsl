@@ -69,6 +69,10 @@ static uint PipelineMapOffset;
 // The main colour pass: kSunTestOn and the number of cascades (the latch's sunMasks and sunPlanes follow).
 static uint SunState;
 static const uint kSunTestOn = 0x80000000u;
+// The depth segment: the main camera's position and its LOD factor, the fade test's (kObjectFadeTest).
+static float4 FadeEye;
+// The depth segment: the tree height test's base and limit (kObjectHeightTest); the limit is +infinity when it is off.
+static float2 TreeHeight;
 
 void LoadLatch()
 {
@@ -85,6 +89,8 @@ void LoadLatch()
 		asfloat(latch.Load4(LatchOffset + 64)), asfloat(latch.Load4(LatchOffset + 80)));
 	PipelineMapOffset = latch.Load(LatchOffset + 192);
 	SunState = latch.Load(LatchOffset + 196);
+	FadeEye = asfloat(latch.Load4(LatchOffset + 1008));
+	TreeHeight = asfloat(latch.Load2(LatchOffset + 200));
 }
 
 // A synthetic pass whose pipeline carries the sun's bits (kObjectSunTest): whether its bound meets any of this
@@ -173,6 +179,11 @@ static const uint kObjectNativeVisible = 1u << 3;
 // cascade (kObjectSunMiss), which the pixel stage reads (DCLFObjects.hlsli).
 static const uint kObjectSunTest = 1u << 26;
 static const uint kObjectSunMiss = 1u << 31;
+// A resident object under a fade root (Records.h): the depth segment's first phase drops it past its fade-out distance
+// unless it was in view last frame (FadeHidden).
+static const uint kObjectFadeTest = 1u << 27;
+// A resident tree (Records.h): phase 1 drops it where BSTreeNode::OnVisible's height test would.
+static const uint kObjectHeightTest = 1u << 28;
 // A volumetric-only caster (Records.h), drawn only by the views of the volumetric lighting copy.
 static const uint kObjectVolumetricOnly = 1u << 23;
 // A decal, with its group (1 = the engine's opaque decal group, 2 = the blended one) in bits 20-21.
@@ -219,6 +230,14 @@ static const uint kCountDecalsTested = 88;
 // The sun on the GPU: kObjectSunTest inputs the colour pass tested, and those that missed every cascade.
 static const uint kCountSunTested = 92;
 static const uint kCountSunMissed = 96;
+// The fade test: flagged inputs phase 1 found in the frustum, and those it dropped.
+static const uint kCountFadeTested = 100;
+static const uint kCountFadeHidden = 104;
+
+// The frustum stamp's word: the stamp in the low 28 bits (the latch's), and whether the fade test dropped the object in
+// that frame. The visibility feedback compares the low bits (PrimaryCull::ConsumeFeedback).
+static const uint kFrustumStampMask = 0x0FFFFFFFu;
+static const uint kFrustumFadeHidden = 0x80000000u;
 
 // Phase 2 writes into the far half of the sequence buffer. Its draw is recorded on the CPU, which cannot
 // know how many sequences phase 1 wrote, so the two need ranges that are fixed in advance rather than one
@@ -229,9 +248,10 @@ static const uint kPhaseTwoSequenceBase = 16384;  // kMaxDraws
 static const uint kDecalSequenceBase = 32768;  // 2 * kMaxDraws
 static const uint kMaxDecalDraws = 2048;
 
-// DrawInput: 48 bytes (pipeline/record/geometry/flags, the world-space bounding sphere, the object index, the
-// decal ordinal, the skin partitions to draw, and the GeometryDraw of a second vertex stream or ~0).
-static const uint kInputStride = 48;
+// DrawInput: 64 bytes (pipeline/record/geometry/flags, the world-space bounding sphere, the object index, the
+// decal ordinal, the skin partitions to draw, the GeometryDraw of a second vertex stream or ~0, and the fade row:
+// the entry root's centre and the fade-out distance, for kObjectFadeTest).
+static const uint kInputStride = 64;
 // GeometryDraw: 40 bytes (vertex buffer view, index buffer view, index count, first index, next partition).
 static const uint kGeometryStride = 40;
 // A skin of several partitions is one object drawn once per partition the engine would draw: the input's
@@ -502,10 +522,35 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	}
 	// The visibility feedback: the frustum alone (occlusion does not stop the engine's OnVisible), for every candidate
 	// phase 1 tests, drawable or not.
+	bool fadeHidden = false;
 	if (FrustumIndex != 0 && phase == kPhaseOne && !frustumRejected) {
 		RWByteAddressBuffer frustumStamps = ResourceDescriptorHeap[FrustumIndex];
-		frustumStamps.Store(objectIndex * 4, VisibilityStamp);
+		// A resident under a fade root (kObjectFadeTest), which nothing on the CPU services while it is out of view: past
+		// its fade-out distance, BSFadeNode::OnVisible snaps the fade of a root that was not in view last frame to 0, and
+		// keeps it at 0 once it has, so the draw is dropped. One that was in view and drawn fades out over frames in the
+		// engine; it is drawn until the feedback has the root fading and the entry leaves residency.
+		const float4 fade = asfloat(inputs.Load4(inputOffset + 48));
+		if ((input.w & kObjectFadeTest) != 0 && fade.w != 0.0 && FadeEye.w != 0.0) {
+			const uint previous = frustumStamps.Load(objectIndex * 4);
+			const bool wasInView = (previous & kFrustumStampMask) == ((VisibilityStamp - 1) & kFrustumStampMask);
+			const bool wasHidden = wasInView && (previous & kFrustumFadeHidden) != 0;
+			// FUN_14147b110: the distance to the root's centre, scaled by the camera's LOD factor over the LOD type's
+			// divisor (folded into a positive distance), or by a constant (a negative one).
+			const float distance = length(fade.xyz - FadeEye.xyz) * (fade.w > 0.0 ? FadeEye.w : 1.0);
+			fadeHidden = distance > abs(fade.w) && (!wasInView || wasHidden);
+			count.InterlockedAdd(kCountFadeTested, 1, scratch);
+			if (fadeHidden)
+				count.InterlockedAdd(kCountFadeHidden, 1, scratch);
+		}
+		frustumStamps.Store(objectIndex * 4, VisibilityStamp | (fadeHidden ? kFrustumFadeHidden : 0));
 	}
+	// BSTreeNode::OnVisible draws nothing of a tree whose root is above the frame's height limit.
+	if (phase == kPhaseOne && !frustumRejected && (input.w & kObjectHeightTest) != 0) {
+		const float3 root = asfloat(inputs.Load3(inputOffset + 48));
+		fadeHidden = fadeHidden || root.z - TreeHeight.x > TreeHeight.y;
+	}
+	// A final verdict, like the frustum's: the colour segment reads it, and phase 2 never revisits it.
+	cullRejected = cullRejected || fadeHidden;
 
 	// The engine's own decision is a useful reference, but only for the frustum test, where the engine is
 	// exact and the two should agree: rejecting something it kept is then a defect, and is counted as one.
@@ -532,7 +577,7 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	// candidate, so the buffer is completely rewritten each frame and nothing stale survives into the colour
 	// segment.
 	if (phase == kPhaseOne || phase == kPhaseTwo) {
-		const uint decided = frustumRejected ? kVisibilityRejectedFinal :
+		const uint decided = (frustumRejected || fadeHidden) ? kVisibilityRejectedFinal :
 			(occlusionRejected ? (phase == kPhaseOne ? kVisibilityOccludedRetest : kVisibilityRejectedFinal) : kVisibilityVisible);
 		visibility.Store(objectIndex * 4, (VisibilityStamp << kVisibilityStampShift) | decided | (draws ? kVisibilityDepthDrawn : 0));
 		if (phase == kPhaseTwo && !occlusionRejected)

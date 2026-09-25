@@ -631,6 +631,8 @@ namespace DCLF
 		shadowReject.resize(a_count, 0);
 		skyTechnique.resize(a_count, 0);
 		sunEntry.resize(a_count, std::array<float, 4>{});
+		fadeDistance.resize(a_count, 0.0f);
+		residentSlot.resize(a_count, 0);
 		faceStream.resize(a_count, kNoFaceStream);
 		shadowDiffuse.resize(a_count, nullptr);
 		shadowMaterial.resize(a_count, nullptr);
@@ -656,6 +658,11 @@ namespace DCLF
 		shadowReject[a_slot] = 0;
 		skyTechnique[a_slot] = 0;
 		sunEntry[a_slot] = {};
+		fadeDistance[a_slot] = 0.0f;
+		if (residentSlot[a_slot]) {
+			residentSlot[a_slot] = 0;
+			NoteResidentChange(a_slot, 0);
+		}
 		faceStream[a_slot] = kNoFaceStream;
 		shadowDiffuse[a_slot] = nullptr;
 		shadowMaterial[a_slot] = nullptr;
@@ -682,6 +689,11 @@ namespace DCLF
 			shadowReject.clear();
 			skyTechnique.clear();
 			sunEntry.clear();
+			fadeDistance.clear();
+			residentSlot.clear();
+			// Every slot is gone: a gap past the log's end makes the regions read them all again.
+			residentLogBase += residentLog.size() + 1;
+			residentLog.clear();
 			faceStream.clear();
 			shadowDiffuse.clear();
 			shadowMaterial.clear();
@@ -746,6 +758,10 @@ namespace DCLF
 		shadowReject.clear();
 		skyTechnique.clear();
 		sunEntry.clear();
+		fadeDistance.clear();
+		residentSlot.clear();
+		residentLogBase += residentLog.size() + 1;
+		residentLog.clear();
 		faceStreams.clear();
 		faceStream.clear();
 		shadowDiffuse.clear();
@@ -2265,6 +2281,13 @@ namespace DCLF
 		// there are never two.
 		AbandonSceneJob();
 		++frame;
+		// The resident draws' change log keeps its tail (Tables::residentLog): a region that has not read past the trimmed
+		// half reads every slot again.
+		if (tables.residentLog.size() > (1u << 16)) {
+			const std::size_t half = tables.residentLog.size() / 2;
+			tables.residentLog.erase(tables.residentLog.begin(), tables.residentLog.begin() + static_cast<std::ptrdiff_t>(half));
+			tables.residentLogBase += half;
+		}
 		// Nothing is drawn while a load screen is up, and nothing here may touch the tracked geometry
 		// either. The load frees the renderer data and the vertex and index buffers of the cell being
 		// unloaded, while the NiPointers in `tracked` keep only the NiAVObjects alive; classifying those
@@ -3326,7 +3349,10 @@ namespace DCLF
 					reason = Ineligible::Hidden;
 				else if (objectId < tables.skinPartitions.size()) {
 					tables.skinPartitions[objectId] = static_cast<std::uint8_t>(data.skinInstance->skinPartition->numPartitions > 1 ? mask : 0);
-					accumulatePatched.push_back(objectId);
+					// Restored at the next walk, unless it joins residency below (a resident's patch is kept; its mask is the
+					// kept skin's, from the same LOD row).
+					if (!(accumulated->resident && residentJoining.contains(geometry)))
+						accumulatePatched.push_back(objectId);
 				}
 			}
 			// A pass in an alpha-test list is drawn with DoAlphaTest whatever it was registered with
@@ -3544,7 +3570,9 @@ namespace DCLF
 			object.materialIndex = materialSlot;
 			object.pipelineIndex = pipelineSlot;
 			object.flags = (object.flags & (kObjectSkinned | kObjectNoShadow | kObjectVolumetricOnly | kObjectShadowOnly)) | staticFlags | (accumulated ? kObjectNativeVisible : 0u) |
-			               (accumulated && accumulated->sunTest ? kObjectSunTest : 0u);
+			               (accumulated && accumulated->sunTest ? kObjectSunTest : 0u) | (resident && accumulated->fadeDistance != 0.0f ? kObjectFadeTest : 0u) |
+			               (resident && accumulated->heightTest ? kObjectHeightTest : 0u);
+			tables.fadeDistance[objectId] = resident ? accumulated->fadeDistance : 0.0f;
 			tables.draws[objectId].pipelineIndex = pipelineSlot;
 			float emissiveMult = 1.0f;
 			tables.shading[objectId] = MakeShading(*static_cast<RE::BSLightingShaderProperty*>(property), descriptors, mainPassRenderFlags, emissiveMult);
@@ -4365,7 +4393,10 @@ namespace DCLF
 		tables.boneOffset[slot] = static_cast<std::uint32_t>(tables.bones.size() / 4);
 		tables.bones.insert(tables.bones.end(), current, current + std::size_t(rows) * 4);
 		tables.previousBones.insert(tables.previousBones.end(), previous, previous + std::size_t(rows) * 4);
-		tables.skinPartitions[slot] = static_cast<std::uint8_t>(partitions && partitions->numPartitions > 1 ? mask : 0);
+		const auto partitionMask = static_cast<std::uint8_t>(partitions && partitions->numPartitions > 1 ? mask : 0);
+		if (tables.skinPartitions[slot] != partitionMask && tables.residentSlot[slot])
+			tables.NoteResidentChange(slot, 1);  // a resident's draw input carries its partitions
+		tables.skinPartitions[slot] = partitionMask;
 		++stats.skinned;
 		stats.boneRows += rows;
 		return true;
@@ -4376,6 +4407,9 @@ namespace DCLF
 		// What WriteObject writes from the geometry's placement, the same way; the geometry slot is kept by
 		// FinishDeltaWalk like any kept slot's.
 		auto& object = tables.objects[a_tracked.slot];
+		const bool resident = tables.residentSlot[a_tracked.slot] != 0;
+		const std::array<float, 4> bound{ object.boundCenter[0], object.boundCenter[1], object.boundCenter[2], object.boundRadius };
+		const auto entry = tables.sunEntry[a_tracked.slot];
 		StoreTransform(a_geometry->world, object.world);
 		StoreTransform(a_geometry->previousWorld, object.previousWorld);
 		object.boundCenter[0] = a_geometry->worldBound.center.x;
@@ -4383,6 +4417,9 @@ namespace DCLF
 		object.boundCenter[2] = a_geometry->worldBound.center.z;
 		object.boundRadius = a_geometry->worldBound.radius;
 		tables.sunEntry[a_tracked.slot] = SunEntryOf(a_tracked, *a_geometry);
+		// A resident's draw input carries its bound and its entry root's centre: only a real change is one.
+		if (resident && (std::memcmp(bound.data(), object.boundCenter, sizeof(bound)) != 0 || entry != tables.sunEntry[a_tracked.slot]))
+			tables.NoteResidentChange(a_tracked.slot, 2);
 		a_tracked.movedWalk = walkSerial;
 		++delta.moved;
 	}
@@ -4805,6 +4842,7 @@ namespace DCLF
 		tables.lights[a_slot] = ObjectLights{};
 		tables.treeAnim[a_slot] = ObjectTreeAnim{};
 		tables.extraOffset[a_slot] = kNoExtraRows;
+		tables.fadeDistance[a_slot] = 0.0f;
 	}
 
 	bool SceneStore::ResidentParityEnabled()
@@ -4820,11 +4858,36 @@ namespace DCLF
 			return false;
 		const auto& entry = it->second;
 		// A record, eligible, written by events only: the light path's placement is fine (MoveObject keeps the
-		// accumulated half), a full write every frame is not, and neither are the per-frame inputs of a face, an actor,
-		// a skin or animated shading.
+		// accumulated half), and so is a kept skin's (AppendKeptSkin: the palette rows and the partition mask, from the
+		// same LOD row the synthetic pass reads; a skin it cannot keep is written in full, which ends the residency). A
+		// full write every frame is not, and neither are the per-frame inputs of a face, an actor or animated shading.
 		return entry.slot != kNoObjectSlot && entry.objectStamp == objectStamp && entry.candidateReason == Ineligible::None && !entry.faceShape &&
-		       !entry.actorOwned && !(entry.lightTraits & (kTraitSkin | kTraitAnimatedShading)) && !(entry.perFrame && !entry.lightTraits) &&
-		       !a_geometry->GetGeometryRuntimeData().skinInstance;
+		       !entry.actorOwned && !(entry.lightTraits & kTraitAnimatedShading) && !(entry.perFrame && !entry.lightTraits);
+	}
+
+	std::string SceneStore::ResidentIncapableReason(const RE::BSGeometry* a_geometry) const
+	{
+		const auto it = tracked.find(const_cast<RE::BSGeometry*>(a_geometry));
+		if (it == tracked.end())
+			return "untracked";
+		const auto& entry = it->second;
+		if (entry.slot == kNoObjectSlot || entry.objectStamp != objectStamp)
+			return "no record";
+		if (entry.candidateReason != Ineligible::None)
+			return fmt::format("verdict {}", static_cast<int>(entry.candidateReason));
+		if (entry.faceShape)
+			return "face";
+		if (entry.actorOwned)
+			return "actor";
+		if (entry.lightTraits & kTraitSkin)
+			return "skin trait";
+		if (entry.lightTraits & kTraitAnimatedShading)
+			return "animated shading";
+		if (entry.perFrame && !entry.lightTraits)
+			return "written every frame";
+		if (a_geometry->GetGeometryRuntimeData().skinInstance)
+			return "skin instance";
+		return "capable";
 	}
 
 	void SceneStore::MarkResidentSlot(std::uint32_t a_slot, const ResidentPatch& a_patch)
@@ -4833,11 +4896,16 @@ namespace DCLF
 			residentPos.resize(std::max<std::size_t>(a_slot + 1, tables.objects.size()), kNotResident);
 		if (residentPos[a_slot] != kNotResident) {
 			residentPatches[residentPos[a_slot]] = a_patch;
+			tables.NoteResidentChange(a_slot, 3);  // patched again: its pipeline or material may be another
 			return;
 		}
 		residentPos[a_slot] = static_cast<std::uint32_t>(residents.size());
 		residents.push_back(a_slot);
 		residentPatches.push_back(a_patch);
+		if (a_slot < tables.residentSlot.size()) {
+			tables.residentSlot[a_slot] = 1;
+			tables.NoteResidentChange(a_slot, 4);
+		}
 	}
 
 	void SceneStore::DropResidentSlot(std::uint32_t a_slot, bool a_notify, bool a_restore)
@@ -4852,6 +4920,10 @@ namespace DCLF
 		residents.pop_back();
 		residentPatches.pop_back();
 		residentPos[a_slot] = kNotResident;
+		if (a_slot < tables.residentSlot.size()) {
+			tables.residentSlot[a_slot] = 0;
+			tables.NoteResidentChange(a_slot, 5);
+		}
 		if (a_restore)
 			ResetAccumulatedHalf(a_slot);
 		if (a_notify && a_slot < tables.objectGeometry.size() && tables.objectGeometry[a_slot])
@@ -4870,6 +4942,10 @@ namespace DCLF
 		for (const std::uint32_t slot : residents) {
 			ResetAccumulatedHalf(slot);
 			residentPos[slot] = kNotResident;
+			if (slot < tables.residentSlot.size()) {
+				tables.residentSlot[slot] = 0;
+				tables.NoteResidentChange(slot, 6);
+			}
 		}
 		residents.clear();
 		residentPatches.clear();
@@ -4897,6 +4973,11 @@ namespace DCLF
 			}
 			if (object.materialIndex < tables.materialLastUsed.size())
 				tables.materialLastUsed[object.materialIndex] = frame;
+			// A tree's wind state is the tree manager's, advanced while the feedback keeps the root's kAccumulated: taken
+			// every frame, as the accumulate phase takes it for every other drawn tree.
+			if ((object.flags & kObjectTreeAnim) && geometry)
+				if (const auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get())
+					DeriveTreeAnim(*property, tables.treeAnim[slot]);
 		}
 	}
 
@@ -4910,6 +4991,13 @@ namespace DCLF
 			const auto* geometry = tables.objectGeometry[slot];
 			if (!geometry)
 				continue;
+			// A root that has started to fade since the feedback's last decode: that decode's successor ends the residency (the
+			// frame of latency every root state the feedback services has), so its pass is not compared.
+			if (const auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
+				property && property->fadeNode && property->fadeNode->GetRuntimeData().currentFade < 1.0f) {
+				++residentStats.parityPending;
+				continue;
+			}
 			++residentStats.parityChecked;
 			AccumulatedPass fresh;
 			const bool built = PrimaryCull::FreshSyntheticPass(*geometry, fresh);

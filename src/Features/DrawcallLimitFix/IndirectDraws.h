@@ -104,6 +104,15 @@ namespace DCLF
 			// flagged inputs and how many missed every cascade, against the CPU's count over the same inputs and
 			// planes (the same test in C++).
 			std::uint32_t sunTested = 0, sunMissed = 0, sunCpuTested = 0, sunCpuMissed = 0;
+			// The fade test (kObjectFadeTest), sampled likewise: resident inputs the depth segment's first phase found in the
+			// frustum under a fade root, and those it dropped past their fade-out distance.
+			std::uint32_t fadeTested = 0, fadeHidden = 0;
+			// Persistent resident draws (drawcall-limit-fix.md): the colour region's inputs, sequences, pairs at stable record
+			// slots and entries it cannot draw (last epoch); new region versions, resyncs, and CS_DCLF_RESIDENT_DRAW_PARITY's
+			// counts, since the start.
+			std::uint32_t residentInputs = 0, residentDraws = 0, residentPairs = 0, residentUndrawable = 0;
+			std::uint64_t residentVersions = 0, residentResyncs = 0, residentParityChecks = 0, residentParityMismatches = 0, residentMissing = 0;
+			std::array<std::uint64_t, 2> residentLastVersion{};
 			std::uint32_t boneRows = 0;  // bone palette rows uploaded by the last epoch (current and previous)
 			// What the HZB held under the tested objects: all-near or all-far means the build is wrong.
 			std::uint32_t hzbNear = 0, hzbFar = 0, hzbSampled = 0;
