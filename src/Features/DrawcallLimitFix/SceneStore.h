@@ -342,18 +342,15 @@ namespace DCLF
 			std::uint32_t materialsDropped = 0;
 			std::uint32_t frameMaterialSamples = 0;
 			bool materialDiffLogged = false;
-			// The Stage 4c gate, and the invariant it checks:
 			//
 			//   if any native-visible object draws on pipeline p, then geometryTemplate[p] came from a
 			//   native-visible object.
 			//
 			// Only that implication matters. A pipeline used *solely* by culled candidates is templated by
-			// one of them and always will be, because there is no native-visible object on it to elect -
-			// and no visible object is harmed by its light list. Counting those as defects reported 12 of
-			// 31 under CS_DCLF_CULL_INPUT=tracked and meant nothing.
+			// one of them and always will be, because there is no native-visible object on it to elect,
+			// and no visible object is harmed by its light list.
 			//
-			// templateDefects is measured from the objects after the loop, not from the election, so it
-			// is a real check on the result rather than a restatement of the code that produced it.
+			// templateDefects is measured from the objects after the loop, not from the election
 			std::uint32_t templateDefects = 0;      // native-visible objects on a culled-templated pipeline; must be 0
 			std::uint32_t pipelinesCulledOnly = 0;  // pipelines no native-visible object draws on (informational)
 			std::uint32_t templateUpgrades = 0;     // templates a later native-visible object took over
@@ -395,6 +392,36 @@ namespace DCLF
 		 * walk, dropped events, or more changes than the list keeps).
 		 */
 		bool TakeSwitchChanges(std::vector<const RE::NiAVObject*>& a_out);
+
+		/**
+		 * @brief Resident records (dclf-cull-job-elimination.md, "Phase 4 in detail"). An object PrimaryCull makes
+		 * resident has the accumulated half of its record patched once, from a resident pass (AccumulatedPass::resident),
+		 * and kept across frames: it is not restored at the next walk, it stays native-visible, and only its slots are kept
+		 * alive each frame (KeepResidentsAlive). The walk rewriting or releasing its record ends it, and so does a failed
+		 * patch; those are reported (TakeResidentEvictions).
+		 */
+		/** @brief Render thread: the record is written only by events (no face, actor, skin or animated shading, not per frame in full). */
+		bool ResidentCapable(const RE::BSGeometry* a_geometry) const;
+		/** @brief Render thread, before the accumulate phase: ends the geometry's residency now (its accumulated half restored). */
+		void EndResidency(const RE::BSGeometry* a_geometry);
+		/** @brief Render thread: ends every residency now. */
+		void EndAllResidency();
+		/**
+		 * @brief PrimaryCull, render thread: the residents whose residency the walk or the accumulate phase ended since the
+		 * last call (a record rewritten, released or not patched), and the sun entry nodes something was attached under or
+		 * detached from (their entries' members changed).
+		 */
+		void TakeResidentEvictions(std::vector<const RE::BSGeometry*>& a_geometries, std::vector<const RE::NiAVObject*>& a_roots);
+		std::uint32_t ResidentCount() const { return static_cast<std::uint32_t>(residents.size()); }
+		/** @brief CS_DCLF_RESIDENT_PARITY=1: every 60 frames, each resident's pass built again and its record, against its patch. */
+		static bool ResidentParityEnabled();
+		struct ResidentStats
+		{
+			std::uint64_t joined = 0, failed = 0, rewritten = 0, released = 0, registered = 0, frames = 0, resident = 0;
+			std::array<std::uint64_t, 4> failedBy{};  // the engine's pass, no record, a frame verdict, material or extras
+			std::uint64_t parityChecks = 0, parityChecked = 0, parityPass = 0, parityRecord = 0;
+		};
+		ResidentStats TakeResidentStats() { return std::exchange(residentStats, {}); }
 
 		/**
 		 * @brief Whether a load screen is up, i.e. the scene graph is being rebuilt under us.
@@ -931,10 +958,7 @@ namespace DCLF
 		// The dense rebuild classifies every entry from scratch, without the verdict caches, and keeps its verdicts
 		// here: the classification itself is what walk parity checks the kept one against.
 		ankerl::unordered_dense::map<const RE::BSGeometry*, Ineligible> referenceReasons;
-		// The per-frame dedup maps. Members, not locals, so their buckets survive the frame: as locals
-		// they were three hash maps allocated and freed every frame to hold the same contents, which is
-		// the waste Stage 1 removed from the ordering vectors and left here. They are cleared, reserved
-		// and refilled by BuildFrame; nothing outside it may read them.
+		// The per-frame dedup maps. Members, not locals, so their buckets survive the frame
 		ankerl::unordered_dense::map<const RE::BSGraphics::TriShape*, std::uint32_t> geometryIndex;
 		ankerl::unordered_dense::map<PipelineKey, std::uint32_t, PipelineKeyHash> pipelineIndex;
 		ankerl::unordered_dense::map<std::pair<const RE::BSShaderMaterial*, std::uint32_t>, std::uint32_t> materialIndex;
@@ -953,8 +977,7 @@ namespace DCLF
 		 * material among every property with the same contents. Its release (FUN_1414f7a40, what
 		 * BSShaderProperty::SetMaterial calls for the old material) decrements the count under the database's
 		 * lock and, at zero, takes the material out of the database before deleting it. A BSTSmartPointer
-		 * deletes it directly instead: when DCLF held the last reference, the database kept pointing at freed
-		 * memory, and the next load whose material hashed to it called into it (a crash on `coc Whiterun`).
+		 * deletes it directly instead.
 		 */
 		class MaterialReference
 		{
@@ -991,8 +1014,6 @@ namespace DCLF
 		};
 		// The cross-frame material cache, keyed by (material, pass descriptor). It holds a reference on
 		// the material, so a freed one cannot be mistaken for a new allocation at the same address.
-		// Unlike the probe it replaced it is swept: entries unused for kMaterialCacheIdleFrames are
-		// dropped, because a cell change retires most of its contents at once and nothing else would.
 		ankerl::unordered_dense::map<std::pair<const RE::BSShaderMaterial*, std::uint32_t>, MaterialProbe> materialCache;
 		/** @brief Whether the cross-frame material cache is serving (CS_DCLF_MATERIAL_CACHE). */
 		static bool MaterialCacheEnabled();
@@ -1147,6 +1168,22 @@ namespace DCLF
 		 * brought up to date (CatchUpSwitch) and, in a delta walk, the entries under it are classified again.
 		 */
 		void ApplySwitchEvents(bool a_full);
+		// Resident records (ResidentCapable).
+		struct ResidentPatch
+		{
+			AccumulatedPass pass;
+			std::uint32_t pipeline = 0, material = 0;
+		};
+		static constexpr std::uint32_t kNotResident = ~0u;
+		bool IsResidentSlot(std::uint32_t a_slot) const { return a_slot < residentPos.size() && residentPos[a_slot] != kNotResident; }
+		void MarkResidentSlot(std::uint32_t a_slot, const ResidentPatch& a_patch);
+		/** @brief Ends a slot's residency: a_restore resets its accumulated half now; a_notify reports the geometry to PrimaryCull. */
+		void DropResidentSlot(std::uint32_t a_slot, bool a_notify, bool a_restore);
+		/** @brief RestoreAccumulated for one slot. */
+		void ResetAccumulatedHalf(std::uint32_t a_slot);
+		/** @brief The accumulate phase: the residents' pipeline and material slots used this frame, and a template when none was. */
+		void KeepResidentsAlive();
+		void CheckResidentParity();
 		/** @brief What a classification reads from the geometry, its properties and its material, hashed. */
 		static std::uint64_t ClassifyInputsOf(const RE::BSGeometry& a_geometry);
 		void MoveBucket(Tracked& a_tracked, Ineligible a_bucket);
@@ -1197,6 +1234,14 @@ namespace DCLF
 		// The switches the walks applied, for PrimaryCull (TakeSwitchChanges); switchResync when it must read them all.
 		std::vector<const RE::NiAVObject*> switchesApplied;
 		bool switchResync = true;
+		// Resident records: the slots, each one's position in the list, and the patch it was given.
+		std::vector<std::uint32_t> residents;
+		std::vector<std::uint32_t> residentPos;
+		std::vector<ResidentPatch> residentPatches;
+		std::vector<const RE::BSGeometry*> residentEvictions;  // for PrimaryCull (TakeResidentEvictions)
+		std::vector<const RE::NiAVObject*> residentRootEvents;
+		ankerl::unordered_dense::set<const RE::BSGeometry*> residentJoining;  // this frame's resident passes, until patched
+		ResidentStats residentStats;
 		// Sun entry nodes something was attached under or detached from since the last walk (keys).
 		std::vector<const RE::NiAVObject*> dirtyRoots;
 		ankerl::unordered_dense::map<const void*, std::vector<RE::BSGeometry*>> propertyDependents;

@@ -155,6 +155,9 @@ namespace DCLF
 		// A synthetic pass (PrimaryCull) whose technique carries the sun's bits for the GPU to drop on a cascade
 		// miss (kObjectSunTest); the engine's registered passes carry the engine's own bits.
 		bool sunTest = false;
+		// A resident object's pass (PrimaryCull, dclf-cull-job-elimination.md "Phase 4 in detail"): the accumulate phase
+		// patches its record once and keeps the patch across frames, instead of restoring it at the next walk.
+		bool resident = false;
 	};
 
 	inline constexpr std::uint32_t kPassDoAlphaTest = 1u << 20;           // pass descriptor DoAlphaTest

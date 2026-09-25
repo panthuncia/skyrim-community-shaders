@@ -12,7 +12,7 @@
 namespace DCLF
 {
 	/**
-	 * @brief Phase 1 gate (CS_DCLF_CAPTURE_PARITY=1): compares what the native main pass actually
+	 * @brief compares what the native main pass actually
 	 * draws with what the CPU tables say Drawcall Limit Fix would draw.
 	 *
 	 * Called after the Lighting shader's SetupGeometry for every native lighting draw of the main

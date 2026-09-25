@@ -37,7 +37,7 @@ namespace DCLF
 			return Toggles::Get().Active().trees;
 		}
 
-		// Techniques Phase 1 handles. The rest (LOD, parallax occlusion, sparkle, ...) stay native.
+		// Techniques DCLF supports. The rest stay native.
 		bool IsSupportedTechnique(std::uint32_t a_technique)
 		{
 			switch (static_cast<Technique>(a_technique)) {

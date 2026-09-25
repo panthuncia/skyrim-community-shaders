@@ -1450,6 +1450,8 @@ through: the shadow pipeline map ("Epochs that only submit") and the NPC head dr
 | `CS_DCLF_PRIMARY_EXCLUDE=1\|0\|probe` | DCLF's references leave the main camera's cull and registration; DCLF builds their main passes and runs their fade updates ("The primary's cull without DCLF's objects"). Needs `CS_DCLF_SUN_EXCLUDE` and static ownership. Default on. Live toggle. `probe`: nothing is removed; the census of the lists and the synthetic pass against the registered one. |
 | `CS_DCLF_SKYLIGHT=1\|0` | With Skylighting loaded, DCLF draws its occlusion map and the engine's `SetupMask` is skipped ("Skylighting's occlusion map, drawn by DCLF"). Needs `CS_DCLF_SHADOWS`. Default on. Live toggle. |
 | `CS_DCLF_SKYLIGHT_PARITY=1` | Diagnostic: every 120th map is rendered by the engine and by DCLF in the same frame and compared texel by texel, with the occluders only DCLF drew; `CS_DCLF_SKYLIGHT_DUMP_DIR=<dir>` writes maps that differ over 5 % of their texels as 16-bit PGM. |
+| `CS_DCLF_RESIDENT=1\|0` | Resident entries: an admitted entry that needs nothing per frame keeps its records patched across frames, drawn whenever the GPU's cull finds them, and its list job returns at once ("Resident entries"). Default on with the visibility feedback and the switch events; read at startup. |
+| `CS_DCLF_RESIDENT_PARITY=1` | Every 60 frames, each resident record's synthetic pass is built from scratch and compared with its patch, and the record with the patch. |
 | `CS_DCLF_SWITCH_EVENTS=1\|0` | An `NiSwitchNode`'s selection follows events: the index's writers are patched, a newly selected child is brought up to date when the event is applied, and neither the scene walk nor the primary's list jobs test switches every frame ("Switch selection by event"). Default on with `CS_DCLF_SCENE_DELTA`; read at startup. |
 | `CS_DCLF_SWITCH_NODES=1` | Leaves under an `NiSwitchNode` (trees, harvestables) are eligible in the frames every switch on their path selects them ("Trees and actors"). Default on. Live toggle. |
 | `CS_DCLF_SKIN_PARTITIONS=1` | Skins of several partitions and dismember skins (LOD trees, actor bodies) are eligible, one draw per partition the engine draws. Needs `CS_DCLF_SKINNED`. Default on. Live toggle. |
@@ -4631,6 +4633,9 @@ Both now follow events ([dclf-cull-job-elimination.md](./dclf-cull-job-eliminati
     makes the store itself and pushes an event carrying the index before it, when the value changed.
 -   `NiSwitchNode`'s child edits are detoured (its vtable's implementations of slots `0x35`, `0x37`-`0x3C`) and push a
     structural event.
+-   Only the render thread's writes make events (`switchEventThread`). A loader thread's are left out: its subtree is not
+    in the scene yet, and its attach brings the switches up to date. Holding a reference to a node a loader is still
+    assembling is not safe ("Resident entries", the crash).
 -   The events go on a lock-free stack from the writer's thread. `ProcessEvents` drains them into one pending entry
     per switch, which keeps the index before the oldest event. A load screen discards them; the rescan's walk covers
     that.
@@ -4683,3 +4688,84 @@ as able to get a record (`PerFrameOf`).
 -   The scene phase took 0.61-0.69 ms, against 0.66-0.84 ms without the events.
 -   The event drain is unchanged (0.05-0.06 ms).
 -   The ten stubs take 285 bytes of the SKSE trampoline, which went from 2 to 4 KiB.
+
+## Resident entries (culling-job elimination, phase 4, step 1)
+
+A stood-in entry still took its list job every frame: the frustum test picked which synthetic passes were built, and
+each synthetic pass went through the accumulate phase, which restored it at the next walk. A **resident** entry needs
+neither ([dclf-cull-job-elimination.md](./dclf-cull-job-elimination.md), "Phase 4 in detail").
+
+**Its records persist** (`SceneStore`'s resident records):
+-   Each DCLF member's record is patched once, from its synthetic pass, through the accumulate phase's own patch
+    (`AccumulatedPass::resident`). It is not in `accumulatePatched`, so no walk restores it.
+-   It keeps `kObjectNativeVisible`, so BuildDraws draws it whenever the GPU's cull finds it. There is no CPU visibility
+    for it at all.
+-   Each frame the accumulate phase only keeps its pipeline and material slots alive (`KeepResidentsAlive`: `lastUsed`,
+    and the lighting template when no other object used the pipeline). `RefreshFrameConstants` resamples its shading
+    with every other bound record's.
+
+**Its list job returns at once** (`StandIn`, a lookup by root). The feedback decode services its root with the stood-in
+entries (fade, LOD, `kAccumulated`).
+
+**Joining** (`PrepareFrame`, render thread, at most 256 a frame), for entries the stand-in reached admitted and settled:
+-   plan `Plain`, `FadeRoot` or `LeafRoot` (trees wait for the height test on the GPU);
+-   every member DCLF's, or unselected by its switch;
+-   every DCLF member `ResidentCapable`: a record written only by events (no face, actor, skin or animated shading, not
+    written in full every frame);
+-   every member's synthetic pass built at the join, without extras rows (projected UV, land blending).
+
+A refused entry is not offered again for 120 frames. The list jobs skip offering it (`joinBlocked`), so the render
+thread's cost before the jobs is back to 0.003 ms.
+
+**Leaving:**
+-   the walk rewrites or releases a record (`WriteObject`, `ReleaseObjectSlot`, the slot check);
+-   something is attached under the root or detached from it (the walk's dirty sun entry nodes);
+-   the decode finds the root fading;
+-   the new snapshot's plan or members differ;
+-   a patch fails.
+
+**Every resident leaves** on a frame the cut does not apply (a local shadow light, the sun's exclusion not live, the
+menu toggle), and when the frame globals the static sun bits read change. A stale snapshot does not end residency.
+
+**The walk parity** compares a resident record as the walk left it (its accumulated half reset).
+
+**Defects found:**
+-   **Joiners' passes replayed.** A frame that failed its preconditions returned before clearing the last frame's
+    joiners' passes. The accumulate phase then patched them in a frame the engine culled everything, and the engine's
+    pass won: about 2,000 failed joins at the `coc`. `PrepareFrame` now clears them first, and the accumulate phase
+    takes them only on a frame whose residents are live.
+-   **A crash while loading** (`rab7-off`, with residency off) on a `QueuedTree` background thread, in Havok's
+    collision setup (`FUN_140ea5cc0`): a child with a null vtable under a tree's `FadeNode Anim`, whose child is the
+    tree's LOD switch. The switch events took references to switches from any thread, including loaders assembling a
+    subtree. They are now taken on the render thread only (`switchEventThread`). A subtree built on a loader is not in
+    the scene until its attach, which brings its switches up to date (`AddSubtree`). It was the first crash with that
+    signature, so this cause is likely, not proven.
+
+**Validation** (full featureset, the tour Riverwood, Whiterun, Dragonsreach):
+-   `CS_DCLF_RESIDENT_PARITY=1`: every 60 frames each resident's synthetic pass is built from scratch and compared with
+    the one it was patched with, and its record with the patch. 0 differ in every window.
+-   Walk parity OK and 0 holes in every window.
+-   Main-pass objects: in Whiterun 303 kept by the engine plus 252 resident, against 555 without the cut. At Riverwood
+    about 1,110 plus about 800 resident, against 1,894-1,917 in other runs.
+-   Riverwood: about 580 resident entries (800 records) of 827 stood in for. The rest are trees (39), entries with the
+    engine's members, and records that need extras rows. Whiterun: about 180 resident entries, 252 records.
+-   Whiterun's local shadow lights fail the preconditions a few times a window, and every resident leaves and joins again
+    (about 1,300 joins per 300 frames). Lifting that precondition is phase 6.
+-   Walk parity also caught a guard's shield or symbol kept hidden in Whiterun, with residency on and off alike. It is
+    the actor-equipment class the scene-delta work met before, and is left open.
+
+**Cost** (Riverwood, four alternating 20 s Tracy captures, ms per frame):
+
+| | Off | On |
+| --- | --- | --- |
+| DCLF's tables, render thread | 1.09-1.13 | 0.98-1.00 |
+| of it, the accumulate phase | 0.43-0.45 | 0.30 |
+| Render thread, waiting on the primary's jobs | 0.36, 0.43 | 0.38, 0.41 |
+| The primary's list jobs (cull), job threads | 0.94, 0.98 | 0.93, 0.94 |
+
+-   Synthetic passes per frame fall from 1,432 to about 630.
+-   The list jobs cost the same: their time goes to the entries the engine still culls (effects, trees, entries with the
+    engine's members, entries not yet admitted).
+-   An earlier build offered every refused entry again every frame. That cost 0.02 ms before the jobs were queued and
+    pushed their start back 11-20 µs.
+-   Switches: `CS_DCLF_RESIDENT=0` turns residency off; `CS_DCLF_RESIDENT_PARITY=1` runs the check.

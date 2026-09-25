@@ -907,8 +907,6 @@ namespace DCLF
 		class BuildDrawsPass final : public org::TypedRenderGraphPass<BuildDrawsPass, BuildDrawsFrame, BuildDrawsBindings>
 		{
 		public:
-			// phase 0 picks itself from the segment (1 in the depth segment, 3 in the colour one); phase 2 is
-			// the rebuilt-HZB pass, registered separately after the HZB build.
 			BuildDrawsPass(std::shared_ptr<Resources> a_resources, SegmentBinding a_segment, std::uint32_t a_phase = 0) :
 				resources(std::move(a_resources)), segment(a_segment), fixedPhase(a_phase) {}
 
@@ -2952,7 +2950,7 @@ namespace DCLF
 						                              materialLookup->key.second == a_tables.materialSlotKey[object.materialIndex].second;
 						for (std::uint32_t t = 0; t < kTextureRegisters; ++t) {
 							// Slots below 16 the material and technique leave alone read a null view (natively: whatever
-							// an earlier draw left bound; Phase 3 parity checks it). A frame register the pipeline reads
+							// an earlier draw left bound). A frame register the pipeline reads
 							// is the epoch's own descriptor, patched in by the commit; on the Z-prepass the pixel stage's
 							// per-frame textures are not bound yet, so a depth pipeline reading one is skipped as before.
 							std::uint32_t index = t < kPixelTextureSlots ? a_lookups.nullTexture : kInvalidIndex;

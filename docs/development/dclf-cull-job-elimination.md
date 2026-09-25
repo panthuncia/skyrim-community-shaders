@@ -1,6 +1,6 @@
 # DCLF: a frame without the engine's culling jobs
 
-Status: phases 1, 2 and 3 done, 2026-09-24; phase 4 next. The reasoning behind it is in [dclf-status.md](./dclf-status.md), "What removing the culling
+Status: phases 1-3 and phase 4's step 1 done, 2026-09-24; phase 4's step 2 next. The reasoning behind it is in [dclf-status.md](./dclf-status.md), "What removing the culling
 jobs takes". The current state is in [drawcall-limit-fix.md](./drawcall-limit-fix.md), "The primary's cull without
 DCLF's objects".
 
@@ -77,16 +77,64 @@ Admission from readiness moved to phase 4, where the pass becomes table state.
 -   the switch trait off the per-frame set (1,707 -> 1,057 entries at Riverwood);
 -   `memberLive` in the stand-in, and the stale-child fallback gone.
 
-## Next: phase 4, DCLF's entries leave the lists
+## Phase 4 in detail: resident entries
 
-What the stand-in still does per admitted entry, per frame, in the list jobs:
--   the fade root's settled check;
--   the frustum test (and a tree's height test), which picks the synthetic passes;
--   the hidden walk per member (`kHidden` has 133 writers; walk parity is its alarm);
--   the hand-over of the engine's members (`AppendVirtual`).
+**Why not a list edit.** The engine rebuilds the scene lists every frame (`DrawWorld_BuildSceneLists`, `0x14064bc20`,
+appending each reference root round robin through `FUN_14021cf40`). Filtering there would also take the entries out of
+the sun's full-frustum cull and the precipitation mask, which read the same lists. The jobs keep the lists; what goes is
+the work an entry needs from its job.
 
-Each of these needs a replacement before an entry can leave the lists:
--   the synthetic passes as table state, drawn when the GPU's cull finds them;
--   admission from readiness;
--   the settled check from the fade events;
--   entries with engine members staying in the lists until phase 5.
+**What an entry still takes from its job** (the stand-in, per frame):
+-   the frustum test that picks which synthetic passes are built;
+-   the root's settled check;
+-   the hidden walk and switch selection per member;
+-   the hand-over of the engine's members.
+
+The synthetic pass itself also goes through the accumulate phase every frame, which restores what it patched at the next
+walk. So nothing about an entry persists from one frame to the next except its admission.
+
+**Resident entries.** An entry whose record needs nothing per frame is made resident:
+-   **Its objects' accumulated half persists.** It is built once, through the accumulate phase's own patch, from its
+    synthetic pass. It is never restored per frame, and it keeps `kObjectNativeVisible`, so BuildDraws draws it
+    whenever the GPU's cull finds it (frustum, occlusion, the sun's cascade test). No CPU visibility is involved.
+-   **Its list job returns at once**, from a lookup by root.
+-   **Its fade, LOD and `kAccumulated`** come from the visibility feedback, as today for stood-in entries.
+-   **The slots stay alive.** Each frame the accumulate phase keeps a resident's pipeline and material slots alive
+    (`lastUsed`, and the lighting template when no other object used the pipeline). That is O(residents) writes, not
+    patches.
+
+**Joining** (render thread, before the list jobs, when the cut applies, a bounded number a frame):
+-   admitted;
+-   plan `Plain`, `FadeRoot` or `LeafRoot` (trees wait for the height test on the GPU);
+-   every member DCLF's or unselected;
+-   the root settled;
+-   every DCLF member with a record that is written only by events: no face, actor, skin or animated shading, and not
+    written in full every frame.
+
+**Leaving** (immediately, in the frame it happens):
+-   **The walk rewrites or releases a resident's record** (`WriteObject`, `ReleaseObjectSlot`, the slot check): an
+    event changed it, so the entry goes back to the stand-in and may join again.
+-   **The patch fails** (a verdict of the frame, a material not ready, extras rows needed).
+-   **The feedback decode finds the root no longer settled** (it started to fade or cross-fade).
+-   **A frame where the cut does not apply** (a local shadow light, the sun's exclusion not live, the menu toggle):
+    every resident leaves. A stale snapshot does not end residency, since residents do not use it.
+-   **The frame globals the static sun bits read change**: every resident leaves.
+
+**Entry 0 of a list** goes through the engine's `Process2`, so the engine registers it even when it is resident. The
+accumulate phase leaves a resident's record alone in that case, and static ownership withholds the engine's pass.
+
+**Checks:**
+-   A resident parity (`CS_DCLF_RESIDENT_PARITY`, every 60 frames): each resident's synthetic pass is built again and
+    compared with the one it was patched with, and its record with the patch.
+-   Walk parity, and 0 holes.
+-   Main-pass objects: the engine's kept ones plus the residents in view match a run without the cut.
+
+**Steps:**
+1.  Resident entries as above, with admission from a draw as today. **Done**
+    ([drawcall-limit-fix.md](./drawcall-limit-fix.md), "Resident entries"). At Riverwood about 580 of the 827
+    stood-in entries are resident; the render thread saves about 0.1 ms; the list jobs cost the same.
+2.  Admission from readiness, so entries never seen in view become resident too. That needs the fade distance on the GPU:
+    an out-of-view resident is not serviced, and one that drifted past its fade distance would draw for a frame when it
+    comes into view. That frame of latency exists already for stood-in entries.
+3.  Trees: the height test and the tree animation on the GPU.
+4.  Entries with engine members stay in the stand-in until phase 5.

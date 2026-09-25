@@ -67,21 +67,15 @@ namespace DCLF
 			std::uint32_t records = 0;                       // binding records built, last epoch
 			std::uint64_t uploadBytes = 0;                   // last epoch
 			double cpuMs = 0.0;                              // last epoch, assembly and epoch
-			// Where that time goes, so the per-draw work is optimised against a measurement rather than a
-			// guess.
-			//
-			// Parts 0-2 are PER BINDING RECORD, not per draw: since Step D deduplicated the record to one
-			// per (material, pipeline) pair they run ~100 times an epoch, not ~1500. The per-draw work -
-			// the loop prologue with its resolvedBindings probe, and the tail that builds the sequence and
-			// the draw input - was invisible, folded into "rest" with the uploads and the epoch execution.
-			// This is the Stage 0 lesson applied to the epoch.
+			// Where that time goes
+			// Parts 0-2 are per binding record, not per draw
 			std::array<double, 8> partMs{};
 			// The render thread's part of the main epochs (the commit and what surrounds it inside the epoch),
 			// summed over commitEpochs since the last report: join, lookups, frame textures and patches, frame
 			// blocks, payload uploads, the drawn set, the rest (shape, latch, stats).
 			std::array<double, 7> commitUs{};
 			std::uint32_t commitEpochs = 0;
-			std::uint32_t notReady = 0;                      // epochs skipped (mirrors, targets or pipelines not ready)
+			std::uint32_t notReady = 0;            // epochs skipped (mirrors, targets or pipelines not ready)
 			std::uint32_t shortBuffers = 0;        // draws whose vertex or index slice does not cover them
 			// Draws skipped because a material's textures were not in the lookups yet (Lookups.h): resolved
 			// by this epoch's commit, they land next frame. Steady state 0.

@@ -100,6 +100,22 @@ namespace DCLF
 		/** @brief [TEMP] CS_DCLF_FEEDBACK_PROBE=1: the tree clock under the feedback. */
 		static bool FeedbackProbe();
 		/**
+		 * @brief CS_DCLF_RESIDENT (default on, with the feedback and the switch events, which need the scene delta): resident entries
+		 * (dclf-cull-job-elimination.md, "Phase 4 in detail"). An admitted entry that needs nothing per frame has its
+		 * objects' records patched once (SceneStore's resident records), drawn whenever the GPU's cull finds them; its list
+		 * job returns at once, and the visibility feedback services its root.
+		 */
+		static bool ResidentOn();
+		/** @brief The accumulate phase: the passes of this frame's joining entries' objects (patched once, then kept). */
+		const std::vector<std::pair<const RE::BSGeometry*, AccumulatedPass>>& ResidentPasses() const { return residentPasses; }
+		/** @brief The accumulate phase: whether this frame's PrepareFrame kept the residents (read once a frame). */
+		bool TakeResidentsLive() { return std::exchange(residentsLive, false); }
+		bool HasResidents() const { return !residents.empty(); }
+		/** @brief Render thread: every resident entry leaves (SceneStore's records restored). */
+		void EndAllResidents();
+		/** @brief CS_DCLF_RESIDENT_PARITY: the synthetic pass built from scratch (no cache), for SceneStore's comparison. */
+		static bool FreshSyntheticPass(const RE::BSGeometry& a_geometry, AccumulatedPass& a_out);
+		/**
 		 * @brief [TEMP] CS_DCLF_SWITCH_PROBE=1: in the list jobs, the event-driven selection (memberLive) against the
 		 * switches' indices, and selected children found out of date, both counted.
 		 */
@@ -184,6 +200,21 @@ namespace DCLF
 		}
 		/** @brief Render thread, before the list jobs: memberLive of entry a_e's members, from the switches. */
 		void RefreshLive(std::uint32_t a_e);
+		/** @brief Whether entry a_e of the current snapshot can be resident now (the doc's joining rules). */
+		bool ResidentOk(std::uint32_t a_e) const;
+		enum class Eviction : std::uint8_t
+		{
+			Record,     // the walk rewrote or released a record, or a patch failed
+			Members,    // something was attached under the root or detached from it
+			Unsettled,  // the feedback found the root fading
+			Snapshot,   // the new snapshot's plan no longer allows it
+			Count,
+		};
+		void EvictResident(const RE::NiAVObject* a_root, Eviction a_cause);
+		/** @brief PrepareFrame: the events that end residency, then this frame's joins (a bounded number). */
+		void UpdateResidents(bool a_current);
+		/** @brief A joining member's resident pass (render thread; the derived cache the synthetic job also uses). */
+		bool ResidentPassOf(const RE::BSGeometry* a_geometry, AccumulatedPass& a_out);
 		PrimaryCull() = default;
 
 		struct Hooks;
@@ -356,6 +387,8 @@ namespace DCLF
 			std::uint64_t seen = 0, skipped = 0, visibleEntries = 0, notSettled = 0, notAdmitted = 0;
 			std::uint64_t fadeServiced = 0, fadedOut = 0, handedBack = 0, hidden = 0, engineMembers = 0, switchStale = 0, unselected = 0;
 			std::uint64_t switchMismatch = 0, switchStaleSeen = 0, switchMidUpdate = 0;  // [TEMP] CS_DCLF_SWITCH_PROBE
+			std::uint64_t resident = 0;                     // resident entries the job returned at once
+			std::vector<std::uint32_t> joinCandidates;      // entries stood in for (admitted and settled): may join
 			std::array<std::uint64_t, 64> causeGeometries{};  // [TEMP] geometries under rejected entries in view, by cause
 		};
 		std::array<JobOut, 16> jobOut;
@@ -373,6 +406,10 @@ namespace DCLF
 			std::uint64_t engineMembers = 0;  // the engine's members in view, handed to its registration
 			std::uint64_t switchStale = 0;    // entries the engine culled this frame because a switch's selected child was out of date
 			std::uint64_t unselected = 0;     // members under an unselected switch child
+			std::uint64_t residentFrames = 0, residentEntries = 0, residentSkips = 0;  // resident entries per frame; list jobs they returned from
+			std::uint64_t joins = 0, joinRefused = 0, endedAll = 0;
+			std::array<std::uint64_t, static_cast<std::size_t>(Eviction::Count)> evicted{};
+			std::uint64_t residentsInView = 0, residentsServiced = 0;  // from the feedback (GPU frustum), per decoded frame
 			std::uint64_t liveAll = 0;        // frames memberLive was read from every switch (a new snapshot, a resync)
 			std::uint64_t liveEntries = 0;    // entries whose memberLive a switch event refreshed
 			std::uint64_t switchMismatch = 0, switchStaleSeen = 0, switchMidUpdate = 0;  // [TEMP] CS_DCLF_SWITCH_PROBE: memberLive wrong; a selected child out of date; one seen mid-update
@@ -385,6 +422,28 @@ namespace DCLF
 		CutStats cutStats;
 		std::vector<const RE::BSGeometry*> frameVisible;  // this frame's visible geometries under left-out entries
 		std::vector<const RE::NiAVObject*> switchChanges;  // scratch: SceneStore::TakeSwitchChanges
+		/** @brief A resident entry: its index in the current snapshot, its DCLF members, and its root, held. */
+		struct Resident
+		{
+			std::uint32_t entry = 0;
+			std::vector<const RE::BSGeometry*> members;
+			RE::NiPointer<RE::NiAVObject> root;
+		};
+		// By root. Changed on the render thread only, before and after the list jobs, which read it.
+		ankerl::unordered_dense::map<const RE::NiAVObject*, Resident> residents;
+		ankerl::unordered_dense::map<const RE::BSGeometry*, const RE::NiAVObject*> residentMemberRoot;
+		ankerl::unordered_dense::map<const RE::NiAVObject*, std::uint64_t> joinBackoff;  // root -> the frame it may try again
+		std::vector<std::uint32_t> joinQueue;   // entries of the current snapshot that may join
+		std::vector<std::uint8_t> joinQueued;   // per entry
+		std::vector<std::uint64_t> joinBlocked;  // per entry: the frame before which the list jobs do not offer it (joinBackoff, by index)
+		std::vector<std::pair<const RE::BSGeometry*, AccumulatedPass>> residentPasses;
+		std::vector<const RE::NiAVObject*> unsettledRoots;  // the decode's (worker), read after its join
+		std::vector<const RE::BSGeometry*> evictedGeometries;
+		std::vector<const RE::NiAVObject*> evictedRoots;
+		std::uint64_t frameCounter = 0;
+		std::uint32_t sunWitness = ~0u;  // the frame globals the static sun bits read, when the residents were patched
+		bool residentsLive = false;      // this frame kept the residents (TakeResidentsLive)
+		bool standInLive = false;        // this frame's snapshot is current: the stand-in runs for non-residents
 		bool liveStale = true;                             // a frame skipped the switch changes: memberLive is read again
 		std::vector<std::pair<const RE::BSGeometry*, AccumulatedPass>> synthetic;
 		std::shared_ptr<void> synthJob;                    // the worker's synthetic-pass job (an AsyncWorker::JobHandle)
@@ -395,6 +454,7 @@ namespace DCLF
 		{
 			std::shared_ptr<const SunCandidates> candidates;
 			std::vector<std::uint32_t> stoodIn;
+			std::uint32_t residentFrom = ~0u;  // stoodIn[residentFrom..] are resident entries
 			// The stood-in entries' roots, held: the decode touches them a frame or more later, when a cell unload may
 			// have freed what the snapshot names. Taken while the list jobs had just traversed them (alive), released on
 			// the render thread (retiredTags), never on the worker.
@@ -406,6 +466,7 @@ namespace DCLF
 		struct FeedbackCounters
 		{
 			std::atomic<std::uint64_t> frames{ 0 }, stale{ 0 }, entries{ 0 }, visible{ 0 }, serviced{ 0 }, unresolved{ 0 };
+			std::atomic<std::uint64_t> residents{ 0 }, residentsVisible{ 0 };
 			// [TEMP] CS_DCLF_FEEDBACK_PROBE: stood-in trees in view, and those whose clock (+0x164) moved since the last decode.
 			std::atomic<std::uint64_t> trees{ 0 }, treesAdvanced{ 0 };
 		};
@@ -422,6 +483,7 @@ namespace DCLF
 			std::uint64_t flags = 0;
 			std::uint8_t fadeState = 0;
 			std::uint32_t derivedPass = kNotDerived;
+			bool extras = false;  // the record takes extras rows each frame (projected UV, land blending): never resident
 		};
 		ankerl::unordered_dense::map<const RE::BSGeometry*, DerivedEntry> derivedCache;
 	};

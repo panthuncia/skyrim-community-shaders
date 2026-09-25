@@ -110,7 +110,7 @@ namespace DCLF
 
 	/**
 	 * @brief Geometry shared by every object that uses the same BSGraphics::TriShape.
-	 * The buffers are the game's; Phase 2 resolves them to Vulkan handles and addresses.
+	 * The buffers are the game's.
 	 */
 	/** @brief GeometryRecord::nextPartition: the last partition, or a TriShape that is not one. */
 	inline constexpr std::uint32_t kNoPartition = ~0u;
