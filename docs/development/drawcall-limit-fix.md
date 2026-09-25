@@ -2435,7 +2435,7 @@ drawn by nothing. The ineligibility histogram counts the kept verdicts, so it re
 
 The three shared tables - geometries, pipelines, materials - keep their slots across frames. Each slot has
 a `lastUsed` frame and its key; a sweep every 16 frames frees slots idle for 64 and erases their map
-entries; the per-object arrays are still appended per frame (`Tables::ClearFrame`). Everything that reads
+entries (since "Persistent draw state", Step 8, liveness is by reference: `SlotTable`); the per-object arrays are still appended per frame (`Tables::ClearFrame`). Everything that reads
 a pipeline by index (the epoch's blocks, EarlyPrepass's pipeline requests, `RefreshFrameConstants`) is
 restricted to the slots used this frame.
 
@@ -5286,14 +5286,37 @@ In all, the render thread's scans went from about 350 to about 105 µs a frame. 
     the same for all three: the camera less `posAdjust`, in world space. Those pipelines take it from the frame's one
     evaluation of such a pipeline. Every other technique leaves whatever the constant buffer last held, which no draw
     of it reads, so the check skips it there.
+-   **Frame lighting** (`Tables::frameLighting`). The sun's direction moves every frame, so while it sat in every
+    pipeline's PerGeometry block about 70 blocks were rewritten each frame.
+    -   **Its own block.** The `DCLF_BINDLESS` pixel stage now reads `DirLightDirection`, `DirLightColor`,
+        `DirectionalAmbient` and `AmbientSpecularTintAndFresnelPower` from `DCLFFrameLighting` at PS b13, a register
+        no shader used. It is a DCLF frame slot (`kFrameSlotLighting`) that the commit uploads only when its version
+        changes.
+    -   **Merged per component.** The rows are merged from the frame's evaluations, each component from whichever
+        evaluation writes it, over what was last published. Techniques differ in what they write: Eye leaves
+        `AmbientSpecularTintAndFresnelPower.w` unwritten where technique 0 writes 1. So taking the rows from a
+        single evaluation made the result depend on pipeline order, which the check caught.
+    -   **What the block no longer carries.** The bindless PerGeometry block packs as zero everything those draws never
+        read from it (`kVSBindlessGeometryUnread`, `kPSBindlessGeometryUnread`, `PackGeometryTemplate`): the frame
+        lighting, the values each object's record or extras rows supply, and `EyePosition` and `AmbientColor`, which
+        Lighting.hlsl never reads. Only a change in what they do read versions a pipeline (`SameBindlessGeometry`). That
+        includes the eye pipeline's full evaluation, whose template actor's World moved every frame.
+    -   **What still reads the full values.** `geometryConstants` keeps them for the constant-buffer path and the
+        checks.
+    -   **Riverwood, before and after:**
+        -   pipelines changed a frame: about 70 → 0;
+        -   pipelines clean in a colour build: 5 → 77 of 77;
+        -   blocks written a build: colour 93 → 19, Z-prepass 82 → 9;
+        -   worker build: colour 0.73 → 0.61 ms, Z-prepass 0.79 → 0.65 ms.
 -   **PerTechnique blocks.** `EvaluateTechnique` reads only the technique and whether the shadow mask is bound
-    (`TechniqueKey`). It runs once a frame per key and is versioned when it changes. A pipeline compares its block
-    only when it holds another version.
+    (`TechniqueKey`). It runs once a frame per key and is versioned when it changes. Since Step 8, the value itself is
+    one shared row per key (`Tables::TechniqueRow`).
 -   **Template pass.** It is looked up only to evaluate.
 -   **Pipelines whose template has no lighting pass this frame** now take the frame's globals too. They used to be
     skipped and kept a stale sun direction.
--   **Check:** every pipeline's block against a full evaluation, in what no object writes over, and its PerTechnique
-    block against `EvaluateTechnique` ("pipeline constants").
+-   **Check:** every pipeline's block against a full evaluation, in what no object writes over; its PerTechnique
+    block against `EvaluateTechnique`; and the frame lighting against each evaluation, where that evaluation writes
+    it ("pipeline constants").
 
 **Material frame components** (`MaterialSources`: IBL, snow rim, character light, LOD texture, landscape snow, t11).
 -   **By signature** (`Tables::frameSignatures`). Each signature keeps its slots, listed when keyed and dropped as
@@ -5308,9 +5331,9 @@ In all, the render thread's scans went from about 350 to about 105 µs a frame. 
     frame components").
 
 **Geometry slot liveness.**
--   **References.** A kept object no longer renews its geometry slot every frame. The sweep (every 16 frames) works
-    out which slots an object draws from, including a skin's partition chain (`geometryReferenced`), and frees only
-    the others once idle.
+-   **References.** A kept object no longer renews its geometry slot every frame. A slot an object draws from,
+    including a skin's partition chain, is kept; only the others are freed once idle. Since Step 8, this is counted
+    from the logs (`SlotTable`) rather than by a sweep over every object.
 -   **Buffer touches.** These are staggered over the slots, every 64 frames each, against `GpuResources`'
     eviction.
 -   **Stale slots are events:** a failed touch; every unresolved slot once buffers start resolving; a slot
@@ -5350,5 +5373,55 @@ bindings. Check: a reuse is built in full every 60 frames and compared ("sun exc
     -   wetness, 11 (per actor, per frame by nature);
     -   the synthetic passes' hole test, 10;
     -   the three live material samples, 13.
--   **Downstream:** `DirLightDirection` moves every frame, so about 70 pipeline blocks change a frame and are packed
-    again. As a frame-shared row, the blocks would stay put.
+
+### Step 8: one implementation of each mechanism
+
+Steps 1 to 7 grew several copies of the same few mechanisms, each with its own data. Each mechanism now has one
+implementation, which every kept structure uses:
+
+| Mechanism | Used by | Replaces |
+| --- | --- | --- |
+| `EventLog`, `LogCursor` (KeptState.h) | `Tables::changeLog`, `Tables::geometryLog`, and every reader of them | Two logs, each with its own base, trim and invalidation, and seven hand-written "fell behind" tests |
+| `ChangeJournal`, `KeptArray`, `KeptView` (KeptState.h) | Object records, bone rows, the geometry table, resident regions, persistent constants and binding records, shadow records and inputs, drawn marks | Two change protocols (dirty-since-base lists, and per-entry versions in the shadow state), and six hand-written coalescing uploads |
+| `TablesHeld` | Resources, ShadowResources, and the build inputs | Nine `*Uploaded` fields and their copies |
+| `KeptRegion` | `ResidentRegion`, `ShadowKept::Mode` | Two swap-removals |
+| `SlotTable` (SlotTable.h), `Tables::GeometryColumns`/`PipelineColumns`/`MaterialColumns` | Geometries, pipelines, materials | Three free lists, three allocators, the idle sweep and its walk over every object |
+| `Tables::TechniqueRow` | PerTechnique values | The per-pipeline copies, the memo, and `techniqueVersionHeld` |
+| `EventQueue` (EventQueue.h) | Fade, property, node, LOD fade and switch events; material writes | Five Treiber stacks allocating per event, and MaterialSources' own ring |
+| `ParityCounter`, `ParityDue` | The stores' parity checks | Per-store counters and verdict strings |
+
+-   **The journal.**
+    -   **Versions.** Each build that changes a kept array is one version. The journal keeps (version, range) entries
+        after its floor. A buffer holding version H is sent the runs changed since H, coalesced. When H is below the
+        floor it is sent everything; a new buffer holds 0.
+    -   **Holders.** There can be one holder, such as a main buffer, or the render thread for the drawn marks. There
+        can also be several: each of the shadow epoch's view slots holds its own copy of the records. `BeginBuild`
+        trims at the oldest holder.
+    -   **Resets.** A reset keeps the journal, so versions keep counting and never repeat one a buffer already holds.
+    -   **Bone rows.** These journal row ranges. A run is sent one section at a time (current, previous, extras); the
+        old coalescing could join two sections at the capacity boundary.
+-   **Slot liveness.**
+    -   **What counts as a reference:**
+        -   an object references its geometry slot while it has a record;
+        -   it references its pipeline and material slots while it is bound;
+        -   a skin partition is referenced by the partition before it.
+    -   **Counting.** `UpdateSlotReferences` counts them from the change and geometry logs. Each count records the
+        slot's generation, since a geometry or material slot can be freed while referenced.
+    -   **Freeing.** A slot is freed 64 frames after its last reference goes. That expiry is an event, not a sweep.
+    -   **`lastUsed` stays.** Only it certifies that the raw engine pointers a slot holds (a pipeline's lighting
+        template, a material key) are this frame's. Every bound object renews its slots each frame, through the
+        accumulate phase or `KeepResidentsAlive`, and `CheckObjectSlots` enforces that.
+-   **Technique rows.**
+    -   **Rows.** There is one row per `TechniqueKey`, evaluated once a frame. Its floats and its bindings are
+        versioned separately.
+    -   **Versions.** A pipeline's kept blocks check the row's constants version, and a pair's record its binding
+        version.
+    -   **Blocks stay per pipeline.** Each shader permutation's constant table lays the group out differently.
+-   **The event queue.** A bounded ring with a sequence per cell, which allocates nothing per push while it has room.
+    When it is full it spills onto a lock-free stack rather than dropping the event: the scene consumers have no way
+    to rebuild what a lost event would have told them. Drains are oldest first.
+-   **Not added:** a `Versioned<T>` helper. Only one site writes and versions a whole value (the frame lighting); the
+    others write parts of a record.
+-   **Validation:**
+    -   the full parity tour after each stage, 0 throughout;
+    -   timings unchanged within noise (Riverwood colour build 0.61 ms, Z-prepass 0.65-0.67 ms).

@@ -174,7 +174,7 @@ namespace
 	}
 
 	// Moves the lights from the execution's latch region into the lights buffer (read by the culling, by
-	// DCLF's draws and by D3D11): a copy of fixed size, recorded once, where a per-frame upload used to be.
+	// DCLF's draws and by D3D11)
 	struct LatchCopyBindings
 	{
 		org::ResourceBindingToken lights;

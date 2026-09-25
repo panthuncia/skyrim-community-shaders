@@ -615,8 +615,10 @@ cbuffer PerMaterial : register(b1)
 
 cbuffer PerGeometry : register(b2)
 {
+#if !defined(DCLF_BINDLESS)
 	float3 DirLightDirection : packoffset(c0);
 	float3 DirLightColor : packoffset(c1);
+#endif  // !DCLF_BINDLESS
 	float4 ShadowLightMaskSelect : packoffset(c2);
 #if !defined(DCLF_BINDLESS)
 	float4 MaterialData : packoffset(c3);  // envmapLODFade in x, specularLODFade in y, alpha in z
@@ -634,12 +636,27 @@ cbuffer PerGeometry : register(b2)
 	float4 ProjectedUVParams2 : packoffset(c9);
 	float4 ProjectedUVParams3 : packoffset(c10);  // fProjectedUVDiffuseNormalTilingScale in x, fProjectedUVNormalDetailTilingScale in y, EnableProjectedNormals in w
 #endif  // !DCLF_BINDLESS
+#if !defined(DCLF_BINDLESS)
 	row_major float3x4 DirectionalAmbient : packoffset(c11);
 	float4 AmbientSpecularTintAndFresnelPower : packoffset(c14);  // Fresnel power in z, color in xyz
-	float4 PointLightPosition[7] : packoffset(c15);               // point light radius in w
+#endif  // !DCLF_BINDLESS
+	float4 PointLightPosition[7] : packoffset(c15);  // point light radius in w
 	float4 PointLightColor[7] : packoffset(c22);
 	float2 NumLightNumShadowLight : packoffset(c29);
 };
+
+#if defined(DCLF_BINDLESS)
+// The frame's lighting: the same in every pipeline's PerGeometry block, so Drawcall Limit Fix keeps it in one block
+// of its own for the whole frame (SceneStore::Tables::frameLighting), and a pipeline's block does not change with the
+// sun. No other shader uses b13.
+cbuffer DCLFFrameLighting : register(b13)
+{
+	float3 DirLightDirection : packoffset(c0);
+	float3 DirLightColor : packoffset(c1);
+	row_major float3x4 DirectionalAmbient : packoffset(c2);
+	float4 AmbientSpecularTintAndFresnelPower : packoffset(c5);  // Fresnel power in z, color in xyz
+};
+#endif  // DCLF_BINDLESS
 
 #if defined(DCLF_BINDLESS)
 static float4 MaterialData = DCLFObjects[DCLFObjectIndex].MaterialData;

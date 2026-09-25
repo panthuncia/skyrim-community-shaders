@@ -604,6 +604,16 @@ namespace DCLF
 			}
 		};
 
+		/**
+		 * @brief The versions of the kept tables (ObjectRecordStore, BonesStore, GeometryStore) a set of buffers holds, written
+		 * by the commit that uploads them; 0 for new buffers, which no version is.
+		 */
+		struct TablesHeld
+		{
+			std::uint64_t objects = 0, bones = 0, geometries = 0;
+			bool operator==(const TablesHeld&) const = default;
+		};
+
 		struct Resources
 		{
 			std::vector<FrameBuffer> frameBuffers;
@@ -627,7 +637,9 @@ namespace DCLF
 			// The version of the persistent object records (ObjectRecordStore) `objects` holds, written by the commit that
 			// uploads it; 0 for a new buffer, which no version is. Likewise the bone rows (BonesStore) and the geometry slots'
 			// draws (GeometryStore).
-			std::uint64_t objectsUploaded = 0, bonesUploaded = 0, geometriesUploaded = 0;
+			TablesHeld tablesHeld;
+			// The frame lighting version (SceneStore::Tables::frameLightingVersion) its frame slot holds (kFrameSlotLighting).
+			std::uint32_t frameLightingUploaded = 0;
 			// The Z-prepass segment's constant blocks and binding records (Step 4 of "Persistent draw state"): each segment
 			// keeps its blocks and records across frames in buffers of its own. Per segment (0 Z-prepass, 1 colour): the
 			// versions the buffers hold, and the frame textures (t16 and up) as the last commit resolved them, which the
@@ -1612,7 +1624,7 @@ namespace DCLF
 			std::array<std::shared_ptr<org::Buffer>, kMaxShadowViews> sequences, count;      // per view slot
 			std::array<winrt::com_ptr<ID3D11Buffer>, kMaxShadowViews> countD3D11;             // the counters, read back
 			std::uint32_t objectsIndex = 0, bonesIndex = 0;
-			std::uint64_t objectsUploaded = 0, bonesUploaded = 0, geometriesUploaded = 0;  // as Resources::objectsUploaded, ...
+			TablesHeld tablesHeld;  // as Resources::tablesHeld
 			// The kept shadow state's versions (ShadowKept) each mode's input buffer and each view slot's records hold.
 			std::array<std::uint64_t, kShadowModeCount> inputsUploaded{};
 			std::array<std::uint64_t, kMaxShadowViews> recordsUploaded{};
@@ -2196,10 +2208,12 @@ namespace DCLF
 		// The per-frame constant blocks - whatever the main pass binds outside the per-draw registers - live
 		// in Resources::frameConstants at fixed slots, so that a record can name a block before its contents
 		// exist: the vertex stage's b0-b13, then the pixel stage's, then the zeroed StrictLightData block
-		// every bindless draw's b3 reads. A slot is D3D11's constant buffer maximum, so no block overflows.
+		// every bindless draw's b3 reads, and the frame lighting every DCLF_BINDLESS draw's b13 reads
+		// (SceneStore::Tables::frameLighting). A slot is D3D11's constant buffer maximum, so no block overflows.
 		constexpr std::uint64_t kFrameSlotBytes = 65536;
 		constexpr std::uint32_t kFrameSlotSharedLight = 2 * kConstantBufferRegisters;
-		constexpr std::uint32_t kFrameSlotCount = kFrameSlotSharedLight + 1;
+		constexpr std::uint32_t kFrameSlotLighting = kFrameSlotSharedLight + 1;
+		constexpr std::uint32_t kFrameSlotCount = kFrameSlotLighting + 1;
 		constexpr std::uint64_t kFrameConstantBytes = std::uint64_t(kFrameSlotCount) * kFrameSlotBytes;
 
 		constexpr std::uint64_t FrameSlotOffset(bool a_pixelStage, std::uint32_t a_register)
@@ -2228,72 +2242,59 @@ namespace DCLF
 		/**
 		 * @brief The per-object records (BindlessObject) one objects buffer holds, kept across frames (drawcall-limit-fix.md,
 		 * "Persistent draw state", Step 3): a record is written again only when the change log names a column it is built
-		 * from, and the commit uploads only the records changed since the version the buffer holds. One for the main
-		 * epochs' buffer, one for the shadow epoch's. Its builds run in frame order - the shadow build, then the Z-prepass,
-		 * then the colour build, each joined (or cancelled, which waits) before the next is kicked, on the one worker or
-		 * inline - so nothing else writes it meanwhile; `collisions` counts it if anything ever does.
+		 * from, and the buffer is sent what changed since the version it holds (KeptArray). One for the main epochs' buffer,
+		 * one for the shadow epoch's. Its builds run in frame order - the shadow build, then the Z-prepass, then the colour
+		 * build, each joined (or cancelled, which waits) before the next is kicked, on the one worker or inline - so nothing
+		 * else writes it meanwhile; `collisions` counts it if anything ever does.
 		 */
 		struct ObjectRecordStore
 		{
-			bool active = false;
-			std::uint32_t generation = 0, renderFlags = 0;
-			std::uint64_t logPosition = 0;
-			std::shared_ptr<std::vector<BindlessObject>> records = std::make_shared<std::vector<BindlessObject>>();
-			std::uint64_t version = 0;
-			// The records changed since version dirtyBase (~0: all of them, after a resync).
-			std::vector<std::uint32_t> dirty;
-			std::vector<std::uint8_t> dirtyMark;
-			std::uint64_t dirtyBase = ~0ull;
+			LogCursor cursor;
+			std::uint32_t renderFlags = 0;
+			KeptArray<BindlessObject> records;
 			std::atomic<std::uint32_t> busy{ 0 };
 			// Since the last report.
-			std::uint64_t updates = 0, rewritten = 0, resyncs = 0, collisions = 0, parityChecks = 0, parityMismatches = 0;
-			void MarkDirty(std::uint32_t a_record)
-			{
-				if (dirtyMark.size() <= a_record)
-					dirtyMark.resize(std::size_t(a_record) + 1, 0);
-				if (!dirtyMark[a_record]) {
-					dirtyMark[a_record] = 1;
-					dirty.push_back(a_record);
-				}
-			}
+			std::uint64_t updates = 0, rewritten = 0, resyncs = 0, collisions = 0;
+			ParityCounter parity;
 		};
+
+		/** @brief A build's view of the object records: the store's, or a full set of its own without one (version 0). */
+		using ObjectRecordsOut = KeptView<BindlessObject>;
 
 		/**
 		 * @brief The rows one bones buffer holds (Step 5): every palette, current then previous (one capacity further), then
-		 * the extras - read straight from the tables' arrays, uploaded as the rows changed since the version the buffer holds.
-		 * The change log names them: a palette's rows (kChangePalette), its place (kChangeSkin), an extras block's rows or
-		 * place (kChangeExtras). A new capacity moves everything past the palettes, so it is a resync. One for the main
-		 * epochs' buffer, one for the shadow epoch's; in frame order like ObjectRecordStore.
+		 * the extras - read straight from the tables' arrays, and journalled as rows, so the buffer is sent the rows changed
+		 * since the version it holds. The change log names them: a palette's rows (kChangePalette), its place (kChangeSkin),
+		 * an extras block's rows or place (kChangeExtras). A new capacity moves everything past the palettes, so it is a
+		 * resync. One for the main epochs' buffer, one for the shadow epoch's; in frame order like ObjectRecordStore.
 		 */
 		struct BonesStore
 		{
-			bool active = false;
-			std::uint32_t generation = 0, capacity = 0;
-			std::uint64_t logPosition = 0;
-			std::uint64_t version = 0, dirtyBase = ~0ull;
-			std::vector<std::pair<std::uint32_t, std::uint32_t>> dirty;  // (first row in the buffer, rows)
+			LogCursor cursor;
+			std::uint32_t capacity = 0;
+			ChangeJournal rows;
 			std::vector<float> uploaded;  // CS_DCLF_PERSISTENT_PARITY: the rows as uploaded
-			std::uint64_t updates = 0, rowsSent = 0, resyncs = 0, parityChecks = 0, parityMismatches = 0;
+			std::uint64_t updates = 0, rowsSent = 0, resyncs = 0;
+			ParityCounter parity;
 		};
 
-		/** @brief A build's view of the rows: the tables' arrays, with what changed since the store's base. */
+		/** @brief A build's view of the rows: the tables' arrays, with the store's changes (version 0: sent whole). */
 		struct BonesOut
 		{
 			const float* bones = nullptr;
 			const float* previous = nullptr;
 			const float* extras = nullptr;
 			std::uint32_t capacity = 0, extraRows = 0;
-			std::uint64_t version = 0;  // 0: not the store's, uploaded whole
-			std::uint64_t dirtyBase = ~0ull;
-			std::vector<std::pair<std::uint32_t, std::uint32_t>> dirty;
+			ChangeJournal::Snapshot changes;
+			std::uint64_t Version() const { return changes.version; }
 			std::uint32_t Rows() const { return 2 * capacity + extraRows; }
-			const float* Row(std::uint32_t a_row) const
+			const float* Row(std::uint64_t a_row) const
 			{
 				if (a_row < capacity)
 					return bones + std::size_t(a_row) * 4;
-				if (a_row < 2 * capacity)
+				if (a_row < 2ull * capacity)
 					return previous + std::size_t(a_row - capacity) * 4;
-				return extras + std::size_t(a_row - 2 * capacity) * 4;
+				return extras + std::size_t(a_row - 2ull * capacity) * 4;
 			}
 			void Reset() { *this = {}; }
 		};
@@ -2310,79 +2311,53 @@ namespace DCLF
 				return;
 			auto& s = *a_store;
 			++s.updates;
-			if (a_uploaded == s.version) {
-				s.dirty.clear();
-				s.dirtyBase = s.version;
-			}
-			const std::uint64_t logEnd = a_tables.changeLogBase + a_tables.changeLog.size();
-			if (!s.active || s.generation != a_generation || s.capacity != a_out.capacity || s.logPosition < a_tables.changeLogBase || s.logPosition > logEnd) {
-				s.active = true;
-				s.generation = a_generation;
+			s.rows.BeginBuild(a_uploaded);
+			if (!s.cursor.Continues(a_tables.changeLog, a_generation) || s.capacity != a_out.capacity) {
+				s.cursor.Restart(a_generation);
 				s.capacity = a_out.capacity;
-				s.dirty.clear();
-				s.dirtyBase = ~0ull;
-				++s.version;
+				s.rows.Resync();
 				++s.resyncs;
 			} else {
-				bool changed = false;
-				for (auto k = static_cast<std::size_t>(s.logPosition - a_tables.changeLogBase); k < a_tables.changeLog.size(); ++k) {
-					const auto& change = a_tables.changeLog[k];
+				for (const auto& change : s.cursor.Unread(a_tables.changeLog)) {
 					const std::uint32_t o = change.slot;
 					if ((change.causes & (kChangePalette | kChangeSkin)) && o < a_tables.boneRows.size() && a_tables.boneRows[o]) {
-						s.dirty.emplace_back(a_tables.boneOffset[o], a_tables.boneRows[o]);
-						s.dirty.emplace_back(a_out.capacity + a_tables.boneOffset[o], a_tables.boneRows[o]);
-						changed = true;
+						s.rows.MarkRange(a_tables.boneOffset[o], a_tables.boneRows[o]);
+						s.rows.MarkRange(std::uint64_t(a_out.capacity) + a_tables.boneOffset[o], a_tables.boneRows[o]);
 					}
-					if ((change.causes & kChangeExtras) && o < a_tables.extraOffset.size() && a_tables.extraOffset[o] != kNoExtraRows) {
-						s.dirty.emplace_back(2 * a_out.capacity + a_tables.extraOffset[o], kExtraRows);
-						changed = true;
-					}
+					if ((change.causes & kChangeExtras) && o < a_tables.extraOffset.size() && a_tables.extraOffset[o] != kNoExtraRows)
+						s.rows.MarkRange(2ull * a_out.capacity + a_tables.extraOffset[o], kExtraRows);
 				}
-				if (changed)
-					++s.version;
 			}
-			s.logPosition = logEnd;
-			a_out.version = s.version;
-			a_out.dirtyBase = s.dirtyBase;
-			a_out.dirty = s.dirty;
+			s.cursor.Advance(a_tables.changeLog);
+			a_out.changes = s.rows.Take();
 		}
 
-		/** @brief The uploads of a build's rows (the rows changed since the buffer's base, else all of them), clipped to the buffer. */
+		/**
+		 * @brief The uploads of a build's rows a buffer at a_held lacks (the changed runs, else all of them), clipped to the buffer.
+		 * A run is sent a section at a time: the current palettes, the previous ones and the extras are separate arrays.
+		 */
 		template <class Emit>
 		std::size_t EmitBones(const BonesOut& a_out, std::uint64_t a_held, BonesStore* a_parity, Emit&& a_emit)
 		{
 			const std::uint32_t rows = std::min<std::uint32_t>(a_out.Rows(), kMaxBoneRows);
-			if (!rows || !a_out.bones || (a_out.version && a_out.version == a_held))
+			if (!rows || !a_out.bones)
 				return 0;
+			const std::uint64_t capacity = a_out.capacity;
 			std::size_t sent = 0;
-			auto emitRange = [&](std::uint32_t a_first, std::uint32_t a_count) {
-				// A range never crosses a section (current, previous, extras); the whole upload is sent section by section.
-				a_count = std::min(a_count, rows > a_first ? rows - a_first : 0u);
-				if (!a_count)
-					return;
-				a_emit(a_out.Row(a_first), std::size_t(a_count) * 16, std::size_t(a_first) * 16);
-				if (a_parity) {
-					if (a_parity->uploaded.size() < std::size_t(rows) * 4)
-						a_parity->uploaded.resize(std::size_t(rows) * 4, 0.0f);
-					std::memcpy(&a_parity->uploaded[std::size_t(a_first) * 4], a_out.Row(a_first), std::size_t(a_count) * 16);
+			a_out.changes.ForEachRun(a_held, rows, [&](std::uint64_t a_first, std::uint64_t a_count) {
+				for (std::uint64_t at = a_first, end = a_first + a_count; at < end;) {
+					const std::uint64_t sectionEnd = at < capacity ? capacity : at < 2 * capacity ? 2 * capacity : end;
+					const std::uint64_t count = std::min(end, sectionEnd) - at;
+					a_emit(a_out.Row(at), std::size_t(count) * 16, std::size_t(at) * 16);
+					if (a_parity) {
+						if (a_parity->uploaded.size() < std::size_t(rows) * 4)
+							a_parity->uploaded.resize(std::size_t(rows) * 4, 0.0f);
+						std::memcpy(&a_parity->uploaded[std::size_t(at) * 4], a_out.Row(at), std::size_t(count) * 16);
+					}
+					sent += static_cast<std::size_t>(count);
+					at += count;
 				}
-				sent += a_count;
-			};
-			if (!a_out.version || a_held != a_out.dirtyBase) {
-				emitRange(0, a_out.capacity);
-				emitRange(a_out.capacity, a_out.capacity);
-				emitRange(2 * a_out.capacity, a_out.extraRows);
-				return sent;
-			}
-			auto dirty = a_out.dirty;
-			std::sort(dirty.begin(), dirty.end());
-			for (std::size_t k = 0; k < dirty.size();) {
-				const std::uint32_t first = dirty[k].first;
-				std::uint32_t end = first + dirty[k].second;
-				while (++k < dirty.size() && dirty[k].first <= end)
-					end = std::max(end, dirty[k].first + dirty[k].second);
-				emitRange(first, end - first);
-			}
+			});
 			return sent;
 		}
 
@@ -2392,32 +2367,28 @@ namespace DCLF
 			const std::uint32_t rows = std::min<std::uint32_t>(a_out.Rows(), kMaxBoneRows);
 			if (a_store.uploaded.size() < std::size_t(rows) * 4)
 				return;
-			++a_store.parityChecks;
-			for (std::uint32_t row = 0; row < rows; ++row)
-				if (std::memcmp(&a_store.uploaded[std::size_t(row) * 4], a_out.Row(row), 16) != 0) {
-					++a_store.parityMismatches;
-					break;
-				}
+			bool same = true;
+			for (std::uint32_t row = 0; row < rows && same; ++row)
+				same = std::memcmp(&a_store.uploaded[std::size_t(row) * 4], a_out.Row(row), 16) == 0;
+			a_store.parity.Check(same);
 		}
 
 		/**
-		 * @brief A build's view of the geometry table: the geometry slots' draws (the store's, shared, or a set of its own without
-		 * one) and the face streams' after them, which are the frame's and sent whole every build.
+		 * @brief A build's view of the geometry table: the geometry slots' draws (the store's, or a set of its own without one)
+		 * and the face streams' after them, which are the frame's and sent whole every build.
 		 */
 		struct GeometryDrawsOut
 		{
-			std::shared_ptr<const std::vector<GeometryDraw>> slots;
+			KeptView<GeometryDraw> slots;
 			std::vector<GeometryDraw> faces;
-			std::uint64_t version = 0;  // 0: not the store's, uploaded whole
-			std::uint64_t dirtyBase = ~0ull;
-			std::vector<std::uint32_t> dirty;
-			std::size_t SlotCount() const { return slots ? slots->size() : 0; }
+			std::size_t SlotCount() const { return slots.Count(); }
 			std::size_t Count() const { return SlotCount() + faces.size(); }
+			std::uint64_t Version() const { return slots.Version(); }
 			std::vector<GeometryDraw> Flat() const
 			{
 				std::vector<GeometryDraw> flat;
-				if (slots)
-					flat = *slots;
+				if (slots.elements)
+					flat = *slots.elements;
 				flat.insert(flat.end(), faces.begin(), faces.end());
 				return flat;
 			}
@@ -2426,41 +2397,16 @@ namespace DCLF
 
 		/**
 		 * @brief The geometry slots' draws one geometry buffer holds, kept across builds (Step 7): repacked from the tables'
-		 * geometry log (Tables::geometryLog) and uploaded as the slots changed since the version the buffer holds. One for the
+		 * geometry log (Tables::geometryLog), and sent as the slots changed since the version the buffer holds. One for the
 		 * main epochs' buffer, one for the shadow epoch's; in frame order like ObjectRecordStore.
 		 */
 		struct GeometryStore
 		{
-			bool active = false;
-			std::uint32_t generation = 0;
-			std::uint64_t logPosition = 0;
-			std::shared_ptr<std::vector<GeometryDraw>> packed = std::make_shared<std::vector<GeometryDraw>>();
-			std::uint64_t version = 0, dirtyBase = ~0ull;
-			std::vector<std::uint32_t> dirty;
-			std::vector<std::uint8_t> dirtyMark;
+			LogCursor cursor;
+			KeptArray<GeometryDraw> packed;
 			// Since the last report.
-			std::uint64_t updates = 0, rewritten = 0, resyncs = 0, parityChecks = 0, parityMismatches = 0;
-			void MarkDirty(std::uint32_t a_slot)
-			{
-				if (dirtyMark.size() <= a_slot)
-					dirtyMark.resize(std::size_t(a_slot) + 1, 0);
-				if (!dirtyMark[a_slot]) {
-					dirtyMark[a_slot] = 1;
-					dirty.push_back(a_slot);
-				}
-			}
-		};
-
-		/** @brief A build's view of the object records: the store's (shared), or a full set of its own without one. */
-		struct ObjectRecordsOut
-		{
-			std::shared_ptr<const std::vector<BindlessObject>> records;
-			std::uint64_t version = 0;  // 0: not the store's, uploaded whole
-			std::uint64_t dirtyBase = ~0ull;
-			std::vector<std::uint32_t> dirty;
-			std::size_t Count() const { return records ? records->size() : 0; }
-			const BindlessObject* At(std::size_t a_index) const { return records && a_index < records->size() ? &(*records)[a_index] : nullptr; }
-			void Reset() { *this = {}; }
+			std::uint64_t updates = 0, rewritten = 0, resyncs = 0;
+			ParityCounter parity;
 		};
 
 		bool PersistentObjectsEnabled()
@@ -2492,118 +2438,58 @@ namespace DCLF
 				for (std::size_t r = 0; r < count; ++r)
 					BuildObjectRecord(a_tables, static_cast<std::uint32_t>(r), a_renderFlags, (*records)[r]);
 				a_out = {};
-				a_out.records = std::move(records);
+				a_out.elements = std::move(records);
 				return;
 			}
 			auto& s = *a_store;
 			if (s.busy.exchange(1, std::memory_order_acquire) != 0)
 				++s.collisions;
 			++s.updates;
-			// The buffer holds the last version: what changes from here on is uploaded alone.
-			if (a_uploaded == s.version) {
-				for (const auto record : s.dirty)
-					s.dirtyMark[record] = 0;
-				s.dirty.clear();
-				s.dirtyBase = s.version;
-			}
-			std::vector<BindlessObject>* writable = nullptr;
-			auto write = [&]() -> std::vector<BindlessObject>& {
-				if (!writable) {
-					if (s.records.use_count() > 1)
-						s.records = std::make_shared<std::vector<BindlessObject>>(*s.records);
-					writable = s.records.get();
-					++s.version;
-				}
-				return *writable;
-			};
-			const std::uint64_t logEnd = a_tables.changeLogBase + a_tables.changeLog.size();
-			const bool resync = !s.active || s.generation != a_generation || s.renderFlags != a_renderFlags || s.logPosition < a_tables.changeLogBase ||
-			                    s.logPosition > logEnd || s.records->size() > count;
-			if (resync) {
+			s.records.BeginBuild(a_uploaded);
+			if (!s.cursor.Continues(a_tables.changeLog, a_generation) || s.renderFlags != a_renderFlags || s.records.Size() > count) {
 				// Every record again: the first build, new tables, or a log this store fell behind.
-				auto& records = write();
+				auto& records = s.records.Mutable();
 				records.resize(count);
 				for (std::size_t r = 0; r < count; ++r)
 					BuildObjectRecord(a_tables, static_cast<std::uint32_t>(r), a_renderFlags, records[r]);
-				for (const auto record : s.dirty)
-					s.dirtyMark[record] = 0;
-				s.dirty.clear();
-				s.dirtyBase = ~0ull;
-				s.active = true;
-				s.generation = a_generation;
+				s.records.Resync();
+				s.cursor.Restart(a_generation);
 				s.renderFlags = a_renderFlags;
 				++s.resyncs;
 			} else {
 				// Slots the tables grew by since: records of their own (the log names them too).
-				if (s.records->size() < count) {
-					auto& records = write();
+				if (s.records.Size() < count) {
+					auto& records = s.records.Mutable();
 					const auto first = records.size();
 					records.resize(count);
 					for (std::size_t r = first; r < count; ++r) {
 						BuildObjectRecord(a_tables, static_cast<std::uint32_t>(r), a_renderFlags, records[r]);
-						s.MarkDirty(static_cast<std::uint32_t>(r));
+						s.records.Mark(r);
 					}
 				}
 				BindlessObject fresh;
-				for (auto k = static_cast<std::size_t>(s.logPosition - a_tables.changeLogBase); k < a_tables.changeLog.size(); ++k) {
-					const auto& change = a_tables.changeLog[k];
+				for (const auto& change : s.cursor.Unread(a_tables.changeLog)) {
 					if (!(change.causes & kObjectRecordCauses) || change.slot >= count)
 						continue;
 					BuildObjectRecord(a_tables, change.slot, a_renderFlags, fresh);
-					if (std::memcmp(&fresh, &(*s.records)[change.slot], sizeof(fresh)) == 0)
-						continue;
-					write()[change.slot] = fresh;
-					s.MarkDirty(change.slot);
-					++s.rewritten;
+					s.rewritten += s.records.Set(change.slot, fresh) ? 1u : 0u;
 				}
 			}
-			s.logPosition = logEnd;
+			s.cursor.Advance(a_tables.changeLog);
 			// CS_DCLF_PERSISTENT_PARITY: every record against one built from the tables now.
-			if (PersistentParityEnabled() && a_frame % 60 == 0) {
+			if (PersistentParityEnabled() && ParityDue(a_frame)) {
 				BindlessObject fresh;
+				const auto& records = s.records.Get();
 				for (std::size_t r = 0; r < count; ++r) {
 					BuildObjectRecord(a_tables, static_cast<std::uint32_t>(r), a_renderFlags, fresh);
-					++s.parityChecks;
-					if (std::memcmp(&fresh, &(*s.records)[r], sizeof(fresh)) != 0 && s.parityMismatches++ < 4) {
+					s.parity.Check(std::memcmp(&fresh, &records[r], sizeof(fresh)) == 0, [&] {
 						const auto* geometry = r < a_tables.objectGeometry.size() ? a_tables.objectGeometry[r] : nullptr;
-						logger::info("[DCLF][TEMP] persistent object record {} '{}' differs from the tables", r, geometry && geometry->name.c_str() ? geometry->name.c_str() : "?");
-					}
+						return fmt::format("record {} '{}'", r, geometry && geometry->name.c_str() ? geometry->name.c_str() : "?");
+					});
 				}
 			}
-			a_out.records = s.records;
-			a_out.version = s.version;
-			a_out.dirtyBase = s.dirtyBase;
-			a_out.dirty = s.dirty;
+			a_out = s.records.View();
 			s.busy.store(0, std::memory_order_release);
-		}
-
-		/** @brief The uploads of a build's object records: the changed ones when the buffer holds their base, else all of them. */
-		template <class Emit>
-		std::size_t EmitObjectRecords(const ObjectRecordsOut& a_out, std::uint64_t a_held, Emit&& a_emit)
-		{
-			const std::size_t count = a_out.Count();
-			if (!count || (a_out.version && a_out.version == a_held))
-				return 0;
-			const auto* data = a_out.records->data();
-			if (!a_out.version || a_held != a_out.dirtyBase) {
-				a_emit(data, count * sizeof(BindlessObject), std::size_t{ 0 });
-				return count * sizeof(BindlessObject);
-			}
-			auto dirty = a_out.dirty;
-			std::sort(dirty.begin(), dirty.end());
-			std::size_t bytes = 0;
-			for (std::size_t k = 0; k < dirty.size();) {
-				const std::uint32_t first = dirty[k];
-				std::uint32_t end = first + 1;
-				while (++k < dirty.size() && dirty[k] <= end)
-					end = std::max(end, dirty[k] + 1);
-				if (first >= count)
-					continue;
-				const std::size_t run = (std::min<std::size_t>(end, count) - first) * sizeof(BindlessObject);
-				a_emit(data + first, run, std::size_t(first) * sizeof(BindlessObject));
-				bytes += run;
-			}
-			return bytes;
 		}
 
 		/** @brief Per object slot, what the colour epoch drew (IndirectDraws' drawn state, render thread). */
@@ -2641,9 +2527,7 @@ namespace DCLF
 			// The resident region version the segment's input buffer holds (Resources::residentUploaded): the region
 			// uploads only the entries changed since that one.
 			std::uint64_t residentUploaded = 0;
-			std::uint64_t objectsUploaded = 0;  // likewise the object records (Resources::objectsUploaded)
-			std::uint64_t bonesUploaded = 0;    // and the bone rows (Resources::bonesUploaded)
-			std::uint64_t geometriesUploaded = 0;  // and the geometry slots' draws (Resources::geometriesUploaded)
+			TablesHeld tablesHeld;  // likewise the kept tables (Resources::tablesHeld)
 			// Step 4: the versions of the segment's constants and records its buffers hold, and the frame textures the last
 			// commit resolved (Resources::constantsUploaded, recordsUploaded, committedFrameTextures).
 			std::uint64_t constantsUploaded = 0, recordsUploaded = 0;
@@ -2665,12 +2549,8 @@ namespace DCLF
 			// Step 4 (PersistentBindings): the segment's constant blocks and binding records, kept across frames. The arena and
 			// `records` stay empty; these are uploaded as the ranges changed since the version the buffers hold.
 			bool persistent = false;
-			std::shared_ptr<const std::vector<std::byte>> constantBytes;
-			std::uint64_t constantsVersion = 0, constantsDirtyBase = ~0ull;
-			std::vector<std::pair<std::uint64_t, std::uint32_t>> constantsDirty;  // (offset, bytes)
-			std::shared_ptr<std::vector<DrawBindings>> recordMirror;  // the commit patches frame textures into it
-			std::uint64_t recordsVersion = 0, recordsDirtyBase = ~0ull;
-			std::vector<std::uint32_t> recordsDirty;
+			KeptView<std::byte> keptConstants;
+			KeptView<DrawBindings> keptRecords;  // the commit patches frame textures into them
 			std::vector<std::array<std::uint64_t, 2>> patchMasks;  // per record: the frame registers (t64 * i + bit) it reads
 			std::uint32_t recordsHeld = 0;
 			std::uint64_t blocksWritten = 0, recordsWritten = 0;
@@ -2719,20 +2599,13 @@ namespace DCLF
 			const void* stagedFor = nullptr;
 			// The segment's resident region (ResidentRegion): its inputs lead the input buffer, uploaded when residentVersion
 			// is not the one the buffer holds (Resources::residentUploaded); inputList follows them.
-			std::shared_ptr<const std::vector<DrawInput>> residentInputs;
-			std::uint64_t residentVersion = 0;
-			// The entries changed since residentDirtyBase: when the buffer holds that version, only they are uploaded.
-			std::vector<std::uint32_t> residentDirty;
-			std::uint64_t residentDirtyBase = ~0ull;
+			KeptView<DrawInput> resident;
 			std::uint32_t residentDraws = 0, residentPairs = 0, residentUndrawable = 0, residentResyncs = 0;
 			std::uint32_t residentParityChecks = 0, residentParityMismatches = 0, residentMissing = 0;
 
 			void Reset()
 			{
-				residentInputs.reset();
-				residentVersion = 0;
-				residentDirty.clear();
-				residentDirtyBase = ~0ull;
+				resident.Reset();
 				residentDraws = residentPairs = residentUndrawable = residentResyncs = 0;
 				residentParityChecks = residentParityMismatches = residentMissing = 0;
 				staged.reset();
@@ -2753,12 +2626,8 @@ namespace DCLF
 				objectRecords.Reset();
 				bones.Reset();
 				persistent = false;
-				constantBytes.reset();
-				constantsVersion = recordsVersion = 0;
-				constantsDirtyBase = recordsDirtyBase = ~0ull;
-				constantsDirty.clear();
-				recordMirror.reset();
-				recordsDirty.clear();
+				keptConstants.Reset();
+				keptRecords.Reset();
 				patchMasks.clear();
 				recordsHeld = 0;
 				blocksWritten = recordsWritten = 0;
@@ -2801,9 +2670,11 @@ namespace DCLF
 			std::vector<std::byte> sharedData, featureData;
 			std::uint32_t lookupGeneration = 0, tablesGeneration = 0;
 			std::uint32_t sceneRebuilds = 0;  // SceneStore::GetSceneRebuilds: the walk the build read was replaced
-			std::uint64_t objectsUploaded = 0;  // ShadowResources::objectsUploaded, as ObjectRecordStore reads it
-			std::uint64_t bonesUploaded = 0;    // ShadowResources::bonesUploaded
-			std::uint64_t geometriesUploaded = 0;  // ShadowResources::geometriesUploaded
+			TablesHeld tablesHeld;  // ShadowResources::tablesHeld
+			// The versions of the kept shadow state the buffers hold (ShadowResources::inputsUploaded), and the oldest of the view
+			// slots' copies of the records (recordsUploaded, of the slots holding any): what the journals keep changes for.
+			std::array<std::uint64_t, kShadowModeCount> inputsHeld{};
+			std::uint64_t recordsOldestHeld = 0;
 		};
 
 		struct ShadowPayload
@@ -2813,23 +2684,21 @@ namespace DCLF
 			std::vector<DrawBindings> records;  // per-view registers (b0, b12) unset
 			std::vector<std::uint32_t> objectRecord;  // per object: its binding record, or ~0u when it cannot draw
 			std::array<std::vector<DrawInput>, kShadowModeCount> inputList;  // per render mode: the frame's own (after the kept region)
-			// The kept state (ShadowKept): per mode the region's inputs at the head of the mode's buffer, and each entry's version
-			// (uploaded when newer than what the buffer holds); the records' versions likewise, per view slot.
+			// The kept state (ShadowKept): per mode the region's inputs at the head of the mode's buffer, and the records' changes,
+			// each sent as what changed since the version a buffer holds (a view slot holds its own copy of the records).
 			bool kept = false;
-			std::array<std::shared_ptr<const std::vector<DrawInput>>, kShadowModeCount> regionInputs;
-			std::array<std::shared_ptr<const std::vector<std::uint64_t>>, kShadowModeCount> regionVersions;
-			std::shared_ptr<const std::vector<std::uint64_t>> recordVersions;
-			std::uint64_t keptVersion = 0;
+			std::array<KeptView<DrawInput>, kShadowModeCount> regionInputs;
+			ChangeJournal::Snapshot recordChanges;
 			// Per mode, the build version at which an object last joined or left its inputs (ShadowKept::Mode::membership);
 			// 0 without the kept state.
 			std::array<std::uint64_t, kShadowModeCount> membership{};
-			std::size_t RegionCount(std::uint32_t a_mode) const { return regionInputs[a_mode] ? regionInputs[a_mode]->size() : 0; }
+			std::size_t RegionCount(std::uint32_t a_mode) const { return regionInputs[a_mode].Count(); }
 			std::size_t ModeInputs(std::uint32_t a_mode) const { return RegionCount(a_mode) + inputList[a_mode].size(); }
 			template <class F>
 			void ForEachInput(std::uint32_t a_mode, F&& a_visit) const
 			{
-				if (regionInputs[a_mode])
-					for (const auto& input : *regionInputs[a_mode])
+				if (regionInputs[a_mode].elements)
+					for (const auto& input : *regionInputs[a_mode].elements)
 						a_visit(input);
 				for (const auto& input : inputList[a_mode])
 					a_visit(input);
@@ -2876,10 +2745,8 @@ namespace DCLF
 				bones.Reset();
 				kept = false;
 				regionInputs = {};
-				regionVersions = {};
 				membership = {};
-				recordVersions.reset();
-				keptVersion = 0;
+				recordChanges.Reset();
 				boneRows.clear();
 				geometries.Reset();
 				faceStreams.clear();
@@ -2985,120 +2852,65 @@ namespace DCLF
 			ScopedScan scan(Scan::PackGeometry);
 			a_out = {};
 			const std::size_t count = std::min<std::size_t>(a_tables.geometries.size(), kMaxGeometries);
-			auto packAll = [&](std::vector<GeometryDraw>& a_packed) {
-				a_packed.resize(count);
-				for (std::size_t g = 0; g < count; ++g)
-					a_packed[g] = PackGeometryDraw(a_tables, static_cast<std::uint32_t>(g), count);
-			};
+			auto pack = [&](std::size_t a_slot) { return PackGeometryDraw(a_tables, static_cast<std::uint32_t>(a_slot), count); };
 			if (!a_store) {
-				auto packed = std::make_shared<std::vector<GeometryDraw>>();
-				packAll(*packed);
-				a_out.slots = std::move(packed);
+				auto packed = std::make_shared<std::vector<GeometryDraw>>(count);
+				for (std::size_t g = 0; g < count; ++g)
+					(*packed)[g] = pack(g);
+				a_out.slots.elements = std::move(packed);
 				return;
 			}
 			auto& s = *a_store;
 			++s.updates;
-			if (a_uploaded == s.version) {
-				for (const auto slot : s.dirty)
-					s.dirtyMark[slot] = 0;
-				s.dirty.clear();
-				s.dirtyBase = s.version;
-			}
-			std::vector<GeometryDraw>* writable = nullptr;
-			auto write = [&]() -> std::vector<GeometryDraw>& {
-				if (!writable) {
-					if (s.packed.use_count() > 1)
-						s.packed = std::make_shared<std::vector<GeometryDraw>>(*s.packed);
-					writable = s.packed.get();
-					++s.version;
-				}
-				return *writable;
-			};
-			const std::uint64_t logEnd = a_tables.geometryLogBase + a_tables.geometryLog.size();
-			const bool resync = !s.active || s.generation != a_generation || s.logPosition < a_tables.geometryLogBase || s.logPosition > logEnd ||
-			                    s.packed->size() > count;
-			if (resync) {
-				packAll(write());
-				for (const auto slot : s.dirty)
-					s.dirtyMark[slot] = 0;
-				s.dirty.clear();
-				s.dirtyBase = ~0ull;
-				s.active = true;
-				s.generation = a_generation;
+			s.packed.BeginBuild(a_uploaded);
+			if (!s.cursor.Continues(a_tables.geometryLog, a_generation) || s.packed.Size() > count) {
+				auto& packed = s.packed.Mutable();
+				packed.resize(count);
+				for (std::size_t g = 0; g < count; ++g)
+					packed[g] = pack(g);
+				s.packed.Resync();
+				s.cursor.Restart(a_generation);
 				++s.resyncs;
 			} else {
 				// Slots the tables grew by since (the log names them too), then the slots written.
-				if (s.packed->size() < count) {
-					auto& packed = write();
+				if (s.packed.Size() < count) {
+					auto& packed = s.packed.Mutable();
 					const auto first = packed.size();
 					packed.resize(count);
 					for (std::size_t g = first; g < count; ++g) {
-						packed[g] = PackGeometryDraw(a_tables, static_cast<std::uint32_t>(g), count);
-						s.MarkDirty(static_cast<std::uint32_t>(g));
+						packed[g] = pack(g);
+						s.packed.Mark(g);
 					}
 				}
-				for (auto k = static_cast<std::size_t>(s.logPosition - a_tables.geometryLogBase); k < a_tables.geometryLog.size(); ++k) {
-					const std::uint32_t g = a_tables.geometryLog[k];
-					if (g >= count)
-						continue;
-					const GeometryDraw fresh = PackGeometryDraw(a_tables, g, count);
-					if (std::memcmp(&fresh, &(*s.packed)[g], sizeof(fresh)) == 0)
-						continue;
-					write()[g] = fresh;
-					s.MarkDirty(g);
-					++s.rewritten;
-				}
+				for (const std::uint32_t g : s.cursor.Unread(a_tables.geometryLog))
+					if (g < count)
+						s.rewritten += s.packed.Set(g, pack(g)) ? 1u : 0u;
 			}
-			s.logPosition = logEnd;
+			s.cursor.Advance(a_tables.geometryLog);
 			// CS_DCLF_PERSISTENT_PARITY: every slot against one packed from the tables now.
-			if (PersistentParityEnabled() && a_frame % 60 == 0) {
-				++s.parityChecks;
-				for (std::size_t g = 0; g < count; ++g) {
-					const GeometryDraw fresh = PackGeometryDraw(a_tables, static_cast<std::uint32_t>(g), count);
-					if (std::memcmp(&fresh, &(*s.packed)[g], sizeof(fresh)) != 0) {
-						++s.parityMismatches;
-						break;
-					}
+			if (PersistentParityEnabled() && ParityDue(a_frame)) {
+				const auto& packed = s.packed.Get();
+				std::size_t differs = count;
+				for (std::size_t g = 0; g < count && differs == count; ++g) {
+					const GeometryDraw fresh = pack(g);
+					if (std::memcmp(&fresh, &packed[g], sizeof(fresh)) != 0)
+						differs = g;
 				}
+				s.parity.Check(differs == count, [&] { return fmt::format("slot {}", differs); });
 			}
-			a_out.slots = s.packed;
-			a_out.version = s.version;
-			a_out.dirtyBase = s.dirtyBase;
-			a_out.dirty = s.dirty;
+			a_out.slots = s.packed.View();
 		}
 
 		/**
-		 * @brief The geometry buffer's uploads: the slots the buffer does not hold (all of them, or the runs changed since the
-		 * version a_held), then the face streams' draws after them. The bytes sent.
+		 * @brief The geometry buffer's uploads: the slots a buffer at a_held lacks, then the face streams' draws after them.
+		 * The bytes sent.
 		 */
 		template <class Emit>
 		std::size_t EmitGeometryDraws(const GeometryDrawsOut& a_out, std::uint64_t a_held, Emit&& a_emit)
 		{
-			std::size_t bytes = 0;
-			const std::size_t count = a_out.SlotCount();
-			if (count && !(a_out.version && a_out.version == a_held)) {
-				const auto* data = a_out.slots->data();
-				if (!a_out.version || a_held != a_out.dirtyBase) {
-					a_emit(data, count * sizeof(GeometryDraw), 0);
-					bytes += count * sizeof(GeometryDraw);
-				} else {
-					auto dirty = a_out.dirty;
-					std::sort(dirty.begin(), dirty.end());
-					for (std::size_t k = 0; k < dirty.size();) {
-						const std::uint32_t first = dirty[k];
-						std::uint32_t end = first + 1;
-						while (++k < dirty.size() && dirty[k] <= end)
-							end = std::max(end, dirty[k] + 1);
-						end = std::min<std::uint32_t>(end, static_cast<std::uint32_t>(count));
-						if (first < end) {
-							a_emit(data + first, std::size_t(end - first) * sizeof(GeometryDraw), std::size_t(first) * sizeof(GeometryDraw));
-							bytes += std::size_t(end - first) * sizeof(GeometryDraw);
-						}
-					}
-				}
-			}
+			std::size_t bytes = a_out.slots.Emit(a_held, a_emit);
 			if (!a_out.faces.empty()) {
-				a_emit(a_out.faces.data(), a_out.faces.size() * sizeof(GeometryDraw), count * sizeof(GeometryDraw));
+				a_emit(a_out.faces.data(), a_out.faces.size() * sizeof(GeometryDraw), a_out.SlotCount() * sizeof(GeometryDraw));
 				bytes += a_out.faces.size() * sizeof(GeometryDraw);
 			}
 			return bytes;
@@ -3206,6 +3018,26 @@ namespace DCLF
 		};
 
 		/**
+		 * @brief A pipeline's PerGeometry template from its constants. Under DCLF_BINDLESS what those draws never read from
+		 * the block (kVSBindlessGeometryUnread, kPSBindlessGeometryUnread: the frame lighting has a block of its own) packs
+		 * as zero, so the block's bytes change only with the pipeline's own values; the group keeps its full size.
+		 */
+		void PackGeometryTemplate(const GeometryConstants& a_constants, std::span<const std::uint8_t> a_vsTable, std::span<const std::uint8_t> a_psTable, bool a_bindless,
+			GeometryTemplate& a_out)
+		{
+			const auto vsSize = ConstantGroupSize(LightingVSLayout(), a_vsTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry]);
+			const auto psSize = ConstantGroupSize(LightingPSLayout(), a_psTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry]);
+			a_out.vs.assign(std::max<std::size_t>(vsSize, 16), std::byte{});
+			a_out.ps.assign(std::max<std::size_t>(psSize, 16), std::byte{});
+			const std::uint64_t vsUnread = a_bindless ? kVSBindlessGeometryUnread : 0, psUnread = a_bindless ? kPSBindlessGeometryUnread : 0;
+			PackConstantGroup(a_constants.vs, LightingVSLayout(), a_vsTable, kVSGroups[kPerGeometry] & ~vsUnread, kVSFirstVariable[kPerGeometry], a_out.vs);
+			PackConstantGroup(a_constants.ps, LightingPSLayout(), a_psTable, kPSGroups[kPerGeometry] & ~psUnread, kPSFirstVariable[kPerGeometry], a_out.ps);
+			a_out.offsets = GeometryPatchOffsetsOf(a_vsTable, a_psTable);
+			a_out.vs.resize(vsSize);
+			a_out.ps.resize(psSize);
+		}
+
+		/**
 		 * @brief CS_DCLF_BUILD_CACHE (default on, =0 off): what BuildMainPayload derives per (material, pipeline)
 		 * pair and per pipeline, kept across frames.
 		 *
@@ -3251,19 +3083,66 @@ namespace DCLF
 		}
 
 		/**
+		 * @brief Draw inputs kept densely by object slot, at the head of an input buffer: the main segments' resident regions
+		 * (ResidentRegion) and each shadow mode's (ShadowKept::Mode). The inputs are journalled like any KeptArray; removing an
+		 * entry moves the last one into its place.
+		 */
+		struct KeptRegion
+		{
+			KeptArray<DrawInput> inputs;
+			std::vector<std::uint32_t> indexOf;  // per object slot: its entry, or kNoRegion
+
+			std::uint32_t EntryOf(std::size_t a_object) const { return a_object < indexOf.size() ? indexOf[a_object] : kNoRegion; }
+			bool Holds(std::size_t a_object) const { return EntryOf(a_object) != kNoRegion; }
+			void Cover(std::size_t a_objects)
+			{
+				if (indexOf.size() < a_objects)
+					indexOf.resize(a_objects, kNoRegion);
+			}
+			/** @brief A new entry for a_object at the end, marked; returns its index. */
+			std::uint32_t Add(std::uint32_t a_object, const DrawInput& a_input = {})
+			{
+				Cover(std::size_t(a_object) + 1);
+				auto& list = inputs.Mutable();
+				const auto i = static_cast<std::uint32_t>(list.size());
+				list.push_back(a_input);
+				indexOf[a_object] = i;
+				inputs.Mark(i);
+				return i;
+			}
+			/** @brief The entry removed, and the last one moved into its place (the same index when none moved); kNoRegion when a_object had none. */
+			struct Removal
+			{
+				std::uint32_t at = kNoRegion, from = kNoRegion;
+			};
+			Removal Remove(std::uint32_t a_object)
+			{
+				const std::uint32_t i = EntryOf(a_object);
+				if (i == kNoRegion)
+					return {};
+				auto& list = inputs.Mutable();
+				const auto tail = static_cast<std::uint32_t>(list.size() - 1);
+				if (i != tail) {
+					list[i] = list[tail];
+					indexOf[list[i].objectIndex] = i;
+					inputs.Mark(i);
+				}
+				list.pop_back();
+				indexOf[a_object] = kNoRegion;
+				return { i, tail };
+			}
+		};
+
+		/**
 		 * @brief One main segment's resident draws (drawcall-limit-fix.md, "Persistent resident draws"): the draw inputs of
 		 * the resident records (SceneStore's), dense, at the head of the segment's input buffer. Written by the segment's
 		 * builds only (the worker's, or an inline one after it), from the tables' change feed; the payloads share the inputs
 		 * copy-on-write, and the commit uploads them when their version is not the buffer's.
 		 */
-		struct ResidentRegion
+		struct ResidentRegion : KeptRegion
 		{
-			bool active = false;
+			LogCursor cursor;               // the change log, and the tables generation it was read from
 			bool depth = false;             // the Z-prepass's: a join waits for the colour epoch's first draw of it
-			std::uint32_t generation = 0;   // the tables generation it was read from
-			std::uint64_t logPosition = 0;  // the change log's absolute position it has read to (Tables::changeLog)
-			std::shared_ptr<std::vector<DrawInput>> inputs = std::make_shared<std::vector<DrawInput>>();
-			std::vector<std::uint32_t> indexOf;  // per object slot: its entry, or kNoRegion
 			std::vector<std::uint64_t> pairOf;   // per entry: its (material, pipeline)
 			std::vector<std::uint8_t> drawsOf;   // per entry: its sequences, 0 when it cannot be drawn this frame
 			struct Pair
@@ -3276,18 +3155,7 @@ namespace DCLF
 			std::vector<std::uint32_t> freeSlots;
 			std::uint32_t slotCount = 0;
 			ankerl::unordered_dense::map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> pipelines;  // pipeline -> (set index, entries)
-			std::vector<std::uint32_t> pendingAdds;   // depth: joined slots the colour epoch has not drawn yet
-			std::vector<std::uint8_t> pendingMark;    // per object slot: in pendingAdds
-			void AddPending(std::uint32_t a_slot)
-			{
-				if (pendingMark.size() <= a_slot)
-					pendingMark.resize(std::size_t(a_slot) + 1, 0);
-				if (!pendingMark[a_slot]) {
-					pendingMark[a_slot] = 1;
-					pendingAdds.push_back(a_slot);
-				}
-			}
-			bool Pending(std::uint32_t a_slot) const { return a_slot < pendingMark.size() && pendingMark[a_slot]; }
+			MarkedList pending;  // depth: joined slots the colour epoch has not drawn yet
 			std::size_t draws = 0;
 			std::size_t undrawable = 0;           // entries with no draw this frame
 			std::vector<std::uint32_t> touched;  // this build: the slots whose entry it wrote or removed, or whose log entry it read
@@ -3299,35 +3167,14 @@ namespace DCLF
 			std::vector<std::uint32_t> loopIndex;  // per slot: its place in loopList, or kNoRegion
 			std::vector<std::uint8_t> candidate;   // per slot: a culling candidate only (no bindings, or shadow-only)
 			std::size_t candidates = 0;
-			std::uint64_t version = 0;
-			// The entries changed since version dirtyBase, which the buffer holds once a commit uploaded it: the next upload
-			// is those alone. ~0: the whole region.
-			std::vector<std::uint32_t> dirty;
-			std::vector<std::uint8_t> dirtyMark;  // per entry
-			std::uint64_t dirtyBase = ~0ull;
-			void MarkDirty(std::uint32_t a_entry)
-			{
-				if (dirtyMark.size() <= a_entry)
-					dirtyMark.resize(std::size_t(a_entry) + 1, 0);
-				if (!dirtyMark[a_entry]) {
-					dirtyMark[a_entry] = 1;
-					dirty.push_back(a_entry);
-				}
-			}
 
-			/** @brief The inputs to change: a copy first while a payload still holds them. */
-			std::vector<DrawInput>& Mutable()
-			{
-				if (inputs.use_count() > 1)
-					inputs = std::make_shared<std::vector<DrawInput>>(*inputs);
-				++version;
-				return *inputs;
-			}
+			/** @brief Empty, for every slot to be read again; the inputs' journal counts on (KeptArray::Clear). */
 			void Reset()
 			{
-				const auto keep = version;
+				auto kept = std::move(inputs);
 				*this = ResidentRegion{};
-				version = keep + 1;
+				inputs = std::move(kept);
+				inputs.Clear();
 			}
 		};
 
@@ -3358,41 +3205,14 @@ namespace DCLF
 			const void* identity = nullptr;
 			std::uint64_t constantsBase = 0, recordsBase = 0, constantsCapacity = 0;
 			std::uint32_t recordCapacity = 0;
-			std::shared_ptr<std::vector<std::byte>> constants = std::make_shared<std::vector<std::byte>>();
+			KeptArray<std::byte> constants;  // journalled by block ranges
 			std::array<std::vector<std::uint64_t>, 257> constantFree{};  // freed blocks by 256-byte units
-			std::uint64_t constantsVersion = 0, constantsDirtyBase = ~0ull;
-			std::vector<std::pair<std::uint64_t, std::uint32_t>> constantsDirty;
-			bool constantsWritten = false;
-			std::shared_ptr<std::vector<DrawBindings>> records = std::make_shared<std::vector<DrawBindings>>();
+			KeptArray<DrawBindings> records;
 			std::vector<std::array<std::uint64_t, 2>> patchMasks;  // per record slot
 			std::vector<std::uint32_t> recordFree;
-			std::uint64_t recordsVersion = 0, recordsDirtyBase = ~0ull;
-			std::vector<std::uint32_t> recordsDirty;
-			std::vector<std::uint8_t> recordsDirtyMark;
-			bool recordsWritten = false;
 			std::uint64_t blocksWritten = 0, recordsRewritten = 0;  // this build
 
 			static std::uint32_t Units(std::size_t a_bytes) { return static_cast<std::uint32_t>(std::min<std::size_t>((std::max<std::size_t>(a_bytes, 16) + 255) / 256, 256)); }
-			std::vector<std::byte>& Constants()
-			{
-				if (!constantsWritten) {
-					if (constants.use_count() > 1)
-						constants = std::make_shared<std::vector<std::byte>>(*constants);
-					++constantsVersion;
-					constantsWritten = true;
-				}
-				return *constants;
-			}
-			std::vector<DrawBindings>& Records()
-			{
-				if (!recordsWritten) {
-					if (records.use_count() > 1)
-						records = std::make_shared<std::vector<DrawBindings>>(*records);
-					++recordsVersion;
-					recordsWritten = true;
-				}
-				return *records;
-			}
 			void FreeBlock(PersistentBlock& a_block)
 			{
 				if (a_block.offset != ~0ull)
@@ -3415,22 +3235,22 @@ namespace DCLF
 						a_block.offset = free.back();
 						free.pop_back();
 					} else {
-						const std::uint64_t offset = constants->size();
+						const std::uint64_t offset = constants.Size();
 						if (offset + std::uint64_t(units) * 256 > constantsCapacity)
 							return 0;
-						Constants().resize(offset + std::size_t(units) * 256);
+						constants.Mutable().resize(offset + std::size_t(units) * 256);
 						a_block.offset = offset;
 					}
 					fresh = true;
 				}
 				a_block.size = static_cast<std::uint32_t>(size);
 				const std::size_t blockBytes = std::size_t(units) * 256;
-				const auto* held = constants->data() + a_block.offset;
+				const auto* held = constants.Get().data() + a_block.offset;
 				if (fresh || std::memcmp(held, a_data, a_bytes) != 0) {
-					auto* out = Constants().data() + a_block.offset;
+					auto* out = constants.Mutable().data() + a_block.offset;
 					std::memcpy(out, a_data, a_bytes);
 					std::memset(out + a_bytes, 0, blockBytes - a_bytes);
-					constantsDirty.emplace_back(a_block.offset, static_cast<std::uint32_t>(blockBytes));
+					constants.MarkRange(a_block.offset, blockBytes);
 					++blocksWritten;
 				}
 				return constantsBase + a_block.offset;
@@ -3442,12 +3262,12 @@ namespace DCLF
 					recordFree.pop_back();
 					return slot;
 				}
-				if (records->size() >= recordCapacity)
+				if (records.Size() >= recordCapacity)
 					return kNoRecord;
-				Records().emplace_back();
+				records.Mutable().emplace_back();
 				patchMasks.emplace_back();
-				MarkRecord(static_cast<std::uint32_t>(records->size() - 1));
-				return static_cast<std::uint32_t>(records->size() - 1);
+				records.Mark(records.Size() - 1);
+				return static_cast<std::uint32_t>(records.Size() - 1);
 			}
 			void ReleaseRecord(std::uint32_t& a_slot)
 			{
@@ -3458,31 +3278,18 @@ namespace DCLF
 				}
 				a_slot = kNoRecord;
 			}
-			void MarkRecord(std::uint32_t a_slot)
-			{
-				if (recordsDirtyMark.size() <= a_slot)
-					recordsDirtyMark.resize(std::size_t(a_slot) + 1, 0);
-				if (!recordsDirtyMark[a_slot]) {
-					recordsDirtyMark[a_slot] = 1;
-					recordsDirty.push_back(a_slot);
-				}
-			}
 			void WriteRecord(std::uint32_t a_slot, const DrawBindings& a_record, const std::array<std::uint64_t, 2>& a_patchMask)
 			{
 				patchMasks[a_slot] = a_patchMask;
-				if (std::memcmp(&(*records)[a_slot], &a_record, sizeof(DrawBindings)) == 0)
-					return;
-				Records()[a_slot] = a_record;
-				MarkRecord(a_slot);
-				++recordsRewritten;
+				recordsRewritten += records.Set(a_slot, a_record) ? 1u : 0u;
 			}
 		};
 
 		/**
 		 * @brief The colour segment's drawn state as its builds leave it (Step 5): per slot, whether the epoch draws it and as
 		 * which geometry. A build changes the marks of the slots whose inputs it changed, and of the per-frame loop's objects;
-		 * the payload carries the slots changed since the version the render thread applied (the dirty protocol of the
-		 * uploads), so the render thread's state follows without ever seeing the whole set.
+		 * the payload carries the slots changed since the version the render thread applied (a ChangeJournal, whose holder is
+		 * the render thread), so the render thread's state follows without ever seeing the whole set.
 		 */
 		struct DrawnMarks
 		{
@@ -3491,11 +3298,7 @@ namespace DCLF
 			bool requireNativeVisible = true;
 			std::vector<std::uint8_t> drawn;
 			std::vector<const RE::BSGeometry*> geometry;
-			std::vector<std::uint32_t> dirty;
-			std::vector<std::uint8_t> dirtyMark;
-			std::uint64_t version = 0, dirtyBase = 0;
-			bool full = false;     // the changes are every slot's (a resync)
-			bool written = false;  // this build changed a mark
+			ChangeJournal changes;
 			std::vector<std::uint32_t> loopDrawn;  // the slots the per-frame loop drew in the last build
 			std::vector<std::uint32_t> loopStamp;  // per slot: the build that last drew it in the loop
 			std::uint32_t serial = 0;
@@ -3510,16 +3313,7 @@ namespace DCLF
 				drawn[a_slot] = a_drawn;
 				if (a_drawn)
 					geometry[a_slot] = a_geometry;
-				if (!written) {
-					++version;
-					written = true;
-				}
-				if (dirtyMark.size() <= a_slot)
-					dirtyMark.resize(std::size_t(a_slot) + 1, 0);
-				if (!dirtyMark[a_slot]) {
-					dirtyMark[a_slot] = 1;
-					dirty.push_back(a_slot);
-				}
+				changes.Mark(a_slot);
 			}
 		};
 
@@ -3547,7 +3341,7 @@ namespace DCLF
 				// written from (PairKeyOf): while they are the same, the build takes the slot and does nothing else.
 				PersistentBlock materialVS, materialPS;
 				std::uint32_t recordSlot = kNoRecord;
-				std::array<std::uint32_t, 12> cleanKey{};
+				std::array<std::uint32_t, 13> cleanKey{};
 				bool clean = false;
 			};
 			struct Pipeline
@@ -3561,7 +3355,7 @@ namespace DCLF
 				// written from (the constants' and the lookup entry's), and a count of their moves (their pairs' records hold
 				// their addresses).
 				PersistentBlock techniqueVSBlock, techniquePSBlock, geometryVSBlock, geometryPSBlock, permutationBlock;
-				std::uint32_t constantsVersion = 0, lookupVersion = 0, addressVersion = 0;
+				std::uint32_t constantsVersion = 0, techniqueVersion = 0, lookupVersion = 0, addressVersion = 0;
 				bool clean = false;
 			};
 			ankerl::unordered_dense::map<std::uint64_t, Pair> pairs;
@@ -3605,14 +3399,20 @@ namespace DCLF
 			void BeginPersistent(const ResourceAddresses& a_addresses, std::uint64_t a_constantsCapacity, std::uint64_t a_constantsUploaded, std::uint64_t a_recordsUploaded)
 			{
 				auto& state = persistent;
+				// What the buffers hold is the version they were sent: what is written from here on is sent alone.
+				state.constants.BeginBuild(a_constantsUploaded);
+				state.records.BeginBuild(a_recordsUploaded);
 				if (!state.active || state.identity != a_addresses.identity || state.constantsBase != a_addresses.constants || state.recordsBase != a_addresses.records ||
 					state.recordCapacity != a_addresses.recordCapacity) {
 					// New buffers (the resources were recreated), or the first build: every block and record again. The versions
 					// go on counting, so no version of the old buffers is taken for one of the new.
-					const auto constantsVersion = state.constantsVersion, recordsVersion = state.recordsVersion;
+					auto constants = std::move(state.constants);
+					auto records = std::move(state.records);
 					state = {};
-					state.constantsVersion = constantsVersion;
-					state.recordsVersion = recordsVersion;
+					state.constants = std::move(constants);
+					state.records = std::move(records);
+					state.constants.Clear();
+					state.records.Clear();
 					state.active = true;
 					state.identity = a_addresses.identity;
 					state.constantsBase = a_addresses.constants;
@@ -3630,19 +3430,7 @@ namespace DCLF
 					}
 					++persistentResets;
 				}
-				state.constantsWritten = state.recordsWritten = false;
 				state.blocksWritten = state.recordsRewritten = 0;
-				// What the buffers hold is the last version: what is written from here on is uploaded alone.
-				if (a_constantsUploaded == state.constantsVersion) {
-					state.constantsDirty.clear();
-					state.constantsDirtyBase = state.constantsVersion;
-				}
-				if (a_recordsUploaded == state.recordsVersion) {
-					for (const auto slot : state.recordsDirty)
-						state.recordsDirtyMark[slot] = 0;
-					state.recordsDirty.clear();
-					state.recordsDirtyBase = state.recordsVersion;
-				}
 			}
 		};
 
@@ -3697,7 +3485,7 @@ namespace DCLF
 		void CheckPersistentBindings(const MainPayload& a_kept, const MainPayload& a_reference, const BuildCache& a_cache, std::uint64_t a_constantsBase,
 			const std::array<std::uint32_t, kTextureRegisters>& a_frameTextures, std::uint64_t& a_checks, std::uint64_t& a_mismatches, std::string& a_first)
 		{
-			if (!a_kept.constantBytes || !a_kept.recordMirror)
+			if (!a_kept.keptConstants.elements || !a_kept.keptRecords.elements)
 				return;
 			ankerl::unordered_dense::map<std::uint64_t, std::uint32_t> blockSize;  // offset -> size
 			auto note = [&](const PersistentBlock& a_block) {
@@ -3717,8 +3505,8 @@ namespace DCLF
 					if (a_input.flags & kInputDrawable)
 						out.emplace(a_input.objectIndex, a_input.recordIndex);
 				};
-				if (a_payload.residentInputs)
-					for (const auto& input : *a_payload.residentInputs)
+				if (a_payload.resident.elements)
+					for (const auto& input : *a_payload.resident.elements)
 						add(input);
 				for (const auto& input : a_payload.inputList)
 					add(input);
@@ -3726,7 +3514,7 @@ namespace DCLF
 			};
 			const auto kept = recordsOf(a_kept);
 			const auto reference = recordsOf(a_reference);
-			const auto& keptBytes = *a_kept.constantBytes;
+			const auto& keptBytes = *a_kept.keptConstants.elements;
 			const auto& referenceBytes = a_reference.arena.Bytes();
 			auto fail = [&](std::uint32_t a_object, const std::string& a_what) {
 				if (a_mismatches++ == 0)
@@ -3739,11 +3527,11 @@ namespace DCLF
 					fail(object, "drawn by the per-frame build only");
 					continue;
 				}
-				if (it->second >= a_kept.recordMirror->size() || referenceRecord >= a_reference.records.size()) {
+				if (it->second >= a_kept.keptRecords.Count() || referenceRecord >= a_reference.records.size()) {
 					fail(object, "a record index out of range");
 					continue;
 				}
-				const auto& a = (*a_kept.recordMirror)[it->second];
+				const auto& a = (*a_kept.keptRecords.elements)[it->second];
 				DrawBindings b = a_reference.records[referenceRecord];
 				for (const auto& [record, t] : a_reference.framePatches)
 					if (record == referenceRecord)
@@ -3830,6 +3618,7 @@ namespace DCLF
 					framePS[slot] = a_in.addresses.frameConstants + FrameSlotOffset(true, slot);
 			}
 			const std::uint64_t sharedLightBlock = a_in.addresses.frameConstants + std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes;
+			const std::uint64_t frameLightingBlock = a_in.addresses.frameConstants + std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes;
 
 			// Blocks shared by many objects.
 			struct PipelineBlocks
@@ -3855,14 +3644,16 @@ namespace DCLF
 				blocks.psTable = entry.psTable;
 				blocks.usage = &entry.usage[depthOnly ? kDepthVariant : kColorVariant];
 				blocks.shadowMaskIndex = entry.shadowMaskIndex;
-				const auto& technique = a_tables.techniqueConstants[p];
+				const auto& technique = a_tables.TechniqueOf(p);
+				const std::uint32_t techniqueVersion = a_tables.TechniqueRowOf(p).constantsVersion;
 				BuildCache::Pipeline* cached = nullptr;
 				// Kept and clean: the constants and the lookup entry are the versions its blocks were written from.
 				if (kept) {
 					auto& entryKept = a_cache->pipelines[static_cast<std::uint32_t>(p)];
 					entryKept.lastUsed = frameNumber;
 					const std::uint32_t constantsVersion = p < a_tables.pipelineConstantsVersion.size() ? a_tables.pipelineConstantsVersion[p] : 0u;
-					if (entryKept.clean && entryKept.constantsVersion == constantsVersion && entryKept.lookupVersion == entry.version &&
+					if (entryKept.clean && entryKept.constantsVersion == constantsVersion && entryKept.techniqueVersion == techniqueVersion &&
+						entryKept.lookupVersion == entry.version &&
 						entryKept.techniqueVSBlock.offset != ~0ull && entryKept.techniquePSBlock.offset != ~0ull) {
 						blocks.techniqueVS = kept->constantsBase + entryKept.techniqueVSBlock.offset;
 						blocks.techniquePS = kept->constantsBase + entryKept.techniquePSBlock.offset;
@@ -3881,6 +3672,7 @@ namespace DCLF
 					AppendSource(sources, a_tables.geometryConstants[p].ps.floats);
 					AppendSource(sources, blocks.vsTable);
 					AppendSource(sources, blocks.psTable);
+					AppendSource(sources, a_in.bindless);  // PackGeometryTemplate's mask
 					cached = &a_cache->pipelines[static_cast<std::uint32_t>(p)];
 					cached->lastUsed = frameNumber;
 					if (SameSources(cached->sources, sources)) {
@@ -3927,17 +3719,7 @@ namespace DCLF
 					// The PerGeometry template and the permutation too: its pairs' records name these blocks, and a clean pair
 					// is not looked at again, so they are brought up to date here, with the pipeline's constants.
 					if (!cached->hasGeometry) {
-						const auto vsSize = ConstantGroupSize(LightingVSLayout(), blocks.vsTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry]);
-						const auto psSize = ConstantGroupSize(LightingPSLayout(), blocks.psTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry]);
-						auto& geometry = cached->geometry;
-						geometry.vs.assign(std::max<std::size_t>(vsSize, 16), std::byte{});
-						geometry.ps.assign(std::max<std::size_t>(psSize, 16), std::byte{});
-						const auto& pipelineConstants = a_tables.geometryConstants[p];
-						PackConstantGroup(pipelineConstants.vs, LightingVSLayout(), blocks.vsTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry], geometry.vs);
-						PackConstantGroup(pipelineConstants.ps, LightingPSLayout(), blocks.psTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry], geometry.ps);
-						geometry.offsets = GeometryPatchOffsetsOf(blocks.vsTable, blocks.psTable);
-						geometry.vs.resize(vsSize);
-						geometry.ps.resize(psSize);
+						PackGeometryTemplate(a_tables.geometryConstants[p], blocks.vsTable, blocks.psTable, true, cached->geometry);
 						cached->hasGeometry = true;
 					}
 					if (!cached->geometry.vs.empty())
@@ -3953,6 +3735,7 @@ namespace DCLF
 					if (offsetsAfter != offsetsBefore)
 						++cached->addressVersion;
 					cached->constantsVersion = p < a_tables.pipelineConstantsVersion.size() ? a_tables.pipelineConstantsVersion[p] : 0u;
+					cached->techniqueVersion = techniqueVersion;
 					cached->lookupVersion = entry.version;
 					cached->clean = blocks.techniqueVS && blocks.techniquePS;
 				}
@@ -3977,32 +3760,23 @@ namespace DCLF
 			DrawnMarks* marks = a_cache && !depthOnly ? &a_cache->drawnMarks : nullptr;
 			if (marks) {
 				auto& m = *marks;
-				m.written = false;
+				// What the render thread applied is the version it holds: what changes from here on is sent alone.
+				m.changes.BeginBuild(a_in.drawnCommitted);
 				if (!m.active || m.generation != a_in.tablesGeneration || m.requireNativeVisible != a_in.requireNativeVisible || a_in.drawnResync) {
 					// Every slot again: the first build, new tables, or the render thread asked for it. Whatever the old marks
-					// held is withdrawn by the full send, which covers every slot either knows.
+					// held is withdrawn by the full send, which covers every slot either knows. The journal counts on.
 					const auto known = std::max(m.drawn.size(), a_tables.objects.size());
+					auto changes = std::move(m.changes);
 					m = {};
+					m.changes = std::move(changes);
+					m.changes.Resync();
 					m.active = true;
 					m.generation = a_in.tablesGeneration;
 					m.requireNativeVisible = a_in.requireNativeVisible;
-					m.version = a_in.drawnCommitted + 1;
-					m.full = true;
 					m.drawn.assign(known, 0);
 					m.geometry.assign(known, nullptr);
-					if (a_cache->region.active)
+					if (a_cache->region.cursor.active)
 						a_cache->region.Reset();  // its entries are marked as it reads them again
-				} else if (a_in.drawnCommitted == m.version && !m.full) {
-					// The render thread holds this version: what changes from here on is sent alone.
-					for (const auto slot : m.dirty)
-						m.dirtyMark[slot] = 0;
-					m.dirty.clear();
-					m.dirtyBase = m.version;
-				} else if (a_in.drawnCommitted == m.version && m.full) {
-					m.full = false;
-					m.dirty.clear();
-					m.dirtyMark.assign(m.dirtyMark.size(), 0);
-					m.dirtyBase = m.version;
 				}
 				++m.serial;
 			}
@@ -4045,7 +3819,7 @@ namespace DCLF
 			// candidate rather than only the drawn ones - a candidate skipped here still reaches the
 			// culling, and an index that addressed nothing would be worse than one that addresses a record
 			// no draw reads. Kept across frames in the store (the records the change log names are written again).
-			UpdateObjectRecords(a_objects, a_in.objectsUploaded, a_tables, a_in.tablesGeneration, renderFlags, frameNumber, a_out.objectRecords);
+			UpdateObjectRecords(a_objects, a_in.tablesHeld.objects, a_tables, a_in.tablesGeneration, renderFlags, frameNumber, a_out.objectRecords);
 			const auto& objectRecords = a_out.objectRecords;
 
 			// Everything before the loop: the per-epoch maps and the object records.
@@ -4064,7 +3838,7 @@ namespace DCLF
 			auto assembleRecord = [&](std::uint32_t o, const ObjectRecord& object, const PipelineBlocks& blocks, std::uint32_t a_slot) -> std::uint32_t {
 					const auto& usage = *blocks.usage;
 					const auto& material = a_tables.materials[object.materialIndex];
-					const auto& technique = a_tables.techniqueConstants[object.pipelineIndex];
+					const auto& technique = a_tables.TechniqueOf(object.pipelineIndex);
 					// A ProjectedUV pipeline binds the engine's four projected textures (SceneStore captured them
 					// from a native draw) at the slots SetupGeometry fills, with its wrap/anisotropic modes.
 					const bool projectedPipeline = (a_tables.pipelines[object.pipelineIndex].passDescriptor & 0x8000u) != 0;
@@ -4083,7 +3857,7 @@ namespace DCLF
 					auto& resolved = resolvedIt->second;
 					// Kept: the versions of everything the pair's record and blocks are written from. The same as when they were
 					// written, and the pair is its slot: nothing else about it is looked at.
-					std::array<std::uint32_t, 12> pairVersions{};
+					std::array<std::uint32_t, 13> pairVersions{};
 					if (kept) {
 						const std::uint32_t m = object.materialIndex, p = object.pipelineIndex;
 						const auto& pipelineEntry = a_cache->pipelines[p];
@@ -4091,7 +3865,7 @@ namespace DCLF
 							m < a_tables.materialFrameVersion.size() ? a_tables.materialFrameVersion[m] : 0u, m < a_lookups.materials.size() ? a_lookups.materials[m].version : 0u,
 							p < a_lookups.pipelines.size() ? a_lookups.pipelines[p].version : 0u, p < a_tables.pipelineBindingVersion.size() ? a_tables.pipelineBindingVersion[p] : 0u,
 							a_lookups.sharedVersion, pipelineEntry.addressVersion, a_in.frameTexturesVersion, a_in.vsFrameMask, a_in.psFrameMask, a_in.resolveTextures ? 1u : 0u,
-							pipelineEntry.clean ? 1u : 0u };
+							pipelineEntry.clean ? 1u : 0u, a_tables.TechniqueRowOf(p).bindingVersion };
 						if (newResolved && !dedupParity) {
 							if (const auto found = a_cache->pairs.find((std::uint64_t(m) << 32) | p);
 								found != a_cache->pairs.end() && found->second.clean && found->second.cleanKey == pairVersions && found->second.recordSlot != kNoRecord) {
@@ -4419,19 +4193,8 @@ namespace DCLF
 									geometryTemplate.psAddress = uploadTemplate(geometryTemplate.ps, cachedPipeline, true);
 								}
 							} else if (newTemplate) {
-								const auto vsSize = ConstantGroupSize(LightingVSLayout(), blocks.vsTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry]);
-								const auto psSize = ConstantGroupSize(LightingPSLayout(), blocks.psTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry]);
-								geometryTemplate.vs.assign(std::max<std::size_t>(vsSize, 16), std::byte{});
-								geometryTemplate.ps.assign(std::max<std::size_t>(psSize, 16), std::byte{});
 								// The pipeline's own values, which is everything the objects do not override.
-								const auto& pipelineConstants = a_tables.geometryConstants[object.pipelineIndex];
-								PackConstantGroup(pipelineConstants.vs, LightingVSLayout(), blocks.vsTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry],
-									geometryTemplate.vs);
-								PackConstantGroup(pipelineConstants.ps, LightingPSLayout(), blocks.psTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry],
-									geometryTemplate.ps);
-								geometryTemplate.offsets = GeometryPatchOffsetsOf(blocks.vsTable, blocks.psTable);
-								geometryTemplate.vs.resize(vsSize);
-								geometryTemplate.ps.resize(psSize);
+								PackGeometryTemplate(a_tables.geometryConstants[object.pipelineIndex], blocks.vsTable, blocks.psTable, bindless, geometryTemplate);
 								if (cachedPipeline) {
 									cachedPipeline->geometry.vs = geometryTemplate.vs;
 									cachedPipeline->geometry.ps = geometryTemplate.ps;
@@ -4533,6 +4296,8 @@ namespace DCLF
 						bindings.pixelConstants[3] = lightBlock;
 						bindings.pixelConstants[4] = permutationBlock;
 						bindings.pixelConstants[11] = alphaBlock;
+						if (bindless)
+							bindings.pixelConstants[kFrameLightingRegister] = frameLightingBlock;
 						// Linear Lighting binds its multiplier per draw only while enabled; otherwise the shader
 						// does not read it. It comes from the tables rather than off the property: the value is
 						// animated and belongs to the same sample as the emissive colour.
@@ -4584,7 +4349,7 @@ namespace DCLF
 							// "is the record really the same for every draw of a pair", and the only check that
 							// would catch a per-object dependency nobody has noticed.
 							++a_out.recordParityChecks;
-							const DrawBindings& held = kept ? (*kept->records)[recordIndex] : records[recordIndex];
+							const DrawBindings& held = kept ? kept->records.Get()[recordIndex] : records[recordIndex];
 							if (std::memcmp(&held, &bindings, sizeof(DrawBindings)) != 0 && a_out.recordParityMismatches++ == 0)
 								logger::warn("[DCLF] record dedup parity: object {} rebuilds a different record than its (material {}, pipeline {}) pair holds",
 									o, object.materialIndex, object.pipelineIndex);
@@ -4631,7 +4396,7 @@ namespace DCLF
 			// pipeline's set index or a pair's record failing. Its pairs' records sit at stable slots, assembled here once per
 			// pair; the loop below skips its objects, and the commit uploads the inputs only when their version is new.
 			ResidentRegion* region = a_cache && ResidentDrawsEnabled() && dedup && bindless && !BuildParityEnabled() ? &a_cache->region : nullptr;
-			if (!region && a_cache && a_cache->region.active)
+			if (!region && a_cache && a_cache->region.cursor.active)
 				a_cache->region.Reset();
 			std::size_t regionInputs = 0, regionDraws = 0;
 			// The whole scene with kept bindings (its pairs' records are theirs); the Z-prepass's only where its gate is not the
@@ -4639,12 +4404,6 @@ namespace DCLF
 			const bool wholeScene = kept && WholeSceneRegionEnabled() && (!depthOnly || !frameHybrid || a_in.withholding);
 			if (region) {
 				auto& r = *region;
-				std::vector<DrawInput>* writable = nullptr;
-				auto inputsForWrite = [&]() -> std::vector<DrawInput>& {
-					if (!writable)
-						writable = &r.Mutable();
-					return *writable;
-				};
 				auto pairKeyOf = [](const ObjectRecord& a_object) { return (std::uint64_t(a_object.materialIndex) << 32) | a_object.pipelineIndex; };
 				auto residentAt = [&](std::uint32_t o) { return o < a_tables.residentSlot.size() && a_tables.residentSlot[o] != 0; };
 				// What the region can hold: a record the loop would draw as one input with its pair's record (no decal slot, no
@@ -4728,34 +4487,26 @@ namespace DCLF
 					r.drawsOf[i] = a_draws;
 				};
 				auto remove = [&](std::uint32_t o) {
-					if (o >= r.indexOf.size() || r.indexOf[o] == kNoRegion)
+					const std::uint32_t i = r.EntryOf(o);
+					if (i == kNoRegion)
 						return;
-					auto& inputs = inputsForWrite();
-					const std::uint32_t i = r.indexOf[o];
 					release(r.pairOf[i]);
 					r.touched.push_back(o);
 					r.undrawable -= r.drawsOf[i] ? 0 : 1;
 					r.draws -= r.drawsOf[i];
-					const auto tail = static_cast<std::uint32_t>(inputs.size() - 1);
-					if (i != tail) {
-						inputs[i] = inputs[tail];
-						r.pairOf[i] = r.pairOf[tail];
-						r.drawsOf[i] = r.drawsOf[tail];
-						r.indexOf[inputs[i].objectIndex] = i;
-						r.MarkDirty(i);
-					}
-					inputs.pop_back();
+					// The entry's columns follow the entry the region moves into its place.
+					const auto removal = r.Remove(o);
+					r.pairOf[removal.at] = r.pairOf[removal.from];
+					r.drawsOf[removal.at] = r.drawsOf[removal.from];
 					r.pairOf.pop_back();
 					r.drawsOf.pop_back();
-					r.indexOf[o] = kNoRegion;
 				};
 				auto upsert = [&](std::uint32_t o) {
 					if (!eligible(o)) {
 						remove(o);
 						return;
 					}
-					if (r.indexOf.size() < a_tables.objects.size())
-						r.indexOf.resize(a_tables.objects.size(), kNoRegion);
+					r.Cover(a_tables.objects.size());
 					const auto& object = a_tables.objects[o];
 					const std::uint64_t key = (object.flags & kObjectNoBindings) ? kNoPair : pairKeyOf(object);
 					std::uint32_t i = r.indexOf[o];
@@ -4766,12 +4517,9 @@ namespace DCLF
 						const bool slot = kept || r.pairs.contains(key) || !r.freeSlots.empty() || r.slotCount < a_in.addresses.recordCapacity / 2;
 						const std::size_t inputLimit = wholeScene ? kMaxInputs - kLoopReserve : kMaxInputs / 2;
 						const std::size_t drawLimit = wholeScene ? kMaxDraws - kLoopReserve : kMaxDraws / 2;
-						if (r.inputs->size() >= inputLimit || r.draws + objectDraws > drawLimit || !slot)
+						if (r.inputs.Size() >= inputLimit || r.draws + objectDraws > drawLimit || !slot)
 							return;
-						auto& inputs = inputsForWrite();
-						i = static_cast<std::uint32_t>(inputs.size());
-						r.indexOf[o] = i;
-						inputs.emplace_back();
+						i = r.Add(o);
 						r.pairOf.push_back(key);
 						r.drawsOf.push_back(0);
 						++r.undrawable;
@@ -4783,30 +4531,24 @@ namespace DCLF
 							acquire(key);
 						r.pairOf[i] = key;
 					}
-					auto& inputs = inputsForWrite();
+					auto& inputs = r.inputs.Mutable();
 					setDraws(i, entryOf(o, inputs[i]));
-					r.MarkDirty(i);
+					r.inputs.Mark(i);
 					r.touched.push_back(o);
 				};
 				// The Z-prepass draws depth only for what the colour epoch drew last frame (the loop's rule below).
 				auto drewLast = [&](std::uint32_t o) { return drewLastFrame(o); };
 				r.touched.clear();
-				// The buffer holds the last build's region: what changes from here on is uploaded alone.
-				if (a_in.residentUploaded == r.version) {
-					for (const auto entry : r.dirty)
-						r.dirtyMark[entry] = 0;
-					r.dirty.clear();
-					r.dirtyBase = r.version;
-				}
-				const std::uint64_t logEnd = a_tables.changeLogBase + a_tables.changeLog.size();
-				const bool resync = !r.active || r.generation != a_in.tablesGeneration || r.depth != depthOnly || r.logPosition < a_tables.changeLogBase ||
-				                    r.logPosition > logEnd || r.indexOf.size() > a_tables.objects.size() || r.wholeScene != wholeScene;
+				// What the buffer holds is the version it was sent: what changes from here on is sent alone.
+				r.inputs.BeginBuild(a_in.residentUploaded);
+				const bool resync = !r.cursor.Continues(a_tables.changeLog, a_in.tablesGeneration) || r.depth != depthOnly || r.indexOf.size() > a_tables.objects.size() ||
+				                    r.wholeScene != wholeScene;
 				// A resident the depth segment has not seen the colour epoch draw waits (the loop's rule); anything else is written.
 				auto take = [&](std::uint32_t o) {
 					if (!residentAt(o) && !wholeScene)
 						remove(o);
 					else if (depthOnly && residentAt(o) && (o >= r.indexOf.size() || r.indexOf[o] == kNoRegion) && !drewLast(o))
-						r.AddPending(o);
+						r.pending.Add(o);
 					else
 						upsert(o);
 					r.touched.push_back(o);
@@ -4814,9 +4556,7 @@ namespace DCLF
 				if (resync) {
 					// Every slot read again: the first build, new tables, or a log this segment fell behind.
 					r.Reset();
-					writable = nullptr;
-					r.active = true;
-					r.generation = a_in.tablesGeneration;
+					r.cursor.Restart(a_in.tablesGeneration);
 					r.depth = depthOnly;
 					r.wholeScene = wholeScene;
 					r.indexOf.assign(a_tables.objects.size(), kNoRegion);
@@ -4826,32 +4566,27 @@ namespace DCLF
 				} else {
 					if (depthOnly) {
 						// Joins the colour epoch has drawn since: their depth may be drawn now.
-						std::size_t waiting = 0;
-						for (std::size_t k = 0; k < r.pendingAdds.size(); ++k) {
-							const std::uint32_t slot = r.pendingAdds[k];
-							r.pendingMark[slot] = 0;
-							if (slot >= a_tables.residentSlot.size() || !a_tables.residentSlot[slot] || (slot < r.indexOf.size() && r.indexOf[slot] != kNoRegion))
-								continue;
-							if (drewLast(slot)) {
+						for (std::size_t k = 0; k < r.pending.Size();) {
+							const std::uint32_t slot = r.pending.list[k];
+							if (slot >= a_tables.residentSlot.size() || !a_tables.residentSlot[slot] || (slot < r.indexOf.size() && r.indexOf[slot] != kNoRegion)) {
+								r.pending.RemoveAt(k);
+							} else if (drewLast(slot)) {
+								r.pending.RemoveAt(k);
 								upsert(slot);
 								r.touched.push_back(slot);
 							} else {
-								r.pendingMark[slot] = 1;
-								r.pendingAdds[waiting++] = slot;
+								++k;
 							}
 						}
-						r.pendingAdds.resize(waiting);
 					}
 					// The log since this region's last build, whenever its changes were made.
 					// What a draw input carries: its placement and fade row, its bindings, its geometry and partitions, its residency.
 					constexpr std::uint32_t kInputCauses = kChangePlacement | kChangeBindings | kChangeSkin | kChangeGeometry | kChangeMembership;
-					for (auto k = static_cast<std::size_t>(r.logPosition - a_tables.changeLogBase); k < a_tables.changeLog.size(); ++k) {
-						if (!(a_tables.changeLog[k].causes & kInputCauses))
-							continue;
-						take(a_tables.changeLog[k].slot);
-					}
+					for (const auto& change : r.cursor.Unread(a_tables.changeLog))
+						if (change.causes & kInputCauses)
+							take(change.slot);
 				}
-				r.logPosition = logEnd;
+				r.cursor.Advance(a_tables.changeLog);
 				// A pipeline whose set index changed, and the pairs whose record could or could no longer be built: their
 				// entries are written again (both rare).
 				std::vector<std::uint32_t> changedPipelines;
@@ -4887,21 +4622,21 @@ namespace DCLF
 					}
 				}
 				if (!changedPipelines.empty() || !changedPairs.empty()) {
-					auto& inputs = inputsForWrite();
+					auto& inputs = r.inputs.Mutable();
 					for (std::uint32_t i = 0; i < inputs.size(); ++i) {
 						const auto key = r.pairOf[i];
 						if (std::find(changedPairs.begin(), changedPairs.end(), key) == changedPairs.end() &&
 							std::find(changedPipelines.begin(), changedPipelines.end(), static_cast<std::uint32_t>(key)) == changedPipelines.end())
 							continue;
 						setDraws(i, entryOf(inputs[i].objectIndex, inputs[i]));
-						r.MarkDirty(i);
+						r.inputs.Mark(i);
 						r.touched.push_back(inputs[i].objectIndex);
 					}
 				}
 				// CS_DCLF_RESIDENT_DRAW_PARITY: every entry written again from the tables and compared, and every resident the
 				// region should hold looked for.
 				if (ResidentDrawParityEnabled() && frameNumber % 60 == 0) {
-					const auto& inputs = *r.inputs;
+					const auto& inputs = r.inputs.Get();
 					for (std::uint32_t i = 0; i < inputs.size(); ++i) {
 						DrawInput expected;
 						const std::uint32_t o = inputs[i].objectIndex;
@@ -4922,10 +4657,10 @@ namespace DCLF
 						for (const auto flag : a_tables.residentSlot)
 							residentCount += flag;
 						logger::info("[DCLF][TEMP] {} region: {} entries, {} pending, {} resident slots, log at {} of {}", depthOnly ? "depth" : "colour", inputs.size(),
-							r.pendingAdds.size(), residentCount, r.logPosition, logEnd);
+							r.pending.Size(), residentCount, r.cursor.position, a_tables.changeLog.End());
 					}
 					for (std::uint32_t o = 0; o < a_tables.objects.size(); ++o)
-						if (eligible(o) && (o >= r.indexOf.size() || r.indexOf[o] == kNoRegion) && !r.Pending(o))
+						if (eligible(o) && (o >= r.indexOf.size() || r.indexOf[o] == kNoRegion) && !r.pending.Contains(o))
 							++a_out.residentMissing;
 				}
 				// Every slot this build touched: the region's, the loop's (loopList) or nobody's, and whether it is a candidate only.
@@ -4964,7 +4699,7 @@ namespace DCLF
 				}
 				// What the region draws: the colour segment's marks for the slots this build touched (the rest are as they were),
 				// and the build's per-object states for set parity alone.
-				const auto& inputs = *r.inputs;
+				const auto& inputs = r.inputs.Get();
 				if (marks)
 					for (const std::uint32_t o : r.touched) {
 						const bool on = o < r.indexOf.size() && r.indexOf[o] != kNoRegion && r.drawsOf[r.indexOf[o]] && nativeDrawn(o);
@@ -4983,10 +4718,7 @@ namespace DCLF
 				// Every candidate is one whether the loop sees it or not (the report's "candidate-only").
 				a_out.skipped[static_cast<std::size_t>(Skip::CandidateOnly)] += static_cast<std::uint32_t>(r.candidates);
 				a_out.residentUndrawable = static_cast<std::uint32_t>(r.undrawable);
-				a_out.residentInputs = r.inputs;
-				a_out.residentVersion = r.version;
-				a_out.residentDirty = r.dirty;
-				a_out.residentDirtyBase = r.dirtyBase;
+				a_out.resident = r.inputs.View();
 				a_out.residentDraws = static_cast<std::uint32_t>(r.draws);
 				a_out.residentPairs = static_cast<std::uint32_t>(r.pairs.size());
 				regionInputs = inputs.size();
@@ -5194,42 +4926,36 @@ namespace DCLF
 					m.Set(o, nullptr, false);
 				}
 				m.loopDrawn = std::move(loopDrawn);
+				// The changes since the version the render thread applied, or every slot when it holds nothing the journal can
+				// build on.
+				const auto snapshot = m.changes.Take();
+				const std::uint64_t held = a_in.drawnCommitted;
 				a_out.drawnValid = true;
-				a_out.drawnFull = m.full;
-				a_out.drawnVersion = m.version;
-				a_out.drawnBase = m.dirtyBase;
-				a_out.drawnChanges.reserve(m.full ? m.drawn.size() : m.dirty.size());
-				if (m.full) {
-					for (std::uint32_t slot = 0; slot < m.drawn.size(); ++slot)
+				a_out.drawnFull = held < snapshot.floor || held > snapshot.version;
+				a_out.drawnVersion = snapshot.version;
+				a_out.drawnBase = held;
+				snapshot.ForEachRun(held, m.drawn.size(), [&](std::uint64_t a_first, std::uint64_t a_count) {
+					for (auto slot = static_cast<std::uint32_t>(a_first); slot < a_first + a_count; ++slot)
 						a_out.drawnChanges.push_back({ slot, m.geometry[slot], m.drawn[slot] != 0 });
-				} else {
-					for (const auto slot : m.dirty)
-						a_out.drawnChanges.push_back({ slot, m.geometry[slot], m.drawn[slot] != 0 });
-				}
+				});
 			}
-			UpdateGeometryDraws(a_geometries, a_in.geometriesUploaded, a_tables, a_in.tablesGeneration, frameNumber, a_out.geometryDraws);
+			UpdateGeometryDraws(a_geometries, a_in.tablesHeld.geometries, a_tables, a_in.tablesGeneration, frameNumber, a_out.geometryDraws);
 			AppendFaceStreams(a_tables, a_in.addresses.facePositions, a_out.geometryDraws);
 			if (a_in.addresses.facePositions)
 				a_out.faceStreams = a_tables.faceStreams;
-			UpdateBones(a_bones, a_in.bonesUploaded, a_tables, a_in.tablesGeneration, a_out.bones);
+			UpdateBones(a_bones, a_in.tablesHeld.bones, a_tables, a_in.tablesGeneration, a_out.bones);
 			if (kept) {
 				a_out.persistent = true;
-				a_out.constantBytes = kept->constants;
-				a_out.constantsVersion = kept->constantsVersion;
-				a_out.constantsDirtyBase = kept->constantsDirtyBase;
-				a_out.constantsDirty = kept->constantsDirty;
-				a_out.recordMirror = kept->records;
-				a_out.recordsVersion = kept->recordsVersion;
-				a_out.recordsDirtyBase = kept->recordsDirtyBase;
-				a_out.recordsDirty = kept->recordsDirty;
+				a_out.keptConstants = kept->constants.View();
+				a_out.keptRecords = kept->records.View();
 				a_out.patchMasks = kept->patchMasks;
-				a_out.recordsHeld = static_cast<std::uint32_t>(kept->records->size() - kept->recordFree.size());
+				a_out.recordsHeld = static_cast<std::uint32_t>(kept->records.Size() - kept->recordFree.size());
 				a_out.blocksWritten = kept->blocksWritten;
 				a_out.recordsWritten = kept->recordsRewritten;
 				++a_cache->persistentBuilds;
 				a_cache->persistentBlocks += kept->blocksWritten;
 				a_cache->persistentRecords += kept->recordsRewritten;
-				if (PersistentParityEnabled() && frameNumber % 60 == 0) {
+				if (PersistentParityEnabled() && ParityDue(frameNumber)) {
 					MainPayload reference;
 					BuildMainPayload(a_in, a_tables, a_lookups, reference);
 					CheckPersistentBindings(a_out, reference, *a_cache, base, a_in.frameTextures, a_cache->persistentParityChecks, a_cache->persistentParityMismatches,
@@ -5279,12 +5005,13 @@ namespace DCLF
 		struct SunExclusionCache
 		{
 			std::shared_ptr<const SunCandidates> candidates;
-			std::uint32_t generation = 0;
-			std::uint64_t membership = 0, logPosition = 0;
+			LogCursor cursor;
+			std::uint64_t membership = 0;
 			std::vector<std::uint8_t> excluded;
 			std::uint32_t excludedCount = 0;
 			bool valid = false;
-			std::uint64_t builds = 0, reused = 0, parityChecks = 0, parityMismatches = 0;  // since the last report
+			std::uint64_t builds = 0, reused = 0;  // since the last report
+			ParityCounter parity;
 		};
 
 		std::shared_ptr<SunExclusion> BuildSunExclusion(const std::shared_ptr<const SunCandidates>& a_candidates, const ShadowPayload& a_payload, std::uint32_t a_mode,
@@ -5296,20 +5023,23 @@ namespace DCLF
 			auto exclusion = std::make_shared<SunExclusion>();
 			exclusion->candidates = a_candidates;
 			const std::size_t count = a_candidates->entries.size();
-			const std::uint64_t logEnd = a_tables.changeLogBase + a_tables.changeLog.size();
 			const std::uint64_t membership = a_payload.kept ? a_payload.membership[a_mode] : 0;
 			bool wouldReuse = false;
 			if (a_cache) {
 				auto& c = *a_cache;
 				++c.builds;
-				bool reuse = c.valid && membership && c.candidates == a_candidates && c.generation == a_payload.inputs.tablesGeneration && c.membership == membership &&
-				             c.logPosition >= a_tables.changeLogBase && c.logPosition <= logEnd;
-				for (auto k = reuse ? static_cast<std::size_t>(c.logPosition - a_tables.changeLogBase) : a_tables.changeLog.size(); reuse && k < a_tables.changeLog.size(); ++k)
-					reuse = !(a_tables.changeLog[k].causes & (kChangeBindings | kChangeGeometry));
-				c.logPosition = logEnd;
+				bool reuse = c.valid && membership && c.candidates == a_candidates && c.membership == membership &&
+				             c.cursor.Continues(a_tables.changeLog, a_payload.inputs.tablesGeneration);
+				if (reuse)
+					for (const auto& change : c.cursor.Unread(a_tables.changeLog))
+						if (change.causes & (kChangeBindings | kChangeGeometry)) {
+							reuse = false;
+							break;
+						}
+				c.cursor.Advance(a_tables.changeLog);
 				// CS_DCLF_PERSISTENT_PARITY: a reuse is built in full every 60 frames and compared.
 				wouldReuse = reuse;
-				if (reuse && PersistentParityEnabled() && a_payload.inputs.frameNumber % 60 == 0)
+				if (reuse && PersistentParityEnabled() && ParityDue(a_payload.inputs.frameNumber))
 					reuse = false;
 				if (reuse) {
 					++c.reused;
@@ -5336,11 +5066,10 @@ namespace DCLF
 			if (a_cache) {
 				auto& c = *a_cache;
 				if (wouldReuse) {
-					++c.parityChecks;
-					c.parityMismatches += c.excluded != exclusion->excluded ? 1u : 0u;
+					c.parity.Check(c.excluded == exclusion->excluded);
 				}
 				c.candidates = a_candidates;
-				c.generation = a_payload.inputs.tablesGeneration;
+				c.cursor.Restart(a_payload.inputs.tablesGeneration);
 				c.membership = membership;
 				c.excluded = exclusion->excluded;
 				c.excludedCount = exclusion->excludedCount;
@@ -5386,20 +5115,18 @@ namespace DCLF
 		 * by a mode's views changing their rasterizer states, and by what was waiting (a pipeline or a diffuse texture not yet
 		 * resolved) becoming ready; the per-frame list is only the face shapes. The records: the plain one and one per
 		 * alpha-tested material, at slots the materials keep; their texcoord blocks sit at fixed offsets in the arena, which is
-		 * written whole every build (it is a few KB), so a record changes only when its texture does. Every entry and record
-		 * carries the version it last changed at: a buffer holding version H receives what is newer.
+		 * written whole every build (it is a few KB), so a record changes only when its texture does. The records and each
+		 * mode's inputs are KeptArrays: a buffer (a mode's, or a view slot's copy of the records) is sent what changed since the
+		 * version it holds.
 		 */
 		struct ShadowKept
 		{
 			static constexpr std::uint32_t kWaiting = ~0u - 1;  // an object's record while its material's texture is not resolved
 			static constexpr std::uint32_t kNoRecord = ~0u;
-			bool active = false;
-			std::uint32_t generation = 0;
-			std::uint64_t logPosition = 0;
+			LogCursor cursor;
 			const void* identity = nullptr;
-			std::uint64_t version = 1;
-			std::shared_ptr<std::vector<DrawBindings>> records = std::make_shared<std::vector<DrawBindings>>();
-			std::shared_ptr<std::vector<std::uint64_t>> recordVersions = std::make_shared<std::vector<std::uint64_t>>();
+			std::uint64_t build = 0;  // counts the builds: what ShadowKept::Mode::membership stamps
+			KeptArray<DrawBindings> records;
 			ankerl::unordered_dense::map<const RE::BSShaderMaterial*, std::uint32_t> slotOf;
 			std::vector<const RE::BSShaderMaterial*> slotMaterial;
 			std::vector<ID3D11ShaderResourceView*> slotDiffuse;
@@ -5408,13 +5135,10 @@ namespace DCLF
 			std::vector<std::uint32_t> freeSlots;
 			std::vector<std::uint32_t> objectRecord;  // per object: its record slot, 0 the plain one, kNoRecord, kWaiting
 			std::vector<const RE::BSShaderMaterial*> objectMaterial;  // per object: the material its slot is held for
-			struct Mode
+			struct Mode : KeptRegion
 			{
 				bool active = false;
 				std::uint32_t rasterStates = 0;
-				std::shared_ptr<std::vector<DrawInput>> inputs = std::make_shared<std::vector<DrawInput>>();
-				std::shared_ptr<std::vector<std::uint64_t>> versions = std::make_shared<std::vector<std::uint64_t>>();
-				std::vector<std::uint32_t> indexOf;  // per object: its entry, or kNoRegion
 				std::vector<const RE::BSGeometry*> claimedOf;  // per object: the geometry its entry claims
 				std::vector<std::uint32_t> waiting;  // objects waiting for a pipeline or a texture
 				std::vector<std::uint8_t> waitingMark;
@@ -5429,12 +5153,40 @@ namespace DCLF
 				bool claimsChanged = true;
 				std::vector<const RE::BSGeometry*> lastFaces;
 				std::shared_ptr<const PassCapture::ClaimSet> published;
+				/** @brief Empty, for every object to be read again; the published claims stay, and the inputs' journal counts on. */
+				void Reset()
+				{
+					auto kept = std::move(inputs);
+					auto keptClaims = std::move(published);
+					*this = Mode{};
+					inputs = std::move(kept);
+					published = std::move(keptClaims);
+					inputs.Clear();
+				}
 			};
 			std::array<Mode, kShadowModeCount> modes;
+			/** @brief Empty, for every object to be read again; the journals count on and the report's counters stay. */
+			void Reset()
+			{
+				auto keptRecords = std::move(records);
+				std::array<Mode, kShadowModeCount> keptModes;
+				for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
+					keptModes[m].inputs = std::move(modes[m].inputs);
+				const auto counters = std::tuple{ build, builds, entriesWritten, recordsWritten, resyncs };
+				auto keptParity = std::move(parity);
+				*this = ShadowKept{};
+				records = std::move(keptRecords);
+				records.Clear();
+				for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
+					modes[m].inputs = std::move(keptModes[m].inputs);
+					modes[m].inputs.Clear();
+				}
+				std::tie(build, builds, entriesWritten, recordsWritten, resyncs) = counters;
+				parity = std::move(keptParity);
+			}
 			// Since the last report.
 			std::uint64_t builds = 0, entriesWritten = 0, recordsWritten = 0, resyncs = 0;
-			std::uint64_t parityChecks = 0, parityMismatches = 0;
-			std::string parityFirst;
+			ParityCounter parity;
 		};
 
 		/** @brief The kept path of BuildShadowPayload: the records and the inputs from the kept state (ShadowKept). */
@@ -5443,18 +5195,17 @@ namespace DCLF
 			const DrawBindings& a_plain, Block&& a_block)
 		{
 			const std::uint32_t objects = static_cast<std::uint32_t>(std::min<std::size_t>(a_tables.objects.size(), kMaxObjects));
-			const std::uint64_t logEnd = a_tables.changeLogBase + a_tables.changeLog.size();
 			++k.builds;
-			// Every write of this build carries this version.
-			const std::uint64_t version = ++k.version;
-			bool resync = !k.active || k.generation != a_in.tablesGeneration || k.identity != a_in.addresses.identity || k.logPosition < a_tables.changeLogBase ||
-			              k.logPosition > logEnd || k.objectRecord.size() > objects;
+			// Membership changes of this build carry this stamp.
+			const std::uint64_t build = ++k.build;
+			// What the buffers hold is the version they were sent: what changes from here on is sent alone.
+			k.records.BeginBuild(a_in.recordsOldestHeld);
+			for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
+				k.modes[m].inputs.BeginBuild(a_in.inputsHeld[m]);
+			bool resync = !k.cursor.Continues(a_tables.changeLog, a_in.tablesGeneration) || k.identity != a_in.addresses.identity || k.objectRecord.size() > objects;
 			if (resync) {
-				const auto keep = k.version;
-				k = {};
-				k.version = keep;
-				k.active = true;
-				k.generation = a_in.tablesGeneration;
+				k.Reset();
+				k.cursor.Restart(a_in.tablesGeneration);
 				k.identity = a_in.addresses.identity;
 				++k.resyncs;
 			}
@@ -5462,24 +5213,16 @@ namespace DCLF
 				k.objectRecord.resize(objects, ShadowKept::kNoRecord);
 				k.objectMaterial.resize(objects, nullptr);
 			}
-			auto recordsForWrite = [&]() -> std::vector<DrawBindings>& {
-				if (k.records.use_count() > 1)
-					k.records = std::make_shared<std::vector<DrawBindings>>(*k.records);
-				if (k.recordVersions.use_count() > 1)
-					k.recordVersions = std::make_shared<std::vector<std::uint64_t>>(*k.recordVersions);
-				return *k.records;
-			};
 			auto writeRecord = [&](std::uint32_t a_slot, const DrawBindings& a_record) {
-				if (a_slot < k.records->size() && std::memcmp(&(*k.records)[a_slot], &a_record, sizeof(DrawBindings)) == 0)
-					return;
-				auto& records = recordsForWrite();
-				if (records.size() <= a_slot) {
+				if (a_slot >= k.records.Size()) {
+					auto& records = k.records.Mutable();
 					records.resize(std::size_t(a_slot) + 1);
-					k.recordVersions->resize(std::size_t(a_slot) + 1, 0);
+					records[a_slot] = a_record;
+					k.records.Mark(a_slot);
+					++k.recordsWritten;
+				} else if (k.records.Set(a_slot, a_record)) {
+					++k.recordsWritten;
 				}
-				records[a_slot] = a_record;
-				(*k.recordVersions)[a_slot] = version;
-				++k.recordsWritten;
 			};
 			// ---- The records: the plain one, and each material's.
 			if (k.slotMaterial.empty()) {
@@ -5607,35 +5350,17 @@ namespace DCLF
 				SetSunEntryRow(a_input, a_tables, o);
 				return 1;
 			};
-			auto modeWrite = [&](ShadowKept::Mode& a_mode) {
-				if (a_mode.inputs.use_count() > 1)
-					a_mode.inputs = std::make_shared<std::vector<DrawInput>>(*a_mode.inputs);
-				if (a_mode.versions.use_count() > 1)
-					a_mode.versions = std::make_shared<std::vector<std::uint64_t>>(*a_mode.versions);
-			};
 			auto removeEntry = [&](ShadowKept::Mode& a_mode, std::uint32_t o) {
-				if (o >= a_mode.indexOf.size() || a_mode.indexOf[o] == kNoRegion)
+				if (!a_mode.Holds(o))
 					return;
-				modeWrite(a_mode);
-				auto& inputs = *a_mode.inputs;
-				auto& versions = *a_mode.versions;
-				const std::uint32_t i = a_mode.indexOf[o];
 				if (o < a_mode.claimedOf.size() && a_mode.claimedOf[o]) {
 					if (const auto held = a_mode.claims.find(a_mode.claimedOf[o]); held != a_mode.claims.end() && held->second == o)
 						a_mode.claims.erase(held);
 					a_mode.claimedOf[o] = nullptr;
 					a_mode.claimsChanged = true;
 				}
-				const std::uint32_t tail = static_cast<std::uint32_t>(inputs.size() - 1);
-				if (i != tail) {
-					inputs[i] = inputs[tail];
-					versions[i] = version;
-					a_mode.indexOf[inputs[i].objectIndex] = i;
-				}
-				inputs.pop_back();
-				versions.pop_back();
-				a_mode.indexOf[o] = kNoRegion;
-				a_mode.membership = version;
+				a_mode.Remove(o);
+				a_mode.membership = build;
 				++k.entriesWritten;
 			};
 			auto setMark = [](std::vector<std::uint32_t>& a_list, std::vector<std::uint8_t>& a_mark, std::uint32_t o, bool a_on) {
@@ -5651,36 +5376,28 @@ namespace DCLF
 			// Claims hold a geometry: the one a slot draws now (a slot reused by another object removed its entry first).
 			auto take = [&](std::uint32_t m, std::uint32_t o) {
 				auto& mode = k.modes[m];
-				if (mode.indexOf.size() < objects) {
-					mode.indexOf.resize(objects, kNoRegion);
+				mode.Cover(objects);
+				if (mode.claimedOf.size() < objects)
 					mode.claimedOf.resize(objects, nullptr);
-				}
 				DrawInput input{};
 				const int result = o < a_tables.objects.size() ? evaluate(m, o, input) : 0;
 				setMark(mode.waiting, mode.waitingMark, o, result == 2);
 				const bool wasFace = o < mode.faceMark.size() && mode.faceMark[o];
 				setMark(mode.faces, mode.faceMark, o, result == 3);
 				if (wasFace != (result == 3))
-					mode.membership = version;
+					mode.membership = build;
 				if (result != 1) {
 					removeEntry(mode, o);
 					return;
 				}
-				modeWrite(mode);
-				auto& inputs = *mode.inputs;
 				std::uint32_t i = mode.indexOf[o];
 				if (i == kNoRegion) {
-					if (inputs.size() >= kMaxInputs - kLoopReserve)
+					if (mode.inputs.Size() >= kMaxInputs - kLoopReserve)
 						return;
-					i = static_cast<std::uint32_t>(inputs.size());
-					mode.indexOf[o] = i;
-					inputs.push_back(input);
-					mode.versions->push_back(version);
-					mode.membership = version;
+					mode.Add(o, input);
+					mode.membership = build;
 					++k.entriesWritten;
-				} else if (std::memcmp(&inputs[i], &input, sizeof(DrawInput)) != 0) {
-					inputs[i] = input;
-					(*mode.versions)[i] = version;
+				} else if (mode.inputs.Set(i, input)) {
 					++k.entriesWritten;
 				}
 				// Its claim: the geometry the slot draws now.
@@ -5708,11 +5425,11 @@ namespace DCLF
 					changed.push_back(o);
 			} else {
 				constexpr std::uint32_t kShadowCauses = kChangeShadow | kChangeBindings | kChangePlacement | kChangeGeometry | kChangeSkin | kChangeMembership;
-				for (auto k2 = static_cast<std::size_t>(k.logPosition - a_tables.changeLogBase); k2 < a_tables.changeLog.size(); ++k2)
-					if ((a_tables.changeLog[k2].causes & kShadowCauses) && a_tables.changeLog[k2].slot < objects)
-						changed.push_back(a_tables.changeLog[k2].slot);
+				for (const auto& change : k.cursor.Unread(a_tables.changeLog))
+					if ((change.causes & kShadowCauses) && change.slot < objects)
+						changed.push_back(change.slot);
 			}
-			k.logPosition = logEnd;
+			k.cursor.Advance(a_tables.changeLog);
 			for (const std::uint32_t o : changed)
 				takeRecord(o);
 			texcoordBase = a_block(nullptr, std::size_t(256) * std::max<std::size_t>(k.slotMaterial.size(), 1));
@@ -5720,15 +5437,13 @@ namespace DCLF
 			for (std::uint32_t slot = 1; slot < k.slotMaterial.size(); ++slot)
 				if (k.slotMaterial[slot])
 					materialRecord(slot);
-			a_out.records = *k.records;
+			a_out.records = k.records.Get();
 			for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
 				auto& mode = k.modes[m];
 				const std::uint32_t states = a_in.modeUsed[m] ? a_in.modeRasterStates[m] : 0u;
 				if (!mode.active || mode.rasterStates != states) {
 					// A mode's views changed their states: every object again for it.
-					const auto published = mode.published;
-					mode = {};
-					mode.published = published;
+					mode.Reset();
 					mode.active = true;
 					mode.rasterStates = states;
 					if (states)
@@ -5789,16 +5504,14 @@ namespace DCLF
 				}
 				if (m != kSkyMode)
 					a_out.claims[m] = mode.published;
-				a_out.regionInputs[m] = mode.inputs;
-				a_out.regionVersions[m] = mode.versions;
+				a_out.regionInputs[m] = mode.inputs.View();
 				a_out.membership[m] = mode.membership;
 				// The skip counters, as the loop kept them: what waits.
 				a_out.deferredPipelines += static_cast<std::uint32_t>(mode.waiting.size());
 				a_out.skippedPipeline += static_cast<std::uint32_t>(mode.waiting.size());
 			}
 			a_out.kept = true;
-			a_out.recordVersions = k.recordVersions;
-			a_out.keptVersion = version;
+			a_out.recordChanges = k.records.View().changes;
 		}
 
 		/**
@@ -5809,21 +5522,7 @@ namespace DCLF
 		void EmitShadowInputs(const ShadowPayload& a_payload, std::uint32_t a_mode, std::uint64_t a_held, Emit&& a_emit)
 		{
 			const std::size_t region = a_payload.RegionCount(a_mode);
-			if (region) {
-				const auto& inputs = *a_payload.regionInputs[a_mode];
-				const auto& versions = *a_payload.regionVersions[a_mode];
-				for (std::size_t i = 0; i < region;) {
-					if (versions[i] <= a_held) {
-						++i;
-						continue;
-					}
-					std::size_t end = i + 1;
-					while (end < region && versions[end] > a_held)
-						++end;
-					a_emit(inputs.data() + i, (end - i) * sizeof(DrawInput), i * sizeof(DrawInput));
-					i = end;
-				}
-			}
+			a_payload.regionInputs[a_mode].Emit(a_held, a_emit);
 			const auto& list = a_payload.inputList[a_mode];
 			if (!list.empty())
 				a_emit(list.data(), list.size() * sizeof(DrawInput), region * sizeof(DrawInput));
@@ -5847,26 +5546,14 @@ namespace DCLF
 				}
 				a_emit(block.data(), block.size() * sizeof(DrawBindings), a_first * sizeof(DrawBindings));
 			};
-			if (!a_payload.kept || !a_payload.recordVersions) {
+			if (!a_payload.kept) {
 				if (!records.empty())
 					copy(0, records.size());
 				return !records.empty();
 			}
-			const auto& versions = *a_payload.recordVersions;
-			bool wrote = false;
-			for (std::size_t r = 0; r < records.size();) {
-				if (r < versions.size() && versions[r] <= a_held) {
-					++r;
-					continue;
-				}
-				std::size_t end = r + 1;
-				while (end < records.size() && !(end < versions.size() && versions[end] <= a_held))
-					++end;
-				copy(r, end);
-				wrote = true;
-				r = end;
-			}
-			return wrote;
+			return a_payload.recordChanges.ForEachRun(a_held, records.size(), [&](std::uint64_t a_first, std::uint64_t a_count) {
+				copy(static_cast<std::size_t>(a_first), static_cast<std::size_t>(a_first + a_count));
+			}) != 0;
 		}
 
 		void BuildShadowPayload(const ShadowInputs& a_in, const SceneStore::Tables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out,
@@ -5883,8 +5570,8 @@ namespace DCLF
 			BuildShadowPayload(a_in, a_tables, a_lookups, reference);
 			const std::uint64_t base = a_in.addresses.constants;
 			auto fail = [&](std::uint32_t a_object, const std::string& a_what) {
-				if (k.parityMismatches++ == 0)
-					k.parityFirst = fmt::format("object {}: {}", a_object, a_what);
+				if (k.parity.mismatches++ == 0)
+					k.parity.first = fmt::format("object {}: {}", a_object, a_what);
 			};
 			auto texcoordOf = [&](const ShadowPayload& a_payload, const DrawBindings& a_record) {
 				std::array<float, 4> values{};
@@ -5901,7 +5588,7 @@ namespace DCLF
 				a_kept.ForEachInput(m, [&](const DrawInput& a_input) { keptInputs.emplace(a_input.objectIndex, a_input); });
 				std::size_t matched = 0;
 				for (const auto& input : reference.inputList[m]) {
-					++k.parityChecks;
+					++k.parity.checks;
 					const auto it = keptInputs.find(input.objectIndex);
 					if (it == keptInputs.end()) {
 						fail(input.objectIndex, fmt::format("mode {}: an input of the per-frame build only", m));
@@ -5953,9 +5640,9 @@ namespace DCLF
 			};
 
 			// ---- What every view shares: the object records, bone rows, geometry table, binding records.
-			UpdateObjectRecords(a_objects, a_in.objectsUploaded, a_tables, a_in.tablesGeneration, a_in.renderFlags, a_in.frameNumber, a_out.objects);
-			UpdateBones(a_bones, a_in.bonesUploaded, a_tables, a_in.tablesGeneration, a_out.bones);
-			UpdateGeometryDraws(a_geometries, a_in.geometriesUploaded, a_tables, a_in.tablesGeneration, a_in.frameNumber, a_out.geometries);
+			UpdateObjectRecords(a_objects, a_in.tablesHeld.objects, a_tables, a_in.tablesGeneration, a_in.renderFlags, a_in.frameNumber, a_out.objects);
+			UpdateBones(a_bones, a_in.tablesHeld.bones, a_tables, a_in.tablesGeneration, a_out.bones);
+			UpdateGeometryDraws(a_geometries, a_in.tablesHeld.geometries, a_tables, a_in.tablesGeneration, a_in.frameNumber, a_out.geometries);
 			AppendFaceStreams(a_tables, a_in.addresses.facePositions, a_out.geometries);
 			if (a_in.addresses.facePositions)
 				a_out.faceStreams = a_tables.faceStreams;
@@ -6207,7 +5894,7 @@ namespace DCLF
 			for (std::size_t p = 0; p < a_tables.pipelines.size(); ++p) {
 				if (!a_tables.PipelineUsed(p, a_frame))
 					continue;
-				const auto& technique = a_tables.techniqueConstants[p];
+				const auto& technique = a_tables.TechniqueOf(p);
 				auto& entry = a_lookups.pipelines[p];
 				const std::uint32_t index = technique.shadowMask ? textures.Resolve(technique.shadowMaskTexture) : Lookups::kNone;
 				if (note(entry.shadowMaskIndex, index))
@@ -8369,29 +8056,29 @@ namespace DCLF
 			if (staged) {
 				org::runtime::GetActiveUploadService()->SubmitStagedUploads(std::move(payload.staged));
 			} else {
-				EmitObjectRecords(payload.objects, resources->objectsUploaded, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
+				payload.objects.Emit(resources->tablesHeld.objects, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
 					uploads(resources->objects, a_data, a_bytes, a_offset);
 				});
-				EmitBones(payload.bones, resources->bonesUploaded, nullptr, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
+				EmitBones(payload.bones, resources->tablesHeld.bones, nullptr, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
 					uploads(resources->bones, a_data, a_bytes, a_offset);
 				});
-				EmitGeometryDraws(payload.geometries, resources->geometriesUploaded, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
+				EmitGeometryDraws(payload.geometries, resources->tablesHeld.geometries, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
 					uploads(resources->geometries, a_data, a_bytes, a_offset);
 				});
 			}
 			// Either path uploaded the object records, the bone rows and the geometry slots' draws the buffers did not hold.
-			if (payload.objects.version)
-				resources->objectsUploaded = payload.objects.version;
-			if (payload.geometries.version)
-				resources->geometriesUploaded = payload.geometries.version;
-			if (PersistentParityEnabled() && payload.bones.version) {
+			if (payload.objects.Version())
+				resources->tablesHeld.objects = payload.objects.Version();
+			if (payload.geometries.Version())
+				resources->tablesHeld.geometries = payload.geometries.Version();
+			if (PersistentParityEnabled() && payload.bones.Version()) {
 				auto& bonesStore = impl->shadowBones;
-				EmitBones(payload.bones, resources->bonesUploaded, &bonesStore, [](const void*, std::size_t, std::size_t) {});
+				EmitBones(payload.bones, resources->tablesHeld.bones, &bonesStore, [](const void*, std::size_t, std::size_t) {});
 				if (payload.inputs.frameNumber % 60 == 0)
 					CheckBones(bonesStore, payload.bones);
 			}
-			if (payload.bones.version)
-				resources->bonesUploaded = payload.bones.version;
+			if (payload.bones.Version())
+				resources->tablesHeld.bones = payload.bones.Version();
 			shadowStats.faceUploads += UploadFaceStreams(payload.faceStreams, resources->facePositions, resources->faceUploaded, uploads);
 			shadowStats.records = static_cast<std::uint32_t>(records.size());
 			shadowStats.skippedTexture = payload.skippedTexture;
@@ -8406,7 +8093,7 @@ namespace DCLF
 						[&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) { uploads(resources->inputs[m], a_data, a_bytes, a_offset); });
 				// Either path wrote what the buffer did not hold.
 				if (payload.kept)
-					resources->inputsUploaded[m] = payload.keptVersion;
+					resources->inputsUploaded[m] = payload.regionInputs[m].Version();
 				shadowStats.inputs = static_cast<std::uint32_t>(payload.ModeInputs(m));
 			}
 			inputsMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - inputsStart).count();
@@ -8447,7 +8134,7 @@ namespace DCLF
 				}
 				// Either path wrote what the slot did not hold.
 				if (payload.kept)
-					resources->recordsUploaded[slot] = payload.keptVersion;
+					resources->recordsUploaded[slot] = payload.recordChanges.version;
 				const auto inputCount = static_cast<std::uint32_t>(payload.ModeInputs(view.modeIndex));
 				// The view's values into its latch: frustum culling alone (mode 1), the single phase, and no
 				// engine-visibility gate - a caster is drawn whether or not the main camera kept it.
@@ -8472,7 +8159,7 @@ namespace DCLF
 							std::memcpy(latch.sunEntryPlanes[process][plane], payload.inputs.sunEntryPlanes[process * 6 + plane].data(), 4 * sizeof(float));
 					}
 					// CS_DCLF_PERSISTENT_PARITY: the GPU's test on the latch as written, against the CPU's verdict, per input.
-					if (PersistentParityEnabled() && frameNumber % 60 == 0) {
+					if (PersistentParityEnabled() && ParityDue(frameNumber)) {
 						const auto& tablesNow = store.GetTables();
 						for (const auto& input : payload.Flat(view.modeIndex)) {
 							const bool cpu = OutsideSunEntry(payload.inputs, tablesNow, input.objectIndex);
@@ -8610,9 +8297,11 @@ namespace DCLF
 		in.tablesGeneration = a_store.GetTablesGeneration();
 		in.lookupGeneration = a_store.GetLookups().generation;
 		in.sceneRebuilds = a_store.GetSceneRebuilds();
-		in.objectsUploaded = a_resources.objectsUploaded;
-		in.bonesUploaded = a_resources.bonesUploaded;
-		in.geometriesUploaded = a_resources.geometriesUploaded;
+		in.tablesHeld = a_resources.tablesHeld;
+		in.inputsHeld = a_resources.inputsUploaded;
+		for (const auto held : a_resources.recordsUploaded)
+			if (held && (!in.recordsOldestHeld || held < in.recordsOldestHeld))
+				in.recordsOldestHeld = held;
 		if (auto* csState = globals::state) {
 			const auto* shared = reinterpret_cast<const std::byte*>(&csState->lastSharedData);
 			in.sharedData.assign(shared, shared + sizeof(State::SharedDataCB));
@@ -9431,9 +9120,7 @@ namespace DCLF
 		in.depthOnly = a_depthOnly;
 		in.hybrid = a_resources.hybrid;
 		in.residentUploaded = a_resources.residentUploaded[a_depthOnly && a_resources.inputsDepth ? 0 : 1];
-		in.objectsUploaded = a_resources.objectsUploaded;
-		in.bonesUploaded = a_resources.bonesUploaded;
-		in.geometriesUploaded = a_resources.geometriesUploaded;
+		in.tablesHeld = a_resources.tablesHeld;
 		in.resolveTextures = !a_depthOnly || !bareDepthTextures;
 		in.bindless = BindlessObjects();
 		in.bindlessDraws = BindlessDraws();
@@ -9503,7 +9190,7 @@ namespace DCLF
 				text += fmt::format("[DCLF] persistent bindings ({}): {} builds; a build: {:.1f} pipelines and {:.1f} pairs clean, {:.1f} and {:.1f} looked at, {:.1f} blocks and {:.1f} records written; {} records held, {:.0f} KB of blocks, {} resets; parity {} draws checked, {} differ{}{}\n",
 					i == kAsyncZPrepass ? "zprepass" : "colour", cache.persistentBuilds, cache.persistentCleanPipelines / n, cache.persistentCleanPairs / n,
 					cache.persistentDirtyPipelines / n, cache.persistentDirtyPairs / n, cache.persistentBlocks / n, cache.persistentRecords / n,
-					kept.records->size() - kept.recordFree.size(), kept.constants->size() / 1024.0, cache.persistentResets, cache.persistentParityChecks,
+					kept.records.Size() - kept.recordFree.size(), kept.constants.Size() / 1024.0, cache.persistentResets, cache.persistentParityChecks,
 					cache.persistentParityMismatches, cache.persistentParityChecks ? (cache.persistentParityMismatches ? " <- DIFFER; first: " : " <- OK") : "",
 					cache.persistentParityFirst);
 				cache.persistentBuilds = cache.persistentBlocks = cache.persistentRecords = cache.persistentResets = 0;
@@ -9516,39 +9203,43 @@ namespace DCLF
 			if (!store->updates)
 				continue;
 			text += fmt::format("[DCLF] persistent object records ({}): {} updates, {:.1f} records rewritten an update, {} records held, {} resyncs, {} collisions; parity {} checked, {} differ{}\n",
-				name, store->updates, static_cast<double>(store->rewritten) / store->updates, store->records->size(), store->resyncs, store->collisions, store->parityChecks,
-				store->parityMismatches, store->parityChecks ? (store->parityMismatches || store->collisions ? " <- DIFFER" : " <- OK") : "");
-			store->updates = store->rewritten = store->resyncs = store->collisions = store->parityChecks = store->parityMismatches = 0;
+				name, store->updates, static_cast<double>(store->rewritten) / store->updates, store->records.Size(), store->resyncs, store->collisions, store->parity.checks,
+				store->parity.mismatches, store->collisions && store->parity.checks ? std::string(" <- DIFFER") : store->parity.Verdict(true));
+			store->updates = store->rewritten = store->resyncs = store->collisions = 0;
+			store->parity.Reset();
 		}
 		if (auto& k = impl->shadowKept; k.builds) {
 			std::size_t entries = 0;
 			for (const auto& mode : k.modes)
-				entries += mode.inputs->size();
+				entries += mode.inputs.Size();
 			text += fmt::format("[DCLF] persistent shadow state: {} builds, {:.1f} entries and {:.1f} records written a build, {} entries and {} records held, {} resyncs; parity {} inputs checked, {} differ{}{}\n",
-				k.builds, static_cast<double>(k.entriesWritten) / k.builds, static_cast<double>(k.recordsWritten) / k.builds, entries, k.records->size(), k.resyncs,
-				k.parityChecks, k.parityMismatches, k.parityChecks ? (k.parityMismatches ? " <- DIFFER; first: " : " <- OK") : "", k.parityFirst);
-			k.builds = k.entriesWritten = k.recordsWritten = k.resyncs = k.parityChecks = k.parityMismatches = 0;
-			k.parityFirst.clear();
+				k.builds, static_cast<double>(k.entriesWritten) / k.builds, static_cast<double>(k.recordsWritten) / k.builds, entries, k.records.Size(), k.resyncs,
+				k.parity.checks, k.parity.mismatches, k.parity.Verdict(true), "");
+			k.builds = k.entriesWritten = k.recordsWritten = k.resyncs = 0;
+			k.parity.Reset();
 		}
 		for (auto [name, store] : { std::pair{ "main", &impl->mainBones }, std::pair{ "shadow", &impl->shadowBones } }) {
 			if (!store->updates)
 				continue;
 			text += fmt::format("[DCLF] persistent bone rows ({}): {} updates, {} resyncs, {} capacity rows; parity {} checked, {} differ{}\n", name, store->updates, store->resyncs,
-				store->capacity, store->parityChecks, store->parityMismatches, store->parityChecks ? (store->parityMismatches ? " <- DIFFER" : " <- OK") : "");
-			store->updates = store->resyncs = store->parityChecks = store->parityMismatches = 0;
+				store->capacity, store->parity.checks, store->parity.mismatches, store->parity.Verdict());
+			store->updates = store->resyncs = 0;
+			store->parity.Reset();
 		}
 		for (auto [name, store] : { std::pair{ "main", &impl->mainGeometries }, std::pair{ "shadow", &impl->shadowGeometries } }) {
 			if (!store->updates)
 				continue;
 			text += fmt::format("[DCLF] persistent geometry table ({}): {} updates, {:.2f} slots repacked an update, {} slots held, {} resyncs; parity {} checked, {} differ{}\n", name,
-				store->updates, static_cast<double>(store->rewritten) / store->updates, store->packed->size(), store->resyncs, store->parityChecks, store->parityMismatches,
-				store->parityChecks ? (store->parityMismatches ? " <- DIFFER" : " <- OK") : "");
-			store->updates = store->rewritten = store->resyncs = store->parityChecks = store->parityMismatches = 0;
+				store->updates, static_cast<double>(store->rewritten) / store->updates, store->packed.Size(), store->resyncs, store->parity.checks, store->parity.mismatches,
+				store->parity.Verdict(true));
+			store->updates = store->rewritten = store->resyncs = 0;
+			store->parity.Reset();
 		}
 		if (auto& c = impl->sunExclusionCache; c.builds) {
-			text += fmt::format("[DCLF] sun exclusion: {} builds, {} reused; parity {} checked, {} differ{}\n", c.builds, c.reused, c.parityChecks, c.parityMismatches,
-				c.parityChecks ? (c.parityMismatches ? " <- DIFFER" : " <- OK") : "");
-			c.builds = c.reused = c.parityChecks = c.parityMismatches = 0;
+			text += fmt::format("[DCLF] sun exclusion: {} builds, {} reused; parity {} checked, {} differ{}\n", c.builds, c.reused, c.parity.checks, c.parity.mismatches,
+				c.parity.Verdict());
+			c.builds = c.reused = 0;
+			c.parity.Reset();
 		}
 		static constexpr const char* kNames[3] = { "colour", "zprepass", "shadow" };
 		for (std::size_t i = 0; i < stats.async.size(); ++i) {
@@ -9584,50 +9275,16 @@ namespace DCLF
 				a_emit(constantsTarget, bytes.data(), bytes.size(), false, 0);
 			if (a_payload.persistent) {
 				// The kept blocks and records: what changed since the version the buffers hold, else all of them.
-				const auto heldConstants = a_resources.constantsUploaded[segment];
-				if (a_payload.constantBytes && !a_payload.constantBytes->empty() && a_payload.constantsVersion != heldConstants) {
-					const auto& kept = *a_payload.constantBytes;
-					if (heldConstants == a_payload.constantsDirtyBase) {
-						auto dirty = a_payload.constantsDirty;
-						std::sort(dirty.begin(), dirty.end());
-						for (std::size_t k = 0; k < dirty.size();) {
-							const std::uint64_t first = dirty[k].first;
-							std::uint64_t end = first + dirty[k].second;
-							while (++k < dirty.size() && dirty[k].first <= end)
-								end = std::max<std::uint64_t>(end, dirty[k].first + dirty[k].second);
-							end = std::min<std::uint64_t>(end, kept.size());
-							if (first < end)
-								a_emit(constantsTarget, kept.data() + first, static_cast<std::size_t>(end - first), false, static_cast<std::size_t>(first));
-						}
-					} else {
-						a_emit(constantsTarget, kept.data(), kept.size(), false, 0);
-					}
-				}
-				const auto heldRecords = a_resources.recordsUploaded[segment];
-				if (a_payload.recordMirror && !a_payload.recordMirror->empty() && a_payload.recordsVersion != heldRecords) {
-					const auto& kept = *a_payload.recordMirror;
-					if (heldRecords == a_payload.recordsDirtyBase) {
-						auto dirty = a_payload.recordsDirty;
-						std::sort(dirty.begin(), dirty.end());
-						for (std::size_t k = 0; k < dirty.size();) {
-							const std::uint32_t first = dirty[k];
-							std::uint32_t end = first + 1;
-							while (++k < dirty.size() && dirty[k] <= end)
-								end = std::max(end, dirty[k] + 1);
-							end = std::min<std::uint32_t>(end, static_cast<std::uint32_t>(kept.size()));
-							if (first < end)
-								a_emit(recordsTarget, kept.data() + first, std::size_t(end - first) * sizeof(DrawBindings), false, std::size_t(first) * sizeof(DrawBindings));
-						}
-					} else {
-						a_emit(recordsTarget, kept.data(), kept.size() * sizeof(DrawBindings), false, 0);
-					}
-				}
+				a_payload.keptConstants.Emit(a_resources.constantsUploaded[segment],
+					[&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) { a_emit(constantsTarget, a_data, a_bytes, false, a_offset); });
+				a_payload.keptRecords.Emit(a_resources.recordsUploaded[segment],
+					[&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) { a_emit(recordsTarget, a_data, a_bytes, false, a_offset); });
 			}
-			EmitObjectRecords(a_payload.objectRecords, a_resources.objectsUploaded, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
+			a_payload.objectRecords.Emit(a_resources.tablesHeld.objects, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
 				a_emit(a_resources.objects, a_data, a_bytes, false, a_offset);
 			});
 			if (a_resources.bones)
-				EmitBones(a_payload.bones, a_resources.bonesUploaded, nullptr, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
+				EmitBones(a_payload.bones, a_resources.tablesHeld.bones, nullptr, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
 					a_emit(a_resources.bones, a_data, a_bytes, false, a_offset);
 				});
 			if (!a_payload.records.empty())
@@ -9636,29 +9293,12 @@ namespace DCLF
 			// then the frame's own inputs after it.
 			const bool depth = a_payload.inputs.depthOnly && a_resources.inputsDepth;
 			const auto& inputs = depth ? a_resources.inputsDepth : a_resources.inputs;
-			const std::size_t regionCount = a_payload.residentInputs ? a_payload.residentInputs->size() : 0;
-			const auto held = a_resources.residentUploaded[depth ? 0 : 1];
-			if (regionCount && a_payload.residentVersion != held) {
-				const auto* data = a_payload.residentInputs->data();
-				if (held == a_payload.residentDirtyBase) {
-					// The entries changed since the version the buffer holds, as contiguous runs.
-					auto dirty = a_payload.residentDirty;
-					std::sort(dirty.begin(), dirty.end());
-					for (std::size_t k = 0; k < dirty.size();) {
-						const std::uint32_t first = dirty[k];
-						std::uint32_t end = first + 1;
-						while (++k < dirty.size() && dirty[k] <= end)
-							end = std::max(end, dirty[k] + 1);
-						if (first < regionCount)
-							a_emit(inputs, data + first, (std::min<std::size_t>(end, regionCount) - first) * sizeof(DrawInput), false, first * sizeof(DrawInput));
-					}
-				} else {
-					a_emit(inputs, data, regionCount * sizeof(DrawInput), false, 0);
-				}
-			}
+			const std::size_t regionCount = a_payload.resident.Count();
+			a_payload.resident.Emit(a_resources.residentUploaded[depth ? 0 : 1],
+				[&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) { a_emit(inputs, a_data, a_bytes, false, a_offset); });
 			if (!a_payload.inputList.empty())
 				a_emit(inputs, a_payload.inputList.data(), a_payload.inputList.size() * sizeof(DrawInput), false, regionCount * sizeof(DrawInput));
-			EmitGeometryDraws(a_payload.geometryDraws, a_resources.geometriesUploaded, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
+			EmitGeometryDraws(a_payload.geometryDraws, a_resources.tablesHeld.geometries, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
 				a_emit(a_resources.geometries, a_data, a_bytes, false, a_offset);
 			});
 		}
@@ -9716,13 +9356,13 @@ namespace DCLF
 	{
 		using org::runtime::UploadTarget;
 		auto batch = AcquireStagedBatch(a_pool);
-		EmitObjectRecords(a_payload.objects, a_resources.objectsUploaded, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
+		a_payload.objects.Emit(a_resources.tablesHeld.objects, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
 			batch->Stage(UploadTarget::FromShared(a_resources.objects), a_offset, a_data, a_bytes);
 		});
-		EmitBones(a_payload.bones, a_resources.bonesUploaded, nullptr, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
+		EmitBones(a_payload.bones, a_resources.tablesHeld.bones, nullptr, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
 			batch->Stage(UploadTarget::FromShared(a_resources.bones), a_offset, a_data, a_bytes);
 		});
-		EmitGeometryDraws(a_payload.geometries, a_resources.geometriesUploaded, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
+		EmitGeometryDraws(a_payload.geometries, a_resources.tablesHeld.geometries, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
 			batch->Stage(UploadTarget::FromShared(a_resources.geometries), a_offset, a_data, a_bytes);
 		});
 		for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
@@ -9866,6 +9506,11 @@ namespace DCLF
 			static const std::array<std::uint32_t, kStrictLightDataBytes / 4> zeroLight{};
 			uploads(a_resources->frameConstants, zeroLight.data(), sizeof(zeroLight), std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes);
 		}
+		// The frame lighting, only when it changed (RefreshFrameConstants versions it).
+		if (const auto& lightingTables = a_store.GetTables(); in.bindless && a_resources->frameLightingUploaded != lightingTables.frameLightingVersion) {
+			uploads(a_resources->frameConstants, lightingTables.frameLighting.data(), sizeof(lightingTables.frameLighting), std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes);
+			a_resources->frameLightingUploaded = lightingTables.frameLightingVersion;
+		}
 
 		lap(3);
 		// Upload (the graph's upload pass runs ahead of every pass of this epoch). The worker's build staged its
@@ -9898,7 +9543,7 @@ namespace DCLF
 			UploadMainPayload(a_payload, *a_resources, uploads);
 		// The kept records carry the frame textures the last commit resolved (PersistentBindings): where one resolves to another
 		// index now, the records reading it are patched and uploaded again (after the payload's own uploads, which they follow).
-		if (a_payload.persistent && !depthOnly && a_payload.recordMirror) {
+		if (a_payload.persistent && !depthOnly && a_payload.keptRecords.elements) {
 			auto& committed = a_resources->committedFrameTextures[1];
 			std::array<std::uint64_t, 2> used{}, changed{}, missing{};
 			for (const auto& mask : a_payload.patchMasks) {
@@ -9920,7 +9565,7 @@ namespace DCLF
 					changed[t / 64] |= bit;
 			}
 			std::uint32_t keptMissing = 0, patched = 0;
-			auto& keptRecords = *a_payload.recordMirror;
+			auto& keptRecords = *a_payload.keptRecords.elements;
 			const auto& recordsTarget = a_resources->records;
 			for (std::uint32_t slot = 0; slot < a_payload.patchMasks.size() && slot < keptRecords.size(); ++slot) {
 				const auto& mask = a_payload.patchMasks[slot];
@@ -9940,39 +9585,39 @@ namespace DCLF
 				++a_resources->committedFrameTexturesVersion[1];
 		}
 		if (a_payload.persistent) {
-			a_resources->constantsUploaded[depthOnly ? 0 : 1] = a_payload.constantsVersion;
-			a_resources->recordsUploaded[depthOnly ? 0 : 1] = a_payload.recordsVersion;
+			a_resources->constantsUploaded[depthOnly ? 0 : 1] = a_payload.keptConstants.Version();
+			a_resources->recordsUploaded[depthOnly ? 0 : 1] = a_payload.keptRecords.Version();
 		}
 		// Either path uploaded the resident region when the buffer held another version of it, and the object records.
-		a_resources->residentUploaded[depthOnly && a_resources->inputsDepth ? 0 : 1] = a_payload.residentVersion;
-		const std::size_t objectBytes = EmitObjectRecords(a_payload.objectRecords, a_resources->objectsUploaded, [](const void*, std::size_t, std::size_t) {});
-		if (a_payload.objectRecords.version)
-			a_resources->objectsUploaded = a_payload.objectRecords.version;
-		const std::size_t geometryBytes = EmitGeometryDraws(a_payload.geometryDraws, a_resources->geometriesUploaded, [](const void*, std::size_t, std::size_t) {});
-		if (a_payload.geometryDraws.version)
-			a_resources->geometriesUploaded = a_payload.geometryDraws.version;
+		a_resources->residentUploaded[depthOnly && a_resources->inputsDepth ? 0 : 1] = a_payload.resident.Version();
+		const std::size_t objectBytes = a_payload.objectRecords.Emit(a_resources->tablesHeld.objects, [](const void*, std::size_t, std::size_t) {});
+		if (a_payload.objectRecords.Version())
+			a_resources->tablesHeld.objects = a_payload.objectRecords.Version();
+		const std::size_t geometryBytes = EmitGeometryDraws(a_payload.geometryDraws, a_resources->tablesHeld.geometries, [](const void*, std::size_t, std::size_t) {});
+		if (a_payload.geometryDraws.Version())
+			a_resources->tablesHeld.geometries = a_payload.geometryDraws.Version();
 		std::size_t boneRowsSent = 0;
-		if (a_payload.bones.version) {
+		if (a_payload.bones.Version()) {
 			BonesStore* bonesParity = PersistentParityEnabled() ? &mainBones : nullptr;
-			boneRowsSent = EmitBones(a_payload.bones, a_resources->bonesUploaded, bonesParity, [](const void*, std::size_t, std::size_t) {});
+			boneRowsSent = EmitBones(a_payload.bones, a_resources->tablesHeld.bones, bonesParity, [](const void*, std::size_t, std::size_t) {});
 			if (bonesParity && frameNumber % 60 == 0)
 				CheckBones(*bonesParity, a_payload.bones);
-			a_resources->bonesUploaded = a_payload.bones.version;
+			a_resources->tablesHeld.bones = a_payload.bones.Version();
 			mainBones.rowsSent += boneRowsSent;
 		}
-		a_stats.residentInputs = a_payload.residentInputs ? static_cast<std::uint32_t>(a_payload.residentInputs->size()) : 0;
+		a_stats.residentInputs = static_cast<std::uint32_t>(a_payload.resident.Count());
 		if (!depthOnly) {
 			a_stats.residentDraws = a_payload.residentDraws;
 			a_stats.residentPairs = a_payload.residentPairs;
 			a_stats.residentUndrawable = a_payload.residentUndrawable;
 		}
-		a_stats.residentVersions += a_payload.residentVersion != a_stats.residentLastVersion[depthOnly ? 0 : 1] ? 1 : 0;
-		a_stats.residentLastVersion[depthOnly ? 0 : 1] = a_payload.residentVersion;
+		a_stats.residentVersions += a_payload.resident.Version() != a_stats.residentLastVersion[depthOnly ? 0 : 1] ? 1 : 0;
+		a_stats.residentLastVersion[depthOnly ? 0 : 1] = a_payload.resident.Version();
 		a_stats.residentResyncs += a_payload.residentResyncs;
 		a_stats.residentParityChecks += a_payload.residentParityChecks;
 		a_stats.residentParityMismatches += a_payload.residentParityMismatches;
 		a_stats.residentMissing += a_payload.residentMissing;
-		a_stats.boneRows = a_payload.bones.version ? static_cast<std::uint32_t>(boneRowsSent) : a_payload.bones.Rows();
+		a_stats.boneRows = a_payload.bones.Version() ? static_cast<std::uint32_t>(boneRowsSent) : a_payload.bones.Rows();
 
 		lap(4);
 		// The build's stats.
@@ -10032,7 +9677,7 @@ namespace DCLF
 		const auto decalCount = depthOnly ? std::array<std::uint32_t, kDecalGroups>{} : a_payload.decalCount;
 		// Inputs the culling dispatch covers. In the depth segment this exceeds drawCount, because that
 		// segment submits a cull-only input for every candidate it is not allowed to draw.
-		const std::uint32_t inputCount = static_cast<std::uint32_t>(a_payload.inputList.size() + (a_payload.residentInputs ? a_payload.residentInputs->size() : 0));
+		const std::uint32_t inputCount = static_cast<std::uint32_t>(a_payload.inputList.size() + (a_payload.resident.Count()));
 		const auto& previousShape = a_resources->published[shapeIndex];
 		auto frame = std::make_shared<PassFrame>();
 		frame->drawCapacity = GrowCapacity(previousShape ? previousShape->drawCapacity : 0u, drawCount, kMaxDraws);
@@ -10467,8 +10112,8 @@ namespace DCLF
 				inside = InSunCascade(sunUpload, c, input.boundCentre, input.boundRadius);
 			readback.sunCpuMissed += inside ? 0 : 1;
 		};
-		if (a_payload.residentInputs)
-			for (const auto& input : *a_payload.residentInputs)
+		if (a_payload.resident.elements)
+			for (const auto& input : *a_payload.resident.elements)
 				sunTest(input);
 		for (const auto& input : a_payload.inputList)
 			sunTest(input);

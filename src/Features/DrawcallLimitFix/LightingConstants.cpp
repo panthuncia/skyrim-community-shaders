@@ -27,6 +27,61 @@ namespace DCLF
 		}
 	}
 
+	bool SameBindlessGeometry(const GeometryConstants& a_a, const GeometryConstants& a_b)
+	{
+		for (std::uint32_t stage = 0; stage < 2; ++stage) {
+			const auto& layout = stage ? LightingPSLayout() : LightingVSLayout();
+			const std::uint64_t read = (stage ? kPSGroups[kPerGeometry] & ~kPSBindlessGeometryUnread : kVSGroups[kPerGeometry] & ~kVSBindlessGeometryUnread);
+			const auto& a = stage ? a_a.ps : a_a.vs;
+			const auto& b = stage ? a_b.ps : a_b.vs;
+			for (std::uint32_t v = 0; v < layout.count; ++v)
+				if (((read >> v) & 1) && std::memcmp(&a.floats[layout.offset[v]], &b.floats[layout.offset[v]], layout.size[v] * sizeof(float)) != 0)
+					return false;
+		}
+		return true;
+	}
+
+	namespace
+	{
+		/** @brief Each frame lighting component: its float in a PerGeometry PS block and its index in FrameLighting. */
+		template <class F>
+		void ForEachFrameLightingFloat(F&& a_f)
+		{
+			const auto& layout = LightingPSLayout();
+			std::uint32_t row = 0;
+			for (std::uint32_t i = 0; i < 4; ++i) {
+				const std::uint32_t v = kPSFrameGeometry[i];
+				for (std::uint32_t c = 0; c < layout.size[v] && row * 4 + c < kFrameLightingRows * 4; ++c)
+					a_f(v, c, layout.offset[v] + c, row * 4 + c);
+				row += (layout.size[v] + 3) / 4;
+			}
+		}
+	}
+
+	void MergeFrameLighting(const ConstantBlock& a_ps, FrameLighting& a_out, std::uint32_t& a_written)
+	{
+		static_assert(kFrameLightingRows * 4 <= 32);
+		ForEachFrameLightingFloat([&](std::uint32_t, std::uint32_t, std::uint32_t a_float, std::uint32_t a_index) {
+			if (!((a_written >> a_index) & 1) && a_ps.Written(a_float)) {
+				a_out[a_index] = a_ps.floats[a_float];
+				a_written |= 1u << a_index;
+			}
+		});
+	}
+
+	bool MatchesFrameLighting(const ConstantBlock& a_ps, const FrameLighting& a_lighting, std::string* a_first)
+	{
+		bool match = true;
+		ForEachFrameLightingFloat([&](std::uint32_t a_variable, std::uint32_t a_component, std::uint32_t a_float, std::uint32_t a_index) {
+			if (!match || !a_ps.Written(a_float) || std::bit_cast<std::uint32_t>(a_ps.floats[a_float]) == std::bit_cast<std::uint32_t>(a_lighting[a_index]))
+				return;
+			match = false;
+			if (a_first)
+				*a_first = fmt::format("PS{}[{}]: {} against the frame's {}", a_variable, a_component, a_ps.floats[a_float], a_lighting[a_index]);
+		});
+		return match;
+	}
+
 	const float* ExtraRowsOf(const SceneStore::Tables& a_tables, std::uint32_t a_objectIndex)
 	{
 		if (a_objectIndex >= a_tables.extraOffset.size())

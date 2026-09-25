@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "AsyncWorker.h"
+#include "KeptState.h"
+#include "SlotTable.h"
 #include "LightingDescriptors.h"
 #include "ConstantEvaluator.h"
 #include "Lookups.h"
@@ -158,8 +160,8 @@ namespace DCLF
 			// instead of the record's 2.3 KB.
 			std::vector<std::uint32_t> materialVersion;
 			// Versions the builds' kept bindings key on (IndirectDraws' PersistentBindings), each new (NextVersion) whenever
-			// what it covers is written with a different value: per pipeline its constants' floats (technique and PerGeometry)
-			// and what its pairs' records read (the key, the technique's filter modes and shadow mask, the permutation); per
+			// what it covers is written with a different value: per pipeline its PerGeometry floats and what its pairs' records
+			// read of it (the key, the permutation), the technique's being its row's (TechniqueRow); per
 			// material slot the frame's floats (RefreshFrameMaterials, RefreshTextureTransforms). materialVersion covers the
 			// rest of a material.
 			std::vector<std::uint32_t> pipelineConstantsVersion;  // parallel to pipelines
@@ -236,6 +238,13 @@ namespace DCLF
 			std::vector<std::uint8_t> skinPartitions;             // parallel to objects
 			std::vector<GeometryConstants> geometryConstants;     // parallel to pipelines (per-frame PerGeometry values)
 			std::vector<std::uint8_t> geometryConstantsValid;     // parallel to pipelines
+			// The frame's lighting (DirLightDirection, DirLightColor, DirectionalAmbient, AmbientSpecularTintAndFresnelPower):
+			// FrameLighting's rows (LightingConstants.h), which the DCLF_BINDLESS draws read from their own frame block
+			// (PS b13) instead of each pipeline's PerGeometry block. RefreshFrameConstants writes it, and versions it
+			// (NextVersion), only when it differs; geometryConstants still hold the values, for the constant-buffer path
+			// and the parity checks, but a change of them alone no longer versions a pipeline.
+			std::array<float, 24> frameLighting{};
+			std::uint32_t frameLightingVersion = 0;
 			// The property whose lighting pass supplied each pipeline's per-frame constants, kept so
 			// RefreshFrameConstants can re-evaluate them once the main camera's state is current.
 			std::vector<RE::BSShaderProperty*> geometryTemplate;  // parallel to pipelines
@@ -245,7 +254,22 @@ namespace DCLF
 			// later native-visible object take the template over, which replaces the ordering guarantee
 			// that a persistent table cannot keep.
 			std::vector<std::uint8_t> geometryTemplateNative;     // parallel to pipelines
-			std::vector<TechniqueConstants> techniqueConstants;   // parallel to pipelines (per-frame PerTechnique values, filter modes)
+			// The PerTechnique values (and the technique's filter modes and shadow mask), one row per TechniqueKey - what
+			// EvaluateTechnique reads of a pass descriptor - which every pipeline of the key shares (pipelineTechnique).
+			// RefreshFrameConstants evaluates each used row once a frame and writes it only when it differs, versioning its
+			// floats (constantsVersion) and its bindings (bindingVersion) apart. Rows are never freed: there are a few dozen.
+			struct TechniqueRow
+			{
+				std::uint32_t key = 0;
+				TechniqueConstants value;
+				std::uint32_t constantsVersion = 0, bindingVersion = 0;
+				std::uint32_t evaluated = ~0u;  // the frame
+			};
+			std::vector<TechniqueRow> techniques;
+			ankerl::unordered_dense::map<std::uint32_t, std::uint32_t> techniqueRow;  // TechniqueKey -> row
+			std::vector<std::uint32_t> pipelineTechnique;  // parallel to pipelines: its row
+			const TechniqueRow& TechniqueRowOf(std::size_t a_pipeline) const { return techniques[pipelineTechnique[a_pipeline]]; }
+			const TechniqueConstants& TechniqueOf(std::size_t a_pipeline) const { return TechniqueRowOf(a_pipeline).value; }
 			std::vector<PipelinePermutation> permutations;        // parallel to pipelines
 			std::vector<DrawSequence> draws;  // one per object (templates: pipelineIndex is the table index)
 			// Decals (CS_DCLF_DECALS): each decal object's slot in its group's draw range, in the engine's
@@ -321,37 +345,30 @@ namespace DCLF
 			std::vector<std::uint8_t> residentSlot;  // parallel to objects
 			// The change log (drawcall-limit-fix.md, "Persistent draw state"): every write that changes a slot's columns
 			// appends the slot with what changed (ChangeCause), whenever it happens. The persistent structures built from
-			// the tables (the resident regions, and the ones after them) read it from their own position (absolute:
-			// changeLogBase is changeLog[0]'s); one that fell behind the trimmed head, or whose tables generation changed,
-			// reads every slot again. A write that leaves the columns as they were appends nothing.
+			// the tables read it from their own position (LogCursor); one that fell behind the trimmed head, or whose tables
+			// generation changed, reads every slot again. A write that leaves the columns as they were appends nothing.
 			struct Change
 			{
 				std::uint32_t slot = 0;
 				std::uint32_t causes = 0;  // ChangeCause bits
 			};
-			std::vector<Change> changeLog;
-			std::uint64_t changeLogBase = 0;
+			EventLog<Change> changeLog;
 			std::array<std::uint64_t, kChangeCauseCount> changeCounts{};  // notes by cause, for the report
 			void NoteChange(std::uint32_t a_slot, std::uint32_t a_causes)
 			{
 				if (!a_causes)
 					return;
-				changeLog.push_back({ a_slot, a_causes });
+				changeLog.Push({ a_slot, a_causes });
 				for (std::uint32_t bits = a_causes; bits; bits &= bits - 1)
 					++changeCounts[std::countr_zero(bits)];
 			}
-			// The geometry slots written since geometryLogBase: a record resolved (ResolveGeometrySlot), a slot added
-			// (AllocateGeometrySlot), a partition link that changed. What the persistent geometry tables repack (IndirectDraws'
-			// GeometryStore); a gap past the end makes every reader resync, as with the change log.
-			std::vector<std::uint32_t> geometryLog;
-			std::uint64_t geometryLogBase = 0;
-			void NoteGeometry(std::uint32_t a_slot) { geometryLog.push_back(a_slot); }
-			/** @brief Every slot is to be read again: a gap past the log's end makes every reader resync. */
-			void InvalidateChangeLog()
-			{
-				changeLogBase += changeLog.size() + 1;
-				changeLog.clear();
-			}
+			// The geometry slots written: a record resolved (ResolveGeometrySlot), a slot added (AllocateGeometrySlot), a
+			// partition link that changed. What the persistent geometry tables repack (IndirectDraws' GeometryStore), read
+			// like the change log.
+			EventLog<std::uint32_t> geometryLog;
+			void NoteGeometry(std::uint32_t a_slot) { geometryLog.Push(a_slot); }
+			/** @brief Every slot is to be read again: every reader of the change log resyncs. */
+			void InvalidateChangeLog() { changeLog.Invalidate(); }
 			/** @brief A slot's columns, everything a persistent consumer builds from, for the writers to compare against. */
 			struct Columns
 			{
@@ -411,24 +428,57 @@ namespace DCLF
 			/**
 			 * @brief The three shared tables keep their slots across frames (CS_DCLF_DERIVED_CACHE).
 			 *
-			 * A slot is alive while its lastUsed frame is not kSlotFree, used this frame when it equals the
-			 * frame, and swept (map entry erased, slot on the free list) after kSlotIdleFrames without use.
-			 * The sweep runs before the loop, so no object of the frame can point at a slot it reuses. The
-			 * keys are kept per slot so the sweep can find the map entry, and so a cached slot index can be
-			 * checked against what it was derived for.
+			 * Which slots are alive, and how long, is each table's SlotTable: a slot lives while objects reference it and
+			 * for SlotTable::kIdleFrames after (SceneStore::UpdateSlotReferences counts the references from the logs), and
+			 * the expiry runs before the loop, so no object of the frame can point at a slot it reuses. A table's columns
+			 * are listed once (GeometryColumns, PipelineColumns, MaterialColumns), which is what grows and clears them.
+			 *
+			 * lastUsed is the frame a slot was last used, which is not its liveness: it certifies the raw engine pointers a
+			 * slot holds (a pipeline's lighting template, a material's key) as this frame's, which is what evaluating them
+			 * needs. Every bound object renews its slots each frame (the accumulate phase, KeepResidentsAlive), and
+			 * CheckObjectSlots holds that to it. The keys are kept per slot so a freed slot can find its map entry, and so a
+			 * cached slot index can be checked against what it was derived for.
 			 */
-			static constexpr std::uint32_t kSlotFree = ~0u;
-			static constexpr std::uint32_t kSlotIdleFrames = 64;
+			static constexpr std::uint32_t kSlotFree = ~0u;  // a lastUsed never used; ResolveGeometrySlot's "no slot"
+			SlotTable geometrySlots, pipelineSlots, materialSlots;
 			std::vector<std::uint32_t> geometryLastUsed;  // parallel to geometries
 			std::vector<const RE::BSGraphics::TriShape*> geometrySlotKey;
-			std::vector<std::uint32_t> geometryFree;
 			std::vector<std::uint32_t> pipelineLastUsed;  // parallel to pipelines
-			std::vector<std::uint32_t> pipelineFree;
 			std::vector<std::uint32_t> materialLastUsed;  // parallel to materials
 			std::vector<std::pair<const RE::BSShaderMaterial*, std::uint32_t>> materialSlotKey;
-			std::vector<std::uint32_t> materialFree;
 			bool PipelineUsed(std::size_t a_slot, std::uint32_t a_frame) const { return a_slot < pipelineLastUsed.size() && pipelineLastUsed[a_slot] == a_frame; }
-			bool PipelineAlive(std::size_t a_slot) const { return a_slot < pipelineLastUsed.size() && pipelineLastUsed[a_slot] != kSlotFree; }
+			bool PipelineAlive(std::size_t a_slot) const { return pipelineSlots.Alive(a_slot); }
+			// Each table's columns: a_column(vector, initial value...) for every vector parallel to it.
+			template <class F>
+			void GeometryColumns(F&& a_column)
+			{
+				a_column(geometries);
+				a_column(geometryLastUsed, kSlotFree);
+				a_column(geometrySlotKey);
+			}
+			template <class F>
+			void PipelineColumns(F&& a_column)
+			{
+				a_column(pipelines);
+				a_column(geometryConstants);
+				a_column(geometryConstantsValid);
+				a_column(geometryTemplate);
+				a_column(geometryTemplateNative);
+				a_column(pipelineTechnique);
+				a_column(permutations);
+				a_column(pipelineLastUsed, kSlotFree);
+				a_column(pipelineConstantsVersion);
+				a_column(pipelineBindingVersion);
+			}
+			template <class F>
+			void MaterialColumns(F&& a_column)
+			{
+				a_column(materials);
+				a_column(materialVersion);
+				a_column(materialFrameVersion);
+				a_column(materialLastUsed, kSlotFree);
+				a_column(materialSlotKey);
+			}
 
 			// The object slots. With CS_DCLF_OBJECT_SLOTS (default on) an object keeps its index for as long as it
 			// has a record: the per-object arrays above are indexed by slot and persist across walks, a free slot
@@ -1446,21 +1496,14 @@ namespace DCLF
 		// The pipelines' PerGeometry blocks (RefreshFrameConstants): full evaluations, frame samples, and the parity's findings.
 		struct GeometryStats
 		{
-			std::uint64_t frames = 0, full = 0, samples = 0, changed = 0, checks = 0, pipelinesChecked = 0, techniquesChecked = 0, techniquesDiffer = 0;
+			std::uint64_t frames = 0, full = 0, samples = 0, changed = 0, checks = 0, pipelinesChecked = 0, techniquesChecked = 0, techniquesDiffer = 0,
+						  lightingVersions = 0, lightingChecked = 0, lightingDiffer = 0;
+			std::string lightingFirst;
 			std::array<std::array<std::uint64_t, 64>, 2> differ{};
 			std::string first;
 		} geometryStats;
-		// The PerTechnique blocks: one evaluation a frame per TechniqueKey, versioned when it changes, and the version each
-		// pipeline slot holds (0: compare it).
-		struct TechniqueMemo
-		{
-			TechniqueConstants value;
-			std::uint32_t version = 0;
-			std::uint32_t frame = ~0u;
-		};
-		ankerl::unordered_dense::map<std::uint32_t, TechniqueMemo> techniqueMemo;
-		std::vector<std::uint32_t> techniqueVersionHeld;
-		std::uint32_t techniqueMemoVersions = 0;
+		/** @brief The technique row of a pass descriptor's TechniqueKey (Tables::techniques), made and evaluated when new. */
+		std::uint32_t TechniqueRowFor(std::uint32_t a_passDescriptor);
 		// The render flags the blocks were evaluated with: a change evaluates every pipeline in full.
 		std::uint32_t geometryEvaluatedFlags = ~0u;
 		void CheckFrameGeometry(std::uint32_t a_pipeline, const GeometryConstants& a_reference, const GeometryConstants& a_held);
@@ -1478,9 +1521,7 @@ namespace DCLF
 		struct ChangeLogParity
 		{
 			std::vector<Tables::Columns> snapshot;
-			std::uint64_t position = 0;
-			std::uint32_t generation = 0;
-			bool armed = false;
+			LogCursor cursor;  // the log where the snapshot was taken; active while one is waiting to be checked
 			std::uint64_t checks = 0, slots = 0, changed = 0, missing = 0, skipped = 0;
 			std::string first;
 		} changeParity;
@@ -1513,12 +1554,31 @@ namespace DCLF
 		std::vector<std::uint32_t> lastPatched;
 		std::vector<std::uint32_t> patchedFrame;
 		std::vector<std::uint32_t> refreshedGeometry;  // geometry slots ResolveGeometrySlot re-resolved in place this walk
-		// Geometry slot liveness. A geometry slot lives while an object draws from it: the sweep spares every slot an
-		// object references (geometryReferenced, rebuilt on sweep frames) and frees the rest once idle, so a kept object
-		// never renews its slot. What makes a slot stale is an event: its buffer references failing the staggered touch,
-		// buffers starting to resolve with the slot unresolved, or ResolveGeometrySlot freeing it (freedGeometry); the
-		// objects drawing a stale slot are written again (FinishDeltaWalk).
-		std::vector<std::uint8_t> geometryReferenced;
+		// Slot liveness (Tables' SlotTables): the references, counted from the logs. Per object slot, the geometry, pipeline
+		// and material it was counted as referencing (slot and generation); per geometry slot, the partition after it in a
+		// skin's chain (a chain's slots live while its first does). What makes a geometry slot stale is an event: its buffer
+		// references failing the staggered touch, buffers starting to resolve with the slot unresolved, or
+		// ResolveGeometrySlot freeing it (freedGeometry); the objects drawing a stale slot are written again (FinishDeltaWalk).
+		struct SlotReferences
+		{
+			static constexpr std::uint32_t kNone = ~0u;
+			struct Reference
+			{
+				std::uint32_t slot = kNone, generation = 0;
+				bool operator==(const Reference&) const = default;
+			};
+			struct Counted
+			{
+				Reference geometry, pipeline, material;
+			};
+			LogCursor objects, links;
+			std::vector<Counted> object;  // per object slot
+			std::vector<Reference> link;  // per geometry slot
+		} slotReferences;
+		/** @brief The slot tables' reference counts, from the change and geometry logs since the last call. */
+		void UpdateSlotReferences();
+		/** @brief Frees a geometry slot (and the reference it holds on the next partition) and its map entry. */
+		void FreeGeometrySlot(std::uint32_t a_slot);
 		std::vector<std::uint32_t> freedGeometry;
 		std::vector<std::uint32_t> staleGeometrySlots;
 		bool geometryResolvedLastWalk = false;
@@ -1610,7 +1670,7 @@ namespace DCLF
 		bool EvaluateMaterialForSlot(const RE::BSShaderMaterial* a_material, std::uint32_t a_pass, bool a_cacheOn,
 			bool a_probeAll, MaterialRecord& a_record);
 
-		/** @brief Frees the slots unused for kSlotIdleFrames and their map entries; before the loop. */
+		/** @brief Counts the slots' references and frees the ones idle past SlotTable::kIdleFrames with their map entries; before the loop. */
 		void SweepSlots();
 		/**
 		 * @brief Drops the slot tables, their maps and every cached derivation (by generation): the

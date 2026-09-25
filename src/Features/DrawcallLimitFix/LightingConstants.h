@@ -1,8 +1,10 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 
 #include "ConstantEvaluator.h"
 #include "SceneStore.h"
@@ -50,6 +52,40 @@ namespace DCLF
 	/** @brief Per-object light assignment, which the Light Limit Fix shaders never read. */
 	inline constexpr std::uint64_t kPSLightAssignment = (1ull << kPSNumLights) | (1ull << kPSPointLightPosition) | (1ull << kPSPointLightColor) |
 	                                                    (1ull << kPSShadowLightMaskSelect);
+
+	// The PerGeometry variables that are the frame's globals, the same in every pipeline that writes them (checked by
+	// CS_DCLF_PERSISTENT_PARITY): DirLightDirection, DirLightColor, DirectionalAmbient, AmbientSpecularTintAndFresnelPower
+	// and AmbientColor. EyePosition (VS 2) is written only by Envmap, Eye and technique 0x10, the same for all three.
+	inline constexpr std::uint32_t kVSEyePosition = 2;
+	inline constexpr std::uint32_t kPSFrameGeometry[5] = { 3, 4, 5, 6, 18 };
+	// The DCLF_BINDLESS pixel stage reads the first four from the frame's own block (DCLFFrameLighting, PS b13 in
+	// Lighting.hlsl), one float4 row each and three for DirectionalAmbient, so no pipeline's block changes with the sun.
+	inline constexpr std::uint32_t kFrameLightingRegister = 13;
+	inline constexpr std::uint32_t kFrameLightingRows = 6;
+	using FrameLighting = std::array<float, kFrameLightingRows * 4>;
+	/**
+	 * @brief What the DCLF_BINDLESS builds leave out of a pipeline's PerGeometry block: the frame lighting (read from
+	 * DCLFFrameLighting), what they read from the object's record and extras rows instead (World, PreviousWorld,
+	 * LandBlendParams, TreeParams, WindTimers, TextureProj; MaterialData, EmitColor, ProjectedUVParams 1-3), and what
+	 * Lighting.hlsl never reads (EyePosition, AmbientColor). Packed as zero, so the block's bytes change only with what is
+	 * the pipeline's own; SSRParams stays (its w alone is per object).
+	 */
+	inline constexpr std::uint64_t kVSBindlessGeometryUnread = (1ull << kVSWorld) | (1ull << kVSPreviousWorld) | (1ull << kVSEyePosition) | (1ull << kVSLandBlendParams) |
+	                                                           (1ull << kVSTreeParams) | (1ull << kVSWindTimers) | (1ull << kVSTextureProj);
+	inline constexpr std::uint64_t kPSBindlessGeometryUnread = (1ull << 3) | (1ull << 4) | (1ull << 5) | (1ull << 6) | (1ull << 18) | (1ull << kPSMaterialData) |
+	                                                           (1ull << kPSEmitColor) | (7ull << kPSProjectedUVParams);
+
+	/** @brief Whether two PerGeometry evaluations agree in everything a DCLF_BINDLESS draw reads from the pipeline's block. */
+	bool SameBindlessGeometry(const GeometryConstants& a_a, const GeometryConstants& a_b);
+
+	/**
+	 * @brief The frame lighting rows a PerGeometry PS block writes, into a_out where a_written (a bit per float) does not
+	 * have them yet; the bits it filled are added. Techniques differ in which components they write (Eye leaves
+	 * AmbientSpecularTintAndFresnelPower.w), so the frame's rows are merged from every evaluation of the frame.
+	 */
+	void MergeFrameLighting(const ConstantBlock& a_ps, FrameLighting& a_out, std::uint32_t& a_written);
+	/** @brief Whether a PerGeometry PS block agrees with the frame lighting in every component it writes. */
+	bool MatchesFrameLighting(const ConstantBlock& a_ps, const FrameLighting& a_lighting, std::string* a_first = nullptr);
 
 	/**
 	 * @brief An object's PerGeometry values as its native draw binds them: the per-frame block of its pass

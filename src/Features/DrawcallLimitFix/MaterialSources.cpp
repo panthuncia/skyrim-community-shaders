@@ -1,5 +1,7 @@
 #include "MaterialSources.h"
 
+#include "EventQueue.h"
+
 #include <bit>
 
 #include "ConstantEvaluator.h"
@@ -40,29 +42,10 @@ namespace DCLF::MaterialSources
 		constexpr std::uint32_t kVSTexcoordOffset = 11;
 		constexpr std::uint32_t kCharacterLightSlot = 11;
 
-		// ---- The write queue: a bounded multi-producer ring (per-cell sequence numbers), drained by the render
-		// thread once a frame. A producer never blocks; a full ring is reported as an overflow instead.
-		constexpr std::uint64_t kQueueCapacity = 8192;  // a power of two
-		struct Cell
+		// ---- The write queue (EventQueue): drained by the render thread once a frame; a producer never blocks.
+		EventQueue<const RE::BSShaderMaterial*, 8192>& GetQueue()
 		{
-			std::atomic<std::uint64_t> sequence;
-			const RE::BSShaderMaterial* material;
-		};
-		struct Queue
-		{
-			std::unique_ptr<Cell[]> cells{ new Cell[kQueueCapacity] };
-			std::atomic<std::uint64_t> head{ 0 };
-			std::uint64_t tail = 0;  // the render thread's
-			std::atomic<bool> overflowed{ false };
-			Queue()
-			{
-				for (std::uint64_t i = 0; i < kQueueCapacity; ++i)
-					cells[i].sequence.store(i, std::memory_order_relaxed);
-			}
-		};
-		Queue& GetQueue()
-		{
-			static Queue queue;
+			static EventQueue<const RE::BSShaderMaterial*, 8192> queue;
 			return queue;
 		}
 
@@ -206,39 +189,14 @@ namespace DCLF::MaterialSources
 	{
 		if (!a_material)
 			return;
-		auto& queue = GetQueue();
-		std::uint64_t position = queue.head.load(std::memory_order_relaxed);
-		for (;;) {
-			auto& cell = queue.cells[position & (kQueueCapacity - 1)];
-			const std::uint64_t sequence = cell.sequence.load(std::memory_order_acquire);
-			const auto difference = static_cast<std::int64_t>(sequence) - static_cast<std::int64_t>(position);
-			if (difference == 0) {
-				if (queue.head.compare_exchange_weak(position, position + 1, std::memory_order_relaxed)) {
-					cell.material = a_material;
-					cell.sequence.store(position + 1, std::memory_order_release);
-					return;
-				}
-			} else if (difference < 0) {
-				queue.overflowed.store(true, std::memory_order_relaxed);
-				return;
-			} else {
-				position = queue.head.load(std::memory_order_relaxed);
-			}
-		}
+		GetQueue().Push(a_material);
 	}
 
 	bool Drain(ankerl::unordered_dense::set<const RE::BSShaderMaterial*>& a_out)
 	{
-		auto& queue = GetQueue();
-		for (;;) {
-			auto& cell = queue.cells[queue.tail & (kQueueCapacity - 1)];
-			if (cell.sequence.load(std::memory_order_acquire) != queue.tail + 1)
-				break;
-			a_out.insert(cell.material);
-			cell.sequence.store(queue.tail + kQueueCapacity, std::memory_order_release);
-			++queue.tail;
-		}
-		return !queue.overflowed.exchange(false, std::memory_order_relaxed);
+		// The queue loses nothing (it spills when full), so a drain is always complete.
+		GetQueue().Drain([&](const RE::BSShaderMaterial* a_material) { a_out.insert(a_material); });
+		return true;
 	}
 
 	std::uint32_t Signature(std::uint32_t a_passDescriptor)

@@ -311,7 +311,7 @@ namespace DCLF
 	{
 		const auto& tables = SceneStore::Get().GetTables();
 		const auto& object = tables.objects[a_objectIndex];
-		const auto& technique = tables.techniqueConstants[object.pipelineIndex];
+		const auto& technique = tables.TechniqueOf(object.pipelineIndex);
 		// SetupTechnique writes VPOSOffset after it unmaps the buffer (engine notes, SetupTechnique); with
 		// DXVK the memory stays mapped and the draw sees the late write, so compare what is there now.
 		for (auto& stage : snapshots) {

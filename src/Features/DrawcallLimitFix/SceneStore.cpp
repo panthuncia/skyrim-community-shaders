@@ -1,5 +1,7 @@
 #include "SceneStore.h"
 
+#include "EventQueue.h"
+
 #include "LightingConstants.h"
 
 #include "MaterialSources.h"
@@ -120,12 +122,7 @@ namespace DCLF
 		 * compares the value before and after and pushes the node when it moved. Cull job threads push, the render
 		 * thread drains (SceneStore::ProcessEvents). A few tens a frame while the camera moves, none at rest.
 		 */
-		struct FadeEvent
-		{
-			const RE::BSFadeNode* node;
-			FadeEvent* next;
-		};
-		std::atomic<FadeEvent*> fadeEvents{ nullptr };
+		EventQueue<const RE::BSFadeNode*> fadeEvents;
 		constexpr std::size_t kMaxFadeChanges = 1u << 16;
 
 		float CurrentFade(RE::BSFadeNode* a_node)
@@ -133,21 +130,11 @@ namespace DCLF
 			return a_node->GetRuntimeData().currentFade;
 		}
 
-		void PushFade(const RE::BSFadeNode* a_node)
-		{
-			auto* event = new FadeEvent{ a_node, fadeEvents.load(std::memory_order_relaxed) };
-			while (!fadeEvents.compare_exchange_weak(event->next, event, std::memory_order_release, std::memory_order_relaxed)) {
-			}
-		}
+		void PushFade(const RE::BSFadeNode* a_node) { fadeEvents.Push(a_node); }
 
 		void DrainFadeEvents(std::vector<const RE::BSFadeNode*>& a_out)
 		{
-			for (auto* event = fadeEvents.exchange(nullptr, std::memory_order_acquire); event;) {
-				a_out.push_back(event->node);
-				auto* next = event->next;
-				delete event;
-				event = next;
-			}
+			fadeEvents.Drain([&](const RE::BSFadeNode* a_node) { a_out.push_back(a_node); });
 		}
 
 		struct FadeOnVisible
@@ -188,37 +175,16 @@ namespace DCLF
 		 *   holds a reference, as SceneTracker's attach events do, because the drain walks the node's subtree and its
 		 *   ancestors.
 		 */
-		struct PropertyEvent
-		{
-			const void* key;
-			PropertyEvent* next;
-		};
-		struct NodeEvent
-		{
-			RE::NiPointer<RE::NiAVObject> node;
-			NodeEvent* next;
-		};
-		std::atomic<PropertyEvent*> propertyEvents{ nullptr };
-		std::atomic<NodeEvent*> nodeEvents{ nullptr };
+		EventQueue<const void*> propertyEvents;
+		EventQueue<RE::NiPointer<RE::NiAVObject>> nodeEvents;
 		constexpr std::size_t kMaxStructuralEvents = 1u << 16;
 
-		template <class T>
-		void PushEvent(std::atomic<T*>& a_stack, T* a_event)
-		{
-			a_event->next = a_stack.load(std::memory_order_relaxed);
-			while (!a_stack.compare_exchange_weak(a_event->next, a_event, std::memory_order_release, std::memory_order_relaxed)) {
-			}
-		}
-
-		void PushProperty(const void* a_property)
-		{
-			PushEvent(propertyEvents, new PropertyEvent{ a_property, nullptr });
-		}
+		void PushProperty(const void* a_property) { propertyEvents.Push(a_property); }
 
 		void PushNode(RE::NiAVObject* a_node)
 		{
 			if (a_node)
-				PushEvent(nodeEvents, new NodeEvent{ RE::NiPointer<RE::NiAVObject>(a_node), nullptr });
+				nodeEvents.Push(RE::NiPointer<RE::NiAVObject>(a_node));
 		}
 
 		/**
@@ -229,7 +195,7 @@ namespace DCLF
 		 * around the call and pushes the property when either moved; RefreshFrameConstants resamples its dependents'
 		 * shading. Cull and accumulation job threads push, the render thread drains.
 		 */
-		std::atomic<PropertyEvent*> lodFadeEvents{ nullptr };
+		EventQueue<const void*> lodFadeEvents;
 		bool lodFadeEventsInstalled = false;
 
 		struct LodFadeRenderPasses
@@ -242,7 +208,7 @@ namespace DCLF
 				auto* passes = func(a_property, a_geometry, a_renderFlags, a_accumulator);
 				if (std::bit_cast<std::uint32_t>(a_property->specularLODFade) != std::bit_cast<std::uint32_t>(specular) ||
 					std::bit_cast<std::uint32_t>(a_property->envmapLODFade) != std::bit_cast<std::uint32_t>(envmap))
-					PushEvent(lodFadeEvents, new PropertyEvent{ a_property, nullptr });
+					lodFadeEvents.Push(a_property);
 				return passes;
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -250,32 +216,17 @@ namespace DCLF
 
 		void DrainLodFadeEvents(std::vector<const void*>& a_out)
 		{
-			for (auto* event = lodFadeEvents.exchange(nullptr, std::memory_order_acquire); event;) {
-				a_out.push_back(event->key);
-				auto* next = event->next;
-				delete event;
-				event = next;
-			}
+			lodFadeEvents.Drain([&](const void* a_key) { a_out.push_back(a_key); });
 		}
 
 		void DrainPropertyEvents(std::vector<const void*>& a_out)
 		{
-			for (auto* event = propertyEvents.exchange(nullptr, std::memory_order_acquire); event;) {
-				a_out.push_back(event->key);
-				auto* next = event->next;
-				delete event;
-				event = next;
-			}
+			propertyEvents.Drain([&](const void* a_key) { a_out.push_back(a_key); });
 		}
 
 		void DrainNodeEvents(std::vector<RE::NiPointer<RE::NiAVObject>>& a_out)
 		{
-			for (auto* event = nodeEvents.exchange(nullptr, std::memory_order_acquire); event;) {
-				a_out.push_back(std::move(event->node));
-				auto* next = event->next;
-				delete event;
-				event = next;
-			}
+			nodeEvents.Drain([&](RE::NiPointer<RE::NiAVObject>&& a_node) { a_out.push_back(std::move(a_node)); });
 		}
 
 		struct PropertySetFlags
@@ -349,11 +300,10 @@ namespace DCLF
 		struct SwitchEvent
 		{
 			RE::NiPointer<RE::NiAVObject> node;
-			std::int32_t before;
-			bool structural;
-			SwitchEvent* next;
+			std::int32_t before = 0;
+			bool structural = false;
 		};
-		std::atomic<SwitchEvent*> switchEvents{ nullptr };
+		EventQueue<SwitchEvent> switchEvents;
 		constexpr std::size_t kSwitchIndex = 0x12C;
 		constexpr std::size_t kMaxSwitchChanges = 1u << 14;
 
@@ -371,7 +321,7 @@ namespace DCLF
 		void PushSwitch(RE::NiAVObject* a_switch, std::int32_t a_before, bool a_structural)
 		{
 			if (a_switch && ::GetCurrentThreadId() == switchEventThread.load(std::memory_order_relaxed))
-				PushEvent(switchEvents, new SwitchEvent{ RE::NiPointer<RE::NiAVObject>(a_switch), a_before, a_structural, nullptr });
+				switchEvents.Push(SwitchEvent{ RE::NiPointer<RE::NiAVObject>(a_switch), a_before, a_structural });
 		}
 
 		/** @brief The patched stores' handler (SwitchStoreStubs): the store, and an event when it changed the index. */
@@ -868,24 +818,22 @@ namespace DCLF
 
 	void SceneStore::Tables::Clear()
 	{
-		geometryLastUsed.clear();
-		geometrySlotKey.clear();
-		geometryFree.clear();
-		pipelineLastUsed.clear();
-		pipelineFree.clear();
-		materialLastUsed.clear();
-		materialSlotKey.clear();
+		auto clear = [](auto& a_column, auto&&...) { a_column.clear(); };
+		GeometryColumns(clear);
+		PipelineColumns(clear);
+		MaterialColumns(clear);
+		geometrySlots.Clear();
+		pipelineSlots.Clear();
+		materialSlots.Clear();
 		frameSignatures.clear();
 		materialSignatureListed.clear();
 		materialFramePending.clear();
 		transformWatch.clear();
 		transformWatchFrame.clear();
-		materialFree.clear();
 		objects.clear();
 		objectGeometry.clear();
 		geometries.clear();
-		geometryLogBase += geometryLog.size() + 1;
-		geometryLog.clear();
+		geometryLog.Invalidate();
 		pipelines.clear();
 		materials.clear();
 		materialVersion.clear();
@@ -905,7 +853,8 @@ namespace DCLF
 		geometryConstantsValid.clear();
 		geometryTemplate.clear();
 		geometryTemplateNative.clear();
-		techniqueConstants.clear();
+		techniques.clear();
+		techniqueRow.clear();
 		permutations.clear();
 		draws.clear();
 		decalOrdinal.clear();
@@ -1377,11 +1326,7 @@ namespace DCLF
 			DrainNodeEvents(nodeChanged);
 			nodeChanged.clear();
 			// The switches are brought up to date by the rescan's walk (AddSubtree); PrimaryCull reads them all again.
-			for (auto* event = switchEvents.exchange(nullptr, std::memory_order_acquire); event;) {
-				auto* next = event->next;
-				delete event;
-				event = next;
-			}
+			switchEvents.Discard();
 			switchPending.clear();
 			switchPendingIndex.clear();
 			switchResync = true;
@@ -1443,24 +1388,14 @@ namespace DCLF
 		DrainNodeEvents(nodeChanged);
 		// The switch events, oldest first, one pending entry per switch: its index before the oldest event decides
 		// whether the selection changed (ApplySwitchEvents).
-		SwitchEvent* switches = nullptr;
-		for (auto* event = switchEvents.exchange(nullptr, std::memory_order_acquire); event;) {
-			auto* next = event->next;
-			event->next = switches;
-			switches = event;
-			event = next;
-		}
-		for (auto* event = switches; event;) {
+		switchEvents.Drain([&](SwitchEvent&& a_event) {
 			++delta.switchEvents;
-			const auto [at, inserted] = switchPendingIndex.try_emplace(event->node.get(), static_cast<std::uint32_t>(switchPending.size()));
+			const auto [at, inserted] = switchPendingIndex.try_emplace(a_event.node.get(), static_cast<std::uint32_t>(switchPending.size()));
 			if (inserted)
-				switchPending.push_back({ std::move(event->node), event->before, event->structural });
+				switchPending.push_back({ std::move(a_event.node), a_event.before, a_event.structural });
 			else
-				switchPending[at->second].structural |= event->structural;
-			auto* next = event->next;
-			delete event;
-			event = next;
-		}
+				switchPending[at->second].structural |= a_event.structural;
+		});
 		if (propertyChanged.size() > kMaxStructuralEvents || nodeChanged.size() > kMaxStructuralEvents) {
 			propertyChanged.clear();
 			nodeChanged.clear();
@@ -1736,12 +1671,10 @@ namespace DCLF
 
 	namespace
 	{
-		// The PerGeometry variables that are the frame's globals: DirLightDirection, DirLightColor, DirectionalAmbient,
-		// AmbientSpecularTintAndFresnelPower and AmbientColor. EyePosition (VS 2) is written only by the techniques
-		// evaluated in full every frame (Envmap, Eye, 0x10); every other technique leaves whatever the constant buffer last
-		// held there, which no draw of it reads.
-		constexpr std::uint32_t kVSEyePosition = 2;
-		constexpr std::array<std::uint32_t, 5> kFrameGeometryPS{ 3, 4, 5, 6, 18 };
+		// The frame's globals (kPSFrameGeometry, kVSEyePosition: LightingConstants.h). EyePosition is written only by Envmap,
+		// Eye and technique 0x10; every other technique leaves whatever the constant buffer last held there, which no draw
+		// of it reads.
+		static_assert(std::tuple_size_v<decltype(SceneStore::Tables::frameLighting)> == std::tuple_size_v<FrameLighting>);
 		// What ObjectGeometryConstants writes over the pipeline's block for every object (or every object of the pipeline's
 		// kind): World, PreviousWorld, LandBlendParams, TreeParams, WindTimers, TextureProj; the light assignment Light
 		// Limit Fix never reads, MaterialData, EmitColor, ShadowLightMaskSelect, ProjectedUVParams 1-3, SSRParams.
@@ -1754,7 +1687,7 @@ namespace DCLF
 		{
 			const auto& layout = LightingPSLayout();
 			bool changed = false;
-			for (const auto v : kFrameGeometryPS) {
+			for (const auto v : kPSFrameGeometry) {
 				const std::uint32_t offset = layout.offset[v];
 				const std::size_t bytes = layout.size[v] * sizeof(float);
 				if (!a_out.ps.Written(offset) || !a_sample.ps.Written(offset) || std::memcmp(&a_out.ps.floats[offset], &a_sample.ps.floats[offset], bytes) == 0)
@@ -1811,7 +1744,7 @@ namespace DCLF
 				tables.materialFrameVersion[a_slot] = tables.NextVersion();
 		};
 		auto keyed = [&](std::uint32_t a_slot, std::uint32_t a_signature) {
-			return a_slot < tables.materials.size() && tables.materialLastUsed[a_slot] != Tables::kSlotFree && tables.materialSlotKey[a_slot].first &&
+			return a_slot < tables.materials.size() && tables.materialSlots.Alive(a_slot) && tables.materialSlotKey[a_slot].first &&
 			       MaterialSources::Signature(tables.materialSlotKey[a_slot].second) == a_signature;
 		};
 		std::optional<ScopedScan> scanLive(std::in_place, Scan::MaterialLive);
@@ -1863,7 +1796,7 @@ namespace DCLF
 		// The slots keyed or rewritten since the last application: the signature's sample regardless.
 		m.pending += tables.materialFramePending.size();
 		for (const std::uint32_t slot : tables.materialFramePending) {
-			if (slot >= tables.materials.size() || tables.materialLastUsed[slot] == Tables::kSlotFree || !tables.materialSlotKey[slot].first)
+			if (slot >= tables.materials.size() || !tables.materialSlots.Alive(slot) || !tables.materialSlotKey[slot].first)
 				continue;
 			const auto it = tables.frameSignatures.find(MaterialSources::Signature(tables.materialSlotKey[slot].second));
 			if (it != tables.frameSignatures.end() && it->second.appliedValid)
@@ -1879,7 +1812,7 @@ namespace DCLF
 		materialFrameStats.transformsWatched += list.size();
 		for (std::size_t i = 0; i < list.size();) {
 			const std::uint32_t slot = list[i];
-			bool keep = slot < tables.materials.size() && tables.materialLastUsed[slot] != Tables::kSlotFree && tables.materialSlotKey[slot].first;
+			bool keep = slot < tables.materials.size() && tables.materialSlots.Alive(slot) && tables.materialSlotKey[slot].first;
 			// The material is read only while a slot drawn this frame holds it.
 			if (keep && tables.materialLastUsed[slot] == frame) {
 				const auto* material = tables.materialSlotKey[slot].first;
@@ -1953,7 +1886,7 @@ namespace DCLF
 		const bool canEvaluate = evaluator.HasLightingShader();
 		auto written = [&](const RE::BSShaderMaterial* a_material) { return !complete || writtenMaterials.contains(a_material); };
 		for (std::uint32_t slot = 0; slot < tables.materials.size(); ++slot) {
-			if (tables.materialLastUsed[slot] == Tables::kSlotFree)
+			if (!tables.materialSlots.Alive(slot))
 				continue;
 			const auto key = tables.materialSlotKey[slot];
 			if (!key.first || !written(key.first))
@@ -1976,7 +1909,7 @@ namespace DCLF
 			materialCache.erase(key);
 			tables.materialSlotKey[slot] = { nullptr, 0u };
 			tables.materialLastUsed[slot] = Tables::kSlotFree;
-			tables.materialFree.push_back(slot);
+			tables.materialSlots.Free(slot);
 			++stats.materialsDropped;
 			slotsFreedThisFrame = true;
 		}
@@ -2002,6 +1935,14 @@ namespace DCLF
 			GeometryConstants constants;
 			bool valid = false;
 		} frameSample, eyeSample;
+		// The frame lighting, merged from the frame's evaluations (MergeFrameLighting) over what was last published (a
+		// component none of them writes keeps its value) and published after them; versioned only when it differs. On a
+		// parity frame each pipeline's reference is kept to compare with what was published.
+		FrameLighting frameLighting;
+		std::memcpy(frameLighting.data(), tables.frameLighting.data(), sizeof(frameLighting));
+		std::uint32_t lightingWritten = 0;
+		auto publishLighting = [&](const GeometryConstants& a_constants) { MergeFrameLighting(a_constants.ps, frameLighting, lightingWritten); };
+		std::vector<std::pair<std::uint32_t, GeometryConstants>> lightingReferences;
 		static const bool geometryParityEnabled = SwitchEnabled("CS_DCLF_PERSISTENT_PARITY");
 		const bool geometryParityFrame = geometryParityEnabled && frame % 60 == 30;
 		geometryStats.checks += geometryParityFrame ? 1u : 0u;
@@ -2011,67 +1952,56 @@ namespace DCLF
 			// The technique constants are the frame's (fog, settings, and the shadow mask's view), so a
 			// pipeline slot that outlives the frame takes them fresh here, as it did when the pipeline
 			// table was rebuilt every frame. Serving the slot's first evaluation instead was both a parity
-			// regression and, at startup, a stale view pointer handed to the render graph.
-			// Written, and versioned, only where the values differ (Tables::pipelineConstantsVersion, pipelineBindingVersion).
+			// regression and, at startup, a stale view pointer handed to the render graph. They are its technique
+			// row's (Tables::TechniqueRow): evaluated once a frame for all the pipelines of its key, and written, and
+			// versioned, only where the values differ.
 			auto sameFloats = [](const ConstantBlock& a, const ConstantBlock& b) { return std::memcmp(a.floats.data(), b.floats.data(), sizeof(a.floats)) == 0; };
 			std::optional<ScopedScan> scanTechnique(std::in_place, Scan::Technique);
-			// Evaluated once a frame per TechniqueKey (everything else it reads is the frame's) and versioned when it changes;
-			// a pipeline compares its block only when it holds another version (pipeline creation resets it).
-			const std::uint32_t techniqueKey = TechniqueKey(tables.pipelines[i].passDescriptor);
-			auto& memo = techniqueMemo[techniqueKey];
-			if (memo.frame != frame) {
-				memo.frame = frame;
+			auto& row = tables.techniques[tables.pipelineTechnique[i]];
+			if (row.evaluated != frame) {
+				row.evaluated = frame;
 				TechniqueConstants now;
 				EvaluateTechnique(tables.pipelines[i].passDescriptor, now);
-				if (!memo.version || !sameFloats(now.vs, memo.value.vs) || !sameFloats(now.ps, memo.value.ps) || now.filterModes != memo.value.filterModes ||
-					now.shadowMask != memo.value.shadowMask || now.shadowMaskTexture != memo.value.shadowMaskTexture) {
-					memo.value = now;
-					memo.version = ++techniqueMemoVersions;
+				const bool floats = !sameFloats(now.vs, row.value.vs) || !sameFloats(now.ps, row.value.ps);
+				const bool binding = now.filterModes != row.value.filterModes || now.shadowMask != row.value.shadowMask ||
+				                     now.shadowMaskTexture != row.value.shadowMaskTexture;
+				if (floats || binding)
+					row.value = now;
+				if (floats)
+					row.constantsVersion = tables.NextVersion();
+				if (binding)
+					row.bindingVersion = tables.NextVersion();
+				// CS_DCLF_PERSISTENT_PARITY: the row against a second evaluation, once a frame.
+				if (geometryParityFrame) {
+					TechniqueConstants reference;
+					EvaluateTechnique(tables.pipelines[i].passDescriptor, reference);
+					++geometryStats.techniquesChecked;
+					if (!sameFloats(reference.vs, row.value.vs) || !sameFloats(reference.ps, row.value.ps) || reference.filterModes != row.value.filterModes ||
+						reference.shadowMask != row.value.shadowMask || reference.shadowMaskTexture != row.value.shadowMaskTexture)
+						++geometryStats.techniquesDiffer;
 				}
-			}
-			if (techniqueVersionHeld.size() < tables.pipelines.size())
-				techniqueVersionHeld.resize(tables.pipelines.size(), 0);
-			if (techniqueVersionHeld[i] != memo.version) {
-				techniqueVersionHeld[i] = memo.version;
-				const TechniqueConstants& technique = memo.value;
-				auto& held = tables.techniqueConstants[i];
-				const bool techniqueFloats = !sameFloats(held.vs, technique.vs) || !sameFloats(held.ps, technique.ps);
-				const bool techniqueBinding = held.filterModes != technique.filterModes || held.shadowMask != technique.shadowMask ||
-				                              held.shadowMaskTexture != technique.shadowMaskTexture;
-				if (techniqueFloats || techniqueBinding)
-					held = technique;
-				if (techniqueFloats)
-					tables.pipelineConstantsVersion[i] = tables.NextVersion();
-				if (techniqueBinding)
-					tables.pipelineBindingVersion[i] = tables.NextVersion();
-			}
-			if (geometryParityFrame) {
-				TechniqueConstants reference;
-				EvaluateTechnique(tables.pipelines[i].passDescriptor, reference);
-				const auto& held = tables.techniqueConstants[i];
-				++geometryStats.techniquesChecked;
-				if (!sameFloats(reference.vs, held.vs) || !sameFloats(reference.ps, held.ps) || reference.filterModes != held.filterModes ||
-					reference.shadowMask != held.shadowMask || reference.shadowMaskTexture != held.shadowMaskTexture)
-					++geometryStats.techniquesDiffer;
 			}
 			scanTechnique.reset();
 			ScopedScan scanGeometry(Scan::Geometry);
 			// A pipeline's PerGeometry block is evaluated in full once (and again when the render flags change); what of it
 			// changes afterwards is either overridden per object (ObjectGeometryConstants) or one of the frame's globals
-			// (kFrameGeometryPS: the sun's direction and colour, the ambient terms), which every pipeline that writes them
+			// (kPSFrameGeometry: the sun's direction and colour, the ambient terms), which every pipeline that writes them
 			// shares and which are copied from the frame's one sample. SetupGeometry writes EyePosition only for Envmap, Eye
 			// and technique 0x10, and the same for all three (the camera less posAdjust in world space, 0x1414dd040): their
-			// pipelines take it from the frame's one evaluation of such a pipeline (eyeSample). The template's pass is looked
-			// up only to evaluate.
+			// pipelines take it from the frame's one evaluation of such a pipeline (eyeSample). The frame's globals are kept
+			// in the block for the constant-buffer path and the parity checks, but no DCLF_BINDLESS draw reads them there
+			// (frameLighting; kPSBindlessGeometryUnread), and neither the template object's own values, so only what such a
+			// draw reads versions the pipeline (SameBindlessGeometry). The template's pass is looked up only to evaluate.
 			auto* property = tables.geometryTemplate[i];
 			auto templatePassOf = [&]() { return property ? FindLightingPass(property) : nullptr; };
 			const std::uint32_t geometryTechnique = (tables.pipelines[i].passDescriptor >> 24) & 0x3f;
 			const bool writesEye = geometryTechnique == 1 || geometryTechnique == 0xb || geometryTechnique == 0x10;
 			const bool full = !tables.geometryConstantsValid[i] || geometryEvaluatedFlags != mainPassRenderFlags || (writesEye && !eyeSample.valid);
-			bool geometryChanged = false;
+			auto& held = tables.geometryConstants[i];
+			bool ownChanged = false;
 			if (!full && writesEye) {
-				geometryChanged = CopyFrameGeometry(eyeSample.constants, tables.geometryConstants[i]);
-				geometryChanged |= CopyEyePosition(eyeSample.constants, tables.geometryConstants[i]);
+				CopyFrameGeometry(eyeSample.constants, held);
+				CopyEyePosition(eyeSample.constants, held);
 			} else if (full) {
 				const auto* templatePass = templatePassOf();
 				if (!templatePass)
@@ -2080,10 +2010,10 @@ namespace DCLF
 				if (!evaluator.EvaluateGeometry(*templatePass, tables.pipelines[i].passDescriptor, mainPassRenderFlags, constants))
 					continue;
 				++geometryStats.full;
-				geometryChanged = !tables.geometryConstantsValid[i] || !sameFloats(tables.geometryConstants[i].vs, constants.vs) ||
-				                  !sameFloats(tables.geometryConstants[i].ps, constants.ps);
-				if (geometryChanged)
-					tables.geometryConstants[i] = constants;
+				publishLighting(constants);
+				// Its own values: what a bindless draw reads from the block (PackGeometryTemplate's mask).
+				ownChanged = !tables.geometryConstantsValid[i] || !SameBindlessGeometry(constants, held);
+				held = constants;
 				if (writesEye && !eyeSample.valid) {
 					eyeSample.constants = constants;
 					eyeSample.valid = true;
@@ -2093,24 +2023,43 @@ namespace DCLF
 					if (const auto* templatePass = templatePassOf()) {
 						frameSample.valid = evaluator.EvaluateGeometry(*templatePass, tables.pipelines[i].passDescriptor, mainPassRenderFlags, frameSample.constants);
 						++geometryStats.samples;
+						if (frameSample.valid)
+							publishLighting(frameSample.constants);
 					}
 				}
 				if (!frameSample.valid)
 					continue;
-				geometryChanged = CopyFrameGeometry(frameSample.constants, tables.geometryConstants[i]);
+				CopyFrameGeometry(frameSample.constants, held);
 			}
-			if (geometryChanged) {
+			if (ownChanged) {
 				tables.pipelineConstantsVersion[i] = tables.NextVersion();
 				++geometryStats.changed;
 			}
 			tables.geometryConstantsValid[i] = 1;
-			// CS_DCLF_PERSISTENT_PARITY: the block against a full evaluation, in what no object overrides.
+			// CS_DCLF_PERSISTENT_PARITY: the block against a full evaluation, in what no object overrides; the frame
+			// lighting is checked against each reference after the loop, where the reference writes it.
 			if (geometryParityFrame) {
 				GeometryConstants reference;
 				const auto* templatePass = templatePassOf();
-				if (templatePass && evaluator.EvaluateGeometry(*templatePass, tables.pipelines[i].passDescriptor, mainPassRenderFlags, reference))
-					CheckFrameGeometry(static_cast<std::uint32_t>(i), reference, tables.geometryConstants[i]);
+				if (templatePass && evaluator.EvaluateGeometry(*templatePass, tables.pipelines[i].passDescriptor, mainPassRenderFlags, reference)) {
+					CheckFrameGeometry(static_cast<std::uint32_t>(i), reference, held);
+					lightingReferences.emplace_back(static_cast<std::uint32_t>(i), reference);
+				}
 			}
+		}
+		if (lightingWritten && std::memcmp(frameLighting.data(), tables.frameLighting.data(), sizeof(frameLighting)) != 0) {
+			std::memcpy(tables.frameLighting.data(), frameLighting.data(), sizeof(frameLighting));
+			tables.frameLightingVersion = tables.NextVersion();
+			++geometryStats.lightingVersions;
+		}
+		for (const auto& [pipeline, reference] : lightingReferences) {
+			++geometryStats.lightingChecked;
+			std::string first;
+			if (MatchesFrameLighting(reference.ps, frameLighting, geometryStats.lightingFirst.empty() ? &first : nullptr))
+				continue;
+			++geometryStats.lightingDiffer;
+			if (!first.empty())
+				geometryStats.lightingFirst = fmt::format("pipeline {} (pass {:X}) {}", pipeline, tables.pipelines[pipeline].passDescriptor, first);
 		}
 		geometryEvaluatedFlags = mainPassRenderFlags;
 		++geometryStats.frames;
@@ -2746,53 +2695,51 @@ namespace DCLF
 			a_slot == ~0u ? std::string() : fmt::format(" in slot {}", a_slot), fmt::ptr(a_key.first), a_key.second, what.substr(0, 600));
 	}
 
+	std::uint32_t SceneStore::TechniqueRowFor(std::uint32_t a_passDescriptor)
+	{
+		const std::uint32_t key = TechniqueKey(a_passDescriptor);
+		const auto [it, fresh] = tables.techniqueRow.try_emplace(key, static_cast<std::uint32_t>(tables.techniques.size()));
+		if (fresh) {
+			auto& row = tables.techniques.emplace_back();
+			row.key = key;
+			EvaluateTechnique(a_passDescriptor, row.value);
+			row.evaluated = frame;
+			row.constantsVersion = tables.NextVersion();
+			row.bindingVersion = tables.NextVersion();
+		}
+		return it->second;
+	}
+
+	namespace
+	{
+		// Grows each column of a table by one slot (Tables::GeometryColumns and the like).
+		constexpr auto kGrowColumn = [](auto& a_column, auto&&... a_initial) { a_column.emplace_back(a_initial...); };
+	}
+
 	std::uint32_t SceneStore::AllocateGeometrySlot()
 	{
-		if (!tables.geometryFree.empty()) {
-			const auto slot = tables.geometryFree.back();
-			tables.geometryFree.pop_back();
-			return slot;
+		const auto allocation = tables.geometrySlots.Allocate(frame);
+		if (allocation.grown) {
+			tables.GeometryColumns(kGrowColumn);
+			tables.NoteGeometry(allocation.slot);
 		}
-		tables.geometries.emplace_back();
-		tables.geometryLastUsed.push_back(Tables::kSlotFree);
-		tables.geometrySlotKey.push_back(nullptr);
-		tables.NoteGeometry(static_cast<std::uint32_t>(tables.geometries.size() - 1));
-		return static_cast<std::uint32_t>(tables.geometries.size() - 1);
+		return allocation.slot;
 	}
 
 	std::uint32_t SceneStore::AllocatePipelineSlot()
 	{
-		if (!tables.pipelineFree.empty()) {
-			const auto slot = tables.pipelineFree.back();
-			tables.pipelineFree.pop_back();
-			return slot;
-		}
-		tables.pipelines.emplace_back();
-		tables.geometryConstants.emplace_back();
-		tables.geometryConstantsValid.push_back(0);
-		tables.geometryTemplate.push_back(nullptr);
-		tables.geometryTemplateNative.push_back(0);
-		tables.techniqueConstants.emplace_back();
-		tables.permutations.emplace_back();
-		tables.pipelineLastUsed.push_back(Tables::kSlotFree);
-		tables.pipelineConstantsVersion.push_back(0);
-		tables.pipelineBindingVersion.push_back(0);
-		return static_cast<std::uint32_t>(tables.pipelines.size() - 1);
+		const auto allocation = tables.pipelineSlots.Allocate(frame);
+		if (allocation.grown)
+			tables.PipelineColumns(kGrowColumn);
+		return allocation.slot;
 	}
 
 	std::uint32_t SceneStore::AllocateMaterialSlot()
 	{
-		if (!tables.materialFree.empty()) {
-			const auto slot = tables.materialFree.back();
-			tables.materialFree.pop_back();
-			return slot;
-		}
-		tables.materials.emplace_back();
-		tables.materialVersion.push_back(0);
-		tables.materialFrameVersion.push_back(0);
-		tables.materialLastUsed.push_back(Tables::kSlotFree);
-		tables.materialSlotKey.emplace_back(nullptr, 0u);
-		return static_cast<std::uint32_t>(tables.materials.size() - 1);
+		const auto allocation = tables.materialSlots.Allocate(frame);
+		if (allocation.grown)
+			tables.MaterialColumns(kGrowColumn);
+		return allocation.slot;
 	}
 
 	namespace
@@ -2870,16 +2817,8 @@ namespace DCLF
 		++frame;
 		// The change log keeps its tail (Tables::changeLog): a reader that has not read past the trimmed half reads every
 		// slot again.
-		if (tables.changeLog.size() > (1u << 17)) {
-			const std::size_t half = tables.changeLog.size() / 2;
-			tables.changeLog.erase(tables.changeLog.begin(), tables.changeLog.begin() + static_cast<std::ptrdiff_t>(half));
-			tables.changeLogBase += half;
-		}
-		if (tables.geometryLog.size() > (1u << 16)) {
-			const std::size_t half = tables.geometryLog.size() / 2;
-			tables.geometryLog.erase(tables.geometryLog.begin(), tables.geometryLog.begin() + static_cast<std::ptrdiff_t>(half));
-			tables.geometryLogBase += half;
-		}
+		tables.changeLog.Trim(1u << 17);
+		tables.geometryLog.Trim(1u << 16);
 		CheckChangeLog();
 		// Nothing is drawn while a load screen is up, and nothing here may touch the tracked geometry
 		// either. The load frees the renderer data and the vertex and index buffers of the cell being
@@ -2922,8 +2861,8 @@ namespace DCLF
 		frameInterior = Util::IsInterior();
 		frameDecalBias = { 0u, DecalDepthBiasMode(1), DecalDepthBiasMode(2) };
 		timer.Add(BuildPart::Walk);
-		// The slot tables and their maps persist across frames; the sweep is what retires what is no
-		// longer used (CS_DCLF_DERIVED_CACHE).
+		// The slot tables and their maps persist across frames; a slot no object has referenced for SlotTable::kIdleFrames
+		// is retired here (CS_DCLF_DERIVED_CACHE).
 		SweepSlots();
 		auto& evaluator = ConstantEvaluator::Get();
 		ConstantEvaluator::ResetFrameAudits();
@@ -3665,7 +3604,7 @@ namespace DCLF
 			}
 			reportedChangeCounts = tables.changeCounts;
 			text += fmt::format("[DCLF] change log: {:.1f} changes a frame, by column: {} ({} entries held)\n", static_cast<double>(total) / n,
-				causes.empty() ? "-" : causes, tables.changeLog.size());
+				causes.empty() ? "-" : causes, tables.changeLog.Size());
 		}
 		if (const double n = delta.walks) {
 			auto& t = ScanTimes::Get();
@@ -3695,9 +3634,11 @@ namespace DCLF
 						total += g.differ[stage][v];
 						differ += fmt::format(" {}{}={}", stage ? "PS" : "VS", v, g.differ[stage][v]);
 					}
-			text += fmt::format("[DCLF] pipeline constants: {:.2f} full geometry evaluations and {:.2f} frame samples a frame, {:.1f} pipelines changed; parity {} checks, {} pipelines, {} geometry variables and {} of {} technique blocks differ{}{}{}\n",
-				static_cast<double>(g.full) / g.frames, static_cast<double>(g.samples) / g.frames, static_cast<double>(g.changed) / g.frames, g.checks, g.pipelinesChecked, total,
-				g.techniquesDiffer, g.techniquesChecked, g.checks ? (total || g.techniquesDiffer ? " <- DIFFER:" : " <- OK") : "", differ, total ? "; first: " + g.first : std::string());
+			text += fmt::format("[DCLF] pipeline constants: {:.2f} full geometry evaluations and {:.2f} frame samples a frame, {:.1f} pipelines changed, frame lighting changed {:.2f}; parity {} checks, {} pipelines, {} geometry variables, {} of {} technique blocks and {} of {} frame lightings differ{}{}{}\n",
+				static_cast<double>(g.full) / g.frames, static_cast<double>(g.samples) / g.frames, static_cast<double>(g.changed) / g.frames,
+				static_cast<double>(g.lightingVersions) / g.frames, g.checks, g.pipelinesChecked, total, g.techniquesDiffer, g.techniquesChecked, g.lightingDiffer, g.lightingChecked,
+				g.checks ? (total || g.techniquesDiffer || g.lightingDiffer ? " <- DIFFER:" : " <- OK") : "", differ,
+				(total ? "; first: " + g.first : std::string()) + (g.lightingDiffer ? "; lighting: " + g.lightingFirst : std::string()));
 			g = {};
 		}
 		if (auto& sp = shadingParity; sp.frames) {
@@ -3709,7 +3650,7 @@ namespace DCLF
 		if (auto& c = changeParity; c.checks || c.skipped) {
 			text += fmt::format("[DCLF] change log parity: {} checks ({} skipped), {} slots compared, {} changed, {} changed with no log entry{}{}\n", c.checks, c.skipped, c.slots,
 				c.changed, c.missing, c.missing ? " <- MISSING; first: " : " <- OK", c.first);
-			c = { std::move(c.snapshot), c.position, c.generation, c.armed };
+			c = { std::move(c.snapshot), c.cursor };
 		}
 		if (auto& t = delta; t.walks) {
 			const double n = t.walks;
@@ -3788,12 +3729,10 @@ namespace DCLF
 					// as it did when every object resolved for itself. A stale slot is freed: its
 					// record no longer describes anything.
 					if (staleGeometry) {
-						tables.geometryLastUsed[geometryIt->second] = Tables::kSlotFree;
-						tables.geometrySlotKey[geometryIt->second] = nullptr;
-						tables.geometryFree.push_back(geometryIt->second);
-						freedGeometry.push_back(geometryIt->second);
+						const std::uint32_t slot = geometryIt->second;
+						FreeGeometrySlot(slot);
+						freedGeometry.push_back(slot);
 						slotsFreedThisFrame = true;
-						geometryIndex.erase(geometryIt);
 					}
 					a_timer.Add(BuildPart::Resolve);
 					return Tables::kSlotFree;
@@ -4014,9 +3953,9 @@ namespace DCLF
 			                  derived.subPass == accumulated->subPass && derived.hint == accumulated->hint && derived.interior == interior &&
 			                  derived.alphaBelowOne == alphaBelowOne && derived.biasWitness == biasWitness;
 			if (derivedHit) {
-				derivedHit = derived.pipelineSlot < tables.pipelines.size() && tables.pipelineLastUsed[derived.pipelineSlot] != Tables::kSlotFree &&
+				derivedHit = derived.pipelineSlot < tables.pipelines.size() && tables.pipelineSlots.Alive(derived.pipelineSlot) &&
 				             tables.pipelines[derived.pipelineSlot] == derived.key &&
-				             derived.materialSlot < tables.materialSlotKey.size() && tables.materialLastUsed[derived.materialSlot] != Tables::kSlotFree &&
+				             derived.materialSlot < tables.materialSlotKey.size() && tables.materialSlots.Alive(derived.materialSlot) &&
 				             tables.materialSlotKey[derived.materialSlot] == std::pair{ derived.material, derived.descriptors.pass };
 			}
 
@@ -4162,12 +4101,8 @@ namespace DCLF
 					tables.geometryTemplate[slot] = property;
 					tables.geometryTemplateNative[slot] = accumulated ? 1 : 0;
 
-					TechniqueConstants technique;
-					EvaluateTechnique(descriptors.pass, technique);
-					stats.shadowMaskPipelines += technique.shadowMask ? 1 : 0;
-					tables.techniqueConstants[slot] = technique;
-					if (slot < techniqueVersionHeld.size())
-						techniqueVersionHeld[slot] = 0;
+					tables.pipelineTechnique[slot] = TechniqueRowFor(descriptors.pass);
+					stats.shadowMaskPipelines += tables.TechniqueOf(slot).shadowMask ? 1 : 0;
 
 					PipelinePermutation permutation;
 					permutation.vertexShaderDescriptor = descriptors.rawVertex;
@@ -4389,18 +4324,13 @@ namespace DCLF
 		static const bool slotProbe = SwitchValue("CS_DCLF_SLOT_PROBE") == "1";
 		if (slotProbe)
 			ProbeSlots(frameResolveBuffers);
-		// The slot counts, for the reports: every 16th frame (the sweep's), held in between. stats.geometries (the slots an
-		// object draws from) is the sweep's.
+		// The slot counts, for the reports: the frame's users every 16th frame, held in between; the live and referenced
+		// counts are the slot tables'.
 		const bool countSlots = frame % 16 == 0;
 		if (countSlots) {
 			stats.pipelines = 0;
-			stats.geometriesAlive = stats.pipelinesAlive = stats.materialsAlive = 0;
-			for (const auto used : tables.geometryLastUsed)
-				stats.geometriesAlive += used != Tables::kSlotFree ? 1u : 0u;
-			for (const auto used : tables.pipelineLastUsed) {
+			for (const auto used : tables.pipelineLastUsed)
 				stats.pipelines += used == frame ? 1u : 0u;
-				stats.pipelinesAlive += used != Tables::kSlotFree ? 1u : 0u;
-			}
 		}
 		// Decal draw order: sort the frame's decals by the engine's key and hand each its slot in its
 		// group. Tens to a few hundred entries; the sort is the whole cost.
@@ -4436,13 +4366,14 @@ namespace DCLF
 		}
 		if (countSlots) {
 			stats.materials = 0;
-			for (const auto used : tables.materialLastUsed) {
+			for (const auto used : tables.materialLastUsed)
 				stats.materials += used == frame ? 1u : 0u;
-				stats.materialsAlive += used != Tables::kSlotFree ? 1u : 0u;
-			}
 		}
-		// The material cache is evicted with the material slots (SweepSlots), which is the only path
-		// that touches a slot's lastUsed on the cached path.
+		stats.geometries = static_cast<std::uint32_t>(tables.geometrySlots.ReferencedCount());
+		stats.geometriesAlive = static_cast<std::uint32_t>(tables.geometrySlots.AliveCount());
+		stats.pipelinesAlive = static_cast<std::uint32_t>(tables.pipelineSlots.AliveCount());
+		stats.materialsAlive = static_cast<std::uint32_t>(tables.materialSlots.AliveCount());
+		// The material cache is evicted with the material slots (SweepSlots).
 		stats.materialCacheEntries = static_cast<std::uint32_t>(materialCache.size());
 		scanStats.reset();
 		ScopedScan scanTail(Scan::MaterialTail);
@@ -4475,7 +4406,6 @@ namespace DCLF
 		residentPatches.clear();
 		residentPos.clear();
 		tables.Clear();
-		techniqueVersionHeld.clear();
 		for (auto& [geometry, entry] : tracked)
 			entry.slot = kNoObjectSlot;
 		geometryTouched.clear();
@@ -4496,7 +4426,7 @@ namespace DCLF
 			if (object.flags & kObjectNoBindings)
 				continue;
 			const char* what = nullptr;
-			if (object.geometryIndex >= tables.geometries.size() || tables.geometryLastUsed[object.geometryIndex] == Tables::kSlotFree)
+			if (!tables.geometrySlots.Alive(object.geometryIndex))
 				what = "geometry slot free";
 			else if (a_resolveBuffers && (!tables.geometries[object.geometryIndex].vertexAddress || !tables.geometries[object.geometryIndex].indexAddress))
 				what = "geometry slot unresolved";
@@ -4581,54 +4511,106 @@ namespace DCLF
 		}
 	}
 
+	void SceneStore::FreeGeometrySlot(std::uint32_t a_slot)
+	{
+		auto& link = slotReferences.link;
+		if (a_slot < link.size()) {
+			tables.geometrySlots.Release(link[a_slot].slot, link[a_slot].generation, frame);
+			link[a_slot] = {};
+		}
+		geometryIndex.erase(tables.geometrySlotKey[a_slot]);
+		tables.geometrySlotKey[a_slot] = nullptr;
+		tables.geometryLastUsed[a_slot] = Tables::kSlotFree;
+		tables.geometrySlots.Free(a_slot);
+	}
+
+	void SceneStore::UpdateSlotReferences()
+	{
+		auto& r = slotReferences;
+		using Reference = SlotReferences::Reference;
+		auto referenceTo = [](const SlotTable& a_table, std::uint32_t a_slot) {
+			return a_table.Alive(a_slot) ? Reference{ a_slot, a_table.Generation(a_slot) } : Reference{};
+		};
+		auto move = [&](SlotTable& a_table, Reference& a_counted, const Reference& a_now) {
+			if (a_counted == a_now)
+				return;
+			if (a_counted.slot != SlotReferences::kNone)
+				a_table.Release(a_counted.slot, a_counted.generation, frame);
+			if (a_now.slot != SlotReferences::kNone)
+				a_table.AddRef(a_now.slot, a_now.generation);
+			a_counted = a_now;
+		};
+		// An object references its geometry while it has a record, and its pipeline and material while it is bound.
+		auto countObject = [&](std::uint32_t o) {
+			if (r.object.size() <= o)
+				r.object.resize(std::size_t(o) + 1);
+			auto& counted = r.object[o];
+			const bool live = o < tables.objects.size() && !(tables.objects[o].flags & kObjectFree);
+			const bool bound = live && !(tables.objects[o].flags & kObjectNoBindings);
+			const auto& object = live ? tables.objects[o] : ObjectRecord{};
+			move(tables.geometrySlots, counted.geometry, live ? referenceTo(tables.geometrySlots, object.geometryIndex) : Reference{});
+			move(tables.pipelineSlots, counted.pipeline, bound ? referenceTo(tables.pipelineSlots, object.pipelineIndex) : Reference{});
+			move(tables.materialSlots, counted.material, bound ? referenceTo(tables.materialSlots, object.materialIndex) : Reference{});
+		};
+		// A geometry slot references the next partition of its skin.
+		auto countLink = [&](std::uint32_t g) {
+			if (r.link.size() <= g)
+				r.link.resize(std::size_t(g) + 1);
+			const bool linked = tables.geometrySlots.Alive(g) && tables.geometries[g].nextPartition != kNoPartition;
+			move(tables.geometrySlots, r.link[g], linked ? referenceTo(tables.geometrySlots, tables.geometries[g].nextPartition) : Reference{});
+		};
+		if (!r.objects.Continues(tables.changeLog, tablesGeneration) || !r.links.Continues(tables.geometryLog, tablesGeneration)) {
+			// Every reference counted again: the first frame, new tables, or a log this reader fell behind.
+			tables.geometrySlots.ResetReferences(frame);
+			tables.pipelineSlots.ResetReferences(frame);
+			tables.materialSlots.ResetReferences(frame);
+			r.object.assign(tables.objects.size(), {});
+			r.link.assign(tables.geometries.size(), {});
+			for (std::uint32_t o = 0; o < tables.objects.size(); ++o)
+				countObject(o);
+			for (std::uint32_t g = 0; g < tables.geometries.size(); ++g)
+				countLink(g);
+			r.objects.Restart(tablesGeneration);
+			r.links.Restart(tablesGeneration);
+		} else {
+			for (const auto& change : r.objects.Unread(tables.changeLog))
+				countObject(change.slot);
+			for (const std::uint32_t g : r.links.Unread(tables.geometryLog))
+				countLink(g);
+		}
+		r.objects.Advance(tables.changeLog);
+		r.links.Advance(tables.geometryLog);
+	}
+
 	void SceneStore::SweepSlots()
 	{
-		if ((frame % 16) != 0)
-			return;
-		auto sweep = [&](std::vector<std::uint32_t>& a_lastUsed, std::vector<std::uint32_t>& a_free, auto&& a_erase, auto&& a_keep) {
-			for (std::uint32_t slot = 0; slot < a_lastUsed.size(); ++slot) {
-				if (a_lastUsed[slot] == Tables::kSlotFree || frame - a_lastUsed[slot] <= Tables::kSlotIdleFrames || a_keep(slot))
-					continue;
-				a_erase(slot);
-				a_lastUsed[slot] = Tables::kSlotFree;
-				a_free.push_back(slot);
-				++stats.slotsSwept;
-				slotsFreedThisFrame = true;
+		UpdateSlotReferences();
+		std::uint32_t freed = tables.geometrySlots.Expire(frame, [&](std::uint32_t a_slot) {
+			auto& link = slotReferences.link;
+			if (a_slot < link.size()) {
+				tables.geometrySlots.Release(link[a_slot].slot, link[a_slot].generation, frame);
+				link[a_slot] = {};
 			}
-		};
-		// The geometry slots an object draws from (the chain of a skin of several partitions) are live whatever their last
-		// write; only the rest can be idle.
-		geometryReferenced.assign(tables.geometries.size(), 0);
-		for (std::uint32_t s = 0; s < tables.objects.size(); ++s) {
-			const auto& object = tables.objects[s];
-			if (object.flags & kObjectFree)
-				continue;
-			std::uint32_t g = object.geometryIndex;
-			for (std::uint32_t link = 0; link < kMaxSkinPartitions && g < tables.geometries.size(); ++link) {
-				geometryReferenced[g] = 1;
-				if (!tables.skinPartitions[s] && !(object.flags & kObjectSkinned))
-					break;
-				g = tables.geometries[g].nextPartition;
-			}
-		}
-		stats.geometries = 0;
-		for (const auto referenced : geometryReferenced)
-			stats.geometries += referenced;
-		sweep(tables.geometryLastUsed, tables.geometryFree, [&](std::uint32_t a_slot) {
 			geometryIndex.erase(tables.geometrySlotKey[a_slot]);
 			tables.geometrySlotKey[a_slot] = nullptr;
-		}, [&](std::uint32_t a_slot) { return a_slot < geometryReferenced.size() && geometryReferenced[a_slot]; });
-		sweep(tables.pipelineLastUsed, tables.pipelineFree, [&](std::uint32_t a_slot) {
+			tables.geometryLastUsed[a_slot] = Tables::kSlotFree;
+		});
+		freed += tables.pipelineSlots.Expire(frame, [&](std::uint32_t a_slot) {
 			pipelineIndex.erase(tables.pipelines[a_slot]);
 			tables.geometryTemplate[a_slot] = nullptr;
 			tables.geometryConstantsValid[a_slot] = 0;
-		}, [](std::uint32_t) { return false; });
-		sweep(tables.materialLastUsed, tables.materialFree, [&](std::uint32_t a_slot) {
+			tables.pipelineLastUsed[a_slot] = Tables::kSlotFree;
+		});
+		freed += tables.materialSlots.Expire(frame, [&](std::uint32_t a_slot) {
 			materialIndex.erase(tables.materialSlotKey[a_slot]);
 			if (materialCache.erase(tables.materialSlotKey[a_slot]))
 				++stats.materialCacheEvicted;
 			tables.materialSlotKey[a_slot] = { nullptr, 0u };
-		}, [](std::uint32_t) { return false; });
+			tables.materialLastUsed[a_slot] = Tables::kSlotFree;
+		});
+		stats.slotsSwept += freed;
+		if (freed)
+			slotsFreedThisFrame = true;
 	}
 
 	void SceneStore::ValidateMaterialSlice()
@@ -5587,16 +5569,17 @@ namespace DCLF
 		if (!enabled)
 			return;
 		auto& c = changeParity;
-		if (c.armed) {
-			c.armed = false;
-			if (c.position < tables.changeLogBase || c.generation != tablesGeneration) {
+		if (c.cursor.active) {
+			const bool continues = c.cursor.Continues(tables.changeLog, tablesGeneration);
+			c.cursor.active = false;
+			if (!continues) {
 				++c.skipped;  // the log started again (a load, a reset): every reader resyncs anyway
 			} else {
 				++c.checks;
 				// What the log says changed since the snapshot, per slot.
 				ankerl::unordered_dense::map<std::uint32_t, std::uint32_t> logged;
-				for (auto k = static_cast<std::size_t>(c.position - tables.changeLogBase); k < tables.changeLog.size(); ++k)
-					logged[tables.changeLog[k].slot] |= tables.changeLog[k].causes;
+				for (const auto& change : tables.changeLog.From(c.cursor.position))
+					logged[change.slot] |= change.causes;
 				for (std::uint32_t slot = 0; slot < tables.objects.size(); ++slot) {
 					++c.slots;
 					const auto now = tables.ColumnsOf(slot);
@@ -5626,9 +5609,8 @@ namespace DCLF
 			c.snapshot.resize(tables.objects.size());
 			for (std::uint32_t slot = 0; slot < tables.objects.size(); ++slot)
 				c.snapshot[slot] = tables.ColumnsOf(slot);
-			c.position = tables.changeLogBase + tables.changeLog.size();
-			c.generation = tablesGeneration;
-			c.armed = true;
+			c.cursor.Restart(tablesGeneration);
+			c.cursor.Advance(tables.changeLog);
 		}
 	}
 
@@ -6071,7 +6053,7 @@ namespace DCLF
 
 	void SceneStore::FinishDeltaWalk(PartTimer& a_timer, WalkResult& a_result)
 	{
-		// The kept slots' geometry slots: the sweep spares every referenced one, so nothing renews them here. Their buffer
+		// The kept slots' geometry slots: a referenced one lives (Tables::geometrySlots), so nothing renews them here. Their buffer
 		// references are touched every 64 frames, staggered by slot, against GpuResources' kEvictFrames. A slot whose touch
 		// fails, every unresolved slot once buffers start resolving (the render graph came back), and a slot
 		// ResolveGeometrySlot freed are stale: the objects drawing them are written again, which resolves them.
@@ -6084,7 +6066,7 @@ namespace DCLF
 			const bool every = !geometryResolvedLastWalk;
 			for (std::uint32_t g = every ? 0u : (frame & 63u); g < tables.geometries.size(); g += every ? 1u : 64u) {
 				const auto used = tables.geometryLastUsed[g];
-				if (used == Tables::kSlotFree || used == frame)
+				if (!tables.geometrySlots.Alive(g) || used == frame)
 					continue;  // free, or written this frame (resolved or touched by the write)
 				const auto& record = tables.geometries[g];
 				if (!record.vertexAddress || !gpu.Touch(record.vertexBuffer) || !gpu.Touch(record.indexBuffer))
