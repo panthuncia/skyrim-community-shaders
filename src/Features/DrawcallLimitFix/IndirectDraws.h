@@ -83,6 +83,7 @@ namespace DCLF
 			// Frame textures (t16 and up) a record reads that the pass had not bound at the commit, last epoch.
 			std::uint32_t frameTexturesMissing = 0;
 			std::array<std::uint64_t, 2> frameTexturesMissingRegisters{};  // which registers, as a bit set
+			std::uint32_t framePatchedRecords = 0;  // kept records the commits patched for a frame texture that changed (PersistentBindings)
 			std::uint32_t cullDrawn = 0;     // sequences BuildDraws wrote, last sampled epoch
 			std::uint32_t cullRejected = 0;  // draws its culling rejected (CS_DCLF_CULL)
 			std::uint32_t cullTested = 0;    // draws it tested at all: 0 means the culling did not run
@@ -334,6 +335,7 @@ namespace DCLF
 		struct ShadowStats
 		{
 			std::uint32_t views = 0;           // views offered (captured by the hook), per report interval
+			std::uint64_t sunEntryChecks = 0, sunEntryMismatches = 0;  // CS_DCLF_PERSISTENT_PARITY: the GPU sun-entry test on the latch against the CPU verdict
 			std::uint32_t viewsDrawn = 0;      // views drawn by an epoch
 			std::uint32_t epochs = 0;          // shadow epochs run (one per frame with views)
 			std::uint32_t notReady = 0;        // views skipped: resources, pipelines or the depth import not ready

@@ -65,6 +65,7 @@ namespace DCLF
 			std::vector<std::uint8_t> vsTable, psTable;
 			std::array<RegisterUsageBits, 2> usage{};  // by variant (kColorVariant, kDepthVariant)
 			std::uint32_t shadowMaskIndex = kNone;     // the technique's shadow mask (t14) this frame, if it binds one
+			std::uint32_t version = 0;                 // new whenever any of the above changes (NextVersion)
 		};
 
 		/** @brief Per material slot (parallel to SceneStore::Tables::materials). */
@@ -82,6 +83,7 @@ namespace DCLF
 			std::uint32_t written = 0;
 			std::uint32_t texturesGeneration = 0;
 			std::uint32_t resolvedFrame = 0;
+			std::uint32_t version = 0;  // new whenever key, resolved, textureIndex or featureIndex changes (NextVersion)
 		};
 
 		std::vector<Pipeline> pipelines;
@@ -105,6 +107,12 @@ namespace DCLF
 		std::array<std::vector<std::uint32_t>, 16> shadowMapRows;
 		ankerl::unordered_dense::map<ID3D11ShaderResourceView*, std::uint32_t> shadowTextures;
 		std::uint32_t pipelineSetGeneration = ~0u;
+		// The builds' kept bindings (IndirectDraws' PersistentBindings) key on versions rather than on the entries: a
+		// pipeline's and a material's own (Pipeline::version, Material::version), and this one for the entries every
+		// record reads (the null texture, the samplers, the projected textures). Unique across all of them.
+		std::uint32_t sharedVersion = 0;
+		std::uint32_t versionCounter = 0;
+		std::uint32_t NextVersion() { return ++versionCounter; }
 		std::uint32_t generation = 0;
 
 		Lookups() { samplers.fill(kNone); }

@@ -71,10 +71,11 @@ namespace DCLF
 		 * every listed float the record has written, and t11. True when t11 changed (the record's textures
 		 * are part of its version; its floats are repacked every build).
 		 */
-		bool ApplyFrameComponents(const MaterialRecord& a_live, MaterialRecord& a_record, std::uint32_t a_passDescriptor);
+		bool ApplyFrameComponents(const MaterialRecord& a_live, MaterialRecord& a_record, std::uint32_t a_passDescriptor, bool* a_floatsChanged = nullptr);
 
 		/** @brief Writes this frame's TexcoordOffset from the material's fields into the record. */
-		void ApplyTextureTransform(const RE::BSShaderMaterial* a_material, MaterialRecord& a_record);
+		/** @brief Returns whether a float changed. */
+		bool ApplyTextureTransform(const RE::BSShaderMaterial* a_material, MaterialRecord& a_record);
 
 		/** @brief Copies the frame-sourced components (floats and t11) of a_from over a_to, for comparisons. */
 		void CopyFrameComponents(const MaterialRecord& a_from, MaterialRecord& a_to, std::uint32_t a_passDescriptor);

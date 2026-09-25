@@ -1,5 +1,7 @@
 #include "MaterialSources.h"
 
+#include <bit>
+
 #include "ConstantEvaluator.h"
 #include "LightingDescriptors.h"
 
@@ -278,11 +280,14 @@ namespace DCLF::MaterialSources
 		}
 	}
 
-	bool ApplyFrameComponents(const MaterialRecord& a_live, MaterialRecord& a_record, std::uint32_t a_passDescriptor)
+	bool ApplyFrameComponents(const MaterialRecord& a_live, MaterialRecord& a_record, std::uint32_t a_passDescriptor, bool* a_floatsChanged)
 	{
 		for (const auto position : FramePSFloats())
-			if (a_record.ps.Written(position) && a_live.ps.Written(position))
+			if (a_record.ps.Written(position) && a_live.ps.Written(position)) {
+				if (a_floatsChanged && std::bit_cast<std::uint32_t>(a_record.ps.floats[position]) != std::bit_cast<std::uint32_t>(a_live.ps.floats[position]))
+					*a_floatsChanged = true;
 				a_record.ps.floats[position] = a_live.ps.floats[position];
+			}
 		if (!(a_passDescriptor & kCharacterLight) || !((a_live.textureWritten >> kCharacterLightSlot) & 1))
 			return false;
 		const bool changed = a_record.textures[kCharacterLightSlot] != a_live.textures[kCharacterLightSlot] ||
@@ -295,19 +300,23 @@ namespace DCLF::MaterialSources
 		return changed;
 	}
 
-	void ApplyTextureTransform(const RE::BSShaderMaterial* a_material, MaterialRecord& a_record)
+	bool ApplyTextureTransform(const RE::BSShaderMaterial* a_material, MaterialRecord& a_record)
 	{
 		const auto* smState = globals::game::smState;
 		if (!a_material || !smState)
-			return;
+			return false;
 		// SetupMaterial (vanilla and TruePBR alike): offset and scale of the buffer the frame reads.
 		const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(a_material);
 		const std::uint32_t buffer = smState->textureTransformCurrentBuffer & 1;
 		const float values[4]{ material->texCoordOffset[buffer].x, material->texCoordOffset[buffer].y, material->texCoordScale[buffer].x,
 			material->texCoordScale[buffer].y };
 		const auto& positions = FrameVSFloats();
+		bool changed = false;
 		for (std::size_t c = 0; c < positions.size() && c < 4; ++c)
-			if (a_record.vs.Written(positions[c]))
+			if (a_record.vs.Written(positions[c])) {
+				changed |= std::bit_cast<std::uint32_t>(a_record.vs.floats[positions[c]]) != std::bit_cast<std::uint32_t>(values[c]);
 				a_record.vs.floats[positions[c]] = values[c];
+			}
+		return changed;
 	}
 }

@@ -116,6 +116,29 @@ bool InSunCascades(float3 a_centre, float a_radius)
 	return false;
 }
 
+// A view of the sun: whether an entry sphere is outside every one of the frame's full-frustum processes (the latch's sun entry
+// block, IndirectDraws.cpp: BuildDrawsLatch::sunEntryPlanes). A count of 0: no verdict here.
+bool OutsideSunEntry(float4 a_entry)
+{
+	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
+	const uint processes = min(latch.Load(LatchOffset + 1024), 8u);
+	if (processes == 0)
+		return false;
+	[loop] for (uint process = 0; process < processes; ++process) {
+		const uint mask = latch.Load(LatchOffset + 1028 + process * 4);
+		bool outside = false;
+		[loop] for (uint p = 0; p < 6 && !outside; ++p) {
+			if ((mask & (1u << p)) == 0)
+				continue;
+			const float4 plane = asfloat(latch.Load4(LatchOffset + 1072 + (process * 6 + p) * 16));
+			outside = dot(plane.xyz, a_entry.xyz) - plane.w < -a_entry.w;
+		}
+		if (!outside)
+			return false;
+	}
+	return true;
+}
+
 // The draw's pipeline: the input's own, or its key slot's through the view's row of the pipeline map.
 // kNoPipeline when the row has none, which the CPU never lets an input reach; the draw is then dropped
 // rather than executed with an index outside the set.
@@ -454,8 +477,15 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	const bool volumetricCaster = (input.w & kObjectVolumetricOnly) != 0;
 	if ((CastersOnly() && volumetricCaster) || (VolumetricOnly() && !volumetricCaster))
 		return;
-	if (SunEntry() && (input.w & kInputOutsideSunEntry) != 0)
-		return;
+	// The sun's entry rule: the input's entry sphere (its fade row) outside every full-frustum process of the frame, which the
+	// view's latch holds as its cascade plane sets (IndirectDraws.cpp: SetSunEntryRow); or the CPU's verdict, where the frame
+	// has more processes than the latch holds.
+	if (SunEntry()) {
+		if ((input.w & kInputOutsideSunEntry) != 0)
+			return;
+		if (OutsideSunEntry(asfloat(inputs.Load4(inputOffset + 48))))
+			return;
+	}
 
 	// Decals: single-phase, fixed slot. Every decal input writes its slot, culled or not, so nothing a
 	// previous frame left there can be executed: a culled or undrawable decal writes the same sequence

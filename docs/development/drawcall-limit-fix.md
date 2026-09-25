@@ -1453,6 +1453,12 @@ through: the shadow pipeline map ("Epochs that only submit") and the NPC head dr
 | `CS_DCLF_RESIDENT=1\|0` | Resident entries: an admitted entry that needs nothing per frame keeps its records patched across frames, drawn whenever the GPU's cull finds them, and its list job returns at once ("Resident entries"). Default on with the visibility feedback and the switch events; read at startup. |
 | `CS_DCLF_RESIDENT_PARITY=1` | Every 60 frames, each resident record's synthetic pass is built from scratch and compared with its patch, and the record with the patch. |
 | `CS_DCLF_RESIDENT_DRAWS=1\|0` | The resident records' draw inputs persist across frames at the head of each main segment's input buffer, changed only by SceneStore's change log ("Persistent resident draws"). Default on; read at startup. |
+| `CS_DCLF_PERSISTENT_OBJECTS=1\|0` | The per-object records persist in a store per objects buffer, changed from the change log and uploaded as dirty ranges ("Persistent draw state", Step 3). Default on. |
+| `CS_DCLF_PERSISTENT_BINDINGS=1\|0` | Each main segment's constant blocks and binding records persist, written only when they differ and skipped when clean ("Persistent draw state", Step 4). Default on. |
+| `CS_DCLF_WHOLE_SCENE_REGION=1\|0` | Each main segment's region holds the whole scene's inputs, not only the residents; the per-frame loop visits only what the region leaves it ("Persistent draw state", Step 5). Default on; needs the kept bindings. |
+| `CS_DCLF_PERSISTENT_SHADOW=1\|0` | The shadow epoch's inputs per mode, its records and its claims persist, changed from the change log ("Persistent draw state", Step 6). Default on; needs the persistent object records. |
+| `CS_DCLF_PERSISTENT_PARITY=1` | Every 60 frames: every kept object record against one built from the tables, and every kept binding record against the same build made the per-frame way. |
+| `CS_DCLF_CHANGE_LOG_PARITY=1` | Every 60 frames, each slot's columns are kept, and a frame later every slot whose columns changed must be in the change log with the causes that changed ("Persistent draw state"). |
 | `CS_DCLF_RESIDENT_DRAW_PARITY=1` | Every 60 frames, each resident region entry is written again from the tables and compared, and every resident the region should hold is looked for. |
 | `CS_DCLF_RESIDENT_PROBATION=1\|0` | Entries not yet admitted join residency out of view, and the build's draws admit them ("Resident entries", step 2). Default on with `CS_DCLF_RESIDENT`; read at startup. |
 | `CS_DCLF_SWITCH_EVENTS=1\|0` | An `NiSwitchNode`'s selection follows events: the index's writers are patched, a newly selected child is brought up to date when the event is applied, and neither the scene walk nor the primary's list jobs test switches every frame ("Switch selection by event"). Default on with `CS_DCLF_SCENE_DELTA`; read at startup. |
@@ -4907,11 +4913,10 @@ only when the resident does, so each main segment now keeps its residents' input
     Z-prepass rule and set parity see them as before. The sun's CPU check covers its inputs too.
 
 **What changes it**, and nothing else:
--   **SceneStore's change log** (`Tables::residentLog`, append-only). It notes a slot when the slot joins, leaves, is
-    patched again or reset, when a resident's placement or entry root centre actually changes (`MoveObject`), and when
-    a resident skin's partition mask changes (`AppendKeptSkin`). `Tables::residentSlot` says which slots are resident.
-    Each region reads the log from its own position. One that fell behind the trimmed head (the log keeps about 64k
-    entries), or whose tables generation changed, reads every resident slot again (a resync).
+-   **SceneStore's change log** (`Tables::changeLog`, append-only; "Persistent draw state" below). The region takes the
+    entries whose causes a draw input carries (placement, bindings, skin, geometry, membership) for the slots
+    `Tables::residentSlot` says are resident. Each region reads the log from its own position. One that fell behind the
+    trimmed head, or whose tables generation changed, reads every resident slot again (a resync).
 -   **A pipeline's set index changing**, or **a pair's record failing or recovering**: that pipeline's or pair's
     entries are written again (drawable only while both are good).
 -   **The Z-prepass waits** for the colour epoch's first draw of a joiner (`drewLastFrame`) before its depth entry
@@ -4951,3 +4956,399 @@ at 0.
     -   the per-object records (`BindlessObject`) the build writes for every object, resident or not;
     -   the constants arena.
 -   Switches: `CS_DCLF_RESIDENT_DRAWS=0` turns the region off; `CS_DCLF_RESIDENT_DRAW_PARITY=1` runs the check.
+
+## Persistent draw state
+
+The resident draws showed the model; this moves everything DCLF builds from the tables to it. Every per-object value has
+one writer, which notes a change only when the value differs, and every structure built from the tables reads those
+notes from its own position and uploads only what changed. The plan, by step: the change log (done), stable offsets,
+one persistent object-record buffer, persistent constants and binding records, the whole scene's draw inputs with the
+drawn set, the shadow build, and the remaining scans.
+
+### Step 1: the change log covers every record
+
+**The log** (`Tables::changeLog`): an entry is a slot and what changed (`ChangeCause`): placement, bindings (flags,
+material, pipeline, fade distance), shading (with the emissive multiplier and wetness), lights, tree animation, skin
+(partitions, bone offset and rows), extras, shadow columns, geometry, membership (residency). A reader skips entries
+whose causes it does not read. The log keeps its tail (it is halved past 128k entries); a reader behind its base, and a
+full walk, a reset or a load (`InvalidateChangeLog`), make every reader read every slot again.
+
+**The writers:**
+-   **A write in full** (the delta walk's `WriteObject`, a reset, a patch, a lapse) is noted by what it changed: the
+    slot's columns are taken before it (`Tables::ColumnsOf`) and compared after (`Tables::CausesBetween`, `NoteWrite`).
+-   **The targeted writers** compare their own column: the placement (`MoveObject`), the skin's mask and bone offset
+    (`AppendKeptSkin`, the accumulate phase), the tree animation (`KeepResidentsAlive`), and at Prepass
+    (`RefreshFrameConstants`) the shading, the extras rows and the wetness.
+
+**The accumulated half persists.** It used to be reset for every patched record at the next walk
+(`RestoreAccumulated`) and written again by the accumulate phase, about 1,100 records a frame at Riverwood. Now:
+-   a patch the accumulate phase gives again is renewed, and changes nothing unless the pass does;
+-   a patch it does not renew lapses at the end of that phase (`LapseAccumulated`: the slots patched last frame and not
+    this one, residents apart);
+-   a record the walk writes again for the same object keeps its patch (`WriteObject`'s `keepHalf`), so an entry written
+    every frame (a face, an actor's part) does not lose it and take it back every frame;
+-   the extras rows are a persistent block per record (`AllocateExtras`, `FreeExtras`), not a per-walk list;
+-   the shadow build, which runs between the walk and the accumulate phase, now sees last frame's patch on the records
+    that keep one, as it already did on residents. Nothing it reads is the patch's (its flags are the scene's, and its
+    culling ignores the main pass's bits);
+-   walk parity compares the scene half alone, since any record may keep a patch.
+
+**The check** (`CS_DCLF_CHANGE_LOG_PARITY=1`): every 60 frames each slot's columns are kept at the scene phase's start,
+and a frame later every slot whose columns changed must be in that frame's log with the causes that changed. Tour
+(Riverwood, Whiterun, Dragonsreach): 0 changed slots missing from the log, over 3,100-6,100 changed slots per report,
+with walk, resident, region and set parity and holes at 0.
+
+**What changes, measured** (changes a frame, one cause counted once per slot; Riverwood with the camera standing):
+
+| Cause | Before the kept patch | After |
+| --- | --- | --- |
+| tree animation | 890-930 | 958 |
+| shading | 460 | 185-195 |
+| placement | 270 | 281 |
+| bindings | 170-190 | 1 |
+| everything else | 5 | 5 |
+
+-   **Tree animation** is every tree the frame draws: the wind timers advance every frame.
+-   **Shading** is the specular LOD fade (`MaterialData.y` and `SSRParams.w`) of the objects inside its fade band, by
+    about 0.001 a frame: it follows the camera's distance, which moves by the idle sway.
+-   **Placement** is the movers (actors, animated furniture, physics).
+-   So all three are values that change every frame; they are the candidates for derivation on the GPU (the tree clock,
+    the LOD fade from the distance) rather than for more events.
+-   Whiterun: 1,000-1,100 a frame, of which tree animation 410-430, shading 315-320 and placement 240-270.
+
+### Step 2: stable offsets
+
+A record addresses its bone palette and its extras rows by offsets into the epoch's row buffer. Both used to move with
+everything else: the palettes were packed end to end by every walk, and the previous rows and the extras were placed
+after all of them, so one skin appearing moved every skinned and extras record.
+
+-   **Palette blocks.** Each skin has a block of its own for as long as its slot keeps a palette of that size
+    (`Tables::PlaceBones`, `FreeBones`; freed blocks are reused by size). The walk writes the rows in place. The arrays
+    are a capacity, grown in 4,096-row steps (`kBoneGrowRows`), with the previous rows one capacity further and the
+    extras after both. A growth moves every previous palette and every extras block, so it notes all of them.
+-   **Extras blocks** are the record's own (Step 1).
+-   **The row buffer** grew to 131,072 rows (2 MB), for the holes. Riverwood: 18,222 rows in use in a 20,480-row
+    capacity, 41,373 rows uploaded; the capacity stays at its high-water mark.
+-   **Render flag 0x10** (the previous transform is the current one) cannot move every record: nothing sets
+    `mainPassRenderFlags`, so it is always 0.
+-   **Results:** steady-state skin changes fell from 25 a frame to 0.2 (the partition masks). Tour: walk parity,
+    change log parity, resident and set parity and holes at 0; the bindless record parity (which checks the offsets)
+    matched 24.5 million components. Walk parity no longer compares the palette arrays' sizes (the slot tables' have
+    holes), only each object's rows.
+
+### Step 3: one persistent store of object records per buffer
+
+The per-object records (`BindlessObject`, 208 bytes) were built for every object by every build and uploaded whole:
+6,215 objects, 1.29 MB, three times a frame (the Z-prepass, the colour epoch, the shadow epoch).
+
+-   **The stores** (`ObjectRecordStore`): one for the main epochs' objects buffer, which both main segments bind, and
+    one for the shadow epoch's. A store keeps the records across frames and reads the change log from its own
+    position. It rebuilds a record only for an entry whose causes a record is built from (placement, bindings,
+    shading, lights, tree, skin, extras), and keeps it only when the bytes differ.
+-   **The upload**: the records changed since the version the buffer holds (`Resources::objectsUploaded`, written by
+    the commit that uploads it), as runs; the whole store after a resync or on new buffers.
+-   **One writer at a time.** The stores' builds run in frame order: the shadow build, then the Z-prepass, then the
+    colour build. Each is joined, or cancelled (which waits for a running job), before the next is kicked, on the
+    one worker or inline. A collision counter checks it: 0 on the tour.
+-   **Results.** A main store rewrites 340-600 records an update, mostly the trees' wind timers and the movers; the
+    shadow store 520-1,060 (it sees a frame's changes at once). Every object record parity check (every record
+    against one built from the tables, every 60 frames) matched. The colour epoch's upload fell from 2.2 MB to 1.2 MB.
+-   Switches: `CS_DCLF_PERSISTENT_OBJECTS=0` builds the records whole every build, as before;
+    `CS_DCLF_PERSISTENT_PARITY=1` runs the checks (this step's and the next's).
+
+### Step 4: persistent constant blocks and binding records
+
+**The state** (`PersistentBindings`, one per main segment in its build cache):
+-   **Each segment has its own buffers.** The Z-prepass now has its own constants and records
+    (`Resources::constantsDepth`, `recordsDepth`), because both segments used to upload into the same buffers
+    from offset 0. BuildDraws' depth phases write the depth records' addresses.
+-   **Blocks.** Every pipeline's technique, PerGeometry template and permutation blocks, and every (material,
+    pipeline) pair's PerMaterial blocks, keep one address in the segment's constants buffer. They are 256-byte
+    aligned, and freed blocks are reused by size. A block is written only when its bytes differ.
+-   **Records.** Every pair keeps one record slot in the segment's records buffer while the build cache holds it.
+    A record is written only when it differs.
+-   **The upload**: the ranges written since the versions the buffers hold (`Resources::constantsUploaded`,
+    `recordsUploaded`).
+
+**Frame textures.** The frame textures (t16 and up) were patched into every colour record by every commit, about
+5,400 patches an epoch.
+-   **Their indices are stable.** A probe over the tour saw them change only in the first one or two epochs after a
+    load.
+-   **So the build writes last epoch's.** It takes the indices the last commit resolved
+    (`Resources::committedFrameTextures`).
+-   **The commit patches only on a change.** It patches, and uploads again, only the records reading a register
+    whose index changed.
+-   **Tour: none in steady state.**
+
+**What is clean is not looked at.** The first version of this step still re-derived every pair's and every
+pipeline's source signature on every build, which cost as much as the packing it saved. Now the writers version
+what they write, only when the value changes:
+-   **Pipelines** (`Tables::pipelineConstantsVersion`, `pipelineBindingVersion`, written by `RefreshFrameConstants`
+    and the accumulate phase):
+    -   the constants version covers the technique and PerGeometry floats, and gates repacking the pipeline's
+        blocks;
+    -   the binding version covers the key, the technique's filter modes and shadow mask, and the permutation, and
+        gates its pairs' records.
+-   **Material frame floats** (`Tables::materialFrameVersion`): `RefreshFrameMaterials` and
+    `RefreshTextureTransforms` version them, and `MaterialSources` now reports whether a float changed.
+-   **Lookup entries**: a version per lookup pipeline and material entry, and one shared by the null texture, the
+    samplers and the projected textures (`Lookups::NextVersion`).
+-   **What a build skips.** A pipeline whose versions are the ones its blocks were written from takes their
+    addresses. A pair whose versions are unchanged is its record slot, and nothing else about it is looked at.
+    -   The pair's versions are its material's, its frame floats', its lookup entries', its pipeline's binding
+        version, and its pipeline's block moves.
+    -   They also include the frame textures' version and the frame masks.
+-   **What stays dirty.** At Riverwood 65 of 77 pipelines change their constants every frame (fog, the sun), so their
+    blocks are repacked and rewritten. Of about 490 pairs, 390 are clean and about 100 are looked at.
+    -   About 85% of those are character-lit materials: their t11 alternates between two render targets every frame
+        (the character light), so the record really changes.
+    -   The rest are frame floats (IBLParams, scrolling UVs).
+    -   A stable alias descriptor for the character light's t11, rewritten once a frame, would remove most of the
+        rest.
+
+**Checks** (`CS_DCLF_PERSISTENT_PARITY=1`, every 60 frames): the same build is made the per-frame way, and for every
+object either draws, the kept record must bind the same textures and samplers, and constant buffers holding the same
+bytes (a frame slot's address must be the same address). Tour: 0 differences over 11,000-40,000 draws a report, in
+both segments, with set parity, change log parity and holes at 0.
+
+**Cost** (Riverwood, a 45 s run each; the report's means; "join" is the render thread's wait on the build):
+
+| | Steps 3-4 off | Steps 3-4 on |
+| --- | --- | --- |
+| Colour build on the worker | 1.13 ms | 0.81 ms |
+| Colour join | 0.94 ms | 0.63 ms |
+| Z-prepass build | 1.02 ms | 0.85 ms |
+| Z-prepass join | 0.41 ms | 0.25 ms |
+| Shadow build | 0.84 ms | 0.64 ms |
+| Shadow join | 0.66 ms | 0.45 ms |
+| Colour epoch's upload | 2.2 MB | 0.5 MB |
+| The build's pair and pipeline parts (textures and samplers, constant groups) | 0.36 ms | 0.16 ms |
+
+-   Switches: `CS_DCLF_PERSISTENT_BINDINGS=0` packs the blocks and records into a per-build arena, as before.
+
+### Step 5: the whole scene's draw inputs, and the drawn set as changes
+
+**The drawn set** (5a). What the colour epoch draws is the native loop's skip set and the claims.
+-   **Before:** the build listed every drawn object, the commit wrote a hash entry for each of them
+    (`drawnFrame`), the claims were rebuilt from that map every frame, and the Z-prepass's gate (without withholding)
+    looked every object up in it.
+-   **The colour build keeps a mark per slot** (`DrawnMarks`: drawn or not, and as which geometry). It sends the
+    slots whose mark changed since the version the render thread applied: the uploads' dirty protocol, with a full
+    send after a resync.
+-   **The render thread keeps its state from those changes alone:**
+    -   per slot and per geometry, drawn now or the last frame it was (`SlotDrawn`, `drawnGeometry`);
+    -   the claims (`Impl::claimSet`), republished only when they changed, or when someone else published over them
+        (a load publishes an empty set);
+    -   dropping a claim a frame after the last draw, the native skip's one-frame tolerance.
+-   **A geometry that moves between slots** is undrawn only by the slot that draws it (`DrawnGeometry::slot`). The
+    first version undrew it after its new slot had drawn it, and the geometry then read as undrawn from then on:
+    1,165 holes in 300 frames at Riverwood, on clutter that changes slots. It is 0 since.
+-   **Result:** the commit's drawn-set part fell from about 14 µs to 0.1-1.7 µs an epoch.
+
+**The whole scene's inputs** (5b). The region (`ResidentRegion`) holds every object the loop would draw as one input
+with its pair's record, not only the residents, when the bindings are kept (Step 4).
+-   **The depth segment's cull-only candidates are entries too**: an object without bindings, with its bounds and no
+    draw.
+-   **Every other live slot is classified from the change log**: the per-frame loop's (`loopList`: decals, faces,
+    second-stream shapes, and what does not fit, with 2,048 inputs and draws kept for it) or nobody's (a candidate
+    the segment does not submit, counted for the report).
+-   **The loop visits only its own list**, not every object.
+-   **The Z-prepass keeps its rule where its gate is the colour epoch's last frame** (no withholding): there only
+    residents are the region's, and their joins wait for the colour epoch's first draw, as before. With withholding
+    (the default) the whole scene is the region's.
+-   **The per-object states** (set parity's) are built only when set parity runs.
+-   Riverwood: about 5,900 inputs kept by the colour segment, against 2,990 residents before.
+
+**Checks.** Tour: region parity 0 differences over 256,000 entry checks and 0 missing, persistent bindings parity 0,
+set parity and holes 0, and claims churn 0.
+
+**Cost** (Riverwood, a 45 s run each):
+
+| | Steps 3-5 off | Steps 3-4 | Steps 3-5 |
+| --- | --- | --- | --- |
+| Colour build on the worker | 1.12 ms | 0.77 ms | 0.77 ms |
+| Colour join | 0.91 ms | 0.57 ms | 0.57 ms |
+| Z-prepass build | 1.02 ms | 0.81 ms | 0.77 ms |
+| Z-prepass join | 0.40 ms | 0.19 ms | 0.12 ms |
+| Shadow join | 0.61 ms | 0.45 ms | 0.46 ms |
+| Render thread, the main epochs' commit (µs an epoch) | 658 | 380 | 347 |
+| Colour epoch's upload | 2.2 MB | 0.5 MB | 0.3 MB |
+
+-   The per-draw parts of the colour build are now about 0.1 ms: record push and the per-draw tail are 0.002 ms each.
+-   What remains per frame is what changes every frame:
+    -   the pipelines' constants, 65 of 77 at Riverwood;
+    -   the character-lit records;
+    -   the movers' records;
+    -   the bone palettes, which each main and shadow epoch uploads whole (current and previous rows, about
+        0.66 MB).
+-   Switches: `CS_DCLF_WHOLE_SCENE_REGION=0` keeps the region to the residents.
+
+**The bone palettes** (5c). Every main and shadow build copied the whole palette arrays and extras rows into its
+payload and uploaded them, about 0.66 MB each, three times a frame.
+-   **The writers note a palette whose rows differ** (`kChangePalette`: the walk's `WriteObject` and `AppendKeptSkin`
+    compare the rows before they copy them).
+-   **A store per bones buffer** (`BonesStore`) collects from the log the rows changed since the version the buffer
+    holds (`Resources::bonesUploaded`):
+    -   a palette's rows or place: current and previous;
+    -   an extras block.
+-   **The uploads read the tables' arrays directly** (no copy); a new capacity is a resync.
+-   **The check** (`CS_DCLF_PERSISTENT_PARITY`): each store keeps a shadow of the rows it uploaded, compared with the
+    tables every 60 frames. It found 0 differences on the tour.
+-   **Result:** at Riverwood about 250 of 669 skins change their palette each frame. The epoch now uploads about
+    12,700 rows (200 KB) instead of 41,000, the colour build fell from 0.77 to 0.67 ms, its join from 0.57 to
+    0.49 ms, and the main epochs' commit on the render thread to 292 µs.
+
+### Step 6: the shadow epoch
+
+**The sun's entry rule on the GPU** (6a). A caster of the sun's views is an input only while its entry is inside one of
+the sun's full-frustum culling processes.
+-   **Before:** the build tested every caster's entry sphere against the frame's planes and wrote the verdict into
+    the input (`kInputOutsideSunEntry`), so every caster's input could change every frame.
+-   **Now** the input carries the sphere (its fade row, `SetSunEntryRow`), each sun view's latch carries the
+    processes (`BuildDrawsLatch::sunEntryPlanes`), and BuildDraws tests them (`OutsideSunEntry`).
+-   **The latch grew to 2 KB.** The sun has six processes at Riverwood, more than the four cascade plane sets the
+    latch already held, and the rule is a union over processes, where a cascade's plane sets intersect.
+-   **Above eight processes** the CPU's flag is used, as before.
+-   **Check** (`CS_DCLF_PERSISTENT_PARITY`): the latch's test, run on the CPU over every sun input, against the old
+    verdict. Tour: 0 differences over about 100,000 inputs a window. The sampled views' GPU counts (tested, drawn,
+    rejected) are the same as the CPU flag's.
+
+**The inputs, the records and the claims** (6b, 6d; `ShadowKept`).
+-   **Records.** The plain record and one per alpha-tested material, at slots the materials keep. Their texcoord
+    blocks sit at fixed offsets in the arena, which is still written every build (a few KB), so a record changes only
+    when its texture does.
+-   **Inputs.** Per render mode, a region of the casters' inputs, changed only by:
+    -   the change log's shadow causes (the technique and reason, flags, placement, geometry, skin, membership);
+    -   a mode's views changing their rasterizer states (the mode is read again);
+    -   what waited (a pipeline, or a diffuse texture) becoming ready. The waiting list is read again every build.
+-   **The frame's own list** is only the face shapes (their positions are the walk's).
+-   **Uploads.** Every entry and record carries the version it last changed at. A mode's input buffer and each view
+    slot's copy of the records receive what is newer than the version they hold (`ShadowResources::inputsUploaded`,
+    `recordsUploaded`): the four view slots' 115 records are no longer staged every frame.
+-   **Claims.** Each mode's claims are kept with the region, each geometry with the object that owns its claim: a
+    geometry that moves between slots is claimed by its new slot before its old one's entry goes. The first version
+    dropped such a claim, 2-5 geometries in Whiterun. A new set is published only when the claims or the faces
+    changed.
+-   **Check** (`CS_DCLF_PERSISTENT_PARITY`): the same build made the per-frame way, and per used mode:
+    -   the same casters with the same inputs, the record's number apart;
+    -   records binding the same textures and samplers with the same texcoord values;
+    -   the same claims.
+-   **Result:** tour 0 differences over 42,000-53,000 inputs a window, with holes and set parity at 0. At Riverwood
+    about 270 entries a build are written again (the movers, in two modes), and no records.
+
+**Cost** (Riverwood, 45 s): the shadow job on the worker fell from 0.51 to 0.28 ms (its build part 0.29 → 0.12 ms,
+the claim sets 0.05 → 0), and the render thread's wait for it from 0.33 to 0.08 ms. What its staging still sends
+(0.13 ms) is mostly its own copies of the object records and bone rows, which the main epochs upload too.
+-   Switches: `CS_DCLF_PERSISTENT_SHADOW=0` builds the shadow epoch's inputs and records every frame, as before.
+
+### Step 7: what still walked every object each frame
+
+These scans were measured one by one, then made event-driven in cost order. Riverwood render thread, µs a frame:
+
+| Scan | Before | After |
+| --- | --- | --- |
+| Shading resample | 130 | 5 |
+| Pipeline constants | 64 | 20 |
+| Material frame components | 30 | 14 |
+| Texture transforms | 11 | 1 |
+| Delta walk's stale-slot scan | 27 | 2 |
+| Slot check | 16 | 0 |
+| Hole detector's claim walk | 30 | 10 |
+| Geometry table packing (worker, per build, 3 builds) | 11 | 1 |
+| Sun exclusion (worker) | 30-37 | 10 |
+
+In all, the render thread's scans went from about 350 to about 105 µs a frame. Every check below is
+`CS_DCLF_PERSISTENT_PARITY`, and was 0 over the tour.
+
+**Shading** (`RefreshFrameConstants`). The resample reads only the slots whose shading inputs change with no event
+(`Tables::watchList`):
+-   **Controllers.** A controller on the shader or alpha property animates the emissive colour, the multiplier and
+    the alpha (`kWatchShading`, set by `WriteObject`).
+-   **Extras.** ProjectedUV and land blend follow the eye and a clock (`kWatchExtras`, set by the patch).
+-   **Actors.** Their alpha fades with the actor.
+-   **The LOD fades.** `GetRenderPasses` writes them into the property (`specularLODFade`, `envmapLODFade`)
+    whenever any view registers the object. A detour on its vtable slot (0x2A) pushes the property when either value
+    moved. It fires about once a frame, and the property's dependents are resampled.
+-   **The render flags** changing resamples every slot.
+-   **A bug the watch exposed.** A hit in the derivation cache (`Tracked::Derived`) reused the cached LOD fades, and
+    the old per-frame resample corrected them at Prepass. Every object in the fade band changed twice a frame
+    (about 90 objects at Riverwood). A hit now takes the fades from the property, as the uncached path does.
+-   **Check:** every slot sampled against the tables every 60 frames ("shading resample").
+
+**Pipeline constants.**
+-   **PerGeometry blocks.** What of a pipeline's block changes after its first evaluation is either written over per
+    object (`ObjectGeometryConstants`) or one of the frame's globals: `DirLightDirection`, `DirLightColor`,
+    `DirectionalAmbient`, `AmbientSpecularTintAndFresnelPower` and `AmbientColor` (PS 3, 4, 5, 6, 18). All
+    pipelines that write them share them. So:
+    -   a pipeline is evaluated in full once, and again when the render flags change;
+    -   otherwise one sample a frame is copied into it, compared and written in place.
+-   **`EyePosition`** (VS 2). `SetupGeometry` (0x1414dd040) writes it only for Envmap, Eye and technique 0x10, and
+    the same for all three: the camera less `posAdjust`, in world space. Those pipelines take it from the frame's one
+    evaluation of such a pipeline. Every other technique leaves whatever the constant buffer last held, which no draw
+    of it reads, so the check skips it there.
+-   **PerTechnique blocks.** `EvaluateTechnique` reads only the technique and whether the shadow mask is bound
+    (`TechniqueKey`). It runs once a frame per key and is versioned when it changes. A pipeline compares its block
+    only when it holds another version.
+-   **Template pass.** It is looked up only to evaluate.
+-   **Pipelines whose template has no lighting pass this frame** now take the frame's globals too. They used to be
+    skipped and kept a stale sun direction.
+-   **Check:** every pipeline's block against a full evaluation, in what no object writes over, and its PerTechnique
+    block against `EvaluateTechnique` ("pipeline constants").
+
+**Material frame components** (`MaterialSources`: IBL, snow rim, character light, LOD texture, landscape snow, t11).
+-   **By signature** (`Tables::frameSignatures`). Each signature keeps its slots, listed when keyed and dropped as
+    the list is walked. One live sample a signature is taken from a slot drawn this frame, and applied to the whole
+    list only when it differs from the last. Slots keyed or rewritten since take it regardless
+    (`materialFramePending`). At Riverwood one signature a frame applies: the character light's, whose t11
+    alternates.
+-   **TexcoordOffset.** A material's two texture-transform buffers change only by a write, which is an event. A slot
+    is watched (`transformWatch`) from its keying or its material's write until two frames have passed and both
+    buffers agree.
+-   **Check:** every slot drawn this frame against its signature's sample and its material's transform ("material
+    frame components").
+
+**Geometry slot liveness.**
+-   **References.** A kept object no longer renews its geometry slot every frame. The sweep (every 16 frames) works
+    out which slots an object draws from, including a skin's partition chain (`geometryReferenced`), and frees only
+    the others once idle.
+-   **Buffer touches.** These are staggered over the slots, every 64 frames each, against `GpuResources`'
+    eviction.
+-   **Stale slots are events:** a failed touch; every unresolved slot once buffers start resolving; a slot
+    `ResolveGeometrySlot` freed. Only then are the objects drawing them found and written again.
+-   **The slot check** (`CheckObjectSlots`) runs only on a frame some slot was freed (a sweep, a material drop, a
+    geometry slot that could not be resolved again), or under the parity switch.
+-   **Counts.** The slot counts for the reports are taken every 16 frames. The decal ordinals are reset from last
+    frame's list, not across the whole column.
+
+**The geometry table** (`GeometryStore`, one for the main epochs' buffer and one for the shadow epoch's).
+-   **Packing.** The geometry slots' draws are kept and repacked from the tables' geometry log (`Tables::geometryLog`:
+    a record resolved, a slot added, a partition link changed).
+-   **Uploads.** Only the slots changed since the version the buffer holds are uploaded (`geometriesUploaded`). The
+    face streams' draws follow the slots and are sent every build.
+-   **Result:** at Riverwood almost no slot changes, where all of them (1,400 to 2,700) were packed and uploaded by
+    every build.
+-   **Check:** every slot against one packed from the tables ("persistent geometry table").
+
+**The hole detector** (`PublishClaims`). A hole was withheld, and only a registration is withheld, so the detector
+walks this frame's withheld registrations (`PassCapture::LastDrain`) rather than every claim. The `claimed` count,
+which only the reports read, is taken every 16th frame.
+
+**The sun exclusion** (`BuildSunExclusion`, `SunExclusionCache`). The exclusion reads four things, and while none of
+them has changed the last verdicts are reused (only the per-frame stamps are new):
+-   the candidates snapshot;
+-   the tables' generation;
+-   the sun mode's membership (`ShadowKept::Mode::membership`: the build at which an object last joined or left its
+    inputs or faces);
+-   every object's flags and geometry (the change log's bindings and geometry causes).
+
+It is reused on 85-90% of builds at Riverwood, and 33-70% in Whiterun's crowds, where walking NPCs keep changing their
+bindings. Check: a reuse is built in full every 60 frames and compared ("sun exclusion").
+
+**Left** (µs a frame at Riverwood):
+-   **Render thread:**
+    -   material validation, 15 (a check, 8 evaluations a frame);
+    -   wetness, 11 (per actor, per frame by nature);
+    -   the synthetic passes' hole test, 10;
+    -   the three live material samples, 13.
+-   **Downstream:** `DirLightDirection` moves every frame, so about 70 pipeline blocks change a frame and are packed
+    again. As a frame-shared row, the blocks would stay put.

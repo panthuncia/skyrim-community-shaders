@@ -623,6 +623,8 @@ void DrawcallLimitFix::EarlyPrepass()
 		for (std::size_t p = 0; p < tables.pipelines.size(); ++p) {
 			auto& entry = lookups.pipelines[p];
 			if (!tables.PipelineUsed(p, store.GetFrame())) {
+				if (entry.setIndex != DCLF::Lookups::kNone)
+					entry.version = lookups.NextVersion();
 				entry.setIndex = DCLF::Lookups::kNone;
 				continue;
 			}
@@ -632,26 +634,40 @@ void DrawcallLimitFix::EarlyPrepass()
 			auto* vs = cache.GetVertexShader(*lighting, key.vertexDescriptor);
 			auto* ps = cache.GetPixelShader(*lighting, key.pixelDescriptor);
 			const std::uint32_t resolved = (setIndex != DCLF::DrawPipelines::kNotReady && vs && ps) ? setIndex : DCLF::Lookups::kNone;
+			// Written only where it differs, so an entry's version is new only when it changed.
+			bool changed = false;
 			if (!(entry.key == key)) {
 				entry.key = key;
 				entry.setIndex = DCLF::Lookups::kNone;
 				entry.shadowMaskIndex = DCLF::Lookups::kNone;
+				changed = true;
 			}
 			if (entry.setIndex != DCLF::Lookups::kNone && entry.setIndex != resolved)
 				++lookups.generation;  // a build may hold the old index
+			changed |= entry.setIndex != resolved;
 			entry.setIndex = resolved;
-			if (resolved == DCLF::Lookups::kNone)
-				continue;
-			entry.vsTable.assign(vs->constantTable.begin(), vs->constantTable.end());
-			entry.psTable.assign(ps->constantTable.begin(), ps->constantTable.end());
-			for (std::uint32_t variant = 0; variant < 2; ++variant) {
-				const auto& usage = pipelines.Usage(resolved, variant);
-				auto& bits = entry.usage[variant];
-				bits.vertexConstants = usage.vertexConstants;
-				bits.pixelConstants = usage.pixelConstants;
-				bits.textures = usage.textures;
-				bits.samplers = usage.samplers;
+			if (resolved != DCLF::Lookups::kNone) {
+				auto assign = [&](std::vector<std::uint8_t>& a_table, const auto& a_source) {
+					if (!std::equal(a_table.begin(), a_table.end(), a_source.begin(), a_source.end())) {
+						a_table.assign(a_source.begin(), a_source.end());
+						changed = true;
+					}
+				};
+				assign(entry.vsTable, vs->constantTable);
+				assign(entry.psTable, ps->constantTable);
+				for (std::uint32_t variant = 0; variant < 2; ++variant) {
+					const auto& usage = pipelines.Usage(resolved, variant);
+					auto& bits = entry.usage[variant];
+					changed |= bits.vertexConstants != usage.vertexConstants || bits.pixelConstants != usage.pixelConstants || bits.textures != usage.textures ||
+					           bits.samplers != usage.samplers;
+					bits.vertexConstants = usage.vertexConstants;
+					bits.pixelConstants = usage.pixelConstants;
+					bits.textures = usage.textures;
+					bits.samplers = usage.samplers;
+				}
 			}
+			if (changed)
+				entry.version = lookups.NextVersion();
 		}
 	}
 
@@ -1217,6 +1233,9 @@ void DrawcallLimitFix::Prepass()
 			if (shadow.cullTested)
 				logger::info("[DCLF] shadow culling (view {} mode {:#x}, sampled): {} tested, {} drawn, {} rejected by the frustum",
 					shadow.cullSampledView, shadow.cullSampledMode, shadow.cullTested, shadow.cullDrawn, shadow.cullRejected);
+			if (shadow.sunEntryChecks)
+				logger::info("[DCLF] sun entry on the GPU: {} inputs checked against the CPU's verdict (sampled frames), {} differ{}", shadow.sunEntryChecks,
+					shadow.sunEntryMismatches, shadow.sunEntryMismatches ? " <- DIFFER" : " <- OK");
 			if (DCLF::PassCapture::ShadowWithholdingEnabled()) {
 				const auto& captured = DCLF::PassCapture::Get().GetStats();
 				logger::info("[DCLF] shadow ownership: withheld plain {} / clamped {} / paraboloid {} passes, {} volumetric-only passes and {} of hints 11, 7 and 3 (last frame); claimed {} / {} / {} casters; {} face regions uploaded; {} views not ready under ownership{}",
@@ -1244,8 +1263,8 @@ void DrawcallLimitFix::Prepass()
 				draws.sunTested, draws.sunMissed, draws.sunCpuTested, draws.sunCpuMissed,
 				(draws.sunTested == draws.sunCpuTested && draws.sunMissed == draws.sunCpuMissed) ? " <- OK" : " <- DIFFERS");
 		if (draws.residentInputs || draws.residentResyncs)
-			logger::info("[DCLF] resident draws (last frame): {} persistent inputs, {} sequences, {} pairs at stable record slots, {} not drawable; since the start {} region "
-						 "versions uploaded, {} resyncs; parity {} entries checked, {} differ, {} residents missing{}",
+			logger::info("[DCLF] persistent draws (last frame, colour): {} kept inputs, {} sequences, {} pairs, {} not drawable; since the start {} region "
+						 "versions uploaded, {} resyncs; parity {} entries checked, {} differ, {} missing{}",
 				draws.residentInputs, draws.residentDraws, draws.residentPairs, draws.residentUndrawable, draws.residentVersions, draws.residentResyncs,
 				draws.residentParityChecks, draws.residentParityMismatches, draws.residentMissing,
 				draws.residentParityChecks ? (draws.residentParityMismatches || draws.residentMissing ? " <- RESIDENT DRAW PARITY" : " <- OK") : "");

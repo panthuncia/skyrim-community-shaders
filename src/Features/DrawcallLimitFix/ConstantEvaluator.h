@@ -111,6 +111,17 @@ namespace DCLF
 	/** @brief Evaluates SetupTechnique's writes for a pass descriptor from the current frame's fog and settings. */
 	void EvaluateTechnique(std::uint32_t a_passDescriptor, TechniqueConstants& a_out);
 
+	/**
+	 * @brief What EvaluateTechnique reads of a pass descriptor (the technique, and whether the shadow mask is bound):
+	 * descriptors with the same key evaluate the same within a frame.
+	 */
+	inline std::uint32_t TechniqueKey(std::uint32_t a_passDescriptor)
+	{
+		const bool shadowLights = (a_passDescriptor & (1u << 13)) || (a_passDescriptor & 0x1c0u);
+		const bool shadowMask = shadowLights && (a_passDescriptor & (1u << 14));
+		return (((a_passDescriptor >> 24) & 0x3f) << 1) | (shadowMask ? 1u : 0u);
+	}
+
 	/** @brief What BSLightingShader::SetupGeometry writes into the PerGeometry groups for one pass. */
 	struct GeometryConstants
 	{

@@ -1,6 +1,9 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <bit>
+#include <chrono>
 #include <deque>
 #include <map>
 #include <vector>
@@ -16,6 +19,61 @@ namespace DCLF
 	/** @brief Attributes the time since the last call to one BuildPart (SceneStore.cpp; CS_DCLF_PROFILE). */
 	struct PartTimer;
 	struct SunCandidates;
+
+	// [TEMP] Step 7: the per-frame scans over every object, timed (SceneStore::SceneAsyncReport prints them).
+	enum class Scan : std::uint32_t
+	{
+		FrameMaterials,
+		PipelineConstants,
+		ShadingResample,
+		Wetness,
+		CheckSlots,
+		AccumulateStats,
+		MaterialTail,
+		DeltaStale,
+		ShadowSets,
+		Claims,
+		PackGeometry,
+		SunExclusion,
+		MaterialLive,
+		MaterialApply,
+		MaterialWrites,
+		TextureTransforms,
+		MaterialValidate,
+		Technique,
+		Geometry,
+		HoleClaims,
+		HoleSynthetic,
+		Admit,
+		SceneJobTouch,
+		Count
+	};
+	inline constexpr const char* kScanNames[] = { "frame materials", "pipeline constants", "shading resample", "wetness", "slot check",
+		"accumulate stats", "material tail", "delta stale scan", "shadow sets", "claims and holes", "pack geometry (worker)", "sun exclusion (worker)",
+		"- material live", "- material apply", "- material writes", "- texture transforms", "- material validate", "- technique", "- geometry",
+		"- hole claims", "- hole synthetic", "- admit", "scene job touches" };
+	struct ScanTimes
+	{
+		std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(Scan::Count)> ns{}, calls{};
+		static ScanTimes& Get()
+		{
+			static ScanTimes times;
+			return times;
+		}
+	};
+	struct ScopedScan
+	{
+		Scan scan;
+		std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+		explicit ScopedScan(Scan a_scan) :
+			scan(a_scan) {}
+		~ScopedScan()
+		{
+			auto& t = ScanTimes::Get();
+			t.ns[static_cast<std::size_t>(scan)] += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+			++t.calls[static_cast<std::size_t>(scan)];
+		}
+	};
 
 	/**
 	 * @brief The render thread's view of the static scene content Drawcall Limit Fix can draw.
@@ -61,6 +119,29 @@ namespace DCLF
 
 	inline constexpr std::uint32_t kNoObjectSlot = ~0u;
 
+	/** @brief What a change-log entry changed (SceneStore::Tables::changeLog), by the columns its consumers read. */
+	enum ChangeCause : std::uint32_t
+	{
+		kChangePlacement = 1u << 0,   // world, previous world, bound, the sun entry
+		kChangeBindings = 1u << 1,    // flags, material, pipeline (the draw's too), the fade distance
+		kChangeShading = 1u << 2,     // shading, emissive multiplier, wetness
+		kChangeLights = 1u << 3,      // Light Limit Fix's room index and shadow mask
+		kChangeTree = 1u << 4,        // tree animation
+		kChangeSkin = 1u << 5,        // skin partitions, bone offset and rows
+		kChangeExtras = 1u << 6,      // the extras block and its rows
+		kChangeShadow = 1u << 7,      // shadow technique and reason, sky technique, shadow material and diffuse
+		kChangeGeometry = 1u << 8,    // geometry slot, the draw's geometry half, face stream, the object's geometry
+		kChangeMembership = 1u << 9,  // residency
+		kChangePalette = 1u << 10,    // the bone palette's rows (current or previous), not where they are
+	};
+	inline constexpr std::uint32_t kChangeCauseCount = 11;
+	inline constexpr std::array<const char*, kChangeCauseCount> kChangeCauseNames{ "placement", "bindings", "shading", "lights", "tree", "skin", "extras", "shadow",
+		"geometry", "membership", "palette" };
+	inline constexpr std::uint32_t kChangeAll = (1u << kChangeCauseCount) - 1;
+
+	/** @brief The scene phase's flags the accumulate phase's patch keeps; the rest of an object's flags are the patch's. */
+	inline constexpr std::uint32_t kSceneKeptFlags = kObjectSkinned | kObjectNoShadow | kObjectVolumetricOnly | kObjectShadowOnly;
+
 	class SceneStore
 	{
 	public:
@@ -76,6 +157,38 @@ namespace DCLF
 			// the frame's floats into it. A consumer that kept something derived from the record compares this
 			// instead of the record's 2.3 KB.
 			std::vector<std::uint32_t> materialVersion;
+			// Versions the builds' kept bindings key on (IndirectDraws' PersistentBindings), each new (NextVersion) whenever
+			// what it covers is written with a different value: per pipeline its constants' floats (technique and PerGeometry)
+			// and what its pairs' records read (the key, the technique's filter modes and shadow mask, the permutation); per
+			// material slot the frame's floats (RefreshFrameMaterials, RefreshTextureTransforms). materialVersion covers the
+			// rest of a material.
+			std::vector<std::uint32_t> pipelineConstantsVersion;  // parallel to pipelines
+			std::vector<std::uint32_t> pipelineBindingVersion;    // parallel to pipelines
+			std::vector<std::uint32_t> materialFrameVersion;      // parallel to materials
+			// The frame components (MaterialSources: engine globals and the character light's t11), by signature: each
+			// signature's material slots (listed when keyed, dropped as the list is walked once freed or keyed under another
+			// signature), and the live sample they were last given. RefreshFrameMaterials takes one sample a signature and
+			// applies it to the list only when it differs from the last; the slots keyed or rewritten since
+			// (materialFramePending) take it regardless.
+			struct FrameSignature
+			{
+				std::vector<std::uint32_t> slots;
+				std::uint32_t representative = ~0u;
+				MaterialRecord applied;
+				bool appliedValid = false;
+			};
+			ankerl::unordered_dense::map<std::uint32_t, FrameSignature> frameSignatures;
+			std::vector<std::uint32_t> materialSignatureListed;  // parallel to materials (grown on demand): signature + 1, 0 when unlisted
+			std::vector<std::uint32_t> materialFramePending;
+			// TexcoordOffset's watch (RefreshTextureTransforms): a material's two texture-transform buffers change only by
+			// a write (MaterialSources' controller and rewrite events), and the frame reads the one the engine flips to. A
+			// slot is watched from its keying or its material's write until two frames have passed and both buffers
+			// agree. transformWatchFrame: the frame it was keyed or written, 0 when unwatched.
+			std::vector<std::uint32_t> transformWatch;
+			std::vector<std::uint32_t> transformWatchFrame;  // parallel to materials (grown on demand)
+			void ListMaterialSlot(std::uint32_t a_slot, std::uint32_t a_frame);
+			std::uint32_t versionCounter = 0;
+			std::uint32_t NextVersion() { return ++versionCounter; }
 			std::vector<ObjectShading> shading;                   // parallel to objects
 			// Linear Lighting's per-object emissive multiplier (LLPerGeometry, PS b8). It lives here rather
 			// than being read off the property in the epoch because it is animated, so it has to be sampled
@@ -91,6 +204,31 @@ namespace DCLF
 			// by an actor (actorObjects lists those that are); refreshed every frame by RefreshFrameConstants.
 			std::vector<std::array<float, 4>> skinWetness;        // parallel to objects
 			std::vector<std::uint32_t> actorObjects;  // sorted by object index (the walk sorts it)
+			// The slots whose shading or extras rows have per-frame inputs no event reports, which RefreshFrameConstants
+			// resamples every frame: a controller on the shader or alpha property animates the emissive colour and
+			// multiplier or the alpha (kWatchShading, set by WriteObject), and ProjectedUV and land blend follow the eye
+			// and a clock (kWatchExtras, set by the accumulate phase's patch). Everything else about an object's shading
+			// changes only with a patch, which samples it. watchList holds each watched slot once (kWatchListed); the
+			// resample drops the slots that lost their bits or were freed.
+			static constexpr std::uint8_t kWatchShading = 1u << 0;
+			static constexpr std::uint8_t kWatchExtras = 1u << 1;
+			static constexpr std::uint8_t kWatchListed = 1u << 7;
+			std::vector<std::uint8_t> shadingWatch;               // parallel to objects (grown on demand)
+			std::vector<std::uint32_t> watchList;
+			void SetWatch(std::uint32_t a_slot, std::uint8_t a_bit, bool a_on)
+			{
+				if (a_slot >= shadingWatch.size()) {
+					if (!a_on)
+						return;
+					shadingWatch.resize(a_slot + 1, 0);
+				}
+				auto& bits = shadingWatch[a_slot];
+				bits = a_on ? static_cast<std::uint8_t>(bits | a_bit) : static_cast<std::uint8_t>(bits & ~a_bit);
+				if (a_on && !(bits & kWatchListed)) {
+					bits |= kWatchListed;
+					watchList.push_back(a_slot);
+				}
+			}
 			// Skins of several partitions (CS_DCLF_SKIN_PARTITIONS): bit i draws partition i, walking the
 			// geometry slots' nextPartition links from the object's geometryIndex (partition 0). 0 for every
 			// other object, which draws its one geometry. The scene phase sets it from the fade node's LOD level
@@ -117,21 +255,51 @@ namespace DCLF
 			// frame, which an atomic append cannot promise. ~0u for everything that is not a decal.
 			std::vector<std::uint32_t> decalOrdinal;  // parallel to objects
 			std::array<std::uint32_t, 2> decalCount{};
-			// Skinning (CS_DCLF_SKINNED): every skinned object's bone palette rows end to end - the engine's
-			// own NiSkinInstance::boneMatrices (three float4 rows a bone, absolute world space), copied
-			// after its per-frame update - and the previous frame's palettes in the same layout. The epoch
-			// packs both eye-relative into its bones buffer, current rows first. Per object, where its rows
-			// start and how many; 0 for anything that is not skinned.
-			std::vector<float> bones;
-			std::vector<float> previousBones;
+			// Skinning (CS_DCLF_SKINNED): every skinned object's bone palette rows - the engine's own
+			// NiSkinInstance::boneMatrices (three float4 rows a bone, absolute world space), copied after its
+			// per-frame update - and the previous frame's palettes in the same layout. The epoch packs both into
+			// its bones buffer, current rows first. Per object, where its rows start and how many; 0 rows for
+			// anything that is not skinned. A skin's block is its own for as long as its slot keeps a palette of
+			// that size (PlaceBones / FreeBones), so its offsets, and the previous rows' (one capacity further),
+			// change only when the capacity grows (in kBoneGrowRows steps), which notes every palette and extras.
+			static constexpr std::uint32_t kBoneGrowRows = 4096;
+			std::vector<float> bones;          // capacity rows
+			std::vector<float> previousBones;  // capacity rows
 			std::vector<std::uint32_t> boneOffset;  // parallel to objects, in rows
 			std::vector<std::uint32_t> boneRows;    // parallel to objects
+			std::array<std::vector<std::uint32_t>, 81> boneFree{};  // freed blocks' offsets, by bones (rows / 3; at most 80)
+			std::uint32_t boneTop = 0;  // rows handed out
+			std::uint32_t BoneCapacity() const { return static_cast<std::uint32_t>(bones.size() / 4); }
+			/** @brief The slot's block for a palette of a_rows rows (its own when the size is the same): its first row. */
+			std::uint32_t PlaceBones(std::uint32_t a_slot, std::uint32_t a_rows);
+			void FreeBones(std::uint32_t a_slot);
 			// Per-object extras (Records.h kExtraRows): the landscape blend parameters and the ProjectedUV
 			// matrix and pixel parameters, filled at Prepass by RefreshFrameConstants for the objects that
 			// carry kObjectLandBlend / kObjectProjectedUV. Rows of float4; per object the row offset, or
-			// kNoExtraRows. The epoch appends them to the row buffer after the palettes.
+			// kNoExtraRows. The epoch appends them to the row buffer after the palettes. A block is the object's
+			// for as long as its patch holds it (AllocateExtras / FreeExtras), so it persists across walks.
 			std::vector<float> extraRows;
 			std::vector<std::uint32_t> extraOffset;  // parallel to objects
+			std::vector<std::uint32_t> extraFree;    // freed blocks' row offsets
+			std::uint32_t AllocateExtras()
+			{
+				if (!extraFree.empty()) {
+					const std::uint32_t offset = extraFree.back();
+					extraFree.pop_back();
+					std::fill_n(extraRows.begin() + std::ptrdiff_t(offset) * 4, std::size_t(kExtraRows) * 4, 0.0f);
+					return offset;
+				}
+				const auto offset = static_cast<std::uint32_t>(extraRows.size() / 4);
+				extraRows.resize(extraRows.size() + std::size_t(kExtraRows) * 4, 0.0f);
+				return offset;
+			}
+			void FreeExtras(std::uint32_t a_slot)
+			{
+				if (a_slot < extraOffset.size() && extraOffset[a_slot] != kNoExtraRows) {
+					extraFree.push_back(extraOffset[a_slot]);
+					extraOffset[a_slot] = kNoExtraRows;
+				}
+			}
 			// The Utility technique each object casts with, without a view's mode bits (ShadowViews.h:
 			// ShadowUtilityTechnique), and why the engine would not draw it into a shadow map. Both are
 			// decided by the scene phase, because every shadow view is drawn before the accumulate phase
@@ -149,21 +317,66 @@ namespace DCLF
 			// A resident object's fade-out distance (kObjectFadeTest, AccumulatedPass::fadeDistance), against its entry
 			// root's centre (sunEntry): > 0 scaled by the camera's LOD factor, < 0 unscaled. Meaningless without the flag.
 			std::vector<float> fadeDistance;  // parallel to objects
-			// The resident draws' change feed (IndirectDraws' resident regions, drawcall-limit-fix.md "Persistent resident
-			// draws"): which slots hold a resident record, and an append-only log of the slots whose draw input may have
-			// changed - joined, left, moved, re-masked, reset - whenever that happened. Each region reads the log from its own
-			// position (absolute: residentLogBase is residentLog[0]'s); one that fell behind the trimmed head, or whose
-			// tables generation changed, reads every resident slot again.
+			// Which slots hold a resident record (PrimaryCull's).
 			std::vector<std::uint8_t> residentSlot;  // parallel to objects
-			std::vector<std::uint32_t> residentLog;
-			std::uint64_t residentLogBase = 0;
-			// [TEMP] the notes by cause: reset, skin mask, placement, patched again, joined, left, all ended.
-			std::array<std::uint64_t, 7> residentNotes{};
-			void NoteResidentChange(std::uint32_t a_slot, std::uint32_t a_cause)
+			// The change log (drawcall-limit-fix.md, "Persistent draw state"): every write that changes a slot's columns
+			// appends the slot with what changed (ChangeCause), whenever it happens. The persistent structures built from
+			// the tables (the resident regions, and the ones after them) read it from their own position (absolute:
+			// changeLogBase is changeLog[0]'s); one that fell behind the trimmed head, or whose tables generation changed,
+			// reads every slot again. A write that leaves the columns as they were appends nothing.
+			struct Change
 			{
-				residentLog.push_back(a_slot);
-				++residentNotes[a_cause];
+				std::uint32_t slot = 0;
+				std::uint32_t causes = 0;  // ChangeCause bits
+			};
+			std::vector<Change> changeLog;
+			std::uint64_t changeLogBase = 0;
+			std::array<std::uint64_t, kChangeCauseCount> changeCounts{};  // notes by cause, for the report
+			void NoteChange(std::uint32_t a_slot, std::uint32_t a_causes)
+			{
+				if (!a_causes)
+					return;
+				changeLog.push_back({ a_slot, a_causes });
+				for (std::uint32_t bits = a_causes; bits; bits &= bits - 1)
+					++changeCounts[std::countr_zero(bits)];
 			}
+			// The geometry slots written since geometryLogBase: a record resolved (ResolveGeometrySlot), a slot added
+			// (AllocateGeometrySlot), a partition link that changed. What the persistent geometry tables repack (IndirectDraws'
+			// GeometryStore); a gap past the end makes every reader resync, as with the change log.
+			std::vector<std::uint32_t> geometryLog;
+			std::uint64_t geometryLogBase = 0;
+			void NoteGeometry(std::uint32_t a_slot) { geometryLog.push_back(a_slot); }
+			/** @brief Every slot is to be read again: a gap past the log's end makes every reader resync. */
+			void InvalidateChangeLog()
+			{
+				changeLogBase += changeLog.size() + 1;
+				changeLog.clear();
+			}
+			/** @brief A slot's columns, everything a persistent consumer builds from, for the writers to compare against. */
+			struct Columns
+			{
+				ObjectRecord object{};
+				DrawSequence draw{};
+				ObjectShading shading{};
+				ObjectLights lights{};
+				ObjectTreeAnim tree{};
+				std::array<float, 4> wetness{};
+				std::array<float, 4> sunEntry{};
+				std::array<float, kExtraRows * 4> extras{};
+				const RE::BSGeometry* geometry = nullptr;
+				ID3D11ShaderResourceView* shadowDiffuse = nullptr;
+				const RE::BSShaderMaterial* shadowMaterial = nullptr;
+				float emissiveMult = 1.0f, fadeDistance = 0.0f;
+				std::uint32_t boneOffset = 0, boneRows = 0, extraOffset = kNoExtraRows, shadowTechnique = 0, skyTechnique = 0, faceStream = kNoFaceStream;
+				std::uint32_t boneCapacity = 0;  // where a record's previous palette and extras are, when it has either
+				std::uint32_t sceneFlags = 0;
+				std::uint8_t skinPartitions = 0, shadowReject = 0, resident = 0;
+			};
+			Columns ColumnsOf(std::uint32_t a_slot) const;
+			/** @brief What differs between two snapshots of a slot, as ChangeCause bits. */
+			static std::uint32_t CausesBetween(const Columns& a_before, const Columns& a_after);
+			/** @brief Notes what a write changed, against the snapshot taken before it. */
+			void NoteWrite(std::uint32_t a_slot, const Columns& a_before) { NoteChange(a_slot, CausesBetween(a_before, ColumnsOf(a_slot))); }
 			// NPC face shapes (Tracked::faceShape): per face object its positions in the snapshot the walk took
 			// (FaceSnapshots::Shape), valid until the next walk, and the region of the positions buffer they go to.
 			// The shadow epoch uploads a region when its generation changed, and binds it as the second stream.
@@ -1200,7 +1413,7 @@ namespace DCLF
 		void MarkResidentSlot(std::uint32_t a_slot, const ResidentPatch& a_patch);
 		/** @brief Ends a slot's residency: a_restore resets its accumulated half now; a_notify reports the geometry to PrimaryCull. */
 		void DropResidentSlot(std::uint32_t a_slot, bool a_notify, bool a_restore);
-		/** @brief RestoreAccumulated for one slot. */
+		/** @brief A slot's accumulated half back as the scene phase wrote it (its patch lapsed, or its residency ended). */
 		void ResetAccumulatedHalf(std::uint32_t a_slot);
 		/** @brief The accumulate phase: the residents' pipeline and material slots used this frame, and a template when none was. */
 		void KeepResidentsAlive();
@@ -1210,8 +1423,68 @@ namespace DCLF
 		void MoveBucket(Tracked& a_tracked, Ineligible a_bucket);
 		void ListFadeDependent(RE::BSGeometry* a_geometry, Tracked& a_tracked);
 		void UnlistFadeDependent(RE::BSGeometry* a_geometry, Tracked& a_tracked);
-		/** @brief The scene half of every slot the last accumulate phase patched, back as the scene phase wrote it. */
-		void RestoreAccumulated();
+		/**
+		 * @brief End of the accumulate phase: the slots the last one patched and this one did not have their patch lapse
+		 * (their accumulated half reset). A patch this phase renewed stays, so a record keeps its patch for as long as the
+		 * engine (or PrimaryCull) keeps giving it a pass, and changes only when that pass does.
+		 */
+		void LapseAccumulated();
+		/**
+		 * @brief CS_DCLF_CHANGE_LOG_PARITY=1: every 60 frames each slot's columns are kept, and a frame later every slot
+		 * whose columns changed in between must be in the log for that frame with the causes that changed. At the scene
+		 * phase's start, before anything of the frame writes.
+		 */
+		void CheckChangeLog();
+		// The material frame components and texture transforms (RefreshFrameMaterials, RefreshTextureTransforms).
+		struct MaterialFrameStats
+		{
+			std::uint64_t frames = 0, samples = 0, applications = 0, slotsApplied = 0, pending = 0, transformsWatched = 0, checks = 0, slotsChecked = 0,
+						  componentsDiffer = 0, transformsDiffer = 0;
+			std::string first;
+		} materialFrameStats;
+		void CheckMaterialFrame();
+		// The pipelines' PerGeometry blocks (RefreshFrameConstants): full evaluations, frame samples, and the parity's findings.
+		struct GeometryStats
+		{
+			std::uint64_t frames = 0, full = 0, samples = 0, changed = 0, checks = 0, pipelinesChecked = 0, techniquesChecked = 0, techniquesDiffer = 0;
+			std::array<std::array<std::uint64_t, 64>, 2> differ{};
+			std::string first;
+		} geometryStats;
+		// The PerTechnique blocks: one evaluation a frame per TechniqueKey, versioned when it changes, and the version each
+		// pipeline slot holds (0: compare it).
+		struct TechniqueMemo
+		{
+			TechniqueConstants value;
+			std::uint32_t version = 0;
+			std::uint32_t frame = ~0u;
+		};
+		ankerl::unordered_dense::map<std::uint32_t, TechniqueMemo> techniqueMemo;
+		std::vector<std::uint32_t> techniqueVersionHeld;
+		std::uint32_t techniqueMemoVersions = 0;
+		// The render flags the blocks were evaluated with: a change evaluates every pipeline in full.
+		std::uint32_t geometryEvaluatedFlags = ~0u;
+		void CheckFrameGeometry(std::uint32_t a_pipeline, const GeometryConstants& a_reference, const GeometryConstants& a_held);
+		/** @brief The slot's shading from its property now; true when it differs from the tables' (written only when a_write). */
+		bool ResampleShading(std::uint32_t a_slot, bool a_write);
+		// The render flags the shading was last sampled with: a change resamples every slot.
+		std::uint32_t resampledRenderFlags = ~0u;
+		// CS_DCLF_PERSISTENT_PARITY: every 60 frames every slot is sampled against the tables after the watched resample.
+		struct ShadingParity
+		{
+			std::uint64_t checks = 0, slots = 0, missing = 0, watched = 0, resampled = 0, lodFadeEvents = 0, frames = 0;
+			std::string first;
+		} shadingParity;
+		std::vector<const void*> lodFadeChanged;
+		struct ChangeLogParity
+		{
+			std::vector<Tables::Columns> snapshot;
+			std::uint64_t position = 0;
+			std::uint32_t generation = 0;
+			bool armed = false;
+			std::uint64_t checks = 0, slots = 0, changed = 0, missing = 0, skipped = 0;
+			std::string first;
+		} changeParity;
+		std::array<std::uint64_t, kChangeCauseCount> reportedChangeCounts{};
 		/** @brief After the delta walk's evaluations: the geometry slots of the slots it kept, and the shadow sets. */
 		void FinishDeltaWalk(PartTimer& a_timer, WalkResult& a_result);
 		void EvaluateRound(PartTimer& a_timer, WalkResult& a_result, std::size_t a_first);
@@ -1235,8 +1508,25 @@ namespace DCLF
 		std::uint32_t walkSerial = 0;
 		std::vector<RE::BSGeometry*> perFrameSet;
 		std::vector<RE::BSGeometry*> pendingEvaluation;
+		// The slots this accumulate phase patched, and the last one's; patchedFrame (per slot) is the frame of its last patch.
 		std::vector<std::uint32_t> accumulatePatched;
+		std::vector<std::uint32_t> lastPatched;
+		std::vector<std::uint32_t> patchedFrame;
 		std::vector<std::uint32_t> refreshedGeometry;  // geometry slots ResolveGeometrySlot re-resolved in place this walk
+		// Geometry slot liveness. A geometry slot lives while an object draws from it: the sweep spares every slot an
+		// object references (geometryReferenced, rebuilt on sweep frames) and frees the rest once idle, so a kept object
+		// never renews its slot. What makes a slot stale is an event: its buffer references failing the staggered touch,
+		// buffers starting to resolve with the slot unresolved, or ResolveGeometrySlot freeing it (freedGeometry); the
+		// objects drawing a stale slot are written again (FinishDeltaWalk).
+		std::vector<std::uint8_t> geometryReferenced;
+		std::vector<std::uint32_t> freedGeometry;
+		std::vector<std::uint32_t> staleGeometrySlots;
+		bool geometryResolvedLastWalk = false;
+		// Set when a slot of any kind was freed this frame; CheckObjectSlots runs only then (or under parity), since a
+		// bound object can reference a slot that is not live only after one was.
+		bool slotsFreedThisFrame = true;
+		// The decals given an ordinal last frame, whose decalOrdinal entries are reset this frame.
+		std::vector<std::uint32_t> decalOrdered;
 		std::vector<const RE::BSFadeNode*> fadeChanged;  // drained from FadeWatch at ProcessEvents
 		ankerl::unordered_dense::map<const RE::BSFadeNode*, std::vector<RE::BSGeometry*>> fadeDependents;
 		// The structural events (SceneEvents in SceneStore.cpp), drained at ProcessEvents: properties by key, nodes held.
