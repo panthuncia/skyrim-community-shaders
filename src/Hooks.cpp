@@ -1,5 +1,7 @@
 #include "Hooks.h"
 
+#include "GpuEventTimers.h"
+#include "RenderGraph/NvPerfBridge.h"
 #include "GpuIdleTrace.h"
 #include "ShaderTools/BSShaderHooks.h"
 #include "ShaderTools/LegacyGraphicsCompatibility.h"
@@ -393,6 +395,8 @@ struct IDXGISwapChain_Present
 	static HRESULT WINAPI thunk(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 	{
 		GpuIdleTrace::OnPresent();
+		GpuEventTimers::OnPresent();
+		NvPerfBridge::OnPresent();
 		globals::state->Reset();
 
 		// DLSS-G on Vulkan requires SyncInterval 0.

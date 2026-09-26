@@ -230,7 +230,7 @@ if(DEVBENCH_BRIDGE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE DEVBENCH_BRIDGE_ENABLED)
 endif()
 
-# OpenRenderGraph on DXVK's Vulkan device; defines CS_HAS_RENDER_GRAPH and CS_RENDER_GRAPH_SPIRV.
+# OpenRenderGraph on DXVK's Vulkan device; defines CS_HAS_RENDER_GRAPH.
 include(cmake/RenderGraph.cmake)
 # https://gitlab.kitware.com/cmake/cmake/-/issues/24922#note_1371990
 if(MSVC_VERSION GREATER_EQUAL 1936 AND MSVC_IDE) # 17.6+
@@ -809,7 +809,7 @@ if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
             -Src "${DXVK_BUILD_DIR}"
             -Dst "${_aio_runtime_dir}"
     )
-    foreach(_dxc IN LISTS CS_DXC_RUNTIME_DLLS)
+    foreach(_dxc IN LISTS CS_DXC_RUNTIME_DLLS CS_NVPERF_DLL)
         list(APPEND _prepare_aio_cmds COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dxc}" "${_aio_runtime_dir}/")
     endforeach()
 
@@ -906,9 +906,6 @@ if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
             file(APPEND "${_feature_shader_paths_file}" "${_fpath}/Shaders\n")
         endif()
     endforeach()
-    if(CS_HAS_RENDER_GRAPH)
-        file(APPEND "${_feature_shader_paths_file}" "${CS_GENERATED_SHADER_DIR}\n")
-    endif()
 
     list(
         APPEND _shader_copy_cmds
@@ -937,11 +934,6 @@ if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
         endif()
     endforeach()
 
-    # Render-graph SPIR-V compiled from the feature HLSL above.
-    if(CS_HAS_RENDER_GRAPH)
-        append_copy_if_different(_shader_copy_cmds CS_RENDER_GRAPH_SPIRV "${CS_GENERATED_SHADER_DIR}" "${AIO_DIR}/Shaders")
-    endif()
-
     add_custom_command(
         OUTPUT copy_shaders.stamp
         COMMAND
@@ -950,7 +942,6 @@ if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
         COMMAND ${CMAKE_COMMAND} -E touch copy_shaders.stamp
         DEPENDS
             ${HLSL_FILES}
-            ${CS_RENDER_GRAPH_SPIRV}
             ${CMAKE_SOURCE_DIR}/cmake/CleanupStaleEntries.cmake
             ${CMAKE_CURRENT_BINARY_DIR}/prepare_aio.stamp
         COMMENT "Copying changed shaders into AIO/Shaders"

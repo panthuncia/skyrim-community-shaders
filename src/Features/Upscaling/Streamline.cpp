@@ -3,6 +3,7 @@
 #include "DXVKInterop.h"
 
 #include "../../DxvkLoader.h"
+#include "../DrawcallLimitFix/Switches.h"
 #include "../../Globals.h"
 #include "../../State.h"
 #include "../../Utils/Game.h"
@@ -456,10 +457,17 @@ bool Streamline::Initialize()
 	// The controller keeps at most one frame-generation feature loaded at runtime.
 	dlssgHardware = ProbeDLSSGHardware();
 
-	std::vector<sl::Feature> featuresToLoad = { sl::kFeatureDLSS, sl::kFeatureReflex, sl::kFeaturePCL,
-		sl::kFeatureFSR, sl::kFeatureFSR_G, sl::kFeatureXeSS };
-	if (dlssgHardware)
+	// Reflex and PCL make the interposer enable VK_NV_low_latency on DXVK's device, which Nsight Graphics refuses to capture. For
+	// now they load only on request, CS_STREAMLINE_REFLEX=1, and DLSS-G (which needs Reflex) with them.
+	const bool reflexRequested = DCLF::SwitchEnabled("CS_STREAMLINE_REFLEX");
+	std::vector<sl::Feature> featuresToLoad = { sl::kFeatureDLSS, sl::kFeatureFSR, sl::kFeatureFSR_G, sl::kFeatureXeSS };
+	if (reflexRequested) {
+		featuresToLoad.push_back(sl::kFeatureReflex);
+		featuresToLoad.push_back(sl::kFeaturePCL);
+	}
+	if (dlssgHardware && reflexRequested)
 		featuresToLoad.push_back(sl::kFeatureDLSS_G);
+	logger::info("[Streamline] Reflex {} (CS_STREAMLINE_REFLEX=1 loads Reflex, PCL and DLSS-G)", reflexRequested ? "requested" : "not loaded");
 
 	sl::Preferences pref{};
 	pref.renderAPI = sl::RenderAPI::eVulkan;

@@ -3,9 +3,11 @@
 #include <d3d11.h>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 #include <winrt/base.h>
 
 struct DxvkOrgInteropResourceInfo;
@@ -134,6 +136,10 @@ public:
 	 * installation has no DXC (dxcompiler.dll beside the DXVK DLLs).
 	 */
 	org::services::ShaderCompiler* ShaderCompiler();
+
+	/** @brief The directory the runtime builds compile from (Data/Shaders), and every .hlsl/.hlsli in it, listed once. */
+	static constexpr const char* kShaderDirectory = "Data/Shaders";
+	static const std::vector<std::filesystem::path>& ShaderSourceFiles();
 
 	/** @brief Wraps a materialized graph-owned buffer as a D3D11 buffer (DEFAULT usage, no CPU access). */
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(org::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc);

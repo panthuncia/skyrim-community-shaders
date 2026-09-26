@@ -214,7 +214,7 @@ mappings; vertices come through the `VertexBuffer` argument. Lighting.hlsl needs
 
 ### An epoch
 
-At the first lighting draw of the main pass DCLF records what the pass binds; just before the deferred
+Where the main pass's opaque batches start, DCLF records what the pass binds; just before the deferred
 composite (`Deferred::EndDeferred`) it runs the graph's `MainOpaque` segment. Its callback assembles and
 uploads the constants, records, draw inputs and geometry table (about 2.5 ms of render-thread CPU and
 1.6 MB for 915 objects in Whiterun). Then:
@@ -225,6 +225,31 @@ uploads the constants, records, draw inputs and geometry table (about 2.5 ms of 
     D24S8 depth, then the color variant (EQUAL) into eight graph-owned targets with the main pass's formats.
     The render area, viewport and depth range are the main pass's (the engine draws with depth range
     [0, 0.999998]; BasicRHI's `PassBeginInfo` gained the range).
+
+The atomic append leaves the sequences in whatever order BuildDraws' threads finish, so the indirect draw switched
+pipeline on nearly every sequence. `CS_DCLF_SORT_DRAWS` (on by default) groups them by pipeline, as a counting sort:
+
+1.  BuildDraws (phase 1 and the colour segment; phase 2's few rescues stay unsorted in their own range) writes each
+    sequence to its append slot of `cs.dclf.sort-staging`, counts it into its pipeline's word of `cs.dclf.sort-counts`,
+    and keeps the atomic's return as its rank among that pipeline's sequences (`cs.dclf.sort-ranks`).
+2.  `PrefixSum` (`src/RenderGraph/PrefixSum.cpp`, `package/Shaders/RenderGraph/PrefixSumCS.hlsl`) turns the 4096
+    counts into each pipeline's first slot. It is BasicRenderer's two-level block scan (`materialPrefixSum.hlsl`) as a
+    reusable pass, and it clears the counts as it reads them, so after the first commit's zero upload nothing clears
+    them again.
+3.  `SortSequencesCS` writes sequence i to its pipeline's first slot plus its rank. Every slot of `[0, count)` is
+    written once, so the draw's count and range are unchanged. Order within a pipeline is still the append order.
+
+Build parity compares the sequences as sets, so it holds with the sort on.
+
+The capture (`DrawcallLimitFix::BeforeOpaquePass`) is taken after `StartDeferred`, with the engine's pending state
+applied by `SetDirtyStates` as the first draw would apply it (that is when the engine binds the G-buffer and clears
+it). It used to be taken at the first lighting draw the engine made, which a frame whose every lighting draw in view
+is DCLF's does not have: in an interior under `DCLF_BINDLESS`, facing away from anything left native, the colour
+epoch was dropped (292 of 300 frames) and the objects it withheld went undrawn, leaving only the depth under fog.
+The end of the opaque pass is no substitute: the sky's clouds have rebound Cloud Shadows' t26 by then.
+`CS_DCLF_CAPTURE_POINT_PARITY=1` compares the capture with what is bound at the first lighting draw the engine
+makes: identical at Riverwood and Whiterun, and in the interior once PS b7 (Advanced Skin's `SkinPerGeometry`, bound
+per draw) was classed as per draw.
 
 The graph holds every feature's passes and each epoch executes all of them; passes record only in their own
 segment (`RenderGraphRuntime::Segment`: LightCulling, MainOpaque, DebugView) and include it in their
@@ -522,6 +547,32 @@ Dragonsreach, with the whole tracked set as input:
 
 One validation VUID (the upstream semaphore one), and the frame is pixel-identical to a frustum-only
 control run of the same scene.
+
+#### Objects behind the camera were never frustum-culled
+
+`Culled` projected the box's corners and kept the object as soon as one corner had `w <= 0`, "crossing the near plane".
+An object wholly behind the eye has all eight there, so the main camera, whose culling has no world-space planes
+(`cullPlaneMask` 0), kept everything behind it, and `ScreenExtent` could not give the HZB a footprint for it either.
+The plane tests are on the homogeneous coordinates (`-w <= x <= w`, `-w <= y <= w`, `0 <= z <= w`), each linear in the
+point, so they hold behind the eye as in front and need no early exit: an object behind the camera is outside the near
+plane.
+
+Riverwood, per frame (full featureset, frame push on):
+
+| | frustum rejects | engine culled, DCLF kept | draws written | colour / Z-prepass draws |
+| --- | --- | --- | --- | --- |
+| before | 772 | 1509 | about 2960 | 3174 / 2960 |
+| after | 3342 | 108 | 1524 | 1752 / 1546 |
+
+With residency off, every object carries the engine's own verdict: the engine culled and DCLF kept went from 2789 to
+219, with 0 frustum rejections of anything the engine kept. The GPU time hardly moved (colour 2.11 to 2.07 ms, the same
+pixel shader warps): the draws behind the camera never rasterized. The report's "false negatives" count residents,
+whose `kObjectNativeVisible` is not an engine verdict: every resident behind the camera is one.
+
+The census that found it (`CS_DCLF_TEST_CULL_CLASSES=1`, TEMP) classifies, every 300 frames, each in-frustum object
+the engine culled and the GPU kept, by the engine's reason (app culling, the fade root, its fade distance) and by what
+the HZB saw (near-plane crossing, a footprint of far plane only, depth nearer than the object), from bits 28-30 of the
+frustum words the visibility feedback reads back.
 
 #### The engine is not an oracle for occlusion
 
@@ -1435,6 +1486,7 @@ through: the shadow pipeline map ("Epochs that only submit") and the NPC head dr
 | `CS_DCLF_ONLY_ELIGIBLE=1` | The reverse skip: the native frame draws only the objects DCLF draws, so the two can be compared pixel for pixel. |
 | `CS_DCLF_CULL=off\|frustum\|occlusion` | How BuildDrawsCS filters the candidates before writing their sequences: nothing, the frustum, or the frustum and then the HZB. |
 | `CS_DCLF_CULL_INPUT=native\|tracked` | Which candidates may be drawn: only what the engine's culling kept (the default), or whatever the GPU culling keeps. `tracked` still shades incorrectly (see Phase 4). |
+| `CS_DCLF_SORT_DRAWS=0` | Execute the phase-1 and colour sequences in append order instead of grouped by pipeline ("An epoch"). |
 | `CS_DCLF_BUILD_PARITY=1` | Every 300 epochs, read BuildDraws' output back and compare it with the CPU templates (`BuildDraws parity OK/MISMATCH`). |
 | `CS_DCLF=0` | Turns the feature off entirely: no hooks, no tables, no draws. Anything else, including unset, leaves it on. The feature list's on/off toggle, by contrast, applies live: off keeps the hooks and the scene tracking but does no frame work (nothing built, drawn, skipped or withheld, claims dropped), and back on resumes at the next frame without a rescan. Unloading the feature (`Feature::loaded`, the remote toggle) does the same. |
 | `CS_DCLF_TABLES=tracked\|accumulated` | Whether the tables hold the whole tracked set or only what the engine's accumulator kept. `accumulated` was the fallback while the per-pipeline template defect was open; `tracked` is now correct. |
@@ -1474,7 +1526,7 @@ through: the shadow pipeline map ("Epochs that only submit") and the NPC head dr
 | `CS_DCLF_PASS_SOURCE=accumulator` | Build the tables from the accumulator walk instead of the captured registrations. |
 | `CS_DCLF_MATERIAL_CACHE=probe` | Diagnostic: measures how many material records are unchanged from the previous frame, i.e. whether a cross-frame cache could work. |
 | `CS_DCLF_EVAL=audit` | Diagnostic: snapshots pipeline state around every stand-in call and reports anything not restored. Very slow; the frame rate collapses. |
-| `CS_DCLF_SHADER_DEBUG=1` | Build the Lighting and Utility SPIR-V with source-level debug info (`-Zi`: `OpSource` with every file's text embedded, and `OpLine`), so Nsight and RenderDoc show source for DCLF's draws. Still optimized. Not `-fspv-debug=vulkan`: its `DebugValue`s keep dead loads alive, so stages read resources their passes do not bind and every candidate is skipped; `vulkan-with-source` also fails DXC 1.9's own validator. There is deliberately no `-Od` form either: unoptimized code reads per-frame constant buffers the epochs do not supply (VS b6, PS b7). The Z-prepass stage (`DCLF_DEPTH_ONLY`) compiles the lighting out of `Lighting.hlsl` rather than relying on the optimizer. The debug builds have their own cache keys. The shader files the game sees through MO2's VFS are also copied, keeping their `Data/Shaders/...` layout, to `CS_DCLF_SHADER_SOURCE_DIR` (default `<Documents>\My Games\Skyrim Special Edition\SKSE\CommunityShaders-ShaderSource`). Shaders DXVK translates from DXBC get no source info this way. The build-time SPIR-V (BuildDrawsCS, HzbCS, LLF's cluster shaders) is always built with `-Zi` (`cmake/RenderGraph.cmake`). Dev-Fast builds do not package it: copy `build/Dev-Fast/generated/Shaders/*/ORG/*.spv` into the mod's `Shaders` folder after changing those shaders. |
+| `CS_DCLF_SHADER_DEBUG=1` | Build the Lighting and Utility SPIR-V with source-level debug info (`-Zi`: `OpSource` with every file's text embedded, and `OpLine`), so Nsight and RenderDoc show source for DCLF's draws. Still optimized. Not `-fspv-debug=vulkan`: its `DebugValue`s keep dead loads alive, so stages read resources their passes do not bind and every candidate is skipped; `vulkan-with-source` also fails DXC 1.9's own validator. There is deliberately no `-Od` form either: unoptimized code reads per-frame constant buffers the epochs do not supply (VS b6, PS b7). The Z-prepass stage (`DCLF_DEPTH_ONLY`) compiles the lighting out of `Lighting.hlsl` rather than relying on the optimizer. The debug builds have their own cache keys. The shader files the game sees through MO2's VFS are also copied, keeping their `Data/Shaders/...` layout, to `CS_DCLF_SHADER_SOURCE_DIR` (default `<Documents>\My Games\Skyrim Special Edition\SKSE\CommunityShaders-ShaderSource`). Shaders DXVK translates from DXBC get no source info this way. The render-graph compute shaders (BuildDrawsCS, HzbCS, SortSequencesCS, the prefix sum, LLF's cluster shaders) always have `-Zi`: they compile at runtime from `Data/Shaders` through `ComputeProgram` (`src/RenderGraph/ComputeProgram.cpp`), into the same cache. |
 | `CS_DCLF_TEST_TOGGLE=<off>:<on>` | Test runs: flips the feature's menu toggle off and back on at those frames (loading screens not counted), to exercise the live on/off. |
 | `CS_DCLF_TEST_COMMANDS=<frame>:<command>;…` | Test runs: run each console command on the main thread once that many frames have been presented (loading screens do not count), for coverage runs from the auto-loaded save. The counter is independent of the feature, so a `CS_DCLF=0` control reaches the same place at the same hour. |
 | `CS_DCLF_ASYNC=off\|on\|probe` | Where the epochs' payloads are built (see "Payloads built off the render thread"). `on` (default since 2026-09-24): the enabled jobs build on the `CS DCLF worker` thread and the epoch commits the result. `off`: inline. `probe`: build on the worker *and* inline, and byte-compare the two payloads (`probe: N compared, N differ`). Bindless path only; the non-bindless path always builds inline. |
@@ -1503,6 +1555,26 @@ through: the shadow pipeline map ("Epochs that only submit") and the NPC head dr
   feature: `DrawcallLimitFix::<segment> / <pass>`, and `LightLimitFix::RenderGraphCull / <pass>`. No D3D11
   timer brackets an epoch: it would straddle the epoch's submission and count the queue's idle time too
   (see "GPU timing in the profiling window" in [render-graph.md](render-graph.md)).
+- `CS_GPU_EVENT_TIMERS=<frames>` times every perf event on the GPU with D3D11 queries and logs, per interval, the
+  events' mean times and the spread of the GPU frame time (min, median, p90, p99, max) with what the slowest tenth
+  of the frames spends its extra time on. It works with DCLF off too: the oldest frame's read may flush the context,
+  since without DCLF's interop nothing else did and every frame was dropped unread.
+- **Time only with the game in the foreground.** Community Shaders skips its upscaler while another process has
+  the foreground (`Upscaling::IsWindowUnusable`), so an unattended run renders without DLSS and is 1.5-2 ms faster
+  at 4K. A run's log has the `[Streamline] DLSS evaluate` line only if it upscaled; compare only such runs. With both
+  in the foreground at Riverwood (2560x1440 internal, 4K output): GPU frame 12.2 ms with DCLF, 10.5 ms without.
+  By segment, switching one back to native at a time: DCLF's sun shadows +0.5 ms, Skylighting +0.1 ms, the main
+  view +1.1 ms (the colour epoch and what follows it +0.5 ms by `CS_GPU_IDLE_TRACE`'s submissions, the Z-prepass and
+  the extra epoch boundaries the rest). Both configurations also idle about 1.8 ms a frame, before the last
+  submission (upscaling), waiting for the render thread.
+- **nvperf's range times favour DCLF.** The range profiler isolates each range, so the native pass's 47 small
+  `RenderBatches` ranges each pay a drain that DCLF's few large ranges do not: native's ranges sum to about 0.5 ms more
+  than its D3D11 timestamps. Compare whole frames (GPU event timers, the idle trace) before per-range numbers.
+- **Background capture skews every frame-time measurement.** On this machine Discord's Clips (`discord_clips.exe`,
+  NVENC at about 8%) captures the game at 30 fps: every ~33 ms, whatever the frame rate, one frame's GPU time is
+  1-1.5 ms (10-15%) longer, spread over every pass in proportion - with DCLF on or off. Seen as a lag-3 (or lag-4,
+  at higher frame rates) autocorrelation of the GPU frame time, confirmed with PresentMon's GPU busy times and
+  `nvidia-smi pmon`'s encoder column. Turn it off before timing.
 - RenderDoc (1.46) does not support `VK_EXT_descriptor_heap`. With RenderDoc capture on, the render graph
   cannot start and DCLF is forced off for the session; the log and the feature's menu page say why.
 
@@ -1517,6 +1589,20 @@ Unset switches now take the configuration every gate run of this work used: `CS_
 overrides a default: `0` for the class and path switches, `off` for the two ownership switches and the
 culling. Rows above that say "Default off" describe the switches before this change. All of them are live
 toggles in the menu.
+
+Two GPU-side choices are on by default too; `=0` turns each off (start-up only, not menu toggles):
+
+-   `CS_DCLF_COLOUR_EQUAL`: the colour pass tests depth EQUAL against DCLF's Z-prepass, as the engine's opaque pass does.
+    LESS_EQUAL let the fragments behind alpha-tested texels through to the full lighting shader. Decals keep LESS_EQUAL
+    (they draw with a depth bias). Colour pass about 4.3 to 3 ms at Riverwood.
+-   `CS_DCLF_DECAL_DEPTH`: the opaque decals' depth before the colour pass ("Decal depth: the opaque group's depth
+    before the colour pass").
+-   `CS_DCLF_FRAME_PUSH` (was `CS_DCLF_TEST_FRAME_PUSH`): the pass-wide constant buffers (the frame slots, PS b3 and b13)
+    are read from push addresses set once per pass instead of through each draw's binding record. The shadow views keep
+    every register in the record, in a layout of their own. Colour pass 3.3 to 2.1 ms at Riverwood (nvperf).
+-   `CS_DCLF_DGC_PREPROCESS`: DCLF's generated commands are preprocessed explicitly, before the passes that execute them
+    ("Explicit DGC preprocessing"), except the depth pass's. Colour pass 2.1 to 1.55 ms, shadow views 1.24 to 1.08 ms at
+    Riverwood.
 
 ## Known upstream issues
 
@@ -2181,7 +2267,7 @@ existing pipeline changed - the pipeline count did not move.
 The indices are translated by reading the engine's state objects, not by re-deriving what each index
 means: `DrawPipelines::CaptureEngineStates` takes `GetDesc` of the rasterizer and blend states behind
 each key's bits (EngineStates.h: the tables at `RelocationID(524748, 411363)` and `(524749, 411364)`) and
-keeps them in RHI terms for the asynchronous build. It runs from the first lighting draw of the deferred
+keeps them in RHI terms for the asynchronous build. It runs with the main pass's capture, inside the deferred
 pass, deliberately: Community Shaders swaps the blend table for its deferred variants between
 `StartDeferred` and `ResetBlendStates`, and those - with RT1-2 forced to alpha blend - are what a native
 decal in the G-buffer uses. A key whose state has not been captured is simply not ready.
@@ -2217,10 +2303,9 @@ group's draw reads its slot count from its own count word, which the CPU uploads
 `ExecuteIndirect`, and issues one indirect draw per group from that group's range. The depth segment
 never sees a decal: its epoch skips them before the cull-only push, so they get no visibility verdict and
 none is needed - the colour segment's BuildDraws tests them itself, frustum and HZB, and the HZB bound
-there is the one rebuilt at the end of this frame's depth segment, so it is final. A decal with
-`kZBufferWrite` keeps its native depth-pass draw (`SkipNativePass` exempts decals inside the depth pass):
-DCLF writes no decal depth, and a depth-writing decal withheld from that pass would lose its depth
-entirely.
+there is the one rebuilt at the end of this frame's depth segment, so it is final. (`SkipNativePass` used
+to exempt decals inside the native depth pass, on the belief that a `kZBufferWrite` decal wrote its depth
+there. It does not: see "Decal depth" below.)
 
 Two instrument corrections came out of the parity runs. The per-geometry check compared TreeParams and
 WindTimers for every object, and they compared clean by accident: SetupGeometry writes them for technique
@@ -2228,6 +2313,74 @@ WindTimers for every object, and they compared clean by accident: SetupGeometry 
 a tree in the main range - until decals, which the engine draws after everything. The check now ignores
 those two variables for non-trees. And the capped sample list is now two samples per variable, because
 the standing PS PerMaterial 29 difference had filled it on its own for three stages running.
+
+### Decal depth: the opaque group's depth before the colour pass
+
+The engine writes decal depth in one place: the main pass's opaque group (hint 2), with depth mode 3 and its bias,
+after every opaque object (engine notes, "Decals"). The blended group only tests, and the native depth pass draws no
+decal at all, although it is offered a few blended `kZBufferWrite` ones. DCLF's second pass wrote no depth, so the
+frame's depth lacked the opaque decals that the native frame has.
+
+The colour segment now runs a **decal depth pass** between DCLF's Z-prepass result and the opaque colour pass
+(`CS_DCLF_DECAL_DEPTH`, default on, `=0` off): the opaque group's fixed-slot range, through the depth signature. An
+opaque-group key's depth variant carries the decal's bias, tests LESS_EQUAL, writes, and runs the alpha test, so a
+transparent texel leaves the host's depth; a blended key's depth variant writes nothing. The frame's depth then matches
+the native one, and every host fragment under an opaque decal texel fails the colour pass's EQUAL test before shading:
+the decal replaces every target there anyway (blending off, full write masks). The blended group cannot do this: it
+blends over its host, which must still be shaded. The decal's own colour draw passes LESS_EQUAL against the depth it
+wrote with the same state.
+
+Riverwood (141 opaque and 60 blended decals): colour-pass pixel shader invocations 3.295 M -> 3.262 M a frame, and the
+same image (window captures of the same view, on and off, compared over the decal-covered road and ground).
+
+### Explicit DGC preprocessing
+
+Every colour-signature `ExecuteIndirect` (the main draws and the two decal groups) cost NVIDIA's driver a fixed
+~170 us of idle GPU when its commands were generated implicitly, inside the call: four extra calls with a zero count
+took 0.66-1.06 ms in the colour pass, against ~12 us each for the depth signature's calls in the depth-only pass.
+Neither draw order nor pipeline switches were the cause (the decal groups switch pipelines 8 and 4 times; the
+unordered layout made no difference).
+
+`CS_DCLF_DGC_PREPROCESS` (default on, `=0` off) gives DCLF's signatures BasicRHI's `explicitPreprocess`: the colour and
+depth variants and the shadow signature. Each pass records a `PreprocessIndirect` for every call it will execute before
+its first `BeginPass`: the colour segment for its decal depth, main and decal calls, the shadow views' pass and
+Skylighting's for every view. `vkCmdPreprocessGeneratedCommandsEXT` must be recorded outside a render pass, but it
+snapshots the state it generates for, render pass instance included, from a *state command buffer*. So each recording
+site (`PreprocessStates`) keeps, per frame slot, a graphics list that is never submitted: the pass records into it the
+same `BeginPass`, heaps, layout, topology and push data that each execution will have, and passes it as the state
+source. A site of its own for each pass that may record concurrently with another. The execution must match that state exactly (VUID-vkCmdExecuteGeneratedCommandsEXT-isPreprocessed-11048
+and -11049). The first attempt used the executing list itself outside the pass as the state source. The snapshot then
+had no depth attachment, and the colour pass ran with no depth test (26.9 M pixel shader invocations instead of 3.27 M).
+
+BasicRHI's side: the layout gets `EXPLICIT_PREPROCESS`, an execution consumes the matching preprocess of the same
+list (and fails without one), the preprocess output becomes visible at the list's next `BeginPass` (one barrier for
+all of a pass's preprocesses, as NVIDIA's DGC sample advises), and barriers to or from indirect argument reads also
+cover the `COMMAND_PREPROCESS` stage when DGC is enabled.
+
+The depth pass (the hybrid Z-prepass, its phase 2, and the depth pass off the hybrid path) keeps implicit
+preprocessing, through a second depth signature without `explicitPreprocess` (`IndirectState::depthPassSignature`). It
+is a single call over sequences written just before it, so an explicit preprocess can only serialise it: 0.342 against
+0.325 ms explicit, 0.316 ms implicit.
+
+Preprocessing does not sort sequences: state sorting stays the application's job, and `UNORDERED_SEQUENCES` is the
+only reordering the layout allows (nvpro-samples `vk_device_generated_cmds`).
+
+Riverwood, focused, GPU event timers over 45 s, on against off: the colour pass 1.54 against 2.10 ms, the shadow views
+1.08 against 1.24 ms, the depth pass 0.316 against 0.325 ms, and the GPU frame 11.96 against 12.56 ms. The shadow views'
+draw counts are unchanged (nvperf, 2660 against 2663).
+
+Open: DCLF adds pipelines to the indirect execution sets (`DrawPipelines::Update`, render thread) while other epochs
+record on workers. The preprocess size BasicRHI queries at recording can then be smaller than the size for the set a
+moment later: the validation layer reported VUID-VkGeneratedCommandsInfoEXT-preprocessSize-11071 three times while
+loading (12452096 against 12583168 bytes). A frame's sequences only reference pipelines committed before it, so what
+executes is covered; the fix is to keep set updates from overlapping the recordings that use the set. The race predates
+explicit preprocessing (implicit calls size their memory the same way).
+
+The colour pass alone, focused, nvperf, on against off: the whole colour pass (preprocesses included) 1.58-1.64 against
+2.09-2.12 ms, SMs active 86 against 66 %; its main draws 0.97-0.99 against 1.21 ms, the opaque decals 0.048 against
+0.25 ms, the blended decals 0.39 against 0.59 ms, and the four zero-count calls 0.006 against 0.66-1.06 ms. GPU event
+timers: GPU frame 12.14 against 12.57 ms, World 4.33 against 4.79 ms. Colour-pass pixel shader invocations 3.26 M
+(unchanged), the same image, and no validation messages about generated commands.
 
 ### Decals, landed (behind `CS_DCLF_DECALS`)
 

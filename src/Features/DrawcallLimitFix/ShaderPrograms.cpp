@@ -20,7 +20,7 @@ namespace DCLF
 	{
 		constexpr const char* kSourcePath = "Data/Shaders/Lighting.hlsl";
 		constexpr const char* kUtilitySourcePath = "Data/Shaders/Utility.hlsl";
-		constexpr const char* kShaderDirectory = "Data/Shaders";
+		constexpr const char* kShaderDirectory = RenderGraphRuntime::kShaderDirectory;
 		constexpr std::size_t kMaxLoggedFailures = 8;
 
 		std::wstring Widen(const std::string& a_value)
@@ -135,12 +135,7 @@ namespace DCLF
 		source.resize(bytes.size());
 		std::memcpy(source.data(), bytes.data(), bytes.size());
 		// Every shader file is a potential include; the compiler re-hashes one only when it changes.
-		std::error_code ec;
-		for (auto it = std::filesystem::recursive_directory_iterator(kShaderDirectory, ec); !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
-			const auto extension = it->path().extension();
-			if (it->is_regular_file() && (extension == ".hlsl" || extension == ".hlsli"))
-				dependencies.push_back(it->path());
-		}
+		dependencies = RenderGraphRuntime::ShaderSourceFiles();
 		{
 			std::ifstream utility(kUtilitySourcePath, std::ios::binary);
 			std::vector<char> utilityBytes((std::istreambuf_iterator<char>(utility)), std::istreambuf_iterator<char>());

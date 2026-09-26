@@ -94,6 +94,11 @@ struct DxvkOrgInteropResourceInfo
 
 typedef void (*PFN_dxvkOrgInteropTeardown)(void* user, VkDevice device);
 typedef void (*PFN_dxvkOrgInteropSubmitted)(void* user, VkResult result);
+// On DXVK's submission thread in stream order with the graphics queue locked (dxvkEnqueueQueueCallback).
+typedef void (*PFN_dxvkOrgInteropQueueCallback)(void* user, VkQueue queue);
+// On DXVK's worker thread in D3D11 stream order, outside any render pass, with the command buffer it records
+// (dxvkEmitCommandBufferCallback).
+typedef void (*PFN_dxvkOrgInteropCommandBufferCallback)(void* user, VkCommandBuffer commandBuffer);
 
 // Client command buffers submitted in D3D11 stream order (dxvkEnqueueInteropSubmission).
 struct DxvkOrgInteropSubmission
@@ -130,6 +135,12 @@ struct DxvkOrgInteropSubmissionBatch
 typedef HRESULT(__stdcall* PFN_dxvkEnqueueInteropSubmissions)(ID3D11Device* pDevice, const DxvkOrgInteropSubmissionBatch* pBatch);
 // Describes a buffer, texture or SRV and marks it stable (never relocated or renamed from then on).
 // Buffers the application can map are rejected (E_INVALIDARG): discard maps rename them.
+typedef HRESULT(__stdcall* PFN_dxvkEnqueueQueueCallback)(ID3D11Device* pDevice, PFN_dxvkOrgInteropQueueCallback pCallback, void* pUser);
+typedef HRESULT(__stdcall* PFN_dxvkEmitCommandBufferCallback)(ID3D11Device* pDevice, PFN_dxvkOrgInteropCommandBufferCallback pCallback, void* pUser);
+// On DXVK's worker thread: onEnd records into each command buffer right before it ends, onBegin into the next right
+// after it begins, so that what a client opened in one stays balanced across DXVK's flushes. Null clears them.
+typedef HRESULT(__stdcall* PFN_dxvkSetCommandBufferBoundaryCallbacks)(ID3D11Device* pDevice, PFN_dxvkOrgInteropCommandBufferCallback pOnEnd,
+	PFN_dxvkOrgInteropCommandBufferCallback pOnBegin, void* pUser);
 typedef HRESULT(__stdcall* PFN_dxvkGetInteropResourceInfo)(ID3D11Device* pDevice, IUnknown* pObject, DxvkOrgInteropResourceInfo* pInfo);
 // Address of the immediate context's submission counter: +1 each time DXVK closes a command list (implicit
 // flushes, Flush(), the flush ahead of an enqueued submission). Read on the immediate context's thread.

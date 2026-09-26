@@ -1086,6 +1086,11 @@ namespace DCLF
 		auto drain = [this] {
 			IndirectDraws::Get().DrainVisibilityFeedback([this](const IndirectDraws::VisibilityFeedbackFrame& a_frame) {
 				ConsumeFeedback(a_frame.stamp, a_frame.objects, a_frame.words, a_frame.tag);
+				static const bool cullClasses = SwitchEnabled("CS_DCLF_TEST_CULL_CLASSES");
+				if (cullClasses) {
+					cullWords.assign(a_frame.words, a_frame.words + a_frame.objects);
+					cullStamp = a_frame.stamp;
+				}
 			});
 		};
 		if (AsyncModeSetting() != AsyncMode::Off && AsyncJobEnabled("primary"))
@@ -1310,6 +1315,7 @@ namespace DCLF
 		frameLive.store(false, std::memory_order_relaxed);
 		gpuSunFrame = false;
 		JoinFeedback();
+		CullClassCensus();
 		if (Toggles::Get().Active().excludePrimaryEntries)
 			PrepareFrame();
 		else if (!residents.empty())
@@ -1368,6 +1374,89 @@ namespace DCLF
 			playerChain = chain;
 		}
 		counting.store(true, std::memory_order_release);
+	}
+
+	void PrimaryCull::CullClassCensus()
+	{
+		static const bool on = SwitchEnabled("CS_DCLF_TEST_CULL_CLASSES");
+		if (!on || cullWords.empty() || ++cullFrames % 300 != 0)
+			return;
+		// BuildDrawsCS.hlsl's [TEMP] frustum word bits.
+		constexpr std::uint32_t kNearCross = 1u << 28, kOccluded = 1u << 29, kHzbFar = 1u << 30, kFadeHidden = 1u << 31;
+		const auto& tables = SceneStore::Get().GetTables();
+		const auto* camera = RE::Main::WorldRootCamera();
+		if (!camera)
+			return;
+		const RE::NiPoint3 eye = camera->world.translate;
+		const float lodFactor = At<float>(camera, kCameraLodAdjust);
+		enum Reason : std::uint32_t { kAppCulled, kFadedOut, kBeyondFade, kFadeRootOther, kNoFadeRoot, kNoGeometry, kReasons };
+		static constexpr const char* reasonNames[kReasons] = { "app-culled", "fade root faded out (fade 0)", "beyond its fade distance",
+			"under a fade root, within its fade distance", "no fade root", "no geometry" };
+		enum GpuClass : std::uint32_t { kGpuNearCross, kGpuHzbFar, kGpuNearer, kGpuUnsampled, kGpuClasses };
+		static constexpr const char* gpuNames[kGpuClasses] = { "box crosses the near plane", "footprint all far plane", "HZB had depth, object nearer",
+			"not sampled" };
+		std::uint64_t matrix[2][2] = {};  // [engine kept][GPU kept], of the objects in the frustum
+		std::uint64_t classes[kReasons][kGpuClasses] = {};
+		double radiusSum[kReasons] = {}, distanceSum[kReasons] = {};
+		std::vector<std::string> samples;
+		const std::size_t objects = std::min(cullWords.size(), std::min(tables.objects.size(), tables.objectGeometry.size()));
+		for (std::size_t o = 0; o < objects; ++o) {
+			const std::uint32_t word = cullWords[o];
+			if ((word & 0x0FFFFFFFu) != cullStamp)
+				continue;  // outside the frustum, or not tested by the depth segment's phase 1 this frame
+			const auto& object = tables.objects[o];
+			if (object.flags & kObjectDecal)
+				continue;
+			const bool engineKept = (object.flags & kObjectNativeVisible) != 0;
+			const bool gpuKept = !(word & (kOccluded | kFadeHidden));
+			++matrix[engineKept][gpuKept];
+			if (engineKept || !gpuKept)
+				continue;
+			const GpuClass gpu = (word & kNearCross) ? kGpuNearCross : (word & kHzbFar) ? kGpuHzbFar : kGpuNearer;
+			Reason reason = kNoFadeRoot;
+			const RE::BSGeometry* geometry = tables.objectGeometry[o];
+			const RE::NiAVObject* fadeRoot = nullptr;
+			bool appCulled = false;
+			for (const RE::NiAVObject* node = geometry; node; node = node->parent) {
+				appCulled = appCulled || node->GetFlags().any(RE::NiAVObject::Flag::kHidden);
+				if (!fadeRoot && const_cast<RE::NiAVObject*>(node)->AsFadeNode())
+					fadeRoot = node;
+			}
+			float distance = 0.0f;
+			if (!geometry) {
+				reason = kNoGeometry;
+			} else if (appCulled) {
+				reason = kAppCulled;
+			} else if (fadeRoot) {
+				const float fadeOut = FadeDistanceOf(fadeRoot);
+				distance = fadeRoot->worldBound.center.GetDistance(eye);
+				if (At<float>(fadeRoot, kCurrentFade) <= 0.0f || At<float>(fadeRoot, kFadeAmount) <= 0.0f)
+					reason = kFadedOut;
+				else if (fadeOut != 0.0f && distance * (fadeOut > 0.0f ? lodFactor : 1.0f) > std::abs(fadeOut))
+					reason = kBeyondFade;
+				else
+					reason = kFadeRootOther;
+			}
+			if (geometry && reason != kNoGeometry) {
+				radiusSum[reason] += geometry->worldBound.radius;
+				distanceSum[reason] += geometry->worldBound.center.GetDistance(eye);
+			}
+			++classes[reason][gpu];
+			if ((reason == kFadeRootOther || reason == kNoFadeRoot) && samples.size() < 12 && (o % 7) == 0)
+				samples.push_back(fmt::format("{} r={:.0f} d={:.0f} [{}]", NameOf(geometry), geometry->worldBound.radius, geometry->worldBound.center.GetDistance(eye), gpuNames[gpu]));
+		}
+		logger::info("[DCLF][TEMP] cull classes: in the frustum, engine kept & GPU kept {}, engine kept & GPU rejected {}, engine culled & GPU rejected {}, "
+					 "engine culled & GPU KEPT {}",
+			matrix[1][1], matrix[1][0], matrix[0][0], matrix[0][1]);
+		for (std::uint32_t r = 0; r < kReasons; ++r) {
+			const std::uint64_t total = classes[r][0] + classes[r][1] + classes[r][2] + classes[r][3];
+			if (!total)
+				continue;
+			logger::info("[DCLF][TEMP] cull classes:   {} {}: {} near-plane, {} all-far, {} nearer than the HZB; mean radius {:.0f}, mean distance {:.0f}",
+				total, reasonNames[r], classes[r][kGpuNearCross], classes[r][kGpuHzbFar], classes[r][kGpuNearer], radiusSum[r] / total, distanceSum[r] / total);
+		}
+		for (const auto& sample : samples)
+			logger::info("[DCLF][TEMP] cull classes:   e.g. {}", sample);
 	}
 
 	void PrimaryCull::NoteRegistration(const void* a_accumulator, const RE::BSGeometry* a_geometry)

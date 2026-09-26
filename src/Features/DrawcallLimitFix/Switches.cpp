@@ -147,6 +147,10 @@ namespace DCLF
 			{ "CS_DCLF_EVAL", [](const std::string& a_value) { return a_value == "off" || a_value == "material"; } },
 			{ "CS_DCLF_OBJECT_SLOTS", zero },
 			{ "CS_DCLF_SCENE_DELTA", zero },
+			{ "CS_DCLF_FRAME_PUSH", zero },
+			{ "CS_DCLF_COLOUR_EQUAL", zero },
+			{ "CS_DCLF_DECAL_DEPTH", zero },
+			{ "CS_DCLF_DGC_PREPROCESS", zero },
 		};
 		std::string text;
 		for (const auto& feature : features) {

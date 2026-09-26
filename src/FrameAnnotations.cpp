@@ -1,5 +1,6 @@
 #include "FrameAnnotations.h"
 
+#include "GpuEventTimers.h"
 #include "GpuIdleTrace.h"
 #include "State.h"
 #include "Util.h"
@@ -342,7 +343,7 @@ namespace FrameAnnotations
 
 	bool GeometryEventsEnabled()
 	{
-		return hooksInstalled && globals::state->frameAnnotations && !GpuIdleTrace::Requested();
+		return hooksInstalled && globals::state->frameAnnotations && !GpuIdleTrace::Requested() && !GpuEventTimers::Requested();
 	}
 
 	void OnPostPostLoad()

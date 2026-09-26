@@ -39,6 +39,8 @@ struct DrawcallLimitFix : Feature
 	 * depth, so the objects DCLF drew in place of native ones have to be in it: Terrain Blending's deferred
 	 * terrain, then the blended decals.
 	 */
+	/** @brief Where the main pass's opaque batches start: what it binds, for the colour epoch (IndirectDraws::CaptureMainPass). */
+	void BeforeOpaquePass();
 	void AfterOpaquePass();
 	/** @brief [TEMP] CS_DCLF_TARGET_PROBE=x,y: render target 0 at a pixel where the opaque pass ends, DCLF on or off. */
 	void ProbeOpaqueTarget(bool a_afterDCLF);
@@ -191,6 +193,10 @@ private:
 	/** @brief The Z-prepass epoch, then what was derived from the depth before it (RefreshDepthConsumers). */
 	void RunZPrepass(bool a_refreshConsumers);
 	std::uint32_t captureFrame = ~0u;  // the frame whose main-pass bindings have been captured
+	std::uint32_t parityFrame = ~0u;   // the frame CS_DCLF_CAPTURE_POINT_PARITY last checked
+	bool loggedCaptureFailure = false;
+	/** @brief The main pass's bindings and target formats for this frame's colour epoch, when its targets are bound. */
+	bool CaptureMainPass();
 	SkipStats skipStats;
 	SkipStats skipCounters;  // accumulating; published into skipStats every frame
 	std::vector<std::string> skipSamples;  // names of a few skipped passes, for the report

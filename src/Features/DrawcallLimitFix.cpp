@@ -1434,13 +1434,8 @@ bool DrawcallLimitFix::SkipNativePass(RE::BSRenderPass* a_pass)
 		return false;
 	if (!inDepthPass && !globals::deferred->deferredPass)
 		return false;  // shadows, reflections and cubemaps keep drawing everything
-	// A decal's depth-pass draw stays native. DCLF draws decals in a second colour pass that writes no
-	// depth (they are not occluders), so a decal with kZBufferWrite that the native depth pass would
-	// have written must still get that write from the native pass; skipping it here would leave the
-	// decal's depth out of the frame entirely.
-	if (inDepthPass && a_pass->shaderProperty &&
-		a_pass->shaderProperty->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kDecal, RE::BSShaderProperty::EShaderPropertyFlag::kDynamicDecal))
-		return false;
+	// A decal's passes offered in the depth pass (blended ones with kZBufferWrite) draw nothing there: the Lighting shader
+	// never reaches SetupGeometry in the depth pass (engine notes, "Decals"), so they are skipped like any other pass.
 	if (onlyEligible) {
 		// Membership of this frame's tables, not what the epoch drew: the epoch only runs once the main pass
 		// has drawn, so a rule based on the frame before would skip everything and never start.
@@ -1625,6 +1620,23 @@ void DrawcallLimitFix::Hooks::Install()
 
 void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags)
 {
+	// [TEMP] CS_DCLF_NATIVE_CENSUS=1: the engine's own lighting draws per frame, by where they are drawn (the main camera's
+	// depth pass, the deferred pass, anything else) and technique, with DCLF on or off.
+	if (static const bool census = DCLF::SwitchEnabled("CS_DCLF_NATIVE_CENSUS"); census && !DCLF::ConstantEvaluator::Evaluating()) {
+		static std::map<std::string, std::uint32_t> counts;
+		static std::uint32_t firstFrame = globals::state->frameCount;
+		const std::uint32_t technique = (DCLF::PassDescriptorOf(a_pass->passEnum) >> 24) & 0x3f;
+		const char* phase = inDepthPass ? "depth" : globals::deferred->deferredPass ? "deferred" : "other";
+		++counts[fmt::format("{} t{}", phase, technique)];
+		if (const std::uint32_t frames = globals::state->frameCount - firstFrame; frames >= 600) {
+			std::string text;
+			for (const auto& [key, count] : counts)
+				text += fmt::format(" {}={:.1f}", key, static_cast<double>(count) / frames);
+			logger::info("[DCLF][TEMP] native lighting draws per frame by phase and technique ({}):{}", Running() ? "DCLF on" : "DCLF off", text);
+			counts.clear();
+			firstFrame = globals::state->frameCount;
+		}
+	}
 	if (!Running() || DCLF::ConstantEvaluator::Evaluating())
 		return;
 	if (globals::deferred->deferredPass) {
@@ -1633,21 +1645,12 @@ void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint3
 		// pipelines DCLF builds with that bit (the Hair technique binds none).
 		if ((DCLF::PassDescriptorOf(a_pass->passEnum) & 0x8000u) && ((DCLF::PassDescriptorOf(a_pass->passEnum) >> 24) & 0x3f) != 6)
 			store.NoteProjectedTextures();
-		// The main pass's target formats, once per frame from its first lighting draw.
-		// The first lighting draw of the frame whose targets are bound: the engine binds the main pass's
-		// targets while it applies a draw's state, so the first draw of the pass can still see none (which
-		// is what the parity switches, where most passes are skipped, run into).
-		if (captureFrame != store.GetFrame()) {
-			const auto formats = CurrentTargetFormats();
-			if (formats.colorCount != 0 && formats.depth != DXGI_FORMAT_UNKNOWN) {
-				captureFrame = store.GetFrame();
-				DCLF::DrawPipelines::Get().SetTargetFormats(formats);
-				// Phase 2: what the main pass binds, for this frame's indirect draws (run before the composite).
-				DCLF::IndirectDraws::Get().CaptureMainPass();
-				// The engine's state objects behind any key that carries state bits (decals), read here
-				// because this is inside the deferred pass, where the blend table holds the deferred variants.
-				DCLF::DrawPipelines::Get().CaptureEngineStates(store.GetTables().pipelines);
-			}
+		// CS_DCLF_CAPTURE_POINT_PARITY: the bindings at the frame's first lighting draw the engine makes, against what
+		// BeforeOpaquePass captured for the colour epoch.
+		static const bool captureParity = DCLF::SwitchEnabled("CS_DCLF_CAPTURE_POINT_PARITY");
+		if (captureParity && captureFrame == store.GetFrame() && parityFrame != store.GetFrame()) {
+			parityFrame = store.GetFrame();
+			DCLF::IndirectDraws::Get().CheckCapturePoint();
 		}
 	}
 	// [TEMP] The road's textures: the engine's table against what the context has bound.
@@ -1743,6 +1746,41 @@ void DrawcallLimitFix::RefreshDepthConsumers()
 		context->CopyResource(prepassCopy.texture, main.texture);
 	}
 	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+}
+
+void DrawcallLimitFix::BeforeOpaquePass()
+{
+	if (!Running())
+		return;
+	// The main pass's bindings for this frame's colour epoch, where the opaque batches start. The engine binds the
+	// G-buffer (and clears it) only when a draw applies its state, so the state is applied here as the first draw would
+	// apply it. They were taken at the first lighting draw the engine made, which a frame whose every lighting draw in
+	// view is DCLF's (an interior, facing away from anything left native) does not have: its colour epoch was dropped,
+	// and the objects it withheld from the engine went undrawn. The end of the pass is no substitute: by then the sky's
+	// clouds have rebound Cloud Shadows' t26. CS_DCLF_CAPTURE_POINT_PARITY checks this capture against the first
+	// lighting draw's.
+	static REL::Relocation<void (*)(bool)> SetDirtyStates{ REL::RelocationID(75580, 77386) };
+	SetDirtyStates(false);
+	if (!CaptureMainPass() && !loggedCaptureFailure) {
+		loggedCaptureFailure = true;
+		logger::warn("[DCLF] the main pass's targets are not bound where its opaque batches start; the colour epoch is skipped");
+	}
+}
+
+bool DrawcallLimitFix::CaptureMainPass()
+{
+	const auto formats = CurrentTargetFormats();
+	if (formats.colorCount == 0 || formats.depth == DXGI_FORMAT_UNKNOWN)
+		return false;
+	auto& store = DCLF::SceneStore::Get();
+	captureFrame = store.GetFrame();
+	DCLF::DrawPipelines::Get().SetTargetFormats(formats);
+	// Phase 2: what the main pass binds, for this frame's indirect draws (run before the composite).
+	DCLF::IndirectDraws::Get().CaptureMainPass();
+	// The engine's state objects behind any key that carries state bits (decals), read here
+	// because this is inside the deferred pass, where the blend table holds the deferred variants.
+	DCLF::DrawPipelines::Get().CaptureEngineStates(store.GetTables().pipelines);
+	return true;
 }
 
 void DrawcallLimitFix::AfterOpaquePass()

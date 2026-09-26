@@ -669,6 +669,8 @@ void Deferred::Hooks::Main_RenderWorld_Start::thunk(RE::BSBatchRenderer* This, u
 	if (globals::shaderCache->IsEnabled() && globals::state->inWorld) {
 		// Here is where the first opaque objects start rendering
 		globals::deferred->StartDeferred();
+		if (globals::features::drawcallLimitFix.loaded)
+			globals::features::drawcallLimitFix.BeforeOpaquePass();
 	}
 
 	func(This, StartRange, EndRanges, RenderFlags, GeometryGroup);  // RenderBatches

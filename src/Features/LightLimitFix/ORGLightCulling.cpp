@@ -6,6 +6,7 @@
 #include "ORGLightCulling.h"
 
 #include "Globals.h"
+#include "RenderGraph/ComputeProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 
 #include <OpenRenderGraph/PersistentGraphHost.h>
@@ -19,16 +20,13 @@
 #include <bit>
 #include <cstddef>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <vector>
 
 namespace
 {
 	constexpr const char* kExtensionId = "cs.llf.light-culling";
-	constexpr const wchar_t* kBuildShader = L"Data\\Shaders\\LightLimitFix\\ORG\\ClusterBuildingCS.spv";
-	constexpr const wchar_t* kCullShader = L"Data\\Shaders\\LightLimitFix\\ORG\\ClusterCullingCS.spv";
+	constexpr const char* kBuildShader = "LightLimitFix/ClusterBuildingCS.hlsl";
+	constexpr const char* kCullShader = "LightLimitFix/ClusterCullingCS.hlsl";
 
 	// Push-constant block of both shaders: only what is fixed across executions. Must match LLFOrgConstants
 	// in OrgBindless.hlsli.
@@ -65,37 +63,6 @@ namespace
 	// Thread-group sizes of the two shaders (LightLimitFix/Common.hlsli).
 	constexpr uint32_t kCullGroupX = 16, kCullGroupY = 16, kCullGroupZ = 4;
 
-	struct Program
-	{
-		rhi::PipelineLayoutPtr layout;
-		rhi::PipelinePtr pipeline;
-	};
-
-	std::shared_ptr<const Program> LoadProgram(rhi::Device a_device, const wchar_t* a_path)
-	{
-		std::ifstream file(a_path, std::ios::binary);
-		std::vector<char> spirv((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-		if (spirv.empty()) {
-			logger::error("[ORG] Missing SPIR-V {}", std::filesystem::path(a_path).string());
-			return {};
-		}
-		auto program = std::make_shared<Program>();
-		rhi::PushConstantRangeDesc constants{};
-		constants.visibility = rhi::ShaderStage::Compute;
-		constants.num32BitValues = kConstantWords;
-		constants.set = 0;
-		constants.binding = 0;
-		if (a_device.CreatePipelineLayout(rhi::PipelineLayoutDesc{ .pushConstants = { &constants, 1 }, .flags = rhi::PipelineLayoutFlags::PF_None },
-				program->layout) != rhi::Result::Ok)
-			return {};
-		rhi::SubobjLayout layout{ program->layout->GetHandle() };
-		rhi::SubobjShader shader{ rhi::ShaderStage::Compute, { spirv.data(), static_cast<uint32_t>(spirv.size()) }, "main" };
-		const rhi::PipelineStreamItem items[] = { rhi::Make(layout), rhi::Make(shader) };
-		if (a_device.CreatePipeline(items, 2, program->pipeline) != rhi::Result::Ok)
-			return {};
-		return program;
-	}
-
 	// What the recorded dispatches depend on: the cluster grid, which follows the resolution, and how many
 	// light bytes the latch copy moves (grow-only, in powers of two, so it settles). Published by the render
 	// thread before the epoch, and replaced only when it changes: its identity is the passes' revision.
@@ -119,8 +86,8 @@ namespace
 		std::shared_ptr<org::Buffer> lightIndexCounter;
 		std::shared_ptr<org::Buffer> lightIndexList;
 		std::shared_ptr<org::Buffer> lightGrid;
-		std::shared_ptr<const Program> build;
-		std::shared_ptr<const Program> cull;
+		std::shared_ptr<const ComputeProgram> build;
+		std::shared_ptr<const ComputeProgram> cull;
 		std::shared_ptr<org::LatchBlock> latch;
 		std::atomic<std::shared_ptr<const Shape>> shape;
 	};
@@ -136,7 +103,7 @@ namespace
 
 	struct DispatchFrame
 	{
-		std::shared_ptr<const Program> program;
+		std::shared_ptr<const ComputeProgram> program;
 		OrgClusterConstants constants{};
 		uint32_t groups[3]{};
 		uint32_t latchStride = 0;  // LatchBlock::Offset(slot) = slot * stride
@@ -156,7 +123,7 @@ namespace
 		commands.Dispatch(a_frame.groups[0], a_frame.groups[1], a_frame.groups[2]);
 	}
 
-	void AppendShapeRevision(const Shape* a_shape, const Program* a_program, std::vector<uint64_t>& a_out)
+	void AppendShapeRevision(const Shape* a_shape, const ComputeProgram* a_program, std::vector<uint64_t>& a_out)
 	{
 		a_out.push_back(reinterpret_cast<uintptr_t>(a_shape));
 		a_out.push_back(reinterpret_cast<uintptr_t>(a_program));
@@ -435,8 +402,12 @@ bool ORGLightCulling::Setup(uint32_t a_clusterCount, uint32_t a_maxLights, uint3
 		state->lightStride = a_lightStride;
 		auto resources = std::make_shared<Resources>();
 		auto device = host->GetDesc().device;
-		resources->build = LoadProgram(device, kBuildShader);
-		resources->cull = LoadProgram(device, kCullShader);
+		// The descriptor-heap build of the D3D11 shaders (LLF_ORG_BINDLESS).
+		const auto load = [&](const char* a_source) {
+			return ComputeProgram::Load(device, { .source = a_source, .constantWords = kConstantWords, .defines = { { L"LLF_ORG_BINDLESS", L"1" } } });
+		};
+		resources->build = load(kBuildShader);
+		resources->cull = load(kCullShader);
 		if (!resources->build || !resources->cull) {
 			logger::warn("[ORG] Light culling stays on D3D11: the SPIR-V programs could not be created");
 			impl.reset();

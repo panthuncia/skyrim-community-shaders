@@ -523,12 +523,7 @@ void Upscaling::ApplyHardwareDefaults()
 		}
 	}
 
-	if (!settings.reflexEnabled) {
-		if (sl->IsReflexSupported()) {
-			settings.reflexEnabled = true;
-			logger::info("[Upscaling] Hardware default: Reflex low-latency enabled");
-		}
-	}
+	// Reflex is no longer switched on by default (see Streamline::Initialize: it loads only with CS_STREAMLINE_REFLEX=1).
 }
 
 Upscaling::FrameGenMethod Upscaling::GetFrameGenMethod() const

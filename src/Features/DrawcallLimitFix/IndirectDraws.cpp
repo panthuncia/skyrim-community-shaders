@@ -33,7 +33,10 @@
 #	include "Features/LinearLighting.h"
 #	include "Features/Skin.h"
 #	include "Features/LightLimitFix/ORGLightCulling.h"
+#	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
+#	include "RenderGraph/NvPerfBridge.h"
+#	include "RenderGraph/PrefixSum.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "ShaderCache.h"
 #	include "State.h"
@@ -44,6 +47,7 @@
 #	include <Render/Runtime/StagedUploadBatch.h>
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <Render/Runtime/DescriptorServiceAccess.h>
+#	include <Render/Runtime/IDescriptorService.h>
 #	include <Render/Runtime/UploadServiceAccess.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/Buffers/Buffer.h>
@@ -139,8 +143,9 @@ namespace DCLF
 		constexpr std::uint32_t kCountDecalsTestedWord = 22;
 		// Byte offsets of the count words the indirect draws read; they must match BuildDrawsCS.hlsl.
 		constexpr std::uint64_t kCountDrawnPhaseTwoBytes = 68;
-		constexpr const wchar_t* kBuildDrawsShader = L"Data\\Shaders\\DrawcallLimitFix\\ORG\\BuildDrawsCS.spv";
-		constexpr const wchar_t* kHzbShader = L"Data\\Shaders\\DrawcallLimitFix\\ORG\\HzbCS.spv";
+		constexpr const char* kBuildDrawsShader = "DrawcallLimitFix/BuildDrawsCS.hlsl";
+		constexpr const char* kHzbShader = "DrawcallLimitFix/HzbCS.hlsl";
+		constexpr const char* kSortSequencesShader = "DrawcallLimitFix/SortSequencesCS.hlsl";
 		// HzbCS.hlsl's constants: source, target, target size, source size, from-depth, padding.
 		constexpr std::uint32_t kHzbConstantWords = 8;
 
@@ -244,9 +249,17 @@ namespace DCLF
 			std::uint32_t hzbIndex;        // 0 when there is no HZB to test against
 			std::uint32_t hzbSizePacked;   // mip 0: width in the low 16 bits, height in the high 16
 			std::uint32_t hzbMips;
-			std::uint32_t hzbPadding;
+			std::uint32_t recordCapacity;  // [TEMP] CS_DCLF_TEST_DRAW_PUSH: BuildDrawsCS's RecordCapacity
+			// The sort by pipeline (SortDraws): the per-pipeline counts, the unsorted sequences and each one's rank among its
+			// pipeline's. 0 when the dispatch appends into the sequences themselves (phase 2, or the sort off).
+			std::uint32_t sortCountsIndex;
+			std::uint32_t sortStagingIndex;
+			std::uint32_t sortRanksIndex;
+			std::uint32_t sequenceMode;  // [TEMP] 1: the long sequence (DrawPushTest), the main pass's builds only
+			std::uint32_t recordsIndex;  // [TEMP] the long sequence: the records' SRV
+			std::uint32_t testPadding[3];
 		};
-		static_assert(sizeof(BuildDrawsConstants) == 64);
+		static_assert(sizeof(BuildDrawsConstants) == 96);
 		constexpr std::uint32_t kBuildDrawsConstantWords = sizeof(BuildDrawsConstants) / 4;
 
 		/**
@@ -373,7 +386,7 @@ namespace DCLF
 			for (std::size_t i = 0; i < a.sets.size(); ++i)
 				if (!SameHandle(a.sets[i], b.sets[i]) || !SameHandle(a.signatures[i], b.signatures[i]))
 					return false;
-			return true;
+			return SameHandle(a.depthPassSignature, b.depthPassSignature);
 		}
 
 		// The dispatch signature every BuildDraws pass records with: one Dispatch argument, read from a latch.
@@ -403,35 +416,6 @@ namespace DCLF
 			}
 			RenderGraphRuntime::Segment Now() const { return fixed ? segment : RenderGraphRuntime::Get().CurrentSegment(); }
 		};
-
-		struct ComputeProgram
-		{
-			rhi::PipelineLayoutPtr layout;
-			rhi::PipelinePtr pipeline;
-		};
-
-		std::shared_ptr<const ComputeProgram> LoadComputeProgram(rhi::Device a_device, const wchar_t* a_path, std::uint32_t a_constantWords)
-		{
-			std::ifstream file(a_path, std::ios::binary);
-			std::vector<char> spirv((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-			if (spirv.empty()) {
-				logger::error("[DCLF] Missing SPIR-V {}", std::filesystem::path(a_path).string());
-				return {};
-			}
-			auto program = std::make_shared<ComputeProgram>();
-			rhi::PushConstantRangeDesc constants{};
-			constants.visibility = rhi::ShaderStage::Compute;
-			constants.num32BitValues = a_constantWords;
-			if (a_device.CreatePipelineLayout(rhi::PipelineLayoutDesc{ .pushConstants = { &constants, 1 }, .flags = rhi::PipelineLayoutFlags::PF_None }, program->layout) !=
-				rhi::Result::Ok)
-				return {};
-			const rhi::SubobjLayout layout{ program->layout->GetHandle() };
-			const rhi::SubobjShader shader{ rhi::ShaderStage::Compute, { spirv.data(), static_cast<std::uint32_t>(spirv.size()) }, "main" };
-			const rhi::PipelineStreamItem items[] = { rhi::Make(layout), rhi::Make(shader) };
-			if (a_device.CreatePipeline(items, 2, program->pipeline) != rhi::Result::Ok)
-				return {};
-			return program;
-		}
 
 		// CS_DCLF_BINDLESS_PARITY: the per-object record against the packed constant group, variable by
 		// variable. Both are produced from tables.objects and tables.shading by the same rules, so the
@@ -517,7 +501,8 @@ namespace DCLF
 		// Constant buffers the native draw rebinds per object (b0-b2 are the Lighting groups): everything
 		// else bound in the main pass is per frame and comes from its CPU mirror.
 		constexpr std::uint32_t kPerDrawVS = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 4) | (1u << 9) | (1u << 10);
-		constexpr std::uint32_t kPerDrawPS = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 8) | (1u << 11);
+		// b7 is Advanced Skin's SkinPerGeometry: bound per draw, for the actor the engine drew last (kSkinRegister).
+		constexpr std::uint32_t kPerDrawPS = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 7) | (1u << 8) | (1u << 11);
 		constexpr std::uint32_t kPerFrameVertexRegister = 12;  // VS_PerFrame (Lighting.hlsl): ViewProj at c8
 		// Bytes per texel, for printing exactly the pixel a readback holds and nothing beyond it.
 		std::uint32_t FormatBytes(DXGI_FORMAT a_format)
@@ -614,6 +599,129 @@ namespace DCLF
 			bool operator==(const TablesHeld&) const = default;
 		};
 
+		struct SortSequencesConstants
+		{
+			std::uint32_t stagingIndex;
+			std::uint32_t ranksIndex;
+			std::uint32_t offsetsIndex;
+			std::uint32_t countIndex;
+			std::uint32_t sequencesIndex;
+			std::uint32_t sequenceStride;  // bytes (SequenceStride)
+			std::uint32_t padding[2];
+		};
+		constexpr std::uint32_t kSortSequencesConstantWords = sizeof(SortSequencesConstants) / 4;
+		constexpr std::uint32_t kSortSequencesGroup = 64;  // SortSequencesCS.hlsl's
+
+		/**
+		 * @brief The sort by pipeline (SortDraws) of phase 1's and the colour segment's sequences. BuildDraws stages the sequences
+		 * and counts them per pipeline, PrefixSum turns the counts into each pipeline's first slot, and SortSequencesPass
+		 * (SortSequencesCS.hlsl) writes the sequences grouped by pipeline. The counts are zeroed once, by the first commit
+		 * (countsZeroed), and after that by the scan that reads them.
+		 *
+		 * Not the shadow views': sorting them (a part of these buffers per view slot, one scan over all of them) left their draw
+		 * time within noise at Riverwood (1.28-1.32 against 1.23-1.29 ms) while the scan of 16 views' counts cost 0.08-0.10 ms.
+		 */
+		struct DrawSort
+		{
+			std::shared_ptr<org::Buffer> counts, offsets, blockSums, staging, ranks;
+			std::shared_ptr<const PrefixSum::Programs> prefixSum;
+			std::shared_ptr<const ComputeProgram> scatter;
+			bool countsZeroed = false;  // render thread
+
+			static constexpr std::uint32_t kKeys = DrawPipelines::kMaxPipelines;
+
+			/** @brief Null, logged, when either program could not be created. */
+			static std::shared_ptr<DrawSort> Create(rhi::Device a_device)
+			{
+				auto sort = std::make_shared<DrawSort>();
+				sort->prefixSum = PrefixSum::Load(a_device);
+				sort->scatter = ComputeProgram::Load(a_device, { .source = kSortSequencesShader, .constantWords = kSortSequencesConstantWords });
+				if (!sort->prefixSum || !sort->scatter) {
+					logger::warn("[DCLF] The draws are not sorted by pipeline: its programs could not be created");
+					return {};
+				}
+				sort->counts = CreateWords(kKeys, true, "cs.dclf.sort-counts");
+				sort->offsets = CreateWords(kKeys, true, "cs.dclf.sort-offsets");
+				sort->blockSums = CreateWords(PrefixSum::Blocks(kKeys), true, "cs.dclf.sort-block-sums");
+				sort->staging = CreateWords(std::uint64_t(kMaxDraws) * SequenceStride() / 4, true, "cs.dclf.sort-staging");
+				sort->ranks = CreateWords(kMaxDraws, true, "cs.dclf.sort-ranks");
+				return sort;
+			}
+
+			void Register(org::RenderGraph& a_graph) const
+			{
+				for (const auto& buffer : { counts, offsets, blockSums, staging, ranks })
+					a_graph.RegisterResource(org::ResourceIdentifier(buffer->GetName()), buffer);
+			}
+
+			/** @brief The scan, which runs in every execution of its epoch, so the counts it clears stay zero whether or not a build ran. */
+			std::shared_ptr<org::RenderPass> ScanPass() const
+			{
+				PrefixSum::Desc scan{};
+				scan.programs = prefixSum;
+				scan.counts = counts;
+				scan.offsets = offsets;
+				scan.blockSums = blockSums;
+				scan.elements = kKeys;
+				scan.clearCounts = true;
+				return PrefixSum::CreatePass(std::move(scan));
+			}
+
+			template <class Uploads>
+			void ZeroCountsOnce(Uploads& a_uploads)
+			{
+				if (countsZeroed)
+					return;
+				static const std::array<std::uint32_t, kKeys> zeros{};
+				a_uploads(counts, zeros.data(), sizeof(zeros), 0);
+				countsZeroed = true;
+			}
+		};
+
+		struct PassStats;
+
+		/**
+		 * @brief The state lists of one recording site's explicit DGC preprocesses (DgcPreprocessEnabled), one per frame slot:
+		 * graphics lists that are never submitted. vkCmdPreprocessGeneratedCommandsEXT is recorded outside any pass but
+		 * generates for the state of another list, render pass included, which the execution must then match exactly; so
+		 * a site begins each of its passes on its slot's list and sets it up as the execution will (heaps, layout, topology,
+		 * push data) before preprocessing that pass's calls against it. A site of its own for every pass that can record at
+		 * the same time as another.
+		 */
+		class PreprocessStates
+		{
+		public:
+			static std::shared_ptr<PreprocessStates> Create(rhi::Device a_device, std::uint32_t a_frameSlots, const char* a_site)
+			{
+				auto states = std::make_shared<PreprocessStates>();
+				states->slots.resize(std::max<std::uint32_t>(a_frameSlots, 1u));
+				for (auto& slot : states->slots) {
+					if (rhi::Failed(a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator)) || !slot.allocator ||
+						rhi::Failed(a_device.CreateCommandList(rhi::QueueKind::Graphics, slot.allocator.Get(), slot.list)) || !slot.list) {
+						logger::error("[DCLF] DGC preprocess: no state list for {}; its draws cannot execute", a_site);
+						return nullptr;
+					}
+				}
+				return states;
+			}
+
+			// The frame slot's list, reset and recording.
+			rhi::CommandList& Begin(std::uint32_t a_frameSlot)
+			{
+				auto& slot = slots[a_frameSlot % slots.size()];
+				slot.list->Recycle(slot.allocator.Get());
+				return slot.list.Get();
+			}
+
+		private:
+			struct Slot
+			{
+				rhi::CommandAllocatorPtr allocator;
+				rhi::CommandListPtr list;
+			};
+			std::vector<Slot> slots;
+		};
+
 		struct Resources
 		{
 			std::vector<FrameBuffer> frameBuffers;
@@ -658,6 +766,9 @@ namespace DCLF
 			// their contents exist.
 			std::shared_ptr<org::Buffer> frameConstants;
 			std::uint64_t frameConstantsAddress = 0;
+			// [TEMP] HeapCbvTest: per segment (0 Z-prepass, 1 colour), the uniform buffer descriptor at each 256-byte unit of its
+			// constants buffer (never retired: a test).
+			std::array<std::shared_ptr<const std::vector<std::uint32_t>>, 2> cbvSlots;
 			std::array<std::shared_ptr<org::PixelBuffer>, kColorTargets> targets;
 			std::uint32_t targetCount = 0;
 			std::shared_ptr<org::Resource> depth;  // DCLF's own Z-prepass (the objects it draws)
@@ -712,6 +823,10 @@ namespace DCLF
 				std::atomic<std::uint64_t> statArmed{ 0 }, statDropped{ 0 }, statAbandoned{ 0 }, statDecoded{ 0 };
 			};
 			std::shared_ptr<Feedback> feedback;
+			std::shared_ptr<PassStats> passStats;  // [TEMP] CS_DCLF_PASS_STATS
+			// The explicit DGC preprocesses' state list (DgcPreprocessEnabled) of the colour segment's passes. The depth pass
+			// has none: IndirectState::depthPassSignature.
+			std::shared_ptr<PreprocessStates> preprocessMain;
 			std::shared_ptr<org::PixelBuffer> hzb;
 			std::shared_ptr<const ComputeProgram> hzbProgram;
 			std::uint32_t hzbWidth = 0, hzbHeight = 0, hzbMips = 0;
@@ -727,6 +842,8 @@ namespace DCLF
 			// Per frame slot, one BuildDrawsLatch: all BuildDraws dispatches of an epoch share the values.
 			std::shared_ptr<org::LatchBlock> latch;
 			rhi::CommandSignaturePtr dispatchSignature;
+			// The sort by pipeline of phase 1's and the colour segment's sequences (one view); null when it is off.
+			std::shared_ptr<DrawSort> sort;
 		};
 
 		struct PassBindings
@@ -737,8 +854,98 @@ namespace DCLF
 			std::vector<org::ResourceBindingToken> frameBuffers;
 		};
 
+		/**
+		 * @brief [TEMP] CS_DCLF_PASS_STATS=1: pipeline statistics (input vertices and primitives, vertex and pixel shader
+		 * invocations) of the main epochs' draw passes, per frame slot, read back when the slot comes round again.
+		 */
+		struct PassStats
+		{
+			enum Kind : std::uint32_t
+			{
+				kDepth,
+				kDepthPhaseTwo,
+				kColour,
+				kKinds
+			};
+			static constexpr std::uint32_t kFields = 4;  // IA vertices, IA primitives, VS invocations, PS invocations
+			rhi::QueryPoolPtr pool;
+			std::vector<std::shared_ptr<org::Buffer>> readback;  // per frame slot, kKinds results
+			std::vector<std::array<bool, kKinds>> written;
+			std::mutex mutex;
+			std::array<std::array<std::uint64_t, kFields>, kKinds> totals{};
+			std::array<std::uint32_t, kKinds> samples{};
+
+			static bool Enabled()
+			{
+				static const bool enabled = SwitchEnabled("CS_DCLF_PASS_STATS");
+				return enabled;
+			}
+
+			/** @brief The slot's results from its last use, then its query reset; before the pass begins. */
+			void Start(rhi::CommandList& a_commands, std::uint32_t a_slot, Kind a_kind)
+			{
+				if (a_slot >= readback.size())
+					return;
+				const std::lock_guard lock(mutex);
+				if (written[a_slot][a_kind]) {
+					auto resource = readback[a_slot]->GetAPIResource();
+					void* mapped = nullptr;
+					resource.Map(&mapped);
+					if (mapped) {
+						const auto* values = static_cast<const std::uint64_t*>(mapped) + std::size_t(a_kind) * kFields;
+						for (std::uint32_t f = 0; f < kFields; ++f)
+							totals[a_kind][f] += values[f];
+						++samples[a_kind];
+						resource.Unmap(0, 0);
+					}
+				}
+				if (a_kind == kColour && samples[kColour] >= 300) {
+					static const char* kNames[kKinds] = { "Z-prepass", "Z-prepass phase 2", "colour" };
+					std::string text;
+					for (std::uint32_t k = 0; k < kKinds; ++k) {
+						if (!samples[k])
+							continue;
+						const double n = samples[k];
+						text += fmt::format("; {}: {:.0f} vertices, {:.0f} primitives, {:.0f} VS invocations, {:.0f} PS invocations", kNames[k], totals[k][0] / n,
+							totals[k][1] / n, totals[k][2] / n, totals[k][3] / n);
+					}
+					logger::info("[DCLF][TEMP] pass statistics, per frame{}", text);
+					totals = {};
+					samples = {};
+				}
+				a_commands.ResetQueries(pool->GetHandle(), a_slot * kKinds + a_kind, 1);
+			}
+			void Begin(rhi::CommandList& a_commands, std::uint32_t a_slot, Kind a_kind) const
+			{
+				if (a_slot < readback.size())
+					a_commands.BeginQuery(pool->GetHandle(), a_slot * kKinds + a_kind);
+			}
+			void End(rhi::CommandList& a_commands, std::uint32_t a_slot, Kind a_kind) const
+			{
+				if (a_slot < readback.size())
+					a_commands.EndQuery(pool->GetHandle(), a_slot * kKinds + a_kind);
+			}
+			/** @brief After the pass ends. */
+			void Resolve(rhi::CommandList& a_commands, std::uint32_t a_slot, Kind a_kind)
+			{
+				if (a_slot >= readback.size())
+					return;
+				a_commands.ResolveQueryData(pool->GetHandle(), a_slot * kKinds + a_kind, 1, readback[a_slot]->GetAPIResource().GetHandle(),
+					std::uint64_t(a_kind) * kFields * sizeof(std::uint64_t));
+				const std::lock_guard lock(mutex);
+				written[a_slot][a_kind] = true;
+			}
+		};
+
+		// Frame push: the pass-wide constant buffers' addresses, as the layout's push address ranges read them.
+		std::array<std::uint32_t, kFramePushWords> FramePushWords(std::uint64_t a_frameConstants);
+
 		struct PreparedDraws
 		{
+			PassStats* stats = nullptr;  // [TEMP] CS_DCLF_PASS_STATS
+			PreprocessStates* preprocess = nullptr;  // null: the calls preprocess implicitly (CS_DCLF_DGC_PREPROCESS=0)
+			bool framePush = false;
+			std::array<std::uint32_t, kFramePushWords> framePushWords{};
 			std::shared_ptr<const PassFrame> frame;
 			std::array<org::PreparedDescriptorReference, kColorTargets> targetViews{};
 			org::PreparedDescriptorReference depthView{};
@@ -756,6 +963,23 @@ namespace DCLF
 			if (a_segment == RenderGraphRuntime::Segment::MainOpaque)
 				return a_resources.frames[kColourShape].load(std::memory_order_acquire);
 			return nullptr;
+		}
+
+		/**
+		 * @brief CS_DCLF_SORT_DRAWS (default on; =0 off): the phase-1 and colour draws executed grouped by pipeline. BuildDraws
+		 * appends in whatever order its threads finish, which made nearly every sequence of the indirect draw switch pipeline.
+		 */
+		bool SortDraws()
+		{
+			static const bool enabled = SwitchValue("CS_DCLF_SORT_DRAWS") != "0";
+			return enabled;
+		}
+		static_assert(DrawPipelines::kMaxPipelines == 4096, "BuildDrawsCS.hlsl's kSortKeys");
+
+		/** @brief Whether BuildDraws runs in the segment (BuildDrawsPass::Prepare's conditions), which is when a sort follows it. */
+		bool BuildsDraws(const Resources& a_resources, RenderGraphRuntime::Segment a_segment)
+		{
+			return a_resources.buildDraws && a_resources.latch && a_resources.dispatchSignature && CurrentFrame(a_resources, a_segment);
 		}
 
 		class MainOpaquePass final : public org::TypedRenderGraphPass<MainOpaquePass, PreparedDraws, PassBindings>
@@ -820,6 +1044,12 @@ namespace DCLF
 					return prepared;
 				prepared.phaseTwo = phaseTwo;
 				prepared.zPrepass = now == RenderGraphRuntime::Segment::ZPrepass;
+				prepared.stats = resources->passStats.get();
+				if (!prepared.zPrepass)
+					prepared.preprocess = resources->preprocessMain.get();
+				prepared.framePush = FramePushEnabled();
+				if (prepared.framePush)
+					prepared.framePushWords = FramePushWords(resources->frameConstantsAddress);
 				prepared.frame = std::move(frame);
 				prepared.targetCount = resources->targetCount;
 				for (std::uint32_t i = 0; i < prepared.targetCount; ++i)
@@ -869,23 +1099,50 @@ namespace DCLF
 				// DCLF's Z-prepass. On the hybrid path it runs in its own segment, at the first draw of the
 				// native main pass, so that the rest of the frame - the native draws that test depth, the sky
 				// and everything that reads the depth buffer afterwards - sees DCLF's objects.
+				auto* stats = a_prepared.stats;
+				const std::uint32_t statsSlot = a_recording.FrameSlot();
+				const auto depthKind = a_prepared.phaseTwo ? PassStats::kDepthPhaseTwo : PassStats::kDepth;
+				// A pass of DCLF's draws: its attachments, the layout, the topology and the frame push data - on the command list,
+				// and on a preprocess state list, identically.
+				auto beginDrawPass = [&](rhi::CommandList& a_list, const rhi::PassBeginInfo& a_begin) {
+					a_list.BeginPass(a_begin);
+					a_list.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
+					a_list.BindLayout(frame.indirect.layout);
+					if (a_prepared.framePush)
+						a_list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kFramePushBinding, 0, kFramePushWords, a_prepared.framePushWords.data());
+				};
+				// The frame slot's preprocess state list, with this pass's heaps; null without explicit preprocessing.
+				auto preprocessState = [&]() -> rhi::CommandList* {
+					if (!a_prepared.preprocess)
+						return nullptr;
+					auto& state = a_prepared.preprocess->Begin(statsSlot);
+					state.SetDescriptorHeaps(frame.resourceHeap, frame.samplerHeap);
+					return &state;
+				};
 				if (!frame.hybrid || zPrepass) {
-					commands.BeginPass(begin);
-					commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
-					commands.BindLayout(frame.indirect.layout);
 					// CS_DCLF_ZPREPASS_EMPTY=1: begin and end the pass but draw nothing, to tell apart damage
 					// done by the depth writes from damage done by the epoch merely running here (its
 					// submission, and the layout the attachment is left in).
 					static const bool empty = SwitchEnabled("CS_DCLF_ZPREPASS_EMPTY");
-					if (!(zPrepass && empty)) {
-						// Phase 2 draws only the rescues, from the reserved half of the sequence buffer and
-						// its own counter word. Its argument offset has to be a constant the CPU knows, which
-						// is why the two phases have fixed ranges instead of sharing one.
-						const std::uint64_t argumentOffset = a_prepared.phaseTwo ? std::uint64_t(kPhaseTwoSequenceBase) * sizeof(DrawSequence) : 0;
-						const std::uint64_t countOffset = a_prepared.phaseTwo ? kCountDrawnPhaseTwoBytes : 0;
-						commands.ExecuteIndirect(frame.indirect.signatures[kDepthVariant], sequences, argumentOffset, count, countOffset, frame.drawCapacity);
+					const bool draws = !(zPrepass && empty);
+					// Phase 2 draws only the rescues, from the reserved half of the sequence buffer and
+					// its own counter word. Its argument offset has to be a constant the CPU knows, which
+					// is why the two phases have fixed ranges instead of sharing one.
+					const std::uint64_t argumentOffset = a_prepared.phaseTwo ? std::uint64_t(kPhaseTwoSequenceBase) * SequenceStride() : 0;
+					const std::uint64_t countOffset = a_prepared.phaseTwo ? kCountDrawnPhaseTwoBytes : 0;
+					if (stats)
+						stats->Start(commands, statsSlot, depthKind);
+					beginDrawPass(commands, begin);
+					if (draws) {
+						if (stats)
+							stats->Begin(commands, statsSlot, depthKind);
+						commands.ExecuteIndirect(frame.indirect.depthPassSignature, sequences, argumentOffset, count, countOffset, frame.drawCapacity);
+						if (stats)
+							stats->End(commands, statsSlot, depthKind);
 					}
 					commands.EndPass();
+					if (stats)
+						stats->Resolve(commands, statsSlot, depthKind);
 				}
 				if (a_prepared.phaseTwo)
 					return;
@@ -896,34 +1153,130 @@ namespace DCLF
 				depth.stencilLoad = rhi::LoadOp::Load;
 				if (zPrepass)
 					return;  // the colour pass belongs to the main segment
-				begin.colors = { colors.data(), a_prepared.targetCount };
-				begin.debugName = "DCLF main opaque";
-				commands.BeginPass(begin);
-				commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
-				commands.BindLayout(frame.indirect.layout);
-				if (frame.drawCapacity)
-					commands.ExecuteIndirect(frame.indirect.signatures[kColorVariant], sequences, 0, count, 0, frame.drawCapacity);
+
+				// The opaque decals' depth (CS_DCLF_DECAL_DEPTH, default on, =0 off), before any colour: the engine's main pass
+				// draws its opaque decal group with depth writes and its bias, so this is where the frame's depth has them, and
+				// with it every host fragment under an opaque decal texel fails the colour pass's EQUAL test and is not shaded -
+				// the decal overwrites every target there (blending off, full masks). The group's depth variants test LESS_EQUAL
+				// with the decal's bias and run the alpha test, so a transparent texel leaves the host's depth. The blended
+				// group has none: it writes no depth natively, and it blends over its host, which must still be shaded.
+				static const bool decalDepth = SwitchValue("CS_DCLF_DECAL_DEPTH") != "0";
+				// [TEMP] CS_DCLF_TEST_EMPTY_EI=<n>: n more colour-signature ExecuteIndirect calls whose count word (27, unused and
+				// zeroed every epoch) is 0, so they draw nothing: the fixed cost of a call. CS_DCLF_TEST_EMPTY_EI_MAX: their maxCount
+				// (default the draw capacity).
+				static const std::uint32_t emptyCalls = static_cast<std::uint32_t>(std::strtoul(SwitchValue("CS_DCLF_TEST_EMPTY_EI").c_str(), nullptr, 10));
+				static const std::uint32_t emptyMax = static_cast<std::uint32_t>(std::strtoul(SwitchValue("CS_DCLF_TEST_EMPTY_EI_MAX").c_str(), nullptr, 10));
+				static const bool emptyDepth = SwitchEnabled("CS_DCLF_TEST_EMPTY_EI_DEPTH");  // [TEMP] the depth signature's calls instead
+				// [TEMP] nvperf ranges around the colour pass's parts (NvPerfBridge::PushPassRange).
+				void* const nvCommands = NvPerfBridge::Active() ? rhi::vulkan::get_cmd_list(commands) : nullptr;
+				auto subRange = [&](const char* a_name) { return nvCommands && NvPerfBridge::PushPassRange(nvCommands, a_name); };
+				auto endSubRange = [&](bool a_pushed) { if (nvCommands) NvPerfBridge::PopPassRange(nvCommands, a_pushed); };
+				// The colour passes: the main one with the targets as the frame loads them, the decals' with all of them loaded; each
+				// with the layout, the topology and the frame push data.
+				auto decalColors = colors;
+				for (std::uint32_t i = 0; i < a_prepared.targetCount; ++i)
+					decalColors[i].loadOp = rhi::LoadOp::Load;
+				rhi::PassBeginInfo mainBegin = begin;
+				mainBegin.colors = { colors.data(), a_prepared.targetCount };
+				mainBegin.debugName = "DCLF main opaque";
+				rhi::PassBeginInfo decalBegin = begin;
+				decalBegin.colors = { decalColors.data(), a_prepared.targetCount };
+				decalBegin.debugName = "DCLF decals";
+				const auto colourSignature = frame.indirect.signatures[kColorVariant];
+				const std::uint32_t emptyCount = emptyMax ? std::min(emptyMax, frame.drawCapacity) : frame.drawCapacity;
+				auto decalArguments = [](std::uint32_t a_group) { return std::uint64_t(kDecalSequenceBase + a_group * kMaxDecalDraws) * SequenceStride(); };
+				auto decalCount = [](std::uint32_t a_group) { return std::uint64_t(kCountDecalGroupWord + a_group) * sizeof(std::uint32_t); };
+
+				// Every call below is preprocessed here, before the first pass (CS_DCLF_DGC_PREPROCESS): generated inside the pass
+				// instead, by NVIDIA's driver, each colour call cost a fixed ~170 us of idle GPU in these eight-target passes. The
+				// preprocess is generated for the state list's state - each call's pass begun and set up exactly as it is below,
+				// with the same heaps - which the execution must match; the sequences and counts are final before this pass (the
+				// culling wrote them).
+				if (auto* preprocessList = preprocessState()) {
+					auto& state = *preprocessList;
+					if (decalDepth && frame.decalCapacity[0]) {
+						rhi::PassBeginInfo decalDepthBegin = begin;
+						decalDepthBegin.debugName = "DCLF decal depth";
+						beginDrawPass(state, decalDepthBegin);
+						commands.PreprocessIndirect(state, frame.indirect.signatures[kDepthVariant], sequences, decalArguments(0), count, decalCount(0), frame.decalCapacity[0]);
+						if (emptyCalls && emptyDepth)
+							for (std::uint32_t call = 0; call < emptyCalls; ++call)
+								commands.PreprocessIndirect(state, frame.indirect.signatures[kDepthVariant], sequences, 0, count, 27 * sizeof(std::uint32_t), emptyCount);
+						state.EndPass();
+					}
+					beginDrawPass(state, mainBegin);
+					if (frame.drawCapacity) {
+						commands.PreprocessIndirect(state, colourSignature, sequences, 0, count, 0, frame.drawCapacity);
+						if (emptyCalls && !emptyDepth)
+							for (std::uint32_t call = 0; call < emptyCalls; ++call)
+								commands.PreprocessIndirect(state, colourSignature, sequences, 0, count, 27 * sizeof(std::uint32_t), emptyCount);
+					}
+					state.EndPass();
+					if (frame.decalCapacity[0] || frame.decalCapacity[1]) {
+						beginDrawPass(state, decalBegin);
+						for (std::uint32_t group = 0; group < kDecalGroups; ++group)
+							if (frame.decalCapacity[group])
+								commands.PreprocessIndirect(state, colourSignature, sequences, decalArguments(group), count, decalCount(group), frame.decalCapacity[group]);
+						state.EndPass();
+					}
+					state.End();
+				}
+
+				if (decalDepth && frame.decalCapacity[0]) {
+					const bool part = subRange("cs.dclf.colour.decal-depth");
+					rhi::PassBeginInfo decalDepthBegin = begin;
+					decalDepthBegin.debugName = "DCLF decal depth";
+					beginDrawPass(commands, decalDepthBegin);
+					commands.ExecuteIndirect(frame.indirect.signatures[kDepthVariant], sequences, decalArguments(0), count, decalCount(0), frame.decalCapacity[0]);
+					if (emptyCalls && emptyDepth) {
+						const bool emptyPart = subRange("cs.dclf.colour.empty");
+						for (std::uint32_t call = 0; call < emptyCalls; ++call)
+							commands.ExecuteIndirect(frame.indirect.signatures[kDepthVariant], sequences, 0, count, 27 * sizeof(std::uint32_t), emptyCount);
+						endSubRange(emptyPart);
+					}
+					commands.EndPass();
+					endSubRange(part);
+				}
+				if (stats)
+					stats->Start(commands, statsSlot, PassStats::kColour);
+				const bool mainPart = subRange("cs.dclf.colour.main");
+				beginDrawPass(commands, mainBegin);
+				if (stats)
+					stats->Begin(commands, statsSlot, PassStats::kColour);
+				if (frame.drawCapacity) {
+					const bool drawPart = subRange("cs.dclf.colour.main-draws");
+					commands.ExecuteIndirect(colourSignature, sequences, 0, count, 0, frame.drawCapacity);
+					endSubRange(drawPart);
+				}
+				if (emptyCalls && !emptyDepth && frame.drawCapacity) {
+					const bool emptyPart = subRange("cs.dclf.colour.empty");
+					for (std::uint32_t call = 0; call < emptyCalls; ++call)
+						commands.ExecuteIndirect(colourSignature, sequences, 0, count, 27 * sizeof(std::uint32_t), emptyCount);
+					endSubRange(emptyPart);
+				}
+				if (stats)
+					stats->End(commands, statsSlot, PassStats::kColour);
 				commands.EndPass();
+				endSubRange(mainPart);
+				if (stats)
+					stats->Resolve(commands, statsSlot, PassStats::kColour);
 
 				// The second pass: decals, after every opaque draw, in the engine's order - its opaque decal
 				// group and then its blended one, each from its own fixed-slot range and its own count word.
-				// The pipelines test depth LESS_EQUAL with the engine's decal bias and write none, so this
-				// pass changes nothing the depth buffer's readers see. Same attachments, all loaded.
+				// The pipelines test depth LESS_EQUAL with the engine's decal bias and write none (the opaque
+				// group's depth is already there, from the decal depth pass). Same attachments, all loaded.
 				if (frame.decalCapacity[0] || frame.decalCapacity[1]) {
-					for (std::uint32_t i = 0; i < a_prepared.targetCount; ++i)
-						colors[i].loadOp = rhi::LoadOp::Load;
-					begin.debugName = "DCLF decals";
-					commands.BeginPass(begin);
-					commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
-					commands.BindLayout(frame.indirect.layout);
+					const bool decalPart = subRange("cs.dclf.colour.decals");
+					beginDrawPass(commands, decalBegin);
 					for (std::uint32_t group = 0; group < kDecalGroups; ++group) {
 						if (!frame.decalCapacity[group])
 							continue;
-						const std::uint64_t argumentOffset = std::uint64_t(kDecalSequenceBase + group * kMaxDecalDraws) * sizeof(DrawSequence);
-						const std::uint64_t countOffset = std::uint64_t(kCountDecalGroupWord + group) * sizeof(std::uint32_t);
-						commands.ExecuteIndirect(frame.indirect.signatures[kColorVariant], sequences, argumentOffset, count, countOffset, frame.decalCapacity[group]);
+						const bool groupPart = subRange(group == 0 ? "cs.dclf.colour.decals-opaque" : "cs.dclf.colour.decals-blended");
+						commands.ExecuteIndirect(colourSignature, sequences, decalArguments(group), count, decalCount(group), frame.decalCapacity[group]);
+						endSubRange(groupPart);
 					}
 					commands.EndPass();
+					endSubRange(decalPart);
 				}
 			}
 
@@ -958,6 +1311,8 @@ namespace DCLF
 		struct BuildDrawsBindings
 		{
 			org::ResourceBindingToken inputs, inputsDepth, geometries, sequences, count, hzb, visibility, frustum;
+			org::ResourceBindingToken sortCounts, sortStaging, sortRanks;
+			org::ResourceBindingToken records, recordsDepth;  // [TEMP] DrawPushTest
 		};
 
 		struct BuildDrawsFrame
@@ -1004,6 +1359,16 @@ namespace DCLF
 				// the build, which is why the ordering below is the whole design.
 				if (resources->hzb)
 					bindings.hzb = a_builder.BindShaderResource(resources->hzb);
+				if (DrawPushTest()) {
+					bindings.records = a_builder.BindShaderResource(resources->records);
+					if (resources->recordsDepth)
+						bindings.recordsDepth = a_builder.BindShaderResource(resources->recordsDepth);
+				}
+				if (Sorts()) {
+					bindings.sortCounts = a_builder.BindUnorderedAccess(resources->sort->counts);
+					bindings.sortStaging = a_builder.BindUnorderedAccess(resources->sort->staging);
+					bindings.sortRanks = a_builder.BindUnorderedAccess(resources->sort->ranks);
+				}
 				return bindings;
 			}
 
@@ -1044,15 +1409,29 @@ namespace DCLF
 				constants.recordsAddressLo = static_cast<std::uint32_t>(recordsAddress);
 				constants.recordsAddressHi = static_cast<std::uint32_t>(recordsAddress >> 32);
 				constants.recordStride = sizeof(DrawBindings);
+				constants.recordCapacity = resources->recordCapacity;
+				if (DrawPushTest()) {
+					const bool depthRecords = (phase == 1 || phase == 2) && resources->recordsDepth;
+					constants.recordsIndex = a_preparation.ResolveView(depthRecords ? a_bindings.recordsDepth : a_bindings.records, { org::BindlessViewKind::ShaderResource }).index;
+				}
 				constants.phaseBits = (phase & 0xFu) << 4;
 				constants.visibilityIndex = a_preparation.ResolveView(a_bindings.visibility, { org::BindlessViewKind::UnorderedAccess }).index;
 				// The frustum stamps: the depth segment's first phase alone tests every candidate's frustum.
-				if (resources->frustum && phase == 1)
+				// [TEMP] and phase 2 under CS_DCLF_TEST_CULL_CLASSES, which clears the occluded bit of what it brings back.
+				static const bool cullClasses = SwitchEnabled("CS_DCLF_TEST_CULL_CLASSES");
+				if (resources->frustum && (phase == 1 || (phase == 2 && cullClasses)))
 					constants.frustumIndex = a_preparation.ResolveView(a_bindings.frustum, { org::BindlessViewKind::UnorderedAccess }).index;
 				if (resources->hzb && frame->cullMode >= 2 && frame->width && frame->height) {
 					constants.hzbIndex = a_preparation.ResolveView(a_bindings.hzb, { org::BindlessViewKind::ShaderResource }).index;
 					constants.hzbSizePacked = (resources->hzbWidth & 0xFFFF) | (resources->hzbHeight << 16);
 					constants.hzbMips = resources->hzbMips;
+				}
+				// =3: the long sequence with zero addresses (no record reads), a bisection.
+				constants.sequenceMode = DrawPushTest() ? (SwitchValue("CS_DCLF_TEST_DRAW_PUSH") == "3" ? 2u : (SwitchValue("CS_DCLF_TEST_DRAW_PUSH") == "4" ? 3u : (SwitchValue("CS_DCLF_TEST_DRAW_PUSH") == "5" ? 4u : 1u))) : 0u;
+				if (Sorts()) {
+					constants.sortCountsIndex = a_preparation.ResolveView(a_bindings.sortCounts, { org::BindlessViewKind::UnorderedAccess }).index;
+					constants.sortStagingIndex = a_preparation.ResolveView(a_bindings.sortStaging, { org::BindlessViewKind::UnorderedAccess }).index;
+					constants.sortRanksIndex = a_preparation.ResolveView(a_bindings.sortRanks, { org::BindlessViewKind::UnorderedAccess }).index;
 				}
 				return prepared;
 			}
@@ -1079,9 +1458,85 @@ namespace DCLF
 			}
 
 		private:
+			// Phase 2 appends its few rescues into its own range, unsorted; the other builds are followed by the sort's passes.
+			bool Sorts() const { return resources->sort && fixedPhase != 2; }
+
 			std::shared_ptr<Resources> resources;
 			SegmentBinding segment;
 			std::uint32_t fixedPhase = 0;
+		};
+
+		struct SortSequencesBindings
+		{
+			org::ResourceBindingToken staging, ranks, offsets, count, sequences;
+		};
+
+		struct SortSequencesFrame
+		{
+			std::shared_ptr<const ComputeProgram> program;
+			SortSequencesConstants constants{};
+		};
+
+		/**
+		 * @brief The sort's scatter (DrawSort), after its segment's BuildDraws and the scan. It covers every slot BuildDraws can
+		 * append (kMaxDraws), each thread past the count returning.
+		 */
+		class SortSequencesPass final : public org::TypedRenderGraphPass<SortSequencesPass, SortSequencesFrame, SortSequencesBindings>
+		{
+		public:
+			SortSequencesPass(std::shared_ptr<Resources> a_resources, SegmentBinding a_segment) :
+				resources(std::move(a_resources)), segment(a_segment) {}
+
+			SortSequencesBindings Declare(org::PassBuilder& a_builder)
+			{
+				a_builder.PreferQueue(org::QueueKind::Graphics);
+				SortSequencesBindings bindings{};
+				bindings.staging = a_builder.BindShaderResource(resources->sort->staging);
+				bindings.ranks = a_builder.BindShaderResource(resources->sort->ranks);
+				bindings.offsets = a_builder.BindShaderResource(resources->sort->offsets);
+				bindings.count = a_builder.BindShaderResource(resources->count);
+				bindings.sequences = a_builder.BindUnorderedAccess(resources->sequences);
+				return bindings;
+			}
+
+			void InvocationRevision(const org::PassPrepareContext&, std::vector<std::uint64_t>& a_out) const
+			{
+				const auto now = segment.Now();
+				const auto frame = CurrentFrame(*resources, now);
+				a_out.push_back(frame ? frame->generation : 0);
+				a_out.push_back(static_cast<std::uint64_t>(now));
+			}
+
+			SortSequencesFrame Prepare(const SortSequencesBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
+			{
+				SortSequencesFrame prepared{};
+				if (!BuildsDraws(*resources, segment.Now()))
+					return prepared;
+				prepared.program = resources->sort->scatter;
+				auto& constants = prepared.constants;
+				constants.stagingIndex = a_preparation.ResolveView(a_bindings.staging, { org::BindlessViewKind::ShaderResource }).index;
+				constants.ranksIndex = a_preparation.ResolveView(a_bindings.ranks, { org::BindlessViewKind::ShaderResource }).index;
+				constants.offsetsIndex = a_preparation.ResolveView(a_bindings.offsets, { org::BindlessViewKind::ShaderResource }).index;
+				constants.countIndex = a_preparation.ResolveView(a_bindings.count, { org::BindlessViewKind::ShaderResource }).index;
+				constants.sequencesIndex = a_preparation.ResolveView(a_bindings.sequences, { org::BindlessViewKind::UnorderedAccess }).index;
+				constants.sequenceStride = SequenceStride();
+				return prepared;
+			}
+
+			static void Record(const SortSequencesBindings&, const SortSequencesFrame& a_frame, org::PassRecordContext& a_recording)
+			{
+				if (!a_frame.program)
+					return;
+				auto& commands = a_recording.Commands();
+				commands.BindLayout(a_frame.program->layout->GetHandle());
+				commands.BindPipeline(a_frame.program->pipeline->GetHandle());
+				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kSortSequencesConstantWords, reinterpret_cast<const std::uint32_t*>(&a_frame.constants));
+				commands.Dispatch(kMaxDraws / kSortSequencesGroup, 1, 1);
+			}
+
+		private:
+			std::shared_ptr<Resources> resources;
+			SegmentBinding segment;
 		};
 
 		struct FeedbackBindings
@@ -1614,6 +2069,8 @@ namespace DCLF
 		/** @brief The shadow views' graph resources: the main path's set, without targets or an HZB, per view slot. */
 		struct ShadowResources
 		{
+			// The explicit DGC preprocesses' state lists (DgcPreprocessEnabled): the shadow views' pass, Skylighting's.
+			std::shared_ptr<PreprocessStates> preprocessShadow, preprocessSky;
 			std::shared_ptr<org::Buffer> constants, records, objects, bones, geometries, visibility;
 			// NPC face shapes' positions (SceneStore::Tables::faceStreams), a region per shape, read by the draws as
 			// the second vertex stream. A region is uploaded when its snapshot's generation is not the one it holds.
@@ -1771,6 +2228,7 @@ namespace DCLF
 		{
 			std::shared_ptr<const ShadowFrame> frame;
 			bool sky = false;
+			PreprocessStates* preprocess = nullptr;  // null: the calls preprocess implicitly (CS_DCLF_DGC_PREPROCESS=0)
 			struct View
 			{
 				std::uint32_t index = 0;  // into frame->views
@@ -1836,6 +2294,7 @@ namespace DCLF
 				if (!prepared.views.empty())
 					prepared.frame = std::move(frame);
 				prepared.sky = sky;
+				prepared.preprocess = (sky ? resources->preprocessSky : resources->preprocessShadow).get();
 				return prepared;
 			}
 
@@ -1846,9 +2305,13 @@ namespace DCLF
 				const auto& frame = *a_prepared.frame;
 				auto& commands = a_recording.Commands();
 				commands.SetDescriptorHeaps(frame.resourceHeap, frame.samplerHeap);
-				for (const auto& prepared : a_prepared.views) {
+				// A view's pass: its slice and viewport, loaded, added to, stored.
+				std::vector<rhi::DepthAttachment> depths(a_prepared.views.size());
+				std::vector<rhi::PassBeginInfo> begins(a_prepared.views.size());
+				for (std::size_t i = 0; i < a_prepared.views.size(); ++i) {
+					const auto& prepared = a_prepared.views[i];
 					const auto& view = frame.views[prepared.index];
-					rhi::PassBeginInfo begin{};
+					auto& begin = begins[i];
 					begin.x = view.x;
 					begin.y = view.y;
 					begin.width = view.width;
@@ -1856,7 +2319,7 @@ namespace DCLF
 					begin.minDepth = view.minDepth;
 					begin.maxDepth = view.maxDepth;
 					// The slice the engine drew its own casters into: loaded, added to, stored.
-					rhi::DepthAttachment depth{};
+					auto& depth = depths[i];
 					depth.dsv = a_recording.Resolve(prepared.depthView);
 					depth.depthLoad = rhi::LoadOp::Load;
 					depth.depthStore = rhi::StoreOp::Store;
@@ -1864,11 +2327,31 @@ namespace DCLF
 					depth.stencilStore = rhi::StoreOp::Store;
 					begin.depth = &depth;
 					begin.debugName = a_prepared.sky ? "DCLF Skylighting occlusion" : "DCLF shadow view";
-					commands.BeginPass(begin);
-					commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
-					commands.BindLayout(frame.indirect.layout);
-					commands.ExecuteIndirect(frame.indirect.signature, a_recording.Resolve(a_bindings.sequences[view.slot]).GetHandle(), 0,
-						a_recording.Resolve(a_bindings.count[view.slot]).GetHandle(), 0, view.capacity);
+				}
+				auto beginView = [&](rhi::CommandList& a_list, const rhi::PassBeginInfo& a_begin) {
+					a_list.BeginPass(a_begin);
+					a_list.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
+					a_list.BindLayout(frame.indirect.layout);
+				};
+				auto sequences = [&](const ShadowPrepared::View& a_view) { return a_recording.Resolve(a_bindings.sequences[frame.views[a_view.index].slot]).GetHandle(); };
+				auto counts = [&](const ShadowPrepared::View& a_view) { return a_recording.Resolve(a_bindings.count[frame.views[a_view.index].slot]).GetHandle(); };
+				// Every view's call is preprocessed first, against the frame slot's state list with the view's pass set up as below
+				// (CS_DCLF_DGC_PREPROCESS; PreprocessStates), and becomes visible at the first view's pass.
+				if (a_prepared.preprocess) {
+					auto& state = a_prepared.preprocess->Begin(a_recording.FrameSlot());
+					state.SetDescriptorHeaps(frame.resourceHeap, frame.samplerHeap);
+					for (std::size_t i = 0; i < a_prepared.views.size(); ++i) {
+						const auto& prepared = a_prepared.views[i];
+						beginView(state, begins[i]);
+						commands.PreprocessIndirect(state, frame.indirect.signature, sequences(prepared), 0, counts(prepared), 0, frame.views[prepared.index].capacity);
+						state.EndPass();
+					}
+					state.End();
+				}
+				for (std::size_t i = 0; i < a_prepared.views.size(); ++i) {
+					const auto& prepared = a_prepared.views[i];
+					beginView(commands, begins[i]);
+					commands.ExecuteIndirect(frame.indirect.signature, sequences(prepared), 0, counts(prepared), 0, frame.views[prepared.index].capacity);
 					commands.EndPass();
 				}
 			}
@@ -1971,6 +2454,8 @@ namespace DCLF
 					a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.native-depth"), resources->nativeDepth);
 				if (resources->hzb)
 					a_graph.RegisterResource(org::ResourceIdentifier("cs.dclf.hzb"), resources->hzb);
+				if (resources->sort)
+					resources->sort->Register(a_graph);
 			}
 
 			void GatherStructuralPasses(org::RenderGraph&, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
@@ -1983,11 +2468,25 @@ namespace DCLF
 				// With epochs, a pass instance runs only in its own epoch and its segment is fixed here, so the
 				// Z-prepass has its own build-draws and draw pass. Without, one instance of each serves both
 				// segments and takes its segment from the runtime, as it always has.
+				// The sort by pipeline after a build (SortDraws): the counts' prefix sum, then the scatter. The scan runs in every
+				// execution, so the counts it clears are zero whether or not a build ran; the scatter only after a build.
+				const auto addSort = [&](const char* a_scan, const char* a_scatter, SegmentBinding a_segment, auto a_epoch) {
+					if (!resources->sort)
+						return;
+					a_out.push_back(org::RenderGraph::ExternalPassDesc::Compute(a_scan, resources->sort->ScanPass())
+							.PreferQueue(org::QueueKind::Graphics)
+							.Epoch(a_epoch));
+					a_out.push_back(org::RenderGraph::ExternalPassDesc::Compute(a_scatter,
+						std::static_pointer_cast<org::RenderPass>(std::make_shared<SortSequencesPass>(resources, a_segment)))
+							.PreferQueue(org::QueueKind::Graphics)
+							.Epoch(a_epoch));
+				};
 				if (RenderGraphRuntime::EpochsEnabled() && resources->hybrid) {
 					a_out.push_back(org::RenderGraph::ExternalPassDesc::Compute("cs.dclf.z.build-draws",
 						std::static_pointer_cast<org::RenderPass>(std::make_shared<BuildDrawsPass>(resources, depthSegment)))
 							.PreferQueue(org::QueueKind::Graphics)
 							.Epoch(depth));
+					addSort("cs.dclf.z.sort-scan", "cs.dclf.z.sort-scatter", depthSegment, depth);
 					a_out.push_back(org::RenderGraph::ExternalPassDesc::Render("cs.dclf.z.depth",
 						std::static_pointer_cast<org::RenderPass>(std::make_shared<MainOpaquePass>(resources, depthSegment)))
 							.Epoch(depth));
@@ -1996,6 +2495,7 @@ namespace DCLF
 					std::static_pointer_cast<org::RenderPass>(std::make_shared<BuildDrawsPass>(resources, colourSegment)))
 						.PreferQueue(org::QueueKind::Graphics)
 						.Epoch(colour));
+				addSort("cs.dclf.sort-scan", "cs.dclf.sort-scatter", colourSegment, colour);
 				if (resources->probe)
 					a_out.push_back(org::RenderGraph::ExternalPassDesc::Copy("cs.dclf.probe-before",
 						std::static_pointer_cast<org::RenderPass>(std::make_shared<ProbePass>(resources, colourSegment, false)))
@@ -2046,7 +2546,7 @@ namespace DCLF
 			std::shared_ptr<Resources> resources;
 		};
 
-		// The main pass's bindings at its first lighting draw.
+		// The main pass's bindings where its opaque batches start (DrawcallLimitFix::BeforeOpaquePass), or the depth pass's.
 		struct Capture
 		{
 			std::array<ID3D11Buffer*, kConstantBufferRegisters> vsBuffers{};
@@ -2221,6 +2721,29 @@ namespace DCLF
 			return (std::uint64_t(a_pixelStage ? kConstantBufferRegisters : 0u) + a_register) * kFrameSlotBytes;
 		}
 
+		std::array<std::uint32_t, kFramePushWords> FramePushWords(std::uint64_t a_frameConstants)
+		{
+			std::array<std::uint32_t, kFramePushWords> words{};
+			std::uint32_t word = 0;
+			for (const bool pixel : { false, true }) {
+				const std::uint32_t mask = pixel ? kFramePushPS : kFramePushVS;
+				for (std::uint32_t r = 0; r < kConstantBufferRegisters; ++r) {
+					if (!((mask >> r) & 1))
+						continue;
+					// What BuildMainPayload names under bindless draws: the frame slot, the shared light block at PS b3 and the
+					// frame lighting at PS b13 (kFrameLightingRegister).
+					std::uint64_t address = a_frameConstants + FrameSlotOffset(pixel, r);
+					if (pixel && r == 3)
+						address = a_frameConstants + std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes;
+					else if (pixel && r == kFrameLightingRegister)
+						address = a_frameConstants + std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes;
+					words[word++] = static_cast<std::uint32_t>(address);
+					words[word++] = static_cast<std::uint32_t>(address >> 32);
+				}
+			}
+			return words;
+		}
+
 		// The blocks the render thread packs into the frame slots for one epoch.
 		struct FrameBlocks
 		{
@@ -2235,6 +2758,8 @@ namespace DCLF
 			std::uint64_t facePositions = 0;  // the shadow epoch's face positions buffer (kFacePositionVertices float4s)
 			std::uint32_t objectsIndex = 0, bonesIndex = 0, recordCapacity = 0;
 			const void* identity = nullptr;
+			// [TEMP] HeapCbvTest: the heap index of the uniform buffer descriptor at each 256-byte unit of `constants`.
+			const std::vector<std::uint32_t>* cbvSlots = nullptr;
 
 			bool operator==(const ResourceAddresses&) const = default;
 		};
@@ -4330,9 +4855,57 @@ namespace DCLF
 								a_out.missingPixelConstants |= 1u << b;
 							}
 						}
+						// [TEMP] DrawPushTest: what the per-draw addresses a sequence pushes are - zero, their alignment, the buffer they are in.
+						if (DrawPushTest() && constantsOk) {
+							static std::atomic<std::uint32_t> seen{ 0 };
+							static std::array<std::atomic<std::uint32_t>, 6> tally{};  // zero, not 64-aligned, not 256-aligned, in constants, elsewhere, total
+							const std::uint64_t arenaEnd = base + (depthOnly ? kDepthConstantBytes : kConstantBytes);
+							for (const bool pixel : { false, true }) {
+								for (const std::uint32_t r : { 0u, 1u, 2u, 4u }) {
+									const std::uint64_t address = pixel ? bindings.pixelConstants[r] : bindings.vertexConstants[r];
+									++tally[5];
+									if (!address) {
+										++tally[0];
+										continue;
+									}
+									tally[1] += (address % 64) != 0;
+									tally[2] += (address % 256) != 0;
+									if (address >= base && address < arenaEnd)
+										++tally[3];
+									else
+										++tally[4];
+								}
+							}
+							if (seen.fetch_add(1) == 20000)
+								logger::info("[DCLF][TEMP] per-draw addresses over 20000 records: {} slots, {} zero, {} not 64-aligned, {} not 256-aligned, {} in the arena, {} elsewhere",
+									tally[5].load(), tally[0].load(), tally[1].load(), tally[2].load(), tally[3].load(), tally[4].load());
+						}
 						if (!constantsOk) {
 							fail(Skip::Constants);
 							return kNoRecord;
+						}
+						// [TEMP] HeapCbvTest: the per-draw registers name their block's descriptor rather than its address; before the
+						// descriptors exist, nothing is drawn (an address read as a heap index would be garbage).
+						if (HeapCbvTest() && !a_in.addresses.cbvSlots) {
+							fail(Skip::Constants);
+							return kNoRecord;
+						}
+						if (const auto* cbvSlots = a_in.addresses.cbvSlots) {
+							for (const bool pixel : { false, true }) {
+								for (const std::uint32_t r : { 0u, 1u, 2u, 4u }) {
+									auto& address = pixel ? bindings.pixelConstants[r] : bindings.vertexConstants[r];
+									if (!address)
+										continue;
+									const std::uint64_t unit = address >= base ? (address - base) / kHeapCbvUnit : ~0ull;
+									if (unit < cbvSlots->size() && (address - base) % kHeapCbvUnit == 0) {
+										address = (*cbvSlots)[unit];
+									} else {
+										static std::atomic<std::uint32_t> logged{ 0 };
+										if (logged.fetch_add(1) < 8)
+											logger::warn("[DCLF][TEMP] heap CBV test: {} b{} at {:#x} is not a unit of the constants buffer at {:#x}", pixel ? "PS" : "VS", r, address, base);
+									}
+								}
+							}
 						}
 
 						// Kept records carry the frame textures the last commit resolved (it patches them again when one changes).
@@ -6311,6 +6884,13 @@ namespace DCLF
 		};
 		std::array<MainJob, 2> mainJobs;
 		MainPayload probePayload;  // CS_DCLF_ASYNC=probe: the inline build to compare the worker's against
+		// CS_DCLF_CAPTURE_POINT_PARITY (CheckCapturePoint), since the last report: the frames that differ, and how often
+		// each binding does.
+		struct
+		{
+			std::uint32_t checks = 0, frames = 0;
+			ankerl::unordered_dense::map<std::string, std::uint32_t> differ;
+		} captureParity;
 		void KickMainJob(bool a_depthOnly, const RE::NiPoint3* a_eye, const RE::NiPoint3* a_previousEye, IndirectDraws::Stats& a_stats);
 		void DropMainJob(std::size_t a_job, IndirectDraws::Stats& a_stats);
 		void LogStaleMainJob(std::size_t a_job, const MainInputs& a_actual);
@@ -6564,11 +7144,17 @@ namespace DCLF
 				created->SetName(a_name);
 				return created;
 			};
-			state->constants = buffer(kConstantBytes, "cs.dclf.constants");
+			// [TEMP] DrawPushTest: a constant bank bound from a pushed address reads a fixed window past it (a DMA page fault at the
+			// arena's end otherwise), so the arenas get a slot's worth of slack.
+			const std::uint64_t constantSlack = DrawPushTest() || HeapCbvTest() ? 65536 : 0;
+			state->constants = buffer(kConstantBytes + constantSlack, "cs.dclf.constants");
 			state->recordCapacity = BindlessDraws() ? kMaxRecordsDeduplicated : kMaxDraws;
-			state->records = buffer(std::uint64_t(state->recordCapacity) * sizeof(DrawBindings), "cs.dclf.records");
-			state->constantsDepth = buffer(kDepthConstantBytes, "cs.dclf.constants-depth");
-			state->recordsDepth = buffer(std::uint64_t(state->recordCapacity) * sizeof(DrawBindings), "cs.dclf.records-depth");
+			// [TEMP] DrawPushTest: structured, so BuildDraws can read them through an SRV.
+			state->records = DrawPushTest() ? CreateWords(std::uint64_t(state->recordCapacity) * sizeof(DrawBindings) / 4, false, "cs.dclf.records") :
+			                                  buffer(std::uint64_t(state->recordCapacity) * sizeof(DrawBindings), "cs.dclf.records");
+			state->constantsDepth = buffer(kDepthConstantBytes + constantSlack, "cs.dclf.constants-depth");
+			state->recordsDepth = DrawPushTest() ? CreateWords(std::uint64_t(state->recordCapacity) * sizeof(DrawBindings) / 4, false, "cs.dclf.records-depth") :
+			                                       buffer(std::uint64_t(state->recordCapacity) * sizeof(DrawBindings), "cs.dclf.records-depth");
 			// Structured rather than raw, because the shaders read it through an SRV at t127 instead of
 			// through a device address the way the constants and the binding records are read.
 			state->objects = org::Buffer::CreateUnmaterializedStructuredBuffer(kMaxObjects, sizeof(BindlessObject), false);
@@ -6584,7 +7170,7 @@ namespace DCLF
 			// Twice kMaxDraws: phase 1 and the colour segment write the first half, phase 2 the second. The
 			// CPU records where phase 2's draw starts, so the two need ranges fixed in advance rather than
 			// one range shared through an atomic counter.
-			state->sequences = CreateWords(std::uint64_t(kSequenceSlots) * sizeof(DrawSequence) / 4, true, "cs.dclf.sequences");
+			state->sequences = CreateWords(std::uint64_t(kSequenceSlots) * SequenceStride() / 4, true, "cs.dclf.sequences");
 			state->count = CreateWords(kCountWords, true, "cs.dclf.draw-count");
 			// One word per object in the frame's tables: what the depth segment's culling decided, read by
 			// the colour segment so that it draws exactly the same set.
@@ -6608,16 +7194,40 @@ namespace DCLF
 					state->feedback = std::move(feedback);
 				}
 			}
+			if (PassStats::Enabled()) {
+				auto passStats = std::make_shared<PassStats>();
+				const std::uint32_t slots = host->FrameSlots();
+				rhi::QueryPoolDesc desc{};
+				desc.type = rhi::QueryType::PipelineStatistics;
+				desc.count = slots * PassStats::kKinds;
+				desc.statsMask = rhi::PipelineStatBits::PS_IAVertices | rhi::PipelineStatBits::PS_IAPrimitives | rhi::PipelineStatBits::PS_VSInvocations |
+				                 rhi::PipelineStatBits::PS_PSInvocations;
+				desc.requireAllStats = true;
+				if (device.CreateQueryPool(desc, passStats->pool) != rhi::Result::Ok || !passStats->pool) {
+					logger::warn("[DCLF][TEMP] pass statistics: no pipeline statistics query pool");
+				} else {
+					for (std::uint32_t i = 0; i < slots; ++i)
+						passStats->readback.push_back(org::Buffer::CreateShared(rhi::HeapType::Readback, std::uint64_t(PassStats::kKinds) * PassStats::kFields * sizeof(std::uint64_t)));
+					passStats->written.resize(slots);
+					state->passStats = std::move(passStats);
+					logger::info("[DCLF][TEMP] pass statistics on: {} frame slots", slots);
+				}
+			}
+			if (DgcPreprocessEnabled()) {
+				state->preprocessMain = PreprocessStates::Create(device, host->FrameSlots(), "the main segment");
+			}
 			state->inputs = CreateWords(std::uint64_t(kMaxInputs) * sizeof(DrawInput) / 4, false, "cs.dclf.draw-inputs");
 			state->inputsDepth = CreateWords(std::uint64_t(kMaxInputs) * sizeof(DrawInput) / 4, false, "cs.dclf.draw-inputs-depth");
 			state->geometries = CreateWords(std::uint64_t(kMaxGeometries) * sizeof(GeometryDraw) / 4, false, "cs.dclf.geometries");
-			state->buildDraws = LoadComputeProgram(device, kBuildDrawsShader, kBuildDrawsConstantWords);
+			state->buildDraws = ComputeProgram::Load(device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords });
 			if (!state->buildDraws)
 				return NotReady(7, "the BuildDraws program could not be created");
 			state->dispatchSignature = CreateDispatchSignature(device, state->buildDraws->layout->GetHandle());
 			if (!state->dispatchSignature)
 				return NotReady(7, "the BuildDraws dispatch signature could not be created");
 			state->latch = std::make_shared<org::LatchBlock>("cs.dclf.latch", static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), host->FrameSlots());
+			if (SortDraws())
+				state->sort = DrawSort::Create(device);
 			if (BuildParityEnabled()) {
 				auto wrap = [](org::Buffer& a_buffer, std::uint64_t a_bytes) {
 					D3D11_BUFFER_DESC desc{};
@@ -6669,6 +7279,7 @@ namespace DCLF
 			state->constantsDepthAddress = device.GetBufferDeviceAddress({ state->constantsDepth->GetAPIResource().GetHandle(), 0 });
 			state->recordsDepthAddress = device.GetBufferDeviceAddress({ state->recordsDepth->GetAPIResource().GetHandle(), 0 });
 			state->frameConstantsAddress = device.GetBufferDeviceAddress({ state->frameConstants->GetAPIResource().GetHandle(), 0 });
+
 			if (!state->constantsAddress || !state->recordsAddress || !state->frameConstantsAddress) {
 				logger::error("[DCLF] Draw data buffers have no device address");
 				return false;
@@ -6777,7 +7388,7 @@ namespace DCLF
 				state->hzb = org::PixelBuffer::CreateSharedUnmaterialized(hzbDesc);
 				state->hzb->SetName("cs.dclf.hzb");
 
-				state->hzbProgram = LoadComputeProgram(device, kHzbShader, kHzbConstantWords);
+				state->hzbProgram = ComputeProgram::Load(device, { .source = kHzbShader, .constantWords = kHzbConstantWords });
 				if (!state->hzbProgram) {
 					// The culling falls back to frustum only; the frame is unaffected.
 					logger::warn("[DCLF] The HZB compute program could not be created; occlusion culling stays off");
@@ -6846,7 +7457,7 @@ namespace DCLF
 		for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
 			state->inputs[m] = CreateWords(std::uint64_t(kMaxInputs) * sizeof(DrawInput) / 4, false, fmt::format("cs.dclf.shadow.draw-inputs{}", m).c_str());
 		state->geometries = CreateWords(std::uint64_t(kMaxGeometries) * sizeof(GeometryDraw) / 4, false, "cs.dclf.shadow.geometries");
-		state->buildDraws = LoadComputeProgram(device, kBuildDrawsShader, kBuildDrawsConstantWords);
+		state->buildDraws = ComputeProgram::Load(device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords });
 		if (!state->buildDraws) {
 			shadowSetupFailed = true;
 			return ShadowNotReady(1, "the BuildDraws compute program could not be created");
@@ -6857,6 +7468,10 @@ namespace DCLF
 			return ShadowNotReady(1, "the BuildDraws dispatch signature could not be created");
 		}
 		state->latch = std::make_shared<org::LatchBlock>("cs.dclf.shadow.latch", kShadowLatchBytes, host->FrameSlots());
+		if (DgcPreprocessEnabled()) {
+			state->preprocessShadow = PreprocessStates::Create(device, host->FrameSlots(), "the shadow views");
+			state->preprocessSky = PreprocessStates::Create(device, host->FrameSlots(), "Skylighting's occlusion map");
+		}
 		state->facePositionsAddress = device.GetBufferDeviceAddress({ state->facePositions->GetAPIResource().GetHandle(), 0 });
 		state->constantsAddress = device.GetBufferDeviceAddress({ state->constants->GetAPIResource().GetHandle(), 0 });
 		state->recordsAddress = device.GetBufferDeviceAddress({ state->records->GetAPIResource().GetHandle(), 0 });
@@ -8653,6 +9268,51 @@ namespace DCLF
 	}
 
 
+	void IndirectDraws::CheckCapturePoint()
+	{
+		if (!impl->pending)
+			return;
+		const auto& captured = *impl->pending;
+		auto now = CaptureBindings();
+		// Only what the colour epoch takes from a capture: the frame registers, the frame textures, the targets, the
+		// viewport and the eye (the per-draw registers and textures are the draw's own).
+		auto& p = impl->captureParity;
+		bool any = false;
+		auto note = [&](std::string a_what) {
+			++p.differ[std::move(a_what)];
+			any = true;
+		};
+		for (std::uint32_t slot = 0; slot < kConstantBufferRegisters; ++slot) {
+			if (!((kPerDrawVS >> slot) & 1) && captured.vsBuffers[slot] != now.vsBuffers[slot])
+				note(fmt::format("VS b{}", slot));
+			if (!((kPerDrawPS >> slot) & 1) && captured.psBuffers[slot] != now.psBuffers[slot])
+				note(fmt::format("PS b{}", slot));
+		}
+		for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters; ++t)
+			if (captured.psViews[t] != now.psViews[t])
+				note(fmt::format("t{}", t));
+		for (std::uint32_t i = 0; i < kColorTargets; ++i)
+			if (captured.targets[i] != now.targets[i])
+				note(fmt::format("rt{}", i));
+		if (captured.depth != now.depth)
+			note("depth");
+		if (captured.viewportWidth != now.viewportWidth || captured.viewportHeight != now.viewportHeight || captured.minDepth != now.minDepth ||
+			captured.maxDepth != now.maxDepth)
+			note("viewport");
+		if (std::memcmp(&captured.eye, &now.eye, sizeof(captured.eye)) != 0 || std::memcmp(&captured.previousEye, &now.previousEye, sizeof(captured.previousEye)) != 0)
+			note("eye");
+		now.Release();
+		p.frames += any ? 1u : 0u;
+		if (++p.checks == 300) {
+			std::string text;
+			for (const auto& [what, count] : p.differ)
+				text += fmt::format(" {}={}", what, count);
+			logger::info("[DCLF] capture point parity: {} frames' captures against the first lighting draw's bindings, {} differ{}", p.checks, p.frames,
+				p.frames ? " <- DIFFER:" + text : std::string(" <- OK"));
+			p = {};
+		}
+	}
+
 	void IndirectDraws::CaptureDepthPass()
 	{
 		// CS_DCLF_NO_ZPREPASS=1: leave the depth to the native pass, so the hybrid path runs a single epoch
@@ -9152,6 +9812,7 @@ namespace DCLF
 		const bool depthBuffers = a_depthOnly && a_resources.recordsDepth;
 		in.addresses.constants = depthBuffers ? a_resources.constantsDepthAddress : a_resources.constantsAddress;
 		in.addresses.records = depthBuffers ? a_resources.recordsDepthAddress : a_resources.recordsAddress;
+		in.addresses.cbvSlots = HeapCbvTest() ? a_resources.cbvSlots[depthBuffers ? 0 : 1].get() : nullptr;
 		in.constantsUploaded = a_resources.constantsUploaded[a_depthOnly ? 0 : 1];
 		in.recordsUploaded = a_resources.recordsUploaded[a_depthOnly ? 0 : 1];
 		in.frameTextures = a_resources.committedFrameTextures[a_depthOnly ? 0 : 1];
@@ -9533,11 +10194,36 @@ namespace DCLF
 		static const std::uint32_t zero[kCountWords] = {};
 		const std::size_t zeroBytes = (depthOnly || !a_resources->hybrid) ? sizeof(zero) : sizeof(std::uint32_t);
 		uploads(a_resources->count, zero, zeroBytes, 0);
+		// The sort's counts start at zero; from then on the scan that reads them clears them.
+		if (a_resources->sort)
+			a_resources->sort->ZeroCountsOnce(uploads);
 		// The decal words: each group's slot count for its draw, and the tallies zeroed. Written by the
 		// colour segment only, which is the one that submits decals.
 		if (!depthOnly) {
 			decalWords = { a_payload.decalCount[0], a_payload.decalCount[1], 0u, 0u };
 			uploads(a_resources->count, decalWords.data(), decalWords.size() * sizeof(std::uint32_t), kCountDecalGroupWord * sizeof(std::uint32_t));
+			// [TEMP] Each decal group's slots in draw order: distinct pipelines, pipeline switches between consecutive drawn slots,
+			// and blank slots (no draw: an index count of zero), every 300 commits.
+			static std::uint32_t decalOrderCommits = 0;
+			if (++decalOrderCommits % 300 == 0) {
+				for (std::uint32_t group = 0; group < kDecalGroups; ++group) {
+					const auto& templates = a_payload.decalTemplates[group];
+					ankerl::unordered_dense::set<std::uint32_t> distinct;
+					std::uint32_t switches = 0, blanks = 0, previous = ~0u;
+					for (std::uint32_t slot = 0; slot < a_payload.decalCount[group] && slot < templates.size(); ++slot) {
+						const auto& sequence = templates[slot];
+						if (!sequence.indexCount) {
+							++blanks;
+							continue;
+						}
+						distinct.insert(sequence.pipelineIndex);
+						switches += previous != ~0u && previous != sequence.pipelineIndex ? 1u : 0u;
+						previous = sequence.pipelineIndex;
+					}
+					logger::info("[DCLF][TEMP] decal order, group {}: {} slots, {} blank, {} distinct pipelines, {} pipeline switches", group, a_payload.decalCount[group],
+						blanks, distinct.size(), switches);
+				}
+			}
 		}
 		if (!staged)
 			UploadMainPayload(a_payload, *a_resources, uploads);
@@ -9681,6 +10367,13 @@ namespace DCLF
 		const auto& previousShape = a_resources->published[shapeIndex];
 		auto frame = std::make_shared<PassFrame>();
 		frame->drawCapacity = GrowCapacity(previousShape ? previousShape->drawCapacity : 0u, drawCount, kMaxDraws);
+		// [TEMP] CS_DCLF_TEST_DRAW_CAPACITY=<n>: the ExecuteIndirect max count forced, to see what the draw passes' GPU time
+		// scales with (draws past it are not drawn).
+		static const std::uint32_t testCapacity = static_cast<std::uint32_t>(std::strtoul(SwitchValue("CS_DCLF_TEST_DRAW_CAPACITY").c_str(), nullptr, 10));
+		if (testCapacity)
+			frame->drawCapacity = std::min(testCapacity, kMaxDraws);
+		if (static std::uint32_t logged = 0; (logged++ % 1200) == 0)
+			logger::info("[DCLF][TEMP] {} epoch draw capacity {} for {} draws ({} inputs)", depthOnly ? "depth" : "colour", frame->drawCapacity, drawCount, inputCount);
 		for (std::uint32_t group = 0; group < kDecalGroups; ++group)
 			frame->decalCapacity[group] = GrowCapacity(previousShape ? previousShape->decalCapacity[group] : 0u, decalCount[group], kMaxDecalDraws);
 		frame->width = a_capture.viewportWidth;
@@ -9690,6 +10383,26 @@ namespace DCLF
 		frame->minDepth = useMainRange ? mainMinDepth : a_capture.minDepth;
 		frame->maxDepth = useMainRange ? mainMaxDepth : a_capture.maxDepth;
 		frame->resourceHeap = org::runtime::GetActiveSRVDescriptorHeap().GetHandle();
+		// [TEMP] HeapCbvTest: the descriptors, made by the first commit (the descriptor service is active only inside an epoch); the
+		// builds skip every draw until the next inputs carry them.
+		if (HeapCbvTest() && !a_resources->cbvSlots[1]) {
+			auto* service = org::runtime::GetActiveDescriptorService();
+			auto device = RenderGraphRuntime::Get().Host()->GetDesc().device;
+			const auto describe = [&](const std::shared_ptr<org::Buffer>& a_buffer, std::uint64_t a_bytes) {
+				auto table = std::make_shared<std::vector<std::uint32_t>>(a_bytes / kHeapCbvUnit);
+				for (std::size_t unit = 0; unit < table->size(); ++unit) {
+					const auto slot = service->AllocateDescriptorSlot(rhi::DescriptorHeapType::CbvSrvUav, true);
+					device.CreateConstantBufferView(slot, a_buffer->GetAPIResource().GetHandle(), rhi::CbvDesc{ unit * kHeapCbvUnit, kHeapCbvWindow });
+					(*table)[unit] = slot.index;
+				}
+				return std::shared_ptr<const std::vector<std::uint32_t>>(std::move(table));
+			};
+			const auto started = std::chrono::steady_clock::now();
+			a_resources->cbvSlots[1] = describe(a_resources->constants, kConstantBytes);
+			a_resources->cbvSlots[0] = describe(a_resources->constantsDepth, kDepthConstantBytes);
+			logger::info("[DCLF][TEMP] heap CBV test: {} + {} uniform buffer descriptors in {:.0f} ms", a_resources->cbvSlots[1]->size(),
+				a_resources->cbvSlots[0]->size(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
+		}
 		frame->samplerHeap = org::runtime::GetActiveSamplerDescriptorHeap().GetHandle();
 		frame->indirect = GetIndirectState();
 		frame->cullMode = CullingMode();
@@ -10079,6 +10792,8 @@ namespace DCLF
 				a_stats.sunMissed = words[kCountSunMissedWord];
 				a_stats.fadeTested = words[kCountFadeTestedWord];
 				a_stats.fadeHidden = words[kCountFadeHiddenWord];
+				if (words[27])
+					logger::warn("[DCLF][TEMP] draw push test: {} sequences named a record past the buffer's capacity", words[27]);
 				a_stats.sunCpuTested = cullReadback->sunCpuTested;
 				a_stats.sunCpuMissed = cullReadback->sunCpuMissed;
 				context->Unmap(cullReadback->count.get(), 0);
@@ -10299,6 +11014,7 @@ namespace DCLF
 	std::uint32_t IndirectDraws::DrainVisibilityFeedback(const std::function<void(const VisibilityFeedbackFrame&)>&) { return 0; }
 	IndirectDraws::FeedbackStats IndirectDraws::TakeFeedbackStats() { return {}; }
 	void IndirectDraws::CaptureMainPass() {}
+	void IndirectDraws::CheckCapturePoint() {}
 	void IndirectDraws::Execute() {}
 	void IndirectDraws::CaptureDepthPass() {}
 	void IndirectDraws::ExecuteColour() {}

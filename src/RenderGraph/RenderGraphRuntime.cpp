@@ -10,6 +10,7 @@
 #include "Globals.h"
 #include "Profiler.h"
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/NvPerfBridge.h"
 #include "GpuIdleTrace.h"
 #include "State.h"
 
@@ -702,6 +703,12 @@ bool RenderGraphRuntime::Initialize()
 	}
 	impl = std::move(state);
 	disabledReason.clear();
+	{
+		// CS_NVPERF_RANGES: Nsight Perf counters per range; nvperf_grfx_host.dll ships beside the DXVK DLLs.
+		wchar_t dxvkPath[MAX_PATH]{};
+		if (::GetModuleFileNameW(d3d11, dxvkPath, MAX_PATH))
+			NvPerfBridge::Initialize(info, d3d11, std::filesystem::path(dxvkPath).parent_path().c_str(), *impl->host);
+	}
 	logger::info("[ORG] Render graph adopted DXVK's Vulkan device (queue family {}, index {}); submissions {}",
 		info.graphicsQueueFamily, info.graphicsQueueIndex,
 		impl->enqueueSubmission ? "go through DXVK's command stream" : "flush DXVK each epoch");
@@ -947,6 +954,21 @@ org::services::ShaderCompiler* RenderGraphRuntime::ShaderCompiler()
 #endif
 }
 
+const std::vector<std::filesystem::path>& RenderGraphRuntime::ShaderSourceFiles()
+{
+	static const std::vector<std::filesystem::path> files = [] {
+		std::vector<std::filesystem::path> found;
+		std::error_code ec;
+		for (auto it = std::filesystem::recursive_directory_iterator(kShaderDirectory, ec); !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+			const auto extension = it->path().extension();
+			if (it->is_regular_file() && (extension == ".hlsl" || extension == ".hlsli"))
+				found.push_back(it->path());
+		}
+		return found;
+	}();
+	return files;
+}
+
 bool RenderGraphRuntime::DescribeResource(IUnknown* a_object, DxvkOrgInteropResourceInfo& a_info)
 {
 	if (!impl || !impl->getResourceInfo || !a_object)
@@ -1006,6 +1028,11 @@ org::PersistentGraphHost* RenderGraphRuntime::Host() { return nullptr; }
 bool RenderGraphRuntime::ExecuteEpoch(Segment, const std::function<void(org::RenderGraph&)>&) { return false; }
 bool RenderGraphRuntime::DescribeResource(IUnknown*, DxvkOrgInteropResourceInfo&) { return false; }
 org::services::ShaderCompiler* RenderGraphRuntime::ShaderCompiler() { return nullptr; }
+const std::vector<std::filesystem::path>& RenderGraphRuntime::ShaderSourceFiles()
+{
+	static const std::vector<std::filesystem::path> none;
+	return none;
+}
 winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource&, const D3D11_BUFFER_DESC&) { return nullptr; }
 void RenderGraphRuntime::ReportGpuTimings(std::uint32_t, bool) {}
 #endif

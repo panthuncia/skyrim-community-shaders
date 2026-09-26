@@ -14,8 +14,6 @@ set(CS_ORG_ROOT "${CMAKE_SOURCE_DIR}/extern" CACHE PATH
     "Directory holding BasicRHI, BasicTelemetry, OpenRenderGraph and volk side by side")
 
 set(CS_HAS_RENDER_GRAPH OFF)
-set(CS_GENERATED_SHADER_DIR "${CMAKE_BINARY_DIR}/generated/Shaders")
-set(CS_RENDER_GRAPH_SPIRV)
 set(CS_DXC_RUNTIME_DLLS)
 
 if(CS_RENDER_GRAPH)
@@ -51,10 +49,21 @@ if(CS_RENDER_GRAPH)
         set(OPENRENDERGRAPH_ENABLE_D3D11_INTEROP OFF CACHE BOOL "" FORCE)
         set(OPENRENDERGRAPH_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 
+        # Nsight Perf for OpenRenderGraph's Telemetry/NvPerfCapture (src/RenderGraph/NvPerfBridge.cpp, CS_NVPERF_RANGES): the
+        # SDK BasicRenderer ships, when this checkout sits in SARP. nvperf_grfx_host.dll is delay-loaded and installed beside
+        # the DXVK DLLs, so the plugin loads without it.
+        set(CS_NVPERF_ROOT "${CMAKE_SOURCE_DIR}/../../BasicRenderer/ThirdParty/NVPerf" CACHE PATH "Nsight Perf SDK root (include/, bin/x64/)")
+        set(CS_NVPERF_DLL)
+        if(EXISTS "${CS_NVPERF_ROOT}/include/nvperf_host.h" AND EXISTS "${CS_NVPERF_ROOT}/bin/x64/nvperf_grfx_host.dll")
+            set(ORG_ENABLE_NVPERF ON CACHE BOOL "" FORCE)
+            set(ORG_NVPERF_ROOT "${CS_NVPERF_ROOT}" CACHE PATH "" FORCE)
+            set(CS_NVPERF_DLL "${CS_NVPERF_ROOT}/bin/x64/nvperf_grfx_host.dll")
+            message(STATUS "CS_RENDER_GRAPH: Nsight Perf from ${CS_NVPERF_ROOT}")
+        endif()
         add_subdirectory("${CS_ORG_ROOT}/OpenRenderGraph" "${CMAKE_BINARY_DIR}/extern/OpenRenderGraph" EXCLUDE_FROM_ALL)
 
-        # Runtime SPIR-V compilation (Drawcall Limit Fix's Lighting permutations): ORGModuleServices'
-        # content-addressed DXC service. Optional; without it DCLF cannot build pipelines.
+        # Runtime SPIR-V compilation (every render-graph shader): ORGModuleServices' content-addressed DXC service.
+        # Optional; without it the render-graph features stay on their D3D11 paths.
         if(EXISTS "${CS_ORG_ROOT}/ORGModuleServices/CMakeLists.txt")
             set(ORG_MODULE_SERVICES_ENABLE_DXC ON CACHE BOOL "" FORCE)
             set(ORG_MODULE_SERVICES_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
@@ -73,64 +82,15 @@ if(CS_RENDER_GRAPH)
             endif()
         endif()
 
-        # SPIR-V for the render-graph passes, with the descriptor-heap ABI BasicRHI expects. Always with -Zi's
-        # source-level debug info (embedded HLSL + OpLine), so Nsight and RenderDoc show these compute passes'
-        # source like the runtime-compiled Lighting ones. Debug info only: optimization and bindings unchanged,
-        # and drivers ignore it.
-        set(BASICRHI_SPIRV_DEBUG_INFO ON)
-        include("${CS_ORG_ROOT}/BasicRHI/cmake/BasicRHIShaderFlags.cmake")
-        set(_llf_shader_dir "${CMAKE_SOURCE_DIR}/features/Light Limit Fix/Shaders")
-        foreach(_shader IN ITEMS ClusterBuildingCS ClusterCullingCS)
-            set(_spv "${CS_GENERATED_SHADER_DIR}/LightLimitFix/ORG/${_shader}.spv")
-            basicrhi_compile_spirv(
-                OUTPUT "${_spv}"
-                SOURCE "${_llf_shader_dir}/LightLimitFix/${_shader}.hlsl"
-                ENTRY main
-                PROFILE cs_6_6
-                DEFINES LLF_ORG_BINDLESS=1
-                INCLUDE_DIRS "${_llf_shader_dir}" "${CMAKE_SOURCE_DIR}/package/Shaders"
-                DEPENDS
-                    "${_llf_shader_dir}/LightLimitFix/Common.hlsli"
-                    "${_llf_shader_dir}/LightLimitFix/OrgBindless.hlsli")
-            list(APPEND CS_RENDER_GRAPH_SPIRV "${_spv}")
-        endforeach()
-        # Drawcall Limit Fix's draw building.
-        set(_dclf_shader_dir "${CMAKE_SOURCE_DIR}/features/Drawcall Limit Fix/Shaders")
-        set(_dclf_spv "${CS_GENERATED_SHADER_DIR}/DrawcallLimitFix/ORG/BuildDrawsCS.spv")
-        basicrhi_compile_spirv(
-            OUTPUT "${_dclf_spv}"
-            SOURCE "${_dclf_shader_dir}/DrawcallLimitFix/BuildDrawsCS.hlsl"
-            ENTRY main
-            PROFILE cs_6_6
-            INCLUDE_DIRS "${_dclf_shader_dir}")
-        set(CS_DCLF_SPIRV "${_dclf_spv}")
-        # The hierarchical depth buffer the occlusion culling tests against.
-        set(_dclf_hzb_spv "${CS_GENERATED_SHADER_DIR}/DrawcallLimitFix/ORG/HzbCS.spv")
-        basicrhi_compile_spirv(
-            OUTPUT "${_dclf_hzb_spv}"
-            SOURCE "${_dclf_shader_dir}/DrawcallLimitFix/HzbCS.hlsl"
-            ENTRY main
-            PROFILE cs_6_6
-            INCLUDE_DIRS "${_dclf_shader_dir}")
-        list(APPEND CS_DCLF_SPIRV "${_dclf_hzb_spv}")
-        add_custom_target(CSRenderGraphShaders DEPENDS ${CS_RENDER_GRAPH_SPIRV} ${CS_DCLF_SPIRV})
-        add_dependencies(${PROJECT_NAME} CSRenderGraphShaders)
-
+        # The render-graph compute passes compile their HLSL at runtime through ORGModuleServices (src/RenderGraph/
+        # ComputeProgram.cpp), like Drawcall Limit Fix's Lighting builds; the sources ship with the other shaders.
         target_link_libraries(${PROJECT_NAME} PRIVATE OpenRenderGraph::OpenRenderGraph BasicRHI::BasicRHI)
+        if(CS_NVPERF_DLL)
+            target_link_libraries(${PROJECT_NAME} PRIVATE delayimp)
+            target_link_options(${PROJECT_NAME} PRIVATE "/DELAYLOAD:nvperf_grfx_host.dll")
+            install(FILES "${CS_NVPERF_DLL}" DESTINATION SKSE/Plugins/CommunityShaders/bin COMPONENT DXVK)
+        endif()
         target_compile_definitions(${PROJECT_NAME} PRIVATE CS_HAS_RENDER_GRAPH=1)
-
-        install(
-            FILES ${CS_RENDER_GRAPH_SPIRV}
-            DESTINATION Shaders/LightLimitFix/ORG
-            COMPONENT Shaders
-        )
-        install(
-            FILES ${CS_DCLF_SPIRV}
-            DESTINATION Shaders/DrawcallLimitFix/ORG
-            COMPONENT Shaders
-        )
-        # From here on the list feeds the AIO copy, which keeps each file's path under the generated directory.
-        list(APPEND CS_RENDER_GRAPH_SPIRV ${CS_DCLF_SPIRV})
 
         set(CS_HAS_RENDER_GRAPH ON)
         message(STATUS "CS_RENDER_GRAPH: OpenRenderGraph from ${CS_ORG_ROOT}")

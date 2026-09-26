@@ -414,6 +414,15 @@ few with; 40.7 hint-3 draws blended and alpha-tested with `kZBufferWrite`, 11.8 
 `alphaBlendWriteMode = 1` for its own passes from the same hook, just before the blended decals, and the
 first decals after it inherit that until a `kZBufferWrite` decal's save and restore resets it.
 
+**Which decals write depth, and where.** Only the opaque group (hint 2), in the main pass: its function draws with
+depth mode 3 whatever the property's `kZBufferWrite` says, and with its bias mode. The blended group (hint 3) tests
+only, `kZBufferWrite` or not (the flag changes the blend write mode, not the depth mode). The depth pass writes no decal
+depth at all: its registration (`FUN_1414b2a60`, render mode `0xC`, from the table at `0x14332b020`; the draw function
+`FUN_1414b44f0` is in the one at `0x14332b120`) drops decal properties except in two special cases, and the few hint-3
+`kZBufferWrite` passes that do reach it (Lighting technique `0x220CA`, 4 to 8 a frame at Riverwood) are offered to
+`RenderPassImmediately` but never reach `BSLightingShader::SetupGeometry`: `CS_DCLF_NATIVE_CENSUS=1` counts no
+Lighting draw in the depth pass at all, with DCLF on or off.
+
 ## Skinning: the palette the engine keeps, and the buffers a skinned draw uses
 
 Decompiled from AE 1.6.1170 for Drawcall Limit Fix's skinned coverage, and measured with

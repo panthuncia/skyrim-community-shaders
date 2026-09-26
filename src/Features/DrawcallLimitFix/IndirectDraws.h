@@ -19,7 +19,7 @@ namespace DCLF
 	 * @brief Phase 2: DCLF's objects drawn by the render graph with one indirect command stream, into
 	 * off-screen copies of the main pass's targets (the frame itself is unchanged).
 	 *
-	 * At the first lighting draw of the main (deferred) pass, CaptureMainPass records what the pass binds;
+	 * Where the main (deferred) pass's opaque batches start, CaptureMainPass records what the pass binds;
 	 * before the deferred composite, Execute runs the graph's MainOpaque epoch. Inside it the draw data is assembled on the CPU and uploaded:
 	 *   - constant blocks packed with the native shaders' constant tables: PerTechnique per pipeline,
 	 *     PerMaterial per (material, pipeline), PerGeometry per object, Light Limit Fix's StrictLightData
@@ -209,8 +209,16 @@ namespace DCLF
 		 */
 		void PublishClaims();
 
-		/** @brief At the first lighting draw of the main pass: what the pass binds (buffers, views, targets, viewport). */
+		/**
+		 * @brief What the main pass binds (buffers, views, targets, viewport), for this frame's colour epoch: where its opaque
+		 * batches start, the engine's state applied (DrawcallLimitFix::BeforeOpaquePass).
+		 */
 		void CaptureMainPass();
+		/**
+		 * @brief CS_DCLF_CAPTURE_POINT_PARITY, at the frame's first lighting draw the engine makes: what is bound there against
+		 * the capture, in everything the colour epoch takes from it.
+		 */
+		void CheckCapturePoint();
 
 
 		/**

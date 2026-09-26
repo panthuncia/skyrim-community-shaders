@@ -194,6 +194,11 @@ namespace DCLF
 
 		rhi::Device device{};
 		rhi::PipelineLayoutPtr layout;
+		// Under frame push, the shadow views' layout: every register from the draw's binding record. Their pass-wide blocks
+		// (the view slot's VS_PerFrame at b12, the build's SharedData and FeatureData at b5 and b6) are not the main pass's
+		// frame slots. Without frame push the shadow views use the main layout.
+		rhi::PipelineLayoutPtr shadowLayout;
+		rhi::PipelineLayoutHandle ShadowLayout() const { return shadowLayout ? shadowLayout->GetHandle() : layout->GetHandle(); }
 		bool supported = false;
 		bool attempted = false;
 		org::services::PipelineService service;
@@ -342,6 +347,7 @@ namespace DCLF
 		// One set per variant; a key has the same index in both.
 		std::array<rhi::IndirectPipelineSetPtr, kVariantCount> sets;
 		std::array<rhi::CommandSignaturePtr, kVariantCount> signatures;
+		rhi::CommandSignaturePtr depthPassSignature;  // IndirectState::depthPassSignature, when it differs from the depth variant's
 		std::vector<org::services::PipelinePayload> setPipelines;  // index -> Built
 		std::uint32_t inFlight = 0;
 		std::uint32_t loggedFailures = 0;
@@ -366,9 +372,15 @@ namespace DCLF
 
 			rhi::PushConstantRangeDesc recordAddress{};
 			recordAddress.visibility = rhi::ShaderStage::AllGraphics;
-			recordAddress.num32BitValues = 3;  // DrawBindings address (2) + the object index
+			// DrawBindings address (2) + the object index; [TEMP] a pad word, and DrawPushTest's per-draw addresses.
+			recordAddress.num32BitValues = DrawPushTest() ? 4 + kDrawPushWords : (FramePushEnabled() ? 4 : 3);
 			recordAddress.set = 0;
 			recordAddress.binding = kRecordAddressBinding;
+			rhi::PushConstantRangeDesc pushConstants[2] = { recordAddress, {} };
+			pushConstants[1].visibility = rhi::ShaderStage::AllGraphics;
+			pushConstants[1].num32BitValues = kFramePushWords;
+			pushConstants[1].set = 0;
+			pushConstants[1].binding = kFramePushBinding;
 
 			auto range = [](std::uint32_t a_binding, std::uint32_t a_count, rhi::ShaderStage a_stage, rhi::LayoutRangeSource a_source, std::size_t a_offset, bool a_samplers = false) {
 				rhi::LayoutBindingRange range{};
@@ -391,12 +403,58 @@ namespace DCLF
 				range(kBonesBufferBinding, kVertexTextureCount, rhi::ShaderStage::Vertex, rhi::LayoutRangeSource::IndirectIndex,
 					offsetof(DrawBindings, textures) + 4 * std::size_t{ kBonesBufferRegister }),
 			};
-			const rhi::PipelineLayoutDesc desc{ .ranges = { ranges, static_cast<std::uint32_t>(std::size(ranges)) }, .pushConstants = { &recordAddress, 1 },
+			// Frame push: a range per constant buffer register, the pass-wide ones by push address.
+			std::vector<rhi::LayoutBindingRange> framePushRanges;
+			if (FramePushEnabled()) {
+				std::uint32_t word = 0;
+				for (const bool pixel : { false, true }) {
+					const std::uint32_t mask = pixel ? kFramePushPS : kFramePushVS;
+					const auto stage = pixel ? rhi::ShaderStage::Pixel : rhi::ShaderStage::Vertex;
+					const std::size_t record = pixel ? offsetof(DrawBindings, pixelConstants) : offsetof(DrawBindings, vertexConstants);
+					for (std::uint32_t r = 0; r < kConstantBufferRegisters; ++r) {
+						if ((mask >> r) & 1) {
+							auto pushed = range(kBindingShiftB + r, 1, stage, rhi::LayoutRangeSource::PushAddress, 0);
+							pushed.addressRootIndex = 1;
+							pushed.addressOffset32 = word;
+							word += 2;
+							framePushRanges.push_back(pushed);
+						} else if (HeapCbvTest() && ((kDrawPushRegisters >> r) & 1)) {
+							// The record's entry for the register holds a heap index (its low 32 bits) instead of an address.
+							framePushRanges.push_back(range(kBindingShiftB + r, 1, stage, rhi::LayoutRangeSource::IndirectIndex, record + 8 * std::size_t{ r }));
+						} else if (DrawPushTest() && (SwitchValue("CS_DCLF_TEST_DRAW_PUSH") == "1" || SwitchValue("CS_DCLF_TEST_DRAW_PUSH") == "5") && ((kDrawPushRegisters >> r) & 1)) {
+							// The sequence's push data after its first 4 words: VS b0 b1 b2 b4, then PS b0 b1 b2 b4.
+							auto pushed = range(kBindingShiftB + r, 1, stage, rhi::LayoutRangeSource::PushAddress, 0);
+							pushed.addressRootIndex = 0;
+							pushed.addressOffset32 = 4 + 2 * ((pixel ? 4 : 0) + std::popcount(kDrawPushRegisters & ((1u << r) - 1)));
+							framePushRanges.push_back(pushed);
+						} else {
+							framePushRanges.push_back(range(kBindingShiftB + r, 1, stage, rhi::LayoutRangeSource::IndirectAddress, record + 8 * std::size_t{ r }));
+						}
+					}
+				}
+				framePushRanges.insert(framePushRanges.end(), std::begin(ranges) + 2, std::end(ranges));
+			}
+			const rhi::PipelineLayoutDesc desc{ .ranges = FramePushEnabled() ? rhi::Span<rhi::LayoutBindingRange>{ framePushRanges.data(), static_cast<std::uint32_t>(framePushRanges.size()) } :
+				                                                          rhi::Span<rhi::LayoutBindingRange>{ ranges, static_cast<std::uint32_t>(std::size(ranges)) },
+				.pushConstants = { pushConstants, FramePushEnabled() ? 2u : 1u },
 				.staticSamplers = {}, .flags = rhi::PF_AllowInputAssembler };
+			if (FramePushEnabled())
+				logger::info("[DCLF] frame push: {} constant ranges, {} pushed address words", framePushRanges.size(), kFramePushWords);
 			if (device.CreatePipelineLayout(desc, layout) != rhi::Result::Ok) {
 				supported = false;
 				logger::error("[DCLF] Could not create the indirect draw pipeline layout");
 				return false;
+			}
+			if (FramePushEnabled()) {
+				rhi::PushConstantRangeDesc shadowRecordAddress = recordAddress;
+				shadowRecordAddress.num32BitValues = 3;
+				const rhi::PipelineLayoutDesc shadowDesc{ .ranges = rhi::Span<rhi::LayoutBindingRange>{ ranges, static_cast<std::uint32_t>(std::size(ranges)) },
+					.pushConstants = { &shadowRecordAddress, 1u }, .staticSamplers = {}, .flags = rhi::PF_AllowInputAssembler };
+				if (device.CreatePipelineLayout(shadowDesc, shadowLayout) != rhi::Result::Ok) {
+					supported = false;
+					logger::error("[DCLF] Could not create the shadow views' pipeline layout");
+					return false;
+				}
 			}
 			return true;
 		}
@@ -424,6 +482,10 @@ namespace DCLF
 			const rhi::SubobjPrimitiveTopology topology{ rhi::PrimitiveTopology::TriangleList };
 			const rhi::SubobjInputLayout input{ BuildInputLayout(vertex, a_key.vertexLayout) };
 			const rhi::SubobjFlags flags{ rhi::PipelineFlags_IndirectBindable };
+			// An opaque-group decal (accumulation hint 2) writes depth where the engine's main pass does: its depth variant is
+			// the decal depth pass's, which draws it before the colour pass with the colour variant's bias and test (engine
+			// notes, "Decals"). A blended decal writes none (depth mode 1), so its depth variant writes nothing either.
+			const std::uint32_t decalGroup = a_state.valid ? RasterDecalGroup(a_key.rasterFlags) : 0u;
 			for (std::uint32_t variant = 0; variant < kVariantCount; ++variant) {
 				const bool depthOnly = variant == kDepthVariant;
 				rhi::SubobjRaster raster{};
@@ -432,7 +494,7 @@ namespace DCLF
 				// integer DepthBias goes through as the constant factor: the main depth is D24S8, for which
 				// Vulkan's default representation is the least representable value of the format, which is
 				// exactly what D3D11 (and DXVK, which forces it for UNORM formats) means by it.
-				if (!depthOnly && a_state.valid) {
+				if (a_state.valid && (!depthOnly || decalGroup == 1)) {
 					raster.rs.depthBias = a_state.depthBias;
 					raster.rs.depthBiasClamp = a_state.depthBiasClamp;
 					raster.rs.slopeScaledDepthBias = a_state.slopeScaledDepthBias;
@@ -445,13 +507,12 @@ namespace DCLF
 				// rejects every fragment" apart from "the draws are not reaching the rasteriser at all".
 				static const bool noDepthTest = SwitchEnabled("CS_DCLF_NO_DEPTH_TEST");
 				depth.ds.depthEnable = !(noDepthTest && !depthOnly);
-				// The depth variant is DCLF's own Z-prepass. The colour variant tests LESS_EQUAL against it
-				// rather than the EQUAL the native main pass uses. EQUAL is the engine's way of avoiding
-				// overdraw when the same pass wrote the depth; here the two are separate epochs assembled
-				// from separate captures, so a value can differ in its last bits and EQUAL then rejects the
-				// fragment outright - which left DCLF's objects unshaded and grey. LESS_EQUAL gives the same
-				// visibility, because the prepass already stored the nearest surface and anything behind it
-				// still fails, and it tolerates the last-bit differences.
+				// The depth variant is DCLF's own Z-prepass. The colour variant tests EQUAL against it, as the
+				// engine's opaque pass does (CS_DCLF_COLOUR_EQUAL=0: LESS_EQUAL). Where the prepass's alpha test
+				// discarded a texel (foliage cards), the stored depth is whatever lies behind it, so LESS_EQUAL
+				// passes those fragments and runs the full lighting shader before they discard; EQUAL rejects
+				// them (colour pass about 4.3 -> 3 ms at Riverwood). A decal (a key with engine state) keeps
+				// LESS_EQUAL: it draws with a depth bias over the surface beneath, which EQUAL never passes.
 				// CS_DCLF_COLOUR_DEPTH_WRITE=1: the colour variant stops testing and writes its own depth, so
 				// a readback says exactly what it computes for a pixel - the number its depth test compares
 				// against the one the Z-prepass stored.
@@ -460,9 +521,14 @@ namespace DCLF
 					depth.ds.depthWrite = true;
 					depth.ds.depthFunc = rhi::CompareOp::Always;
 				} else {
-					depth.ds.depthWrite = depthOnly;
-					depth.ds.depthFunc = depthOnly ? rhi::CompareOp::Less : rhi::CompareOp::LessEqual;
+					depth.ds.depthWrite = depthOnly && decalGroup != 2;
+					static const bool colourEqual = SwitchValue("CS_DCLF_COLOUR_EQUAL") != "0";
+					depth.ds.depthFunc = depthOnly ? (a_state.valid ? rhi::CompareOp::LessEqual : rhi::CompareOp::Less) :
+					                                 (colourEqual && !a_state.valid ? rhi::CompareOp::Equal : rhi::CompareOp::LessEqual);
 				}
+				// [TEMP] CS_DCLF_TEST_CHEAP_COLOUR_PS=1: the colour variant runs the Z-prepass pixel shader (the alpha test alone, no
+				// outputs), so the colour pass's time is its vertex stage, raster and indirect commands without the shading.
+				static const bool cheapColour = SwitchEnabled("CS_DCLF_TEST_CHEAP_COLOUR_PS");
 				rhi::SubobjBlend blend{};
 				rhi::SubobjRTVs targets{};
 				if (!depthOnly) {
@@ -478,7 +544,7 @@ namespace DCLF
 					blend.bs.numAttachments = 0;
 				}
 				const rhi::PipelineStreamItem items[] = {
-					rhi::Make(layout), rhi::Make(vertexShader), rhi::Make(depthOnly ? depthPixelShader : pixelShader), rhi::Make(raster), rhi::Make(depth), rhi::Make(blend),
+					rhi::Make(layout), rhi::Make(vertexShader), rhi::Make(depthOnly || cheapColour ? depthPixelShader : pixelShader), rhi::Make(raster), rhi::Make(depth), rhi::Make(blend),
 					rhi::Make(targets), rhi::Make(depthFormat), rhi::Make(topology), rhi::Make(input), rhi::Make(flags),
 				};
 				if (const auto result = a_device.CreatePipeline(items, static_cast<std::uint32_t>(std::size(items)), built->pipelines[variant]); result != rhi::Result::Ok)
@@ -557,7 +623,8 @@ namespace DCLF
 			desc.args = { args, 6 };
 			desc.byteStride = sizeof(DrawSequence);
 			desc.pipelineSet = shadowSet->GetHandle();
-			return device.CreateCommandSignature(desc, layout->GetHandle(), shadowSignature) == rhi::Result::Ok;
+			desc.explicitPreprocess = DgcPreprocessEnabled();
+			return device.CreateCommandSignature(desc, ShadowLayout(), shadowSignature) == rhi::Result::Ok;
 		}
 
 		// The command signature of DrawSequence (Records.h), created with the set it selects from.
@@ -573,13 +640,55 @@ namespace DCLF
 			args[3].u.vertexBuffer.slot = 1;
 			args[4].kind = rhi::IndirectArgKind::IndexBuffer;
 			args[5].kind = rhi::IndirectArgKind::DrawIndexed;
+			// [TEMP] The long sequence: one push data run of the record address, the object index, a pad and the per-draw addresses.
+			if (DrawPushTest())
+				args[1].u.rootConstants = { 0, 0, 4 + kDrawPushWords };
 			rhi::CommandSignatureDesc desc{};
 			desc.args = { args, 6 };
-			desc.byteStride = sizeof(DrawSequence);
+			desc.byteStride = SequenceStride();
 			desc.pipelineSet = sets[a_variant]->GetHandle();
-			return device.CreateCommandSignature(desc, layout->GetHandle(), signatures[a_variant]) == rhi::Result::Ok;
+			// [TEMP] CS_DCLF_TEST_DGC_UNORDERED=1: the layout's UNORDERED_SEQUENCES usage, to measure what ordered generation costs
+			// (the decals, which share the colour signature, then lose their order).
+			desc.unorderedSequences = SwitchEnabled("CS_DCLF_TEST_DGC_UNORDERED");
+			desc.explicitPreprocess = DgcPreprocessEnabled();
+			if (device.CreateCommandSignature(desc, layout->GetHandle(), signatures[a_variant]) != rhi::Result::Ok)
+				return false;
+			if (a_variant != kDepthVariant || !desc.explicitPreprocess)
+				return true;
+			desc.explicitPreprocess = false;
+			return device.CreateCommandSignature(desc, layout->GetHandle(), depthPassSignature) == rhi::Result::Ok;
 		}
 	};
+
+	bool FramePushEnabled()
+	{
+		static const bool enabled = SwitchValue("CS_DCLF_FRAME_PUSH") != "0";
+		return enabled;
+	}
+
+	bool DgcPreprocessEnabled()
+	{
+		static const bool enabled = SwitchValue("CS_DCLF_DGC_PREPROCESS") != "0";
+		return enabled;
+	}
+
+	bool HeapCbvTest()
+	{
+		static const bool enabled = FramePushEnabled() && SwitchEnabled("CS_DCLF_TEST_HEAP_CBV");
+		return enabled;
+	}
+
+	bool DrawPushTest()
+	{
+		// =2: the long sequence and its token, with the registers still read through the record (a bisection).
+		static const bool enabled = FramePushEnabled() && !SwitchValue("CS_DCLF_TEST_DRAW_PUSH").empty() && SwitchValue("CS_DCLF_TEST_DRAW_PUSH") != "0";
+		return enabled;
+	}
+
+	std::uint32_t SequenceStride()
+	{
+		return DrawPushTest() ? 152u : static_cast<std::uint32_t>(sizeof(DrawSequence));
+	}
 
 	DrawPipelines::DrawPipelines() :
 		impl(std::make_unique<Impl>())
@@ -618,6 +727,7 @@ namespace DCLF
 				impl->signatures[variant].Reset();
 				impl->sets[variant].Reset();
 			}
+			impl->depthPassSignature.Reset();
 			impl->setPipelines.clear();
 			usage.clear();
 			++generation;
@@ -695,7 +805,7 @@ namespace DCLF
 		recipe.id = fmt::format("dclf.shadow.{:08X}.{:X}.{:016X}", a_key.technique, a_key.rasterFlags, a_key.vertexLayout);
 		recipe.shaderKey = ShadowPipelineKeyHash{}(a_key);
 		recipe.fixedFunctionKey = static_cast<std::uint64_t>(a_depthFormat);
-		recipe.build = [device = impl->device, layout = impl->layout->GetHandle(), key = a_key, program = &a_program, format = a_depthFormat, state] {
+		recipe.build = [device = impl->device, layout = impl->ShadowLayout(), key = a_key, program = &a_program, format = a_depthFormat, state] {
 			return Impl::BuildShadow(device, layout, key, program, format, state);
 		};
 		auto& entry = impl->shadowEntries[a_key];
@@ -868,7 +978,7 @@ namespace DCLF
 		ShadowIndirectState state;
 		if (!impl.layout || !impl.shadowSet || !impl.shadowSignature)
 			return state;
-		state.layout = impl.layout->GetHandle();
+		state.layout = impl.ShadowLayout();
 		state.set = impl.shadowSet->GetHandle();
 		state.signature = impl.shadowSignature->GetHandle();
 		state.valid = true;
@@ -885,6 +995,7 @@ namespace DCLF
 			state.sets[variant] = impl.sets[variant]->GetHandle();
 			state.signatures[variant] = impl.signatures[variant]->GetHandle();
 		}
+		state.depthPassSignature = impl.depthPassSignature ? impl.depthPassSignature->GetHandle() : state.signatures[kDepthVariant];
 		state.layout = impl.layout->GetHandle();
 		state.valid = true;
 		return state;
