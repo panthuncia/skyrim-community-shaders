@@ -1,0 +1,37 @@
+# Run in an isolated directory so per-process DXVK logs cannot overwrite another test.
+if(NOT DEFINED TEST_EXECUTABLE OR NOT DEFINED DXVK_DIRECTORY OR NOT DEFINED OUTPUT_DIRECTORY)
+    message(FATAL_ERROR "Validation runner requires executable, DXVK directory and output directory")
+endif()
+if(NOT DEFINED TEST_MODE)
+    set(TEST_MODE scoped)
+endif()
+file(MAKE_DIRECTORY "${OUTPUT_DIRECTORY}")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env DXVK_DEBUG=validation VK_LAYER_VALIDATE_SYNC=1
+        "${TEST_EXECUTABLE}" "${DXVK_DIRECTORY}" "${TEST_MODE}"
+    WORKING_DIRECTORY "${OUTPUT_DIRECTORY}"
+    RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr
+    TIMEOUT 60)
+file(WRITE "${OUTPUT_DIRECTORY}/test-output.log" "${stdout}\n${stderr}")
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "Scoped GPU validation failed (${result}):\n${stdout}\n${stderr}")
+endif()
+set(logs "${stdout}\n${stderr}")
+foreach(component dxgi d3d11)
+    set(path "${OUTPUT_DIRECTORY}/OrgDxvkInteropTest_${component}.log")
+    if(NOT EXISTS "${path}")
+        message(FATAL_ERROR "Missing validation evidence: ${path}")
+    endif()
+    file(READ "${path}" component_log)
+    string(APPEND logs "\n${component_log}")
+endforeach()
+if(NOT logs MATCHES "Enabled instance layers:[\r\n]+info:  +VK_LAYER_KHRONOS_validation")
+    message(FATAL_ERROR "Khronos validation was not enabled; this is not a validated pass")
+endif()
+if(logs MATCHES "err:|SYNC-HAZARD|Validation Error|VUID-")
+    message(FATAL_ERROR "Vulkan validation reported an error; inspect ${OUTPUT_DIRECTORY}")
+endif()
+if(NOT stdout MATCHES "OrgDxvkInteropTest: ok")
+    message(FATAL_ERROR "GPU test did not complete (a skipped test is not validation)")
+endif()
+message(STATUS "Scoped GPU handoff passed with synchronization validation")

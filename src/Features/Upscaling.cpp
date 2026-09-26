@@ -1592,8 +1592,11 @@ void Upscaling::Upscale()
 
 	auto& motionVector = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
 
-	if (auto* dxvk = DXVKInterop::GetSingleton(); dxvk && dxvk->IsAvailable())
+	if (auto* dxvk = DXVKInterop::GetSingleton(); dxvk && dxvk->IsAvailable()) {
+		// This is the thread issuing D3D11's commands: its ring submissions go through DXVK's command stream.
+		dxvk->BindStreamThread();
 		dxvk->PublishCommandTimings();
+	}
 
 	{
 		// GPU time comes from the interop buffer's own timestamps (PublishCommandTimings above); a D3D11 timer

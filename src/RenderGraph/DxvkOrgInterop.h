@@ -92,6 +92,29 @@ struct DxvkOrgInteropResourceInfo
 	DxvkOrgInteropImageInfo image;
 };
 
+
+// Stable registration is separate from describing a view. Each call owns one
+// lease; backingToken is shared by all registrations of the same native handle.
+// Release a lease only after all uses are retired. Submission-owned references
+// must retain it independently of the client's registration lifetime.
+// Imported Vulkan objects remain owned by the importing client; registration
+// retains DXVK wrappers, not the external owner's allocation.
+#define DXVK_ORG_RESOURCE_REGISTRATION_VERSION 1u
+typedef struct DxvkOrgInteropRegistration {
+  uint32_t version;
+  uint32_t queueFamily;
+  uint64_t leaseToken;
+  uint64_t backingToken;
+  VkPipelineStageFlags2 legalStages;
+  VkAccessFlags2 legalAccess;
+  DxvkOrgInteropResourceInfo resource;
+} DxvkOrgInteropRegistration;
+
+typedef HRESULT (__stdcall *PFN_dxvkRegisterInteropResource)(ID3D11Device* pDevice,
+  IUnknown* pObject, DxvkOrgInteropRegistration* pRegistration);
+typedef HRESULT (__stdcall *PFN_dxvkUnregisterInteropResource)(ID3D11Device* pDevice,
+  uint64_t leaseToken);
+
 typedef void (*PFN_dxvkOrgInteropTeardown)(void* user, VkDevice device);
 typedef void (*PFN_dxvkOrgInteropSubmitted)(void* user, VkResult result);
 // On DXVK's submission thread in stream order with the graphics queue locked (dxvkEnqueueQueueCallback).
@@ -133,6 +156,79 @@ struct DxvkOrgInteropSubmissionBatch
 	const char* label;
 };
 typedef HRESULT(__stdcall* PFN_dxvkEnqueueInteropSubmissions)(ID3D11Device* pDevice, const DxvkOrgInteropSubmissionBatch* pBatch);
+
+// Incremental resource interface. Capabilities are explicit: retained submission
+// alone does not advertise automatic resource-scoped synchronization.
+#define DXVK_ORG_RESOURCE_INTERFACE_VERSION 1u
+#define DXVK_ORG_CAP_RESOURCE_REGISTRATION 0x1ull
+#define DXVK_ORG_CAP_RETAINED_SUBMISSION 0x2ull
+#define DXVK_ORG_CAP_SCOPED_SYNCHRONIZATION 0x4ull
+
+typedef struct DxvkOrgInteropLeasedSubmission {
+  uint32_t version;
+  DxvkOrgInteropSubmissionBatch batch;
+  uint32_t leaseCount;
+  const uint64_t* leaseTokens;
+  PFN_dxvkOrgInteropSubmitted onCompleted; // GPU retirement, or terminal failure
+  void* completionUser;
+} DxvkOrgInteropLeasedSubmission;
+
+
+#define DXVK_ORG_BUFFER_HANDOFF_VERSION 1u
+// Development buffer-only interface. The general resource
+// interface must not advertise SCOPED_SYNCHRONIZATION until all consumers exist.
+typedef struct DxvkOrgInteropBufferAccess {
+  uint64_t leaseToken;
+  VkDeviceSize offset; // relative to the registered D3D11 buffer range
+  VkDeviceSize size;
+  VkPipelineStageFlags2 stages;
+  VkAccessFlags2 access;
+} DxvkOrgInteropBufferAccess;
+typedef struct DxvkOrgInteropBufferHandoff {
+  uint32_t version;
+  DxvkOrgInteropLeasedSubmission submission; // exactly one epoch/submit
+  uint32_t accessCount;
+  const DxvkOrgInteropBufferAccess* accesses;
+} DxvkOrgInteropBufferHandoff;
+typedef HRESULT (__stdcall *PFN_dxvkEnqueueBufferHandoff)(void* context, const DxvkOrgInteropBufferHandoff*);
+
+#define DXVK_ORG_RESOURCE_HANDOFF_VERSION 2u
+// Image uses name absolute subresources of the registered backing. This version
+// requires GENERAL throughout the external epoch; no implicit layout fallback.
+typedef struct DxvkOrgInteropImageAccess {
+  uint64_t leaseToken;
+  VkImageSubresourceRange range;
+  VkPipelineStageFlags2 stages;
+  VkAccessFlags2 access;
+  VkImageLayout layout;
+} DxvkOrgInteropImageAccess;
+typedef struct DxvkOrgInteropEpochAccesses {
+  VkBool32 complete; // incomplete declarations are rejected, including empty lists
+  uint32_t bufferCount;
+  const DxvkOrgInteropBufferAccess* buffers;
+  uint32_t imageCount;
+  const DxvkOrgInteropImageAccess* images;
+} DxvkOrgInteropEpochAccesses;
+typedef struct DxvkOrgInteropResourceHandoff {
+  uint32_t version;
+  DxvkOrgInteropLeasedSubmission submission;
+  uint32_t epochCount; // exactly one manifest per VkSubmitInfo2, in order
+  const DxvkOrgInteropEpochAccesses* epochs;
+} DxvkOrgInteropResourceHandoff;
+typedef HRESULT (__stdcall *PFN_dxvkEnqueueResourceHandoff)(void* context, const DxvkOrgInteropResourceHandoff*);
+
+typedef struct DxvkOrgInteropResourceInterface {
+  uint32_t version;
+  uint64_t capabilities;
+  void* context; // borrowed; valid while the D3D11 device lives
+  HRESULT (__stdcall *registerResource)(void*, IUnknown*, DxvkOrgInteropRegistration*);
+  HRESULT (__stdcall *unregisterResource)(void*, uint64_t);
+  // Copies all arguments. No COM/resource-description calls or worker/GPU waits.
+  HRESULT (__stdcall *enqueue)(void*, const DxvkOrgInteropLeasedSubmission*);
+} DxvkOrgInteropResourceInterface;
+
+typedef HRESULT (__stdcall *PFN_dxvkGetResourceInteropInterface)(ID3D11Device*, DxvkOrgInteropResourceInterface*);
+
 // Describes a buffer, texture or SRV and marks it stable (never relocated or renamed from then on).
 // Buffers the application can map are rejected (E_INVALIDARG): discard maps rename them.
 typedef HRESULT(__stdcall* PFN_dxvkEnqueueQueueCallback)(ID3D11Device* pDevice, PFN_dxvkOrgInteropQueueCallback pCallback, void* pUser);

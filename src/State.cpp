@@ -68,6 +68,74 @@ void State::UpdateSkyShaderPermutation(RE::BSRenderPass* a_pass)
 	}
 }
 
+// [TEMP] CS_TEMP_OVERLAY_GAPS=<frames>: the Performance Overlay's per-shader-type "frame time", logged without the overlay.
+// It is sampled where State::Debug is, at the first draw after each BSShader::BeginTechnique, and charges the CPU time since
+// the previous sample to the technique just begun: per type, the mean per frame and the samples, and the interval's largest
+// gaps with the technique before and after them. Time across a Present (the frame counter's step) is not charged.
+namespace
+{
+	void TempOverlayGaps(const RE::BSShader* a_shader)
+	{
+		static const std::uint32_t interval = [] {
+			char value[32] = {};
+			const DWORD length = GetEnvironmentVariableA("CS_TEMP_OVERLAY_GAPS", value, sizeof(value));
+			return length && length < sizeof(value) ? static_cast<std::uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+		}();
+		if (!interval || !a_shader)
+			return;
+		constexpr int kTypes = magic_enum::enum_integer(RE::BSShader::Type::Total) + 1;
+		struct Gap
+		{
+			double ms;
+			std::string before, after;
+			bool deferred;
+		};
+		static double totals[kTypes]{};
+		static std::uint64_t samples[kTypes]{};
+		static std::vector<Gap> largest;
+		static LARGE_INTEGER frequency{}, lastSample{};
+		static std::uint32_t frame = ~0u, frames = 0;
+		static std::string previous;
+		if (!frequency.QuadPart)
+			QueryPerformanceFrequency(&frequency);
+		LARGE_INTEGER now;
+		QueryPerformanceCounter(&now);
+		const int type = magic_enum::enum_integer(a_shader->shaderType.get());
+		const std::string current = fmt::format("{} {}", magic_enum::enum_name(a_shader->shaderType.get()), a_shader->fxpFilename ? a_shader->fxpFilename : "?");
+		if (globals::state->frameCount != frame) {
+			frame = globals::state->frameCount;
+			if (++frames > interval) {
+				std::string text;
+				for (int t = 0; t < kTypes; ++t) {
+					if (samples[t])
+						text += fmt::format("\n    {:<14} {:>7.3f} ms {:>7.1f} samples", magic_enum::enum_name(static_cast<RE::BSShader::Type>(t)), totals[t] / interval,
+							static_cast<double>(samples[t]) / interval);
+				}
+				text += "\n  largest gaps:";
+				for (const auto& gap : largest)
+					text += fmt::format("\n    {:>7.3f} ms  after [{}]  before [{}]{}", gap.ms, gap.before, gap.after, gap.deferred ? " (deferred)" : "");
+				logger::info("[TEMP] overlay gaps per frame over {} frames:{}", interval, text);
+				std::fill(std::begin(totals), std::end(totals), 0.0);
+				std::fill(std::begin(samples), std::end(samples), 0ull);
+				largest.clear();
+				frames = 1;
+			}
+		} else if (type >= 0 && type < kTypes) {
+			const double gap = static_cast<double>(now.QuadPart - lastSample.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart);
+			totals[type] += gap;
+			++samples[type];
+			if (largest.size() < 12 || gap > largest.back().ms) {
+				largest.push_back({ gap, previous, current, globals::deferred && globals::deferred->deferredPass });
+				std::sort(largest.begin(), largest.end(), [](const Gap& a, const Gap& b) { return a.ms > b.ms; });
+				if (largest.size() > 12)
+					largest.pop_back();
+			}
+		}
+		previous = current;
+		lastSample = now;
+	}
+}
+
 void State::Draw()
 {
 	ZoneScoped;
@@ -142,6 +210,7 @@ void State::Draw()
 			}
 		}
 
+		TempOverlayGaps(currentShader);
 		if (globals::menu->overlayVisible && globals::features::performanceOverlay.loaded && globals::features::performanceOverlay.IsOverlayVisible())
 			Debug();
 

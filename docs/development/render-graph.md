@@ -42,6 +42,31 @@ With a DXVK build that lacks the export (or `CS_ORG_SUBMIT=flush`), each epoch i
 waits for DXVK, then submits under the queue lock. This is undesirable, and will likely be downgraded 
 to a failure in the future.
 
+### The upscaler's interop command ring
+
+The upscaler (DLSS, FSR and XeSS through Streamline) and frame generation record into `DXVKInterop`'s own command ring,
+which used to submit the way the fallback above does: `FlushRenderingCommands` (DXVK's `Flush` and
+`SynchronizeCsThread(SynchronizeAll)`), then `vkQueueSubmit` under the queue lock, once a frame. The only thing that wait
+provided was the order: the upscaler reads what the frame's D3D11 work wrote, so its buffer has to reach the queue after
+it. It provided no memory dependency (there is no semaphore or barrier between DXVK's work and the buffer either way) and
+no image stability: `GetVulkanImageInfo` pins an image against relocation itself, once per resource.
+
+`DXVKInterop::SubmitFrameCommandBuffer` now enqueues on the stream thread, as the graph does. The stream thread is the one
+issuing the immediate context's commands (`BindStreamThread`, called from `Upscaling::Upscale` each frame). Every
+submission of the ring comes from it in steady state, frame generation's included (`PrepareFrameGeneration`, in the
+post-processing hook). The memory dependencies are the buffer's own: it opens and closes with a full memory barrier, so
+what D3D11 wrote before it is visible to it, and what it writes is visible to D3D11 after it. Slots are recycled through
+one timeline semaphore, which every submission signals with the next value, instead of per-slot fences (an enqueued
+submission takes no fence). A submission from any other thread still flushes and submits directly, after waiting until
+DXVK has handed every enqueued one to the queue, so the timeline's values reach the queue in order.
+
+Measured at Riverwood with DCLF on and the game focused, the render thread spent 8.9 ms a frame inside that
+`FlushRenderingCommands` (6.1 ms with DCLF off), which the Performance Overlay charges to ImageSpace. With the enqueue it
+is gone from there. The frame's CPU wait for the GPU moves to where the frames-in-flight limit puts it (ORG's frame
+slots, at the colour epoch), and the GPU no longer waits for the render thread: `CS_GPU_IDLE_TRACE` idle drops from 0.49
+to 0.01 ms a frame. The validation layer reports nothing about the ring's submissions or its timeline. Frame generation
+has not been exercised on this path yet.
+
 ## Resources crossing the boundary
 
 -   **Graph outputs** (LLF's `lightIndexList`, `lightGrid`) are graph-owned buffers. D3D11 reads them
@@ -97,8 +122,10 @@ Where the timings come from now:
 | `CS_ORG=0` | No feature request and no graph: every feature stays on D3D11. |
 | `CS_ORG=features` | Request the device features but never create the graph (isolates device-configuration side effects). |
 | `CS_ORG_SUBMIT=flush` | Use the flush-and-lock submission path even when DXVK supports the stream path. |
+| `CS_UPSCALE_SUBMIT=direct` | The upscaler's interop ring flushes and waits for DXVK each frame, as it used to ("The upscaler's interop command ring"). |
 | `CS_ORG_LLF_PARITY=1` | Every 300 frames, also run LLF's D3D11 culling and compare each cluster's light set with the graph's (logs `LLF parity OK` / `MISMATCH`). |
 | `CS_ORG_EPOCH_STATS=1` | Log render-thread CPU time per epoch (average and maximum every 600 epochs). |
+| `CS_ORG_PASS_STATS=0` | Disable ORG pass timestamp/statistics collection for whole-frame diagnostic comparisons. Default is enabled. Does not disable `CS_GPU_EVENT_TIMERS` or the submission tracer; those have their own overhead. |
 | `CS_ORG_ASYNC_EPOCHS=0` | Run the epochs synchronously. By default each epoch is prepared and recorded ahead on the graph host's thread, and the render thread only submits ("Epochs that only submit" in `drawcall-limit-fix.md`). |
 | `CS_GPU_IDLE_TRACE=<frames>` | Every that many frames, log one complete frame's GPU idle gaps and what the render thread was doing during each (`[GpuIdle]`). DXVK timestamps every submission on its queue (`dxvkSetSubmissionTrace`, two extra timestamp-only submissions per submission), the Streamline ring's buffers add their own spans, and the render thread's perf events are the CPU markers. Forces Frame Annotations on for the session (without saving it) but leaves out the per-draw geometry events, whose formatting would dominate the timeline. Diagnostics only: the trace's own overhead makes gaps somewhat longer than in a normal run. |
 | `CS_PROFILER_LOG=<frames>` | Log the profiling window's rolling averages every that many collected frames, sorted by cost, with `[split N%]` on timers that straddle DXVK submissions. For comparing two configurations from their logs. |

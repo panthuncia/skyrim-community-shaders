@@ -12,7 +12,9 @@ namespace GpuEventTimers
 	namespace
 	{
 		// Frames in flight before a frame's queries are read back; a frame whose slot comes round again unread is dropped.
-		constexpr std::uint32_t kFrames = 4;
+		// Nothing in the frame waits for the GPU (the upscaler's submissions are enqueued), so the render thread can run
+		// several frames ahead: with 4, every frame was dropped with DCLF off.
+		constexpr std::uint32_t kFrames = 8;
 		// Queries per frame (two an event, two for the frame); events past it are not timed, and counted.
 		constexpr std::uint32_t kMaxQueries = 4096;
 		constexpr std::uint32_t kNone = ~0u;

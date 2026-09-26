@@ -15,6 +15,7 @@
 #include "State.h"
 
 #include <OpenRenderGraph/PersistentGraphHost.h>
+#include <Render/Runtime/OpenRenderGraphSettings.h>
 #if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
 #	include <ORGModuleServices/ShaderCompiler.h>
 #endif
@@ -654,6 +655,10 @@ bool RenderGraphRuntime::Initialize()
 		return disable("BasicRHI could not adopt DXVK's Vulkan device");
 
 	try {
+		// Allow whole-frame comparisons without the graph's timestamp/readback overhead.
+		auto settings = org::runtime::GetOpenRenderGraphSettings();
+		settings.collectPassStatistics = !EnvEquals("CS_ORG_PASS_STATS", "0");
+		org::runtime::SetOpenRenderGraphSettings(settings);
 		org::PersistentGraphHost::Desc desc{};
 		desc.device = state->device.Get();
 		desc.backend = rhi::Backend::Vulkan;
