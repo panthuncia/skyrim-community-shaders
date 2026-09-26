@@ -26,37 +26,11 @@ namespace GpuEventTimers
 			return length && length < sizeof(value) ? static_cast<std::uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
 		}
 
-		/** @brief CS_GPU_EVENT_STATS="<path>;<path>...": the event paths that also get a pipeline statistics query. */
-		const std::vector<std::string>& StatsPaths()
-		{
-			static const std::vector<std::string> paths = [] {
-				std::vector<std::string> out;
-				char value[1024] = {};
-				const DWORD length = GetEnvironmentVariableA("CS_GPU_EVENT_STATS", value, sizeof(value));
-				if (!length || length >= sizeof(value))
-					return out;
-				std::string text(value, length);
-				std::size_t start = 0;
-				while (start <= text.size()) {
-					const auto end = text.find(';', start);
-					auto part = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
-					if (!part.empty())
-						out.push_back(std::move(part));
-					if (end == std::string::npos)
-						break;
-					start = end + 1;
-				}
-				return out;
-			}();
-			return paths;
-		}
-
 		struct Event
 		{
 			std::uint32_t path;
 			std::uint32_t parent;  // the enclosing event's index in the frame, or kNone
 			std::uint32_t begin, end = kNone;  // query indices
-			std::uint32_t stats = kNone;       // its pipeline statistics query, when its path is one of StatsPaths
 		};
 
 		struct Frame
@@ -66,8 +40,6 @@ namespace GpuEventTimers
 			std::uint32_t used = 0;
 			std::uint32_t frameBegin = kNone, frameEnd = kNone;
 			std::vector<Event> events;
-			std::vector<winrt::com_ptr<ID3D11Query>> statsQueries;
-			std::uint32_t statsUsed = 0;
 			bool open = false, pending = false, overflow = false;
 		};
 
@@ -75,8 +47,6 @@ namespace GpuEventTimers
 		{
 			double inclusive = 0.0, self = 0.0;
 			std::uint64_t count = 0;
-			D3D11_QUERY_DATA_PIPELINE_STATISTICS stats{};
-			std::uint64_t statsCount = 0;
 		};
 
 		struct State
@@ -95,14 +65,6 @@ namespace GpuEventTimers
 			std::vector<Accumulated> accumulated;
 			double frameMs = 0.0;
 			std::uint32_t collected = 0, dropped = 0, disjoint = 0, overflowed = 0;
-			// Each collected frame of the interval: its GPU frame time and every path's inclusive time in it, for the
-			// frame-time spread and for what the slow frames spend their extra time on.
-			struct Sample
-			{
-				double frameMs;
-				std::vector<float> paths;
-			};
-			std::vector<Sample> samples;
 		};
 
 		State& Get()
@@ -171,10 +133,6 @@ namespace GpuEventTimers
 			for (std::uint32_t i = 0; i < a_frame.used; ++i)
 				if (context->GetData(a_frame.queries[i].get(), &ticks[i], sizeof(std::uint64_t), flags) != S_OK)
 					return false;
-			std::vector<D3D11_QUERY_DATA_PIPELINE_STATISTICS> stats(a_frame.statsUsed);
-			for (std::uint32_t i = 0; i < a_frame.statsUsed; ++i)
-				if (context->GetData(a_frame.statsQueries[i].get(), &stats[i], sizeof(stats[i]), flags) != S_OK)
-					return false;
 			a_frame.pending = false;
 			if (disjoint.Disjoint || !disjoint.Frequency || a_frame.frameBegin == kNone || a_frame.frameEnd == kNone) {
 				++a_state.disjoint;
@@ -193,75 +151,18 @@ namespace GpuEventTimers
 				if (event.parent != kNone)
 					children[event.parent] += inclusive[e];
 			}
-			auto& sample = a_state.samples.emplace_back();
-			sample.frameMs = span(a_frame.frameBegin, a_frame.frameEnd);
-			sample.paths.assign(a_state.paths.size(), 0.0f);
 			for (std::size_t e = 0; e < a_frame.events.size(); ++e) {
 				if (inclusive[e] < 0.0)
 					continue;
-				sample.paths[a_frame.events[e].path] += static_cast<float>(inclusive[e]);
 				auto& total = a_state.accumulated[a_frame.events[e].path];
 				total.inclusive += inclusive[e];
 				total.self += std::max(0.0, inclusive[e] - children[e]);
 				++total.count;
-				if (const auto q = a_frame.events[e].stats; q != kNone && q < stats.size()) {
-					total.stats.IAVertices += stats[q].IAVertices;
-					total.stats.IAPrimitives += stats[q].IAPrimitives;
-					total.stats.VSInvocations += stats[q].VSInvocations;
-					total.stats.CInvocations += stats[q].CInvocations;
-					total.stats.CPrimitives += stats[q].CPrimitives;
-					total.stats.PSInvocations += stats[q].PSInvocations;
-					++total.statsCount;
-				}
 			}
 			a_state.frameMs += span(a_frame.frameBegin, a_frame.frameEnd);
 			a_state.overflowed += a_frame.overflow ? 1u : 0u;
 			++a_state.collected;
 			return true;
-		}
-
-		/**
-		 * @brief The interval's GPU frame times by percentile, and the paths the slowest tenth of its frames spend their extra
-		 * time on: each path's mean inclusive time in the frames at or above the 90th percentile, against the frames at or
-		 * below the median. Top-level paths and leaves both appear, so a nested path's excess is also in its parents'.
-		 */
-		void LogSpread(State& a_state)
-		{
-			auto& samples = a_state.samples;
-			if (samples.size() < 10) {
-				samples.clear();
-				return;
-			}
-			std::vector<double> sorted;
-			for (const auto& sample : samples)
-				sorted.push_back(sample.frameMs);
-			std::sort(sorted.begin(), sorted.end());
-			auto at = [&](double a_fraction) { return sorted[std::min(sorted.size() - 1, static_cast<std::size_t>(a_fraction * sorted.size()))]; };
-			const double median = at(0.5), p90 = at(0.9);
-			std::vector<double> slow(a_state.paths.size(), 0.0), typical(a_state.paths.size(), 0.0);
-			std::uint32_t slowCount = 0, typicalCount = 0;
-			for (const auto& sample : samples) {
-				const bool isSlow = sample.frameMs >= p90, isTypical = sample.frameMs <= median;
-				if (!isSlow && !isTypical)
-					continue;
-				auto& into = isSlow ? slow : typical;
-				(isSlow ? slowCount : typicalCount)++;
-				for (std::size_t p = 0; p < sample.paths.size(); ++p)
-					into[p] += sample.paths[p];
-			}
-			std::vector<std::pair<double, std::size_t>> excess;
-			for (std::size_t p = 0; p < a_state.paths.size(); ++p) {
-				const double delta = slow[p] / std::max(1u, slowCount) - typical[p] / std::max(1u, typicalCount);
-				if (delta >= 0.05)
-					excess.emplace_back(delta, p);
-			}
-			std::sort(excess.begin(), excess.end(), std::greater<>());
-			std::string text = fmt::format("[GpuEvents] GPU frame spread over {} frames: min {:.2f}, median {:.2f}, p90 {:.2f}, p99 {:.2f}, max {:.2f} ms; the slowest tenth's excess over the median half, ms:",
-				samples.size(), sorted.front(), median, p90, at(0.99), sorted.back());
-			for (std::size_t i = 0; i < std::min<std::size_t>(excess.size(), 8); ++i)
-				text += fmt::format("\n    {:>6.2f}  {}", excess[i].first, a_state.paths[excess[i].second]);
-			logger::info("{}", text);
-			samples.clear();
 		}
 
 		void Log(State& a_state)
@@ -281,15 +182,8 @@ namespace GpuEventTimers
 				const auto leaf = path.rfind(" / ");
 				text += fmt::format("\n    {:>6.2f} {:>6.2f} {:>5.1f}  {}{}", total.inclusive / frames, total.self / frames, static_cast<double>(total.count) / frames,
 					std::string(std::size_t(a_state.depth[p]) * 2, ' '), leaf == std::string::npos ? path : path.substr(leaf + 3));
-				if (total.statsCount) {
-					const double n = static_cast<double>(total.statsCount);
-					text += fmt::format("  [per call: {:.0f} vertices, {:.0f} primitives, {:.0f} VS, {:.0f} rasterized primitives, {:.0f} PS invocations]",
-						static_cast<double>(total.stats.IAVertices) / n, static_cast<double>(total.stats.IAPrimitives) / n, static_cast<double>(total.stats.VSInvocations) / n,
-						static_cast<double>(total.stats.CPrimitives) / n, static_cast<double>(total.stats.PSInvocations) / n);
-				}
 			}
 			logger::info("{}", text);
-			LogSpread(a_state);
 			for (auto& total : a_state.accumulated)
 				total = {};
 			a_state.frameMs = 0.0;
@@ -324,19 +218,6 @@ namespace GpuEventTimers
 		const auto index = static_cast<std::uint32_t>(frame.events.size());
 		const std::uint32_t path = PathOf(state, parentPath, a_name);
 		frame.events.push_back({ path, parent, Timestamp(frame) });
-		const auto& statsPaths = StatsPaths();
-		if (std::find(statsPaths.begin(), statsPaths.end(), state.paths[path]) != statsPaths.end()) {
-			if (frame.statsUsed == frame.statsQueries.size()) {
-				D3D11_QUERY_DESC desc{ D3D11_QUERY_PIPELINE_STATISTICS, 0 };
-				winrt::com_ptr<ID3D11Query> query;
-				if (SUCCEEDED(globals::d3d::device->CreateQuery(&desc, query.put())))
-					frame.statsQueries.push_back(std::move(query));
-			}
-			if (frame.statsUsed < frame.statsQueries.size()) {
-				frame.events.back().stats = frame.statsUsed++;
-				globals::d3d::context->Begin(frame.statsQueries[frame.events.back().stats].get());
-			}
-		}
 		state.stack.push_back(index);
 	}
 
@@ -353,8 +234,6 @@ namespace GpuEventTimers
 		state.stack.pop_back();
 		auto& frame = state.frames[state.write];
 		if (index != kNone && frame.open && index < frame.events.size() && frame.events[index].begin != kNone) {
-			if (frame.events[index].stats != kNone)
-				globals::d3d::context->End(frame.statsQueries[frame.events[index].stats].get());
 			frame.events[index].end = Timestamp(frame);
 		}
 	}
@@ -406,7 +285,6 @@ namespace GpuEventTimers
 			++state.dropped;
 		}
 		next.used = 0;
-		next.statsUsed = 0;
 		next.events.clear();
 		next.overflow = false;
 		next.frameEnd = kNone;

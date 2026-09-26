@@ -455,8 +455,9 @@ namespace DCLF
 
 			rhi::PushConstantRangeDesc recordAddress{};
 			recordAddress.visibility = rhi::ShaderStage::AllGraphics;
-			// DrawBindings address (2) + the object index; [TEMP] a pad word, and DrawPushTest's per-draw addresses.
-			recordAddress.num32BitValues = DrawPushTest() ? 4 + kDrawPushWords : (FramePushEnabled() ? 4 : 3);
+			// DrawBindings address (2) + the object index; under frame push a pad word too, which starts the frame push range's
+			// addresses 8-byte aligned (BasicRHI packs the push ranges back to back).
+			recordAddress.num32BitValues = FramePushEnabled() ? 4 : 3;
 			recordAddress.set = 0;
 			recordAddress.binding = kRecordAddressBinding;
 			rhi::PushConstantRangeDesc pushConstants[2] = { recordAddress, {} };
@@ -500,15 +501,6 @@ namespace DCLF
 							pushed.addressRootIndex = 1;
 							pushed.addressOffset32 = word;
 							word += 2;
-							framePushRanges.push_back(pushed);
-						} else if (HeapCbvTest() && ((kDrawPushRegisters >> r) & 1)) {
-							// The record's entry for the register holds a heap index (its low 32 bits) instead of an address.
-							framePushRanges.push_back(range(kBindingShiftB + r, 1, stage, rhi::LayoutRangeSource::IndirectIndex, record + 8 * std::size_t{ r }));
-						} else if (DrawPushTest() && (SwitchValue("CS_DCLF_TEST_DRAW_PUSH") == "1" || SwitchValue("CS_DCLF_TEST_DRAW_PUSH") == "5") && ((kDrawPushRegisters >> r) & 1)) {
-							// The sequence's push data after its first 4 words: VS b0 b1 b2 b4, then PS b0 b1 b2 b4.
-							auto pushed = range(kBindingShiftB + r, 1, stage, rhi::LayoutRangeSource::PushAddress, 0);
-							pushed.addressRootIndex = 0;
-							pushed.addressOffset32 = 4 + 2 * ((pixel ? 4 : 0) + std::popcount(kDrawPushRegisters & ((1u << r) - 1)));
 							framePushRanges.push_back(pushed);
 						} else {
 							framePushRanges.push_back(range(kBindingShiftB + r, 1, stage, rhi::LayoutRangeSource::IndirectAddress, record + 8 * std::size_t{ r }));
@@ -609,9 +601,6 @@ namespace DCLF
 					depth.ds.depthFunc = depthOnly ? (a_state.valid ? rhi::CompareOp::LessEqual : rhi::CompareOp::Less) :
 					                                 (colourEqual && !a_state.valid ? rhi::CompareOp::Equal : rhi::CompareOp::LessEqual);
 				}
-				// [TEMP] CS_DCLF_TEST_CHEAP_COLOUR_PS=1: the colour variant runs the Z-prepass pixel shader (the alpha test alone, no
-				// outputs), so the colour pass's time is its vertex stage, raster and indirect commands without the shading.
-				static const bool cheapColour = SwitchEnabled("CS_DCLF_TEST_CHEAP_COLOUR_PS");
 				rhi::SubobjBlend blend{};
 				rhi::SubobjRTVs targets{};
 				if (!depthOnly) {
@@ -627,7 +616,7 @@ namespace DCLF
 					blend.bs.numAttachments = 0;
 				}
 				const rhi::PipelineStreamItem items[] = {
-					rhi::Make(layout), rhi::Make(vertexShader), rhi::Make(depthOnly || cheapColour ? depthPixelShader : pixelShader), rhi::Make(raster), rhi::Make(depth), rhi::Make(blend),
+					rhi::Make(layout), rhi::Make(vertexShader), rhi::Make(depthOnly ? depthPixelShader : pixelShader), rhi::Make(raster), rhi::Make(depth), rhi::Make(blend),
 					rhi::Make(targets), rhi::Make(depthFormat), rhi::Make(topology), rhi::Make(input), rhi::Make(flags),
 				};
 				if (const auto result = a_device.CreatePipeline(items, static_cast<std::uint32_t>(std::size(items)), built->pipelines[variant]); result != rhi::Result::Ok)
@@ -723,16 +712,10 @@ namespace DCLF
 			args[3].u.vertexBuffer.slot = 1;
 			args[4].kind = rhi::IndirectArgKind::IndexBuffer;
 			args[5].kind = rhi::IndirectArgKind::DrawIndexed;
-			// [TEMP] The long sequence: one push data run of the record address, the object index, a pad and the per-draw addresses.
-			if (DrawPushTest())
-				args[1].u.rootConstants = { 0, 0, 4 + kDrawPushWords };
 			rhi::CommandSignatureDesc desc{};
 			desc.args = { args, 6 };
-			desc.byteStride = SequenceStride();
+			desc.byteStride = sizeof(DrawSequence);
 			desc.pipelineSet = a_version.sets[a_variant]->GetHandle();
-			// [TEMP] CS_DCLF_TEST_DGC_UNORDERED=1: the layout's UNORDERED_SEQUENCES usage, to measure what ordered generation costs
-			// (the decals, which share the colour signature, then lose their order).
-			desc.unorderedSequences = SwitchEnabled("CS_DCLF_TEST_DGC_UNORDERED");
 			desc.explicitPreprocess = DgcPreprocessEnabled();
 			if (device.CreateCommandSignature(desc, layout->GetHandle(), a_version.signatures[a_variant]) != rhi::Result::Ok)
 				return false;
@@ -780,24 +763,6 @@ namespace DCLF
 	{
 		static const bool enabled = SwitchValue("CS_DCLF_DGC_PREPROCESS") != "0";
 		return enabled;
-	}
-
-	bool HeapCbvTest()
-	{
-		static const bool enabled = FramePushEnabled() && SwitchEnabled("CS_DCLF_TEST_HEAP_CBV");
-		return enabled;
-	}
-
-	bool DrawPushTest()
-	{
-		// =2: the long sequence and its token, with the registers still read through the record (a bisection).
-		static const bool enabled = FramePushEnabled() && !SwitchValue("CS_DCLF_TEST_DRAW_PUSH").empty() && SwitchValue("CS_DCLF_TEST_DRAW_PUSH") != "0";
-		return enabled;
-	}
-
-	std::uint32_t SequenceStride()
-	{
-		return DrawPushTest() ? 152u : static_cast<std::uint32_t>(sizeof(DrawSequence));
 	}
 
 	DrawPipelines::DrawPipelines() :

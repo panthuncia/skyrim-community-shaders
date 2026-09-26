@@ -1622,23 +1622,6 @@ void DrawcallLimitFix::Hooks::Install()
 
 void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags)
 {
-	// [TEMP] CS_DCLF_NATIVE_CENSUS=1: the engine's own lighting draws per frame, by where they are drawn (the main camera's
-	// depth pass, the deferred pass, anything else) and technique, with DCLF on or off.
-	if (static const bool census = DCLF::SwitchEnabled("CS_DCLF_NATIVE_CENSUS"); census && !DCLF::ConstantEvaluator::Evaluating()) {
-		static std::map<std::string, std::uint32_t> counts;
-		static std::uint32_t firstFrame = globals::state->frameCount;
-		const std::uint32_t technique = (DCLF::PassDescriptorOf(a_pass->passEnum) >> 24) & 0x3f;
-		const char* phase = inDepthPass ? "depth" : globals::deferred->deferredPass ? "deferred" : "other";
-		++counts[fmt::format("{} t{}", phase, technique)];
-		if (const std::uint32_t frames = globals::state->frameCount - firstFrame; frames >= 600) {
-			std::string text;
-			for (const auto& [key, count] : counts)
-				text += fmt::format(" {}={:.1f}", key, static_cast<double>(count) / frames);
-			logger::info("[DCLF][TEMP] native lighting draws per frame by phase and technique ({}):{}", Running() ? "DCLF on" : "DCLF off", text);
-			counts.clear();
-			firstFrame = globals::state->frameCount;
-		}
-	}
 	if (!Running() || DCLF::ConstantEvaluator::Evaluating())
 		return;
 	if (globals::deferred->deferredPass) {
@@ -1653,63 +1636,6 @@ void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint3
 		if (captureParity && captureFrame == store.GetFrame() && parityFrame != store.GetFrame()) {
 			parityFrame = store.GetFrame();
 			DCLF::IndirectDraws::Get().CheckCapturePoint();
-		}
-	}
-	// [TEMP] The road's textures: the engine's table against what the context has bound.
-	if (globals::deferred->deferredPass && a_pass->geometry && a_pass->geometry->name.c_str() && std::string_view(a_pass->geometry->name.c_str()).starts_with("RoadStraight01")) {
-		static std::uint32_t logged = 0;
-		if (logged++ % 2000 == 0) {
-			const auto& state = globals::game::shadowState->GetRuntimeData();
-			ID3D11ShaderResourceView* bound[6] = {};
-			globals::d3d::context->PSGetShaderResources(0, 6, bound);
-			auto describe = [](ID3D11ShaderResourceView* a_view) {
-				if (!a_view)
-					return std::string("null");
-				D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
-				a_view->GetDesc(&viewDesc);
-				winrt::com_ptr<ID3D11Resource> resource;
-				a_view->GetResource(resource.put());
-				D3D11_TEXTURE2D_DESC desc{};
-				if (auto texture = resource.try_as<ID3D11Texture2D>())
-					texture->GetDesc(&desc);
-				return fmt::format("{} ({}x{} format {} mips {}, view format {} mips {}+{})", fmt::ptr(a_view), desc.Width, desc.Height, static_cast<std::uint32_t>(desc.Format), desc.MipLevels,
-					static_cast<std::uint32_t>(viewDesc.Format), viewDesc.Texture2D.MostDetailedMip, viewDesc.Texture2D.MipLevels);
-			};
-			for (std::uint32_t slot : { 0u, 1u, 5u })
-				logger::info("[TEMP] RoadStraight01 t{}: table {}; bound {}", slot, describe(reinterpret_cast<ID3D11ShaderResourceView*>(state.PSTexture[slot])), describe(bound[slot]));
-			for (auto* view : bound)
-				if (view)
-					view->Release();
-		}
-	}
-	// [TEMP] The write masks of the blend state native deferred lighting draws run with.
-	if (globals::deferred->deferredPass) {
-		static ankerl::unordered_dense::map<std::string, std::uint32_t> masks;
-		static std::uint32_t draws = 0;
-		ID3D11BlendState* blend = nullptr;
-		float factor[4];
-		UINT sampleMask = 0;
-		globals::d3d::context->OMGetBlendState(&blend, factor, &sampleMask);
-		std::string key = "none";
-		if (blend) {
-			D3D11_BLEND_DESC desc{};
-			blend->GetDesc(&desc);
-			key.clear();
-			for (std::uint32_t i = 0; i < 8; ++i) {
-				const auto& target = desc.RenderTarget[desc.IndependentBlendEnable ? i : 0];
-				key += fmt::format("{}{:X}{}", i ? " " : "", target.RenderTargetWriteMask, target.BlendEnable ? "b" : "");
-			}
-			blend->Release();
-		}
-		const auto& runtime = globals::game::shadowState->GetRuntimeData();
-		key += fmt::format(" (blend mode {}, write mode {})", runtime.alphaBlendMode, runtime.alphaBlendWriteMode);
-		++masks[key];
-		if (++draws % 20000 == 0) {
-			std::string text;
-			for (const auto& [mask, count] : masks)
-				text += fmt::format(" [{}] x{};", mask, count);
-			logger::info("[TEMP] native deferred lighting draws by target write mask:{}", text);
-			masks.clear();
 		}
 	}
 	if (DCLF::CaptureParity::Enabled())

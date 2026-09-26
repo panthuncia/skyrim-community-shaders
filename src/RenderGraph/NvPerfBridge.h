@@ -45,7 +45,7 @@ namespace NvPerfBridge
 	void OnPresent();
 
 	/**
-	 * @brief [TEMP] A range inside a graph pass's own recording (the parts of DCLF's colour pass), pushed when a capture is armed
+	 * @brief A range inside a graph pass's own recording (the parts of DCLF's colour pass), pushed when a capture is armed
 	 * and a_name is selected. The profiler measures one nesting level, so select these names without the pass's own.
 	 */
 	bool PushPassRange(void* a_vkCommandBuffer, const char* a_name);

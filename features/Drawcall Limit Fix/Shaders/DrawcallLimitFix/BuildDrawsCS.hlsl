@@ -34,7 +34,6 @@ cbuffer BuildDrawsConstants : register(b0)
 	uint HzbIndex;
 	uint HzbSizePacked;  // mip 0: width in the low 16 bits, height in the high 16
 	uint HzbMips;
-	uint RecordCapacity;  // [TEMP] CS_DCLF_TEST_DRAW_PUSH: records the buffer holds; a sequence naming one past it is counted
 	// The sort by pipeline (IndirectDraws.cpp, SortDraws): with SortCountsIndex set, a sequence goes to its append slot of
 	// the staging buffer, with its rank among its pipeline's sequences (the count before it, from the atomic on its pipeline's
 	// word of SortCountsIndex). SortSequencesCS.hlsl then writes it to the sequences, grouped by pipeline, once the prefix
@@ -42,11 +41,6 @@ cbuffer BuildDrawsConstants : register(b0)
 	uint SortCountsIndex;   // RWByteAddressBuffer: uint[kSortKeys], zero before the dispatch
 	uint SortStagingIndex;  // RWByteAddressBuffer: DrawSequence[kPhaseTwoSequenceBase]
 	uint SortRanksIndex;    // RWByteAddressBuffer: uint[kPhaseTwoSequenceBase]
-	// [TEMP] CS_DCLF_TEST_DRAW_PUSH (IndirectDraws.cpp): 1 writes the long sequence, which carries the draw's per-draw constant
-	// buffer addresses (kDrawPushVS, kDrawPushPS) from its binding record for a second push data token.
-	uint SequenceMode;
-	uint RecordsIndex;  // [TEMP] ByteAddressBuffer: the binding records RecordsAddress names (the long sequence reads them)
-	uint TestPadding[3];
 }
 
 // The execution's values, from the latch (BuildDrawsLatch): read once per thread at the top of main. The
@@ -268,21 +262,11 @@ static const uint kCountSunMissed = 96;
 // The fade test: flagged inputs phase 1 found in the frustum, and those it dropped.
 static const uint kCountFadeTested = 100;
 static const uint kCountFadeHidden = 104;
-// [TEMP] The long sequence: draws whose record is past RecordCapacity (their addresses are not read).
-static const uint kCountRecordOutside = 108;
 
 // The frustum stamp's word: the stamp in the low 28 bits (the latch's), and whether the fade test dropped the object in
 // that frame. The visibility feedback compares the low bits (PrimaryCull::ConsumeFeedback).
 static const uint kFrustumStampMask = 0x0FFFFFFFu;
 static const uint kFrustumFadeHidden = 0x80000000u;
-// [TEMP] CS_DCLF_TEST_CULL_CLASSES (PrimaryCull's census): what the culling saw of the object, in bits the feedback masks out.
-// Occluded: the HZB rejected it (phase 2 clears the bit when it brings the object back). NearCross: its box crossed the near
-// plane, so no footprint was tested. HzbFar: the footprint's farthest depth was the far plane (nothing behind it was drawn).
-static const uint kFrustumNearCross = 1u << 28;
-static const uint kFrustumOccluded = 1u << 29;
-static const uint kFrustumHzbFar = 1u << 30;
-// What the calling thread's last Occluded saw: 0 not sampled, 1 near-plane crossing, 2 all far plane, 3 depth sampled.
-static uint g_hzbClass = 0;
 
 // Phase 2 writes into the far half of the sequence buffer. Its draw is recorded on the CPU, which cannot
 // know how many sequences phase 1 wrote, so the two need ranges that are fixed in advance rather than one
@@ -309,12 +293,6 @@ static const uint kNoPartition = 0xFFFFFFFFu;
 // the object index), which is why the object index sits between the record address and the vertex buffer.
 // The second vertex buffer view (slot 1) is a face shape's positions (FaceSnapshots), else the first again.
 static const uint kSequenceStride = 84;
-// [TEMP] The long sequence: the pipeline, then one push data run of 20 words - the record address, the object index, a pad
-// word and the per-draw addresses (VS b0 b1 b2 b4, then PS b0 b1 b2 b4) - then the buffers and the draw arguments.
-// DrawBindings: the vertex stage's addresses at byte 0, the pixel stage's at 112.
-static const uint kLongSequenceStride = 152;
-static const uint kDrawPushRegisters[4] = { 0, 1, 2, 4 };
-uint SequenceStride() { return SequenceMode != 0 ? kLongSequenceStride : kSequenceStride; }
 static const uint kIndexFormatR16 = 57;  // DXGI_FORMAT_R16_UINT
 static const uint kNoStream = 0xFFFFFFFFu;
 
@@ -322,47 +300,14 @@ static const uint kNoStream = 0xFFFFFFFFu;
 void StoreSequence(RWByteAddressBuffer sequences, uint slot, uint pipeline, uint recordLo, uint recordHi, uint objectIndex, uint4 vertexBuffer,
 	uint4 streamBuffer, uint4 indexBuffer, uint indexCount, uint firstIndex)
 {
-	const uint base = slot * SequenceStride();
+	const uint base = slot * kSequenceStride;
 	sequences.Store(base + 0, pipeline);
 	sequences.Store3(base + 4, uint3(recordLo, recordHi, objectIndex));
-	// The long sequence's buffers follow its 80 bytes of push data.
-	const uint buffers = SequenceMode != 0 ? base + 84 : base + 16;
-	sequences.Store4(buffers, vertexBuffer);
-	sequences.Store4(buffers + 16, streamBuffer);
-	sequences.Store4(buffers + 32, uint4(indexBuffer.xyz, kIndexFormatR16));
-	uint draw = buffers + 48;
-	if (SequenceMode != 0) {
-		sequences.Store(base + 16, 0);  // the pad word
-		// A draw that executes has a record; one that does not (a culled decal's slot) may not, and reads nothing.
-		// Through the records' descriptor, not their device address: a PhysicalStorageBuffer load of them lost the device.
-		const uint64_t record = (uint64_t(recordHi) << 32) | recordLo;
-		const uint64_t first = (uint64_t(RecordsAddressHi) << 32) | RecordsAddressLo;
-		const bool inside = record >= first && (record - first) / RecordStride < RecordCapacity;
-		const uint recordByte = uint(record - first);
-		bool read = indexCount != 0 && (SequenceMode == 1 || SequenceMode == 4);
-		if (read && !inside) {
-			RWByteAddressBuffer counters = ResourceDescriptorHeap[CountIndex];
-			uint scratch;
-			counters.InterlockedAdd(kCountRecordOutside, 1, scratch);
-			read = false;
-		}
-		[unroll] for (uint stage = 0; stage < 2; ++stage) {
-			[unroll] for (uint r = 0; r < 4; ++r) {
-				// [TEMP] SequenceMode 3: a valid, non-zero address and no read (a bisection).
-				uint2 address = SequenceMode == 3 ? uint2(RecordsAddressLo, RecordsAddressHi) : uint2(0, 0);
-				[branch] if (read) {
-					ByteAddressBuffer records = ResourceDescriptorHeap[RecordsIndex];
-					address = records.Load2(recordByte + stage * 112 + kDrawPushRegisters[r] * 8);
-					// [TEMP] SequenceMode 4: an unset register gets a valid address instead of 0 (a bisection).
-					if (SequenceMode == 4 && all(address == 0))
-						address = uint2(RecordsAddressLo, RecordsAddressHi);
-				}
-				sequences.Store2(base + 20 + (stage * 4 + r) * 8, address);
-			}
-		}
-	}
-	sequences.Store4(draw, uint4(indexCount, 1, firstIndex, 0));
-	sequences.Store(draw + 16, 0);
+	sequences.Store4(base + 16, vertexBuffer);
+	sequences.Store4(base + 32, streamBuffer);
+	sequences.Store4(base + 48, uint4(indexBuffer.xyz, kIndexFormatR16));
+	sequences.Store4(base + 64, uint4(indexCount, 1, firstIndex, 0));
+	sequences.Store(base + 80, 0);
 }
 
 // The bounding sphere's world-space AABB, projected corner by corner. The box contains the sphere, so
@@ -445,14 +390,10 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 		return false;
 	float2 uvMin, uvMax;
 	float nearestZ;
-	if (!ScreenExtent(boundCentre, boundRadius, uvMin, uvMax, nearestZ)) {
-		g_hzbClass = 1;
+	if (!ScreenExtent(boundCentre, boundRadius, uvMin, uvMax, nearestZ))
 		return false;
-	}
-	if (nearestZ <= 0.0) {
-		g_hzbClass = 1;
+	if (nearestZ <= 0.0)
 		return false;  // in front of the near plane: nothing can occlude it
-	}
 
 	// Image texture space to HZB texture space, before anything is measured in HZB texels.
 	const float2 scale = HzbUvScale();
@@ -473,7 +414,6 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 		max(hzb.Load(int3(texelMin.x, texelMin.y, mip)), hzb.Load(int3(texelMax.x, texelMin.y, mip))),
 		max(hzb.Load(int3(texelMin.x, texelMax.y, mip)), hzb.Load(int3(texelMax.x, texelMax.y, mip))));
 
-	g_hzbClass = farthest >= 0.9999 ? 2 : 3;
 	RWByteAddressBuffer counters = ResourceDescriptorHeap[CountIndex];
 	uint scratch;
 	counters.InterlockedAdd(kCountHzbSampled, 1, scratch);
@@ -642,8 +582,7 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 			if (fadeHidden)
 				count.InterlockedAdd(kCountFadeHidden, 1, scratch);
 		}
-		frustumStamps.Store(objectIndex * 4, VisibilityStamp | (fadeHidden ? kFrustumFadeHidden : 0) | (occlusionRejected ? kFrustumOccluded : 0) |
-			(g_hzbClass == 1 ? kFrustumNearCross : 0) | (g_hzbClass == 2 ? kFrustumHzbFar : 0));
+		frustumStamps.Store(objectIndex * 4, VisibilityStamp | (fadeHidden ? kFrustumFadeHidden : 0));
 	}
 	// BSTreeNode::OnVisible draws nothing of a tree whose root is above the frame's height limit.
 	if (phase == kPhaseOne && !frustumRejected && (input.w & kObjectHeightTest) != 0) {
@@ -677,11 +616,6 @@ bool Occluded(float3 boundCentre, float boundRadius, bool nativeVisibleForSample
 	// Publish the decision, and whether the depth segment drew the object. Phase 1 writes one for every
 	// candidate, so the buffer is completely rewritten each frame and nothing stale survives into the colour
 	// segment.
-	// [TEMP] CS_DCLF_TEST_CULL_CLASSES: phase 2 brought it back (its FrustumIndex is bound only under the census).
-	if (FrustumIndex != 0 && phase == kPhaseTwo && !occlusionRejected) {
-		RWByteAddressBuffer frustumStamps = ResourceDescriptorHeap[FrustumIndex];
-		frustumStamps.InterlockedAnd(objectIndex * 4, ~kFrustumOccluded, scratch);
-	}
 	if (phase == kPhaseOne || phase == kPhaseTwo) {
 		const uint decided = (frustumRejected || fadeHidden) ? kVisibilityRejectedFinal :
 			(occlusionRejected ? (phase == kPhaseOne ? kVisibilityOccludedRetest : kVisibilityRejectedFinal) : kVisibilityVisible);

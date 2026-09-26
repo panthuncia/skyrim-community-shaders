@@ -420,8 +420,8 @@ only, `kZBufferWrite` or not (the flag changes the blend write mode, not the dep
 depth at all: its registration (`FUN_1414b2a60`, render mode `0xC`, from the table at `0x14332b020`; the draw function
 `FUN_1414b44f0` is in the one at `0x14332b120`) drops decal properties except in two special cases, and the few hint-3
 `kZBufferWrite` passes that do reach it (Lighting technique `0x220CA`, 4 to 8 a frame at Riverwood) are offered to
-`RenderPassImmediately` but never reach `BSLightingShader::SetupGeometry`: `CS_DCLF_NATIVE_CENSUS=1` counts no
-Lighting draw in the depth pass at all, with DCLF on or off.
+`RenderPassImmediately` but never reach `BSLightingShader::SetupGeometry`: a census of the native lighting draws (since
+removed) counted no Lighting draw in the depth pass at all, with DCLF on or off.
 
 ## Skinning: the palette the engine keeps, and the buffers a skinned draw uses
 

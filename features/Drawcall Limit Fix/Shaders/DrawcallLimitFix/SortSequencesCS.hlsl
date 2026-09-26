@@ -11,7 +11,7 @@ cbuffer SortSequencesConstants : register(b0)
 	uint OffsetsIndex;    // ByteAddressBuffer: uint[kSortKeys], each key's first slot
 	uint CountIndex;      // ByteAddressBuffer: the draw count words (kCountDrawn, the sequences appended)
 	uint SequencesIndex;  // RWByteAddressBuffer: DrawSequence[], what the draw executes
-	uint SequenceStride;  // bytes: BuildDrawsCS's SequenceStride()
+	uint SequenceStride;  // bytes: DrawSequence (BuildDrawsCS's kSequenceStride)
 	uint Padding[2];
 }
 

@@ -567,14 +567,6 @@ namespace DCLF
 		};
 		ankerl::unordered_dense::map<const RE::NiAVObject*, float> treeClocks;  // [TEMP] worker only
 		FeedbackCounters feedbackCounters;
-		/**
-		 * @brief [TEMP] CS_DCLF_TEST_CULL_CLASSES: the latest decoded frustum words (the worker's copy, read by the render
-		 * thread after JoinFeedback) and the census that classifies what the engine culled and the GPU's culling kept.
-		 */
-		std::vector<std::uint32_t> cullWords;
-		std::uint32_t cullStamp = 0;
-		std::uint32_t cullFrames = 0;
-		void CullClassCensus();
 		std::uint64_t synthJobUnmodelled = 0;
 		std::atomic<bool> synthJobDone{ false };
 

@@ -569,10 +569,10 @@ With residency off, every object carries the engine's own verdict: the engine cu
 pixel shader warps): the draws behind the camera never rasterized. The report's "false negatives" count residents,
 whose `kObjectNativeVisible` is not an engine verdict: every resident behind the camera is one.
 
-The census that found it (`CS_DCLF_TEST_CULL_CLASSES=1`, TEMP) classifies, every 300 frames, each in-frustum object
-the engine culled and the GPU kept, by the engine's reason (app culling, the fade root, its fade distance) and by what
-the HZB saw (near-plane crossing, a footprint of far plane only, depth nearer than the object), from bits 28-30 of the
-frustum words the visibility feedback reads back.
+The census that found it (`CS_DCLF_TEST_CULL_CLASSES=1`, since removed) classified, every 300 frames, each in-frustum
+object the engine culled and the GPU kept, by the engine's reason (app culling, the fade root, its fade distance) and by
+what the HZB saw (near-plane crossing, a footprint of far plane only, depth nearer than the object), from bits 28-30 of
+the frustum words the visibility feedback reads back.
 
 #### The engine is not an oracle for occlusion
 
@@ -1556,8 +1556,7 @@ through: the shadow pipeline map ("Epochs that only submit") and the NPC head dr
   timer brackets an epoch: it would straddle the epoch's submission and count the queue's idle time too
   (see "GPU timing in the profiling window" in [render-graph.md](render-graph.md)).
 - `CS_GPU_EVENT_TIMERS=<frames>` times every perf event on the GPU with D3D11 queries and logs, per interval, the
-  events' mean times and the spread of the GPU frame time (min, median, p90, p99, max) with what the slowest tenth
-  of the frames spends its extra time on. It works with DCLF off too: the oldest frame's read may flush the context,
+  events' mean inclusive and self times and the GPU frame time. It works with DCLF off too: the oldest frame's read may flush the context,
   since without DCLF's interop nothing else did and every frame was dropped unread.
 - **Time only with the game in the foreground.** Community Shaders skips its upscaler while another process has
   the foreground (`Upscaling::IsWindowUnusable`), so an unattended run renders without DLSS and is 1.5-2 ms faster

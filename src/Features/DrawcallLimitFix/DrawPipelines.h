@@ -36,24 +36,6 @@ namespace DCLF
 	 * explicitly, before the passes that execute it (CommandList::PreprocessIndirect), instead of by the driver inside each call.
 	 */
 	bool DgcPreprocessEnabled();
-	/**
-	 * @brief [TEMP] CS_DCLF_TEST_DRAW_PUSH=1 (needs frame push): the per-draw constant buffers b0, b1, b2 and b4 of
-	 * both stages read their addresses from push data too, which each main-pass sequence carries in a second push data token
-	 * (BuildDrawsCS copies them from the draw's binding record): the long sequence, SequenceStride() bytes.
-	 */
-	inline constexpr std::uint32_t kDrawPushRegisters = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 4);
-	inline constexpr std::uint32_t kDrawPushWords = 2 * 2 * 4;  // after the record address, the object index and a pad word
-	bool DrawPushTest();
-	/**
-	 * @brief [TEMP] CS_DCLF_TEST_HEAP_CBV=1 (needs frame push): the per-draw constant buffers b0, b1, b2 and b4 of both
-	 * stages are uniform buffer descriptors in the resource heap, one per 256-byte unit of the segment's constants buffer, and a
-	 * record holds the descriptor's heap index instead of the block's address (the layout reads them as IndirectIndex).
-	 */
-	bool HeapCbvTest();
-	inline constexpr std::uint32_t kHeapCbvUnit = 256;
-	inline constexpr std::uint32_t kHeapCbvWindow = 4096;
-	/** @brief The main pass's DrawSequence stride: sizeof(DrawSequence), or the long sequence's 152 under DrawPushTest. */
-	std::uint32_t SequenceStride();
 	/** @brief Pixel shader resource registers t0-t127 (textures and structured buffers). */
 	inline constexpr std::uint32_t kTextureRegisters = 128;
 	/** @brief Pixel shader sampler registers s0-s15. */
