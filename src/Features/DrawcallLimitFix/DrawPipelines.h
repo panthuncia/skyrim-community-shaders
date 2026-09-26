@@ -140,6 +140,9 @@ namespace DCLF
 			std::uint32_t shadowRequested = 0;
 			std::uint32_t shadowReady = 0;
 			std::uint32_t shadowFailed = 0;
+			// Set versions (DrawPipelines.cpp, SetVersion): published with new pipelines, and frames whose admissions
+			// waited because every version was still held.
+			std::uint32_t setPublishes = 0, setWaits = 0, shadowSetPublishes = 0, shadowSetWaits = 0;
 		};
 
 		static DrawPipelines& Get();

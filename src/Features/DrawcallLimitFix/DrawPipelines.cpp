@@ -188,8 +188,95 @@ namespace DCLF
 		struct Entry
 		{
 			std::shared_future<org::services::PipelineArtifact> future;
-			std::uint32_t index = kNotReady;
+			std::uint32_t index = kNotReady;  // handed out once a published set version holds the pipeline
+			std::uint32_t slot = kNotReady;   // its index in the sets, from its admission
 			bool failed = false;
+		};
+
+		/**
+		 * @brief A version of an indirect pipeline set group and its command signatures, holding the admitted pipelines
+		 * [0, applied).
+		 *
+		 * The frames record with the published version and keep it (IndirectState::version) until they are recorded.
+		 * Update writes new pipelines only into a version nothing else references, at indices it never held, and then
+		 * publishes it. So a set is never written while a recording reads it or sizes preprocess memory against it
+		 * (VUID-VkGeneratedCommandsInfoEXT-preprocessSize-11071: the size depends on the set's pipelines), and no entry
+		 * that submitted work may use is ever rewritten (VUID-VkWriteIndirectExecutionSetPipelineEXT-index-11029).
+		 */
+		struct SetVersion
+		{
+			std::array<rhi::IndirectPipelineSetPtr, kVariantCount> sets;  // one per variant; a key has the same index in both
+			std::array<rhi::CommandSignaturePtr, kVariantCount> signatures;
+			rhi::CommandSignaturePtr depthPassSignature;  // IndirectState::depthPassSignature, when it differs from the depth variant's
+			std::uint32_t applied = 0;
+		};
+		// The shadow views' set and signature, versioned the same way.
+		struct ShadowSetVersion
+		{
+			rhi::IndirectPipelineSetPtr set;
+			rhi::CommandSignaturePtr signature;
+			std::uint32_t applied = 0;
+		};
+		// Enough that one is normally free: the published one, and the one the frames still being recorded may hold.
+		static constexpr std::size_t kSetVersions = 3;
+		template <class Version>
+		struct Versions
+		{
+			std::array<std::shared_ptr<Version>, kSetVersions> owned;
+			std::atomic<std::shared_ptr<Version>> published;
+			// Versions of a previous pipeline generation (a target or format change), dropped here once nothing holds them.
+			std::vector<std::shared_ptr<Version>> retired;
+			std::uint32_t handedOut = 0;  // the pipelines whose Entry::index is set
+			bool failureLogged = false;
+
+			void Retire()
+			{
+				for (auto& version : owned)
+					if (version)
+						retired.push_back(std::move(version));
+				owned = {};
+				published.store(nullptr);
+				handedOut = 0;
+			}
+
+			enum class PublishResult
+			{
+				Current,    // the published version already holds every admitted pipeline
+				Published,  // a version was brought up to them and published
+				Waiting,    // every other version is still held: the admissions wait for a later frame
+				Failed,     // a set operation failed
+			};
+
+			/**
+			 * @brief Brings a version nothing references up to a_admitted pipelines (a_apply writes [applied, a_admitted)
+			 * into it) and publishes it.
+			 */
+			template <class Apply>
+			PublishResult Publish(std::uint32_t a_admitted, Apply&& a_apply)
+			{
+				std::erase_if(retired, [](const std::shared_ptr<Version>& a_version) { return a_version.use_count() == 1; });
+				const auto current = published.load();
+				if (current && current->applied == a_admitted)
+					return PublishResult::Current;
+				for (auto& version : owned) {
+					if (version && (version == current || version.use_count() != 1))
+						continue;
+					// Every other owner has let go, and none can take it again until it is published: whatever a recording
+					// did with it happened before this.
+					std::atomic_thread_fence(std::memory_order_acquire);
+					if (!version)
+						version = std::make_shared<Version>();
+					if (!a_apply(*version)) {
+						// Start that version over: what it holds may be partial.
+						version.reset();
+						return PublishResult::Failed;
+					}
+					version->applied = a_admitted;
+					published.store(version);
+					return PublishResult::Published;
+				}
+				return PublishResult::Waiting;
+			}
 		};
 
 		rhi::Device device{};
@@ -206,8 +293,7 @@ namespace DCLF
 		// The shadow views' own set: one pipeline per (Utility technique, vertex layout, raster state),
 		// depth only, into the engine's shadow map format.
 		ankerl::unordered_dense::map<ShadowPipelineKey, Entry, ShadowPipelineKeyHash> shadowEntries;
-		rhi::IndirectPipelineSetPtr shadowSet;
-		rhi::CommandSignaturePtr shadowSignature;
+		Versions<ShadowSetVersion> shadowVersions;
 		std::vector<org::services::PipelinePayload> shadowSetPipelines;
 		DXGI_FORMAT shadowDepthFormat = DXGI_FORMAT_UNKNOWN;
 		// The shadow views' rasterizer states, by id - 1 (ShadowRasterStateId), and the render modes each was
@@ -344,11 +430,8 @@ namespace DCLF
 			return state;
 		}
 
-		// One set per variant; a key has the same index in both.
-		std::array<rhi::IndirectPipelineSetPtr, kVariantCount> sets;
-		std::array<rhi::CommandSignaturePtr, kVariantCount> signatures;
-		rhi::CommandSignaturePtr depthPassSignature;  // IndirectState::depthPassSignature, when it differs from the depth variant's
-		std::vector<org::services::PipelinePayload> setPipelines;  // index -> Built
+		Versions<SetVersion> versions;
+		std::vector<org::services::PipelinePayload> setPipelines;  // index -> Built, admitted (not necessarily published)
 		std::uint32_t inFlight = 0;
 		std::uint32_t loggedFailures = 0;
 
@@ -607,7 +690,7 @@ namespace DCLF
 		}
 
 		/** @brief The shadow set's command signature; the same DrawSequence stream as the main pass's. */
-		bool CreateShadowSignature()
+		bool CreateShadowSignature(ShadowSetVersion& a_version)
 		{
 			rhi::IndirectArg args[6]{};
 			args[0].kind = rhi::IndirectArgKind::PipelineIndex;
@@ -622,13 +705,13 @@ namespace DCLF
 			rhi::CommandSignatureDesc desc{};
 			desc.args = { args, 6 };
 			desc.byteStride = sizeof(DrawSequence);
-			desc.pipelineSet = shadowSet->GetHandle();
+			desc.pipelineSet = a_version.set->GetHandle();
 			desc.explicitPreprocess = DgcPreprocessEnabled();
-			return device.CreateCommandSignature(desc, ShadowLayout(), shadowSignature) == rhi::Result::Ok;
+			return device.CreateCommandSignature(desc, ShadowLayout(), a_version.signature) == rhi::Result::Ok;
 		}
 
 		// The command signature of DrawSequence (Records.h), created with the set it selects from.
-		bool CreateSignature(std::uint32_t a_variant)
+		bool CreateSignature(SetVersion& a_version, std::uint32_t a_variant)
 		{
 			rhi::IndirectArg args[6]{};
 			args[0].kind = rhi::IndirectArgKind::PipelineIndex;
@@ -646,17 +729,44 @@ namespace DCLF
 			rhi::CommandSignatureDesc desc{};
 			desc.args = { args, 6 };
 			desc.byteStride = SequenceStride();
-			desc.pipelineSet = sets[a_variant]->GetHandle();
+			desc.pipelineSet = a_version.sets[a_variant]->GetHandle();
 			// [TEMP] CS_DCLF_TEST_DGC_UNORDERED=1: the layout's UNORDERED_SEQUENCES usage, to measure what ordered generation costs
 			// (the decals, which share the colour signature, then lose their order).
 			desc.unorderedSequences = SwitchEnabled("CS_DCLF_TEST_DGC_UNORDERED");
 			desc.explicitPreprocess = DgcPreprocessEnabled();
-			if (device.CreateCommandSignature(desc, layout->GetHandle(), signatures[a_variant]) != rhi::Result::Ok)
+			if (device.CreateCommandSignature(desc, layout->GetHandle(), a_version.signatures[a_variant]) != rhi::Result::Ok)
 				return false;
 			if (a_variant != kDepthVariant || !desc.explicitPreprocess)
 				return true;
 			desc.explicitPreprocess = false;
-			return device.CreateCommandSignature(desc, layout->GetHandle(), depthPassSignature) == rhi::Result::Ok;
+			return device.CreateCommandSignature(desc, layout->GetHandle(), a_version.depthPassSignature) == rhi::Result::Ok;
+		}
+
+		/**
+		 * @brief Writes a_pipelines' [a_version's applied, a_admitted) into a_version's set(s), creating each set (with
+		 * pipeline 0, its initial pipeline) and its signature(s) when the version has none yet.
+		 */
+		template <class GetPipeline, class CreateSignatures>
+		bool ApplyToSet(rhi::IndirectPipelineSetPtr& a_set, std::uint32_t a_applied, std::uint32_t a_admitted, const char* a_name, GetPipeline&& a_pipeline,
+			CreateSignatures&& a_createSignatures)
+		{
+			std::uint32_t from = a_applied;
+			if (!a_set) {
+				if (device.CreateIndirectPipelineSet(rhi::IndirectPipelineSetDesc{ a_pipeline(0), kMaxPipelines }, a_set) != rhi::Result::Ok)
+					return false;
+				a_set->SetName(a_name);
+				if (!a_createSignatures())
+					return false;
+				from = 1;
+			}
+			if (from >= a_admitted)
+				return true;
+			std::vector<rhi::PipelineHandle> pipelines;
+			pipelines.reserve(a_admitted - from);
+			for (std::uint32_t i = from; i < a_admitted; ++i)
+				pipelines.push_back(a_pipeline(i));
+			return device.UpdateIndirectPipelineSet(a_set->GetHandle(), from, { pipelines.data(), static_cast<std::uint32_t>(pipelines.size()) }) ==
+			       rhi::Result::Ok;
 		}
 	};
 
@@ -723,11 +833,7 @@ namespace DCLF
 			logger::info("[DCLF] Main pass targets changed ({} -> {}); rebuilding {} indirect pipelines", describe(targets), describe(a_formats), impl->setPipelines.size());
 			++stats.targetChanges;
 			impl->entries.clear();
-			for (std::uint32_t variant = 0; variant < kVariantCount; ++variant) {
-				impl->signatures[variant].Reset();
-				impl->sets[variant].Reset();
-			}
-			impl->depthPassSignature.Reset();
+			impl->versions.Retire();
 			impl->setPipelines.clear();
 			usage.clear();
 			++generation;
@@ -783,8 +889,7 @@ namespace DCLF
 				logger::info("[DCLF] shadow map format changed ({} -> {}); rebuilding {} shadow pipelines",
 					static_cast<int>(impl->shadowDepthFormat), static_cast<int>(a_depthFormat), impl->shadowSetPipelines.size());
 				impl->shadowEntries.clear();
-				impl->shadowSignature.Reset();
-				impl->shadowSet.Reset();
+				impl->shadowVersions.Retire();
 				impl->shadowSetPipelines.clear();
 				shadowUsage.clear();
 				impl->shadowInFlight = 0;
@@ -898,35 +1003,43 @@ namespace DCLF
 				continue;
 			}
 			const auto* built = static_cast<const Impl::Built*>(artifact.payload.get());
-			const auto index = static_cast<std::uint32_t>(impl->setPipelines.size());
-			rhi::Result result = rhi::Result::Ok;
-			for (std::uint32_t variant = 0; variant < kVariantCount && result == rhi::Result::Ok; ++variant) {
-				const auto pipeline = built->pipelines[variant]->GetHandle();
-				auto& set = impl->sets[variant];
-				if (!set) {
-					result = impl->device.CreateIndirectPipelineSet(rhi::IndirectPipelineSetDesc{ pipeline, kMaxPipelines }, set);
-					if (result == rhi::Result::Ok) {
-						set->SetName(variant == kDepthVariant ? "DCLF indirect pipelines (depth)" : "DCLF indirect pipelines");
-						if (!impl->CreateSignature(variant)) {
-							logger::error("[DCLF] Could not create the indirect draw command signature");
-							set.Reset();
-							result = rhi::Result::Failed;
-						}
-					}
-				} else {
-					result = impl->device.UpdateIndirectPipelineSet(set->GetHandle(), index, { &pipeline, 1 });
-				}
-			}
-			if (result != rhi::Result::Ok) {
-				entry.failed = true;
-				++stats.failed;
-				logger::warn("[DCLF] Could not add indirect pipeline {} to the set ({})", index, static_cast<int>(result));
-				continue;
-			}
+			entry.slot = static_cast<std::uint32_t>(impl->setPipelines.size());
 			impl->setPipelines.push_back(artifact.payload);
 			usage.push_back(built->usage);
-			entry.index = index;
-			++stats.ready;
+		}
+		// Publish the admitted pipelines (Impl::SetVersion), then hand out the indices the published version holds.
+		const auto admitted = static_cast<std::uint32_t>(impl->setPipelines.size());
+		if (admitted) {
+			auto pipelineAt = [&](std::uint32_t a_variant) {
+				return [&, a_variant](std::uint32_t a_index) {
+					return static_cast<const Impl::Built*>(impl->setPipelines[a_index].get())->pipelines[a_variant]->GetHandle();
+				};
+			};
+			const auto result = impl->versions.Publish(admitted, [&](Impl::SetVersion& a_version) {
+				for (std::uint32_t variant = 0; variant < kVariantCount; ++variant) {
+					if (!impl->ApplyToSet(a_version.sets[variant], a_version.applied, admitted,
+							variant == kDepthVariant ? "DCLF indirect pipelines (depth)" : "DCLF indirect pipelines", pipelineAt(variant),
+							[&] { return impl->CreateSignature(a_version, variant); }))
+						return false;
+				}
+				return true;
+			});
+			using Result = decltype(result);
+			stats.setPublishes += result == Result::Published;
+			stats.setWaits += result == Result::Waiting;
+			const bool published = result == Result::Current || result == Result::Published;
+			if (published && impl->versions.handedOut != admitted) {
+				impl->versions.handedOut = admitted;
+				for (auto& [key, entry] : impl->entries) {
+					if (entry.index == kNotReady && entry.slot != kNotReady) {
+						entry.index = entry.slot;
+						++stats.ready;
+					}
+				}
+			} else if (result == Result::Failed && !impl->versions.failureLogged) {
+				impl->versions.failureLogged = true;
+				logger::warn("[DCLF] Could not publish the indirect pipeline sets ({} pipelines admitted)", admitted);
+			}
 		}
 		for (auto& [key, entry] : impl->shadowEntries) {
 			if (entry.index != kNotReady || entry.failed || !entry.future.valid() || entry.future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
@@ -942,32 +1055,33 @@ namespace DCLF
 				continue;
 			}
 			const auto* built = static_cast<const Impl::Built*>(artifact.payload.get());
-			const auto index = static_cast<std::uint32_t>(impl->shadowSetPipelines.size());
-			const auto pipeline = built->pipelines[kColorVariant]->GetHandle();
-			rhi::Result result = rhi::Result::Ok;
-			if (!impl->shadowSet) {
-				result = impl->device.CreateIndirectPipelineSet(rhi::IndirectPipelineSetDesc{ pipeline, kMaxPipelines }, impl->shadowSet);
-				if (result == rhi::Result::Ok) {
-					impl->shadowSet->SetName("DCLF indirect pipelines (shadow)");
-					if (!impl->CreateShadowSignature()) {
-						logger::error("[DCLF] Could not create the shadow command signature");
-						impl->shadowSet.Reset();
-						result = rhi::Result::Failed;
-					}
-				}
-			} else {
-				result = impl->device.UpdateIndirectPipelineSet(impl->shadowSet->GetHandle(), index, { &pipeline, 1 });
-			}
-			if (result != rhi::Result::Ok) {
-				entry.failed = true;
-				++stats.shadowFailed;
-				logger::warn("[DCLF] Could not add shadow pipeline {} to the set ({})", index, static_cast<int>(result));
-				continue;
-			}
+			entry.slot = static_cast<std::uint32_t>(impl->shadowSetPipelines.size());
 			impl->shadowSetPipelines.push_back(artifact.payload);
 			shadowUsage.push_back(built->usage[kColorVariant]);
-			entry.index = index;
-			++stats.shadowReady;
+		}
+		const auto shadowAdmitted = static_cast<std::uint32_t>(impl->shadowSetPipelines.size());
+		if (shadowAdmitted) {
+			const auto result = impl->shadowVersions.Publish(shadowAdmitted, [&](Impl::ShadowSetVersion& a_version) {
+				return impl->ApplyToSet(a_version.set, a_version.applied, shadowAdmitted, "DCLF indirect pipelines (shadow)",
+					[&](std::uint32_t a_index) { return static_cast<const Impl::Built*>(impl->shadowSetPipelines[a_index].get())->pipelines[kColorVariant]->GetHandle(); },
+					[&] { return impl->CreateShadowSignature(a_version); });
+			});
+			using Result = decltype(result);
+			stats.shadowSetPublishes += result == Result::Published;
+			stats.shadowSetWaits += result == Result::Waiting;
+			const bool published = result == Result::Current || result == Result::Published;
+			if (published && impl->shadowVersions.handedOut != shadowAdmitted) {
+				impl->shadowVersions.handedOut = shadowAdmitted;
+				for (auto& [key, entry] : impl->shadowEntries) {
+					if (entry.index == kNotReady && entry.slot != kNotReady) {
+						entry.index = entry.slot;
+						++stats.shadowReady;
+					}
+				}
+			} else if (result == Result::Failed && !impl->shadowVersions.failureLogged) {
+				impl->shadowVersions.failureLogged = true;
+				logger::warn("[DCLF] Could not publish the shadow pipeline set ({} pipelines admitted)", shadowAdmitted);
+			}
 		}
 		impl->service.PublishReady(0);
 	}
@@ -976,11 +1090,13 @@ namespace DCLF
 	{
 		const auto& impl = *DrawPipelines::Get().impl;
 		ShadowIndirectState state;
-		if (!impl.layout || !impl.shadowSet || !impl.shadowSignature)
+		auto version = impl.shadowVersions.published.load();
+		if (!impl.layout || !version)
 			return state;
 		state.layout = impl.ShadowLayout();
-		state.set = impl.shadowSet->GetHandle();
-		state.signature = impl.shadowSignature->GetHandle();
+		state.set = version->set->GetHandle();
+		state.signature = version->signature->GetHandle();
+		state.version = std::move(version);
 		state.valid = true;
 		return state;
 	}
@@ -989,13 +1105,15 @@ namespace DCLF
 	{
 		const auto& impl = *DrawPipelines::Get().impl;
 		IndirectState state;
+		auto version = impl.versions.published.load();
+		if (!version || !impl.layout)
+			return state;
 		for (std::uint32_t variant = 0; variant < kVariantCount; ++variant) {
-			if (!impl.sets[variant] || !impl.signatures[variant])
-				return state;
-			state.sets[variant] = impl.sets[variant]->GetHandle();
-			state.signatures[variant] = impl.signatures[variant]->GetHandle();
+			state.sets[variant] = version->sets[variant]->GetHandle();
+			state.signatures[variant] = version->signatures[variant]->GetHandle();
 		}
-		state.depthPassSignature = impl.depthPassSignature ? impl.depthPassSignature->GetHandle() : state.signatures[kDepthVariant];
+		state.depthPassSignature = version->depthPassSignature ? version->depthPassSignature->GetHandle() : state.signatures[kDepthVariant];
+		state.version = std::move(version);
 		state.layout = impl.layout->GetHandle();
 		state.valid = true;
 		return state;

@@ -2369,12 +2369,27 @@ Riverwood, focused, GPU event timers over 45 s, on against off: the colour pass 
 1.08 against 1.24 ms, the depth pass 0.316 against 0.325 ms, and the GPU frame 11.96 against 12.56 ms. The shadow views'
 draw counts are unchanged (nvperf, 2660 against 2663).
 
-Open: DCLF adds pipelines to the indirect execution sets (`DrawPipelines::Update`, render thread) while other epochs
-record on workers. The preprocess size BasicRHI queries at recording can then be smaller than the size for the set a
-moment later: the validation layer reported VUID-VkGeneratedCommandsInfoEXT-preprocessSize-11071 three times while
-loading (12452096 against 12583168 bytes). A frame's sequences only reference pipelines committed before it, so what
-executes is covered; the fix is to keep set updates from overlapping the recordings that use the set. The race predates
-explicit preprocessing (implicit calls size their memory the same way).
+#### Pipeline set versions
+
+The first validation of all signatures found VUID-VkGeneratedCommandsInfoEXT-preprocessSize-11071 three times while
+loading: the preprocess size BasicRHI queried at recording was 12452096 bytes, the layer's a moment later 12583168. The
+size depends on the execution set's pipelines, and DCLF added pipelines to the sets (`DrawPipelines::Update`, render
+thread, mid-frame) while the host's thread recorded epochs that read them. The race predated explicit preprocessing:
+implicit calls size their memory the same way.
+
+The sets are now versioned (`DrawPipelines.cpp`, `SetVersion` and `ShadowSetVersion`, three of each). Every frame shape
+holds the version its handles belong to (`IndirectState::version`, `ShadowIndirectState::version`) until it is recorded.
+`Update` admits finished pipelines to a slot, then writes them only into a version nothing else references, at indices
+that version never held, and publishes it; a pipeline's index reaches the builds only once a published version holds it.
+So no recording ever reads, or sizes preprocess memory against, a set that is being written, and no entry submitted work
+may use is rewritten (VUID-VkWriteIndirectExecutionSetPipelineEXT-index-11029). Versions of an earlier pipeline
+generation (a target or shadow format change) are dropped on the render thread once nothing holds them. No locks, and
+nothing waits: when every version is held, the admissions wait a frame (`set versions ... waited`, in the pipeline
+statistics line).
+
+Validation, full featureset: a Riverwood run and a tour to Whiterun and Dragonsreach, 0 messages about generated commands
+or execution sets; 54 main and 50 shadow publishes on the tour, 0 frames waited, every pipeline in its set. Timing
+unchanged (colour pass 1.541 against 1.542 ms).
 
 The colour pass alone, focused, nvperf, on against off: the whole colour pass (preprocesses included) 1.58-1.64 against
 2.09-2.12 ms, SMs active 86 against 66 %; its main draws 0.97-0.99 against 1.21 ms, the opaque decals 0.048 against
