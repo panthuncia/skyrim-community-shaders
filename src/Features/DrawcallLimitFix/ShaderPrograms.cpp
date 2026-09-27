@@ -226,12 +226,20 @@ namespace DCLF
 		return it->second->program.get();
 	}
 
-	const ShaderPrograms::ShadowProgram* ShaderPrograms::FindShadow(std::uint32_t a_technique, RE::BSShader& a_utility)
+	const ShaderPrograms::ShadowProgram* ShaderPrograms::FindShadow(std::uint32_t a_technique, RE::BSShader& a_utility, bool a_allowRequest, bool* a_requested)
 	{
+		if (a_requested)
+			*a_requested = false;
 		if (!Enabled() || !LoadSources() || utilitySource.empty())
 			return nullptr;
-		auto [it, inserted] = shadowEntries.try_emplace(a_technique);
+		auto it = shadowEntries.find(a_technique);
+		if (it == shadowEntries.end() && !a_allowRequest)
+			return nullptr;
+		const bool inserted = it == shadowEntries.end();
 		if (inserted) {
+			it = shadowEntries.try_emplace(a_technique).first;
+			if (a_requested)
+				*a_requested = true;
 			it->second = std::make_unique<ShadowEntry>();
 #if defined(DCLF_HAS_SHADER_COMPILER)
 			// Both stages take the same technique: Utility's descriptor is the technique itself, not a

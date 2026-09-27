@@ -98,7 +98,8 @@ namespace DCLF
 			std::vector<std::byte> vertex;
 			std::vector<std::byte> pixel;
 		};
-		const ShadowProgram* FindShadow(std::uint32_t a_technique, RE::BSShader& a_utility);
+		/** @param a_allowRequest False returns null for an unseen technique without starting its builds. */
+		const ShadowProgram* FindShadow(std::uint32_t a_technique, RE::BSShader& a_utility, bool a_allowRequest = true, bool* a_requested = nullptr);
 
 		/** @brief Programs are never freed: the reference stays valid for the process (pipeline builds keep it). */
 

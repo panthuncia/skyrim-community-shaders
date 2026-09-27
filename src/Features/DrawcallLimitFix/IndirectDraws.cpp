@@ -2775,6 +2775,7 @@ namespace DCLF
 
 		void UpdateBones(BonesStore* a_store, std::uint64_t a_uploaded, const SceneStore::Tables& a_tables, std::uint32_t a_generation, BonesOut& a_out)
 		{
+			ZoneScopedN("CS.DCLF.Build.UpdateBones");
 			a_out = {};
 			a_out.capacity = a_tables.BoneCapacity();
 			a_out.extraRows = static_cast<std::uint32_t>(a_tables.extraRows.size() / 4);
@@ -2906,6 +2907,7 @@ namespace DCLF
 		void UpdateObjectRecords(ObjectRecordStore* a_store, std::uint64_t a_uploaded, const SceneStore::Tables& a_tables, std::uint32_t a_generation,
 			std::uint32_t a_renderFlags, std::uint32_t a_frame, ObjectRecordsOut& a_out)
 		{
+			ZoneScopedN("CS.DCLF.Build.UpdateObjectRecords");
 			const std::size_t count = std::min<std::size_t>(a_tables.objects.size(), kMaxObjects);
 			if (!a_store) {
 				auto records = std::make_shared<std::vector<BindlessObject>>(count);
@@ -3323,6 +3325,7 @@ namespace DCLF
 		void UpdateGeometryDraws(GeometryStore* a_store, std::uint64_t a_uploaded, const SceneStore::Tables& a_tables, std::uint32_t a_generation,
 			std::uint32_t a_frame, GeometryDrawsOut& a_out)
 		{
+			ZoneScopedN("CS.DCLF.Build.UpdateGeometryDraws");
 			ScopedScan scan(Scan::PackGeometry);
 			a_out = {};
 			const std::size_t count = std::min<std::size_t>(a_tables.geometries.size(), kMaxGeometries);
@@ -4053,6 +4056,7 @@ namespace DCLF
 		void BuildMainPayload(const MainInputs& a_in, const SceneStore::Tables& a_tables, const Lookups& a_lookups, MainPayload& a_out,
 			BuildCache* a_cache = nullptr, ObjectRecordStore* a_objects = nullptr, BonesStore* a_bones = nullptr, GeometryStore* a_geometries = nullptr)
 		{
+			ZoneScopedN("CS.DCLF.BuildMainPayload");
 			if (a_cache && (a_in.frameNumber % 64) == 0)
 				a_cache->Sweep(a_in.frameNumber);
 			using Skip = IndirectDraws::Skip;
@@ -4104,6 +4108,7 @@ namespace DCLF
 				std::uint64_t techniqueVS = 0, techniquePS = 0;
 			};
 			std::vector<PipelineBlocks> pipelineBlocks(a_tables.pipelines.size());
+			TracyCZoneN(pipelinesZone, "CS.DCLF.BuildMain.Pipelines", true);
 			for (std::size_t p = 0; p < a_tables.pipelines.size(); ++p) {
 				auto& blocks = pipelineBlocks[p];
 				// The pipeline table keeps its slots across frames; only the ones this frame's objects use
@@ -4214,6 +4219,7 @@ namespace DCLF
 					cached->clean = blocks.techniqueVS && blocks.techniquePS;
 				}
 			}
+			TracyCZoneEnd(pipelinesZone);
 
 			ankerl::unordered_dense::map<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>> materialBlocks;  // (material, pipeline) -> VS, PS
 			// Resolved descriptor heap indices per (material, pipeline) pair (ResolvedBindings, above).
@@ -4876,6 +4882,7 @@ namespace DCLF
 			// The whole scene with kept bindings (its pairs' records are theirs); the Z-prepass's only where its gate is not the
 			// colour epoch's last frame (withholding, or no hybrid): with that gate, what is not resident stays the loop's.
 			const bool wholeScene = kept && WholeSceneRegionEnabled() && (!depthOnly || !frameHybrid || a_in.withholding);
+			TracyCZoneN(residentRegionZone, "CS.DCLF.BuildMain.ResidentRegion", true);
 			if (region) {
 				auto& r = *region;
 				auto pairKeyOf = [](const ObjectRecord& a_object) { return (std::uint64_t(a_object.materialIndex) << 32) | a_object.pipelineIndex; };
@@ -5198,8 +5205,10 @@ namespace DCLF
 				regionInputs = inputs.size();
 				regionDraws = r.draws;
 			}
+			TracyCZoneEnd(residentRegionZone);
 
 			std::vector<std::uint32_t> loopDrawn;  // what the loop draws this build (DrawnMarks)
+			TracyCZoneN(objectLoopZone, "CS.DCLF.BuildMain.ObjectLoop", true);
 			// With a region, the loop visits only what the region leaves it (ResidentRegion::loopList); the candidates were
 			// counted by the region.
 			const std::vector<std::uint32_t>* loopObjects = region ? &region->loopList : nullptr;
@@ -5387,6 +5396,7 @@ namespace DCLF
 				// Per DRAW: the sequence, the draw input, the drawn mark and the slice check.
 				mark(3);
 			}
+			TracyCZoneEnd(objectLoopZone);
 
 			// The loop's marks: what it drew last build and not now is not drawn, unless the region draws it.
 			if (marks) {
@@ -5491,6 +5501,7 @@ namespace DCLF
 		std::shared_ptr<SunExclusion> BuildSunExclusion(const std::shared_ptr<const SunCandidates>& a_candidates, const ShadowPayload& a_payload, std::uint32_t a_mode,
 			const SceneStore::Tables& a_tables, SunExclusionCache* a_cache = nullptr)
 		{
+			ZoneScopedN("CS.DCLF.BuildSunExclusion");
 			ScopedScan scan(Scan::SunExclusion);
 			if (!a_candidates || a_candidates->entries.empty())
 				return nullptr;
@@ -5668,6 +5679,7 @@ namespace DCLF
 		void BuildKeptShadow(const ShadowInputs& a_in, const SceneStore::Tables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out, ShadowKept& k,
 			const DrawBindings& a_plain, Block&& a_block)
 		{
+			ZoneScopedN("CS.DCLF.BuildShadow.Kept");
 			const std::uint32_t objects = static_cast<std::uint32_t>(std::min<std::size_t>(a_tables.objects.size(), kMaxObjects));
 			++k.builds;
 			// Membership changes of this build carry this stamp.
@@ -6099,6 +6111,7 @@ namespace DCLF
 		void BuildShadowPayload(const ShadowInputs& a_in, const SceneStore::Tables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out,
 			ObjectRecordStore* a_objects, BonesStore* a_bones, ShadowKept* a_kept, GeometryStore* a_geometries)
 		{
+			ZoneScopedN("CS.DCLF.BuildShadowPayload");
 			a_out.Reset();
 			a_out.inputs = a_in;
 			const std::uint64_t base = a_in.addresses.constants;
@@ -6293,6 +6306,7 @@ namespace DCLF
 		 */
 		void RefreshMaterialLookups(const SceneStore::Tables& a_tables, std::uint32_t a_frame, const SceneStore::ProjectedTextures& a_projected, Lookups& a_lookups)
 		{
+			ZoneScopedN("CS.DCLF.RefreshMaterialLookups");
 			auto& textures = GpuTextures::Get();
 			// Any change a build can observe bumps the generation, including an entry resolved for the first
 			// time: a job built before it deferred those draws, and must not stand in for a build made after.
@@ -6420,10 +6434,12 @@ namespace DCLF
 		void RefreshShadowLookups(const SceneStore::Tables& a_tables, const std::array<bool, kShadowModeCount>& a_modeUsed,
 			const std::array<std::uint32_t, kShadowModeCount>& a_modeRasterStates, DXGI_FORMAT a_dsvFormat, DXGI_FORMAT a_skyFormat, Lookups& a_lookups)
 		{
+			ZoneScopedN("CS.DCLF.RefreshShadowLookups");
 			auto& textures = GpuTextures::Get();
 			auto& pipelines = DrawPipelines::Get();
 			auto& programs = ShaderPrograms::Get();
 			auto* utility = globals::game::utilityShader;
+			TracyCZoneN(shadowTexturesZone, "CS.DCLF.RefreshShadow.Textures", true);
 			for (auto* srv : a_tables.shadowTextureSet) {
 				const std::uint32_t index = textures.Resolve(srv);
 				auto [it, inserted] = a_lookups.shadowTextures.try_emplace(srv, index);
@@ -6434,8 +6450,14 @@ namespace DCLF
 					++a_lookups.generation;
 				}
 			}
+			TracyCZoneEnd(shadowTexturesZone);
 			if (!utility)
 				return;
+			// Request setup hashes the shader dependency tree and may take 10+ ms. Missing pipelines leave their
+			// casters on the native path, so introduce at most one new Utility technique per frame instead of
+			// multiplying a render-thread hitch when a scene exposes several techniques at once.
+			bool mayRequestProgram = true;
+			TracyCZoneN(shadowPipelinesZone, "CS.DCLF.RefreshShadow.Pipelines", true);
 			for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
 				if (!a_modeUsed[m])
 					continue;
@@ -6454,12 +6476,21 @@ namespace DCLF
 						++a_lookups.generation;
 					}
 					const std::uint32_t slot = slotIt->second;
-					const auto* program = programs.FindShadow(slotKey.technique, *utility);
+					const auto* program = [&] {
+						ZoneScopedN("CS.DCLF.RefreshShadow.FindProgram");
+						bool requested = false;
+						const auto* found = programs.FindShadow(slotKey.technique, *utility, mayRequestProgram, &requested);
+						mayRequestProgram &= !requested;
+						return found;
+					}();
 					// The key under each rasterizer state its mode's views draw with.
 					for (std::uint32_t states = (a_modeRasterStates[m] & 0xFFFFu) | (a_modeRasterStates[m] >> 16); states; states &= states - 1) {
 						const auto state = static_cast<std::uint32_t>(std::countr_zero(states));
 						const ShadowPipelineKey viewKey{ slotKey.technique, WithShadowState(slotKey.rasterFlags, state), slotKey.vertexLayout };
-						const std::uint32_t set = program ? pipelines.FindShadow(viewKey, *program, format) : DrawPipelines::kNotReady;
+						const std::uint32_t set = [&] {
+							ZoneScopedN("CS.DCLF.RefreshShadow.FindPipeline");
+							return program ? pipelines.FindShadow(viewKey, *program, format) : DrawPipelines::kNotReady;
+						}();
 						const std::uint32_t index = set == DrawPipelines::kNotReady ? Lookups::kNone : set;
 						auto [it, inserted] = a_lookups.shadowPipelines.try_emplace(viewKey, index);
 						if (inserted || it->second != index) {
@@ -6473,6 +6504,7 @@ namespace DCLF
 					}
 				}
 			}
+			TracyCZoneEnd(shadowPipelinesZone);
 		}
 
 		constexpr std::size_t kAsyncColour = 0;
@@ -7891,6 +7923,7 @@ namespace DCLF
 		bool usedWorkerBuild = false;
 
 		const bool ok = RenderGraphRuntime::Get().ExecuteEpoch(RenderGraphRuntime::Segment::ShadowView, [&](org::RenderGraph&) {
+			ZoneScopedN("CS.DCLF.ShadowInputs");
 			struct BodyTimer
 			{
 				std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
@@ -7901,6 +7934,8 @@ namespace DCLF
 
 			// The worker's build if one was kicked and it was built for exactly these inputs, else the build
 			// here. Joined before the lookups are refreshed: the worker reads them until it is done.
+			bool useAsync = false;
+			TracyCZoneN(shadowPrepareZone, "CS.DCLF.ShadowInputs.Prepare", true);
 			const auto prepareStart = std::chrono::steady_clock::now();
 			textures.BeginFrame(frameNumber);
 			auto& job = impl->shadowJob;
@@ -7915,7 +7950,6 @@ namespace DCLF
 			RefreshMaterialLookups(tables, frameNumber, store.GetProjectedTextures(), lookups);
 			RefreshShadowLookups(tables, modeUsed, modeRasterStates, dsvFormat, impl->skyDsvFormat, lookups);
 			in.lookupGeneration = lookups.generation;
-			bool useAsync = false;
 			if (job.handle) {
 				switch (joined) {
 				case AsyncWorker::WaitResult::Done:
@@ -7960,6 +7994,7 @@ namespace DCLF
 				BuildShadowPayload(in, tables, lookups, payload, impl->ShadowObjects(), impl->ShadowBones(), impl->ShadowKeptState(), impl->ShadowGeometries());
 			}
 			prepareMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - prepareStart).count();
+			TracyCZoneEnd(shadowPrepareZone);
 
 			// [TEMP] CS_DCLF_CASCADE_PROBE: per view, the casters DCLF's frustum test keeps (a CPU replica of
 			// BuildDrawsCS Culled against the view's latch matrix) against the ones the engine registered into
@@ -8556,15 +8591,18 @@ namespace DCLF
 			CommitUploads uploads(impl->commitStagedPool);
 			// ---- The commit: the shared uploads, the per-mode inputs, then per view its blocks at its slot of
 			// the arena's head, its copy of the records naming them, its count buffer zeroed, and the view.
-			const auto inputsStart = std::chrono::steady_clock::now();
 			const std::uint64_t base = resources->constantsAddress;
 			auto& arena = payload.arena;
 			auto& records = payload.records;
+			bool staged = false;
+			std::uint32_t stagedSlots = 0;
+			TracyCZoneN(shadowCommitZone, "CS.DCLF.ShadowInputs.CommitShared", true);
+			const auto inputsStart = std::chrono::steady_clock::now();
 			// The worker's build staged what does not depend on the views (StageShadowPayload): one submission,
 			// ahead of this commit's own uploads. A build made here, or staged against resources since recreated,
 			// is uploaded from its vectors.
-			const bool staged = useAsync && payload.staged && payload.stagedFor == resources.get();
-			const std::uint32_t stagedSlots = staged ? payload.stagedSlots : 0;
+			staged = useAsync && payload.staged && payload.stagedFor == resources.get();
+			stagedSlots = staged ? payload.stagedSlots : 0;
 			if (staged) {
 				org::runtime::GetActiveUploadService()->SubmitStagedUploads(std::move(payload.staged));
 			} else {
@@ -8609,7 +8647,9 @@ namespace DCLF
 				shadowStats.inputs = static_cast<std::uint32_t>(payload.ModeInputs(m));
 			}
 			inputsMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - inputsStart).count();
+			TracyCZoneEnd(shadowCommitZone);
 
+			TracyCZoneN(shadowViewsZone, "CS.DCLF.ShadowInputs.BuildViews", true);
 			const auto blocksStart = std::chrono::steady_clock::now();
 			auto frame = std::make_shared<ShadowFrame>();
 			const auto& previousShape = resources->published;
@@ -8739,6 +8779,7 @@ namespace DCLF
 				resources->published = frame;
 				resources->frame.store(std::move(frame), std::memory_order_release);
 			}
+			TracyCZoneEnd(shadowViewsZone);
 		});
 		const double totalMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 		shadowStats.prepareMs += prepareMs;
@@ -8779,6 +8820,7 @@ namespace DCLF
 	ShadowInputs IndirectDraws::Impl::PrepareShadowInputs(const SceneStore& a_store, const ShadowResources& a_resources, const std::array<bool, kShadowModeCount>& a_modeUsed,
 		const std::array<std::uint32_t, kShadowModeCount>& a_modeRasterStates) const
 	{
+		ZoneScopedN("CS.DCLF.PrepareShadowInputs");
 		ShadowInputs in;
 		in.frameNumber = a_store.GetFrame();
 		in.renderFlags = a_store.GetMainPassRenderFlags();
@@ -8861,6 +8903,7 @@ namespace DCLF
 			BuildShadowPayload(inputs, *tablesPtr, *lookups, *payload, objects, bonesStore, kept, geometriesStore);
 			StageShadowPayload(*payload, *target, slots, *pool);
 			if (claims) {
+				ZoneScopedN("CS.DCLF.BuildShadow.Claims");
 				for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
 					if (inputs.modeUsed[m] && m != kSkyMode && !payload->kept)
 						payload->claims[m] = ShadowClaimSet(payload->inputList[m], *tablesPtr);
@@ -9878,6 +9921,7 @@ namespace DCLF
 		// A released batch from a job's pool (neither a payload nor the upload service still holds it), or a new one.
 		std::shared_ptr<org::runtime::StagedUploadBatch> AcquireStagedBatch(std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>>& a_pool)
 		{
+			ZoneScopedN("CS.DCLF.Stage.AcquireBatch");
 			std::shared_ptr<org::runtime::StagedUploadBatch> batch;
 			for (const auto& candidate : a_pool) {
 				if (candidate.use_count() == 1) {
