@@ -1609,6 +1609,10 @@ namespace DCLF
 		std::vector<std::uint32_t> residents;
 		std::vector<std::uint32_t> residentPos;
 		std::vector<ResidentPatch> residentPatches;
+		// Rebuilt on membership/patch changes; renew shared slots once, and visit only trees for wind.
+		bool residentMaintenanceDirty = true;
+		std::vector<std::pair<std::uint32_t, std::uint32_t>> residentPipelines;  // pipeline -> first resident object
+		std::vector<std::uint32_t> residentMaterials, residentTrees;
 		std::vector<const RE::BSGeometry*> residentEvictions;  // for PrimaryCull (TakeResidentEvictions)
 		std::vector<const RE::NiAVObject*> residentRootEvents;
 		ankerl::unordered_dense::set<const RE::BSGeometry*> residentJoining;  // this frame's resident passes, until patched

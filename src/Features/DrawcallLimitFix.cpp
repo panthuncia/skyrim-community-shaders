@@ -600,6 +600,8 @@ void DrawcallLimitFix::EarlyPrepass()
 	auto& programs = DCLF::ShaderPrograms::Get();
 	auto& pipelines = DCLF::DrawPipelines::Get();
 	if (auto* lighting = DCLF::ConstantEvaluator::Get().GetLightingShader(); lighting && programs.Enabled()) {
+		ZoneScopedN("CS.DCLF.Accumulate.Pipelines");
+		TracyCZoneN(requestZone, "CS.DCLF.Accumulate.RequestLighting", true);
 		const auto& tables = store.GetTables();
 		for (std::size_t p = 0; p < tables.pipelines.size(); ++p) {
 			if (!tables.PipelineUsed(p, store.GetFrame()))
@@ -607,8 +609,12 @@ void DrawcallLimitFix::EarlyPrepass()
 			if (const auto* program = programs.Find(tables.pipelines[p], *lighting))
 				pipelines.Find(tables.pipelines[p], *program);
 		}
+		TracyCZoneEnd(requestZone);
+		TracyCZoneN(updateZone, "CS.DCLF.Accumulate.PublishPipelines", true);
 		programs.Update();
 		pipelines.Update();
+		TracyCZoneEnd(updateZone);
+		TracyCZoneN(lookupZone, "CS.DCLF.Accumulate.PipelineLookups", true);
 		// The pipeline lookups an epoch's build reads (Lookups.h): the set index of every pipeline used this
 		// frame, its shaders' constant tables and its register usage, after Update has admitted this frame's
 		// finished builds. Resolved here, where the GPU is busy with the shadow maps, rather than in the epoch.
@@ -669,6 +675,7 @@ void DrawcallLimitFix::EarlyPrepass()
 			if (changed)
 				entry.version = lookups.NextVersion();
 		}
+		TracyCZoneEnd(lookupZone);
 	}
 
 	// What the native loop was told to leave to DCLF but DCLF cannot draw this frame goes back to it now,
@@ -680,6 +687,7 @@ void DrawcallLimitFix::EarlyPrepass()
 	// among the views the engine drew. Requested here, beside the Lighting builds, so they are compiled
 	// long before a shadow epoch would draw with them.
 	if (auto* utility = globals::game::utilityShader; utility && programs.Enabled()) {
+		ZoneScopedN("CS.DCLF.Accumulate.ShadowPipelines");
 		std::uint32_t modeBits = 0;
 		for (const auto& view : DCLF::ShadowViews::Get().All()) {
 			// Clamped for cascades and spot lights, the paraboloid warp for point lights; the engine
@@ -1513,6 +1521,8 @@ void DrawcallLimitFix::Hooks::Main_RenderDepth_WorldDrawn::thunk(void* a_accumul
 	// depth goes in after the world's, as it does natively, so there is nothing to refresh.
 	feature.zPrepassInDepthPass = true;
 	feature.RunZPrepass(false);
+	if (DCLF::SceneStore::Get().GetTables().objects.size() >= 400)
+		globals::BeginDCLFDepthTrace(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture);
 	// DCLF's epoch leaves the context's bindings to the engine's state tracking: rebind its targets for the
 	// rest of the pass.
 	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
@@ -1689,6 +1699,7 @@ void DrawcallLimitFix::BeforeOpaquePass()
 	// lighting draw's.
 	static REL::Relocation<void (*)(bool)> SetDirtyStates{ REL::RelocationID(75580, 77386) };
 	SetDirtyStates(false);
+	globals::EndDCLFDepthTrace();
 	if (!CaptureMainPass() && !loggedCaptureFailure) {
 		loggedCaptureFailure = true;
 		logger::warn("[DCLF] the main pass's targets are not bound where its opaque batches start; the colour epoch is skipped");

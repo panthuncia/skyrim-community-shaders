@@ -2474,6 +2474,27 @@ namespace DCLF
 		const auto entries = capture.Drain();
 		auto& captureStats = capture.MutableStats();
 		captureStats.compared = captureStats.missing = captureStats.extra = captureStats.techniqueDiffers = captureStats.subPassDiffers = 0;
+		static const bool fromAccumulator = SwitchValue("CS_DCLF_PASS_SOURCE") == "accumulator";
+		if (!a_compare && !fromAccumulator) {
+			// The normal path needs only the first registration per geometry. Insert directly into the
+			// retained table instead of allocating a second map and hashing every geometry twice.
+			bool foundMain = false;
+			for (const auto& entry : entries) {
+				if (!mainBatchRenderers.contains(entry.batch))
+					continue;
+				if (!foundMain) {
+					accumulatedPasses.clear();
+					foundMain = true;
+				}
+				// Preserve the capture's first-registration rule, including duplicate hint-10 passes.
+				accumulatedPasses.try_emplace(entry.geometry,
+					AccumulatedPass{ entry.pass, DrawnPassDescriptor(PassDescriptorOf(entry.technique), entry.subPass), entry.subPass, entry.passEnum,
+						entry.pass ? static_cast<std::uint32_t>(entry.pass->accumulationHint) : 0u,
+						0xFFFFFFu - static_cast<std::uint32_t>(std::min<std::size_t>(static_cast<std::size_t>(&entry - entries.data()), 0xFFFFFFu)),
+						entry.fading, entry.pass ? LodRowOf(*entry.pass) : 3u });
+			}
+			return;  // An empty capture preserves the caller's accumulator fallback.
+		}
 
 		// Only the main camera's registrations; the shadow cameras register into their own renderers.
 		ankerl::unordered_dense::map<const RE::BSGeometry*, const PassCapture::Entry*> captured;
@@ -2506,7 +2527,6 @@ namespace DCLF
 		// point of static ownership; the capture sees the registration regardless of what happens to it
 		// afterwards. Falling back when the capture is empty keeps the first frame and any unexpected
 		// path working.
-		static const bool fromAccumulator = SwitchValue("CS_DCLF_PASS_SOURCE") == "accumulator";
 		if (fromAccumulator || captured.empty())
 			return;
 		accumulatedPasses.clear();
@@ -3772,6 +3792,51 @@ namespace DCLF
 		return geometryIt->second;
 	}
 
+	namespace
+	{
+		// Only columns the accumulator patch below can change. It never writes placement, geometry,
+		// bones, wetness or shadow inputs. Extras contents are unchanged unless their offset changes
+		// (allocate/free), which already invalidates them. Skin-mask changes are noted before the patch.
+		struct AccumulateSnapshot
+		{
+			std::uint32_t flags, material, pipeline, drawPipeline, extras;
+			ObjectShading shading;
+			ObjectLights lights;
+			ObjectTreeAnim tree;
+			float emissive, fade;
+			std::uint8_t resident;
+
+			AccumulateSnapshot(const SceneStore::Tables& a_tables, std::uint32_t a_slot) :
+				flags(a_tables.objects[a_slot].flags), material(a_tables.objects[a_slot].materialIndex),
+				pipeline(a_tables.objects[a_slot].pipelineIndex), drawPipeline(a_tables.draws[a_slot].pipelineIndex),
+				extras(a_tables.extraOffset[a_slot]), shading(a_tables.shading[a_slot]), lights(a_tables.lights[a_slot]),
+				tree(a_tables.treeAnim[a_slot]), emissive(a_tables.emissiveMult[a_slot]), fade(a_tables.fadeDistance[a_slot]),
+				resident(a_tables.residentSlot[a_slot])
+			{}
+
+			void NoteWrite(SceneStore::Tables& a_tables, std::uint32_t a_slot) const
+			{
+				auto differs = [](const auto& a, const auto& b) { return std::memcmp(&a, &b, sizeof(a)) != 0; };
+				const auto& object = a_tables.objects[a_slot];
+				std::uint32_t causes = 0;
+				if (flags != object.flags || material != object.materialIndex || pipeline != object.pipelineIndex ||
+					drawPipeline != a_tables.draws[a_slot].pipelineIndex || differs(fade, a_tables.fadeDistance[a_slot]))
+					causes |= kChangeBindings;
+				if (differs(shading, a_tables.shading[a_slot]) || differs(emissive, a_tables.emissiveMult[a_slot]))
+					causes |= kChangeShading;
+				if (differs(lights, a_tables.lights[a_slot]))
+					causes |= kChangeLights;
+				if (differs(tree, a_tables.treeAnim[a_slot]))
+					causes |= kChangeTree;
+				if (extras != a_tables.extraOffset[a_slot])
+					causes |= kChangeExtras;
+				if (resident != a_tables.residentSlot[a_slot])
+					causes |= kChangeMembership;
+				a_tables.NoteChange(a_slot, causes);
+			}
+		};
+	}
+
 	/**
 	 * @brief The accumulator half of the frame, at EarlyPrepass.
 	 *
@@ -3782,6 +3847,7 @@ namespace DCLF
 	 */
 	void SceneStore::BuildAccumulatePhase()
 	{
+		ZoneScopedN("CS.DCLF.Accumulate.Tables");
 		if (!sceneBuilt) {
 			// A load screen, or the feature installed mid-frame: nothing to patch.
 			CompareCapturedPasses(false);
@@ -3789,6 +3855,7 @@ namespace DCLF
 		}
 		PartTimer timer(stats.partMs);
 		std::uint32_t fadingThisFrame = 0;
+		TracyCZoneN(captureZone, "CS.DCLF.Accumulate.Capture", true);
 		// The pass table is filled from the capture, which is the source that keeps working once passes
 		// are withheld from the batch renderer. The accumulator walk is the cross-check.
 		static const bool passParity = SwitchEnabled("CS_DCLF_PASS_PARITY");
@@ -3826,6 +3893,7 @@ namespace DCLF
 					PrimaryCull::Get().UnifySunBits(geometry, pass);
 		timer.Add(BuildPart::Walk);
 
+		TracyCZoneEnd(captureZone);
 		// [TEMP] CS_DCLF_VOLUMETRIC_PROBE: the face parts' main-camera passes - the technique their flags select, the
 		// decal and alpha flags, and the pass the table holds (technique, hint, list), or none - every 600 frames.
 		if (VolumetricProbe::Enabled() && frame % 600 == 0) {
@@ -3879,6 +3947,7 @@ namespace DCLF
 		// not walk the tracked set a second time merely to find them; the scene phase has already given
 		// every other object everything it gets this frame.
 		accumulateOrder.clear();
+		TracyCZoneN(orderZone, "CS.DCLF.Accumulate.Order", true);
 		if (drawCulledCandidates && !accumulatedOnly) {
 			// The delta walk's `order` holds only what it evaluated.
 			if (SceneDeltaEnabled())
@@ -3896,6 +3965,8 @@ namespace DCLF
 			}
 		}
 		timer.Add(BuildPart::PassLookup);
+		TracyCZoneEnd(orderZone);
+		TracyCZoneN(objectsZone, "CS.DCLF.Accumulate.Objects", true);
 		for (auto& [geometry, trackedEntry, accumulated] : accumulateOrder) {
 			timer.Add(BuildPart::LoopTail);
 			if (!accumulated && !(drawCulledCandidates && !accumulatedOnly))
@@ -4209,7 +4280,7 @@ namespace DCLF
 			const bool landBlendRecord = descriptors.technique == 8 || descriptors.technique == 19;
 			const bool resident = accumulated && accumulated->resident && !descriptors.projectedUV && !landBlendRecord && residentJoining.contains(geometry);
 			// The patch is kept until a phase does not renew it (LapseAccumulated): written, and noted, where it differs.
-			const auto columnsBefore = tables.ColumnsOf(objectId);
+			const AccumulateSnapshot columnsBefore(tables, objectId);
 			if (!resident) {
 				accumulatePatched.push_back(objectId);
 				if (patchedFrame.size() < tables.objects.size())
@@ -4261,7 +4332,7 @@ namespace DCLF
 				residentJoining.erase(geometry);
 				++residentStats.joined;
 			}
-			tables.NoteWrite(objectId, columnsBefore);
+			columnsBefore.NoteWrite(tables, objectId);
 			stats.nativeVisible += accumulated && !resident ? 1 : 0;
 			stats.nativeShadowMasked += accumulated && (descriptors.pass & 0x6000u) == 0x6000u ? 1 : 0;
 			stats.derivedDescriptors += accumulated ? 0 : 1;
@@ -4279,6 +4350,8 @@ namespace DCLF
 			(void)gpu;
 		}
 
+		TracyCZoneEnd(objectsZone);
+		TracyCZoneN(residentsZone, "CS.DCLF.Accumulate.Residents", true);
 		// Resident passes that were not patched (no record, a verdict of the frame, a material not ready, extras rows, or
 		// the engine's own pass for the object): their entries leave residency.
 		for (const auto* geometry : residentJoining) {
@@ -4321,6 +4394,8 @@ namespace DCLF
 			slotsFreedThisFrame = false;
 		}
 		std::optional<ScopedScan> scanStats(std::in_place, Scan::AccumulateStats);
+		TracyCZoneEnd(residentsZone);
+		TracyCZoneN(statsZone, "CS.DCLF.Accumulate.StatsAndDecals", true);
 		static const bool slotProbe = SwitchValue("CS_DCLF_SLOT_PROBE") == "1";
 		if (slotProbe)
 			ProbeSlots(frameResolveBuffers);
@@ -4376,6 +4451,8 @@ namespace DCLF
 		// The material cache is evicted with the material slots (SweepSlots).
 		stats.materialCacheEntries = static_cast<std::uint32_t>(materialCache.size());
 		scanStats.reset();
+		TracyCZoneEnd(statsZone);
+		ZoneNamedN(materialTailZone, "CS.DCLF.Accumulate.MaterialTail", true);
 		ScopedScan scanTail(Scan::MaterialTail);
 		ProcessMaterialWrites();
 		RefreshTextureTransforms();
@@ -4405,6 +4482,7 @@ namespace DCLF
 		residents.clear();
 		residentPatches.clear();
 		residentPos.clear();
+		residentMaintenanceDirty = true;
 		tables.Clear();
 		for (auto& [geometry, entry] : tracked)
 			entry.slot = kNoObjectSlot;
@@ -5616,6 +5694,7 @@ namespace DCLF
 
 	void SceneStore::LapseAccumulated()
 	{
+		ZoneScopedN("CS.DCLF.Accumulate.Lapse");
 		// A patch this phase did not renew: the engine no longer registers the object (culled, hidden, faded out), or it
 		// has no bindings this frame. Its record goes back to the scene half; a resident's is kept by its residency.
 		std::uint32_t lapsed = 0;
@@ -5698,6 +5777,7 @@ namespace DCLF
 
 	void SceneStore::MarkResidentSlot(std::uint32_t a_slot, const ResidentPatch& a_patch)
 	{
+		residentMaintenanceDirty = true;
 		if (residentPos.size() <= a_slot)
 			residentPos.resize(std::max<std::size_t>(a_slot + 1, tables.objects.size()), kNotResident);
 		// The accumulate phase notes the join, and a patch that changed, with the rest of its write.
@@ -5716,6 +5796,7 @@ namespace DCLF
 	{
 		if (!IsResidentSlot(a_slot))
 			return;
+		residentMaintenanceDirty = true;
 		const std::uint32_t at = residentPos[a_slot];
 		const std::uint32_t last = residents.back();
 		residents[at] = last;
@@ -5743,6 +5824,7 @@ namespace DCLF
 
 	void SceneStore::EndAllResidency()
 	{
+		residentMaintenanceDirty = true;
 		for (const std::uint32_t slot : residents) {
 			ResetAccumulatedHalf(slot);
 			residentPos[slot] = kNotResident;
@@ -5765,21 +5847,42 @@ namespace DCLF
 
 	void SceneStore::KeepResidentsAlive()
 	{
-		for (const std::uint32_t slot : residents) {
-			const auto& object = tables.objects[slot];
-			const auto* geometry = tables.objectGeometry[slot];
-			if (object.pipelineIndex < tables.pipelineLastUsed.size() && tables.pipelineLastUsed[object.pipelineIndex] != frame) {
+		ZoneScopedN("CS.DCLF.Accumulate.KeepResidents");
+		if (residentMaintenanceDirty) {
+			ZoneScopedN("CS.DCLF.Accumulate.RebuildResidentMaintenance");
+			residentPipelines.clear();
+			residentMaterials.clear();
+			residentTrees.clear();
+			ankerl::unordered_dense::set<std::uint32_t> pipelines, materials;
+			for (const std::uint32_t slot : residents) {
+				const auto& object = tables.objects[slot];
+				if (pipelines.insert(object.pipelineIndex).second)
+					residentPipelines.emplace_back(object.pipelineIndex, slot);
+				if (materials.insert(object.materialIndex).second)
+					residentMaterials.push_back(object.materialIndex);
+				if (object.flags & kObjectTreeAnim)
+					residentTrees.push_back(slot);
+			}
+			residentMaintenanceDirty = false;
+		}
+		for (const auto& [pipeline, slot] : residentPipelines) {
+			if (pipeline < tables.pipelineLastUsed.size() && tables.pipelineLastUsed[pipeline] != frame) {
 				// No accumulated object used the pipeline this frame: the resident's property is its lighting template, as
 				// the first user's would be. A resident is drawn whenever the GPU finds it, so it counts as kept.
-				tables.pipelineLastUsed[object.pipelineIndex] = frame;
-				tables.geometryTemplate[object.pipelineIndex] = geometry ? geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
-				tables.geometryTemplateNative[object.pipelineIndex] = 1;
+				const auto* geometry = tables.objectGeometry[slot];
+				tables.pipelineLastUsed[pipeline] = frame;
+				tables.geometryTemplate[pipeline] = geometry ? geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
+				tables.geometryTemplateNative[pipeline] = 1;
 			}
-			if (object.materialIndex < tables.materialLastUsed.size())
-				tables.materialLastUsed[object.materialIndex] = frame;
+		}
+		for (const std::uint32_t material : residentMaterials)
+			if (material < tables.materialLastUsed.size())
+				tables.materialLastUsed[material] = frame;
+		for (const std::uint32_t slot : residentTrees) {
+			const auto* geometry = tables.objectGeometry[slot];
 			// A tree's wind state is the tree manager's, advanced while the feedback keeps the root's kAccumulated: taken
 			// every frame, as the accumulate phase takes it for every other drawn tree.
-			if ((object.flags & kObjectTreeAnim) && geometry)
+			if (geometry)
 				if (const auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get()) {
 					ObjectTreeAnim tree = tables.treeAnim[slot];
 					DeriveTreeAnim(*property, tree);

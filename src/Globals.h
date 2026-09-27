@@ -266,4 +266,7 @@ namespace globals
 	 * @param a_context The D3D11 device context to hook.
 	 */
 	void InstallD3DHooks(ID3D11DeviceContext* a_context);
+	/** @brief Opt-in DCLF diagnostic: record D3D11 operations affecting main depth between the two epochs. */
+	void BeginDCLFDepthTrace(ID3D11Texture2D* a_depth);
+	void EndDCLFDepthTrace();
 }

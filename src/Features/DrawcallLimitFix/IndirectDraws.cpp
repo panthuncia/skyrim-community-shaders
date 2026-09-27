@@ -1700,7 +1700,9 @@ namespace DCLF
 		constexpr std::uint32_t kProbeDepthAfterPrepass = 2 * kColorTargets;
 		constexpr std::uint32_t kProbeDepthBeforeColour = kProbeDepthAfterPrepass + 1;
 		constexpr std::uint32_t kProbeDepthAfterColour = kProbeDepthBeforeColour + 1;
-		constexpr std::uint32_t kProbeSlots = kProbeDepthAfterColour + 1;
+		constexpr std::uint32_t kProbeDepthAfterSky = kProbeDepthAfterColour + 1;
+		constexpr std::uint32_t kProbeDepthAfterLightCulling = kProbeDepthAfterSky + 1;
+		constexpr std::uint32_t kProbeSlots = kProbeDepthAfterLightCulling + 1;
 
 		struct ProbeBindings
 		{
@@ -1740,7 +1742,8 @@ namespace DCLF
 			void InvocationRevision(const org::PassPrepareContext&, std::vector<std::uint64_t>& a_out) const
 			{
 				const auto now = segment.Now();
-				const auto frame = CurrentFrame(*resources, now);
+				const auto frame = CurrentFrame(*resources,
+					now == RenderGraphRuntime::Segment::SkyOcclusion || now == RenderGraphRuntime::Segment::LightCulling ? RenderGraphRuntime::Segment::ZPrepass : now);
 				a_out.push_back(frame ? frame->generation : 0);
 				a_out.push_back(static_cast<std::uint64_t>(now));
 			}
@@ -1750,15 +1753,20 @@ namespace DCLF
 				ProbeFrame prepared{};
 				const auto now = segment.Now();
 				const bool zPrepass = now == RenderGraphRuntime::Segment::ZPrepass;
-				if (now != RenderGraphRuntime::Segment::MainOpaque && !(zPrepass && after))
+				const bool gapProbe = now == RenderGraphRuntime::Segment::SkyOcclusion || now == RenderGraphRuntime::Segment::LightCulling;
+				if (now != RenderGraphRuntime::Segment::MainOpaque && !(zPrepass && after) && !gapProbe)
 					return prepared;
-				const auto frame = CurrentFrame(*resources, now);
+				const auto frame = CurrentFrame(*resources, gapProbe ? RenderGraphRuntime::Segment::ZPrepass : now);
 				if (!frame || !frame->probePixel)
 					return prepared;
 				prepared.x = frame->probeX;
 				prepared.y = frame->probeY;
 				if (zPrepass) {
 					prepared.depthSlot = kProbeDepthAfterPrepass;  // what the Z-prepass left in the buffer
+					return prepared;
+				}
+				if (gapProbe) {
+					prepared.depthSlot = now == RenderGraphRuntime::Segment::SkyOcclusion ? kProbeDepthAfterSky : kProbeDepthAfterLightCulling;
 					return prepared;
 				}
 				prepared.count = resources->targetCount;
@@ -2486,6 +2494,16 @@ namespace DCLF
 					a_out.push_back(org::RenderGraph::ExternalPassDesc::Render("cs.dclf.depth-phase2",
 						std::static_pointer_cast<org::RenderPass>(std::make_shared<MainOpaquePass>(resources, depthSegment, true)))
 							.Epoch(depth));
+				}
+				if (resources->probe && resources->hybrid && RenderGraphRuntime::EpochsEnabled())
+					a_out.push_back(org::RenderGraph::ExternalPassDesc::Copy("cs.dclf.z.probe-after",
+						std::static_pointer_cast<org::RenderPass>(std::make_shared<ProbePass>(resources, depthSegment, true)))
+							.Epoch(depth));
+				if (resources->probe && resources->hybrid && RenderGraphRuntime::EpochsEnabled()) {
+					for (const auto segment : { Segment::SkyOcclusion, Segment::LightCulling })
+						a_out.push_back(org::RenderGraph::ExternalPassDesc::Copy(segment == Segment::SkyOcclusion ? "cs.dclf.sky.probe-depth" : "cs.dclf.light.probe-depth",
+							std::static_pointer_cast<org::RenderPass>(std::make_shared<ProbePass>(resources, SegmentBinding::Of(segment), false)))
+								.Epoch(RenderGraphRuntime::EpochOf(segment)));
 				}
 				if (resources->native[0] && !resources->hybrid)
 					a_out.push_back(org::RenderGraph::ExternalPassDesc::Render("cs.dclf.debug-view",
@@ -9261,6 +9279,15 @@ namespace DCLF
 		const bool skip = Toggles::Get().Active().noZPrepass;
 		if (!Hybrid() || skip)
 			return;
+		// Main::RenderDepth sets the world depth target and viewport in the engine's shadow state,
+		// but only a native draw flushes that state to D3D11. When ownership withheld all such draws,
+		// RSGetViewports can still return the last shadow map's 4096x4096 viewport. Pairing that with
+		// the main depth texture below records an out-of-bounds Vulkan render area and can lose the
+		// device. Apply the pending world state at this hook, before the first-person camera replaces
+		// it, exactly as BeforeOpaquePass does for the colour capture. This also applies pending clears
+		// and preserves the engine's dynamic-resolution viewport instead of using the texture's extent.
+		static REL::Relocation<void (*)(bool)> SetDirtyStates{ REL::RelocationID(75580, 77386) };
+		SetDirtyStates(false);
 		auto capture = CaptureBindings();
 		// The engine's main depth, not whatever is bound: inside the depth pass Terrain Blending alternates the
 		// bound target between it and its own terrain depth while terrain draws.
@@ -10442,6 +10469,8 @@ namespace DCLF
 				logger::info("[DCLF] G-buffer at ({}, {}) after  DCLF's colour draws: {}", gbufferX, gbufferY, slots(kColorTargets));
 				logger::info("[DCLF] depth at ({}, {}): {:06X} after the z-prepass, {:06X} when the colour pass tests it, {:06X} after it",
 					gbufferX, gbufferY, depthAt(kProbeDepthAfterPrepass), depthAt(kProbeDepthBeforeColour), depthAt(kProbeDepthAfterColour));
+				logger::info("[DCLF] depth gap at ({}, {}): {:06X} after sky occlusion, {:06X} after light culling",
+					gbufferX, gbufferY, depthAt(kProbeDepthAfterSky), depthAt(kProbeDepthAfterLightCulling));
 				context->Unmap(gbufferStaging.get(), 0);
 			}
 			gbufferStaging = nullptr;

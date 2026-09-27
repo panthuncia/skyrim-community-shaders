@@ -359,6 +359,22 @@ The main (deferred) pass draws with the viewport at the origin, the dynamic-reso
 3840 x 2160 target at 1.5x upscaling), and depth range [0, 0.999998]. Anything that has to reproduce its depth
 values must use the same range.
 
+The world-depth capture must flush the engine's pending state too, even though it runs **after** the world's
+native batches. With DCLF ownership, those batches can contain no actual native draws. In AE 1.6.1170,
+`Main::RenderDepth` sets the main depth target with `140e4fe00` and unbinds colour/cube targets with
+`140e4fd40` / `140e4fe50`. These update `RendererShadowState` and mark state dirty; the latter calls also
+invoke `Renderer::UpdateViewPort` (`140e441c0`), which calculates the dynamic-resolution viewport and marks
+`DIRTY_VIEWPORT`. They do not bind it to D3D11. `SetCameraData` then establishes the world camera, but without
+a native draw the context can still have the previous shadow-map viewport.
+
+This caused a reproducible device loss when turning the camera: the Z-prepass's `CaptureBindings` read
+4096 x 4096 from `RSGetViewports`, while `CaptureDepthPass` explicitly selected the 3840 x 2160 main depth
+texture. Live validation stopped in `MainOpaquePass::Record` with `zPrepass=true` and this mismatched frozen
+frame; Aftermath reported `Error_DMA_PageFault`. `CaptureDepthPass` now calls `SetDirtyStates(false)` before
+capturing, just like `BeforeOpaquePass`. Keep the AE world-drawn hook at `Main::RenderDepth +0x1AA`: moving it
+past the first-person draws loses the world camera (see below). Do not substitute full texture dimensions
+for the viewport, since that discards dynamic-resolution semantics.
+
 ## Decals: where the main pass draws them, and with what state
 
 Decompiled from AE 1.6.1170 and then measured with `CS_DCLF_DECAL_PROBE=1`, which records the
