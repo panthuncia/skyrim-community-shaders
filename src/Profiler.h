@@ -17,7 +17,9 @@ class Profiler
 {
 public:
 	static constexpr uint32_t kMaxTimers = 128;
-	static constexpr uint32_t kFrameLatency = 3;
+	// Frames whose queries can be in flight at once. The render thread may run several frames ahead of the GPU
+	// (nothing in the frame waits for it), and a frame's queries are read only once all of them are done.
+	static constexpr uint32_t kFrameRing = 8;
 	static constexpr uint32_t kHistorySize = 300;
 	// Must exceed the longest legitimate gap between samples of a still-running pass;
 	// the DynamicCubemaps state machine spreads its passes over 6 frames.
@@ -149,6 +151,7 @@ public:
 		knownTimers.clear();
 		knownTimerIndex.clear();
 		collectedFrames = 0;
+		lastLoggedFrame = 0;
 		totalTimeMs = 0.0f;
 		cpuTotalTimeMs = 0.0f;
 	}
@@ -187,12 +190,15 @@ private:
 
 	ID3D11DeviceContext* context = nullptr;
 
-	FrameQueries frames[kFrameLatency];
+	FrameQueries frames[kFrameRing];
 	uint32_t writeFrame = 0;
-	uint32_t readFrame = 0;
-	uint32_t framesSinceInit = 0;
+	uint32_t readFrame = 0;  // the oldest frame not yet collected
 	bool initialized = false;
 	bool frameActive = false;
+	// The current frame is not timed: every slot of the ring still holds a frame the GPU has not finished.
+	// Its passes still emit their perf events.
+	bool frameSkipped = false;
+	uint64_t lastLoggedFrame = 0;
 	double cpuTicksToMs = 0.0;
 
 	PerfEventCallback beginPerfEvent;
@@ -218,11 +224,14 @@ private:
 	float totalTimeMs = 0.0f;
 	float cpuTotalTimeMs = 0.0f;
 
+	/** @brief Collects every frame the GPU has finished, oldest first, then rebuilds the results. */
 	void CollectResults();
+	/** @brief Reads one finished frame's queries into the timers' histories; false while the GPU is not done with it. */
+	bool CollectFrame(FrameQueries& frame, std::unordered_map<std::string, std::pair<float, float>>& activeTimers);
 
 	/** @brief Drops timers that have not been sampled for kTimerRetireFrames, so disabled passes stop reporting stale values. */
 	void RetireStaleTimers();
-	void LogResultsIfRequested() const;
+	void LogResultsIfRequested();
 
 	/** @brief Repoints knownTimerIndex at the current knownTimers positions after an erase. */
 	void RebuildTimerIndex();

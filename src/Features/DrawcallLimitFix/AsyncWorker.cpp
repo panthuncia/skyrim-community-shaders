@@ -1,4 +1,5 @@
 #include "AsyncWorker.h"
+#include <Tracy/Tracy.hpp>
 
 #include "Switches.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -121,6 +122,8 @@ namespace DCLF
 				}
 				Job::State result = Job::State::Done;
 				try {
+					ZoneScopedN("CS.DCLF.Worker.Run");
+					ZoneText(job->name, std::char_traits<char>::length(job->name));
 					job->run(job->stop.get_token());
 				} catch (...) {
 					result = Job::State::Failed;
@@ -184,6 +187,7 @@ namespace DCLF
 
 	AsyncWorker::WaitResult AsyncWorker::Wait(const JobHandle& a_handle, std::chrono::microseconds a_budget)
 	{
+		ZoneScopedN("CS.DCLF.Worker.Wait");
 		auto& job = a_handle.job;
 		if (!job)
 			return WaitResult::None;
@@ -242,6 +246,7 @@ namespace DCLF
 
 	void AsyncWorker::Cancel(const JobHandle& a_handle)
 	{
+		ZoneScopedN("CS.DCLF.Worker.CancelAndJoin");
 		const auto& job = a_handle.job;
 		if (!job)
 			return;
@@ -270,6 +275,7 @@ namespace DCLF
 
 	void AsyncWorker::Drain()
 	{
+		ZoneScopedN("CS.DCLF.Worker.Drain");
 		CancelPending();
 		std::shared_ptr<Job> running;
 		{
@@ -285,6 +291,7 @@ namespace DCLF
 
 	void AsyncWorker::WaitIdle()
 	{
+		ZoneScopedN("CS.DCLF.Worker.WaitIdle");
 		std::unique_lock lock(impl->queueMutex);
 		impl->idle.wait(lock, [&] { return impl->queue.empty() && !impl->running; });
 	}

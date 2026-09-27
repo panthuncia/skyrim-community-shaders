@@ -841,10 +841,12 @@ std::uint32_t RenderGraphRuntime::EpochOf(Segment a_segment)
 
 bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare)
 {
+	ZoneScopedN("CS.ORG.ExecuteEpoch");
 	if (!IsActive())
 		return false;
 	// Read by passes while the frame prepares and records, all before ExecuteFrame returns.
 	segment = a_segment;
+	ZoneText(Impl::SegmentLabel(a_segment), std::strlen(Impl::SegmentLabel(a_segment)));
 	// Where the epoch's submissions land in the D3D11 stream; the submissions themselves carry a queue
 	// label of the same name (Submit). The event spans the epoch's CPU side: the feature's inputs, the
 	// graph's preparation and recording, and the hand-off to DXVK.
@@ -858,8 +860,10 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 		// graph has prepared and recorded: the D3D11 work issued just before the epoch would sit on the CPU for
 		// that whole time while the GPU runs dry. Flushing here (asynchronous under DXVK) submits it now; the
 		// enqueue then finds nothing pending, so the number of submissions does not change.
-		if (impl->earlyFlush)
+		if (impl->earlyFlush) {
+			ZoneScopedN("CS.ORG.FlushNativeProducer");
 			globals::d3d::context->Flush();
+		}
 	} else {
 		// Older DXVK (or CS_ORG_SUBMIT=flush): submit and wait for every D3D11 command recorded
 		// so far, then submit the graph directly under DXVK's queue lock.

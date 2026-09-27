@@ -394,6 +394,7 @@ struct IDXGISwapChain_Present
 {
 	static HRESULT WINAPI thunk(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 	{
+		ZoneScopedN("CS.Present");
 		GpuIdleTrace::OnPresent();
 		GpuEventTimers::OnPresent();
 		NvPerfBridge::OnPresent();
@@ -428,7 +429,10 @@ struct IDXGISwapChain_Present
 			[&](IDXGISwapChain* swapChain, UINT syncInterval, UINT presentFlags) {
 				return globals::features::upscaling.PresentWithFrameGeneration(
 					swapChain, syncInterval, presentFlags,
-					[&](IDXGISwapChain* sc, UINT si, UINT f) { return func(sc, si, f); });
+					[&](IDXGISwapChain* sc, UINT si, UINT f) {
+						ZoneScopedN("CS.Present.NativeWait");
+						return func(sc, si, f);
+					});
 			});
 
 		streamline->SetPCLMarker(Streamline::PclMarker::PresentEnd);

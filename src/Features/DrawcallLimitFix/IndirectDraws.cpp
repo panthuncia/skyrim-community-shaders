@@ -7655,6 +7655,7 @@ namespace DCLF
 
 	bool IndirectDraws::ExecuteSkyOcclusion(bool a_diagnose)
 	{
+		ZoneScopedN("CS.DCLF.ExecuteSkyOcclusion");
 		const auto start = std::chrono::steady_clock::now();
 		auto& store = SceneStore::Get();
 		const std::uint32_t frameNumber = store.GetFrame();
@@ -7832,6 +7833,7 @@ namespace DCLF
 
 	void IndirectDraws::ExecuteShadowFrame()
 	{
+		ZoneScopedN("CS.DCLF.ExecuteShadowFrame");
 		auto& pending = impl->pendingViews;
 		if (!ShadowsEnabled() || failed || pending.empty()) {
 			pending.clear();
@@ -9267,6 +9269,7 @@ namespace DCLF
 
 	void IndirectDraws::RunEpoch(RenderGraphRuntime::Segment a_segment)
 	{
+		ZoneScopedN("CS.DCLF.RunEpoch");
 		RenderGraphRuntime::EpochBodyScope body(a_segment);
 		ScopedPerfEvent event(a_segment == RenderGraphRuntime::Segment::ZPrepass ? "CS DCLF: Z-prepass (CPU)" : "CS DCLF: main opaque (CPU)");
 		const auto start = std::chrono::steady_clock::now();
@@ -9468,6 +9471,7 @@ namespace DCLF
 
 	void IndirectDraws::Impl::KickMainJob(bool a_depthOnly, const RE::NiPoint3* a_eye, const RE::NiPoint3* a_previousEye, IndirectDraws::Stats& a_stats)
 	{
+		ZoneScopedN("CS.DCLF.KickMainJob");
 		// Only the bindless records are per pair, which is what keeps the build a function of the tables.
 		const std::size_t index = a_depthOnly ? kAsyncZPrepass : kAsyncColour;
 		auto& job = mainJobs[index];
@@ -9892,6 +9896,7 @@ namespace DCLF
 
 	void StageMainPayload(MainPayload& a_payload, const Resources& a_resources, std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>>& a_pool)
 	{
+		ZoneScopedN("CS.DCLF.StageMainPayload");
 		auto batch = AcquireStagedBatch(a_pool);
 		ForEachMainPayloadUpload(a_payload, a_resources, [&](const auto& a_target, const void* a_data, std::size_t a_bytes, bool a_records, std::size_t a_offset) {
 			auto* staging = batch->Stage(org::runtime::UploadTarget::FromShared(a_target), a_offset, a_data, a_bytes);
@@ -9909,6 +9914,7 @@ namespace DCLF
 	void StageShadowPayload(ShadowPayload& a_payload, const ShadowResources& a_resources, std::uint32_t a_slots,
 		std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>>& a_pool)
 	{
+		ZoneScopedN("CS.DCLF.StageShadowPayload");
 		using org::runtime::UploadTarget;
 		auto batch = AcquireStagedBatch(a_pool);
 		a_payload.objects.Emit(a_resources.tablesHeld.objects, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
@@ -9965,6 +9971,7 @@ namespace DCLF
 	bool IndirectDraws::Impl::CommitMainPayload(const Capture& a_capture, const FrameBlocks& a_blocks, MainPayload& a_payload,
 		const std::shared_ptr<Resources>& a_resources, SceneStore& a_store, IndirectDraws::Stats& a_stats)
 	{
+		ZoneScopedN("CS.DCLF.CommitMainPayload");
 		const auto& in = a_payload.inputs;
 		const auto& tables = a_store.GetTables();
 		const bool depthOnly = in.depthOnly;
