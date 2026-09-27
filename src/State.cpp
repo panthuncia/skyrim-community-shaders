@@ -5,6 +5,10 @@
 #include <pystring/pystring.h>
 
 #include "Deferred.h"
+#include "Features/DrawcallLimitFix/Switches.h"
+#include "GpuEventTimers.h"
+#include "RenderGraph/NvPerfBridge.h"
+#include "GpuIdleTrace.h"
 #include "FeatureIssues.h"
 #include "Features/CSEditor.h"
 #include "Features/CloudShadows.h"
@@ -533,7 +537,7 @@ void State::SaveToJson(nlohmann::json& settings)
 	advanced["Compiler Threads"] = shaderCache->compilationThreadCount;
 	advanced["Background Compiler Threads"] = shaderCache->backgroundCompilationThreadCount;
 	advanced["Use FileWatcher"] = shaderCache->UseFileWatcher();
-	advanced["Frame Annotations"] = frameAnnotations;
+	advanced["Frame Annotations"] = frameAnnotationsSetting.value_or(frameAnnotations);
 	advanced["Partial Precision"] = enablePartialPrecision.load(std::memory_order_relaxed);
 	settings["Advanced"] = advanced;
 
@@ -612,6 +616,11 @@ void State::LoadFromJson(nlohmann::json& settings)
 			shaderCache->SetFileWatcher(advanced["Use FileWatcher"]);
 		if (advanced.contains("Frame Annotations") && advanced["Frame Annotations"].is_boolean())
 			frameAnnotations = advanced["Frame Annotations"];
+		// The GPU idle trace attributes gaps to the engine's render phases, which only the annotations mark.
+		if ((GpuIdleTrace::Requested() || GpuEventTimers::Requested() || NvPerfBridge::Requested()) && !frameAnnotations) {
+			frameAnnotationsSetting = frameAnnotations;
+			frameAnnotations = true;
+		}
 		if (advanced.contains("Partial Precision") && advanced["Partial Precision"].is_boolean())
 			enablePartialPrecision.store(advanced["Partial Precision"].get<bool>(), std::memory_order_relaxed);
 	}
@@ -750,6 +759,13 @@ void State::SetDefines(std::string a_defines)
 
 std::vector<std::pair<std::string, std::string>>* State::GetDefines()
 {
+	// [TEMP] CS_DCLF_SHADOW_DEBUG_OUTPUT: the sun's shadow terms in place of the colour, native and DCLF alike.
+	static const bool shadowDebug = DCLF::SwitchEnabled("CS_DCLF_SHADOW_DEBUG_OUTPUT");
+	if (shadowDebug && std::ranges::none_of(shaderDefines, [](const auto& a_define) { return a_define.first == "DCLF_SHADOW_DEBUG"; })) {
+		shaderDefines.emplace_back("DCLF_SHADOW_DEBUG", "1");
+		// The disk cache's file names carry this string, so the debug builds are cached apart.
+		shaderDefinesString += shaderDefinesString.empty() ? "DCLF_SHADOW_DEBUG=1" : ";DCLF_SHADOW_DEBUG=1";
+	}
 	return &shaderDefines;
 }
 
@@ -872,21 +888,36 @@ void State::SetupResources()
 
 	globals::profiler->Initialize(globals::d3d::device, globals::d3d::context);
 
-	if (frameAnnotations) {
+	// Debugger events (Nsight, RenderDoc, PIX) around CS's own GPU work: the profiler's passes and each
+	// feature's frame callbacks. With Frame Annotations on, or whenever a capture tool is attached, which
+	// DXVK reports through GetStatus (it forwards D3D11 events only then).
+	const bool captureAttached = pPerf && pPerf->GetStatus();
+	debuggerEvents = pPerf && (frameAnnotations || captureAttached);
+	if (debuggerEvents) {
+		logger::info("Debugger events on ({})", frameAnnotations ? "Frame Annotations" : "capture tool attached");
 		globals::profiler->SetPerfEventCallbacks(
 			[this](std::string_view name) { BeginPerfEvent(name); },
 			[this](std::string_view) { EndPerfEvent(); });
+		Feature::SetGpuEventCallbacks(
+			[](std::string_view name) { globals::state->BeginPerfEvent(name); },
+			[] { globals::state->EndPerfEvent(); });
 	} else {
 		globals::profiler->SetPerfEventCallbacks({}, {});
+		Feature::SetGpuEventCallbacks(nullptr, nullptr);
 	}
 }
 
 void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescriptor, uint& a_pixelDescriptor, bool a_forceDeferred)
 {
+	ModifyShaderLookup(a_shader.shaderType.get(), a_vertexDescriptor, a_pixelDescriptor, a_forceDeferred);
+}
+
+void State::ModifyShaderLookup(RE::BSShader::Type a_shaderType, uint& a_vertexDescriptor, uint& a_pixelDescriptor, bool a_forceDeferred)
+{
 	auto deferred = globals::deferred;
 
-	if (a_shader.shaderType.get() != RE::BSShader::Type::Utility && a_shader.shaderType.get() != RE::BSShader::Type::ImageSpace) {
-		switch (a_shader.shaderType.get()) {
+	if (a_shaderType != RE::BSShader::Type::Utility && a_shaderType != RE::BSShader::Type::ImageSpace) {
+		switch (a_shaderType) {
 		case RE::BSShader::Type::Lighting:
 			{
 				a_vertexDescriptor &= ~((uint32_t)SIE::ShaderCache::LightingShaderFlags::AdditionalAlphaMask |
@@ -991,6 +1022,9 @@ void State::BeginPerfEvent(std::string_view title)
 	s_tracyPerfZones.push_back(ctx);
 #endif
 	pPerf->BeginEvent(std::wstring(title.begin(), title.end()).c_str());
+	GpuIdleTrace::BeginEvent(title);
+	GpuEventTimers::BeginEvent(title);
+	NvPerfBridge::BeginEvent(title);
 }
 
 void State::EndPerfEvent()
@@ -1004,11 +1038,28 @@ void State::EndPerfEvent()
 	}
 #endif
 	pPerf->EndEvent();
+	GpuIdleTrace::EndEvent();
+	GpuEventTimers::EndEvent();
+	NvPerfBridge::EndEvent();
+}
+
+ScopedPerfEvent::ScopedPerfEvent(std::string_view a_name) :
+	active(globals::state && globals::state->debuggerEvents)
+{
+	if (active)
+		globals::state->BeginPerfEvent(a_name);
+}
+
+ScopedPerfEvent::~ScopedPerfEvent()
+{
+	if (active)
+		globals::state->EndPerfEvent();
 }
 
 void State::SetPerfMarker(std::string_view title)
 {
 	pPerf->SetMarker(std::wstring(title.begin(), title.end()).c_str());
+	GpuIdleTrace::Mark(title);
 }
 
 void State::SetAdapterDescription(const std::wstring& description)
@@ -1132,11 +1183,17 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 
 		data.HDRData = globals::features::hdrDisplay.GetSharedDataHDR();
 
+		lastSharedData = data;  // Drawcall Limit Fix packs these bytes itself; see State::lastSharedData
 		sharedDataCB->Update(data);
 	}
 
 	{
 		auto [data, size] = GetFeatureBufferData(a_inWorld);
+
+		// Kept for Drawcall Limit Fix, for the same reason as lastSharedData: it packs these bytes into its
+		// own per-draw constants and cannot read them back from the GPU buffer.
+		lastFeatureData.assign(static_cast<const std::byte*>(static_cast<const void*>(data)),
+			static_cast<const std::byte*>(static_cast<const void*>(data)) + size);
 
 		featureDataCB->Update(data, size);
 	}
