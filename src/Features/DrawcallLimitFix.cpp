@@ -397,6 +397,9 @@ void DrawcallLimitFix::PostPostLoad()
 
 void DrawcallLimitFix::SetupResources()
 {
+	DCLF::reuseKeptStorage = DCLF::SwitchValue("CS_DCLF_CPU_STORAGE_REUSE") != "0";
+	if (installed && RenderGraphRuntime::Get().IsActive())
+		DCLF::ShaderPrograms::Get().StartPrecompile();
 	// Runs right after the render graph tried to adopt DXVK's device (State::SetupResources). The hooks went in
 	// at PostPostLoad, before any device existed; without the graph there is nothing to draw with, and left
 	// on, DCLF would track, classify and skip for nothing while the frame silently stays native. So it is

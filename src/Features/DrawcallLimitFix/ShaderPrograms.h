@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -53,7 +54,7 @@ namespace DCLF
 	 * build uses (ShaderCache::GetCompileDefines), plus DCLF_ORG. Artifacts are content-addressed on the
 	 * source, every shader file under Data/Shaders and the defines, and cached on disk.
 	 *
-	 * Render thread only.
+	 * Program publication is render-thread only. The stage cache also accepts CS compilation workers.
 	 */
 	class ShaderPrograms
 	{
@@ -106,6 +107,11 @@ namespace DCLF
 		/** @brief Collects finished compilations (call once per frame). */
 		void Update();
 
+		// CS compilation workers request the same stage futures used by runtime programs.
+		// Requests before ORG initialization are retained until StartPrecompile.
+		void Precompile(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor);
+		void StartPrecompile();
+
 		const Stats& GetStats() const { return stats; }
 
 	private:
@@ -114,6 +120,8 @@ namespace DCLF
 
 		struct Entry;  // compilation futures; defined with the compiler (ShaderPrograms.cpp)
 		struct ShadowEntry;
+		struct StageCache;
+		std::unique_ptr<StageCache> stages;
 		bool LoadSources();
 
 		ankerl::unordered_dense::map<std::uint64_t, std::unique_ptr<Entry>> entries;
@@ -122,7 +130,7 @@ namespace DCLF
 		std::vector<std::byte> utilitySource;
 		std::vector<std::filesystem::path> dependencies;
 		bool sourcesLoaded = false;
-		bool sourcesMissing = false;
+		std::atomic<bool> sourcesMissing{ false };
 		std::uint32_t loggedFailures = 0;
 		Stats stats;
 	};

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -13,6 +14,8 @@
 // one of these rather than its own copy of the protocol.
 namespace DCLF
 {
+	// Startup-only control for A/B validation. Set before any scene/payload workers run.
+	inline bool reuseKeptStorage = true;
 	/**
 	 * @brief An append-only log with absolute positions: entry k is at base + k. Readers keep their own position
 	 * (LogCursor); trimming the head, or invalidating the log, leaves a reader behind the base, and a reader behind the
@@ -123,7 +126,46 @@ namespace DCLF
 					a_run(std::uint64_t{ 0 }, a_count);
 					return a_count;
 				}
+				// Dense dirty object/input tables: a compact bitmap avoids sorting thousands of
+				// single-element journal entries. Sparse/large byte arenas keep the range sorter.
+				if (reuseKeptStorage && entries.size() >= 128 && a_count <= (1u << 20) && a_count <= entries.size() * 64) {
+					std::vector<std::uint64_t> bits(static_cast<std::size_t>((a_count + 63) / 64), 0);
+					for (const auto& entry : entries) {
+						if (entry.version <= a_held || !entry.count || entry.first >= a_count)
+							continue;
+						const auto lastIndex = entry.first + std::min(entry.count, a_count - entry.first) - 1;
+						const auto firstWord = entry.first / 64, lastWord = lastIndex / 64;
+						const auto head = ~std::uint64_t{0} << (entry.first % 64);
+						const auto tail = ~std::uint64_t{0} >> (63 - lastIndex % 64);
+						if (firstWord == lastWord)
+							bits[firstWord] |= head & tail;
+						else {
+							bits[firstWord] |= head;
+							for (auto word = firstWord + 1; word < lastWord; ++word)
+								bits[word] = ~std::uint64_t{0};
+							bits[lastWord] |= tail;
+						}
+					}
+					std::uint64_t first = 0, end = 0, sent = 0;
+					for (std::size_t i = 0; i < bits.size(); ++i) {
+						auto word = bits[i];
+						while (word) {
+							const auto startBit = std::countr_zero(word);
+							const auto endBit = startBit + std::countr_one(word >> startBit);
+							const std::uint64_t start = i * 64 + startBit;
+							if (start != end) {
+								if (first < end) { a_run(first, end - first); sent += end - first; }
+								first = start;
+							}
+							end = i * 64 + endBit;
+							word = endBit == 64 ? 0 : word & (~std::uint64_t{0} << endBit);
+						}
+					}
+					if (first < end) { a_run(first, end - first); sent += end - first; }
+					return sent;
+				}
 				std::vector<std::pair<std::uint64_t, std::uint64_t>> runs;
+				runs.reserve(entries.size());
 				for (const auto& entry : entries)
 					if (entry.version > a_held)
 						runs.emplace_back(entry.first, entry.first + entry.count);
@@ -257,8 +299,29 @@ namespace DCLF
 		std::vector<T>& Mutable()
 		{
 			if (!copied) {
-				if (elements.use_count() > 1)
-					elements = std::make_shared<std::vector<T>>(*elements);
+				if (elements.use_count() > 1) {
+					if (!reuseKeptStorage) {
+						elements = std::make_shared<std::vector<T>>(*elements);
+						copied = true;
+						return *elements;
+					}
+					// Reuse storage only after every snapshot has released it. Copy the whole current
+					// array: some commit-time patches are deliberately outside the change journal.
+					std::shared_ptr<std::vector<T>> next;
+					for (auto it = spare.begin(); it != spare.end(); ++it) {
+						if (it->use_count() == 1) {
+							next = std::move(*it);
+							spare.erase(it);
+							break;
+						}
+					}
+					if (!next)
+						next = std::make_shared<std::vector<T>>();
+					*next = *elements;
+					if (spare.size() < 2)
+						spare.push_back(std::move(elements));
+					elements = std::move(next);
+				}
 				copied = true;
 			}
 			return *elements;
@@ -289,6 +352,7 @@ namespace DCLF
 
 	private:
 		std::shared_ptr<std::vector<T>> elements = std::make_shared<std::vector<T>>();
+		std::vector<std::shared_ptr<std::vector<T>>> spare;
 		ChangeJournal journal;
 		bool copied = false;
 	};

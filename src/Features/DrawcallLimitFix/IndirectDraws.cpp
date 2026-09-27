@@ -704,6 +704,7 @@ namespace DCLF
 			// The frame slot's list, reset and recording.
 			rhi::CommandList& Begin(std::uint32_t a_frameSlot)
 			{
+				ZoneScopedN("CS.DCLF.Record.RecyclePreprocessState");
 				auto& slot = slots[a_frameSlot % slots.size()];
 				slot.list->Recycle(slot.allocator.Get());
 				return slot.list.Get();
@@ -2742,6 +2743,7 @@ namespace DCLF
 		struct ObjectRecordStore
 		{
 			LogCursor cursor;
+			MarkedList changedObjects;
 			std::uint32_t renderFlags = 0;
 			KeptArray<BindlessObject> records;
 			std::atomic<std::uint32_t> busy{ 0 };
@@ -2940,6 +2942,7 @@ namespace DCLF
 				++s.collisions;
 			++s.updates;
 			s.records.BeginBuild(a_uploaded);
+			TracyCZoneN(updateRecordsZone, "CS.DCLF.Build.Objects.ApplyChanges", true);
 			if (!s.cursor.Continues(a_tables.changeLog, a_generation) || s.renderFlags != a_renderFlags || s.records.Size() > count) {
 				// Every record again: the first build, new tables, or a log this store fell behind.
 				auto& records = s.records.Mutable();
@@ -2962,8 +2965,10 @@ namespace DCLF
 					}
 				}
 				BindlessObject fresh;
+				s.changedObjects.Clear();
 				for (const auto& change : s.cursor.Unread(a_tables.changeLog)) {
-					if (!(change.causes & kObjectRecordCauses) || change.slot >= count)
+					// Every event reads the final immutable table row, not an intermediate value.
+					if (!(change.causes & kObjectRecordCauses) || change.slot >= count || (reuseKeptStorage && !s.changedObjects.Add(change.slot)))
 						continue;
 					BuildObjectRecord(a_tables, change.slot, a_renderFlags, fresh);
 					s.rewritten += s.records.Set(change.slot, fresh) ? 1u : 0u;
@@ -2971,6 +2976,7 @@ namespace DCLF
 			}
 			s.cursor.Advance(a_tables.changeLog);
 			// CS_DCLF_PERSISTENT_PARITY: every record against one built from the tables now.
+			TracyCZoneEnd(updateRecordsZone);
 			if (PersistentParityEnabled() && ParityDue(a_frame)) {
 				BindlessObject fresh;
 				const auto& records = s.records.Get();
@@ -2982,7 +2988,10 @@ namespace DCLF
 					});
 				}
 			}
-			a_out = s.records.View();
+			{
+				ZoneScopedN("CS.DCLF.Build.Objects.Snapshot");
+				a_out = s.records.View();
+			}
 			s.busy.store(0, std::memory_order_release);
 		}
 
@@ -4075,6 +4084,7 @@ namespace DCLF
 			BuildCache* a_cache = nullptr, ObjectRecordStore* a_objects = nullptr, BonesStore* a_bones = nullptr, GeometryStore* a_geometries = nullptr)
 		{
 			ZoneScopedN("CS.DCLF.BuildMainPayload");
+			TracyCZoneN(resetMainZone, "CS.DCLF.BuildMain.Reset", true);
 			if (a_cache && (a_in.frameNumber % 64) == 0)
 				a_cache->Sweep(a_in.frameNumber);
 			using Skip = IndirectDraws::Skip;
@@ -4094,6 +4104,7 @@ namespace DCLF
 			arena.Reset(depthOnly ? kDepthConstantBytes : kConstantBytes);
 			if (kept)
 				a_cache->BeginPersistent(a_in.addresses, depthOnly ? kDepthConstantBytes : kConstantBytes, a_in.constantsUploaded, a_in.recordsUploaded);
+			TracyCZoneEnd(resetMainZone);
 
 			auto block = [&](const void* a_data, std::size_t a_size) -> std::uint64_t {
 				const auto offset = arena.Allocate(a_size);
@@ -5030,9 +5041,14 @@ namespace DCLF
 							acquire(key);
 						r.pairOf[i] = key;
 					}
-					auto& inputs = r.inputs.Mutable();
-					setDraws(i, entryOf(o, inputs[i]));
-					r.inputs.Mark(i);
+					DrawInput fresh{};
+					setDraws(i, entryOf(o, fresh));
+					if (reuseKeptStorage)
+						r.inputs.Set(i, fresh);
+					else {
+						r.inputs.Mutable()[i] = fresh;
+						r.inputs.Mark(i);
+					}
 					r.touched.push_back(o);
 				};
 				// The Z-prepass draws depth only for what the colour epoch drew last frame (the loop's rule below).
@@ -9903,15 +9919,18 @@ namespace DCLF
 			if (!bytes.empty())
 				a_emit(constantsTarget, bytes.data(), bytes.size(), false, 0);
 			if (a_payload.persistent) {
+				ZoneScopedN("CS.DCLF.UploadRanges.Bindings");
 				// The kept blocks and records: what changed since the version the buffers hold, else all of them.
 				a_payload.keptConstants.Emit(a_resources.constantsUploaded[segment],
 					[&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) { a_emit(constantsTarget, a_data, a_bytes, false, a_offset); });
 				a_payload.keptRecords.Emit(a_resources.recordsUploaded[segment],
 					[&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) { a_emit(recordsTarget, a_data, a_bytes, false, a_offset); });
 			}
+			TracyCZoneN(objectUploadZone, "CS.DCLF.UploadRanges.Objects", true);
 			a_payload.objectRecords.Emit(a_resources.tablesHeld.objects, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
 				a_emit(a_resources.objects, a_data, a_bytes, false, a_offset);
 			});
+			TracyCZoneEnd(objectUploadZone);
 			if (a_resources.bones)
 				EmitBones(a_payload.bones, a_resources.tablesHeld.bones, nullptr, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
 					a_emit(a_resources.bones, a_data, a_bytes, false, a_offset);
@@ -9923,10 +9942,12 @@ namespace DCLF
 			const bool depth = a_payload.inputs.depthOnly && a_resources.inputsDepth;
 			const auto& inputs = depth ? a_resources.inputsDepth : a_resources.inputs;
 			const std::size_t regionCount = a_payload.resident.Count();
+			TracyCZoneN(residentUploadZone, "CS.DCLF.UploadRanges.Resident", true);
 			a_payload.resident.Emit(a_resources.residentUploaded[depth ? 0 : 1],
 				[&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) { a_emit(inputs, a_data, a_bytes, false, a_offset); });
 			if (!a_payload.inputList.empty())
 				a_emit(inputs, a_payload.inputList.data(), a_payload.inputList.size() * sizeof(DrawInput), false, regionCount * sizeof(DrawInput));
+			TracyCZoneEnd(residentUploadZone);
 			EmitGeometryDraws(a_payload.geometryDraws, a_resources.tablesHeld.geometries, [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
 				a_emit(a_resources.geometries, a_data, a_bytes, false, a_offset);
 			});

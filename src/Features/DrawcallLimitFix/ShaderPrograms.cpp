@@ -4,6 +4,7 @@
 #include <chrono>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "ShaderCache.h"
@@ -107,9 +108,6 @@ namespace DCLF
 		bool failed = false;
 	};
 
-	ShaderPrograms::ShaderPrograms() = default;
-	ShaderPrograms::~ShaderPrograms() = default;
-
 	ShaderPrograms& ShaderPrograms::Get()
 	{
 		static ShaderPrograms programs;
@@ -156,9 +154,10 @@ namespace DCLF
 	namespace
 	{
 		std::shared_future<org::services::ShaderArtifact> RequestStage(std::span<const std::byte> a_source, const std::vector<std::filesystem::path>& a_dependencies,
-			RE::BSShader& a_lighting, bool a_pixel, std::uint32_t a_descriptor, bool a_depthOnly = false, const char* a_sourceName = kSourcePath)
+			const RE::BSShader& a_lighting, bool a_pixel, std::uint32_t a_descriptor, bool a_depthOnly = false, const char* a_sourceName = kSourcePath)
 		{
 			org::services::ShaderCompileRequest request{};
+			ZoneScopedN("CS.DCLF.Shaders.RequestStage");
 			request.sourceName = a_sourceName;
 			request.source = a_source;
 			request.entryPoint = L"main";
@@ -205,18 +204,112 @@ namespace DCLF
 	}
 #endif
 
+	struct ShaderPrograms::StageCache
+	{
+		std::mutex mutex;
+		std::mutex requestMutex;
+		bool started = false;
+		struct Pending { const RE::BSShader* shader; bool pixel; std::uint32_t descriptor; };
+		std::vector<Pending> pending;
+#if defined(DCLF_HAS_SHADER_COMPILER)
+		ankerl::unordered_dense::map<std::uint64_t, std::shared_future<org::services::ShaderArtifact>> futures;
+		std::shared_future<org::services::ShaderArtifact> Request(ShaderPrograms& owner, const RE::BSShader& shader,
+			bool pixel, std::uint32_t descriptor, bool depth = false)
+		{
+			const bool utility = shader.shaderType.get() == RE::BSShader::Type::Utility;
+			const std::uint64_t key = descriptor | (std::uint64_t(pixel) << 32) | (std::uint64_t(depth) << 33) | (std::uint64_t(utility) << 34);
+			{
+				std::lock_guard lock(mutex);
+				if (const auto found = futures.find(key); found != futures.end())
+					return found->second;
+			}
+			// Cache hits must not wait behind another permutation's filesystem key construction.
+			std::lock_guard requestLock(requestMutex);
+			{
+				std::lock_guard lock(mutex);
+				if (const auto found = futures.find(key); found != futures.end())
+					return found->second;
+			}
+			if (!owner.Enabled() || !owner.LoadSources() || (utility && owner.utilitySource.empty()))
+				return {};
+			// Like the program entries, stage futures live for this source set's lifetime.
+			// A VS shared by several PS permutations must not rescan the shader tree each time.
+			auto future = RequestStage(utility ? owner.utilitySource : owner.source, owner.dependencies, shader,
+				pixel, descriptor, depth, utility ? kUtilitySourcePath : kSourcePath);
+			{
+				std::lock_guard lock(mutex);
+				futures.emplace(key, future);
+			}
+			return future;
+		}
+#endif
+	};
+
+	ShaderPrograms::ShaderPrograms() : stages(std::make_unique<StageCache>()) {}
+	ShaderPrograms::~ShaderPrograms() = default;
+
+	void ShaderPrograms::Precompile(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor)
+	{
+#if defined(DCLF_HAS_SHADER_COMPILER)
+		static const bool enabled = SwitchValue("CS_DCLF_PRECOMPILE") != "0";
+		if (!enabled)
+			return;
+		const auto type = a_shader.shaderType.get();
+		if (type != RE::BSShader::Type::Lighting && type != RE::BSShader::Type::Utility)
+			return;
+		{
+			std::lock_guard lock(stages->mutex);
+			if (!stages->started) {
+				stages->pending.push_back({ &a_shader, a_pixel, a_descriptor });
+				return;
+			}
+		}
+		ZoneScopedN("CS.DCLF.Shaders.Precompile");
+		auto stage = stages->Request(*this, a_shader, a_pixel, a_descriptor);
+		auto depth = a_pixel && type == RE::BSShader::Type::Lighting ? stages->Request(*this, a_shader, true, a_descriptor, true) : decltype(stage){};
+		// Stay inside CS's bounded compilation workers until this task is done, including cache hits.
+		for (const auto* future : { &stage, &depth }) {
+			if (!future->valid()) continue;
+			const auto& artifact = future->get();
+			if (!artifact) {
+				static std::atomic<std::uint32_t> failures{ 0 };
+				if (failures.fetch_add(1) < kMaxLoggedFailures)
+					logger::warn("[DCLF] ORG precompile {} {} {:08X} failed: {}", type == RE::BSShader::Type::Lighting ? "Lighting" : "Utility",
+						a_pixel ? "PS" : "VS", a_descriptor, artifact.diagnostics.substr(0, 1500));
+			}
+		}
+#endif
+	}
+
+	void ShaderPrograms::StartPrecompile()
+	{
+		std::vector<StageCache::Pending> pending;
+		{
+			std::lock_guard lock(stages->mutex);
+			if (stages->started) return;
+			stages->started = true;
+			pending.swap(stages->pending);
+		}
+		for (const auto request : pending)
+			SIE::ShaderCache::Instance().compilationPool.detach_task([this, request] {
+				try { Precompile(*request.shader, request.pixel, request.descriptor); }
+				catch (const std::exception& e) { logger::warn("[DCLF] ORG shader precompile failed: {}", e.what()); }
+				SIE::ShaderCache::Instance().NotifyPoolProgress();
+			});
+	}
+
 	const ShaderPrograms::Program* ShaderPrograms::Find(const PipelineKey& a_key, RE::BSShader& a_lighting)
 	{
-		if (!Enabled() || !LoadSources())
+		if (!Enabled())
 			return nullptr;
 		const std::uint64_t id = (static_cast<std::uint64_t>(a_key.vertexDescriptor) << 32) | a_key.pixelDescriptor;
 		auto [it, inserted] = entries.try_emplace(id);
 		if (inserted) {
 			it->second = std::make_unique<Entry>();
 #if defined(DCLF_HAS_SHADER_COMPILER)
-			it->second->vertex = RequestStage(source, dependencies, a_lighting, false, a_key.vertexDescriptor);
-			it->second->pixel = RequestStage(source, dependencies, a_lighting, true, a_key.pixelDescriptor);
-			it->second->depthPixel = RequestStage(source, dependencies, a_lighting, true, a_key.pixelDescriptor, true);
+			it->second->vertex = stages->Request(*this, a_lighting, false, a_key.vertexDescriptor);
+			it->second->pixel = stages->Request(*this, a_lighting, true, a_key.pixelDescriptor);
+			it->second->depthPixel = stages->Request(*this, a_lighting, true, a_key.pixelDescriptor, true);
 #else
 			(void)a_lighting;
 			it->second->failed = true;
@@ -230,7 +323,7 @@ namespace DCLF
 	{
 		if (a_requested)
 			*a_requested = false;
-		if (!Enabled() || !LoadSources() || utilitySource.empty())
+		if (!Enabled())
 			return nullptr;
 		auto it = shadowEntries.find(a_technique);
 		if (it == shadowEntries.end() && !a_allowRequest)
@@ -244,8 +337,8 @@ namespace DCLF
 #if defined(DCLF_HAS_SHADER_COMPILER)
 			// Both stages take the same technique: Utility's descriptor is the technique itself, not a
 			// pair of vertex and pixel descriptors as the Lighting shader's is.
-			it->second->vertex = RequestStage(utilitySource, dependencies, a_utility, false, a_technique, false, kUtilitySourcePath);
-			it->second->pixel = RequestStage(utilitySource, dependencies, a_utility, true, a_technique, false, kUtilitySourcePath);
+			it->second->vertex = stages->Request(*this, a_utility, false, a_technique);
+			it->second->pixel = stages->Request(*this, a_utility, true, a_technique);
 #else
 			(void)a_utility;
 			it->second->failed = true;

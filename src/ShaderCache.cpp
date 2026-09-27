@@ -13,6 +13,7 @@
 #include "State.h"
 
 #include "Features/DynamicCubemaps.h"
+#include "Features/DrawcallLimitFix/ShaderPrograms.h"
 
 #include "Plugin.h"
 
@@ -2358,7 +2359,10 @@ namespace SIE
 
 	bool ShaderCache::IsCompiling()
 	{
-		return compilationSet.totalTasks && compilationSet.completedTasks + compilationSet.failedTasks < compilationSet.totalTasks;
+		// ORG requests retained before renderer initialization also run in this pool.
+		// Keep the initial compilation gate up until those stage futures have completed.
+		return (compilationSet.totalTasks && compilationSet.completedTasks + compilationSet.failedTasks < compilationSet.totalTasks) ||
+		       compilationPool.get_tasks_total() != 0;
 	}
 
 	void ShaderCache::StopCompilation()
@@ -3123,6 +3127,14 @@ namespace SIE
 			ShaderCache::Instance().MakeAndAddPixelShader(shader, descriptor);
 		} else if (shaderClass == ShaderClass::Compute) {
 			ShaderCache::Instance().MakeAndAddComputeShader(shader, descriptor);
+		}
+		if (shaderClass == ShaderClass::Vertex || shaderClass == ShaderClass::Pixel) {
+			try {
+				DCLF::ShaderPrograms::Get().Precompile(shader, shaderClass == ShaderClass::Pixel, descriptor);
+			} catch (const std::exception& e) {
+				// An optional ORG artifact must not turn a successful native compile into a failed task.
+				logger::warn("[DCLF] ORG shader precompile failed: {}", e.what());
+			}
 		}
 	}
 

@@ -194,11 +194,18 @@ buffer addresses for b0-b13, resource heap indices for t0-t127, sampler heap ind
 pipeline layout maps the shaders' registers onto that record with `VK_EXT_descriptor_heap`'s indirect
 mappings; vertices come through the `VertexBuffer` argument. Lighting.hlsl needs no binding changes.
 
--   **SPIR-V.** `ShaderPrograms` compiles each pipeline key's Lighting VS and PS at run time through
+-   **SPIR-V.** `ShaderPrograms` requests each pipeline key's Lighting VS and PS through
     ORGModuleServices, with the defines of the D3D11 build (`ShaderCache::GetCompileDefines`), HLSL 2018,
     and register shifts per class (`ShaderPrograms.h`). DXC scopes cbuffers declared inside namespaces
     differently from FXC; those members are declared through `Common/NamespacedCBuffer.hlsli` (FXC output
-    byte-identical).
+    byte-identical). CS's initial compilation workers also request ORG Lighting stages (including the
+    depth-only PS) and Utility stages, including native disk-cache hits. Requests made before ORG setup
+    are retained until `DrawcallLimitFix::SetupResources`; the same bounded CS pool processes them and
+    the initial compilation gate includes that pool's outstanding work. Stage futures are shared by
+    descriptor, stage and source family, so pipeline pairs sharing a VS do not repeatedly scan shader
+    dependencies. Runtime requests remain a fallback for unseen stages; no gameplay work is frame-deferred.
+    `CS_DCLF_PRECOMPILE=0` disables only this startup path for profiling/control runs. A cold ORG cache
+    can significantly lengthen initial compilation, especially with shader debug information enabled.
 -   **Pipelines** (`DrawPipelines`) are built asynchronously through ORGModuleServices' `PipelineService`,
     two per key: the main pass's (color, depth test EQUAL, no depth writes) and DCLF's own Z-prepass (depth
     only, LESS, writes). Vertex input is the engine's input layout for (VS input mask & geometry
@@ -5131,6 +5138,15 @@ one writer, which notes a change only when the value differs, and every structur
 notes from its own position and uploads only what changed. The plan, by step: the change log (done), stable offsets,
 one persistent object-record buffer, persistent constants and binding records, the whole scene's draw inputs with the
 drawn set, the shadow build, and the remaining scans.
+
+The CPU storage path retains up to two spare vectors per `KeptArray`, reusing a vector only after all
+snapshot readers release it. Copies still copy every element, including commit-time patches outside
+the journal. Object-record updates deduplicate repeated log entries for the same final table row;
+resident inputs are journalled only when their bytes differ. Dense dirty tables use bitmap range
+coalescing, with the original sorter retained for sparse byte arenas. `CS_DCLF_CPU_STORAGE_REUSE=0`
+selects the allocation/per-event/unconditional-input-write/sort control path for correctness and timing
+comparisons; it does not change scheduling. Standalone regression tests live in
+`tests/DrawcallLimitFixCPU` (configure with CMake, build, then run CTest).
 
 ### Step 1: the change log covers every record
 

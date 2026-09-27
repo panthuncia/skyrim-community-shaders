@@ -246,6 +246,7 @@ namespace SIE
 		void Add(const ShaderCompilationTask& task);
 		/** @brief Marks a task as finished and records its timing metrics. */
 		void Complete(const ShaderCompilationTask& task);
+		void NotifyPoolProgress() { conditionVariable.notify_one(); }
 		/** @brief Resets all task queues and counters for a fresh compilation pass. */
 		void Clear();
 		/** @brief Formats a millisecond duration into a human-readable time string. */
@@ -360,6 +361,7 @@ namespace SIE
 
 		/** @brief Returns true if any shader compilation tasks are in progress. */
 		bool IsCompiling();
+		void NotifyPoolProgress() { compilationSet.NotifyPoolProgress(); }
 		/** Gets whether the shader cache is enabled. */
 		bool IsEnabled() const;
 		/** Sets whether the shader cache is enabled. */
