@@ -1329,7 +1329,7 @@ namespace SIE
 
 		std::wstring GetDiskPath(const std::string_view& name, uint32_t descriptor, ShaderClass shaderClass)
 		{
-			globals::state->GetDefines();  // [TEMP] applies CS_DCLF_SHADOW_DEBUG_OUTPUT before the name is taken
+			globals::state->GetDefines();  // applies CS_DCLF_SHADOW_DEBUG_OUTPUT before the name is taken
 			const auto suffixNarrow = Util::GetShaderDefinesSuffix(globals::state->shaderDefinesString);
 			const std::wstring suffix(suffixNarrow.begin(), suffixNarrow.end());
 
