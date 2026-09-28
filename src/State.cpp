@@ -761,7 +761,7 @@ std::vector<std::pair<std::string, std::string>>* State::GetDefines()
 {
 	// CS_DCLF_SHADOW_DEBUG_OUTPUT (dclf-open-defects.md): Lighting.hlsl writes chosen intermediate values into the Diffuse
 	// target, native and DCLF alike (DCLF_SHADOW_DEBUG).
-	static const bool shadowDebug = DCLF::SwitchEnabled("CS_DCLF_SHADOW_DEBUG_OUTPUT");
+	const bool shadowDebug = DCLF::SwitchEnabled(DCLF::Switch::ShadowDebugOutput);
 	if (shadowDebug && std::ranges::none_of(shaderDefines, [](const auto& a_define) { return a_define.first == "DCLF_SHADOW_DEBUG"; })) {
 		shaderDefines.emplace_back("DCLF_SHADOW_DEBUG", "1");
 		// The disk cache's file names carry this string, so the debug builds are cached apart.
