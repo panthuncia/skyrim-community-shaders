@@ -5,7 +5,7 @@
 #include <pystring/pystring.h>
 
 #include "Deferred.h"
-#include "Features/DrawcallLimitFix/Switches.h"
+#include "Features/DrawcallLimitFix/Common/Switches.h"
 #include "GpuEventTimers.h"
 #include "RenderGraph/NvPerfBridge.h"
 #include "GpuIdleTrace.h"
