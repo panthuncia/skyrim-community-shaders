@@ -6,6 +6,7 @@
 
 #include "Deferred.h"
 #include "Features/DrawcallLimitFix/Common/Switches.h"
+#include "Features/DrawcallLimitFix.h"
 #include "GpuEventTimers.h"
 #include "RenderGraph/NvPerfBridge.h"
 #include "GpuIdleTrace.h"
@@ -71,6 +72,8 @@ void State::UpdateSkyShaderPermutation(RE::BSRenderPass* a_pass)
 void State::Draw()
 {
 	ZoneScoped;
+	if (globals::features::drawcallLimitFix.DrawCensusOn())
+		globals::features::drawcallLimitFix.NoteNativeDraw(currentShader, currentVertexDescriptor, currentPixelDescriptor);
 
 	auto shaderCache = globals::shaderCache;
 	auto weatherManager = globals::weatherManager;

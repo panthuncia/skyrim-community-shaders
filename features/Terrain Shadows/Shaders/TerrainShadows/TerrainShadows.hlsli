@@ -21,8 +21,14 @@ namespace TerrainShadows
 	{
 		if (!SharedData::terraOccSettings.EnableTerrainShadow)
 			return 1.0;
+		// The penumbra's [upper, lower] heights: lit above the upper, shadowed below the lower. Where it has collapsed (the two
+		// equal, as wherever nothing occludes the texel), the division would be by a difference whose sign is rounding, and
+		// compilers round it differently (fused or separate multiply-adds: DXC's pipelines read -inf where FXC's read +inf,
+		// and every surface lost the sun); there the shadow is the step at that height.
 		float2 shadowHeight = GetTerrainZ(ShadowHeightTexture.SampleLevel(samp, GetTerrainShadowUV(worldPos.xy), 0));
-		return saturate((worldPos.z - shadowHeight.y) / (shadowHeight.x - shadowHeight.y));
-		;
+		const float penumbra = shadowHeight.x - shadowHeight.y;
+		if (penumbra <= 1e-3)
+			return worldPos.z >= shadowHeight.y ? 1.0 : 0.0;
+		return saturate((worldPos.z - shadowHeight.y) / penumbra);
 	}
 }
