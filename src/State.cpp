@@ -12,7 +12,6 @@
 #include "Utils/SwitchFile.h"
 #include "Features/DrawcallLimitFix.h"
 #include "GpuEventTimers.h"
-#include "RenderGraph/NvPerfBridge.h"
 #include "GpuIdleTrace.h"
 #include "FeatureIssues.h"
 #include "Features/CSEditor.h"
@@ -668,7 +667,7 @@ void State::LoadFromJson(nlohmann::json& settings)
 		if (advanced.contains("Frame Annotations") && advanced["Frame Annotations"].is_boolean())
 			frameAnnotations = advanced["Frame Annotations"];
 		// The GPU idle trace attributes gaps to the engine's render phases, which only the annotations mark.
-		if ((GpuIdleTrace::Requested() || GpuEventTimers::Requested() || NvPerfBridge::Requested()) && !frameAnnotations) {
+		if ((GpuIdleTrace::Requested() || GpuEventTimers::Requested() || NvPerf::EnvironmentRequested()) && !frameAnnotations) {
 			frameAnnotationsSetting = frameAnnotations;
 			frameAnnotations = true;
 		}
@@ -1118,7 +1117,6 @@ void State::BeginPerfEvent(std::string_view title)
 		NvPerf::PushRange(title);
 	GpuIdleTrace::BeginEvent(title);
 	GpuEventTimers::BeginEvent(title);
-	NvPerfBridge::BeginEvent(title);
 }
 
 void State::EndPerfEvent()
@@ -1136,7 +1134,6 @@ void State::EndPerfEvent()
 	pPerf->EndEvent();
 	GpuIdleTrace::EndEvent();
 	GpuEventTimers::EndEvent();
-	NvPerfBridge::EndEvent();
 }
 
 ScopedPerfEvent::ScopedPerfEvent(std::string_view a_name) :

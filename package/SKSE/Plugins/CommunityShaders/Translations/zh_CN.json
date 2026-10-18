@@ -1345,7 +1345,7 @@
     "feature.remote_control.nvperf.device": "%s（芯片 %s）",
     "feature.remote_control.nvperf.extra_metrics": "附加指标",
     "feature.remote_control.nvperf.extra_metrics_tooltip": "以英文逗号分隔，格式为 name[:counter|ratio|throughput|active|elapsed|percycle]。",
-    "feature.remote_control.nvperf.header": "Nsight Perf（DX11）",
+    "feature.remote_control.nvperf.header": "Nsight Perf",
     "feature.remote_control.nvperf.library_path": "库：%s",
     "feature.remote_control.nvperf.metrics": "指标",
     "feature.remote_control.nvperf.nesting": "嵌套层数",
