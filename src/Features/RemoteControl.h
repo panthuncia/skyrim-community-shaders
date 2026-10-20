@@ -72,6 +72,7 @@ private:
 	 * Renders the Nsight Perf section: GPU support, the capture's metrics and ranges, and the latest result.
 	 */
 	void DrawNvPerfSection();
+	void DrawNvPerfTraces();
 
 	// The Nsight Perf section's inputs. UI state only: nothing here is saved.
 	struct NvPerfPanel
@@ -83,5 +84,11 @@ private:
 		int delayFrames = 0;
 		int nestingLevels = 1;
 		std::string requestError;
+		// Traces (NvPerfTrace.h).
+		std::string traceTemplate = "dclf-passes";
+		std::string traceLabel;
+		std::string traceBaseline;  // a saved report's label, empty: none
+		std::string traceError;
+		int traceRows = 40;
 	} nvperfPanel;
 };
