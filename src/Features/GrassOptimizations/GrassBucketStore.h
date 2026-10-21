@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Buffer.h"
-#include "GrassMeshLibrary.h"
+#include "GrassShared/GrassMeshLibrary.h"
 
 struct BucketKey
 {
@@ -117,8 +117,8 @@ struct GrassBucket
 		}
 	};
 
-	// Indexed by GrassMeshLibrary::LODTier. Instances land in the main bin unless a tier claims them.
-	std::array<LODBin, (size_t)GrassMeshLibrary::LODTier::kCount> lodBins;
+	// Indexed by GrassShared::GrassMeshLibrary::LODTier. Instances land in the main bin unless a tier claims them.
+	std::array<LODBin, (size_t)GrassShared::GrassMeshLibrary::LODTier::kCount> lodBins;
 
 	// Source mesh id, for easy lookup of the LOD mesh.
 	uint32_t meshId = 0;
@@ -134,6 +134,8 @@ struct GrassBucket
 	float distScale = 1.0f;
 	float minPixelScale = 1.0f;
 	bool isComplex = false;
+	// Captured while stood down, when no detection dispatch may run; ResumeGpu detects it.
+	bool complexPending = false;
 	bool argsIndexCountWritten = false;
 
 	uint32_t capacityInstances = 0;
@@ -252,14 +254,19 @@ public:
 	/** @brief Applies staged removals and captures, then uploads dirty buckets. Caller holds bucketMutex. */
 	void ApplyPending(ID3D11Device* device, ID3D11DeviceContext* ctx);
 
+	/** @brief While DCLF owns grass: applies staged removals and captures to the buckets on the CPU only, with no
+	    uploads and no detection dispatch, so the staging queues stay bounded. Takes bucketMutex. */
+	void ApplyPendingCpu();
+
+	/** @brief On the first grass frame after standing down: drops every bucket's GPU state so the next
+	    ApplyPending rebuilds it whole from the slices, and detects the buckets captured meanwhile. Caller holds bucketMutex. */
+	void ResumeGpu(ID3D11DeviceContext* ctx);
+
 	/** @brief Re-evaluates cached complex-grass measurements for every bucket when the threshold changes. Caller holds bucketMutex. */
 	void RefreshComplexGrass(float threshold, ID3D11DeviceContext* ctx);
 
-	/** @brief Captures one GID group's instance records from the cell-load hooks. */
-	void CaptureGIDGroup(RE::BSMultiStreamInstanceTriShape* shape, RE::BSMultiStreamInstanceTriShape::GroupHeader* header, const uint16_t* instanceData, size_t dataBytes);
-
-	/** @brief Stages a raw instance-record capture. Returns false when the stride is not the expected 32 bytes, defaulting to vanilla rendering. */
-	bool StageCapture(RE::BSMultiStreamInstanceTriShape* shape, const void* src, uint32_t count, uint32_t stride, uint64_t descVal, RE::NiSourceTexture* tex);
+	/** @brief Stages a shared capture (GrassShared's sink, on the hook thread), which GrassShared already validated. */
+	void StageCapture(const GrassShared::AddEvent& e);
 
 	/** @brief Stages a dead shape for removal on the next grass frame. */
 	void StageRemoval(RE::BSMultiStreamInstanceTriShape* shape);
@@ -274,9 +281,10 @@ public:
 	void UpdateCoarseBounds(GrassBucket& b);
 
 	/** @brief Allocates/frees one of a bucket's LOD compaction bins. Returns true if the bin is successfully allocated. */
-	bool EnsureLODBin(GrassBucket& b, GrassMeshLibrary::LODTier tier, ID3D11Device* device);
+	bool EnsureLODBin(GrassBucket& b, GrassShared::GrassMeshLibrary::LODTier tier, ID3D11Device* device);
 
-	GrassMeshLibrary meshLibrary;
+	// Shared with DCLF; GrassShared's hooks record the model paths and forget dead shapes.
+	GrassShared::GrassMeshLibrary& meshLibrary = GrassShared::MeshLibrary();
 
 	std::unordered_map<BucketKey, GrassBucket, BucketKeyHash> buckets;
 	// Callers hold this across the whole lifetime of a buckets traversal, and across ApplyPending and
@@ -285,11 +293,11 @@ public:
 	std::mutex bucketMutex;
 
 private:
-	/** @brief Removes dead shapes' slices from their buckets and drops them from the lookup maps. */
+	/** @brief Removes dead shapes' slices from their buckets and drops them from the shape lookup. */
 	void ApplyRemovals(const std::vector<RE::BSMultiStreamInstanceTriShape*>& removes);
 
-	/** @brief Folds staged captures into buckets, creating buckets and slices as needed. */
-	void ApplyCaptures(std::vector<PendingCapture>& captures);
+	/** @brief Folds staged captures into buckets, creating buckets and slices as needed. cpuOnly defers complex-grass detection to ResumeGpu. */
+	void ApplyCaptures(std::vector<PendingCapture>& captures, bool cpuOnly = false);
 
 	/** @brief Rebuilds or appends to the GPU buffers of buckets whose slices changed. */
 	void UploadDirtyBuckets(ID3D11Device* device, ID3D11DeviceContext* ctx);

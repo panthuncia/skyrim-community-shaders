@@ -67,8 +67,11 @@ public:
 	/** @brief Releases the cached compute shaders so they recompile on next use. */
 	virtual void ClearShaderCache() override;
 
-	/** @brief Installs the grass capture, culling and draw hooks after all plugins have loaded. */
+	/** @brief Registers the bucket store with GrassShared's capture, then installs the culling and draw hooks after all plugins have loaded. */
 	virtual void PostPostLoad() override;
+
+	/** @brief Publishes the cull settings to GrassShared, where DCLF's grass reads them. */
+	void PublishSettings();
 
 	/** @brief Returns the instance culling compute shader, compiling it on first use. */
 	ID3D11ComputeShader* GetCullCS();
@@ -149,6 +152,15 @@ public:
 	/** @brief Once-per-frame grass update called in BSGrassShader::SetupGeometry: applies staged captures/removals, uploads dirty buckets, builds the Hi-Z pyramid and issues the culling dispatches. */
 	void UpdateGrass();
 
+	/** @brief GrassShared sink: stages a capture on the hook thread. */
+	static void OnCapture(const GrassShared::AddEvent& e);
+
+	/** @brief GrassShared sink: stages a destroyed shape's removal on the dtor's thread. */
+	static void OnRemove(RE::BSMultiStreamInstanceTriShape* shape, uint64_t seq);
+
+	/** @brief GrassShared stood-down callback, on frames DCLF owns grass: keeps the buckets current on the CPU, without uploads or culling. */
+	static void StoodDownDrain();
+
 	/** @brief Merges this bucket's slices into runs of contiguous buffer ranges that share a cell, for the per-bucket slice table. */
 	void MergeSlicesIntoRuns(GrassBucket& b);
 
@@ -197,23 +209,14 @@ public:
 	float maxGrassDistance = 0.0f;
 	float maxDistSq = 0.0f;
 
+	// Set by StoodDownDrain; the next UpdateGrass rebuilds the GPU state, since the stood-down frames did not upload.
+	bool stoodDown = false;
+
 	struct Hooks
 	{
-		struct BSMultiStreamInstanceTriShape_dtor
-		{
-			static void thunk(RE::BSMultiStreamInstanceTriShape* This);
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
 		struct BSMultiStreamInstanceTriShape_OnVisible
 		{
 			static void thunk(RE::BSMultiStreamInstanceTriShape* This, RE::NiCullingProcess* process, std::int32_t alphaGroupIndex);
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
-		struct DoneAddingInstances
-		{
-			static void thunk(RE::BSMultiStreamInstanceTriShape* geometry, RE::BSTArray<std::uint32_t>& a_instances);
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
@@ -223,51 +226,9 @@ public:
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		struct AddQueuedGroupGIDBuffer
-		{
-			static std::uint32_t thunk(RE::BSMultiStreamInstanceTriShape* a1, RE::BSMultiStreamInstanceTriShape::GroupHeader* a2, std::uint16_t* a3, RE::BSTArray<std::uint32_t>& a4);
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
-		struct AddGroupGIDBuffer
-		{
-			static std::uint32_t thunk(RE::BSMultiStreamInstanceTriShape* a1, RE::BSMultiStreamInstanceTriShape::GroupHeader* a2, std::uint16_t* a3);
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
-		struct ReadGroupHeaderStreamTraits
-		{
-			static void thunk(RE::BSStreamHeader* streamHeader, RE::BSMultiStreamInstanceTriShape::GroupHeader* groupHeader, uint32_t size);
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
-		struct ReadInstanceGroupStreamTraits
-		{
-			static void thunk(RE::BSStreamHeader* streamHeader, uint16_t* groupHeader, uint32_t size);
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
-		struct AddGroupQueuedGIDFile
-		{
-			static void thunk(RE::BSMultiStreamInstanceTriShape* a1, RE::BSStream* a2, RE::BSTArray<std::uint32_t>& a3);
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
-		struct AddGroupGIDFile
-		{
-			static void thunk(RE::BSMultiStreamInstanceTriShape* a1, RE::BSStream* a2);
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
 		struct DrawInstanceTriShape
 		{
 			static void thunk(RE::BSRenderPass* curPass, RE::BSMultiStreamInstanceTriShape* geometry);
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
-		struct LoadGrassType
-		{
-			static RE::BSMultiStreamInstanceTriShape* thunk(RE::BGSGrassManager* grassManager, RE::GrassParam* a_param, uint32_t CellXDivided, uint32_t CellYDivided, uint64_t* typeKey, RE::BSFixedString* modelPath);
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
@@ -275,25 +236,10 @@ public:
 		{
 			auto& trampoline = SKSE::GetTrampoline();
 
-			stl::write_vfunc<0x0, BSMultiStreamInstanceTriShape_dtor>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);
+			// The instance capture hooks (shape dtor, DoneAddingInstances, the GID buffer/file and LoadGrassType thunks) are GrassShared's.
 			stl::write_vfunc<0x34, BSMultiStreamInstanceTriShape_OnVisible>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);
-			stl::write_vfunc<0x3A, DoneAddingInstances>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);
 
 			stl::write_vfunc<0x6, BSGrassShader_SetupGeometry>(RE::VTABLE_BSGrassShader[0]);
-
-			// Capture raw instance data for cached grass.
-			stl::write_thunk_call<AddQueuedGroupGIDBuffer>(REL::RelocationID(15205, 15373).address() + Util::VersionedRelocation::Select(0x7FF, 0x756, 0x768));
-			stl::write_thunk_call<AddGroupGIDBuffer>(REL::RelocationID(15205, 15373).address() + Util::VersionedRelocation::Select(0x806, 0x75D, 0x76F));
-			stl::write_thunk_call<ReadGroupHeaderStreamTraits>(REL::RelocationID(74599, 76327).address() + Util::VersionedRelocation::Select(0x36, 0x36, 0x45));
-			stl::write_thunk_call<ReadGroupHeaderStreamTraits>(REL::RelocationID(74596, 76324).address() + Util::VersionedRelocation::Select(0x2F, 0x33, 0x42));
-			stl::write_thunk_call<ReadInstanceGroupStreamTraits>(REL::RelocationID(74607, 76339).address() + REL::Relocate(0xCF, 0xCF));
-			stl::write_thunk_call<AddGroupQueuedGIDFile>(REL::RelocationID(15206, 15374).address() + REL::Relocate(0x394, 0x384));
-			stl::write_thunk_call<AddGroupGIDFile>(REL::RelocationID(15206, 15374).address() + REL::Relocate(0x39B, 0x38B));
-
-			// Record each grass type's source .nif path alongside its shape.
-			stl::write_thunk_call<LoadGrassType>(REL::RelocationID(15204, 15372).address() + Util::VersionedRelocation::Select(0x2F5, 0x2F5, 0x305));
-			stl::write_thunk_call<LoadGrassType>(REL::RelocationID(15205, 15373).address() + Util::VersionedRelocation::Select(0x62B, 0x597, 0x590));
-			stl::write_thunk_call<LoadGrassType>(REL::RelocationID(15206, 15374).address() + REL::Relocate(0x25C, 0x25C));
 
 			std::uint8_t patch[] = { 0x4C, 0x89, 0xF2 };  // mov rdx, r14
 			REL::safe_write(REL::RelocationID(100847, 107637).address() + REL::Relocate(0x660, 0x648), patch, sizeof(patch));
