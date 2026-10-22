@@ -11,7 +11,8 @@
 #	if defined(DCLF_BINDLESS_DRAW)
 // From the object's shading row rather than b8, so the binding record stops varying with it. The outer
 // guard is LIGHTING, so Effect/Particle/Water/RunGrass never reach either branch.
-static const float emissiveMult = DCLFShading[DCLFObjectIndex].EmissiveMult;
+// Read where used: a plain draw's object index (DCLF_PULLED) is set by its main, after statics are initialised.
+#		define emissiveMult (DCLFShading[DCLFObjectIndex].EmissiveMult)
 #	else
 cbuffer LLPerGeometry : register(b8)
 {
