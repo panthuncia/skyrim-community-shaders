@@ -12,6 +12,7 @@
 #include "Deferred.h"
 #include "State.h"
 #include "Utils/CompileDedupe.h"
+#include "Utils/FileRename.h"
 #include "Utils/ShaderContentStore.h"
 
 #include "Features/DynamicCubemaps.h"
@@ -1422,7 +1423,7 @@ namespace SIE
 				tempCounter.fetch_add(1, std::memory_order_relaxed));
 			std::error_code ec;
 			if (SUCCEEDED(D3DWriteBlobToFile(blob, tempPath.c_str(), true))) {
-				std::filesystem::rename(tempPath, diskPath, ec);
+				Util::RenameSerialized(tempPath, diskPath, ec);
 				if (!ec)
 					return true;
 			}
