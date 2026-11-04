@@ -203,6 +203,8 @@ namespace DCLF
 		// The Z-prepass and the views' work here (the reflection's faces and first person's depth, which the depth epoch hosts) are submitted
 		// under depth.committed.
 		Extensions::TriggerScope trigger(Draws::CoreTriggerOf(Draws::CoreTrigger::DepthCommitted));
+		if (auto* player = RE::PlayerCharacter::GetSingleton())
+			FrameValues::Get().KickLate(static_cast<RE::TESObjectREFR*>(player));
 		// The views' work at the depth commit (Features/Reflection's: the frame's reflection faces, every TESWaterReflections::Update of the
 		// frame having run, two a frame, a face each, drawn by DCLF before the water reads the cube; dclf-architecture.md, "Water
 		// reflections"; then Features/FirstPerson's: the frame's first-person depth, its camera set by Main::Draw before RenderDepth, drawn

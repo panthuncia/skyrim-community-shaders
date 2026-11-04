@@ -92,6 +92,7 @@ namespace DCLF
 		 */
 		bool Kick(std::vector<std::shared_ptr<const PlacementPlan>> a_plans, std::vector<ShadingItem> a_shading,
 			std::vector<ShadingFieldValue> a_fieldValues, std::shared_ptr<const FrameGlobals> a_globals);
+		void KickLate(const void* a_key);
 		/**
 		 * @brief Render thread, before Kick: the claims whose CategoryRoot views' members the frame draws (null: none, those views'
 		 * epochs do not draw this frame: the first person's). Kick samples those members' rows and skin palettes itself, before Main::Draw
