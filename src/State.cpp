@@ -25,6 +25,7 @@
 #include "Features/PostProcessing.h"
 #include "Features/RainRefraction.h"
 #include "Features/RemoteControl/NvPerf.h"
+#include "GpuEventTimers.h"
 #include "Features/Skin.h"
 #include "Features/SkySync.h"
 #include "Features/Skylighting.h"
@@ -811,6 +812,8 @@ void State::LoadFromJson(nlohmann::json& settings)
 			shaderCache->SetFileWatcher(advanced["Use FileWatcher"]);
 		if (advanced.contains("Frame Annotations") && advanced["Frame Annotations"].is_boolean())
 			frameAnnotations = advanced["Frame Annotations"];
+		if (NvPerf::EnvironmentRequested() || GpuEventTimers::Requested())
+			frameAnnotations = true;
 		if (advanced.contains("Partial Precision") && advanced["Partial Precision"].is_boolean())
 			enablePartialPrecision.store(advanced["Partial Precision"].get<bool>(), std::memory_order_relaxed);
 		if (advanced.contains("Content Store") && advanced["Content Store"].is_boolean())
@@ -1435,7 +1438,7 @@ uint32_t State::GetRuntimePixelBits(const RE::BSShader& a_shader)
 
 bool State::PerfEventsConsumed() const
 {
-	if ((pPerf && pPerf->GetStatus()) || NvPerf::RangesActive())
+	if ((pPerf && pPerf->GetStatus()) || NvPerf::RangesActive() || GpuEventTimers::Requested())
 		return true;
 #ifdef TRACY_ENABLE
 	return TracyIsConnected;
@@ -1466,6 +1469,7 @@ void State::BeginPerfEvent(std::string_view title)
 	pPerf->BeginEvent(std::wstring(title.begin(), title.end()).c_str());
 	if (NvPerf::RangesActive())
 		NvPerf::PushRange(title);
+	GpuEventTimers::BeginEvent(title);
 }
 
 void State::EndPerfEvent()
@@ -1489,6 +1493,7 @@ void State::EndPerfEvent()
 	if (NvPerf::RangesActive())
 		NvPerf::PopRange();
 	pPerf->EndEvent();
+	GpuEventTimers::EndEvent();
 }
 
 void State::SetPerfMarker(std::string_view title)

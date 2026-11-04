@@ -1,4 +1,5 @@
 #include "Deferred.h"
+#include "MemAB.h"
 #include "Features/Upscaling.h"
 #include "FrameAnnotations.h"
 #include "Globals.h"
@@ -50,6 +51,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	while (!REX::W32::IsDebuggerPresent()) {};
 #endif
 	InitializeLog();
+	MemAB::ApplyEnvironmentFile();
 	SKSE::Init(a_skse);
 	logger::info("Community Shaders {} | branch: {} | describe: {} | hash: {}{}",
 		Util::GetFormattedVersion(Plugin::VERSION),

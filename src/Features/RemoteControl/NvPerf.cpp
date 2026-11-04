@@ -10,6 +10,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -1090,8 +1091,74 @@ namespace NvPerf
 			EndPass(profiler, *profiler.capture);
 	}
 
+	// A/B test switches, as org_integration's: CS_NVPERF_RANGES (comma-separated filters, or ALL for every outermost range),
+	// CS_NVPERF_METRICS, CS_NVPERF_START_FRAME (default 1200) and CS_NVPERF_SAMPLES (default 3). The result goes to the CSV.
+	namespace
+	{
+		std::string Env(const char* a_name)
+		{
+			char value[4096]{};
+			const DWORD length = ::GetEnvironmentVariableA(a_name, value, sizeof(value));
+			return length && length < sizeof(value) ? std::string(value, length) : std::string{};
+		}
+
+		std::vector<std::string> Split(const std::string& a_text)
+		{
+			std::vector<std::string> parts;
+			std::stringstream stream(a_text);
+			for (std::string part; std::getline(stream, part, ',');) {
+				while (!part.empty() && part.front() == ' ')
+					part.erase(part.begin());
+				while (!part.empty() && part.back() == ' ')
+					part.pop_back();
+				if (!part.empty())
+					parts.push_back(part);
+			}
+			return parts;
+		}
+
+		void QueueEnvironmentCapture()
+		{
+			static const bool requested = !Env("CS_NVPERF_RANGES").empty();
+			static const std::uint64_t startFrame = [] {
+				const auto start = Env("CS_NVPERF_START_FRAME");
+				return start.empty() ? std::uint64_t(1200) : std::strtoull(start.c_str(), nullptr, 10);
+			}();
+			static std::uint64_t presents = 0;
+			if (!requested || ++presents != startFrame)
+				return;
+			CaptureConfiguration configuration;
+			if (Env("CS_NVPERF_RANGES") != "ALL")
+				configuration.ranges = Split(Env("CS_NVPERF_RANGES"));
+			for (const auto& entry : Split(Env("CS_NVPERF_METRICS"))) {
+				MetricRequest metric;
+				std::string error;
+				if (ParseMetric(entry, metric, error))
+					configuration.metrics.push_back(std::move(metric));
+				else
+					logger::warn("[NvPerf] CS_NVPERF_METRICS: '{}' skipped: {}", entry, error);
+			}
+			configuration.samples = 3;
+			if (const auto samples = Env("CS_NVPERF_SAMPLES"); !samples.empty())
+				configuration.samples = static_cast<std::uint32_t>(std::strtoul(samples.c_str(), nullptr, 10));
+			std::uint64_t captureId = 0;
+			std::string error;
+			if (!RequestCapture(configuration, captureId, error))
+				logger::warn("[NvPerf] CS_NVPERF_RANGES: no capture: {}", error);
+			else
+				logger::info("[NvPerf] CS_NVPERF_RANGES: capture {} at frame {}, {} samples", captureId, startFrame, configuration.samples);
+		}
+	}
+
+	bool EnvironmentRequested()
+	{
+		static const bool requested = !Env("CS_NVPERF_RANGES").empty();
+		return requested;
+	}
+
 	void OnPresentEnd()
 	{
+		QueueEnvironmentCapture();
 		auto& profiler = Get();
 		std::optional<std::pair<std::uint64_t, CaptureConfiguration>> pending;
 		bool cancel = false;
@@ -1184,6 +1251,7 @@ namespace NvPerf
 	void SetCompletionCallback(std::function<void(const CaptureResult&)>) {}
 	void OnPresentBegin() {}
 	void OnPresentEnd() {}
+	bool EnvironmentRequested() { return false; }
 	bool RangesActive() noexcept { return false; }
 	void PushRange(std::string_view) {}
 	void PopRange() {}

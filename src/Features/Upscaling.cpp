@@ -1,4 +1,5 @@
 #include "Upscaling.h"
+#include "MemAB.h"
 
 #include "../I18n/I18n.h"
 #include "Deferred.h"
@@ -87,7 +88,8 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 		pSwapChainDesc->BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 	}
 
-	bool shouldProxy = true;
+	char noFg[8]{};
+	bool shouldProxy = !GetEnvironmentVariableA("CS_DEV_NO_FG", noFg, sizeof(noFg));
 	if (shouldProxy)
 		if (!pSwapChainDesc->Windowed)
 			shouldProxy = false;
@@ -127,6 +129,7 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 				ppDevice,
 				pFeatureLevel,
 				ppImmediateContext));
+			MemAB::Track(*ppDevice);
 
 			upscaling.SetProxyD3D11Device(*ppDevice);
 			upscaling.SetProxyD3D11DeviceContext(*ppImmediateContext);
@@ -170,6 +173,8 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 		ppDevice,
 		pFeatureLevel,
 		ppImmediateContext);
+	if (SUCCEEDED(ret) && ppDevice)
+		MemAB::Track(*ppDevice);
 
 	if (upscaling.IsBackendInitialized()) {
 		upscaling.UpgradeBackendInterface((void**)&(*ppDevice));

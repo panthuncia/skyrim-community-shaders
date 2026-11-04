@@ -1,3 +1,4 @@
+#include "GpuEventTimers.h"
 #include "FrameAnnotations.h"
 
 #include "State.h"
@@ -29,7 +30,7 @@ namespace FrameAnnotations
 	{
 		static void thunk(RE::BSShader* shader, RE::BSRenderPass* pass, uint32_t renderFlags)
 		{
-			if (globals::state->AnnotateDraws()) {
+			if (globals::state->AnnotateDraws() && !GpuEventTimers::Requested()) {
 				uint32_t descriptor = 0;
 				if (globals::game::currentPixelShader && *globals::game::currentPixelShader) {
 					descriptor = (*globals::game::currentPixelShader)->id;
@@ -54,7 +55,7 @@ namespace FrameAnnotations
 		{
 			func(shader, pass, renderFlags);
 
-			if (globals::state->AnnotateDraws()) {
+			if (globals::state->AnnotateDraws() && !GpuEventTimers::Requested()) {
 				globals::state->EndPerfEvent();
 			}
 		}

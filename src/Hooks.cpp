@@ -1,4 +1,6 @@
 #include "Hooks.h"
+#include "GpuEventTimers.h"
+#include "MemAB.h"
 
 #include "ShaderTools/BSShaderHooks.h"
 #include "ShaderTools/LegacyGraphicsCompatibility.h"
@@ -493,6 +495,7 @@ struct IDXGISwapChain_Present
 	{
 		// Nsight Perf passes span one frame's rendering: ended before the overlay and Present, begun after.
 		NvPerf::OnPresentBegin();
+		GpuEventTimers::OnPresent();
 
 		HRESULT retval = globals::features::hdrDisplay.HandleSwapChainPresent(
 			This,
@@ -502,7 +505,9 @@ struct IDXGISwapChain_Present
 				return func(swapChain, syncInterval, presentFlags);
 			});
 
+		GpuEventTimers::PassSkipAfterPresent();
 		globals::state->Reset();
+		MemAB::OnPresent();
 
 		NvPerf::OnPresentEnd();
 
@@ -567,6 +572,9 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChain(
 		ppDevice,
 		pFeatureLevel,
 		ppImmediateContext);
+
+	if (SUCCEEDED(ret) && ppDevice)
+		MemAB::Track(*ppDevice);
 
 	return ret;
 }

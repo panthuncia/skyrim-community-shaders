@@ -121,6 +121,8 @@ namespace NvPerf
 	/// Loads the library and identifies the GPU, once. Thread-safe; needs the D3D11 device.
 	/// @return Whether the GPU supports the range profiler.
 	bool Probe();
+	/// CS_NVPERF_RANGES asks for a capture: Frame Annotations must be on at startup, so the engine's passes are hooked.
+	bool EnvironmentRequested();
 	DeviceInfo GetDeviceInfo();
 
 	/// Time, throughput of the main units, the instruction mix and the warp stall reasons.

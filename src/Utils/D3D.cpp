@@ -1,4 +1,5 @@
 #include "D3D.h"
+#include "MemAB.h"
 
 #include "Deferred.h"
 #include "Feature.h"
@@ -148,6 +149,7 @@ namespace Util
 		if (len < 0)
 			len = static_cast<int>(strnlen(buffer, sizeof(buffer)));
 		Resource->SetPrivateData(WKPDID_D3DDebugObjectNameT, static_cast<UINT>(len), buffer);
+		MemAB::NoteName(Resource, buffer);
 	}
 
 	// Per-frame getters would otherwise retry a failed compile every frame.
