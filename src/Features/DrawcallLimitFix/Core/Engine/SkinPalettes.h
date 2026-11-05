@@ -30,6 +30,11 @@ namespace DCLF::SkinPalettes
 		updateSkinInstance(a_skin, &a_world);
 	}
 
+	inline bool Rewound(const RE::NiSkinInstance& a_skin)
+	{
+		return Engine::At<const std::uint32_t>(&a_skin, 0x38) != Engine::Global<std::uint32_t>(Engine::Address::kFrameCounter);
+	}
+
 	// The skin's palettes after this frame's update; false when its size mismatches its block (the walk rewrites it: KeepSkin).
 	inline bool Of(const RE::BSGeometry& a_geometry, std::uint32_t a_rows, const float*& a_current, const float*& a_previous)
 	{

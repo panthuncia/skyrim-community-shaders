@@ -583,6 +583,7 @@ namespace DCLF
 			std::uint64_t seq = 0;
 			const Plan* plan = nullptr;
 			std::uint64_t planSerial = 0;  // the render thread's for plan
+			const void* lateKey = nullptr;
 			bool parity = false;           // Policy::SampleEveryMover
 			std::vector<const Plan*> written;  // plans whose written slots it also samples (oldest first)
 			std::vector<ShadingItem> shadingItems;  // newest last
@@ -769,7 +770,7 @@ namespace DCLF
 		// A backing the pool stopped handing out is no frame's and no failed upload's fallback: its descriptors' imports, each holding a
 		// texture and any old storage a move left it, go now rather than when the pool lets the backing go.
 		for (auto& [generation, entry] : backingFieldOwners)
-			if (entry.seq + kIdleBackingJobs < a_job.seq)
+			if (!a_job.lateKey && entry.seq + kIdleBackingJobs < a_job.seq)
 				entry.resources.reset();
 		if (const auto previous = backingFieldOwners.find(a_job.leases[kShading]->generation); previous != backingFieldOwners.end())
 			a_job.fieldResources->push_back(previous->second.resources);
@@ -798,7 +799,8 @@ namespace DCLF
 			stl::report_and_fail(fmt::format("Drawcall Limit Fix: frame values {} could not signal the frame's wait; the GPU would wait for it forever", a_job.seq));
 		const auto total = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
 		for (auto max = maxTotalUs.load(std::memory_order_relaxed); total > max && !maxTotalUs.compare_exchange_weak(max, total, std::memory_order_relaxed);) {}
-		++frames;
+		if (!a_job.lateKey)
+			++frames;
 		done.store(a_job.seq, std::memory_order_release);
 		done.notify_all();
 	}
@@ -1161,6 +1163,12 @@ namespace DCLF
 			rootDue[r] = 0;
 		dueMovers.clear();
 		dueRoots.clear();
+		if (a_job.lateKey) {
+			if (const auto it = keyIndex.find(a_job.lateKey); it != keyIndex.end())
+				for (const auto m : it->second.movers)
+					MarkMover(m);
+			return;
+		}
 		// The plans since the last producer onto the kept set (their joined and changed items due once, below).
 		ApplyPlans(a_job);
 		const auto markKey = [&](const void* a_key) {
@@ -1345,6 +1353,8 @@ namespace DCLF
 			blockListed[block] = 0;
 		listedSlots.clear();
 		listedBlocks.clear();
+		if (a_job.lateKey)
+			return;
 		SampleShadingRows(a_job, a_job.shadingSlots);
 		// The CPU pipeline's: the rows are this frame's from here (the registered pools' samples write none). The view batches' live spheres,
 		// the builder's snapshot spheres when it asked, then the CPU stages' hook (Features/Fades' CPU fade states, a registered pool, read
@@ -2209,6 +2219,8 @@ namespace DCLF
 			ZoneScopedN("CS.DCLF.FrameValues.Send.palettes");
 			Send(a_job, kPalettes, palettes);
 		}
+		if (a_job.lateKey)
+			return;
 		{
 			ZoneScopedN("CS.DCLF.FrameValues.Send.shading");
 			auto owners = std::make_shared<ResourceOwners>();
@@ -2519,6 +2531,42 @@ namespace DCLF
 				}))
 			stl::report_and_fail("Drawcall Limit Fix: the frame values' producer was refused by DCLF's executor");
 		return true;
+	}
+
+	void FrameValues::KickLate(const void* a_key)
+	{
+		auto& s = *impl;
+		if (!a_key || !s.kicked || !s.plan || !ProducerDone(true))
+			return;
+		const auto keyed = s.keyIndex.find(a_key);
+		if (keyed == s.keyIndex.end() || !std::ranges::any_of(keyed->second.movers, [&](std::uint32_t a_mover) {
+				const auto& mover = s.keptMovers[a_mover];
+				const auto* skin = mover.live && mover.item.boneRows && mover.item.geometry ? mover.item.geometry->GetGeometryRuntimeData().skinInstance.get() : nullptr;
+				return skin && SkinPalettes::Rewound(*skin);
+			}))
+			return;
+		auto* host = RenderGraphRuntime::Get().Host();
+		auto timeline = RenderGraphRuntime::Get().FrameWaitTimeline();
+		auto uploads = host ? host->RetainUploads() : nullptr;
+		if (!host || !timeline || !uploads)
+			return;
+		Impl::Job job;
+		job.seq = ++s.seq;
+		job.lateKey = a_key;
+		job.plan = s.plan.get();
+		job.fieldResources = std::make_shared<Impl::ResourceOwners>();
+		job.leases = s.frameLeases;
+		for (std::size_t part = 0; part < kBuiltInPools; ++part)
+			job.oldestContentEpochs[part] = s.pools[part].pool->OldestContentEpoch();
+		job.writeAfter = DCLF::SubmittedGpuPoint();
+		job.timeline = std::move(timeline);
+		job.uploads = std::move(uploads);
+		host->SetFrameWaitValue(job.seq);
+		if (!SceneScheduler::Executor().DispatchFrameCritical(SceneScheduler::Scope(), "frame values late", [&s, job = std::move(job)](const auto&) mutable {
+				s.Run(job);
+				job.leases = {};
+			}))
+			stl::report_and_fail("Drawcall Limit Fix: the frame values' late producer was refused by DCLF's executor");
 	}
 
 	void FrameValues::Skip()
