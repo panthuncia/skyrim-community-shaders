@@ -697,7 +697,7 @@ void ExponentialHeightFog::Prepass()
 	auto& lightLimitFix = globals::features::lightLimitFix;
 	const bool hasLocalLightData =
 		lightLimitFix.loaded &&
-		lightLimitFix.lights &&
+		lightLimitFix.GetLightsSRV() &&
 		lightLimitFix.GetLightIndexListSRV() &&
 		lightLimitFix.GetLightGridSRV();
 	const bool hasLocalShadowData = hasLocalLightData && lightLimitFix.IsLocalShadowCacheActive() && lightLimitFix.localShadowBuffer;
@@ -903,7 +903,7 @@ void ExponentialHeightFog::Prepass()
 				p.hasPrevConservativeDepth && p.conservativeDepthHistory ? p.conservativeDepthHistory->srv.get() : nullptr
 			};
 			ID3D11ShaderResourceView* localLightSrvs[3]{
-				hasLocalLightData ? lightLimitFix.lights->srv.get() : nullptr,
+				hasLocalLightData ? lightLimitFix.GetLightsSRV() : nullptr,
 				hasLocalLightData ? lightLimitFix.GetLightIndexListSRV() : nullptr,
 				hasLocalLightData ? lightLimitFix.GetLightGridSRV() : nullptr
 			};

@@ -292,6 +292,11 @@ public:
 	eastl::unique_ptr<Buffer> lightIndexCounter = nullptr;
 	eastl::unique_ptr<Buffer> lightIndexList = nullptr;
 	eastl::unique_ptr<Buffer> lightGrid = nullptr;
+	// The cluster count the D3D11 culling set is made for (SetupResources).
+	uint legacyClusterCount = 0;
+
+	/** @brief Creates the D3D11 culling shaders and buffers on first use: the fallback when the render graph does not cull. */
+	void EnsureLegacyCulling();
 
 	std::uint32_t lightCount = 0;
 	std::uint32_t particleLightCount = 0;
@@ -402,6 +407,11 @@ public:
 	 * UpdateCamera) does not reach, so the two would choose different lights (dclf-open-defects.md).
 	 */
 	static bool LocalShadowsBlockedByDCLF();
+	/**
+	 * @brief This frame's lights (t35): the render graph's buffer when it culled the clusters, else the D3D11 fallback's.
+	 * Valid for consumers that run after Prepass.
+	 */
+	ID3D11ShaderResourceView* GetLightsSRV() const;
 	/**
 	 * @brief This frame's light index list: the render graph's when it culled the clusters, else the D3D11 fallback's.
 	 * Valid for consumers that run after Prepass.

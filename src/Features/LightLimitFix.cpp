@@ -1,6 +1,5 @@
 #include "LightLimitFix.h"
 
-#include <bitset>
 #include "CSEditor/EditorWindow.h"
 #include "DrawcallLimitFix.h"
 #include "Effects11.h"
@@ -8,6 +7,7 @@
 #include "LightLimitFix/LightAttach.h"
 #include "LightLimitFix/ORGLightCulling.h"
 #include "LinearLighting.h"
+#include <bitset>
 
 #include "I18n/I18n.h"
 #include "Menu.h"
@@ -264,7 +264,22 @@ void LightLimitFix::SetupResources()
 	clusterSize[0] = ((uint)screenSize.x + 63) / 64;
 	clusterSize[1] = ((uint)screenSize.y + 63) / 64;
 	clusterSize[2] = 32;
-	uint clusterCount = clusterSize[0] * clusterSize[1] * clusterSize[2];
+	legacyClusterCount = clusterSize[0] * clusterSize[1] * clusterSize[2];
+
+	// Culling runs on the render graph when DXVK's device could be adopted. The D3D11 set is the
+	// fallback for native D3D11 and for graph failures, so it is made only when one of those needs it.
+	if (!ORGLightCulling::Get().Setup(legacyClusterCount, MAX_LIGHTS, sizeof(LightData), CLUSTER_MAX_LIGHTS))
+		EnsureLegacyCulling();
+
+	strictLightDataCB = new ConstantBuffer(ConstantBufferDesc<StrictLightDataCB>(), "LLF::StrictLightDataCB");
+}
+
+void LightLimitFix::EnsureLegacyCulling()
+{
+	if (lights)
+		return;
+	const uint clusterCount = legacyClusterCount;
+	logger::info("[LLF] D3D11 light culling resources created ({} clusters)", clusterCount);
 
 	{
 		std::vector<std::pair<const char*, const char*>> clusterDefines;
@@ -331,10 +346,6 @@ void LightLimitFix::SetupResources()
 		lightGrid->CreateUAV(uavDesc);
 	}
 
-	// Culling runs on the render graph when DXVK's device could be adopted; the D3D11
-	// buffers above stay as the fallback for native D3D11 and for graph failures.
-	ORGLightCulling::Get().Setup(clusterCount, MAX_LIGHTS, sizeof(LightData), CLUSTER_MAX_LIGHTS);
-
 	{
 		D3D11_BUFFER_DESC sbDesc{};
 		sbDesc.Usage = D3D11_USAGE_DYNAMIC;
@@ -351,10 +362,6 @@ void LightLimitFix::SetupResources()
 		srvDesc.Buffer.FirstElement = 0;
 		srvDesc.Buffer.NumElements = MAX_LIGHTS;
 		lights->CreateSRV(srvDesc);
-	}
-
-	{
-		strictLightDataCB = new ConstantBuffer(ConstantBufferDesc<StrictLightDataCB>(), "LLF::StrictLightDataCB");
 	}
 }
 
@@ -539,10 +546,17 @@ void LightLimitFix::Prepass()
 	state->BeginPerfEvent("LightLimitFix Prepass");
 	UpdateLights();
 
-	ID3D11ShaderResourceView* views[3]{ lights->srv.get(), GetLightIndexListSRV(), GetLightGridSRV() };
+	ID3D11ShaderResourceView* views[3]{ GetLightsSRV(), GetLightIndexListSRV(), GetLightGridSRV() };
 	context->PSSetShaderResources(35, ARRAYSIZE(views), views);
 
 	state->EndPerfEvent();
+}
+
+ID3D11ShaderResourceView* LightLimitFix::GetLightsSRV() const
+{
+	if (orgCulledThisFrame)
+		return ORGLightCulling::Get().GetLightsSRV();
+	return lights ? lights->srv.get() : nullptr;
 }
 
 ID3D11ShaderResourceView* LightLimitFix::GetLightIndexListSRV() const
@@ -710,6 +724,9 @@ void LightLimitFix::ClearShaderCache()
 		localShadowCopyCS = nullptr;
 	}
 	localShadowCopyCSCompiled = false;
+	// The D3D11 culling shaders exist only while the fallback set does.
+	if (!lights)
+		return;
 	std::vector<std::pair<const char*, const char*>> clusterDefines;
 	clusterBuildingCS = (ID3D11ComputeShader*)Util::CompileShader(L"Data\\Shaders\\LightLimitFix\\ClusterBuildingCS.hlsl", clusterDefines, "cs_5_0");
 	clusterCullingCS = (ID3D11ComputeShader*)Util::CompileShader(L"Data\\Shaders\\LightLimitFix\\ClusterCullingCS.hlsl", clusterDefines, "cs_5_0");
@@ -866,25 +883,27 @@ void LightLimitFix::UpdateLights()
 
 	AddParticleLightsToBuffer(lightsData);
 
-	auto context = globals::d3d::context;
-
 	lightCount = std::min((uint)lightsData.size(), MAX_LIGHTS);
 
+	UpdateClusterParameters();
+	// On the graph, the culling epoch also moves the lights into the buffer pixel shaders read (t35).
+	orgCulledThisFrame = CullOnRenderGraph(lightsData);
+	// The D3D11 buffers are not bound while the graph culls, so filling them for the parity check is free of side effects.
+	const bool parityCheck = orgCulledThisFrame && OrgParityEnabled() && (orgParityFrame++ % 300) == 0;
+	if (orgCulledThisFrame && !parityCheck)
+		return;
+
+	EnsureLegacyCulling();
+	auto context = globals::d3d::context;
 	D3D11_MAPPED_SUBRESOURCE mapped;
 	DX::ThrowIfFailed(context->Map(lights->resource.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
 	size_t bytes = sizeof(LightData) * lightCount;
 	memcpy_s(mapped.pData, bytes, lightsData.data(), bytes);
 	context->Unmap(lights->resource.get(), 0);
 
-	UpdateClusterParameters();
-	orgCulledThisFrame = CullOnRenderGraph(lightsData);
-	if (!orgCulledThisFrame) {
-		UpdateStructure();
-	} else if (OrgParityEnabled() && (orgParityFrame++ % 300) == 0) {
-		// The D3D11 buffers are not bound this frame, so filling them is free of side effects.
-		UpdateStructure();
+	UpdateStructure();
+	if (parityCheck)
 		CompareRenderGraphCulling();
-	}
 }
 
 void LightLimitFix::CompareRenderGraphCulling()

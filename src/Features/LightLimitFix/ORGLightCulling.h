@@ -11,8 +11,8 @@
  * Runs LLF's own cluster-building and culling shaders (compiled to SPIR-V with
  * LLF_ORG_BINDLESS) on DXVK's Vulkan device through RenderGraphRuntime, and
  * produces the same lightIndexList / lightGrid layout the D3D11 path does. The
- * outputs are graph-owned buffers that D3D11 reads through wrappers, so pixel
- * shaders bind them at t36/t37 exactly as before.
+ * lights and the outputs are graph-owned buffers that D3D11 reads through wrappers,
+ * so pixel shaders bind them at t35-t37 exactly as before.
  *
  * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
@@ -44,6 +44,8 @@ public:
 
 	bool IsActive() const;
 
+	/** @brief The graph's lights buffer (t35), which the culling epoch fills from its latch; null when inactive. */
+	ID3D11ShaderResourceView* GetLightsSRV() const;
 	ID3D11ShaderResourceView* GetLightIndexListSRV() const;
 	ID3D11ShaderResourceView* GetLightGridSRV() const;
 
