@@ -668,7 +668,8 @@ namespace Util
 		} else {
 			return std::nullopt;
 		}
-		if (format != DXGI_FORMAT_R16G16B16A16_FLOAT && format != DXGI_FORMAT_R32_FLOAT && format != DXGI_FORMAT_R8_UNORM && format != DXGI_FORMAT_R8_UINT)
+		if (format != DXGI_FORMAT_R32G32B32A32_FLOAT && format != DXGI_FORMAT_R16G16B16A16_FLOAT && format != DXGI_FORMAT_R32_FLOAT &&
+			format != DXGI_FORMAT_R8_UNORM && format != DXGI_FORMAT_R8_UINT)
 			return std::nullopt;
 
 		std::array<double, 4> sums{};
@@ -683,6 +684,10 @@ namespace Util
 					const auto* row = bytes + z * mapped.DepthPitch + y * mapped.RowPitch;
 					for (UINT x = 0; x < width; ++x) {
 						switch (format) {
+						case DXGI_FORMAT_R32G32B32A32_FLOAT:
+							for (UINT c = 0; c < 4; ++c)
+								sums[c] += reinterpret_cast<const float*>(row)[x * 4 + c];
+							break;
 						case DXGI_FORMAT_R16G16B16A16_FLOAT:
 							for (UINT c = 0; c < 4; ++c)
 								sums[c] += DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const DirectX::PackedVector::HALF*>(row)[x * 4 + c]);
