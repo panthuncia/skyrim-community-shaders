@@ -4,6 +4,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "Features/DrawcallLimitFix/Integrations/DynamicCubemaps/ReflectionsGraphTest.h"
+#include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 
 #include "Features/DynamicCubemaps.h"
 #include "Globals.h"
@@ -43,6 +44,7 @@ namespace DCLF::Integrations::DynamicCubemaps::ReflectionsGraphTest
 		struct Status
 		{
 			Mode mode = Mode::Off;
+			Api::ToggleId graph;
 			bool attempted = false;
 			std::shared_ptr<Test> test;
 		};
@@ -251,10 +253,11 @@ namespace DCLF::Integrations::DynamicCubemaps::ReflectionsGraphTest
 		}
 	}
 
-	void Install(Mode a_mode)
+	void Install(Mode a_mode, Api::ToggleId a_graph)
 	{
 		auto& state = State();
 		state.mode = a_mode;
+		state.graph = a_graph;
 		if (a_mode != Mode::Off && !FrameAnchors::Reserve(FrameAnchors::Anchor::Prepass))
 			logger::warn("[DCLF] graph texture test: the Prepass anchor could not be reserved");
 	}
@@ -273,6 +276,7 @@ namespace DCLF::Integrations::DynamicCubemaps::ReflectionsGraphTest
 	bool GraphIndex(std::uint32_t& a_index)
 	{
 		Ensure();
-		return State().mode == Mode::Graph && State().test && PublishedResources::ShaderResourceIndex(kResourceId, a_index);
+		const auto& state = State();
+		return state.test && FrameToggles().On(state.graph) && PublishedResources::ShaderResourceIndex(kResourceId, a_index);
 	}
 }

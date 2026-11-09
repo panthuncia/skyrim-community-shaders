@@ -6,7 +6,10 @@
 // kResourceId (RenderGraph/PublishedResources.h). The integration's t30 then names that cubemap:
 // - "graph": through the graph (its published descriptor; the colour passes declare the read),
 // - "d3d11": through its exported D3D11 view (imported as any CS view),
-// so the two runs read the same memory by the two paths, and their screenshots must be identical. Unset or anything else: off.
+// so the two runs read the same memory by the two paths, and their screenshots must be identical. Unset or anything else: off. The live
+// toggle "graph texture test" (seeded on by "graph") switches between the two paths inside one run.
+
+#include "Features/DrawcallLimitFix/Api/Settings.h"
 
 #include <cstdint>
 
@@ -22,8 +25,11 @@ namespace DCLF::Integrations::DynamicCubemaps::ReflectionsGraphTest
 		D3D11,
 	};
 
-	/** @brief Main thread, at the integration's install: reads the switch and reserves the Prepass anchor when it is on. */
-	void Install(Mode a_mode);
+	/**
+	 * @brief Main thread, at the integration's install: the switch's mode and the live toggle choosing the graph path; reserves the Prepass
+	 * anchor when the test is on.
+	 */
+	void Install(Mode a_mode, Api::ToggleId a_graph);
 
 	/** @brief The mode Install was given. */
 	Mode CurrentMode();
@@ -34,6 +40,6 @@ namespace DCLF::Integrations::DynamicCubemaps::ReflectionsGraphTest
 	 */
 	void* View();
 
-	/** @brief Render thread: in "graph" mode, the published cubemap's descriptor while it is published. */
+	/** @brief Render thread: while the toggle is on, the published cubemap's descriptor while it is published. */
 	bool GraphIndex(std::uint32_t& a_index);
 }

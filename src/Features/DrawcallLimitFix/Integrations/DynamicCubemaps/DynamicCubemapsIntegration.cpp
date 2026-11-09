@@ -45,7 +45,11 @@ namespace DCLF::Integrations::DynamicCubemaps
 			const auto mode = value == "graph" ? ReflectionsGraphTest::Mode::Graph :
 			                  value == "d3d11" ? ReflectionsGraphTest::Mode::D3D11 :
 			                                     ReflectionsGraphTest::Mode::Off;
-			ReflectionsGraphTest::Install(mode);
+			// Live, for an A/B inside one run: on reads the graph, off the export (dclf:graph texture test=0|1).
+			const auto toggle = mode == ReflectionsGraphTest::Mode::Off ? Api::ToggleId{} :
+				a_context.RegisterToggle({ .name = "graph texture test", .label = "Graph texture test: t30 through the graph",
+					.seed = testSwitch, .onValue = "graph", .offByDefault = true });
+			ReflectionsGraphTest::Install(mode, toggle);
 			if (mode == ReflectionsGraphTest::Mode::Off)
 				a_context.RegisterFrameTexture({ .name = "dynamic cubemaps reflections", .textureRegister = kReflectionsRegister,
 					.view = &ReflectionsView, .capturedWhenNull = true });
