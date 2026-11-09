@@ -61,6 +61,20 @@ One entry per need. Give:
 - **Where it fits:** named graph resources at the frame anchors (P2.2), readable by a plugin's pass.
 - **Found by:** survey for the plan (2026-11-09).
 
+### Compiling a plugin's shaders
+
+- **Need:** compile the plugin's own HLSL for the ORG path, with the same bindings as CS's passes.
+- **Who:** plugins that compile shaders with `D3DCompile` (FXC, `*_5_0`) and bind them with `CSSetShaderResources` and
+  friends, or hand CS shader bytecode.
+- **Where it fits:** the dual-target convention (`Common/OrgResources.hlsli`; shader-workflow.md, "Dual-target shaders"). A
+  plugin can include that header from CS's `Data/Shaders` and keep its D3D11 build. For the ORG build it needs, through an
+  exported table: `ComputeProgram::Load` and `RasterProgram::Load` on a source path of its own (today the path is relative to
+  `Data/Shaders`), `ComputeProgram::Dispatch`, and `ShaderBindings::CreateSampler`. The push block layout (handles in list
+  order, then `PUSH` structs, at most 128 bytes) is part of that ABI, and so is the `CS_ORG_BINDLESS` define. Bytecode a
+  plugin compiled itself would need BasicRHI's DXC arguments (`rhi_shader_abi.h`) and the same layout; accepting source is
+  simpler, because CS's store then caches and hot-reloads it.
+- **Found by:** P2.3 (2026-11-09).
+
 ### Attaching passes to the frame
 
 - **Need:** run compute or raster work at a defined point in the frame, with declared inputs and outputs.

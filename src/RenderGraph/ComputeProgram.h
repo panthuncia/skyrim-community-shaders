@@ -6,9 +6,15 @@
 
 #	include <cstdint>
 #	include <memory>
+#	include <span>
 #	include <string>
 #	include <utility>
 #	include <vector>
+
+namespace org
+{
+	class RecordingContext;
+}
 
 namespace org::services
 {
@@ -33,6 +39,7 @@ struct ComputeProgram
 	rhi::PipelineLayoutPtr layout;
 	// The registry's (payload: rhi::PipelinePtr); bind Pipeline() at record time, never a handle kept across recordings.
 	std::shared_ptr<org::services::LivePipelineSlot> slot;
+	std::uint32_t constantWords = 0;
 
 	/** @brief Record time: the pipeline to bind, the slot's current one (it changes only at a graph build, where nothing records). */
 	rhi::PipelineHandle Pipeline() const;
@@ -50,6 +57,12 @@ struct ComputeProgram
 	 * the build fails. Blocks on a compile the cache does not have, so call it at setup, not per frame.
 	 */
 	static std::shared_ptr<const ComputeProgram> Load(rhi::Device a_device, const Desc& a_desc);
+
+	/**
+	 * @brief Record time: binds the program, pushes a_constants (a dual-target shader's push block: ShaderBindings::Data), and
+	 * dispatches. Records nothing when the constants are longer than constantWords or a group count is zero.
+	 */
+	void Dispatch(org::RecordingContext& a_recording, std::span<const std::uint32_t> a_constants, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z) const;
 };
 
 #endif
