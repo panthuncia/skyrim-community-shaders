@@ -137,6 +137,28 @@ Keys used so far:
 
 - The anchor self-test (`CS_ORG_ANCHOR_SELFTEST`): 0, 1 and 2 at every anchor.
 - The graph resource self-test (`CS_ORG_GRAPHRES_SELFTEST`): 0 at DeferredPasses.
+- Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
+### Per-frame CPU data of varying size
+
+- **Need:** send a list whose length changes every frame (colliders, lights, decals) to a pass whose recording is kept
+  from frame to frame.
+- **Who:** any plugin that gathers scene objects on the CPU each frame. Grass Collision does it with `Map(WRITE_DISCARD)`
+  on two dynamic structured buffers today.
+- **Where it fits:** a client's latch block. The commit writes only the bytes in use, but a recorded copy cannot follow
+  the length, so Grass Collision's copy into its graph buffers always moves the whole capacity (66 KB). LLF instead
+  re-records when the length grows past a power of two. A structured view of a latch slot's region, or a copy whose size
+  is read from the latch, would remove both workarounds.
+- **Found by:** P3 GrassCollision (2026-11-09).
+
+### Skipping an inactive client's passes
+
+- **Need:** a client with nothing to do this frame records nothing, even when another client keeps the anchor's epoch.
+- **Who:** any client whose passes read a latch region.
+- **Where it fits:** `FrameAnchors::ClientDesc::active`. Today an inactive client's commit is not called but its kept
+  recording still runs, on a latch region written frames ago. Grass Collision stays active every frame for this reason,
+  and writes a "clear" frame when the feature is off.
+- **Found by:** P3 GrassCollision (2026-11-09).
+
 ### Presenting from more than one thread
 
 - **Need:** present a frame from a thread other than the render thread, under the engine's lock.
