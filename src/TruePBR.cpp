@@ -401,6 +401,8 @@ void TruePBR::Prepass()
 		srv = glintsNoiseTexture->srv.get();
 	}
 	context->PSSetShaderResources(20, 1, &srv);
+	if (!orgNoise.Active() || orgNoise.Filled())
+		DebugReadback(srv);
 }
 
 void TruePBR::EarlyPrepass()
@@ -413,6 +415,26 @@ ID3D11ShaderResourceView* TruePBR::GlintsNoiseSRV() const
 	if (auto* srv = ORGGlintsNoise::Get().NoiseSRV())
 		return srv;
 	return glintsNoiseTexture ? glintsNoiseTexture->srv.get() : nullptr;
+}
+
+void TruePBR::DebugReadback(ID3D11ShaderResourceView* a_noise)
+{
+	// Debug readback (CS_GLINTS_READBACK=1): the noise's per-channel means, once (it stalls). The texels are packed half pairs read
+	// as floats, so the means only compare the two paths.
+	static const bool readback = [] {
+		char value[8]{};
+		return GetEnvironmentVariableA("CS_GLINTS_READBACK", value, sizeof(value)) && value[0] == '1';
+	}();
+	if (!readback || glintsReadbackLogged || !a_noise)
+		return;
+	glintsReadbackLogged = true;
+	const auto means = Util::VolumeMeans(a_noise);
+	if (!means) {
+		logger::warn("[TruePBR] glints noise readback failed");
+		return;
+	}
+	logger::info("[TruePBR] glints noise readback ({}) frame {}: means [{:.9g} {:.9g} {:.9g} {:.9g}]", ORGGlintsNoise::Get().Active() ? "ORG" : "D3D11",
+		globals::state->frameCount, (*means)[0], (*means)[1], (*means)[2], (*means)[3]);
 }
 
 void TruePBR::SetupGlintsTexture()
