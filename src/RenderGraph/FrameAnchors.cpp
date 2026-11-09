@@ -47,6 +47,7 @@ namespace FrameAnchors
 		constexpr std::array<AnchorInfo, kAnchors> kInfo{ {
 			{ "ReflectionsPrepass", { "CS anchor: reflections prepass", "CS anchor: reflections prepass inputs", "FrameAnchors::ReflectionsPrepass / ", "cs.anchor.reflections-prepass" }, false },
 			{ "EarlyPrepass", { "CS anchor: early prepass", "CS anchor: early prepass inputs", "FrameAnchors::EarlyPrepass / ", "cs.anchor.early-prepass" }, false },
+			{ "DepthDone", { "CS anchor: depth done", "CS anchor: depth done inputs", "FrameAnchors::DepthDone / ", "cs.anchor.depth-done" }, false },
 			{ "Prepass", { "CS anchor: prepass", "CS anchor: prepass inputs", "FrameAnchors::Prepass / ", "cs.anchor.prepass" }, false },
 			{ "DeferredPasses", { "CS anchor: deferred passes", "CS anchor: deferred passes inputs", "FrameAnchors::DeferredPasses / ", "cs.anchor.deferred-passes" }, false },
 			{ "DeferredComposite", { "CS anchor: deferred composite", "CS anchor: deferred composite inputs", "FrameAnchors::DeferredComposite / ", "cs.anchor.deferred-composite" }, false },
@@ -65,6 +66,7 @@ namespace FrameAnchors
 			Segment::AnchorEarlyPrepass,  // Main::RenderShadowMaps returned
 			Segment::ZPrepass,            // Main::RenderDepth
 			Segment::FirstPersonDepth,
+			Segment::AnchorDepthDone,  // Main::RenderDepth returned, with the first-person depth
 			Segment::Reflection,
 			Segment::AnchorReflectionsPrepass,  // the cubemap render, nominally here (zero or more times a frame)
 			Segment::LightCulling,              // Light Limit Fix's Prepass
