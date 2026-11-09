@@ -62,4 +62,35 @@ namespace DCLF::Extensions
 				return true;
 		return false;
 	}
+
+	FrameGraphTextureSet FrameGraphTextures()
+	{
+		FrameGraphTextureSet onGraph;
+		for (const auto& texture : RegisteredFrameTextures()) {
+			std::uint32_t index = 0;
+			if (texture.graph && texture.graph(index))
+				onGraph.set(texture.textureRegister);
+		}
+		return onGraph;
+	}
+
+	bool FrameGraphTextureIndex(std::size_t a_texture, const FrameGraphTextureSet& a_onGraph, std::uint32_t& a_index)
+	{
+		const auto textures = RegisteredFrameTextures();
+		if (a_texture >= textures.size() || !textures[a_texture].graph)
+			return false;
+		const auto& texture = textures[a_texture];
+		const bool onGraph = a_onGraph.test(texture.textureRegister) && texture.graph(a_index);
+		// Each change of path, once (the render thread's alone).
+		static std::array<std::int8_t, kFrameTextureSlots> s_logged{};
+		if (auto& logged = s_logged[a_texture]; logged != (onGraph ? 1 : -1)) {
+			logged = onGraph ? 1 : -1;
+			if (onGraph)
+				logger::info("[DCLF] frame texture {} (t{}) reads the graph resource '{}' (descriptor {})", texture.name, texture.textureRegister,
+					texture.graphResource, a_index);
+			else
+				logger::info("[DCLF] frame texture {} (t{}) reads its D3D11 view", texture.name, texture.textureRegister);
+		}
+		return onGraph;
+	}
 }

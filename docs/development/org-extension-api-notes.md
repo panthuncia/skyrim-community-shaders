@@ -101,6 +101,21 @@ One entry per need. Give:
   its D3D11 export, which DCLF imports like any D3D11 view. A frame-graph-texture registration, with the resource registered
   in DCLF's graphs, would drop that import and, once the engine's own reads are ported (Phase 5), the export.
 - **Found by:** P3 W1 ports (2026-11-09).
+### Reading another client's graph output in another epoch
+
+- **Need:** a pass reads a texture or buffer that another feature or plugin writes in a different epoch (an anchor epoch, or one
+  of DCLF's), ordered after the write, without a copy and without going through D3D11.
+- **Who:** DCLF's colour passes reading the ported CS features' outputs (Dynamic Cubemaps, IBL, Skylighting, Terrain Shadows,
+  Volumetric Shadows and the others its integrations read), and any plugin pass that consumes CS's outputs.
+- **Where it fits:** `PublishedResources` (`src/RenderGraph/PublishedResources.h`; render-graph.md, "Publishing a graph resource
+  to other epochs"). An exported table needs:
+    - `Publish(id, resource)` and `Withdraw(id)`, with the rule that only non-aliased resources are published;
+    - a reader-side lookup of the bindless index (`ShaderResourceIndex`) and of whether the id is published now;
+    - a stable id naming convention (`Feature::Name`), because the reader's pass declares the id.
+  Open items: a withdrawn resource stays registered (and alive) until the producer publishes again under that id; and DCLF's
+  views with frame constants of their own (the reflection's faces) do not declare published textures yet, so they still need
+  the producer's D3D11 export.
+- **Found by:** P3 DCLF graph textures (2026-11-09).
 
 ### Render to texture
 
@@ -207,6 +222,7 @@ Keys used so far:
 - Light Limit Fix's local shadow cache (`CS_ORG_LLF_SHADOWS`): 100 (slot data) and 101 (shadow map copy) at EarlyPrepass.
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
 - CS's ImGui (`CS_ORG_IMGUI`): 1000 at Overlay, last.
+- The DCLF graph texture test (`CS_DCLF_GRAPH_TEXTURE_TEST`): 0 at Prepass.
 
 ### Work whose shape changes every frame
 

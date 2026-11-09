@@ -353,11 +353,13 @@ namespace DCLF
 			if (Extensions::FrameGraphBufferIndices(b, indices))
 				graphBuffers |= 1u << b;
 		}
+		// The frame textures on the graph path now (Api::FrameTexture::graph): a change rebuilds the passes that declare them.
+		const auto graphTextures = Extensions::FrameGraphTextures();
 		auto frameBuffers = FrameBuffersOf(a_capture, graphBuffers);
 		const bool sameFrameBuffers = resources && resources->frameBuffers.size() == frameBuffers.size() &&
 		                              std::equal(frameBuffers.begin(), frameBuffers.end(), resources->frameBuffers.begin(), [](const auto& a, const auto& b) { return a.SameShape(b); });
 		if (resources && targets == formats && target.Width == width && target.Height == height && sameFrameBuffers &&
-			resources->graphBuffers == graphBuffers)
+			resources->graphBuffers == graphBuffers && resources->graphTextures == graphTextures)
 			return true;
 
 		auto device = host->Device();
@@ -385,6 +387,7 @@ namespace DCLF
 		SetUpHzb(*state, device);
 
 		state->graphBuffers = graphBuffers;
+		state->graphTextures = graphTextures;
 		for (auto& frameBuffer : frameBuffers) {
 			frameBuffer.copy = org::Buffer::CreateUnmaterializedStructuredBuffer(frameBuffer.elements, frameBuffer.stride, false);
 			frameBuffer.copy->SetName(fmt::format("cs.dclf.frame-buffer.t{}", frameBuffer.textureRegister));

@@ -166,6 +166,12 @@ namespace DCLF::Draws
 			if ((a_resources.graphBuffers >> b) & 1)
 				for (std::uint32_t r = 0; r < graphBuffers[b].count; ++r)
 					a_builder.ShaderResource(org::ResourceIdentifier(graphBuffers[b].resources[r].c_str()), noViews);
+		// The frame textures on the graph path (Api::FrameTexture::graph): the producers' published textures, which every epoch's graph
+		// registers (RenderGraph/PublishedResources.h), so the sequencer orders this read after the producer's write in its anchor epoch.
+		if (a_resources.graphTextures.any())
+			for (const auto& texture : Extensions::RegisteredFrameTextures())
+				if (!texture.graphResource.empty() && a_resources.graphTextures.test(texture.textureRegister))
+					a_builder.ShaderResource(org::ResourceIdentifier(texture.graphResource.c_str()), noViews);
 	}
 
 	void RecordPreprocessedDraws(org::PassRecordContext& a_recording, PreprocessStates& a_preprocess, const rhi::PassBeginInfo& a_begin, rhi::DescriptorHeapHandle a_resourceHeap,

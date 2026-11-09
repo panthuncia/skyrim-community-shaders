@@ -2,13 +2,15 @@
 
 // The frame binding contract's Core side (Api/FrameBindings.h): what a registered binding's select is handed, the values the frame
 // records take from the bindings, and the texture registers Core keeps for itself (which no binding or frame texture may take). And the
-// frame textures' (Api::FrameTexture): their registers' indices. And the frame graph buffers' (Api::FrameGraphBuffers): their entries.
+// frame textures' (Api::FrameTexture): their registers' indices, and which read their published graph texture. And the frame graph
+// buffers' (Api::FrameGraphBuffers): their entries.
 // And the per-draw buffers' (Api::PerDrawBuffer): the per-draw registers by stage, Core's and the declared ones (PerDrawMask).
 
 #include "Features/DrawcallLimitFix/Api/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 
 #include <array>
+#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -96,6 +98,19 @@ namespace DCLF::Extensions
 	static_assert(kFrameTextureSlots < kNoFrameTexture, "a frame texture's index (FrameTextureIndices) would reach kNoFrameTexture");
 	/** @brief Any thread, after InstallFeatures: by texture register, its frame texture's index (RegisteredFrameTextures), or kNoFrameTexture. */
 	std::span<const std::uint8_t> FrameTextureIndices();
+
+	/** @brief The frame textures on the graph path, a bit by texture register (Api::FrameTexture::graph). */
+	using FrameGraphTextureSet = std::bitset<kTextureRegisters>;
+	/**
+	 * @brief Render thread (the main resources' check): the frame textures whose graph answers true now. The colour passes declare their
+	 * published textures (Resources::graphTextures), and a colour commit reads them through the graph only while their bit is set.
+	 */
+	FrameGraphTextureSet FrameGraphTextures();
+	/**
+	 * @brief Render thread (a colour commit): frame texture a_texture's published texture index into a_index, when a_onGraph (the
+	 * resources' set) has its register and its graph answers true now; false: its view. Logs each change of path once.
+	 */
+	bool FrameGraphTextureIndex(std::size_t a_texture, const FrameGraphTextureSet& a_onGraph, std::uint32_t& a_index);
 
 	/**
 	 * @brief The most frame graph buffers registrations there may be (a commit keeps each one's indices in a fixed array), and each one's
