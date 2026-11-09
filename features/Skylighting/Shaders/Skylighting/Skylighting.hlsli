@@ -3,13 +3,17 @@
 
 #include "Common/ColorManagement.hlsli"
 #include "Common/Math.hlsli"
+#include "Common/OrgResources.hlsli"
 #include "Common/Shading.hlsli"
 #include "Common/SharedData.hlsli"
 #include "Common/Spherical Harmonics/SphericalHarmonics.hlsli"
 
 namespace Skylighting
 {
-#if defined(SKYLIGHTING_PROBE_REGISTER)
+#if defined(SKYLIGHTING_PROBE_REGISTER) && defined(CS_ORG_BINDLESS)
+	// An ORG pass: an EXTERN entry of the shader's resource list (Common/OrgResources.hlsli).
+	ORG_RESOURCE(SRV, Texture3D<sh2>, SkylightingProbeArray, 0)
+#elif defined(SKYLIGHTING_PROBE_REGISTER)
 	Texture3D<sh2> SkylightingProbeArray : register(SKYLIGHTING_PROBE_REGISTER);
 #elif defined(PSHADER)
 	Texture3D<sh2> SkylightingProbeArray : register(t50);

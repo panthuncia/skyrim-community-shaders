@@ -3,6 +3,7 @@
 
 #include "Common/ColorManagement.hlsli"
 #include "Common/Math.hlsli"
+#include "Common/OrgResources.hlsli"
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"
 #include "Common/Spherical Harmonics/SphericalHarmonics.hlsli"
@@ -10,8 +11,9 @@
 namespace ImageBasedLighting
 {
 #if defined(IBL_DEFERRED)
-	Texture2D<sh2> EnvIBLTexture : register(t14);
-	Texture2D<sh2> SkyIBLTexture : register(t15);
+	// The deferred composite's: EXTERN entries of its resource list under ORG.
+	ORG_RESOURCE(SRV, Texture2D<sh2>, EnvIBLTexture, 14)
+	ORG_RESOURCE(SRV, Texture2D<sh2>, SkyIBLTexture, 15)
 #else
 	Texture2D<sh2> EnvIBLTexture : register(t76);
 	Texture2D<sh2> SkyIBLTexture : register(t77);
