@@ -4,7 +4,6 @@
 
 #include <dxgi.h>
 #include <imgui.h>
-#include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
 #include <imgui_internal.h>
 #include <unordered_map>
@@ -21,6 +20,7 @@
 #include "Menu.h"
 #include "Menu/CursorLoader.h"
 #include "Menu/FontAtlasState.h"
+#include "Menu/ImGuiRenderer.h"
 #include "Presets/UnifiedPresetCatalog.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -365,7 +365,7 @@ void OverlayRenderer::InitializeImGuiFrame(Menu& menu)
 	// Start the Dear ImGui frame
 	{
 		ZoneScopedN("CS.Present.Overlay.ImplNewFrame");
-		ImGui_ImplDX11_NewFrame();
+		ImGuiRenderer::NewFrame();
 		ImGui_ImplWin32_NewFrame();
 	}
 
@@ -528,7 +528,7 @@ void OverlayRenderer::FinalizeImGuiFrame()
 		ZoneScopedN("CS.Present.Overlay.RenderDrawData");
 		// The backend grows its vertex and index buffers, and uploads font atlas pages, here.
 		Vram::OwnerScope vramScope("CS/Menu");
-		ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+		ImGuiRenderer::RenderDrawData(ImGui::GetDrawData());
 	}
 }
 
