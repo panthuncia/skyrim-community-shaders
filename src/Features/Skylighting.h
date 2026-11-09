@@ -78,6 +78,12 @@ public:
 	 * @return Populated SkylightingCB structure, or zeroed if not in world or map menu is open.
 	 */
 	SkylightingCB GetCommonBufferData(bool a_inWorld);
+	/** @brief What the last GetCommonBufferData returned: the feature buffer's skylighting settings, which the ORG probe update latches. */
+	SkylightingCB frameSettings{};
+
+	/** @brief The probe array (t50) and shadow visibility (t53) views D3D11 readers bind: the render graph's while its probe update runs. */
+	ID3D11ShaderResourceView* ProbeArraySRV() const;
+	ID3D11ShaderResourceView* ShadowVisibilitySRV() const;
 
 	winrt::com_ptr<ID3D11SamplerState> comparisonSampler = nullptr;
 
@@ -120,6 +126,12 @@ public:
 
 	/** @brief Clears the accumulation frames array to force a full rebuild of skylighting probes. */
 	void ResetSkylighting();
+	/** @brief Creates the D3D11 probe volumes (texProbeArray and the rest), unless they exist. */
+	void CreateProbeVolumes();
+	/** @brief Releases the D3D11 probe volumes, once the render graph's replace them. */
+	void ReleaseProbeVolumes();
+	/** @brief The probe update on the render graph (CS_ORG_SKYLIGHTING=1), its volumes then replacing the D3D11 ones; false: D3D11's dispatch. */
+	bool UpdateProbesOnGraph();
 	void CaptureShadowCascadeSRV();
 
 	std::chrono::time_point<std::chrono::system_clock> lastUpdateTimer = std::chrono::system_clock::now();

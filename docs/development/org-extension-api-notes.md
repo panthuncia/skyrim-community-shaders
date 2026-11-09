@@ -155,3 +155,36 @@ Keys used so far:
   no longer describe what reaches the display (CS reads `OwnedFrame::GetSurfaceState`). The API needs a query and a
   change notification for the ORG swap chain.
 - **Found by:** P1 ownership inversion (2026-11-09).
+
+### Importing a plugin's own depth textures
+
+- **Need:** a pass reads a depth texture that is not in the engine's render-target tables: a plugin's own map that the
+  engine (or DCLF) renders into, or a texture the plugin only sees as a bound SRV.
+- **Who:** Skylighting's sky occlusion map, which it swaps in for the precipitation occlusion target; its probe update also
+  reads the directional shadow maps through the SRV it captures at the shadow mask draw.
+- **Where it fits:** `FrameAnchors::ImportDepth(DepthStencilData, id)`, beside `EngineDepth`: the same import, keyed by the
+  id, kept while the texture stays the same, registered with every anchor graph. A capture of an engine texture should
+  resolve to `EngineDepth` first (`ORGSkylighting.cpp`, `ImportShadowMap`), so one image has one anchor import.
+- **Found by:** P3 Skylighting (2026-11-09).
+
+### Skipping a frame in a kept recording
+
+- **Need:** a client with per-frame work that some frames do not have (Skylighting: interiors, the map menu).
+- **Who:** any anchor client whose pass is recorded once and reused.
+- **Where it fits:** `ClientDesc::active` false means no commit, but another client can still run the anchor's epoch, and
+  the reused recording then reads whatever its frame slot's latch held from frames ago. Skylighting writes a "no update"
+  flag into its latch and stays active until every frame slot has been latched idle once, then rests. A framework answer
+  would be a per-client "skip" the anchor applies to the client's passes (an empty dispatch, or a predicate the graph
+  owns), so clients need not carry the flag into their shaders.
+- **Found by:** P3 Skylighting (2026-11-09).
+
+### Per-frame values from CS's shared constant buffers
+
+- **Need:** a ported pass reads values CS uploads in `SharedData`, `FeatureData` or the engine's `PerFrame` buffer.
+- **Who:** every ported CS compute shader that includes `SharedData.hlsli` or `FrameBuffer.hlsli`.
+- **Where it fits:** until P2.6 makes those buffers bindless, a pass latches the fields it reads (a LATCH entry) and the
+  shader reads them through small accessors that return the shared buffer's field under FXC, so the D3D11 bytecode stays
+  identical. Matrices go in the latch as `float4` rows (or columns), so no `Load<T>` depends on matrix packing.
+  `Deferred`'s directional shadow buffer is a `Map(WRITE_DISCARD)` buffer, which cannot be imported; its CPU copy
+  (`Deferred::GetDirectionalShadowLightData`) is latched instead.
+- **Found by:** P3 Skylighting (2026-11-09).
