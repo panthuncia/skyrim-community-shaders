@@ -62,7 +62,7 @@ float4 BurleyNormalizedSS(uint2 DTid, float2 texCoord, float sssAmount, bool hum
 	float3 surfaceAlbedo = SSSDecodeAlbedo(surfaceAlbedoSample.xyz);
 	float3 originalIrradiance = centerColor.xyz;
 
-	float4 diffuseMeanFreePath = humanProfile ? MeanFreePathHuman : MeanFreePathBase;
+	float4 diffuseMeanFreePath = humanProfile ? PerFrameSSS.MeanFreePathHuman : PerFrameSSS.MeanFreePathBase;
 	// MFP channels are defined relative to color space primaries; convert to working gamut
 	diffuseMeanFreePath.xyz = Color::LinearSRGBToWorking(diffuseMeanFreePath.xyz);
 	diffuseMeanFreePath.xyz = float3(max(diffuseMeanFreePath.x, 1e-5f), max(diffuseMeanFreePath.y, 1e-5f), max(diffuseMeanFreePath.z, 1e-5f));
@@ -80,7 +80,7 @@ float4 BurleyNormalizedSS(uint2 DTid, float2 texCoord, float sssAmount, bool hum
 	float3 weightSum = 0.0f;
 	float3 colorSum = 0.0f;
 
-	float2 uvScale = (GAME_UNIT_TO_CM * 0.1f * (0.5f / tan(0.5 * radians(SSSS_FOVY)))) / centerDepth;  // Scale in mm
+	float2 uvScale = (GAME_UNIT_TO_CM * 0.1f * (0.5f / tan(0.5 * radians(PerFrameSSS.SSSS_FOVY)))) / centerDepth;  // Scale in mm
 	uvScale *= FrameBuffer::DynamicResolutionParams1.xy;
 	float2 texCoordNonDR = FrameBuffer::GetDynamicResolutionUnadjustedScreenPosition(texCoord);
 
@@ -94,9 +94,9 @@ float4 BurleyNormalizedSS(uint2 DTid, float2 texCoord, float sssAmount, bool hum
 	float jitter = Random::f1(rngState);
 	float rotation = Random::f1(rngState);
 
-	[loop] for (int i = 0; i < (int)BurleySamples; ++i)
+	[loop] for (int i = 0; i < (int)PerFrameSSS.BurleySamples; ++i)
 	{
-		float2 rand = float2((i + jitter) / (float)BurleySamples, Random::R1Sequence(i, rotation));
+		float2 rand = float2((i + jitter) / (float)PerFrameSSS.BurleySamples, Random::R1Sequence(i, rotation));
 
 		rand.x = centerRadiusCDF + rand.x * (1.0f - centerRadiusCDF);
 

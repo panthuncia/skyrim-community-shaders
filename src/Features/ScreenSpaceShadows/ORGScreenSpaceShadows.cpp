@@ -13,6 +13,7 @@
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/UavClearPass.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
@@ -101,47 +102,6 @@ namespace
 		auto& terrainBlending = globals::features::terrainBlending;
 		return terrainBlending.loaded && terrainBlending.settings.Enabled ? "Terrain Blending" : "the z-prepass copy";
 	}
-
-	// The clear to white (no shadow), as the D3D11 path clears before its dispatches.
-	struct ClearBindings
-	{
-		org::ResourceBindingToken resource;
-		org::DeclaredViewToken shaderVisible, cpuVisible;
-	};
-
-	struct ClearFrame
-	{};
-
-	class ClearPass final : public org::TypedRenderGraphPass<ClearPass, ClearFrame, ClearBindings>
-	{
-	public:
-		explicit ClearPass(std::shared_ptr<org::Resource> a_output) :
-			output(std::move(a_output)) {}
-
-		ClearBindings Declare(org::PassBuilder& a_builder)
-		{
-			a_builder.PreferQueue(org::QueueKind::Graphics);
-			const auto use = a_builder.UnorderedAccessClear(output);
-			return { use.resources.front(), use.views[0], use.views[1] };
-		}
-
-		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(output.get())); }
-
-		ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return {}; }
-
-		static void Record(const ClearBindings& a_bindings, const ClearFrame&, org::PassRecordContext& a_recording)
-		{
-			rhi::UavClearInfo info{};
-			info.shaderVisible = a_recording.View(a_bindings.shaderVisible);
-			info.cpuVisible = a_recording.View(a_bindings.cpuVisible);
-			info.resource = a_recording.Resolve(a_bindings.resource);
-			const float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-			a_recording.Commands().ClearUavFloat(info, rhi::UavClearFloat(white));
-		}
-
-	private:
-		std::shared_ptr<org::Resource> output;
-	};
 
 	// Every dispatch of the list's capacity, each reading its constants and group counts from the execution's latch region.
 	struct RaymarchBindings
@@ -268,7 +228,8 @@ void ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 			.anchor = FrameAnchors::Anchor::Prepass,
 			.order = 100,
 			.kind = FrameAnchors::PassKind::Compute,
-			.make = [state]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ClearPass>(state->output->Graph()); } });
+			// The clear to white (no shadow), as the D3D11 path clears before its dispatches.
+			.make = [state] { return GraphPasses::MakeUavClear(state->output->Graph(), { 1.0f, 1.0f, 1.0f, 1.0f }); } });
 		client.passes.push_back({ .name = "cs.sss.raymarch",
 			.anchor = FrameAnchors::Anchor::Prepass,
 			.order = 101,

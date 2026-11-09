@@ -223,6 +223,8 @@ Keys used so far:
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
 - CS's ImGui (`CS_ORG_IMGUI`): 1000 at Overlay, last.
 - The DCLF graph texture test (`CS_DCLF_GRAPH_TEXTURE_TEST`): 0 at Prepass.
+- Subsurface Scattering (`CS_ORG_SUBSURFACE_SCATTERING`): 199 (Burley clear), 200 (extraction), 201 (horizontal or Burley
+  blur) and 202 (vertical blur) at DeferredPasses. SSGI's passes there stay below 199, as the D3D11 order is SSGI first.
 
 ### Work whose shape changes every frame
 
@@ -235,6 +237,28 @@ Keys used so far:
   (`ExecuteIndirect` with a one-argument `Dispatch` signature, read from the latch), and unused entries hold zero groups. A
   plugin API would need the dispatch signature and `LATCH` entries (`ShaderBindings::LatchOf`) exported with the programs.
 - **Found by:** P3 W1, Screen Space Shadows (2026-11-09).
+
+### Work that some frames skip
+
+- **Need:** a client whose passes have no work in some frames (Subsurface Scattering: no skin drawn) while other clients
+  keep the same anchor's epoch. `FrameAnchors` calls `commit` only for active clients, so an inactive client's passes
+  run again with the latch region an older execution in the same frame slot wrote.
+- **Who:** CS's Subsurface Scattering; any plugin whose work depends on what the frame drew.
+- **Where it fits:** today the client stays always active and its commit writes zero thread groups for the indirect
+  dispatches (as Screen Space Shadows does for unused entries). A plugin API would want either a commit for every
+  registered client of a running anchor, with an "inactive" flag, or a per-execution skip that `Prepare` can read.
+- **Found by:** P3 W2, Subsurface Scattering (2026-11-09).
+
+### Arrays in latch constants
+
+- **Need:** a `LATCH` struct with an array the shader indexes by a run-time value (Subsurface Scattering's 42 kernel
+  samples). `LATCH` loads the whole struct into a static copy, which DXC would keep as an indexed private array.
+- **Who:** any pass whose per-frame constants hold tables (kernels, cascades, light lists).
+- **Where it fits:** the shader reads such an element straight from the latch region
+  (`OrgLatch_<name>.Load<T>(OrgOffset_<name> + offset)` under `CS_ORG_BINDLESS`, `SSSKernel` in
+  `SubsurfaceScattering/SSSCommon.hlsli`). That reaches into `OrgResources.hlsli`'s internal names; a public
+  `ORG_LATCH_LOAD(name, type, offset)` macro would make it part of the dual-target contract.
+- **Found by:** P3 W2, Subsurface Scattering (2026-11-09).
 
 ### Reading another feature's D3D11 texture
 

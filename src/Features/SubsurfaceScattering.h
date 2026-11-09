@@ -131,8 +131,17 @@ public:
 	 */
 	void CalculateKernel(DiffusionProfile& a_profile, Kernel& kernel);
 
-	/** @brief Dispatches the SSS blur compute shaders (prepass, horizontal, vertical or Burley). */
+	/**
+	 * @brief The blur constants for this frame: the kernels from Reset, the camera's field of view and the settings.
+	 * @param a_mode The SSMode the passes run (0 separable, 1 Burley); the scatter mode applies to the separable blur only.
+	 */
+	BlurCB BuildBlurConstants(int a_mode);
+
+	/** @brief Dispatches the SSS blur compute shaders (prepass, horizontal, vertical or Burley), or nothing when they run on the render graph. */
 	void DrawSSS();
+
+	/** @brief Creates the D3D11 path's textures when they are missing: at setup, or when the render-graph path falls back. */
+	void EnsureD3D11Resources();
 
 	virtual void LoadSettings(json& o_json) override;
 	virtual void SaveSettings(json& o_json) override;
