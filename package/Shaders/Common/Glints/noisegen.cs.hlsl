@@ -1,4 +1,9 @@
-RWTexture2D<float4> tex_noise : register(u0);
+#include "Common/OrgResources.hlsli"
+
+#define NOISEGEN_RESOURCES(X) \
+	X(UAV, RWTexture2D<float4>, tex_noise, 0)
+ORG_PUSH_BLOCK(NOISEGEN_RESOURCES(ORG_HANDLE))
+NOISEGEN_RESOURCES(ORG_RESOURCE)
 
 static const float GAUSSIAN_AVG = 0.0;
 static const float GAUSSIAN_STD = 1.0;
