@@ -10,6 +10,7 @@
 #include "Menu.h"
 #include "Utils/VersionedRelocation.h"
 #include "PostProcessing.h"
+#include "RenderGraph/Engine/OwnedFrame.h"
 #include "ScreenshotFeature.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -1606,6 +1607,8 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 		HRESULT hr = swapChain4->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
 		if (SUCCEEDED(hr)) {
 			logger::info("[HDR] Set swap chain color space to HDR10 (PQ/BT.2020)");
+			// The owned frame's BasicRHI swap chain takes the colour space at its next present.
+			RenderGraph::Engine::OwnedFrame::Get().RequestColorSpace(true);
 			// Do NOT set HDR10 static metadata - it can cause issues on some monitors
 			// The HGiG approach is to handle highlights compression in the shader instead.
 			swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
@@ -1617,6 +1620,7 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 		HRESULT hr = swapChain4->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
 		if (SUCCEEDED(hr)) {
 			logger::info("[HDR] Set swap chain color space to SDR (sRGB)");
+			RenderGraph::Engine::OwnedFrame::Get().RequestColorSpace(false);
 			swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
 		} else {
 			logger::warn("[HDR] Failed to set SDR color space");

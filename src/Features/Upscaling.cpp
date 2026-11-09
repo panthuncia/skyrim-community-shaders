@@ -10,6 +10,8 @@
 #include "State.h"
 #include "Upscaling/DXVKInterop.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/Engine/GuestDevice.h"
+#include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Upscaling/FrameGenController.h"
 #include "Upscaling/Streamline.h"
@@ -93,7 +95,15 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 
 	const D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_1;
 
-	return ptrD3D11CreateDeviceAndSwapChainUpscaling(pAdapter,
+	// CS_ORG_OWNED_FRAME=1: BasicRHI's device and swap chain, with the game's device on it as DXVK's guest.
+	auto& guest = RenderGraph::Engine::GuestDevice::Get();
+	bool owned = DxvkLoader::IsLoaded() && guest.Prepare(::GetModuleHandleW(L"dxvk_d3d11.dll"));
+	if (owned && !RenderGraph::Engine::OwnedFrame::Get().CreateSwapchain(*pSwapChainDesc)) {
+		guest.Abandon("BasicRHI could not create a swap chain on the game's window");
+		owned = false;
+	}
+
+	const HRESULT hr = ptrD3D11CreateDeviceAndSwapChainUpscaling(pAdapter,
 		DriverType,
 		Software,
 		Flags,
@@ -105,6 +115,13 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 		ppDevice,
 		pFeatureLevel,
 		ppImmediateContext);
+
+	if (owned) {
+		guest.Confirm(SUCCEEDED(hr) && ppDevice ? *ppDevice : nullptr);
+		if (guest.Active())
+			RenderGraph::Engine::OwnedFrame::Get().Initialize(ppSwapChain ? *ppSwapChain : nullptr, *ppDevice);
+	}
+	return hr;
 }
 
 static bool DrawStepper(const char* a_label, int* a_index, const std::vector<const char*>& a_options, bool a_disabled = false)
@@ -596,6 +613,13 @@ bool Upscaling::IsFrameGenerationActive() const
 {
 	if (!loaded || !settings.frameGeneration || IsDisplayUnsettled())
 		return false;
+	// The owned frame presents through BasicRHI's swap chain, which no frame-generation presenter wraps yet (P1.4).
+	if (RenderGraph::Engine::OwnedFrame::Active()) {
+		static bool s_reported = false;
+		if (!std::exchange(s_reported, true))
+			logger::info("[Upscaling] Frame generation is unavailable in the owned frame (CS_ORG_OWNED_FRAME=1)");
+		return false;
+	}
 	if (DXVKInterop::GetSingleton()->HasCommandRingFault())
 		return false;
 	const auto& hdr = globals::features::hdrDisplay;

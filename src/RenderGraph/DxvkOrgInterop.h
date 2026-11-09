@@ -14,8 +14,8 @@
 #	include <vulkan/vulkan.h>
 #endif
 
-// Version 6: dxvkCreateTextureFromVkImage (DxvkOrgInteropTextureWrap).
-#define DXVK_ORG_INTEROP_VERSION 6u
+// Version 6: the guest-device exports. Version 7: dxvkCreateTextureFromVkImage (DxvkOrgInteropTextureWrap).
+#define DXVK_ORG_INTEROP_VERSION 7u
 
 extern "C" {
 
@@ -400,4 +400,70 @@ typedef HRESULT(__stdcall* PFN_dxvkReadSubmissionTrace)(ID3D11Device* pDevice, D
 	// A live resource's creation stack (return addresses, innermost first; DXVK's own frames first), up to capacity; *pCount is its
 	// depth. S_FALSE if none was recorded or the resource is gone.
 	typedef HRESULT(__stdcall* PFN_dxvkGetResourceCreationStack)(ID3D11Device* pDevice, uint64_t cookie, void** pFrames, uint32_t capacity, uint32_t* pCount);
+
+	// Guest devices (interop version 6): the host creates the Vulkan instance and device, DXVK runs on them. The host enables what
+	// dxvkGetGuestInstanceRequirements and dxvkGetGuestDeviceRequirements report, then dxvkSetGuestDevice makes the next D3D11 device
+	// a guest on it. A guest device's DXGI swap chains are headless: Present only ends the frame and flushes, and the host presents.
+#define DXVK_ORG_GUEST_VERSION 1u
+
+	struct DxvkOrgGuestInstanceRequirements
+	{
+		uint32_t version;  // DXVK_ORG_GUEST_VERSION
+		uint32_t apiVersion;
+		uint32_t extensionCount;  // the instance extensions DXVK needs that the loader has; valid until the next call
+		const char* const* extensions;
+		const char* engineName;  // VkApplicationInfo::pEngineName ("DXVK_HDR" when HDR is configured)
+	};
+	typedef HRESULT(__stdcall* PFN_dxvkGetGuestInstanceRequirements)(PFN_vkGetInstanceProcAddr getInstanceProcAddr, DxvkOrgGuestInstanceRequirements* pRequirements);
+
+	struct DxvkOrgGuestDeviceQuery
+	{
+		uint32_t version;  // DXVK_ORG_GUEST_VERSION
+		PFN_vkGetInstanceProcAddr getInstanceProcAddr;
+		VkInstance instance;
+		uint32_t instanceExtensionCount;  // what the host's instance was created with
+		const char* const* instanceExtensions;
+		VkPhysicalDevice physicalDevice;
+		uint32_t bindingModel;  // the host's (DxvkOrgInteropBindingModelBits): DXVK binds descriptors the same way
+	};
+
+	struct DxvkOrgGuestFeatureStruct
+	{
+		const VkBaseInStructure* feature;
+		size_t size;
+	};
+
+	struct DxvkOrgGuestDeviceRequirements
+	{
+		uint32_t version;  // DXVK_ORG_GUEST_VERSION
+		const VkPhysicalDeviceFeatures* coreFeatures;
+		uint32_t featureCount;  // every other feature struct; their pNext is not part of the requirement
+		const DxvkOrgGuestFeatureStruct* features;
+		uint32_t extensionCount;
+		const char* const* extensions;
+		uint32_t queueCount;  // families and queue counts (pQueuePriorities is null)
+		const VkDeviceQueueCreateInfo* queues;
+	};
+	// Valid until the next call or until the guest D3D11 device exists.
+	typedef HRESULT(__stdcall* PFN_dxvkGetGuestDeviceRequirements)(const DxvkOrgGuestDeviceQuery* pQuery, DxvkOrgGuestDeviceRequirements* pRequirements);
+
+	struct DxvkOrgGuestQueue
+	{
+		VkQueue queue;
+		uint32_t family;
+		uint32_t index;
+	};
+
+	struct DxvkOrgGuestDeviceDesc
+	{
+		uint32_t version;  // DXVK_ORG_GUEST_VERSION
+		VkDevice device;
+		uint32_t enabledExtensionCount;  // every device extension the host enabled; copied
+		const char* const* enabledExtensions;
+		DxvkOrgGuestQueue graphics;  // DXVK's only queue (graphics, transfer, sparse binding); its family's first
+		DxvkOrgGuestQueue compute;   // the host's own queues, reported by dxvkGetInteropDeviceInfo; null: none
+		DxvkOrgGuestQueue upload;
+		DxvkOrgGuestQueue copy;
+	};
+	typedef HRESULT(__stdcall* PFN_dxvkSetGuestDevice)(const DxvkOrgGuestDeviceDesc* pDesc);
 }

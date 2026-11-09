@@ -12,6 +12,7 @@
 #include "Profiler.h"
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/Engine/GuestDevice.h"
 #include "Features/RemoteControl/GpuTimestamps.h"
 #include "Features/RemoteControl/GpuCounters.h"
 #include "Features/DrawcallLimitFix.h"
@@ -1701,7 +1702,15 @@ bool RenderGraphRuntime::Initialize()
 		state->computeQueue ? fmt::format("{}:{}", info.computeQueueFamily, info.computeQueueIndex) : std::string("shared with graphics"),
 		state->uploadQueue ? fmt::format("{}:{}", info.uploadQueueFamily, info.uploadQueueIndex) : std::string("none"),
 		!state->copyQueue ? std::string("shared with graphics") : state->copyQueue == state->uploadQueue ? std::string("shared with upload") : fmt::format("{}:{}", info.copyQueueFamily, info.copyQueueIndex));
-	if (rhi::vulkan::AdoptVulkanDevice(adopt, *state->device) != rhi::Result::Ok || !*state->device)
+	if (auto& guest = RenderGraph::Engine::GuestDevice::Get(); guest.Active()) {
+		// The owned frame: BasicRHI created the device and DXVK is its guest. The graph shares that device, with the same hooks an
+		// adoption takes; the queue lock skips the owned frame's present, which runs inside DXVK's own lock.
+		state->device = guest.Device();
+		adopt.submissionHooks.lock = &RenderGraph::Engine::GuestDevice::LockQueue;
+		adopt.submissionHooks.unlock = &RenderGraph::Engine::GuestDevice::UnlockQueue;
+		if (rhi::vulkan::ShareVulkanDevice(state->device->Get(), adopt.submissionHooks) != rhi::Result::Ok)
+			return disable("BasicRHI could not share its Vulkan device with the render graph's hooks");
+	} else if (rhi::vulkan::AdoptVulkanDevice(adopt, *state->device) != rhi::Result::Ok || !*state->device)
 		return disable("BasicRHI could not adopt DXVK's Vulkan device");
 	if ((*state->device)->CreateTimeline(state->nativeTimelines, 0, "CS native timeline lookup") != rhi::Result::Ok || !state->nativeTimelines)
 		return disable("BasicRHI could not create a timeline on DXVK's Vulkan device");
