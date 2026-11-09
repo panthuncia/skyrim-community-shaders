@@ -32,19 +32,19 @@ public:
 	static ORGSubsurfaceScattering& Get();
 
 	/**
-	 * @brief Makes the programs, the intermediate textures (a_desc: the main target's description with SRV and UAV binds) and the
-	 * latch, and registers the anchor client. With the runtime active (the feature's SetupResources). Logged and left on D3D11 on
-	 * failure.
+	 * @brief Requests the render-graph path (the feature's SetupResources). a_desc: the main target's description with SRV and
+	 * UAV binds, for the intermediate textures. The programs, textures and latch are made at the first frame the DeferredPasses
+	 * anchor has an epoch, the engine targets are imported and the client registered at the frames after (AfterDeferredPasses).
 	 */
 	void Setup(const D3D11_TEXTURE2D_DESC& a_desc);
 
-	/** @brief Whether the render-graph path is set up: its passes run, or will from the frame after their client registers. */
+	/** @brief Whether the render-graph path is requested and has not failed: its passes run, or will once it is set up. */
 	bool Running() const;
 
 	/**
-	 * @brief At the feature's DrawSSS, after the DeferredPasses anchor ran: keeps the passes current for the next frame (the mode,
-	 * the programs after a shader cache clear, the engine targets). @return Whether the render graph ran this frame's passes;
-	 * false when the feature uses its D3D11 path.
+	 * @brief At the feature's DrawSSS, after the DeferredPasses anchor ran: finishes the setup over the first frames, then keeps
+	 * the passes current for the next frame (the mode, the programs after a shader cache clear, the engine targets).
+	 * @return Whether the render graph ran this frame's passes; false when the feature uses its D3D11 path.
 	 */
 	bool AfterDeferredPasses();
 
