@@ -292,6 +292,11 @@ public:
 	eastl::unique_ptr<Buffer> lightIndexCounter = nullptr;
 	eastl::unique_ptr<Buffer> lightIndexList = nullptr;
 	eastl::unique_ptr<Buffer> lightGrid = nullptr;
+	// The cluster count the D3D11 culling set is made for (SetupResources).
+	uint legacyClusterCount = 0;
+
+	/** @brief Creates the D3D11 culling shaders and buffers on first use: the fallback when the render graph does not cull. */
+	void EnsureLegacyCulling();
 
 	std::uint32_t lightCount = 0;
 	std::uint32_t particleLightCount = 0;
@@ -386,6 +391,10 @@ public:
 	uint32_t localShadowEngineMipLevels = 1;
 	uint32_t localShadowEngineSlices = 0;
 	bool localShadowDirectCopy = false;
+	// The cache lives on the render graph (ORGLocalShadows, CS_ORG_LLF_SHADOWS=1) rather than in localShadowCache/localShadowBuffer.
+	bool localShadowOnGraph = false;
+	// The graph could not hold the cache, or lost it: D3D11 holds it for the rest of the session.
+	bool localShadowGraphFailed = false;
 	uint32_t localShadowAllocFailedFrame = 0;
 	RE::Setting* poissonRadiusScaleSetting = nullptr;
 	bool poissonRadiusScaleLookedUp = false;
@@ -403,6 +412,11 @@ public:
 	 */
 	static bool LocalShadowsBlockedByDCLF();
 	/**
+	 * @brief This frame's lights (t35): the render graph's buffer when it culled the clusters, else the D3D11 fallback's.
+	 * Valid for consumers that run after Prepass.
+	 */
+	ID3D11ShaderResourceView* GetLightsSRV() const;
+	/**
 	 * @brief This frame's light index list: the render graph's when it culled the clusters, else the D3D11 fallback's.
 	 * Valid for consumers that run after Prepass.
 	 */
@@ -410,7 +424,11 @@ public:
 	/** @brief This frame's light grid, from the same source as GetLightIndexListSRV. */
 	ID3D11ShaderResourceView* GetLightGridSRV() const;
 	/** @brief True when local shadows are enabled and the cache texture exists. */
-	bool IsLocalShadowCacheActive() const { return IsLocalShadowsEnabled() && localShadowCache; }
+	bool IsLocalShadowCacheActive() const { return IsLocalShadowsEnabled() && (localShadowCache || localShadowOnGraph); }
+	/** @brief The cache's slot data (t102): the render graph's export or the D3D11 buffer; null without a cache. */
+	ID3D11ShaderResourceView* GetLocalShadowDataSRV() const;
+	/** @brief The cache's shadow maps (t103), from the same source as GetLocalShadowDataSRV. */
+	ID3D11ShaderResourceView* GetLocalShadowCacheSRV() const;
 	/** @brief Draws the experimental local shadow settings. */
 	void DrawLocalShadowSettings();
 	void DrawLightAttachSettings();

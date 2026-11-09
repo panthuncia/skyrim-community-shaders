@@ -697,10 +697,10 @@ void ExponentialHeightFog::Prepass()
 	auto& lightLimitFix = globals::features::lightLimitFix;
 	const bool hasLocalLightData =
 		lightLimitFix.loaded &&
-		lightLimitFix.lights &&
+		lightLimitFix.GetLightsSRV() &&
 		lightLimitFix.GetLightIndexListSRV() &&
 		lightLimitFix.GetLightGridSRV();
-	const bool hasLocalShadowData = hasLocalLightData && lightLimitFix.IsLocalShadowCacheActive() && lightLimitFix.localShadowBuffer;
+	const bool hasLocalShadowData = hasLocalLightData && lightLimitFix.IsLocalShadowCacheActive() && lightLimitFix.GetLocalShadowDataSRV();
 	ID3D11ShaderResourceView* engineLocalShadowMap = hasLocalLightData ? UpdateEngineLocalShadowData() : nullptr;
 	auto* depthSrv = Util::GetCurrentSceneDepthSRV(true);
 	auto& ibl = globals::features::ibl;
@@ -840,8 +840,8 @@ void ExponentialHeightFog::Prepass()
 	context->CSSetShaderResources(50, 1, &skylightingSrv);
 	context->CSSetShaderResources(76, 2, iblSrvs);
 	ID3D11ShaderResourceView* localShadowSrvs[2]{
-		hasLocalShadowData ? lightLimitFix.localShadowBuffer->srv.get() : nullptr,
-		hasLocalShadowData ? lightLimitFix.localShadowCache->srv.get() : nullptr
+		hasLocalShadowData ? lightLimitFix.GetLocalShadowDataSRV() : nullptr,
+		hasLocalShadowData ? lightLimitFix.GetLocalShadowCacheSRV() : nullptr
 	};
 	context->CSSetShaderResources(5, 1, &engineLocalShadowMap);
 	context->CSSetShaderResources(102, 2, localShadowSrvs);
@@ -903,7 +903,7 @@ void ExponentialHeightFog::Prepass()
 				p.hasPrevConservativeDepth && p.conservativeDepthHistory ? p.conservativeDepthHistory->srv.get() : nullptr
 			};
 			ID3D11ShaderResourceView* localLightSrvs[3]{
-				hasLocalLightData ? lightLimitFix.lights->srv.get() : nullptr,
+				hasLocalLightData ? lightLimitFix.GetLightsSRV() : nullptr,
 				hasLocalLightData ? lightLimitFix.GetLightIndexListSRV() : nullptr,
 				hasLocalLightData ? lightLimitFix.GetLightGridSRV() : nullptr
 			};

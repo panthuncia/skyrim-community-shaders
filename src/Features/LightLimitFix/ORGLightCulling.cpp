@@ -387,6 +387,7 @@ struct ORGLightCulling::Impl
 	std::shared_ptr<Resources> resources;
 	uint32_t maxLights = 0;
 	uint32_t lightStride = 0;
+	winrt::com_ptr<ID3D11ShaderResourceView> lightsSRV;
 	winrt::com_ptr<ID3D11ShaderResourceView> lightIndexListSRV;
 	winrt::com_ptr<ID3D11ShaderResourceView> lightGridSRV;
 };
@@ -435,9 +436,10 @@ bool ORGLightCulling::Setup(uint32_t a_clusterCount, uint32_t a_maxLights, uint3
 		resources->lightIndexCounter = CreateStructured(1, sizeof(uint32_t), true, "cs.llf.light-index-counter");
 		resources->lightIndexList = CreateStructured(indexCount, sizeof(uint32_t), true, "cs.llf.light-index-list");
 		resources->lightGrid = CreateStructured(a_clusterCount, sizeof(uint32_t) * 4, true, "cs.llf.light-grid");
+		state->lightsSRV = WrapStructured(*resources->lights, a_maxLights, a_lightStride);
 		state->lightIndexListSRV = WrapStructured(*resources->lightIndexList, indexCount, sizeof(uint32_t));
 		state->lightGridSRV = WrapStructured(*resources->lightGrid, a_clusterCount, sizeof(uint32_t) * 4);
-		if (!state->lightIndexListSRV || !state->lightGridSRV) {
+		if (!state->lightsSRV || !state->lightIndexListSRV || !state->lightGridSRV) {
 			logger::warn("[ORG] Light culling stays on D3D11: its outputs could not be shared with D3D11");
 			impl.reset();
 			return false;
@@ -500,6 +502,11 @@ bool ORGLightCulling::IsActive() const
 	return impl && impl->resources && RenderGraphRuntime::Get().IsActive();
 }
 
+ID3D11ShaderResourceView* ORGLightCulling::GetLightsSRV() const
+{
+	return impl ? impl->lightsSRV.get() : nullptr;
+}
+
 ID3D11ShaderResourceView* ORGLightCulling::GetLightIndexListSRV() const
 {
 	return impl ? impl->lightIndexListSRV.get() : nullptr;
@@ -539,6 +546,7 @@ ORGLightCulling::~ORGLightCulling() = default;
 bool ORGLightCulling::Setup(uint32_t, uint32_t, uint32_t, uint32_t) { return false; }
 bool ORGLightCulling::Execute(const FrameInputs&) { return false; }
 bool ORGLightCulling::IsActive() const { return false; }
+ID3D11ShaderResourceView* ORGLightCulling::GetLightsSRV() const { return nullptr; }
 ID3D11ShaderResourceView* ORGLightCulling::GetLightIndexListSRV() const { return nullptr; }
 ID3D11ShaderResourceView* ORGLightCulling::GetLightGridSRV() const { return nullptr; }
 bool ORGLightCulling::GetShaderResourceIndices(uint32_t&, uint32_t&, uint32_t&) const { return false; }

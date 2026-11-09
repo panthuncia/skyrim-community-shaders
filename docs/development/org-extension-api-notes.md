@@ -187,6 +187,7 @@ Keys used so far:
 - The shared constants' upload (`cs.shared.upload`): first at every anchor where a client reads them, outside the keys.
 - Terrain Shadows' update (`CS_ORG_TERRAIN_SHADOWS`): 100 at EarlyPrepass.
 - Volumetric Shadows (`CS_ORG_VOLUMETRIC_SHADOWS`): 100 to 105 at EarlyPrepass (per mip: downsample, horizontal blur, vertical
+- Light Limit Fix's local shadow cache (`CS_ORG_LLF_SHADOWS`): 100 (slot data) and 101 (shadow map copy) at EarlyPrepass.
 
 ### Work whose shape changes every frame
 
@@ -211,6 +212,27 @@ Keys used so far:
 - **Found by:** P3 W1, Screen Space Shadows (2026-11-09).
 
   blur).
+### A per-frame number of dispatches
+
+- **Need:** a pass whose number of dispatches changes every frame (copy the shadow map slices the engine drew this frame),
+  without recording again each frame.
+- **Who:** Light Limit Fix's local shadow cache (`ORGLocalShadows.cpp`). Any plugin that copies or processes "what changed
+  this frame".
+- **Where it fits:** a kept recording cannot hold per-frame values, so the pass records the most dispatches a frame can need
+  (8), each reading its row of a LatchBlock (`LATCH` entry), and a row with no work returns at once. An indirect dispatch
+  whose arguments the commit writes into the latch would save the empty groups. The API needs one of the two.
+- **Found by:** P3 W1, LLF (2026-11-09).
+
+### Storage image formats in plugin shaders
+
+- **Need:** write a UAV texture of a format other than the one DXC infers from the element type.
+- **Who:** Light Limit Fix's cache copy: `RWTexture2DArray<float>` becomes an `R32f` storage image under SPIR-V, so its ORG
+  cache is `R32_FLOAT` even where the D3D11 cache is `R16_UNORM` (twice the memory with 16-bit engine shadow maps).
+- **Where it fits:** the dual-target resource list (`OrgResources.hlsli`) would need a format per UAV entry
+  (`[[vk::image_format]]`), or the ABI would compile with unknown storage formats (`-fspv-use-unknown-image-format`,
+  which needs `shaderStorageImageWriteWithoutFormat`).
+- **Found by:** P3 W1, LLF (2026-11-09).
+
 ### Presenting from more than one thread
 
 - **Need:** present a frame from a thread other than the render thread, under the engine's lock.

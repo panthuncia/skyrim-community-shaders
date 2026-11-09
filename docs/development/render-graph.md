@@ -250,7 +250,7 @@ stream order, on its own command buffer, outside any render pass. DCLF's CPU-dri
 
 ## Resources crossing the boundary
 
--   **Graph outputs** (LLF's `lightIndexList`, `lightGrid`) are graph-owned buffers. D3D11 reads them
+-   **Graph outputs** (LLF's `lights`, `lightIndexList`, `lightGrid`) are graph-owned buffers. D3D11 reads them
     through wrappers from `dxvkCreateBufferFromVkBuffer`. DXVK never renames, relocates or maps a
     wrapped buffer, and only `D3D11_USAGE_DEFAULT` without CPU access is accepted. Graph textures D3D11 still reads are
     wrapped the same way by `dxvkCreateTextureFromVkImage` (below, "Graph-backed feature resources").
@@ -584,6 +584,7 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 | `CS_ORG_CRASH_MARKERS=0` | With the owned frame, BasicRHI's crash markers off even in hang mode. They cost about a third of the frame rate in Dragonsreach on the RX 6600 (43 against 60 fps, Dev-Fast). |
 | `CS_ORG=features` | Request the device features but never create the graph (isolates device-configuration side effects). |
 | `CS_ORG_SUBMIT=flush` | Use the flush-and-lock submission path even when DXVK supports the stream path. |
+| `CS_ORG_LLF_SHADOWS=1` | With LLF's local light shadows on, its shadow cache runs at the EarlyPrepass anchor (`ORGLocalShadows.cpp`): the engine slices drawn this frame are copied by `LocalShadowCopyCS` on the graph, and the cache and slot data are Persistent graph resources exported to the engine's pixel shaders (t102, t103). Logs `[ORG] LLF local shadows run on the render graph`; falls back to the D3D11 cache on any failure. |
 | `CS_ORG_LLF_PARITY=1` | Every 300 frames, also run LLF's D3D11 culling and compare each cluster's light set with the graph's (logs `LLF parity OK` / `MISMATCH`). |
 | `CS_ORG_ANCHOR_SELFTEST=1` | Reserve every frame anchor and run a test client at each: a raster pass writes a texture, a compute pass reads it and one texel of kMAIN into a buffer, and a copy reads that back. Each anchor logs `[ORG] anchor self-test: <anchor> OK` once, then `every anchor OK`. |
 | `CS_ORG_GRAPHRES_SELFTEST=1` | Reserve DeferredPasses and test the graph-backed resources there (above, "Graph-backed feature resources"). Logs `[ORG] graph resource self-test: 16x16 OK ...`, then `resized to 32x32`, `32x32 OK ...` and `every check OK; the texture is released`; `MISMATCH` otherwise. |
