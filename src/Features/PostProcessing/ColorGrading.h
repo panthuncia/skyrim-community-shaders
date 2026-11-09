@@ -177,6 +177,15 @@ struct ColorGrading : public PostProcessFeature
 	void UpdateColorSpaceTransforms(bool hdrEnabled = false);
 
 	/**
+	 * @brief This frame's constants: the settings, the game's ImageSpace values and HDR Display's, with the colour space
+	 * matrices brought up to date. Shared by the D3D11 draw and the ORG chain.
+	 */
+	ColorCB BuildConstants();
+
+	/** @brief The TONEMAP_FUNC the shaders are built with for the current tonemapper (OpenDRT's when it is on). */
+	std::string_view TonemapFunctionName() const;
+
+	/**
 	 * @brief True when HDR Display is on, tonemapping is enabled, the active tonemapper is
 	 *        SDR-only (not OpenDRT / not supportsHDR), and the user enabled AutoHDR.
 	 */

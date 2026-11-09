@@ -114,6 +114,15 @@ struct PostProcessing : Feature
 	 */
 	void SyncPipelineResources();
 
+	/** @brief Updates the auto-enabled sub-features, then SyncPipelineResources: every draw of the pipeline starts with it. */
+	void UpdatePipeline();
+
+	/**
+	 * @brief The sub-features the tonemap chain (PreProcess) draws this frame, in draw order: the pipeline's order, those drawn
+	 * after Color Grading last. Empty while bypassed. Call after UpdatePipeline.
+	 */
+	std::vector<FeaturePipelineIndex> ChainOrder() const;
+
 	/// shared_ptr, not unique_ptr: see PostProcessFeature's weak_ptr callback contract.
 	std::array<std::shared_ptr<PostProcessFeature>, static_cast<size_t>(FeaturePipelineIndex::COUNT)> pipeline;
 
@@ -179,6 +188,12 @@ struct PostProcessing : Feature
 		ID3D11Texture2D* srcTex,
 		ID3D11ShaderResourceView* srcSRV, const CopyCB& conversion);
 	void BeginLinearProcessing(PostProcessFeature::TextureInfo& texture);
+
+	/**
+	 * @brief The conversion PreProcess applies when it copies the chain's output into the main target.
+	 * @param a_colorGraded Whether Color Grading drew this frame: its output is in the display's gamut.
+	 */
+	CopyCB OutputConversion(bool a_colorGraded) const;
 
 	/////////////////////////////////////////////////////////////////////////////////
 
