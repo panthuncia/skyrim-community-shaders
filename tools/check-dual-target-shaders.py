@@ -110,6 +110,8 @@ def main():
     parser.add_argument("--fxc", help="fxc.exe (default: the newest Windows SDK's)")
     parser.add_argument("--spirv-val", help="spirv-val.exe (default: beside dxc.exe, when present)")
     parser.add_argument("--entry", default="main")
+    parser.add_argument("--stage", choices=["cs", "ps", "vs"],
+                        help="The stage of every shader (default: from the file name, *CS/*PS/*VS, else cs)")
     parser.add_argument("-D", "--define", action="append", default=[], metavar="NAME[=VALUE]",
                         help="A define for every build of every shader (repeat for more)")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "build/dual-target-shaders")
@@ -124,7 +126,7 @@ def main():
     for shader in args.shaders or DEFAULT_SHADERS:
         path = Path(shader)
         path = path if path.is_absolute() else ROOT / path
-        stage = stage_of(path)
+        stage = args.stage or stage_of(path)
         includes = include_dirs(path)
         out = args.output_dir / path.stem
         print(path.relative_to(ROOT) if path.is_relative_to(ROOT) else path)
