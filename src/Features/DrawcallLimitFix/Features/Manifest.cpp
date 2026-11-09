@@ -91,7 +91,7 @@ namespace DCLF::Features
 		// DCLFEffectSoftDepth; Integrations/TerrainBlending's mask, TerrainBlending.hlsli's TerrainBlendingMaskTexture; the CS features'
 		// views, their own HLSL's: Volumetric Shadows' SharedShadowMap, Cloud Shadows' CloudShadowsTexture, Exponential Height Fog's
 		// ExponentialHeightFogIntegratedLightScattering, Dynamic Cubemaps' EnvReflectionsTexture and EnvTexture, Skylighting's SkylightingProbeArray and ShadowVisibilityProbeArray, Terrain Shadows' ShadowHeightTexture, Water Effects'
-		// WaterCaustics, IBL's EnvIBLTexture, SkyIBLTexture, StaticDiffuseIBLTexture and StaticSpecularIBLTexture): none Core's, a frame
+		// WaterCaustics, IBL's EnvIBLTexture, SkyIBLTexture, StaticDiffuseIBLTexture and StaticSpecularIBLTexture, TruePBR's Glint2023NoiseMap): none Core's, a frame
 		// binding's or another's.
 		constexpr std::uint32_t kFrameTextureRegisters[] = {
 			Effects::kSoftDepthRegister,
@@ -109,6 +109,7 @@ namespace DCLF::Features
 			Integrations::IBL::kSkyRegister,
 			Integrations::IBL::kStaticDiffuseRegister,
 			Integrations::IBL::kStaticSpecularRegister,
+			Integrations::TruePBR::kGlintsNoiseRegister,
 		};
 
 		constexpr bool FrameTextureRegistersValid()

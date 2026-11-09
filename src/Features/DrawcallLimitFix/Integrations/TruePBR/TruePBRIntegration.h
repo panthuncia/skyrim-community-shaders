@@ -9,6 +9,8 @@
 // - its property bits ("glints": a PBR material's glintParameters.enabled, which its GetRenderPasses hook reads);
 // - its Lighting pass rules: GetRenderPasses' swap (PBR swaps Specular for TruePbr; glint adds AnisoLighting), GetPixelTechnique's split
 //   (keeps bits 3-5) and SetupGeometry's raw technique (a TruePbr pass gains AmbientSpecular and flips AnisoLighting);
+// - its glints noise (t20, Glints2023.hlsli's Glint2023NoiseMap), a frame texture: the view TruePBR's Prepass binds, or on its ORG path
+//   (CS_ORG_GLINTS) the published graph texture, read after its fill;
 // - its parity (Diagnostics/TextureParity.h): CaptureParity's t80-t91 check.
 //
 // The rules apply whether or not TruePBR is loaded, as its hooks' ports always did; the contributor is active only while it is loaded
@@ -32,6 +34,8 @@ namespace DCLF::Integrations::TruePBR
 	// contributor's textureRegisters (static storage; Features/Manifest.cpp checks them, with Advanced Skin's, against DCLFObjects.hlsli's
 	// decode).
 	inline constexpr std::array<std::uint32_t, 12> kTextureRegisters{ 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91 };
+	// t20: the glints noise, a frame texture (Features/Manifest.cpp).
+	inline constexpr std::uint32_t kGlintsNoiseRegister = 20;
 	// Its contributor bit in the Lighting property record (Api::PropertyBits): the material's glint is enabled.
 	inline constexpr std::uint8_t kGlints = 1u << 0;
 
