@@ -212,6 +212,9 @@ Each anchor's rule:
   DCLF's `BeforePresent` and the frame pace signal. ImGui has built its frame. Before HDR output and frame generation. It runs
   only on frames where CS's overlay draws (the menu, an editor, notifications, the performance overlay), not every frame. The
   target is the render target bound for the overlay: the framebuffer, or HDR's UI texture when HDR composites the UI.
+- **Capture.** At the end of HDRDisplay's present chain (`ScreenshotFeature::ProcessCaptureRequest`), just before the native
+  Present or frame generation's present. After Overlay and HDR output: the back buffer (or the owned frame's source) holds
+  what the display will show. Reserved only by the Screenshot feature's ORG path (`CS_ORG_SCREENSHOT=1`) and the self-test.
 
 Keys used so far:
 
@@ -225,6 +228,7 @@ Keys used so far:
 - Light Limit Fix's local shadow cache (`CS_ORG_LLF_SHADOWS`): 100 (slot data) and 101 (shadow map copy) at EarlyPrepass.
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
 - CS's ImGui (`CS_ORG_IMGUI`): 1000 at Overlay, last.
+- The Screenshot feature (`CS_ORG_SCREENSHOT`): 100 (the readback copy) at Capture.
 - The DCLF graph texture test (`CS_DCLF_GRAPH_TEXTURE_TEST`): 0 at Prepass.
 - Subsurface Scattering (`CS_ORG_SUBSURFACE_SCATTERING`): 199 (Burley clear), 200 (extraction), 201 (horizontal or Burley
   blur) and 202 (vertical blur) at DeferredPasses. SSGI's passes there stay below 199, as the D3D11 order is SSGI first.
@@ -588,3 +592,15 @@ Keys used so far:
   in any epoch and again after a device or graph reset. There is no reset event today: a failed graph returns the
   feature to D3D11, which makes the texture again.
 - **Found by:** P3 W4, TruePBR glints noise (2026-11-09).
+### Reading back a frame without waiting
+
+- **Need:** copy the displayed image (or any graph texture) to the CPU at a chosen frame, without stalling that frame, and
+  get the bytes on a callback once the GPU copy is done.
+- **Who:** CS's Screenshot feature (D3D11 staging texture plus `Map(DO_NOT_WAIT)` polling today); capture, recording and
+  photo-mode plugins that hook Present and do the same.
+- **Where it fits:** the Capture anchor, after HDR output, and ORG's readback service (`PlanReadbackCapture` and
+  `RecordReadbackCapture` in a copy pass, `IReadbackService::ProcessReadbackRequests` for the callbacks). Two things a plugin
+  API would hide: the anchor's ticket is prepared ahead of the hook, so a one-off capture must be in the pass's revision
+  (the ticket is then prepared again), and an epoch that submits only when it captures must poll the readbacks itself,
+  since only submissions poll them. `RangeSpec` names mips and slices, not a rectangle: a crop is cut on the CPU.
+- **Found by:** P3 W3, Screenshot (2026-11-09).
