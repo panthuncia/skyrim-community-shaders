@@ -74,21 +74,30 @@ The shader body does not change. Each entry is `X(kind, type, name, register num
 | `UAV` | `T name : register(u#)` | as `SRV` |
 | `SAMPLER` | `T name : register(s#)` | `static T name = SamplerDescriptorHeap[handle]` |
 | `CBUFFER` | `cbuffer nameBuffer : register(b#) { T name; }` | `static ConstantBuffer<T> name = ResourceDescriptorHeap[handle]` |
+| `LATCH` | as `CBUFFER` | `static T name = ((ByteAddressBuffer)ResourceDescriptorHeap[handle]).Load<T>(offset)` |
 | `PUSH` | as `CBUFFER` | the struct itself, inside the push block |
 
 `SRV` and `UAV` cover `Texture2D`, `Texture3D`, `TextureCube` and their arrays, the `RW` textures, `(RW)StructuredBuffer`,
-`(RW)ByteAddressBuffer` and typed buffers. `SAMPLER` covers `SamplerState` and `SamplerComparisonState`. `CBUFFER` and `PUSH`
-take a struct, and code reads its fields as `name.field` on both paths.
+`(RW)ByteAddressBuffer` and typed buffers. `SAMPLER` covers `SamplerState` and `SamplerComparisonState`. `CBUFFER`, `LATCH` and
+`PUSH` take a struct, and code reads its fields as `name.field` on both paths. Under FXC `LATCH` expands exactly as `CBUFFER`
+does, so the D3D11 bytecode is the same whichever of the two a list uses.
 
 **The push block.** Under ORG it is `cbuffer OrgBindings : register(b0)`: the pipeline's push constants on Vulkan, its root
-constants on D3D12. It holds one `uint` handle per `SRV`, `UAV`, `SAMPLER` and `CBUFFER` entry, in list order, then each
-`PUSH` struct, each on a 16-byte boundary. Put `PUSH` entries last.
+constants on D3D12. It holds one `uint` handle per `SRV`, `UAV`, `SAMPLER` and `CBUFFER` entry and two (the handle, then
+the byte offset) per `LATCH` entry, in list order, then each `PUSH` struct, each on a 16-byte boundary. Put `PUSH` entries
+last.
 
 **Which constants go where.**
 
-- **`PUSH`**: small values that change between dispatches of one pass (a mip, a slice, a step). They are recorded with the
-  dispatch, so they cost no upload.
-- **`CBUFFER`**: everything else. The pass uploads it (a `LatchBlock` region or a graph upload) and passes its CBV handle.
+- **`PUSH`**: small values fixed in the recording that change between dispatches of one pass (a mip, a slice, a step).
+  They are recorded with the dispatch, so they cost no upload. Never a value that changes by frame: async epochs prepare and
+  record ahead of the frame's values, and kept recordings are submitted again.
+- **`LATCH`**: values that change every frame (a camera, a time, a stripe of a rolling update). The client's `commit` writes
+  them into its `org::LatchBlock` at the host's current frame slot (`GraphHost::CurrentFrameSlot()`), and `Record` names that
+  slot's region with `ShaderBindings::LatchOf(block, a_recording.FrameSlot(), offset)`. The recording stays the same from
+  frame to frame. The struct must have the same layout packed tightly as in cbuffer packing (no member crosses a 16-byte row,
+  no gaps), because DXC loads it from a raw buffer.
+- **`CBUFFER`**: constants that change only with the graph's build (settings, sizes), in a graph buffer with a CBV.
 - **The limit.** The whole push block is at most 32 words (128 bytes), Vulkan's guaranteed push-constant size. D3D12's root
   signature holds 64 words. Handles take one word each, so a pass with 12 resources has 20 words left for `PUSH` data.
   `ShaderBindings::Words<Block>()` fails to compile above the limit, and `tools/check-dual-target-shaders.py` checks the
@@ -120,7 +129,8 @@ const DiffuseIBLBlock block{ a_recording.Index(a_bindings.env), a_recording.Inde
 program->Dispatch(a_recording, ShaderBindings::Data(block), 1, 1, 1);
 ```
 
-A `PUSH` struct is an `alignas(16)` member after the handles. Raster passes give `ShaderBindings::Data(block)` as
+A `LATCH` entry is a `ShaderBindings::Latch` member (two words) in list order. A `PUSH` struct is an `alignas(16)` member
+after the handles. Raster passes give `ShaderBindings::Data(block)` as
 `RasterProgram::DrawDesc::constants`.
 
 **Validating.**

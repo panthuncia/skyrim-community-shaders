@@ -15,7 +15,8 @@
 //       X(UAV, RWTexture2D<float4>, OutputTexture, 0) \
 //       X(SAMPLER, SamplerState, LinearSampler, 0)    \
 //       X(CBUFFER, MyConstants, Constants, 1)         \
-//       X(PUSH, MyDispatch, Dispatch, 2)
+//       X(LATCH, MyFrame, Frame, 2)                   \
+//       X(PUSH, MyDispatch, Dispatch, 3)
 //   ORG_PUSH_BLOCK(MY_RESOURCES(ORG_HANDLE))
 //   MY_RESOURCES(ORG_RESOURCE)
 //
@@ -28,11 +29,18 @@
 // - SAMPLER: s#. SamplerState or SamplerComparisonState.
 // - CBUFFER: b#. A struct. D3D11: a cbuffer holding one member of that struct. ORG: a constant
 //   buffer read from the heap (ConstantBuffer<T>). Code reads its fields as name.field on both.
+// - LATCH: b#. A struct. D3D11: as CBUFFER. ORG: the struct loaded from a raw buffer at a byte
+//   offset, both given in the push block: the execution's region of an org::LatchBlock. For values
+//   that change every frame, which a recording reused across frames cannot hold: the host writes the
+//   region just before the submission. The struct must have the same layout packed tightly as in
+//   cbuffer packing: no member crosses a 16-byte row, and there are no gaps.
 // - PUSH: b#. A struct. D3D11: as CBUFFER. ORG: the struct itself, inside the push block. For
-//   small values that change per dispatch (a mip level, a pass index). PUSH entries go last.
+//   small values fixed in the recording that change between its dispatches (a mip level, a pass
+//   index). PUSH entries go last.
 //
 // The ORG push block, which the C++ side mirrors (src/RenderGraph/ShaderBindings.h):
-// 1. one uint handle per SRV, UAV, SAMPLER and CBUFFER entry, in list order;
+// 1. one uint handle per SRV, UAV, SAMPLER and CBUFFER entry, and two uints per LATCH entry (the
+//    handle, then the byte offset), in list order;
 // 2. then each PUSH struct, in list order, each starting on a 16-byte boundary (cbuffer packing).
 // The whole block is at most 32 words (128 bytes, Vulkan's guaranteed push constant size).
 //
@@ -48,6 +56,7 @@
 #	define ORG_HANDLE_UAV(T, N, R) uint OrgHandle_##N;
 #	define ORG_HANDLE_SAMPLER(T, N, R) uint OrgHandle_##N;
 #	define ORG_HANDLE_CBUFFER(T, N, R) uint OrgHandle_##N;
+#	define ORG_HANDLE_LATCH(T, N, R) uint OrgHandle_##N, OrgOffset_##N;
 #	define ORG_HANDLE_PUSH(T, N, R) T N;
 #	define ORG_HANDLE(K, T, N, R) ORG_HANDLE_##K(T, N, R)
 
@@ -55,6 +64,9 @@
 #	define ORG_RESOURCE_UAV(T, N, R) static T N = ResourceDescriptorHeap[OrgHandle_##N];
 #	define ORG_RESOURCE_SAMPLER(T, N, R) static T N = SamplerDescriptorHeap[OrgHandle_##N];
 #	define ORG_RESOURCE_CBUFFER(T, N, R) static ConstantBuffer<T> N = ResourceDescriptorHeap[OrgHandle_##N];
+#	define ORG_RESOURCE_LATCH(T, N, R)                                                   \
+		static ByteAddressBuffer OrgLatch_##N = ResourceDescriptorHeap[OrgHandle_##N]; \
+		static T N = OrgLatch_##N.Load<T>(OrgOffset_##N);
 #	define ORG_RESOURCE_PUSH(T, N, R)
 #	define ORG_RESOURCE(K, T, N, R) ORG_RESOURCE_##K(T, N, R)
 
@@ -70,6 +82,7 @@
 #	define ORG_RESOURCE_SAMPLER(T, N, R) T N : register(s##R);
 #	define ORG_RESOURCE_CBUFFER(T, N, R) \
 		cbuffer N##Buffer : register(b##R) { T N; }
+#	define ORG_RESOURCE_LATCH(T, N, R) ORG_RESOURCE_CBUFFER(T, N, R)
 #	define ORG_RESOURCE_PUSH(T, N, R) ORG_RESOURCE_CBUFFER(T, N, R)
 #	define ORG_RESOURCE(K, T, N, R) ORG_RESOURCE_##K(T, N, R)
 
