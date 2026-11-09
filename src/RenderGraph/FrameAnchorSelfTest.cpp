@@ -30,8 +30,8 @@ namespace FrameAnchors::SelfTest
 		constexpr const char* kClientId = "cs.org.anchor-selftest";
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
 		constexpr std::uint32_t kTextureSize = 16;
-		constexpr std::uint32_t kOutputWords = 16;  // word a: the check; word 8 + a: kMAIN's texel
-		constexpr std::uint32_t kMainWord = 8;
+		constexpr std::uint32_t kOutputWords = 32;  // word a: the check; word 16 + a: kMAIN's texel
+		constexpr std::uint32_t kMainWord = 16;
 		constexpr std::uint32_t kNoIndex = 0xFFFFFFFFu;
 		// Runs without a value before the test reports that nothing came back.
 		constexpr std::uint32_t kPatience = 240;
