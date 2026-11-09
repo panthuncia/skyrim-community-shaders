@@ -7,6 +7,8 @@
 #include <string_view>
 #include <vector>
 
+struct ID3D11Texture2D;
+
 namespace org
 {
 	class ExternalTextureResource;
@@ -168,6 +170,13 @@ namespace FrameAnchors
 
 	/** @brief EngineTarget for a depth-stencil target (RE::RENDER_TARGETS_DEPTHSTENCIL), with its DSV and depth SRV: "cs.engine.depth.<index>". */
 	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t a_depthStencil);
+
+	/**
+	 * @brief EngineTarget for a texture a CS feature still makes with D3D11 (Buffer.h's Texture2D), for a port that reads it
+	 * before its owner is ported: its views as the texture's bind flags give them, in its own format. Registered with every graph
+	 * as a_id. Null when the texture cannot be imported. The owner keeps writing it with D3D11.
+	 */
+	std::shared_ptr<org::ExternalTextureResource> FeatureTexture(ID3D11Texture2D* a_texture, const std::string& a_id);
 
 	// What RenderGraphRuntime asks of the anchors.
 
