@@ -83,6 +83,15 @@ public:
 		Forward,       // Drawcall Limit Fix's forward epoch (T7d): blended Lighting, at the engine's blended draw after the composite
 		FirstPersonDepth,  // Drawcall Limit Fix's first-person depth (T7e), at RenderDepth's first-person draw, before kPOST_ZPREPASS_COPY
 		FirstPerson,       // Drawcall Limit Fix's first-person colour (T7e), at Main::RenderFirstPersonView's accumulator render
+		// The frame anchors' epochs (FrameAnchors.h), in FrameAnchors::Anchor's order. Each is an epoch only when a feature
+		// reserved its anchor before Initialize.
+		AnchorReflectionsPrepass,
+		AnchorEarlyPrepass,
+		AnchorPrepass,
+		AnchorDeferredPasses,
+		AnchorPostProcessing,
+		AnchorTonemap,
+		AnchorPresent,
 		Count
 	};
 
@@ -109,6 +118,9 @@ public:
 
 	/** @brief Asks DXVK to enable the device features BasicRHI needs. Call before the D3D11 device exists. */
 	static void RequestDeviceFeatures(HMODULE a_dxvkD3D11);
+
+	/** @brief Whether a segment is Drawcall Limit Fix's: neither Light Limit Fix's light culling nor a frame anchor's. */
+	static constexpr bool IsDclfSegment(Segment a_segment) { return a_segment != Segment::LightCulling && a_segment < Segment::AnchorReflectionsPrepass; }
 
 	/**
 	 * @brief The frame's epochs, as Segment values: the order a frame runs them (GraphHost::Desc::epochOrder), the host's async

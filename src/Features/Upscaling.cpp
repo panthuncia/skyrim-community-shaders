@@ -9,6 +9,7 @@
 #include "Hooks.h"
 #include "State.h"
 #include "Upscaling/DXVKInterop.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Upscaling/FrameGenController.h"
 #include "Upscaling/Streamline.h"
@@ -2056,6 +2057,8 @@ void Upscaling::MenuManagerDrawInterfaceStartHook::thunk(int64_t a1)
 
 void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32_t a3, RE::RENDER_TARGET a_target, void* a_4, bool a_5)
 {
+	FrameAnchors::Run(FrameAnchors::Anchor::PostProcessing);
+
 	auto& postProcessing = globals::features::postProcessing;
 	if (postProcessing.loaded) {
 		postProcessing.DrawBeforeUpscaling();

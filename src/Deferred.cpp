@@ -19,6 +19,7 @@
 #include "Features/Upscaling.h"
 
 #include "Hooks.h"
+#include "RenderGraph/FrameAnchors.h"
 
 struct DepthStates
 {
@@ -214,6 +215,7 @@ void Deferred::ReflectionsPrepasses()
 	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
 
 	Feature::ForEachLoadedFeature("ReflectionsPrepass", [](Feature* feature) { feature->ReflectionsPrepass(); }, true);
+	FrameAnchors::Run(FrameAnchors::Anchor::ReflectionsPrepass);
 }
 
 void Deferred::EarlyPrepasses()
@@ -239,6 +241,7 @@ void Deferred::EarlyPrepasses()
 	CopyShadowLightData();
 
 	Feature::ForEachLoadedFeature("EarlyPrepass", [](Feature* feature) { feature->EarlyPrepass(); }, true);
+	FrameAnchors::Run(FrameAnchors::Anchor::EarlyPrepass);
 }
 
 void Deferred::PrepassPasses()
@@ -255,6 +258,7 @@ void Deferred::PrepassPasses()
 	context->OMSetRenderTargets(0, nullptr, nullptr);  // Unbind all bound render targets
 
 	Feature::ForEachLoadedFeature("Prepass", [](Feature* feature) { feature->Prepass(); }, true);
+	FrameAnchors::Run(FrameAnchors::Anchor::Prepass);
 }
 
 void Deferred::StartDeferred()
@@ -335,6 +339,8 @@ void Deferred::DeferredPasses()
 	auto finalDepthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
 	context->CopyResource(finalDepthCopy.texture, depth.texture);
 	sceneDepthFinal = true;
+	// The render graph's passes here, before the D3D11 passes below read what they write.
+	FrameAnchors::Run(FrameAnchors::Anchor::DeferredPasses);
 	auto reflectance = renderer->GetRuntimeData().renderTargets[REFLECTANCE];
 
 	auto motionVectors = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];

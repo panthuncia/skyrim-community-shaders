@@ -41,6 +41,7 @@
 #include "Features/Upscaling/DXVKInterop.h"
 #include "Features/Upscaling/Streamline.h"
 #include "Features/VolumetricLighting.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Utils/ImportCallSites.h"
 #include "Vram/Debug.h"
@@ -456,6 +457,8 @@ namespace PostProcessingExtensions
 			const auto input = static_cast<RE::RENDER_TARGET>(a3);
 			const auto output = static_cast<RE::RENDER_TARGET>(a4);
 
+			FrameAnchors::Run({ .anchor = FrameAnchors::Anchor::Tonemap, .input = static_cast<std::int32_t>(a3), .output = static_cast<std::int32_t>(a4) });
+
 			// Effects11 replaces the pass outright; when it does, the vanilla call is skipped
 			// and HandlePostProcessing fixes up the render-target state the pass would have set.
 			if (state->HandlePostProcessing(input, output))
@@ -520,6 +523,8 @@ struct IDXGISwapChain_Present
 		streamline->SetPCLMarker(Streamline::PclMarker::RenderSubmitEnd);
 		streamline->SetPCLMarker(Streamline::PclMarker::TriggerFlash);
 		streamline->SetPCLMarker(Streamline::PclMarker::PresentStart);
+
+		FrameAnchors::Run(FrameAnchors::Anchor::Present);
 
 		// What DCLF puts in DXVK's stream for the frame (its CPU frame signal), before the present sends the stream on; its features'
 		// Reset (EndFrame) runs after the present.

@@ -11,6 +11,7 @@
 #include "Globals.h"
 #include "Profiler.h"
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "Features/RemoteControl/GpuTimestamps.h"
 #include "Features/RemoteControl/GpuCounters.h"
 #include "Features/DrawcallLimitFix.h"
@@ -598,7 +599,7 @@ struct RenderGraphRuntime::Impl
 			submissionDumps.fetch_sub(1, std::memory_order_relaxed);
 			DumpPendingSubmits(a_label);
 		}
-		if (dropLists.load(std::memory_order_relaxed) && RenderGraphRuntime::Get().CurrentSegment() != RenderGraphRuntime::Segment::LightCulling) {
+		if (dropLists.load(std::memory_order_relaxed) && RenderGraphRuntime::IsDclfSegment(RenderGraphRuntime::Get().CurrentSegment())) {
 			// Diagnostics (DropDclfLists): the signals alone, so the graph's tracking advances while the GPU runs none of its work.
 			for (std::size_t i = 0; i < pendingCount; ++i) {
 				pendingSubmits[i].commandBuffers.clear();
@@ -944,6 +945,10 @@ struct RenderGraphRuntime::Impl
 			return "DrawcallLimitFix::First-person depth / " + a_pass;
 		case Segment::FirstPerson:
 			return "DrawcallLimitFix::First person / " + a_pass;
+		default:
+			if (const auto* anchor = FrameAnchors::NamesOf(static_cast<std::uint32_t>(a_segment)))
+				return anchor->profiler + a_pass;
+			break;
 		}
 		return "RenderGraph::" + a_pass;
 	}
@@ -1218,6 +1223,8 @@ struct RenderGraphRuntime::Impl
 		case Segment::FirstPerson:
 			return "cs.first-person";
 		default:
+			if (const auto* anchor = FrameAnchors::NamesOf(static_cast<std::uint32_t>(a_segment)))
+				return anchor->contributor;
 			return "cs.unknown";
 		}
 	}
@@ -1240,6 +1247,8 @@ struct RenderGraphRuntime::Impl
 			desc.anchors = { { "cs.frame.begin", "Frame begin", "__rg_begin__" }, { "cs.frame.end", "Frame end", "__rg_end__" } };
 			for (std::uint32_t index = 0; index < static_cast<std::uint32_t>(Segment::Count); ++index) {
 				const auto value = static_cast<Segment>(index);
+				if (FrameAnchors::IsUnusedSegment(index))
+					continue;  // an anchor nobody reserved has no epoch
 				desc.epochs.push_back({ ContributorEpochId(value), SegmentLabel(value), EpochOf(value) });
 			}
 			desc.graphicsLayout = desc.computeLayout = contributorLayout->GetHandle();
@@ -1297,6 +1306,10 @@ struct RenderGraphRuntime::Impl
 			return "CS DCLF: first-person depth";
 		case Segment::FirstPerson:
 			return "CS DCLF: first person";
+		default:
+			if (const auto* anchor = FrameAnchors::NamesOf(static_cast<std::uint32_t>(a_segment)))
+				return anchor->label;
+			break;
 		}
 		return "CS render graph";
 	}
@@ -1324,6 +1337,10 @@ struct RenderGraphRuntime::Impl
 			return "CS DCLF: first-person depth inputs";
 		case Segment::FirstPerson:
 			return "CS DCLF: first-person inputs";
+		default:
+			if (const auto* anchor = FrameAnchors::NamesOf(static_cast<std::uint32_t>(a_segment)))
+				return anchor->inputs;
+			break;
 		}
 		return "CS render graph: feature inputs";
 	}
@@ -1711,6 +1728,8 @@ bool RenderGraphRuntime::Initialize()
 		else if (EpochsEnabled())
 			desc.epochOrder = { EpochOf(Segment::ShadowView), EpochOf(Segment::ZPrepass), EpochOf(Segment::Reflection), EpochOf(Segment::FirstPersonDepth),
 				EpochOf(Segment::SkyOcclusion), EpochOf(Segment::LightCulling), EpochOf(Segment::MainOpaque), EpochOf(Segment::Forward), EpochOf(Segment::FirstPerson) };
+		// The frame anchors' reserved epochs, where the frame reaches them (FrameAnchors.h).
+		FrameAnchors::AddToFrame(desc.epochOrder);
 		if (!desc.epochOrder.empty())
 			logger::info("[ORG] epoch order: {}", fmt::join(desc.epochOrder, ","));
 #if defined(CS_RELEASE_PROFILE)
@@ -1772,6 +1791,8 @@ bool RenderGraphRuntime::Initialize()
 		return {};
 	});
 #endif
+	// The frame anchors' passes, before any graph is built (so adding the extension rebuilds nothing).
+	FrameAnchors::Attach(*state->host);
 	state->CreateContributorHost();
 	if (state->asyncEpochs) {
 		try {
@@ -1786,6 +1807,8 @@ bool RenderGraphRuntime::Initialize()
 				epochs = EpochsOf(frameConfig.asyncOrder);
 				revisionEpochs = EpochsOf(frameConfig.revisionEpochs);
 			}
+			// The frame anchors' epochs are live async epochs, in DXVK's stream with the others.
+			FrameAnchors::AddToFrame(epochs);
 			logger::info("[ORG] async epochs: {}; revision-driven: {}", fmt::join(epochs, ","), fmt::join(revisionEpochs, ","));
 			// In DXVK's own command stream unless CS_ORG_IN_STREAM=0 (or DXVK takes no external commands); a list of epochs (3,1) puts only
 			// those there.
@@ -2123,7 +2146,7 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 		return false;
 	// Diagnostics (dclf:epochs=0): Drawcall Limit Fix's epochs report submitted without submitting anything, so a run times the frame
 	// without their boundaries (the flush, the queue barriers, the split render passes). Their objects are then drawn by nobody.
-	if (a_segment != Segment::LightCulling && (dclfEpochsSkipped.load(std::memory_order_relaxed) >> static_cast<std::uint32_t>(a_segment) & 1u)) {
+	if (IsDclfSegment(a_segment) && (dclfEpochsSkipped.load(std::memory_order_relaxed) >> static_cast<std::uint32_t>(a_segment) & 1u)) {
 		if (const std::uint32_t spinUs = skippedEpochSpinUs.load(std::memory_order_relaxed)) {
 			const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(spinUs);
 			while (std::chrono::steady_clock::now() < until) {
@@ -2271,7 +2294,7 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 			impl->holding = true;
 		} else if (impl->batching && !impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment)))
 			throw std::runtime_error("DXVK rejected the epoch's submissions");
-		if (const std::uint32_t spinUs = submittedEpochSpinUs.load(std::memory_order_relaxed); spinUs && a_segment != Segment::LightCulling) {
+		if (const std::uint32_t spinUs = submittedEpochSpinUs.load(std::memory_order_relaxed); spinUs && IsDclfSegment(a_segment)) {
 			const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(spinUs);
 			while (std::chrono::steady_clock::now() < until) {
 			}
