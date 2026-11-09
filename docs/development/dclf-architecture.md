@@ -1721,6 +1721,40 @@ buffer (`SceneBuffers::facePositions`, the set's) serve every epoch. The set req
 and the per-object buffers - the visibility and frustum words, the reported verdicts - as one unit group at the tables' objects
 (`RequireSceneTables`), so a segment or a mode never has more inputs than its buffers hold.
 
+### Frame graph textures
+
+A CS feature ported to ORG writes its output in an anchor epoch and publishes it (render-graph.md, "Publishing a graph resource to
+other epochs"). Its integration then names the texture by its graph id instead of its D3D11 view (`Api::FrameTexture::graphResource`
+and `graph`, beside `view`):
+
+-   At the main resources' check (`IndirectDraws::Impl::Setup`), `Extensions::FrameGraphTextures` asks each registration's `graph`
+    whether its producer is on its ORG path. That set is `Resources::graphTextures`. A change makes new main resources, so the
+    passes are built again.
+-   Every colour pass declares a read of the set's published textures (`DeclareFrameBuffers`). The graph sequencer orders it after
+    the producer's write, in whichever epoch that ran.
+-   Each colour commit (`ResolveFrameTextures`) writes the published texture's descriptor into the register when the set has it and
+    `graph` still answers true. Otherwise it writes `view`'s import, as before. The first read through each path is logged:
+    `[DCLF] frame texture <name> (t<n>) reads the graph resource '<id>'` or `... reads its D3D11 view`.
+-   The views with frame constants of their own (the reflection's faces) still read `view`. Their epoch is earlier in the frame, and
+    their passes do not declare the graph textures yet. So `view` must keep answering while the producer still exports.
+
+LLF's culling buffers use the same idea for buffers (`Api::FrameGraphBuffers`), registered by its own extension. A buffer twin can be
+published the same way, and its `indices` callback then answers with `PublishedResources::ShaderResourceIndex`.
+
+Switching an integration when its feature is ported:
+
+1.  The feature creates its output as a non-aliased twin (`History` or `Persistent`, or exported while D3D11 readers remain).
+2.  It calls `PublishedResources::Publish(twin)` after creating it and after every `Resize`, and `Withdraw(id)` in its client's
+    `onFailed` and whenever it leaves its ORG path.
+3.  The integration adds `.graphResource = "<Feature>::<Name>"` and `.graph = &GraphIndex` to its `RegisterFrameTexture`. `GraphIndex`
+    is `return <producer on its ORG path> && PublishedResources::ShaderResourceIndex(id, a_index);`.
+4.  `view` stays as it is (the export's SRV, or the D3D11 texture's) until the export is dropped.
+5.  Check one run's log for the `reads the graph resource` line and compare `dclf:shot` images with the feature's switch on and off.
+
+`CS_DCLF_GRAPH_TEXTURE_TEST` (`Integrations/DynamicCubemaps/ReflectionsGraphTest.h`) is the test producer. `graph` makes t30 read a
+cubemap copied at the Prepass anchor through the graph; `d3d11` makes it read the same cubemap through its export. Their screenshots
+must be identical.
+
 ### Object rows
 
 The object row (`BindlessObject`) is 64 bytes, structure only; what moves per frame is in the placement and shading rows. The shaders

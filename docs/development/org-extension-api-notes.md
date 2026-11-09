@@ -63,6 +63,22 @@ One entry per need. Give:
   D3D11 side, so the export becomes a tripwire handle (P4.1).
 - **Found by:** P2.1 (2026-11-09).
 
+### Reading another client's graph output in another epoch
+
+- **Need:** a pass reads a texture or buffer that another feature or plugin writes in a different epoch (an anchor epoch, or one
+  of DCLF's), ordered after the write, without a copy and without going through D3D11.
+- **Who:** DCLF's colour passes reading the ported CS features' outputs (Dynamic Cubemaps, IBL, Skylighting, Terrain Shadows,
+  Volumetric Shadows and the others its integrations read), and any plugin pass that consumes CS's outputs.
+- **Where it fits:** `PublishedResources` (`src/RenderGraph/PublishedResources.h`; render-graph.md, "Publishing a graph resource
+  to other epochs"). An exported table needs:
+    - `Publish(id, resource)` and `Withdraw(id)`, with the rule that only non-aliased resources are published;
+    - a reader-side lookup of the bindless index (`ShaderResourceIndex`) and of whether the id is published now;
+    - a stable id naming convention (`Feature::Name`), because the reader's pass declares the id.
+  Open items: a withdrawn resource stays registered (and alive) until the producer publishes again under that id; and DCLF's
+  views with frame constants of their own (the reflection's faces) do not declare published textures yet, so they still need
+  the producer's D3D11 export.
+- **Found by:** P3 DCLF graph textures (2026-11-09).
+
 ### Render to texture
 
 - **Need:** render into a texture the engine later samples on a character.
@@ -137,6 +153,7 @@ Keys used so far:
 
 - The anchor self-test (`CS_ORG_ANCHOR_SELFTEST`): 0, 1 and 2 at every anchor.
 - The graph resource self-test (`CS_ORG_GRAPHRES_SELFTEST`): 0 at DeferredPasses.
+- The DCLF graph texture test (`CS_DCLF_GRAPH_TEXTURE_TEST`): 0 at Prepass.
 ### Presenting from more than one thread
 
 - **Need:** present a frame from a thread other than the render thread, under the engine's lock.

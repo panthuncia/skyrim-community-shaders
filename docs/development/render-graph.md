@@ -304,6 +304,39 @@ if (out.Resize(width, height))
 a staging texture right after the epoch and reads one texel back, then the texture is resized (the first one released through
 `ReleaseAfterD3D11`) and checked again.
 
+### Publishing a graph resource to other epochs
+
+A client's `registerResources` registers its twins with the anchor graphs only. To let a pass in another epoch read one (DCLF's
+colour passes reading a feature's output), the producer publishes it (`src/RenderGraph/PublishedResources.h`):
+
+-   `PublishedResources::Publish(id, twin)` registers the twin's graph resource under `id` with every epoch's graph: the anchors' and
+    DCLF's. It uses ORG's own cross-epoch machinery (persistent-epochs.md, "What ties the graphs together"): every graph admits
+    against the runtime's one `ResourceSequencer`, so a read declared in a later epoch waits for the producer's write and enters
+    the state it left. Nothing is copied.
+-   Only a resource the graph never aliases can be published: `History`, `Persistent`, or exported. An aliased transient keeps no
+    contents across executions, and the reader's epoch is another execution. Publish refuses an aliasable twin.
+-   A reader in an epoch earlier in the frame than the producer's reads the previous frame's contents.
+-   Publishing a new resource under an id (the first time, or after a `Resize`) adds the host extension
+    `cs.org.published-resources` again, which rebuilds every graph once.
+-   `Withdraw(id)` when the producer leaves its ORG path (its `onFailed`, a setting that turns it off). Readers then go back to D3D11.
+    The resource stays registered until the next `Publish` under that id, because a graph built earlier may still declare it.
+-   `ShaderResourceIndex(id, index)` gives the bindless index of the whole-resource SRV (every mip; a cube's `TextureCube` view, a 2D
+    array's full array view), false while it is not published. That index is what a frame record holds for a bindless reader.
+
+```cpp
+// The producer, after creating its output (and after every Resize):
+out = std::make_unique<GraphResources::Texture2D>(desc, "MyFeature::Output",
+	GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
+PublishedResources::Publish(*out);  // id "MyFeature::Output"
+// Its client's onFailed:
+PublishedResources::Withdraw("MyFeature::Output");
+```
+
+DCLF reads a published texture through its frame texture contract (`Api::FrameTexture::graphResource` and `graph`;
+dclf-architecture.md, "Frame graph textures"). `CS_DCLF_GRAPH_TEXTURE_TEST=graph|d3d11` is the end-to-end test: a copy pass at the
+Prepass anchor fills a published cubemap from Dynamic Cubemaps' reflections, and DCLF's t30 reads it through the graph or through
+its export.
+
 ## GPU timing in the profiling window
 
 The profiling window's D3D11 timers are timestamp query pairs, which DXVK writes at
