@@ -137,6 +137,8 @@ Keys used so far:
 
 - The anchor self-test (`CS_ORG_ANCHOR_SELFTEST`): 0, 1 and 2 at every anchor.
 - The graph resource self-test (`CS_ORG_GRAPHRES_SELFTEST`): 0 at DeferredPasses.
+- Volumetric Shadows (`CS_ORG_VOLUMETRIC_SHADOWS`): 100 to 105 at EarlyPrepass (per mip: downsample, horizontal blur, vertical
+  blur).
 ### Presenting from more than one thread
 
 - **Need:** present a frame from a thread other than the render thread, under the engine's lock.
@@ -155,3 +157,25 @@ Keys used so far:
   no longer describe what reaches the display (CS reads `OwnedFrame::GetSurfaceState`). The API needs a query and a
   change notification for the ORG swap chain.
 - **Found by:** P1 ownership inversion (2026-11-09).
+
+### Work at an engine draw that is not an anchor
+
+- **Need:** run a pass where an engine draw happens (a specific Utility pass, a shader bind) instead of at an anchor.
+- **Who:** CS's Volumetric Shadows ran at the sun's shadow mask draw (`State::Draw`, RenderShadowmask) and read the engine's
+  t4 there. Plugins that hook `SetShader` or a draw to capture inputs do the same.
+- **Where it fits:** usually an existing anchor, once the inputs are known to be final there. The shadow mask draw only marks
+  where the engine binds the sun cascades; they are drawn in `Main::RenderShadowMaps`, so EarlyPrepass has them. The pass then
+  reads the engine target by name (`FrameAnchors::EngineDepth`), not the bound slot. The API should name which engine
+  targets are final at each anchor, so a plugin does not need a new anchor per draw. A new anchor costs an epoch at that
+  point (entry and exit barriers) each frame.
+- **What stays at the draw:** binding the output to a PS slot for the engine's own shaders, until P5 removes those draws.
+- **Found by:** P3 Volumetric Shadows (2026-11-09).
+
+### Graph textures read by DCLF's draws
+
+- **Need:** DCLF's colour draws read a feature's graph texture by its graph resource, not through a D3D11 view of it.
+- **Who:** CS's Volumetric Shadows (t18), IBL and Terrain Shadows. Today they register a D3D11 SRV as a frame texture
+  (`Api::FrameTexture`). On their ORG paths that is the exported SRV, which DCLF imports as it imports any D3D11 view.
+- **Where it fits:** `Api::FrameGraphBuffers` takes buffers only, and an anchor client registers its resources only with the
+  anchor graphs, not with DCLF's. A graph-texture variant needs both. It is planned as one task for every port.
+- **Found by:** P3 Volumetric Shadows (2026-11-09).
