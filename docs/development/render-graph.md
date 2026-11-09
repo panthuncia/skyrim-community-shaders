@@ -426,6 +426,7 @@ of adding a `Segment` and editing the epoch order. Each anchor is one of CS's ho
 | `Prepass` | `Deferred::PrepassPasses` (the main pass's first opaque batch) |
 | `DeferredPasses` | `Deferred::DeferredPasses`, after the final depth copy |
 | `DeferredComposite` | `Deferred::DeferredPasses`, after the D3D11 SSGI, SSS and cubemap update, where the composite runs |
+| `PostComposite` | the end of `Deferred::DeferredPasses`, after the composite (D3D11 or ORG), where Effects11's rays draw |
 | `PostProcessing` | `Upscaling::Main_PostProcessing`, before the upscaler |
 | `Tonemap` | `Main_HDRTonemapBlendCinematic_Render` (`Hooks.cpp`) |
 | `Present` | `IDXGISwapChain_Present` (`Hooks.cpp`), before DCLF's `BeforePresent` |

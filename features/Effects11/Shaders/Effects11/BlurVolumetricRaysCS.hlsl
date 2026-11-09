@@ -3,16 +3,18 @@
 // Taps are rejected by relative linear-depth difference, so the kernel behaves the
 // same near and far instead of depending on raw depth-buffer precision.
 
-Texture2D<float> InputTexture : register(t0);
-Texture2D<float> LinearDepthTexture : register(t1);
-RWTexture2D<float> OutputTexture : register(u0);
+// Dual-target (Common/OrgResources.hlsli). VLData changes with the dynamic resolution, so under ORG it is
+// the frame's latch region.
+#include "Common/OrgResources.hlsli"
+#include "Effects11/VolumetricRaysData.hlsli"
 
-// Half-res target dimensions (dynamic resolution area).
-cbuffer VLData : register(b1)
-{
-	int2 ScreenSize;
-	int2 ScreenSizeMin1;
-}
+#define BLUR_VOLUMETRIC_RAYS_RESOURCES(X)          \
+	X(SRV, Texture2D<float>, InputTexture, 0)       \
+	X(SRV, Texture2D<float>, LinearDepthTexture, 1) \
+	X(UAV, RWTexture2D<float>, OutputTexture, 0)    \
+	X(LATCH, VLData, VL, 1)
+ORG_PUSH_BLOCK(BLUR_VOLUMETRIC_RAYS_RESOURCES(ORG_HANDLE))
+BLUR_VOLUMETRIC_RAYS_RESOURCES(ORG_RESOURCE)
 
 #define TG_DIM 256
 #define WINDOW 12
@@ -36,13 +38,13 @@ static const float TapWeights[5] = { 0.178400, 0.210431, 0.222338, 0.210431, 0.1
 #endif
 
 	// Clamp so the halo lanes replicate the edge instead of reading outside the render area.
-	int2 clampedPixel = clamp(pixel, 0, ScreenSizeMin1);
+	int2 clampedPixel = clamp(pixel, 0, VL.ScreenSizeMin1);
 	scattering[idx] = InputTexture[clampedPixel];
 	linearDepth[idx] = LinearDepthTexture[clampedPixel];
 
 	GroupMemoryBarrierWithGroupSync();
 
-	if (base < 0 || base >= TG_DIM - WINDOW * 2 || any(pixel > ScreenSizeMin1))
+	if (base < 0 || base >= TG_DIM - WINDOW * 2 || any(pixel > VL.ScreenSizeMin1))
 		return;
 
 	float centerDepth = linearDepth[idx];

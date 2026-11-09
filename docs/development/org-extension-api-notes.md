@@ -222,8 +222,11 @@ Each anchor's rule:
 - **DeferredComposite.** In `Deferred::DeferredPasses`, after the D3D11 SSGI, SSS and cubemap update, where the deferred
   composite runs. The ORG composite (`CS_ORG_COMPOSITE=1`, key 0) is a pass here; when it ran, the D3D11 dispatch is skipped.
   A pass with a higher key reads the composited `kMAIN`. Before the D3D11 `DynamicCubemaps::PostDeferred` and Effects11's
-  rays. When SSGI and SSS move to DeferredPasses (P3 W2), the composite can join them there; this anchor stays for passes
-  that follow it.
+  rays. When SSGI and SSS move to DeferredPasses (P3 W2), the composite can join them there. A pass that must follow the
+  composite whichever path ran it uses PostComposite: with the ORG composite off, the D3D11 composite runs after this anchor.
+- **PostComposite.** At the end of `Deferred::DeferredPasses`, after the deferred composite (D3D11 or ORG), the D3D11
+  `DynamicCubemaps::PostDeferred` and Effects11's D3D11 rays. `kMAIN` holds the composited opaque scene. Before the forward
+  (blended) pass and DCLF's forward epoch.
 - **PostProcessing.** At `Main_PostProcessing`, before Post Processing's `DrawBeforeUpscaling`, the upscaler and the
   ImageSpace chain. The scene is at render resolution.
 - **Tonemap.** At the ImageSpace HDR tonemap's render, after the upscaler. Before Effects11 and Post Processing's `PreProcess`.
@@ -249,6 +252,8 @@ Keys used so far:
 - The graph resource self-test (`CS_ORG_GRAPHRES_SELFTEST`): 0 at DeferredPasses.
 - Screen Space Shadows (`CS_ORG_SCREEN_SPACE_SHADOWS`): 100 (clear) and 101 (raymarch) at Prepass.
 - The deferred composite (`cs.deferred.composite`): 0 at DeferredComposite.
+- Effects11's rays (`CS_ORG_E11_RAYS`): 100 to 103 (volumetric rays: raymarch, horizontal and vertical blur, apply) and 200 to
+  204 (sun rays: mask, three blurs, composite) at PostComposite.
 - The shared constants' upload (`cs.shared.upload`): first at every anchor where a client reads them, outside the keys.
 - Terrain Shadows' update (`CS_ORG_TERRAIN_SHADOWS`): 100 at EarlyPrepass.
 - Terrain Blending's depth blend (`CS_ORG_TERRAIN_BLENDING`): 0 at DepthDone.
@@ -614,6 +619,7 @@ Keys used so far:
 
 - **Need:** fill a persistent lookup texture once (a noise, a LUT), before its first reader in any epoch, and never again
 - **Who:** CS's HDRDisplay (`CS_ORG_HDR_DISPLAY`, the copy at HDROutput); plugins that `CopyResource` into `GetBuffer(0)`.
+- **Where it fits:** today the client publishes the area in an atomic at `active`, and the passes put it in their `Revision`
   unless the graph loses it.
 - **Who:** CS's TruePBR glints noise (`src/TruePBR/ORGGlintsNoise.cpp`, `CS_ORG_GLINTS`); any plugin with a generated LUT.
 - **Where it fits:** today the client registers a fill pass at the earliest anchor its readers follow (EarlyPrepass), is
@@ -673,3 +679,21 @@ Keys used so far:
 - **Where it fits:** one helper beside `Util::GetCommonShaderDefines`, or `ComputeProgram::Desc` taking narrow defines and
   adding the stage's defines itself. A plugin API would expose the same.
 - **Found by:** P3 W3, HDRDisplay (2026-11-09).
+### A pass after the deferred composite, whichever path ran it
+
+- **Need:** add to the composited opaque scene (`kMAIN`) before the forward pass, as screen-space light shafts do.
+- **Who:** CS's Effects11 volumetric rays and sun rays; any plugin that adds a deferred effect (fog, shafts, decals on the
+  lit scene) before the blended geometry.
+- **Where it fits:** the PostComposite anchor. DeferredComposite is not enough on its own: with the ORG composite off, the
+  D3D11 composite runs after that anchor, so a higher key there sees the scene before the composite.
+- **Found by:** P3 W4, Effects11 rays (2026-11-09).
+
+### Raster passes whose area follows the dynamic resolution
+
+- **Need:** fullscreen raster passes whose viewport (and compute passes whose group counts) follow the dynamic resolution,
+  which can change from frame to frame, while the recording is kept.
+- **Who:** CS's Effects11 rays (half-res and full-res areas of `kMAIN`); any plugin pass sized to the render area.
+  and read it in `Prepare`, so a change records them again (as the live flags do). The shaders read the same sizes from
+  the latch. A plugin API would want the render area as a graph value the viewport and dispatch can take at execution
+  (a viewport from a buffer, or indirect draws and dispatches sized from the latch), so the recording never changes.
+- **Found by:** P3 W4, Effects11 rays (2026-11-09).
