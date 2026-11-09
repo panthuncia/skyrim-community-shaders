@@ -306,6 +306,25 @@ ID3D11ComputeShader* DynamicCubemaps::GetComputeShaderBC6HEncode()
 	return bc6hEncodeCS;
 }
 
+DynamicCubemaps::UpdateCubemapCB DynamicCubemaps::NextCaptureConstants(bool a_reflections)
+{
+	const uint index = a_reflections ? 1 : 0;
+
+	UpdateCubemapCB updateData{};
+
+	updateData.CameraPreviousPosAdjust = cameraPreviousPosAdjust[index];
+	updateData.CaptureIndex = index;
+	updateData.CaptureDeltaTime = std::max(0.0f, globals::state->timer - previousCaptureTime[index]);
+	updateData.ResetCapture = resetCapture[index];
+	previousCaptureTime[index] = globals::state->timer;
+	resetCapture[index] = false;
+
+	auto eyePosition = Util::GetEyePosition();
+
+	cameraPreviousPosAdjust[index] = { eyePosition.x, eyePosition.y, eyePosition.z };
+	return updateData;
+}
+
 void DynamicCubemaps::UpdateCubemapCapture(bool a_reflections)
 {
 	auto renderer = globals::game::renderer;
@@ -316,8 +335,6 @@ void DynamicCubemaps::UpdateCubemapCapture(bool a_reflections)
 
 	ID3D11ShaderResourceView* srvs[2] = { depth.depthSRV, main.SRV };
 	context->CSSetShaderResources(0, 2, srvs);
-
-	uint index = a_reflections ? 1 : 0;
 
 	ID3D11UnorderedAccessView* uavs[4];
 	if (a_reflections) {
@@ -333,20 +350,7 @@ void DynamicCubemaps::UpdateCubemapCapture(bool a_reflections)
 	uavs[3] = captureLightingState->UAV();
 	context->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);
 
-	UpdateCubemapCB updateData{};
-
-	updateData.CameraPreviousPosAdjust = cameraPreviousPosAdjust[index];
-	updateData.CaptureIndex = index;
-	updateData.CaptureDeltaTime = std::max(0.0f, globals::state->timer - previousCaptureTime[index]);
-	updateData.ResetCapture = resetCapture[index];
-	previousCaptureTime[index] = globals::state->timer;
-	resetCapture[index] = false;
-
-	auto eyePosition = Util::GetEyePosition();
-
-	cameraPreviousPosAdjust[index] = { eyePosition.x, eyePosition.y, eyePosition.z };
-
-	updateCubemapCB->Update(updateData);
+	updateCubemapCB->Update(NextCaptureConstants(a_reflections));
 
 	ID3D11Buffer* buffer = updateCubemapCB->CB();
 	context->CSSetConstantBuffers(0, 1, &buffer);
@@ -573,19 +577,8 @@ void DynamicCubemaps::CompressToBC6H(bool a_reflections)
 	globals::profiler->EndPass();
 }
 
-/**
- * @brief Advances the cubemap update pipeline state machine by one task.
- *
- * Executes the next step in a multi-frame sequence that captures, infers, filters,
- * and compresses environment cubemaps. Resets capture when game time jumps
- * significantly and recompiles shaders if needed. Processes either the base or
- * reflection variant depending on the current task.
- */
-void DynamicCubemaps::UpdateCubemap()
+void DynamicCubemaps::BeginUpdate()
 {
-	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "Cubemap Update");
-
 	// Reset capture when game time jumps (wait menu, timescale changes, console commands)
 	if (auto calendar = globals::game::calendar) {
 		float currentHoursPassed = calendar->GetHoursPassed();
@@ -606,6 +599,62 @@ void DynamicCubemaps::UpdateCubemap()
 			shaderCache->Clear(RE::BSShader::Types::ImageSpace);
 		recompileFlag = false;
 	}
+}
+
+DynamicCubemaps::UpdateStep DynamicCubemaps::NextUpdateStep()
+{
+	static constexpr uint32_t kIrradianceSplit = 2;
+	static constexpr uint32_t kIrradianceSplitB = MIPLEVELS - 1;
+
+	UpdateStep step{};
+	switch (nextTask) {
+	case NextTask::kCaptureInferAndIrradianceA:
+		step = { .reflections = false, .capture = true, .irradianceStart = 1, .irradianceEnd = kIrradianceSplit };
+		nextTask = NextTask::kIrradianceBA;
+		break;
+
+	case NextTask::kIrradianceBA:
+		step = { .reflections = false, .irradianceStart = kIrradianceSplit, .irradianceEnd = kIrradianceSplitB };
+		nextTask = NextTask::kIrradianceBBAndBC6H;
+		break;
+
+	case NextTask::kIrradianceBBAndBC6H:
+		step = { .reflections = false, .irradianceStart = kIrradianceSplitB, .irradianceEnd = MIPLEVELS, .publish = true };
+		nextTask = activeReflections ? NextTask::kCaptureInferAndIrradianceA2 : NextTask::kCaptureInferAndIrradianceA;
+		break;
+
+	case NextTask::kCaptureInferAndIrradianceA2:
+		step = { .reflections = true, .capture = true, .irradianceStart = 1, .irradianceEnd = kIrradianceSplit };
+		nextTask = NextTask::kIrradianceBA2;
+		break;
+
+	case NextTask::kIrradianceBA2:
+		step = { .reflections = true, .irradianceStart = kIrradianceSplit, .irradianceEnd = kIrradianceSplitB };
+		nextTask = NextTask::kIrradianceBBAndBC6H2;
+		break;
+
+	case NextTask::kIrradianceBBAndBC6H2:
+		step = { .reflections = true, .irradianceStart = kIrradianceSplitB, .irradianceEnd = MIPLEVELS, .publish = true };
+		nextTask = NextTask::kCaptureInferAndIrradianceA;
+		break;
+	}
+	return step;
+}
+
+/**
+ * @brief Advances the cubemap update pipeline state machine by one task.
+ *
+ * Executes the next step in a multi-frame sequence that captures, infers, filters,
+ * and compresses environment cubemaps. Resets capture when game time jumps
+ * significantly and recompiles shaders if needed. Processes either the base or
+ * reflection variant depending on the current task.
+ */
+void DynamicCubemaps::UpdateCubemap()
+{
+	ZoneScoped;
+	TracyD3D11Zone(globals::state->tracyCtx, "Cubemap Update");
+
+	BeginUpdate();
 
 	if (!GetComputeShaderDetectLighting() || !GetComputeShaderUpdate() || !GetComputeShaderInferrence() || !GetComputeShaderSpecularIrradiance() || !GetComputeShaderBC6HEncode())
 		return;
@@ -614,46 +663,14 @@ void DynamicCubemaps::UpdateCubemap()
 									 (GetComputeShaderUpdateReflections() && GetComputeShaderInferrenceReflections())))
 		return;
 
-	static constexpr uint32_t kIrradianceSplit = 2;
-	static constexpr uint32_t kIrradianceSplitB = MIPLEVELS - 1;
-
-	switch (nextTask) {
-	case NextTask::kCaptureInferAndIrradianceA:
-		UpdateCubemapCapture(false);
-		Inferrence(false);
-		Irradiance(false, 1, kIrradianceSplit, /*doSetup=*/true);
-		nextTask = NextTask::kIrradianceBA;
-		break;
-
-	case NextTask::kIrradianceBA:
-		Irradiance(false, kIrradianceSplit, kIrradianceSplitB, /*doSetup=*/false);
-		nextTask = NextTask::kIrradianceBBAndBC6H;
-		break;
-
-	case NextTask::kIrradianceBBAndBC6H:
-		Irradiance(false, kIrradianceSplitB, MIPLEVELS, /*doSetup=*/false);
-		CompressToBC6H(false);
-		nextTask = activeReflections ? NextTask::kCaptureInferAndIrradianceA2 : NextTask::kCaptureInferAndIrradianceA;
-		break;
-
-	case NextTask::kCaptureInferAndIrradianceA2:
-		UpdateCubemapCapture(true);
-		Inferrence(true);
-		Irradiance(true, 1, kIrradianceSplit, /*doSetup=*/true);
-		nextTask = NextTask::kIrradianceBA2;
-		break;
-
-	case NextTask::kIrradianceBA2:
-		Irradiance(true, kIrradianceSplit, kIrradianceSplitB, /*doSetup=*/false);
-		nextTask = NextTask::kIrradianceBBAndBC6H2;
-		break;
-
-	case NextTask::kIrradianceBBAndBC6H2:
-		Irradiance(true, kIrradianceSplitB, MIPLEVELS, /*doSetup=*/false);
-		CompressToBC6H(true);
-		nextTask = NextTask::kCaptureInferAndIrradianceA;
-		break;
+	const auto step = NextUpdateStep();
+	if (step.capture) {
+		UpdateCubemapCapture(step.reflections);
+		Inferrence(step.reflections);
 	}
+	Irradiance(step.reflections, step.irradianceStart, step.irradianceEnd, /*doSetup=*/step.capture);
+	if (step.publish)
+		CompressToBC6H(step.reflections);
 }
 
 void DynamicCubemaps::PostDeferred()
@@ -678,7 +695,6 @@ void DynamicCubemaps::SetupResources()
 	GetComputeShaderSpecularIrradiance();
 	GetComputeShaderBC6HEncode();
 
-	auto renderer = globals::game::renderer;
 	auto device = globals::d3d::device;
 
 	{
@@ -693,6 +709,25 @@ void DynamicCubemaps::SetupResources()
 		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, &computeSampler));
 		Util::SetResourceName(computeSampler, "DynamicCubemaps::ComputeSampler");
 	}
+
+	updateCubemapCB = new ConstantBuffer(ConstantBufferDesc<UpdateCubemapCB>(), "DynamicCubemaps::UpdateCubemapCB");
+	bc6hEncodeCB = new ConstantBuffer(ConstantBufferDesc<BC6HEncodeCB>(), "DynamicCubemaps::BC6HEncodeCB");
+	spmapCB = new ConstantBuffer(ConstantBufferDesc<SpecularMapFilterSettingsCB>(), "DynamicCubemaps::SpmapCB");
+
+	{
+		winrt::com_ptr<ID3D11Resource> defaultCubemapResource;
+		DirectX::CreateDDSTextureFromFile(device, L"Data\\Shaders\\DynamicCubemaps\\defaultcubemap.dds", defaultCubemapResource.put(), &defaultCubemap);
+		Util::SetResourceName(defaultCubemapResource.get(), "DynamicCubemaps::DefaultCubemap");
+		Util::SetResourceName(defaultCubemap, "DynamicCubemaps::DefaultCubemap SRV");
+	}
+
+	CreateD3D11Textures();
+}
+
+void DynamicCubemaps::CreateD3D11Textures()
+{
+	auto renderer = globals::game::renderer;
+	auto device = globals::d3d::device;
 
 	auto& cubemap = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
 
@@ -861,19 +896,10 @@ void DynamicCubemaps::SetupResources()
 			envReflectionsTextureBC6H->CreateSRV(bc6hSRVDesc);
 		}
 
-		updateCubemapCB = new ConstantBuffer(ConstantBufferDesc<UpdateCubemapCB>(), "DynamicCubemaps::UpdateCubemapCB");
 		captureLightingState = std::make_unique<StructuredBuffer>(StructuredBufferDesc<CaptureLightingState>(uint64_t(1), true, false), 1, "DynamicCubemaps::CaptureLightingState");
 		captureLightingState->CreateUAV();
 		const UINT clearState[4]{};
 		globals::d3d::context->ClearUnorderedAccessViewUint(captureLightingState->UAV(), clearState);
-	}
-
-	{
-		bc6hEncodeCB = new ConstantBuffer(ConstantBufferDesc<BC6HEncodeCB>(), "DynamicCubemaps::BC6HEncodeCB");
-	}
-
-	{
-		spmapCB = new ConstantBuffer(ConstantBufferDesc<SpecularMapFilterSettingsCB>(), "DynamicCubemaps::SpmapCB");
 	}
 
 	{
@@ -889,13 +915,6 @@ void DynamicCubemaps::SetupResources()
 			DX::ThrowIfFailed(device->CreateUnorderedAccessView(envFilteredTexture->resource.get(), &uavDesc, &uavArray[level - 1]));
 			Util::SetResourceName(uavArray[level - 1], "DynamicCubemaps::EnvFiltered UAV mip%u", level);
 		}
-	}
-
-	{
-		winrt::com_ptr<ID3D11Resource> defaultCubemapResource;
-		DirectX::CreateDDSTextureFromFile(device, L"Data\\Shaders\\DynamicCubemaps\\defaultcubemap.dds", defaultCubemapResource.put(), &defaultCubemap);
-		Util::SetResourceName(defaultCubemapResource.get(), "DynamicCubemaps::DefaultCubemap");
-		Util::SetResourceName(defaultCubemap, "DynamicCubemaps::DefaultCubemap SRV");
 	}
 }
 
