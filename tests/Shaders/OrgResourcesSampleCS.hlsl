@@ -10,6 +10,14 @@ struct SampleConstants
 	uint4 Size;
 };
 
+struct SampleFrame
+{
+	float4 Tint;
+	float2 Offset;
+	uint Index;
+	float Weight;
+};
+
 struct SampleDispatch
 {
 	uint Mip;
@@ -34,6 +42,7 @@ struct SampleDispatch
 	X(SAMPLER, SamplerState, LinearSampler, 0)           \
 	X(SAMPLER, SamplerComparisonState, ShadowSampler, 1) \
 	X(CBUFFER, SampleConstants, Constants, 0)            \
+	X(LATCH, SampleFrame, Frame, 2)                      \
 	X(PUSH, SampleDispatch, Dispatch, 1)
 ORG_PUSH_BLOCK(SAMPLE_RESOURCES(ORG_HANDLE))
 SAMPLE_RESOURCES(ORG_RESOURCE)
@@ -49,6 +58,7 @@ SAMPLE_RESOURCES(ORG_RESOURCE)
 	colour += asfloat(Raw.Load4(16 * (id.y % Constants.Size.w)));
 	colour *= Depth.SampleCmpLevelZero(ShadowSampler, uv, 0.5);
 	colour *= Constants.Scale;
+	colour = colour * Frame.Tint + float4(Frame.Offset, Frame.Index, Frame.Weight);
 
 	Output[id.xy] = colour;
 	OutputLayers[uint3(id.xy, Dispatch.Slice)] = colour;
