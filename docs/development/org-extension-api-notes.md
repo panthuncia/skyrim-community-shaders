@@ -380,3 +380,11 @@ Keys used so far:
   `Deferred`'s directional shadow buffer is a `Map(WRITE_DISCARD)` buffer, which cannot be imported; its CPU copy
   (`Deferred::GetDirectionalShadowLightData`) is latched instead.
 - **Found by:** P3 Skylighting (2026-11-09).
+### Choosing the image a frame presents
+
+- **Need:** hand the present stage the frame's final image when it is not the back buffer (an HDR or colour-grading
+  output), so it is copied once into the swap chain image instead of into the back buffer and again from it.
+- **Who:** CS's HDRDisplay (`OwnedFrame::SetFrameSource`); plugins that do their own output transform after the engine.
+- **Where it fits:** the Present anchor: a per-frame "present source" a client sets, read by the present pass. A
+  screenshot or capture reads the same source.
+- **Found by:** P1.5 (2026-11-09).

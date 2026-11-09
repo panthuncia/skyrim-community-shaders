@@ -404,7 +404,7 @@ typedef HRESULT(__stdcall* PFN_dxvkReadSubmissionTrace)(ID3D11Device* pDevice, D
 	// Guest devices (interop version 6): the host creates the Vulkan instance and device, DXVK runs on them. The host enables what
 	// dxvkGetGuestInstanceRequirements and dxvkGetGuestDeviceRequirements report, then dxvkSetGuestDevice makes the next D3D11 device
 	// a guest on it. A guest device's DXGI swap chains are headless: Present only ends the frame and flushes, and the host presents.
-#define DXVK_ORG_GUEST_VERSION 1u
+#define DXVK_ORG_GUEST_VERSION 2u
 
 	struct DxvkOrgGuestInstanceRequirements
 	{
@@ -464,6 +464,7 @@ typedef HRESULT(__stdcall* PFN_dxvkReadSubmissionTrace)(ID3D11Device* pDevice, D
 		DxvkOrgGuestQueue compute;   // the host's own queues, reported by dxvkGetInteropDeviceInfo; null: none
 		DxvkOrgGuestQueue upload;
 		DxvkOrgGuestQueue copy;
+		const VkPhysicalDeviceFeatures2* enabledFeatures;  // the chain the host created the device with; read during the call
 	};
 	typedef HRESULT(__stdcall* PFN_dxvkSetGuestDevice)(const DxvkOrgGuestDeviceDesc* pDesc);
 }

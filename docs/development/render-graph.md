@@ -584,7 +584,11 @@ At the game's `D3D11CreateDeviceAndSwapChain` (CS's hook in `Upscaling.cpp`), be
     device hook asks `dxvkGetGuestDeviceRequirements` on the chosen physical device, with BasicRHI's binding model, and merges the
     answer: its extensions, its core features, each feature struct ORed into BasicRHI's of the same sType or copied into the
     chain, and its queue counts.
-4.  `dxvkSetGuestDevice` hands the device over. DXVK submits all its work (graphics, transfer, sparse) to the graphics family's
+4.  `dxvkSetGuestDevice` hands the device over, with the feature chain the device was created with (guest version 2).
+    `dxvkGetInteropDeviceInfo` reports those features, so the graph's binding model check sees the mutable descriptors
+    BasicRHI enabled and DXVK did not. Before this, the graph disabled itself and DCLF was forced off in the owned frame.
+    BasicRHI likewise records what its device hook added (DXVK's `nullDescriptor`): without that it reported null
+    descriptors unsupported and DCLF logged that warning for every texture. DXVK submits all its work (graphics, transfer, sparse) to the graphics family's
     first queue, the one BasicRHI's graphics queue is. The graph keeps the compute queue, the copy queue and the copy family's
     second queue (the uploader's, which BasicRHI's `CreateQueue` hands out); `dxvkGetInteropDeviceInfo` reports them as
     `computeQueue`, `copyQueue` and `uploadQueue`, so `RenderGraphRuntime::Initialize` runs as it does on an adopted device.
@@ -614,10 +618,34 @@ DXVK's Present:
 The caller's thread does no Vulkan work and holds no BasicRHI lock, so the main frame, the loading screen's job thread
 (`JobListManager::ServingThread`, under `Renderer::Lock`) and Bink present the same way. A resize (the guest back buffer's size
 changed, or a present asked for a rebuild) and HDRDisplay's colour space are applied at the next Present, after every queued tail
-has run. HDRDisplay still composes into the guest back buffer; its surface state comes from BasicRHI's swap chain
+has run. With HDR on, HDRDisplay's output texture is what the tail copies into the swap chain image
+(`OwnedFrame::SetFrameSource`): no `CopyResource` into the guest back buffer first. A frame whose output a clean
+screenshot composite overwrites goes through the back buffer as before, and screenshots read the shown texture. The
+compute shader does not write the swap chain image itself: the image is acquired on DXVK's submission thread after the
+previous frame's present, up to 8 frames after the D3D11 work that would write it was recorded. SDR output is
+unchanged (HDRDisplay does not run). HDR is untested: the test display reports no HDR10 or scRGB support
+(`output supports HDR10 false, scRGB false`). The surface state comes from BasicRHI's swap chain
 (`OwnedFrame::GetSurfaceState`, read by `DXVKInterop::RefreshPresenterSurfaceState`). Frame generation is unavailable in the
 owned frame (logged once): no frame-generation presenter wraps BasicRHI's swap chain yet (P1.4). Upscalers that run inside the
 frame through DXVK's interop are unchanged.
+
+### Status (2026-11-09, RX 6600, Dev-Fast)
+
+-   With the feature fixes above, the graph runs in the owned frame (`[ORG] Binding model: descriptor buffer`, no
+    `Render graph disabled`, no `Forced off`).
+-   **Open: a stall with DCLF on.** The owned frame stops presenting at the main menu or the first loading screen, every
+    run (runs `1109-1233..`, `1245..`, `1253..`, `1306..`, `1322..` `p1fix-owned-frame-*`). It does not happen with DCLF
+    off (`owned-frame-nodclf`) or with the owned frame off. It still happens with every graph queue on graphics
+    (`owned-frame-onequeue`) and with the epochs outside DXVK's stream (`owned-frame-nostream`). A dump shows DXVK's
+    submission thread asleep in `submitCmdLists` with 33 entries queued and no waiter on its condition variable, the
+    CS thread blocked on the full queue, and the presenting thread waiting for a frame slot. The CS hang watchdog's dump
+    (which suspends and resumes every thread) once released it. `owned-frame-skiptail` (`CS_ORG_OWNED_SKIPTAIL=1`) tells
+    whether the tail's Vulkan present on DXVK's submission thread is needed for it.
+-   Because of the stall there is no owned-on frame rate with DCLF on yet. The earlier 20-30% slower result compared DCLF
+    on against DCLF off and does not count. Owned off, DCLF on, `DXVK_DEBUG=hang`: Whiterun 72.8, Dragonsreach 84.4 fps
+    (`1109-122526-p1fix-owned-frame-off-off`).
+-   Window cases: `owned-frame-window` drives focus loss, minimize/restore and a resize with `dclf:window=...` (no key
+    presses). Not run yet; the Bethesda logo's Bink presents and loading screens ran in every owned run before the stall.
 
 ### What becomes unnecessary later
 
@@ -643,6 +671,7 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 | --- | --- |
 | `CS_ORG=0` | No feature request and no graph: every feature stays on D3D11. |
 | `CS_ORG_OWNED_FRAME=1` | BasicRHI creates the device, DXVK runs as its guest, ORG presents ("Owned frame"). Frame generation is unavailable. |
+| `CS_ORG_OWNED_SKIPTAIL=1` | Diagnostic: the owned frame's tail neither copies nor presents (nothing is shown). |
 | `CS_ORG_CRASH_MARKERS=0` | With the owned frame, BasicRHI's crash markers off even in hang mode. They cost about a third of the frame rate in Dragonsreach on the RX 6600 (43 against 60 fps, Dev-Fast). |
 | `CS_ORG=features` | Request the device features but never create the graph (isolates device-configuration side effects). |
 | `CS_ORG_SUBMIT=flush` | Use the flush-and-lock submission path even when DXVK supports the stream path. |

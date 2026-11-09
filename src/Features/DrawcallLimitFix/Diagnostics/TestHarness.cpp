@@ -453,6 +453,38 @@ namespace DCLF
 					}
 					// "dclf:menu=<menu name>=show|hide": a menu opened or closed through the UI message queue (e.g. "Journal Menu", the
 					// system menu Escape opens), so a scripted run pauses the game as a player does.
+					// "dclf:window=minimize|restore|background|foreground|<W>x<H>": the game window as alt-tab and a window drag leave it, with no
+					// key press (a synthetic Alt reaches the game's input). All asynchronous: the window's thread handles them between frames.
+					if (command.rfind("dclf:window=", 0) == 0) {
+						const auto what = command.substr(12);
+						DXGI_SWAP_CHAIN_DESC desc{};
+						const HWND window = globals::d3d::swapChain && SUCCEEDED(globals::d3d::swapChain->GetDesc(&desc)) ? desc.OutputWindow : nullptr;
+						if (!window) {
+							logger::warn("[DCLF] dclf:window: the game has no swap chain window yet");
+							return;
+						}
+						unsigned width = 0, height = 0;
+						bool done = false;
+						if (what == "minimize" || what == "restore") {
+							done = ::PostMessageW(window, WM_SYSCOMMAND, what == "minimize" ? SC_MINIMIZE : SC_RESTORE, 0);
+						} else if (what == "background") {
+							done = ::SetForegroundWindow(::GetShellWindow());
+						} else if (what == "foreground") {
+							done = ::SetForegroundWindow(window);
+						} else if (std::sscanf(what.c_str(), "%ux%u", &width, &height) == 2 && width && height) {
+							// The client area at that size, the frame around it as the window's style draws it.
+							RECT rect{ 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) };
+							::AdjustWindowRectEx(&rect, static_cast<DWORD>(::GetWindowLongPtrW(window, GWL_STYLE)), FALSE,
+								static_cast<DWORD>(::GetWindowLongPtrW(window, GWL_EXSTYLE)));
+							done = ::SetWindowPos(window, nullptr, 0, 0, rect.right - rect.left, rect.bottom - rect.top,
+								SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+						} else {
+							logger::warn("[DCLF] dclf:window: '{}' is not minimize, restore, background, foreground or <W>x<H>", what);
+							return;
+						}
+						logger::info("[DCLF] dclf:window={}: {}", what, done ? "sent" : "failed");
+						return;
+					}
 					// "dclf:cs-menu=open|close": Community Shaders' own menu (ImGui), as its key opens it.
 					if (command.rfind("dclf:cs-menu=", 0) == 0) {
 						if (command.substr(13) == "open")

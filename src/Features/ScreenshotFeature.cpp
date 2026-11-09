@@ -13,6 +13,7 @@
 #include "Globals.h"
 #include "I18n/I18n.h"
 #include "Menu.h"
+#include "RenderGraph/Engine/OwnedFrame.h"
 #include "Utils/Clipboard.h"
 #include "Utils/D3D.h"
 #include "Utils/FileSystem.h"
@@ -261,6 +262,12 @@ namespace
 	{
 		if (!globals::d3d::swapChain) {
 			return nullptr;
+		}
+
+		// The owned frame shows HDRDisplay's output itself this frame, without a copy into the back buffer.
+		if (auto* shown = RenderGraph::Engine::OwnedFrame::Get().GetFrameSource()) {
+			holder.copy_from(shown);
+			return holder.get();
 		}
 
 		winrt::com_ptr<ID3D11Texture2D> backBuffer;

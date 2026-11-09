@@ -65,6 +65,57 @@ namespace RenderGraph::Engine
 				into[i] |= from[i];
 		}
 
+		// The feature structs the device was created with that dxvkGetInteropDeviceInfo reports, copied out of BasicRHI's create info
+		// (which does not outlive CreateVulkanDevice) for dxvkSetGuestDevice.
+		struct EnabledFeatures
+		{
+			VkPhysicalDeviceFeatures2 core{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+			VkPhysicalDeviceVulkan11Features vk11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
+			VkPhysicalDeviceVulkan12Features vk12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+			VkPhysicalDeviceVulkan13Features vk13{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+			VkPhysicalDeviceDescriptorHeapFeaturesEXT descriptorHeap{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT };
+			VkPhysicalDeviceDescriptorBufferFeaturesEXT descriptorBuffer{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT };
+			VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT mutableDescriptorType{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT };
+			VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT deviceGeneratedCommands{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT };
+			VkPhysicalDeviceRobustness2FeaturesEXT robustness2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT };
+			VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pipelineExecutableProperties{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR };
+
+			// Copies the structs of a create info's chain; the core features come from pEnabledFeatures when the chain has no
+			// VkPhysicalDeviceFeatures2.
+			void Capture(const VkDeviceCreateInfo& a_info)
+			{
+				if (a_info.pEnabledFeatures)
+					core.features = *a_info.pEnabledFeatures;
+				auto take = [](auto& a_into, const VkBaseOutStructure* a_from) {
+					if (a_from->sType == a_into.sType)
+						std::memcpy(reinterpret_cast<std::byte*>(&a_into) + kFeatureHeaderBytes, reinterpret_cast<const std::byte*>(a_from) + kFeatureHeaderBytes,
+							sizeof(a_into) - kFeatureHeaderBytes);
+				};
+				for (auto* s = static_cast<const VkBaseOutStructure*>(a_info.pNext); s; s = s->pNext) {
+					take(core, s);
+					take(vk11, s);
+					take(vk12, s);
+					take(vk13, s);
+					take(descriptorHeap, s);
+					take(descriptorBuffer, s);
+					take(mutableDescriptorType, s);
+					take(deviceGeneratedCommands, s);
+					take(robustness2, s);
+					take(pipelineExecutableProperties, s);
+				}
+				core.pNext = &vk11;
+				vk11.pNext = &vk12;
+				vk12.pNext = &vk13;
+				vk13.pNext = &descriptorHeap;
+				descriptorHeap.pNext = &descriptorBuffer;
+				descriptorBuffer.pNext = &mutableDescriptorType;
+				mutableDescriptorType.pNext = &deviceGeneratedCommands;
+				deviceGeneratedCommands.pNext = &robustness2;
+				robustness2.pNext = &pipelineExecutableProperties;
+				pipelineExecutableProperties.pNext = nullptr;
+			}
+		};
+
 		void AppendUnique(std::vector<const char*>& a_names, const char* a_name)
 		{
 			if (std::none_of(a_names.begin(), a_names.end(), [&](const char* n) { return std::strcmp(n, a_name) == 0; }))
@@ -104,6 +155,7 @@ namespace RenderGraph::Engine
 		std::vector<std::string> instanceExtensionNames;
 		std::vector<std::string> deviceExtensionNames;
 		std::vector<std::pair<uint32_t, uint32_t>> queueCounts;
+		EnabledFeatures enabledFeatures;
 		std::string hookFailure;
 
 		std::shared_ptr<rhi::DevicePtr> device;
@@ -217,6 +269,7 @@ namespace RenderGraph::Engine
 			info->pQueueCreateInfos = self->queues.data();
 
 			self->deviceExtensionNames.assign(self->deviceExtensions.begin(), self->deviceExtensions.end());
+			self->enabledFeatures.Capture(*info);
 			logger::info("[ORG] Owned frame: DXVK adds {} device extensions, {} feature structs ({} merged), {} queue families", requirements.extensionCount,
 				requirements.featureCount, merged, requirements.queueCount);
 		}
@@ -322,6 +375,8 @@ namespace RenderGraph::Engine
 			if (state->QueueCount(copyFamily) > 1)
 				desc.upload = { queueAt(copyFamily, 1), copyFamily, 1 };
 		}
+		// DXVK reports these to the render graph, which checks BasicRHI's binding model in them (mutable descriptors DXVK does not enable).
+		desc.enabledFeatures = &state->enabledFeatures.core;
 		if (FAILED(state->setGuestDevice(&desc)))
 			return fail("DXVK could not import BasicRHI's device (see DXVK's log)");
 
