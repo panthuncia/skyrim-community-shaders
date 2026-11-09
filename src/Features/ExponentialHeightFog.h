@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Buffer.h"
+#include "Features/LightLimitFix.h"
 
 struct ExponentialHeightFog : Feature
 {
@@ -36,6 +37,8 @@ public:
 	 * light scattering, and front-to-back integration.
 	 */
 	virtual void Prepass() override;
+	/** @brief Reserves the Prepass anchor for the render-graph path (CS_ORG_EXPONENTIAL_HEIGHT_FOG=1). */
+	virtual void PostPostLoad() override;
 
 	virtual void RestoreDefaultSettings() override;
 	virtual void LoadSettings(json& o_json) override;
@@ -98,10 +101,12 @@ public:
 
 	Settings GetCommonBufferData() const;
 
-	/** @brief The view Prepass binds at t19 (null before the volumetric resources exist). Render thread. */
-	ID3D11ShaderResourceView* IntegratedLightScatteringView() const { return integratedLightScattering ? integratedLightScattering->srv.get() : nullptr; }
+	/** @brief The view Prepass binds at t19: the render graph's when it ran the last frame, else D3D11's (null before it exists). Render thread. */
+	ID3D11ShaderResourceView* IntegratedLightScatteringView() const;
 
-private:
+	// The volumetric fog's frame description, shared by the D3D11 path and the render-graph path (ORGExponentialHeightFog).
+
+	/** @brief The volumetric fog passes' constants (VolumetricFogCB, b0; the shaders' VolumetricFogConstants). */
 	struct VolumetricFogCB
 	{
 		DirectX::XMUINT4 gridSizeAndFlags = {};
@@ -118,6 +123,51 @@ private:
 		float4 farRange = {};  // x = far start depth, y = far end depth, zw = unused
 	};
 	STATIC_ASSERT_ALIGNAS_16(VolumetricFogCB);
+
+	/** @brief The two volumes' grid sizes (x, y, slices) and whether their conservative depth reduces a cell per thread group. */
+	struct GridSizes
+	{
+		DirectX::XMUINT4 nearSize = {};
+		DirectX::XMUINT4 farSize = {};
+		bool nearGroupReduce = false;
+		bool farGroupReduce = false;
+	};
+
+	/** @brief What a frame's constants depend on besides the settings: the inputs present and the history state. */
+	struct ConstantInputs
+	{
+		GridSizes sizes;
+		bool directionalShadow = false;
+		bool depth = false;
+		bool ibl = false;
+		bool skylighting = false;
+		bool localLights = false;
+		bool localShadows = false;
+		bool engineLocalShadows = false;
+		bool temporal = false;
+		bool historyValid = false;
+		bool historyValidFar = false;
+		bool depthHistory = false;
+		bool depthHistoryFar = false;
+	};
+
+	/** @brief The engine's local shadow lights, one per shadow mask channel (EngineLocalShadowCB, b1). */
+	using EngineLocalShadows = std::array<LightLimitFix::LocalShadowData, LightLimitFix::SHADOW_MASK_CHANNEL_COUNT>;
+
+private:
+	friend class ORGExponentialHeightFog;
+
+	/** @brief The volumes' grid sizes for the current render size and settings. */
+	GridSizes ComputeGridSizes() const;
+
+	/** @brief The frame's volumetric fog constants; a_farGridEnabled says whether the far volume covers any depth. */
+	VolumetricFogCB BuildConstants(const ConstantInputs& a_inputs, bool& a_farGridEnabled) const;
+
+	/**
+	 * @brief Fills a_shadows with the engine's local shadow lights.
+	 * @return The engine's shadow map array view they index, or null when there is none (a_shadows untouched).
+	 */
+	ID3D11ShaderResourceView* BuildEngineLocalShadowData(EngineLocalShadows& a_shadows) const;
 
 	/** @brief Shaders see height fog as disabled: an ENB preset replaces it without handing it back to CS, or the flat world map is open. */
 	bool IsSuppressed() const;

@@ -1,22 +1,10 @@
 #ifndef __EXPONENTIAL_HEIGHT_FOG_VOLUMETRIC_CS_COMMON_HLSLI__
 #define __EXPONENTIAL_HEIGHT_FOG_VOLUMETRIC_CS_COMMON_HLSLI__
 
+// Included after the pass's resource list is declared: it reads VolumetricFog, the pass's LATCH entry
+// (ExponentialHeightFog/VolumetricFogConstants.hlsli).
 #include "Common/FrameBuffer.hlsli"
-
-cbuffer VolumetricFogCB : register(b0)
-{
-	uint4 VolumetricFogGridSizeAndFlags;         // near volume
-	float4 VolumetricFogInvGridSizeAndNearFade;  // near volume
-	float4 VolumetricFogGridZParams;             // near volume
-	row_major float4x4 VolumetricFogClipToWorld;
-	float4 VolumetricFogFrameJitterOffsets[16];
-	float4 VolumetricFogHistoryParameters;
-	float4 VolumetricFogJitterParameters;
-	uint4 VolumetricFogFarGridSizeAndFlags;  // far volume (quarter lattice)
-	float4 VolumetricFogFarInvGridSizeAndNearFade;
-	float4 VolumetricFogFarGridZParams;
-	float4 VolumetricFogFarRange;  // x = far volume start depth, y = far volume end depth, zw = unused
-};
+#include "ExponentialHeightFog/VolumetricFogConstants.hlsli"
 
 #if defined(VOLUMETRIC_FOG_FAR_GRID)
 // The far volume variant reads its own grid parameters from the same constant buffer.

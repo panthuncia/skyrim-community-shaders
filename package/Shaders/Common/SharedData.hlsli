@@ -5,6 +5,7 @@
 #include "Common/Spherical Harmonics/SphericalHarmonics.hlsli"
 
 #include "Common/NamespacedCBuffer.hlsli"
+#include "Common/OrgResources.hlsli"
 
 namespace SharedData
 {
@@ -564,7 +565,7 @@ namespace SharedData
 	ORG_SHARED_ALIAS(FeatureData, SharedData, HorizonFixSettings, horizonFixSettings)
 	ORG_SHARED_ALIAS(FeatureData, SharedData, RainRefractionSettings, rainRefractionSettings)
 
-	Texture2D<float4> DepthTexture : register(t17);
+	ORG_HEADER_SRV(Texture2D<float4>, DepthTexture, 17)
 
 	// Get a int3 to be used as texture sample coord. [0,1] in uv space
 	int3 ConvertUVToSampleCoord(float2 uv)

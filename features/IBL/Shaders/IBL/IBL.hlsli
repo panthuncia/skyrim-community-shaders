@@ -15,8 +15,8 @@ namespace ImageBasedLighting
 	ORG_RESOURCE(SRV, Texture2D<sh2>, EnvIBLTexture, 14)
 	ORG_RESOURCE(SRV, Texture2D<sh2>, SkyIBLTexture, 15)
 #else
-	Texture2D<sh2> EnvIBLTexture : register(t76);
-	Texture2D<sh2> SkyIBLTexture : register(t77);
+	ORG_HEADER_SRV(Texture2D<sh2>, EnvIBLTexture, 76)
+	ORG_HEADER_SRV(Texture2D<sh2>, SkyIBLTexture, 77)
 	TextureCube<float4> StaticDiffuseIBLTexture : register(t78);
 	TextureCube<float4> StaticSpecularIBLTexture : register(t79);
 #endif
