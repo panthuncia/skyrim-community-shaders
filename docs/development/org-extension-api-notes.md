@@ -212,6 +212,10 @@ Each anchor's rule:
   DCLF's `BeforePresent` and the frame pace signal. ImGui has built its frame. Before HDR output and frame generation. It runs
   only on frames where CS's overlay draws (the menu, an editor, notifications, the performance overlay), not every frame. The
   target is the render target bound for the overlay: the framebuffer, or HDR's UI texture when HDR composites the UI.
+- **HDROutput.** In `HDRDisplay::ApplyHDR`, inside HDRDisplay's present chain: after Overlay and, when HDR composites the UI
+  after the present hooks (the deferred composite), after other mods' Present hooks and frame generation's hudless capture.
+  Before the real present. It runs only on frames HDR composites (HDR on, the window usable), and only when
+  `CS_ORG_HDR_DISPLAY=1`: HDRDisplay calls it. The UI texture is complete here, and the back buffer is not yet presented.
 
 Keys used so far:
 
