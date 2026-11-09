@@ -335,8 +335,8 @@ namespace
 				failures += ok ? 0 : 1;
 				a_totals.compileFailures += ok ? 0 : 1;
 			}
-		std::printf("   lowered and compiled: %zu of %zu pass(es), %zu unique source(s), %zu resource slot(s), %u value byte(s) per pass\n", passes - failures, passes, done.size(),
-			effect.resources.size(), effect.RegionSize());
+		std::printf("   lowered and compiled: %zu of %zu pass(es), %zu unique source(s), %zu resource slot(s), %u push word(s), %u value byte(s) per pass\n", passes - failures, passes,
+			done.size(), effect.resources.size(), effect.PushWords(), effect.RegionSize());
 		return failures == 0;
 	}
 
