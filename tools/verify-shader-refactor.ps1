@@ -123,17 +123,22 @@ try {
     $baseRoot = Join-Path $work "base"
     New-Item -ItemType Directory -Force $baseRoot | Out-Null
     $tar = Join-Path $work "base.tar"
-    git archive --format=tar -o $tar $BaseRef -- $IncludeDir $relPath 2>$null
+    # A feature shader (features/<Name>/Shaders/...) also includes from its own Shaders folder.
+    $featureInclude = $null
+    if ($relPath -match '^(features/[^/]+/Shaders)/') { $featureInclude = $Matches[1] }
+    $archivePaths = @($IncludeDir, $relPath) + @($featureInclude | Where-Object { $_ })
+    git archive --format=tar -o $tar $BaseRef -- @archivePaths 2>$null
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $tar)) {
         throw "git archive failed for '$BaseRef' (paths: $IncludeDir, $relPath)."
     }
     tar -xf $tar -C $baseRoot
     if ($LASTEXITCODE -ne 0) { throw "Failed to extract base archive." }
     $baseFile = Join-Path $baseRoot $relPath
-    $baseInclude = Join-Path $baseRoot $IncludeDir
+    $baseInclude = @(Join-Path $baseRoot $IncludeDir) + @($featureInclude | Where-Object { $_ } | ForEach-Object { Join-Path $baseRoot $_ })
+    $workInclude = @($IncludeDir) + @($featureInclude | Where-Object { $_ })
     if (-not (Test-Path $baseFile)) { throw "'$relPath' not found at '$BaseRef'." }
 
-    function Compile([string]$src, [string]$incDir, [string]$defs, [string]$outFile, [switch]$Asm) {
+    function Compile([string]$src, [string[]]$incDirs, [string]$defs, [string]$outFile, [switch]$Asm) {
         # Preserve explicit-valued defines (e.g. SHADOWFILTER=0); only bare names get =1.
         $defArgs = @()
         foreach ($d in ($defs -split '\s+' | Where-Object { $_ })) {
@@ -141,7 +146,8 @@ try {
             $defArgs += $(if ($d -like '*=*') { $d } else { "$d=1" })
         }
         $fmt = if ($Asm) { "/Fc" } else { "/Fo" }
-        $out = & $fxcPath /nologo /T $Profile /E $Entry @defArgs /I $incDir $src $fmt $outFile 2>&1
+        $incArgs = foreach ($dir in $incDirs) { "/I"; $dir }
+        $out = & $fxcPath /nologo /T $Profile /E $Entry @defArgs @incArgs $src $fmt $outFile 2>&1
         return @{ Code = $LASTEXITCODE; Out = $out }
     }
 
@@ -159,7 +165,7 @@ try {
         $baseCso = Join-Path $work "base.cso"
         $workCso = Join-Path $work "work.cso"
         $rb = Compile $baseFile $baseInclude $perm $baseCso
-        $rw = Compile $shaderFull $IncludeDir $perm $workCso
+        $rw = Compile $shaderFull $workInclude $perm $workCso
 
         if ($rb.Code -ne 0 -or $rw.Code -ne 0) {
             $anyError = $true
@@ -180,7 +186,7 @@ try {
             # Tier 2: assembly diff for inspection (Compare-Object avoids git's CRLF/exit noise).
             $baseAsm = Join-Path $work "base.asm"; $workAsm = Join-Path $work "work.asm"
             Compile $baseFile $baseInclude $perm $baseAsm -Asm | Out-Null
-            Compile $shaderFull $IncludeDir $perm $workAsm -Asm | Out-Null
+            Compile $shaderFull $workInclude $perm $workAsm -Asm | Out-Null
             $d = Compare-Object (Get-Content $baseAsm) (Get-Content $workAsm)
             if ($d) {
                 $d | Select-Object -First 40 | ForEach-Object {
