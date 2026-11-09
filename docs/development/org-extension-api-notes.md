@@ -179,7 +179,7 @@ How the anchors order work:
 - The key only decides between passes that do not depend on each other. The graph orders a reader after its writer anyway.
 - Leave gaps of 100 between features' keys, so a pass can go between them later. Add each feature's keys to its anchor's rule.
 - An anchor nobody reserved has no epoch. A reserved anchor with no active client submits nothing.
-- After PostProcessing, Tonemap and Present, the anchor separates its epoch from Vulkan work that may follow. That is the hazard
+- After PostProcessing, Upscale, Tonemap, FrameGeneration, Present and Overlay, the anchor separates its epoch from Vulkan work that may follow. That is the hazard
   rule in render-graph.md.
 
 Each anchor's rule:
@@ -203,9 +203,15 @@ Each anchor's rule:
   that follow it.
 - **PostProcessing.** At `Main_PostProcessing`, before Post Processing's `DrawBeforeUpscaling`, the upscaler and the
   ImageSpace chain. The scene is at render resolution.
+- **Upscale.** In `Upscaling::PerformUpscaling`, after the upscaler's evaluate (the DXVK interop command ring) and after
+  `kMAIN`'s D3D11 copy and depth upscale when those run on D3D11. Before the ImageSpace chain. It runs only on frames where an
+  upscaler (FSR, XeSS, DLSS) evaluates, not with TAA. The ring's buffer ends with a full memory barrier and is submitted ahead
+  of DXVK's next command list, which the epoch records into, so its passes see the evaluate's output.
 - **Tonemap.** At the ImageSpace HDR tonemap's render, after the upscaler. Before Effects11 and Post Processing's `PreProcess`.
   `Point::input` and `Point::output` are the tonemap's targets. Its graph may record ahead of the hook, so a pass that depends
   on them puts them in its revision.
+- **FrameGeneration.** In `Upscaling::CopyHudlessColor`, after the ImageSpace chain and HDR's clean composite, before frame
+  generation tags or evaluates (DLSS-G, FSR-FG). It runs only on frames where frame generation captures the hudless colour.
 - **Present.** In `IDXGISwapChain::Present`, before DCLF's `BeforePresent`, the frame pace signal, CS's overlay, HDR output,
   frame generation and the present. It is before the UI: a pass after the UI uses Overlay.
 - **Overlay.** At CS's overlay draw (`OverlayRenderer::FinalizeImGuiFrame`), inside HDRDisplay's present chain: after Present,
@@ -225,6 +231,8 @@ Keys used so far:
 - Light Limit Fix's local shadow cache (`CS_ORG_LLF_SHADOWS`): 100 (slot data) and 101 (shadow map copy) at EarlyPrepass.
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
 - CS's ImGui (`CS_ORG_IMGUI`): 1000 at Overlay, last.
+- Upscaling (`CS_ORG_UPSCALING`): 100 (the upscaled colour into `kMAIN`), 200 to 204 (the depth and refraction normal copies,
+  the depth upscale, the underwater mask copy and its upscale) at Upscale; 100 (the hudless copy) at FrameGeneration.
 - The DCLF graph texture test (`CS_DCLF_GRAPH_TEXTURE_TEST`): 0 at Prepass.
 - Subsurface Scattering (`CS_ORG_SUBSURFACE_SCATTERING`): 199 (Burley clear), 200 (extraction), 201 (horizontal or Burley
   blur) and 202 (vertical blur) at DeferredPasses. SSGI's passes there stay below 199, as the D3D11 order is SSGI first.

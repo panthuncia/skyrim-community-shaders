@@ -51,7 +51,9 @@ namespace FrameAnchors
 			{ "DeferredPasses", { "CS anchor: deferred passes", "CS anchor: deferred passes inputs", "FrameAnchors::DeferredPasses / ", "cs.anchor.deferred-passes" }, false },
 			{ "DeferredComposite", { "CS anchor: deferred composite", "CS anchor: deferred composite inputs", "FrameAnchors::DeferredComposite / ", "cs.anchor.deferred-composite" }, false },
 			{ "PostProcessing", { "CS anchor: post-processing", "CS anchor: post-processing inputs", "FrameAnchors::PostProcessing / ", "cs.anchor.post-processing" }, true },
+			{ "Upscale", { "CS anchor: upscale", "CS anchor: upscale inputs", "FrameAnchors::Upscale / ", "cs.anchor.upscale" }, true },
 			{ "Tonemap", { "CS anchor: tonemap", "CS anchor: tonemap inputs", "FrameAnchors::Tonemap / ", "cs.anchor.tonemap" }, true },
+			{ "FrameGeneration", { "CS anchor: frame generation", "CS anchor: frame generation inputs", "FrameAnchors::FrameGeneration / ", "cs.anchor.frame-generation" }, true },
 			{ "Present", { "CS anchor: present", "CS anchor: present inputs", "FrameAnchors::Present / ", "cs.anchor.present" }, true },
 			{ "Overlay", { "CS anchor: overlay", "CS anchor: overlay inputs", "FrameAnchors::Overlay / ", "cs.anchor.overlay" }, true },
 		} };
@@ -74,8 +76,10 @@ namespace FrameAnchors
 			Segment::AnchorDeferredComposite,  // DeferredPasses, after the D3D11 SSGI and SSS
 			Segment::Forward,
 			Segment::FirstPerson,
-			Segment::AnchorPostProcessing,  // Main_PostProcessing, before the upscaler
-			Segment::AnchorTonemap,         // in the ImageSpace chain after it
+			Segment::AnchorPostProcessing,   // Main_PostProcessing, before the upscaler
+			Segment::AnchorUpscale,          // after the upscaler's evaluate
+			Segment::AnchorTonemap,          // in the ImageSpace chain after it
+			Segment::AnchorFrameGeneration,  // after the ImageSpace chain, before frame generation
 			Segment::AnchorPresent,
 			Segment::AnchorOverlay,  // the overlay's ImGui draw, inside HDRDisplay's present chain
 		};

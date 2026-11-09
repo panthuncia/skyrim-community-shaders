@@ -93,7 +93,9 @@ public:
 		AnchorDeferredPasses,
 		AnchorDeferredComposite,
 		AnchorPostProcessing,
+		AnchorUpscale,
 		AnchorTonemap,
+		AnchorFrameGeneration,
 		AnchorPresent,
 		AnchorOverlay,
 		Count

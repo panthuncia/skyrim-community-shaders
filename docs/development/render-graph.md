@@ -426,7 +426,9 @@ of adding a `Segment` and editing the epoch order. Each anchor is one of CS's ho
 | `DeferredPasses` | `Deferred::DeferredPasses`, after the final depth copy |
 | `DeferredComposite` | `Deferred::DeferredPasses`, after the D3D11 SSGI, SSS and cubemap update, where the composite runs |
 | `PostProcessing` | `Upscaling::Main_PostProcessing`, before the upscaler |
+| `Upscale` | `Upscaling::PerformUpscaling`, after the upscaler's evaluate, before the ImageSpace chain |
 | `Tonemap` | `Main_HDRTonemapBlendCinematic_Render` (`Hooks.cpp`) |
+| `FrameGeneration` | `Upscaling::CopyHudlessColor`, after the ImageSpace chain, where frame generation's hudless colour is captured |
 | `Present` | `IDXGISwapChain_Present` (`Hooks.cpp`), before DCLF's `BeforePresent` |
 | `Overlay` | `OverlayRenderer::FinalizeImGuiFrame`, where CS's ImGui frame is drawn (`ImGuiRenderer::RenderDrawData`) |
 
@@ -488,7 +490,7 @@ FrameAnchors::Register({ .id = "cs.myfeature",
     `kGameFramesInFlight` slots. Size `LatchBlock`s from `GraphHost::FrameSlots()` after the runtime is up, as LLF does. An anchor that
     runs several times a frame (`ReflectionsPrepass`, at each cubemap render) uses its ring that much faster, and may wait for a
     slot when the CPU is far ahead of the GPU.
--   **The hazard rule.** After the late anchors (`PostProcessing`, `Tonemap`, `Present`, `Overlay`) have run an epoch, `Run` calls
+-   **The hazard rule.** After the late anchors (`PostProcessing`, `Upscale`, `Tonemap`, `FrameGeneration`, `Present`, `Overlay`) have run an epoch, `Run` calls
     `Upscaling::SeparateFromGraphEpochs()`. An upscaler, frame generation or the present can follow these, and none may run directly
     behind a graph epoch (above, "Hazard: external Vulkan work directly after a graph epoch"). The earlier anchors are followed by
     the engine's own draws.
