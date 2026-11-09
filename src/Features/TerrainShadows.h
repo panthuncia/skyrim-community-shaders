@@ -79,6 +79,13 @@ public:
 
 	std::unique_ptr<Texture2D> texHeightMap = nullptr;
 	std::unique_ptr<Texture2D> texShadowHeight = nullptr;
+	uint heightMapWidth = 0;
+	uint heightMapHeight = 0;
+	// The cached heightmap's textures are the render graph's (ORGTerrainShadows), not texHeightMap and texShadowHeight.
+	bool orgHeightmap = false;
+
+	/** @brief The shadow height map's view that t60 binds, on whichever path holds it; null before one exists. */
+	ID3D11ShaderResourceView* GetShadowHeightSRV() const;
 
 	/** @brief Checks whether a valid heightmap is loaded for the current worldspace. */
 	bool IsHeightMapReady();
