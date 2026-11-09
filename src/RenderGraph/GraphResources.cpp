@@ -79,6 +79,8 @@ namespace GraphResources
 			desc.srvFormat = format;
 			desc.hasUAV = (a_shape.bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
 			desc.uavFormat = format;
+			// A CPU-side UAV too, so a pass can clear it (PassBuilder::UnorderedAccessClear), as D3D11 clears its UAVs.
+			desc.hasNonShaderVisibleUAV = desc.hasUAV;
 			desc.hasRTV = (a_shape.bindFlags & D3D11_BIND_RENDER_TARGET) != 0;
 			desc.rtvFormat = format;
 			desc.hasDSV = (a_shape.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
