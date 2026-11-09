@@ -117,6 +117,8 @@ namespace
 	{
 		std::shared_ptr<org::Resource> resource;
 		std::string name;
+		// A texture array the shaders read whole (Texture2DArray): its whole-array view, not the default first slice.
+		bool wholeArray = false;
 
 		explicit operator bool() const { return resource || !name.empty(); }
 		bool operator==(const Source&) const = default;
@@ -184,9 +186,12 @@ namespace
 
 	org::DeclaredViewToken Read(org::PassBuilder& a_builder, const Source& a_source)
 	{
+		org::SrvView view{};
+		if (a_source.wholeArray)
+			view.variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull);
 		if (a_source.resource)
-			return a_builder.ShaderResource(a_source.resource).View();
-		return a_builder.ShaderResource(org::ResourceIdentifier(a_source.name)).View();
+			return a_builder.ShaderResource(a_source.resource, view).View();
+		return a_builder.ShaderResource(org::ResourceIdentifier(a_source.name), view).View();
 	}
 
 	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -538,14 +543,17 @@ namespace
 		auto texture = resource.try_as<ID3D11Texture2D>();
 		if (!texture)
 			return {};
+		D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
+		a_view->GetDesc(&viewDesc);
+		const bool wholeArray = viewDesc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
 		const auto& depthStencils = globals::game::renderer->GetDepthStencilData().depthStencils;
 		for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); ++i)
 			if (depthStencils[i].texture == texture.get())
-				return { FrameAnchors::EngineDepth(i), {} };
+				return { FrameAnchors::EngineDepth(i), {}, wholeArray };
 		RE::BSGraphics::DepthStencilData target{};
 		target.texture = texture.get();
 		target.depthSRV = a_view;
-		return { FrameAnchors::ImportDepth(target, a_id), {} };
+		return { FrameAnchors::ImportDepth(target, a_id), {}, wholeArray };
 	}
 
 	/** @brief The scene depth the D3D11 path reads (Util::GetCurrentSceneDepthSRV(true)). */
@@ -883,7 +891,7 @@ bool ORGExponentialHeightFog::Prepass()
 			if (!localShadows.IsActive() || lightLimitFix.GetLocalShadowDataSRV() != localShadows.GetDataSRV())
 				return fallback("Light Limit Fix's local shadows are on D3D11");
 			shape.inputs[kLocalShadows] = { nullptr, "LightLimitFix::LocalShadowData" };
-			shape.inputs[kLocalShadowMaps] = { nullptr, "LightLimitFix::LocalShadowCache" };
+			shape.inputs[kLocalShadowMaps] = { nullptr, "LightLimitFix::LocalShadowCache", true };
 			inputs.localShadows = true;
 		}
 		if (auto* view = fog.BuildEngineLocalShadowData(data.engineShadows)) {

@@ -92,7 +92,10 @@ namespace
 		CopyBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			return { a_builder.ShaderResource(source).View(), a_builder.UnorderedAccess(cache).View() };
+			// Both are texture arrays the shader reads and writes whole: their whole-array views, not the default first slice.
+			const org::SrvView sourceView{ .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull) };
+			const org::UavView cacheView{ .variant = static_cast<std::uint32_t>(org::UAVViewType::Texture2DArrayFull) };
+			return { a_builder.ShaderResource(source, sourceView).View(), a_builder.UnorderedAccess(cache, cacheView).View() };
 		}
 
 		void Revision(std::vector<std::uint64_t>& a_out) const
