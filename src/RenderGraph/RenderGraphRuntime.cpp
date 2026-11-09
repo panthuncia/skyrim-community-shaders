@@ -12,6 +12,7 @@
 #include "Profiler.h"
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/GpuTimingSource.h"
 #include "Features/RemoteControl/GpuTimestamps.h"
 #include "Features/RemoteControl/GpuCounters.h"
 #include "Features/DrawcallLimitFix.h"
@@ -817,6 +818,7 @@ struct RenderGraphRuntime::Impl
 
 	void OnCompletedFrame(std::uint64_t a_frameNumber, const org::runtime::IStatisticsService& a_stats)
 	{
+		GpuTimingSource::OnCompletedFrame(a_frameNumber, a_stats);
 		CompletedEpoch epoch;
 		ReadCompletedEpoch(a_frameNumber, a_stats, epoch);
 		if (!asyncEpochs) {
@@ -961,6 +963,7 @@ struct RenderGraphRuntime::Impl
 		frameSegments[a_hostFrame % kSegmentRing].store(a_segment, std::memory_order_release);
 		if (timestampFrame)
 			GpuCounters::Timestamps::Submitted(timestampFrame);
+		GpuTimingSource::OnEpochSubmitted(a_hostFrame);
 	}
 
 	void RecordEpoch(Segment a_segment, std::chrono::steady_clock::duration a_elapsed)

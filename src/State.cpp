@@ -39,6 +39,7 @@
 #include "Menu.h"
 #include "PostProcessingMode.h"
 #include "Presets/UnifiedPresetCatalog.h"
+#include "RenderGraph/GpuLoadPass.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "ShaderCache.h"
 #include "TruePBR.h"
@@ -382,6 +383,7 @@ void State::Setup()
 
 	// Adopt DXVK's Vulkan device for the render graph before features create
 	// resources; features fall back to their D3D11 paths when it stays inactive.
+	GpuLoadPass::ReserveAnchor();
 	RenderGraphRuntime::Get().Initialize();
 
 	Feature::ForEachLoadedFeature("SetupResources", [](Feature* feature) { feature->SetupResources(); });

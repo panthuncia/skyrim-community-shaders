@@ -14,6 +14,9 @@
  * Each event is a pair of D3D11 timestamp queries. DXVK writes them in its command stream, and the render graph's
  * epochs are enqueued on the same queue in order, so an event around an epoch includes the epoch's GPU time. A GPU
  * that sits idle inside an event counts too: this measures where the frame's GPU time goes, busy or not.
+ *
+ * With CS_GPU_TIMERS=graph no D3D11 query is made: the timers are the render graph's own ranges, per pass and per queue,
+ * logged by GpuTimingSource ("[GpuEvents] graph ..."). D3D11 work has no timer then. CS_GPU_LOAD's load becomes a graph pass.
  */
 namespace GpuEventTimers
 {

@@ -1,6 +1,7 @@
 #include "Profiler.h"
 
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/GpuTimingSource.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -37,6 +38,19 @@ void Profiler::Initialize(ID3D11Device* device, ID3D11DeviceContext* a_context)
 {
 	Release();
 
+	// CS_GPU_TIMERS=graph: no D3D11 query. The ranges keep their CPU times, and the GPU times are the render graph's
+	// (AddExternalSample). This path needs no D3D11 device and no DXVK.
+	if (GpuTimingSource::SelectedTimers() == GpuTimingSource::Timers::Graph) {
+		d3d11Ranges = false;
+		initialized = true;
+		logger::info("[Profiler] GPU times from the render graph only (CS_GPU_TIMERS=graph): D3D11 ranges have CPU times only");
+		return;
+	}
+	if (!device || !a_context) {
+		logger::warn("Profiler disabled: no D3D11 device for its timestamp queries");
+		return;
+	}
+	d3d11Ranges = true;
 	context = a_context;
 
 	for (auto& frame : frames) {
@@ -97,6 +111,9 @@ void Profiler::Release()
 	collectedFrames = 0;
 	totalTimeMs = 0.0f;
 	cpuTotalTimeMs = 0.0f;
+	cpuFrame.clear();
+	closedCpuFrame.clear();
+	cpuFrameClosed = false;
 	initialized = false;
 	frameActive = false;
 	context = nullptr;
@@ -104,7 +121,7 @@ void Profiler::Release()
 
 void Profiler::BeginFrame()
 {
-	if (!initialized || !context || frameActive || !IsActive())
+	if (!initialized || frameActive || !IsActive())
 		return;
 
 	CollectResults();
@@ -112,6 +129,10 @@ void Profiler::BeginFrame()
 	frameActive = true;
 	passOpen = false;
 	++framesSinceExternalMerge;
+	if (!d3d11Ranges) {
+		frameSkipped = false;
+		return;
+	}
 	auto& frame = frames[writeFrame];
 	// Every slot still holds a frame the GPU has not finished: leave this one untimed rather than restart a
 	// pending disjoint query, which would never let that slot complete.
@@ -125,13 +146,17 @@ void Profiler::BeginFrame()
 
 void Profiler::BeginPass(std::string_view name)
 {
-	if (!initialized || !context)
+	if (!initialized)
 		return;
 
 	if (!frameActive)
 		BeginFrame();
 
-	if (frameActive && !frameSkipped) {
+	if (frameActive && !d3d11Ranges) {
+		cpuRangeName.assign(name);
+		QueryPerformanceCounter(&cpuRangeBegin);
+		passOpen = true;
+	} else if (frameActive && !frameSkipped) {
 		auto& frame = frames[writeFrame];
 		if (frame.activeCount < kMaxTimers) {
 			auto& timer = frame.timers[frame.activeCount];
@@ -149,10 +174,16 @@ void Profiler::BeginPass(std::string_view name)
 
 void Profiler::EndPass()
 {
-	if (!initialized || !context)
+	if (!initialized)
 		return;
 
-	if (frameActive && !frameSkipped) {
+	if (frameActive && !d3d11Ranges) {
+		if (std::exchange(passOpen, false)) {
+			LARGE_INTEGER cpuEnd;
+			QueryPerformanceCounter(&cpuEnd);
+			cpuFrame[cpuRangeName] += static_cast<float>(static_cast<double>(cpuEnd.QuadPart - cpuRangeBegin.QuadPart) * cpuTicksToMs);
+		}
+	} else if (frameActive && !frameSkipped) {
 		auto& frame = frames[writeFrame];
 		if (frame.activeCount < kMaxTimers && std::exchange(passOpen, false)) {
 			auto& timer = frame.timers[frame.activeCount];
@@ -188,7 +219,7 @@ void Profiler::EndFrame()
 		frameHistory.PushSample(static_cast<float>(static_cast<double>(now.QuadPart - lastFrameTicks) * cpuTicksToMs));
 	lastFrameTicks = now.QuadPart;
 
-	if (!initialized || !context)
+	if (!initialized)
 		return;
 
 	frameCounter.fetch_add(1, std::memory_order_relaxed);
@@ -198,6 +229,14 @@ void Profiler::EndFrame()
 
 	frameActive = false;
 	passOpen = false;
+	if (!d3d11Ranges) {
+		// The frame's CPU times, for the next collection. Frames not collected yet add up as one.
+		for (const auto& [name, ms] : cpuFrame)
+			closedCpuFrame[name] += ms;
+		cpuFrame.clear();
+		cpuFrameClosed = true;
+		return;
+	}
 	if (std::exchange(frameSkipped, false))
 		return;
 	context->End(frames[writeFrame].disjoint.get());
@@ -250,14 +289,39 @@ bool Profiler::CollectFrame(FrameQueries& frame, std::unordered_map<std::string,
 	return true;
 }
 
+bool Profiler::CollectCpuFrame(std::unordered_map<std::string, std::pair<float, float>>& activeTimers)
+{
+	if (!std::exchange(cpuFrameClosed, false))
+		return false;
+	collectedFrames++;
+	for (const auto& [name, cpuMs] : closedCpuFrame) {
+		auto [it, inserted] = knownTimerIndex.try_emplace(name, knownTimers.size());
+		if (inserted) {
+			KnownTimer kt;
+			kt.name = name;
+			knownTimers.push_back(std::move(kt));
+		}
+		auto& known = knownTimers[it->second];
+		known.cpu.PushSample(cpuMs);
+		known.lastSampleFrame = collectedFrames;
+		activeTimers[name] = { 0.0f, cpuMs };
+	}
+	closedCpuFrame.clear();
+	return true;
+}
+
 void Profiler::CollectResults()
 {
 	// The last collected frame's timers (GPU, CPU), for the results' current values.
 	std::unordered_map<std::string, std::pair<float, float>> frameTimers;
 	bool collected = false;
-	while (frames[readFrame].inFlight && CollectFrame(frames[readFrame], frameTimers)) {
-		collected = true;
-		readFrame = (readFrame + 1) % kFrameRing;
+	if (d3d11Ranges) {
+		while (frames[readFrame].inFlight && CollectFrame(frames[readFrame], frameTimers)) {
+			collected = true;
+			readFrame = (readFrame + 1) % kFrameRing;
+		}
+	} else {
+		collected = CollectCpuFrame(frameTimers);
 	}
 	if (!collected)
 		return;
