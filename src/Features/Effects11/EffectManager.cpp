@@ -414,6 +414,13 @@ void EffectManager::ExecuteEffect(EffectBase& a_effect, uint32_t enableSettingID
 		return;
 
 	a_effect.profiler = globals::profiler;
+	UpdateEffectValues(a_effect);
+	a_effect.Execute();
+	a_effect.profiler = nullptr;
+}
+
+void EffectManager::UpdateEffectValues(EffectBase& a_effect)
+{
 #ifdef ENABLE_ENB_EXTENDER
 	const float weatherBlend = Effects11Editor::GetSingleton().IsOpen() ? (commonData.weather[2] > 0.5f ? 1.0f : 0.0f) : commonData.weather[2];
 	a_effect.ApplyWeatherBlending(weatherBlend, currentWeatherID, previousWeatherID);
@@ -422,8 +429,6 @@ void EffectManager::ExecuteEffect(EffectBase& a_effect, uint32_t enableSettingID
 	UpdateCommonVariablesForEffect(a_effect);
 	a_effect.UpdateExternBindings();
 	a_effect.UpdateEffectVariables();
-	a_effect.Execute();
-	a_effect.profiler = nullptr;
 }
 
 bool EffectManager::ExecuteEffects(RE::BSGraphics::RenderTargetData& a_input, RE::BSGraphics::RenderTargetData& a_output)
