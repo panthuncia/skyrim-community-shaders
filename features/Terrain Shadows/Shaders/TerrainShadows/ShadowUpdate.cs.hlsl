@@ -1,16 +1,26 @@
-Texture2D<float> TexHeight : register(t0);
-RWTexture2D<float2> RWTexShadowHeights : register(u0);
+#include "Common/OrgResources.hlsli"
 
-cbuffer ShadowUpdateCB : register(b0)
+// The same layout packed tightly as in cbuffer packing, as a LATCH entry needs. Must match
+// TerrainShadows::ShadowUpdateCB.
+struct ShadowUpdateConstants
 {
-	float2 LightPxDir : packoffset(c0.x);   // direction on which light descends, from one pixel to next via dda
-	float2 LightDeltaZ : packoffset(c0.z);  // per lightUVDir, normalised, [upper, lower] penumbra, should be negative
-	uint StartPxCoord : packoffset(c1.x);
-	float2 PxSize : packoffset(c1.y);
-	float BlendWeight : packoffset(c1.w);
-	float2 PosRange : packoffset(c2.x);
-	float2 ZRange : packoffset(c2.z);
-}
+	float2 LightPxDir;   // direction on which light descends, from one pixel to next via dda
+	float2 LightDeltaZ;  // per lightUVDir, normalised, [upper, lower] penumbra, should be negative
+	uint StartPxCoord;
+	float2 PxSize;
+	float BlendWeight;
+	float2 PosRange;
+	float2 ZRange;
+};
+
+// D3D11: t0, u0, b0. ORG: the two textures' handles, then the latch region of this dispatch
+// (Common/OrgResources.hlsli).
+#define SHADOW_UPDATE_RESOURCES(X)                     \
+	X(SRV, Texture2D<float>, TexHeight, 0)             \
+	X(UAV, RWTexture2D<float2>, RWTexShadowHeights, 0) \
+	X(LATCH, ShadowUpdateConstants, ShadowUpdate, 0)
+ORG_PUSH_BLOCK(SHADOW_UPDATE_RESOURCES(ORG_HANDLE))
+SHADOW_UPDATE_RESOURCES(ORG_RESOURCE)
 
 float2 GetInterpolatedHeightRW(float2 pxCoord, bool isVertical)
 {
@@ -41,13 +51,13 @@ uint GetWrappedCoord(int coord, uint dimension)
 	uint2 dims;
 	TexHeight.GetDimensions(dims.x, dims.y);
 
-	bool isVertical = abs(LightPxDir.y) > abs(LightPxDir.x);
-	int majorStep = (isVertical ? LightPxDir.y : LightPxDir.x) > 0.0 ? 1 : -1;
-	int majorPxCoord = int(StartPxCoord) + int(gtid) * majorStep;
+	bool isVertical = abs(ShadowUpdate.LightPxDir.y) > abs(ShadowUpdate.LightPxDir.x);
+	int majorStep = (isVertical ? ShadowUpdate.LightPxDir.y : ShadowUpdate.LightPxDir.x) > 0.0 ? 1 : -1;
+	int majorPxCoord = int(ShadowUpdate.StartPxCoord) + int(gtid) * majorStep;
 	uint majorDimension = isVertical ? dims.y : dims.x;
 	uint minorDimension = isVertical ? dims.x : dims.y;
 	bool isValid = majorPxCoord >= 0 && majorPxCoord < int(majorDimension);
-	float minorDirection = isVertical ? LightPxDir.x : LightPxDir.y;
+	float minorDirection = isVertical ? ShadowUpdate.LightPxDir.x : ShadowUpdate.LightPxDir.y;
 	float minorOffset = 0.5 + gtid * minorDirection;
 	int rawMinorPxCoord = int(gid) + int(floor(minorOffset));
 	uint minorPxCoord = GetWrappedCoord(rawMinorPxCoord, minorDimension);
@@ -56,18 +66,18 @@ uint GetWrappedCoord(int coord, uint dimension)
 
 	float2 pastHeights = 0.0;
 	if (isValid) {
-		if (BlendWeight < 1.0)
+		if (ShadowUpdate.BlendWeight < 1.0)
 			pastHeights = RWTexShadowHeights[outputPxCoord];
 
-		float terrainHeight = lerp(PosRange.x, PosRange.y, TexHeight[outputPxCoord]);
-		float2 heights = ((terrainHeight - ZRange.x) / (ZRange.y - ZRange.x)).xx;
+		float terrainHeight = lerp(ShadowUpdate.PosRange.x, ShadowUpdate.PosRange.y, TexHeight[outputPxCoord]);
+		float2 heights = ((terrainHeight - ShadowUpdate.ZRange.x) / (ShadowUpdate.ZRange.y - ShadowUpdate.ZRange.x)).xx;
 
 		// fetch last dispatch
 		int previousMajorCoord = majorPxCoord - majorStep;
 		float previousMinorCoord = gid + 0.5 - minorDirection;
 		if (gtid == 0 && previousMajorCoord >= 0 && previousMajorCoord < int(majorDimension) && previousMinorCoord >= 0.0 && previousMinorCoord < minorDimension) {
 			float2 previousPxCoord = isVertical ? float2(previousMinorCoord, previousMajorCoord + 0.5) : float2(previousMajorCoord + 0.5, previousMinorCoord);
-			float2 sampleHeights = GetInterpolatedHeightRW(previousPxCoord, isVertical) + LightDeltaZ;
+			float2 sampleHeights = GetInterpolatedHeightRW(previousPxCoord, isVertical) + ShadowUpdate.LightDeltaZ;
 			heights = max(heights, sampleHeights);
 		}
 
@@ -87,7 +97,7 @@ uint GetWrappedCoord(int coord, uint dimension)
 			if (floor(float(previousMinorPxCoord) / minorDimension) == rayWrap) {
 				combineHeights = true;
 				currentHeights = g_shadowHeight[gtid];
-				sampleHeights = g_shadowHeight[gtid - offset] + LightDeltaZ * offset;
+				sampleHeights = g_shadowHeight[gtid - offset] + ShadowUpdate.LightDeltaZ * offset;
 			}
 		}
 		GroupMemoryBarrierWithGroupSync();
@@ -99,6 +109,6 @@ uint GetWrappedCoord(int coord, uint dimension)
 
 	// save
 	if (isValid) {
-		RWTexShadowHeights[outputPxCoord] = lerp(pastHeights, g_shadowHeight[gtid], BlendWeight);
+		RWTexShadowHeights[outputPxCoord] = lerp(pastHeights, g_shadowHeight[gtid], ShadowUpdate.BlendWeight);
 	}
 }
