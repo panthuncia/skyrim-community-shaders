@@ -13,8 +13,9 @@
  * volume as the D3D11 path's clear does.
  *
  * Resources: the per-frame volumes are transient graph textures (aliasable); the histories have History lifetime; the two
- * integrated volumes are exported as D3D11 SRVs, which the engine's pixel shaders read at t19 and t22 (and Drawcall Limit
- * Fix's frame texture at t19). The per-frame constants (VolumetricFogCB, the engine's local shadows, the directional shadow
+ * integrated volumes are exported as D3D11 SRVs, which the engine's pixel shaders read at t19 and t22. They are also
+ * published under their names (PublishedResources), and Drawcall Limit Fix's frame textures at t19 and t22 read them through
+ * the graph while NearSRV and FarSRV answer. The per-frame constants (VolumetricFogCB, the engine's local shadows, the directional shadow
  * light) are one latch region. The shared constant buffers come from SharedConstants.
  *
  * Inputs are read as graph resources: the features already on the graph by their resource names (IBL's SH textures,

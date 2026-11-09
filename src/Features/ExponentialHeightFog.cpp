@@ -521,6 +521,13 @@ ID3D11ShaderResourceView* ExponentialHeightFog::IntegratedLightScatteringView() 
 	return integratedLightScattering ? integratedLightScattering->srv.get() : nullptr;
 }
 
+ID3D11ShaderResourceView* ExponentialHeightFog::IntegratedLightScatteringFarView() const
+{
+	if (auto* view = ORGExponentialHeightFog::Get().FarSRV())
+		return view;
+	return integratedLightScatteringFar ? integratedLightScatteringFar->srv.get() : nullptr;
+}
+
 void ExponentialHeightFog::BindIntegratedLightScattering()
 {
 	ID3D11ShaderResourceView* srv = IntegratedLightScatteringView();
@@ -535,9 +542,7 @@ void ExponentialHeightFog::BindIntegratedLightScattering()
 				ORGExponentialHeightFog::Get().NearSRV() ? "ORG" : "D3D11", globals::state->frameCount, (*means)[0], (*means)[1], (*means)[2], (*means)[3]);
 	}
 	globals::d3d::context->PSSetShaderResources(19, 1, &srv);
-	ID3D11ShaderResourceView* farSrv = ORGExponentialHeightFog::Get().FarSRV();
-	if (!farSrv)
-		farSrv = integratedLightScatteringFar ? integratedLightScatteringFar->srv.get() : nullptr;
+	ID3D11ShaderResourceView* farSrv = IntegratedLightScatteringFarView();
 	globals::d3d::context->PSSetShaderResources(22, 1, &farSrv);
 }
 

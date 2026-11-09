@@ -104,6 +104,9 @@ public:
 	/** @brief The view Prepass binds at t19: the render graph's when it ran the last frame, else D3D11's (null before it exists). Render thread. */
 	ID3D11ShaderResourceView* IntegratedLightScatteringView() const;
 
+	/** @brief The view Prepass binds at t22, the far volume's, chosen as IntegratedLightScatteringView chooses. Render thread. */
+	ID3D11ShaderResourceView* IntegratedLightScatteringFarView() const;
+
 	// The volumetric fog's frame description, shared by the D3D11 path and the render-graph path (ORGExponentialHeightFog).
 
 	/** @brief The volumetric fog passes' constants (VolumetricFogCB, b0; the shaders' VolumetricFogConstants). */
