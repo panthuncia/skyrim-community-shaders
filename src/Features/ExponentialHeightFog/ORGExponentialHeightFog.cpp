@@ -45,6 +45,7 @@ ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 #	include "RenderGraph/SharedConstants.h"
 #	include "State.h"
 #	include "Utils/D3D.h"
+#	include "Utils/Game.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
@@ -878,7 +879,10 @@ bool ORGExponentialHeightFog::Prepass()
 			shape.inputs[kCloudShadows] = { nullptr, "CloudShadows::Occlusion" };
 		else
 			shape.inputs[kCloudShadows] = ImportView("CloudShadows::Occlusion", view.get());
-		if (!shape.inputs[kCloudShadows])
+		// Without the sky (interiors, the map) the shader skips the world shadow, and Cloud Shadows binds nothing there.
+		const bool skyless = Util::IsInterior() || globals::state->isMapMenuOpen ||
+		                     (globals::game::sky && globals::game::sky->flags.any(RE::Sky::Flags::kHideSky));
+		if (!shape.inputs[kCloudShadows] && !skyless)
 			return fallback("Cloud Shadows' texture is missing");
 	}
 
