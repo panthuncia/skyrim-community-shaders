@@ -169,6 +169,13 @@ namespace FrameAnchors
 	/** @brief EngineTarget for a depth-stencil target (RE::RENDER_TARGETS_DEPTHSTENCIL), with its DSV and depth SRV: "cs.engine.depth.<index>". */
 	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t a_depthStencil);
 
+	/**
+	 * @brief EngineDepth for a depth texture outside the engine's table (a feature's own map, or one only a view of reaches the
+	 * feature): a_target's texture with its DSV and depth SRV, either of which may be null. Registered with every graph as a_id, and
+	 * kept while a_target's texture stays the same. Null when the texture cannot be imported.
+	 */
+	std::shared_ptr<org::ExternalTextureResource> ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id);
+
 	// What RenderGraphRuntime asks of the anchors.
 
 	/** @brief The anchor's segment (RenderGraphRuntime::Segment, as its value). */
