@@ -2,7 +2,8 @@
 
 // The frame binding contract (Api::InstallContext::RegisterFrameBinding): a buffer every DCLF draw reads at a declared texture register,
 // given by the frame record (DrawBindings) because it changes by frame: the version of a feature's buffer the frame's draws read. And the
-// frame texture contract (RegisterFrameTexture): an engine render target's view the frame record names at a declared texture register.
+// frame texture contract (RegisterFrameTexture): an engine render target's view the frame record names at a declared texture register, or
+// a CS feature's published graph texture while the feature is on its ORG path.
 // And the frame graph buffers' (RegisterFrameGraphBuffers): another CS feature's graph buffers, read at declared texture registers. And
 // the per-draw buffers' (DeclarePerDrawBuffer): another CS feature's constant buffers bound per draw, which no frame block mirrors.
 
@@ -51,6 +52,13 @@ namespace DCLF::Api
 	 * - capturedWhenNull: a null view leaves the register the view the colour commit captured there (a texture the feature names only
 	 *   while it binds it itself after the epoch, and the engine's or CS's binding stands otherwise: Integrations/TerrainBlending's mask;
 	 *   a CS feature's view the integration names only while it is the one CS binds there).
+	 *
+	 * The graph path, for a producer ported to ORG (both or neither; dclf-architecture.md, "Frame graph textures"):
+	 * - graphResource: the id the producer publishes its texture under (RenderGraph/PublishedResources.h). The colour passes declare a
+	 *   read of it while graph answers true at the main resources' check, so ORG orders the read after the producer's write.
+	 * - graph: render thread, at the main resources' check and once per colour commit: whether the register reads the published texture
+	 *   now (the producer is on its ORG path; usually PublishedResources::ShaderResourceIndex), with its bindless index into a_index.
+	 *   False: view, as above. The views with frame constants of their own (the reflection's faces) always read view.
 	 */
 	struct FrameTexture
 	{
@@ -58,6 +66,8 @@ namespace DCLF::Api
 		std::uint32_t textureRegister = ~0u;
 		void* (*view)() = nullptr;
 		bool capturedWhenNull = false;
+		std::string_view graphResource;
+		bool (*graph)(std::uint32_t& a_index) = nullptr;
 	};
 
 	/**

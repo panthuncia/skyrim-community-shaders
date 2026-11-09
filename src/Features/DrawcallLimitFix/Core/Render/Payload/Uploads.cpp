@@ -373,6 +373,13 @@ namespace DCLF
 		for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters && !depthOnly; ++t) {
 			auto& held = frameTextureBindings[t];
 			const auto at = frameTextureAt[t];
+			// On the graph path (Api::FrameTexture::graph, declared by the colour passes: Resources::graphTextures), the published texture's
+			// own descriptor: no import to hold, the graph registers it.
+			if (std::uint32_t graphIndex = 0; at != Extensions::kNoFrameTexture && Extensions::FrameGraphTextureIndex(at, epochResources->graphTextures, graphIndex)) {
+				HoldFrameTexture(held.view, held.binding, nullptr, t, 0u, a_commit.bindingOwners);
+				a_frameTextures[t] = graphIndex;
+				continue;
+			}
 			const bool registered = at != Extensions::kNoFrameTexture && (frameTextureViews[at] || !frameTextures[at].capturedWhenNull);
 			auto* const view = t == kCharacterLightRegister ? Scene::FrameView::Get().GetFrameCapture().characterLightView :
 			                   registered                   ? frameTextureViews[at] :
