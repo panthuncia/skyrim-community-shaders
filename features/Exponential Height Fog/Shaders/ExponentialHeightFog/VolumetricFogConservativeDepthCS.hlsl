@@ -1,6 +1,19 @@
-#include "ExponentialHeightFog/VolumetricFogCSCommon.hlsli"
+// Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers and SharedData's depth are
+// heap reads through the push block (ORG_SHARED_CONSTANTS, ORG_HEADER_RESOURCES).
+#define ORG_SHARED_CONSTANTS
+#define ORG_HEADER_RESOURCES
+#include "Common/OrgResources.hlsli"
+#include "ExponentialHeightFog/VolumetricFogConstants.hlsli"
 
-RWTexture2D<float> ConservativeDepthTexture : register(u0);
+#define VOLUMETRIC_FOG_DEPTH_RESOURCES(X)                   \
+	X(SHARED, ConstantBuffer, Shared, 0)                    \
+	X(LATCH, VolumetricFogConstants, VolumetricFog, 0)      \
+	X(UAV, RWTexture2D<float>, ConservativeDepthTexture, 0) \
+	X(EXTERN, Texture2D<float4>, DepthTexture, 17)
+ORG_PUSH_BLOCK(VOLUMETRIC_FOG_DEPTH_RESOURCES(ORG_HANDLE))
+VOLUMETRIC_FOG_DEPTH_RESOURCES(ORG_RESOURCE)
+
+#include "ExponentialHeightFog/VolumetricFogCSCommon.hlsli"
 
 void GetCellDepthCoords(uint2 cellID, out int2 minCoord, out int2 maxCoord)
 {
