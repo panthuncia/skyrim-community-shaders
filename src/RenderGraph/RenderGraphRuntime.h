@@ -94,6 +94,7 @@ public:
 		AnchorPostProcessing,
 		AnchorTonemap,
 		AnchorPresent,
+		AnchorOverlay,
 		Count
 	};
 

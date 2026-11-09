@@ -48,6 +48,7 @@ namespace FrameAnchors
 		PostProcessing,      // Main_PostProcessing, before the D3D11 post-processing and the upscaler
 		Tonemap,             // the ImageSpace HDR tonemap's render, before Effects11 and Post Processing replace or follow it
 		Present,             // IDXGISwapChain::Present, before the overlay, HDR output and frame generation
+		Overlay,             // the overlay's draw (OverlayRenderer::FinalizeImGuiFrame), after ImGui built its frame, before HDR output
 		Count
 	};
 

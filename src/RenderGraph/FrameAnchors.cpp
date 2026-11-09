@@ -30,7 +30,7 @@ namespace FrameAnchors
 		using Segment = RenderGraphRuntime::Segment;
 
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
-		static_assert(static_cast<std::uint32_t>(Segment::AnchorPresent) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
+		static_assert(static_cast<std::uint32_t>(Segment::AnchorOverlay) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
 			"one segment per anchor, in the anchors' order");
 		static_assert(static_cast<std::uint32_t>(Segment::Count) <= 32, "TakeSubmittedSegments holds one bit per segment");
 
@@ -51,6 +51,7 @@ namespace FrameAnchors
 			{ "PostProcessing", { "CS anchor: post-processing", "CS anchor: post-processing inputs", "FrameAnchors::PostProcessing / ", "cs.anchor.post-processing" }, true },
 			{ "Tonemap", { "CS anchor: tonemap", "CS anchor: tonemap inputs", "FrameAnchors::Tonemap / ", "cs.anchor.tonemap" }, true },
 			{ "Present", { "CS anchor: present", "CS anchor: present inputs", "FrameAnchors::Present / ", "cs.anchor.present" }, true },
+			{ "Overlay", { "CS anchor: overlay", "CS anchor: overlay inputs", "FrameAnchors::Overlay / ", "cs.anchor.overlay" }, true },
 		} };
 
 		// Where each segment runs in a frame: AddToFrame puts an anchor before the first epoch of the order that runs after it. A
@@ -73,6 +74,7 @@ namespace FrameAnchors
 			Segment::AnchorPostProcessing,  // Main_PostProcessing, before the upscaler
 			Segment::AnchorTonemap,         // in the ImageSpace chain after it
 			Segment::AnchorPresent,
+			Segment::AnchorOverlay,  // the overlay's ImGui draw, inside HDRDisplay's present chain
 		};
 
 		std::uint32_t RankOf(std::uint32_t a_segment)
