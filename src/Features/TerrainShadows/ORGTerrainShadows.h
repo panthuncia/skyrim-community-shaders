@@ -24,7 +24,8 @@ namespace DirectX
  *   view. Its DDS bytes go into an upload buffer at once, and a copy pass fills it in the first epoch; the graph is then built
  *   again without that pass. Async epochs record no texture uploads, so the upload service cannot fill it.
  * - The shadow height map: a persistent graph texture written by the pass. It exports a D3D11 SRV, which the feature binds at t60
- *   for the engine's pixel shaders and Drawcall Limit Fix reads as its frame texture, until those draws are ported.
+ *   for the engine's pixel shaders until those draws are ported. It is also published (PublishedResources): Drawcall Limit Fix's
+ *   colour passes read it through the graph.
  * - The per-dispatch constants: one LATCH region a dispatch, written by the client's commit at the frame slot.
  *
  * On any failure (no runtime, a shader that does not compile, a texture that cannot be made, the graph stopping) it stops for

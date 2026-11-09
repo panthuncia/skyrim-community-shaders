@@ -40,6 +40,7 @@ ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
@@ -69,6 +70,16 @@ namespace
 	constexpr const char* kShaderDir = "ExponentialHeightFog/";
 	// After IBL (0, 1) and Skylighting at the Prepass anchor; the graph orders the reads of their outputs in any case.
 	constexpr std::int32_t kOrder = 300;
+	// The integrated volumes' names, which they are published under (MakeVolume's prefixes): Drawcall Limit Fix's t19 and t22.
+	constexpr const char* kNearIntegratedName = "ExponentialHeightFog::IntegratedLightScattering";
+	constexpr const char* kFarIntegratedName = "ExponentialHeightFog::FarIntegratedLightScattering";
+
+	/** @brief The integrated volumes are no longer written by the graph: their readers return to the D3D11 views. */
+	void WithdrawIntegrated()
+	{
+		PublishedResources::Withdraw(kNearIntegratedName);
+		PublishedResources::Withdraw(kFarIntegratedName);
+	}
 
 	using ShaderBindings::Handle;
 
@@ -766,12 +777,18 @@ struct ORGExponentialHeightFog::Impl
 		client.onFailed = [] {
 			logger::error("[ORG] Exponential Height Fog returns to D3D11: the render graph failed");
 			auto& self = Get();
+			WithdrawIntegrated();
 			self.failed = true;
 			self.impl.reset();
 		};
 		client.sharedConstants = true;
 		if (!FrameAnchors::Register(std::move(client)))
 			return false;
+		// Drawcall Limit Fix's colour passes read them by name, ordered after the integration (Integrations/ExponentialHeightFog).
+		if (!PublishedResources::Publish(*built->nearVolume.integrated) || !PublishedResources::Publish(*built->farVolume.integrated)) {
+			logger::error("[ORG] Exponential Height Fog: the integrated volumes could not be published");
+			return false;
+		}
 		this->state = std::move(built);
 		// New histories: nothing to reproject from.
 		hasScatteringHistory = hasDepthHistory = hasScatteringHistoryFar = hasDepthHistoryFar = false;
@@ -920,6 +937,7 @@ bool ORGExponentialHeightFog::Prepass()
 		if (!impl->Build(shape)) {
 			logger::error("[ORG] Exponential Height Fog returns to D3D11 for good");
 			FrameAnchors::Unregister(kClientId);
+			WithdrawIntegrated();
 			failed = true;
 			impl.reset();
 			return false;
@@ -962,6 +980,7 @@ void ORGExponentialHeightFog::Release()
 	if (!impl)
 		return;
 	FrameAnchors::Unregister(kClientId);
+	WithdrawIntegrated();
 	impl.reset();
 }
 

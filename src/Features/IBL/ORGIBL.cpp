@@ -141,6 +141,7 @@ void ORGIBL::DebugReadback(ID3D11Texture2D* a_env, ID3D11Texture2D* a_sky)
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
 
@@ -154,6 +155,9 @@ namespace
 {
 	constexpr const char* kClientId = "cs.ibl";
 	constexpr const char* kShader = "IBL/DiffuseIBLCS.hlsl";
+	// The SH textures' names, which they are published under: Drawcall Limit Fix's t76 and t77.
+	constexpr const char* kEnvName = "IBL::EnvIBL";
+	constexpr const char* kSkyName = "IBL::SkyIBL";
 
 	// DiffuseIBLCS's push block (DIFFUSE_IBL_RESOURCES, in list order).
 	struct DiffuseIBLBlock
@@ -251,8 +255,8 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	state->sampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{});
 	// Read in the next frame (the reflection prepass binds the last frame's SH), and by D3D11 until its readers are ported.
 	const GraphResources::Options options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV };
-	state->env = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(false), "IBL::EnvIBL", options);
-	state->sky = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(false), "IBL::SkyIBL", options);
+	state->env = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(false), kEnvName, options);
+	state->sky = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(false), kSkyName, options);
 	if (!state->program || !state->sampler || !*state->env || !*state->sky || !state->env->SRV() || !state->sky->SRV()) {
 		logger::error("[ORG] IBL: its program, sampler or SH textures could not be made; IBL stays on D3D11");
 		return false;
@@ -285,12 +289,23 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	client.active = [] { return !globals::features::ibl.IsDisabledForCurrentScene(); };
 	client.onFailed = [self] {
 		logger::error("[ORG] IBL: the render graph failed; IBL returns to D3D11");
+		PublishedResources::Withdraw(kEnvName);
+		PublishedResources::Withdraw(kSkyName);
 		auto failed = std::move(self->impl);
 		if (failed && failed->onFailed)
 			failed->onFailed();
 	};
 	impl = std::move(state);
 	if (!FrameAnchors::Register(std::move(client))) {
+		impl.reset();
+		return false;
+	}
+	// Drawcall Limit Fix's colour passes read them by name, ordered after the projection (Integrations/IBL).
+	if (!PublishedResources::Publish(*impl->env) || !PublishedResources::Publish(*impl->sky)) {
+		logger::error("[ORG] IBL: the SH textures could not be published; IBL stays on D3D11");
+		FrameAnchors::Unregister(kClientId);
+		PublishedResources::Withdraw(kEnvName);
+		PublishedResources::Withdraw(kSkyName);
 		impl.reset();
 		return false;
 	}

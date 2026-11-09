@@ -12,8 +12,9 @@
  * shadow epoch included. So they are final at the EarlyPrepass anchor, and the passes run there instead of at a new anchor.
  *
  * The passes are 2 downsamples (one per cascade, into the two mips of the shared shadow map) and 4 blurs, each through a
- * transient, aliasable temporary. The shared shadow map is exported as a D3D11 SRV: engine draws read it at t18, and DCLF's
- * frame texture reads it there. The shadow mask draw still binds it at t18, as the D3D11 path does.
+ * transient, aliasable temporary. The shared shadow map is exported as a D3D11 SRV: engine draws read it at t18. The shadow mask
+ * draw still binds it at t18, as the D3D11 path does. It is also published (PublishedResources): DCLF's frame texture at t18
+ * reads it through the graph.
  *
  * Everything here runs on the render thread. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */

@@ -4,9 +4,11 @@
 #include "Features/DrawcallLimitFix/Integrations/IBL/IBL.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
 
+#include "RenderGraph/PublishedResources.h"
 #include "State.h"
 
 #include "Features/IBL.h"
+#include "Features/IBL/ORGIBL.h"
 
 namespace DCLF::Integrations::IBL
 {
@@ -14,18 +16,34 @@ namespace DCLF::Integrations::IBL
 	{
 		// The SH Prepass computes and binds at t76 and t77 unless IBL is off for the scene (the only PS bindings there besides the
 		// reflection prepass's, the same views or null): persistent textures made at setup (last frame's SH at the faces' commit, which
-		// the reflection prepass bound). Off for the scene, Prepass binds nothing: the captured views. With CS_ORG_IBL=1 the views are
-		// the render graph's exported SH textures (IBL::EnvIBLSRV), imported like any D3D11 view.
+		// the reflection prepass bound). Off for the scene, Prepass binds nothing: the captured views.
+		bool ShBinds()
+		{
+			const auto& ibl = globals::features::ibl;
+			return ibl.loaded && !ibl.IsDisabledForCurrentScene();
+		}
+
 		template <ID3D11ShaderResourceView* (::IBL::*View)() const>
 		void* ShView()
 		{
-			const auto& ibl = globals::features::ibl;
-			return ibl.loaded && !ibl.IsDisabledForCurrentScene() ? (ibl.*View)() : nullptr;
+			return ShBinds() ? (globals::features::ibl.*View)() : nullptr;
 		}
 
-		// The static cubemaps (DDS loaded at setup) ReflectionsPrepass binds at t78 and t79 (their only PS bindings), whatever the scene:
-		// only on a frame whose water reflection ran it (State::activeReflections, set by Deferred::ReflectionsPrepasses until Present).
-		// Otherwise the bindings stand from an earlier frame, or were never made: the captured views.
+		// With CS_ORG_IBL=1 the views are the render graph's exported SH textures (IBL::EnvIBLSRV, while ORGIBL is active): the colour
+		// passes read the published textures instead, ordered after the projection at the Prepass anchor.
+		constexpr std::string_view kEnvironmentId = "IBL::EnvIBL";
+		constexpr std::string_view kSkyId = "IBL::SkyIBL";
+
+		template <const std::string_view* Id>
+		bool ShGraphIndex(std::uint32_t& a_index)
+		{
+			return ShBinds() && ORGIBL::Get().IsActive() && PublishedResources::ShaderResourceIndex(*Id, a_index);
+		}
+
+		// The static cubemaps (DDS loaded at setup, D3D11 textures on either path) ReflectionsPrepass binds at t78 and t79 (their only PS
+		// bindings), whatever the scene: only on a frame whose water reflection ran it (State::activeReflections, set by
+		// Deferred::ReflectionsPrepasses until Present). Otherwise the bindings stand from an earlier frame, or were never made: the
+		// captured views.
 		template <auto Texture>
 		void* StaticView()
 		{
@@ -35,8 +53,10 @@ namespace DCLF::Integrations::IBL
 
 		void Install(Api::InstallContext& a_context)
 		{
-			a_context.RegisterFrameTexture({ .name = "ibl environment", .textureRegister = kEnvironmentRegister, .view = &ShView<&::IBL::EnvIBLSRV>, .capturedWhenNull = true });
-			a_context.RegisterFrameTexture({ .name = "ibl sky", .textureRegister = kSkyRegister, .view = &ShView<&::IBL::SkyIBLSRV>, .capturedWhenNull = true });
+			a_context.RegisterFrameTexture({ .name = "ibl environment", .textureRegister = kEnvironmentRegister, .view = &ShView<&::IBL::EnvIBLSRV>,
+				.capturedWhenNull = true, .graphResource = kEnvironmentId, .graph = &ShGraphIndex<&kEnvironmentId> });
+			a_context.RegisterFrameTexture({ .name = "ibl sky", .textureRegister = kSkyRegister, .view = &ShView<&::IBL::SkyIBLSRV>,
+				.capturedWhenNull = true, .graphResource = kSkyId, .graph = &ShGraphIndex<&kSkyId> });
 			a_context.RegisterFrameTexture({ .name = "ibl static diffuse", .textureRegister = kStaticDiffuseRegister,
 				.view = &StaticView<&::IBL::staticDiffuseIBLTexture>, .capturedWhenNull = true });
 			a_context.RegisterFrameTexture({ .name = "ibl static specular", .textureRegister = kStaticSpecularRegister,

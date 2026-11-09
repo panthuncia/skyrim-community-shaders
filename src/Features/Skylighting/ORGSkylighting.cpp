@@ -23,6 +23,7 @@ bool ORGSkylighting::Requested()
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
 
@@ -41,6 +42,16 @@ namespace
 	constexpr const char* kClientId = "cs.skylighting";
 	constexpr const char* kShader = "Skylighting/UpdateProbesCS.hlsl";
 	constexpr auto kVolumes = static_cast<std::size_t>(ORGSkylighting::Volume::Count);
+	// The volumes Drawcall Limit Fix reads at t50 and t53, published under their names.
+	constexpr const char* kProbeArrayName = "Skylighting::ProbeArray";
+	constexpr const char* kShadowVisibilityName = "Skylighting::ShadowVisibility";
+
+	/** @brief The graph no longer updates the probes: the published volumes' readers return to D3D11. */
+	void WithdrawVolumes()
+	{
+		PublishedResources::Withdraw(kProbeArrayName);
+		PublishedResources::Withdraw(kShadowVisibilityName);
+	}
 
 	/** @brief One frame's values, as UpdateProbesFrame in UpdateProbesCS.hlsl: float4 rows, tightly packed. */
 	struct Frame
@@ -321,6 +332,7 @@ struct ORGSkylighting::Impl
 		};
 		client.onFailed = [state = state] {
 			state->failed = true;
+			WithdrawVolumes();
 			logger::error("[ORG] Skylighting: the render graph failed; the probe update returns to D3D11");
 		};
 		return client;
@@ -374,10 +386,10 @@ bool ORGSkylighting::Update(const Skylighting& a_feature)
 		// Read by D3D11 (the engine's draws, the composite, fog, DCLF) and cleared by ResetSkylighting: exported SRV and UAV.
 		constexpr GraphResources::Options volumeOptions{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV | GraphResources::Export::UAV };
 		constexpr std::pair<DXGI_FORMAT, const char*> volumeInfo[kVolumes] = {
-			{ DXGI_FORMAT_R16G16B16A16_FLOAT, "Skylighting::ProbeArray" },
+			{ DXGI_FORMAT_R16G16B16A16_FLOAT, kProbeArrayName },
 			{ DXGI_FORMAT_R8_UINT, "Skylighting::AccumFramesArray" },
 			{ DXGI_FORMAT_R32_UINT, "Skylighting::ShadowBitmask" },
-			{ DXGI_FORMAT_R8_UNORM, "Skylighting::ShadowVisibility" },
+			{ DXGI_FORMAT_R8_UNORM, kShadowVisibilityName },
 		};
 		for (std::size_t i = 0; i < kVolumes; ++i) {
 			auto& volume = resources->volumes[i];
@@ -394,6 +406,14 @@ bool ORGSkylighting::Update(const Skylighting& a_feature)
 		}
 		if (!FrameAnchors::Register(state->MakeClient()))
 			return false;
+		// Drawcall Limit Fix's colour passes read them by name, ordered after the update (Integrations/Skylighting).
+		if (!PublishedResources::Publish(*resources->volumes[static_cast<std::size_t>(Volume::ProbeArray)]) ||
+			!PublishedResources::Publish(*resources->volumes[static_cast<std::size_t>(Volume::ShadowVisibility)])) {
+			logger::warn("[ORG] Skylighting: the probe volumes could not be published; the probe update stays on D3D11");
+			FrameAnchors::Unregister(kClientId);
+			WithdrawVolumes();
+			return false;
+		}
 		impl = std::move(state);
 		logger::info("[ORG] Skylighting: the probe update runs on the render graph at the Prepass anchor ({}x{}x{})", dims[0], dims[1], dims[2]);
 	} else if (!impl->ResolveInputs(inputs, true)) {

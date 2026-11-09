@@ -90,7 +90,7 @@ namespace DCLF::Features
 		// Every frame texture's register (Api::FrameTexture; its HLSL declares the same: Effects' soft depth, Effect.hlsl's
 		// DCLFEffectSoftDepth; Integrations/TerrainBlending's mask, TerrainBlending.hlsli's TerrainBlendingMaskTexture; the CS features'
 		// views, their own HLSL's: Volumetric Shadows' SharedShadowMap, Cloud Shadows' CloudShadowsTexture, Exponential Height Fog's
-		// ExponentialHeightFogIntegratedLightScattering, Dynamic Cubemaps' EnvReflectionsTexture and EnvTexture, Skylighting's SkylightingProbeArray and ShadowVisibilityProbeArray, Terrain Shadows' ShadowHeightTexture, Water Effects'
+		// ExponentialHeightFogIntegratedLightScattering and ExponentialHeightFogIntegratedLightScatteringFar, Dynamic Cubemaps' EnvReflectionsTexture and EnvTexture, Skylighting's SkylightingProbeArray and ShadowVisibilityProbeArray, Terrain Shadows' ShadowHeightTexture, Water Effects'
 		// WaterCaustics, IBL's EnvIBLTexture, SkyIBLTexture, StaticDiffuseIBLTexture and StaticSpecularIBLTexture, TruePBR's Glint2023NoiseMap): none Core's, a frame
 		// binding's or another's.
 		constexpr std::uint32_t kFrameTextureRegisters[] = {
@@ -99,6 +99,7 @@ namespace DCLF::Features
 			Integrations::VolumetricShadows::kSharedShadowMapRegister,
 			Integrations::CloudShadows::kCloudOcclusionRegister,
 			Integrations::ExponentialHeightFog::kLightScatteringRegister,
+			Integrations::ExponentialHeightFog::kLightScatteringFarRegister,
 			Integrations::DynamicCubemaps::kReflectionsRegister,
 			Integrations::DynamicCubemaps::kEnvironmentRegister,
 			Integrations::Skylighting::kProbeArrayRegister,

@@ -118,7 +118,12 @@ One entry per need. Give:
   Open items: a withdrawn resource stays registered (and alive) until the producer publishes again under that id; and DCLF's
   views with frame constants of their own (the reflection's faces) do not declare published textures yet, so they still need
   the producer's D3D11 export.
-- **Found by:** P3 DCLF graph textures (2026-11-09).
+  Found when every DCLF integration moved to published textures: published means "the graph owns it", not "the graph wrote it
+  this frame". A producer that can run a single frame on D3D11 (Exponential Height Fog) stays published, and its readers check
+  the producer's own state (`NearSRV()` non-null) beside `ShaderResourceIndex`; an export would want a per-frame "written"
+  flag or a producer callback in the table. D3D11 writes to an exported twin (Skylighting's `ResetSkylighting` clears through
+  the UAV export) are not ordered against graph reads either.
+- **Found by:** P3 DCLF graph textures (2026-11-09); P3 DCLF publish (2026-11-09).
 
 ### Render to texture
 
