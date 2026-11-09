@@ -4,6 +4,7 @@
 
 #include "Buffer.h"
 #include "Effects11.h"
+#include "Features/HDRDisplay/ORGHDRDisplay.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
 #include "LinearLighting.h"
@@ -659,6 +660,7 @@ void HDRDisplay::PostPostLoad()
 	}
 
 	stl::detour_thunk<HDR_Movie_Draw>(REL::RelocationID(87907, 90279));
+	ORGHDRDisplay::Reserve();
 }
 
 void HDRDisplay::SetupResources()
@@ -1115,7 +1117,8 @@ HRESULT HDRDisplay::HandleSwapChainPresent(
 void HDRDisplay::ClearUIBuffer()
 {
 	auto* context = globals::d3d::context;
-	if (context && uiTexture && uiTexture->rtv) {
+	// The graph cleared it after this frame's composite (ORGHDRDisplay).
+	if (context && uiTexture && uiTexture->rtv && !ORGHDRDisplay::Get().TakeUIClear()) {
 		float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 		context->ClearRenderTargetView(uiTexture->rtv.get(), clearColor);
 	}
@@ -1178,17 +1181,17 @@ void HDRDisplay::ApplyHDR()
 			return;
 		}
 
-		DispatchHDROutput(sceneSRV, uiSRV, outputTexture->uav.get());
-	}
+		// The owned frame presents the output itself, with no copy into the guest's back buffer.
+		winrt::com_ptr<ID3D11Texture2D> backBuffer;
+		if (!RenderGraph::Engine::OwnedFrame::Get().SetFrameSource(outputTexture->resource.get()))
+			globals::d3d::swapChain->GetBuffer(0, IID_PPV_ARGS(backBuffer.put()));
 
-	// The owned frame presents the output itself, with no copy into the guest's back buffer.
-	if (!RenderGraph::Engine::OwnedFrame::Get().SetFrameSource(outputTexture->resource.get())) {
-		ID3D11Texture2D* backBuffer = nullptr;
-		HRESULT hr = globals::d3d::swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
-		if (SUCCEEDED(hr) && backBuffer) {
-			context->CopyResource(backBuffer, outputTexture->resource.get());
-			backBuffer->Release();
-		}
+		// CS_ORG_HDR_DISPLAY: the composite, and the copy when it can, on the render graph. Else D3D11.
+		const auto composed = ORGHDRDisplay::Get().Compose(BuildHDRData(), backBuffer.get());
+		if (composed == ORGHDRDisplay::Composed::None)
+			DispatchHDROutput(sceneSRV, uiSRV, outputTexture->uav.get());
+		if (backBuffer && composed != ORGHDRDisplay::Composed::OutputAndBackBuffer)
+			context->CopyResource(backBuffer.get(), outputTexture->resource.get());
 	}
 
 	RestoreCleanScene();
@@ -1476,6 +1479,7 @@ void HDRDisplay::RestoreLDRRenderTargets()
 void HDRDisplay::ClearShaderCache()
 {
 	patchedBlendStateCache.clear();
+	ORGHDRDisplay::Get().ClearShaderCache();
 	if (hdrOutputCS) {
 		hdrOutputCS->Release();
 		hdrOutputCS = nullptr;
