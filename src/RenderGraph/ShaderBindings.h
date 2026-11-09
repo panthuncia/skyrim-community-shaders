@@ -6,6 +6,7 @@
 #	include <rhi.h>
 
 #	include <cstdint>
+#	include <memory>
 #	include <span>
 #	include <type_traits>
 
@@ -57,6 +58,14 @@ namespace ShaderBindings
 	 * active. Empty, logged, when there is no descriptor service or the backend cannot create the sampler.
 	 */
 	org::OwnedDescriptorBinding CreateSampler(const rhi::SamplerDesc& a_desc);
+
+	/**
+	 * @brief A shader resource view of a resource the graph does not track (a_resource stays alive through a_owner), in the graph's
+	 * descriptor heap: its Index() is the handle. The descriptor names the resource's shader-read layout, so the caller keeps the
+	 * resource there whenever a shader may read it. Render thread, with the runtime active. Empty, logged, when there is no
+	 * descriptor service or the backend cannot create the view.
+	 */
+	org::OwnedDescriptorBinding CreateShaderResourceView(rhi::Resource a_resource, std::shared_ptr<const void> a_owner, const rhi::SrvDesc& a_desc);
 }
 
 #endif

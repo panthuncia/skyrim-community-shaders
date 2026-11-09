@@ -16,18 +16,24 @@
 
 namespace ShaderBindings
 {
+	namespace
+	{
+		/** @brief The active service inside a graph callback, else the host graph's (setup, on the render thread); null without one. */
+		org::runtime::IDescriptorService* Service(std::shared_ptr<org::runtime::IDescriptorService>& a_retained)
+		{
+			if (auto* service = org::runtime::GetActiveDescriptorService())
+				return service;
+			auto* host = RenderGraphRuntime::Get().Host();
+			if (host && host->Graph())
+				a_retained = host->Graph()->RetainDescriptorService();
+			return a_retained.get();
+		}
+	}
+
 	org::OwnedDescriptorBinding CreateSampler(const rhi::SamplerDesc& a_desc)
 	{
-		// The active service inside a graph callback, else the host graph's (setup, on the render thread).
 		std::shared_ptr<org::runtime::IDescriptorService> retained;
-		auto* service = org::runtime::GetActiveDescriptorService();
-		if (!service) {
-			auto* host = RenderGraphRuntime::Get().Host();
-			if (host && host->Graph()) {
-				retained = host->Graph()->RetainDescriptorService();
-				service = retained.get();
-			}
-		}
+		auto* service = Service(retained);
 		if (!service) {
 			logger::warn("[ORG] A sampler was asked for without a descriptor service");
 			return {};
@@ -39,6 +45,25 @@ namespace ShaderBindings
 			return binding;
 		} catch (const std::exception& e) {
 			logger::error("[ORG] The backend could not create a sampler: {}", e.what());
+			return {};
+		}
+	}
+
+	org::OwnedDescriptorBinding CreateShaderResourceView(rhi::Resource a_resource, std::shared_ptr<const void> a_owner, const rhi::SrvDesc& a_desc)
+	{
+		std::shared_ptr<org::runtime::IDescriptorService> retained;
+		auto* service = Service(retained);
+		if (!service) {
+			logger::warn("[ORG] A shader resource view was asked for without a descriptor service");
+			return {};
+		}
+		try {
+			auto binding = service->CreateOwnedShaderResourceView(RenderGraphRuntime::Get().DeviceOwner(), a_resource, std::move(a_owner), a_desc);
+			if (!binding)
+				logger::error("[ORG] The backend could not create a shader resource view");
+			return binding;
+		} catch (const std::exception& e) {
+			logger::error("[ORG] The backend could not create a shader resource view: {}", e.what());
 			return {};
 		}
 	}
