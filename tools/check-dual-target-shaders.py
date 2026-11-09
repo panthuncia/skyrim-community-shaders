@@ -21,6 +21,7 @@ DEFAULT_SHADERS = [
     "tests/Shaders/OrgResourcesSampleCS.hlsl",
     "tests/Shaders/OrgSharedConstantsSampleCS.hlsl",
     "features/IBL/Shaders/IBL/DiffuseIBLCS.hlsl",
+    "features/Grass Collision/Shaders/GrassCollision/CollisionUpdateCS.hlsl",
 ]
 MAX_PUSH_BYTES = 128
 

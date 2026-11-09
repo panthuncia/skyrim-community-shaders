@@ -1,4 +1,5 @@
 #include "GrassCollision.h"
+#include "GrassCollision/ORGGrassCollision.h"
 
 #include "Globals.h"
 #include "GrassShared/GrassFrame.h"
@@ -15,6 +16,21 @@ static constexpr uint MAX_COLLISIONS = MAX_BOUNDING_BOXES * MAX_COLLISIONS_PER_B
 static constexpr float MAX_ACTOR_DISTANCE = 2048.0f;
 static constexpr float MAX_ACTOR_SQ_DISTANCE = MAX_ACTOR_DISTANCE * MAX_ACTOR_DISTANCE;
 static constexpr float MIN_COLLISION_RADIUS_DISTANCE_SCALE = 0.001f;
+
+// The collision texture: 512x512 cells of 8 units (4096 units across), RGBA16F.
+static D3D11_TEXTURE2D_DESC CollisionTextureDesc()
+{
+	return {
+		.Width = 512,
+		.Height = 512,
+		.MipLevels = 1,
+		.ArraySize = 1,
+		.Format = DXGI_FORMAT_R16G16B16A16_FLOAT,
+		.SampleDesc = { .Count = 1 },
+		.Usage = D3D11_USAGE_DEFAULT,
+		.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS
+	};
+}
 
 struct GrassCollisionActorCandidate
 {
@@ -153,47 +169,56 @@ void GrassCollision::QueueCollisions()
 	queuedCollisions = std::move(collisionsData);
 }
 
+GrassCollision::PerFrame GrassCollision::NextPerFrame(const RE::NiPoint3& a_eye)
+{
+	PerFrame perFrameData{};
+
+	auto eyePosNI = a_eye;
+	if (!std::exchange(hasPrevEye, true))
+		prevEyePos = eyePosNI;
+
+	auto eyePos = float2{ eyePosNI.x, eyePosNI.y };
+
+	float worldSize = 4096.0f;
+	uint textureArrayDims = 512;
+
+	float cellSize = worldSize / textureArrayDims;
+
+	auto cellID = eyePos / cellSize;
+	cellID = { round(cellID.x), round(cellID.y) };
+	auto cellOrigin = cellID * cellSize;
+
+	float2 cellIDDiff = prevCellID - cellID;
+	prevCellID = cellID;
+
+	perFrameData.PosOffset = cellOrigin - eyePos;
+
+	perFrameData.ArrayOrigin = {
+		((int)cellID.x - textureArrayDims / 2) % textureArrayDims,
+		((int)cellID.y - textureArrayDims / 2) % textureArrayDims
+	};
+
+	perFrameData.ValidMargin = { (int)cellIDDiff.x, (int)cellIDDiff.y };
+
+	perFrameData.TimeDelta = *globals::game::deltaTime * !globals::game::ui->GameIsPaused();
+
+	perFrameData.CameraHeightDelta = prevEyePos.z - eyePosNI.z;
+
+	perFrameData.BoundingBoxCount = std::min((uint)queuedBoundingBoxes.size(), MAX_BOUNDING_BOXES);
+
+	prevEyePos = eyePosNI;
+	return perFrameData;
+}
+
 void GrassCollision::Update(const RE::NiPoint3& a_eye)
 {
 	static Util::FrameChecker frameChecker;
 	if (frameChecker.IsNewFrame()) {
-		PerFrame perFrameData{};
+		if (!collisionTexture)
+			return;
 
-		perFrameData.BoundingBoxCount = 0;
-
-		static float2 prevCellID = { 0, 0 };
-
-		auto eyePosNI = a_eye;
-		static auto prevEyePosNI = eyePosNI;
-
-		auto eyePos = float2{ eyePosNI.x, eyePosNI.y };
-
-		float worldSize = 4096.0f;
-		uint textureArrayDims = 512;
-
-		float cellSize = worldSize / textureArrayDims;
-
-		auto cellID = eyePos / cellSize;
-		cellID = { round(cellID.x), round(cellID.y) };
-		auto cellOrigin = cellID * cellSize;
-
-		float2 cellIDDiff = prevCellID - cellID;
-		prevCellID = cellID;
-
-		perFrameData.PosOffset = cellOrigin - eyePos;
-
-		perFrameData.ArrayOrigin = {
-			((int)cellID.x - textureArrayDims / 2) % textureArrayDims,
-			((int)cellID.y - textureArrayDims / 2) % textureArrayDims
-		};
-
-		perFrameData.ValidMargin = { (int)cellIDDiff.x, (int)cellIDDiff.y };
-
-		perFrameData.TimeDelta = *globals::game::deltaTime * !globals::game::ui->GameIsPaused();
-
-		perFrameData.CameraHeightDelta = prevEyePosNI.z - eyePosNI.z;
-
-		perFrameData.BoundingBoxCount = std::min((uint)queuedBoundingBoxes.size(), MAX_BOUNDING_BOXES);
+		const PerFrame perFrameData = NextPerFrame(a_eye);
+		LogColliders("D3D11");
 
 		auto context = globals::d3d::context;
 
@@ -220,9 +245,6 @@ void GrassCollision::Update(const RE::NiPoint3& a_eye)
 		lastPerFrame = perFrameData;
 
 		UpdateCollisionTexture();
-
-		prevCellID = cellID;
-		prevEyePosNI = eyePosNI;
 
 		ID3D11Buffer* buffers[1];
 		buffers[0] = perFrame->CB();
@@ -252,39 +274,106 @@ void GrassCollision::PostPostLoad()
 {
 	Hooks::Install();
 	GrassShared::OnStoodDownFrame(&GrassCollision::StoodDownUpdate);
+	ORGGrassCollision::Reserve();
+}
+
+ID3D11ShaderResourceView* GrassCollision::CollisionSRV() const
+{
+	if (auto* view = ORGGrassCollision::Get().CollisionSRV())
+		return view;
+	return collisionTexture ? collisionTexture->srv.get() : nullptr;
+}
+
+void GrassCollision::PublishCollision() const
+{
+	static_assert(sizeof(PerFrame) <= sizeof(GrassShared::Collision::perFrame));
+	GrassShared::Collision published;
+	published.texture = CollisionSRV();
+	std::memcpy(published.perFrame.data(), &lastPerFrame, sizeof(PerFrame));
+	published.frame = globals::game::graphicsState->frameCount;
+	GrassShared::PublishCollision(published);
+}
+
+void GrassCollision::LogColliders(const char* a_path) const
+{
+	static const bool requested = [] {
+		char value[8]{};
+		return GetEnvironmentVariableA("CS_GRASS_COLLISION_STATS", value, sizeof(value)) && std::strcmp(value, "1") == 0;
+	}();
+	const auto frame = globals::game::graphicsState->frameCount;
+	if (!requested || frame % 120 != 0)
+		return;
+	logger::info("[GRASS COLLISION] frame {} ({}): {} colliders, {} collision shapes", frame, a_path,
+		std::min((uint)queuedBoundingBoxes.size(), MAX_BOUNDING_BOXES), queuedCollisions.size());
 }
 
 void GrassCollision::StoodDownUpdate(const GrassShared::StoodDownFrame& a_frame)
 {
 	auto& self = globals::features::grassCollision;
-	if (!self.collisionTexture || !self.perFrame)
+	// The render graph's path updates and publishes at EarlyPrepass, before DCLF's depth commit reads what is published.
+	if (!self.collisionTexture || !self.perFrame || ORGGrassCollision::Get().IsActive())
 		return;
 
 	self.Update(RE::NiPoint3(a_frame.eye[0], a_frame.eye[1], a_frame.eye[2]));
+	self.PublishCollision();
+}
 
-	static_assert(sizeof(PerFrame) <= sizeof(GrassShared::Collision::perFrame));
-	GrassShared::Collision published;
-	published.texture = self.collisionTexture->srv.get();
-	std::memcpy(published.perFrame.data(), &self.lastPerFrame, sizeof(PerFrame));
-	published.frame = globals::game::graphicsState->frameCount;
-	GrassShared::PublishCollision(published);
+void GrassCollision::EarlyPrepass()
+{
+	auto& graph = ORGGrassCollision::Get();
+	if (!graph.IsActive() || !perFrame)
+		return;
+
+	// The main view's eye: posAdjust holds the last shadow pass's here (GrassShared::StoodDownFrame).
+	auto* camera = RE::Main::WorldRootCamera();
+	if (!camera)
+		return;
+	const PerFrame perFrameData = NextPerFrame(camera->world.translate);
+	LogColliders("ORG");
+
+	// Disabled: no colliders, and every cell new, so the update writes zero everywhere as the D3D11 path's clear does.
+	PerFrame latched = perFrameData;
+	if (!settings.EnableGrassCollision) {
+		latched.BoundingBoxCount = 0;
+		latched.ValidMargin = { 512, 512 };
+	}
+	const size_t collisions = std::min(queuedCollisions.size(), (size_t)MAX_COLLISIONS);
+	graph.Stage({ .perFrame = std::as_bytes(std::span(&latched, 1)),
+		.boxes = std::as_bytes(std::span(queuedBoundingBoxes.data(), latched.BoundingBoxCount)),
+		.instances = std::as_bytes(std::span(queuedCollisions.data(), latched.BoundingBoxCount ? collisions : 0)) });
+
+	queuedBoundingBoxes.clear();
+	queuedCollisions.clear();
+
+	// The engine's grass reads these from its first SetupGeometry of the frame; DCLF's grass from the depth commit.
+	perFrame->Update(perFrameData);
+	lastPerFrame = perFrameData;
+	if (GrassShared::DclfOwned())
+		PublishCollision();
 }
 
 void GrassCollision::SetupResources()
 {
 	perFrame = new ConstantBuffer(ConstantBufferDesc<PerFrame>(), "GrassCollision::PerFrameCB");
 
+	const ORGGrassCollision::Limits limits{ .perFrameBytes = sizeof(PerFrame),
+		.maxBoxes = MAX_BOUNDING_BOXES,
+		.boxStride = sizeof(BoundingBoxPacked),
+		.maxInstances = MAX_COLLISIONS,
+		.instanceStride = sizeof(float4),
+		.texture = CollisionTextureDesc() };
+	// The render graph's collision texture replaces the D3D11 one; on a later graph failure the D3D11 path makes its own.
+	if (!ORGGrassCollision::Get().Setup(limits, [this] { CreateD3D11Resources(); }))
+		CreateD3D11Resources();
+}
+
+void GrassCollision::CreateD3D11Resources()
+{
+	if (collisionTexture)
+		return;
+
 	{
-		D3D11_TEXTURE2D_DESC texDesc = {
-			.Width = 512,
-			.Height = 512,
-			.MipLevels = 1,
-			.ArraySize = 1,
-			.Format = DXGI_FORMAT_R16G16B16A16_FLOAT,
-			.SampleDesc = { .Count = 1 },
-			.Usage = D3D11_USAGE_DEFAULT,
-			.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS
-		};
+		const D3D11_TEXTURE2D_DESC texDesc = CollisionTextureDesc();
 
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
 			.Format = texDesc.Format,
@@ -360,7 +449,19 @@ void GrassCollision::Hooks::MainUpdate_QueueCollisions::thunk()
 
 void GrassCollision::Hooks::BSGrassShader_SetupGeometry::thunk(RE::BSShader* This, RE::BSRenderPass* Pass, uint32_t RenderFlags)
 {
-	globals::features::grassCollision.Update(Util::GetEyePosition());
+	auto& self = globals::features::grassCollision;
+	if (ORGGrassCollision::Get().IsActive()) {
+		// The render graph updated the texture at EarlyPrepass: bind it and its constants for the frame's grass.
+		static Util::FrameChecker frameChecker;
+		if (frameChecker.IsNewFrame() && self.perFrame) {
+			auto context = globals::d3d::context;
+			ID3D11Buffer* buffers[1] = { self.perFrame->CB() };
+			context->VSSetConstantBuffers(5, ARRAYSIZE(buffers), buffers);
+			ID3D11ShaderResourceView* srvs[] = { self.CollisionSRV() };
+			context->VSSetShaderResources(100, ARRAYSIZE(srvs), srvs);
+		}
+	} else
+		self.Update(Util::GetEyePosition());
 	func(This, Pass, RenderFlags);
 }
 

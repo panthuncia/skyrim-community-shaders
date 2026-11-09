@@ -81,8 +81,17 @@ public:
 
 	Texture2D* collisionTexture = nullptr;
 
-	/** @brief Creates the collision texture, structured buffers for bounding boxes and collision instances. */
+	/**
+	 * @brief Creates the per-frame constant buffer, then the collision update's resources: the render graph's (CS_ORG_GRASS_COLLISION=1,
+	 * ORGGrassCollision), else the D3D11 collision texture and structured buffers.
+	 */
 	virtual void SetupResources() override;
+
+	/**
+	 * @brief On the render graph's path: this frame's per-frame values and colliders, staged for the EarlyPrepass anchor that runs right
+	 * after, the constant buffer the engine's grass reads updated, and the state published for DCLF's grass.
+	 */
+	virtual void EarlyPrepass() override;
 
 	/** @brief Draws the ImGui settings UI for grass collision options. */
 	virtual void DrawSettings() override;
@@ -100,6 +109,25 @@ public:
 	 * (a_eye the frame's, from GrassShared).
 	 */
 	void Update(const RE::NiPoint3& a_eye);
+
+	/** @brief The frame's per-frame values for a_eye; advances the clipmap origin and eye height kept from the last call. */
+	PerFrame NextPerFrame(const RE::NiPoint3& a_eye);
+
+	/** @brief The collision texture's view the grass reads: the render graph's export while it runs the update, else the D3D11 texture's. */
+	ID3D11ShaderResourceView* CollisionSRV() const;
+
+	/** @brief Publishes the collision texture and lastPerFrame for DCLF's grass draws (GrassShared). */
+	void PublishCollision() const;
+
+	/** @brief Logs the colliders of the frame every 120 frames when CS_GRASS_COLLISION_STATS=1. */
+	void LogColliders(const char* a_path) const;
+
+	/** @brief The D3D11 path's collision texture and structured buffers: at setup, or when the render graph's path fails. */
+	void CreateD3D11Resources();
+
+	float2 prevCellID = { 0, 0 };
+	RE::NiPoint3 prevEyePos{};
+	bool hasPrevEye = false;
 
 	/** @brief GrassShared stood-down callback, on frames DCLF owns grass and no grass SetupGeometry runs: updates the
 	    collision texture and publishes it with its constants for DCLF's grass draws. */
