@@ -212,6 +212,9 @@ Each anchor's rule:
   DCLF's `BeforePresent` and the frame pace signal. ImGui has built its frame. Before HDR output and frame generation. It runs
   only on frames where CS's overlay draws (the menu, an editor, notifications, the performance overlay), not every frame. The
   target is the render target bound for the overlay: the framebuffer, or HDR's UI texture when HDR composites the UI.
+- **Capture.** At the end of HDRDisplay's present chain (`ScreenshotFeature::ProcessCaptureRequest`), just before the native
+  Present or frame generation's present. After Overlay and HDR output: the back buffer (or the owned frame's source) holds
+  what the display will show. Reserved only by the Screenshot feature's ORG path (`CS_ORG_SCREENSHOT=1`) and the self-test.
 
 Keys used so far:
 
@@ -225,6 +228,7 @@ Keys used so far:
 - Light Limit Fix's local shadow cache (`CS_ORG_LLF_SHADOWS`): 100 (slot data) and 101 (shadow map copy) at EarlyPrepass.
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
 - CS's ImGui (`CS_ORG_IMGUI`): 1000 at Overlay, last.
+- The Screenshot feature (`CS_ORG_SCREENSHOT`): 100 (the readback copy) at Capture.
 - The DCLF graph texture test (`CS_DCLF_GRAPH_TEXTURE_TEST`): 0 at Prepass.
 - Subsurface Scattering (`CS_ORG_SUBSURFACE_SCATTERING`): 199 (Burley clear), 200 (extraction), 201 (horizontal or Burley
   blur) and 202 (vertical blur) at DeferredPasses. SSGI's passes there stay below 199, as the D3D11 order is SSGI first.
