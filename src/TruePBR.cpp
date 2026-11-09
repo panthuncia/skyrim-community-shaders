@@ -4,6 +4,7 @@
 
 #include "TruePBR/BSLightingShaderMaterialPBR.h"
 #include "TruePBR/BSLightingShaderMaterialPBRLandscape.h"
+#include "TruePBR/ORGGlintsNoise.h"
 
 #include "Features/InteriorSun.h"
 #include "Features/LinearLighting.h"
@@ -391,10 +392,27 @@ void TruePBR::Prepass()
 	SetupDefaultPBRLandTextureSet();
 
 	auto context = globals::d3d::context;
-	if (!glintsNoiseTexture)
-		SetupGlintsTexture();
-	ID3D11ShaderResourceView* srv = glintsNoiseTexture->srv.get();
+	// On the ORG path the noise was filled at the EarlyPrepass anchor, earlier this frame.
+	const auto& orgNoise = ORGGlintsNoise::Get();
+	ID3D11ShaderResourceView* srv = orgNoise.NoiseSRV();
+	if (!srv) {
+		if (!glintsNoiseTexture)
+			SetupGlintsTexture();
+		srv = glintsNoiseTexture->srv.get();
+	}
 	context->PSSetShaderResources(20, 1, &srv);
+}
+
+void TruePBR::EarlyPrepass()
+{
+	ORGGlintsNoise::Get().Update();
+}
+
+ID3D11ShaderResourceView* TruePBR::GlintsNoiseSRV() const
+{
+	if (auto* srv = ORGGlintsNoise::Get().NoiseSRV())
+		return srv;
+	return glintsNoiseTexture ? glintsNoiseTexture->srv.get() : nullptr;
 }
 
 void TruePBR::SetupGlintsTexture()
@@ -1939,6 +1957,8 @@ void TruePBR::PostPostLoad()
 
 	logger::info("[TruePBR] Hooking BSLightingShader::SetupMaterial");
 	stl::write_vfunc<0x4, PBR_BSLightingShader_SetupMaterial>(RE::VTABLE_BSLightingShader[0]);
+
+	ORGGlintsNoise::Reserve();
 }
 
 void TruePBR::DataLoaded()
