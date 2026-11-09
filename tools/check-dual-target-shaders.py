@@ -19,6 +19,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SHADERS = [
     "tests/Shaders/OrgResourcesSampleCS.hlsl",
+    "features/IBL/Shaders/IBL/DiffuseIBLCS.hlsl",
 ]
 MAX_PUSH_BYTES = 128
 
@@ -98,7 +99,7 @@ def push_bytes(dxc, dxil):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("shaders", nargs="*", help="Shader paths, repo-relative or absolute (default: the sample)")
+    parser.add_argument("shaders", nargs="*", help="Shader paths, repo-relative or absolute (default: the sample and DiffuseIBLCS)")
     parser.add_argument("--dxc", help="dxc.exe (default: the Vulkan SDK's)")
     parser.add_argument("--fxc", help="fxc.exe (default: the newest Windows SDK's)")
     parser.add_argument("--spirv-val", help="spirv-val.exe (default: beside dxc.exe, when present)")
