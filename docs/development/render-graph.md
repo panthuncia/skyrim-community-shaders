@@ -252,10 +252,57 @@ stream order, on its own command buffer, outside any render pass. DCLF's CPU-dri
 
 -   **Graph outputs** (LLF's `lightIndexList`, `lightGrid`) are graph-owned buffers. D3D11 reads them
     through wrappers from `dxvkCreateBufferFromVkBuffer`. DXVK never renames, relocates or maps a
-    wrapped buffer, and only `D3D11_USAGE_DEFAULT` without CPU access is accepted.
+    wrapped buffer, and only `D3D11_USAGE_DEFAULT` without CPU access is accepted. Graph textures D3D11 still reads are
+    wrapped the same way by `dxvkCreateTextureFromVkImage` (below, "Graph-backed feature resources").
 -   **Game or DXVK resources** are not pinned or otherwise changed. Inputs the graph needs are either
     uploaded as copies (LLF's light list) or, for future passes, imported each epoch with the handle DXVK
     currently uses.
+
+## Graph-backed feature resources
+
+`src/RenderGraph/GraphResources.h` has graph twins of `Buffer.h`'s wrappers for ported features: `Texture2D`, `Texture3D`,
+`StructuredBuffer` and `Buffer`. Constant buffers have none: a pass's constants are a `LatchBlock` or push constants.
+
+-   **Graph side.** Each twin owns an ORG resource named as the D3D11 wrapper names its resource, `Feature::Name` (ORG reads the
+    `::` as namespaces). The client registers it in `registerResources` (`tex.Register(graph)`), and its passes declare `Graph()`.
+-   **Lifetime.** `Options::lifetime` is `Transient`, `History` or `Persistent` (org-aliasing-port-priorities.md, "Lifetime
+    classes"). A transient resource is aliasable: an unmaterialized `PixelBuffer` or buffer with `allowAlias`, placed by the graph.
+    Its first use in each frame must be a write. The others are materialized when made.
+-   **D3D11 export.** `Options::d3d11` (`Export::SRV`, `UAV`, `RTV`) adds D3D11 views of the same memory for readers not ported
+    yet: an engine draw that binds the output as a PS SRV, or another feature. They are named `Feature::Name SRV` / `UAV` / `RTV`
+    (`Util::SetResourceName`), the texture or buffer `Feature::Name (D3D11)`.
+    -   A buffer goes through `RenderGraphRuntime::WrapBuffer`.
+    -   A texture is a BasicRHI image wrapped by `RenderGraphRuntime::WrapTexture` (`dxvkCreateTextureFromVkImage`, interop
+        version 6). The graph sees it as a host-owned texture whose home state is the layout DXVK rests it in, so every epoch gives
+        it back in that layout, as for DXVK's own images (DxvkImageImport). DXVK zeroes it in its stream when it is wrapped.
+    -   The image has no mutable format, so D3D11 views use the texture's own typed format. 3D textures take no RTV.
+-   **Rule: exported means not aliasable**, whatever the lifetime. D3D11's use is outside the graph, which would otherwise reuse
+    the memory across it. A resource becomes aliasable when its last D3D11 reader is ported and the export goes.
+-   **Teardown and resize.** `Reset`, the destructor and `Resize` release the D3D11 views and resource first. Then
+    `RenderGraphRuntime::ReleaseAfterD3D11` holds the graph resource until an event query issued after that release completes
+    (checked every frame). DXVK keeps its own objects alive for in-flight work, but not the image's memory, which the graph owns.
+    After a `Resize` the owner calls `FrameAnchors::Refresh(id)`: its anchors' graphs are built again with the new resource. A pass
+    reads `Graph()` when it is made, never across builds.
+
+```cpp
+// A transient output written at DeferredPasses and bound by engine draws as a PS SRV until P5.
+GraphResources::Texture2D out(desc /* RGBA16F, SRV | UAV */, "MyFeature::Output",
+	{ .lifetime = GraphResources::Lifetime::Transient, .d3d11 = GraphResources::Export::SRV });
+FrameAnchors::Register({ .id = "cs.myfeature",
+	.passes = { { .name = "cs.myfeature.resolve", .anchor = FrameAnchors::Anchor::DeferredPasses, .order = 100,
+		.kind = FrameAnchors::PassKind::Compute, .make = [&] { return std::make_shared<MyPass>(out.Graph(), program); } } },
+	.registerResources = [&](org::RenderGraph& g) { out.Register(g); } });
+// Later in the frame, the D3D11 reader:
+ID3D11ShaderResourceView* srv = out.SRV();
+context->PSSetShaderResources(45, 1, &srv);
+// At a resolution change:
+if (out.Resize(width, height))
+	FrameAnchors::Refresh("cs.myfeature");
+```
+
+`CS_ORG_GRAPHRES_SELFTEST=1` proves the path: a compute pass at DeferredPasses writes an exported texture, D3D11 copies it into
+a staging texture right after the epoch and reads one texel back, then the texture is resized (the first one released through
+`ReleaseAfterD3D11`) and checked again.
 
 ## GPU timing in the profiling window
 
@@ -422,6 +469,7 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 | `CS_ORG_SUBMIT=flush` | Use the flush-and-lock submission path even when DXVK supports the stream path. |
 | `CS_ORG_LLF_PARITY=1` | Every 300 frames, also run LLF's D3D11 culling and compare each cluster's light set with the graph's (logs `LLF parity OK` / `MISMATCH`). |
 | `CS_ORG_ANCHOR_SELFTEST=1` | Reserve every frame anchor and run a test client at each: a raster pass writes a texture, a compute pass reads it and one texel of kMAIN into a buffer, and a copy reads that back. Each anchor logs `[ORG] anchor self-test: <anchor> OK` once, then `every anchor OK`. |
+| `CS_ORG_GRAPHRES_SELFTEST=1` | Reserve DeferredPasses and test the graph-backed resources there (above, "Graph-backed feature resources"). Logs `[ORG] graph resource self-test: 16x16 OK ...`, then `resized to 32x32`, `32x32 OK ...` and `every check OK; the texture is released`; `MISMATCH` otherwise. |
 | `CS_ORG_EPOCH_STATS=1` | Log render-thread CPU time per epoch (average and maximum every 600 epochs). |
 | `CS_ORG_ASYNC_EPOCHS=0` | Run the epochs synchronously. By default each epoch is prepared and recorded ahead on the graph host's thread, and the render thread only admits and submits ("Revisions and recordings" in `dclf-architecture.md`). |
 | `CS_ORG_IN_STREAM=0` | Enqueue the async epochs' batches behind DXVK's command list (`dxvkEnqueueInteropSubmission`) instead of running their graphics work inside it. A list such as `0,3` keeps only those epochs in the stream. |

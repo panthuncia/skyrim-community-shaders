@@ -9,6 +9,7 @@
 #	include "Globals.h"
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/FrameAnchorSelfTest.h"
+#	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -412,6 +413,14 @@ namespace FrameAnchors
 		Rebuild(state, mask);
 	}
 
+	void Refresh(std::string_view a_id)
+	{
+		auto& state = Anchors();
+		const auto existing = std::ranges::find_if(state.clients, [&](const auto& a_other) { return a_other->id == a_id; });
+		if (existing != state.clients.end())
+			Rebuild(state, AnchorMask(**existing));
+	}
+
 	bool Run(const Point& a_point)
 	{
 		auto& state = Anchors();
@@ -422,6 +431,7 @@ namespace FrameAnchors
 		if (!runtime.IsActive())
 			return false;
 		SelfTest::Ensure();
+		GraphResources::SelfTest::Ensure();
 		// The clients with work here this frame; none, no epoch.
 		std::vector<std::shared_ptr<const ClientDesc>> active;
 		for (const auto& client : state.clients)
@@ -445,6 +455,8 @@ namespace FrameAnchors
 			globals::features::upscaling.SeparateFromGraphEpochs();
 		if (ran) {
 			SelfTest::AfterRun(a_point.anchor);
+			if (a_point.anchor == Anchor::DeferredPasses)
+				GraphResources::SelfTest::AfterRun();
 			return true;
 		}
 		// The graph failed and stopped (ExecuteEpoch logged why): every client returns to its D3D11 path.
@@ -486,6 +498,8 @@ namespace FrameAnchors
 		if (!state.frozen && SelfTest::Requested())
 			for (std::uint32_t i = 0; i < kAnchors; ++i)
 				state.reserved[i] = true;
+		if (!state.frozen && GraphResources::SelfTest::Requested())
+			state.reserved[IndexOf(Anchor::DeferredPasses)] = true;
 		state.frozen = true;
 		for (std::uint32_t i = 0; i < kAnchors; ++i) {
 			if (!state.reserved[i])
@@ -531,6 +545,7 @@ namespace FrameAnchors
 	bool HasEpoch(Anchor) { return false; }
 	bool Register(ClientDesc) { return false; }
 	void Unregister(std::string_view) {}
+	void Refresh(std::string_view) {}
 	bool Run(const Point&) { return false; }
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t) { return nullptr; }

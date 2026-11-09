@@ -141,6 +141,12 @@ namespace FrameAnchors
 	void Unregister(std::string_view a_id);
 
 	/**
+	 * @brief The client's anchors' graphs built again at their next execution, with its passes and resources as they are then: after
+	 * the client replaced a resource it registers (a resize, GraphResources). Render thread. Nothing when the id is unknown.
+	 */
+	void Refresh(std::string_view a_id);
+
+	/**
 	 * @brief The hook: runs the anchor's epoch at this point of the D3D11 stream when it has an active client. After the late
 	 * anchors (PostProcessing, Tonemap, Present) it separates the epoch from external Vulkan work that may follow
 	 * (Upscaling::SeparateFromGraphEpochs; render-graph.md, "Hazard: external Vulkan work directly after a graph epoch").
