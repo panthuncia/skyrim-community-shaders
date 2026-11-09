@@ -45,6 +45,7 @@ namespace FrameAnchors
 		EarlyPrepass,        // Main::RenderShadowMaps returned, after the features' EarlyPrepass (Deferred::EarlyPrepasses)
 		Prepass,             // the main pass's first opaque batch, after the features' Prepass (Deferred::PrepassPasses)
 		DeferredPasses,      // the opaque pass done, after the final depth copy, before the D3D11 SSGI, SSS and composite
+		DeferredComposite,   // after the D3D11 SSGI, SSS and cubemap update, where the deferred composite runs
 		PostProcessing,      // Main_PostProcessing, before the D3D11 post-processing and the upscaler
 		Tonemap,             // the ImageSpace HDR tonemap's render, before Effects11 and Post Processing replace or follow it
 		Present,             // IDXGISwapChain::Present, before the overlay, HDR output and frame generation
@@ -107,6 +108,8 @@ namespace FrameAnchors
 	 *   anchor submits nothing. Null: always active. An inactive client's passes still run when another client keeps the epoch:
 	 *   a pass with nothing to do records nothing (its Prepare returns empty frame data).
 	 * - onFailed: the graph failed and stopped. The client is unregistered; it returns to its D3D11 path.
+	 * - sharedConstants: the client's passes read CS's shared constant buffers (SharedConstants.h). Each of its anchors' epochs
+	 *   then writes their values at the hook and uploads them before the anchor's first pass.
 	 */
 	struct ClientDesc
 	{
@@ -116,6 +119,7 @@ namespace FrameAnchors
 		std::function<void(const Point&)> commit;
 		std::function<bool()> active;
 		std::function<void()> onFailed;
+		bool sharedConstants = false;
 	};
 
 	/** @brief An anchor's name, as the logs and docs give it ("DeferredPasses"). */
@@ -132,7 +136,8 @@ namespace FrameAnchors
 
 	/**
 	 * @brief Registers (or replaces) a client. Render thread, with the runtime active. False, logged, when the runtime is not active,
-	 * a pass names an anchor without an epoch, a pass has no name or no make, or a name repeats. The anchors' graphs are built again
+	 * a pass names an anchor without an epoch, a pass has no name or no make, a name repeats, or the client reads the shared
+	 * constants and they cannot be made. The anchors' graphs are built again
 	 * at their next execution.
 	 */
 	bool Register(ClientDesc a_client);
