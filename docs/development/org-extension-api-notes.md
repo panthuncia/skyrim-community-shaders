@@ -46,6 +46,23 @@ One entry per need. Give:
 - **Where it fits:** an ORG texture with an upload, handed to the engine as a tripwire handle that wraps it (P4.1, P4.3).
 - **Found by:** survey for the plan (2026-11-09).
 
+### Sharing graph resources with D3D11 code
+
+- **Need:** a plugin's pass writes a texture or buffer that D3D11 code still reads (its own, or an engine draw it feeds), or
+  reads a CS feature's graph output from D3D11.
+- **Who:** any plugin moved to the frame anchors while part of it stays on D3D11.
+- **Where it fits:** CS's graph-backed resources (`src/RenderGraph/GraphResources.h`; render-graph.md, "Graph-backed feature
+  resources"). An exported API needs the same rules:
+    - an exported resource is never aliased;
+    - its D3D11 views go before its memory, and the memory waits for D3D11's last use (CS's `ReleaseAfterD3D11`);
+    - a texture rests in DXVK's layout for it between epochs, and its views use its own typed format;
+    - a resize rebuilds the client's anchors (`FrameAnchors::Refresh`).
+
+  The DXVK exports underneath are `dxvkCreateBufferFromVkBuffer` and `dxvkCreateTextureFromVkImage` (interop version 6). A plugin
+  that calls them itself must create images with every usage the D3D11 bind flags imply. In the DXVK-free build there is no
+  D3D11 side, so the export becomes a tripwire handle (P4.1).
+- **Found by:** P2.1 (2026-11-09).
+
 ### Render to texture
 
 - **Need:** render into a texture the engine later samples on a character.
@@ -105,3 +122,4 @@ Each anchor's rule:
 Keys used so far:
 
 - The anchor self-test (`CS_ORG_ANCHOR_SELFTEST`): 0, 1 and 2 at every anchor.
+- The graph resource self-test (`CS_ORG_GRAPHRES_SELFTEST`): 0 at DeferredPasses.
