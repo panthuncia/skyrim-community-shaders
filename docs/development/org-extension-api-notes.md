@@ -198,7 +198,7 @@ How the anchors order work:
 - The key only decides between passes that do not depend on each other. The graph orders a reader after its writer anyway.
 - Leave gaps of 100 between features' keys, so a pass can go between them later. Add each feature's keys to its anchor's rule.
 - An anchor nobody reserved has no epoch. A reserved anchor with no active client submits nothing.
-- After PostProcessing, Tonemap and Present, the anchor separates its epoch from Vulkan work that may follow. That is the hazard
+- After PostProcessing, Upscale, Tonemap, FrameGeneration, Present and Overlay, the anchor separates its epoch from Vulkan work that may follow. That is the hazard
   rule in render-graph.md.
 
 Each anchor's rule:
@@ -229,9 +229,15 @@ Each anchor's rule:
   (blended) pass and DCLF's forward epoch.
 - **PostProcessing.** At `Main_PostProcessing`, before Post Processing's `DrawBeforeUpscaling`, the upscaler and the
   ImageSpace chain. The scene is at render resolution.
+- **Upscale.** In `Upscaling::PerformUpscaling`, after the upscaler's evaluate (the DXVK interop command ring) and after
+  `kMAIN`'s D3D11 copy and depth upscale when those run on D3D11. Before the ImageSpace chain. It runs only on frames where an
+  upscaler (FSR, XeSS, DLSS) evaluates, not with TAA. The ring's buffer ends with a full memory barrier and is submitted ahead
+  of DXVK's next command list, which the epoch records into, so its passes see the evaluate's output.
 - **Tonemap.** At the ImageSpace HDR tonemap's render, after the upscaler. Before Effects11 and Post Processing's `PreProcess`.
   `Point::input` and `Point::output` are the tonemap's targets. Its graph may record ahead of the hook, so a pass that depends
   on them puts them in its revision.
+- **FrameGeneration.** In `Upscaling::CopyHudlessColor`, after the ImageSpace chain and HDR's clean composite, before frame
+  generation tags or evaluates (DLSS-G, FSR-FG). It runs only on frames where frame generation captures the hudless colour.
 - **Present.** In `IDXGISwapChain::Present`, before DCLF's `BeforePresent`, the frame pace signal, CS's overlay, HDR output,
   frame generation and the present. It is before the UI: a pass after the UI uses Overlay.
 - **Overlay.** At CS's overlay draw (`OverlayRenderer::FinalizeImGuiFrame`), inside HDRDisplay's present chain: after Present,
@@ -264,6 +270,8 @@ Keys used so far:
 - The Screenshot feature (`CS_ORG_SCREENSHOT`): 100 (the readback copy) at Capture.
 - HDR Display (`CS_ORG_HDR_DISPLAY`): 100 (the output composite), 101 (the copy into the back buffer, not in the owned frame)
   and 102 (the UI texture's clear) at HDROutput.
+- Upscaling (`CS_ORG_UPSCALING`): 100 (the upscaled colour into `kMAIN`), 200 to 204 (the depth and refraction normal copies,
+  the depth upscale, the underwater mask copy and its upscale) at Upscale; 100 (the hudless copy) at FrameGeneration.
 - The DCLF graph texture test (`CS_DCLF_GRAPH_TEXTURE_TEST`): 0 at Prepass.
 - Subsurface Scattering (`CS_ORG_SUBSURFACE_SCATTERING`): 199 (Burley clear), 200 (extraction), 201 (horizontal or Burley
   blur) and 202 (vertical blur) at DeferredPasses. SSGI's passes there stay below 199, as the D3D11 order is SSGI first.
@@ -697,3 +705,20 @@ Keys used so far:
   the latch. A plugin API would want the render area as a graph value the viewport and dispatch can take at execution
   (a viewport from a buffer, or indirect draws and dispatches sized from the latch), so the recording never changes.
 - **Found by:** P3 W4, Effects11 rays (2026-11-09).
+### Graph passes around a vendor SDK's Vulkan work
+
+- **Need:** a plugin runs a vendor SDK (an upscaler, frame generation, a denoiser) on its own Vulkan command buffer, and wants
+  the passes that feed it and consume its output on the graph: a copy of its output into an engine target, a resolve, a format
+  conversion of its input.
+- **Who:** CS's Upscaling (`CS_ORG_UPSCALING`): Streamline's FSR, XeSS and DLSS run in the DXVK interop command ring
+  (`Upscaling/DXVKInterop.cpp`); the copy into kMAIN, the depth upscale and the hudless copy are graph passes now.
+- **Where it fits:** the SDK's own images are graph textures exported to D3D11 (`GraphResources`, `Persistent`, SRV and UAV
+  or RTV), because the SDK reaches them through their D3D11 images (`IDXGIVkInteropSurface`). Its passes go at an anchor the
+  plugin runs right after the SDK's submission (`Upscale`, `FrameGeneration`): the ring's buffer is submitted after DXVK's
+  command list in flight and ends with a full memory barrier, so the next list's epoch sees its writes, and the exported
+  textures rest in DXVK's layout on both sides. Two things a plugin API would need: an anchor the plugin itself runs at its own
+  point of the frame (today only CS code calls `FrameAnchors::Run`), and the hazard separator before the SDK's submission
+  (`Upscaling::SeparateFromGraphEpochs`), which every late anchor already applies. Per-run work in a kept recording is a bit
+  each pass reads at `Prepare` and adds to its revision ("Skipping a frame in a kept recording"); Upscaling and Cloud Shadows
+  both carry that pattern, which a framework predicate would replace.
+- **Found by:** P3 W3, Upscaling's own passes (2026-11-09).

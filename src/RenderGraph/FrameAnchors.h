@@ -53,7 +53,9 @@ namespace FrameAnchors
 		DeferredComposite,   // after the D3D11 SSGI, SSS and cubemap update, where the deferred composite runs
 		PostComposite,       // the end of the deferred passes, after the composite (D3D11 or ORG), where Effects11's rays run
 		PostProcessing,      // Main_PostProcessing, before the D3D11 post-processing and the upscaler
+		Upscale,             // Main_PostProcessing, after the upscaler's evaluate, before the ImageSpace chain
 		Tonemap,             // the ImageSpace HDR tonemap's render, before Effects11 and Post Processing replace or follow it
+		FrameGeneration,     // Main_PostProcessing, after the ImageSpace chain, where frame generation's inputs are captured
 		Present,             // IDXGISwapChain::Present, before the overlay, HDR output and frame generation
 		Overlay,             // the overlay's draw (OverlayRenderer::FinalizeImGuiFrame), after ImGui built its frame, before HDR output
 		HDROutput,           // HDRDisplay's output composite (ApplyHDR), after the overlay and other mods' Present hooks, before the present
@@ -162,7 +164,7 @@ namespace FrameAnchors
 
 	/**
 	 * @brief The hook: runs the anchor's epoch at this point of the D3D11 stream when it has an active client. After the late
-	 * anchors (PostProcessing, Tonemap, Present) it separates the epoch from external Vulkan work that may follow
+	 * anchors (PostProcessing, Upscale, Tonemap, FrameGeneration, Present, Overlay) it separates the epoch from external Vulkan work that may follow
 	 * (Upscaling::SeparateFromGraphEpochs; render-graph.md, "Hazard: external Vulkan work directly after a graph epoch").
 	 * @return Whether an epoch was submitted.
 	 */

@@ -216,6 +216,8 @@ public:
 	void PostDisplay();
 	void PerformUpscaling();
 	void UpscaleDepth();
+	/** @brief The depth upscale's constants for this frame: the jitter, and the wide kernel's choice with its hysteresis. */
+	JitterCB DepthUpscaleConstants();
 
 	static double GetRefreshRate(HWND a_window);
 
@@ -229,6 +231,10 @@ private:
 	void CreateHudlessTexture();
 	bool DestroyHudlessTexture(bool a_commandRingDrained = false);
 	ID3D11Resource* CaptureHudlessColor();
+	/** @brief The upscaler's output: the graph texture's D3D11 export with CS_ORG_UPSCALING, else the D3D11 texture; null when neither exists. */
+	ID3D11Texture2D* UpscaledResource() const;
+	/** @brief Frame generation's hudless colour, as UpscaledResource. */
+	ID3D11Texture2D* HudlessResource() const;
 	bool CopyHudlessColor(ID3D11ShaderResourceView* a_source);
 	void PrepareFrameGeneration(ID3D11Resource* a_hudlessColor);
 

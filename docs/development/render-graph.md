@@ -183,6 +183,8 @@ upscaler output").
 -   **Frame generation:** *not covered*. That is `Streamline::EvaluateFSRFrameGen` (`Upscaling/Streamline.cpp`) and the DLSS-G path.
     Frame generation was off in every run of the investigation. A later check of the inn with it on showed no corruption in a few
     screen grabs, which does not rule the hazard out.
+    With `CS_ORG_UPSCALING=1` the hudless copy is an epoch at the `FrameGeneration` anchor, a late anchor, so on that path the
+    separator does run between it and frame generation's calls.
 -   **Epochs that can end up last before the upscaler or Present.**
     -   DCLF's first-person colour epoch (`RenderFirstPersonView`) is the one that triggered this. It is the only epoch with no DXVK
         work after it before the upscaler.
@@ -428,7 +430,9 @@ of adding a `Segment` and editing the epoch order. Each anchor is one of CS's ho
 | `DeferredComposite` | `Deferred::DeferredPasses`, after the D3D11 SSGI, SSS and cubemap update, where the composite runs |
 | `PostComposite` | the end of `Deferred::DeferredPasses`, after the composite (D3D11 or ORG), where Effects11's rays draw |
 | `PostProcessing` | `Upscaling::Main_PostProcessing`, before the upscaler |
+| `Upscale` | `Upscaling::PerformUpscaling`, after the upscaler's evaluate, before the ImageSpace chain |
 | `Tonemap` | `Main_HDRTonemapBlendCinematic_Render` (`Hooks.cpp`) |
+| `FrameGeneration` | `Upscaling::CopyHudlessColor`, after the ImageSpace chain, where frame generation's hudless colour is captured |
 | `Present` | `IDXGISwapChain_Present` (`Hooks.cpp`), before DCLF's `BeforePresent` |
 | `Overlay` | `OverlayRenderer::FinalizeImGuiFrame`, where CS's ImGui frame is drawn (`ImGuiRenderer::RenderDrawData`) |
 | `HDROutput` | `HDRDisplay::ApplyHDR`, HDR's output composite inside its present chain (run only by `CS_ORG_HDR_DISPLAY`) |
@@ -492,7 +496,7 @@ FrameAnchors::Register({ .id = "cs.myfeature",
     `kGameFramesInFlight` slots. Size `LatchBlock`s from `GraphHost::FrameSlots()` after the runtime is up, as LLF does. An anchor that
     runs several times a frame (`ReflectionsPrepass`, at each cubemap render) uses its ring that much faster, and may wait for a
     slot when the CPU is far ahead of the GPU.
--   **The hazard rule.** After the late anchors (`PostProcessing`, `Tonemap`, `Present`, `Overlay`, `HDROutput`, `Capture`) have run an epoch, `Run` calls
+-   **The hazard rule.** After the late anchors (`PostProcessing`, `Upscale`, `Tonemap`, `FrameGeneration`, `Present`, `Overlay`, `HDROutput`, `Capture`) have run an epoch, `Run` calls
     `Upscaling::SeparateFromGraphEpochs()`. An upscaler, frame generation or the present can follow these, and none may run directly
     behind a graph epoch (above, "Hazard: external Vulkan work directly after a graph epoch"). The earlier anchors are followed by
     the engine's own draws.
@@ -684,6 +688,7 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 | `CS_ORG_TERRAIN_BLENDING=1` | Terrain Blending's depth blend runs at the DepthDone anchor (`ORGTerrainBlending.cpp`): `DepthBlend` writes the blended depths and the terrain mask (t55) as graph textures exported to D3D11 and published (`TerrainBlending::BlendedDepth`, `BlendedDepth16`, `Mask`); DCLF's t55 reads the mask by name. The terrain depth stays a D3D11 texture (org-extension-api-notes.md, "Depth targets a D3D11 draw still writes"). Logs `[ORG] Terrain Blending: the depth blend runs on the render graph`; falls back to D3D11 on any failure. |
 | `CS_ORG_ANCHOR_SELFTEST=1` | Reserve every frame anchor and run a test client at each: a raster pass writes a texture, a compute pass reads it and one texel of kMAIN into a buffer, and a copy reads that back. Each anchor logs `[ORG] anchor self-test: <anchor> OK` once, then `every anchor OK`. |
 | `CS_ORG_GRAPHRES_SELFTEST=1` | Reserve DeferredPasses and test the graph-backed resources there (above, "Graph-backed feature resources"). Logs `[ORG] graph resource self-test: 16x16 OK ...`, then `resized to 32x32`, `32x32 OK ...` and `every check OK; the texture is released`; `MISMATCH` otherwise. |
+| `CS_ORG_UPSCALING=1` | Upscaling's own passes on the graph (`Upscaling/ORGUpscaling.cpp`): the upscaled colour's copy into kMAIN and the depth upscale (the copies, `DepthRefractionUpscalePS`, `UnderwaterMaskUpscalePS`) at the `Upscale` anchor, and frame generation's hudless copy (`CopyHudlessPS`) at `FrameGeneration`. The upscaled and hudless textures are graph textures exported to D3D11, which Streamline's evaluates in the interop ring still write and read. Logs `[ORG] Upscaling's own passes run on the render graph` and `created the upscaled texture on the graph`; on any failure the D3D11 textures and passes come back (`[ORG] Upscaling returns to D3D11: ...`). |
 | `CS_ORG_IMGUI=1` | Draw CS's ImGui frames with the render graph's backend at the `Overlay` anchor once the graph is up ("ImGui on the graph"). Logs `[ORG] ImGui: drawn by the render graph` and `drawing onto ...`. |
 | `CS_ORG_HDR_DISPLAY=1` | HDR Display's output composite, its copy into the back buffer and the UI texture's clear as passes at the `HDROutput` anchor (`ORGHDRDisplay`), on frames HDR composites. Logs `[ORG] HDR Display runs on the render graph` and where the back buffer copy runs; on a failure `[ORG] HDR Display returns to D3D11`. Test command `dclf:hdr=0|1` forces Enable HDR on an SDR display. |
 | `CS_ORG_SCREENSHOT=1` | The Screenshot feature's captures (the hotkey, the menu button, `dclf:shot`) are copied into an ORG readback buffer by a pass at the `Capture` anchor, at the end of HDRDisplay's present chain, instead of a D3D11 staging texture (`src/Features/Screenshot/ORGScreenshot.cpp`). The frame never waits: the bytes reach the encoding worker when the copy's fence passes, and the worker crops them. Logs `[ORG] Screenshot: captures are read back through the render graph`; any failure (no anchor, a source that cannot be imported, a failed epoch) copies that capture with D3D11. |

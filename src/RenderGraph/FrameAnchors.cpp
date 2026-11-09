@@ -53,7 +53,9 @@ namespace FrameAnchors
 			{ "DeferredComposite", { "CS anchor: deferred composite", "CS anchor: deferred composite inputs", "FrameAnchors::DeferredComposite / ", "cs.anchor.deferred-composite" }, false },
 			{ "PostComposite", { "CS anchor: post-composite", "CS anchor: post-composite inputs", "FrameAnchors::PostComposite / ", "cs.anchor.post-composite" }, false },
 			{ "PostProcessing", { "CS anchor: post-processing", "CS anchor: post-processing inputs", "FrameAnchors::PostProcessing / ", "cs.anchor.post-processing" }, true },
+			{ "Upscale", { "CS anchor: upscale", "CS anchor: upscale inputs", "FrameAnchors::Upscale / ", "cs.anchor.upscale" }, true },
 			{ "Tonemap", { "CS anchor: tonemap", "CS anchor: tonemap inputs", "FrameAnchors::Tonemap / ", "cs.anchor.tonemap" }, true },
+			{ "FrameGeneration", { "CS anchor: frame generation", "CS anchor: frame generation inputs", "FrameAnchors::FrameGeneration / ", "cs.anchor.frame-generation" }, true },
 			{ "Present", { "CS anchor: present", "CS anchor: present inputs", "FrameAnchors::Present / ", "cs.anchor.present" }, true },
 			{ "Overlay", { "CS anchor: overlay", "CS anchor: overlay inputs", "FrameAnchors::Overlay / ", "cs.anchor.overlay" }, true },
 			{ "HDROutput", { "CS anchor: HDR output", "CS anchor: HDR output inputs", "FrameAnchors::HDROutput / ", "cs.anchor.hdr-output" }, true },
@@ -80,8 +82,10 @@ namespace FrameAnchors
 			Segment::AnchorPostComposite,      // DeferredPasses' end, after the composite
 			Segment::Forward,
 			Segment::FirstPerson,
-			Segment::AnchorPostProcessing,  // Main_PostProcessing, before the upscaler
-			Segment::AnchorTonemap,         // in the ImageSpace chain after it
+			Segment::AnchorPostProcessing,   // Main_PostProcessing, before the upscaler
+			Segment::AnchorUpscale,          // after the upscaler's evaluate
+			Segment::AnchorTonemap,          // in the ImageSpace chain after it
+			Segment::AnchorFrameGeneration,  // after the ImageSpace chain, before frame generation
 			Segment::AnchorPresent,
 			Segment::AnchorOverlay,    // the overlay's ImGui draw, inside HDRDisplay's present chain
 			Segment::AnchorHDROutput,  // HDRDisplay's output composite, after the overlay
