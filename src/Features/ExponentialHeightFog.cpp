@@ -320,7 +320,7 @@ void ExponentialHeightFog::CaptureDirectionalShadowMap()
 		shadowMap->Release();
 }
 
-void ExponentialHeightFog::EnsureVolumetricResources()
+ExponentialHeightFog::GridSizes ExponentialHeightFog::ComputeGridSizes() const
 {
 	uint32_t pixelSize = std::clamp(settings.volumetricGridPixelSize, 4u, 64u);
 	const uint32_t gridZ = std::clamp(settings.volumetricGridSizeZ, 16u, 160u);
@@ -354,6 +354,21 @@ void ExponentialHeightFog::EnsureVolumetricResources()
 		farPixelSize++;
 		farGridSize = getGridSize(farPixelSize, farGridZ);
 	}
+
+	GridSizes sizes;
+	sizes.nearSize = gridSize;
+	sizes.farSize = farGridSize;
+	// From 8-pixel cells up, one thread group per cell reduces the cell's depth footprint in parallel.
+	sizes.nearGroupReduce = std::clamp(settings.volumetricGridPixelSize, 4u, 64u) >= 8;
+	sizes.farGroupReduce = std::clamp(settings.volumetricFarGridPixelSize, 4u, 64u) >= 8;
+	return sizes;
+}
+
+void ExponentialHeightFog::EnsureVolumetricResources()
+{
+	const auto sizes = ComputeGridSizes();
+	const DirectX::XMUINT4 gridSize = sizes.nearSize;
+	const DirectX::XMUINT4 farGridSize = sizes.farSize;
 
 	if (vBufferA &&
 		currentGridSize.x == gridSize.x && currentGridSize.y == gridSize.y && currentGridSize.z == gridSize.z &&
@@ -507,6 +522,18 @@ void ExponentialHeightFog::BindIntegratedLightScattering()
 
 ID3D11ShaderResourceView* ExponentialHeightFog::UpdateEngineLocalShadowData()
 {
+	EngineLocalShadows shadows{};
+	auto* view = BuildEngineLocalShadowData(shadows);
+	if (!view)
+		return nullptr;
+	if (!engineLocalShadowCB)
+		engineLocalShadowCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<EngineLocalShadows>(), "ExponentialHeightFog::EngineLocalShadows");
+	engineLocalShadowCB->Update(shadows);
+	return view;
+}
+
+ID3D11ShaderResourceView* ExponentialHeightFog::BuildEngineLocalShadowData(EngineLocalShadows& a_shadows) const
+{
 	auto* renderer = globals::game::renderer;
 	auto* smState = globals::game::smState;
 	if (!renderer || !smState || !smState->shadowSceneNode[0])
@@ -546,7 +573,7 @@ ID3D11ShaderResourceView* ExponentialHeightFog::UpdateEngineLocalShadowData()
 		sliceClaims[slice]++;
 	}
 
-	std::array<LightLimitFix::LocalShadowData, LightLimitFix::SHADOW_MASK_CHANNEL_COUNT> shadows{};
+	auto& shadows = a_shadows;
 	const auto& eye = globals::game::frameBufferCached.GetCameraPosAdjust();
 	for (uint32_t i = 0; i < shadows.size(); i++) {
 		auto* light = shadowLights[i];
@@ -576,9 +603,6 @@ ID3D11ShaderResourceView* ExponentialHeightFog::UpdateEngineLocalShadowData()
 		data.Params2 = { falloff, 0.0f, static_cast<float>(descriptor.shadowmapIndex - firstSlice), texel };
 		data.Origin = { eye.x, eye.y, eye.z, 0.0f };
 	}
-	if (!engineLocalShadowCB)
-		engineLocalShadowCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<decltype(shadows)>(), "ExponentialHeightFog::EngineLocalShadows");
-	engineLocalShadowCB->Update(shadows);
 	return depthStencil.depthSRV;
 }
 
@@ -671,6 +695,104 @@ ID3D11ComputeShader* ExponentialHeightFog::GetFarIntegrationCS()
 	return farIntegrationCS;
 }
 
+ExponentialHeightFog::VolumetricFogCB ExponentialHeightFog::BuildConstants(const ConstantInputs& a_inputs, bool& a_farGridEnabled) const
+{
+	const auto& gridSize = a_inputs.sizes.nearSize;
+	const auto& farGridSize = a_inputs.sizes.farSize;
+
+	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+	// Depth ranges. The near volume spans [nearPlane, nearEndDepth] at full resolution;
+	// the far volume continues [nearEndDepth, totalFarPlane] at quarter lattice.
+	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+	const auto cameraData = Util::GetCameraData();
+	const double nearPlane = std::max(static_cast<double>(cameraData.y), static_cast<double>(std::max(settings.volumetricFogStartDistance, 0.0f)));
+	const double totalFarPlane = std::max(nearPlane + 1.0, static_cast<double>(std::max(settings.volumetricFogDistance, settings.volumetricFogStartDistance + 1.0f)));
+	const double nearEndDepth = std::min(
+		std::max(static_cast<double>(std::max(settings.volumetricNearGridDistance, 0.0f)), nearPlane + 1.0),
+		totalFarPlane);
+	a_farGridEnabled = nearEndDepth + 1.0 < totalFarPlane;
+
+	auto computeGridZParams = [](double a_nearPlane, double a_farPlane, uint32_t a_gridZ, float a_distributionScale) {
+		const double nearWithOffset = a_nearPlane + 0.095 * 100.0;
+		const double depthDistributionScale = std::max(static_cast<double>(a_distributionScale), static_cast<double>(a_gridZ) / 120.0);
+		const double farExp = std::exp2(std::min(static_cast<double>(a_gridZ) / depthDistributionScale, 120.0));
+		const double gridZOffset = (a_farPlane - nearWithOffset * farExp) / (a_farPlane - nearWithOffset);
+		const double gridZScale = (1.0 - gridZOffset) / nearWithOffset;
+		return DirectX::XMFLOAT4{
+			static_cast<float>(gridZScale),
+			static_cast<float>(gridZOffset),
+			static_cast<float>(depthDistributionScale),
+			0.0f
+		};
+	};
+
+	const uint32_t sharedFlags =
+		(a_inputs.directionalShadow ? 1u : 0u) |
+		(a_inputs.depth ? 2u : 0u) |
+		(a_inputs.ibl ? 4u : 0u) |
+		(a_inputs.skylighting ? 8u : 0u);
+
+	VolumetricFogCB cb{};
+	cb.gridSizeAndFlags = {
+		gridSize.x,
+		gridSize.y,
+		gridSize.z,
+		sharedFlags |
+			(a_inputs.depth && a_inputs.historyValid && a_inputs.depthHistory ? 16u : 0u) |
+			(a_inputs.localLights ? 32u : 0u) |
+			(a_inputs.localShadows ? 64u : 0u) |
+			(a_inputs.engineLocalShadows ? 128u : 0u)
+	};
+	cb.invGridSizeAndNearFade = {
+		1.0f / static_cast<float>(gridSize.x),
+		1.0f / static_cast<float>(gridSize.y),
+		1.0f / static_cast<float>(gridSize.z),
+		settings.volumetricFogNearFadeInDistance > 0.0f ? 1.0f / settings.volumetricFogNearFadeInDistance : 100000000.0f
+	};
+	cb.gridZParams = computeGridZParams(nearPlane, nearEndDepth, gridSize.z, settings.volumetricDepthDistributionScale);
+
+	cb.farGridSizeAndFlags = {
+		farGridSize.x,
+		farGridSize.y,
+		farGridSize.z,
+		sharedFlags |
+			(a_inputs.depth && a_inputs.historyValidFar && a_inputs.depthHistoryFar ? 16u : 0u)
+	};
+	cb.farInvGridSizeAndNearFade = {
+		1.0f / static_cast<float>(farGridSize.x),
+		1.0f / static_cast<float>(farGridSize.y),
+		1.0f / static_cast<float>(farGridSize.z),
+		settings.volumetricFogNearFadeInDistance > 0.0f ? 1.0f / settings.volumetricFogNearFadeInDistance : 100000000.0f
+	};
+	cb.farGridZParams = computeGridZParams(nearEndDepth, totalFarPlane, farGridSize.z, settings.volumetricDepthDistributionScale);
+	cb.farRange = { static_cast<float>(nearEndDepth), static_cast<float>(totalFarPlane), 0.0f, 0.0f };
+
+	cb.clipToWorld = globals::game::frameBufferCached.GetCameraViewProjUnjittered().Invert();
+
+	for (uint32_t i = 0; i < std::size(cb.frameJitterOffsets); i++) {
+		const uint32_t temporalFrame = (globals::state->frameCount - i) & 1023u;
+		cb.frameJitterOffsets[i] = {
+			a_inputs.temporal ? Halton(temporalFrame, 2) : 0.5f,
+			a_inputs.temporal ? Halton(temporalFrame, 3) : 0.5f,
+			a_inputs.temporal ? Halton(temporalFrame, 5) : 0.5f,
+			0.0f
+		};
+	}
+	cb.historyParameters = {
+		a_inputs.historyValid ? std::clamp(settings.volumetricHistoryWeight, 0.0f, 0.99f) : 0.0f,
+		static_cast<float>(std::clamp(settings.volumetricHistoryMissSampleCount, 1u, 16u)),
+		a_inputs.historyValidFar ? std::clamp(settings.volumetricHistoryWeight, 0.0f, 0.99f) : 0.0f,
+		0.0f
+	};
+	cb.jitterParameters = {
+		a_inputs.temporal ? std::max(settings.volumetricSampleJitterMultiplier, 0.0f) : 0.0f,
+		static_cast<float>(globals::state->frameCount % 8u),
+		0.0f,
+		0.0f
+	};
+	return cb;
+}
+
 void ExponentialHeightFog::Prepass()
 {
 	if (!settings.enabled || !settings.volumetricFogEnabled || settings.volumetricFogExtinctionScale <= 0.0f) {
@@ -724,96 +846,22 @@ void ExponentialHeightFog::Prepass()
 		lastPrepassFrame != UINT32_MAX &&
 		globals::state->frameCount == lastPrepassFrame + 1u;
 
-	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-	// Depth ranges. The near volume spans [nearPlane, nearEndDepth] at full resolution;
-	// the far volume continues [nearEndDepth, totalFarPlane] at quarter lattice.
-	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-	const auto cameraData = Util::GetCameraData();
-	const double nearPlane = std::max(static_cast<double>(cameraData.y), static_cast<double>(std::max(settings.volumetricFogStartDistance, 0.0f)));
-	const double totalFarPlane = std::max(nearPlane + 1.0, static_cast<double>(std::max(settings.volumetricFogDistance, settings.volumetricFogStartDistance + 1.0f)));
-	const double nearEndDepth = std::min(
-		std::max(static_cast<double>(std::max(settings.volumetricNearGridDistance, 0.0f)), nearPlane + 1.0),
-		totalFarPlane);
-	const bool farGridEnabled = nearEndDepth + 1.0 < totalFarPlane;
-
-	auto computeGridZParams = [](double a_nearPlane, double a_farPlane, uint32_t a_gridZ, float a_distributionScale) {
-		const double nearWithOffset = a_nearPlane + 0.095 * 100.0;
-		const double depthDistributionScale = std::max(static_cast<double>(a_distributionScale), static_cast<double>(a_gridZ) / 120.0);
-		const double farExp = std::exp2(std::min(static_cast<double>(a_gridZ) / depthDistributionScale, 120.0));
-		const double gridZOffset = (a_farPlane - nearWithOffset * farExp) / (a_farPlane - nearWithOffset);
-		const double gridZScale = (1.0 - gridZOffset) / nearWithOffset;
-		return DirectX::XMFLOAT4{
-			static_cast<float>(gridZScale),
-			static_cast<float>(gridZOffset),
-			static_cast<float>(depthDistributionScale),
-			0.0f
-		};
-	};
-
-	VolumetricFogCB cb{};
-	cb.gridSizeAndFlags = {
-		currentGridSize.x,
-		currentGridSize.y,
-		currentGridSize.z,
-		(directionalShadowMap && directionalShadowLightData ? 1u : 0u) |
-			(depthSrv ? 2u : 0u) |
-			(hasIBL ? 4u : 0u) |
-			(hasSkylighting ? 8u : 0u) |
-			(depthSrv && temporalHistoryValid && hasConservativeDepthHistory ? 16u : 0u) |
-			(hasLocalLightData ? 32u : 0u) |
-			(hasLocalShadowData ? 64u : 0u) |
-			(engineLocalShadowMap ? 128u : 0u)
-	};
-	cb.invGridSizeAndNearFade = {
-		1.0f / static_cast<float>(currentGridSize.x),
-		1.0f / static_cast<float>(currentGridSize.y),
-		1.0f / static_cast<float>(currentGridSize.z),
-		settings.volumetricFogNearFadeInDistance > 0.0f ? 1.0f / settings.volumetricFogNearFadeInDistance : 100000000.0f
-	};
-	cb.gridZParams = computeGridZParams(nearPlane, nearEndDepth, currentGridSize.z, settings.volumetricDepthDistributionScale);
-
-	cb.farGridSizeAndFlags = {
-		currentFarGridSize.x,
-		currentFarGridSize.y,
-		currentFarGridSize.z,
-		(directionalShadowMap && directionalShadowLightData ? 1u : 0u) |
-			(depthSrv ? 2u : 0u) |
-			(hasIBL ? 4u : 0u) |
-			(hasSkylighting ? 8u : 0u) |
-			(depthSrv && temporalHistoryValidFar && hasConservativeDepthFarHistory ? 16u : 0u)
-	};
-	cb.farInvGridSizeAndNearFade = {
-		1.0f / static_cast<float>(currentFarGridSize.x),
-		1.0f / static_cast<float>(currentFarGridSize.y),
-		1.0f / static_cast<float>(currentFarGridSize.z),
-		settings.volumetricFogNearFadeInDistance > 0.0f ? 1.0f / settings.volumetricFogNearFadeInDistance : 100000000.0f
-	};
-	cb.farGridZParams = computeGridZParams(nearEndDepth, totalFarPlane, currentFarGridSize.z, settings.volumetricDepthDistributionScale);
-	cb.farRange = { static_cast<float>(nearEndDepth), static_cast<float>(totalFarPlane), 0.0f, 0.0f };
-
-	cb.clipToWorld = globals::game::frameBufferCached.GetCameraViewProjUnjittered().Invert();
-
-	for (uint32_t i = 0; i < std::size(cb.frameJitterOffsets); i++) {
-		const uint32_t temporalFrame = (globals::state->frameCount - i) & 1023u;
-		cb.frameJitterOffsets[i] = {
-			temporalReprojection ? Halton(temporalFrame, 2) : 0.5f,
-			temporalReprojection ? Halton(temporalFrame, 3) : 0.5f,
-			temporalReprojection ? Halton(temporalFrame, 5) : 0.5f,
-			0.0f
-		};
-	}
-	cb.historyParameters = {
-		temporalHistoryValid ? std::clamp(settings.volumetricHistoryWeight, 0.0f, 0.99f) : 0.0f,
-		static_cast<float>(std::clamp(settings.volumetricHistoryMissSampleCount, 1u, 16u)),
-		temporalHistoryValidFar ? std::clamp(settings.volumetricHistoryWeight, 0.0f, 0.99f) : 0.0f,
-		0.0f
-	};
-	cb.jitterParameters = {
-		temporalReprojection ? std::max(settings.volumetricSampleJitterMultiplier, 0.0f) : 0.0f,
-		static_cast<float>(globals::state->frameCount % 8u),
-		0.0f,
-		0.0f
-	};
+	ConstantInputs inputs;
+	inputs.sizes = { currentGridSize, currentFarGridSize };
+	inputs.directionalShadow = directionalShadowMap && directionalShadowLightData;
+	inputs.depth = depthSrv != nullptr;
+	inputs.ibl = hasIBL;
+	inputs.skylighting = hasSkylighting;
+	inputs.localLights = hasLocalLightData;
+	inputs.localShadows = hasLocalShadowData;
+	inputs.engineLocalShadows = engineLocalShadowMap != nullptr;
+	inputs.temporal = temporalReprojection;
+	inputs.historyValid = temporalHistoryValid;
+	inputs.historyValidFar = temporalHistoryValidFar;
+	inputs.depthHistory = hasConservativeDepthHistory;
+	inputs.depthHistoryFar = hasConservativeDepthFarHistory;
+	bool farGridEnabled = false;
+	const VolumetricFogCB cb = BuildConstants(inputs, farGridEnabled);
 	volumetricFogCB->Update(cb);
 
 	auto context = globals::d3d::context;
@@ -932,9 +980,9 @@ void ExponentialHeightFog::Prepass()
 		}
 	};
 
-	// From 8-pixel cells up, one thread group per cell reduces the cell's depth footprint in parallel.
-	const bool nearGroupReduce = std::clamp(settings.volumetricGridPixelSize, 4u, 64u) >= 8;
-	const bool farGroupReduce = std::clamp(settings.volumetricFarGridPixelSize, 4u, 64u) >= 8;
+	const auto groupReduce = ComputeGridSizes();
+	const bool nearGroupReduce = groupReduce.nearGroupReduce;
+	const bool farGroupReduce = groupReduce.farGroupReduce;
 
 	runVolumetricPass({ currentGridSize,
 		vBufferA.get(),
