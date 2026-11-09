@@ -33,7 +33,7 @@
 namespace
 {
 	constexpr const char* kClientId = "cs.ssgi";
-	constexpr const char* kNoiseId = "cs.feature.ssgi.noise";
+	constexpr const char* kNoiseName = "ssgi.noise";
 	constexpr std::uint32_t kMips = 5;
 	// Below Subsurface Scattering's keys (199-202): the D3D11 frame runs SSGI first.
 	constexpr std::int32_t kOrderReset = 100;
@@ -129,7 +129,7 @@ namespace
 	 * @brief What one configuration's passes are made from. Made on the render thread; a new one replaces it on a settings change.
 	 * Passes copy what they need when they are made (ClientDesc's make), so the host thread never reads this.
 	 */
-	struct State
+	struct GiState
 	{
 		Config config;
 		std::array<std::shared_ptr<const Program>, kSteps> programs;
@@ -225,7 +225,7 @@ namespace
 	Use Uav(std::shared_ptr<org::Resource> a_resource) { return { UseKind::Uav, std::move(a_resource) }; }
 	Use UavMips(std::shared_ptr<org::Resource> a_resource) { return { UseKind::UavMips, std::move(a_resource) }; }
 
-	std::vector<Use> StepUses(const State& a_state, Step a_step)
+	std::vector<Use> StepUses(const GiState& a_state, Step a_step)
 	{
 		const auto& s = a_state;
 		const auto& in = s.inputs;
@@ -279,7 +279,7 @@ namespace
 	{
 	public:
 		// At the build, on the render thread: the state as it is now.
-		DispatchPass(const State& a_state, Step a_step, std::uint32_t a_pointSampler, std::uint32_t a_linearSampler) :
+		DispatchPass(const GiState& a_state, Step a_step, std::uint32_t a_pointSampler, std::uint32_t a_linearSampler) :
 			frame{ a_state.programs[a_step], a_state.latch, a_pointSampler, a_linearSampler, a_step }, uses(StepUses(a_state, a_step)) {}
 
 		DispatchBindings Declare(org::PassBuilder& a_builder)
@@ -456,14 +456,14 @@ namespace
 		inputs.normalRoughness = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(NORMALROUGHNESS));
 		inputs.motionVectors = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kMOTION_VECTOR));
 		if (feature.texNoise)
-			inputs.noise = FrameAnchors::FeatureTexture(feature.texNoise->resource.get(), kNoiseId);
+			inputs.noise = FrameAnchors::D3D11Texture(kNoiseName, feature.texNoise->resource.get(), feature.texNoise->srv.get(), nullptr);
 		return inputs;
 	}
 
 	/** @brief What the client's callbacks share: the current state, and whether the graph path failed. */
 	struct Shared
 	{
-		std::shared_ptr<State> state;
+		std::shared_ptr<GiState> state;
 		org::OwnedDescriptorBinding pointSampler, linearSampler;
 		bool frameReady = false;
 		bool failed = false;
@@ -504,9 +504,9 @@ struct ORGScreenSpaceGI::Impl
 	}
 
 	/** @brief The programs and textures of a configuration; null, logged, when one cannot be made. */
-	std::shared_ptr<State> Build(const Config& a_config) const
+	std::shared_ptr<GiState> Build(const Config& a_config) const
 	{
-		auto state = std::make_shared<State>();
+		auto state = std::make_shared<GiState>();
 		state->config = a_config;
 		if (!a_config.enabled)
 			return state;
@@ -569,15 +569,15 @@ struct ORGScreenSpaceGI::Impl
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
 		client.sharedConstants = true;
-		const auto shared = this->shared;
+		const auto owner = this->shared;
 		// The history clears, in builds after a reset only.
 		for (std::size_t i = 0; i < kHistoryTextures; ++i) {
 			client.passes.push_back({ .name = std::format("cs.ssgi.reset.{}", i),
 				.anchor = FrameAnchors::Anchor::DeferredPasses,
 				.order = kOrderReset,
 				.kind = FrameAnchors::PassKind::Compute,
-				.make = [shared, i]() -> std::shared_ptr<org::RenderPass> {
-					const auto& state = shared->state;
+				.make = [owner, i]() -> std::shared_ptr<org::RenderPass> {
+					const auto& state = owner->state;
 					if (!state || !state->config.enabled || !state->resetPending)
 						return nullptr;
 					const auto& texture = *state->History()[i];
@@ -592,27 +592,27 @@ struct ORGScreenSpaceGI::Impl
 				.anchor = FrameAnchors::Anchor::DeferredPasses,
 				.order = kOrderFirstStep + static_cast<std::int32_t>(step),
 				.kind = FrameAnchors::PassKind::Compute,
-				.make = [shared, step]() { return MakeStep(shared, static_cast<Step>(step)); } });
+				.make = [owner, step]() { return MakeStep(owner, static_cast<Step>(step)); } });
 		}
 		client.passes.push_back({ .name = "cs.ssgi.keep-accumulation",
 			.anchor = FrameAnchors::Anchor::DeferredPasses,
 			.order = kOrderFirstStep + kSteps,
 			.kind = FrameAnchors::PassKind::Copy,
-			.make = [shared]() -> std::shared_ptr<org::RenderPass> {
-				const auto& state = shared->state;
+			.make = [owner]() -> std::shared_ptr<org::RenderPass> {
+				const auto& state = owner->state;
 				if (!state || !state->config.enabled || state->config.blur)
 					return nullptr;
 				return std::make_shared<CopyPass>(state->accumScratch->Graph(), state->accum->Graph(), state->accum->Desc().Width,
 					state->accum->Desc().Height);
 			} });
-		client.registerResources = [shared](org::RenderGraph& a_graph) {
-			if (shared->state)
-				for (const auto* texture : shared->state->All())
+		client.registerResources = [owner](org::RenderGraph& a_graph) {
+			if (owner->state)
+				for (const auto* texture : owner->state->All())
 					if (*texture)
 						(*texture)->Register(a_graph);
 		};
-		client.commit = [shared](const FrameAnchors::Point&) {
-			const auto& state = shared->state;
+		client.commit = [owner](const FrameAnchors::Point&) {
+			const auto& state = owner->state;
 			if (!state || !state->config.enabled || !state->latch)
 				return;
 			// The build that just ran holds the clears.
@@ -636,11 +636,11 @@ struct ORGScreenSpaceGI::Impl
 			groups(kUpsample, sizes.full, 8);
 			state->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, data);
 		};
-		client.active = [shared] { return shared->frameReady; };
-		client.onFailed = [shared] {
+		client.active = [owner] { return owner->frameReady; };
+		client.onFailed = [owner] {
 			logger::error("[ORG] Screen Space GI returns to D3D11: the render graph failed");
-			shared->failed = true;
-			shared->frameReady = false;
+			owner->failed = true;
+			owner->frameReady = false;
 		};
 		registered = FrameAnchors::Register(std::move(client));
 		return registered;

@@ -169,7 +169,7 @@ namespace
 	};
 
 	/** @brief Everything a build's passes are made from: immutable once registered. */
-	struct State
+	struct FogState
 	{
 		Shape shape;
 		Volume nearVolume, farVolume;
@@ -213,7 +213,7 @@ namespace
 
 	struct DispatchFrame
 	{
-		std::shared_ptr<const State> state;
+		std::shared_ptr<const FogState> state;
 		const Volume* volume = nullptr;
 		Step step = Step::Material;
 	};
@@ -221,7 +221,7 @@ namespace
 	class DispatchPass final : public org::TypedRenderGraphPass<DispatchPass, DispatchFrame, DispatchBindings>
 	{
 	public:
-		DispatchPass(std::shared_ptr<const State> a_state, bool a_far, Step a_step) :
+		DispatchPass(std::shared_ptr<const FogState> a_state, bool a_far, Step a_step) :
 			state(std::move(a_state)), isFar(a_far), step(a_step) {}
 
 		DispatchBindings Declare(org::PassBuilder& a_builder)
@@ -346,7 +346,7 @@ namespace
 	private:
 		const Volume& Of() const { return isFar ? state->farVolume : state->nearVolume; }
 
-		std::shared_ptr<const State> state;
+		std::shared_ptr<const FogState> state;
 		bool isFar;
 		Step step;
 	};
@@ -359,13 +359,13 @@ namespace
 
 	struct UploadFrame
 	{
-		std::shared_ptr<const State> state;
+		std::shared_ptr<const FogState> state;
 	};
 
 	class UploadPass final : public org::TypedRenderGraphPass<UploadPass, UploadFrame, UploadBindings>
 	{
 	public:
-		explicit UploadPass(std::shared_ptr<const State> a_state) :
+		explicit UploadPass(std::shared_ptr<const FogState> a_state) :
 			state(std::move(a_state)) {}
 
 		UploadBindings Declare(org::PassBuilder& a_builder)
@@ -398,7 +398,7 @@ namespace
 		}
 
 	private:
-		std::shared_ptr<const State> state;
+		std::shared_ptr<const FogState> state;
 	};
 
 	// A volume's scattering and conservative depth into their histories, as the D3D11 path's CopyResource calls.
@@ -415,7 +415,7 @@ namespace
 	class HistoryPass final : public org::TypedRenderGraphPass<HistoryPass, HistoryFrame, HistoryBindings>
 	{
 	public:
-		HistoryPass(std::shared_ptr<const State> a_state, bool a_far) :
+		HistoryPass(std::shared_ptr<const FogState> a_state, bool a_far) :
 			state(std::move(a_state)), isFar(a_far) {}
 
 		HistoryBindings Declare(org::PassBuilder& a_builder)
@@ -457,7 +457,7 @@ namespace
 	private:
 		const Volume& Of() const { return isFar ? state->farVolume : state->nearVolume; }
 
-		std::shared_ptr<const State> state;
+		std::shared_ptr<const FogState> state;
 		bool isFar;
 	};
 
@@ -476,7 +476,7 @@ namespace
 	class ClearPass final : public org::TypedRenderGraphPass<ClearPass, ClearFrame, ClearBindings>
 	{
 	public:
-		explicit ClearPass(std::shared_ptr<const State> a_state) :
+		explicit ClearPass(std::shared_ptr<const FogState> a_state) :
 			state(std::move(a_state)), target(state->farVolume.integrated->Graph()) {}
 
 		ClearBindings Declare(org::PassBuilder& a_builder)
@@ -507,7 +507,7 @@ namespace
 		}
 
 	private:
-		std::shared_ptr<const State> state;
+		std::shared_ptr<const FogState> state;
 		std::shared_ptr<org::Resource> target;
 	};
 
@@ -609,7 +609,7 @@ namespace
 
 struct ORGExponentialHeightFog::Impl
 {
-	std::shared_ptr<const State> state;
+	std::shared_ptr<const FogState> state;
 	// Programs by source and defines, kept across shapes: a grid change does not compile again.
 	std::map<std::pair<std::string, std::string>, std::shared_ptr<const ComputeProgram>> programs;
 	// This frame's values, written at Prepass and latched by the commit.
@@ -685,10 +685,10 @@ struct ORGExponentialHeightFog::Impl
 	bool Build(const Shape& a_shape)
 	{
 		auto* host = RenderGraphRuntime::Get().Host();
-		auto state = std::make_shared<State>();
-		state->shape = a_shape;
-		if (!MakeVolume(state->nearVolume, a_shape.sizes.nearSize, a_shape.sizes.nearGroupReduce, false) ||
-			!MakeVolume(state->farVolume, a_shape.sizes.farSize, a_shape.sizes.farGroupReduce, true))
+		auto built = std::make_shared<FogState>();
+		built->shape = a_shape;
+		if (!MakeVolume(built->nearVolume, a_shape.sizes.nearSize, a_shape.sizes.nearGroupReduce, false) ||
+			!MakeVolume(built->farVolume, a_shape.sizes.farSize, a_shape.sizes.farGroupReduce, true))
 			return false;
 		D3D11_BUFFER_DESC bufferDesc{};
 		bufferDesc.Usage = D3D11_USAGE_DEFAULT;
@@ -696,20 +696,20 @@ struct ORGExponentialHeightFog::Impl
 		bufferDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
 		bufferDesc.StructureByteStride = sizeof(Deferred::DirectionalShadowLightData);
 		bufferDesc.ByteWidth = sizeof(Deferred::DirectionalShadowLightData);
-		state->directionalShadowLights = std::make_unique<GraphResources::StructuredBuffer>(bufferDesc, 1, "ExponentialHeightFog::DirectionalShadowLights",
+		built->directionalShadowLights = std::make_unique<GraphResources::StructuredBuffer>(bufferDesc, 1, "ExponentialHeightFog::DirectionalShadowLights",
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient });
-		state->latch = std::make_shared<org::LatchBlock>("cs.exp-height-fog.latch", static_cast<std::uint32_t>(sizeof(LatchData)), host->FrameSlots());
+		built->latch = std::make_shared<org::LatchBlock>("cs.exp-height-fog.latch", static_cast<std::uint32_t>(sizeof(LatchData)), host->FrameSlots());
 		// The D3D11 path's samplers: linear clamp, and the comparison sampler for the directional shadow map.
-		state->linearSampler = ShaderBindings::CreateSampler({});
-		state->shadowSampler = ShaderBindings::CreateSampler({ .compareEnable = true, .compareOp = rhi::CompareOp::LessEqual, .reduction = rhi::ReductionMode::Comparison });
-		if (!*state->directionalShadowLights || !state->linearSampler || !state->shadowSampler) {
+		built->linearSampler = ShaderBindings::CreateSampler({});
+		built->shadowSampler = ShaderBindings::CreateSampler({ .compareEnable = true, .compareOp = rhi::CompareOp::LessEqual, .reduction = rhi::ReductionMode::Comparison });
+		if (!*built->directionalShadowLights || !built->linearSampler || !built->shadowSampler) {
 			logger::error("[ORG] Exponential Height Fog: the shadow light buffer or a sampler could not be made");
 			return false;
 		}
 
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
-		const std::shared_ptr<const State> shared = state;
+		const std::shared_ptr<const FogState> shared = built;
 		std::int32_t order = kOrder;
 		const auto add = [&](std::string a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make) {
 			client.passes.push_back({ .name = "cs.exp-height-fog." + std::move(a_name), .anchor = FrameAnchors::Anchor::Prepass, .order = order++, .kind = a_kind, .make = std::move(a_make) });
@@ -762,7 +762,7 @@ struct ORGExponentialHeightFog::Impl
 		client.sharedConstants = true;
 		if (!FrameAnchors::Register(std::move(client)))
 			return false;
-		this->state = std::move(state);
+		this->state = std::move(built);
 		// New histories: nothing to reproject from.
 		hasScatteringHistory = hasDepthHistory = hasScatteringHistoryFar = hasDepthHistoryFar = false;
 		lastFrame = UINT32_MAX;
