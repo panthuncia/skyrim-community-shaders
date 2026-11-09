@@ -524,6 +524,16 @@ ID3D11ShaderResourceView* ExponentialHeightFog::IntegratedLightScatteringView() 
 void ExponentialHeightFog::BindIntegratedLightScattering()
 {
 	ID3D11ShaderResourceView* srv = IntegratedLightScatteringView();
+	// Debug readback (CS_FOG_READBACK=1): every 250 frames, the near volume's means on either path (it stalls).
+	static const bool readback = [] {
+		char value[8]{};
+		return GetEnvironmentVariableA("CS_FOG_READBACK", value, sizeof(value)) && value[0] == '1';
+	}();
+	if (readback && globals::state->frameCount % 250 == 0) {
+		if (const auto means = Util::VolumeMeans(srv))
+			logger::info("[Exponential Height Fog] readback ({}) frame {}: near volume mean [{:.5f} {:.5f} {:.5f} {:.5f}]",
+				ORGExponentialHeightFog::Get().NearSRV() ? "ORG" : "D3D11", globals::state->frameCount, (*means)[0], (*means)[1], (*means)[2], (*means)[3]);
+	}
 	globals::d3d::context->PSSetShaderResources(19, 1, &srv);
 	ID3D11ShaderResourceView* farSrv = ORGExponentialHeightFog::Get().FarSRV();
 	if (!farSrv)
