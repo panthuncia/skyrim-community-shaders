@@ -459,7 +459,8 @@ Keys used so far:
   feature's graph path is active, and otherwise reads the D3D11 resource or does without.
 - **Who:** Exponential Height Fog's light scattering reads IBL's SH (`IBL::EnvIBL`, `IBL::SkyIBL`), Skylighting's probes
   (`Skylighting::ProbeArray`), Terrain Shadows' heights (`TerrainShadows::ShadowHeight`), Light Limit Fix's lights and lists
-  (`cs.llf.*`) and local shadows (`LightLimitFix::LocalShadowData`, `LightLimitFix::LocalShadowCache`). Today it asks each
+  (`cs.llf.*`), local shadows (`LightLimitFix::LocalShadowData`, `LightLimitFix::LocalShadowCache`) and Cloud Shadows'
+  occlusion (`CloudShadows::Occlusion`). Today it asks each
   producer's ORG class whether it is active and compares the feature's D3D11 view with the producer's export to decide.
 - **Where it fits:** a registry of named graph outputs (as `PublishedResources`, but for anchor graphs too) with a query
   "is `Feature::Name` registered now", so a reader declares by name without knowing each producer's class.
@@ -484,3 +485,28 @@ Keys used so far:
 - **Where it fits:** the dual-target shader ABI. A plugin needs the list of header resources and their names kept stable.
   DXC's SPIR-V ignores `row_major` in a templated raw buffer `Load<T>`, so LATCH structs hold matrices as `float4` rows.
 - **Found by:** P3 ExponentialHeightFog (2026-11-09).
+
+### Copies between engine draws
+
+- **Need:** copy or clear a feature's texture between two engine draws, where the feature adds a render target to those draws
+  and each draw reads what the copy wrote.
+- **Who:** Cloud Shadows. It adds a 4th render target (one of 32 layer cubemaps) to the engine's cloud draws into the
+  reflections cubemap. Before each layer's draw it copies the layer below into it, and when a new face starts it clears the
+  face and fills the faces the frame did not draw (`CheckResourcesSide`, `SkyShaderHacks`, `PropagateToCompletion`). None of
+  these points is an anchor, so they stay on D3D11; only the copy into the occlusion cubemap moved (the ReflectionsPrepass
+  anchor). The EarlyPrepass half of the propagation stays on D3D11 too: its copies change every frame, chain into each other,
+  and read and write subresources of the same layer textures, while the graph declares one access per texture per pass.
+- **Where it fits:** P5's sky pass, which makes the layers outputs of the graph's own cloud draws. Short of that, two things
+  would let the propagation move: a copy pass that declares subresource ranges per frame (or takes a copy list from the
+  latch), and a way to copy within one texture between faces in one pass.
+- **Found by:** P3 CloudShadows (2026-11-09).
+
+### A once-a-frame pass at an anchor that runs several times a frame
+
+- **Need:** a pass that runs once a frame at an anchor whose hook runs more than once a frame.
+- **Who:** Cloud Shadows' occlusion copy at ReflectionsPrepass, whose hook runs at every `BSCubeMapCamera::RenderCubemap`.
+  The client's `active` consumes a flag the feature sets once a frame and publishes it in an atomic; the pass's `Revision`
+  and `Prepare` read it so a ticket prepared with another value is prepared again (Terrain Shadows' pattern).
+- **Where it fits:** `FrameAnchors::PassDesc`: a "first run of the frame only" option, or the run's index in the frame in
+  `FrameAnchors::Point`, so the pass decides without its own flag.
+- **Found by:** P3 CloudShadows (2026-11-09).
