@@ -307,6 +307,7 @@ of adding a `Segment` and editing the epoch order. Each anchor is one of CS's ho
 | `EarlyPrepass` | `Deferred::EarlyPrepasses` (after `Main::RenderShadowMaps`) |
 | `Prepass` | `Deferred::PrepassPasses` (the main pass's first opaque batch) |
 | `DeferredPasses` | `Deferred::DeferredPasses`, after the final depth copy |
+| `DeferredComposite` | `Deferred::DeferredPasses`, after the D3D11 SSGI, SSS and cubemap update, where the composite runs |
 | `PostProcessing` | `Upscaling::Main_PostProcessing`, before the upscaler |
 | `Tonemap` | `Main_HDRTonemapBlendCinematic_Render` (`Hooks.cpp`) |
 | `Present` | `IDXGISwapChain_Present` (`Hooks.cpp`), before DCLF's `BeforePresent` |
@@ -323,6 +324,14 @@ Each anchor's ordering rule is in [org-extension-api-notes.md](./org-extension-a
     `FrameAnchors::EngineTarget(RE::RENDER_TARGET)` and `EngineDepth(...)`: DXVK images imported once (`DxvkImageImport`) and
     registered with every anchor graph as `cs.engine.target.<n>` and `cs.engine.depth.<n>`.
 4.  When the graph fails, `onFailed` is called and the client is removed; the feature returns to its D3D11 path.
+5.  CS's shared constant buffers (FrameBuffer, SharedData, FeatureData, Permutation): set `.sharedConstants = true`. The anchor's
+    epoch then writes their values into a `LatchBlock` at the hook (the bytes D3D11 sees there: CS's cached `PerFrame` mapping and
+    State's last uploads) and copies them into four CBV buffers (`cs.shared.*`) before the anchor's passes. A pass declares them
+    with `SharedConstants::Declare` and pushes `SharedConstants::Index` as the shader's `SHARED` entry. `CS_ORG_SHARED_CONSTANTS_CHECK=1`
+    reads the D3D11 buffers back after each such epoch and logs whether the bytes match (a debug switch: it stalls).
+6.  Textures D3D11 features produce (not engine targets) can be read in place, untracked, through
+    `DCLF::GpuTextures::ResolveBinding(srv)` (the ORG deferred composite does, `src/ORGDeferredComposite.cpp`). Keep the binding's
+    owner until no submission can read it.
 
 ```cpp
 // A compute pass at DeferredPasses that reads kMAIN and writes a graph texture.

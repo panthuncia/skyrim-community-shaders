@@ -203,6 +203,25 @@ namespace Util
 		}
 	}
 
+	std::vector<std::pair<std::string, std::string>> GetCommonShaderDefines(std::span<const std::string_view> a_explicit)
+	{
+		std::vector<std::pair<std::string, std::string>> defines;
+		const auto shaderDefines = globals::state->GetDefines();
+		defines.assign(shaderDefines->begin(), shaderDefines->end());
+		const auto present = [&](std::string_view a_name) {
+			return std::ranges::find(a_explicit, a_name) != a_explicit.end() ||
+			       std::ranges::any_of(defines, [&](const auto& a_define) { return a_define.first == a_name; });
+		};
+		for (auto* feature : Feature::GetFeatureList()) {
+			if (!feature->loaded)
+				continue;
+			for (const auto& [name, value] : feature->GetCommonShaderDefines())
+				if (!present(name))
+					defines.emplace_back(name, value);
+		}
+		return defines;
+	}
+
 	ID3D11DeviceChild* CompileShader(const wchar_t* FilePath, const std::vector<std::pair<const char*, const char*>>& Defines, const char* ProgramType, const char* Program)
 	{
 		auto device = globals::d3d::device;
@@ -224,20 +243,12 @@ namespace Util
 			macros.push_back({ "D3DCOMPILE_SKIP_OPTIMIZATION", "" });
 			macros.push_back({ "D3DCOMPILE_DEBUG", "" });
 		}
-		auto shaderDefines = globals::state->GetDefines();
-		if (!shaderDefines->empty()) {
-			for (unsigned int i = 0; i < shaderDefines->size(); i++)
-				macros.push_back({ shaderDefines->at(i).first.c_str(), shaderDefines->at(i).second.c_str() });
-		}
-
-		for (auto* feature : Feature::GetFeatureList()) {
-			if (!feature->loaded)
-				continue;
-			for (const auto& [name, value] : feature->GetCommonShaderDefines()) {
-				if (std::ranges::none_of(macros, [&](const auto& macro) { return name == macro.Name; }))
-					macros.push_back({ name.data(), value.empty() ? nullptr : value.data() });
-			}
-		}
+		std::vector<std::string_view> explicitNames;
+		for (const auto& macro : macros)
+			explicitNames.push_back(macro.Name);
+		const auto commonDefines = GetCommonShaderDefines(explicitNames);
+		for (const auto& [name, value] : commonDefines)
+			macros.push_back({ name.c_str(), value.c_str() });
 		if (!_stricmp(ProgramType, "ps_5_0"))
 			macros.push_back({ "PSHADER", "" });
 		else if (!_stricmp(ProgramType, "vs_5_0"))

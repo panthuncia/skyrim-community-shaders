@@ -19,6 +19,7 @@
 #include "Features/Upscaling.h"
 
 #include "Hooks.h"
+#include "ORGDeferredComposite.h"
 #include "RenderGraph/FrameAnchors.h"
 
 struct DepthStates
@@ -192,6 +193,9 @@ void Deferred::SetupResources()
 		directionalShadowLights = new Buffer(sbDesc, nullptr, "Deferred::DirectionalShadowLights");
 		directionalShadowLights->CreateSRV(srvDesc);
 	}
+
+	// The composite on the render graph, when CS_ORG_COMPOSITE=1 reserved its anchor.
+	ORGDeferredComposite::Get().Setup();
 }
 
 void Deferred::ReflectionsPrepasses()
@@ -372,7 +376,7 @@ void Deferred::DeferredPasses()
 		TracyD3D11Zone(globals::state->tracyCtx, "Deferred Composite");
 
 		ID3D11ShaderResourceView* skylightingProbes = skylighting.loaded && skylighting.texProbeArray ? skylighting.texProbeArray->srv.get() : nullptr;
-		ID3D11ShaderResourceView* srvs[16]{
+		const std::array<ID3D11ShaderResourceView*, 16> srvs{
 			specular.SRV,                                                                         // t0  SpecularTexture
 			albedo.SRV,                                                                           // t1  AlbedoTexture
 			normalRoughness.SRV,                                                                  // t2  NormalRoughnessTexture
@@ -391,22 +395,35 @@ void Deferred::DeferredPasses()
 			ibl.loaded ? ibl.skyIBLTexture->srv.get() : nullptr,                                  // t15 SkyIBLTexture
 		};
 
-		if (dynamicCubemaps.loaded)
-			context->CSSetSamplers(0, 1, &linearSampler);
+		// The render graph's passes here, after the D3D11 SSGI, SSS and cubemap update; the ORG composite among them
+		// (CS_ORG_COMPOSITE=1), which the D3D11 dispatch below then replaces.
+		auto& orgComposite = ORGDeferredComposite::Get();
+		orgComposite.SetFrame({ .interior = interior,
+			.main = static_cast<std::uint32_t>(forwardRenderTargets[0]),
+			.normals = static_cast<std::uint32_t>(forwardRenderTargets[2]),
+			.groupsX = dispatchCount.x,
+			.groupsY = dispatchCount.y,
+			.views = srvs });
+		FrameAnchors::Run(FrameAnchors::Anchor::DeferredComposite);
 
-		context->CSSetShaderResources(0, ARRAYSIZE(srvs), srvs);
+		if (!orgComposite.Composited()) {
+			if (dynamicCubemaps.loaded)
+				context->CSSetSamplers(0, 1, &linearSampler);
 
-		ID3D11UnorderedAccessView* uavs[3]{ main.UAV, normals.UAV, motionVectors.UAV };
-		context->CSSetUnorderedAccessViews(0, ARRAYSIZE(uavs), uavs, nullptr);
+			context->CSSetShaderResources(0, static_cast<UINT>(srvs.size()), srvs.data());
 
-		auto shader = interior ? GetComputeMainCompositeInterior() : GetComputeMainComposite();
-		context->CSSetShader(shader, nullptr, 0);
+			ID3D11UnorderedAccessView* uavs[3]{ main.UAV, normals.UAV, motionVectors.UAV };
+			context->CSSetUnorderedAccessViews(0, ARRAYSIZE(uavs), uavs, nullptr);
 
-		{
-			TracyD3D11Zone(globals::state->tracyCtx, "Deferred Composite - Dispatch");
-			globals::profiler->BeginPass("DeferredComposite");
-			context->Dispatch(dispatchCount.x, dispatchCount.y, 1);
-			globals::profiler->EndPass();
+			auto shader = interior ? GetComputeMainCompositeInterior() : GetComputeMainComposite();
+			context->CSSetShader(shader, nullptr, 0);
+
+			{
+				TracyD3D11Zone(globals::state->tracyCtx, "Deferred Composite - Dispatch");
+				globals::profiler->BeginPass("DeferredComposite");
+				context->Dispatch(dispatchCount.x, dispatchCount.y, 1);
+				globals::profiler->EndPass();
+			}
 		}
 	}
 
@@ -602,6 +619,7 @@ void Deferred::CopyShadowLightData()
 
 void Deferred::ClearShaderCache()
 {
+	ORGDeferredComposite::Get().ClearShaderCache();
 	if (mainCompositeCS) {
 		mainCompositeCS->Release();
 		mainCompositeCS = nullptr;
