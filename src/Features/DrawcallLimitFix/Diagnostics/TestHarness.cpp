@@ -23,6 +23,7 @@
 #include "Features/Upscaling.h"
 #include "GpuEventTimers.h"
 #include "Globals.h"
+#include "Menu.h"
 
 #include <Tracy/Tracy.hpp>
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -452,6 +453,14 @@ namespace DCLF
 					}
 					// "dclf:menu=<menu name>=show|hide": a menu opened or closed through the UI message queue (e.g. "Journal Menu", the
 					// system menu Escape opens), so a scripted run pauses the game as a player does.
+					// "dclf:cs-menu=open|close": Community Shaders' own menu (ImGui), as its key opens it.
+					if (command.rfind("dclf:cs-menu=", 0) == 0) {
+						if (command.substr(13) == "open")
+							Menu::GetSingleton()->Open();
+						else
+							Menu::GetSingleton()->Close();
+						return;
+					}
 					if (command.rfind("dclf:menu=", 0) == 0) {
 						const auto rest = command.substr(10);
 						const auto equals = rest.rfind('=');

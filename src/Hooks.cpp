@@ -41,6 +41,7 @@
 #include "Features/Upscaling/DXVKInterop.h"
 #include "Features/Upscaling/Streamline.h"
 #include "Features/VolumetricLighting.h"
+#include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Utils/ImportCallSites.h"
 #include "Vram/Debug.h"
@@ -545,7 +546,10 @@ struct IDXGISwapChain_Present
 						ZoneScopedN("CS.Present.NativeWait");
 						GpuEventTimers::BeginEvent("mark before native present");
 						GpuEventTimers::EndEvent();
-						const auto presented = func(sc, si, f);
+						// The owned frame: DXVK's headless Present ends the guest frame, ORG presents behind it.
+						const auto presented = RenderGraph::Engine::OwnedFrame::Active() ?
+						                           RenderGraph::Engine::OwnedFrame::Get().Present(sc, si, f, [](IDXGISwapChain* a_sc, unsigned a_si, unsigned a_f) { return func(a_sc, a_si, a_f); }) :
+						                           func(sc, si, f);
 						GpuEventTimers::BeginEvent("mark after native present");
 						GpuEventTimers::EndEvent();
 						return presented;
