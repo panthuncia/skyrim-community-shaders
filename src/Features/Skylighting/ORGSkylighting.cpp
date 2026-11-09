@@ -188,8 +188,10 @@ namespace
 			a_builder.PreferQueue(org::QueueKind::Graphics);
 			ProbeBindings bindings{};
 			bindings.occlusion = a_builder.ShaderResource(occlusion).View();
-			bindings.shadowCascades = a_builder.ShaderResource(shadowCascades).View();
-			bindings.esramShadows = a_builder.ShaderResource(esramShadows).View();
+			// The shader reads the cascades as one Texture2DArray: the whole-array view, not the default (first slice).
+			const org::SrvView wholeArray{ .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull) };
+			bindings.shadowCascades = a_builder.ShaderResource(shadowCascades, wholeArray).View();
+			bindings.esramShadows = a_builder.ShaderResource(esramShadows, wholeArray).View();
 			for (std::size_t i = 0; i < kVolumes; ++i)
 				bindings.volumes[i] = a_builder.UnorderedAccess(volumes[i]).View();
 			return bindings;
