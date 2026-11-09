@@ -1,15 +1,23 @@
+// Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers are heap reads
+// (ORG_SHARED_CONSTANTS).
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+#define INFER_CUBEMAP_RESOURCES(X)                           \
+	X(SHARED, ConstantBuffer, Shared, 0)                     \
+	X(SRV, TextureCube<float4>, EnvCaptureTexture, 0)        \
+	X(SRV, TextureCube<float4>, ReflectionsTexture, 1)       \
+	X(SRV, TextureCube<float4>, DefaultCubemap, 2)           \
+	X(UAV, RWTexture2DArray<float4>, EnvInferredTexture, 0) \
+	X(SAMPLER, SamplerState, LinearSampler, 0)
+ORG_PUSH_BLOCK(INFER_CUBEMAP_RESOURCES(ORG_HANDLE))
+
 #include "Common/Color.hlsli"
 #include "Common/ColorManagement.hlsli"
 #include "Common/SharedData.hlsli"
 #include "DynamicCubemaps/CubemapCommon.hlsli"
 
-TextureCube<float4> EnvCaptureTexture : register(t0);
-TextureCube<float4> ReflectionsTexture : register(t1);
-TextureCube<float4> DefaultCubemap : register(t2);
-
-RWTexture2DArray<float4> EnvInferredTexture : register(u0);
-
-SamplerState LinearSampler : register(s0);
+INFER_CUBEMAP_RESOURCES(ORG_RESOURCE)
 
 [numthreads(8, 8, 1)] void main(uint3 ThreadID : SV_DispatchThreadID) {
 	uint width, height, depth;

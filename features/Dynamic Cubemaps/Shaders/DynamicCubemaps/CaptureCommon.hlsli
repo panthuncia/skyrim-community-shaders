@@ -1,15 +1,10 @@
 #ifndef DYNAMIC_CUBEMAPS_CAPTURE_COMMON_HLSLI
 #define DYNAMIC_CUBEMAPS_CAPTURE_COMMON_HLSLI
 
-#include "Common/Color.hlsli"
-#include "Common/ColorManagement.hlsli"
-#include "Common/FrameBuffer.hlsli"
-#include "Common/SharedData.hlsli"
-#include "DynamicCubemaps/CubemapCommon.hlsli"
-
-RWTexture2DArray<float4> DynamicCubemap : register(u0);
-RWTexture2DArray<float4> DynamicCubemapRaw : register(u1);
-RWTexture2DArray<float4> DynamicCubemapPosition : register(u2);
+// Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers are heap reads
+// (ORG_SHARED_CONSTANTS) and the capture constants are the frame's latch region, declared below.
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
 
 struct CaptureLightingState
 {
@@ -19,12 +14,44 @@ struct CaptureLightingState
 	uint Initialized;
 };
 
-RWStructuredBuffer<CaptureLightingState> LightingState : register(u3);
+struct UpdateCubemapConstants
+{
+	float3 CameraPreviousPosAdjust2;
+	uint CaptureIndex;
+	float CaptureDeltaTime;
+	uint ResetCapture;
+	uint2 UpdatePadding;
+};
 
-Texture2D<float> DepthTexture : register(t0);
-Texture2D<float4> ColorTexture : register(t1);
-SamplerState LinearSampler : register(s0);
+#define CAPTURE_RESOURCES(X)                                            \
+	X(SHARED, ConstantBuffer, Shared, 0)                                \
+	X(UAV, RWTexture2DArray<float4>, DynamicCubemap, 0)                 \
+	X(UAV, RWTexture2DArray<float4>, DynamicCubemapRaw, 1)              \
+	X(UAV, RWTexture2DArray<float4>, DynamicCubemapPosition, 2)         \
+	X(UAV, RWStructuredBuffer<CaptureLightingState>, LightingState, 3) \
+	X(SRV, Texture2D<float>, DepthTexture, 0)                           \
+	X(SRV, Texture2D<float4>, ColorTexture, 1)                          \
+	X(SAMPLER, SamplerState, LinearSampler, 0)                          \
+	X(EXTERN_LATCH, UpdateCubemapConstants, UpdateData, 0)
+ORG_PUSH_BLOCK(CAPTURE_RESOURCES(ORG_HANDLE))
 
+#include "Common/Color.hlsli"
+#include "Common/ColorManagement.hlsli"
+#include "Common/FrameBuffer.hlsli"
+#include "Common/SharedData.hlsli"
+#include "DynamicCubemaps/CubemapCommon.hlsli"
+
+CAPTURE_RESOURCES(ORG_RESOURCE)
+
+// The capture constants. D3D11: the cbuffer at b0. ORG: the frame's latch region, read through
+// the names the cbuffer gives them.
+#if defined(CS_ORG_BINDLESS)
+ORG_RESOURCE(LATCH, UpdateCubemapConstants, UpdateData, 0)
+#	define CameraPreviousPosAdjust2 UpdateData.CameraPreviousPosAdjust2
+#	define CaptureIndex UpdateData.CaptureIndex
+#	define CaptureDeltaTime UpdateData.CaptureDeltaTime
+#	define ResetCapture UpdateData.ResetCapture
+#else
 cbuffer UpdateData : register(b0)
 {
 	float3 CameraPreviousPosAdjust2;
@@ -33,6 +60,7 @@ cbuffer UpdateData : register(b0)
 	uint ResetCapture;
 	uint2 UpdatePadding;
 }
+#endif
 
 static const float CaptureHistoryLifetime = 30.0;
 
