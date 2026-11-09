@@ -296,6 +296,95 @@ Where the timings come from now:
     operation's time appears in no timer. The copy of the upscaler's output into `kMAIN`, the first
     operation after the interop flush, is one (estimated from bandwidth at about 0.1 ms at 4K, not measured), so it has no timer.
 
+## Frame anchors: attaching feature passes
+
+A feature that moves its GPU work onto the graph attaches its passes to a frame anchor (`src/RenderGraph/FrameAnchors.h`) instead
+of adding a `Segment` and editing the epoch order. Each anchor is one of CS's hook points:
+
+| Anchor | Hook |
+| --- | --- |
+| `ReflectionsPrepass` | `Deferred::ReflectionsPrepasses` (`BSCubeMapCamera::RenderCubemap`) |
+| `EarlyPrepass` | `Deferred::EarlyPrepasses` (after `Main::RenderShadowMaps`) |
+| `Prepass` | `Deferred::PrepassPasses` (the main pass's first opaque batch) |
+| `DeferredPasses` | `Deferred::DeferredPasses`, after the final depth copy |
+| `PostProcessing` | `Upscaling::Main_PostProcessing`, before the upscaler |
+| `Tonemap` | `Main_HDRTonemapBlendCinematic_Render` (`Hooks.cpp`) |
+| `Present` | `IDXGISwapChain_Present` (`Hooks.cpp`), before DCLF's `BeforePresent` |
+
+Each anchor's ordering rule is in [org-extension-api-notes.md](./org-extension-api-notes.md), "Attaching passes to the frame".
+
+**How a feature uses one.**
+
+1.  Before the graph initializes (`Load` or `PostPostLoad`, when its ORG path is on): `FrameAnchors::Reserve(anchor)`.
+2.  Once the runtime is active (`SetupResources`): make its programs and resources, then `FrameAnchors::Register(client)`. A
+    client is an id, its passes (name, anchor, order key, kind, and a `make` that returns a new `TypedRenderGraphPass` at each
+    build), and optional callbacks: `registerResources`, `commit` (latch writes inside the epoch), `active` and `onFailed`.
+3.  The passes declare what they read and write as any graph pass does. Engine targets come from
+    `FrameAnchors::EngineTarget(RE::RENDER_TARGET)` and `EngineDepth(...)`: DXVK images imported once (`DxvkImageImport`) and
+    registered with every anchor graph as `cs.engine.target.<n>` and `cs.engine.depth.<n>`.
+4.  When the graph fails, `onFailed` is called and the client is removed; the feature returns to its D3D11 path.
+
+```cpp
+// A compute pass at DeferredPasses that reads kMAIN and writes a graph texture.
+struct Bindings { org::DeclaredViewToken main, out; };
+class MyPass final : public org::TypedRenderGraphPass<MyPass, Frame, Bindings> {
+	Bindings Declare(org::PassBuilder& b) {
+		b.PreferQueue(org::QueueKind::Graphics);
+		return { b.ShaderResource(main).View(), b.UnorderedAccess(out).View() };
+	}
+	// Revision, Prepare and Record as in ORGLightCulling.cpp: bind program->layout and Pipeline(), push indices, Dispatch.
+};
+
+FrameAnchors::Reserve(FrameAnchors::Anchor::DeferredPasses);  // at load
+auto main = FrameAnchors::EngineTarget(RE::RENDER_TARGET::kMAIN);
+FrameAnchors::Register({ .id = "cs.myfeature",
+	.passes = { { .name = "cs.myfeature.resolve", .anchor = FrameAnchors::Anchor::DeferredPasses, .order = 100,
+		.kind = FrameAnchors::PassKind::Compute, .make = [=] { return std::make_shared<MyPass>(main, out, program); } } },
+	.registerResources = [=](org::RenderGraph& g) { g.RegisterResource(org::ResourceIdentifier("cs.myfeature.out"), out); } });
+```
+
+**How anchors map onto epochs.**
+
+-   Each anchor is a `Segment` of its own (`Segment::Anchor*`), and a reserved one is an epoch: in the host's epoch order (before
+    the first epoch the frame runs after it), a live async epoch, and in DXVK's stream with the others.
+-   `RenderGraphRuntime::Initialize` asks `FrameAnchors::AddToFrame` for the reserved epochs, then `FrameAnchors::Attach` adds one
+    host extension (`cs.org.frame-anchors`). At each build it gives an anchor's graph that anchor's passes, sorted by key, and the
+    clients' resources. Other epochs' graphs get nothing from it.
+-   A client change rebuilds only its anchors' epochs (`GraphHost::RequestRebuild(epoch)`). DCLF's condition changes no longer
+    rebuild them (`RenderGraphRuntime::IsDclfSegment`).
+-   **Cost.** An anchor nobody reserved has no epoch: no graph, no frame slots, and its hook is one load. A reserved anchor whose
+    clients are all inactive (`active`) submits nothing at its hook; its ticket waits, prepared, for the next run.
+-   **Frames in flight.** The host's frame slots are frames in flight times the epochs, so every reserved anchor adds
+    `kGameFramesInFlight` slots. Size `LatchBlock`s from `GraphHost::FrameSlots()` after the runtime is up, as LLF does. An anchor that
+    runs several times a frame (`ReflectionsPrepass`, at each cubemap render) uses its ring that much faster, and may wait for a
+    slot when the CPU is far ahead of the GPU.
+-   **The hazard rule.** After the late anchors (`PostProcessing`, `Tonemap`, `Present`) have run an epoch, `Run` calls
+    `Upscaling::SeparateFromGraphEpochs()`. An upscaler, frame generation or the present can follow these, and none may run directly
+    behind a graph epoch (above, "Hazard: external Vulkan work directly after a graph epoch"). The earlier anchors are followed by
+    the engine's own draws.
+-   **Not shared with DCLF.** DCLF keeps its schedule (`Schedule/Frame.cpp`, `Api/Passes.h`): its passes depend on its scene
+    revisions and recorded shapes. Anchors are the thin layer for every other feature. DCLF's imports and the anchors' imports of
+    the same engine image are separate graph resources; that is safe because they never share an epoch.
+
+## Raster programs
+
+`RasterProgram` (`src/RenderGraph/RasterProgram.h`) is `ComputeProgram`'s raster twin, for fullscreen vertex and pixel shader
+passes on ORG render passes. It replaces `PostProcessing/RasterPass` and the pixel-shader passes in Upscaling and Effects11 as
+they are ported.
+
+-   **Compile.** Both stages compile with DXC through the same path (`ProgramBuild.{h,cpp}`, shared with `ComputeProgram`):
+    ORGModuleServices' shader store, SPIR-V, BasicRHI's bindless ABI. The default vertex stage is `RenderGraph/FullscreenVS.hlsl`,
+    a three-vertex triangle with `TEXCOORD0` as in PostProcessing's `fullscreen.hlsli`.
+-   **State.** `Desc` gives up to eight colour targets, each with its format and `rhi::BlendAttachment`, an optional depth format
+    and `DepthStencilState` (off by default), the `RasterState` (no culling by default) and the push-block size. The push block is a
+    `cbuffer` at b0 that both stages read.
+-   **Draw.** A pass declares its targets (`RenderTarget`, a mip or slice through `RtvView`) and depth (`DepthRead` or
+    `DepthReadWrite`), then calls `Draw` at record time with the declared views, load ops and clear values, the viewport, and the
+    constants. The viewport is the render area, so a mip's size is set there.
+-   **Hot reload.** As for compute programs: registered with the pipeline registry with both sources as dependencies.
+-   **Not covered yet:** the blend factor and sample mask that CODBloom's upsample uses (`D3D11_BLEND_BLEND_FACTOR`), which wait
+    for P0.2. A viewport smaller than the render area, or a separate scissor, waits for P0.4.
+
 ## The schedule inspector
 
 To see what the persistent graph executes (batches per queue, the barriers before each pass, and every cross-queue wait with its cause), use the menu's
@@ -309,6 +398,7 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 | `CS_ORG=features` | Request the device features but never create the graph (isolates device-configuration side effects). |
 | `CS_ORG_SUBMIT=flush` | Use the flush-and-lock submission path even when DXVK supports the stream path. |
 | `CS_ORG_LLF_PARITY=1` | Every 300 frames, also run LLF's D3D11 culling and compare each cluster's light set with the graph's (logs `LLF parity OK` / `MISMATCH`). |
+| `CS_ORG_ANCHOR_SELFTEST=1` | Reserve every frame anchor and run a test client at each: a raster pass writes a texture, a compute pass reads it and one texel of kMAIN into a buffer, and a copy reads that back. Each anchor logs `[ORG] anchor self-test: <anchor> OK` once, then `every anchor OK`. |
 | `CS_ORG_EPOCH_STATS=1` | Log render-thread CPU time per epoch (average and maximum every 600 epochs). |
 | `CS_ORG_ASYNC_EPOCHS=0` | Run the epochs synchronously. By default each epoch is prepared and recorded ahead on the graph host's thread, and the render thread only admits and submits ("Revisions and recordings" in `dclf-architecture.md`). |
 | `CS_ORG_IN_STREAM=0` | Enqueue the async epochs' batches behind DXVK's command list (`dxvkEnqueueInteropSubmission`) instead of running their graphics work inside it. A list such as `0,3` keeps only those epochs in the stream. |

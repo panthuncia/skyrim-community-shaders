@@ -65,6 +65,43 @@ One entry per need. Give:
 
 - **Need:** run compute or raster work at a defined point in the frame, with declared inputs and outputs.
 - **Who:** any plugin that adds a GPU effect.
-- **Where it fits:** the frame anchors from P2.2 (ReflectionsPrepass, EarlyPrepass, Prepass, DeferredPasses, Tonemap,
-  PostProcessing, Present). Each anchor's ordering rule is recorded here when it is built.
+- **Where it fits:** the frame anchors from P2.2 (`src/RenderGraph/FrameAnchors.h`; render-graph.md, "Frame anchors"). CS's
+  own features use them now. An external plugin would need the same calls through an exported table, as the contributor ABI
+  has: a reserved anchor is already a contributor epoch (`cs.anchor.<name>`).
 - **Found by:** survey for the plan (2026-11-09).
+
+How the anchors order work:
+
+- An anchor runs at one hook. It runs after the D3D11 work CS's features do at that hook, unless its rule says otherwise.
+- Within an anchor, passes run by order key, lowest first. Equal keys keep the registration order.
+- The key only decides between passes that do not depend on each other. The graph orders a reader after its writer anyway.
+- Leave gaps of 100 between features' keys, so a pass can go between them later. Add each feature's keys to its anchor's rule.
+- An anchor nobody reserved has no epoch. A reserved anchor with no active client submits nothing.
+- After PostProcessing, Tonemap and Present, the anchor separates its epoch from Vulkan work that may follow. That is the hazard
+  rule in render-graph.md.
+
+Each anchor's rule:
+
+- **ReflectionsPrepass.** At `BSCubeMapCamera::RenderCubemap`, before the engine draws the cubemap. After every feature's
+  `ReflectionsPrepass`. It runs once per cubemap render, which can be zero or several times a frame. Each run is one
+  execution of its epoch.
+- **EarlyPrepass.** After `Main::RenderShadowMaps` returns. The shadow maps are drawn, DCLF's shadow epoch included, and the
+  shadow light data is copied (t98). After every feature's `EarlyPrepass`. Before `Main::RenderDepth`: the scene depth is
+  not drawn yet.
+- **Prepass.** At the main pass's first opaque batch, inside `StartDeferred`. After every feature's `Prepass`, so after Light
+  Limit Fix's culling epoch. Before DCLF's colour epoch. The Z-prepass depth is drawn. The GBuffer targets are bound but not
+  cleared yet: they still hold the last frame.
+- **DeferredPasses.** In `EndDeferred`, after the opaque pass, the blended decals and the final depth copy into
+  `kPOST_ZPREPASS_COPY`. Before the D3D11 SSGI, SSS, cubemap update, deferred composite and Effects11's rays. The GBuffer is
+  complete. Until the composite is an ORG pass (P2.7), a pass that must follow the composite cannot use this anchor.
+- **PostProcessing.** At `Main_PostProcessing`, before Post Processing's `DrawBeforeUpscaling`, the upscaler and the
+  ImageSpace chain. The scene is at render resolution.
+- **Tonemap.** At the ImageSpace HDR tonemap's render, after the upscaler. Before Effects11 and Post Processing's `PreProcess`.
+  `Point::input` and `Point::output` are the tonemap's targets. Its graph may record ahead of the hook, so a pass that depends
+  on them puts them in its revision.
+- **Present.** In `IDXGISwapChain::Present`, before DCLF's `BeforePresent`, the frame pace signal, CS's overlay, HDR output,
+  frame generation and the present. It is not after the UI yet: an overlay pass after the UI needs P1.6.
+
+Keys used so far:
+
+- The anchor self-test (`CS_ORG_ANCHOR_SELFTEST`): 0, 1 and 2 at every anchor.
