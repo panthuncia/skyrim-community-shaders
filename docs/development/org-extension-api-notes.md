@@ -484,3 +484,16 @@ Keys used so far:
 - **Where it fits:** the dual-target shader ABI. A plugin needs the list of header resources and their names kept stable.
   DXC's SPIR-V ignores `row_major` in a templated raw buffer `Load<T>`, so LATCH structs hold matrices as `float4` rows.
 - **Found by:** P3 ExponentialHeightFog (2026-11-09).
+
+### Running a plugin's .fx effects
+
+- **Need:** a plugin ships ENB-style `.fx` effects (techniques, passes, UI-annotated globals, named render targets) and
+  wants them run as passes at a point of the frame, with their variables in CS's menu and ini, without FX11 or D3D11.
+- **Who:** CS's Effects11 (ENB presets at the tonemap, through FX11 today); post-processing plugins that embed FX11 or
+  write their own D3D11 passes for the same purpose.
+- **Where it fits:** the ORG FX runtime (`docs/development/org-fx-runtime.md`). Its parser and lowering
+  (`src/Features/Effects11/ORG/`) are std-only for this reason. An export would take the effect text (or a file and an
+  include folder), the textures it reads by name (graph resources, or CS's own names such as `TextureDepth`), an anchor
+  and order key; and return the UI variables and a handle to set values and choose techniques. Values reach the GPU as a
+  latched values block plus a handle table (two push words per pass), so recordings stay reusable.
+- **Found by:** P3 W5, ORG FX runtime (2026-11-09).

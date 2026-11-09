@@ -1,10 +1,13 @@
 # ORG FX runtime: ENB-style `.fx` presets without FX11
 
-Plan task P3 W5 ([org-full-port.md](./org-full-port.md)). Effects11 runs ENB-style `.fx` presets at the Tonemap position
-through FX11 (`D3DX11CreateEffectFromMemory`, `src/Features/Effects11/Effects/Effect.cpp`). FX11 is a D3D11 library: it
-owns the shaders, constant buffers, state objects and binds them with `ID3DX11EffectPass::Apply`. This document designs
-its replacement: an `.fx` front end that CS owns, DXC compiles per pass, and ORG raster passes in the Tonemap anchor. FX11
-stays as the default; `CS_ORG_FX=1` selects the new runtime.
+Plan task P3 W5 ([org-full-port.md](./org-full-port.md)). Status (2026-11-09): design, parser and lowering are written and
+checked offline against the corpus (section 10); execution on ORG is not started.
+
+Effects11 runs ENB-style `.fx` presets at the Tonemap position through FX11 (`D3DX11CreateEffectFromMemory`,
+`src/Features/Effects11/Effects/Effect.cpp`). FX11 is a D3D11 library: it owns the shaders, constant buffers, state
+objects and binds them with `ID3DX11EffectPass::Apply`. This document designs its replacement: an `.fx` front end that
+CS owns, DXC compiles per pass, and ORG raster passes in the Tonemap anchor. FX11 stays as the default; `CS_ORG_FX=1`
+selects the new runtime.
 
 ## 1. What Effects11 uses from FX11 today
 
@@ -12,17 +15,17 @@ stays as the default; `CS_ORG_FX=1` selects the new runtime.
 
 `EffectManager::ExecuteEffects` (called from the Tonemap hook, `Effects11.cpp`) runs, all on the D3D11 immediate context:
 
-| Step | Code                                  | Input                                   | Output                                          |
-| ---- | ------------------------------------- | --------------------------------------- | ----------------------------------------------- |
-| 1    | `ApplyColorCorrection` (CS-owned CS)  | `kMAIN` UAV                             | `kMAIN` in place                                |
-| 2    | `enbdepthoffield.fx`                  | techniques `Aperture`, `ReadFocus`, `Focus` by name, then the selected chain on `kMAIN` | aperture/focus history pairs, then `kMAIN` (copy back) |
-| 3    | `TextureManager::UpdateDownsampledTexture` (CS-owned PS) | `kMAIN`                | 1024² mip chain (`TextureDownsampled`, blurry mip 2) |
-| 4    | `enbbloom.fx`                         | `TextureDownsampled`                    | `TextureBloom` (1024², ping-pong with `TextureBloomTemp`) |
-| 5    | `enblens.fx`                          | `TextureDownsampled`                    | `TextureLens` (ping-pong with `TextureHDRTemp`) |
-| 6    | `enbadaptation.fx`                    | techniques `Downsample` (16², from the sun-masked blurry mip) and `Draw` | `TextureAdaptation` / `TextureAdaptationSwap` (1x1 R32F, history pair) |
-| 7    | `enbeffect.fx` (required)             | `kMAIN` (HDR)                           | `TextureSDRTemp` (R10G10B10A2, ping-pong with `TextureSDRTemp2`) |
-| 8    | `enbeffectpostpass.fx`                | `TextureSDRTemp`                        | `TextureSDRTemp2`/scratch, copied back           |
-| 9    | `CopyTexture`                         | `TextureSDRTemp`                        | the hook's output target                         |
+| Step | Code                                                     | Input                                                                                   | Output                                                                 |
+| ---- | -------------------------------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| 1    | `ApplyColorCorrection` (CS-owned CS)                     | `kMAIN` UAV                                                                             | `kMAIN` in place                                                       |
+| 2    | `enbdepthoffield.fx`                                     | techniques `Aperture`, `ReadFocus`, `Focus` by name, then the selected chain on `kMAIN` | aperture/focus history pairs, then `kMAIN` (copy back)                 |
+| 3    | `TextureManager::UpdateDownsampledTexture` (CS-owned PS) | `kMAIN`                                                                                 | 1024² mip chain (`TextureDownsampled`, blurry mip 2)                   |
+| 4    | `enbbloom.fx`                                            | `TextureDownsampled`                                                                    | `TextureBloom` (1024², ping-pong with `TextureBloomTemp`)              |
+| 5    | `enblens.fx`                                             | `TextureDownsampled`                                                                    | `TextureLens` (ping-pong with `TextureHDRTemp`)                        |
+| 6    | `enbadaptation.fx`                                       | techniques `Downsample` (16², from the sun-masked blurry mip) and `Draw`                | `TextureAdaptation` / `TextureAdaptationSwap` (1x1 R32F, history pair) |
+| 7    | `enbeffect.fx` (required)                                | `kMAIN` (HDR)                                                                           | `TextureSDRTemp` (R10G10B10A2, ping-pong with `TextureSDRTemp2`)       |
+| 8    | `enbeffectpostpass.fx`                                   | `TextureSDRTemp`                                                                        | `TextureSDRTemp2`/scratch, copied back                                 |
+| 9    | `CopyTexture`                                            | `TextureSDRTemp`                                                                        | the hook's output target                                               |
 
 `enbeffectprepass.fx`, `enbunderwater.fx`, `enbsunsprite.fx` and `enbsmaa.fx` exist in presets but Effects11 does not run
 them (`enbsmaa.fx` is only included by postpass). The volumetric/sun rays passes (W4) and the adaptation sun mask are
@@ -115,29 +118,29 @@ parser still recognises them (section 3), so a preset that uses them gets a clea
 
 ```
 .fx file ──(1.2 steps 1-3, unchanged)──> preprocessed text
-  ──Fx::Parse──> Fx::EffectDesc (techniques, passes, globals, resources, samplers, functions, structs, annotations)
-  ──Fx::Lower──> one HLSL translation unit per pass stage (bindless prologue + original body + entry wrapper)
+  ──OrgFx::Parse──> OrgFx::EffectDesc (techniques, passes, globals, resources, samplers, functions, structs, annotations)
+  ──OrgFx::Lower──> one HLSL translation unit per pass stage (bindless prologue + original body + entry wrapper)
   ──DXC (RasterProgram)──> SPIR-V pipelines
-  ──Fx::Runtime──> values image, latches, graph passes in the Tonemap anchor
+  ──OrgFx::Runtime──> values image, latches, graph passes in the Tonemap anchor
 ```
 
 Module layout, `src/Features/Effects11/ORG/`:
 
-| File                    | What                                                                                           | Depends on       |
-| ----------------------- | ---------------------------------------------------------------------------------------------- | ---------------- |
-| `FxModel.h`             | The data model.                                                                                | std only         |
-| `FxParser.{h,cpp}`      | Tokenizer, parser, constant evaluator, ENB technique chains, `$Globals` packing.               | std only         |
-| `FxSourceText.{h,cpp}`  | Text passes shared with FX11's path: stringify macros, `#line` stripping.                       | std only         |
-| `FxLower.{h,cpp}`       | Model + text to DXC sources (step 3).                                                         | std only         |
-| `ORGFxRuntime.{h,cpp}`  | Programs, values, latches, Tonemap anchor passes (step 3).                                    | ORG, RasterProgram |
+| File                   | What                                                                             | Depends on         |
+| ---------------------- | -------------------------------------------------------------------------------- | ------------------ |
+| `FxModel.h`            | The data model.                                                                  | std only           |
+| `FxParser.{h,cpp}`     | Tokenizer, parser, constant evaluator, ENB technique chains, `$Globals` packing. | std only           |
+| `FxSourceText.{h,cpp}` | Text passes shared with FX11's path: stringify macros, `#line` stripping.        | std only           |
+| `FxLower.{h,cpp}`      | Model + text to DXC sources, one per pass.                                       | std only           |
+| `ORGFxRuntime.{h,cpp}` | Programs, values, latches, Tonemap anchor passes (step 3).                       | ORG, RasterProgram |
 
 The parser and lowering have no D3D11 or ORG dependency so they can be tested offline
 (`tools/fx-parse-check`, section 6) and reused by an extension API (section 8).
 
-## 3. Parser (`Fx::Parse`)
+## 3. Parser (`OrgFx::Parse`)
 
 Input: the preprocessed text (any leftover `#` line is skipped; comments are handled, so raw source also parses when it
-has no macros). Output: `Fx::EffectDesc` plus diagnostics with line numbers. It never throws; an unknown construct at
+has no macros). Output: `OrgFx::EffectDesc` plus diagnostics with line numbers. It never throws; an unknown construct at
 global scope is skipped to the next `;` or balanced `}` with a warning.
 
 Recognised at global scope:
@@ -150,7 +153,7 @@ Recognised at global scope:
   (`VertexShader vs = CompileShader(...);`). Arguments are kept as text and classified (literal, global resource,
   expression).
 - State objects: `SamplerState`, `SamplerComparisonState`, `BlendState`, `DepthStencilState`, `RasterizerState`, with
-  indexed keys (`BlendEnable[0]`). Samplers are decoded into `Fx::SamplerDesc` (filter, address modes, LOD, anisotropy,
+  indexed keys (`BlendEnable[0]`). Samplers are decoded into `OrgFx::SamplerDesc` (filter, address modes, LOD, anisotropy,
   comparison, border colour); the other three into typed descs for the keys D3D11 defines; unknown keys are kept raw and
   reported.
 - Global variables: storage modifiers, type (scalar/vector/matrix, struct, `string`, resource or sampler with optional
@@ -168,32 +171,43 @@ Derived views computed after parsing:
   arguments onto the `uniform` parameters; mismatches are diagnostics.
 - **`$Globals` layout**: FXC's cbuffer packing (16-byte rows, no straddling, arrays start rows, structs start rows) for
   every non-static numeric global, so the CPU value image matches what FX11 had and the generated loads read it back.
+- **Default values** (`BuildDefaultValues`): the evaluated initializers written at their offsets, as FXC writes them.
+  Two FXC habits found by comparing with its reflection: `true` is stored as `0xFFFFFFFF`, and a global matrix's
+  initializer list is read column by column whatever the constructor says. FX11 starts from those bytes, so the image
+  does the same.
 - **ENB view**: UI variables in source order (the `UIName` rule of `CreateUIVariable`), labels/groups from `string`
   globals, `ResourceName` textures, `ExternBinding` globals.
 
-## 4. Lowering to DXC (`Fx::Lower`, step 3)
+## 4. Lowering to DXC (`OrgFx::LowerEffect`, `OrgFx::LowerPass`)
 
-One translation unit per pass and stage, cached by its hash:
+`LowerEffect` makes the effect's body once; `LowerPass` appends one pass's entry wrappers, giving one source per pass with
+entries `OrgFxVS` and `OrgFxPS` (passes with the same shaders produce the same text, so the shader store dedupes them):
 
-1. **Remove** every technique, group, state object, `string` global, annotation list, numeric uniform global and
-   resource/sampler global from the text (by the ranges the parser records). Function bodies, structs, classes and
-   `static` globals stay byte for byte.
-2. **Prologue (bindless ABI).** The push block is three words: the latch buffer's heap handle, this pass's values
-   offset, and its handle-table offset. Then:
-   - each numeric global: `static float4 Timer = OrgFxValues.Load<float4>(OrgFxValueOffset + 16);` at its `$Globals`
-     offset; arrays and matrices load element by element (DXC's SPIR-V ignores `row_major` in templated loads; FXC's
-     default column-major packing is reproduced explicitly);
-   - each texture: `static Texture2D<float4> TextureColor = ResourceDescriptorHeap[FxHandle(3)];`
-     where `FxHandle(i)` reads the pass's handle table; each sampler from `SamplerDescriptorHeap` likewise. This is the
-     `OrgResources.hlsli` LATCH/SRV expansion, generated, because a preset can have more resources than the 32-word push
-     block holds.
+1. **Replace in place.** Each uniform global's statement becomes a `static` of the same type initialised from the values
+   buffer; each texture and sampler becomes a `static` taken from the descriptor heaps. In place, not in a prologue, so a
+   uniform of a struct type still follows its struct. Techniques, groups, state objects, `string` and shader globals,
+   and annotations on kept statics are blanked. Newlines are kept and a `#line 1` follows the prologue, so DXC's messages
+   give lines of the preprocessed text. Function bodies, structs, classes and `static` globals stay byte for byte.
+2. **Prologue (bindless ABI).** The push block (`cbuffer OrgFxBindings : register(b0)`, as `OrgResources.hlsli`) is two
+   words: the heap index of a raw buffer (a `LatchBlock` region in practice) and this pass's byte offset in it. The
+   region holds the constant buffers (`$Globals`, then each `cbuffer`, `LoweredEffect::regions`) and, from
+   `LoweredEffect::valuesSize`, one heap index per `LoweredEffect::resources` entry. So:
+    - `static float4 Timer = OrgFxValues.Load<float4>(OrgFxValuesOffset + 16u);` at the variable's offset; bools compare
+      with zero; arrays, matrices and structs load element by element into initializer lists (DXC's SPIR-V ignores
+      `row_major` in templated loads, so matrices are built from scalars with FXC's register layout);
+    - `static Texture2D TextureColor = ResourceDescriptorHeap[OrgFxHandle(3)];`, samplers from `SamplerDescriptorHeap`.
+      This is the `OrgResources.hlsli` LATCH/SRV expansion, generated, because presets have 13-18 resources, more than
+      the 32-word push block holds as handles.
 3. **Entry wrappers.** The vertex wrapper takes `SV_VertexID` and builds the user's input (struct members by semantic:
-   `POSITION` from the quad corner, `TEXCOORD0` from its UV) for a 6-vertex two-triangle quad with the same corners and
-   UVs as Effects11's strip, then calls the user's entry with the pass's uniform arguments. Its outputs, and the pixel
-   wrapper's inputs, are flattened with `[[vk::location(n)]]` derived from the semantic (`TEXCOORDn` -> n, `COLORn` -> 16+n,
-   others by name), because Vulkan links stages by location while FX matched them by semantic. The pixel wrapper rebuilds
-   the user's input struct and calls the entry with its uniform arguments (`PS_Resize(IN, ..., TextureDownsampled,
-   1024.0, 512.0)`).
+   `POSITION`/`SV_Position` from the quad corner, `TEXCOORD0` from its UV, anything else zero with a warning) for a
+   6-vertex two-triangle quad with the same corners and UVs as Effects11's strip, then calls the user's entry with the
+   pass's uniform arguments. Its outputs, and the pixel wrapper's inputs, are flattened with `[[vk::location(n)]]`:
+   locations are given to the vertex outputs in order (arrays take one per element, as `TEXCOORD1[10]` in Rudy's DoF),
+   and each pixel input takes the location of the output whose semantic name and index range covers it, because Vulkan
+   links stages by location while FX matched them by semantic. A pixel input no output writes reads zero (with a
+   warning; D3D11 would have refused the draw). The pixel wrapper rebuilds the user's input struct and calls the entry
+   with its uniform arguments (`PS_Resize(OrgFxArg0, OrgFxArg1, TextureDownsampled, 1024.0, 512.0)`); `COLORn` outputs
+   become `SV_Targetn`.
 4. **DXC flags**: `-HV 2018` (FXC-era rules: `&&`, `||` and `?:` on vectors are allowed and evaluate both sides),
    warnings logged and not fatal, `vs_6_6`/`ps_6_6`. Because the prologue is generated, the same unit can be emitted for FXC
    (register-bound declarations instead of heap loads, as `OrgResources.hlsli` does without `CS_ORG_BINDLESS`). That
@@ -247,8 +261,15 @@ code keep working on `uiVariables`. UI variables are built from the model on the
 folders, runs the same text steps as the runtime (`D3DPreprocess` with a preset-folder include handler, stringify
 expansion, `#line` stripping; ShaderPatches and `#pragma uidefine` are not applied), parses each `.fx`, and prints per
 file: techniques, chains, passes, entry resolution, globals with their `$Globals` offsets and evaluated defaults,
-textures, samplers, UI variables, and every diagnostic. Exit code 0 only when every unencrypted file parsed without
-errors.
+textures, samplers, UI variables, and every diagnostic. It then compiles pixel entries with FXC (`ps_5_0`) until one
+reads `$Globals` and compares every variable's offset, size and default bytes with FXC's reflection. With
+`--dxc <dxc.exe>` it also lowers every pass and compiles both wrappers with the runtime's DXC flags, keeping the sources
+in `--out`. `testdata/constructs.fx` exercises the syntax the presets do not use. Exit code 0 only when everything
+passed.
+
+```
+fx-parse-check [-v] [--dxc C:\VulkanSDK\<ver>\Bin\dxc.exe] [--out <folder>] <enbseries folder>...
+```
 
 ## 7. Out of scope
 
@@ -276,7 +297,42 @@ errors.
 - **Shape rebuilds** when the user toggles bound techniques in the editor: one graph build per toggle.
 - **Preset text patches** (`ShaderPatches.json`) were written against FXC; they apply unchanged because they patch text.
 
-## 9. Extension API
+## 9. Next steps (execution)
+
+1. `RasterProgram` from in-memory source: a `Desc` with source text and a virtual name, through `ProgramBuild` and the
+   shader store; flags `-HV 2018`.
+2. The UI seam (section 5): `UIVariable` value handle, and UI variables built from the model on the ORG path.
+3. `ORGFxRuntime`: per effect, `LowerEffect` at `Apply`, programs per pass, the value image from
+   `BuildDefaultValues` plus ini/weather/UI writes, the resource table (graph textures, files, samplers from
+   `SamplerDesc`), a latch region per pass, the Tonemap client, shape hash and `Refresh`.
+4. Scenarios under `tools/cs-ab/scenarios/` with `CS_ORG_FX=1` and FX11 for screenshot A/B on Rudy's preset (it lowers
+   completely).
+
+## 10. Status and corpus results (2026-11-09)
+
+`fx-parse-check --dxc` over the corpus (HexRim NAT, Rudy ENB, Silent Horizons):
+
+| Measure                                      | Result                                                                  |
+| -------------------------------------------- | ----------------------------------------------------------------------- |
+| Files                                        | 21: 17 parsed with no errors or warnings, 4 encrypted (Silent Horizons) |
+| Techniques / passes                          | 97 / 103; 206 of 206 shader stages resolved to an overload              |
+| UI variables (`UIName`)                      | 270                                                                     |
+| `$Globals` layout vs FXC                     | 16 files, 0 mismatches (`enbsmaa.fx` has no technique to compile)       |
+| Default values vs FXC                        | 263 compared, 0 mismatches                                              |
+| Passes lowered                               | 103 of 103                                                              |
+| Passes compiled by DXC (SPIR-V, both stages) | Rudy: all 62. HexRim: 28 of 41                                          |
+
+The 13 HexRim passes that DXC rejects come from two FXC-only constructs in the preset text, not from the lowering:
+
+- `enbeffect.fx` (all 10 passes): a class declared inside a function reads a local of the enclosing function
+  (`MultiLUT_T`'s `func_t::run` reads `dni`). DXC: "reference to local variable declared in enclosing function".
+- `enbeffectprepass.fx` (3 passes, not run by Effects11): assignment to a vector constructor,
+  `float2(IncomingSnow, OutgoingSnow) = ...;`. DXC: "expression is not assignable".
+
+Both are fixable by preset text patches (`ShaderPatches.json` already patches preset text), or the effect stays on FX11.
+A runtime ships with the first; the second needs no action while prepass is not run.
+
+## 11. Extension API
 
 An FX runtime is a likely extension-API piece: a plugin hands CS an `.fx` file (or text) plus the textures it binds by
 name, and gets its techniques run as ORG passes at an anchor, with the UI variables exposed through CS's menu. The
