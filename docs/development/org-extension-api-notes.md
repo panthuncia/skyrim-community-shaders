@@ -155,3 +155,12 @@ Keys used so far:
   no longer describe what reaches the display (CS reads `OwnedFrame::GetSurfaceState`). The API needs a query and a
   change notification for the ORG swap chain.
 - **Found by:** P1 ownership inversion (2026-11-09).
+
+### Choosing the image a frame presents
+
+- **Need:** hand the present stage the frame's final image when it is not the back buffer (an HDR or colour-grading
+  output), so it is copied once into the swap chain image instead of into the back buffer and again from it.
+- **Who:** CS's HDRDisplay (`OwnedFrame::SetFrameSource`); plugins that do their own output transform after the engine.
+- **Where it fits:** the Present anchor: a per-frame "present source" a client sets, read by the present pass. A
+  screenshot or capture reads the same source.
+- **Found by:** P1.5 (2026-11-09).
