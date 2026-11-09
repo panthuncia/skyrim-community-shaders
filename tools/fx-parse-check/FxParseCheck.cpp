@@ -7,13 +7,17 @@
 // It also checks the parser's $Globals layout against FXC: it compiles the first pixel entry with ps_5_0 and compares every
 // global's offset and size with the shader's reflection. A mismatch counts as an error.
 //
-// Usage: fx-parse-check [-v] <preset folder or .fx file>...
+// With --dxc it also lowers every pass (FxLower.h) and compiles both wrappers with that dxc.exe, with the flags the runtime uses
+// (BasicRHI's SPIR-V ABI, -HV 2018). Sources go to --out (default: a folder in %TEMP%), so a failure can be read.
+//
+// Usage: fx-parse-check [-v] [--dxc <dxc.exe>] [--out <folder>] <preset folder or .fx file>...
 //   A folder is scanned for *.fx (not recursively). -v lists every global, technique and pass.
-//   Exit code 0 when every readable file parsed without errors, 1 otherwise.
+//   Exit code 0 when every readable file parsed (and, with --dxc, lowered and compiled) without errors, 1 otherwise.
 //
 // Build (x64 Native Tools prompt, from the repository root):
 //   cl /nologo /std:c++latest /EHsc /W4 /WX /permissive- /utf-8 /Isrc tools\fx-parse-check\FxParseCheck.cpp
-//      src\Features\Effects11\ORG\FxParser.cpp src\Features\Effects11\ORG\FxSourceText.cpp d3dcompiler.lib dxguid.lib
+//      src\Features\Effects11\ORG\FxParser.cpp src\Features\Effects11\ORG\FxLower.cpp src\Features\Effects11\ORG\FxSourceText.cpp
+//      d3dcompiler.lib dxguid.lib
 //      /Fe:build\fx-parse-check.exe /Fo:build\
 
 #include <Windows.h>
@@ -21,6 +25,7 @@
 #include <d3d11shader.h>
 #include <d3dcompiler.h>
 
+#include "Features/Effects11/ORG/FxLower.h"
 #include "Features/Effects11/ORG/FxParser.h"
 #include "Features/Effects11/ORG/FxSourceText.h"
 
@@ -240,10 +245,104 @@ namespace
 		std::size_t errors = 0;
 		std::size_t warnings = 0;
 		std::size_t layoutMismatches = 0;
+		std::size_t lowered = 0;
+		std::size_t compiled = 0;
+		std::size_t compileFailures = 0;
 	};
 
-	void Report(const std::filesystem::path& a_file, bool a_verbose, Totals& a_totals)
+	struct Options
 	{
+		bool verbose = false;
+		std::filesystem::path dxc;
+		std::filesystem::path out;
+	};
+
+	/** @brief Runs a command line; its exit code, with its output in a_output. */
+	int Run(const std::string& a_command, std::string& a_output)
+	{
+		a_output.clear();
+		FILE* pipe = _popen(("\"" + a_command + " 2>&1\"").c_str(), "r");
+		if (!pipe)
+			return -1;
+		char buffer[512];
+		while (std::fgets(buffer, sizeof(buffer), pipe))
+			a_output += buffer;
+		return _pclose(pipe);
+	}
+
+	/** @brief Lowers every pass and compiles its wrappers with DXC. @return Whether every pass compiled. */
+	bool LowerAndCompile(const OrgFx::EffectDesc& a_fx, const std::string& a_text, const std::filesystem::path& a_file, const Options& a_options, Totals& a_totals)
+	{
+		const auto effect = OrgFx::LowerEffect(a_text, a_fx);
+		for (const auto& d : effect.diagnostics)
+			std::printf("   lower: %s line %u: %s\n", SeverityName(d.severity), d.line, d.message.c_str());
+		if (!effect.ok)
+			return false;
+		const auto folder = a_options.out / a_file.parent_path().filename() / a_file.stem();
+		std::error_code ec;
+		std::filesystem::create_directories(folder, ec);
+		std::map<std::size_t, bool> done;  // by source hash: passes that share a source compile once
+		std::size_t passes = 0, failures = 0;
+		for (std::uint32_t t = 0; t < a_fx.techniques.size(); ++t)
+			for (std::uint32_t p = 0; p < a_fx.techniques[t].passes.size(); ++p) {
+				++passes;
+				const auto& technique = a_fx.techniques[t];
+				const auto pass = OrgFx::LowerPass(effect, a_fx, t, p);
+				for (const auto& d : pass.diagnostics)
+					if (a_options.verbose || d.severity != OrgFx::Severity::Info)
+						std::printf("   lower %s/%u: %s line %u: %s\n", technique.name.c_str(), p, SeverityName(d.severity), d.line, d.message.c_str());
+				if (!pass.ok) {
+					++failures;
+					continue;
+				}
+				++a_totals.lowered;
+				const auto hash = std::hash<std::string>{}(pass.source);
+				if (auto it = done.find(hash); it != done.end()) {
+					failures += it->second ? 0 : 1;
+					continue;
+				}
+				const auto source = folder / std::format("{}_{}.hlsl", technique.name.empty() ? std::format("technique{}", t) : technique.name, p);
+				std::ofstream(source, std::ios::binary) << pass.source;
+				bool ok = true;
+				for (const auto& [target, entry] : { std::pair{ "vs_6_6", OrgFx::kVertexEntry }, std::pair{ "ps_6_6", OrgFx::kPixelEntry } }) {
+					const auto spv = source.string() + "." + target + ".spv";
+					const auto command = std::format(
+						"\"{}\" -spirv -fvk-use-dx-layout -fvk-use-dx-position-w -fspv-target-env=vulkan1.3 -fvk-bind-resource-heap 1000000 0 "
+						"-fvk-bind-sampler-heap 1000001 0 -fvk-bind-counter-heap 1000002 0 -fspv-use-unknown-image-format -HV 2018 "
+						"-DBASICRHI_SHADER_API_VULKAN=1 -DCS_ORG_BINDLESS=1 -T {} -E {} -Fo \"{}\" \"{}\"",
+						a_options.dxc.string(), target, entry, spv, source.string());
+					std::string output;
+					if (Run(command, output) != 0) {
+						ok = false;
+						std::string first;
+						for (std::size_t at = 0; at < output.size();) {
+							const auto end = output.find('\n', at);
+							const auto line = output.substr(at, end == std::string::npos ? std::string::npos : end - at);
+							if (line.find("error") != std::string::npos) {
+								first = line;
+								break;
+							}
+							if (end == std::string::npos)
+								break;
+							at = end + 1;
+						}
+						std::printf("   dxc %s %s/%u failed: %s\n     source: %s\n", target, technique.name.c_str(), p, first.empty() ? output.substr(0, 300).c_str() : first.c_str(),
+							source.string().c_str());
+					} else
+						++a_totals.compiled;
+				}
+				done[hash] = ok;
+				failures += ok ? 0 : 1;
+				a_totals.compileFailures += ok ? 0 : 1;
+			}
+		std::printf("   lowered and compiled: %zu of %zu pass(es), %zu unique source(s), %zu resource slot(s), %u value byte(s) per pass\n", passes - failures, passes, done.size(),
+			effect.resources.size(), effect.RegionSize());
+		return failures == 0;
+	}
+
+	void Report(const std::filesystem::path& a_file, const Options& a_options, Totals& a_totals)
+	{
+		const bool a_verbose = a_options.verbose;
 		++a_totals.files;
 		bool ok = false;
 		auto source = ReadFile(a_file, ok);
@@ -382,6 +481,8 @@ namespace
 			}
 		}
 
+		const bool compiled = a_options.dxc.empty() || errorCount != 0 || LowerAndCompile(fx, text, a_file, a_options, a_totals);
+
 		a_totals.techniques += fx.techniques.size();
 		a_totals.passes += passes;
 		a_totals.stages += stages;
@@ -389,7 +490,7 @@ namespace
 		a_totals.uiVariables += ui;
 		a_totals.errors += errorCount;
 		a_totals.warnings += warningCount;
-		if (errorCount == 0 && layoutMismatches == 0)
+		if (errorCount == 0 && layoutMismatches == 0 && compiled)
 			++a_totals.clean;
 		else
 			++a_totals.failed;
@@ -398,12 +499,16 @@ namespace
 
 int main(int a_argc, char** a_argv)
 {
-	bool verbose = false;
+	Options options;
 	std::vector<std::filesystem::path> files;
 	for (int i = 1; i < a_argc; ++i) {
 		const std::string arg = a_argv[i];
 		if (arg == "-v") {
-			verbose = true;
+			options.verbose = true;
+			continue;
+		}
+		if ((arg == "--dxc" || arg == "--out") && i + 1 < a_argc) {
+			(arg == "--dxc" ? options.dxc : options.out) = a_argv[++i];
 			continue;
 		}
 		const std::filesystem::path path(arg);
@@ -419,14 +524,19 @@ int main(int a_argc, char** a_argv)
 			files.push_back(path);
 	}
 	if (files.empty()) {
-		std::printf("usage: fx-parse-check [-v] <preset folder or .fx file>...\n");
+		std::printf("usage: fx-parse-check [-v] [--dxc <dxc.exe>] [--out <folder>] <preset folder or .fx file>...\n");
 		return 2;
 	}
+	if (!options.dxc.empty() && options.out.empty())
+		options.out = std::filesystem::temp_directory_path() / "fx-parse-check";
 	Totals totals;
 	for (const auto& file : files)
-		Report(file, verbose, totals);
+		Report(file, options, totals);
 	std::printf("\n%d file(s): %d parsed without errors, %d with errors or unreadable, %d encrypted. %zu techniques, %zu passes, %zu/%zu shader stages resolved, %zu UI variables, %zu errors, %zu warnings, %zu layout mismatches.\n",
 		totals.files, totals.clean, totals.failed, totals.encrypted, totals.techniques, totals.passes, totals.resolvedStages, totals.stages, totals.uiVariables, totals.errors, totals.warnings,
 		totals.layoutMismatches);
+	if (!options.dxc.empty())
+		std::printf("Lowering: %zu pass(es) lowered, %zu stage(s) compiled by DXC, %zu unique source(s) failed. Sources in %s\n", totals.lowered, totals.compiled, totals.compileFailures,
+			options.out.string().c_str());
 	return totals.failed == 0 ? 0 : 1;
 }
