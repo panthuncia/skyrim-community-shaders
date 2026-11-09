@@ -112,6 +112,14 @@ boundary. Put `PUSH` entries last.
 entry. Its handle must exist before the header is included, so such a shader expands its push block first, then includes
 the headers, then expands its own declarations.
 
+Headers that many shaders include declare their resources with `ORG_HEADER_SRV(type, name, register)` instead:
+`SharedData::DepthTexture` (t17), Light Limit Fix's `lights`, `lightList`, `lightGrid`, `LocalShadows` and `LocalShadowMaps`
+(t35-t37, t102, t103), IBL's `EnvIBLTexture` and `SkyIBLTexture` (t76, t77), Terrain Shadows' `ShadowHeightTexture` (t60) and
+Cloud Shadows' `CloudShadowsTexture` (t25). They stay register-bound everywhere, DXC builds included, so no other shader has to
+list them. An ORG pass shader that defines `ORG_HEADER_RESOURCES` before including `Common/OrgResources.hlsli` reads them from the
+heap, and lists, as `EXTERN` entries, every one of them that the headers it includes declare (the height fog's
+`VolumetricFogLightScatteringCS.hlsl` is the example).
+
 **The shared constant buffers.** `FrameBuffer` (b12), `SharedData` (b5), `FeatureData` (b6) and `Permutation` (b4) are
 declared with the `ORG_SHARED_*` macros (`Common/NamespacedCBuffer.hlsli`). Under FXC, and under DXC by default, they are
 the cbuffers they always were. An ORG pass shader that defines `ORG_SHARED_CONSTANTS` before including

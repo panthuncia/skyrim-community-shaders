@@ -1,6 +1,8 @@
+#include "Common/OrgResources.hlsli"
+
 namespace TerrainShadows
 {
-	Texture2D<float2> ShadowHeightTexture : register(t60);
+	ORG_HEADER_SRV(Texture2D<float2>, ShadowHeightTexture, 60)
 
 	// Lowers shadow heights to hide self-shadowing from the coarse heightmap.
 	static const float SelfShadowBias = 256.0;

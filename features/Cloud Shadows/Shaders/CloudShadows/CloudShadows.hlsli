@@ -2,10 +2,11 @@
 #define CLOUD_SHADOWS_HLSLI
 
 #include "Common/Game.hlsli"
+#include "Common/OrgResources.hlsli"
 
 namespace CloudShadows
 {
-	TextureCube<float> CloudShadowsTexture : register(t25);
+	ORG_HEADER_SRV(TextureCube<float>, CloudShadowsTexture, 25)
 #if defined(CLOUDS)
 	// Cloud occlusion of the layers drawn up to the current one, for cloud self shadowing
 	TextureCube<float> CloudSelfShadowTexture : register(t26);

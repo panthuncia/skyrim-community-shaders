@@ -6,6 +6,7 @@
 #include "Common/Game.hlsli"
 #include "LightLimitFix/Attenuation.hlsli"
 #include "Common/NamespacedCBuffer.hlsli"
+#include "Common/OrgResources.hlsli"
 #include "Common/DCLFObjects.hlsli"
 
 namespace LightLimitFix
@@ -49,14 +50,14 @@ namespace LightLimitFix
 	NSCB_ALIAS(LightLimitFix, float4, WorldEyePosition)
 	NSCB_ARRAY_ALIAS(LightLimitFix, Light, StrictLights, 15)
 
-	StructuredBuffer<Light> lights : register(t35);
-	StructuredBuffer<uint> lightList : register(t36);       //MAX_CLUSTER_LIGHTS * 16^3
-	StructuredBuffer<LightGrid> lightGrid : register(t37);  //16^3
+	ORG_HEADER_SRV(StructuredBuffer<Light>, lights, 35)
+	ORG_HEADER_SRV(StructuredBuffer<uint>, lightList, 36)       //MAX_CLUSTER_LIGHTS * 16^3
+	ORG_HEADER_SRV(StructuredBuffer<LightGrid>, lightGrid, 37)  //16^3
 
 #include "LightLimitFix/LocalShadowProjection.hlsli"
 
-	StructuredBuffer<LocalShadowData> LocalShadows : register(t102);
-	Texture2DArray<float> LocalShadowMaps : register(t103);
+	ORG_HEADER_SRV(StructuredBuffer<LocalShadowData>, LocalShadows, 102)
+	ORG_HEADER_SRV(Texture2DArray<float>, LocalShadowMaps, 103)
 
 	bool GetClusterIndex(in float2 uv, in float z, inout uint clusterIndex)
 	{

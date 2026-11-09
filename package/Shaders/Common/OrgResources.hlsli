@@ -63,6 +63,12 @@
 // 2. then each PUSH struct, in list order, each starting on a 16-byte boundary (cbuffer packing).
 // The whole block is at most 32 words (128 bytes, Vulkan's guaranteed push constant size).
 //
+// Shared headers' own resources (SharedData's depth, Light Limit Fix's light lists, IBL, Terrain
+// and Cloud Shadows) are declared with ORG_HEADER_SRV(type, name, register). Everywhere they stay
+// register-bound as before. An ORG pass shader that defines ORG_HEADER_RESOURCES before including
+// this file reads them from the heap instead, and lists each one, of every such header it
+// includes, as an EXTERN entry.
+//
 // Not covered: arrays of resources and append/consume counters. A list cannot hold another list
 // (FXC rejects a macro passed on as an argument), so the shared handles are one SHARED entry.
 
@@ -115,6 +121,12 @@
 #	define ORG_RESOURCE_SHARED(T, N, R)
 #	define ORG_RESOURCE(K, T, N, R) ORG_RESOURCE_##K(T, N, R)
 
+#endif
+
+#if defined(CS_ORG_BINDLESS) && defined(ORG_HEADER_RESOURCES)
+#	define ORG_HEADER_SRV(T, N, R) static T N = ResourceDescriptorHeap[OrgHandle_##N];
+#else
+#	define ORG_HEADER_SRV(T, N, R) T N : register(t##R);
 #endif
 
 #endif  // __ORG_RESOURCES_DEPENDENCY_HLSL__
