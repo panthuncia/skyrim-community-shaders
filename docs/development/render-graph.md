@@ -368,7 +368,10 @@ Each anchor's ordering rule is in [org-extension-api-notes.md](./org-extension-a
     build), and optional callbacks: `registerResources`, `commit` (latch writes inside the epoch), `active` and `onFailed`.
 3.  The passes declare what they read and write as any graph pass does. Engine targets come from
     `FrameAnchors::EngineTarget(RE::RENDER_TARGET)` and `EngineDepth(...)`: DXVK images imported once (`DxvkImageImport`) and
-    registered with every anchor graph as `cs.engine.target.<n>` and `cs.engine.depth.<n>`.
+    registered with every anchor graph as `cs.engine.target.<n>` and `cs.engine.depth.<n>`. Cubemap targets come from
+    `EngineCubemap(RE::RENDER_TARGETS_CUBEMAP)` (`cs.engine.cubemap.<n>`, a cube default SRV), and a feature's own D3D11
+    texture that is not ported yet from `D3D11Texture(name, texture, srv, uav)` (`cs.d3d11.<name>`). Every import
+    describes all its mips and slices; a `D3D11_RESOURCE_MISC_TEXTURECUBE` texture gets cube views.
 4.  When the graph fails, `onFailed` is called and the client is removed; the feature returns to its D3D11 path.
 
 ```cpp

@@ -117,7 +117,7 @@ namespace FrameAnchors
 			bool frozen = false;  // AddToFrame ran: the reservations are the frame's epochs
 			org::GraphHost* host = nullptr;
 			std::vector<std::shared_ptr<const ClientDesc>> clients;
-			std::map<std::uint64_t, EngineImport> imports;  // by kind << 32 | index
+			std::map<std::string, EngineImport, std::less<>> imports;  // by graph id
 			std::atomic<std::shared_ptr<const Snapshot>> snapshot;
 		};
 
@@ -228,28 +228,29 @@ namespace FrameAnchors
 			std::shared_ptr<const Snapshot> snapshot;
 		};
 
-		/** @brief The import's description: its views as the engine made them. */
-		org::TextureDescription DescribeColour(const RE::BSGraphics::RenderTargetData& a_target, const D3D11_TEXTURE2D_DESC& a_desc)
+		/** @brief The import's description: its views as their owner (the engine, a feature) made them. Any view may be null. */
+		org::TextureDescription DescribeColour(const D3D11_TEXTURE2D_DESC& a_desc, ID3D11ShaderResourceView* a_srv, ID3D11RenderTargetView* a_rtv,
+			ID3D11UnorderedAccessView* a_uav)
 		{
 			org::TextureDescription desc{};
 			desc.format = rhi::helpers::ToRHI(a_desc.Format);
 			desc.channels = 4;
-			if (a_target.SRV) {
+			if (a_srv) {
 				D3D11_SHADER_RESOURCE_VIEW_DESC view{};
-				a_target.SRV->GetDesc(&view);
+				a_srv->GetDesc(&view);
 				desc.hasSRV = true;
 				desc.srvFormat = rhi::helpers::ToRHI(view.Format);
 				desc.format = desc.srvFormat;
 			}
-			if (a_target.RTV) {
+			if (a_rtv) {
 				D3D11_RENDER_TARGET_VIEW_DESC view{};
-				a_target.RTV->GetDesc(&view);
+				a_rtv->GetDesc(&view);
 				desc.hasRTV = true;
 				desc.rtvFormat = rhi::helpers::ToRHI(view.Format);
 			}
-			if (a_target.UAV) {
+			if (a_uav) {
 				D3D11_UNORDERED_ACCESS_VIEW_DESC view{};
-				a_target.UAV->GetDesc(&view);
+				a_uav->GetDesc(&view);
 				desc.hasUAV = true;
 				desc.uavFormat = rhi::helpers::ToRHI(view.Format);
 			}
@@ -277,14 +278,14 @@ namespace FrameAnchors
 			return desc;
 		}
 
-		std::shared_ptr<org::ExternalTextureResource> Import(std::uint64_t a_key, ID3D11Texture2D* a_texture, const std::string& a_id,
+		std::shared_ptr<org::ExternalTextureResource> Import(ID3D11Texture2D* a_texture, const std::string& a_id,
 			const std::function<org::TextureDescription(const D3D11_TEXTURE2D_DESC&)>& a_describe)
 		{
 			auto& state = Anchors();
 			auto& runtime = RenderGraphRuntime::Get();
 			if (!a_texture || !runtime.IsActive())
 				return nullptr;
-			if (const auto found = state.imports.find(a_key); found != state.imports.end() && found->second.texture.get() == a_texture)
+			if (const auto found = state.imports.find(a_id); found != state.imports.end() && found->second.texture.get() == a_texture)
 				return found->second.resource;
 			DxvkOrgInteropResourceInfo info{};
 			if (!runtime.DescribeResource(a_texture, info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE) {
@@ -294,9 +295,16 @@ namespace FrameAnchors
 			D3D11_TEXTURE2D_DESC textureDesc{};
 			a_texture->GetDesc(&textureDesc);
 			auto desc = a_describe(textureDesc);
-			desc.imageDimensions = { { info.image.extent.width, info.image.extent.height, 0, 0 } };
-			desc.isArray = info.image.arrayLayers > 1;
-			desc.arraySize = desc.isArray ? info.image.arrayLayers : 1;
+			// One entry per mip: the graph's views and barriers then cover the whole image.
+			const std::uint32_t mips = (std::max)(info.image.mipLevels, 1u);
+			for (std::uint32_t mip = 0; mip < mips; ++mip)
+				desc.imageDimensions.push_back({ (std::max)(info.image.extent.width >> mip, 1u), (std::max)(info.image.extent.height >> mip, 1u), 0, 0 });
+			// A cube (the engine's cubemap targets): its SRV is a cube view, and arraySize counts cubes.
+			const std::uint32_t layers = (std::max)(info.image.arrayLayers, 1u);
+			desc.isCubemap = (textureDesc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) && layers % 6 == 0;
+			const std::uint32_t slices = desc.isCubemap ? layers / 6 : layers;
+			desc.isArray = slices > 1;
+			desc.arraySize = slices;
 			auto resource = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), info.image, desc, a_id.c_str());
 			if (!resource) {
 				logger::warn("[ORG] frame anchors: {} could not be imported", a_id);
@@ -306,7 +314,7 @@ namespace FrameAnchors
 			import.texture.copy_from(a_texture);
 			import.resource = resource;
 			import.id = a_id;
-			state.imports[a_key] = std::move(import);
+			state.imports[a_id] = std::move(import);
 			Publish(state);
 			// The imports are registered with every anchor graph.
 			Rebuild(state, ~0u);
@@ -476,8 +484,8 @@ namespace FrameAnchors
 		if (!renderer || a_target >= static_cast<std::uint32_t>(RE::RENDER_TARGET::kTOTAL))
 			return nullptr;
 		const auto target = renderer->GetRuntimeData().renderTargets[a_target];
-		return Import(a_target, target.texture, fmt::format("cs.engine.target.{}", a_target),
-			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(target, a_desc); });
+		return Import(target.texture, fmt::format("cs.engine.target.{}", a_target),
+			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, target.SRV, target.RTV, target.UAV); });
 	}
 
 	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t a_depthStencil)
@@ -486,8 +494,28 @@ namespace FrameAnchors
 		if (!renderer || a_depthStencil >= static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL))
 			return nullptr;
 		const auto target = renderer->GetDepthStencilData().depthStencils[a_depthStencil];
-		return Import((1ull << 32) | a_depthStencil, target.texture, fmt::format("cs.engine.depth.{}", a_depthStencil),
+		return Import(target.texture, fmt::format("cs.engine.depth.{}", a_depthStencil),
 			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeDepth(target, a_desc); });
+	}
+
+	std::shared_ptr<org::ExternalTextureResource> EngineCubemap(std::uint32_t a_cubemap)
+	{
+		auto* renderer = globals::game::renderer;
+		if (!renderer || a_cubemap >= static_cast<std::uint32_t>(RE::RENDER_TARGETS_CUBEMAP::kTOTAL))
+			return nullptr;
+		const auto target = renderer->GetRendererData().cubemapRenderTargets[a_cubemap];
+		// The faces' RTVs share one format; the graph makes its own views of each face.
+		return Import(target.texture, fmt::format("cs.engine.cubemap.{}", a_cubemap),
+			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, target.SRV, target.cubeSideRTV[0], nullptr); });
+	}
+
+	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv,
+		ID3D11UnorderedAccessView* a_uav)
+	{
+		if (a_name.empty())
+			return nullptr;
+		return Import(a_texture, fmt::format("cs.d3d11.{}", a_name),
+			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, a_srv, nullptr, a_uav); });
 	}
 
 	void AddToFrame(std::vector<std::uint32_t>& a_epochs)
@@ -549,6 +577,8 @@ namespace FrameAnchors
 	bool Run(const Point&) { return false; }
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t) { return nullptr; }
+	std::shared_ptr<org::ExternalTextureResource> EngineCubemap(std::uint32_t) { return nullptr; }
+	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*, ID3D11UnorderedAccessView*) { return nullptr; }
 	std::uint32_t SegmentOf(Anchor) { return 0; }
 	bool IsUnusedSegment(std::uint32_t) { return false; }
 	const SegmentNames* NamesOf(std::uint32_t) { return nullptr; }

@@ -7,6 +7,10 @@
 #include <string_view>
 #include <vector>
 
+struct ID3D11ShaderResourceView;
+struct ID3D11Texture2D;
+struct ID3D11UnorderedAccessView;
+
 namespace org
 {
 	class ExternalTextureResource;
@@ -161,13 +165,26 @@ namespace FrameAnchors
 	 * @brief The engine's render target (RE::RENDER_TARGET) as a graph texture, imported once and kept while the engine's texture
 	 * stays the same. Its views follow the engine's (SRV, RTV, UAV where the engine made one). Registered with every graph as
 	 * "cs.engine.target.<index>". Render thread (it synchronizes with DXVK's worker the first time). Null when the target does not
-	 * exist or cannot be imported. A separate graph resource from Drawcall Limit Fix's import of the same image, which is safe because
+	 * exist or cannot be imported. Every mip and slice is described (a cube's views are cube views). A separate graph resource from Drawcall Limit Fix's import of the same image, which is safe because
 	 * no anchor epoch is one of DCLF's.
 	 */
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t a_target);
 
 	/** @brief EngineTarget for a depth-stencil target (RE::RENDER_TARGETS_DEPTHSTENCIL), with its DSV and depth SRV: "cs.engine.depth.<index>". */
 	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t a_depthStencil);
+
+	/**
+	 * @brief EngineTarget for a cubemap target (RE::RENDER_TARGETS_CUBEMAP): a cube texture whose default SRV is a cube view, with its
+	 * faces' RTVs: "cs.engine.cubemap.<index>".
+	 */
+	std::shared_ptr<org::ExternalTextureResource> EngineCubemap(std::uint32_t a_cubemap);
+
+	/**
+	 * @brief EngineTarget for a texture a feature still owns in D3D11 (one not ported yet), with the views given (either may be null):
+	 * "cs.d3d11.<name>". Imported again when a_texture changes. A cube texture (D3D11_RESOURCE_MISC_TEXTURECUBE) gets cube views.
+	 */
+	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv,
+		ID3D11UnorderedAccessView* a_uav);
 
 	// What RenderGraphRuntime asks of the anchors.
 
