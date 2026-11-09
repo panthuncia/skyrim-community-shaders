@@ -8,58 +8,24 @@
 #	include "RenderGraph/RenderGraphRuntime.h"
 
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#		include "RenderGraph/ProgramBuild.h"
+
 #		include <ORGModuleServices/PipelineRegistry.h>
 #		include <ORGModuleServices/ShaderCompiler.h>
 #	endif
 
-#	include <cstring>
 #	include <filesystem>
-#	include <fstream>
-#	include <iterator>
 #	include <span>
 
 namespace
 {
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
-	std::uint64_t HashBinary(std::span<const std::byte> a_bytes)
-	{
-		std::uint64_t hash = 1469598103934665603ull;
-		for (const auto byte : a_bytes) {
-			hash ^= static_cast<std::uint8_t>(byte);
-			hash *= 1099511628211ull;
-		}
-		return hash;
-	}
-
-	std::vector<std::byte> ReadSource(const std::filesystem::path& a_path)
-	{
-		std::ifstream file(a_path, std::ios::binary);
-		const std::vector<char> chars((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-		std::vector<std::byte> bytes(chars.size());
-		if (!chars.empty())
-			std::memcpy(bytes.data(), chars.data(), chars.size());
-		return bytes;
-	}
+	using RenderGraph::ProgramBuild::HashBinary;
+	using RenderGraph::ProgramBuild::ReadSource;
 
 	org::services::ShaderCompileRequest MakeRequest(const ComputeProgram::Desc& a_desc, const std::filesystem::path& a_path, std::span<const std::byte> a_source)
 	{
-		org::services::ShaderCompileRequest request{};
-		request.sourceName = a_path.generic_string();
-		request.source = a_source;
-		request.entryPoint = a_desc.entry;
-		request.target = L"cs_6_6";
-		request.format = org::services::ShaderBinaryFormat::Spirv;
-		request.warningsAsErrors = false;  // as the build-time compilation these replaced
-		// Source-level debug info for Nsight and RenderDoc; drivers ignore it, and optimization is unchanged.
-		request.debugInfo = true;
-		request.includeDirectories = { RenderGraphRuntime::kShaderDirectory };
-		request.defines.push_back({ L"BASICRHI_SHADER_API_VULKAN", L"1" });
-		// The vendor, for workarounds of its shader compiler (CS_GPU_AMD: PortalPrograms.hlsli's interpreter).
-		if (RenderGraphRuntime::VendorId() == 0x1002)
-			request.defines.push_back({ L"CS_GPU_AMD", L"1" });
-		for (const auto& [name, value] : a_desc.defines)
-			request.defines.push_back({ name, value });
-		return request;
+		return RenderGraph::ProgramBuild::MakeRequest(a_path, a_source, a_desc.entry, L"cs_6_6", a_desc.defines);
 	}
 
 	// a_source: the program's shader, the label its pipeline's debugging dumps go under (BASICRHI_VK_DUMP_ISA, DXVK_PIPELINE_STATS).
@@ -89,7 +55,7 @@ namespace
 	{
 		return [a_program = std::move(a_program), a_device, a_desc = std::move(a_desc)](const org::services::LiveRebuildRequest& a_request, org::services::LiveRebuildDone a_done) {
 			auto* compiler = RenderGraphRuntime::Get().ShaderCompiler();
-			const std::filesystem::path path = std::filesystem::path(RenderGraphRuntime::kShaderDirectory) / a_desc.source;
+			const std::filesystem::path path = RenderGraph::ProgramBuild::SourcePath(a_desc.source);
 			const auto source = ReadSource(path);
 			if (!compiler || source.empty())
 				return a_done({ .error = compiler ? fmt::format("missing shader source {}", path.string()) : std::string("no runtime shader compiler") });
@@ -136,7 +102,7 @@ std::shared_ptr<const ComputeProgram> ComputeProgram::Load(rhi::Device a_device,
 	auto& registry = *RenderGraphRuntime::PipelineRegistry();
 	// Before the source is read: a reload that starts after rebuilds it (PipelineRegistry::Register).
 	const std::uint64_t builtFor = registry.SourcesGeneration();
-	const std::filesystem::path path = std::filesystem::path(RenderGraphRuntime::kShaderDirectory) / a_desc.source;
+	const std::filesystem::path path = RenderGraph::ProgramBuild::SourcePath(a_desc.source);
 	const auto bytes = ReadSource(path);
 	if (bytes.empty()) {
 		logger::error("[ORG] Missing shader source {}", path.string());
