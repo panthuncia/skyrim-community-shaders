@@ -7,6 +7,8 @@
 
 #	include "RenderGraph/RenderGraphRuntime.h"
 
+#	include <Render/PreparedPass.h>
+
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
 #		include "RenderGraph/ProgramBuild.h"
 
@@ -91,6 +93,19 @@ rhi::PipelineHandle ComputeProgram::Pipeline() const
 #	endif
 }
 
+void ComputeProgram::Dispatch(org::RecordingContext& a_recording, std::span<const std::uint32_t> a_constants, std::uint32_t a_x, std::uint32_t a_y,
+	std::uint32_t a_z) const
+{
+	if (a_constants.size() > constantWords || !a_x || !a_y || !a_z || !slot)
+		return;
+	auto& commands = a_recording.Commands();
+	commands.BindLayout(layout->GetHandle());
+	commands.BindPipeline(Pipeline());
+	if (!a_constants.empty())
+		commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, static_cast<std::uint32_t>(a_constants.size()), a_constants.data());
+	commands.Dispatch(a_x, a_y, a_z);
+}
+
 std::shared_ptr<const ComputeProgram> ComputeProgram::Load(rhi::Device a_device, const Desc& a_desc)
 {
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
@@ -116,6 +131,7 @@ std::shared_ptr<const ComputeProgram> ComputeProgram::Load(rhi::Device a_device,
 	}
 
 	auto program = std::make_shared<ComputeProgram>();
+	program->constantWords = a_desc.constantWords;
 	rhi::PushConstantRangeDesc constants{};
 	constants.visibility = rhi::ShaderStage::Compute;
 	constants.num32BitValues = a_desc.constantWords;
