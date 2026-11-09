@@ -14,12 +14,13 @@ namespace DCLF::Integrations::IBL
 	{
 		// The SH Prepass computes and binds at t76 and t77 unless IBL is off for the scene (the only PS bindings there besides the
 		// reflection prepass's, the same views or null): persistent textures made at setup (last frame's SH at the faces' commit, which
-		// the reflection prepass bound). Off for the scene, Prepass binds nothing: the captured views.
-		template <auto Texture>
+		// the reflection prepass bound). Off for the scene, Prepass binds nothing: the captured views. With CS_ORG_IBL=1 the views are
+		// the render graph's exported SH textures (IBL::EnvIBLSRV), imported like any D3D11 view.
+		template <ID3D11ShaderResourceView* (::IBL::*View)() const>
 		void* ShView()
 		{
 			const auto& ibl = globals::features::ibl;
-			return ibl.loaded && ibl.*Texture && !ibl.IsDisabledForCurrentScene() ? (ibl.*Texture)->srv.get() : nullptr;
+			return ibl.loaded && !ibl.IsDisabledForCurrentScene() ? (ibl.*View)() : nullptr;
 		}
 
 		// The static cubemaps (DDS loaded at setup) ReflectionsPrepass binds at t78 and t79 (their only PS bindings), whatever the scene:
@@ -34,10 +35,8 @@ namespace DCLF::Integrations::IBL
 
 		void Install(Api::InstallContext& a_context)
 		{
-			a_context.RegisterFrameTexture({ .name = "ibl environment", .textureRegister = kEnvironmentRegister,
-				.view = &ShView<&::IBL::envIBLTexture>, .capturedWhenNull = true });
-			a_context.RegisterFrameTexture({ .name = "ibl sky", .textureRegister = kSkyRegister, .view = &ShView<&::IBL::skyIBLTexture>,
-				.capturedWhenNull = true });
+			a_context.RegisterFrameTexture({ .name = "ibl environment", .textureRegister = kEnvironmentRegister, .view = &ShView<&::IBL::EnvIBLSRV>, .capturedWhenNull = true });
+			a_context.RegisterFrameTexture({ .name = "ibl sky", .textureRegister = kSkyRegister, .view = &ShView<&::IBL::SkyIBLSRV>, .capturedWhenNull = true });
 			a_context.RegisterFrameTexture({ .name = "ibl static diffuse", .textureRegister = kStaticDiffuseRegister,
 				.view = &StaticView<&::IBL::staticDiffuseIBLTexture>, .capturedWhenNull = true });
 			a_context.RegisterFrameTexture({ .name = "ibl static specular", .textureRegister = kStaticSpecularRegister,

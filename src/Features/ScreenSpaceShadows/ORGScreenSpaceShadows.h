@@ -12,7 +12,7 @@
  * from the execution's region of a latch block, which the client's commit writes. Unused entries dispatch no groups.
  *
  * Depth is the engine's kPOST_ZPREPASS_COPY (FrameAnchors::EngineDepth), or Terrain Blending's blended depth while that is on
- * (FrameAnchors::FeatureTexture). The output is a graph texture exported to D3D11, which the engine's pixel shaders read at t45.
+ * (FrameAnchors::D3D11Texture). The output is a graph texture exported to D3D11, which the engine's pixel shaders read at t45.
  *
  * On any failure the feature returns to its D3D11 path. Render thread throughout.
  *

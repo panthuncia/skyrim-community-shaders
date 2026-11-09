@@ -391,8 +391,8 @@ void Deferred::DeferredPasses()
 			ssgi_hq_spec ? nullptr : ssgi_y,                                                      // t11 SsgiYTexture
 			ssgi_hq_spec ? nullptr : ssgi_cocg,                                                   // t12 SsgiCoCgTexture
 			ssgi_hq_spec ? ssgi_gi_spec : nullptr,                                                // t13 SsgiSpecularTexture
-			ibl.loaded ? ibl.envIBLTexture->srv.get() : nullptr,                                  // t14 EnvIBLTexture
-			ibl.loaded ? ibl.skyIBLTexture->srv.get() : nullptr,                                  // t15 SkyIBLTexture
+			ibl.loaded ? ibl.EnvIBLSRV() : nullptr,                                               // t14 EnvIBLTexture
+			ibl.loaded ? ibl.SkyIBLSRV() : nullptr,                                               // t15 SkyIBLTexture
 		};
 
 		// The render graph's passes here, after the D3D11 SSGI, SSS and cubemap update; the ORG composite among them

@@ -30,7 +30,7 @@ namespace
 	constexpr const char* kClientId = "cs.sss";
 	constexpr const char* kShader = "ScreenSpaceShadows/RaymarchCS.hlsl";
 	constexpr const char* kTextureName = "SSS::ShadowTexture";
-	constexpr const char* kBlendedDepthId = "cs.feature.terrain-blending.blended-depth";
+	constexpr const char* kBlendedDepthName = "terrain-blending.blended-depth";
 	constexpr std::uint32_t kMaxDispatches = ScreenSpaceShadows::Dispatches::kMax;
 
 	// RaymarchCS's push block under ORG, in list order: three handles, then PerFrame's latch region.
@@ -91,7 +91,8 @@ namespace
 	{
 		auto& terrainBlending = globals::features::terrainBlending;
 		if (terrainBlending.loaded && terrainBlending.settings.Enabled && terrainBlending.blendedDepthTexture)
-			return FrameAnchors::FeatureTexture(terrainBlending.blendedDepthTexture->resource.get(), kBlendedDepthId);
+			return FrameAnchors::D3D11Texture(kBlendedDepthName, terrainBlending.blendedDepthTexture->resource.get(),
+				terrainBlending.blendedDepthTexture->srv.get(), nullptr);
 		return FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
 	}
 
