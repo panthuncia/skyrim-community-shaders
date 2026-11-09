@@ -385,6 +385,29 @@ they are ported.
 -   **Not covered yet:** the blend factor and sample mask that CODBloom's upsample uses (`D3D11_BLEND_BLEND_FACTOR`), which wait
     for P0.2. A viewport smaller than the render area, or a separate scissor, waits for P0.4.
 
+## Shader bindings for ported passes
+
+A feature shader that still has a D3D11 path builds for both from one source: `Common/OrgResources.hlsli` turns its resource
+list into register declarations under FXC, and into push-block handles and descriptor-heap fetches under DXC
+(`CS_ORG_BINDLESS`, which `ProgramBuild` defines for every ORG compile). How to write one, the limits and the checks are in
+[shader-workflow.md](./shader-workflow.md), "Dual-target shaders".
+
+On the C++ side (`src/RenderGraph/ShaderBindings.h`):
+
+-   **The block.** A struct that mirrors the shader's push block: one `ShaderBindings::Handle` per resource entry in list order,
+    then the `PUSH` structs as `alignas(16)` members. `ShaderBindings::Words<Block>()` is its size for `constantWords`, checked
+    at compile time against the 32-word limit.
+-   **Handles.** At record time from the pass's declared views: `a_recording.Index(token)`. A `CBUFFER` entry is a declared
+    `PassBuilder::ConstantBuffer` use. Samplers are not graph resources: `ShaderBindings::CreateSampler` at setup returns an
+    owned binding, kept as long as the program, whose `Index()` is the handle.
+-   **Push.** `ComputeProgram::Dispatch(a_recording, ShaderBindings::Data(block), x, y, z)` binds the program, pushes the block
+    and dispatches. Raster passes give `ShaderBindings::Data(block)` as `DrawDesc::constants`.
+-   **DXIL.** The ORG expansion compiles to DXIL unchanged (`tools/check-dual-target-shaders.py` builds both). BasicRHI's D3D12
+    layout already matches it: the program's push range (set 0, binding 0) becomes root constants at `b0`, and the root
+    signature has `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` and `SAMPLER_HEAP_DIRECTLY_INDEXED` (`rhi_dx12.cpp`). What P7.2 still
+    needs on CS's side: the binary format as a parameter of `ProgramBuild::MakeRequest` (SPIR-V is fixed there today, with
+    `BASICRHI_SHADER_API_VULKAN`).
+
 ## The schedule inspector
 
 To see what the persistent graph executes (batches per queue, the barriers before each pass, and every cross-queue wait with its cause), use the menu's
