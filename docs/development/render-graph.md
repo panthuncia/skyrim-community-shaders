@@ -395,6 +395,7 @@ of adding a `Segment` and editing the epoch order. Each anchor is one of CS's ho
 | `PostProcessing` | `Upscaling::Main_PostProcessing`, before the upscaler |
 | `Tonemap` | `Main_HDRTonemapBlendCinematic_Render` (`Hooks.cpp`) |
 | `Present` | `IDXGISwapChain_Present` (`Hooks.cpp`), before DCLF's `BeforePresent` |
+| `Overlay` | `OverlayRenderer::FinalizeImGuiFrame`, where CS's ImGui frame is drawn (`ImGuiRenderer::RenderDrawData`) |
 
 Each anchor's ordering rule is in [org-extension-api-notes.md](./org-extension-api-notes.md), "Attaching passes to the frame".
 
@@ -454,7 +455,7 @@ FrameAnchors::Register({ .id = "cs.myfeature",
     `kGameFramesInFlight` slots. Size `LatchBlock`s from `GraphHost::FrameSlots()` after the runtime is up, as LLF does. An anchor that
     runs several times a frame (`ReflectionsPrepass`, at each cubemap render) uses its ring that much faster, and may wait for a
     slot when the CPU is far ahead of the GPU.
--   **The hazard rule.** After the late anchors (`PostProcessing`, `Tonemap`, `Present`) have run an epoch, `Run` calls
+-   **The hazard rule.** After the late anchors (`PostProcessing`, `Tonemap`, `Present`, `Overlay`) have run an epoch, `Run` calls
     `Upscaling::SeparateFromGraphEpochs()`. An upscaler, frame generation or the present can follow these, and none may run directly
     behind a graph epoch (above, "Hazard: external Vulkan work directly after a graph epoch"). The earlier anchors are followed by
     the engine's own draws.
@@ -480,6 +481,34 @@ they are ported.
 -   **Hot reload.** As for compute programs: registered with the pipeline registry with both sources as dependencies.
 -   **Not covered yet:** the blend factor and sample mask that CODBloom's upsample uses (`D3D11_BLEND_BLEND_FACTOR`), which wait
     for P0.2. A viewport smaller than the render area, or a separate scissor, waits for P0.4.
+
+## ImGui on the graph
+
+With `CS_ORG_IMGUI=1`, CS's ImGui frames are drawn by a render-graph pass instead of `imgui_impl_dx11`
+(`src/RenderGraph/ImGuiBasicRHI.{h,cpp}`, chosen in `src/Menu/ImGuiRenderer.{h,cpp}`).
+
+-   **When.** `imgui_impl_dx11` draws the first frames: the graph starts after the menu. Once the runtime is active with the
+    `Overlay` anchor's epoch (reserved in `Menu::Init`), the next `NewFrame` shuts the D3D11 backend down and installs the
+    graph's. ImGui then creates its textures again for it. If the graph fails or a frame cannot be drawn, the D3D11 backend is
+    installed again for the rest of the session.
+-   **Target.** The render target bound when the overlay draws. That is the engine's framebuffer (`EngineTarget(kFRAMEBUFFER)`),
+    or HDR's UI texture, which is imported as `cs.imgui.target`. A new target refreshes the client. With the owned frame, the
+    framebuffer is the guest back buffer that `OwnedFrame` copies into the BasicRHI swap chain image, so the pass draws on the
+    final image there too.
+-   **Textures.** ImGui's own textures use 1.92's protocol (`RendererHasTextures`):
+    - The font atlas pages are BasicRHI textures that the backend creates, updates by rectangle and destroys. The graph does
+      not track them: the pass records their copies and barriers itself, and the shaders read them by descriptor index.
+    - D3D11 views used as `ImTextureID` get a descriptor at commit time. Icons and cursors use their ORG copies, made from the
+      pixels `IconLoader` keeps (`IconLoader::OrgBinding`; one view per mip, as `ViewForSize` picks). Any other view (a preset
+      screenshot, a feature's debug view) is DXVK's image imported by `DCLF::GpuTextures::ResolveBinding`.
+-   **Per frame.** The client's commit copies the vertices, indices and texture rows into one host-visible staging buffer, a
+    `LatchBlock` from a small pool. It stores the frame in the host frame slot. The pass takes its slot's frame at record time
+    and keeps it, with its textures and descriptors, until the recording's GPU work retires (`RecordingContext::Retain`). The
+    staging buffer then goes back to the pool. The vertex stage reads the geometry by index (`RenderGraph/ImGui.hlsl`). Each
+    command gets its own scissor (`SetScissors`) and push block.
+-   **Not drawn.** Draw callbacks (`ImDrawList::AddCallback`), which are D3D11 code. `ImDrawCallback_ResetRenderState` needs
+    nothing. The screenshot editor's opaque preview blend is the one callback CS has: its preview is alpha-blended on this
+    path.
 
 ## Shader bindings for ported passes
 
@@ -588,6 +617,7 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 | `CS_ORG_LLF_PARITY=1` | Every 300 frames, also run LLF's D3D11 culling and compare each cluster's light set with the graph's (logs `LLF parity OK` / `MISMATCH`). |
 | `CS_ORG_ANCHOR_SELFTEST=1` | Reserve every frame anchor and run a test client at each: a raster pass writes a texture, a compute pass reads it and one texel of kMAIN into a buffer, and a copy reads that back. Each anchor logs `[ORG] anchor self-test: <anchor> OK` once, then `every anchor OK`. |
 | `CS_ORG_GRAPHRES_SELFTEST=1` | Reserve DeferredPasses and test the graph-backed resources there (above, "Graph-backed feature resources"). Logs `[ORG] graph resource self-test: 16x16 OK ...`, then `resized to 32x32`, `32x32 OK ...` and `every check OK; the texture is released`; `MISMATCH` otherwise. |
+| `CS_ORG_IMGUI=1` | Draw CS's ImGui frames with the render graph's backend at the `Overlay` anchor once the graph is up ("ImGui on the graph"). Logs `[ORG] ImGui: drawn by the render graph` and `drawing onto ...`. |
 | `CS_ORG_EPOCH_STATS=1` | Log render-thread CPU time per epoch (average and maximum every 600 epochs). |
 | `CS_ORG_ASYNC_EPOCHS=0` | Run the epochs synchronously. By default each epoch is prepared and recorded ahead on the graph host's thread, and the render thread only admits and submits ("Revisions and recordings" in `dclf-architecture.md`). |
 | `CS_ORG_IN_STREAM=0` | Enqueue the async epochs' batches behind DXVK's command list (`dxvkEnqueueInteropSubmission`) instead of running their graphics work inside it. A list such as `0,3` keeps only those epochs in the stream. |

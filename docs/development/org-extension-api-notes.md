@@ -26,9 +26,22 @@ One entry per need. Give:
 
 - **Need:** draw a 2D overlay (usually Dear ImGui) over the finished frame.
 - **Who:** ImGui-based SKSE menus and HUDs that hook `IDXGISwapChain::Present` and draw with `imgui_impl_dx11`.
-- **Where it fits:** a pass in the Present anchor, after CS's own overlay (plan P1.6, P2.2). The plugin records its ImGui
-  draw data and CS draws it, or it gets a render pass on the back buffer.
-- **Found by:** survey for the plan (2026-11-09).
+- **Where it fits:** the Overlay anchor (P1.6), with an order key below CS's ImGui pass (1000), so CS's menu stays on top.
+  Two ways a plugin could use it:
+  - It hands CS its `ImDrawData` each frame, and CS draws it with its ORG ImGui backend (`src/RenderGraph/ImGuiBasicRHI.h`).
+    `ImGuiBasicRHI::Commit` and `MakePass` already work this way for CS's own context. A plugin's context has its own
+    textures, so the backend would need one state per context. Today its state is a single static.
+  - It registers its own raster pass on the overlay's target. That target is whatever D3D11 render target is bound when the
+    overlay draws: the framebuffer (`cs.engine.target.<kFRAMEBUFFER>`), or HDR's UI texture (`cs.imgui.target`). The plugin
+    would need that resource from an exported call.
+- **Also needed:**
+  - Its textures as bindless indices: an exported `MakeTexture` (CPU pixels to an ORG texture), and the resolver hook that
+    turns a plugin's own `ImTextureID` into a descriptor.
+  - Draw callbacks. CS skips `ImDrawList::AddCallback` callbacks on the ORG path, because they are D3D11 code. A plugin that
+    switches blend state in a callback (CS's screenshot preview does) needs a declarative replacement: a per-draw blend or
+    opaque flag.
+  - Input. The overlay's ImGui input still comes from CS's WndProc hook. A plugin's own context needs the same forwarding.
+- **Found by:** survey for the plan (2026-11-09); P1.6 (2026-11-09).
 
 ### Present notification
 
@@ -176,7 +189,11 @@ Each anchor's rule:
   `Point::input` and `Point::output` are the tonemap's targets. Its graph may record ahead of the hook, so a pass that depends
   on them puts them in its revision.
 - **Present.** In `IDXGISwapChain::Present`, before DCLF's `BeforePresent`, the frame pace signal, CS's overlay, HDR output,
-  frame generation and the present. It is not after the UI yet: an overlay pass after the UI needs P1.6.
+  frame generation and the present. It is before the UI: a pass after the UI uses Overlay.
+- **Overlay.** At CS's overlay draw (`OverlayRenderer::FinalizeImGuiFrame`), inside HDRDisplay's present chain: after Present,
+  DCLF's `BeforePresent` and the frame pace signal. ImGui has built its frame. Before HDR output and frame generation. It runs
+  only on frames where CS's overlay draws (the menu, an editor, notifications, the performance overlay), not every frame. The
+  target is the render target bound for the overlay: the framebuffer, or HDR's UI texture when HDR composites the UI.
 
 Keys used so far:
 
@@ -189,6 +206,7 @@ Keys used so far:
 - Volumetric Shadows (`CS_ORG_VOLUMETRIC_SHADOWS`): 100 to 105 at EarlyPrepass (per mip: downsample, horizontal blur, vertical
 - Light Limit Fix's local shadow cache (`CS_ORG_LLF_SHADOWS`): 100 (slot data) and 101 (shadow map copy) at EarlyPrepass.
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
+- CS's ImGui (`CS_ORG_IMGUI`): 1000 at Overlay, last.
 
 ### Work whose shape changes every frame
 

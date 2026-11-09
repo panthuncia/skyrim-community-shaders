@@ -4,6 +4,7 @@
 
 #include "Globals.h"
 #include "Menu.h"
+#include "Menu/ImGuiRenderer.h"
 #include "Menu/ThemeManager.h"
 #include "Utils/D3D.h"
 #include "Utils/FileSystem.h"
@@ -25,7 +26,21 @@ namespace Util
 		/// {6c1c5f0e-6f6e-4c8e-9a1d-3f0b7b2d5a11}: private data on an icon's full view, holding its per-level views.
 		constexpr GUID kIconMipViewsGuid = { 0x6c1c5f0e, 0x6f6e, 0x4c8e, { 0x9a, 0x1d, 0x3f, 0x0b, 0x7b, 0x2d, 0x5a, 0x11 } };
 
-		/** @brief One single-level view per mip of an icon, owned by the icon's full view through D3D private data. */
+		/// {0e6a3b4d-2f71-4c9a-8b52-6d1e9a7c3f20}: private data on an icon's single-level view: its IconMipViews (not a reference:
+		/// the full view's holder owns the level views) and its level.
+		constexpr GUID kIconLevelGuid = { 0x0e6a3b4d, 0x2f71, 0x4c9a, { 0x8b, 0x52, 0x6d, 0x1e, 0x9a, 0x7c, 0x3f, 0x20 } };
+
+		class IconMipViews;
+		struct IconLevelTag
+		{
+			IconMipViews* holder;
+			std::uint32_t level;
+		};
+
+		/**
+		 * @brief One single-level view per mip of an icon, owned by the icon's full view through D3D private data. With the render
+		 * graph's ImGui (CS_ORG_IMGUI=1) it also keeps the icon's pixels until its ORG copy is made (OrgBinding).
+		 */
 		class IconMipViews final : public IUnknown
 		{
 		public:
@@ -58,6 +73,9 @@ namespace Util
 			std::vector<ID3D11ShaderResourceView*> views;
 			int width;
 			int height;
+			std::vector<std::vector<uint8_t>> levels;  // the pixels, per level, until the ORG copy is made
+			std::shared_ptr<ImGuiBasicRHI::Texture> orgTexture;
+			bool orgFailed = false;
 
 		private:
 			std::atomic<ULONG> refs{ 1 };
@@ -193,6 +211,13 @@ namespace Util
 				levelViews[i] = nullptr;
 		}
 		auto* holder = new IconMipViews(std::move(levelViews), image_width, image_height);
+		for (std::uint32_t i = 0; i < holder->views.size(); i++) {
+			const IconLevelTag tag{ holder, i };
+			if (holder->views[i])
+				holder->views[i]->SetPrivateData(kIconLevelGuid, sizeof(tag), &tag);
+		}
+		if (ImGuiRenderer::OrgRequested())
+			holder->levels = std::move(levels);
 		(*out_srv)->SetPrivateDataInterface(kIconMipViewsGuid, holder);
 		holder->Release();  // The view keeps its own reference
 
@@ -225,6 +250,38 @@ namespace Util::IconLoader
 		}
 		raw->Release();  // GetPrivateData added a reference
 		return view;
+	}
+
+	ImGuiBasicRHI::Binding OrgBinding(ID3D11ShaderResourceView* texture)
+	{
+		if (!texture)
+			return {};
+		Util::IconMipViews* holder = nullptr;
+		int level = -1;
+		Util::IconLevelTag tag{};
+		UINT dataSize = sizeof(tag);
+		IUnknown* raw = nullptr;
+		if (SUCCEEDED(texture->GetPrivateData(Util::kIconLevelGuid, &dataSize, &tag)) && dataSize == sizeof(tag)) {
+			holder = tag.holder;
+			level = static_cast<int>(tag.level);
+		} else {
+			dataSize = sizeof(raw);
+			if (FAILED(texture->GetPrivateData(Util::kIconMipViewsGuid, &dataSize, &raw)) || !raw)
+				return {};
+			holder = static_cast<Util::IconMipViews*>(raw);
+		}
+		if (!holder->orgTexture && !holder->orgFailed && !holder->levels.empty()) {
+			std::vector<std::span<const std::byte>> spans;
+			for (const auto& pixels : holder->levels)
+				spans.push_back(std::as_bytes(std::span(pixels)));
+			holder->orgTexture = ImGuiBasicRHI::MakeTexture(static_cast<std::uint32_t>(holder->width), static_cast<std::uint32_t>(holder->height), spans, "cs.imgui.icon");
+			holder->orgFailed = !holder->orgTexture;
+			holder->levels.clear();
+		}
+		auto binding = ImGuiBasicRHI::BindingOf(holder->orgTexture, level);
+		if (raw)
+			raw->Release();  // GetPrivateData added a reference
+		return binding;
 	}
 
 	UIIcons& GetIcons()
