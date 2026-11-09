@@ -57,9 +57,12 @@ One entry per need. Give:
 - **Who:** plugins that make icons, HUD textures or dynamic textures with `ID3D11Device::CreateTexture2D` and
   `UpdateSubresource`.
 - **Where it fits:** an ORG texture with an upload, handed to the engine as a tripwire handle that wraps it (P4.1, P4.3).
-  Terrain Shadows' port does the graph half today: its heightmap is a persistent graph texture (`GraphResources::Texture2D`,
-  no export), filled once from the DDS by `TEXTURE_UPLOAD_SUBRESOURCES` in its anchor client's `commit`, where the upload
-  service is active. The upload copies the bytes at that call, so the source only has to live until then. BC formats work.
+  Terrain Shadows' port does the graph half today. Its heightmap is a persistent graph texture (`GraphResources::Texture2D`,
+  no export). The upload service cannot fill it: async epochs, which the anchors run, record only buffer uploads
+  ("Async epochs cannot record these uploads"). So the DDS bytes go into an upload-heap `org::Buffer` at once, laid out by
+  `rhi::helpers::PlanTextureUploadSubresources`, and a copy pass (`CopyBufferToTexture`) in the client fills the texture in
+  the first epoch. The next frame the client is rebuilt without that pass (`FrameAnchors::Refresh`), and the buffer goes
+  with the last build that holds it. BC formats work. An API for plugins needs a texture upload that async epochs record.
 - **Found by:** survey for the plan (2026-11-09); the graph upload by P3 TerrainShadows (2026-11-09).
 
 ### Sharing graph resources with D3D11 code

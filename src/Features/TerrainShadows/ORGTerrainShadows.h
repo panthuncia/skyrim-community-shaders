@@ -20,8 +20,9 @@ namespace DirectX
  * render thread (TerrainShadows::UpdateShadow); this class only runs them.
  *
  * Resources:
- * - The heightmap: a persistent graph texture, owned by the graph and filled once from the DDS through the graph's upload
- *   service. Nothing outside the graph reads it, so it has no D3D11 view.
+ * - The heightmap: a persistent graph texture, owned by the graph. Nothing outside the graph reads it, so it has no D3D11
+ *   view. Its DDS bytes go into an upload buffer at once, and a copy pass fills it in the first epoch; the graph is then built
+ *   again without that pass. Async epochs record no texture uploads, so the upload service cannot fill it.
  * - The shadow height map: a persistent graph texture written by the pass. It exports a D3D11 SRV, which the feature binds at t60
  *   for the engine's pixel shaders and Drawcall Limit Fix reads as its frame texture, until those draws are ported.
  * - The per-dispatch constants: one LATCH region a dispatch, written by the client's commit at the frame slot.
@@ -50,12 +51,11 @@ public:
 
 	/**
 	 * @brief Replaces the heightmap: makes the program (once), the heightmap and shadow height textures and the latch, queues the
-	 * heightmap's upload and registers the anchor client. The caller unbinds the previous shadow height view first.
-	 * @param a_image Mip 0 of the DDS (BC4 or any other typed format). Its bytes are copied at the next commit, so they must stay
-	 *        valid until then: the caller passes ownership of the image's memory through a_owner.
+	 * heightmap's bytes in an upload buffer and registers the anchor client. The caller unbinds the previous shadow height view first.
+	 * @param a_image Mip 0 of the DDS (BC4 or any other typed format). Its bytes are copied before this returns.
 	 * @return False, logged, when anything fails; the ORG path is then off for good.
 	 */
-	bool SetHeightmap(const DirectX::Image& a_image, std::shared_ptr<const void> a_owner);
+	bool SetHeightmap(const DirectX::Image& a_image);
 
 	/**
 	 * @brief This frame's dispatches, run at the EarlyPrepass anchor: one constants entry a dispatch, in order, each with a_groups
