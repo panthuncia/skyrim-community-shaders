@@ -265,7 +265,29 @@ void CloudShadows::ReflectionsPrepass()
 		ID3D11ShaderResourceView* srv = OcclusionSRV();
 		context->PSSetShaderResources(25, 1, &srv);
 		context->CSSetShaderResources(25, 1, &srv);
+		DebugReadback(srv);
 	}
+}
+
+void CloudShadows::DebugReadback(ID3D11ShaderResourceView* a_occlusion) const
+{
+	// Debug readback (CS_CLOUD_READBACK=1): every 250 frames, each face's mean of the last layer and of the bound occlusion (it stalls).
+	static const bool readback = [] {
+		char value[8]{};
+		return GetEnvironmentVariableA("CS_CLOUD_READBACK", value, sizeof(value)) && value[0] == '1';
+	}();
+	if (!readback || globals::state->frameCount % 250 != 0)
+		return;
+	auto* lastLayer = texCloudShadowLayers[kMaxCloudLayers - 1];
+	std::string layerMeans, occlusionMeans;
+	for (UINT face = 0; face < 6; ++face) {
+		const auto layerMean = lastLayer ? Util::VolumeMeans(lastLayer->srv.get(), face) : std::nullopt;
+		const auto occlusionMean = Util::VolumeMeans(a_occlusion, face);
+		layerMeans += std::format(" {:.4f}", layerMean ? (*layerMean)[0] : -1.0);
+		occlusionMeans += std::format(" {:.4f}", occlusionMean ? (*occlusionMean)[0] : -1.0);
+	}
+	logger::info("[Cloud Shadows] readback ({}) frame {}: last layer faces [{} ], occlusion faces [{} ]",
+		ORGCloudShadows::Get().OcclusionSRV() ? "ORG" : "D3D11", globals::state->frameCount, layerMeans, occlusionMeans);
 }
 
 ID3D11ShaderResourceView* CloudShadows::OcclusionSRV() const

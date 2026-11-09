@@ -100,6 +100,8 @@ public:
 
 	/** @brief The cloud occlusion cubemap's view (t25, t26): the render graph's export on the ORG path, else the D3D11 copy. */
 	ID3D11ShaderResourceView* OcclusionSRV() const;
+	/** @brief With CS_CLOUD_READBACK=1, logs each face's mean of the last layer and of a_occlusion every 250 frames. */
+	void DebugReadback(ID3D11ShaderResourceView* a_occlusion) const;
 
 	/** @brief Installs the BSSkyShader hooks and reserves the ORG path's anchor after all plugins have loaded. */
 	virtual void PostPostLoad() override;
