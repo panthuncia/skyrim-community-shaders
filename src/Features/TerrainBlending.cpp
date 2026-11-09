@@ -1,6 +1,7 @@
 #include "TerrainBlending.h"
 
 #include "Features/DrawcallLimitFix.h"
+#include "Features/TerrainBlending/ORGTerrainBlending.h"
 
 #include "Deferred.h"
 #include "Globals.h"
@@ -86,6 +87,34 @@ void TerrainBlending::SetupResources()
 	}
 
 	{
+		auto& mainDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
+		depthSRVBackup = mainDepth.depthSRV;
+
+		auto& zPrepassCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
+		prepassSRVBackup = zPrepassCopy.depthSRV;
+	}
+
+	// The ORG path makes its own blended depths at the first depth pass (ORGTerrainBlending::BeforeDepth), and these only if it stops.
+	if (!ORGTerrainBlending::Requested())
+		CreateBlendedDepthTextures();
+
+	{
+		D3D11_DEPTH_STENCIL_DESC depthStencilDesc{};
+		depthStencilDesc.DepthEnable = true;
+		depthStencilDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+		depthStencilDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+		depthStencilDesc.StencilEnable = false;
+		DX::ThrowIfFailed(device->CreateDepthStencilState(&depthStencilDesc, &terrainDepthStencilState));
+		Util::SetResourceName(terrainDepthStencilState, "TerrainBlending::DepthStencilState");
+	}
+}
+
+void TerrainBlending::CreateBlendedDepthTextures()
+{
+	if (blendedDepthTexture)
+		return;
+	auto renderer = globals::game::renderer;
+	{
 		auto main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 
 		D3D11_TEXTURE2D_DESC texDesc{};
@@ -112,27 +141,40 @@ void TerrainBlending::SetupResources()
 		blendedDepthTexture16 = new Texture2D(texDesc, "TerrainBlending::BlendedDepth16");
 		blendedDepthTexture16->CreateSRV(srvDesc);
 		blendedDepthTexture16->CreateUAV(uavDesc);
-
-		auto& mainDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
-		depthSRVBackup = mainDepth.depthSRV;
-
-		auto& zPrepassCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
-		prepassSRVBackup = zPrepassCopy.depthSRV;
 	}
+}
 
-	{
-		D3D11_DEPTH_STENCIL_DESC depthStencilDesc{};
-		depthStencilDesc.DepthEnable = true;
-		depthStencilDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
-		depthStencilDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
-		depthStencilDesc.StencilEnable = false;
-		DX::ThrowIfFailed(device->CreateDepthStencilState(&depthStencilDesc, &terrainDepthStencilState));
-		Util::SetResourceName(terrainDepthStencilState, "TerrainBlending::DepthStencilState");
-	}
+ID3D11ShaderResourceView* TerrainBlending::GetBlendedDepthSRV(bool a_16bit) const
+{
+	if (auto* view = ORGTerrainBlending::Get().BlendedDepthSRV(a_16bit))
+		return view;
+	const auto* texture = a_16bit ? blendedDepthTexture16 : blendedDepthTexture;
+	return texture ? texture->srv.get() : nullptr;
+}
+
+ID3D11ShaderResourceView* TerrainBlending::GetMaskSRV() const
+{
+	if (auto* view = ORGTerrainBlending::Get().MaskSRV())
+		return view;
+	return terrainDepth.depthSRV;
+}
+
+void TerrainBlending::UseD3D11BlendedDepth()
+{
+	CreateBlendedDepthTextures();
+	// While the depth table names a blended depth (from the depth pass to the terrain passes), it names the D3D11 texture's.
+	auto renderer = globals::game::renderer;
+	auto& mainDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
+	auto& zPrepassCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
+	if (mainDepth.depthSRV != depthSRVBackup)
+		mainDepth.depthSRV = blendedDepthTexture->srv.get();
+	if (zPrepassCopy.depthSRV != prepassSRVBackup)
+		zPrepassCopy.depthSRV = blendedDepthTexture->srv.get();
 }
 
 void TerrainBlending::PostPostLoad()
 {
+	ORGTerrainBlending::Reserve();
 	Hooks::Install();
 }
 
@@ -201,6 +243,18 @@ void TerrainBlending::BlendPrepassDepths()
 	auto context = globals::d3d::context;
 	context->OMSetRenderTargets(0, nullptr, nullptr);
 
+	auto stateUpdateFlags = globals::game::stateUpdateFlags;
+
+	// The ORG path: the DepthDone anchor's pass blends and writes the mask (ORGTerrainBlending).
+	if (ORGTerrainBlending::Get().Blend()) {
+		stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+		if (globals::state->frameAnnotations)
+			globals::state->EndPerfEvent();
+		return;
+	}
+	// D3D11, or the graph stopped since the depth pass began: blend into the D3D11 textures, which the depth table then names.
+	UseD3D11BlendedDepth();
+
 	auto dispatchCount = Util::GetScreenDispatchCount();
 
 	{
@@ -228,7 +282,6 @@ void TerrainBlending::BlendPrepassDepths()
 	ID3D11ComputeShader* shader = nullptr;
 	context->CSSetShader(shader, nullptr, 0);
 
-	auto stateUpdateFlags = globals::game::stateUpdateFlags;
 	stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 
 	auto renderer = globals::game::renderer;
@@ -274,8 +327,12 @@ void TerrainBlending::Hooks::Main_RenderDepth::thunk(bool a1, bool a2)
 	singleton.eyePosition = Util::GetEyePosition();
 
 	if (shaderCache->IsEnabled() && singleton.settings.Enabled) {
-		mainDepth.depthSRV = singleton.blendedDepthTexture->srv.get();
-		zPrepassCopy.depthSRV = singleton.blendedDepthTexture->srv.get();
+		// Before the depth table names the blended depth: the ORG path imports the main depth through it.
+		if (!ORGTerrainBlending::Get().BeforeDepth())
+			singleton.CreateBlendedDepthTextures();
+		auto* blendedDepth = singleton.GetBlendedDepthSRV();
+		mainDepth.depthSRV = blendedDepth;
+		zPrepassCopy.depthSRV = blendedDepth;
 
 		singleton.renderDepth = true;
 		singleton.ResetDepth();
@@ -376,7 +433,8 @@ void TerrainBlending::RenderTerrainBlendingPasses()
 	auto shadowState = globals::game::shadowState;
 	auto stateUpdateFlags = globals::game::stateUpdateFlags;
 
-	context->PSSetShaderResources(55, 1, &terrainDepth.depthSRV);
+	auto* mask = GetMaskSRV();
+	context->PSSetShaderResources(55, 1, &mask);
 
 	const uint64_t terrainPassCount = static_cast<uint64_t>(terrainRenderPasses.size());
 	const uint64_t noBlendPassCount = static_cast<uint64_t>(renderPasses.size());

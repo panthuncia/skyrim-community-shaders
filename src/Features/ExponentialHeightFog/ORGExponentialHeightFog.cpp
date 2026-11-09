@@ -34,6 +34,7 @@ ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 #	include "Features/Skylighting.h"
 #	include "Features/Skylighting/ORGSkylighting.h"
 #	include "Features/TerrainBlending.h"
+#	include "Features/TerrainBlending/ORGTerrainBlending.h"
 #	include "Features/TerrainShadows.h"
 #	include "Features/TerrainShadows/ORGTerrainShadows.h"
 #	include "Globals.h"
@@ -576,7 +577,9 @@ namespace
 			return {};
 		if (a_view == globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV)
 			return { FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY), {} };
-		// Terrain Blending's 16-bit blended depth.
+		// Terrain Blending's 16-bit blended depth: by name on its ORG path (published, ordered after the blend), else imported.
+		if (a_view == ORGTerrainBlending::Get().BlendedDepthSRV(true))
+			return { nullptr, std::string(ORGTerrainBlending::kBlendedDepth16Id) };
 		return ImportView("TerrainBlending::BlendedDepth16", a_view);
 	}
 

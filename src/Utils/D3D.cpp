@@ -65,8 +65,8 @@ namespace Util
 
 		auto& tb = globals::features::terrainBlending;
 		if (tb.loaded && tb.settings.Enabled) {
-			auto* srv = prefer16bit ? (tb.blendedDepthTexture16 ? tb.blendedDepthTexture16->srv.get() : nullptr) : (tb.blendedDepthTexture ? tb.blendedDepthTexture->srv.get() : nullptr);
-			if (srv)
+			// The graph's export on Terrain Blending's ORG path, else its D3D11 texture.
+			if (auto* srv = tb.GetBlendedDepthSRV(prefer16bit))
 				return srv;
 		}
 		return zPrepassCopy.depthSRV;

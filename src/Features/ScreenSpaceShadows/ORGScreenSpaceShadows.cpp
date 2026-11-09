@@ -7,6 +7,7 @@
 
 #	include "Features/ScreenSpaceShadows.h"
 #	include "Features/TerrainBlending.h"
+#	include "Features/TerrainBlending/ORGTerrainBlending.h"
 #	include "Globals.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
@@ -66,7 +67,7 @@ namespace
 		std::unique_ptr<GraphResources::Texture2D> output;
 		std::shared_ptr<org::LatchBlock> latch;
 		org::OwnedDescriptorBinding sampler;
-		std::shared_ptr<org::ExternalTextureResource> depth;
+		std::shared_ptr<org::Resource> depth;
 	};
 
 	std::shared_ptr<const Program> LoadProgram(rhi::Device a_device, std::uint32_t a_sampleCount)
@@ -87,20 +88,29 @@ namespace
 		return program;
 	}
 
-	/** @brief The depth the D3D11 path reads at Prepass (Util::GetCurrentSceneDepthSRV(false)), as a graph texture. */
-	std::shared_ptr<org::ExternalTextureResource> CurrentDepth()
+	/**
+	 * @brief The depth the D3D11 path reads at Prepass (Util::GetCurrentSceneDepthSRV(false)), as a graph texture: on Terrain
+	 * Blending's ORG path its published blended depth, which the graph orders after the blend.
+	 */
+	std::shared_ptr<org::Resource> CurrentDepth()
 	{
 		auto& terrainBlending = globals::features::terrainBlending;
-		if (terrainBlending.loaded && terrainBlending.settings.Enabled && terrainBlending.blendedDepthTexture)
-			return FrameAnchors::D3D11Texture(kBlendedDepthName, terrainBlending.blendedDepthTexture->resource.get(),
-				terrainBlending.blendedDepthTexture->srv.get(), nullptr);
+		if (terrainBlending.loaded && terrainBlending.settings.Enabled) {
+			if (auto graph = ORGTerrainBlending::Get().BlendedDepthGraph())
+				return graph;
+			if (terrainBlending.blendedDepthTexture)
+				return FrameAnchors::D3D11Texture(kBlendedDepthName, terrainBlending.blendedDepthTexture->resource.get(),
+					terrainBlending.blendedDepthTexture->srv.get(), nullptr);
+		}
 		return FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
 	}
 
 	const char* DepthLabel()
 	{
 		auto& terrainBlending = globals::features::terrainBlending;
-		return terrainBlending.loaded && terrainBlending.settings.Enabled ? "Terrain Blending" : "the z-prepass copy";
+		if (!terrainBlending.loaded || !terrainBlending.settings.Enabled)
+			return "the z-prepass copy";
+		return ORGTerrainBlending::Get().Active() ? "Terrain Blending's graph texture" : "Terrain Blending";
 	}
 
 	// Every dispatch of the list's capacity, each reading its constants and group counts from the execution's latch region.

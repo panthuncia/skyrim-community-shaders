@@ -47,6 +47,7 @@ namespace FrameAnchors
 	{
 		ReflectionsPrepass,  // BSCubeMapCamera::RenderCubemap, after the features' ReflectionsPrepass (Deferred::ReflectionsPrepasses)
 		EarlyPrepass,        // Main::RenderShadowMaps returned, after the features' EarlyPrepass (Deferred::EarlyPrepasses)
+		DepthDone,           // Main::RenderDepth returned (Terrain Blending's depth hook), before the features' Prepass
 		Prepass,             // the main pass's first opaque batch, after the features' Prepass (Deferred::PrepassPasses)
 		DeferredPasses,      // the opaque pass done, after the final depth copy, before the D3D11 SSGI, SSS and composite
 		DeferredComposite,   // after the D3D11 SSGI, SSS and cubemap update, where the deferred composite runs

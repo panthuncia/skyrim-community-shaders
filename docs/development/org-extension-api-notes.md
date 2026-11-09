@@ -125,6 +125,20 @@ One entry per need. Give:
   the UAV export) are not ordered against graph reads either.
 - **Found by:** P3 DCLF graph textures (2026-11-09); P3 DCLF publish (2026-11-09).
 
+### Depth targets a D3D11 draw still writes
+
+- **Need:** a pass reads a depth texture that D3D11 draws write, or a plugin's depth texture that both D3D11 draws and graph
+  passes write (Terrain Blending's terrain depth: the engine's re-issued terrain draws write it through a D3D11 DSV; DCLF's
+  depth epoch writes it when it holds the terrain).
+- **Who:** Terrain Blending today; any plugin that redraws engine geometry into a depth target of its own.
+- **Where it fits:** the texture stays D3D11's and graph passes import it (`FrameAnchors::ImportDepth`). Two gaps keep it there:
+  - `GraphResources` exports SRV, UAV and RTV views, but no DSV, so a graph-owned depth texture cannot take the engine's draws.
+  - `Api::NearTwinContribution::target` is an `ID3D11Texture2D*` DCLF imports itself. DCLF would need a graph-resource form (the
+    target's published id, with DCLF clearing it at the depth commit) before the terrain depth could be a graph texture.
+  With both, Terrain Blending's terrain depth becomes a graph texture: DCLF draws its near twin, the engine's re-issue (DCLF
+  off, or the terrain toggle off) draws through the export, and the clear becomes a graph pass.
+- **Found by:** P3 TerrainBlending (2026-11-09).
+
 ### Render to texture
 
 - **Need:** render into a texture the engine later samples on a character.
@@ -195,6 +209,10 @@ Each anchor's rule:
 - **EarlyPrepass.** After `Main::RenderShadowMaps` returns. The shadow maps are drawn, DCLF's shadow epoch included, and the
   shadow light data is copied (t98). After every feature's `EarlyPrepass`. Before `Main::RenderDepth`: the scene depth is
   not drawn yet.
+- **DepthDone.** When `Main::RenderDepth` returns, in Terrain Blending's depth hook (`TerrainBlending::BlendPrepassDepths`): the
+  z-prepass is drawn, DCLF's depth and first-person depth epochs included, and Terrain Blending's terrain depth is complete.
+  Before the features' `Prepass`, which read the blended depth through the depth table. It runs only while Terrain Blending
+  is loaded and on: no other hook reaches this point, so the anchor self-test reports it only then.
 - **Prepass.** At the main pass's first opaque batch, inside `StartDeferred`. After every feature's `Prepass`, so after Light
   Limit Fix's culling epoch. Before DCLF's colour epoch. The Z-prepass depth is drawn. The GBuffer targets are bound but not
   cleared yet: they still hold the last frame.
@@ -233,6 +251,7 @@ Keys used so far:
 - The deferred composite (`cs.deferred.composite`): 0 at DeferredComposite.
 - The shared constants' upload (`cs.shared.upload`): first at every anchor where a client reads them, outside the keys.
 - Terrain Shadows' update (`CS_ORG_TERRAIN_SHADOWS`): 100 at EarlyPrepass.
+- Terrain Blending's depth blend (`CS_ORG_TERRAIN_BLENDING`): 0 at DepthDone.
 - Volumetric Shadows (`CS_ORG_VOLUMETRIC_SHADOWS`): 100 to 105 at EarlyPrepass (per mip: downsample, horizontal blur, vertical
 - Light Limit Fix's local shadow cache (`CS_ORG_LLF_SHADOWS`): 100 (slot data) and 101 (shadow map copy) at EarlyPrepass.
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.

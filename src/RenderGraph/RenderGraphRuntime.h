@@ -89,6 +89,7 @@ public:
 		// reserved its anchor before Initialize.
 		AnchorReflectionsPrepass,
 		AnchorEarlyPrepass,
+		AnchorDepthDone,
 		AnchorPrepass,
 		AnchorDeferredPasses,
 		AnchorDeferredComposite,

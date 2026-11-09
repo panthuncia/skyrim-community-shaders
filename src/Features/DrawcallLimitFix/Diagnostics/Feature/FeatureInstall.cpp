@@ -93,7 +93,7 @@ namespace DCLF::Diagnostics
 			const auto& terrain = globals::features::terrainBlending;
 			logger::info("[DCLF] native main-pass blend: alphaBlendMode {}, alphaBlendWriteMode {}, alpha to coverage {}, '{}':{}; t55 {} (Terrain Blending's mask view {})",
 				state.alphaBlendMode, writeMode, state.alphaBlendAlphaToCoverage, pass->geometry && pass->geometry->name.c_str() ? pass->geometry->name.c_str() : "?", masks,
-				static_cast<const void*>(t55), static_cast<const void*>(terrain.terrainDepth.depthSRV));
+				static_cast<const void*>(t55), static_cast<const void*>(terrain.GetMaskSRV()));
 			if (t55)
 				t55->Release();
 		}

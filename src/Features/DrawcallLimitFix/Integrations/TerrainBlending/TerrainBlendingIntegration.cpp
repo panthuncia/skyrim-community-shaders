@@ -4,9 +4,11 @@
 #include "Features/DrawcallLimitFix/Integrations/TerrainBlending/TerrainBlending.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
 
+#include "RenderGraph/PublishedResources.h"
 #include "ShaderCache.h"
 
 #include "Features/TerrainBlending.h"
+#include "Features/TerrainBlending/ORGTerrainBlending.h"
 
 #include <cstdint>
 
@@ -25,12 +27,18 @@ namespace DCLF::Integrations::TerrainBlending
 			return terrainBlending.loaded && terrainBlending.settings.Enabled;
 		}
 
-		// Terrain Blending's mask (t55) is its terrain depth, bound by its replay after this epoch, so named here rather than
-		// captured. By the colour epoch it holds the Z-prepass's main depth (TerrainBlending::BlendPrepassDepths). Null while it does not
-		// hold the terrain: the captured view.
+		// Terrain Blending's mask (t55), bound by its replay after this epoch, so named here rather than captured. By the colour epoch it
+		// holds the Z-prepass's main depth (TerrainBlending::BlendPrepassDepths): its terrain depth on D3D11, its graph mask's export on
+		// its ORG path. Null while it does not hold the terrain: the captured view.
+		// On the ORG path (CS_ORG_TERRAIN_BLENDING) the colour passes read the published mask instead, ordered after the blend.
 		void* MaskView()
 		{
-			return DefersTerrain() ? globals::features::terrainBlending.terrainDepth.depthSRV : nullptr;
+			return DefersTerrain() ? globals::features::terrainBlending.GetMaskSRV() : nullptr;
+		}
+
+		bool MaskGraphIndex(std::uint32_t& a_index)
+		{
+			return DefersTerrain() && PublishedResources::ShaderResourceIndex(::ORGTerrainBlending::kMaskId, a_index);
 		}
 
 		// Terrain Blending's terrain depth shares the main depth's description; the Z-prepass draws near terrain blocks into it
@@ -79,7 +87,7 @@ namespace DCLF::Integrations::TerrainBlending
 			a_context.RegisterHeldGroup({ .heldWhile = defers, .slot = kNoBlendRange, .name = "terrain-no-blend", .order = 3,
 				.propertyFlags = static_cast<std::uint64_t>(Flag::kNoTransparencyMultiSample), .toggle = terrain });
 			// Its mask, t55, each colour commit.
-			a_context.RegisterFrameTexture({ .name = "terrain blending mask", .textureRegister = kMaskRegister, .view = &MaskView, .capturedWhenNull = true });
+			a_context.RegisterFrameTexture({ .name = "terrain blending mask", .textureRegister = kMaskRegister, .view = &MaskView, .capturedWhenNull = true, .graphResource = ::ORGTerrainBlending::kMaskId, .graph = &MaskGraphIndex });
 			// Its near blocks drawn twice in the depth segment: into its terrain depth and, offset, into the main depth.
 			a_context.RegisterNearTwin({ .name = "Terrain Blending's terrain depth", .debugName = "DCLF terrain blending depth",
 				.resource = "cs.dclf.terrain-blending-depth", .target = &TerrainDepthTarget, .nearTest = &NearTest });
