@@ -1,18 +1,27 @@
-RWTexture2D<float4> SSSRW : register(u0);
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below. The ORG passes
+// (ORGSubsurfaceScattering.cpp) give heap handles in the push block, the shared constant
+// buffers' too (ORG_SHARED_CONSTANTS).
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
 
-Texture2D<float4> ColorTexture : register(t0);
-Texture2D<float4> DepthTexture : register(t1);
-Texture2D<float4> MaskTexture : register(t2);
-Texture2D<float4> AlbedoTexture : register(t3);
-Texture2D<float4> NormalTexture : register(t4);
-
-SamplerState PointSampler : register(s0);
+#define SEPARABLE_SSS_RESOURCES(X)              \
+	X(SHARED, ConstantBuffer, Shared, 0)        \
+	X(UAV, RWTexture2D<float4>, SSSRW, 0)       \
+	X(SRV, Texture2D<float4>, ColorTexture, 0)  \
+	X(SRV, Texture2D<float4>, DepthTexture, 1)  \
+	X(SRV, Texture2D<float4>, MaskTexture, 2)   \
+	X(SRV, Texture2D<float4>, AlbedoTexture, 3) \
+	X(SRV, Texture2D<float4>, NormalTexture, 4) \
+	X(SAMPLER, SamplerState, PointSampler, 0)   \
+	X(LATCH, SSSConstants, PerFrameSSS, 1)
+ORG_PUSH_BLOCK(SEPARABLE_SSS_RESOURCES(ORG_HANDLE))
 
 #include "Common/Color.hlsli"
 #include "Common/ColorManagement.hlsli"
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"
 #include "SubsurfaceScattering/SSSCommon.hlsli"
+SEPARABLE_SSS_RESOURCES(ORG_RESOURCE)
 
 #if defined(BURLEY)
 #	include "SubsurfaceScattering/Burley.hlsli"
@@ -56,7 +65,7 @@ SamplerState PointSampler : register(s0);
 		float4 originalColor = SSSRW[DTid.xy];
 		float4 color = SSSSBlurCS(texCoord, float2(0.0, 1.0), sssAmount, humanProfile);
 		float3 albedo = SSSDecodeAlbedo(AlbedoTexture[DTid.xy].rgb);
-		color.rgb = SSSApplyAlbedo(color.rgb, ColorManagement::SceneToLinear(originalColor.rgb), albedo, ScatterMode);
+		color.rgb = SSSApplyAlbedo(color.rgb, ColorManagement::SceneToLinear(originalColor.rgb), albedo, PerFrameSSS.ScatterMode);
 		color.rgb = ColorManagement::LinearToScene(color.rgb);
 		SSSRW[DTid.xy] = float4(color.rgb, originalColor.a);
 	}
