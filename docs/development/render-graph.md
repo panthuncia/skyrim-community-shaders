@@ -369,6 +369,8 @@ Each anchor's ordering rule is in [org-extension-api-notes.md](./org-extension-a
 3.  The passes declare what they read and write as any graph pass does. Engine targets come from
     `FrameAnchors::EngineTarget(RE::RENDER_TARGET)` and `EngineDepth(...)`: DXVK images imported once (`DxvkImageImport`) and
     registered with every anchor graph as `cs.engine.target.<n>` and `cs.engine.depth.<n>`.
+    A texture another CS feature still makes with D3D11 comes from `FrameAnchors::FeatureTexture(texture, id)`, imported the same
+    way and registered as `id` (Screen Space Shadows reads Terrain Blending's blended depth through it).
 4.  When the graph fails, `onFailed` is called and the client is removed; the feature returns to its D3D11 path.
 
 ```cpp

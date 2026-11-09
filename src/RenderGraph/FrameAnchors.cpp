@@ -490,6 +490,24 @@ namespace FrameAnchors
 			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeDepth(target, a_desc); });
 	}
 
+	std::shared_ptr<org::ExternalTextureResource> FeatureTexture(ID3D11Texture2D* a_texture, const std::string& a_id)
+	{
+		// Keyed apart from the engine's targets (kind 0) and depth (kind 1).
+		const std::uint64_t key = (2ull << 32) | static_cast<std::uint32_t>(std::hash<std::string>{}(a_id));
+		return Import(key, a_texture, a_id, [](const D3D11_TEXTURE2D_DESC& a_desc) {
+			org::TextureDescription desc{};
+			desc.format = rhi::helpers::ToRHI(a_desc.Format);
+			desc.channels = 4;
+			desc.hasSRV = (a_desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0;
+			desc.srvFormat = desc.format;
+			desc.hasUAV = (a_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
+			desc.uavFormat = desc.format;
+			desc.hasRTV = (a_desc.BindFlags & D3D11_BIND_RENDER_TARGET) != 0;
+			desc.rtvFormat = desc.format;
+			return desc;
+		});
+	}
+
 	void AddToFrame(std::vector<std::uint32_t>& a_epochs)
 	{
 		auto& state = Anchors();
@@ -549,6 +567,7 @@ namespace FrameAnchors
 	bool Run(const Point&) { return false; }
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t) { return nullptr; }
+	std::shared_ptr<org::ExternalTextureResource> FeatureTexture(ID3D11Texture2D*, const std::string&) { return nullptr; }
 	std::uint32_t SegmentOf(Anchor) { return 0; }
 	bool IsUnusedSegment(std::uint32_t) { return false; }
 	const SegmentNames* NamesOf(std::uint32_t) { return nullptr; }
