@@ -5,6 +5,7 @@
 #include "Effects11.h"
 #include "Effects11/SettingManager.h"
 #include "Features/CloudShadows.h"
+#include "Features/ExponentialHeightFog/ORGExponentialHeightFog.h"
 #include "Features/IBL.h"
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
@@ -487,6 +488,7 @@ void ExponentialHeightFog::EnsureVolumetricResources()
 
 void ExponentialHeightFog::ReleaseVolumetricResources()
 {
+	ORGExponentialHeightFog::Get().Release();
 	vBufferA.reset();
 	vBufferAFar.reset();
 	conservativeDepth.reset();
@@ -512,12 +514,26 @@ void ExponentialHeightFog::ReleaseVolumetricResources()
 	globals::d3d::context->PSSetShaderResources(22, 1, &nullSRV);
 }
 
+ID3D11ShaderResourceView* ExponentialHeightFog::IntegratedLightScatteringView() const
+{
+	if (auto* view = ORGExponentialHeightFog::Get().NearSRV())
+		return view;
+	return integratedLightScattering ? integratedLightScattering->srv.get() : nullptr;
+}
+
 void ExponentialHeightFog::BindIntegratedLightScattering()
 {
-	ID3D11ShaderResourceView* srv = integratedLightScattering ? integratedLightScattering->srv.get() : nullptr;
+	ID3D11ShaderResourceView* srv = IntegratedLightScatteringView();
 	globals::d3d::context->PSSetShaderResources(19, 1, &srv);
-	ID3D11ShaderResourceView* farSrv = integratedLightScatteringFar ? integratedLightScatteringFar->srv.get() : nullptr;
+	ID3D11ShaderResourceView* farSrv = ORGExponentialHeightFog::Get().FarSRV();
+	if (!farSrv)
+		farSrv = integratedLightScatteringFar ? integratedLightScatteringFar->srv.get() : nullptr;
 	globals::d3d::context->PSSetShaderResources(22, 1, &farSrv);
+}
+
+void ExponentialHeightFog::PostPostLoad()
+{
+	ORGExponentialHeightFog::Reserve();
 }
 
 ID3D11ShaderResourceView* ExponentialHeightFog::UpdateEngineLocalShadowData()
@@ -802,6 +818,12 @@ void ExponentialHeightFog::Prepass()
 
 	if (IsSuppressed())
 		return;
+
+	// The render-graph path: its passes run in the Prepass anchor's epoch, right after the features' Prepass.
+	if ((settings.fogDensity > 0.0f || settings.fogDensity2 > 0.0f) && ORGExponentialHeightFog::Get().Prepass()) {
+		BindIntegratedLightScattering();
+		return;
+	}
 
 	EnsureVolumetricResources();
 

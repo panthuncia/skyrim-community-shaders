@@ -37,6 +37,8 @@ public:
 	 * light scattering, and front-to-back integration.
 	 */
 	virtual void Prepass() override;
+	/** @brief Reserves the Prepass anchor for the render-graph path (CS_ORG_EXPONENTIAL_HEIGHT_FOG=1). */
+	virtual void PostPostLoad() override;
 
 	virtual void RestoreDefaultSettings() override;
 	virtual void LoadSettings(json& o_json) override;
@@ -99,8 +101,8 @@ public:
 
 	Settings GetCommonBufferData() const;
 
-	/** @brief The view Prepass binds at t19 (null before the volumetric resources exist). Render thread. */
-	ID3D11ShaderResourceView* IntegratedLightScatteringView() const { return integratedLightScattering ? integratedLightScattering->srv.get() : nullptr; }
+	/** @brief The view Prepass binds at t19: the render graph's when it ran the last frame, else D3D11's (null before it exists). Render thread. */
+	ID3D11ShaderResourceView* IntegratedLightScatteringView() const;
 
 	// The volumetric fog's frame description, shared by the D3D11 path and the render-graph path (ORGExponentialHeightFog).
 
@@ -153,6 +155,7 @@ public:
 	using EngineLocalShadows = std::array<LightLimitFix::LocalShadowData, LightLimitFix::SHADOW_MASK_CHANNEL_COUNT>;
 
 private:
+	friend class ORGExponentialHeightFog;
 
 	/** @brief The volumes' grid sizes for the current render size and settings. */
 	GridSizes ComputeGridSizes() const;
