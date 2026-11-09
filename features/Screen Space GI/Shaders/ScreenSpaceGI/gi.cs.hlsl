@@ -25,6 +25,31 @@
 //
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+#define GI_TRACE_RESOURCES(X)                         \
+	X(SHARED, ConstantBuffer, Shared, 0)              \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 7)      \
+	X(EXTERN, SamplerState, samplerPointClamp, 0)     \
+	X(EXTERN, SamplerState, samplerLinearClamp, 1)    \
+	X(SRV, Texture2D<float>, srcWorkingDepth, 0)      \
+	X(SRV, Texture2D<float4>, srcNormalRoughness, 1)  \
+	X(SRV, Texture2D<float3>, srcRadiance, 2)         \
+	X(SRV, Texture2D<unorm float2>, srcNoise, 3)      \
+	X(SRV, Texture2D<unorm float>, srcAccumFrames, 4) \
+	X(SRV, Texture2D<float4>, srcPrevY, 5)            \
+	X(SRV, Texture2D<float2>, srcPrevCoCg, 6)         \
+	X(SRV, Texture2D<float4>, srcPrevGISpecular, 7)   \
+	X(SRV, Texture2D<float2>, srcNormal, 8)           \
+	X(SRV, Texture2D<unorm float>, srcPrevAo, 9)      \
+	X(UAV, RWTexture2D<unorm float>, outAo, 0)        \
+	X(UAV, RWTexture2D<float4>, outY, 1)              \
+	X(UAV, RWTexture2D<float2>, outCoCg, 2)           \
+	X(UAV, RWTexture2D<float4>, outGISpecular, 3)     \
+	X(UAV, RWTexture2D<half3>, outPrevGeo, 4)
+ORG_PUSH_BLOCK(GI_TRACE_RESOURCES(ORG_HANDLE))
+
 #include "Common/Color.hlsli"
 #include "Common/FastMath.hlsli"
 #include "Common/FrameBuffer.hlsli"
@@ -33,22 +58,7 @@
 #include "Common/Spherical Harmonics/SphericalHarmonics.hlsli"
 #include "ScreenSpaceGI/common.hlsli"
 
-Texture2D<float> srcWorkingDepth : register(t0);
-Texture2D<float4> srcNormalRoughness : register(t1);
-Texture2D<float3> srcRadiance : register(t2);  // maybe half-res
-Texture2D<unorm float2> srcNoise : register(t3);
-Texture2D<unorm float> srcAccumFrames : register(t4);  // maybe half-res
-Texture2D<float4> srcPrevY : register(t5);             // maybe half-res
-Texture2D<float2> srcPrevCoCg : register(t6);          // maybe half-res
-Texture2D<float4> srcPrevGISpecular : register(t7);    // maybe half-res
-Texture2D<float2> srcNormal : register(t8);
-Texture2D<unorm float> srcPrevAo : register(t9);  // maybe half-res
-
-RWTexture2D<unorm float> outAo : register(u0);
-RWTexture2D<float4> outY : register(u1);
-RWTexture2D<float2> outCoCg : register(u2);
-RWTexture2D<float4> outGISpecular : register(u3);
-RWTexture2D<half3> outPrevGeo : register(u4);
+GI_TRACE_RESOURCES(ORG_RESOURCE)
 
 float GetDepthFade(float depth)
 {

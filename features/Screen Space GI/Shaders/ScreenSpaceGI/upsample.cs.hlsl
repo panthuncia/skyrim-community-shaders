@@ -1,18 +1,28 @@
 // depth-aware upsampling: https://gist.github.com/pixelmager/a4364ea18305ed5ca707d89ddc5f8743
 
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+#define UPSAMPLE_RESOURCES(X)                      \
+	X(SHARED, ConstantBuffer, Shared, 0)           \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 7)   \
+	X(EXTERN, SamplerState, samplerPointClamp, 0)  \
+	X(EXTERN, SamplerState, samplerLinearClamp, 1) \
+	X(SRV, Texture2D<half>, srcDepth, 0)           \
+	X(SRV, Texture2D<half>, srcAo, 1)              \
+	X(SRV, Texture2D<half4>, srcIlY, 2)            \
+	X(SRV, Texture2D<half2>, srcIlCoCg, 3)         \
+	X(SRV, Texture2D<half4>, srcGiSpecular, 4)     \
+	X(UAV, RWTexture2D<half>, outAo, 0)            \
+	X(UAV, RWTexture2D<half4>, outIlY, 1)          \
+	X(UAV, RWTexture2D<half2>, outIlCoCg, 2)       \
+	X(UAV, RWTexture2D<half4>, outGiSpecular, 3)
+ORG_PUSH_BLOCK(UPSAMPLE_RESOURCES(ORG_HANDLE))
+
 #include "Common/FastMath.hlsli"
 #include "ScreenSpaceGI/common.hlsli"
 
-Texture2D<half> srcDepth : register(t0);
-Texture2D<half> srcAo : register(t1);           // half-res
-Texture2D<half4> srcIlY : register(t2);         // half-res
-Texture2D<half2> srcIlCoCg : register(t3);      // half-res
-Texture2D<half4> srcGiSpecular : register(t4);  // half-res
-
-RWTexture2D<half> outAo : register(u0);
-RWTexture2D<half4> outIlY : register(u1);
-RWTexture2D<half2> outIlCoCg : register(u2);
-RWTexture2D<half4> outGiSpecular : register(u3);
+UPSAMPLE_RESOURCES(ORG_RESOURCE)
 
 #define min4(v) min(min(v.x, v.y), min(v.z, v.w))
 #define max4(v) max(max(v.x, v.y), max(v.z, v.w))
