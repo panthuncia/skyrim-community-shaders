@@ -230,6 +230,10 @@ Keys used so far:
   blur) and 202 (vertical blur) at DeferredPasses. SSGI's passes there stay below 199, as the D3D11 order is SSGI first.
 - Screen Space GI (`CS_ORG_SCREEN_SPACE_GI`): 100 (history clears, after a reset only), 110 to 116 (the chain's steps) and 117
   (the accumulation copy without the blur) at DeferredPasses, below Subsurface Scattering's 199-202.
+- Dynamic Cubemaps (`CS_ORG_DYNAMIC_CUBEMAPS`): 300 to 310 at DeferredPasses (capture, the captures' mips, inference, the
+  filtered mip 0 copy, the inferred mips, irradiance, BC6H encoding, the two BC6H copies, publishing), after Subsurface
+  Scattering. Not at DeferredComposite, where its D3D11 path runs: the ORG composite reads the cubemaps there through
+  descriptors the graph does not track.
 
 ### Work whose shape changes every frame
 
@@ -484,3 +488,41 @@ Keys used so far:
 - **Where it fits:** the dual-target shader ABI. A plugin needs the list of header resources and their names kept stable.
   DXC's SPIR-V ignores `row_major` in a templated raw buffer `Load<T>`, so LATCH structs hold matrices as `float4` rows.
 - **Found by:** P3 ExponentialHeightFog (2026-11-09).
+
+### Work spread over frames by a CPU state machine
+
+- **Need:** a feature that splits a long job over several frames, choosing each frame's part on the CPU (Dynamic Cubemaps:
+  capture and inference, then the middle irradiance mips, then the last mip with BC6H encoding and publishing, per
+  cubemap), while its recording is kept and may be prepared before the frame's commit.
+- **Who:** CS's Dynamic Cubemaps; any plugin that amortizes work (probe updates, rolling texture builds).
+- **Where it fits:** a pass may not read the frame's choice in `Prepare`: the ticket is prepared ahead, so a choice
+  published between `Prepare` and the revision check would be recorded under the wrong revision. Today every part is in
+  the recording and the commit gates it: each dispatch is indirect, with its group counts in the latch region (zero for
+  the parts this frame skips), and ORG's mip generation takes its per-mip counts from the latch the same way
+  (`GraphPasses::MakeGenerateMips` with a gate). Copies cannot be gated, so they must give the same result every frame
+  (copy from a persistent source that only the gated work changes), or join the graph by `FrameAnchors::Refresh` once
+  they are needed. A framework answer would be predicated copies and mip generation (a condition word in a buffer the
+  commit writes), or variants a kept recording selects by a latched index.
+- **Found by:** P3 W2, Dynamic Cubemaps (2026-11-09).
+
+### ORG's built-in passes in a host without a pipeline compiler
+
+- **Need:** generate mips (and resolve MSAA) on the graph.
+- **Who:** CS's Dynamic Cubemaps (capture and inferred cubemaps); Post Processing's bloom and others next.
+- **Where it fits:** `org::GenerateMipsPass` declares its pipeline through `PassBuilder::Pipeline`, which needs an
+  `org::PipelineCompiler` in `Runtime::Desc`; CS's runtime has none (its programs are `ComputeProgram`s). CS runs ORG's own
+  shader through `ComputeProgram` instead (`GraphPasses::MakeGenerateMips`), and ships ORG's `shaders/` folder in
+  `Data/Shaders/OpenRenderGraph` (copied into `package/Shaders` at configure time). A plugin API needs either a
+  `PipelineCompiler` in CS's runtime, so ORG's built-in passes work as they are, or these wrappers exported.
+- **Found by:** P3 W2, Dynamic Cubemaps (2026-11-09).
+
+### Writing a texture that an untracked reader samples in the same epoch
+
+- **Need:** a pass writes a texture that another pass of the same anchor epoch reads through a descriptor it resolved
+  outside the graph (the ORG composite reads Dynamic Cubemaps' and IBL's D3D11 views through `DCLF::GpuTextures`).
+- **Who:** CS's Dynamic Cubemaps against the ORG composite.
+- **Where it fits:** the graph orders and transitions only declared uses, so the write and the read race, and the texture
+  can still be in a copy or storage layout when the read happens. Dynamic Cubemaps runs one epoch earlier
+  (DeferredPasses) so the epoch boundary orders them. The answer is for readers to declare published resources by id
+  (`PublishedResources`), as Drawcall Limit Fix's frame textures do; the composite and IBL still resolve D3D11 views.
+- **Found by:** P3 W2, Dynamic Cubemaps (2026-11-09).
