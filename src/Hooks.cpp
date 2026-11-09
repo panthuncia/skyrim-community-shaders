@@ -3,6 +3,7 @@
 #include "GpuEventTimers.h"
 #include "HangWatchdog.h"
 #include "GpuIdleTrace.h"
+#include "RenderGraph/GpuTimingSource.h"
 #include "ShaderTools/BSShaderHooks.h"
 #include "ShaderTools/LegacyGraphicsCompatibility.h"
 #include "Utils/ExternalEmittance.h"
@@ -498,6 +499,7 @@ struct IDXGISwapChain_Present
 		ZoneScopedN("CS.Present");
 		{
 			ZoneScopedN("CS.Present.Begin");
+			GpuTimingSource::OnPresent();
 			GpuIdleTrace::OnPresent();
 			HangWatchdog::OnPresent();
 			GpuEventTimers::OnPresent();

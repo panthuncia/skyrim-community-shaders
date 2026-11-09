@@ -3,6 +3,7 @@
 #include "Features/Upscaling/DXVKInterop.h"
 #include "Globals.h"
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/GpuTimingSource.h"
 
 #include <algorithm>
 #include <deque>
@@ -52,6 +53,7 @@ namespace GpuIdleTrace
 				CommandList,
 				External,
 				Interop,
+				Graph,  // a render-graph range on the graphics queue (CS_GPU_IDLE_SOURCE=graph)
 			};
 			Kind kind = Kind::CommandList;
 			std::uint32_t flushType = ~0u;
@@ -68,6 +70,7 @@ namespace GpuIdleTrace
 		{
 			std::uint32_t interval = 0;
 			bool active = false;
+			bool graph = false;  // CS_GPU_IDLE_SOURCE=graph: spans from the render graph's ranges, not DXVK's trace
 			PFN_dxvkReadSubmissionTrace readTrace = nullptr;
 			double tickNs = 1.0;
 			double qpcToMs = 0.0;
@@ -192,6 +195,8 @@ namespace GpuIdleTrace
 				return fmt::format("interop '{}'", a_span.label);
 			case Span::Kind::Interop:
 				return fmt::format("Streamline ring '{}'", a_span.label);
+			case Span::Kind::Graph:
+				return fmt::format("graph '{}'", a_span.label);
 			}
 			return "?";
 		}
@@ -336,6 +341,10 @@ namespace GpuIdleTrace
 				const std::int64_t cpuBegin = gpuToQpc(gap.begin);
 				const std::int64_t cpuEnd = gpuToQpc(gap.end);
 				const auto rel = [&](std::int64_t q) { return q ? fmt::format("{:+.2f}", qpcToMs(q - cpuBegin)) : std::string("n/a"); };
+				// A graph range knows only when the render thread submitted its epoch.
+				const std::string submitted = next.kind == Span::Kind::Graph ?
+				                                  fmt::format("its epoch submitted by the render thread {} ms", rel(next.queueQpc)) :
+				                                  fmt::format("app flush {} ms, DXVK CS thread {} ms, queue submit {} ms", rel(next.appQpc), rel(next.csQpc), rel(next.queueQpc));
 
 				// Self time of each marker inside the gap's CPU window.
 				std::map<std::string, double> self;
@@ -376,12 +385,12 @@ namespace GpuIdleTrace
 
 				logger::info(
 					"[GpuIdle] gap {:.3f} ms at +{:.2f} ms: after [{}] before [{}]"
-					"\n    next submission, relative to the GPU going idle: app flush {} ms, DXVK CS thread {} ms, queue submit {} ms"
+					"\n    next submission, relative to the GPU going idle: {}"
 					"\n    render thread at gap start: {}"
 					"\n    render thread at gap end:   {}"
 					"\n    CPU self time inside the gap ({:.3f} ms window, {:.3f} ms without any marker):{}",
 					tickToMs(gap.end - gap.begin), tickToMs(gap.begin - frameBegin), Describe(prev), Describe(next),
-					rel(next.appQpc), rel(next.csQpc), rel(next.queueQpc),
+					submitted,
 					StackAt(intervals, cpuBegin), StackAt(intervals, cpuEnd),
 					windowMs, (std::max)(0.0, windowMs - topLevel), markers.empty() ? std::string(" (none)") : markers);
 			}
@@ -410,6 +419,19 @@ namespace GpuIdleTrace
 		state.interval = ReadInterval();
 		if (!state.interval || state.active)
 			return;
+		LARGE_INTEGER freq;
+		QueryPerformanceFrequency(&freq);
+		state.qpcToMs = 1000.0 / static_cast<double>(freq.QuadPart);
+
+		// CS_GPU_IDLE_SOURCE=graph: the render graph's ranges on the graphics queue, with no DXVK export.
+		if (GpuTimingSource::IdleFromGraph()) {
+			state.graph = true;
+			state.active = true;
+			logger::info("[GpuIdle] Tracing the render graph's graphics queue (CS_GPU_IDLE_SOURCE=graph): work outside graph ranges counts as idle; "
+						 "analysing one frame every {} frames",
+				state.interval);
+			return;
+		}
 
 		HMODULE dxvk = GetModuleHandleW(L"dxvk_d3d11.dll");
 		auto setTrace = dxvk ? reinterpret_cast<PFN_dxvkSetSubmissionTrace>(reinterpret_cast<void*>(GetProcAddress(dxvk, "dxvkSetSubmissionTrace"))) : nullptr;
@@ -423,9 +445,6 @@ namespace GpuIdleTrace
 		VkPhysicalDeviceProperties props{};
 		vkGetPhysicalDeviceProperties(interop->GetPhysicalDevice(), &props);
 		state.tickNs = props.limits.timestampPeriod;
-		LARGE_INTEGER freq;
-		QueryPerformanceFrequency(&freq);
-		state.qpcToMs = 1000.0 / static_cast<double>(freq.QuadPart);
 		state.active = true;
 		logger::info("[GpuIdle] Tracing DXVK's queue; analysing one frame every {} frames", state.interval);
 	}
@@ -499,6 +518,34 @@ namespace GpuIdleTrace
 		if (++state.framesSinceReport >= state.interval) {
 			state.framesSinceReport = 0;
 			state.analysePending = true;
+		}
+
+		if (state.graph) {
+			// Each Present whose epochs have all completed: its graph ranges are the frame's submissions.
+			for (const auto& frame : GpuTimingSource::CompletedFrames()) {
+				if (state.analysePending && state.presents > 0) {
+					state.frameSpans.clear();
+					for (const auto& range : frame.ranges) {
+						if (range.queue != GpuTimingSource::Queue::Graphics || range.kind == GpuTimingSource::RangeKind::Sub || !range.beginTick ||
+							range.endTick < range.beginTick)
+							continue;
+						Span span;
+						span.kind = Span::Kind::Graph;
+						span.label = range.kind == GpuTimingSource::RangeKind::Barrier ? "barriers " + range.name : range.name;
+						span.queueQpc = range.submitQpc;
+						span.gpuBegin = range.beginTick;
+						span.gpuEnd = range.endTick;
+						state.frameSpans.push_back(std::move(span));
+					}
+					if (frame.graphicsMsPerTick > 0.0 && !state.frameSpans.empty()) {
+						state.tickNs = frame.graphicsMsPerTick * 1e6;
+						state.analysePending = false;
+						Analyse(state);
+					}
+				}
+				++state.presents;
+			}
+			return;
 		}
 
 		DxvkOrgSubmissionTraceRecord records[256];

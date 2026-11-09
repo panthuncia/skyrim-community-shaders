@@ -343,6 +343,43 @@ Where the timings come from now:
     operation's time appears in no timer. The copy of the upscaler's output into `kMAIN`, the first
     operation after the interop flush, is one (estimated from bandwidth at about 0.1 ms at 4K, not measured), so it has no timer.
 
+## GPU timers from the graph
+
+The end state has no D3D11 and no DXVK, so every GPU timer must come from the graph's own timestamp queries (ORG's statistics
+service on BasicRHI query pools). `src/RenderGraph/GpuTimingSource.{h,cpp}` is that source. Two switches pick it; both keep
+the D3D11/DXVK path as the default until the DXVK-free build.
+
+-   `CS_GPU_TIMERS=graph`. The profiler (`Profiler.cpp`) makes no D3D11 query and needs no D3D11 device. Its `BeginPass` /
+    `EndPass` ranges keep their CPU times. The graph's passes report exactly as before, through `AddExternalSample`, and are
+    averaged over the frames since the last collection. While D3D11 work remains, its ranges show no GPU time here: the
+    window's GPU total is the graph's work only. `CS_GPU_EVENT_TIMERS` logs the graph's ranges per Present instead of the engine's
+    events: `[GpuEvents] graph N frames ...` with the graphics queue's span from the first graph range to the last, each queue's
+    time inside graph ranges, then per range the inclusive and self (along its queue) time and calls. `dclf:gpu-window` windows work
+    the same way. `CS_GPU_LOAD` becomes a compute pass at the Present anchor (`GpuLoadPass.cpp`, same shader arithmetic).
+-   `CS_GPU_IDLE_SOURCE=graph`. `CS_GPU_IDLE_TRACE` takes its busy spans from the graph's graphics-queue ranges instead of
+    `dxvkSetSubmissionTrace` / `dxvkReadSubmissionTrace`. The analysis and the log are the same.
+
+Each epoch submission (`MarkEpoch`) records its host frame, the Present it belongs to and the CPU time. The completed-frame callback
+adds that host frame's timestamp pairs (`IStatisticsService::GetCompletedTimestamps`: passes, barrier batches of kept recordings,
+sub-ranges) to the Present. A Present is handed on once every epoch submitted in it has completed (given up after 32 Presents).
+
+What the graph source cannot see, compared with the DXVK trace:
+
+-   DXVK's own command lists. While the engine still draws through D3D11, the time between graph ranges is D3D11 work, not idle.
+    The idle trace on the graph is only an idle trace once the whole frame is graph passes.
+-   Work the graph does not time: barrier batches (timed only in recordings kept across frames), the kept recordings
+    themselves unless `CS_ORG_RECORDING_TIMESTAMPS=1`, upload lists, the present and the presenter's blit.
+-   The exact queue submission time. The graph knows when the render thread submitted the epoch, which is no later than the
+    queue submission, so it still bounds the GPU-to-CPU clock offset but less tightly. BasicRHI enables
+    `VK_EXT_calibrated_timestamps` only for Tracy and does not expose it, so there is no exact calibration yet.
+-   The flush type and the app, CS thread and queue times of each DXVK submission, and the compute queue's idle time (the trace
+    covers the graphics queue).
+
+Remaining DXVK dependencies of the timers and diagnostics, all on the default path: `dxvkGetSubmissionCounter` (the
+profiler's split flag), `dxvkSetSubmissionTrace` / `dxvkReadSubmissionTrace` (the idle trace), and the Streamline interop
+ring's own timestamps (`DXVKInterop`, `Upscaling::Upscale`), which use DXVK's device and `dxvkEnqueueInteropSubmission`.
+`CS_PASS_SKIP`, `CS_GPU_OP_PROBE` and `CS_GPU_EVENT_STATS` hook or query the D3D11 context and have no graph equivalent.
+
 ## Frame anchors: attaching feature passes
 
 A feature that moves its GPU work onto the graph attaches its passes to a frame anchor (`src/RenderGraph/FrameAnchors.h`) instead
@@ -548,6 +585,8 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 | `ORG_PERSISTENT_COPIES_ON_COPY_QUEUE=1` | Every copy pass on the copy queue whatever it prefers (a test of that queue). Set it in the launching process's environment: ORG reads it with `getenv`, which does not see the switches file. |
 | `CS_ORG_QUEUE_UPLOADS=0` | Every upload of an epoch on the graphics queue, and every compute batch waits for them. |
 | `CS_GPU_IDLE_TRACE=<frames>` | Every that many frames, log one complete frame's GPU idle gaps and what the render thread was doing during each (`[GpuIdle]`). DXVK timestamps every submission on its queue (`dxvkSetSubmissionTrace`, two extra timestamp-only submissions per submission), the Streamline ring's buffers add their own spans, and the render thread's perf events are the CPU markers. Forces Frame Annotations on for the session (without saving it) but leaves out the per-draw geometry events, whose formatting would dominate the timeline. Diagnostics only: the trace's own overhead makes gaps somewhat longer than in a normal run. |
+| `CS_GPU_TIMERS=graph` | GPU timers from the render graph alone ("GPU timers from the graph"): the profiler makes no D3D11 query, its D3D11 ranges keep CPU times only, `CS_GPU_EVENT_TIMERS` logs the graph's ranges (`[GpuEvents] graph ...`), and `CS_GPU_LOAD` runs as a graph pass at the Present anchor. Default `d3d11`. |
+| `CS_GPU_IDLE_SOURCE=graph` | `CS_GPU_IDLE_TRACE` reads the graph's graphics-queue ranges instead of DXVK's submission trace. Default `dxvk`. |
 | `CS_PROFILER_LOG=<frames>` | Log the profiling window's rolling averages every that many collected frames, sorted by cost, with `[split N%]` on timers that straddle DXVK submissions. For comparing two configurations from their logs. |
 
 Every `CS_*` switch can also be set in `CommunityShaders.env`, beside `CommunityShaders.log`

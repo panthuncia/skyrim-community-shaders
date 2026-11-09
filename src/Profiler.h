@@ -11,10 +11,13 @@
 #include <winrt/base.h>
 
 /**
- * @brief GPU and CPU profiler using D3D11 timestamp queries.
+ * @brief GPU and CPU profiler: named ranges per frame with rolling statistics (average, p95, p99).
  *
- * Maintains a ring buffer of frames with paired begin/end timestamp queries
- * and rolling statistics (average, p95, p99) per named pass.
+ * GPU times come from two sources (GpuTimingSource::SelectedTimers, CS_GPU_TIMERS):
+ * - d3d11 (default): a ring of frames with paired begin/end D3D11 timestamp queries around each range, plus the render
+ *   graph's pass times (AddExternalSample).
+ * - graph: the render graph's pass times only. Ranges keep their CPU times and have no GPU time. No D3D11 query is made,
+ *   so this works without a D3D11 device or DXVK.
  */
 class Profiler
 {
@@ -110,7 +113,8 @@ public:
 	};
 
 	/**
-	 * @brief Creates timestamp query objects and prepares the frame ring buffer.
+	 * @brief Creates timestamp query objects and prepares the frame ring buffer. With CS_GPU_TIMERS=graph it creates none,
+	 * and the device and context may be null.
 	 * @param device D3D11 device used to create query objects.
 	 * @param context Device context used for issuing and collecting queries.
 	 */
@@ -239,6 +243,15 @@ private:
 	};
 
 	ID3D11DeviceContext* context = nullptr;
+	// D3D11 timestamp queries around the ranges (CS_GPU_TIMERS=d3d11). Off, a range has its CPU time only.
+	bool d3d11Ranges = true;
+	// Without D3D11 queries: the open range, the CPU times of the frame being recorded, and those of the frames ended
+	// since the last collection.
+	std::string cpuRangeName;
+	LARGE_INTEGER cpuRangeBegin{};
+	std::unordered_map<std::string, float> cpuFrame;
+	std::unordered_map<std::string, float> closedCpuFrame;
+	bool cpuFrameClosed = false;
 
 	FrameQueries frames[kFrameRing];
 	uint32_t writeFrame = 0;
@@ -281,6 +294,8 @@ private:
 	float totalTimeMs = 0.0f;
 	float cpuTotalTimeMs = 0.0f;
 
+	/** @brief Without D3D11 queries: the CPU times of the frames ended since the last call; false when none ended. */
+	bool CollectCpuFrame(std::unordered_map<std::string, std::pair<float, float>>& activeTimers);
 	/** @brief Collects every frame the GPU has finished, oldest first, then rebuilds the results. */
 	void CollectResults();
 	/** @brief Reads one finished frame's queries into the timers' histories; false while the GPU is not done with it. */
