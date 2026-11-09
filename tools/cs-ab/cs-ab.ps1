@@ -200,6 +200,9 @@ switch ($Action) {
         $out = Join-Path $Root "runs\$id"
         New-Item -ItemType Directory -Force $out | Out-Null
         foreach ($log in 'CommunityShaders.log', 'SkyrimSE_d3d11.log') { Copy-Item (Join-Path $skse $log) $out -ErrorAction SilentlyContinue }
+        # dclf:shot's screenshots of this run (<log directory>\dclf-shots), into the run folder's shots.
+        $shots = Get-ChildItem (Join-Path $skse 'dclf-shots') -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTimeUtc -ge $startUtc }
+        if ($shots) { $shotDir = Join-Path $out 'shots'; New-Item -ItemType Directory -Force $shotDir | Out-Null; $shots | Copy-Item -Destination $shotDir }
         Get-ChildItem $skse -File | Where-Object { $_.LastWriteTimeUtc -ge $startUtc -and $_.Name -match '^(CS-AB-memory\.csv|CommunityShaders-VRAM-\d+\.json)$' } | ForEach-Object {
             if ($_.Name -like '*.json') { Move-Item $_.FullName $out } else { Copy-Item $_.FullName $out }
         }
