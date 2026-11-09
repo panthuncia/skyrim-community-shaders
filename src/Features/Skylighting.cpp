@@ -11,73 +11,29 @@
 #include "Utils/SphericalHarmonics.h"
 #include "Utils/VersionedRelocation.h"
 
-#include <DirectXPackedVector.h>
 #include <numbers>
 
 #define I18N_KEY_PREFIX "feature.skylighting."
 
 namespace
 {
-	/**
-	 * @brief Debug readback (CS_SKYLIGHTING_READBACK=1): every 250 frames, the probe and shadow-visibility volumes' means, read
-	 * through a blocking staging copy (it stalls). Either path's volumes are D3D11 textures, so the two paths log comparable lines.
-	 */
+	/** @brief Debug readback (CS_SKYLIGHTING_READBACK=1): every 250 frames, the probe and shadow-visibility volumes' means (it stalls). */
 	void DebugReadback(ID3D11ShaderResourceView* a_probes, ID3D11ShaderResourceView* a_visibility, bool a_graph)
 	{
 		static const bool requested = [] {
 			char value[8]{};
 			return GetEnvironmentVariableA("CS_SKYLIGHTING_READBACK", value, sizeof(value)) && value[0] == '1';
 		}();
-		if (!requested || !a_probes || !a_visibility || globals::state->frameCount % 250 != 0)
+		if (!requested || globals::state->frameCount % 250 != 0)
 			return;
-		auto* device = globals::d3d::device;
-		auto* context = globals::d3d::context;
-		// The volume behind a_view copied to a CPU-readable texture, mapped, and handed to a_read with its row and slice pitches.
-		auto read = [&](ID3D11ShaderResourceView* a_view, const auto& a_read) {
-			winrt::com_ptr<ID3D11Resource> resource;
-			a_view->GetResource(resource.put());
-			auto volume = resource.try_as<ID3D11Texture3D>();
-			if (!volume)
-				return false;
-			D3D11_TEXTURE3D_DESC desc{};
-			volume->GetDesc(&desc);
-			desc.Usage = D3D11_USAGE_STAGING;
-			desc.BindFlags = 0;
-			desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-			desc.MiscFlags = 0;
-			winrt::com_ptr<ID3D11Texture3D> staging;
-			if (FAILED(device->CreateTexture3D(&desc, nullptr, staging.put())))
-				return false;
-			context->CopyResource(staging.get(), volume.get());
-			D3D11_MAPPED_SUBRESOURCE mapped{};
-			if (FAILED(context->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped)))
-				return false;
-			a_read(desc, static_cast<const std::uint8_t*>(mapped.pData), mapped.RowPitch, mapped.DepthPitch);
-			context->Unmap(staging.get(), 0);
-			return true;
-		};
-		double sh[4]{}, visibility = 0.0;
-		std::uint64_t voxels = 0;
-		const bool ok = read(a_probes, [&](const D3D11_TEXTURE3D_DESC& d, const std::uint8_t* p, UINT row, UINT slice) {
-			for (UINT z = 0; z < d.Depth; ++z)
-				for (UINT y = 0; y < d.Height; ++y) {
-					const auto* texel = reinterpret_cast<const DirectX::PackedVector::HALF*>(p + z * slice + y * row);
-					for (UINT x = 0; x < d.Width; ++x, ++voxels)
-						for (int c = 0; c < 4; ++c)
-							sh[c] += DirectX::PackedVector::XMConvertHalfToFloat(texel[x * 4 + c]);
-				}
-		}) && read(a_visibility, [&](const D3D11_TEXTURE3D_DESC& d, const std::uint8_t* p, UINT row, UINT slice) {
-			for (UINT z = 0; z < d.Depth; ++z)
-				for (UINT y = 0; y < d.Height; ++y)
-					for (UINT x = 0; x < d.Width; ++x)
-						visibility += p[z * slice + y * row + x] / 255.0;
-		});
-		if (!ok || !voxels) {
+		const auto sh = Util::VolumeMeans(a_probes);
+		const auto visibility = Util::VolumeMeans(a_visibility);
+		if (!sh || !visibility) {
 			logger::warn("[Skylighting] readback failed");
 			return;
 		}
-		logger::info("[Skylighting] readback ({}) frame {}: SH mean [{:.5f} {:.5f} {:.5f} {:.5f}], shadow visibility mean {:.5f}",
-			a_graph ? "ORG" : "D3D11", globals::state->frameCount, sh[0] / voxels, sh[1] / voxels, sh[2] / voxels, sh[3] / voxels, visibility / voxels);
+		logger::info("[Skylighting] readback ({}) frame {}: SH mean [{:.5f} {:.5f} {:.5f} {:.5f}], shadow visibility mean {:.5f}", a_graph ? "ORG" : "D3D11",
+			globals::state->frameCount, (*sh)[0], (*sh)[1], (*sh)[2], (*sh)[3], (*visibility)[0]);
 	}
 }
 

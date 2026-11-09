@@ -11,6 +11,7 @@
 #include "Utils/Format.h"
 #include "Utils/Logging.h"
 #include <DDSTextureLoader.h>
+#include <DirectXPackedVector.h>
 #include <DirectXTex.h>
 #include <bcrypt.h>
 #include <d3dcompiler.h>
@@ -613,5 +614,61 @@ namespace Util
 		}
 
 		return S_OK;
+	}
+	std::optional<std::array<double, 4>> VolumeMeans(ID3D11ShaderResourceView* a_view)
+	{
+		if (!a_view)
+			return std::nullopt;
+		winrt::com_ptr<ID3D11Resource> resource;
+		a_view->GetResource(resource.put());
+		auto volume = resource.try_as<ID3D11Texture3D>();
+		if (!volume)
+			return std::nullopt;
+		D3D11_TEXTURE3D_DESC desc{};
+		volume->GetDesc(&desc);
+		const DXGI_FORMAT format = desc.Format;
+		if (format != DXGI_FORMAT_R16G16B16A16_FLOAT && format != DXGI_FORMAT_R32_FLOAT && format != DXGI_FORMAT_R8_UNORM && format != DXGI_FORMAT_R8_UINT)
+			return std::nullopt;
+		desc.MipLevels = 1;
+		desc.Usage = D3D11_USAGE_STAGING;
+		desc.BindFlags = 0;
+		desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		desc.MiscFlags = 0;
+		winrt::com_ptr<ID3D11Texture3D> staging;
+		auto* context = globals::d3d::context;
+		if (FAILED(globals::d3d::device->CreateTexture3D(&desc, nullptr, staging.put())))
+			return std::nullopt;
+		context->CopySubresourceRegion(staging.get(), 0, 0, 0, 0, volume.get(), 0, nullptr);
+		D3D11_MAPPED_SUBRESOURCE mapped{};
+		if (FAILED(context->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped)))
+			return std::nullopt;
+		std::array<double, 4> sums{};
+		const auto* bytes = static_cast<const std::uint8_t*>(mapped.pData);
+		for (UINT z = 0; z < desc.Depth; ++z)
+			for (UINT y = 0; y < desc.Height; ++y) {
+				const auto* row = bytes + z * mapped.DepthPitch + y * mapped.RowPitch;
+				for (UINT x = 0; x < desc.Width; ++x) {
+					switch (format) {
+					case DXGI_FORMAT_R16G16B16A16_FLOAT:
+						for (UINT c = 0; c < 4; ++c)
+							sums[c] += DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const DirectX::PackedVector::HALF*>(row)[x * 4 + c]);
+						break;
+					case DXGI_FORMAT_R32_FLOAT:
+						sums[0] += reinterpret_cast<const float*>(row)[x];
+						break;
+					case DXGI_FORMAT_R8_UNORM:
+						sums[0] += row[x] / 255.0;
+						break;
+					default:
+						sums[0] += row[x];
+						break;
+					}
+				}
+			}
+		context->Unmap(staging.get(), 0);
+		const double count = static_cast<double>(desc.Width) * desc.Height * desc.Depth;
+		for (auto& sum : sums)
+			sum /= count;
+		return sums;
 	}
 }  // namespace Util
