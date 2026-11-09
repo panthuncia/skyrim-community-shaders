@@ -22,7 +22,10 @@ namespace ImGuiRenderer
 	/** @brief CS_ORG_IMGUI=1: the render graph draws ImGui once it can (default 0: imgui_impl_dx11 only, as before). */
 	bool OrgRequested();
 
-	/** @brief Menu::Init: the D3D11 backend installed, and the Overlay anchor reserved when OrgRequested. */
+	/** @brief State::Setup, before the render graph initializes: the Overlay anchor reserved when OrgRequested. */
+	void ReserveAnchor();
+
+	/** @brief Menu::Init: the D3D11 backend installed. */
 	void Init(ID3D11Device* a_device, ID3D11DeviceContext* a_context);
 
 	/** @brief Menu's destructor: whichever backend is installed shut down. */

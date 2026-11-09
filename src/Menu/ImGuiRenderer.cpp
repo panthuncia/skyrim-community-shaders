@@ -217,8 +217,12 @@ namespace ImGuiRenderer
 		state.context = a_context;
 		ImGui_ImplDX11_Init(a_device, a_context);
 		state.dx11 = true;
+	}
+
+	void ReserveAnchor()
+	{
 		if (OrgRequested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::Overlay)) {
-			state.failed = true;
+			Renderer().failed = true;
 			logger::warn("[ORG] ImGui: CS_ORG_IMGUI=1, but the Overlay anchor could not be reserved; imgui_impl_dx11 draws");
 		}
 	}
