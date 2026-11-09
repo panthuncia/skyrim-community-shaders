@@ -45,6 +45,7 @@
 #include <mutex>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <thread>
 #include <vector>
 
@@ -252,6 +253,14 @@ struct RenderGraphRuntime::Impl
 {
 	winrt::com_ptr<IDXGIVkInteropDevice> interop;
 	PFN_dxvkCreateBufferFromVkBuffer createBufferFromVkBuffer = nullptr;
+	PFN_dxvkCreateTextureFromVkImage createTextureFromVkImage = nullptr;  // optional (interop version 6): WrapTexture
+	// ReleaseAfterD3D11: owners held until an event query issued after their release completes, oldest first.
+	struct D3D11Release
+	{
+		winrt::com_ptr<ID3D11Query> query;
+		std::shared_ptr<const void> owner;
+	};
+	std::deque<D3D11Release> d3d11Releases;
 	PFN_dxvkSetDeviceTeardownCallback setTeardownCallback = nullptr;
 	PFN_dxvkEnqueueInteropSubmission enqueueSubmission = nullptr;
 	// Optional (newer DXVK): an epoch's submissions go to DXVK as one enqueue (CS_ORG_BATCH_SUBMIT=0 turns it off).
@@ -1519,6 +1528,8 @@ bool RenderGraphRuntime::Initialize()
 	auto state = std::make_unique<Impl>();
 	state->createBufferFromVkBuffer = ResolveExport<PFN_dxvkCreateBufferFromVkBuffer>(d3d11, "dxvkCreateBufferFromVkBuffer");
 	state->setTeardownCallback = ResolveExport<PFN_dxvkSetDeviceTeardownCallback>(d3d11, "dxvkSetDeviceTeardownCallback");
+	// Optional: graph textures that D3D11 still reads (GraphResources' exports).
+	state->createTextureFromVkImage = ResolveExport<PFN_dxvkCreateTextureFromVkImage>(d3d11, "dxvkCreateTextureFromVkImage");
 	if (!getInfo || !state->createBufferFromVkBuffer || !state->setTeardownCallback)
 		return disable("the DXVK build lacks the render graph interop exports");
 	// Optional: game resources for the graph (Drawcall Limit Fix).
@@ -1900,6 +1911,13 @@ void RenderGraphRuntime::Shutdown()
 	// The compute and copy queues' last submissions, before the host waits on their timelines.
 	state->computeSubmitter.Stop();
 	state->copySubmitter.Stop();
+	// Exported resources still waiting for D3D11's last use: DXVK's device is going, so wait for the GPU once and free them
+	// while the graph's objects they hold still have their device.
+	if (!state->d3d11Releases.empty()) {
+		if (state->device && *state->device)
+			(void)state->device->Get().WaitIdle();
+		state->d3d11Releases.clear();
+	}
 	try {
 		// Waits only for the graph's own timelines, then releases every graph object; the contributors after it.
 		state->host.reset();
@@ -2037,8 +2055,10 @@ std::uint32_t RenderGraphRuntime::TakeSubmittedSegments()
 
 void RenderGraphRuntime::SignalFramePace(bool a_active)
 {
-	// The frame's end on the render thread (the graph's owner), every frame: shader hot reload's owner point.
+	// The frame's end on the render thread (the graph's owner), every frame: shader hot reload's owner point, and the point
+	// where exported resources whose last D3D11 use is done are freed.
 	ServicePipelineReload();
+	ServiceD3D11Releases();
 	if (!IsActive() || !impl->framePace || !a_active)
 		return;
 	auto& state = *impl;
@@ -2653,6 +2673,70 @@ winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource& a_buf
 	return result;
 }
 
+winrt::com_ptr<ID3D11Resource> RenderGraphRuntime::WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap,
+	DxvkOrgInteropResourceInfo& a_info, const char* a_name)
+{
+	winrt::com_ptr<ID3D11Resource> result;
+	if (!IsActive() || !impl->createTextureFromVkImage)
+		return result;
+	rhi::VulkanResourceInfo info{};
+	if (!rhi::vulkan::get_resource_info(a_image, info) || !info.resource) {
+		logger::error("[ORG] WrapTexture: '{}' has no Vulkan image", a_name);
+		return result;
+	}
+	auto wrap = a_wrap;
+	wrap.version = DXVK_ORG_INTEROP_VERSION;
+	wrap.image = rhi::vulkan::from_native_void<VkImage>(info.resource);
+	wrap.imageFormat = static_cast<VkFormat>(info.nativeFormat);
+	wrap.imageFlags = info.flags;
+	wrap.imageUsage = info.usage;
+	a_info = {};
+	a_info.version = DXVK_ORG_INTEROP_VERSION;
+	if (FAILED(impl->createTextureFromVkImage(globals::d3d::device, &wrap, result.put(), &a_info))) {
+		logger::error("[ORG] WrapTexture: DXVK rejected '{}' (format {}, usage 0x{:X}, flags 0x{:X}; see DXVK's log)", a_name,
+			wrap.format, wrap.imageUsage, wrap.imageFlags);
+		result = nullptr;
+	} else {
+		// The D3D11 view of the graph's image, named after it as WrapBuffer names buffers.
+		Util::SetResourceName(result.get(), "%s (D3D11)", a_name);
+	}
+	return result;
+}
+
+bool RenderGraphRuntime::CanWrapTextures() const
+{
+	return IsActive() && impl->createTextureFromVkImage;
+}
+
+void RenderGraphRuntime::ReleaseAfterD3D11(std::shared_ptr<const void> a_owner)
+{
+	if (!a_owner)
+		return;
+	if (!impl)
+		return;  // shut down: DXVK's device is gone or going, and nothing of the graph's runs any more
+	D3D11_QUERY_DESC desc{ D3D11_QUERY_EVENT, 0 };
+	winrt::com_ptr<ID3D11Query> query;
+	if (FAILED(globals::d3d::device->CreateQuery(&desc, query.put()))) {
+		// No query: wait for the GPU here rather than free memory D3D11 may still read.
+		if (impl->device && *impl->device)
+			(void)impl->device->Get().WaitIdle();
+		return;
+	}
+	globals::d3d::context->End(query.get());
+	impl->d3d11Releases.push_back({ std::move(query), std::move(a_owner) });
+	ServiceD3D11Releases();
+}
+
+void RenderGraphRuntime::ServiceD3D11Releases()
+{
+	if (!impl)
+		return;
+	auto& releases = impl->d3d11Releases;
+	// In stream order: once one is pending, every later one is too.
+	while (!releases.empty() && globals::d3d::context->GetData(releases.front().query.get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK)
+		releases.pop_front();
+}
+
 #else  // !CS_HAS_RENDER_GRAPH
 
 // Built without OpenRenderGraph (CS_ORG_ROOT missing): the runtime never activates
@@ -2705,6 +2789,11 @@ const std::vector<std::filesystem::path>& RenderGraphRuntime::ShaderSourceFiles(
 	return none;
 }
 winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource&, const D3D11_BUFFER_DESC&) { return nullptr; }
+winrt::com_ptr<ID3D11Resource> RenderGraphRuntime::WrapTexture(const rhi::Resource&, const DxvkOrgInteropTextureWrap&, DxvkOrgInteropResourceInfo&,
+	const char*) { return nullptr; }
+bool RenderGraphRuntime::CanWrapTextures() const { return false; }
+void RenderGraphRuntime::ReleaseAfterD3D11(std::shared_ptr<const void>) {}
+void RenderGraphRuntime::ServiceD3D11Releases() {}
 void RenderGraphRuntime::ReportGpuTimings(std::uint32_t, bool) {}
 std::uint32_t RenderGraphRuntime::TakeSubmittedSegments() { return 0; }
 void RenderGraphRuntime::SignalFramePace(bool) {}

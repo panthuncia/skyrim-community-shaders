@@ -15,6 +15,7 @@
 struct DxvkOrgInteropResourceInfo;
 struct DxvkOrgInteropTrackedResource;
 struct DxvkOrgInteropRelocation;
+struct DxvkOrgInteropTextureWrap;
 
 // The Vulkan handles EmitExternalCommands takes, declared as vulkan_core.h does on 64-bit targets (identical redeclarations),
 // so this header stays free of Vulkan includes.
@@ -30,6 +31,7 @@ namespace org::services
 
 namespace rhi
 {
+	class Resource;
 	class Timeline;
 	struct TimelinePoint;
 	template <class TObject>
@@ -367,6 +369,26 @@ public:
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(org::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc);
 
 	/**
+	 * @brief Wraps a BasicRHI image the caller owns as a D3D11 texture (dxvkCreateTextureFromVkImage), the image counterpart of
+	 * WrapBuffer. a_wrap gives the D3D11 description (dimension, size, mips, DXGI format, bind and misc flags); the image, its
+	 * format, flags and usage are filled in here. a_info receives the texture as DXVK describes it: a_info.image.layout is the
+	 * layout the image rests in between DXVK's commands, the graph's home state for it (DxvkImageImport). DXVK zeroes the image
+	 * in its stream first. Render thread. Null when inactive, without the export, or when DXVK rejects the image (logged).
+	 */
+	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, DxvkOrgInteropResourceInfo& a_info,
+		const char* a_name);
+
+	/** @brief Whether WrapTexture can work: the runtime is active and DXVK has the export (interop version 6). */
+	bool CanWrapTextures() const;
+
+	/**
+	 * @brief Render thread: holds a_owner until the GPU has finished every D3D11 command issued so far (an event query, checked
+	 * each frame at SignalFramePace). An exported resource is released through here after its D3D11 views and textures, so its
+	 * memory outlives D3D11's last use of it. After Shutdown a_owner is dropped at once.
+	 */
+	void ReleaseAfterD3D11(std::shared_ptr<const void> a_owner);
+
+	/**
 	 * @brief Totals (and with a_log, logs) the GPU time of every segment and of the passes inside it, from ORG's own pass timestamps,
 	 * averaged over `a_frames` frames, and starts a new window. Render thread.
 	 *
@@ -386,6 +408,8 @@ private:
 	RenderGraphRuntime() = default;
 	/** @brief The render thread, every frame (SignalFramePace): the registry's reload served, and its staged pipelines' build asked for. */
 	void ServicePipelineReload();
+	/** @brief The render thread, every frame (SignalFramePace): ReleaseAfterD3D11's owners whose query completed are dropped. */
+	void ServiceD3D11Releases();
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;

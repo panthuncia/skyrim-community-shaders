@@ -14,7 +14,8 @@
 #	include <vulkan/vulkan.h>
 #endif
 
-#define DXVK_ORG_INTEROP_VERSION 5u
+// Version 6: dxvkCreateTextureFromVkImage (DxvkOrgInteropTextureWrap).
+#define DXVK_ORG_INTEROP_VERSION 6u
 
 extern "C" {
 
@@ -178,6 +179,32 @@ typedef HRESULT(__stdcall* PFN_dxvkSetBindingModelCallback)(const DxvkOrgInterop
 typedef HRESULT(__stdcall* PFN_dxvkGetInteropDeviceInfo)(ID3D11Device* pDevice, DxvkOrgInteropDeviceInfo* pInfo);
 typedef HRESULT(__stdcall* PFN_dxvkCreateBufferFromVkBuffer)(ID3D11Device* pDevice,
 	const D3D11_BUFFER_DESC* pDesc, VkBuffer buffer, ID3D11Buffer** ppBuffer);
+
+// A client-owned image to wrap as a D3D11 texture (dxvkCreateTextureFromVkImage): the D3D11 description, then the image and
+// what it was created with.
+struct DxvkOrgInteropTextureWrap
+{
+	uint32_t version;
+	uint32_t dimension;  // D3D11_RESOURCE_DIMENSION_TEXTURE2D or _TEXTURE3D
+	uint32_t width;
+	uint32_t height;
+	uint32_t depthOrArraySize;  // the depth of a 3D texture, the array size of a 2D one (six per cube)
+	uint32_t mipLevels;
+	uint32_t format;  // a typed DXGI_FORMAT: views of another format need VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT on the image
+	uint32_t sampleCount;
+	uint32_t bindFlags;  // D3D11_BIND_*
+	uint32_t miscFlags;  // only D3D11_RESOURCE_MISC_TEXTURECUBE
+	VkImage image;
+	VkFormat imageFormat;  // the image's format, create flags and usage, exactly as created
+	VkImageCreateFlags imageFlags;
+	VkImageUsageFlags imageUsage;
+};
+// Wraps a client-owned VkImage as a D3D11 texture (2D or 3D, returned as its ID3D11Resource). The client keeps the image and its
+// memory, which must outlive DXVK's GPU use of the texture (wait for an event query issued after the last release). DEFAULT usage,
+// no CPU access; the image needs every usage the bind flags imply and the format DXVK picks. DXVK zeroes it in its stream and from
+// then on it rests in pInfo->image.layout, as for dxvkGetInteropResourceInfo.
+typedef HRESULT(__stdcall* PFN_dxvkCreateTextureFromVkImage)(ID3D11Device* pDevice, const DxvkOrgInteropTextureWrap* pWrap,
+	ID3D11Resource** ppTexture, DxvkOrgInteropResourceInfo* pInfo);
 typedef HRESULT(__stdcall* PFN_dxvkSetDeviceTeardownCallback)(PFN_dxvkOrgInteropTeardown pCallback, void* pUser);
 typedef HRESULT(__stdcall* PFN_dxvkEnqueueInteropSubmission)(ID3D11Device* pDevice, const DxvkOrgInteropSubmission* pSubmission);
 
