@@ -375,7 +375,7 @@ void Deferred::DeferredPasses()
 	{
 		TracyD3D11Zone(globals::state->tracyCtx, "Deferred Composite");
 
-		ID3D11ShaderResourceView* skylightingProbes = skylighting.loaded && skylighting.texProbeArray ? skylighting.texProbeArray->srv.get() : nullptr;
+		ID3D11ShaderResourceView* skylightingProbes = skylighting.loaded ? skylighting.ProbeArraySRV() : nullptr;
 		const std::array<ID3D11ShaderResourceView*, 16> srvs{
 			specular.SRV,                                                                         // t0  SpecularTexture
 			albedo.SRV,                                                                           // t1  AlbedoTexture
@@ -586,27 +586,36 @@ void Deferred::SetShadowCascadeParameters(T& lightData, DirectionalShadowLightDa
 	}
 }
 
-void Deferred::CopyShadowLightData()
+bool Deferred::GetDirectionalShadowLightData(DirectionalShadowLightData& a_out)
 {
-	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "CopyShadowLightData");
-
 	auto* shadowSceneNode = globals::game::smState->shadowSceneNode[0];
 	if (!shadowSceneNode)
-		return;
+		return false;
 
 	auto* sunShadowLight = shadowSceneNode->GetRuntimeData().sunShadowDirLight;
 	if (!sunShadowLight)
-		return;
+		return false;
 
 	DirectionalShadowLightData dd{};
-	auto context = globals::d3d::context;
-
 	auto& dirData = sunShadowLight->GetShadowDirectionalLightRuntimeData();
 	dd.EndSplitDistances = { dirData.endSplitDistances[0], dirData.endSplitDistances[1] };
 	dd.StartSplitDistances = { dirData.startSplitDistances[0], dirData.startSplitDistances[1] };
 
 	SetShadowCascadeParameters(sunShadowLight->GetRuntimeData(), dd);
+	a_out = dd;
+	return true;
+}
+
+void Deferred::CopyShadowLightData()
+{
+	ZoneScoped;
+	TracyD3D11Zone(globals::state->tracyCtx, "CopyShadowLightData");
+
+	DirectionalShadowLightData dd{};
+	if (!GetDirectionalShadowLightData(dd))
+		return;
+
+	auto context = globals::d3d::context;
 
 	D3D11_MAPPED_SUBRESOURCE mapped{};
 	DX::ThrowIfFailed(context->Map(directionalShadowLights->resource.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));

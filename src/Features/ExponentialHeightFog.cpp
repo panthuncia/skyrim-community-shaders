@@ -710,7 +710,7 @@ void ExponentialHeightFog::Prepass()
 	                    !ibl.IsDisabledForCurrentScene() &&
 	                    ibl.EnvIBLSRV() &&
 	                    ibl.SkyIBLSRV();
-	const bool hasSkylighting = skylighting.loaded && skylighting.texProbeArray;
+	const bool hasSkylighting = skylighting.loaded && skylighting.ProbeArraySRV();
 
 	const bool temporalReprojection = Util::GetTemporal();
 	const bool temporalHistoryValid =
@@ -832,7 +832,7 @@ void ExponentialHeightFog::Prepass()
 	context->CSSetSamplers(0, 2, samplers);
 
 	context->CSSetShaderResources(17, 1, &depthSrv);
-	ID3D11ShaderResourceView* skylightingSrv = hasSkylighting ? skylighting.texProbeArray->srv.get() : nullptr;
+	ID3D11ShaderResourceView* skylightingSrv = hasSkylighting ? skylighting.ProbeArraySRV() : nullptr;
 	ID3D11ShaderResourceView* iblSrvs[2]{
 		hasIBL ? ibl.EnvIBLSRV() : nullptr,
 		hasIBL ? ibl.SkyIBLSRV() : nullptr

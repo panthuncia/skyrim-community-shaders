@@ -192,6 +192,13 @@ namespace FrameAnchors
 	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv,
 		ID3D11UnorderedAccessView* a_uav);
 
+	/**
+	 * @brief EngineDepth for a depth texture outside the engine's table (a feature's own map, or one only a view of reaches the
+	 * feature): a_target's texture with its DSV and depth SRV, either of which may be null. Registered with every graph as a_id, and
+	 * kept while a_target's texture stays the same. Null when the texture cannot be imported.
+	 */
+	std::shared_ptr<org::ExternalTextureResource> ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id);
+
 	// What RenderGraphRuntime asks of the anchors.
 
 	/** @brief The anchor's segment (RenderGraphRuntime::Segment, as its value). */

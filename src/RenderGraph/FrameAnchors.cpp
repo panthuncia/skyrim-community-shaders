@@ -552,6 +552,11 @@ namespace FrameAnchors
 			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, a_srv, nullptr, a_uav); });
 	}
 
+	std::shared_ptr<org::ExternalTextureResource> ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id)
+	{
+		return Import(a_target.texture, a_id, [&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeDepth(a_target, a_desc); });
+	}
+
 	void AddToFrame(std::vector<std::uint32_t>& a_epochs)
 	{
 		auto& state = Anchors();
@@ -613,6 +618,7 @@ namespace FrameAnchors
 	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> EngineCubemap(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*, ID3D11UnorderedAccessView*) { return nullptr; }
+	std::shared_ptr<org::ExternalTextureResource> ImportDepth(const RE::BSGraphics::DepthStencilData&, const std::string&) { return nullptr; }
 	std::uint32_t SegmentOf(Anchor) { return 0; }
 	bool IsUnusedSegment(std::uint32_t) { return false; }
 	const SegmentNames* NamesOf(std::uint32_t) { return nullptr; }

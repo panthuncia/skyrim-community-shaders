@@ -21,17 +21,16 @@ namespace DCLF::Integrations::Skylighting
 			return sky && sky->mode.get() == RE::Sky::Mode::kFull;
 		}
 
-		// Persistent textures made at setup, which Prepass updates before it binds them (last frame's at the faces' commit).
+		// Persistent textures, which Prepass updates before it binds them (last frame's at the faces' commit): the D3D11 ones, or the
+		// render graph's exports while its probe update runs (CS_ORG_SKYLIGHTING=1).
 		void* ProbeArrayView()
 		{
-			const auto* probes = globals::features::skylighting.texProbeArray;
-			return probes && Binds() ? probes->srv.get() : nullptr;
+			return Binds() ? globals::features::skylighting.ProbeArraySRV() : nullptr;
 		}
 
 		void* ShadowVisibilityView()
 		{
-			const auto* visibility = globals::features::skylighting.texShadowVisibility;
-			return visibility && Binds() ? visibility->srv.get() : nullptr;
+			return Binds() ? globals::features::skylighting.ShadowVisibilitySRV() : nullptr;
 		}
 
 		void Install(Api::InstallContext& a_context)

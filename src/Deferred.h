@@ -82,6 +82,12 @@ public:
 	 */
 	void CopyShadowLightData();
 
+	/**
+	 * @brief The directional shadow parameters CopyShadowLightData uploads, as of now: false, a_out untouched, when there is no sun
+	 * shadow light. For passes that latch them rather than read the t98 buffer.
+	 */
+	bool GetDirectionalShadowLightData(DirectionalShadowLightData& a_out);
+
 	// The engine's blend states as the deferred pass draws with them (OverrideBlendStates, made once on its first call; null
 	// until then), and the forward ones they replace for its duration.
 	ID3D11BlendState* deferredBlendStates[7][2][13][2]{};
