@@ -113,7 +113,7 @@ namespace Permutation
 	static uint BaseTextureIsWorking;
 	static uint RenderToUI;
 #else
-	cbuffer PerShader : register(b4)
+	ORG_SHARED_CBUFFER(PerShader, Permutation, 4)
 	{
 		uint NSCB(Permutation, VertexShaderDescriptor);
 		uint NSCB(Permutation, PixelShaderDescriptor);
@@ -125,14 +125,15 @@ namespace Permutation
 		uint NSCB(Permutation, RenderToUI);
 		float NSCB(Permutation, GrassCanopyHeight);  // Model-space height of the grass mesh being drawn
 	};
-	NSCB_ALIAS(Permutation, uint, VertexShaderDescriptor)
-	NSCB_ALIAS(Permutation, uint, PixelShaderDescriptor)
-	NSCB_ALIAS(Permutation, uint, ExtraShaderDescriptor)
-	NSCB_ALIAS(Permutation, uint, ExtraFeatureDescriptor)
-	NSCB_ALIAS(Permutation, float, EffectRadius)
-	NSCB_ALIAS(Permutation, uint, BaseTextureIsWorking)
-	NSCB_ALIAS(Permutation, uint, RenderToUI)
-	NSCB_ALIAS(Permutation, float, GrassCanopyHeight)
+	ORG_SHARED_VIEW(Permutation)
+	ORG_SHARED_ALIAS(Permutation, Permutation, uint, VertexShaderDescriptor)
+	ORG_SHARED_ALIAS(Permutation, Permutation, uint, PixelShaderDescriptor)
+	ORG_SHARED_ALIAS(Permutation, Permutation, uint, ExtraShaderDescriptor)
+	ORG_SHARED_ALIAS(Permutation, Permutation, uint, ExtraFeatureDescriptor)
+	ORG_SHARED_ALIAS(Permutation, Permutation, float, EffectRadius)
+	ORG_SHARED_ALIAS(Permutation, Permutation, uint, BaseTextureIsWorking)
+	ORG_SHARED_ALIAS(Permutation, Permutation, uint, RenderToUI)
+	ORG_SHARED_ALIAS(Permutation, Permutation, float, GrassCanopyHeight)
 #endif  // DCLF_PULLED_ROWS
 
 }

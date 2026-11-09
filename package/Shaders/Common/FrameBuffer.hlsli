@@ -6,45 +6,46 @@
 namespace FrameBuffer
 {
 
-	cbuffer PerFrame : register(b12)
+	ORG_SHARED_CBUFFER(PerFrame, FrameBuffer, 12)
 	{
-		row_major float4x4 NSCB(FrameBuffer, CameraView) : packoffset(c0);
-		row_major float4x4 NSCB(FrameBuffer, CameraProj) : packoffset(c4);
-		row_major float4x4 NSCB(FrameBuffer, CameraViewProj) : packoffset(c8);
-		row_major float4x4 NSCB(FrameBuffer, CameraViewProjUnjittered) : packoffset(c12);
-		row_major float4x4 NSCB(FrameBuffer, CameraPreviousViewProjUnjittered) : packoffset(c16);
-		row_major float4x4 NSCB(FrameBuffer, CameraProjUnjittered) : packoffset(c20);
-		row_major float4x4 NSCB(FrameBuffer, CameraProjUnjitteredInverse) : packoffset(c24);
-		row_major float4x4 NSCB(FrameBuffer, CameraViewInverse) : packoffset(c28);
-		row_major float4x4 NSCB(FrameBuffer, CameraViewProjInverse) : packoffset(c32);
-		row_major float4x4 NSCB(FrameBuffer, CameraProjInverse) : packoffset(c36);
-		float4 NSCB(FrameBuffer, CameraPosAdjust) : packoffset(c40);
-		float4 NSCB(FrameBuffer, CameraPreviousPosAdjust) : packoffset(c41);  // fDRClampOffset in w
-		float4 NSCB(FrameBuffer, FrameParams) : packoffset(c42);                 // inverse fGamma in x, some flags in yzw
-		float4 NSCB(FrameBuffer, DynamicResolutionParams1) : packoffset(c43);    // fDynamicResolutionWidthRatio in x,
-															  // fDynamicResolutionHeightRatio in y,
-															  // fDynamicResolutionPreviousWidthRatio in z,
-															  // fDynamicResolutionPreviousHeightRatio in w
-		float4 NSCB(FrameBuffer, DynamicResolutionParams2) : packoffset(c44);    // inverse fDynamicResolutionWidthRatio in x, inverse
-															  // fDynamicResolutionHeightRatio in y,
-															  // fDynamicResolutionWidthRatio - fDRClampOffset in z,
-															  // fDynamicResolutionPreviousWidthRatio - fDRClampOffset in w
-	}
-	NSCB_ALIAS(FrameBuffer, float4x4, CameraView)
-	NSCB_ALIAS(FrameBuffer, float4x4, CameraProj)
-	NSCB_ALIAS(FrameBuffer, float4x4, CameraViewProj)
-	NSCB_ALIAS(FrameBuffer, float4x4, CameraViewProjUnjittered)
-	NSCB_ALIAS(FrameBuffer, float4x4, CameraPreviousViewProjUnjittered)
-	NSCB_ALIAS(FrameBuffer, float4x4, CameraProjUnjittered)
-	NSCB_ALIAS(FrameBuffer, float4x4, CameraProjUnjitteredInverse)
-	NSCB_ALIAS(FrameBuffer, float4x4, CameraViewInverse)
-	NSCB_ALIAS(FrameBuffer, float4x4, CameraViewProjInverse)
-	NSCB_ALIAS(FrameBuffer, float4x4, CameraProjInverse)
-	NSCB_ALIAS(FrameBuffer, float4, CameraPosAdjust)
-	NSCB_ALIAS(FrameBuffer, float4, CameraPreviousPosAdjust)
-	NSCB_ALIAS(FrameBuffer, float4, FrameParams)
-	NSCB_ALIAS(FrameBuffer, float4, DynamicResolutionParams1)
-	NSCB_ALIAS(FrameBuffer, float4, DynamicResolutionParams2)
+		row_major float4x4 NSCB(FrameBuffer, CameraView) ORG_SHARED_PACKOFFSET(c0);
+		row_major float4x4 NSCB(FrameBuffer, CameraProj) ORG_SHARED_PACKOFFSET(c4);
+		row_major float4x4 NSCB(FrameBuffer, CameraViewProj) ORG_SHARED_PACKOFFSET(c8);
+		row_major float4x4 NSCB(FrameBuffer, CameraViewProjUnjittered) ORG_SHARED_PACKOFFSET(c12);
+		row_major float4x4 NSCB(FrameBuffer, CameraPreviousViewProjUnjittered) ORG_SHARED_PACKOFFSET(c16);
+		row_major float4x4 NSCB(FrameBuffer, CameraProjUnjittered) ORG_SHARED_PACKOFFSET(c20);
+		row_major float4x4 NSCB(FrameBuffer, CameraProjUnjitteredInverse) ORG_SHARED_PACKOFFSET(c24);
+		row_major float4x4 NSCB(FrameBuffer, CameraViewInverse) ORG_SHARED_PACKOFFSET(c28);
+		row_major float4x4 NSCB(FrameBuffer, CameraViewProjInverse) ORG_SHARED_PACKOFFSET(c32);
+		row_major float4x4 NSCB(FrameBuffer, CameraProjInverse) ORG_SHARED_PACKOFFSET(c36);
+		float4 NSCB(FrameBuffer, CameraPosAdjust) ORG_SHARED_PACKOFFSET(c40);
+		float4 NSCB(FrameBuffer, CameraPreviousPosAdjust) ORG_SHARED_PACKOFFSET(c41);   // fDRClampOffset in w
+		float4 NSCB(FrameBuffer, FrameParams) ORG_SHARED_PACKOFFSET(c42);               // inverse fGamma in x, some flags in yzw
+		float4 NSCB(FrameBuffer, DynamicResolutionParams1) ORG_SHARED_PACKOFFSET(c43);  // fDynamicResolutionWidthRatio in x,
+																						// fDynamicResolutionHeightRatio in y,
+																						// fDynamicResolutionPreviousWidthRatio in z,
+																						// fDynamicResolutionPreviousHeightRatio in w
+		float4 NSCB(FrameBuffer, DynamicResolutionParams2) ORG_SHARED_PACKOFFSET(c44);  // inverse fDynamicResolutionWidthRatio in x, inverse
+																						// fDynamicResolutionHeightRatio in y,
+																						// fDynamicResolutionWidthRatio - fDRClampOffset in z,
+																						// fDynamicResolutionPreviousWidthRatio - fDRClampOffset in w
+	};
+	ORG_SHARED_VIEW(FrameBuffer)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4x4, CameraView)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4x4, CameraProj)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4x4, CameraViewProj)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4x4, CameraViewProjUnjittered)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4x4, CameraPreviousViewProjUnjittered)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4x4, CameraProjUnjittered)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4x4, CameraProjUnjitteredInverse)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4x4, CameraViewInverse)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4x4, CameraViewProjInverse)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4x4, CameraProjInverse)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4, CameraPosAdjust)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4, CameraPreviousPosAdjust)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4, FrameParams)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4, DynamicResolutionParams1)
+	ORG_SHARED_ALIAS(FrameBuffer, FrameBuffer, float4, DynamicResolutionParams2)
 
 	/**
 	 * @brief Clamps already dynamic-resolution-adjusted UVs to the valid render region.

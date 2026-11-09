@@ -75,14 +75,16 @@ The shader body does not change. Each entry is `X(kind, type, name, register num
 | `SAMPLER` | `T name : register(s#)` | `static T name = SamplerDescriptorHeap[handle]` |
 | `CBUFFER` | `cbuffer nameBuffer : register(b#) { T name; }` | `static ConstantBuffer<T> name = ResourceDescriptorHeap[handle]` |
 | `PUSH` | as `CBUFFER` | the struct itself, inside the push block |
+| `EXTERN` | nothing: the header that declares it binds the register | its handle; the header reads `OrgHandle_<name>` |
+| `SHARED` | nothing: `FrameBuffer`, `SharedData`, `FeatureData` and `Permutation` stay the headers' cbuffers | four handles, in that order |
 
 `SRV` and `UAV` cover `Texture2D`, `Texture3D`, `TextureCube` and their arrays, the `RW` textures, `(RW)StructuredBuffer`,
 `(RW)ByteAddressBuffer` and typed buffers. `SAMPLER` covers `SamplerState` and `SamplerComparisonState`. `CBUFFER` and `PUSH`
 take a struct, and code reads its fields as `name.field` on both paths.
 
 **The push block.** Under ORG it is `cbuffer OrgBindings : register(b0)`: the pipeline's push constants on Vulkan, its root
-constants on D3D12. It holds one `uint` handle per `SRV`, `UAV`, `SAMPLER` and `CBUFFER` entry, in list order, then each
-`PUSH` struct, each on a 16-byte boundary. Put `PUSH` entries last.
+constants on D3D12. It holds one `uint` handle per `SRV`, `UAV`, `SAMPLER`, `CBUFFER` and `EXTERN` entry (four for `SHARED`), in
+list order, then each `PUSH` struct, each on a 16-byte boundary. Put `PUSH` entries last.
 
 **Which constants go where.**
 
@@ -94,9 +96,36 @@ constants on D3D12. It holds one `uint` handle per `SRV`, `UAV`, `SAMPLER` and `
   `ShaderBindings::Words<Block>()` fails to compile above the limit, and `tools/check-dual-target-shaders.py` checks the
   shader side.
 
-**Not covered.** Resource arrays (`Texture2D t[4]`), append/consume counters, and the shared constant buffers (`SharedData`,
-`FrameBuffer`, `PermutationCB`). Those keep their own declarations until P2.6 makes the shared buffers bindless. A shader
-that includes them still builds under DXC as long as it does not read them, because DXC drops what is unused.
+**Not covered.** Resource arrays (`Texture2D t[4]`) and append/consume counters.
+
+**Resources that headers declare.** A header used by several shaders declares its own resource with `ORG_RESOURCE` (as
+`IBL/IBL.hlsli` and `Skylighting/Skylighting.hlsli` do for the deferred composite). The shader lists it as an `EXTERN`
+entry. Its handle must exist before the header is included, so such a shader expands its push block first, then includes
+the headers, then expands its own declarations.
+
+**The shared constant buffers.** `FrameBuffer` (b12), `SharedData` (b5), `FeatureData` (b6) and `Permutation` (b4) are
+declared with the `ORG_SHARED_*` macros (`Common/NamespacedCBuffer.hlsli`). Under FXC, and under DXC by default, they are
+the cbuffers they always were. An ORG pass shader that defines `ORG_SHARED_CONSTANTS` before including
+`Common/OrgResources.hlsli`, and puts `X(SHARED, ConstantBuffer, Shared, 0)` first in its list, reads them from the heap
+instead: each becomes a struct read as a `ConstantBuffer` through its handle, and aliases give the members back their names.
+Shader bodies read `SharedData::BufferDim` and the rest unchanged on both paths. A `bool` member is declared
+`ORG_SHARED_BOOL`: a `uint` in the struct, since DXC 1.9 emits invalid SPIR-V for a `bool` read from a `ConstantBuffer<T>`.
+The C++ side is `src/RenderGraph/SharedConstants.h`: a frame anchor client sets `ClientDesc::sharedConstants`, its passes
+declare the buffers with `SharedConstants::Declare` and fill the four handles with `SharedConstants::Index`.
+
+```hlsl
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+#define MY_RESOURCES(X)                  \
+	X(SHARED, ConstantBuffer, Shared, 0) \
+	X(SRV, Texture2D<float4>, InputTexture, 0)
+ORG_PUSH_BLOCK(MY_RESOURCES(ORG_HANDLE))
+#include "Common/SharedData.hlsli"
+MY_RESOURCES(ORG_RESOURCE)
+```
+
+A shader without `ORG_SHARED_CONSTANTS` still builds under DXC with the cbuffers, as long as it does not read them, because
+DXC drops what is unused.
 
 **Two FXC limits shaped the macros.** FXC cannot pass a list's name as a macro argument, so the shader invokes the list
 itself (`DIFFUSE_IBL_RESOURCES(ORG_RESOURCE)`). It also rejects an empty macro argument, so under FXC `ORG_HANDLE` expands to
@@ -133,8 +162,12 @@ pwsh tools/verify-shader-refactor.ps1 features/IBL/Shaders/IBL/DiffuseIBLCS.hlsl
 python tools/check-dual-target-shaders.py features/IBL/Shaders/IBL/DiffuseIBLCS.hlsl
 ```
 
-Without arguments the script checks `tests/Shaders/OrgResourcesSampleCS.hlsl`, which uses every kind and resource type, and
-`DiffuseIBLCS`. It finds `dxc.exe` in the Vulkan SDK (`VULKAN_SDK` or `C:\VulkanSDK\*`) and `fxc.exe` in the Windows SDK.
+Without arguments the script checks `tests/Shaders/OrgResourcesSampleCS.hlsl`, which uses every kind and resource type,
+`tests/Shaders/OrgSharedConstantsSampleCS.hlsl` (the shared constant buffers and an `EXTERN` entry), and `DiffuseIBLCS`.
+`-D NAME[=VALUE]` adds a define to every build, for a shader's permutations (the composite:
+`-D COMPUTESHADER -D INTERIOR -D SSGI`). It includes `package/Shaders` and every `features/*/Shaders`, as `Data/Shaders` merges
+them. `verify-shader-refactor.ps1` takes several `-IncludeDir` roots for the same reason (call it in-process, `& ./tools/verify-shader-refactor.ps1`,
+to pass an array). It finds `dxc.exe` in the Vulkan SDK (`VULKAN_SDK` or `C:\VulkanSDK\*`) and `fxc.exe` in the Windows SDK.
 
 A conversion that moves `cbuffer` members into a `CBUFFER` struct changes the DXBC's reflection names, so
 `verify-shader-refactor` reports DIFFERS even though the instructions are the same. Check that its assembly diff shows only

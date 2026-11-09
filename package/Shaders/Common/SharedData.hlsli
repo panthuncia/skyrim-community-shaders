@@ -12,7 +12,7 @@ namespace SharedData
 	static const uint TonemapOwnerPostProcessing = 1;
 	static const uint TonemapOwnerEffects11 = 2;
 
-	cbuffer SharedData : register(b5)
+	ORG_SHARED_CBUFFER(SharedData, SharedData, 5)
 	{
 		float4 NSCB(SharedData, WaterData)[25];
 		float4 NSCB(SharedData, DirLightDirection);
@@ -28,10 +28,10 @@ namespace SharedData
 		float NSCB(SharedData, Timer);
 		uint NSCB(SharedData, FrameCount);
 		uint NSCB(SharedData, FrameCountAlwaysActive);
-		bool NSCB(SharedData, InInterior);  // If the current cell is an interior
-		bool NSCB(SharedData, HasDirectionalShadows);
-		bool NSCB(SharedData, InMapMenu);           // If the world/local map is open (note that the renderer is still deferred here)
-		bool NSCB(SharedData, HideSky);             // HideSky flag in WorldSpace, e.g. Blackreach
+		ORG_SHARED_BOOL NSCB(SharedData, InInterior);  // If the current cell is an interior
+		ORG_SHARED_BOOL NSCB(SharedData, HasDirectionalShadows);
+		ORG_SHARED_BOOL NSCB(SharedData, InMapMenu);  // If the world/local map is open (note that the renderer is still deferred here)
+		ORG_SHARED_BOOL NSCB(SharedData, HideSky);    // HideSky flag in WorldSpace, e.g. Blackreach
 		float NSCB(SharedData, MipBias);            // Offset to mip level for TAA sharpness
 		float NSCB(SharedData, WaterSystemHeight);  // TES::GetWaterHeight in camera-relative Z; -FLT_MAX when no water body found
 		uint NSCB(SharedData, PostWaterComposite);
@@ -42,40 +42,41 @@ namespace SharedData
 		float4 NSCB(SharedData, AmbientSHB);
 		float4 NSCB(SharedData, HDRData);
 	};
-	NSCB_ARRAY_ALIAS(SharedData, float4, WaterData, 25)
-	NSCB_ALIAS(SharedData, float4, DirLightDirection)
-	NSCB_ALIAS(SharedData, float4, DirLightColor)
-	NSCB_ALIAS(SharedData, float4, SunDirection)
-	NSCB_ALIAS(SharedData, float4, SunColor)
-	NSCB_ALIAS(SharedData, float4, MasserDirection)
-	NSCB_ALIAS(SharedData, float4, MasserColor)
-	NSCB_ALIAS(SharedData, float4, SecundaDirection)
-	NSCB_ALIAS(SharedData, float4, SecundaColor)
-	NSCB_ALIAS(SharedData, float4, CameraData)
-	NSCB_ALIAS(SharedData, float4, BufferDim)
-	NSCB_ALIAS(SharedData, float, Timer)
-	NSCB_ALIAS(SharedData, uint, FrameCount)
-	NSCB_ALIAS(SharedData, uint, FrameCountAlwaysActive)
-	NSCB_ALIAS(SharedData, bool, InInterior)
-	NSCB_ALIAS(SharedData, bool, HasDirectionalShadows)
-	NSCB_ALIAS(SharedData, bool, InMapMenu)
-	NSCB_ALIAS(SharedData, bool, HideSky)
-	NSCB_ALIAS(SharedData, float, MipBias)
-	NSCB_ALIAS(SharedData, float, WaterSystemHeight)
-	NSCB_ALIAS(SharedData, uint, PostWaterComposite)
-	NSCB_ALIAS(SharedData, uint, ResetHistory)
-	NSCB_ALIAS(SharedData, uint, TonemapOwner)
-	NSCB_ALIAS(SharedData, float4, AmbientSHR)
-	NSCB_ALIAS(SharedData, float4, AmbientSHG)
-	NSCB_ALIAS(SharedData, float4, AmbientSHB)
-	NSCB_ALIAS(SharedData, float4, HDRData)
+	ORG_SHARED_VIEW(SharedData)
+	ORG_SHARED_ARRAY_ALIAS(SharedData, SharedData, float4, WaterData, 25)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, DirLightDirection)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, DirLightColor)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, SunDirection)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, SunColor)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, MasserDirection)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, MasserColor)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, SecundaDirection)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, SecundaColor)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, CameraData)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, BufferDim)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float, Timer)
+	ORG_SHARED_ALIAS(SharedData, SharedData, uint, FrameCount)
+	ORG_SHARED_ALIAS(SharedData, SharedData, uint, FrameCountAlwaysActive)
+	ORG_SHARED_ALIAS(SharedData, SharedData, bool, InInterior)
+	ORG_SHARED_ALIAS(SharedData, SharedData, bool, HasDirectionalShadows)
+	ORG_SHARED_ALIAS(SharedData, SharedData, bool, InMapMenu)
+	ORG_SHARED_ALIAS(SharedData, SharedData, bool, HideSky)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float, MipBias)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float, WaterSystemHeight)
+	ORG_SHARED_ALIAS(SharedData, SharedData, uint, PostWaterComposite)
+	ORG_SHARED_ALIAS(SharedData, SharedData, uint, ResetHistory)
+	ORG_SHARED_ALIAS(SharedData, SharedData, uint, TonemapOwner)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, AmbientSHR)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, AmbientSHG)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, AmbientSHB)
+	ORG_SHARED_ALIAS(SharedData, SharedData, float4, HDRData)
 
 	struct GrassLightingSettings
 	{
 		float Glossiness;
 		float SpecularStrength;
 		float SubsurfaceScatteringAmount;
-		bool OverrideComplexGrassSettings;
+		ORG_SHARED_BOOL OverrideComplexGrassSettings;
 
 		float BasicGrassBrightness;
 		float ComplexGrassThreshold;
@@ -90,12 +91,12 @@ namespace SharedData
 
 	struct CPMSettings
 	{
-		bool EnableComplexMaterial;
-		bool EnableParallax;
-		bool EnableTerrainParallax;
-		bool EnableHeightBlending;
-		bool EnableShadows;
-		bool EnableParallaxWarpingFix;
+		ORG_SHARED_BOOL EnableComplexMaterial;
+		ORG_SHARED_BOOL EnableParallax;
+		ORG_SHARED_BOOL EnableTerrainParallax;
+		ORG_SHARED_BOOL EnableHeightBlending;
+		ORG_SHARED_BOOL EnableShadows;
+		ORG_SHARED_BOOL EnableParallaxWarpingFix;
 		uint2 pad0;
 	};
 
@@ -109,7 +110,7 @@ namespace SharedData
 
 	struct TerraOccSettings
 	{
-		bool EnableTerrainShadow;
+		ORG_SHARED_BOOL EnableTerrainShadow;
 		float3 Scale;
 		float2 ZRange;
 		float2 Offset;
@@ -138,7 +139,7 @@ namespace SharedData
 		float Wetness;
 		float PuddleWetness;
 
-		bool EnableWetnessEffects;
+		ORG_SHARED_BOOL EnableWetnessEffects;
 		float MaxRainWetness;
 		float MaxPuddleWetness;
 		float MaxShoreWetness;
@@ -151,10 +152,10 @@ namespace SharedData
 		float MinRainWetness;
 		float SkinWetness;
 		float WeatherTransitionSpeed;
-		bool EnableRaindropFx;
+		ORG_SHARED_BOOL EnableRaindropFx;
 
-		bool EnableSplashes;
-		bool EnableRipples;
+		ORG_SHARED_BOOL EnableSplashes;
+		ORG_SHARED_BOOL EnableRipples;
 		uint EnableVanillaRipples;
 		float RaindropFxRange;
 
@@ -199,7 +200,7 @@ namespace SharedData
 		float LODTerrainBrightness;
 		float LODObjectBrightness;
 		float LODObjectSnowBrightness;
-		bool DisableTerrainVertexColors;
+		ORG_SHARED_BOOL DisableTerrainVertexColors;
 		float LODTerrainGamma;
 		float LODObjectGamma;
 		float LODObjectSnowGamma;
@@ -516,7 +517,7 @@ namespace SharedData
 		float2 pad1;
 	};
 
-	cbuffer FeatureData : register(b6)
+	ORG_SHARED_CBUFFER(FeatureData, FeatureData, 6)
 	{
 		GrassLightingSettings NSCB(SharedData, grassLightingSettings);
 		CPMSettings NSCB(SharedData, extendedMaterialSettings);
@@ -540,27 +541,28 @@ namespace SharedData
 		HorizonFixSettings NSCB(SharedData, horizonFixSettings);
 		RainRefractionSettings NSCB(SharedData, rainRefractionSettings);
 	};
-	NSCB_ALIAS(SharedData, GrassLightingSettings, grassLightingSettings)
-	NSCB_ALIAS(SharedData, CPMSettings, extendedMaterialSettings)
-	NSCB_ALIAS(SharedData, CubemapCreatorSettings, cubemapCreatorSettings)
-	NSCB_ALIAS(SharedData, TerraOccSettings, terraOccSettings)
-	NSCB_ALIAS(SharedData, LightLimitFixSettings, lightLimitFixSettings)
-	NSCB_ALIAS(SharedData, WetnessEffectsSettings, wetnessEffectsSettings)
-	NSCB_ALIAS(SharedData, SkylightingSettings, skylightingSettings)
-	NSCB_ALIAS(SharedData, CloudShadowsSettings, cloudShadowsSettings)
-	NSCB_ALIAS(SharedData, LODBlendingSettings, lodBlendingSettings)
-	NSCB_ALIAS(SharedData, HairSpecularSettings, hairSpecularSettings)
-	NSCB_ALIAS(SharedData, TerrainVariationSettings, terrainVariationSettings)
-	NSCB_ALIAS(SharedData, IBLSettings, iblSettings)
-	NSCB_ALIAS(SharedData, ExtendedTranslucencySettings, extendedTranslucencySettings)
-	NSCB_ALIAS(SharedData, LinearLightingSettings, linearLightingSettings)
-	NSCB_ALIAS(SharedData, ENBSettings, enbSettings)
-	NSCB_ALIAS(SharedData, TerrainBlendingSettings, terrainBlendingSettings)
-	NSCB_ALIAS(SharedData, ExponentialHeightFogSettings, exponentialHeightFogSettings)
-	NSCB_ALIAS(SharedData, TruePBRSettings, truePBRSettings)
-	NSCB_ALIAS(SharedData, SkinData, skinData)
-	NSCB_ALIAS(SharedData, HorizonFixSettings, horizonFixSettings)
-	NSCB_ALIAS(SharedData, RainRefractionSettings, rainRefractionSettings)
+	ORG_SHARED_VIEW(FeatureData)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, GrassLightingSettings, grassLightingSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, CPMSettings, extendedMaterialSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, CubemapCreatorSettings, cubemapCreatorSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, TerraOccSettings, terraOccSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, LightLimitFixSettings, lightLimitFixSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, WetnessEffectsSettings, wetnessEffectsSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, SkylightingSettings, skylightingSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, CloudShadowsSettings, cloudShadowsSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, LODBlendingSettings, lodBlendingSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, HairSpecularSettings, hairSpecularSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, TerrainVariationSettings, terrainVariationSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, IBLSettings, iblSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, ExtendedTranslucencySettings, extendedTranslucencySettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, LinearLightingSettings, linearLightingSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, ENBSettings, enbSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, TerrainBlendingSettings, terrainBlendingSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, ExponentialHeightFogSettings, exponentialHeightFogSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, TruePBRSettings, truePBRSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, SkinData, skinData)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, HorizonFixSettings, horizonFixSettings)
+	ORG_SHARED_ALIAS(FeatureData, SharedData, RainRefractionSettings, rainRefractionSettings)
 
 	Texture2D<float4> DepthTexture : register(t17);
 
