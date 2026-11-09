@@ -183,6 +183,8 @@ upscaler output").
 -   **Frame generation:** *not covered*. That is `Streamline::EvaluateFSRFrameGen` (`Upscaling/Streamline.cpp`) and the DLSS-G path.
     Frame generation was off in every run of the investigation. A later check of the inn with it on showed no corruption in a few
     screen grabs, which does not rule the hazard out.
+    With `CS_ORG_UPSCALING=1` the hudless copy is an epoch at the `FrameGeneration` anchor, a late anchor, so on that path the
+    separator does run between it and frame generation's calls.
 -   **Epochs that can end up last before the upscaler or Present.**
     -   DCLF's first-person colour epoch (`RenderFirstPersonView`) is the one that triggered this. It is the only epoch with no DXVK
         work after it before the upscaler.
@@ -681,6 +683,7 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 | `CS_ORG_LLF_PARITY=1` | Every 300 frames, also run LLF's D3D11 culling and compare each cluster's light set with the graph's (logs `LLF parity OK` / `MISMATCH`). |
 | `CS_ORG_ANCHOR_SELFTEST=1` | Reserve every frame anchor and run a test client at each: a raster pass writes a texture, a compute pass reads it and one texel of kMAIN into a buffer, and a copy reads that back. Each anchor logs `[ORG] anchor self-test: <anchor> OK` once, then `every anchor OK`. |
 | `CS_ORG_GRAPHRES_SELFTEST=1` | Reserve DeferredPasses and test the graph-backed resources there (above, "Graph-backed feature resources"). Logs `[ORG] graph resource self-test: 16x16 OK ...`, then `resized to 32x32`, `32x32 OK ...` and `every check OK; the texture is released`; `MISMATCH` otherwise. |
+| `CS_ORG_UPSCALING=1` | Upscaling's own passes on the graph (`Upscaling/ORGUpscaling.cpp`): the upscaled colour's copy into kMAIN and the depth upscale (the copies, `DepthRefractionUpscalePS`, `UnderwaterMaskUpscalePS`) at the `Upscale` anchor, and frame generation's hudless copy (`CopyHudlessPS`) at `FrameGeneration`. The upscaled and hudless textures are graph textures exported to D3D11, which Streamline's evaluates in the interop ring still write and read. Logs `[ORG] Upscaling's own passes run on the render graph` and `created the upscaled texture on the graph`; on any failure the D3D11 textures and passes come back (`[ORG] Upscaling returns to D3D11: ...`). |
 | `CS_ORG_IMGUI=1` | Draw CS's ImGui frames with the render graph's backend at the `Overlay` anchor once the graph is up ("ImGui on the graph"). Logs `[ORG] ImGui: drawn by the render graph` and `drawing onto ...`. |
 | `CS_ORG_EPOCH_STATS=1` | Log render-thread CPU time per epoch (average and maximum every 600 epochs). |
 | `CS_ORG_ASYNC_EPOCHS=0` | Run the epochs synchronously. By default each epoch is prepared and recorded ahead on the graph host's thread, and the render thread only admits and submits ("Revisions and recordings" in `dclf-architecture.md`). |

@@ -583,3 +583,21 @@ Keys used so far:
   and order key; and return the UI variables and a handle to set values and choose techniques. Values reach the GPU as a
   latched values block plus a handle table (two push words per pass), so recordings stay reusable.
 - **Found by:** P3 W5, ORG FX runtime (2026-11-09).
+
+### Graph passes around a vendor SDK's Vulkan work
+
+- **Need:** a plugin runs a vendor SDK (an upscaler, frame generation, a denoiser) on its own Vulkan command buffer, and wants
+  the passes that feed it and consume its output on the graph: a copy of its output into an engine target, a resolve, a format
+  conversion of its input.
+- **Who:** CS's Upscaling (`CS_ORG_UPSCALING`): Streamline's FSR, XeSS and DLSS run in the DXVK interop command ring
+  (`Upscaling/DXVKInterop.cpp`); the copy into kMAIN, the depth upscale and the hudless copy are graph passes now.
+- **Where it fits:** the SDK's own images are graph textures exported to D3D11 (`GraphResources`, `Persistent`, SRV and UAV
+  or RTV), because the SDK reaches them through their D3D11 images (`IDXGIVkInteropSurface`). Its passes go at an anchor the
+  plugin runs right after the SDK's submission (`Upscale`, `FrameGeneration`): the ring's buffer is submitted after DXVK's
+  command list in flight and ends with a full memory barrier, so the next list's epoch sees its writes, and the exported
+  textures rest in DXVK's layout on both sides. Two things a plugin API would need: an anchor the plugin itself runs at its own
+  point of the frame (today only CS code calls `FrameAnchors::Run`), and the hazard separator before the SDK's submission
+  (`Upscaling::SeparateFromGraphEpochs`), which every late anchor already applies. Per-run work in a kept recording is a bit
+  each pass reads at `Prepare` and adds to its revision ("Skipping a frame in a kept recording"); Upscaling and Cloud Shadows
+  both carry that pattern, which a framework predicate would replace.
+- **Found by:** P3 W3, Upscaling's own passes (2026-11-09).
