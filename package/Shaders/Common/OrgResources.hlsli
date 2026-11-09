@@ -39,6 +39,8 @@
 //   index). PUSH entries go last.
 // - EXTERN: a resource an included header declares with ORG_RESOURCE. D3D11: nothing here (the
 //   header binds the register). ORG: its handle only; the header reads OrgHandle_<name>.
+// - EXTERN_LATCH: a LATCH an included header declares with ORG_RESOURCE. D3D11: nothing here. ORG:
+//   its handle and byte offset only, as a LATCH entry's; the header reads them.
 // - SHARED: CS's shared constant buffers, first in the list: X(SHARED, ConstantBuffer, Shared, 0)
 //   (type, name and register are not used). D3D11: nothing here; FrameBuffer (b12), SharedData
 //   (b5), FeatureData (b6) and Permutation (b4) stay the cbuffers their headers declare. ORG: four
@@ -58,8 +60,8 @@
 //   MY_RESOURCES(ORG_RESOURCE)
 //
 // The ORG push block, which the C++ side mirrors (src/RenderGraph/ShaderBindings.h):
-// 1. one uint handle per SRV, UAV, SAMPLER, CBUFFER and EXTERN entry, two uints per LATCH entry
-//    (the handle, then the byte offset), and four for SHARED, in list order;
+// 1. one uint handle per SRV, UAV, SAMPLER, CBUFFER and EXTERN entry, two uints per LATCH and
+//    EXTERN_LATCH entry (the handle, then the byte offset), and four for SHARED, in list order;
 // 2. then each PUSH struct, in list order, each starting on a 16-byte boundary (cbuffer packing).
 // The whole block is at most 32 words (128 bytes, Vulkan's guaranteed push constant size).
 //
@@ -78,6 +80,7 @@
 #	define ORG_HANDLE_LATCH(T, N, R) uint OrgHandle_##N, OrgOffset_##N;
 #	define ORG_HANDLE_PUSH(T, N, R) T N;
 #	define ORG_HANDLE_EXTERN(T, N, R) uint OrgHandle_##N;
+#	define ORG_HANDLE_EXTERN_LATCH(T, N, R) uint OrgHandle_##N, OrgOffset_##N;
 #	define ORG_HANDLE_SHARED(T, N, R) \
 		uint OrgHandle_FrameBuffer;    \
 		uint OrgHandle_SharedData;     \
@@ -94,6 +97,7 @@
 		static T N = OrgLatch_##N.Load<T>(OrgOffset_##N);
 #	define ORG_RESOURCE_PUSH(T, N, R)
 #	define ORG_RESOURCE_EXTERN(T, N, R)
+#	define ORG_RESOURCE_EXTERN_LATCH(T, N, R)
 #	define ORG_RESOURCE_SHARED(T, N, R)
 #	define ORG_RESOURCE(K, T, N, R) ORG_RESOURCE_##K(T, N, R)
 
@@ -112,6 +116,7 @@
 #	define ORG_RESOURCE_LATCH(T, N, R) ORG_RESOURCE_CBUFFER(T, N, R)
 #	define ORG_RESOURCE_PUSH(T, N, R) ORG_RESOURCE_CBUFFER(T, N, R)
 #	define ORG_RESOURCE_EXTERN(T, N, R)
+#	define ORG_RESOURCE_EXTERN_LATCH(T, N, R)
 #	define ORG_RESOURCE_SHARED(T, N, R)
 #	define ORG_RESOURCE(K, T, N, R) ORG_RESOURCE_##K(T, N, R)
 

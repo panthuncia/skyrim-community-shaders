@@ -13,15 +13,25 @@
 //
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+#define PREFILTER_RADIANCE_RESOURCES(X)            \
+	X(SHARED, ConstantBuffer, Shared, 0)           \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 7)   \
+	X(EXTERN, SamplerState, samplerPointClamp, 0)  \
+	X(EXTERN, SamplerState, samplerLinearClamp, 1) \
+	X(SRV, Texture2D<float3>, srcRadiance, 0)      \
+	X(UAV, RWTexture2D<float3>, outRadiance0, 0)   \
+	X(UAV, RWTexture2D<float3>, outRadiance1, 1)   \
+	X(UAV, RWTexture2D<float3>, outRadiance2, 2)   \
+	X(UAV, RWTexture2D<float3>, outRadiance3, 3)   \
+	X(UAV, RWTexture2D<float3>, outRadiance4, 4)
+ORG_PUSH_BLOCK(PREFILTER_RADIANCE_RESOURCES(ORG_HANDLE))
+
 #include "ScreenSpaceGI/common.hlsli"
 
-Texture2D<float3> srcRadiance : register(t0);
-
-RWTexture2D<float3> outRadiance0 : register(u0);
-RWTexture2D<float3> outRadiance1 : register(u1);
-RWTexture2D<float3> outRadiance2 : register(u2);
-RWTexture2D<float3> outRadiance3 : register(u3);
-RWTexture2D<float3> outRadiance4 : register(u4);
+PREFILTER_RADIANCE_RESOURCES(ORG_RESOURCE)
 
 float3 RadianceMIPFilter(float3 radiance0, float3 radiance1, float3 radiance2, float3 radiance3)
 {

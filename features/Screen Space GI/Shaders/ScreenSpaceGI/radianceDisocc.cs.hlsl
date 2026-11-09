@@ -1,26 +1,36 @@
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+#define RADIANCE_DISOCC_RESOURCES(X)                    \
+	X(SHARED, ConstantBuffer, Shared, 0)                \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 7)        \
+	X(EXTERN, SamplerState, samplerPointClamp, 0)       \
+	X(EXTERN, SamplerState, samplerLinearClamp, 1)      \
+	X(SRV, Texture2D<half4>, srcDiffuse, 0)             \
+	X(SRV, Texture2D<half>, srcCurrDepth, 1)            \
+	X(SRV, Texture2D<half4>, srcCurrNormal, 2)          \
+	X(SRV, Texture2D<half3>, srcPrevGeo, 3)             \
+	X(SRV, Texture2D<float4>, srcMotionVec, 4)          \
+	X(SRV, Texture2D<unorm float>, srcAccumFrames, 5)   \
+	X(SRV, Texture2D<half>, srcPrevAo, 6)               \
+	X(SRV, Texture2D<half4>, srcPrevIlY, 7)             \
+	X(SRV, Texture2D<half2>, srcPrevIlCoCg, 8)          \
+	X(SRV, Texture2D<half4>, srcPrevGISpecular, 9)      \
+	X(UAV, RWTexture2D<float3>, outRadianceDisocc, 0)   \
+	X(UAV, RWTexture2D<unorm float>, outAccumFrames, 1) \
+	X(UAV, RWTexture2D<float>, outRemappedAo, 2)        \
+	X(UAV, RWTexture2D<float4>, outRemappedIlY, 3)      \
+	X(UAV, RWTexture2D<float2>, outRemappedIlCoCg, 4)   \
+	X(UAV, RWTexture2D<float4>, outRemappedPrevGISpecular, 5)
+ORG_PUSH_BLOCK(RADIANCE_DISOCC_RESOURCES(ORG_HANDLE))
+
 #include "Common/ColorManagement.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/GBuffer.hlsli"
 #include "Common/Math.hlsli"
 #include "ScreenSpaceGI/common.hlsli"
 
-Texture2D<half4> srcDiffuse : register(t0);
-Texture2D<half> srcCurrDepth : register(t1);
-Texture2D<half4> srcCurrNormal : register(t2);
-Texture2D<half3> srcPrevGeo : register(t3);  // maybe half-res
-Texture2D<float4> srcMotionVec : register(t4);
-Texture2D<unorm float> srcAccumFrames : register(t5);  // maybe half-res
-Texture2D<half> srcPrevAo : register(t6);              // maybe half-res
-Texture2D<half4> srcPrevIlY : register(t7);            // maybe half-res
-Texture2D<half2> srcPrevIlCoCg : register(t8);         // maybe half-res
-Texture2D<half4> srcPrevGISpecular : register(t9);     // maybe half-res
-
-RWTexture2D<float3> outRadianceDisocc : register(u0);
-RWTexture2D<unorm float> outAccumFrames : register(u1);
-RWTexture2D<float> outRemappedAo : register(u2);
-RWTexture2D<float4> outRemappedIlY : register(u3);
-RWTexture2D<float2> outRemappedIlCoCg : register(u4);
-RWTexture2D<float4> outRemappedPrevGISpecular : register(u5);
+RADIANCE_DISOCC_RESOURCES(ORG_RESOURCE)
 
 #if defined(TEMPORAL_DENOISER) || defined(HALF_RATE)
 #	define REPROJECTION

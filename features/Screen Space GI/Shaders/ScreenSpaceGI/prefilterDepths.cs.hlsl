@@ -13,15 +13,25 @@
 //
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+#define PREFILTER_DEPTHS_RESOURCES(X)              \
+	X(SHARED, ConstantBuffer, Shared, 0)           \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 7)   \
+	X(EXTERN, SamplerState, samplerPointClamp, 0)  \
+	X(EXTERN, SamplerState, samplerLinearClamp, 1) \
+	X(SRV, Texture2D<float>, srcNDCDepth, 0)       \
+	X(UAV, RWTexture2D<float>, outDepth0, 0)       \
+	X(UAV, RWTexture2D<float>, outDepth1, 1)       \
+	X(UAV, RWTexture2D<float>, outDepth2, 2)       \
+	X(UAV, RWTexture2D<float>, outDepth3, 3)       \
+	X(UAV, RWTexture2D<float>, outDepth4, 4)
+ORG_PUSH_BLOCK(PREFILTER_DEPTHS_RESOURCES(ORG_HANDLE))
+
 #include "ScreenSpaceGI/common.hlsli"
 
-Texture2D<float> srcNDCDepth : register(t0);
-
-RWTexture2D<float> outDepth0 : register(u0);
-RWTexture2D<float> outDepth1 : register(u1);
-RWTexture2D<float> outDepth2 : register(u2);
-RWTexture2D<float> outDepth3 : register(u3);
-RWTexture2D<float> outDepth4 : register(u4);
+PREFILTER_DEPTHS_RESOURCES(ORG_RESOURCE)
 
 // This is also a good place to do non-linear depth conversion for cases where one wants the 'radius' (effectively the threshold between near-field and far-field GI),
 // is required to be non-linear (i.e. very large outdoors environments).

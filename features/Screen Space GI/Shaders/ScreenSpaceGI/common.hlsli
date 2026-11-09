@@ -21,8 +21,83 @@
 ///////////////////////////////////////////////////////////////////////////////
 
 #include "Common/Math.hlsli"
+#include "Common/OrgResources.hlsli"
 #include "Common/SharedData.hlsli"
 
+// SSGI's per-frame constants. D3D11: the cbuffer at b1. ORG: the frame's latch region, declared
+// here; each shader lists X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 7) for its handle and offset,
+// and the names below read it. The struct is the cbuffer's layout, with the matrix as the four rows
+// C++ writes, so no load depends on matrix packing.
+struct SSGIConstants
+{
+	float4 PrevInvViewMat[4];  // the rows C++ writes, which the cbuffer reads as columns
+	float4 NDCToViewMul;
+	float4 NDCToViewAdd;
+
+	float2 TexDim;
+	float2 RcpTexDim;
+	float2 FrameDim;
+	float2 RcpFrameDim;
+
+	float pad0;
+
+	uint NumSlices;
+	uint NumSteps;
+
+	float MinScreenRadius;
+	float AORadius;
+	float GIRadius;
+	float EffectRadius;
+	float Thickness;
+	float2 DepthFadeRange;
+	float DepthFadeScaleConst;
+
+	float GISaturation;
+	float GIDistanceCompensation;
+	float GICompensationMaxDist;
+	float pad1;
+
+	float AOPower;
+	float GIStrength;
+
+	float DepthDisocclusion;
+	float NormalDisocclusion;
+	uint MaxAccumFrames;
+
+	float BlurRadius;
+	float DistanceNormalisation;
+	float2 pad;
+};
+
+#if defined(CS_ORG_BINDLESS)
+ORG_RESOURCE(LATCH, SSGIConstants, SsgiFrame, 7)
+#	define PrevInvViewMat transpose(float4x4(SsgiFrame.PrevInvViewMat[0], SsgiFrame.PrevInvViewMat[1], SsgiFrame.PrevInvViewMat[2], SsgiFrame.PrevInvViewMat[3]))
+#	define NDCToViewMul SsgiFrame.NDCToViewMul
+#	define NDCToViewAdd SsgiFrame.NDCToViewAdd
+#	define TexDim SsgiFrame.TexDim
+#	define RcpTexDim SsgiFrame.RcpTexDim
+#	define FrameDim SsgiFrame.FrameDim
+#	define RcpFrameDim SsgiFrame.RcpFrameDim
+#	define NumSlices SsgiFrame.NumSlices
+#	define NumSteps SsgiFrame.NumSteps
+#	define MinScreenRadius SsgiFrame.MinScreenRadius
+#	define AORadius SsgiFrame.AORadius
+#	define GIRadius SsgiFrame.GIRadius
+#	define EffectRadius SsgiFrame.EffectRadius
+#	define Thickness SsgiFrame.Thickness
+#	define DepthFadeRange SsgiFrame.DepthFadeRange
+#	define DepthFadeScaleConst SsgiFrame.DepthFadeScaleConst
+#	define GISaturation SsgiFrame.GISaturation
+#	define GIDistanceCompensation SsgiFrame.GIDistanceCompensation
+#	define GICompensationMaxDist SsgiFrame.GICompensationMaxDist
+#	define AOPower SsgiFrame.AOPower
+#	define GIStrength SsgiFrame.GIStrength
+#	define DepthDisocclusion SsgiFrame.DepthDisocclusion
+#	define NormalDisocclusion SsgiFrame.NormalDisocclusion
+#	define MaxAccumFrames SsgiFrame.MaxAccumFrames
+#	define BlurRadius SsgiFrame.BlurRadius
+#	define DistanceNormalisation SsgiFrame.DistanceNormalisation
+#else
 cbuffer SSGICB : register(b1)
 {
 	float4x4 PrevInvViewMat;
@@ -63,9 +138,10 @@ cbuffer SSGICB : register(b1)
 	float DistanceNormalisation;
 	float2 pad;
 };
+#endif
 
-SamplerState samplerPointClamp : register(s0);
-SamplerState samplerLinearClamp : register(s1);
+ORG_RESOURCE(SAMPLER, SamplerState, samplerPointClamp, 0)
+ORG_RESOURCE(SAMPLER, SamplerState, samplerLinearClamp, 1)
 
 ///////////////////////////////////////////////////////////////////////////////
 
