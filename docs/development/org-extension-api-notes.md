@@ -223,6 +223,8 @@ Keys used so far:
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
 - CS's ImGui (`CS_ORG_IMGUI`): 1000 at Overlay, last.
 - The DCLF graph texture test (`CS_DCLF_GRAPH_TEXTURE_TEST`): 0 at Prepass.
+- Screen Space GI (`CS_ORG_SCREEN_SPACE_GI`): 100 (history clears, after a reset only), 110 to 116 (the chain's steps) and 117
+  (the accumulation copy without the blur) at DeferredPasses, below Subsurface Scattering's 199-202.
 
 ### Work whose shape changes every frame
 
@@ -388,3 +390,39 @@ Keys used so far:
 - **Where it fits:** the Present anchor: a per-frame "present source" a client sets, read by the present pass. A
   screenshot or capture reads the same source.
 - **Found by:** P1.5 (2026-11-09).
+
+### One-frame passes after a reset
+
+- **Need:** run a pass in one frame only, such as clearing a feature's history textures after a loading screen, a shader
+  reload or new textures, without the pass in every frame's recording.
+- **Who:** temporal effects (CS's Screen Space GI clears its History textures; the D3D11 path clears its accumulation
+  counts with `ClearUnorderedAccessViewFloat`); any plugin with history it must drop.
+- **Where it fits:** today a client sets a flag, calls `FrameAnchors::Refresh` so the next build's `make` includes the clear
+  passes, and calls `Refresh` again a frame later to drop them: two graph builds per reset. A framework answer would be a
+  per-execution switch on a kept pass (a predicate the graph evaluates at submission), or clears the graph runs once
+  on request before a resource's next use.
+- **Found by:** P3 W2, Screen Space GI (2026-11-09).
+
+### Ping-pong history as two lifetimes
+
+- **Need:** a temporal chain whose D3D11 path swaps two textures each frame (function-static indices) needs a fixed
+  resource for each binding in a kept recording.
+- **Who:** CS's Screen Space GI; any plugin with temporal accumulation.
+- **Where it fits:** split each pair by what the next frame reads: one `History` texture that the last writer of the frame
+  writes and the next frame's first reader reads, and one `Transient` scratch texture (aliasable) for everything in
+  between. A writer that cannot write in place (a pass reading neighbours of the texture it updates) writes the scratch
+  texture and a copy pass carries it into the history (Screen Space GI without its blur). A graph-level ping-pong
+  resource (two images, the frame's index choosing the views) would avoid the copy.
+- **Found by:** P3 W2, Screen Space GI (2026-11-09).
+
+### Constants declared by a shared header
+
+- **Need:** a header shared by several shaders of a feature declares the feature's per-frame constants (a cbuffer whose
+  members the shader bodies read by bare name), and each shader's push block must still carry the latch's handle and
+  offset.
+- **Who:** CS's Screen Space GI (`ScreenSpaceGI/common.hlsli`, `SSGICB`); any plugin with a common header.
+- **Where it fits:** the header declares the latch with `ORG_RESOURCE(LATCH, ...)` under ORG and keeps its cbuffer under
+  FXC; each shader lists it as an `EXTERN_LATCH` entry (`OrgResources.hlsli`), which puts the handle and offset in the push
+  block and declares nothing. Macros give the members their bare names under ORG, so shader bodies and the FXC bytecode
+  stay the same.
+- **Found by:** P3 W2, Screen Space GI (2026-11-09).

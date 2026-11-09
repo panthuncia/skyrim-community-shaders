@@ -77,6 +77,7 @@ The shader body does not change. Each entry is `X(kind, type, name, register num
 | `LATCH` | as `CBUFFER` | `static T name = ((ByteAddressBuffer)ResourceDescriptorHeap[handle]).Load<T>(offset)` |
 | `PUSH` | as `CBUFFER` | the struct itself, inside the push block |
 | `EXTERN` | nothing: the header that declares it binds the register | its handle; the header reads `OrgHandle_<name>` |
+| `EXTERN_LATCH` | nothing: the header that declares it binds the register | its handle and offset; the header declares the `LATCH` |
 | `SHARED` | nothing: `FrameBuffer`, `SharedData`, `FeatureData` and `Permutation` stay the headers' cbuffers | four handles, in that order |
 
 `SRV` and `UAV` cover `Texture2D`, `Texture3D`, `TextureCube` and their arrays, the `RW` textures, `(RW)StructuredBuffer`,
@@ -86,7 +87,7 @@ does, so the D3D11 bytecode is the same whichever of the two a list uses.
 
 **The push block.** Under ORG it is `cbuffer OrgBindings : register(b0)`: the pipeline's push constants on Vulkan, its root
 constants on D3D12. It holds one `uint` handle per `SRV`, `UAV`, `SAMPLER`, `CBUFFER` and `EXTERN` entry, two (the handle,
-then the byte offset) per `LATCH` entry and four for `SHARED`, in list order, then each `PUSH` struct, each on a 16-byte
+then the byte offset) per `LATCH` and `EXTERN_LATCH` entry and four for `SHARED`, in list order, then each `PUSH` struct, each on a 16-byte
 boundary. Put `PUSH` entries last.
 
 **Which constants go where.**
