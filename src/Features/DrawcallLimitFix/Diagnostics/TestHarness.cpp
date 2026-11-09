@@ -17,6 +17,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Capture/Capture.h"
 #include "Features/DrawcallLimitFix/Diagnostics/PlayerParity.h"
 #include "Features/DrawcallLimitFix/Diagnostics/TelemetryProfile.h"
+#include "Features/HDRDisplay.h"
 #include "Features/PostProcessing.h"
 #include "Features/RemoteControl/GpuCounters.h"
 #include "Features/ScreenshotFeature.h"
@@ -642,6 +643,19 @@ namespace DCLF
 						}
 						if (!found)
 							logger::warn("[DCLF] dclf:pp: no Post Processing effect '{}'", type);
+						return;
+					}
+					// "dclf:hdr=0|1": HDR Display's Enable HDR, as its Advanced override sets it without an HDR display, from the next
+					// rendered frame. On an SDR display the frame is then PQ-encoded (it looks washed out), which still runs HDR's output path.
+					if (command == "dclf:hdr=0" || command == "dclf:hdr=1") {
+						auto& hdr = globals::features::hdrDisplay;
+						if (!hdr.loaded) {
+							logger::warn("[DCLF] dclf:hdr: HDR Display is not loaded");
+							return;
+						}
+						std::lock_guard lock(hdr.settingsMutex);
+						hdr.settings.enableHDR = command.back() == '1';
+						logger::info("[DCLF] dclf:hdr: Enable HDR {}", hdr.settings.enableHDR ? "on" : "off");
 						return;
 					}
 					// "dclf:feature=0|1": the feature's menu toggle (as CS_DCLF_TEST_TOGGLE flips it), for in-session on/off A/Bs.

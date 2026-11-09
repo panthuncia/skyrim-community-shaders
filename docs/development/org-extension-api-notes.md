@@ -220,6 +220,10 @@ Each anchor's rule:
 - **Capture.** At the end of HDRDisplay's present chain (`ScreenshotFeature::ProcessCaptureRequest`), just before the native
   Present or frame generation's present. After Overlay and HDR output: the back buffer (or the owned frame's source) holds
   what the display will show. Reserved only by the Screenshot feature's ORG path (`CS_ORG_SCREENSHOT=1`) and the self-test.
+- **HDROutput.** In `HDRDisplay::ApplyHDR`, inside HDRDisplay's present chain: after Overlay and, when HDR composites the UI
+  after the present hooks (the deferred composite), after other mods' Present hooks and frame generation's hudless capture.
+  Before the real present. It runs only on frames HDR composites (HDR on, the window usable), and only when
+  `CS_ORG_HDR_DISPLAY=1`: HDRDisplay calls it. The UI texture is complete here, and the back buffer is not yet presented.
 
 Keys used so far:
 
@@ -234,6 +238,8 @@ Keys used so far:
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
 - CS's ImGui (`CS_ORG_IMGUI`): 1000 at Overlay, last.
 - The Screenshot feature (`CS_ORG_SCREENSHOT`): 100 (the readback copy) at Capture.
+- HDR Display (`CS_ORG_HDR_DISPLAY`): 100 (the output composite), 101 (the copy into the back buffer, not in the owned frame)
+  and 102 (the UI texture's clear) at HDROutput.
 - The DCLF graph texture test (`CS_DCLF_GRAPH_TEXTURE_TEST`): 0 at Prepass.
 - Subsurface Scattering (`CS_ORG_SUBSURFACE_SCATTERING`): 199 (Burley clear), 200 (extraction), 201 (horizontal or Burley
   blur) and 202 (vertical blur) at DeferredPasses. SSGI's passes there stay below 199, as the D3D11 order is SSGI first.
@@ -588,6 +594,7 @@ Keys used so far:
 ### Textures generated once at startup
 
 - **Need:** fill a persistent lookup texture once (a noise, a LUT), before its first reader in any epoch, and never again
+- **Who:** CS's HDRDisplay (`CS_ORG_HDR_DISPLAY`, the copy at HDROutput); plugins that `CopyResource` into `GetBuffer(0)`.
   unless the graph loses it.
 - **Who:** CS's TruePBR glints noise (`src/TruePBR/ORGGlintsNoise.cpp`, `CS_ORG_GLINTS`); any plugin with a generated LUT.
 - **Where it fits:** today the client registers a fill pass at the earliest anchor its readers follow (EarlyPrepass), is
@@ -609,3 +616,41 @@ Keys used so far:
   (the ticket is then prepared again), and an epoch that submits only when it captures must poll the readbacks itself,
   since only submissions poll them. `RangeSpec` names mips and slices, not a rectangle: a crop is cut on the CPU.
 - **Found by:** P3 W3, Screenshot (2026-11-09).
+### Writing the D3D11 swap chain's back buffer from a pass
+
+- **Need:** a pass writes the frame into the swap chain's back buffer (an output transform's copy), in the DXVK-host frame.
+- **Where it fits:** the back buffer imports like any D3D11 texture (`FrameAnchors::D3D11Texture`), but only while the swap
+  chain has one image. With a sequential swap effect and several buffers DXVK rotates the images under the D3D11 objects at
+  each present (`D3D11SwapChain::RotateBackBuffers`, on its own thread), so an import made once writes the wrong image after
+  the first present. HDRDisplay's FLIP_DISCARD swap chain has one, and the pass falls back to D3D11 otherwise. A plugin API
+  wants a "back buffer" resource the present stage resolves per frame (in the owned frame, the present source above).
+- **Found by:** P3 W3, HDRDisplay (2026-11-09).
+
+### Clearing an imported D3D11 texture
+
+- **Need:** clear a D3D11 texture a feature still owns (a render target the engine draws into) from a graph pass.
+- **Who:** CS's HDRDisplay (its UI texture, after the composite read it).
+- **Where it fits:** `FrameAnchors::D3D11Texture` imports SRV and UAV only, and no CPU-side UAV, so neither a render target
+  clear nor `UnorderedAccessClear` works on it. HDRDisplay imports the texture itself with its RTV and clears it with an
+  empty render pass (`LoadOp::Clear`). An import option for an RTV and a clearable UAV would cover both.
+- **Found by:** P3 W3, HDRDisplay (2026-11-09).
+
+### A frame anchor only one feature runs
+
+- **Need:** a point of the frame that only exists inside one feature's code path (HDRDisplay's present chain, after the
+  overlay and other mods' Present hooks), where its passes and any plugin's passes that read the finished UI go.
+- **Who:** CS's HDRDisplay (`FrameAnchors::Anchor::HDROutput`, run from `ApplyHDR`).
+- **Where it fits:** a frame anchor whose hook is the feature's own call (`FrameAnchors::Run`), reserved by that feature. It
+  runs only on frames the feature reaches it (HDR on, the window usable). A plugin that needs a pass after the UI but on
+  every frame uses Overlay or Present instead.
+- **Found by:** P3 W3, HDRDisplay (2026-11-09).
+
+### One helper for an ORG build's D3D11 defines
+
+- **Need:** an ORG program built from a D3D11 shader needs the defines `Util::CompileShader` adds (the common defines, then
+  `COMPUTESHADER`, `WINPC`, `DX11`) as wide strings.
+- **Who:** every CS port writes the same function (`ProgramDefines` in Subsurface Scattering, SSGI, Dynamic Cubemaps, the height
+  fog, the deferred composite and HDRDisplay).
+- **Where it fits:** one helper beside `Util::GetCommonShaderDefines`, or `ComputeProgram::Desc` taking narrow defines and
+  adding the stage's defines itself. A plugin API would expose the same.
+- **Found by:** P3 W3, HDRDisplay (2026-11-09).

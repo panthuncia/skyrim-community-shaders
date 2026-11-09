@@ -96,6 +96,7 @@ public:
 		AnchorTonemap,
 		AnchorPresent,
 		AnchorOverlay,
+		AnchorHDROutput,
 		AnchorCapture,
 		Count
 	};

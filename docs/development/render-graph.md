@@ -429,6 +429,7 @@ of adding a `Segment` and editing the epoch order. Each anchor is one of CS's ho
 | `Tonemap` | `Main_HDRTonemapBlendCinematic_Render` (`Hooks.cpp`) |
 | `Present` | `IDXGISwapChain_Present` (`Hooks.cpp`), before DCLF's `BeforePresent` |
 | `Overlay` | `OverlayRenderer::FinalizeImGuiFrame`, where CS's ImGui frame is drawn (`ImGuiRenderer::RenderDrawData`) |
+| `HDROutput` | `HDRDisplay::ApplyHDR`, HDR's output composite inside its present chain (run only by `CS_ORG_HDR_DISPLAY`) |
 | `Capture` | `ScreenshotFeature::ProcessCaptureRequest`, at the end of HDRDisplay's present chain, before the native Present |
 
 Each anchor's ordering rule is in [org-extension-api-notes.md](./org-extension-api-notes.md), "Attaching passes to the frame".
@@ -489,7 +490,7 @@ FrameAnchors::Register({ .id = "cs.myfeature",
     `kGameFramesInFlight` slots. Size `LatchBlock`s from `GraphHost::FrameSlots()` after the runtime is up, as LLF does. An anchor that
     runs several times a frame (`ReflectionsPrepass`, at each cubemap render) uses its ring that much faster, and may wait for a
     slot when the CPU is far ahead of the GPU.
--   **The hazard rule.** After the late anchors (`PostProcessing`, `Tonemap`, `Present`, `Overlay`, `Capture`) have run an epoch, `Run` calls
+-   **The hazard rule.** After the late anchors (`PostProcessing`, `Tonemap`, `Present`, `Overlay`, `HDROutput`, `Capture`) have run an epoch, `Run` calls
     `Upscaling::SeparateFromGraphEpochs()`. An upscaler, frame generation or the present can follow these, and none may run directly
     behind a graph epoch (above, "Hazard: external Vulkan work directly after a graph epoch"). The earlier anchors are followed by
     the engine's own draws.
@@ -681,6 +682,7 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 | `CS_ORG_ANCHOR_SELFTEST=1` | Reserve every frame anchor and run a test client at each: a raster pass writes a texture, a compute pass reads it and one texel of kMAIN into a buffer, and a copy reads that back. Each anchor logs `[ORG] anchor self-test: <anchor> OK` once, then `every anchor OK`. |
 | `CS_ORG_GRAPHRES_SELFTEST=1` | Reserve DeferredPasses and test the graph-backed resources there (above, "Graph-backed feature resources"). Logs `[ORG] graph resource self-test: 16x16 OK ...`, then `resized to 32x32`, `32x32 OK ...` and `every check OK; the texture is released`; `MISMATCH` otherwise. |
 | `CS_ORG_IMGUI=1` | Draw CS's ImGui frames with the render graph's backend at the `Overlay` anchor once the graph is up ("ImGui on the graph"). Logs `[ORG] ImGui: drawn by the render graph` and `drawing onto ...`. |
+| `CS_ORG_HDR_DISPLAY=1` | HDR Display's output composite, its copy into the back buffer and the UI texture's clear as passes at the `HDROutput` anchor (`ORGHDRDisplay`), on frames HDR composites. Logs `[ORG] HDR Display runs on the render graph` and where the back buffer copy runs; on a failure `[ORG] HDR Display returns to D3D11`. Test command `dclf:hdr=0|1` forces Enable HDR on an SDR display. |
 | `CS_ORG_SCREENSHOT=1` | The Screenshot feature's captures (the hotkey, the menu button, `dclf:shot`) are copied into an ORG readback buffer by a pass at the `Capture` anchor, at the end of HDRDisplay's present chain, instead of a D3D11 staging texture (`src/Features/Screenshot/ORGScreenshot.cpp`). The frame never waits: the bytes reach the encoding worker when the copy's fence passes, and the worker crops them. Logs `[ORG] Screenshot: captures are read back through the render graph`; any failure (no anchor, a source that cannot be imported, a failed epoch) copies that capture with D3D11. |
 | `CS_ORG_EPOCH_STATS=1` | Log render-thread CPU time per epoch (average and maximum every 600 epochs). |
 | `CS_ORG_ASYNC_EPOCHS=0` | Run the epochs synchronously. By default each epoch is prepared and recorded ahead on the graph host's thread, and the render thread only admits and submits ("Revisions and recordings" in `dclf-architecture.md`). |

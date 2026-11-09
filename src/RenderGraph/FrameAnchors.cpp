@@ -54,6 +54,7 @@ namespace FrameAnchors
 			{ "Tonemap", { "CS anchor: tonemap", "CS anchor: tonemap inputs", "FrameAnchors::Tonemap / ", "cs.anchor.tonemap" }, true },
 			{ "Present", { "CS anchor: present", "CS anchor: present inputs", "FrameAnchors::Present / ", "cs.anchor.present" }, true },
 			{ "Overlay", { "CS anchor: overlay", "CS anchor: overlay inputs", "FrameAnchors::Overlay / ", "cs.anchor.overlay" }, true },
+			{ "HDROutput", { "CS anchor: HDR output", "CS anchor: HDR output inputs", "FrameAnchors::HDROutput / ", "cs.anchor.hdr-output" }, true },
 			{ "Capture", { "CS anchor: capture", "CS anchor: capture inputs", "FrameAnchors::Capture / ", "cs.anchor.capture" }, true },
 		} };
 
@@ -78,8 +79,9 @@ namespace FrameAnchors
 			Segment::AnchorPostProcessing,  // Main_PostProcessing, before the upscaler
 			Segment::AnchorTonemap,         // in the ImageSpace chain after it
 			Segment::AnchorPresent,
-			Segment::AnchorOverlay,  // the overlay's ImGui draw, inside HDRDisplay's present chain
-			Segment::AnchorCapture,  // the screenshot capture, at the end of HDRDisplay's present chain
+			Segment::AnchorOverlay,    // the overlay's ImGui draw, inside HDRDisplay's present chain
+			Segment::AnchorHDROutput,  // HDRDisplay's output composite, after the overlay
+			Segment::AnchorCapture,    // the screenshot capture, at the end of HDRDisplay's present chain
 		};
 
 		std::uint32_t RankOf(std::uint32_t a_segment)
