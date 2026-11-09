@@ -44,7 +44,10 @@ One entry per need. Give:
 - **Who:** plugins that make icons, HUD textures or dynamic textures with `ID3D11Device::CreateTexture2D` and
   `UpdateSubresource`.
 - **Where it fits:** an ORG texture with an upload, handed to the engine as a tripwire handle that wraps it (P4.1, P4.3).
-- **Found by:** survey for the plan (2026-11-09).
+  Terrain Shadows' port does the graph half today: its heightmap is a persistent graph texture (`GraphResources::Texture2D`,
+  no export), filled once from the DDS by `TEXTURE_UPLOAD_SUBRESOURCES` in its anchor client's `commit`, where the upload
+  service is active. The upload copies the bytes at that call, so the source only has to live until then. BC formats work.
+- **Found by:** survey for the plan (2026-11-09); the graph upload by P3 TerrainShadows (2026-11-09).
 
 ### Sharing graph resources with D3D11 code
 
@@ -62,6 +65,29 @@ One entry per need. Give:
   that calls them itself must create images with every usage the D3D11 bind flags imply. In the DXVK-free build there is no
   D3D11 side, so the export becomes a tripwire handle (P4.1).
 - **Found by:** P2.1 (2026-11-09).
+
+### Per-frame constants for a pass
+
+- **Need:** give a pass values that change every frame (a camera, a time, the stripe of a rolling update).
+- **Who:** every effect a plugin moves to the anchors.
+- **Where it fits:** async epochs prepare and record a pass ahead of the frame's values, and kept recordings are submitted
+  again, so such values can be neither push constants nor anything a pass reads in `Prepare`. They go in an `org::LatchBlock`
+  that the client's `commit` writes at `GraphHost::CurrentFrameSlot()`; the shader reads them through a `LATCH` entry
+  (`Common/OrgResources.hlsli`, `ShaderBindings::LatchOf`). What the recording's commands depend on (dispatch counts, group
+  counts) goes in the pass's `Revision`; when the commit changes it, the ticket is prepared again. A pass that reads that
+  shape in `Prepare` must make sure a shape published between its `Prepare` and the revision check cannot pass as current
+  (Terrain Shadows' pass remembers the shape it prepared and adds a fresh value while it differs from the live one). An
+  exported API needs the latch block and this rule.
+- **Found by:** P3 TerrainShadows (2026-11-09).
+
+### Graph textures read by Drawcall Limit Fix
+
+- **Need:** DCLF's colour passes read a feature's graph texture at a frame-texture register.
+- **Who:** CS's ported features whose output DCLF samples (Terrain Shadows' t60 now; IBL, VolumetricShadows and others next).
+- **Where it fits:** DCLF has a graph path only for buffers (`Api::FrameGraphBuffers`). A ported texture is still read through
+  its D3D11 export, which DCLF imports like any D3D11 view. A frame-graph-texture registration, with the resource registered
+  in DCLF's graphs, would drop that import and, once the engine's own reads are ported (Phase 5), the export.
+- **Found by:** P3 W1 ports (2026-11-09).
 
 ### Render to texture
 
@@ -137,6 +163,7 @@ Keys used so far:
 
 - The anchor self-test (`CS_ORG_ANCHOR_SELFTEST`): 0, 1 and 2 at every anchor.
 - The graph resource self-test (`CS_ORG_GRAPHRES_SELFTEST`): 0 at DeferredPasses.
+- Terrain Shadows' update (`CS_ORG_TERRAIN_SHADOWS`): 100 at EarlyPrepass.
 ### Presenting from more than one thread
 
 - **Need:** present a frame from a thread other than the render thread, under the engine's lock.
