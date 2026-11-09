@@ -9,6 +9,7 @@
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "State.h"
@@ -29,6 +30,8 @@ namespace
 	constexpr const char* kClientId = "cs.volumetric-shadows";
 	constexpr const char* kDownsampleShader = "VolumetricShadows/DownsampleShadowCS.hlsl";
 	constexpr const char* kBlurShader = "VolumetricShadows/BlurShadowCS.hlsl";
+	// The shared shadow map's name, which it is published under: Drawcall Limit Fix's t18.
+	constexpr const char* kShadowCopyName = "VolumetricShadows::ShadowCopy";
 	// EarlyPrepass order key (org-extension-api-notes.md, "Keys used so far").
 	constexpr std::int32_t kOrder = 100;
 
@@ -315,7 +318,7 @@ void ORGVolumetricShadows::EarlyPrepass()
 		}
 		resources->sampler = ShaderBindings::CreateSampler({});
 		// Read by the engine's draws and DCLF in later frames too (the reflections draw before this frame's copy): exported, so never aliased.
-		resources->shadowCopy = std::make_unique<GraphResources::Texture2D>(CopyDesc(), "VolumetricShadows::ShadowCopy",
+		resources->shadowCopy = std::make_unique<GraphResources::Texture2D>(CopyDesc(), kShadowCopyName,
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
 		resources->blurTemp = std::make_unique<GraphResources::Texture2D>(CopyDesc(), "VolumetricShadows::ShadowBlurTemp");
 		if (!resources->sampler || !*resources->shadowCopy || !resources->shadowCopy->SRV() || !*resources->blurTemp) {
@@ -327,10 +330,18 @@ void ORGVolumetricShadows::EarlyPrepass()
 		impl = std::move(state);
 		const bool registered = FrameAnchors::Register(MakeClient(resources, [this] {
 			logger::error("[ORG] Volumetric Shadows: the render graph failed; back to the D3D11 dispatches");
+			PublishedResources::Withdraw(kShadowCopyName);
 			impl.reset();
 		}));
 		if (!registered) {
 			logger::warn("[ORG] Volumetric Shadows stays on D3D11: its anchor client could not be registered");
+			impl.reset();
+			return;
+		}
+		// Drawcall Limit Fix's colour passes read it by name, ordered after the blurs (Integrations/VolumetricShadows).
+		if (!PublishedResources::Publish(*resources->shadowCopy)) {
+			logger::warn("[ORG] Volumetric Shadows stays on D3D11: the shared shadow map could not be published");
+			FrameAnchors::Unregister(kClientId);
 			impl.reset();
 			return;
 		}
@@ -371,6 +382,7 @@ void ORGVolumetricShadows::CheckShadowMaskInput(ID3D11ShaderResourceView* a_shad
 	}
 	logger::error("[ORG] Volumetric Shadows: the shadow mask's t4 is not the cascade map the passes read; back to the D3D11 dispatches");
 	FrameAnchors::Unregister(kClientId);
+	PublishedResources::Withdraw(kShadowCopyName);
 	impl.reset();
 }
 
