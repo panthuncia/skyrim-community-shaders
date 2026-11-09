@@ -5,6 +5,7 @@
 #include "EffectManager.h"
 #include "Globals.h"
 #include "State.h"
+#include "Utils/D3D.h"
 
 namespace
 {
@@ -186,12 +187,14 @@ void TextureManager::CreateDownsampleResources()
 	winrt::com_ptr<ID3DBlob> pixelShaderBlob;
 	winrt::com_ptr<ID3DBlob> errorBlob;
 
+	// Dual-target shader: its includes resolve under Data\Shaders.
+	Util::CustomInclude include;
 	HRESULT result = D3DCompile(
 		pixelShaderSource.data(),
 		pixelShaderSource.size(),
 		"DownsamplePS.hlsl",
 		nullptr,
-		nullptr,
+		&include,
 		"main",
 		"ps_5_0",
 		0,

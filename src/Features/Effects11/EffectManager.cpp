@@ -7,6 +7,7 @@
 #include "Globals.h"
 #include "Menu.h"
 #include "State.h"
+#include "Utils/D3D.h"
 #include "Utils/Game.h"
 
 #include "PresetManager.h"
@@ -633,7 +634,9 @@ void EffectManager::CreateCopyShaders()
 
 	winrt::com_ptr<ID3DBlob> psBlob;
 	errorBlob = nullptr;  // Holds any vertex shader warnings, and put() requires an empty pointer
-	hr = D3DCompile(pixelShaderSource.data(), pixelShaderSource.size(), "CopyPS.hlsl", nullptr, nullptr,
+	// Dual-target shader: its includes resolve under Data\Shaders.
+	Util::CustomInclude include;
+	hr = D3DCompile(pixelShaderSource.data(), pixelShaderSource.size(), "CopyPS.hlsl", nullptr, &include,
 		"main", "ps_5_0", 0, 0, psBlob.put(), errorBlob.put());
 
 	if (FAILED(hr)) {
@@ -668,7 +671,9 @@ void EffectManager::CreateColorCorrectionShader()
 		return;
 
 	winrt::com_ptr<ID3DBlob> csBlob, errorBlob;
-	HRESULT hr = D3DCompile(computeShaderSource.data(), computeShaderSource.size(), "ColorCorrectionCS.hlsl", nullptr, nullptr,
+	// Dual-target shader: its includes resolve under Data\Shaders.
+	Util::CustomInclude include;
+	HRESULT hr = D3DCompile(computeShaderSource.data(), computeShaderSource.size(), "ColorCorrectionCS.hlsl", nullptr, &include,
 		"main", "cs_5_0", 0, 0, csBlob.put(), errorBlob.put());
 
 	if (FAILED(hr)) {
