@@ -60,6 +60,15 @@ if(CS_RENDER_GRAPH)
         # NVPerf::Host target come from CMakeLists.txt's NVPERF_SUPPORT block, which also delay-loads and installs the DLL.
         add_subdirectory("${CS_ORG_ROOT}/OpenRenderGraph" "${CMAKE_BINARY_DIR}/extern/OpenRenderGraph" EXCLUDE_FROM_ALL)
 
+        # ORG's built-in passes' shaders (GenerateMips.hlsl and its include), which CS compiles at runtime with ComputeProgram
+        # from Data/Shaders/OpenRenderGraph (org::kBuiltinShaderPrefix). Copied into package/Shaders at configure time, so every
+        # path that ships package/Shaders ships them; the copies are generated (.gitignore) and follow the ORG checkout.
+        if(OPENRENDERGRAPH_SHADER_DIR)
+            file(GLOB _org_builtin_shaders "${OPENRENDERGRAPH_SHADER_DIR}/*.hlsl" "${OPENRENDERGRAPH_SHADER_DIR}/*.hlsli")
+            file(COPY ${_org_builtin_shaders} DESTINATION "${CMAKE_SOURCE_DIR}/package/Shaders/OpenRenderGraph")
+            set_property(DIRECTORY "${CMAKE_SOURCE_DIR}" APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_org_builtin_shaders})
+        endif()
+
         # Runtime SPIR-V compilation (every render-graph shader): ORGModuleServices' content-addressed DXC service.
         # Optional; without it the render-graph features stay on their D3D11 paths.
         if(EXISTS "${CS_ORG_ROOT}/ORGModuleServices/CMakeLists.txt")
