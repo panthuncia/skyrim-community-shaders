@@ -11,6 +11,7 @@
 #include "RenderGraph/ImGuiBasicRHI.h"
 
 #include <imgui_impl_dx11.h>
+#include <imgui_impl_win32.h>
 
 #if defined(CS_HAS_RENDER_GRAPH)
 #	include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
@@ -163,6 +164,18 @@ namespace ImGuiRenderer
 			return client;
 		}
 
+		/**
+		 * @brief imgui_impl_dx11 shut down while ImGui keeps running. Its shutdown destroys every platform window, the main
+		 * viewport's Win32 data included, so the Win32 backend is set up again on the same window.
+		 */
+		void ShutdownDX11()
+		{
+			auto* window = static_cast<HWND>(ImGui::GetMainViewport()->PlatformHandleRaw);
+			ImGui_ImplDX11_Shutdown();
+			ImGui_ImplWin32_Shutdown();
+			ImGui_ImplWin32_Init(window);
+		}
+
 		/** @brief The graph's backend installed in the D3D11 backend's place, once the graph runs with the Overlay anchor. */
 		void SwitchToGraph(State& a_state)
 		{
@@ -180,7 +193,7 @@ namespace ImGuiRenderer
 				logger::error("[ORG] ImGui: the render graph's backend could not start; imgui_impl_dx11 stays");
 				return;
 			}
-			ImGui_ImplDX11_Shutdown();
+			ShutdownDX11();
 			a_state.dx11 = false;
 			ImGuiBasicRHI::Init();
 			a_state.org = true;
