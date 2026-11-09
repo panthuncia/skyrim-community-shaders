@@ -104,6 +104,7 @@ def main():
     parser.add_argument("--fxc", help="fxc.exe (default: the newest Windows SDK's)")
     parser.add_argument("--spirv-val", help="spirv-val.exe (default: beside dxc.exe, when present)")
     parser.add_argument("--entry", default="main")
+    parser.add_argument("-D", "--define", action="append", default=[], help="A define for every build (NAME or NAME=VALUE); repeatable")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "build/dual-target-shaders")
     args = parser.parse_args()
 
@@ -121,10 +122,12 @@ def main():
         out = args.output_dir / path.stem
         print(path.relative_to(ROOT) if path.is_relative_to(ROOT) else path)
 
-        common = ["-E", args.entry, *includes, str(path)]
+        defines = [arg for define in args.define for arg in ("-D", define)]
+        common = ["-E", args.entry, *defines, *includes, str(path)]
         fxc_includes = ["/I" if arg == "-I" else arg for arg in includes]
+        fxc_defines = ["/D" if arg == "-D" else arg for arg in defines]
         results = [
-            run("FXC " + stage + "_5_0", [str(fxc), "/nologo", "/T", stage + "_5_0", "/E", args.entry, *fxc_includes, "/Fo", f"{out}.cso", str(path)]),
+            run("FXC " + stage + "_5_0", [str(fxc), "/nologo", "/T", stage + "_5_0", "/E", args.entry, *fxc_defines, *fxc_includes, "/Fo", f"{out}.cso", str(path)]),
             run("DXC SPIR-V " + stage + "_6_6", [str(dxc), "-HV", "2021", "-T", stage + "_6_6", *spirv_flags(), "-D", "CS_ORG_BINDLESS=1", "-Fo", f"{out}.spv", *common]),
             run("DXC DXIL " + stage + "_6_6", [str(dxc), "-HV", "2021", "-T", stage + "_6_6", "-D", "CS_ORG_BINDLESS=1", "-Fo", f"{out}.dxil", *common]),
         ]
