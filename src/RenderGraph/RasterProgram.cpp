@@ -92,14 +92,33 @@ namespace
 		return pipeline;
 	}
 
-	/** @brief What Load and the rebuild compile: both stages' sources, entries and defines. */
+	/** @brief What Load and the rebuild compile: both stages' sources (or generated text), entries and defines. */
 	struct Stages
 	{
 		std::string vertexSource, pixelSource;
 		std::wstring vertexEntry, pixelEntry;
 		Build::Defines defines;
 		std::string label;
+		std::string vertexText, pixelText;
+		std::wstring languageVersion = L"2021";
 	};
+
+	/** @brief A stage's bytes: its generated text when it has one, else its file. */
+	std::vector<std::byte> StageBytes(const std::filesystem::path& a_path, const std::string& a_text)
+	{
+		if (a_text.empty())
+			return Build::ReadSource(a_path);
+		const auto* data = reinterpret_cast<const std::byte*>(a_text.data());
+		return { data, data + a_text.size() };
+	}
+
+	org::services::ShaderCompileRequest StageRequest(const std::filesystem::path& a_path, std::span<const std::byte> a_source, const std::wstring& a_entry,
+		const wchar_t* a_target, const Stages& a_stages)
+	{
+		auto request = Build::MakeRequest(a_path, a_source, a_entry, a_target, a_stages.defines);
+		request.languageVersion = a_stages.languageVersion;
+		return request;
+	}
 
 	std::uint64_t Fingerprint(const std::vector<std::byte>& a_vertex, const std::vector<std::byte>& a_pixel)
 	{
@@ -118,16 +137,16 @@ namespace
 			auto* compiler = RenderGraphRuntime::Get().ShaderCompiler();
 			const auto vertexPath = Build::SourcePath(a_stages.vertexSource);
 			const auto pixelPath = Build::SourcePath(a_stages.pixelSource);
-			auto vertexSource = std::make_shared<std::vector<std::byte>>(Build::ReadSource(vertexPath));
-			auto pixelSource = std::make_shared<std::vector<std::byte>>(Build::ReadSource(pixelPath));
+			auto vertexSource = std::make_shared<std::vector<std::byte>>(StageBytes(vertexPath, a_stages.vertexText));
+			auto pixelSource = std::make_shared<std::vector<std::byte>>(StageBytes(pixelPath, a_stages.pixelText));
 			if (!compiler || vertexSource->empty() || pixelSource->empty())
 				return a_done({ .error = compiler ? fmt::format("missing shader source for {}", a_stages.label) : std::string("no runtime shader compiler") });
 			// The compiler copies each source; a memory-cache hit (nothing changed) completes inline, on this thread.
-			(void)compiler->CompileAsync(Build::MakeRequest(vertexPath, *vertexSource, a_stages.vertexEntry, L"vs_6_6", a_stages.defines),
+			(void)compiler->CompileAsync(StageRequest(vertexPath, *vertexSource, a_stages.vertexEntry, L"vs_6_6", a_stages),
 				[compiler, a_program, a_device, a_state, a_stages, a_request, a_done, pixelPath, pixelSource](const org::services::ShaderArtifact& a_vertex) {
 					if (!a_vertex)
 						return a_done({ .error = fmt::format("SPIR-V build of {}'s vertex stage failed:\n{}", a_stages.label, a_vertex.diagnostics.substr(0, 2000)) });
-					(void)compiler->CompileAsync(Build::MakeRequest(pixelPath, *pixelSource, a_stages.pixelEntry, L"ps_6_6", a_stages.defines),
+					(void)compiler->CompileAsync(StageRequest(pixelPath, *pixelSource, a_stages.pixelEntry, L"ps_6_6", a_stages),
 						[a_program, a_device, a_state, a_stages, a_request, a_done, vertex = a_vertex.binary](const org::services::ShaderArtifact& a_pixel) {
 							if (!a_pixel)
 								return a_done({ .error = fmt::format("SPIR-V build of {}'s pixel stage failed:\n{}", a_stages.label, a_pixel.diagnostics.substr(0, 2000)) });
@@ -148,16 +167,16 @@ namespace
 	}
 
 	/** @brief One stage compiled now (blocking); empty, logged, on failure. */
-	std::vector<std::byte> CompileStage(org::services::ShaderCompiler& a_compiler, const std::string& a_source, const std::wstring& a_entry, const wchar_t* a_target,
-		const Build::Defines& a_defines)
+	std::vector<std::byte> CompileStage(org::services::ShaderCompiler& a_compiler, const std::string& a_source, const std::string& a_text, const std::wstring& a_entry,
+		const wchar_t* a_target, const Stages& a_stages)
 	{
 		const auto path = Build::SourcePath(a_source);
-		const auto bytes = Build::ReadSource(path);
+		const auto bytes = StageBytes(path, a_text);
 		if (bytes.empty()) {
 			logger::error("[ORG] Missing shader source {}", path.string());
 			return {};
 		}
-		const auto artifact = a_compiler.Compile(Build::MakeRequest(path, bytes, a_entry, a_target, a_defines));
+		const auto artifact = a_compiler.Compile(StageRequest(path, bytes, a_entry, a_target, a_stages));
 		if (!artifact) {
 			logger::error("[ORG] SPIR-V build of {} ({}) failed:\n{}", a_source, Util::WStringToString(a_entry), artifact.diagnostics.substr(0, 2000));
 			return {};
@@ -193,9 +212,10 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 	// Before the sources are read: a reload that starts after rebuilds it (PipelineRegistry::Register).
 	const std::uint64_t builtFor = registry.SourcesGeneration();
 	Stages stages{ a_desc.vertexSource, a_desc.pixelSource, a_desc.vertexEntry, a_desc.pixelEntry, a_desc.defines,
-		fmt::format("{} ({})", std::filesystem::path(a_desc.pixelSource).stem().string(), Util::WStringToString(a_desc.pixelEntry)) };
-	const auto vertex = CompileStage(*compiler, stages.vertexSource, stages.vertexEntry, L"vs_6_6", stages.defines);
-	const auto pixel = vertex.empty() ? std::vector<std::byte>{} : CompileStage(*compiler, stages.pixelSource, stages.pixelEntry, L"ps_6_6", stages.defines);
+		fmt::format("{} ({})", std::filesystem::path(a_desc.pixelSource).stem().string(), Util::WStringToString(a_desc.pixelEntry)), a_desc.vertexText,
+		a_desc.pixelText, a_desc.languageVersion };
+	const auto vertex = CompileStage(*compiler, stages.vertexSource, stages.vertexText, stages.vertexEntry, L"vs_6_6", stages);
+	const auto pixel = vertex.empty() ? std::vector<std::byte>{} : CompileStage(*compiler, stages.pixelSource, stages.pixelText, stages.pixelEntry, L"ps_6_6", stages);
 	if (vertex.empty() || pixel.empty())
 		return {};
 
@@ -221,7 +241,11 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 	// Live while an owner holds the program (the slot is its).
 	org::services::LivePipelineDesc live;
 	live.id = fmt::format("{} + {}", a_desc.vertexSource, stages.label);
-	live.sources = { a_desc.vertexSource, a_desc.pixelSource };
+	// Generated stages have no file a reload could name.
+	if (a_desc.vertexText.empty())
+		live.sources.push_back(a_desc.vertexSource);
+	if (a_desc.pixelText.empty())
+		live.sources.push_back(a_desc.pixelSource);
 	live.rebuild = Rebuild(program, a_device, state, stages);
 	program->slot = registry.Register(std::move(live), std::make_shared<rhi::PipelinePtr>(std::move(pipeline)), Fingerprint(vertex, pixel), builtFor);
 	return program;
