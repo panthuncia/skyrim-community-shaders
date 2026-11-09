@@ -119,7 +119,8 @@ namespace OrgFx
 		/** @brief Byte offset in its constant buffer (FXC packing); -1 when it is not in one (static, resource, string...). */
 		std::int32_t bufferOffset = -1;
 		std::uint32_t bufferSize = 0;
-		Range statement;  // the whole declaration statement, shared by `float a, b;`
+		Range statement;   // the whole declaration statement, shared by `float a, b;`
+		Range annotation;  // the `<...>` list; empty when there is none
 		std::uint32_t line = 0;
 	};
 
@@ -391,6 +392,7 @@ namespace OrgFx
 		std::string name;
 		Annotations annotations;
 		std::vector<std::uint32_t> techniques;  // indices into EffectDesc::techniques
+		Range statement;
 		std::uint32_t line = 0;
 	};
 
@@ -425,6 +427,7 @@ namespace OrgFx
 		std::uint32_t arraySize = 0;
 		std::string semantic;
 		std::string interpolation;
+		std::uint32_t offset = 0;  // in a constant buffer (FXC packing), from the struct's start
 	};
 
 	/** @brief A struct or class. Member functions are skipped; only data members are listed. */
@@ -433,6 +436,7 @@ namespace OrgFx
 		std::string name;
 		bool isClass = false;
 		std::vector<StructMember> members;
+		std::uint32_t size = 0;  // in a constant buffer: up to the end of the last member (FXC packing)
 		Range statement;
 		std::uint32_t line = 0;
 	};

@@ -1144,8 +1144,11 @@ namespace OrgFx
 					++pos;
 					v.arraySize = ParseArraySize();
 					ParseBindings(v.semantic, &v.registerBinding);
-					if (Is("<"))
+					if (Is("<")) {
+						const auto annotationStart = pos;
 						ParseAnnotations(v.annotations);
+						v.annotation = RangeOf(annotationStart, pos);
+					}
 
 					const bool stateType = a_type.cls == TypeClass::StateObject || a_type.cls == TypeClass::Sampler;
 					if (stateType && Is("{")) {
@@ -1699,6 +1702,7 @@ namespace OrgFx
 
 			void ParseGroup()
 			{
+				const auto start = pos;
 				Group g;
 				g.line = Peek().line;
 				++pos;
@@ -1734,6 +1738,7 @@ namespace OrgFx
 				});
 				pos = close;
 				Accept(";");
+				fx.groups[groupIndex].statement = RangeOf(start, pos);
 			}
 
 			void ParseTechnique(const std::string& a_group)
@@ -2113,6 +2118,21 @@ namespace OrgFx
 
 			void ComputeLayouts()
 			{
+				// Struct members first: their offsets are what a lowered struct load reads.
+				for (auto& s : fx.structs) {
+					std::uint32_t offset = 0;
+					bool ok = true;
+					for (auto& m : s.members) {
+						auto placement = Place(offset, m.type, {}, m.arraySize);
+						if (!placement) {
+							ok = false;
+							break;
+						}
+						m.offset = placement->first;
+						offset = placement->second;
+					}
+					s.size = ok ? offset : 0;
+				}
 				std::unordered_map<std::string, std::uint32_t> ends;
 				for (auto& v : fx.variables) {
 					if (!InConstantBuffer(v))
