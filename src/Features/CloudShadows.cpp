@@ -3,6 +3,7 @@
 #include "../I18n/I18n.h"
 #include "Effects11.h"
 #include "Effects11/SettingManager.h"
+#include "Features/CloudShadows/ORGCloudShadows.h"
 #include "Globals.h"
 #include "State.h"
 #include "Utils/D3D.h"
@@ -168,7 +169,7 @@ void CloudShadows::SkyShaderHacks()
 		}
 
 		// The layer chain is being written by this draw, so self shadowing reads last frame's composite
-		ID3D11ShaderResourceView* selfShadowSRV = texCubemapCloudOccCopy->srv.get();
+		ID3D11ShaderResourceView* selfShadowSRV = OcclusionSRV();
 		context->PSSetShaderResources(26, 1, &selfShadowSRV);
 
 		ID3D11RenderTargetView* captureRTVs[4] = { rtvs[0], rtvs[1], rtvs[2], cloudShadowLayerRTVs[layer][side] };
@@ -257,12 +258,27 @@ void CloudShadows::ReflectionsPrepass()
 			occlusionClearedWithoutClouds = false;
 		}
 
-		context->CopyResource(texCubemapCloudOccCopy->resource.get(), texCloudShadowLayers[kMaxCloudLayers - 1]->resource.get());
+		// On the ORG path the ReflectionsPrepass anchor, which follows, copies into the graph's cubemap
+		if (!ORGCloudShadows::Get().QueueOcclusionCopy())
+			context->CopyResource(texCubemapCloudOccCopy->resource.get(), texCloudShadowLayers[kMaxCloudLayers - 1]->resource.get());
 
-		ID3D11ShaderResourceView* srv = texCubemapCloudOccCopy->srv.get();
+		ID3D11ShaderResourceView* srv = OcclusionSRV();
 		context->PSSetShaderResources(25, 1, &srv);
 		context->CSSetShaderResources(25, 1, &srv);
 	}
+}
+
+ID3D11ShaderResourceView* CloudShadows::OcclusionSRV() const
+{
+	if (auto* srv = ORGCloudShadows::Get().OcclusionSRV())
+		return srv;
+	return texCubemapCloudOccCopy ? texCubemapCloudOccCopy->srv.get() : nullptr;
+}
+
+void CloudShadows::PostPostLoad()
+{
+	Hooks::Install();
+	ORGCloudShadows::Reserve();
 }
 
 void CloudShadows::EarlyPrepass()

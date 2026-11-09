@@ -98,8 +98,11 @@ public:
 	/** @brief Binds the cloud occlusion cubemap as a shader resource for the early prepass. */
 	virtual void EarlyPrepass() override;
 
-	/** @brief Installs the BSSkyShader hooks after all plugins have loaded. */
-	virtual inline void PostPostLoad() override { Hooks::Install(); }
+	/** @brief The cloud occlusion cubemap's view (t25, t26): the render graph's export on the ORG path, else the D3D11 copy. */
+	ID3D11ShaderResourceView* OcclusionSRV() const;
+
+	/** @brief Installs the BSSkyShader hooks and reserves the ORG path's anchor after all plugins have loaded. */
+	virtual void PostPostLoad() override;
 
 	struct Hooks
 	{
