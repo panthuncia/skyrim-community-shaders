@@ -4,6 +4,7 @@
 #include <DirectXTex.h>
 #include <cassert>
 
+#include "DynamicCubemaps/ORGDynamicCubemaps.h"
 #include "I18n/I18n.h"
 #include "LinearLighting.h"
 #include "ShaderCache.h"
@@ -150,6 +151,7 @@ void DynamicCubemaps::DataLoaded()
 
 void DynamicCubemaps::PostPostLoad()
 {
+	ORGDynamicCubemaps::Reserve();
 }
 
 RE::BSEventNotifyControl MenuOpenCloseEventHandler::ProcessEvent(const RE::MenuOpenCloseEvent* a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
@@ -187,6 +189,7 @@ void DynamicCubemaps::ClearShaderCache()
 	resetCapture[0] = resetCapture[1] = true;
 	cubemapValid[0] = cubemapValid[1] = false;
 	nextTask = NextTask::kCaptureInferAndIrradianceA;
+	ORGDynamicCubemaps::Get().ClearShaderCache();
 	if (detectCaptureLightingCS) {
 		detectCaptureLightingCS->Release();
 		detectCaptureLightingCS = nullptr;
@@ -651,6 +654,12 @@ DynamicCubemaps::UpdateStep DynamicCubemaps::NextUpdateStep()
  */
 void DynamicCubemaps::UpdateCubemap()
 {
+	// On the render graph the step ran at the DeferredPasses anchor, earlier in this frame (ORGDynamicCubemaps).
+	if (auto& graph = ORGDynamicCubemaps::Get(); graph.IsActive()) {
+		graph.AfterUpdate();
+		return;
+	}
+
 	ZoneScoped;
 	TracyD3D11Zone(globals::state->tracyCtx, "Cubemap Update");
 
@@ -683,6 +692,18 @@ void DynamicCubemaps::PostDeferred()
 	};
 	boundReflectionsView = views[0];
 	context->PSSetShaderResources(30, 2, views);
+}
+
+namespace
+{
+	/** @brief A Texture2D over an exported render-graph texture and its SRV, for the readers of the D3D11 path's textures. */
+	Texture2D* WrapExported(ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv)
+	{
+		a_texture->AddRef();  // the wrapper takes a reference of its own
+		auto* wrapper = new Texture2D(a_texture);
+		wrapper->srv.copy_from(a_srv);
+		return wrapper;
+	}
 }
 
 void DynamicCubemaps::SetupResources()
@@ -721,6 +742,16 @@ void DynamicCubemaps::SetupResources()
 		Util::SetResourceName(defaultCubemap, "DynamicCubemaps::DefaultCubemap SRV");
 	}
 
+	// CS_ORG_DYNAMIC_CUBEMAPS=1: the update runs on the render graph, whose exported textures the readers of the D3D11 path's take.
+	auto& graph = ORGDynamicCubemaps::Get();
+	if (graph.Setup([this] { ReturnToD3D11(); })) {
+		const auto outputs = graph.Exported();
+		envTexture = WrapExported(outputs.env, outputs.envSRV);
+		envReflectionsTexture = WrapExported(outputs.envReflections, outputs.envReflectionsSRV);
+		envTextureBC6H = WrapExported(outputs.bc6h, outputs.bc6hSRV);
+		envReflectionsTextureBC6H = WrapExported(outputs.bc6hReflections, outputs.bc6hReflectionsSRV);
+		return;
+	}
 	CreateD3D11Textures();
 }
 
@@ -916,6 +947,20 @@ void DynamicCubemaps::CreateD3D11Textures()
 			Util::SetResourceName(uavArray[level - 1], "DynamicCubemaps::EnvFiltered UAV mip%u", level);
 		}
 	}
+}
+
+void DynamicCubemaps::ReturnToD3D11()
+{
+	// The exported textures go once the render graph's resources are released: nothing of this feature may keep them.
+	for (auto** texture : { &envTexture, &envReflectionsTexture, &envTextureBC6H, &envReflectionsTextureBC6H }) {
+		delete *texture;
+		*texture = nullptr;
+	}
+	boundReflectionsView = nullptr;
+	CreateD3D11Textures();
+	resetCapture[0] = resetCapture[1] = true;
+	cubemapValid[0] = cubemapValid[1] = false;
+	nextTask = NextTask::kCaptureInferAndIrradianceA;
 }
 
 void DynamicCubemaps::Reset()

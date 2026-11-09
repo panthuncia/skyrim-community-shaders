@@ -239,8 +239,11 @@ public:
 
 	ID3D11ComputeShader* GetComputeShaderBC6HEncode();
 
-	/** @brief The textures, views and buffers the update writes. */
+	/** @brief The D3D11 path's textures, views and buffers (the render-graph path makes its own: ORGDynamicCubemaps). */
 	void CreateD3D11Textures();
+
+	/** @brief The render-graph path failed: drops its exported views, makes the D3D11 textures, and restarts the state machine. */
+	void ReturnToD3D11();
 
 	virtual bool IsCore() const override { return true; };
 };
