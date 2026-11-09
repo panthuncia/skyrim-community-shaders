@@ -1,0 +1,60 @@
+#pragma once
+
+#include <d3d11.h>
+#include <memory>
+
+/**
+ * @brief Volumetric Shadows' shadow map downsample and blur as render-graph passes (CS_ORG_VOLUMETRIC_SHADOWS=1).
+ *
+ * The D3D11 path runs at the engine's sun shadow mask draw (State::Draw, the RenderShadowmask Utility pass). That draw only
+ * marks the point where the inputs are bound. The inputs are the sun cascades (kSHADOWMAPS_ESRAM, the mask's t4) and the
+ * volumetric lighting copy (kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM). Both are drawn inside Main::RenderShadowMaps, DCLF's
+ * shadow epoch included. So they are final at the EarlyPrepass anchor, and the passes run there instead of at a new anchor.
+ *
+ * The passes are 2 downsamples (one per cascade, into the two mips of the shared shadow map) and 4 blurs, each through a
+ * transient, aliasable temporary. The shared shadow map is exported as a D3D11 SRV: engine draws read it at t18, and DCLF's
+ * frame texture reads it there. The shadow mask draw still binds it at t18, as the D3D11 path does.
+ *
+ * Everything here runs on the render thread. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
+ */
+class ORGVolumetricShadows
+{
+public:
+	/** @brief Whether CS_ORG_VOLUMETRIC_SHADOWS=1 is set. */
+	static bool Requested();
+
+	static ORGVolumetricShadows& Get();
+
+	/** @brief Reserves the EarlyPrepass anchor when requested. Call before the render graph initializes (PostPostLoad). */
+	void Reserve();
+
+	/**
+	 * @brief The feature's EarlyPrepass, before the anchor runs: sets the path up the first time the runtime is active, and
+	 * imports the engine's shadow maps again when the engine replaced them.
+	 */
+	void EarlyPrepass();
+
+	/** @brief Whether the passes run on the render graph; false keeps the D3D11 dispatches. */
+	bool IsActive() const;
+
+	/**
+	 * @brief At the sun's shadow mask draw: checks once that the engine's t4 is the cascade map the passes read. A different
+	 * view turns the ORG path off, so the frame falls back to the D3D11 dispatches.
+	 */
+	void CheckShadowMaskInput(ID3D11ShaderResourceView* a_shadowMap);
+
+	/** @brief The shared shadow map's exported view (both mips); null when inactive. */
+	ID3D11ShaderResourceView* SharedShadowMapSRV() const;
+
+	/** @brief The exported texture, for the settings' buffer viewer; null when inactive. */
+	ID3D11Texture2D* SharedShadowMapTexture() const;
+
+	~ORGVolumetricShadows();
+
+private:
+	ORGVolumetricShadows() = default;
+
+	struct Impl;
+	std::unique_ptr<Impl> impl;
+	bool attempted = false;
+};

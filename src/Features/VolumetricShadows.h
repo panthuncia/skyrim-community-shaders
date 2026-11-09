@@ -73,8 +73,11 @@ public:
 	virtual void SaveSettings(json& o_json) override;
 	virtual void RestoreDefaultSettings() override;
 
-	/** @brief Installs the engine hook for binding the shared shadow map SRV. */
+	/** @brief Installs the engine hook for binding the shared shadow map SRV, and reserves the ORG path's anchor when it is on. */
 	virtual void PostPostLoad() override;
+
+	/** @brief Sets up the ORG path (CS_ORG_VOLUMETRIC_SHADOWS=1) and keeps its engine imports current, before its anchor runs. */
+	virtual void EarlyPrepass() override;
 
 private:
 	static void SetSharedShadowMapSRV(ID3D11DeviceContext* a_context, ID3D11ShaderResourceView* a_srv);
