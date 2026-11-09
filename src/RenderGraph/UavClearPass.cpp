@@ -5,6 +5,7 @@
 
 #	include "RenderGraph/UavClearPass.h"
 
+#	include <Render/PassBuilders.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 
 #	include <cstdint>
