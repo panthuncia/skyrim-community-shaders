@@ -51,6 +51,9 @@ namespace RenderGraph::ProgramBuild
 		// Source-level debug info for Nsight and RenderDoc; drivers ignore it, and optimization is unchanged.
 		request.debugInfo = true;
 		request.includeDirectories = { RenderGraphRuntime::kShaderDirectory };
+		// Storage images take the format of the view they are bound through, as in D3D11 (and the DXC game shaders, DxcShaderStore).
+		// Without it DXC types every float4 RWTexture as Rgba32f, which a view of another format (RGBA16F) must not be written through.
+		request.arguments.emplace_back(L"-fspv-use-unknown-image-format");
 		request.defines.push_back({ L"BASICRHI_SHADER_API_VULKAN", L"1" });
 		// Dual-target shaders (Common/OrgResources.hlsli) take their bindless declarations.
 		request.defines.push_back({ L"CS_ORG_BINDLESS", L"1" });

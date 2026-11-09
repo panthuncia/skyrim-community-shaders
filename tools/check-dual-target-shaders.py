@@ -57,7 +57,7 @@ def spirv_flags():
             raise RuntimeError(f"Missing shader ABI constant: {name}")
         return match.group(1)
 
-    flags = ["-spirv", "-fvk-use-dx-layout", "-fvk-use-dx-position-w", "-fspv-target-env=vulkan1.3",
+    flags = ["-spirv", "-fvk-use-dx-layout", "-fvk-use-dx-position-w", "-fspv-use-unknown-image-format", "-fspv-target-env=vulkan1.3",
              "-D", "BASICRHI_SHADER_API_VULKAN=1"]
     for option, name in [("resource", "RESOURCE"), ("sampler", "SAMPLER"), ("counter", "COUNTER")]:
         flags += [f"-fvk-bind-{option}-heap", constant(f"VULKAN_{name}_DESCRIPTOR_HEAP_BINDING"),
