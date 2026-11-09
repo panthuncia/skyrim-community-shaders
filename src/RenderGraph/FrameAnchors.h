@@ -50,6 +50,7 @@ namespace FrameAnchors
 		Prepass,             // the main pass's first opaque batch, after the features' Prepass (Deferred::PrepassPasses)
 		DeferredPasses,      // the opaque pass done, after the final depth copy, before the D3D11 SSGI, SSS and composite
 		DeferredComposite,   // after the D3D11 SSGI, SSS and cubemap update, where the deferred composite runs
+		PostComposite,       // the end of the deferred passes, after the composite (D3D11 or ORG), where Effects11's rays run
 		PostProcessing,      // Main_PostProcessing, before the D3D11 post-processing and the upscaler
 		Tonemap,             // the ImageSpace HDR tonemap's render, before Effects11 and Post Processing replace or follow it
 		Present,             // IDXGISwapChain::Present, before the overlay, HDR output and frame generation

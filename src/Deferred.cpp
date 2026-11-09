@@ -448,6 +448,9 @@ void Deferred::DeferredPasses()
 		globals::features::effects11.DrawVolumetricRays();
 		globals::features::effects11.DrawSunRays();
 	}
+
+	// The render graph's passes here, after the composite: Effects11's rays on the ORG path (CS_ORG_E11_RAYS=1).
+	FrameAnchors::Run(FrameAnchors::Anchor::PostComposite);
 }
 
 void Deferred::EndDeferred()

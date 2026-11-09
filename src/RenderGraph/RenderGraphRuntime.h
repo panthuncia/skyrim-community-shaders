@@ -92,6 +92,7 @@ public:
 		AnchorPrepass,
 		AnchorDeferredPasses,
 		AnchorDeferredComposite,
+		AnchorPostComposite,
 		AnchorPostProcessing,
 		AnchorTonemap,
 		AnchorPresent,
