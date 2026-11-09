@@ -233,6 +233,7 @@ public:
 	void UpdateSkyScattering(PerFrame& a_data);
 
 	virtual void DrawSettings() override;
+	virtual void PostPostLoad() override;
 	virtual void SetupResources() override;
 	virtual void PostSetupResources() override;
 	virtual void Reset() override;
@@ -252,6 +253,25 @@ public:
 
 	/** @brief Draws the ENB [RAYS] screen-space shafts from the sun, or from a moon at night, additively onto the main target. */
 	void DrawSunRays();
+
+	/** @brief Mirrors SunRaysData in SunRaysPS.hlsl: one sun ray pass's constants. */
+	struct SunRaysData
+	{
+		float2 lightUV;
+		float2 uvScale;
+		float2 uvMax;
+		float blurFactor;
+		uint32_t stepCount;
+		float3 lightDirection;
+		float lightBillboardTan;
+		float3 raysColor;
+		float maskBrightness;
+		float maskExponent;
+		uint32_t weightedSteps;
+		uint32_t useNoise;
+		float invScreenWidth;
+	};
+	static_assert(sizeof(SunRaysData) == 80);
 
 	void OnSkyUpdateColors(RE::Sky* a_sky);
 	void OverrideWeather(RE::Sky* a_sky);
