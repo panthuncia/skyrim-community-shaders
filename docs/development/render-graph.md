@@ -422,6 +422,7 @@ of adding a `Segment` and editing the epoch order. Each anchor is one of CS's ho
 | --- | --- |
 | `ReflectionsPrepass` | `Deferred::ReflectionsPrepasses` (`BSCubeMapCamera::RenderCubemap`) |
 | `EarlyPrepass` | `Deferred::EarlyPrepasses` (after `Main::RenderShadowMaps`) |
+| `DepthDone` | `TerrainBlending::BlendPrepassDepths` (`Main::RenderDepth` returned; only with Terrain Blending on) |
 | `Prepass` | `Deferred::PrepassPasses` (the main pass's first opaque batch) |
 | `DeferredPasses` | `Deferred::DeferredPasses`, after the final depth copy |
 | `DeferredComposite` | `Deferred::DeferredPasses`, after the D3D11 SSGI, SSS and cubemap update, where the composite runs |
@@ -677,6 +678,7 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 | `CS_ORG_SUBMIT=flush` | Use the flush-and-lock submission path even when DXVK supports the stream path. |
 | `CS_ORG_LLF_SHADOWS=1` | With LLF's local light shadows on, its shadow cache runs at the EarlyPrepass anchor (`ORGLocalShadows.cpp`): the engine slices drawn this frame are copied by `LocalShadowCopyCS` on the graph, and the cache and slot data are Persistent graph resources exported to the engine's pixel shaders (t102, t103). Logs `[ORG] LLF local shadows run on the render graph`; falls back to the D3D11 cache on any failure. |
 | `CS_ORG_LLF_PARITY=1` | Every 300 frames, also run LLF's D3D11 culling and compare each cluster's light set with the graph's (logs `LLF parity OK` / `MISMATCH`). |
+| `CS_ORG_TERRAIN_BLENDING=1` | Terrain Blending's depth blend runs at the DepthDone anchor (`ORGTerrainBlending.cpp`): `DepthBlend` writes the blended depths and the terrain mask (t55) as graph textures exported to D3D11 and published (`TerrainBlending::BlendedDepth`, `BlendedDepth16`, `Mask`); DCLF's t55 reads the mask by name. The terrain depth stays a D3D11 texture (org-extension-api-notes.md, "Depth targets a D3D11 draw still writes"). Logs `[ORG] Terrain Blending: the depth blend runs on the render graph`; falls back to D3D11 on any failure. |
 | `CS_ORG_ANCHOR_SELFTEST=1` | Reserve every frame anchor and run a test client at each: a raster pass writes a texture, a compute pass reads it and one texel of kMAIN into a buffer, and a copy reads that back. Each anchor logs `[ORG] anchor self-test: <anchor> OK` once, then `every anchor OK`. |
 | `CS_ORG_GRAPHRES_SELFTEST=1` | Reserve DeferredPasses and test the graph-backed resources there (above, "Graph-backed feature resources"). Logs `[ORG] graph resource self-test: 16x16 OK ...`, then `resized to 32x32`, `32x32 OK ...` and `every check OK; the texture is released`; `MISMATCH` otherwise. |
 | `CS_ORG_IMGUI=1` | Draw CS's ImGui frames with the render graph's backend at the `Overlay` anchor once the graph is up ("ImGui on the graph"). Logs `[ORG] ImGui: drawn by the render graph` and `drawing onto ...`. |
