@@ -68,3 +68,22 @@ One entry per need. Give:
 - **Where it fits:** the frame anchors from P2.2 (ReflectionsPrepass, EarlyPrepass, Prepass, DeferredPasses, Tonemap,
   PostProcessing, Present). Each anchor's ordering rule is recorded here when it is built.
 - **Found by:** survey for the plan (2026-11-09).
+
+### Presenting from more than one thread
+
+- **Need:** present a frame from a thread other than the render thread, under the engine's lock.
+- **Who:** the engine itself (the loading-screen loop on `JobListManager::ServingThread`, Bink) and plugins that draw
+  their own loading or splash screens.
+- **Where it fits:** the owned frame's tail (P1.3) already runs on DXVK's submission thread whatever thread called
+  Present. An API present call must likewise not tie Vulkan work to the caller's thread.
+- **Found by:** P1 ownership inversion (2026-11-09).
+
+### Window and swap chain state
+
+- **Need:** know the real swap chain's size, format, colour space and present mode, and see a resize or colour space
+  change before drawing.
+- **Who:** HDR and colour-grading plugins that read `IDXGISwapChain4` state, and overlays that size to the back buffer.
+- **Where it fits:** in the owned frame the DXGI swap chain is headless: its back buffer and `CheckColorSpaceSupport`
+  no longer describe what reaches the display (CS reads `OwnedFrame::GetSurfaceState`). The API needs a query and a
+  change notification for the ORG swap chain.
+- **Found by:** P1 ownership inversion (2026-11-09).
