@@ -6,6 +6,11 @@
 #include <fstream>
 #include <winrt/base.h>
 
+namespace DirectX
+{
+	class ScratchImage;
+}
+
 namespace Util
 {
 	/**
@@ -152,6 +157,14 @@ namespace Util
 	 * @return S_OK on success, or an error HRESULT.
 	 */
 	HRESULT SaveTextureToFile(ID3D11Device* device, ID3D11DeviceContext* context, const std::filesystem::path& path, ID3D11Texture2D* tex);
+
+	/**
+	 * @brief Save a CPU image to a DDS file on disk, through a temporary file and a rename.
+	 * @param path Destination file path (parent directories are created if needed).
+	 * @param image The image to save, with all its mips and array slices.
+	 * @return S_OK on success, or an error HRESULT.
+	 */
+	HRESULT SaveImageToFile(const std::filesystem::path& path, const DirectX::ScratchImage& image);
 
 	/**
 	 * @brief Load a DDS texture from disk and create a texture with its SRV.

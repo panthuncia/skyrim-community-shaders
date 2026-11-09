@@ -526,24 +526,34 @@ namespace Util
 			return E_INVALIDARG;
 		}
 
-		namespace fs = std::filesystem;
-
 		DirectX::ScratchImage cpuImage;
 		if (const auto hr = CaptureTexture(device, context, tex, cpuImage); FAILED(hr))
 			return hr;
+
+		return SaveImageToFile(path, cpuImage);
+	}
+
+	HRESULT SaveImageToFile(const std::filesystem::path& path, const DirectX::ScratchImage& image)
+	{
+		if (path.empty()) {
+			logger::error("SaveImageToFile: path parameter is empty");
+			return E_INVALIDARG;
+		}
+
+		namespace fs = std::filesystem;
 
 		const auto parent = path.parent_path();
 		std::error_code ec;
 		if (!parent.empty() && !fs::exists(parent, ec)) {
 			if (!fs::create_directories(parent, ec)) {
-				logger::error("SaveTextureToFile: failed to create directories");
+				logger::error("SaveImageToFile: failed to create directories");
 				return HRESULT_FROM_WIN32(static_cast<DWORD>(ec.value()));
 			}
 		}
 
 		const std::wstring tmp = path.wstring().append(L".tmp");
-		if (const auto hr = SaveToDDSFile(cpuImage.GetImages(), cpuImage.GetImageCount(), cpuImage.GetMetadata(), DirectX::DDS_FLAGS_NONE, tmp.c_str()); FAILED(hr)) {
-			logger::error("SaveTextureToFile: failed to save to file");
+		if (const auto hr = SaveToDDSFile(image.GetImages(), image.GetImageCount(), image.GetMetadata(), DirectX::DDS_FLAGS_NONE, tmp.c_str()); FAILED(hr)) {
+			logger::error("SaveImageToFile: failed to save to file");
 			fs::remove(tmp);
 			return hr;
 		}
@@ -552,13 +562,13 @@ namespace Util
 		if (ec) {
 			fs::remove(path, ec);
 			if (ec) {
-				logger::error("SaveTextureToFile: failed to remove existing file");
+				logger::error("SaveImageToFile: failed to remove existing file");
 				fs::remove(tmp);
 				return HRESULT_FROM_WIN32(static_cast<DWORD>(ec.value()));
 			}
 			Util::RenameSerialized(tmp, path, ec);
 			if (ec) {
-				logger::error("SaveTextureToFile: failed to rename {} onto {}: {} {} ({})", Util::WStringToString(tmp), Util::WStringToString(path.wstring()),
+				logger::error("SaveImageToFile: failed to rename {} onto {}: {} {} ({})", Util::WStringToString(tmp), Util::WStringToString(path.wstring()),
 					ec.value(), ec.message(), Util::UnderUsvfs() ? "under usvfs" : "no usvfs");
 				fs::remove(tmp);
 				return HRESULT_FROM_WIN32(static_cast<DWORD>(ec.value()));
