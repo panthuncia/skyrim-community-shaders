@@ -1,9 +1,24 @@
+// Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers and the included headers'
+// resources (SharedData's depth, Terrain and Cloud Shadows) are heap reads through the push block
+// (ORG_SHARED_CONSTANTS, ORG_HEADER_RESOURCES): the EXTERN entries below.
+#define ORG_SHARED_CONSTANTS
+#define ORG_HEADER_RESOURCES
+#include "Common/OrgResources.hlsli"
+
+#define RAYMARCH_VOLUMETRIC_RAYS_RESOURCES(X)            \
+	X(SHARED, ConstantBuffer, Shared, 0)                  \
+	X(SAMPLER, SamplerState, defaultSampler, 0)           \
+	X(EXTERN, Texture2D<float4>, DepthTexture, 17)        \
+	X(EXTERN, Texture2D<float2>, ShadowHeightTexture, 60) \
+	X(EXTERN, TextureCube<float>, CloudShadowsTexture, 25)
+ORG_PUSH_BLOCK(RAYMARCH_VOLUMETRIC_RAYS_RESOURCES(ORG_HANDLE))
+
 #include "Common/FrameBuffer.hlsli"
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"
 
 #define LinearSampler defaultSampler
-SamplerState defaultSampler : register(s0);
+RAYMARCH_VOLUMETRIC_RAYS_RESOURCES(ORG_RESOURCE)
 
 #include "Common/ShadowSampling.hlsli"
 
