@@ -4,6 +4,24 @@
 // Pre-filters environment cube map using GGX NDF importance sampling.
 // Part of specular IBL split-sum approximation.
 
+// Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers are heap reads
+// (ORG_SHARED_CONSTANTS), and the mip's roughness is a PUSH struct, pushed with each mip's
+// dispatch. D3D11 keeps its cbuffer at b0 as it was.
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+struct SpecularMapFilterConstants
+{
+	float roughness;
+};
+
+#define SPECULAR_IRRADIANCE_RESOURCES(X)                \
+	X(SHARED, ConstantBuffer, Shared, 0)                \
+	X(SRV, TextureCube, inputTexture, 0)                \
+	X(UAV, RWTexture2DArray<float4>, outputTexture, 0) \
+	X(SAMPLER, SamplerState, linear_wrap_sampler, 0)
+ORG_PUSH_BLOCK(SPECULAR_IRRADIANCE_RESOURCES(ORG_HANDLE) SpecularMapFilterConstants FilterSettings;)
+
 #include "Common/Color.hlsli"
 #include "Common/ColorManagement.hlsli"
 #include "Common/Math.hlsli"
@@ -14,15 +32,14 @@ static const float Epsilon = 0.00001;
 static const uint NumSamples = 16;
 static const float InvNumSamples = 1.0 / float(NumSamples);
 
+#if !defined(CS_ORG_BINDLESS)
 cbuffer SpecularMapFilterSettings : register(b0)
 {
 	float roughness;
 };
+#endif
 
-TextureCube inputTexture : register(t0);
-RWTexture2DArray<float4> outputTexture : register(u0);
-
-SamplerState linear_wrap_sampler : register(s0);
+SPECULAR_IRRADIANCE_RESOURCES(ORG_RESOURCE)
 
 // Compute Van der Corput radical inverse
 // See: http://holger.dammertz.org/stuff/notes_HammersleyOnHemisphere.html
@@ -84,6 +101,12 @@ float3 tangentToWorld(const float3 v, const float3 N, const float3 S, const floa
 {
 	return S * v.x + T * v.y + N * v.z;
 }
+
+// ORG: main reads the pushed roughness by the cbuffer's name. Defined here, after the functions
+// whose parameters share the name.
+#if defined(CS_ORG_BINDLESS)
+#	define roughness FilterSettings.roughness
+#endif
 
 [numthreads(8, 8, 1)] void main(uint3 ThreadID : SV_DispatchThreadID) {
 	// Make sure we won't write past output when computing higher mipmap levels.
