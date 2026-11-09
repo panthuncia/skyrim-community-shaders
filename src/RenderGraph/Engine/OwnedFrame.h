@@ -5,6 +5,7 @@
 
 struct IDXGISwapChain;
 struct ID3D11Device;
+struct ID3D11Texture2D;
 struct DXGI_SWAP_CHAIN_DESC;
 
 namespace RenderGraph::Engine
@@ -43,6 +44,17 @@ namespace RenderGraph::Engine
 		 */
 		long Present(IDXGISwapChain* a_swapChain, unsigned a_syncInterval, unsigned a_flags,
 			const std::function<long(IDXGISwapChain*, unsigned, unsigned)>& a_guestPresent);
+
+		/**
+		 * @brief The texture the next Present shows instead of the guest back buffer: HDRDisplay's output, which then needs no copy
+		 * into the back buffer. For that Present only. Same thread as Present (the immediate context's, under the engine's lock).
+		 * @param a_texture A texture DXVK made (not mappable); null shows the back buffer.
+		 * @return Whether the next Present shows the texture. False: the caller copies it into the back buffer as before.
+		 */
+		bool SetFrameSource(ID3D11Texture2D* a_texture);
+
+		/** @brief The texture the next Present shows when SetFrameSource set one this frame, else null. */
+		ID3D11Texture2D* GetFrameSource() const;
 
 		/** @brief HDRDisplay's colour space for the swap chain, applied at the next Present. */
 		void RequestColorSpace(bool a_hdr);

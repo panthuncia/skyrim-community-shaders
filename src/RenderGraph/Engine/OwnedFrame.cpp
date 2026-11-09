@@ -22,6 +22,7 @@ namespace RenderGraph::Engine
 #	include <atomic>
 #	include <condition_variable>
 #	include <mutex>
+#	include <utility>
 #	include <vector>
 
 namespace RenderGraph::Engine
@@ -131,6 +132,12 @@ namespace RenderGraph::Engine
 		PFN_dxvkEmitExternalCommands emitExternalCommands = nullptr;
 		PFN_dxvkEnqueueQueueCallback enqueueQueueCallback = nullptr;
 		PFN_dxvkGetInteropResourceInfo getResourceInfo = nullptr;
+		// HDRDisplay's output, shown instead of the back buffer when set for a frame (SetFrameSource). Described once per texture;
+		// one DXVK cannot describe is remembered so that it is not asked again.
+		winrt::com_ptr<ID3D11Texture2D> frameSource;
+		winrt::com_ptr<ID3D11Texture2D> sourceTexture;
+		DxvkOrgInteropImageInfo sourceImage{};
+		winrt::com_ptr<ID3D11Texture2D> rejectedSource;
 
 		std::mutex presentMutex;
 		mutable std::mutex surfaceMutex;
@@ -160,6 +167,35 @@ namespace RenderGraph::Engine
 		{
 			std::unique_lock lock(completionMutex);
 			completionChanged.wait(lock, [&] { return completed.load(std::memory_order_acquire) == queued; });
+		}
+
+		// Drained, and every copy done on the GPU: a source image nothing tracks for DXVK can be released.
+		void WaitCopies()
+		{
+			Drain();
+			if (!hostValue)
+				return;
+			VkSemaphoreWaitInfo wait{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+			wait.semaphoreCount = 1;
+			wait.pSemaphores = &hostSemaphore;
+			wait.pValues = &hostValue;
+			if (fn.vkWaitSemaphores(vkDevice, &wait, UINT64_MAX) != VK_SUCCESS)
+				lost = true;
+		}
+
+		// The image DXVK keeps a texture in. False when DXVK cannot describe it.
+		bool Describe(ID3D11Texture2D* a_texture, DxvkOrgInteropImageInfo& a_image, const char* a_what)
+		{
+			DxvkOrgInteropResourceInfo info{};
+			info.version = DXVK_ORG_INTEROP_VERSION;
+			if (FAILED(getResourceInfo(d3dDevice, a_texture, &info)) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE) {
+				logger::error("[ORG] Owned frame: DXVK could not describe {}", a_what);
+				return false;
+			}
+			a_image = info.image;
+			logger::info("[ORG] Owned frame: {} {}x{}, format {}, resting layout {}", a_what, info.image.extent.width, info.image.extent.height,
+				static_cast<int>(info.image.format), static_cast<int>(info.image.layout));
+			return true;
 		}
 
 		void Resize(uint32_t a_width, uint32_t a_height)
@@ -448,23 +484,22 @@ namespace RenderGraph::Engine
 			return DXGI_ERROR_DEVICE_REMOVED;
 		if (a_flags & DXGI_PRESENT_TEST)
 			return a_guestPresent(a_swapChain, a_syncInterval, a_flags);
+		const bool showSource = std::exchange(s.frameSource, nullptr) != nullptr;
 
 		// The guest's back buffer: described again when the engine's ResizeBuffers made a new one.
 		winrt::com_ptr<ID3D11Texture2D> backBuffer;
 		if (FAILED(a_swapChain->GetBuffer(0, IID_PPV_ARGS(backBuffer.put()))) || !backBuffer)
 			return a_guestPresent(a_swapChain, a_syncInterval, a_flags);
 		if (backBuffer.get() != s.backBuffer.get()) {
-			DxvkOrgInteropResourceInfo info{};
-			info.version = DXVK_ORG_INTEROP_VERSION;
-			if (FAILED(s.getResourceInfo(s.d3dDevice, backBuffer.get(), &info)) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE) {
-				logger::error("[ORG] Owned frame: DXVK could not describe its back buffer");
+			DxvkOrgInteropImageInfo image{};
+			if (!s.Describe(backBuffer.get(), image, "guest back buffer"))
 				return a_guestPresent(a_swapChain, a_syncInterval, a_flags);
-			}
 			s.backBuffer = backBuffer;
-			s.backBufferImage = info.image;
-			logger::info("[ORG] Owned frame: guest back buffer {}x{}, format {}, resting layout {}", info.image.extent.width, info.image.extent.height,
-				static_cast<int>(info.image.format), static_cast<int>(info.image.layout));
+			s.backBufferImage = image;
 		}
+
+		// HDRDisplay's output this frame, if it set one (SetFrameSource described it).
+		const DxvkOrgInteropImageInfo* source = showSource ? &s.sourceImage : &s.backBufferImage;
 
 		// Swap chain changes, between frames: the guest's size, a present that asked for a rebuild, HDRDisplay's colour space.
 		const auto& extent = s.backBufferImage.extent;
@@ -496,15 +531,48 @@ namespace RenderGraph::Engine
 		frame.sequence = s.queued;
 		frame.guestValue = s.guestValue;
 		frame.vsync = a_syncInterval > 0;
-		frame.source = s.backBufferImage.image;
-		frame.sourceLayout = s.backBufferImage.layout;
-		frame.sourceExtent = { extent.width, extent.height };
+		frame.source = source->image;
+		frame.sourceLayout = source->layout;
+		frame.sourceExtent = { source->extent.width, source->extent.height };
 		if (FAILED(s.enqueueQueueCallback(s.d3dDevice, &State::Tail, &frame))) {
 			logger::error("[ORG] Owned frame: the present could not be queued behind DXVK's stream");
 			return E_FAIL;
 		}
 		++s.queued;
 		return result;
+	}
+
+	bool OwnedFrame::SetFrameSource(ID3D11Texture2D* a_texture)
+	{
+		if (!state || !state->enqueueQueueCallback)
+			return false;
+		auto& s = *state;
+		std::lock_guard lock(s.presentMutex);
+		s.frameSource = nullptr;
+		if (!a_texture || a_texture == s.rejectedSource.get())
+			return false;
+		if (a_texture != s.sourceTexture.get()) {
+			DxvkOrgInteropImageInfo image{};
+			if (!s.Describe(a_texture, image, "HDR output")) {
+				s.rejectedSource.copy_from(a_texture);
+				return false;
+			}
+			// The last texture is released once no queued copy reads it: DXVK does not track those reads.
+			if (s.sourceTexture)
+				s.WaitCopies();
+			s.sourceTexture.copy_from(a_texture);
+			s.sourceImage = image;
+		}
+		s.frameSource = s.sourceTexture;
+		return true;
+	}
+
+	ID3D11Texture2D* OwnedFrame::GetFrameSource() const
+	{
+		if (!state)
+			return nullptr;
+		std::lock_guard lock(state->presentMutex);
+		return state->frameSource.get();
 	}
 
 	void OwnedFrame::RequestColorSpace(bool a_hdr)
@@ -534,6 +602,8 @@ namespace RenderGraph::Engine
 	{
 		return a_guestPresent(a_swapChain, a_syncInterval, a_flags);
 	}
+	bool OwnedFrame::SetFrameSource(ID3D11Texture2D*) { return false; }
+	ID3D11Texture2D* OwnedFrame::GetFrameSource() const { return nullptr; }
 	void OwnedFrame::RequestColorSpace(bool) {}
 	OwnedFrame::SurfaceState OwnedFrame::GetSurfaceState() const { return {}; }
 }

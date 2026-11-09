@@ -1181,7 +1181,8 @@ void HDRDisplay::ApplyHDR()
 		DispatchHDROutput(sceneSRV, uiSRV, outputTexture->uav.get());
 	}
 
-	{
+	// The owned frame presents the output itself, with no copy into the guest's back buffer.
+	if (!RenderGraph::Engine::OwnedFrame::Get().SetFrameSource(outputTexture->resource.get())) {
 		ID3D11Texture2D* backBuffer = nullptr;
 		HRESULT hr = globals::d3d::swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
 		if (SUCCEEDED(hr) && backBuffer) {
@@ -1295,6 +1296,15 @@ ID3D11Texture2D* HDRDisplay::ComposeCleanCapture(ID3D11ShaderResourceView* scene
 
 	if (!GetHDROutputCS())
 		return nullptr;
+
+	// The owned frame was to present this frame's composite from outputTexture, which this overwrites: it goes to the back buffer
+	// first, and the frame shows that.
+	if (auto& ownedFrame = RenderGraph::Engine::OwnedFrame::Get(); ownedFrame.GetFrameSource() == outputTexture->resource.get()) {
+		winrt::com_ptr<ID3D11Texture2D> backBuffer;
+		if (SUCCEEDED(globals::d3d::swapChain->GetBuffer(0, IID_PPV_ARGS(backBuffer.put()))))
+			globals::d3d::context->CopyResource(backBuffer.get(), outputTexture->resource.get());
+		ownedFrame.SetFrameSource(nullptr);
+	}
 
 	// Null UI SRV (t1 samples as 0) leaves the scene alone: no UI, menu, or blur.
 	HDRDataCB data = BuildHDRData();
