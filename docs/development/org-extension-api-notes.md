@@ -77,6 +77,20 @@ One entry per need. Give:
 - **Who:** post-processing and screenshot plugins that read `BSGraphics::Renderer` render targets.
 - **Where it fits:** named graph resources at the frame anchors (P2.2), readable by a plugin's pass.
 - **Found by:** survey for the plan (2026-11-09).
+- **Cubemaps and other plugins' textures (P3 IBL, 2026-11-09):** the engine's cubemap targets
+  (`RENDER_TARGETS_CUBEMAP`, e.g. the sky reflections cube that IBL projects to SH) are a separate table from the 2D
+  targets, and a reader wants them as cube views. `FrameAnchors::EngineCubemap` imports them as
+  `cs.engine.cubemap.<n>`, with every mip and a cube default SRV. A plugin's own D3D11 texture that a graph pass reads
+  (Dynamic Cubemaps' environment cube, not ported yet) goes through `FrameAnchors::D3D11Texture` (`cs.d3d11.<name>`).
+  The API needs both: engine cubemaps by name, and "import my D3D11 texture" for plugins that keep a D3D11 producer.
+- **Graph textures for Drawcall Limit Fix (P3 IBL, 2026-11-09):** DCLF reads another feature's graph output only for
+  buffers (`Api::FrameGraphBuffers`), and anchor clients register their resources only in anchor graphs. A ported
+  texture producer (IBL's SH at t76/t77) is read by DCLF through its exported D3D11 SRV, imported like any view. A
+  frame graph texture registration (resources shared with DCLF's graphs by name) is a follow-up.
+- **Storage image formats (P3 IBL, 2026-11-09):** DXC types a `float4` `RWTexture2D` as `Rgba32f` in SPIR-V unless told
+  otherwise, and writing an RGBA16F view through it is invalid. `ProgramBuild` now compiles every ORG program with
+  `-fspv-use-unknown-image-format` (as `DxcShaderStore` does for game shaders), so the view's format applies, as in
+  D3D11. A plugin shader compiled by the API needs the same.
 
 ### Compiling a plugin's shaders
 

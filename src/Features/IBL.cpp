@@ -1,4 +1,5 @@
 #include "IBL.h"
+#include "IBL/ORGIBL.h"
 
 #include "Deferred.h"
 #include "DynamicCubemaps.h"
@@ -178,8 +179,8 @@ void IBL::ReflectionsPrepass()
 		// Set PS shader resource
 		{
 			std::array<ID3D11ShaderResourceView*, 4> srvs = {
-				sceneDisabled ? nullptr : envIBLTexture->srv.get(),
-				sceneDisabled ? nullptr : skyIBLTexture->srv.get(),
+				sceneDisabled ? nullptr : EnvIBLSRV(),
+				sceneDisabled ? nullptr : SkyIBLSRV(),
 				staticDiffuseIBLTexture ? staticDiffuseIBLTexture->srv.get() : nullptr,
 				staticSpecularIBLTexture ? staticSpecularIBLTexture->srv.get() : nullptr
 			};
@@ -194,6 +195,16 @@ void IBL::Prepass()
 		return;
 
 	auto context = globals::d3d::context;
+
+	auto& orgIBL = ORGIBL::Get();
+	orgIBL.DebugReadback(envIBLTexture ? envIBLTexture->resource.get() : nullptr, skyIBLTexture ? skyIBLTexture->resource.get() : nullptr);
+
+	// The render graph projects the SH at the Prepass anchor, right after this (CS_ORG_IBL=1): bind its textures for the main pass.
+	if (orgIBL.Prepass(settings.DALCMode < 2)) {
+		ID3D11ShaderResourceView* views[2]{ EnvIBLSRV(), SkyIBLSRV() };
+		context->PSSetShaderResources(76, 2, views);
+		return;
+	}
 
 	auto& dynamicCubemaps = globals::features::dynamicCubemaps;
 
@@ -259,8 +270,29 @@ void IBL::Prepass()
 	}
 }
 
-void IBL::SetupResources()
+void IBL::PostPostLoad()
 {
+	ORGIBL::Reserve();
+}
+
+ID3D11ShaderResourceView* IBL::EnvIBLSRV() const
+{
+	if (auto* view = ORGIBL::Get().EnvSRV())
+		return view;
+	return envIBLTexture ? envIBLTexture->srv.get() : nullptr;
+}
+
+ID3D11ShaderResourceView* IBL::SkyIBLSRV() const
+{
+	if (auto* view = ORGIBL::Get().SkySRV())
+		return view;
+	return skyIBLTexture ? skyIBLTexture->srv.get() : nullptr;
+}
+
+void IBL::CreateSHTextures()
+{
+	if (envIBLTexture)
+		return;
 	GetDiffuseIBLCS();
 
 	{
@@ -296,6 +328,13 @@ void IBL::SetupResources()
 		skyIBLTexture->CreateSRV(srvDesc);
 		skyIBLTexture->CreateUAV(uavDesc);
 	}
+}
+
+void IBL::SetupResources()
+{
+	// The render graph's SH textures replace the D3D11 ones; on a later graph failure the D3D11 path makes its own.
+	if (!ORGIBL::Get().Setup([this] { CreateSHTextures(); }))
+		CreateSHTextures();
 
 	auto device = globals::d3d::device;
 
