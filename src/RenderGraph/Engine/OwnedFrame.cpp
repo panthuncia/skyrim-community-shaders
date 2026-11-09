@@ -235,7 +235,14 @@ namespace RenderGraph::Engine
 			GuestDevice::QueueHeldScope held;
 			auto& frame = *static_cast<Frame*>(a_user);
 			auto& self = *frame.state;
-			self.PresentFrame(frame);
+			// CS_ORG_OWNED_SKIPTAIL=1 (diagnostic): the tail neither copies nor presents, so nothing is shown. It tells whether a stall
+			// needs the Vulkan present on DXVK's submission thread.
+			static const bool s_skip = [] {
+				char value[2] = {};
+				return GetEnvironmentVariableA("CS_ORG_OWNED_SKIPTAIL", value, sizeof(value)) && value[0] == '1';
+			}();
+			if (!s_skip)
+				self.PresentFrame(frame);
 			self.completed.fetch_add(1, std::memory_order_acq_rel);
 			{
 				std::lock_guard lock(self.completionMutex);
