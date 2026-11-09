@@ -33,6 +33,7 @@ ORGCloudShadows& ORGCloudShadows::Get()
 #	include "Globals.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 
 #	include <Render/RenderGraph/RenderGraph.h>
@@ -179,6 +180,7 @@ void ORGCloudShadows::Fail()
 {
 	failed = true;
 	FrameAnchors::Unregister(kClientId);
+	PublishedResources::Withdraw(kOcclusionName);
 	if (impl)
 		ReturnToD3D11();
 	impl.reset();
@@ -245,11 +247,18 @@ bool ORGCloudShadows::Setup()
 	client.onFailed = [] {
 		logger::error("[ORG] Cloud Shadows: the render graph failed; back to D3D11");
 		auto& self = Get();
+		PublishedResources::Withdraw(kOcclusionName);
 		ReturnToD3D11();
 		self.failed = true;
 		self.impl.reset();
 	};
 	if (!FrameAnchors::Register(std::move(client))) {
+		Fail();
+		return false;
+	}
+	// Drawcall Limit Fix's colour passes read it by name, ordered after the copy (Integrations/CloudShadows).
+	if (!PublishedResources::Publish(*next->occlusion)) {
+		logger::error("[ORG] Cloud Shadows: the occlusion cubemap could not be published; back to D3D11");
 		Fail();
 		return false;
 	}
