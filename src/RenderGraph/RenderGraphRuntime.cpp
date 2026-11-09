@@ -1755,6 +1755,12 @@ bool RenderGraphRuntime::Initialize()
 		FrameAnchors::AddToFrame(desc.epochOrder);
 		if (!desc.epochOrder.empty())
 			logger::info("[ORG] epoch order: {}", fmt::join(desc.epochOrder, ","));
+		// Diagnostic: CS_ORG_ALIAS_LOG=1 logs every alias plan's placements, ranks and exclusions.
+		if (EnvEquals("CS_ORG_ALIAS_LOG", "1")) {
+			auto settings = org::runtime::GetOpenRenderGraphSettings();
+			settings.autoAliasEnableLogging = true;
+			org::runtime::SetOpenRenderGraphSettings(settings);
+		}
 #if defined(CS_RELEASE_PROFILE)
 		// No pass timestamps and no readback of them: the statistics take this when the runtime below creates them.
 		auto settings = org::runtime::GetOpenRenderGraphSettings();
