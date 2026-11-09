@@ -579,3 +579,16 @@ Keys used so far:
   and order key; and return the UI variables and a handle to set values and choose techniques. Values reach the GPU as a
   latched values block plus a handle table (two push words per pass), so recordings stay reusable.
 - **Found by:** P3 W5, ORG FX runtime (2026-11-09).
+
+### Reading back a frame without waiting
+
+- **Need:** copy the displayed image (or any graph texture) to the CPU at a chosen frame, without stalling that frame, and
+  get the bytes on a callback once the GPU copy is done.
+- **Who:** CS's Screenshot feature (D3D11 staging texture plus `Map(DO_NOT_WAIT)` polling today); capture, recording and
+  photo-mode plugins that hook Present and do the same.
+- **Where it fits:** the Capture anchor, after HDR output, and ORG's readback service (`PlanReadbackCapture` and
+  `RecordReadbackCapture` in a copy pass, `IReadbackService::ProcessReadbackRequests` for the callbacks). Two things a plugin
+  API would hide: the anchor's ticket is prepared ahead of the hook, so a one-off capture must be in the pass's revision
+  (the ticket is then prepared again), and an epoch that submits only when it captures must poll the readbacks itself,
+  since only submissions poll them. `RangeSpec` names mips and slices, not a rectangle: a crop is cut on the CPU.
+- **Found by:** P3 W3, Screenshot (2026-11-09).

@@ -81,6 +81,14 @@ private:
 		// Suppress the game's own PrintScreen capture by clearing bAllowScreenShot in memory.
 		bool disableVanillaScreenshot = true;
 		bool notify = true;  // the in-game "saved" message (not for RequestCapture's)
+		// A render-graph readback (ORGScreenshot) of the whole source, which the worker crops at cropX, cropY.
+		std::vector<std::byte> readback;
+		uint64_t readbackOffset = 0;
+		uint32_t readbackRowPitch = 0;
+		uint32_t readbackWidth = 0;
+		uint32_t readbackHeight = 0;
+		uint32_t cropX = 0;
+		uint32_t cropY = 0;
 	};
 
 	std::mutex screenshotQueueMutex;
