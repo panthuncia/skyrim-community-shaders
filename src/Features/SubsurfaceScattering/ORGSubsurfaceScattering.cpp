@@ -349,12 +349,16 @@ namespace
 
 struct ORGSubsurfaceScattering::Impl
 {
+	// The main target's description, from Setup: the intermediate textures' size and format.
+	D3D11_TEXTURE2D_DESC desc{};
+	// Made at the first frame the DeferredPasses epoch exists (Build); null until then.
 	std::shared_ptr<ScatterState> state;
 	bool programsDirty = false;
 	// Whether this frame's DeferredPasses epoch ran the passes (the commit was called).
 	bool ranThisFrame = false;
 	bool registered = false;
-	bool registerLogged = false;
+	// What the log has said about a wait, so each is said once.
+	bool epochLogged = false, targetsLogged = false, registerLogged = false;
 
 	/** @brief The anchor client: its passes, its resources and its commit. */
 	static FrameAnchors::ClientDesc MakeClient(const std::shared_ptr<ScatterState>& state)
@@ -419,87 +423,134 @@ struct ORGSubsurfaceScattering::Impl
 			logger::info("[ORG] Subsurface Scattering: the anchor client is not registered yet; D3D11 draws until it is");
 		return registered;
 	}
+
+	/**
+	 * @brief The programs, the sampler, the intermediate textures and the latch, each failure logged by name. Null on a failure,
+	 * which is final: the feature then stays on D3D11.
+	 */
+	std::shared_ptr<ScatterState> Build() const
+	{
+		auto* host = RenderGraphRuntime::Get().Host();
+		auto next = std::make_shared<ScatterState>();
+		next->mode = CurrentMode();
+		bool ok = true;
+		const auto fail = [&](const char* a_what) {
+			logger::warn("[ORG] Subsurface Scattering stays on D3D11: {} could not be made", a_what);
+			ok = false;
+		};
+		next->programs = LoadPrograms(host->Device());
+		if (!next->programs)
+			fail("its programs");
+		// Deferred::pointSampler's description: point, clamp.
+		next->pointSampler = ShaderBindings::CreateSampler({ .minFilter = rhi::Filter::Nearest,
+			.magFilter = rhi::Filter::Nearest,
+			.mipFilter = rhi::MipFilter::Nearest,
+			.addressU = rhi::AddressMode::Clamp,
+			.addressV = rhi::AddressMode::Clamp,
+			.addressW = rhi::AddressMode::Clamp });
+		if (!next->pointSampler)
+			fail("its point sampler");
+		// Written before they are read and read only within the frame: transient, so aliasable.
+		next->diffuseNoAlbedo = std::make_unique<GraphResources::Texture2D>(desc, "SSS::DiffuseNoAlbedo");
+		if (!*next->diffuseNoAlbedo)
+			fail("its albedo-free texture");
+		next->blurTemp = std::make_unique<GraphResources::Texture2D>(desc, "SSS::BlurHorizontalTemp");
+		if (!*next->blurTemp)
+			fail("its blur texture");
+		next->latch = std::make_shared<org::LatchBlock>("cs.subsurface.latch", static_cast<std::uint32_t>(sizeof(LatchData)), host->FrameSlots());
+		return ok ? next : nullptr;
+	}
+
+	static int CurrentMode() { return globals::features::subsurfaceScattering.settings.SSMode == kBurley ? kBurley : kSeparable; }
 };
 
 ORGSubsurfaceScattering::~ORGSubsurfaceScattering() = default;
 
 bool ORGSubsurfaceScattering::Running() const
 {
-	return impl && RenderGraphRuntime::Get().IsActive();
+	return impl != nullptr;
 }
 
 void ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 {
 	impl.reset();
-	auto& runtime = RenderGraphRuntime::Get();
-	auto* host = runtime.Host();
-	if (!host || !runtime.IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DeferredPasses)) {
-		logger::warn("[ORG] Subsurface Scattering stays on D3D11: the render graph or its DeferredPasses anchor is not available");
+	if (!RenderGraphRuntime::Get().Host()) {
+		logger::warn("[ORG] Subsurface Scattering stays on D3D11: the render graph is not available");
 		return;
 	}
-	try {
-		auto state = std::make_shared<ScatterState>();
-		state->mode = globals::features::subsurfaceScattering.settings.SSMode == kBurley ? kBurley : kSeparable;
-		state->programs = LoadPrograms(host->Device());
-		state->targets = ImportTargets();
-		// Deferred::pointSampler's description: point, clamp.
-		state->pointSampler = ShaderBindings::CreateSampler({ .minFilter = rhi::Filter::Nearest,
-			.magFilter = rhi::Filter::Nearest,
-			.mipFilter = rhi::MipFilter::Nearest,
-			.addressU = rhi::AddressMode::Clamp,
-			.addressV = rhi::AddressMode::Clamp,
-			.addressW = rhi::AddressMode::Clamp });
-		// Written before they are read and read only within the frame: transient, so aliasable.
-		state->diffuseNoAlbedo = std::make_unique<GraphResources::Texture2D>(a_desc, "SSS::DiffuseNoAlbedo");
-		state->blurTemp = std::make_unique<GraphResources::Texture2D>(a_desc, "SSS::BlurHorizontalTemp");
-		state->latch = std::make_shared<org::LatchBlock>("cs.subsurface.latch", static_cast<std::uint32_t>(sizeof(LatchData)), host->FrameSlots());
-		if (!state->programs || !state->targets || !state->pointSampler || !*state->diffuseNoAlbedo || !*state->blurTemp) {
-			logger::warn("[ORG] Subsurface Scattering stays on D3D11: its programs, sampler, textures or engine targets could not be made");
-			return;
-		}
-
-		impl = std::make_unique<Impl>();
-		impl->state = std::move(state);
-		logger::info("[ORG] Subsurface Scattering runs on the render graph ({}x{}, {} blur)", a_desc.Width, a_desc.Height, ModeName(impl->state->mode));
-		impl->Register();
-	} catch (const std::exception& e) {
-		logger::error("[ORG] Subsurface Scattering setup failed, staying on D3D11: {}", e.what());
-		FrameAnchors::Unregister(kClientId);
-		impl.reset();
-	}
+	// The rest at the first frames (AfterDeferredPasses): the anchor's epoch, the engine targets and the shared constants
+	// exist only once the world renders.
+	impl = std::make_unique<Impl>();
+	impl->desc = a_desc;
+	logger::info("[ORG] Subsurface Scattering: the render graph path is requested ({}x{}); set up at the first frames", a_desc.Width, a_desc.Height);
 }
 
 bool ORGSubsurfaceScattering::AfterDeferredPasses()
 {
 	if (!impl)
 		return false;
-	if (!RenderGraphRuntime::Get().IsActive()) {
-		logger::error("[ORG] Subsurface Scattering returns to D3D11: the render graph is no longer active");
+	const auto giveUp = [this](const char* a_why) {
+		logger::error("[ORG] Subsurface Scattering returns to D3D11: {}", a_why);
 		FrameAnchors::Unregister(kClientId);
 		impl.reset();
 		return false;
+	};
+	auto& runtime = RenderGraphRuntime::Get();
+	if (!runtime.IsActive()) {
+		if (impl->state)
+			return giveUp("the render graph is no longer active");
+		return false;
 	}
-	// From the next frame once the client is registered (State has uploaded the shared constants by now).
+
+	// Set up: waits are tried again at the next frame, with D3D11 drawing meanwhile.
+	if (!impl->state) {
+		if (!FrameAnchors::HasEpoch(FrameAnchors::Anchor::DeferredPasses)) {
+			if (!std::exchange(impl->epochLogged, true))
+				logger::info("[ORG] Subsurface Scattering: waiting for the DeferredPasses anchor's epoch");
+			return false;
+		}
+		try {
+			impl->state = impl->Build();
+		} catch (const std::exception& e) {
+			logger::error("[ORG] Subsurface Scattering setup failed: {}", e.what());
+		}
+		if (!impl->state)
+			return giveUp("its setup failed");
+		logger::info("[ORG] Subsurface Scattering runs on the render graph ({}x{}, {} blur)", impl->desc.Width, impl->desc.Height,
+			ModeName(impl->state->mode));
+	}
+	auto& state = *impl->state;
+	if (!state.targets) {
+		state.targets = ImportTargets();
+		if (!state.targets) {
+			if (!std::exchange(impl->targetsLogged, true)) {
+				logger::info("[ORG] Subsurface Scattering: waiting for the engine targets (main {}, masks {}, albedo {}, normals {}, depth {})",
+					state.targets.main != nullptr, state.targets.mask != nullptr, state.targets.albedo != nullptr, state.targets.normal != nullptr,
+					state.targets.depth != nullptr);
+			}
+			state.targets = {};
+			return false;
+		}
+	}
 	if (!impl->registered) {
+		// From the next frame once the client is registered (State has uploaded the shared constants by now).
 		if (impl->Register())
 			logger::info("[ORG] Subsurface Scattering: registered on the DeferredPasses anchor");
 		return false;
 	}
+
 	const bool ran = std::exchange(impl->ranThisFrame, false);
-	auto& state = *impl->state;
 	bool changed = false;
-	if (const int mode = globals::features::subsurfaceScattering.settings.SSMode == kBurley ? kBurley : kSeparable; mode != state.mode) {
+	if (const int mode = Impl::CurrentMode(); mode != state.mode) {
 		state.mode = mode;
 		logger::info("[ORG] Subsurface Scattering: {} blur", ModeName(mode));
 		changed = true;
 	}
 	if (impl->programsDirty) {
 		impl->programsDirty = false;
-		auto programs = LoadPrograms(RenderGraphRuntime::Get().Host()->Device());
+		auto programs = LoadPrograms(runtime.Host()->Device());
 		if (!programs) {
-			logger::error("[ORG] Subsurface Scattering returns to D3D11: its programs could not be built again");
-			FrameAnchors::Unregister(kClientId);
-			impl.reset();
+			giveUp("its programs could not be built again");
 			return ran;
 		}
 		state.programs = std::move(programs);
@@ -507,9 +558,7 @@ bool ORGSubsurfaceScattering::AfterDeferredPasses()
 	}
 	if (auto targets = ImportTargets(); !(targets == state.targets)) {
 		if (!targets) {
-			logger::error("[ORG] Subsurface Scattering returns to D3D11: an engine target could not be imported");
-			FrameAnchors::Unregister(kClientId);
-			impl.reset();
+			giveUp("an engine target could not be imported");
 			return ran;
 		}
 		state.targets = std::move(targets);
