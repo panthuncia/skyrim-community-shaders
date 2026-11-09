@@ -288,6 +288,9 @@ namespace
 	}
 }
 
+// C4324: the aligned HDR constants pad the struct.
+#	pragma warning(push)
+#	pragma warning(disable: 4324)
 struct ORGHDRDisplay::Impl
 {
 	std::shared_ptr<const ComputeProgram> program;
@@ -307,6 +310,7 @@ struct ORGHDRDisplay::Impl
 	// This frame's constants, for the commit.
 	HDRDisplay::HDRDataCB constants{};
 };
+#	pragma warning(pop)
 
 ORGHDRDisplay::~ORGHDRDisplay() = default;
 
