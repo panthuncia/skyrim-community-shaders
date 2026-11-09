@@ -27,7 +27,9 @@
     Git ref to treat as "before". Default: merge-base of HEAD and origin/dev.
 
 .PARAMETER IncludeDir
-    Shader include root passed to fxc /I. Default: package/Shaders.
+    Shader include roots passed to fxc /I, in order. Default: package/Shaders. Pass
+    several for a shader that includes feature headers, e.g.
+    -IncludeDir package/Shaders,"features/IBL/Shaders","features/Skylighting/Shaders".
 
 .PARAMETER Permutations
     Optional explicit permutation list; each entry is a space-separated define set,
@@ -50,7 +52,7 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string]$Shader,
     [string]$BaseRef,
-    [string]$IncludeDir = "package/Shaders",
+    [string[]]$IncludeDir = @("package/Shaders"),
     [string[]]$Permutations,
     [string]$Entry = "main",
     [string]$Profile,
@@ -126,7 +128,7 @@ try {
     # A feature shader (features/<Name>/Shaders/...) also includes from its own Shaders folder.
     $featureInclude = $null
     if ($relPath -match '^(features/[^/]+/Shaders)/') { $featureInclude = $Matches[1] }
-    $archivePaths = @($IncludeDir, $relPath) + @($featureInclude | Where-Object { $_ })
+    $archivePaths = @($IncludeDir) + @($relPath) + @($featureInclude | Where-Object { $_ -and ($IncludeDir -notcontains $_) })
     git archive --format=tar -o $tar $BaseRef -- @archivePaths 2>$null
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $tar)) {
         throw "git archive failed for '$BaseRef' (paths: $IncludeDir, $relPath)."
@@ -134,8 +136,8 @@ try {
     tar -xf $tar -C $baseRoot
     if ($LASTEXITCODE -ne 0) { throw "Failed to extract base archive." }
     $baseFile = Join-Path $baseRoot $relPath
-    $baseInclude = @(Join-Path $baseRoot $IncludeDir) + @($featureInclude | Where-Object { $_ } | ForEach-Object { Join-Path $baseRoot $_ })
-    $workInclude = @($IncludeDir) + @($featureInclude | Where-Object { $_ })
+    $workInclude = @($IncludeDir) + @($featureInclude | Where-Object { $_ -and ($IncludeDir -notcontains $_) })
+    $baseInclude = @($workInclude | ForEach-Object { Join-Path $baseRoot $_ })
     if (-not (Test-Path $baseFile)) { throw "'$relPath' not found at '$BaseRef'." }
 
     function Compile([string]$src, [string[]]$incDirs, [string]$defs, [string]$outFile, [switch]$Asm) {
@@ -146,7 +148,8 @@ try {
             $defArgs += $(if ($d -like '*=*') { $d } else { "$d=1" })
         }
         $fmt = if ($Asm) { "/Fc" } else { "/Fo" }
-        $incArgs = foreach ($dir in $incDirs) { "/I"; $dir }
+        $incArgs = @()
+        foreach ($i in $incDirs) { $incArgs += "/I"; $incArgs += $i }
         $out = & $fxcPath /nologo /T $Profile /E $Entry @defArgs @incArgs $src $fmt $outFile 2>&1
         return @{ Code = $LASTEXITCODE; Out = $out }
     }
@@ -154,7 +157,7 @@ try {
     Write-Host "Shader   : $relPath"
     Write-Host "Base ref : $BaseRef  (full include tree materialized)"
     Write-Host "Profile  : $Profile  (entry $Entry)"
-    Write-Host "Include  : $IncludeDir"
+    Write-Host "Include  : $($IncludeDir -join ', ')"
     Write-Host ("-" * 60)
 
     $allIdentical = $true

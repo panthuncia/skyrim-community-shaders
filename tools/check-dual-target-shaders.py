@@ -19,6 +19,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SHADERS = [
     "tests/Shaders/OrgResourcesSampleCS.hlsl",
+    "tests/Shaders/OrgSharedConstantsSampleCS.hlsl",
     "features/IBL/Shaders/IBL/DiffuseIBLCS.hlsl",
 ]
 MAX_PUSH_BYTES = 128
@@ -74,11 +75,15 @@ def stage_of(path):
 
 
 def include_dirs(path):
-    dirs = [ROOT / "package/Shaders"]
+    # The shader's own Shaders folder, package/Shaders, then every feature's: the merged layout of Data/Shaders.
+    dirs = []
     for parent in path.parents:
-        if parent.name == "Shaders" and parent not in dirs:
+        if parent.name == "Shaders":
             dirs.append(parent)
             break
+    for d in [ROOT / "package/Shaders", *sorted(ROOT.glob("features/*/Shaders"))]:
+        if d not in dirs:
+            dirs.append(d)
     return [arg for d in dirs for arg in ("-I", str(d))]
 
 
@@ -104,7 +109,8 @@ def main():
     parser.add_argument("--fxc", help="fxc.exe (default: the newest Windows SDK's)")
     parser.add_argument("--spirv-val", help="spirv-val.exe (default: beside dxc.exe, when present)")
     parser.add_argument("--entry", default="main")
-    parser.add_argument("-D", "--define", action="append", default=[], help="A define for every build, NAME or NAME=VALUE (repeatable)")
+    parser.add_argument("-D", "--define", action="append", default=[], metavar="NAME[=VALUE]",
+                        help="A define for every build of every shader (repeat for more)")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "build/dual-target-shaders")
     args = parser.parse_args()
 
@@ -122,10 +128,10 @@ def main():
         out = args.output_dir / path.stem
         print(path.relative_to(ROOT) if path.is_relative_to(ROOT) else path)
 
-        defines = [arg for define in args.define for arg in ("-D", define)]
+        defines = [arg for d in args.define for arg in ("-D", d if "=" in d else d + "=1")]
         common = ["-E", args.entry, *defines, *includes, str(path)]
         fxc_includes = ["/I" if arg == "-I" else arg for arg in includes]
-        fxc_defines = [arg for define in args.define for arg in ("/D", define)]
+        fxc_defines = ["/D" if arg == "-D" else arg for arg in defines]
         results = [
             run("FXC " + stage + "_5_0", [str(fxc), "/nologo", "/T", stage + "_5_0", "/E", args.entry, *fxc_defines, *fxc_includes, "/Fo", f"{out}.cso", str(path)]),
             run("DXC SPIR-V " + stage + "_6_6", [str(dxc), "-HV", "2021", "-T", stage + "_6_6", *spirv_flags(), "-D", "CS_ORG_BINDLESS=1", "-Fo", f"{out}.spv", *common]),

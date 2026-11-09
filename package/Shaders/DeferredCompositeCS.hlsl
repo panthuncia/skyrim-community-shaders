@@ -1,3 +1,42 @@
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below. The ORG composite
+// (src/ORGDeferredComposite.cpp) passes heap handles in the push block, those of
+// the shared constant buffers too (ORG_SHARED_CONSTANTS).
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+// 24/32-bit depth: TerrainBlending ON -> R32_FLOAT (no unorm),
+// OFF -> R24_UNORM_X8_TYPELESS game depth (unorm).
+#if defined(TERRAIN_BLENDING)
+#	define DEFERRED_COMPOSITE_DEPTH_TEXTURE Texture2D<float>
+#else
+#	define DEFERRED_COMPOSITE_DEPTH_TEXTURE Texture2D<unorm float>
+#endif
+
+// Every permutation's resources: a permutation leaves out what it does not read. The skylighting
+// probes (t8) and the IBL SH (t14, t15) are declared by their headers.
+#define DEFERRED_COMPOSITE_RESOURCES(X)                         \
+	X(SHARED, ConstantBuffer, Shared, 0)                        \
+	X(SRV, Texture2D<float3>, SpecularTexture, 0)               \
+	X(SRV, Texture2D<unorm float3>, AlbedoTexture, 1)           \
+	X(SRV, Texture2D<unorm float3>, NormalRoughnessTexture, 2)  \
+	X(SRV, Texture2D<float3>, MasksTexture, 3)                  \
+	X(SRV, Texture2D<unorm float>, Masks2Texture, 9)            \
+	X(UAV, RWTexture2D<float4>, MainRW, 0)                      \
+	X(UAV, RWTexture2D<float4>, NormalTAAMaskSpecularMaskRW, 1) \
+	X(UAV, RWTexture2D<float2>, MotionVectorsRW, 2)             \
+	X(SRV, DEFERRED_COMPOSITE_DEPTH_TEXTURE, DepthTexture, 4)   \
+	X(SRV, Texture2D<float3>, ReflectanceTexture, 5)            \
+	X(SRV, TextureCube<float3>, EnvTexture, 6)                  \
+	X(SRV, TextureCube<float3>, EnvReflectionsTexture, 7)       \
+	X(SAMPLER, SamplerState, LinearSampler, 0)                  \
+	X(EXTERN, Texture3D<sh2>, SkylightingProbeArray, 8)         \
+	X(SRV, Texture2D<float4>, SsgiAoTexture, 10)                \
+	X(SRV, Texture2D<float4>, SsgiYTexture, 11)                 \
+	X(SRV, Texture2D<float4>, SsgiCoCgTexture, 12)              \
+	X(SRV, Texture2D<float4>, SsgiSpecularTexture, 13)          \
+	X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 14)                \
+	X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 15)
+ORG_PUSH_BLOCK(DEFERRED_COMPOSITE_RESOURCES(ORG_HANDLE))
 
 #include "Common/BRDF.hlsli"
 #include "Common/ColorManagement.hlsli"
@@ -7,31 +46,7 @@
 #include "Common/Shading.hlsli"
 #include "Common/SharedData.hlsli"
 #include "Common/Spherical Harmonics/SphericalHarmonics.hlsli"
-Texture2D<float3> SpecularTexture : register(t0);
-Texture2D<unorm float3> AlbedoTexture : register(t1);
-Texture2D<unorm float3> NormalRoughnessTexture : register(t2);
-Texture2D<float3> MasksTexture : register(t3);
-Texture2D<unorm float> Masks2Texture : register(t9);
-
-RWTexture2D<float4> MainRW : register(u0);
-RWTexture2D<float4> NormalTAAMaskSpecularMaskRW : register(u1);
-RWTexture2D<float2> MotionVectorsRW : register(u2);
-
-// 24/32-bit depth: TerrainBlending ON -> R32_FLOAT (no unorm),
-// OFF -> R24_UNORM_X8_TYPELESS game depth (unorm).
-#if defined(TERRAIN_BLENDING)
-Texture2D<float> DepthTexture : register(t4);
-#else
-Texture2D<unorm float> DepthTexture : register(t4);
-#endif
-
-#if defined(DYNAMIC_CUBEMAPS)
-Texture2D<float3> ReflectanceTexture : register(t5);
-TextureCube<float3> EnvTexture : register(t6);
-TextureCube<float3> EnvReflectionsTexture : register(t7);
-
-SamplerState LinearSampler : register(s0);
-#endif
+DEFERRED_COMPOSITE_RESOURCES(ORG_RESOURCE)
 
 #if defined(SKYLIGHTING)
 #	define SKYLIGHTING_PROBE_REGISTER t8
@@ -39,11 +54,6 @@ SamplerState LinearSampler : register(s0);
 #endif
 
 #if defined(SSGI)
-Texture2D<float4> SsgiAoTexture : register(t10);
-Texture2D<float4> SsgiYTexture : register(t11);
-Texture2D<float4> SsgiCoCgTexture : register(t12);
-Texture2D<float4> SsgiSpecularTexture : register(t13);
-
 void SampleSSGI(uint2 pixCoord, float3 normalWS, out float ao, out float3 il)
 {
 	ao = 1 - SsgiAoTexture[pixCoord];

@@ -103,6 +103,13 @@ namespace Util
 	};
 
 	/**
+	 * @brief The defines CompileShader adds to every build after the caller's: State's shader defines, then each loaded feature's
+	 * common defines that neither the caller (a_explicit) nor an earlier entry already names. An ORG build of a D3D11 shader adds the
+	 * same, so both see one permutation.
+	 */
+	std::vector<std::pair<std::string, std::string>> GetCommonShaderDefines(std::span<const std::string_view> a_explicit = {});
+
+	/**
 	 * @brief Compile an HLSL shader from file and create the appropriate D3D11 shader object.
 	 * @param FilePath Path to the HLSL source file.
 	 * @param Defines Preprocessor macro name/value pairs to pass to the compiler.

@@ -14,9 +14,10 @@
  * @brief The C++ side of dual-target shaders (package/Shaders/Common/OrgResources.hlsli).
  *
  * Under ORG such a shader reads its resources through handles in its push block (a cbuffer at b0). A pass mirrors that block in a
- * struct: one Handle per SRV, UAV, SAMPLER and CBUFFER entry of the shader's list and one Latch per LATCH entry, in list order,
- * then each PUSH struct as an alignas(16) member. At record time it fills the handles from its declared views
- * (RecordingContext::Index) and pushes the block with ComputeProgram::Dispatch or RasterProgram::DrawDesc::constants:
+ * struct: one Handle per SRV, UAV, SAMPLER, CBUFFER and EXTERN entry of the shader's list and one Latch per LATCH entry, in list
+ * order (a SHARED entry is SharedConstants::Handles, four words), then each PUSH struct as an alignas(16) member. At record time
+ * it fills the handles from its declared views (RecordingContext::Index) and pushes the block with ComputeProgram::Dispatch or
+ * RasterProgram::DrawDesc::constants:
  *
  *     struct DiffuseIBLBlock { ShaderBindings::Handle envTexture, iblTexture, linearSampler; };
  *     program = ComputeProgram::Load(device, { .source = "IBL/DiffuseIBLCS.hlsl", .constantWords = ShaderBindings::Words<DiffuseIBLBlock>() });

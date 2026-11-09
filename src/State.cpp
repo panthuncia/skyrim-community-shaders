@@ -37,6 +37,7 @@
 #include "Features/Upscaling.h"
 #include "Features/VolumetricShadows.h"
 #include "Menu.h"
+#include "ORGDeferredComposite.h"
 #include "PostProcessingMode.h"
 #include "Presets/UnifiedPresetCatalog.h"
 #include "RenderGraph/GpuLoadPass.h"
@@ -384,6 +385,8 @@ void State::Setup()
 	// Adopt DXVK's Vulkan device for the render graph before features create
 	// resources; features fall back to their D3D11 paths when it stays inactive.
 	GpuLoadPass::ReserveAnchor();
+	// Anchors are reserved before the graph initializes: the frame's epochs are fixed then.
+	ORGDeferredComposite::Reserve();
 	RenderGraphRuntime::Get().Initialize();
 
 	Feature::ForEachLoadedFeature("SetupResources", [](Feature* feature) { feature->SetupResources(); });

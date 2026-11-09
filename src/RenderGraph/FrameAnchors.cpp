@@ -10,6 +10,7 @@
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/FrameAnchorSelfTest.h"
 #	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/SharedConstants.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -48,6 +49,7 @@ namespace FrameAnchors
 			{ "EarlyPrepass", { "CS anchor: early prepass", "CS anchor: early prepass inputs", "FrameAnchors::EarlyPrepass / ", "cs.anchor.early-prepass" }, false },
 			{ "Prepass", { "CS anchor: prepass", "CS anchor: prepass inputs", "FrameAnchors::Prepass / ", "cs.anchor.prepass" }, false },
 			{ "DeferredPasses", { "CS anchor: deferred passes", "CS anchor: deferred passes inputs", "FrameAnchors::DeferredPasses / ", "cs.anchor.deferred-passes" }, false },
+			{ "DeferredComposite", { "CS anchor: deferred composite", "CS anchor: deferred composite inputs", "FrameAnchors::DeferredComposite / ", "cs.anchor.deferred-composite" }, false },
 			{ "PostProcessing", { "CS anchor: post-processing", "CS anchor: post-processing inputs", "FrameAnchors::PostProcessing / ", "cs.anchor.post-processing" }, true },
 			{ "Tonemap", { "CS anchor: tonemap", "CS anchor: tonemap inputs", "FrameAnchors::Tonemap / ", "cs.anchor.tonemap" }, true },
 			{ "Present", { "CS anchor: present", "CS anchor: present inputs", "FrameAnchors::Present / ", "cs.anchor.present" }, true },
@@ -67,7 +69,8 @@ namespace FrameAnchors
 			Segment::LightCulling,              // Light Limit Fix's Prepass
 			Segment::AnchorPrepass,             // after every feature's Prepass
 			Segment::MainOpaque,
-			Segment::AnchorDeferredPasses,  // EndDeferred, after the blended decals
+			Segment::AnchorDeferredPasses,     // EndDeferred, after the blended decals
+			Segment::AnchorDeferredComposite,  // DeferredPasses, after the D3D11 SSGI and SSS
 			Segment::Forward,
 			Segment::FirstPerson,
 			Segment::AnchorPostProcessing,  // Main_PostProcessing, before the upscaler
@@ -132,6 +135,21 @@ namespace FrameAnchors
 			return std::ranges::any_of(a_client.passes, [&](const PassDesc& a_pass) { return a_pass.anchor == a_anchor; });
 		}
 
+		/** @brief Whether a client with passes at the anchor reads the shared constants: the anchor's epoch then uploads them. */
+		bool UsesSharedConstants(const std::vector<std::shared_ptr<const ClientDesc>>& a_clients, Anchor a_anchor)
+		{
+			return std::ranges::any_of(a_clients, [&](const auto& a_client) { return a_client->sharedConstants && HasPasses(*a_client, a_anchor); });
+		}
+
+		/** @brief The anchor of an anchor epoch's graph, or Count. */
+		Anchor AnchorOfEpoch(std::uint32_t a_epoch)
+		{
+			for (std::uint32_t i = 0; i < kAnchors; ++i)
+				if (a_epoch == EpochOfAnchor(static_cast<Anchor>(i)))
+					return static_cast<Anchor>(i);
+			return Anchor::Count;
+		}
+
 		/** @brief Publishes the clients and imports as they are now, for the next builds. */
 		void Publish(State& a_state)
 		{
@@ -189,6 +207,8 @@ namespace FrameAnchors
 				for (const auto& client : snapshot->clients)
 					if (client->registerResources)
 						client->registerResources(a_graph);
+				if (UsesSharedConstants(snapshot->clients, AnchorOfEpoch(a_graph.PassEpochFilter())))
+					SharedConstants::Register(a_graph);
 			}
 
 			void GatherStructuralPasses(org::RenderGraph& a_graph, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
@@ -196,6 +216,12 @@ namespace FrameAnchors
 				if (!snapshot || !IsAnchorGraph(a_graph))
 					return;
 				const std::uint32_t epoch = a_graph.PassEpochFilter();
+				// The shared constants' upload first: the passes that read them follow it (the graph orders them by the buffers).
+				if (UsesSharedConstants(snapshot->clients, AnchorOfEpoch(epoch)))
+					if (auto upload = SharedConstants::MakeUploadPass())
+						a_out.push_back(std::move(org::RenderGraph::ExternalPassDesc::Copy("cs.shared.upload", std::move(upload))
+								.PreferQueue(org::QueueKind::Graphics)
+								.Epoch(epoch)));
 				for (const auto& scheduled : snapshot->passes) {
 					const auto& pass = *scheduled.pass;
 					if (EpochOfAnchor(pass.anchor) != epoch)
@@ -218,11 +244,7 @@ namespace FrameAnchors
 		private:
 			static bool IsAnchorGraph(const org::RenderGraph& a_graph)
 			{
-				const std::uint32_t epoch = a_graph.PassEpochFilter();
-				for (std::uint32_t i = 0; i < kAnchors; ++i)
-					if (epoch == EpochOfAnchor(static_cast<Anchor>(i)))
-						return true;
-				return false;
+				return AnchorOfEpoch(a_graph.PassEpochFilter()) != Anchor::Count;
 			}
 
 			std::shared_ptr<const Snapshot> snapshot;
@@ -386,6 +408,10 @@ namespace FrameAnchors
 			}
 			names.push_back(pass.name);
 		}
+		if (a_client.sharedConstants && !SharedConstants::Ensure()) {
+			logger::warn("[ORG] frame anchors: {} not registered: it reads the shared constants, which could not be made", a_client.id);
+			return false;
+		}
 		std::uint32_t mask = AnchorMask(a_client);
 		auto client = std::make_shared<const ClientDesc>(std::move(a_client));
 		const auto existing = std::ranges::find_if(state.clients, [&](const auto& a_other) { return a_other->id == client->id; });
@@ -440,10 +466,14 @@ namespace FrameAnchors
 		if (active.empty())
 			return false;
 		const auto segment = static_cast<Segment>(SegmentOf(a_point.anchor));
+		// The graph holds the upload whenever a registered client reads the shared constants, active or not.
+		const bool sharedConstants = UsesSharedConstants(state.clients, a_point.anchor);
 		bool ran = false;
 		{
 			RenderGraphRuntime::EpochBodyScope body(segment);
 			ran = runtime.ExecuteEpoch(segment, [&](org::RenderGraph&) {
+				if (sharedConstants)
+					SharedConstants::Commit();
 				for (const auto& client : active)
 					if (client->commit)
 						client->commit(a_point);
@@ -454,6 +484,8 @@ namespace FrameAnchors
 		if (ran && kInfo[index].late)
 			globals::features::upscaling.SeparateFromGraphEpochs();
 		if (ran) {
+			if (sharedConstants)
+				SharedConstants::CheckAfterRun();
 			SelfTest::AfterRun(a_point.anchor);
 			if (a_point.anchor == Anchor::DeferredPasses)
 				GraphResources::SelfTest::AfterRun();
