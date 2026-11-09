@@ -388,3 +388,35 @@ Keys used so far:
 - **Where it fits:** the Present anchor: a per-frame "present source" a client sets, read by the present pass. A
   screenshot or capture reads the same source.
 - **Found by:** P1.5 (2026-11-09).
+
+### Reading other features' graph outputs by name, and knowing whether they are there
+
+- **Need:** a pass reads several other features' outputs (textures and buffers) as graph resources, each only while that
+  feature's graph path is active, and otherwise reads the D3D11 resource or does without.
+- **Who:** Exponential Height Fog's light scattering reads IBL's SH (`IBL::EnvIBL`, `IBL::SkyIBL`), Skylighting's probes
+  (`Skylighting::ProbeArray`), Terrain Shadows' heights (`TerrainShadows::ShadowHeight`), Light Limit Fix's lights and lists
+  (`cs.llf.*`) and local shadows (`LightLimitFix::LocalShadowData`, `LightLimitFix::LocalShadowCache`). Today it asks each
+  producer's ORG class whether it is active and compares the feature's D3D11 view with the producer's export to decide.
+- **Where it fits:** a registry of named graph outputs (as `PublishedResources`, but for anchor graphs too) with a query
+  "is `Feature::Name` registered now", so a reader declares by name without knowing each producer's class.
+- **Found by:** P3 ExponentialHeightFog (2026-11-09).
+
+### Per-frame data a D3D11 producer maps with WRITE_DISCARD
+
+- **Need:** a pass reads a small buffer whose D3D11 producer renames it every frame (Map with WRITE_DISCARD), which an import
+  cannot follow.
+- **Who:** Exponential Height Fog reads Deferred's directional shadow light (t98). It takes the values from
+  `Deferred::GetDirectionalShadowLightData`, latches them, and a copy pass fills its own transient structured buffer.
+- **Where it fits:** a helper that turns CPU data into a transient graph buffer each frame (a latch region plus the copy), as
+  Light Limit Fix's lights upload and this fog's upload both do by hand.
+- **Found by:** P3 ExponentialHeightFog (2026-11-09).
+
+### Resources declared by shared shader headers
+
+- **Need:** a plugin's ORG shader includes CS headers that declare their own resources (SharedData's depth, Light Limit
+  Fix's lists, IBL, Terrain and Cloud Shadows), and reads them through its push block.
+- **Who:** Exponential Height Fog's light scattering. The headers declare those resources with `ORG_HEADER_SRV`; a shader
+  that defines `ORG_HEADER_RESOURCES` lists them as `EXTERN` entries (shader-workflow.md, "Resources that headers declare").
+- **Where it fits:** the dual-target shader ABI. A plugin needs the list of header resources and their names kept stable.
+  DXC's SPIR-V ignores `row_major` in a templated raw buffer `Load<T>`, so LATCH structs hold matrices as `float4` rows.
+- **Found by:** P3 ExponentialHeightFog (2026-11-09).
