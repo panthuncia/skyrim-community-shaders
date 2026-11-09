@@ -40,8 +40,8 @@ ORGTerrainShadows& ORGTerrainShadows::Get()
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
 #	include <Render/RenderGraph/RenderGraph.h>
-#	include <Render/Runtime/UploadServiceAccess.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
+#	include <Resources/Buffers/Buffer.h>
 #	include <rhi_helpers.h>
 
 #	include <algorithm>
@@ -85,9 +85,16 @@ struct ORGTerrainShadows::Impl
 	std::shared_ptr<org::LatchBlock> latch;
 	std::uint32_t maxDispatches = 0;
 
-	// The heightmap's bytes until the first commit has queued their upload.
-	DirectX::Image image{};
-	std::shared_ptr<const void> imageOwner;
+	// The heightmap's bytes in an upload buffer, laid out for a buffer-to-texture copy, until the copy pass has run. Async epochs
+	// record no texture uploads, so a copy pass of the graph fills the heightmap instead.
+	std::shared_ptr<org::Buffer> staging;
+	rhi::CopyableFootprint stagingFootprint{};
+	enum class Copy : std::uint8_t
+	{
+		None,
+		Needed,     // the copy pass is in the graph; no epoch with it has been submitted yet
+		Submitted,  // an epoch with it was submitted: the next frame drops it
+	} copy = Copy::None;
 
 	// Render thread: this frame's constants, until the commit latches them.
 	std::vector<Constants> pending;
@@ -171,6 +178,91 @@ namespace
 		mutable std::atomic<std::uint64_t> mismatch = 0;
 	};
 
+	struct CopyBindings
+	{
+		org::ResourceBindingToken heightMap;
+	};
+
+	struct CopyFrame
+	{
+		std::shared_ptr<org::Buffer> staging;
+		rhi::CopyableFootprint footprint{};
+	};
+
+	/** @brief Fills the heightmap from the upload buffer. It is in the graph only until an epoch with it was submitted. */
+	class HeightMapCopyPass final : public org::TypedRenderGraphPass<HeightMapCopyPass, CopyFrame, CopyBindings>
+	{
+	public:
+		explicit HeightMapCopyPass(const Impl& a_impl) :
+			heightMap(a_impl.heightMap->Graph()), staging(a_impl.staging), footprint(a_impl.stagingFootprint) {}
+
+		CopyBindings Declare(org::PassBuilder& a_builder)
+		{
+			a_builder.PreferQueue(org::QueueKind::Graphics);
+			return { a_builder.CopyDestination(heightMap) };
+		}
+
+		// The copy depends only on what the pass was made with.
+		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(staging.get())); }
+
+		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { staging, footprint }; }
+
+		static void Record(const CopyBindings& a_bindings, const CopyFrame& a_frame, org::PassRecordContext& a_recording)
+		{
+			if (!a_frame.staging)
+				return;
+			rhi::BufferTextureCopyFootprint copy{};
+			copy.texture = a_recording.Resolve(a_bindings.heightMap).GetHandle();
+			copy.buffer = a_frame.staging->GetAPIResource().GetHandle();
+			copy.mip = 0;
+			copy.arraySlice = 0;
+			copy.footprint = a_frame.footprint;
+			a_recording.Commands().CopyBufferToTexture(copy);
+		}
+
+	private:
+		std::shared_ptr<org::Resource> heightMap;
+		std::shared_ptr<org::Buffer> staging;
+		rhi::CopyableFootprint footprint;
+	};
+
+	/**
+	 * @brief The heightmap's mip 0 in a new upload buffer, rows at the copy's pitch. Null, logged, when the buffer cannot be made or
+	 * mapped.
+	 */
+	std::shared_ptr<org::Buffer> StageHeightMap(const DirectX::Image& a_image, rhi::CopyableFootprint& a_footprint)
+	{
+		const auto format = rhi::helpers::ToRHI(a_image.format);
+		const rhi::helpers::SubresourceData source{ a_image.pixels, static_cast<std::uint32_t>(a_image.rowPitch), static_cast<std::uint32_t>(a_image.slicePitch) };
+		const auto plan = rhi::helpers::PlanTextureUploadSubresources(format, static_cast<std::uint32_t>(a_image.width), static_cast<std::uint32_t>(a_image.height), 1, 1, 1,
+			rhi::Span<const rhi::helpers::SubresourceData>{ &source, 1 });
+		if (plan.footprints.size() != 1 || !plan.totalSize) {
+			logger::error("[ORG] Terrain Shadows: no copy layout for the heightmap's format {}", static_cast<int>(a_image.format));
+			return nullptr;
+		}
+		const auto& fp = plan.footprints[0];
+		if (fp.rowSize > a_image.rowPitch || static_cast<std::size_t>(fp.rows) * a_image.rowPitch > a_image.slicePitch) {
+			logger::error("[ORG] Terrain Shadows: the heightmap's rows do not match its format");
+			return nullptr;
+		}
+		auto staging = org::Buffer::CreateShared(rhi::HeapType::Upload, plan.totalSize);
+		staging->SetName("TerrainShadows::HeightMapUpload");
+		auto resource = staging->GetAPIResource();
+		void* mapped = nullptr;
+		resource.Map(&mapped);
+		if (!mapped) {
+			logger::error("[ORG] Terrain Shadows: the heightmap's upload buffer could not be mapped");
+			return nullptr;
+		}
+		auto* destination = static_cast<std::byte*>(mapped) + fp.offset;
+		const auto* rows = reinterpret_cast<const std::byte*>(a_image.pixels);
+		for (std::uint32_t row = 0; row < fp.rows; ++row)
+			std::memcpy(destination + static_cast<std::size_t>(row) * fp.rowPitch, rows + static_cast<std::size_t>(row) * a_image.rowPitch, fp.rowSize);
+		resource.Unmap(0, plan.totalSize);
+		a_footprint = { fp.offset, fp.rowPitch, fp.width, fp.height, fp.depth };
+		return staging;
+	}
+
 	/** @brief Unbinds t60 before the export goes: its texture is freed once D3D11 is past the commands issued until then. */
 	void UnbindShadowHeight()
 	{
@@ -179,19 +271,13 @@ namespace
 		globals::d3d::context->CSSetShaderResources(60, 1, &none);
 	}
 
-	/** @brief The client's commit: the heightmap's upload once, then this frame's constants at the frame slot. */
+	/** @brief The client's commit: this frame's constants at the frame slot. The epoch it precedes carries the heightmap's copy. */
 	void Commit(Impl& a_impl)
 	{
-		if (a_impl.imageOwner) {
-			const rhi::helpers::SubresourceData source{ a_impl.image.pixels, static_cast<std::uint32_t>(a_impl.image.rowPitch),
-				static_cast<std::uint32_t>(a_impl.image.slicePitch) };
-			TEXTURE_UPLOAD_SUBRESOURCES(org::runtime::UploadTarget::FromShared(a_impl.heightMap->Graph()), rhi::helpers::ToRHI(a_impl.image.format),
-				static_cast<std::uint32_t>(a_impl.image.width), static_cast<std::uint32_t>(a_impl.image.height), 1, 1, 1, &source, 1);
-			a_impl.imageOwner.reset();
-			a_impl.image = {};
-		}
 		if (!std::exchange(a_impl.pendingFrame, false))
 			return;
+		if (a_impl.copy == Impl::Copy::Needed)
+			a_impl.copy = Impl::Copy::Submitted;
 		const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
 		a_impl.latch->Write(slot, 0, std::as_bytes(std::span(a_impl.pending)));
 	}
@@ -222,7 +308,7 @@ void ORGTerrainShadows::Fail()
 	impl.reset();
 }
 
-bool ORGTerrainShadows::SetHeightmap(const DirectX::Image& a_image, std::shared_ptr<const void> a_owner)
+bool ORGTerrainShadows::SetHeightmap(const DirectX::Image& a_image)
 {
 	if (!Available())
 		return false;
@@ -267,11 +353,25 @@ bool ORGTerrainShadows::SetHeightmap(const DirectX::Image& a_image, std::shared_
 		return false;
 	}
 	next->pending.reserve(next->maxDispatches);
-	next->image = a_image;
-	next->imageOwner = std::move(a_owner);
+	next->staging = StageHeightMap(a_image, next->stagingFootprint);
+	if (!next->staging) {
+		Fail();
+		return false;
+	}
+	next->copy = Impl::Copy::Needed;
 
 	FrameAnchors::ClientDesc client{};
 	client.id = kClientId;
+	// Before the update, which reads the heightmap. Made only while the copy has not been submitted (Submit drops it).
+	client.passes.push_back({ .name = std::string(kClientId) + ".heightmap-copy",
+		.anchor = FrameAnchors::Anchor::EarlyPrepass,
+		.order = 90,
+		.kind = FrameAnchors::PassKind::Copy,
+		.make = [next]() -> std::shared_ptr<org::RenderPass> {
+			if (!next->staging)
+				return nullptr;
+			return std::make_shared<HeightMapCopyPass>(*next);
+		} });
 	client.passes.push_back({ .name = std::string(kClientId) + ".update",
 		.anchor = FrameAnchors::Anchor::EarlyPrepass,
 		.order = 100,
@@ -282,7 +382,7 @@ bool ORGTerrainShadows::SetHeightmap(const DirectX::Image& a_image, std::shared_
 		next->shadowHeights->Register(a_graph);
 	};
 	client.commit = [next](const FrameAnchors::Point&) { Commit(*next); };
-	// The upload rides with the first frame's update, so the client is active only with an update to run.
+	// The copy rides with the first frame's update, so the client is active only with an update to run.
 	client.active = [next] { return next->pendingFrame; };
 	client.onFailed = [] {
 		logger::error("[ORG] Terrain Shadows: the render graph failed; back to D3D11");
@@ -306,6 +406,13 @@ bool ORGTerrainShadows::Submit(std::span<const TerrainShadows::ShadowUpdateCB> a
 	if (!Active() || a_dispatches.empty() || !a_groups)
 		return false;
 	auto& state = *impl;
+	// An epoch with the heightmap's copy was submitted: the graph is built again without the copy pass, and the upload buffer goes
+	// with the last build that holds it.
+	if (state.copy == Impl::Copy::Submitted) {
+		state.copy = Impl::Copy::None;
+		state.staging.reset();
+		FrameAnchors::Refresh(kClientId);
+	}
 	const auto count = (std::min)(static_cast<std::uint32_t>(a_dispatches.size()), state.maxDispatches);
 	state.pending.assign(a_dispatches.begin(), a_dispatches.begin() + count);
 	state.pendingFrame = true;
@@ -333,7 +440,7 @@ void ORGTerrainShadows::Reserve() {}
 bool ORGTerrainShadows::Available() const { return false; }
 bool ORGTerrainShadows::Active() const { return false; }
 void ORGTerrainShadows::Fail() { failed = true; }
-bool ORGTerrainShadows::SetHeightmap(const DirectX::Image&, std::shared_ptr<const void>) { return false; }
+bool ORGTerrainShadows::SetHeightmap(const DirectX::Image&) { return false; }
 bool ORGTerrainShadows::Submit(std::span<const TerrainShadows::ShadowUpdateCB>, std::uint32_t) { return false; }
 ID3D11ShaderResourceView* ORGTerrainShadows::ShadowHeightSRV() const { return nullptr; }
 ORGTerrainShadows::~ORGTerrainShadows() = default;

@@ -400,18 +400,18 @@ void TerrainShadows::LoadHeightmap()
 	{
 		auto& target_heightmap = heightmaps[worldspace_name];
 
-		auto image = std::make_shared<DirectX::ScratchImage>();
+		DirectX::ScratchImage image;
 		try {
 			std::filesystem::path path{ target_heightmap.dir };
 			path /= target_heightmap.filename;
 
-			DX::ThrowIfFailed(LoadFromDDSFile(path.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, *image));
+			DX::ThrowIfFailed(LoadFromDDSFile(path.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, image));
 		} catch (const DX::com_exception& e) {
 			logger::error("{}", e.what());
 			return;
 		}
 
-		const auto& metadata = image->GetMetadata();
+		const auto& metadata = image.GetMetadata();
 		heightMapWidth = static_cast<uint>(metadata.width);
 		heightMapHeight = static_cast<uint>(metadata.height);
 
@@ -419,8 +419,8 @@ void TerrainShadows::LoadHeightmap()
 		auto& orgShadows = ORGTerrainShadows::Get();
 		if (orgShadows.Available()) {
 			UnbindShadowHeight();
-			const auto* mip0 = image->GetImage(0, 0, 0);
-			if (mip0 && orgShadows.SetHeightmap(*mip0, image)) {
+			const auto* mip0 = image.GetImage(0, 0, 0);
+			if (mip0 && orgShadows.SetHeightmap(*mip0)) {
 				texHeightMap.reset();
 				texShadowHeight.reset();
 				orgHeightmap = true;
@@ -435,8 +435,8 @@ void TerrainShadows::LoadHeightmap()
 		ID3D11Resource* pResource = nullptr;
 		try {
 			DX::ThrowIfFailed(CreateTexture(device,
-				image->GetImages(), image->GetImageCount(),
-				image->GetMetadata(), &pResource));
+				image.GetImages(), image.GetImageCount(),
+				image.GetMetadata(), &pResource));
 		} catch (const DX::com_exception& e) {
 			logger::error("{}", e.what());
 			return;
