@@ -137,6 +137,29 @@ Keys used so far:
 
 - The anchor self-test (`CS_ORG_ANCHOR_SELFTEST`): 0, 1 and 2 at every anchor.
 - The graph resource self-test (`CS_ORG_GRAPHRES_SELFTEST`): 0 at DeferredPasses.
+- Screen Space Shadows (`CS_ORG_SCREEN_SPACE_SHADOWS`): 100 (clear) and 101 (raymarch) at Prepass.
+
+### Work whose shape changes every frame
+
+- **Need:** a pass whose dispatch count or group counts follow the frame's data (Screen Space Shadows: Bend's dispatch
+  list, up to 8 dispatches with new group counts and wave offsets every frame), while the recording is kept and submitted
+  again.
+- **Who:** CS's Screen Space Shadows today; any plugin that sizes work on the CPU each frame.
+- **Where it fits:** record the capacity, and let the data drive it. The commit writes each dispatch's constants and its
+  `Dispatch` arguments into the execution's `LatchBlock` region; the pass records one indirect dispatch per entry
+  (`ExecuteIndirect` with a one-argument `Dispatch` signature, read from the latch), and unused entries hold zero groups. A
+  plugin API would need the dispatch signature and `LATCH` entries (`ShaderBindings::LatchOf`) exported with the programs.
+- **Found by:** P3 W1, Screen Space Shadows (2026-11-09).
+
+### Reading another feature's D3D11 texture
+
+- **Need:** read, in a graph pass, a texture that a D3D11 feature (or plugin) still makes and writes, such as Terrain
+  Blending's blended depth, which Screen Space Shadows reads instead of the engine's depth while Terrain Blending is on.
+- **Who:** CS ports whose inputs come from features not ported yet; plugins whose textures other passes read.
+- **Where it fits:** `FrameAnchors::FeatureTexture(texture, id)`: the DXVK image imported once, as `EngineTarget` does, with
+  its views from the texture's bind flags. The owner keeps writing it with D3D11. When the owner is ported, the reader
+  switches to the owner's graph resource.
+- **Found by:** P3 W1, Screen Space Shadows (2026-11-09).
 ### Presenting from more than one thread
 
 - **Need:** present a frame from a thread other than the render thread, under the engine's lock.

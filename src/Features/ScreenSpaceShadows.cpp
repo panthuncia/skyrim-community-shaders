@@ -1,7 +1,9 @@
 #include "ScreenSpaceShadows.h"
 
+#include "Features/ScreenSpaceShadows/ORGScreenSpaceShadows.h"
 #include "Features/TerrainBlending.h"
 #include "I18n/I18n.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "State.h"
 #include "Utils/D3D.h"
 
@@ -103,13 +105,14 @@ ID3D11ComputeShader* ScreenSpaceShadows::GetComputeRaymarch()
 	return raymarchCS;
 }
 
-void ScreenSpaceShadows::DrawShadows()
+bool ScreenSpaceShadows::ShouldDraw() const
 {
-	ZoneScopedS(8);
-	TracyD3D11Zone(globals::state->tracyCtx, "Screen Space Shadows");
+	auto sky = globals::game::sky;
+	return sky && bendSettings.Enable && sky->mode.get() == RE::Sky::Mode::kFull;
+}
 
-	auto context = globals::d3d::context;
-
+ScreenSpaceShadows::Dispatches ScreenSpaceShadows::BuildDispatches() const
+{
 	auto accumulator = *globals::game::currentAccumulator.get();
 	auto dirLight = skyrim_cast<RE::NiDirectionalLight*>(accumulator->GetRuntimeData().activeShadowSceneNode->GetRuntimeData().sunLight->light.get());
 
@@ -118,20 +121,56 @@ void ScreenSpaceShadows::DrawShadows()
 	light.Normalize();
 	float4 lightProjection = float4(-light.x, -light.y, -light.z, 0.0f);
 
-	// Helper lambda to calculate light projection
-	auto CalculateLightProjection = [&]() -> std::array<float, 4> {
-		auto viewProjMat = globals::game::frameBufferCached.GetCameraViewProj().Transpose();
-		auto projectedLight = DirectX::SimpleMath::Vector4::Transform(lightProjection, viewProjMat);
-		return { projectedLight.x, projectedLight.y, projectedLight.z, projectedLight.w };
-	};
-
-	auto lightProjectionF = CalculateLightProjection();
+	auto viewProjMat = globals::game::frameBufferCached.GetCameraViewProj().Transpose();
+	auto projectedLight = DirectX::SimpleMath::Vector4::Transform(lightProjection, viewProjMat);
+	float lightProjectionF[4] = { projectedLight.x, projectedLight.y, projectedLight.z, projectedLight.w };
 
 	float2 renderSize = Util::ConvertToDynamic(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
 	int viewportSize[2] = { (int)renderSize.x, (int)renderSize.y };
 
 	int minRenderBounds[2] = { 0, 0 };
 	int maxRenderBounds[2] = { viewportSize[0], viewportSize[1] };
+
+	auto viewport = globals::game::graphicsState;
+	float2 dynamicRes = { viewport->GetRuntimeData().dynamicResolutionWidthRatio, viewport->GetRuntimeData().dynamicResolutionHeightRatio };
+
+	auto dispatchList = Bend::BuildDispatchList(lightProjectionF, viewportSize, minRenderBounds, maxRenderBounds);
+
+	Dispatches dispatches;
+	dispatches.count = static_cast<uint32_t>(std::clamp(dispatchList.DispatchCount, 0, static_cast<int>(Dispatches::kMax)));
+	for (uint32_t i = 0; i < dispatches.count; i++) {
+		auto& dispatchData = dispatchList.Dispatch[i];
+		auto& data = dispatches.constants[i];
+		data.LightCoordinate[0] = dispatchList.LightCoordinate_Shader[0];
+		data.LightCoordinate[1] = dispatchList.LightCoordinate_Shader[1];
+		data.LightCoordinate[2] = dispatchList.LightCoordinate_Shader[2];
+		data.LightCoordinate[3] = dispatchList.LightCoordinate_Shader[3];
+
+		data.WaveOffset[0] = dispatchData.WaveOffset_Shader[0];
+		data.WaveOffset[1] = dispatchData.WaveOffset_Shader[1];
+
+		data.FarDepthValue = 1.0f;
+		data.NearDepthValue = 0.0f;
+
+		data.DynamicRes = dynamicRes;
+
+		data.InvDepthTextureSize[0] = 1.0f / (float)viewportSize[0];
+		data.InvDepthTextureSize[1] = 1.0f / (float)viewportSize[1];
+
+		data.settings = bendSettings;
+
+		for (int axis = 0; axis < 3; axis++)
+			dispatches.groups[i][axis] = static_cast<uint32_t>(dispatchData.WaveCount[axis]);
+	}
+	return dispatches;
+}
+
+void ScreenSpaceShadows::DrawShadows()
+{
+	ZoneScopedS(8);
+	TracyD3D11Zone(globals::state->tracyCtx, "Screen Space Shadows");
+
+	auto context = globals::d3d::context;
 
 	// Setup common render state.
 	// SSS always uses 24/32-bit depth, never the R16_UNORM half-precision path.
@@ -150,68 +189,32 @@ void ScreenSpaceShadows::DrawShadows()
 	auto buffer = raymarchCB->CB();
 	context->CSSetConstantBuffers(1, 1, &buffer);
 
-	auto viewport = globals::game::graphicsState;
+	globals::profiler->BeginPass("ScreenSpaceShadows::RayMarch");
 
-	float2 dynamicRes = { viewport->GetRuntimeData().dynamicResolutionWidthRatio, viewport->GetRuntimeData().dynamicResolutionHeightRatio };
+	if (globals::state->frameAnnotations) {
+		globals::state->BeginPerfEvent("SSS - Ray March");
+	}
 
-	// Shared dispatch logic
-	auto Dispatch = [&](ID3D11ComputeShader* shader, const float* lightProj,
-						float invTexSizeX, float invTexSizeY) {
-		globals::profiler->BeginPass("ScreenSpaceShadows::RayMarch");
+	context->CSSetShader(GetComputeRaymarch(), nullptr, 0);
 
-		if (globals::state->frameAnnotations) {
-			globals::state->BeginPerfEvent("SSS - Ray March");
+	const auto dispatches = BuildDispatches();
+	for (uint32_t i = 0; i < dispatches.count; i++) {
+		{
+			TracyD3D11Zone(globals::state->tracyCtx, "SSS - Dispatch CB");
+			raymarchCB->Update(dispatches.constants[i]);
 		}
 
-		context->CSSetShader(shader, nullptr, 0);
-
-		auto dispatchList = Bend::BuildDispatchList(const_cast<float*>(lightProj), viewportSize, minRenderBounds, maxRenderBounds);
-
-		for (int i = 0; i < dispatchList.DispatchCount; i++) {
-			auto dispatchData = dispatchList.Dispatch[i];
-
-			{
-				TracyD3D11Zone(globals::state->tracyCtx, "SSS - Dispatch CB");
-
-				RaymarchCB data{};
-				data.LightCoordinate[0] = dispatchList.LightCoordinate_Shader[0];
-				data.LightCoordinate[1] = dispatchList.LightCoordinate_Shader[1];
-				data.LightCoordinate[2] = dispatchList.LightCoordinate_Shader[2];
-				data.LightCoordinate[3] = dispatchList.LightCoordinate_Shader[3];
-
-				data.WaveOffset[0] = dispatchData.WaveOffset_Shader[0];
-				data.WaveOffset[1] = dispatchData.WaveOffset_Shader[1];
-
-				data.FarDepthValue = 1.0f;
-				data.NearDepthValue = 0.0f;
-
-				data.DynamicRes = dynamicRes;
-
-				data.InvDepthTextureSize[0] = invTexSizeX;
-				data.InvDepthTextureSize[1] = invTexSizeY;
-
-				data.settings = bendSettings;
-
-				raymarchCB->Update(data);
-			}
-
-			{
-				TracyD3D11Zone(globals::state->tracyCtx, "SSS - Dispatch Sweep");
-				context->Dispatch(dispatchData.WaveCount[0], dispatchData.WaveCount[1], dispatchData.WaveCount[2]);
-			}
+		{
+			TracyD3D11Zone(globals::state->tracyCtx, "SSS - Dispatch Sweep");
+			context->Dispatch(dispatches.groups[i][0], dispatches.groups[i][1], dispatches.groups[i][2]);
 		}
+	}
 
-		if (globals::state->frameAnnotations) {
-			globals::state->EndPerfEvent();
-		}
+	if (globals::state->frameAnnotations) {
+		globals::state->EndPerfEvent();
+	}
 
-		globals::profiler->EndPass();
-	};
-
-	float InvTexSizeX = 1.0f / (float)viewportSize[0];
-	float InvTexSizeY = 1.0f / (float)viewportSize[1];
-
-	Dispatch(GetComputeRaymarch(), lightProjectionF.data(), InvTexSizeX, InvTexSizeY);
+	globals::profiler->EndPass();
 
 	ID3D11ShaderResourceView* views[1]{ nullptr };
 	context->CSSetShaderResources(0, 1, views);
@@ -228,17 +231,27 @@ void ScreenSpaceShadows::DrawShadows()
 	context->CSSetConstantBuffers(1, 1, &buffer);
 }
 
+void ScreenSpaceShadows::PostPostLoad()
+{
+	if (ORGScreenSpaceShadows::Requested())
+		FrameAnchors::Reserve(FrameAnchors::Anchor::Prepass);
+}
+
 void ScreenSpaceShadows::Prepass()
 {
 	auto context = globals::d3d::context;
 
+	// The ORG path: its passes run in the Prepass anchor's epoch, right after the features' Prepass.
+	if (auto* view = ORGScreenSpaceShadows::Get().Prepass()) {
+		context->PSSetShaderResources(45, 1, &view);
+		return;
+	}
+
 	float white[4] = { 1, 1, 1, 1 };
 	context->ClearUnorderedAccessViewFloat(screenSpaceShadowsTexture->uav.get(), white);
 
-	if (auto sky = globals::game::sky)
-		if (bendSettings.Enable && sky->mode.get() == RE::Sky::Mode::kFull) {
-			DrawShadows();
-		}
+	if (ShouldDraw())
+		DrawShadows();
 
 	auto view = screenSpaceShadowsTexture->srv.get();
 	context->PSSetShaderResources(45, 1, &view);
@@ -312,6 +325,10 @@ void ScreenSpaceShadows::SetupResources()
 		screenSpaceShadowsTexture = new Texture2D(texDesc, "SSS::ShadowTexture");
 		screenSpaceShadowsTexture->CreateSRV(srvDesc);
 		screenSpaceShadowsTexture->CreateUAV(uavDesc);
+
+		// The ORG path's texture has the same description. The D3D11 one stays for the fallback.
+		if (ORGScreenSpaceShadows::Requested())
+			ORGScreenSpaceShadows::Get().Setup(texDesc);
 	}
 }
 #undef I18N_KEY_PREFIX

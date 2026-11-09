@@ -83,6 +83,24 @@ public:
 	 */
 	ID3D11ComputeShader* GetComputeRaymarch();
 
+	/** @brief Bend's dispatch list for this frame: each dispatch's constants and thread-group counts. */
+	struct Dispatches
+	{
+		static constexpr uint32_t kMax = 8;  // Bend::DispatchList's capacity
+		RaymarchCB constants[kMax]{};
+		uint32_t groups[kMax][3]{};
+		uint32_t count = 0;
+	};
+
+	/** @brief Whether the shadows are drawn this frame: the feature is enabled and the full sky (sun or moon) is up. */
+	bool ShouldDraw() const;
+
+	/** @brief This frame's raymarch dispatches, from the sun's direction and the render size. */
+	Dispatches BuildDispatches() const;
+
+	/** @brief Reserves the Prepass anchor when the ORG path is asked for (CS_ORG_SCREEN_SPACE_SHADOWS=1). */
+	virtual void PostPostLoad() override;
+
 	/** @brief Clears the shadow texture and dispatches shadow ray marching if conditions are met. */
 	virtual void Prepass() override;
 
