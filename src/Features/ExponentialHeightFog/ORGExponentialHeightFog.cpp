@@ -24,6 +24,7 @@ ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 
 #	include "Deferred.h"
 #	include "Features/CloudShadows.h"
+#	include "Features/CloudShadows/ORGCloudShadows.h"
 #	include "Features/ExponentialHeightFog.h"
 #	include "Features/IBL.h"
 #	include "Features/IBL/ORGIBL.h"
@@ -869,10 +870,14 @@ bool ORGExponentialHeightFog::Prepass()
 	}
 
 	if (globals::features::cloudShadows.loaded) {
-		// The view Cloud Shadows leaves bound at CS t25, which the D3D11 path reads.
+		// The view Cloud Shadows leaves bound at CS t25, which the D3D11 path reads: the graph's own cubemap when it is that one.
 		winrt::com_ptr<ID3D11ShaderResourceView> view;
 		globals::d3d::context->CSGetShaderResources(25, 1, view.put());
-		shape.inputs[kCloudShadows] = ImportView("CloudShadows::Occlusion", view.get());
+		const auto& graphClouds = ORGCloudShadows::Get();
+		if (view && graphClouds.Active() && view.get() == graphClouds.OcclusionSRV())
+			shape.inputs[kCloudShadows] = { nullptr, "CloudShadows::Occlusion" };
+		else
+			shape.inputs[kCloudShadows] = ImportView("CloudShadows::Occlusion", view.get());
 		if (!shape.inputs[kCloudShadows])
 			return fallback("Cloud Shadows' texture is missing");
 	}

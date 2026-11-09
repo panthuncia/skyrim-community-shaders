@@ -15,6 +15,7 @@ namespace DCLF::Integrations::CloudShadows
 		// same prepass (this frame's at the faces' commit). Only on a frame whose water reflection ran that prepass (State::activeReflections,
 		// set by Deferred::ReflectionsPrepasses until Present) with the full sky and a climate, its conditions; otherwise the binding stands
 		// from an earlier frame, or was never made: the captured view.
+		// On the ORG path (CS_ORG_CLOUD_SHADOWS) the view is the graph texture's D3D11 export, imported like any other view.
 		void* CloudOcclusionView()
 		{
 			const auto& cloudShadows = globals::features::cloudShadows;
@@ -23,7 +24,7 @@ namespace DCLF::Integrations::CloudShadows
 			const auto* sky = globals::game::sky;
 			if (!sky || sky->mode.get() != RE::Sky::Mode::kFull || !sky->currentClimate)
 				return nullptr;
-			return cloudShadows.texCubemapCloudOccCopy->srv.get();
+			return cloudShadows.OcclusionSRV();
 		}
 
 		void Install(Api::InstallContext& a_context)
