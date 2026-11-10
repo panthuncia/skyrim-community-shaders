@@ -550,7 +550,7 @@ Keys used so far:
 - **Who:** Unified Water's flowmap (all of Tamriel's 64x64 flow tiles in one DDS). Its D3D11 path copied the tiles on a
   deferred context and read the texture back with `CaptureTexture` to save it. Plugins that bake textures at load do the same.
 - **Where it fits:** no graph pass. When the result only goes to disk, the work is a CPU copy: DirectXTex decodes the tiles,
-  they go into a `ScratchImage`, and `Util::SaveImageToFile` writes it (`CS_ORG_UNIFIED_WATER=1`). A GPU pass would add an
+  they go into a `ScratchImage`, and `Util::SaveImageToFile` writes it (`UnifiedWater/Flowmap.cpp`). A GPU pass would add an
   upload, a readback and a host wait on a graph epoch, and an anchor pass does not run while `DataLoaded` blocks the main
   thread. An API needs no GPU entry for this; it needs the engine side, the texture the engine loads from that file, to come
   from an ORG texture in the DXVK-free build (P5.4).

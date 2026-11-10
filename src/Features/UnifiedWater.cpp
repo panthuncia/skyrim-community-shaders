@@ -253,10 +253,7 @@ void UnifiedWater::DataLoaded()
 
 		waterCache->RegenerateCaches();
 	} else {
-		// A test switch: rebuild the flowmap at every start, so a run exercises the D3D11 or ORG builder.
-		char regenerate[8]{};
-		const bool forceFlowmap = GetEnvironmentVariableA("CS_UNIFIED_WATER_REGENERATE_FLOWMAP", regenerate, sizeof(regenerate)) && std::strcmp(regenerate, "1") == 0;
-		if (forceFlowmap ? flowmap->RegenerateAndLoadFlowmap() : flowmap->LoadOrGenerateFlowmap())
+		if (flowmap->LoadOrGenerateFlowmap())
 			SetFlowmapTex();
 
 		waterCache->LoadOrGenerateCaches();
