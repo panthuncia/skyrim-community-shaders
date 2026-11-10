@@ -106,6 +106,33 @@ boundary. Put `PUSH` entries last.
   `ShaderBindings::Words<Block>()` fails to compile above the limit, and `tools/check-dual-target-shaders.py` checks the
   shader side.
 
+**Large constant buffers read as globals.** A shader whose D3D11 code reads a cbuffer's fields by their bare names (Color
+Grading, Depth of Field, Lens Flare) lists the fields once, as `M(type, name)` and `A(type, name, count)`, and declares them
+with the `ORG_GLOBAL_*` macros instead of writing its own `#if CS_ORG_BINDLESS` split:
+
+```hlsl
+#define MY_CB_FIELDS(M, A) \
+	M(float4, Tint)        \
+	A(float4, Weights, 3)
+ORG_PUSH_BLOCK(MY_RESOURCES(ORG_HANDLE) ORG_HANDLE(LATCH, MyConstants, MyFrame, 1))
+MY_RESOURCES(ORG_RESOURCE)
+
+ORG_GLOBAL_LATCH_BEGIN(MyConstants, MyCB, 1)
+MY_CB_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(MyConstants, MyFrame, 1)
+#define ORG_GLOBAL_LATCH MyFrame
+MY_CB_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
+```
+
+Under FXC this is `cbuffer MyCB : register(b1)` holding the fields, as before, and the statics are nothing. Under DXC it is
+`struct MyConstants`, a `LATCH` named `MyFrame`, and one static per field copied from it, so the shader body reads the same
+names on both paths. The latch is not in the resource list, because under FXC the list would declare a second cbuffer at the
+same register; the push block names it with `ORG_HANDLE(LATCH, ...)`. ORG-only members (Depth of Field's `OrgResetFocus`) go
+between the field list and `ORG_GLOBAL_LATCH_END` under `#if defined(CS_ORG_BINDLESS)`. The shader invokes the field list
+itself: FXC cannot take a list's name as a macro argument. Moving to these macros left the FXC, SPIR-V and DXIL output of the
+three shaders byte-identical.
+
 **Not covered.** Resource arrays (`Texture2D t[4]`) and append/consume counters.
 
 **Resources that headers declare.** A header used by several shaders declares its own resource with `ORG_RESOURCE` (as
