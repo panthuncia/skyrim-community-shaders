@@ -209,6 +209,7 @@ struct ORGGrassCollision::Impl
 	std::uint32_t perFrameBytes = 0;
 	std::uint32_t boxesBytes = 0;
 	std::uint32_t instancesBytes = 0;
+	bool stagedFrame = false;  // Stage ran since the last commit
 	std::function<void()> onFailed;
 };
 
@@ -285,10 +286,11 @@ bool ORGGrassCollision::Setup(const Limits& a_limits, std::function<void()> a_on
 		resources->collision->Register(a_graph);
 	};
 	// The staged frame into the execution's latch region: the regions in use only, as the counts in the per-frame values bound the reads.
+	// A frame that staged nothing (no camera) updates nothing, as on D3D11.
 	client.commit = [self](const FrameAnchors::Point&) {
 		const auto& current = self->impl;
 		auto* graphHost = RenderGraphRuntime::Get().Host();
-		if (!current || !graphHost)
+		if (!current || !graphHost || !std::exchange(current->stagedFrame, false))
 			return;
 		const auto& latch = *current->resources->latch;
 		const auto& slotLayout = current->resources->layout;
@@ -300,6 +302,8 @@ bool ORGGrassCollision::Setup(const Limits& a_limits, std::function<void()> a_on
 		if (current->instancesBytes)
 			latch.Write(slot, slotLayout.instancesOffset, staged.subspan(slotLayout.instancesOffset, current->instancesBytes));
 	};
+	// Active only with a staged frame, so the passes never run on a latch region the commit did not write.
+	client.active = [self] { return self->impl && self->impl->stagedFrame; };
 	client.onFailed = [self] {
 		logger::error("[ORG] Grass Collision: the render graph failed; Grass Collision returns to D3D11");
 		PublishedResources::Withdraw(GrassShared::kCollisionGraphId);
@@ -344,6 +348,7 @@ void ORGGrassCollision::Stage(const Frame& a_frame)
 	state.perFrameBytes = copy(a_frame.perFrame, 0, state.limits.perFrameBytes);
 	state.boxesBytes = copy(a_frame.boxes, layout.boxesOffset, layout.boxesBytes);
 	state.instancesBytes = copy(a_frame.instances, layout.instancesOffset, layout.instancesBytes);
+	state.stagedFrame = true;
 }
 
 ID3D11ShaderResourceView* ORGGrassCollision::CollisionSRV() const

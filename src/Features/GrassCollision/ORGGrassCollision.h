@@ -67,8 +67,8 @@ public:
 
 	/**
 	 * @brief Before each run of the EarlyPrepass anchor (Grass Collision's EarlyPrepass, which Deferred calls right before it): the
-	 * values the anchor's commit writes into the latch block. Sizes past the limits are cut to them. The client is always active,
-	 * so its passes never run on a latch region the commit did not write.
+	 * values the anchor's commit writes into the latch block. Sizes past the limits are cut to them. The client is active only on
+	 * a frame that staged, so a frame without one (no camera) updates nothing, and the passes never read an unwritten region.
 	 */
 	void Stage(const Frame& a_frame);
 
