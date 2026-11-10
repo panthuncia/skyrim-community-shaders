@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <string_view>
+
+struct ID3D11ShaderResourceView;
 
 namespace GraphResources
 {
@@ -60,4 +63,11 @@ namespace PublishedResources
 	 * @return False when a_id is not published, withdrawn, or has no such view.
 	 */
 	bool ShaderResourceIndex(std::string_view a_id, std::uint32_t& a_index);
+
+	/**
+	 * @brief The id whose twin exports a_view as its D3D11 SRV, while that id is published; empty otherwise. A diagnostic for readers
+	 * that import D3D11 views: a graph pass reading the export through an import of its own is not ordered after the producer's
+	 * writes, so it should read the id instead.
+	 */
+	std::string ExportedId(const ID3D11ShaderResourceView* a_view);
 }
