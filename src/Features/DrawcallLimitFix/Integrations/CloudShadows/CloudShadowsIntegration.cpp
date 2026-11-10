@@ -1,4 +1,5 @@
-// Cloud Shadows: its cloud occlusion cubemap (t25), a frame texture. The render thread's callback reads the feature live.
+// Cloud Shadows: its cloud occlusion cubemap (t25) and its self-shadowing input (t26), frame textures. The render thread's callbacks
+// read the feature live.
 
 #include "Features/DrawcallLimitFix/Integrations/CloudShadows/CloudShadows.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
@@ -38,10 +39,29 @@ namespace DCLF::Integrations::CloudShadows
 			return Bound() && PublishedResources::ShaderResourceIndex(kOcclusionId, a_index);
 		}
 
+		// The view at t26 is the colour commit's captured one: the integration names none. The views with frame constants of their own
+		// (the reflection's faces) read null there, as before the registration.
+		void* SelfShadowView()
+		{
+			return nullptr;
+		}
+
+		// What the sky's last cloud draw left bound at t26 (CloudShadows::selfShadowView): after a draw in the reflections capture the
+		// occlusion cubemap, which on the ORG path is the published cubemap's export. The colour passes then read the published cubemap,
+		// ordered after its copy; otherwise (a layer's view, or the D3D11 copy) the captured view.
+		bool SelfShadowGraphIndex(std::uint32_t& a_index)
+		{
+			const auto& cloudShadows = globals::features::cloudShadows;
+			return cloudShadows.loaded && PublishedResources::ExportedId(cloudShadows.selfShadowView) == kOcclusionId &&
+			       PublishedResources::ShaderResourceIndex(kOcclusionId, a_index);
+		}
+
 		void Install(Api::InstallContext& a_context)
 		{
 			a_context.RegisterFrameTexture({ .name = "cloud shadows occlusion", .textureRegister = kCloudOcclusionRegister,
 				.view = &CloudOcclusionView, .capturedWhenNull = true, .graphResource = kOcclusionId, .graph = &CloudOcclusionGraphIndex });
+			a_context.RegisterFrameTexture({ .name = "cloud shadows self shadow", .textureRegister = kSelfShadowRegister, .view = &SelfShadowView,
+				.capturedWhenNull = true, .graphResource = kOcclusionId, .graph = &SelfShadowGraphIndex });
 		}
 	}
 

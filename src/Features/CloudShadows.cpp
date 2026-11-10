@@ -128,6 +128,7 @@ void CloudShadows::SkyShaderHacks()
 		bindLayerSelfShadow = false;
 		ID3D11ShaderResourceView* selfShadowSRV = texCloudShadowLayers[currentLayerForDraw]->srv.get();
 		context->PSSetShaderResources(26, 1, &selfShadowSRV);
+		selfShadowView = selfShadowSRV;
 	}
 
 	if (!overrideSky)
@@ -171,6 +172,7 @@ void CloudShadows::SkyShaderHacks()
 		// The layer chain is being written by this draw, so self shadowing reads last frame's composite
 		ID3D11ShaderResourceView* selfShadowSRV = OcclusionSRV();
 		context->PSSetShaderResources(26, 1, &selfShadowSRV);
+		selfShadowView = selfShadowSRV;
 
 		ID3D11RenderTargetView* captureRTVs[4] = { rtvs[0], rtvs[1], rtvs[2], cloudShadowLayerRTVs[layer][side] };
 		context->OMSetRenderTargets(4, captureRTVs, nullptr);
