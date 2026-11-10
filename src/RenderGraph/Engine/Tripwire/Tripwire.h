@@ -32,20 +32,26 @@ namespace org
  * Two modes, chosen per handle at creation:
  * - Native (nothing wrapped): every tripwire method fails as above.
  * - Guest (a D3D11 object wrapped, while DXVK is loaded): every method is forwarded to the wrapped object, so readers not ported
- *   yet keep working. Only the methods in the handle's WatchSet are logged. Arguments that are tripwire handles are replaced by
- *   the objects they wrap before forwarding, so a handle can be passed to a wrapped device or context. Objects a forwarded
- *   method returns (GetResource without a resource handle, the Get* methods of a context) are the wrapped D3D11 objects, not
- *   handles.
+ *   yet keep working. Only the methods in the handle's WatchSet are logged (with CS_ORG_TRIPWIRE_WATCH_ALL=1, every method,
+ *   except on the device, context and swap chain). Arguments that are tripwire handles are replaced by the objects they wrap
+ *   before forwarding, so a handle can be passed to a wrapped device or context. Each call site that passes one is logged once,
+ *   as a reader not ported yet ("<Interface> handle "<name>" passed on"). Objects a forwarded method returns (GetResource
+ *   without a resource handle, the Get* methods of a context) are the wrapped D3D11 objects, not handles. GraphResourceOf still
+ *   finds the ORG resource from them.
  *
  * A handle passed straight to DXVK's own device or context (not through a wrapping handle) crashes in DXVK, which casts it to its
- * own class. A port installs a handle only where every reader goes through its methods or through a wrapping device/context.
+ * own class. CS_ORG_TRIPWIRE_GUEST=1 puts wrapping handles in the engine's device and context pointers (GuestDevice.h). A port
+ * installs handles in engine fields only when GuestContextInstalled() is true (or in native mode). CS code that passes an engine
+ * field to globals::d3d::context, which stays raw DXVK, goes through Unwrap.
  *
  * Releases: the last Release frees the handle on the calling thread and releases the wrapped object (D3D11 objects are free
  * threaded). The ORG resource and the owner it keeps go to a queue that the render thread drains with ServiceRetired, so their
- * GPU memory outlives the frames that used them.
+ * GPU memory outlives the frames that used them. A guest handle's wrapped object holds them too (AttachGraphResource). They are
+ * queued again when DXVK drops its last reference, and freed only after that.
  *
  * Diagnostics: CS_ORG_TRIPWIRE_LOG=1 logs a report of every call site with its count, every CS_ORG_TRIPWIRE_LOG_INTERVAL seconds
- * (default 60, 0 = only at exit) when something changed, and at exit. CS_ORG_TRIPWIRE_SELFTEST=1 runs a self-test at startup
+ * (default 60, 0 = only at exit) when something changed, and at exit. A periodic report lists only the sites that are new or were
+ * called again since the last one. The exit report lists them all. CS_ORG_TRIPWIRE_SELFTEST=1 runs a self-test at startup
  * (TripwireSelfTest.cpp) that logs PASS or FAIL.
  */
 namespace RenderGraph::Engine::Tripwire
@@ -156,6 +162,13 @@ namespace RenderGraph::Engine::Tripwire
 	winrt::com_ptr<IDXGISwapChain> CreateSwapChain(const DXGI_SWAP_CHAIN_DESC& a_desc, Options a_options = {}, IDXGISwapChain* a_wrap = nullptr);
 	/** @} */
 
+	/**
+	 * @brief Pairs a device handle with a context handle: the device's GetImmediateContext then answers the context, and the
+	 * context's GetDevice answers the device (a reference added, as D3D11 does), in both modes. The device holds the context.
+	 * Call it once, before either is handed out. False when a_device is not a device handle or a_context not a context handle.
+	 */
+	bool PairDeviceAndContext(ID3D11Device* a_device, ID3D11DeviceContext* a_context);
+
 	/** @brief What a handle holds, for the code that replaces its readers. */
 	struct Info
 	{
@@ -171,6 +184,22 @@ namespace RenderGraph::Engine::Tripwire
 
 	/** @brief a_object's handle data, or an Info with kind Count when it is not a handle. */
 	Info Describe(const void* a_object);
+
+	/**
+	 * @brief The ORG resource behind a_object, from an engine field that may or may not hold a handle. That is a handle's
+	 * Options::graph, or the resource AttachGraphResource tied to a D3D11 object (a guest handle's wrapped object carries its
+	 * handle's). Null when there is none. a_object is null or a COM object (any interface pointer, CommonLib's REX::W32 types
+	 * included) that stays alive during the call. Any thread.
+	 */
+	std::shared_ptr<org::Resource> GraphResourceOf(const void* a_object);
+
+	/**
+	 * @brief For an engine field that keeps a plain DXVK object made from an ORG resource (no handle): ties a_graph and a_owner to
+	 * the object through private data, so GraphResourceOf finds them. When the object is destroyed (its last reference, DXVK's own
+	 * bindings included, on any thread), both go through ServiceRetired like a released handle's. Call it once, at creation, before
+	 * the object is shared. False when a_object is not a D3D11 device child or refuses private data.
+	 */
+	bool AttachGraphResource(void* a_object, std::shared_ptr<org::Resource> a_graph, std::shared_ptr<const void> a_owner = {});
 
 	/** @brief A shader handle's bytecode (empty when a_object is not a shader handle). Lives as long as the handle. */
 	std::span<const std::uint8_t> ShaderBytecode(const void* a_object);

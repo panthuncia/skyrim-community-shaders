@@ -383,11 +383,114 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 
 			auto innerContext = CreateDeviceContext({ .name = "SelfTest::InnerContext" });
 			auto outerContext = CreateDeviceContext({ .name = "SelfTest::OuterContext" }, innerContext.get());
+			// Two calls counted: the outer context's site records the handle it passed on, and the native inner context fails.
 			const auto bindBefore = Detail::Calls(Kind::DeviceContext, "PSSetShaderResources");
 			outerContext->PSSetShaderResources(0, 2, views);
-			a_check(Detail::Calls(Kind::DeviceContext, "PSSetShaderResources") == bindBefore + 1, "a guest context forwards to the context it wraps");
+			a_check(Detail::Calls(Kind::DeviceContext, "PSSetShaderResources") == bindBefore + 2,
+				"a guest context forwards to the context it wraps and records the handle argument at its site");
+			outerContext->PSSetShaderResources(0, 2, plainViews);
+			a_check(Detail::Calls(Kind::DeviceContext, "PSSetShaderResources") == bindBefore + 3, "a call without handle arguments records nothing extra");
 			D3D11_MAPPED_SUBRESOURCE mapped{};
 			a_check(outerContext->Map(outer.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped) == E_FAIL, "a guest context returns the wrapped context's result");
+
+			// Another D3D11 object interface is refused quietly, as D3D11 refuses it.
+			void* out = reinterpret_cast<void*>(1);
+			const auto queryBefore = Detail::Calls(Kind::Texture2D, "QueryInterface");
+			a_check(inner->QueryInterface(__uuidof(ID3D11Texture3D), &out) == E_NOINTERFACE && out == nullptr, "another texture interface is refused");
+			a_check(Detail::Calls(Kind::Texture2D, "QueryInterface") == queryBefore, "refusing another D3D11 object interface is no tripwire");
+		}
+
+		// A paired device and context answer each other, with balanced counts, and the context outlives the device safely.
+		void Paired(Checks& a_check)
+		{
+			auto device = CreateDevice({ .name = "SelfTest::PairedDevice" });
+			auto context = CreateDeviceContext({ .name = "SelfTest::PairedContext" });
+			a_check(!PairDeviceAndContext(device.get(), nullptr), "a device pairs only with a context handle");
+			a_check(PairDeviceAndContext(device.get(), context.get()), "a device and a context pair");
+			winrt::com_ptr<ID3D11DeviceContext> immediate;
+			device->GetImmediateContext(immediate.put());
+			a_check(immediate.get() == context.get(), "a paired device answers GetImmediateContext with its context");
+			winrt::com_ptr<ID3D11Device> owner;
+			context->GetDevice(owner.put());
+			a_check(owner.get() == device.get(), "a paired context answers GetDevice with its device");
+			immediate = nullptr;
+			owner = nullptr;
+			a_check(device->AddRef() == 2 && device->Release() == 1, "the device's count is balanced after GetDevice");
+			a_check(context->AddRef() == 3 && context->Release() == 2, "the context is held once by the device");
+			device = nullptr;
+			CheckTrip(a_check, Kind::DeviceContext, "GetDevice", [&] {
+				auto* out = reinterpret_cast<ID3D11Device*>(1);
+				context->GetDevice(&out);
+				return out == nullptr;
+			});
+			CheckFinalRelease(a_check, context, Kind::DeviceContext);
+		}
+
+		/** @brief The least of a D3D11 object that keeps private data interfaces, standing in for a DXVK object. */
+		class FakeChild final : public ID3D11DeviceChild
+		{
+		public:
+			HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override
+			{
+				if (!a_out)
+					return E_POINTER;
+				if (a_riid == __uuidof(IUnknown) || a_riid == __uuidof(ID3D11DeviceChild)) {
+					AddRef();
+					*a_out = static_cast<ID3D11DeviceChild*>(this);
+					return S_OK;
+				}
+				*a_out = nullptr;
+				return E_NOINTERFACE;
+			}
+			ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+			ULONG STDMETHODCALLTYPE Release() override
+			{
+				const ULONG left = --refs;
+				if (left == 0)
+					delete this;
+				return left;
+			}
+			void STDMETHODCALLTYPE GetDevice(ID3D11Device** a_out) override { Detail::Zero(a_out); }
+			HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID a_guid, UINT* a_size, void* a_data) override
+			{
+				if (!a_size || a_guid != guid || !stored)
+					return DXGI_ERROR_NOT_FOUND;
+				if (*a_size < sizeof(IUnknown*))
+					return DXGI_ERROR_MORE_DATA;
+				stored.copy_to(static_cast<IUnknown**>(a_data));
+				*a_size = sizeof(IUnknown*);
+				return S_OK;
+			}
+			HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return E_NOTIMPL; }
+			HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID a_guid, const IUnknown* a_data) override
+			{
+				guid = a_guid;
+				stored.copy_from(const_cast<IUnknown*>(a_data));
+				return S_OK;
+			}
+
+		private:
+			std::atomic<ULONG> refs{ 1 };
+			GUID guid{};
+			winrt::com_ptr<IUnknown> stored;
+		};
+
+		// AttachGraphResource on a plain object: the owner lives as long as the object, then goes to the retired queue.
+		void Attached(Checks& a_check)
+		{
+			(void)TakeRetired();
+			auto owner = std::make_shared<int>(2);
+			std::weak_ptr<int> watched = owner;
+			auto* object = new FakeChild;
+			a_check(AttachGraphResource(object, nullptr, std::move(owner)), "AttachGraphResource ties an owner to a plain object");
+			a_check(!IsHandle(object) && GraphResourceOf(object) == nullptr, "a plain object without a graph resource has none");
+			a_check(!watched.expired() && TakeRetired().empty(), "the owner lives while the object does");
+			std::thread([object] { object->Release(); }).join();
+			auto retired = TakeRetired();
+			a_check(retired.size() == 1 && !watched.expired(), "the object's destruction queues the owner for ServiceRetired");
+			retired.clear();
+			a_check(watched.expired(), "the owner is freed once taken from the queue");
+			a_check(GraphResourceOf(nullptr) == nullptr, "GraphResourceOf takes null");
 		}
 
 		// Release from several threads at once: the count stays exact and the owner is retired once, after the last one.
@@ -442,6 +545,8 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 		ShadersAndStates(check);
 		DeviceObjects(check);
 		Guest(check);
+		Paired(check);
+		Attached(check);
 		Threads(check);
 		Callers(check);
 		(void)TakeRetired();
