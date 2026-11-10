@@ -101,8 +101,6 @@ namespace
 			if (!a_frame.program || a_frame.steps.empty())
 				return;
 			const auto& compute = *a_frame.program->compute;
-			auto& commands = a_recording.Commands();
-			const std::uint32_t slot = a_recording.FrameSlot();
 			for (std::size_t i = 0; i < a_frame.steps.size(); ++i) {
 				const auto& step = a_frame.steps[i];
 				// The previous dispatch wrote this one's source.
@@ -115,11 +113,9 @@ namespace
 						(step.destinationHeight + kGroupSize - 1) / kGroupSize, a_bindings.slices);
 					continue;
 				}
-				commands.BindLayout(compute.layout->GetHandle());
-				commands.BindPipeline(compute.Pipeline());
-				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kConstantWords, constants.data());
-				const std::uint64_t offset = a_frame.latch->Offset(slot) + a_frame.offset + i * sizeof(GraphPasses::DispatchGroups);
-				commands.ExecuteIndirect(a_frame.program->signature->GetHandle(), a_frame.latch->Resource()->GetAPIResource().GetHandle(), offset, {}, 0, 1);
+				// The gate's group counts for this step, in the execution's frame slot.
+				const auto offset = static_cast<std::uint32_t>(a_frame.offset + i * sizeof(GraphPasses::DispatchGroups));
+				compute.DispatchIndirect(a_recording, constants, *a_frame.latch, offset);
 			}
 		}
 
@@ -134,7 +130,8 @@ namespace GraphPasses
 {
 	std::shared_ptr<const GenerateMipsProgram> LoadGenerateMips(rhi::Device a_device, bool a_array)
 	{
-		ComputeProgram::Desc desc{ .source = kShader, .constantWords = kConstantWords };
+		// ORG's own shader has no D3D11 build, so it takes none of CS's defines.
+		ComputeProgram::Desc desc{ .source = kShader, .constantWords = kConstantWords, .commonDefines = false };
 		if (a_array)
 			desc.defines.push_back({ L"ORG_GENERATE_MIPS_ARRAY", L"1" });
 		auto program = std::make_shared<GenerateMipsProgram>();
@@ -142,12 +139,6 @@ namespace GraphPasses
 		program->compute = ComputeProgram::Load(a_device, desc);
 		if (!program->compute)
 			return nullptr;
-		rhi::IndirectArg args[] = { { .kind = rhi::IndirectArgKind::Dispatch } };
-		if (a_device.CreateCommandSignature(rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, 1), sizeof(std::uint32_t) * 3 },
-				program->compute->layout->GetHandle(), program->signature) != rhi::Result::Ok) {
-			logger::error("[ORG] {}: the dispatch signature could not be created", kShader);
-			return nullptr;
-		}
 		return program;
 	}
 
