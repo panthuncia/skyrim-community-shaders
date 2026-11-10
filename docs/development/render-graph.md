@@ -844,6 +844,11 @@ functions. The engine side of P4.1 (which interfaces the engine asks for, the gu
     Scaleform also reads), right after the engine creates its device (`GuestDevice.h`). Ports install handles in engine
     fields only when `GuestContextInstalled()` is true. `globals::d3d::device`/`context` stay DXVK's own objects, so CS
     code that passes an engine field to them goes through `Tripwire::Unwrap`.
+-   **Startup order.** The engine makes its render targets (and CS runs `State::Setup`) before the blend table, where
+    the guest goes in. The other state tables and the query pools come after it. So the handles for objects made before
+    the guest go in at one later point: the hook on `Renderer::Init`'s last call (SE 75445+0x310, AE 77226+0x9C3). It
+    wraps the state tables, the query pools and the startup targets once. Objects made after the guest get their handles
+    at creation. The order is in [p4/p4.1-tripwire.md](./p4/p4.1-tripwire.md) ("Startup order").
 -   **ORG resource lookup.** `Tripwire::GraphResourceOf(pointer)` returns the ORG resource behind a handle, or behind a
     plain DXVK object that `AttachGraphResource` tagged (private data). A guest handle tags its wrapped object, so the
     lookup also works on what a forwarded getter returns.

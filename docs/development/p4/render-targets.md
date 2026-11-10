@@ -145,14 +145,19 @@ in practice the set is made at startup only, but the path works.
 - **Repurposed targets:** `Deferred::SetupRenderTarget` and HDR Display's LDR upgrade call `Targets::Recreate` with their description
   (HDR keeps the copy); HDR's restore calls `Targets::Restore`, which remakes the target from the engine's properties.
 - **Tripwire handles:** `CS_ORG_ENGINE_TARGET_HANDLES=1` puts handles that wrap the DXVK objects in the fields, only when the engine's
-  device and context are tripwire guests (P4.1). `RenderGraphRuntime::DescribeResource` describes the wrapped object.
+  device and context are tripwire guests (P4.1). The startup set is made and taken over before the guest exists. So
+  `Targets::InstallHandles`, from the hook at the end of `Renderer::Init`, wraps the fields of every target ORG made: each
+  handle wraps the object the field holds and takes the field's reference. Nothing is made again. Mip views and targets kept on
+  D3D11 stay plain, as at creation. Targets made later (a resize, `Recreate`, the 3D targets) get handles at creation.
+  `RenderGraphRuntime::DescribeResource` describes the wrapped object. The order is in
+  [p4.1-tripwire.md](./p4.1-tripwire.md) ("Startup order").
 
 ## Open points
 
 - Mip-generation targets stay D3D11 until the DXVK export accepts `GENERATE_MIPS` (or an ORG GenerateMips pass replaces the engine's
   call). The startup log counts how many targets were taken over.
-- With handles on, every CS site that hands an engine field to `globals::d3d::context` or a DXVK export must unwrap it first
-  (`Vram::TagGameRenderTargets` is one, on a resize).
+- With handles on, every CS site that hands an engine field to `globals::d3d::context` or a DXVK export must unwrap it first.
+  The readers were audited and fixed (p4.1-tripwire.md, "CS code that reads engine fields"). New code must do the same.
 - `Vram::TagGameRenderTargets` tags the startup D3D11 set, which `TakeOver` releases at once. The ORG images are named `Engine::...`,
   which the VRAM ledger reads as a CS owner prefix (P4.7).
 - HDR Display's per-frame redirect of kFRAMEBUFFER is untouched: kFRAMEBUFFER is the swap chain's.
