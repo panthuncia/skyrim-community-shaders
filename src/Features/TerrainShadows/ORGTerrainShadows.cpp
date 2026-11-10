@@ -297,8 +297,8 @@ bool ORGTerrainShadows::SetHeightmap(const DirectX::Image& a_image)
 	}
 
 	auto spec = std::make_shared<const UpdateSpec>(UpdateSpec{ impl->program, impl->latch, impl->gate, heightmap });
-	// The upload runs once, at the anchor's next run; the update reads the heightmap after it.
-	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::EarlyPrepass, kClientId, 90);
+	// Keys 99 (the upload, once, at the anchor's next run) and 100 (the update, which reads the heightmap after it).
+	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::EarlyPrepass, kClientId, 99);
 	builder.Add(RenderGraph::AnchorPasses::Upload{ .name = "heightmap-upload", .staging = std::move(staging), .target = heightmap->heightMap->Graph(), .footprint = footprint });
 	builder.Add("update", FrameAnchors::PassKind::Compute, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass>(spec); });
 	if (builder.Failed()) {
