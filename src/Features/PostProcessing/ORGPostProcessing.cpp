@@ -924,6 +924,7 @@ struct ORGPostProcessing::Impl
 			logger::error("[ORG] Post Processing: the render graph failed; the chain returns to D3D11 for the session");
 			failed = true;
 			ready = false;
+			ran = false;
 			gate->on.store(false, std::memory_order_release);
 			build.reset();
 			key.clear();
