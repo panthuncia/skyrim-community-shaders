@@ -10,6 +10,16 @@
 namespace
 {
 	constexpr const char* kEnvSwitch = "CS_ORG_FX";
+	constexpr const char* kReadbackSwitch = "CS_ORG_FX_READBACK";
+}
+
+bool ORGFxRuntime::ReadbackRequested()
+{
+	static const bool requested = [] {
+		char value[8]{};
+		return GetEnvironmentVariableA(kReadbackSwitch, value, sizeof(value)) && std::strcmp(value, "1") == 0;
+	}();
+	return requested;
 }
 
 bool ORGFxRuntime::Requested()
@@ -53,7 +63,12 @@ ORGFxRuntime& ORGFxRuntime::Get()
 #	include <rhi_helpers.h>
 
 #	include <algorithm>
+#	include <DirectXPackedVector.h>
+
 #	include <array>
+#	include <atomic>
+#	include <cfloat>
+#	include <cmath>
 #	include <chrono>
 #	include <map>
 #	include <set>
@@ -274,6 +289,8 @@ namespace
 		std::vector<PushWord> push;
 		std::uint32_t vertexCount = 3;
 		std::vector<org::OwnedDescriptorBinding> samplers;  // the samplers its push block names, kept while the pass lives
+		std::vector<std::string> wordNames;                 // CS_ORG_FX_READBACK: what each push word is, for the logs
+		mutable std::atomic<bool> loggedWords = false;      // CS_ORG_FX_READBACK: the record-time words were logged
 
 		std::uint32_t Input(const Res& a_resource)
 		{
@@ -329,6 +346,7 @@ namespace
 		std::uint32_t offset = 0;
 		float screenSize[4]{};
 		float amplitude = 0.0f;
+		std::string label;  // the pass that reads it, for CS_ORG_FX_READBACK
 	};
 
 	/** @brief One registered shape: its steps, its latch, and what the commit writes. */
@@ -343,6 +361,17 @@ namespace
 		std::shared_ptr<Resources> resources;
 		std::vector<std::string> clears;  // the kept textures this frame clears first
 		std::uint32_t fxPasses = 0;
+
+		/** @brief CS_ORG_FX_READBACK: a copy of one step's target, exported to D3D11 and read back after the epoch. */
+		struct Snapshot
+		{
+			std::string step;
+			std::string target;
+			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+			std::unique_ptr<GraphResources::Texture2D> texture;
+		};
+		std::vector<Snapshot> snapshots;
+		std::map<const org::Resource*, std::string> names;  // every resource the plan names, for the logs
 	};
 
 	// ---- passes ----
@@ -409,6 +438,12 @@ namespace
 					words[i] = static_cast<std::uint32_t>(a_frame.latch->Offset(slot)) + word.value;
 					break;
 				}
+			}
+			if (ORGFxRuntime::ReadbackRequested() && !draw.loggedWords.exchange(true)) {
+				std::string list;
+				for (std::uint32_t i = 0; i < count; ++i)
+					list += fmt::format("{}[{}] {}={}", i ? ", " : "", i, i < draw.wordNames.size() ? draw.wordNames[i] : std::string("?"), words[i]);
+				logger::info("[ORG] Effects11 readback: {} records {}x{}, {} vertices, push: {}", draw.name, draw.width, draw.height, draw.vertexCount, list);
 			}
 			const RasterProgram::Colour colour{ .view = &a_bindings.target, .load = rhi::LoadOp::Load };
 			draw.program->Draw(a_recording, { .colours = { &colour, 1 },
@@ -665,6 +700,158 @@ namespace
 	}
 }
 
+namespace
+{
+	/** @brief One texel as four floats, for the formats the plan uses. False for a format it does not decode. */
+	bool DecodeTexel(DXGI_FORMAT a_format, const std::uint8_t* a_texel, float (&a_out)[4])
+	{
+		using namespace DirectX::PackedVector;
+		a_out[0] = a_out[1] = a_out[2] = 0.0f;
+		a_out[3] = 1.0f;
+		switch (a_format) {
+		case DXGI_FORMAT_R32G32B32A32_FLOAT:
+			std::memcpy(a_out, a_texel, 16);
+			return true;
+		case DXGI_FORMAT_R16G16B16A16_FLOAT:
+			{
+				const auto* h = reinterpret_cast<const HALF*>(a_texel);
+				for (int c = 0; c < 4; ++c)
+					a_out[c] = XMConvertHalfToFloat(h[c]);
+				return true;
+			}
+		case DXGI_FORMAT_R16G16B16A16_UNORM:
+			{
+				const auto* u = reinterpret_cast<const std::uint16_t*>(a_texel);
+				for (int c = 0; c < 4; ++c)
+					a_out[c] = u[c] / 65535.0f;
+				return true;
+			}
+		case DXGI_FORMAT_R10G10B10A2_UNORM:
+			{
+				std::uint32_t v;
+				std::memcpy(&v, a_texel, 4);
+				a_out[0] = (v & 1023u) / 1023.0f;
+				a_out[1] = ((v >> 10) & 1023u) / 1023.0f;
+				a_out[2] = ((v >> 20) & 1023u) / 1023.0f;
+				a_out[3] = (v >> 30) / 3.0f;
+				return true;
+			}
+		case DXGI_FORMAT_R11G11B10_FLOAT:
+			{
+				XMFLOAT3PK packed;
+				std::memcpy(&packed.v, a_texel, 4);
+				DirectX::XMFLOAT3 value;
+				DirectX::XMStoreFloat3(&value, XMLoadFloat3PK(&packed));
+				a_out[0] = value.x;
+				a_out[1] = value.y;
+				a_out[2] = value.z;
+				return true;
+			}
+		case DXGI_FORMAT_R8G8B8A8_UNORM:
+		case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+			for (int c = 0; c < 4; ++c)
+				a_out[c] = a_texel[c] / 255.0f;
+			return true;
+		case DXGI_FORMAT_B8G8R8A8_UNORM:
+		case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+			a_out[0] = a_texel[2] / 255.0f;
+			a_out[1] = a_texel[1] / 255.0f;
+			a_out[2] = a_texel[0] / 255.0f;
+			a_out[3] = a_texel[3] / 255.0f;
+			return true;
+		case DXGI_FORMAT_R16_FLOAT:
+			a_out[0] = XMConvertHalfToFloat(*reinterpret_cast<const HALF*>(a_texel));
+			return true;
+		case DXGI_FORMAT_R32_FLOAT:
+			std::memcpy(a_out, a_texel, 4);
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	std::uint32_t TexelBytes(DXGI_FORMAT a_format)
+	{
+		switch (a_format) {
+		case DXGI_FORMAT_R32G32B32A32_FLOAT:
+			return 16;
+		case DXGI_FORMAT_R16G16B16A16_FLOAT:
+		case DXGI_FORMAT_R16G16B16A16_UNORM:
+			return 8;
+		case DXGI_FORMAT_R16_FLOAT:
+			return 2;
+		default:
+			return 4;
+		}
+	}
+
+	/** @brief The texture's per-channel mean, minimum and maximum (and non-finite count), through a staging copy. Stalls. */
+	std::string Stats(ID3D11Texture2D* a_texture, DXGI_FORMAT a_format)
+	{
+		if (!a_texture)
+			return "no D3D11 export";
+		D3D11_TEXTURE2D_DESC desc{};
+		a_texture->GetDesc(&desc);
+		D3D11_TEXTURE2D_DESC staging = desc;
+		staging.Usage = D3D11_USAGE_STAGING;
+		staging.BindFlags = 0;
+		staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		staging.MiscFlags = 0;
+		staging.MipLevels = 1;
+		winrt::com_ptr<ID3D11Texture2D> copy;
+		if (FAILED(globals::d3d::device->CreateTexture2D(&staging, nullptr, copy.put())))
+			return "staging texture failed";
+		auto* context = globals::d3d::context;
+		context->CopySubresourceRegion(copy.get(), 0, 0, 0, 0, a_texture, 0, nullptr);
+		D3D11_MAPPED_SUBRESOURCE mapped{};
+		if (FAILED(context->Map(copy.get(), 0, D3D11_MAP_READ, 0, &mapped)))
+			return "map failed";
+		double sum[4]{};
+		float low[4] = { FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX };
+		float high[4] = { -FLT_MAX, -FLT_MAX, -FLT_MAX, -FLT_MAX };
+		std::uint64_t nonFinite = 0;
+		const std::uint32_t texel = TexelBytes(a_format);
+		bool decoded = true;
+		for (UINT y = 0; y < desc.Height && decoded; ++y) {
+			const auto* row = static_cast<const std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch;
+			for (UINT x = 0; x < desc.Width; ++x) {
+				float v[4];
+				if (!DecodeTexel(a_format, row + static_cast<std::size_t>(x) * texel, v)) {
+					decoded = false;
+					break;
+				}
+				for (int c = 0; c < 4; ++c) {
+					if (!std::isfinite(v[c])) {
+						++nonFinite;
+						continue;
+					}
+					sum[c] += v[c];
+					low[c] = (std::min)(low[c], v[c]);
+					high[c] = (std::max)(high[c], v[c]);
+				}
+			}
+		}
+		context->Unmap(copy.get(), 0);
+		if (!decoded)
+			return fmt::format("format {} is not decoded", static_cast<std::uint32_t>(a_format));
+		const double count = static_cast<double>(desc.Width) * desc.Height;
+		return fmt::format("mean ({:.4g}, {:.4g}, {:.4g}, {:.4g}) min ({:.4g}, {:.4g}, {:.4g}, {:.4g}) max ({:.4g}, {:.4g}, {:.4g}, {:.4g}) non-finite {}",
+			sum[0] / count, sum[1] / count, sum[2] / count, sum[3] / count, low[0], low[1], low[2], low[3], high[0], high[1], high[2], high[3], nonFinite);
+	}
+
+	std::string Floats(std::span<const std::byte> a_bytes)
+	{
+		std::string out;
+		const std::size_t count = (std::min)(a_bytes.size(), std::size_t{ 64 }) / 4;
+		for (std::size_t i = 0; i < count; ++i) {
+			float v;
+			std::memcpy(&v, a_bytes.data() + i * 4, 4);
+			out += fmt::format("{}{:.4g}", i ? " " : "", v);
+		}
+		return out;
+	}
+}
+
 struct ORGFxRuntime::Impl
 {
 	std::array<FxEffect, kEffects> effects{};
@@ -677,6 +864,10 @@ struct ORGFxRuntime::Impl
 	bool activeNow = false;
 	bool failed = false;  // the graph failed: FX11 for the session
 	std::uint32_t ranFrame = UINT32_MAX;
+	std::uint32_t ranCount = 0;        // frames the graph ran
+	std::uint32_t nextReadback = 600;  // CS_ORG_FX_READBACK: the ran frame whose plan carries the snapshots
+	bool readbackNow = false;          // this frame's commit ran a plan with snapshots: AfterRun reads them
+	bool bindingsLogged = false;
 	std::vector<std::vector<std::uint8_t>> images = std::vector<std::vector<std::uint8_t>>(kEffects);
 
 	FxEffect& EffectOf(Fx a_fx) { return effects[static_cast<std::size_t>(a_fx)]; }
@@ -877,6 +1068,12 @@ struct ORGFxRuntime::Impl
 		std::uint32_t outputWidth = 0;
 		std::uint32_t outputHeight = 0;
 		std::array<bool, kEffects> runs{};
+		DXGI_FORMAT inputDxgi = DXGI_FORMAT_UNKNOWN;
+		DXGI_FORMAT mainDxgi = DXGI_FORMAT_UNKNOWN;
+		DXGI_FORMAT outputDxgi = DXGI_FORMAT_UNKNOWN;
+		std::uint32_t inputWidth = 0;
+		std::uint32_t inputHeight = 0;
+		bool snapshots = false;  // CS_ORG_FX_READBACK: copy every step's target for a readback after the epoch
 	};
 
 	/** @brief Builds one frame's steps; FX11's ping-pong becomes fixed textures. */
@@ -888,6 +1085,34 @@ struct ORGFxRuntime::Impl
 		{
 			frame->resources = impl.resources;
 			frame->runs = inputs.runs;
+			Name(inputs.input, "engine.input", inputs.inputDxgi, inputs.inputWidth, inputs.inputHeight);
+			Name(inputs.main, "engine.kMAIN", inputs.mainDxgi, inputs.mainWidth, inputs.mainHeight);
+			Name(inputs.output, "engine.output", inputs.outputDxgi, inputs.outputWidth, inputs.outputHeight);
+			Name(inputs.depth, "engine.depth", DXGI_FORMAT_UNKNOWN, 0, 0);
+		}
+
+		/** @brief A target's name, format and size, for the readback and the binding logs. */
+		struct TargetInfo
+		{
+			std::string name;
+			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+			std::uint32_t width = 0;
+			std::uint32_t height = 0;
+		};
+		std::map<const org::Resource*, TargetInfo> targets;
+
+		void Name(const Res& a_resource, std::string a_name, DXGI_FORMAT a_format, std::uint32_t a_width, std::uint32_t a_height)
+		{
+			if (a_resource)
+				targets.emplace(a_resource.get(), TargetInfo{ std::move(a_name), a_format, a_width, a_height });
+		}
+
+		std::string NameOf(const Res& a_resource) const
+		{
+			if (!a_resource)
+				return "null";
+			const auto it = targets.find(a_resource.get());
+			return it != targets.end() ? it->second.name : fmt::format("resource {:#x}", reinterpret_cast<std::uintptr_t>(a_resource.get()));
 		}
 
 		std::string error;
@@ -899,6 +1124,8 @@ struct ORGFxRuntime::Impl
 				Fail(fmt::format("the texture Effects11::{} could not be created", a_name));
 				return nullptr;
 			}
+			const auto& desc = texture->Desc();
+			Name(texture->Graph(), std::string(a_name), desc.Format, desc.Width, desc.Height);
 			return texture->Graph();
 		}
 
@@ -942,8 +1169,9 @@ struct ORGFxRuntime::Impl
 		{
 			auto spec = CsDraw(a_name, impl.CopyProgram(RenderGraphRuntime::Get().Host()->Device(), a_format), std::move(a_target), a_width, a_height);
 			const std::uint32_t region = Region(sizeof(DitherConstants));
-			frame->writes.push_back({ .kind = RegionWrite::Kind::Dither, .offset = region, .amplitude = a_amplitude });
+			frame->writes.push_back({ .kind = RegionWrite::Kind::Dither, .offset = region, .amplitude = a_amplitude, .label = a_name });
 			spec->push = { { PushWord::Kind::Input, spec->Input(a_source) }, { PushWord::Kind::LatchHandle, 0 }, { PushWord::Kind::LatchOffset, region } };
+			spec->wordNames = { "SourceTexture:" + NameOf(a_source), "Dither latch", fmt::format("Dither offset (region {})", region) };
 			AddStep(std::shared_ptr<const DrawSpec>(std::move(spec)), std::move(a_name));
 		}
 
@@ -1005,17 +1233,26 @@ struct ORGFxRuntime::Impl
 				write.screenSize[1] = 1.0f / static_cast<float>(width);
 				write.screenSize[2] = aspect;
 				write.screenSize[3] = 1.0f / aspect;
+				write.label = draw->name;
 				frame->writes.push_back(write);
 				draw->push = { { PushWord::Kind::LatchHandle, 0 }, { PushWord::Kind::LatchOffset, region } };
+				draw->wordNames = { "values latch", fmt::format("values offset (region {}, {} bytes)", region, e.lowered.valuesSize) };
 				for (std::size_t i = 0; i < e.lowered.resources.size(); ++i) {
-					if (e.lowered.resources[i].kind == OrgFx::ResourceSlot::Kind::Sampler) {
+					const auto& slot = e.lowered.resources[i];
+					if (slot.kind == OrgFx::ResourceSlot::Kind::Sampler) {
 						draw->push.push_back({ PushWord::Kind::Literal, e.samplers[i].Index() });
 						draw->samplers.push_back(e.samplers[i]);
-					} else
-						draw->push.push_back({ PushWord::Kind::Input, draw->Input(Resolve(e, i, a_names, a_color, target)) });
+						draw->wordNames.push_back(fmt::format("{}:sampler", slot.name));
+					} else {
+						const Res resource = Resolve(e, i, a_names, a_color, target);
+						draw->push.push_back({ PushWord::Kind::Input, draw->Input(resource) });
+						draw->wordNames.push_back(fmt::format("{}:{}", slot.name, NameOf(resource)));
+					}
 				}
-				while (draw->push.size() < e.lowered.PushWords())
+				while (draw->push.size() < e.lowered.PushWords()) {
 					draw->push.push_back({});
+					draw->wordNames.push_back("pad");
+				}
 				++frame->fxPasses;
 				AddStep(std::shared_ptr<const DrawSpec>(std::move(draw)), fmt::format("{}.{}.p{}", e.Name(), technique.name, p));
 			}
@@ -1116,7 +1353,7 @@ struct ORGFxRuntime::Impl
 				spec->groupsX = (width + 7) / 8;
 				spec->groupsY = (height + 7) / 8;
 				spec->region = Region(sizeof(ColorCorrectionConstants));
-				frame->writes.push_back({ .kind = RegionWrite::Kind::ColorCorrection, .offset = spec->region });
+				frame->writes.push_back({ .kind = RegionWrite::Kind::ColorCorrection, .offset = spec->region, .label = spec->name });
 				AddStep(std::shared_ptr<const ComputeSpec>(std::move(spec)), "color-correction");
 			}
 			// FX11 leaves the corrected image in kMAIN; nothing here reads kMAIN again. Before the output copy, which may be kMAIN.
@@ -1135,6 +1372,7 @@ struct ORGFxRuntime::Impl
 					auto spec = CsDraw(fmt::format("Effects11::Downsample {}", size), impl.cs.downsample, Tex(name), size, size);
 					spec->push = { { PushWord::Kind::Input, spec->Input(source) }, { PushWord::Kind::Literal, impl.cs.linearSampler.Index() } };
 					spec->samplers = { impl.cs.linearSampler };
+					spec->wordNames = { "SourceTexture:" + NameOf(source), "LinearSampler" };
 					source = spec->target;
 					AddStep(std::shared_ptr<const DrawSpec>(std::move(spec)), fmt::format("downsample-{}", size));
 				}
@@ -1162,10 +1400,11 @@ struct ORGFxRuntime::Impl
 				constexpr std::uint32_t kSize = ENBAdaptation::kSunMaskSize;
 				auto mask = CsDraw("Effects11::AdaptationSunMask", impl.cs.sunMask, Tex("SunMasked"), kSize, kSize);
 				const std::uint32_t region = Region(sizeof(ENBAdaptation::SunMaskCB));
-				frame->writes.push_back({ .kind = RegionWrite::Kind::SunMask, .offset = region });
+				frame->writes.push_back({ .kind = RegionWrite::Kind::SunMask, .offset = region, .label = "Effects11::AdaptationSunMask" });
 				mask->push = { { PushWord::Kind::Input, mask->Input(Tex("Downsampled256")) }, { PushWord::Kind::Literal, impl.cs.linearSampler.Index() },
 					{ PushWord::Kind::LatchHandle, 0 }, { PushWord::Kind::LatchOffset, region } };
 				mask->samplers = { impl.cs.linearSampler };
+				mask->wordNames = { "SourceTexture:Downsampled256", "LinearSampler", "SunMask latch", fmt::format("SunMask offset (region {})", region) };
 				const Res masked = mask->target;
 				AddStep(std::shared_ptr<const DrawSpec>(std::move(mask)), "adaptation-sun-mask");
 				Technique(Fx::Adaptation, "Downsample", "AdaptationCurrent", { { "TextureCurrent", masked } });
@@ -1216,8 +1455,64 @@ struct ORGFxRuntime::Impl
 			}
 			frame->steps.insert(frame->steps.begin(), std::make_move_iterator(clears.begin()), std::make_move_iterator(clears.end()));
 			frame->stepNames.insert(frame->stepNames.begin(), std::make_move_iterator(clearNames.begin()), std::make_move_iterator(clearNames.end()));
+			if (inputs.snapshots)
+				AddSnapshots();
+			for (const auto& [resource, info] : targets)
+				frame->names.emplace(resource, info.name);
 			frame->latch = std::make_shared<org::LatchBlock>("cs.effects11.latch", (std::max)(frame->latchBytes, kRegionAlignment), host->FrameSlots());
 			return frame;
+		}
+
+		/** @brief CS_ORG_FX_READBACK: after every step but the clears, a copy of its target into an exported texture. */
+		void AddSnapshots()
+		{
+			std::vector<Step> steps;
+			std::vector<std::string> names;
+			for (std::size_t i = 0; i < frame->steps.size(); ++i) {
+				Res target = std::visit(
+					[](const auto& a_step) -> Res {
+						using T = std::decay_t<decltype(a_step)>;
+						if constexpr (std::is_same_v<T, std::shared_ptr<const DrawSpec>>)
+							return a_step->target;
+						else if constexpr (std::is_same_v<T, std::shared_ptr<const ComputeSpec>>)
+							return a_step->texture;
+						else if constexpr (std::is_same_v<T, CopySpec>)
+							return a_step.to;
+						else
+							return nullptr;
+					},
+					frame->steps[i]);
+				const bool clear = std::holds_alternative<ClearSpec>(frame->steps[i]);
+				steps.push_back(std::move(frame->steps[i]));
+				names.push_back(frame->stepNames[i]);
+				if (clear || !target)
+					continue;
+				const auto it = targets.find(target.get());
+				if (it == targets.end() || it->second.format == DXGI_FORMAT_UNKNOWN || !it->second.width) {
+					logger::warn("[ORG] Effects11 readback: step {} writes {}, whose format or size is unknown; not read back", names.back(), NameOf(target));
+					continue;
+				}
+				const auto& info = it->second;
+				const D3D11_TEXTURE2D_DESC desc{ .Width = info.width,
+					.Height = info.height,
+					.MipLevels = 1,
+					.ArraySize = 1,
+					.Format = info.format,
+					.SampleDesc = { .Count = 1 },
+					.Usage = D3D11_USAGE_DEFAULT,
+					.BindFlags = D3D11_BIND_SHADER_RESOURCE };
+				auto snapshot = std::make_unique<GraphResources::Texture2D>(desc, fmt::format("Effects11::Snapshot{:03}", frame->snapshots.size()),
+					GraphResources::Options{ .lifetime = Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV });
+				if (!*snapshot || !snapshot->D3D11()) {
+					logger::warn("[ORG] Effects11 readback: no snapshot texture for step {}", names.back());
+					continue;
+				}
+				steps.push_back(CopySpec{ fmt::format("Effects11::Snapshot {}", names.back()), target, snapshot->Graph(), info.width, info.height });
+				names.push_back(fmt::format("snapshot-{}", frame->snapshots.size()));
+				frame->snapshots.push_back({ frame->stepNames[i], info.name, info.format, std::move(snapshot) });
+			}
+			frame->steps = std::move(steps);
+			frame->stepNames = std::move(names);
 		}
 
 	private:
@@ -1231,6 +1526,7 @@ struct ORGFxRuntime::Impl
 	{
 		std::string key = fmt::format("{}x{} {} {}{} {} {}", resources->width, resources->height, reinterpret_cast<std::uintptr_t>(a_inputs.input.get()),
 			a_inputs.inputCopies ? 'c' : 'd', reinterpret_cast<std::uintptr_t>(a_inputs.main.get()), static_cast<std::uint32_t>(a_inputs.mainFormat), a_inputs.mainWidth);
+		key += a_inputs.snapshots ? " snapshots" : "";
 		key += fmt::format(" {} {} {} {} c{}",
 			reinterpret_cast<std::uintptr_t>(a_inputs.depth.get()), reinterpret_cast<std::uintptr_t>(a_inputs.output.get()), static_cast<std::uint32_t>(a_inputs.outputFormat),
 			a_inputs.outputWidth, resources->cleared.size());
@@ -1280,9 +1576,12 @@ struct ORGFxRuntime::Impl
 			client.passes.push_back(std::move(pass));
 		}
 		auto heldResources = a_frame->resources;
-		client.registerResources = [heldResources](org::RenderGraph& a_graph) {
+		std::shared_ptr<const Frame> heldFrame = a_frame;
+		client.registerResources = [heldResources, heldFrame](org::RenderGraph& a_graph) {
 			for (const auto& [name, texture] : heldResources->textures)
 				texture->Register(a_graph);
+			for (const auto& snapshot : heldFrame->snapshots)
+				snapshot.texture->Register(a_graph);
 		};
 		client.active = [] {
 			const auto& self = ORGFxRuntime::Get();
@@ -1317,6 +1616,10 @@ struct ORGFxRuntime::Impl
 				effectsList += fmt::format("{}{}", effectsList.empty() ? "" : ", ", effects[i].Name());
 		logger::info("[ORG] Effects11 runs on the render graph: {} passes ({} from .fx: {}), {} latch bytes, {}x{}", a_frame->steps.size(), a_frame->fxPasses, effectsList,
 			a_frame->latchBytes, resources->width, resources->height);
+		if (ORGFxRuntime::ReadbackRequested() && !bindingsLogged) {
+			bindingsLogged = true;
+			LogBindings(*a_frame);
+		}
 	}
 
 	/** @brief The frame's decision and plan (ORGFxRuntime::Prepare, which catches what it throws). */
@@ -1350,6 +1653,54 @@ struct ORGFxRuntime::Impl
 		}
 	}
 
+	/** @brief CS_ORG_FX_READBACK: every step's target and inputs, and each draw's push words by name (their values at record time). */
+	void LogBindings(const Frame& a_frame) const
+	{
+		auto nameOf = [&](const Res& a_resource) {
+			const auto it = a_frame.names.find(a_resource.get());
+			return it != a_frame.names.end() ? it->second : fmt::format("resource {:#x}", reinterpret_cast<std::uintptr_t>(a_resource.get()));
+		};
+		for (std::size_t i = 0; i < a_frame.steps.size(); ++i) {
+			std::visit(
+				[&](const auto& a_step) {
+					using T = std::decay_t<decltype(a_step)>;
+					if constexpr (std::is_same_v<T, std::shared_ptr<const DrawSpec>>) {
+						std::string words;
+						for (std::size_t w = 0; w < a_step->push.size(); ++w)
+							words += fmt::format("{}[{}] {}", w ? ", " : "", w, w < a_step->wordNames.size() ? a_step->wordNames[w] : std::string("?"));
+						std::string inputs;
+						for (std::size_t n = 0; n < a_step->inputs.size(); ++n)
+							inputs += fmt::format("{}{}", n ? ", " : "", nameOf(a_step->inputs[n]));
+						logger::info("[ORG] Effects11 bindings: {:03} {} draws {}x{} into {} ({} words), inputs [{}], push [{}]", i, a_step->name, a_step->width,
+							a_step->height, nameOf(a_step->target), a_step->program ? a_step->program->constantWords : 0, inputs, words);
+					} else if constexpr (std::is_same_v<T, std::shared_ptr<const ComputeSpec>>)
+						logger::info("[ORG] Effects11 bindings: {:03} {} dispatches {}x{} groups on {}, latch region {}", i, a_step->name, a_step->groupsX, a_step->groupsY,
+							nameOf(a_step->texture), a_step->region);
+					else if constexpr (std::is_same_v<T, CopySpec>)
+						logger::info("[ORG] Effects11 bindings: {:03} {} copies {} into {} ({}x{})", i, a_step.name, nameOf(a_step.from), nameOf(a_step.to), a_step.width,
+							a_step.height);
+					else
+						logger::info("[ORG] Effects11 bindings: {:03} {} clears {} ({}x{})", i, a_step.name, nameOf(a_step.texture), a_step.width, a_step.height);
+				},
+				a_frame.steps[i]);
+		}
+	}
+
+	/** @brief After the epoch that ran a plan with snapshots: each step's target, read back through D3D11. */
+	void ReadSnapshots()
+	{
+		if (!readbackNow || !frame)
+			return;
+		readbackNow = false;
+		nextReadback = ranCount + 1000;
+		logger::info("[ORG] Effects11 readback of ran frame {} (game frame {}), {} snapshots", ranCount, globals::state->frameCount, frame->snapshots.size());
+		for (const auto& snapshot : frame->snapshots) {
+			const auto& desc = snapshot.texture->Desc();
+			logger::info("[ORG] Effects11 readback: {} -> {} ({} {}x{}): {}", snapshot.step, snapshot.target, static_cast<std::uint32_t>(snapshot.format), desc.Width,
+				desc.Height, Stats(snapshot.texture->D3D11(), snapshot.format));
+		}
+	}
+
 	/** @brief Inside the epoch: this frame's values into the latch. FX11's variables hold them (EffectManager::UpdateEffectValues). */
 	void Commit()
 	{
@@ -1368,6 +1719,7 @@ struct ORGFxRuntime::Impl
 		}
 		const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
 		const auto& latch = *frame->latch;
+		const bool logValues = !frame->snapshots.empty();
 		const std::uint32_t frameCount = manager.frameCount;
 		for (const auto& write : frame->writes) {
 			switch (write.kind) {
@@ -1400,6 +1752,15 @@ struct ORGFxRuntime::Impl
 				break;
 			}
 		}
+		if (logValues) {
+			const auto bytes = latch.Slot(slot);
+			logger::info("[ORG] Effects11 readback: latch slot {} at offset {}, {} bytes per slot", slot, latch.Offset(slot), latch.Stride());
+			for (const auto& write : frame->writes)
+				if (write.offset < bytes.size())
+					logger::info("[ORG] Effects11 readback: values of {} (region {}): {}", write.label, write.offset, Floats(bytes.subspan(write.offset)));
+			readbackNow = true;
+		}
+		++ranCount;
 		// The clears run with this frame; the next frame's plan leaves them out.
 		for (const auto& name : frame->clears)
 			frame->resources->cleared.insert(name);
@@ -1501,6 +1862,7 @@ void ORGFxRuntime::Impl::PrepareFrame(std::uint32_t a_input, std::uint32_t a_out
 		D3D11_TEXTURE2D_DESC mainDesc{};
 		main.texture->GetDesc(&mainDesc);
 		inputs.mainFormat = rhi::helpers::ToRHI(mainView.Format);
+		inputs.mainDxgi = mainView.Format;
 		inputs.mainWidth = mainDesc.Width;
 		inputs.mainHeight = mainDesc.Height;
 		if (inputs.mainFormat == rhi::Format::Unknown)
@@ -1511,6 +1873,15 @@ void ORGFxRuntime::Impl::PrepareFrame(std::uint32_t a_input, std::uint32_t a_out
 	D3D11_TEXTURE2D_DESC outputDesc{};
 	output.texture->GetDesc(&outputDesc);
 	inputs.outputFormat = rhi::helpers::ToRHI(rtvDesc.Format);
+	inputs.outputDxgi = rtvDesc.Format;
+	{
+		D3D11_TEXTURE2D_DESC inputDesc{};
+		input.texture->GetDesc(&inputDesc);
+		inputs.inputDxgi = inputDesc.Format;
+		inputs.inputWidth = inputDesc.Width;
+		inputs.inputHeight = inputDesc.Height;
+	}
+	inputs.snapshots = ORGFxRuntime::ReadbackRequested() && self.ranCount >= self.nextReadback;
 	inputs.outputWidth = outputDesc.Width;
 	inputs.outputHeight = outputDesc.Height;
 	if (inputs.outputFormat == rhi::Format::Unknown)
@@ -1560,6 +1931,17 @@ bool ORGFxRuntime::RanThisFrame() const
 	return impl && !impl->failed && impl->ranFrame == globals::state->frameCount;
 }
 
+void ORGFxRuntime::AfterRun()
+{
+	if (!impl || !ReadbackRequested())
+		return;
+	try {
+		impl->ReadSnapshots();
+	} catch (const std::exception& e) {
+		logger::error("[ORG] Effects11 readback failed: {}", e.what());
+	}
+}
+
 #else  // !CS_HAS_RENDER_GRAPH
 
 // Built without OpenRenderGraph: Effects11 always runs on FX11.
@@ -1571,5 +1953,6 @@ void ORGFxRuntime::Reserve() {}
 void ORGFxRuntime::Invalidate() {}
 void ORGFxRuntime::Prepare(std::uint32_t, std::uint32_t) {}
 bool ORGFxRuntime::RanThisFrame() const { return false; }
+void ORGFxRuntime::AfterRun() {}
 
 #endif
