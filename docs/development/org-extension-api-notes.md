@@ -573,5 +573,27 @@ Keys used so far:
   (`src/Features/Effects11/ORG/`) are std-only for this reason. An export would take the effect text (or a file and an
   include folder), the textures it reads by name (graph resources, or CS's own names such as `TextureDepth`), an anchor
   and order key; and return the UI variables and a handle to set values and choose techniques. Values reach the GPU as a
-  latched values block plus a handle table (two push words per pass), so recordings stay reusable.
+  latched values region per pass; the texture and sampler handles go in the push block (up to 30 per effect), since the
+  commit that writes the latch cannot know heap indices, which ORG gives only at record time.
 - **Found by:** P3 W5, ORG FX runtime (2026-11-09).
+
+### Heap indices outside the recording
+
+- **Need:** a pass whose shader reads more resource handles than the push block holds (an effect with 40 textures, a
+  material table) wants the handles in a buffer, written once per build or per frame.
+- **Who:** the ORG FX runtime (its handle table had to move into the push block, which caps an effect at 30 textures and
+  samplers); any port with a long resource list.
+- **Where it fits:** `RecordingContext::Index` is the only way to learn a declared view's heap index, and only at record
+  time, where nothing can write a buffer the same recording reads without a barrier. An ORG service that resolves a pass's
+  declared views into a small host-visible table at prepare time (with the table's lifetime tied to the build) would let
+  the commit, or the graph itself, fill it.
+- **Found by:** P3 W5, ORG FX runtime execution (2026-11-09).
+
+### Clearing a render target without a draw
+
+- **Need:** clear a kept graph texture once (to match D3D11's zero-filled textures) without a UAV, whose storage format
+  support varies (R11G11B10, R10G10B10A2).
+- **Who:** the ORG FX runtime's History textures; any port that keeps render targets across frames.
+- **Where it fits:** `GraphPasses::MakeUavClear` needs a UAV. The FX runtime records a render pass that only clears
+  (`LoadOp::Clear`, no draw). A shared `MakeRenderTargetClear` beside `MakeUavClear` would serve every port.
+- **Found by:** P3 W5, ORG FX runtime execution (2026-11-09).

@@ -1,7 +1,8 @@
 # ORG FX runtime: ENB-style `.fx` presets without FX11
 
 Plan task P3 W5 ([org-full-port.md](./org-full-port.md)). Status (2026-11-09): design, parser and lowering are written and
-checked offline against the corpus (section 10); execution on ORG is not started.
+checked offline against the corpus (section 10). Execution is written (`ORGFxRuntime`, section 5) behind `CS_ORG_FX=1` and
+waits for its first build and in-game A/B.
 
 Effects11 runs ENB-style `.fx` presets at the Tonemap position through FX11 (`D3DX11CreateEffectFromMemory`,
 `src/Features/Effects11/Effects/Effect.cpp`). FX11 is a D3D11 library: it owns the shaders, constant buffers, state
@@ -40,7 +41,7 @@ CS-owned shaders, not FX, and are not part of this runtime.
    empty), stringify macros expanded by hand (`D3DPreprocess` has no `#x`), `ParseSourceGroupScopes` (UI group order from
    the source text), `StripLineDirectives`.
 4. `D3DCompile(..., "fx_5_0")` then `D3DX11CreateEffectFromMemory`. Two fallbacks re-try with inlined includes and with
-   the raw source.
+   the raw source. The text that compiled (first or second path) is kept as `Effect::preprocessedSource` for the ORG runtime.
 5. Encrypted presets (`KIEFX` header, e.g. Silent Horizons) never reach CS as source: KiENBExtender's `ENBExt_Compile`
    returns an `fx_5_0` binary.
 
@@ -188,16 +189,16 @@ entries `OrgFxVS` and `OrgFxPS` (passes with the same shaders produce the same t
    uniform of a struct type still follows its struct. Techniques, groups, state objects, `string` and shader globals,
    and annotations on kept statics are blanked. Newlines are kept and a `#line 1` follows the prologue, so DXC's messages
    give lines of the preprocessed text. Function bodies, structs, classes and `static` globals stay byte for byte.
-2. **Prologue (bindless ABI).** The push block (`cbuffer OrgFxBindings : register(b0)`, as `OrgResources.hlsli`) is two
-   words: the heap index of a raw buffer (a `LatchBlock` region in practice) and this pass's byte offset in it. The
-   region holds the constant buffers (`$Globals`, then each `cbuffer`, `LoweredEffect::regions`) and, from
-   `LoweredEffect::valuesSize`, one heap index per `LoweredEffect::resources` entry. So:
+2. **Prologue (bindless ABI).** The push block (`cbuffer OrgFxBindings : register(b0)`, `uint4 OrgFxPush[]`,
+   `LoweredEffect::PushWords()` words) holds the heap index of a raw buffer (a `LatchBlock` region in practice), this
+   pass's byte offset in it, then one heap index per `LoweredEffect::resources` entry (at most `kMaxResources`, 30). The
+   region holds the constant buffers (`$Globals`, then each `cbuffer`, `LoweredEffect::regions`). Handles are fixed for a
+   recording and known only at record time, so they cannot sit in the latch the commit writes. So:
     - `static float4 Timer = OrgFxValues.Load<float4>(OrgFxValuesOffset + 16u);` at the variable's offset; bools compare
       with zero; arrays, matrices and structs load element by element into initializer lists (DXC's SPIR-V ignores
       `row_major` in templated loads, so matrices are built from scalars with FXC's register layout);
     - `static Texture2D TextureColor = ResourceDescriptorHeap[OrgFxHandle(3)];`, samplers from `SamplerDescriptorHeap`.
-      This is the `OrgResources.hlsli` LATCH/SRV expansion, generated, because presets have 13-18 resources, more than
-      the 32-word push block holds as handles.
+      This is the `OrgResources.hlsli` LATCH/SRV expansion, generated. Rudy's effects have 4 to 17 resources.
 3. **Entry wrappers.** The vertex wrapper takes `SV_VertexID` and builds the user's input (struct members by semantic:
    `POSITION`/`SV_Position` from the quad corner, `TEXCOORD0` from its UV, anything else zero with a warning) for a
    6-vertex two-triangle quad with the same corners and UVs as Effects11's strip, then calls the user's entry with the
@@ -223,8 +224,8 @@ request and shader store.
 - **Anchor.** One client `cs.effects11` on `FrameAnchors::Anchor::Tonemap`; the D3D11 hook calls `FrameAnchors::Run` with
   the tonemap's input/output and skips `EffectManager::ExecuteEffects` when the ORG client ran.
 - **Passes.** One graph raster pass per FX pass (`RasterProgram::Draw`, 6 vertices), plus the CS-owned colour correction
-  (ComputeProgram), the 1024² downsample (RasterProgram over its existing PS, or the P0 GenerateMips pass), the
-  adaptation sun mask, and the final copy. Pass order keys follow section 1.1.
+  (ComputeProgram), the 1024² downsample (RasterProgram over its existing PS), the adaptation sun mask, and the final copy.
+  Pass order keys follow section 1.1.
 - **Chain resources.** The ping-pong swaps become single-assignment graph textures: each chain step that writes the chain
   gets its own transient `Effects11::<effect>::Chain<i>` (aliasing on), sized and formatted like the texture it replaces.
   The graph orders them by reads and writes; no `SwapTextures`.
@@ -236,17 +237,79 @@ request and shader store.
   `FrameAnchors::EngineTarget`; `TextureDepth` through `EngineDepth`. Inputs of disabled effects (bloom off) bind a 1x1
   black texture: FX11 with a null SRV reads zero.
 - **Files.** `ResourceName` textures are decoded on the CPU (DirectXTex, as today) and uploaded to persistent ORG textures
-  once per load.
+  once per load. As built, they are FX11's loaded textures, imported.
 - **Values.** Each effect keeps a CPU `$Globals` image (the parser's layout). `UIVariable` writes, ini loads, weather and
   time-of-day blending, the ENB SDK globals and extern bindings write into it. The client's `commit` copies the image
-  into a `LatchBlock` region per pass (that pass's `ScreenSize` patched in) together with its handle table. Values never
-  go in the push block, so recordings stay reusable.
+  into a `LatchBlock` region per pass (that pass's `ScreenSize` patched in). Values never go in the push block, so
+  recordings stay reusable; the handles do. As built, FX11's variables are still the image's source (below).
 - **Shape changes.** The graph's shape is the set of passes that run: effect enable settings, the selected technique,
-  `UIBinding` toggles, and loaded effects. A hash of those is checked at the hook; a change calls
-  `FrameAnchors::Refresh("cs.effects11")`. Value edits never rebuild.
-- **Compilation.** At `Effect::Apply` (preset load, reload, `#pragma uidefine` change): parse, lower, compile every pass
-  of every technique. Any failure falls the effect back to FX11 with the reason in the log and in the effect's errors.
+  `UIBinding` toggles, and loaded effects. A key of those is checked at the hook; a change registers the client again
+  with the new passes (its pass list is fixed per registration). Value edits never rebuild.
+- **Compilation.** After `Effect::Apply` (preset load, reload, `#pragma uidefine` change): parse and lower; as built, each
+  pass compiles the first time a frame needs it, at the hook. Any failure falls the frame back to FX11 with the reason in
+  the log.
 - **Switch.** `CS_ORG_FX=1` enables the runtime; default 0 keeps FX11 unchanged. Encrypted presets always use FX11.
+
+### What execution does today (`src/Features/Effects11/ORG/ORGFxRuntime.{h,cpp}`)
+
+The seams: `Hooks.cpp`'s tonemap thunk calls `ORGFxRuntime::Prepare(input, output)` before `FrameAnchors::Run(Tonemap)`;
+`Effects11::RenderTonemap` returns at once when `RanThisFrame()` (the chain ran in that epoch); `EffectManager::Apply`
+calls `Invalidate()` before FX11 reloads; `Effects11::PostPostLoad` reserves the Tonemap anchor. With `CS_ORG_FX` unset
+all four do nothing.
+
+- **All or nothing per frame.** `Prepare` runs the frame on the graph only when FX11 would render it (Effects11 owns the
+  tonemap, a preset is loaded) and every effect that runs this frame is ready on ORG. Otherwise FX11 runs the frame, and
+  each new reason is logged once as `[ORG] Effects11 runs on FX11: <reason>`.
+- **Build, per effect, on first need.** Parse `Effect::preprocessedSource`, lower it, and check FX11's `$Globals` against
+  the parser's layout variable by variable (`BufferOffset`); any mismatch fails the effect. Samplers come from their state
+  blocks (`SamplerDesc` to `rhi::SamplerDesc`), bare `SamplerState`s take D3D11's default. `ResourceName` textures are
+  FX11's loaded files, imported with `FrameAnchors::D3D11Texture`. Passes compile when a plan first needs them, keyed by
+  technique, pass and target format: `RasterProgram` from generated text (the same text for both stages, entries
+  `OrgFxVS`/`OrgFxPS`, `-HV 2018`). A pass with blend, depth or rasterizer states, a parse or lowering error, or a DXC
+  failure fails its effect until the next reload.
+- **Plan.** `Planner::Build` replays `ExecuteEffects` in order and resolves FX11's ping-pong into fixed graph textures
+  (`Effects11::<name>`): colour correction of kMAIN in place; the downsample to 1024, 512 and 256 (three textures, since
+  FX11 binds single mips only; each a bilinear half of the one before, which is the box filter GenerateMips gave); the
+  bloom and lens chains (`Effect::ExecuteTechniqueSequence`'s rule, `RenderTarget` annotations to the `RenderTarget*`
+  textures); adaptation (sun mask, `Downsample`, `Draw`, then a copy into `AdaptationHistory` for the next frame);
+  enbeffect.fx into `SDRTemp`/`SDRTemp2` (or a plain copy of kMAIN when no technique wrote the chain); postpass with
+  `Scratch` as its temp; the dithered copy into the tonemap's output. Slots resolve, in order: a file, `TextureColor`
+  (the chain input), `TextureDepth`, a `RenderTarget*` texture, the effect's named inputs (`TextureOriginal`,
+  `TextureBloom`, `TextureLens`, `TextureAdaptation`, `TextureDownsampled`, `TextureCurrent`, `TexturePrevious`), else
+  a 1x1 black texture (FX11's null view). A slot that names the pass's own target reads black, as D3D11 unbinds it.
+- **Shape.** The plan is one `FrameAnchors::Register` of client `cs.effects11`, one pass per step. A key of the screen
+  size, the engine imports, the output's format and size, the effects that run, each selected chain and its `UIBinding`
+  toggles, and the cleared set registers a new plan when it changes. Value edits never do.
+- **Values.** FX11 stays the value store: the commit runs `EffectManager::UpdateEffectValues` per effect (weather and
+  time-of-day blending, the ENB SDK globals, extern bindings, the effect's own), copies each variable's bytes from FX11
+  (`GetRawValue`) into the effect's image, and writes one latch region per pass with that pass's `ScreenSize`. Colour
+  correction, the sun mask (`ENBAdaptation::SunMaskConstants`, a mask that changes nothing when the procedural sun is off)
+  and the copies' dither are latch regions too. Handles are in the push block (section 4).
+- **Lifetimes.** Textures that FX11 reads across frames, or reads when their chain did not run (bloom, lens, HDRTemp, the
+  `RenderTarget*` set, the adaptation pair), are History; the SDR pair, Scratch, the downsamples and the sun mask are
+  Transient (aliased). Kept textures are cleared to zero once by a render pass that only clears, as DXVK's D3D11 textures
+  start at zero.
+- **Failure.** A graph failure (`onFailed`) returns Effects11 to FX11 for the session.
+
+Not supported yet (the frame stays on FX11, logged):
+
+- `enbdepthoffield.fx` (its aperture and focus history pairs, and the copy back into kMAIN).
+- A tonemap input other than kMAIN (FX11 copies it into kMAIN first).
+- `cbuffer` blocks, render states in passes, `RenderTarget` annotations naming textures other than `RenderTarget*`
+  (`TextureHDRTemp` and the like), effects with more than 30 textures and samplers, encrypted presets.
+- The UI seam below: FX11 still holds the values, so FX11 must still compile every effect.
+- GPU timers per pass, and `Effects11::<effect> Pass <n>` profiler zones.
+
+### Testing
+
+The game instance's preset (Picta Aurbis) ships no `.fx` files, so FX11 logs that `enbeffect.fx` is missing and Effects11
+stays off. Rudy ENB for Obsidian Weathers lowers and compiles completely (section 10): install its
+`D:\Modlists\NordicSouls\mods\Rudy ENB for Obsidian Weathers\Root\enbseries.ini` and `Root\enbseries\` (all
+`.fx`, `.fxh`, `SMAA.h`, `Modular Shaders\`, LUT and SMAA textures) as an MO2 mod above Picta (files at the mod's
+root, as Picta's are). Its `[EFFECT]` section runs bloom, adaptation (with the procedural sun mask), enbeffect and
+postpass, with lens and depth of field off. Scenarios: `tools/cs-ab/scenarios/fx-org0.env` (FX11) and `fx-org1.env`
+(ORG); compare their shots. In the `fx-org1` log look for `[ORG] Effects11: <effect> parsed and lowered`, `[ORG]
+Effects11 runs on the render graph: N passes`, and no `[ORG] Effects11 runs on FX11` or `[ORG] SPIR-V build` errors.
 
 ### UI layer seam
 
@@ -299,14 +362,15 @@ fx-parse-check [-v] [--dxc C:\VulkanSDK\<ver>\Bin\dxc.exe] [--out <folder>] <enb
 
 ## 9. Next steps (execution)
 
-1. `RasterProgram` from in-memory source: a `Desc` with source text and a virtual name, through `ProgramBuild` and the
-   shader store; flags `-HV 2018`.
-2. The UI seam (section 5): `UIVariable` value handle, and UI variables built from the model on the ORG path.
-3. `ORGFxRuntime`: per effect, `LowerEffect` at `Apply`, programs per pass, the value image from
-   `BuildDefaultValues` plus ini/weather/UI writes, the resource table (graph textures, files, samplers from
-   `SamplerDesc`), a latch region per pass, the Tonemap client, shape hash and `Refresh`.
-4. Scenarios under `tools/cs-ab/scenarios/` with `CS_ORG_FX=1` and FX11 for screenshot A/B on Rudy's preset (it lowers
-   completely).
+Done: `RasterProgram` from generated text (`Desc::pixelText`/`vertexText`, `languageVersion`), `ORGFxRuntime` (section 5,
+"What execution does today"), the scenarios. Next:
+
+1. Build and A/B on Rudy's preset; fix what the first runs show.
+2. `enbdepthoffield.fx`: the aperture and focus pairs as History textures with copies, the chain into HDRTemp/HDRTemp2,
+   and the copy back into kMAIN.
+3. The UI seam (section 5): `UIVariable` value handle, and UI variables built from the model on the ORG path, so the
+   value image starts from `BuildDefaultValues` and FX11 is no longer compiled.
+4. GPU timers per pass (P2 timers), and the rest of the "not supported yet" list.
 
 ## 10. Status and corpus results (2026-11-09)
 
