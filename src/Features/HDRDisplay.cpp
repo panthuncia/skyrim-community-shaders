@@ -12,6 +12,7 @@
 #include "Utils/VersionedRelocation.h"
 #include "PostProcessing.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "ScreenshotFeature.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -1403,6 +1404,15 @@ void HDRDisplay::UpgradeLDRRenderTargets()
 		D3D11_TEXTURE2D_DESC newDesc = origDesc;
 		newDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
+		// CS_ORG_ENGINE_TARGETS: ORG makes the target again in the HDR format. Nothing is saved: the restore makes it again from the
+		// engine's own description.
+		const auto hdrName = fmt::format("HDR::{}", magic_enum::enum_name(targetId));
+		if (RenderGraph::Engine::Targets::Recreate(targetId, newDesc, hdrName.c_str(), true)) {
+			savedLDRTargets.push_back({ targetId, {} });
+			logger::info("[HDR] Upgraded render target {} to R16G16B16A16_FLOAT on the render graph (was format {})", static_cast<int>(targetId), static_cast<int>(origDesc.Format));
+			continue;
+		}
+
 		ID3D11Texture2D* newTexture = nullptr;
 		if (FAILED(device->CreateTexture2D(&newDesc, nullptr, &newTexture)))
 			continue;
@@ -1459,6 +1469,9 @@ void HDRDisplay::RestoreLDRRenderTargets()
 	auto renderer = globals::game::renderer;
 
 	for (auto& [targetId, saved] : savedLDRTargets) {
+		// An upgrade made on the render graph saved nothing: ORG makes the target again as the engine described it.
+		if (!saved.texture && RenderGraph::Engine::Targets::Restore(targetId))
+			continue;
 		auto& rt = renderer->GetRuntimeData().renderTargets[targetId];
 
 		if (rt.texture)

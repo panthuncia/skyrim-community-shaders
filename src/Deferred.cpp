@@ -20,6 +20,7 @@
 
 #include "Hooks.h"
 #include "ORGDeferredComposite.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/FrameAnchors.h"
 
 struct DepthStates
@@ -48,6 +49,10 @@ void SetupRenderTarget(RE::RENDER_TARGET target, const char* name, D3D11_TEXTURE
 	srvDesc.Format = format;
 	rtvDesc.Format = format;
 	uavDesc.Format = format;
+
+	// CS_ORG_ENGINE_TARGETS: ORG makes the target again with this description.
+	if (RenderGraph::Engine::Targets::Recreate(target, texDesc, name))
+		return;
 
 	auto& data = renderer->GetRuntimeData().renderTargets[target];
 
