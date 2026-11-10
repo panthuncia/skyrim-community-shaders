@@ -14,7 +14,7 @@
  *
  * Resources:
  * - The noise: a persistent graph texture named "TruePBR::GlintsNoise". It exports a D3D11 SRV, which TruePBR binds at t20 for the
- *   engine's Lighting pixel shaders until those draws are ported. It is also published under its name, and Drawcall Limit Fix's
+ *   engine's Lighting pixel shaders until those draws are ported. Until the fill's epochs ran TruePBR binds nothing there. It is also published under its name, and Drawcall Limit Fix's
  *   colour passes read it from there (Integrations/TruePBR), ordered after the fill.
  *
  * The render graph has no device reset. When the graph fails, the client is dropped and TruePBR goes back to D3D11, where the
@@ -52,8 +52,14 @@ public:
 	/** @brief Whether the fill's epoch was submitted, so later D3D11 work and graph readers see the filled texture. */
 	bool Filled() const;
 
-	/** @brief The noise's exported view (t20); null when inactive. */
+	/** @brief The noise's exported view (t20); null when inactive or not filled yet. */
 	ID3D11ShaderResourceView* NoiseSRV() const;
+
+	/**
+	 * @brief TruePBR::ClearShaderCache: builds the fill program again and fills the noise again. After a failed compile, the next
+	 * Update sets the path up again.
+	 */
+	void ClearShaderCache();
 
 	~ORGGlintsNoise();
 
@@ -71,4 +77,5 @@ private:
 
 	std::shared_ptr<Impl> impl;
 	bool failed = false;
+	bool programFailed = false;  // the failure was the fill program's compile, which a shader reload may fix
 };

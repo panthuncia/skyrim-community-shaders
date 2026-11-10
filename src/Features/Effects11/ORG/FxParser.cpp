@@ -95,8 +95,10 @@ namespace OrgFx
 						++i;
 					}
 					const auto directive = a_src.substr(directiveStart, i - directiveStart);
-					if (directive.find("pack_matrix") != std::string_view::npos)
-						a_diagnostics.push_back({ Severity::Warning, line, "#pragma pack_matrix is not applied to the $Globals layout" });
+					// Column-major is the default, so only row_major changes the layout. The parser does not apply it: the effect
+					// fails, and FX11 runs it, rather than reading every matrix transposed.
+					if (const auto pack = directive.find("pack_matrix"); pack != std::string_view::npos && directive.find("row_major", pack) != std::string_view::npos)
+						a_diagnostics.push_back({ Severity::Error, line, "#pragma pack_matrix(row_major) is not supported" });
 					continue;
 				}
 				lineStart = false;

@@ -1,12 +1,9 @@
 ﻿#include "Flowmap.h"
-#include "ORGFlowmap.h"
 
 #include "Utils/D3D.h"
 #include <DDSTextureLoader.h>
 #include <DirectXTex.h>
 #include <charconv>
-#include <fstream>
-#include <optional>
 
 bool Flowmap::TryGetFlowmap(RE::NiPointer<RE::NiSourceTexture>& outFlowmapTex) const
 {
@@ -166,113 +163,81 @@ bool Flowmap::LoadFlowmap()
 
 namespace
 {
-	/** @brief FNV-1a of a file's bytes, logged so the D3D11 and ORG paths' flowmaps can be compared. */
-	std::optional<uint64_t> HashFile(const std::filesystem::path& path)
+	constexpr uint32_t kTileSize = 64;
+	constexpr uint32_t kMipLevels = 6;
+	constexpr size_t kBytesPerPixel = 4;
+
+	/** @brief One decoded flow tile: its cell coordinates and its B8G8R8A8 image with at least 6 mips. */
+	struct Tile
 	{
-		std::ifstream file(path, std::ios::binary);
-		if (!file)
-			return std::nullopt;
+		int32_t x = 0;
+		int32_t y = 0;
+		DirectX::ScratchImage image;
+	};
 
-		uint64_t hash = 14695981039346656037ull;
-		std::vector<char> chunk(1 << 20);
-		while (file) {
-			file.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
-			const auto count = static_cast<size_t>(file.gcount());
-			for (size_t i = 0; i < count; ++i) {
-				hash ^= static_cast<uint8_t>(chunk[i]);
-				hash *= 1099511628211ull;
-			}
-		}
-		return hash;
-	}
-
-	/** @brief Copies the tiles into one texture on a deferred context and saves it. */
-	bool ComposeD3D11(const std::vector<ORGFlowmap::Tile>& cells, int32_t width, int32_t height, int32_t offsetX, int32_t offsetY, bool useMips,
+	/**
+	 * @brief Places the tiles in one flowmap image and saves it as a DDS file. The engine only reads that file, so this needs no
+	 * GPU: the tiles are copied on the CPU.
+	 * @param tiles The decoded tiles.
+	 * @param width The flowmap's width in cells.
+	 * @param height The flowmap's height in cells.
+	 * @param offsetX Added to a tile's cell x to get its column.
+	 * @param offsetY Added to a tile's cell y to get its row, counted from the bottom.
+	 * @param mipLevels How many of the 6 mips to fill; the rest stay zero.
+	 * @param path The DDS file to write.
+	 * @return True if the file was written.
+	 */
+	bool Compose(const std::vector<Tile>& tiles, int32_t width, int32_t height, int32_t offsetX, int32_t offsetY, uint32_t mipLevels,
 		const std::filesystem::path& path)
 	{
-		auto dvc = globals::d3d::device;
-		auto ctx = globals::d3d::context;
-		if (!dvc || !ctx) {
-			logger::error("[Unified Water] [Flowmap] D3D device/context not available");
+		if (width <= 0 || height <= 0) {
+			logger::error("[Unified Water] [Flowmap] Invalid flowmap size {}x{}", width, height);
 			return false;
 		}
 
-		winrt::com_ptr<ID3D11DeviceContext> deferredCtx;
-		if (FAILED(dvc->CreateDeferredContext(0, deferredCtx.put()))) {
-			logger::error("[Unified Water] [Flowmap] Failed to create deferred context");
+		const size_t pixelWidth = static_cast<size_t>(width) * kTileSize;
+		const size_t pixelHeight = static_cast<size_t>(height) * kTileSize;
+
+		DirectX::ScratchImage flowmap;
+		if (FAILED(flowmap.Initialize2D(DXGI_FORMAT_B8G8R8A8_UNORM, pixelWidth, pixelHeight, 1, kMipLevels))) {
+			logger::error("[Unified Water] [Flowmap] Failed to allocate a {}x{} image", pixelWidth, pixelHeight);
 			return false;
 		}
+		// Cells without a tile, and mips not filled, are zero.
+		std::memset(flowmap.GetPixels(), 0, flowmap.GetPixelsSize());
 
-		Util::MultithreadScope guard(ctx);
-		if (!guard) {
-			logger::error("[Unified Water] [Flowmap] ID3D11Multithread not available");
-			return false;
-		}
-
-		D3D11_TEXTURE2D_DESC desc{};
-		desc.Width = width * 64;
-		desc.Height = height * 64;
-		desc.MipLevels = 6;
-		desc.ArraySize = 1;
-		desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-		desc.SampleDesc = { 1, 0 };
-		desc.Usage = D3D11_USAGE_DEFAULT;
-		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		desc.MiscFlags = 0;
-
-		winrt::com_ptr<ID3D11Texture2D> flowmap;
-		if (FAILED(dvc->CreateTexture2D(&desc, nullptr, flowmap.put()))) {
-			logger::error("[Unified Water] [Flowmap] Failed to create texture");
-			return false;
-		}
-		Util::SetResourceName(flowmap.get(), "UnifiedWater::Flowmap");
-
-		for (const auto& [x, y, image] : cells) {
-			winrt::com_ptr<ID3D11Resource> res;
-			auto hr = DirectX::CreateTexture(dvc, image.GetImages(), image.GetImageCount(), image.GetMetadata(), res.put());
-			if (FAILED(hr) || !res) {
-				logger::warn("[Unified Water] [Flowmap] Flow texture at {},{} creation failed", x, y);
+		mipLevels = std::min(mipLevels, kMipLevels);
+		for (const auto& tile : tiles) {
+			const auto column = static_cast<uint32_t>(tile.x + offsetX);
+			const auto row = static_cast<uint32_t>(tile.y + offsetY);
+			if (column >= static_cast<uint32_t>(width) || row >= static_cast<uint32_t>(height)) {
+				logger::warn("[Unified Water] [Flowmap] Flow texture at {},{} lies outside the flowmap", tile.x, tile.y);
 				continue;
 			}
 
-			winrt::com_ptr<ID3D11Texture2D> flowTex;
-			hr = res->QueryInterface(IID_PPV_ARGS(flowTex.put()));
-			if (FAILED(hr)) {
-				logger::warn("[Unified Water] [Flowmap] Flow texture at {},{} is not a Texture2D", x, y);
-				continue;
-			}
+			for (uint32_t mip = 0; mip < mipLevels; ++mip) {
+				const DirectX::Image* src = tile.image.GetImage(mip, 0, 0);
+				const DirectX::Image* dst = flowmap.GetImage(mip, 0, 0);
+				const uint32_t tileSize = std::max(1u, kTileSize >> mip);
+				if (!src || !dst || src->width != tileSize || src->height != tileSize) {
+					logger::warn("[Unified Water] [Flowmap] Flow texture at {},{} has no {}x{} mip {}", tile.x, tile.y, tileSize, tileSize, mip);
+					break;
+				}
 
-			D3D11_TEXTURE2D_DESC srcDesc{};
-			flowTex->GetDesc(&srcDesc);
-
-			const UINT sx = static_cast<UINT>(x + offsetX);
-			const UINT sy = static_cast<UINT>(y + offsetY);
-			const UINT dstX0 = sx * 64;
-
-			const UINT maxMipLevel = useMips ? 6u : 1u;
-			for (UINT mipLevel = 0; mipLevel < maxMipLevel; ++mipLevel) {
-				const UINT srcSub = D3D11CalcSubresource(mipLevel, 0, srcDesc.MipLevels);
-				const UINT dstSub = D3D11CalcSubresource(mipLevel, 0, desc.MipLevels);
-				const UINT tileSize = std::max(1u, 64u >> mipLevel);
-				const UINT flowmapHeight = std::max(1u, desc.Height >> mipLevel);
-				const UINT dstX = dstX0 >> mipLevel;
-				const UINT dstY = flowmapHeight - (sy + 1) * tileSize;
-
-				deferredCtx->CopySubresourceRegion(flowmap.get(), dstSub, dstX, dstY, 0, flowTex.get(), srcSub, nullptr);
+				// The flowmap's rows run from the top, its cells from the bottom.
+				const size_t dstX = static_cast<size_t>(column) * tileSize;
+				const size_t dstY = dst->height - (static_cast<size_t>(row) + 1) * tileSize;
+				const size_t rowBytes = tileSize * kBytesPerPixel;
+				for (uint32_t line = 0; line < tileSize; ++line) {
+					const uint8_t* from = src->pixels + line * src->rowPitch;
+					uint8_t* to = dst->pixels + (dstY + line) * dst->rowPitch + dstX * kBytesPerPixel;
+					std::memcpy(to, from, rowBytes);
+				}
 			}
 		}
 
-		winrt::com_ptr<ID3D11CommandList> commandList;
-		if (deferredCtx && FAILED(deferredCtx->FinishCommandList(FALSE, commandList.put()))) {
-			logger::error("[Unified Water] [Flowmap] FinishCommandList failed");
-			return false;
-		}
-
-		ctx->ExecuteCommandList(commandList.get(), TRUE);
-
-		const auto hr = Util::SaveTextureToFile(dvc, ctx, path, flowmap.get());
-		if (FAILED(hr)) {
-			logger::error("[Unified Water] [Flowmap] Failed to save flowmap to {}: hr={:08X}", path.string().c_str(), static_cast<uint32_t>(hr));
+		if (const auto hr = Util::SaveImageToFile(path, flowmap); FAILED(hr)) {
+			logger::error("[Unified Water] [Flowmap] Failed to save flowmap to {}: hr={:08X}", path.string(), static_cast<uint32_t>(hr));
 			return false;
 		}
 		return true;
@@ -300,7 +265,7 @@ bool Flowmap::GenerateFlowmap(bool useMips)
 	int32_t mapMaxX = INT_MIN;
 	int32_t mapMaxY = INT_MIN;
 
-	auto cells = std::vector<ORGFlowmap::Tile>();
+	auto cells = std::vector<Tile>();
 	cells.reserve(1024);
 
 	{
@@ -341,7 +306,6 @@ bool Flowmap::GenerateFlowmap(bool useMips)
 					conv = std::move(src);
 				}
 
-				// The checks the D3D11 path made on the created texture, made on the image both paths copy from.
 				const auto& d = conv.GetMetadata();
 				if (d.dimension != DirectX::TEX_DIMENSION_TEXTURE2D || d.width != 64 || d.height != 64 || d.format != DXGI_FORMAT_B8G8R8A8_UNORM || d.mipLevels < 6) {
 					logger::warn("[Unified Water] [Flowmap] Flow texture at {},{} is invalid", x, y);
@@ -353,7 +317,7 @@ bool Flowmap::GenerateFlowmap(bool useMips)
 				mapMaxX = std::max(mapMaxX, x);
 				mapMaxY = std::max(mapMaxY, y);
 
-				cells.emplace_back(ORGFlowmap::Tile{ x, y, std::move(conv) });
+				cells.emplace_back(Tile{ x, y, std::move(conv) });
 			}
 		}
 	}
@@ -373,24 +337,12 @@ bool Flowmap::GenerateFlowmap(bool useMips)
 	const auto filename = std::format(L"Tamriel-Flowmap.{}.{}.{}.{}.dds", width, height, offsetX, offsetY);
 	const auto path = Util::PathHelpers::GetDataPath() / "textures" / "water" / "flowmaps" / filename;
 
-	bool written = false;
-	const char* pathName = "D3D11";
-	if (ORGFlowmap::Requested()) {
-		written = ORGFlowmap::Compose(cells, width, height, offsetX, offsetY, useMips ? 6u : 1u, path);
-		if (written)
-			pathName = "ORG";
-		else
-			logger::warn("[Unified Water] [Flowmap] [ORG] Composing failed, falling back to D3D11");
-	}
-	if (!written)
-		written = ComposeD3D11(cells, width, height, offsetX, offsetY, useMips, path);
-	if (!written)
+	if (!Compose(cells, width, height, offsetX, offsetY, useMips ? kMipLevels : 1u, path))
 		return false;
 
 	const auto t1 = std::chrono::steady_clock::now();
 	const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-	const auto hash = HashFile(path);
-	logger::info("[Unified Water] [Flowmap] Generated in {} ms ({}), {}x{} cells, file hash {:016X}", ms, pathName, width, height, hash.value_or(0));
+	logger::info("[Unified Water] [Flowmap] Generated in {} ms from {} tiles, {}x{} cells", ms, cells.size(), width, height);
 
 	return true;
 }

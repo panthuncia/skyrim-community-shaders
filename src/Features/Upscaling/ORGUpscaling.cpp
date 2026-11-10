@@ -608,6 +608,7 @@ void ORGUpscaling::Reserve()
 void ORGUpscaling::Setup()
 {
 	impl.reset();
+	setupFailed = false;
 	if (!Requested())
 		return;
 	auto& runtime = RenderGraphRuntime::Get();
@@ -617,6 +618,7 @@ void ORGUpscaling::Setup()
 		logger::warn("[ORG] Upscaling stays on D3D11: the render graph or its Upscale and FrameGeneration anchors are not available");
 		return;
 	}
+	setupFailed = true;
 	try {
 		auto next = std::make_shared<Impl>();
 		// The D3D11 path's Deferred::LinearSampler: linear, clamped.
@@ -633,6 +635,7 @@ void ORGUpscaling::Setup()
 			return;
 		}
 		impl = std::move(next);
+		setupFailed = false;
 		logger::info("[ORG] Upscaling's own passes run on the render graph ({}x{}); the upscalers stay in the interop command ring",
 			impl->inputs.width, impl->inputs.height);
 	} catch (const std::exception& e) {
@@ -644,6 +647,14 @@ void ORGUpscaling::Setup()
 bool ORGUpscaling::Running() const
 {
 	return impl && !impl->failed && RenderGraphRuntime::Get().IsActive();
+}
+
+void ORGUpscaling::ClearShaderCache()
+{
+	// Programs that built reload through the pipeline registry. A setup that failed (a shader that did not compile) is tried
+	// again; until the textures are made again the copy to kMAIN and the hudless copy stay on D3D11.
+	if (!impl && setupFailed)
+		Setup();
 }
 
 bool ORGUpscaling::Failed() const
@@ -871,6 +882,7 @@ ORGUpscaling& ORGUpscaling::Get()
 ORGUpscaling::~ORGUpscaling() = default;
 void ORGUpscaling::Reserve() {}
 void ORGUpscaling::Setup() {}
+void ORGUpscaling::ClearShaderCache() {}
 bool ORGUpscaling::Running() const { return false; }
 bool ORGUpscaling::Failed() const { return false; }
 bool ORGUpscaling::ReleaseAfterFailure() { return false; }

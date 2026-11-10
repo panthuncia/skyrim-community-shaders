@@ -7,6 +7,7 @@
 
 #	include "Features/PostProcessing.h"
 #	include "Features/PostProcessing/DoF.h"
+#	include "Globals.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/ShaderBindings.h"
 
@@ -81,10 +82,14 @@ namespace ORGPostChain
 				depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN));
 				if (!depth)
 					return "the main depth cannot be imported";
-				if (!dof.texOutput)
-					return "its resources are not set up";
-				// As DoF::Draw: the frame for the D3D11 output's size, which the chain checks is kMAIN's.
-				frame = dof.PrepareFrame(static_cast<float>(dof.texOutput->desc.Width), static_cast<float>(dof.texOutput->desc.Height));
+				// As DoF::Draw: the frame for its output's size, kMAIN_COPY's (the chain checks it is kMAIN's). Not the D3D11 output's,
+				// which the graph path does not make.
+				auto* mainCopy = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY].texture;
+				if (!mainCopy)
+					return "kMAIN_COPY is missing";
+				D3D11_TEXTURE2D_DESC mainCopyDesc{};
+				mainCopy->GetDesc(&mainCopyDesc);
+				frame = dof.PrepareFrame(static_cast<float>(mainCopyDesc.Width), static_cast<float>(mainCopyDesc.Height));
 				if (!frame.run)
 					return "Target Focus has no target";
 

@@ -108,9 +108,9 @@ struct PostProcessing : Feature
 	void EnsureResources(PostProcessFeature& feature);
 
 	/**
-	 * @brief Sets up every active sub-feature and frees inactive ones, so disabled effects hold no GPU memory.
-	 * An inactive sub-feature with resources is replaced by a fresh instance carrying its settings and enabled state.
-	 * Call after the auto-enabled update and before the pipeline draws.
+	 * @brief Frees inactive sub-features, so disabled effects hold no GPU memory. An inactive sub-feature with resources is
+	 * replaced by a fresh instance carrying its settings and enabled state. Active ones are set up where the D3D11 path draws
+	 * them (DrawFeature), so none are made while the render graph runs the chain. Call after the auto-enabled update.
 	 */
 	void SyncPipelineResources();
 

@@ -133,6 +133,11 @@ namespace
 		std::shared_ptr<org::Resource> noise;
 	};
 
+	std::shared_ptr<const ComputeProgram> LoadFillProgram(rhi::Device a_device)
+	{
+		return ComputeProgram::Load(a_device, { .source = kShader, .constantWords = ShaderBindings::Words<NoiseGenBlock>() });
+	}
+
 	/** @brief Unbinds t20 before the export goes: its texture is freed once D3D11 is past the commands issued until then. */
 	void UnbindNoise()
 	{
@@ -159,7 +164,7 @@ bool ORGGlintsNoise::Filled() const
 
 ID3D11ShaderResourceView* ORGGlintsNoise::NoiseSRV() const
 {
-	return Active() ? impl->noise->SRV() : nullptr;
+	return Filled() ? impl->noise->SRV() : nullptr;
 }
 
 void ORGGlintsNoise::Fail()
@@ -176,10 +181,11 @@ bool ORGGlintsNoise::Setup()
 {
 	auto* host = RenderGraphRuntime::Get().Host();
 	auto next = std::make_shared<Impl>();
-	next->program = ComputeProgram::Load(host->Device(), { .source = kShader, .constantWords = ShaderBindings::Words<NoiseGenBlock>() });
+	next->program = LoadFillProgram(host->Device());
 	if (!next->program) {
 		logger::error("[ORG] TruePBR glints: {} could not be compiled; back to D3D11", kShader);
 		Fail();
+		programFailed = true;
 		return false;
 	}
 
@@ -262,6 +268,33 @@ bool ORGGlintsNoise::Update()
 	return true;
 }
 
+void ORGGlintsNoise::ClearShaderCache()
+{
+	if (failed) {
+		// Only a failed compile is tried again, at the next Update.
+		if (programFailed) {
+			failed = false;
+			programFailed = false;
+		}
+		return;
+	}
+	auto* host = RenderGraphRuntime::Get().Host();
+	if (!impl || !host)
+		return;
+	// The noise is filled once, so a reload fills it again with the program as the file is now. Until then nothing is bound.
+	auto program = LoadFillProgram(host->Device());
+	if (!program) {
+		logger::error("[ORG] TruePBR glints: {} could not be compiled; the noise keeps its last fill", kShader);
+		return;
+	}
+	impl->program = std::move(program);
+	impl->prepared.store(false, std::memory_order_release);
+	impl->filledEpochs = 0;
+	impl->fill = Impl::Fill::Needed;
+	FrameAnchors::Refresh(kClientId);
+	logger::info("[ORG] TruePBR glints: the noise is filled again after a shader reload");
+}
+
 ORGGlintsNoise::~ORGGlintsNoise() = default;
 
 #else  // !CS_HAS_RENDER_GRAPH
@@ -275,6 +308,7 @@ bool ORGGlintsNoise::Update() { return false; }
 bool ORGGlintsNoise::Active() const { return false; }
 bool ORGGlintsNoise::Filled() const { return false; }
 ID3D11ShaderResourceView* ORGGlintsNoise::NoiseSRV() const { return nullptr; }
+void ORGGlintsNoise::ClearShaderCache() {}
 void ORGGlintsNoise::Fail() { failed = true; }
 bool ORGGlintsNoise::Setup() { return false; }
 ORGGlintsNoise::~ORGGlintsNoise() = default;

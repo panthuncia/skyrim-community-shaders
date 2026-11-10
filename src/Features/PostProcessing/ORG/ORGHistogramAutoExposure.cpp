@@ -48,12 +48,10 @@ namespace ORGPostChain
 			std::shared_ptr<org::runtime::IReadbackService> service;
 			std::atomic<bool> wantHistogram = false;
 			std::atomic<bool> wantAdaptation = false;
-			std::atomic<bool> wantLog = false;  // the adaptation's capture is a CS_PP_EXPOSURE_LOG frame
 
 			std::mutex mutex;
 			std::optional<std::array<std::uint32_t, kBins>> histogram;  // guarded: the latest result not taken yet
 			std::optional<float> adaptation;                            // guarded
-			bool log = false;                                           // guarded: the adaptation came from a log frame
 		};
 
 		enum class Capture : std::uint8_t
@@ -92,8 +90,7 @@ namespace ORGPostChain
 				ReadbackFrame data{};
 				data.source = a_preparation.CaptureResource(source->GetGlobalResourceID());
 				// The readback service's thread: the result waits for the next Commit.
-				org::ReadbackCaptureCallback onDone = [weak = std::weak_ptr<Readback>(shared), histogram,
-														  logFrame = shared->wantLog.load(std::memory_order_acquire)](org::ReadbackCaptureResult&& a_result) {
+				org::ReadbackCaptureCallback onDone = [weak = std::weak_ptr<Readback>(shared), histogram](org::ReadbackCaptureResult&& a_result) {
 					const auto owner = weak.lock();
 					if (!owner)
 						return;
@@ -106,7 +103,6 @@ namespace ORGPostChain
 						float value = 0.0f;
 						std::memcpy(&value, a_result.data.data(), sizeof(value));
 						owner->adaptation = value;
-						owner->log = logFrame;
 					}
 				};
 				data.plan = org::runtime::PlanReadbackCapture(a_preparation.device, shared->service, *source, a_preparation.ResolveCapturedResource(data.source),
@@ -149,7 +145,7 @@ namespace ORGPostChain
 		 * @brief HistogramAutoExposure::Draw on the graph: CS_Histogram over the chain's image, CS_Average into the adaptation. The
 		 * histogram and the adaptation are history buffers owned here; CS_Reset clears them after they are made (an indirect dispatch,
 		 * zero groups on the other frames). The adaptation is published as "PostProcessing::AutoExposure::Adaptation" for
-		 * Composite. The settings UI's histogram and meter, and CS_PP_EXPOSURE_LOG, read back through the graph's readback service.
+		 * Composite. The settings UI's histogram and meter read back through the graph's readback service.
 		 */
 		class HistogramAutoExposureEffect final : public Effect
 		{
@@ -214,7 +210,7 @@ namespace ORGPostChain
 					[shared = readback, source = adaptation->Graph()]() -> std::shared_ptr<org::RenderPass> {
 						return std::make_shared<ReadbackPass>(shared, source, Capture::Adaptation);
 					});
-				a_builder.Publish("PostProcessing::AutoExposure::Adaptation", Image{ adaptation->Graph(), DXGI_FORMAT_UNKNOWN });
+				a_builder.Publish(Published::kAdaptation, Image{ adaptation->Graph(), DXGI_FORMAT_UNKNOWN });
 				a_builder.PublishLatch(Published::kAutoExposureConstants, constants);
 			}
 
@@ -242,15 +238,11 @@ namespace ORGPostChain
 					if (readback->adaptation) {
 						a_exposure.adaptationValue = *readback->adaptation;
 						a_exposure.adaptationReadbackFrame = static_cast<int64_t>(globals::state->frameCount);
-						if (readback->log)
-							HistogramAutoExposure::LogAdaptation(*readback->adaptation, "graph");
 						readback->adaptation.reset();
-						readback->log = false;
 					}
 				}
 				const auto wanted = a_exposure.WantedReadbacks();
 				readback->wantHistogram.store(wanted.histogram, std::memory_order_release);
-				readback->wantLog.store(HistogramAutoExposure::AdaptationLogDue(), std::memory_order_release);
 				readback->wantAdaptation.store(wanted.adaptation, std::memory_order_release);
 			}
 

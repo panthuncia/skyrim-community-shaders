@@ -76,7 +76,8 @@ namespace ImGuiRenderer
 
 		/**
 		 * @brief The graph texture behind the bound render target: the engine's framebuffer through the anchors' import, any other
-		 * (HDR's UI texture) imported here. False when there is none or it cannot be imported; the frame is not drawn then.
+		 * (HDR's UI texture) imported here. False when there is none or it cannot be imported; the frame is not drawn then, and an
+		 * import that failed sets failed, so the next NewFrame falls back to imgui_impl_dx11.
 		 */
 		bool UpdateTarget(State& a_state)
 		{
@@ -121,8 +122,12 @@ namespace ImGuiRenderer
 			a_state.ownImport = own;
 			a_state.targetInfo = { textureDesc.Width, textureDesc.Height, static_cast<std::uint32_t>(format) };
 			if (!target) {
-				logger::warn("[ORG] ImGui: the overlay's render target ({}x{}, DXGI format {}) could not be imported; not drawn", textureDesc.Width,
-					textureDesc.Height, static_cast<int>(viewDesc.Format));
+				// The menu must not stay invisible: the next NewFrame falls back to imgui_impl_dx11.
+				logger::warn("[ORG] ImGui: the overlay's render target ({}x{}, DXGI format {}) could not be imported; imgui_impl_dx11 draws from the next frame",
+					textureDesc.Width, textureDesc.Height, static_cast<int>(viewDesc.Format));
+				a_state.failed = true;
+				a_state.targetTexture = nullptr;
+				a_state.ownImport = false;
 				return false;
 			}
 			if (!ImGuiBasicRHI::Prepare(a_state.targetInfo.format)) {

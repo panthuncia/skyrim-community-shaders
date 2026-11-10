@@ -1085,7 +1085,6 @@ bool Effects11::RenderTonemap(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_out
 
 	// The ORG FX runtime (CS_ORG_FX=1) ran the chain in the Tonemap anchor's epoch, just before this.
 	if (ORGFxRuntime::Get().RanThisFrame()) {
-		ORGFxRuntime::Get().AfterRun();
 		tonemapReplacedFrame = globals::state->frameCount;
 		return true;
 	}

@@ -185,6 +185,7 @@ void PostProcessing::DrawSettings()
 				if (Util::LabeledButton("##RecompileShaders", Icons::TI(ICON_TI_REFRESH),
 						T("feature.post_processing.recompile_shaders", "Recompile Shaders"))) {
 					feat->ClearShaderCache();
+					ORGPostProcessing::Get().ClearShaderCache();
 				}
 				if (auto _tt = Util::HoverTooltipWrapper())
 					ImGui::Text("%s", T("feature.post_processing.recompile_shaders_for_this_sub_feature_only", "Recompile shaders for this sub-feature only."));
@@ -475,13 +476,9 @@ void PostProcessing::SyncPipelineResources()
 {
 	for (size_t index = 0; index < pipeline.size(); ++index) {
 		auto& pipe = pipeline[index];
-		if (!pipe)
-			continue;
-		if (pipe->IsActive()) {
-			EnsureResources(*pipe);
-			continue;
-		}
-		if (!pipe->resourcesReady)
+		// An active sub-feature is set up where the D3D11 path first draws it (DrawFeature), so it holds no D3D11 textures while
+		// the render graph runs the chain.
+		if (!pipe || pipe->IsActive() || !pipe->resourcesReady)
 			continue;
 
 		// A fresh instance is the never-set-up state every sub-feature already supports, so this frees its
@@ -496,60 +493,8 @@ void PostProcessing::SyncPipelineResources()
 	}
 }
 
-namespace
-{
-	/**
-	 * @brief The test switch CS_PP_ONLY: a comma-separated list of sub-feature types ("Vignette,Camera"), read once. While it is
-	 * set, those sub-features are on and every other one that is not auto-enabled is off, every frame, whatever the settings or
-	 * scene blends load. Empty when not set.
-	 */
-	const std::optional<std::vector<std::string>>& ForcedSubFeatures()
-	{
-		static const auto forced = []() -> std::optional<std::vector<std::string>> {
-			char value[1024]{};
-			const DWORD length = GetEnvironmentVariableA("CS_PP_ONLY", value, sizeof(value));
-			if (length == 0 || length >= sizeof(value))
-				return std::nullopt;
-			std::vector<std::string> names;
-			std::string_view rest(value, length);
-			while (!rest.empty()) {
-				const auto comma = rest.find(',');
-				auto name = rest.substr(0, comma);
-				while (!name.empty() && name.front() == ' ')
-					name.remove_prefix(1);
-				while (!name.empty() && name.back() == ' ')
-					name.remove_suffix(1);
-				if (!name.empty())
-					names.emplace_back(name);
-				rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
-			}
-			return names;
-		}();
-		return forced;
-	}
-}
-
 void PostProcessing::UpdatePipeline()
 {
-	if (const auto& forced = ForcedSubFeatures()) {
-		static bool logged = false;
-		std::string on;
-		for (auto& pipe : pipeline) {
-			if (!pipe || pipe->IsAutoEnabled())
-				continue;
-			pipe->enabled = std::ranges::find(*forced, pipe->GetType()) != forced->end();
-			if (pipe->enabled)
-				on += std::format("{}{}", on.empty() ? "" : ", ", pipe->GetType());
-		}
-		if (!logged) {
-			logger::info("[PostProcessing] CS_PP_ONLY: only these sub-features are on for the session: {}", on.empty() ? "none" : on);
-			for (const auto& name : *forced) {
-				if (std::ranges::none_of(pipeline, [&](const auto& a_pipe) { return a_pipe && a_pipe->GetType() == name; }))
-					logger::warn("[PostProcessing] CS_PP_ONLY: no sub-feature is named \"{}\"", name);
-			}
-			logged = true;
-		}
-	}
 	for (auto& pipe : pipeline) {
 		if (pipe && pipe->IsAutoEnabled())
 			pipe->UpdateAutoEnabled();
@@ -608,6 +553,7 @@ void PostProcessing::ClearShaderCache()
 		if (pipe && pipe->resourcesReady)
 			pipe->ClearShaderCache();
 	}
+	ORGPostProcessing::Get().ClearShaderCache();
 }
 
 void PostProcessing::SetupResources()
@@ -670,7 +616,7 @@ void PostProcessing::SetupResources()
 
 	BuildPipeline();
 
-	// Sub-features are set up when they first run active (SyncPipelineResources), so disabled ones allocate nothing.
+	// Sub-features are set up when the D3D11 path first draws them (DrawFeature), so disabled ones allocate nothing.
 	for (auto& pipe : pipeline) {
 		if (pipe)
 			pipe->owner = this;
@@ -782,6 +728,7 @@ PostProcessing::CopyCB PostProcessing::OutputConversion(bool a_colorGraded) cons
 
 void PostProcessing::DrawFeature(PostProcessFeature& feature, PostProcessFeature::TextureInfo& lastTexColor)
 {
+	EnsureResources(feature);
 	if (feature.WritesToMainTexture()) {
 		feature.Draw(lastTexColor);
 	} else {
@@ -905,6 +852,8 @@ void PostProcessing::ClearBorderMotionVectorsForFrameGen()
 	auto borderIdx = static_cast<size_t>(FeaturePipelineIndex::Border);
 	auto& pipe = pipeline[borderIdx];
 	if (pipe && pipe->IsActive() && !(globals::state->IsMainOrLoadingMenuOpen() && pipe->DisableInMainLoadingMenu())) {
+		// A D3D11 side path, also when the render graph draws the border.
+		EnsureResources(*pipe);
 		auto* border = static_cast<Border*>(pipe.get());
 		border->ClearMotionVectorsForFrameGen();
 	}

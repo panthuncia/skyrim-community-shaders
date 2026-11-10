@@ -16,8 +16,9 @@
  *           formats differ (PostProcessing::OutputConversion)
  *
  * Every chain image is a transient GraphResources::Texture2D, the size of kMAIN unless the effect names one (a half-resolution
- * or FFT image), so the graph aliases them: there is no ping-pong to write by hand. The D3D11 path's own textures are still created (SyncPipelineResources) while the D3D11
- * fallback may run.
+ * or FFT image), so the graph aliases them: there is no ping-pong to write by hand. A sub-feature's D3D11 textures are made only
+ * when the D3D11 path first draws it (PostProcessing::DrawFeature), so an effect must not read them; files the sub-feature
+ * loads itself (LUT::UpdateTexture) are fine.
  *
  * The mixed rule
  * --------------

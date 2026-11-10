@@ -1604,6 +1604,7 @@ void Upscaling::ClearShaderCache()
 	underwaterMaskUpscalePS = nullptr;
 	upscaleVS = nullptr;
 	copyHudlessPS = nullptr;
+	ORGUpscaling::Get().ClearShaderCache();
 }
 
 void UpdateCameraData()

@@ -30,14 +30,7 @@ public:
 	/** @brief Whether CS_ORG_FX=1 is set. */
 	static bool Requested();
 
-	/**
-	 * @brief Whether CS_ORG_FX_READBACK=1 is set: a debug readback. The 600th frame on the graph, then every 1000th, runs a plan
-	 * that copies every step's target into a texture exported to D3D11; AfterRun reads them back (stalling) and logs each one's
-	 * per-channel mean, minimum and maximum, with the latch values each pass read. The first plan logs every step's bindings, and
-	 * each draw logs its push words as recorded, once.
-	 */
-	static bool ReadbackRequested();
-
+	/** @brief The one runtime. Its state is made on the first Prepare. */
 	static ORGFxRuntime& Get();
 
 	/** @brief Reserves the Tonemap anchor when requested. Before the render graph initializes (Effects11::PostPostLoad). */
@@ -57,9 +50,6 @@ public:
 
 	/** @brief Whether this frame's chain ran on the graph and wrote the tonemap's output: Effects11 then skips FX11. */
 	bool RanThisFrame() const;
-
-	/** @brief After the Tonemap epoch, on D3D11: the CS_ORG_FX_READBACK readback when this frame carried it. */
-	void AfterRun();
 
 	~ORGFxRuntime();
 

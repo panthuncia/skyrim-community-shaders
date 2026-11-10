@@ -206,6 +206,15 @@ bool ORGTerrainBlending::Active() const
 	return impl && !failed && RenderGraphRuntime::Get().IsActive();
 }
 
+void ORGTerrainBlending::ClearShaderCache()
+{
+	// A program that built reloads through the pipeline registry. Only a failed compile is tried again, at the next BeforeDepth.
+	if (failed && programFailed) {
+		failed = false;
+		programFailed = false;
+	}
+}
+
 ID3D11ShaderResourceView* ORGTerrainBlending::BlendedDepthSRV(bool a_16bit) const
 {
 	if (!Active())
@@ -247,6 +256,7 @@ bool ORGTerrainBlending::Setup()
 	next->program = ComputeProgram::Load(host->Device(), { .source = kShader, .constantWords = ShaderBindings::Words<DepthBlendBlock>(), .defines = { { L"MASK_OUTPUT", L"" } } });
 	if (!next->program) {
 		Fail("DepthBlend.hlsl could not be compiled");
+		programFailed = true;
 		return false;
 	}
 	// Written in full by the blend every frame and read within it, but the engine's draws and the D3D11 features read them through
@@ -354,6 +364,7 @@ void ORGTerrainBlending::Reserve() {}
 bool ORGTerrainBlending::BeforeDepth() { return false; }
 bool ORGTerrainBlending::Blend() { return false; }
 bool ORGTerrainBlending::Active() const { return false; }
+void ORGTerrainBlending::ClearShaderCache() {}
 ID3D11ShaderResourceView* ORGTerrainBlending::BlendedDepthSRV(bool) const { return nullptr; }
 ID3D11ShaderResourceView* ORGTerrainBlending::MaskSRV() const { return nullptr; }
 std::shared_ptr<org::Resource> ORGTerrainBlending::BlendedDepthGraph() const { return nullptr; }

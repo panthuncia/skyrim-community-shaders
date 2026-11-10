@@ -65,6 +65,12 @@ public:
 	/** @brief Whether the textures are the graph's and the pass is registered. */
 	bool Active() const;
 
+	/**
+	 * @brief TerrainBlending::ClearShaderCache: when the path stopped because DepthBlend.hlsl did not compile, the next BeforeDepth
+	 * sets it up again. Programs that built reload through the pipeline registry.
+	 */
+	void ClearShaderCache();
+
 	/** @brief The blended depth's exported view (a_16bit: the R16 one); null when inactive. */
 	ID3D11ShaderResourceView* BlendedDepthSRV(bool a_16bit) const;
 
@@ -90,4 +96,5 @@ private:
 
 	std::shared_ptr<Impl> impl;
 	bool failed = false;
+	bool programFailed = false;  // the failure was the program's compile, which a shader reload may fix
 };
