@@ -34,6 +34,7 @@
 #if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
 #	include <ORGModuleServices/ShaderCompiler.h>
 #endif
+#include <Render/RenderGraph/RhiExecution.h>
 #include <Resources/Resource.h>
 
 #include <algorithm>
@@ -41,6 +42,7 @@
 #include <atomic>
 #include <filesystem>
 #include <semaphore>
+#include <set>
 
 #include <tbb/concurrent_queue.h>
 #include <map>
@@ -223,6 +225,44 @@ namespace
 	bool EnvFeaturesOnly()
 	{
 		return EnvEquals("CS_ORG", "features");
+	}
+
+	// Diagnostic (CS_ORG_STREAM_TRACE_AT=a-b,c-d): whether CS's frame counter is in one of the ranges. A single number is a
+	// range of one frame.
+	bool StreamTraceFrame()
+	{
+		static const std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges = [] {
+			std::vector<std::pair<std::uint64_t, std::uint64_t>> parsed;
+			char value[256]{};
+			if (!GetEnvironmentVariableA("CS_ORG_STREAM_TRACE_AT", value, sizeof(value)))
+				return parsed;
+			for (const char* c = value; *c;) {
+				char* end = nullptr;
+				const auto from = std::strtoull(c, &end, 10);
+				if (end == c)
+					break;
+				auto to = from;
+				if (*end == '-') {
+					c = end + 1;
+					to = std::strtoull(c, &end, 10);
+					if (end == c)
+						break;
+				}
+				parsed.emplace_back(from, to);
+				c = (*end == ',') ? end + 1 : end;
+			}
+			return parsed;
+		}();
+		if (ranges.empty() || !globals::state)
+			return false;
+		const std::uint64_t frame = globals::state->frameCount;
+		return std::ranges::any_of(ranges, [&](const auto& a_range) { return frame >= a_range.first && frame <= a_range.second; });
+	}
+
+	// The list's handle, as one number: the same number in two executions means the same secondary executed again.
+	std::uint64_t ListId(const rhi::CommandList& a_list)
+	{
+		return (std::uint64_t{ a_list.GetHandle().generation } << 32) | a_list.GetHandle().index;
 	}
 
 	template <class T>
@@ -1094,6 +1134,47 @@ struct RenderGraphRuntime::Impl
 				logger::error("[ORG] an in-stream epoch's segment failed: {}", e.what());
 		}
 	}
+	// Diagnostic (CS_ORG_STREAM_TRACE_AT): one line per segment of an in-stream epoch's execution: the packets it runs (a kept
+	// recording's are the ones seen before), their secondaries, the slot, waits and signals.
+	void TraceExecution(const org::ExternalEpochExecution& a_execution, const char* a_label)
+	{
+		static std::map<std::string, std::set<std::uintptr_t>> seen;
+		auto& known = seen[a_label ? a_label : ""];
+		const auto points = [](const std::vector<rhi::TimelinePoint>& a_points) {
+			std::string text;
+			for (const auto& point : a_points)
+				text += fmt::format("{}{}@{}", text.empty() ? "" : ",", point.t.index, point.value);
+			return text;
+		};
+		std::size_t kept = 0, fresh = 0;
+		for (std::size_t index = 0; index < a_execution.segments.size(); ++index) {
+			const auto& segment = a_execution.segments[index];
+			std::string leading, items;
+			for (const auto& list : segment.leading)
+				leading += fmt::format("{}{:x}", leading.empty() ? "" : ",", ListId(list));
+			for (const auto& item : segment.items) {
+				if (!item.packet)
+					continue;
+				if (item.packet->Deferred()) {
+					items += items.empty() ? "late" : ",late";
+					continue;
+				}
+				// A kept recording's packet is the same object in every execution that takes it; a fresh one is new.
+				const bool again = !known.insert(reinterpret_cast<std::uintptr_t>(item.packet.get())).second;
+				(again ? kept : fresh) += 1;
+				items += fmt::format("{}packet {:x}{} lists", items.empty() ? "" : "; ", reinterpret_cast<std::uintptr_t>(item.packet.get()), again ? "*" : "");
+				for (const auto& list : item.packet->Lists())
+					items += fmt::format(" {:x}", ListId(list));
+				items += fmt::format(" heaps {}/{}", item.resourceHeap.index, item.samplerHeap.index);
+			}
+			logger::info("[ORG] stream trace frame {} '{}' host frame {} slot {}: segment {}/{}{} leading [{}] items [{}] waits [{}] signals [{}]",
+				globals::state->frameCount, a_label ? a_label : "", host->LastHostFrame(), host->CurrentFrameSlot(), index + 1,
+				a_execution.segments.size(), segment.split ? " split" : "", leading, items, points(segment.waits), points(segment.signals));
+		}
+		logger::info("[ORG] stream trace frame {} '{}': {} packets executed before (* above, a kept recording), {} new{}",
+			globals::state->frameCount, a_label ? a_label : "", kept, fresh, a_execution.exitSplit ? ", exit split" : "");
+	}
+
 	// Render thread: an in-stream epoch's execution into DXVK's command stream, a segment per external command with its waits and
 	// signals, DXVK's command list ended (flushed) before a segment marked split. Not taken: the rest signalled unexecuted.
 	bool EmitExecution(const std::shared_ptr<org::ExternalEpochExecution>& a_execution, const char* a_label)
@@ -1101,6 +1182,8 @@ struct RenderGraphRuntime::Impl
 		ZoneScopedN("CS.ORG.EmitExecution");
 		thread_local std::vector<RenderGraphRuntime::ExternalCommandsWait> waits, signals;
 		const auto streamDevice = host->Device();
+		if (StreamTraceFrame())
+			TraceExecution(*a_execution, a_label);
 		for (std::size_t index = 0; index < a_execution->segments.size(); ++index) {
 			const auto& streamSegment = a_execution->segments[index];
 			if (streamSegment.split && index) {
@@ -2332,6 +2415,13 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 			impl->holding = true;
 		} else if (impl->batching && !impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment)))
 			throw std::runtime_error("DXVK rejected the epoch's submissions");
+		// Experiment (CS_ORG_STREAM_FLUSH_AFTER=1): DXVK closes its command list right after an in-stream epoch, so the D3D11 work
+		// after it records into a new command buffer. It tells state left in DXVK's command buffer from memory or layout faults.
+		static const bool flushAfter = EnvEquals("CS_ORG_STREAM_FLUSH_AFTER", "1");
+		if (execution && flushAfter) {
+			globals::d3d::context->Flush();
+			++impl->epochEnqueues;
+		}
 		if (const std::uint32_t spinUs = submittedEpochSpinUs.load(std::memory_order_relaxed); spinUs && IsDclfSegment(a_segment)) {
 			const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(spinUs);
 			while (std::chrono::steady_clock::now() < until) {
