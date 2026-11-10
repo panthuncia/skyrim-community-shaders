@@ -381,13 +381,18 @@ public:
 	 * WrapBuffer. a_wrap gives the D3D11 description (dimension, size, mips, DXGI format, bind and misc flags); the image, its
 	 * format, flags and usage are filled in here. a_info receives the texture as DXVK describes it: a_info.image.layout is the
 	 * layout the image rests in between DXVK's commands, the graph's home state for it (DxvkImageImport). DXVK zeroes the image
-	 * in its stream first. Render thread. Null when inactive, without the export, or when DXVK rejects the image (logged).
+	 * in its stream first, or with a_initialData (one entry per subresource, as CreateTexture2D takes them) uploads that there
+	 * instead. Any thread: DXVK's wrap is free threaded, as its CreateTexture2D is. Null when inactive, without the export, or
+	 * when DXVK rejects the image (logged).
 	 */
 	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, DxvkOrgInteropResourceInfo& a_info,
-		const char* a_name);
+		const char* a_name, const D3D11_SUBRESOURCE_DATA* a_initialData = nullptr);
 
 	/** @brief Whether WrapTexture can work: the runtime is active and DXVK has the export (interop version 6). */
 	bool CanWrapTextures() const;
+
+	/** @brief Whether WrapTexture can take initial data: CanWrapTextures, and DXVK has dxvkCreateTextureFromVkImageWithData. */
+	bool CanWrapTexturesWithData() const;
 
 	/**
 	 * @brief Render thread: holds a_owner until the GPU has finished every D3D11 command issued so far (an event query, checked

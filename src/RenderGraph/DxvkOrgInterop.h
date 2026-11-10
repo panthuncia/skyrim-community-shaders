@@ -205,6 +205,10 @@ struct DxvkOrgInteropTextureWrap
 // then on it rests in pInfo->image.layout, as for dxvkGetInteropResourceInfo.
 typedef HRESULT(__stdcall* PFN_dxvkCreateTextureFromVkImage)(ID3D11Device* pDevice, const DxvkOrgInteropTextureWrap* pWrap,
 	ID3D11Resource** ppTexture, DxvkOrgInteropResourceInfo* pInfo);
+// dxvkCreateTextureFromVkImage with the texture's contents, one entry per subresource: DXVK uploads them in its stream where the
+// plain call zeroes the image. Any thread. Optional (no version of its own): null pInitialData is the plain call.
+typedef HRESULT(__stdcall* PFN_dxvkCreateTextureFromVkImageWithData)(ID3D11Device* pDevice, const DxvkOrgInteropTextureWrap* pWrap,
+	const D3D11_SUBRESOURCE_DATA* pInitialData, ID3D11Resource** ppTexture, DxvkOrgInteropResourceInfo* pInfo);
 typedef HRESULT(__stdcall* PFN_dxvkSetDeviceTeardownCallback)(PFN_dxvkOrgInteropTeardown pCallback, void* pUser);
 typedef HRESULT(__stdcall* PFN_dxvkEnqueueInteropSubmission)(ID3D11Device* pDevice, const DxvkOrgInteropSubmission* pSubmission);
 
