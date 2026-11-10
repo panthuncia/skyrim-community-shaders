@@ -255,6 +255,11 @@ namespace Vram::Debug
 		logger::info("[VRAM] DXVK records every resource's creation stack");
 	}
 
+	const char* GameTextureOwner(std::string_view a_path)
+	{
+		return TextureOwner(a_path);
+	}
+
 	void TagGameTexture(ID3D11Resource* a_resource, std::string_view a_path)
 	{
 		SetOwner(a_resource, TextureOwner(a_path), true);

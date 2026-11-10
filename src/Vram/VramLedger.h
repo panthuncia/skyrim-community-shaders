@@ -9,7 +9,8 @@
 /**
  * @brief VRAM attribution: every byte of the process's device memory, by owner.
  *
- * Merges DXVK's snapshot of its live buffers and images (Vram/DxvkMemory.h) with the render graph's tracked resources, attributes
+ * Merges DXVK's snapshot of its live buffers and images (Vram/DxvkMemory.h) with the render graph's tracked resources (and, with
+ * CS_ORG_VRAM_SOURCE=org, BasicRHI's heaps and ORG's allocator by owner label: Vram/OrgMemory.h), attributes
  * each to an owner path ("CS/ScreenSpaceGI", "Game/RenderTarget/kMAIN", "DXVK/Staging buffer", "ORG/Alias pools"), and reconciles
  * the sum against what the driver reports per heap, so that memory nothing claims shows up as an explicit residual rather than
  * as a gap.
@@ -55,6 +56,7 @@ namespace Vram
 		std::uint64_t dxvkCache = 0;
 		std::uint64_t dxvkOrgRetired = 0;
 		std::uint64_t attributed = 0;  // rows' bytes in this heap (ORG's device rows go to the largest device-local heap)
+		bool usageAtBudget = false;    // the driver reports the usage at the budget (AMD's clamp): the real usage may be higher
 	};
 
 	enum class Kind : std::uint8_t
@@ -83,6 +85,7 @@ namespace Vram
 		bool hasDxvk = false;
 		bool hasOrg = false;
 		bool debug = false;  // CS_VRAM_DEBUG: creation call sites and ORG's allocation ledger
+		bool orgSource = false;  // CS_ORG_VRAM_SOURCE=org: heaps from BasicRHI (0 video memory, 1 system memory) and ORG's allocator by owner
 	};
 
 	/**
