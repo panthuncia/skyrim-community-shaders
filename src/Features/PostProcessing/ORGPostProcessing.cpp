@@ -94,6 +94,7 @@ namespace ORGPostChain
 		std::vector<std::pair<std::string, std::shared_ptr<org::Resource>>> registered;
 		std::vector<FrameAnchors::PassDesc> passes;
 		std::map<std::string, Image, std::less<>> published;
+		std::map<std::string, std::pair<std::uint32_t, std::uint32_t>, std::less<>> publishedLatches;  // offset, size
 		Image current;
 		std::string failure;           // empty while the build is good
 		bool sharedConstants = false;  // a pass reads CS's shared constants (Bind::Shared)
@@ -494,6 +495,23 @@ namespace ORGPostChain
 		return found != state.published.end() ? found->second : Image{};
 	}
 
+	void Builder::PublishLatchBytes(std::string_view a_name, std::uint32_t a_offset, std::uint32_t a_size)
+	{
+		state.publishedLatches.insert_or_assign(std::string(a_name), std::pair{ a_offset, a_size });
+	}
+
+	std::optional<std::uint32_t> Builder::FindLatchBytes(std::string_view a_name, std::uint32_t a_size)
+	{
+		const auto found = state.publishedLatches.find(a_name);
+		if (found == state.publishedLatches.end())
+			return std::nullopt;
+		if (found->second.second != a_size) {
+			Fail(std::format("the latch region {} holds {} bytes, not {}", a_name, found->second.second, a_size));
+			return std::nullopt;
+		}
+		return found->second.first;
+	}
+
 	std::uint32_t Builder::Reserve(std::uint32_t a_bytes)
 	{
 		const std::uint32_t offset = (state.latchUsed + 15u) & ~15u;
@@ -718,6 +736,12 @@ namespace
 			return ORGPostChain::MakePhysicalGlare();
 		case Index::DoF:
 			return ORGPostChain::MakeDoF();
+		case Index::Camera:
+			return ORGPostChain::MakeCamera();
+		case Index::Composite:
+			return ORGPostChain::MakeComposite();
+		case Index::MotionBlur:
+			return ORGPostChain::MakeMotionBlur();
 		default:
 			return nullptr;
 		}

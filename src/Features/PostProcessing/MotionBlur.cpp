@@ -365,6 +365,32 @@ bool MotionBlur::CheckAndResizeResources(const TextureInfo& inout_tex)
 	}
 }
 
+MotionBlur::FrameConstants MotionBlur::Constants(float2 a_targetResolution) const
+{
+	float velocityScale = GetScaleValueFromPreset(settings.ScalePreset);
+	if (const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr) {
+		velocityScale = std::clamp(CinematicCamera::kMotionBlurReferenceScale * cam->ShutterAngleDeg / 180.0f, 10.0f, 800.0f);
+	}
+	float2 velocityTextureScale = { 1.0f, 1.0f };
+
+	auto& upscaling = globals::features::upscaling;
+	if (upscaling.loaded && upscaling.IsUpscalingActive()) {
+		velocityTextureScale.x = std::clamp(upscaling.resolutionScale.x, 0.0f, 1.0f);
+		velocityTextureScale.y = std::clamp(upscaling.resolutionScale.y, 0.0f, 1.0f);
+	}
+
+	FrameConstants constants;
+	constants.blur = {
+		.VelocityParams = { velocityScale, velocityTextureScale.x, velocityTextureScale.y, 0.0f },
+		.SampleCount = (settings.SampleCount * 2) & ~1  // Double and ensure it's always even
+	};
+	constants.reduction = {
+		.VelocityParams = { velocityScale, velocityTextureScale.x, velocityTextureScale.y, 0.0f },
+		.TargetResolution = { a_targetResolution.x, a_targetResolution.y, 0.0f, 0.0f }
+	};
+	return constants;
+}
+
 bool MotionBlur::UpdateConstantBuffers()
 {
 	auto context = globals::d3d::context;
@@ -380,29 +406,10 @@ bool MotionBlur::UpdateConstantBuffers()
 
 	bool updated = false;
 
-	float velocityScale = GetScaleValueFromPreset(settings.ScalePreset);
-	if (const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr) {
-		velocityScale = std::clamp(CinematicCamera::kMotionBlurReferenceScale * cam->ShutterAngleDeg / 180.0f, 10.0f, 800.0f);
-	}
-	float2 velocityTextureScale = { 1.0f, 1.0f };
-	float2 targetResolution = { static_cast<float>(lastWidth), static_cast<float>(lastHeight) };
-
-	auto& upscaling = globals::features::upscaling;
-	if (upscaling.loaded && upscaling.IsUpscalingActive()) {
-		velocityTextureScale.x = std::clamp(upscaling.resolutionScale.x, 0.0f, 1.0f);
-		velocityTextureScale.y = std::clamp(upscaling.resolutionScale.y, 0.0f, 1.0f);
-	}
-
 	// Set current values
-	motionBlurCB = {
-		.VelocityParams = { velocityScale, velocityTextureScale.x, velocityTextureScale.y, 0.0f },
-		.SampleCount = (settings.SampleCount * 2) & ~1  // Double and ensure it's always even
-	};
-
-	reductionPassCB = {
-		.VelocityParams = { velocityScale, velocityTextureScale.x, velocityTextureScale.y, 0.0f },
-		.TargetResolution = { targetResolution.x, targetResolution.y, 0.0f, 0.0f }
-	};
+	const auto constants = Constants({ static_cast<float>(lastWidth), static_cast<float>(lastHeight) });
+	motionBlurCB = constants.blur;
+	reductionPassCB = constants.reduction;
 
 	// Update blur constant buffer if needed
 	if (memcmp(&motionBlurCB, &lastMotionBlurCB, sizeof(MotionBlurConstantBuffer)) != 0) {

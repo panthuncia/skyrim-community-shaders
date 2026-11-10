@@ -6,26 +6,32 @@
  * First stage of the separable approach for maximum velocity calculation
  */
 
+#include "Common/OrgResources.hlsli"
 #include "PostProcessing/common.hlsli"
 
-// Textures
-Texture2D<float4> TexVelocity : register(t0);        // Full resolution motion vectors
-RWTexture2D<float4> RWTexHorizontal : register(u0);  // [20 x height] output
-
-// Constants
-cbuffer MotionBlurCB : register(b0)
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (MotionBlur::ReductionPassConstantBuffer at
+// b0). The ORG chain (ORG/ORGMotionBlur.cpp) gives heap handles in the push block and the constants from its latch.
+struct ReductionConstants
 {
-	float4 g_VelocityParams;    // x: velocity multiplier, yz: motion-vector source/display scale
-	float4 g_TargetResolution;  // xy: output color resolution
-}
+	float4 VelocityParams;    // x: velocity multiplier, yz: motion-vector source/display scale
+	float4 TargetResolution;  // xy: output color resolution
+};
+
+// TexVelocity: full resolution motion vectors. RWTexHorizontal: the [20 x height] output.
+#define HORIZONTAL_RESOURCES(X)                      \
+	X(SRV, Texture2D<float4>, TexVelocity, 0)        \
+	X(UAV, RWTexture2D<float4>, RWTexHorizontal, 0) \
+	X(LATCH, ReductionConstants, Reduction, 0)
+ORG_PUSH_BLOCK(HORIZONTAL_RESOURCES(ORG_HANDLE))
+HORIZONTAL_RESOURCES(ORG_RESOURCE)
 
 // Fixed parameters
 static const uint GRID_SIZE = 20;  // Fixed grid size
 
 uint2 GetVelocitySamplePosition(uint2 targetPixel, uint2 velocityDimensions)
 {
-	float2 velocityScale = g_VelocityParams.yz;
-	float2 sourceDimensionsF = max(float2(1.0f, 1.0f), g_TargetResolution.xy * velocityScale);
+	float2 velocityScale = Reduction.VelocityParams.yz;
+	float2 sourceDimensionsF = max(float2(1.0f, 1.0f), Reduction.TargetResolution.xy * velocityScale);
 	uint2 sourceDimensions = min(velocityDimensions, uint2(sourceDimensionsF + 0.5f));
 	uint2 sourcePixel = uint2((float2(targetPixel) + 0.5f) * velocityScale);
 	return min(sourcePixel, sourceDimensions - 1);
@@ -37,7 +43,7 @@ uint2 GetVelocitySamplePosition(uint2 targetPixel, uint2 velocityDimensions)
 	uint2 velocityDimensions;
 	TexVelocity.GetDimensions(velocityDimensions.x, velocityDimensions.y);
 
-	uint2 targetDimensions = uint2(max(g_TargetResolution.xy, float2(1.0f, 1.0f)) + 0.5f);
+	uint2 targetDimensions = uint2(max(Reduction.TargetResolution.xy, float2(1.0f, 1.0f)) + 0.5f);
 
 	if (DTid.y >= targetDimensions.y)
 		return;
@@ -64,7 +70,7 @@ uint2 GetVelocitySamplePosition(uint2 targetPixel, uint2 velocityDimensions)
 		float2 velocity = TexVelocity[velocityPixel].xy;
 
 		// Apply velocity scale
-		velocity *= g_VelocityParams.x;
+		velocity *= Reduction.VelocityParams.x;
 
 		// Keep largest velocity
 		float velocityMagnitude = length(velocity);

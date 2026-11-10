@@ -6,17 +6,17 @@
  * Outputs final neighborhood-aware velocity data for blur pass
  */
 
+#include "Common/OrgResources.hlsli"
 #include "PostProcessing/common.hlsli"
 
-// Textures
-Texture2D<float4> TexVertical : register(t0);         // [20×20] input from vertical pass
-RWTexture2D<float4> RWTexNeighborMax : register(u0);  // [20×20] output
-
-// Constants
-cbuffer MotionBlurCB : register(b0)
-{
-	float g_VelocityScale;  // Velocity multiplier
-}
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below; the ORG chain (ORG/ORGMotionBlur.cpp)
+// gives heap handles in the push block. The pass reads no constants.
+// TexVertical: the [20 x 20] input from the vertical pass. RWTexNeighborMax: the [20 x 20] output.
+#define NEIGHBOR_RESOURCES(X)                    \
+	X(SRV, Texture2D<float4>, TexVertical, 0) \
+	X(UAV, RWTexture2D<float4>, RWTexNeighborMax, 0)
+ORG_PUSH_BLOCK(NEIGHBOR_RESOURCES(ORG_HANDLE))
+NEIGHBOR_RESOURCES(ORG_RESOURCE)
 
 // Fixed parameters
 static const uint GRID_SIZE = 20;  // Fixed grid size

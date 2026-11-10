@@ -127,6 +127,20 @@ struct MotionBlur : public PostProcessFeature
 	void DrawSettings() override;
 	void Draw(TextureInfo&) override;
 
+	/** @brief One frame's constants for the blur pass and the reduction passes. */
+	struct FrameConstants
+	{
+		MotionBlurConstantBuffer blur;
+		ReductionPassConstantBuffer reduction;
+	};
+
+	/**
+	 * @brief This frame's constants for an output of a_targetResolution pixels (the full texture size): the velocity scale from
+	 * the preset, or from Cinematic Camera's shutter angle while it drives the lens, and the motion vectors' scale under
+	 * upscaling. Shared by the D3D11 draw and the ORG chain.
+	 */
+	FrameConstants Constants(float2 a_targetResolution) const;
+
 	// Helper methods
 	void CompileComputeShaders();
 	bool CheckAndResizeResources(const TextureInfo& inout_tex);

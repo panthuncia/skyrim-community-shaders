@@ -176,6 +176,20 @@ void Camera::CompileRasterShaders()
 	CompileRasterShadersAsync(L"Data\\Shaders\\PostProcessing\\Camera", {}, shaderInfos);
 }
 
+Camera::CameraCB Camera::Constants(float2 a_res) const
+{
+	const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr;
+	return {
+		.FEFoV = cam ? cam->HorizontalFOVDeg : settings.FEFoV,
+		.FECrop = settings.FECrop,
+		.CAStrength = settings.CAStrength,
+		.NoiseStrength = settings.NoiseStrength,
+		.NoiseType = settings.NoiseType,
+		.res = a_res,
+		.UseFE = settings.UseFE
+	};
+}
+
 void Camera::Draw(TextureInfo& inout_tex)
 {
 	if (!owner || !owner->GetFullscreenVS())
@@ -188,20 +202,7 @@ void Camera::Draw(TextureInfo& inout_tex)
 	float2 res = { (float)texOutput->desc.Width, (float)texOutput->desc.Height };
 	res = Util::ConvertToDynamic(res);
 
-	CameraCB data = {
-		.FEFoV = [this]() {
-			const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr;
-			return cam ? cam->HorizontalFOVDeg : settings.FEFoV;
-		}(),
-		.FECrop = settings.FECrop,
-		.CAStrength = settings.CAStrength,
-		.NoiseStrength = settings.NoiseStrength,
-		.NoiseType = settings.NoiseType,
-		.res = res,
-		.UseFE = settings.UseFE
-	};
-
-	cameraCB->Update(data);
+	cameraCB->Update(Constants(res));
 
 	{
 		PostProcessingRaster::RasterPass pass(context);

@@ -104,6 +104,34 @@ void Composite::CompileRasterShaders()
 	CompileRasterShadersAsync(L"Data\\Shaders\\PostProcessing\\Composite", {}, shaderInfos);
 }
 
+Composite::CompositeCB Composite::Constants(float2 a_outputSize, bool a_bloom, bool a_flare) const
+{
+	CompositeCB cbData = {};
+	cbData.OutputSize[0] = a_outputSize.x;
+	cbData.OutputSize[1] = a_outputSize.y;
+	if (!owner)
+		return cbData;
+	if (a_bloom) {
+		const auto* bloom = owner->GetPipelineFeature<CODBloom>(PostProcessing::FeaturePipelineIndex::CODBloom);
+		if (!bloom)
+			return cbData;
+		cbData.BloomRadius = bloom->settings.UpsampleRadius;
+		cbData.BloomIntensity = bloom->settings.BlendFactor;
+	}
+	if (a_flare) {
+		const auto* flare = owner->GetPipelineFeature<LensFlare>(PostProcessing::FeaturePipelineIndex::LensFlare);
+		if (!flare)
+			return cbData;
+		if (flare->texGhostHalo) {
+			cbData.FlareSize[0] = (float)flare->texGhostHalo->desc.Width;
+			cbData.FlareSize[1] = (float)flare->texGhostHalo->desc.Height;
+		}
+		std::copy(flare->settings.Tint.begin(), flare->settings.Tint.end(), cbData.FlareTint);
+		cbData.FlareIntensity = flare->settings.Intensity;
+	}
+	return cbData;
+}
+
 void Composite::Draw(TextureInfo& inout_tex)
 {
 	if (!owner)
@@ -181,20 +209,7 @@ void Composite::Draw(TextureInfo& inout_tex)
 	uint width = texOutput->desc.Width;
 	uint height = texOutput->desc.Height;
 
-	CompositeCB cbData = {};
-	cbData.OutputSize[0] = (float)width;
-	cbData.OutputSize[1] = (float)height;
-	if (hasBloom) {
-		cbData.BloomRadius = bloom->settings.UpsampleRadius;
-		cbData.BloomIntensity = bloom->settings.BlendFactor;
-	}
-	if (hasFlare) {
-		cbData.FlareSize[0] = (float)flare->texGhostHalo->desc.Width;
-		cbData.FlareSize[1] = (float)flare->texGhostHalo->desc.Height;
-		std::copy(flare->settings.Tint.begin(), flare->settings.Tint.end(), cbData.FlareTint);
-		cbData.FlareIntensity = flare->settings.Intensity;
-	}
-	compositeCB->Update(cbData);
+	compositeCB->Update(Constants({ (float)width, (float)height }, hasBloom, hasFlare));
 	std::array<ID3D11SamplerState*, 2> samplers = {
 		hasLocalExposure ? localExposure->linearSampler.get() : (hasFlare ? flare->colorSampler.get() : nullptr),
 		hasBloom ? bloom->colorSampler.get() : nullptr

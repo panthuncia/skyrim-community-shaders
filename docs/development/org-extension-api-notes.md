@@ -876,3 +876,16 @@ Keys used so far:
   build (`ORGDoF.cpp`, `kFocusResetCommits`). An API would tell a client which build an epoch runs, or give history
   resources a "contents undefined" flag the pass can read.
 - **Found by:** P3 W3, Post Processing DoF (2026-11-09).
+### Side outputs and constants shared between effects of a chain
+
+- **Need:** an effect of a chain reads another effect's side outputs (images, buffers) and its per-frame constants, and
+  must run without them when that effect is off.
+- **Who:** CS's Post Processing Composite, which reads COD Bloom, Lens Flare, Physical Glare, Histogram Auto Exposure and
+  Local Exposure (`ORG/ORGComposite.cpp`); post-processing plugins whose effects combine others' results.
+- **Where it fits:** each effect publishes its images by name (`Builder::Publish`) and its constant regions of the chain's
+  latch (`Builder::PublishLatch`); the reader `Find`s them at the build and picks the shader permutation of those present,
+  so binding another effect's constants costs no copy. The names are string ids agreed between the effects
+  (`ORGPostChain::Published`), and the reader checks a latch region's size against the struct it expects. A plugin API would
+  want these as typed, versioned outputs of an effect (an image with its view and size, a constants struct with its layout)
+  rather than strings, so a contributor's change of format or layout is caught when the chain is built.
+- **Found by:** P3 W3, Post Processing Composite (2026-11-09).
