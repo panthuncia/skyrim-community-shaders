@@ -5,6 +5,7 @@
 #include "GpuIdleTrace.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
 #include "RenderGraph/GpuTimingSource.h"
+#include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "ShaderTools/BSShaderHooks.h"
 #include "ShaderTools/LegacyGraphicsCompatibility.h"
 #include "Utils/ExternalEmittance.h"
@@ -883,6 +884,8 @@ namespace Hooks
 			logger::info("Calling original Init3D");
 
 			func();
+
+			RenderGraph::Engine::Tripwire::InstallGuestDevice();
 
 			logger::info("Accessing render device information");
 			globals::ReInit();

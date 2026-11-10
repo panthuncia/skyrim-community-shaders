@@ -29,12 +29,44 @@ namespace RenderGraph::Engine::Tripwire
 			return requested;
 		}
 
+		// CS_ORG_TRIPWIRE_WATCH_ALL=1: guest resources, views, shaders, states and queries log the first use of every method per
+		// call site, whatever their WatchSet says. The device, the context and the swap chain keep theirs: their calls are the hot path.
+		bool WatchAllRequested()
+		{
+			static const bool requested = Switches::On("CS_ORG_TRIPWIRE_WATCH_ALL");
+			return requested;
+		}
+
 		HMODULE ModuleAt(const void* a_address)
 		{
 			HMODULE module = nullptr;
 			if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCWSTR>(a_address), &module))
 				return nullptr;
 			return module;
+		}
+
+		/** @brief The address range of CS's own image, where every handle class's vtable lives. */
+		struct ImageRange
+		{
+			std::uintptr_t begin = 0;
+			std::uintptr_t end = 0;
+		};
+
+		const ImageRange& OwnImage()
+		{
+			static const ImageRange range = [] {
+				ImageRange out;
+				const HMODULE module = ModuleAt(reinterpret_cast<const void*>(&OwnImage));
+				if (!module)
+					return out;
+				const auto base = reinterpret_cast<std::uintptr_t>(module);
+				const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+				const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+				out.begin = base;
+				out.end = base + nt->OptionalHeader.SizeOfImage;
+				return out;
+			}();
+			return range;
 		}
 
 		std::string ModuleName(HMODULE a_module)
@@ -85,6 +117,7 @@ namespace RenderGraph::Engine::Tripwire
 			const char* method = nullptr;
 			std::string where;
 			std::uint64_t calls = 0;
+			std::uint64_t reported = 0;  // calls at the last report
 			bool forwarded = false;
 		};
 
@@ -118,10 +151,88 @@ namespace RenderGraph::Engine::Tripwire
 			std::mutex lock;
 			std::vector<std::shared_ptr<const void>> owners;
 		};
+		// Never destroyed: a guest object's tag can die after static destruction began (DXVK releasing what it still holds).
 		Retired& GetRetired()
 		{
-			static Retired retired;
-			return retired;
+			static auto* retired = new Retired;
+			return *retired;
+		}
+
+		void Retire(std::shared_ptr<org::Resource> a_graph, std::shared_ptr<const void> a_owner)
+		{
+			if (!a_graph && !a_owner)
+				return;
+			auto& retired = GetRetired();
+			std::lock_guard guard(retired.lock);
+			if (a_graph)
+				retired.owners.push_back(std::move(a_graph));
+			if (a_owner)
+				retired.owners.push_back(std::move(a_owner));
+		}
+
+		// {6B4C2A7E-3D51-4F0B-9E27-8A1C5D0F3B64}: the private-data slot, and the IID, of the tag AttachGraphResource puts on an object.
+		constexpr GUID kGraphTagGuid = { 0x6b4c2a7e, 0x3d51, 0x4f0b, { 0x9e, 0x27, 0x8a, 0x1c, 0x5d, 0x0f, 0x3b, 0x64 } };
+
+		/** @brief Holds an ORG resource and its owner for as long as the D3D11 object that keeps it in private data lives. */
+		class GraphTag final : public IUnknown
+		{
+		public:
+			GraphTag(std::shared_ptr<org::Resource> a_graph, std::shared_ptr<const void> a_owner) :
+				graph(std::move(a_graph)), owner(std::move(a_owner)) {}
+			GraphTag(const GraphTag&) = delete;
+			GraphTag& operator=(const GraphTag&) = delete;
+			// The object that held the tag is gone, on whichever thread dropped it. The GPU free waits for ServiceRetired.
+			~GraphTag() { Retire(std::move(graph), std::move(owner)); }
+
+			HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override
+			{
+				if (!a_out)
+					return E_POINTER;
+				if (a_riid == __uuidof(IUnknown) || a_riid == kGraphTagGuid) {
+					AddRef();
+					*a_out = static_cast<IUnknown*>(this);
+					return S_OK;
+				}
+				*a_out = nullptr;
+				return E_NOINTERFACE;
+			}
+			ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+			ULONG STDMETHODCALLTYPE Release() override
+			{
+				const ULONG left = --refs;
+				if (left == 0)
+					delete this;
+				return left;
+			}
+
+			const std::shared_ptr<org::Resource>& Graph() const { return graph; }
+
+		private:
+			std::atomic<ULONG> refs{ 1 };
+			std::shared_ptr<org::Resource> graph;
+			std::shared_ptr<const void> owner;
+		};
+
+		/** @brief a_object's ID3D11DeviceChild interface (a reference added), or null when it has none. a_object is a COM object. */
+		winrt::com_ptr<ID3D11DeviceChild> AsDeviceChild(const void* a_object)
+		{
+			winrt::com_ptr<ID3D11DeviceChild> child;
+			if (a_object)
+				(void)static_cast<IUnknown*>(const_cast<void*>(a_object))->QueryInterface(__uuidof(ID3D11DeviceChild), child.put_void());
+			return child;
+		}
+
+		/** @brief D3D11 object interfaces outside a handle's chain: the real object refuses them too, so a refusal is no tripwire. */
+		bool IsOtherObjectIid(REFIID a_riid)
+		{
+			static const IID kIids[] = { __uuidof(ID3D11Resource), __uuidof(ID3D11View), __uuidof(ID3D11Asynchronous), __uuidof(ID3D11Texture1D),
+				__uuidof(ID3D11Texture2D), __uuidof(ID3D11Texture3D), __uuidof(ID3D11Buffer), __uuidof(ID3D11ShaderResourceView),
+				__uuidof(ID3D11RenderTargetView), __uuidof(ID3D11DepthStencilView), __uuidof(ID3D11UnorderedAccessView), __uuidof(ID3D11VertexShader),
+				__uuidof(ID3D11PixelShader), __uuidof(ID3D11ComputeShader), __uuidof(ID3D11GeometryShader), __uuidof(ID3D11HullShader),
+				__uuidof(ID3D11DomainShader), __uuidof(ID3D11InputLayout), __uuidof(ID3D11BlendState), __uuidof(ID3D11DepthStencilState),
+				__uuidof(ID3D11RasterizerState), __uuidof(ID3D11SamplerState), __uuidof(ID3D11Query), __uuidof(ID3D11Predicate),
+				__uuidof(ID3D11Counter) };
+			return std::find(std::begin(kIids), std::end(kIids), a_riid) != std::end(kIids);
 		}
 
 		std::string IidText(REFIID a_iid)
@@ -130,7 +241,9 @@ namespace RenderGraph::Engine::Tripwire
 				a_iid.Data4[1], a_iid.Data4[2], a_iid.Data4[3], a_iid.Data4[4], a_iid.Data4[5], a_iid.Data4[6], a_iid.Data4[7]);
 		}
 
-		void ReportLocked(Sites& a_sites, std::string_view a_reason)
+		// a_full lists every site (at exit). Otherwise only the sites that are new or were called again since the last report are
+		// listed, so a long tour's periodic reports stay short.
+		void ReportLocked(Sites& a_sites, std::string_view a_reason, bool a_full)
 		{
 			struct Totals
 			{
@@ -138,14 +251,19 @@ namespace RenderGraph::Engine::Tripwire
 				std::vector<const std::pair<const SiteKey, Site>*> entries;
 			};
 			std::array<Totals, kKinds> perKind{};
+			std::size_t changed = 0;
 			for (const auto& entry : a_sites.sites) {
 				auto& totals = perKind[static_cast<std::size_t>(entry.first.kind)];
 				++totals.sites;
 				totals.calls += entry.second.calls;
 				totals.failedSites += entry.second.forwarded ? 0 : 1;
-				totals.entries.push_back(&entry);
+				const bool active = entry.second.calls != entry.second.reported;
+				changed += active ? 1 : 0;
+				if (a_full || active)
+					totals.entries.push_back(&entry);
 			}
-			logger::info("[ORG] tripwire report ({}): {} call sites, {} calls", a_reason, a_sites.sites.size(), a_sites.calls);
+			logger::info("[ORG] tripwire report ({}): {} call sites, {} calls, {} sites new or called since the last report{}", a_reason,
+				a_sites.sites.size(), a_sites.calls, changed, a_full ? "" : " (only those are listed)");
 			for (std::size_t kind = 0; kind < kKinds; ++kind) {
 				auto& totals = perKind[kind];
 				if (!totals.sites)
@@ -153,10 +271,15 @@ namespace RenderGraph::Engine::Tripwire
 				logger::info("[ORG] tripwire   {}: {} sites ({} failed, {} forwarded), {} calls", InterfaceName(static_cast<Kind>(kind)), totals.sites,
 					totals.failedSites, totals.sites - totals.failedSites, totals.calls);
 				std::sort(totals.entries.begin(), totals.entries.end(), [](const auto* a_left, const auto* a_right) { return a_left->second.calls > a_right->second.calls; });
-				for (const auto* entry : totals.entries)
-					logger::info("[ORG] tripwire     {} x{} from {}, {}", entry->second.method, entry->second.calls, entry->second.where,
-						entry->second.forwarded ? "forwarded" : "failed");
+				for (const auto* entry : totals.entries) {
+					const auto& site = entry->second;
+					logger::info("[ORG] tripwire     {} x{}{} from {}, {}", site.method, site.calls,
+						site.reported == 0 ? std::string(" (new)") : fmt::format(" (+{})", site.calls - site.reported), site.where,
+						site.forwarded ? "forwarded" : "failed");
+				}
 			}
+			for (auto& entry : a_sites.sites)
+				entry.second.reported = entry.second.calls;
 			a_sites.reportedCalls = a_sites.calls;
 		}
 
@@ -186,7 +309,7 @@ namespace RenderGraph::Engine::Tripwire
 				auto& sites = GetSites();
 				std::lock_guard guard(sites.lock);
 				if (sites.calls != sites.reportedCalls)
-					ReportLocked(sites, "periodic");
+					ReportLocked(sites, "periodic", false);
 			}
 		}
 	}
@@ -332,14 +455,7 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		if (wrapped)
 			wrapped->Release();
-		if (!graph && !owner)
-			return;
-		auto& retired = GetRetired();
-		std::lock_guard guard(retired.lock);
-		if (graph)
-			retired.owners.push_back(std::move(graph));
-		if (owner)
-			retired.owners.push_back(std::move(owner));
+		Retire(std::move(graph), std::move(owner));
 	}
 
 	void HandleCore::Init(Kind a_kind, Options&& a_options, IUnknown* a_wrap)
@@ -350,8 +466,16 @@ namespace RenderGraph::Engine::Tripwire
 		owner = std::move(a_options.owner);
 		watch = a_options.watch;
 		wrapped = a_wrap;
-		if (wrapped)
-			wrapped->AddRef();
+		if (!wrapped)
+			return;
+		wrapped->AddRef();
+		const bool hotPath = kind == Kind::Device || kind == Kind::DeviceContext || kind == Kind::SwapChain;
+		if (WatchAllRequested() && !hotPath)
+			watch = WatchSet::All();
+		// The wrapped DXVK object carries the ORG resource too. It can outlive the handle (bound in DXVK's context, or handed out by
+		// a forwarded getter), and GraphResourceOf finds the resource from it.
+		if ((graph || owner) && !hotPath && !Detail::CoreOf(wrapped))
+			(void)AttachGraphResource(wrapped, graph, owner);
 	}
 
 	std::string HandleCore::Name() const
@@ -366,26 +490,42 @@ namespace RenderGraph::Engine::Tripwire
 		name = std::move(a_name);
 	}
 
+	namespace
+	{
+		// Counts a call at its site. The first one is logged with the text a_detail() makes, which is made only then.
+		template <class D>
+		void RecordSite(const HandleCore& a_core, std::uint16_t a_slot, const char* a_method, void* a_caller, bool a_forwarded, D&& a_detail)
+		{
+			auto& sites = GetSites();
+			std::lock_guard guard(sites.lock);
+			++sites.calls;
+			auto [entry, added] = sites.sites.try_emplace(SiteKey{ a_caller, a_slot, a_core.kind });
+			++entry->second.calls;
+			if (!added)
+				return;
+			entry->second.method = a_method;
+			entry->second.forwarded = a_forwarded;
+			entry->second.where = DescribeCaller(a_caller);
+			const std::string detail = a_detail();
+			const auto message = fmt::format("[ORG] tripwire: {}::{}{} from {}, {} (handle \"{}\"){}", InterfaceName(a_core.kind), a_method,
+				detail.empty() ? std::string() : fmt::format("({})", detail), entry->second.where, a_forwarded ? "forwarded to D3D11" : "failed",
+				a_core.Name(), sites.selfTest ? " [self-test]" : "");
+			if (sites.selfTest)
+				logger::info("{}", message);
+			else
+				logger::warn("{}", message);
+		}
+	}
+
 	void HandleCore::Record(std::uint16_t a_slot, const char* a_method, void* a_caller, bool a_forwarded, std::string_view a_detail) const
 	{
-		auto& sites = GetSites();
-		std::lock_guard guard(sites.lock);
-		++sites.calls;
-		auto [entry, added] = sites.sites.try_emplace(SiteKey{ a_caller, a_slot, kind });
-		++entry->second.calls;
-		if (!added)
-			return;
-		entry->second.method = a_method;
-		entry->second.forwarded = a_forwarded;
-		entry->second.where = DescribeCaller(a_caller);
-		const auto handle = Name();
-		const auto message = fmt::format("[ORG] tripwire: {}::{}{} from {}, {} (handle \"{}\"){}", InterfaceName(kind), a_method,
-			a_detail.empty() ? std::string() : fmt::format("({})", a_detail), entry->second.where, a_forwarded ? "forwarded to D3D11" : "failed",
-			handle, sites.selfTest ? " [self-test]" : "");
-		if (sites.selfTest)
-			logger::info("{}", message);
-		else
-			logger::warn("{}", message);
+		RecordSite(*this, a_slot, a_method, a_caller, a_forwarded, [&] { return std::string(a_detail); });
+	}
+
+	void HandleCore::RecordArgument(std::uint16_t a_slot, const char* a_method, void* a_caller, const HandleCore& a_argument) const
+	{
+		RecordSite(*this, a_slot, a_method, a_caller, true,
+			[&] { return fmt::format("{} handle \"{}\" passed on", InterfaceName(a_argument.kind), a_argument.Name()); });
 	}
 
 	InputLayoutHandle::InputLayoutHandle(std::span<const D3D11_INPUT_ELEMENT_DESC> a_elements, std::span<const std::uint8_t> a_vsBytecode) :
@@ -416,12 +556,24 @@ namespace RenderGraph::Engine::Tripwire
 			const void* vtable = *static_cast<const void* const*>(a_object);
 			if (!vtable)
 				return nullptr;  // a kind with no handle yet has a null entry
+			// Every handle's vtable is in CS's image. DXVK's objects and the engine's have theirs elsewhere.
+			const auto& image = OwnImage();
+			const auto address = reinterpret_cast<std::uintptr_t>(vtable);
+			if (address < image.begin || address >= image.end)
+				return nullptr;
 			auto& classes = GetClasses();
 			for (std::size_t i = 0; i < kKinds; ++i) {
 				if (classes.vtables[i].load(std::memory_order_acquire) == vtable)
 					return classes.cores[i].load(std::memory_order_relaxed)(const_cast<void*>(a_object));
 			}
 			return nullptr;
+		}
+
+		void NoteHandleArgument(const CallSite& a_site, const void* a_handle)
+		{
+			const auto* argument = CoreOf(a_handle);
+			if (a_site.core && argument)
+				a_site.core->RecordArgument(a_site.slot, a_site.method, a_site.caller, *argument);
 		}
 
 		bool IsDebugName(REFGUID a_guid)
@@ -437,6 +589,12 @@ namespace RenderGraph::Engine::Tripwire
 				a_self->AddRef();
 				*a_out = a_self;
 				return S_OK;
+			}
+			// Another D3D11 object interface: the real object refuses it too, so this is no tripwire. (The engine's texture save
+			// helper asks GetType first, then for the matching texture interface.)
+			if (IsOtherObjectIid(a_riid)) {
+				*a_out = nullptr;
+				return E_NOINTERFACE;
 			}
 			// Another interface escapes the handle: always logged, forwarded in guest mode.
 			a_core.Record(0, "QueryInterface", a_caller, a_core.wrapped != nullptr, IidText(a_riid));
@@ -539,6 +697,93 @@ namespace RenderGraph::Engine::Tripwire
 			info.wrapped = core->wrapped;
 		}
 		return info;
+	}
+
+	DeviceHandle::~DeviceHandle()
+	{
+		// The context may outlive this device: it must not answer GetDevice with it any more.
+		if (immediate)
+			static_cast<DeviceContextHandle*>(immediate.get())->device.store(nullptr, std::memory_order_release);
+	}
+
+	void STDMETHODCALLTYPE DeviceHandle::GetImmediateContext(ID3D11DeviceContext** a_out)
+	{
+		if (immediate) {
+			if (a_out)
+				immediate.copy_to(a_out);
+			return;
+		}
+		if (core.Enter(static_cast<std::uint16_t>(Slot::GetImmediateContext), "GetImmediateContext", _ReturnAddress())) {
+			static_cast<ID3D11Device*>(core.wrapped)->GetImmediateContext(a_out);
+			return;
+		}
+		Detail::Zero(a_out);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::GetDevice(ID3D11Device** a_out)
+	{
+		if (auto* paired = device.load(std::memory_order_acquire)) {
+			if (a_out) {
+				paired->AddRef();
+				*a_out = paired;
+			}
+			return;
+		}
+		if (core.Enter(static_cast<std::uint16_t>(Slot::GetDevice), "GetDevice", _ReturnAddress())) {
+			static_cast<ID3D11DeviceContext*>(core.wrapped)->GetDevice(a_out);
+			return;
+		}
+		Detail::Zero(a_out);
+	}
+
+	bool PairDeviceAndContext(ID3D11Device* a_device, ID3D11DeviceContext* a_context)
+	{
+		const auto* deviceCore = Detail::CoreOf(a_device);
+		const auto* contextCore = Detail::CoreOf(a_context);
+		if (!deviceCore || deviceCore->kind != Kind::Device || !contextCore || contextCore->kind != Kind::DeviceContext)
+			return false;
+		static_cast<DeviceHandle*>(a_device)->immediate.copy_from(a_context);
+		static_cast<DeviceContextHandle*>(a_context)->device.store(a_device, std::memory_order_release);
+		return true;
+	}
+
+	std::shared_ptr<org::Resource> GraphResourceOf(const void* a_object)
+	{
+		if (!a_object)
+			return {};
+		if (const auto* core = Detail::CoreOf(a_object))
+			return core->graph;
+		const auto child = AsDeviceChild(a_object);
+		if (!child)
+			return {};
+		winrt::com_ptr<IUnknown> stored;
+		UINT size = sizeof(IUnknown*);
+		if (FAILED(child->GetPrivateData(kGraphTagGuid, &size, stored.put_void())) || size != sizeof(IUnknown*) || !stored)
+			return {};
+		winrt::com_ptr<IUnknown> tag;
+		if (FAILED(stored->QueryInterface(kGraphTagGuid, tag.put_void())) || !tag)
+			return {};
+		return static_cast<GraphTag*>(tag.get())->Graph();
+	}
+
+	bool AttachGraphResource(void* a_object, std::shared_ptr<org::Resource> a_graph, std::shared_ptr<const void> a_owner)
+	{
+		if (!a_object || (!a_graph && !a_owner))
+			return false;
+		const auto child = AsDeviceChild(a_object);
+		if (!child) {
+			logger::warn("[ORG] tripwire: AttachGraphResource got an object that is not a D3D11 device child");
+			return false;
+		}
+		winrt::com_ptr<IUnknown> tag;
+		tag.attach(new GraphTag(std::move(a_graph), std::move(a_owner)));
+		// The object takes a reference to the tag and drops it when it is destroyed. If it refuses, the tag dies here and what it
+		// holds still goes through ServiceRetired.
+		if (FAILED(child->SetPrivateDataInterface(kGraphTagGuid, tag.get()))) {
+			logger::warn("[ORG] tripwire: AttachGraphResource: the object refused private data");
+			return false;
+		}
+		return true;
 	}
 
 	std::span<const std::uint8_t> ShaderBytecode(const void* a_object)
@@ -691,7 +936,7 @@ namespace RenderGraph::Engine::Tripwire
 			return;
 		auto& sites = GetSites();
 		std::lock_guard guard(sites.lock);
-		ReportLocked(sites, a_reason);
+		ReportLocked(sites, a_reason, true);
 	}
 
 	void Start()
