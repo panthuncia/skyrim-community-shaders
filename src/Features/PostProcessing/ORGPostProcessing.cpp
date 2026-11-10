@@ -662,6 +662,8 @@ namespace
 			return ORGPostChain::MakeLUT();
 		case Index::Border:
 			return ORGPostChain::MakeBorder();
+		case Index::LensFlare:
+			return ORGPostChain::MakeLensFlare();
 		default:
 			return nullptr;
 		}

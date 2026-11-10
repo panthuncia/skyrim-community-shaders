@@ -314,6 +314,13 @@ namespace ORGPostChain
 	std::unique_ptr<Effect> MakeColorGrading();
 	std::unique_ptr<Effect> MakeLUT();
 	std::unique_ptr<Effect> MakeBorder();
+	std::unique_ptr<Effect> MakeLensFlare();
+
+	/**
+	 * @brief Lens Flare's published side output, which Composite reads: the ghosts and halo, RGBA16F, at max(width / 2, 1) x
+	 * max(height / 2, 1) of the chain's Shape (LensFlare::texGhostHalo's size, Composite's FlareSize).
+	 */
+	inline constexpr std::string_view kLensFlareOutput = "PostProcessing::LensFlare::GhostHalo";
 }
 
 #endif
