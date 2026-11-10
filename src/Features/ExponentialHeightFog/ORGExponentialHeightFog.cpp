@@ -897,23 +897,23 @@ bool ORGExponentialHeightFog::Prepass()
 		inputs.skylighting = true;
 	}
 
+	// Without the sky (interiors, the map) the shader skips the terrain and cloud shadows (SampleDirectionalWorldShadow), and
+	// Cloud Shadows binds nothing: neither is an input then.
+	const bool skyless = Util::IsInterior() || globals::state->isMapMenuOpen ||
+	                     (globals::game::sky && globals::game::sky->flags.any(RE::Sky::Flags::kHideSky));
+
 	auto& terrainShadows = globals::features::terrainShadows;
-	if (terrainShadows.loaded) {
+	if (terrainShadows.loaded && !skyless) {
 		shape.inputs[kShadowHeights] = Published(ORGTerrainShadows::kShadowHeightId, terrainShadows.GetShadowHeightSRV());
-		// The shader reads the heights whenever terrain shadows are on.
 		if (!shape.inputs[kShadowHeights])
 			return fallback("Terrain Shadows' heights are missing");
 	}
 
-	if (globals::features::cloudShadows.loaded) {
-		// The view Cloud Shadows leaves bound at CS t25, which the D3D11 path reads: the published cubemap when it is its export.
-		winrt::com_ptr<ID3D11ShaderResourceView> view;
-		globals::d3d::context->CSGetShaderResources(25, 1, view.put());
-		shape.inputs[kCloudShadows] = Published(ORGCloudShadows::kOcclusionId, view.get());
-		// Without the sky (interiors, the map) the shader skips the world shadow, and Cloud Shadows binds nothing there.
-		const bool skyless = Util::IsInterior() || globals::state->isMapMenuOpen ||
-		                     (globals::game::sky && globals::game::sky->flags.any(RE::Sky::Flags::kHideSky));
-		if (!shape.inputs[kCloudShadows] && !skyless)
+	auto& cloudShadows = globals::features::cloudShadows;
+	if (cloudShadows.loaded && !skyless) {
+		// The occlusion cubemap Cloud Shadows binds at t25 for the frame, not whatever view the slot holds now.
+		shape.inputs[kCloudShadows] = Published(ORGCloudShadows::kOcclusionId, cloudShadows.OcclusionSRV());
+		if (!shape.inputs[kCloudShadows])
 			return fallback("Cloud Shadows' texture is missing");
 	}
 
