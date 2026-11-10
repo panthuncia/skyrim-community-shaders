@@ -151,6 +151,15 @@ struct PostProcessing : Feature
 	virtual void PostPostLoad() override;
 	virtual void Prepass() override;
 
+	/**
+	 * @brief At the tonemap hook, before the Tonemap anchor runs: lets the render graph take the chain this frame
+	 * (ORGPostProcessing, CS_ORG_POST_PROCESSING=1). PreProcess then draws nothing.
+	 */
+	void BeforeTonemapAnchor(RE::RENDER_TARGET a_input);
+
+	/** @brief Whether the scene is in kMAIN_COPY at the tonemap (its input, or refraction routed it there), else in kMAIN. */
+	bool ReadsMainCopy(RE::RENDER_TARGET a_input) const;
+
 	void PreProcess(RE::RENDER_TARGET a_input);
 	void DrawBeforeUpscaling();
 	void ClearBorderMotionVectorsForFrameGen();

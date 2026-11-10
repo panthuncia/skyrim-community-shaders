@@ -13,6 +13,7 @@
 #include "State.h"
 #include "Util.h"
 
+#include "PostProcessing/ORGPostProcessing.h"
 #include "PostProcessing/RasterPass.h"
 
 #include "Features/HDRDisplay.h"
@@ -629,6 +630,8 @@ void PostProcessing::SetupResources()
 
 	ProcessSettings(pendingSettings);
 	pendingSettings = {};
+
+	ORGPostProcessing::Get().Setup();
 }
 
 void PostProcessing::Reset()
@@ -776,8 +779,25 @@ void PostProcessing::DrawBeforeUpscaling()
 	state->EndPerfEvent();
 }
 
+void PostProcessing::BeforeTonemapAnchor(RE::RENDER_TARGET a_input)
+{
+	ORGPostProcessing::Get().BeforeTonemap(ReadsMainCopy(a_input));
+}
+
+bool PostProcessing::ReadsMainCopy(RE::RENDER_TARGET a_input) const
+{
+	// The tonemap hook hands us the pass input directly, so no need to probe the bound RTV.
+	// Refraction still routes through kMAIN_COPY without that being reflected in a_input.
+	return isrefraction || a_input == RE::RENDER_TARGETS::kMAIN_COPY;
+}
+
 void PostProcessing::PreProcess(RE::RENDER_TARGET a_input)
 {
+	// The render graph ran the chain in the Tonemap anchor's epoch.
+	if (ORGPostProcessing::Get().Ran()) {
+		isrefraction = false;
+		return;
+	}
 	if (globals::features::linearLighting.IsLinearLightingActive() &&
 		(globals::state->permutationData.RenderToUI || globals::state->IsMainOrLoadingMenuOpen()))
 		return;
@@ -797,9 +817,7 @@ void PostProcessing::PreProcess(RE::RENDER_TARGET a_input)
 	auto& gameTexMainRT = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 	auto& gameTexMainCopyRT = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
 
-	// The tonemap hook hands us the pass input directly, so no need to probe the bound RTV.
-	// Refraction still routes through kMAIN_COPY without that being reflected in a_input.
-	bool useMainCopy = isrefraction || a_input == RE::RENDER_TARGETS::kMAIN_COPY;
+	bool useMainCopy = ReadsMainCopy(a_input);
 
 	auto gameTexMain = useMainCopy ? gameTexMainCopyRT : gameTexMainRT;
 	PostProcessFeature::TextureInfo lastTexColor = { gameTexMain.texture, gameTexMain.SRV };
@@ -937,4 +955,6 @@ void PostProcessing::PostPostLoad()
 	stl::write_vfunc<0x6, VanillaDoF_IsActive>(RE::VTABLE_ImageSpaceEffectDepthOfField[0]);
 	stl::write_vfunc<0x1, VanillaBlur_Render>(RE::VTABLE_ImageSpaceEffectBlur[0]);
 	stl::write_vfunc<0x2, BSImagespaceShaderRefraction_SetupTechnique>(RE::VTABLE_BSImagespaceShaderRefraction[0]);
+
+	ORGPostProcessing::Reserve();
 }
