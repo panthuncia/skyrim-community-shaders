@@ -3,7 +3,6 @@
 #include "../I18n/I18n.h"
 #include "Deferred.h"
 #include "Features/SubsurfaceScattering/ORGSubsurfaceScattering.h"
-#include "RenderGraph/FrameAnchors.h"
 #include "ShaderCache.h"
 #include "State.h"
 
@@ -374,15 +373,16 @@ void SubsurfaceScattering::DrawSSS()
 
 void SubsurfaceScattering::SetupResources()
 {
+	bool onGraph = false;
 	if (ORGSubsurfaceScattering::Requested()) {
 		auto main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 		D3D11_TEXTURE2D_DESC texDesc{};
 		main.texture->GetDesc(&texDesc);
 		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		ORGSubsurfaceScattering::Get().Setup(texDesc);
+		onGraph = ORGSubsurfaceScattering::Get().Setup(texDesc, {});
 	}
-	// The D3D11 path's resources only when it runs: made later if the render graph's path falls back.
-	if (!ORGSubsurfaceScattering::Get().Running())
+	// The D3D11 path's resources only when it runs: DrawSSS makes them later if the render graph's path falls back.
+	if (!onGraph)
 		EnsureD3D11Resources();
 }
 
@@ -533,8 +533,7 @@ void SubsurfaceScattering::DataLoaded()
 void SubsurfaceScattering::PostPostLoad()
 {
 	Hooks::Install();
-	if (ORGSubsurfaceScattering::Requested())
-		FrameAnchors::Reserve(FrameAnchors::Anchor::DeferredPasses);
+	ORGSubsurfaceScattering::Reserve();
 }
 
 void SubsurfaceScattering::BSLightingShader_SetupSkin(RE::BSRenderPass* a_pass)
