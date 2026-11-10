@@ -275,20 +275,20 @@ struct ORGScreenSpaceGI::Impl
 	/** @brief The programs and textures of a configuration; null, logged, when one cannot be made. */
 	std::shared_ptr<GiState> Build(const Config& a_config) const
 	{
-		auto state = std::make_shared<GiState>();
-		state->config = a_config;
+		auto gi = std::make_shared<GiState>();
+		gi->config = a_config;
 		if (!a_config.enabled)
-			return state;
+			return gi;
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host)
 			return nullptr;
 		for (std::uint32_t step = 0; step < kSteps; ++step) {
 			if ((step == kBlur && !a_config.blur) || (step == kUpsample && a_config.FullRes()))
 				continue;
-			state->programs[step] = ComputeProgram::Load(host->Device(), { .source = kStepInfo[step].source,
+			gi->programs[step] = ComputeProgram::Load(host->Device(), { .source = kStepInfo[step].source,
 																			  .constantWords = kFixedWords + kStepInfo[step].views,
 																			  .defines = AnchorPasses::Defines(StepDefines(static_cast<Step>(step), a_config)) });
-			if (!state->programs[step]) {
+			if (!gi->programs[step]) {
 				logger::error("[ORG] Screen Space GI: {} could not be built", kStepInfo[step].source);
 				return nullptr;
 			}
@@ -296,42 +296,42 @@ struct ORGScreenSpaceGI::Impl
 
 		using enum GraphResources::Lifetime;
 		const bool full = a_config.FullRes();
-		state->workingDepth = MakeTexture(DXGI_FORMAT_R16_FLOAT, kMips, "SSGI::WorkingDepth", Transient, false);
-		state->normal = MakeTexture(DXGI_FORMAT_R8G8_UNORM, kMips, "SSGI::Normal", Transient, false);
-		state->radiance = MakeTexture(DXGI_FORMAT_R11G11B10_FLOAT, kMips, "SSGI::Radiance", Transient, false);
-		state->radianceTemp = MakeTexture(DXGI_FORMAT_R11G11B10_FLOAT, 1, "SSGI::RadianceTemp", Transient, false);
-		state->accumScratch = MakeTexture(DXGI_FORMAT_R8_UNORM, 1, "SSGI::AccumFramesScratch", Transient, false);
-		state->accum = MakeTexture(DXGI_FORMAT_R8_UNORM, 1, "SSGI::AccumFrames", History, false);
+		gi->workingDepth = MakeTexture(DXGI_FORMAT_R16_FLOAT, kMips, "SSGI::WorkingDepth", Transient, false);
+		gi->normal = MakeTexture(DXGI_FORMAT_R8G8_UNORM, kMips, "SSGI::Normal", Transient, false);
+		gi->radiance = MakeTexture(DXGI_FORMAT_R11G11B10_FLOAT, kMips, "SSGI::Radiance", Transient, false);
+		gi->radianceTemp = MakeTexture(DXGI_FORMAT_R11G11B10_FLOAT, 1, "SSGI::RadianceTemp", Transient, false);
+		gi->accumScratch = MakeTexture(DXGI_FORMAT_R8_UNORM, 1, "SSGI::AccumFramesScratch", Transient, false);
+		gi->accum = MakeTexture(DXGI_FORMAT_R8_UNORM, 1, "SSGI::AccumFrames", History, false);
 		// 8-bit history stalls the temporal AO blend.
-		state->ao = MakeTexture(DXGI_FORMAT_R16_UNORM, 1, "SSGI::AO", History, full);
-		state->aoScratch = MakeTexture(DXGI_FORMAT_R16_UNORM, 1, "SSGI::AOScratch", Transient, !full);
-		state->y = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::IlY", History, full);
-		state->yScratch = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::IlYScratch", Transient, !full);
-		state->coCg = MakeTexture(DXGI_FORMAT_R16G16_FLOAT, 1, "SSGI::IlCoCg", History, full);
-		state->coCgScratch = MakeTexture(DXGI_FORMAT_R16G16_FLOAT, 1, "SSGI::IlCoCgScratch", Transient, !full);
+		gi->ao = MakeTexture(DXGI_FORMAT_R16_UNORM, 1, "SSGI::AO", History, full);
+		gi->aoScratch = MakeTexture(DXGI_FORMAT_R16_UNORM, 1, "SSGI::AOScratch", Transient, !full);
+		gi->y = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::IlY", History, full);
+		gi->yScratch = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::IlYScratch", Transient, !full);
+		gi->coCg = MakeTexture(DXGI_FORMAT_R16G16_FLOAT, 1, "SSGI::IlCoCg", History, full);
+		gi->coCgScratch = MakeTexture(DXGI_FORMAT_R16G16_FLOAT, 1, "SSGI::IlCoCgScratch", Transient, !full);
 		if (a_config.blur) {
-			state->yBlurInput = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::IlYBlurInput", Transient, false);
-			state->coCgBlurInput = MakeTexture(DXGI_FORMAT_R16G16_FLOAT, 1, "SSGI::IlCoCgBlurInput", Transient, false);
+			gi->yBlurInput = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::IlYBlurInput", Transient, false);
+			gi->coCgBlurInput = MakeTexture(DXGI_FORMAT_R16G16_FLOAT, 1, "SSGI::IlCoCgBlurInput", Transient, false);
 		}
 		if (a_config.SpecularTextures()) {
-			state->spec = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::GiSpecular", History, full);
-			state->specScratch = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::GiSpecularScratch", Transient, !full);
+			gi->spec = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::GiSpecular", History, full);
+			gi->specScratch = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::GiSpecularScratch", Transient, !full);
 		}
-		state->prevGeo = MakeTexture(DXGI_FORMAT_R11G11B10_FLOAT, 1, "SSGI::PrevGeo", History, false);
-		for (const auto* texture : state->All()) {
+		gi->prevGeo = MakeTexture(DXGI_FORMAT_R11G11B10_FLOAT, 1, "SSGI::PrevGeo", History, false);
+		for (const auto* texture : gi->All()) {
 			// Only the optional ones may be missing, and only when their option is off.
 			if (*texture && !**texture) {
 				logger::error("[ORG] Screen Space GI: {} could not be made", (*texture)->Name());
 				return nullptr;
 			}
 		}
-		for (const Texture* exported : { &state->OutAo(), &state->OutY(), &state->OutCoCg() }) {
+		for (const Texture* exported : { &gi->OutAo(), &gi->OutY(), &gi->OutCoCg() }) {
 			if (!*exported || !(*exported)->SRV()) {
 				logger::error("[ORG] Screen Space GI: the composite's inputs could not be exported to D3D11");
 				return nullptr;
 			}
 		}
-		return state;
+		return gi;
 	}
 
 	/** @brief Every texture of a state, registered with each build of the anchor's graph. */
