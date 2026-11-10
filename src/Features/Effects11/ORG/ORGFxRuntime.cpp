@@ -197,6 +197,7 @@ namespace
 	struct FxEffect
 	{
 		EffectBase* fx11 = nullptr;
+		winrt::com_ptr<ID3DX11Effect> compiled;  // the FX11 effect the values below belong to
 		bool built = false;
 		bool ok = false;
 		std::string reason;
@@ -332,6 +333,20 @@ namespace
 		float amplitude = 0.0f;
 	};
 
+	/**
+	 * @brief What the commit reads of one effect, taken when the shape is planned. The commit never reads the runtime's effects,
+	 * which a reload resets or rebuilds while an older shape may still run.
+	 */
+	struct EffectValues
+	{
+		EffectBase* fx11 = nullptr;
+		winrt::com_ptr<ID3DX11Effect> compiled;  // keeps the variables below alive
+		std::vector<ValueCopy> values;
+		std::uint32_t valuesSize = 0;
+		std::int32_t screenSize = -1;  // ScreenSize's offset in $Globals
+		std::uint32_t screenSizeBytes = 0;
+	};
+
 	/** @brief One registered shape: its steps, its latch, and what the commit writes. */
 	struct Frame
 	{
@@ -341,6 +356,7 @@ namespace
 		std::shared_ptr<org::LatchBlock> latch;
 		std::uint32_t latchBytes = 0;
 		std::array<bool, kEffects> runs{};
+		std::array<EffectValues, kEffects> effects{};  // for the effects that run
 		std::shared_ptr<Resources> resources;
 		std::vector<std::string> clears;  // the kept textures this frame clears first
 		std::uint32_t fxPasses = 0;
@@ -777,6 +793,7 @@ struct ORGFxRuntime::Impl
 
 		// FX11 keeps the values; its $Globals must be laid out as the lowered code reads it.
 		auto* effect = fx11->GetEffect();
+		e.compiled.copy_from(effect);
 		for (const auto& v : e.desc.variables) {
 			if (v.bufferOffset < 0 || !v.cbuffer.empty() || v.modifiers.isStatic)
 				continue;
@@ -904,6 +921,12 @@ struct ORGFxRuntime::Impl
 		{
 			frame->resources = impl.resources;
 			frame->runs = inputs.runs;
+			for (std::size_t i = 0; i < kEffects; ++i) {
+				if (!inputs.runs[i])
+					continue;
+				const auto& e = impl.effects[i];
+				frame->effects[i] = { e.fx11, e.compiled, e.values, e.lowered.valuesSize, e.screenSize, e.screenSizeBytes };
+			}
 		}
 
 		std::string error;
@@ -1391,10 +1414,18 @@ struct ORGFxRuntime::Impl
 		for (std::size_t i = 0; i < kEffects; ++i) {
 			if (!shape.runs[i])
 				continue;
-			auto& e = effects[i];
+			const auto& e = shape.effects[i];
+			// FX11 reloaded the effect after the plan: FX11 updates other variables now. FX11 renders the frame.
+			if (!e.fx11 || !e.compiled || e.fx11->GetEffect() != e.compiled.get())
+				return;
+		}
+		for (std::size_t i = 0; i < kEffects; ++i) {
+			if (!shape.runs[i])
+				continue;
+			const auto& e = shape.effects[i];
 			manager.UpdateEffectValues(*e.fx11);
 			auto& image = images[i];
-			image.assign(e.lowered.valuesSize, 0);
+			image.assign(e.valuesSize, 0);
 			for (const auto& value : e.values)
 				value.variable->GetRawValue(image.data() + value.offset, 0, value.size);
 		}
@@ -1407,7 +1438,7 @@ struct ORGFxRuntime::Impl
 				{
 					const auto index = static_cast<std::size_t>(write.effect);
 					auto& image = images[index];
-					const auto& e = effects[index];
+					const auto& e = shape.effects[index];
 					if (e.screenSize >= 0 && static_cast<std::size_t>(e.screenSize) + e.screenSizeBytes <= image.size())
 						std::memcpy(image.data() + e.screenSize, write.screenSize, e.screenSizeBytes);
 					latch.Write(slot, write.offset, std::as_bytes(std::span<const std::uint8_t>(image)));
@@ -1456,6 +1487,7 @@ void ORGFxRuntime::Invalidate()
 	impl->registered = false;
 	impl->activeNow = false;
 	impl->frame.reset();
+	impl->running.reset();
 	impl->shapeKey.clear();
 	for (auto& effect : impl->effects)
 		effect = FxEffect{};
