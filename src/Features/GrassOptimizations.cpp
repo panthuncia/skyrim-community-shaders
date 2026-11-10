@@ -366,7 +366,11 @@ void GrassOptimizations::DrawBucket(GrassBucket& b)
 	if (materialTextures) {
 		const uint32_t firstTexture = std::countr_zero(materialTextures);
 		const uint32_t textureCount = std::bit_width(materialTextures) - firstTexture;
-		ctx->PSSetShaderResources(firstTexture, textureCount, reinterpret_cast<ID3D11ShaderResourceView* const*>(&shadowState.PSTexture[firstTexture]));
+		// The engine's slots can hold tripwire handles (its textures and targets): DXVK's own context is given what they wrap.
+		std::array<ID3D11ShaderResourceView*, 7> views{};
+		for (uint32_t i = 0; i < textureCount; ++i)
+			views[i] = RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11ShaderResourceView*>(shadowState.PSTexture[firstTexture + i]));
+		ctx->PSSetShaderResources(firstTexture, textureCount, views.data());
 	}
 
 	// Bind complexity and canopy heights for all tiers; the vertex shader selects each record's tier.
