@@ -1735,8 +1735,13 @@ and `graph`, beside `view`):
 -   Each colour commit (`ResolveFrameTextures`) writes the published texture's descriptor into the register when the set has it and
     `graph` still answers true. Otherwise it writes `view`'s import, as before. The first read through each path is logged:
     `[DCLF] frame texture <name> (t<n>) reads the graph resource '<id>'` or `... reads its D3D11 view`.
--   The views with frame constants of their own (the reflection's faces) still read `view`. Their epoch is earlier in the frame, and
-    their passes do not declare the graph textures yet. So `view` must keep answering while the producer still exports.
+-   The views with frame constants of their own (the reflection's faces) read `view`, but a `view` that is the published texture's
+    own export (`PublishedResources::ExportedId`) is read through its id instead, when the faces' passes declared it: they declare
+    the main resources' set too (`DeclareFrameGraphTextures`), except while they wait to be declared again with new main resources
+    (`ViewResources::rebuildPending`). Their epoch is earlier in the frame than most producers', so they read the previous frame's
+    contents either way. The first read through each path is logged: `[DCLF] the faces' frame texture <name> (t<n>) reads the
+    graph resource '<id>'` or `... reads its D3D11 view`. So `view` must keep answering the export while the producer exports.
+-   Two registers may read one published texture (Cloud Shadows' t25 and t26); the passes declare each id once.
 
 Grass reads Grass Collision's texture (t100) from its draw row, not from a register. On Grass Collision's ORG path the texture is
 published as `GrassShared::kCollisionGraphId`. Grass's main passes declare a read of it while it is published (`MainDeclare`), and the
@@ -1755,9 +1760,13 @@ Switching an integration when its feature is ported:
 3.  The integration adds `.graphResource = "<Feature>::<Name>"` and `.graph = &GraphIndex` to its `RegisterFrameTexture`. `GraphIndex`
     is `return <producer on its ORG path> && PublishedResources::ShaderResourceIndex(id, a_index);`.
 4.  `view` stays as it is (the export's SRV, or the D3D11 texture's) until the export is dropped. A register DCLF read only as the
-    captured view before (no frame texture: Screen Space Shadows' t45, Light Limit Fix's t102 and t103) registers with `view` always null and `capturedWhenNull`, so
+    captured view before (no frame texture: Screen Space Shadows' t45, Light Limit Fix's t102 and t103, Terrain Blending's scene
+    depth at t17, Cloud Shadows' self-shadowing input at t26) registers with `view` always null and `capturedWhenNull`, so
     the colour commits keep the captured view and the faces keep reading null; `graph` answers true exactly while the view CS bound
-    there is the producer's export.
+    there is the producer's export (compare the view CS bound with the export, or `PublishedResources::ExportedId(view) == id`;
+    Cloud Shadows keeps the view it bound last at t26, `CloudShadows::selfShadowView`, for this). A register with a `view` of its
+    own that is sometimes the export (Effects' soft depth at t118, the depth table's `kPOST_ZPREPASS_COPY`, which names Terrain
+    Blending's blended depth from its depth pass to its terrain passes) answers `graph` with `ExportedId(view) == id`.
 5.  Check one run's log for the `reads the graph resource` line and compare `dclf:shot` images with the feature's switch on and off.
 
 `CS_DCLF_GRAPH_TEXTURE_TEST` (`Integrations/DynamicCubemaps/ReflectionsGraphTest.h`) is the test producer. `graph` makes t30 read a

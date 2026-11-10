@@ -40,6 +40,12 @@ public:
 	/** @brief Set for a cloud layer drawn outside the reflections capture, which binds that layer's occlusion at t26. */
 	bool bindLayerSelfShadow = false;
 	/**
+	 * @brief The view SkyShaderHacks last bound at t26 (cloud self shadowing), which stays bound after the sky's draws: the occlusion
+	 * cubemap (OcclusionSRV) after a draw in the reflections capture, else a layer's. Drawcall Limit Fix's colour draws read it there
+	 * (Integrations/CloudShadows). Compared, never used.
+	 */
+	const ID3D11ShaderResourceView* selfShadowView = nullptr;
+	/**
 	 * @brief Applies sky shader render state overrides for cloud shadow capture.
 	 *
 	 * When overrideSky is set, redirects rendering to the cloud occlusion cubemap

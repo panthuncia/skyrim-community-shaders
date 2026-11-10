@@ -184,6 +184,9 @@ namespace DCLF
 					a_builder.ShaderResource(resources->blocks, noViews);
 					if (mode == DrawMode::Colour)
 						DeclareFrameBuffers(a_builder, main);
+					// The faces read the published textures their frame textures' views export (ResolveViewFrameTextures).
+					else if (mode == DrawMode::Faces)
+						DeclareFrameGraphTextures(a_builder, main);
 					// The faces' draw families (tree LOD's tables, the faces' rows and lists).
 					for (std::size_t d = 0; d < Extensions::kDrawFamilies && mode == DrawMode::Faces; ++d)
 						if (const auto& family = Extensions::DrawFamilies()[d].contribution.faces; Extensions::DrawFamilyHasFaces(static_cast<Api::DrawFamily>(d))) {
