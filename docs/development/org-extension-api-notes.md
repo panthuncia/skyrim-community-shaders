@@ -648,9 +648,8 @@ Keys used so far:
 - **Where it fits:** a client at the Tonemap anchor that registers again (`FrameAnchors::Register` with the same id) when
   unless the graph loses it.
 - **Who:** CS's TruePBR glints noise (`src/TruePBR/ORGGlintsNoise.cpp`, `CS_ORG_GLINTS`); any plugin with a generated LUT.
-- **Where it fits:** today the client registers a fill pass at the earliest anchor its readers follow (EarlyPrepass), is
-  active only until the commit of the epoch that carries it, then calls `FrameAnchors::Refresh` so the next build leaves
-  the pass out. The texture is a Persistent `GraphResources` twin, published for Drawcall Limit Fix. A framework answer
+- **Where it fits:** the client registers the fill as a one-shot pass (`PassDesc::once`) at the earliest anchor its readers
+  follow (EarlyPrepass), and binds the texture once `ClientDesc::executed` reports the run that carried it. The texture is a Persistent `GraphResources` twin, published for Drawcall Limit Fix. A framework answer
   would be an "initialize" callback on a persistent resource, which the graph runs once before the resource's first use
   in any epoch and again after a device or graph reset. There is no reset event today: a failed graph returns the
   feature to D3D11, which makes the texture again.
