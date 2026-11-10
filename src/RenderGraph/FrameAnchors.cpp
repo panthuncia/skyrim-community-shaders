@@ -323,6 +323,10 @@ namespace FrameAnchors
 				return nullptr;
 			if (const auto found = state.imports.find(a_id); found != state.imports.end() && found->second.texture.get() == a_texture)
 				return found->second.resource;
+			// The same image under another id is a second graph resource: the graph orders neither's uses after the other's writes.
+			for (const auto& [id, other] : state.imports)
+				if (id != a_id && other.texture.get() == a_texture)
+					logger::warn("[ORG] frame anchors: {} imports the image {} already imports; their uses are not ordered with each other", a_id, id);
 			DxvkOrgInteropResourceInfo info{};
 			if (!runtime.DescribeResource(a_texture, info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE) {
 				logger::warn("[ORG] frame anchors: {} cannot be described", a_id);
