@@ -56,6 +56,9 @@ public:
 
 	/** @brief Draws the ImGui settings UI for PBR texture sets and material objects. */
 	virtual void DrawSettings() override;
+
+	/** @brief The render graph's glints noise is filled again (ORGGlintsNoise::ClearShaderCache). */
+	virtual void ClearShaderCache() override;
 	/** @brief Loads PBR texture set and material object configurations from disk. */
 	virtual void SetupResources() override;
 	/** @brief On the ORG path (CS_ORG_GLINTS=1): sets up the glint noise's fill, which the EarlyPrepass anchor then runs. */

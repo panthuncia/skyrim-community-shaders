@@ -411,6 +411,11 @@ void TruePBR::EarlyPrepass()
 	ORGGlintsNoise::Get().Update();
 }
 
+void TruePBR::ClearShaderCache()
+{
+	ORGGlintsNoise::Get().ClearShaderCache();
+}
+
 ID3D11ShaderResourceView* TruePBR::GlintsNoiseSRV() const
 {
 	if (auto* srv = ORGGlintsNoise::Get().NoiseSRV())

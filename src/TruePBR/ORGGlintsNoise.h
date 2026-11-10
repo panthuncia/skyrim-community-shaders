@@ -51,6 +51,12 @@ public:
 	/** @brief The noise's exported view (t20); null when inactive or not filled yet. */
 	ID3D11ShaderResourceView* NoiseSRV() const;
 
+	/**
+	 * @brief TruePBR::ClearShaderCache: builds the fill program again and fills the noise again. After a failed compile, the next
+	 * Update sets the path up again.
+	 */
+	void ClearShaderCache();
+
 	~ORGGlintsNoise();
 
 	/** @brief The resources and fill state the pass and the client share (ORGGlintsNoise.cpp). */
@@ -67,4 +73,5 @@ private:
 
 	std::shared_ptr<Impl> impl;
 	bool failed = false;
+	bool programFailed = false;  // the failure was the fill program's compile, which a shader reload may fix
 };
