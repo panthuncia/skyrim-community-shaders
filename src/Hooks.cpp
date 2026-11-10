@@ -475,12 +475,30 @@ namespace PostProcessingExtensions
 			// Before the anchor runs: Post Processing's chain may run in its epoch (ORGPostProcessing).
 			if (globals::features::postProcessing.loaded)
 				globals::features::postProcessing.BeforeTonemapAnchor(input);
-			FrameAnchors::Run({ .anchor = FrameAnchors::Anchor::Tonemap, .input = static_cast<std::int32_t>(a3), .output = static_cast<std::int32_t>(a4) });
+			const bool anchorRan = FrameAnchors::Run({ .anchor = FrameAnchors::Anchor::Tonemap, .input = static_cast<std::int32_t>(a3), .output = static_cast<std::int32_t>(a4) });
+
+			// The same readback after the anchor's epoch (DXVK runs it before these copies), and of the output after the tonemap: where a
+			// black frame starts. Effects11's graph writes the input and the output; Post Processing's writes kMAIN and kMAIN_COPY.
+			const bool readbackFrame = inputReadback && globals::state->frameCount % 500 == 0;
+			const auto readAfter = [&](const char* a_when, std::uint32_t a_target, const char* a_name) {
+				const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[a_target];
+				if (const auto means = Util::VolumeMeans(target.SRV))
+					logger::info("[Hooks] tonemap {} {} {} (epoch {}) frame {}: mean [{:.4f} {:.4f} {:.4f}]", a_name, a_target, a_when, anchorRan ? "ran" : "not run",
+						globals::state->frameCount, (*means)[0], (*means)[1], (*means)[2]);
+			};
+			if (readbackFrame) {
+				readAfter("after the anchor", a3, "input");
+				readAfter("after the anchor", a4, "output");
+				readAfter("after the anchor", static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN_COPY), "kMAIN_COPY");
+			}
 
 			// Effects11 replaces the pass outright; when it does, the vanilla call is skipped
 			// and HandlePostProcessing fixes up the render-target state the pass would have set.
-			if (state->HandlePostProcessing(input, output))
+			if (state->HandlePostProcessing(input, output)) {
+				if (readbackFrame)
+					readAfter("after Effects11", a4, "output");
 				return;
+			}
 
 			// Post Processing runs its pipeline into kMAIN/kMAIN_COPY, then lets the vanilla
 			// pass run so ISHDR can take its POSTPROCESS passthrough branch.
@@ -489,6 +507,8 @@ namespace PostProcessingExtensions
 				postProcessing.PreProcess(input);
 
 			func(a1, a2, a3, a4, a5);
+			if (readbackFrame)
+				readAfter("after the vanilla tonemap", a4, "output");
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};

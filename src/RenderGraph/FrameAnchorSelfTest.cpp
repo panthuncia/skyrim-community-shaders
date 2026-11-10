@@ -5,6 +5,9 @@
 
 #	include "RenderGraph/FrameAnchorSelfTest.h"
 
+#	include "Globals.h"
+#	include "State.h"
+
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -349,8 +352,12 @@ namespace FrameAnchors::SelfTest
 		if (got == expected) {
 			test.reported[anchor] = true;
 			test.passed |= 1u << anchor;
-			logger::info("[ORG] anchor self-test: {} OK after {} runs (wrote 0x{:08X}, read back 0x{:08X}; kMAIN(0,0).r {})", Name(a_anchor), test.runs[anchor],
-				ValueOf(anchor), got, test.resources->main ? fmt::format("{:.4f}", std::bit_cast<float>(words[kMainWord + anchor])) : std::string("not read"));
+			// The first value an anchor returns may come from the main menu (no scene in kMAIN yet, and the menu's frames may run off
+			// the render thread): the line says so, so a 0 there is not read as a graph that sees no scene.
+			logger::info("[ORG] anchor self-test: {} OK after {} runs (wrote 0x{:08X}, read back 0x{:08X}; kMAIN(0,0).r {}; game frame {}{})", Name(a_anchor),
+				test.runs[anchor], ValueOf(anchor), got,
+				test.resources->main ? fmt::format("{:.4f}", std::bit_cast<float>(words[kMainWord + anchor])) : std::string("not read"), globals::state->frameCount,
+				globals::state->IsMainOrLoadingMenuOpen() ? ", main or loading menu open" : "");
 			if (test.passed == (1u << kAnchors) - 1)
 				logger::info("[ORG] anchor self-test: every anchor OK");
 		} else if (got != 0) {
