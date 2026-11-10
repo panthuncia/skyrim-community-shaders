@@ -1047,3 +1047,25 @@ Keys used so far:
 - **Where it fits:** `FrameAnchors` could pass the commit the client registration its epoch's build holds (the snapshot the
   extension built from), or run a client's commit only once a build holds it.
 - **Found by:** P3 FX execution, Tonemap anchor readback (2026-11-09).
+
+### Boundary states of an in-stream epoch's imports
+
+- **Need:** an in-stream epoch (`GraphHost::SetExternalEpochs`) enters and leaves every DXVK import in the layout DXVK rests
+  it in (`DXVK_ORG_INTEROP_RESTING_LAYOUTS`, external home states). That is the whole contract on both sides: ORG's handoff
+  lists name the resting layout as the entry state, and its exit barriers return to it. DXVK must have the image in that
+  layout when the external command runs, and must not assume anything else about it afterwards.
+- **What broke it:** DXVK, not the graph. `DxvkContext::acquireResources` promoted a render target's layout change to the
+  init barriers whenever DXVK had not yet written the image in the command list, so the change ran before the whole list,
+  ahead of an earlier external command that used the image. The validation layer showed it as an ORG-imported depth or
+  colour target (DCLF's native depth, refraction normals, native targets) whose list expected the resting layout while the
+  image was in the attachment layout, followed by DXVK's own `vkCmdBeginRendering` and `vkCmdPipelineBarrier2` with a stale
+  layout. Every ORG barrier (`vkCmdPipelineBarrier`, BasicRHI's) agreed with the layer. Fixed in DXVK
+  (`fix(dxvk): keep interop layout changes in order`).
+- **For clients:** a kept or revision recording needs nothing beyond the resting layout at its boundary: its body depends on
+  the compiled graph alone, and its handoff list comes from the ledger at submission. A client that records into DXVK's own
+  command buffer (a late pass) gets the same boundary. Imports resting in GENERAL (`CS_ORG_RESTING_LAYOUTS=0`) never
+  change layout and hide this kind of bug.
+- **Copies of tracked images:** a DXVK relocation of an ORG-tracked image copied the old storage in its resting layout
+  (often `SHADER_READ_ONLY_OPTIMAL`, not a legal copy source). It now copies from the transfer source layout and puts the old
+  storage back to rest in the same command buffer (`fix(dxvk): copy relocated interop images legally`).
+- **Found by:** P3 kept layouts, RX 6600 validation runs (2026-11-10).
