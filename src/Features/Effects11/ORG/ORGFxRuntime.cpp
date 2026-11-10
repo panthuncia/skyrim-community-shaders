@@ -373,6 +373,9 @@ namespace
 		std::shared_ptr<Resources> resources;
 		std::vector<std::string> clears;  // the kept textures this frame clears first
 		std::uint32_t fxPasses = 0;
+		// Set when a graph build holding this shape's passes prepared one of them: from then on the epoch runs this shape. A shape
+		// registered at the hook runs only from the next build point (DCLF builds the graph once a frame, at its start).
+		std::shared_ptr<std::atomic<bool>> prepared = std::make_shared<std::atomic<bool>>(false);
 
 		/** @brief CS_ORG_FX_READBACK: a copy of one step's target, exported to D3D11 and read back after the epoch. */
 		struct Snapshot
@@ -404,8 +407,8 @@ namespace
 	class DrawPass final : public org::TypedRenderGraphPass<DrawPass, DrawFrame, DrawBindings>
 	{
 	public:
-		DrawPass(std::shared_ptr<const DrawSpec> a_spec, std::shared_ptr<const org::LatchBlock> a_latch) :
-			spec(std::move(a_spec)), latch(std::move(a_latch)) {}
+		DrawPass(std::shared_ptr<const DrawSpec> a_spec, std::shared_ptr<const org::LatchBlock> a_latch, std::shared_ptr<std::atomic<bool>> a_prepared) :
+			spec(std::move(a_spec)), latch(std::move(a_latch)), prepared(std::move(a_prepared)) {}
 
 		DrawBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -424,7 +427,11 @@ namespace
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(latch.get()));
 		}
 
-		DrawFrame Prepare(const DrawBindings&, const org::PassPrepareContext&) const { return { spec, latch }; }
+		DrawFrame Prepare(const DrawBindings&, const org::PassPrepareContext&) const
+		{
+			prepared->store(true, std::memory_order_release);
+			return { spec, latch };
+		}
 
 		static void Record(const DrawBindings& a_bindings, const DrawFrame& a_frame, org::PassRecordContext& a_recording)
 		{
@@ -468,6 +475,7 @@ namespace
 	private:
 		std::shared_ptr<const DrawSpec> spec;
 		std::shared_ptr<const org::LatchBlock> latch;
+		std::shared_ptr<std::atomic<bool>> prepared;
 	};
 
 	struct ComputeBindings
@@ -485,8 +493,8 @@ namespace
 	class ColorCorrectionPass final : public org::TypedRenderGraphPass<ColorCorrectionPass, ComputeFrame, ComputeBindings>
 	{
 	public:
-		ColorCorrectionPass(std::shared_ptr<const ComputeSpec> a_spec, std::shared_ptr<const org::LatchBlock> a_latch) :
-			spec(std::move(a_spec)), latch(std::move(a_latch)) {}
+		ColorCorrectionPass(std::shared_ptr<const ComputeSpec> a_spec, std::shared_ptr<const org::LatchBlock> a_latch, std::shared_ptr<std::atomic<bool>> a_prepared) :
+			spec(std::move(a_spec)), latch(std::move(a_latch)), prepared(std::move(a_prepared)) {}
 
 		ComputeBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -500,7 +508,11 @@ namespace
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(latch.get()));
 		}
 
-		ComputeFrame Prepare(const ComputeBindings&, const org::PassPrepareContext&) const { return { spec, latch }; }
+		ComputeFrame Prepare(const ComputeBindings&, const org::PassPrepareContext&) const
+		{
+			prepared->store(true, std::memory_order_release);
+			return { spec, latch };
+		}
 
 		static void Record(const ComputeBindings& a_bindings, const ComputeFrame& a_frame, org::PassRecordContext& a_recording)
 		{
@@ -514,6 +526,7 @@ namespace
 	private:
 		std::shared_ptr<const ComputeSpec> spec;
 		std::shared_ptr<const org::LatchBlock> latch;
+		std::shared_ptr<std::atomic<bool>> prepared;
 	};
 
 	struct CopyBindings
@@ -869,7 +882,8 @@ struct ORGFxRuntime::Impl
 	std::array<FxEffect, kEffects> effects{};
 	CsPrograms cs;
 	std::shared_ptr<Resources> resources;
-	std::shared_ptr<Frame> frame;  // the registered shape
+	std::shared_ptr<Frame> frame;    // the registered shape
+	std::shared_ptr<Frame> running;  // the shape the epoch runs: the newest registered one a build prepared (Frame::prepared)
 	std::string shapeKey;
 	std::string lastReason;
 	bool registered = false;
@@ -895,6 +909,7 @@ struct ORGFxRuntime::Impl
 			FrameAnchors::Unregister(kClientId);
 			registered = false;
 			frame.reset();
+			running.reset();
 			shapeKey.clear();
 		}
 		if (!a_reason.empty() && a_reason != lastReason)
@@ -1577,15 +1592,18 @@ struct ORGFxRuntime::Impl
 			pass.anchor = FrameAnchors::Anchor::Tonemap;
 			pass.order = kFirstOrder + static_cast<std::int32_t>(i);
 			const auto latch = std::shared_ptr<const org::LatchBlock>(a_frame->latch);
+			const auto prepared = a_frame->prepared;
 			std::visit(
 				[&](const auto& a_step) {
 					using T = std::decay_t<decltype(a_step)>;
 					if constexpr (std::is_same_v<T, std::shared_ptr<const DrawSpec>>) {
 						pass.kind = FrameAnchors::PassKind::Render;
-						pass.make = [a_step, latch]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DrawPass>(a_step, latch); };
+						pass.make = [a_step, latch, prepared]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DrawPass>(a_step, latch, prepared); };
 					} else if constexpr (std::is_same_v<T, std::shared_ptr<const ComputeSpec>>) {
 						pass.kind = FrameAnchors::PassKind::Compute;
-						pass.make = [a_step, latch]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ColorCorrectionPass>(a_step, latch); };
+						pass.make = [a_step, latch, prepared]() -> std::shared_ptr<org::RenderPass> {
+							return std::make_shared<ColorCorrectionPass>(a_step, latch, prepared);
+						};
 					} else if constexpr (std::is_same_v<T, CopySpec>) {
 						pass.kind = FrameAnchors::PassKind::Copy;
 						pass.make = [a_step]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyPass>(a_step); };
@@ -1621,6 +1639,7 @@ struct ORGFxRuntime::Impl
 				self.impl->activeNow = false;
 				self.impl->ranFrame = UINT32_MAX;
 				self.impl->frame.reset();
+				self.impl->running.reset();
 			}
 		};
 		if (!FrameAnchors::Register(std::move(client))) {
@@ -1628,6 +1647,7 @@ struct ORGFxRuntime::Impl
 			FrameAnchors::Unregister(kClientId);
 			registered = false;
 			frame.reset();
+			running.reset();
 			return;
 		}
 		registered = true;
@@ -1658,6 +1678,7 @@ struct ORGFxRuntime::Impl
 			FrameAnchors::Unregister(kClientId);
 		registered = false;
 		frame.reset();
+		running.reset();
 		shapeKey.clear();
 	}
 
@@ -1736,12 +1757,12 @@ struct ORGFxRuntime::Impl
 	/** @brief After the epoch that ran a plan with snapshots: each step's target, read back through D3D11. */
 	void ReadSnapshots()
 	{
-		if (!readbackNow || !frame)
+		if (!readbackNow || !running)
 			return;
 		readbackNow = false;
 		nextReadback = ranCount + 1000;
-		logger::info("[ORG] Effects11 readback of ran frame {} (game frame {}), {} snapshots", ranCount, globals::state->frameCount, frame->snapshots.size());
-		for (const auto& snapshot : frame->snapshots) {
+		logger::info("[ORG] Effects11 readback of ran frame {} (game frame {}), {} snapshots", ranCount, globals::state->frameCount, running->snapshots.size());
+		for (const auto& snapshot : running->snapshots) {
 			const auto& desc = snapshot.texture->Desc();
 			logger::info("[ORG] Effects11 readback: {} -> {} ({} {}x{}): {}", snapshot.step, snapshot.target, static_cast<std::uint32_t>(snapshot.format), desc.Width,
 				desc.Height, Stats(snapshot.texture->D3D11(), snapshot.format));
@@ -1751,11 +1772,19 @@ struct ORGFxRuntime::Impl
 	/** @brief Inside the epoch: this frame's values into the latch. FX11's variables hold them (EffectManager::UpdateEffectValues). */
 	void Commit()
 	{
-		if (!frame || !frame->latch)
+		// The epoch runs the shape a build prepared: one registered at this hook runs only from the next build point, and until then
+		// the last one does, reading its own latch. With none yet, the epoch runs nothing of Effects11's and FX11 renders the frame.
+		if (frame && frame->prepared->load(std::memory_order_acquire) && running != frame) {
+			running = frame;
+			logger::info("[ORG] Effects11: the graph runs the shape registered last ({} passes{})", running->steps.size(),
+				running->snapshots.empty() ? "" : ", with readback snapshots");
+		}
+		if (!running || !running->latch)
 			return;
+		const auto& shape = *running;
 		auto& manager = EffectManager::GetSingleton();
 		for (std::size_t i = 0; i < kEffects; ++i) {
-			if (!frame->runs[i])
+			if (!shape.runs[i])
 				continue;
 			auto& e = effects[i];
 			manager.UpdateEffectValues(*e.fx11);
@@ -1765,10 +1794,10 @@ struct ORGFxRuntime::Impl
 				value.variable->GetRawValue(image.data() + value.offset, 0, value.size);
 		}
 		const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
-		const auto& latch = *frame->latch;
-		const bool logValues = !frame->snapshots.empty();
+		const auto& latch = *shape.latch;
+		const bool logValues = !shape.snapshots.empty();
 		const std::uint32_t frameCount = manager.frameCount;
-		for (const auto& write : frame->writes) {
+		for (const auto& write : shape.writes) {
 			switch (write.kind) {
 			case RegionWrite::Kind::FxValues:
 				{
@@ -1802,15 +1831,15 @@ struct ORGFxRuntime::Impl
 		if (logValues) {
 			const auto bytes = latch.Slot(slot);
 			logger::info("[ORG] Effects11 readback: latch slot {} at offset {}, {} bytes per slot", slot, latch.Offset(slot), latch.Stride());
-			for (const auto& write : frame->writes)
+			for (const auto& write : shape.writes)
 				if (write.offset < bytes.size())
 					logger::info("[ORG] Effects11 readback: values of {} (region {}): {}", write.label, write.offset, Floats(bytes.subspan(write.offset)));
 			readbackNow = true;
 		}
 		++ranCount;
 		// The clears run with this frame; the next frame's plan leaves them out.
-		for (const auto& name : frame->clears)
-			frame->resources->cleared.insert(name);
+		for (const auto& name : shape.clears)
+			shape.resources->cleared.insert(name);
 		ranFrame = globals::state->frameCount;
 	}
 };
