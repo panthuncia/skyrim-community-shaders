@@ -11,8 +11,8 @@ groupshared uint VisibleSamples;
 	GroupMemoryBarrierWithGroupSync();
 
 	CaptureLightingState state = LightingState[0];
-	uint captureBit = 1u << CaptureIndex;
-	bool reset = ResetCapture != 0 || (state.PendingResetMask & captureBit) != 0 || state.Initialized == 0;
+	uint captureBit = 1u << UpdateData.CaptureIndex;
+	bool reset = UpdateData.ResetCapture != 0 || (state.PendingResetMask & captureBit) != 0 || state.Initialized == 0;
 	if (!reset) {
 		uint width, height, faces;
 		DynamicCubemap.GetDimensions(width, height, faces);
