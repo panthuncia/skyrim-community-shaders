@@ -762,7 +762,7 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 	if (terrainShadows.loaded) {
 		auto* view = terrainShadows.GetShadowHeightSRV();
 		const auto& graphTerrain = ORGTerrainShadows::Get();
-		if (view && graphTerrain.Active() && view == graphTerrain.ShadowHeightSRV())
+		if (view && graphTerrain.IsActive() && view == graphTerrain.ShadowHeightSRV())
 			shape.shadowHeights = { nullptr, "TerrainShadows::ShadowHeight" };
 		else
 			shape.shadowHeights = ImportView("TerrainShadows::ShadowHeight", view);
@@ -775,7 +775,7 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 		// The view Cloud Shadows leaves bound at PS t25, which the D3D11 passes read: the graph's own cubemap when it is that one.
 		const auto view = BoundPixelView(25);
 		const auto& graphClouds = ORGCloudShadows::Get();
-		if (view && graphClouds.Active() && view.get() == graphClouds.OcclusionSRV())
+		if (view && graphClouds.IsActive() && view.get() == graphClouds.OcclusionSRV())
 			shape.cloudShadows = { nullptr, "CloudShadows::Occlusion" };
 		else
 			shape.cloudShadows = ImportView("CloudShadows::Occlusion", view.get());
