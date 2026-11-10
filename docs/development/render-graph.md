@@ -496,7 +496,8 @@ Each anchor's ordering rule is in [org-extension-api-notes.md](./org-extension-a
     reads the D3D11 buffers back after each such epoch and logs whether the bytes match (a debug switch: it stalls).
 6.  Textures D3D11 features produce (not engine targets) can be read in place, untracked, through
     `DCLF::GpuTextures::ResolveBinding(srv)` (the ORG deferred composite does, `src/ORGDeferredComposite.cpp`). Keep the binding's
-    owner until no submission can read it.
+    owner until no submission can read it: the recording that names it retains it (`RecordingContext::Retain` at record time),
+    which covers every resubmission of a kept recording, with no frame count.
 
 ```cpp
 // A compute pass at DeferredPasses that reads kMAIN and writes a graph texture.

@@ -63,6 +63,12 @@ public:
 	void ClearShaderCache();
 
 	/**
+	 * @brief The defines of the deferred composite's build (DeferredCompositeCS.hlsl) besides the common ones: INTERIOR, and the
+	 * loaded features it reads. One list for the D3D11 shaders and the ORG composite (ORGDeferredComposite).
+	 */
+	static std::vector<std::pair<const char*, const char*>> CompositeDefines(bool a_interior);
+
+	/**
 	 * @brief Gets or compiles the exterior deferred composite compute shader.
 	 * @return Cached or freshly compiled compute shader with feature-dependent defines.
 	 */
