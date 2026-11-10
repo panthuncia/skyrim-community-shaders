@@ -785,3 +785,33 @@ Keys used so far:
 - **Where it fits:** CS guards those sections with `__HLSL_ENABLE_16_BIT` as well. A plugin API's program build would
   need a per-program option for 16-bit types (which changes `half` everywhere in that program) rather than a global flag.
 - **Found by:** P3 W3, Post Processing (2026-11-09).
+
+### One constant block, changed between a pass sequence's dispatches
+
+- **Need:** a shader whose one cbuffer the D3D11 path rewrites between dispatches (per-pass sizes, a kernel group's scale
+  and ghost mask, the halo only in the first group), on a recording that never changes. The block is 304 bytes, too big for
+  push constants.
+- **Who:** CS's Lens Flare (up to 12 dispatch shapes); any multi-pass effect ported from D3D11 with a shared cbuffer.
+- **Where it fits:** each pass gets its own latch copy of the block, written in full by the commit (`ORGLensFlare.cpp`).
+  That costs latch space (about 2.7 KB in Ultra mode, of the chain's 16 KB). An API could take one base block plus small
+  per-pass overrides in push constants, if the shader could read the base from the latch and patch it from the push block.
+- **Found by:** P3 W3, Post Processing Lens Flare (2026-11-09).
+
+### Knowing that a commit's build is the epoch's
+
+- **Need:** run work only on some frames (a bokeh kernel's spectrum, baked when the aperture changes) and count it done
+  only when it ran. After a rebuild, the chain's commit writes the new build's latch while the epoch may still run the old
+  build's passes, so marking the work done in the commit can lose it.
+- **Who:** CS's Lens Flare (kernel bake), Color Grading (LUT bake, which marks it done in the commit), TruePBR's glint
+  noise (counts prepared passes).
+- **Where it fits:** Lens Flare bakes in three frames after a change, which is deterministic and harmless. An API would
+  tell the commit which build the epoch was made from (or pass a per-build epoch counter), so one frame is enough.
+- **Found by:** P3 W3, Post Processing Lens Flare (2026-11-09).
+
+### Chain images of other sizes
+
+- **Need:** transient chain images at half, quarter or FFT (N x N) resolution, aliased with the rest.
+- **Who:** CS's Lens Flare, and likely Bloom, Physical Glare and Depth of Field.
+- **Where it fits:** `Builder::CreateImage` takes an optional width and height. RG32F images are sampled with linear
+  filtering (the FFT compose), which Vulkan does not guarantee for 32-bit float formats; current desktop GPUs support it.
+- **Found by:** P3 W3, Post Processing Lens Flare (2026-11-09).
