@@ -9,6 +9,7 @@
 #include "Features/InteriorSun.h"
 #include "Features/LinearLighting.h"
 #include "Hooks.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "I18n/I18n.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -710,7 +711,8 @@ struct ExtendedRendererState
 
 	void SetPSTexture(size_t textureIndex, RE::BSGraphics::Texture* newTexture)
 	{
-		ID3D11ShaderResourceView* resourceView = newTexture ? newTexture->resourceView : nullptr;
+		// Bound on the raw context: an engine texture's tripwire handle goes as the D3D11 view it wraps.
+		ID3D11ShaderResourceView* resourceView = newTexture ? RenderGraph::Engine::Tripwire::Unwrap(newTexture->resourceView) : nullptr;
 		//if (PSTexture[textureIndex] != resourceView)
 		{
 			PSTexture[textureIndex] = resourceView;

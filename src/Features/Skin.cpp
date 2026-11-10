@@ -7,6 +7,7 @@
 #include "Globals.h"
 #include "Hooks.h"
 #include "Menu.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 
@@ -547,9 +548,10 @@ std::optional<Skin::MaterialTextures> Skin::MaterialTexturesOf(RE::BSLightingSha
 		return std::nullopt;
 	}
 
+	// Bound on the raw context: an engine texture's tripwire handle goes as the D3D11 view it wraps.
 	auto view = [](const RE::NiSourceTexturePtr& a_texture) -> ID3D11ShaderResourceView* {
 		auto* texture = a_texture ? a_texture->rendererTexture : nullptr;
-		return texture ? texture->resourceView : nullptr;
+		return texture ? RenderGraph::Engine::Tripwire::Unwrap(texture->resourceView) : nullptr;
 	};
 	const auto& black = globals::game::graphicsState->GetRuntimeData().defaultTextureBlack;
 
