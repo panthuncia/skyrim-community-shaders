@@ -72,6 +72,9 @@ namespace
 	constexpr std::int32_t kFirstOrder = 100;
 	constexpr std::uint32_t kRegionAlignment = 16;
 
+	// The lowered passes' push blocks must fit the push words a draw records.
+	static_assert(OrgFx::kMaxPushWords == ShaderBindings::kMaxPushWords, "OrgFx::kMaxPushWords must match ShaderBindings::kMaxPushWords");
+
 	using Res = std::shared_ptr<org::Resource>;
 	using Lifetime = GraphResources::Lifetime;
 
@@ -592,9 +595,24 @@ namespace
 
 	rhi::CompareOp CompareOf(OrgFx::CompareFunc a_func)
 	{
-		constexpr rhi::CompareOp kOps[] = { rhi::CompareOp::Never, rhi::CompareOp::Less, rhi::CompareOp::Equal, rhi::CompareOp::LessEqual, rhi::CompareOp::Greater,
-			rhi::CompareOp::NotEqual, rhi::CompareOp::GreaterEqual, rhi::CompareOp::Always };
-		return kOps[static_cast<std::size_t>(a_func) % std::size(kOps)];
+		switch (a_func) {
+		case OrgFx::CompareFunc::Never:
+			return rhi::CompareOp::Never;
+		case OrgFx::CompareFunc::Less:
+			return rhi::CompareOp::Less;
+		case OrgFx::CompareFunc::Equal:
+			return rhi::CompareOp::Equal;
+		case OrgFx::CompareFunc::LessEqual:
+			return rhi::CompareOp::LessEqual;
+		case OrgFx::CompareFunc::Greater:
+			return rhi::CompareOp::Greater;
+		case OrgFx::CompareFunc::NotEqual:
+			return rhi::CompareOp::NotEqual;
+		case OrgFx::CompareFunc::GreaterEqual:
+			return rhi::CompareOp::GreaterEqual;
+		default:
+			return rhi::CompareOp::Always;
+		}
 	}
 
 	/** @brief A parsed sampler state as BasicRHI's. D3D11's custom border colours that are not a preset become Custom. */

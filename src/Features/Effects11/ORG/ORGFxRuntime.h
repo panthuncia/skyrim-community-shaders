@@ -30,6 +30,7 @@ public:
 	/** @brief Whether CS_ORG_FX=1 is set. */
 	static bool Requested();
 
+	/** @brief The one runtime. Its state is made on the first Prepare. */
 	static ORGFxRuntime& Get();
 
 	/** @brief Reserves the Tonemap anchor when requested. Before the render graph initializes (Effects11::PostPostLoad). */
