@@ -44,12 +44,13 @@ public:
 	 */
 	bool Setup(std::function<void()> a_onFailed);
 
-	/** @brief Whether the SH runs on the render graph. */
+	/** @brief Whether the SH runs on the render graph: set up, and the runtime still up. */
 	bool IsActive() const;
 
 	/**
 	 * @brief IBL's Prepass, before the Prepass anchor runs: imports this frame's source cubemaps and rebuilds the passes when they
-	 * or the environment's use (a_useEnvironment: the DALC mode reads it) changed.
+	 * or the environment's use (a_useEnvironment: the DALC mode reads it) changed. When the runtime stopped, IBL returns to D3D11
+	 * as on a graph failure.
 	 * @return Whether the anchor computes the SH this frame; false means the D3D11 dispatches run.
 	 */
 	bool Prepass(bool a_useEnvironment);
@@ -58,24 +59,17 @@ public:
 	ID3D11ShaderResourceView* EnvSRV() const;
 	ID3D11ShaderResourceView* SkySRV() const;
 
-	/**
-	 * @brief Debug readback (CS_ORG_IBL_READBACK=1): every 250 frames, copies the SH textures into staging textures and logs the
-	 * values a few frames later. Uses the exported textures while active, else a_env and a_sky (IBL's D3D11 textures). Call at the
-	 * start of IBL's Prepass on both paths, so both read the same frame's result.
-	 */
-	void DebugReadback(ID3D11Texture2D* a_env, ID3D11Texture2D* a_sky);
-
 	~ORGIBL();
 
 private:
 	ORGIBL() = default;
 
-	/** @brief The exported SH texture (environment or sky); null when inactive. */
-	ID3D11Texture2D* Exported(bool a_env) const;
+	/**
+	 * @brief Leaves the graph path: the client unregistered (a_unregister; a failed epoch did that already), the SH textures
+	 * withdrawn, then a_onFailed from Setup brings the D3D11 path back.
+	 */
+	void Fail(const char* a_reason, bool a_unregister);
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;
-
-	struct Readback;
-	std::unique_ptr<Readback> readback;
 };
