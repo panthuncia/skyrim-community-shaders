@@ -185,6 +185,7 @@ void PostProcessing::DrawSettings()
 				if (Util::LabeledButton("##RecompileShaders", Icons::TI(ICON_TI_REFRESH),
 						T("feature.post_processing.recompile_shaders", "Recompile Shaders"))) {
 					feat->ClearShaderCache();
+					ORGPostProcessing::Get().ClearShaderCache();
 				}
 				if (auto _tt = Util::HoverTooltipWrapper())
 					ImGui::Text("%s", T("feature.post_processing.recompile_shaders_for_this_sub_feature_only", "Recompile shaders for this sub-feature only."));
@@ -608,6 +609,7 @@ void PostProcessing::ClearShaderCache()
 		if (pipe && pipe->resourcesReady)
 			pipe->ClearShaderCache();
 	}
+	ORGPostProcessing::Get().ClearShaderCache();
 }
 
 void PostProcessing::SetupResources()

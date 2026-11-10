@@ -1110,6 +1110,17 @@ bool ORGPostProcessing::Ran() const
 	return impl && impl->ran;
 }
 
+void ORGPostProcessing::ClearShaderCache()
+{
+	if (!impl)
+		return;
+	// Failed compiles are cached as null, and a failed key is not tried again: both go, and the next frame builds the chain anew.
+	impl->programs.raster.clear();
+	impl->programs.compute.clear();
+	impl->failedKey.clear();
+	impl->key.clear();
+}
+
 #else  // !CS_HAS_RENDER_GRAPH
 
 // Built without OpenRenderGraph: the chain always runs on D3D11.
@@ -1121,5 +1132,6 @@ void ORGPostProcessing::Reserve() {}
 void ORGPostProcessing::Setup() {}
 void ORGPostProcessing::BeforeTonemap(bool) {}
 bool ORGPostProcessing::Ran() const { return false; }
+void ORGPostProcessing::ClearShaderCache() {}
 
 #endif

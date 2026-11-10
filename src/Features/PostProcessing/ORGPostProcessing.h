@@ -38,6 +38,12 @@ public:
 	/** @brief After the anchor ran: whether the graph ran the chain this frame (then PreProcess draws nothing). */
 	bool Ran() const;
 
+	/**
+	 * @brief Drops the cached programs and the chain's key (PostProcessing::ClearShaderCache): the next frame builds the chain again,
+	 * and a chain that failed to build is tried again.
+	 */
+	void ClearShaderCache();
+
 	~ORGPostProcessing();
 
 private:
