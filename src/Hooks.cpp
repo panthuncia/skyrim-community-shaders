@@ -3,6 +3,7 @@
 #include "GpuEventTimers.h"
 #include "HangWatchdog.h"
 #include "GpuIdleTrace.h"
+#include "RenderGraph/Engine/Textures/EngineTextures.h"
 #include "RenderGraph/GpuTimingSource.h"
 #include "ShaderTools/BSShaderHooks.h"
 #include "ShaderTools/LegacyGraphicsCompatibility.h"
@@ -1422,6 +1423,7 @@ namespace Hooks
 		Vram::Debug::InstallGameHooks();
 		TextureStreaming::Census::InstallGameHooks();
 		TextureStreaming::InstallGameHooks();
+		RenderGraph::Engine::Textures::InstallHooks();
 
 		logger::info("Hooking BSGraphics::Renderer::InitD3D");
 		stl::write_thunk_call<BSGraphics_Renderer_Init_InitD3D>(REL::RelocationID(75595, 77226).address() + REL::Relocate(0x50, 0x2BC));
