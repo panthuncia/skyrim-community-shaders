@@ -26,7 +26,8 @@ namespace DCLF
 	 * Vulkan handle and device address stay valid. An entry lives exactly as long as a lease on it does (the
 	 * geometry slots that draw the buffer, and the publications they are in): the registry holds it weakly, and
 	 * the last lease's release queues it for removal. Buffers the game can map cannot be made stable; they are
-	 * not remembered (the object's verdict is, Coordinator's UnstableBuffer).
+	 * not remembered (the object's verdict is, Coordinator's UnstableBuffer). An engine buffer the ORG owns
+	 * (CS_ORG_ENGINE_BUFFERS=1, RenderGraph::Engine::Buffers::Resolve) is read directly instead, with no DXVK description.
 	 *
 	 * Prefetch describes on the preparation pool: the batch is dispatched, and the Acquire that first needs one of its answers runs it
  * itself if no worker has started it, else waits for the worker (DXVK's batched description synchronizes with its worker thread, which

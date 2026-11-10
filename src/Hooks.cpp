@@ -46,6 +46,7 @@
 #include "Features/Upscaling/Streamline.h"
 #include "Features/VolumetricLighting.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -922,6 +923,7 @@ namespace Hooks
 
 			if (RenderDoc::IsLoaded())
 				stl::detour_vfunc<3, ID3D11Device_CreateBuffer>(globals::d3d::device);
+			RenderGraph::Engine::Buffers::InstallDeviceHooks(globals::d3d::device);
 
 			globals::InstallD3DHooks(globals::d3d::context);
 
@@ -1431,6 +1433,7 @@ namespace Hooks
 		TextureStreaming::Census::InstallGameHooks();
 		TextureStreaming::InstallGameHooks();
 		RenderGraph::Engine::Textures::InstallHooks();
+		RenderGraph::Engine::Buffers::InstallGameHooks();
 
 		logger::info("Hooking BSGraphics::Renderer::InitD3D");
 		stl::write_thunk_call<BSGraphics_Renderer_Init_InitD3D>(REL::RelocationID(75595, 77226).address() + REL::Relocate(0x50, 0x2BC));

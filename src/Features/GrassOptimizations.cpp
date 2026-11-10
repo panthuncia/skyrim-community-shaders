@@ -6,6 +6,7 @@
 #include "GrassShared/GrassFrame.h"
 
 #include "Profiler.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 #include "TruePBR.h"
 #include "TruePBR/BSLightingShaderMaterialPBR.h"
@@ -338,8 +339,9 @@ void GrassOptimizations::DrawBucket(GrassBucket& b)
 {
 	auto* ctx = globals::d3d::context;
 	const uint64_t descVal = b.asset.key.descVal;
-	auto* meshVB = b.asset.vertexBuffer.get();
-	auto* indexB = b.asset.indexBuffer.get();
+	// The engine's buffers may be tripwire handles (CS_ORG_ENGINE_BUFFERS=1): DXVK's own context is given what they wrap.
+	auto* meshVB = RenderGraph::Engine::Tripwire::Unwrap(b.asset.vertexBuffer.get());
+	auto* indexB = RenderGraph::Engine::Tripwire::Unwrap(b.asset.indexBuffer.get());
 	const UINT meshStride = VertexStrideFromDesc(descVal);
 	if (!meshVB || !indexB || !meshStride)
 		return;
