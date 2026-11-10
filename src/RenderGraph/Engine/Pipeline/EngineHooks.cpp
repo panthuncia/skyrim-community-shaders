@@ -2,10 +2,11 @@
 
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+
 #include <algorithm>
 
 #if defined(CS_HAS_RENDER_GRAPH)
-#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 // P4.1's guest context. A branch without it never installs handles.
 #	if __has_include("RenderGraph/Engine/Tripwire/GuestDevice.h")
 #		include "RenderGraph/Engine/Tripwire/GuestDevice.h"
@@ -330,6 +331,8 @@ namespace RenderGraph::Engine::Pipeline
 
 	void InstallDeviceHooks(ID3D11Device* a_device)
 	{
+		// DXVK's device, not a guest handle around it: CS's own creations call DXVK directly, and a handle's methods are shared code.
+		a_device = Tripwire::Unwrap(a_device);
 		if (!a_device)
 			return;
 		stl::detour_vfunc<23, ID3D11Device_CreateSamplerState>(a_device);
