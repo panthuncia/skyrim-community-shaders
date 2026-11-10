@@ -110,6 +110,87 @@
 //					http://fileadmin.cs.lth.se/cs/education/edan35/lectures/12dof.pdf
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Dual-target (Common/OrgResources.hlsli). D3D11 (DoF::Draw) binds the registers below and reads DoFCB (DoF::DoFCB) at b1,
+// declared exactly as before. Under ORG (ORG/ORGDoF.cpp) the same fields are the LATCH entry DoFFrame (struct DoFConstants,
+// with one ORG-only word after them), and each field is copied into a static of the same name, so the passes read them as they
+// do under D3D11. The fields are listed once, in DOF_CB_FIELDS. Two things differ under ORG only:
+// - BokehSamples is a region of the chain's latch (a raw buffer and a byte offset), which the chain fills each frame with the
+//   procedural or the custom shape's table. LoadBokehSample reads it on both paths.
+// - CS_UpdateFocus updates the focus history in place: it reads the last focus from RWFocus, the history texture that
+//   CS_CalculateCoC then reads as TexPreviousFocus. OrgResetFocus makes it start from the new focus instead.
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+#define DOF_RESOURCES(X)                                                                                   \
+	X(SHARED, ConstantBuffer, Shared, 0)                                                                   \
+	X(UAV, RWTexture2D<float4>, RWTexOut, 0)                                                               \
+	X(UAV, RWTexture2D<float>, RWFocus, 1)                                                                 \
+	X(UAV, RWTexture2D<float>, RWTexCoC, 2)                                                                \
+	X(UAV, RWTexture2D<float4>, RWTexCoCTile, 3)                                                           \
+	X(SAMPLER, SamplerState, LinearSampler, 0)                                                             \
+	X(SRV, Texture2D<float4>, TexColor, 0)                                                                 \
+	X(SRV, Texture2D<float>, TexPreviousFocus, 1)                                                          \
+	X(SRV, Texture2D<float>, DepthTexture, 2)                                                              \
+	X(SRV, Texture2D<float>, TexCoCInput, 3) /* full res CoC */                                            \
+	/* t4 was the half-resolution near-mask blur. Near reach is now carried by t11, leaving this slot free. */ \
+	X(SRV, Texture2D<float4>, TexFarBlur, 5)                                                               \
+	X(SRV, Texture2D<float4>, TexNearBlur, 6)                                                              \
+	X(SRV, Texture2D<float4>, TexPostSmoothInput, 7)                                                       \
+	X(SRV, Texture2D<float4>, TexBokehShape, 8)                                                            \
+	X(SRV, Texture2D<float>, TexCoCHalf, 9)                /* half res CoC (bilateral downsample of t3) */ \
+	X(SRV, Texture2D<float4>, TexCoCTile, 10)              /* per tile (min, max) signed CoC */            \
+	X(SRV, Texture2D<float4>, TexCoCTileDilated, 11)       /* (min, max, propagated near reach in pixels, unused) */ \
+	X(SRV, Texture2D<float4>, TexGatherColor1, 12)         /* quarter res */                               \
+	X(SRV, Texture2D<float4>, TexGatherColor2, 13)         /* eighth res */                                \
+	X(SRV, Texture2D<float4>, TexGatherColor3, 14)         /* sixteenth res */                             \
+	X(SRV, Texture2D<float>, TexGatherCoC1, 15)                                                            \
+	X(SRV, Texture2D<float>, TexGatherCoC2, 16)                                                            \
+	X(SRV, Texture2D<float>, TexGatherCoC3, 17)                                                            \
+	X(SRV, Texture2D<float>, TexReduceCoCInput, 18)
+
+#define DOF_CB_FIELDS(M)                                                                              \
+	M(float, TransitionSpeed)                                                                         \
+	M(float2, FocusCoord)                                                                             \
+	M(float, ManualFocusPlane)                                                                        \
+	M(float, FocalLength)                                                                             \
+	M(float, FNumber)                                                                                 \
+	M(float, FarPlaneMaxBlur)                                                                         \
+	M(float, NearPlaneMaxBlur)                                                                        \
+	M(float, BlurQuality)                                                                             \
+	M(float, NearFarDistanceCompensation)                                                             \
+	M(float, BokehBusyFactor)                                                                         \
+	M(float, HighlightBoost)                                                                          \
+	M(float, PostBlurSmoothing)                                                                       \
+	M(uint, HighlightShape)                                                                           \
+	M(float, HighlightShapeRotationAngle)                                                             \
+	M(float, PetzvalStrength)                                                                         \
+	M(uint, AutoFocus)                                                                                \
+	M(float, MaxNearCoCRadius)                                                                        \
+	M(float, MaxFarCoCRadius)                                                                         \
+	M(uint, TileDilateRadius) /* in tiles */                                                          \
+	M(uint2, CoCTileDim)                                                                              \
+	M(uint2, HalfResDim)                                                                              \
+	M(uint, BokehMode)               /* 0=procedural, 1=custom texture */                             \
+	M(float, CustomShapeRadiusScale) /* normalises the custom aperture to the area of a unit circle */ \
+	M(float, BokehMaxRadius)                                                                          \
+	M(float, NearMaxReachPx)                                                                          \
+	M(uint, BokehBladeCount)                                                                          \
+	M(float, BokehBladeRoundness)                                                                     \
+	M(float, ProceduralBokehAreaScale)                                                                \
+	M(float, SensorWidthMM)
+
+#define DOF_CB_MEMBER(T, N) T N;
+
+#if defined(CS_ORG_BINDLESS)
+struct DoFConstants
+{
+	DOF_CB_FIELDS(DOF_CB_MEMBER)
+	uint OrgResetFocus;  // 1: the focus history holds nothing yet
+	uint3 OrgPad;
+};
+ORG_PUSH_BLOCK(DOF_RESOURCES(ORG_HANDLE) ORG_HANDLE(LATCH, DoFConstants, DoFFrame, 1) ORG_HANDLE(EXTERN_LATCH, float4, BokehSamples, 19))
+#endif
+
 #include "Common/Color.hlsli"
 #include "Common/Game.hlsli"
 #include "Common/Math.hlsli"
@@ -119,69 +200,24 @@
 #	include "PostProcessing/DoF/dof_gather_kernel.hlsli"
 #endif
 
-RWTexture2D<float4> RWTexOut : register(u0);
-RWTexture2D<float> RWFocus : register(u1);
-RWTexture2D<float> RWTexCoC : register(u2);
-RWTexture2D<float4> RWTexCoCTile : register(u3);
+DOF_RESOURCES(ORG_RESOURCE)
 
-SamplerState LinearSampler : register(s0);
-
-Texture2D<float4> TexColor : register(t0);
-Texture2D<float> TexPreviousFocus : register(t1);
-Texture2D<float> DepthTexture : register(t2);
-Texture2D<float> TexCoCInput : register(t3);  // full res CoC
-// t4 was the half-resolution near-mask blur. Near reach is now carried by t11, leaving this slot free.
-Texture2D<float4> TexFarBlur : register(t5);
-Texture2D<float4> TexNearBlur : register(t6);
-Texture2D<float4> TexPostSmoothInput : register(t7);
-Texture2D<float4> TexBokehShape : register(t8);
-Texture2D<float> TexCoCHalf : register(t9);           // half res CoC (bilateral downsample of t3)
-Texture2D<float4> TexCoCTile : register(t10);         // per tile (min, max) signed CoC
-Texture2D<float4> TexCoCTileDilated : register(t11);  // (min, max, propagated near reach in pixels, unused)
-Texture2D<float4> TexGatherColor1 : register(t12);    // quarter res
-Texture2D<float4> TexGatherColor2 : register(t13);    // eighth res
-Texture2D<float4> TexGatherColor3 : register(t14);    // sixteenth res
-Texture2D<float> TexGatherCoC1 : register(t15);
-Texture2D<float> TexGatherCoC2 : register(t16);
-Texture2D<float> TexGatherCoC3 : register(t17);
-Texture2D<float> TexReduceCoCInput : register(t18);
+#if defined(CS_ORG_BINDLESS)
+ORG_RESOURCE(LATCH, DoFConstants, DoFFrame, 1)
+#	define DOF_CB_STATIC(T, N) static T N = DoFFrame.N;
+DOF_CB_FIELDS(DOF_CB_STATIC)
+// The sample table (see the D3D11 declaration below), 16 bytes a sample, at the latch offset the push block gives.
+static ByteAddressBuffer OrgBokehSamples = ResourceDescriptorHeap[OrgHandle_BokehSamples];
+float4 LoadBokehSample(uint a_index) { return OrgBokehSamples.Load<float4>(OrgOffset_BokehSamples + a_index * 16); }
+#else
 // xy = shaped sample position, z = radial accumulation weight, w = canonical disc distance.
 // Keeping w separate is essential for polygon corners: shaped xy may extend beyond unit radius,
 // but its intersection distance still belongs to the same canonical gather ring.
 StructuredBuffer<float4> BokehSamples : register(t19);
+float4 LoadBokehSample(uint a_index) { return BokehSamples[a_index]; }
 
-cbuffer DoFCB : register(b1)
-{
-	float TransitionSpeed;
-	float2 FocusCoord;
-	float ManualFocusPlane;
-	float FocalLength;
-	float FNumber;
-	float FarPlaneMaxBlur;
-	float NearPlaneMaxBlur;
-	float BlurQuality;
-	float NearFarDistanceCompensation;
-	float BokehBusyFactor;
-	float HighlightBoost;
-	float PostBlurSmoothing;
-	uint HighlightShape;
-	float HighlightShapeRotationAngle;
-	float PetzvalStrength;
-	uint AutoFocus;
-	float MaxNearCoCRadius;
-	float MaxFarCoCRadius;
-	uint TileDilateRadius;  // in tiles
-	uint2 CoCTileDim;
-	uint2 HalfResDim;
-	uint BokehMode;                // 0=procedural, 1=custom texture
-	float CustomShapeRadiusScale;  // normalises the custom aperture to the area of a unit circle
-	float BokehMaxRadius;
-	float NearMaxReachPx;
-	uint BokehBladeCount;
-	float BokehBladeRoundness;
-	float ProceduralBokehAreaScale;
-	float SensorWidthMM;
-};
+cbuffer DoFCB : register(b1){ DOF_CB_FIELDS(DOF_CB_MEMBER) };
+#endif
 
 // One CoC tile covers exactly one gather thread group: 8x8 half res pixels == 16x16 full res pixels.
 // Because of that a gather group can take a *group uniform* (scalar) early out branch from a single
@@ -368,7 +404,11 @@ float4 PerformFullFragmentGaussianBlur(Texture2D source, float2 texcoord, uint2 
 
 [numthreads(1, 1, 1)] void CS_UpdateFocus(uint2 DTid : SV_DispatchThreadID) {
 	float depth = AutoFocus ? GetDepth(FocusCoord) : ManualFocusPlane;
+#if defined(CS_ORG_BINDLESS)
+	float previousFocus = DoFFrame.OrgResetFocus ? depth : RWFocus[uint2(0, 0)];
+#else
 	float previousFocus = TexPreviousFocus[uint2(0, 0)];
+#endif
 	RWFocus[DTid] = lerp(previousFocus, depth, TransitionSpeed);
 }
 
@@ -662,7 +702,7 @@ float2 RotateBokehOffset(float2 offset, float2 rotation)
 
 AdaptiveBokehSample GetAdaptiveBokehSample(uint sampleIndex, float2 rotation)
 {
-	float4 data = BokehSamples[sampleIndex];
+	float4 data = LoadBokehSample(sampleIndex);
 	AdaptiveBokehSample sample;
 	sample.offset = data.xy;
 	sample.radialWeight = data.z;
