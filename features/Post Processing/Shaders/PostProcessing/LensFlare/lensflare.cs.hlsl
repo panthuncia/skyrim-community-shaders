@@ -1,57 +1,20 @@
+#include "Common/OrgResources.hlsli"
 #include "PostProcessing/common.hlsli"
 
 static const float PI = 3.14159265359;
 static const float EPSILON = 1e-6;
 static const int NUM_GHOSTS = 8;
 
-// Resources
-Texture2D<float4> InputTexture : register(t0);
-SamplerState ColorSampler : register(s0);
-SamplerState BorderSampler : register(s1);
-RWTexture2D<float4> OutputTexture : register(u0);
+// Resources (dual-target: Common/OrgResources.hlsli; the constants: lensflare_constants.hlsli)
+#define LENS_FLARE_RESOURCES(X)                \
+	X(SRV, Texture2D<float4>, InputTexture, 0) \
+	X(SAMPLER, SamplerState, ColorSampler, 0)  \
+	X(SAMPLER, SamplerState, BorderSampler, 1) \
+	X(UAV, RWTexture2D<float4>, OutputTexture, 0)
+ORG_PUSH_BLOCK(LENS_FLARE_RESOURCES(ORG_HANDLE) ORG_HANDLE(LATCH, LensFlareConstants, LensFlareFrame, 1))
+LENS_FLARE_RESOURCES(ORG_RESOURCE)
 
-cbuffer LensFlareConstants : register(b1)
-{
-	// Per-pass dimensions (updated before each dispatch)
-	float OutputWidth;
-	float OutputHeight;
-	float InputWidth;
-	float InputHeight;
-
-	// Threshold
-	float ThresholdLevel;
-	float ThresholdRange;
-	float GhostStrength;
-	float GhostChromaShift;
-
-	// Halo
-	float HaloStrength;
-	float HaloRadius;
-	float HaloWidth;
-	float HaloCompression;
-
-	float HaloChromaShift;
-	float Intensity;
-	uint FFTResolution;
-	int GLocalMask;
-
-	float3 Tint;
-	float KernelScale;
-
-	float AspectRatio;
-	int ApertureBlades;
-	float ApertureRotation;
-	float PadScale;
-
-	uint ActiveGhostMask;
-	float ApertureSize;
-	float2 _pad0;
-
-	// Ghost data
-	float4 GhostColors[NUM_GHOSTS];
-	float4 GhostScalesPacked[2];  // 8 scales packed into 2 float4s
-	float4 GhostKernelScalesPacked[2];
-}
+#include "PostProcessing/LensFlare/lensflare_constants.hlsli"
 
 // ============================================================
 // Utilities
