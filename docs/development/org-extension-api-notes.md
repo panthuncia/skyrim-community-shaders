@@ -66,6 +66,32 @@ One entry per need. Give:
   (`PassDesc::once`) that the anchors drop themselves once a run with it was submitted. BC formats work. An API for plugins needs a texture upload that async epochs record.
 - **Found by:** survey for the plan (2026-11-09); the graph upload by P3 TerrainShadows (2026-11-09).
 
+### Textures a plugin streams in parts
+
+- **Need:** a texture whose memory and contents change while the engine and other passes read it: a mip window that is
+  replaced by a finer or coarser one, made on a worker, filled without the frame waiting, and released once nothing reads it.
+- **Who:** CS's texture streaming (P4.4). Any plugin with large textures would want the same.
+- **Where it fits:** the image from ORG's allocator with an owner label (`org::memory::CreateAllocatedResource`, added for
+  this; ORG's tracked resources cannot be made off the render thread), wrapped for D3D11 in the guest phase, imported into the
+  graph in DXVK's resting layout (`RenderGraph::ImportDxvkTexture`), and filled by a one-shot copy pass whose
+  `ClientDesc::executed` installs it. Readiness is an artifact's GPU submission set, so whoever waits gates on it. What an API
+  would add: a texture-upload job a worker can post (async epochs cannot record texture uploads), a completion it can
+  subscribe to, and a release that waits for every reader (D3D11's stream, and every epoch that bound the descriptor) without a
+  render-thread queue of its own.
+- **Found by:** P4.4 texture streaming on ORG (2026-11-10).
+
+### VRAM by owner
+
+- **Need:** say how much video memory a plugin's resources take, by owner, and how much spilled to system memory.
+- **Who:** CS's VRAM attribution and texture streaming's budget (P4.7). DXVK's exports did this before
+  (`dxvkPushResourceOwner`, `dxvkGetMemoryHeapReports`, snapshots).
+- **Where it fits:** BasicRHI's allocator owner labels (P0.13) through `org::memory::OwnerReport` and `AllocatorBudget`, and
+  BasicRHI's `QueryVideoMemoryInfo` (P0.7) with `usageAtBudget` for AMD's clamp. Labels are owner paths ("Game/Textures/x"),
+  so they share DXVK's categories. Limits: only allocations made with a label (or under `PushAllocationOwner`) are told
+  apart; ORG's tracked resources carry their own owner in ORG's memory metadata instead, so the two must not label the same
+  memory, or the report counts it twice.
+- **Found by:** P4.7 VRAM tooling (2026-11-10).
+
 ### Sharing graph resources with D3D11 code
 
 - **Need:** a plugin's pass writes a texture or buffer that D3D11 code still reads (its own, or an engine draw it feeds), or
