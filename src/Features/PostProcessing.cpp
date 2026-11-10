@@ -476,13 +476,9 @@ void PostProcessing::SyncPipelineResources()
 {
 	for (size_t index = 0; index < pipeline.size(); ++index) {
 		auto& pipe = pipeline[index];
-		if (!pipe)
-			continue;
-		if (pipe->IsActive()) {
-			EnsureResources(*pipe);
-			continue;
-		}
-		if (!pipe->resourcesReady)
+		// An active sub-feature is set up where the D3D11 path first draws it (DrawFeature), so it holds no D3D11 textures while
+		// the render graph runs the chain.
+		if (!pipe || pipe->IsActive() || !pipe->resourcesReady)
 			continue;
 
 		// A fresh instance is the never-set-up state every sub-feature already supports, so this frees its
@@ -672,7 +668,7 @@ void PostProcessing::SetupResources()
 
 	BuildPipeline();
 
-	// Sub-features are set up when they first run active (SyncPipelineResources), so disabled ones allocate nothing.
+	// Sub-features are set up when the D3D11 path first draws them (DrawFeature), so disabled ones allocate nothing.
 	for (auto& pipe : pipeline) {
 		if (pipe)
 			pipe->owner = this;
@@ -784,6 +780,7 @@ PostProcessing::CopyCB PostProcessing::OutputConversion(bool a_colorGraded) cons
 
 void PostProcessing::DrawFeature(PostProcessFeature& feature, PostProcessFeature::TextureInfo& lastTexColor)
 {
+	EnsureResources(feature);
 	if (feature.WritesToMainTexture()) {
 		feature.Draw(lastTexColor);
 	} else {
@@ -907,6 +904,8 @@ void PostProcessing::ClearBorderMotionVectorsForFrameGen()
 	auto borderIdx = static_cast<size_t>(FeaturePipelineIndex::Border);
 	auto& pipe = pipeline[borderIdx];
 	if (pipe && pipe->IsActive() && !(globals::state->IsMainOrLoadingMenuOpen() && pipe->DisableInMainLoadingMenu())) {
+		// A D3D11 side path, also when the render graph draws the border.
+		EnsureResources(*pipe);
 		auto* border = static_cast<Border*>(pipe.get());
 		border->ClearMotionVectorsForFrameGen();
 	}
