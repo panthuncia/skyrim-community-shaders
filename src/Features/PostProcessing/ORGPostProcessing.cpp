@@ -671,6 +671,8 @@ namespace
 			return ORGPostChain::MakeLUT();
 		case Index::Border:
 			return ORGPostChain::MakeBorder();
+		case Index::PhysicalGlare:
+			return ORGPostChain::MakePhysicalGlare();
 		default:
 			return nullptr;
 		}

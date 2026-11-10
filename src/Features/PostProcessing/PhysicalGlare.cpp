@@ -336,7 +336,14 @@ void PhysicalGlare::DrawSettings()
 	if (Util::ShowDebugSections() && ImGui::CollapsingHeader(T("feature.post_processing.physical_glare.debug", "Debug"))) {
 		if (texGlarePacked)
 			ImGui::Image(texGlarePacked->srv.get(), { 256.f, 256.f });
+		debugViewFrame = globals::state->frameCount;
+		debugViewDrawn = true;
 	}
+}
+
+bool PhysicalGlare::DebugViewShown() const
+{
+	return debugViewDrawn && globals::state->frameCount - debugViewFrame <= 1;
 }
 
 void PhysicalGlare::RestoreDefaultSettings()

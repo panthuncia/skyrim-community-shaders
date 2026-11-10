@@ -258,6 +258,13 @@ struct PhysicalGlare : public PostProcessFeature
 	bool apertureDirty = true;
 	float tearFilmTimeAccum = 0.f;
 
+	// The frame the debug view last showed texGlarePacked, a D3D11 texture only the D3D11 path writes.
+	uint debugViewFrame = 0;
+	bool debugViewDrawn = false;
+
+	/** @brief Whether the debug view showed the D3D11 glare in this frame or the last (the ORG chain then stays on D3D11). */
+	[[nodiscard]] bool DebugViewShown() const;
+
 	uint currentFFTResolution = 256;
 
 	virtual void SetupResources() override;
