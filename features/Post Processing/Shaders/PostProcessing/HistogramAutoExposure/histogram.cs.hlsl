@@ -150,3 +150,12 @@ float4 ComputeBoxBounds(float2 dims)
 		RWBufferAdaptation[0] = adaptedLum;
 	}
 }
+
+	// ORG only: the history buffers' first contents, as a new D3D11 buffer's zeros. ORG/ORGHistogramAutoExposure.cpp dispatches it
+	// after it makes them (zero groups on the other frames).
+	[numthreads(256, 1, 1)] void CS_Reset(uint gidx : SV_GroupIndex)
+{
+	RWBufferHistogram[gidx] = 0;
+	if (gidx == 0)
+		RWBufferAdaptation[0] = 0;
+}

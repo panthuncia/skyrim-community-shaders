@@ -657,6 +657,10 @@ namespace
 			return ORGPostChain::MakeLUT();
 		case Index::Border:
 			return ORGPostChain::MakeBorder();
+		case Index::LocalExposure:
+			return ORGPostChain::MakeLocalExposure();
+		case Index::AutoExposure:
+			return ORGPostChain::MakeHistogramAutoExposure();
 		default:
 			return nullptr;
 		}

@@ -100,7 +100,7 @@ void HistogramAutoExposure::DrawCameraExposureReadout()
 	float iso = cam->ISO;
 	if (cam->Exposure == CinematicCamera::ExposureMode::AutoISO) {
 		exposureReadbackRequestFrame = static_cast<int64_t>(globals::state->frameCount);
-		if (resetAdaptation || adaptationReadbackFrame < 0 || adaptationReadbackFrame < static_cast<int64_t>(globals::state->frameCount) - 1) {
+		if (adaptationReadbackFrame < 0 || adaptationReadbackFrame < static_cast<int64_t>(globals::state->frameCount) - 1) {
 			ImGui::TextDisabled("%s", T("feature.post_processing.cinematic_camera.metering", "Metering..."));
 			return;
 		}
@@ -316,6 +316,7 @@ void HistogramAutoExposure::SetupResources()
 void HistogramAutoExposure::ClearShaderCache()
 {
 	resetAdaptation = true;
+	adaptationReadbackFrame = -1;
 	BumpShaderGeneration();
 	const auto shaderPtrs = std::array{
 		&histogramCS, &histogramAvgCS
