@@ -182,9 +182,9 @@ across the game's draws.
 
 ### 6. LightLimitFix (already on ORG: finish it)
 
--   **`cs.llf.clusters` and `cs.llf.light-index-counter`** are transient inside the culling epoch but
-    are `Materialize()`d (`ORGLightCulling.cpp:344-351`). Dropping that would alias about 2 MB.
--   **`cs.llf.light-index-list` (32 MB) and `cs.llf.light-grid` (1 MB)** are rewritten every frame, but
+-   **`LightLimitFix::Clusters` and `LightLimitFix::LightIndexCounter`** are transient inside the culling epoch but
+    are Persistent twins (`ORGLightCulling.cpp`, `CreateStructured`). Transient ones would alias about 2 MB.
+-   **`LightLimitFix::LightIndexList` (32 MB) and `LightLimitFix::LightGrid` (1 MB)** are rewritten every frame, but
     D3D11 draws (PS t36/t37) and DCLF read them through the forward and water passes. They could alias
     only if their last D3D11 use is declared to the graph, and even then only with post-forward
     resources.

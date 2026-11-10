@@ -12,18 +12,27 @@
  * Runs LLF's own cluster-building and culling shaders (compiled to SPIR-V with
  * LLF_ORG_BINDLESS) on DXVK's Vulkan device through RenderGraphRuntime, and
  * produces the same lightIndexList / lightGrid layout the D3D11 path does. The
- * lights and the outputs are graph-owned buffers that D3D11 reads through wrappers,
- * so pixel shaders bind them at t35-t37 exactly as before.
+ * lights and the outputs are Persistent graph twins (GraphResources::StructuredBuffer)
+ * exported to D3D11, so pixel shaders bind them at t35-t37 exactly as before. They are
+ * also published under kLightsId, kLightIndexListId and kLightGridId; the ids are
+ * withdrawn when the graph fails and LLF culls on D3D11 again.
+ *
+ * The culling runs in its own epoch (RenderGraphRuntime::Segment::LightCulling) through a
+ * host extension, not at a frame anchor, so it has no anchor client: Execute reports a
+ * failure and LLF checks IsActive every frame.
  *
  * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
 class ORGLightCulling
 {
 public:
-	/** @brief The graph ids of the lights (t35), the light index list (t36) and the light grid (t37), which other graph passes read. */
-	static constexpr std::string_view kLightsId = "cs.llf.lights";
-	static constexpr std::string_view kLightIndexListId = "cs.llf.light-index-list";
-	static constexpr std::string_view kLightGridId = "cs.llf.light-grid";
+	/**
+	 * @brief The published ids (PublishedResources), the twins' names, of the lights (t35), the light index list (t36) and the
+	 * light grid (t37). Passes of every epoch read them by these ids.
+	 */
+	static constexpr std::string_view kLightsId = "LightLimitFix::Lights";
+	static constexpr std::string_view kLightIndexListId = "LightLimitFix::LightIndexList";
+	static constexpr std::string_view kLightGridId = "LightLimitFix::LightGrid";
 
 	/** @brief Per-frame inputs, copied at Execute; nothing is retained by reference. */
 	struct FrameInputs

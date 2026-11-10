@@ -113,7 +113,7 @@ checked again for this file. Sizes are measured.
 | --- | --- | --- | --- |
 | SubsurfaceScattering | `DiffuseNoAlbedo`, `BlurHorizontalTemp` | 31.9 x 2 | Transient |
 | ScreenSpaceShadows | `SSS::ShadowTexture` | 15.9 | External: bound for all world lighting draws |
-| LightLimitFix | `cs.llf.light-index-list` (ORG) | 31.9 | Rewritten each frame, read by D3D11 draws |
+| LightLimitFix | `LightLimitFix::LightIndexList` (ORG) | 31.9 | Rewritten each frame, read by D3D11 draws |
 | LightLimitFix | `LLF::LightIndexList`, `LLF::Clusters`, `LLF::LightGrid` (D3D11 fallback) | 31.9, 2.0, 1.0 | Unused while ORG culling is active |
 | Skylighting | `ProbeArray`, `ShadowBitmask`, two others | 64, 32, 8, 8 | History or read by game draws |
 | TerrainBlending | `TerrainDepth`, `BlendedDepth`, `BlendedDepth16` | 39.8, 31.9, 15.9 | External: per-frame, used by game draws |
