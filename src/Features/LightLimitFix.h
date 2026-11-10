@@ -180,6 +180,13 @@ public:
 	};
 	STATIC_ASSERT_ALIGNAS_16(LocalShadowCopyCB);
 
+	/** @brief One engine shadow map slice the frame copies into a cache slot. */
+	struct LocalShadowCopy
+	{
+		uint32_t sourceSlice;
+		uint32_t targetSlot;
+	};
+
 	/** @brief Per-light bookkeeping for the local shadow cache and the caster rotation. */
 	struct LocalShadowCaster
 	{
@@ -391,8 +398,11 @@ public:
 	uint32_t localShadowEngineMipLevels = 1;
 	uint32_t localShadowEngineSlices = 0;
 	bool localShadowDirectCopy = false;
-	// The cache lives on the render graph (ORGLocalShadows, CS_ORG_LLF_SHADOWS=1) rather than in localShadowCache/localShadowBuffer.
+	// The cache lives on the render graph (ORGLocalShadows, CS_ORG_LIGHT_LIMIT_FIX_SHADOWS=1) rather than in localShadowCache/localShadowBuffer.
 	bool localShadowOnGraph = false;
+	// The frame's description, the same for both paths: the slices to copy and every slot's data.
+	eastl::vector<LocalShadowCopy> localShadowFrameCopies;
+	eastl::vector<LocalShadowData> localShadowFrameData;
 	// The graph could not hold the cache, or lost it: D3D11 holds it for the rest of the session.
 	bool localShadowGraphFailed = false;
 	uint32_t localShadowAllocFailedFrame = 0;
@@ -459,6 +469,9 @@ public:
 	bool FilterLocalShadowCaster(RE::BSShadowLight* a_light, const RE::NiCamera* a_camera, bool a_result);
 	/** @brief Copies this frame's engine shadow map slices into the cache and uploads the projection data. */
 	void CopyLocalShadowMaps();
+	/** @brief The D3D11 path of the frame's description: copies the slices into the D3D11 cache and uploads the slot data. */
+	void CommitLocalShadowFrameD3D11(ID3D11Texture2D* a_engineShadowMaps, ID3D11ShaderResourceView* a_engineShadowMapsSRV);
+
 	/** @brief Binds the local shadow cache and projection buffer for pixel shaders. */
 	void BindLocalShadowResources();
 	/** @brief Creates or recreates the cache texture and projection buffer to match the settings and the engine shadow map. */

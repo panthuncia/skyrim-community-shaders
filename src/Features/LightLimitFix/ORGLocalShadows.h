@@ -3,12 +3,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <d3d11.h>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string_view>
 
 /**
- * @brief Light Limit Fix's local shadow cache on the render graph (CS_ORG_LLF_SHADOWS=1).
+ * @brief Light Limit Fix's local shadow cache on the render graph (CS_ORG_LIGHT_LIMIT_FIX_SHADOWS=1).
  *
  * At the EarlyPrepass anchor, right after the engine rendered its shadow maps, one compute pass copies this frame's freshly
  * rendered engine slices into the cache (LocalShadowCopyCS, built for ORG), and one copy pass moves the slots' projection data
@@ -17,7 +18,10 @@
  * read them through the graph.
  *
  * Every per-frame value (which slices to copy, the slots' data) goes through a LatchBlock that the anchor's commit writes, so
- * the passes' recordings stay the same from frame to frame.
+ * the passes' recordings stay the same from frame to frame. Each possible copy is a dispatch through a run gate entry: a copy
+ * the frame did not stage dispatches no groups.
+ *
+ * Light Limit Fix describes each frame (SetFrame) the same way for both paths; this file only stages that description.
  *
  * Render thread only. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
@@ -50,7 +54,10 @@ public:
 
 	static ORGLocalShadows& Get();
 
-	/** @brief Whether CS_ORG_LLF_SHADOWS=1 is set. */
+	/**
+	 * @brief Whether CS_ORG_LIGHT_LIMIT_FIX_SHADOWS=1 is set. The earlier name CS_ORG_LLF_SHADOWS is read when the new one is
+	 * unset, with a deprecation warning.
+	 */
 	static bool Requested();
 
 	/** @brief Reserves the EarlyPrepass anchor when requested. Call before the render graph initializes (PostPostLoad). */
@@ -58,9 +65,12 @@ public:
 
 	/**
 	 * @brief Creates the cache and data buffer for a_desc and registers the anchor client (again when the shape changed).
+	 * Light Limit Fix calls it when it sizes its cache, which follows its settings, so not at SetupResources.
+	 * @param a_onFailed Called once if the graph fails later; the cache returns to D3D11.
 	 * @return Whether the cache lives on the graph; false, with nothing held, keeps Light Limit Fix on its D3D11 path.
 	 */
-	bool Setup(const Desc& a_desc);
+	bool Setup(const Desc& a_desc, std::function<void()> a_onFailed);
+
 
 	/** @brief Drops the client and its resources (D3D11 views first, the graph's after D3D11's last use), and withdraws them. */
 	void Release();
