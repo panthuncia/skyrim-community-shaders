@@ -16,6 +16,7 @@
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/Engine/GuestDevice.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/Switches.h"
@@ -2082,6 +2083,7 @@ void RenderGraphRuntime::SignalFramePace(bool a_active)
 	ServicePipelineReload();
 	ServiceD3D11Releases();
 	RenderGraph::Engine::Tripwire::ServiceRetired();
+	RenderGraph::Engine::Targets::ServiceRetired();
 	// The self-tests register as ordinary clients after the first frame, when the engine's targets they import exist. Each
 	// does so once, and nothing when its switch is off.
 	if (IsActive()) {
@@ -2559,6 +2561,8 @@ const std::vector<std::filesystem::path>& RenderGraphRuntime::ShaderSourceFiles(
 
 bool RenderGraphRuntime::DescribeResource(IUnknown* a_object, DxvkOrgInteropResourceInfo& a_info)
 {
+	// An engine field may hold a tripwire handle (CS_ORG_ENGINE_TARGET_HANDLES): DXVK describes the object it wraps.
+	a_object = RenderGraph::Engine::Tripwire::UnwrapObject(a_object);
 	if (!impl || !impl->getResourceInfo || !a_object)
 		return false;
 	a_info = {};
