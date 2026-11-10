@@ -39,6 +39,7 @@ ORGPostProcessing& ORGPostProcessing::Get()
 #	include "State.h"
 #	include "Utils/ColorSpace.h"
 #	include "Utils/D3D.h"
+#	include "Utils/Format.h"
 #	include "Utils/Game.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -400,7 +401,7 @@ namespace ORGPostChain
 		std::string ProgramKey(std::string_view a_source, const std::wstring& a_entry, std::uint32_t a_words,
 			const std::vector<std::pair<std::string, std::string>>& a_defines)
 		{
-			std::string key = std::format("{}|{}|{}", a_source, std::string(a_entry.begin(), a_entry.end()), a_words);
+			std::string key = std::format("{}|{}|{}", a_source, Util::WStringToString(a_entry), a_words);
 			for (const auto& [name, value] : a_defines)
 				key += std::format("|{}={}", name, value);
 			return key;
