@@ -14,7 +14,8 @@
  * path writes. The textures are graph twins (GraphResources::Texture2D) exported as D3D11 SRVs: the deferred composite (t14,
  * t15) and the engine's pixel shaders (t76, t77) read those until their draws move to the graph. Exponential Height Fog's passes
  * read the twins by name. They are also published (PublishedResources), and Drawcall Limit Fix's colour passes read them so.
- * The SH is read again in the next frame (the reflection prepass binds the last frame's), so it is History.
+ * The SH is read again in the next frame (the reflection prepass binds the last frame's), so it is History. A missing source
+ * cubemap clears its SH to zero, as the D3D11 path's projection of a null view does.
  *
  * Fallback: when the program, sampler or textures cannot be made, Setup returns false and IBL keeps its D3D11 path. When the
  * graph fails later, the client is unregistered, the textures are withdrawn and a_onFailed (from Setup) brings the D3D11 path

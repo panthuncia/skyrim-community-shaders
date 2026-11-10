@@ -33,6 +33,7 @@ bool ORGIBL::Requested()
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/UavClearPass.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/OwnedDescriptorBinding.h>
@@ -186,9 +187,12 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 			return nullptr;
 		const auto& source = a_env ? current->envSource : current->skySource;
 		const auto& target = a_env ? current->env : current->sky;
-		// The environment only while the DALC mode reads it (the D3D11 path skips it too); a missing source leaves the last values.
-		if (!source || (a_env && !current->useEnvironment))
+		// The environment only while the DALC mode reads it: the D3D11 path skips it too, and the last values stay.
+		if (a_env && !current->useEnvironment)
 			return nullptr;
+		// A missing cubemap: the D3D11 path projects a null view, which samples zero, so the SH is zero.
+		if (!source)
+			return GraphPasses::MakeUavClear(target->Graph(), {});
 		return std::make_shared<ProjectPass>(current->program, current->sampler.Index(), source, target->Graph());
 	};
 	FrameAnchors::ClientDesc client{};
