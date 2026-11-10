@@ -5,19 +5,13 @@
 
 #include "ORGFxRuntime.h"
 
-#include <cstring>
+#include "RenderGraph/Switches.h"
 
-namespace
-{
-	constexpr const char* kEnvSwitch = "CS_ORG_FX";
-}
+#include <cstring>
 
 bool ORGFxRuntime::Requested()
 {
-	static const bool requested = [] {
-		char value[8]{};
-		return GetEnvironmentVariableA(kEnvSwitch, value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}();
+	static const bool requested = Switches::On("CS_ORG_FX");
 	return requested;
 }
 
@@ -36,6 +30,7 @@ ORGFxRuntime& ORGFxRuntime::Get()
 #	include "Features/Effects11/SettingManager.h"
 #	include "Features/Effects11/TextureManager.h"
 #	include "Globals.h"
+#	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
@@ -54,7 +49,6 @@ ORGFxRuntime& ORGFxRuntime::Get()
 
 #	include <algorithm>
 #	include <array>
-#	include <atomic>
 #	include <chrono>
 #	include <map>
 #	include <set>
@@ -77,6 +71,7 @@ namespace
 
 	using Res = std::shared_ptr<org::Resource>;
 	using Lifetime = GraphResources::Lifetime;
+	namespace AP = RenderGraph::AnchorPasses;
 
 	/** @brief The .fx effects the runtime runs, in the order ExecuteEffects runs them. */
 	enum class Fx : std::uint8_t
@@ -157,7 +152,8 @@ namespace
 		std::uint32_t width = 0;
 		std::uint32_t height = 0;
 		std::map<std::string, std::unique_ptr<GraphResources::Texture2D>, std::less<>> textures;
-		// The kept (History, Persistent) textures a frame that ran has cleared: they start at zero, as DXVK's D3D11 textures.
+		// The kept (History, Persistent) textures a run has cleared: they start at zero, as DXVK's D3D11 textures. A plan adds a
+		// one-shot clear for each kept texture not in here; the shape's executed signal adds its clears.
 		std::set<std::string, std::less<>> cleared;
 
 		/** @brief The texture by name, created on first use; null when the name is unknown or the texture cannot be made. */
@@ -254,7 +250,7 @@ namespace
 	constexpr std::uint32_t kSunMaskWords = 4;     // SourceTexture, LinearSampler, SunMask (handle, offset)
 	constexpr std::uint32_t kCopyWords = 3;        // SourceTexture, Dither (handle, offset)
 
-	/** @brief One word of a raster pass's push block, resolved at record time. */
+	/** @brief One word of an .fx pass's push block, resolved at record time. */
 	struct PushWord
 	{
 		enum class Kind : std::uint8_t
@@ -268,6 +264,10 @@ namespace
 		std::uint32_t value = 0;
 	};
 
+	/**
+	 * @brief An .fx pass's draw. Its own pass rather than an AnchorPasses::Draw: it draws Effects11's quad (six vertices), and one
+	 * texture may fill several of its slots (black for every unbound one), which stays one declared use.
+	 */
 	struct DrawSpec
 	{
 		std::string name;
@@ -290,25 +290,7 @@ namespace
 		}
 	};
 
-	struct ComputeSpec
-	{
-		std::string name;
-		std::shared_ptr<const ComputeProgram> program;
-		Res texture;
-		std::uint32_t groupsX = 0;
-		std::uint32_t groupsY = 0;
-		std::uint32_t region = 0;
-	};
-
-	struct CopySpec
-	{
-		std::string name;
-		Res from;
-		Res to;
-		std::uint32_t width = 1;
-		std::uint32_t height = 1;
-	};
-
+	/** @brief A kept texture's clear to zero, through a render target: they have no UAV, which AnchorPasses::Clear needs. */
 	struct ClearSpec
 	{
 		std::string name;
@@ -317,7 +299,8 @@ namespace
 		std::uint32_t height = 0;
 	};
 
-	using Step = std::variant<std::shared_ptr<const DrawSpec>, std::shared_ptr<const ComputeSpec>, CopySpec, ClearSpec>;
+	// A frame's steps: the .fx draws, CS's own draws, dispatch and copies (AnchorPasses), and the one-shot clears.
+	using Step = std::variant<std::shared_ptr<const DrawSpec>, AP::Draw, AP::Dispatch, AP::Copy, ClearSpec>;
 
 	/** @brief A region of the latch the commit fills. */
 	struct RegionWrite
@@ -363,11 +346,8 @@ namespace
 		Res input;                                     // the tonemap input the plan reads
 		Res output;                                    // the tonemap output the plan writes
 		std::shared_ptr<Resources> resources;
-		std::vector<std::string> clears;  // the kept textures this frame clears first
+		std::vector<std::string> clears;  // the kept textures the shape clears once, first
 		std::uint32_t fxPasses = 0;
-		// Set when a graph build holding this shape's passes prepared one of them: from then on the epoch runs this shape. A shape
-		// registered at the hook runs only from the next build point (DCLF builds the graph once a frame, at its start).
-		std::shared_ptr<std::atomic<bool>> prepared = std::make_shared<std::atomic<bool>>(false);
 	};
 
 	// ---- passes ----
@@ -384,12 +364,12 @@ namespace
 		std::shared_ptr<const org::LatchBlock> latch;
 	};
 
-	/** @brief One fullscreen draw: an .fx pass or one of CS's raster steps. */
+	/** @brief One .fx pass's fullscreen draw. */
 	class DrawPass final : public org::TypedRenderGraphPass<DrawPass, DrawFrame, DrawBindings>
 	{
 	public:
-		DrawPass(std::shared_ptr<const DrawSpec> a_spec, std::shared_ptr<const org::LatchBlock> a_latch, std::shared_ptr<std::atomic<bool>> a_prepared) :
-			spec(std::move(a_spec)), latch(std::move(a_latch)), prepared(std::move(a_prepared)) {}
+		DrawPass(std::shared_ptr<const DrawSpec> a_spec, std::shared_ptr<const org::LatchBlock> a_latch) :
+			spec(std::move(a_spec)), latch(std::move(a_latch)) {}
 
 		DrawBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -408,11 +388,7 @@ namespace
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(latch.get()));
 		}
 
-		DrawFrame Prepare(const DrawBindings&, const org::PassPrepareContext&) const
-		{
-			prepared->store(true, std::memory_order_release);
-			return { spec, latch };
-		}
+		DrawFrame Prepare(const DrawBindings&, const org::PassPrepareContext&) const { return { spec, latch }; }
 
 		static void Record(const DrawBindings& a_bindings, const DrawFrame& a_frame, org::PassRecordContext& a_recording)
 		{
@@ -450,89 +426,6 @@ namespace
 	private:
 		std::shared_ptr<const DrawSpec> spec;
 		std::shared_ptr<const org::LatchBlock> latch;
-		std::shared_ptr<std::atomic<bool>> prepared;
-	};
-
-	struct ComputeBindings
-	{
-		org::DeclaredViewToken texture;
-	};
-
-	struct ComputeFrame
-	{
-		std::shared_ptr<const ComputeSpec> spec;
-		std::shared_ptr<const org::LatchBlock> latch;
-	};
-
-	/** @brief The colour correction of the input's copy in place, as ApplyColorCorrection on kMAIN. */
-	class ColorCorrectionPass final : public org::TypedRenderGraphPass<ColorCorrectionPass, ComputeFrame, ComputeBindings>
-	{
-	public:
-		ColorCorrectionPass(std::shared_ptr<const ComputeSpec> a_spec, std::shared_ptr<const org::LatchBlock> a_latch, std::shared_ptr<std::atomic<bool>> a_prepared) :
-			spec(std::move(a_spec)), latch(std::move(a_latch)), prepared(std::move(a_prepared)) {}
-
-		ComputeBindings Declare(org::PassBuilder& a_builder)
-		{
-			a_builder.PreferQueue(org::QueueKind::Graphics);
-			return { a_builder.UnorderedAccess(spec->texture).View() };
-		}
-
-		void Revision(std::vector<std::uint64_t>& a_out) const
-		{
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(spec.get()));
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(latch.get()));
-		}
-
-		ComputeFrame Prepare(const ComputeBindings&, const org::PassPrepareContext&) const
-		{
-			prepared->store(true, std::memory_order_release);
-			return { spec, latch };
-		}
-
-		static void Record(const ComputeBindings& a_bindings, const ComputeFrame& a_frame, org::PassRecordContext& a_recording)
-		{
-			if (!a_frame.spec || !a_frame.spec->program || !a_frame.latch)
-				return;
-			const ColorCorrectionBlock block{ a_recording.Index(a_bindings.texture),
-				ShaderBindings::LatchOf(*a_frame.latch, a_recording.FrameSlot(), a_frame.spec->region) };
-			a_frame.spec->program->Dispatch(a_recording, ShaderBindings::Data(block), a_frame.spec->groupsX, a_frame.spec->groupsY, 1);
-		}
-
-	private:
-		std::shared_ptr<const ComputeSpec> spec;
-		std::shared_ptr<const org::LatchBlock> latch;
-		std::shared_ptr<std::atomic<bool>> prepared;
-	};
-
-	struct CopyBindings
-	{
-		org::ResourceBindingToken from, to;
-		std::uint32_t width = 1;
-		std::uint32_t height = 1;
-	};
-
-	/** @brief A whole-texture copy of two textures of one format and size: the adaptation history, and CopyResource's cases. */
-	class CopyPass final : public org::TypedRenderGraphPass<CopyPass, org::EmptyPassFrameData, CopyBindings>
-	{
-	public:
-		explicit CopyPass(CopySpec a_spec) :
-			spec(std::move(a_spec)) {}
-
-		CopyBindings Declare(org::PassBuilder& a_builder)
-		{
-			a_builder.PreferQueue(org::QueueKind::Graphics);
-			return { a_builder.CopySource(spec.from), a_builder.CopyDestination(spec.to), spec.width, spec.height };
-		}
-
-		static void Record(const CopyBindings& a_bindings, const org::EmptyPassFrameData&, org::PassRecordContext& a_recording)
-		{
-			const rhi::TextureCopyRegion target{ .texture = a_recording.Resolve(a_bindings.to).GetHandle(), .width = a_bindings.width, .height = a_bindings.height };
-			const rhi::TextureCopyRegion source{ .texture = a_recording.Resolve(a_bindings.from).GetHandle(), .width = a_bindings.width, .height = a_bindings.height };
-			a_recording.Commands().CopyTextureRegion(target, source);
-		}
-
-	private:
-		CopySpec spec;
 	};
 
 	struct ClearBindings
@@ -575,87 +468,61 @@ namespace
 
 	// ---- helpers ----
 
-	rhi::Filter FilterOf(OrgFx::FilterMode a_mode) { return a_mode == OrgFx::FilterMode::Point ? rhi::Filter::Nearest : rhi::Filter::Linear; }
-
-	rhi::AddressMode AddressOf(OrgFx::AddressMode a_mode)
+	/** @brief A parsed sampler state as the D3D11 description FX11 makes of it, for ShaderBindings::SamplerFromD3D11. */
+	D3D11_SAMPLER_DESC D3D11SamplerOf(const OrgFx::SamplerDesc& a_sampler)
 	{
-		switch (a_mode) {
-		case OrgFx::AddressMode::Wrap:
-			return rhi::AddressMode::Wrap;
-		case OrgFx::AddressMode::Mirror:
-			return rhi::AddressMode::Mirror;
-		case OrgFx::AddressMode::Border:
-			return rhi::AddressMode::Border;
-		case OrgFx::AddressMode::MirrorOnce:
-			return rhi::AddressMode::MirrorOnce;
-		default:
-			return rhi::AddressMode::Clamp;
-		}
-	}
-
-	rhi::CompareOp CompareOf(OrgFx::CompareFunc a_func)
-	{
-		switch (a_func) {
-		case OrgFx::CompareFunc::Never:
-			return rhi::CompareOp::Never;
-		case OrgFx::CompareFunc::Less:
-			return rhi::CompareOp::Less;
-		case OrgFx::CompareFunc::Equal:
-			return rhi::CompareOp::Equal;
-		case OrgFx::CompareFunc::LessEqual:
-			return rhi::CompareOp::LessEqual;
-		case OrgFx::CompareFunc::Greater:
-			return rhi::CompareOp::Greater;
-		case OrgFx::CompareFunc::NotEqual:
-			return rhi::CompareOp::NotEqual;
-		case OrgFx::CompareFunc::GreaterEqual:
-			return rhi::CompareOp::GreaterEqual;
-		default:
-			return rhi::CompareOp::Always;
-		}
-	}
-
-	/** @brief A parsed sampler state as BasicRHI's. D3D11's custom border colours that are not a preset become Custom. */
-	rhi::SamplerDesc SamplerOf(const OrgFx::SamplerDesc& a_sampler)
-	{
-		rhi::SamplerDesc desc{};
-		desc.minFilter = FilterOf(a_sampler.minFilter);
-		desc.magFilter = FilterOf(a_sampler.magFilter);
-		desc.mipFilter = a_sampler.mipFilter == OrgFx::FilterMode::Point ? rhi::MipFilter::Nearest : rhi::MipFilter::Linear;
-		desc.addressU = AddressOf(a_sampler.addressU);
-		desc.addressV = AddressOf(a_sampler.addressV);
-		desc.addressW = AddressOf(a_sampler.addressW);
-		desc.mipLodBias = a_sampler.mipLodBias;
-		// D3D11's default minimum is -FLT_MAX; below mip 0 there is nothing to clamp.
-		desc.minLod = (std::max)(a_sampler.minLod, 0.0f);
-		desc.maxLod = (std::max)(a_sampler.maxLod, desc.minLod);
-		desc.maxAnisotropy = a_sampler.anisotropic ? (std::max)(a_sampler.maxAnisotropy, 1u) : 1u;
+		const auto type = [](OrgFx::FilterMode a_mode) { return a_mode == OrgFx::FilterMode::Point ? D3D11_FILTER_TYPE_POINT : D3D11_FILTER_TYPE_LINEAR; };
+		const auto address = [](OrgFx::AddressMode a_mode) {
+			switch (a_mode) {
+			case OrgFx::AddressMode::Wrap:
+				return D3D11_TEXTURE_ADDRESS_WRAP;
+			case OrgFx::AddressMode::Mirror:
+				return D3D11_TEXTURE_ADDRESS_MIRROR;
+			case OrgFx::AddressMode::Border:
+				return D3D11_TEXTURE_ADDRESS_BORDER;
+			case OrgFx::AddressMode::MirrorOnce:
+				return D3D11_TEXTURE_ADDRESS_MIRROR_ONCE;
+			default:
+				return D3D11_TEXTURE_ADDRESS_CLAMP;
+			}
+		};
+		D3D11_FILTER_REDUCTION_TYPE reduction = D3D11_FILTER_REDUCTION_TYPE_STANDARD;
 		switch (a_sampler.reduction) {
 		case OrgFx::FilterReduction::Comparison:
-			desc.compareEnable = true;
-			desc.compareOp = CompareOf(a_sampler.compare);
-			desc.reduction = rhi::ReductionMode::Comparison;
+			reduction = D3D11_FILTER_REDUCTION_TYPE_COMPARISON;
 			break;
 		case OrgFx::FilterReduction::Minimum:
-			desc.reduction = rhi::ReductionMode::Min;
+			reduction = D3D11_FILTER_REDUCTION_TYPE_MINIMUM;
 			break;
 		case OrgFx::FilterReduction::Maximum:
-			desc.reduction = rhi::ReductionMode::Max;
+			reduction = D3D11_FILTER_REDUCTION_TYPE_MAXIMUM;
 			break;
 		default:
 			break;
 		}
-		const auto& c = a_sampler.borderColor;
-		if (c[0] == 0.0f && c[1] == 0.0f && c[2] == 0.0f && c[3] == 0.0f)
-			desc.borderPreset = rhi::BorderPreset::TransparentBlack;
-		else if (c[0] == 0.0f && c[1] == 0.0f && c[2] == 0.0f && c[3] == 1.0f)
-			desc.borderPreset = rhi::BorderPreset::OpaqueBlack;
-		else if (c[0] == 1.0f && c[1] == 1.0f && c[2] == 1.0f && c[3] == 1.0f)
-			desc.borderPreset = rhi::BorderPreset::OpaqueWhite;
-		else {
-			desc.borderPreset = rhi::BorderPreset::Custom;
-			std::copy(c.begin(), c.end(), desc.borderColor);
-		}
+		D3D11_SAMPLER_DESC desc{};
+		desc.Filter = a_sampler.anisotropic ? D3D11_ENCODE_ANISOTROPIC_FILTER(reduction) :
+		                                      D3D11_ENCODE_BASIC_FILTER(type(a_sampler.minFilter), type(a_sampler.magFilter), type(a_sampler.mipFilter), reduction);
+		desc.AddressU = address(a_sampler.addressU);
+		desc.AddressV = address(a_sampler.addressV);
+		desc.AddressW = address(a_sampler.addressW);
+		desc.MipLODBias = a_sampler.mipLodBias;
+		desc.MaxAnisotropy = a_sampler.maxAnisotropy;
+		// The parser's CompareFunc is D3D11_COMPARISON_FUNC less one (Never first).
+		desc.ComparisonFunc = static_cast<D3D11_COMPARISON_FUNC>(static_cast<int>(a_sampler.compare) + 1);
+		std::copy(a_sampler.borderColor.begin(), a_sampler.borderColor.end(), desc.BorderColor);
+		desc.MinLOD = a_sampler.minLod;
+		desc.MaxLOD = a_sampler.maxLod;
+		return desc;
+	}
+
+	/** @brief A parsed sampler state as BasicRHI's, through the one D3D11 converter. */
+	rhi::SamplerDesc SamplerOf(const OrgFx::SamplerDesc& a_sampler)
+	{
+		auto desc = ShaderBindings::SamplerFromD3D11(D3D11SamplerOf(a_sampler));
+		// D3D11's default minimum is -FLT_MAX; below mip 0 there is nothing to clamp.
+		desc.minLod = (std::max)(desc.minLod, 0.0f);
+		desc.maxLod = (std::max)(desc.maxLod, desc.minLod);
 		return desc;
 	}
 
@@ -721,7 +588,7 @@ struct ORGFxRuntime::Impl
 	CsPrograms cs;
 	std::shared_ptr<Resources> resources;
 	std::shared_ptr<Frame> frame;    // the registered shape
-	std::shared_ptr<Frame> running;  // the shape the epoch runs: the newest registered one a build prepared (Frame::prepared)
+	std::shared_ptr<Frame> running;  // the newest shape a run's graph held (its executed signal); null before the first
 	std::string shapeKey;
 	std::string lastReason;
 	bool registered = false;
@@ -731,6 +598,14 @@ struct ORGFxRuntime::Impl
 	Res frameInput;   // this frame's tonemap input import, set when the frame is active
 	Res frameOutput;  // this frame's tonemap output import
 	std::vector<std::vector<std::uint8_t>> images = std::vector<std::vector<std::uint8_t>>(kEffects);
+	// This run's commit: whether it wrote the running shape's and the registered shape's latch, and each effect's last value update.
+	bool wroteRunning = false;
+	bool wroteFrame = false;
+	std::array<std::uint32_t, kEffects> updatedFrame = [] {
+		std::array<std::uint32_t, kEffects> frames{};
+		frames.fill(UINT32_MAX);
+		return frames;
+	}();
 
 	FxEffect& EffectOf(Fx a_fx) { return effects[static_cast<std::size_t>(a_fx)]; }
 
@@ -996,28 +871,33 @@ struct ORGFxRuntime::Impl
 			frame->stepNames.push_back(std::move(a_name));
 		}
 
-		/** @brief A fullscreen draw of one of CS's programs. */
-		std::shared_ptr<DrawSpec> CsDraw(std::string a_name, std::shared_ptr<const RasterProgram> a_program, Res a_target, std::uint32_t a_width, std::uint32_t a_height)
+		/** @brief A fullscreen draw of one of CS's programs over the whole target, its push block in a_bindings. */
+		void CsDraw(std::string a_step, std::shared_ptr<const RasterProgram> a_program, Res a_target, std::uint32_t a_width, std::uint32_t a_height,
+			std::vector<AP::Bind> a_bindings)
 		{
-			auto spec = std::make_shared<DrawSpec>();
-			spec->name = std::move(a_name);
-			spec->program = std::move(a_program);
-			spec->target = std::move(a_target);
-			spec->width = a_width;
-			spec->height = a_height;
-			if (!spec->program)
-				Fail(fmt::format("{}: its program could not be built", spec->name));
-			return spec;
+			if (!a_program)
+				Fail(fmt::format("Effects11::{}: its program could not be built", a_step));
+			AddStep(AP::Draw{ .name = a_step,
+						.program = std::move(a_program),
+						.bindings = std::move(a_bindings),
+						.target = std::move(a_target),
+						.viewport = { .width = a_width, .height = a_height } },
+				a_step);
 		}
 
 		/** @brief CopyPS from a_source into a_target, with dither (the output copy) or without (EffectManager::CopyTexture's false). */
-		void Copy(std::string a_name, Res a_source, Res a_target, rhi::Format a_format, std::uint32_t a_width, std::uint32_t a_height, float a_amplitude)
+		void Copy(std::string a_step, Res a_source, Res a_target, rhi::Format a_format, std::uint32_t a_width, std::uint32_t a_height, float a_amplitude)
 		{
-			auto spec = CsDraw(a_name, impl.CopyProgram(RenderGraphRuntime::Get().Host()->Device(), a_format), std::move(a_target), a_width, a_height);
 			const std::uint32_t region = Region(sizeof(DitherConstants));
 			frame->writes.push_back({ .kind = RegionWrite::Kind::Dither, .offset = region, .amplitude = a_amplitude });
-			spec->push = { { PushWord::Kind::Input, spec->Input(a_source) }, { PushWord::Kind::LatchHandle, 0 }, { PushWord::Kind::LatchOffset, region } };
-			AddStep(std::shared_ptr<const DrawSpec>(std::move(spec)), std::move(a_name));
+			CsDraw(std::move(a_step), impl.CopyProgram(RenderGraphRuntime::Get().Host()->Device(), a_format), std::move(a_target), a_width, a_height,
+				{ AP::Bind::Srv(std::move(a_source)), AP::Bind::Latch(region) });
+		}
+
+		/** @brief A whole-texture copy of two textures of one format and size, as CopyResource. */
+		void CopyTexture(std::string a_step, Res a_source, Res a_target, std::uint32_t a_width = 1, std::uint32_t a_height = 1)
+		{
+			AddStep(AP::Copy{ .name = a_step, .source = std::move(a_source), .target = std::move(a_target), .width = a_width, .height = a_height }, a_step);
 		}
 
 		/** @brief The texture a pass's slot reads: a file, the chain input, an effect-named input, depth, a shared render target, or black. */
@@ -1179,28 +1059,26 @@ struct ORGFxRuntime::Impl
 			// FX11 works on kMAIN, after copying the input there (CopyToTarget). Here that is Original, a graph texture with a UAV.
 			const Res original = Tex("Original");
 			if (inputs.inputCopies)
-				AddStep(CopySpec{ "Effects11::CopyInput", inputs.input, original, width, height }, "copy-input");
+				CopyTexture("copy-input", inputs.input, original, width, height);
 			else
-				Copy("Effects11::CopyInput", inputs.input, original, rhi::Format::R16G16B16A16_Float, width, height, 0.0f);
+				Copy("copy-input", inputs.input, original, rhi::Format::R16G16B16A16_Float, width, height, 0.0f);
 
 			// 1. Colour correction in place.
 			{
-				auto spec = std::make_shared<ComputeSpec>();
-				spec->name = "Effects11::ColorCorrection";
-				spec->program = impl.cs.colorCorrection;
-				spec->texture = original;
-				spec->groupsX = (width + 7) / 8;
-				spec->groupsY = (height + 7) / 8;
-				spec->region = Region(sizeof(ColorCorrectionConstants));
-				frame->writes.push_back({ .kind = RegionWrite::Kind::ColorCorrection, .offset = spec->region });
-				AddStep(std::shared_ptr<const ComputeSpec>(std::move(spec)), "color-correction");
+				const std::uint32_t region = Region(sizeof(ColorCorrectionConstants));
+				frame->writes.push_back({ .kind = RegionWrite::Kind::ColorCorrection, .offset = region });
+				AddStep(AP::Dispatch{ .name = "color-correction",
+							.program = impl.cs.colorCorrection,
+							.bindings = { AP::Bind::Uav(original), AP::Bind::Latch(region) },
+							.groups = { (width + 7) / 8, (height + 7) / 8, 1 } },
+					"color-correction");
 			}
 			// FX11 leaves the corrected image in kMAIN; nothing here reads kMAIN again. Before the output copy, which may be kMAIN.
 			if (inputs.main) {
 				if (inputs.mainCopies)
-					AddStep(CopySpec{ "Effects11::CopyToMain", original, inputs.main, width, height }, "copy-to-main");
+					CopyTexture("copy-to-main", original, inputs.main, width, height);
 				else
-					Copy("Effects11::CopyToMain", original, inputs.main, inputs.mainFormat, inputs.mainWidth, inputs.mainHeight, 0.0f);
+					Copy("copy-to-main", original, inputs.main, inputs.mainFormat, inputs.mainWidth, inputs.mainHeight, 0.0f);
 			}
 
 			// 3. The 1024 downsample and its two mips, for bloom, lens and adaptation.
@@ -1208,11 +1086,11 @@ struct ORGFxRuntime::Impl
 				const std::pair<std::string_view, std::uint32_t> levels[] = { { "Downsampled", 1024 }, { "Downsampled512", 512 }, { "Downsampled256", 256 } };
 				Res source = original;
 				for (const auto& [name, size] : levels) {
-					auto spec = CsDraw(fmt::format("Effects11::Downsample {}", size), impl.cs.downsample, Tex(name), size, size);
-					spec->push = { { PushWord::Kind::Input, spec->Input(source) }, { PushWord::Kind::Literal, impl.cs.linearSampler.Index() } };
-					spec->samplers = { impl.cs.linearSampler };
-					source = spec->target;
-					AddStep(std::shared_ptr<const DrawSpec>(std::move(spec)), fmt::format("downsample-{}", size));
+					const Res target = Tex(name);
+					// The sampler is CS's own, kept by the runtime for the session.
+					CsDraw(fmt::format("downsample-{}", size), impl.cs.downsample, target, size, size,
+						{ AP::Bind::Srv(source), AP::Bind::Handle(impl.cs.linearSampler.Index()) });
+					source = target;
 				}
 			}
 
@@ -1236,17 +1114,14 @@ struct ORGFxRuntime::Impl
 			// 6. enbadaptation.fx: the sun-masked blurry mip, its Downsample to 16x16, its Draw from last frame's value, kept for the next.
 			if (run(Fx::Adaptation)) {
 				constexpr std::uint32_t kSize = ENBAdaptation::kSunMaskSize;
-				auto mask = CsDraw("Effects11::AdaptationSunMask", impl.cs.sunMask, Tex("SunMasked"), kSize, kSize);
 				const std::uint32_t region = Region(sizeof(ENBAdaptation::SunMaskCB));
 				frame->writes.push_back({ .kind = RegionWrite::Kind::SunMask, .offset = region });
-				mask->push = { { PushWord::Kind::Input, mask->Input(Tex("Downsampled256")) }, { PushWord::Kind::Literal, impl.cs.linearSampler.Index() },
-					{ PushWord::Kind::LatchHandle, 0 }, { PushWord::Kind::LatchOffset, region } };
-				mask->samplers = { impl.cs.linearSampler };
-				const Res masked = mask->target;
-				AddStep(std::shared_ptr<const DrawSpec>(std::move(mask)), "adaptation-sun-mask");
+				const Res masked = Tex("SunMasked");
+				CsDraw("adaptation-sun-mask", impl.cs.sunMask, masked, kSize, kSize,
+					{ AP::Bind::Srv(Tex("Downsampled256")), AP::Bind::Handle(impl.cs.linearSampler.Index()), AP::Bind::Latch(region) });
 				Technique(Fx::Adaptation, "Downsample", "AdaptationCurrent", { { "TextureCurrent", masked } });
 				Technique(Fx::Adaptation, "Draw", "Adaptation", { { "TextureCurrent", Tex("AdaptationCurrent") }, { "TexturePrevious", Tex("AdaptationHistory") } });
-				AddStep(CopySpec{ "Effects11::AdaptationHistory", Tex("Adaptation"), Tex("AdaptationHistory") }, "adaptation-history");
+				CopyTexture("adaptation-history", Tex("Adaptation"), Tex("AdaptationHistory"));
 				adaptation = Tex("Adaptation");
 			}
 
@@ -1259,7 +1134,7 @@ struct ORGFxRuntime::Impl
 					sdr = "SDRTemp2";
 				else if (!chain.executed)
 					// Side-target-only sequences leave the SDR texture unwritten: this frame's image, as ENBEffect::Execute.
-					Copy("Effects11::CopyOriginal", original, Tex("SDRTemp"), rhi::Format::R10G10B10A2_UNorm, width, height, 0.0f);
+					Copy("copy-original", original, Tex("SDRTemp"), rhi::Format::R10G10B10A2_UNorm, width, height, 0.0f);
 			}
 
 			// 8. enbeffectpostpass.fx, from the SDR result into the other one, with Scratch as its temp.
@@ -1275,11 +1150,11 @@ struct ORGFxRuntime::Impl
 			}
 
 			// 9. The result into the tonemap's output, dithered.
-			Copy("Effects11::CopyToOutput", Tex(sdr), inputs.output, inputs.outputFormat, inputs.outputWidth, inputs.outputHeight, 1.0f / 255.0f);
+			Copy("copy-to-output", Tex(sdr), inputs.output, inputs.outputFormat, inputs.outputWidth, inputs.outputHeight, 1.0f / 255.0f);
 
 			if (!error.empty())
 				return nullptr;
-			// Kept textures not cleared yet start at zero, before anything reads them.
+			// Kept textures not cleared yet start at zero, before anything reads them: one-shot passes, run once with this shape.
 			std::vector<Step> clears;
 			std::vector<std::string> clearNames;
 			for (const auto& [name, texture] : impl.resources->textures) {
@@ -1307,9 +1182,8 @@ struct ORGFxRuntime::Impl
 	{
 		std::string key = fmt::format("{}x{} {} {}{} {} {}", resources->width, resources->height, reinterpret_cast<std::uintptr_t>(a_inputs.input.get()),
 			a_inputs.inputCopies ? 'c' : 'd', reinterpret_cast<std::uintptr_t>(a_inputs.main.get()), static_cast<std::uint32_t>(a_inputs.mainFormat), a_inputs.mainWidth);
-		key += fmt::format(" {} {} {} {} c{}",
-			reinterpret_cast<std::uintptr_t>(a_inputs.depth.get()), reinterpret_cast<std::uintptr_t>(a_inputs.output.get()), static_cast<std::uint32_t>(a_inputs.outputFormat),
-			a_inputs.outputWidth, resources->cleared.size());
+		key += fmt::format(" {} {} {} {}", reinterpret_cast<std::uintptr_t>(a_inputs.depth.get()), reinterpret_cast<std::uintptr_t>(a_inputs.output.get()),
+			static_cast<std::uint32_t>(a_inputs.outputFormat), a_inputs.outputWidth);
 		for (std::size_t i = 0; i < kEffects; ++i) {
 			if (!a_inputs.runs[i]) {
 				key += " -";
@@ -1325,39 +1199,43 @@ struct ORGFxRuntime::Impl
 		return key;
 	}
 
+	/** @brief Registers a_frame's steps as the client. On failure the client is gone and registered is false. */
 	void Register(const std::shared_ptr<Frame>& a_frame)
 	{
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
+		const auto latch = std::shared_ptr<const org::LatchBlock>(a_frame->latch);
+		AP::Builder builder(FrameAnchors::Anchor::Tonemap, kClientId, kFirstOrder, latch);
 		for (std::size_t i = 0; i < a_frame->steps.size(); ++i) {
-			FrameAnchors::PassDesc pass{};
-			pass.name = fmt::format("{}.{:03}.{}", kClientId, i, a_frame->stepNames[i]);
-			pass.anchor = FrameAnchors::Anchor::Tonemap;
-			pass.order = kFirstOrder + static_cast<std::int32_t>(i);
-			const auto latch = std::shared_ptr<const org::LatchBlock>(a_frame->latch);
-			const auto prepared = a_frame->prepared;
+			// The step's number keeps the names unique and in the plan's order.
+			const auto name = fmt::format("{:03}.{}", i, a_frame->stepNames[i]);
 			std::visit(
 				[&](const auto& a_step) {
 					using T = std::decay_t<decltype(a_step)>;
 					if constexpr (std::is_same_v<T, std::shared_ptr<const DrawSpec>>) {
-						pass.kind = FrameAnchors::PassKind::Render;
-						pass.make = [a_step, latch, prepared]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DrawPass>(a_step, latch, prepared); };
-					} else if constexpr (std::is_same_v<T, std::shared_ptr<const ComputeSpec>>) {
-						pass.kind = FrameAnchors::PassKind::Compute;
-						pass.make = [a_step, latch, prepared]() -> std::shared_ptr<org::RenderPass> {
-							return std::make_shared<ColorCorrectionPass>(a_step, latch, prepared);
-						};
-					} else if constexpr (std::is_same_v<T, CopySpec>) {
-						pass.kind = FrameAnchors::PassKind::Copy;
-						pass.make = [a_step]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyPass>(a_step); };
+						builder.Add(name, FrameAnchors::PassKind::Render,
+							[a_step, latch]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DrawPass>(a_step, latch); });
+					} else if constexpr (std::is_same_v<T, ClearSpec>) {
+						// One-shot: in the graph until a run with it was submitted.
+						builder.Add(name, FrameAnchors::PassKind::Render, [a_step]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ClearPass>(a_step); },
+							true);
 					} else {
-						pass.kind = FrameAnchors::PassKind::Render;
-						pass.make = [a_step]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ClearPass>(a_step); };
+						auto step = a_step;
+						step.name = name;
+						builder.Add(std::move(step));
 					}
 				},
 				a_frame->steps[i]);
-			client.passes.push_back(std::move(pass));
 		}
+		if (builder.Failed()) {
+			logger::warn("[ORG] Effects11: {}", builder.Failure());
+			FrameAnchors::Unregister(kClientId);
+			registered = false;
+			frame.reset();
+			running.reset();
+			return;
+		}
+		client.passes = builder.Take();
 		auto heldResources = a_frame->resources;
 		client.registerResources = [heldResources](org::RenderGraph& a_graph) {
 			for (const auto& [name, texture] : heldResources->textures)
@@ -1370,6 +1248,12 @@ struct ORGFxRuntime::Impl
 		client.commit = [](const FrameAnchors::Point&) {
 			if (auto& self = ORGFxRuntime::Get(); self.impl)
 				self.impl->SafeCommit();
+		};
+		// After a run whose graph held this shape's passes: from then on the epoch runs it.
+		client.executed = [weak = std::weak_ptr<Frame>(a_frame)](const FrameAnchors::Point&) {
+			if (auto& self = ORGFxRuntime::Get(); self.impl)
+				if (const auto shape = weak.lock())
+					self.impl->Executed(shape);
 		};
 		client.onFailed = [] {
 			logger::error("[ORG] Effects11 returns to FX11: the render graph failed");
@@ -1432,47 +1316,73 @@ struct ORGFxRuntime::Impl
 		}
 	}
 
-	/** @brief Inside the epoch: this frame's values into the latch. FX11's variables hold them (EffectManager::UpdateEffectValues). */
+	/**
+	 * @brief Inside the epoch: this run's values into the latch. The run's graph holds the shape the last executed signal named, or
+	 * the one registered since, once a build made it; which one is known only after the run (Executed). So both get the values.
+	 */
 	void Commit()
 	{
-		// The epoch runs the shape a build prepared: one registered at this hook runs only from the next build point, and until then
-		// the last one does, reading its own latch. With none yet, the epoch runs nothing of Effects11's and FX11 renders the frame.
-		if (frame && frame->prepared->load(std::memory_order_acquire) && running != frame) {
-			running = frame;
+		wroteRunning = running && running->latch && Write(*running);
+		wroteFrame = frame && frame != running && frame->latch && Write(*frame);
+		// An older shape still running wrote its own output. Only a shape planned for this frame's targets replaces FX11.
+		if (wroteRunning && running->input == frameInput && running->output == frameOutput)
+			ranFrame = globals::state->frameCount;
+	}
+
+	/** @brief The executed signal of a_shape's registration: its passes ran this run, so it is the shape the epoch runs from now on. */
+	void Executed(const std::shared_ptr<Frame>& a_shape)
+	{
+		const bool wrote = a_shape == running ? wroteRunning : (a_shape == frame && wroteFrame);
+		if (running != a_shape) {
+			running = a_shape;
 			logger::info("[ORG] Effects11: the graph runs the shape registered last ({} passes)", running->steps.size());
 		}
-		if (!running || !running->latch)
-			return;
-		const auto& shape = *running;
+		// Its one-shot clears ran with it: later plans leave those textures out.
+		for (const auto& name : a_shape->clears)
+			a_shape->resources->cleared.insert(name);
+		const std::uint32_t frameCount = globals::state->frameCount;
+		if (wrote && a_shape->input == frameInput && a_shape->output == frameOutput)
+			ranFrame = frameCount;
+		else if (ranFrame == frameCount)
+			ranFrame = UINT32_MAX;
+	}
+
+	/** @brief a_shape's values into its latch at this run's slot. FX11's variables hold them (EffectManager::UpdateEffectValues). */
+	bool Write(const Frame& a_shape)
+	{
 		auto& manager = EffectManager::GetSingleton();
 		for (std::size_t i = 0; i < kEffects; ++i) {
-			if (!shape.runs[i])
+			if (!a_shape.runs[i])
 				continue;
-			const auto& e = shape.effects[i];
+			const auto& e = a_shape.effects[i];
 			// FX11 reloaded the effect after the plan: FX11 updates other variables now. FX11 renders the frame.
 			if (!e.fx11 || !e.compiled || e.fx11->GetEffect() != e.compiled.get())
-				return;
+				return false;
 		}
 		for (std::size_t i = 0; i < kEffects; ++i) {
-			if (!shape.runs[i])
+			if (!a_shape.runs[i])
 				continue;
-			const auto& e = shape.effects[i];
-			manager.UpdateEffectValues(*e.fx11);
+			const auto& e = a_shape.effects[i];
+			// Once a run, for whichever shapes it writes.
+			if (updatedFrame[i] != globals::state->frameCount) {
+				manager.UpdateEffectValues(*e.fx11);
+				updatedFrame[i] = globals::state->frameCount;
+			}
 			auto& image = images[i];
 			image.assign(e.valuesSize, 0);
 			for (const auto& value : e.values)
 				value.variable->GetRawValue(image.data() + value.offset, 0, value.size);
 		}
 		const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
-		const auto& latch = *shape.latch;
+		const auto& latch = *a_shape.latch;
 		const std::uint32_t frameCount = manager.frameCount;
-		for (const auto& write : shape.writes) {
+		for (const auto& write : a_shape.writes) {
 			switch (write.kind) {
 			case RegionWrite::Kind::FxValues:
 				{
 					const auto index = static_cast<std::size_t>(write.effect);
 					auto& image = images[index];
-					const auto& e = shape.effects[index];
+					const auto& e = a_shape.effects[index];
 					if (e.screenSize >= 0 && static_cast<std::size_t>(e.screenSize) + e.screenSizeBytes <= image.size())
 						std::memcpy(image.data() + e.screenSize, write.screenSize, e.screenSizeBytes);
 					latch.Write(slot, write.offset, std::as_bytes(std::span<const std::uint8_t>(image)));
@@ -1497,12 +1407,7 @@ struct ORGFxRuntime::Impl
 				break;
 			}
 		}
-		// The clears run with this frame; the next frame's plan leaves them out.
-		for (const auto& name : shape.clears)
-			shape.resources->cleared.insert(name);
-		// An older shape still running wrote its own output. Only a shape planned for this frame's targets replaces FX11.
-		if (shape.input == frameInput && shape.output == frameOutput)
-			ranFrame = globals::state->frameCount;
+		return true;
 	}
 };
 

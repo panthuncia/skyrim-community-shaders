@@ -264,7 +264,7 @@ all four do nothing.
   each new reason is logged once as `[ORG] Effects11 runs on FX11: <reason>`.
 - **Build, per effect, on first need.** Parse `Effect::preprocessedSource`, lower it, and check FX11's `$Globals` against
   the parser's layout variable by variable (`BufferOffset`); any mismatch fails the effect. Samplers come from their state
-  blocks (`SamplerDesc` to `rhi::SamplerDesc`), bare `SamplerState`s take D3D11's default. `ResourceName` textures are
+  blocks (`SamplerDesc` as the `D3D11_SAMPLER_DESC` FX11 makes, through `ShaderBindings::SamplerFromD3D11`), bare `SamplerState`s take D3D11's default. `ResourceName` textures are
   FX11's loaded files, imported with `FrameAnchors::D3D11Texture`. Passes compile when a plan first needs them, keyed by
   technique, pass and target format: `RasterProgram` from generated text (the same text for both stages, entries
   `OrgFxVS`/`OrgFxPS`, `-HV 2018`). A pass with blend, depth or rasterizer states, a parse or lowering error, or a DXC
@@ -282,9 +282,12 @@ all four do nothing.
   (the chain input), `TextureDepth`, a `RenderTarget*` texture, the effect's named inputs (`TextureOriginal`,
   `TextureBloom`, `TextureLens`, `TextureAdaptation`, `TextureDownsampled`, `TextureCurrent`, `TexturePrevious`), else
   a 1x1 black texture (FX11's null view). A slot that names the pass's own target reads black, as D3D11 unbinds it.
-- **Shape.** The plan is one `FrameAnchors::Register` of client `cs.effects11`, one pass per step. A key of the screen
-  size, the engine imports, the output's format and size, the effects that run, each selected chain and its `UIBinding`
-  toggles, and the cleared set registers a new plan when it changes. Value edits never do.
+- **Shape.** The plan is one `FrameAnchors::Register` of client `cs.effects11`, one pass per step, made through
+  `RenderGraph::AnchorPasses`: CS's own draws (the copies, the downsamples, the sun mask), the colour correction dispatch
+  and the plain copies are its `Draw`, `Dispatch` and `Copy`. The .fx passes stay a pass of their own: they draw
+  Effects11's six-vertex quad, and one texture may fill several slots (black for every unbound one), which must stay one
+  declared use. A key of the screen size, the engine imports, the output's format and size, the effects that run, and each
+  selected chain and its `UIBinding` toggles registers a new plan when it changes. Value edits never do.
 - **Values.** FX11 stays the value store: the commit runs `EffectManager::UpdateEffectValues` per effect (weather and
   time-of-day blending, the ENB SDK globals, extern bindings, the effect's own), copies each variable's bytes from FX11
   (`GetRawValue`) into the effect's image, and writes one latch region per pass with that pass's `ScreenSize`. Colour
@@ -292,12 +295,16 @@ all four do nothing.
   and the copies' dither are latch regions too. Handles are in the push block (section 4).
 - **Lifetimes.** Textures that FX11 reads across frames, or reads when their chain did not run (bloom, lens, HDRTemp, the
   `RenderTarget*` set, the adaptation pair), are History; the SDR pair, Scratch, the downsamples and the sun mask are
-  Transient (aliased). Kept textures are cleared to zero once by a render pass that only clears, as DXVK's D3D11 textures
-  start at zero.
+  Transient (aliased). Kept textures start at zero, as DXVK's D3D11 textures: a plan adds a one-shot pass
+  (`PassDesc::once`) that only clears each kept texture not cleared yet, through a render target, since they have no UAV.
+  The shape's executed signal marks them cleared for later plans; the clears are not part of the key, so they cost no
+  second registration.
 - **Snapshots.** Each shape keeps what its commit reads: the FX11 effect (held, so its variables stay valid), the value
   copies, the values size and the `ScreenSize` offset, and the input and output imports it was planned for. A new shape
-  runs only from the next graph build, so the commit may run an older shape. It claims the frame only when that shape's
-  input and output are this frame's, and leaves the frame to FX11 when an effect was reloaded after the plan.
+  runs only from the next graph build, so a run may still hold the older one. The commit cannot tell which, so it writes
+  both latches; the new shape's `executed` signal (`ClientDesc::executed`) then makes it the running one. A shape claims
+  the frame only when its input and output are this frame's, and leaves the frame to FX11 when an effect was reloaded
+  after the plan.
 - **Failure.** A graph failure (`onFailed`), or an exception out of `Prepare` or the commit, returns Effects11 to FX11
   for the session: `[ORG] Effects11 returns to FX11 for the session: <what>`. After a failed commit the next `Prepare`
   unregisters the passes. Nothing is thrown into the engine's call.
