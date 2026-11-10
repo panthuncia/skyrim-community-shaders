@@ -125,8 +125,8 @@ namespace FrameAnchors
 	 *   values into the client's LatchBlock at the host's current frame slot, or queue uploads. Called for each of the client's
 	 *   anchors that runs, once per run.
 	 * - active: at the hook, before the epoch: whether the client has work this frame. When no client of an anchor is active, the
-	 *   anchor submits nothing. Null: always active. An inactive client's passes still run when another client keeps the epoch:
-	 *   a pass with nothing to do records nothing (its Prepare returns empty frame data).
+	 *   anchor submits nothing. Null: always active. An inactive client's passes still run when another client keeps the epoch,
+	 *   with its commit not called: put its per-run dispatches and draws behind its run gates (gates), which the run closes.
 	 * - onFailed: the graph failed and stopped. The client is unregistered; it returns to its D3D11 path.
 	 * - sharedConstants: the client's passes read CS's shared constant buffers (SharedConstants.h). Each of its anchors' epochs
 	 *   then writes their values at the hook and uploads them before the anchor's first pass. Such a client may register before
