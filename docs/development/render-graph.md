@@ -668,6 +668,28 @@ for now. As later phases move work out of DXVK:
 -   **The binding model negotiation** (`dxvkSetBindingModelCallback`) and `dxvkRequestDeviceFeatures` are already unused in the owned
     frame: the host decides.
 
+## Tripwire handles
+
+Phase 4 of [org-full-port.md](./org-full-port.md) puts these in the engine's `ID3D11*` and `IDXGISwapChain` fields once ORG
+owns what is behind them (`src/RenderGraph/Engine/Tripwire/Tripwire.h`). Nothing installs them yet: P4.2-P4.6 do, each
+for its creation functions.
+
+-   **What a handle does.** IUnknown works (atomic count, Release from any thread). `QueryInterface` answers only the
+    handle's interface chain. `GetDesc` returns the creation description, and debug names are kept. Every other method
+    logs its caller once per call site (module+offset, with the Address Library ID for the game) and fails with E_FAIL,
+    null or zeroed outputs, or zero.
+-   **Guest mode.** Made with a D3D11 object (`a_wrap`), the handle forwards every call and logs only the methods in its
+    `WatchSet`. Handle arguments are unwrapped on the way, so a wrapping device or context passes DXVK its own objects.
+    A handle given straight to DXVK crashes there: a port installs one only where its readers go through the handle.
+-   **Releases.** The last Release drops the wrapped object at once and queues the ORG resource and owner. The render
+    thread hands them to `ReleaseAfterD3D11` through `Tripwire::ServiceRetired` (installed per frame with the first
+    port).
+-   **Generated vtables.** `tools/generate-tripwire-interfaces.py` reads the SDK's `d3d11.h` and `dxgi.h` into
+    `TripwireInterfaces.inl`: each method's signature, its forwarding arguments and its failure outputs (from the SAL
+    annotations). `TripwireHandles.h` expands that into one class per interface. Every method is an `override`, and a
+    class with a missing slot stays abstract, so a list that does not match the SDK fails to compile. Run the script
+    again after an SDK change.
+
 ## The schedule inspector
 
 To see what the persistent graph executes (batches per queue, the barriers before each pass, and every cross-queue wait with its cause), use the menu's
@@ -692,6 +714,8 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 | `CS_ORG_IMGUI=1` | Draw CS's ImGui frames with the render graph's backend at the `Overlay` anchor once the graph is up ("ImGui on the graph"). Logs `[ORG] ImGui: drawn by the render graph` and `drawing onto ...`. |
 | `CS_ORG_HDR_DISPLAY=1` | HDR Display's output composite, its copy into the back buffer and the UI texture's clear as passes at the `HDROutput` anchor (`ORGHDRDisplay`), on frames HDR composites. Logs `[ORG] HDR Display runs on the render graph` and where the back buffer copy runs; on a failure `[ORG] HDR Display returns to D3D11`. Test command `dclf:hdr=0|1` forces Enable HDR on an SDR display. |
 | `CS_ORG_SCREENSHOT=1` | The Screenshot feature's captures (the hotkey, the menu button, `dclf:shot`) are copied into an ORG readback buffer by a pass at the `Capture` anchor, at the end of HDRDisplay's present chain, instead of a D3D11 staging texture (`src/Features/Screenshot/ORGScreenshot.cpp`). The frame never waits: the bytes reach the encoding worker when the copy's fence passes, and the worker crops them. Logs `[ORG] Screenshot: captures are read back through the render graph`; any failure (no anchor, a source that cannot be imported, a failed epoch, a submission at the capture point without the copy) copies that capture with D3D11. `CS_ORG_SCREENSHOT_COMPARE=1` also copies each graph capture with D3D11 from the same frame, saved as `<name>-d3d11.<ext>` beside it. |
+| `CS_ORG_TRIPWIRE_LOG=1` | Log every tripwire call site with its count ("Tripwire handles"): `[ORG] tripwire report (<reason>)`, a line per interface and one per site, every `CS_ORG_TRIPWIRE_LOG_INTERVAL` seconds (default 60, 0 = only at exit) when calls changed, and at exit. Without it each site still logs its first call (`[ORG] tripwire: <Interface>::<Method> from ...`). |
+| `CS_ORG_TRIPWIRE_SELFTEST=1` | At startup, make every handle type standalone and check refcounting, `QueryInterface`, `GetDesc`, debug names, forbidden calls (fail, zeroed outputs, counted), guest forwarding and unwrapping, Release from several threads, and caller naming. Logs `[ORG] tripwire self-test: PASS (<n> checks, 20 interfaces)` or a `FAIL` line per check. |
 | `CS_ORG_EPOCH_STATS=1` | Log render-thread CPU time per epoch (average and maximum every 600 epochs). |
 | `CS_ORG_ASYNC_EPOCHS=0` | Run the epochs synchronously. By default each epoch is prepared and recorded ahead on the graph host's thread, and the render thread only admits and submits ("Revisions and recordings" in `dclf-architecture.md`). |
 | `CS_ORG_IN_STREAM=0` | Enqueue the async epochs' batches behind DXVK's command list (`dxvkEnqueueInteropSubmission`) instead of running their graphics work inside it. A list such as `0,3` keeps only those epochs in the stream. |
