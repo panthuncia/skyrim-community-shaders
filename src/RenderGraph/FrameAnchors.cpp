@@ -345,6 +345,8 @@ namespace FrameAnchors
 				a_uav->GetDesc(&view);
 				desc.hasUAV = true;
 				desc.uavFormat = rhi::helpers::ToRHI(view.Format);
+				// A CPU-side UAV too, so a pass can clear it (AnchorPasses::Clear), as GraphResources' twins have.
+				desc.hasNonShaderVisibleUAV = true;
 			}
 			return desc;
 		}
