@@ -130,16 +130,25 @@ namespace ORGPostChain
 			SharedConstants::Bindings shared;
 		};
 
+		/** @brief One mip of a texture, for a pass that reads or writes that mip alone (other mips may be another use of the pass). */
+		org::ResourcePtrAndRange MipOf(const std::shared_ptr<org::Resource>& a_texture, std::uint32_t a_mip)
+		{
+			return org::Subresources(a_texture, org::Mip(a_mip, 1));
+		}
+
 		DeclaredBindings DeclareBindings(org::PassBuilder& a_builder, const std::vector<Bind>& a_bindings)
 		{
 			DeclaredBindings declared;
 			declared.views.resize(a_bindings.size());
 			for (std::size_t i = 0; i < a_bindings.size(); ++i) {
 				const auto& bind = a_bindings[i];
+				const bool whole = bind.mip == kAllMips;
 				if (bind.kind == Bind::Kind::Srv)
-					declared.views[i] = a_builder.ShaderResource(bind.resource).View();
+					declared.views[i] = whole ? a_builder.ShaderResource(bind.resource).View() :
+					                            a_builder.ShaderResource(MipOf(bind.resource, bind.mip), org::SrvView{ .mip = bind.mip }).View();
 				else if (bind.kind == Bind::Kind::Uav)
-					declared.views[i] = a_builder.UnorderedAccess(bind.resource).View();
+					declared.views[i] = whole ? a_builder.UnorderedAccess(bind.resource).View() :
+					                            a_builder.UnorderedAccess(MipOf(bind.resource, bind.mip), org::UavView{ .mip = bind.mip }).View();
 			}
 			if (ReadsShared(a_bindings))
 				declared.shared = SharedConstants::Declare(a_builder);
@@ -240,7 +249,10 @@ namespace ORGPostChain
 
 			DrawBindings Declare(org::PassBuilder& a_builder)
 			{
-				return { a_builder.RenderTarget(spec->target.graph).View(), DeclareBindings(a_builder, spec->bindings) };
+				const auto& target = spec->target;
+				auto view = target.mip == kAllMips ? a_builder.RenderTarget(target.graph).View() :
+				                                     a_builder.RenderTarget(MipOf(target.graph, target.mip), org::RtvView{ .mip = target.mip }).View();
+				return { view, DeclareBindings(a_builder, spec->bindings) };
 			}
 
 			void Revision(std::vector<std::uint64_t>& a_out) const
@@ -430,12 +442,17 @@ namespace ORGPostChain
 		return CreateImage(a_name, a_format, a_bindFlags, shape.width, shape.height);
 	}
 
-	Image Builder::CreateImage(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags, UINT a_width, UINT a_height)
+	Image Builder::CreateMipChain(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags, UINT a_mips)
+	{
+		return CreateImage(a_name, a_format, a_bindFlags, shape.width, shape.height, a_mips);
+	}
+
+	Image Builder::CreateImage(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags, UINT a_width, UINT a_height, UINT a_mips)
 	{
 		D3D11_TEXTURE2D_DESC desc{};
 		desc.Width = a_width;
 		desc.Height = a_height;
-		desc.MipLevels = 1;
+		desc.MipLevels = (std::max)(a_mips, 1u);
 		desc.ArraySize = 1;
 		desc.Format = a_format;
 		desc.SampleDesc = { 1, 0 };
@@ -485,9 +502,25 @@ namespace ORGPostChain
 	std::shared_ptr<const RasterProgram> Builder::Raster(std::string_view a_source, std::uint32_t a_words, std::vector<DXGI_FORMAT> a_targets,
 		std::vector<std::pair<std::string, std::string>> a_defines, std::wstring a_entry)
 	{
-		auto key = ProgramKey(a_source, a_entry, a_words, a_defines);
+		std::vector<RasterProgram::Target> targets;
 		for (const auto format : a_targets)
-			key += std::format("|f{}", static_cast<int>(format));
+			targets.push_back({ .format = rhi::helpers::ToRHI(format) });
+		return RasterTargets(a_source, a_words, std::move(targets), std::move(a_defines), std::move(a_entry));
+	}
+
+	std::shared_ptr<const RasterProgram> Builder::RasterTargets(std::string_view a_source, std::uint32_t a_words, std::vector<RasterProgram::Target> a_targets,
+		std::vector<std::pair<std::string, std::string>> a_defines, std::wstring a_entry)
+	{
+		auto key = ProgramKey(a_source, a_entry, a_words, a_defines);
+		for (const auto& target : a_targets) {
+			const auto& blend = target.blend;
+			key += std::format("|f{}", static_cast<int>(target.format));
+			if (blend.enable)
+				key += std::format("b{},{},{},{},{},{},{}", static_cast<int>(blend.srcColor), static_cast<int>(blend.dstColor), static_cast<int>(blend.colorOp),
+					static_cast<int>(blend.srcAlpha), static_cast<int>(blend.dstAlpha), static_cast<int>(blend.alphaOp), static_cast<int>(blend.writeMask));
+			else if (blend.writeMask != rhi::ColorWriteEnable::All)
+				key += std::format("m{}", static_cast<int>(blend.writeMask));
+		}
 		if (const auto found = programs.raster.find(key); found != programs.raster.end())
 			return found->second;
 		RasterProgram::Desc desc{};
@@ -495,8 +528,7 @@ namespace ORGPostChain
 		desc.pixelEntry = std::move(a_entry);
 		desc.constantWords = a_words;
 		desc.defines = ProgramDefines(std::move(a_defines), "PSHADER");
-		for (const auto format : a_targets)
-			desc.targets.push_back({ .format = rhi::helpers::ToRHI(format) });
+		desc.targets = std::move(a_targets);
 		auto program = RasterProgram::Load(programs.device, desc);
 		if (!program) {
 			Fail(std::format("{} did not build", a_source));
@@ -529,6 +561,13 @@ namespace ORGPostChain
 		return { .width = (std::min)(CoveredPixels(shape.dynamicWidth), shape.width), .height = (std::min)(CoveredPixels(shape.dynamicHeight), shape.height) };
 	}
 
+	RasterProgram::Viewport Builder::MipViewport(std::uint32_t a_mip) const
+	{
+		if (a_mip == kAllMips)
+			return FullViewport();
+		return { .width = (std::max)(shape.width >> a_mip, 1u), .height = (std::max)(shape.height >> a_mip, 1u) };
+	}
+
 	namespace
 	{
 		bool BindingsValid(const std::vector<Bind>& a_bindings)
@@ -555,7 +594,7 @@ namespace ORGPostChain
 		spec->program = std::move(a_draw.program);
 		spec->bindings = std::move(a_draw.bindings);
 		spec->target = std::move(a_draw.target);
-		spec->viewport = a_draw.viewport.value_or(FullViewport());
+		spec->viewport = a_draw.viewport.value_or(MipViewport(spec->target.mip));
 		spec->latch = state.latch;
 		auto gate = state.gate;
 		state.passes.push_back({ .name = spec->name,
@@ -601,8 +640,8 @@ namespace ORGPostChain
 
 	void Builder::Copy(std::string_view a_name, const Image& a_source, const Image& a_target)
 	{
-		if (!a_source || !a_target || a_source.format != a_target.format) {
-			Fail(std::format("{}: the copy's images are missing or differ in format", a_name));
+		if (!a_source || !a_target || a_source.format != a_target.format || a_source.mip != kAllMips || a_target.mip != kAllMips) {
+			Fail(std::format("{}: the copy's images are missing, differ in format, or are single mips", a_name));
 			return;
 		}
 		auto spec = std::make_shared<CopySpec>(CopySpec{ a_source, a_target, shape.width, shape.height });
