@@ -8,6 +8,7 @@
 
 namespace org
 {
+	class ExternalTextureResource;
 	class RenderGraph;
 	class Resource;
 }
@@ -70,6 +71,48 @@ namespace GraphResources
 		Lifetime lifetime = Lifetime::Transient;
 		Export d3d11 = Export::None;
 	};
+
+	/**
+	 * @brief What ExportTexture makes an image from: the D3D11 texture's shape and format, and the format of each view the graph
+	 * makes of it. DXGI_FORMAT_UNKNOWN leaves that view out.
+	 *
+	 * The texture's format may be typeless when a view gives the typed one, as the engine's depth targets do (R24G8_TYPELESS with a
+	 * D24_UNORM_S8_UINT DSV). The image is made in the DSV's format when there is one, else in the texture's own.
+	 */
+	struct ExportDesc
+	{
+		D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+		UINT width = 0;
+		UINT height = 0;
+		UINT depthOrArraySize = 1;  // the depth of a 3D texture, the array size of a 2D one (six per cube)
+		UINT mips = 1;              // 0: the whole chain, as in D3D11
+		UINT samples = 1;
+		DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+		UINT bindFlags = 0;  // D3D11_BIND_*
+		UINT miscFlags = 0;  // only D3D11_RESOURCE_MISC_TEXTURECUBE
+		DXGI_FORMAT srv = DXGI_FORMAT_UNKNOWN;
+		DXGI_FORMAT rtv = DXGI_FORMAT_UNKNOWN;
+		DXGI_FORMAT uav = DXGI_FORMAT_UNKNOWN;
+		DXGI_FORMAT dsv = DXGI_FORMAT_UNKNOWN;
+	};
+
+	/** @brief An exported image: the graph's texture and the D3D11 texture DXVK made of the same memory. Both null on failure. */
+	struct ExportedTexture
+	{
+		std::shared_ptr<org::ExternalTextureResource> graph;
+		winrt::com_ptr<ID3D11Resource> d3d11;
+		std::uint64_t image = 0;  // the VkImage, for readers that hold DXVK's description of it
+	};
+
+	/**
+	 * @brief The exported-texture path of the twins, for an owner that makes its own D3D11 views (the engine's render targets,
+	 * RenderGraph/Engine/Targets). A BasicRHI image the graph sees as a host-owned texture whose home is the layout DXVK rests it in,
+	 * wrapped for D3D11 by the DXVK fork (dxvkCreateTextureFromVkImage).
+	 *
+	 * The caller keeps the image alive while D3D11 may use it: it hands the graph resource to RenderGraphRuntime::ReleaseAfterD3D11
+	 * once the D3D11 texture and its views are gone. Render thread, with the runtime active. Logged and empty on any failure.
+	 */
+	ExportedTexture ExportTexture(const ExportDesc& a_desc, const std::string& a_name);
 
 	/** @brief What every twin shares: the graph resource, its name and its exported views. */
 	class Resource
