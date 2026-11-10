@@ -589,6 +589,28 @@ How the anchors know: every `Publish` of the clients has a serial, each client r
 they are now, and an anchor graph's build records the serial it was made from. A run's commit reads that serial, so it compares
 two numbers instead of watching passes prepare.
 
+### Pass helpers
+
+`src/RenderGraph/AnchorPasses.h` makes a client's common passes from plain descriptions, generalised from Post Processing's chain
+builder with the anchor, the pass-name prefix and the order keys as parameters:
+
+-   `Draw`: a fullscreen pixel stage into one target or one mip of it (`RasterProgram`), optionally through a run gate entry.
+-   `Dispatch`: a compute program with fixed group counts, a run gate entry, or group counts at a latch offset.
+-   `Copy`: a whole texture's first mip into another of the same size and format.
+-   `Clear`: a UAV clear to a float or uint value, a one-shot pass by default.
+-   `Upload`: a staging buffer into one subresource of a texture, always a one-shot pass (a heightmap, a lookup table).
+-   `Bind` lists a pass's push block in the shader's resource order: `Srv`, `Uav` (whole or one mip), `Handle`, `Latch` (an offset
+    into the client's latch), `Shared` (the shared constants; `ReadsSharedConstants` then tells the client to set
+    `sharedConstants`).
+
+`Builder::Take` returns the `PassDesc`s for `ClientDesc::passes`. Each pass's revision is its immutable spec, so its recording
+is kept; per-frame values reach it only through the latch and the gate. Programs add the D3D11 defines themselves ("Raster
+programs", Defines); `AnchorPasses::Defines` widens a port's own list.
+
+`ComputeProgram` owns its dispatch command signature (`DispatchIndirect`, from a buffer or a latch region of the frame slot),
+and `RasterProgram` its draw signature (`DrawDesc::indirect`). `ShaderBindings::SamplerFromD3D11` (and `CreateSampler` of a
+`D3D11_SAMPLER_DESC`) is the one D3D11-to-rhi sampler converter.
+
 ## Raster programs
 
 `RasterProgram` (`src/RenderGraph/RasterProgram.h`) is `ComputeProgram`'s raster twin, for fullscreen vertex and pixel shader
