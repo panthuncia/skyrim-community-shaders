@@ -1189,9 +1189,9 @@ struct ORGFxRuntime::Impl
 			// 8. enbeffectpostpass.fx, from the SDR result into the other one, with Scratch as its temp.
 			if (run(Fx::PostPass)) {
 				const std::string_view other = sdr == "SDRTemp" ? "SDRTemp2" : "SDRTemp";
-				const Res original = Tex(sdr);
-				const auto chain = Sequence(Fx::PostPass, impl.EffectOf(Fx::PostPass).fx11->GetSelectedTechnique(), original, other, "Scratch",
-					{ { "TextureOriginal", original } });
+				const Res postPassInput = Tex(sdr);
+				const auto chain = Sequence(Fx::PostPass, impl.EffectOf(Fx::PostPass).fx11->GetSelectedTechnique(), postPassInput, other, "Scratch",
+					{ { "TextureOriginal", postPassInput } });
 				if (chain.executed && chain.inOutput)
 					sdr = other;
 				else if (chain.executed && chain.inTemp)
