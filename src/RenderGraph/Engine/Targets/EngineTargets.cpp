@@ -1,17 +1,16 @@
-#include "RenderGraph/Engine/Targets/EngineTargets.h"
-
-#include "RenderGraph/Switches.h"
-
 #if defined(CS_HAS_RENDER_GRAPH)
 
 // volk must precede every Vulkan header in this translation unit.
 #	include <rhi_interop_vulkan.h>
+
+#	include "RenderGraph/Engine/Targets/EngineTargets.h"
 
 #	include "Globals.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/Switches.h"
 #	include "Utils/D3D.h"
 
 #	include <Resources/ExternalTextureResource.h>
@@ -1018,6 +1017,8 @@ namespace RenderGraph::Engine::Targets
 }
 
 #else  // !CS_HAS_RENDER_GRAPH
+
+#	include "RenderGraph/Engine/Targets/EngineTargets.h"
 
 // Built without OpenRenderGraph: the engine makes every target with D3D11.
 namespace RenderGraph::Engine::Targets
