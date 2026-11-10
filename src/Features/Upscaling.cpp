@@ -13,6 +13,7 @@
 #include "RenderGraph/Engine/GuestDevice.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/Switches.h"
 #include "Upscaling/FrameGenController.h"
 #include "Upscaling/ORGUpscaling.h"
 #include "Upscaling/Streamline.h"
@@ -1746,10 +1747,7 @@ bool Upscaling::IsDisplayUnsettled()
 {
 	// CS_FG_DISPLAY_SUSPEND=1: frame generation unloads before a monitor leaves the desktop (the display reports off about 10 s ahead)
 	// and reloads once it settles. Off by default: it was added for a freeze that turned out to be a lock in DXVK's D3D11Initializer.
-	static const bool s_enabled = [] {
-		char v[2] = {};
-		return GetEnvironmentVariableA("CS_FG_DISPLAY_SUSPEND", v, sizeof(v)) && v[0] == '1';
-	}();
+	static const bool s_enabled = Switches::On("CS_FG_DISPLAY_SUSPEND");
 	if (!s_enabled)
 		return false;
 	static constexpr std::uint64_t kSettleMilliseconds = 5000;
@@ -1770,10 +1768,7 @@ bool Upscaling::IsWindowUnusable()
 
 	// CS_UPSCALE_UNFOCUSED=1: unattended test runs on another monitor keep upscaling (and HDR, frame generation) while another
 	// process has the foreground; minimized and size/move still suspend.
-	static const bool s_ignoreFocus = [] {
-		char v[2] = {};
-		return GetEnvironmentVariableA("CS_UPSCALE_UNFOCUSED", v, sizeof(v)) && v[0] == '1';
-	}();
+	static const bool s_ignoreFocus = Switches::On("CS_UPSCALE_UNFOCUSED");
 
 	return IsWindowMinimized() ||
 	       (!s_ignoreFocus && s_windowUnfocused.load(std::memory_order_relaxed)) ||
