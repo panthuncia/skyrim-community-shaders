@@ -142,6 +142,9 @@ struct DoF : public PostProcessFeature
 	virtual void Draw(TextureInfo&) override;
 	void UpdateProceduralBokehSamples(int bladeCount, float bladeRoundness, bool force = false);
 
+	// C4324: the aligned constants pad the struct.
+#pragma warning(push)
+#pragma warning(disable: 4324)
 	/** @brief One frame of DoF as both paths draw it (PrepareFrame). */
 	struct Frame
 	{
@@ -152,6 +155,7 @@ struct DoF : public PostProcessFeature
 		int customShapeIndex = 0;     // the custom aperture, when constants.BokehMode is 1
 		DoFCB constants{};
 	};
+#pragma warning(pop)
 
 	/**
 	 * @brief This frame's lens, focus and bokeh: the Cinematic Camera or the settings, the focus target, the procedural sample table
