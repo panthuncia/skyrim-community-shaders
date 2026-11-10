@@ -12,6 +12,7 @@
 #include "LightLimitFix/Common.h"
 #include "PostProcessing.h"
 #include "PostProcessingMode.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "Utils/ColorSpace.h"
 #include "Utils/Game.h"
@@ -173,9 +174,10 @@ void LinearLighting::ClearShaderCache()
 	workingSunlight = nullptr;
 	const float clear[4]{};
 	auto& reflections = globals::game::renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
+	// The faces can be tripwire handles (CS_ORG_ENGINE_TARGET_HANDLES): DXVK's context takes the objects they wrap.
 	for (auto* rtv : reflections.cubeSideRTV)
 		if (rtv)
-			globals::d3d::context->ClearRenderTargetView(rtv, clear);
+			globals::d3d::context->ClearRenderTargetView(RenderGraph::Engine::Tripwire::Unwrap(rtv), clear);
 }
 
 std::vector<std::pair<std::string_view, std::string_view>> LinearLighting::GetCommonShaderDefines()
