@@ -427,6 +427,12 @@ void TruePBR::DebugReadback(ID3D11ShaderResourceView* a_noise)
 	}();
 	if (!readback || glintsReadbackLogged || !a_noise)
 		return;
+	// The graph fills it in an epoch the D3D11 copy below does not wait for: read it well after the fill.
+	static std::uint32_t firstFrame = UINT32_MAX;
+	if (firstFrame == UINT32_MAX)
+		firstFrame = globals::state->frameCount;
+	if (ORGGlintsNoise::Get().Active() && globals::state->frameCount < firstFrame + 60)
+		return;
 	glintsReadbackLogged = true;
 	const auto means = Util::VolumeMeans(a_noise);
 	if (!means) {
