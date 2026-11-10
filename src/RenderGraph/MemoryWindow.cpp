@@ -6,6 +6,7 @@
 #	include "RenderGraph/MemoryWindow.h"
 
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "Vram/OrgMemory.h"
 #	include "Vram/VramLedger.h"
 
 #	include <DebugUI/MemoryIntrospectionWidget.h>
@@ -200,9 +201,22 @@ namespace RenderGraphMemory
 			name.bytes += record.bytes;
 			++name.count;
 		}
-		return fmt::format("render graph memory (ORG-tracked): {:.1f} MB device-local in {} resources ({:.1f} MB more in host memory: upload pages, "
-						   "readbacks); device-local by family: {}; by name: {}",
+		auto line = fmt::format("render graph memory (ORG-tracked): {:.1f} MB device-local in {} resources ({:.1f} MB more in host memory: upload pages, "
+										"readbacks); device-local by family: {}; by name: {}",
 			MiB(device), deviceCount, MiB(host), Largest(families, a_families), Largest(names, a_names));
+		// CS_ORG_VRAM_SOURCE=org: the allocator's owner labels too, which include what the host allocates outside tracked resources.
+		if (Vram::Org::Selected()) {
+			std::unordered_map<std::string, Sum> owners;
+			std::uint64_t spilled = 0;
+			for (const auto& owner : Vram::Org::ReadOwners()) {
+				auto& sum = owners[Vram::Org::OwnerPath(owner.label)];
+				sum.bytes += owner.videoBytes;
+				sum.count += owner.count;
+				spilled += owner.spilledBytes;
+			}
+			line += fmt::format("; allocator video memory by owner: {}; spilled to system memory {:.1f} MB", Largest(owners, a_families), MiB(spilled));
+		}
+		return line;
 	}
 }
 

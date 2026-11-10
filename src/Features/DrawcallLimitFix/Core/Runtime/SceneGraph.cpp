@@ -42,7 +42,7 @@ namespace DCLF::Runtime
 
 		struct TextureWindowInput
 		{
-			std::function<void()> build;
+			std::function<std::shared_ptr<const org::async::GpuSubmissionSet>()> build;
 		};
 		struct TextureWindowBuilt
 		{
@@ -85,11 +85,12 @@ namespace DCLF::Runtime
 		textureGates(std::make_unique<TextureGates>())
 	{
 		// A window: the file's read and the texture's creation, which block, on the streaming domain. A failed read still completes: its
-		// gate opens on a texture that reads zero rather than wait for ever.
+		// gate opens on a texture that reads zero rather than wait for ever. A window the render graph uploads is GPU ready once its copy
+		// pass was submitted (the build's submission set), so no frame waits for it.
 		graph->RegisterTypedProducer<TextureWindowInput, TextureWindowBuilt>(kTextureWindow, SceneExecutor::Streaming.lane, SceneExecutor::Streaming.domain, "DCLF texture window",
 			[](const Graph::ArtifactBuildContext&, std::shared_ptr<const TextureWindowInput> a_input) {
-				a_input->build();
-				return Graph::ArtifactBuildResult::Ready(org::async::ArtifactPayload::Make(std::make_shared<const TextureWindowBuilt>()));
+				auto pending = a_input->build();
+				return Graph::ArtifactBuildResult::Ready(org::async::ArtifactPayload::Make(std::make_shared<const TextureWindowBuilt>()), std::move(pending));
 			});
 		// A gate runs its request when its requirement, the base window, is ready: the wake is the graph's.
 		graph->RegisterTypedProducer<TextureGateInput, TextureGateRan>(kTextureGate, SceneExecutor::Preparation.lane, SceneExecutor::Preparation.domain, "DCLF texture gate",
@@ -115,7 +116,7 @@ namespace DCLF::Runtime
 			SceneExecutor::Preparation.domain, "DCLF payload part", std::move(hooks));
 	}
 
-	bool SceneGraph::PostTextureWindow(std::uint64_t a_texture, std::uint64_t a_revision, std::function<void()> a_build)
+	bool SceneGraph::PostTextureWindow(std::uint64_t a_texture, std::uint64_t a_revision, std::function<std::shared_ptr<const org::async::GpuSubmissionSet>()> a_build)
 	{
 		Graph::ArtifactIntent intent;
 		intent.key = Graph::ArtifactKey{ kTextureWindow, a_texture, 0 };
@@ -142,7 +143,7 @@ namespace DCLF::Runtime
 		Graph::ArtifactIntent intent;
 		intent.key = Graph::ArtifactKey{ kTextureGate, textureGates->ids.fetch_add(1, std::memory_order_relaxed) + 1, 0 };
 		intent.desiredRevision = 1;
-		intent.requirements.push_back(org::async::ReadyGateAtLeast(Graph::ArtifactKey{ kTextureWindow, a_texture, 0 }, a_revision));
+		intent.requirements.push_back(org::async::ReadyGateAtLeast(Graph::ArtifactKey{ kTextureWindow, a_texture, 0 }, a_revision, org::async::ArtifactReadiness::GpuReady));
 		intent.input = org::async::ArtifactPayload::Make(std::make_shared<const TextureGateInput>(TextureGateInput{ std::move(a_run) }));
 		intent.requestFingerprint = intent.key.primaryID;
 		return static_cast<bool>(graph->PostRequest(std::move(intent), false));

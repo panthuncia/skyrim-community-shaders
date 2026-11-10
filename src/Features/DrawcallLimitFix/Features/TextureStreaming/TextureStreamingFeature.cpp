@@ -162,6 +162,23 @@ namespace DCLF::Features::Streaming
 			}
 		}
 
+		/**
+		 * @brief A window build's readiness for the state graph: null when the window is in place (a D3D11 window), else done once the render
+		 * graph's copy pass for it was submitted, which wakes the graph (TextureStreaming::PendingWindow).
+		 */
+		std::shared_ptr<const org::async::GpuSubmissionSet> Readiness(std::shared_ptr<TextureStreaming::PendingWindow> a_pending)
+		{
+			if (!a_pending)
+				return nullptr;
+			auto set = std::make_shared<org::async::GpuSubmissionSet>();
+			set->isSubmitted = [] { return true; };
+			set->isComplete = [a_pending] { return a_pending->Done(); };
+			set->subscribe = [a_pending](std::function<void()> a_wake) { a_pending->Subscribe(std::move(a_wake)); };
+			set->describe = [] { return std::string("texture window upload (render graph)"); };
+			set->completionNotificationsAreAuthoritative = true;
+			return set;
+		}
+
 		void Install(Api::InstallContext& a_context)
 		{
 			const auto master = a_context.RegisterSwitch({ .name = "CS_DCLF_TEX_STREAM", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Zero, .description = "0: the game's textures stay whole, not shells with streamed mip windows; read at the first texture load", .after = "CS_DCLF_GRASS" });
@@ -179,7 +196,7 @@ namespace DCLF::Features::Streaming
 			a_context.RegisterCommitHook({ .name = "texture-streaming", .commit = &Commit });
 
 			TextureStreaming::SetScheduler({ [](TextureStreaming::TextureId a_id, std::uint64_t a_revision, std::uint32_t a_top) {
-												SceneScheduler::Graph().PostTextureWindow(a_id, a_revision, [a_id, a_top] { TextureStreaming::BuildWindow(a_id, a_top); });
+												SceneScheduler::Graph().PostTextureWindow(a_id, a_revision, [a_id, a_top] { return Readiness(TextureStreaming::BuildWindowAsync(a_id, a_top)); });
 											},
 				[](TextureStreaming::TextureId a_id) { SceneScheduler::Graph().RetireTextureWindow(a_id); } });
 			TextureStreaming::SetWindowListener([](const ID3D11ShaderResourceView* a_shell) { GpuTextures::Get().NoteWindowChanged(a_shell); });

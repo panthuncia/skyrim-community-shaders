@@ -1,5 +1,6 @@
 #include "TextureStreaming.h"
 
+#include "TextureStreaming/ORGWindows.h"
 #include "TextureStreaming/Policy.h"
 #include "TextureStreaming/Streamer.h"
 
@@ -95,6 +96,16 @@ void TextureStreamingFeature::LoadSettings(json& o_json)
 void TextureStreamingFeature::SaveSettings(json& o_json)
 {
 	o_json = settings;
+}
+
+void TextureStreamingFeature::PostPostLoad()
+{
+	TextureStreaming::ORG::Reserve();
+}
+
+void TextureStreamingFeature::Reset()
+{
+	TextureStreaming::ORG::FrameTick();
 }
 
 void TextureStreamingFeature::RestoreDefaultSettings()

@@ -10,6 +10,7 @@
 #include "Vram/Attribution.h"
 #include "Vram/Debug.h"
 #include "Vram/DxvkMemory.h"
+#include "Vram/OrgMemory.h"
 
 #if defined(CS_HAS_RENDER_GRAPH)
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -331,16 +332,83 @@ namespace Vram
 			return heaps;
 		}
 
+		/**
+		 * @brief CS_ORG_VRAM_SOURCE=org: the heaps are BasicRHI's two segment groups (index 0 video memory, 1 system memory), with DXVK's
+		 * totals summed into them. DXVK's rows move to the group of their heap. False when BasicRHI cannot report, and the DXVK heaps stay.
+		 */
+		bool UseOrgHeaps(Snapshot& a_snapshot)
+		{
+			const auto org = Org::ReadHeaps();
+			if (!org.local.valid)
+				return false;
+			std::vector<Heap> heaps(2);
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				const auto& segment = index == 0 ? org.local : org.system;
+				auto& heap = heaps[index];
+				heap.index = index;
+				heap.deviceLocal = index == 0;
+				heap.hasBudget = segment.valid;
+				heap.size = segment.capacity ? segment.capacity : segment.budget;
+				heap.usage = segment.usage;
+				heap.budget = segment.budget;
+				heap.usageAtBudget = segment.usageAtBudget;
+			}
+			for (const auto& dxvk : a_snapshot.heaps) {
+				auto& heap = heaps[dxvk.deviceLocal ? 0 : 1];
+				heap.dxvkAllocated += dxvk.dxvkAllocated;
+				heap.dxvkUsed += dxvk.dxvkUsed;
+				heap.dxvkCache += dxvk.dxvkCache;
+				heap.dxvkOrgRetired += dxvk.dxvkOrgRetired;
+			}
+			for (auto& row : a_snapshot.rows)
+				if (row.heapIndex != ~0u)
+					row.heapIndex = row.deviceLocal ? 0u : 1u;
+			a_snapshot.heaps = std::move(heaps);
+			return true;
+		}
+
+		/**
+		 * @brief ORG's allocator by owner label, as rows. A label is set only by host code that allocates outside ORG's tracked resources
+		 * (org::memory::CreateAllocatedResource: texture streaming's windows), so a labelled row counts: no tracked row has those bytes.
+		 * The unlabelled row is ORG's own memory, which the tracked rows and the "not tracked" residual already account for: listed only.
+		 */
+		void AppendOrgOwners(OrgPart& a_part)
+		{
+			for (const auto& owner : Org::ReadOwners()) {
+				const bool labelled = !owner.label.empty();
+				for (const bool video : { true, false }) {
+					const auto bytes = video ? owner.videoBytes : owner.systemBytes;
+					if (!bytes)
+						continue;
+					Row row;
+					row.owner = Org::OwnerPath(owner.label);
+					row.name = fmt::format("{} ({} allocations{})", row.owner, owner.count, video ? "" : ", system memory");
+					row.type = "Allocation";
+					row.source = "ORG";
+					row.category = "ORG/Allocator";
+					row.bytes = bytes;
+					row.deviceLocal = video;
+					if (!video)
+						row.heapIndex = 1;  // system memory (UseOrgHeaps); video rows go to heap 0 with ORG's other rows
+					if (!video && owner.spilledBytes)
+						row.detail = fmt::format("{:.1f} MB spilled from video memory", MiB(owner.spilledBytes));
+					row.flags = labelled ? 0u : (kRowNotCounted | kRowInternal);
+					a_part.rows.push_back(std::move(row));
+				}
+			}
+		}
+
 		// From the driver's usage of the device-local heaps down to resources. Each total's children add up to it, with the part
 		// nothing accounts for as an explicit residual.
 		std::vector<Line> Reconcile(const Snapshot& a_snapshot, const OrgPart& a_org)
 		{
 			std::uint64_t usage = 0, allocated = 0, used = 0, cache = 0, retired = 0;
-			bool anyHeap = false;
+			bool anyHeap = false, atBudget = false;
 			for (const auto& heap : a_snapshot.heaps) {
 				if (!heap.deviceLocal)
 					continue;
 				anyHeap = true;
+				atBudget = atBudget || heap.usageAtBudget;
 				usage += heap.usage;
 				allocated += heap.dxvkAllocated;
 				used += heap.dxvkUsed;
@@ -385,7 +453,8 @@ namespace Vram
 
 			if (anyHeap)
 				lines.push_back({ "Device-local heap usage (driver)", usage, Kind::Total, 0,
-					"VK_EXT_memory_budget's process-wide usage of the device-local heaps" });
+					atBudget ? "at the driver's budget: AMD reports no more than the budget, so the real usage may be higher" :
+							   "VK_EXT_memory_budget's process-wide usage of the device-local heaps" });
 
 			if (a_snapshot.hasDxvk) {
 				lines.push_back({ "DXVK allocated", allocated, Kind::Total, 1, "VkDeviceMemory in DXVK's chunks and dedicated allocations" });
@@ -445,6 +514,9 @@ namespace Vram
 			snapshot.debug = Debug::Enabled();
 			if (org.present)
 				ReadOrgLedger(org);
+			snapshot.orgSource = Org::Selected() && UseOrgHeaps(snapshot);
+			if (snapshot.orgSource && org.present)
+				AppendOrgOwners(org);
 
 			// ORG's rows carry no heap index: its device-local memory goes to the largest device-local heap.
 			std::uint32_t orgHeap = ~0u;
@@ -563,10 +635,11 @@ namespace Vram
 		const auto snapshot = Current(0.0);
 		nlohmann::json json;
 		json["dxvkSerial"] = snapshot.dxvkSerial;
+		json["heapSource"] = snapshot.orgSource ? "org" : "dxvk";
 		for (const auto& heap : snapshot.heaps)
 			json["heaps"].push_back({ { "index", heap.index }, { "deviceLocal", heap.deviceLocal }, { "size", heap.size }, { "usage", heap.usage },
 				{ "budget", heap.budget }, { "dxvkAllocated", heap.dxvkAllocated }, { "dxvkUsed", heap.dxvkUsed }, { "dxvkCache", heap.dxvkCache },
-				{ "dxvkOrgRetired", heap.dxvkOrgRetired }, { "attributed", heap.attributed } });
+				{ "dxvkOrgRetired", heap.dxvkOrgRetired }, { "attributed", heap.attributed }, { "usageAtBudget", heap.usageAtBudget } });
 		for (const auto& line : snapshot.reconciliation)
 			json["reconciliation"].push_back({ { "label", line.label }, { "bytes", line.bytes }, { "depth", line.depth },
 				{ "kind", static_cast<int>(line.kind) }, { "note", line.note } });

@@ -64,6 +64,7 @@ namespace DCLF
 				logger::info("[TextureStreaming] left to the engine: {} loads, {} of them failed", stats.passedThrough, stats.engineFailures);
 				logger::info("[TextureStreaming] builds: {} first windows (read {} ms, create {} ms in all), {} later (read {} ms, create {} ms in all)", stats.baseBuilds, stats.baseReadMicroseconds / 1000,
 					stats.baseCreateMicroseconds / 1000, stats.otherBuilds, stats.otherReadMicroseconds / 1000, stats.otherCreateMicroseconds / 1000);
+				logger::info("[TextureStreaming] render graph windows: {} uploaded in {} copy passes, {} built on D3D11 instead", stats.graphWindows, stats.graphBatches, stats.graphRetried);
 				return true;
 			}
 			if (a_command.rfind("dclf:tex-force=", 0) == 0) {

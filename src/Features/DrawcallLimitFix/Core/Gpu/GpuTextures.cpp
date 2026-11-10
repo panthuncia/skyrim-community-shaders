@@ -193,6 +193,7 @@ namespace DCLF
 			std::uint64_t cookie = 0, storageSerial = 0;
 			bool pinned = false;
 			const void* window = nullptr;  // a streamed texture's: the window imported (an identity)
+			std::shared_ptr<const void> graphWindow;  // a streamed window the render graph owns: its own descriptor is the binding
 			std::uint32_t sourceTag = ~0u;  // who first asked for it (ResolveBinding's tags), for DescribeSuperseded
 			std::weak_ptr<ImportedBacking> backing;
 			// The fields above are the importing thread's until it stores the state (release); a lookup reads it first.
@@ -201,7 +202,7 @@ namespace DCLF
 			~Entry()
 			{
 				if (auto owner = registry.lock()) {
-					if (binding)
+					if (binding || graphWindow)
 						owner->liveCount.fetch_sub(1, std::memory_order_relaxed);
 					std::scoped_lock lock(owner->mutex);
 					if (const auto found = owner->entries.find(key); found != owner->entries.end() && found->second.serial == serial && !found->second.rejected)
@@ -483,6 +484,13 @@ namespace DCLF
 			winrt::com_ptr<ID3D11ShaderResourceView> window;
 			if (!StreamedWindow(a_entry, window))
 				return Reject::NotImage;
+			// A window the render graph owns (CS_ORG_TEXTURE_STREAMING): its own descriptor, read by index. Nothing of DXVK's to import.
+			if (TextureStreaming::GraphWindow graph; window && TextureStreaming::GraphWindowOf(a_entry.view.get(), window.get(), graph)) {
+				a_entry.graphWindow = std::move(graph.owner);
+				a_entry.index = graph.index;
+				NoteImported(window.get(), a_sourceTag, nullptr);
+				return Reject::None;
+			}
 			auto* view = window ? window.get() : a_entry.view.get();
 			D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
 			view->GetDesc(&viewDesc);

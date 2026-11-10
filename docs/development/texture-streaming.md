@@ -129,6 +129,14 @@ DWM, an editor and a browser open), and Windows did not take that back from them
 rest was in system memory whichever way it got there. An override that made DXVK treat the heap's size as its budget gave the same frame rate within
 noise (16.5 against 16.0 fps) and hid the overflow from DXVK's figures, so it was removed.
 
+### On the render graph
+
+With `CS_ORG_TEXTURE_STREAMING=1` a scheduled window is an ORG texture instead of a D3D11 one: ORG's allocator holds its memory,
+DXVK wraps it so the shell still names it for native binds, a one-shot copy pass at the Present anchor fills it, and Drawcall
+Limit Fix reads it by its own descriptor index. The window artifact is GPU ready once that pass was submitted, and the texture
+gate waits for that. The policy, the controller and the switches above are unchanged. Synchronous builds (the safety net) stay
+D3D11 windows, and the two kinds mix freely. Details: [p4/texture-streaming.md](./p4/texture-streaming.md).
+
 ## What carries over from BasicRenderer
 
 Whole-image mip windows with no sparse binding, upgrade settling, deferred retirement and artifact-gated readiness. Not its 4-mip steps,
