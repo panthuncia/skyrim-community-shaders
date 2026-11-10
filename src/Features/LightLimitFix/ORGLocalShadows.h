@@ -5,6 +5,7 @@
 #include <d3d11.h>
 #include <memory>
 #include <span>
+#include <string_view>
 
 /**
  * @brief Light Limit Fix's local shadow cache on the render graph (CS_ORG_LLF_SHADOWS=1).
@@ -12,7 +13,8 @@
  * At the EarlyPrepass anchor, right after the engine rendered its shadow maps, one compute pass copies this frame's freshly
  * rendered engine slices into the cache (LocalShadowCopyCS, built for ORG), and one copy pass moves the slots' projection data
  * into the data buffer. Both are Persistent graph resources exported to D3D11, so the engine's pixel shaders still bind them at
- * t102 (data) and t103 (cache).
+ * t102 (data) and t103 (cache). Both are also published (PublishedResources, kDataId and kCacheId): Drawcall Limit Fix's colour passes
+ * read them through the graph.
  *
  * Every per-frame value (which slices to copy, the slots' data) goes through a LatchBlock that the anchor's commit writes, so
  * the passes' recordings stay the same from frame to frame.
@@ -22,6 +24,10 @@
 class ORGLocalShadows
 {
 public:
+	/** @brief The published ids (PublishedResources), the twins' names: the slot data (t102) and the cache (t103). */
+	static constexpr std::string_view kDataId = "LightLimitFix::LocalShadowData";
+	static constexpr std::string_view kCacheId = "LightLimitFix::LocalShadowCache";
+
 	/** @brief The most engine slices one frame copies (LightLimitFix::ENGINE_SHADOW_MAP_SLICES). */
 	static constexpr std::uint32_t kMaxCopies = 8;
 
@@ -56,7 +62,7 @@ public:
 	 */
 	bool Setup(const Desc& a_desc);
 
-	/** @brief Drops the client and its resources (D3D11 views first, the graph's after D3D11's last use). */
+	/** @brief Drops the client and its resources (D3D11 views first, the graph's after D3D11's last use), and withdraws them. */
 	void Release();
 
 	/** @brief Whether the cache is set up and the render graph still runs it. */

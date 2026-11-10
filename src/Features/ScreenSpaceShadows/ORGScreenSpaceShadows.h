@@ -2,6 +2,7 @@
 
 #include <d3d11.h>
 #include <memory>
+#include <string_view>
 
 /**
  * @brief Screen Space Shadows on the render graph (CS_ORG_SCREEN_SPACE_SHADOWS=1).
@@ -12,7 +13,8 @@
  * from the execution's region of a latch block, which the client's commit writes. Unused entries dispatch no groups.
  *
  * Depth is the engine's kPOST_ZPREPASS_COPY (FrameAnchors::EngineDepth), or Terrain Blending's blended depth while that is on
- * (FrameAnchors::D3D11Texture). The output is a graph texture exported to D3D11, which the engine's pixel shaders read at t45.
+ * (FrameAnchors::D3D11Texture). The output is a graph texture exported to D3D11, which the engine's pixel shaders read at t45. It
+ * is also published (PublishedResources, kShadowTextureId): Drawcall Limit Fix's colour passes read it through the graph.
  *
  * On any failure the feature returns to its D3D11 path. Render thread throughout.
  *
@@ -21,6 +23,9 @@
 class ORGScreenSpaceShadows
 {
 public:
+	/** @brief The shadow texture's published id (PublishedResources), its twin's name. */
+	static constexpr std::string_view kShadowTextureId = "SSS::ShadowTexture";
+
 	/** @brief Whether CS_ORG_SCREEN_SPACE_SHADOWS=1 is set. */
 	static bool Requested();
 
@@ -38,10 +43,16 @@ public:
 	 */
 	ID3D11ShaderResourceView* Prepass();
 
+	/** @brief The shadow texture's exported SRV while the ORG path runs; null on the D3D11 path. */
+	ID3D11ShaderResourceView* ShadowSRV() const;
+
 	~ORGScreenSpaceShadows();
 
 private:
 	ORGScreenSpaceShadows() = default;
+
+	/** @brief Leaves the ORG path: the client unregistered, the texture withdrawn, the state dropped. */
+	void Stop();
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;

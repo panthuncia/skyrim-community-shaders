@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d11.h>
+#include <string_view>
 
 /**
  * Per-frame state shared between DCLF's grass draws and the features that normally run inside the engine's
@@ -70,12 +71,19 @@ namespace GrassShared
 	/** @brief The latest published settings, or the vanilla-equivalent defaults (valid false). */
 	CullSettings Settings();
 
+	/**
+	 * @brief The id Grass Collision publishes its texture under on its render-graph path (RenderGraph/PublishedResources.h): DCLF's
+	 * grass passes read it by this id, ordered after the update.
+	 */
+	inline constexpr std::string_view kCollisionGraphId = "GrassCollision::Collision";
+
 	/** @brief Grass Collision's displacement texture and its per-frame constants, as RunGrass binds them at t100 and b5. */
 	struct Collision
 	{
 		ID3D11ShaderResourceView* texture = nullptr;  // owned by Grass Collision for the session
 		std::array<std::byte, 64> perFrame{};         // GrassCollision::PerFrame, zero-padded
 		uint32_t frame = 0;                           // graphicsState->frameCount at the update
+		bool onGraph = false;                         // texture is the graph twin's export, published as kCollisionGraphId
 	};
 
 	/** @brief Publishes the collision state of a stood-down frame. */

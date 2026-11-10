@@ -5,6 +5,7 @@
 
 #	include "ORGScreenshot.h"
 
+#	include "Features/HDRDisplay/ORGHDRDisplay.h"
 #	include "Globals.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -145,6 +146,10 @@ namespace
 			if (renderer && renderer->GetRuntimeData().renderTargets[static_cast<std::size_t>(a_source.engineTarget)].texture == a_source.texture)
 				return FrameAnchors::EngineTarget(static_cast<std::uint32_t>(a_source.engineTarget));
 		}
+		// HDR Display's output or back buffer, which its ORG passes write at the HDROutput anchor: their own import, so the graph orders
+		// the copy after those writes.
+		if (auto hdr = ORGHDRDisplay::Get().ImportOf(a_source.texture))
+			return hdr;
 		return a_source.importName ? FrameAnchors::D3D11Texture(a_source.importName, a_source.texture, a_source.srv, nullptr) : nullptr;
 	}
 }

@@ -24,6 +24,7 @@ ORGSunRays& ORGSunRays::Get()
 
 #	include "Features/CloudShadows.h"
 #	include "Features/CloudShadows/ORGCloudShadows.h"
+#	include "Features/TerrainBlending/ORGTerrainBlending.h"
 #	include "Features/TerrainShadows.h"
 #	include "Features/TerrainShadows/ORGTerrainShadows.h"
 #	include "Globals.h"
@@ -490,7 +491,13 @@ namespace
 		for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); ++i)
 			if (depthStencils[i].texture && depthStencils[i].texture == resource.get())
 				return { FrameAnchors::EngineDepth(i), {} };
-		// Terrain Blending's blended depth.
+		// Terrain Blending's blended depth: by name on its ORG path (published, ordered after the blend; importing its export would make
+		// a second graph resource of the same image), else imported.
+		const auto& graphBlending = ORGTerrainBlending::Get();
+		if (a_view == graphBlending.BlendedDepthSRV(false))
+			return { nullptr, std::string(ORGTerrainBlending::kBlendedDepthId) };
+		if (a_view == graphBlending.BlendedDepthSRV(true))
+			return { nullptr, std::string(ORGTerrainBlending::kBlendedDepth16Id) };
 		return ImportView("Effects11::SceneDepth", a_view);
 	}
 

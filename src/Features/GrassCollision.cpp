@@ -289,6 +289,7 @@ void GrassCollision::PublishCollision() const
 	static_assert(sizeof(PerFrame) <= sizeof(GrassShared::Collision::perFrame));
 	GrassShared::Collision published;
 	published.texture = CollisionSRV();
+	published.onGraph = published.texture && published.texture == ORGGrassCollision::Get().CollisionSRV();
 	std::memcpy(published.perFrame.data(), &lastPerFrame, sizeof(PerFrame));
 	published.frame = globals::game::graphicsState->frameCount;
 	GrassShared::PublishCollision(published);

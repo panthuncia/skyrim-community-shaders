@@ -7,6 +7,8 @@
 // - the room index (Api::AncestorValueContribution): the object's room (its nearest BSMultiBoundRoom or BSPortalSharedNode, LLF's
 //   GetParentRoomNode) looked up in LLF's room map, in the object record's first word;
 // - its graph buffers (Api::FrameGraphBuffers): the lights, light index list and light grid at t35-t37;
+// - its local shadow cache's slot data and shadow maps (t102, t103), frame textures for its graph path only (CS_ORG_LLF_SHADOWS): the
+//   colour commits keep the captured views, and read the published resources while the views CS bound are the graph's exports;
 // - its parity (Diagnostics/LightDataParity.cpp): CaptureParity's StrictLightData check.
 //
 // Core keeps the zeroed StrictLightData block every draw reads (frame-slot layout), the key walk and the column. Included by the
@@ -34,6 +36,10 @@ namespace DCLF::Integrations::LightLimitFix
 	// (Features/Manifest.cpp).
 	inline constexpr std::uint32_t kLightsRegister = 35;
 	inline constexpr std::uint32_t kGraphBuffers = 3;
+	// t102 and t103: the local shadow cache's slot data and shadow maps (LightLimitFix.hlsli's LocalShadows and LocalShadowMaps), frame
+	// textures (Features/Manifest.cpp).
+	inline constexpr std::uint32_t kLocalShadowDataRegister = 102;
+	inline constexpr std::uint32_t kLocalShadowMapsRegister = 103;
 	// The room index: DCLFObjectRecord's first word (BindlessObject::ancestorValue, DCLFObjects.hlsli's RoomIndex; Features/Manifest.cpp), -1 outside rooms.
 	inline constexpr std::uint32_t kRoomRecordWord = 0;
 	inline constexpr std::int32_t kNoRoom = -1;

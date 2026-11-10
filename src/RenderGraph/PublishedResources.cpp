@@ -30,6 +30,7 @@ namespace PublishedResources
 			std::shared_ptr<org::Resource> resource;
 			std::optional<org::SRVViewType> view;  // none: the resource's primary view
 			bool published = false;                // false: withdrawn, still registered
+			const ID3D11ShaderResourceView* srv = nullptr;  // the twin's D3D11 export, if any (ExportedId); compared, never used
 		};
 
 		/** @brief What every graph build registers. Immutable once stored. */
@@ -116,6 +117,7 @@ namespace PublishedResources
 			}
 			auto* entry = Find(state, a_id);
 			if (entry && entry->resource == a_resource.Graph()) {
+				entry->srv = a_resource.SRV();
 				if (!std::exchange(entry->published, true))
 					logger::info("[ORG] '{}' published again", a_id);
 				return true;
@@ -125,6 +127,7 @@ namespace PublishedResources
 			entry->resource = a_resource.Graph();
 			entry->view = a_view;
 			entry->published = true;
+			entry->srv = a_resource.SRV();
 			Store(state, *host);
 			logger::info("[ORG] '{}' published to every epoch's graph ({})", a_id, a_resource.Name());
 			return true;
@@ -187,6 +190,16 @@ namespace PublishedResources
 		}
 		return true;
 	}
+
+	std::string ExportedId(const ID3D11ShaderResourceView* a_view)
+	{
+		if (!a_view)
+			return {};
+		for (const auto& entry : Published().entries)
+			if (entry.published && entry.srv == a_view)
+				return entry.id;
+		return {};
+	}
 }
 
 #else  // !CS_HAS_RENDER_GRAPH
@@ -203,6 +216,7 @@ namespace PublishedResources
 	void Withdraw(std::string_view) {}
 	bool IsPublished(std::string_view) { return false; }
 	bool ShaderResourceIndex(std::string_view, std::uint32_t&) { return false; }
+	std::string ExportedId(const ID3D11ShaderResourceView*) { return {}; }
 }
 
 #endif

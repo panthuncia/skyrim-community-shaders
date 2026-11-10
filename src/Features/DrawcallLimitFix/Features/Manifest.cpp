@@ -46,6 +46,7 @@
 #include "Features/DrawcallLimitFix/Integrations/ExponentialHeightFog/ExponentialHeightFog.h"
 #include "Features/DrawcallLimitFix/Integrations/IBL/IBL.h"
 #include "Features/DrawcallLimitFix/Integrations/LightLimitFix/LightLimitFix.h"
+#include "Features/DrawcallLimitFix/Integrations/ScreenSpaceShadows/ScreenSpaceShadows.h"
 #include "Features/DrawcallLimitFix/Integrations/Skylighting/Skylighting.h"
 #include "Features/DrawcallLimitFix/Integrations/SubsurfaceScattering/SubsurfaceScattering.h"
 #include "Features/DrawcallLimitFix/Integrations/TerrainBlending/TerrainBlending.h"
@@ -91,7 +92,8 @@ namespace DCLF::Features
 		// DCLFEffectSoftDepth; Integrations/TerrainBlending's mask, TerrainBlending.hlsli's TerrainBlendingMaskTexture; the CS features'
 		// views, their own HLSL's: Volumetric Shadows' SharedShadowMap, Cloud Shadows' CloudShadowsTexture, Exponential Height Fog's
 		// ExponentialHeightFogIntegratedLightScattering and ExponentialHeightFogIntegratedLightScatteringFar, Dynamic Cubemaps' EnvReflectionsTexture and EnvTexture, Skylighting's SkylightingProbeArray and ShadowVisibilityProbeArray, Terrain Shadows' ShadowHeightTexture, Water Effects'
-		// WaterCaustics, IBL's EnvIBLTexture, SkyIBLTexture, StaticDiffuseIBLTexture and StaticSpecularIBLTexture, TruePBR's Glint2023NoiseMap): none Core's, a frame
+		// WaterCaustics, IBL's EnvIBLTexture, SkyIBLTexture, StaticDiffuseIBLTexture and StaticSpecularIBLTexture, TruePBR's Glint2023NoiseMap,
+		// Screen Space Shadows' ScreenSpaceShadowsTexture, Light Limit Fix's LocalShadows and LocalShadowMaps): none Core's, a frame
 		// binding's or another's.
 		constexpr std::uint32_t kFrameTextureRegisters[] = {
 			Effects::kSoftDepthRegister,
@@ -111,6 +113,9 @@ namespace DCLF::Features
 			Integrations::IBL::kStaticDiffuseRegister,
 			Integrations::IBL::kStaticSpecularRegister,
 			Integrations::TruePBR::kGlintsNoiseRegister,
+			Integrations::ScreenSpaceShadows::kShadowTextureRegister,
+			Integrations::LightLimitFix::kLocalShadowDataRegister,
+			Integrations::LightLimitFix::kLocalShadowMapsRegister,
 		};
 
 		constexpr bool FrameTextureRegistersValid()

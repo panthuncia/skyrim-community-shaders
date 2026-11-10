@@ -9,6 +9,7 @@
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
 
@@ -41,6 +42,13 @@ namespace
 		std::uint32_t targetSize;
 	};
 	static_assert(sizeof(CopyConstants) == 16);
+
+	/** @brief The graph no longer writes the cache: its published readers return to their D3D11 views. */
+	void WithdrawCache()
+	{
+		PublishedResources::Withdraw(ORGLocalShadows::kDataId);
+		PublishedResources::Withdraw(ORGLocalShadows::kCacheId);
+	}
 
 	// The latch slot: the copies, then the slots' data.
 	constexpr std::uint32_t kDataOffset = ORGLocalShadows::kMaxCopies * sizeof(CopyConstants);
@@ -258,7 +266,7 @@ bool ORGLocalShadows::Setup(const Desc& a_desc)
 	cacheDesc.SampleDesc.Count = 1;
 	cacheDesc.Usage = D3D11_USAGE_DEFAULT;
 	cacheDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-	resources->cache = std::make_unique<GraphResources::Texture2D>(cacheDesc, "LightLimitFix::LocalShadowCache", exported);
+	resources->cache = std::make_unique<GraphResources::Texture2D>(cacheDesc, std::string(kCacheId), exported);
 
 	D3D11_BUFFER_DESC dataDesc{};
 	dataDesc.Usage = D3D11_USAGE_DEFAULT;
@@ -266,7 +274,7 @@ bool ORGLocalShadows::Setup(const Desc& a_desc)
 	dataDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
 	dataDesc.StructureByteStride = a_desc.dataStride;
 	dataDesc.ByteWidth = a_desc.slots * a_desc.dataStride;
-	resources->data = std::make_unique<GraphResources::StructuredBuffer>(dataDesc, a_desc.slots, "LightLimitFix::LocalShadowData", exported);
+	resources->data = std::make_unique<GraphResources::StructuredBuffer>(dataDesc, a_desc.slots, std::string(kDataId), exported);
 
 	if (!*resources->cache || !resources->cache->SRV() || !*resources->data || !resources->data->SRV()) {
 		logger::warn("[ORG] LLF local shadows stay on D3D11: the cache or its data could not be created and exported");
@@ -314,10 +322,18 @@ bool ORGLocalShadows::Setup(const Desc& a_desc)
 	client.onFailed = [] {
 		// LightLimitFix sees the cache inactive at its next EarlyPrepass and makes its D3D11 cache.
 		logger::error("[ORG] LLF local shadows: the render graph failed; back to D3D11");
+		WithdrawCache();
 		Get().impl.reset();
 	};
 	if (!FrameAnchors::Register(std::move(client))) {
 		logger::warn("[ORG] LLF local shadows stay on D3D11: the EarlyPrepass client could not be registered");
+		return false;
+	}
+	// Drawcall Limit Fix's colour passes read them by name, ordered after the copies (Integrations/LightLimitFix).
+	if (!PublishedResources::Publish(*resources->data) || !PublishedResources::Publish(*resources->cache)) {
+		logger::warn("[ORG] LLF local shadows stay on D3D11: the cache or its data could not be published");
+		FrameAnchors::Unregister(kClientId);
+		WithdrawCache();
 		return false;
 	}
 	state->resources = std::move(resources);
@@ -333,6 +349,7 @@ void ORGLocalShadows::Release()
 		return;
 	if (impl->resources) {
 		FrameAnchors::Unregister(kClientId);
+		WithdrawCache();
 		impl->resources.reset();
 	}
 }

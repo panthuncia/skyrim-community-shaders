@@ -12,6 +12,7 @@
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/UavClearPass.h"
@@ -31,7 +32,8 @@ namespace
 {
 	constexpr const char* kClientId = "cs.sss";
 	constexpr const char* kShader = "ScreenSpaceShadows/RaymarchCS.hlsl";
-	constexpr const char* kTextureName = "SSS::ShadowTexture";
+	// The shadow texture's name, which it is published under: Drawcall Limit Fix's t45.
+	constexpr std::string_view kTextureName = ORGScreenSpaceShadows::kShadowTextureId;
 	constexpr const char* kBlendedDepthName = "terrain-blending.blended-depth";
 	constexpr std::uint32_t kMaxDispatches = ScreenSpaceShadows::Dispatches::kMax;
 
@@ -205,6 +207,8 @@ ORGScreenSpaceShadows::~ORGScreenSpaceShadows() = default;
 void ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 {
 	impl.reset();
+	// Readers return to D3D11 until the new texture is published.
+	PublishedResources::Withdraw(kTextureName);
 	auto& runtime = RenderGraphRuntime::Get();
 	auto* host = runtime.Host();
 	if (!host || !runtime.IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::Prepass)) {
@@ -223,7 +227,7 @@ void ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 			.addressW = rhi::AddressMode::Border,
 			.borderPreset = rhi::BorderPreset::OpaqueWhite });
 		// Written in full every frame, but the engine's draws read it through D3D11: exported, so never aliased.
-		state->output = std::make_unique<GraphResources::Texture2D>(a_desc, kTextureName,
+		state->output = std::make_unique<GraphResources::Texture2D>(a_desc, std::string(kTextureName),
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient, .d3d11 = GraphResources::Export::SRV });
 		state->latch = std::make_shared<org::LatchBlock>("cs.sss.latch", static_cast<std::uint32_t>(sizeof(RaymarchLatchData)), host->FrameSlots());
 		state->depth = CurrentDepth();
@@ -260,19 +264,32 @@ void ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 		};
 		client.onFailed = [] {
 			logger::error("[ORG] Screen Space Shadows returns to D3D11: the render graph failed");
+			PublishedResources::Withdraw(kTextureName);
 			Get().impl.reset();
 		};
 		if (!FrameAnchors::Register(std::move(client)))
 			return;
+		// Drawcall Limit Fix's colour passes read it by name, ordered after the raymarch (Integrations/ScreenSpaceShadows).
+		if (!PublishedResources::Publish(*state->output)) {
+			logger::warn("[ORG] Screen Space Shadows stays on D3D11: the shadow texture could not be published");
+			FrameAnchors::Unregister(kClientId);
+			return;
+		}
 		impl = std::make_unique<Impl>();
 		impl->state = std::move(state);
 		logger::info("[ORG] Screen Space Shadows runs on the render graph ({}x{}, {} samples, depth from {})", a_desc.Width, a_desc.Height,
 			impl->state->program->sampleCount, DepthLabel());
 	} catch (const std::exception& e) {
 		logger::error("[ORG] Screen Space Shadows setup failed, staying on D3D11: {}", e.what());
-		FrameAnchors::Unregister(kClientId);
-		impl.reset();
+		Stop();
 	}
+}
+
+void ORGScreenSpaceShadows::Stop()
+{
+	FrameAnchors::Unregister(kClientId);
+	PublishedResources::Withdraw(kTextureName);
+	impl.reset();
 }
 
 ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass()
@@ -286,8 +303,7 @@ ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass()
 		auto program = LoadProgram(RenderGraphRuntime::Get().Host()->Device(), sampleCount);
 		if (!program) {
 			logger::error("[ORG] Screen Space Shadows returns to D3D11: the {}-sample program could not be made", sampleCount);
-			FrameAnchors::Unregister(kClientId);
-			impl.reset();
+			Stop();
 			return nullptr;
 		}
 		state.program = std::move(program);
@@ -296,8 +312,7 @@ ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass()
 	// Terrain Blending on or off, or a new engine depth texture.
 	if (auto depth = CurrentDepth(); depth != state.depth) {
 		if (!depth) {
-			FrameAnchors::Unregister(kClientId);
-			impl.reset();
+			Stop();
 			return nullptr;
 		}
 		state.depth = std::move(depth);
@@ -307,6 +322,11 @@ ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass()
 	if (changed)
 		FrameAnchors::Refresh(kClientId);
 	return state.output->SRV();
+}
+
+ID3D11ShaderResourceView* ORGScreenSpaceShadows::ShadowSRV() const
+{
+	return impl && RenderGraphRuntime::Get().IsActive() ? impl->state->output->SRV() : nullptr;
 }
 
 #else  // !CS_HAS_RENDER_GRAPH
@@ -328,5 +348,7 @@ ORGScreenSpaceShadows& ORGScreenSpaceShadows::Get()
 ORGScreenSpaceShadows::~ORGScreenSpaceShadows() = default;
 void ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC&) {}
 ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass() { return nullptr; }
+ID3D11ShaderResourceView* ORGScreenSpaceShadows::ShadowSRV() const { return nullptr; }
+void ORGScreenSpaceShadows::Stop() {}
 
 #endif

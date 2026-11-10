@@ -62,17 +62,19 @@ void Skylighting::RestoreDefaultSettings()
 
 void Skylighting::ResetSkylighting()
 {
+	// While the probe update runs on the render graph, a graph pass clears its volumes, ordered with the graph's reads.
+	if (ORGSkylighting::Get().QueueReset()) {
+		probeGridBottomZ = -FLT_MAX;
+		queuedResetSkylighting = false;
+		return;
+	}
+
 	auto context = globals::d3d::context;
-	// The render graph's volumes while its probe update runs, else the D3D11 ones.
-	const auto& graph = ORGSkylighting::Get();
-	const bool onGraph = graph.IsActive();
-	const auto uav = [&](ORGSkylighting::Volume a_volume, Texture3D* a_texture) -> ID3D11UnorderedAccessView* {
-		return onGraph ? graph.UAV(a_volume) : (a_texture ? a_texture->uav.get() : nullptr);
-	};
-	auto* probeArray = uav(ORGSkylighting::Volume::ProbeArray, texProbeArray);
-	auto* accumFrames = uav(ORGSkylighting::Volume::AccumFrames, texAccumFramesArray);
-	auto* shadowBitmask = uav(ORGSkylighting::Volume::ShadowBitmask, texShadowBitmask);
-	auto* shadowVisibility = uav(ORGSkylighting::Volume::ShadowVisibility, texShadowVisibility);
+	const auto uav = [](Texture3D* a_texture) -> ID3D11UnorderedAccessView* { return a_texture ? a_texture->uav.get() : nullptr; };
+	auto* probeArray = uav(texProbeArray);
+	auto* accumFrames = uav(texAccumFramesArray);
+	auto* shadowBitmask = uav(texShadowBitmask);
+	auto* shadowVisibility = uav(texShadowVisibility);
 	if (!probeArray || !accumFrames || !shadowBitmask || !shadowVisibility)
 		return;
 

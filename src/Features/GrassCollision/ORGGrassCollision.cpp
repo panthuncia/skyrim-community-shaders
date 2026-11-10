@@ -27,9 +27,11 @@ bool ORGGrassCollision::Requested()
 #if defined(CS_HAS_RENDER_GRAPH)
 
 #	include "Globals.h"
+#	include "GrassShared/GrassFrame.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
 
@@ -248,8 +250,9 @@ bool ORGGrassCollision::Setup(const Limits& a_limits, std::function<void()> a_on
 		"GrassCollision::BoundingBoxes");
 	resources->instances = std::make_unique<GraphResources::StructuredBuffer>(StructuredDesc(a_limits.maxInstances, a_limits.instanceStride),
 		a_limits.maxInstances, "GrassCollision::Instances");
-	// Read back by the next frame's update, and by D3D11 (the engine's grass, DCLF's grass) until those draws are the graph's.
-	resources->collision = std::make_unique<GraphResources::Texture2D>(a_limits.texture, "GrassCollision::Collision",
+	// Read back by the next frame's update, and by the engine's grass through D3D11 until those draws are the graph's. Published: DCLF's
+	// grass draws read it by name.
+	resources->collision = std::make_unique<GraphResources::Texture2D>(a_limits.texture, std::string(GrassShared::kCollisionGraphId),
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
 	if (!resources->program || !resources->latch || !*resources->boxes || !*resources->instances || !*resources->collision ||
 		!resources->collision->SRV()) {
@@ -299,12 +302,20 @@ bool ORGGrassCollision::Setup(const Limits& a_limits, std::function<void()> a_on
 	};
 	client.onFailed = [self] {
 		logger::error("[ORG] Grass Collision: the render graph failed; Grass Collision returns to D3D11");
+		PublishedResources::Withdraw(GrassShared::kCollisionGraphId);
 		auto failed = std::move(self->impl);
 		if (failed && failed->onFailed)
 			failed->onFailed();
 	};
 	impl = std::move(state);
 	if (!FrameAnchors::Register(std::move(client))) {
+		impl.reset();
+		return false;
+	}
+	// Drawcall Limit Fix's grass draws read it by name, ordered after the update (Features/Grass, GrassTables.cpp).
+	if (!PublishedResources::Publish(*resources->collision)) {
+		logger::error("[ORG] Grass Collision: the collision texture could not be published; Grass Collision stays on D3D11");
+		FrameAnchors::Unregister(kClientId);
 		impl.reset();
 		return false;
 	}

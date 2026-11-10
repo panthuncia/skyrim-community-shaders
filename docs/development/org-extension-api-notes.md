@@ -479,7 +479,12 @@ Keys used so far:
   passes, and calls `Refresh` again a frame later to drop them: two graph builds per reset. A framework answer would be a
   per-execution switch on a kept pass (a predicate the graph evaluates at submission), or clears the graph runs once
   on request before a resource's next use.
-- **Found by:** P3 W2, Screen Space GI (2026-11-09).
+- **Also:** Skylighting's reset (`ORGSkylighting::QueueReset`) works the same way, and counts the reset done only when the
+  clear pass's `Prepare` ran (a flag the client's commit reads), not when `make` returned it: with async epochs a build can
+  come too late for the run that asked. A reset flag in a pass's `Revision` cannot replace the rebuilds: with async epochs a
+  ticket is prepared before the client's commit, so the revision would lag a frame and a kept recording with the clear
+  could be reused.
+- **Found by:** P3 W2, Screen Space GI (2026-11-09); Skylighting's reset (2026-11-09).
 
 ### Ping-pong history as two lifetimes
 
@@ -974,3 +979,45 @@ Keys used so far:
   a completion signal per frame or per submission (ORG's frame fences, or a callback after the epoch that used the
   resource retires).
 - **Found by:** P4.1 (2026-11-09).
+### Reading a ported feature's output that DCLF never named
+
+- **Need:** a draw or pass reads another feature's output at a register it only ever captured (the view bound there when the
+  colour commit ran), or through a row of its own (a descriptor index it writes into a GPU table), and the producer moved to
+  the graph.
+- **Who:** DCLF's colour draws at t45 (Screen Space Shadows) and t102/t103 (Light Limit Fix's local shadow cache); DCLF's grass
+  draw row (Grass Collision's texture at t100). On the producers' ORG paths these were the graph twins' D3D11 exports,
+  imported by DCLF as resources of their own, unordered after the graph's writes.
+- **Where it fits:** today each integration registers the register as an `Api::FrameTexture` with `view` always null and
+  `capturedWhenNull`, so only its graph path is new, and grass declares the published id in its family's `MainDeclare` and
+  writes `PublishedResources::ShaderResourceIndex` into its row. A framework answer: DCLF maps any captured view that is a
+  published twin's export to that id by itself (`PublishedResources::ExportedId` already finds it), declaring and indexing it
+  at the main resources' check, so a producer's port needs no integration change. Until then, a colour commit logs
+  `[DCLF] t<n> reads the D3D11 export of the published '<id>'` once per register and id.
+- **Found by:** P3 DCLF published resources, second pass (2026-11-09).
+
+### One image imported under two names
+
+- **Need:** two features' graph passes use the same D3D11 texture (one writes it, the other reads it).
+- **Who:** Screenshot's capture read HDR Display's output and back buffer through imports of its own while HDR Display's
+  passes wrote them through theirs (fixed: `ORGHDRDisplay::ImportOf`); Effects11's rays imported Terrain Blending's blended
+  depth export (fixed: by name); ORGIBL imported Dynamic Cubemaps' environment export (fixed: by name). Open: DCLF's near
+  twin writes Terrain Blending's terrain depth through DCLF's import (`cs.dclf.terrain-blending-depth`) while Terrain
+  Blending's graph blend reads it through `FrameAnchors::ImportDepth`.
+- **Where it fits:** `FrameAnchors` keys its imports by id, so a second id makes a second graph resource of one image, and
+  nothing orders their uses. It now logs `[ORG] frame anchors: <id> imports the image <id> already imports` when that
+  happens. A framework answer: key imports by the image (one graph resource per VkImage, whatever the name), and let DCLF's
+  imports and the anchors' share that table.
+- **Found by:** P3 DCLF published resources, second pass (2026-11-09).
+
+### Graph textures read by views drawn before their producers
+
+- **Need:** a view drawn early in the frame (DCLF's reflection faces) reads features' outputs that the graph writes later in
+  the frame (last frame's contents).
+- **Who:** DCLF's views with frame constants of their own read every frame texture's `view`: on the producers' ORG paths
+  the D3D11 exports of Volumetric Shadows (t18), Exponential Height Fog (t19, t22), Cloud Shadows (t25), Dynamic Cubemaps
+  (t30, t31), Skylighting (t50, t53), Terrain Shadows (t60) and IBL (t76-t79), imported as resources of their own. The ORG
+  deferred composite reads its inputs through descriptors the graph does not track (`GpuTextures::ResolveBinding`) as well.
+- **Where it fits:** the faces' passes would declare the published ids as the colour passes do (`DeclareFrameBuffers`); a
+  read in an earlier epoch is then ordered after the previous frame's write (PublishedResources' rule). The composite needs
+  the same declarations once its inputs are graph resources.
+- **Found by:** P3 DCLF published resources, second pass (2026-11-09).

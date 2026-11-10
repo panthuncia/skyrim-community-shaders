@@ -21,8 +21,31 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Draws.h"
 
+#include "RenderGraph/PublishedResources.h"
+
+#include <array>
+#include <string>
+
 namespace DCLF
 {
+	namespace
+	{
+		/**
+		 * @brief Render thread, when a colour commit's register reads a new D3D11 view: a view that is a published graph texture's export
+		 * is imported as a resource of its own, which nothing orders after the producer's graph writes. Logged once per register and id,
+		 * so a producer whose integration should read it through the graph (Api::FrameTexture::graph) shows up in the log.
+		 */
+		void NoteExportRead(std::uint32_t a_register, ID3D11ShaderResourceView* a_view)
+		{
+			static std::array<std::string, kTextureRegisters> s_logged;
+			auto id = PublishedResources::ExportedId(a_view);
+			if (id.empty() || s_logged[a_register] == id)
+				return;
+			logger::warn("[DCLF] t{} reads the D3D11 export of the published '{}': not ordered after its graph writes", a_register, id);
+			s_logged[a_register] = std::move(id);
+		}
+	}
+
 	// Core's feature rows start right after the extras' pixel row (FrameSlots.h).
 	static_assert(Draws::FrameConstantRowOffset(Extensions::kFrameConstantRowFirst) == Draws::kExtrasPixelFrameOffset + sizeof(ExtrasFrame::projectedGlobals),
 		"Core's first frame constant row is not right after the extras' pixel row");
@@ -384,6 +407,8 @@ namespace DCLF
 			auto* const view = t == kCharacterLightRegister ? Scene::FrameView::Get().GetFrameCapture().characterLightView :
 			                   registered                   ? frameTextureViews[at] :
 			                                                  capture.psViews[t];
+			if (view && view != held.view)
+				NoteExportRead(t, view);
 			a_frameTextures[t] = HoldFrameTexture(held.view, held.binding, view, t, view ? 0u : textures.NullIndex(), a_commit.bindingOwners);
 		}
 		// The frame graph buffers on the graph (Api::FrameGraphBuffers: Integrations/LightLimitFix's, t35-t37), their indices at their registers.
