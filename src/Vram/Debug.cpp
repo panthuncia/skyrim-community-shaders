@@ -1,6 +1,7 @@
 #include "Vram/Debug.h"
 
 #include "Globals.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "Utils/SwitchFile.h"
 #include "Vram/DxvkMemory.h"
@@ -212,7 +213,8 @@ namespace Vram::Debug
 				return true;  // not a file texture: nothing to wait for
 			if (!source->rendererTexture || !source->rendererTexture->texture)
 				return false;
-			TagGameTexture(source->rendererTexture->texture, a_path);
+			// DXVK's exports take its own objects, never an engine texture's tripwire handle.
+			TagGameTexture(RenderGraph::Engine::Tripwire::Unwrap(source->rendererTexture->texture), a_path);
 			return true;
 		}
 

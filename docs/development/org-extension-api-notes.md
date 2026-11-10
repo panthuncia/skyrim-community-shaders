@@ -64,7 +64,14 @@ One entry per need. Give:
   the first epoch. The next frame the client is rebuilt without that pass (`FrameAnchors::Refresh`), and the buffer goes
   with the last build that holds it. Phase 3.5 makes this a framework helper: an `AnchorPasses::Upload` is a one-shot pass
   (`PassDesc::once`) that the anchors drop themselves once a run with it was submitted. BC formats work. An API for plugins needs a texture upload that async epochs record.
-- **Found by:** survey for the plan (2026-11-09); the graph upload by P3 TerrainShadows (2026-11-09).
+- **P4.3 (engine textures, `src/RenderGraph/Engine/Textures`):** `Textures::Create` is CS's one path for a texture
+  on an ORG image from any thread, with no wait: BasicRHI creates the image, and while DXVK is the host it wraps the image
+  with the contents uploaded in its own stream (`dxvkCreateTextureFromVkImageWithData`), so the contents are there before
+  any D3D11 or graph use, including on loading screens, where no anchor runs. A plugin texture API can be this call plus a
+  tripwire handle. The DXVK-free build needs the same from the graph: an any-thread texture upload that async epochs
+  record and that orders before the first use, which the upload service's mailbox (`PostTextureSubresources`) does not
+  give for textures today.
+- **Found by:** survey for the plan (2026-11-09); the graph upload by P3 TerrainShadows (2026-11-09); P4.3 (2026-11-10).
 
 ### Sharing graph resources with D3D11 code
 

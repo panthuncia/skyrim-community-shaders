@@ -12,6 +12,7 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Engine/GuestDevice.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Switches.h"
 #include "Upscaling/FrameGenController.h"
@@ -510,7 +511,8 @@ struct FaceGen_CopyRenderTarget
 			return nullptr;
 		}
 
-		globals::d3d::context->CopyResource(texture->texture, source);
+		// The raw context takes D3D11 objects: the new texture may be an engine texture's tripwire handle (CS_ORG_ENGINE_TEXTURES).
+		globals::d3d::context->CopyResource(RenderGraph::Engine::Tripwire::Unwrap(texture->texture), RenderGraph::Engine::Tripwire::Unwrap(source));
 		return texture;
 	}
 	static inline REL::Relocation<decltype(thunk)> func;

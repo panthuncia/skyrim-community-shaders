@@ -255,6 +255,7 @@ struct RenderGraphRuntime::Impl
 	winrt::com_ptr<IDXGIVkInteropDevice> interop;
 	PFN_dxvkCreateBufferFromVkBuffer createBufferFromVkBuffer = nullptr;
 	PFN_dxvkCreateTextureFromVkImage createTextureFromVkImage = nullptr;  // optional (interop version 6): WrapTexture
+	PFN_dxvkCreateTextureFromVkImageWithData createTextureFromVkImageWithData = nullptr;  // optional: WrapTexture with contents
 	// ReleaseAfterD3D11: owners held until an event query issued after their release completes, oldest first.
 	struct D3D11Release
 	{
@@ -1536,6 +1537,8 @@ bool RenderGraphRuntime::Initialize()
 	state->setTeardownCallback = ResolveExport<PFN_dxvkSetDeviceTeardownCallback>(d3d11, "dxvkSetDeviceTeardownCallback");
 	// Optional: graph textures that D3D11 still reads (GraphResources' exports).
 	state->createTextureFromVkImage = ResolveExport<PFN_dxvkCreateTextureFromVkImage>(d3d11, "dxvkCreateTextureFromVkImage");
+	// Optional: engine textures created on graph images with their contents (Engine/Textures).
+	state->createTextureFromVkImageWithData = ResolveExport<PFN_dxvkCreateTextureFromVkImageWithData>(d3d11, "dxvkCreateTextureFromVkImageWithData");
 	if (!getInfo || !state->createBufferFromVkBuffer || !state->setTeardownCallback)
 		return disable("the DXVK build lacks the render graph interop exports");
 	// Optional: game resources for the graph (Drawcall Limit Fix).
@@ -2761,10 +2764,10 @@ winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource& a_buf
 }
 
 winrt::com_ptr<ID3D11Resource> RenderGraphRuntime::WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap,
-	DxvkOrgInteropResourceInfo& a_info, const char* a_name)
+	DxvkOrgInteropResourceInfo& a_info, const char* a_name, const D3D11_SUBRESOURCE_DATA* a_initialData)
 {
 	winrt::com_ptr<ID3D11Resource> result;
-	if (!IsActive() || !impl->createTextureFromVkImage)
+	if (!IsActive() || !impl->createTextureFromVkImage || (a_initialData && !impl->createTextureFromVkImageWithData))
 		return result;
 	rhi::VulkanResourceInfo info{};
 	if (!rhi::vulkan::get_resource_info(a_image, info) || !info.resource) {
@@ -2779,7 +2782,9 @@ winrt::com_ptr<ID3D11Resource> RenderGraphRuntime::WrapTexture(const rhi::Resour
 	wrap.imageUsage = info.usage;
 	a_info = {};
 	a_info.version = DXVK_ORG_INTEROP_VERSION;
-	if (FAILED(impl->createTextureFromVkImage(globals::d3d::device, &wrap, result.put(), &a_info))) {
+	const HRESULT created = a_initialData ? impl->createTextureFromVkImageWithData(globals::d3d::device, &wrap, a_initialData, result.put(), &a_info) :
+	                                        impl->createTextureFromVkImage(globals::d3d::device, &wrap, result.put(), &a_info);
+	if (FAILED(created)) {
 		logger::error("[ORG] WrapTexture: DXVK rejected '{}' (format {}, usage 0x{:X}, flags 0x{:X}; see DXVK's log)", a_name,
 			wrap.format, wrap.imageUsage, wrap.imageFlags);
 		result = nullptr;
@@ -2793,6 +2798,11 @@ winrt::com_ptr<ID3D11Resource> RenderGraphRuntime::WrapTexture(const rhi::Resour
 bool RenderGraphRuntime::CanWrapTextures() const
 {
 	return IsActive() && impl->createTextureFromVkImage;
+}
+
+bool RenderGraphRuntime::CanWrapTexturesWithData() const
+{
+	return CanWrapTextures() && impl->createTextureFromVkImageWithData;
 }
 
 namespace
@@ -2897,8 +2907,9 @@ const std::vector<std::filesystem::path>& RenderGraphRuntime::ShaderSourceFiles(
 }
 winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource&, const D3D11_BUFFER_DESC&) { return nullptr; }
 winrt::com_ptr<ID3D11Resource> RenderGraphRuntime::WrapTexture(const rhi::Resource&, const DxvkOrgInteropTextureWrap&, DxvkOrgInteropResourceInfo&,
-	const char*) { return nullptr; }
+	const char*, const D3D11_SUBRESOURCE_DATA*) { return nullptr; }
 bool RenderGraphRuntime::CanWrapTextures() const { return false; }
+bool RenderGraphRuntime::CanWrapTexturesWithData() const { return false; }
 void RenderGraphRuntime::ReleaseAfterD3D11(std::shared_ptr<const void>) {}
 void RenderGraphRuntime::ServiceD3D11Releases() {}
 void RenderGraphRuntime::ReportGpuTimings(std::uint32_t, bool) {}
