@@ -10,8 +10,8 @@
 // Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below and reads ColorCB (ColorGrading::ColorCB) at b1,
 // declared exactly as before. Under ORG (ORG/ORGColorGrading.cpp) the same fields are the LATCH entry ColorGradingFrame
 // (struct ColorConstants), and each field is copied into a static of the same name, so the grading code reads them as
-// it does under D3D11. The fields are listed once, in COLOR_CB_FIELDS: M(type, name) for a value, A(type, name, count)
-// for an array.
+// it does under D3D11 (ORG_GLOBAL_LATCH_BEGIN). The fields are listed once, in COLOR_CB_FIELDS: M(type, name) for a
+// value, A(type, name, count) for an array.
 #define COLOR_GRADING_RESOURCES(X)         \
 	X(SRV, Texture2D<float4>, TexColor, 0) \
 	X(SRV, Texture3D<float4>, TexLUT, 1)   \
@@ -58,21 +58,12 @@ COLOR_GRADING_RESOURCES(ORG_RESOURCE)
 	M(float, hdrPaperWhiteNits) /* Reference white brightness in nits for HDR */                 \
 	M(OpenDRTConfig, odrtConfig)
 
-#define COLOR_CB_MEMBER(T, N) T N;
-#define COLOR_CB_ARRAY(T, N, C) T N[C];
-
-#if defined(CS_ORG_BINDLESS)
-struct ColorConstants
-{
-	COLOR_CB_FIELDS(COLOR_CB_MEMBER, COLOR_CB_ARRAY)
-};
-ORG_RESOURCE(LATCH, ColorConstants, ColorGradingFrame, 1)
-#	define COLOR_CB_STATIC(T, N) static T N = ColorGradingFrame.N;
-#	define COLOR_CB_STATIC_ARRAY(T, N, C) static T N[C] = ColorGradingFrame.N;
-COLOR_CB_FIELDS(COLOR_CB_STATIC, COLOR_CB_STATIC_ARRAY)
-#else
-cbuffer ColorCB : register(b1){ COLOR_CB_FIELDS(COLOR_CB_MEMBER, COLOR_CB_ARRAY) };
-#endif
+ORG_GLOBAL_LATCH_BEGIN(ColorConstants, ColorCB, 1)
+COLOR_CB_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(ColorConstants, ColorGradingFrame, 1)
+#define ORG_GLOBAL_LATCH ColorGradingFrame
+COLOR_CB_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
 
 #include "PostProcessing/ColorGrading/Include/GT7ToneMapping.hlsli"
 #include "PostProcessing/ColorGrading/Include/OpenDRT.hlsli"

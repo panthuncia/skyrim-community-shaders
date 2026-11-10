@@ -29,9 +29,6 @@ namespace ORGPostChain
 	{
 		constexpr const char* kShader = "PostProcessing/HistogramAutoExposure/histogram.cs.hlsl";
 		constexpr std::uint32_t kBins = 256;
-		// A new build's client joins the graph from the anchor's next run at the latest: the first clear is repeated over a few
-		// frames, so it lands whichever of them runs first.
-		constexpr std::uint32_t kClearFrames = 4;
 
 		// histogram.cs.hlsl's push block, every entry: HISTOGRAM_RESOURCES, in order.
 		struct HistogramBlock
@@ -39,8 +36,6 @@ namespace ORGPostChain
 			ShaderBindings::Handle texColor, rwHistogram, rwAdaptation;
 			ShaderBindings::Latch autoExposure;
 		};
-
-		using Groups = std::array<std::uint32_t, 4>;
 
 		/** @brief What the render thread, the readback passes (graph host thread) and the readback callbacks share. */
 		struct Readback
@@ -143,8 +138,9 @@ namespace ORGPostChain
 
 		/**
 		 * @brief HistogramAutoExposure::Draw on the graph: CS_Histogram over the chain's image, CS_Average into the adaptation. The
-		 * histogram and the adaptation are history buffers owned here; CS_Reset clears them after they are made (an indirect dispatch,
-		 * zero groups on the other frames). The adaptation is published as "PostProcessing::AutoExposure::Adaptation" for
+		 * histogram and the adaptation are history buffers owned here; CS_Reset clears them after they are made: a one-shot pass,
+		 * in the builds made until a frame with it reached the GPU (Executed). CS_Reset reads no constants, so it may run on a
+		 * frame the chain does not. The adaptation is published as "PostProcessing::AutoExposure::Adaptation" for
 		 * Composite. The settings UI's histogram and meter read back through the graph's readback service.
 		 */
 		class HistogramAutoExposureEffect final : public Effect
@@ -169,7 +165,7 @@ namespace ORGPostChain
 						"PostProcessing::HistogramAutoExposure::Histogram", history);
 					adaptation = std::make_unique<GraphResources::StructuredBuffer>(StructuredDesc(1, sizeof(float)), 1,
 						"PostProcessing::HistogramAutoExposure::Adaptation", history);
-					clears = kClearFrames;
+					clearPending = true;
 					reset = true;
 				}
 				if (!*histogram || !*adaptation) {
@@ -185,15 +181,15 @@ namespace ORGPostChain
 
 				const auto words = ShaderBindings::Words<HistogramBlock>();
 				constants = a_builder.Latch<HistogramAutoExposure::AutoExposureCB>();
-				clearGroups = a_builder.Latch<Groups>();
 				const auto input = a_builder.Current();
 				const auto shape = a_builder.GetShape();
 				const auto groups = HistogramAutoExposure::HistogramGroups(shape.width, shape.height);
 
-				a_builder.Dispatch({ .name = "reset",
-					.program = a_builder.Compute(kShader, words, {}, L"CS_Reset"),
-					.bindings = { Bind::Unused(), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) },
-					.indirect = clearGroups });
+				if (clearPending)
+					a_builder.Dispatch({ .name = "reset",
+						.program = a_builder.Compute(kShader, words, {}, L"CS_Reset"),
+						.bindings = { Bind::Unused(), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) },
+						.once = true });
 				a_builder.Dispatch({ .name = "histogram",
 					.program = a_builder.Compute(kShader, words, {}, L"CS_Histogram"),
 					.bindings = { Bind::Srv(input), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) },
@@ -217,13 +213,13 @@ namespace ORGPostChain
 			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
 			{
 				auto& exposure = static_cast<HistogramAutoExposure&>(a_feature);
-				a_commit.Write(constants, exposure.Constants(reset || clears > 0));
-				a_commit.Write(clearGroups, clears > 0 ? Groups{ 1, 1, 1, 0 } : Groups{});
+				a_commit.Write(constants, exposure.Constants(reset || clearPending));
 				reset = false;
-				if (clears > 0)
-					--clears;
 				TakeReadbacks(exposure);
 			}
+
+			// The first frame with this build reached the GPU: its one-shot clear ran before it, or in an earlier run.
+			void Executed(PostProcessFeature&) override { clearPending = false; }
 
 		private:
 			/** @brief The readbacks that arrived since the last frame into the feature's UI values, and this frame's requests. */
@@ -250,9 +246,8 @@ namespace ORGPostChain
 			std::unique_ptr<GraphResources::StructuredBuffer> adaptation;
 			std::shared_ptr<Readback> readback = std::make_shared<Readback>();
 			LatchRegion<HistogramAutoExposure::AutoExposureCB> constants;
-			LatchRegion<Groups> clearGroups;
 			std::uint64_t shaderGeneration = 0;
-			std::uint32_t clears = 0;
+			bool clearPending = false;  // the history buffers are new and not cleared yet
 			bool reset = true;
 		};
 	}

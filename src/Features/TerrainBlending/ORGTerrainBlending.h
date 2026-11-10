@@ -1,6 +1,8 @@
 #pragma once
 
 #include <d3d11.h>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string_view>
 
@@ -29,6 +31,9 @@ namespace org
  *   by name (Integrations/TerrainBlending's frame texture).
  * All three are published (PublishedResources), so passes of other epochs are ordered after the blend.
  *
+ * Setup (TerrainBlending::SetupResources) makes the program and the textures and publishes them. The first depth pass imports the
+ * depths and registers the client; a resize or a new import registers it again, since the pass holds what it was made with.
+ *
  * On any failure the path stops for good: Terrain Blending makes its D3D11 textures and blends on D3D11 again.
  *
  * Everything here runs on the render thread. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
@@ -47,11 +52,20 @@ public:
 	/** @brief Reserves the DepthDone anchor when requested. Call before the render graph initializes (PostPostLoad). */
 	static void Reserve();
 
+	/** @brief The one instance. */
 	static ORGTerrainBlending& Get();
 
 	/**
-	 * @brief At Terrain Blending's depth hook, before it points the depth table at the blended depth: makes the textures and the client
-	 * the first time, and keeps the depth imports and the textures' size current.
+	 * @brief After the render graph initializes (TerrainBlending::SetupResources), when requested: makes the program and the
+	 * textures and publishes them. The device is the graph host's.
+	 * @param a_onFailed Called whenever the path stops (here or later): Terrain Blending's D3D11 textures come back.
+	 * @return Whether the blend is on the render graph; false keeps the D3D11 path.
+	 */
+	bool Setup(std::function<void()> a_onFailed = {});
+
+	/**
+	 * @brief At Terrain Blending's depth hook, before it points the depth table at the blended depth: imports the depths, follows
+	 * the main target's size, and registers the client when either changed.
 	 * @return Whether this frame blends on the graph; false: the D3D11 path.
 	 */
 	bool BeforeDepth();
@@ -62,23 +76,33 @@ public:
 	 */
 	bool Blend();
 
-	/** @brief Whether the textures are the graph's and the pass is registered. */
+	/** @brief Whether the textures are the graph's and the runtime is still up. */
 	bool Active() const;
 
 	/**
-	 * @brief TerrainBlending::ClearShaderCache: when the path stopped because DepthBlend.hlsl did not compile, the next BeforeDepth
-	 * sets it up again. Programs that built reload through the pipeline registry.
+	 * @brief TerrainBlending::ClearShaderCache: when the path stopped because DepthBlend.hlsl did not compile, sets it up again.
+	 * Programs that built reload through the pipeline registry.
 	 */
 	void ClearShaderCache();
 
-	/** @brief The blended depth's exported view (a_16bit: the R16 one); null when inactive. */
+	/**
+	 * @brief The blended depth's exported view (a_16bit: the R16 one); null when the graph does not hold this frame's blend
+	 * (Holds): Terrain Blending's D3D11 textures do.
+	 */
 	ID3D11ShaderResourceView* BlendedDepthSRV(bool a_16bit) const;
 
-	/** @brief The mask's exported view (t55); null when inactive. */
+	/** @brief The mask's exported view (t55); null when the graph does not hold this frame's blend (Holds). */
 	ID3D11ShaderResourceView* MaskSRV() const;
 
-	/** @brief The R32 blended depth's graph resource, published as kBlendedDepthId; null when inactive. */
+	/** @brief The R32 blended depth's graph resource, published as kBlendedDepthId; null when the graph does not hold this frame's blend. */
 	std::shared_ptr<org::Resource> BlendedDepthGraph() const;
+
+	/**
+	 * @brief Whether this frame's blend is the graph's: the path is active, BeforeDepth chose the graph, and Blend has not fallen
+	 * back to D3D11 since. The one decision the views above and Terrain Blending's own write follow, so a frame whose anchor ran
+	 * nothing is read from the D3D11 textures it blended into.
+	 */
+	bool Holds() const;
 
 	~ORGTerrainBlending();
 
@@ -88,13 +112,24 @@ public:
 private:
 	ORGTerrainBlending() = default;
 
-	/** @brief Makes the program and textures, imports the depths, registers the client and publishes. False, logged, on failure. */
-	bool Setup();
+	/** @brief Registers (or replaces) the client with the textures and imports as they are now. False, logged, on failure. */
+	bool RegisterClient();
 
 	/** @brief Stops the ORG path for good: Terrain Blending returns to its D3D11 textures. */
 	void Fail(const char* a_why);
 
+	/** @brief Where this frame's blend is: set by BeforeDepth (Planned or None), then by Blend (Written or Missed). */
+	enum class FrameBlend : std::uint8_t
+	{
+		None,     // no graph blend this frame: the D3D11 textures
+		Planned,  // the depth table names the graph's exports; the anchor has not run yet
+		Written,  // the anchor ran the blend
+		Missed,   // the anchor submitted nothing: Terrain Blending blended on D3D11
+	};
+
 	std::shared_ptr<Impl> impl;
+	std::function<void()> onFailed;
+	FrameBlend frame = FrameBlend::None;
 	bool failed = false;
 	bool programFailed = false;  // the failure was the program's compile, which a shader reload may fix
 };

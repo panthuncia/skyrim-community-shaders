@@ -54,7 +54,7 @@
 //
 //   #define ORG_SHARED_CONSTANTS
 //   #include "Common/OrgResources.hlsli"
-//   #define MY_RESOURCES(X)                  //       X(SHARED, ConstantBuffer, Shared, 0) //       X(SRV, Texture2D<float4>, InputTexture, 0)
+//   #define MY_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, InputTexture, 0)
 //   ORG_PUSH_BLOCK(MY_RESOURCES(ORG_HANDLE))
 //   #include "Common/SharedData.hlsli"
 //   MY_RESOURCES(ORG_RESOURCE)
@@ -70,6 +70,25 @@
 // register-bound as before. An ORG pass shader that defines ORG_HEADER_RESOURCES before including
 // this file reads them from the heap instead, and lists each one, of every such header it
 // includes, as an EXTERN entry.
+//
+// Large constant buffers read as globals: a shader whose D3D11 code reads a cbuffer's fields by
+// their bare names (not name.field) lists the fields once, as M(type, name) for a value and
+// A(type, name, count) for an array, and declares them with the ORG_GLOBAL_* macros:
+//
+//   #define MY_CB_FIELDS(M, A) M(float4, Tint) A(float4, Weights, 3)
+//   ORG_GLOBAL_LATCH_BEGIN(MyConstants, MyCB, 1)
+//   MY_CB_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+//   ORG_GLOBAL_LATCH_END(MyConstants, MyFrame, 1)
+//   #define ORG_GLOBAL_LATCH MyFrame
+//   MY_CB_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+//   #undef ORG_GLOBAL_LATCH
+//
+// D3D11: cbuffer MyCB : register(b1) holding the fields, as before; the statics expand to nothing.
+// ORG: struct MyConstants holding the fields, a LATCH entry MyFrame of it, and a static per field
+// copied from MyFrame, so the code reads the same names on both paths. The push block lists the
+// latch itself: ORG_HANDLE(LATCH, MyConstants, MyFrame, 1). ORG-only members may go between the
+// field list and ORG_GLOBAL_LATCH_END, under #if defined(CS_ORG_BINDLESS). The shader invokes the
+// field list itself, as it does its resource list.
 //
 // Not covered: arrays of resources and append/consume counters. A list cannot hold another list
 // (FXC rejects a macro passed on as an argument), so the shared handles are one SHARED entry.
@@ -107,6 +126,15 @@
 #	define ORG_RESOURCE_SHARED(T, N, R)
 #	define ORG_RESOURCE(K, T, N, R) ORG_RESOURCE_##K(T, N, R)
 
+#	define ORG_GLOBAL_LATCH_BEGIN(T, B, R) struct T {
+#	define ORG_GLOBAL_LATCH_END(T, N, R) \
+		};                               \
+		ORG_RESOURCE_LATCH(T, N, R)
+#	define ORG_GLOBAL_MEMBER(T, N) T N;
+#	define ORG_GLOBAL_ARRAY(T, N, C) T N[C];
+#	define ORG_GLOBAL_STATIC(T, N) static T N = ORG_GLOBAL_LATCH.N;
+#	define ORG_GLOBAL_STATIC_ARRAY(T, N, C) static T N[C] = ORG_GLOBAL_LATCH.N;
+
 #else
 
 // FXC rejects an empty macro argument, so the handles expand to their kinds, which
@@ -125,6 +153,13 @@
 #	define ORG_RESOURCE_EXTERN_LATCH(T, N, R)
 #	define ORG_RESOURCE_SHARED(T, N, R)
 #	define ORG_RESOURCE(K, T, N, R) ORG_RESOURCE_##K(T, N, R)
+
+#	define ORG_GLOBAL_LATCH_BEGIN(T, B, R) cbuffer B : register(b##R) {
+#	define ORG_GLOBAL_LATCH_END(T, N, R) };
+#	define ORG_GLOBAL_MEMBER(T, N) T N;
+#	define ORG_GLOBAL_ARRAY(T, N, C) T N[C];
+#	define ORG_GLOBAL_STATIC(T, N)
+#	define ORG_GLOBAL_STATIC_ARRAY(T, N, C)
 
 #endif
 

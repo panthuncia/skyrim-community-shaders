@@ -41,7 +41,7 @@
  *    return a reason when the graph cannot run it as it is set now (a debug readback, a format it cannot import). A
  *    changed key rebuilds the whole chain, so never push a value that changes every frame: those go in the latch.
  * 5. Build (render thread, at a rebuild): read Builder::Current(), create the outputs with Builder::CreateImage, add the
- *    passes (Draw, Dispatch, Copy, or Add for a custom pass), reserve latch regions, then SetCurrent(output) when the
+ *    passes (Draw, Dispatch, or Add for a custom pass), reserve latch regions, then SetCurrent(output) when the
  *    effect replaces the image (WritesToMainTexture). An effect that only produces side data (bloom, exposure) leaves
  *    Current alone and Publishes its result by name, and its constants by PublishLatch; Composite Finds them under the
  *    names in ORGPostChain::Published. A mip chain is one CreateMipChain image, read and written a mip at a time through
@@ -50,8 +50,9 @@
  *    them across builds (a first build blocks on the compile). A shader's SHARED entry is Bind::Shared:
  *    the chain then uploads CS's shared constants at the anchor (FrameBuffer, SharedData: frame count, depth params).
  * 6. Commit (in the epoch, every frame): write this frame's values into the regions Build reserved. Work that runs only
- *    on some frames (a LUT regenerated on a settings change) is an indirect dispatch whose group counts are in the latch
- *    (ComputeDispatch::indirect), so the recording stays the same.
+ *    on some frames (a LUT regenerated on a settings change) is a dispatch through its own gate entry (Builder::Gate,
+ *    ComputeDispatch::gate) that Commit opens on those frames, so the recording stays the same. Such work counts as done
+ *    in Executed, which runs after a frame whose commit reached the GPU with this build's passes, not in Commit.
  * 7. Resources that live across frames (history, adaptation, a baked LUT) belong to the Effect object, which lives for
  *    the session: create them as GraphResources with Lifetime::History or Persistent and Builder::Register them at each
  *    build. Everything per frame is a chain image.
@@ -60,8 +61,13 @@
  * 9. Names: passes "cs.pp.<effect>.<step>" (Builder adds the prefix), images "PostProcessing::<Effect>::<Name>", as the
  *    D3D11 resources are named.
  *
- * Threads: Update and Build run on the render thread, Commit inside the epoch (render thread, before submission). The
- * passes' Prepare and Record run on the graph host's thread and read only what they were made with and the latch.
+ * Every draw and dispatch of the chain runs through the chain's run gate (RenderGraph::RunGate): the chain's commit opens
+ * the draws and the fixed dispatches, and each effect opens its own entries. A frame the chain does not run (the Tonemap
+ * anchor runs for another client) therefore does no chain work, and the recording is kept.
+ *
+ * Threads: Update and Build run on the render thread, Commit inside the epoch (render thread, before submission), Executed
+ * after the run. The passes' Prepare and Record run on the graph host's thread and read only what they were made with and the
+ * latch.
  *
  * Translation units that include this header include <rhi_interop_vulkan.h> first (volk before any Vulkan header).
  */
@@ -69,12 +75,12 @@
 #if defined(CS_HAS_RENDER_GRAPH)
 
 #	include "Features/PostProcessing.h"
+#	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/RasterProgram.h"
 
 #	include <array>
-#	include <atomic>
 #	include <cstdint>
 #	include <functional>
 #	include <memory>
@@ -97,13 +103,21 @@ namespace GraphResources
 	class Resource;
 }
 
+namespace RenderGraph
+{
+	class RunGate;
+}
+
 namespace ORGPostChain
 {
 	/** @brief The latch bytes one build may reserve for every effect together, per frame slot. */
 	inline constexpr std::uint32_t kLatchBytes = 16384;
 
 	/** @brief An Image or Bind that covers every mip of its texture (the texture's default view). */
-	inline constexpr std::uint32_t kAllMips = UINT32_MAX;
+	inline constexpr std::uint32_t kAllMips = RenderGraph::AnchorPasses::kAllMips;
+
+	/** @brief The run gate entries one build may use: the draws' entry, one per distinct fixed dispatch size, and the effects' own. */
+	inline constexpr std::uint32_t kGateEntries = 128;
 
 	/** @brief A texture of the chain: the graph resource and its format, or one mip of it (Mip). */
 	struct Image
@@ -122,9 +136,6 @@ namespace ORGPostChain
 			return image;
 		}
 	};
-
-	/** @brief The name CODBloom publishes its accumulated bloom under: mip 1 of its chain, which Composite upsamples. */
-	inline constexpr const char* kBloomOutput = "PostProcessing::CODBloom::Bloom";
 
 	/** @brief What a build is made for: kMAIN's size and the main targets' formats. */
 	struct Shape
@@ -153,7 +164,11 @@ namespace ORGPostChain
 	 */
 	namespace Published
 	{
-		// COD Bloom and Lens Flare declare their own names (kBloomOutput, kLensFlareOutput); Composite reads them by those ids.
+		// CODBloom: the accumulated bloom, mip 1 of its chain (a published Image of that mip), which Composite upsamples.
+		inline constexpr std::string_view kBloomOutput = "PostProcessing::CODBloom::Bloom";
+		// LensFlare: the ghosts and halo, RGBA16F, at max(width / 2, 1) x max(height / 2, 1) of the chain's Shape
+		// (LensFlare::texGhostHalo's size, Composite's FlareSize).
+		inline constexpr std::string_view kLensFlareOutput = "PostProcessing::LensFlare::GhostHalo";
 		// PhysicalGlare: the glare, the size of the chain's images.
 		inline constexpr std::string_view kGlare = "PostProcessing::PhysicalGlare::Output";
 		// HistogramAutoExposure: the adapted luminance (a structured buffer of one float) and a HistogramAutoExposure::AutoExposureCB.
@@ -167,38 +182,36 @@ namespace ORGPostChain
 	}
 
 	/**
-	 * @brief One entry of a pass's push block, in the shader's resource list order (ShaderBindings.h): SRV and UAV entries
-	 * are declared resources, Handle a sampler or another descriptor, Latch a LATCH entry's two words, Unused a handle the
-	 * shader never reads on this pass (another entry point's resource, the LUT type not loaded), Shared a SHARED entry's four
-	 * words (CS's shared constant buffers, SharedConstants.h; the chain's client then uploads them at the anchor).
+	 * @brief A run gate entry an effect owns (Builder::Gate): the dispatches through it run only on the frames Commit opens it
+	 * (CommitContext::Open), with the group counts given there.
 	 */
-	struct Bind
+	struct GateEntry
 	{
-		enum class Kind : std::uint8_t
-		{
-			Srv,
-			Uav,
-			Handle,
-			Latch,
-			Shared,
-		};
+		std::uint32_t index = 0;
+	};
 
-		Kind kind = Kind::Handle;
-		std::shared_ptr<org::Resource> resource;
-		std::uint32_t value = 0;       // Handle: the descriptor index; Latch: the region's offset
-		std::uint32_t mip = kAllMips;  // Srv and Uav: the one mip the view covers, or the default view
+	/**
+	 * @brief One entry of a pass's push block (RenderGraph::AnchorPasses::Bind), with the chain's Image and LatchRegion forms.
+	 * SRV and UAV entries are declared resources, Handle a sampler or another descriptor, Latch a LATCH entry's two words,
+	 * Unused a handle the shader never reads on this pass (another entry point's resource, the LUT type not loaded), Shared a
+	 * SHARED entry's four words (CS's shared constant buffers, SharedConstants.h; the chain's client then uploads them at the
+	 * anchor).
+	 */
+	struct Bind : RenderGraph::AnchorPasses::Bind
+	{
+		using Base = RenderGraph::AnchorPasses::Bind;
 
-		static Bind Srv(std::shared_ptr<org::Resource> a_resource) { return { Kind::Srv, std::move(a_resource), 0 }; }
-		static Bind Srv(const Image& a_image) { return { Kind::Srv, a_image.graph, 0, a_image.mip }; }
-		static Bind Uav(std::shared_ptr<org::Resource> a_resource) { return { Kind::Uav, std::move(a_resource), 0 }; }
-		static Bind Uav(const Image& a_image) { return { Kind::Uav, a_image.graph, 0, a_image.mip }; }
-		static Bind Handle(std::uint32_t a_index) { return { Kind::Handle, nullptr, a_index }; }
-		static Bind Unused() { return Handle(0); }
-		static Bind Shared() { return { Kind::Shared, nullptr, 0 }; }
+		static Bind Srv(std::shared_ptr<org::Resource> a_resource) { return { Base::Srv(std::move(a_resource)) }; }
+		static Bind Srv(const Image& a_image) { return { Base::Srv(a_image.graph, a_image.mip) }; }
+		static Bind Uav(std::shared_ptr<org::Resource> a_resource) { return { Base::Uav(std::move(a_resource)) }; }
+		static Bind Uav(const Image& a_image) { return { Base::Uav(a_image.graph, a_image.mip) }; }
+		static Bind Handle(std::uint32_t a_index) { return { Base::Handle(a_index) }; }
+		static Bind Unused() { return { Base::Unused() }; }
+		static Bind Shared() { return { Base::Shared() }; }
 		template <class T>
 		static Bind Latch(const LatchRegion<T>& a_region)
 		{
-			return { Kind::Latch, nullptr, a_region.offset };
+			return { Base::Latch(a_region.offset) };
 		}
 	};
 
@@ -212,17 +225,19 @@ namespace ORGPostChain
 		std::optional<RasterProgram::Viewport> viewport;  // default: the whole target or its mip (Builder::MipViewport)
 	};
 
-	/** @brief A compute pass: fixed group counts, or (indirect) three uints at a latch offset that Commit writes. */
+	/**
+	 * @brief A compute pass. With fixed group counts it runs on every frame the chain runs. With gate it runs on the frames
+	 * Commit opens that entry, with the counts given there. once: a one-shot pass with fixed group counts (the clear of a new
+	 * history resource), which runs at the anchor's next run whether the chain runs or not, so it reads no latch entry.
+	 */
 	struct ComputeDispatch
 	{
 		std::string name;
 		std::shared_ptr<const ComputeProgram> program;
 		std::vector<Bind> bindings;
 		std::array<std::uint32_t, 3> groups{ 1, 1, 1 };
-		std::optional<LatchRegion<std::array<std::uint32_t, 4>>> indirect;
-		// Set when the pass is prepared to run (the chain on): the build is then in the graph, and every commit after the one
-		// before that preparation reaches the GPU. For work an effect counts done only once it ran (a PSF regenerated on a change).
-		std::shared_ptr<std::atomic<bool>> prepared;
+		std::optional<GateEntry> gate;
+		bool once = false;
 	};
 
 	struct BuildState;
@@ -281,6 +296,9 @@ namespace ORGPostChain
 			return offset ? std::optional<LatchRegion<T>>(LatchRegion<T>{ *offset }) : std::nullopt;
 		}
 
+		/** @brief Reserves a run gate entry for dispatches that run on some frames only (ComputeDispatch::gate). */
+		GateEntry Gate();
+
 		/** @brief Reserves a latch region for a T: 16-byte aligned, at most kLatchBytes for the whole build. */
 		template <class T>
 		LatchRegion<T> Latch()
@@ -314,10 +332,10 @@ namespace ORGPostChain
 		void Draw(FullscreenDraw a_draw);
 		void Dispatch(ComputeDispatch a_dispatch);
 
-		/** @brief A copy of a whole image into another of the same size and format (whole images: no Image::Mip). */
-		void Copy(std::string_view a_name, const Image& a_source, const Image& a_target);
-
-		/** @brief A custom pass: make is called at each graph build of the anchor, as FrameAnchors::PassDesc::make. */
+		/**
+		 * @brief A custom pass: make is called at each graph build of the anchor, as FrameAnchors::PassDesc::make. It has no
+		 * gate: it runs on every run of the anchor, so it decides in Prepare whether it has work.
+		 */
 		void Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make);
 
 		/** @brief Marks the build failed (an effect that cannot build); the reason is logged. */
@@ -327,7 +345,8 @@ namespace ORGPostChain
 
 	private:
 		std::uint32_t Reserve(std::uint32_t a_bytes);
-		std::string PassName(std::string_view a_step) const;
+		std::string Step(std::string_view a_step) const;
+		std::optional<std::uint32_t> FixedEntry(const std::array<std::uint32_t, 3>& a_groups);
 		void PublishLatchBytes(std::string_view a_name, std::uint32_t a_offset, std::uint32_t a_size);
 		std::optional<std::uint32_t> FindLatchBytes(std::string_view a_name, std::uint32_t a_size);
 
@@ -337,12 +356,12 @@ namespace ORGPostChain
 		std::string effect;
 	};
 
-	/** @brief What Commit writes through: the build's latch at this execution's frame slot. */
+	/** @brief What Commit writes through: the build's latch at this execution's frame slot, and its run gate. */
 	class CommitContext
 	{
 	public:
-		CommitContext(const org::LatchBlock& a_latch, std::uint32_t a_slot) :
-			latch(a_latch), slot(a_slot) {}
+		CommitContext(const org::LatchBlock& a_latch, std::uint32_t a_slot, const RenderGraph::RunGate& a_gate) :
+			latch(a_latch), slot(a_slot), gate(a_gate) {}
 
 		template <class T>
 		void Write(const LatchRegion<T>& a_region, const T& a_value) const
@@ -350,11 +369,15 @@ namespace ORGPostChain
 			WriteBytes(a_region.offset, &a_value, sizeof(T));
 		}
 
+		/** @brief The dispatches through a_entry run this frame with these group counts. They are closed on every other frame. */
+		void Open(GateEntry a_entry, std::uint32_t a_x, std::uint32_t a_y = 1, std::uint32_t a_z = 1) const;
+
 	private:
 		void WriteBytes(std::uint32_t a_offset, const void* a_data, std::size_t a_size) const;
 
 		const org::LatchBlock& latch;
 		std::uint32_t slot;
+		const RenderGraph::RunGate& gate;
 	};
 
 	/**
@@ -383,6 +406,12 @@ namespace ORGPostChain
 
 		/** @brief In the epoch, each frame: this frame's values into the regions Build reserved. */
 		virtual void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) = 0;
+
+		/**
+		 * @brief After a frame whose Commit reached the GPU with this build's passes (FrameAnchors::ClientDesc::executed): the
+		 * work that commit opened is done. Not called for a frame whose epoch ran an older build. Render thread.
+		 */
+		virtual void Executed(PostProcessFeature& a_feature) { (void)a_feature; }
 	};
 
 	// The ported sub-effects (src/Features/PostProcessing/ORG/). Add a port's factory here and in MakeEffect.
@@ -391,12 +420,6 @@ namespace ORGPostChain
 	std::unique_ptr<Effect> MakeLUT();
 	std::unique_ptr<Effect> MakeBorder();
 	std::unique_ptr<Effect> MakeLensFlare();
-
-	/**
-	 * @brief Lens Flare's published side output, which Composite reads: the ghosts and halo, RGBA16F, at max(width / 2, 1) x
-	 * max(height / 2, 1) of the chain's Shape (LensFlare::texGhostHalo's size, Composite's FlareSize).
-	 */
-	inline constexpr std::string_view kLensFlareOutput = "PostProcessing::LensFlare::GhostHalo";
 	std::unique_ptr<Effect> MakeCODBloom();
 	std::unique_ptr<Effect> MakePhysicalGlare();
 	std::unique_ptr<Effect> MakeDoF();

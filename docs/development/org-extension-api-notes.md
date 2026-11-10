@@ -662,9 +662,8 @@ Keys used so far:
 - **Where it fits:** a client at the Tonemap anchor that registers again (`FrameAnchors::Register` with the same id) when
   unless the graph loses it.
 - **Who:** CS's TruePBR glints noise (`src/TruePBR/ORGGlintsNoise.cpp`, `CS_ORG_GLINTS`); any plugin with a generated LUT.
-- **Where it fits:** today the client registers a fill pass at the earliest anchor its readers follow (EarlyPrepass), is
-  active only until the commit of the epoch that carries it, then calls `FrameAnchors::Refresh` so the next build leaves
-  the pass out. The texture is a Persistent `GraphResources` twin, published for Drawcall Limit Fix. A framework answer
+- **Where it fits:** the client registers the fill as a one-shot pass (`PassDesc::once`) at the earliest anchor its readers
+  follow (EarlyPrepass), and binds the texture once `ClientDesc::executed` reports the run that carried it. The texture is a Persistent `GraphResources` twin, published for Drawcall Limit Fix. A framework answer
   would be an "initialize" callback on a persistent resource, which the graph runs once before the resource's first use
   in any epoch and again after a device or graph reset. There is no reset event today: a failed graph returns the
   feature to D3D11, which makes the texture again.
@@ -874,10 +873,9 @@ Keys used so far:
   graph may still run the previous one, whose passes read the previous latch, so work marked done there never happens.
 - **Who:** CS's Physical Glare (`ORG/ORGPhysicalGlare.cpp`); Color Grading's LUT bake has the same shape; TruePBR's
   glints noise fill met it first.
-- **Where it fits:** `ORGPostChain::ComputeDispatch::prepared` is a flag the pass sets when it is prepared with the chain
-  on. The effect keeps the request of the last commit and counts it made at the next commit once the flag is set; until
-  then it asks again each frame. An API would give the commit the build (or a generation) the epoch executes, or a
-  per-pass "ran in epoch N" receipt, so a client needs no flag of its own.
+- **Where it fits:** answered by `FrameAnchors::ClientDesc::executed` (lane L3). The chain forwards it to each effect's
+  `Effect::Executed`: the effect keeps what this frame's commit asked for and counts it made there; a frame whose epoch ran
+  an older build gets no call, so the next commit asks again.
 - **Found by:** P3 W3, Physical Glare (2026-11-09).
 
 ### Side outputs at the work size, not the screen size

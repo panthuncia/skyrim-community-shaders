@@ -164,42 +164,6 @@ namespace
 		return S_OK;
 	}
 
-	/**
-	 * @brief Copies the crop of a render-graph readback (ORGScreenshot) into `image`. Worker thread.
-	 * @return False when the readback does not hold the crop.
-	 */
-	bool PopulateScratchImageFromReadback(
-		const std::vector<std::byte>& data,
-		uint64_t offset,
-		uint32_t rowPitch,
-		uint32_t sourceWidth,
-		uint32_t sourceHeight,
-		uint32_t cropX,
-		uint32_t cropY,
-		DXGI_FORMAT format,
-		uint32_t width,
-		uint32_t height,
-		DirectX::ScratchImage& image)
-	{
-		const size_t bytesPerPixel = DirectX::BitsPerPixel(format) / 8;
-		if (bytesPerPixel == 0 || width == 0 || height == 0 || cropX + width > sourceWidth || cropY + height > sourceHeight)
-			return false;
-		const size_t rowBytes = static_cast<size_t>(width) * bytesPerPixel;
-		// The last row's end must be inside the readback.
-		const size_t lastRowEnd = offset + static_cast<size_t>(cropY + height - 1) * rowPitch + static_cast<size_t>(cropX) * bytesPerPixel + rowBytes;
-		if (lastRowEnd > data.size())
-			return false;
-		if (FAILED(image.Initialize2D(format, width, height, 1, 1)))
-			return false;
-		const auto* destImage = image.GetImage(0, 0, 0);
-		if (!destImage || destImage->rowPitch < rowBytes)
-			return false;
-		const auto* source = reinterpret_cast<const uint8_t*>(data.data()) + offset + static_cast<size_t>(cropX) * bytesPerPixel;
-		for (size_t row = 0; row < height; ++row)
-			memcpy(destImage->pixels + row * destImage->rowPitch, source + (cropY + row) * rowPitch, rowBytes);
-		return true;
-	}
-
 	const DirectX::Image* PrepareSdrImage(const DirectX::ScratchImage& sourceImage, DirectX::ScratchImage& convertedImage)
 	{
 		if (sourceImage.GetMetadata().format == DXGI_FORMAT_B8G8R8X8_UNORM) {
@@ -377,27 +341,6 @@ namespace
 		src.engineTarget = static_cast<std::int32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER);
 		src.importName = "screenshot.framebuffer";
 		return src;
-	}
-
-	// What a capture would copy now, for ORGScreenshot::Prime, without HDR's clean composite (a dispatch): false while that is
-	// the source.
-	bool CaptureSourceHint(winrt::com_ptr<ID3D11Texture2D>& holder, ORGScreenshot::Source& source)
-	{
-		auto* renderer = globals::game::renderer;
-		if (!renderer)
-			return false;
-		if (IsFlatHdrScreenshotCapture()) {
-			if (Menu::GetSingleton()->IsOpen())
-				return false;
-			source = { .texture = ResolveDisplayedBackBuffer(holder), .importName = "screenshot.back-buffer" };
-			return source.texture != nullptr;
-		}
-		auto& slot = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
-		source = { .texture = ResolveSlotTexture(slot, holder),
-			.srv = slot.SRV,
-			.engineTarget = static_cast<std::int32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER),
-			.importName = "screenshot.framebuffer" };
-		return source.texture != nullptr;
 	}
 
 	// True when our hotkey is the single PrintScreen key vanilla binds. Anything
@@ -588,7 +531,14 @@ bool ScreenshotFeature::IsInMenu() const
 void ScreenshotFeature::PostPostLoad()
 {
 	ApplyVanillaScreenshotSetting();
-	ORGScreenshot::Get().ReserveAnchor();
+	ORGScreenshot::Reserve();
+}
+
+void ScreenshotFeature::SetupResources()
+{
+	// A later graph failure needs nothing here: Capture copies with D3D11 once ORGScreenshot is inactive.
+	if (ORGScreenshot::Requested())
+		(void)ORGScreenshot::Get().Setup({});
 }
 
 void ScreenshotFeature::ApplyVanillaScreenshotSetting()
@@ -888,12 +838,6 @@ void ScreenshotFeature::Reset()
 void ScreenshotFeature::ProcessCaptureRequest()
 {
 	ProcessPendingReadbacks();
-	if (ORGScreenshot::Requested()) {
-		winrt::com_ptr<ID3D11Texture2D> hintKeepAlive;
-		ORGScreenshot::Source hint{};
-		if (CaptureSourceHint(hintKeepAlive, hint))
-			ORGScreenshot::Get().Prime(hint);
-	}
 	captureOutputPath.clear();
 	{
 		std::lock_guard lock(requestedPathsMutex);
@@ -997,14 +941,15 @@ void ScreenshotFeature::ScreenshotWorkerLoop()
 		}
 
 		// A render-graph readback (ORGScreenshot): its crop into the image here, off the render thread.
-		if (!screenshot.readback.empty()) {
-			const bool copied = PopulateScratchImageFromReadback(screenshot.readback, screenshot.readbackOffset, screenshot.readbackRowPitch,
-				screenshot.readbackWidth, screenshot.readbackHeight, screenshot.cropX, screenshot.cropY, screenshot.format, screenshot.width,
-				screenshot.height, screenshot.image);
+		if (!screenshot.readback.data.empty()) {
+			const bool copied = ORGScreenshot::Crop(screenshot.readback, screenshot.cropX, screenshot.cropY, screenshot.width, screenshot.height,
+				screenshot.format, screenshot.image);
+			const auto readbackWidth = screenshot.readback.width;
+			const auto readbackHeight = screenshot.readback.height;
 			screenshot.readback = {};
 			if (!copied) {
 				logger::error("Screenshot failed: the render graph's readback ({}x{}) does not hold the {}x{} capture at {},{}.",
-					screenshot.readbackWidth, screenshot.readbackHeight, screenshot.width, screenshot.height, screenshot.cropX, screenshot.cropY);
+					readbackWidth, readbackHeight, screenshot.width, screenshot.height, screenshot.cropX, screenshot.cropY);
 				ShowInGameNotification("Screenshot failed - see CommunityShaders.log");
 				continue;
 			}
@@ -1103,35 +1048,27 @@ void ScreenshotFeature::Capture()
 
 	const char* extension = saveAsHdrAvif ? ".avif" : (saveAsHdrPng || saveAsSdrPng ? ".png" : ".bmp");
 	const auto outputPath = captureOutputPath.empty() ? BuildScreenshotPath(screenshotPath, extension) : std::filesystem::path(captureOutputPath).replace_extension(extension);
-	auto makeScreenshot = [&] {
-		PendingScreenshot made;
-		made.format = srcDesc.Format;
-		made.width = copyW;
-		made.height = copyH;
-		made.saveAsHdrPng = saveAsHdrPng;
-		made.saveAsHdrAvif = saveAsHdrAvif;
-		made.saveAsSdrPng = saveAsSdrPng;
-		made.hdrPngBitDepth = static_cast<int>(hdrPngBitDepth);
-		made.outputPath = outputPath;
-		made.copyToClipboard = copyToClipboard && captureOutputPath.empty();
-		made.notify = captureOutputPath.empty();
-		return made;
-	};
-	PendingScreenshot screenshot = makeScreenshot();
+	PendingScreenshot screenshot;
+	screenshot.format = srcDesc.Format;
+	screenshot.width = copyW;
+	screenshot.height = copyH;
+	screenshot.saveAsHdrPng = saveAsHdrPng;
+	screenshot.saveAsHdrAvif = saveAsHdrAvif;
+	screenshot.saveAsSdrPng = saveAsSdrPng;
+	screenshot.hdrPngBitDepth = static_cast<int>(hdrPngBitDepth);
+	screenshot.outputPath = outputPath;
+	screenshot.copyToClipboard = copyToClipboard && captureOutputPath.empty();
+	screenshot.notify = captureOutputPath.empty();
 
 	// The render graph's readback (CS_ORG_SCREENSHOT=1): the whole source is copied, and the worker crops it. Not for the UI
 	// composite, which is D3D11's.
-	if (ORGScreenshot::Requested() && !src.uiSRV) {
+	if (ORGScreenshot::Get().IsActive() && !src.uiSRV) {
 		screenshot.cropX = copyX;
 		screenshot.cropY = copyY;
 		auto shared = std::make_shared<PendingScreenshot>(std::move(screenshot));
 		const ORGScreenshot::Source source{ .texture = sourceTexture, .srv = src.srv, .engineTarget = src.engineTarget, .importName = src.importName };
 		const bool onGraph = ORGScreenshot::Get().Capture(source, [this, shared](ORGScreenshot::Pixels&& a_pixels) {
-			shared->readback = std::move(a_pixels.data);
-			shared->readbackOffset = a_pixels.offset;
-			shared->readbackRowPitch = a_pixels.rowPitch;
-			shared->readbackWidth = a_pixels.width;
-			shared->readbackHeight = a_pixels.height;
+			shared->readback = std::move(a_pixels);
 			try {
 				EnsureWorkerThread();
 				EnqueueScreenshot(std::move(*shared));
@@ -1139,18 +1076,11 @@ void ScreenshotFeature::Capture()
 				logger::error("Screenshot failed: could not hand off to worker thread: {}", e.what());
 			}
 		});
-		if (!onGraph) {
-			screenshot = std::move(*shared);
-		} else if (ORGScreenshot::CompareRequested()) {
-			// The same frame copied with D3D11 too, saved beside it (CS_ORG_SCREENSHOT_COMPARE).
-			screenshot = makeScreenshot();
-			screenshot.outputPath.replace_filename(outputPath.stem().string() + "-d3d11" + outputPath.extension().string());
-			screenshot.copyToClipboard = false;
-			screenshot.notify = false;
-		} else {
+		if (onGraph) {
 			logger::debug("Screenshot copied on the render graph from {}", src.description);
 			return;
 		}
+		screenshot = std::move(*shared);
 	}
 
 	D3D11_TEXTURE2D_DESC stagingDesc = srcDesc;

@@ -9,6 +9,11 @@
 struct ID3D11ShaderResourceView;
 struct ID3D11Texture2D;
 
+namespace DirectX
+{
+	class ScratchImage;
+}
+
 /**
  * @brief The Screenshot feature's GPU readback on the render graph (CS_ORG_SCREENSHOT=1).
  *
@@ -16,13 +21,11 @@ struct ID3D11Texture2D;
  * texture. The pass copies the capture source (the framebuffer, the back buffer, or HDR's clean composite) into one of ORG's
  * readback buffers. The readback service hands the bytes back once the GPU copy is done; the frame never waits for it.
  *
- * Captures are rare, so the client is active only at a capture point that armed one: other frames submit nothing. The epoch's
- * ticket is prepared ahead of the hook, so the pass's revision names the capture it prepared for. A capture armed after that
- * makes the ticket stale and it is prepared again, now with the copy. Prime registers the client and imports the source every
- * frame, and a new source runs the anchor once without a capture, so its graph is built before a capture needs it. A capture
- * whose copy was not in the epoch submitted at its capture point is withdrawn, and the caller copies it with D3D11.
+ * The copy is a one-shot pass (FrameAnchors::PassDesc::once). Other frames do not have it in the anchor's graph, so they submit
+ * nothing for it. A capture arms it (FrameAnchors::Rearm) with that capture's request and source, then runs the anchor. A
+ * capture whose copy was not in the epoch submitted at its capture point is withdrawn, and the caller copies it with D3D11.
  *
- * On any failure the feature uses its D3D11 staging copy. Render thread throughout.
+ * On any failure the feature uses its D3D11 staging copy. Render thread throughout, except Crop.
  *
  * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
@@ -54,43 +57,45 @@ public:
 	/** @brief Whether CS_ORG_SCREENSHOT=1 is set. */
 	static bool Requested();
 
-	/**
-	 * @brief Whether CS_ORG_SCREENSHOT_COMPARE=1 is set as well: a capture the graph takes is also copied with D3D11 from the same
-	 * frame, saved beside it with a "-d3d11" suffix.
-	 */
-	static bool CompareRequested();
-
 	static ORGScreenshot& Get();
 
 	/** @brief Reserves the Capture anchor when requested. Call before the render graph initializes (the feature's PostPostLoad). */
-	void ReserveAnchor();
+	static void Reserve();
 
 	/**
-	 * @brief Every capture point, before any Capture: registers the client and imports a_source (what a capture would copy now),
-	 * so the anchor's graph holds the copy pass before a capture arrives.
+	 * @brief Registers the anchor client (the feature's SetupResources). False, logged, keeps every capture on D3D11.
+	 * @param a_onFailed Called when the graph fails later; captures then use D3D11.
 	 */
-	void Prime(const Source& a_source);
+	bool Setup(std::function<void()> a_onFailed);
+
+	/** @brief Whether captures go through the graph: the client is registered and the runtime is still up. */
+	bool IsActive() const;
 
 	/**
 	 * @brief At the capture point: copies a_source on the graph now, in the Capture anchor's epoch. a_onPixels runs from a later
 	 * Poll, once the GPU copy is done.
-	 * @return False when the graph cannot take it (not requested, inactive, the source cannot be imported, the epoch failed, or
-	 * the epoch submitted at this point did not hold the copy): the caller copies with D3D11 instead.
+	 * @return False when the graph cannot take it (inactive, the source cannot be imported, the epoch failed, or the epoch
+	 * submitted at this point did not hold the copy): the caller copies with D3D11 instead.
 	 */
 	bool Capture(const Source& a_source, OnPixels a_onPixels);
 
 	/** @brief Every capture point, after any Capture: hands finished readbacks to their callbacks, and runs the anchor. */
 	void Poll();
 
+	/**
+	 * @brief Copies the a_width x a_height crop at a_x, a_y of a readback into a_image, in a_format. Any thread: the encoding
+	 * worker calls it, off the render thread.
+	 * @return False when the readback does not hold the crop.
+	 */
+	static bool Crop(const Pixels& a_pixels, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_width, std::uint32_t a_height, DXGI_FORMAT a_format,
+		DirectX::ScratchImage& a_image);
+
 	~ORGScreenshot();
 
 private:
 	ORGScreenshot() = default;
 
-	/** @brief Registers the anchor client once the runtime is up. False, for good after a failure, when the graph cannot take captures. */
-	bool EnsureRegistered();
-
-	/** @brief The graph import of a_source, made the copy pass's source (the graph built again, once) when it is new. */
+	/** @brief The graph import of a_source, which the copy pass reads from its next build. */
 	bool SetSource(const Source& a_source);
 
 	struct Impl;

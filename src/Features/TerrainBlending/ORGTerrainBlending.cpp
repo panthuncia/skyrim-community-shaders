@@ -5,19 +5,11 @@
 
 #include "Features/TerrainBlending/ORGTerrainBlending.h"
 
-#include <cstring>
-
-namespace
-{
-	constexpr const char* kEnvSwitch = "CS_ORG_TERRAIN_BLENDING";
-}
+#include "RenderGraph/Switches.h"
 
 bool ORGTerrainBlending::Requested()
 {
-	static const bool requested = [] {
-		char value[8]{};
-		return GetEnvironmentVariableA(kEnvSwitch, value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}();
+	static const bool requested = Switches::On("CS_ORG_TERRAIN_BLENDING");
 	return requested;
 }
 
@@ -33,6 +25,7 @@ ORGTerrainBlending::~ORGTerrainBlending() = default;
 
 #	include "Features/TerrainBlending.h"
 #	include "Globals.h"
+#	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
@@ -42,11 +35,10 @@ ORGTerrainBlending::~ORGTerrainBlending() = default;
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/ExternalTextureResource.h>
 
 #	include <array>
-#	include <vector>
+#	include <utility>
 
 namespace
 {
@@ -69,9 +61,11 @@ struct ORGTerrainBlending::Impl
 	std::unique_ptr<GraphResources::Texture2D> blendedDepth;
 	std::unique_ptr<GraphResources::Texture2D> blendedDepth16;
 	std::unique_ptr<GraphResources::Texture2D> mask;
-	// The engine's main depth and Terrain Blending's terrain depth, both D3D11 textures (imports).
+	// The engine's main depth and Terrain Blending's terrain depth, both D3D11 textures (imports), taken at the first depth pass.
 	std::shared_ptr<org::Resource> mainDepth;
 	std::shared_ptr<org::Resource> terrainDepth;
+	// Whether the client is registered with the textures and imports as they are now.
+	bool registered = false;
 
 	/** @brief The three twins, in the order they are published. */
 	std::array<std::pair<std::string_view, GraphResources::Texture2D*>, 3> Outputs() const
@@ -83,67 +77,7 @@ struct ORGTerrainBlending::Impl
 namespace
 {
 	using Impl = ORGTerrainBlending::Impl;
-
-	struct BlendBindings
-	{
-		org::DeclaredViewToken blendedDepth, blendedDepth16, mask, mainDepth, terrainDepth;
-	};
-
-	struct BlendFrame
-	{
-		std::shared_ptr<const ComputeProgram> program;
-		std::uint32_t groupsX = 0;
-		std::uint32_t groupsY = 0;
-	};
-
-	/** @brief min(main depth, terrain depth) into both blended depths, and the main depth into the mask, as the D3D11 path's dispatch and copy. */
-	class DepthBlendPass final : public org::TypedRenderGraphPass<DepthBlendPass, BlendFrame, BlendBindings>
-	{
-	public:
-		// At the build, on the render thread: the state as it is now (GraphResources' rule).
-		explicit DepthBlendPass(const Impl& a_impl) :
-			program(a_impl.program),
-			blendedDepth(a_impl.blendedDepth->Graph()),
-			blendedDepth16(a_impl.blendedDepth16->Graph()),
-			mask(a_impl.mask->Graph()),
-			mainDepth(a_impl.mainDepth),
-			terrainDepth(a_impl.terrainDepth),
-			// The whole texture: DepthBlend skips the threads past its edge. A smaller dynamic-resolution viewport only leaves pixels
-			// nothing reads.
-			groupsX((a_impl.blendedDepth->Desc().Width + kGroupSize - 1) / kGroupSize),
-			groupsY((a_impl.blendedDepth->Desc().Height + kGroupSize - 1) / kGroupSize)
-		{}
-
-		BlendBindings Declare(org::PassBuilder& a_builder)
-		{
-			a_builder.PreferQueue(org::QueueKind::Graphics);
-			return { a_builder.UnorderedAccess(blendedDepth).View(), a_builder.UnorderedAccess(blendedDepth16).View(), a_builder.UnorderedAccess(mask).View(),
-				a_builder.ShaderResource(mainDepth).View(), a_builder.ShaderResource(terrainDepth).View() };
-		}
-
-		void Revision(std::vector<std::uint64_t>& a_out) const
-		{
-			for (const void* part : { static_cast<const void*>(program.get()), static_cast<const void*>(blendedDepth.get()), static_cast<const void*>(blendedDepth16.get()),
-					 static_cast<const void*>(mask.get()), static_cast<const void*>(mainDepth.get()), static_cast<const void*>(terrainDepth.get()) })
-				a_out.push_back(reinterpret_cast<std::uintptr_t>(part));
-		}
-
-		BlendFrame Prepare(const BlendBindings&, const org::PassPrepareContext&) const { return { program, groupsX, groupsY }; }
-
-		static void Record(const BlendBindings& a_bindings, const BlendFrame& a_frame, org::PassRecordContext& a_recording)
-		{
-			if (!a_frame.program)
-				return;
-			const DepthBlendBlock block{ a_recording.Index(a_bindings.blendedDepth), a_recording.Index(a_bindings.blendedDepth16), a_recording.Index(a_bindings.mask),
-				a_recording.Index(a_bindings.mainDepth), a_recording.Index(a_bindings.terrainDepth) };
-			a_frame.program->Dispatch(a_recording, ShaderBindings::Data(block), a_frame.groupsX, a_frame.groupsY, 1);
-		}
-
-	private:
-		std::shared_ptr<const ComputeProgram> program;
-		std::shared_ptr<org::Resource> blendedDepth, blendedDepth16, mask, mainDepth, terrainDepth;
-		std::uint32_t groupsX, groupsY;
-	};
+	using RenderGraph::AnchorPasses::Bind;
 
 	/** @brief The engine's main depth, as a graph texture. Called before the depth table points its SRV at the blended depth. */
 	std::shared_ptr<org::Resource> MainDepth()
@@ -208,28 +142,63 @@ bool ORGTerrainBlending::Active() const
 
 void ORGTerrainBlending::ClearShaderCache()
 {
-	// A program that built reloads through the pipeline registry. Only a failed compile is tried again, at the next BeforeDepth.
+	// A program that built reloads through the pipeline registry. Only a failed compile is tried again.
 	if (failed && programFailed) {
 		failed = false;
 		programFailed = false;
+		Setup(onFailed);
 	}
+}
+
+bool ORGTerrainBlending::Holds() const
+{
+	return Active() && (frame == FrameBlend::Planned || frame == FrameBlend::Written);
 }
 
 ID3D11ShaderResourceView* ORGTerrainBlending::BlendedDepthSRV(bool a_16bit) const
 {
-	if (!Active())
+	if (!Holds())
 		return nullptr;
 	return a_16bit ? impl->blendedDepth16->SRV() : impl->blendedDepth->SRV();
 }
 
 ID3D11ShaderResourceView* ORGTerrainBlending::MaskSRV() const
 {
-	return Active() ? impl->mask->SRV() : nullptr;
+	return Holds() ? impl->mask->SRV() : nullptr;
 }
 
 std::shared_ptr<org::Resource> ORGTerrainBlending::BlendedDepthGraph() const
 {
-	return Active() ? impl->blendedDepth->Graph() : nullptr;
+	return Holds() ? impl->blendedDepth->Graph() : nullptr;
+}
+
+bool ORGTerrainBlending::RegisterClient()
+{
+	// One dispatch writes min(main depth, terrain depth) into both blended depths and the main depth into the mask, as the D3D11
+	// path's dispatch and copy. The whole texture: DepthBlend skips the threads past its edge. A smaller dynamic-resolution
+	// viewport only leaves pixels nothing reads.
+	const auto& desc = impl->blendedDepth->Desc();
+	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::DepthDone, kClientId, 0);
+	builder.Add(RenderGraph::AnchorPasses::Dispatch{ .name = "depth-blend",
+		.program = impl->program,
+		.bindings = { Bind::Uav(impl->blendedDepth->Graph()), Bind::Uav(impl->blendedDepth16->Graph()), Bind::Uav(impl->mask->Graph()), Bind::Srv(impl->mainDepth),
+			Bind::Srv(impl->terrainDepth) },
+		.groups = { (desc.Width + kGroupSize - 1) / kGroupSize, (desc.Height + kGroupSize - 1) / kGroupSize, 1 } });
+	if (builder.Failed()) {
+		logger::error("[ORG] Terrain Blending: {}", builder.Failure());
+		return false;
+	}
+
+	FrameAnchors::ClientDesc client{};
+	client.id = kClientId;
+	client.passes = builder.Take();
+	client.registerResources = [current = impl](org::RenderGraph& a_graph) {
+		for (const auto& [id, texture] : current->Outputs())
+			texture->Register(a_graph);
+	};
+	client.active = [] { return globals::features::terrainBlending.settings.Enabled != 0; };
+	client.onFailed = [] { Get().Fail("the render graph failed"); };
+	return FrameAnchors::Register(std::move(client));
 }
 
 void ORGTerrainBlending::Fail(const char* a_why)
@@ -240,16 +209,25 @@ void ORGTerrainBlending::Fail(const char* a_why)
 	Withdraw();
 	// The exports stay alive until Terrain Blending's depth table no longer names them.
 	auto old = std::move(impl);
-	globals::features::terrainBlending.UseD3D11BlendedDepth();
+	if (onFailed)
+		onFailed();
 	old.reset();
 }
 
-bool ORGTerrainBlending::Setup()
+bool ORGTerrainBlending::Setup(std::function<void()> a_onFailed)
 {
-	auto* host = RenderGraphRuntime::Get().Host();
+	if (!Requested() || failed || impl)
+		return impl != nullptr;
+	auto& runtime = RenderGraphRuntime::Get();
+	auto* host = runtime.Host();
+	if (!host || !runtime.IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DepthDone)) {
+		logger::warn("[ORG] Terrain Blending: CS_ORG_TERRAIN_BLENDING=1 but the render graph or its DepthDone anchor is not available; it stays on D3D11");
+		return false;
+	}
+	onFailed = std::move(a_onFailed);
 	UINT width = 0, height = 0;
-	if (!host || !MainSize(width, height)) {
-		Fail("the render graph or the main render target is missing");
+	if (!MainSize(width, height)) {
+		Fail("the main render target is missing");
 		return false;
 	}
 	auto next = std::make_shared<Impl>();
@@ -271,31 +249,8 @@ bool ORGTerrainBlending::Setup()
 			return false;
 		}
 	}
-	next->mainDepth = MainDepth();
-	next->terrainDepth = TerrainDepth();
-	if (!next->mainDepth || !next->terrainDepth) {
-		Fail("the main or the terrain depth could not be imported");
-		return false;
-	}
-
-	FrameAnchors::ClientDesc client{};
-	client.id = kClientId;
-	client.passes.push_back({ .name = std::string(kClientId) + ".depth-blend",
-		.anchor = FrameAnchors::Anchor::DepthDone,
-		.order = 0,
-		.kind = FrameAnchors::PassKind::Compute,
-		.make = [next]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DepthBlendPass>(*next); } });
-	client.registerResources = [next](org::RenderGraph& a_graph) {
-		for (const auto& [id, texture] : next->Outputs())
-			texture->Register(a_graph);
-	};
-	client.active = [] { return globals::features::terrainBlending.settings.Enabled != 0; };
-	client.onFailed = [] { Get().Fail("the render graph failed"); };
-	if (!FrameAnchors::Register(std::move(client))) {
-		Fail("its client could not be registered");
-		return false;
-	}
 	// Screen Space Shadows, Exponential Height Fog and Drawcall Limit Fix's colour passes read them by name, ordered after the blend.
+	// The client registers at the first depth pass, which imports the depths.
 	for (const auto& [id, texture] : next->Outputs()) {
 		if (!PublishedResources::Publish(id, *texture)) {
 			impl = std::move(next);
@@ -310,19 +265,16 @@ bool ORGTerrainBlending::Setup()
 
 bool ORGTerrainBlending::BeforeDepth()
 {
-	if (!Requested() || failed)
+	frame = FrameBlend::None;
+	if (!Active() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DepthDone))
 		return false;
-	auto& runtime = RenderGraphRuntime::Get();
-	if (!runtime.IsActive() || !runtime.Host() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DepthDone))
-		return false;
-	if (!impl)
-		return Setup();
-	bool changed = false;
-	// A resolution change: new engine depth textures, and the blended depths follow the main target's size.
+	bool changed = !impl->registered;
+	// A resolution change: new engine depth textures, and the blended depths follow the main target's size. The anchors and
+	// PublishedResources follow the twins' resize; the pass is made again for the new textures and group counts.
 	UINT width = 0, height = 0;
 	if (MainSize(width, height) && (width != impl->blendedDepth->Desc().Width || height != impl->blendedDepth->Desc().Height)) {
 		for (const auto& [id, texture] : impl->Outputs()) {
-			if (!texture->Resize(width, height) || !*texture || !texture->SRV() || !PublishedResources::Publish(id, *texture)) {
+			if (!texture->Resize(width, height) || !*texture || !texture->SRV()) {
 				Fail("its textures could not be resized");
 				return false;
 			}
@@ -341,17 +293,26 @@ bool ORGTerrainBlending::BeforeDepth()
 		impl->terrainDepth = std::move(terrainDepth);
 		changed = true;
 	}
-	if (changed)
-		FrameAnchors::Refresh(kClientId);
+	if (changed) {
+		impl->registered = RegisterClient();
+		if (!impl->registered) {
+			Fail("its client could not be registered");
+			return false;
+		}
+	}
+	frame = FrameBlend::Planned;
 	return true;
 }
 
 bool ORGTerrainBlending::Blend()
 {
-	if (!Active())
+	if (frame != FrameBlend::Planned)
 		return false;
-	// A failed epoch calls the client's onFailed inside Run, which returns Terrain Blending to D3D11.
-	return FrameAnchors::Run(FrameAnchors::Anchor::DepthDone) && Active();
+	// A failed epoch calls the client's onFailed inside Run, which returns Terrain Blending to D3D11. An anchor that submitted
+	// nothing leaves the frame to D3D11 too: the views then name the D3D11 textures Terrain Blending blends into.
+	const bool written = Active() && impl->registered && FrameAnchors::Run(FrameAnchors::Anchor::DepthDone) && Active();
+	frame = written ? FrameBlend::Written : FrameBlend::Missed;
+	return written;
 }
 
 #else  // !CS_HAS_RENDER_GRAPH
@@ -361,14 +322,16 @@ struct ORGTerrainBlending::Impl
 {};
 
 void ORGTerrainBlending::Reserve() {}
+bool ORGTerrainBlending::Setup(std::function<void()>) { return false; }
 bool ORGTerrainBlending::BeforeDepth() { return false; }
 bool ORGTerrainBlending::Blend() { return false; }
 bool ORGTerrainBlending::Active() const { return false; }
+bool ORGTerrainBlending::Holds() const { return false; }
 void ORGTerrainBlending::ClearShaderCache() {}
 ID3D11ShaderResourceView* ORGTerrainBlending::BlendedDepthSRV(bool) const { return nullptr; }
 ID3D11ShaderResourceView* ORGTerrainBlending::MaskSRV() const { return nullptr; }
 std::shared_ptr<org::Resource> ORGTerrainBlending::BlendedDepthGraph() const { return nullptr; }
-bool ORGTerrainBlending::Setup() { return false; }
 void ORGTerrainBlending::Fail(const char*) {}
+bool ORGTerrainBlending::RegisterClient() { return false; }
 
 #endif

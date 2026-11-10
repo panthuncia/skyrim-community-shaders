@@ -14,6 +14,8 @@
 //   A folder is scanned for *.fx (not recursively). -v lists every global, technique and pass.
 //   Exit code 0 when every readable file parsed (and, with --dxc, lowered and compiled) without errors, 1 otherwise.
 //
+// CMake builds it and runs it over testdata/constructs.fx as a test: tests/FxParseCheck/CMakeLists.txt.
+//
 // Build (x64 Native Tools prompt, from the repository root):
 //   cl /nologo /std:c++latest /EHsc /W4 /WX /permissive- /utf-8 /Isrc tools\fx-parse-check\FxParseCheck.cpp
 //      src\Features\Effects11\ORG\FxParser.cpp src\Features\Effects11\ORG\FxLower.cpp src\Features\Effects11\ORG\FxSourceText.cpp

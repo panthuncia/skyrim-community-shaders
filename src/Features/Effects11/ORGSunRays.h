@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include "Features/Effects11.h"
@@ -15,7 +16,9 @@
  * composite, all raster passes, the last added to kMAIN.
  *
  * Resources: the half-res intermediates are transient graph textures (aliasable). The per-frame constants (the half-res size
- * for the blurs and the upsample, and each sun ray pass's SunRaysData) are one latch region. The shared constant buffers come
+ * for the blurs and the upsample, and each sun ray pass's SunRaysData) are one latch region. A run gate holds each effect's
+ * draws and the blurs' group counts: the commit opens what the frame gave the graph, so the recordings are kept and an effect
+ * off this frame does no work. The areas the passes cover are part of the build (a kept recording fixes its viewports). The shared constant buffers come
  * from SharedConstants. The scene depth and kMAIN are the engine's targets; Terrain and Cloud Shadows' textures are read by
  * name when they are on the graph, else imported from D3D11.
  *
@@ -30,10 +33,22 @@ public:
 	/** @brief Whether CS_ORG_E11_RAYS=1 is set. */
 	static bool Requested();
 
+	/** @brief The one instance. Its graph state is made by Setup. */
 	static ORGSunRays& Get();
 
 	/** @brief Reserves the PostComposite anchor when requested (Effects11's PostPostLoad). */
 	static void Reserve();
+
+	/**
+	 * @brief Effects11's SetupResources, with the render graph up: the latch block, the run gate and the sampler every build
+	 * shares. The passes are built at the first frame the graph takes, from that frame's inputs.
+	 * @param a_onFailed Called if the render graph fails later; the rays are then on D3D11 for the session.
+	 * @return False when the rays stay on D3D11 (not requested, or no graph or anchor).
+	 */
+	bool Setup(std::function<void()> a_onFailed);
+
+	/** @brief Whether the graph may take the rays: set up, not failed, and the render graph still active. */
+	bool IsActive() const;
 
 	/** @brief A frame's sizes: kMAIN's half-res texture, and the half-res and full dynamic resolution areas the passes cover. */
 	struct Sizes
@@ -58,7 +73,7 @@ public:
 	 */
 	bool SunRays(const Sizes& a_sizes, const std::array<Effects11::SunRaysData, kSunRaysPasses>& a_passes);
 
-	/** @brief Drops the client and its resources (a shader cache clear); the next frame makes them again. */
+	/** @brief Drops the client, its resources and programs (a shader cache clear); the next frame builds them again. */
 	void Release();
 
 	~ORGSunRays();

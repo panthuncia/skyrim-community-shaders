@@ -94,8 +94,8 @@ void TerrainBlending::SetupResources()
 		prepassSRVBackup = zPrepassCopy.depthSRV;
 	}
 
-	// The ORG path makes its own blended depths at the first depth pass (ORGTerrainBlending::BeforeDepth), and these only if it stops.
-	if (!ORGTerrainBlending::Requested())
+	// The ORG path makes its own blended depths; these only when it is off or stops.
+	if (!ORGTerrainBlending::Get().Setup([] { globals::features::terrainBlending.UseD3D11BlendedDepth(); }))
 		CreateBlendedDepthTextures();
 
 	{

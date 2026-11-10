@@ -20,12 +20,8 @@ namespace ORGPostChain
 		constexpr const char* kFFTShader = "PostProcessing/LensFlare/lensflare_fft.cs.hlsl";
 		constexpr DXGI_FORMAT kColorFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;  // texThreshold's, texGhostHalo's, texBlurTemp's
 		constexpr DXGI_FORMAT kComplexFormat = DXGI_FORMAT_R32G32_FLOAT;     // the FFT textures'
-		// A kernel is baked in this many frames after it changes. The epoch run right after a rebuild may still be the old
-		// build's, so one frame is not enough; the bake is deterministic, so baking again is harmless.
-		constexpr std::uint32_t kBakeFrames = 3;
 
 		using CB = LensFlare::LensFlareCB;
-		using Groups = std::array<std::uint32_t, 4>;
 
 		// lensflare.cs.hlsl's push block: LENS_FLARE_RESOURCES, then the LensFlareFrame latch.
 		struct FlareBlock
@@ -59,21 +55,23 @@ namespace ORGPostChain
 		{
 			std::unique_ptr<GraphResources::Texture2D> spectrum;
 			KernelKey key;
-			std::uint32_t bakeFrames = 0;
+			bool baked = false;    // the spectrum holds key's kernel
+			bool pending = false;  // this frame's commit bakes it, until Executed
 			LatchRegion<CB> constants;
-			LatchRegion<Groups> prepareGroups, fftGroups;
+			GateEntry prepareGate, fftGate;
 		};
 
 		/**
 		 * @brief LensFlare::Draw on the graph. The threshold pass, then either the Fast path (ghosts and halo, then the Kawase
 		 * blur) or the FFT path (Quality, Ultra): the thresholded scene's spectrum, then per kernel group the bokeh kernel's
 		 * spectrum, the product, the inverse transform and the ghost compose, added into the ghosts-and-halo image. That image
-		 * is published for Composite (kLensFlareOutput); the main image is left alone, as on D3D11.
+		 * is published for Composite (Published::kLensFlareOutput); the main image is left alone, as on D3D11.
 		 *
 		 * Every pass has its own latch copy of LensFlareCB, since the D3D11 path changes the per-pass sizes, the kernel scale,
 		 * the ghost mask and the halo strength between dispatches. What sets the passes (mode, FFT size, kernel group count,
 		 * blur passes) is the key; the settings and the camera's aperture are in the latch. The kernel spectra are persistent
-		 * and owned here, one per group; their bake is an indirect dispatch that runs only after a kernel's inputs change.
+		 * and owned here, one per group; their bake runs through gate entries that Commit opens after a kernel's inputs change,
+		 * until a frame that baked it reached the GPU with this build (Executed).
 		 * Every other image is a transient chain image.
 		 */
 		class LensFlareEffect final : public Effect
@@ -123,7 +121,7 @@ namespace ORGPostChain
 				else
 					BuildFast(a_builder, threshold, ghostHalo);
 
-				a_builder.Publish(kLensFlareOutput, ghostHalo);
+				a_builder.Publish(Published::kLensFlareOutput, ghostHalo);
 			}
 
 			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
@@ -159,13 +157,22 @@ namespace ORGPostChain
 					const KernelKey key{ group.KernelScale, group.ApertureSize, group.ApertureRotation, group.ApertureBlades };
 					if (key != kernel.key) {
 						kernel.key = key;
-						kernel.bakeFrames = kBakeFrames;
+						kernel.baked = false;
 					}
-					const bool bake = kernel.bakeFrames > 0;
-					if (bake)
-						--kernel.bakeFrames;
-					a_commit.Write(kernel.prepareGroups, bake ? Groups{ Tiles(n), Tiles(n), 1, 0 } : Groups{});
-					a_commit.Write(kernel.fftGroups, bake ? Groups{ n, 1, 1, 0 } : Groups{});
+					kernel.pending = !kernel.baked;
+					if (kernel.pending) {
+						a_commit.Open(kernel.prepareGate, Tiles(n), Tiles(n));
+						a_commit.Open(kernel.fftGate, n);
+					}
+				}
+			}
+
+			void Executed(PostProcessFeature&) override
+			{
+				// The kernels this frame's commit baked reached the GPU with this build.
+				for (auto& kernel : kernels) {
+					kernel.baked = kernel.baked || kernel.pending;
+					kernel.pending = false;
 				}
 			}
 
@@ -294,10 +301,11 @@ namespace ORGPostChain
 				for (auto& kernel : kernels) {
 					a_builder.Register(*kernel.spectrum);
 					kernel.constants = a_builder.Latch<CB>();
-					kernel.prepareGroups = a_builder.Latch<Groups>();
-					kernel.fftGroups = a_builder.Latch<Groups>();
+					kernel.prepareGate = a_builder.Gate();
+					kernel.fftGate = a_builder.Gate();
 					// A new build may have new programs: bake again.
-					kernel.bakeFrames = kBakeFrames;
+					kernel.baked = false;
+					kernel.pending = false;
 				}
 
 				const auto none = Bind::Unused();
@@ -317,11 +325,11 @@ namespace ORGPostChain
 					const auto step = [i](const char* a_name) { return std::format("group{}-{}", i, a_name); };
 					// PrepareBokehFFT: only on the frames the kernel is baked (the group counts are zero otherwise).
 					a_builder.Dispatch({ .name = step("bokeh"), .program = prepare,
-						.bindings = FFTBindings(kernel.constants, none, none, none, Bind::Uav(fftA), none), .indirect = kernel.prepareGroups });
+						.bindings = FFTBindings(kernel.constants, none, none, none, Bind::Uav(fftA), none), .gate = kernel.prepareGate });
 					a_builder.Dispatch({ .name = step("bokeh-rows"), .program = rowForward,
-						.bindings = FFTBindings(kernel.constants, none, Bind::Srv(fftA), none, Bind::Uav(fftB), none), .indirect = kernel.fftGroups });
+						.bindings = FFTBindings(kernel.constants, none, Bind::Srv(fftA), none, Bind::Uav(fftB), none), .gate = kernel.fftGate });
 					a_builder.Dispatch({ .name = step("bokeh-columns"), .program = colForward,
-						.bindings = FFTBindings(kernel.constants, none, Bind::Srv(fftB), none, Bind::Uav(spectrum), none), .indirect = kernel.fftGroups });
+						.bindings = FFTBindings(kernel.constants, none, Bind::Srv(fftB), none, Bind::Uav(spectrum), none), .gate = kernel.fftGate });
 					a_builder.Dispatch({ .name = step("multiply"), .program = multiply,
 						.bindings = FFTBindings(kernel.constants, none, Bind::Srv(scene), Bind::Srv(spectrum), Bind::Uav(fftB), none), .groups = tiles });
 					a_builder.Dispatch({ .name = step("inverse-rows"), .program = rowInverse,

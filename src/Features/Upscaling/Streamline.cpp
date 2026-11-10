@@ -7,6 +7,7 @@
 #include "../../DxvkLoader.h"
 #include "Utils/SwitchFile.h"
 #include "../../Globals.h"
+#include "../../RenderGraph/Switches.h"
 #include "../../State.h"
 #include "../../Utils/Game.h"
 
@@ -276,10 +277,7 @@ namespace
 
 	void LogCallback(sl::LogType a_type, const char* a_msg)
 	{
-		static const bool s_verbose = [] {
-			char v[2] = {};
-			return GetEnvironmentVariableA("CS_SL_VERBOSE", v, sizeof(v)) && v[0] == 0x31;
-		}();
+		static const bool s_verbose = Switches::On("CS_SL_VERBOSE");
 		if (s_verbose) {
 			logger::info("[Streamline/SL] {}", a_msg);
 			return;
@@ -357,7 +355,7 @@ void Streamline::PreloadInterposer()
 // Probe with the system loader before slInit decides which FG plugin to load.
 static bool ProbeDLSSGHardware()
 {
-	if (char v[2] = {}; GetEnvironmentVariableA("CS_FORCE_FSR_FG", v, sizeof(v)) && v[0] == '1') {
+	if (Switches::On("CS_FORCE_FSR_FG")) {
 		logger::info("[Streamline] CS_FORCE_FSR_FG=1: hardware probe reports no DLSS-G (FSR-FG path forced)");
 		return false;
 	}
@@ -498,7 +496,7 @@ bool Streamline::Initialize()
 	pref.engine = sl::EngineType::eCustom;
 	pref.engineVersion = "1.0";
 	pref.projectId = "a0f57b54-1daf-4934-90ae-c4035c19df04";
-	if (char v[2] = {}; GetEnvironmentVariableA("CS_SL_VERBOSE", v, sizeof(v)) && v[0] == 0x31)
+	if (Switches::On("CS_SL_VERBOSE"))
 		pref.logLevel = sl::LogLevel::eVerbose;
 	else
 		pref.logLevel = sl::LogLevel::eDefault;

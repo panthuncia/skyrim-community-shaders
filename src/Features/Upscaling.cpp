@@ -13,6 +13,7 @@
 #include "RenderGraph/Engine/GuestDevice.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/Switches.h"
 #include "Upscaling/FrameGenController.h"
 #include "Upscaling/ORGUpscaling.h"
 #include "Upscaling/Streamline.h"
@@ -691,10 +692,9 @@ void Upscaling::BeginRenderFrame()
 	}
 
 	// CS_ORG_UPSCALING failed: once the ring no longer uses the graph textures, the D3D11 ones take over.
-	if (auto& orgUpscaling = ORGUpscaling::Get(); orgUpscaling.Failed() && dxvk->DrainCommandRing()) {
+	if (auto& orgUpscaling = ORGUpscaling::Get(); orgUpscaling.Failed() && dxvk->DrainCommandRing() && orgUpscaling.ReleaseAfterFailure()) {
 		const auto method = GetUpscaleMethod();
-		if (orgUpscaling.ReleaseAfterFailure() &&
-			(method == UpscaleMethod::kFSR || method == UpscaleMethod::kDLSS || method == UpscaleMethod::kXeSS))
+		if (method == UpscaleMethod::kFSR || method == UpscaleMethod::kDLSS || method == UpscaleMethod::kXeSS)
 			CreateUpscaledTexture();
 	}
 
@@ -1073,7 +1073,7 @@ void Upscaling::CreateUpscaledTexture()
 
 	texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 
-	if (ORGUpscaling::Get().CreateUpscaledTexture(texDesc))
+	if (ORGUpscaling::Get().CreateTexture(ORGUpscaling::Target::Upscaled, texDesc))
 		return;
 
 	upscaledTexture = new Texture2D(texDesc);
@@ -1098,7 +1098,7 @@ void Upscaling::CreateUpscaledTexture()
 
 void Upscaling::DestroyUpscaledTexture()
 {
-	ORGUpscaling::Get().DestroyUpscaledTexture();
+	ORGUpscaling::Get().DestroyTexture(ORGUpscaling::Target::Upscaled);
 	if (upscaledTexture) {
 		delete upscaledTexture;
 		upscaledTexture = nullptr;
@@ -1168,9 +1168,7 @@ void Upscaling::CreateHudlessTexture()
 		return;
 	}
 
-	const D3D11_TEXTURE2D_DESC* current = ORGUpscaling::Get().HudlessDesc();
-	if (!current && hudlessTexture)
-		current = &hudlessTexture->desc;
+	const D3D11_TEXTURE2D_DESC* current = ORGUpscaling::Get().Desc(ORGUpscaling::Target::Hudless, hudlessTexture ? &hudlessTexture->desc : nullptr);
 	if (current &&
 		current->Width == texDesc.Width &&
 		current->Height == texDesc.Height &&
@@ -1191,7 +1189,7 @@ void Upscaling::CreateHudlessTexture()
 	// when it does not hold -- which leaves the UI to be interpolated, i.e. flashing.
 	texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 
-	if (ORGUpscaling::Get().CreateHudlessTexture(texDesc))
+	if (ORGUpscaling::Get().CreateTexture(ORGUpscaling::Target::Hudless, texDesc))
 		return;
 
 	hudlessTexture = new Texture2D(texDesc);
@@ -1220,7 +1218,7 @@ bool Upscaling::DestroyHudlessTexture(bool a_commandRingDrained)
 			logger::error("[Upscaling] hudless texture destruction deferred because command completion could not be proven");
 			return false;
 		}
-		ORGUpscaling::Get().DestroyHudlessTexture();
+		ORGUpscaling::Get().DestroyTexture(ORGUpscaling::Target::Hudless);
 		delete hudlessTexture;
 		hudlessTexture = nullptr;
 		logger::debug("[Upscaling] Destroyed hudless texture");
@@ -1230,22 +1228,18 @@ bool Upscaling::DestroyHudlessTexture(bool a_commandRingDrained)
 
 ID3D11Texture2D* Upscaling::UpscaledResource() const
 {
-	if (auto* texture = ORGUpscaling::Get().UpscaledTexture())
-		return texture;
-	return upscaledTexture ? upscaledTexture->resource.get() : nullptr;
+	return ORGUpscaling::Get().Texture(ORGUpscaling::Target::Upscaled, upscaledTexture ? upscaledTexture->resource.get() : nullptr);
 }
 
 ID3D11Texture2D* Upscaling::HudlessResource() const
 {
-	if (auto* texture = ORGUpscaling::Get().HudlessTexture())
-		return texture;
-	return hudlessTexture ? hudlessTexture->resource.get() : nullptr;
+	return ORGUpscaling::Get().Texture(ORGUpscaling::Target::Hudless, hudlessTexture ? hudlessTexture->resource.get() : nullptr);
 }
 
 bool Upscaling::CopyHudlessColor(ID3D11ShaderResourceView* a_source)
 {
 	// CS_ORG_UPSCALING: the copy is a pass at the FrameGeneration anchor.
-	if (ORGUpscaling::Get().HudlessTexture())
+	if (ORGUpscaling::Get().Holds(ORGUpscaling::Target::Hudless))
 		return ORGUpscaling::Get().CopyHudless(a_source);
 	if (!a_source || !hudlessTexture || !hudlessTexture->rtv)
 		return false;
@@ -1574,7 +1568,7 @@ void Upscaling::SetupResources()
 	Util::SetResourceName(upscaleRasterizerState.get(), "Upscaling::DepthUpscaleRasterizerState");
 
 	// CS_ORG_UPSCALING: before the textures, which the graph path then makes.
-	ORGUpscaling::Get().Setup();
+	(void)ORGUpscaling::Get().Setup();
 
 	CheckResources(GetUpscaleMethod());
 
@@ -1746,10 +1740,7 @@ bool Upscaling::IsDisplayUnsettled()
 {
 	// CS_FG_DISPLAY_SUSPEND=1: frame generation unloads before a monitor leaves the desktop (the display reports off about 10 s ahead)
 	// and reloads once it settles. Off by default: it was added for a freeze that turned out to be a lock in DXVK's D3D11Initializer.
-	static const bool s_enabled = [] {
-		char v[2] = {};
-		return GetEnvironmentVariableA("CS_FG_DISPLAY_SUSPEND", v, sizeof(v)) && v[0] == '1';
-	}();
+	static const bool s_enabled = Switches::On("CS_FG_DISPLAY_SUSPEND");
 	if (!s_enabled)
 		return false;
 	static constexpr std::uint64_t kSettleMilliseconds = 5000;
@@ -1770,10 +1761,7 @@ bool Upscaling::IsWindowUnusable()
 
 	// CS_UPSCALE_UNFOCUSED=1: unattended test runs on another monitor keep upscaling (and HDR, frame generation) while another
 	// process has the foreground; minimized and size/move still suspend.
-	static const bool s_ignoreFocus = [] {
-		char v[2] = {};
-		return GetEnvironmentVariableA("CS_UPSCALE_UNFOCUSED", v, sizeof(v)) && v[0] == '1';
-	}();
+	static const bool s_ignoreFocus = Switches::On("CS_UPSCALE_UNFOCUSED");
 
 	return IsWindowMinimized() ||
 	       (!s_ignoreFocus && s_windowUnfocused.load(std::memory_order_relaxed)) ||

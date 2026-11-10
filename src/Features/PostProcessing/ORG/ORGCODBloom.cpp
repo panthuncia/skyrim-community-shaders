@@ -30,7 +30,7 @@ namespace ORGPostChain
 		/**
 		 * @brief CODBloom::Draw on the graph: the threshold into mip 0 of a kMAIN-sized chain, the downsamples down the mips, then
 		 * the upsamples back up to mip 1, each accumulating into its mip by blending. Each pass reads and writes one mip through
-		 * per-mip views of one transient texture. Mip 1 is published (kBloomOutput) for Composite, as GetBloomOutput gives it.
+		 * per-mip views of one transient texture. Mip 1 is published (Published::kBloomOutput) for Composite, as GetBloomOutput gives it.
 		 *
 		 * The D3D11 upsample scales the destination by a blend factor (CurrentMipMult). A recording is reused across frames, so a
 		 * blend constant would be fixed in it; under ORG the shader returns CurrentMipMult in alpha instead, the blend scales the
@@ -104,7 +104,7 @@ namespace ORGPostChain
 						.target = image.Mip(mip) });
 				}
 
-				a_builder.Publish(kBloomOutput, image.Mip(1));
+				a_builder.Publish(Published::kBloomOutput, image.Mip(1));
 				builtMips = usedMips;
 			}
 

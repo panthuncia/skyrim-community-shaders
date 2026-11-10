@@ -470,6 +470,8 @@ void Effects11::SetupResources()
 	if (const auto presetId = UnifiedPresetCatalog::GetSingleton().GetActiveEffects11PresetId(); !presetId.empty())
 		presetManager.SetActivePreset(presetId);
 	EffectManager::GetSingleton().Initialize();
+	// The rays' graph path; on a later graph failure each frame simply draws them on D3D11.
+	ORGSunRays::Get().Setup({});
 }
 
 void Effects11::PostPostLoad()

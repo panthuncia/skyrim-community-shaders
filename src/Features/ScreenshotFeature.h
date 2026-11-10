@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Feature.h"
+#include "Features/Screenshot/ORGScreenshot.h"
 #include "Utils/Subrect.h"
 #include <DirectXTex.h>
 #include <atomic>
@@ -36,8 +37,10 @@ struct ScreenshotFeature : public Feature
 	virtual void ClearShaderCache() override;
 	/** @brief Resets transient state (no-op for this feature). */
 	virtual void Reset() override;
-	/** @brief Called after all features are loaded (no-op for this feature). */
+	/** @brief Called after all features are loaded: the vanilla screenshot setting, and the render graph's Capture anchor. */
 	virtual void PostPostLoad() override;
+	/** @brief Registers the render graph's capture copy when CS_ORG_SCREENSHOT=1 (ORGScreenshot). */
+	virtual void SetupResources() override;
 
 	/** @brief Captures a screenshot from the current back buffer and enqueues it for async encoding and save. */
 	void Capture();
@@ -82,11 +85,7 @@ private:
 		bool disableVanillaScreenshot = true;
 		bool notify = true;  // the in-game "saved" message (not for RequestCapture's)
 		// A render-graph readback (ORGScreenshot) of the whole source, which the worker crops at cropX, cropY.
-		std::vector<std::byte> readback;
-		uint64_t readbackOffset = 0;
-		uint32_t readbackRowPitch = 0;
-		uint32_t readbackWidth = 0;
-		uint32_t readbackHeight = 0;
+		ORGScreenshot::Pixels readback;
 		uint32_t cropX = 0;
 		uint32_t cropY = 0;
 	};
