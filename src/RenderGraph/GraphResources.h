@@ -30,8 +30,9 @@ namespace org
  *   that layout, as for DXVK's own images (DxvkImageImport).
  * - Teardown and Resize release the D3D11 views and texture first, then hand the graph resource to RenderGraphRuntime::ReleaseAfterD3D11,
  *   which frees it once the GPU is past every D3D11 command issued until then. Graph builds still holding it keep it alive themselves.
- * - After a Resize the owner calls FrameAnchors::Refresh(client id): its anchors' graphs are built again with the new resource. Passes
- *   read Graph() when they are made (ClientDesc's make), never keep one across builds.
+ * - A Resize bumps the resize generation (ResizeGeneration). At their next run the frame anchors see it and build their graphs again,
+ *   and PublishedResources publishes the new resource under the twin's id: the owner calls nothing. Passes read Graph() when they
+ *   are made (ClientDesc's make), never keep one across builds.
  *
  * Everything here runs on the render thread. Constructors never throw: a twin that could not be created is false (logged), and the feature
  * keeps its D3D11 path.
@@ -103,6 +104,15 @@ namespace GraphResources
 		/** @brief Releases the D3D11 export, then the graph resource once D3D11's last use is done (ReleaseAfterD3D11). */
 		void Reset();
 
+		/**
+		 * @brief A token that expires when the twin is destroyed: a holder of a pointer to the twin (PublishedResources) checks it
+		 * before reading the twin again.
+		 */
+		std::weak_ptr<const void> Alive() const { return alive; }
+
+		/** @brief Bumped by every Resize of any twin: what the anchors and PublishedResources compare to notice one. */
+		static std::uint64_t ResizeGeneration();
+
 	protected:
 		Resource(std::string a_name, Options a_options) :
 			name(std::move(a_name)), options(a_options) {}
@@ -111,8 +121,12 @@ namespace GraphResources
 		/** @brief The views' names, as Buffer.h's detail::SetD3DName gives them. */
 		void NameViews() const;
 
+		/** @brief Called by a Resize that made a new resource. */
+		static void BumpResizeGeneration();
+
 		std::string name;
 		Options options;
+		std::shared_ptr<const void> alive = std::make_shared<const int>(0);
 		std::shared_ptr<org::Resource> graph;
 		// The exported texture or buffer, as DXVK returned it: one COM object, so the derived twins' D3D11() casts it down.
 		winrt::com_ptr<ID3D11Resource> d3d11;

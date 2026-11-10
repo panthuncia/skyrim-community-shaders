@@ -20,6 +20,7 @@
 #	include <rhi_helpers.h>
 
 #	include <algorithm>
+#	include <atomic>
 #	include <bit>
 
 namespace GraphResources
@@ -227,6 +228,21 @@ namespace GraphResources
 		}
 	}
 
+	namespace
+	{
+		std::atomic<std::uint64_t> resizeGeneration{ 0 };
+	}
+
+	std::uint64_t Resource::ResizeGeneration()
+	{
+		return resizeGeneration.load(std::memory_order_acquire);
+	}
+
+	void Resource::BumpResizeGeneration()
+	{
+		resizeGeneration.fetch_add(1, std::memory_order_acq_rel);
+	}
+
 	void Resource::Register(org::RenderGraph& a_graph) const
 	{
 		if (graph)
@@ -285,6 +301,7 @@ namespace GraphResources
 		desc.Width = a_width;
 		desc.Height = a_height;
 		Create();
+		BumpResizeGeneration();
 		return true;
 	}
 
@@ -322,6 +339,7 @@ namespace GraphResources
 		desc.Height = a_height;
 		desc.Depth = a_depth;
 		Create();
+		BumpResizeGeneration();
 		return true;
 	}
 
@@ -424,6 +442,8 @@ namespace GraphResources
 // Built without OpenRenderGraph: no twin is ever created, and every feature keeps its D3D11 path.
 namespace GraphResources
 {
+	std::uint64_t Resource::ResizeGeneration() { return 0; }
+	void Resource::BumpResizeGeneration() {}
 	void Resource::Register(org::RenderGraph&) const {}
 	void Resource::Reset() {}
 	void Resource::NameViews() const {}

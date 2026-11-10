@@ -31,6 +31,8 @@ namespace PublishedResources
 			std::optional<org::SRVViewType> view;  // none: the resource's primary view
 			bool published = false;                // false: withdrawn, still registered
 			const ID3D11ShaderResourceView* srv = nullptr;  // the twin's D3D11 export, if any (ExportedId); compared, never used
+			const GraphResources::Resource* twin = nullptr;  // read again by Refresh while alive has not expired
+			std::weak_ptr<const void> alive;
 		};
 
 		/** @brief What every graph build registers. Immutable once stored. */
@@ -118,6 +120,8 @@ namespace PublishedResources
 			auto* entry = Find(state, a_id);
 			if (entry && entry->resource == a_resource.Graph()) {
 				entry->srv = a_resource.SRV();
+				entry->twin = &a_resource;
+				entry->alive = a_resource.Alive();
 				if (!std::exchange(entry->published, true))
 					logger::info("[ORG] '{}' published again", a_id);
 				return true;
@@ -128,6 +132,8 @@ namespace PublishedResources
 			entry->view = a_view;
 			entry->published = true;
 			entry->srv = a_resource.SRV();
+			entry->twin = &a_resource;
+			entry->alive = a_resource.Alive();
 			Store(state, *host);
 			logger::info("[ORG] '{}' published to every epoch's graph ({})", a_id, a_resource.Name());
 			return true;
@@ -152,6 +158,25 @@ namespace PublishedResources
 	bool Publish(const GraphResources::Texture2D& a_texture)
 	{
 		return Publish(a_texture.Name(), a_texture);
+	}
+
+	void Refresh()
+	{
+		auto& state = Published();
+		auto* host = RenderGraphRuntime::Get().Host();
+		if (!host || !RenderGraphRuntime::Get().IsActive())
+			return;
+		bool changed = false;
+		for (auto& entry : state.entries) {
+			if (!entry.twin || entry.alive.expired() || !*entry.twin || entry.twin->Graph() == entry.resource)
+				continue;
+			entry.resource = entry.twin->Graph();
+			entry.srv = entry.twin->SRV();
+			changed = true;
+			logger::info("[ORG] '{}' published again after a resize ({})", entry.id, entry.twin->Name());
+		}
+		if (changed)
+			Store(state, *host);
 	}
 
 	void Withdraw(std::string_view a_id)
@@ -213,6 +238,7 @@ namespace PublishedResources
 	bool Publish(const GraphResources::Resource&) { return false; }
 	bool Publish(std::string_view, const GraphResources::Texture2D&) { return false; }
 	bool Publish(const GraphResources::Texture2D&) { return false; }
+	void Refresh() {}
 	void Withdraw(std::string_view) {}
 	bool IsPublished(std::string_view) { return false; }
 	bool ShaderResourceIndex(std::string_view, std::uint32_t&) { return false; }
