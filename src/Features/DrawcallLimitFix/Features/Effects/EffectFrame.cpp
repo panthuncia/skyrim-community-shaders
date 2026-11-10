@@ -1,11 +1,15 @@
 // The Effect port's frame inputs: its three frame constant rows (Api::FrameConstantRow: the camera's planes, the Lighting variant's light
-// colour, Blood's globals; PS b13 c17-c19) and the soft effects' depth (Api::FrameTexture, t118). Sampled on the render thread by each
-// main commit (the rows) and each colour commit (the depth).
+// colour, Blood's globals; PS b13 c17-c19) and the soft effects' depth (Api::FrameTexture, t118; Terrain Blending's published blended
+// depth while the depth table names its export). Sampled on the render thread by each main commit (the rows) and each colour commit
+// (the depth).
 
 #include "Features/DrawcallLimitFix/Features/Effects/Effects.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
 #include "Globals.h"
+
+#include "Features/TerrainBlending/ORGTerrainBlending.h"
+#include "RenderGraph/PublishedResources.h"
 
 #include <array>
 #include <cstddef>
@@ -86,6 +90,15 @@ namespace DCLF::Features::Effects
 			return globals::game::renderer ? static_cast<void*>(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV) :
 			                                 nullptr;
 		}
+
+		// Terrain Blending's blended depth on its ORG path: the depth table names its export from the depth pass to the terrain passes, so
+		// the soft depth is that export while a colour commit falls in between. The colour passes then read the published texture,
+		// ordered after the blend; otherwise the view above.
+		bool SoftDepthGraphIndex(std::uint32_t& a_index)
+		{
+			constexpr auto id = ORGTerrainBlending::kBlendedDepthId;
+			return PublishedResources::ExportedId(static_cast<ID3D11ShaderResourceView*>(SoftDepthView())) == id && PublishedResources::ShaderResourceIndex(id, a_index);
+		}
 	}
 
 	void RegisterFrame(Api::InstallContext& a_context)
@@ -95,6 +108,7 @@ namespace DCLF::Features::Effects
 		a_context.RegisterFrameConstantRow({ "effect camera", kEffectCameraFrameRow, &SampleRow<&SampleEffectCamera> });
 		a_context.RegisterFrameConstantRow({ "effect light", kEffectLightFrameRow, &SampleRow<&SampleEffectLight> });
 		a_context.RegisterFrameConstantRow({ "effect blood", kEffectBloodFrameRow, &SampleRow<&SampleEffectBlood> });
-		a_context.RegisterFrameTexture({ "effect soft depth", kSoftDepthRegister, &SoftDepthView });
+		a_context.RegisterFrameTexture({ .name = "effect soft depth", .textureRegister = kSoftDepthRegister, .view = &SoftDepthView,
+			.graphResource = ORGTerrainBlending::kBlendedDepthId, .graph = &SoftDepthGraphIndex });
 	}
 }

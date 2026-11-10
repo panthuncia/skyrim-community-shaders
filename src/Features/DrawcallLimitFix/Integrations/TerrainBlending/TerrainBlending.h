@@ -9,6 +9,7 @@
 // - its two held groups (Api::HeldGroupContribution: the terrain blocks in Appended0, the no-blend meshes in Appended1, orders 2 and 3, before
 //   Features/Decals' blended decals at 4);
 // - its mask, t55 (Api::FrameTexture: the terrain depth while it holds the terrain, else the captured view);
+// - the scene depth, t17 (Api::FrameTexture, graph path only: its blended depth on its ORG path, else the captured view);
 // - its near blocks' depth twin (Api::NearTwinContribution: its terrain depth, imported, and the depth pass's near test).
 //
 // Core keeps the main pass's structure: the appended slots, their count words and object flag bits (GpuLayouts.h, BuildDrawsCS), the twin
@@ -27,6 +28,9 @@ namespace DCLF::Integrations::TerrainBlending
 	inline constexpr Api::MainRangeSlot kNoBlendRange = Api::MainRangeSlot::Appended1;
 	// t55: Terrain Blending's mask (TerrainBlending.hlsli's TerrainBlendingMaskTexture), a frame texture (Features/Manifest.cpp).
 	inline constexpr std::uint32_t kMaskRegister = 55;
+	// t17: the scene depth (SharedData.hlsli's DepthTexture), which VanillaBinding::BindSceneDepth binds: Terrain Blending's 16-bit
+	// blended depth while it blends. A frame texture for its graph path only (Features/Manifest.cpp).
+	inline constexpr std::uint32_t kSceneDepthRegister = 17;
 
 	// TerrainBlendingIntegration.cpp: the integration's entry (Integrations/IntegrationList.cpp).
 	Api::Feature Integration();
