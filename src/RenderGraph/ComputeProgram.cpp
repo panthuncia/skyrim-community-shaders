@@ -7,7 +7,9 @@
 
 #	include "RenderGraph/RenderGraphRuntime.h"
 
+#	include <Render/LatchBlock.h>
 #	include <Render/PreparedPass.h>
+#	include <Resources/Buffers/Buffer.h>
 
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
 #		include "RenderGraph/ProgramBuild.h"
@@ -106,6 +108,25 @@ void ComputeProgram::Dispatch(org::RecordingContext& a_recording, std::span<cons
 	commands.Dispatch(a_x, a_y, a_z);
 }
 
+void ComputeProgram::DispatchIndirect(org::RecordingContext& a_recording, std::span<const std::uint32_t> a_constants, rhi::ResourceHandle a_arguments,
+	std::uint64_t a_offset) const
+{
+	if (a_constants.size() > constantWords || !slot || !dispatchSignature)
+		return;
+	auto& commands = a_recording.Commands();
+	commands.BindLayout(layout->GetHandle());
+	commands.BindPipeline(Pipeline());
+	if (!a_constants.empty())
+		commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, static_cast<std::uint32_t>(a_constants.size()), a_constants.data());
+	commands.ExecuteIndirect(dispatchSignature->GetHandle(), a_arguments, a_offset, {}, 0, 1);
+}
+
+void ComputeProgram::DispatchIndirect(org::RecordingContext& a_recording, std::span<const std::uint32_t> a_constants, const org::LatchBlock& a_latch,
+	std::uint32_t a_offset) const
+{
+	DispatchIndirect(a_recording, a_constants, a_latch.Resource()->GetAPIResource().GetHandle(), a_latch.Offset(a_recording.FrameSlot()) + a_offset);
+}
+
 std::shared_ptr<const ComputeProgram> ComputeProgram::Load(rhi::Device a_device, const Desc& a_desc)
 {
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
@@ -148,6 +169,12 @@ std::shared_ptr<const ComputeProgram> ComputeProgram::Load(rhi::Device a_device,
 	auto pipeline = CreatePipeline(a_device, program->layout->GetHandle(), artifact.binary, entry, desc.source);
 	if (!pipeline) {
 		logger::error("[ORG] {}: the compute pipeline could not be created", desc.source);
+		return {};
+	}
+	rhi::IndirectArg dispatch[] = { { .kind = rhi::IndirectArgKind::Dispatch } };
+	if (a_device.CreateCommandSignature(rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatch, 1), sizeof(std::uint32_t) * 3 },
+			program->layout->GetHandle(), program->dispatchSignature) != rhi::Result::Ok) {
+		logger::error("[ORG] {}: the dispatch signature could not be created", desc.source);
 		return {};
 	}
 	// Live while an owner holds the program (the slot is its).

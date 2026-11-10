@@ -7,8 +7,10 @@
 
 #	include "RenderGraph/RenderGraphRuntime.h"
 
+#	include <Render/LatchBlock.h>
 #	include <Render/PreparedPass.h>
 #	include <Render/ResourceUseDeclaration.h>
+#	include <Resources/Buffers/Buffer.h>
 
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
 #		include "RenderGraph/ProgramBuild.h"
@@ -241,6 +243,12 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 		logger::error("[ORG] {}: the raster pipeline could not be created", stages.label);
 		return {};
 	}
+	rhi::IndirectArg draw[] = { { .kind = rhi::IndirectArgKind::Draw } };
+	if (a_device.CreateCommandSignature(rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(draw, 1), sizeof(std::uint32_t) * 4 },
+			program->layout->GetHandle(), program->drawSignature) != rhi::Result::Ok) {
+		logger::error("[ORG] {}: the draw signature could not be created", stages.label);
+		return {};
+	}
 	// Live while an owner holds the program (the slot is its).
 	org::services::LivePipelineDesc live;
 	live.id = fmt::format("{} + {}", a_desc.vertexSource, stages.label);
@@ -309,7 +317,11 @@ void RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 	commands.BindPipeline(Pipeline());
 	if (!a_draw.constants.empty())
 		commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, 0, 0, static_cast<std::uint32_t>(a_draw.constants.size()), a_draw.constants.data());
-	commands.Draw(a_draw.vertexCount, a_draw.instanceCount, 0, 0);
+	if (a_draw.indirect && drawSignature)
+		commands.ExecuteIndirect(drawSignature->GetHandle(), a_draw.indirect->Resource()->GetAPIResource().GetHandle(),
+			a_draw.indirect->Offset(a_recording.FrameSlot()) + a_draw.indirectOffset, {}, 0, 1);
+	else
+		commands.Draw(a_draw.vertexCount, a_draw.instanceCount, 0, 0);
 	commands.EndPass();
 }
 
