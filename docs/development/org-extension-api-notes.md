@@ -1021,3 +1021,17 @@ Keys used so far:
   read in an earlier epoch is then ordered after the previous frame's write (PublishedResources' rule). The composite needs
   the same declarations once its inputs are graph resources.
 - **Found by:** P3 DCLF published resources, second pass (2026-11-09).
+
+### Knowing which build of a client an anchor's epoch runs
+
+- **Need:** a client that registers new passes at its anchor's hook (a new shape, a readback plan) must know whether this
+  frame's epoch runs them, so its commit writes the latch, readbacks and once-only bookkeeping of the passes that run.
+- **Who:** Effects11's ORG FX runtime. With DCLF on, the host builds the graph only at DCLF's build point at the frame's
+  start (`GraphHost::SetExplicitBuilds`), so a client registered at the Tonemap hook runs from the next frame, while
+  `FrameAnchors::Run` already calls its commit. The FX readback read snapshot textures in the frame that registered them,
+  before any build held their copies, and logged zeros for every step (fixed: each shape's passes set a flag in Prepare,
+  and the commit writes the newest prepared shape). Post Processing's chain writes the newest build's latch the same way
+  (one frame of stale values after each new chain).
+- **Where it fits:** `FrameAnchors` could pass the commit the client registration its epoch's build holds (the snapshot the
+  extension built from), or run a client's commit only once a build holds it.
+- **Found by:** P3 FX execution, Tonemap anchor readback (2026-11-09).
