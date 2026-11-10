@@ -465,12 +465,14 @@ void ScreenSpaceGI::SetupResources()
 	}
 
 	// The graph path makes its own textures; the D3D11 ones only when it does not run.
+	// When the graph path stops later, DrawSSGI makes them before its first D3D11 frame.
+	bool onGraph = false;
 	if (ORGScreenSpaceGI::Requested()) {
 		D3D11_TEXTURE2D_DESC mainDesc;
 		renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture->GetDesc(&mainDesc);
-		ORGScreenSpaceGI::Get().Setup(mainDesc);
+		onGraph = ORGScreenSpaceGI::Get().Setup(mainDesc, [] { logger::warn("[ORG] Screen Space GI: drawing with D3D11 from now on"); });
 	}
-	if (!ORGScreenSpaceGI::Get().Running())
+	if (!onGraph)
 		CreateTextures();
 
 	CompileComputeShaders();
@@ -787,7 +789,7 @@ void ScreenSpaceGI::DrawSSGI()
 		BSImagespaceShaderISSAOBlurH->enableSAO = settings.EnableVanillaSSAO;
 
 	// The graph path ran in the DeferredPasses anchor, just before this.
-	if (ORGScreenSpaceGI::Get().Draw())
+	if (ORGScreenSpaceGI::Get().IsActive())
 		return;
 	if (!texRadiance)
 		CreateTextures();
@@ -1051,7 +1053,7 @@ std::tuple<ID3D11ShaderResourceView*, ID3D11ShaderResourceView*, ID3D11ShaderRes
 {
 	if (!loaded || !settings.Enabled)
 		return { nullptr, nullptr, nullptr, nullptr };
-	if (ORGScreenSpaceGI::Get().Running()) {
+	if (ORGScreenSpaceGI::Get().IsActive()) {
 		const auto outputs = ORGScreenSpaceGI::Get().GetOutputs();
 		return { outputs.ao, outputs.y, outputs.coCg, outputs.specular };
 	}
