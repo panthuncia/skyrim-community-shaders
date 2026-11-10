@@ -102,15 +102,18 @@ namespace DCLF::Extensions
 	/** @brief The frame textures on the graph path, a bit by texture register (Api::FrameTexture::graph). */
 	using FrameGraphTextureSet = std::bitset<kTextureRegisters>;
 	/**
-	 * @brief Render thread (the main resources' check): the frame textures whose graph answers true now. The colour passes declare their
-	 * published textures (Resources::graphTextures), and a colour commit reads them through the graph only while their bit is set.
+	 * @brief Render thread (the main resources' check): the frame textures whose graph resource is published now. The colour passes
+	 * declare them (Resources::graphTextures), so the set changes only when a producer changes path. A colour commit reads a texture
+	 * through the graph while its bit is set and its captured view is the export, or its graph callback answers true.
 	 */
 	FrameGraphTextureSet FrameGraphTextures();
 	/**
 	 * @brief Render thread (a colour commit): frame texture a_texture's published texture index into a_index, when a_onGraph (the
-	 * resources' set) has its register and its graph answers true now; false: its view. Logs each change of path once.
+	 * resources' set) has its register and either a_view (the view the commit would read) is that texture's export or its graph
+	 * answers true now; false: its view. Logs each change of path once.
 	 */
-	bool FrameGraphTextureIndex(std::size_t a_texture, const FrameGraphTextureSet& a_onGraph, std::uint32_t& a_index);
+	bool FrameGraphTextureIndex(std::size_t a_texture, const FrameGraphTextureSet& a_onGraph, const ID3D11ShaderResourceView* a_view,
+		std::uint32_t& a_index);
 
 	/**
 	 * @brief The most frame graph buffers registrations there may be (a commit keeps each one's indices in a fixed array), and each one's

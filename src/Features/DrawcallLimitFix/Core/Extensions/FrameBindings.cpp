@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
+#include "RenderGraph/PublishedResources.h"
 
 namespace DCLF::Extensions
 {
@@ -66,21 +67,27 @@ namespace DCLF::Extensions
 	FrameGraphTextureSet FrameGraphTextures()
 	{
 		FrameGraphTextureSet onGraph;
-		for (const auto& texture : RegisteredFrameTextures()) {
-			std::uint32_t index = 0;
-			if (texture.graph && texture.graph(index))
+		// A texture is declared while its resource is published, not while its callback answers true: the view a callback reads can
+		// change within the frame (Cloud Shadows binds t26 in the reflections capture, after this check), and the commit asks again.
+		for (const auto& texture : RegisteredFrameTextures())
+			if (texture.graph && PublishedResources::IsPublished(texture.graphResource))
 				onGraph.set(texture.textureRegister);
-		}
 		return onGraph;
 	}
 
-	bool FrameGraphTextureIndex(std::size_t a_texture, const FrameGraphTextureSet& a_onGraph, std::uint32_t& a_index)
+	bool FrameGraphTextureIndex(std::size_t a_texture, const FrameGraphTextureSet& a_onGraph, const ID3D11ShaderResourceView* a_view,
+		std::uint32_t& a_index)
 	{
 		const auto textures = RegisteredFrameTextures();
 		if (a_texture >= textures.size() || !textures[a_texture].graph)
 			return false;
 		const auto& texture = textures[a_texture];
-		const bool onGraph = a_onGraph.test(texture.textureRegister) && texture.graph(a_index);
+		// The view the commit captured decides too: when it is the published texture's own export, the D3D11 view would be an import
+		// that nothing orders after the producer's graph writes. The commit resolves its textures after the capture, so a callback
+		// that reads the producer's current bind can already see a later one.
+		const bool capturedExport = a_view && PublishedResources::ExportedId(a_view) == texture.graphResource &&
+		                            PublishedResources::ShaderResourceIndex(texture.graphResource, a_index);
+		const bool onGraph = a_onGraph.test(texture.textureRegister) && (capturedExport || texture.graph(a_index));
 		// Each change of path, once (the render thread's alone).
 		static std::array<std::int8_t, kFrameTextureSlots> s_logged{};
 		if (auto& logged = s_logged[a_texture]; logged != (onGraph ? 1 : -1)) {

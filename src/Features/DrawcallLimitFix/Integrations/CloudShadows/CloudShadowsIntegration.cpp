@@ -46,14 +46,13 @@ namespace DCLF::Integrations::CloudShadows
 			return nullptr;
 		}
 
-		// What the sky's last cloud draw left bound at t26 (CloudShadows::selfShadowView): after a draw in the reflections capture the
-		// occlusion cubemap, which on the ORG path is the published cubemap's export. The colour passes then read the published cubemap,
-		// ordered after its copy; otherwise (a layer's view, or the D3D11 copy) the captured view.
-		bool SelfShadowGraphIndex(std::uint32_t& a_index)
+		// The captured view decides alone. After the reflections capture it is the occlusion cubemap, which on the ORG path is the
+		// published cubemap's export, and the commit then reads the published cubemap (Extensions::FrameGraphTextureIndex). A layer's view
+		// or the D3D11 copy stays the captured view. Cloud Shadows' current bind is not asked: the main sky rebinds t26 before the commit
+		// resolves its textures.
+		bool SelfShadowGraphIndex(std::uint32_t&)
 		{
-			const auto& cloudShadows = globals::features::cloudShadows;
-			return cloudShadows.loaded && PublishedResources::ExportedId(cloudShadows.selfShadowView) == kOcclusionId &&
-			       PublishedResources::ShaderResourceIndex(kOcclusionId, a_index);
+			return false;
 		}
 
 		void Install(Api::InstallContext& a_context)
