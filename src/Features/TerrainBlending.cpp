@@ -6,6 +6,7 @@
 #include "Deferred.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/D3D.h"
@@ -198,7 +199,7 @@ void TerrainBlending::TerrainShaderHacks()
 			context->OMSetRenderTargets(0, nullptr, dsv);
 			auto shadowState = globals::game::shadowState;
 			auto& currentVertexShader = shadowState->GetRuntimeData().currentVertexShader;
-			context->VSSetShader((ID3D11VertexShader*)currentVertexShader->shader, NULL, NULL);
+			context->VSSetShader(RenderGraph::Engine::Tripwire::Unwrap((ID3D11VertexShader*)currentVertexShader->shader), NULL, NULL);
 		}
 		renderAltTerrain = !renderAltTerrain;
 	}
@@ -227,7 +228,7 @@ void TerrainBlending::ResetTerrainDepth()
 	stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 
 	auto currentVertexShader = *globals::game::currentVertexShader;
-	context->VSSetShader((ID3D11VertexShader*)currentVertexShader->shader, NULL, NULL);
+	context->VSSetShader(RenderGraph::Engine::Tripwire::Unwrap((ID3D11VertexShader*)currentVertexShader->shader), NULL, NULL);
 
 	if (globals::state->frameAnnotations)
 		globals::state->EndPerfEvent();

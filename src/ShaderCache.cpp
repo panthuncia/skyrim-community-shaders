@@ -23,6 +23,7 @@
 #include "Features/DynamicCubemaps.h"
 #include "Features/RenderDoc.h"
 #include "Features/DrawcallLimitFix.h"
+#include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 
 #include "Plugin.h"
@@ -2734,6 +2735,31 @@ namespace SIE
 		}
 	}
 
+	namespace
+	{
+		// CS_ORG_ENGINE_SHADERS=1: the source of a shader this cache built, added to the description the device recorded (P4.6).
+		void RecordEngineShaderSource(void* a_object, const RE::BSShader& a_shader, ShaderClass a_class, uint32_t a_descriptor)
+		{
+#if defined(CS_HAS_RENDER_GRAPH)
+			if (!a_object || !RenderGraph::Engine::Pipeline::Enabled())
+				return;
+			RenderGraph::Engine::Pipeline::ShaderSource source;
+			source.shaderType = static_cast<uint32_t>(a_shader.shaderType.get());
+			source.descriptor = a_descriptor;
+			source.path = SShaderCache::GetShaderPath(a_shader.shaderType == RE::BSShader::Type::ImageSpace ?
+														  static_cast<const RE::BSImagespaceShader&>(a_shader).originalShaderName :
+														  a_shader.fxpFilename);
+			source.defines = ShaderCache::GetCompileDefines(a_shader, a_class, a_descriptor);
+			RenderGraph::Engine::Pipeline::RecordShaderSource(static_cast<IUnknown*>(a_object), std::move(source));
+#else
+			(void)a_object;
+			(void)a_shader;
+			(void)a_class;
+			(void)a_descriptor;
+#endif
+		}
+	}
+
 	RE::BSGraphics::VertexShader* ShaderCache::MakeAndAddVertexShader(const RE::BSShader& shader,
 		uint32_t descriptor)
 	{
@@ -2755,6 +2781,7 @@ namespace SIE
 					newShader->shader->Release();
 				}
 			} else {
+				RecordEngineShaderSource(newShader->shader, shader, ShaderClass::Vertex, descriptor);
 				std::lock_guard lockGuard(vertexShadersMutex);
 				auto& entry = vertexShaders[static_cast<size_t>(shader.shaderType.get())][descriptor];
 				if (entry && entry->shader)
@@ -2792,6 +2819,7 @@ namespace SIE
 					Util::SetResourceName(reinterpret_cast<ID3D11PixelShader*>(newShader->shader), "%s", static_cast<const RE::BSImagespaceShader&>(shader).name);
 				else
 					Util::SetResourceName(reinterpret_cast<ID3D11PixelShader*>(newShader->shader), "%s:%X", std::string(magic_enum::enum_name(shader.shaderType.get())).c_str(), descriptor);
+				RecordEngineShaderSource(newShader->shader, shader, ShaderClass::Pixel, descriptor);
 				std::lock_guard lockGuard(pixelShadersMutex);
 				auto& entry = pixelShaders[static_cast<size_t>(shader.shaderType.get())][descriptor];
 				if (entry && entry->shader)
@@ -2829,6 +2857,7 @@ namespace SIE
 					Util::SetResourceName(reinterpret_cast<ID3D11ComputeShader*>(newShader->shader), "%s", static_cast<const RE::BSImagespaceShader&>(shader).name);
 				else
 					Util::SetResourceName(reinterpret_cast<ID3D11ComputeShader*>(newShader->shader), "%s:%X", std::string(magic_enum::enum_name(shader.shaderType.get())).c_str(), descriptor);
+				RecordEngineShaderSource(newShader->shader, shader, ShaderClass::Compute, descriptor);
 				std::lock_guard lockGuard(computeShadersMutex);
 				auto& entry = computeShaders[static_cast<size_t>(shader.shaderType.get())][descriptor];
 				if (entry && entry->shader)

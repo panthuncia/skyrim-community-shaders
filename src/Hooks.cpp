@@ -5,6 +5,8 @@
 #include "GpuIdleTrace.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Engine/Pipeline/EngineHooks.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "ShaderTools/BSShaderHooks.h"
@@ -147,7 +149,7 @@ struct BSShader_LoadShaders
 
 			for (const auto& entry : shader->vertexShaders) {
 				if (entry->shader && shaderCache->IsDump()) {
-					if (const auto bytecode = GetShaderBytecode(entry->shader)) {
+					if (const auto bytecode = GetShaderBytecode(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<IUnknown*>(entry->shader)))) {
 						DumpShader(shader, entry, std::span(*bytecode));
 					} else {
 						logger::warn("No captured bytecode for vertex shader {} descriptor {:X}", shader->fxpFilename ? shader->fxpFilename : "Unknown", entry->id);
@@ -161,7 +163,7 @@ struct BSShader_LoadShaders
 			}
 			for (const auto& entry : shader->pixelShaders) {
 				if (entry->shader && shaderCache->IsDump()) {
-					if (const auto bytecode = GetShaderBytecode(entry->shader)) {
+					if (const auto bytecode = GetShaderBytecode(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<IUnknown*>(entry->shader)))) {
 						DumpShader(shader, entry, std::span(*bytecode));
 					} else {
 						logger::warn("No captured bytecode for pixel shader {} descriptor {:X}", shader->fxpFilename ? shader->fxpFilename : "Unknown", entry->id);
@@ -755,18 +757,6 @@ struct ID3D11Device_CreatePixelShader
 	static inline REL::Relocation<decltype(thunk)> func;
 };
 
-struct ID3D11Device_CreateSamplerState
-{
-	static HRESULT STDMETHODCALLTYPE thunk(ID3D11Device* This, D3D11_SAMPLER_DESC* pSamplerDesc, ID3D11SamplerState** ppSamplerState)
-	{
-		// Limit Anisotropy to 8x for performance
-		D3D11_SAMPLER_DESC descCopy = *pSamplerDesc;  // make a copy, pSamplerDesc is supposed to be immutable
-		descCopy.MaxAnisotropy = std::min(descCopy.MaxAnisotropy, 8u);
-		return func(This, &descCopy, ppSamplerState);
-	}
-	static inline REL::Relocation<decltype(thunk)> func;
-};
-
 /** @brief Nulls the output buffer on failure like the native runtime; RenderDoc leaves it untouched and the game uses it unchecked (e.g. zero-triangle skin partitions). */
 struct ID3D11Device_CreateBuffer
 {
@@ -919,7 +909,7 @@ namespace Hooks
 				stl::detour_vfunc<15, ID3D11Device_CreatePixelShader>(globals::d3d::device);
 			}
 
-			stl::detour_vfunc<23, ID3D11Device_CreateSamplerState>(globals::d3d::device);
+			RenderGraph::Engine::Pipeline::InstallDeviceHooks(globals::d3d::device);
 
 			if (RenderDoc::IsLoaded())
 				stl::detour_vfunc<3, ID3D11Device_CreateBuffer>(globals::d3d::device);
@@ -1172,7 +1162,8 @@ namespace Hooks
 
 			state->customVertexShader = nullptr;
 			*globals::game::currentVertexShader = a_vertexShader;
-			globals::d3d::context->VSSetShader(reinterpret_cast<ID3D11VertexShader*>(a_vertexShader->shader), NULL, NULL);
+			// An engine shader can be a tripwire handle (P4.6), which DXVK's own context cannot take.
+			globals::d3d::context->VSSetShader(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11VertexShader*>(a_vertexShader->shader)), NULL, NULL);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -1204,7 +1195,7 @@ namespace Hooks
 			state->customPixelShader = nullptr;
 
 			if (a_pixelShader)
-				globals::d3d::context->PSSetShader(reinterpret_cast<ID3D11PixelShader*>(a_pixelShader->shader), NULL, NULL);
+				globals::d3d::context->PSSetShader(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11PixelShader*>(a_pixelShader->shader)), NULL, NULL);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -1440,6 +1431,8 @@ namespace Hooks
 
 		logger::info("Hooking WndProcHandler");
 		stl::write_thunk_call<RegisterClassA_Hook, 6>(REL::VariantID(75591, 77226, 0xDC4B90).address() + REL::VariantOffset(0x8E, 0x15C, 0x99).offset());
+
+		RenderGraph::Engine::Pipeline::InstallGameHooks();
 
 		logger::info("Hooking BSShaderRenderTargets::Create");
 		stl::detour_thunk<BSShaderRenderTargets_Create>(REL::RelocationID(100458, 107175));

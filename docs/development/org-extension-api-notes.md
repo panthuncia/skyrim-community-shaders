@@ -1098,3 +1098,21 @@ Keys used so far:
   (often `SHADER_READ_ONLY_OPTIMAL`, not a legal copy source). It now copies from the transfer source layout and puts the old
   storage back to rest in the same command buffer (`fix(dxvk): copy relocated interop images legally`).
 - **Found by:** P3 kept layouts, RX 6600 validation runs (2026-11-10).
+
+### Pipelines built from a D3D11 plugin's shaders and states
+
+- **Need:** a plugin that hands the engine its own shaders or state objects (ShaderTools' replacement Lighting pixel shaders,
+  anything that writes `BSGraphics::*Shader::shader` or a state table entry) gets a pipeline on ORG built from them. ORG has to
+  know each object's bytecode, its source when there is one, and its state description.
+- **Who:** CS itself (ShaderCache's replacements, `Deferred`'s blend table swap, `ShadowmapRasterizerFix`'s rasterizer
+  clones) and any mod that creates D3D11 shaders or states through the engine's device.
+- **Where it fits:** P4.6's description registry (`src/RenderGraph/Engine/Pipeline/Descriptions.h`): the device hooks record
+  every shader and input layout, state objects are described from `GetDesc` on first lookup, and `PipelineKey` /
+  `PipelineStates` feed `org::PipelinePermutations`. A plugin's FXC-only shader has bytecode but no source, so an ORG build
+  needs its HLSL (or DXC) from the plugin.
+- **Gaps found:** `org::GraphicsPipelineDesc` has one define list for all stages, but an engine vertex and pixel shader are
+  compiled with different defines, so either ORG takes per-stage defines or engine stages are compiled one at a time (as
+  DCLF's `ShaderPrograms` does). rhi has no scissor-enable flag (a scissor-off draw needs a covering scissor), and input
+  layouts need their strides at pipeline creation, so the key carries the geometry's strides unless the pipeline takes
+  dynamic strides.
+- **Found by:** P4.6 (2026-11-10).
