@@ -207,7 +207,8 @@ namespace FrameAnchors
 	 * stays the same. Its views follow the engine's (SRV, RTV, UAV where the engine made one). Registered with every graph as
 	 * "cs.engine.target.<index>". Render thread (it synchronizes with DXVK's worker the first time). Null when the target does not
 	 * exist or cannot be imported. Every mip and slice is described (a cube's views are cube views). A separate graph resource from Drawcall Limit Fix's import of the same image, which is safe because
-	 * no anchor epoch is one of DCLF's.
+	 * no anchor epoch is one of DCLF's. When ORG owns the target (CS_ORG_ENGINE_TARGETS, RenderGraph/Engine/Targets), this and every
+	 * other import here return its published texture ("Engine::kMAIN" and the like) instead, the one resource DCLF reads too.
 	 */
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t a_target);
 

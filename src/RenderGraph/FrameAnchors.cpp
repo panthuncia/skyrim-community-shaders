@@ -6,6 +6,7 @@
 #	include "RenderGraph/FrameAnchors.h"
 
 #	include "Globals.h"
+#	include "RenderGraph/Engine/Targets/EngineTargets.h"
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -377,6 +378,10 @@ namespace FrameAnchors
 			auto& runtime = RenderGraphRuntime::Get();
 			if (!a_texture || !runtime.IsActive())
 				return nullptr;
+			// An engine target ORG owns (CS_ORG_ENGINE_TARGETS): its published texture, which every graph registers. Importing the
+			// image again would make a second resource whose uses the graph does not order with the owner's.
+			if (auto owned = RenderGraph::Engine::Targets::Find(a_texture))
+				return owned;
 			if (const auto found = state.imports.find(a_id); found != state.imports.end() && found->second.texture.get() == a_texture)
 				return found->second.resource;
 			// The same image under another id is a second graph resource: the graph orders neither's uses after the other's writes.
