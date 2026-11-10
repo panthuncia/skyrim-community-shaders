@@ -250,8 +250,8 @@ private:
 	std::string cpuRangeName;
 	LARGE_INTEGER cpuRangeBegin{};
 	std::unordered_map<std::string, float> cpuFrame;
-	std::unordered_map<std::string, float> closedCpuFrame;
-	bool cpuFrameClosed = false;
+	// Graph mode: each closed frame's CPU times, one sample each at the next collection.
+	std::vector<std::unordered_map<std::string, float>> closedCpuFrames;
 
 	FrameQueries frames[kFrameRing];
 	uint32_t writeFrame = 0;
