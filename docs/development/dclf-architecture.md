@@ -1749,7 +1749,7 @@ Switching an integration when its feature is ported:
 3.  The integration adds `.graphResource = "<Feature>::<Name>"` and `.graph = &GraphIndex` to its `RegisterFrameTexture`. `GraphIndex`
     is `return <producer on its ORG path> && PublishedResources::ShaderResourceIndex(id, a_index);`.
 4.  `view` stays as it is (the export's SRV, or the D3D11 texture's) until the export is dropped. A register DCLF read only as the
-    captured view before (no frame texture: Screen Space Shadows' t45) registers with `view` always null and `capturedWhenNull`, so
+    captured view before (no frame texture: Screen Space Shadows' t45, Light Limit Fix's t102 and t103) registers with `view` always null and `capturedWhenNull`, so
     the colour commits keep the captured view and the faces keep reading null; `graph` answers true exactly while the view CS bound
     there is the producer's export.
 5.  Check one run's log for the `reads the graph resource` line and compare `dclf:shot` images with the feature's switch on and off.

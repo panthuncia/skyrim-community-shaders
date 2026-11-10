@@ -93,7 +93,7 @@ namespace DCLF::Features
 		// views, their own HLSL's: Volumetric Shadows' SharedShadowMap, Cloud Shadows' CloudShadowsTexture, Exponential Height Fog's
 		// ExponentialHeightFogIntegratedLightScattering and ExponentialHeightFogIntegratedLightScatteringFar, Dynamic Cubemaps' EnvReflectionsTexture and EnvTexture, Skylighting's SkylightingProbeArray and ShadowVisibilityProbeArray, Terrain Shadows' ShadowHeightTexture, Water Effects'
 		// WaterCaustics, IBL's EnvIBLTexture, SkyIBLTexture, StaticDiffuseIBLTexture and StaticSpecularIBLTexture, TruePBR's Glint2023NoiseMap,
-		// Screen Space Shadows' ScreenSpaceShadowsTexture): none Core's, a frame
+		// Screen Space Shadows' ScreenSpaceShadowsTexture, Light Limit Fix's LocalShadows and LocalShadowMaps): none Core's, a frame
 		// binding's or another's.
 		constexpr std::uint32_t kFrameTextureRegisters[] = {
 			Effects::kSoftDepthRegister,
@@ -114,6 +114,8 @@ namespace DCLF::Features
 			Integrations::IBL::kStaticSpecularRegister,
 			Integrations::TruePBR::kGlintsNoiseRegister,
 			Integrations::ScreenSpaceShadows::kShadowTextureRegister,
+			Integrations::LightLimitFix::kLocalShadowDataRegister,
+			Integrations::LightLimitFix::kLocalShadowMapsRegister,
 		};
 
 		constexpr bool FrameTextureRegistersValid()
