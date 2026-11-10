@@ -1,7 +1,7 @@
-#include "Common/FrameBuffer.hlsli"
-#include "Common/Math.hlsli"
+// Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers are heap reads
+// (ORG_SHARED_CONSTANTS), so the shader body reads FrameBuffer and SharedData the same on both paths.
+#define ORG_SHARED_CONSTANTS
 #include "Common/OrgResources.hlsli"
-#include "Skylighting/Skylighting.hlsli"
 
 struct DirectionalShadowLightData
 {
@@ -11,25 +11,17 @@ struct DirectionalShadowLightData
 	float2 StartSplitDistances;
 };
 
-// The ORG build cannot read the shared constant buffers yet, so the frame's values come from a latch.
-// FXC drops the latch's cbuffer: only the ORG build reads it.
-// Matrices are stored as float4 rows (or columns), so no load depends on matrix packing.
-struct UpdateProbesFrame
+// The directional shadow data, which D3D11 reads from Deferred's structured buffer at t2. The ORG build
+// reads it from a latch, stored as float4 columns so no load depends on matrix packing. FXC drops the
+// latch's cbuffer: only the ORG build reads it.
+struct UpdateProbesShadows
 {
-	float4 OcclusionViewProj[4];  // rows, as SkylightingSettings' row_major matrix
-	float4 OcclusionSHBasis4Pi;
-	float4 PosOffset;
-	uint4 ArrayOrigin;
-	int4 ValidMargin;
-	float4 CameraViewProj[4];  // rows, as FrameBuffer's row_major matrix
-	float4 CameraPosAdjust;
-	float4 CameraData;      // SharedData::CameraData
 	float4 ShadowProj[8];   // the two cascades' columns, as DirectionalShadowLightData's column_major matrices
 	float4 SplitDistances;  // xy: end, zw: start
-	uint4 FrameCount;       // x: SharedData::FrameCountAlwaysActive, y: whether this frame updates the probes
 };
 
 #define UPDATE_PROBES_RESOURCES(X)                           \
+	X(SHARED, ConstantBuffer, Shared, 0)                     \
 	X(SRV, Texture2D<unorm float>, srcOcclusionDepth, 0)     \
 	X(SRV, Texture2DArray<float4>, ShadowCascadeMap, 1)      \
 	X(SRV, Texture2DArray<float4>, ESRAMShadow, 3)           \
@@ -38,52 +30,32 @@ struct UpdateProbesFrame
 	X(UAV, RWTexture3D<uint>, outShadowBitmask, 2)           \
 	X(UAV, RWTexture3D<float>, outShadowVisibility, 3)       \
 	X(SAMPLER, SamplerComparisonState, comparisonSampler, 0) \
-	X(LATCH, UpdateProbesFrame, Frame, 0)
+	X(LATCH, UpdateProbesShadows, Shadows, 0)
 ORG_PUSH_BLOCK(UPDATE_PROBES_RESOURCES(ORG_HANDLE))
+
+#include "Common/FrameBuffer.hlsli"
+#include "Common/Math.hlsli"
+#include "Skylighting/Skylighting.hlsli"
+
 UPDATE_PROBES_RESOURCES(ORG_RESOURCE)
 
 #if !defined(CS_ORG_BINDLESS)
 StructuredBuffer<DirectionalShadowLightData> DirectionalShadowLights : register(t2);
 #endif
 
-// The frame's values: the shared constant buffers under D3D11, the latch under ORG.
 namespace UpdateProbes
 {
 #if defined(CS_ORG_BINDLESS)
-	SharedData::SkylightingSettings Settings()
-	{
-		SharedData::SkylightingSettings settings = (SharedData::SkylightingSettings)0;
-		settings.OcclusionViewProj = float4x4(Frame.OcclusionViewProj[0], Frame.OcclusionViewProj[1], Frame.OcclusionViewProj[2], Frame.OcclusionViewProj[3]);
-		settings.OcclusionSHBasis4Pi = Frame.OcclusionSHBasis4Pi;
-		settings.PosOffset = Frame.PosOffset;
-		settings.ArrayOrigin = Frame.ArrayOrigin;
-		settings.ValidMargin = Frame.ValidMargin;
-		return settings;
-	}
-
-	float4x4 CameraViewProj() { return float4x4(Frame.CameraViewProj[0], Frame.CameraViewProj[1], Frame.CameraViewProj[2], Frame.CameraViewProj[3]); }
-	float4 CameraPosAdjust() { return Frame.CameraPosAdjust; }
-	uint FrameCountAlwaysActive() { return Frame.FrameCount.x; }
-	// A frame without an update (an interior, the map menu) still runs the recorded dispatch when the epoch runs.
-	bool Enabled() { return Frame.FrameCount.y != 0; }
-	float GetScreenDepth(float depth) { return Frame.CameraData.w / (-depth * Frame.CameraData.z + Frame.CameraData.x); }
-
 	DirectionalShadowLightData ShadowLight()
 	{
 		DirectionalShadowLightData light = (DirectionalShadowLightData)0;
-		light.ShadowProj[0] = transpose(float4x4(Frame.ShadowProj[0], Frame.ShadowProj[1], Frame.ShadowProj[2], Frame.ShadowProj[3]));
-		light.ShadowProj[1] = transpose(float4x4(Frame.ShadowProj[4], Frame.ShadowProj[5], Frame.ShadowProj[6], Frame.ShadowProj[7]));
-		light.EndSplitDistances = Frame.SplitDistances.xy;
-		light.StartSplitDistances = Frame.SplitDistances.zw;
+		light.ShadowProj[0] = transpose(float4x4(Shadows.ShadowProj[0], Shadows.ShadowProj[1], Shadows.ShadowProj[2], Shadows.ShadowProj[3]));
+		light.ShadowProj[1] = transpose(float4x4(Shadows.ShadowProj[4], Shadows.ShadowProj[5], Shadows.ShadowProj[6], Shadows.ShadowProj[7]));
+		light.EndSplitDistances = Shadows.SplitDistances.xy;
+		light.StartSplitDistances = Shadows.SplitDistances.zw;
 		return light;
 	}
 #else
-	SharedData::SkylightingSettings Settings() { return SharedData::skylightingSettings; }
-	float4x4 CameraViewProj() { return FrameBuffer::CameraViewProj; }
-	float4 CameraPosAdjust() { return FrameBuffer::CameraPosAdjust; }
-	uint FrameCountAlwaysActive() { return SharedData::FrameCountAlwaysActive; }
-	bool Enabled() { return true; }
-	float GetScreenDepth(float depth) { return SharedData::GetScreenDepth(depth); }
 	DirectionalShadowLightData ShadowLight() { return DirectionalShadowLights[0]; }
 #endif
 }
@@ -124,12 +96,9 @@ static const float3 noise3D[32] = {
 };
 
 [numthreads(8, 8, 1)] void main(uint3 dtid : SV_DispatchThreadID) {
-	if (!UpdateProbes::Enabled())
-		return;
-
 	const float fadeInThreshold = 15;
 	const static sh2 unitSH = Skylighting::UNIT_SH;
-	const SharedData::SkylightingSettings settings = UpdateProbes::Settings();
+	const SharedData::SkylightingSettings settings = SharedData::skylightingSettings;
 	uint3 cellID = ((uint3)dtid - settings.ArrayOrigin.xyz) % Skylighting::ARRAY_DIM;
 	uint3 validMin = (uint3)max(0, settings.ValidMargin.xyz);
 	uint3 validMax = Skylighting::ARRAY_DIM - 1 + (uint3)min(0, settings.ValidMargin.xyz);
@@ -163,7 +132,7 @@ static const float3 noise3D[32] = {
 	}
 
 	// Shadow cascade sampling with bitmask accumulation
-	float4 cellCentreCS = mul(UpdateProbes::CameraViewProj(), float4(cellCentreMS, 1));
+	float4 cellCentreCS = mul(FrameBuffer::CameraViewProj, float4(cellCentreMS, 1));
 	bool onScreen = false;
 	if (cellCentreCS.w > 0) {
 		float2 screenUV = (cellCentreCS.xy / cellCentreCS.w) * float2(0.5, -0.5) + 0.5;
@@ -173,25 +142,25 @@ static const float3 noise3D[32] = {
 	// Only a valid projection advances the history. Clamping an out-of-range one would sample the
 	// shadow map border into the history, and the jitter can cross the camera near plane.
 	// The history is a shift register of the last 32 accepted samples, so a rejected sample leaves no stale bit.
-	uint jitterIndex = UpdateProbes::FrameCountAlwaysActive() % 32;
+	uint jitterIndex = SharedData::FrameCountAlwaysActive % 32;
 	bool advanceShadowHistory = false;
 	float shadowSample = 1.0;
 	if (onScreen) {
 		DirectionalShadowLightData shadowData = UpdateProbes::ShadowLight();
 
 		float3 jitteredMS = cellCentreMS + noise3D[jitterIndex] * 128;
-		float4 jitteredCS = mul(UpdateProbes::CameraViewProj(), float4(jitteredMS, 1));
+		float4 jitteredCS = mul(FrameBuffer::CameraViewProj, float4(jitteredMS, 1));
 
 		if (jitteredCS.w > 0) {
 			float ndcDepth = jitteredCS.z / jitteredCS.w;
-			float linearDepth = UpdateProbes::GetScreenDepth(ndcDepth);
+			float linearDepth = SharedData::GetScreenDepth(ndcDepth);
 
 			if (ndcDepth > 0 && ndcDepth < 1 && linearDepth > 0) {
 				if (linearDepth >= shadowData.EndSplitDistances.y) {
 					// Past the directional shadow range: fully lit
 					advanceShadowHistory = true;
 				} else {
-					float3 positionWS = jitteredMS + UpdateProbes::CameraPosAdjust().xyz;
+					float3 positionWS = jitteredMS + FrameBuffer::CameraPosAdjust.xyz;
 
 					uint cascadeIndex = (linearDepth > shadowData.EndSplitDistances.x) ? 1u : 0u;
 					float3 positionLS = mul(shadowData.ShadowProj[cascadeIndex], float4(positionWS, 1)).xyz;

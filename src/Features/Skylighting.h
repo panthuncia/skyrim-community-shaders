@@ -78,8 +78,6 @@ public:
 	 * @return Populated SkylightingCB structure, or zeroed if not in world or map menu is open.
 	 */
 	SkylightingCB GetCommonBufferData(bool a_inWorld);
-	/** @brief What the last GetCommonBufferData returned: the feature buffer's skylighting settings, which the ORG probe update latches. */
-	SkylightingCB frameSettings{};
 
 	/** @brief The probe array (t50) and shadow visibility (t53) views D3D11 readers bind: the render graph's while its probe update runs. */
 	ID3D11ShaderResourceView* ProbeArraySRV() const;
