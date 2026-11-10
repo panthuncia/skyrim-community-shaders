@@ -1,8 +1,8 @@
 # ORG FX runtime: ENB-style `.fx` presets without FX11
 
-Plan task P3 W5 ([org-full-port.md](./org-full-port.md)). Status (2026-11-09): design, parser and lowering are written and
-checked offline against the corpus (section 10). Execution is written (`ORGFxRuntime`, section 5) behind `CS_ORG_FX=1` and
-waits for its first build and in-game A/B.
+Plan task P3 W5 ([org-full-port.md](./org-full-port.md)). Status (2026-11-10): design, parser and lowering are written and
+checked offline against the corpus (section 10). Execution (`ORGFxRuntime`, section 5, behind `CS_ORG_FX=1`) runs in game
+and matches FX11 in both test cells, with recording reuse on.
 
 Effects11 runs ENB-style `.fx` presets at the Tonemap position through FX11 (`D3DX11CreateEffectFromMemory`,
 `src/Features/Effects11/Effects/Effect.cpp`). FX11 is a D3D11 library: it owns the shaders, constant buffers, state
@@ -176,8 +176,10 @@ Derived views computed after parsing:
   Two FXC habits found by comparing with its reflection: `true` is stored as `0xFFFFFFFF`, and a global matrix's
   initializer list is read column by column whatever the constructor says. FX11 starts from those bytes, so the image
   does the same.
-- **ENB view**: UI variables in source order (the `UIName` rule of `CreateUIVariable`), labels/groups from `string`
-  globals, `ResourceName` textures, `ExternBinding` globals.
+
+The model keeps every annotation on its variable; it does not build an ENB view of UI variables. `ResourceName` and
+`ExternBinding` are read from the annotations where they are used, and `fx-parse-check` counts `UIName` variables the
+same way.
 
 ## 4. Lowering to DXC (`OrgFx::LowerEffect`, `OrgFx::LowerPass`)
 
@@ -292,8 +294,13 @@ all four do nothing.
   `RenderTarget*` set, the adaptation pair), are History; the SDR pair, Scratch, the downsamples and the sun mask are
   Transient (aliased). Kept textures are cleared to zero once by a render pass that only clears, as DXVK's D3D11 textures
   start at zero.
+- **Snapshots.** Each shape keeps what its commit reads: the FX11 effect (held, so its variables stay valid), the value
+  copies, the values size and the `ScreenSize` offset, and the input and output imports it was planned for. A new shape
+  runs only from the next graph build, so the commit may run an older shape. It claims the frame only when that shape's
+  input and output are this frame's, and leaves the frame to FX11 when an effect was reloaded after the plan.
 - **Failure.** A graph failure (`onFailed`), or an exception out of `Prepare` or the commit, returns Effects11 to FX11
-  for the session: `[ORG] Effects11 returns to FX11 for the session: <what>`. Nothing is thrown into the engine's call.
+  for the session: `[ORG] Effects11 returns to FX11 for the session: <what>`. After a failed commit the next `Prepare`
+  unregisters the passes. Nothing is thrown into the engine's call.
 - **Text.** `D3DPreprocess`'s blob ends with the string's NUL; `Effect` drops it before keeping the text, and the lexer
   skips a NUL as whitespace (it was Rudy's `enbbloom.fx` "unexpected character at global scope" on the last line).
 
@@ -301,7 +308,8 @@ Not supported yet (the frame stays on FX11, logged):
 
 - `enbdepthoffield.fx` (its aperture and focus history pairs, and the copy back into kMAIN).
 - `cbuffer` blocks, render states in passes, `RenderTarget` annotations naming textures other than `RenderTarget*`
-  (`TextureHDRTemp` and the like), effects with more than 30 textures and samplers, encrypted presets.
+  (`TextureHDRTemp` and the like), effects with more than 30 textures and samplers, `#pragma pack_matrix(row_major)`
+  (a parse error), encrypted presets.
 - The UI seam below: FX11 still holds the values, so FX11 must still compile every effect.
 - GPU timers per pass, and `Effects11::<effect> Pass <n>` profiler zones.
 
@@ -370,7 +378,7 @@ fx-parse-check [-v] [--dxc C:\VulkanSDK\<ver>\Bin\dxc.exe] [--out <folder>] <enb
 Done: `RasterProgram` from generated text (`Desc::pixelText`/`vertexText`, `languageVersion`), `ORGFxRuntime` (section 5,
 "What execution does today"), the scenarios. Next:
 
-1. Build and A/B on Rudy's preset; fix what the first runs show.
+1. Done: build and A/B on Rudy's preset. The graph matches FX11 in both test cells.
 2. `enbdepthoffield.fx`: the aperture and focus pairs as History textures with copies, the chain into HDRTemp/HDRTemp2,
    and the copy back into kMAIN.
 3. The UI seam (section 5): `UIVariable` value handle, and UI variables built from the model on the ORG path, so the
