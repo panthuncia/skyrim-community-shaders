@@ -1,4 +1,5 @@
 #include "RenderGraph/Engine/GuestDevice.h"
+#include "RenderGraph/Switches.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -7,11 +8,7 @@ namespace RenderGraph::Engine
 {
 	bool OwnedFrameRequested()
 	{
-		static const bool s_requested = [] {
-			char buf[8] = {};
-			return GetEnvironmentVariableA("CS_ORG_OWNED_FRAME", buf, sizeof(buf)) && buf[0] == '1';
-		}();
-		return s_requested;
+		return Switches::On("CS_ORG_OWNED_FRAME");
 	}
 
 	GuestDevice& GuestDevice::Get()
@@ -316,11 +313,9 @@ namespace RenderGraph::Engine
 		// The NVIDIA profile trick (extern/dxvk/FORK.md): the engine name DXVK would report, "DXVK_HDR" when HDR is configured.
 		ci.vulkanEngineName = state->engineName.c_str();
 		// Hang diagnostics survive the inversion: BasicRHI's native markers where DXVK's hang mode would be on.
-		char debug[16] = {};
-		const bool hangMode = GetEnvironmentVariableA("DXVK_DEBUG", debug, sizeof(debug)) && std::strcmp(debug, "hang") == 0;
+		const bool hangMode = Switches::Equals("DXVK_DEBUG", "hang");
 		// CS_ORG_CRASH_MARKERS=0 turns them off (they write a marker at every command list boundary and label).
-		char markers[8] = {};
-		const bool markersOff = GetEnvironmentVariableA("CS_ORG_CRASH_MARKERS", markers, sizeof(markers)) && markers[0] == '0';
+		const bool markersOff = Switches::Off("CS_ORG_CRASH_MARKERS");
 		ci.enableCrashMarkers = (hangMode || Aftermath::WantsCrashAnalysis()) && !markersOff;
 		ci.vulkanCreateHooks = &hooks;
 		ci.vulkanBindingModels = rhi::vulkan::BindingModel_DescriptorBuffer;

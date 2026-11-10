@@ -9,6 +9,7 @@
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/Switches.h"
 #	include "Utils/D3D.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -192,11 +193,7 @@ namespace GraphResources::SelfTest
 
 	bool Requested()
 	{
-		static const bool requested = [] {
-			char value[8]{};
-			return GetEnvironmentVariableA("CS_ORG_GRAPHRES_SELFTEST", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-		}();
-		return requested;
+		return Switches::On("CS_ORG_GRAPHRES_SELFTEST");
 	}
 
 	void Ensure()

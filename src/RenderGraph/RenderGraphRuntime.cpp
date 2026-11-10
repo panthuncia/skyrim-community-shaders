@@ -14,6 +14,7 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Engine/GuestDevice.h"
 #include "RenderGraph/GpuTimingSource.h"
+#include "RenderGraph/Switches.h"
 #include "Features/RemoteControl/GpuTimestamps.h"
 #include "Features/RemoteControl/GpuCounters.h"
 #include "Features/DrawcallLimitFix.h"
@@ -42,7 +43,6 @@
 #include <atomic>
 #include <filesystem>
 #include <semaphore>
-#include <set>
 
 #include <tbb/concurrent_queue.h>
 #include <map>
@@ -210,59 +210,14 @@ namespace
 
 	bool EnvDisabled()
 	{
-		char buf[8] = {};
-		return GetEnvironmentVariableA("CS_ORG", buf, sizeof(buf)) && buf[0] == '0';
+		return Switches::Off("CS_ORG");
 	}
 
 	// Diagnostic: CS_ORG=features requests the interop device features but never creates the
 	// graph, separating side effects of the device configuration from those of the graph's work.
-	bool EnvEquals(const char* a_name, const char* a_value)
-	{
-		char buf[32] = {};
-		return GetEnvironmentVariableA(a_name, buf, sizeof(buf)) && std::strcmp(buf, a_value) == 0;
-	}
-
 	bool EnvFeaturesOnly()
 	{
-		return EnvEquals("CS_ORG", "features");
-	}
-
-	// Diagnostic (CS_ORG_STREAM_TRACE_AT=a-b,c-d): whether CS's frame counter is in one of the ranges. A single number is a
-	// range of one frame.
-	bool StreamTraceFrame()
-	{
-		static const std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges = [] {
-			std::vector<std::pair<std::uint64_t, std::uint64_t>> parsed;
-			char value[256]{};
-			if (!GetEnvironmentVariableA("CS_ORG_STREAM_TRACE_AT", value, sizeof(value)))
-				return parsed;
-			for (const char* c = value; *c;) {
-				char* end = nullptr;
-				const auto from = std::strtoull(c, &end, 10);
-				if (end == c)
-					break;
-				auto to = from;
-				if (*end == '-') {
-					c = end + 1;
-					to = std::strtoull(c, &end, 10);
-					if (end == c)
-						break;
-				}
-				parsed.emplace_back(from, to);
-				c = (*end == ',') ? end + 1 : end;
-			}
-			return parsed;
-		}();
-		if (ranges.empty() || !globals::state)
-			return false;
-		const std::uint64_t frame = globals::state->frameCount;
-		return std::ranges::any_of(ranges, [&](const auto& a_range) { return frame >= a_range.first && frame <= a_range.second; });
-	}
-
-	// The list's handle, as one number: the same number in two executions means the same secondary executed again.
-	std::uint64_t ListId(const rhi::CommandList& a_list)
-	{
-		return (std::uint64_t{ a_list.GetHandle().generation } << 32) | a_list.GetHandle().index;
+		return Switches::Equals("CS_ORG", "features");
 	}
 
 	template <class T>
@@ -1134,47 +1089,6 @@ struct RenderGraphRuntime::Impl
 				logger::error("[ORG] an in-stream epoch's segment failed: {}", e.what());
 		}
 	}
-	// Diagnostic (CS_ORG_STREAM_TRACE_AT): one line per segment of an in-stream epoch's execution: the packets it runs (a kept
-	// recording's are the ones seen before), their secondaries, the slot, waits and signals.
-	void TraceExecution(const org::ExternalEpochExecution& a_execution, const char* a_label)
-	{
-		static std::map<std::string, std::set<std::uintptr_t>> seen;
-		auto& known = seen[a_label ? a_label : ""];
-		const auto points = [](const std::vector<rhi::TimelinePoint>& a_points) {
-			std::string text;
-			for (const auto& point : a_points)
-				text += fmt::format("{}{}@{}", text.empty() ? "" : ",", point.t.index, point.value);
-			return text;
-		};
-		std::size_t kept = 0, fresh = 0;
-		for (std::size_t index = 0; index < a_execution.segments.size(); ++index) {
-			const auto& traced = a_execution.segments[index];
-			std::string leading, items;
-			for (const auto& list : traced.leading)
-				leading += fmt::format("{}{:x}", leading.empty() ? "" : ",", ListId(list));
-			for (const auto& item : traced.items) {
-				if (!item.packet)
-					continue;
-				if (item.packet->Deferred()) {
-					items += items.empty() ? "late" : ",late";
-					continue;
-				}
-				// A kept recording's packet is the same object in every execution that takes it; a fresh one is new.
-				const bool again = !known.insert(reinterpret_cast<std::uintptr_t>(item.packet.get())).second;
-				(again ? kept : fresh) += 1;
-				items += fmt::format("{}packet {:x}{} lists", items.empty() ? "" : "; ", reinterpret_cast<std::uintptr_t>(item.packet.get()), again ? "*" : "");
-				for (const auto& list : item.packet->Lists())
-					items += fmt::format(" {:x}", ListId(list));
-				items += fmt::format(" heaps {}/{}", item.resourceHeap.index, item.samplerHeap.index);
-			}
-			logger::info("[ORG] stream trace frame {} '{}' host frame {} slot {}: traced {}/{}{} leading [{}] items [{}] waits [{}] signals [{}]",
-				globals::state->frameCount, a_label ? a_label : "", host->LastHostFrame(), host->CurrentFrameSlot(), index + 1,
-				a_execution.segments.size(), traced.split ? " split" : "", leading, items, points(traced.waits), points(traced.signals));
-		}
-		logger::info("[ORG] stream trace frame {} '{}': {} packets executed before (* above, a kept recording), {} new{}",
-			globals::state->frameCount, a_label ? a_label : "", kept, fresh, a_execution.exitSplit ? ", exit split" : "");
-	}
-
 	// Render thread: an in-stream epoch's execution into DXVK's command stream, a segment per external command with its waits and
 	// signals, DXVK's command list ended (flushed) before a segment marked split. Not taken: the rest signalled unexecuted.
 	bool EmitExecution(const std::shared_ptr<org::ExternalEpochExecution>& a_execution, const char* a_label)
@@ -1182,8 +1096,6 @@ struct RenderGraphRuntime::Impl
 		ZoneScopedN("CS.ORG.EmitExecution");
 		thread_local std::vector<RenderGraphRuntime::ExternalCommandsWait> waits, signals;
 		const auto streamDevice = host->Device();
-		if (StreamTraceFrame())
-			TraceExecution(*a_execution, a_label);
 		for (std::size_t index = 0; index < a_execution->segments.size(); ++index) {
 			const auto& streamSegment = a_execution->segments[index];
 			if (streamSegment.split && index) {
@@ -1362,22 +1274,23 @@ struct RenderGraphRuntime::Impl
 	// after CS_ORG_TEST_CONTRIBUTOR_FRAMES frames (default 600) and logs to CommunityShaders-ContributorSample.log beside CS's log.
 	void LoadTestContributor()
 	{
-		wchar_t path[MAX_PATH]{};
-		if (!GetEnvironmentVariableW(L"CS_ORG_TEST_CONTRIBUTOR", path, MAX_PATH))
+		const auto pathValue = Switches::Value("CS_ORG_TEST_CONTRIBUTOR");
+		if (pathValue.empty())
 			return;
-		char epoch[64] = "cs.light-culling";
-		GetEnvironmentVariableA("CS_ORG_TEST_CONTRIBUTOR_EPOCH", epoch, sizeof(epoch));
-		char frames[16] = "600";
-		GetEnvironmentVariableA("CS_ORG_TEST_CONTRIBUTOR_FRAMES", frames, sizeof(frames));
-		const HMODULE module = LoadLibraryW(path);
+		const std::filesystem::path path = std::filesystem::u8path(pathValue);
+		std::string epoch = Switches::Value("CS_ORG_TEST_CONTRIBUTOR_EPOCH");
+		if (epoch.empty())
+			epoch = "cs.light-culling";
+		const auto frames = static_cast<std::uint32_t>(Switches::Number("CS_ORG_TEST_CONTRIBUTOR_FRAMES", 600));
+		const HMODULE module = LoadLibraryW(path.c_str());
 		using Start = int(ORG_RG_CALL*)(const wchar_t*, const char*, std::uint32_t, const char*);
 		const auto start = module ? reinterpret_cast<Start>(GetProcAddress(module, "ORGContributorSampleStart")) : nullptr;
 		if (!start) {
-			logger::warn("[ORG] CS_ORG_TEST_CONTRIBUTOR: no ORGContributorSampleStart in {}", std::filesystem::path(path).string());
+			logger::warn("[ORG] CS_ORG_TEST_CONTRIBUTOR: no ORGContributorSampleStart in {}", path.string());
 			return;
 		}
 		const auto log = (logger::log_directory().value_or(std::filesystem::path{}) / "CommunityShaders-ContributorSample.log").string();
-		const int status = start(L"CommunityShaders.dll", epoch, static_cast<std::uint32_t>(std::strtoul(frames, nullptr, 10)), log.c_str());
+		const int status = start(L"CommunityShaders.dll", epoch.c_str(), frames, log.c_str());
 		logger::info("[ORG] test contributor {} started: {} (epoch {}, log {})", std::filesystem::path(path).filename().string(), status, epoch, log);
 	}
 
@@ -1622,7 +1535,7 @@ bool RenderGraphRuntime::Initialize()
 	// Optional: game resources for the graph (Drawcall Limit Fix).
 	state->getResourceInfo = ResolveExport<PFN_dxvkGetInteropResourceInfo>(d3d11, "dxvkGetInteropResourceInfo");
 	state->getResourceInfos = ResolveExport<PFN_dxvkGetInteropResourceInfos>(d3d11, "dxvkGetInteropResourceInfos");
-	if (!EnvEquals("CS_ORG_PINNED_IMPORTS", "1")) {
+	if (!Switches::Equals("CS_ORG_PINNED_IMPORTS", "1")) {
 		state->trackResources = ResolveExport<PFN_dxvkTrackInteropResources>(d3d11, "dxvkTrackInteropResources");
 		state->untrackResources = ResolveExport<PFN_dxvkUntrackInteropResources>(d3d11, "dxvkUntrackInteropResources");
 		state->pollRelocations = ResolveExport<PFN_dxvkPollInteropRelocations>(d3d11, "dxvkPollInteropRelocations");
@@ -1639,12 +1552,12 @@ bool RenderGraphRuntime::Initialize()
 	state->emitExternalCommands = ResolveExport<PFN_dxvkEmitExternalCommands>(d3d11, "dxvkEmitExternalCommands");
 	// Optional: without it, each epoch flushes and waits for DXVK's command stream instead.
 	state->enqueueSubmission = ResolveExport<PFN_dxvkEnqueueInteropSubmission>(d3d11, "dxvkEnqueueInteropSubmission");
-	if (EnvEquals("CS_ORG_SUBMIT", "flush"))
+	if (Switches::Equals("CS_ORG_SUBMIT", "flush"))
 		state->enqueueSubmission = nullptr;
-	if (state->enqueueSubmission && !EnvEquals("CS_ORG_BATCH_SUBMIT", "0"))
+	if (state->enqueueSubmission && !Switches::Equals("CS_ORG_BATCH_SUBMIT", "0"))
 		state->enqueueSubmissions = ResolveExport<PFN_dxvkEnqueueInteropSubmissions>(d3d11, "dxvkEnqueueInteropSubmissions");
-	state->epochStats = EnvEquals("CS_ORG_EPOCH_STATS", "1");
-	state->earlyFlush = EnvEquals("CS_ORG_EARLY_FLUSH", "1");
+	state->epochStats = Switches::Equals("CS_ORG_EPOCH_STATS", "1");
+	state->earlyFlush = Switches::Equals("CS_ORG_EARLY_FLUSH", "1");
 
 	auto d3dDevice = globals::d3d::device;
 	if (!d3dDevice || FAILED(d3dDevice->QueryInterface(__uuidof(IDXGIVkInteropDevice), state->interop.put_void())))
@@ -1653,7 +1566,7 @@ bool RenderGraphRuntime::Initialize()
 	// Resting layouts (RenderGraph/DxvkImageImport.h): imported images stay in DXVK's own layouts instead of GENERAL, which keeps
 	// their compression on AMD's Windows driver. The graph gives each one back in that layout through external home states, so
 	// both must be on. CS_ORG_RESTING_LAYOUTS=0 keeps DXVK pinning them in GENERAL.
-	if (!EnvEquals("CS_ORG_RESTING_LAYOUTS", "0") && !EnvEquals("CS_ORG_EXTERNAL_HOME", "0")) {
+	if (!Switches::Equals("CS_ORG_RESTING_LAYOUTS", "0") && !Switches::Equals("CS_ORG_EXTERNAL_HOME", "0")) {
 		const auto setOptions = ResolveExport<PFN_dxvkSetInteropOptions>(d3d11, "dxvkSetInteropOptions");
 		const bool resting = setOptions && SUCCEEDED(setOptions(d3dDevice, DXVK_ORG_INTEROP_RESTING_LAYOUTS));
 		logger::info("[ORG] imported images {}", resting ? "rest in DXVK's layouts" : "rest in GENERAL (this DXVK build has no dxvkSetInteropOptions)");
@@ -1704,7 +1617,7 @@ bool RenderGraphRuntime::Initialize()
 	adopt.enabledDeviceExtensions = info.enabledExtensions;
 	adopt.enabledDeviceExtensionCount = info.enabledExtensionCount;
 	adopt.diagnostics.registerMarker = &Aftermath::RegisterOrgCheckpoint;
-	adopt.diagnostics.detailedCommands = EnvEquals("CS_ORG_DETAILED_CHECKPOINTS", "1");
+	adopt.diagnostics.detailedCommands = Switches::Equals("CS_ORG_DETAILED_CHECKPOINTS", "1");
 	// Whether VK_EXT_debug_utils is on, so that BasicRHI names objects and labels passes only then.
 	adopt.enabledInstanceExtensions = info.enabledInstanceExtensions;
 	adopt.enabledInstanceExtensionCount = info.enabledInstanceExtensionCount;
@@ -1727,9 +1640,8 @@ bool RenderGraphRuntime::Initialize()
 		}
 		// The frame-pace timeline (SignalFramePace): signalled from DXVK's stream, so it needs the stream.
 		if (state->enqueueSubmission && getDeviceProcAddr) {
-			char latency[8] = {};
-			if (GetEnvironmentVariableA("CS_FRAME_LATENCY", latency, sizeof(latency)) && latency[0])
-				state->frameLatency = static_cast<uint32_t>(std::clamp(std::atoi(latency), 0, static_cast<int>(kGameFramesInFlight)));
+			if (Switches::IsSet("CS_FRAME_LATENCY"))
+				state->frameLatency = static_cast<uint32_t>(std::clamp<std::uint64_t>(Switches::Number("CS_FRAME_LATENCY", 0), 0, kGameFramesInFlight));
 			const auto createSemaphore = reinterpret_cast<PFN_vkCreateSemaphore>(getDeviceProcAddr(info.device, "vkCreateSemaphore"));
 			state->destroySemaphore = reinterpret_cast<PFN_vkDestroySemaphore>(getDeviceProcAddr(info.device, "vkDestroySemaphore"));
 			state->waitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(getDeviceProcAddr(info.device, "vkWaitSemaphores"));
@@ -1744,7 +1656,7 @@ bool RenderGraphRuntime::Initialize()
 		}
 		// DXVK's compute-only queue, ordered against the stream by the host (EnqueueStreamPoint, CloseComputeEpoch), which
 		// needs the stream. CS_ORG_COMPUTE_QUEUE=0 leaves BasicRHI's compute queue aliasing the graphics one.
-		if (state->enqueueSubmission && info.computeQueue && !EnvEquals("CS_ORG_COMPUTE_QUEUE", "0") && getDeviceProcAddr) {
+		if (state->enqueueSubmission && info.computeQueue && !Switches::Equals("CS_ORG_COMPUTE_QUEUE", "0") && getDeviceProcAddr) {
 			const auto createSemaphore = reinterpret_cast<PFN_vkCreateSemaphore>(getDeviceProcAddr(info.device, "vkCreateSemaphore"));
 			state->destroySemaphore = reinterpret_cast<PFN_vkDestroySemaphore>(getDeviceProcAddr(info.device, "vkDestroySemaphore"));
 			state->waitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(getDeviceProcAddr(info.device, "vkWaitSemaphores"));
@@ -1763,9 +1675,9 @@ bool RenderGraphRuntime::Initialize()
 				// stream as its compute passes do (a pass that touches a resource only DXVK's families may use stays there): DXVK's spare
 				// one, else the uploader's, shared (see copyQueue). Off, or with neither: the copy queue aliases the graphics one. Never
 				// the compute queue: a copy there waits behind a running dispatch.
-				const bool uploadOffered = adopt.submissionHooks.submit && info.uploadQueue && !EnvEquals("CS_ORG_UPLOAD_QUEUE", "0");
+				const bool uploadOffered = adopt.submissionHooks.submit && info.uploadQueue && !Switches::Equals("CS_ORG_UPLOAD_QUEUE", "0");
 				const bool shared = !info.copyQueue && uploadOffered;
-				if ((info.copyQueue || shared) && !EnvEquals("CS_ORG_COPY_QUEUE", "0") &&
+				if ((info.copyQueue || shared) && !Switches::Equals("CS_ORG_COPY_QUEUE", "0") &&
 					createSemaphore(info.device, &create, nullptr, &state->copyExit) == VK_SUCCESS) {
 					state->copyQueue = shared ? info.uploadQueue : info.copyQueue;
 					adopt.queues[2] = shared ? rhi::vulkan::AdoptedQueue{ info.uploadQueue, info.uploadQueueFamily, info.uploadQueueIndex } :
@@ -1778,7 +1690,7 @@ bool RenderGraphRuntime::Initialize()
 	// The upload queue, offered to BasicRHI as a spare queue (CreateQueue hands it to ORG's copy-queue uploader). Its submissions are
 	// direct, under the lock (Submit). CS_ORG_UPLOAD_QUEUE=0 offers none.
 	rhi::vulkan::AdoptedQueue uploadSpare{};
-	if (adopt.submissionHooks.submit && info.uploadQueue && !EnvEquals("CS_ORG_UPLOAD_QUEUE", "0")) {
+	if (adopt.submissionHooks.submit && info.uploadQueue && !Switches::Equals("CS_ORG_UPLOAD_QUEUE", "0")) {
 		state->uploadQueue = info.uploadQueue;
 		uploadSpare = { info.uploadQueue, info.uploadQueueFamily, info.uploadQueueIndex };
 		adopt.spareQueues = &uploadSpare;
@@ -1812,19 +1724,19 @@ bool RenderGraphRuntime::Initialize()
 		// CS_ORG_CLOSED (default off, =1 on): each epoch leaves every resource in its home state and starts with a full barrier, so
 		// its admission is independent of the epochs before it. An interop fallback: the epochs' resources otherwise flow between them
 		// through ORG's ledgers.
-		desc.closedExecutions = EpochsEnabled() && EnvEquals("CS_ORG_CLOSED", "1");
+		desc.closedExecutions = EpochsEnabled() && Switches::Equals("CS_ORG_CLOSED", "1");
 		// CS_ORG_EXTERNAL_HOME (default on, =0 off): each epoch gives DXVK's images (the imports) back in their home state on the
 		// graphics queue, where DXVK uses them between the epochs (GENERAL, the external-commands contract).
-		desc.externalHomeStates = !EnvEquals("CS_ORG_EXTERNAL_HOME", "0");
+		desc.externalHomeStates = !Switches::Equals("CS_ORG_EXTERNAL_HOME", "0");
 		// CS_ORG_REUSE_RECORDINGS (default on, =0 off): each epoch's recordings are kept per frame slot and submitted again
 		// while what they were recorded for holds; a ticket an epoch's commit made stale takes the kept recording of its new
 		// shape instead of being prepared again (a render-thread wait). Kept recordings carry no Tracy GPU zones: turn it off
 		// to profile the epochs' passes on the GPU with Tracy.
-		desc.reuseRecordings = !EnvEquals("CS_ORG_REUSE_RECORDINGS", "0");
+		desc.reuseRecordings = !Switches::Equals("CS_ORG_REUSE_RECORDINGS", "0");
 		// CS_ORG_QUEUE_UPLOADS (default on, =0 off): an async epoch's staged uploads whose destination it first uses on the compute
 		// queue are recorded there, just ahead of its first compute batch, and a compute batch waits for the graphics queue's
 		// uploads only when it uses what they write. Off: every upload on the graphics queue and every compute batch waits for them.
-		desc.queueScopedUploads = !EnvEquals("CS_ORG_QUEUE_UPLOADS", "0");
+		desc.queueScopedUploads = !Switches::Equals("CS_ORG_QUEUE_UPLOADS", "0");
 		// The segments in the order a frame runs them: Drawcall Limit Fix's schedule's (ConfigureFrame), else the built-in order - the
 		// shadow views at AfterShadowMaps, the Z-prepass at the depth pass, the water reflection's faces after it, Skylighting's map, Light
 		// Limit Fix's culling at Prepass, the colour pass where the main pass's opaque batches end, and the forward epoch (T7d) at the
@@ -1839,7 +1751,7 @@ bool RenderGraphRuntime::Initialize()
 		if (!desc.epochOrder.empty())
 			logger::info("[ORG] epoch order: {}", fmt::join(desc.epochOrder, ","));
 		// Diagnostic: CS_ORG_ALIAS_LOG=1 logs every alias plan's placements, ranks and exclusions.
-		if (EnvEquals("CS_ORG_ALIAS_LOG", "1")) {
+		if (Switches::Equals("CS_ORG_ALIAS_LOG", "1")) {
 			auto settings = org::runtime::GetOpenRenderGraphSettings();
 			settings.autoAliasEnableLogging = true;
 			org::runtime::SetOpenRenderGraphSettings(settings);
@@ -1870,7 +1782,7 @@ bool RenderGraphRuntime::Initialize()
 		// CS_ORG_ASYNC_EPOCHS (default on, =0 off): each epoch's work is prepared, admitted and recorded ahead of
 		// its epoch point on the host's own thread; at the point the render thread only writes the epoch's
 		// latches, records the queued uploads and submits. Needs epochs.
-		state->asyncEpochs = !EnvEquals("CS_ORG_ASYNC_EPOCHS", "0") && EpochsEnabled();
+		state->asyncEpochs = !Switches::Equals("CS_ORG_ASYNC_EPOCHS", "0") && EpochsEnabled();
 	} catch (const std::exception& e) {
 		return disable(std::string("graph host creation failed: ") + e.what());
 	}
@@ -1878,7 +1790,7 @@ bool RenderGraphRuntime::Initialize()
 	state->setTeardownCallback(&Impl::OnDxvkTeardown, nullptr);
 	// CS_ORG_RECORDING_TIMESTAMPS=1: the recordings kept across frames are timed too (the others always are), as a timestamp trace
 	// turns them on (NvPerf timestamps).
-	if (EnvEquals("CS_ORG_RECORDING_TIMESTAMPS", "1"))
+	if (Switches::Equals("CS_ORG_RECORDING_TIMESTAMPS", "1"))
 		state->host->SetRecordingTimestamps(true);
 	state->host->SetCompletedFrameCallback([self = state.get()](std::uint64_t a_frameNumber, const org::runtime::IStatisticsService& a_stats) {
 		self->OnCompletedFrame(a_frameNumber, a_stats);
@@ -1924,12 +1836,12 @@ bool RenderGraphRuntime::Initialize()
 			logger::info("[ORG] async epochs: {}; revision-driven: {}", fmt::join(epochs, ","), fmt::join(revisionEpochs, ","));
 			// In DXVK's own command stream unless CS_ORG_IN_STREAM=0 (or DXVK takes no external commands); a list of epochs (3,1) puts only
 			// those there.
-			if (state->emitExternalCommands && !EnvEquals("CS_ORG_IN_STREAM", "0")) {
+			if (state->emitExternalCommands && !Switches::Equals("CS_ORG_IN_STREAM", "0")) {
 				state->inStreamEpochs = epochs;
-				char list[128]{};
-				if (GetEnvironmentVariableA("CS_ORG_IN_STREAM", list, sizeof(list)) && std::strchr(list, ',')) {
+				const auto list = Switches::Value("CS_ORG_IN_STREAM");
+				if (list.find(',') != std::string::npos) {
 					std::vector<std::uint32_t> chosen;
-					for (const char* at = list; *at;) {
+					for (const char* at = list.c_str(); *at;) {
 						chosen.push_back(static_cast<std::uint32_t>(std::strtoul(at, nullptr, 10)));
 						const char* comma = std::strchr(at, ',');
 						if (!comma)
@@ -2224,7 +2136,7 @@ void RenderGraphRuntime::AddEpochJoinWait(std::chrono::steady_clock::duration a_
 
 bool RenderGraphRuntime::EpochsEnabled()
 {
-	static const bool enabled = !EnvEquals("CS_ORG_EPOCHS", "0");
+	static const bool enabled = !Switches::Equals("CS_ORG_EPOCHS", "0");
 	return enabled;
 }
 
@@ -2415,13 +2327,6 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 			impl->holding = true;
 		} else if (impl->batching && !impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment)))
 			throw std::runtime_error("DXVK rejected the epoch's submissions");
-		// Experiment (CS_ORG_STREAM_FLUSH_AFTER=1): DXVK closes its command list right after an in-stream epoch, so the D3D11 work
-		// after it records into a new command buffer. It tells state left in DXVK's command buffer from memory or layout faults.
-		static const bool flushAfter = EnvEquals("CS_ORG_STREAM_FLUSH_AFTER", "1");
-		if (execution && flushAfter) {
-			globals::d3d::context->Flush();
-			++impl->epochEnqueues;
-		}
 		if (const std::uint32_t spinUs = submittedEpochSpinUs.load(std::memory_order_relaxed); spinUs && IsDclfSegment(a_segment)) {
 			const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(spinUs);
 			while (std::chrono::steady_clock::now() < until) {

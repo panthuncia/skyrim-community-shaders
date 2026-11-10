@@ -9,6 +9,7 @@
 #include "Menu/IconLoader.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/ImGuiBasicRHI.h"
+#include "RenderGraph/Switches.h"
 
 #include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
@@ -216,11 +217,7 @@ namespace ImGuiRenderer
 
 	bool OrgRequested()
 	{
-		static const bool requested = [] {
-			char value[8]{};
-			return GetEnvironmentVariableA("CS_ORG_IMGUI", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-		}();
-		return requested;
+		return Switches::On("CS_ORG_IMGUI");
 	}
 
 	void Init(ID3D11Device* a_device, ID3D11DeviceContext* a_context)

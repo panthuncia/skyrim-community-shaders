@@ -1,20 +1,10 @@
 #include "ORGDeferredComposite.h"
 
-#include <cstring>
-
-namespace
-{
-	bool ReadRequested()
-	{
-		char value[8]{};
-		return GetEnvironmentVariableA("CS_ORG_COMPOSITE", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}
-}
+#include "RenderGraph/Switches.h"
 
 bool ORGDeferredComposite::Requested()
 {
-	static const bool requested = ReadRequested();
-	return requested;
+	return Switches::On("CS_ORG_COMPOSITE");
 }
 
 ORGDeferredComposite& ORGDeferredComposite::Get()

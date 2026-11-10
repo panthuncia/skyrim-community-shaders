@@ -7,6 +7,7 @@
 
 #include "GpuEventTimers.h"
 #include "GpuIdleTrace.h"
+#include "RenderGraph/Switches.h"
 
 #if defined(CS_HAS_RENDER_GRAPH)
 #	include <Render/Runtime/IStatisticsService.h>
@@ -23,16 +24,6 @@ namespace GpuTimingSource
 {
 	namespace
 	{
-		std::string Env(const char* a_name)
-		{
-			char value[64] = {};
-			const DWORD length = GetEnvironmentVariableA(a_name, value, sizeof(value));
-			std::string out(value, length < sizeof(value) ? length : 0);
-			for (auto& c : out)
-				c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-			return out;
-		}
-
 		// Host frames whose submission is remembered until their timestamps come back. The host completes a frame a few game
 		// frames after it ran, and a game frame runs at most one host frame per epoch.
 		constexpr std::size_t kEpochRing = 512;
@@ -214,9 +205,7 @@ namespace GpuTimingSource
 		{
 			auto& events = a_state.events;
 			if (!events.interval) {
-				char value[32] = {};
-				const DWORD length = GetEnvironmentVariableA("CS_GPU_EVENT_TIMERS", value, sizeof(value));
-				events.interval = std::max<std::uint32_t>(1u, length && length < sizeof(value) ? static_cast<std::uint32_t>(std::strtoul(value, nullptr, 10)) : 0u);
+				events.interval = static_cast<std::uint32_t>(std::max<std::uint64_t>(1u, Switches::Number("CS_GPU_EVENT_TIMERS")));
 				logger::info("[GpuEvents] GPU event timers on the render graph (CS_GPU_TIMERS=graph): every graph range's GPU time, logged every {} frames. "
 							 "D3D11 work has no timer here.",
 					events.interval);
@@ -240,13 +229,13 @@ namespace GpuTimingSource
 
 	Timers SelectedTimers()
 	{
-		static const Timers timers = Env("CS_GPU_TIMERS") == "graph" ? Timers::Graph : Timers::D3D11;
+		static const Timers timers = Switches::EqualsNoCase("CS_GPU_TIMERS", "graph") ? Timers::Graph : Timers::D3D11;
 		return timers;
 	}
 
 	bool IdleFromGraph()
 	{
-		static const bool graph = Env("CS_GPU_IDLE_SOURCE") == "graph";
+		static const bool graph = Switches::EqualsNoCase("CS_GPU_IDLE_SOURCE", "graph");
 		return graph;
 	}
 

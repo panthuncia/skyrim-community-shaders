@@ -7,6 +7,7 @@
 
 #	include "Globals.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/Switches.h"
 #	include "State.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -65,10 +66,7 @@ namespace SharedConstants
 
 		bool CheckRequested()
 		{
-			static const bool requested = [] {
-				char value[8]{};
-				return GetEnvironmentVariableA("CS_ORG_SHARED_CONSTANTS_CHECK", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-			}();
+			static const bool requested = Switches::On("CS_ORG_SHARED_CONSTANTS_CHECK");
 			return requested;
 		}
 

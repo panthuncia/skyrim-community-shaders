@@ -1,6 +1,7 @@
 #include "RenderGraph/Engine/Tripwire/TripwireHandles.h"
 
 #include "RenderGraph/Engine/Tripwire/TripwireSelfTest.h"
+#include "RenderGraph/Switches.h"
 #include "Utils/D3D.h"
 
 #if defined(CS_HAS_RENDER_GRAPH)
@@ -21,16 +22,9 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		constexpr std::size_t kKinds = static_cast<std::size_t>(Kind::Count);
 
-		std::string EnvValue(const char* a_name)
-		{
-			char value[64]{};
-			const DWORD length = GetEnvironmentVariableA(a_name, value, sizeof(value));
-			return length && length < sizeof(value) ? std::string(value, length) : std::string();
-		}
-
 		bool LogRequested()
 		{
-			static const bool requested = EnvValue("CS_ORG_TRIPWIRE_LOG") == "1";
+			static const bool requested = Switches::On("CS_ORG_TRIPWIRE_LOG");
 			return requested;
 		}
 
@@ -686,8 +680,7 @@ namespace RenderGraph::Engine::Tripwire
 			SelfTest::Run();
 		if (!LogRequested())
 			return;
-		const auto interval = EnvValue("CS_ORG_TRIPWIRE_LOG_INTERVAL");
-		const unsigned long seconds = interval.empty() ? 60ul : std::strtoul(interval.c_str(), nullptr, 10);
+		const auto seconds = Switches::Number("CS_ORG_TRIPWIRE_LOG_INTERVAL", 60);
 		logger::info("[ORG] tripwire log on (CS_ORG_TRIPWIRE_LOG=1): a report {}", seconds ? fmt::format("every {} s when calls changed, and at exit", seconds) : std::string("at exit"));
 		if (seconds)
 			std::thread(ReportLoop, std::chrono::seconds(seconds)).detach();

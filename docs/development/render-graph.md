@@ -680,8 +680,7 @@ frame through DXVK's interop are unchanged.
     (`owned-frame-onequeue`) and with the epochs outside DXVK's stream (`owned-frame-nostream`). A dump shows DXVK's
     submission thread asleep in `submitCmdLists` with 33 entries queued and no waiter on its condition variable, the
     CS thread blocked on the full queue, and the presenting thread waiting for a frame slot. The CS hang watchdog's dump
-    (which suspends and resumes every thread) once released it. `owned-frame-skiptail` (`CS_ORG_OWNED_SKIPTAIL=1`) tells
-    whether the tail's Vulkan present on DXVK's submission thread is needed for it.
+    (which suspends and resumes every thread) once released it.
 -   Because of the stall there is no owned-on frame rate with DCLF on yet. The earlier 20-30% slower result compared DCLF
     on against DCLF off and does not count. Owned off, DCLF on, `DXVK_DEBUG=hang`: Whiterun 72.8, Dragonsreach 84.4 fps
     (`1109-122526-p1fix-owned-frame-off-off`).
@@ -730,11 +729,14 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 
 ## Switches
 
+Every switch is read once, through `src/RenderGraph/Switches.h` (`Switches::On`, `Off`, `Equals`, `Value`, `Number`): the first
+read of a name is kept for the session, from any thread. New switches go through it and get a row here. The feature ports' own
+switches (`CS_ORG_<FEATURE>=1`) move onto it with lane L4.
+
 | Variable | Effect |
 | --- | --- |
 | `CS_ORG=0` | No feature request and no graph: every feature stays on D3D11. |
 | `CS_ORG_OWNED_FRAME=1` | BasicRHI creates the device, DXVK runs as its guest, ORG presents ("Owned frame"). Frame generation is unavailable. |
-| `CS_ORG_OWNED_SKIPTAIL=1` | Diagnostic: the owned frame's tail neither copies nor presents (nothing is shown). |
 | `CS_ORG_CRASH_MARKERS=0` | With the owned frame, BasicRHI's crash markers off even in hang mode. They cost about a third of the frame rate in Dragonsreach on the RX 6600 (43 against 60 fps, Dev-Fast). |
 | `CS_ORG=features` | Request the device features but never create the graph (isolates device-configuration side effects). |
 | `CS_ORG_SUBMIT=flush` | Use the flush-and-lock submission path even when DXVK supports the stream path. |
@@ -749,6 +751,22 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 | `CS_ORG_SCREENSHOT=1` | The Screenshot feature's captures (the hotkey, the menu button, `dclf:shot`) are copied into an ORG readback buffer by a pass at the `Capture` anchor, at the end of HDRDisplay's present chain, instead of a D3D11 staging texture (`src/Features/Screenshot/ORGScreenshot.cpp`). The frame never waits: the bytes reach the encoding worker when the copy's fence passes, and the worker crops them. Logs `[ORG] Screenshot: captures are read back through the render graph`; any failure (no anchor, a source that cannot be imported, a failed epoch, a submission at the capture point without the copy) copies that capture with D3D11. `CS_ORG_SCREENSHOT_COMPARE=1` also copies each graph capture with D3D11 from the same frame, saved as `<name>-d3d11.<ext>` beside it. |
 | `CS_ORG_TRIPWIRE_LOG=1` | Log every tripwire call site with its count ("Tripwire handles"): `[ORG] tripwire report (<reason>)`, a line per interface and one per site, every `CS_ORG_TRIPWIRE_LOG_INTERVAL` seconds (default 60, 0 = only at exit) when calls changed, and at exit. Without it each site still logs its first call (`[ORG] tripwire: <Interface>::<Method> from ...`). |
 | `CS_ORG_TRIPWIRE_SELFTEST=1` | At startup, make every handle type standalone and check refcounting, `QueryInterface`, `GetDesc`, debug names, forbidden calls (fail, zeroed outputs, counted), guest forwarding and unwrapping, Release from several threads, and caller naming. Logs `[ORG] tripwire self-test: PASS (<n> checks, 20 interfaces)` or a `FAIL` line per check. |
+| `CS_ORG_EPOCHS=0` | One graph for every segment instead of a graph per epoch; no frame anchor can be reserved. |
+| `CS_ORG_REUSE_RECORDINGS=0` | Record every epoch again each frame instead of submitting the kept recordings again. |
+| `CS_ORG_RECORDING_TIMESTAMPS=1` | Kept recordings carry ORG's pass timestamps (they carry none by default). |
+| `CS_ORG_BATCH_SUBMIT=0` | Enqueue each of an epoch's submissions alone instead of one batch (`dxvkEnqueueInteropSubmissions`). |
+| `CS_ORG_EARLY_FLUSH=1` | Flush DXVK's command list before each in-stream epoch instead of when the epoch's first submission is enqueued. |
+| `CS_ORG_UPLOAD_QUEUE=0` | No dedicated upload queue: uploads go to the copy queue or the graphics queue. |
+| `CS_ORG_PINNED_IMPORTS=1` | Imported DXVK images are pinned instead of tracked (`dxvkTrackInteropResources` unused). |
+| `CS_ORG_RESTING_LAYOUTS=0` | DXVK keeps imported images in GENERAL instead of its own layouts (DxvkImageImport). |
+| `CS_ORG_DETAILED_CHECKPOINTS=1` | BasicRHI's crash checkpoints per command instead of per pass. |
+| `CS_ORG_ALIAS_LOG=1` | Log every alias plan's placements, ranks and exclusions (ORG's `autoAliasEnableLogging`). |
+| `CS_ORG_SHARED_CONSTANTS_CHECK=1` | After each epoch that uploads CS's shared constants, read the D3D11 buffers back and log whether the bytes match (stalls). |
+| `CS_ORG_COMPOSITE=1` | The deferred composite runs on the graph at the DeferredComposite anchor (`src/ORGDeferredComposite.cpp`). |
+| `CS_ORG_TEST_CONTRIBUTOR=<dll>` | Load ORG's sample contributor into `CS_ORG_TEST_CONTRIBUTOR_EPOCH` (default `cs.light-culling`) for `CS_ORG_TEST_CONTRIBUTOR_FRAMES` frames (default 600). |
+| `CS_FRAME_LATENCY=<n>` | The frame-pace timeline's depth, 0 to `kGameFramesInFlight` (0 turns the render thread's own pacing off). |
+| `CS_GPU_LOAD=<groups>` | A synthetic GPU load of that many groups each frame (`GpuEventTimers`; a graph pass at the Present anchor with `CS_GPU_TIMERS=graph`). |
+| `CS_GPU_EVENT_TIMERS=<frames>` | Log the GPU event timers every that many frames ("GPU timers from the graph"). |
 | `CS_ORG_EPOCH_STATS=1` | Log render-thread CPU time per epoch (average and maximum every 600 epochs). |
 | `CS_ORG_ASYNC_EPOCHS=0` | Run the epochs synchronously. By default each epoch is prepared and recorded ahead on the graph host's thread, and the render thread only admits and submits ("Revisions and recordings" in `dclf-architecture.md`). |
 | `CS_ORG_IN_STREAM=0` | Enqueue the async epochs' batches behind DXVK's command list (`dxvkEnqueueInteropSubmission`) instead of running their graphics work inside it. A list such as `0,3` keeps only those epochs in the stream. |

@@ -11,6 +11,7 @@
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/Switches.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
@@ -304,11 +305,7 @@ namespace FrameAnchors::SelfTest
 
 	bool Requested()
 	{
-		static const bool requested = [] {
-			char value[8]{};
-			return GetEnvironmentVariableA("CS_ORG_ANCHOR_SELFTEST", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-		}();
-		return requested;
+		return Switches::On("CS_ORG_ANCHOR_SELFTEST");
 	}
 
 	void Ensure()
