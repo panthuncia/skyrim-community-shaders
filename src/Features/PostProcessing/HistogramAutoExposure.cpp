@@ -43,6 +43,53 @@ HistogramAutoExposure::ExposureParameters HistogramAutoExposure::GetExposurePara
 	return parameters;
 }
 
+HistogramAutoExposure::AutoExposureCB HistogramAutoExposure::Constants(bool a_reset) const
+{
+	const auto parameters = GetExposureParameters();
+	return {
+		.AdaptArea = settings.AdaptArea,
+		.AdaptationRange = parameters.LuminanceRange,
+		.AdaptLerp = a_reset ? 1.f : std::clamp(1.f - exp(-RE::BSTimer::GetSingleton()->realTimeDelta * settings.AdaptSpeed), 0.f, 1.f),
+		.ExposureCompensation = exp2(parameters.CompensationEV),
+		.PurkinjeStartEV = settings.PurkinjeStartEV,
+		.PurkinjeMaxEV = settings.PurkinjeMaxEV,
+		.PurkinjeStrength = settings.PurkinjeStrength,
+	};
+}
+
+std::array<uint32_t, 2> HistogramAutoExposure::HistogramGroups(uint a_width, uint a_height)
+{
+	uint32_t dispatchX = ((a_width - 1) >> 5) + 1;
+	uint32_t dispatchY = ((a_height - 1) >> 5) + 1;
+	return { (dispatchX + 7) / 8, (dispatchY + 7) / 8 };
+}
+
+HistogramAutoExposure::Readbacks HistogramAutoExposure::WantedReadbacks() const
+{
+	const auto frame = static_cast<int64_t>(globals::state->frameCount);
+	const bool ui = ImGui::GetCurrentContext() != nullptr;
+	Readbacks wanted;
+	wanted.histogram = histogramReadbackRequested && ui && histogramReadbackRequestFrame >= frame - 1;
+	const bool exposure = ui && exposureReadbackRequestFrame >= 0 && exposureReadbackRequestFrame >= frame - 1;
+	wanted.adaptation = wanted.histogram || exposure || AdaptationLogDue();
+	return wanted;
+}
+
+bool HistogramAutoExposure::AdaptationLogDue()
+{
+	static const bool requested = [] {
+		char value[8]{};
+		return GetEnvironmentVariableA("CS_PP_EXPOSURE_LOG", value, sizeof(value)) && std::strcmp(value, "1") == 0;
+	}();
+	return requested && globals::state->frameCount % 250 == 0;
+}
+
+void HistogramAutoExposure::LogAdaptation(float a_adaptedLuminance, const char* a_path)
+{
+	logger::info("[PP] Histogram Auto Exposure ({}): frame {}, adapted luminance {:.6g} ({:+.3f} EV100)", a_path, globals::state->frameCount,
+		a_adaptedLuminance, std::log2(std::max(a_adaptedLuminance, 1e-5f)) + 3.0f);
+}
+
 void HistogramAutoExposure::DrawCameraExposureReadout()
 {
 	const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr;
@@ -305,17 +352,7 @@ void HistogramAutoExposure::Draw(TextureInfo& inout_tex)
 	if (!AllShadersReady({ &histogramCS, &histogramAvgCS }))
 		return;
 
-	const auto parameters = GetExposureParameters();
-
-	AutoExposureCB cbData = {
-		.AdaptArea = settings.AdaptArea,
-		.AdaptationRange = parameters.LuminanceRange,
-		.AdaptLerp = resetAdaptation ? 1.f : std::clamp(1.f - exp(-RE::BSTimer::GetSingleton()->realTimeDelta * settings.AdaptSpeed), 0.f, 1.f),
-		.ExposureCompensation = exp2(parameters.CompensationEV),
-		.PurkinjeStartEV = settings.PurkinjeStartEV,
-		.PurkinjeMaxEV = settings.PurkinjeMaxEV,
-		.PurkinjeStrength = settings.PurkinjeStrength,
-	};
+	const AutoExposureCB cbData = Constants(resetAdaptation);
 	autoExposureCB->Update(cbData);
 
 	std::array<ID3D11ShaderResourceView*, 2> srvs = { nullptr };
@@ -334,16 +371,11 @@ void HistogramAutoExposure::Draw(TextureInfo& inout_tex)
 	globals::profiler->BeginPass("PostProcessing::HistogramAutoExposure");
 	state->BeginPerfEvent("Histogram Auto Exposure");
 
-	const bool histogramReadbackActive =
-		histogramReadbackRequested &&
-		ImGui::GetCurrentContext() &&
-		histogramReadbackRequestFrame >= static_cast<int64_t>(globals::state->frameCount) - 1;
+	const auto wanted = WantedReadbacks();
+	const bool histogramReadbackActive = wanted.histogram;
 	if (!histogramReadbackActive)
 		histogramReadbackRequested = false;
-	const bool exposureReadbackActive =
-		ImGui::GetCurrentContext() &&
-		exposureReadbackRequestFrame >= 0 &&
-		exposureReadbackRequestFrame >= static_cast<int64_t>(globals::state->frameCount) - 1;
+	const bool adaptationReadbackActive = wanted.adaptation;
 
 	{
 		state->BeginPerfEvent("Calculate Histogram");
@@ -356,20 +388,10 @@ void HistogramAutoExposure::Draw(TextureInfo& inout_tex)
 
 		// Calculate histogram
 		context->CSSetShader(histogramCS.get(), nullptr, 0);
-		uint texWidth = 0;
-		uint texHeight = 0;
-		{
-			D3D11_TEXTURE2D_DESC desc;
-			inout_tex.tex->GetDesc(&desc);
-			texWidth = desc.Width;
-			texHeight = desc.Height;
-		}
-		uint32_t dispatchX = ((texWidth - 1) >> 5) + 1;
-		uint32_t dispatchY = ((texHeight - 1) >> 5) + 1;
-		dispatchX = (dispatchX + 7) / 8;
-		dispatchY = (dispatchY + 7) / 8;
-
-		context->Dispatch(dispatchX, dispatchY, 1);
+		D3D11_TEXTURE2D_DESC desc;
+		inout_tex.tex->GetDesc(&desc);
+		const auto groups = HistogramGroups(desc.Width, desc.Height);
+		context->Dispatch(groups[0], groups[1], 1);
 
 		if (histogramReadbackActive && histogramStagingBuffer) {
 			uavs.fill(nullptr);
@@ -413,7 +435,7 @@ void HistogramAutoExposure::Draw(TextureInfo& inout_tex)
 			context->Unmap(histogramStagingBuffer.get(), 0);
 		}
 	}
-	if ((histogramReadbackActive || exposureReadbackActive) && adaptationStagingBuffer) {
+	if (adaptationReadbackActive && adaptationStagingBuffer) {
 		ID3D11Resource* adaptResource = nullptr;
 		adaptationSB->SRV()->GetResource(&adaptResource);
 		context->CopyResource(adaptationStagingBuffer.get(), adaptResource);
@@ -424,6 +446,8 @@ void HistogramAutoExposure::Draw(TextureInfo& inout_tex)
 			adaptationValue = *reinterpret_cast<float*>(adaptMapped.pData);
 			adaptationReadbackFrame = static_cast<int64_t>(globals::state->frameCount);
 			context->Unmap(adaptationStagingBuffer.get(), 0);
+			if (AdaptationLogDue())
+				LogAdaptation(adaptationValue, "D3D11");
 		}
 	}
 }
