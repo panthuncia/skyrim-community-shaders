@@ -286,6 +286,7 @@ namespace ORGPostChain
 			std::array<std::uint32_t, 3> groups{};
 			std::optional<std::uint32_t> indirect;  // the latch offset of the group counts
 			rhi::CommandSignaturePtr signature;
+			std::shared_ptr<std::atomic<bool>> prepared;
 			std::shared_ptr<const org::LatchBlock> latch;
 		};
 
@@ -317,7 +318,14 @@ namespace ORGPostChain
 				gate.Revision(a_out);
 			}
 
-			DispatchFrame Prepare(const DispatchBindings&, const org::PassPrepareContext&) const { return { gate.Prepare() ? spec : nullptr }; }
+			DispatchFrame Prepare(const DispatchBindings&, const org::PassPrepareContext&) const
+			{
+				if (!gate.Prepare())
+					return { nullptr };
+				if (spec->prepared)
+					spec->prepared->store(true, std::memory_order_release);
+				return { spec };
+			}
 
 			static void Record(const DispatchBindings& a_bindings, const DispatchFrame& a_frame, org::PassRecordContext& a_recording)
 			{
@@ -621,6 +629,7 @@ namespace ORGPostChain
 		spec->bindings = std::move(a_dispatch.bindings);
 		spec->groups = a_dispatch.groups;
 		spec->latch = state.latch;
+		spec->prepared = std::move(a_dispatch.prepared);
 		if (a_dispatch.indirect) {
 			spec->indirect = a_dispatch.indirect->offset;
 			rhi::IndirectArg args[] = { { .kind = rhi::IndirectArgKind::Dispatch } };
@@ -705,6 +714,8 @@ namespace
 			return ORGPostChain::MakeLensFlare();
 		case Index::CODBloom:
 			return ORGPostChain::MakeCODBloom();
+		case Index::PhysicalGlare:
+			return ORGPostChain::MakePhysicalGlare();
 		default:
 			return nullptr;
 		}

@@ -16,71 +16,17 @@
 //   [1] Delavennat (2021), Physically-based Real-time Glare, LiU.
 //   [4] Jimenez (2012), Filmic SMAA, SIGGRAPH — bicubic via HW bilinear.
 
-Texture2D<float4> TexScene : register(t0);     // Original scene (full resolution)
-Texture2D<float4> TexIFFT_RGB : register(t1);  // Packed RGB real components (FFT resolution)
+#include "PostProcessing/PhysicalGlare/glare.hlsli"
 
-RWTexture2D<float4> RWTexOutput : register(u0);  // Final composited output (full resolution)
-
-SamplerState LinearSampler : register(s0);
-
-cbuffer GlareCB : register(b1)
-{
-	float Threshold;
-	float Intensity;
-	float ScatterStrength;
-	uint ApertureMode;
-
-	int ApertureBlades;
-	float ApertureRotation;
-	float AdaptSpeed;
-	float DeltaTime;
-
-	uint FFTResolution;
-	float PaddingRatio;
-	float ScreenWidth;
-	float ScreenHeight;
-
-	uint ChannelIndex;
-	float FresnelExponent;
-	float ChromaticSpread;
-	float ApertureSize;
-
-	float PSFSharpness;
-	float PSFNoiseFloor;
-	uint EnableEyelashes;
-	float EyelashCurvature;
-
-	// (remaining fields omitted — only needed by aperture/PSF shaders)
-	// Row 5-10: eye/lens mode params (not needed here)
-	uint EyelashCount;
-	float EyelashLength;
-	uint ParticleCount;
-	float ParticleSize;
-	uint GratingCount;
-	float GratingStrength;
-	float TearFilmStrength;
-	float TearFilmSpeed;
-	uint TearFilmComplexity;
-	float TearFilmTime;
-	uint SutureBranches;
-	float SutureStrength;
-	float SutureWidth;
-	uint StarburstCount;
-	float StarburstStrength;
-	float StarburstIrregularity;
-	uint DustCount;
-	float DustSize;
-	uint BladeRoughnessFreq;
-	float BladeRoughnessAmp;
-	uint ScratchCount;
-	float ScratchOpacity;
-	float ScratchLength;
-	float ScratchWidth;
-	float SphericalAberration;
-	uint UseAP1;
-	float KernelScale;
-	float _pad11;
-};
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (PhysicalGlare::GlareCB at b1). The ORG chain
+// (ORG/ORGPhysicalGlare.cpp) gives heap handles in the push block and the constants from its latch.
+#define COMPOSITE_RESOURCES(X)                  \
+	X(SRV, Texture2D<float4>, TexScene, 0)      \
+	X(SRV, Texture2D<float4>, TexIFFT_RGB, 1)   \
+	X(UAV, RWTexture2D<float4>, RWTexOutput, 0) \
+	X(LATCH, GlareConstants, Glare, 1)
+ORG_PUSH_BLOCK(COMPOSITE_RESOURCES(ORG_HANDLE))
+COMPOSITE_RESOURCES(ORG_RESOURCE)
 
 groupshared float3 GlareTile[256];
 
@@ -95,20 +41,20 @@ float4 CatmullRomWeights(float fraction)
 
 float3 LoadGlare(int2 position)
 {
-	return TexIFFT_RGB.Load(int3(clamp(position, 0, int(FFTResolution) - 1), 0)).rgb;
+	return TexIFFT_RGB.Load(int3(clamp(position, 0, int(Glare.FFTResolution) - 1), 0)).rgb;
 }
 
 [numthreads(8, 8, 1)] void CS_Composite(
 	uint2 tid : SV_DispatchThreadID,
 	uint2 groupID : SV_GroupID,
 	uint groupIndex : SV_GroupIndex) {
-	float2 screenSize = float2(ScreenWidth, ScreenHeight);
-	float sceneScale = 1.0 - 2.0 * PaddingRatio;
+	float2 screenSize = float2(Glare.ScreenWidth, Glare.ScreenHeight);
+	float sceneScale = 1.0 - 2.0 * Glare.PaddingRatio;
 	uint2 firstPixel = groupID * 8;
 	float2 firstUV = (float2(firstPixel) + 0.5) / screenSize;
 	float2 lastUV = (min(float2(firstPixel + 7), screenSize - 1.0) + 0.5) / screenSize;
-	int2 tileStart = int2(floor((firstUV * sceneScale + PaddingRatio) * float(FFTResolution) - 0.5)) - 1;
-	int2 tileEnd = int2(floor((lastUV * sceneScale + PaddingRatio) * float(FFTResolution) - 0.5)) + 2;
+	int2 tileStart = int2(floor((firstUV * sceneScale + Glare.PaddingRatio) * float(Glare.FFTResolution) - 0.5)) - 1;
+	int2 tileEnd = int2(floor((lastUV * sceneScale + Glare.PaddingRatio) * float(Glare.FFTResolution) - 0.5)) + 2;
 	uint2 tileSize = uint2(tileEnd - tileStart + 1);
 	bool cached = all(tileSize <= 16);
 
@@ -121,7 +67,7 @@ float3 LoadGlare(int2 position)
 		GroupMemoryBarrierWithGroupSync();
 	}
 
-	if (tid.x >= (uint)ScreenWidth || tid.y >= (uint)ScreenHeight)
+	if (tid.x >= (uint)Glare.ScreenWidth || tid.y >= (uint)Glare.ScreenHeight)
 		return;
 
 	float3 scene = TexScene[tid].rgb;
@@ -130,7 +76,7 @@ float3 LoadGlare(int2 position)
 	// region that contained the original scene within the zero-padded
 	// texture [1, section 2.5].
 	float2 uv = (float2(tid) + 0.5) / screenSize;
-	float2 samplePos = (uv * sceneScale + PaddingRatio) * float(FFTResolution) - 0.5;
+	float2 samplePos = (uv * sceneScale + Glare.PaddingRatio) * float(Glare.FFTResolution) - 0.5;
 	int2 base = int2(floor(samplePos));
 	float2 fraction = samplePos - float2(base);
 	float4 weightsX = CatmullRomWeights(fraction.x);
@@ -168,8 +114,8 @@ float3 LoadGlare(int2 position)
 	// (spread) result.  At Intensity = 1 total energy is redistributed,
 	// not gained.  Values != 1 allow artistic attenuation or exaggeration.
 	// This output is combined with the scene in the Composite pass.
-	float3 bright = max(0, scene - Threshold);
-	float3 output = (glare - bright) * Intensity;
+	float3 bright = max(0, scene - Glare.Threshold);
+	float3 output = (glare - bright) * Glare.Intensity;
 
 	// Clamp to prevent negative values at Intensity > 1.0
 	output = max(output, 0);

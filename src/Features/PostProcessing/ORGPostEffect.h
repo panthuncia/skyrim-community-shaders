@@ -72,6 +72,7 @@
 #	include "RenderGraph/RasterProgram.h"
 
 #	include <array>
+#	include <atomic>
 #	include <cstdint>
 #	include <functional>
 #	include <memory>
@@ -194,6 +195,9 @@ namespace ORGPostChain
 		std::vector<Bind> bindings;
 		std::array<std::uint32_t, 3> groups{ 1, 1, 1 };
 		std::optional<LatchRegion<std::array<std::uint32_t, 4>>> indirect;
+		// Set when the pass is prepared to run (the chain on): the build is then in the graph, and every commit after the one
+		// before that preparation reaches the GPU. For work an effect counts done only once it ran (a PSF regenerated on a change).
+		std::shared_ptr<std::atomic<bool>> prepared;
 	};
 
 	struct BuildState;
@@ -351,6 +355,7 @@ namespace ORGPostChain
 	 */
 	inline constexpr std::string_view kLensFlareOutput = "PostProcessing::LensFlare::GhostHalo";
 	std::unique_ptr<Effect> MakeCODBloom();
+	std::unique_ptr<Effect> MakePhysicalGlare();
 }
 
 #endif

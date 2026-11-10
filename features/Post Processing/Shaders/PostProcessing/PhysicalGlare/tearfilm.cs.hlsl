@@ -1,43 +1,15 @@
 // Physical Glare — animated tear-film phase applied to a cached aperture
 
-Texture2D<float2> TexApertureBase : register(t0);
-RWTexture2D<float2> RWTexAperture : register(u0);
+#include "PostProcessing/PhysicalGlare/glare.hlsli"
 
-cbuffer GlareCB : register(b1)
-{
-	float Threshold;
-	float Intensity;
-	float ScatterStrength;
-	uint ApertureMode;
-	int ApertureBlades;
-	float ApertureRotation;
-	float AdaptSpeed;
-	float DeltaTime;
-	uint FFTResolution;
-	float PaddingRatio;
-	float ScreenWidth;
-	float ScreenHeight;
-	uint ChannelIndex;
-	float FresnelExponent;
-	float ChromaticSpread;
-	float ApertureSize;
-	float PSFSharpness;
-	float PSFNoiseFloor;
-	uint EnableEyelashes;
-	float EyelashCurvature;
-	uint EyelashCount;
-	float EyelashLength;
-	uint ParticleCount;
-	float ParticleSize;
-	uint GratingCount;
-	float GratingStrength;
-	float TearFilmStrength;
-	float TearFilmSpeed;
-	uint TearFilmComplexity;
-	float TearFilmTime;
-	uint SutureBranches;
-	float SutureStrength;
-};
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (PhysicalGlare::GlareCB at b1). The ORG chain
+// (ORG/ORGPhysicalGlare.cpp) gives heap handles in the push block and the constants from its latch.
+#define TEAR_FILM_RESOURCES(X)                    \
+	X(SRV, Texture2D<float2>, TexApertureBase, 0) \
+	X(UAV, RWTexture2D<float2>, RWTexAperture, 0) \
+	X(LATCH, GlareConstants, Glare, 1)
+ORG_PUSH_BLOCK(TEAR_FILM_RESOURCES(ORG_HANDLE))
+TEAR_FILM_RESOURCES(ORG_RESOURCE)
 
 static const float PI = 3.14159265358979323846;
 
@@ -52,12 +24,12 @@ float HashToFloat(uint seed)
 }
 
 [numthreads(8, 8, 1)] void CS_TearFilm(uint2 tid : SV_DispatchThreadID) {
-	if (tid.x >= FFTResolution || tid.y >= FFTResolution)
+	if (tid.x >= Glare.FFTResolution || tid.y >= Glare.FFTResolution)
 		return;
 
-	float2 center = float2(FFTResolution, FFTResolution) * 0.5;
-	float aspect = ScreenWidth / max(ScreenHeight, 1.0);
-	float radius = float(FFTResolution) * ApertureSize;
+	float2 center = float2(Glare.FFTResolution, Glare.FFTResolution) * 0.5;
+	float aspect = Glare.ScreenWidth / max(Glare.ScreenHeight, 1.0);
+	float radius = float(Glare.FFTResolution) * Glare.ApertureSize;
 	float2 pos = float2(tid) + 0.5 - center;
 	pos.y *= aspect;
 
@@ -65,15 +37,15 @@ float HashToFloat(uint seed)
 	float theta = atan2(pos.y, pos.x);
 	float edgeFactor = smoothstep(radius * 0.55, radius * 0.95, r);
 	float phaseOffset = 0.0;
-	uint complexity = min(TearFilmComplexity, 16u);
+	uint complexity = min(Glare.TearFilmComplexity, 16u);
 	for (uint h = 0; h < complexity; h++) {
 		float amp = HashToFloat(h * 3u + 7000u) * 0.6 + 0.4;
 		float angularFreq = float(h + 2);
-		float timeSpeed = (HashToFloat(h * 3u + 7001u) * 1.6 + 0.2) * TearFilmSpeed;
+		float timeSpeed = (HashToFloat(h * 3u + 7001u) * 1.6 + 0.2) * Glare.TearFilmSpeed;
 		float timePhase = HashToFloat(h * 3u + 7002u) * 2.0 * PI;
-		phaseOffset += amp * sin(angularFreq * theta + timeSpeed * TearFilmTime + timePhase);
+		phaseOffset += amp * sin(angularFreq * theta + timeSpeed * Glare.TearFilmTime + timePhase);
 	}
-	phaseOffset *= TearFilmStrength * edgeFactor * 2.5;
+	phaseOffset *= Glare.TearFilmStrength * edgeFactor * 2.5;
 
 	float s, c;
 	sincos(phaseOffset, s, c);

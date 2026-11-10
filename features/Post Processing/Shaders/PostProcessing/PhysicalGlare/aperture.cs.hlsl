@@ -24,70 +24,15 @@
 //   [1] Delavennat (2021), Physically-based Real-time Glare, LiU.
 //   [2] Ritschel et al. (2009), Temporal Glare, CGF 28(2).
 
-RWTexture2D<float2> RWTexAperture : register(u0);
+#include "PostProcessing/PhysicalGlare/glare.hlsli"
 
-cbuffer GlareCB : register(b1)
-{
-	float Threshold;
-	float Intensity;
-	float ScatterStrength;
-	uint ApertureMode;
-
-	int ApertureBlades;
-	float ApertureRotation;
-	float AdaptSpeed;
-	float DeltaTime;
-
-	uint FFTResolution;
-	float PaddingRatio;
-	float ScreenWidth;
-	float ScreenHeight;
-
-	uint ChannelIndex;
-	float FresnelExponent;
-	float ChromaticSpread;
-	float ApertureSize;
-
-	float PSFSharpness;
-	float PSFNoiseFloor;
-	uint EnableEyelashes;
-	float EyelashCurvature;
-
-	uint EyelashCount;
-	float EyelashLength;
-	uint ParticleCount;
-	float ParticleSize;
-
-	uint GratingCount;
-	float GratingStrength;
-	float TearFilmStrength;
-	float TearFilmSpeed;
-
-	uint TearFilmComplexity;
-	float TearFilmTime;
-	uint SutureBranches;
-	float SutureStrength;
-
-	float SutureWidth;
-	uint StarburstCount;
-	float StarburstStrength;
-	float StarburstIrregularity;
-
-	uint DustCount;
-	float DustSize;
-	uint BladeRoughnessFreq;
-	float BladeRoughnessAmp;
-
-	uint ScratchCount;
-	float ScratchOpacity;
-	float ScratchLength;
-	float ScratchWidth;
-
-	float SphericalAberration;
-	uint UseAP1;
-	float KernelScale;
-	float _pad11;
-};
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (PhysicalGlare::GlareCB at b1). The ORG chain
+// (ORG/ORGPhysicalGlare.cpp) gives heap handles in the push block and the constants from its latch.
+#define APERTURE_RESOURCES(X)                     \
+	X(UAV, RWTexture2D<float2>, RWTexAperture, 0) \
+	X(LATCH, GlareConstants, Glare, 1)
+ORG_PUSH_BLOCK(APERTURE_RESOURCES(ORG_HANDLE))
+APERTURE_RESOURCES(ORG_RESOURCE)
 static const float PI = 3.14159265358979323846;
 
 // ---------------------------------------------------------------------------
@@ -101,16 +46,16 @@ static const float PI = 3.14159265358979323846;
 // ---------------------------------------------------------------------------
 float EyelashMask(float2 pos, float radius)
 {
-	if (EyelashCount == 0)
+	if (Glare.EyelashCount == 0)
 		return 1.0;
 
 	float mask = 1.0;
-	uint totalLashes = EyelashCount;
+	uint totalLashes = Glare.EyelashCount;
 	// Upper lashes: ~60% of count, lower lashes: ~40%
 	uint upperCount = max(totalLashes * 3 / 5, 1u);
 	uint lowerCount = max(totalLashes - upperCount, 1u);
 
-	float lashLen = EyelashLength * radius;
+	float lashLen = Glare.EyelashLength * radius;
 	float lineHalfWidth = 1.2;  // pixels
 
 	// Upper eyelashes: distributed along the top arc
@@ -195,12 +140,12 @@ float2 ParticlePosition(uint index, float diskRadius)
 }
 
 [numthreads(8, 8, 1)] void CS_Aperture(uint2 tid : SV_DispatchThreadID) {
-	if (tid.x >= FFTResolution || tid.y >= FFTResolution)
+	if (tid.x >= Glare.FFTResolution || tid.y >= Glare.FFTResolution)
 		return;
 
-	float2 center = float2(FFTResolution, FFTResolution) * 0.5;
-	float aspect = ScreenWidth / max(ScreenHeight, 1.0);
-	float radius = float(FFTResolution) * ApertureSize;
+	float2 center = float2(Glare.FFTResolution, Glare.FFTResolution) * 0.5;
+	float aspect = Glare.ScreenWidth / max(Glare.ScreenHeight, 1.0);
+	float radius = float(Glare.FFTResolution) * Glare.ApertureSize;
 
 	// ----- Supersampled aperture shape + Fresnel phase -----
 	// 4×4 sub-pixel supersampling [2, p.17].
@@ -220,20 +165,20 @@ float2 ParticlePosition(uint index, float diskRadius)
 			float subR = length(subPos);
 			float subValue = 0.0;
 
-			if (ApertureMode == 1 || ApertureBlades <= 2) {
+			if (Glare.ApertureMode == 1 || Glare.ApertureBlades <= 2) {
 				subValue = 1.0 - smoothstep(radius - edgeW, radius + edgeW, subR);
 			} else {
-				float sectorAngle = 2.0 * PI / float(ApertureBlades);
-				float rawAngle = atan2(subPos.y, subPos.x) - ApertureRotation;
+				float sectorAngle = 2.0 * PI / float(Glare.ApertureBlades);
+				float rawAngle = atan2(subPos.y, subPos.x) - Glare.ApertureRotation;
 				float localAngle = frac(rawAngle / sectorAngle) * sectorAngle - sectorAngle * 0.5;
 				float apothem = radius * cos(sectorAngle * 0.5);
 
 				// Blade edge roughness: micro-serrations on aperture blade edges
-				if (ApertureMode == 0 && BladeRoughnessAmp > 0.0 && BladeRoughnessFreq > 0) {
+				if (Glare.ApertureMode == 0 && Glare.BladeRoughnessAmp > 0.0 && Glare.BladeRoughnessFreq > 0) {
 					float bladeIdx = floor((rawAngle + PI) / sectorAngle);
 					float edgeT = localAngle / (sectorAngle * 0.5);  // [-1,1] along blade edge
 					uint bladeHash = uint(abs(bladeIdx) + 0.5) + 8000u;
-					float roughFreq = float(min(BladeRoughnessFreq, 400u));
+					float roughFreq = float(min(Glare.BladeRoughnessFreq, 400u));
 					float noise = 0.0;
 					[unroll] for (int k = 0; k < 4; k++)
 					{
@@ -241,7 +186,7 @@ float2 ParticlePosition(uint index, float diskRadius)
 						float ph = HashToFloat(bladeHash * 7u + uint(k) * 31u) * 2.0 * PI;
 						noise += sin(edgeT * freq + ph) / float(k + 1);
 					}
-					apothem += noise * BladeRoughnessAmp * 1.5;
+					apothem += noise * Glare.BladeRoughnessAmp * 1.5;
 				}
 
 				float projDist = subR * cos(localAngle);
@@ -251,7 +196,7 @@ float2 ParticlePosition(uint index, float diskRadius)
 			float R2 = radius * radius;
 			float rNorm2 = subR2 / max(R2, 1.0);
 			// Fresnel (r^2 defocus) + Seidel spherical aberration (r^4 lens curvature)
-			float phase = FresnelExponent * rNorm2 + SphericalAberration * rNorm2 * rNorm2;
+			float phase = Glare.FresnelExponent * rNorm2 + Glare.SphericalAberration * rNorm2 * rNorm2;
 
 			complexSum += float2(subValue * cos(phase), subValue * sin(phase));
 		}
@@ -264,7 +209,7 @@ float2 ParticlePosition(uint index, float diskRadius)
 	// optical path differences concentrated near the pupil edge,
 	// producing temporally varying sharp diffraction spikes [1, section 3.1].
 	// Eye mode only.
-	if (ApertureMode == 1 && TearFilmStrength > 0.0) {
+	if (Glare.ApertureMode == 1 && Glare.TearFilmStrength > 0.0) {
 		float2 tfPos = float2(tid) + 0.5 - center;
 		tfPos.y *= aspect;
 		float r = length(tfPos);
@@ -275,16 +220,16 @@ float2 ParticlePosition(uint index, float diskRadius)
 
 		// Sum angular harmonics with time-varying phases
 		float phaseOffset = 0.0;
-		uint complexity = min(TearFilmComplexity, 16u);
+		uint complexity = min(Glare.TearFilmComplexity, 16u);
 		for (uint h = 0; h < complexity; h++) {
 			// Deterministic random amplitude and speed per harmonic
 			float amp = HashToFloat(h * 3u + 7000u) * 0.6 + 0.4;
 			float angularFreq = float(h + 2);
-			float timeSpeed = (HashToFloat(h * 3u + 7001u) * 1.6 + 0.2) * TearFilmSpeed;
+			float timeSpeed = (HashToFloat(h * 3u + 7001u) * 1.6 + 0.2) * Glare.TearFilmSpeed;
 			float timePhase = HashToFloat(h * 3u + 7002u) * 2.0 * PI;
-			phaseOffset += amp * sin(angularFreq * theta + timeSpeed * TearFilmTime + timePhase);
+			phaseOffset += amp * sin(angularFreq * theta + timeSpeed * Glare.TearFilmTime + timePhase);
 		}
-		phaseOffset *= TearFilmStrength * edgeFactor * 2.5;
+		phaseOffset *= Glare.TearFilmStrength * edgeFactor * 2.5;
 
 		// Apply as complex phase rotation
 		float c = cos(phaseOffset);
@@ -300,32 +245,32 @@ float2 ParticlePosition(uint index, float diskRadius)
 	pos.y *= aspect;
 
 	// Eyelash occlusion — eye mode only
-	if (ApertureMode == 1 && EnableEyelashes != 0) {
+	if (Glare.ApertureMode == 1 && Glare.EnableEyelashes != 0) {
 		complexSum *= EyelashMask(pos, radius);
 	}
 
 	// Scatter particles — eye mode only
-	if (ApertureMode == 1 && ParticleCount > 0) {
-		uint pCount = min(ParticleCount, 1000u);
-		float opacity = saturate(ScatterStrength);
+	if (Glare.ApertureMode == 1 && Glare.ParticleCount > 0) {
+		uint pCount = min(Glare.ParticleCount, 1000u);
+		float opacity = saturate(Glare.ScatterStrength);
 		float particleMask = 1.0;
 		for (uint p = 0; p < pCount; p++) {
 			float2 ppos = ParticlePosition(p, radius * 0.92);
 			float d = length(pos - ppos);
-			float alpha = 1.0 - smoothstep(ParticleSize - 0.5, ParticleSize + 0.5, d);
+			float alpha = 1.0 - smoothstep(Glare.ParticleSize - 0.5, Glare.ParticleSize + 0.5, d);
 			particleMask *= (1.0 - alpha * opacity);
 		}
 		complexSum *= particleMask;
 	}
 
 	// Lens dust — lens mode only
-	if (ApertureMode == 0 && DustCount > 0) {
-		uint pCount = min(DustCount, 1000u);
+	if (Glare.ApertureMode == 0 && Glare.DustCount > 0) {
+		uint pCount = min(Glare.DustCount, 1000u);
 		float particleMask = 1.0;
 		for (uint p = 0; p < pCount; p++) {
 			float2 ppos = ParticlePosition(p, radius * 0.92);
 			float d = length(pos - ppos);
-			float alpha = 1.0 - smoothstep(DustSize - 0.5, DustSize + 0.5, d);
+			float alpha = 1.0 - smoothstep(Glare.DustSize - 0.5, Glare.DustSize + 0.5, d);
 			particleMask *= (1.0 - alpha);
 		}
 		complexSum *= particleMask;
@@ -333,11 +278,11 @@ float2 ParticlePosition(uint index, float diskRadius)
 
 	// Lens surface scratches — lens mode only.
 	// Linear scratches produce perpendicular streak patterns after FFT.
-	if (ApertureMode == 0 && ScratchCount > 0 && ScratchOpacity > 0.0) {
-		uint scratchCnt = min(ScratchCount, 20u);
-		float scratchLen = ScratchLength * radius * 2.0;
-		float scratchHW = ScratchWidth * 0.5;
-		float scratchOpc = saturate(ScratchOpacity);
+	if (Glare.ApertureMode == 0 && Glare.ScratchCount > 0 && Glare.ScratchOpacity > 0.0) {
+		uint scratchCnt = min(Glare.ScratchCount, 20u);
+		float scratchLen = Glare.ScratchLength * radius * 2.0;
+		float scratchHW = Glare.ScratchWidth * 0.5;
+		float scratchOpc = saturate(Glare.ScratchOpacity);
 
 		for (uint si = 0; si < scratchCnt; si++) {
 			// Deterministic random position and angle per scratch
@@ -369,12 +314,12 @@ float2 ParticlePosition(uint index, float diskRadius)
 	// edge, producing a diffuse lenticular halo via edge diffraction.
 	// Modelled as semi-opaque radial lines with radial falloff.
 	// Eye mode only.
-	if (ApertureMode == 1 && GratingCount > 0) {
+	if (Glare.ApertureMode == 1 && Glare.GratingCount > 0) {
 		float r = length(pos);
 		float angle = atan2(pos.y, pos.x);
 
 		// Angular spacing between gratings
-		float gratingCountF = float(min(GratingCount, 400u));
+		float gratingCountF = float(min(Glare.GratingCount, 400u));
 		float sectorAngle = 2.0 * PI / gratingCountF;
 
 		// Fractional position within the nearest grating sector [-0.5, 0.5)
@@ -391,7 +336,7 @@ float2 ParticlePosition(uint index, float diskRadius)
 		float edgeFade = smoothstep(radius * 0.4, radius, r);
 
 		// Combined grating mask: reduce transmission at grating locations
-		float gratingMask = 1.0 - lineAlpha * edgeFade * saturate(GratingStrength);
+		float gratingMask = 1.0 - lineAlpha * edgeFade * saturate(Glare.GratingStrength);
 		complexSum *= gratingMask;
 	}
 
@@ -402,10 +347,10 @@ float2 ParticlePosition(uint index, float diskRadius)
 	// prominent star spikes after FFT.  Fewer and thicker than gratings,
 	// sutures define the base starburst geometry of human glare.
 	// Eye mode only.
-	if (ApertureMode == 1 && SutureBranches > 0) {
+	if (Glare.ApertureMode == 1 && Glare.SutureBranches > 0) {
 		float r = length(pos);
 		float angle = atan2(pos.y, pos.x);
-		uint branches = min(SutureBranches, 8u);
+		uint branches = min(Glare.SutureBranches, 8u);
 
 		// Anterior sutures: N branches from center outward
 		float sectorAngle = 2.0 * PI / float(branches);
@@ -415,7 +360,7 @@ float2 ParticlePosition(uint index, float diskRadius)
 		{
 			float localAngle = frac(angle / sectorAngle + 0.5) - 0.5;
 			float arcDist = abs(localAngle) * sectorAngle * r;
-			float lineAlpha = 1.0 - smoothstep(SutureWidth * 0.5 - 0.75, SutureWidth * 0.5 + 0.75, arcDist);
+			float lineAlpha = 1.0 - smoothstep(Glare.SutureWidth * 0.5 - 0.75, Glare.SutureWidth * 0.5 + 0.75, arcDist);
 			// Sutures run from center to ~90% radius
 			float radialMask = smoothstep(0.0, radius * 0.08, r) * (1.0 - smoothstep(radius * 0.85, radius * 0.95, r));
 			suturePhase += lineAlpha * radialMask;
@@ -426,13 +371,13 @@ float2 ParticlePosition(uint index, float diskRadius)
 			float rotAngle = angle - sectorAngle * 0.5;
 			float localAngle = frac(rotAngle / sectorAngle + 0.5) - 0.5;
 			float arcDist = abs(localAngle) * sectorAngle * r;
-			float lineAlpha = 1.0 - smoothstep(SutureWidth * 0.5 - 0.75, SutureWidth * 0.5 + 0.75, arcDist);
+			float lineAlpha = 1.0 - smoothstep(Glare.SutureWidth * 0.5 - 0.75, Glare.SutureWidth * 0.5 + 0.75, arcDist);
 			float radialMask = smoothstep(0.0, radius * 0.08, r) * (1.0 - smoothstep(radius * 0.85, radius * 0.95, r));
 			suturePhase += lineAlpha * radialMask;
 		}
 
 		// Apply as phase shift (refractive index difference → optical path difference)
-		float phase = suturePhase * SutureStrength * PI * 0.5;
+		float phase = suturePhase * Glare.SutureStrength * PI * 0.5;
 		float sc = cos(phase);
 		float ss = sin(phase);
 		complexSum = float2(complexSum.x * sc - complexSum.y * ss,
@@ -446,10 +391,10 @@ float2 ParticlePosition(uint index, float diskRadius)
 	// Unlike sutures (few thick spikes) or gratings (amplitude → diffuse
 	// halo), this is high-count phase modulation → sharp thin spikes.
 	// Eye mode only.
-	if (ApertureMode == 1 && StarburstCount > 0) {
+	if (Glare.ApertureMode == 1 && Glare.StarburstCount > 0) {
 		float r = length(pos);
 		float angle = atan2(pos.y, pos.x);
-		uint spikeCount = min(StarburstCount, 128u);
+		uint spikeCount = min(Glare.StarburstCount, 128u);
 		float spikeCountF = float(spikeCount);
 		float sectorAngle = 2.0 * PI / spikeCountF;
 
@@ -462,7 +407,7 @@ float2 ParticlePosition(uint index, float diskRadius)
 			uint wrappedIdx = uint(idx + int(spikeCount)) % spikeCount;
 
 			// Per-fiber angular jitter: shifts each line off the regular grid
-			float jitter = (HashToFloat(wrappedIdx * 2u + 5000u) - 0.5) * StarburstIrregularity;
+			float jitter = (HashToFloat(wrappedIdx * 2u + 5000u) - 0.5) * Glare.StarburstIrregularity;
 			float fiberAngle = (float(idx) + jitter) * sectorAngle;
 
 			// Arc distance to this fiber line (in pixels)
@@ -473,7 +418,7 @@ float2 ParticlePosition(uint index, float diskRadius)
 			float lineAlpha = 1.0 - smoothstep(0.0, 0.8, arcDist);
 
 			// Per-fiber random strength variation for natural look
-			float fiberStr = 1.0 - StarburstIrregularity * 0.5 * (1.0 - HashToFloat(wrappedIdx * 2u + 5001u));
+			float fiberStr = 1.0 - Glare.StarburstIrregularity * 0.5 * (1.0 - HashToFloat(wrappedIdx * 2u + 5001u));
 
 			burstPhase += lineAlpha * fiberStr;
 		}
@@ -482,7 +427,7 @@ float2 ParticlePosition(uint index, float diskRadius)
 		float radialMask = smoothstep(radius * 0.05, radius * 0.3, r) * (1.0 - smoothstep(radius * 0.88, radius * 0.98, r));
 
 		// Apply as phase modulation (refractive index difference)
-		float phase = burstPhase * radialMask * StarburstStrength * PI;
+		float phase = burstPhase * radialMask * Glare.StarburstStrength * PI;
 		float cb = cos(phase);
 		float sb = sin(phase);
 		complexSum = float2(complexSum.x * cb - complexSum.y * sb,
