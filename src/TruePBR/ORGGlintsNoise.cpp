@@ -160,7 +160,7 @@ bool ORGGlintsNoise::Filled() const
 
 ID3D11ShaderResourceView* ORGGlintsNoise::NoiseSRV() const
 {
-	return Active() ? impl->noise->SRV() : nullptr;
+	return Filled() ? impl->noise->SRV() : nullptr;
 }
 
 void ORGGlintsNoise::Fail()
