@@ -31,7 +31,9 @@ namespace ORGPostChain
 		/**
 		 * @brief ColorGrading::Draw on the graph: the LUT bake (CSLUTGen) whenever the constants changed, then the grading draw over
 		 * the whole target. The bake is an indirect dispatch whose group counts Commit writes (zero on the frames it is skipped), so
-		 * the recording stays the same. The LUT is persistent and owned here. The curve preview and the image export read back through
+		 * the recording stays the same. The LUT is persistent and owned here. A bake counts as done only once the build is known to
+		 * be in the graph (its bake pass was prepared): a commit cannot tell which build the epoch runs, so until then it is asked
+		 * for again each frame. The curve preview and the image export read back through
 		 * D3D11, so the chain stays on D3D11 while either runs.
 		 */
 		class ColorGradingEffect final : public Effect
@@ -79,29 +81,38 @@ namespace ORGPostChain
 				constants = a_builder.Latch<ColorGrading::ColorCB>();
 				groups = a_builder.Latch<Groups>();
 				const auto linear = Bind::Handle(sampler.Index());
+				prepared = std::make_shared<std::atomic<bool>>(false);
 				a_builder.Dispatch({ .name = "lut",
 					.program = std::move(bake),
 					.bindings = { Bind::Unused(), Bind::Unused(), Bind::Uav(lut->Graph()), linear, Bind::Latch(constants) },
-					.indirect = groups });
+					.indirect = groups,
+					.prepared = prepared });
 				a_builder.Draw({ .name = "draw",
 					.program = std::move(grade),
 					.bindings = { Bind::Srv(a_builder.Current()), Bind::Srv(lut->Graph()), Bind::Unused(), linear, Bind::Latch(constants) },
 					.target = image });
 				a_builder.SetCurrent(image);
-				// A new build may have a new bake program: bake again on its first frame.
+				// A new build may have a new bake program: bake again once it runs.
 				lutValid = false;
+				pending = false;
 			}
 
 			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
 			{
 				const auto data = static_cast<ColorGrading&>(a_feature).BuildConstants();
 				a_commit.Write(constants, data);
+				// The bake the last commit asked for is done once the build is in the graph: that commit then reached the GPU.
+				if (pending && prepared && prepared->load(std::memory_order_acquire)) {
+					lutKey = pendingKey;
+					lutValid = true;
+				}
+				pending = false;
 				// As the D3D11 draw: the LUT depends only on the constants (and the program, which a rebuild changes).
 				const bool bake = !data.skipLUT && (!lutValid || std::memcmp(&data, lutKey.data(), sizeof(data)) != 0);
 				a_commit.Write(groups, bake ? Groups{ kLutGroups, kLutGroups, kLutGroups, 0 } : Groups{});
 				if (bake) {
-					std::memcpy(lutKey.data(), &data, sizeof(data));
-					lutValid = true;
+					std::memcpy(pendingKey.data(), &data, sizeof(data));
+					pending = true;
 				}
 			}
 
@@ -112,6 +123,10 @@ namespace ORGPostChain
 			LatchRegion<Groups> groups;
 			std::array<char, sizeof(ColorGrading::ColorCB)> lutKey{};
 			bool lutValid = false;
+			// The constants the last commit baked with, and this build's flag, set once its bake pass is prepared.
+			std::array<char, sizeof(ColorGrading::ColorCB)> pendingKey{};
+			bool pending = false;
+			std::shared_ptr<std::atomic<bool>> prepared;
 		};
 	}
 
