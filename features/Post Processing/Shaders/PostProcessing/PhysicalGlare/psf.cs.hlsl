@@ -19,54 +19,19 @@
 //   [3] Wyman, Sloan, Shirley (2013), Simple Analytic Approximations
 //       to the CIE XYZ Color Matching Functions, JCGT 2(2).
 
-Texture2D<float2> TexDiffraction : register(t0);  // Complex FFT of aperture (RG32F)
-SamplerState WrapSampler : register(s0);          // Wrap-mode bilinear sampler
+#include "PostProcessing/PhysicalGlare/glare.hlsli"
 
-RWTexture2D<float2> RWTexPSF_R : register(u0);
-RWTexture2D<float2> RWTexPSF_G : register(u1);
-RWTexture2D<float2> RWTexPSF_B : register(u2);
-
-cbuffer GlareCB : register(b1)
-{
-	float Threshold;
-	float Intensity;
-	float ScatterStrength;
-	uint ApertureMode;
-
-	int ApertureBlades;
-	float ApertureRotation;
-	float AdaptSpeed;
-	float DeltaTime;
-
-	uint FFTResolution;
-	float PaddingRatio;
-	float ScreenWidth;
-	float ScreenHeight;
-
-	uint ChannelIndex;  // Retained for constant-buffer layout compatibility
-	float FresnelExponent;
-	float ChromaticSpread;
-	float ApertureSize;
-
-	float PSFSharpness;
-	float PSFNoiseFloor;
-	uint EnableEyelashes;
-	float EyelashCurvature;
-
-	// Rows 5-10 (used by aperture shader, not this shader)
-	float4 _cbpad5;
-	float4 _cbpad6;
-	float4 _cbpad7;
-	float4 _cbpad8;
-	float4 _cbpad9;
-	float4 _cbpad10;
-
-	// Row 11: Additional optics
-	float SphericalAberration;
-	uint UseAP1;
-	float KernelScale;
-	float _pad11;
-};
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (PhysicalGlare::GlareCB at b1). The ORG chain
+// (ORG/ORGPhysicalGlare.cpp) gives heap handles in the push block and the constants from its latch.
+#define PSF_RESOURCES(X)                         \
+	X(SRV, Texture2D<float2>, TexDiffraction, 0) \
+	X(UAV, RWTexture2D<float2>, RWTexPSF_R, 0)   \
+	X(UAV, RWTexture2D<float2>, RWTexPSF_G, 1)   \
+	X(UAV, RWTexture2D<float2>, RWTexPSF_B, 2)   \
+	X(SAMPLER, SamplerState, WrapSampler, 0)     \
+	X(LATCH, GlareConstants, Glare, 1)
+ORG_PUSH_BLOCK(PSF_RESOURCES(ORG_HANDLE))
+PSF_RESOURCES(ORG_RESOURCE)
 
 static const float PI = 3.14159265358979323846;
 
@@ -125,10 +90,10 @@ float3 XYZToAP1(float3 xyz)
 
 // ---------------------------------------------------------------------------
 [numthreads(8, 8, 1)] void CS_ChromaticBlur(uint2 tid : SV_DispatchThreadID) {
-	if (tid.x >= FFTResolution || tid.y >= FFTResolution)
+	if (tid.x >= Glare.FFTResolution || tid.y >= Glare.FFTResolution)
 		return;
 
-	float N = float(FFTResolution);
+	float N = float(Glare.FFTResolution);
 	float rcpN = 1.0 / N;
 
 	// ------------------------------------------------------------------
@@ -152,7 +117,7 @@ float3 XYZToAP1(float3 xyz)
 	// KernelScale: shrink/grow the PSF spatially by scaling frequency coordinates.
 	// Dividing by KernelScale < 1 maps each position to further from DC,
 	// making the PSF drop off faster → smaller glare on screen.
-	freq /= max(KernelScale, 0.01);
+	freq /= max(Glare.KernelScale, 0.01);
 
 	[loop] for (int w = 0; w < NUM_WAVELENGTHS; w++)
 	{
@@ -161,7 +126,7 @@ float3 XYZToAP1(float3 xyz)
 		// UV scale: physical scaling λ/575nm [1, section 2.3].
 		// ChromaticSpread controls deviation from unity:
 		//   1.0 = physically correct, >1 = exaggerated, 0 = monochrome.
-		float uvScale = 1.0 + (lambda / 575.0 - 1.0) * ChromaticSpread;
+		float uvScale = 1.0 + (lambda / 575.0 - 1.0) * Glare.ChromaticSpread;
 
 		// Scale frequency around DC, convert to UV.
 		// Wrap-mode sampler handles out-of-range coordinates.
@@ -171,9 +136,9 @@ float3 XYZToAP1(float3 xyz)
 		// [1, section 3.1, fig. 3.7]:  sin(π·x) · |x| produces a
 		// symmetric arch that curves both sides of the streak.
 		// Eye mode only.
-		if (ApertureMode == 1 && EnableEyelashes != 0) {
-			float x_norm = freq.x / (N * 0.5);                          // [-1, 1]
-			float bend = sin(PI * x_norm) * x_norm * EyelashCurvature;  // symmetric arch
+		if (Glare.ApertureMode == 1 && Glare.EnableEyelashes != 0) {
+			float x_norm = freq.x / (N * 0.5);                                // [-1, 1]
+			float bend = sin(PI * x_norm) * x_norm * Glare.EyelashCurvature;  // symmetric arch
 			sampleUV.y -= bend * 0.5;
 		}
 
@@ -184,7 +149,7 @@ float3 XYZToAP1(float3 xyz)
 
 		// Spectral weight for this RGB channel
 		float3 xyz = WavelengthToXYZ(lambda);
-		float3 rgb = UseAP1 ? max(XYZToAP1(xyz), 0.0) : max(XYZToLinearSRGB(xyz), 0.0);
+		float3 rgb = Glare.UseAP1 ? max(XYZToAP1(xyz), 0.0) : max(XYZToLinearSRGB(xyz), 0.0);
 
 		// Normalise by NUM_WAVELENGTHS to preserve dynamic range [1, section 3.1].
 		result += intensity * rgb / float(NUM_WAVELENGTHS);
@@ -198,8 +163,8 @@ float3 XYZToAP1(float3 xyz)
 	//   The LDR-tuned empirical factors from [1] (×2000, ×10) are omitted;
 	//   brightness is governed by the Intensity parameter instead.
 	// ------------------------------------------------------------------
-	result = pow(max(result, 0.0), PSFSharpness);
-	result = max(result - PSFNoiseFloor, 0.0);
+	result = pow(max(result, 0.0), Glare.PSFSharpness);
+	result = max(result - Glare.PSFNoiseFloor, 0.0);
 
 	result = max(result, 0.0);
 	RWTexPSF_R[tid] = float2(result.r, 0.0);
