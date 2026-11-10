@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <d3d11.h>
 #include <memory>
+#include <string_view>
 
 /**
  * @brief Light Limit Fix's clustered light culling as OpenRenderGraph passes.
@@ -19,6 +20,11 @@
 class ORGLightCulling
 {
 public:
+	/** @brief The graph ids of the lights (t35), the light index list (t36) and the light grid (t37), which other graph passes read. */
+	static constexpr std::string_view kLightsId = "cs.llf.lights";
+	static constexpr std::string_view kLightIndexListId = "cs.llf.light-index-list";
+	static constexpr std::string_view kLightGridId = "cs.llf.light-grid";
+
 	/** @brief Per-frame inputs, copied at Execute; nothing is retained by reference. */
 	struct FrameInputs
 	{
