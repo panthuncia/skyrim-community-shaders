@@ -181,6 +181,27 @@ void CODBloom::CompileRasterShaders()
 	CompileRasterShadersAsync(L"Data\\Shaders\\PostProcessing\\CODBloom", {}, shaderInfos);
 }
 
+CODBloom::BloomCB CODBloom::Constants(int a_mip) const
+{
+	BloomCB data = {
+		.Threshold = exp2(settings.Threshold - 3.0f),
+		.UpsampleRadius = settings.UpsampleRadius,
+		.UpsampleMult = 1.f,
+		.CurrentMipMult = 1.f
+	};
+	if (a_mip >= 1) {
+		if (a_mip == static_cast<int>(s_BloomMips) - 2)
+			data.UpsampleMult = settings.MipBlendFactor[a_mip];
+		data.CurrentMipMult = settings.MipBlendFactor[a_mip - 1];
+	}
+	return data;
+}
+
+int CODBloom::UsedMips() const
+{
+	return static_cast<int>(settings.MipBlendFactor[s_BloomMips - 2] == 0.f && settings.MipBlendFactor[s_BloomMips - 3] == 1.f ? s_BloomMips - 1 : s_BloomMips);
+}
+
 void CODBloom::Draw(TextureInfo& inout_tex)
 {
 	auto state = globals::state;
@@ -194,12 +215,7 @@ void CODBloom::Draw(TextureInfo& inout_tex)
 	state->BeginPerfEvent("COD Bloom");
 
 	// update cb
-	BloomCB cbData = {
-		.Threshold = exp2(settings.Threshold - 3.0f),
-		.UpsampleRadius = settings.UpsampleRadius,
-		.UpsampleMult = 1.f,
-		.CurrentMipMult = 1.f
-	};
+	BloomCB cbData = Constants(0);
 	bloomCB->Update(cbData);
 
 	//////////////////////////////////////////////////////////////////////////////
@@ -227,7 +243,7 @@ void CODBloom::Draw(TextureInfo& inout_tex)
 		globals::profiler->EndPass();
 	}
 
-	const int usedMips = static_cast<int>(settings.MipBlendFactor[s_BloomMips - 2] == 0.f && settings.MipBlendFactor[s_BloomMips - 3] == 1.f ? s_BloomMips - 1 : s_BloomMips);
+	const int usedMips = UsedMips();
 
 	// Downsample
 	globals::profiler->BeginPass("PostProcessing::CODBloom::Downsample");
@@ -251,10 +267,7 @@ void CODBloom::Draw(TextureInfo& inout_tex)
 	globals::profiler->BeginPass("PostProcessing::CODBloom::Upsample");
 	pass.SetShaders(vs, upsamplePS.get());
 	for (int i = usedMips - 2; i >= 1; i--) {
-		cbData.UpsampleMult = 1.f;
-		if (i == s_BloomMips - 2)
-			cbData.UpsampleMult = settings.MipBlendFactor[i];
-		cbData.CurrentMipMult = settings.MipBlendFactor[i - 1];
+		cbData = Constants(i);
 		bloomCB->Update(cbData);
 
 		float blendFactor[4] = { cbData.CurrentMipMult, cbData.CurrentMipMult, cbData.CurrentMipMult, 0.f };
