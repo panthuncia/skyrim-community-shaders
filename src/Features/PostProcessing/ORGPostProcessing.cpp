@@ -427,9 +427,14 @@ namespace ORGPostChain
 
 	Image Builder::CreateImage(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags)
 	{
+		return CreateImage(a_name, a_format, a_bindFlags, shape.width, shape.height);
+	}
+
+	Image Builder::CreateImage(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags, UINT a_width, UINT a_height)
+	{
 		D3D11_TEXTURE2D_DESC desc{};
-		desc.Width = shape.width;
-		desc.Height = shape.height;
+		desc.Width = a_width;
+		desc.Height = a_height;
 		desc.MipLevels = 1;
 		desc.ArraySize = 1;
 		desc.Format = a_format;
