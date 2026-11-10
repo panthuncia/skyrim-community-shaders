@@ -785,3 +785,25 @@ Keys used so far:
 - **Where it fits:** CS guards those sections with `__HLSL_ENABLE_16_BIT` as well. A plugin API's program build would
   need a per-program option for 16-bit types (which changes `half` everywhere in that program) rather than a global flag.
 - **Found by:** P3 W3, Post Processing (2026-11-09).
+
+### Knowing the epoch ran this build's passes
+
+- **Need:** count one-shot GPU work done (a PSF remade on a settings change, a baked LUT) only once it reached the GPU. A
+  client's commit cannot tell whether the epoch it writes runs the client's newest build: right after a rebuild the
+  graph may still run the previous one, whose passes read the previous latch, so work marked done there never happens.
+- **Who:** CS's Physical Glare (`ORG/ORGPhysicalGlare.cpp`); Color Grading's LUT bake has the same shape; TruePBR's
+  glints noise fill met it first.
+- **Where it fits:** `ORGPostChain::ComputeDispatch::prepared` is a flag the pass sets when it is prepared with the chain
+  on. The effect keeps the request of the last commit and counts it made at the next commit once the flag is set; until
+  then it asks again each frame. An API would give the commit the build (or a generation) the epoch executes, or a
+  per-pass "ran in epoch N" receipt, so a client needs no flag of its own.
+- **Found by:** P3 W3, Physical Glare (2026-11-09).
+
+### Side outputs at the work size, not the screen size
+
+- **Need:** transient work images whose size follows a setting rather than the screen (FFT squares of 128-1024), aliased
+  with the rest of the chain, plus persistent spectra of the same size kept across graph builds.
+- **Who:** CS's Physical Glare and Lens Flare.
+- **Where it fits:** `Builder::CreateImage` takes a size; the persistent textures are `GraphResources` the effect owns and
+  `Builder::Register`s at each build, made again only when the size changes (which is part of the chain's key).
+- **Found by:** P3 W3, Physical Glare (2026-11-09).
