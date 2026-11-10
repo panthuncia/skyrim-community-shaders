@@ -343,6 +343,7 @@ namespace ORGPostChain
 	std::unique_ptr<Effect> MakeColorGrading();
 	std::unique_ptr<Effect> MakeLUT();
 	std::unique_ptr<Effect> MakeBorder();
+	std::unique_ptr<Effect> MakeCODBloom();
 }
 
 #endif

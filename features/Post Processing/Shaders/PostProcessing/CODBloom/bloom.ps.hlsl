@@ -8,6 +8,9 @@
 /// UpsampleMult and the blend stage adds it to the destination mip
 /// pre-multiplied by CurrentMipMult (SrcBlend = ONE, DestBlend = BLEND_FACTOR,
 /// blend factor = CurrentMipMult).
+/// The ORG chain (ORG/ORGCODBloom.cpp) cannot set a blend factor per frame: its
+/// upsample returns CurrentMipMult in alpha and blends with DestBlend =
+/// SRC_ALPHA instead, with alpha not written.
 
 #include "Common/OrgResources.hlsli"
 #include "PostProcessing/fullscreen.hlsli"
@@ -103,7 +106,11 @@ float4 PS_Upsample(FullscreenTriangleVSOutput input) : SV_Target
 	float2 uv = input.TexCoord;
 
 	float3 col = UpsampleCOD(TexBloomIn, uv, px_size * Bloom.UpsampleRadius).rgb * Bloom.UpsampleMult;
+#if defined(CS_ORG_BINDLESS)
+	return float4(col, Bloom.CurrentMipMult);
+#else
 	return float4(col, 1);
+#endif
 };
 
 float4 PS_Composite(FullscreenTriangleVSOutput input) : SV_Target

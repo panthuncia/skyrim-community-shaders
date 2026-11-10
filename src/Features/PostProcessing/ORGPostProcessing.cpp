@@ -701,6 +701,8 @@ namespace
 			return ORGPostChain::MakeLUT();
 		case Index::Border:
 			return ORGPostChain::MakeBorder();
+		case Index::CODBloom:
+			return ORGPostChain::MakeCODBloom();
 		default:
 			return nullptr;
 		}
