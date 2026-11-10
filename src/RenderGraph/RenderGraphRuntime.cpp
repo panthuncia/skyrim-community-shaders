@@ -1148,11 +1148,11 @@ struct RenderGraphRuntime::Impl
 		};
 		std::size_t kept = 0, fresh = 0;
 		for (std::size_t index = 0; index < a_execution.segments.size(); ++index) {
-			const auto& segment = a_execution.segments[index];
+			const auto& traced = a_execution.segments[index];
 			std::string leading, items;
-			for (const auto& list : segment.leading)
+			for (const auto& list : traced.leading)
 				leading += fmt::format("{}{:x}", leading.empty() ? "" : ",", ListId(list));
-			for (const auto& item : segment.items) {
+			for (const auto& item : traced.items) {
 				if (!item.packet)
 					continue;
 				if (item.packet->Deferred()) {
@@ -1167,9 +1167,9 @@ struct RenderGraphRuntime::Impl
 					items += fmt::format(" {:x}", ListId(list));
 				items += fmt::format(" heaps {}/{}", item.resourceHeap.index, item.samplerHeap.index);
 			}
-			logger::info("[ORG] stream trace frame {} '{}' host frame {} slot {}: segment {}/{}{} leading [{}] items [{}] waits [{}] signals [{}]",
+			logger::info("[ORG] stream trace frame {} '{}' host frame {} slot {}: traced {}/{}{} leading [{}] items [{}] waits [{}] signals [{}]",
 				globals::state->frameCount, a_label ? a_label : "", host->LastHostFrame(), host->CurrentFrameSlot(), index + 1,
-				a_execution.segments.size(), segment.split ? " split" : "", leading, items, points(segment.waits), points(segment.signals));
+				a_execution.segments.size(), traced.split ? " split" : "", leading, items, points(traced.waits), points(traced.signals));
 		}
 		logger::info("[ORG] stream trace frame {} '{}': {} packets executed before (* above, a kept recording), {} new{}",
 			globals::state->frameCount, a_label ? a_label : "", kept, fresh, a_execution.exitSplit ? ", exit split" : "");
