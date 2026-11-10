@@ -22,6 +22,7 @@
 
 #	include <algorithm>
 #	include <cstring>
+#	include <utility>
 #	include <vector>
 
 namespace
@@ -67,9 +68,10 @@ namespace
 		std::unique_ptr<GraphResources::Texture2D> cache;
 		std::unique_ptr<GraphResources::StructuredBuffer> data;
 		std::shared_ptr<org::LatchBlock> latch;
-		// The frame SetFrame gave, written into the latch at the anchor's commit.
+		// The frame SetFrame gave, written into the latch at the anchor's commit. staged: SetFrame ran since the last commit.
 		std::vector<CopyConstants> copies = std::vector<CopyConstants>(ORGLocalShadows::kMaxCopies);
 		std::vector<std::byte> slotData;
+		bool staged = false;
 	};
 
 	// Copies the frame's fresh engine slices into the cache: a dispatch per possible copy, each reading its row of the latch.
@@ -316,7 +318,13 @@ bool ORGLocalShadows::Setup(const Desc& a_desc)
 		if (!graphHost)
 			return;
 		const std::uint32_t slot = graphHost->CurrentFrameSlot();
-		resources->latch->Write(slot, 0, std::as_bytes(std::span(resources->copies)));
+		// A frame that staged nothing copies nothing: the engine's slices are not this frame's. The data stays as last staged.
+		if (std::exchange(resources->staged, false))
+			resources->latch->Write(slot, 0, std::as_bytes(std::span(resources->copies)));
+		else {
+			static const std::vector<CopyConstants> kNoCopies(ORGLocalShadows::kMaxCopies);
+			resources->latch->Write(slot, 0, std::as_bytes(std::span(kNoCopies)));
+		}
 		resources->latch->Write(slot, kDataOffset, resources->slotData);
 	};
 	client.onFailed = [] {
@@ -373,6 +381,7 @@ void ORGLocalShadows::SetFrame(std::span<const Copy> a_copies, std::span<const s
 	}
 	const std::size_t bytes = (std::min)(a_data.size(), resources.slotData.size());
 	std::memcpy(resources.slotData.data(), a_data.data(), bytes);
+	resources.staged = true;
 }
 
 ID3D11ShaderResourceView* ORGLocalShadows::GetCacheSRV() const

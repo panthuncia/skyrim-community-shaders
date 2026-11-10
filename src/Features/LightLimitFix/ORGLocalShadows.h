@@ -70,7 +70,8 @@ public:
 
 	/**
 	 * @brief This frame's copies and slot data, written into the latch when the anchor runs. a_data holds Desc::slots entries
-	 * of Desc::dataStride bytes. Copies past kMaxCopies are dropped.
+	 * of Desc::dataStride bytes. Copies past kMaxCopies are dropped. A frame that does not call it copies nothing and keeps the
+	 * last slot data.
 	 */
 	void SetFrame(std::span<const Copy> a_copies, std::span<const std::byte> a_data);
 
