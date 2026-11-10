@@ -233,9 +233,10 @@ public:
 	void UpdateSkyScattering(PerFrame& a_data);
 
 	virtual void DrawSettings() override;
-	virtual void PostPostLoad() override;
 	virtual void SetupResources() override;
 	virtual void PostSetupResources() override;
+	/** @brief Reserves the anchors of the ORG rays (CS_ORG_E11_RAYS=1) and FX runtime (CS_ORG_FX=1). */
+	virtual void PostPostLoad() override;
 	virtual void Reset() override;
 	virtual void ClearShaderCache() override;
 

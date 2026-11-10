@@ -4,6 +4,7 @@
 #include "Effects11/ENBHelper.h"
 #include "Effects11/Editor/Effects11Editor.h"
 #include "Effects11/EffectManager.h"
+#include "Effects11/ORG/ORGFxRuntime.h"
 #include "Effects11/ORGSunRays.h"
 #include "Effects11/PresetManager.h"
 #include "Effects11/SettingManager.h"
@@ -461,11 +462,6 @@ void Effects11::SetUseEffect(bool enabled)
 	settingManager.SetValue<bool>(settingManager.GetSettingID("UseEffect", "GLOBAL"), enabled);
 }
 
-void Effects11::PostPostLoad()
-{
-	ORGSunRays::Reserve();
-}
-
 void Effects11::SetupResources()
 {
 	// The active preset pack decides the preset; without one, or when it is gone, the default stays.
@@ -474,6 +470,12 @@ void Effects11::SetupResources()
 	if (const auto presetId = UnifiedPresetCatalog::GetSingleton().GetActiveEffects11PresetId(); !presetId.empty())
 		presetManager.SetActivePreset(presetId);
 	EffectManager::GetSingleton().Initialize();
+}
+
+void Effects11::PostPostLoad()
+{
+	ORGSunRays::Reserve();
+	ORGFxRuntime::Reserve();
 }
 
 void Effects11::PostSetupResources()
@@ -1080,6 +1082,12 @@ bool Effects11::RenderTonemap(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_out
 	auto& effectManager = EffectManager::GetSingleton();
 	if (!effectManager.IsInitialized())
 		return false;
+
+	// The ORG FX runtime (CS_ORG_FX=1) ran the chain in the Tonemap anchor's epoch, just before this.
+	if (ORGFxRuntime::Get().RanThisFrame()) {
+		tonemapReplacedFrame = globals::state->frameCount;
+		return true;
+	}
 
 	auto& renderTargets = globals::game::renderer->GetRuntimeData().renderTargets;
 	// Only report replacement after the effect chain actually wrote the output.

@@ -12,7 +12,6 @@
 namespace
 {
 	constexpr float kSunMaskMarginRadians = DirectX::XMConvertToRadians(0.75f);
-	constexpr uint32_t kSunMaskSize = 256;
 }
 
 void ENBAdaptation::Execute()
@@ -99,40 +98,51 @@ bool ENBAdaptation::EnsureSunMaskResources()
 	return true;
 }
 
-ID3D11ShaderResourceView* ENBAdaptation::MaskProceduralSun(ID3D11ShaderResourceView* a_source)
+bool ENBAdaptation::SunMaskConstants(SunMaskCB& a_out) const
 {
+	const auto& frame = globals::game::frameBufferCached;
+	a_out.CameraViewProj = frame.GetCameraViewProj();
+	a_out.CameraViewProjInverse = frame.GetCameraViewProjInverse();
+	a_out.DynamicResolution = { frame.GetDynamicResolutionParams1().x, frame.GetDynamicResolutionParams1().y, frame.GetDynamicResolutionParams2().x, frame.GetDynamicResolutionParams2().y };
+	// No pixel is nearer the sun than a cosine above 1: the shader returns every pixel as it is.
+	a_out.SunDirection = { 0.0f, 0.0f, 1.0f, 0.0f };
+	a_out.MaskParams = { 2.0f, 0.0f, 0.0f, 0.0f };
+
 	auto& settingManager = SettingManager::GetSingleton();
 	const auto& effects11 = globals::features::effects11;
 	if (!effects11.enableEffect || !settingManager.GetValue<bool>("EnableProceduralSun", "EFFECT"))
-		return a_source;
+		return false;
 
 	// Adaptation runs after the world pass, so gate on an exterior sky rather than State::inWorld
 	auto sky = globals::game::sky;
 	if (!sky || sky->mode.get() != RE::Sky::Mode::kFull || !sky->sun || !sky->sun->root || !sky->root)
-		return a_source;
+		return false;
 	if (Util::GetSunVisibility(sky->sun) <= 0.0f)
-		return a_source;
+		return false;
 
 	const auto sunDirection = globals::features::skySync.GetCelestialDirection(sky, SkySync::Caster::Sun);
+	const float maskAngle = effects11.proceduralSunAngularRadius + kSunMaskMarginRadians;
+	const float sampleAngle = maskAngle + kSunMaskMarginRadians;
+	a_out.SunDirection = { sunDirection.x, sunDirection.y, sunDirection.z, 0.0f };
+	a_out.MaskParams = { std::cos(maskAngle), std::cos(sampleAngle), std::sin(sampleAngle), 0.0f };
+	return true;
+}
+
+ID3D11ShaderResourceView* ENBAdaptation::MaskProceduralSun(ID3D11ShaderResourceView* a_source)
+{
+	SunMaskCB constants{};
+	if (!SunMaskConstants(constants))
+		return a_source;
 
 	if (!EnsureSunMaskResources())
 		return a_source;
 
 	auto context = globals::d3d::context;
-	const auto& frame = globals::game::frameBufferCached;
-
-	const float maskAngle = effects11.proceduralSunAngularRadius + kSunMaskMarginRadians;
-	const float sampleAngle = maskAngle + kSunMaskMarginRadians;
 
 	D3D11_MAPPED_SUBRESOURCE mapped{};
 	if (FAILED(context->Map(sunMaskCB.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
 		return a_source;
-	auto* cb = static_cast<SunMaskCB*>(mapped.pData);
-	cb->CameraViewProj = frame.GetCameraViewProj();
-	cb->CameraViewProjInverse = frame.GetCameraViewProjInverse();
-	cb->SunDirection = { sunDirection.x, sunDirection.y, sunDirection.z, 0.0f };
-	cb->DynamicResolution = { frame.GetDynamicResolutionParams1().x, frame.GetDynamicResolutionParams1().y, frame.GetDynamicResolutionParams2().x, frame.GetDynamicResolutionParams2().y };
-	cb->MaskParams = { std::cos(maskAngle), std::cos(sampleAngle), std::sin(sampleAngle), 0.0f };
+	*static_cast<SunMaskCB*>(mapped.pData) = constants;
 	context->Unmap(sunMaskCB.get(), 0);
 
 	auto& effectManager = EffectManager::GetSingleton();

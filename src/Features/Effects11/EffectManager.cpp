@@ -7,8 +7,10 @@
 #include "Globals.h"
 #include "Menu.h"
 #include "State.h"
+#include "Utils/D3D.h"
 #include "Utils/Game.h"
 
+#include "ORG/ORGFxRuntime.h"
 #include "PresetManager.h"
 #include "SettingManager.h"
 #include "TextureManager.h"
@@ -118,6 +120,9 @@ void EffectManager::LogPresetStatus() const
 
 void EffectManager::Apply()
 {
+	// The ORG FX runtime reads these effects' variables; it builds again from the reloaded effects.
+	ORGFxRuntime::Get().Invalidate();
+
 	if (auto& rainRefraction = globals::features::rainRefraction; rainRefraction.loaded)
 		rainRefraction.LoadPresetRaindrops(PresetManager::GetSingleton().GetENBSeriesPath());
 
@@ -413,6 +418,13 @@ void EffectManager::ExecuteEffect(EffectBase& a_effect, uint32_t enableSettingID
 		return;
 
 	a_effect.profiler = globals::profiler;
+	UpdateEffectValues(a_effect);
+	a_effect.Execute();
+	a_effect.profiler = nullptr;
+}
+
+void EffectManager::UpdateEffectValues(EffectBase& a_effect)
+{
 #ifdef ENABLE_ENB_EXTENDER
 	const float weatherBlend = Effects11Editor::GetSingleton().IsOpen() ? (commonData.weather[2] > 0.5f ? 1.0f : 0.0f) : commonData.weather[2];
 	a_effect.ApplyWeatherBlending(weatherBlend, currentWeatherID, previousWeatherID);
@@ -421,8 +433,6 @@ void EffectManager::ExecuteEffect(EffectBase& a_effect, uint32_t enableSettingID
 	UpdateCommonVariablesForEffect(a_effect);
 	a_effect.UpdateExternBindings();
 	a_effect.UpdateEffectVariables();
-	a_effect.Execute();
-	a_effect.profiler = nullptr;
 }
 
 bool EffectManager::ExecuteEffects(RE::BSGraphics::RenderTargetData& a_input, RE::BSGraphics::RenderTargetData& a_output)
@@ -633,7 +643,9 @@ void EffectManager::CreateCopyShaders()
 
 	winrt::com_ptr<ID3DBlob> psBlob;
 	errorBlob = nullptr;  // Holds any vertex shader warnings, and put() requires an empty pointer
-	hr = D3DCompile(pixelShaderSource.data(), pixelShaderSource.size(), "CopyPS.hlsl", nullptr, nullptr,
+	// Dual-target shader: its includes resolve under Data\Shaders.
+	Util::CustomInclude include;
+	hr = D3DCompile(pixelShaderSource.data(), pixelShaderSource.size(), "CopyPS.hlsl", nullptr, &include,
 		"main", "ps_5_0", 0, 0, psBlob.put(), errorBlob.put());
 
 	if (FAILED(hr)) {
@@ -668,7 +680,9 @@ void EffectManager::CreateColorCorrectionShader()
 		return;
 
 	winrt::com_ptr<ID3DBlob> csBlob, errorBlob;
-	HRESULT hr = D3DCompile(computeShaderSource.data(), computeShaderSource.size(), "ColorCorrectionCS.hlsl", nullptr, nullptr,
+	// Dual-target shader: its includes resolve under Data\Shaders.
+	Util::CustomInclude include;
+	HRESULT hr = D3DCompile(computeShaderSource.data(), computeShaderSource.size(), "ColorCorrectionCS.hlsl", nullptr, &include,
 		"main", "cs_5_0", 0, 0, csBlob.put(), errorBlob.put());
 
 	if (FAILED(hr)) {

@@ -26,6 +26,7 @@
 #include "CSEditor/SceneManager/WeatherTransition.h"
 #include "Features/DrawcallLimitFix.h"
 #include "Features/Effects11.h"
+#include "Features/Effects11/ORG/ORGFxRuntime.h"
 #include "Features/GrassOptimizations.h"
 #include "Features/HDRDisplay.h"
 #include "Features/InteriorSun.h"
@@ -459,6 +460,8 @@ namespace PostProcessingExtensions
 			const auto input = static_cast<RE::RENDER_TARGET>(a3);
 			const auto output = static_cast<RE::RENDER_TARGET>(a4);
 
+			// The ORG FX runtime (CS_ORG_FX=1) settles its passes for this frame before the anchor runs them.
+			ORGFxRuntime::Get().Prepare(a3, a4);
 			FrameAnchors::Run({ .anchor = FrameAnchors::Anchor::Tonemap, .input = static_cast<std::int32_t>(a3), .output = static_cast<std::int32_t>(a4) });
 
 			// Effects11 replaces the pass outright; when it does, the vanilla call is skipped

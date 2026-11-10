@@ -316,6 +316,7 @@ void Effect::Unload()
 
 	filePresent = false;
 	errors.clear();
+	preprocessedSource.clear();
 
 	logger::info("[EFFECTS11] Unloaded effect '{}'", GetName());
 }
@@ -417,7 +418,10 @@ bool Effect::LoadFXFile()
 			ENBExtender::ExpandStringifyMacros(pp, extraStringifyMacros);
 		ENBExtender::ParseSourceGroupScopes(pp, *this);
 		ENBExtender::StripLineDirectives(pp);
-		return compile(pp, nullptr);
+		if (!compile(pp, nullptr))
+			return false;
+		preprocessedSource = std::move(pp);
+		return true;
 	};
 
 	bool compiled = false;
@@ -434,6 +438,8 @@ bool Effect::LoadFXFile()
 			ENBExtender::ParseSourceGroupScopes(pp, *this);
 			ENBExtender::StripLineDirectives(pp);
 			compiled = compile(pp, nullptr);
+			if (compiled)
+				preprocessedSource = std::move(pp);
 		}
 	}
 
