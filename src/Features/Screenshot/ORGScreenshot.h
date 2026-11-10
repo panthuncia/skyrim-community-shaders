@@ -18,7 +18,9 @@ struct ID3D11Texture2D;
  *
  * Captures are rare, so the client is active only at a capture point that armed one: other frames submit nothing. The epoch's
  * ticket is prepared ahead of the hook, so the pass's revision names the capture it prepared for. A capture armed after that
- * makes the ticket stale and it is prepared again, now with the copy.
+ * makes the ticket stale and it is prepared again, now with the copy. Prime registers the client and imports the source every
+ * frame, and a new source runs the anchor once without a capture, so its graph is built before a capture needs it. A capture
+ * whose copy was not in the epoch submitted at its capture point is withdrawn, and the caller copies it with D3D11.
  *
  * On any failure the feature uses its D3D11 staging copy. Render thread throughout.
  *
@@ -52,16 +54,28 @@ public:
 	/** @brief Whether CS_ORG_SCREENSHOT=1 is set. */
 	static bool Requested();
 
+	/**
+	 * @brief Whether CS_ORG_SCREENSHOT_COMPARE=1 is set as well: a capture the graph takes is also copied with D3D11 from the same
+	 * frame, saved beside it with a "-d3d11" suffix.
+	 */
+	static bool CompareRequested();
+
 	static ORGScreenshot& Get();
 
 	/** @brief Reserves the Capture anchor when requested. Call before the render graph initializes (the feature's PostPostLoad). */
 	void ReserveAnchor();
 
 	/**
+	 * @brief Every capture point, before any Capture: registers the client and imports a_source (what a capture would copy now),
+	 * so the anchor's graph holds the copy pass before a capture arrives.
+	 */
+	void Prime(const Source& a_source);
+
+	/**
 	 * @brief At the capture point: copies a_source on the graph now, in the Capture anchor's epoch. a_onPixels runs from a later
 	 * Poll, once the GPU copy is done.
-	 * @return False when the graph cannot take it (not requested, inactive, the source cannot be imported, the epoch failed):
-	 * the caller copies with D3D11 instead.
+	 * @return False when the graph cannot take it (not requested, inactive, the source cannot be imported, the epoch failed, or
+	 * the epoch submitted at this point did not hold the copy): the caller copies with D3D11 instead.
 	 */
 	bool Capture(const Source& a_source, OnPixels a_onPixels);
 
@@ -75,6 +89,9 @@ private:
 
 	/** @brief Registers the anchor client once the runtime is up. False, for good after a failure, when the graph cannot take captures. */
 	bool EnsureRegistered();
+
+	/** @brief The graph import of a_source, made the copy pass's source (the graph built again, once) when it is new. */
+	bool SetSource(const Source& a_source);
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;

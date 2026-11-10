@@ -34,7 +34,11 @@ namespace
 		std::uint64_t id = 0;
 		std::uint64_t armedAt = 0;  // the capture point's number
 		ORGScreenshot::OnPixels onPixels;
+		std::atomic<bool> submitted = false;  // a submission held its copy
+		std::atomic<bool> withdrawn = false;  // its capture point passed without the copy: D3D11 took it
 	};
+
+	void OnCopySubmitted(Request& a_request, org::SubmissionContext) { a_request.submitted.store(true, std::memory_order_release); }
 
 	/** @brief What the render thread, the graph host's thread and the readback callback share. */
 	struct Shared
@@ -98,6 +102,8 @@ namespace
 			data.source = a_preparation.CaptureResource(source->GetGlobalResourceID());
 			// The readback service's thread (any submitting or host thread): Poll hands it on.
 			org::ReadbackCaptureCallback onDone = [weak = std::weak_ptr<Shared>(shared), request](org::ReadbackCaptureResult&& a_result) {
+				if (request->withdrawn.load(std::memory_order_acquire))
+					return;
 				if (const auto owner = weak.lock()) {
 					std::scoped_lock lock(owner->mutex);
 					owner->done.emplace_back(request, std::move(a_result));
@@ -110,6 +116,8 @@ namespace
 			if (data.plan.destinationLease)
 				a_preparation.Retain(data.plan.destinationLease);
 			a_preparation.Reserve(data.plan.reservation);
+			// Whether the submission at the capture point held this copy (ORGScreenshot::Capture checks after the run).
+			a_preparation.Reserve(request, &OnCopySubmitted);
 			data.plan.destinationLease.reset();
 			data.plan.reservation.reset();
 			return data;
@@ -147,7 +155,9 @@ struct ORGScreenshot::Impl
 	bool registered = false;
 	bool failed = false;
 	bool importWarned = false;
+	bool inactiveWarned = false;
 	bool ranThisPoint = false;
+	bool warm = false;  // a new source or a new registration: the anchor runs once without a capture, to build its graph
 	std::uint64_t nextId = 0;
 	std::uint64_t points = 0;                           // capture points seen
 	std::shared_ptr<Request> pending;                   // this capture point's capture, while its epoch runs
@@ -159,6 +169,15 @@ bool ORGScreenshot::Requested()
 	static const bool requested = [] {
 		char value[8]{};
 		return GetEnvironmentVariableA("CS_ORG_SCREENSHOT", value, sizeof(value)) && std::strcmp(value, "1") == 0;
+	}();
+	return requested;
+}
+
+bool ORGScreenshot::CompareRequested()
+{
+	static const bool requested = [] {
+		char value[8]{};
+		return Requested() && GetEnvironmentVariableA("CS_ORG_SCREENSHOT_COMPARE", value, sizeof(value)) && std::strcmp(value, "1") == 0;
 	}();
 	return requested;
 }
@@ -186,8 +205,14 @@ bool ORGScreenshot::EnsureRegistered()
 		return true;
 	auto& runtime = RenderGraphRuntime::Get();
 	auto* host = runtime.Host();
-	if (!host || !runtime.IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::Capture)) {
-		logger::warn("[ORG] Screenshot: the render graph or its Capture anchor is not available; captures use D3D11");
+	// Not up yet (Prime runs from the first Present): D3D11 until it is.
+	if (!host || !runtime.IsActive()) {
+		if (!std::exchange(state.inactiveWarned, true))
+			logger::info("[ORG] Screenshot: the render graph is not active yet; captures use D3D11 until it is");
+		return false;
+	}
+	if (!FrameAnchors::HasEpoch(FrameAnchors::Anchor::Capture)) {
+		logger::warn("[ORG] Screenshot: the Capture anchor has no epoch; captures use D3D11");
 		state.failed = true;
 		return false;
 	}
@@ -214,7 +239,7 @@ bool ORGScreenshot::EnsureRegistered()
 		impl.shared->armed = impl.pending;
 		impl.shared->armedId.store(impl.pending->id, std::memory_order_release);
 	};
-	client.active = [] { return Get().impl->pending != nullptr; };
+	client.active = [] { return Get().impl->pending != nullptr || Get().impl->warm; };
 	client.onFailed = [] {
 		auto& impl = *Get().impl;
 		logger::error("[ORG] Screenshot: the render graph failed; captures use D3D11 ({} readbacks lost)", impl.outstanding.size());
@@ -227,8 +252,35 @@ bool ORGScreenshot::EnsureRegistered()
 		return false;
 	}
 	state.registered = true;
+	state.warm = true;
 	logger::info("[ORG] Screenshot: captures are read back through the render graph (Capture anchor)");
 	return true;
+}
+
+bool ORGScreenshot::SetSource(const Source& a_source)
+{
+	auto& state = *impl;
+	auto source = Import(a_source);
+	if (!source)
+		return false;
+	// A new source: the anchor's graph is built again at its next run, its pass copying from it.
+	if (source != state.shared->source) {
+		state.shared->source = std::move(source);
+		FrameAnchors::Refresh(kClientId);
+		state.warm = true;
+		logger::info("[ORG] Screenshot: the copy now reads {}", a_source.importName ? a_source.importName : "the source");
+	}
+	return true;
+}
+
+void ORGScreenshot::Prime(const Source& a_source)
+{
+	if (!Requested() || !a_source.texture)
+		return;
+	if (!impl)
+		impl = std::make_unique<Impl>();
+	if (EnsureRegistered())
+		(void)SetSource(a_source);
 }
 
 bool ORGScreenshot::Capture(const Source& a_source, OnPixels a_onPixels)
@@ -240,16 +292,10 @@ bool ORGScreenshot::Capture(const Source& a_source, OnPixels a_onPixels)
 	auto& state = *impl;
 	if (!EnsureRegistered())
 		return false;
-	auto source = Import(a_source);
-	if (!source) {
+	if (!SetSource(a_source)) {
 		if (!std::exchange(state.importWarned, true))
 			logger::warn("[ORG] Screenshot: the capture source cannot be imported into the graph; this capture uses D3D11");
 		return false;
-	}
-	// A new source: the anchor's graph is built again at this run, its pass copying from it.
-	if (source != state.shared->source) {
-		state.shared->source = std::move(source);
-		FrameAnchors::Refresh(kClientId);
 	}
 	auto request = std::make_shared<Request>();
 	request->id = ++state.nextId;
@@ -259,10 +305,26 @@ bool ORGScreenshot::Capture(const Source& a_source, OnPixels a_onPixels)
 	const bool ran = FrameAnchors::Run(FrameAnchors::Anchor::Capture);
 	state.pending.reset();
 	state.ranThisPoint = true;
+	state.warm = false;
 	if (!ran || state.failed) {
 		logger::warn("[ORG] Screenshot: the Capture anchor's epoch did not run; this capture uses D3D11");
 		return false;
 	}
+	// The submission at this point did not hold the copy (its graph was being built, or its ticket was not prepared for it): no
+	// later ticket may copy another frame for it.
+	if (!request->submitted.load(std::memory_order_acquire)) {
+		request->withdrawn.store(true, std::memory_order_release);
+		{
+			std::scoped_lock lock(state.shared->mutex);
+			if (state.shared->armed == request)
+				state.shared->armed.reset();
+			state.shared->takenId = (std::max)(state.shared->takenId, request->id);
+			state.shared->armedId.store(0, std::memory_order_release);
+		}
+		logger::warn("[ORG] Screenshot: capture {} was not in the epoch submitted at its capture point; D3D11 copies it", request->id);
+		return false;
+	}
+	logger::info("[ORG] Screenshot: capture {} copied on the render graph", request->id);
 	state.outstanding.push_back(std::move(request));
 	return true;
 }
@@ -277,6 +339,7 @@ void ORGScreenshot::Poll()
 	// The anchor runs at every capture point (for its other clients, the anchor self-test), once.
 	if (!std::exchange(state.ranThisPoint, false))
 		FrameAnchors::Run(FrameAnchors::Anchor::Capture);
+	state.warm = false;
 	++state.points;
 	if (state.outstanding.empty())
 		return;
@@ -301,14 +364,14 @@ void ORGScreenshot::Poll()
 		pixels.width = layout.width;
 		pixels.height = layout.height;
 		pixels.data = std::move(result.data);
-		logger::debug("[ORG] Screenshot: capture {} read back ({}x{}, {} bytes) after {} capture points", request->id, pixels.width, pixels.height,
+		logger::info("[ORG] Screenshot: capture {} read back ({}x{}, {} bytes) after {} capture points", request->id, pixels.width, pixels.height,
 			pixels.data.size(), state.points - request->armedAt);
 		request->onPixels(std::move(pixels));
 	}
 	std::erase_if(state.outstanding, [&](const std::shared_ptr<Request>& a_request) {
 		if (state.points - a_request->armedAt < kPatience)
 			return false;
-		logger::warn("[ORG] Screenshot: capture {} was not read back after {} frames; dropped", a_request->id, kPatience);
+		logger::error("[ORG] Screenshot: capture {} was not read back after {} frames; it is lost", a_request->id, kPatience);
 		return true;
 	});
 }
@@ -322,6 +385,7 @@ struct ORGScreenshot::Impl
 {};
 
 bool ORGScreenshot::Requested() { return false; }
+bool ORGScreenshot::CompareRequested() { return false; }
 
 ORGScreenshot& ORGScreenshot::Get()
 {
@@ -331,6 +395,7 @@ ORGScreenshot& ORGScreenshot::Get()
 
 ORGScreenshot::~ORGScreenshot() = default;
 void ORGScreenshot::ReserveAnchor() {}
+void ORGScreenshot::Prime(const Source&) {}
 bool ORGScreenshot::Capture(const Source&, OnPixels) { return false; }
 void ORGScreenshot::Poll() {}
 
