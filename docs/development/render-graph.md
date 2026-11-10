@@ -797,8 +797,10 @@ for its creation functions.
     `WatchSet`. Handle arguments are unwrapped on the way, so a wrapping device or context passes DXVK its own objects.
     A handle given straight to DXVK crashes there: a port installs one only where its readers go through the handle.
 -   **Releases.** The last Release drops the wrapped object at once and queues the ORG resource and owner. The render
-    thread hands them to `ReleaseAfterD3D11` through `Tripwire::ServiceRetired` (installed per frame with the first
-    port).
+    thread hands them to `ReleaseAfterD3D11` through `Tripwire::ServiceRetired`, every frame at the frame pace point
+    (`RenderGraphRuntime::SignalFramePace`, beside `ServiceD3D11Releases`).
+-   **Report.** `CS_ORG_TRIPWIRE_LOG`'s periodic report runs on a joinable thread that `Tripwire::Stop` stops and joins at the
+    game window's close, before the exit report.
 -   **Generated vtables.** `tools/generate-tripwire-interfaces.py` reads the SDK's `d3d11.h` and `dxgi.h` into
     `TripwireInterfaces.inl`: each method's signature, its forwarding arguments and its failure outputs (from the SAL
     annotations). `TripwireHandles.h` expands that into one class per interface. Every method is an `override`, and a

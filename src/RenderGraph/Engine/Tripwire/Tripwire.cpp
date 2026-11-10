@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -159,10 +160,29 @@ namespace RenderGraph::Engine::Tripwire
 			a_sites.reportedCalls = a_sites.calls;
 		}
 
-		void ReportLoop(std::chrono::seconds a_interval)
+		/** @brief The periodic report's thread, stopped and joined by Stop. */
+		struct Reporter
 		{
+			std::mutex lock;
+			std::condition_variable_any wake;
+			std::jthread thread;
+		};
+
+		Reporter& GetReporter()
+		{
+			static Reporter s_reporter;
+			return s_reporter;
+		}
+
+		void ReportLoop(std::stop_token a_stop, std::chrono::seconds a_interval)
+		{
+			auto& reporter = GetReporter();
 			for (;;) {
-				std::this_thread::sleep_for(a_interval);
+				{
+					std::unique_lock wait(reporter.lock);
+					if (reporter.wake.wait_for(wait, a_stop, a_interval, [] { return false; }) || a_stop.stop_requested())
+						return;
+				}
 				auto& sites = GetSites();
 				std::lock_guard guard(sites.lock);
 				if (sites.calls != sites.reportedCalls)
@@ -683,6 +703,16 @@ namespace RenderGraph::Engine::Tripwire
 		const auto seconds = Switches::Number("CS_ORG_TRIPWIRE_LOG_INTERVAL", 60);
 		logger::info("[ORG] tripwire log on (CS_ORG_TRIPWIRE_LOG=1): a report {}", seconds ? fmt::format("every {} s when calls changed, and at exit", seconds) : std::string("at exit"));
 		if (seconds)
-			std::thread(ReportLoop, std::chrono::seconds(seconds)).detach();
+			GetReporter().thread = std::jthread(ReportLoop, std::chrono::seconds(seconds));
+	}
+
+	void Stop()
+	{
+		auto& reporter = GetReporter();
+		if (reporter.thread.joinable()) {
+			reporter.thread.request_stop();
+			reporter.thread.join();
+		}
+		Report("exit");
 	}
 }

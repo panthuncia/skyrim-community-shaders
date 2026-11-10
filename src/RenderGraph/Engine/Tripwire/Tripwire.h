@@ -209,6 +209,9 @@ namespace RenderGraph::Engine::Tripwire
 	/** @brief CS_ORG_TRIPWIRE_LOG=1: logs every call site with its count now (at exit: a_reason "exit"). Otherwise does nothing. */
 	void Report(std::string_view a_reason);
 
+	/** @brief At the game window's close: stops the periodic report's thread, joins it, and logs the exit report. */
+	void Stop();
+
 	/**
 	 * @brief How a code address is named in tripwire logs: "SkyrimSE.exe+0xd6a8f2 (ID 75467+0x82)" for the game (the Address Library
 	 * ID of the function that contains it), "Module.dll+0x1234" for any other module, the bare address when no module holds it.

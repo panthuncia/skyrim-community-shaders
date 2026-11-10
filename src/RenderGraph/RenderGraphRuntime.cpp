@@ -15,6 +15,7 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/Engine/GuestDevice.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/Switches.h"
 #include "Features/RemoteControl/GpuTimestamps.h"
@@ -2077,9 +2078,10 @@ std::uint32_t RenderGraphRuntime::TakeSubmittedSegments()
 void RenderGraphRuntime::SignalFramePace(bool a_active)
 {
 	// The frame's end on the render thread (the graph's owner), every frame: shader hot reload's owner point, and the point
-	// where exported resources whose last D3D11 use is done are freed.
+	// where exported resources whose last D3D11 use is done are freed, and released tripwire handles' resources queued for that.
 	ServicePipelineReload();
 	ServiceD3D11Releases();
+	RenderGraph::Engine::Tripwire::ServiceRetired();
 	if (!IsActive() || !impl->framePace || !a_active)
 		return;
 	auto& state = *impl;
