@@ -85,7 +85,7 @@ namespace
 	}
 
 	/** @brief The engine targets the Upscale anchor's passes read and write, as graph textures. */
-	struct Inputs
+	struct DepthInputs
 	{
 		std::shared_ptr<org::ExternalTextureResource> main;
 		std::shared_ptr<org::ExternalTextureResource> depth, depthCopy;
@@ -93,7 +93,7 @@ namespace
 		std::shared_ptr<org::ExternalTextureResource> underwater, underwaterCopy;
 		std::uint32_t width = 0, height = 0;  // the screen: the depth upscale's render area
 
-		bool operator==(const Inputs&) const = default;
+		bool operator==(const DepthInputs&) const = default;
 
 		bool DepthComplete() const
 		{
@@ -120,7 +120,7 @@ namespace
 	 * @brief The depth upscale's targets as UpscaleDepth binds them. Empty depth fields when one is missing or a copy is its own
 	 * source: the D3D11 path then draws.
 	 */
-	void CurrentDepthInputs(Inputs& a_inputs, DepthFormats& a_formats)
+	void CurrentDepthInputs(DepthInputs& a_inputs, DepthFormats& a_formats)
 	{
 		auto* renderer = globals::game::renderer;
 		auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
@@ -192,7 +192,7 @@ struct ORGUpscaling::Impl
 	std::shared_ptr<org::LatchBlock> latch;
 
 	std::unique_ptr<GraphResources::Texture2D> upscaled, hudless;
-	Inputs inputs;
+	DepthInputs inputs;
 	std::shared_ptr<org::ExternalTextureResource> hudlessSource;
 	std::shared_ptr<const RasterProgram> hudlessProgram;  // for the hudless texture's format
 
@@ -358,7 +358,7 @@ namespace
 	private:
 		Gate gate;
 		DrawFrame frame;
-		Inputs inputs;
+		DepthInputs inputs;
 	};
 
 	struct UnderwaterBindings
@@ -412,7 +412,7 @@ namespace
 	private:
 		Gate gate;
 		DrawFrame frame;
-		Inputs inputs;
+		DepthInputs inputs;
 	};
 
 	struct HudlessBindings
@@ -772,7 +772,7 @@ bool ORGUpscaling::QueueDepthUpscale(float2 a_jitter, float a_useWideKernel)
 {
 	if (!Running())
 		return false;
-	Inputs inputs{};
+	DepthInputs inputs{};
 	DepthFormats formats{};
 	CurrentDepthInputs(inputs, formats);
 	if (!inputs.DepthComplete())
