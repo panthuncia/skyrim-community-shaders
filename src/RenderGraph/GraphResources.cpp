@@ -464,8 +464,8 @@ namespace GraphResources
 	namespace SelfTest
 	{
 		bool Requested() { return false; }
-		void Ensure() {}
-		void AfterRun() {}
+		void Reserve() {}
+		void Setup() {}
 	}
 }
 

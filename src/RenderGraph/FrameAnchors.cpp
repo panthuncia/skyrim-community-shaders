@@ -5,13 +5,13 @@
 
 #	include "RenderGraph/FrameAnchors.h"
 
-#	include "Features/Upscaling.h"
 #	include "Globals.h"
 #	include "RenderGraph/DxvkImageImport.h"
-#	include "RenderGraph/FrameAnchorSelfTest.h"
 #	include "RenderGraph/GraphResources.h"
-#	include "RenderGraph/SharedConstants.h"
+#	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
+#	include "RenderGraph/SharedConstants.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
@@ -122,20 +122,36 @@ namespace FrameAnchors
 		/** @brief What every graph build makes the anchors' passes and resources from. Immutable once published. */
 		struct Snapshot
 		{
-			std::vector<std::shared_ptr<const ClientDesc>> clients;  // registration order
+			std::uint64_t serial = 0;                                // State::serial when it was published
+			std::vector<std::shared_ptr<const ClientDesc>> clients;  // registration order, the ones in the graphs
 			std::vector<ScheduledPass> passes;                       // by anchor, then order key, then registration
 			std::vector<std::pair<std::string, std::shared_ptr<org::ExternalTextureResource>>> imports;
 		};
 
-		/** @brief The anchors' state. Render thread, but the snapshot, which a build reads. */
+		/** @brief A registered client and what the anchors keep about it. Render thread. */
+		struct Client
+		{
+			std::shared_ptr<const ClientDesc> desc;
+			// The snapshot that first held its passes and resources as they are now (Register, Refresh, a resize): a graph built
+			// from that one or a later one runs them.
+			std::uint64_t serial = 0;
+			// Per pass: the snapshot a pending one-shot pass was armed in; 0 once it ran (always 0 for other passes).
+			std::vector<std::uint64_t> armed;
+		};
+
+		/** @brief The anchors' state. Render thread, but the snapshot and the built serials, which a build writes and reads. */
 		struct State
 		{
 			std::array<bool, kAnchors> reserved{};
 			bool frozen = false;  // AddToFrame ran: the reservations are the frame's epochs
 			org::GraphHost* host = nullptr;
-			std::vector<std::shared_ptr<const ClientDesc>> clients;
+			std::vector<Client> clients;
 			std::map<std::string, EngineImport, std::less<>> imports;  // by graph id
+			std::uint64_t serial = 0;                                  // bumped by every Publish
+			std::uint64_t resizeGeneration = 0;                        // GraphResources' last seen
+			std::function<void()> lateHook;
 			std::atomic<std::shared_ptr<const Snapshot>> snapshot;
+			std::array<std::atomic<std::uint64_t>, kAnchors> built{};  // the snapshot each anchor's graph was last built from
 		};
 
 		State& Anchors()
@@ -149,10 +165,31 @@ namespace FrameAnchors
 			return std::ranges::any_of(a_client.passes, [&](const PassDesc& a_pass) { return a_pass.anchor == a_anchor; });
 		}
 
+		/** @brief Whether the client is in the graphs: one that reads the shared constants waits until they exist. */
+		bool InGraphs(const ClientDesc& a_client)
+		{
+			return !a_client.sharedConstants || SharedConstants::Ready();
+		}
+
 		/** @brief Whether a client with passes at the anchor reads the shared constants: the anchor's epoch then uploads them. */
 		bool UsesSharedConstants(const std::vector<std::shared_ptr<const ClientDesc>>& a_clients, Anchor a_anchor)
 		{
 			return std::ranges::any_of(a_clients, [&](const auto& a_client) { return a_client->sharedConstants && HasPasses(*a_client, a_anchor); });
+		}
+
+		/** @brief Whether the client has a one-shot pass at the anchor that has not run yet. */
+		bool HasPendingOnce(const Client& a_client, Anchor a_anchor)
+		{
+			for (std::size_t i = 0; i < a_client.desc->passes.size(); ++i)
+				if (a_client.armed[i] && a_client.desc->passes[i].anchor == a_anchor)
+					return true;
+			return false;
+		}
+
+		Client* FindClient(State& a_state, std::string_view a_id)
+		{
+			const auto found = std::ranges::find_if(a_state.clients, [&](const Client& a_client) { return a_client.desc->id == a_id; });
+			return found != a_state.clients.end() ? &*found : nullptr;
 		}
 
 		/** @brief The anchor of an anchor epoch's graph, or Count. */
@@ -168,10 +205,18 @@ namespace FrameAnchors
 		void Publish(State& a_state)
 		{
 			auto snapshot = std::make_shared<Snapshot>();
-			snapshot->clients = a_state.clients;
-			for (const auto& client : a_state.clients)
-				for (const auto& pass : client->passes)
-					snapshot->passes.push_back({ client, &pass });
+			snapshot->serial = ++a_state.serial;
+			for (const auto& client : a_state.clients) {
+				if (!InGraphs(*client.desc))
+					continue;
+				snapshot->clients.push_back(client.desc);
+				for (std::size_t i = 0; i < client.desc->passes.size(); ++i) {
+					const auto& pass = client.desc->passes[i];
+					// A one-shot pass that ran is left out until it is armed again.
+					if (!pass.once || client.armed[i])
+						snapshot->passes.push_back({ client.desc, &pass });
+				}
+			}
 			// Stable: equal keys keep the registration order, and each client's own.
 			std::ranges::stable_sort(snapshot->passes, [](const ScheduledPass& a, const ScheduledPass& b) {
 				if (a.pass->anchor != b.pass->anchor)
@@ -181,6 +226,15 @@ namespace FrameAnchors
 			for (const auto& [key, import] : a_state.imports)
 				snapshot->imports.emplace_back(import.id, import.resource);
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
+		}
+
+		/** @brief The client's passes and resources, and its pending one-shot passes, as of the snapshot just published. */
+		void MarkCurrent(const State& a_state, Client& a_client)
+		{
+			a_client.serial = a_state.serial;
+			for (auto& armed : a_client.armed)
+				if (armed)
+					armed = a_state.serial;
 		}
 
 		/** @brief The anchors' epochs built again at their next execution (the others keep their graphs). */
@@ -193,11 +247,11 @@ namespace FrameAnchors
 					a_state.host->RequestRebuild(EpochOfAnchor(static_cast<Anchor>(i)));
 		}
 
-		std::uint32_t AnchorMask(const ClientDesc& a_client)
+		std::uint32_t AnchorMask(const ClientDesc& a_client, bool a_onceOnly = false)
 		{
 			std::uint32_t mask = 0;
 			for (const auto& pass : a_client.passes)
-				if (IndexOf(pass.anchor) < kAnchors)
+				if (IndexOf(pass.anchor) < kAnchors && (!a_onceOnly || pass.once))
 					mask |= 1u << IndexOf(pass.anchor);
 			return mask;
 		}
@@ -216,6 +270,8 @@ namespace FrameAnchors
 			{
 				if (!snapshot || !IsAnchorGraph(a_graph))
 					return;
+				// What the run that submits this graph reads (ClientDesc::executed, one-shot passes): the graph holds this snapshot's passes.
+				Anchors().built[IndexOf(AnchorOfEpoch(a_graph.PassEpochFilter()))].store(snapshot->serial, std::memory_order_release);
 				for (const auto& [id, resource] : snapshot->imports)
 					a_graph.RegisterResource(org::ResourceIdentifier(id), resource);
 				for (const auto& client : snapshot->clients)
@@ -434,32 +490,38 @@ namespace FrameAnchors
 			}
 			names.push_back(pass.name);
 		}
-		if (a_client.sharedConstants && !SharedConstants::Ensure()) {
+		// Before CS's first upload the shared constants cannot be made yet: the client waits for them (Service).
+		if (a_client.sharedConstants && !SharedConstants::Ensure() && SharedConstants::Failed()) {
 			logger::warn("[ORG] frame anchors: {} not registered: it reads the shared constants, which could not be made", a_client.id);
 			return false;
 		}
-		std::uint32_t mask = AnchorMask(a_client);
-		auto client = std::make_shared<const ClientDesc>(std::move(a_client));
-		const auto existing = std::ranges::find_if(state.clients, [&](const auto& a_other) { return a_other->id == client->id; });
-		if (existing != state.clients.end()) {
-			mask |= AnchorMask(**existing);
-			*existing = client;
+		Client client;
+		client.desc = std::make_shared<const ClientDesc>(std::move(a_client));
+		for (const auto& pass : client.desc->passes)
+			client.armed.push_back(pass.once ? 1 : 0);
+		std::uint32_t mask = AnchorMask(*client.desc);
+		auto* existing = FindClient(state, client.desc->id);
+		if (existing) {
+			mask |= AnchorMask(*existing->desc);
+			*existing = std::move(client);
 		} else {
-			state.clients.push_back(client);
+			existing = &state.clients.emplace_back(std::move(client));
 		}
 		Publish(state);
+		MarkCurrent(state, *existing);
 		Rebuild(state, mask);
-		logger::info("[ORG] frame anchors: {} registered ({} passes)", client->id, client->passes.size());
+		logger::info("[ORG] frame anchors: {} registered ({} passes){}", existing->desc->id, existing->desc->passes.size(),
+			InGraphs(*existing->desc) ? "" : "; it joins the graphs once the shared constants exist");
 		return true;
 	}
 
 	void Unregister(std::string_view a_id)
 	{
 		auto& state = Anchors();
-		const auto existing = std::ranges::find_if(state.clients, [&](const auto& a_other) { return a_other->id == a_id; });
+		const auto existing = std::ranges::find_if(state.clients, [&](const Client& a_other) { return a_other.desc->id == a_id; });
 		if (existing == state.clients.end())
 			return;
-		const std::uint32_t mask = AnchorMask(**existing);
+		const std::uint32_t mask = AnchorMask(*existing->desc);
 		state.clients.erase(existing);
 		Publish(state);
 		Rebuild(state, mask);
@@ -468,9 +530,91 @@ namespace FrameAnchors
 	void Refresh(std::string_view a_id)
 	{
 		auto& state = Anchors();
-		const auto existing = std::ranges::find_if(state.clients, [&](const auto& a_other) { return a_other->id == a_id; });
-		if (existing != state.clients.end())
-			Rebuild(state, AnchorMask(**existing));
+		if (auto* client = FindClient(state, a_id)) {
+			Publish(state);
+			MarkCurrent(state, *client);
+			Rebuild(state, AnchorMask(*client->desc));
+		}
+	}
+
+	void Rearm(std::string_view a_id)
+	{
+		auto& state = Anchors();
+		auto* client = FindClient(state, a_id);
+		if (!client)
+			return;
+		bool armed = false;
+		for (std::size_t i = 0; i < client->desc->passes.size(); ++i)
+			if (client->desc->passes[i].once && !client->armed[i]) {
+				client->armed[i] = 1;
+				armed = true;
+			}
+		if (!armed)
+			return;
+		Publish(state);
+		for (std::size_t i = 0; i < client->desc->passes.size(); ++i)
+			if (client->armed[i] == 1)
+				client->armed[i] = state.serial;
+		Rebuild(state, AnchorMask(*client->desc, true));
+	}
+
+	void SetLateEpochHook(std::function<void()> a_hook)
+	{
+		Anchors().lateHook = std::move(a_hook);
+	}
+
+	namespace
+	{
+		/**
+		 * @brief Before a run: clients waiting for the shared constants join once they exist (or fail with them), and a twin's resize
+		 * since the last run builds every anchor graph again and publishes the new resource.
+		 */
+		void Service(State& a_state)
+		{
+			const bool waiting = std::ranges::any_of(a_state.clients, [](const Client& a_client) { return !InGraphs(*a_client.desc); });
+			if (waiting && SharedConstants::Ensure()) {
+				Publish(a_state);
+				std::uint32_t mask = 0;
+				for (auto& client : a_state.clients)
+					if (client.desc->sharedConstants) {
+						MarkCurrent(a_state, client);
+						mask |= AnchorMask(*client.desc);
+					}
+				Rebuild(a_state, mask);
+				logger::info("[ORG] frame anchors: the shared constants exist; the clients that read them join the graphs");
+			} else if (waiting && SharedConstants::Failed()) {
+				std::vector<std::shared_ptr<const ClientDesc>> failed;
+				std::erase_if(a_state.clients, [&](const Client& a_client) {
+					if (InGraphs(*a_client.desc))
+						return false;
+					failed.push_back(a_client.desc);
+					return true;
+				});
+				Publish(a_state);
+				for (const auto& client : failed) {
+					logger::error("[ORG] frame anchors: {} is removed: the shared constants it reads could not be made", client->id);
+					if (client->onFailed)
+						client->onFailed();
+				}
+			}
+			const std::uint64_t generation = GraphResources::Resource::ResizeGeneration();
+			if (generation != a_state.resizeGeneration) {
+				a_state.resizeGeneration = generation;
+				PublishedResources::Refresh();
+				Publish(a_state);
+				for (auto& client : a_state.clients)
+					MarkCurrent(a_state, client);
+				Rebuild(a_state, ~0u);
+			}
+		}
+
+		/** @brief A client with work at this run: its desc, its serial then, and whether its commit runs (active). */
+		struct RunClient
+		{
+			std::shared_ptr<const ClientDesc> desc;
+			std::uint64_t serial = 0;
+			bool active = false;
+		};
 	}
 
 	bool Run(const Point& a_point)
@@ -482,50 +626,78 @@ namespace FrameAnchors
 		auto& runtime = RenderGraphRuntime::Get();
 		if (!runtime.IsActive())
 			return false;
-		SelfTest::Ensure();
-		GraphResources::SelfTest::Ensure();
-		// The clients with work here this frame; none, no epoch.
-		std::vector<std::shared_ptr<const ClientDesc>> active;
-		for (const auto& client : state.clients)
-			if (HasPasses(*client, a_point.anchor) && (!client->active || client->active()))
-				active.push_back(client);
-		if (active.empty())
+		Service(state);
+		// The clients in this anchor's graph; the run happens when one is active or has a one-shot pass pending.
+		std::vector<RunClient> clients;
+		bool work = false;
+		for (const auto& client : state.clients) {
+			if (!InGraphs(*client.desc) || !HasPasses(*client.desc, a_point.anchor))
+				continue;
+			const bool active = !client.desc->active || client.desc->active();
+			work = work || active || HasPendingOnce(client, a_point.anchor);
+			clients.push_back({ client.desc, client.serial, active });
+		}
+		if (!work)
 			return false;
 		const auto segment = static_cast<Segment>(SegmentOf(a_point.anchor));
 		// The graph holds the upload whenever a registered client reads the shared constants, active or not.
-		const bool sharedConstants = UsesSharedConstants(state.clients, a_point.anchor);
+		std::vector<std::shared_ptr<const ClientDesc>> descs;
+		for (const auto& client : clients)
+			descs.push_back(client.desc);
+		const bool sharedConstants = UsesSharedConstants(descs, a_point.anchor);
+		std::uint64_t built = 0;
 		bool ran = false;
 		{
 			RenderGraphRuntime::EpochBodyScope body(segment);
 			ran = runtime.ExecuteEpoch(segment, [&](org::RenderGraph&) {
+				// The graph this run submits is built by now.
+				built = state.built[index].load(std::memory_order_acquire);
 				if (sharedConstants)
 					SharedConstants::Commit();
-				for (const auto& client : active)
-					if (client->commit)
-						client->commit(a_point);
+				// Every gate closed first: a run does work only where this run's commits open it.
+				for (const auto& client : clients)
+					for (const auto& gate : client.desc->gates)
+						if (gate)
+							gate->Close();
+				for (const auto& client : clients)
+					if (client.active && client.desc->commit)
+						client.desc->commit(a_point);
 			});
+		}
+		if (!ran) {
+			// The graph failed and stopped (ExecuteEpoch logged why): every client returns to its D3D11 path.
+			logger::error("[ORG] frame anchors: the {} epoch failed; {} clients return to D3D11", Name(a_point.anchor), state.clients.size());
+			auto failed = std::move(state.clients);
+			state.clients.clear();
+			Publish(state);
+			for (const auto& client : failed)
+				if (client.desc->onFailed)
+					client.desc->onFailed();
+			return false;
 		}
 		// An epoch must not be the last GPU work before a third-party Vulkan consumer (render-graph.md, "Hazard: external Vulkan
 		// work directly after a graph epoch"). After the late anchors an upscaler, frame generation or the present may follow.
-		if (ran && kInfo[index].late)
-			globals::features::upscaling.SeparateFromGraphEpochs();
-		if (ran) {
-			if (sharedConstants)
-				SharedConstants::CheckAfterRun();
-			SelfTest::AfterRun(a_point.anchor);
-			if (a_point.anchor == Anchor::DeferredPasses)
-				GraphResources::SelfTest::AfterRun();
-			return true;
+		if (kInfo[index].late && state.lateHook)
+			state.lateHook();
+		if (sharedConstants)
+			SharedConstants::CheckAfterRun();
+		// One-shot passes in the graph this run submitted have run: the next build leaves them out.
+		bool ranOnce = false;
+		for (auto& client : state.clients)
+			for (std::size_t i = 0; i < client.desc->passes.size(); ++i)
+				if (client.armed[i] && client.armed[i] <= built && client.desc->passes[i].anchor == a_point.anchor) {
+					client.armed[i] = 0;
+					ranOnce = true;
+				}
+		if (ranOnce) {
+			Publish(state);
+			Rebuild(state, 1u << index);
 		}
-		// The graph failed and stopped (ExecuteEpoch logged why): every client returns to its D3D11 path.
-		logger::error("[ORG] frame anchors: the {} epoch failed; {} clients return to D3D11", Name(a_point.anchor), state.clients.size());
-		auto clients = std::move(state.clients);
-		state.clients.clear();
-		Publish(state);
+		// Last: an executed callback may register, refresh or rearm.
 		for (const auto& client : clients)
-			if (client->onFailed)
-				client->onFailed();
-		return false;
+			if (client.active && client.desc->executed && client.serial <= built)
+				client.desc->executed(a_point);
+		return true;
 	}
 
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t a_target)
@@ -573,16 +745,26 @@ namespace FrameAnchors
 		return Import(a_target.texture, a_id, [&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeDepth(a_target, a_desc); });
 	}
 
+	void ReleaseImport(std::string_view a_id)
+	{
+		auto& state = Anchors();
+		const auto found = state.imports.find(a_id);
+		if (found == state.imports.end())
+			return;
+		// The graph resource views DXVK's image, whose memory the D3D11 texture owns: both go once the GPU is past every use,
+		// which the graph's in-stream epochs and their compute joins precede.
+		auto owner = std::make_shared<EngineImport>(std::move(found->second));
+		state.imports.erase(found);
+		Publish(state);
+		Rebuild(state, ~0u);
+		RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(owner));
+	}
+
 	void AddToFrame(std::vector<std::uint32_t>& a_epochs)
 	{
 		auto& state = Anchors();
 		if (!RenderGraphRuntime::EpochsEnabled())
 			return;
-		if (!state.frozen && SelfTest::Requested())
-			for (std::uint32_t i = 0; i < kAnchors; ++i)
-				state.reserved[i] = true;
-		if (!state.frozen && GraphResources::SelfTest::Requested())
-			state.reserved[IndexOf(Anchor::DeferredPasses)] = true;
 		state.frozen = true;
 		for (std::uint32_t i = 0; i < kAnchors; ++i) {
 			if (!state.reserved[i])
@@ -612,7 +794,7 @@ namespace FrameAnchors
 		for (std::uint32_t i = 0; i < kAnchors; ++i)
 			if (state.reserved[i])
 				reserved += fmt::format("{}{} (epoch {})", reserved.empty() ? "" : ", ", kInfo[i].name, EpochOfAnchor(static_cast<Anchor>(i)));
-		logger::info("[ORG] frame anchors with epochs: {}{}", reserved, SelfTest::Requested() ? " (CS_ORG_ANCHOR_SELFTEST)" : "");
+		logger::info("[ORG] frame anchors with epochs: {}", reserved);
 	}
 }
 
@@ -635,6 +817,9 @@ namespace FrameAnchors
 	std::shared_ptr<org::ExternalTextureResource> EngineCubemap(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*, ID3D11UnorderedAccessView*) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> ImportDepth(const RE::BSGraphics::DepthStencilData&, const std::string&) { return nullptr; }
+	void ReleaseImport(std::string_view) {}
+	void Rearm(std::string_view) {}
+	void SetLateEpochHook(std::function<void()>) {}
 	std::uint32_t SegmentOf(Anchor) { return 0; }
 	bool IsUnusedSegment(std::uint32_t) { return false; }
 	const SegmentNames* NamesOf(std::uint32_t) { return nullptr; }

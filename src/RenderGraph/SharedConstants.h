@@ -60,6 +60,9 @@ namespace SharedConstants
 	/** @brief Whether Ensure succeeded. */
 	bool Ready();
 
+	/** @brief Whether Ensure failed for good (the buffers could not be created): clients waiting for them never get them. */
+	bool Failed();
+
 	// What FrameAnchors asks of them.
 
 	/** @brief Registers the four buffers with an anchor's graph ("cs.shared.frame-buffer" and so on). */

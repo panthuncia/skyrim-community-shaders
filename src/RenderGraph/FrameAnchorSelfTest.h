@@ -12,9 +12,12 @@ namespace FrameAnchors::SelfTest
 	/** @brief Whether CS_ORG_ANCHOR_SELFTEST=1 is set. */
 	bool Requested();
 
-	/** @brief Once, at the first anchor's run with the runtime active: makes the test's programs and resources and registers its client. */
-	void Ensure();
+	/** @brief Before the render graph initializes: when requested, reserves every anchor. */
+	void Reserve();
 
-	/** @brief After an anchor's epoch was submitted: checks what the anchor's last completed run read back, and logs the first result. */
-	void AfterRun(Anchor a_anchor);
+	/**
+	 * @brief With the runtime active, once: when requested, makes the test's programs and resources and registers its client, an
+	 * ordinary one. Its executed callback checks what each anchor's last completed run read back, and logs the first result.
+	 */
+	void Setup();
 }

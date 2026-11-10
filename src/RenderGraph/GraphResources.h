@@ -218,17 +218,20 @@ namespace GraphResources
 	/**
 	 * @brief The twins' self-test (CS_ORG_GRAPHRES_SELFTEST=1): a compute pass at the DeferredPasses anchor writes an exported graph
 	 * texture, D3D11 copies it into a staging texture right after the epoch, and the value read back is logged once. Then the texture is
-	 * resized and checked again, which also releases the first one through ReleaseAfterD3D11. Render thread, from FrameAnchors.
+	 * resized and checked again, which also releases the first one through ReleaseAfterD3D11. Render thread.
 	 */
 	namespace SelfTest
 	{
-		/** @brief Whether CS_ORG_GRAPHRES_SELFTEST=1 is set (FrameAnchors reserves DeferredPasses for it). */
+		/** @brief Whether CS_ORG_GRAPHRES_SELFTEST=1 is set. */
 		bool Requested();
 
-		/** @brief At an anchor's run with the runtime active: once, makes the test's program and texture and registers its client. */
-		void Ensure();
+		/** @brief Before the render graph initializes: when requested, reserves DeferredPasses. */
+		void Reserve();
 
-		/** @brief After DeferredPasses' epoch was submitted: copies the texture through its export and checks the last copy. */
-		void AfterRun();
+		/**
+		 * @brief With the runtime active, once: when requested, makes the test's program and texture and registers its client, an
+		 * ordinary one. Its executed callback copies the texture through its export after each run and checks the last copy.
+		 */
+		void Setup();
 	}
 }

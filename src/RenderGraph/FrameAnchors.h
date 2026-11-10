@@ -19,6 +19,11 @@ namespace org
 	class RenderPass;
 }
 
+namespace RenderGraph
+{
+	class RunGate;
+}
+
 /**
  * @brief Named points in CS's frame where features attach render-graph passes: the frame anchors.
  *
@@ -96,6 +101,9 @@ namespace FrameAnchors
 	 *   own order. The graph still orders passes by what they declare: the key decides only between passes that do not depend on
 	 *   each other's resources.
 	 * - make: at each build of the anchor's graph, on the render thread: a new pass instance, or null to leave it out of that build.
+	 * - once: a one-shot pass (a clear, an upload, a fill). It is in the anchor's graph until one run with it was submitted, then
+	 *   the graph is built again without it; Rearm puts it back. The anchor runs while the pass is pending, active client or not.
+	 *   Its work must give the same result if it ran twice.
 	 */
 	struct PassDesc
 	{
@@ -105,6 +113,7 @@ namespace FrameAnchors
 		PassKind kind = PassKind::Compute;
 		PassQueue queue = PassQueue::Default;
 		std::function<std::shared_ptr<org::RenderPass>()> make;
+		bool once = false;
 	};
 
 	/**
@@ -120,7 +129,14 @@ namespace FrameAnchors
 	 *   a pass with nothing to do records nothing (its Prepare returns empty frame data).
 	 * - onFailed: the graph failed and stopped. The client is unregistered; it returns to its D3D11 path.
 	 * - sharedConstants: the client's passes read CS's shared constant buffers (SharedConstants.h). Each of its anchors' epochs
-	 *   then writes their values at the hook and uploads them before the anchor's first pass.
+	 *   then writes their values at the hook and uploads them before the anchor's first pass. Such a client may register before
+	 *   CS's first upload sized them: its passes join the graphs once the buffers can be made.
+	 * - gates: the client's run gates (RunGate.h). Every run of one of its anchors closes them before any commit, so its gated
+	 *   dispatches and draws do work only where this run's commit opened them.
+	 * - executed: after a run whose epoch was submitted with this registration's passes in its graph (built from this
+	 *   registration or a later Refresh) and whose commit ran: what that commit wrote is in a submitted execution, and every
+	 *   later GPU use of the client's resources is ordered after it. Render thread. The signal for work a client counts done
+	 *   once it ran (a regenerated table, a reset), in place of frame counts or flags set in Prepare.
 	 */
 	struct ClientDesc
 	{
@@ -131,6 +147,8 @@ namespace FrameAnchors
 		std::function<bool()> active;
 		std::function<void()> onFailed;
 		bool sharedConstants = false;
+		std::vector<std::shared_ptr<RenderGraph::RunGate>> gates;
+		std::function<void(const Point&)> executed;
 	};
 
 	/** @brief An anchor's name, as the logs and docs give it ("DeferredPasses"). */
@@ -147,9 +165,9 @@ namespace FrameAnchors
 
 	/**
 	 * @brief Registers (or replaces) a client. Render thread, with the runtime active. False, logged, when the runtime is not active,
-	 * a pass names an anchor without an epoch, a pass has no name or no make, a name repeats, or the client reads the shared
-	 * constants and they cannot be made. The anchors' graphs are built again
-	 * at their next execution.
+	 * a pass names an anchor without an epoch, a pass has no name or no make, or a name repeats. The anchors' graphs are built again
+	 * at their next execution. A client that reads the shared constants before CS's first upload is held until they can be made,
+	 * then joins the graphs; when they cannot be made at all, its onFailed is called.
 	 */
 	bool Register(ClientDesc a_client);
 
@@ -158,14 +176,25 @@ namespace FrameAnchors
 
 	/**
 	 * @brief The client's anchors' graphs built again at their next execution, with its passes and resources as they are then: after
-	 * the client replaced a resource it registers (a resize, GraphResources). Render thread. Nothing when the id is unknown.
+	 * the client replaced a resource it registers outside GraphResources. Render thread. Nothing when the id is unknown. A
+	 * GraphResources twin's Resize needs no call: the anchors see its generation at their next run and build again themselves.
 	 */
 	void Refresh(std::string_view a_id);
 
+	/** @brief The client's one-shot passes (PassDesc::once) pending again: each runs at its anchor's next run. Render thread. */
+	void Rearm(std::string_view a_id);
+
 	/**
-	 * @brief The hook: runs the anchor's epoch at this point of the D3D11 stream when it has an active client. After the late
-	 * anchors (PostProcessing, Upscale, Tonemap, FrameGeneration, Present, Overlay) it separates the epoch from external Vulkan work that may follow
-	 * (Upscaling::SeparateFromGraphEpochs; render-graph.md, "Hazard: external Vulkan work directly after a graph epoch").
+	 * @brief The hook run after every submitted epoch of a late anchor (PostProcessing, Upscale, Tonemap, FrameGeneration, Present,
+	 * Overlay, HDROutput, Capture): an upscaler, frame generation or the present may follow those directly. Upscaling installs its
+	 * separation (Upscaling::SeparateFromGraphEpochs; render-graph.md, "Hazard: external Vulkan work directly after a graph
+	 * epoch"). One hook; installing another replaces it.
+	 */
+	void SetLateEpochHook(std::function<void()> a_hook);
+
+	/**
+	 * @brief The hook: runs the anchor's epoch at this point of the D3D11 stream when it has an active client or a pending one-shot
+	 * pass. After the late anchors it runs the late-epoch hook (SetLateEpochHook).
 	 * @return Whether an epoch was submitted.
 	 */
 	bool Run(const Point& a_point);
@@ -205,6 +234,13 @@ namespace FrameAnchors
 	 */
 	std::shared_ptr<org::ExternalTextureResource> ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id);
 
+	/**
+	 * @brief Drops an import by its graph id ("cs.d3d11.<name>" for D3D11Texture, a_id for ImportDepth): the D3D11 texture is
+	 * released once D3D11's last use is done (ReleaseAfterD3D11) and every anchor graph is built again without it. For a feature
+	 * texture that is destroyed or replaced under another name. Render thread. Nothing when the id is unknown.
+	 */
+	void ReleaseImport(std::string_view a_id);
+
 	// What RenderGraphRuntime asks of the anchors.
 
 	/** @brief The anchor's segment (RenderGraphRuntime::Segment, as its value). */
@@ -226,7 +262,7 @@ namespace FrameAnchors
 	/**
 	 * @brief Initialize, for the host's epoch order and again for its async epochs: the reserved anchors' epochs inserted into
 	 * a_epochs (epoch ids, which are segment values) before the first epoch the frame runs after them. The first call freezes the
-	 * reservations; CS_ORG_ANCHOR_SELFTEST=1 reserves every anchor then.
+	 * reservations.
 	 */
 	void AddToFrame(std::vector<std::uint32_t>& a_epochs);
 

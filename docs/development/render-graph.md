@@ -314,8 +314,9 @@ stream order, on its own command buffer, outside any render pass. DCLF's CPU-dri
 -   **Teardown and resize.** `Reset`, the destructor and `Resize` release the D3D11 views and resource first. Then
     `RenderGraphRuntime::ReleaseAfterD3D11` holds the graph resource until an event query issued after that release completes
     (checked every frame). DXVK keeps its own objects alive for in-flight work, but not the image's memory, which the graph owns.
-    After a `Resize` the owner calls `FrameAnchors::Refresh(id)`: its anchors' graphs are built again with the new resource. A pass
-    reads `Graph()` when it is made, never across builds.
+    A `Resize` bumps the twins' resize generation (`Resource::ResizeGeneration`). At their next run the anchors see it, build
+    their graphs again with the new resource, and `PublishedResources::Refresh` publishes it again under the twin's id: the owner
+    calls nothing. A pass reads `Graph()` when it is made, never across builds.
 
 ```cpp
 // A transient output written at DeferredPasses and bound by engine draws as a PS SRV until P5.
@@ -328,9 +329,8 @@ FrameAnchors::Register({ .id = "cs.myfeature",
 // Later in the frame, the D3D11 reader:
 ID3D11ShaderResourceView* srv = out.SRV();
 context->PSSetShaderResources(45, 1, &srv);
-// At a resolution change:
-if (out.Resize(width, height))
-	FrameAnchors::Refresh("cs.myfeature");
+// At a resolution change: the anchors build again and the published id follows by themselves.
+out.Resize(width, height);
 ```
 
 `CS_ORG_GRAPHRES_SELFTEST=1` proves the path: a compute pass at DeferredPasses writes an exported texture, D3D11 copies it into
@@ -350,14 +350,15 @@ colour passes reading a feature's output), the producer publishes it (`src/Rende
     contents across executions, and the reader's epoch is another execution. Publish refuses an aliasable twin.
 -   A reader in an epoch earlier in the frame than the producer's reads the previous frame's contents.
 -   Publishing a new resource under an id (the first time, or after a `Resize`) adds the host extension
-    `cs.org.published-resources` again, which rebuilds every graph once.
+    `cs.org.published-resources` again, which rebuilds every graph once. After a twin's `Resize` the anchors do it
+    (`PublishedResources::Refresh`); the producer need not publish again.
 -   `Withdraw(id)` when the producer leaves its ORG path (its `onFailed`, a setting that turns it off). Readers then go back to D3D11.
     The resource stays registered until the next `Publish` under that id, because a graph built earlier may still declare it.
 -   `ShaderResourceIndex(id, index)` gives the bindless index of the whole-resource SRV (every mip; a cube's `TextureCube` view, a 2D
     array's full array view), false while it is not published. That index is what a frame record holds for a bindless reader.
 
 ```cpp
-// The producer, after creating its output (and after every Resize):
+// The producer, after creating its output:
 out = std::make_unique<GraphResources::Texture2D>(desc, "MyFeature::Output",
 	GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
 PublishedResources::Publish(*out);  // id "MyFeature::Output"
@@ -476,7 +477,8 @@ Each anchor's ordering rule is in [org-extension-api-notes.md](./org-extension-a
 1.  Before the graph initializes (`Load` or `PostPostLoad`, when its ORG path is on): `FrameAnchors::Reserve(anchor)`.
 2.  Once the runtime is active (`SetupResources`): make its programs and resources, then `FrameAnchors::Register(client)`. A
     client is an id, its passes (name, anchor, order key, kind, and a `make` that returns a new `TypedRenderGraphPass` at each
-    build), and optional callbacks: `registerResources`, `commit` (latch writes inside the epoch), `active` and `onFailed`.
+    build), and optional callbacks: `registerResources`, `commit` (latch writes inside the epoch), `active`, `onFailed` and
+    `executed`, and its run gates (below, "Per-run work").
 3.  The passes declare what they read and write as any graph pass does. Engine targets come from
     `FrameAnchors::EngineTarget(RE::RENDER_TARGET)` and `EngineDepth(...)`: DXVK images imported once (`DxvkImageImport`) and
     registered with every anchor graph as `cs.engine.target.<n>` and `cs.engine.depth.<n>`. Cubemap targets come from
@@ -486,7 +488,9 @@ Each anchor's ordering rule is in [org-extension-api-notes.md](./org-extension-a
 4.  When the graph fails, `onFailed` is called and the client is removed; the feature returns to its D3D11 path.
 5.  CS's shared constant buffers (FrameBuffer, SharedData, FeatureData, Permutation): set `.sharedConstants = true`. The anchor's
     epoch then writes their values into a `LatchBlock` at the hook (the bytes D3D11 sees there: CS's cached `PerFrame` mapping and
-    State's last uploads) and copies them into four CBV buffers (`cs.shared.*`) before the anchor's passes. A pass declares them
+    State's last uploads) and copies them into four CBV buffers (`cs.shared.*`) before the anchor's passes. Such a client may
+    register before CS's first upload has sized the buffers: it is held, and joins the graphs at the first run after they can
+    be made (or gets `onFailed` if they never can). A pass declares them
     with `SharedConstants::Declare` and pushes `SharedConstants::Index` as the shader's `SHARED` entry. `CS_ORG_SHARED_CONSTANTS_CHECK=1`
     reads the D3D11 buffers back after each such epoch and logs whether the bytes match (a debug switch: it stalls).
 6.  Textures D3D11 features produce (not engine targets) can be read in place, untracked, through
@@ -527,13 +531,63 @@ FrameAnchors::Register({ .id = "cs.myfeature",
     `kGameFramesInFlight` slots. Size `LatchBlock`s from `GraphHost::FrameSlots()` after the runtime is up, as LLF does. An anchor that
     runs several times a frame (`ReflectionsPrepass`, at each cubemap render) uses its ring that much faster, and may wait for a
     slot when the CPU is far ahead of the GPU.
--   **The hazard rule.** After the late anchors (`PostProcessing`, `Upscale`, `Tonemap`, `FrameGeneration`, `Present`, `Overlay`, `HDROutput`, `Capture`) have run an epoch, `Run` calls
-    `Upscaling::SeparateFromGraphEpochs()`. An upscaler, frame generation or the present can follow these, and none may run directly
-    behind a graph epoch (above, "Hazard: external Vulkan work directly after a graph epoch"). The earlier anchors are followed by
-    the engine's own draws.
+-   **The hazard rule.** After the late anchors (`PostProcessing`, `Upscale`, `Tonemap`, `FrameGeneration`, `Present`, `Overlay`,
+    `HDROutput`, `Capture`) have run an epoch, `Run` calls the late-epoch hook, which Upscaling installs in `PostPostLoad`
+    (`FrameAnchors::SetLateEpochHook`, `Upscaling::SeparateFromGraphEpochs`). An upscaler, frame generation or the present can
+    follow these, and none may run directly behind a graph epoch (above, "Hazard: external Vulkan work directly after a graph
+    epoch"). The earlier anchors are followed by the engine's own draws. The anchors' core calls no feature and no self-test:
+    the self-tests reserve and register as ordinary clients (`RenderGraphRuntime::Initialize`), and check their runs from
+    `executed`.
+-   **Imports.** An import is kept while its D3D11 texture stays the same, and replaced when it changes. A feature texture that
+    is destroyed or renamed is dropped with `FrameAnchors::ReleaseImport(id)` (`cs.d3d11.<name>`): the anchors build again
+    without it, and the texture goes through `ReleaseAfterD3D11`.
 -   **Not shared with DCLF.** DCLF keeps its schedule (`Schedule/Frame.cpp`, `Api/Passes.h`): its passes depend on its scene
     revisions and recorded shapes. Anchors are the thin layer for every other feature. DCLF's imports and the anchors' imports of
     the same engine image are separate graph resources; that is safe because they never share an epoch.
+
+### The setup template
+
+Every port sets up the same way:
+
+```cpp
+// PostPostLoad, when the ORG path is requested: the frame's epochs are fixed when the graph initializes.
+static void Reserve() { if (Requested()) FrameAnchors::Reserve(FrameAnchors::Anchor::DeferredPasses); }
+
+// SetupResources: programs, resources and the client. False keeps the D3D11 path; a_onFailed runs if the graph fails later.
+bool Setup(rhi::Device a_device, std::function<void()> a_onFailed);
+
+// Every frame, before the D3D11 path would run: the graph path only while the runtime is still up.
+bool IsActive() const { return registered && RenderGraphRuntime::Get().IsActive(); }
+```
+
+-   `Register` may be called before CS's first constant upload, also by a client that reads the shared constants (above).
+-   A resize needs no call: the anchors follow the twins' resize generation.
+-   The client's `onFailed` clears what `IsActive` reads, withdraws what it published, and calls `a_onFailed`.
+
+### Per-run work, one-shot passes and the executed signal
+
+Three primitives replace the per-port workarounds (mismatch counters pushed into `Revision`, `prepared` atomics set in `Prepare`,
+fill and clear frame counts). A pass's revision stays a function of what it was made with, so its recording is kept.
+
+-   **Run gates** (`src/RenderGraph/RunGate.h`). A dispatch or draw that runs on some runs of its anchor only records
+    `RunGate::Dispatch` (`ComputeProgram::DispatchIndirect`) or a `RasterProgram::DrawDesc` with `indirect` set to the gate's
+    latch and offset. The group or vertex counts are in a latch block, so a zero there does no work. List the gate in
+    `ClientDesc::gates`: each run of the client's anchors closes it before any commit, and the commit opens the entries this run
+    does (`OpenDispatch`, `OpenDraw`). An inactive client, or a commit that opens nothing, therefore costs a kept recording with
+    no work, and never repeats an older run's counts. A copy has no indirect form: one that runs on some runs only is a raster
+    copy through a gate, or a separate one-shot pass.
+-   **One-shot passes** (`PassDesc::once`). A clear, an upload or a fill. The pass is in its anchor's graph until one run with it
+    has been submitted, then the graph is built again without it. `FrameAnchors::Rearm(id)` makes the client's one-shot passes
+    pending again (a reset, a resize that needs a clear). The anchor runs while one is pending, even with no active client. Its
+    work must give the same result if it ran twice. The helpers in "Pass helpers" below make the clear and the upload.
+-   **The executed signal** (`ClientDesc::executed`). Called on the render thread after a run whose epoch was submitted with this
+    registration's passes in its graph (built from this registration, or from a later `Refresh` or resize) and whose commit ran.
+    What that commit wrote is then in a submitted execution, and every later GPU use of the client's resources is ordered after
+    it. Use it for work that counts as done once it ran (a regenerated table, a history reset), instead of counting frames.
+
+How the anchors know: every `Publish` of the clients has a serial, each client remembers the serial that first held its passes as
+they are now, and an anchor graph's build records the serial it was made from. A run's commit reads that serial, so it compares
+two numbers instead of watching passes prepare.
 
 ## Raster programs
 

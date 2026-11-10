@@ -30,6 +30,8 @@ namespace FrameAnchors::SelfTest
 {
 	namespace
 	{
+		void Check(Anchor a_anchor);
+
 		constexpr const char* kShader = "RenderGraph/AnchorSelfTest.hlsl";
 		constexpr const char* kClientId = "cs.org.anchor-selftest";
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
@@ -193,7 +195,7 @@ namespace FrameAnchors::SelfTest
 			std::uint32_t anchor;
 		};
 
-		// The copy pass: the anchor's two words into the host copy, which AfterRun reads.
+		// The copy pass: the anchor's two words into the host copy, which Check reads.
 		struct ReadbackBindings
 		{
 			org::ResourceBindingToken output;
@@ -299,6 +301,7 @@ namespace FrameAnchors::SelfTest
 				Test().resources.reset();
 				logger::error("[ORG] anchor self-test: stopped, the render graph failed");
 			};
+			client.executed = [](const Point& a_point) { Check(a_point.anchor); };
 			return client;
 		}
 	}
@@ -308,7 +311,16 @@ namespace FrameAnchors::SelfTest
 		return Switches::On("CS_ORG_ANCHOR_SELFTEST");
 	}
 
-	void Ensure()
+	void Reserve()
+	{
+		if (!Requested())
+			return;
+		for (std::uint32_t i = 0; i < kAnchors; ++i)
+			FrameAnchors::Reserve(static_cast<Anchor>(i));
+		logger::info("[ORG] anchor self-test: every anchor reserved (CS_ORG_ANCHOR_SELFTEST)");
+	}
+
+	void Setup()
 	{
 		auto& test = Test();
 		if (!Requested() || std::exchange(test.attempted, true))
@@ -328,42 +340,45 @@ namespace FrameAnchors::SelfTest
 			test.resources->main ? "made" : "unavailable");
 	}
 
-	void AfterRun(Anchor a_anchor)
+	namespace
 	{
-		auto& test = Test();
-		const auto anchor = static_cast<std::uint32_t>(a_anchor);
-		if (!test.resources || anchor >= kAnchors || test.reported[anchor])
-			return;
-		++test.runs[anchor];
-		auto readback = test.resources->readback->GetAPIResource();
-		void* mapped = nullptr;
-		readback.Map(&mapped);
-		if (!mapped)
-			return;
-		// The value is the same every run: a copy the GPU is still writing reads the same word.
-		std::uint32_t words[kOutputWords]{};
-		std::memcpy(words, mapped, sizeof(words));
-		readback.Unmap(0, 0);
-		const std::uint32_t expected = ValueOf(anchor) + 1;
-		const std::uint32_t got = words[anchor];
-		if (got == expected) {
-			test.reported[anchor] = true;
-			test.passed |= 1u << anchor;
-			// The first value an anchor returns may come from the main menu (no scene in kMAIN yet, and the menu's frames may run off
-			// the render thread): the line says so, so a 0 there is not read as a graph that sees no scene.
-			logger::info("[ORG] anchor self-test: {} OK after {} runs (wrote 0x{:08X}, read back 0x{:08X}; kMAIN(0,0).r {}; game frame {}{})", Name(a_anchor),
-				test.runs[anchor], ValueOf(anchor), got,
-				test.resources->main ? fmt::format("{:.4f}", std::bit_cast<float>(words[kMainWord + anchor])) : std::string("not read"), globals::state->frameCount,
-				globals::state->IsMainOrLoadingMenuOpen() ? ", main or loading menu open" : "");
-			if (test.passed == (1u << kAnchors) - 1)
-				logger::info("[ORG] anchor self-test: every anchor OK");
-		} else if (got != 0) {
-			test.reported[anchor] = true;
-			logger::error("[ORG] anchor self-test: {} MISMATCH: read back 0x{:08X}, expected 0x{:08X} ({})", Name(a_anchor), got, expected,
-				got == 1 ? "the read ran before the draw" : "wrong value");
-		} else if (test.runs[anchor] == kPatience) {
-			test.reported[anchor] = true;
-			logger::warn("[ORG] anchor self-test: {} read back nothing after {} runs", Name(a_anchor), kPatience);
+		void Check(Anchor a_anchor)
+		{
+			auto& test = Test();
+			const auto anchor = static_cast<std::uint32_t>(a_anchor);
+			if (!test.resources || anchor >= kAnchors || test.reported[anchor])
+				return;
+			++test.runs[anchor];
+			auto readback = test.resources->readback->GetAPIResource();
+			void* mapped = nullptr;
+			readback.Map(&mapped);
+			if (!mapped)
+				return;
+			// The value is the same every run: a copy the GPU is still writing reads the same word.
+			std::uint32_t words[kOutputWords]{};
+			std::memcpy(words, mapped, sizeof(words));
+			readback.Unmap(0, 0);
+			const std::uint32_t expected = ValueOf(anchor) + 1;
+			const std::uint32_t got = words[anchor];
+			if (got == expected) {
+				test.reported[anchor] = true;
+				test.passed |= 1u << anchor;
+				// The first value an anchor returns may come from the main menu (no scene in kMAIN yet, and the menu's frames may run off
+				// the render thread): the line says so, so a 0 there is not read as a graph that sees no scene.
+				logger::info("[ORG] anchor self-test: {} OK after {} runs (wrote 0x{:08X}, read back 0x{:08X}; kMAIN(0,0).r {}; game frame {}{})", Name(a_anchor),
+					test.runs[anchor], ValueOf(anchor), got,
+					test.resources->main ? fmt::format("{:.4f}", std::bit_cast<float>(words[kMainWord + anchor])) : std::string("not read"), globals::state->frameCount,
+					globals::state->IsMainOrLoadingMenuOpen() ? ", main or loading menu open" : "");
+				if (test.passed == (1u << kAnchors) - 1)
+					logger::info("[ORG] anchor self-test: every anchor OK");
+			} else if (got != 0) {
+				test.reported[anchor] = true;
+				logger::error("[ORG] anchor self-test: {} MISMATCH: read back 0x{:08X}, expected 0x{:08X} ({})", Name(a_anchor), got, expected,
+					got == 1 ? "the read ran before the draw" : "wrong value");
+			} else if (test.runs[anchor] == kPatience) {
+				test.reported[anchor] = true;
+				logger::warn("[ORG] anchor self-test: {} read back nothing after {} runs", Name(a_anchor), kPatience);
+			}
 		}
 	}
 }

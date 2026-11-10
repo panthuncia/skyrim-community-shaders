@@ -17,6 +17,7 @@
 #	include <Resources/Buffers/Buffer.h>
 
 #	include <array>
+#	include <atomic>
 #	include <cstring>
 #	include <span>
 #	include <vector>
@@ -186,7 +187,10 @@ namespace SharedConstants
 		auto* host = RenderGraphRuntime::Get().Host();
 		auto* cs = globals::state;
 		if (!host || !RenderGraphRuntime::Get().IsActive() || !cs || !cs->featureDataBytes) {
-			logger::warn("[ORG] Shared constants: not available yet (render graph inactive, or FeatureData not sized)");
+			// Asked again at each anchor run until CS's first upload sizes FeatureData: said once.
+			static std::atomic_flag s_logged;
+			if (!s_logged.test_and_set())
+				logger::info("[ORG] Shared constants: not available yet (render graph inactive, or FeatureData not sized); their clients wait");
 			return false;
 		}
 		try {
@@ -225,6 +229,11 @@ namespace SharedConstants
 	bool Ready()
 	{
 		return static_cast<bool>(Shared().buffers);
+	}
+
+	bool Failed()
+	{
+		return Shared().failed;
 	}
 
 	void Register(org::RenderGraph& a_graph)

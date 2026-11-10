@@ -11,7 +11,9 @@
 #include "Globals.h"
 #include "Profiler.h"
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/FrameAnchorSelfTest.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/GraphResources.h"
 #include "RenderGraph/Engine/GuestDevice.h"
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/Switches.h"
@@ -1746,6 +1748,9 @@ bool RenderGraphRuntime::Initialize()
 		else if (EpochsEnabled())
 			desc.epochOrder = { EpochOf(Segment::ShadowView), EpochOf(Segment::ZPrepass), EpochOf(Segment::Reflection), EpochOf(Segment::FirstPersonDepth),
 				EpochOf(Segment::SkyOcclusion), EpochOf(Segment::LightCulling), EpochOf(Segment::MainOpaque), EpochOf(Segment::Forward), EpochOf(Segment::FirstPerson) };
+		// The self-tests reserve their anchors as any client does, before the reservations freeze.
+		FrameAnchors::SelfTest::Reserve();
+		GraphResources::SelfTest::Reserve();
 		// The frame anchors' reserved epochs, where the frame reaches them (FrameAnchors.h).
 		FrameAnchors::AddToFrame(desc.epochOrder);
 		if (!desc.epochOrder.empty())
@@ -1898,6 +1903,9 @@ bool RenderGraphRuntime::Initialize()
 			impl->getResourceInfo ? "available" : "missing", impl->getResourceInfos ? " (batched)" : " (not batched)",
 			impl->trackResources ? ", pinless (relocations followed)" : ", pinned");
 	}
+	// The self-tests register as ordinary clients once the runtime is up (nothing when their switches are off).
+	FrameAnchors::SelfTest::Setup();
+	GraphResources::SelfTest::Setup();
 	return true;
 }
 
