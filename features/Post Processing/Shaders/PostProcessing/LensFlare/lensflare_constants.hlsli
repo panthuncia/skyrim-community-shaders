@@ -6,7 +6,8 @@
 //
 // D3D11 reads the cbuffer at b1, declared exactly as before. Under ORG (ORG/ORGLensFlare.cpp) the same fields are the LATCH
 // entry LensFlareFrame, and each field is copied into a static of the same name, so the shader code reads them as it does
-// under D3D11. The fields are listed once: M(type, name) for a value, A(type, name, count) for an array.
+// under D3D11 (ORG_GLOBAL_LATCH_BEGIN). The fields are listed once: M(type, name) for a value, A(type, name, count) for an
+// array.
 #define LENS_FLARE_CB_FIELDS(M, A)    \
 	M(float, OutputWidth)             \
 	M(float, OutputHeight)            \
@@ -37,20 +38,11 @@
 	A(float4, GhostScalesPacked, 2)   \
 	A(float4, GhostKernelScalesPacked, 2)
 
-#define LENS_FLARE_CB_MEMBER(T, N) T N;
-#define LENS_FLARE_CB_ARRAY(T, N, C) T N[C];
-
-#if defined(CS_ORG_BINDLESS)
-struct LensFlareConstants
-{
-	LENS_FLARE_CB_FIELDS(LENS_FLARE_CB_MEMBER, LENS_FLARE_CB_ARRAY)
-};
-ORG_RESOURCE(LATCH, LensFlareConstants, LensFlareFrame, 1)
-#	define LENS_FLARE_CB_STATIC(T, N) static T N = LensFlareFrame.N;
-#	define LENS_FLARE_CB_STATIC_ARRAY(T, N, C) static T N[C] = LensFlareFrame.N;
-LENS_FLARE_CB_FIELDS(LENS_FLARE_CB_STATIC, LENS_FLARE_CB_STATIC_ARRAY)
-#else
-cbuffer LensFlareConstants : register(b1){ LENS_FLARE_CB_FIELDS(LENS_FLARE_CB_MEMBER, LENS_FLARE_CB_ARRAY) };
-#endif
+ORG_GLOBAL_LATCH_BEGIN(LensFlareConstants, LensFlareConstants, 1)
+LENS_FLARE_CB_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(LensFlareConstants, LensFlareFrame, 1)
+#define ORG_GLOBAL_LATCH LensFlareFrame
+LENS_FLARE_CB_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
 
 #endif  // __LENSFLARE_CONSTANTS_HLSLI__

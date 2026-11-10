@@ -113,7 +113,7 @@
 // Dual-target (Common/OrgResources.hlsli). D3D11 (DoF::Draw) binds the registers below and reads DoFCB (DoF::DoFCB) at b1,
 // declared exactly as before. Under ORG (ORG/ORGDoF.cpp) the same fields are the LATCH entry DoFFrame (struct DoFConstants,
 // with one ORG-only word after them), and each field is copied into a static of the same name, so the passes read them as they
-// do under D3D11. The fields are listed once, in DOF_CB_FIELDS. Two things differ under ORG only:
+// do under D3D11 (ORG_GLOBAL_LATCH_BEGIN). The fields are listed once, in DOF_CB_FIELDS. Two things differ under ORG only:
 // - BokehSamples is a region of the chain's latch (a raw buffer and a byte offset), which the chain fills each frame with the
 //   procedural or the custom shape's table. LoadBokehSample reads it on both paths.
 // - CS_UpdateFocus updates the focus history in place: it reads the last focus from RWFocus, the history texture that
@@ -179,17 +179,7 @@
 	M(float, ProceduralBokehAreaScale)                                                                \
 	M(float, SensorWidthMM)
 
-#define DOF_CB_MEMBER(T, N) T N;
-
-#if defined(CS_ORG_BINDLESS)
-struct DoFConstants
-{
-	DOF_CB_FIELDS(DOF_CB_MEMBER)
-	uint OrgResetFocus;  // 1: the focus history holds nothing yet
-	uint3 OrgPad;
-};
 ORG_PUSH_BLOCK(DOF_RESOURCES(ORG_HANDLE) ORG_HANDLE(LATCH, DoFConstants, DoFFrame, 1) ORG_HANDLE(EXTERN_LATCH, float4, BokehSamples, 19))
-#endif
 
 #include "Common/Color.hlsli"
 #include "Common/Game.hlsli"
@@ -202,10 +192,18 @@ ORG_PUSH_BLOCK(DOF_RESOURCES(ORG_HANDLE) ORG_HANDLE(LATCH, DoFConstants, DoFFram
 
 DOF_RESOURCES(ORG_RESOURCE)
 
+ORG_GLOBAL_LATCH_BEGIN(DoFConstants, DoFCB, 1)
+DOF_CB_FIELDS(ORG_GLOBAL_MEMBER)
 #if defined(CS_ORG_BINDLESS)
-ORG_RESOURCE(LATCH, DoFConstants, DoFFrame, 1)
-#	define DOF_CB_STATIC(T, N) static T N = DoFFrame.N;
-DOF_CB_FIELDS(DOF_CB_STATIC)
+uint OrgResetFocus;  // 1: the focus history holds nothing yet
+uint3 OrgPad;
+#endif
+ORG_GLOBAL_LATCH_END(DoFConstants, DoFFrame, 1)
+#define ORG_GLOBAL_LATCH DoFFrame
+DOF_CB_FIELDS(ORG_GLOBAL_STATIC)
+#undef ORG_GLOBAL_LATCH
+
+#if defined(CS_ORG_BINDLESS)
 // The sample table (see the D3D11 declaration below), 16 bytes a sample, at the latch offset the push block gives.
 static ByteAddressBuffer OrgBokehSamples = ResourceDescriptorHeap[OrgHandle_BokehSamples];
 float4 LoadBokehSample(uint a_index) { return OrgBokehSamples.Load<float4>(OrgOffset_BokehSamples + a_index * 16); }
@@ -215,8 +213,6 @@ float4 LoadBokehSample(uint a_index) { return OrgBokehSamples.Load<float4>(OrgOf
 // but its intersection distance still belongs to the same canonical gather ring.
 StructuredBuffer<float4> BokehSamples : register(t19);
 float4 LoadBokehSample(uint a_index) { return BokehSamples[a_index]; }
-
-cbuffer DoFCB : register(b1){ DOF_CB_FIELDS(DOF_CB_MEMBER) };
 #endif
 
 // One CoC tile covers exactly one gather thread group: 8x8 half res pixels == 16x16 full res pixels.
