@@ -694,13 +694,13 @@ struct ORGExponentialHeightFog::Impl
 	{
 		if (!pending)
 			return;
-		const auto& fixed = *a_state.fixed;
-		fixed.latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, *pending);
+		const auto& shape = *a_state.fixed;
+		shape.latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, *pending);
 		pending.reset();
 		const auto open = [&](const Volume& a_volume, bool a_far) {
 			for (std::uint32_t step = 0; step < static_cast<std::uint32_t>(Step::Count); ++step) {
 				const auto groups = a_volume.Groups(static_cast<Step>(step));
-				fixed.gate->OpenDispatch(GateEntry(a_far, static_cast<Step>(step)), groups[0], groups[1], groups[2]);
+				shape.gate->OpenDispatch(GateEntry(a_far, static_cast<Step>(step)), groups[0], groups[1], groups[2]);
 			}
 		};
 		open(a_state.nearVolume, false);
