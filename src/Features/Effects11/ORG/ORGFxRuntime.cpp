@@ -1508,8 +1508,17 @@ void ORGFxRuntime::Prepare(std::uint32_t a_input, std::uint32_t a_output)
 	if (!impl)
 		impl = std::make_unique<Impl>();
 	impl->activeNow = false;
-	if (impl->failed)
+	if (impl->failed) {
+		// A failed commit leaves the client registered; its passes must not run on.
+		if (impl->registered) {
+			FrameAnchors::Unregister(kClientId);
+			impl->registered = false;
+			impl->frame.reset();
+			impl->running.reset();
+			impl->shapeKey.clear();
+		}
 		return;
+	}
 	// Nothing may leave the engine's tonemap call: an error returns Effects11 to FX11 for the session.
 	try {
 		impl->PrepareFrame(a_input, a_output);
