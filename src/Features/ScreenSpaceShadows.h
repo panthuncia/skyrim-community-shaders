@@ -62,10 +62,16 @@ public:
 	ConstantBuffer* raymarchCB = nullptr;
 	ID3D11ComputeShader* raymarchCS = nullptr;
 
+	// Made by EnsureShadowTexture when the D3D11 path first runs; the ORG path uses a graph texture instead.
 	Texture2D* screenSpaceShadowsTexture = nullptr;
+	D3D11_TEXTURE2D_DESC shadowTextureDesc{};
+	D3D11_SHADER_RESOURCE_VIEW_DESC shadowTextureSrvDesc{};
 
-	/** @brief Creates the raymarch constant buffer, point border sampler, and shadow output texture. */
+	/** @brief Creates the raymarch constant buffer and point border sampler, and sets up the ORG path when it is asked for. */
 	virtual void SetupResources() override;
+
+	/** @brief Creates the D3D11 shadow texture the first time the D3D11 path needs it. */
+	void EnsureShadowTexture();
 
 	/** @brief Draws the ImGui settings UI for screen-space shadow configuration. */
 	virtual void DrawSettings() override;

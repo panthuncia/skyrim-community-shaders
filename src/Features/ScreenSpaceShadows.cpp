@@ -3,7 +3,6 @@
 #include "Features/ScreenSpaceShadows/ORGScreenSpaceShadows.h"
 #include "Features/TerrainBlending.h"
 #include "I18n/I18n.h"
-#include "RenderGraph/FrameAnchors.h"
 #include "State.h"
 #include "Utils/D3D.h"
 
@@ -233,8 +232,7 @@ void ScreenSpaceShadows::DrawShadows()
 
 void ScreenSpaceShadows::PostPostLoad()
 {
-	if (ORGScreenSpaceShadows::Requested())
-		FrameAnchors::Reserve(FrameAnchors::Anchor::Prepass);
+	ORGScreenSpaceShadows::Reserve();
 }
 
 void ScreenSpaceShadows::Prepass()
@@ -246,6 +244,8 @@ void ScreenSpaceShadows::Prepass()
 		context->PSSetShaderResources(45, 1, &view);
 		return;
 	}
+
+	EnsureShadowTexture();
 
 	float white[4] = { 1, 1, 1, 1 };
 	context->ClearUnorderedAccessViewFloat(screenSpaceShadowsTexture->uav.get(), white);
@@ -279,7 +279,7 @@ bool ScreenSpaceShadows::HasShaderDefine(RE::BSShader::Type)
 
 void ScreenSpaceShadows::SetupResources()
 {
-	raymarchCB = new ConstantBuffer(ConstantBufferDesc<RaymarchCB>(), "SSS::RaymarchCB");
+	raymarchCB = new ConstantBuffer(ConstantBufferDesc<RaymarchCB>(), "ScreenSpaceShadows::RaymarchCB");
 
 	{
 		auto device = globals::d3d::device;
@@ -297,38 +297,39 @@ void ScreenSpaceShadows::SetupResources()
 		samplerDesc.BorderColor[2] = 1.0f;
 		samplerDesc.BorderColor[3] = 1.0f;
 		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, &pointBorderSampler));
-		Util::SetResourceName(pointBorderSampler, "SSS::PointBorderSampler");
+		Util::SetResourceName(pointBorderSampler, "ScreenSpaceShadows::PointBorderSampler");
 	}
 
 	{
 		auto renderer = globals::game::renderer;
 		auto shadowMask = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kSHADOW_MASK];
 
-		D3D11_TEXTURE2D_DESC texDesc{};
-		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-
-		shadowMask.texture->GetDesc(&texDesc);
-		shadowMask.SRV->GetDesc(&srvDesc);
+		shadowMask.texture->GetDesc(&shadowTextureDesc);
+		shadowMask.SRV->GetDesc(&shadowTextureSrvDesc);
 
 		// Store normal front-facing visibility and the reversed depth-offset
 		// visibility used by back-facing SSS/transmission receivers.
-		texDesc.Format = DXGI_FORMAT_R8G8_UNORM;
-		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		shadowTextureDesc.Format = DXGI_FORMAT_R8G8_UNORM;
+		shadowTextureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 
-		srvDesc.Format = texDesc.Format;
+		shadowTextureSrvDesc.Format = shadowTextureDesc.Format;
 
-		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {
-			.Format = texDesc.Format,
-			.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D,
-			.Texture2D = { .MipSlice = 0 }
-		};
-		screenSpaceShadowsTexture = new Texture2D(texDesc, "SSS::ShadowTexture");
-		screenSpaceShadowsTexture->CreateSRV(srvDesc);
-		screenSpaceShadowsTexture->CreateUAV(uavDesc);
-
-		// The ORG path's texture has the same description. The D3D11 one stays for the fallback.
-		if (ORGScreenSpaceShadows::Requested())
-			ORGScreenSpaceShadows::Get().Setup(texDesc);
+		// The ORG path's texture has the same description. The D3D11 one is made only when the D3D11 path runs.
+		ORGScreenSpaceShadows::Get().Setup(shadowTextureDesc, {});
 	}
+}
+
+void ScreenSpaceShadows::EnsureShadowTexture()
+{
+	if (screenSpaceShadowsTexture)
+		return;
+	D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {
+		.Format = shadowTextureDesc.Format,
+		.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D,
+		.Texture2D = { .MipSlice = 0 }
+	};
+	screenSpaceShadowsTexture = new Texture2D(shadowTextureDesc, "ScreenSpaceShadows::ShadowTexture");
+	screenSpaceShadowsTexture->CreateSRV(shadowTextureSrvDesc);
+	screenSpaceShadowsTexture->CreateUAV(uavDesc);
 }
 #undef I18N_KEY_PREFIX
