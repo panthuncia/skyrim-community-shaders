@@ -5,19 +5,11 @@
 
 #include "Features/CloudShadows/ORGCloudShadows.h"
 
-#include <cstring>
-
-namespace
-{
-	constexpr const char* kEnvSwitch = "CS_ORG_CLOUD_SHADOWS";
-}
+#include "RenderGraph/Switches.h"
 
 bool ORGCloudShadows::Requested()
 {
-	static const bool requested = [] {
-		char value[8]{};
-		return GetEnvironmentVariableA(kEnvSwitch, value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}();
+	static const bool requested = Switches::On("CS_ORG_CLOUD_SHADOWS");
 	return requested;
 }
 
@@ -31,40 +23,55 @@ ORGCloudShadows& ORGCloudShadows::Get()
 
 #	include "Features/CloudShadows.h"
 #	include "Globals.h"
+#	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
+#	include "RenderGraph/ShaderBindings.h"
 
+#	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/ExternalTextureResource.h>
+#	include <Resources/GloballyIndexedResource.h>
 
 #	include <algorithm>
-#	include <atomic>
-#	include <utility>
+#	include <array>
+#	include <span>
 #	include <vector>
 
 namespace
 {
 	constexpr const char* kClientId = "cs.cloud-shadows";
+	constexpr const char* kShader = "CloudShadows/OcclusionCopyCS.hlsl";
 	constexpr int kLastLayer = CloudShadows::kMaxCloudLayers - 1;
-	// No value prepared yet: differs from both copy states.
-	constexpr std::uint8_t kNotPrepared = 0xFF;
+	constexpr std::uint32_t kFaces = 6;
+	// OcclusionCopyCS's numthreads.
+	constexpr std::uint32_t kGroupSize = 8;
+
+	// OcclusionCopyCS's push block (OCCLUSION_COPY_RESOURCES), in list order.
+	struct OcclusionCopyBlock
+	{
+		std::array<ShaderBindings::Handle, kFaces> faces;
+		ShaderBindings::Handle occlusion;
+	};
 }
 
 struct ORGCloudShadows::Impl
 {
+	std::shared_ptr<const ComputeProgram> program;
+	std::shared_ptr<RenderGraph::RunGate> gate;
 	std::unique_ptr<GraphResources::Texture2D> occlusion;
 	std::shared_ptr<org::Resource> lastLayer;
 	UINT width = 0;
 	UINT height = 0;
 	UINT mips = 0;
+	std::function<void()> onFailed;
 
-	// Render thread: ReflectionsPrepass queued this frame's copy.
+	// Render thread: ReflectionsPrepass queued this frame's copy; the commit of the next run opens the gate and clears it.
 	bool pending = false;
-	// Published at the hook (the client's active): whether this run of the anchor copies.
-	std::atomic<bool> copyNow = false;
 };
 
 namespace
@@ -73,17 +80,16 @@ namespace
 
 	struct CopyBindings
 	{
-		org::ResourceBindingToken from, to;
+		std::vector<org::DeclaredViewToken> faces;  // face + mip * 6: one face of one mip of the last layer
+		std::vector<org::DeclaredViewToken> mips;   // one mip of the occlusion cubemap, all faces
 	};
 
 	struct CopyFrame
 	{
-		UINT width = 0;
-		UINT height = 0;
-		UINT mips = 0;
+		std::shared_ptr<const Impl> impl;
 	};
 
-	/** @brief The last layer into the occlusion cubemap, every face and mip, as the D3D11 path's CopyResource. */
+	/** @brief The last layer into the occlusion cubemap, every face and mip, as the D3D11 path's CopyResource; one gated dispatch a mip. */
 	class OcclusionCopyPass final : public org::TypedRenderGraphPass<OcclusionCopyPass, CopyFrame, CopyBindings>
 	{
 	public:
@@ -94,44 +100,34 @@ namespace
 		CopyBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			return { a_builder.CopySource(from), a_builder.CopyDestination(to) };
+			// The import's single face views (a cube imported with views per face and mip), and the cubemap's per mip array views.
+			std::vector<org::SrvView> faceViews;
+			std::vector<org::UavView> mipViews;
+			for (std::uint32_t mip = 0; mip < impl->mips; ++mip) {
+				for (std::uint32_t face = 0; face < kFaces; ++face)
+					faceViews.push_back({ .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArray), .mip = mip, .slice = face });
+				mipViews.push_back({ .variant = static_cast<std::uint32_t>(org::UAVViewType::Texture2DArrayFull), .mip = mip });
+			}
+			CopyBindings bindings;
+			bindings.faces = a_builder.ShaderResource(from, std::span<const org::SrvView>(faceViews)).views;
+			bindings.mips = a_builder.UnorderedAccess(to, std::span<const org::UavView>(mipViews)).views;
+			return bindings;
 		}
 
-		// The copy state it was prepared with, while it is the one published. A ticket prepared before the hook published another
-		// one takes a value no later check repeats: it is prepared again.
-		void Revision(std::vector<std::uint64_t>& a_out) const
-		{
-			const auto live = static_cast<std::uint8_t>(impl->copyNow.load(std::memory_order_acquire) ? 1 : 0);
-			const std::uint8_t used = prepared.load(std::memory_order_acquire);
-			a_out.push_back(used);
-			if (used != live)
-				a_out.push_back(mismatch.fetch_add(1, std::memory_order_relaxed) + 1);
-		}
+		// The recording depends only on what the pass was made with.
+		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(impl.get())); }
 
-		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&)
-		{
-			const bool copy = impl->copyNow.load(std::memory_order_acquire);
-			prepared.store(static_cast<std::uint8_t>(copy ? 1 : 0), std::memory_order_release);
-			if (!copy)
-				return {};
-			return { impl->width, impl->height, impl->mips };
-		}
+		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { impl }; }
 
 		static void Record(const CopyBindings& a_bindings, const CopyFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.width)
-				return;
-			auto& commands = a_recording.Commands();
-			const auto sourceImage = a_recording.Resolve(a_bindings.from).GetHandle();
-			const auto targetImage = a_recording.Resolve(a_bindings.to).GetHandle();
-			for (std::uint32_t face = 0; face < 6; ++face) {
-				for (std::uint32_t mip = 0; mip < a_frame.mips; ++mip) {
-					const std::uint32_t width = (std::max)(a_frame.width >> mip, 1u);
-					const std::uint32_t height = (std::max)(a_frame.height >> mip, 1u);
-					const rhi::TextureCopyRegion target{ .texture = targetImage, .mip = mip, .arraySlice = face, .width = width, .height = height };
-					const rhi::TextureCopyRegion source{ .texture = sourceImage, .mip = mip, .arraySlice = face, .width = width, .height = height };
-					commands.CopyTextureRegion(target, source);
-				}
+			const auto& impl = *a_frame.impl;
+			for (std::uint32_t mip = 0; mip < impl.mips; ++mip) {
+				OcclusionCopyBlock block{};
+				for (std::uint32_t face = 0; face < kFaces; ++face)
+					block.faces[face] = a_recording.Index(a_bindings.faces[mip * kFaces + face]);
+				block.occlusion = a_recording.Index(a_bindings.mips[mip]);
+				impl.gate->Dispatch(a_recording, *impl.program, ShaderBindings::Data(block), mip);
 			}
 		}
 
@@ -139,23 +135,18 @@ namespace
 		std::shared_ptr<const Impl> impl;
 		std::shared_ptr<org::Resource> from;
 		std::shared_ptr<org::Resource> to;
-		std::atomic<std::uint8_t> prepared = kNotPrepared;
-		mutable std::atomic<std::uint64_t> mismatch = 0;
 	};
 
-	/** @brief Binds the D3D11 occlusion copy at t25 again, filled from the last layer, before the export goes. */
-	void ReturnToD3D11()
+	/** @brief The client's commit: the copy, every mip, on the run that follows the frame's first reflections prepass. */
+	void Commit(Impl& a_impl)
 	{
-		auto& cloudShadows = globals::features::cloudShadows;
-		auto* copy = cloudShadows.texCubemapCloudOccCopy;
-		auto* lastLayer = cloudShadows.texCloudShadowLayers[kLastLayer];
-		if (!copy || !lastLayer)
+		if (!std::exchange(a_impl.pending, false))
 			return;
-		auto* context = globals::d3d::context;
-		context->CopyResource(copy->resource.get(), lastLayer->resource.get());
-		ID3D11ShaderResourceView* srv = copy->srv.get();
-		context->PSSetShaderResources(25, 1, &srv);
-		context->CSSetShaderResources(25, 1, &srv);
+		for (std::uint32_t mip = 0; mip < a_impl.mips; ++mip) {
+			const std::uint32_t width = (std::max)(a_impl.width >> mip, 1u);
+			const std::uint32_t height = (std::max)(a_impl.height >> mip, 1u);
+			a_impl.gate->OpenDispatch(mip, (width + kGroupSize - 1) / kGroupSize, (height + kGroupSize - 1) / kGroupSize, kFaces);
+		}
 	}
 }
 
@@ -165,33 +156,37 @@ void ORGCloudShadows::Reserve()
 		logger::warn("[ORG] Cloud Shadows stays on D3D11: the ReflectionsPrepass anchor could not be reserved");
 }
 
-bool ORGCloudShadows::Active() const
+bool ORGCloudShadows::IsActive() const
 {
-	return impl && !failed && RenderGraphRuntime::Get().IsActive();
+	return impl && RenderGraphRuntime::Get().IsActive();
 }
 
 ID3D11ShaderResourceView* ORGCloudShadows::OcclusionSRV() const
 {
-	return Active() ? impl->occlusion->SRV() : nullptr;
+	return IsActive() ? impl->occlusion->SRV() : nullptr;
 }
 
-void ORGCloudShadows::Fail()
+void ORGCloudShadows::Stop()
 {
-	failed = true;
 	FrameAnchors::Unregister(kClientId);
 	PublishedResources::Withdraw(kOcclusionId);
-	if (impl)
-		ReturnToD3D11();
 	impl.reset();
 }
 
-bool ORGCloudShadows::Setup()
+bool ORGCloudShadows::Setup(std::function<void()> a_onFailed)
 {
+	impl.reset();
+	if (!Requested())
+		return false;
+	auto* host = RenderGraphRuntime::Get().Host();
+	if (!host || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::ReflectionsPrepass)) {
+		logger::warn("[ORG] Cloud Shadows stays on D3D11: the render graph or its ReflectionsPrepass anchor is not available");
+		return false;
+	}
 	auto& cloudShadows = globals::features::cloudShadows;
 	auto* lastLayer = cloudShadows.texCloudShadowLayers[kLastLayer];
 	if (!lastLayer || !lastLayer->srv) {
-		logger::error("[ORG] Cloud Shadows: its layer textures are missing; back to D3D11");
-		Fail();
+		logger::error("[ORG] Cloud Shadows: its layer textures are missing; it stays on D3D11");
 		return false;
 	}
 
@@ -201,8 +196,20 @@ bool ORGCloudShadows::Setup()
 	next->width = layerDesc.Width;
 	next->height = layerDesc.Height;
 	next->mips = layerDesc.MipLevels;
+	next->onFailed = std::move(a_onFailed);
 
-	// The last layer's shape (the reflections cubemap's, in R8), sampled only.
+	next->program = ComputeProgram::Load(host->Device(), { .source = kShader, .constantWords = ShaderBindings::Words<OcclusionCopyBlock>() });
+	if (!next->program) {
+		logger::error("[ORG] Cloud Shadows: {} could not be compiled; it stays on D3D11", kShader);
+		return false;
+	}
+	next->gate = RenderGraph::RunGate::Create("CloudShadows::OcclusionCopyGate", next->mips);
+	if (!next->gate) {
+		logger::error("[ORG] Cloud Shadows: its run gate could not be created; it stays on D3D11");
+		return false;
+	}
+
+	// The last layer's shape (the reflections cubemap's, in R8), written by the copy's dispatches and sampled.
 	const D3D11_TEXTURE2D_DESC desc{ .Width = layerDesc.Width,
 		.Height = layerDesc.Height,
 		.MipLevels = layerDesc.MipLevels,
@@ -210,22 +217,20 @@ bool ORGCloudShadows::Setup()
 		.Format = layerDesc.Format,
 		.SampleDesc = { .Count = 1 },
 		.Usage = D3D11_USAGE_DEFAULT,
-		.BindFlags = D3D11_BIND_SHADER_RESOURCE,
+		.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
 		.MiscFlags = layerDesc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE };
 	// Engine draws read it at t25 and t26 (and Drawcall Limit Fix through that view) until they are ported. A frame without the
 	// full sky keeps the last copy, so it lives across frames.
 	next->occlusion = std::make_unique<GraphResources::Texture2D>(desc, std::string(kOcclusionId),
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
 	if (!*next->occlusion || !next->occlusion->SRV()) {
-		logger::error("[ORG] Cloud Shadows: the {}x{} occlusion cubemap could not be created; back to D3D11", desc.Width, desc.Height);
-		Fail();
+		logger::error("[ORG] Cloud Shadows: the {}x{} occlusion cubemap could not be created; it stays on D3D11", desc.Width, desc.Height);
 		return false;
 	}
-	// Engine draws and D3D11 copies write the layers, so the last one stays a D3D11 texture.
+	// Engine draws and D3D11 copies write the layers, so the last one stays a D3D11 texture. It lives as long as the feature.
 	next->lastLayer = FrameAnchors::D3D11Texture("CloudShadows::Layer[31]", lastLayer->resource.get(), lastLayer->srv.get(), nullptr);
 	if (!next->lastLayer) {
-		logger::error("[ORG] Cloud Shadows: the last cloud layer could not be imported; back to D3D11");
-		Fail();
+		logger::error("[ORG] Cloud Shadows: the last cloud layer could not be imported; it stays on D3D11");
 		return false;
 	}
 
@@ -234,46 +239,40 @@ bool ORGCloudShadows::Setup()
 	client.passes.push_back({ .name = std::string(kClientId) + ".occlusion-copy",
 		.anchor = FrameAnchors::Anchor::ReflectionsPrepass,
 		.order = 0,
-		.kind = FrameAnchors::PassKind::Copy,
+		.kind = FrameAnchors::PassKind::Compute,
 		.make = [next]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<OcclusionCopyPass>(next); } });
 	client.registerResources = [next](org::RenderGraph& a_graph) { next->occlusion->Register(a_graph); };
-	// The anchor runs at every cubemap render; only the frame's first copies, as on D3D11.
-	client.active = [next] {
-		const bool copy = std::exchange(next->pending, false);
-		next->copyNow.store(copy, std::memory_order_release);
-		return copy;
-	};
+	client.commit = [next](const FrameAnchors::Point&) { Commit(*next); };
+	// The anchor runs at every cubemap render; only the run after the frame's first reflections prepass copies, as on D3D11.
+	client.active = [next] { return next->pending; };
+	client.gates = { next->gate };
 	client.onFailed = [] {
 		logger::error("[ORG] Cloud Shadows: the render graph failed; back to D3D11");
 		auto& self = Get();
 		PublishedResources::Withdraw(kOcclusionId);
-		ReturnToD3D11();
-		self.failed = true;
+		auto onFailed = self.impl ? std::move(self.impl->onFailed) : nullptr;
 		self.impl.reset();
+		if (onFailed)
+			onFailed();
 	};
+	impl = next;
 	if (!FrameAnchors::Register(std::move(client))) {
-		Fail();
+		impl.reset();
 		return false;
 	}
 	// Drawcall Limit Fix's colour passes read it by name, ordered after the copy (Integrations/CloudShadows).
 	if (!PublishedResources::Publish(*next->occlusion)) {
-		logger::error("[ORG] Cloud Shadows: the occlusion cubemap could not be published; back to D3D11");
-		Fail();
+		logger::error("[ORG] Cloud Shadows: the occlusion cubemap could not be published; it stays on D3D11");
+		Stop();
 		return false;
 	}
-	impl = std::move(next);
 	logger::info("[ORG] Cloud Shadows: the occlusion copy runs on the render graph ({}x{}, {} mips)", desc.Width, desc.Height, desc.MipLevels);
 	return true;
 }
 
 bool ORGCloudShadows::QueueOcclusionCopy()
 {
-	if (!Requested() || failed)
-		return false;
-	auto& runtime = RenderGraphRuntime::Get();
-	if (!runtime.IsActive() || !runtime.Host() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::ReflectionsPrepass))
-		return false;
-	if (!impl && !Setup())
+	if (!IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::ReflectionsPrepass))
 		return false;
 	impl->pending = true;
 	return true;
@@ -288,10 +287,10 @@ struct ORGCloudShadows::Impl
 {};
 
 void ORGCloudShadows::Reserve() {}
-bool ORGCloudShadows::Active() const { return false; }
+bool ORGCloudShadows::Setup(std::function<void()>) { return false; }
+bool ORGCloudShadows::IsActive() const { return false; }
 ID3D11ShaderResourceView* ORGCloudShadows::OcclusionSRV() const { return nullptr; }
-void ORGCloudShadows::Fail() { failed = true; }
-bool ORGCloudShadows::Setup() { return false; }
+void ORGCloudShadows::Stop() {}
 bool ORGCloudShadows::QueueOcclusionCopy() { return false; }
 ORGCloudShadows::~ORGCloudShadows() = default;
 

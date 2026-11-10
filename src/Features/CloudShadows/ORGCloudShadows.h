@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d11.h>
+#include <functional>
 #include <memory>
 #include <string_view>
 
@@ -17,13 +18,17 @@
  * - At the reflections prepass, the last layer is copied into the occlusion cubemap that every reader samples. This copy is the
  *   graph pass here.
  *
+ * The ReflectionsPrepass anchor runs at every cubemap render, and the copy happens only on the frame's first, as on D3D11. A copy
+ * has no indirect form, so the pass is a compute copy (OcclusionCopyCS, one dispatch a mip) through a run gate: the commit of the
+ * run that copies opens it, and every other run dispatches no groups. The recording stays the same.
+ *
  * Resources:
  * - The occlusion cubemap: a graph texture named "CloudShadows::Occlusion", kept across frames. It exports a D3D11 SRV, which the
  *   feature binds at t25 (engine pixel shaders, D3D11 compute) and t26 (cloud self shadowing), and which Drawcall Limit Fix reads as
  *   its frame texture, until those readers are ported. Graph readers (Exponential Height Fog) read it by name.
  * - The last layer: Cloud Shadows' D3D11 texture, imported (FrameAnchors::D3D11Texture).
  *
- * On any failure it stops for good and Active() turns false: the feature then copies on D3D11 again.
+ * On any failure it stops for good and IsActive() turns false: the feature then copies on D3D11 again.
  *
  * Everything here runs on the render thread. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
@@ -42,14 +47,22 @@ public:
 	static ORGCloudShadows& Get();
 
 	/**
+	 * @brief At SetupResources, after Cloud Shadows made its layers, with the runtime active: makes the program and the occlusion
+	 * cubemap, imports the last layer, registers the anchor client and publishes the cubemap.
+	 * @param a_onFailed Called once if the graph fails later; the feature copies and binds its D3D11 occlusion again.
+	 * @return Whether the copy runs on the render graph; false keeps it on D3D11.
+	 */
+	bool Setup(std::function<void()> a_onFailed);
+
+	/** @brief Whether the occlusion cubemap is the graph's and its pass is registered, with the runtime still up. */
+	bool IsActive() const;
+
+	/**
 	 * @brief Queues this frame's copy of the last layer into the occlusion cubemap, which the ReflectionsPrepass anchor runs right
-	 * after the features' reflection prepasses. Makes the texture and registers the client the first time.
-	 * @return False when the copy stays on D3D11 (not requested, failed, or the runtime is not up).
+	 * after the features' reflection prepasses.
+	 * @return False when the copy stays on D3D11 (not set up, failed, or the runtime is not up).
 	 */
 	bool QueueOcclusionCopy();
-
-	/** @brief Whether the occlusion cubemap is the graph's and its pass is registered. */
-	bool Active() const;
 
 	/** @brief The occlusion cubemap's exported view (t25, t26); null when inactive. */
 	ID3D11ShaderResourceView* OcclusionSRV() const;
@@ -62,12 +75,8 @@ public:
 private:
 	ORGCloudShadows() = default;
 
-	/** @brief Makes the texture, imports the last layer and registers the client. False, logged, on failure. */
-	bool Setup();
-
 	/** @brief Stops the ORG path for good. */
-	void Fail();
+	void Stop();
 
 	std::shared_ptr<Impl> impl;
-	bool failed = false;
 };

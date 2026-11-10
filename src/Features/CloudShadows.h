@@ -50,6 +50,7 @@ public:
 
 	Texture2D* texCloudShadowLayers[kMaxCloudLayers] = {};
 	ID3D11RenderTargetView* cloudShadowLayerRTVs[kMaxCloudLayers][6] = {};
+	// The D3D11 occlusion copy: null on the ORG path (OcclusionCopy makes it).
 	Texture2D* texCubemapCloudOccCopy = nullptr;
 
 	UINT cubemapMipLevels = 1;
@@ -98,10 +99,17 @@ public:
 	/** @brief Binds the cloud occlusion cubemap as a shader resource for the early prepass. */
 	virtual void EarlyPrepass() override;
 
-	/** @brief The cloud occlusion cubemap's view (t25, t26): the render graph's export on the ORG path, else the D3D11 copy. */
+	/**
+	 * @brief The cloud occlusion cubemap's view (t25, t26): the render graph's export on the ORG path, else the D3D11 copy. Null
+	 * before either exists.
+	 */
 	ID3D11ShaderResourceView* OcclusionSRV() const;
-	/** @brief With CS_CLOUD_READBACK=1, logs each face's mean of the last layer and of a_occlusion every 250 frames. */
-	void DebugReadback(ID3D11ShaderResourceView* a_occlusion) const;
+
+	/** @brief The D3D11 occlusion copy, made the first time the D3D11 path needs it (filled from the first layer then). */
+	Texture2D* OcclusionCopy();
+
+	/** @brief The render graph failed: the D3D11 copy is filled from the last layer and bound at t25 again. */
+	void ReturnToD3D11();
 
 	/** @brief Installs the BSSkyShader hooks and reserves the ORG path's anchor after all plugins have loaded. */
 	virtual void PostPostLoad() override;
