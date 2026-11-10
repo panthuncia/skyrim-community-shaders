@@ -309,6 +309,7 @@ void TerrainBlending::ClearShaderCache()
 		depthBlendShader->Release();
 		depthBlendShader = nullptr;
 	}
+	ORGTerrainBlending::Get().ClearShaderCache();
 }
 
 void TerrainBlending::Hooks::Main_RenderDepth::thunk(bool a1, bool a2)
