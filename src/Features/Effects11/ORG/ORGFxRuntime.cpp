@@ -11,6 +11,17 @@ namespace
 {
 	constexpr const char* kEnvSwitch = "CS_ORG_FX";
 	constexpr const char* kReadbackSwitch = "CS_ORG_FX_READBACK";
+	constexpr const char* kInputSwitch = "CS_ORG_FX_INPUT";
+
+	/** @brief CS_ORG_FX_INPUT=d3d11: the tonemap input imported as a D3D11 texture (FrameAnchors::D3D11Texture), a diagnostic. */
+	bool InputFromD3D11()
+	{
+		static const bool requested = [] {
+			char value[16]{};
+			return GetEnvironmentVariableA(kInputSwitch, value, sizeof(value)) && _stricmp(value, "d3d11") == 0;
+		}();
+		return requested;
+	}
 }
 
 bool ORGFxRuntime::ReadbackRequested()
@@ -47,6 +58,7 @@ ORGFxRuntime& ORGFxRuntime::Get()
 #	include "Features/Effects11/TextureManager.h"
 #	include "Globals.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/DxvkOrgInterop.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RasterProgram.h"
@@ -868,6 +880,9 @@ struct ORGFxRuntime::Impl
 	std::uint32_t nextReadback = 600;  // CS_ORG_FX_READBACK: the ran frame whose plan carries the snapshots
 	bool readbackNow = false;          // this frame's commit ran a plan with snapshots: AfterRun reads them
 	bool bindingsLogged = false;
+	std::string lastInputCheck;  // the last logged import and DXVK image of the tonemap input
+	ID3D11Texture2D* checkedTexture = nullptr;
+	const org::Resource* checkedImport = nullptr;
 	std::vector<std::vector<std::uint8_t>> images = std::vector<std::vector<std::uint8_t>>(kEffects);
 
 	FxEffect& EffectOf(Fx a_fx) { return effects[static_cast<std::size_t>(a_fx)]; }
@@ -1468,7 +1483,36 @@ struct ORGFxRuntime::Impl
 		{
 			std::vector<Step> steps;
 			std::vector<std::string> names;
+			// A copy of a_target into an exported texture of its format and size, after the steps so far.
+			auto snapshotOf = [&](const Res& a_target, const std::string& a_step) {
+				const auto it = targets.find(a_target.get());
+				if (it == targets.end() || it->second.format == DXGI_FORMAT_UNKNOWN || !it->second.width) {
+					logger::warn("[ORG] Effects11 readback: step {} writes {}, whose format or size is unknown; not read back", a_step, NameOf(a_target));
+					return;
+				}
+				const auto& info = it->second;
+				const D3D11_TEXTURE2D_DESC desc{ .Width = info.width,
+					.Height = info.height,
+					.MipLevels = 1,
+					.ArraySize = 1,
+					.Format = info.format,
+					.SampleDesc = { .Count = 1 },
+					.Usage = D3D11_USAGE_DEFAULT,
+					.BindFlags = D3D11_BIND_SHADER_RESOURCE };
+				auto snapshot = std::make_unique<GraphResources::Texture2D>(desc, fmt::format("Effects11::Snapshot{:03}", frame->snapshots.size()),
+					GraphResources::Options{ .lifetime = Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV });
+				if (!*snapshot || !snapshot->D3D11()) {
+					logger::warn("[ORG] Effects11 readback: no snapshot texture for step {}", a_step);
+					return;
+				}
+				steps.push_back(CopySpec{ fmt::format("Effects11::Snapshot {}", a_step), a_target, snapshot->Graph(), info.width, info.height });
+				names.push_back(fmt::format("snapshot-{}", frame->snapshots.size()));
+				frame->snapshots.push_back({ a_step, info.name, info.format, std::move(snapshot) });
+			};
 			for (std::size_t i = 0; i < frame->steps.size(); ++i) {
+				// The engine's input as the graph sees it, before anything reads it.
+				if (frame->stepNames[i] == "copy-input" || frame->stepNames[i] == "Effects11::CopyInput")
+					snapshotOf(inputs.input, "before-copy-input");
 				Res target = std::visit(
 					[](const auto& a_step) -> Res {
 						using T = std::decay_t<decltype(a_step)>;
@@ -1487,29 +1531,7 @@ struct ORGFxRuntime::Impl
 				names.push_back(frame->stepNames[i]);
 				if (clear || !target)
 					continue;
-				const auto it = targets.find(target.get());
-				if (it == targets.end() || it->second.format == DXGI_FORMAT_UNKNOWN || !it->second.width) {
-					logger::warn("[ORG] Effects11 readback: step {} writes {}, whose format or size is unknown; not read back", names.back(), NameOf(target));
-					continue;
-				}
-				const auto& info = it->second;
-				const D3D11_TEXTURE2D_DESC desc{ .Width = info.width,
-					.Height = info.height,
-					.MipLevels = 1,
-					.ArraySize = 1,
-					.Format = info.format,
-					.SampleDesc = { .Count = 1 },
-					.Usage = D3D11_USAGE_DEFAULT,
-					.BindFlags = D3D11_BIND_SHADER_RESOURCE };
-				auto snapshot = std::make_unique<GraphResources::Texture2D>(desc, fmt::format("Effects11::Snapshot{:03}", frame->snapshots.size()),
-					GraphResources::Options{ .lifetime = Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV });
-				if (!*snapshot || !snapshot->D3D11()) {
-					logger::warn("[ORG] Effects11 readback: no snapshot texture for step {}", names.back());
-					continue;
-				}
-				steps.push_back(CopySpec{ fmt::format("Effects11::Snapshot {}", names.back()), target, snapshot->Graph(), info.width, info.height });
-				names.push_back(fmt::format("snapshot-{}", frame->snapshots.size()));
-				frame->snapshots.push_back({ frame->stepNames[i], info.name, info.format, std::move(snapshot) });
+				snapshotOf(target, frame->stepNames[i]);
 			}
 			frame->steps = std::move(steps);
 			frame->stepNames = std::move(names);
@@ -1686,6 +1708,31 @@ struct ORGFxRuntime::Impl
 		}
 	}
 
+	/**
+	 * @brief Diagnostic: the VkImage the input's graph import wraps against the one DXVK reports for the D3D11 texture now. Asks DXVK
+	 * (DescribeResource, which synchronizes with its worker) when the import or texture changes and on readback frames; logs a change.
+	 */
+	void CheckInputImage(std::uint32_t a_target, ID3D11Texture2D* a_texture, const Res& a_import, bool a_readbackFrame)
+	{
+		if (!a_readbackFrame && a_texture == checkedTexture && a_import.get() == checkedImport)
+			return;
+		checkedTexture = a_texture;
+		checkedImport = a_import.get();
+		const VkImage imported = a_import ? rhi::vulkan::get_resource(a_import->GetAPIResource()) : VK_NULL_HANDLE;
+		DxvkOrgInteropResourceInfo info{};
+		const bool described = RenderGraphRuntime::Get().DescribeResource(a_texture, info) && info.kind == DXVK_ORG_INTEROP_RESOURCE_IMAGE;
+		const auto line = fmt::format("render target {} ({}): D3D11 texture {:#x}, graph import {:#x} wraps VkImage {:#x}; DXVK now {} VkImage {:#x} (layout {}, format {}, {}x{})",
+			a_target, InputFromD3D11() ? "D3D11Texture import" : "EngineTarget import", reinterpret_cast<std::uintptr_t>(a_texture),
+			reinterpret_cast<std::uintptr_t>(a_import.get()), reinterpret_cast<std::uintptr_t>(imported), described ? "reports" : "cannot describe",
+			described ? reinterpret_cast<std::uintptr_t>(info.image.image) : 0, described ? static_cast<int>(info.image.layout) : -1,
+			described ? static_cast<int>(info.image.format) : -1, described ? info.image.extent.width : 0, described ? info.image.extent.height : 0);
+		if (line == lastInputCheck)
+			return;
+		lastInputCheck = line;
+		const bool same = described && imported == info.image.image;
+		logger::info("[ORG] Effects11 input check: {}{}", line, same ? "" : ": DIFFERENT");
+	}
+
 	/** @brief After the epoch that ran a plan with snapshots: each step's target, read back through D3D11. */
 	void ReadSnapshots()
 	{
@@ -1849,7 +1896,8 @@ void ORGFxRuntime::Impl::PrepareFrame(std::uint32_t a_input, std::uint32_t a_out
 	if (!self.BuildCsPrograms(host->Device()))
 		return self.Inactive("Effects11's own shaders (colour correction, downsample, sun mask) could not be built for the render graph");
 
-	inputs.input = FrameAnchors::EngineTarget(a_input);
+	inputs.input = InputFromD3D11() ? FrameAnchors::D3D11Texture(fmt::format("effects11.input.{}", a_input), input.texture, input.SRV, nullptr) :
+	                                  FrameAnchors::EngineTarget(a_input);
 	inputs.depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN));
 	inputs.output = FrameAnchors::EngineTarget(a_output);
 	if (!inputs.input || !inputs.depth || !inputs.output)
@@ -1882,6 +1930,8 @@ void ORGFxRuntime::Impl::PrepareFrame(std::uint32_t a_input, std::uint32_t a_out
 		inputs.inputHeight = inputDesc.Height;
 	}
 	inputs.snapshots = ORGFxRuntime::ReadbackRequested() && self.ranCount >= self.nextReadback;
+	if (ORGFxRuntime::ReadbackRequested() || InputFromD3D11())
+		self.CheckInputImage(a_input, input.texture, inputs.input, inputs.snapshots);
 	inputs.outputWidth = outputDesc.Width;
 	inputs.outputHeight = outputDesc.Height;
 	if (inputs.outputFormat == rhi::Format::Unknown)
