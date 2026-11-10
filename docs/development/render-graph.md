@@ -520,8 +520,10 @@ they are ported.
     `DepthReadWrite`), then calls `Draw` at record time with the declared views, load ops and clear values, the viewport, and the
     constants. The viewport is the render area, so a mip's size is set there.
 -   **Hot reload.** As for compute programs: registered with the pipeline registry with both sources as dependencies.
--   **Not covered yet:** the blend factor and sample mask that CODBloom's upsample uses (`D3D11_BLEND_BLEND_FACTOR`), which wait
-    for P0.2. A viewport smaller than the render area, or a separate scissor, waits for P0.4.
+-   **Blend factor.** A kept recording fixes the blend constants, so a factor that follows a setting cannot be one. The ORG
+    COD Bloom upsample, which D3D11 blends by `D3D11_BLEND_BLEND_FACTOR`, returns the factor in alpha and blends by `SrcAlpha`
+    with alpha masked out of the write (`ORG/ORGCODBloom.cpp`).
+-   **Not covered yet:** a viewport smaller than the render area, or a separate scissor, waits for P0.4.
 
 ## ImGui on the graph
 

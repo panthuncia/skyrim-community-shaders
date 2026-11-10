@@ -785,3 +785,25 @@ Keys used so far:
 - **Where it fits:** CS guards those sections with `__HLSL_ENABLE_16_BIT` as well. A plugin API's program build would
   need a per-program option for 16-bit types (which changes `half` everywhere in that program) rather than a global flag.
 - **Found by:** P3 W3, Post Processing (2026-11-09).
+
+### A blend factor that changes without a new recording
+
+- **Need:** a blend whose factor follows a setting (COD Bloom scales each mip by its blend weight with
+  `D3D11_BLEND_BLEND_FACTOR`), in a recording the graph keeps across frames.
+- **Who:** CS's Post Processing bloom; any port whose D3D11 path calls `OMSetBlendState` with a changing factor.
+- **Where it fits:** the blend constants are dynamic state recorded with the draw, so a kept recording fixes them, and a
+  setting in the build key rebuilds the whole chain on every slider step. The bloom upsample returns the weight in alpha
+  under ORG and blends the destination by `SrcAlpha`, with alpha masked out of the write. That works when the pixel
+  stage's alpha is free. A framework answer would be blend constants read from a latch at submission, or a
+  `RasterProgram` option that sets them from a buffer the commit writes.
+- **Found by:** P3 W3, Post Processing COD Bloom (2026-11-09).
+
+### Per-mip views in a chain helper
+
+- **Need:** passes down and up one texture's mip chain, each reading one mip and writing another of the same texture.
+- **Who:** CS's Post Processing bloom (9 mips); any other mip pyramid of the chain still to port.
+- **Where it fits:** ORG declares a subresource range per use (`Subresources(resource, Mip(m, 1))` with
+  `SrvView`/`RtvView{ .mip }`), so one pass may read mip i and render to mip i + 1. The chain's `Image::Mip(m)` carries the
+  mip through `Bind::Srv` and `FullscreenDraw::target`, and a draw's default viewport is then that mip's size. A published
+  `Image` keeps its mip, so its reader binds that mip's view without knowing the chain.
+- **Found by:** P3 W3, Post Processing COD Bloom (2026-11-09).
