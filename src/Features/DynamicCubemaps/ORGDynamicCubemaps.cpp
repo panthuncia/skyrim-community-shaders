@@ -7,17 +7,7 @@
 
 #include "Features/DynamicCubemaps.h"
 #include "Globals.h"
-
-#include <cstring>
-
-namespace
-{
-	bool EnvironmentFlag(const char* a_name)
-	{
-		char value[8]{};
-		return GetEnvironmentVariableA(a_name, value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}
-}
+#include "RenderGraph/Switches.h"
 
 ORGDynamicCubemaps& ORGDynamicCubemaps::Get()
 {
@@ -27,7 +17,7 @@ ORGDynamicCubemaps& ORGDynamicCubemaps::Get()
 
 bool ORGDynamicCubemaps::Requested()
 {
-	static const bool requested = EnvironmentFlag("CS_ORG_DYNAMIC_CUBEMAPS");
+	static const bool requested = Switches::On("CS_ORG_DYNAMIC_CUBEMAPS");
 	return requested;
 }
 
@@ -41,7 +31,6 @@ bool ORGDynamicCubemaps::Requested()
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
-#	include "Utils/D3D.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
@@ -80,8 +69,6 @@ namespace
 	constexpr std::uint32_t kFaces = 6;
 	// After Subsurface Scattering's passes (199-202) at DeferredPasses.
 	constexpr std::int32_t kOrder = 300;
-	// Frames AfterUpdate waits for the inputs before the cubemaps return to D3D11.
-	constexpr std::uint32_t kRegisterAttempts = 600;
 
 	using ShaderBindings::Handle;
 	using Groups = GraphPasses::DispatchGroups;
@@ -145,14 +132,8 @@ namespace
 
 	constexpr std::uint32_t GroupsOffset(std::size_t a_fieldOffset, std::uint32_t a_index) { return static_cast<std::uint32_t>(a_fieldOffset) + a_index * sizeof(Groups); }
 
-	/** @brief A program, with the indirect dispatch signature made against its layout. */
-	struct Program
-	{
-		std::shared_ptr<const ComputeProgram> compute;
-		rhi::CommandSignaturePtr signature;
-
-		explicit operator bool() const { return compute && signature; }
-	};
+	/** @brief A program; it owns its indirect dispatch signature (ComputeProgram::DispatchIndirect). */
+	using Program = std::shared_ptr<const ComputeProgram>;
 
 	struct Programs
 	{
@@ -168,52 +149,30 @@ namespace
 		}
 	};
 
-	/** @brief The defines a_own plus those Util::CompileShader gives every D3D11 build, so both paths build one permutation. */
-	std::vector<std::pair<std::wstring, std::wstring>> ProgramDefines(std::vector<std::pair<std::string, std::string>> a_own)
-	{
-		std::vector<std::string_view> names;
-		for (const auto& define : a_own)
-			names.push_back(define.first);
-		for (auto& define : Util::GetCommonShaderDefines(names))
-			a_own.push_back(std::move(define));
-		for (const char* name : { "COMPUTESHADER", "WINPC", "DX11" })
-			a_own.emplace_back(name, "");
-		// Defines are ASCII.
-		std::vector<std::pair<std::wstring, std::wstring>> wide;
-		for (const auto& [name, value] : a_own)
-			wide.emplace_back(std::wstring(name.begin(), name.end()), std::wstring(value.begin(), value.end()));
-		return wide;
-	}
-
+	/** @brief A program with a_define, if given. ComputeProgram adds the defines every D3D11 build gets, so both paths build one permutation. */
 	template <class Block>
-	Program LoadProgram(rhi::Device a_device, const char* a_source, std::vector<std::pair<std::string, std::string>> a_defines)
+	Program LoadProgram(rhi::Device a_device, const char* a_source, const wchar_t* a_define = nullptr)
 	{
-		Program program;
-		program.compute = ComputeProgram::Load(a_device,
-			{ .source = a_source, .constantWords = ShaderBindings::Words<Block>(), .defines = ProgramDefines(std::move(a_defines)) });
-		if (!program.compute)
-			return {};
-		rhi::IndirectArg args[] = { { .kind = rhi::IndirectArgKind::Dispatch } };
-		if (a_device.CreateCommandSignature(rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, 1), sizeof(std::uint32_t) * 3 },
-				program.compute->layout->GetHandle(), program.signature) != rhi::Result::Ok)
-			return {};
-		return program;
+		ComputeProgram::Desc desc{ .source = a_source, .constantWords = ShaderBindings::Words<Block>() };
+		if (a_define)
+			desc.defines.push_back({ a_define, L"" });
+		return ComputeProgram::Load(a_device, desc);
 	}
 
 	/** @brief Every program, as DynamicCubemaps' GetComputeShader* compile them, and ORG's GenerateMips for arrays and cubes. */
 	std::shared_ptr<const Programs> LoadPrograms(rhi::Device a_device)
 	{
 		auto programs = std::make_shared<Programs>();
-		programs->detect = LoadProgram<CaptureBlock>(a_device, kDetectShader, {});
-		programs->update[kBase] = LoadProgram<CaptureBlock>(a_device, kUpdateShader, {});
-		programs->update[kReflections] = LoadProgram<CaptureBlock>(a_device, kUpdateShader, { { "REFLECTIONS", "" } });
-		programs->update[kFake] = LoadProgram<CaptureBlock>(a_device, kUpdateShader, { { "FAKEREFLECTIONS", "" } });
-		programs->infer[kBase] = LoadProgram<InferBlock>(a_device, kInferShader, {});
-		programs->infer[kReflections] = LoadProgram<InferBlock>(a_device, kInferShader, { { "REFLECTIONS", "" } });
-		programs->infer[kFake] = LoadProgram<InferBlock>(a_device, kInferShader, { { "FAKEREFLECTIONS", "" } });
-		programs->irradiance = LoadProgram<IrradianceBlock>(a_device, kIrradianceShader, {});
-		programs->encode = LoadProgram<EncodeBlock>(a_device, kEncodeShader, {});
-		programs->publish = LoadProgram<PublishBlock>(a_device, kPublishShader, {});
+		programs->detect = LoadProgram<CaptureBlock>(a_device, kDetectShader);
+		programs->update[kBase] = LoadProgram<CaptureBlock>(a_device, kUpdateShader);
+		programs->update[kReflections] = LoadProgram<CaptureBlock>(a_device, kUpdateShader, L"REFLECTIONS");
+		programs->update[kFake] = LoadProgram<CaptureBlock>(a_device, kUpdateShader, L"FAKEREFLECTIONS");
+		programs->infer[kBase] = LoadProgram<InferBlock>(a_device, kInferShader);
+		programs->infer[kReflections] = LoadProgram<InferBlock>(a_device, kInferShader, L"REFLECTIONS");
+		programs->infer[kFake] = LoadProgram<InferBlock>(a_device, kInferShader, L"FAKEREFLECTIONS");
+		programs->irradiance = LoadProgram<IrradianceBlock>(a_device, kIrradianceShader);
+		programs->encode = LoadProgram<EncodeBlock>(a_device, kEncodeShader);
+		programs->publish = LoadProgram<PublishBlock>(a_device, kPublishShader);
 		programs->mips = GraphPasses::LoadGenerateMips(a_device, true);
 		if (!*programs)
 			return nullptr;
@@ -332,9 +291,6 @@ namespace
 			if (!current || !current->latch)
 				return;
 			const std::uint32_t slot = a_recording.FrameSlot();
-			auto& commands = a_recording.Commands();
-			const auto latchBuffer = current->latch->Resource()->GetAPIResource().GetHandle();
-			const std::uint64_t region = current->latch->Offset(slot);
 			const auto shared = current->shared ? SharedConstants::Index(a_recording, a_bindings.shared) : SharedConstants::Handles{};
 			std::array<std::uint32_t, ShaderBindings::kMaxPushWords> words{};
 			for (const auto& dispatch : current->dispatches) {
@@ -367,16 +323,13 @@ namespace
 						}
 					}
 				}
-				const auto& compute = *dispatch.program->compute;
+				const auto& compute = **dispatch.program;
 				// A block that does not match the program's records nothing (a programming error, caught in the first test).
 				if (count != compute.constantWords)
 					continue;
 				if (dispatch.barrier)
 					a_recording.UavBarrier();
-				commands.BindLayout(compute.layout->GetHandle());
-				commands.BindPipeline(compute.Pipeline());
-				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, count, words.data());
-				commands.ExecuteIndirect(dispatch.program->signature->GetHandle(), latchBuffer, region + dispatch.groups, {}, 0, 1);
+				compute.DispatchIndirect(a_recording, std::span<const std::uint32_t>(words.data(), count), *current->latch, dispatch.groups);
 			}
 		}
 
