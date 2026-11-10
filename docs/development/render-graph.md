@@ -365,8 +365,8 @@ PublishedResources::Publish(*out);  // id "MyFeature::Output"
 PublishedResources::Withdraw("MyFeature::Output");
 ```
 
-DCLF reads a published texture through its frame texture contract (`Api::FrameTexture::graphResource` and `graph`;
-dclf-architecture.md, "Frame graph textures").
+DCLF reads a published texture through its frame texture contract (`Api::FrameTexture::graphResources`; dclf-architecture.md,
+"Frame graph textures"): when the view a commit resolved is the id's export (`PublishedResources::IsExportOf`).
 
 ## GPU timing in the profiling window
 
