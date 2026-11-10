@@ -1769,11 +1769,6 @@ Switching an integration when its feature is ported:
     Blending's blended depth from its depth pass to its terrain passes) answers `graph` with `ExportedId(view) == id`.
 5.  Check one run's log for the `reads the graph resource` line and compare `dclf:shot` images with the feature's switch on and off.
 
-`CS_DCLF_GRAPH_TEXTURE_TEST` (`Integrations/DynamicCubemaps/ReflectionsGraphTest.h`) is the test producer. `graph` makes t30 read a
-cubemap copied at the Prepass anchor through the graph; `d3d11` makes it read the same cubemap through its export. Their screenshots
-must be identical across that pair of runs only within run-to-run noise (NPCs, fire, TAA), so the A/B is taken inside one run with
-the live toggle `graph texture test` (`dclf:graph texture test=0|1`; scenarios `orgport-graphtex-ab` and `-ba`).
-
 Open defect (2026-11-09): switching the path mid-scene (the toggle, so a new main resources set while the scene draws) lost the
 device on the RX 6600 in both directions, within a frame of `Main-pass graph resources` being logged again. A run that starts on
 either path is clean. Until this is found, a producer must not flip its graph path while a cell is loaded.
