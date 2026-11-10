@@ -538,7 +538,8 @@ namespace OrgFx
 		wrappers += "\tstatic const float2 OrgFxCorners[6] = { float2(-1, -1), float2(-1, 1), float2(1, -1), float2(1, -1), float2(-1, 1), float2(1, 1) };\n";
 		wrappers += "\tconst float2 OrgFxCorner = OrgFxCorners[OrgFxVertexId];\n";
 		wrappers += "\tconst float4 OrgFxPosition = float4(OrgFxCorner, 0.0, 1.0);\n";
-		wrappers += "\tconst float4 OrgFxTexcoord = float4(OrgFxCorner.x * 0.5 + 0.5, 0.5 - OrgFxCorner.y * 0.5, 0.0, 0.0);\n";
+		// D3D11 expands the float2 TEXCOORD0 element to (u, v, 0, 1).
+		wrappers += "\tconst float4 OrgFxTexcoord = float4(OrgFxCorner.x * 0.5 + 0.5, 0.5 - OrgFxCorner.y * 0.5, 0.0, 1.0);\n";
 		wrappers += vsLocals + vsAssign;
 		const auto vsCall = std::format("{}({})", vsFn.name, callArguments(vsFn, vs));
 		wrappers += vsReturns ? std::format("\t{} OrgFxResult = {};\n", TypeText(vsFn.returnType), vsCall) : std::format("\t{};\n", vsCall);
