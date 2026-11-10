@@ -834,11 +834,6 @@ void State::LoadFromJson(nlohmann::json& settings)
 			shaderCache->SetFileWatcher(advanced["Use FileWatcher"]);
 		if (advanced.contains("Frame Annotations") && advanced["Frame Annotations"].is_boolean())
 			frameAnnotations = advanced["Frame Annotations"];
-		// Experiment (CS_IS_TRACE_AT): the ImageSpace trace logs through the annotation hooks.
-		if (char traceValue[8]{}; GetEnvironmentVariableA("CS_IS_TRACE_AT", traceValue, sizeof(traceValue)) && !frameAnnotations) {
-			frameAnnotationsSetting = frameAnnotations;
-			frameAnnotations = true;
-		}
 		// The GPU idle trace attributes gaps to the engine's render phases, which only the annotations mark.
 		if ((GpuIdleTrace::Requested() || GpuEventTimers::Requested() || GpuCounters::EnvironmentRequested()) && !frameAnnotations) {
 			frameAnnotationsSetting = frameAnnotations;

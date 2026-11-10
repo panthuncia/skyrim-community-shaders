@@ -26,26 +26,6 @@ namespace FrameAnnotations
 		}
 	}
 
-	/** Experiment (CS_IS_TRACE_AT=f1,...): logs each ImageSpace draw and dispatch on those frames. */
-	void TraceImageSpace(const std::string& a_event)
-	{
-		static const std::vector<std::uint64_t> frames = [] {
-			std::vector<std::uint64_t> result;
-			char value[256]{};
-			if (GetEnvironmentVariableA("CS_IS_TRACE_AT", value, sizeof(value)))
-				for (const char* c = value; *c;) {
-					char* end = nullptr;
-					result.push_back(std::strtoull(c, &end, 10));
-					if (end == c) break;
-					c = (*end == ',') ? end + 1 : end;
-				}
-			return result;
-		}();
-		const auto frame = static_cast<std::uint64_t>(globals::state->frameCount);
-		if (!frames.empty() && std::ranges::find(frames, frame) != frames.end())
-			logger::info("[IS trace] frame {}: {}", frame, a_event);
-	}
-
 	template <RE::BSShader::Type ShaderType>
 	struct BSShader_SetupGeometry
 	{
@@ -88,7 +68,6 @@ namespace FrameAnnotations
 		static void thunk(void* imageSpaceShader, RE::BSTriShape* shape, RE::ImageSpaceEffectParam* param)
 		{
 			std::string eventName = BuildEventName(EffectType) + " Draw";
-			TraceImageSpace(eventName);
 			globals::state->BeginPerfEvent(eventName);
 
 			func(imageSpaceShader, shape, param);
@@ -105,7 +84,6 @@ namespace FrameAnnotations
 		static void thunk(void* imageSpaceShader, uint32_t a1, uint32_t a2, uint32_t a3)
 		{
 			std::string eventName = BuildEventName(EffectType) + " Dispatch";
-			TraceImageSpace(eventName);
 			globals::state->BeginPerfEvent(eventName);
 
 			func(imageSpaceShader, a1, a2, a3);
