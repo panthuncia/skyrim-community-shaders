@@ -27,6 +27,7 @@
 #include "Menu.h"
 
 #include <Tracy/Tracy.hpp>
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "State.h"
 #include "Vram/VramLedger.h"
@@ -1236,6 +1237,7 @@ namespace DCLF
 			logger::info("[DCLF] test exit at frame {}", exitCount);
 			const auto moves = DCLF::Extensions::TransformMoveStats();
 			logger::info("[DCLF] transform moves at exit: {} spilled (allocated past the queue), {} dropped while no build drained", moves.spilled, moves.dropped);
+			RenderGraph::Engine::Tripwire::Report("exit");
 			spdlog::apply_all([](const std::shared_ptr<spdlog::logger>& a_logger) { a_logger->flush(); });
 			::TerminateProcess(::GetCurrentProcess(), 0);
 		}

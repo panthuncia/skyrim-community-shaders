@@ -1,5 +1,6 @@
 #include "Globals.h"
 #include "GpuEventTimers.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #include "CSEditor/SceneManager/SceneManager.h"
 #include "CSEditor/SceneManager/SceneSettingsManager.h"
@@ -266,6 +267,7 @@ namespace globals
 	void OnGameWindowClose()
 	{
 		game::quitGame = true;
+		RenderGraph::Engine::Tripwire::Report("exit");
 		if (shaderCache)
 			shaderCache->StopCompilation();
 	}
