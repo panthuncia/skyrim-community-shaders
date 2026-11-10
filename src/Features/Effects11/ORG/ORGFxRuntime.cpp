@@ -1076,6 +1076,8 @@ struct ORGFxRuntime::Impl
 		desc.vertexEntry = std::wstring(OrgFx::kVertexEntry, OrgFx::kVertexEntry + std::strlen(OrgFx::kVertexEntry));
 		desc.pixelText = lowered.source;
 		desc.vertexText = lowered.source;
+		// Effect code built by Effects11 on D3D11, which gives it none of CS's shader defines.
+		desc.commonDefines = false;
 		desc.languageVersion = L"2018";
 		desc.constantWords = a_effect.lowered.PushWords();
 		desc.targets = { { .format = a_format } };

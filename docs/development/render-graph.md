@@ -544,6 +544,11 @@ they are ported.
 -   **Compile.** Both stages compile with DXC through the same path (`ProgramBuild.{h,cpp}`, shared with `ComputeProgram`):
     ORGModuleServices' shader store, SPIR-V, BasicRHI's bindless ABI. The default vertex stage is `RenderGraph/FullscreenVS.hlsl`,
     a three-vertex triangle with `TEXCOORD0` as in PostProcessing's `fullscreen.hlsli`.
+-   **Defines.** Compute and raster programs get the defines `Util::CompileShader` gives the D3D11 build, after their own:
+    CS's common shader defines (`Util::GetCommonShaderDefines`), the stage's (`COMPUTESHADER`, `VSHADER`, `PSHADER`), `WINPC`
+    and `DX11` (`ProgramBuild::WithCommonDefines`). A dual-target shader then compiles the same permutation on both paths. A
+    name the program already gives is not added again. They are resolved once at `Load`, so a hot reload keeps them.
+    `Desc::commonDefines = false` opts out (the FX runtime's generated stages, which Effects11 builds without them).
 -   **State.** `Desc` gives up to eight colour targets, each with its format and `rhi::BlendAttachment`, an optional depth format
     and `DepthStencilState` (off by default), the `RasterState` (no culling by default) and the push-block size. The push block is a
     `cbuffer` at b0 that both stages read.

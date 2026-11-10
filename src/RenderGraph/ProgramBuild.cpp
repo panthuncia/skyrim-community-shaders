@@ -6,7 +6,9 @@
 #	include "RenderGraph/ProgramBuild.h"
 
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "Utils/D3D.h"
 
+#	include <algorithm>
 #	include <cstring>
 #	include <fstream>
 #	include <iterator>
@@ -36,6 +38,36 @@ namespace RenderGraph::ProgramBuild
 			hash *= 1099511628211ull;
 		}
 		return hash;
+	}
+
+	Defines WithCommonDefines(const Defines& a_own, const wchar_t* a_target)
+	{
+		Defines defines = a_own;
+		const auto has = [&](const std::wstring& a_name) {
+			return std::ranges::any_of(defines, [&](const auto& a_define) { return a_define.first == a_name; });
+		};
+		// Defines are ASCII.
+		const auto wide = [](std::string_view a_text) { return std::wstring(a_text.begin(), a_text.end()); };
+		const auto add = [&](std::wstring a_name, std::wstring a_value) {
+			if (!has(a_name))
+				defines.emplace_back(std::move(a_name), std::move(a_value));
+		};
+		std::vector<std::string> ownNames;
+		for (const auto& [name, value] : a_own)
+			ownNames.emplace_back(name.begin(), name.end());
+		const std::vector<std::string_view> explicitNames(ownNames.begin(), ownNames.end());
+		for (const auto& [name, value] : Util::GetCommonShaderDefines(explicitNames))
+			add(wide(name), wide(value));
+		const std::wstring_view target = a_target ? a_target : L"";
+		if (target.starts_with(L"cs_"))
+			add(L"COMPUTESHADER", L"");
+		else if (target.starts_with(L"vs_"))
+			add(L"VSHADER", L"");
+		else if (target.starts_with(L"ps_"))
+			add(L"PSHADER", L"");
+		add(L"WINPC", L"");
+		add(L"DX11", L"");
+		return defines;
 	}
 
 	org::services::ShaderCompileRequest MakeRequest(const std::filesystem::path& a_path, std::span<const std::byte> a_source, const std::wstring& a_entry,

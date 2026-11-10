@@ -50,6 +50,9 @@ struct ComputeProgram
 		std::wstring entry = L"main";
 		std::uint32_t constantWords = 0;  // the push-constant block, in 32-bit words
 		std::vector<std::pair<std::wstring, std::wstring>> defines;
+		// Also the defines the D3D11 build of the shader gets (ProgramBuild::WithCommonDefines), so a dual-target shader compiles
+		// the same permutation on both paths. Off for a shader with no D3D11 build that must not see CS's defines.
+		bool commonDefines = true;
 	};
 
 	/**

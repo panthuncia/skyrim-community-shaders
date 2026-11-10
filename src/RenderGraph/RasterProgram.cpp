@@ -97,7 +97,7 @@ namespace
 	{
 		std::string vertexSource, pixelSource;
 		std::wstring vertexEntry, pixelEntry;
-		Build::Defines defines;
+		Build::Defines vertexDefines, pixelDefines;
 		std::string label;
 		std::string vertexText, pixelText;
 		std::wstring languageVersion = L"2021";
@@ -115,7 +115,8 @@ namespace
 	org::services::ShaderCompileRequest StageRequest(const std::filesystem::path& a_path, std::span<const std::byte> a_source, const std::wstring& a_entry,
 		const wchar_t* a_target, const Stages& a_stages)
 	{
-		auto request = Build::MakeRequest(a_path, a_source, a_entry, a_target, a_stages.defines);
+		const bool vertex = std::wstring_view(a_target).starts_with(L"vs_");
+		auto request = Build::MakeRequest(a_path, a_source, a_entry, a_target, vertex ? a_stages.vertexDefines : a_stages.pixelDefines);
 		request.languageVersion = a_stages.languageVersion;
 		return request;
 	}
@@ -211,8 +212,10 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 	auto& registry = *RenderGraphRuntime::PipelineRegistry();
 	// Before the sources are read: a reload that starts after rebuilds it (PipelineRegistry::Register).
 	const std::uint64_t builtFor = registry.SourcesGeneration();
-	Stages stages{ a_desc.vertexSource, a_desc.pixelSource, a_desc.vertexEntry, a_desc.pixelEntry, a_desc.defines,
-		fmt::format("{} ({})", std::filesystem::path(a_desc.pixelSource).stem().string(), Util::WStringToString(a_desc.pixelEntry)), a_desc.vertexText,
+	// The defines resolved once, here: a hot reload compiles the same permutation.
+	Stages stages{ a_desc.vertexSource, a_desc.pixelSource, a_desc.vertexEntry, a_desc.pixelEntry,
+		a_desc.commonDefines ? Build::WithCommonDefines(a_desc.defines, L"vs_6_6") : a_desc.defines,
+		a_desc.commonDefines ? Build::WithCommonDefines(a_desc.defines, L"ps_6_6") : a_desc.defines, fmt::format("{} ({})", std::filesystem::path(a_desc.pixelSource).stem().string(), Util::WStringToString(a_desc.pixelEntry)), a_desc.vertexText,
 		a_desc.pixelText, a_desc.languageVersion };
 	const auto vertex = CompileStage(*compiler, stages.vertexSource, stages.vertexText, stages.vertexEntry, L"vs_6_6", stages);
 	const auto pixel = vertex.empty() ? std::vector<std::byte>{} : CompileStage(*compiler, stages.pixelSource, stages.pixelText, stages.pixelEntry, L"ps_6_6", stages);
