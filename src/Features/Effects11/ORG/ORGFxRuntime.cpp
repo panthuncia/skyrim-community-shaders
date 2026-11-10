@@ -955,6 +955,14 @@ struct ORGFxRuntime::Impl
 				error = std::move(a_reason);
 		}
 
+		/** @brief Fails the plan and the effect: PrepareFrame leaves the effect to FX11 until the next reload, without planning again. */
+		void FailEffect(FxEffect& a_effect, std::string a_reason)
+		{
+			a_effect.ok = false;
+			a_effect.reason = a_reason;
+			Fail(std::move(a_reason));
+		}
+
 		std::uint32_t Region(std::uint32_t a_bytes)
 		{
 			const std::uint32_t offset = frame->latchBytes;
@@ -1033,7 +1041,7 @@ struct ORGFxRuntime::Impl
 				std::string reason;
 				auto program = impl.FxProgram(e, a_technique, p, format, reason);
 				if (!program) {
-					Fail(reason);
+					FailEffect(e, std::move(reason));
 					return;
 				}
 				auto draw = std::make_shared<DrawSpec>();
@@ -1094,7 +1102,7 @@ struct ORGFxRuntime::Impl
 				const auto name = TechniqueName(info.technique.get());
 				const auto technique = e.techniques.find(name);
 				if (technique == e.techniques.end()) {
-					Fail(fmt::format("{}: technique '{}' was not parsed", e.Name(), name));
+					FailEffect(e, fmt::format("{}: technique '{}' was not parsed", e.Name(), name));
 					return result;
 				}
 				Res input;
@@ -1113,7 +1121,7 @@ struct ORGFxRuntime::Impl
 					if (IsRenderTargetName(info.renderTargetName))
 						output = info.renderTargetName;
 					else if (fx11.effectTextureCache.contains(info.renderTargetName) || TextureManager::GetSingleton().FindCommonTexture(info.renderTargetName)) {
-						Fail(fmt::format("{}: technique '{}' renders to '{}', which is not supported yet", e.Name(), name, info.renderTargetName));
+						FailEffect(e, fmt::format("{}: technique '{}' renders to '{}', which is not supported yet", e.Name(), name, info.renderTargetName));
 						return result;
 					}
 					// Otherwise FX11 falls back to the chain's output too.
@@ -1620,7 +1628,7 @@ void ORGFxRuntime::Impl::PrepareFrame(std::uint32_t a_input, std::uint32_t a_out
 		Impl::Planner planner(self, inputs);
 		auto planned = planner.Build();
 		if (!planned) {
-			// A pass that failed to build fails its effect until the next reload; FX11 runs it meanwhile.
+			// A pass that failed to build fails its effect until the next reload (Planner::FailEffect); FX11 runs it meanwhile.
 			return self.Inactive(planner.error);
 		}
 		self.Register(planned);
