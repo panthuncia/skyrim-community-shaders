@@ -622,8 +622,18 @@ namespace
 	/** @brief The ORG implementation of a pipeline slot, or null: not ported, so the chain runs on D3D11 while it is enabled. */
 	std::unique_ptr<ORGPostChain::Effect> MakeEffect(Index a_index)
 	{
-		(void)a_index;
-		return nullptr;
+		switch (a_index) {
+		case Index::Vignette:
+			return ORGPostChain::MakeVignette();
+		case Index::ColorGrading:
+			return ORGPostChain::MakeColorGrading();
+		case Index::LUT:
+			return ORGPostChain::MakeLUT();
+		case Index::Border:
+			return ORGPostChain::MakeBorder();
+		default:
+			return nullptr;
+		}
 	}
 
 	/** @brief A slot's step in the pass names: "cs.pp.<step>.<pass>". */

@@ -303,6 +303,10 @@ namespace ORGPostChain
 	};
 
 	// The ported sub-effects (src/Features/PostProcessing/ORG/). Add a port's factory here and in MakeEffect.
+	std::unique_ptr<Effect> MakeVignette();
+	std::unique_ptr<Effect> MakeColorGrading();
+	std::unique_ptr<Effect> MakeLUT();
+	std::unique_ptr<Effect> MakeBorder();
 }
 
 #endif
