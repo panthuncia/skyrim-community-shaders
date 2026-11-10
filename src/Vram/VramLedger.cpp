@@ -348,7 +348,7 @@ namespace Vram
 				heap.index = index;
 				heap.deviceLocal = index == 0;
 				heap.hasBudget = segment.valid;
-				heap.size = segment.capacity;
+				heap.size = segment.capacity ? segment.capacity : segment.budget;
 				heap.usage = segment.usage;
 				heap.budget = segment.budget;
 				heap.usageAtBudget = segment.usageAtBudget;
@@ -388,6 +388,8 @@ namespace Vram
 					row.category = "ORG/Allocator";
 					row.bytes = bytes;
 					row.deviceLocal = video;
+					if (!video)
+						row.heapIndex = 1;  // system memory (UseOrgHeaps); video rows go to heap 0 with ORG's other rows
 					if (!video && owner.spilledBytes)
 						row.detail = fmt::format("{:.1f} MB spilled from video memory", MiB(owner.spilledBytes));
 					row.flags = labelled ? 0u : (kRowNotCounted | kRowInternal);
