@@ -916,3 +916,61 @@ Keys used so far:
   as done only when its pass ran. The exposure port adds a `CS_Reset` entry, dispatched indirectly with one group over
   its first few frames and zero after. An API would take an initial value (zero fill) for a History resource.
 - **Found by:** P3 W3, Post Processing (2026-11-09).
+### Calling D3D11 in the DXVK-free build
+
+- **Need:** any GPU work a plugin does today through the game's `ID3D11Device`, immediate context or swap chain
+  (`BSGraphics::Renderer` +0x48/+0x50, the device global, `RendererData` +0x38/+0x40/+0x60), or through the views and
+  textures in the render-target tables.
+- **Who:** every SKSE plugin that renders with D3D11: ImGui menus and HUDs, post-processing and screenshot plugins,
+  texture and overlay bakers.
+- **Where it fits:** in the native build those fields hold tripwire handles (`src/RenderGraph/Engine/Tripwire/`). Each
+  call logs once per call site as `[ORG] tripwire: <Interface>::<Method> from <Module>+0x<offset> (another plugin calls
+  D3D11: see org-extension-api-notes.md)` and fails (E_FAIL, null outputs). `CS_ORG_TRIPWIRE_LOG=1` lists every site
+  with its count. Each module found that way gets its own entry here with the calls it made, and maps to one of the
+  other needs (overlay pass, texture upload, render to texture, named targets).
+- **Found by:** P4.1 (2026-11-09).
+
+### Passing engine resources to a plugin's own D3D11 code
+
+- **Need:** bind an engine texture or view (a render target's SRV, the depth SRV) in a plugin's own D3D11 draw.
+- **Who:** post-processing and screenshot plugins that read `renderTargets[i].SRV` and bind it on the game's context or
+  their own.
+- **Where it fits:** while DXVK is loaded (guest mode) a handle wraps the DXVK object, and a call through a wrapping
+  device or context unwraps it. A handle passed straight to DXVK's own device or context is cast to DXVK's class and
+  crashes. Until the engine's fields go native, a plugin can pass `Tripwire::Unwrap(object)` (no reference added; a
+  native handle unwraps to null). The API replacement is "Reading named engine targets": the graph resource by name,
+  not the D3D11 view.
+- **Found by:** P4.1 (2026-11-09).
+
+### Interfaces beyond the ones the engine holds
+
+- **Need:** what plugins reach through `QueryInterface` on the device and swap chain: `IDXGIDevice` (adapter, frame
+  latency), `ID3D11Device1-5` and `ID3D11DeviceContext1-4` (constant-buffer offsets, fences), `IDXGISwapChain3/4` (HDR
+  colour space and metadata, the waitable object).
+- **Who:** HDR, frame-pacing and upscaler/frame-generation plugins; ImGui backends that read the swap chain's buffer.
+- **Where it fits:** a tripwire handle answers only its own interface chain (IUnknown up to the interface the engine
+  stores). Any other IID is logged with its GUID and refused in native mode (forwarded in guest mode). Each IID that
+  shows up in the log names a capability the API must offer directly: present-time colour space and metadata (P0.9),
+  frame latency (P0.10), a GPU completion signal.
+- **Found by:** P4.1 (2026-11-09).
+
+### Objects a forwarded getter returns
+
+- **Need:** compare what a getter returns with the engine's fields (`OMGetRenderTargets` against
+  `renderTargets[kMAIN].RTV`, `GetResource` against the texture field).
+- **Who:** plugins that detect the current pass from the bound targets.
+- **Where it fits:** in guest mode a forwarded getter returns the DXVK object, not the handle the engine stored, so the
+  pointers differ. Views made with their resource answer `GetResource` with that handle. Identity checks should go
+  through `Tripwire::Describe`/`Unwrap`, or better through the frame anchor the plugin attaches to, which says which
+  pass runs.
+- **Found by:** P4.1 (2026-11-09).
+
+### Waiting for GPU work through D3D11 queries
+
+- **Need:** know when the GPU has finished work the plugin issued (readbacks, ring buffers).
+- **Who:** plugins that spin on `GetData` of an event query until it returns S_OK; the engine's own dynamic ring does
+  the same (75484, R6.4), which P4.5 replaces.
+- **Where it fits:** a native tripwire context returns E_FAIL from `GetData`, so such a loop spins forever. The API needs
+  a completion signal per frame or per submission (ORG's frame fences, or a callback after the epoch that used the
+  resource retires).
+- **Found by:** P4.1 (2026-11-09).

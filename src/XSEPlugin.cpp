@@ -11,6 +11,7 @@
 #include "Menu.h"
 #include "Menu/ThemeManager.h"
 #include "NativeMenu/NativeMenu.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/LogTee.h"
@@ -146,6 +147,8 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 	case SKSE::MessagingInterface::kPostPostLoad:
 		{
 			if (errors.empty()) {
+				// Tripwire handles: self-test and report only (CS_ORG_TRIPWIRE_SELFTEST, CS_ORG_TRIPWIRE_LOG); no engine hooks.
+				RenderGraph::Engine::Tripwire::Start();
 				Deferred::Hooks::Install();
 				Hooks::Install();
 				EngineFix::InstallOnPostPostLoadFixes();
