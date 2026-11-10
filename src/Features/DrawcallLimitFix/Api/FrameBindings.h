@@ -58,7 +58,8 @@ namespace DCLF::Api
 	 *   read of it while graph answers true at the main resources' check, so ORG orders the read after the producer's write.
 	 * - graph: render thread, at the main resources' check and once per colour commit: whether the register reads the published texture
 	 *   now (the producer is on its ORG path; usually PublishedResources::ShaderResourceIndex), with its bindless index into a_index.
-	 *   False: view, as above. The views with frame constants of their own (the reflection's faces) always read view.
+	 *   False: view, as above. The views with frame constants of their own (the reflection's faces) read view, or the published
+	 *   texture when view is its export (PublishedResources::ExportedId) and their passes declared it.
 	 */
 	struct FrameTexture
 	{

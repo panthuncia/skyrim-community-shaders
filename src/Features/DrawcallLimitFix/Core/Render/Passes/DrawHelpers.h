@@ -72,6 +72,12 @@ namespace DCLF::Draws
 	void DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights = true);
 
 	/**
+	 * @brief The frame textures on the graph path (a_resources.graphTextures) declared as read, through no view: the colour passes'
+	 * (DeclareFrameBuffers) and the reflection faces' (their commit reads the same published textures: ResolveViewFrameTextures).
+	 */
+	void DeclareFrameGraphTextures(org::PassBuilder& a_builder, const Resources& a_resources);
+
+	/**
 	 * @brief One device-generated call of a draw pass: its signature (a state class's: each call draws one class's sub-range of a range),
 	 * where its sequences start in the arguments, its count word and its max count.
 	 */
