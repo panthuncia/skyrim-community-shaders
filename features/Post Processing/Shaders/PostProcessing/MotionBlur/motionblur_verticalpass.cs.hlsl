@@ -6,17 +6,17 @@
  * Preserves the maximum velocity vectors for each grid cell
  */
 
+#include "Common/OrgResources.hlsli"
 #include "PostProcessing/common.hlsli"
 
-// Textures
-Texture2D<float4> TexHorizontal : register(t0);    // [20 x height] input
-RWTexture2D<float4> RWTexVertical : register(u0);  // [20 x 20] output
-
-// Constants
-cbuffer MotionBlurCB : register(b0)
-{
-	float g_VelocityScale;  // Velocity multiplier
-}
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below; the ORG chain (ORG/ORGMotionBlur.cpp)
+// gives heap handles in the push block. The pass reads no constants.
+// TexHorizontal: the [20 x height] input. RWTexVertical: the [20 x 20] output.
+#define VERTICAL_RESOURCES(X)                    \
+	X(SRV, Texture2D<float4>, TexHorizontal, 0) \
+	X(UAV, RWTexture2D<float4>, RWTexVertical, 0)
+ORG_PUSH_BLOCK(VERTICAL_RESOURCES(ORG_HANDLE))
+VERTICAL_RESOURCES(ORG_RESOURCE)
 
 // Fixed parameters
 static const uint GRID_SIZE = 20;  // Fixed grid size
