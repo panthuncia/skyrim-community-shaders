@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 namespace DCLF
 {
@@ -50,7 +51,8 @@ namespace DCLF
 		// The engine's main depth, not whatever is bound: inside the depth pass Terrain Blending alternates the
 		// bound target between it and its own terrain depth while terrain draws.
 		if (auto* renderer = globals::game::renderer) {
-			if (auto* main = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture) {
+			// DXVK's texture, as the main pass's capture (DXVK's context) holds it: the field can be a tripwire handle.
+			if (auto* main = RenderGraph::Engine::Tripwire::Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture)) {
 				capture.depth = nullptr;
 				capture.depth.copy_from(main);
 			}

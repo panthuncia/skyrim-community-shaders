@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/ConstantMirror.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 namespace DCLF::Features::Reflection
 {
@@ -38,7 +39,8 @@ namespace DCLF::Features::Reflection
 					resource->QueryInterface(IID_PPV_ARGS(texture.put()));
 				bound->Release();
 			}
-			if (targetFace != f || texture.get() != reflection.cube.get()) {
+			// The bound view is DXVK's; the face's texture can be a tripwire handle that wraps it.
+			if (targetFace != f || texture.get() != RenderGraph::Engine::Tripwire::Unwrap(reflection.cube.get())) {
 				if (parity.slices++ == 0 && parity.first.empty())
 					parity.first = fmt::format("face {}: the engine drew into face {}", f, targetFace);
 			}

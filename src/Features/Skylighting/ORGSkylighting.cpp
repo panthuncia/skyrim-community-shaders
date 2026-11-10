@@ -18,6 +18,7 @@ bool ORGSkylighting::Requested()
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -230,9 +231,11 @@ namespace
 		auto texture = resource.try_as<ID3D11Texture2D>();
 		if (!texture)
 			return nullptr;
+		// The view and the depth fields can be tripwire handles or DXVK's objects: compare what they wrap.
+		using RenderGraph::Engine::Tripwire::Unwrap;
 		const auto& depthStencils = globals::game::renderer->GetDepthStencilData().depthStencils;
 		for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); ++i)
-			if (depthStencils[i].texture == texture.get())
+			if (depthStencils[i].texture && Unwrap(depthStencils[i].texture) == Unwrap(texture.get()))
 				return FrameAnchors::EngineDepth(i);
 		RE::BSGraphics::DepthStencilData target{};
 		target.texture = texture.get();

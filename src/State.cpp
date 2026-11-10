@@ -42,6 +42,7 @@
 #include "PostProcessingMode.h"
 #include "Presets/UnifiedPresetCatalog.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuLoadPass.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "ShaderCache.h"
@@ -283,8 +284,9 @@ bool State::HandlePostProcessing(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_
 		return false;
 
 	auto renderer = globals::game::renderer;
-	auto& outputRT = renderer->GetRuntimeData().renderTargets[a_output];
-	globals::d3d::context->OMSetRenderTargets(1, &outputRT.RTV, nullptr);
+	// Engine target fields can be tripwire handles: DXVK's context takes the wrapped view.
+	auto* outputRTV = RenderGraph::Engine::Tripwire::Unwrap(renderer->GetRuntimeData().renderTargets[a_output].RTV);
+	globals::d3d::context->OMSetRenderTargets(1, &outputRTV, nullptr);
 
 	auto shadowState = globals::game::shadowState;
 	auto& stateData = shadowState->GetRuntimeData();

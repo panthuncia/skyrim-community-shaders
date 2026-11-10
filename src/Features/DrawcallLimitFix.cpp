@@ -6,6 +6,7 @@
 #if defined(CS_HAS_DCLF)
 
 #	include "Deferred.h"
+#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "Features/DrawcallLimitFix/Api/MaterialWrites.h"
 #	include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #	include "Features/DrawcallLimitFix/Core/Engine/WindowWriters.h"
@@ -616,7 +617,8 @@ void DrawcallLimitFix::Hooks::Main_RenderDepth_WorldDrawn::thunk(void* a_accumul
 	// reflection faces and first-person depth, which the depth epoch hosts).
 	DCLF::FrameDriver::Get().DepthCommitted();
 	if (DCLF::Scene::FrameView::Get().GetTables().objects.size() >= 400)
-		globals::BeginDCLFDepthTrace(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture);
+		// The trace compares DXVK's objects; the field can be a tripwire handle.
+		globals::BeginDCLFDepthTrace(RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture));
 	// DCLF's epoch leaves the context's bindings to the engine's state tracking: rebind its targets for the
 	// rest of the pass.
 	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);

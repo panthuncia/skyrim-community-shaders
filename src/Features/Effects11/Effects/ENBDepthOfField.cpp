@@ -3,6 +3,7 @@
 #include "../EffectManager.h"
 #include "../SettingManager.h"
 #include "../TextureManager.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 
 static constexpr std::array<std::string_view, 3> FocusTechniques = { "Aperture", "ReadFocus", "Focus" };
@@ -29,7 +30,11 @@ void ENBDepthOfField::Execute()
 	if (!renderer)
 		return;
 
-	auto& textureMain = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+	// Engine target fields can be tripwire handles: effects and DXVK take the wrapped objects.
+	auto textureMain = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+	textureMain.texture = RenderGraph::Engine::Tripwire::Unwrap(textureMain.texture);
+	textureMain.SRV = RenderGraph::Engine::Tripwire::Unwrap(textureMain.SRV);
+	textureMain.RTV = RenderGraph::Engine::Tripwire::Unwrap(textureMain.RTV);
 	if (!textureMain.texture || !textureMain.SRV)
 		return;
 

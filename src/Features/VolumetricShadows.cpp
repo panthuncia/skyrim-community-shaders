@@ -1,6 +1,7 @@
 #include "VolumetricShadows.h"
 
 #include "Globals.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 #include "Utils/D3D.h"
 #include "VolumetricShadows/ORGVolumetricShadows.h"
@@ -208,7 +209,8 @@ void VolumetricShadows::CopyShadowLightData()
 					auto renderer = globals::game::renderer;
 					auto& esramDepthStencil = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM];
 
-					ID3D11ShaderResourceView* csSrvs[2]{ shadowView, esramDepthStencil.depthSRV };
+					// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+					ID3D11ShaderResourceView* csSrvs[2]{ shadowView, RenderGraph::Engine::Tripwire::Unwrap(esramDepthStencil.depthSRV) };
 					context->CSSetShaderResources(0, 2, csSrvs);
 
 					context->CSSetSamplers(0, 1, &linearSampler);

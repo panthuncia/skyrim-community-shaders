@@ -1,6 +1,7 @@
 // CS_DCLF_TARGET_DUMP: staging copies at the frame's target points, written as PNGs and statistics once readable. Render thread.
 #include "TargetDump.h"
 #include "Features/Upscaling.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #include <DirectXPackedVector.h>
 #include <DirectXTex.h>
@@ -62,6 +63,8 @@ namespace DCLF::TargetDump
 
 		void Stage(ID3D11Texture2D* a_texture, const std::string& a_name, Frame& a_frame)
 		{
+			// Engine target fields can be tripwire handles: DXVK's context copies the texture they wrap.
+			a_texture = RenderGraph::Engine::Tripwire::Unwrap(a_texture);
 			if (!a_texture)
 				return;
 			D3D11_TEXTURE2D_DESC desc{};
@@ -88,6 +91,8 @@ namespace DCLF::TargetDump
 		/** @brief Each slice of a texture array (at most 16), as Stage copies slice 0: a whole subresource, as a depth array requires. */
 		void StageSlices(ID3D11Texture2D* a_texture, const std::string& a_name, Frame& a_frame)
 		{
+			// Engine target fields can be tripwire handles: DXVK's context copies the texture they wrap.
+			a_texture = RenderGraph::Engine::Tripwire::Unwrap(a_texture);
 			if (!a_texture)
 				return;
 			D3D11_TEXTURE2D_DESC desc{};

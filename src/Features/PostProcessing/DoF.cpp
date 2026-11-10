@@ -4,6 +4,7 @@
 
 #include "Features/PostProcessing.h"
 #include "Menu.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Util.h"
@@ -709,7 +710,8 @@ void DoF::Draw(TextureInfo& inout_tex)
 	auto state = globals::state;
 	auto context = globals::d3d::context;
 	auto renderer = globals::game::renderer;
-	auto* depthSRV = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV;
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+	auto* depthSRV = RenderGraph::Engine::Tripwire::Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV);
 	if (!depthSRV) {
 		return;
 	}

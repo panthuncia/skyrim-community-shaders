@@ -7,6 +7,7 @@
 
 #	include "Globals.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -383,8 +384,10 @@ void ORGVolumetricShadows::CheckShadowMaskInput(ID3D11ShaderResourceView* a_shad
 	if (!IsActive() || impl->inputChecked || !a_shadowMap)
 		return;
 	impl->inputChecked = true;
+	// The field can be a tripwire handle; a_shadowMap comes from DXVK's context. Compare what they wrap.
+	using RenderGraph::Engine::Tripwire::Unwrap;
 	auto* expected = globals::game::renderer->GetDepthStencilData().depthStencils[kCascades].depthSRV;
-	if (a_shadowMap == expected) {
+	if (Unwrap(a_shadowMap) == Unwrap(expected)) {
 		logger::info("[ORG] Volumetric Shadows: the shadow mask's t4 is the engine's cascade map, as the passes read it");
 		return;
 	}

@@ -17,6 +17,7 @@
 #include "PostProcessing.h"
 #include "PostProcessingMode.h"
 #include "Presets/UnifiedPresetCatalog.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "SkySync.h"
 #include "State.h"
@@ -1307,7 +1308,8 @@ void Effects11::DrawVolumetricRays()
 	// Pass 4: Apply blurred shadow with color → main RT (additive)
 	{
 		profiler->BeginPass("Effects11::VolumetricRays Pass 3");
-		ID3D11RenderTargetView* rtv = main.RTV;
+		// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+		ID3D11RenderTargetView* rtv = RenderGraph::Engine::Tripwire::Unwrap(main.RTV);
 		context->OMSetRenderTargets(1, &rtv, nullptr);
 		context->RSSetViewports(1, &viewport);
 
@@ -1514,7 +1516,8 @@ void Effects11::DrawSunRays()
 	drawPass(passes[1], sunRaysBlurPS, sunRaysTexB->rtv.get(), sunRaysTexA->srv.get(), halfViewport, nullptr, "Effects11::SunRays Blur 1");
 	drawPass(passes[2], sunRaysBlurPS, sunRaysTexA->rtv.get(), sunRaysTexB->srv.get(), halfViewport, nullptr, "Effects11::SunRays Blur 2");
 	drawPass(passes[3], sunRaysBlurPS, sunRaysTexB->rtv.get(), sunRaysTexA->srv.get(), halfViewport, nullptr, "Effects11::SunRays Blur 3");
-	drawPass(passes[4], sunRaysCompositePS, main.RTV, sunRaysTexB->srv.get(), viewport, additiveBlendState.get(), "Effects11::SunRays Composite");
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+	drawPass(passes[4], sunRaysCompositePS, RenderGraph::Engine::Tripwire::Unwrap(main.RTV), sunRaysTexB->srv.get(), viewport, additiveBlendState.get(), "Effects11::SunRays Composite");
 
 	stateBackup.Restore(context);
 	stateBackup.Release();

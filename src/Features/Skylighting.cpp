@@ -4,6 +4,7 @@
 #include "DrawcallLimitFix.h"
 #include "Features/Skylighting/ORGSkylighting.h"
 #include "I18n/I18n.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/D3D.h"
@@ -330,7 +331,8 @@ void Skylighting::Prepass()
 			texOcclusion->srv.get(),
 			shadowCascadeSRV ? shadowCascadeSRV : nullptr,
 			shadowCascadeSRV ? globals::deferred->directionalShadowLights->srv.get() : nullptr,
-			shadowCascadeSRV ? esramDepthStencil.depthSRV : nullptr
+			// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+			shadowCascadeSRV ? RenderGraph::Engine::Tripwire::Unwrap(esramDepthStencil.depthSRV) : nullptr
 		};
 		std::array<ID3D11UnorderedAccessView*, 4> uavs = {
 			texProbeArray->uav.get(),

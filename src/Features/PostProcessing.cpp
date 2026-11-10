@@ -20,6 +20,7 @@
 #include "Features/LinearLighting.h"
 #include "Features/Upscaling.h"
 #include "Utils/ColorSpace.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "Vram/DxvkMemory.h"
 
 #include <algorithm>
@@ -649,8 +650,12 @@ void PostProcessing::CopyToRenderTarget(
 	ID3D11Texture2D* srcTex,
 	ID3D11ShaderResourceView* srcSRV, const CopyCB& conversion)
 {
+	// Engine target fields can be tripwire handles: DXVK's context takes the objects they wrap.
+	auto* targetTex = RenderGraph::Engine::Tripwire::Unwrap(targetRT.texture);
+	srcTex = RenderGraph::Engine::Tripwire::Unwrap(srcTex);
+	srcSRV = RenderGraph::Engine::Tripwire::Unwrap(srcSRV);
 	const bool convert = conversion.gamma != 1.f || conversion.inputGamut != conversion.outputGamut;
-	if (!targetRT.texture || !srcTex || (!convert && targetRT.texture == srcTex))
+	if (!targetTex || !srcTex || (!convert && targetTex == srcTex))
 		return;
 
 	auto context = globals::d3d::context;
@@ -659,10 +664,10 @@ void PostProcessing::CopyToRenderTarget(
 	srcTex->GetDesc(&srcDesc);
 
 	D3D11_TEXTURE2D_DESC targetDesc;
-	targetRT.texture->GetDesc(&targetDesc);
+	targetTex->GetDesc(&targetDesc);
 
 	if (!convert && srcDesc.Format == targetDesc.Format) {
-		context->CopySubresourceRegion(targetRT.texture, 0, 0, 0, 0, srcTex, 0, nullptr);
+		context->CopySubresourceRegion(targetTex, 0, 0, 0, 0, srcTex, 0, nullptr);
 		return;
 	}
 
@@ -687,7 +692,7 @@ void PostProcessing::CopyToRenderTarget(
 		context->PSSetConstantBuffers(1, 1, &cb);
 	}
 
-	context->CopySubresourceRegion(targetRT.texture, 0, 0, 0, 0, convertTex->resource.get(), 0, nullptr);
+	context->CopySubresourceRegion(targetTex, 0, 0, 0, 0, convertTex->resource.get(), 0, nullptr);
 }
 
 void PostProcessing::BeginLinearProcessing(PostProcessFeature::TextureInfo& texture)
@@ -751,7 +756,8 @@ void PostProcessing::DrawBeforeUpscaling()
 
 	bool inMainLoadingMenu = state->IsMainOrLoadingMenuOpen();
 	auto gameTexMain = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
-	PostProcessFeature::TextureInfo lastTexColor = { gameTexMain.texture, gameTexMain.SRV };
+	// Engine target fields can be tripwire handles: the passes bind these through DXVK's context.
+	PostProcessFeature::TextureInfo lastTexColor = { RenderGraph::Engine::Tripwire::Unwrap(gameTexMain.texture), RenderGraph::Engine::Tripwire::Unwrap(gameTexMain.SRV) };
 	bool processing = false;
 
 	state->BeginPerfEvent("[Post Processing] Pre-Upscale");
@@ -819,7 +825,8 @@ void PostProcessing::PreProcess(RE::RENDER_TARGET a_input)
 	bool useMainCopy = ReadsMainCopy(a_input);
 
 	auto gameTexMain = useMainCopy ? gameTexMainCopyRT : gameTexMainRT;
-	PostProcessFeature::TextureInfo lastTexColor = { gameTexMain.texture, gameTexMain.SRV };
+	// Engine target fields can be tripwire handles: the passes bind these through DXVK's context.
+	PostProcessFeature::TextureInfo lastTexColor = { RenderGraph::Engine::Tripwire::Unwrap(gameTexMain.texture), RenderGraph::Engine::Tripwire::Unwrap(gameTexMain.SRV) };
 	BeginLinearProcessing(lastTexColor);
 	auto gameTexMainAlt = useMainCopy ? gameTexMainRT : gameTexMainCopyRT;
 

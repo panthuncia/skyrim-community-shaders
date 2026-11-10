@@ -13,6 +13,7 @@
 #include "I18n/I18n.h"
 #include "Menu.h"
 #include "Menu/ThemeManager.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Switches.h"
 #include "Shadercache.h"
 #include "State.h"
@@ -2181,7 +2182,8 @@ void LightLimitFix::CopyLocalShadowMaps()
 
 	// The frame's description goes to the path that holds the cache.
 	if (!localShadowOnGraph) {
-		CommitLocalShadowFrameD3D11(depthStencil.texture, depthStencil.depthSRV);
+		// Engine target fields can be tripwire handles: the D3D11 copy goes through DXVK, which takes the wrapped objects.
+		CommitLocalShadowFrameD3D11(RenderGraph::Engine::Tripwire::Unwrap(depthStencil.texture), RenderGraph::Engine::Tripwire::Unwrap(depthStencil.depthSRV));
 		return;
 	}
 	std::array<ORGLocalShadows::Copy, ORGLocalShadows::kMaxCopies> copies{};

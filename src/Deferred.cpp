@@ -21,6 +21,7 @@
 #include "Hooks.h"
 #include "ORGDeferredComposite.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
 
 struct DepthStates
@@ -346,7 +347,9 @@ void Deferred::DeferredPasses()
 	// composite would otherwise see the background where those objects stand. Water also
 	// samples this copy for edge fade and refraction.
 	auto finalDepthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
-	context->CopyResource(finalDepthCopy.texture, depth.texture);
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped objects.
+	using RenderGraph::Engine::Tripwire::Unwrap;
+	context->CopyResource(Unwrap(finalDepthCopy.texture), Unwrap(depth.texture));
 	sceneDepthFinal = true;
 	// The render graph's passes here, before the D3D11 passes below read what they write.
 	FrameAnchors::Run(FrameAnchors::Anchor::DeferredPasses);
@@ -382,16 +385,16 @@ void Deferred::DeferredPasses()
 
 		ID3D11ShaderResourceView* skylightingProbes = skylighting.loaded ? skylighting.ProbeArraySRV() : nullptr;
 		const std::array<ID3D11ShaderResourceView*, 16> srvs{
-			specular.SRV,                                                                         // t0  SpecularTexture
-			albedo.SRV,                                                                           // t1  AlbedoTexture
-			normalRoughness.SRV,                                                                  // t2  NormalRoughnessTexture
-			masks.SRV,                                                                            // t3  MasksTexture
+			Unwrap(specular.SRV),                                                                 // t0  SpecularTexture
+			Unwrap(albedo.SRV),                                                                   // t1  AlbedoTexture
+			Unwrap(normalRoughness.SRV),                                                          // t2  NormalRoughnessTexture
+			Unwrap(masks.SRV),                                                                    // t3  MasksTexture
 			dynamicCubemaps.loaded ? Util::GetCurrentSceneDepthSRV(false) : nullptr,              // t4  DepthTexture (24/32-bit; HLSL type baked at compile via TERRAIN_BLENDING)
-			dynamicCubemaps.loaded ? reflectance.SRV : nullptr,                                   // t5  ReflectanceTexture
+			dynamicCubemaps.loaded ? Unwrap(reflectance.SRV) : nullptr,                           // t5  ReflectanceTexture
 			dynamicCubemaps.loaded ? dynamicCubemaps.envTexture->srv.get() : nullptr,             // t6  EnvTexture
 			dynamicCubemaps.loaded ? dynamicCubemaps.envReflectionsTexture->srv.get() : nullptr,  // t7  EnvReflectionsTexture
 			dynamicCubemaps.loaded ? skylightingProbes : nullptr,                                 // t8  SkylightingProbeArray
-			masks2.SRV,                                                                           // t9  Masks2Texture (vertexAO in .x)
+			Unwrap(masks2.SRV),                                                                   // t9  Masks2Texture (vertexAO in .x)
 			ssgi_ao,                                                                              // t10 SsgiAoTexture
 			ssgi_hq_spec ? nullptr : ssgi_y,                                                      // t11 SsgiYTexture
 			ssgi_hq_spec ? nullptr : ssgi_cocg,                                                   // t12 SsgiCoCgTexture
@@ -417,7 +420,7 @@ void Deferred::DeferredPasses()
 
 			context->CSSetShaderResources(0, static_cast<UINT>(srvs.size()), srvs.data());
 
-			ID3D11UnorderedAccessView* uavs[3]{ main.UAV, normals.UAV, motionVectors.UAV };
+			ID3D11UnorderedAccessView* uavs[3]{ Unwrap(main.UAV), Unwrap(normals.UAV), Unwrap(motionVectors.UAV) };
 			context->CSSetUnorderedAccessViews(0, ARRAYSIZE(uavs), uavs, nullptr);
 
 			auto shader = interior ? GetComputeMainCompositeInterior() : GetComputeMainComposite();
@@ -766,7 +769,8 @@ void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumula
 		auto depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 		auto depthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
 
-		context->CopyResource(depthCopy.texture, depth.texture);
+		// Engine target fields can be tripwire handles: DXVK takes the wrapped objects.
+		context->CopyResource(RenderGraph::Engine::Tripwire::Unwrap(depthCopy.texture), RenderGraph::Engine::Tripwire::Unwrap(depth.texture));
 	}
 
 	// After this point, water starts rendering

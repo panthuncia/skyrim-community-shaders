@@ -5,6 +5,7 @@
 #include "Deferred.h"
 #include "Feature.h"
 #include "Features/TerrainBlending.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/FileRename.h"
@@ -57,9 +58,11 @@ namespace Util
 		auto renderer = globals::game::renderer;
 		if (!renderer)
 			return nullptr;
-		auto& zPrepassCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
+		// The field can be a tripwire handle (CS_ORG_ENGINE_TARGET_HANDLES). Callers bind it on DXVK's context, so they get the
+		// wrapped view.
+		auto* zPrepassCopy = RenderGraph::Engine::Tripwire::Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV);
 		if (globals::deferred && globals::deferred->sceneDepthFinal)
-			return zPrepassCopy.depthSRV;
+			return zPrepassCopy;
 
 		auto& tb = globals::features::terrainBlending;
 		if (tb.loaded && tb.settings.Enabled) {
@@ -67,7 +70,7 @@ namespace Util
 			if (auto* srv = tb.GetBlendedDepthSRV(prefer16bit))
 				return srv;
 		}
-		return zPrepassCopy.depthSRV;
+		return zPrepassCopy;
 	}
 
 	ID3D11ShaderResourceView* GetSRVFromRTV(const ID3D11RenderTargetView* a_rtv)

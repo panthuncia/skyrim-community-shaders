@@ -369,8 +369,9 @@ namespace WaterBlendHistory
 			// Clear stale coverage left by discarded non-water pixels
 			const float clearColor[4] = { 0.f, 0.f, 0.f, 0.f };
 			const auto target = renderTargets[1];
+			// Engine target fields can be tripwire handles: DXVK's context takes the wrapped view.
 			globals::d3d::context->ClearRenderTargetView(
-				globals::game::renderer->GetRuntimeData().renderTargets[target].RTV,
+				RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetRuntimeData().renderTargets[target].RTV),
 				clearColor);
 
 			func(imageSpaceShader, shape, param);

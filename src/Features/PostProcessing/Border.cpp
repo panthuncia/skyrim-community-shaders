@@ -2,6 +2,7 @@
 
 #include "Deferred.h"
 #include "I18n/I18n.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Util.h"
@@ -145,9 +146,10 @@ void Border::ClearMotionVectorsForFrameGen()
 	}
 	auto motion = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
 
-	ID3D11ShaderResourceView* srvs[1] = { depthSRV };
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+	ID3D11ShaderResourceView* srvs[1] = { RenderGraph::Engine::Tripwire::Unwrap(depthSRV) };
 	context->CSSetShaderResources(0, 1, srvs);
-	ID3D11UnorderedAccessView* uavs[1] = { motion.UAV };
+	ID3D11UnorderedAccessView* uavs[1] = { RenderGraph::Engine::Tripwire::Unwrap(motion.UAV) };
 	context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
 	ID3D11Buffer* cb = borderCB->CB();
 	context->CSSetConstantBuffers(1, 1, &cb);
@@ -184,9 +186,10 @@ void Border::Draw(TextureInfo& inout_tex)
 		return;
 	}
 	auto motion = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
-	ID3D11ShaderResourceView* srvs[2] = { inout_tex.srv, depthSRV };
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+	ID3D11ShaderResourceView* srvs[2] = { inout_tex.srv, RenderGraph::Engine::Tripwire::Unwrap(depthSRV) };
 	context->CSSetShaderResources(0, 2, srvs);
-	ID3D11UnorderedAccessView* uavs[2] = { texOutput->uav.get(), motion.UAV };
+	ID3D11UnorderedAccessView* uavs[2] = { texOutput->uav.get(), RenderGraph::Engine::Tripwire::Unwrap(motion.UAV) };
 	context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
 	ID3D11Buffer* cb = borderCB->CB();
 	context->CSSetConstantBuffers(1, 1, &cb);

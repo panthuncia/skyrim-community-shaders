@@ -13,6 +13,7 @@
 
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "TextureStreaming/Census.h"
@@ -491,7 +492,8 @@ namespace DCLF
 				NoteImported(window.get(), a_sourceTag, nullptr);
 				return Reject::None;
 			}
-			auto* view = window ? window.get() : a_entry.view.get();
+			// An engine target's view can be a tripwire handle (CS_ORG_ENGINE_TARGET_HANDLES): DXVK's exports take the view it wraps.
+			auto* view = RenderGraph::Engine::Tripwire::Unwrap(window ? window.get() : a_entry.view.get());
 			D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
 			view->GetDesc(&viewDesc);
 			rhi::SrvDesc srv{};

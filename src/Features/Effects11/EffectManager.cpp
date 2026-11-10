@@ -6,6 +6,7 @@
 #include "Features/RainRefraction.h"
 #include "Globals.h"
 #include "Menu.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 #include "Utils/D3D.h"
 #include "Utils/Game.h"
@@ -458,8 +459,9 @@ bool EffectManager::ExecuteEffects(RE::BSGraphics::RenderTargetData& a_input, RE
 
 	// Effects sample kMAIN as TextureOriginal, so mirror any other input into it
 	auto& textureOriginal = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+	// Engine target fields can be tripwire handles: the passes below take the DXVK objects they wrap.
 	if (&a_input != &textureOriginal && a_input.SRV && textureOriginal.RTV)
-		CopyToTarget(a_input.texture, a_input.SRV, textureOriginal.texture, textureOriginal.RTV);
+		CopyToTarget(RenderGraph::Engine::Tripwire::Unwrap(a_input.texture), RenderGraph::Engine::Tripwire::Unwrap(a_input.SRV), RenderGraph::Engine::Tripwire::Unwrap(textureOriginal.texture), RenderGraph::Engine::Tripwire::Unwrap(textureOriginal.RTV));
 
 	// Set our render state
 	context->RSSetState(rasterizerState.get());
@@ -474,7 +476,7 @@ bool EffectManager::ExecuteEffects(RE::BSGraphics::RenderTargetData& a_input, RE
 	context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 
 	globals::profiler->BeginPass("Effects11::ColorCorrection");
-	ApplyColorCorrection(textureOriginal.UAV);
+	ApplyColorCorrection(RenderGraph::Engine::Tripwire::Unwrap(textureOriginal.UAV));
 	globals::profiler->EndPass();
 
 	auto& textureManager = TextureManager::GetSingleton();
@@ -482,7 +484,7 @@ bool EffectManager::ExecuteEffects(RE::BSGraphics::RenderTargetData& a_input, RE
 	ExecuteEffect(enbDepthOfField, ids.useDepthOfField);
 
 	if (WillEffectRun(enbBloom, ids.useBloom) || WillEffectRun(enbLens, ids.useLens) || WillEffectRun(enbAdaptation, ids.useAdaptation))
-		textureManager.UpdateDownsampledTexture(textureOriginal.SRV);
+		textureManager.UpdateDownsampledTexture(RenderGraph::Engine::Tripwire::Unwrap(textureOriginal.SRV));
 
 	ExecuteEffect(enbBloom, ids.useBloom);
 	ExecuteEffect(enbLens, ids.useLens);
@@ -496,7 +498,7 @@ bool EffectManager::ExecuteEffects(RE::BSGraphics::RenderTargetData& a_input, RE
 	bool wroteOutput = false;
 	if (textureSDRTemp && a_output.RTV) {
 		globals::profiler->BeginPass("Effects11::CopyToOutput");
-		wroteOutput = CopyTexture(textureSDRTemp->srv.get(), a_output.RTV);
+		wroteOutput = CopyTexture(textureSDRTemp->srv.get(), RenderGraph::Engine::Tripwire::Unwrap(a_output.RTV));
 		globals::profiler->EndPass();
 	}
 
@@ -980,8 +982,9 @@ void EffectManager::UpdateCommonVariablesForEffect(Effect& effect)
 
 	auto renderer = globals::game::renderer;
 
+	// Engine target fields can be tripwire handles: the effect variable takes the DXVK object.
 	effect.SetShaderResourceVariable("TextureDepth",
-		renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV);
+		RenderGraph::Engine::Tripwire::Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV));
 
 	static const std::string renderTargets[] = {
 		"RenderTargetRGBA32", "RenderTargetRGBA64", "RenderTargetRGBA64F",

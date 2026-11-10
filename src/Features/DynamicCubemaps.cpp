@@ -7,6 +7,7 @@
 #include "DynamicCubemaps/ORGDynamicCubemaps.h"
 #include "I18n/I18n.h"
 #include "LinearLighting.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/D3D.h"
@@ -336,7 +337,8 @@ void DynamicCubemaps::UpdateCubemapCapture(bool a_reflections)
 	auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
 	auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 
-	ID3D11ShaderResourceView* srvs[2] = { depth.depthSRV, main.SRV };
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped objects.
+	ID3D11ShaderResourceView* srvs[2] = { RenderGraph::Engine::Tripwire::Unwrap(depth.depthSRV), RenderGraph::Engine::Tripwire::Unwrap(main.SRV) };
 	context->CSSetShaderResources(0, 2, srvs);
 
 	ID3D11UnorderedAccessView* uavs[4];
@@ -411,7 +413,7 @@ void DynamicCubemaps::Inferrence(bool a_reflections)
 
 	auto& cubemap = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
 
-	ID3D11ShaderResourceView* srvs[3] = { (a_reflections ? envCaptureReflectionsTexture : envCaptureTexture)->srv.get(), cubemap.SRV, defaultCubemap };
+	ID3D11ShaderResourceView* srvs[3] = { (a_reflections ? envCaptureReflectionsTexture : envCaptureTexture)->srv.get(), RenderGraph::Engine::Tripwire::Unwrap(cubemap.SRV), defaultCubemap };
 	context->CSSetShaderResources(0, 3, srvs);
 
 	context->CSSetSamplers(0, 1, &computeSampler);

@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/Skylighting.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #include <filesystem>
 #include <fstream>
@@ -111,7 +112,8 @@ namespace DCLF::Features::OcclusionMaps
 				if (a_map == 0)
 					texture = globals::features::skylighting.texOcclusion ? globals::features::skylighting.texOcclusion->resource.get() : nullptr;
 				else if (auto* renderer = globals::game::renderer)
-					texture = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP].texture;
+					// DXVK's texture: it is copied through DXVK's context, and the field can be a tripwire handle.
+					texture = RenderGraph::Engine::Tripwire::Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP].texture);
 				map.texture = texture;
 			}
 			if (!texture || a_stage > 1)

@@ -5,6 +5,7 @@
 #include "Effects11/SettingManager.h"
 #include "Features/CloudShadows/ORGCloudShadows.h"
 #include "Globals.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 #include "Utils/D3D.h"
 
@@ -143,9 +144,11 @@ void CloudShadows::SkyShaderHacks()
 	ID3D11DepthStencilView* dsv = nullptr;
 	context->OMGetRenderTargets(3, rtvs, &dsv);
 
+	// The faces can be tripwire handles; OMGetRenderTargets on DXVK's context returns what they wrap.
+	using RenderGraph::Engine::Tripwire::Unwrap;
 	int side = -1;
 	for (int i = 0; i < 6; ++i)
-		if (rtvs[0] == reflections.cubeSideRTV[i]) {
+		if (rtvs[0] && rtvs[0] == Unwrap(reflections.cubeSideRTV[i])) {
 			side = i;
 			break;
 		}
@@ -184,7 +187,8 @@ void CloudShadows::SkyShaderHacks()
 		globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
 
 		auto cubemapDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kCUBEMAP_REFLECTIONS];
-		context->PSSetShaderResources(17, 1, &cubemapDepth.depthSRV);
+		ID3D11ShaderResourceView* cubemapDepthSRV = Unwrap(cubemapDepth.depthSRV);
+		context->PSSetShaderResources(17, 1, &cubemapDepthSRV);
 
 		renderedLayersMask[side] |= (1u << layer);
 	}

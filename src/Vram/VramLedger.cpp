@@ -7,6 +7,7 @@
 
 #include "Globals.h"
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "Vram/Attribution.h"
 #include "Vram/Debug.h"
 #include "Vram/DxvkMemory.h"
@@ -572,6 +573,8 @@ namespace Vram
 		// Owned "Game/<kind>/<name>"; named after the slot unless already named (a CS replacement's own name is kept). No "::"
 		// in the name: it would read as a CS prefix (OwnerFromD3DName).
 		auto tag = [a_overwrite](ID3D11DeviceChild* a_resource, std::string_view a_kind, std::string_view a_name, std::string_view a_suffix = {}) {
+			// Engine target fields can be tripwire handles: DXVK's export takes the wrapped object.
+			a_resource = RenderGraph::Engine::Tripwire::Unwrap(a_resource);
 			if (!a_resource)
 				return;
 			SetOwner(a_resource, fmt::format("Game/{}/{}", a_kind, a_name).c_str(), a_overwrite);

@@ -1824,8 +1824,11 @@ void Upscaling::Upscale()
 		state->BeginPerfEvent("Upscaling");
 		TracyD3D11Zone(globals::state->tracyCtx, "Upscaling Dispatch");
 
-		auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
-		auto& depthTex = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
+		// Engine target fields can be tripwire handles: Streamline and DXVK take the wrapped objects.
+		using RenderGraph::Engine::Tripwire::Unwrap;
+		auto* mainTexture = Unwrap(renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture);
+		auto* depthTexture = Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture);
+		auto* motionTexture = Unwrap(motionVector.texture);
 		const auto displaySize = float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
 		const auto renderSize = Util::ConvertToDynamic(displaySize);
 		auto result = Streamline::EvaluationResult::kFailed;
@@ -1837,21 +1840,21 @@ void Upscaling::Upscale()
 			switch (method) {
 			case UpscaleMethod::kFSR:
 				result = Streamline::GetSingleton()->EvaluateFSR(
-					main.texture, upscaled, depthTex.texture, motionVector.texture,
+					mainTexture, upscaled, depthTexture, motionTexture,
 					(uint32_t)renderSize.x, (uint32_t)renderSize.y,
 					(uint32_t)displaySize.x, (uint32_t)displaySize.y,
 					settings.qualityMode, settings.sharpnessFSR, jitter.x, jitter.y);
 				break;
 			case UpscaleMethod::kDLSS:
 				result = Streamline::GetSingleton()->EvaluateDLSS(
-					main.texture, upscaled, depthTex.texture, motionVector.texture,
+					mainTexture, upscaled, depthTexture, motionTexture,
 					(uint32_t)renderSize.x, (uint32_t)renderSize.y,
 					(uint32_t)displaySize.x, (uint32_t)displaySize.y,
 					settings.qualityMode, jitter.x, jitter.y);
 				break;
 			case UpscaleMethod::kXeSS:
 				result = Streamline::GetSingleton()->EvaluateXeSS(
-					main.texture, upscaled, depthTex.texture, motionVector.texture,
+					mainTexture, upscaled, depthTexture, motionTexture,
 					(uint32_t)renderSize.x, (uint32_t)renderSize.y,
 					(uint32_t)displaySize.x, (uint32_t)displaySize.y,
 					settings.qualityMode, settings.sharpnessFSR, jitter.x, jitter.y);
@@ -1868,7 +1871,7 @@ void Upscaling::Upscale()
 		// into that list's init buffer, ahead of any timestamp a D3D11 timer here would write.
 		// CS_ORG_UPSCALING: the copy is a pass at the Upscale anchor, which runs after this point (PerformUpscaling).
 		if (result == Streamline::EvaluationResult::kReady && !ORGUpscaling::Get().QueueCopyToMain())
-			context->CopyResource(main.texture, upscaled);
+			context->CopyResource(mainTexture, upscaled);
 		DrawcallLimitFix::TargetDumpPoint("after upscale", upscaled);
 
 		state->EndPerfEvent();
@@ -1988,7 +1991,11 @@ void Upscaling::UpscaleDepth()
 	auto bufferArray = jitterCB->CB();
 	context->PSSetConstantBuffers(0, 1, &bufferArray);
 
+	// Engine target fields can be tripwire handles: DXVK's context takes the wrapped objects.
+	using RenderGraph::Engine::Tripwire::Unwrap;
 	const auto copyIfNonAliased = [&](ID3D11Resource* dst, ID3D11Resource* src) {
+		dst = Unwrap(dst);
+		src = Unwrap(src);
 		if (dst && src && dst != src) {
 			context->CopyResource(dst, src);
 		}
@@ -2003,11 +2010,11 @@ void Upscaling::UpscaleDepth()
 
 		copyIfNonAliased(refractionNormals.textureCopy, refractionNormals.texture);
 
-		ID3D11ShaderResourceView* srvs[] = { refractionNormals.SRVCopy, depthCopy.depthSRV, depthCopy.stencilSRV };
+		ID3D11ShaderResourceView* srvs[] = { Unwrap(refractionNormals.SRVCopy), Unwrap(depthCopy.depthSRV), Unwrap(depthCopy.stencilSRV) };
 		context->PSSetShaderResources(0, ARRAYSIZE(srvs), srvs);
 
-		ID3D11RenderTargetView* rtvs[] = { refractionNormals.RTV, saoCameraZ.RTV };
-		context->OMSetRenderTargets(2, rtvs, depth.views[0]);
+		ID3D11RenderTargetView* rtvs[] = { Unwrap(refractionNormals.RTV), Unwrap(saoCameraZ.RTV) };
+		context->OMSetRenderTargets(2, rtvs, Unwrap(depth.views[0]));
 
 		context->PSSetShader(depthUpscalePS, nullptr, 0);
 		globals::profiler->BeginPass("Upscaling::DepthUpscale");
@@ -2026,10 +2033,10 @@ void Upscaling::UpscaleDepth()
 
 		context->OMSetDepthStencilState(nullptr, 0x00);
 
-		ID3D11ShaderResourceView* srvs[] = { underwaterMask.SRVCopy, depthCopy.depthSRV };
+		ID3D11ShaderResourceView* srvs[] = { Unwrap(underwaterMask.SRVCopy), Unwrap(depthCopy.depthSRV) };
 		context->PSSetShaderResources(0, ARRAYSIZE(srvs), srvs);
 
-		ID3D11RenderTargetView* rtvs[] = { underwaterMask.RTV };
+		ID3D11RenderTargetView* rtvs[] = { Unwrap(underwaterMask.RTV) };
 		context->OMSetRenderTargets(ARRAYSIZE(rtvs), rtvs, nullptr);
 
 		context->PSSetShader(underwaterMaskPS, nullptr, 0);
@@ -2057,7 +2064,9 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 		return;
 
 	auto* renderer = globals::game::renderer;
-	auto& motionVector = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
+	// Engine target fields can be tripwire handles: Streamline takes the wrapped objects.
+	using RenderGraph::Engine::Tripwire::Unwrap;
+	auto* motionTexture = Unwrap(renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR].texture);
 
 	if (fgMethod == FrameGenMethod::kDLSSG) {
 		FrameGen::Controller::GetSingleton()->EngageDLSSG();
@@ -2067,14 +2076,14 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 			const auto renderSize = Util::ConvertToDynamic(displaySize, true);
 			auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 			auto& depthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN_COPY];
-			ID3D11Resource* fgDepth = (IsUpscalingActive() && depthCopy.texture) ? depthCopy.texture : depth.texture;
+			ID3D11Resource* fgDepth = Unwrap((IsUpscalingActive() && depthCopy.texture) ? depthCopy.texture : depth.texture);
 
 			if (!IsUpscalingActive()) {
 				CreateUpscaledTexture();
 				auto& mainColor = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 				if (auto* upscaled = UpscaledResource(); upscaled && mainColor.texture)
 					(void)Streamline::GetSingleton()->EvaluateFSR(
-						mainColor.texture, upscaled, fgDepth, motionVector.texture,
+						Unwrap(mainColor.texture), upscaled, fgDepth, motionTexture,
 						(uint32_t)displaySize.x, (uint32_t)displaySize.y, (uint32_t)displaySize.x, (uint32_t)displaySize.y,
 						0, 0.0f, jitter.x, jitter.y);
 			}
@@ -2084,7 +2093,7 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 			if (s_lastTagFrame != tagFrame) {
 				s_lastTagFrame = tagFrame;
 				Streamline::GetSingleton()->TagDLSSGResources(
-					fgDepth, motionVector.texture, a_hudlessColor,
+					fgDepth, motionTexture, a_hudlessColor,
 					(uint32_t)renderSize.x, (uint32_t)renderSize.y,
 					(uint32_t)displaySize.x, (uint32_t)displaySize.y);
 			}
@@ -2094,9 +2103,9 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 		const auto renderSize = Util::ConvertToDynamic(displaySize, true);
 		auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 		auto& depthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN_COPY];
-		ID3D11Resource* fgDepth = (IsUpscalingActive() && depthCopy.texture) ? depthCopy.texture : depth.texture;
+		ID3D11Resource* fgDepth = Unwrap((IsUpscalingActive() && depthCopy.texture) ? depthCopy.texture : depth.texture);
 		(void)Streamline::GetSingleton()->EvaluateFSRFrameGen(
-			fgDepth, motionVector.texture, a_hudlessColor,
+			fgDepth, motionTexture, a_hudlessColor,
 			(uint32_t)renderSize.x, (uint32_t)renderSize.y,
 			(uint32_t)displaySize.x, (uint32_t)displaySize.y,
 			jitter.x, jitter.y);

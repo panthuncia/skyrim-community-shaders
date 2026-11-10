@@ -28,6 +28,7 @@ ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 #	include "Features/LightLimitFix.h"
 #	include "Features/LightLimitFix/ORGLightCulling.h"
 #	include "Features/LightLimitFix/ORGLocalShadows.h"
+#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "Features/Skylighting.h"
 #	include "Features/Skylighting/ORGSkylighting.h"
 #	include "Features/TerrainBlending/ORGTerrainBlending.h"
@@ -559,9 +560,11 @@ namespace
 		D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
 		a_view->GetDesc(&viewDesc);
 		const bool wholeArray = viewDesc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+		// The view and the depth fields can be tripwire handles or DXVK's objects: compare what they wrap.
+		using RenderGraph::Engine::Tripwire::Unwrap;
 		const auto& depthStencils = globals::game::renderer->GetDepthStencilData().depthStencils;
 		for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); ++i)
-			if (depthStencils[i].texture == texture.get())
+			if (depthStencils[i].texture && Unwrap(depthStencils[i].texture) == Unwrap(texture.get()))
 				return { FrameAnchors::EngineDepth(i), {}, wholeArray };
 		RE::BSGraphics::DepthStencilData target{};
 		target.texture = texture.get();
@@ -574,7 +577,8 @@ namespace
 	{
 		if (!a_view || !globals::game::renderer)
 			return {};
-		if (a_view == globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV)
+		using RenderGraph::Engine::Tripwire::Unwrap;
+		if (Unwrap(a_view) == Unwrap(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV))
 			return { FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY), {} };
 		// Terrain Blending's 16-bit blended depth.
 		return Published(ORGTerrainBlending::kBlendedDepth16Id, a_view);

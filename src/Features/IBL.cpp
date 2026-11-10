@@ -9,6 +9,7 @@
 #include "Effects11.h"
 #include "Effects11/SettingManager.h"
 #include "Globals.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #include "../I18n/I18n.h"
 #include <DDSTextureLoader.h>
@@ -240,7 +241,8 @@ void IBL::Prepass()
 	{
 		auto renderer = globals::game::renderer;
 		auto& reflections = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
-		srvs.at(0) = reflections.SRV;
+		// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+		srvs.at(0) = RenderGraph::Engine::Tripwire::Unwrap(reflections.SRV);
 		uavs.at(0) = skyIBLTexture->uav.get();
 
 		context->CSSetShaderResources(0, (uint)srvs.size(), srvs.data());

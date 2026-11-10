@@ -3,6 +3,7 @@
 #include "../I18n/I18n.h"
 #include "Deferred.h"
 #include "Features/SubsurfaceScattering/ORGSubsurfaceScattering.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 
@@ -272,12 +273,14 @@ void SubsurfaceScattering::DrawSSS()
 		auto albedo = renderer->GetRuntimeData().renderTargets[ALBEDO];
 		auto normal = renderer->GetRuntimeData().renderTargets[NORMALROUGHNESS];
 
+		// Engine target fields can be tripwire handles: DXVK takes the wrapped objects.
+		using RenderGraph::Engine::Tripwire::Unwrap;
 		ID3D11ShaderResourceView* views[5];
-		views[0] = main.SRV;
+		views[0] = Unwrap(main.SRV);
 		views[1] = Util::GetCurrentSceneDepthSRV(true);
-		views[2] = mask.SRV;
-		views[3] = albedo.SRV;
-		views[4] = normal.SRV;
+		views[2] = Unwrap(mask.SRV);
+		views[3] = Unwrap(albedo.SRV);
+		views[4] = Unwrap(normal.SRV);
 
 		context->CSSetShaderResources(0, ARRAYSIZE(views), views);
 
@@ -327,7 +330,7 @@ void SubsurfaceScattering::DrawSSS()
 				views[0] = blurHorizontalTemp->srv.get();
 				context->CSSetShaderResources(0, 1, views);
 
-				ID3D11UnorderedAccessView* uavs[1] = { main.UAV };
+				ID3D11UnorderedAccessView* uavs[1] = { Unwrap(main.UAV) };
 				context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
 
 				auto shader = GetComputeShaderVerticalBlur();
@@ -342,7 +345,7 @@ void SubsurfaceScattering::DrawSSS()
 			{
 				TracyD3D11Zone(globals::state->tracyCtx, "Subsurface Scattering - Burley");
 
-				ID3D11UnorderedAccessView* uavs[1] = { main.UAV };
+				ID3D11UnorderedAccessView* uavs[1] = { Unwrap(main.UAV) };
 				context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
 
 				auto shader = GetComputeShaderBurley();

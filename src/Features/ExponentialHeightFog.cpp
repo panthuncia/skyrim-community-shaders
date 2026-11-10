@@ -13,6 +13,7 @@
 #include "Features/TerrainShadows.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 #include "Utils/D3D.h"
 #include "Utils/Game.h"
@@ -565,7 +566,8 @@ ID3D11ShaderResourceView* ExponentialHeightFog::UpdateEngineLocalShadowData()
 	if (!engineLocalShadowCB)
 		engineLocalShadowCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<EngineLocalShadows>(), "ExponentialHeightFog::EngineLocalShadows");
 	engineLocalShadowCB->Update(shadows);
-	return view;
+	// The D3D11 dispatch binds it through DXVK's context; the engine's field can be a tripwire handle.
+	return RenderGraph::Engine::Tripwire::Unwrap(view);
 }
 
 ID3D11ShaderResourceView* ExponentialHeightFog::BuildEngineLocalShadowData(EngineLocalShadows& a_shadows) const

@@ -3,6 +3,7 @@
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
 #include "Features/PostProcessing.h"
 #include "Features/Upscaling.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "Util.h"
 
@@ -501,7 +502,8 @@ void MotionBlur::ExecuteHorizontalPass()
 	if (!motionVectorTex.texture || !motionVectorTex.SRV || !horizontalPassTexture || !horizontalPassTexture->uav)
 		return;
 
-	ID3D11ShaderResourceView* velocitySRV = motionVectorTex.SRV;
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+	ID3D11ShaderResourceView* velocitySRV = RenderGraph::Engine::Tripwire::Unwrap(motionVectorTex.SRV);
 
 	// Setup horizontal pass
 	ID3D11Buffer* reductionCB = reductionPassConstantBufferObj->CB();
@@ -550,7 +552,9 @@ void MotionBlur::ExecuteBlurPass(TextureInfo& inout_tex)
 	if (!motionVectorTex.SRV || !depthSRV || !neighborMaxTexture || !neighborMaxTexture->srv || !blurOutputTexture || !blurOutputTexture->uav)
 		return;
 
-	ID3D11ShaderResourceView* velocitySRV = motionVectorTex.SRV;
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+	ID3D11ShaderResourceView* velocitySRV = RenderGraph::Engine::Tripwire::Unwrap(motionVectorTex.SRV);
+	depthSRV = RenderGraph::Engine::Tripwire::Unwrap(depthSRV);
 
 	// Set samplers
 	if (!linearSampler || !pointSampler)

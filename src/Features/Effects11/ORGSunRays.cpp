@@ -28,6 +28,7 @@ ORGSunRays& ORGSunRays::Get()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -423,7 +424,8 @@ namespace
 		a_view->GetResource(resource.put());
 		const auto& depthStencils = globals::game::renderer->GetDepthStencilData().depthStencils;
 		for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); ++i)
-			if (depthStencils[i].texture && depthStencils[i].texture == resource.get())
+			// The view is DXVK's (from the raw context); a field can be a tripwire handle that wraps it.
+			if (depthStencils[i].texture && RenderGraph::Engine::Tripwire::Unwrap(depthStencils[i].texture) == resource.get())
 				return { FrameAnchors::EngineDepth(i), {} };
 		// Terrain Blending's blended depth: by name on its ORG path (published, ordered after the blend; importing its export would make
 		// a second graph resource of the same image), else imported.

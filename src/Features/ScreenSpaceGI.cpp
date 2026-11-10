@@ -6,6 +6,7 @@
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
 #include "Deferred.h"
 #include "ScreenSpaceGI/ORGScreenSpaceGI.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 #include "Util.h"
 
@@ -830,6 +831,8 @@ void ScreenSpaceGI::DrawSSGI()
 
 	auto renderer = globals::game::renderer;
 	auto rts = renderer->GetRuntimeData().renderTargets;
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped objects.
+	using RenderGraph::Engine::Tripwire::Unwrap;
 	auto deferred = globals::deferred;
 
 	const auto [resolution, internalRes] = GetDispatchSizes();
@@ -877,9 +880,9 @@ void ScreenSpaceGI::DrawSSGI()
 		resetViews();
 		srvs.at(0) = rts[deferred->forwardRenderTargets[0]].SRV;
 		srvs.at(1) = texWorkingDepth->srv.get();
-		srvs.at(2) = rts[NORMALROUGHNESS].SRV;
+		srvs.at(2) = Unwrap(rts[NORMALROUGHNESS].SRV);
 		srvs.at(3) = texPrevGeo->srv.get();
-		srvs.at(4) = rts[RE::RENDER_TARGET::kMOTION_VECTOR].SRV;
+		srvs.at(4) = Unwrap(rts[RE::RENDER_TARGET::kMOTION_VECTOR].SRV);
 		srvs.at(5) = texAccumFrames[lastFrameAccumTexIdx]->srv.get();
 		srvs.at(6) = texAo[inputAoTexIdx]->srv.get();
 		srvs.at(7) = texIlY[inputGITexIdx]->srv.get();
@@ -933,7 +936,7 @@ void ScreenSpaceGI::DrawSSGI()
 		TracyD3D11Zone(globals::state->tracyCtx, "SSGI - Prefilter Normals");
 
 		resetViews();
-		srvs.at(0) = rts[NORMALROUGHNESS].SRV;
+		srvs.at(0) = Unwrap(rts[NORMALROUGHNESS].SRV);
 		uavs.at(0) = uavNormal[0].get();
 		uavs.at(1) = uavNormal[1].get();
 		uavs.at(2) = uavNormal[2].get();
@@ -954,7 +957,7 @@ void ScreenSpaceGI::DrawSSGI()
 
 		resetViews();
 		srvs.at(0) = texWorkingDepth->srv.get();
-		srvs.at(1) = rts[NORMALROUGHNESS].SRV;
+		srvs.at(1) = Unwrap(rts[NORMALROUGHNESS].SRV);
 		srvs.at(2) = texRadiance->srv.get();
 		srvs.at(3) = texNoise->srv.get();
 		srvs.at(4) = texAccumFrames[lastFrameAccumTexIdx]->srv.get();
@@ -989,7 +992,7 @@ void ScreenSpaceGI::DrawSSGI()
 
 		resetViews();
 		srvs.at(0) = texWorkingDepth->srv.get();
-		srvs.at(1) = rts[NORMALROUGHNESS].SRV;
+		srvs.at(1) = Unwrap(rts[NORMALROUGHNESS].SRV);
 		srvs.at(2) = texAccumFrames[lastFrameAccumTexIdx]->srv.get();
 		srvs.at(3) = texIlY[inputGITexIdx]->srv.get();
 		srvs.at(4) = texIlCoCg[inputGITexIdx]->srv.get();
