@@ -2636,8 +2636,28 @@ bool RenderGraphRuntime::DescribeResource(IUnknown* a_object, DxvkOrgInteropReso
 	return described;
 }
 
+namespace
+{
+	/**
+	 * @brief A batch for DXVK: engine fields may hold tripwire handles (CS_ORG_ENGINE_TARGET_HANDLES), and DXVK takes the objects
+	 * they wrap. Copies into a_scratch only when the batch holds a handle.
+	 */
+	std::span<IUnknown* const> UnwrapBatch(std::span<IUnknown* const> a_objects, std::vector<IUnknown*>& a_scratch)
+	{
+		using RenderGraph::Engine::Tripwire::IsHandle;
+		if (std::none_of(a_objects.begin(), a_objects.end(), [](IUnknown* a_object) { return a_object && IsHandle(a_object); }))
+			return a_objects;
+		a_scratch.assign(a_objects.begin(), a_objects.end());
+		for (auto& object : a_scratch)
+			object = RenderGraph::Engine::Tripwire::UnwrapObject(object);
+		return a_scratch;
+	}
+}
+
 bool RenderGraphRuntime::DescribeResources(std::span<IUnknown* const> a_objects, std::span<DxvkOrgInteropResourceInfo> a_infos, std::span<HRESULT> a_results)
 {
+	std::vector<IUnknown*> scratch;
+	a_objects = UnwrapBatch(a_objects, scratch);
 	if (!impl || !impl->getResourceInfos || a_infos.size() != a_objects.size() || a_results.size() != a_objects.size())
 		return false;
 	for (auto& info : a_infos) {
@@ -2659,6 +2679,8 @@ bool RenderGraphRuntime::PinlessImports() const
 
 bool RenderGraphRuntime::TrackResources(std::span<IUnknown* const> a_objects, std::span<DxvkOrgInteropTrackedResource> a_resources, std::span<HRESULT> a_results)
 {
+	std::vector<IUnknown*> scratch;
+	a_objects = UnwrapBatch(a_objects, scratch);
 	if (!PinlessImports() || a_resources.size() != a_objects.size() || a_results.size() != a_objects.size())
 		return false;
 	for (auto& resource : a_resources) {
@@ -2676,6 +2698,8 @@ bool RenderGraphRuntime::TrackResources(std::span<IUnknown* const> a_objects, st
 
 void RenderGraphRuntime::UntrackResources(std::span<IUnknown* const> a_objects)
 {
+	std::vector<IUnknown*> scratch;
+	a_objects = UnwrapBatch(a_objects, scratch);
 	if (PinlessImports() && !a_objects.empty())
 		impl->untrackResources(globals::d3d::device, static_cast<UINT>(a_objects.size()), a_objects.data());
 }
