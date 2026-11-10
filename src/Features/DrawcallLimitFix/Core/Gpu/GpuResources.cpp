@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
@@ -104,6 +105,19 @@ namespace DCLF
 				byCookie.erase(c);
 			entries.erase(it);
 			Bump(counters.cached, -1);
+		}
+
+		// An engine buffer the ORG owns (CS_ORG_ENGINE_BUFFERS=1) is read directly: nothing to describe, pin or track, and it never
+		// moves. The lease's reference keeps the engine's object, and so the ORG buffer, alive. Never passed to DXVK: it may be a
+		// tripwire handle.
+		if (const auto direct = RenderGraph::Engine::Buffers::Resolve(a_buffer)) {
+			if (!direct->address) {
+				Bump(counters.rejected, 1);
+				return std::nullopt;
+			}
+			winrt::com_ptr<ID3D11Buffer> reference;
+			reference.copy_from(a_buffer);
+			return Insert(a_buffer, std::move(reference), Buffer{ direct->vkBuffer, 0, direct->size, direct->address }, nullptr);
 		}
 
 		// Resolved by this pass's Prefetch (or the pass before's), under its reference: the description is still this buffer's.
@@ -259,6 +273,9 @@ namespace DCLF
 			if (!buffer || prefetched.contains(buffer) || prefetchedBefore.contains(buffer))
 				continue;
 			if (const auto it = entries.find(buffer); it != entries.end() && !it->second.owner.expired())
+				continue;
+			// The ORG's own buffers need no description (Acquire reads them directly).
+			if (RenderGraph::Engine::Buffers::Resolve(buffer))
 				continue;
 			if (!batch)
 				batch = std::make_shared<Batch>();
