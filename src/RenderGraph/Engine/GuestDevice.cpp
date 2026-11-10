@@ -163,7 +163,7 @@ namespace RenderGraph::Engine
 		PFN_vkGetDeviceProcAddr getDeviceProcAddr = nullptr;
 		VkDevice vkDevice = VK_NULL_HANDLE;
 
-		static void OnInstance(void* a_user, void* a_createInfo)
+		static bool OnInstance(void* a_user, void* a_createInfo)
 		{
 			auto* self = static_cast<State*>(a_user);
 			auto* info = static_cast<VkInstanceCreateInfo*>(a_createInfo);
@@ -177,9 +177,10 @@ namespace RenderGraph::Engine
 				self->instanceRequirements.extensionCount);
 			if (info->pApplicationInfo && info->pApplicationInfo->apiVersion < self->instanceRequirements.apiVersion)
 				self->hookFailure = "the instance's Vulkan version is below DXVK's";
+			return self->hookFailure.empty();
 		}
 
-		static void OnDevice(void* a_user, void* a_instance, void* a_physicalDevice, void* a_createInfo)
+		static bool OnDevice(void* a_user, void* a_instance, void* a_physicalDevice, void* a_createInfo)
 		{
 			auto* self = static_cast<State*>(a_user);
 			auto* info = static_cast<VkDeviceCreateInfo*>(a_createInfo);
@@ -202,7 +203,7 @@ namespace RenderGraph::Engine
 			DxvkOrgGuestDeviceRequirements requirements{ DXVK_ORG_GUEST_VERSION };
 			if (!model || FAILED(self->getDeviceRequirements(&query, &requirements))) {
 				self->hookFailure = model ? "DXVK cannot run on BasicRHI's device (see DXVK's log)" : "BasicRHI chose no descriptor model DXVK shares";
-				return;
+				return false;
 			}
 
 			self->deviceExtensions.assign(info->ppEnabledExtensionNames, info->ppEnabledExtensionNames + info->enabledExtensionCount);
@@ -272,6 +273,7 @@ namespace RenderGraph::Engine
 			self->enabledFeatures.Capture(*info);
 			logger::info("[ORG] Owned frame: DXVK adds {} device extensions, {} feature structs ({} merged), {} queue families", requirements.extensionCount,
 				requirements.featureCount, merged, requirements.queueCount);
+			return true;
 		}
 
 		uint32_t QueueCount(uint32_t a_family) const
@@ -330,10 +332,9 @@ namespace RenderGraph::Engine
 
 		// Streamline's interposer stays off: frame generation is unavailable in the owned frame for now (P1.4).
 		state->device = std::make_shared<rhi::DevicePtr>();
+		// A hook that fails aborts the creation; its reason is the one to report.
 		if (rhi::CreateVulkanDevice(ci, *state->device, false) != rhi::Result::Ok || !*state->device)
-			return fail("rhi::CreateVulkanDevice failed");
-		if (!state->hookFailure.empty())
-			return fail(state->hookFailure);
+			return fail(state->hookFailure.empty() ? std::string("rhi::CreateVulkanDevice failed") : state->hookFailure);
 
 		auto& device = *state->device;
 		const VkDevice vkDevice = rhi::vulkan::get_device(device.Get());
