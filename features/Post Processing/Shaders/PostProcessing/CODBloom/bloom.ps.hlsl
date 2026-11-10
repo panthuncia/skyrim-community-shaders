@@ -9,33 +9,42 @@
 /// pre-multiplied by CurrentMipMult (SrcBlend = ONE, DestBlend = BLEND_FACTOR,
 /// blend factor = CurrentMipMult).
 
+#include "Common/OrgResources.hlsli"
 #include "PostProcessing/fullscreen.hlsli"
 
 #include "PostProcessing/common.hlsli"
 
-Texture2D<float4> TexColor : register(t0);
-Texture2D<float4> TexBloomIn : register(t1);
-
-cbuffer BloomCB : register(b1)
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (CODBloom::BloomCB at b1). The ORG chain
+// (ORG/ORGCODBloom.cpp) gives heap handles in the push block and each pass's constants from its latch.
+struct BloomConstants
 {
 	// threshold
-	float Threshold : packoffset(c0.x);
+	float Threshold;
 	// upsample
-	float UpsampleRadius : packoffset(c0.y);
-	float UpsampleMult : packoffset(c0.z);  // in composite: bloom mult
-	float CurrentMipMult : packoffset(c0.w);
+	float UpsampleRadius;
+	float UpsampleMult;  // in composite: bloom mult
+	float CurrentMipMult;
 };
 
-SamplerState SampColor : register(s0);
+#define BLOOM_RESOURCES(X)                   	X(SRV, Texture2D<float4>, TexColor, 0)   	X(SRV, Texture2D<float4>, TexBloomIn, 1) 	X(SAMPLER, SamplerState, SampColor, 0)   	X(LATCH, BloomConstants, Bloom, 1)
+ORG_PUSH_BLOCK(BLOOM_RESOURCES(ORG_HANDLE))
+BLOOM_RESOURCES(ORG_RESOURCE)
+
+// A per-component or of bool vectors: HLSL 2021 (DXC) takes one only through or, FXC's || is per component.
+#if defined(__HLSL_VERSION) && __HLSL_VERSION >= 2021
+#	define BLOOM_OR(a, b) or(a, b)
+#else
+#	define BLOOM_OR(a, b) ((a) || (b))
+#endif
 
 bool3 IsNaN(float3 x)
 {
-	return !(x < 0.f || x > 0.f || x == 0.f);
+	return !BLOOM_OR(BLOOM_OR(x < 0.f, x > 0.f), x == 0.f);
 }
 
 float3 Sanitise(float3 v)
 {
-	bool3 err = IsNaN(v) || (v < 0);
+	bool3 err = BLOOM_OR(IsNaN(v), (v < 0));
 	v.x = err.x ? 0 : v.x;
 	v.y = err.y ? 0 : v.y;
 	v.z = err.z ? 0 : v.z;
@@ -67,7 +76,7 @@ float4 PS_Threshold(FullscreenTriangleVSOutput input) : SV_Target
 
 	float3 col = col_input;
 	col = Sanitise(col);
-	col = ThresholdColor(col, Threshold.x);
+	col = ThresholdColor(col, Bloom.Threshold);
 	return float4(col, 1);
 };
 
@@ -93,7 +102,7 @@ float4 PS_Upsample(FullscreenTriangleVSOutput input) : SV_Target
 	float2 px_size = fwidth(input.TexCoord);
 	float2 uv = input.TexCoord;
 
-	float3 col = UpsampleCOD(TexBloomIn, uv, px_size * UpsampleRadius).rgb * UpsampleMult;
+	float3 col = UpsampleCOD(TexBloomIn, uv, px_size * Bloom.UpsampleRadius).rgb * Bloom.UpsampleMult;
 	return float4(col, 1);
 };
 
@@ -102,7 +111,7 @@ float4 PS_Composite(FullscreenTriangleVSOutput input) : SV_Target
 	float2 px_size = fwidth(input.TexCoord);
 	float2 uv = input.TexCoord;
 
-	float3 col = TexColor[input.Position.xy].rgb + UpsampleCOD(TexBloomIn, uv, px_size * UpsampleRadius).rgb * UpsampleMult;
+	float3 col = TexColor[input.Position.xy].rgb + UpsampleCOD(TexBloomIn, uv, px_size * Bloom.UpsampleRadius).rgb * Bloom.UpsampleMult;
 
 	return float4(col, 1);
 };
