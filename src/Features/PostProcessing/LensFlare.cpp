@@ -9,12 +9,6 @@
 
 namespace
 {
-	uint NormaliseFFTResolution(int resolution)
-	{
-		const uint clamped = std::clamp(static_cast<uint>(std::max(resolution, 0)), LensFlare::FFT_MIN, LensFlare::FFT_MAX);
-		return std::bit_ceil(clamped);
-	}
-
 	uint GetFFTVariant(uint resolution)
 	{
 		return static_cast<uint>(std::countr_zero(resolution) - std::countr_zero(LensFlare::FFT_MIN));
@@ -56,6 +50,112 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	disableThreshold,
 	disableGhosts,
 	disableBlur)
+
+uint LensFlare::NormaliseFFTResolution(int a_resolution)
+{
+	const uint clamped = std::clamp(static_cast<uint>(std::max(a_resolution, 0)), FFT_MIN, FFT_MAX);
+	return std::bit_ceil(clamped);
+}
+
+LensFlare::LensFlareCB LensFlare::BuildConstants(uint a_width, uint a_height) const
+{
+	LensFlareCB data = {};
+	data.ThresholdLevel = std::exp2f(settings.ThresholdEV - 3.0f);  // EV100 → linear luminance
+	data.ThresholdRange = settings.ThresholdRange;
+	data.GhostStrength = settings.GhostStrength;
+	data.GhostChromaShift = settings.GhostChromaShift;
+	data.HaloStrength = settings.HaloStrength;
+	data.HaloRadius = settings.HaloRadius;
+	data.HaloWidth = settings.HaloWidth;
+	data.HaloCompression = settings.HaloCompression;
+	data.HaloChromaShift = settings.HaloChromaShift;
+	data.Intensity = settings.Intensity;
+	data.FFTResolution = NormaliseFFTResolution(settings.FFTResolution);
+	std::memcpy(data.Tint, settings.Tint.data(), sizeof(float) * 3);
+	data.GLocalMask = settings.GLocalMask ? 1 : 0;
+
+	const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr;
+	const float fStop = cam ? cam->FNumber : settings.FStop;
+	const int apertureBlades = cam ? cam->ApertureBladeCount : settings.ApertureBlades;
+	const float apertureRotationDeg = cam ? cam->ApertureBladeRotationDeg : settings.ApertureRotation;
+
+	uint enabledMask = 0;
+	for (int i = 0; i < NUM_GHOSTS; i++) {
+		std::memcpy(&data.GhostColors[i * 4], settings.Ghosts[i].Color.data(), sizeof(float) * 4);
+		data.GhostScalesPacked[i] = settings.Ghosts[i].Scale;
+		// Effective kernel scale = global * per-ghost multiplier
+		data.GhostKernelScalesPacked[i] = settings.KernelScale * settings.Ghosts[i].KernelScale;
+		if (settings.Ghosts[i].Enabled)
+			enabledMask |= (1u << i);
+	}
+	data.ActiveGhostMask = enabledMask;
+	data.KernelScale = settings.KernelScale;
+	data.AspectRatio = (float)a_width / (float)a_height;
+	data.ApertureBlades = apertureBlades;
+	data.ApertureRotation = apertureRotationDeg * 3.14159265358979323846f / 180.0f;  // degrees → radians
+	data.ApertureSize = 1.0f / std::max(fStop, 1.0f);
+
+	// Compute PadScale based on mode
+	GhostMode mode = static_cast<GhostMode>(settings.GhostModeInt);
+	float maxKernelScale = settings.KernelScale;  // Quality mode: use global directly
+	if (mode == GhostMode::Ultra) {
+		// Ultra: PadScale based on max effective scale across enabled ghosts
+		maxKernelScale = 0.0f;
+		for (int i = 0; i < NUM_GHOSTS; i++) {
+			if (settings.Ghosts[i].Enabled)
+				maxKernelScale = std::max(maxKernelScale, settings.KernelScale * settings.Ghosts[i].KernelScale);
+		}
+		if (maxKernelScale == 0.0f)
+			maxKernelScale = settings.KernelScale;  // fallback if none enabled
+	}
+	data.PadScale = std::clamp(1.0f - maxKernelScale, 0.1f, 1.0f);
+	return data;
+}
+
+std::vector<LensFlare::KernelGroup> LensFlare::KernelGroups(uint32_t a_activeGhostMask) const
+{
+	std::vector<KernelGroup> groups;
+
+	if (static_cast<GhostMode>(settings.GhostModeInt) == GhostMode::Ultra) {
+		// Group enabled ghosts by effective kernel scale (merge similar within 0.001)
+		for (int i = 0; i < NUM_GHOSTS; i++) {
+			if (!(a_activeGhostMask & (1u << i)))
+				continue;
+			float ks = settings.KernelScale * settings.Ghosts[i].KernelScale;  // effective scale
+			bool merged = false;
+			for (auto& g : groups) {
+				if (std::abs(g.kernelScale - ks) < 0.001f) {
+					g.ghostMask |= (1u << i);
+					merged = true;
+					break;
+				}
+			}
+			if (!merged) {
+				if ((int)groups.size() < MAX_KERNEL_GROUPS) {
+					groups.push_back({ ks, 1u << (uint)i });
+				} else {
+					// Overflow: merge into closest existing group
+					float bestDist = 1e9f;
+					int bestIdx = 0;
+					for (int g = 0; g < (int)groups.size(); g++) {
+						float d = std::abs(groups[g].kernelScale - ks);
+						if (d < bestDist) {
+							bestDist = d;
+							bestIdx = g;
+						}
+					}
+					groups[bestIdx].ghostMask |= (1u << i);
+				}
+			}
+		}
+	}
+
+	if (groups.empty()) {
+		// Quality mode or no Ultra groups: single pass with global KernelScale
+		groups.push_back({ settings.KernelScale, a_activeGhostMask });
+	}
+	return groups;
+}
 
 void LensFlare::DrawSettings()
 {
@@ -640,54 +740,8 @@ void LensFlare::DrawQuality(TextureInfo& inout_tex, LensFlareCB& data)
 
 	const uint fftVariant = GetFFTVariant(N);
 	data.FFTResolution = N;
-	GhostMode mode = static_cast<GhostMode>(settings.GhostModeInt);
 
-	// === Build kernel groups ===
-	struct KernelGroup
-	{
-		float kernelScale;
-		uint32_t ghostMask;
-	};
-	std::vector<KernelGroup> groups;
-
-	if (mode == GhostMode::Ultra) {
-		// Group enabled ghosts by effective kernel scale (merge similar within 0.001)
-		for (int i = 0; i < NUM_GHOSTS; i++) {
-			if (!(data.ActiveGhostMask & (1u << i)))
-				continue;
-			float ks = settings.KernelScale * settings.Ghosts[i].KernelScale;  // effective scale
-			bool merged = false;
-			for (auto& g : groups) {
-				if (std::abs(g.kernelScale - ks) < 0.001f) {
-					g.ghostMask |= (1u << i);
-					merged = true;
-					break;
-				}
-			}
-			if (!merged) {
-				if ((int)groups.size() < MAX_KERNEL_GROUPS) {
-					groups.push_back({ ks, 1u << (uint)i });
-				} else {
-					// Overflow: merge into closest existing group
-					float bestDist = 1e9f;
-					int bestIdx = 0;
-					for (int g = 0; g < (int)groups.size(); g++) {
-						float d = std::abs(groups[g].kernelScale - ks);
-						if (d < bestDist) {
-							bestDist = d;
-							bestIdx = g;
-						}
-					}
-					groups[bestIdx].ghostMask |= (1u << i);
-				}
-			}
-		}
-	}
-
-	if (groups.empty()) {
-		// Quality mode or no Ultra groups: single pass with global KernelScale
-		groups.push_back({ settings.KernelScale, data.ActiveGhostMask });
-	}
+	const auto groups = KernelGroups(data.ActiveGhostMask);
 
 	if (debugsettings.disableGhosts) {
 		const FLOAT clearColor[4] = { 0.f, 0.f, 0.f, 0.f };
@@ -736,7 +790,7 @@ void LensFlare::DrawQuality(TextureInfo& inout_tex, LensFlareCB& data)
 	float originalHaloStrength = data.HaloStrength;
 
 	for (int gi = 0; gi < (int)groups.size(); gi++) {
-		auto& group = groups[gi];
+		const auto& group = groups[gi];
 
 		// Update CB for this group
 		data.KernelScale = group.kernelScale;
@@ -816,56 +870,9 @@ void LensFlare::Draw(TextureInfo& inout_tex)
 	uint halfH = texThreshold->desc.Height;
 
 	// Build base constant buffer data
-	LensFlareCB data = {};
-	data.ThresholdLevel = std::exp2f(settings.ThresholdEV - 3.0f);  // EV100 → linear luminance
-	data.ThresholdRange = settings.ThresholdRange;
-	data.GhostStrength = settings.GhostStrength;
-	data.GhostChromaShift = settings.GhostChromaShift;
-	data.HaloStrength = settings.HaloStrength;
-	data.HaloRadius = settings.HaloRadius;
-	data.HaloWidth = settings.HaloWidth;
-	data.HaloCompression = settings.HaloCompression;
-	data.HaloChromaShift = settings.HaloChromaShift;
-	data.Intensity = settings.Intensity;
+	LensFlareCB data = BuildConstants(fullW, fullH);
 	data.FFTResolution = currentFFTResolution;
-	std::memcpy(data.Tint, settings.Tint.data(), sizeof(float) * 3);
-	data.GLocalMask = settings.GLocalMask ? 1 : 0;
-
-	const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr;
-	const float fStop = cam ? cam->FNumber : settings.FStop;
-	const int apertureBlades = cam ? cam->ApertureBladeCount : settings.ApertureBlades;
-	const float apertureRotationDeg = cam ? cam->ApertureBladeRotationDeg : settings.ApertureRotation;
-
-	uint enabledMask = 0;
-	for (int i = 0; i < NUM_GHOSTS; i++) {
-		std::memcpy(&data.GhostColors[i * 4], settings.Ghosts[i].Color.data(), sizeof(float) * 4);
-		data.GhostScalesPacked[i] = settings.Ghosts[i].Scale;
-		// Effective kernel scale = global * per-ghost multiplier
-		data.GhostKernelScalesPacked[i] = settings.KernelScale * settings.Ghosts[i].KernelScale;
-		if (settings.Ghosts[i].Enabled)
-			enabledMask |= (1u << i);
-	}
-	data.ActiveGhostMask = enabledMask;
-	data.KernelScale = settings.KernelScale;
-	data.AspectRatio = (float)fullW / (float)fullH;
-	data.ApertureBlades = apertureBlades;
-	data.ApertureRotation = apertureRotationDeg * 3.14159265358979323846f / 180.0f;  // degrees → radians
-	data.ApertureSize = 1.0f / std::max(fStop, 1.0f);
-
-	// Compute PadScale based on mode
-	GhostMode mode = static_cast<GhostMode>(settings.GhostModeInt);
-	float maxKernelScale = settings.KernelScale;  // Quality mode: use global directly
-	if (mode == GhostMode::Ultra) {
-		// Ultra: PadScale based on max effective scale across enabled ghosts
-		maxKernelScale = 0.0f;
-		for (int i = 0; i < NUM_GHOSTS; i++) {
-			if (settings.Ghosts[i].Enabled)
-				maxKernelScale = std::max(maxKernelScale, settings.KernelScale * settings.Ghosts[i].KernelScale);
-		}
-		if (maxKernelScale == 0.0f)
-			maxKernelScale = settings.KernelScale;  // fallback if none enabled
-	}
-	data.PadScale = std::clamp(1.0f - maxKernelScale, 0.1f, 1.0f);
+	const GhostMode mode = static_cast<GhostMode>(settings.GhostModeInt);
 
 	std::array<ID3D11ShaderResourceView*, 1> srvs = { nullptr };
 	std::array<ID3D11UnorderedAccessView*, 1> uavs = { nullptr };

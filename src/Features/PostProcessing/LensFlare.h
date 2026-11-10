@@ -121,6 +121,28 @@ struct LensFlare : public PostProcessFeature
 		uint8_t pad[3]{};
 	} debugsettings;
 
+	/** @brief Ghosts that share one bokeh kernel in the FFT convolution: its kernel scale and their bits. */
+	struct KernelGroup
+	{
+		float kernelScale;
+		uint32_t ghostMask;
+	};
+
+	/** @brief The FFT size a setting asks for: a power of two in [FFT_MIN, FFT_MAX]. */
+	static uint NormaliseFFTResolution(int a_resolution);
+
+	/**
+	 * @brief The constants every pass starts from, for an input of a_width x a_height (both paths). FFTResolution is the
+	 * size the settings ask for; the per-pass sizes are left zero.
+	 */
+	LensFlareCB BuildConstants(uint a_width, uint a_height) const;
+
+	/**
+	 * @brief The FFT convolution's kernel groups (both paths): one per distinct ghost kernel scale in Ultra mode, at most
+	 * MAX_KERNEL_GROUPS; otherwise one with the global kernel scale and a_activeGhostMask.
+	 */
+	std::vector<KernelGroup> KernelGroups(uint32_t a_activeGhostMask) const;
+
 	eastl::unique_ptr<ConstantBuffer> lensFlareCB = nullptr;
 
 	eastl::unique_ptr<Texture2D> texThreshold = nullptr;  // half resolution

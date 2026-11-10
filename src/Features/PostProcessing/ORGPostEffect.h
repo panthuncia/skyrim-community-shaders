@@ -15,8 +15,8 @@
  *   output  the last image into kMAIN and into kMAIN_COPY: a copy, or copy.ps when the gamut or gamma changes or the
  *           formats differ (PostProcessing::OutputConversion)
  *
- * Every chain image is a transient GraphResources::Texture2D the size of kMAIN, so the graph aliases them: there is no
- * ping-pong to write by hand. The D3D11 path's own textures are still created (SyncPipelineResources) while the D3D11
+ * Every chain image is a transient GraphResources::Texture2D, the size of kMAIN unless the effect names one (a half-resolution
+ * or FFT image), so the graph aliases them: there is no ping-pong to write by hand. The D3D11 path's own textures are still created (SyncPipelineResources) while the D3D11
  * fallback may run.
  *
  * The mixed rule
@@ -202,6 +202,9 @@ namespace ORGPostChain
 		 */
 		Image CreateImage(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags);
 
+		/** @brief As CreateImage, at a_width x a_height instead of kMAIN's size (a reduced-resolution or FFT image). */
+		Image CreateImage(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags, UINT a_width, UINT a_height);
+
 		/** @brief Registers an effect-owned resource (history, persistent) with the graph at this build. */
 		void Register(const GraphResources::Resource& a_resource);
 
@@ -311,6 +314,13 @@ namespace ORGPostChain
 	std::unique_ptr<Effect> MakeColorGrading();
 	std::unique_ptr<Effect> MakeLUT();
 	std::unique_ptr<Effect> MakeBorder();
+	std::unique_ptr<Effect> MakeLensFlare();
+
+	/**
+	 * @brief Lens Flare's published side output, which Composite reads: the ghosts and halo, RGBA16F, at max(width / 2, 1) x
+	 * max(height / 2, 1) of the chain's Shape (LensFlare::texGhostHalo's size, Composite's FlareSize).
+	 */
+	inline constexpr std::string_view kLensFlareOutput = "PostProcessing::LensFlare::GhostHalo";
 }
 
 #endif
