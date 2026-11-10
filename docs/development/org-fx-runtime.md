@@ -348,7 +348,14 @@ textures, samplers, UI variables, and every diagnostic. It then compiles pixel e
 reads `$Globals` and compares every variable's offset, size and default bytes with FXC's reflection. With
 `--dxc <dxc.exe>` it also lowers every pass and compiles both wrappers with the runtime's DXC flags, keeping the sources
 in `--out`. `testdata/constructs.fx` exercises the syntax the presets do not use. Exit code 0 only when everything
-passed.
+passed. `tests/FxParseCheck` builds the tool with CMake and runs it over `constructs.fx` as a test
+(`FxParseCheck.constructs`):
+
+```
+cmake -S tests/FxParseCheck -B build/FxParseCheck
+cmake --build build/FxParseCheck --config Release
+ctest --test-dir build/FxParseCheck -C Release
+```
 
 ```
 fx-parse-check [-v] [--dxc C:\VulkanSDK\<ver>\Bin\dxc.exe] [--out <folder>] <enbseries folder>...
