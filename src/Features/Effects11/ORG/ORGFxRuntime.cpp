@@ -93,11 +93,14 @@ namespace
 		std::uint32_t size;
 		DXGI_FORMAT format;
 		Lifetime lifetime;
+		bool uav = false;
 	};
 
 	// Chain textures that a later effect reads even when their chain did not run this frame (FX11 then reads the last frame's)
 	// are History, so they keep their contents; the others are written before every read and may alias.
 	constexpr TextureSpec kTextures[] = {
+		// FX11's kMAIN: the tonemap input copied in, colour corrected in place. Engine targets need not have a UAV.
+		{ "Original", 0, DXGI_FORMAT_R16G16B16A16_FLOAT, Lifetime::Transient, true },
 		{ "SDRTemp", 0, DXGI_FORMAT_R10G10B10A2_UNORM, Lifetime::Transient },
 		{ "SDRTemp2", 0, DXGI_FORMAT_R10G10B10A2_UNORM, Lifetime::Transient },
 		{ "Scratch", 0, DXGI_FORMAT_R10G10B10A2_UNORM, Lifetime::Transient },
@@ -161,7 +164,7 @@ namespace
 			const auto* spec = FindSpec(a_name);
 			if (!spec)
 				return nullptr;
-			const UINT bind = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+			const UINT bind = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | (spec->uav ? D3D11_BIND_UNORDERED_ACCESS : 0u);
 			const D3D11_TEXTURE2D_DESC desc{ .Width = spec->size ? spec->size : width,
 				.Height = spec->size ? spec->size : height,
 				.MipLevels = 1,
@@ -297,6 +300,8 @@ namespace
 		std::string name;
 		Res from;
 		Res to;
+		std::uint32_t width = 1;
+		std::uint32_t height = 1;
 	};
 
 	struct ClearSpec
@@ -429,7 +434,7 @@ namespace
 		std::shared_ptr<const org::LatchBlock> latch;
 	};
 
-	/** @brief The colour correction of kMAIN in place, as ApplyColorCorrection. */
+	/** @brief The colour correction of the input's copy in place, as ApplyColorCorrection on kMAIN. */
 	class ColorCorrectionPass final : public org::TypedRenderGraphPass<ColorCorrectionPass, ComputeFrame, ComputeBindings>
 	{
 	public:
@@ -467,31 +472,32 @@ namespace
 	struct CopyBindings
 	{
 		org::ResourceBindingToken from, to;
+		std::uint32_t width = 1;
+		std::uint32_t height = 1;
 	};
 
-	/** @brief This frame's adaptation into the history the next frame reads (FX11's TextureAdaptation swap). */
+	/** @brief A whole-texture copy of two textures of one format and size: the adaptation history, and CopyResource's cases. */
 	class CopyPass final : public org::TypedRenderGraphPass<CopyPass, org::EmptyPassFrameData, CopyBindings>
 	{
 	public:
-		CopyPass(Res a_from, Res a_to) :
-			from(std::move(a_from)), to(std::move(a_to)) {}
+		explicit CopyPass(CopySpec a_spec) :
+			spec(std::move(a_spec)) {}
 
 		CopyBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			return { a_builder.CopySource(from), a_builder.CopyDestination(to) };
+			return { a_builder.CopySource(spec.from), a_builder.CopyDestination(spec.to), spec.width, spec.height };
 		}
 
 		static void Record(const CopyBindings& a_bindings, const org::EmptyPassFrameData&, org::PassRecordContext& a_recording)
 		{
-			const rhi::TextureCopyRegion target{ .texture = a_recording.Resolve(a_bindings.to).GetHandle(), .width = 1, .height = 1 };
-			const rhi::TextureCopyRegion source{ .texture = a_recording.Resolve(a_bindings.from).GetHandle(), .width = 1, .height = 1 };
+			const rhi::TextureCopyRegion target{ .texture = a_recording.Resolve(a_bindings.to).GetHandle(), .width = a_bindings.width, .height = a_bindings.height };
+			const rhi::TextureCopyRegion source{ .texture = a_recording.Resolve(a_bindings.from).GetHandle(), .width = a_bindings.width, .height = a_bindings.height };
 			a_recording.Commands().CopyTextureRegion(target, source);
 		}
 
 	private:
-		Res from;
-		Res to;
+		CopySpec spec;
 	};
 
 	struct ClearBindings
@@ -861,7 +867,12 @@ struct ORGFxRuntime::Impl
 	/** @brief What a plan needs from the frame. */
 	struct Inputs
 	{
-		Res main, depth, output;
+		Res input, main, depth, output;  // main: kMAIN, when it has an RTV FX11's result is copied into
+		bool inputCopies = false;        // the input has Original's format and size: a plain copy, as CopyResource
+		bool mainCopies = false;         // kMAIN has Original's format and size
+		rhi::Format mainFormat = rhi::Format::Unknown;
+		std::uint32_t mainWidth = 0;
+		std::uint32_t mainHeight = 0;
 		rhi::Format outputFormat = rhi::Format::Unknown;
 		std::uint32_t outputWidth = 0;
 		std::uint32_t outputHeight = 0;
@@ -1089,23 +1100,37 @@ struct ORGFxRuntime::Impl
 
 			Black();
 
-			// 1. Colour correction of kMAIN in place.
+			// FX11 works on kMAIN, after copying the input there (CopyToTarget). Here that is Original, a graph texture with a UAV.
+			const Res original = Tex("Original");
+			if (inputs.inputCopies)
+				AddStep(CopySpec{ "Effects11::CopyInput", inputs.input, original, width, height }, "copy-input");
+			else
+				Copy("Effects11::CopyInput", inputs.input, original, rhi::Format::R16G16B16A16_Float, width, height, 0.0f);
+
+			// 1. Colour correction in place.
 			{
 				auto spec = std::make_shared<ComputeSpec>();
 				spec->name = "Effects11::ColorCorrection";
 				spec->program = impl.cs.colorCorrection;
-				spec->texture = inputs.main;
+				spec->texture = original;
 				spec->groupsX = (width + 7) / 8;
 				spec->groupsY = (height + 7) / 8;
 				spec->region = Region(sizeof(ColorCorrectionConstants));
 				frame->writes.push_back({ .kind = RegionWrite::Kind::ColorCorrection, .offset = spec->region });
 				AddStep(std::shared_ptr<const ComputeSpec>(std::move(spec)), "color-correction");
 			}
+			// FX11 leaves the corrected image in kMAIN; nothing here reads kMAIN again. Before the output copy, which may be kMAIN.
+			if (inputs.main) {
+				if (inputs.mainCopies)
+					AddStep(CopySpec{ "Effects11::CopyToMain", original, inputs.main, width, height }, "copy-to-main");
+				else
+					Copy("Effects11::CopyToMain", original, inputs.main, inputs.mainFormat, inputs.mainWidth, inputs.mainHeight, 0.0f);
+			}
 
 			// 3. The 1024 downsample and its two mips, for bloom, lens and adaptation.
 			if (run(Fx::Bloom) || run(Fx::Lens) || run(Fx::Adaptation)) {
 				const std::pair<std::string_view, std::uint32_t> levels[] = { { "Downsampled", 1024 }, { "Downsampled512", 512 }, { "Downsampled256", 256 } };
-				Res source = inputs.main;
+				Res source = original;
 				for (const auto& [name, size] : levels) {
 					auto spec = CsDraw(fmt::format("Effects11::Downsample {}", size), impl.cs.downsample, Tex(name), size, size);
 					spec->push = { { PushWord::Kind::Input, spec->Input(source) }, { PushWord::Kind::Literal, impl.cs.linearSampler.Index() } };
@@ -1123,12 +1148,12 @@ struct ORGFxRuntime::Impl
 			// 4. enbbloom.fx and 5. enblens.fx, from the 1024 downsample.
 			if (run(Fx::Bloom)) {
 				const auto chain = Sequence(Fx::Bloom, impl.EffectOf(Fx::Bloom).fx11->GetSelectedTechnique(), downsampled, "Bloom", "BloomTemp",
-					{ { "TextureDownsampled", downsampled }, { "TextureOriginal", inputs.main } });
+					{ { "TextureDownsampled", downsampled }, { "TextureOriginal", original } });
 				bloom = Tex(chain.executed && !chain.inOutput ? "BloomTemp" : "Bloom");
 			}
 			if (run(Fx::Lens)) {
 				const auto chain = Sequence(Fx::Lens, impl.EffectOf(Fx::Lens).fx11->GetSelectedTechnique(), downsampled, "Lens", "HDRTemp",
-					{ { "TextureDownsampled", downsampled }, { "TextureOriginal", inputs.main } });
+					{ { "TextureDownsampled", downsampled }, { "TextureOriginal", original } });
 				lens = Tex(chain.executed && !chain.inOutput ? "HDRTemp" : "Lens");
 			}
 
@@ -1149,16 +1174,16 @@ struct ORGFxRuntime::Impl
 				adaptation = Tex("Adaptation");
 			}
 
-			// 7. enbeffect.fx, from kMAIN into the SDR pair.
+			// 7. enbeffect.fx, from the corrected image into the SDR pair.
 			std::string_view sdr = "SDRTemp";
 			{
-				const auto chain = Sequence(Fx::Effect, impl.EffectOf(Fx::Effect).fx11->GetSelectedTechnique(), inputs.main, "SDRTemp", "SDRTemp2",
-					{ { "TextureOriginal", inputs.main }, { "TextureBloom", bloom }, { "TextureLens", lens }, { "TextureAdaptation", adaptation } });
+				const auto chain = Sequence(Fx::Effect, impl.EffectOf(Fx::Effect).fx11->GetSelectedTechnique(), original, "SDRTemp", "SDRTemp2",
+					{ { "TextureOriginal", original }, { "TextureBloom", bloom }, { "TextureLens", lens }, { "TextureAdaptation", adaptation } });
 				if (chain.executed && !chain.inOutput)
 					sdr = "SDRTemp2";
 				else if (!chain.executed)
 					// Side-target-only sequences leave the SDR texture unwritten: this frame's image, as ENBEffect::Execute.
-					Copy("Effects11::CopyOriginal", inputs.main, Tex("SDRTemp"), rhi::Format::R10G10B10A2_UNorm, width, height, 0.0f);
+					Copy("Effects11::CopyOriginal", original, Tex("SDRTemp"), rhi::Format::R10G10B10A2_UNorm, width, height, 0.0f);
 			}
 
 			// 8. enbeffectpostpass.fx, from the SDR result into the other one, with Scratch as its temp.
@@ -1204,7 +1229,9 @@ struct ORGFxRuntime::Impl
 	/** @brief The shape the plan follows; a change registers a new plan. */
 	std::string ShapeKey(const Inputs& a_inputs)
 	{
-		std::string key = fmt::format("{}x{} {} {} {} {} {} c{}", resources->width, resources->height, reinterpret_cast<std::uintptr_t>(a_inputs.main.get()),
+		std::string key = fmt::format("{}x{} {} {}{} {} {}", resources->width, resources->height, reinterpret_cast<std::uintptr_t>(a_inputs.input.get()),
+			a_inputs.inputCopies ? 'c' : 'd', reinterpret_cast<std::uintptr_t>(a_inputs.main.get()), static_cast<std::uint32_t>(a_inputs.mainFormat), a_inputs.mainWidth);
+		key += fmt::format(" {} {} {} {} c{}",
 			reinterpret_cast<std::uintptr_t>(a_inputs.depth.get()), reinterpret_cast<std::uintptr_t>(a_inputs.output.get()), static_cast<std::uint32_t>(a_inputs.outputFormat),
 			a_inputs.outputWidth, resources->cleared.size());
 		for (std::size_t i = 0; i < kEffects; ++i) {
@@ -1243,7 +1270,7 @@ struct ORGFxRuntime::Impl
 						pass.make = [a_step, latch]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ColorCorrectionPass>(a_step, latch); };
 					} else if constexpr (std::is_same_v<T, CopySpec>) {
 						pass.kind = FrameAnchors::PassKind::Copy;
-						pass.make = [a_step]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyPass>(a_step.from, a_step.to); };
+						pass.make = [a_step]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyPass>(a_step); };
 					} else {
 						pass.kind = FrameAnchors::PassKind::Render;
 						pass.make = [a_step]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ClearPass>(a_step); };
@@ -1263,7 +1290,7 @@ struct ORGFxRuntime::Impl
 		};
 		client.commit = [](const FrameAnchors::Point&) {
 			if (auto& self = ORGFxRuntime::Get(); self.impl)
-				self.impl->Commit();
+				self.impl->SafeCommit();
 		};
 		client.onFailed = [] {
 			logger::error("[ORG] Effects11 returns to FX11: the render graph failed");
@@ -1290,6 +1317,37 @@ struct ORGFxRuntime::Impl
 				effectsList += fmt::format("{}{}", effectsList.empty() ? "" : ", ", effects[i].Name());
 		logger::info("[ORG] Effects11 runs on the render graph: {} passes ({} from .fx: {}), {} latch bytes, {}x{}", a_frame->steps.size(), a_frame->fxPasses, effectsList,
 			a_frame->latchBytes, resources->width, resources->height);
+	}
+
+	/** @brief The frame's decision and plan (ORGFxRuntime::Prepare, which catches what it throws). */
+	void PrepareFrame(std::uint32_t a_input, std::uint32_t a_output);
+
+	/** @brief After an exception: FX11 for the rest of the session. */
+	void Fail(const char* a_what)
+	{
+		logger::error("[ORG] Effects11 returns to FX11 for the session: {}", a_what);
+		failed = true;
+		activeNow = false;
+		ranFrame = UINT32_MAX;
+		if (registered)
+			FrameAnchors::Unregister(kClientId);
+		registered = false;
+		frame.reset();
+		shapeKey.clear();
+	}
+
+	/** @brief Commit, with what it throws kept inside the epoch's callback. */
+	void SafeCommit()
+	{
+		try {
+			Commit();
+		} catch (const std::exception& e) {
+			// The passes already in this epoch run with the latch as it is; the next frames are FX11's.
+			failed = true;
+			activeNow = false;
+			ranFrame = UINT32_MAX;
+			logger::error("[ORG] Effects11 returns to FX11 for the session: the commit failed: {}", e.what());
+		}
 	}
 
 	/** @brief Inside the epoch: this frame's values into the latch. FX11's variables hold them (EffectManager::UpdateEffectValues). */
@@ -1377,10 +1435,22 @@ void ORGFxRuntime::Prepare(std::uint32_t a_input, std::uint32_t a_output)
 		return;
 	if (!impl)
 		impl = std::make_unique<Impl>();
-	auto& self = *impl;
-	self.activeNow = false;
-	if (self.failed)
+	impl->activeNow = false;
+	if (impl->failed)
 		return;
+	// Nothing may leave the engine's tonemap call: an error returns Effects11 to FX11 for the session.
+	try {
+		impl->PrepareFrame(a_input, a_output);
+	} catch (const std::exception& e) {
+		impl->Fail(e.what());
+	} catch (...) {
+		impl->Fail("an unknown exception");
+	}
+}
+
+void ORGFxRuntime::Impl::PrepareFrame(std::uint32_t a_input, std::uint32_t a_output)
+{
+	auto& self = *this;
 
 	auto& runtime = RenderGraphRuntime::Get();
 	auto* host = runtime.Host();
@@ -1390,19 +1460,18 @@ void ORGFxRuntime::Prepare(std::uint32_t a_input, std::uint32_t a_output)
 	auto& manager = EffectManager::GetSingleton();
 	if (globals::state->GetTonemapOwner() != State::TonemapOwner::kEffects11 || !manager.IsInitialized() || !manager.IsPresetLoaded())
 		return self.Inactive({});
-	if (a_input != static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN))
-		return self.Inactive(fmt::format("the tonemap input is render target {}, not kMAIN", a_input));
 	if (manager.WillEffectRun(manager.enbDepthOfField, manager.ids.useDepthOfField))
 		return self.Inactive("enbdepthoffield.fx is not supported on the render graph yet");
 
 	auto* renderer = globals::game::renderer;
 	auto& targets = renderer->GetRuntimeData().renderTargets;
 	const auto& main = targets[RE::RENDER_TARGETS::kMAIN];
-	if (a_output >= static_cast<std::uint32_t>(RE::RENDER_TARGETS::kTOTAL))
-		return self.Inactive(fmt::format("the tonemap output {} is not a render target", a_output));
+	if (a_input >= static_cast<std::uint32_t>(RE::RENDER_TARGETS::kTOTAL) || a_output >= static_cast<std::uint32_t>(RE::RENDER_TARGETS::kTOTAL))
+		return self.Inactive(fmt::format("the tonemap reads render target {} and writes {}, which are not both render targets", a_input, a_output));
+	const auto& input = targets[a_input];
 	const auto& output = targets[a_output];
-	if (!main.texture || !main.SRV || !main.UAV || !output.texture || !output.RTV)
-		return self.Inactive("kMAIN has no UAV or the tonemap output has no RTV");
+	if (!input.texture || !input.SRV || !output.texture || !output.RTV)
+		return self.Inactive(fmt::format("the tonemap input {} has no SRV or its output {} has no RTV", a_input, a_output));
 
 	Impl::Inputs inputs{};
 	for (std::size_t i = 0; i < kEffects; ++i) {
@@ -1419,11 +1488,24 @@ void ORGFxRuntime::Prepare(std::uint32_t a_input, std::uint32_t a_output)
 	if (!self.BuildCsPrograms(host->Device()))
 		return self.Inactive("Effects11's own shaders (colour correction, downsample, sun mask) could not be built for the render graph");
 
-	inputs.main = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN));
+	inputs.input = FrameAnchors::EngineTarget(a_input);
 	inputs.depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN));
 	inputs.output = FrameAnchors::EngineTarget(a_output);
-	if (!inputs.main || !inputs.depth || !inputs.output)
-		return self.Inactive("kMAIN, its depth or the tonemap output could not be imported");
+	if (!inputs.input || !inputs.depth || !inputs.output)
+		return self.Inactive(fmt::format("the tonemap input {}, kMAIN's depth or the output {} could not be imported", a_input, a_output));
+	// kMAIN gets FX11's corrected image too when it can be drawn to.
+	if (main.texture && main.RTV) {
+		inputs.main = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN));
+		D3D11_RENDER_TARGET_VIEW_DESC mainView{};
+		main.RTV->GetDesc(&mainView);
+		D3D11_TEXTURE2D_DESC mainDesc{};
+		main.texture->GetDesc(&mainDesc);
+		inputs.mainFormat = rhi::helpers::ToRHI(mainView.Format);
+		inputs.mainWidth = mainDesc.Width;
+		inputs.mainHeight = mainDesc.Height;
+		if (inputs.mainFormat == rhi::Format::Unknown)
+			inputs.main = nullptr;
+	}
 	D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
 	output.RTV->GetDesc(&rtvDesc);
 	D3D11_TEXTURE2D_DESC outputDesc{};
@@ -1442,17 +1524,25 @@ void ORGFxRuntime::Prepare(std::uint32_t a_input, std::uint32_t a_output)
 		self.resources->width = width;
 		self.resources->height = height;
 	}
+	// A texture copy where D3D11's CopyResource would apply: the same format and size as Original, mip 0 of one slice.
+	auto copies = [&](ID3D11Texture2D* a_texture) {
+		D3D11_TEXTURE2D_DESC desc{};
+		a_texture->GetDesc(&desc);
+		return desc.Width == width && desc.Height == height && desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT && desc.SampleDesc.Count == 1;
+	};
+	inputs.inputCopies = copies(input.texture);
+	inputs.mainCopies = inputs.main && copies(main.texture);
 
 	auto key = self.ShapeKey(inputs);
 	if (!self.registered || key != self.shapeKey) {
 		const auto started = std::chrono::steady_clock::now();
 		Impl::Planner planner(self, inputs);
-		auto frame = planner.Build();
-		if (!frame) {
+		auto planned = planner.Build();
+		if (!planned) {
 			// A pass that failed to build fails its effect until the next reload; FX11 runs it meanwhile.
 			return self.Inactive(planner.error);
 		}
-		self.Register(frame);
+		self.Register(planned);
 		if (!self.registered)
 			return self.Inactive("the render graph refused the passes");
 		self.shapeKey = std::move(key);

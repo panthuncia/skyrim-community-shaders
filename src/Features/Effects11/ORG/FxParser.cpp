@@ -74,7 +74,8 @@ namespace OrgFx
 					lineStart = true;
 					continue;
 				}
-				if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') {
+				// A NUL is skipped too: D3DPreprocess's text ends with one.
+				if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v' || c == '\0') {
 					++i;
 					continue;
 				}

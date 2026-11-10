@@ -268,11 +268,14 @@ all four do nothing.
   `OrgFxVS`/`OrgFxPS`, `-HV 2018`). A pass with blend, depth or rasterizer states, a parse or lowering error, or a DXC
   failure fails its effect until the next reload.
 - **Plan.** `Planner::Build` replays `ExecuteEffects` in order and resolves FX11's ping-pong into fixed graph textures
-  (`Effects11::<name>`): colour correction of kMAIN in place; the downsample to 1024, 512 and 256 (three textures, since
+  (`Effects11::<name>`): the tonemap's input (kMAIN, or another target with an upscaler on) copied into `Original`, a
+  graph texture with a UAV, since engine targets may have none (a plain copy when the format and size match, as
+  `CopyResource`, else CopyPS); colour correction of `Original` in place, then `Original` copied into kMAIN when kMAIN
+  has an RTV (FX11 leaves its corrected image there), before the output copy; the downsample to 1024, 512 and 256 (three textures, since
   FX11 binds single mips only; each a bilinear half of the one before, which is the box filter GenerateMips gave); the
   bloom and lens chains (`Effect::ExecuteTechniqueSequence`'s rule, `RenderTarget` annotations to the `RenderTarget*`
   textures); adaptation (sun mask, `Downsample`, `Draw`, then a copy into `AdaptationHistory` for the next frame);
-  enbeffect.fx into `SDRTemp`/`SDRTemp2` (or a plain copy of kMAIN when no technique wrote the chain); postpass with
+  enbeffect.fx into `SDRTemp`/`SDRTemp2` (or a plain copy of `Original` when no technique wrote the chain); postpass with
   `Scratch` as its temp; the dithered copy into the tonemap's output. Slots resolve, in order: a file, `TextureColor`
   (the chain input), `TextureDepth`, a `RenderTarget*` texture, the effect's named inputs (`TextureOriginal`,
   `TextureBloom`, `TextureLens`, `TextureAdaptation`, `TextureDownsampled`, `TextureCurrent`, `TexturePrevious`), else
@@ -289,12 +292,14 @@ all four do nothing.
   `RenderTarget*` set, the adaptation pair), are History; the SDR pair, Scratch, the downsamples and the sun mask are
   Transient (aliased). Kept textures are cleared to zero once by a render pass that only clears, as DXVK's D3D11 textures
   start at zero.
-- **Failure.** A graph failure (`onFailed`) returns Effects11 to FX11 for the session.
+- **Failure.** A graph failure (`onFailed`), or an exception out of `Prepare` or the commit, returns Effects11 to FX11
+  for the session: `[ORG] Effects11 returns to FX11 for the session: <what>`. Nothing is thrown into the engine's call.
+- **Text.** `D3DPreprocess`'s blob ends with the string's NUL; `Effect` drops it before keeping the text, and the lexer
+  skips a NUL as whitespace (it was Rudy's `enbbloom.fx` "unexpected character at global scope" on the last line).
 
 Not supported yet (the frame stays on FX11, logged):
 
 - `enbdepthoffield.fx` (its aperture and focus history pairs, and the copy back into kMAIN).
-- A tonemap input other than kMAIN (FX11 copies it into kMAIN first).
 - `cbuffer` blocks, render states in passes, `RenderTarget` annotations naming textures other than `RenderTarget*`
   (`TextureHDRTemp` and the like), effects with more than 30 textures and samplers, encrypted presets.
 - The UI seam below: FX11 still holds the values, so FX11 must still compile every effect.

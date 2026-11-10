@@ -409,6 +409,13 @@ bool Effect::LoadFXFile()
 		return { static_cast<const char*>(blob->GetBufferPointer()), blob->GetBufferSize() };
 	};
 
+	// The ORG FX runtime parses the text that compiled. D3DPreprocess's blob ends with the string's terminator, which is not text.
+	auto keepPreprocessed = [&](std::string a_text) {
+		while (!a_text.empty() && a_text.back() == '\0')
+			a_text.pop_back();
+		preprocessedSource = std::move(a_text);
+	};
+
 	auto tryPreprocessAndCompile = [&](const std::string& source, ID3DInclude* include,
 									   const std::vector<std::string>& extraStringifyMacros = {}) -> bool {
 		auto pp = preprocess(source, include);
@@ -420,7 +427,7 @@ bool Effect::LoadFXFile()
 		ENBExtender::StripLineDirectives(pp);
 		if (!compile(pp, nullptr))
 			return false;
-		preprocessedSource = std::move(pp);
+		keepPreprocessed(std::move(pp));
 		return true;
 	};
 
@@ -439,7 +446,7 @@ bool Effect::LoadFXFile()
 			ENBExtender::StripLineDirectives(pp);
 			compiled = compile(pp, nullptr);
 			if (compiled)
-				preprocessedSource = std::move(pp);
+				keepPreprocessed(std::move(pp));
 		}
 	}
 
