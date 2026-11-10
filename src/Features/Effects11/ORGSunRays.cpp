@@ -1,13 +1,10 @@
 #include "ORGSunRays.h"
 
-#include <cstring>
+#include "RenderGraph/Switches.h"
 
 bool ORGSunRays::Requested()
 {
-	static const bool requested = [] {
-		char value[8]{};
-		return GetEnvironmentVariableA("CS_ORG_E11_RAYS", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}();
+	static const bool requested = Switches::On("CS_ORG_E11_RAYS");
 	return requested;
 }
 
@@ -28,11 +25,13 @@ ORGSunRays& ORGSunRays::Get()
 #	include "Features/TerrainShadows.h"
 #	include "Features/TerrainShadows/ORGTerrainShadows.h"
 #	include "Globals.h"
+#	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
 #	include "State.h"
@@ -45,7 +44,6 @@ ORGSunRays& ORGSunRays::Get()
 #	include <Resources/ExternalTextureResource.h>
 #	include <rhi_helpers.h>
 
-#	include <atomic>
 #	include <cstddef>
 #	include <functional>
 #	include <map>
@@ -61,7 +59,15 @@ namespace
 	constexpr std::int32_t kVolumetricOrder = 100;
 	constexpr std::int32_t kSunRaysOrder = 200;
 
+	// The run gate's entries. The commit opens those of the effects the frame gave the graph; the others do no work.
+	constexpr std::uint32_t kVolumetricDraws = 0;  // the raymarch and the apply pass
+	constexpr std::uint32_t kBlurH = 1;
+	constexpr std::uint32_t kBlurV = 2;
+	constexpr std::uint32_t kSunDraws = 3;  // the mask, the blurs and the composite
+	constexpr std::uint32_t kGateEntries = 4;
+
 	using ShaderBindings::Handle;
+	using RenderGraph::AnchorPasses::Bind;
 
 	// The blurs' groups cover this many pixels along the blurred axis (BlurVolumetricRaysCS: TG_DIM - WINDOW * 2).
 	constexpr std::uint32_t kBlurGroupPixels = 256 - 12 * 2;
@@ -80,6 +86,8 @@ namespace
 		std::array<Effects11::SunRaysData, ORGSunRays::kSunRaysPasses> sun;
 	};
 	static_assert(offsetof(LatchData, sun) % 16 == 0 && sizeof(Effects11::SunRaysData) % 16 == 0);
+
+	constexpr std::uint32_t kVLOffset = static_cast<std::uint32_t>(offsetof(LatchData, vl));
 
 	constexpr std::uint32_t SunOffset(std::uint32_t a_pass)
 	{
@@ -136,36 +144,28 @@ namespace
 		return a_builder.ShaderResource(org::ResourceIdentifier(a_source.name)).View();
 	}
 
-	/** @brief What the graph is built from: a change makes a new client. */
+	/**
+	 * @brief What the graph is built from: a change makes a new client. The areas the passes cover are part of it, since a kept
+	 * recording fixes its viewports; they change only with the dynamic resolution.
+	 */
 	struct Shape
 	{
-		std::uint32_t halfTexWidth = 0, halfTexHeight = 0;
+		ORGSunRays::Sizes sizes;
 		rhi::Format mainFormat = rhi::Format::Unknown;
 		std::shared_ptr<org::Resource> main;
 		Source depth, shadowHeights, cloudShadows;
 
-		bool operator==(const Shape&) const = default;
+		bool operator==(const Shape& a_other) const
+		{
+			const auto& a = sizes;
+			const auto& b = a_other.sizes;
+			return a.halfTexWidth == b.halfTexWidth && a.halfTexHeight == b.halfTexHeight && a.halfWidth == b.halfWidth && a.halfHeight == b.halfHeight &&
+			       a.width == b.width && a.height == b.height && mainFormat == a_other.mainFormat && main == a_other.main && depth == a_other.depth &&
+			       shadowHeights == a_other.shadowHeights && cloudShadows == a_other.cloudShadows;
+		}
 	};
 
-	/** @brief The sizes the passes cover this frame, packed for an atomic: half-res width and height, then full. */
-	std::uint64_t Pack(const ORGSunRays::Sizes& a_sizes)
-	{
-		return static_cast<std::uint64_t>(a_sizes.halfWidth & 0xFFFF) | static_cast<std::uint64_t>(a_sizes.halfHeight & 0xFFFF) << 16 |
-		       static_cast<std::uint64_t>(a_sizes.width & 0xFFFF) << 32 | static_cast<std::uint64_t>(a_sizes.height & 0xFFFF) << 48;
-	}
-
-	struct Area
-	{
-		std::uint32_t halfWidth = 0, halfHeight = 0, width = 0, height = 0;
-	};
-
-	Area Unpack(std::uint64_t a_packed)
-	{
-		return { static_cast<std::uint32_t>(a_packed & 0xFFFF), static_cast<std::uint32_t>(a_packed >> 16 & 0xFFFF),
-			static_cast<std::uint32_t>(a_packed >> 32 & 0xFFFF), static_cast<std::uint32_t>(a_packed >> 48 & 0xFFFF) };
-	}
-
-	/** @brief Everything a build's passes are made from: immutable once registered, but the per-frame flags. */
+	/** @brief Everything a build's passes are made from. Immutable once registered. */
 	struct RaysState
 	{
 		Shape shape;
@@ -174,48 +174,26 @@ namespace
 		// The volumetric rays' scattering (raymarched, then blurred back into it), the blur's other half and the raymarch's depth;
 		// the sun rays' ping-pong pair.
 		std::unique_ptr<GraphResources::Texture2D> vlScattering, vlBlur, vlDepth, sunA, sunB;
-		std::shared_ptr<org::LatchBlock> latch;
-		org::OwnedDescriptorBinding linearSampler;
-		// Set at the hook: whether this run has each effect, and the areas they cover. A run another client keeps going records nothing.
-		std::shared_ptr<std::atomic<bool>> volumetricLive = std::make_shared<std::atomic<bool>>(false);
-		std::shared_ptr<std::atomic<bool>> sunLive = std::make_shared<std::atomic<bool>>(false);
-		std::shared_ptr<std::atomic<std::uint64_t>> area = std::make_shared<std::atomic<std::uint64_t>>(0);
-
-		bool Live(bool a_sun) const { return (a_sun ? sunLive : volumetricLive)->load(std::memory_order_acquire); }
-		std::uint64_t PackedArea() const { return area->load(std::memory_order_acquire); }
+		std::shared_ptr<const org::LatchBlock> latch;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
+		std::uint32_t linearSampler = 0;
 	};
 
-	/** @brief What every pass records from: the state, the frame's area and the pass's index; null state when the effect is off this run. */
+	/** @brief What a raster pass records from: the state and the pass's index. Its revision is the same, so its recording is kept. */
 	struct RaysFrame
 	{
 		std::shared_ptr<const RaysState> state;
-		Area area;
 		std::uint32_t index = 0;
 	};
 
-	/** @brief What the client's passes share: the revision and the frame follow the effect's flag and the area. */
-	struct PassCommon
+	/** @brief A raster pass's draw, through its gate entry: no work on runs whose commit did not open it. */
+	void GatedDraw(const RaysState& a_state, std::uint32_t a_entry, const RasterProgram& a_program, RasterProgram::DrawDesc a_desc,
+		org::PassRecordContext& a_recording)
 	{
-		std::shared_ptr<const RaysState> state;
-		bool sun = false;
-		// The blur's direction (1: horizontal) or the sun ray pass.
-		std::uint32_t index = 0;
-
-		void AddRevision(std::vector<std::uint64_t>& a_out) const
-		{
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(state.get()));
-			a_out.push_back(state->Live(sun));
-			a_out.push_back(state->PackedArea());
-			a_out.push_back(index);
-		}
-
-		RaysFrame Frame() const
-		{
-			if (!state->Live(sun))
-				return {};
-			return { state, Unpack(state->PackedArea()), index };
-		}
-	};
+		a_desc.indirect = &a_state.gate->Latch();
+		a_desc.indirectOffset = a_state.gate->Offset(a_entry);
+		a_program.Draw(a_recording, a_desc);
+	}
 
 	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 	// Volumetric rays
@@ -228,16 +206,19 @@ namespace
 		bool hasShadowHeights = false, hasCloudShadows = false;
 	};
 
-	/** @brief The raymarch: the scattering and its linear depth into the half-res pair (two targets). */
+	/**
+	 * @brief The raymarch: the scattering and its linear depth into the half-res pair. A pass of its own, since it has two targets
+	 * and reads other clients' textures by name, which AnchorPasses::Draw does not cover.
+	 */
 	class RaymarchPass final : public org::TypedRenderGraphPass<RaymarchPass, RaysFrame, RaymarchBindings>
 	{
 	public:
 		explicit RaymarchPass(std::shared_ptr<const RaysState> a_state) :
-			common{ std::move(a_state), false, 0 } {}
+			state(std::move(a_state)) {}
 
 		RaymarchBindings Declare(org::PassBuilder& a_builder)
 		{
-			const auto& s = *common.state;
+			const auto& s = *state;
 			RaymarchBindings b{};
 			b.shared = SharedConstants::Declare(a_builder);
 			b.scattering = a_builder.RenderTarget(s.vlScattering->Graph()).View();
@@ -254,85 +235,33 @@ namespace
 			return b;
 		}
 
-		void Revision(std::vector<std::uint64_t>& a_out) const { common.AddRevision(a_out); }
+		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(state.get())); }
 
-		RaysFrame Prepare(const RaymarchBindings&, const org::PassPrepareContext&) const { return common.Frame(); }
+		RaysFrame Prepare(const RaymarchBindings&, const org::PassPrepareContext&) const { return { state }; }
 
 		static void Record(const RaymarchBindings& a_bindings, const RaysFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.state)
-				return;
 			const auto& s = *a_frame.state;
 			RaymarchBlock block{};
 			block.shared = SharedConstants::Index(a_recording, a_bindings.shared);
-			block.sampler = s.linearSampler.Index();
+			block.sampler = s.linearSampler;
 			block.depth = a_recording.Index(a_bindings.depth);
 			block.shadowHeights = a_bindings.hasShadowHeights ? a_recording.Index(a_bindings.shadowHeights) : 0;
 			block.cloudShadows = a_bindings.hasCloudShadows ? a_recording.Index(a_bindings.cloudShadows) : 0;
 			// The raymarch writes every texel of the area: nothing to keep.
 			const std::array<RasterProgram::Colour, 2> colours{ { { .view = &a_bindings.scattering, .load = rhi::LoadOp::DontCare },
 				{ .view = &a_bindings.depthOut, .load = rhi::LoadOp::DontCare } } };
-			s.raymarch->Draw(a_recording, { .colours = colours,
-											  .viewport = { .width = a_frame.area.halfWidth, .height = a_frame.area.halfHeight },
-											  .constants = ShaderBindings::Data(block),
-											  .debugName = "Effects11::VolumetricRays Raymarch" });
+			const auto& sizes = s.shape.sizes;
+			GatedDraw(s, kVolumetricDraws, *s.raymarch,
+				{ .colours = colours,
+					.viewport = { .width = sizes.halfWidth, .height = sizes.halfHeight },
+					.constants = ShaderBindings::Data(block),
+					.debugName = "Effects11::VolumetricRays Raymarch" },
+				a_recording);
 		}
 
 	private:
-		PassCommon common;
-	};
-
-	struct BlurBindings
-	{
-		org::DeclaredViewToken input, linearDepth, output;
-	};
-
-	/** @brief One depth-aware blur: horizontal (the scattering into the other half), then vertical (back into the scattering). */
-	class BlurPass final : public org::TypedRenderGraphPass<BlurPass, RaysFrame, BlurBindings>
-	{
-	public:
-		BlurPass(std::shared_ptr<const RaysState> a_state, bool a_horizontal) :
-			common{ std::move(a_state), false, a_horizontal ? 1u : 0u } {}
-
-		BlurBindings Declare(org::PassBuilder& a_builder)
-		{
-			a_builder.PreferQueue(org::QueueKind::Graphics);
-			const auto& s = *common.state;
-			const bool horizontal = common.index != 0;
-			const auto& from = horizontal ? s.vlScattering : s.vlBlur;
-			const auto& to = horizontal ? s.vlBlur : s.vlScattering;
-			BlurBindings b{};
-			b.input = a_builder.ShaderResource(from->Graph()).View();
-			b.linearDepth = a_builder.ShaderResource(s.vlDepth->Graph()).View();
-			b.output = a_builder.UnorderedAccess(to->Graph()).View();
-			return b;
-		}
-
-		void Revision(std::vector<std::uint64_t>& a_out) const { common.AddRevision(a_out); }
-
-		RaysFrame Prepare(const BlurBindings&, const org::PassPrepareContext&) const { return common.Frame(); }
-
-		static void Record(const BlurBindings& a_bindings, const RaysFrame& a_frame, org::PassRecordContext& a_recording)
-		{
-			if (!a_frame.state)
-				return;
-			const auto& s = *a_frame.state;
-			const bool horizontal = a_frame.index != 0;
-			BlurBlock block{};
-			block.input = a_recording.Index(a_bindings.input);
-			block.linearDepth = a_recording.Index(a_bindings.linearDepth);
-			block.output = a_recording.Index(a_bindings.output);
-			block.vl = ShaderBindings::LatchOf(*s.latch, a_recording.FrameSlot(), static_cast<std::uint32_t>(offsetof(LatchData, vl)));
-			const auto& area = a_frame.area;
-			// As the D3D11 dispatches: each group covers kBlurGroupPixels along the blurred axis, one row or column across it.
-			if (horizontal)
-				s.blurH->Dispatch(a_recording, ShaderBindings::Data(block), (area.halfWidth + kBlurGroupPixels - 1) / kBlurGroupPixels, area.halfHeight, 1);
-			else
-				s.blurV->Dispatch(a_recording, ShaderBindings::Data(block), area.halfWidth, (area.halfHeight + kBlurGroupPixels - 1) / kBlurGroupPixels, 1);
-		}
-
-	private:
-		PassCommon common;
+		std::shared_ptr<const RaysState> state;
 	};
 
 	struct ApplyBindings
@@ -341,16 +270,16 @@ namespace
 		org::DeclaredViewToken main, scattering, raymarchDepth, depth;
 	};
 
-	/** @brief The apply pass: the blurred scattering, upsampled and lit, added to kMAIN. */
+	/** @brief The apply pass: the blurred scattering, upsampled and lit, added to kMAIN. Reads the scene depth, maybe by name. */
 	class ApplyPass final : public org::TypedRenderGraphPass<ApplyPass, RaysFrame, ApplyBindings>
 	{
 	public:
 		explicit ApplyPass(std::shared_ptr<const RaysState> a_state) :
-			common{ std::move(a_state), false, 0 } {}
+			state(std::move(a_state)) {}
 
 		ApplyBindings Declare(org::PassBuilder& a_builder)
 		{
-			const auto& s = *common.state;
+			const auto& s = *state;
 			ApplyBindings b{};
 			b.shared = SharedConstants::Declare(a_builder);
 			b.main = a_builder.RenderTarget(s.shape.main).View();
@@ -360,30 +289,31 @@ namespace
 			return b;
 		}
 
-		void Revision(std::vector<std::uint64_t>& a_out) const { common.AddRevision(a_out); }
+		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(state.get())); }
 
-		RaysFrame Prepare(const ApplyBindings&, const org::PassPrepareContext&) const { return common.Frame(); }
+		RaysFrame Prepare(const ApplyBindings&, const org::PassPrepareContext&) const { return { state }; }
 
 		static void Record(const ApplyBindings& a_bindings, const RaysFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.state)
-				return;
 			const auto& s = *a_frame.state;
 			ApplyBlock block{};
 			block.shared = SharedConstants::Index(a_recording, a_bindings.shared);
 			block.scattering = a_recording.Index(a_bindings.scattering);
 			block.raymarchDepth = a_recording.Index(a_bindings.raymarchDepth);
-			block.vl = ShaderBindings::LatchOf(*s.latch, a_recording.FrameSlot(), static_cast<std::uint32_t>(offsetof(LatchData, vl)));
+			block.vl = ShaderBindings::LatchOf(*s.latch, a_recording.FrameSlot(), kVLOffset);
 			block.depth = a_recording.Index(a_bindings.depth);
 			const RasterProgram::Colour colour{ .view = &a_bindings.main, .load = rhi::LoadOp::Load };
-			s.apply->Draw(a_recording, { .colours = { &colour, 1 },
-										   .viewport = { .width = a_frame.area.width, .height = a_frame.area.height },
-										   .constants = ShaderBindings::Data(block),
-										   .debugName = "Effects11::VolumetricRays Apply" });
+			const auto& sizes = s.shape.sizes;
+			GatedDraw(s, kVolumetricDraws, *s.apply,
+				{ .colours = { &colour, 1 },
+					.viewport = { .width = sizes.width, .height = sizes.height },
+					.constants = ShaderBindings::Data(block),
+					.debugName = "Effects11::VolumetricRays Apply" },
+				a_recording);
 		}
 
 	private:
-		PassCommon common;
+		std::shared_ptr<const RaysState> state;
 	};
 
 	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -399,18 +329,17 @@ namespace
 
 	/**
 	 * @brief One sun ray pass: the mask (into A), a blur (A into B, B into A, A into B) or the composite (B added to kMAIN). Each
-	 * reads its own SunRaysData from the latch region.
+	 * reads its own SunRaysData from the latch region, and the scene depth, maybe by name.
 	 */
 	class SunRaysPass final : public org::TypedRenderGraphPass<SunRaysPass, RaysFrame, SunRaysBindings>
 	{
 	public:
 		SunRaysPass(std::shared_ptr<const RaysState> a_state, std::uint32_t a_pass) :
-			common{ std::move(a_state), true, a_pass } {}
+			state(std::move(a_state)), pass(a_pass) {}
 
 		SunRaysBindings Declare(org::PassBuilder& a_builder)
 		{
-			const auto& s = *common.state;
-			const std::uint32_t pass = common.index;
+			const auto& s = *state;
 			const bool composite = pass == ORGSunRays::kSunRaysPasses - 1;
 			// The mask and the second blur write A, the other blurs write B; each blur and the composite read the last target.
 			const auto& written = pass % 2 == 0 ? s.sunA : s.sunB;
@@ -430,20 +359,22 @@ namespace
 			return b;
 		}
 
-		void Revision(std::vector<std::uint64_t>& a_out) const { common.AddRevision(a_out); }
+		void Revision(std::vector<std::uint64_t>& a_out) const
+		{
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(state.get()));
+			a_out.push_back(pass);
+		}
 
-		RaysFrame Prepare(const SunRaysBindings&, const org::PassPrepareContext&) const { return common.Frame(); }
+		RaysFrame Prepare(const SunRaysBindings&, const org::PassPrepareContext&) const { return { state, pass }; }
 
 		static void Record(const SunRaysBindings& a_bindings, const RaysFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.state)
-				return;
 			const auto& s = *a_frame.state;
 			const std::uint32_t pass = a_frame.index;
 			const bool composite = pass == ORGSunRays::kSunRaysPasses - 1;
 			SunRaysBlock block{};
 			block.shared = SharedConstants::Index(a_recording, a_bindings.shared);
-			block.sampler = s.linearSampler.Index();
+			block.sampler = s.linearSampler;
 			block.rays = a_bindings.hasRays ? a_recording.Index(a_bindings.rays) : 0;
 			block.data = ShaderBindings::LatchOf(*s.latch, a_recording.FrameSlot(), SunOffset(pass));
 			block.depth = a_recording.Index(a_bindings.depth);
@@ -453,14 +384,17 @@ namespace
 			const auto& program = pass == 0 ? s.sunMask : (composite ? s.sunComposite : s.sunBlur);
 			static constexpr std::array<const char*, ORGSunRays::kSunRaysPasses> kNames{ "Effects11::SunRays Mask", "Effects11::SunRays Blur 1",
 				"Effects11::SunRays Blur 2", "Effects11::SunRays Blur 3", "Effects11::SunRays Composite" };
+			const auto& sizes = s.shape.sizes;
 			RasterProgram::Viewport viewport{};
-			viewport.width = composite ? a_frame.area.width : a_frame.area.halfWidth;
-			viewport.height = composite ? a_frame.area.height : a_frame.area.halfHeight;
-			program->Draw(a_recording, { .colours = { &colour, 1 }, .viewport = viewport, .constants = ShaderBindings::Data(block), .debugName = kNames[pass] });
+			viewport.width = composite ? sizes.width : sizes.halfWidth;
+			viewport.height = composite ? sizes.height : sizes.halfHeight;
+			GatedDraw(s, kSunDraws, *program, { .colours = { &colour, 1 }, .viewport = viewport, .constants = ShaderBindings::Data(block), .debugName = kNames[pass] },
+				a_recording);
 		}
 
 	private:
-		PassCommon common;
+		std::shared_ptr<const RaysState> state;
+		std::uint32_t pass = 0;
 	};
 
 	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -509,31 +443,20 @@ namespace
 		return view;
 	}
 
-	/** @brief The defines the D3D11 build gets (Util::CompileShader), as the programs take them. */
-	std::vector<std::pair<std::wstring, std::wstring>> Defines(std::vector<std::string> a_names, const char* a_stage)
+	/** @brief A program's own defines, each without a value. The programs add the D3D11 build's common defines themselves. */
+	std::vector<std::pair<std::wstring, std::wstring>> Defines(const std::vector<std::string>& a_names)
 	{
 		std::vector<std::pair<std::string, std::string>> defines;
-		for (auto& name : a_names)
-			defines.emplace_back(std::move(name), "");
-		std::vector<std::string_view> explicitNames;
-		for (const auto& define : defines)
-			explicitNames.push_back(define.first);
-		for (auto& define : Util::GetCommonShaderDefines(explicitNames))
-			defines.push_back(std::move(define));
-		for (const char* name : { a_stage, "WINPC", "DX11" })
+		for (const auto& name : a_names)
 			defines.emplace_back(name, "");
-		// Defines are ASCII.
-		std::vector<std::pair<std::wstring, std::wstring>> wide;
-		for (const auto& [name, value] : defines)
-			wide.emplace_back(std::wstring(name.begin(), name.end()), std::wstring(value.begin(), value.end()));
-		return wide;
+		return RenderGraph::AnchorPasses::Defines(defines);
 	}
 
 	D3D11_TEXTURE2D_DESC HalfDesc(const Shape& a_shape, DXGI_FORMAT a_format, UINT a_bindFlags)
 	{
 		D3D11_TEXTURE2D_DESC desc{};
-		desc.Width = a_shape.halfTexWidth;
-		desc.Height = a_shape.halfTexHeight;
+		desc.Width = a_shape.sizes.halfTexWidth;
+		desc.Height = a_shape.sizes.halfTexHeight;
 		desc.MipLevels = 1;
 		desc.ArraySize = 1;
 		desc.Format = a_format;
@@ -557,19 +480,36 @@ namespace
 		blend.writeMask = static_cast<rhi::ColorWriteEnable>(rhi::ColorWriteEnable::R | rhi::ColorWriteEnable::G | rhi::ColorWriteEnable::B);
 		return blend;
 	}
+
+	/** @brief The blurs' group counts for a frame's half-res area, as the D3D11 dispatches give them. */
+	std::array<std::uint32_t, 3> BlurGroups(const ORGSunRays::Sizes& a_sizes, bool a_horizontal)
+	{
+		// Each group covers kBlurGroupPixels along the blurred axis, one row or column across it.
+		if (a_horizontal)
+			return { (a_sizes.halfWidth + kBlurGroupPixels - 1) / kBlurGroupPixels, a_sizes.halfHeight, 1 };
+		return { a_sizes.halfWidth, (a_sizes.halfHeight + kBlurGroupPixels - 1) / kBlurGroupPixels, 1 };
+	}
 }
 
 struct ORGSunRays::Impl
 {
+	// From Setup, for the session: the latch block, the run gate and the sampler every build shares.
+	std::shared_ptr<org::LatchBlock> latch;
+	std::shared_ptr<RenderGraph::RunGate> gate;
+	org::OwnedDescriptorBinding linearSampler;
+	std::function<void()> onFailed;
+
+	// The registered build, null until the first frame the graph takes.
 	std::shared_ptr<const RaysState> state;
 	// Programs by source, defines and target formats, kept across shapes: a resize does not compile again.
 	std::map<std::string, std::shared_ptr<const RasterProgram>> rasterPrograms;
 	std::map<std::string, std::shared_ptr<const ComputeProgram>> computePrograms;
 	// This frame's values, gathered by VolumetricRays and SunRays, handed to the run at the hook and latched by the commit.
 	LatchData pending{};
-	Sizes pendingSizes{};
 	bool pendingVolumetric = false, pendingSun = false;
+	// The run's, from the hook (active) for the commit.
 	std::optional<LatchData> committed;
+	bool committedVolumetric = false, committedSun = false;
 	// The frame PrepareFrame last ran for, and its answer.
 	std::uint32_t preparedFrame = UINT32_MAX;
 	bool preparedOk = false;
@@ -588,7 +528,7 @@ struct ORGSunRays::Impl
 			RasterProgram::Desc desc{};
 			desc.pixelSource = std::string(kShaderDir) + a_source;
 			desc.constantWords = a_words;
-			desc.defines = Defines(std::move(a_defines), "PSHADER");
+			desc.defines = Defines(a_defines);
 			desc.targets = std::move(a_targets);
 			program = RasterProgram::Load(RenderGraphRuntime::Get().Host()->Device(), desc);
 		}
@@ -603,16 +543,18 @@ struct ORGSunRays::Impl
 		auto& program = computePrograms[key];
 		if (!program)
 			program = ComputeProgram::Load(RenderGraphRuntime::Get().Host()->Device(),
-				{ .source = std::string(kShaderDir) + a_source, .constantWords = a_words, .defines = Defines(std::move(a_defines), "COMPUTESHADER") });
+				{ .source = std::string(kShaderDir) + a_source, .constantWords = a_words, .defines = Defines(a_defines) });
 		return program;
 	}
 
 	/** @brief A new state for a_shape, registered as the client. False, logged, when anything could not be made. */
 	bool Build(const Shape& a_shape)
 	{
-		auto* host = RenderGraphRuntime::Get().Host();
 		auto built = std::make_shared<RaysState>();
 		built->shape = a_shape;
+		built->latch = latch;
+		built->gate = gate;
+		built->linearSampler = linearSampler.Index();
 
 		// The D3D11 path's defines (Effects11::DrawVolumetricRays, EnsureSunRaysResources).
 		std::vector<std::string> raymarchDefines;
@@ -647,46 +589,68 @@ struct ORGSunRays::Impl
 		built->vlDepth = std::make_unique<GraphResources::Texture2D>(HalfDesc(a_shape, DXGI_FORMAT_R32_FLOAT, kTarget), "Effects11::VLDepthHalf", transient);
 		built->sunA = std::make_unique<GraphResources::Texture2D>(HalfDesc(a_shape, DXGI_FORMAT_R16_FLOAT, kTarget), "Effects11::SunRaysTexA", transient);
 		built->sunB = std::make_unique<GraphResources::Texture2D>(HalfDesc(a_shape, DXGI_FORMAT_R16_FLOAT, kTarget), "Effects11::SunRaysTexB", transient);
-		built->latch = std::make_shared<org::LatchBlock>("cs.e11-rays.latch", static_cast<std::uint32_t>(sizeof(LatchData)), host->FrameSlots());
-		// As Deferred::linearSampler: linear, clamped.
-		built->linearSampler = ShaderBindings::CreateSampler({});
-		if (!*built->vlScattering || !*built->vlBlur || !*built->vlDepth || !*built->sunA || !*built->sunB || !built->linearSampler) {
-			logger::error("[ORG] Effects11 rays: the half-res textures or the sampler could not be made");
+		if (!*built->vlScattering || !*built->vlBlur || !*built->vlDepth || !*built->sunA || !*built->sunB) {
+			logger::error("[ORG] Effects11 rays: the half-res textures could not be made");
 			return false;
+		}
+
+		// The blurs are plain gated dispatches. The raster passes stay passes of their own: they read other clients' textures by
+		// name, and the raymarch has two targets, neither of which AnchorPasses::Draw covers.
+		const std::shared_ptr<const RaysState> shared = built;
+		namespace AP = RenderGraph::AnchorPasses;
+		AP::Builder volumetric(FrameAnchors::Anchor::PostComposite, std::string(kClientId) + ".volumetric", kVolumetricOrder, latch, gate);
+		volumetric.Add("raymarch", FrameAnchors::PassKind::Render, [shared] { return std::make_shared<RaymarchPass>(shared); });
+		volumetric.Add(AP::Dispatch{ .name = "blur-h",
+			.program = built->blurH,
+			.bindings = { Bind::Srv(built->vlScattering->Graph()), Bind::Srv(built->vlDepth->Graph()), Bind::Uav(built->vlBlur->Graph()), Bind::Latch(kVLOffset) },
+			.gate = kBlurH });
+		volumetric.Add(AP::Dispatch{ .name = "blur-v",
+			.program = built->blurV,
+			.bindings = { Bind::Srv(built->vlBlur->Graph()), Bind::Srv(built->vlDepth->Graph()), Bind::Uav(built->vlScattering->Graph()), Bind::Latch(kVLOffset) },
+			.gate = kBlurV });
+		volumetric.Add("apply", FrameAnchors::PassKind::Render, [shared] { return std::make_shared<ApplyPass>(shared); });
+
+		AP::Builder sun(FrameAnchors::Anchor::PostComposite, std::string(kClientId) + ".sun", kSunRaysOrder, latch, gate);
+		static constexpr std::array<const char*, kSunRaysPasses> kSunSteps{ "mask", "blur-1", "blur-2", "blur-3", "composite" };
+		for (std::uint32_t pass = 0; pass < kSunRaysPasses; ++pass)
+			sun.Add(kSunSteps[pass], FrameAnchors::PassKind::Render, [shared, pass] { return std::make_shared<SunRaysPass>(shared, pass); });
+
+		for (const auto* builder : { &volumetric, &sun }) {
+			if (builder->Failed()) {
+				logger::error("[ORG] Effects11 rays: {}", builder->Failure());
+				return false;
+			}
 		}
 
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
-		const std::shared_ptr<const RaysState> shared = built;
-		const auto add = [&](std::string a_name, std::int32_t a_order, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make) {
-			client.passes.push_back({ .name = "cs.e11-rays." + std::move(a_name),
-				.anchor = FrameAnchors::Anchor::PostComposite,
-				.order = a_order,
-				.kind = a_kind,
-				.make = std::move(a_make) });
-		};
-		add("volumetric.raymarch", kVolumetricOrder, FrameAnchors::PassKind::Render, [shared] { return std::make_shared<RaymarchPass>(shared); });
-		add("volumetric.blur-h", kVolumetricOrder + 1, FrameAnchors::PassKind::Compute, [shared] { return std::make_shared<BlurPass>(shared, true); });
-		add("volumetric.blur-v", kVolumetricOrder + 2, FrameAnchors::PassKind::Compute, [shared] { return std::make_shared<BlurPass>(shared, false); });
-		add("volumetric.apply", kVolumetricOrder + 3, FrameAnchors::PassKind::Render, [shared] { return std::make_shared<ApplyPass>(shared); });
-		static constexpr std::array<const char*, kSunRaysPasses> kSunNames{ "sun.mask", "sun.blur-1", "sun.blur-2", "sun.blur-3", "sun.composite" };
-		for (std::uint32_t pass = 0; pass < kSunRaysPasses; ++pass)
-			add(kSunNames[pass], kSunRaysOrder + static_cast<std::int32_t>(pass), FrameAnchors::PassKind::Render,
-				[shared, pass] { return std::make_shared<SunRaysPass>(shared, pass); });
+		client.passes = volumetric.Take();
+		for (auto& pass : sun.Take())
+			client.passes.push_back(std::move(pass));
 		client.registerResources = [shared](org::RenderGraph& a_graph) {
 			for (const auto* texture : { shared->vlScattering.get(), shared->vlBlur.get(), shared->vlDepth.get(), shared->sunA.get(), shared->sunB.get() })
 				texture->Register(a_graph);
 		};
+		// In the epoch: the run's values, and the gate entries of the effects the frame gave the graph.
 		client.commit = [this, shared](const FrameAnchors::Point&) {
-			if (committed)
-				shared->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, *committed);
+			if (committed) {
+				latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, *committed);
+				if (committedVolumetric) {
+					const auto h = BlurGroups(shared->shape.sizes, true);
+					const auto v = BlurGroups(shared->shape.sizes, false);
+					gate->OpenDraw(kVolumetricDraws);
+					gate->OpenDispatch(kBlurH, h[0], h[1], h[2]);
+					gate->OpenDispatch(kBlurV, v[0], v[1], v[2]);
+				}
+				if (committedSun)
+					gate->OpenDraw(kSunDraws);
+			}
 			committed.reset();
 		};
-		// At the hook, before the epoch: the passes record only for the effects the frame gave the graph.
-		client.active = [this, shared] {
-			shared->volumetricLive->store(pendingVolumetric, std::memory_order_release);
-			shared->sunLive->store(pendingSun, std::memory_order_release);
-			shared->area->store(Pack(pendingSizes), std::memory_order_release);
+		// At the hook, before the epoch: the run has work only for the effects the frame gave the graph.
+		client.active = [this] {
+			committedVolumetric = pendingVolumetric;
+			committedSun = pendingSun;
 			const bool live = pendingVolumetric || pendingSun;
 			if (live)
 				committed = pending;
@@ -697,14 +661,19 @@ struct ORGSunRays::Impl
 			logger::error("[ORG] Effects11 rays return to D3D11: the render graph failed");
 			auto& self = Get();
 			self.failed = true;
+			auto onFailed = self.impl ? std::move(self.impl->onFailed) : std::function<void()>{};
 			self.impl.reset();
+			if (onFailed)
+				onFailed();
 		};
 		client.sharedConstants = true;
+		client.gates = { gate };
 		if (!FrameAnchors::Register(std::move(client)))
 			return false;
 		state = std::move(built);
-		logger::info("[ORG] Effects11 rays run on the render graph (half-res {}x{}, kMAIN format {}, terrain shadows {}, cloud shadows {})", a_shape.halfTexWidth,
-			a_shape.halfTexHeight, static_cast<std::uint32_t>(a_shape.mainFormat), a_shape.shadowHeights ? "on" : "off", a_shape.cloudShadows ? "on" : "off");
+		const auto& sizes = a_shape.sizes;
+		logger::info("[ORG] Effects11 rays run on the render graph (half-res {}x{}, kMAIN format {}, terrain shadows {}, cloud shadows {})", sizes.halfTexWidth,
+			sizes.halfTexHeight, static_cast<std::uint32_t>(a_shape.mainFormat), a_shape.shadowHeights ? "on" : "off", a_shape.cloudShadows ? "on" : "off");
 		return true;
 	}
 };
@@ -717,15 +686,41 @@ void ORGSunRays::Reserve()
 		logger::warn("[ORG] Effects11 rays: the PostComposite anchor could not be reserved; the rays stay on D3D11");
 }
 
-bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
+bool ORGSunRays::Setup(std::function<void()> a_onFailed)
 {
 	if (!Requested() || failed)
 		return false;
+	if (impl)
+		return true;
 	auto& runtime = RenderGraphRuntime::Get();
-	if (!runtime.IsActive() || !runtime.Host() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::PostComposite))
+	if (!runtime.IsActive() || !runtime.Host() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::PostComposite)) {
+		logger::warn("[ORG] Effects11 rays: CS_ORG_E11_RAYS=1 but the render graph or its PostComposite anchor is not available; the rays stay on D3D11");
 		return false;
-	if (!impl)
-		impl = std::make_unique<Impl>();
+	}
+	auto state = std::make_unique<Impl>();
+	state->latch = std::make_shared<org::LatchBlock>("cs.e11-rays.latch", static_cast<std::uint32_t>(sizeof(LatchData)), runtime.Host()->FrameSlots());
+	state->gate = RenderGraph::RunGate::Create("cs.e11-rays.gate", kGateEntries);
+	// As Deferred::linearSampler: linear, clamped.
+	state->linearSampler = ShaderBindings::CreateSampler({});
+	if (!state->gate || !state->linearSampler) {
+		logger::error("[ORG] Effects11 rays: the run gate or the sampler could not be made; the rays stay on D3D11");
+		failed = true;
+		return false;
+	}
+	state->onFailed = std::move(a_onFailed);
+	impl = std::move(state);
+	return true;
+}
+
+bool ORGSunRays::IsActive() const
+{
+	return impl && !failed && RenderGraphRuntime::Get().IsActive();
+}
+
+bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
+{
+	if (!IsActive())
+		return false;
 	const std::uint32_t frame = globals::state->frameCount;
 	if (impl->preparedFrame == frame)
 		return impl->preparedOk;
@@ -742,8 +737,7 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 
 	// This frame's inputs, as the D3D11 passes read them, each as a graph resource.
 	Shape shape;
-	shape.halfTexWidth = a_sizes.halfTexWidth;
-	shape.halfTexHeight = a_sizes.halfTexHeight;
+	shape.sizes = a_sizes;
 	const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 	if (!main.texture || !main.RTV)
 		return fallback("kMAIN is missing");
@@ -763,9 +757,9 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 		auto* view = terrainShadows.GetShadowHeightSRV();
 		const auto& graphTerrain = ORGTerrainShadows::Get();
 		if (view && graphTerrain.Active() && view == graphTerrain.ShadowHeightSRV())
-			shape.shadowHeights = { nullptr, "TerrainShadows::ShadowHeight" };
+			shape.shadowHeights = { nullptr, std::string(ORGTerrainShadows::kShadowHeightId) };
 		else
-			shape.shadowHeights = ImportView("TerrainShadows::ShadowHeight", view);
+			shape.shadowHeights = ImportView(ORGTerrainShadows::kShadowHeightId, view);
 		// The raymarch reads the heights whenever terrain shadows are on.
 		if (!shape.shadowHeights)
 			return fallback("Terrain Shadows' heights are missing");
@@ -776,9 +770,9 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 		const auto view = BoundPixelView(25);
 		const auto& graphClouds = ORGCloudShadows::Get();
 		if (view && graphClouds.Active() && view.get() == graphClouds.OcclusionSRV())
-			shape.cloudShadows = { nullptr, "CloudShadows::Occlusion" };
+			shape.cloudShadows = { nullptr, std::string(ORGCloudShadows::kOcclusionId) };
 		else
-			shape.cloudShadows = ImportView("CloudShadows::Occlusion", view.get());
+			shape.cloudShadows = ImportView(ORGCloudShadows::kOcclusionId, view.get());
 		if (!shape.cloudShadows)
 			return fallback("Cloud Shadows' texture is missing");
 	}
@@ -793,7 +787,6 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 		}
 	}
 
-	impl->pendingSizes = a_sizes;
 	impl->pending.vl = { static_cast<std::int32_t>(a_sizes.halfWidth), static_cast<std::int32_t>(a_sizes.halfHeight),
 		static_cast<std::int32_t>(a_sizes.halfWidth) - 1, static_cast<std::int32_t>(a_sizes.halfHeight) - 1 };
 	impl->fallbackReason.clear();
@@ -822,8 +815,13 @@ void ORGSunRays::Release()
 {
 	if (!impl)
 		return;
+	// The build and its programs go; the latch, the gate and the sampler stay. The next frame builds again.
 	FrameAnchors::Unregister(kClientId);
-	impl.reset();
+	impl->state.reset();
+	impl->rasterPrograms.clear();
+	impl->computePrograms.clear();
+	impl->preparedFrame = UINT32_MAX;
+	impl->pendingVolumetric = impl->pendingSun = false;
 }
 
 #else  // !CS_HAS_RENDER_GRAPH
@@ -834,10 +832,11 @@ struct ORGSunRays::Impl
 
 ORGSunRays::~ORGSunRays() = default;
 void ORGSunRays::Reserve() {}
+bool ORGSunRays::Setup(std::function<void()>) { return false; }
+bool ORGSunRays::IsActive() const { return false; }
 bool ORGSunRays::PrepareFrame(const Sizes&) { return false; }
 bool ORGSunRays::VolumetricRays(const Sizes&) { return false; }
 bool ORGSunRays::SunRays(const Sizes&, const std::array<Effects11::SunRaysData, kSunRaysPasses>&) { return false; }
 void ORGSunRays::Release() {}
 
 #endif
-
