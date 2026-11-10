@@ -209,6 +209,37 @@ upscaler output").
     legacy descriptor sets, so with RenderDoc loaded the graph turns itself off.
 -   If it reproduces in isolation, report it to NVIDIA.
 
+## Hazard: bindings the driver keeps across an in-stream epoch
+
+**Rule.** After an in-stream epoch, DXVK must not rely on re-binding the same vertex or index buffer it had bound before the epoch.
+`DxvkContext::invalidateExternalCommandState` (`extern/dxvk`) binds placeholder vertex and index buffers after every client's
+commands, so DXVK's own binds before its next draw always reach the driver. Keep that step if the function is rewritten.
+
+**What happened.** On the RX 6600 (AMD's Windows driver, 2026-11-10), every frame went black when a graph client ran at the Tonemap
+anchor with FSR: Effects11's ORG runtime and Post Processing's chain both. The graph's output was correct. The engine's depth of
+field after it, `ISHDRDownSample4` and `ISDistantBlur`, drew garbage: both are indexed draws of the engine's full-screen quad, whose
+index buffer `ISRefraction` had also bound just before the epoch. The epoch's secondary command buffers bind the graph's own index
+buffer. Vulkan leaves the primary's bindings undefined after `vkCmdExecuteCommands`, and DXVK does bind its own again, but the driver
+compares against the bindings it recorded before the secondaries and drops the identical bind as redundant. The draw then reads the
+graph's index buffer.
+
+**Why it was hard to see.**
+
+-   The core and synchronization validation layers report nothing: the API use is correct.
+-   Barriers, layout transitions, descriptor rebinds and new descriptor ranges change nothing.
+-   It goes away with anything that resets the driver's record: a new command buffer (a flush on either side of the epoch, a GPU wait
+    that moves DXVK's later flush points), or a copy, which the driver runs as an internal blit that saves and restores its state.
+    That made it look timing dependent, and recording reuse looked like the trigger because it changed where DXVK flushed.
+-   TAA was unaffected: its first draw after the epoch uses another quad, so its bind always differs.
+
+**How it was found.** An RGP capture of a black frame and of a fixed one (`fx-org1` against the same with a one-texel copy after the
+anchor), compared at the level of the driver's SQTT user-data markers (command buffers, barriers with their cache flags, layout
+transitions, debug labels). The copy showed up as an internal graphics blit between the epoch and the depth of field draw, which
+pointed at driver state rather than memory. Binding a placeholder index buffer after the epoch alone fixed it; a placeholder vertex
+buffer alone did not.
+
+The descriptor-heap hazard above, with NVIDIA's driver, may be the same kind of state record surviving the graph's secondaries.
+
 ## External commands in DXVK's command buffer
 
 `RenderGraphRuntime::EmitExternalCommands(record, user, waits, signals, bindsState, label, fullBarrier)` (render thread) queues
