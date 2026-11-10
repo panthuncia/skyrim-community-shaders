@@ -37,12 +37,14 @@ pinned submodule commits exist only locally, so a fresh clone cannot fetch them.
 | DCLF reads fog, IBL, Skylighting, Terrain/Volumetric Shadows as published resources                            | Merged; A/B within noise                                                            | CS `org-port/integration`                                |
 | DCLF reads Terrain Blending's depths, Cloud Shadows' self shadow and the faces' inputs as published resources  | Merged; A/B within noise, no D3D11 export reads left                                | CS `org-port/integration`                                |
 | DXVK: placeholder binds after external commands, interop layout order, relocation copies                       | Done; validation clean apart from a known kMAIN GENERAL layout                      | DXVK `org-port/p3-kept-layouts`, bumped on integration   |
+| P3.5: consolidation (bugs, DCLF one rule, framework primitives, ports on them, submodule fixes)                | Done; A/B within noise, validation clean, hot reload checked                        | CS `org-port/integration`                                |
+| VRAM Budget: runs on the main thread, purges as pcb does                                                       | Done; the interior grid-detach crash is gone                                        | CS `fix/vram-budget-main-thread`, merged                 |
 
 **Root cause worth knowing:** a BasicRHI-created Vulkan device failed on AMD because the driver rejects acceleration
 structures in a mutable descriptor list at any count. DXVK never enables acceleration structures, so the adopted device
 never hit it. Acceleration-structure SRVs are now dropped from the descriptor-buffer model where this happens.
 
-**Phase 3 is done.** Phase 3.5 (consolidation, below) comes before Phase 4.
+**Phases 3 and 3.5 are done.** Phase 4 is written on six branches (`org-port/p4-*`) and not yet built.
 
 **Second root cause worth knowing:** after `vkCmdExecuteCommands`, AMD's Windows driver keeps the vertex and index
 buffers the primary bound before it. When DXVK re-binds the same index buffer after the graph's secondaries, the driver
@@ -53,6 +55,14 @@ own binds always reach the driver. Details: "Hazard: bindings the driver keeps a
 `render-graph.md`.
 
 **Bugs found by in-game testing (fixed on `org-port/integration`):**
+
+- VRAM Budget's interior step unloaded the worldspace 3D and detached the grid, then unloaded the old grid cells over later
+  ticks. An actor in a detached cell got its 3D attached by the AI job, which read the null worldspace portal graph and
+  crashed (SkyrimSE+0x2C4BD6). Its controller also ran on a job thread, not the main thread its comment claimed. It now
+  runs after the frame jobs on the main thread and calls the engine's whole `pcb` for the interior step.
+- A failed build of one graph epoch ended ORG's host thread, so every epoch stopped and DCLF waited until the GPU timed
+  out (HDR Display's UI clear asked for a view its import lacked). A failure now stays with its epoch: that anchor's
+  clients return to D3D11 and the rest runs on. Imports with a UAV now also publish the CPU-side UAV a clear needs.
 
 - ORG's alias planner sized a texture with an authored mip chain as one mip, so placements overlapped (SSGI's working
   depth ran into its radiance). Placement now sizes textures from the description the backing creates them with.
