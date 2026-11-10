@@ -37,6 +37,9 @@ void VolumetricShadows::SetupResources()
 	defines.clear();
 	defines.push_back({ "BLUR_VERTICAL", nullptr });
 	blurShadowVerticalCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\VolumetricShadows\\BlurShadowCS.hlsl", defines, "cs_5_0"));
+
+	// The render graph's passes, when requested. If the graph fails later, the D3D11 dispatches run again by themselves.
+	ORGVolumetricShadows::Get().Setup({});
 }
 
 void VolumetricShadows::ClearShaderCache()
@@ -401,12 +404,12 @@ struct CreateDepthStencil_VolumetricLighting
 
 void VolumetricShadows::EarlyPrepass()
 {
-	ORGVolumetricShadows::Get().EarlyPrepass();
+	ORGVolumetricShadows::Get().UpdateImports();
 }
 
 void VolumetricShadows::PostPostLoad()
 {
-	ORGVolumetricShadows::Get().Reserve();
+	ORGVolumetricShadows::Reserve();
 	stl::write_thunk_call<CreateDepthStencil_VolumetricLighting>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x9DC, 0x9DC));
 }
 

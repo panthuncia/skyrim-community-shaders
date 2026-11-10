@@ -12,6 +12,7 @@
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/Switches.h"
 #	include "State.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -23,7 +24,6 @@
 
 #	include <algorithm>
 #	include <array>
-#	include <cstring>
 
 namespace
 {
@@ -263,14 +263,12 @@ struct ORGVolumetricShadows::Impl
 {
 	std::shared_ptr<Resources> resources;
 	bool inputChecked = false;
+	std::function<void()> onFailed;
 };
 
 bool ORGVolumetricShadows::Requested()
 {
-	static const bool requested = [] {
-		char value[8]{};
-		return GetEnvironmentVariableA("CS_ORG_VOLUMETRIC_SHADOWS", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}();
+	static const bool requested = Switches::On("CS_ORG_VOLUMETRIC_SHADOWS");
 	return requested;
 }
 
@@ -288,64 +286,76 @@ void ORGVolumetricShadows::Reserve()
 		logger::warn("[ORG] Volumetric Shadows stays on D3D11: the EarlyPrepass anchor could not be reserved");
 }
 
-void ORGVolumetricShadows::EarlyPrepass()
+bool ORGVolumetricShadows::Setup(std::function<void()> a_onFailed)
 {
+	impl.reset();
 	if (!Requested())
-		return;
+		return false;
 	auto& runtime = RenderGraphRuntime::Get();
-	if (!impl) {
-		// Set up once, the first frame the runtime is active. A failure keeps the D3D11 path for the session.
-		if (attempted || !runtime.IsActive())
-			return;
-		attempted = true;
-		if (!FrameAnchors::HasEpoch(FrameAnchors::Anchor::EarlyPrepass)) {
-			logger::warn("[ORG] Volumetric Shadows stays on D3D11: the EarlyPrepass anchor has no epoch");
-			return;
-		}
-		auto resources = std::make_shared<Resources>();
-		auto device = runtime.Host()->Device();
-		for (std::uint32_t mip = 0; mip < kMips; ++mip)
-			resources->downsample[mip] = ComputeProgram::Load(device, { .source = kDownsampleShader,
-																		  .constantWords = ShaderBindings::Words<DownsampleBlock>(),
-																		  .defines = { { mip ? L"DOWNSAMPLE_SHADOW_MIP1" : L"DOWNSAMPLE_SHADOW_MIP0", L"1" } } });
-		resources->blurHorizontal = ComputeProgram::Load(device, { .source = kBlurShader, .constantWords = ShaderBindings::Words<BlurBlock>(), .defines = { { L"BLUR_HORIZONTAL", L"1" } } });
-		resources->blurVertical = ComputeProgram::Load(device, { .source = kBlurShader, .constantWords = ShaderBindings::Words<BlurBlock>(), .defines = { { L"BLUR_VERTICAL", L"1" } } });
-		if (!resources->downsample[0] || !resources->downsample[1] || !resources->blurHorizontal || !resources->blurVertical) {
-			logger::warn("[ORG] Volumetric Shadows stays on D3D11: its programs could not be created");
-			return;
-		}
-		resources->sampler = ShaderBindings::CreateSampler({});
-		// Read by the engine's draws and DCLF in later frames too (the reflections draw before this frame's copy): exported, so never aliased.
-		resources->shadowCopy = std::make_unique<GraphResources::Texture2D>(CopyDesc(), std::string(kShadowCopyId),
-			GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
-		resources->blurTemp = std::make_unique<GraphResources::Texture2D>(CopyDesc(), "VolumetricShadows::ShadowBlurTemp");
-		if (!resources->sampler || !*resources->shadowCopy || !resources->shadowCopy->SRV() || !*resources->blurTemp) {
-			logger::warn("[ORG] Volumetric Shadows stays on D3D11: its sampler or textures could not be created");
-			return;
-		}
-		auto state = std::make_unique<Impl>();
-		state->resources = resources;
-		impl = std::move(state);
-		const bool registered = FrameAnchors::Register(MakeClient(resources, [this] {
-			logger::error("[ORG] Volumetric Shadows: the render graph failed; back to the D3D11 dispatches");
-			PublishedResources::Withdraw(kShadowCopyId);
-			impl.reset();
-		}));
-		if (!registered) {
-			logger::warn("[ORG] Volumetric Shadows stays on D3D11: its anchor client could not be registered");
-			impl.reset();
-			return;
-		}
-		// Drawcall Limit Fix's colour passes read it by name, ordered after the blurs (Integrations/VolumetricShadows).
-		if (!PublishedResources::Publish(*resources->shadowCopy)) {
-			logger::warn("[ORG] Volumetric Shadows stays on D3D11: the shared shadow map could not be published");
-			FrameAnchors::Unregister(kClientId);
-			impl.reset();
-			return;
-		}
-		logger::info("[ORG] Volumetric Shadows runs on the render graph at EarlyPrepass (shared map aliasable {}, temporary aliasable {})",
-			resources->shadowCopy->Aliasable(), resources->blurTemp->Aliasable());
+	if (!runtime.IsActive() || !runtime.Host() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::EarlyPrepass)) {
+		logger::warn("[ORG] Volumetric Shadows stays on D3D11: the render graph or its EarlyPrepass anchor is not available");
+		return false;
 	}
+	auto resources = std::make_shared<Resources>();
+	auto device = runtime.Host()->Device();
+	for (std::uint32_t mip = 0; mip < kMips; ++mip)
+		resources->downsample[mip] = ComputeProgram::Load(device, { .source = kDownsampleShader,
+																	  .constantWords = ShaderBindings::Words<DownsampleBlock>(),
+																	  .defines = { { mip ? L"DOWNSAMPLE_SHADOW_MIP1" : L"DOWNSAMPLE_SHADOW_MIP0", L"1" } } });
+	resources->blurHorizontal = ComputeProgram::Load(device, { .source = kBlurShader, .constantWords = ShaderBindings::Words<BlurBlock>(), .defines = { { L"BLUR_HORIZONTAL", L"1" } } });
+	resources->blurVertical = ComputeProgram::Load(device, { .source = kBlurShader, .constantWords = ShaderBindings::Words<BlurBlock>(), .defines = { { L"BLUR_VERTICAL", L"1" } } });
+	if (!resources->downsample[0] || !resources->downsample[1] || !resources->blurHorizontal || !resources->blurVertical) {
+		logger::warn("[ORG] Volumetric Shadows stays on D3D11: its programs could not be created");
+		return false;
+	}
+	resources->sampler = ShaderBindings::CreateSampler({});
+	// Read by the engine's draws and DCLF in later frames too (the reflections draw before this frame's copy): exported, so never aliased.
+	resources->shadowCopy = std::make_unique<GraphResources::Texture2D>(CopyDesc(), std::string(kShadowCopyId),
+		GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
+	resources->blurTemp = std::make_unique<GraphResources::Texture2D>(CopyDesc(), "VolumetricShadows::ShadowBlurTemp");
+	if (!resources->sampler || !*resources->shadowCopy || !resources->shadowCopy->SRV() || !*resources->blurTemp) {
+		logger::warn("[ORG] Volumetric Shadows stays on D3D11: its sampler or textures could not be created");
+		return false;
+	}
+	auto state = std::make_unique<Impl>();
+	state->resources = resources;
+	state->onFailed = std::move(a_onFailed);
+	impl = std::move(state);
+	const bool registered = FrameAnchors::Register(MakeClient(resources, [this] {
+		logger::error("[ORG] Volumetric Shadows: the render graph failed; back to the D3D11 dispatches");
+		PublishedResources::Withdraw(kShadowCopyId);
+		auto onFailed = impl ? std::move(impl->onFailed) : nullptr;
+		impl.reset();
+		if (onFailed)
+			onFailed();
+	}));
+	if (!registered) {
+		logger::warn("[ORG] Volumetric Shadows stays on D3D11: its anchor client could not be registered");
+		impl.reset();
+		return false;
+	}
+	// Drawcall Limit Fix's colour passes read it by name, ordered after the blurs (Integrations/VolumetricShadows).
+	if (!PublishedResources::Publish(*resources->shadowCopy)) {
+		logger::warn("[ORG] Volumetric Shadows stays on D3D11: the shared shadow map could not be published");
+		Stop();
+		return false;
+	}
+	logger::info("[ORG] Volumetric Shadows runs on the render graph at EarlyPrepass (shared map aliasable {}, temporary aliasable {})",
+		resources->shadowCopy->Aliasable(), resources->blurTemp->Aliasable());
+	return true;
+}
+
+void ORGVolumetricShadows::Stop()
+{
+	FrameAnchors::Unregister(kClientId);
+	PublishedResources::Withdraw(kShadowCopyId);
+	impl.reset();
+}
+
+void ORGVolumetricShadows::UpdateImports()
+{
+	if (!IsActive())
+		return;
 	// The engine's maps as they are now: a new import (the engine replaced its texture) builds the graphs again.
 	auto& resources = *impl->resources;
 	auto cascades = ImportShadowMap(kCascades);
@@ -379,9 +389,7 @@ void ORGVolumetricShadows::CheckShadowMaskInput(ID3D11ShaderResourceView* a_shad
 		return;
 	}
 	logger::error("[ORG] Volumetric Shadows: the shadow mask's t4 is not the cascade map the passes read; back to the D3D11 dispatches");
-	FrameAnchors::Unregister(kClientId);
-	PublishedResources::Withdraw(kShadowCopyId);
-	impl.reset();
+	Stop();
 }
 
 ID3D11ShaderResourceView* ORGVolumetricShadows::SharedShadowMapSRV() const
@@ -412,7 +420,9 @@ ORGVolumetricShadows& ORGVolumetricShadows::Get()
 
 ORGVolumetricShadows::~ORGVolumetricShadows() = default;
 void ORGVolumetricShadows::Reserve() {}
-void ORGVolumetricShadows::EarlyPrepass() {}
+bool ORGVolumetricShadows::Setup(std::function<void()>) { return false; }
+void ORGVolumetricShadows::UpdateImports() {}
+void ORGVolumetricShadows::Stop() {}
 bool ORGVolumetricShadows::IsActive() const { return false; }
 void ORGVolumetricShadows::CheckShadowMaskInput(ID3D11ShaderResourceView*) {}
 ID3D11ShaderResourceView* ORGVolumetricShadows::SharedShadowMapSRV() const { return nullptr; }

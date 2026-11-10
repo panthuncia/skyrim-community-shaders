@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d11.h>
+#include <functional>
 #include <memory>
 #include <string_view>
 
@@ -28,18 +29,26 @@ public:
 	/** @brief Whether CS_ORG_VOLUMETRIC_SHADOWS=1 is set. */
 	static bool Requested();
 
+	/** @brief Reserves the EarlyPrepass anchor when requested. Call before the render graph initializes (PostPostLoad). */
+	static void Reserve();
+
 	static ORGVolumetricShadows& Get();
 
-	/** @brief Reserves the EarlyPrepass anchor when requested. Call before the render graph initializes (PostPostLoad). */
-	void Reserve();
+	/**
+	 * @brief At SetupResources, with the runtime active: makes the programs, sampler and textures, registers the anchor client and
+	 * publishes the shared shadow map.
+	 * @param a_onFailed Called once if the graph fails later; the D3D11 dispatches run again.
+	 * @return Whether the passes run on the render graph; false keeps the D3D11 dispatches.
+	 */
+	bool Setup(std::function<void()> a_onFailed);
 
 	/**
-	 * @brief The feature's EarlyPrepass, before the anchor runs: sets the path up the first time the runtime is active, and
-	 * imports the engine's shadow maps again when the engine replaced them.
+	 * @brief The feature's EarlyPrepass, before the anchor runs: imports the engine's shadow maps again when the engine replaced
+	 * them. The passes are left out of the graph while the cascades are missing.
 	 */
-	void EarlyPrepass();
+	void UpdateImports();
 
-	/** @brief Whether the passes run on the render graph; false keeps the D3D11 dispatches. */
+	/** @brief Whether the passes run on the render graph (set up, and the runtime still up); false keeps the D3D11 dispatches. */
 	bool IsActive() const;
 
 	/**
@@ -59,7 +68,9 @@ public:
 private:
 	ORGVolumetricShadows() = default;
 
+	/** @brief Leaves the ORG path for good: the client goes and the shared map is withdrawn. */
+	void Stop();
+
 	struct Impl;
 	std::unique_ptr<Impl> impl;
-	bool attempted = false;
 };
