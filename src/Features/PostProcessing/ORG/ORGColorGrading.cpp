@@ -26,15 +26,12 @@ namespace ORGPostChain
 			ShaderBindings::Latch colorGradingFrame;
 		};
 
-		using Groups = std::array<std::uint32_t, 4>;
-
 		/**
 		 * @brief ColorGrading::Draw on the graph: the LUT bake (CSLUTGen) whenever the constants changed, then the grading draw over
-		 * the whole target. The bake is an indirect dispatch whose group counts Commit writes (zero on the frames it is skipped), so
-		 * the recording stays the same. The LUT is persistent and owned here. A bake counts as done only once the build is known to
-		 * be in the graph (its bake pass was prepared): a commit cannot tell which build the epoch runs, so until then it is asked
-		 * for again each frame. The curve preview and the image export read back through
-		 * D3D11, so the chain stays on D3D11 while either runs.
+		 * the whole target. The bake runs through its own gate entry, which Commit opens on the frames it bakes, so the recording
+		 * stays the same. The LUT is persistent and owned here. A bake counts as done once a frame that asked for it reached the GPU
+		 * with this build (Executed); until then it is asked for again each frame. The curve preview and the image export read back
+		 * through D3D11, so the chain stays on D3D11 while either runs.
 		 */
 		class ColorGradingEffect final : public Effect
 		{
@@ -79,14 +76,12 @@ namespace ORGPostChain
 				auto grade = a_builder.Raster(kShader, ShaderBindings::Words<ColorBlock>(), { kFormat }, defines, L"PSColorGrading");
 				auto image = a_builder.CreateImage("PostProcessing::ColorGrading::Output", kFormat, D3D11_BIND_RENDER_TARGET);
 				constants = a_builder.Latch<ColorGrading::ColorCB>();
-				groups = a_builder.Latch<Groups>();
+				bakeGate = a_builder.Gate();
 				const auto linear = Bind::Handle(sampler.Index());
-				prepared = std::make_shared<std::atomic<bool>>(false);
 				a_builder.Dispatch({ .name = "lut",
 					.program = std::move(bake),
 					.bindings = { Bind::Unused(), Bind::Unused(), Bind::Uav(lut->Graph()), linear, Bind::Latch(constants) },
-					.indirect = groups,
-					.prepared = prepared });
+					.gate = bakeGate });
 				a_builder.Draw({ .name = "draw",
 					.program = std::move(grade),
 					.bindings = { Bind::Srv(a_builder.Current()), Bind::Srv(lut->Graph()), Bind::Unused(), linear, Bind::Latch(constants) },
@@ -101,32 +96,36 @@ namespace ORGPostChain
 			{
 				const auto data = static_cast<ColorGrading&>(a_feature).BuildConstants();
 				a_commit.Write(constants, data);
-				// The bake the last commit asked for is done once the build is in the graph: that commit then reached the GPU.
-				if (pending && prepared && prepared->load(std::memory_order_acquire)) {
-					lutKey = pendingKey;
-					lutValid = true;
-				}
 				pending = false;
 				// As the D3D11 draw: the LUT depends only on the constants (and the program, which a rebuild changes).
 				const bool bake = !data.skipLUT && (!lutValid || std::memcmp(&data, lutKey.data(), sizeof(data)) != 0);
-				a_commit.Write(groups, bake ? Groups{ kLutGroups, kLutGroups, kLutGroups, 0 } : Groups{});
 				if (bake) {
+					a_commit.Open(bakeGate, kLutGroups, kLutGroups, kLutGroups);
 					std::memcpy(pendingKey.data(), &data, sizeof(data));
 					pending = true;
 				}
+			}
+
+			void Executed(PostProcessFeature&) override
+			{
+				// The bake this frame's commit asked for reached the GPU with this build.
+				if (!pending)
+					return;
+				lutKey = pendingKey;
+				lutValid = true;
+				pending = false;
 			}
 
 		private:
 			std::unique_ptr<GraphResources::Texture3D> lut;
 			org::OwnedDescriptorBinding sampler;
 			LatchRegion<ColorGrading::ColorCB> constants;
-			LatchRegion<Groups> groups;
+			GateEntry bakeGate;
 			std::array<char, sizeof(ColorGrading::ColorCB)> lutKey{};
 			bool lutValid = false;
-			// The constants the last commit baked with, and this build's flag, set once its bake pass is prepared.
+			// The constants this frame's commit baked with, until Executed.
 			std::array<char, sizeof(ColorGrading::ColorCB)> pendingKey{};
 			bool pending = false;
-			std::shared_ptr<std::atomic<bool>> prepared;
 		};
 	}
 

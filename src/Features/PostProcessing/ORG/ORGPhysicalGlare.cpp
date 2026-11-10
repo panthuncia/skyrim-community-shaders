@@ -61,20 +61,18 @@ namespace ORGPostChain
 			ShaderBindings::Latch glare;
 		};
 
-		using Groups = std::array<std::uint32_t, 4>;
-
 		/** @brief Whether the animated tear film is on: the PSF then starts from the tear-film pass and is made every frame. */
 		bool TearFilmAnimated(const PhysicalGlare::Settings& a_effective) { return a_effective.ApertureMode == 1 && a_effective.TearFilmStrength > 0.f; }
 
 		/**
 		 * @brief PhysicalGlare::Draw on the graph. The aperture response and the PSF's spectrum are persistent and owned here; they
-		 * are made again only when their settings change (every frame while the tear film animates). Those passes are indirect
-		 * dispatches whose group counts Commit writes, zero on the frames they are skipped, so the recording stays the same. The
+		 * are made again only when their settings change (every frame while the tear film animates). Those passes run through
+		 * gate entries that Commit opens on the frames they are made, so the recording stays the same. The
 		 * scene's FFT work images and the packed result are transient chain images at the FFT size. The glare is a side output:
 		 * the image is published as "PostProcessing::PhysicalGlare::Output" for Composite, and Current is left alone.
 		 *
-		 * A regenerated PSF counts as made only once the build is known to be in the graph (its threshold pass was prepared): a
-		 * commit cannot tell which build the epoch runs, so until then the request is repeated each frame.
+		 * A regenerated PSF counts as made once a frame that asked for it reached the GPU with this build (Executed); until then
+		 * the request is repeated each frame.
 		 */
 		class PhysicalGlareEffect final : public Effect
 		{
@@ -149,9 +147,9 @@ namespace ORGPostChain
 
 				constants = a_builder.Latch<PhysicalGlare::GlareCB>();
 				apertureConstants = a_builder.Latch<PhysicalGlare::GlareCB>();
-				apertureGroups = a_builder.Latch<Groups>();
-				psfGroups = a_builder.Latch<Groups>();
-				psfFftGroups = a_builder.Latch<Groups>();
+				apertureGate = a_builder.Gate();
+				psfGate = a_builder.Gate();
+				psfFftGate = a_builder.Gate();
 				groups = (size + 7) >> 3;
 				fftSize = size;
 
@@ -160,7 +158,7 @@ namespace ORGPostChain
 											 bool a_psf) {
 					ComputeDispatch dispatch{ .name = std::move(a_name), .program = a_program, .bindings = { Bind::Srv(a_input), Bind::Uav(a_output) }, .groups = { size, 1, 1 } };
 					if (a_psf)
-						dispatch.indirect = psfFftGroups;
+						dispatch.gate = psfFftGate;
 					a_builder.Dispatch(std::move(dispatch));
 				};
 
@@ -169,12 +167,12 @@ namespace ORGPostChain
 				a_builder.Dispatch({ .name = "aperture",
 					.program = aperture,
 					.bindings = { Bind::Uav(apertureBase->Graph()), Bind::Latch(apertureConstants) },
-					.indirect = apertureGroups });
+					.gate = apertureGate });
 				if (tearFilm) {
 					a_builder.Dispatch({ .name = "tear-film",
 						.program = tearFilmProgram,
 						.bindings = { Bind::Srv(apertureBase->Graph()), Bind::Uav(work[0][0]), glareLatch },
-						.indirect = psfGroups });
+						.gate = psfGate });
 					dispatchFft("psf-aperture-row", rowForward, work[0][0], work[0][1], true);
 				} else {
 					dispatchFft("psf-aperture-row", rowForward, apertureBase->Graph(), work[0][1], true);
@@ -183,20 +181,18 @@ namespace ORGPostChain
 				a_builder.Dispatch({ .name = "psf",
 					.program = psf,
 					.bindings = { Bind::Srv(work[0][0]), Bind::Uav(work[0][1]), Bind::Uav(work[1][1]), Bind::Uav(work[2][1]), Bind::Handle(wrapSampler.Index()), glareLatch },
-					.indirect = psfGroups });
+					.gate = psfGate });
 				for (int channel = 0; channel < 3; ++channel) {
 					dispatchFft(std::format("psf-row-{}", kChannels[channel]), rowForward, work[channel][1], work[channel][0], true);
 					dispatchFft(std::format("psf-col-{}", kChannels[channel]), colForward, work[channel][0], psfSpectrum[channel]->Graph(), true);
 				}
 
 				// The scene, as Draw: threshold into the FFT size, forward FFT, multiply by the PSF, inverse FFT, pack, composite.
-				prepared = std::make_shared<std::atomic<bool>>(false);
 				pending.reset();
 				a_builder.Dispatch({ .name = "threshold",
 					.program = threshold,
 					.bindings = { Bind::Srv(a_builder.Current()), Bind::Uav(work[0][0]), Bind::Uav(work[1][0]), Bind::Uav(work[2][0]), glareLatch },
-					.groups = { groups, groups, 1 },
-					.prepared = prepared });
+					.groups = { groups, groups, 1 } });
 				for (int channel = 0; channel < 3; ++channel) {
 					dispatchFft(std::format("row-{}", kChannels[channel]), rowForward, work[channel][0], work[channel][1], false);
 					dispatchFft(std::format("col-{}", kChannels[channel]), colForward, work[channel][1], work[channel][0], false);
@@ -233,11 +229,6 @@ namespace ORGPostChain
 					glare.tearFilmTimeAccum += deltaTime;
 				const bool useAP1 = globals::features::linearLighting.IsACEScgActive();
 
-				// The PSF the last commit asked for is made once the build is in the graph: its commit then reached the GPU.
-				if (pending && prepared && prepared->load(std::memory_order_acquire)) {
-					made = *pending;
-					madeValid = true;
-				}
 				pending.reset();
 
 				const bool remakeAperture = !madeValid || PhysicalGlare::ApertureStale(made, effective, fftSize);
@@ -251,9 +242,22 @@ namespace ORGPostChain
 				auto apertureData = data;
 				apertureData.TearFilmStrength = 0.f;
 				a_commit.Write(apertureConstants, apertureData);
-				a_commit.Write(apertureGroups, remakeAperture ? Groups{ groups, groups, 1, 0 } : Groups{});
-				a_commit.Write(psfGroups, remakePsf ? Groups{ groups, groups, 1, 0 } : Groups{});
-				a_commit.Write(psfFftGroups, remakePsf ? Groups{ fftSize, 1, 1, 0 } : Groups{});
+				if (remakeAperture)
+					a_commit.Open(apertureGate, groups, groups);
+				if (remakePsf) {
+					a_commit.Open(psfGate, groups, groups);
+					a_commit.Open(psfFftGate, fftSize);
+				}
+			}
+
+			void Executed(PostProcessFeature&) override
+			{
+				// The PSF this frame's commit asked for reached the GPU with this build.
+				if (!pending)
+					return;
+				made = *pending;
+				madeValid = true;
+				pending.reset();
 			}
 
 		private:
@@ -288,14 +292,13 @@ namespace ORGPostChain
 			std::array<std::unique_ptr<GraphResources::Texture2D>, 3> psfSpectrum;
 			org::OwnedDescriptorBinding wrapSampler;
 
-			// What the persistent PSF was made from, and what the last commit asked for.
+			// What the persistent PSF was made from, and what this frame's commit asked for, until Executed.
 			PhysicalGlare::PSFParams made{};
 			bool madeValid = false;
 			std::optional<PhysicalGlare::PSFParams> pending;
-			std::shared_ptr<std::atomic<bool>> prepared;  // this build's: set once its threshold pass is prepared
 
 			LatchRegion<PhysicalGlare::GlareCB> constants, apertureConstants;
-			LatchRegion<Groups> apertureGroups, psfGroups, psfFftGroups;
+			GateEntry apertureGate, psfGate, psfFftGate;
 			uint fftSize = PhysicalGlare::FFT_MIN;
 			uint groups = 0;
 			float width = 0.f, height = 0.f;
