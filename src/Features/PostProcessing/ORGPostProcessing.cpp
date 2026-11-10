@@ -798,17 +798,17 @@ struct ORGPostProcessing::Impl
 		// D3D11 copy of one into the other gives (when their formats differ, each is converted from the output directly).
 		{
 			ORGPostChain::Builder builder(*next, programs, a_shape, "output");
-			const auto last = builder.Current();
+			const auto chainOutput = builder.Current();
 			nextOutput = builder.Latch<CopyLatch>();
 			const bool convert = Converts(a_conversion);
 			for (const auto& [target, name] : { std::pair{ &a_main, "main" }, std::pair{ &a_mainCopy, "main-copy" } }) {
-				if (!convert && last.format == target->format) {
-					builder.Copy(name, last, *target);
+				if (!convert && chainOutput.format == target->format) {
+					builder.Copy(name, chainOutput, *target);
 					continue;
 				}
 				builder.Draw({ .name = name,
 					.program = builder.Raster(ORGPostChain::kCopyShader, ShaderBindings::Words<CopyBlock>(), { target->format }),
-					.bindings = { Bind::Srv(last), Bind::Unused(), Bind::Latch(nextOutput) },
+					.bindings = { Bind::Srv(chainOutput), Bind::Unused(), Bind::Latch(nextOutput) },
 					.target = *target });
 			}
 		}
