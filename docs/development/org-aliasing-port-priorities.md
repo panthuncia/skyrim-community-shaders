@@ -132,8 +132,8 @@ The whole chain is `DrawSSGI`, called from one site in `DeferredPasses`, so it i
 It is a 2-3 dispatch compute chain from one call site (`Deferred.cpp:348-350`) and runs right after SSGI.
 Its whole 64 MB fits inside SSGI's dead transients, so the pair should be ported together.
 
-The dump showed SSS at 80 MB because ScreenSpaceShadows names its 16 MB texture `SSS::ShadowTexture`,
-and the attribution maps the `SSS::` prefix to SubsurfaceScattering.
+The dump showed SSS at 80 MB because ScreenSpaceShadows named its 16 MB texture `SSS::ShadowTexture`,
+and the attribution maps the `SSS::` prefix to SubsurfaceScattering. It is `ScreenSpaceShadows::ShadowTexture` now.
 
 ### 4. ExponentialHeightFog, volumetric fog only (~98 MB est.)
 
@@ -230,5 +230,5 @@ ORG.
     -   HDRDisplay's `SnapshotCleanScene` has no caller.
     -   HDRDisplay keeps the original LDR game targets alive in `savedLDRTargets` while the upgraded
         ones are in use.
--   **Attribution fix:** rename ScreenSpaceShadows' `SSS::` resources to `ScreenSpaceShadows::` so the
-    VRAM widget stops counting them under SubsurfaceScattering.
+-   **Attribution fix (done):** ScreenSpaceShadows' `SSS::` resources are now `ScreenSpaceShadows::`, so the
+    VRAM widget no longer counts them under SubsurfaceScattering.

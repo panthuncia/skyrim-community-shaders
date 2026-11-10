@@ -38,7 +38,7 @@ These rows add up to the heap total. "Whiterun" is shown only for owners whose s
 | Skylighting | 113 | 113 | |
 | Free space in DXVK chunks | 103 | 753 | Not in use. The Whiterun figure varies with fragmentation |
 | TerrainBlending | 88 | 88 | |
-| SubsurfaceScattering | 80 | 80 | 16 MiB of this is ScreenSpaceShadows, misattributed by its `SSS::` prefix |
+| SubsurfaceScattering | 80 | 80 | 16 MiB of this was ScreenSpaceShadows, misattributed by its old `SSS::` prefix (now `ScreenSpaceShadows::`) |
 | LightLimitFix | 72 | 72 | 37 MiB in ORG and 35 MiB in its D3D11 fallback set |
 | Game textures | 71 | 3,083 | The main thing a save adds |
 | ORG allocations not tracked | 58 | 4 | Device memory no tracked resource claims |
@@ -112,7 +112,7 @@ checked again for this file. Sizes are measured.
 | Feature | Resource | MiB | Class |
 | --- | --- | --- | --- |
 | SubsurfaceScattering | `DiffuseNoAlbedo`, `BlurHorizontalTemp` | 31.9 x 2 | Transient |
-| ScreenSpaceShadows | `SSS::ShadowTexture` | 15.9 | External: bound for all world lighting draws |
+| ScreenSpaceShadows | `ScreenSpaceShadows::ShadowTexture` | 15.9 | External: bound for all world lighting draws |
 | LightLimitFix | `LightLimitFix::LightIndexList` (ORG) | 31.9 | Rewritten each frame, read by D3D11 draws |
 | LightLimitFix | `LLF::LightIndexList`, `LLF::Clusters`, `LLF::LightGrid` (D3D11 fallback) | 31.9, 2.0, 1.0 | Unused while ORG culling is active |
 | Skylighting | `ProbeArray`, `ShadowBitmask`, two others | 64, 32, 8, 8 | History or read by game draws |
