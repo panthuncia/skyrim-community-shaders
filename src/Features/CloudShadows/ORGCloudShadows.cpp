@@ -48,7 +48,6 @@ ORGCloudShadows& ORGCloudShadows::Get()
 namespace
 {
 	constexpr const char* kClientId = "cs.cloud-shadows";
-	constexpr const char* kOcclusionName = "CloudShadows::Occlusion";
 	constexpr int kLastLayer = CloudShadows::kMaxCloudLayers - 1;
 	// No value prepared yet: differs from both copy states.
 	constexpr std::uint8_t kNotPrepared = 0xFF;
@@ -180,7 +179,7 @@ void ORGCloudShadows::Fail()
 {
 	failed = true;
 	FrameAnchors::Unregister(kClientId);
-	PublishedResources::Withdraw(kOcclusionName);
+	PublishedResources::Withdraw(kOcclusionId);
 	if (impl)
 		ReturnToD3D11();
 	impl.reset();
@@ -215,7 +214,7 @@ bool ORGCloudShadows::Setup()
 		.MiscFlags = layerDesc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE };
 	// Engine draws read it at t25 and t26 (and Drawcall Limit Fix through that view) until they are ported. A frame without the
 	// full sky keeps the last copy, so it lives across frames.
-	next->occlusion = std::make_unique<GraphResources::Texture2D>(desc, kOcclusionName,
+	next->occlusion = std::make_unique<GraphResources::Texture2D>(desc, std::string(kOcclusionId),
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
 	if (!*next->occlusion || !next->occlusion->SRV()) {
 		logger::error("[ORG] Cloud Shadows: the {}x{} occlusion cubemap could not be created; back to D3D11", desc.Width, desc.Height);
@@ -247,7 +246,7 @@ bool ORGCloudShadows::Setup()
 	client.onFailed = [] {
 		logger::error("[ORG] Cloud Shadows: the render graph failed; back to D3D11");
 		auto& self = Get();
-		PublishedResources::Withdraw(kOcclusionName);
+		PublishedResources::Withdraw(kOcclusionId);
 		ReturnToD3D11();
 		self.failed = true;
 		self.impl.reset();

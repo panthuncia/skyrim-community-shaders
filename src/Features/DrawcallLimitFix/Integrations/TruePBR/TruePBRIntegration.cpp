@@ -8,10 +8,10 @@
 #include <cstdint>
 #include <string_view>
 
-#include "RenderGraph/PublishedResources.h"
 #include "ShaderCache.h"
 #include "TruePBR.h"
 #include "TruePBR/BSLightingShaderMaterialPBR.h"
+#include "TruePBR/ORGGlintsNoise.h"
 
 namespace DCLF::Integrations::TruePBR
 {
@@ -57,19 +57,12 @@ namespace DCLF::Integrations::TruePBR
 		}
 
 		// The glints noise TruePBR's Prepass binds at t20, made once (the first Prepass on D3D11, the first EarlyPrepass anchor on the ORG
-		// path). Before it exists, the captured view. On the ORG path (CS_ORG_GLINTS) the colour passes read the published texture instead,
-		// ordered after its fill.
-		constexpr std::string_view kGlintsNoiseId = "TruePBR::GlintsNoise";
-
+		// path). Before it exists, the captured view. On the ORG path (CS_ORG_GLINTS) it is the published texture's export, so the commits
+		// read the published texture, ordered after its fill.
 		void* GlintsNoiseView()
 		{
 			const auto& truePBR = globals::features::truePBR;
 			return truePBR.loaded ? truePBR.GlintsNoiseSRV() : nullptr;
-		}
-
-		bool GlintsNoiseGraphIndex(std::uint32_t& a_index)
-		{
-			return globals::features::truePBR.loaded && PublishedResources::ShaderResourceIndex(kGlintsNoiseId, a_index);
 		}
 
 		void Install(Api::InstallContext& a_context)
@@ -86,7 +79,8 @@ namespace DCLF::Integrations::TruePBR
 				.takesPass = &PBRTakesPass,
 				.evaluate = &EvaluatePBR });
 			a_context.RegisterPropertyBits({ .name = "glints", .bits = kGlints, .capture = &CaptureGlints });
-			a_context.RegisterFrameTexture({ .name = "true pbr glints noise", .textureRegister = kGlintsNoiseRegister, .view = &GlintsNoiseView, .capturedWhenNull = true, .graphResource = kGlintsNoiseId, .graph = &GlintsNoiseGraphIndex });
+			a_context.RegisterFrameTexture({ .name = "true pbr glints noise", .textureRegister = kGlintsNoiseRegister, .view = &GlintsNoiseView,
+				.capturedWhenNull = true, .graphResources = { ORGGlintsNoise::kNoiseId } });
 			// Its hooks' pass changes, whether or not it is loaded (as their ports always applied): GetRenderPasses' swap (per derive),
 			// GetPixelTechnique's split, and SetupGeometry's raw technique (a TruePbr pass gains AmbientSpecular and flips AnisoLighting).
 			a_context.RegisterLightingPassRules({ .pixelKeep = kPixelKeep,

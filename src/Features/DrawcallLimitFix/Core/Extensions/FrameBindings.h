@@ -2,24 +2,27 @@
 
 // The frame binding contract's Core side (Api/FrameBindings.h): what a registered binding's select is handed, the values the frame
 // records take from the bindings, and the texture registers Core keeps for itself (which no binding or frame texture may take). And the
-// frame textures' (Api::FrameTexture): their registers' indices, and which read their published graph texture. And the frame graph
-// buffers' (Api::FrameGraphBuffers): their entries.
+// frame textures' (Api::FrameTexture): their registers' indices, and the one rule that picks a published graph texture over a view. And
+// the frame graph buffers' (Api::FrameGraphBuffers): their entries.
 // And the per-draw buffers' (Api::PerDrawBuffer): the per-draw registers by stage, Core's and the declared ones (PerDrawMask).
 
 #include "Features/DrawcallLimitFix/Api/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 
 #include <array>
-#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <tuple>
+
+struct ID3D11ShaderResourceView;
 
 namespace org
 {
+	class RenderPassBuilder;
 	class VersionedBuffer;
 	namespace services
 	{
@@ -99,21 +102,34 @@ namespace DCLF::Extensions
 	/** @brief Any thread, after InstallFeatures: by texture register, its frame texture's index (RegisteredFrameTextures), or kNoFrameTexture. */
 	std::span<const std::uint8_t> FrameTextureIndices();
 
-	/** @brief The frame textures on the graph path, a bit by texture register (Api::FrameTexture::graph). */
-	using FrameGraphTextureSet = std::bitset<kTextureRegisters>;
+	/** @brief Who reads a graph texture: each logs its own changes of path. */
+	enum class GraphTextureReader : std::uint8_t
+	{
+		Colour,  // a colour commit's frame textures
+		Faces,   // the reflection faces' frame textures
+		Grass,   // grass's collision texture
+		Count,
+	};
+
+	/** @brief Any thread, after InstallFeatures: every frame texture's graph ids, once each. The colour passes declare them. */
+	std::span<const std::string_view> ColourGraphTextureIds();
+	/** @brief Any thread, after InstallFeatures: the graph ids of the frame textures with a view. The faces read no others. */
+	std::span<const std::string_view> FacesGraphTextureIds();
+
 	/**
-	 * @brief Render thread (the main resources' check): the frame textures whose graph resource is published now. The colour passes
-	 * declare them (Resources::graphTextures), so the set changes only when a producer changes path. A colour commit reads a texture
-	 * through the graph while its bit is set and its captured view is the export, or its graph callback answers true.
+	 * @brief Graph build (render thread): declares a read, through no view, of each of a_ids that every graph registers
+	 * (PublishedResources::IsRegistered), and records it as declared. An id stays registered once published, so every later build
+	 * declares it too. The set grows only on a first Publish, which rebuilds every graph anyway.
 	 */
-	FrameGraphTextureSet FrameGraphTextures();
+	void DeclareGraphTextures(org::RenderPassBuilder& a_builder, std::span<const std::string_view> a_ids);
+
 	/**
-	 * @brief Render thread (a colour commit): frame texture a_texture's published texture index into a_index, when a_onGraph (the
-	 * resources' set) has its register and either a_view (the view the commit would read) is that texture's export or its graph
-	 * answers true now; false: its view. Logs each change of path once.
+	 * @brief Render thread (a commit): the one rule for reading a published texture. When a_view is the export of one of a_ids that a
+	 * graph build declared, writes that id's bindless index into a_index and returns true. Otherwise returns false, and the caller
+	 * imports a_view. Logs each change of path once per reader and register (a_name names it).
 	 */
-	bool FrameGraphTextureIndex(std::size_t a_texture, const FrameGraphTextureSet& a_onGraph, const ID3D11ShaderResourceView* a_view,
-		std::uint32_t& a_index);
+	bool GraphTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, const ID3D11ShaderResourceView* a_view,
+		std::span<const std::string_view> a_ids, std::uint32_t& a_index);
 
 	/**
 	 * @brief The most frame graph buffers registrations there may be (a commit keeps each one's indices in a fixed array), and each one's

@@ -272,7 +272,6 @@ Keys used so far:
   and 102 (the UI texture's clear) at HDROutput.
 - Upscaling (`CS_ORG_UPSCALING`): 100 (the upscaled colour into `kMAIN`), 200 to 204 (the depth and refraction normal copies,
   the depth upscale, the underwater mask copy and its upscale) at Upscale; 100 (the hudless copy) at FrameGeneration.
-- The DCLF graph texture test (`CS_DCLF_GRAPH_TEXTURE_TEST`): 0 at Prepass.
 - Subsurface Scattering (`CS_ORG_SUBSURFACE_SCATTERING`): 199 (Burley clear), 200 (extraction), 201 (horizontal or Burley
   blur) and 202 (vertical blur) at DeferredPasses. SSGI's passes there stay below 199, as the D3D11 order is SSGI first.
 - Screen Space GI (`CS_ORG_SCREEN_SPACE_GI`): 100 (history clears, after a reset only), 110 to 116 (the chain's steps) and 117
@@ -987,20 +986,19 @@ Keys used so far:
 - **Who:** DCLF's colour draws at t45 (Screen Space Shadows) and t102/t103 (Light Limit Fix's local shadow cache); DCLF's grass
   draw row (Grass Collision's texture at t100). On the producers' ORG paths these were the graph twins' D3D11 exports,
   imported by DCLF as resources of their own, unordered after the graph's writes.
-- **Where it fits:** today each integration registers the register as an `Api::FrameTexture` with `view` always null and
-  `capturedWhenNull`, so only its graph path is new, and grass declares the published id in its family's `MainDeclare` and
-  writes `PublishedResources::ShaderResourceIndex` into its row. A framework answer: DCLF maps any captured view that is a
+- **Where it fits:** each integration registers the register as an `Api::FrameTexture` without a view, so only its graph path
+  is new, and grass declares the published id in its family's `MainDeclare`. A further framework answer: DCLF maps any captured view that is a
   published twin's export to that id by itself (`PublishedResources::ExportedId` already finds it), declaring and indexing it
   at the main resources' check, so a producer's port needs no integration change. Until then, a colour commit logs
   `[DCLF] t<n> reads the D3D11 export of the published '<id>'` once per register and id.
 - **Also:** the third pass registered t17 (Terrain Blending's 16-bit blended depth, bound by `VanillaBinding::BindSceneDepth`) and
   t26 (Cloud Shadows' occlusion cubemap, bound for cloud self shadowing) the same way, and gave Effects' soft depth (t118, the depth
-  table's `kPOST_ZPREPASS_COPY`, which names the blended depth during the opaque pass) a graph path. Each `graph` needs to know
-  whether the view bound now is the export: t26's binding is left over from the sky's last cloud draw, so Cloud Shadows now keeps the
-  view it bound last (`CloudShadows::selfShadowView`) for the comparison. `PublishedResources::ExportedId(view) == id` is the check
-  wherever the view is reachable. This is the framework answer above done by hand per register, which also shows its limit: one
-  register maps to one id, so a register that may hold either of two published textures (t17 is the R16 depth, but the R32 one
-  where `sceneDepthFinal`'s path takes kPOST_ZPREPASS_COPY) needs a by-view mapping to cover both.
+  table's `kPOST_ZPREPASS_COPY`, which names the blended depth during the opaque pass) a graph path.
+- **Done (2026-11-10), one rule:** a commit reads the graph resource when the view it resolved (the registration's, or the
+  captured one) is the export of a published id its passes declared (`Extensions::GraphTextureIndex`,
+  `PublishedResources::IsExportOf`). The per-register `graph` callbacks are gone: some read producer state at resolve time, after
+  the capture. A registration lists its ids, more than one when a register can hold either texture, and the passes declare every
+  id that was ever published. A register that may hold an id no registration lists (t17's R32 depth) still imports it.
 - **Found by:** P3 DCLF published resources, second pass (2026-11-09); third pass (2026-11-10).
 
 ### One image imported under two names
@@ -1028,9 +1026,8 @@ Keys used so far:
 - **Where it fits:** the faces' passes would declare the published ids as the colour passes do (`DeclareFrameBuffers`); a
   read in an earlier epoch is then ordered after the previous frame's write (PublishedResources' rule). The composite needs
   the same declarations once its inputs are graph resources.
-- **Done for the faces (2026-11-10):** their passes declare the main resources' published set (`DeclareFrameGraphTextures`), and
-  their commit reads a view that is a published export (`ExportedId`) through its id. A pass declared before new main resources
-  must not read the new set: the commit skips the graph path while `ViewResources::rebuildPending` is set. The composite is still
+- **Done for the faces (2026-11-10):** their passes declare the ids of the frame textures with a view
+  (`Extensions::FacesGraphTextureIds`), and their commit follows the same rule as the colour commit. The composite is still
   open.
 - **Found by:** P3 DCLF published resources, second pass (2026-11-09).
 

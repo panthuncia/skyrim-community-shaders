@@ -9,7 +9,6 @@
 #include "Globals.h"
 
 #include "Features/TerrainBlending/ORGTerrainBlending.h"
-#include "RenderGraph/PublishedResources.h"
 
 #include <array>
 #include <cstddef>
@@ -84,20 +83,12 @@ namespace DCLF::Features::Effects
 		}
 
 		// Soft effects' depth: the kPOST_ZPREPASS_COPY SetupTechnique binds for a Soft pass, which CS fills from the main depth after the
-		// deferred pass, before the forward epoch.
+		// deferred pass, before the forward epoch. On Terrain Blending's ORG path the depth table names its blended depth's export there
+		// from the depth pass to the terrain passes, and a colour commit in between reads the published texture.
 		void* SoftDepthView()
 		{
 			return globals::game::renderer ? static_cast<void*>(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV) :
 			                                 nullptr;
-		}
-
-		// Terrain Blending's blended depth on its ORG path: the depth table names its export from the depth pass to the terrain passes, so
-		// the soft depth is that export while a colour commit falls in between. The colour passes then read the published texture,
-		// ordered after the blend; otherwise the view above.
-		bool SoftDepthGraphIndex(std::uint32_t& a_index)
-		{
-			constexpr auto id = ORGTerrainBlending::kBlendedDepthId;
-			return PublishedResources::ExportedId(static_cast<ID3D11ShaderResourceView*>(SoftDepthView())) == id && PublishedResources::ShaderResourceIndex(id, a_index);
 		}
 	}
 
@@ -109,6 +100,6 @@ namespace DCLF::Features::Effects
 		a_context.RegisterFrameConstantRow({ "effect light", kEffectLightFrameRow, &SampleRow<&SampleEffectLight> });
 		a_context.RegisterFrameConstantRow({ "effect blood", kEffectBloodFrameRow, &SampleRow<&SampleEffectBlood> });
 		a_context.RegisterFrameTexture({ .name = "effect soft depth", .textureRegister = kSoftDepthRegister, .view = &SoftDepthView,
-			.graphResource = ORGTerrainBlending::kBlendedDepthId, .graph = &SoftDepthGraphIndex });
+			.graphResources = { ORGTerrainBlending::kBlendedDepthId } });
 	}
 }

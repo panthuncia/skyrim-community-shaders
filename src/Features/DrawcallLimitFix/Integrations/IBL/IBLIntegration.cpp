@@ -4,7 +4,6 @@
 #include "Features/DrawcallLimitFix/Integrations/IBL/IBL.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
 
-#include "RenderGraph/PublishedResources.h"
 #include "State.h"
 
 #include "Features/IBL.h"
@@ -29,17 +28,6 @@ namespace DCLF::Integrations::IBL
 			return ShBinds() ? (globals::features::ibl.*View)() : nullptr;
 		}
 
-		// With CS_ORG_IBL=1 the views are the render graph's exported SH textures (IBL::EnvIBLSRV, while ORGIBL is active): the colour
-		// passes read the published textures instead, ordered after the projection at the Prepass anchor.
-		constexpr std::string_view kEnvironmentId = "IBL::EnvIBL";
-		constexpr std::string_view kSkyId = "IBL::SkyIBL";
-
-		template <const std::string_view* Id>
-		bool ShGraphIndex(std::uint32_t& a_index)
-		{
-			return ShBinds() && ORGIBL::Get().IsActive() && PublishedResources::ShaderResourceIndex(*Id, a_index);
-		}
-
 		// The static cubemaps (DDS loaded at setup, D3D11 textures on either path) ReflectionsPrepass binds at t78 and t79 (their only PS
 		// bindings), whatever the scene: only on a frame whose water reflection ran it (State::activeReflections, set by
 		// Deferred::ReflectionsPrepasses until Present). Otherwise the bindings stand from an earlier frame, or were never made: the
@@ -53,10 +41,12 @@ namespace DCLF::Integrations::IBL
 
 		void Install(Api::InstallContext& a_context)
 		{
+			// With CS_ORG_IBL=1 the SH views are the graph's exports, so the commits read the published textures, ordered after the
+			// projection at the Prepass anchor.
 			a_context.RegisterFrameTexture({ .name = "ibl environment", .textureRegister = kEnvironmentRegister, .view = &ShView<&::IBL::EnvIBLSRV>,
-				.capturedWhenNull = true, .graphResource = kEnvironmentId, .graph = &ShGraphIndex<&kEnvironmentId> });
+				.capturedWhenNull = true, .graphResources = { ORGIBL::kEnvId } });
 			a_context.RegisterFrameTexture({ .name = "ibl sky", .textureRegister = kSkyRegister, .view = &ShView<&::IBL::SkyIBLSRV>,
-				.capturedWhenNull = true, .graphResource = kSkyId, .graph = &ShGraphIndex<&kSkyId> });
+				.capturedWhenNull = true, .graphResources = { ORGIBL::kSkyId } });
 			a_context.RegisterFrameTexture({ .name = "ibl static diffuse", .textureRegister = kStaticDiffuseRegister,
 				.view = &StaticView<&::IBL::staticDiffuseIBLTexture>, .capturedWhenNull = true });
 			a_context.RegisterFrameTexture({ .name = "ibl static specular", .textureRegister = kStaticSpecularRegister,

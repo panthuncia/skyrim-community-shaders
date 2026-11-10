@@ -2,6 +2,7 @@
 
 #include <d3d11.h>
 #include <memory>
+#include <string_view>
 
 /**
  * @brief Volumetric Shadows' shadow map downsample and blur as render-graph passes (CS_ORG_VOLUMETRIC_SHADOWS=1).
@@ -21,6 +22,9 @@
 class ORGVolumetricShadows
 {
 public:
+	/** @brief The shared shadow map's published id (PublishedResources), its twin's name. */
+	static constexpr std::string_view kShadowCopyId = "VolumetricShadows::ShadowCopy";
+
 	/** @brief Whether CS_ORG_VOLUMETRIC_SHADOWS=1 is set. */
 	static bool Requested();
 

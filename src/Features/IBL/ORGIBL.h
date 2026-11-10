@@ -3,6 +3,7 @@
 #include <d3d11.h>
 #include <functional>
 #include <memory>
+#include <string_view>
 
 /**
  * @brief Image Based Lighting's SH projection (DiffuseIBLCS) as render-graph passes, behind CS_ORG_IBL=1.
@@ -24,6 +25,10 @@
 class ORGIBL
 {
 public:
+	/** @brief The SH textures' published ids (PublishedResources), their twins' names. */
+	static constexpr std::string_view kEnvId = "IBL::EnvIBL";
+	static constexpr std::string_view kSkyId = "IBL::SkyIBL";
+
 	static ORGIBL& Get();
 
 	/** @brief Whether CS_ORG_IBL=1 asks for the render-graph path. */

@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Features/Grass/GrassMirror.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/SceneResources.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
@@ -22,7 +23,6 @@
 #include "GrassShared/GrassFrame.h"
 
 #include "RenderGraph/ComputeProgram.h"
-#include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include <OpenRenderGraph/GraphHost.h>
 #include <Resources/Buffers/Buffer.h>
@@ -413,29 +413,20 @@ namespace DCLF::Features::Grass
 		}
 
 		/**
-		 * @brief Grass Collision's texture for the draw row: on its ORG path (the texture is the graph twin's export, which the main passes
-		 * built last declare), the published texture's own descriptor, which the graph keeps; otherwise the view's import.
+		 * @brief Grass Collision's texture for the draw row. When it is the published texture's export, the published texture's own
+		 * descriptor (Extensions::GraphTextureIndex; the main passes declare it: MainDeclare). Otherwise the view's import.
 		 */
-		bool BindCollision(OwnedRow<DrawRow>& a_row, const GrassShared::Collision& a_collision, const GrassTables& a_tables)
+		bool BindCollision(OwnedRow<DrawRow>& a_row, const GrassShared::Collision& a_collision)
 		{
+			static constexpr std::string_view kIds[] = { GrassShared::kCollisionGraphId };
 			std::uint32_t index = 0;
-			const bool onGraph = a_collision.onGraph && a_tables.collisionDeclared.load(std::memory_order_acquire) &&
-			                     PublishedResources::ShaderResourceIndex(GrassShared::kCollisionGraphId, index);
-			// Each change of path, once (the depth commit's, on the render thread).
-			static int s_logged = 0;
-			if (const int path = onGraph ? 1 : -1; std::exchange(s_logged, path) != path) {
-				if (onGraph)
-					logger::info("[DCLF] grass collision reads the graph resource '{}' (descriptor {})", GrassShared::kCollisionGraphId, index);
-				else
-					logger::info("[DCLF] grass collision reads its D3D11 view");
-			}
-			if (onGraph)
+			if (Extensions::GraphTextureIndex(Extensions::GraphTextureReader::Grass, 0, "grass collision", a_collision.texture, kIds, index))
 				return a_row.Bind(&DrawRow::collisionIndex, GpuTextures::Binding{ .index = index });
 			return Bind(a_row, &DrawRow::collisionIndex, a_collision.texture);
 		}
 
 		/** @brief The frame's shadow mask (bShadowsOnGrass: the engine's, else its white default) and Grass Collision's published state. */
-		bool BindFrameTextures(OwnedRow<DrawRow>& a_row, const GrassTables& a_tables)
+		bool BindFrameTextures(OwnedRow<DrawRow>& a_row)
 		{
 			static auto* shadowsOnGrass = RE::GetINISetting("bShadowsOnGrass:Display");
 			ID3D11ShaderResourceView* mask = DefaultView(false);
@@ -445,7 +436,7 @@ namespace DCLF::Features::Grass
 				return false;
 			// The collision of the frames DCLF owns grass (its stood-down update, from the decision): none without Grass Collision.
 			GrassShared::Collision collision;
-			if (GrassShared::LatestCollision(collision) && BindCollision(a_row, collision, a_tables))
+			if (GrassShared::LatestCollision(collision) && BindCollision(a_row, collision))
 				a_row.Plain().collision = collision.perFrame;
 			else
 				a_row.Unbind(&DrawRow::collisionIndex, DescriptorIndex::Sentinel(~0u));
@@ -475,7 +466,7 @@ namespace DCLF::Features::Grass
 			static const float fadeIn = IniFloat("fGrassFadeInTime:Grass", 0.0f);
 			row.fadeInTimeRcp = fadeIn > 0.0f ? 1.0f / fadeIn : 1e6f;
 			SampleLight(row);
-			const bool sampled = SampleCull(row) && BindFrameTextures(owned, a_tables);
+			const bool sampled = SampleCull(row) && BindFrameTextures(owned);
 			if (a_draw && sampled && a_tables.sentInstanceSlots) {
 				row.instanceSlots = a_tables.sentInstanceSlots;
 				row.shapeSlots = a_tables.sentShapeSlots;

@@ -48,7 +48,6 @@ ORGGlintsNoise& ORGGlintsNoise::Get()
 namespace
 {
 	constexpr const char* kClientId = "cs.true-pbr.glints";
-	constexpr const char* kNoiseName = "TruePBR::GlintsNoise";
 	constexpr const char* kShader = "Common/Glints/noisegen.cs.hlsl";
 	// TruePBR::SetupGlintsTexture's size, and noisegen.cs.hlsl's group size.
 	constexpr UINT kNoiseSize = 128;
@@ -167,7 +166,7 @@ void ORGGlintsNoise::Fail()
 {
 	failed = true;
 	FrameAnchors::Unregister(kClientId);
-	PublishedResources::Withdraw(kNoiseName);
+	PublishedResources::Withdraw(kNoiseId);
 	if (impl)
 		UnbindNoise();
 	impl.reset();
@@ -194,7 +193,7 @@ bool ORGGlintsNoise::Setup()
 		.Usage = D3D11_USAGE_DEFAULT,
 		.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS };
 	// Engine draws read it at t20 until they are ported. It is filled once, so it lives for good.
-	next->noise = std::make_unique<GraphResources::Texture2D>(desc, kNoiseName,
+	next->noise = std::make_unique<GraphResources::Texture2D>(desc, std::string(kNoiseId),
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV });
 	if (!*next->noise || !next->noise->SRV()) {
 		logger::error("[ORG] TruePBR glints: the {}x{} noise texture could not be created; back to D3D11", kNoiseSize, kNoiseSize);
@@ -224,7 +223,7 @@ bool ORGGlintsNoise::Setup()
 	client.active = [next] { return next->fill == Impl::Fill::Needed; };
 	client.onFailed = [] {
 		logger::error("[ORG] TruePBR glints: the render graph failed; back to D3D11");
-		PublishedResources::Withdraw(kNoiseName);
+		PublishedResources::Withdraw(kNoiseId);
 		UnbindNoise();
 		auto& self = Get();
 		self.failed = true;

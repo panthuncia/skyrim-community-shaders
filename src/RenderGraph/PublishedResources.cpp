@@ -30,7 +30,7 @@ namespace PublishedResources
 			std::shared_ptr<org::Resource> resource;
 			std::optional<org::SRVViewType> view;  // none: the resource's primary view
 			bool published = false;                // false: withdrawn, still registered
-			const ID3D11ShaderResourceView* srv = nullptr;  // the twin's D3D11 export, if any (ExportedId); compared, never used
+			const ID3D11ShaderResourceView* srv = nullptr;  // the twin's D3D11 export while published; compared, never used
 		};
 
 		/** @brief What every graph build registers. Immutable once stored. */
@@ -42,6 +42,8 @@ namespace PublishedResources
 		struct State
 		{
 			std::vector<Entry> entries;
+			// Stays atomic although every call is on the render thread: it is cheap, and an extension made off that thread (a build
+			// on another owner thread) would still read a whole snapshot.
 			std::atomic<std::shared_ptr<const Snapshot>> snapshot;
 		};
 
@@ -51,8 +53,22 @@ namespace PublishedResources
 			return s_state;
 		}
 
+		/** @brief Logs once when called off the thread that first used the entries (the render thread): they are not locked. */
+		void CheckThread()
+		{
+			static std::atomic<DWORD> s_owner{ 0 };
+			static std::atomic<bool> s_logged{ false };
+			const DWORD self = ::GetCurrentThreadId();
+			DWORD owner = 0;
+			if (s_owner.compare_exchange_strong(owner, self, std::memory_order_relaxed) || owner == self)
+				return;
+			if (!s_logged.exchange(true, std::memory_order_relaxed))
+				logger::critical("[ORG] PublishedResources used on thread {}, not the render thread {}: its entries are not locked", self, owner);
+		}
+
 		Entry* Find(State& a_state, std::string_view a_id)
 		{
+			CheckThread();
 			const auto found = std::ranges::find(a_state.entries, a_id, &Entry::id);
 			return found != a_state.entries.end() ? &*found : nullptr;
 		}
@@ -156,7 +172,12 @@ namespace PublishedResources
 
 	void Withdraw(std::string_view a_id)
 	{
-		if (auto* entry = Find(Published(), a_id); entry && std::exchange(entry->published, false))
+		auto* entry = Find(Published(), a_id);
+		if (!entry)
+			return;
+		// No export to match until the next Publish.
+		entry->srv = nullptr;
+		if (std::exchange(entry->published, false))
 			logger::info("[ORG] '{}' withdrawn: its readers return to D3D11", a_id);
 	}
 
@@ -164,6 +185,19 @@ namespace PublishedResources
 	{
 		const auto* entry = Find(Published(), a_id);
 		return entry && entry->published && RenderGraphRuntime::Get().IsActive();
+	}
+
+	bool IsRegistered(std::string_view a_id)
+	{
+		return Find(Published(), a_id) && RenderGraphRuntime::Get().IsActive();
+	}
+
+	bool IsExportOf(const ID3D11ShaderResourceView* a_view, std::string_view a_id)
+	{
+		if (!a_view)
+			return false;
+		const auto* entry = Find(Published(), a_id);
+		return entry && entry->published && entry->srv == a_view;
 	}
 
 	bool ShaderResourceIndex(std::string_view a_id, std::uint32_t& a_index)
@@ -195,6 +229,7 @@ namespace PublishedResources
 	{
 		if (!a_view)
 			return {};
+		CheckThread();
 		for (const auto& entry : Published().entries)
 			if (entry.published && entry.srv == a_view)
 				return entry.id;
@@ -215,6 +250,8 @@ namespace PublishedResources
 	bool Publish(const GraphResources::Texture2D&) { return false; }
 	void Withdraw(std::string_view) {}
 	bool IsPublished(std::string_view) { return false; }
+	bool IsRegistered(std::string_view) { return false; }
+	bool IsExportOf(const ID3D11ShaderResourceView*, std::string_view) { return false; }
 	bool ShaderResourceIndex(std::string_view, std::uint32_t&) { return false; }
 	std::string ExportedId(const ID3D11ShaderResourceView*) { return {}; }
 }

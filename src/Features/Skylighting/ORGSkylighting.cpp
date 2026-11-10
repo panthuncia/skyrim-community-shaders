@@ -45,15 +45,12 @@ namespace
 	constexpr const char* kClientId = "cs.skylighting";
 	constexpr const char* kShader = "Skylighting/UpdateProbesCS.hlsl";
 	constexpr auto kVolumes = static_cast<std::size_t>(ORGSkylighting::Volume::Count);
-	// The volumes Drawcall Limit Fix reads at t50 and t53, published under their names.
-	constexpr const char* kProbeArrayName = "Skylighting::ProbeArray";
-	constexpr const char* kShadowVisibilityName = "Skylighting::ShadowVisibility";
 
 	/** @brief The graph no longer updates the probes: the published volumes' readers return to D3D11. */
 	void WithdrawVolumes()
 	{
-		PublishedResources::Withdraw(kProbeArrayName);
-		PublishedResources::Withdraw(kShadowVisibilityName);
+		PublishedResources::Withdraw(ORGSkylighting::kProbeArrayId);
+		PublishedResources::Withdraw(ORGSkylighting::kShadowVisibilityId);
 	}
 
 	/** @brief One frame's values, as UpdateProbesFrame in UpdateProbesCS.hlsl: float4 rows, tightly packed. */
@@ -482,15 +479,16 @@ bool ORGSkylighting::Update(const Skylighting& a_feature)
 		}
 		// Read by D3D11 (the engine's draws, the composite): exported SRV. ResetSkylighting clears them on the graph (QueueReset).
 		constexpr GraphResources::Options volumeOptions{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV };
-		constexpr std::pair<DXGI_FORMAT, const char*> volumeInfo[kVolumes] = {
-			{ DXGI_FORMAT_R16G16B16A16_FLOAT, kProbeArrayName },
+		constexpr std::pair<DXGI_FORMAT, std::string_view> volumeInfo[kVolumes] = {
+			{ DXGI_FORMAT_R16G16B16A16_FLOAT, kProbeArrayId },
 			{ DXGI_FORMAT_R8_UINT, "Skylighting::AccumFramesArray" },
 			{ DXGI_FORMAT_R32_UINT, "Skylighting::ShadowBitmask" },
-			{ DXGI_FORMAT_R8_UNORM, kShadowVisibilityName },
+			{ DXGI_FORMAT_R8_UNORM, kShadowVisibilityId },
 		};
 		for (std::size_t i = 0; i < kVolumes; ++i) {
 			auto& volume = resources->volumes[i];
-			volume = std::make_unique<GraphResources::Texture3D>(VolumeDesc(dims, volumeInfo[i].first), volumeInfo[i].second, volumeOptions);
+			volume = std::make_unique<GraphResources::Texture3D>(VolumeDesc(dims, volumeInfo[i].first), std::string(volumeInfo[i].second),
+				volumeOptions);
 			if (!*volume || !volume->SRV()) {
 				logger::warn("[ORG] Skylighting: {} could not be made and exported; the probe update stays on D3D11", volumeInfo[i].second);
 				return false;

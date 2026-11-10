@@ -15,8 +15,6 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 
-#include "RenderGraph/PublishedResources.h"
-
 namespace DCLF
 {
 	const ViewEpochState* IndirectDraws::ViewState(Api::EngineView a_view) const
@@ -153,10 +151,9 @@ namespace DCLF
 		 * those read null. The frame buffers (t98) are the view's own copies, which its commit fills and names (CommitView). Each binding is
 		 * held by a_owners for the execution.
 		 *
-		 * A view that is a published graph texture's D3D11 export (a producer on its ORG path) is read through its id instead, when the
-		 * faces' passes declared it (the main resources' graphTextures: DeclareFrameGraphTextures): an import of the export would be a
-		 * resource of its own, which nothing orders after the producer's writes. The faces draw before most producers, so they read the
-		 * previous frame's contents either way.
+		 * A view that is a published texture's D3D11 export is read through its id instead (Extensions::GraphTextureIndex, the faces'
+		 * passes declare the ids: FacesGraphTextureIds). An import of the export would be a resource of its own, which nothing orders
+		 * after the producer's writes. The faces draw before most producers, so they read the previous frame's contents either way.
 		 */
 		void ResolveViewFrameTextures(ViewEpochState& a_state, std::vector<std::shared_ptr<const void>>& a_owners)
 		{
@@ -169,29 +166,16 @@ namespace DCLF
 			a_state.frameTextures.fill(kInvalidIndex);
 			const auto frameTextures = Extensions::RegisteredFrameTextures();
 			const auto frameTextureAt = Extensions::FrameTextureIndices();
-			// What the faces' passes declared: none while they wait to be declared again with new main resources.
-			const auto& viewResources = a_state.resources;
-			const auto declared = viewResources && viewResources->main && !viewResources->rebuildPending ? viewResources->main->graphTextures :
-			                                                                                                Extensions::FrameGraphTextureSet{};
-			// Each change of path of a named view, once (the render thread's alone).
-			static std::array<bool, kTextureRegisters> s_onGraph{};
 			for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters; ++t) {
 				const auto at = frameTextureAt[t];
-				const bool registered = at != Extensions::kNoFrameTexture && at < frameTextures.size();
+				const auto* const texture = at != Extensions::kNoFrameTexture && at < frameTextures.size() ? &frameTextures[at] : nullptr;
+				// A registration without a view reads null here: the faces capture nothing.
 				auto* const view = t == kCharacterLightRegister ? Scene::FrameView::Get().GetFrameCapture().characterLightView :
-				                   registered                   ? static_cast<ID3D11ShaderResourceView*>(frameTextures[at].view()) :
+				                   texture && texture->view     ? static_cast<ID3D11ShaderResourceView*>(texture->view()) :
 				                                                  nullptr;
 				std::uint32_t graphIndex = 0;
-				const bool onGraph = registered && view && declared.test(t) && PublishedResources::ExportedId(view) == frameTextures[at].graphResource &&
-				                     PublishedResources::ShaderResourceIndex(frameTextures[at].graphResource, graphIndex);
-				if (view && registered && std::exchange(s_onGraph[t], onGraph) != onGraph) {
-					if (onGraph)
-						logger::info("[DCLF] the faces' frame texture {} (t{}) reads the graph resource '{}' (descriptor {})", frameTextures[at].name, t,
-							frameTextures[at].graphResource, graphIndex);
-					else
-						logger::info("[DCLF] the faces' frame texture {} (t{}) reads its D3D11 view", frameTextures[at].name, t);
-				}
-				if (onGraph) {
+				const auto reader = Extensions::GraphTextureReader::Faces;
+				if (texture && Extensions::GraphTextureIndex(reader, t, texture->name, view, texture->graphResources, graphIndex)) {
 					// The graph registers the published texture: no import to hold.
 					HoldFrameTexture(a_state.frameTextureViews[t], a_state.frameTextureBindings[t], nullptr, t, 0u, a_owners);
 					a_state.frameTextures[t] = graphIndex;

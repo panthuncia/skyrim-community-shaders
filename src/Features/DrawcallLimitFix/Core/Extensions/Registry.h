@@ -114,10 +114,9 @@ namespace DCLF::Extensions
 	{
 		std::string name;
 		std::uint32_t textureRegister = ~0u;
-		decltype(Api::FrameTexture::view) view = nullptr;
+		decltype(Api::FrameTexture::view) view = nullptr;  // null: the captured view, graph only
 		bool capturedWhenNull = false;
-		std::string graphResource;  // the published id, owned (c_str for ORG's ResourceIdentifier); empty: no graph path
-		decltype(Api::FrameTexture::graph) graph = nullptr;
+		decltype(Api::FrameTexture::graphResources) graphResources{};  // the published ids (static strings); empty ones unused
 	};
 	/** @brief A feature's registered report lines. */
 	struct ReportLinesEntry

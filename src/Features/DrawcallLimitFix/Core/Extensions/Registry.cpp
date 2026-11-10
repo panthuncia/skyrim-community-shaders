@@ -381,13 +381,13 @@ namespace DCLF::Extensions
 
 		/**
 		 * @brief Adds a_texture, refused (a_who's) for a register below the frame textures or past t127, Core's, a frame binding's or another
-		 * frame texture's, no name or no view, or one past kFrameTextureSlots.
+		 * frame texture's, no name, neither a view nor a graph id, or one past kFrameTextureSlots.
 		 */
 		void AddFrameTexture(Lists& a_lists, std::string_view a_who, const Api::FrameTexture& a_texture)
 		{
 			const auto r = a_texture.textureRegister;
-			if (a_texture.name.empty() || !a_texture.view || r < kPixelTextureSlots || r >= kTextureRegisters ||
-				a_texture.graphResource.empty() != !a_texture.graph)
+			const bool graphIds = std::ranges::any_of(a_texture.graphResources, [](std::string_view a_id) { return !a_id.empty(); });
+			if (a_texture.name.empty() || (!a_texture.view && !graphIds) || r < kPixelTextureSlots || r >= kTextureRegisters)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete frame texture", a_who));
 			if (CoreFrameRegister(r))
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame texture {} takes t{}, which Core keeps", a_who, a_texture.name, r));
@@ -404,8 +404,7 @@ namespace DCLF::Extensions
 			if (a_lists.frameTextures.size() >= kFrameTextureSlots)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame texture {} is one past kFrameTextureSlots: grow it first", a_who, a_texture.name));
 			a_lists.frameTextureIndices[r] = static_cast<std::uint8_t>(a_lists.frameTextures.size());
-			a_lists.frameTextures.push_back({ std::string(a_texture.name), r, a_texture.view, a_texture.capturedWhenNull, std::string(a_texture.graphResource),
-				a_texture.graph });
+			a_lists.frameTextures.push_back({ std::string(a_texture.name), r, a_texture.view, a_texture.capturedWhenNull, a_texture.graphResources });
 		}
 
 		/**

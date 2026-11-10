@@ -365,10 +365,8 @@ PublishedResources::Publish(*out);  // id "MyFeature::Output"
 PublishedResources::Withdraw("MyFeature::Output");
 ```
 
-DCLF reads a published texture through its frame texture contract (`Api::FrameTexture::graphResource` and `graph`;
-dclf-architecture.md, "Frame graph textures"). `CS_DCLF_GRAPH_TEXTURE_TEST=graph|d3d11` is the end-to-end test: a copy pass at the
-Prepass anchor fills a published cubemap from Dynamic Cubemaps' reflections, and DCLF's t30 reads it through the graph or through
-its export.
+DCLF reads a published texture through its frame texture contract (`Api::FrameTexture::graphResources`; dclf-architecture.md,
+"Frame graph textures"): when the view a commit resolved is the id's export (`PublishedResources::IsExportOf`).
 
 ## GPU timing in the profiling window
 

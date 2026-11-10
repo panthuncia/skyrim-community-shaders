@@ -4,9 +4,7 @@
 #include "Features/DrawcallLimitFix/Integrations/TerrainBlending/TerrainBlending.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
 
-#include "RenderGraph/PublishedResources.h"
 #include "ShaderCache.h"
-#include "Utils/D3D.h"
 
 #include "Features/TerrainBlending.h"
 #include "Features/TerrainBlending/ORGTerrainBlending.h"
@@ -31,31 +29,11 @@ namespace DCLF::Integrations::TerrainBlending
 		// Terrain Blending's mask (t55), bound by its replay after this epoch, so named here rather than captured. By the colour epoch it
 		// holds the Z-prepass's main depth (TerrainBlending::BlendPrepassDepths): its terrain depth on D3D11, its graph mask's export on
 		// its ORG path. Null while it does not hold the terrain: the captured view.
-		// On the ORG path (CS_ORG_TERRAIN_BLENDING) the colour passes read the published mask instead, ordered after the blend.
+		// On the ORG path (CS_ORG_TERRAIN_BLENDING) the mask is the graph mask's export, so the commits read the published mask,
+		// ordered after the blend.
 		void* MaskView()
 		{
 			return DefersTerrain() ? globals::features::terrainBlending.GetMaskSRV() : nullptr;
-		}
-
-		bool MaskGraphIndex(std::uint32_t& a_index)
-		{
-			return DefersTerrain() && PublishedResources::ShaderResourceIndex(::ORGTerrainBlending::kMaskId, a_index);
-		}
-
-		// The scene depth (t17) is the colour commit's captured view: the integration names none. The views with frame constants of their
-		// own (the reflection's faces) read null there, as before the registration.
-		void* SceneDepthView()
-		{
-			return nullptr;
-		}
-
-		// On the ORG path (CS_ORG_TERRAIN_BLENDING) the scene depth CS binds at t17 (Util::GetCurrentSceneDepthSRV(true)) is the 16-bit
-		// blended depth's export from the depth pass until the deferred pass's final depth: the colour passes read the published texture
-		// instead, ordered after the blend. Otherwise the captured view (the engine's depth, or the D3D11 blended depth).
-		bool SceneDepthGraphIndex(std::uint32_t& a_index)
-		{
-			auto* blended = ::ORGTerrainBlending::Get().BlendedDepthSRV(true);
-			return blended && Util::GetCurrentSceneDepthSRV(true) == blended && PublishedResources::ShaderResourceIndex(::ORGTerrainBlending::kBlendedDepth16Id, a_index);
 		}
 
 		// Terrain Blending's terrain depth shares the main depth's description; the Z-prepass draws near terrain blocks into it
@@ -104,10 +82,12 @@ namespace DCLF::Integrations::TerrainBlending
 			a_context.RegisterHeldGroup({ .heldWhile = defers, .slot = kNoBlendRange, .name = "terrain-no-blend", .order = 3,
 				.propertyFlags = static_cast<std::uint64_t>(Flag::kNoTransparencyMultiSample), .toggle = terrain });
 			// Its mask, t55, each colour commit.
-			a_context.RegisterFrameTexture({ .name = "terrain blending mask", .textureRegister = kMaskRegister, .view = &MaskView, .capturedWhenNull = true, .graphResource = ::ORGTerrainBlending::kMaskId, .graph = &MaskGraphIndex });
-			// The scene depth, t17, each colour commit: its blended depth through the graph on its ORG path.
-			a_context.RegisterFrameTexture({ .name = "terrain blending scene depth", .textureRegister = kSceneDepthRegister, .view = &SceneDepthView,
-				.capturedWhenNull = true, .graphResource = ::ORGTerrainBlending::kBlendedDepth16Id, .graph = &SceneDepthGraphIndex });
+			a_context.RegisterFrameTexture({ .name = "terrain blending mask", .textureRegister = kMaskRegister, .view = &MaskView,
+				.capturedWhenNull = true, .graphResources = { ::ORGTerrainBlending::kMaskId } });
+			// The scene depth, t17, has no view of its own: the colour commit reads the captured view, the faces null. On the ORG path
+			// the captured view is the 16-bit blended depth's export from the depth pass until the deferred pass's final depth.
+			a_context.RegisterFrameTexture({ .name = "terrain blending scene depth", .textureRegister = kSceneDepthRegister,
+				.graphResources = { ::ORGTerrainBlending::kBlendedDepth16Id } });
 			// Its near blocks drawn twice in the depth segment: into its terrain depth and, offset, into the main depth.
 			a_context.RegisterNearTwin({ .name = "Terrain Blending's terrain depth", .debugName = "DCLF terrain blending depth",
 				.resource = "cs.dclf.terrain-blending-depth", .target = &TerrainDepthTarget, .nearTest = &NearTest });

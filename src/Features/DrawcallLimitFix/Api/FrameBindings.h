@@ -3,11 +3,12 @@
 // The frame binding contract (Api::InstallContext::RegisterFrameBinding): a buffer every DCLF draw reads at a declared texture register,
 // given by the frame record (DrawBindings) because it changes by frame: the version of a feature's buffer the frame's draws read. And the
 // frame texture contract (RegisterFrameTexture): an engine render target's view the frame record names at a declared texture register, or
-// a CS feature's published graph texture while the feature is on its ORG path.
+// a CS feature's published graph texture when that view is its export.
 // And the frame graph buffers' (RegisterFrameGraphBuffers): another CS feature's graph buffers, read at declared texture registers. And
 // the per-draw buffers' (DeclarePerDrawBuffer): another CS feature's constant buffers bound per draw, which no frame block mirrors.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string_view>
@@ -36,6 +37,9 @@ namespace DCLF::Api
 		void (*select)(FrameBindingSelect& a_select) = nullptr;
 	};
 
+	/** @brief The most published ids one frame texture may list (FrameTexture::graphResources). */
+	inline constexpr std::size_t kFrameTextureGraphIds = 2;
+
 	/**
 	 * @brief A frame texture (Api::InstallContext::RegisterFrameTexture): a view every DCLF colour draw reads at a declared texture
 	 * register, which the frame record names because it is a render target or a CS feature's own per-frame texture (a material row never
@@ -48,18 +52,15 @@ namespace DCLF::Api
 	 *
 	 * - view: render thread, once per colour commit before its frame textures are resolved, and once per epoch of a view with frame
 	 *   constants of its own: the shader resource view (ID3D11ShaderResourceView*) the register reads (null: the null texture, or with
-	 *   capturedWhenNull in a colour commit the captured view).
+	 *   capturedWhenNull in a colour commit the captured view). No view at all: the colour commit reads the captured view and the
+	 *   faces read null. Such a registration only lets the graph path take the register, so it needs a graph id.
 	 * - capturedWhenNull: a null view leaves the register the view the colour commit captured there (a texture the feature names only
 	 *   while it binds it itself after the epoch, and the engine's or CS's binding stands otherwise: Integrations/TerrainBlending's mask;
 	 *   a CS feature's view the integration names only while it is the one CS binds there).
-	 *
-	 * The graph path, for a producer ported to ORG (both or neither; dclf-architecture.md, "Frame graph textures"):
-	 * - graphResource: the id the producer publishes its texture under (RenderGraph/PublishedResources.h). The colour passes declare a
-	 *   read of it while graph answers true at the main resources' check, so ORG orders the read after the producer's write.
-	 * - graph: render thread, at the main resources' check and once per colour commit: whether the register reads the published texture
-	 *   now (the producer is on its ORG path; usually PublishedResources::ShaderResourceIndex), with its bindless index into a_index.
-	 *   False: view, as above. The views with frame constants of their own (the reflection's faces) read view, or the published
-	 *   texture when view is its export (PublishedResources::ExportedId) and their passes declared it.
+	 * - graphResources: the ids a producer ported to ORG publishes the register's texture under (RenderGraph/PublishedResources.h;
+	 *   dclf-architecture.md, "Frame graph textures"). More than one when the register can hold either texture. Static strings: the
+	 *   producer's constants. The passes declare a read of each id once it was ever published. A commit then reads the graph resource
+	 *   when the view it resolved (view, or the captured one) is that id's export, and imports the view otherwise.
 	 */
 	struct FrameTexture
 	{
@@ -67,8 +68,7 @@ namespace DCLF::Api
 		std::uint32_t textureRegister = ~0u;
 		void* (*view)() = nullptr;
 		bool capturedWhenNull = false;
-		std::string_view graphResource;
-		bool (*graph)(std::uint32_t& a_index) = nullptr;
+		std::array<std::string_view, kFrameTextureGraphIds> graphResources{};
 	};
 
 	/**

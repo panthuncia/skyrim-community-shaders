@@ -3,8 +3,6 @@
 #include "Features/DrawcallLimitFix/Integrations/TerrainShadows/TerrainShadows.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
 
-#include "RenderGraph/PublishedResources.h"
-
 #include "Features/TerrainShadows.h"
 #include "Features/TerrainShadows/ORGTerrainShadows.h"
 
@@ -21,20 +19,12 @@ namespace DCLF::Integrations::TerrainShadows
 			return terrainShadows.loaded && terrainShadows.settings.EnableTerrainShadow ? terrainShadows.GetShadowHeightSRV() : nullptr;
 		}
 
-		// On the ORG path (CS_ORG_TERRAIN_SHADOWS) the view is the graph texture's D3D11 export while the current heightmap is the
-		// graph's: the colour passes read the published texture instead, ordered after the update at the EarlyPrepass anchor.
-		constexpr std::string_view kShadowHeightId = "TerrainShadows::ShadowHeight";
-
-		bool ShadowHeightGraphIndex(std::uint32_t& a_index)
-		{
-			auto* const view = ShadowHeightView();
-			return view && view == ORGTerrainShadows::Get().ShadowHeightSRV() && PublishedResources::ShaderResourceIndex(kShadowHeightId, a_index);
-		}
-
+		// On the ORG path (CS_ORG_TERRAIN_SHADOWS) the view is the graph texture's export while the current heightmap is the graph's,
+		// so the commits read the published texture, ordered after the update at the EarlyPrepass anchor.
 		void Install(Api::InstallContext& a_context)
 		{
 			a_context.RegisterFrameTexture({ .name = "terrain shadows height", .textureRegister = kShadowHeightRegister, .view = &ShadowHeightView,
-				.capturedWhenNull = true, .graphResource = kShadowHeightId, .graph = &ShadowHeightGraphIndex });
+				.capturedWhenNull = true, .graphResources = { ORGTerrainShadows::kShadowHeightId } });
 		}
 	}
 

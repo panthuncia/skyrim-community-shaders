@@ -4,8 +4,6 @@
 #include "Features/DrawcallLimitFix/Integrations/ExponentialHeightFog/ExponentialHeightFog.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
 
-#include "RenderGraph/PublishedResources.h"
-
 #include "Features/ExponentialHeightFog.h"
 #include "Features/ExponentialHeightFog/ORGExponentialHeightFog.h"
 
@@ -13,10 +11,6 @@ namespace DCLF::Integrations::ExponentialHeightFog
 {
 	namespace
 	{
-		// The ids ORGExponentialHeightFog publishes the integrated volumes under (their twins' names).
-		constexpr std::string_view kNearId = "ExponentialHeightFog::IntegratedLightScattering";
-		constexpr std::string_view kFarId = "ExponentialHeightFog::FarIntegratedLightScattering";
-
 		// The views Prepass binds at t19 and t22 under its own conditions (every path past them ends in BindIntegratedLightScattering;
 		// otherwise ReleaseVolumetricResources binds null). Prepass runs after the faces' commit, so they read last frame's volumes, or the
 		// previous textures while Prepass remakes them (a grid change), held by their binding. Null without the feature or the volumes:
@@ -38,25 +32,14 @@ namespace DCLF::Integrations::ExponentialHeightFog
 			return Binds() ? globals::features::exponentialHeightFog.IntegratedLightScatteringFarView() : nullptr;
 		}
 
-		// On the ORG path (CS_ORG_EXPONENTIAL_HEIGHT_FOG) the views are the graph volumes' exports while the graph ran the last Prepass
-		// (NearSRV, FarSRV); the colour passes then read the published volumes, ordered after the integration at the Prepass anchor. A
-		// frame the fog ran on D3D11 has no export to answer: the view, the D3D11 volume.
-		bool LightScatteringGraphIndex(std::uint32_t& a_index)
-		{
-			return Binds() && ORGExponentialHeightFog::Get().NearSRV() && PublishedResources::ShaderResourceIndex(kNearId, a_index);
-		}
-
-		bool LightScatteringFarGraphIndex(std::uint32_t& a_index)
-		{
-			return Binds() && ORGExponentialHeightFog::Get().FarSRV() && PublishedResources::ShaderResourceIndex(kFarId, a_index);
-		}
-
+		// On the ORG path (CS_ORG_EXPONENTIAL_HEIGHT_FOG) the views are the graph volumes' exports while the graph ran the last Prepass, so
+		// the commits read the published volumes, ordered after the integration at the Prepass anchor.
 		void Install(Api::InstallContext& a_context)
 		{
 			a_context.RegisterFrameTexture({ .name = "exponential height fog light scattering", .textureRegister = kLightScatteringRegister,
-				.view = &LightScatteringView, .capturedWhenNull = true, .graphResource = kNearId, .graph = &LightScatteringGraphIndex });
+				.view = &LightScatteringView, .capturedWhenNull = true, .graphResources = { ORGExponentialHeightFog::kNearIntegratedId } });
 			a_context.RegisterFrameTexture({ .name = "exponential height fog far light scattering", .textureRegister = kLightScatteringFarRegister,
-				.view = &LightScatteringFarView, .capturedWhenNull = true, .graphResource = kFarId, .graph = &LightScatteringFarGraphIndex });
+				.view = &LightScatteringFarView, .capturedWhenNull = true, .graphResources = { ORGExponentialHeightFog::kFarIntegratedId } });
 		}
 	}
 

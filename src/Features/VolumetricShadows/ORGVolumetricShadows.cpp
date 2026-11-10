@@ -30,8 +30,6 @@ namespace
 	constexpr const char* kClientId = "cs.volumetric-shadows";
 	constexpr const char* kDownsampleShader = "VolumetricShadows/DownsampleShadowCS.hlsl";
 	constexpr const char* kBlurShader = "VolumetricShadows/BlurShadowCS.hlsl";
-	// The shared shadow map's name, which it is published under: Drawcall Limit Fix's t18.
-	constexpr const char* kShadowCopyName = "VolumetricShadows::ShadowCopy";
 	// EarlyPrepass order key (org-extension-api-notes.md, "Keys used so far").
 	constexpr std::int32_t kOrder = 100;
 
@@ -318,7 +316,7 @@ void ORGVolumetricShadows::EarlyPrepass()
 		}
 		resources->sampler = ShaderBindings::CreateSampler({});
 		// Read by the engine's draws and DCLF in later frames too (the reflections draw before this frame's copy): exported, so never aliased.
-		resources->shadowCopy = std::make_unique<GraphResources::Texture2D>(CopyDesc(), kShadowCopyName,
+		resources->shadowCopy = std::make_unique<GraphResources::Texture2D>(CopyDesc(), std::string(kShadowCopyId),
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
 		resources->blurTemp = std::make_unique<GraphResources::Texture2D>(CopyDesc(), "VolumetricShadows::ShadowBlurTemp");
 		if (!resources->sampler || !*resources->shadowCopy || !resources->shadowCopy->SRV() || !*resources->blurTemp) {
@@ -330,7 +328,7 @@ void ORGVolumetricShadows::EarlyPrepass()
 		impl = std::move(state);
 		const bool registered = FrameAnchors::Register(MakeClient(resources, [this] {
 			logger::error("[ORG] Volumetric Shadows: the render graph failed; back to the D3D11 dispatches");
-			PublishedResources::Withdraw(kShadowCopyName);
+			PublishedResources::Withdraw(kShadowCopyId);
 			impl.reset();
 		}));
 		if (!registered) {
@@ -382,7 +380,7 @@ void ORGVolumetricShadows::CheckShadowMaskInput(ID3D11ShaderResourceView* a_shad
 	}
 	logger::error("[ORG] Volumetric Shadows: the shadow mask's t4 is not the cascade map the passes read; back to the D3D11 dispatches");
 	FrameAnchors::Unregister(kClientId);
-	PublishedResources::Withdraw(kShadowCopyName);
+	PublishedResources::Withdraw(kShadowCopyId);
 	impl.reset();
 }
 
