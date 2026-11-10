@@ -17,8 +17,8 @@
  *
  * Every chain image is a transient GraphResources::Texture2D, the size of kMAIN unless the effect names one (a half-resolution
  * or FFT image), so the graph aliases them: there is no ping-pong to write by hand. A sub-feature's D3D11 textures are made only
- * when the D3D11 path first draws it (PostProcessing::DrawFeature). An effect whose Update reads them (DoF's output size) holds
- * the chain on D3D11 until they exist.
+ * when the D3D11 path first draws it (PostProcessing::DrawFeature), so an effect must not read them; files the sub-feature
+ * loads itself (LUT::UpdateTexture) are fine.
  *
  * The mixed rule
  * --------------
