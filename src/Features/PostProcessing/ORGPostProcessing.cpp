@@ -716,6 +716,8 @@ namespace
 			return ORGPostChain::MakeCODBloom();
 		case Index::PhysicalGlare:
 			return ORGPostChain::MakePhysicalGlare();
+		case Index::DoF:
+			return ORGPostChain::MakeDoF();
 		default:
 			return nullptr;
 		}

@@ -857,3 +857,22 @@ Keys used so far:
 - **Where it fits:** `Builder::CreateImage` takes a size; the persistent textures are `GraphResources` the effect owns and
   `Builder::Register`s at each build, made again only when the size changes (which is part of the chain's key).
 - **Found by:** P3 W3, Physical Glare (2026-11-09).
+### Small per-frame tables in a latch
+
+- **Need:** a table a few KB large that the CPU rebuilds whenever a setting moves (DoF's 120 gather samples, procedural
+  or from a custom aperture), read by many passes, without a graph upload pass or a rebuild per change.
+- **Who:** CS's Depth of Field; any pass whose kernel weights or sample sets come from the CPU.
+- **Where it fits:** the table is a latch region the client writes every frame, and the shader reads it as a raw buffer
+  at the latch offset (`EXTERN_LATCH` handle and offset, `LoadBokehSample` in `dof.cs.hlsl`). An API would give a
+  structured view of a latch region, so the D3D11 and ORG declarations could be one `StructuredBuffer`.
+- **Found by:** P3 W3, Post Processing DoF (2026-11-09).
+
+### History initialized by the pass that first uses it
+
+- **Need:** a history texture whose first frame must not read uninitialized memory (DoF's 1x1 focus distance; a NaN
+  there would stick for the session), without a one-shot clear that a commit cannot tell was executed.
+- **Who:** CS's Depth of Field; temporal passes generally.
+- **Where it fits:** the shader takes a reset word from the latch and the client sets it for a few commits after each
+  build (`ORGDoF.cpp`, `kFocusResetCommits`). An API would tell a client which build an epoch runs, or give history
+  resources a "contents undefined" flag the pass can read.
+- **Found by:** P3 W3, Post Processing DoF (2026-11-09).

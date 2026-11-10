@@ -356,6 +356,7 @@ namespace ORGPostChain
 	inline constexpr std::string_view kLensFlareOutput = "PostProcessing::LensFlare::GhostHalo";
 	std::unique_ptr<Effect> MakeCODBloom();
 	std::unique_ptr<Effect> MakePhysicalGlare();
+	std::unique_ptr<Effect> MakeDoF();
 }
 
 #endif

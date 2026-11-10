@@ -206,6 +206,7 @@ bool BokehResources::BuildShapeSamples(const DirectX::ScratchImage& image, int i
 		StructuredBufferDesc<ShapeSample>((uint64_t)GATHER_SAMPLE_COUNT, false, true), GATHER_SAMPLE_COUNT, bufferName.c_str());
 	shapeSampleBuffers[index]->CreateSRV();
 	shapeSampleBuffers[index]->Update(samples.data(), sizeof(samples));
+	shapeSamples[index] = samples;
 	const float apertureArea = 4.0f * coverageSum / float(source->width * source->height);
 	shapeSampleRadiusScales[index] = std::clamp(
 		std::sqrt(std::numbers::pi_v<float> / std::max(apertureArea, 1e-4f)), 0.5f, 4.0f);
@@ -272,6 +273,13 @@ float BokehResources::GetShapeSampleMaxRadius(int shapeIndex) const
 	if (shapeIndex < 0 || shapeIndex >= MAX_SHAPES || !shapeSampleBuffers[shapeIndex])
 		return 1.0f;
 	return shapeSampleMaxRadii[shapeIndex];
+}
+
+const std::array<BokehResources::ShapeSample, BokehResources::GATHER_SAMPLE_COUNT>* BokehResources::GetShapeSamples(int shapeIndex) const
+{
+	if (shapeIndex < 0 || shapeIndex >= MAX_SHAPES || !shapeSampleBuffers[shapeIndex])
+		return nullptr;
+	return &shapeSamples[shapeIndex];
 }
 
 const char* BokehResources::GetShapeName(int index) const
