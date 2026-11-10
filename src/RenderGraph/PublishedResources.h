@@ -28,10 +28,13 @@ namespace GraphResources
  * - A reader in an epoch earlier in the frame than the producer's reads the previous frame's contents.
  * - The id is the twin's name ("Feature::Name") unless the producer gives another. Readers name the same id.
  * - Publishing a new resource under an id (the first time, or after a Resize) rebuilds every graph, once.
+ * - A Resize makes a new resource, so the producer publishes again right after it. Until then readers would name the old one.
  * - Withdraw marks the resource as no longer written: ShaderResourceIndex answers false and readers return to their D3D11 view. It
  *   stays registered, because a graph built earlier may still declare it, until the producer publishes again under that id.
+ * - An id stays registered once published (IsRegistered), so a reader may declare it in every build from then on.
  *
- * Everything here runs on the render thread; graph builds read a snapshot.
+ * Everything here runs on the render thread (graph builds too: GraphHost builds on its owner thread). The lookups log once if
+ * called from another thread.
  *
  * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
@@ -58,6 +61,16 @@ namespace PublishedResources
 	bool IsPublished(std::string_view a_id);
 
 	/**
+	 * @brief Whether a_id was ever published, so every graph built since registers it (withdrawn or not). A reader may declare it then.
+	 */
+	bool IsRegistered(std::string_view a_id);
+
+	/**
+	 * @brief Whether a_view is the D3D11 export of a_id's twin while a_id is published. Does not allocate.
+	 */
+	bool IsExportOf(const ID3D11ShaderResourceView* a_view, std::string_view a_id);
+
+	/**
 	 * @brief The bindless index of a_id's whole-resource shader resource view (every mip; a cube's TextureCube view, a 2D array's full
 	 * array view, a buffer's structured view), for a shader that reads it from the descriptor heap.
 	 * @return False when a_id is not published, withdrawn, or has no such view.
@@ -67,7 +80,7 @@ namespace PublishedResources
 	/**
 	 * @brief The id whose twin exports a_view as its D3D11 SRV, while that id is published; empty otherwise. A diagnostic for readers
 	 * that import D3D11 views: a graph pass reading the export through an import of its own is not ordered after the producer's
-	 * writes, so it should read the id instead.
+	 * writes, so it should read the id instead. Allocates: use IsExportOf on hot paths.
 	 */
 	std::string ExportedId(const ID3D11ShaderResourceView* a_view);
 }
