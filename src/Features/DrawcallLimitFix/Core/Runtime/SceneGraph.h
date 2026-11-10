@@ -79,12 +79,16 @@ namespace DCLF::Runtime
 		 * One thread posts at a time (the snapshot builder). False when the graph refused it (shutting down): a_done does not run.
 		 */
 		bool PostPayloadPart(org::services::VersionedBufferBuildInput a_input, PayloadPartDone a_done);
-		/** @brief Any thread, lock-free: a_build makes a texture's window, on the streaming domain. A later revision replaces this one if it has not started. */
-		bool PostTextureWindow(std::uint64_t a_texture, std::uint64_t a_revision, std::function<void()> a_build);
+		/**
+		 * @brief Any thread, lock-free: a_build makes a texture's window, on the streaming domain. A later revision replaces this one if it has
+		 * not started. a_build returns what the window still waits for once it returns (its upload, on the render graph), or null when it is
+		 * in place: the window is GPU ready then.
+		 */
+		bool PostTextureWindow(std::uint64_t a_texture, std::uint64_t a_revision, std::function<std::shared_ptr<const org::async::GpuSubmissionSet>()> a_build);
 		/** @brief The texture is gone: its window's address goes too. */
 		void RetireTextureWindow(std::uint64_t a_texture);
 		/**
-		 * @brief Runs a_run once the texture's window has reached a_revision and is ready (a window posted before this call, on any thread). False
+		 * @brief Runs a_run once the texture's window has reached a_revision and is GPU ready (a window posted before this call, on any thread). False
 		 * when the graph refused it (shutting down): a_run does not run.
 		 */
 		bool PostTextureGate(std::uint64_t a_texture, std::uint64_t a_revision, std::function<void()> a_run);
