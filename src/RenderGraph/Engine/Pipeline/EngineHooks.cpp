@@ -269,11 +269,12 @@ namespace RenderGraph::Engine::Pipeline
 			return REL::Relocation<Interface**>{ a_id }.get();
 		}
 
-		void InstallEngineHandles()
+		/** @brief Wraps the state tables and query pools. False, with nothing changed, when the guest context is missing. */
+		bool InstallEngineHandles()
 		{
 			if (!HandlesWanted()) {
 				logger::info("[ORG] engine pipeline descriptions: no guest context, so the engine keeps its D3D11 state objects and queries");
-				return;
+				return false;
 			}
 			const auto depthStencil = WrapTable(Table<ID3D11DepthStencilState>(RELOCATION_ID(524747, 411362)), 6 * 40, sizeof(void*),
 				[](ID3D11DepthStencilState* a_real, std::size_t a_index) {
@@ -308,6 +309,7 @@ namespace RenderGraph::Engine::Pipeline
 			const auto disjoint = WrapTable(Table<ID3D11Query>(RELOCATION_ID(524952, 411440)), 6, 0x50, makeQuery("DisjointQuery"));
 			logger::info("[ORG] engine pipeline descriptions: handles for {} depth-stencil, {} rasterizer, {} blend, {} sampler states and {} queries",
 				depthStencil, raster, blend, samplers, occlusion + disjoint);
+			return true;
 		}
 
 #endif
@@ -341,10 +343,11 @@ namespace RenderGraph::Engine::Pipeline
 	void InstallEngineHandlesOnce()
 	{
 #if defined(CS_HAS_RENDER_GRAPH)
+		// Done only once it worked: a call without the guest context leaves the tables as they are.
 		static bool installed = false;
-		if (!Enabled() || std::exchange(installed, true))
+		if (!Enabled() || installed)
 			return;
-		InstallEngineHandles();
+		installed = InstallEngineHandles();
 #endif
 	}
 

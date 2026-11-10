@@ -923,6 +923,26 @@ namespace Hooks
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
+	/**
+	 * @brief The last call of Renderer::Init (SE 75445+0x310, AE 77226+0x9C3): BSGraphics::State's setup, after the occlusion and
+	 * disjoint query pools. Installed only with CS_ORG_TRIPWIRE_GUEST=1.
+	 *
+	 * The engine's start, in order: the device, the render targets (BSShaderRenderTargets::Create, then State::Setup), the blend
+	 * table (the InitD3D hook above, which installs the guest device and context), the depth-stencil, rasterizer and sampler
+	 * tables, then the query pools here. This is the first point where the guest and every object the handles wrap exist, so the
+	 * state, query and startup target handles all go in here, once, before the first frame.
+	 */
+	struct BSGraphics_Renderer_Init_StateSetup
+	{
+		static void thunk(void* a_state)
+		{
+			func(a_state);
+			RenderGraph::Engine::Pipeline::InstallEngineHandlesOnce();
+			RenderGraph::Engine::Targets::InstallHandles();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
 	struct WndProcHandler_Hook
 	{
 		static LRESULT thunk(HWND a_hwnd, UINT a_msg, WPARAM a_wParam, LPARAM a_lParam)
@@ -1428,6 +1448,10 @@ namespace Hooks
 
 		logger::info("Hooking BSGraphics::Renderer::InitD3D");
 		stl::write_thunk_call<BSGraphics_Renderer_Init_InitD3D>(REL::RelocationID(75595, 77226).address() + REL::Relocate(0x50, 0x2BC));
+		if (RenderGraph::Engine::Tripwire::GuestRequested()) {
+			logger::info("Hooking the end of BSGraphics::Renderer::Init (engine handles after the guest device)");
+			stl::write_thunk_call<BSGraphics_Renderer_Init_StateSetup>(REL::RelocationID(75445, 77226).address() + REL::Relocate(0x310, 0x9C3));
+		}
 
 		logger::info("Hooking WndProcHandler");
 		stl::write_thunk_call<RegisterClassA_Hook, 6>(REL::VariantID(75591, 77226, 0xDC4B90).address() + REL::VariantOffset(0x8E, 0x15C, 0x99).offset());

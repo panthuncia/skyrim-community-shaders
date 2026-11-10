@@ -7,10 +7,10 @@
  *
  * The sampler anisotropy cap is always on. Everything else needs CS_ORG_ENGINE_SHADERS=1:
  * - The device's shader and input layout creation record descriptions (every creator, CS's own included).
- * - BSGraphics::Renderer's shader loaders (75547/75548/75551/75552/75556) and CreateInputLayout (75583), and Renderer::Init (the
- *   state tables and query pools), put tripwire handles that wrap the real objects into the engine's fields. Only while P4.1's
- *   guest context is installed (CS_ORG_TRIPWIRE_GUEST=1): the engine then binds them through a context that unwraps them.
- *   Without it the engine's fields keep the D3D11 objects.
+ * - BSGraphics::Renderer's shader loaders (75547/75548/75551/75552/75556) and CreateInputLayout (75583), and the end of
+ *   Renderer::Init (the state tables and query pools, InstallEngineHandlesOnce), put tripwire handles that wrap the real
+ *   objects into the engine's fields. Only while P4.1's guest context is installed (CS_ORG_TRIPWIRE_GUEST=1): the engine then
+ *   binds them through a context that unwraps them. Without it the engine's fields keep the D3D11 objects.
  *
  * RE: docs/development/p4/p4.6-shaders-states.md.
  */
@@ -29,9 +29,9 @@ namespace RenderGraph::Engine::Pipeline
 	void InstallGameHooks();
 
 	/**
-	 * @brief With CS_ORG_ENGINE_SHADERS=1: wraps the engine's state tables and query pools in tripwire handles (when the guest
-	 * context is installed). Called once from State's setup, after Renderer::Init has made them. Not a detour on Renderer::Init: on
-	 * AE that function also holds InitD3D, which CS already patches.
+	 * @brief With CS_ORG_ENGINE_SHADERS=1: wraps the engine's state tables and query pools in tripwire handles, when the guest
+	 * context is installed. Called from the hook at the end of Renderer::Init (Hooks.cpp), the first point where the guest, all
+	 * four state tables and both query pools exist. Marks itself done only when it wrapped them.
 	 */
 	void InstallEngineHandlesOnce();
 }

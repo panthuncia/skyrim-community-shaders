@@ -210,21 +210,28 @@ namespace RenderGraph::Engine::Targets
 
 		bool Active() { return RenderGraphRuntime::Get().IsActive(); }
 
+		/** @brief Whether CS_ORG_ENGINE_TARGET_HANDLES=1 asks for tripwire handles in the engine's fields. */
+		bool HandlesRequested()
+		{
+			static const bool requested = Switches::On("CS_ORG_ENGINE_TARGET_HANDLES");
+			return requested;
+		}
+
+		/** @brief Whether the engine's device and immediate context are the tripwire's wrapping guests (P4.1). */
+		bool GuestsInstalled()
+		{
+			const auto& data = Renderer()->GetRuntimeData();
+			return Tripwire::IsHandle(static_cast<const void*>(data.context)) && Tripwire::IsHandle(static_cast<const void*>(data.forwarder));
+		}
+
 		/**
-		 * @brief Whether the engine's fields get tripwire handles: CS_ORG_ENGINE_TARGET_HANDLES=1, and the engine's device and immediate
-		 * context are the tripwire's wrapping guests (P4.1). Without them a handle would reach DXVK's own device or context and crash there.
+		 * @brief Whether a target made now gets tripwire handles in the engine's fields: HandlesRequested, and the guests are installed.
+		 * Without the guests a handle would reach DXVK's own device or context and crash there. The targets made before the guests
+		 * get their handles from InstallHandles.
 		 */
 		bool UseHandles()
 		{
-			static const bool requested = Switches::On("CS_ORG_ENGINE_TARGET_HANDLES");
-			if (!requested)
-				return false;
-			const auto& data = Renderer()->GetRuntimeData();
-			const bool guests = Tripwire::IsHandle(static_cast<const void*>(data.context)) && Tripwire::IsHandle(static_cast<const void*>(data.forwarder));
-			static std::atomic_flag logged;
-			if (!guests && !logged.test_and_set())
-				logger::warn("[ORG] engine targets: CS_ORG_ENGINE_TARGET_HANDLES=1, but the engine's device and context are not tripwire guests; the fields keep DXVK's objects");
-			return guests;
+			return HandlesRequested() && GuestsInstalled();
 		}
 
 		template <class T>
@@ -819,6 +826,41 @@ namespace RenderGraph::Engine::Targets
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		// --- Handles for the fields of targets made before the guests (InstallHandles) ---
+
+		/**
+		 * @brief Puts a handle that wraps a_field's DXVK object into a_field, through Give. The handle takes the field's reference.
+		 * Null fields and handles stay as they are. True when it wrapped one.
+		 */
+		template <class T>
+		bool WrapTexture(T*& a_field, const std::string& a_name, const std::shared_ptr<org::ExternalTextureResource>& a_graph)
+		{
+			if (!a_field || Tripwire::IsHandle(static_cast<const void*>(a_field)))
+				return false;
+			winrt::com_ptr<T> object;
+			object.attach(a_field);
+			a_field = Give(std::move(object), a_name, a_graph, true);
+			return true;
+		}
+
+		/** @brief WrapTexture for a view: its handle answers GetResource with a_resource, the texture field's handle. */
+		template <class T>
+		bool WrapView(T*& a_field, ID3D11Resource* a_resource, const std::string& a_name, const std::shared_ptr<org::ExternalTextureResource>& a_graph)
+		{
+			if (!a_field || Tripwire::IsHandle(static_cast<const void*>(a_field)))
+				return false;
+			winrt::com_ptr<T> object;
+			object.attach(a_field);
+			a_field = Give(std::move(object), a_resource, a_name, a_graph, true);
+			return true;
+		}
+
+		/** @brief Whether ORG made the record's image (only those get handles, as UseHandles gives them at creation). */
+		bool Owned(const std::unique_ptr<EngineTexture>& a_texture)
+		{
+			return a_texture && a_texture->Graph();
+		}
+
 		/** @brief Calls f on every target record's graph textures. */
 		template <class F>
 		void ForEachTexture(F&& a_function)
@@ -934,6 +976,80 @@ namespace RenderGraph::Engine::Targets
 		logger::info("[ORG] engine targets: {} targets now on the render graph, {} mip views made again on them, {} kept on D3D11 after a failure", taken, mipViews, kept);
 	}
 
+	void InstallHandles()
+	{
+		if (!Enabled() || !HandlesRequested())
+			return;
+		if (!GuestsInstalled()) {
+			logger::warn("[ORG] engine targets: CS_ORG_ENGINE_TARGET_HANDLES=1, but the engine's device and context are not tripwire guests; the fields keep DXVK's objects");
+			return;
+		}
+		auto& state = Targets();
+		std::uint32_t targets = 0, objects = 0;
+		const auto count = [&](bool a_wrapped) { objects += a_wrapped ? 1u : 0u; };
+		for (std::uint32_t i = 0; i < kColourSlots; ++i) {
+			auto& record = state.colours[i];
+			if (!Owned(record.texture))
+				continue;
+			auto& data = ColourData(i);
+			const auto& name = record.texture->Name();
+			const auto& graph = record.texture->External();
+			count(WrapTexture(data.texture, name, graph));
+			count(WrapView(data.RTV, data.texture, name + " RTV", graph));
+			count(WrapView(data.SRV, data.texture, name + " SRV", graph));
+			count(WrapView(data.UAV, data.texture, name + " UAV", graph));
+			// The UAV is tracked by its field value: the engine's release leaves it, and MakeColour releases it.
+			record.uav = data.UAV;
+			if (Owned(record.copy)) {
+				count(WrapTexture(data.textureCopy, record.copy->Name(), record.copy->External()));
+				count(WrapView(data.SRVCopy, data.textureCopy, record.copy->Name() + " SRV", record.copy->External()));
+			}
+			++targets;
+		}
+		for (std::uint32_t i = 0; i < kDepthSlots; ++i) {
+			auto& record = state.depths[i];
+			if (!Owned(record.texture))
+				continue;
+			auto& data = DepthData(i);
+			const auto& name = record.texture->Name();
+			const auto& graph = record.texture->External();
+			count(WrapTexture(data.texture, name, graph));
+			for (std::size_t slice = 0; slice < std::size(data.views); ++slice) {
+				count(WrapView(data.views[slice], data.texture, fmt::format("{} DSV {}", name, slice), graph));
+				count(WrapView(data.readOnlyViews[slice], data.texture, fmt::format("{} read-only DSV {}", name, slice), graph));
+			}
+			count(WrapView(data.depthSRV, data.texture, name + " SRV", graph));
+			count(WrapView(data.stencilSRV, data.texture, name + " stencil SRV", graph));
+			++targets;
+		}
+		for (std::uint32_t i = 0; i < kCubeSlots; ++i) {
+			auto& record = state.cubes[i];
+			if (!Owned(record.texture))
+				continue;
+			auto& data = CubeData(i);
+			const auto& name = record.texture->Name();
+			const auto& graph = record.texture->External();
+			count(WrapTexture(data.texture, name, graph));
+			for (std::size_t face = 0; face < std::size(data.cubeSideRTV); ++face)
+				count(WrapView(data.cubeSideRTV[face], data.texture, fmt::format("{} RTV {}", name, face), graph));
+			count(WrapView(data.SRV, data.texture, name + " SRV", graph));
+			++targets;
+		}
+		for (std::uint32_t i = 0; i < kVolumeSlots; ++i) {
+			auto& record = state.volumes[i];
+			if (!Owned(record.texture))
+				continue;
+			auto& data = *reinterpret_cast<VolumeFields*>(&VolumeData(i));
+			const auto& name = record.texture->Name();
+			const auto& graph = record.texture->External();
+			count(WrapTexture(data.texture, name, graph));
+			count(WrapView(data.srv, data.texture, name + " SRV", graph));
+			count(WrapView(data.uav, data.texture, name + " UAV", graph));
+			++targets;
+		}
+		logger::info("[ORG] engine targets: tripwire handles installed in the fields of {} targets ({} objects wrapped, the same DXVK objects)", targets, objects);
+	}
+
 	bool Owns(std::uint32_t a_target)
 	{
 		if (!Enabled() || a_target >= kColourSlots)
@@ -1028,6 +1144,7 @@ namespace RenderGraph::Engine::Targets
 	void BeginSet() {}
 	void EndSet() {}
 	void TakeOver() {}
+	void InstallHandles() {}
 	bool Owns(std::uint32_t) { return false; }
 	bool Recreate(std::uint32_t, const D3D11_TEXTURE2D_DESC&, const char*, bool) { return false; }
 	bool Restore(std::uint32_t) { return false; }

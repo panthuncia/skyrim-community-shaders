@@ -19,7 +19,8 @@ namespace org
  * upgrades (the call-site hooks in Hooks.cpp, which rewrite those properties on their way in) are in the description that way.
  * The engine's RenderTargetData, DepthStencilData, CubemapRenderTargetData and Texture3DTargetData fields get DXVK's D3D11
  * objects of the same memory, so every D3D11 reader keeps working. With CS_ORG_ENGINE_TARGET_HANDLES=1 and the tripwire's guest
- * device and context installed, the fields hold tripwire handles that wrap those objects instead.
+ * device and context installed, the fields hold tripwire handles that wrap those objects instead. The startup set is made before
+ * the guests exist, so InstallHandles wraps it later; targets made after that get their handles at creation.
  *
  * Each target is published to every epoch's graph by id: "Engine::kMAIN", "Engine::kMAIN Copy", "Engine::Depth::kMAIN",
  * "Engine::Cubemap::kREFLECTIONS", "Engine::3D::VOLUMETRIC_LIGHTING_ACCUMULATION". FrameAnchors' engine imports and Drawcall
@@ -61,6 +62,14 @@ namespace RenderGraph::Engine::Targets
 	 * Nothing when Enabled is false or the graph is not active.
 	 */
 	void TakeOver();
+
+	/**
+	 * @brief With CS_ORG_ENGINE_TARGET_HANDLES=1, once the guest device and context are installed (the hook at the end of
+	 * Renderer::Init): puts tripwire handles into the fields of every target ORG made so far. Each handle wraps the DXVK object the
+	 * field holds and takes the field's reference; nothing is made again. Targets made later get handles at creation. Logs a
+	 * warning and changes nothing when the guests are missing.
+	 */
+	void InstallHandles();
 
 	/** @brief Whether ORG owns render target a_target (RE::RENDER_TARGET) now. */
 	bool Owns(std::uint32_t a_target);
