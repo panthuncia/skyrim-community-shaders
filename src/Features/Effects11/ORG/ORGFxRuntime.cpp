@@ -357,6 +357,8 @@ namespace
 		std::uint32_t latchBytes = 0;
 		std::array<bool, kEffects> runs{};
 		std::array<EffectValues, kEffects> effects{};  // for the effects that run
+		Res input;                                     // the tonemap input the plan reads
+		Res output;                                    // the tonemap output the plan writes
 		std::shared_ptr<Resources> resources;
 		std::vector<std::string> clears;  // the kept textures this frame clears first
 		std::uint32_t fxPasses = 0;
@@ -708,6 +710,8 @@ struct ORGFxRuntime::Impl
 	bool activeNow = false;
 	bool failed = false;  // the graph failed: FX11 for the session
 	std::uint32_t ranFrame = UINT32_MAX;
+	Res frameInput;   // this frame's tonemap input import, set when the frame is active
+	Res frameOutput;  // this frame's tonemap output import
 	std::vector<std::vector<std::uint8_t>> images = std::vector<std::vector<std::uint8_t>>(kEffects);
 
 	FxEffect& EffectOf(Fx a_fx) { return effects[static_cast<std::size_t>(a_fx)]; }
@@ -921,6 +925,8 @@ struct ORGFxRuntime::Impl
 		{
 			frame->resources = impl.resources;
 			frame->runs = inputs.runs;
+			frame->input = inputs.input;
+			frame->output = inputs.output;
 			for (std::size_t i = 0; i < kEffects; ++i) {
 				if (!inputs.runs[i])
 					continue;
@@ -1466,7 +1472,9 @@ struct ORGFxRuntime::Impl
 		// The clears run with this frame; the next frame's plan leaves them out.
 		for (const auto& name : shape.clears)
 			shape.resources->cleared.insert(name);
-		ranFrame = globals::state->frameCount;
+		// An older shape still running wrote its own output. Only a shape planned for this frame's targets replaces FX11.
+		if (shape.input == frameInput && shape.output == frameOutput)
+			ranFrame = globals::state->frameCount;
 	}
 };
 
@@ -1616,6 +1624,8 @@ void ORGFxRuntime::Impl::PrepareFrame(std::uint32_t a_input, std::uint32_t a_out
 	}
 	if (!self.lastReason.empty())
 		self.lastReason.clear();
+	self.frameInput = inputs.input;
+	self.frameOutput = inputs.output;
 	self.activeNow = true;
 }
 
