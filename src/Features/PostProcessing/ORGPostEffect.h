@@ -42,8 +42,10 @@
  * 5. Build (render thread, at a rebuild): read Builder::Current(), create the outputs with Builder::CreateImage, add the
  *    passes (Draw, Dispatch, Copy, or Add for a custom pass), reserve latch regions, then SetCurrent(output) when the
  *    effect replaces the image (WritesToMainTexture). An effect that only produces side data (bloom, exposure) leaves
- *    Current alone and Publishes its result by name; Composite Finds it. Programs come from Builder::Raster/Compute,
- *    which cache them across builds (a first build blocks on the compile). A shader's SHARED entry is Bind::Shared:
+ *    Current alone and Publishes its result by name; Composite Finds it. A mip chain is one CreateMipChain image, read
+ *    and written a mip at a time through Image::Mip (the draw's viewport is then that mip's size); a published Image keeps
+ *    its mip, so the reader's Bind::Srv sees only that mip. Programs come from Builder::Raster/Compute (RasterTargets
+ *    for a target that blends), which cache them across builds (a first build blocks on the compile). A shader's SHARED entry is Bind::Shared:
  *    the chain then uploads CS's shared constants at the anchor (FrameBuffer, SharedData: frame count, depth params).
  * 6. Commit (in the epoch, every frame): write this frame's values into the regions Build reserved. Work that runs only
  *    on some frames (a LUT regenerated on a settings change) is an indirect dispatch whose group counts are in the latch
@@ -97,14 +99,29 @@ namespace ORGPostChain
 	/** @brief The latch bytes one build may reserve for every effect together, per frame slot. */
 	inline constexpr std::uint32_t kLatchBytes = 16384;
 
-	/** @brief A texture of the chain: the graph resource and its format. */
+	/** @brief An Image or Bind that covers every mip of its texture (the texture's default view). */
+	inline constexpr std::uint32_t kAllMips = UINT32_MAX;
+
+	/** @brief A texture of the chain: the graph resource and its format, or one mip of it (Mip). */
 	struct Image
 	{
 		std::shared_ptr<org::Resource> graph;
 		DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+		std::uint32_t mip = kAllMips;  // kAllMips: the whole texture; else a pass reads or writes only this mip
 
 		explicit operator bool() const { return graph != nullptr; }
+
+		/** @brief The same texture, one mip only: a draw targets that mip, a Bind::Srv reads a view of that mip alone. */
+		Image Mip(std::uint32_t a_mip) const
+		{
+			Image image = *this;
+			image.mip = a_mip;
+			return image;
+		}
 	};
+
+	/** @brief The name CODBloom publishes its accumulated bloom under: mip 1 of its chain, which Composite upsamples. */
+	inline constexpr const char* kBloomOutput = "PostProcessing::CODBloom::Bloom";
 
 	/** @brief What a build is made for: kMAIN's size and the main targets' formats. */
 	struct Shape
@@ -142,12 +159,13 @@ namespace ORGPostChain
 
 		Kind kind = Kind::Handle;
 		std::shared_ptr<org::Resource> resource;
-		std::uint32_t value = 0;  // Handle: the descriptor index; Latch: the region's offset
+		std::uint32_t value = 0;       // Handle: the descriptor index; Latch: the region's offset
+		std::uint32_t mip = kAllMips;  // Srv and Uav: the one mip the view covers, or the default view
 
 		static Bind Srv(std::shared_ptr<org::Resource> a_resource) { return { Kind::Srv, std::move(a_resource), 0 }; }
-		static Bind Srv(const Image& a_image) { return Srv(a_image.graph); }
+		static Bind Srv(const Image& a_image) { return { Kind::Srv, a_image.graph, 0, a_image.mip }; }
 		static Bind Uav(std::shared_ptr<org::Resource> a_resource) { return { Kind::Uav, std::move(a_resource), 0 }; }
-		static Bind Uav(const Image& a_image) { return Uav(a_image.graph); }
+		static Bind Uav(const Image& a_image) { return { Kind::Uav, a_image.graph, 0, a_image.mip }; }
 		static Bind Handle(std::uint32_t a_index) { return { Kind::Handle, nullptr, a_index }; }
 		static Bind Unused() { return Handle(0); }
 		static Bind Shared() { return { Kind::Shared, nullptr, 0 }; }
@@ -164,8 +182,8 @@ namespace ORGPostChain
 		std::string name;  // the step: the pass is "cs.pp.<effect>.<name>"
 		std::shared_ptr<const RasterProgram> program;
 		std::vector<Bind> bindings;
-		Image target;
-		std::optional<RasterProgram::Viewport> viewport;  // default: the whole target (Builder::FullViewport)
+		Image target;                                     // or one mip of it (Image::Mip)
+		std::optional<RasterProgram::Viewport> viewport;  // default: the whole target or its mip (Builder::MipViewport)
 	};
 
 	/** @brief A compute pass: fixed group counts, or (indirect) three uints at a latch offset that Commit writes. */
@@ -202,8 +220,14 @@ namespace ORGPostChain
 		 */
 		Image CreateImage(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags);
 
-		/** @brief As CreateImage, at a_width x a_height instead of kMAIN's size (a reduced-resolution or FFT image). */
-		Image CreateImage(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags, UINT a_width, UINT a_height);
+		/**
+		 * @brief As CreateImage, at a_width x a_height instead of kMAIN's size (a reduced-resolution or FFT image), with a_mips
+		 * mips. A draw into one mip of an image that is not kMAIN's size gives its viewport (MipViewport assumes kMAIN's size).
+		 */
+		Image CreateImage(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags, UINT a_width, UINT a_height, UINT a_mips = 1);
+
+		/** @brief A kMAIN-sized image with a_mips mips, each read and written through Image::Mip (a bloom pyramid). */
+		Image CreateMipChain(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags, UINT a_mips);
 
 		/** @brief Registers an effect-owned resource (history, persistent) with the graph at this build. */
 		void Register(const GraphResources::Resource& a_resource);
@@ -229,18 +253,23 @@ namespace ORGPostChain
 		 */
 		std::shared_ptr<const RasterProgram> Raster(std::string_view a_source, std::uint32_t a_words, std::vector<DXGI_FORMAT> a_targets,
 			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
+		/** @brief As Raster, with each target's blending and write mask (RasterProgram::Target): an accumulating draw. */
+		std::shared_ptr<const RasterProgram> RasterTargets(std::string_view a_source, std::uint32_t a_words, std::vector<RasterProgram::Target> a_targets,
+			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
 		std::shared_ptr<const ComputeProgram> Compute(std::string_view a_source, std::uint32_t a_words,
 			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
 
 		/** @brief The whole of kMAIN, and the dynamic-resolution part the D3D11 viewports cover (Shape::dynamicWidth). */
 		RasterProgram::Viewport FullViewport() const;
 		RasterProgram::Viewport DynamicViewport() const;
+		/** @brief The whole of a_mip of a kMAIN-sized image (FullViewport for kAllMips), as a D3D11 viewport of width >> a_mip. */
+		RasterProgram::Viewport MipViewport(std::uint32_t a_mip) const;
 
 		/** @brief Adds a pass. Its push words must match the program's (logged, and the build fails, otherwise). */
 		void Draw(FullscreenDraw a_draw);
 		void Dispatch(ComputeDispatch a_dispatch);
 
-		/** @brief A copy of a whole image into another of the same size and format. */
+		/** @brief A copy of a whole image into another of the same size and format (whole images: no Image::Mip). */
 		void Copy(std::string_view a_name, const Image& a_source, const Image& a_target);
 
 		/** @brief A custom pass: make is called at each graph build of the anchor, as FrameAnchors::PassDesc::make. */
@@ -321,6 +350,7 @@ namespace ORGPostChain
 	 * max(height / 2, 1) of the chain's Shape (LensFlare::texGhostHalo's size, Composite's FlareSize).
 	 */
 	inline constexpr std::string_view kLensFlareOutput = "PostProcessing::LensFlare::GhostHalo";
+	std::unique_ptr<Effect> MakeCODBloom();
 }
 
 #endif
