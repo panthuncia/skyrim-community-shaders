@@ -993,7 +993,15 @@ Keys used so far:
   published twin's export to that id by itself (`PublishedResources::ExportedId` already finds it), declaring and indexing it
   at the main resources' check, so a producer's port needs no integration change. Until then, a colour commit logs
   `[DCLF] t<n> reads the D3D11 export of the published '<id>'` once per register and id.
-- **Found by:** P3 DCLF published resources, second pass (2026-11-09).
+- **Also:** the third pass registered t17 (Terrain Blending's 16-bit blended depth, bound by `VanillaBinding::BindSceneDepth`) and
+  t26 (Cloud Shadows' occlusion cubemap, bound for cloud self shadowing) the same way, and gave Effects' soft depth (t118, the depth
+  table's `kPOST_ZPREPASS_COPY`, which names the blended depth during the opaque pass) a graph path. Each `graph` needs to know
+  whether the view bound now is the export: t26's binding is left over from the sky's last cloud draw, so Cloud Shadows now keeps the
+  view it bound last (`CloudShadows::selfShadowView`) for the comparison. `PublishedResources::ExportedId(view) == id` is the check
+  wherever the view is reachable. This is the framework answer above done by hand per register, which also shows its limit: one
+  register maps to one id, so a register that may hold either of two published textures (t17 is the R16 depth, but the R32 one
+  where `sceneDepthFinal`'s path takes kPOST_ZPREPASS_COPY) needs a by-view mapping to cover both.
+- **Found by:** P3 DCLF published resources, second pass (2026-11-09); third pass (2026-11-10).
 
 ### One image imported under two names
 
@@ -1020,6 +1028,10 @@ Keys used so far:
 - **Where it fits:** the faces' passes would declare the published ids as the colour passes do (`DeclareFrameBuffers`); a
   read in an earlier epoch is then ordered after the previous frame's write (PublishedResources' rule). The composite needs
   the same declarations once its inputs are graph resources.
+- **Done for the faces (2026-11-10):** their passes declare the main resources' published set (`DeclareFrameGraphTextures`), and
+  their commit reads a view that is a published export (`ExportedId`) through its id. A pass declared before new main resources
+  must not read the new set: the commit skips the graph path while `ViewResources::rebuildPending` is set. The composite is still
+  open.
 - **Found by:** P3 DCLF published resources, second pass (2026-11-09).
 
 ### Knowing which build of a client an anchor's epoch runs
