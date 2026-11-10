@@ -26,6 +26,7 @@ namespace RenderGraph::Engine
 #	include "Aftermath.h"
 #	include "Features/Upscaling/DXVKInteropInterfaces.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
+#	include "RenderGraph/Engine/OwnedFrame.h"
 
 #	include <algorithm>
 #	include <vector>
@@ -293,13 +294,18 @@ namespace RenderGraph::Engine
 			return false;
 		};
 
-		state = new State();
+		// Everything the owned frame calls later is checked here, before BasicRHI's device exists: a missing export then leaves
+		// plain DXVK, instead of a headless swap chain nothing presents.
 		const auto module = static_cast<HMODULE>(a_dxvkD3D11);
+		for (const char* name : { "dxvkGetGuestInstanceRequirements", "dxvkGetGuestDeviceRequirements", "dxvkSetGuestDevice", "dxvkEmitExternalCommands",
+				 "dxvkGetInteropResourceInfo", "dxvkEnqueueQueueCallback" })
+			if (!module || !::GetProcAddress(module, name))
+				return fail(fmt::format("this DXVK build has no {} export", name));
+
+		state = new State();
 		state->getInstanceRequirements = module ? reinterpret_cast<PFN_dxvkGetGuestInstanceRequirements>(::GetProcAddress(module, "dxvkGetGuestInstanceRequirements")) : nullptr;
 		state->getDeviceRequirements = module ? reinterpret_cast<PFN_dxvkGetGuestDeviceRequirements>(::GetProcAddress(module, "dxvkGetGuestDeviceRequirements")) : nullptr;
 		state->setGuestDevice = module ? reinterpret_cast<PFN_dxvkSetGuestDevice>(::GetProcAddress(module, "dxvkSetGuestDevice")) : nullptr;
-		if (!state->getInstanceRequirements || !state->getDeviceRequirements || !state->setGuestDevice)
-			return fail("this DXVK build has no guest-device exports");
 
 		// The loader BasicRHI's volk loads answers which of DXVK's instance extensions exist.
 		if (FAILED(state->getInstanceRequirements(LoaderProc(), &state->instanceRequirements)))
@@ -389,17 +395,17 @@ namespace RenderGraph::Engine
 			return;
 		auto* d3dDevice = static_cast<ID3D11Device*>(a_d3d11Device);
 		if (!d3dDevice || FAILED(d3dDevice->QueryInterface(__uuidof(IDXGIVkInteropDevice), state->interop.put_void()))) {
-			state->setGuestDevice(nullptr);
-			disabledReason = "the game's D3D11 device was not created on BasicRHI's device";
-			logger::error("[ORG] Owned frame off: {}", disabledReason);
+			// No DXVK device on BasicRHI's: nothing runs on it, so the swap chain and the device go.
+			OwnedFrame::Get().Shutdown();
+			Abandon("the game's D3D11 device was not created on BasicRHI's device");
 			return;
 		}
 		// Until the render graph installs its own hooks (RenderGraphRuntime::Initialize), BasicRHI's queue accesses take DXVK's lock.
 		rhi::vulkan::QueueSubmissionHooks hooks{ nullptr, &GuestDevice::LockQueue, &GuestDevice::UnlockQueue, nullptr };
 		if (rhi::vulkan::ShareVulkanDevice(state->device->Get(), hooks) != rhi::Result::Ok) {
-			disabledReason = "BasicRHI could not share its device with DXVK";
-			logger::error("[ORG] Owned frame off: {}", disabledReason);
-			return;
+			// DXVK runs on BasicRHI's device with a headless swap chain: without sharing nothing could present.
+			stl::report_and_fail("Community Shaders: the owned frame (CS_ORG_OWNED_FRAME=1) failed after the game's device was made on it: "
+								 "BasicRHI could not share its Vulkan device with DXVK, so nothing could be shown. Turn CS_ORG_OWNED_FRAME off.");
 		}
 		active = true;
 		disabledReason.clear();
@@ -415,10 +421,13 @@ namespace RenderGraph::Engine
 		disabledReason = std::move(a_reason);
 		logger::error("[ORG] Owned frame off: {}; DXVK creates its own device and presents", disabledReason);
 		active = false;
-		if (state && state->setGuestDevice)
+		if (!state)
+			return;
+		if (state->setGuestDevice)
 			state->setGuestDevice(nullptr);
-		if (state)
-			state->device.reset();
+		// Nothing holds the state once the device is taken back: no hook was installed (Confirm installs them).
+		state->device.reset();
+		delete std::exchange(state, nullptr);
 	}
 
 	void* GuestDevice::DeviceProc(const char* a_name) const

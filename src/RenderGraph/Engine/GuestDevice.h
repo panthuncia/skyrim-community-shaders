@@ -33,7 +33,8 @@ namespace RenderGraph::Engine
 		static GuestDevice& Get();
 
 		/**
-		 * @brief Creates the device and hands it to DXVK, before the game's D3D11CreateDeviceAndSwapChain. Once.
+		 * @brief Creates the device and hands it to DXVK, before the game's D3D11CreateDeviceAndSwapChain. Once. Every DXVK export
+		 * the owned frame calls is checked first, so a missing one leaves plain DXVK.
 		 * @param a_dxvkD3D11 dxvk_d3d11.dll.
 		 * @return false when the owned frame is off or the device could not be made (logged): DXVK then creates its own.
 		 */
@@ -57,7 +58,10 @@ namespace RenderGraph::Engine
 		/** @brief A device-level Vulkan entry point of BasicRHI's device, from the loader (CS's own code does not use volk's globals). */
 		void* DeviceProc(const char* a_name) const;
 
-		/** @brief Before the game's device exists: takes the device back from DXVK and releases it, so DXVK creates its own. */
+		/**
+		 * @brief Before the game's device runs on BasicRHI's: takes the device back from DXVK, releases it and frees the state, so
+		 * DXVK creates its own. Failures after that point are fatal (the swap chain is headless).
+		 */
 		void Abandon(std::string a_reason);
 
 		/** @brief Why the owned frame is off (empty when Active). */
@@ -84,7 +88,7 @@ namespace RenderGraph::Engine
 		GuestDevice() = default;
 
 		struct State;
-		State* state = nullptr;  // never freed: the device outlives static destruction, as DXVK's does
+		State* state = nullptr;  // freed by Abandon; once the game's device runs on it, never: it outlives static destruction, as DXVK's does
 		bool attempted = false;
 		bool active = false;
 		std::string disabledReason = "CS_ORG_OWNED_FRAME is off";

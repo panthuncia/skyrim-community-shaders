@@ -15,6 +15,7 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/Engine/GuestDevice.h"
+#include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/Switches.h"
@@ -1912,6 +1913,8 @@ bool RenderGraphRuntime::Initialize()
 
 void RenderGraphRuntime::Shutdown()
 {
+	// The owned frame's swap chain and present objects first: they are on the same device, and DXVK's teardown follows.
+	RenderGraph::Engine::OwnedFrame::Get().Shutdown();
 	if (!impl)
 		return;
 	auto state = std::move(impl);

@@ -720,7 +720,11 @@ At the game's `D3D11CreateDeviceAndSwapChain` (CS's hook in `Upscaling.cpp`), be
     turns its whole-device waits into waits on its own timelines. `RenderGraphRuntime::Initialize` shares the device instead of
     calling `AdoptVulkanDevice`, with the same submission hooks.
 
-Any failure before the hand-over leaves the owned frame off, logged, and DXVK creates its own device.
+Any failure before the hand-over leaves the owned frame off, logged, and DXVK creates its own device: `Prepare` first checks every
+DXVK export the owned frame calls later (the guest-device exports, `dxvkEmitExternalCommands`, `dxvkGetInteropResourceInfo`,
+`dxvkEnqueueQueueCallback`), so a missing one never gets as far as BasicRHI's device. `Abandon` then releases the device and frees
+its state. A failure after the game's device was made on BasicRHI's (sharing the device, resolving the present's exports) is
+fatal, with a message that names `CS_ORG_OWNED_FRAME`: the guest's swap chain is headless, so going on would show a black screen.
 
 ### The frame tail (`OwnedFrame`)
 
@@ -738,6 +742,14 @@ DXVK's Present:
     Its frame-latency limit blocks DXVK's submission thread, which holds the next frame's command lists back from the GPU, so it
     is set to `kGameFramesInFlight` and only backs up the render thread's own pacing (`CS_FRAME_LATENCY`). At 2 Whiterun ran
     about 12% slower (50 against 57 fps, Dev-Fast).
+
+Every failure path of `OwnedFrame::Present` still calls DXVK's Present once and returns its result, so the game's frame ends;
+the frame is then not shown (logged once). A swap chain format the owned frame has no match for is logged and shown as
+R8G8B8A8_UNORM through the blit.
+
+**Teardown.** `RenderGraphRuntime::Shutdown` (DXVK's device teardown callback) calls `OwnedFrame::Shutdown` first: no new frame is
+taken, the queued tails drain, the host timeline is waited for, then the swap chain, the guest-frame semaphore and the command pool
+are destroyed, all before DXVK's device goes. Both waits are bounded; a tail that never runs leaves the objects to the process exit.
 
 The caller's thread does no Vulkan work and holds no BasicRHI lock, so the main frame, the loading screen's job thread
 (`JobListManager::ServingThread`, under `Renderer::Lock`) and Bink present the same way. A resize (the guest back buffer's size
