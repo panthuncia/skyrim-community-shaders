@@ -18,7 +18,7 @@
 
 #define PREFILTER_RADIANCE_RESOURCES(X)            \
 	X(SHARED, ConstantBuffer, Shared, 0)           \
-	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 7)   \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 1)   \
 	X(EXTERN, SamplerState, samplerPointClamp, 0)  \
 	X(EXTERN, SamplerState, samplerLinearClamp, 1) \
 	X(SRV, Texture2D<float3>, srcRadiance, 0)      \
@@ -41,12 +41,12 @@ float3 RadianceMIPFilter(float3 radiance0, float3 radiance1, float3 radiance2, f
 
 groupshared float3 g_scratchRadiance[8][8];
 [numthreads(8, 8, 1)] void main(uint2 dispatchThreadID : SV_DispatchThreadID, uint2 groupThreadID : SV_GroupThreadID) {
-	const float2 frameScale = FrameDim * RcpTexDim;
+	const float2 frameScale = SsgiFrame.FrameDim * SsgiFrame.RcpTexDim;
 
 	// MIP 0
 	const uint2 baseCoord = dispatchThreadID;
 	const uint2 pixCoord = baseCoord * 2;
-	const float2 uv = (pixCoord + .5) * RcpFrameDim;
+	const float2 uv = (pixCoord + .5) * SsgiFrame.RcpFrameDim;
 
 	float4 rad0 = srcRadiance.GatherRed(samplerPointClamp, uv * frameScale);
 	float4 rad1 = srcRadiance.GatherGreen(samplerPointClamp, uv * frameScale);

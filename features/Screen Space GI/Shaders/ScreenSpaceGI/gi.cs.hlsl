@@ -30,7 +30,7 @@
 
 #define GI_TRACE_RESOURCES(X)                         \
 	X(SHARED, ConstantBuffer, Shared, 0)              \
-	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 7)      \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 1)      \
 	X(EXTERN, SamplerState, samplerPointClamp, 0)     \
 	X(EXTERN, SamplerState, samplerLinearClamp, 1)    \
 	X(SRV, Texture2D<float>, srcWorkingDepth, 0)      \
@@ -62,7 +62,7 @@ GI_TRACE_RESOURCES(ORG_RESOURCE)
 
 float GetDepthFade(float depth)
 {
-	return saturate((depth - DepthFadeRange.x) * DepthFadeScaleConst);
+	return saturate((depth - SsgiFrame.DepthFadeRange.x) * SsgiFrame.DepthFadeScaleConst);
 }
 
 // Engine-specific screen & temporal noise loader
@@ -103,20 +103,20 @@ void CalculateGI(
 	uint2 dtid, float2 uv, float viewspaceZ, float3 viewspaceNormal,
 	out float o_ao, out sh2 o_currY, out float2 o_currCoCg, out float4 o_currGIAOSpecular)
 {
-	const float2 frameScale = FrameDim * RcpTexDim;
+	const float2 frameScale = SsgiFrame.FrameDim * SsgiFrame.RcpTexDim;
 
 	float2 normalizedScreenPos = uv;
 
-	const float rcpNumSlices = rcp((float)NumSlices);
-	const float rcpNumSteps = rcp((float)NumSteps);
+	const float rcpNumSlices = rcp((float)SsgiFrame.NumSlices);
+	const float rcpNumSteps = rcp((float)SsgiFrame.NumSteps);
 
 	// if the offset is under approx pixel size (pixelTooCloseThreshold), push it out to the minimum distance
 	const float pixelTooCloseThreshold = 1.3;
 	// approx viewspace pixel size at pixCoord; approximation of NDCToViewspace( uv.xy + ViewportSize.xy, pixCenterPos.z ).xy - pixCenterPos.xy;
-	const float2 pixelDirRBViewspaceSizeAtCenterZ = viewspaceZ.xx * NDCToViewMul.xy * RCP_OUT_FRAME_DIM;
+	const float2 pixelDirRBViewspaceSizeAtCenterZ = viewspaceZ.xx * SsgiFrame.NDCToViewMul.xy * RCP_OUT_FRAME_DIM;
 
-	float screenspaceRadius = EffectRadius / pixelDirRBViewspaceSizeAtCenterZ.x;
-	screenspaceRadius = max(MinScreenRadius, screenspaceRadius);
+	float screenspaceRadius = SsgiFrame.EffectRadius / pixelDirRBViewspaceSizeAtCenterZ.x;
+	screenspaceRadius = max(SsgiFrame.MinScreenRadius, screenspaceRadius);
 	// this is the min distance to start sampling from to avoid sampling from the center pixel (no useful data obtained from sampling center pixel)
 	const float minS = pixelTooCloseThreshold / screenspaceRadius;
 
@@ -150,7 +150,7 @@ void CalculateGI(
 	const float roughness = max(0.2, saturate(1 - FULLRES_LOAD(srcNormalRoughness, dtid, uv * frameScale, samplerLinearClamp).z));  // can't handle low roughness
 #endif
 
-	for (uint slice = 0; slice < NumSlices; slice++) {
+	for (uint slice = 0; slice < SsgiFrame.NumSlices; slice++) {
 		float phi = (Math::PI * rcpNumSlices) * (slice + noiseSlice);
 		float3 directionVec = 0;
 		sincos(phi, directionVec.y, directionVec.x);
@@ -189,7 +189,7 @@ void CalculateGI(
 
 		[unroll] for (int sideSign = -1; sideSign <= 1; sideSign += 2)
 		{
-			[loop] for (uint step = 0; step < NumSteps; step++)
+			[loop] for (uint step = 0; step < SsgiFrame.NumSteps; step++)
 			{
 				float s = (step + stepNoise) * rcpNumSteps;
 				s *= s;     // default 2 is fine
@@ -226,7 +226,7 @@ void CalculateGI(
 				float3 sampleHorizonVec = normalize(sampleDelta);
 
 				// Back-side horizon vector for the surface-thickness offset.
-				float3 sampleBackHorizonVec = normalize(sampleDelta - viewVec * Thickness);
+				float3 sampleBackHorizonVec = normalize(sampleDelta - viewVec * SsgiFrame.Thickness);
 
 				float angleFront = FastMath::ACos(dot(sampleHorizonVec, viewVec));  // either clamp or use float version for whatever reason
 				float angleBack = FastMath::ACos(dot(sampleBackHorizonVec, viewVec));
@@ -235,7 +235,7 @@ void CalculateGI(
 				// Using smoothstep for cos: https://discord.com/channels/586242553746030596/586245736413528082/1102228968247144570
 				angleRange = smoothstep(0, 1, (angleRange + n) * Math::INV_PI + .5);
 
-				uint maskedBits = s < AORadius ? HorizonBitmask(angleRange) : 0;
+				uint maskedBits = s < SsgiFrame.AORadius ? HorizonBitmask(angleRange) : 0;
 
 #ifdef GI
 				// Back-side horizon vector for GI-radius sampling depth (~300 units).
@@ -247,14 +247,14 @@ void CalculateGI(
 				float coneHalfAngles = max(5e-2, specularLobeHalfAngle(roughness));  // not too small
 				float2 angleRangeSpecular = clamp((angleRangeGI + nDom) * 0.5 / coneHalfAngles, -1, 1) * 0.5 + 0.5;
 
-				uint maskedBitsGISpecular = s < GIRadius ? HorizonBitmask(angleRangeSpecular) : 0;
+				uint maskedBitsGISpecular = s < SsgiFrame.GIRadius ? HorizonBitmask(angleRangeSpecular) : 0;
 #	endif
 
 				// The math: https://www.desmos.com/calculator/je4y5ved2j
 				// Using smoothstep for cos: https://discord.com/channels/586242553746030596/586245736413528082/1102228968247144570
 				angleRangeGI = smoothstep(0, 1, (angleRangeGI + n) * Math::INV_PI + .5);
 
-				uint maskedBitsGI = s < GIRadius ? HorizonBitmask(angleRangeGI) : 0;
+				uint maskedBitsGI = s < SsgiFrame.GIRadius ? HorizonBitmask(angleRangeGI) : 0;
 
 				uint validBits = maskedBitsGI & ~bitmaskGI;
 				bool checkGI = validBits;
@@ -265,7 +265,7 @@ void CalculateGI(
 #	endif
 
 				if (checkGI) {
-					float giBoost = 4.0 * Math::PI * (1 + GIDistanceCompensation * smoothstep(0, GICompensationMaxDist, s * EffectRadius));
+					float giBoost = 4.0 * Math::PI * (1 + SsgiFrame.GIDistanceCompensation * smoothstep(0, SsgiFrame.GICompensationMaxDist, s * SsgiFrame.EffectRadius));
 
 					// IL
 					float3 normalSample = GBuffer::DecodeNormal(srcNormal.SampleLevel(samplerPointClamp, sampleUV * OUT_FRAME_SCALE, mipLevelRadiance));
@@ -317,13 +317,13 @@ void CalculateGI(
 
 	visibility *= rcpNumSlices;
 	visibility = lerp(saturate(visibility), 0, depthFade);
-	visibility = 1 - pow(abs(1 - visibility), AOPower);
+	visibility = 1 - pow(abs(1 - visibility), SsgiFrame.AOPower);
 
 #ifdef GI
 	radianceY *= rcpNumSlices;
 	radianceY = lerp(radianceY, 0, depthFade);
 
-	radianceCoCg *= rcpNumSlices * GISaturation;
+	radianceCoCg *= rcpNumSlices * SsgiFrame.GISaturation;
 
 #	ifdef GI_SPECULAR
 	radianceSpecular *= rcpNumSlices;
@@ -341,7 +341,7 @@ void CalculateGI(
 }
 
 [numthreads(8, 8, 1)] void main(const uint2 dtid : SV_DispatchThreadID) {
-	const float2 frameScale = FrameDim * RcpTexDim;
+	const float2 frameScale = SsgiFrame.FrameDim * SsgiFrame.RcpTexDim;
 
 	uint2 pxCoord = dtid;
 
@@ -363,7 +363,7 @@ void CalculateGI(
 	float2 currCoCg = 0;
 	float4 currGIAOSpecular = float4(0, 0, 0, 0);
 
-	bool needGI = viewspaceZ > FP_Z && viewspaceZ < DepthFadeRange.y;
+	bool needGI = viewspaceZ > FP_Z && viewspaceZ < SsgiFrame.DepthFadeRange.y;
 	if (needGI) {
 		CalculateGI(
 			pxCoord, uv, viewspaceZ, viewspaceNormal,

@@ -6,7 +6,7 @@
 
 #define BLUR_RESOURCES(X)                               \
 	X(SHARED, ConstantBuffer, Shared, 0)                \
-	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 7)        \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 1)        \
 	X(EXTERN, SamplerState, samplerPointClamp, 0)       \
 	X(EXTERN, SamplerState, samplerLinearClamp, 1)      \
 	X(SRV, Texture2D<half>, srcDepth, 0)                \
@@ -97,9 +97,9 @@ float2x2 getRotationMatrix(float noise)
 	// Early exit if dispatch thread is outside frame bounds
 	if (any(dtid >= uint2(OUT_FRAME_DIM)))
 		return;
-	const float2 frameScale = FrameDim * RcpTexDim;
+	const float2 frameScale = SsgiFrame.FrameDim * SsgiFrame.RcpTexDim;
 
-	float radius = BlurRadius;
+	float radius = SsgiFrame.BlurRadius;
 #ifdef TEMPORAL_DENOISER
 	float accumFrames = srcAccumFrames[dtid];
 	radius = lerp(radius, 2, 1 / (1 + accumFrames * 255));
@@ -113,7 +113,7 @@ float2x2 getRotationMatrix(float noise)
 	float3 pos = ScreenToViewPosition(screenPos, depth);
 	float3 normal = GBuffer::DecodeNormal(FULLRES_LOAD(srcNormalRoughness, dtid, uv * frameScale, samplerLinearClamp).xy);
 
-	const float2 pixelDirRBViewspaceSizeAtCenterZ = depth.xx * NDCToViewMul.xy * RCP_OUT_FRAME_DIM;
+	const float2 pixelDirRBViewspaceSizeAtCenterZ = depth.xx * SsgiFrame.NDCToViewMul.xy * RCP_OUT_FRAME_DIM;
 	const float worldRadius = radius * pixelDirRBViewspaceSizeAtCenterZ.x;
 	float2x3 TvBv = getKernelBasis(normal, normal);  // D = N
 	float halfAngle = Math::HALF_PI;
@@ -121,7 +121,7 @@ float2x2 getRotationMatrix(float noise)
 	TvBv[0] *= worldRadius;
 	TvBv[1] *= worldRadius;
 #ifdef TEMPORAL_DENOISER
-	halfAngle *= 1 - lerp(0, 0.8, sqrt(saturate(accumFrames * 255 / (float)MaxAccumFrames)));
+	halfAngle *= 1 - lerp(0, 0.8, sqrt(saturate(accumFrames * 255 / (float)SsgiFrame.MaxAccumFrames)));
 #endif
 
 	const float4 ilY = srcIlY[dtid];
@@ -155,7 +155,7 @@ float2x2 getRotationMatrix(float noise)
 		float3 normalSample = GBuffer::DecodeNormal(normalRoughnessSample.xy);
 
 		// geometry weight
-		w *= saturate(1 - abs(dot(normal, posSample - pos)) * DistanceNormalisation);
+		w *= saturate(1 - abs(dot(normal, posSample - pos)) * SsgiFrame.DistanceNormalisation);
 		// normal weight
 		w *= 1 - saturate(FastMath::acosFast4(saturate(dot(normalSample, normal))) / halfAngle);
 

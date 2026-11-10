@@ -5,7 +5,7 @@
 
 #define UPSAMPLE_RESOURCES(X)                      \
 	X(SHARED, ConstantBuffer, Shared, 0)           \
-	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 7)   \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 1)   \
 	X(EXTERN, SamplerState, samplerPointClamp, 0)  \
 	X(EXTERN, SamplerState, samplerLinearClamp, 1) \
 	X(SRV, Texture2D<half>, srcDepth, 0)           \
@@ -31,7 +31,7 @@ UPSAMPLE_RESOURCES(ORG_RESOURCE)
 
 [numthreads(8, 8, 1)] void main(const uint2 dtid : SV_DispatchThreadID) {
 	// Early exit if dispatch thread is outside frame bounds
-	if (any(dtid >= uint2(FrameDim)))
+	if (any(dtid >= uint2(SsgiFrame.FrameDim)))
 		return;
 #ifdef HALF_RES
 	int2 px00 = (dtid >> 1) + (dtid & 1) - 1;
@@ -80,7 +80,7 @@ UPSAMPLE_RESOURCES(ORG_RESOURCE)
 	}
 	else
 	{
-		float2 uv = (dtid + .5) * RcpFrameDim * OUT_FRAME_DIM * RcpTexDim;
+		float2 uv = (dtid + .5) * SsgiFrame.RcpFrameDim * OUT_FRAME_DIM * SsgiFrame.RcpTexDim;
 		ao = srcAo.SampleLevel(samplerLinearClamp, uv, 0);
 		y = srcIlY.SampleLevel(samplerLinearClamp, uv, 0);
 		coCg = srcIlCoCg.SampleLevel(samplerLinearClamp, uv, 0);
