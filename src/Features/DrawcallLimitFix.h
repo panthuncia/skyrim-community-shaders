@@ -176,6 +176,13 @@ struct DrawcallLimitFix : Feature
 	static void TargetDumpPoint(const char* a_label, ID3D11Texture2D* a_extra = nullptr);
 	/** @brief Every render graph submission up to a_submissions completed on the GPU (GraphHost's retired callback): DCLF's retirement clock. */
 	static void OnGraphSubmissionsRetired(std::uint64_t a_submissions);
+	/**
+	 * @brief Render thread (RenderGraphRuntime::PollEpochFailures): one of DCLF's epochs failed to build or prepare. DCLF hands drawing
+	 * back to the engine for the session at its next frame start, with the error in the log and the menu. The first failure is kept.
+	 */
+	static void OnGraphEpochFailed(std::string_view a_epoch, const std::string& a_error);
+	/** @brief Why one of DCLF's epochs failed (OnGraphEpochFailed), or empty. Render thread. */
+	static const std::string& GraphEpochFailure();
 
 	/** @brief What the diagnostic capture records of the feature's state (Diagnostics/Capture). */
 	struct CaptureInfo
@@ -284,6 +291,9 @@ private:
 	// The scene pump's watchdog (BeginSceneFrame, while running): a pump that stopped turns DCLF off for the session (faulted: UpdateActive
 	// leaves it off) with the reason in the menu, rather than every frame keeping the last snapshot.
 	void WatchScenePump();
+	// The graph's watchdog (BeginSceneFrame, while running): the failures the host reported are polled, and one of DCLF's epochs that
+	// failed turns DCLF off for the session (faulted), as a stopped pump does.
+	void WatchGraphFailure();
 	bool faulted = false;
 	bool pumpLagging = false;
 	std::chrono::steady_clock::time_point pumpLagSince;

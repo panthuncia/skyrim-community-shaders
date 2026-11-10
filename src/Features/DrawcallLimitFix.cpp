@@ -328,10 +328,50 @@ bool DrawcallLimitFix::BeginSceneFrame()
 {
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::SceneFrame);
 	if (Running())
+		WatchGraphFailure();
+	if (Running())
 		WatchScenePump();
 	// Called every frame, loaded or not: the one place an unload (which stops Reset from being called) is noticed.
 	UpdateActive();
 	return DCLF::FrameDriver::Get().BeginFrame(Running(), installed);
+}
+
+namespace
+{
+	/** @brief The first failure of one of DCLF's epochs (OnGraphEpochFailed). Render thread. */
+	std::string& GraphFailure()
+	{
+		static std::string s_failure;
+		return s_failure;
+	}
+}
+
+void DrawcallLimitFix::OnGraphEpochFailed(std::string_view a_epoch, const std::string& a_error)
+{
+	auto& failure = GraphFailure();
+	if (!failure.empty())
+		return;
+	failure = fmt::format("its render graph epoch '{}' failed: {}", a_epoch, a_error);
+	logger::error("[DCLF] {}; drawing goes back to the engine at the next frame start", failure);
+}
+
+const std::string& DrawcallLimitFix::GraphEpochFailure()
+{
+	return GraphFailure();
+}
+
+void DrawcallLimitFix::WatchGraphFailure()
+{
+	// Between frames, before this frame decides what it draws: a failed epoch draws nothing, and DCLF would wait for it forever.
+	// Handing drawing back here is the menu toggle's path, which is safe at a frame start.
+	RenderGraphRuntime::Get().PollEpochFailures();
+	const auto& failure = GraphFailure();
+	if (failure.empty() || faulted)
+		return;
+	unavailableReason = failure + "; DCLF is off for the rest of the session";
+	logger::error("[DCLF] {}", unavailableReason);
+	faulted = true;
+	SetActive(false);
 }
 
 void DrawcallLimitFix::WatchScenePump()
@@ -1100,5 +1140,11 @@ void DrawcallLimitFix::OnUpdateSubresource(ID3D11Resource*, const D3D11_BOX*, co
 bool DrawcallLimitFix::TargetDumpArmed() { return false; }
 void DrawcallLimitFix::TargetDumpPoint(const char*, ID3D11Texture2D*) {}
 void DrawcallLimitFix::OnGraphSubmissionsRetired(std::uint64_t) {}
+void DrawcallLimitFix::OnGraphEpochFailed(std::string_view, const std::string&) {}
+const std::string& DrawcallLimitFix::GraphEpochFailure()
+{
+	static const std::string s_none;
+	return s_none;
+}
 
 #endif

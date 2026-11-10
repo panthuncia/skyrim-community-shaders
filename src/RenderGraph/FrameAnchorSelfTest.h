@@ -6,6 +6,10 @@
  * @brief The frame anchors' self-test (CS_ORG_ANCHOR_SELFTEST=1): every anchor gets an epoch, and at each one a raster pass writes a
  * texture, a compute pass reads it (and one texel of the engine's kMAIN) into a buffer, and a copy pass reads that back. Each anchor
  * logs once when its value came back. Render thread, from FrameAnchors.
+ *
+ * CS_ORG_ANCHOR_SELFTEST_FAIL=1 adds a second client whose UAV clear at the Present anchor fails to prepare (its texture has no
+ * CPU-side UAV). The main client then leaves Present out. Expected: the failing client alone is dropped ("dropped as expected"),
+ * and the other anchors keep running ("isolation OK").
  */
 namespace FrameAnchors::SelfTest
 {
