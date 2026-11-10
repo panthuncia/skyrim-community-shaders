@@ -292,6 +292,10 @@ namespace RenderGraph::Engine::Textures
 		record->desc.Usage = D3D11_USAGE_DEFAULT;
 		record->desc.BindFlags = a_info.bindFlags;
 		record->desc.MiscFlags = a_info.miscFlags;
+		record->components[0] = info.image.components.r;
+		record->components[1] = info.image.components.g;
+		record->components[2] = info.image.components.b;
+		record->components[3] = info.image.components.a;
 
 		winrt::com_ptr<ID3D11ShaderResourceView> view;
 		if (FAILED(globals::d3d::device->CreateShaderResourceView(texture.get(), &a_info.srv, view.put()))) {

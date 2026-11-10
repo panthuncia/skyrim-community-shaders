@@ -12,6 +12,7 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/Engine/Textures/EngineTextures.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "TextureStreaming/Census.h"
@@ -23,6 +24,7 @@
 #include <Render/BindingTable.h>
 #include <Render/Runtime/DescriptorServiceAccess.h>
 #include <Render/Runtime/IDescriptorService.h>
+#include <Resources/Resource.h>
 #include <rhi_helpers.h>
 #include <Tracy/Tracy.hpp>
 
@@ -163,6 +165,8 @@ namespace DCLF
 			// Pinless: the old storages of relocations that superseded the import, which its image reads (appended under the registry's
 			// lock).
 			std::vector<std::shared_ptr<const void>> storages;
+			// An engine texture ORG owns (CS_ORG_ENGINE_TEXTURES): its record, which holds the image the descriptor reads.
+			std::shared_ptr<const RenderGraph::Engine::Textures::Texture> engineTexture;
 			~ImportedBacking()
 			{
 				// The descriptor's last use is done (the binding released this on the cleanup queue): the wrapper first, then the
@@ -438,11 +442,44 @@ namespace DCLF
 			}
 		}
 
+		/**
+		 * @brief An engine texture ORG owns (CS_ORG_ENGINE_TEXTURES): the descriptor reads its graph texture's image directly, in the
+		 * layout DXVK rests it in. Nothing is asked of DXVK: the image is ORG's, so it never moves and needs no tracking or pin.
+		 */
+		static Reject ImportEngineTexture(Entry& a_entry, std::shared_ptr<const RenderGraph::Engine::Textures::Texture> a_texture,
+			const ImportContext& a_context, std::uint32_t a_sourceTag)
+		{
+			D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
+			a_entry.view->GetDesc(&viewDesc);
+			rhi::SrvDesc srv{};
+			if (!DescribeView(viewDesc, srv) || !a_texture->graph)
+				return Reject::View;
+			srv.componentMapping = MappingOf({ static_cast<VkComponentSwizzle>(a_texture->components[0]), static_cast<VkComponentSwizzle>(a_texture->components[1]),
+				static_cast<VkComponentSwizzle>(a_texture->components[2]), static_cast<VkComponentSwizzle>(a_texture->components[3]) });
+			const auto image = a_texture->graph->GetAPIResource();
+			auto backing = a_context.cleanup->Make<ImportedBacking>();
+			backing->view.copy_from(a_entry.view.get());
+			backing->engineTexture = std::move(a_texture);
+			a_entry.backing = backing;
+			{
+				DCLF_ZONE("CS.DCLF.Texture.Import.CreateView");
+				a_entry.binding = a_context.service->CreateOwnedShaderResourceView(a_context.deviceOwner, image, backing, srv);
+			}
+			if (!a_entry.binding)
+				return Reject::View;
+			a_entry.index = a_entry.binding.Index();
+			NoteImported(a_entry.view.get(), a_sourceTag, nullptr);
+			return Reject::None;
+		}
+
 		// The import: marks the image stable in DXVK (a synchronous chunk on its CS thread), wraps it in BasicRHI and writes
 		// its view into ORG's heap. Any thread; the entry is the caller's until Settle.
 		static Reject Import(Entry& a_entry, const ImportContext& a_context, Counters& a_counters, [[maybe_unused]] std::uint32_t a_sourceTag)
 		{
 			a_entry.sourceTag = a_sourceTag;
+			// The engine texture is ORG's (a view of it may be a tripwire handle, which DXVK must never see).
+			if (auto engine = RenderGraph::Engine::Textures::Find(a_entry.view.get()))
+				return ImportEngineTexture(a_entry, std::move(engine), a_context, a_sourceTag);
 			winrt::com_ptr<ID3D11ShaderResourceView> window;
 			if (!StreamedWindow(a_entry, window))
 				return Reject::NotImage;

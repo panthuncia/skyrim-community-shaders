@@ -56,6 +56,8 @@ namespace RenderGraph::Engine::Textures
 		/** @brief The D3D11 description of the texture (2D; a 3D texture keeps its depth in ArraySize). */
 		D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
 		D3D11_TEXTURE2D_DESC desc{};
+		/** @brief The swizzle DXVK's views of the texture apply (VkComponentSwizzle r, g, b, a), for views made beside them. */
+		std::int32_t components[4]{};
 	};
 
 	/** @brief What Create makes a texture from. */
