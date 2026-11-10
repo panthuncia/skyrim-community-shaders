@@ -524,6 +524,17 @@ namespace PostProcessingExtensions
 						}
 					}
 				}
+				// Experiment (CS_TONEMAP_LATE_DUMP=1): the bytes, for an offline look, as late-<frame>-<label>-<w>x<h>-f<format>-p<pitch>.raw.
+				static const bool dump = [] { char v[2]{}; return GetEnvironmentVariableA("CS_TONEMAP_LATE_DUMP", v, sizeof(v)) && v[0] == '1'; }();
+				if (dump) {
+					std::string name = label;
+					for (auto& c : name)
+						if (!std::isalnum(static_cast<unsigned char>(c))) c = '_';
+					const auto path = fmt::format("C:/Modding/CS-AB/late/late-{}-{}-{}x{}-f{}-p{}.raw", frame, name, desc.Width, desc.Height, static_cast<int>(format), mapped.RowPitch);
+					std::filesystem::create_directories("C:/Modding/CS-AB/late");
+					if (std::ofstream out(path, std::ios::binary); out)
+						out.write(static_cast<const char*>(mapped.pData), static_cast<std::streamsize>(mapped.RowPitch) * desc.Height);
+				}
 				globals::d3d::context->Unmap(staging.get(), 0);
 				const double n = double(desc.Width) * desc.Height;
 				logger::info("[Hooks] late read {} (format {}) of frame {} at frame {}: mean [{:.4f} {:.4f} {:.4f}]", label, static_cast<int>(format), frame, a_frame,
@@ -597,6 +608,23 @@ namespace PostProcessingExtensions
 			lateInput.Poll(frame), lateOutput.Poll(frame), lateAfter.Poll(frame);
 			if (lateFrame)
 				lateInput.Copy(a3, frame, "input before the anchor");
+			// Experiment (CS_TONEMAP_MARK=1): on the late-read frames, kLDR_DOWNSAMPLE0 (25) and kFRAMEBUFFER (0) are cleared to magenta
+			// before the anchor, so the late reads show whether the draws after it wrote them.
+			// CS_TONEMAP_MARK_TARGETS=a,b picks the targets (default 25,0); CS_TONEMAP_MARK_EVERY=1 clears on every frame.
+			static const bool mark = [] { char v[2]{}; return GetEnvironmentVariableA("CS_TONEMAP_MARK", v, sizeof(v)) && v[0] == '1'; }();
+			static const bool markEvery = [] { char v[2]{}; return GetEnvironmentVariableA("CS_TONEMAP_MARK_EVERY", v, sizeof(v)) && v[0] == '1'; }();
+			static const auto markTargets = [&] {
+				auto targets = framesOf("CS_TONEMAP_MARK_TARGETS");
+				if (targets.empty())
+					targets = { 25, 0 };
+				return targets;
+			}();
+			if (mark && (lateFrame || markEvery)) {
+				const float magenta[4]{ 1.0f, 0.0f, 1.0f, 1.0f };
+				for (const auto target : markTargets)
+					if (auto* rtv = globals::game::renderer->GetRuntimeData().renderTargets[target].RTV)
+						globals::d3d::context->ClearRenderTargetView(rtv, magenta);
+			}
 			if (std::ranges::find(copyFrames, frame) != copyFrames.end()) {
 				winrt::com_ptr<ID3D11Resource> resource;
 				globals::game::renderer->GetRuntimeData().renderTargets[a4].SRV->GetResource(resource.put());
@@ -612,7 +640,8 @@ namespace PostProcessingExtensions
 					logger::info("[Hooks] experiment: copied output {} to staging at frame {}", a4, frame);
 				}
 			}
-			if (std::ranges::find(syncFrames, frame) != syncFrames.end()) {
+			static const bool syncEvery = [] { char v[2]{}; return GetEnvironmentVariableA("CS_TONEMAP_SYNC_EVERY", v, sizeof(v)) && v[0] == '1'; }();
+			if (syncEvery || std::ranges::find(syncFrames, frame) != syncFrames.end()) {
 				D3D11_QUERY_DESC desc{ D3D11_QUERY_EVENT, 0 };
 				winrt::com_ptr<ID3D11Query> query;
 				if (SUCCEEDED(globals::d3d::device->CreateQuery(&desc, query.put()))) {
@@ -621,7 +650,8 @@ namespace PostProcessingExtensions
 					BOOL done = FALSE;
 					while (globals::d3d::context->GetData(query.get(), &done, sizeof(done), 0) != S_OK)
 						std::this_thread::yield();
-					logger::info("[Hooks] experiment: waited for the GPU at frame {}", frame);
+					if (!syncEvery)
+						logger::info("[Hooks] experiment: waited for the GPU at frame {}", frame);
 				}
 			}
 			const bool readbackFrame = inputReadback && (readbackFrames.empty() ? frame % 500 == 0 : std::ranges::find(readbackFrames, frame) != readbackFrames.end());
@@ -630,13 +660,41 @@ namespace PostProcessingExtensions
 				if (const auto means = Util::VolumeMeans(target.SRV))
 					logger::info("[Hooks] tonemap input {} (D3D11) frame {}: mean [{:.4f} {:.4f} {:.4f}]", a3, globals::state->frameCount, (*means)[0], (*means)[1], (*means)[2]);
 			}
-			FrameAnnotations::TraceImageSpace(fmt::format("tonemap hook: input {} output {}", a3, a4));
+			{
+				const auto& fb = globals::game::frameBufferCached;
+				const auto& rt = globals::game::graphicsState->GetRuntimeData();
+				FrameAnnotations::TraceImageSpace(fmt::format("tonemap hook: input {} output {}; FrameBuffer DynamicResolutionParams1 ({} {} {} {}) 2 ({} {} {} {}); engine ratio {} x {} lock {}",
+					a3, a4, fb.GetDynamicResolutionParams1().x, fb.GetDynamicResolutionParams1().y, fb.GetDynamicResolutionParams1().z, fb.GetDynamicResolutionParams1().w,
+					fb.GetDynamicResolutionParams2().x, fb.GetDynamicResolutionParams2().y, fb.GetDynamicResolutionParams2().z, fb.GetDynamicResolutionParams2().w,
+					rt.dynamicResolutionWidthRatio, rt.dynamicResolutionHeightRatio, rt.dynamicResolutionLock));
+			}
 			// The ORG FX runtime (CS_ORG_FX=1) settles its passes for this frame before the anchor runs them.
 			ORGFxRuntime::Get().Prepare(a3, a4);
 			// Before the anchor runs: Post Processing's chain may run in its epoch (ORGPostProcessing).
 			if (globals::features::postProcessing.loaded)
 				globals::features::postProcessing.BeforeTonemapAnchor(input);
 			const bool anchorRan = FrameAnchors::Run({ .anchor = FrameAnchors::Anchor::Tonemap, .input = static_cast<std::int32_t>(a3), .output = static_cast<std::int32_t>(a4) });
+
+			// Experiment (CS_TONEMAP_TOUCH_AFTER=1): a one-texel copy out of the output after the anchor on every frame, so DXVK's next use
+			// of it follows an image barrier with a layout change.
+			static const bool touchAfter = [] { char v[2]{}; return GetEnvironmentVariableA("CS_TONEMAP_TOUCH_AFTER", v, sizeof(v)) && v[0] == '1'; }();
+			if (touchAfter && anchorRan) {
+				static winrt::com_ptr<ID3D11Texture2D> texel;
+				winrt::com_ptr<ID3D11Resource> resource;
+				globals::game::renderer->GetRuntimeData().renderTargets[a4].SRV->GetResource(resource.put());
+				if (auto texture = resource.try_as<ID3D11Texture2D>()) {
+					D3D11_TEXTURE2D_DESC desc{};
+					texture->GetDesc(&desc);
+					if (!texel) {
+						desc.Width = desc.Height = 1, desc.MipLevels = desc.ArraySize = 1, desc.Usage = D3D11_USAGE_DEFAULT, desc.BindFlags = 0;
+						desc.CPUAccessFlags = 0, desc.MiscFlags = 0;
+						(void)globals::d3d::device->CreateTexture2D(&desc, nullptr, texel.put());
+					}
+					const D3D11_BOX box{ 0, 0, 0, 1, 1, 1 };
+					if (texel)
+						globals::d3d::context->CopySubresourceRegion(texel.get(), 0, 0, 0, 0, texture.get(), 0, &box);
+				}
+			}
 
 			// The same readback after the anchor's epoch (DXVK runs it before these copies), and of the output after the tonemap: where a
 			// black frame starts. Effects11's graph writes the input and the output; Post Processing's writes kMAIN and kMAIN_COPY.
@@ -825,6 +883,18 @@ struct IDXGISwapChain_Present
 		{
 			ZoneScopedN("CS.Present.FramePace");
 			RenderGraphRuntime::Get().WaitFramePace();
+		}
+		// Experiment (CS_PRESENT_SYNC=1): the CPU waits for the GPU after each Present, so no frame's CPU work overlaps the last's GPU work.
+		if (static const bool presentSync = [] { char v[2]{}; return GetEnvironmentVariableA("CS_PRESENT_SYNC", v, sizeof(v)) && v[0] == '1'; }(); presentSync) {
+			D3D11_QUERY_DESC desc{ D3D11_QUERY_EVENT, 0 };
+			winrt::com_ptr<ID3D11Query> query;
+			if (SUCCEEDED(globals::d3d::device->CreateQuery(&desc, query.put()))) {
+				globals::d3d::context->End(query.get());
+				globals::d3d::context->Flush();
+				BOOL done = FALSE;
+				while (globals::d3d::context->GetData(query.get(), &done, sizeof(done), 0) != S_OK)
+					std::this_thread::yield();
+			}
 		}
 
 		// Collect the overlay's frame metrics here rather than from its draw path, so hiding the

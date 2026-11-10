@@ -2398,6 +2398,10 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 			};
 		}
 		std::shared_ptr<org::ExternalEpochExecution> execution;
+		// Experiment: CS_ORG_STREAM_FLUSH_BEFORE=1 closes DXVK's command list before the Tonemap anchor's epoch.
+		static const bool flushBefore = EnvEquals("CS_ORG_STREAM_FLUSH_BEFORE", "1");
+		if (async && flushBefore && a_segment == Segment::AnchorTonemap)
+			globals::d3d::context->Flush();
 		if (async) {
 			impl->host->SubmitEpoch(EpochOf(a_segment), beforePrepare, a_resourceOwner);
 			impl->MarkEpoch(impl->host->LastHostFrame(), a_segment);
@@ -2418,7 +2422,69 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 		// Experiment (CS_ORG_STREAM_FLUSH_AFTER=1): DXVK closes its command list right after an in-stream epoch, so the D3D11 work
 		// after it records into a new command buffer. It tells state left in DXVK's command buffer from memory or layout faults.
 		static const bool flushAfter = EnvEquals("CS_ORG_STREAM_FLUSH_AFTER", "1");
-		if (execution && flushAfter) {
+		// Experiments: CS_ORG_STREAM_BARRIER_AFTER=1 adds an external command with only DXVK's full barrier after an in-stream epoch;
+		// CS_ORG_STREAM_REBIND_AFTER=1 one that only makes DXVK bind all its state again; CS_ORG_STREAM_AFTER_TONEMAP=1 limits the three
+		// to the Tonemap anchor's epoch.
+		static const bool barrierAfter = EnvEquals("CS_ORG_STREAM_BARRIER_AFTER", "1");
+		static const bool rebindAfter = EnvEquals("CS_ORG_STREAM_REBIND_AFTER", "1");
+		static const bool tonemapOnly = EnvEquals("CS_ORG_STREAM_AFTER_TONEMAP", "1");
+		const bool afterThis = execution && (!tonemapOnly || a_segment == Segment::AnchorTonemap);
+		if (afterThis && barrierAfter)
+			(void)EmitExternalCommands(&Impl::NoCommands, nullptr, {}, {}, false, "experiment: barrier after", true);
+		if (afterThis && rebindAfter)
+			(void)EmitExternalCommands(&Impl::NoCommands, nullptr, {}, {}, true, "experiment: rebind after", false);
+		// Experiment: CS_ORG_STREAM_IMAGE_BARRIER_AFTER=1 records an image barrier on kIMAGESPACE_TEMP_COPY (41) into DXVK's command buffer
+		// after the Tonemap anchor's epoch, without a layout change; =2 through GENERAL and back.
+		static const int imageBarrierAfter = [] { char v[4]{}; return GetEnvironmentVariableA("CS_ORG_STREAM_IMAGE_BARRIER_AFTER", v, sizeof(v)) ? std::atoi(v) : 0; }();
+		if (execution && imageBarrierAfter && a_segment == Segment::AnchorTonemap) {
+			static VkImage image = VK_NULL_HANDLE;
+			static VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+			if (auto* texture = globals::game::renderer->GetRuntimeData().renderTargets[41].texture) {
+				DxvkOrgInteropResourceInfo info{};
+				info.version = DXVK_ORG_INTEROP_VERSION;
+				if (DescribeResource(texture, info) && info.kind == DXVK_ORG_INTEROP_RESOURCE_IMAGE) {
+					if (image && image != info.image.image)
+						logger::info("[ORG] experiment: 41's VkImage changed from {} to {} at game frame {}", static_cast<const void*>(image),
+							static_cast<const void*>(info.image.image), globals::state->frameCount);
+					image = info.image.image;
+					layout = info.image.layout;
+				}
+			}
+			if (image) {
+				static const auto record = [](void*, VkCommandBuffer a_commandBuffer) {
+					const auto barrier = [&](VkImageLayout a_old, VkImageLayout a_new) {
+						VkImageMemoryBarrier2 imageBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
+						imageBarrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+						imageBarrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+						imageBarrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+						imageBarrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+						imageBarrier.oldLayout = a_old;
+						imageBarrier.newLayout = a_new;
+						imageBarrier.srcQueueFamilyIndex = imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+						imageBarrier.image = image;
+						imageBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
+						VkDependencyInfo dependency{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+						dependency.imageMemoryBarrierCount = 1;
+						dependency.pImageMemoryBarriers = &imageBarrier;
+						vkCmdPipelineBarrier2(a_commandBuffer, &dependency);
+					};
+					if (imageBarrierAfter == 2 && layout != VK_IMAGE_LAYOUT_GENERAL) {
+						barrier(layout, VK_IMAGE_LAYOUT_GENERAL);
+						barrier(VK_IMAGE_LAYOUT_GENERAL, layout);
+					} else if (imageBarrierAfter == 3) {
+						barrier(layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+						barrier(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layout);
+					} else {
+						barrier(layout, layout);
+					}
+				};
+				(void)EmitExternalCommands(+record, nullptr, {}, {}, false, "experiment: image barrier after", false);
+				static std::atomic_flag logged;
+				if (!logged.test_and_set())
+					logger::info("[ORG] experiment: image barrier on 41 after the Tonemap epoch, layout {}", static_cast<int>(layout));
+			}
+		}
+		if (afterThis && flushAfter) {
 			globals::d3d::context->Flush();
 			++impl->epochEnqueues;
 		}

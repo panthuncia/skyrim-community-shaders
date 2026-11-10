@@ -1,3 +1,4 @@
+#include "FrameAnnotations.h"
 #include "Globals.h"
 #include "GpuEventTimers.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -307,6 +308,13 @@ namespace globals
 		static HRESULT thunk(ID3D11DeviceContext* This, ID3D11Resource* pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags, D3D11_MAPPED_SUBRESOURCE* pMappedResource)
 		{
 			HRESULT hr = func(This, pResource, Subresource, MapType, MapFlags, pMappedResource);
+			// Experiment (CS_IS_TRACE_AT): buffer maps on the traced frames.
+			if (winrt::com_ptr<ID3D11Buffer> buffer; FrameAnnotations::TracingNow() && SUCCEEDED(pResource->QueryInterface(IID_PPV_ARGS(buffer.put())))) {
+				D3D11_BUFFER_DESC desc{};
+				buffer->GetDesc(&desc);
+				FrameAnnotations::TraceImageSpace(fmt::format("Map buffer {} type {} usage {} bind {:#x} size {}", static_cast<const void*>(pResource),
+					static_cast<int>(MapType), static_cast<int>(desc.Usage), desc.BindFlags, desc.ByteWidth));
+			}
 			if (hr == S_OK) {
 				if (*globals::game::perFrame.get() == pResource)
 					globals::game::mappedFrameBuffer = pMappedResource;
@@ -342,6 +350,12 @@ namespace globals
 			UINT SrcDepthPitch)
 		{
 			DrawcallLimitFix::OnUpdateSubresource(pDstResource, pDstBox, pSrcData);
+			if (winrt::com_ptr<ID3D11Buffer> buffer; FrameAnnotations::TracingNow() && SUCCEEDED(pDstResource->QueryInterface(IID_PPV_ARGS(buffer.put())))) {
+				D3D11_BUFFER_DESC desc{};
+				buffer->GetDesc(&desc);
+				FrameAnnotations::TraceImageSpace(fmt::format("UpdateSubresource buffer {} usage {} bind {:#x} size {} box {}", static_cast<const void*>(pDstResource),
+					static_cast<int>(desc.Usage), desc.BindFlags, desc.ByteWidth, pDstBox ? fmt::format("{}-{}", pDstBox->left, pDstBox->right) : "all"));
+			}
 			func(This, pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;

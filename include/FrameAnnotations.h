@@ -16,4 +16,7 @@ namespace FrameAnnotations
 
 	/** @brief Experiment (CS_IS_TRACE_AT=f1,...): logs a_event on those frames. */
 	void TraceImageSpace(const std::string& a_event);
+
+	/** @brief Experiment: whether this frame is one CS_IS_TRACE_AT names. */
+	bool TracingNow();
 }

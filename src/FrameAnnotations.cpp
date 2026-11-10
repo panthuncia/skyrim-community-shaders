@@ -1,3 +1,4 @@
+#include <DirectXPackedVector.h>
 #include "FrameAnnotations.h"
 
 #include "GpuEventTimers.h"
@@ -27,9 +28,11 @@ namespace FrameAnnotations
 	}
 
 	/** Experiment (CS_IS_TRACE_AT=f1,...): logs each ImageSpace draw and dispatch on those frames. */
-	void TraceImageSpace(const std::string& a_event)
+	namespace
 	{
-		static const std::vector<std::uint64_t> frames = [] {
+		const std::vector<std::uint64_t>& TraceFrames()
+		{
+			static const std::vector<std::uint64_t> frames = [] {
 			std::vector<std::uint64_t> result;
 			char value[256]{};
 			if (GetEnvironmentVariableA("CS_IS_TRACE_AT", value, sizeof(value)))
@@ -41,9 +44,104 @@ namespace FrameAnnotations
 				}
 			return result;
 		}();
-		const auto frame = static_cast<std::uint64_t>(globals::state->frameCount);
-		if (!frames.empty() && std::ranges::find(frames, frame) != frames.end())
-			logger::info("[IS trace] frame {}: {}", frame, a_event);
+			return frames;
+		}
+	}
+
+	namespace
+	{
+		// Experiment: a traced draw's render target 0, copied right after the draw and mapped a few frames later without waiting.
+		struct DrawSnapshot
+		{
+			winrt::com_ptr<ID3D11Texture2D> staging;
+			std::string label;
+			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+			std::uint64_t frame = 0;
+		};
+		std::vector<DrawSnapshot>& Snapshots()
+		{
+			static std::vector<DrawSnapshot> snapshots;
+			return snapshots;
+		}
+	}
+
+	void SnapshotRenderTarget(const std::string& a_label)
+	{
+		winrt::com_ptr<ID3D11RenderTargetView> rtv;
+		globals::d3d::context->OMGetRenderTargets(1, rtv.put(), nullptr);
+		if (!rtv)
+			return;
+		winrt::com_ptr<ID3D11Resource> resource;
+		rtv->GetResource(resource.put());
+		auto texture = resource.try_as<ID3D11Texture2D>();
+		if (!texture)
+			return;
+		D3D11_TEXTURE2D_DESC desc{};
+		texture->GetDesc(&desc);
+		DrawSnapshot snapshot;
+		snapshot.format = desc.Format;
+		desc.MipLevels = 1, desc.ArraySize = 1, desc.Usage = D3D11_USAGE_STAGING, desc.BindFlags = 0, desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ, desc.MiscFlags = 0;
+		desc.SampleDesc = { 1, 0 };
+		if (FAILED(globals::d3d::device->CreateTexture2D(&desc, nullptr, snapshot.staging.put())))
+			return;
+		globals::d3d::context->CopySubresourceRegion(snapshot.staging.get(), 0, 0, 0, 0, texture.get(), 0, nullptr);
+		snapshot.label = a_label;
+		snapshot.frame = globals::state->frameCount;
+		Snapshots().push_back(std::move(snapshot));
+	}
+
+	void PollSnapshots()
+	{
+		auto& snapshots = Snapshots();
+		for (auto it = snapshots.begin(); it != snapshots.end();) {
+			if (globals::state->frameCount < it->frame + 8) {
+				++it;
+				continue;
+			}
+			D3D11_MAPPED_SUBRESOURCE mapped{};
+			const HRESULT hr = globals::d3d::context->Map(it->staging.get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+			if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+				++it;
+				continue;
+			}
+			if (SUCCEEDED(hr)) {
+				D3D11_TEXTURE2D_DESC desc{};
+				it->staging->GetDesc(&desc);
+				double sums[3]{};
+				for (UINT y = 0; y < desc.Height; ++y) {
+					const auto* row = static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch;
+					for (UINT x = 0; x < desc.Width; ++x) {
+						if (it->format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+							for (int c = 0; c < 3; ++c)
+								sums[c] += DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const DirectX::PackedVector::HALF*>(row)[x * 4 + c]);
+						} else if (it->format == DXGI_FORMAT_R10G10B10A2_UNORM) {
+							const auto v = reinterpret_cast<const std::uint32_t*>(row)[x];
+							sums[0] += (v & 1023) / 1023.0, sums[1] += ((v >> 10) & 1023) / 1023.0, sums[2] += ((v >> 20) & 1023) / 1023.0;
+						} else if (it->format == DXGI_FORMAT_R8G8B8A8_UNORM || it->format == DXGI_FORMAT_B8G8R8A8_UNORM) {
+							for (int c = 0; c < 3; ++c)
+								sums[c] += row[x * 4 + c] / 255.0;
+						}
+					}
+				}
+				globals::d3d::context->Unmap(it->staging.get(), 0);
+				const double n = double(desc.Width) * desc.Height;
+				logger::info("[IS trace] snapshot of frame {} after {}: rt0 {}x{} format {} mean [{:.4f} {:.4f} {:.4f}]", it->frame, it->label, desc.Width, desc.Height,
+					static_cast<int>(it->format), sums[0] / n, sums[1] / n, sums[2] / n);
+			}
+			it = snapshots.erase(it);
+		}
+	}
+
+	bool TracingNow()
+	{
+		const auto& frames = TraceFrames();
+		return !frames.empty() && globals::state && std::ranges::find(frames, static_cast<std::uint64_t>(globals::state->frameCount)) != frames.end();
+	}
+
+	void TraceImageSpace(const std::string& a_event)
+	{
+		if (TracingNow())
+			logger::info("[IS trace] frame {}: {}", globals::state->frameCount, a_event);
 	}
 
 	template <RE::BSShader::Type ShaderType>
@@ -92,6 +190,46 @@ namespace FrameAnnotations
 			globals::state->BeginPerfEvent(eventName);
 
 			func(imageSpaceShader, shape, param);
+
+			// Experiment (CS_IS_TRACE_AT): what the draw had bound, by engine render target index where known.
+			PollSnapshots();
+			if (TracingNow())
+				SnapshotRenderTarget(eventName);
+			if (TracingNow()) {
+				const auto nameOf = [](ID3D11Resource* a_resource) -> std::string {
+					if (!a_resource)
+						return "-";
+					const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
+					for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGET::kTOTAL); ++i) {
+						if (!targets[i].SRV)
+							continue;
+						winrt::com_ptr<ID3D11Resource> resource;
+						targets[i].SRV->GetResource(resource.put());
+						if (resource.get() == a_resource)
+							return std::to_string(i);
+					}
+					return fmt::format("{}", static_cast<const void*>(a_resource));
+				};
+				std::array<ID3D11ShaderResourceView*, 8> srvs{};
+				globals::d3d::context->PSGetShaderResources(0, 8, srvs.data());
+				std::array<ID3D11RenderTargetView*, 2> rtvs{};
+				globals::d3d::context->OMGetRenderTargets(2, rtvs.data(), nullptr);
+				std::string text = "  bound: ps";
+				for (auto* srv : srvs) {
+					winrt::com_ptr<ID3D11Resource> resource;
+					if (srv)
+						srv->GetResource(resource.put()), srv->Release();
+					text += " " + nameOf(resource.get());
+				}
+				text += " | rt";
+				for (auto* rtv : rtvs) {
+					winrt::com_ptr<ID3D11Resource> resource;
+					if (rtv)
+						rtv->GetResource(resource.put()), rtv->Release();
+					text += " " + nameOf(resource.get());
+				}
+				TraceImageSpace(text);
+			}
 
 			globals::state->EndPerfEvent();
 		}
