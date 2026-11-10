@@ -41,6 +41,12 @@ public:
 	/** @brief SetupResources, with the runtime active: makes the programs, the sampler and the latch. Logged, D3D11 on failure. */
 	void Setup();
 
+	/**
+	 * @brief Upscaling::ClearShaderCache: a Setup that failed is tried again. Programs that built reload through the pipeline
+	 * registry, so nothing else is dropped.
+	 */
+	void ClearShaderCache();
+
 	/** @brief Whether the graph path runs: set up and not failed. */
 	bool Running() const;
 
@@ -95,4 +101,5 @@ private:
 	ORGUpscaling() = default;
 
 	std::shared_ptr<Impl> impl;
+	bool setupFailed = false;  // the last Setup found the runtime but could not make its programs or resources
 };
