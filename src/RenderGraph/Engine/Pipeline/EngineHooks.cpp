@@ -310,15 +310,6 @@ namespace RenderGraph::Engine::Pipeline
 				depthStencil, raster, blend, samplers, occlusion + disjoint);
 		}
 
-		struct RendererInit
-		{
-			static void thunk(void* a_renderer, void* a_osData, void* a_windowProperties, int a_flags)
-			{
-				func(a_renderer, a_osData, a_windowProperties, a_flags);
-				InstallEngineHandles();
-			}
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
 #endif
 	}
 
@@ -347,6 +338,16 @@ namespace RenderGraph::Engine::Pipeline
 #endif
 	}
 
+	void InstallEngineHandlesOnce()
+	{
+#if defined(CS_HAS_RENDER_GRAPH)
+		static bool installed = false;
+		if (!Enabled() || std::exchange(installed, true))
+			return;
+		InstallEngineHandles();
+#endif
+	}
+
 	void InstallGameHooks()
 	{
 #if defined(CS_HAS_RENDER_GRAPH)
@@ -359,7 +360,6 @@ namespace RenderGraph::Engine::Pipeline
 		stl::detour_thunk<LoadPixelShader>(REL::RelocationID(75552, 77353));
 		stl::detour_thunk<LoadComputeShader>(REL::RelocationID(75556, 77357));
 		stl::detour_thunk<EngineCreateInputLayout>(REL::RelocationID(75583, 77389));
-		stl::detour_thunk<RendererInit>(REL::RelocationID(75445, 77226));
 #endif
 	}
 }

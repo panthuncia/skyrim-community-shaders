@@ -42,6 +42,7 @@
 #include "PostProcessingMode.h"
 #include "Presets/UnifiedPresetCatalog.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Engine/Pipeline/EngineHooks.h"
 #include "RenderGraph/GpuLoadPass.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "ShaderCache.h"
@@ -393,6 +394,8 @@ void State::Setup()
 	RenderGraphRuntime::Get().Initialize();
 	// CS_ORG_ENGINE_TARGETS: the engine's targets, made on D3D11 before the graph existed, move to ORG before any feature reads them.
 	RenderGraph::Engine::Targets::TakeOver();
+	// CS_ORG_ENGINE_SHADERS: the engine's state tables and query pools exist now; wrap them once.
+	RenderGraph::Engine::Pipeline::InstallEngineHandlesOnce();
 
 	Feature::ForEachLoadedFeature("SetupResources", [](Feature* feature) { feature->SetupResources(); });
 	{

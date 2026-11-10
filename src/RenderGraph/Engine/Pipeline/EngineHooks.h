@@ -25,6 +25,13 @@ namespace RenderGraph::Engine::Pipeline
 	 */
 	void InstallDeviceHooks(ID3D11Device* a_device);
 
-	/** @brief Hooks::Install: the engine's creation functions and Renderer::Init, with CS_ORG_ENGINE_SHADERS=1 only. */
+	/** @brief Hooks::Install: the engine's shader and input layout creation functions, with CS_ORG_ENGINE_SHADERS=1 only. */
 	void InstallGameHooks();
+
+	/**
+	 * @brief With CS_ORG_ENGINE_SHADERS=1: wraps the engine's state tables and query pools in tripwire handles (when the guest
+	 * context is installed). Called once from State's setup, after Renderer::Init has made them. Not a detour on Renderer::Init: on
+	 * AE that function also holds InitD3D, which CS already patches.
+	 */
+	void InstallEngineHandlesOnce();
 }
