@@ -26,7 +26,6 @@
 #include "CSEditor/SceneManager/WeatherTransition.h"
 #include "Features/DrawcallLimitFix.h"
 #include "Features/Effects11.h"
-#include "Features/Effects11/ORG/ORGFxRuntime.h"
 #include "Features/GrassOptimizations.h"
 #include "Features/HDRDisplay.h"
 #include "Features/InteriorSun.h"
@@ -45,6 +44,7 @@
 #include "Features/VolumetricLighting.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
+#include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Utils/ImportCallSites.h"
 #include "Vram/Debug.h"
@@ -460,45 +460,13 @@ namespace PostProcessingExtensions
 			const auto input = static_cast<RE::RENDER_TARGET>(a3);
 			const auto output = static_cast<RE::RENDER_TARGET>(a4);
 
-			// Debug readback (CS_TONEMAP_INPUT_READBACK=1): the tonemap input's means through D3D11, before the anchor, every 500 frames.
-			static const bool inputReadback = [] {
-				char value[8]{};
-				return GetEnvironmentVariableA("CS_TONEMAP_INPUT_READBACK", value, sizeof(value)) && value[0] == '1';
-			}();
-			if (inputReadback && globals::state->frameCount % 500 == 0) {
-				const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[a3];
-				if (const auto means = Util::VolumeMeans(target.SRV))
-					logger::info("[Hooks] tonemap input {} (D3D11) frame {}: mean [{:.4f} {:.4f} {:.4f}]", a3, globals::state->frameCount, (*means)[0], (*means)[1], (*means)[2]);
-			}
-			// The ORG FX runtime (CS_ORG_FX=1) settles its passes for this frame before the anchor runs them.
-			ORGFxRuntime::Get().Prepare(a3, a4);
-			// Before the anchor runs: Post Processing's chain may run in its epoch (ORGPostProcessing).
-			if (globals::features::postProcessing.loaded)
-				globals::features::postProcessing.BeforeTonemapAnchor(input);
-			const bool anchorRan = FrameAnchors::Run({ .anchor = FrameAnchors::Anchor::Tonemap, .input = static_cast<std::int32_t>(a3), .output = static_cast<std::int32_t>(a4) });
-
-			// The same readback after the anchor's epoch (DXVK runs it before these copies), and of the output after the tonemap: where a
-			// black frame starts. Effects11's graph writes the input and the output; Post Processing's writes kMAIN and kMAIN_COPY.
-			const bool readbackFrame = inputReadback && globals::state->frameCount % 500 == 0;
-			const auto readAfter = [&](const char* a_when, std::uint32_t a_target, const char* a_name) {
-				const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[a_target];
-				if (const auto means = Util::VolumeMeans(target.SRV))
-					logger::info("[Hooks] tonemap {} {} {} (epoch {}) frame {}: mean [{:.4f} {:.4f} {:.4f}]", a_name, a_target, a_when, anchorRan ? "ran" : "not run",
-						globals::state->frameCount, (*means)[0], (*means)[1], (*means)[2]);
-			};
-			if (readbackFrame) {
-				readAfter("after the anchor", a3, "input");
-				readAfter("after the anchor", a4, "output");
-				readAfter("after the anchor", static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN_COPY), "kMAIN_COPY");
-			}
+			// The ORG FX runtime, Post Processing's graph chain and the Tonemap anchor's epoch.
+			RenderGraph::Engine::RunTonemapAnchor(a3, a4);
 
 			// Effects11 replaces the pass outright; when it does, the vanilla call is skipped
 			// and HandlePostProcessing fixes up the render-target state the pass would have set.
-			if (state->HandlePostProcessing(input, output)) {
-				if (readbackFrame)
-					readAfter("after Effects11", a4, "output");
+			if (state->HandlePostProcessing(input, output))
 				return;
-			}
 
 			// Post Processing runs its pipeline into kMAIN/kMAIN_COPY, then lets the vanilla
 			// pass run so ISHDR can take its POSTPROCESS passthrough branch.
@@ -507,8 +475,6 @@ namespace PostProcessingExtensions
 				postProcessing.PreProcess(input);
 
 			func(a1, a2, a3, a4, a5);
-			if (readbackFrame)
-				readAfter("after the vanilla tonemap", a4, "output");
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};

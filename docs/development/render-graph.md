@@ -464,7 +464,7 @@ of adding a `Segment` and editing the epoch order. Each anchor is one of CS's ho
 | `PostComposite` | the end of `Deferred::DeferredPasses`, after the composite (D3D11 or ORG), where Effects11's rays draw |
 | `PostProcessing` | `Upscaling::Main_PostProcessing`, before the upscaler |
 | `Upscale` | `Upscaling::PerformUpscaling`, after the upscaler's evaluate, before the ImageSpace chain |
-| `Tonemap` | `Main_HDRTonemapBlendCinematic_Render` (`Hooks.cpp`) |
+| `Tonemap` | `Main_HDRTonemapBlendCinematic_Render` (`Hooks.cpp`), through the seam `RenderGraph::Engine::RunTonemapAnchor` (the FX runtime's and Post Processing's preparation, then the run) |
 | `FrameGeneration` | `Upscaling::CopyHudlessColor`, after the ImageSpace chain, where frame generation's hudless colour is captured |
 | `Present` | `IDXGISwapChain_Present` (`Hooks.cpp`), before DCLF's `BeforePresent` |
 | `Overlay` | `OverlayRenderer::FinalizeImGuiFrame`, where CS's ImGui frame is drawn (`ImGuiRenderer::RenderDrawData`) |
