@@ -83,7 +83,6 @@ namespace GrassShared
 		ID3D11ShaderResourceView* texture = nullptr;  // owned by Grass Collision for the session
 		std::array<std::byte, 64> perFrame{};         // GrassCollision::PerFrame, zero-padded
 		uint32_t frame = 0;                           // graphicsState->frameCount at the update
-		bool onGraph = false;                         // texture is the graph twin's export, published as kCollisionGraphId
 	};
 
 	/** @brief Publishes the collision state of a stood-down frame. */
