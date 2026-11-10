@@ -100,15 +100,9 @@ struct HistogramAutoExposure : public PostProcessFeature
 	struct Readbacks
 	{
 		bool histogram = false;   // the histogram panel is open
-		bool adaptation = false;  // the panel, the Auto ISO meter or the adaptation log
+		bool adaptation = false;  // the panel or the Auto ISO meter
 	};
 	Readbacks WantedReadbacks() const;
-
-	/** @brief Whether CS_PP_EXPOSURE_LOG=1 is set and this frame logs the adapted luminance (every 250 frames, on either path). */
-	static bool AdaptationLogDue();
-
-	/** @brief Logs an adapted luminance read back on a_path ("D3D11" or "graph"), for comparing the paths. */
-	static void LogAdaptation(float a_adaptedLuminance, const char* a_path);
 
 	struct ExposureParameters
 	{

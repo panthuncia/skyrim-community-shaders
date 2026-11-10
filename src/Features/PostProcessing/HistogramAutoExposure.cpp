@@ -71,23 +71,8 @@ HistogramAutoExposure::Readbacks HistogramAutoExposure::WantedReadbacks() const
 	Readbacks wanted;
 	wanted.histogram = histogramReadbackRequested && ui && histogramReadbackRequestFrame >= frame - 1;
 	const bool exposure = ui && exposureReadbackRequestFrame >= 0 && exposureReadbackRequestFrame >= frame - 1;
-	wanted.adaptation = wanted.histogram || exposure || AdaptationLogDue();
+	wanted.adaptation = wanted.histogram || exposure;
 	return wanted;
-}
-
-bool HistogramAutoExposure::AdaptationLogDue()
-{
-	static const bool requested = [] {
-		char value[8]{};
-		return GetEnvironmentVariableA("CS_PP_EXPOSURE_LOG", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}();
-	return requested && globals::state->frameCount % 250 == 0;
-}
-
-void HistogramAutoExposure::LogAdaptation(float a_adaptedLuminance, const char* a_path)
-{
-	logger::info("[PP] Histogram Auto Exposure ({}): frame {}, adapted luminance {:.6g} ({:+.3f} EV100)", a_path, globals::state->frameCount,
-		a_adaptedLuminance, std::log2(std::max(a_adaptedLuminance, 1e-5f)) + 3.0f);
 }
 
 void HistogramAutoExposure::DrawCameraExposureReadout()
@@ -447,8 +432,6 @@ void HistogramAutoExposure::Draw(TextureInfo& inout_tex)
 			adaptationValue = *reinterpret_cast<float*>(adaptMapped.pData);
 			adaptationReadbackFrame = static_cast<int64_t>(globals::state->frameCount);
 			context->Unmap(adaptationStagingBuffer.get(), 0);
-			if (AdaptationLogDue())
-				LogAdaptation(adaptationValue, "D3D11");
 		}
 	}
 }
