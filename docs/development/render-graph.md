@@ -796,20 +796,33 @@ for now. As later phases move work out of DXVK:
 ## Tripwire handles
 
 Phase 4 of [org-full-port.md](./org-full-port.md) puts these in the engine's `ID3D11*` and `IDXGISwapChain` fields once ORG
-owns what is behind them (`src/RenderGraph/Engine/Tripwire/Tripwire.h`). Nothing installs them yet: P4.2-P4.6 do, each
-for its creation functions.
+owns what is behind them (`src/RenderGraph/Engine/Tripwire/Tripwire.h`). P4.2-P4.6 install them, each for its creation
+functions. The engine side of P4.1 (which interfaces the engine asks for, the guest device's pointers) is in
+[p4/p4.1-tripwire.md](./p4/p4.1-tripwire.md).
 
 -   **What a handle does.** IUnknown works (atomic count, Release from any thread). `QueryInterface` answers only the
     handle's interface chain. `GetDesc` returns the creation description, and debug names are kept. Every other method
     logs its caller once per call site (module+offset, with the Address Library ID for the game) and fails with E_FAIL,
     null or zeroed outputs, or zero.
 -   **Guest mode.** Made with a D3D11 object (`a_wrap`), the handle forwards every call and logs only the methods in its
-    `WatchSet`. Handle arguments are unwrapped on the way, so a wrapping device or context passes DXVK its own objects.
-    A handle given straight to DXVK crashes there: a port installs one only where its readers go through the handle.
+    `WatchSet` (`CS_ORG_TRIPWIRE_WATCH_ALL=1`: every method, except on the device, context and swap chain). Handle
+    arguments are unwrapped on the way, so a wrapping device or context passes DXVK its own objects. Each call site that
+    passes a handle is logged once (`<Interface> handle "<name>" passed on`): those are the readers not ported yet.
+    A handle given straight to DXVK crashes there.
+-   **The guest device and context.** `CS_ORG_TRIPWIRE_GUEST=1` puts a wrapping device handle and a wrapping
+    immediate-context handle in the engine's pointers (the device and context globals, `RendererData` +0x38/+0x40, which
+    Scaleform also reads), right after the engine creates its device (`GuestDevice.h`). Ports install handles in engine
+    fields only when `GuestContextInstalled()` is true. `globals::d3d::device`/`context` stay DXVK's own objects, so CS
+    code that passes an engine field to them goes through `Tripwire::Unwrap`.
+-   **ORG resource lookup.** `Tripwire::GraphResourceOf(pointer)` returns the ORG resource behind a handle, or behind a
+    plain DXVK object that `AttachGraphResource` tagged (private data). A guest handle tags its wrapped object, so the
+    lookup also works on what a forwarded getter returns.
 -   **Releases.** The last Release drops the wrapped object at once and queues the ORG resource and owner. The render
     thread hands them to `ReleaseAfterD3D11` through `Tripwire::ServiceRetired`, every frame at the frame pace point
-    (`RenderGraphRuntime::SignalFramePace`, beside `ServiceD3D11Releases`).
--   **Report.** `CS_ORG_TRIPWIRE_LOG`'s periodic report runs on a joinable thread that `Tripwire::Stop` stops and joins at the
+    (`RenderGraphRuntime::SignalFramePace`, beside `ServiceD3D11Releases`). A tagged DXVK object queues them again
+    when DXVK destroys it (after its last binding is gone), so the GPU memory outlives both.
+-   **Report.** A periodic report lists only the sites that are new or were called again since the last one (`(new)`,
+    `(+n)`), so it stays short over a long tour. The exit report lists them all. It runs on a joinable thread that `Tripwire::Stop` stops and joins at the
     game window's close, before the exit report.
 -   **Generated vtables.** `tools/generate-tripwire-interfaces.py` reads the SDK's `d3d11.h` and `dxgi.h` into
     `TripwireInterfaces.inl`: each method's signature, its forwarding arguments and its failure outputs (from the SAL
@@ -863,7 +876,9 @@ switches (`CS_ORG_<FEATURE>=1`) read through it too.
 | `CS_FG_DISPLAY_SUSPEND`, `CS_UPSCALE_UNFOCUSED`, `CS_FSRFG_QDEPTH`, `CS_SL_VERBOSE`, `CS_FORCE_FSR_FG` | Upscaling and frame generation diagnostics, read through `Switches`: display-off unloading and unfocused upscaling (dclf-validation.md), FSR frame generation's queue depth (1 to 8, default 2), Streamline's verbose log, and forcing the FSR frame generation path. |
 | `CS_VK_DRIVER_TRACE`, `CS_VK_PRIORITY`, `CS_VK_CLIENT_PRIORITY`, `CS_VK_SPILL` | The Vulkan driver trace and residency experiments (`Upscaling/VkDriverTrace.cpp`), described in [vram-spill-lab.md](./vram-spill-lab.md). |
 | `CS_ORG_TRIPWIRE_LOG=1` | Log every tripwire call site with its count ("Tripwire handles"): `[ORG] tripwire report (<reason>)`, a line per interface and one per site, every `CS_ORG_TRIPWIRE_LOG_INTERVAL` seconds (default 60, 0 = only at exit) when calls changed, and at exit. Without it each site still logs its first call (`[ORG] tripwire: <Interface>::<Method> from ...`). |
-| `CS_ORG_TRIPWIRE_SELFTEST=1` | At startup, make every handle type standalone and check refcounting, `QueryInterface`, `GetDesc`, debug names, forbidden calls (fail, zeroed outputs, counted), guest forwarding and unwrapping, Release from several threads, and caller naming. Logs `[ORG] tripwire self-test: PASS (<n> checks, 20 interfaces)` or a `FAIL` line per check. |
+| `CS_ORG_TRIPWIRE_GUEST=1` | Put wrapping tripwire handles in the engine's device and immediate-context pointers ("Tripwire handles", `GuestDevice.h`), so ported engine fields can hold handles while DXVK is the host. Logs `[ORG] tripwire guest: the engine's device and immediate context are wrapping handles ...`. P4 ports install handles only with it on. |
+| `CS_ORG_TRIPWIRE_WATCH_ALL=1` | Guest resource, view, shader, state and query handles log the first use of every method per call site, whatever their `WatchSet` says. |
+| `CS_ORG_TRIPWIRE_SELFTEST=1` | At startup, make every handle type standalone and check refcounting, `QueryInterface`, `GetDesc`, debug names, forbidden calls (fail, zeroed outputs, counted), guest forwarding and unwrapping (handle arguments recorded at their site), refusal of other D3D11 object interfaces without a trip, device and context pairing, `AttachGraphResource` lifetime, Release from several threads, and caller naming. Logs `[ORG] tripwire self-test: PASS (<n> checks, 20 interfaces)` or a `FAIL` line per check. |
 | `CS_ORG_EPOCHS=0` | One graph for every segment instead of a graph per epoch; no frame anchor can be reserved. |
 | `CS_ORG_REUSE_RECORDINGS=0` | Record every epoch again each frame instead of submitting the kept recordings again. |
 | `CS_ORG_RECORDING_TIMESTAMPS=1` | Kept recordings carry ORG's pass timestamps (they carry none by default). |
