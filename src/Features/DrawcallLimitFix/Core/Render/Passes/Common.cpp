@@ -166,23 +166,8 @@ namespace DCLF::Draws
 			if ((a_resources.graphBuffers >> b) & 1)
 				for (std::uint32_t r = 0; r < graphBuffers[b].count; ++r)
 					a_builder.ShaderResource(org::ResourceIdentifier(graphBuffers[b].resources[r].c_str()), noViews);
-		DeclareFrameGraphTextures(a_builder, a_resources);
-	}
-
-	void DeclareFrameGraphTextures(org::PassBuilder& a_builder, const Resources& a_resources)
-	{
-		// The frame textures on the graph path (Api::FrameTexture::graph): the producers' published textures, which every epoch's graph
-		// registers (RenderGraph/PublishedResources.h), so the sequencer orders this read after the producer's write in its anchor epoch.
-		// Once an id: two registers may read one texture (Integrations/CloudShadows' t25 and t26).
-		const std::span<const org::SrvView> noViews{};
-		if (!a_resources.graphTextures.any())
-			return;
-		const auto textures = Extensions::RegisteredFrameTextures();
-		const auto onGraph = [&](const auto& a_texture) { return !a_texture.graphResource.empty() && a_resources.graphTextures.test(a_texture.textureRegister); };
-		for (std::size_t i = 0; i < textures.size(); ++i)
-			if (const auto earlier = textures.first(i); onGraph(textures[i]) &&
-				std::ranges::none_of(earlier, [&](const auto& a_earlier) { return onGraph(a_earlier) && a_earlier.graphResource == textures[i].graphResource; }))
-				a_builder.ShaderResource(org::ResourceIdentifier(textures[i].graphResource.c_str()), noViews);
+		// The frame textures' published ids, so the graph orders these reads after the producers' writes.
+		Extensions::DeclareGraphTextures(a_builder, Extensions::ColourGraphTextureIds());
 	}
 
 	void RecordPreprocessedDraws(org::PassRecordContext& a_recording, PreprocessStates& a_preprocess, const rhi::PassBeginInfo& a_begin, rhi::DescriptorHeapHandle a_resourceHeap,

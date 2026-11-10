@@ -33,7 +33,7 @@ namespace DCLF
 		/**
 		 * @brief Render thread, when a colour commit's register reads a new D3D11 view: a view that is a published graph texture's export
 		 * is imported as a resource of its own, which nothing orders after the producer's graph writes. Logged once per register and id,
-		 * so a producer whose integration should read it through the graph (Api::FrameTexture::graph) shows up in the log.
+		 * so a producer whose integration should list its id (Api::FrameTexture::graphResources) shows up in the log.
 		 */
 		void NoteExportRead(std::uint32_t a_register, ID3D11ShaderResourceView* a_view)
 		{
@@ -392,18 +392,21 @@ namespace DCLF
 		const auto frameTextureAt = Extensions::FrameTextureIndices();
 		std::array<ID3D11ShaderResourceView*, Extensions::kFrameTextureSlots> frameTextureViews{};
 		for (std::size_t i = 0; i < frameTextures.size() && !depthOnly; ++i)
-			frameTextureViews[i] = static_cast<ID3D11ShaderResourceView*>(frameTextures[i].view());
+			frameTextureViews[i] = frameTextures[i].view ? static_cast<ID3D11ShaderResourceView*>(frameTextures[i].view()) : nullptr;
 		for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters && !depthOnly; ++t) {
 			auto& held = frameTextureBindings[t];
 			const auto at = frameTextureAt[t];
-			const bool registered = at != Extensions::kNoFrameTexture && (frameTextureViews[at] || !frameTextures[at].capturedWhenNull);
+			const auto* const texture = at != Extensions::kNoFrameTexture ? &frameTextures[at] : nullptr;
+			// A registration names the view, unless it has none or its null view leaves the captured one.
+			const bool named = texture && texture->view && (frameTextureViews[at] || !texture->capturedWhenNull);
 			auto* const view = t == kCharacterLightRegister ? Scene::FrameView::Get().GetFrameCapture().characterLightView :
-			                   registered                   ? frameTextureViews[at] :
+			                   named                        ? frameTextureViews[at] :
 			                                                  capture.psViews[t];
-			// On the graph path (Api::FrameTexture::graph, declared by the colour passes: Resources::graphTextures), the published texture's
-			// own descriptor: no import to hold, the graph registers it.
-			if (std::uint32_t graphIndex = 0;
-				at != Extensions::kNoFrameTexture && Extensions::FrameGraphTextureIndex(at, epochResources->graphTextures, view, graphIndex)) {
+			// The view is a published export the colour passes declared: the published texture's own descriptor. No import to hold,
+			// the graph registers it.
+			std::uint32_t graphIndex = 0;
+			if (texture &&
+				Extensions::GraphTextureIndex(Extensions::GraphTextureReader::Colour, t, texture->name, view, texture->graphResources, graphIndex)) {
 				HoldFrameTexture(held.view, held.binding, nullptr, t, 0u, a_commit.bindingOwners);
 				a_frameTextures[t] = graphIndex;
 				continue;

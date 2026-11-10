@@ -96,9 +96,6 @@ namespace DCLF::Features::Grass
 		std::uint64_t uploads = 0, shapesSent = 0, bucketsSent = 0, unboundBuckets = 0, overBuckets = 0, outgrown = 0;
 		// The last depth commit's draw row.
 		GrassInstances::DrawRow row{};
-		// Whether the main passes built last declare Grass Collision's published texture (GrassShared::kCollisionGraphId; GrassDraws.cpp's
-		// MainDeclare): the draw row names its graph descriptor only then.
-		std::atomic<bool> collisionDeclared{ false };
 	};
 
 	// The words the tables post with the revision's inputs (Api::SceneResources::postInputs): what their requirements grow by, the mirror's

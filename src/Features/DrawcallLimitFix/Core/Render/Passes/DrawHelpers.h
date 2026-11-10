@@ -68,14 +68,11 @@ namespace DCLF::Draws
 	 */
 	std::shared_ptr<org::RenderPass> MakeShadowIndexPoolPass(const std::shared_ptr<ShadowResources>& a_resources);
 
-	/** @brief A pass's frame buffers (t16 and up) and Light Limit Fix's lights (t35-t37) declared as read, through no view. */
-	void DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights = true);
-
 	/**
-	 * @brief The frame textures on the graph path (a_resources.graphTextures) declared as read, through no view: the colour passes'
-	 * (DeclareFrameBuffers) and the reflection faces' (their commit reads the same published textures: ResolveViewFrameTextures).
+	 * @brief A pass's frame buffers (t16 and up), Light Limit Fix's lights (t35-t37) and the frame textures' published ids
+	 * (Extensions::DeclareGraphTextures) declared as read, through no view.
 	 */
-	void DeclareFrameGraphTextures(org::PassBuilder& a_builder, const Resources& a_resources);
+	void DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights = true);
 
 	/**
 	 * @brief One device-generated call of a draw pass: its signature (a state class's: each call draws one class's sub-range of a range),

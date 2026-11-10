@@ -33,7 +33,6 @@
 
 #include <array>
 #include <atomic>
-#include <bitset>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -192,9 +191,6 @@ namespace DCLF::Draws
 		// The frame graph buffers registered on the graph (Api::FrameGraphBuffers, a bit per registration: Integrations/LightLimitFix's,
 		// t35-t37), read at their registers instead of the captured frame buffers.
 		std::uint32_t graphBuffers = 0;
-		// The frame textures on the graph path at the check (Api::FrameTexture::graph, a bit by register: Extensions::FrameGraphTextures):
-		// the colour passes declare their published textures, which the colour commits read while their producers stay on the graph.
-		std::bitset<kTextureRegisters> graphTextures;
 		rhi::CommandSignaturePtr dispatchSignature;
 		// The pipeline sort of phase 1's and the colour segment's sequences; null when off.
 		std::shared_ptr<DrawSort> sort;

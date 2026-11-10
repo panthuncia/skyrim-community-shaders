@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Features/Grass/GrassMirror.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
 #include "Features/DrawcallLimitFix/Core/Render/DrawFamilies/FamilySlots.h"
@@ -15,7 +16,6 @@
 #include "GrassShared/GrassCapture.h"
 #include "GrassShared/GrassFrame.h"
 
-#include "RenderGraph/PublishedResources.h"
 #include "ShaderCache.h"
 #include <Render/RenderGraph/RenderGraph.h>
 #include <rhi.h>
@@ -128,8 +128,8 @@ namespace DCLF::Features::Grass
 		}
 
 		// The main passes: the draws buffer (its arrays and their counts), the draw row's address (in its push data), the tables its
-		// vertex and pixel stages read by address, and Grass Collision's texture while it is published (its ORG path: the vertex stages
-		// read it by the graph's descriptor, ordered after the update at the EarlyPrepass anchor).
+		// vertex and pixel stages read by address, and Grass Collision's texture once it was ever published (its ORG path: the vertex
+		// stages read it by the graph's descriptor, ordered after the update at the EarlyPrepass anchor).
 		void MainDeclare(Api::DrawFamilyDeclare& a_declare)
 		{
 			auto* tables = TablesOf(a_declare.scene);
@@ -142,11 +142,8 @@ namespace DCLF::Features::Grass
 			for (const auto& table : { tables->instances, tables->owners, tables->frame, tables->visible, tables->shapes, tables->buckets, tables->meshes })
 				builder.ShaderResource(*table, noViews);
 			builder.ShaderResource(tables->draw, noViews);
-			// Withdrawn later, it stays registered with every graph, so the declaration holds until the next build.
-			const bool collision = PublishedResources::IsPublished(GrassShared::kCollisionGraphId);
-			if (collision)
-				builder.ShaderResource(org::ResourceIdentifier(GrassShared::kCollisionGraphId), noViews);
-			tables->collisionDeclared.store(collision, std::memory_order_release);
+			static constexpr std::string_view kCollisionIds[] = { GrassShared::kCollisionGraphId };
+			Extensions::DeclareGraphTextures(builder, kCollisionIds);
 		}
 
 		// The CPU pipeline's main draw (main.direct): MainDeclare's draws buffer (a plain buffer, fixed with the tables) and

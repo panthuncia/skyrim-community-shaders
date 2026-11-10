@@ -1,12 +1,12 @@
 // Dynamic Cubemaps: its reflections and environment cubemaps (t30, t31), frame textures. The render thread's callback reads the feature live.
-// On the feature's render-graph path (CS_ORG_DYNAMIC_CUBEMAPS) both registers read its published BC6H cubemaps through the graph; the
-// views with frame constants of their own (the reflection's faces) keep reading their D3D11 exports.
+// On the feature's render-graph path (CS_ORG_DYNAMIC_CUBEMAPS) the views are its BC6H cubemaps' exports, so the colour commits and the
+// reflection's faces read the published cubemaps through the graph.
 
 #include "Features/DrawcallLimitFix/Integrations/DynamicCubemaps/DynamicCubemaps.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
 
 #include "Features/DynamicCubemaps.h"
-#include "RenderGraph/PublishedResources.h"
+#include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
 
 namespace DCLF::Integrations::DynamicCubemaps
 {
@@ -28,37 +28,14 @@ namespace DCLF::Integrations::DynamicCubemaps
 			return dynamicCubemaps.loaded ? dynamicCubemaps.boundReflectionsView : nullptr;
 		}
 
-		// The ids ORGDynamicCubemaps publishes its BC6H cubemaps under (the D3D11 path's texture names).
-		constexpr const char* kEnvironmentId = "DynamicCubemaps::EnvTextureBC6H";
-		constexpr const char* kReflectionsId = "DynamicCubemaps::EnvReflectionsBC6H";
-
-		// t31 on the graph path: the published environment cubemap. False on the D3D11 path: EnvironmentView.
-		bool EnvironmentGraphIndex(std::uint32_t& a_index)
-		{
-			return globals::features::dynamicCubemaps.loaded && PublishedResources::ShaderResourceIndex(kEnvironmentId, a_index);
-		}
-
-		// t30 on the graph path: the published cubemap of the two that PostDeferred last bound (t31 declares the environment one, this
-		// register the reflections one). False without one bound, or on the D3D11 path: ReflectionsView.
-		bool ReflectionsGraphIndex(std::uint32_t& a_index)
-		{
-			const auto& dynamicCubemaps = globals::features::dynamicCubemaps;
-			auto* bound = dynamicCubemaps.loaded ? dynamicCubemaps.boundReflectionsView : nullptr;
-			if (!bound)
-				return false;
-			if (dynamicCubemaps.envReflectionsTextureBC6H && bound == dynamicCubemaps.envReflectionsTextureBC6H->srv.get())
-				return PublishedResources::ShaderResourceIndex(kReflectionsId, a_index);
-			if (dynamicCubemaps.envTextureBC6H && bound == dynamicCubemaps.envTextureBC6H->srv.get())
-				return PublishedResources::ShaderResourceIndex(kEnvironmentId, a_index);
-			return false;
-		}
-
 		void Install(Api::InstallContext& a_context)
 		{
+			// t30 holds either cubemap: the reflections one while water reflections were active, else the environment one.
 			a_context.RegisterFrameTexture({ .name = "dynamic cubemaps reflections", .textureRegister = kReflectionsRegister,
-				.view = &ReflectionsView, .capturedWhenNull = true, .graphResource = kReflectionsId, .graph = &ReflectionsGraphIndex });
+				.view = &ReflectionsView, .capturedWhenNull = true,
+				.graphResources = { ORGDynamicCubemaps::kEnvReflectionsBC6HId, ORGDynamicCubemaps::kEnvBC6HId } });
 			a_context.RegisterFrameTexture({ .name = "dynamic cubemaps environment", .textureRegister = kEnvironmentRegister,
-				.view = &EnvironmentView, .capturedWhenNull = true, .graphResource = kEnvironmentId, .graph = &EnvironmentGraphIndex });
+				.view = &EnvironmentView, .capturedWhenNull = true, .graphResources = { ORGDynamicCubemaps::kEnvBC6HId } });
 		}
 	}
 

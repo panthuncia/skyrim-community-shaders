@@ -3,7 +3,6 @@
 #include "Features/DrawcallLimitFix/Integrations/Skylighting/Skylighting.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
 
-#include "RenderGraph/PublishedResources.h"
 #include "State.h"
 
 #include "Features/Skylighting.h"
@@ -35,24 +34,14 @@ namespace DCLF::Integrations::Skylighting
 			return Binds() ? globals::features::skylighting.ShadowVisibilitySRV() : nullptr;
 		}
 
-		// While the probe update runs on the graph the views are its exports: the colour passes read the published volumes instead,
-		// ordered after the update at the Prepass anchor.
-		constexpr std::string_view kProbeArrayId = "Skylighting::ProbeArray";
-		constexpr std::string_view kShadowVisibilityId = "Skylighting::ShadowVisibility";
-
-		template <const std::string_view* Id>
-		bool VolumeGraphIndex(std::uint32_t& a_index)
-		{
-			return Binds() && ORGSkylighting::Get().IsActive() && PublishedResources::ShaderResourceIndex(*Id, a_index);
-		}
-
+		// While the probe update runs on the graph the views are its exports, so the commits read the published volumes, ordered after
+		// the update at the Prepass anchor.
 		void Install(Api::InstallContext& a_context)
 		{
 			a_context.RegisterFrameTexture({ .name = "skylighting probes", .textureRegister = kProbeArrayRegister, .view = &ProbeArrayView,
-				.capturedWhenNull = true, .graphResource = kProbeArrayId, .graph = &VolumeGraphIndex<&kProbeArrayId> });
+				.capturedWhenNull = true, .graphResources = { ORGSkylighting::kProbeArrayId } });
 			a_context.RegisterFrameTexture({ .name = "skylighting shadow visibility", .textureRegister = kShadowVisibilityRegister,
-				.view = &ShadowVisibilityView, .capturedWhenNull = true, .graphResource = kShadowVisibilityId,
-				.graph = &VolumeGraphIndex<&kShadowVisibilityId> });
+				.view = &ShadowVisibilityView, .capturedWhenNull = true, .graphResources = { ORGSkylighting::kShadowVisibilityId } });
 		}
 	}
 
