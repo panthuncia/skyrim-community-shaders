@@ -2729,22 +2729,33 @@ bool RenderGraphRuntime::CanWrapTextures() const
 	return IsActive() && impl->createTextureFromVkImage;
 }
 
+namespace
+{
+	/** @brief An event query ended at this point of D3D11's stream; null, logged once, when D3D11 cannot make one. */
+	winrt::com_ptr<ID3D11Query> IssueReleaseQuery()
+	{
+		D3D11_QUERY_DESC desc{ D3D11_QUERY_EVENT, 0 };
+		winrt::com_ptr<ID3D11Query> query;
+		if (FAILED(globals::d3d::device->CreateQuery(&desc, query.put()))) {
+			static std::atomic_flag logged;
+			if (!logged.test_and_set())
+				logger::warn("[ORG] a release query could not be made; the release waits for a later frame's");
+			return nullptr;
+		}
+		globals::d3d::context->End(query.get());
+		return query;
+	}
+}
+
 void RenderGraphRuntime::ReleaseAfterD3D11(std::shared_ptr<const void> a_owner)
 {
 	if (!a_owner)
 		return;
 	if (!impl)
 		return;  // shut down: DXVK's device is gone or going, and nothing of the graph's runs any more
-	D3D11_QUERY_DESC desc{ D3D11_QUERY_EVENT, 0 };
-	winrt::com_ptr<ID3D11Query> query;
-	if (FAILED(globals::d3d::device->CreateQuery(&desc, query.put()))) {
-		// No query: wait for the GPU here rather than free memory D3D11 may still read.
-		if (impl->device && *impl->device)
-			(void)impl->device->Get().WaitIdle();
-		return;
-	}
-	globals::d3d::context->End(query.get());
-	impl->d3d11Releases.push_back({ std::move(query), std::move(a_owner) });
+	// Parked without a query when D3D11 cannot make one now: ServiceD3D11Releases issues it at a later frame, which is later in
+	// the stream than the release, so the owner still outlives every D3D11 command issued until then. Nothing waits.
+	impl->d3d11Releases.push_back({ IssueReleaseQuery(), std::move(a_owner) });
 	ServiceD3D11Releases();
 }
 
@@ -2753,8 +2764,17 @@ void RenderGraphRuntime::ServiceD3D11Releases()
 	if (!impl)
 		return;
 	auto& releases = impl->d3d11Releases;
-	// In stream order: once one is pending, every later one is too.
-	while (!releases.empty() && globals::d3d::context->GetData(releases.front().query.get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK)
+	// Owners parked without a query get one now, in order: each covers its release and everything issued since.
+	for (auto& release : releases) {
+		if (release.query)
+			continue;
+		release.query = IssueReleaseQuery();
+		if (!release.query)
+			break;
+	}
+	// In stream order: once one is pending (or still parked), every later one is too.
+	while (!releases.empty() && releases.front().query &&
+		   globals::d3d::context->GetData(releases.front().query.get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK)
 		releases.pop_front();
 }
 

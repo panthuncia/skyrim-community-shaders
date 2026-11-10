@@ -77,7 +77,7 @@ One entry per need. Give:
     - a texture rests in DXVK's layout for it between epochs, and its views use its own typed format;
     - a resize rebuilds the client's anchors (`FrameAnchors::Refresh`).
 
-  The DXVK exports underneath are `dxvkCreateBufferFromVkBuffer` and `dxvkCreateTextureFromVkImage` (interop version 6). A plugin
+  The DXVK exports underneath are `dxvkCreateBufferFromVkBuffer` and `dxvkCreateTextureFromVkImage` (interop version 7). A plugin
   that calls them itself must create images with every usage the D3D11 bind flags imply. In the DXVK-free build there is no
   D3D11 side, so the export becomes a tripwire handle (P4.1).
 - **Found by:** P2.1 (2026-11-09).

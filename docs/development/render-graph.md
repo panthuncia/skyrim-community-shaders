@@ -306,14 +306,15 @@ stream order, on its own command buffer, outside any render pass. DCLF's CPU-dri
     (`Util::SetResourceName`), the texture or buffer `Feature::Name (D3D11)`.
     -   A buffer goes through `RenderGraphRuntime::WrapBuffer`.
     -   A texture is a BasicRHI image wrapped by `RenderGraphRuntime::WrapTexture` (`dxvkCreateTextureFromVkImage`, interop
-        version 6). The graph sees it as a host-owned texture whose home state is the layout DXVK rests it in, so every epoch gives
+        version 7). The graph sees it as a host-owned texture whose home state is the layout DXVK rests it in, so every epoch gives
         it back in that layout, as for DXVK's own images (DxvkImageImport). DXVK zeroes it in its stream when it is wrapped.
     -   The image has no mutable format, so D3D11 views use the texture's own typed format. 3D textures take no RTV.
 -   **Rule: exported means not aliasable**, whatever the lifetime. D3D11's use is outside the graph, which would otherwise reuse
     the memory across it. A resource becomes aliasable when its last D3D11 reader is ported and the export goes.
 -   **Teardown and resize.** `Reset`, the destructor and `Resize` release the D3D11 views and resource first. Then
     `RenderGraphRuntime::ReleaseAfterD3D11` holds the graph resource until an event query issued after that release completes
-    (checked every frame). DXVK keeps its own objects alive for in-flight work, but not the image's memory, which the graph owns.
+    (checked every frame). When D3D11 cannot make the query then, the owner is parked and a later frame issues it: nothing waits,
+    and the query still follows the release in the stream. DXVK keeps its own objects alive for in-flight work, but not the image's memory, which the graph owns.
     A `Resize` bumps the twins' resize generation (`Resource::ResizeGeneration`). At their next run the anchors see it, build
     their graphs again with the new resource, and `PublishedResources::Refresh` publishes it again under the twin's id: the owner
     calls nothing. A pass reads `Graph()` when it is made, never across builds.
