@@ -7,6 +7,8 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/RemoteControl/GpuCounters.h"
 #include "RenderGraph/DxvkImageImport.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Switches.h"
 
 namespace DCLF::Draws
 {
@@ -19,6 +21,12 @@ namespace DCLF::Draws
 	std::shared_ptr<org::ExternalTextureResource> ImportImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
 		const char* a_name)
 	{
+		// An engine target ORG owns (CS_ORG_ENGINE_TARGETS): its published texture, the one the anchors' passes use, so the graph
+		// orders DCLF's uses with theirs. CS_ORG_ENGINE_TARGETS_DCLF=0 keeps DCLF's own import of the image.
+		static const bool shareOwned = !Switches::Off("CS_ORG_ENGINE_TARGETS_DCLF");
+		if (shareOwned)
+			if (auto owned = RenderGraph::Engine::Targets::FindImage(reinterpret_cast<std::uint64_t>(a_image.image)))
+				return owned;
 		a_desc.imageDimensions.clear();
 		a_desc.imageDimensions.push_back({ a_image.extent.width, a_image.extent.height, 0, 0 });
 		// ORG builds a DSV per slice for arrays, so a shadow view attaches its own slice.

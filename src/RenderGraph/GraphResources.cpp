@@ -102,71 +102,25 @@ namespace GraphResources
 			return texture;
 		}
 
-		/**
-		 * @brief An exported texture: a BasicRHI image the graph sees as a host-owned texture whose home is the layout DXVK rests it in
-		 * (DxvkImageImport's rule), wrapped for D3D11 by the DXVK fork (dxvkCreateTextureFromVkImage).
-		 */
+		/** @brief An exported twin texture: every view in the texture's own format, the SRV always (Describe's rule). */
 		Created CreateExportedTexture(const Shape& a_shape, const std::string& a_name)
 		{
-			auto& runtime = RenderGraphRuntime::Get();
-			if (!runtime.CanWrapTextures()) {
-				logger::warn("[ORG] {}: not exported, the DXVK build cannot wrap images (dxvkCreateTextureFromVkImage)", a_name);
-				return {};
-			}
-			const UINT mips = MipCount(a_shape);
-			rhi::ResourceDesc desc{};
-			desc.type = Is3D(a_shape) ? rhi::ResourceType::Texture3D : rhi::ResourceType::Texture2D;
-			desc.heapType = rhi::HeapType::DeviceLocal;
-			std::uint32_t flags = rhi::RF_None;
-			if (a_shape.bindFlags & D3D11_BIND_RENDER_TARGET)
-				flags |= rhi::RF_AllowRenderTarget;
-			if (a_shape.bindFlags & D3D11_BIND_DEPTH_STENCIL)
-				flags |= rhi::RF_AllowDepthStencil;
-			if (a_shape.bindFlags & D3D11_BIND_UNORDERED_ACCESS)
-				flags |= rhi::RF_AllowUnorderedAccess;
-			if (a_shape.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE)
-				flags |= rhi::RF_TextureCubeCompatible;
-			desc.resourceFlags = static_cast<rhi::ResourceFlags>(flags);
-			desc.debugName = a_name.c_str();
-			desc.texture.format = rhi::helpers::ToRHI(a_shape.format);
-			desc.texture.width = a_shape.width;
-			desc.texture.height = a_shape.height;
-			desc.texture.depthOrLayers = static_cast<std::uint16_t>((std::max)(a_shape.depthOrArraySize, 1u));
-			desc.texture.mipLevels = static_cast<std::uint16_t>(mips);
-			desc.texture.sampleCount = (std::max)(a_shape.samples, 1u);
-			rhi::ResourcePtr image;
-			if (runtime.Host()->Device().CreateCommittedResource(desc, image) != rhi::Result::Ok || !image) {
-				logger::error("[ORG] {}: the image could not be created", a_name);
-				return {};
-			}
-			DxvkOrgInteropTextureWrap wrap{};
-			wrap.dimension = static_cast<std::uint32_t>(a_shape.dimension);
-			wrap.width = a_shape.width;
-			wrap.height = a_shape.height;
-			wrap.depthOrArraySize = (std::max)(a_shape.depthOrArraySize, 1u);
-			wrap.mipLevels = mips;
-			wrap.format = static_cast<std::uint32_t>(a_shape.format);
-			wrap.sampleCount = (std::max)(a_shape.samples, 1u);
-			wrap.bindFlags = a_shape.bindFlags;
-			wrap.miscFlags = a_shape.miscFlags;
-			DxvkOrgInteropResourceInfo info{};
-			Created created;
-			created.d3d11 = runtime.WrapTexture(image.Get(), wrap, info, a_name.c_str());
-			const auto home = created.d3d11 ? RenderGraph::HomeLayoutOf(info.image.layout) : std::nullopt;
-			if (!home) {
-				if (created.d3d11)
-					logger::error("[ORG] {}: DXVK rests it in layout {}, which the graph has no equivalent of", a_name, static_cast<int>(info.image.layout));
-				// DXVK's stream may still initialize the image: it goes once D3D11 is past this point.
-				created.d3d11 = nullptr;
-				runtime.ReleaseAfterD3D11(std::make_shared<rhi::ResourcePtr>(std::move(image)));
-				return {};
-			}
-			auto graphDesc = Describe(a_shape, true);
-			graphDesc.initialLayout = *home;
-			auto texture = org::ExternalTextureResource::CreateShared(std::move(image), graphDesc, *home == rhi::ResourceLayout::Common);
-			texture->SetName(a_name);
-			created.graph = std::move(texture);
-			return created;
+			ExportDesc desc{};
+			desc.dimension = a_shape.dimension;
+			desc.width = a_shape.width;
+			desc.height = a_shape.height;
+			desc.depthOrArraySize = a_shape.depthOrArraySize;
+			desc.mips = a_shape.mips;
+			desc.samples = a_shape.samples;
+			desc.format = a_shape.format;
+			desc.bindFlags = a_shape.bindFlags;
+			desc.miscFlags = a_shape.miscFlags;
+			desc.srv = a_shape.format;
+			desc.rtv = (a_shape.bindFlags & D3D11_BIND_RENDER_TARGET) ? a_shape.format : DXGI_FORMAT_UNKNOWN;
+			desc.uav = (a_shape.bindFlags & D3D11_BIND_UNORDERED_ACCESS) ? a_shape.format : DXGI_FORMAT_UNKNOWN;
+			desc.dsv = (a_shape.bindFlags & D3D11_BIND_DEPTH_STENCIL) ? a_shape.format : DXGI_FORMAT_UNKNOWN;
+			auto exported = ExportTexture(desc, a_name);
+			return { std::move(exported.graph), std::move(exported.d3d11) };
 		}
 
 		Created CreateTexture(const Shape& a_shape, const std::string& a_name, const Options& a_options)
@@ -225,6 +179,97 @@ namespace GraphResources
 				return false;
 			}
 			return true;
+		}
+	}
+
+	ExportedTexture ExportTexture(const ExportDesc& a_desc, const std::string& a_name)
+	{
+		auto& runtime = RenderGraphRuntime::Get();
+		if (!runtime.CanWrapTextures()) {
+			logger::warn("[ORG] {}: not exported, the DXVK build cannot wrap images (dxvkCreateTextureFromVkImage)", a_name);
+			return {};
+		}
+		const bool is3D = a_desc.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D;
+		const bool cube = (a_desc.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
+		const UINT layers = (std::max)(a_desc.depthOrArraySize, 1u);
+		const Shape shape{ a_desc.dimension, a_desc.width, a_desc.height, layers, a_desc.mips, a_desc.format, a_desc.samples, a_desc.bindFlags,
+			a_desc.miscFlags, D3D11_USAGE_DEFAULT, 0 };
+		const UINT mips = MipCount(shape);
+		// A depth image is made in its DSV's format: a typeless texture format names no image format of its own.
+		const auto imageFormat = rhi::helpers::ToRHI(a_desc.dsv != DXGI_FORMAT_UNKNOWN ? a_desc.dsv : a_desc.format);
+		if (imageFormat == rhi::Format::Unknown) {
+			logger::error("[ORG] {}: not exported, format {} has no image format", a_name, static_cast<int>(a_desc.format));
+			return {};
+		}
+		try {
+			rhi::ResourceDesc desc{};
+			desc.type = is3D ? rhi::ResourceType::Texture3D : rhi::ResourceType::Texture2D;
+			desc.heapType = rhi::HeapType::DeviceLocal;
+			std::uint32_t flags = rhi::RF_None;
+			if (a_desc.bindFlags & D3D11_BIND_RENDER_TARGET)
+				flags |= rhi::RF_AllowRenderTarget;
+			if (a_desc.bindFlags & D3D11_BIND_DEPTH_STENCIL)
+				flags |= rhi::RF_AllowDepthStencil;
+			if (a_desc.bindFlags & D3D11_BIND_UNORDERED_ACCESS)
+				flags |= rhi::RF_AllowUnorderedAccess;
+			if (cube)
+				flags |= rhi::RF_TextureCubeCompatible;
+			desc.resourceFlags = static_cast<rhi::ResourceFlags>(flags);
+			desc.debugName = a_name.c_str();
+			desc.texture.format = imageFormat;
+			desc.texture.width = a_desc.width;
+			desc.texture.height = a_desc.height;
+			desc.texture.depthOrLayers = static_cast<std::uint16_t>(layers);
+			desc.texture.mipLevels = static_cast<std::uint16_t>(mips);
+			desc.texture.sampleCount = (std::max)(a_desc.samples, 1u);
+			rhi::ResourcePtr image;
+			if (runtime.Host()->Device().CreateCommittedResource(desc, image) != rhi::Result::Ok || !image) {
+				logger::error("[ORG] {}: the image could not be created", a_name);
+				return {};
+			}
+			DxvkOrgInteropTextureWrap wrap{};
+			wrap.dimension = static_cast<std::uint32_t>(a_desc.dimension);
+			wrap.width = a_desc.width;
+			wrap.height = a_desc.height;
+			wrap.depthOrArraySize = layers;
+			wrap.mipLevels = mips;
+			wrap.format = static_cast<std::uint32_t>(a_desc.format);
+			wrap.sampleCount = (std::max)(a_desc.samples, 1u);
+			wrap.bindFlags = a_desc.bindFlags;
+			wrap.miscFlags = a_desc.miscFlags;
+			DxvkOrgInteropResourceInfo info{};
+			ExportedTexture exported;
+			exported.d3d11 = runtime.WrapTexture(image.Get(), wrap, info, a_name.c_str());
+			const auto home = exported.d3d11 ? RenderGraph::HomeLayoutOf(info.image.layout) : std::nullopt;
+			if (!home) {
+				if (exported.d3d11)
+					logger::error("[ORG] {}: DXVK rests it in layout {}, which the graph has no equivalent of", a_name, static_cast<int>(info.image.layout));
+				// DXVK's stream may still initialize the image: it goes once D3D11 is past this point.
+				exported.d3d11 = nullptr;
+				runtime.ReleaseAfterD3D11(std::make_shared<rhi::ResourcePtr>(std::move(image)));
+				return {};
+			}
+			// The graph's description: the twins' (Describe) with each view in the format the owner asked for.
+			auto graphDesc = Describe(shape, true);
+			graphDesc.format = imageFormat;
+			graphDesc.hasSRV = a_desc.srv != DXGI_FORMAT_UNKNOWN;
+			graphDesc.srvFormat = rhi::helpers::ToRHI(a_desc.srv);
+			graphDesc.hasUAV = a_desc.uav != DXGI_FORMAT_UNKNOWN;
+			graphDesc.uavFormat = rhi::helpers::ToRHI(a_desc.uav);
+			graphDesc.hasNonShaderVisibleUAV = graphDesc.hasUAV;
+			graphDesc.hasRTV = a_desc.rtv != DXGI_FORMAT_UNKNOWN;
+			graphDesc.rtvFormat = rhi::helpers::ToRHI(a_desc.rtv);
+			graphDesc.hasDSV = a_desc.dsv != DXGI_FORMAT_UNKNOWN;
+			graphDesc.dsvFormat = imageFormat;
+			graphDesc.initialLayout = *home;
+			auto texture = org::ExternalTextureResource::CreateShared(std::move(image), graphDesc, *home == rhi::ResourceLayout::Common);
+			texture->SetName(a_name);
+			exported.graph = std::move(texture);
+			exported.image = reinterpret_cast<std::uint64_t>(info.image.image);
+			return exported;
+		} catch (const std::exception& e) {
+			logger::error("[ORG] {}: not exported: {}", a_name, e.what());
+			return {};
 		}
 	}
 
@@ -442,6 +487,7 @@ namespace GraphResources
 // Built without OpenRenderGraph: no twin is ever created, and every feature keeps its D3D11 path.
 namespace GraphResources
 {
+	ExportedTexture ExportTexture(const ExportDesc&, const std::string&) { return {}; }
 	std::uint64_t Resource::ResizeGeneration() { return 0; }
 	void Resource::BumpResizeGeneration() {}
 	void Resource::Register(org::RenderGraph&) const {}

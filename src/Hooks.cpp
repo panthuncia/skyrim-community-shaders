@@ -4,6 +4,7 @@
 #include "HangWatchdog.h"
 #include "GpuIdleTrace.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "ShaderTools/BSShaderHooks.h"
@@ -798,7 +799,10 @@ struct BSShaderRenderTargets_Create
 		{
 			// Everything the game creates here is its render targets (VRAM attribution); each is then labeled by name.
 			Vram::OwnerScope vramScope("Game/RenderTarget");
+			// CS_ORG_ENGINE_TARGETS: ORG makes the set, and publishes it once it is complete.
+			RenderGraph::Engine::Targets::BeginSet();
 			func();
+			RenderGraph::Engine::Targets::EndSet();
 		}
 		globals::ReInit();
 		Vram::TagGameRenderTargets(true);
@@ -1436,6 +1440,7 @@ namespace Hooks
 
 		logger::info("Hooking BSShaderRenderTargets::Create");
 		stl::detour_thunk<BSShaderRenderTargets_Create>(REL::RelocationID(100458, 107175));
+		RenderGraph::Engine::Targets::Install();
 
 		logger::info("Hooking BSShaderRenderTargets::Create::CreateRenderTarget(s)");
 		stl::write_thunk_call<CreateRenderTarget_Main>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x3F0, 0x3F3));

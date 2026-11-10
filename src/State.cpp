@@ -41,6 +41,7 @@
 #include "ORGDeferredComposite.h"
 #include "PostProcessingMode.h"
 #include "Presets/UnifiedPresetCatalog.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/GpuLoadPass.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "ShaderCache.h"
@@ -390,6 +391,8 @@ void State::Setup()
 	ORGDeferredComposite::Reserve();
 	ImGuiRenderer::ReserveAnchor();
 	RenderGraphRuntime::Get().Initialize();
+	// CS_ORG_ENGINE_TARGETS: the engine's targets, made on D3D11 before the graph existed, move to ORG before any feature reads them.
+	RenderGraph::Engine::Targets::TakeOver();
 
 	Feature::ForEachLoadedFeature("SetupResources", [](Feature* feature) { feature->SetupResources(); });
 	{
