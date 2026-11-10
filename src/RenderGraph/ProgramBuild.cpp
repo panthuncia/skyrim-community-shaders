@@ -53,8 +53,11 @@ namespace RenderGraph::ProgramBuild
 				defines.emplace_back(std::move(a_name), std::move(a_value));
 		};
 		std::vector<std::string> ownNames;
-		for (const auto& [name, value] : a_own)
-			ownNames.emplace_back(name.begin(), name.end());
+		for (const auto& [name, value] : a_own) {
+			std::string& narrow = ownNames.emplace_back();
+			for (const wchar_t c : name)
+				narrow.push_back(static_cast<char>(c));
+		}
 		const std::vector<std::string_view> explicitNames(ownNames.begin(), ownNames.end());
 		for (const auto& [name, value] : Util::GetCommonShaderDefines(explicitNames))
 			add(wide(name), wide(value));

@@ -88,8 +88,8 @@ namespace ShaderBindings
 	 */
 	rhi::SamplerDesc SamplerFromD3D11(const D3D11_SAMPLER_DESC& a_desc);
 
-	/** @brief CreateSampler of SamplerFromD3D11(a_desc). */
-	inline org::OwnedDescriptorBinding CreateSampler(const D3D11_SAMPLER_DESC& a_desc) { return CreateSampler(SamplerFromD3D11(a_desc)); }
+	/** @brief CreateSampler of SamplerFromD3D11(a_desc): a sampler described as D3D11 describes it. */
+	inline org::OwnedDescriptorBinding CreateSamplerFromD3D11(const D3D11_SAMPLER_DESC& a_desc) { return CreateSampler(SamplerFromD3D11(a_desc)); }
 
 	/**
 	 * @brief A shader resource view of a resource the graph does not track (a_resource stays alive through a_owner), in the graph's
