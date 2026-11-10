@@ -1,13 +1,10 @@
 #include "ORGExponentialHeightFog.h"
 
-#include <cstring>
+#include "RenderGraph/Switches.h"
 
 bool ORGExponentialHeightFog::Requested()
 {
-	static const bool requested = [] {
-		char value[8]{};
-		return GetEnvironmentVariableA("CS_ORG_EXPONENTIAL_HEIGHT_FOG", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}();
+	static const bool requested = Switches::On("CS_ORG_EXPONENTIAL_HEIGHT_FOG");
 	return requested;
 }
 
@@ -33,16 +30,17 @@ ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 #	include "Features/LightLimitFix/ORGLocalShadows.h"
 #	include "Features/Skylighting.h"
 #	include "Features/Skylighting/ORGSkylighting.h"
-#	include "Features/TerrainBlending.h"
 #	include "Features/TerrainBlending/ORGTerrainBlending.h"
 #	include "Features/TerrainShadows.h"
 #	include "Features/TerrainShadows/ORGTerrainShadows.h"
 #	include "Globals.h"
+#	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
 #	include "State.h"
@@ -57,10 +55,8 @@ ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 #	include <Resources/ExternalTextureResource.h>
 
 #	include <array>
-#	include <atomic>
 #	include <cstddef>
 #	include <functional>
-#	include <map>
 #	include <optional>
 #	include <string>
 #	include <vector>
@@ -123,7 +119,7 @@ namespace
 	};
 	static_assert(sizeof(ScatteringBlock) == 116);
 
-	/** @brief A graph resource a pass reads: one the client holds or imported, or one another client registers by name. */
+	/** @brief A graph resource a pass reads: one the client holds or imported, or one another client publishes by name. */
 	struct Source
 	{
 		std::shared_ptr<org::Resource> resource;
@@ -171,6 +167,37 @@ namespace
 		}
 	};
 
+	/** @brief One volume's programs, as the D3D11 build compiles them (ExponentialHeightFog's Get*CS). */
+	struct Programs
+	{
+		std::shared_ptr<const ComputeProgram> depth, depthGroupReduce, material, scattering, integration;
+	};
+
+	/** @brief What Setup makes once: the programs, the samplers, the latch and the run gate. Shared by every shape. */
+	struct Fixed
+	{
+		Programs nearPrograms, farPrograms;
+		org::OwnedDescriptorBinding linearSampler, shadowSampler;
+		std::shared_ptr<org::LatchBlock> latch;
+		std::shared_ptr<RenderGraph::RunGate> gate;
+	};
+
+	/** @brief One of the volume compute passes; which one and for which volume is fixed when it is made. */
+	enum class Step : std::uint8_t
+	{
+		Depth,
+		Material,
+		Scattering,
+		Integration,
+		Count
+	};
+
+	/** @brief The run gate's entry of a volume's step: the near volume's four steps, then the far volume's. */
+	constexpr std::uint32_t GateEntry(bool a_far, Step a_step)
+	{
+		return (a_far ? static_cast<std::uint32_t>(Step::Count) : 0u) + static_cast<std::uint32_t>(a_step);
+	}
+
 	/** @brief One volume's programs and textures. */
 	struct Volume
 	{
@@ -179,6 +206,22 @@ namespace
 		std::unique_ptr<GraphResources::Texture2D> conservativeDepth, conservativeDepthHistory;
 		DirectX::XMUINT4 size{};
 		bool groupReduce = false;
+
+		/** @brief A step's group counts, as the D3D11 path dispatches it. */
+		std::array<std::uint32_t, 3> Groups(Step a_step) const
+		{
+			const std::uint32_t groupsX = (size.x + 7) / 8;
+			const std::uint32_t groupsY = (size.y + 7) / 8;
+			const std::uint32_t groupsZ = (size.z + 3) / 4;
+			switch (a_step) {
+			case Step::Depth:
+				return groupReduce ? std::array<std::uint32_t, 3>{ size.x, size.y, 1 } : std::array<std::uint32_t, 3>{ groupsX, groupsY, 1 };
+			case Step::Integration:
+				return { groupsX, groupsY, 1 };
+			default:
+				return { groupsX, groupsY, groupsZ };
+			}
+		}
 	};
 
 	/** @brief Everything a build's passes are made from: immutable once registered. */
@@ -187,12 +230,7 @@ namespace
 		Shape shape;
 		Volume nearVolume, farVolume;
 		std::unique_ptr<GraphResources::StructuredBuffer> directionalShadowLights;
-		std::shared_ptr<org::LatchBlock> latch;
-		org::OwnedDescriptorBinding linearSampler, shadowSampler;
-		// Whether this run has the client's frame (set at the hook): a run another client keeps going records nothing here.
-		std::shared_ptr<std::atomic<bool>> live = std::make_shared<std::atomic<bool>>(false);
-
-		bool Live() const { return live->load(std::memory_order_acquire); }
+		std::shared_ptr<const Fixed> fixed;
 	};
 
 	org::DeclaredViewToken Read(org::PassBuilder& a_builder, const Source& a_source)
@@ -209,15 +247,6 @@ namespace
 	// Passes
 	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-	/** @brief One of the volume compute passes; which one and for which volume is fixed when it is made. */
-	enum class Step : std::uint8_t
-	{
-		Depth,
-		Material,
-		Scattering,
-		Integration
-	};
-
 	struct DispatchBindings
 	{
 		SharedConstants::Bindings shared;
@@ -232,8 +261,10 @@ namespace
 		std::shared_ptr<const FogState> state;
 		const Volume* volume = nullptr;
 		Step step = Step::Material;
+		bool isFar = false;
 	};
 
+	/** @brief A volume compute pass. Its groups come from the run gate, which the commit opens on the runs that have the fog's frame. */
 	class DispatchPass final : public org::TypedRenderGraphPass<DispatchPass, DispatchFrame, DispatchBindings>
 	{
 	public:
@@ -271,7 +302,7 @@ namespace
 					b.hasInput[i] = true;
 				}
 				break;
-			case Step::Integration:
+			default:
 				b.output = a_builder.UnorderedAccess(v.integrated->Graph()).View();
 				b.own[0] = a_builder.ShaderResource(v.scattering->Graph()).View();
 				break;
@@ -279,46 +310,32 @@ namespace
 			return b;
 		}
 
-		void Revision(std::vector<std::uint64_t>& a_out) const
-		{
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(state.get()));
-			a_out.push_back(state->Live());
-		}
+		// The recording depends only on what the pass was made with: the gate decides each run's work.
+		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(state.get())); }
 
-		DispatchFrame Prepare(const DispatchBindings&, const org::PassPrepareContext&) const
-		{
-			if (!state->Live())
-				return {};
-			return { state, &Of(), step };
-		}
+		DispatchFrame Prepare(const DispatchBindings&, const org::PassPrepareContext&) const { return { state, &Of(), step, isFar }; }
 
 		static void Record(const DispatchBindings& a_bindings, const DispatchFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.state || !a_frame.volume)
-				return;
 			const auto& s = *a_frame.state;
 			const auto& v = *a_frame.volume;
+			const auto& fixed = *s.fixed;
 			const std::uint32_t slot = a_recording.FrameSlot();
 			const auto shared = SharedConstants::Index(a_recording, a_bindings.shared);
-			const auto fog = ShaderBindings::LatchOf(*s.latch, slot, static_cast<std::uint32_t>(offsetof(LatchData, fog)));
-			const std::uint32_t groupsX = (v.size.x + 7) / 8;
-			const std::uint32_t groupsY = (v.size.y + 7) / 8;
-			const std::uint32_t groupsZ = (v.size.z + 3) / 4;
+			const auto fog = ShaderBindings::LatchOf(*fixed.latch, slot, static_cast<std::uint32_t>(offsetof(LatchData, fog)));
 			const auto input = [&](Input a_input) -> Handle { return a_bindings.hasInput[a_input] ? a_recording.Index(a_bindings.inputs[a_input]) : 0; };
+			const std::uint32_t entry = GateEntry(a_frame.isFar, a_frame.step);
 			switch (a_frame.step) {
 			case Step::Depth:
 				{
 					const VolumeBlock block{ shared, fog, a_recording.Index(a_bindings.output), input(kDepth) };
-					if (v.groupReduce)
-						v.depthProgram->Dispatch(a_recording, ShaderBindings::Data(block), v.size.x, v.size.y, 1);
-					else
-						v.depthProgram->Dispatch(a_recording, ShaderBindings::Data(block), groupsX, groupsY, 1);
+					fixed.gate->Dispatch(a_recording, *v.depthProgram, ShaderBindings::Data(block), entry);
 					break;
 				}
 			case Step::Material:
 				{
 					const VolumeBlock block{ shared, fog, a_recording.Index(a_bindings.output), 0 };
-					v.materialProgram->Dispatch(a_recording, ShaderBindings::Data(block), groupsX, groupsY, groupsZ);
+					fixed.gate->Dispatch(a_recording, *v.materialProgram, ShaderBindings::Data(block), entry);
 					break;
 				}
 			case Step::Scattering:
@@ -326,8 +343,8 @@ namespace
 					ScatteringBlock block{};
 					block.shared = shared;
 					block.fog = fog;
-					block.linearSampler = s.linearSampler.Index();
-					block.shadowSampler = s.shadowSampler.Index();
+					block.linearSampler = fixed.linearSampler.Index();
+					block.shadowSampler = fixed.shadowSampler.Index();
 					block.vBuffer = a_recording.Index(a_bindings.own[0]);
 					block.directionalShadowMap = input(kDirectionalShadowMap);
 					block.history = a_recording.Index(a_bindings.own[1]);
@@ -346,14 +363,14 @@ namespace
 					block.localShadows = input(kLocalShadows);
 					block.localShadowMaps = input(kLocalShadowMaps);
 					block.engineShadowMaps = input(kEngineShadowMaps);
-					block.engineShadows = ShaderBindings::LatchOf(*s.latch, slot, static_cast<std::uint32_t>(offsetof(LatchData, engineShadows)));
-					v.scatteringProgram->Dispatch(a_recording, ShaderBindings::Data(block), groupsX, groupsY, groupsZ);
+					block.engineShadows = ShaderBindings::LatchOf(*fixed.latch, slot, static_cast<std::uint32_t>(offsetof(LatchData, engineShadows)));
+					fixed.gate->Dispatch(a_recording, *v.scatteringProgram, ShaderBindings::Data(block), entry);
 					break;
 				}
-			case Step::Integration:
+			default:
 				{
 					const IntegrationBlock block{ shared, fog, a_recording.Index(a_bindings.own[0]), a_recording.Index(a_bindings.output), 0 };
-					v.integrationProgram->Dispatch(a_recording, ShaderBindings::Data(block), groupsX, groupsY, 1);
+					fixed.gate->Dispatch(a_recording, *v.integrationProgram, ShaderBindings::Data(block), entry);
 					break;
 				}
 			}
@@ -367,7 +384,8 @@ namespace
 		Step step;
 	};
 
-	// The directional shadow light, from the latch into its buffer, as Deferred::CopyShadowLightData maps it on D3D11.
+	// The directional shadow light, from the latch into its buffer, as Deferred::CopyShadowLightData maps it on D3D11. It runs on
+	// every run: on a run without the fog's frame it copies the slot's older values, which no dispatch reads.
 	struct UploadBindings
 	{
 		org::ResourceBindingToken buffer;
@@ -390,24 +408,13 @@ namespace
 			return { a_builder.CopyDestination(state->directionalShadowLights->Graph()) };
 		}
 
-		void Revision(std::vector<std::uint64_t>& a_out) const
-		{
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(state.get()));
-			a_out.push_back(state->Live());
-		}
+		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(state.get())); }
 
-		UploadFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const
-		{
-			if (!state->Live())
-				return {};
-			return { state };
-		}
+		UploadFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { state }; }
 
 		static void Record(const UploadBindings& a_bindings, const UploadFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.state)
-				return;
-			const auto& latch = *a_frame.state->latch;
+			const auto& latch = *a_frame.state->fixed->latch;
 			a_recording.Commands().CopyBufferRegion(a_recording.Resolve(a_bindings.buffer).GetHandle(), 0,
 				latch.Resource()->GetAPIResource().GetHandle(), latch.Offset(a_recording.FrameSlot()) + offsetof(LatchData, directionalShadow),
 				sizeof(Deferred::DirectionalShadowLightData));
@@ -417,7 +424,9 @@ namespace
 		std::shared_ptr<const FogState> state;
 	};
 
-	// A volume's scattering and conservative depth into their histories, as the D3D11 path's CopyResource calls.
+	// A volume's scattering and conservative depth into their histories, as the D3D11 path's CopyResource calls. It runs on every
+	// run: on a run without the fog's frame the copied history is never read, because the next frame on the graph is not
+	// consecutive (historyValid is false).
 	struct HistoryBindings
 	{
 		org::ResourceBindingToken scattering, scatteringHistory, depth, depthHistory;
@@ -442,23 +451,12 @@ namespace
 				a_builder.CopySource(v.conservativeDepth->Graph()), a_builder.CopyDestination(v.conservativeDepthHistory->Graph()) };
 		}
 
-		void Revision(std::vector<std::uint64_t>& a_out) const
-		{
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(state.get()));
-			a_out.push_back(state->Live());
-		}
+		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(state.get())); }
 
-		HistoryFrame Prepare(const HistoryBindings&, const org::PassPrepareContext&) const
-		{
-			if (!state->Live())
-				return {};
-			return { &Of() };
-		}
+		HistoryFrame Prepare(const HistoryBindings&, const org::PassPrepareContext&) const { return { &Of() }; }
 
 		static void Record(const HistoryBindings& a_bindings, const HistoryFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.volume)
-				return;
 			const auto& size = a_frame.volume->size;
 			auto& commands = a_recording.Commands();
 			const auto copy = [&](org::ResourceBindingToken a_from, org::ResourceBindingToken a_to, std::uint32_t a_depth) {
@@ -477,7 +475,8 @@ namespace
 		bool isFar;
 	};
 
-	// The far volume's integrated scattering cleared to no fog (transmittance 1), as the D3D11 path clears it with the far volume off.
+	// The far volume's integrated scattering cleared to no fog (transmittance 1), as the D3D11 path clears it with the far volume
+	// off. It runs on every run; the result is the same each time.
 	struct ClearBindings
 	{
 		org::ResourceBindingToken resource;
@@ -485,9 +484,7 @@ namespace
 	};
 
 	struct ClearFrame
-	{
-		bool live = false;
-	};
+	{};
 
 	class ClearPass final : public org::TypedRenderGraphPass<ClearPass, ClearFrame, ClearBindings>
 	{
@@ -502,18 +499,12 @@ namespace
 			return { use.resources.front(), use.views[0], use.views[1] };
 		}
 
-		void Revision(std::vector<std::uint64_t>& a_out) const
-		{
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(state.get()));
-			a_out.push_back(state->Live());
-		}
+		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(state.get())); }
 
-		ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return { state->Live() }; }
+		ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return {}; }
 
-		static void Record(const ClearBindings& a_bindings, const ClearFrame& a_frame, org::PassRecordContext& a_recording)
+		static void Record(const ClearBindings& a_bindings, const ClearFrame&, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.live)
-				return;
 			rhi::UavClearInfo info{};
 			info.shaderVisible = a_recording.View(a_bindings.shaderVisible);
 			info.cpuVisible = a_recording.View(a_bindings.cpuVisible);
@@ -542,6 +533,17 @@ namespace
 		if (!texture)
 			return {};
 		return { FrameAnchors::D3D11Texture(a_name, texture.get(), a_view, nullptr), {} };
+	}
+
+	/**
+	 * @brief A producer's texture, as a_view (the view its feature binds) names it: by its published id while a_view is that id's
+	 * export, so the read is ordered after the producer's write; else the D3D11 texture behind a_view, imported under the id.
+	 */
+	Source Published(std::string_view a_id, ID3D11ShaderResourceView* a_view)
+	{
+		if (PublishedResources::IsExportOf(a_view, a_id))
+			return { nullptr, std::string(a_id) };
+		return ImportView(a_id, a_view);
 	}
 
 	/** @brief A depth texture behind a_view: the engine's depth-stencil import when it is one of the engine's, else its own. */
@@ -574,30 +576,8 @@ namespace
 			return {};
 		if (a_view == globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV)
 			return { FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY), {} };
-		// Terrain Blending's 16-bit blended depth: by name on its ORG path (published, ordered after the blend), else imported.
-		if (a_view == ORGTerrainBlending::Get().BlendedDepthSRV(true))
-			return { nullptr, std::string(ORGTerrainBlending::kBlendedDepth16Id) };
-		return ImportView("TerrainBlending::BlendedDepth16", a_view);
-	}
-
-	/** @brief The defines the D3D11 build gets (ExponentialHeightFog's Get*CS and Util::CompileShader), as ComputeProgram takes them. */
-	std::vector<std::pair<std::wstring, std::wstring>> Defines(std::vector<std::string> a_names)
-	{
-		std::vector<std::pair<std::string, std::string>> defines;
-		for (auto& name : a_names)
-			defines.emplace_back(std::move(name), "");
-		std::vector<std::string_view> explicitNames;
-		for (const auto& define : defines)
-			explicitNames.push_back(define.first);
-		for (auto& define : Util::GetCommonShaderDefines(explicitNames))
-			defines.push_back(std::move(define));
-		for (const char* name : { "COMPUTESHADER", "WINPC", "DX11" })
-			defines.emplace_back(name, "");
-		// Defines are ASCII.
-		std::vector<std::pair<std::wstring, std::wstring>> wide;
-		for (const auto& [name, value] : defines)
-			wide.emplace_back(std::wstring(name.begin(), name.end()), std::wstring(value.begin(), value.end()));
-		return wide;
+		// Terrain Blending's 16-bit blended depth.
+		return Published(ORGTerrainBlending::kBlendedDepth16Id, a_view);
 	}
 
 	D3D11_TEXTURE3D_DESC VolumeDesc(const DirectX::XMUINT4& a_size, DXGI_FORMAT a_format)
@@ -626,13 +606,51 @@ namespace
 		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 		return desc;
 	}
+
+	/** @brief One fog program; the D3D11 build's defines are added by ComputeProgram (Desc::commonDefines). */
+	std::shared_ptr<const ComputeProgram> LoadProgram(const char* a_source, const std::vector<std::string>& a_defines, std::uint32_t a_words)
+	{
+		std::vector<std::pair<std::string, std::string>> defines;
+		for (const auto& name : a_defines)
+			defines.emplace_back(name, "");
+		return ComputeProgram::Load(RenderGraphRuntime::Get().Host()->Device(),
+			{ .source = std::string(kShaderDir) + a_source, .constantWords = a_words, .defines = RenderGraph::AnchorPasses::Defines(defines) });
+	}
+
+	/** @brief A volume's programs with the defines the D3D11 build gives them. False, logged, when one does not build. */
+	bool LoadPrograms(Programs& a_programs, bool a_far)
+	{
+		std::vector<std::string> volumeDefines;
+		if (a_far)
+			volumeDefines.emplace_back("VOLUMETRIC_FOG_FAR_GRID");
+		auto scatteringDefines = volumeDefines;
+		if (globals::features::lightLimitFix.loaded)
+			scatteringDefines.emplace_back("LIGHT_LIMIT_FIX");
+		if (globals::features::terrainShadows.loaded)
+			scatteringDefines.emplace_back("TERRAIN_SHADOWS");
+		if (globals::features::cloudShadows.loaded)
+			scatteringDefines.emplace_back("CLOUD_SHADOWS");
+		auto groupDefines = volumeDefines;
+		groupDefines.emplace_back("GROUP_REDUCE");
+
+		a_programs.depth = LoadProgram("VolumetricFogConservativeDepthCS.hlsl", volumeDefines, ShaderBindings::Words<VolumeBlock>());
+		a_programs.depthGroupReduce = LoadProgram("VolumetricFogConservativeDepthCS.hlsl", groupDefines, ShaderBindings::Words<VolumeBlock>());
+		a_programs.material = LoadProgram("VolumetricFogMaterialCS.hlsl", volumeDefines, ShaderBindings::Words<VolumeBlock>());
+		a_programs.scattering = LoadProgram("VolumetricFogLightScatteringCS.hlsl", scatteringDefines, ShaderBindings::Words<ScatteringBlock>());
+		a_programs.integration = LoadProgram("VolumetricFogIntegrationCS.hlsl", volumeDefines, ShaderBindings::Words<IntegrationBlock>());
+		if (!a_programs.depth || !a_programs.depthGroupReduce || !a_programs.material || !a_programs.scattering || !a_programs.integration) {
+			logger::error("[ORG] Exponential Height Fog: a {} volume program could not be built", a_far ? "far" : "near");
+			return false;
+		}
+		return true;
+	}
 }
 
 struct ORGExponentialHeightFog::Impl
 {
+	std::shared_ptr<const Fixed> fixed;
+	std::function<void()> onFailed;
 	std::shared_ptr<const FogState> state;
-	// Programs by source and defines, kept across shapes: a grid change does not compile again.
-	std::map<std::pair<std::string, std::string>, std::shared_ptr<const ComputeProgram>> programs;
 	// This frame's values, written at Prepass and latched by the commit.
 	std::optional<LatchData> pending;
 	// The histories' state, as the D3D11 path keeps its own.
@@ -641,47 +659,15 @@ struct ORGExponentialHeightFog::Impl
 	bool ranLastFrame = false;
 	std::string fallbackReason;  // why the last frame ran on D3D11, logged when it changes
 
-	std::shared_ptr<const ComputeProgram> Program(const char* a_source, std::vector<std::string> a_defines, std::uint32_t a_words)
-	{
-		std::string key;
-		for (const auto& define : a_defines)
-			key += define + ";";
-		auto& program = programs[{ a_source, key }];
-		if (!program)
-			program = ComputeProgram::Load(RenderGraphRuntime::Get().Host()->Device(),
-				{ .source = std::string(kShaderDir) + a_source, .constantWords = a_words, .defines = Defines(std::move(a_defines)) });
-		return program;
-	}
-
 	bool MakeVolume(Volume& a_volume, const DirectX::XMUINT4& a_size, bool a_groupReduce, bool a_far)
 	{
-		const auto& lightLimitFix = globals::features::lightLimitFix;
-		std::vector<std::string> scatteringDefines;
-		if (a_far)
-			scatteringDefines.emplace_back("VOLUMETRIC_FOG_FAR_GRID");
-		if (lightLimitFix.loaded)
-			scatteringDefines.emplace_back("LIGHT_LIMIT_FIX");
-		if (globals::features::terrainShadows.loaded)
-			scatteringDefines.emplace_back("TERRAIN_SHADOWS");
-		if (globals::features::cloudShadows.loaded)
-			scatteringDefines.emplace_back("CLOUD_SHADOWS");
-		std::vector<std::string> volumeDefines;
-		if (a_far)
-			volumeDefines.emplace_back("VOLUMETRIC_FOG_FAR_GRID");
-		auto depthDefines = volumeDefines;
-		if (a_groupReduce)
-			depthDefines.emplace_back("GROUP_REDUCE");
-
+		const auto& programs = a_far ? fixed->farPrograms : fixed->nearPrograms;
 		a_volume.size = a_size;
 		a_volume.groupReduce = a_groupReduce;
-		a_volume.depthProgram = Program("VolumetricFogConservativeDepthCS.hlsl", depthDefines, ShaderBindings::Words<VolumeBlock>());
-		a_volume.materialProgram = Program("VolumetricFogMaterialCS.hlsl", volumeDefines, ShaderBindings::Words<VolumeBlock>());
-		a_volume.scatteringProgram = Program("VolumetricFogLightScatteringCS.hlsl", scatteringDefines, ShaderBindings::Words<ScatteringBlock>());
-		a_volume.integrationProgram = Program("VolumetricFogIntegrationCS.hlsl", volumeDefines, ShaderBindings::Words<IntegrationBlock>());
-		if (!a_volume.depthProgram || !a_volume.materialProgram || !a_volume.scatteringProgram || !a_volume.integrationProgram) {
-			logger::error("[ORG] Exponential Height Fog: a volumetric fog program could not be built");
-			return false;
-		}
+		a_volume.depthProgram = a_groupReduce ? programs.depthGroupReduce : programs.depth;
+		a_volume.materialProgram = programs.material;
+		a_volume.scatteringProgram = programs.scattering;
+		a_volume.integrationProgram = programs.integration;
 
 		const std::string prefix = a_far ? "ExponentialHeightFog::Far" : "ExponentialHeightFog::";
 		const GraphResources::Options transient{ .lifetime = GraphResources::Lifetime::Transient };
@@ -703,12 +689,31 @@ struct ORGExponentialHeightFog::Impl
 		return true;
 	}
 
+	/** @brief The commit's run: the frame's values into the latch, and the gate open for the volumes this shape dispatches. */
+	void Commit(const FogState& a_state)
+	{
+		if (!pending)
+			return;
+		const auto& fixed = *a_state.fixed;
+		fixed.latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, *pending);
+		pending.reset();
+		const auto open = [&](const Volume& a_volume, bool a_far) {
+			for (std::uint32_t step = 0; step < static_cast<std::uint32_t>(Step::Count); ++step) {
+				const auto groups = a_volume.Groups(static_cast<Step>(step));
+				fixed.gate->OpenDispatch(GateEntry(a_far, static_cast<Step>(step)), groups[0], groups[1], groups[2]);
+			}
+		};
+		open(a_state.nearVolume, false);
+		if (a_state.shape.farEnabled)
+			open(a_state.farVolume, true);
+	}
+
 	/** @brief A new state for a_shape, registered as the client. False, logged, when anything could not be made. */
 	bool Build(const Shape& a_shape)
 	{
-		auto* host = RenderGraphRuntime::Get().Host();
 		auto built = std::make_shared<FogState>();
 		built->shape = a_shape;
+		built->fixed = fixed;
 		if (!MakeVolume(built->nearVolume, a_shape.sizes.nearSize, a_shape.sizes.nearGroupReduce, false) ||
 			!MakeVolume(built->farVolume, a_shape.sizes.farSize, a_shape.sizes.farGroupReduce, true))
 			return false;
@@ -720,12 +725,8 @@ struct ORGExponentialHeightFog::Impl
 		bufferDesc.ByteWidth = sizeof(Deferred::DirectionalShadowLightData);
 		built->directionalShadowLights = std::make_unique<GraphResources::StructuredBuffer>(bufferDesc, 1, "ExponentialHeightFog::DirectionalShadowLights",
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient });
-		built->latch = std::make_shared<org::LatchBlock>("cs.exp-height-fog.latch", static_cast<std::uint32_t>(sizeof(LatchData)), host->FrameSlots());
-		// The D3D11 path's samplers: linear clamp, and the comparison sampler for the directional shadow map.
-		built->linearSampler = ShaderBindings::CreateSampler({});
-		built->shadowSampler = ShaderBindings::CreateSampler({ .compareEnable = true, .compareOp = rhi::CompareOp::LessEqual, .reduction = rhi::ReductionMode::Comparison });
-		if (!*built->directionalShadowLights || !built->linearSampler || !built->shadowSampler) {
-			logger::error("[ORG] Exponential Height Fog: the shadow light buffer or a sampler could not be made");
+		if (!*built->directionalShadowLights) {
+			logger::error("[ORG] Exponential Height Fog: the shadow light buffer could not be made");
 			return false;
 		}
 
@@ -764,25 +765,21 @@ struct ORGExponentialHeightFog::Impl
 			}
 			shared->directionalShadowLights->Register(a_graph);
 		};
-		client.commit = [this, shared](const FrameAnchors::Point&) {
-			if (pending)
-				shared->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, *pending);
-			pending.reset();
-		};
-		// At the hook, before the epoch: the passes record only for a frame Prepass gave the graph.
-		client.active = [this, shared] {
-			const bool live = pending.has_value();
-			shared->live->store(live, std::memory_order_release);
-			return live;
-		};
+		client.commit = [this, shared](const FrameAnchors::Point&) { Commit(*shared); };
+		// The fog has work on a run only when Prepass gave the graph this frame.
+		client.active = [this] { return pending.has_value(); };
 		client.onFailed = [] {
 			logger::error("[ORG] Exponential Height Fog returns to D3D11: the render graph failed");
 			auto& self = Get();
 			WithdrawIntegrated();
 			self.failed = true;
+			auto onFailed = self.impl ? std::move(self.impl->onFailed) : std::function<void()>{};
 			self.impl.reset();
+			if (onFailed)
+				onFailed();
 		};
 		client.sharedConstants = true;
+		client.gates = { fixed->gate };
 		if (!FrameAnchors::Register(std::move(client)))
 			return false;
 		// Drawcall Limit Fix's colour passes read them by name, ordered after the integration (Integrations/ExponentialHeightFog).
@@ -809,15 +806,46 @@ void ORGExponentialHeightFog::Reserve()
 		logger::warn("[ORG] Exponential Height Fog: the Prepass anchor could not be reserved; the fog stays on D3D11");
 }
 
-bool ORGExponentialHeightFog::Prepass()
+bool ORGExponentialHeightFog::Setup(std::function<void()> a_onFailed)
 {
+	impl.reset();
 	if (!Requested() || failed)
 		return false;
 	auto& runtime = RenderGraphRuntime::Get();
-	if (!runtime.IsActive() || !runtime.Host() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::Prepass))
+	if (!runtime.IsActive() || !runtime.Host() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::Prepass)) {
+		logger::warn("[ORG] Exponential Height Fog: the render graph or its Prepass anchor is not available; the fog stays on D3D11");
 		return false;
-	if (!impl)
-		impl = std::make_unique<Impl>();
+	}
+	auto fixed = std::make_shared<Fixed>();
+	if (!LoadPrograms(fixed->nearPrograms, false) || !LoadPrograms(fixed->farPrograms, true)) {
+		logger::error("[ORG] Exponential Height Fog stays on D3D11");
+		return false;
+	}
+	// The D3D11 path's samplers: linear clamp, and the comparison sampler for the directional shadow map.
+	fixed->linearSampler = ShaderBindings::CreateSamplerFromD3D11(ExponentialHeightFog::SamplerDesc(false));
+	fixed->shadowSampler = ShaderBindings::CreateSamplerFromD3D11(ExponentialHeightFog::SamplerDesc(true));
+	fixed->latch = std::make_shared<org::LatchBlock>("cs.exp-height-fog.latch", static_cast<std::uint32_t>(sizeof(LatchData)), runtime.Host()->FrameSlots());
+	fixed->gate = RenderGraph::RunGate::Create("cs.exp-height-fog.gate", 2 * static_cast<std::uint32_t>(Step::Count));
+	if (!fixed->linearSampler || !fixed->shadowSampler || !fixed->gate) {
+		logger::error("[ORG] Exponential Height Fog: a sampler or the run gate could not be made; the fog stays on D3D11");
+		return false;
+	}
+	impl = std::make_unique<Impl>();
+	impl->fixed = std::move(fixed);
+	impl->onFailed = std::move(a_onFailed);
+	logger::info("[ORG] Exponential Height Fog: the volumetric fog can run on the render graph");
+	return true;
+}
+
+bool ORGExponentialHeightFog::IsActive() const
+{
+	return impl && !failed && RenderGraphRuntime::Get().IsActive();
+}
+
+bool ORGExponentialHeightFog::Prepass()
+{
+	if (!IsActive())
+		return false;
 	auto& fog = globals::features::exponentialHeightFog;
 	impl->pending.reset();
 
@@ -853,14 +881,8 @@ bool ORGExponentialHeightFog::Prepass()
 
 	auto& ibl = globals::features::ibl;
 	if (ibl.loaded && ibl.settings.EnableIBL != 0 && !ibl.IsDisabledForCurrentScene() && ibl.EnvIBLSRV() && ibl.SkyIBLSRV()) {
-		const auto& graphIBL = ORGIBL::Get();
-		if (graphIBL.IsActive() && ibl.EnvIBLSRV() == graphIBL.EnvSRV() && ibl.SkyIBLSRV() == graphIBL.SkySRV()) {
-			shape.inputs[kEnvIBL] = { nullptr, "IBL::EnvIBL" };
-			shape.inputs[kSkyIBL] = { nullptr, "IBL::SkyIBL" };
-		} else {
-			shape.inputs[kEnvIBL] = ImportView("IBL::EnvIBL", ibl.EnvIBLSRV());
-			shape.inputs[kSkyIBL] = ImportView("IBL::SkyIBL", ibl.SkyIBLSRV());
-		}
+		shape.inputs[kEnvIBL] = Published(ORGIBL::kEnvId, ibl.EnvIBLSRV());
+		shape.inputs[kSkyIBL] = Published(ORGIBL::kSkyId, ibl.SkyIBLSRV());
 		if (!shape.inputs[kEnvIBL] || !shape.inputs[kSkyIBL])
 			return fallback("IBL's SH textures cannot be imported");
 		inputs.ibl = true;
@@ -869,56 +891,48 @@ bool ORGExponentialHeightFog::Prepass()
 	auto& skylighting = globals::features::skylighting;
 	if (skylighting.loaded && skylighting.ProbeArraySRV()) {
 		// A 3D texture: only the graph's own probe volume can be read.
-		if (!ORGSkylighting::Get().IsActive())
+		if (!PublishedResources::IsExportOf(skylighting.ProbeArraySRV(), ORGSkylighting::kProbeArrayId))
 			return fallback("Skylighting's probes are on D3D11");
-		shape.inputs[kProbes] = { nullptr, "Skylighting::ProbeArray" };
+		shape.inputs[kProbes] = { nullptr, std::string(ORGSkylighting::kProbeArrayId) };
 		inputs.skylighting = true;
 	}
 
+	// Without the sky (interiors, the map) the shader skips the terrain and cloud shadows (SampleDirectionalWorldShadow), and
+	// Cloud Shadows binds nothing: neither is an input then.
+	const bool skyless = Util::IsInterior() || globals::state->isMapMenuOpen ||
+	                     (globals::game::sky && globals::game::sky->flags.any(RE::Sky::Flags::kHideSky));
+
 	auto& terrainShadows = globals::features::terrainShadows;
-	if (terrainShadows.loaded) {
-		auto* view = terrainShadows.GetShadowHeightSRV();
-		const auto& graphTerrain = ORGTerrainShadows::Get();
-		if (view && graphTerrain.Active() && view == graphTerrain.ShadowHeightSRV())
-			shape.inputs[kShadowHeights] = { nullptr, "TerrainShadows::ShadowHeight" };
-		else
-			shape.inputs[kShadowHeights] = ImportView("TerrainShadows::ShadowHeight", view);
-		// The shader reads the heights whenever terrain shadows are on.
+	if (terrainShadows.loaded && !skyless) {
+		shape.inputs[kShadowHeights] = Published(ORGTerrainShadows::kShadowHeightId, terrainShadows.GetShadowHeightSRV());
 		if (!shape.inputs[kShadowHeights])
 			return fallback("Terrain Shadows' heights are missing");
 	}
 
-	if (globals::features::cloudShadows.loaded) {
-		// The view Cloud Shadows leaves bound at CS t25, which the D3D11 path reads: the graph's own cubemap when it is that one.
-		winrt::com_ptr<ID3D11ShaderResourceView> view;
-		globals::d3d::context->CSGetShaderResources(25, 1, view.put());
-		const auto& graphClouds = ORGCloudShadows::Get();
-		if (view && graphClouds.Active() && view.get() == graphClouds.OcclusionSRV())
-			shape.inputs[kCloudShadows] = { nullptr, "CloudShadows::Occlusion" };
-		else
-			shape.inputs[kCloudShadows] = ImportView("CloudShadows::Occlusion", view.get());
-		// Without the sky (interiors, the map) the shader skips the world shadow, and Cloud Shadows binds nothing there.
-		const bool skyless = Util::IsInterior() || globals::state->isMapMenuOpen ||
-		                     (globals::game::sky && globals::game::sky->flags.any(RE::Sky::Flags::kHideSky));
-		if (!shape.inputs[kCloudShadows] && !skyless)
+	auto& cloudShadows = globals::features::cloudShadows;
+	if (cloudShadows.loaded && !skyless) {
+		// The occlusion cubemap Cloud Shadows binds at t25 for the frame, not whatever view the slot holds now.
+		shape.inputs[kCloudShadows] = Published(ORGCloudShadows::kOcclusionId, cloudShadows.OcclusionSRV());
+		if (!shape.inputs[kCloudShadows])
 			return fallback("Cloud Shadows' texture is missing");
 	}
 
 	auto& lightLimitFix = globals::features::lightLimitFix;
 	if (lightLimitFix.loaded && lightLimitFix.GetLightsSRV() && lightLimitFix.GetLightIndexListSRV() && lightLimitFix.GetLightGridSRV()) {
-		const auto& culling = ORGLightCulling::Get();
-		if (!culling.IsActive() || lightLimitFix.GetLightsSRV() != culling.GetLightsSRV())
+		if (!PublishedResources::IsExportOf(lightLimitFix.GetLightsSRV(), ORGLightCulling::kLightsId) ||
+			!PublishedResources::IsExportOf(lightLimitFix.GetLightIndexListSRV(), ORGLightCulling::kLightIndexListId) ||
+			!PublishedResources::IsExportOf(lightLimitFix.GetLightGridSRV(), ORGLightCulling::kLightGridId))
 			return fallback("Light Limit Fix's light lists are on D3D11");
-		shape.inputs[kLights] = { nullptr, "cs.llf.lights" };
-		shape.inputs[kLightList] = { nullptr, "cs.llf.light-index-list" };
-		shape.inputs[kLightGrid] = { nullptr, "cs.llf.light-grid" };
+		shape.inputs[kLights] = { nullptr, std::string(ORGLightCulling::kLightsId) };
+		shape.inputs[kLightList] = { nullptr, std::string(ORGLightCulling::kLightIndexListId) };
+		shape.inputs[kLightGrid] = { nullptr, std::string(ORGLightCulling::kLightGridId) };
 		inputs.localLights = true;
 		if (lightLimitFix.IsLocalShadowCacheActive() && lightLimitFix.GetLocalShadowDataSRV()) {
-			const auto& localShadows = ORGLocalShadows::Get();
-			if (!localShadows.IsActive() || lightLimitFix.GetLocalShadowDataSRV() != localShadows.GetDataSRV())
+			if (!PublishedResources::IsExportOf(lightLimitFix.GetLocalShadowDataSRV(), ORGLocalShadows::kDataId) ||
+				!PublishedResources::IsExportOf(lightLimitFix.GetLocalShadowCacheSRV(), ORGLocalShadows::kCacheId))
 				return fallback("Light Limit Fix's local shadows are on D3D11");
-			shape.inputs[kLocalShadows] = { nullptr, "LightLimitFix::LocalShadowData" };
-			shape.inputs[kLocalShadowMaps] = { nullptr, "LightLimitFix::LocalShadowCache", true };
+			shape.inputs[kLocalShadows] = { nullptr, std::string(ORGLocalShadows::kDataId) };
+			shape.inputs[kLocalShadowMaps] = { nullptr, std::string(ORGLocalShadows::kCacheId), true };
 			inputs.localShadows = true;
 		}
 		if (auto* view = fog.BuildEngineLocalShadowData(data.engineShadows)) {
@@ -968,21 +982,26 @@ bool ORGExponentialHeightFog::Prepass()
 
 ID3D11ShaderResourceView* ORGExponentialHeightFog::NearSRV() const
 {
-	return impl && impl->state && impl->ranLastFrame ? impl->state->nearVolume.integrated->SRV() : nullptr;
+	return IsActive() && impl->state && impl->ranLastFrame ? impl->state->nearVolume.integrated->SRV() : nullptr;
 }
 
 ID3D11ShaderResourceView* ORGExponentialHeightFog::FarSRV() const
 {
-	return impl && impl->state && impl->ranLastFrame ? impl->state->farVolume.integrated->SRV() : nullptr;
+	return IsActive() && impl->state && impl->ranLastFrame ? impl->state->farVolume.integrated->SRV() : nullptr;
 }
 
 void ORGExponentialHeightFog::Release()
 {
-	if (!impl)
+	if (!impl || !impl->state)
 		return;
 	FrameAnchors::Unregister(kClientId);
 	WithdrawIntegrated();
-	impl.reset();
+	impl->state.reset();
+	impl->pending.reset();
+	impl->hasScatteringHistory = impl->hasDepthHistory = impl->hasScatteringHistoryFar = impl->hasDepthHistoryFar = false;
+	impl->lastFrame = UINT32_MAX;
+	impl->ranLastFrame = false;
+	impl->fallbackReason.clear();
 }
 
 #else  // !CS_HAS_RENDER_GRAPH
@@ -993,6 +1012,8 @@ struct ORGExponentialHeightFog::Impl
 
 ORGExponentialHeightFog::~ORGExponentialHeightFog() = default;
 void ORGExponentialHeightFog::Reserve() {}
+bool ORGExponentialHeightFog::Setup(std::function<void()>) { return false; }
+bool ORGExponentialHeightFog::IsActive() const { return false; }
 bool ORGExponentialHeightFog::Prepass() { return false; }
 ID3D11ShaderResourceView* ORGExponentialHeightFog::NearSRV() const { return nullptr; }
 ID3D11ShaderResourceView* ORGExponentialHeightFog::FarSRV() const { return nullptr; }

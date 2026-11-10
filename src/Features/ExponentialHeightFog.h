@@ -28,7 +28,7 @@ public:
 
 	/** @brief Draws the ImGui settings UI for fog parameters and volumetric fog options. */
 	virtual void DrawSettings() override;
-	/** @brief Creates samplers and the volumetric fog constant buffer. */
+	/** @brief Sets up the render-graph path when requested; the D3D11 path makes its objects when it first runs. */
 	virtual void SetupResources() override;
 	/** @brief Releases all cached volumetric fog compute shaders so they can be recompiled. */
 	virtual void ClearShaderCache() override;
@@ -172,8 +172,13 @@ private:
 	 */
 	ID3D11ShaderResourceView* BuildEngineLocalShadowData(EngineLocalShadows& a_shadows) const;
 
+	/** @brief The D3D11 path's samplers (s0 linear clamp, s1 the shadow comparison), which the render-graph path converts. */
+	static D3D11_SAMPLER_DESC SamplerDesc(bool a_comparison);
+
 	/** @brief Shaders see height fog as disabled: an ENB preset replaces it without handing it back to CS, or the flat world map is open. */
 	bool IsSuppressed() const;
+	/** @brief The D3D11 path's samplers and constant buffer, made the first time it runs. */
+	void EnsureD3D11Objects();
 	void EnsureVolumetricResources();
 	void ReleaseVolumetricResources();
 	void BindIntegratedLightScattering();
