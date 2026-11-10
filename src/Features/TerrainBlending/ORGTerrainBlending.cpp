@@ -150,21 +150,26 @@ void ORGTerrainBlending::ClearShaderCache()
 	}
 }
 
+bool ORGTerrainBlending::Holds() const
+{
+	return Active() && (frame == FrameBlend::Planned || frame == FrameBlend::Written);
+}
+
 ID3D11ShaderResourceView* ORGTerrainBlending::BlendedDepthSRV(bool a_16bit) const
 {
-	if (!Active())
+	if (!Holds())
 		return nullptr;
 	return a_16bit ? impl->blendedDepth16->SRV() : impl->blendedDepth->SRV();
 }
 
 ID3D11ShaderResourceView* ORGTerrainBlending::MaskSRV() const
 {
-	return Active() ? impl->mask->SRV() : nullptr;
+	return Holds() ? impl->mask->SRV() : nullptr;
 }
 
 std::shared_ptr<org::Resource> ORGTerrainBlending::BlendedDepthGraph() const
 {
-	return Active() ? impl->blendedDepth->Graph() : nullptr;
+	return Holds() ? impl->blendedDepth->Graph() : nullptr;
 }
 
 bool ORGTerrainBlending::RegisterClient()
@@ -260,6 +265,7 @@ bool ORGTerrainBlending::Setup(std::function<void()> a_onFailed)
 
 bool ORGTerrainBlending::BeforeDepth()
 {
+	frame = FrameBlend::None;
 	if (!Active() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DepthDone))
 		return false;
 	bool changed = !impl->registered;
@@ -294,15 +300,19 @@ bool ORGTerrainBlending::BeforeDepth()
 			return false;
 		}
 	}
+	frame = FrameBlend::Planned;
 	return true;
 }
 
 bool ORGTerrainBlending::Blend()
 {
-	if (!Active() || !impl->registered)
+	if (frame != FrameBlend::Planned)
 		return false;
-	// A failed epoch calls the client's onFailed inside Run, which returns Terrain Blending to D3D11.
-	return FrameAnchors::Run(FrameAnchors::Anchor::DepthDone) && Active();
+	// A failed epoch calls the client's onFailed inside Run, which returns Terrain Blending to D3D11. An anchor that submitted
+	// nothing leaves the frame to D3D11 too: the views then name the D3D11 textures Terrain Blending blends into.
+	const bool written = Active() && impl->registered && FrameAnchors::Run(FrameAnchors::Anchor::DepthDone) && Active();
+	frame = written ? FrameBlend::Written : FrameBlend::Missed;
+	return written;
 }
 
 #else  // !CS_HAS_RENDER_GRAPH
@@ -316,6 +326,7 @@ bool ORGTerrainBlending::Setup(std::function<void()>) { return false; }
 bool ORGTerrainBlending::BeforeDepth() { return false; }
 bool ORGTerrainBlending::Blend() { return false; }
 bool ORGTerrainBlending::Active() const { return false; }
+bool ORGTerrainBlending::Holds() const { return false; }
 void ORGTerrainBlending::ClearShaderCache() {}
 ID3D11ShaderResourceView* ORGTerrainBlending::BlendedDepthSRV(bool) const { return nullptr; }
 ID3D11ShaderResourceView* ORGTerrainBlending::MaskSRV() const { return nullptr; }

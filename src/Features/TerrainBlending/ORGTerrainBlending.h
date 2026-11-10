@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d11.h>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string_view>
@@ -84,14 +85,24 @@ public:
 	 */
 	void ClearShaderCache();
 
-	/** @brief The blended depth's exported view (a_16bit: the R16 one); null when inactive. */
+	/**
+	 * @brief The blended depth's exported view (a_16bit: the R16 one); null when the graph does not hold this frame's blend
+	 * (Holds): Terrain Blending's D3D11 textures do.
+	 */
 	ID3D11ShaderResourceView* BlendedDepthSRV(bool a_16bit) const;
 
-	/** @brief The mask's exported view (t55); null when inactive. */
+	/** @brief The mask's exported view (t55); null when the graph does not hold this frame's blend (Holds). */
 	ID3D11ShaderResourceView* MaskSRV() const;
 
-	/** @brief The R32 blended depth's graph resource, published as kBlendedDepthId; null when inactive. */
+	/** @brief The R32 blended depth's graph resource, published as kBlendedDepthId; null when the graph does not hold this frame's blend. */
 	std::shared_ptr<org::Resource> BlendedDepthGraph() const;
+
+	/**
+	 * @brief Whether this frame's blend is the graph's: the path is active, BeforeDepth chose the graph, and Blend has not fallen
+	 * back to D3D11 since. The one decision the views above and Terrain Blending's own write follow, so a frame whose anchor ran
+	 * nothing is read from the D3D11 textures it blended into.
+	 */
+	bool Holds() const;
 
 	~ORGTerrainBlending();
 
@@ -107,8 +118,18 @@ private:
 	/** @brief Stops the ORG path for good: Terrain Blending returns to its D3D11 textures. */
 	void Fail(const char* a_why);
 
+	/** @brief Where this frame's blend is: set by BeforeDepth (Planned or None), then by Blend (Written or Missed). */
+	enum class FrameBlend : std::uint8_t
+	{
+		None,     // no graph blend this frame: the D3D11 textures
+		Planned,  // the depth table names the graph's exports; the anchor has not run yet
+		Written,  // the anchor ran the blend
+		Missed,   // the anchor submitted nothing: Terrain Blending blended on D3D11
+	};
+
 	std::shared_ptr<Impl> impl;
 	std::function<void()> onFailed;
+	FrameBlend frame = FrameBlend::None;
 	bool failed = false;
 	bool programFailed = false;  // the failure was the program's compile, which a shader reload may fix
 };
