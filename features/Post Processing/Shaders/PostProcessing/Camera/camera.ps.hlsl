@@ -4,13 +4,13 @@
 // Purely per-pixel (fisheye + chromatic aberration + grain). SV_Position at
 // pixel centers is DTid + 0.5.
 
-#include "PostProcessing/fullscreen.hlsli"
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (Camera::CameraCB at b1, SharedData at b5).
+// The ORG chain (ORG/ORGCamera.cpp) gives heap handles in the push block, the constants from its latch and the shared
+// constants from the heap (ORG_SHARED_CONSTANTS).
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
 
-#include "Common/Math.hlsli"
-#include "Common/SharedData.hlsli"
-#include "PostProcessing/common.hlsli"
-
-cbuffer CameraCB : register(b1)
+struct CameraConstants
 {
 	// Fisheye
 	float FEFoV;
@@ -25,13 +25,24 @@ cbuffer CameraCB : register(b1)
 	float2 ScreenSize;
 
 	bool UseFE;
-}
+};
 
-Texture2D<float4> InputTexture : register(t0);
+#define CAMERA_RESOURCES(X)                    \
+	X(SHARED, ConstantBuffer, Shared, 0)       \
+	X(SRV, Texture2D<float4>, InputTexture, 0) \
+	X(SAMPLER, SamplerState, ColorSampler, 0)  \
+	X(LATCH, CameraConstants, Camera, 1)
+ORG_PUSH_BLOCK(CAMERA_RESOURCES(ORG_HANDLE))
 
-SamplerState ColorSampler : register(s0);
+#include "PostProcessing/fullscreen.hlsli"
 
-#define BUFFER_ASPECT_RATIO ScreenSize.x / ScreenSize.y
+#include "Common/Math.hlsli"
+#include "Common/SharedData.hlsli"
+#include "PostProcessing/common.hlsli"
+
+CAMERA_RESOURCES(ORG_RESOURCE)
+
+#define BUFFER_ASPECT_RATIO Camera.ScreenSize.x / Camera.ScreenSize.y
 #define ASPECT_RATIO float2(BUFFER_ASPECT_RATIO, 1.0)
 
 // Film grain helper functions
@@ -102,25 +113,25 @@ float2 FishEye(float2 texcoord, float FEFoV, float FECrop)
 float4 main(FullscreenTriangleVSOutput input) : SV_Target
 {
 	uint2 DTid = uint2(input.Position.xy);
-	static const float2 TEXEL_SIZE = float2(1.0f / ScreenSize.x, 1.0f / ScreenSize.y);
+	static const float2 TEXEL_SIZE = float2(1.0f / Camera.ScreenSize.x, 1.0f / Camera.ScreenSize.y);
 	float2 texcoord = (DTid.xy + 0.5f) * TEXEL_SIZE;
 	float2 texcoord_clean = texcoord.xy;
 
 	// Fisheye
-	if (UseFE) {
-		texcoord.xy = FishEye(texcoord_clean, FEFoV, FECrop);
+	if (Camera.UseFE) {
+		texcoord.xy = FishEye(texcoord_clean, Camera.FEFoV, Camera.FECrop);
 	}
 
 	float3 color = InputTexture.SampleLevel(ColorSampler, texcoord, 0).rgb;
 
 	// Chromatic aberration
-	[branch] if (CAStrength != 0.0)
+	[branch] if (Camera.CAStrength != 0.0)
 	{
-		color = SampleCA(InputTexture, ColorSampler, texcoord, CAStrength, 0).rgb;
+		color = SampleCA(InputTexture, ColorSampler, texcoord, Camera.CAStrength, 0).rgb;
 	}
 
 	// Film grain
-	[branch] if (NoiseStrength != 0.0)
+	[branch] if (Camera.NoiseStrength != 0.0)
 	{
 		float2 pixelCoord = DTid.xy;
 		float t = float(SharedData::FrameCount);
@@ -130,11 +141,11 @@ float4 main(FullscreenTriangleVSOutput input) : SV_Target
 		static const float GRAIN_LIFT_RATIO = 0.5;
 
 		float3 grain;
-		if (NoiseType == 1) {
+		if (Camera.NoiseType == 1) {
 			// Color grain
-			float rg = GrainSource(float3(pixelCoord, floor(GRAIN_RATE * t)), NoiseStrength, GRAIN_PITCH);
-			float gg = GrainSource(float3(pixelCoord, floor(GRAIN_RATE * (t + 9.0))), NoiseStrength, GRAIN_PITCH);
-			float bg = GrainSource(float3(pixelCoord, floor(GRAIN_RATE * (t - 9.0))), NoiseStrength, GRAIN_PITCH);
+			float rg = GrainSource(float3(pixelCoord, floor(GRAIN_RATE * t)), Camera.NoiseStrength, GRAIN_PITCH);
+			float gg = GrainSource(float3(pixelCoord, floor(GRAIN_RATE * (t + 9.0))), Camera.NoiseStrength, GRAIN_PITCH);
+			float bg = GrainSource(float3(pixelCoord, floor(GRAIN_RATE * (t - 9.0))), Camera.NoiseStrength, GRAIN_PITCH);
 
 			static const float COLOR_LEVEL = 1.0;
 			float3 color_grain = float3(rg, gg, bg);
@@ -142,7 +153,7 @@ float4 main(FullscreenTriangleVSOutput input) : SV_Target
 		} else {
 			// Monochrome film grain
 			static const float NEUTRAL_GRAIN_FACTOR = 1.4142135;  // sqrt(2)
-			grain = GrainSource(float3(pixelCoord, floor(GRAIN_RATE * t)), NoiseStrength / NEUTRAL_GRAIN_FACTOR, GRAIN_PITCH).xxx;
+			grain = GrainSource(float3(pixelCoord, floor(GRAIN_RATE * t)), Camera.NoiseStrength / NEUTRAL_GRAIN_FACTOR, GRAIN_PITCH).xxx;
 		}
 
 		color = max(lerp(color * grain, color + (grain - 1.0), GRAIN_LIFT_RATIO), 0.0);
