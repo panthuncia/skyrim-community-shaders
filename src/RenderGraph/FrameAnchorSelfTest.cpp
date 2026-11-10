@@ -308,7 +308,8 @@ namespace FrameAnchors::SelfTest
 
 	bool Requested()
 	{
-		return Switches::On("CS_ORG_ANCHOR_SELFTEST");
+		static const bool requested = Switches::On("CS_ORG_ANCHOR_SELFTEST");
+		return requested;
 	}
 
 	void Reserve()

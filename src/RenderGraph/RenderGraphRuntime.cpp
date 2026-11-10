@@ -1905,9 +1905,6 @@ bool RenderGraphRuntime::Initialize()
 			impl->getResourceInfo ? "available" : "missing", impl->getResourceInfos ? " (batched)" : " (not batched)",
 			impl->trackResources ? ", pinless (relocations followed)" : ", pinned");
 	}
-	// The self-tests register as ordinary clients once the runtime is up (nothing when their switches are off).
-	FrameAnchors::SelfTest::Setup();
-	GraphResources::SelfTest::Setup();
 	return true;
 }
 
@@ -2085,6 +2082,12 @@ void RenderGraphRuntime::SignalFramePace(bool a_active)
 	ServicePipelineReload();
 	ServiceD3D11Releases();
 	RenderGraph::Engine::Tripwire::ServiceRetired();
+	// The self-tests register as ordinary clients after the first frame, when the engine's targets they import exist. Each
+	// does so once, and nothing when its switch is off.
+	if (IsActive()) {
+		FrameAnchors::SelfTest::Setup();
+		GraphResources::SelfTest::Setup();
+	}
 	if (!IsActive() || !impl->framePace || !a_active)
 		return;
 	auto& state = *impl;

@@ -196,7 +196,8 @@ namespace GraphResources::SelfTest
 
 	bool Requested()
 	{
-		return Switches::On("CS_ORG_GRAPHRES_SELFTEST");
+		static const bool requested = Switches::On("CS_ORG_GRAPHRES_SELFTEST");
+		return requested;
 	}
 
 	void Reserve()

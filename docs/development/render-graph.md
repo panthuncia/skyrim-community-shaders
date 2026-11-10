@@ -538,8 +538,8 @@ FrameAnchors::Register({ .id = "cs.myfeature",
     (`FrameAnchors::SetLateEpochHook`, `Upscaling::SeparateFromGraphEpochs`). An upscaler, frame generation or the present can
     follow these, and none may run directly behind a graph epoch (above, "Hazard: external Vulkan work directly after a graph
     epoch"). The earlier anchors are followed by the engine's own draws. The anchors' core calls no feature and no self-test:
-    the self-tests reserve and register as ordinary clients (`RenderGraphRuntime::Initialize`), and check their runs from
-    `executed`.
+    the self-tests reserve in `RenderGraphRuntime::Initialize` and register as ordinary clients at the first frame's end
+    (`SignalFramePace`), and check their runs from `executed`.
 -   **Imports.** An import is kept while its D3D11 texture stays the same, and replaced when it changes. A feature texture that
     is destroyed or renamed is dropped with `FrameAnchors::ReleaseImport(id)` (`cs.d3d11.<name>`): the anchors build again
     without it, and the texture goes through `ReleaseAfterD3D11`.

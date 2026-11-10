@@ -229,7 +229,7 @@ namespace GraphResources
 		void Reserve();
 
 		/**
-		 * @brief With the runtime active, once: when requested, makes the test's program and texture and registers its client, an
+		 * @brief At a frame's end with the runtime active (RenderGraphRuntime::SignalFramePace), once: when requested, makes the test's program and texture and registers its client, an
 		 * ordinary one. Its executed callback copies the texture through its export after each run and checks the last copy.
 		 */
 		void Setup();

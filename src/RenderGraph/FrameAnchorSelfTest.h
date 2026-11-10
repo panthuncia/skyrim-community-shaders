@@ -16,7 +16,7 @@ namespace FrameAnchors::SelfTest
 	void Reserve();
 
 	/**
-	 * @brief With the runtime active, once: when requested, makes the test's programs and resources and registers its client, an
+	 * @brief At a frame's end with the runtime active (RenderGraphRuntime::SignalFramePace), once: when requested, makes the test's programs and resources and registers its client, an
 	 * ordinary one. Its executed callback checks what each anchor's last completed run read back, and logs the first result.
 	 */
 	void Setup();
