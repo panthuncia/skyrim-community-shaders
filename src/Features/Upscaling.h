@@ -231,7 +231,7 @@ private:
 	void CreateHudlessTexture();
 	bool DestroyHudlessTexture(bool a_commandRingDrained = false);
 	ID3D11Resource* CaptureHudlessColor();
-	/** @brief The upscaler's output: the graph texture's D3D11 export with CS_ORG_UPSCALING, else the D3D11 texture; null when neither exists. */
+	/** @brief The upscaler's output as ORGUpscaling::Texture chooses it (the graph's export with CS_ORG_UPSCALING); null when neither exists. */
 	ID3D11Texture2D* UpscaledResource() const;
 	/** @brief Frame generation's hudless colour, as UpscaledResource. */
 	ID3D11Texture2D* HudlessResource() const;
