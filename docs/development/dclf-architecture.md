@@ -1738,6 +1738,12 @@ and `graph`, beside `view`):
 -   The views with frame constants of their own (the reflection's faces) still read `view`. Their epoch is earlier in the frame, and
     their passes do not declare the graph textures yet. So `view` must keep answering while the producer still exports.
 
+Grass reads Grass Collision's texture (t100) from its draw row, not from a register. On Grass Collision's ORG path the texture is
+published as `GrassShared::kCollisionGraphId`. Grass's main passes declare a read of it while it is published (`MainDeclare`), and the
+depth commit writes the published descriptor into the row only when the passes built last declare it and the texture Grass Collision
+handed over is the graph's export (`GrassShared::Collision::onGraph`). Otherwise the row names the view's import. The first read
+through each path is logged: `[DCLF] grass collision reads the graph resource '...'` or `... reads its D3D11 view`.
+
 LLF's culling buffers use the same idea for buffers (`Api::FrameGraphBuffers`), registered by its own extension. A buffer twin can be
 published the same way, and its `indices` callback then answers with `PublishedResources::ShaderResourceIndex`.
 

@@ -13,8 +13,8 @@
  * Two passes at the EarlyPrepass anchor: a copy moves the frame's colliders (bounding boxes and collision spheres) from the
  * client's latch block into two graph buffers, then the update writes the 512x512 collision texture. The per-frame values are a
  * LATCH entry of the shader, read from the same block. The texture is a graph twin (GraphResources::Texture2D) exported as a D3D11
- * SRV: the engine's grass vertex shader (t100) and Drawcall Limit Fix's grass draws read it there. Each update reads the last
- * frame's texture, so it is History.
+ * SRV: the engine's grass vertex shader reads it at t100. It is also published (PublishedResources, GrassShared::kCollisionGraphId):
+ * Drawcall Limit Fix's grass draws read it through the graph. Each update reads the last frame's texture, so it is History.
  *
  * Why EarlyPrepass: the colliders are queued in Main::Update, before the frame renders, and the eye is the main camera's then. The
  * anchor runs after the shadow maps and before Main::RenderDepth, so before every main-view grass draw: the engine's Z-prepass and
