@@ -392,7 +392,7 @@ void TruePBR::Prepass()
 	SetupDefaultPBRLandTextureSet();
 
 	auto context = globals::d3d::context;
-	// On the ORG path the noise is filled at the EarlyPrepass anchor. Until those epochs ran nothing is bound, so no draw reads
+	// On the ORG path the noise is filled at the EarlyPrepass anchor. Until that run was submitted nothing is bound, so no draw reads
 	// the texture unfilled.
 	const auto& orgNoise = ORGGlintsNoise::Get();
 	ID3D11ShaderResourceView* srv = nullptr;
@@ -406,9 +406,9 @@ void TruePBR::Prepass()
 	context->PSSetShaderResources(20, 1, &srv);
 }
 
-void TruePBR::EarlyPrepass()
+void TruePBR::PostSetupResources()
 {
-	ORGGlintsNoise::Get().Update();
+	ORGGlintsNoise::Get().Setup();
 }
 
 void TruePBR::ClearShaderCache()
@@ -452,7 +452,8 @@ void TruePBR::SetupGlintsTexture()
 		.Texture2D = { .MipSlice = 0 }
 	};
 
-	glintsNoiseTexture = eastl::make_unique<Texture2D>(tex_desc, "TruePBR::GlintsNoise");
+	// The ORG path's texture has the same name (kNoiseId is a literal, so its data is terminated).
+	glintsNoiseTexture = eastl::make_unique<Texture2D>(tex_desc, ORGGlintsNoise::kNoiseId.data());
 	glintsNoiseTexture->CreateSRV(srv_desc);
 	glintsNoiseTexture->CreateUAV(uav_desc);
 

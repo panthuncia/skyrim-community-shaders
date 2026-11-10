@@ -1,24 +1,25 @@
 #pragma once
 
 #include <d3d11.h>
+#include <functional>
 #include <memory>
 #include <string_view>
 
 /**
  * @brief TruePBR's glints noise as a render-graph pass (CS_ORG_GLINTS=1).
  *
- * The noise is a 128x128 RGBA32F texture that never changes: noisegen.cs.hlsl fills it once. On this path a compute pass at the
- * EarlyPrepass anchor fills it, in the first frame after TruePBR's EarlyPrepass set it up. That anchor runs before every reader in
- * the frame (the depth prepass, the water reflections, the main pass). The client is active only until that epoch is submitted.
- * The next frame builds the graph again without the pass.
+ * The noise is a 128x128 RGBA32F texture that never changes: noisegen.cs.hlsl fills it once. On this path a one-shot compute pass
+ * (FrameAnchors::PassDesc::once) at the EarlyPrepass anchor fills it at the anchor's first run after Setup. That anchor runs
+ * before every reader in the frame (the depth prepass, the water reflections, the main pass). The client is active until the
+ * executed signal reports the run with the fill; the anchors then build the graph again without the pass.
  *
  * Resources:
  * - The noise: a persistent graph texture named "TruePBR::GlintsNoise". It exports a D3D11 SRV, which TruePBR binds at t20 for the
- *   engine's Lighting pixel shaders until those draws are ported. Until the fill's epochs ran TruePBR binds nothing there. It is also published under its name, and Drawcall Limit Fix's
+ *   engine's Lighting pixel shaders until those draws are ported. Until the fill ran TruePBR binds nothing there. It is also published under its name, and Drawcall Limit Fix's
  *   colour passes read it from there (Integrations/TruePBR), ordered after the fill.
  *
  * The render graph has no device reset. When the graph fails, the client is dropped and TruePBR goes back to D3D11, where the
- * noise is made again on its next Prepass. A new Setup (never after a failure) fills the new texture again.
+ * noise is made again on its next Prepass.
  *
  * On any failure (no runtime, a shader that does not compile, a texture that cannot be made, the graph stopping) it stops for
  * good and Active() turns false.
@@ -37,27 +38,29 @@ public:
 	/** @brief Reserves the EarlyPrepass anchor when requested. Call before the render graph initializes (PostPostLoad). */
 	static void Reserve();
 
+	/** @brief The one instance. */
 	static ORGGlintsNoise& Get();
 
 	/**
-	 * @brief TruePBR's EarlyPrepass: makes the program, the texture and the client the first time, and drops the fill pass once its
-	 * epoch was submitted.
-	 * @return Whether the noise is on the render graph.
+	 * @brief After the render graph initializes (TruePBR::PostSetupResources), when requested: makes the program and the texture,
+	 * registers the client with its one-shot fill and publishes the texture. The device is the graph host's.
+	 * @param a_onFailed Called when the graph fails later and the noise returns to D3D11.
+	 * @return Whether the noise is on the render graph; false keeps the D3D11 path.
 	 */
-	bool Update();
+	bool Setup(std::function<void()> a_onFailed = {});
 
-	/** @brief Whether the noise is the graph's and its client is registered. */
+	/** @brief Whether the noise is the graph's, its client is registered and the runtime is still up. */
 	bool Active() const;
 
-	/** @brief Whether the fill's epoch was submitted, so later D3D11 work and graph readers see the filled texture. */
+	/** @brief Whether a run with the fill was submitted (ClientDesc::executed), so later D3D11 work and graph readers see it filled. */
 	bool Filled() const;
 
 	/** @brief The noise's exported view (t20); null when inactive or not filled yet. */
 	ID3D11ShaderResourceView* NoiseSRV() const;
 
 	/**
-	 * @brief TruePBR::ClearShaderCache: builds the fill program again and fills the noise again. After a failed compile, the next
-	 * Update sets the path up again.
+	 * @brief TruePBR::ClearShaderCache: builds the fill program again and fills the noise again. After a failed compile, sets the
+	 * path up again.
 	 */
 	void ClearShaderCache();
 
@@ -69,13 +72,14 @@ public:
 private:
 	ORGGlintsNoise() = default;
 
-	/** @brief Makes the program and texture, registers the client and publishes the texture. False, logged, on failure. */
-	bool Setup();
+	/** @brief Registers (or replaces) the client with a_impl's program: its fill is pending again. False on failure. */
+	bool RegisterClient(const std::shared_ptr<Impl>& a_impl);
 
 	/** @brief Stops the ORG path for good. */
 	void Fail();
 
 	std::shared_ptr<Impl> impl;
+	std::function<void()> onFailed;
 	bool failed = false;
 	bool programFailed = false;  // the failure was the fill program's compile, which a shader reload may fix
 };

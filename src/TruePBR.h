@@ -61,8 +61,8 @@ public:
 	virtual void ClearShaderCache() override;
 	/** @brief Loads PBR texture set and material object configurations from disk. */
 	virtual void SetupResources() override;
-	/** @brief On the ORG path (CS_ORG_GLINTS=1): sets up the glint noise's fill, which the EarlyPrepass anchor then runs. */
-	virtual void EarlyPrepass() override;
+	/** @brief On the ORG path (CS_ORG_GLINTS=1), once the render graph is up: sets up the glint noise's one-shot fill at EarlyPrepass. */
+	virtual void PostSetupResources() override;
 	/** @brief Per-frame prepass that initializes the glint noise texture and binds it to the pipeline. */
 	virtual void Prepass() override;
 	/** @brief Installs all Detours hooks for PBR material, shader, and decal interception. */
