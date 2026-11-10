@@ -335,6 +335,19 @@ void ORGHDRDisplay::ClearShaderCache()
 		impl->programDirty = true;
 }
 
+std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::ImportOf(ID3D11Texture2D* a_texture) const
+{
+	if (!impl || !impl->registered || !a_texture)
+		return nullptr;
+	const auto& inputs = impl->registered->inputs;
+	if (inputs.backBuffer && a_texture == impl->backBufferTexture.get())
+		return inputs.backBuffer;
+	const auto& hdr = globals::features::hdrDisplay;
+	if (inputs.output && hdr.outputTexture && a_texture == hdr.outputTexture->resource.get())
+		return inputs.output;
+	return nullptr;
+}
+
 bool ORGHDRDisplay::TakeUIClear()
 {
 	return std::exchange(uiCleared, false);
@@ -476,6 +489,7 @@ ORGHDRDisplay::~ORGHDRDisplay() = default;
 void ORGHDRDisplay::Reserve() {}
 void ORGHDRDisplay::Fail(const char*) {}
 void ORGHDRDisplay::ClearShaderCache() {}
+std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::ImportOf(ID3D11Texture2D*) const { return nullptr; }
 bool ORGHDRDisplay::TakeUIClear() { return false; }
 ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB&, ID3D11Texture2D*) { return Composed::None; }
 

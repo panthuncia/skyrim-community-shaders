@@ -5,6 +5,11 @@
 #include <d3d11.h>
 #include <memory>
 
+namespace org
+{
+	class ExternalTextureResource;
+}
+
 /**
  * @brief HDR Display's output on the render graph (CS_ORG_HDR_DISPLAY=1).
  *
@@ -58,6 +63,13 @@ public:
 
 	/** @brief The program is built again from its file at the next Compose (HDRDisplay::ClearShaderCache). */
 	void ClearShaderCache();
+
+	/**
+	 * @brief The graph resource the registered passes write a_texture through (the output texture, or the back buffer they copy into);
+	 * null when they write no such texture. Another anchor's pass reading that texture uses this import: a second import of the same
+	 * image would be a graph resource of its own, which nothing orders after these writes (ORGScreenshot's capture).
+	 */
+	std::shared_ptr<org::ExternalTextureResource> ImportOf(ID3D11Texture2D* a_texture) const;
 
 	~ORGHDRDisplay();
 
