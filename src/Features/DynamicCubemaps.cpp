@@ -655,10 +655,8 @@ DynamicCubemaps::UpdateStep DynamicCubemaps::NextUpdateStep()
 void DynamicCubemaps::UpdateCubemap()
 {
 	// On the render graph the step ran at the DeferredPasses anchor, earlier in this frame (ORGDynamicCubemaps).
-	if (auto& graph = ORGDynamicCubemaps::Get(); graph.IsActive()) {
-		graph.AfterUpdate();
+	if (ORGDynamicCubemaps::Get().AfterUpdate())
 		return;
-	}
 
 	ZoneScoped;
 	TracyD3D11Zone(globals::state->tracyCtx, "Cubemap Update");
@@ -815,11 +813,11 @@ void DynamicCubemaps::CreateD3D11Textures()
 		srvDesc.Format = texDesc.Format;
 		uavDesc.Format = texDesc.Format;
 
-		envTexture = new Texture2D(texDesc, "DynamicCubemaps::Env");
+		envTexture = new Texture2D(texDesc, ORGDynamicCubemaps::kEnvId.data());
 		envTexture->CreateSRV(srvDesc);
 		envTexture->CreateUAV(uavDesc);
 
-		envReflectionsTexture = new Texture2D(texDesc, "DynamicCubemaps::EnvReflections");
+		envReflectionsTexture = new Texture2D(texDesc, ORGDynamicCubemaps::kEnvReflectionsId.data());
 		envReflectionsTexture->CreateSRV(srvDesc);
 		envReflectionsTexture->CreateUAV(uavDesc);
 
@@ -920,10 +918,10 @@ void DynamicCubemaps::CreateD3D11Textures()
 			bc6hSRVDesc.TextureCube.MostDetailedMip = 0;
 			bc6hSRVDesc.TextureCube.MipLevels = bc6hMipLevels;
 
-			envTextureBC6H = new Texture2D(bc6hDesc, "DynamicCubemaps::EnvTextureBC6H");
+			envTextureBC6H = new Texture2D(bc6hDesc, ORGDynamicCubemaps::kEnvBC6HId.data());
 			envTextureBC6H->CreateSRV(bc6hSRVDesc);
 
-			envReflectionsTextureBC6H = new Texture2D(bc6hDesc, "DynamicCubemaps::EnvReflectionsBC6H");
+			envReflectionsTextureBC6H = new Texture2D(bc6hDesc, ORGDynamicCubemaps::kEnvReflectionsBC6HId.data());
 			envReflectionsTextureBC6H->CreateSRV(bc6hSRVDesc);
 		}
 

@@ -487,11 +487,6 @@ struct ORGDynamicCubemaps::Impl
 	std::array<bool, 2> copying{};
 	std::function<void()> onFailed;
 
-	// The anchor client, registered at the first AfterUpdate with every input (Setup runs before the engine targets exist).
-	bool registered = false;
-	std::uint32_t registerAttempts = 0;
-	bool waitLogged = false;
-
 	bool Complete() const
 	{
 		const auto made = [](const auto& a_resource) { return a_resource && static_cast<bool>(*a_resource); };
@@ -779,6 +774,13 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 			logger::warn("[ORG] Dynamic Cubemaps: its programs, sampler or textures could not be made; the cubemaps stay on D3D11");
 			return false;
 		}
+		// The engine made its targets just before CS's setup, and the feature loaded its default cubemap.
+		state->imports = Import();
+		if (!state->imports) {
+			logger::warn("[ORG] Dynamic Cubemaps: its inputs cannot be imported (depth {}, main {}, reflections {}, default cubemap {}); the cubemaps stay on D3D11",
+				state->imports.depth != nullptr, state->imports.main != nullptr, state->imports.reflections != nullptr, state->imports.defaultCubemap != nullptr);
+			return false;
+		}
 		// Black until the first publish, as the D3D11 path's cubemaps are.
 		for (std::uint32_t i = 0; i < 2; ++i) {
 			ZeroTexture(state->env[i]->D3D11());
@@ -786,20 +788,29 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 		}
 		state->onFailed = std::move(a_onFailed);
 		impl = std::move(state);
+		// The client may register before CS's first constant upload: the anchors hold it until the shared constants exist. The
+		// readers see the black cubemaps until the first publish.
+		if (!RegisterClient()) {
+			logger::warn("[ORG] Dynamic Cubemaps: the anchor client could not be registered; the cubemaps stay on D3D11");
+			impl.reset();
+			return false;
+		}
 		for (std::uint32_t i = 0; i < 2; ++i)
 			if (!PublishedResources::Publish(*impl->env[i]) || !PublishedResources::Publish(*impl->bc6h[i])) {
 				logger::warn("[ORG] Dynamic Cubemaps: the cubemaps could not be published; they stay on D3D11");
+				FrameAnchors::Unregister(kClientId);
 				Withdraw();
 				impl.reset();
 				return false;
 			}
-		// The client registers at the first AfterUpdate that has the engine targets and the shared constants.
-		logger::info("[ORG] Dynamic Cubemaps: the cubemaps update on the render graph ({}x{}, {} mips)", size, size, kMips);
+		logger::info("[ORG] Dynamic Cubemaps: the cubemaps update on the render graph at DeferredPasses ({}x{}, {} mips)", size, size, kMips);
 		return true;
 	} catch (const std::exception& e) {
 		logger::error("[ORG] Dynamic Cubemaps setup failed, staying on D3D11: {}", e.what());
-		if (impl)
+		if (impl) {
+			FrameAnchors::Unregister(kClientId);
 			Withdraw();
+		}
 		impl.reset();
 		return false;
 	}
@@ -885,7 +896,7 @@ void ORGDynamicCubemaps::Fail(const char* a_reason, bool a_unregister)
 
 bool ORGDynamicCubemaps::IsActive() const
 {
-	return impl != nullptr;
+	return impl && RenderGraphRuntime::Get().IsActive();
 }
 
 ORGDynamicCubemaps::Outputs ORGDynamicCubemaps::Exported() const
@@ -896,36 +907,22 @@ ORGDynamicCubemaps::Outputs ORGDynamicCubemaps::Exported() const
 		impl->bc6h[1]->D3D11(), impl->bc6h[1]->SRV() };
 }
 
-void ORGDynamicCubemaps::AfterUpdate()
+bool ORGDynamicCubemaps::AfterUpdate()
 {
 	if (!impl)
-		return;
+		return false;
+	// The runtime stopped without a failed epoch of this anchor (another epoch faulted): leave as onFailed does, this frame skipped.
 	if (!RenderGraphRuntime::Get().IsActive()) {
 		Fail("the render graph is no longer active", true);
-		return;
+		return true;
 	}
 	auto& state = *impl;
-	if (!state.registered) {
-		// Once the engine targets are there and CS has uploaded its shared constants: the first frames in the world. The anchor runs
-		// the client from the next frame; the readers see the black cubemaps until the first publish.
-		state.imports = Import();
-		if (state.imports && RegisterClient()) {
-			state.registered = true;
-			logger::info("[ORG] Dynamic Cubemaps: registered on the DeferredPasses anchor");
-		} else if (++state.registerAttempts >= kRegisterAttempts) {
-			Fail("its inputs or its anchor client were not ready in time", true);
-		} else if (!std::exchange(state.waitLogged, true)) {
-			logger::info("[ORG] Dynamic Cubemaps: waiting for the engine targets and the shared constants (depth {}, main {}, reflections {}, default cubemap {})",
-				state.imports.depth != nullptr, state.imports.main != nullptr, state.imports.reflections != nullptr, state.imports.defaultCubemap != nullptr);
-		}
-		return;
-	}
 	bool refresh = false;
 	if (state.programsDirty) {
 		auto programs = LoadPrograms(RenderGraphRuntime::Get().Host()->Device());
 		if (!programs) {
 			Fail("its programs could not be built again", true);
-			return;
+			return true;
 		}
 		state.programs = std::move(programs);
 		state.programsDirty = false;
@@ -943,6 +940,7 @@ void ORGDynamicCubemaps::AfterUpdate()
 		}
 	if (refresh)
 		FrameAnchors::Refresh(kClientId);
+	return true;
 }
 
 void ORGDynamicCubemaps::ClearShaderCache()
@@ -964,7 +962,7 @@ void ORGDynamicCubemaps::Reserve() {}
 bool ORGDynamicCubemaps::Setup(std::function<void()>) { return false; }
 bool ORGDynamicCubemaps::IsActive() const { return false; }
 ORGDynamicCubemaps::Outputs ORGDynamicCubemaps::Exported() const { return {}; }
-void ORGDynamicCubemaps::AfterUpdate() {}
+bool ORGDynamicCubemaps::AfterUpdate() { return false; }
 void ORGDynamicCubemaps::ClearShaderCache() {}
 void ORGDynamicCubemaps::Withdraw() {}
 void ORGDynamicCubemaps::Fail(const char*, bool) {}
