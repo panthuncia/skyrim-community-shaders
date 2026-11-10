@@ -13,4 +13,7 @@ namespace FrameAnnotations
 	 * SetupGeometry without RestoreGeometry closes the event itself when this is true.
 	 */
 	bool GeometryEventsEnabled();
+
+	/** @brief Experiment (CS_IS_TRACE_AT=f1,...): logs a_event on those frames. */
+	void TraceImageSpace(const std::string& a_event);
 }

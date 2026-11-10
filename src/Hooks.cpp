@@ -1,3 +1,4 @@
+#include "FrameAnnotations.h"
 #include "Hooks.h"
 
 #include "GpuEventTimers.h"
@@ -452,6 +453,86 @@ namespace WeatherExtensions
 
 namespace PostProcessingExtensions
 {
+	/** Experiment (CS_TONEMAP_LATE_READ_AT=f1,...): copies a target on frame f, maps it 8 frames later without waiting. */
+	struct LateRead
+	{
+		winrt::com_ptr<ID3D11Texture2D> staging;
+		std::uint64_t frame = 0;
+		std::string label;
+		DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+
+		void Copy(std::uint32_t a_target, std::uint64_t a_frame, std::string a_label)
+		{
+			winrt::com_ptr<ID3D11Resource> resource;
+			globals::game::renderer->GetRuntimeData().renderTargets[a_target].SRV->GetResource(resource.put());
+			if (auto texture = resource.try_as<ID3D11Texture2D>())
+				Copy(texture.get(), a_frame, fmt::format("{} {}", a_label, a_target));
+		}
+
+		void Copy(ID3D11Texture2D* texture, std::uint64_t a_frame, std::string a_label)
+		{
+			D3D11_TEXTURE2D_DESC desc{};
+			texture->GetDesc(&desc);
+			format = desc.Format;
+			desc.MipLevels = 1, desc.ArraySize = 1, desc.Usage = D3D11_USAGE_STAGING, desc.BindFlags = 0;
+			desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ, desc.MiscFlags = 0;
+			staging = nullptr;
+			if (FAILED(globals::d3d::device->CreateTexture2D(&desc, nullptr, staging.put())))
+				return;
+			globals::d3d::context->CopySubresourceRegion(staging.get(), 0, 0, 0, 0, texture, 0, nullptr);
+			frame = a_frame;
+			label = std::move(a_label);
+		}
+
+		void Poll(std::uint64_t a_frame)
+		{
+			if (!staging || a_frame < frame + 8)
+				return;
+			D3D11_MAPPED_SUBRESOURCE mapped{};
+			const HRESULT hr = globals::d3d::context->Map(staging.get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+			if (hr == DXGI_ERROR_WAS_STILL_DRAWING)
+				return;
+			if (SUCCEEDED(hr)) {
+				D3D11_TEXTURE2D_DESC desc{};
+				staging->GetDesc(&desc);
+				std::array<double, 3> sums{};
+				for (UINT y = 0; y < desc.Height; ++y) {
+					const auto* row = static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch;
+					for (UINT x = 0; x < desc.Width; ++x) {
+						if (format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+							for (UINT c = 0; c < 3; ++c)
+								sums[c] += DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const DirectX::PackedVector::HALF*>(row)[x * 4 + c]);
+						} else if (format == DXGI_FORMAT_R11G11B10_FLOAT) {
+							DirectX::XMFLOAT3 v;
+							DirectX::XMStoreFloat3(&v, DirectX::PackedVector::XMLoadFloat3PK(reinterpret_cast<const DirectX::PackedVector::XMFLOAT3PK*>(row) + x));
+							sums[0] += v.x, sums[1] += v.y, sums[2] += v.z;
+						} else if (format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || format == DXGI_FORMAT_B8G8R8A8_UNORM) {
+							for (UINT c = 0; c < 3; ++c)
+								sums[c] += row[x * 4 + c] / 255.0;
+						} else if (format == DXGI_FORMAT_R24G8_TYPELESS) {
+							const auto v = reinterpret_cast<const std::uint32_t*>(row)[x];
+							sums[0] += (v & 0xFFFFFF) / 16777215.0, sums[1] += (v >> 24), sums[2] += ((v & 0xFFFFFF) == 0) ? 1.0 : 0.0;
+						} else if (format == DXGI_FORMAT_R32_TYPELESS) {
+							const float v = reinterpret_cast<const float*>(row)[x];
+							sums[0] += v, sums[2] += v == 0.0f ? 1.0 : 0.0;
+						} else if (format == DXGI_FORMAT_R32G8X24_TYPELESS) {
+							const float v = reinterpret_cast<const float*>(row)[x * 2];
+							sums[0] += v, sums[1] += reinterpret_cast<const std::uint32_t*>(row)[x * 2 + 1] & 0xFF, sums[2] += v == 0.0f ? 1.0 : 0.0;
+						} else if (format == DXGI_FORMAT_R10G10B10A2_UNORM) {
+							const auto v = reinterpret_cast<const std::uint32_t*>(row)[x];
+							sums[0] += (v & 1023) / 1023.0, sums[1] += ((v >> 10) & 1023) / 1023.0, sums[2] += ((v >> 20) & 1023) / 1023.0;
+						}
+					}
+				}
+				globals::d3d::context->Unmap(staging.get(), 0);
+				const double n = double(desc.Width) * desc.Height;
+				logger::info("[Hooks] late read {} (format {}) of frame {} at frame {}: mean [{:.4f} {:.4f} {:.4f}]", label, static_cast<int>(format), frame, a_frame,
+					sums[0] / n, sums[1] / n, sums[2] / n);
+			}
+			staging = nullptr;
+		}
+	};
+
 	struct Main_HDRTonemapBlendCinematic_Render
 	{
 		static void thunk(RE::ImageSpaceManager* a1, RE::ImageSpaceEffect* a2, uint32_t a3, uint32_t a4, RE::ImageSpaceShaderParam* a5)
@@ -465,11 +546,91 @@ namespace PostProcessingExtensions
 				char value[8]{};
 				return GetEnvironmentVariableA("CS_TONEMAP_INPUT_READBACK", value, sizeof(value)) && value[0] == '1';
 			}();
-			if (inputReadback && globals::state->frameCount % 500 == 0) {
+			// CS_TONEMAP_READBACK_AT=f1,f2,... reads only on those frames instead of every 500th.
+			static const std::vector<std::uint64_t> readbackFrames = [] {
+				std::vector<std::uint64_t> frames;
+				char value[256]{};
+				if (GetEnvironmentVariableA("CS_TONEMAP_READBACK_AT", value, sizeof(value))) {
+					for (const char* c = value; *c;) {
+						char* end = nullptr;
+						frames.push_back(std::strtoull(c, &end, 10));
+						c = (*end == ',') ? end + 1 : end;
+						if (end == c && *c) break;
+					}
+				}
+				return frames;
+			}();
+			const auto frame = static_cast<std::uint64_t>(globals::state->frameCount);
+			// Experiment (CS_TONEMAP_STALL_AT=f1,...): a 150 ms CPU stall on those frames, no GPU work.
+			static const std::vector<std::uint64_t> stallFrames = [] {
+				std::vector<std::uint64_t> frames;
+				char value[256]{};
+				if (GetEnvironmentVariableA("CS_TONEMAP_STALL_AT", value, sizeof(value)))
+					for (const char* c = value; *c;) {
+						char* end = nullptr;
+						frames.push_back(std::strtoull(c, &end, 10));
+						if (end == c) break;
+						c = (*end == ',') ? end + 1 : end;
+					}
+				return frames;
+			}();
+			if (std::ranges::find(stallFrames, frame) != stallFrames.end())
+				std::this_thread::sleep_for(std::chrono::milliseconds(150));
+			const auto framesOf = [](const char* a_name) {
+				std::vector<std::uint64_t> frames;
+				char value[256]{};
+				if (GetEnvironmentVariableA(a_name, value, sizeof(value)))
+					for (const char* c = value; *c;) {
+						char* end = nullptr;
+						frames.push_back(std::strtoull(c, &end, 10));
+						if (end == c) break;
+						c = (*end == ',') ? end + 1 : end;
+					}
+				return frames;
+			};
+			// Experiments: CS_TONEMAP_COPY_AT copies the output into staging (no wait); CS_TONEMAP_SYNC_AT waits for the GPU (no copy).
+			static const auto copyFrames = framesOf("CS_TONEMAP_COPY_AT");
+			static const auto syncFrames = framesOf("CS_TONEMAP_SYNC_AT");
+			static const auto lateFrames = framesOf("CS_TONEMAP_LATE_READ_AT");
+			static LateRead lateInput, lateOutput, lateAfter;
+			const bool lateFrame = std::ranges::find(lateFrames, frame) != lateFrames.end();
+			lateInput.Poll(frame), lateOutput.Poll(frame), lateAfter.Poll(frame);
+			if (lateFrame)
+				lateInput.Copy(a3, frame, "input before the anchor");
+			if (std::ranges::find(copyFrames, frame) != copyFrames.end()) {
+				winrt::com_ptr<ID3D11Resource> resource;
+				globals::game::renderer->GetRuntimeData().renderTargets[a4].SRV->GetResource(resource.put());
+				if (auto texture = resource.try_as<ID3D11Texture2D>()) {
+					D3D11_TEXTURE2D_DESC desc{};
+					texture->GetDesc(&desc);
+					desc.MipLevels = 1, desc.ArraySize = 1, desc.Usage = D3D11_USAGE_STAGING, desc.BindFlags = 0;
+					desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ, desc.MiscFlags = 0;
+					static winrt::com_ptr<ID3D11Texture2D> staging;
+					staging = nullptr;
+					if (SUCCEEDED(globals::d3d::device->CreateTexture2D(&desc, nullptr, staging.put())))
+						globals::d3d::context->CopySubresourceRegion(staging.get(), 0, 0, 0, 0, texture.get(), 0, nullptr);
+					logger::info("[Hooks] experiment: copied output {} to staging at frame {}", a4, frame);
+				}
+			}
+			if (std::ranges::find(syncFrames, frame) != syncFrames.end()) {
+				D3D11_QUERY_DESC desc{ D3D11_QUERY_EVENT, 0 };
+				winrt::com_ptr<ID3D11Query> query;
+				if (SUCCEEDED(globals::d3d::device->CreateQuery(&desc, query.put()))) {
+					globals::d3d::context->End(query.get());
+					globals::d3d::context->Flush();
+					BOOL done = FALSE;
+					while (globals::d3d::context->GetData(query.get(), &done, sizeof(done), 0) != S_OK)
+						std::this_thread::yield();
+					logger::info("[Hooks] experiment: waited for the GPU at frame {}", frame);
+				}
+			}
+			const bool readbackFrame = inputReadback && (readbackFrames.empty() ? frame % 500 == 0 : std::ranges::find(readbackFrames, frame) != readbackFrames.end());
+			if (readbackFrame) {
 				const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[a3];
 				if (const auto means = Util::VolumeMeans(target.SRV))
 					logger::info("[Hooks] tonemap input {} (D3D11) frame {}: mean [{:.4f} {:.4f} {:.4f}]", a3, globals::state->frameCount, (*means)[0], (*means)[1], (*means)[2]);
 			}
+			FrameAnnotations::TraceImageSpace(fmt::format("tonemap hook: input {} output {}", a3, a4));
 			// The ORG FX runtime (CS_ORG_FX=1) settles its passes for this frame before the anchor runs them.
 			ORGFxRuntime::Get().Prepare(a3, a4);
 			// Before the anchor runs: Post Processing's chain may run in its epoch (ORGPostProcessing).
@@ -479,7 +640,6 @@ namespace PostProcessingExtensions
 
 			// The same readback after the anchor's epoch (DXVK runs it before these copies), and of the output after the tonemap: where a
 			// black frame starts. Effects11's graph writes the input and the output; Post Processing's writes kMAIN and kMAIN_COPY.
-			const bool readbackFrame = inputReadback && globals::state->frameCount % 500 == 0;
 			const auto readAfter = [&](const char* a_when, std::uint32_t a_target, const char* a_name) {
 				const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[a_target];
 				if (const auto means = Util::VolumeMeans(target.SRV))
@@ -497,6 +657,8 @@ namespace PostProcessingExtensions
 			if (state->HandlePostProcessing(input, output)) {
 				if (readbackFrame)
 					readAfter("after Effects11", a4, "output");
+				if (lateFrame)
+					lateOutput.Copy(a4, frame, "output after Effects11");
 				return;
 			}
 
@@ -509,6 +671,8 @@ namespace PostProcessingExtensions
 			func(a1, a2, a3, a4, a5);
 			if (readbackFrame)
 				readAfter("after the vanilla tonemap", a4, "output");
+			if (lateFrame)
+				lateAfter.Copy(a4, frame, "output after the vanilla tonemap");
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -531,6 +695,50 @@ struct IDXGISwapChain_Present
 	{
 		// Nsight Perf passes span one frame's rendering: ended before the overlay and Present, begun after.
 		GpuCounters::OnPresentBegin();
+
+		// Experiment (CS_TONEMAP_LATE_READ_AT): the back buffer on those frames, read 8 frames later without waiting.
+		{
+			static const auto lateFrames = [] {
+				std::vector<std::uint64_t> frames;
+				char value[256]{};
+				if (GetEnvironmentVariableA("CS_TONEMAP_LATE_READ_AT", value, sizeof(value)))
+					for (const char* c = value; *c;) {
+						char* end = nullptr;
+						frames.push_back(std::strtoull(c, &end, 10));
+						if (end == c) break;
+						c = (*end == ',') ? end + 1 : end;
+					}
+				return frames;
+			}();
+			static PostProcessingExtensions::LateRead backBuffer, framebuffer, tempCopy, tempCopy2;
+			// The depth of field's targets (kMAIN, kHDR_BLURSWAP, kLDR_BLURSWAP, kLDR_DOWNSAMPLE0, kHDR_DOWNSAMPLE0).
+			static constexpr std::array<std::uint32_t, 5> dofTargets{ 1, 22, 23, 25, 26 };
+			static std::array<PostProcessingExtensions::LateRead, 5> dof;
+			static PostProcessingExtensions::LateRead mainDepth;
+			if (!lateFrames.empty()) {
+				const auto frame = static_cast<std::uint64_t>(globals::state->frameCount);
+				backBuffer.Poll(frame), framebuffer.Poll(frame), tempCopy.Poll(frame), tempCopy2.Poll(frame);
+				for (auto& read : dof)
+					read.Poll(frame);
+				mainDepth.Poll(frame);
+				winrt::com_ptr<ID3D11Texture2D> buffer;
+				if (std::ranges::find(lateFrames, frame) != lateFrames.end()) {
+					if (SUCCEEDED(This->GetBuffer(0, IID_PPV_ARGS(buffer.put()))))
+						backBuffer.Copy(buffer.get(), frame, "back buffer at Present");
+					framebuffer.Copy(std::uint32_t{ 0 }, frame, "target at Present");
+					tempCopy.Copy(std::uint32_t{ 41 }, frame, "target at Present");
+					tempCopy2.Copy(std::uint32_t{ 42 }, frame, "target at Present");
+					for (std::size_t i = 0; i < dof.size(); ++i)
+						dof[i].Copy(dofTargets[i], frame, "target at Present");
+					// kMAIN's depth: mean depth, mean stencil, share of zero depth.
+					if (auto* depth = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture) {
+						winrt::com_ptr<ID3D11Texture2D> texture;
+						if (SUCCEEDED(depth->QueryInterface(IID_PPV_ARGS(texture.put()))))
+							mainDepth.Copy(texture.get(), frame, "kMAIN depth at Present (depth, stencil, zero share)");
+					}
+				}
+			}
+		}
 
 		ZoneScopedN("CS.Present");
 		{
