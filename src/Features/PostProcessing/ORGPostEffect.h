@@ -43,7 +43,8 @@
  *    passes (Draw, Dispatch, Copy, or Add for a custom pass), reserve latch regions, then SetCurrent(output) when the
  *    effect replaces the image (WritesToMainTexture). An effect that only produces side data (bloom, exposure) leaves
  *    Current alone and Publishes its result by name; Composite Finds it. Programs come from Builder::Raster/Compute,
- *    which cache them across builds (a first build blocks on the compile).
+ *    which cache them across builds (a first build blocks on the compile). A shader's SHARED entry is Bind::Shared:
+ *    the chain then uploads CS's shared constants at the anchor (FrameBuffer, SharedData: frame count, depth params).
  * 6. Commit (in the epoch, every frame): write this frame's values into the regions Build reserved. Work that runs only
  *    on some frames (a LUT regenerated on a settings change) is an indirect dispatch whose group counts are in the latch
  *    (ComputeDispatch::indirect), so the recording stays the same.
@@ -125,7 +126,8 @@ namespace ORGPostChain
 	/**
 	 * @brief One entry of a pass's push block, in the shader's resource list order (ShaderBindings.h): SRV and UAV entries
 	 * are declared resources, Handle a sampler or another descriptor, Latch a LATCH entry's two words, Unused a handle the
-	 * shader never reads on this pass (another entry point's resource, the LUT type not loaded).
+	 * shader never reads on this pass (another entry point's resource, the LUT type not loaded), Shared a SHARED entry's four
+	 * words (CS's shared constant buffers, SharedConstants.h; the chain's client then uploads them at the anchor).
 	 */
 	struct Bind
 	{
@@ -135,6 +137,7 @@ namespace ORGPostChain
 			Uav,
 			Handle,
 			Latch,
+			Shared,
 		};
 
 		Kind kind = Kind::Handle;
@@ -147,6 +150,7 @@ namespace ORGPostChain
 		static Bind Uav(const Image& a_image) { return Uav(a_image.graph); }
 		static Bind Handle(std::uint32_t a_index) { return { Kind::Handle, nullptr, a_index }; }
 		static Bind Unused() { return Handle(0); }
+		static Bind Shared() { return { Kind::Shared, nullptr, 0 }; }
 		template <class T>
 		static Bind Latch(const LatchRegion<T>& a_region)
 		{

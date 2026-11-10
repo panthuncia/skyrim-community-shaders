@@ -35,6 +35,7 @@ ORGPostProcessing& ORGPostProcessing::Get()
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/SharedConstants.h"
 #	include "State.h"
 #	include "Utils/ColorSpace.h"
 #	include "Utils/D3D.h"
@@ -93,7 +94,8 @@ namespace ORGPostChain
 		std::vector<FrameAnchors::PassDesc> passes;
 		std::map<std::string, Image, std::less<>> published;
 		Image current;
-		std::string failure;  // empty while the build is good
+		std::string failure;           // empty while the build is good
+		bool sharedConstants = false;  // a pass reads CS's shared constants (Bind::Shared)
 	};
 
 	namespace
@@ -111,25 +113,39 @@ namespace ORGPostChain
 		{
 			std::uint32_t words = 0;
 			for (const auto& bind : a_bindings)
-				words += bind.kind == Bind::Kind::Latch ? 2u : 1u;
+				words += bind.kind == Bind::Kind::Latch ? 2u : (bind.kind == Bind::Kind::Shared ? 4u : 1u);
 			return words;
 		}
 
-		/** @brief Declares each SRV and UAV entry; the others get an empty token. */
-		std::vector<org::DeclaredViewToken> DeclareBindings(org::PassBuilder& a_builder, const std::vector<Bind>& a_bindings)
+		bool ReadsShared(const std::vector<Bind>& a_bindings)
 		{
-			std::vector<org::DeclaredViewToken> views(a_bindings.size());
+			return std::ranges::any_of(a_bindings, [](const Bind& a_bind) { return a_bind.kind == Bind::Kind::Shared; });
+		}
+
+		/** @brief A pass's declared entries: a view for each SRV and UAV entry (empty for the others), and the shared buffers. */
+		struct DeclaredBindings
+		{
+			std::vector<org::DeclaredViewToken> views;
+			SharedConstants::Bindings shared;
+		};
+
+		DeclaredBindings DeclareBindings(org::PassBuilder& a_builder, const std::vector<Bind>& a_bindings)
+		{
+			DeclaredBindings declared;
+			declared.views.resize(a_bindings.size());
 			for (std::size_t i = 0; i < a_bindings.size(); ++i) {
 				const auto& bind = a_bindings[i];
 				if (bind.kind == Bind::Kind::Srv)
-					views[i] = a_builder.ShaderResource(bind.resource).View();
+					declared.views[i] = a_builder.ShaderResource(bind.resource).View();
 				else if (bind.kind == Bind::Kind::Uav)
-					views[i] = a_builder.UnorderedAccess(bind.resource).View();
+					declared.views[i] = a_builder.UnorderedAccess(bind.resource).View();
 			}
-			return views;
+			if (ReadsShared(a_bindings))
+				declared.shared = SharedConstants::Declare(a_builder);
+			return declared;
 		}
 
-		PushWords FillWords(const std::vector<Bind>& a_bindings, const std::vector<org::DeclaredViewToken>& a_views, const org::LatchBlock& a_latch,
+		PushWords FillWords(const std::vector<Bind>& a_bindings, const DeclaredBindings& a_declared, const org::LatchBlock& a_latch,
 			org::PassRecordContext& a_recording)
 		{
 			PushWords words;
@@ -138,7 +154,7 @@ namespace ORGPostChain
 				switch (bind.kind) {
 				case Bind::Kind::Srv:
 				case Bind::Kind::Uav:
-					words.data[words.count++] = a_recording.Index(a_views[i]);
+					words.data[words.count++] = a_recording.Index(a_declared.views[i]);
 					break;
 				case Bind::Kind::Handle:
 					words.data[words.count++] = bind.value;
@@ -148,6 +164,13 @@ namespace ORGPostChain
 						const auto latch = ShaderBindings::LatchOf(a_latch, a_recording.FrameSlot(), bind.value);
 						words.data[words.count++] = latch.handle;
 						words.data[words.count++] = latch.offset;
+						break;
+					}
+				case Bind::Kind::Shared:
+					{
+						const auto shared = SharedConstants::Index(a_recording, a_declared.shared);
+						for (const auto handle : { shared.frameBuffer, shared.sharedData, shared.featureData, shared.permutation })
+							words.data[words.count++] = handle;
 						break;
 					}
 				}
@@ -200,7 +223,7 @@ namespace ORGPostChain
 		struct DrawBindings
 		{
 			org::DeclaredViewToken target;
-			std::vector<org::DeclaredViewToken> views;
+			DeclaredBindings declared;
 		};
 
 		struct DrawFrame
@@ -232,7 +255,7 @@ namespace ORGPostChain
 				if (!a_frame.spec)
 					return;
 				const auto& draw = *a_frame.spec;
-				const auto words = FillWords(draw.bindings, a_bindings.views, *draw.latch, a_recording);
+				const auto words = FillWords(draw.bindings, a_bindings.declared, *draw.latch, a_recording);
 				const RasterProgram::Colour colour{ .view = &a_bindings.target, .load = rhi::LoadOp::Load };
 				draw.program->Draw(a_recording, { .colours = { &colour, 1 }, .viewport = draw.viewport, .constants = words.Span(), .debugName = draw.name.c_str() });
 			}
@@ -255,7 +278,7 @@ namespace ORGPostChain
 
 		struct DispatchBindings
 		{
-			std::vector<org::DeclaredViewToken> views;
+			DeclaredBindings declared;
 		};
 
 		struct DispatchFrame
@@ -288,7 +311,7 @@ namespace ORGPostChain
 				if (!a_frame.spec)
 					return;
 				const auto& dispatch = *a_frame.spec;
-				const auto words = FillWords(dispatch.bindings, a_bindings.views, *dispatch.latch, a_recording);
+				const auto words = FillWords(dispatch.bindings, a_bindings.declared, *dispatch.latch, a_recording);
 				if (!dispatch.indirect) {
 					dispatch.program->Dispatch(a_recording, words.Span(), dispatch.groups[0], dispatch.groups[1], dispatch.groups[2]);
 					return;
@@ -520,6 +543,7 @@ namespace ORGPostChain
 			Fail(std::format("{}: {} push words, the program takes {}", a_draw.name, words, a_draw.program->constantWords));
 			return;
 		}
+		state.sharedConstants = state.sharedConstants || ReadsShared(a_draw.bindings);
 		auto spec = std::make_shared<DrawSpec>();
 		spec->name = PassName(a_draw.name);
 		spec->program = std::move(a_draw.program);
@@ -545,6 +569,7 @@ namespace ORGPostChain
 			Fail(std::format("{}: {} push words, the program takes {}", a_dispatch.name, words, a_dispatch.program->constantWords));
 			return;
 		}
+		state.sharedConstants = state.sharedConstants || ReadsShared(a_dispatch.bindings);
 		auto spec = std::make_shared<DispatchSpec>();
 		spec->name = PassName(a_dispatch.name);
 		spec->program = std::move(a_dispatch.program);
@@ -796,6 +821,7 @@ struct ORGPostProcessing::Impl
 		FrameAnchors::ClientDesc client{};
 		client.id = ORGPostChain::kClientId;
 		client.passes = next->passes;
+		client.sharedConstants = next->sharedConstants;
 		client.registerResources = [next](org::RenderGraph& a_graph) {
 			for (const auto& image : next->images)
 				image->Register(a_graph);
