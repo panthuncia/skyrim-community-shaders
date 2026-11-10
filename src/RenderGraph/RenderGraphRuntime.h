@@ -178,10 +178,20 @@ public:
 	 * @brief Runs one graph epoch at the current point of the D3D11 stream.
 	 * @param a_beforePrepare Called with the graph's services active, before its passes
 	 *        prepare: queue this frame's uploads (BUFFER_UPLOAD) here.
-	 * @return false when inactive or the graph failed; callers fall back to their D3D11 path.
+	 * @return false when inactive, when the graph failed, or when only this epoch's graph failed (org::GraphHost::EpochFailedError:
+	 * the graph stays up for the other epochs). Callers fall back to their D3D11 path.
 	 */
 	bool ExecuteEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare = {},
 		std::shared_ptr<const void> a_resourceOwner = {});
+
+	/**
+	 * @brief Render thread: the epochs whose graph failed to build or prepare since the last call, each handed to its owner
+	 * (render-graph.md, "Failure isolation"). A frame anchor's clients of that build are dropped and the anchor built again without
+	 * them (FrameAnchors::OnEpochFailed); Drawcall Limit Fix hands drawing back to the engine at its next frame start. Called at
+	 * every frame's end (SignalFramePace), before every anchor run, and at Drawcall Limit Fix's frame start. Call it where no epoch
+	 * is being run.
+	 */
+	void PollEpochFailures();
 
 	/**
 	 * @brief Render thread: an external epoch (org::GraphHost::SetExternalEpochs) submitted at the current point of the
@@ -418,6 +428,8 @@ private:
 	void ServicePipelineReload();
 	/** @brief The render thread, every frame (SignalFramePace): ReleaseAfterD3D11's owners whose query completed are dropped. */
 	void ServiceD3D11Releases();
+	/** @brief The host's epoch failure callback (PollEpochFailures): routes the failure to the epoch's owner. */
+	void OnEpochFailed(std::uint32_t a_epoch, bool a_keptGraph, const std::string& a_error);
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;

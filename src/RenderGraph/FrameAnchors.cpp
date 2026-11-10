@@ -152,6 +152,10 @@ namespace FrameAnchors
 			std::function<void()> lateHook;
 			std::atomic<std::shared_ptr<const Snapshot>> snapshot;
 			std::array<std::atomic<std::uint64_t>, kAnchors> built{};  // the snapshot each anchor's graph was last built from
+			// The snapshot each anchor's last build was made from, and the one before it. An epoch failure drops the clients of the
+			// failed build (OnEpochFailed); a failed build that kept the old graph puts the one before back.
+			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kAnchors> builtSnapshots{};
+			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kAnchors> previousSnapshots{};
 		};
 
 		State& Anchors()
@@ -271,7 +275,11 @@ namespace FrameAnchors
 				if (!snapshot || !IsAnchorGraph(a_graph))
 					return;
 				// What the run that submits this graph reads (ClientDesc::executed, one-shot passes): the graph holds this snapshot's passes.
-				Anchors().built[IndexOf(AnchorOfEpoch(a_graph.PassEpochFilter()))].store(snapshot->serial, std::memory_order_release);
+				const auto index = IndexOf(AnchorOfEpoch(a_graph.PassEpochFilter()));
+				auto& anchors = Anchors();
+				anchors.built[index].store(snapshot->serial, std::memory_order_release);
+				anchors.previousSnapshots[index].store(anchors.builtSnapshots[index].load(std::memory_order_acquire), std::memory_order_release);
+				anchors.builtSnapshots[index].store(snapshot, std::memory_order_release);
 				for (const auto& [id, resource] : snapshot->imports)
 					a_graph.RegisterResource(org::ResourceIdentifier(id), resource);
 				for (const auto& client : snapshot->clients)
@@ -628,6 +636,10 @@ namespace FrameAnchors
 		auto& runtime = RenderGraphRuntime::Get();
 		if (!runtime.IsActive())
 			return false;
+		// Before the clients are read: an anchor whose epoch failed drops its clients here (OnEpochFailed), not in the middle of a run.
+		runtime.PollEpochFailures();
+		if (!runtime.IsActive())
+			return false;
 		Service(state);
 		// The clients in this anchor's graph; the run happens when one is active or has a one-shot pass pending.
 		std::vector<RunClient> clients;
@@ -665,6 +677,11 @@ namespace FrameAnchors
 					if (client.active && client.desc->commit)
 						client.desc->commit(a_point);
 			});
+		}
+		if (!ran && runtime.IsActive()) {
+			// Only this anchor's epoch failed (ExecuteEpoch logged why). Its clients are dropped at the next poll (OnEpochFailed); the
+			// other anchors and their clients run on.
+			return false;
 		}
 		if (!ran) {
 			// The graph failed and stopped (ExecuteEpoch logged why): every client returns to its D3D11 path.
@@ -762,6 +779,55 @@ namespace FrameAnchors
 		RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(owner));
 	}
 
+	void OnEpochFailed(std::uint32_t a_epoch, const std::string& a_error, bool a_keptGraph)
+	{
+		auto& state = Anchors();
+		const Anchor anchor = AnchorOfEpoch(a_epoch);
+		if (anchor == Anchor::Count)
+			return;
+		const std::uint32_t index = IndexOf(anchor);
+		const auto failed = state.builtSnapshots[index].load(std::memory_order_acquire);
+		if (a_keptGraph) {
+			// The previous graph still runs: what it was built from is the anchor's again.
+			const auto previous = state.previousSnapshots[index].load(std::memory_order_acquire);
+			state.builtSnapshots[index].store(previous, std::memory_order_release);
+			state.built[index].store(previous ? previous->serial : 0, std::memory_order_release);
+		}
+		// The clients with passes at this anchor in the failed build, still registered as they were then. A client registered again
+		// since is not in that build, and its rebuild is already asked for.
+		std::vector<std::shared_ptr<const ClientDesc>> dropped;
+		std::uint32_t mask = 1u << index;
+		if (failed)
+			for (const auto& client : failed->clients) {
+				if (!HasPasses(*client, anchor))
+					continue;
+				const auto found = std::ranges::find_if(state.clients, [&](const Client& a_client) { return a_client.desc == client; });
+				if (found == state.clients.end())
+					continue;
+				mask |= AnchorMask(*client);
+				dropped.push_back(client);
+				state.clients.erase(found);
+			}
+		if (dropped.empty()) {
+			logger::error("[ORG] frame anchors: the {} epoch failed and none of its build's clients is still registered; it runs nothing until a "
+						  "client registers or changes. Why: {}",
+				Name(anchor), a_error);
+			return;
+		}
+		// The anchor, and the dropped clients' other anchors, built again without them.
+		Publish(state);
+		Rebuild(state, mask);
+		std::string ids;
+		for (const auto& client : dropped)
+			ids += fmt::format("{}{}", ids.empty() ? "" : ", ", client->id);
+		logger::error("[ORG] frame anchors: the {} epoch failed; its clients {} are dropped and return to D3D11, and the anchor is built again "
+					  "without them. Why: {}",
+			Name(anchor), ids, a_error);
+		for (const auto& client : dropped)
+			if (client->onFailed)
+				client->onFailed();
+	}
+
 	void AddToFrame(std::vector<std::uint32_t>& a_epochs)
 	{
 		auto& state = Anchors();
@@ -825,6 +891,7 @@ namespace FrameAnchors
 	std::uint32_t SegmentOf(Anchor) { return 0; }
 	bool IsUnusedSegment(std::uint32_t) { return false; }
 	const SegmentNames* NamesOf(std::uint32_t) { return nullptr; }
+	void OnEpochFailed(std::uint32_t, const std::string&, bool) {}
 	void AddToFrame(std::vector<std::uint32_t>&) {}
 	void Attach(org::GraphHost&) {}
 }

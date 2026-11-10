@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/Coordinator.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
+#include "Features/DrawcallLimitFix.h"
 
 #include <thread>
 
@@ -947,6 +948,13 @@ namespace DCLF
 			if (s.revisions.explicitBuilds && host->RebuildRequested())
 				s.BuildIfAsked(*host);
 			if (const auto now = Clock::now(); now - ticketsAt >= kTicketPeriod) {
+				// One of DCLF's epochs failed to build or prepare (a build just above, say): no snapshot will be current for it. This
+				// frame already draws with DCLF, so the error ends the game here, clearly, instead of a 5 s wait and a GPU timeout.
+				RenderGraphRuntime::Get().PollEpochFailures();
+				if (const auto& failure = DrawcallLimitFix::GraphEpochFailure(); !failure.empty())
+					stl::report_and_fail(fmt::format("Drawcall Limit Fix: frame {} waited at its start for a scene snapshot, and {}. DCLF does not "
+													 "hand drawing back to the engine within a frame it draws",
+						frame, failure));
 				s.ReleaseTicketsForRecordings(*host, 0);
 				Direct::SubmitQueued();
 				Direct::ReleaseCompletedSlots();

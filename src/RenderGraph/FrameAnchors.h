@@ -127,7 +127,8 @@ namespace FrameAnchors
 	 * - active: at the hook, before the epoch: whether the client has work this frame. When no client of an anchor is active, the
 	 *   anchor submits nothing. Null: always active. An inactive client's passes still run when another client keeps the epoch,
 	 *   with its commit not called: put its per-run dispatches and draws behind its run gates (gates), which the run closes.
-	 * - onFailed: the graph failed and stopped. The client is unregistered; it returns to its D3D11 path.
+	 * - onFailed: the graph failed and stopped, or the epoch of one of the client's anchors failed to build or prepare with the
+	 *   client in it (OnEpochFailed). The client is unregistered; it returns to its D3D11 path.
 	 * - sharedConstants: the client's passes read CS's shared constant buffers (SharedConstants.h). Each of its anchors' epochs
 	 *   then writes their values at the hook and uploads them before the anchor's first pass. Such a client may register before
 	 *   CS's first upload sized them: its passes join the graphs once the buffers can be made.
@@ -265,6 +266,14 @@ namespace FrameAnchors
 	 * reservations.
 	 */
 	void AddToFrame(std::vector<std::uint32_t>& a_epochs);
+
+	/**
+	 * @brief Render thread (RenderGraphRuntime::PollEpochFailures): an anchor's epoch failed to build or prepare. Every client with
+	 * passes at that anchor in the failed build is unregistered, its onFailed called, and the anchor (and the dropped clients' other
+	 * anchors) built again without them. One error line names the clients and the error. a_keptGraph: the build failed and the
+	 * anchor's previous graph still runs. Nothing for an epoch that is not an anchor's.
+	 */
+	void OnEpochFailed(std::uint32_t a_epoch, const std::string& a_error, bool a_keptGraph);
 
 	/** @brief Initialize, once, with the host made and no graph built: adds the anchors' extension when any anchor has an epoch. */
 	void Attach(org::GraphHost& a_host);

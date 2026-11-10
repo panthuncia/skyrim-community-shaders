@@ -484,7 +484,8 @@ Each anchor's ordering rule is in [org-extension-api-notes.md](./org-extension-a
     `EngineCubemap(RE::RENDER_TARGETS_CUBEMAP)` (`cs.engine.cubemap.<n>`, a cube default SRV), and a feature's own D3D11
     texture that is not ported yet from `D3D11Texture(name, texture, srv, uav)` (`cs.d3d11.<name>`; Screen Space Shadows reads Terrain Blending's blended depth through it). Every import
     describes all its mips and slices; a `D3D11_RESOURCE_MISC_TEXTURECUBE` texture gets cube views.
-4.  When the graph fails, `onFailed` is called and the client is removed; the feature returns to its D3D11 path.
+4.  When the graph fails, `onFailed` is called and the client is removed; the feature returns to its D3D11 path. The same
+    happens when only the anchor's epoch fails with the client in it (below, "Failure isolation").
 5.  CS's shared constant buffers (FrameBuffer, SharedData, FeatureData, Permutation): set `.sharedConstants = true`. The anchor's
     epoch then writes their values into a `LatchBlock` at the hook (the bytes D3D11 sees there: CS's cached `PerFrame` mapping and
     State's last uploads) and copies them into four CBV buffers (`cs.shared.*`) before the anchor's passes. Such a client may
@@ -544,6 +545,35 @@ FrameAnchors::Register({ .id = "cs.myfeature",
 -   **Not shared with DCLF.** DCLF keeps its schedule (`Schedule/Frame.cpp`, `Api/Passes.h`): its passes depend on its scene
     revisions and recorded shapes. Anchors are the thin layer for every other feature. DCLF's imports and the anchors' imports of
     the same engine image are separate graph resources; that is safe because they never share an epoch.
+
+### Failure isolation
+
+A failure in one epoch stays with that epoch. It never stops the graph host's thread, so the other epochs keep running.
+
+-   **What fails.** An epoch's graph can fail to build (a client's `registerResources`, a pass's `Declare`, the compile) or to
+    prepare (a pass's `Prepare` or `Record`, or a bindless view it resolves that its resource does not have). The host marks
+    that epoch failed and keeps running (`org::GraphHost`, ORG's `docs/persistent-epochs.md`, "Failure isolation").
+-   **The run.** `ExecuteEpoch` returns false for a failed epoch and logs it once. Nothing of it was submitted. The runtime stays
+    active, so the caller falls back for that run only.
+-   **The owner.** `RenderGraphRuntime::PollEpochFailures` hands each failure to the epoch's owner. It runs at every frame's end,
+    before every anchor run, and at DCLF's frame start. It never runs in the middle of an anchor's run.
+    -   **An anchor's epoch.** Every client with passes at that anchor in the failed build is unregistered and gets `onFailed`.
+        The anchor, and the dropped clients' other anchors, are built again without them. One error line names the clients and
+        the error: `[ORG] frame anchors: the <anchor> epoch failed; its clients <ids> are dropped ...`. Clients at other anchors
+        keep running. A client with passes at several anchors is dropped from all of them.
+    -   **A DCLF epoch.** DCLF cannot hand drawing back inside a frame it draws. At its next frame start it turns itself off for
+        the session and the engine draws again, as when its scene pump stops (`[DCLF] its render graph epoch '<label>' failed`).
+        If a frame is already waiting for a scene snapshot when the failure arrives, DCLF ends the game with
+        `stl::report_and_fail` and the error. That is a clear stop instead of a 5 s wait and a GPU timeout.
+    -   **Any other epoch** (Light Limit Fix's light culling). `ExecuteEpoch` returns false for it, and the feature falls back
+        to D3D11 as its contract says.
+-   **Recovery.** A failed epoch is not built again every frame. It is built again when a client registers, changes or is
+    dropped. A build that succeeds clears the failure.
+-   **Host-wide errors.** A failed GPU wait or a lost device still stops the host's thread. Every epoch then fails, the runtime
+    turns inactive, and every client gets `onFailed`.
+-   **Testing it.** `CS_ORG_ANCHOR_SELFTEST=1` with `CS_ORG_ANCHOR_SELFTEST_FAIL=1` adds a client whose UAV clear at the Present
+    anchor fails to prepare (its texture has no CPU-side UAV). Expect `the failing client was dropped as expected`, then
+    `isolation OK`, and the other anchors' `OK` lines.
 
 ### The setup template
 
@@ -851,6 +881,7 @@ switches (`CS_ORG_<FEATURE>=1`) read through it too.
 | `CS_ORG_SUBSURFACE_SCATTERING=1` | Subsurface Scattering at the DeferredPasses anchor (`SubsurfaceScattering/ORGSubsurfaceScattering.cpp`): the diffuse extraction and the separable or Burley blur through a run gate opened on frames with skin, reading the shared constants; the intermediate textures are transient graph textures. Logs `[ORG] Subsurface Scattering runs on the render graph`; falls back to D3D11 on any failure. |
 | `CS_ORG_TERRAIN_BLENDING=1` | Terrain Blending's depth blend runs at the DepthDone anchor (`ORGTerrainBlending.cpp`): `DepthBlend` writes the blended depths and the terrain mask (t55) as graph textures exported to D3D11 and published (`TerrainBlending::BlendedDepth`, `BlendedDepth16`, `Mask`); DCLF's t55 reads the mask by name. The terrain depth stays a D3D11 texture (org-extension-api-notes.md, "Depth targets a D3D11 draw still writes"). Logs `[ORG] Terrain Blending: the depth blend runs on the render graph`; falls back to D3D11 on any failure. A frame whose anchor submitted nothing blends on D3D11, and every view Terrain Blending hands out names the D3D11 textures for that frame (`ORGTerrainBlending::Holds`). |
 | `CS_ORG_ANCHOR_SELFTEST=1` | Reserve every frame anchor and run a test client at each: a raster pass writes a texture, a compute pass reads it and one texel of kMAIN into a buffer, and a copy reads that back. Each anchor logs `[ORG] anchor self-test: <anchor> OK` once, then `every anchor OK`. |
+| `CS_ORG_ANCHOR_SELFTEST_FAIL=1` | With `CS_ORG_ANCHOR_SELFTEST=1`: a second test client whose UAV clear at the Present anchor fails to prepare, and the main test client leaves Present out. Checks failure isolation ("Failure isolation" above): logs `the failing client was dropped as expected`, then `isolation OK, <anchor> ran with the main client after the failing client was dropped`. `isolation FAILED` means the main client was dropped too. |
 | `CS_ORG_GRAPHRES_SELFTEST=1` | Reserve DeferredPasses and test the graph-backed resources there (above, "Graph-backed feature resources"). Logs `[ORG] graph resource self-test: 16x16 OK ...`, then `resized to 32x32`, `32x32 OK ...` and `every check OK; the texture is released`; `MISMATCH` otherwise. |
 | `CS_ORG_UPSCALING=1` | Upscaling's own passes on the graph (`Upscaling/ORGUpscaling.cpp`): the depth upscale (the copies, `DepthRefractionUpscalePS`, `UnderwaterMaskUpscalePS`; in the graph only while the depth upscale runs) and the upscaled colour's copy into kMAIN (a `CopyHudlessPS` draw through a run gate, on frames the upscaler returned a result) at the `Upscale` anchor, and frame generation's hudless copy (`CopyHudlessPS`) at `FrameGeneration`. The upscaled and hudless textures are graph textures exported to D3D11, which Streamline's evaluates in the interop ring still write and read. Logs `[ORG] Upscaling's own passes run on the render graph` and `created the upscaled texture on the graph`; on any failure the D3D11 textures and passes come back (`[ORG] Upscaling returns to D3D11: ...`). |
 | `CS_ORG_IMGUI=1` | Draw CS's ImGui frames with the render graph's backend at the `Overlay` anchor once the graph is up ("ImGui on the graph"). Logs `[ORG] ImGui: drawn by the render graph` and `drawing onto ...`. |

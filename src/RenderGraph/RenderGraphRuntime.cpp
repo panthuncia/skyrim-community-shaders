@@ -527,6 +527,8 @@ struct RenderGraphRuntime::Impl
 	// The frame-wait timeline cannot serve: it exists only with an upload queue, which a device with no transfer family lacks.
 	rhi::TimelinePtr nativeTimelines;
 	std::atomic<bool> faulted = false;
+	// Render thread: the segments whose failed epoch ExecuteEpoch has logged, one bit each. A segment's bit clears when it submits again.
+	std::uint32_t failedEpochsLogged = 0;
 
 	// The thread that drives the D3D11 immediate context (the one running epochs).
 	// Its submissions go into DXVK's command stream; other threads submit directly.
@@ -1810,6 +1812,11 @@ bool RenderGraphRuntime::Initialize()
 		PipelineRegistry()->Retire(a_submissions);
 #endif
 	});
+	// One epoch's graph failed to build or prepare (PollEpochFailures hands it over on the render thread). The host and the other epochs
+	// run on; the epoch's owner decides what to do (OnEpochFailed).
+	state->host->SetEpochFailedCallback([this](const org::GraphHost::EpochFailure& a_failure) {
+		OnEpochFailed(a_failure.epoch, a_failure.keptGraph, a_failure.error);
+	});
 #if defined(CS_HAS_ORG_MODULE_SERVICES)
 	// Shader hot reload's safe point (docs/development/dclf-hot-reload.md): every build of the graph publishes what the registry staged.
 	// There the host's thread is stopped and the old graph's work waited for, so no recording or preparation reads a slot while it
@@ -2075,6 +2082,43 @@ std::uint32_t RenderGraphRuntime::TakeSubmittedSegments()
 	return impl ? std::exchange(impl->submittedSegments, 0u) : 0u;
 }
 
+void RenderGraphRuntime::PollEpochFailures()
+{
+	if (!IsActive())
+		return;
+	try {
+		(void)impl->host->PollEpochFailures();
+	} catch (const std::exception& e) {
+		logger::error("[ORG] an epoch failure's handler failed: {}", e.what());
+	}
+}
+
+void RenderGraphRuntime::OnEpochFailed(std::uint32_t a_epoch, bool a_keptGraph, const std::string& a_error)
+{
+	// Epochs are segment values. Without epochs (CS_ORG_EPOCHS=0) the one graph runs every segment: its failure is the whole graph's.
+	if (!EpochsEnabled() || a_epoch >= static_cast<std::uint32_t>(Segment::Count)) {
+		logger::error("[ORG] Render graph failed, disabling the graph: {}", a_error);
+		impl->faulted = true;
+		disabledReason = a_error;
+		return;
+	}
+	const auto segment = static_cast<Segment>(a_epoch);
+	logger::error("[ORG] {} failed ({}); the other epochs run on: {}", Impl::SegmentLabel(segment),
+		a_keptGraph ? "its previous graph still runs" : "it runs nothing until it is built again", a_error);
+	// The frame anchors drop the clients of the anchor's failed build and build the anchor again without them.
+	if (FrameAnchors::NamesOf(a_epoch)) {
+		FrameAnchors::OnEpochFailed(a_epoch, a_error, a_keptGraph);
+		return;
+	}
+	// Drawcall Limit Fix hands drawing back to the engine at its next frame start.
+	if (IsDclfSegment(segment)) {
+		DrawcallLimitFix::OnGraphEpochFailed(Impl::SegmentLabel(segment), a_error);
+		return;
+	}
+	// Any other epoch (Light Limit Fix's light culling): ExecuteEpoch returns false for it from now on, and its feature falls back
+	// to D3D11 as its contract says.
+}
+
 void RenderGraphRuntime::SignalFramePace(bool a_active)
 {
 	// The frame's end on the render thread (the graph's owner), every frame: shader hot reload's owner point, and the point
@@ -2082,6 +2126,8 @@ void RenderGraphRuntime::SignalFramePace(bool a_active)
 	ServicePipelineReload();
 	ServiceD3D11Releases();
 	RenderGraph::Engine::Tripwire::ServiceRetired();
+	// Between frames: the epochs that failed since the last poll go to their owners.
+	PollEpochFailures();
 	// The self-tests register as ordinary clients after the first frame, when the engine's targets they import exist. Each
 	// does so once, and nothing when its switch is off.
 	if (IsActive()) {
@@ -2375,7 +2421,19 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 			}
 		}
 		impl->submittedSegments |= 1u << static_cast<std::uint32_t>(a_segment);
+		impl->failedEpochsLogged &= ~(1u << static_cast<std::uint32_t>(a_segment));
 		return true;
+	} catch (const org::GraphHost::EpochFailedError& e) {
+		// Only this epoch's graph failed, and nothing of it was submitted. The graph stays up for the other epochs. The epoch's owner
+		// hears of it at the next PollEpochFailures (OnEpochFailed); until then the caller falls back for this run.
+		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
+		if (impl->batching)
+			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
+		if (const std::uint32_t bit = 1u << static_cast<std::uint32_t>(a_segment); !(impl->failedEpochsLogged & bit)) {
+			impl->failedEpochsLogged |= bit;
+			logger::error("[ORG] {} did not run, its graph failed (the other epochs run on): {}", Impl::SegmentLabel(a_segment), e.what());
+		}
+		return false;
 	} catch (const std::exception& e) {
 		// What the graph did submit still goes to DXVK in order (it has committed it); then the graph stops.
 		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
@@ -2845,6 +2903,7 @@ void RenderGraphRuntime::ReleaseAfterD3D11(std::shared_ptr<const void>) {}
 void RenderGraphRuntime::ServiceD3D11Releases() {}
 void RenderGraphRuntime::ReportGpuTimings(std::uint32_t, bool) {}
 std::uint32_t RenderGraphRuntime::TakeSubmittedSegments() { return 0; }
+void RenderGraphRuntime::PollEpochFailures() {}
 void RenderGraphRuntime::SignalFramePace(bool) {}
 void RenderGraphRuntime::SealPresented() {}
 void RenderGraphRuntime::WaitFramePace() {}
