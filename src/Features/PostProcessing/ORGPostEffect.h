@@ -402,6 +402,8 @@ namespace ORGPostChain
 	std::unique_ptr<Effect> MakeCamera();
 	std::unique_ptr<Effect> MakeComposite();
 	std::unique_ptr<Effect> MakeMotionBlur();
+	std::unique_ptr<Effect> MakeLocalExposure();
+	std::unique_ptr<Effect> MakeHistogramAutoExposure();
 }
 
 #endif

@@ -2,6 +2,8 @@
 /// Builds the luminance pyramid and edge-aware grid. Composite resolves the
 /// base layer and evaluates tonal remapping using the final global exposure.
 
+#include "Common/OrgResources.hlsli"
+
 #include "Common/Color.hlsli"
 
 #define GRID_DEPTH 32
@@ -11,7 +13,10 @@
 #define GRID_QUANTIZATION 4096
 #define MAX_BLUR_RADIUS 64
 
-cbuffer LocalExposureCB : register(b1)
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (LocalExposure::LocalExposureCB at b1). The
+// ORG chain (ORG/ORGLocalExposure.cpp) gives heap handles in the push block and the constants from its latch. Each entry
+// point reads only some of the resources: the others' handles are never dereferenced.
+struct LocalExposureConstants
 {
 	float ManualExposure;
 	float Strength;
@@ -38,24 +43,27 @@ cbuffer LocalExposureCB : register(b1)
 	float2 Padding1;
 };
 
-Texture2D<float4> TexColor : register(t0);
-Texture2D<float> TexLogLuminance : register(t1);
-Texture3D<float2> TexLuminanceGrid : register(t2);
-Texture2D<float> TexBlurredLuminance : register(t3);
-SamplerState LinearSampler : register(s0);
-SamplerState MirrorSampler : register(s1);
-
-RWTexture2D<float> RWTexOutput : register(u0);
-RWTexture3D<float2> RWTexLuminanceGrid : register(u1);
+#define LOCAL_EXPOSURE_RESOURCES(X)                    \
+	X(SRV, Texture2D<float4>, TexColor, 0)             \
+	X(SRV, Texture2D<float>, TexLogLuminance, 1)       \
+	X(SRV, Texture3D<float2>, TexLuminanceGrid, 2)     \
+	X(SRV, Texture2D<float>, TexBlurredLuminance, 3)   \
+	X(SAMPLER, SamplerState, LinearSampler, 0)         \
+	X(SAMPLER, SamplerState, MirrorSampler, 1)         \
+	X(UAV, RWTexture2D<float>, RWTexOutput, 0)         \
+	X(UAV, RWTexture3D<float2>, RWTexLuminanceGrid, 1) \
+	X(LATCH, LocalExposureConstants, LocalExposure, 1)
+ORG_PUSH_BLOCK(LOCAL_EXPOSURE_RESOURCES(ORG_HANDLE))
+LOCAL_EXPOSURE_RESOURCES(ORG_RESOURCE)
 
 float SceneLogLuminance(float3 color)
 {
 	float luminance = Color::RGBToLuminance(max(color, 0.0));
-	return clamp(log2(max(luminance, exp2(LogLuminanceMin))), LogLuminanceMin, LogLuminanceMax);
+	return clamp(log2(max(luminance, exp2(LocalExposure.LogLuminanceMin))), LocalExposure.LogLuminanceMin, LocalExposure.LogLuminanceMax);
 }
 
 [numthreads(8, 8, 1)] void CSSetupLogLuminance(uint2 tid : SV_DispatchThreadID) {
-	if (tid.x >= InputWidth || tid.y >= InputHeight)
+	if (tid.x >= LocalExposure.InputWidth || tid.y >= LocalExposure.InputHeight)
 		return;
 
 	RWTexOutput[tid] = SceneLogLuminance(TexColor[tid].rgb);
@@ -87,10 +95,10 @@ float BlurLogLuminance(uint2 tid, float2 direction)
 	RWTexOutput.GetDimensions(outputSize.x, outputSize.y);
 	float2 uv = (float2(tid) + 0.5) / float2(outputSize);
 	float2 texelSize = rcp(float2(outputSize));
-	float sigma = max(BlurRadius * 0.173, 0.5);
+	float sigma = max(LocalExposure.BlurRadius * 0.173, 0.5);
 	float result = 0.0;
 	float weightSum = 0.0;
-	int kernelRadius = min((int)ceil(BlurRadius), MAX_BLUR_RADIUS);
+	int kernelRadius = min((int)ceil(LocalExposure.BlurRadius), MAX_BLUR_RADIUS);
 
 	[loop] for (int offset = -kernelRadius; offset <= kernelRadius; offset++)
 	{
@@ -103,7 +111,7 @@ float BlurLogLuminance(uint2 tid, float2 direction)
 }
 
 [numthreads(8, 8, 1)] void CSBlurHorizontal(uint2 tid : SV_DispatchThreadID) {
-	if (tid.x >= BlurredWidth || tid.y >= BlurredHeight)
+	if (tid.x >= LocalExposure.BlurredWidth || tid.y >= LocalExposure.BlurredHeight)
 		return;
 
 	RWTexOutput[tid] = BlurLogLuminance(tid, float2(1.0, 0.0));
@@ -111,7 +119,7 @@ float BlurLogLuminance(uint2 tid, float2 direction)
 
 	[numthreads(8, 8, 1)] void CSBlurVertical(uint2 tid : SV_DispatchThreadID)
 {
-	if (tid.x >= BlurredWidth || tid.y >= BlurredHeight)
+	if (tid.x >= LocalExposure.BlurredWidth || tid.y >= LocalExposure.BlurredHeight)
 		return;
 
 	RWTexOutput[tid] = BlurLogLuminance(tid, float2(0.0, 1.0));
@@ -132,7 +140,7 @@ groupshared uint ThreadGridLogSums[GRID_THREAD_SIZE * GRID_THREAD_SIZE][GRID_DEP
 		ThreadGridLogSums[groupIndex][bin] = 0;
 	}
 
-	const float inverseLogRange = rcp(LogLuminanceMax - LogLuminanceMin);
+	const float inverseLogRange = rcp(LocalExposure.LogLuminanceMax - LocalExposure.LogLuminanceMin);
 	const uint2 tileOrigin = groupID.xy * GRID_TILE_SIZE;
 
 	[unroll] for (uint y = 0; y < GRID_SAMPLE_STRIDE; y++)
@@ -140,8 +148,8 @@ groupshared uint ThreadGridLogSums[GRID_THREAD_SIZE * GRID_THREAD_SIZE][GRID_DEP
 		[unroll] for (uint x = 0; x < GRID_SAMPLE_STRIDE; x++)
 		{
 			uint2 pixel = tileOrigin + groupThreadID.xy + uint2(x, y) * GRID_THREAD_SIZE;
-			if (pixel.x < InputWidth && pixel.y < InputHeight) {
-				float normalizedLog = saturate((TexLogLuminance[pixel] - LogLuminanceMin) * inverseLogRange);
+			if (pixel.x < LocalExposure.InputWidth && pixel.y < LocalExposure.InputHeight) {
+				float normalizedLog = saturate((TexLogLuminance[pixel] - LocalExposure.LogLuminanceMin) * inverseLogRange);
 				float binPosition = normalizedLog * (GRID_DEPTH - 1);
 				uint lowerBin = min((uint)binPosition, GRID_DEPTH - 1);
 				uint upperBin = min(lowerBin + 1, GRID_DEPTH - 1);

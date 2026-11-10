@@ -889,3 +889,30 @@ Keys used so far:
   want these as typed, versioned outputs of an effect (an image with its view and size, a constants struct with its layout)
   rather than strings, so a contributor's change of format or layout is caught when the chain is built.
 - **Found by:** P3 W3, Post Processing Composite (2026-11-09).
+### Reading back small GPU values only on the frames that want them
+
+- **Need:** read a few bytes (a histogram, one adapted luminance) back to the CPU on the frames a settings panel or a log
+  asks for them, without a host wait and without a recording that replays an old readback plan.
+- **Who:** CS's Histogram Auto Exposure (histogram panel, Auto ISO meter); any plugin with a GPU-side statistic in its UI.
+- **Where it fits:** ORG's `ReadbackCapturePass` captures every frame. CS's pass (ORG/ORGHistogramAutoExposure.cpp) is a
+  copy of it that plans the capture only while an atomic "wanted" flag is set, and has no `Revision`, so it is prepared
+  every frame. An API would take a "capture this frame" predicate, or a revision-safe one-shot request.
+- **Found by:** P3 W3, Post Processing (2026-11-09).
+
+### Pyramids without per-mip views in a shared pass helper
+
+- **Need:** compute passes that read mip N-1 and write mip N of one texture.
+- **Who:** CS's Local Exposure (log-luminance pyramid); bloom chains; any plugin downsampling chain.
+- **Where it fits:** the chain's Bind entries take whole-resource views. Local Exposure gives each level its own transient
+  texture the size of the D3D11 mip (rounded down, as mips are), which reads the same as single-mip views and keeps every
+  level aliasable. An API would let a binding name a mip range (`SrvView`/`UavView` with mips).
+- **Found by:** P3 W3, Post Processing (2026-11-09).
+
+### First contents of a history buffer
+
+- **Need:** a history buffer that starts at zero, as a new D3D11 buffer does, before its first frame reads it.
+- **Who:** CS's Histogram Auto Exposure (histogram, adaptation); any plugin with an accumulating buffer.
+- **Where it fits:** UAV clears in CS (`GraphPasses::MakeUavClear`) cover textures only, and a one-shot clear must count
+  as done only when its pass ran. The exposure port adds a `CS_Reset` entry, dispatched indirectly with one group over
+  its first few frames and zero after. An API would take an initial value (zero fill) for a History resource.
+- **Found by:** P3 W3, Post Processing (2026-11-09).

@@ -95,6 +95,46 @@ void LocalExposure::SaveSettings(json& o_json)
 	o_json = settings;
 }
 
+uint LocalExposure::MipCount(uint a_width, uint a_height)
+{
+	uint mips = 1;
+	uint w = a_width, h = a_height;
+	while (w > 1 && h > 1 && mips < s_MaxMips) {
+		w = (w + 1) / 2;
+		h = (h + 1) / 2;
+		mips++;
+	}
+	return mips;
+}
+
+LocalExposure::LocalExposureCB LocalExposure::Constants(uint a_inputWidth, uint a_inputHeight, uint a_blurWidth, uint a_blurHeight) const
+{
+	const float blurRadius = std::min(
+		a_blurWidth * std::clamp(settings.BlurredLuminanceKernelSize, 0.f, 100.f) * 0.005f,
+		(float)s_MaxBlurRadius);
+	return {
+		.ManualExposure = settings.Exposure,
+		.Strength = std::clamp(settings.Strength, 0.f, 1.f),
+		.HighlightContrast = std::clamp(settings.HighlightContrast, 0.f, 1.f),
+		.ShadowContrast = std::clamp(settings.ShadowContrast, 0.f, 1.f),
+		.DetailStrength = std::clamp(settings.DetailStrength, 0.f, 2.f),
+		.BaseBlend = std::clamp(settings.BaseBlend, 0.f, 1.f),
+		.BlurRadius = blurRadius,
+		.MiddleGreyBias = settings.MiddleGreyBias,
+		.HighlightThreshold = std::max(settings.HighlightThreshold, 0.f),
+		.ShadowThreshold = std::max(settings.ShadowThreshold, 0.f),
+		.HighlightThresholdStrength = std::clamp(settings.HighlightThresholdStrength, 0.f, 1.f),
+		.ShadowThresholdStrength = std::clamp(settings.ShadowThresholdStrength, 0.f, 1.f),
+		.InputWidth = a_inputWidth,
+		.InputHeight = a_inputHeight,
+		.BlurredWidth = a_blurWidth,
+		.BlurredHeight = a_blurHeight,
+		.LogLuminanceMin = -13.f,
+		.LogLuminanceMax = 18.f,
+		.Padding1 = {},
+	};
+}
+
 void LocalExposure::SetupResources()
 {
 	auto renderer = globals::game::renderer;
@@ -106,16 +146,7 @@ void LocalExposure::SetupResources()
 
 	uint fullW = mainDesc.Width;
 	uint fullH = mainDesc.Height;
-	// Calculate mip count for the log-luminance pyramid.
-	numMips = 1;
-	{
-		uint w = fullW, h = fullH;
-		while (w > 1 && h > 1 && numMips < s_MaxMips) {
-			w = (w + 1) / 2;
-			h = (h + 1) / 2;
-			numMips++;
-		}
-	}
+	numMips = MipCount(fullW, fullH);
 
 	auto createMipViews = [](Texture2D& texture,
 							  DXGI_FORMAT format,
@@ -194,7 +225,7 @@ void LocalExposure::SetupResources()
 
 	// Create low-resolution textures for the broad luminance blur.
 	{
-		const uint blurMip = std::min(s_BlurMip, numMips - 1);
+		const uint blurMip = BlurMip(numMips);
 		D3D11_TEXTURE2D_DESC texDesc = {};
 		texDesc.Width = std::max(1u, fullW >> blurMip);
 		texDesc.Height = std::max(1u, fullH >> blurMip);
@@ -298,35 +329,12 @@ void LocalExposure::Draw(TextureInfo& inout_tex)
 	inout_tex.tex->GetDesc(&mainDesc);
 	uint fullW = mainDesc.Width;
 	uint fullH = mainDesc.Height;
-	const uint blurMip = std::min(s_BlurMip, numMips - 1);
+	const uint blurMip = BlurMip(numMips);
 	const uint blurWidth = texBlurredLuminance->desc.Width;
 	const uint blurHeight = texBlurredLuminance->desc.Height;
-	const float blurRadius = std::min(
-		blurWidth * std::clamp(settings.BlurredLuminanceKernelSize, 0.f, 100.f) * 0.005f,
-		(float)s_MaxBlurRadius);
 
 	// Update constant buffer
-	LocalExposureCB cbData = {
-		.ManualExposure = settings.Exposure,
-		.Strength = std::clamp(settings.Strength, 0.f, 1.f),
-		.HighlightContrast = std::clamp(settings.HighlightContrast, 0.f, 1.f),
-		.ShadowContrast = std::clamp(settings.ShadowContrast, 0.f, 1.f),
-		.DetailStrength = std::clamp(settings.DetailStrength, 0.f, 2.f),
-		.BaseBlend = std::clamp(settings.BaseBlend, 0.f, 1.f),
-		.BlurRadius = blurRadius,
-		.MiddleGreyBias = settings.MiddleGreyBias,
-		.HighlightThreshold = std::max(settings.HighlightThreshold, 0.f),
-		.ShadowThreshold = std::max(settings.ShadowThreshold, 0.f),
-		.HighlightThresholdStrength = std::clamp(settings.HighlightThresholdStrength, 0.f, 1.f),
-		.ShadowThresholdStrength = std::clamp(settings.ShadowThresholdStrength, 0.f, 1.f),
-		.InputWidth = fullW,
-		.InputHeight = fullH,
-		.BlurredWidth = blurWidth,
-		.BlurredHeight = blurHeight,
-		.LogLuminanceMin = -13.f,
-		.LogLuminanceMax = 18.f,
-		.Padding1 = {},
-	};
+	const LocalExposureCB cbData = Constants(fullW, fullH, blurWidth, blurHeight);
 	localExposureCB->Update(cbData);
 
 	ID3D11Buffer* cb = localExposureCB->CB();

@@ -742,6 +742,10 @@ namespace
 			return ORGPostChain::MakeComposite();
 		case Index::MotionBlur:
 			return ORGPostChain::MakeMotionBlur();
+		case Index::LocalExposure:
+			return ORGPostChain::MakeLocalExposure();
+		case Index::AutoExposure:
+			return ORGPostChain::MakeHistogramAutoExposure();
 		default:
 			return nullptr;
 		}
