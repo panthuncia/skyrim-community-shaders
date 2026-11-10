@@ -39,7 +39,6 @@ protected:
 	void CreateEffectTextures() override;
 
 private:
-
 	/** @brief Compiles the sun mask shader and creates its constant buffer and sampler on first use. */
 	bool EnsureSunMaskResources();
 	/**

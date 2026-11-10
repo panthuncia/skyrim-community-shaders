@@ -73,7 +73,7 @@ struct RasterProgram
 		// hot reload; a reload of every shader compiles the same text again.
 		std::string pixelText;
 		std::string vertexText;
-		std::wstring languageVersion = L"2021";  // DXC -HV: "2018" for FXC-era sources (vector ?:, && and || on vectors)
+		std::wstring languageVersion = L"2021";                      // DXC -HV: "2018" for FXC-era sources (vector ?:, && and || on vectors)
 		std::uint32_t constantWords = 0;                             // the push block, in 32-bit words, read by both stages
 		std::vector<std::pair<std::wstring, std::wstring>> defines;  // both stages
 		std::vector<Target> targets;                                 // 1 to 8 colour targets, in SV_Target order

@@ -4,6 +4,7 @@
 #include "Effects11/ENBHelper.h"
 #include "Effects11/Editor/Effects11Editor.h"
 #include "Effects11/EffectManager.h"
+#include "Effects11/ORG/ORGFxRuntime.h"
 #include "Effects11/PresetManager.h"
 #include "Effects11/SettingManager.h"
 #include "Effects11/WeatherManager.h"
@@ -487,6 +488,11 @@ void Effects11::SetupResources()
 	if (const auto presetId = UnifiedPresetCatalog::GetSingleton().GetActiveEffects11PresetId(); !presetId.empty())
 		presetManager.SetActivePreset(presetId);
 	EffectManager::GetSingleton().Initialize();
+}
+
+void Effects11::PostPostLoad()
+{
+	ORGFxRuntime::Reserve();
 }
 
 void Effects11::PostSetupResources()
@@ -1092,6 +1098,12 @@ bool Effects11::RenderTonemap(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_out
 	auto& effectManager = EffectManager::GetSingleton();
 	if (!effectManager.IsInitialized())
 		return false;
+
+	// The ORG FX runtime (CS_ORG_FX=1) ran the chain in the Tonemap anchor's epoch, just before this.
+	if (ORGFxRuntime::Get().RanThisFrame()) {
+		tonemapReplacedFrame = globals::state->frameCount;
+		return true;
+	}
 
 	auto& renderTargets = globals::game::renderer->GetRuntimeData().renderTargets;
 	// Only report replacement after the effect chain actually wrote the output.

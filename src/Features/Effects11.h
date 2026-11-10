@@ -235,6 +235,8 @@ public:
 	virtual void DrawSettings() override;
 	virtual void SetupResources() override;
 	virtual void PostSetupResources() override;
+	/** @brief Reserves the Tonemap anchor for the ORG FX runtime (CS_ORG_FX=1). */
+	virtual void PostPostLoad() override;
 	virtual void Reset() override;
 	virtual void ClearShaderCache() override;
 

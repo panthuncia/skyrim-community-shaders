@@ -10,6 +10,7 @@
 #include "Utils/D3D.h"
 #include "Utils/Game.h"
 
+#include "ORG/ORGFxRuntime.h"
 #include "PresetManager.h"
 #include "SettingManager.h"
 #include "TextureManager.h"
@@ -119,6 +120,9 @@ void EffectManager::LogPresetStatus() const
 
 void EffectManager::Apply()
 {
+	// The ORG FX runtime reads these effects' variables; it builds again from the reloaded effects.
+	ORGFxRuntime::Get().Invalidate();
+
 	if (auto& rainRefraction = globals::features::rainRefraction; rainRefraction.loaded)
 		rainRefraction.LoadPresetRaindrops(PresetManager::GetSingleton().GetENBSeriesPath());
 
