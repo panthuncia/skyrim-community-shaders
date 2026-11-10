@@ -41,6 +41,7 @@ ORGGlintsNoise& ORGGlintsNoise::Get()
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 
+#	include <atomic>
 #	include <utility>
 #	include <vector>
 
@@ -69,10 +70,16 @@ struct ORGGlintsNoise::Impl
 
 	enum class Fill : std::uint8_t
 	{
-		Needed,     // the fill pass is in the graph; no epoch with it has been submitted yet
-		Submitted,  // an epoch with it was submitted: the next Update drops the pass
+		Needed,     // the fill pass is in the graph; not enough epochs with it have been committed yet
+		Submitted,  // enough epochs with it were committed: the next Update drops the pass
 		Done,       // the graph was built again without it
 	} fill = Fill::Needed;
+
+	// Set when an epoch prepares the fill pass. The epoch run right after registering is built without it, so only an epoch
+	// that prepared it counts; the fill is deterministic, so it runs in a few to be sure one reached the GPU.
+	std::atomic<bool> prepared = false;
+	std::uint32_t filledEpochs = 0;
+	static constexpr std::uint32_t kFillEpochs = 3;
 };
 
 namespace
@@ -89,13 +96,13 @@ namespace
 		std::shared_ptr<const ComputeProgram> program;
 	};
 
-	/** @brief Fills the noise, one thread a texel. It is in the graph only until an epoch with it was submitted. */
+	/** @brief Fills the noise, one thread a texel. It is in the graph only until a few epochs prepared it. */
 	class NoiseFillPass final : public org::TypedRenderGraphPass<NoiseFillPass, FillFrame, FillBindings>
 	{
 	public:
 		// At the build, on the render thread: the texture as it is now (GraphResources' rule).
-		explicit NoiseFillPass(const Impl& a_impl) :
-			program(a_impl.program), noise(a_impl.noise->Graph()) {}
+		explicit NoiseFillPass(const std::shared_ptr<Impl>& a_impl) :
+			impl(a_impl), program(a_impl->program), noise(a_impl->noise->Graph()) {}
 
 		FillBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -106,7 +113,11 @@ namespace
 		// The fill depends only on what the pass was made with.
 		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(program.get())); }
 
-		FillFrame Prepare(const FillBindings&, const org::PassPrepareContext&) const { return { program }; }
+		FillFrame Prepare(const FillBindings&, const org::PassPrepareContext&) const
+		{
+			impl->prepared.store(true, std::memory_order_release);
+			return { program };
+		}
 
 		static void Record(const FillBindings& a_bindings, const FillFrame& a_frame, org::PassRecordContext& a_recording)
 		{
@@ -118,6 +129,7 @@ namespace
 		}
 
 	private:
+		std::shared_ptr<Impl> impl;
 		std::shared_ptr<const ComputeProgram> program;
 		std::shared_ptr<org::Resource> noise;
 	};
@@ -192,7 +204,7 @@ bool ORGGlintsNoise::Setup()
 
 	FrameAnchors::ClientDesc client{};
 	client.id = kClientId;
-	// Made only until an epoch with it was submitted (Update drops it).
+	// Made only until a few epochs prepared it (Update drops it).
 	client.passes.push_back({ .name = std::string(kClientId) + ".noise-fill",
 		.anchor = FrameAnchors::Anchor::EarlyPrepass,
 		.order = 0,
@@ -200,11 +212,12 @@ bool ORGGlintsNoise::Setup()
 		.make = [next]() -> std::shared_ptr<org::RenderPass> {
 			if (next->fill != Impl::Fill::Needed)
 				return nullptr;
-			return std::make_shared<NoiseFillPass>(*next);
+			return std::make_shared<NoiseFillPass>(next);
 		} });
 	client.registerResources = [next](org::RenderGraph& a_graph) { next->noise->Register(a_graph); };
 	client.commit = [next](const FrameAnchors::Point&) {
-		if (next->fill == Impl::Fill::Needed)
+		if (next->fill == Impl::Fill::Needed && next->prepared.exchange(false, std::memory_order_acq_rel) &&
+			++next->filledEpochs >= Impl::kFillEpochs)
 			next->fill = Impl::Fill::Submitted;
 	};
 	// Active only for the fill.
