@@ -210,7 +210,7 @@ namespace ORGPostChain
 					[shared = readback, source = adaptation->Graph()]() -> std::shared_ptr<org::RenderPass> {
 						return std::make_shared<ReadbackPass>(shared, source, Capture::Adaptation);
 					});
-				a_builder.Publish("PostProcessing::AutoExposure::Adaptation", Image{ adaptation->Graph(), DXGI_FORMAT_UNKNOWN });
+				a_builder.Publish(Published::kAdaptation, Image{ adaptation->Graph(), DXGI_FORMAT_UNKNOWN });
 				a_builder.PublishLatch(Published::kAutoExposureConstants, constants);
 			}
 
