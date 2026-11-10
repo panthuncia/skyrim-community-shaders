@@ -28,9 +28,8 @@ namespace GraphPasses
 	 */
 	struct GenerateMipsProgram
 	{
-		std::shared_ptr<const ComputeProgram> compute;
-		rhi::CommandSignaturePtr signature;  // one indirect dispatch, against compute's layout
-		bool array = false;                  // built for 2D arrays and cube maps (ORG_GENERATE_MIPS_ARRAY)
+		std::shared_ptr<const ComputeProgram> compute;  // its dispatch signature serves the gated steps
+		bool array = false;                             // built for 2D arrays and cube maps (ORG_GENERATE_MIPS_ARRAY)
 	};
 
 	/**

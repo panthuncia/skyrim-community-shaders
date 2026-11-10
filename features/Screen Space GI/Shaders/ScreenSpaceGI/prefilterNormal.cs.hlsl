@@ -3,7 +3,7 @@
 
 #define PREFILTER_NORMAL_RESOURCES(X)                \
 	X(SHARED, ConstantBuffer, Shared, 0)             \
-	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 7)     \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 1)     \
 	X(EXTERN, SamplerState, samplerPointClamp, 0)    \
 	X(EXTERN, SamplerState, samplerLinearClamp, 1)   \
 	X(SRV, Texture2D<float4>, srcNormalRoughness, 0) \
@@ -27,7 +27,7 @@ float2 NormalMIPFilter(float2 enc0, float2 enc1, float2 enc2, float2 enc3)
 
 groupshared float2 g_scratchNormal[8][8];
 [numthreads(8, 8, 1)] void main(uint2 dispatchThreadID : SV_DispatchThreadID, uint2 groupThreadID : SV_GroupThreadID) {
-	const float2 frameScale = FrameDim * RcpTexDim;
+	const float2 frameScale = SsgiFrame.FrameDim * SsgiFrame.RcpTexDim;
 
 	// MIP 0
 	const uint2 baseCoord = dispatchThreadID;

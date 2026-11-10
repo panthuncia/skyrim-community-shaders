@@ -76,7 +76,7 @@ public:
 	/** @brief Installs the engine hook for binding the shared shadow map SRV, and reserves the ORG path's anchor when it is on. */
 	virtual void PostPostLoad() override;
 
-	/** @brief Sets up the ORG path (CS_ORG_VOLUMETRIC_SHADOWS=1) and keeps its engine imports current, before its anchor runs. */
+	/** @brief Keeps the ORG path's (CS_ORG_VOLUMETRIC_SHADOWS=1) engine imports current, before its anchor runs. */
 	virtual void EarlyPrepass() override;
 
 private:

@@ -258,15 +258,25 @@ Keys used so far:
 
 - The anchor self-test (`CS_ORG_ANCHOR_SELFTEST`): 0, 1 and 2 at every anchor.
 - The graph resource self-test (`CS_ORG_GRAPHRES_SELFTEST`): 0 at DeferredPasses.
+- Skylighting's probe update (`CS_ORG_SKYLIGHTING`): -5 to -2 (the reset clears, after a reset only) and -1 (the update) at
+  Prepass.
+- IBL's SH projection (`CS_ORG_IBL`): 0 (environment) and 1 (sky) at Prepass.
 - Screen Space Shadows (`CS_ORG_SCREEN_SPACE_SHADOWS`): 100 (clear) and 101 (raymarch) at Prepass.
+- Exponential Height Fog (`CS_ORG_EXPONENTIAL_HEIGHT_FOG`): 300 upward at Prepass, one key per pass: the upload, the near
+  volume's depth, material, scattering and integration, its history copy (temporal only), then the far volume's passes the
+  same way, or its clear. At most 310.
 - The deferred composite (`cs.deferred.composite`): 0 at DeferredComposite.
 - Effects11's rays (`CS_ORG_E11_RAYS`): 100 to 103 (volumetric rays: raymarch, horizontal and vertical blur, apply) and 200 to
   204 (sun rays: mask, three blurs, composite) at PostComposite.
 - The shared constants' upload (`cs.shared.upload`): first at every anchor where a client reads them, outside the keys.
-- Terrain Shadows' update (`CS_ORG_TERRAIN_SHADOWS`): 100 at EarlyPrepass.
+- Terrain Shadows (`CS_ORG_TERRAIN_SHADOWS`): 99 (the heightmap upload, once per heightmap) and 100 (the update) at
+  EarlyPrepass.
 - Terrain Blending's depth blend (`CS_ORG_TERRAIN_BLENDING`): 0 at DepthDone.
 - Volumetric Shadows (`CS_ORG_VOLUMETRIC_SHADOWS`): 100 to 105 at EarlyPrepass (per mip: downsample, horizontal blur, vertical
-- Light Limit Fix's local shadow cache (`CS_ORG_LLF_SHADOWS`): 100 (slot data) and 101 (shadow map copy) at EarlyPrepass.
+  blur).
+- Cloud Shadows (`CS_ORG_CLOUD_SHADOWS`): 0 (the occlusion copy) at ReflectionsPrepass.
+- Light Limit Fix's local shadow cache (`CS_ORG_LIGHT_LIMIT_FIX_SHADOWS`): 100 (slot data) and 101 (shadow map copy) at
+  EarlyPrepass.
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
 - CS's ImGui (`CS_ORG_IMGUI`): 1000 at Overlay, last.
 - The Screenshot feature (`CS_ORG_SCREENSHOT`): 100 (the readback copy) at Capture.
@@ -276,8 +286,9 @@ Keys used so far:
   the depth upscale, the underwater mask copy and its upscale) at Upscale; 100 (the hudless copy) at FrameGeneration.
 - Subsurface Scattering (`CS_ORG_SUBSURFACE_SCATTERING`): 199 (Burley clear), 200 (extraction), 201 (horizontal or Burley
   blur) and 202 (vertical blur) at DeferredPasses. SSGI's passes there stay below 199, as the D3D11 order is SSGI first.
-- Screen Space GI (`CS_ORG_SCREEN_SPACE_GI`): 100 (history clears, after a reset only), 110 to 116 (the chain's steps) and 117
-  (the accumulation copy without the blur) at DeferredPasses, below Subsurface Scattering's 199-202.
+- Screen Space GI (`CS_ORG_SCREEN_SPACE_GI`): 100 to 105 (history clears of `cs.ssgi.reset`, after a reset only), 110 to 116
+  (the chain's steps) and 117 (the accumulation copy without the blur) at DeferredPasses, below Subsurface Scattering's
+  199-202.
 - Dynamic Cubemaps (`CS_ORG_DYNAMIC_CUBEMAPS`): 300 to 310 at DeferredPasses (capture, the captures' mips, inference, the
   filtered mip 0 copy, the inferred mips, irradiance, BC6H encoding, the two BC6H copies, publishing), after Subsurface
   Scattering. Not at DeferredComposite, where its D3D11 path runs: the ORG composite reads the cubemaps there through
@@ -513,18 +524,21 @@ Keys used so far:
 - **Who:** CS's Screen Space GI (`ScreenSpaceGI/common.hlsli`, `SSGICB`); any plugin with a common header.
 - **Where it fits:** the header declares the latch with `ORG_RESOURCE(LATCH, ...)` under ORG and keeps its cbuffer under
   FXC; each shader lists it as an `EXTERN_LATCH` entry (`OrgResources.hlsli`), which puts the handle and offset in the push
-  block and declares nothing. Macros give the members their bare names under ORG, so shader bodies and the FXC bytecode
-  stay the same.
+  block and declares nothing. Since lane L4 the header declares the latch the same way on both paths
+  (`ORG_RESOURCE(LATCH, SSGIConstants, SsgiFrame, 1)`, a `cbuffer` holding one struct under FXC), and the bodies read
+  `SsgiFrame.<member>`: one layout, no second cbuffer and no bare-name macros.
 - **Found by:** P3 W2, Screen Space GI (2026-11-09).
+
 ### Reading other features' graph outputs by name, and knowing whether they are there
 
 - **Need:** a pass reads several other features' outputs (textures and buffers) as graph resources, each only while that
   feature's graph path is active, and otherwise reads the D3D11 resource or does without.
 - **Who:** Exponential Height Fog's light scattering reads IBL's SH (`IBL::EnvIBL`, `IBL::SkyIBL`), Skylighting's probes
   (`Skylighting::ProbeArray`), Terrain Shadows' heights (`TerrainShadows::ShadowHeight`), Light Limit Fix's lights and lists
-  (`cs.llf.*`), local shadows (`LightLimitFix::LocalShadowData`, `LightLimitFix::LocalShadowCache`) and Cloud Shadows'
-  occlusion (`CloudShadows::Occlusion`). Today it asks each
-  producer's ORG class whether it is active and compares the feature's D3D11 view with the producer's export to decide.
+  (`LightLimitFix::Lights`, `LightIndexList`, `LightGrid`), local shadows (`LightLimitFix::LocalShadowData`,
+  `LightLimitFix::LocalShadowCache`) and Cloud Shadows' occlusion (`CloudShadows::Occlusion`). Since lane L4 it asks
+  `PublishedResources::IsExportOf(view, id)` with each producer's id constant, and imports the D3D11 view under that id
+  otherwise. The constants still live in the producers' ORG headers, so the reader includes them.
 - **Where it fits:** a registry of named graph outputs (as `PublishedResources`, but for anchor graphs too) with a query
   "is `Feature::Name` registered now", so a reader declares by name without knowing each producer's class.
 - **Found by:** P3 ExponentialHeightFog (2026-11-09).

@@ -260,34 +260,38 @@ void CloudShadows::ReflectionsPrepass()
 
 		// On the ORG path the ReflectionsPrepass anchor, which follows, copies into the graph's cubemap
 		if (!ORGCloudShadows::Get().QueueOcclusionCopy())
-			context->CopyResource(texCubemapCloudOccCopy->resource.get(), texCloudShadowLayers[kMaxCloudLayers - 1]->resource.get());
+			context->CopyResource(OcclusionCopy()->resource.get(), texCloudShadowLayers[kMaxCloudLayers - 1]->resource.get());
 
 		ID3D11ShaderResourceView* srv = OcclusionSRV();
 		context->PSSetShaderResources(25, 1, &srv);
 		context->CSSetShaderResources(25, 1, &srv);
-		DebugReadback(srv);
 	}
 }
 
-void CloudShadows::DebugReadback(ID3D11ShaderResourceView* a_occlusion) const
+Texture2D* CloudShadows::OcclusionCopy()
 {
-	// Debug readback (CS_CLOUD_READBACK=1): every 250 frames, each face's mean of the last layer and of the bound occlusion (it stalls).
-	static const bool readback = [] {
-		char value[8]{};
-		return GetEnvironmentVariableA("CS_CLOUD_READBACK", value, sizeof(value)) && value[0] == '1';
-	}();
-	if (!readback || globals::state->frameCount % 250 != 0)
-		return;
-	auto* lastLayer = texCloudShadowLayers[kMaxCloudLayers - 1];
-	std::string layerMeans, occlusionMeans;
-	for (UINT face = 0; face < 6; ++face) {
-		const auto layerMean = lastLayer ? Util::VolumeMeans(lastLayer->srv.get(), face) : std::nullopt;
-		const auto occlusionMean = Util::VolumeMeans(a_occlusion, face);
-		layerMeans += std::format(" {:.4f}", layerMean ? (*layerMean)[0] : -1.0);
-		occlusionMeans += std::format(" {:.4f}", occlusionMean ? (*occlusionMean)[0] : -1.0);
-	}
-	logger::info("[Cloud Shadows] readback ({}) frame {}: last layer faces [{} ], occlusion faces [{} ]",
-		ORGCloudShadows::Get().OcclusionSRV() ? "ORG" : "D3D11", globals::state->frameCount, layerMeans, occlusionMeans);
+	if (texCubemapCloudOccCopy)
+		return texCubemapCloudOccCopy;
+	// The layers' shape and views.
+	auto* firstLayer = texCloudShadowLayers[0];
+	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+	firstLayer->srv->GetDesc(&srvDesc);
+	texCubemapCloudOccCopy = new Texture2D(firstLayer->desc, "CloudShadows::CubemapCloudOccCopy");
+	texCubemapCloudOccCopy->CreateSRV(srvDesc);
+	// Bound for self shadowing before the first reflections prepass fills it
+	globals::d3d::context->CopyResource(texCubemapCloudOccCopy->resource.get(), firstLayer->resource.get());
+	return texCubemapCloudOccCopy;
+}
+
+void CloudShadows::ReturnToD3D11()
+{
+	// The D3D11 occlusion filled from the last layer and bound at t25, before the graph's export goes.
+	auto* copy = OcclusionCopy();
+	auto context = globals::d3d::context;
+	context->CopyResource(copy->resource.get(), texCloudShadowLayers[kMaxCloudLayers - 1]->resource.get());
+	ID3D11ShaderResourceView* srv = copy->srv.get();
+	context->PSSetShaderResources(25, 1, &srv);
+	context->CSSetShaderResources(25, 1, &srv);
 }
 
 ID3D11ShaderResourceView* CloudShadows::OcclusionSRV() const
@@ -348,10 +352,10 @@ void CloudShadows::SetupResources()
 			}
 		}
 
-		texCubemapCloudOccCopy = new Texture2D(texDesc, "CloudShadows::CubemapCloudOccCopy");
-		texCubemapCloudOccCopy->CreateSRV(srvDesc);
-		// Bound for self shadowing before the first reflections prepass fills it
-		context->CopyResource(texCubemapCloudOccCopy->resource.get(), texCloudShadowLayers[0]->resource.get());
+		// The render graph copies into its own occlusion cubemap when requested. The D3D11 copy is made only for the D3D11 path, and
+		// when the graph fails later.
+		if (!ORGCloudShadows::Get().Setup([this] { ReturnToD3D11(); }))
+			OcclusionCopy();
 	}
 	{
 		D3D11_BLEND_DESC blendDesc = {};

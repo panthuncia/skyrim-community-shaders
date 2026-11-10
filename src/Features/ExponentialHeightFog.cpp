@@ -247,21 +247,36 @@ void ExponentialHeightFog::DrawSettings()
 	}
 }
 
-void ExponentialHeightFog::SetupResources()
+D3D11_SAMPLER_DESC ExponentialHeightFog::SamplerDesc(bool a_comparison)
 {
 	D3D11_SAMPLER_DESC samplerDesc = {};
-	samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+	samplerDesc.Filter = a_comparison ? D3D11_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR : D3D11_FILTER_MIN_MAG_MIP_LINEAR;
 	samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
 	samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
 	samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
 	samplerDesc.MaxAnisotropy = 1;
 	samplerDesc.MinLOD = 0;
 	samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+	if (a_comparison)
+		samplerDesc.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
+	return samplerDesc;
+}
+
+void ExponentialHeightFog::SetupResources()
+{
+	// Nothing to undo when the graph fails later: the D3D11 path makes its objects at its first frame.
+	ORGExponentialHeightFog::Get().Setup([] {});
+}
+
+void ExponentialHeightFog::EnsureD3D11Objects()
+{
+	if (volumetricFogCB)
+		return;
+	auto samplerDesc = SamplerDesc(false);
 	DX::ThrowIfFailed(globals::d3d::device->CreateSamplerState(&samplerDesc, linearSampler.put()));
 	Util::SetResourceName(linearSampler.get(), "ExponentialHeightFog::LinearSampler");
 
-	samplerDesc.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR;
-	samplerDesc.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
+	samplerDesc = SamplerDesc(true);
 	DX::ThrowIfFailed(globals::d3d::device->CreateSamplerState(&samplerDesc, shadowSampler.put()));
 	Util::SetResourceName(shadowSampler.get(), "ExponentialHeightFog::ShadowSampler");
 
@@ -436,7 +451,7 @@ void ExponentialHeightFog::EnsureVolumetricResources()
 	vBufferA = make3D(gridSize, "ExponentialHeightFog::VBufferA");
 	conservativeDepth = make2D(gridSize, "ExponentialHeightFog::ConservativeDepth");
 	lightScattering = make3D(gridSize, "ExponentialHeightFog::LightScattering", DXGI_FORMAT_R32G32B32A32_FLOAT);
-	integratedLightScattering = make3D(gridSize, "ExponentialHeightFog::IntegratedLightScattering");
+	integratedLightScattering = make3D(gridSize, ORGExponentialHeightFog::kNearIntegratedId.data());
 
 	conservativeDepthHistory = std::make_unique<Texture2D>(conservativeDepth->desc, "ExponentialHeightFog::ConservativeDepthHistory");
 	{
@@ -459,7 +474,7 @@ void ExponentialHeightFog::EnsureVolumetricResources()
 	vBufferAFar = make3D(farGridSize, "ExponentialHeightFog::VBufferAFar");
 	conservativeDepthFar = make2D(farGridSize, "ExponentialHeightFog::ConservativeDepthFar");
 	lightScatteringFar = make3D(farGridSize, "ExponentialHeightFog::LightScatteringFar", DXGI_FORMAT_R32G32B32A32_FLOAT);
-	integratedLightScatteringFar = make3D(farGridSize, "ExponentialHeightFog::IntegratedLightScatteringFar");
+	integratedLightScatteringFar = make3D(farGridSize, ORGExponentialHeightFog::kFarIntegratedId.data());
 
 	conservativeDepthFarHistory = std::make_unique<Texture2D>(conservativeDepthFar->desc, "ExponentialHeightFog::ConservativeDepthFarHistory");
 	{
@@ -531,16 +546,6 @@ ID3D11ShaderResourceView* ExponentialHeightFog::IntegratedLightScatteringFarView
 void ExponentialHeightFog::BindIntegratedLightScattering()
 {
 	ID3D11ShaderResourceView* srv = IntegratedLightScatteringView();
-	// Debug readback (CS_FOG_READBACK=1): every 250 frames, the near volume's means on either path (it stalls).
-	static const bool readback = [] {
-		char value[8]{};
-		return GetEnvironmentVariableA("CS_FOG_READBACK", value, sizeof(value)) && value[0] == '1';
-	}();
-	if (readback && globals::state->frameCount % 250 == 0) {
-		if (const auto means = Util::VolumeMeans(srv))
-			logger::info("[Exponential Height Fog] readback ({}) frame {}: near volume mean [{:.5f} {:.5f} {:.5f} {:.5f}]",
-				ORGExponentialHeightFog::Get().NearSRV() ? "ORG" : "D3D11", globals::state->frameCount, (*means)[0], (*means)[1], (*means)[2], (*means)[3]);
-	}
 	globals::d3d::context->PSSetShaderResources(19, 1, &srv);
 	ID3D11ShaderResourceView* farSrv = IntegratedLightScatteringFarView();
 	globals::d3d::context->PSSetShaderResources(22, 1, &farSrv);
@@ -840,6 +845,7 @@ void ExponentialHeightFog::Prepass()
 		return;
 	}
 
+	EnsureD3D11Objects();
 	EnsureVolumetricResources();
 
 	if (settings.fogDensity <= 0.0f && settings.fogDensity2 <= 0.0f) {

@@ -4,6 +4,7 @@
 #include "Globals.h"
 #include "GrassShared/GrassFrame.h"
 #include "I18n/I18n.h"
+#include "RenderGraph/Switches.h"
 #include "State.h"
 #include "Utils/ActorUtils.h"
 #include "Utils/D3D.h"
@@ -245,14 +246,17 @@ void GrassCollision::Update(const RE::NiPoint3& a_eye)
 		lastPerFrame = perFrameData;
 
 		UpdateCollisionTexture();
-
-		ID3D11Buffer* buffers[1];
-		buffers[0] = perFrame->CB();
-		context->VSSetConstantBuffers(5, ARRAYSIZE(buffers), buffers);
-
-		ID3D11ShaderResourceView* srvs[] = { collisionTexture->srv.get() };
-		context->VSSetShaderResources(100, ARRAYSIZE(srvs), srvs);
+		BindCollision();
 	}
+}
+
+void GrassCollision::BindCollision() const
+{
+	auto context = globals::d3d::context;
+	ID3D11Buffer* buffers[1] = { perFrame->CB() };
+	context->VSSetConstantBuffers(5, ARRAYSIZE(buffers), buffers);
+	ID3D11ShaderResourceView* srvs[] = { CollisionSRV() };
+	context->VSSetShaderResources(100, ARRAYSIZE(srvs), srvs);
 }
 
 void GrassCollision::LoadSettings(json& o_json)
@@ -289,7 +293,6 @@ void GrassCollision::PublishCollision() const
 	static_assert(sizeof(PerFrame) <= sizeof(GrassShared::Collision::perFrame));
 	GrassShared::Collision published;
 	published.texture = CollisionSRV();
-	published.onGraph = published.texture && published.texture == ORGGrassCollision::Get().CollisionSRV();
 	std::memcpy(published.perFrame.data(), &lastPerFrame, sizeof(PerFrame));
 	published.frame = globals::game::graphicsState->frameCount;
 	GrassShared::PublishCollision(published);
@@ -297,10 +300,7 @@ void GrassCollision::PublishCollision() const
 
 void GrassCollision::LogColliders(const char* a_path) const
 {
-	static const bool requested = [] {
-		char value[8]{};
-		return GetEnvironmentVariableA("CS_GRASS_COLLISION_STATS", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}();
+	static const bool requested = Switches::On("CS_GRASS_COLLISION_STATS");
 	const auto frame = globals::game::graphicsState->frameCount;
 	if (!requested || frame % 120 != 0)
 		return;
@@ -332,16 +332,12 @@ void GrassCollision::EarlyPrepass()
 	const PerFrame perFrameData = NextPerFrame(camera->world.translate);
 	LogColliders("ORG");
 
-	// Disabled: no colliders, and every cell new, so the update writes zero everywhere as the D3D11 path's clear does.
-	PerFrame latched = perFrameData;
-	if (!settings.EnableGrassCollision) {
-		latched.BoundingBoxCount = 0;
-		latched.ValidMargin = { 512, 512 };
-	}
+	// The frame's update, as the D3D11 path uploads it: the graph's path stages it for the anchor.
 	const size_t collisions = std::min(queuedCollisions.size(), (size_t)MAX_COLLISIONS);
-	graph.Stage({ .perFrame = std::as_bytes(std::span(&latched, 1)),
-		.boxes = std::as_bytes(std::span(queuedBoundingBoxes.data(), latched.BoundingBoxCount)),
-		.instances = std::as_bytes(std::span(queuedCollisions.data(), latched.BoundingBoxCount ? collisions : 0)) });
+	graph.Stage({ .perFrame = std::as_bytes(std::span(&perFrameData, 1)),
+		.boxes = std::as_bytes(std::span(queuedBoundingBoxes.data(), perFrameData.BoundingBoxCount)),
+		.instances = std::as_bytes(std::span(queuedCollisions.data(), perFrameData.BoundingBoxCount ? collisions : 0)),
+		.enabled = settings.EnableGrassCollision });
 
 	queuedBoundingBoxes.clear();
 	queuedCollisions.clear();
@@ -390,7 +386,7 @@ void GrassCollision::CreateD3D11Resources()
 			.Texture2D = { .MipSlice = 0 }
 		};
 
-		collisionTexture = new Texture2D(texDesc, "GrassCollision::Collision");
+		collisionTexture = new Texture2D(texDesc, GrassShared::kCollisionGraphId.data());
 		collisionTexture->CreateSRV(srvDesc);
 		collisionTexture->CreateUAV(uavDesc);
 	}
@@ -454,13 +450,8 @@ void GrassCollision::Hooks::BSGrassShader_SetupGeometry::thunk(RE::BSShader* Thi
 	if (ORGGrassCollision::Get().IsActive()) {
 		// The render graph updated the texture at EarlyPrepass: bind it and its constants for the frame's grass.
 		static Util::FrameChecker frameChecker;
-		if (frameChecker.IsNewFrame() && self.perFrame) {
-			auto context = globals::d3d::context;
-			ID3D11Buffer* buffers[1] = { self.perFrame->CB() };
-			context->VSSetConstantBuffers(5, ARRAYSIZE(buffers), buffers);
-			ID3D11ShaderResourceView* srvs[] = { self.CollisionSRV() };
-			context->VSSetShaderResources(100, ARRAYSIZE(srvs), srvs);
-		}
+		if (frameChecker.IsNewFrame() && self.perFrame)
+			self.BindCollision();
 	} else
 		self.Update(Util::GetEyePosition());
 	func(This, Pass, RenderFlags);

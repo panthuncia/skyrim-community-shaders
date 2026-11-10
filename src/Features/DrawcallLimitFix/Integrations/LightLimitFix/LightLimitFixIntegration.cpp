@@ -66,9 +66,9 @@ namespace DCLF::Integrations::LightLimitFix
 				.ancestorRtti = { &RoomRtti, &PortalRtti }, .whileOn = loaded, .generation = &RoomMapGeneration, .fill = &RoomMap });
 			// t35-t37, which the colour passes declare.
 			a_context.RegisterFrameGraphBuffers({ .name = "light limit fix", .firstRegister = kLightsRegister,
-				.resources = { "cs.llf.lights", "cs.llf.light-index-list", "cs.llf.light-grid" }, .indices = &GraphBufferIndices });
+				.resources = { ORGLightCulling::kLightsId, ORGLightCulling::kLightIndexListId, ORGLightCulling::kLightGridId }, .indices = &GraphBufferIndices });
 			// t102 and t103 have no views of their own: the colour commit reads the captured views, the faces null. On the ORG path
-			// (CS_ORG_LLF_SHADOWS) EarlyPrepass binds the cache's exports, so the commit reads the published resources.
+			// (CS_ORG_LIGHT_LIMIT_FIX_SHADOWS) EarlyPrepass binds the cache's exports, so the commit reads the published resources.
 			a_context.RegisterFrameTexture({ .name = "light limit fix local shadow data", .textureRegister = kLocalShadowDataRegister,
 				.graphResources = { ORGLocalShadows::kDataId } });
 			a_context.RegisterFrameTexture({ .name = "light limit fix local shadow maps", .textureRegister = kLocalShadowMapsRegister,

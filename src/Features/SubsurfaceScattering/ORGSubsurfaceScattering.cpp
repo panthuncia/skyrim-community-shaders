@@ -1,14 +1,11 @@
 #include "ORGSubsurfaceScattering.h"
 
-#include <cstring>
+#include "RenderGraph/Switches.h"
 
 bool ORGSubsurfaceScattering::Requested()
 {
 #if defined(CS_HAS_RENDER_GRAPH)
-	static const bool requested = [] {
-		char value[8]{};
-		return GetEnvironmentVariableA("CS_ORG_SUBSURFACE_SCATTERING", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}();
+	static const bool requested = Switches::On("CS_ORG_SUBSURFACE_SCATTERING");
 	return requested;
 #else
 	return false;
@@ -33,6 +30,7 @@ ORGSubsurfaceScattering& ORGSubsurfaceScattering::Get()
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
 #	include "RenderGraph/UavClearPass.h"
@@ -43,13 +41,10 @@ ORGSubsurfaceScattering& ORGSubsurfaceScattering::Get()
 #	include <Render/LatchBlock.h>
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/Buffers/Buffer.h>
 #	include <Resources/ExternalTextureResource.h>
 
 #	include <cstddef>
 #	include <functional>
-#	include <span>
-#	include <string_view>
 #	include <utility>
 
 namespace
@@ -78,30 +73,20 @@ namespace
 	};
 	static_assert(sizeof(BlurBlock) == 52, "matches the shader's push block (check-dual-target-shaders reports 52 bytes)");
 
-	// One execution's values, in its slot of the latch block: the blur constants (SSSConstants in the shaders) and the
-	// thread-group counts every pass dispatches with, zero in a frame without skin.
-	struct LatchData
-	{
-		SubsurfaceScattering::BlurCB constants;
-		std::uint32_t groups[4];  // x, y, z, padding
-	};
-	static_assert(offsetof(LatchData, constants) == 0 && sizeof(SubsurfaceScattering::BlurCB) % 16 == 0);
-	static_assert(offsetof(LatchData, groups) % 16 == 0);
+	// One execution's values, in its slot of the latch block: the blur constants (SSSConstants in the shaders). The group
+	// counts every pass dispatches with are in the run gate's one entry, open only in a frame with skin.
+	using LatchData = SubsurfaceScattering::BlurCB;
+	static_assert(sizeof(LatchData) % 16 == 0);
+	constexpr std::uint32_t kGateEntry = 0;
 
 	enum Mode : int
 	{
+		kAnyMode = -1,  // InMode: a pass of both modes
 		kSeparable = 0,
 		kBurley = 1,
 	};
 
-	/** @brief A program, with the indirect dispatch signature made against its layout. */
-	struct Program
-	{
-		std::shared_ptr<const ComputeProgram> compute;
-		rhi::CommandSignaturePtr signature;
-
-		explicit operator bool() const { return compute && signature; }
-	};
+	using Program = std::shared_ptr<const ComputeProgram>;
 
 	/** @brief Every pass's program, as SubsurfaceScattering's GetComputeShader* compile them. */
 	struct Programs
@@ -111,46 +96,21 @@ namespace
 		explicit operator bool() const { return extraction && extractionBurley && horizontal && vertical && burley; }
 	};
 
-	/** @brief The defines a_own plus those Util::CompileShader gives every D3D11 build, so both paths build one permutation. */
-	std::vector<std::pair<std::wstring, std::wstring>> ProgramDefines(std::vector<std::pair<std::string, std::string>> a_own)
-	{
-		std::vector<std::string_view> names;
-		for (const auto& define : a_own)
-			names.push_back(define.first);
-		for (auto& define : Util::GetCommonShaderDefines(names))
-			a_own.push_back(std::move(define));
-		for (const char* name : { "COMPUTESHADER", "WINPC", "DX11" })
-			a_own.emplace_back(name, "");
-		// Defines are ASCII.
-		std::vector<std::pair<std::wstring, std::wstring>> wide;
-		for (const auto& [name, value] : a_own)
-			wide.emplace_back(std::wstring(name.begin(), name.end()), std::wstring(value.begin(), value.end()));
-		return wide;
-	}
-
+	/** @brief One program; it adds the defines every D3D11 build gets itself (ComputeProgram::Desc::commonDefines). */
 	template <class Block>
-	Program LoadProgram(rhi::Device a_device, const char* a_source, std::vector<std::pair<std::string, std::string>> a_defines)
+	Program LoadProgram(rhi::Device a_device, const char* a_source, std::vector<std::pair<std::wstring, std::wstring>> a_defines)
 	{
-		Program program;
-		program.compute = ComputeProgram::Load(a_device,
-			{ .source = a_source, .constantWords = ShaderBindings::Words<Block>(), .defines = ProgramDefines(std::move(a_defines)) });
-		if (!program.compute)
-			return {};
-		rhi::IndirectArg args[] = { { .kind = rhi::IndirectArgKind::Dispatch } };
-		if (a_device.CreateCommandSignature(rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, 1), sizeof(std::uint32_t) * 3 },
-				program.compute->layout->GetHandle(), program.signature) != rhi::Result::Ok)
-			return {};
-		return program;
+		return ComputeProgram::Load(a_device, { .source = a_source, .constantWords = ShaderBindings::Words<Block>(), .defines = std::move(a_defines) });
 	}
 
 	std::shared_ptr<const Programs> LoadPrograms(rhi::Device a_device)
 	{
 		auto programs = std::make_shared<Programs>();
 		programs->extraction = LoadProgram<ExtractionBlock>(a_device, kExtractionShader, {});
-		programs->extractionBurley = LoadProgram<ExtractionBlock>(a_device, kExtractionShader, { { "BURLEY", "" } });
-		programs->horizontal = LoadProgram<BlurBlock>(a_device, kBlurShader, { { "HORIZONTAL", "" } });
+		programs->extractionBurley = LoadProgram<ExtractionBlock>(a_device, kExtractionShader, { { L"BURLEY", L"" } });
+		programs->horizontal = LoadProgram<BlurBlock>(a_device, kBlurShader, { { L"HORIZONTAL", L"" } });
 		programs->vertical = LoadProgram<BlurBlock>(a_device, kBlurShader, {});
-		programs->burley = LoadProgram<BlurBlock>(a_device, kBlurShader, { { "BURLEY", "" } });
+		programs->burley = LoadProgram<BlurBlock>(a_device, kBlurShader, { { L"BURLEY", L"" } });
 		if (!*programs)
 			return nullptr;
 		return programs;
@@ -180,38 +140,18 @@ namespace
 		Targets targets;
 		std::unique_ptr<GraphResources::Texture2D> diffuseNoAlbedo, blurTemp;
 		std::shared_ptr<org::LatchBlock> latch;
+		std::shared_ptr<RenderGraph::RunGate> gate;
 		org::OwnedDescriptorBinding pointSampler;
+		std::function<void()> onFailed;
 	};
-
-	/** @brief Record time: this execution's latch region and its group counts' place in it. */
-	struct LatchRegion
-	{
-		ShaderBindings::Latch latch;
-		rhi::ResourceHandle buffer;
-		std::uint64_t groups = 0;
-	};
-
-	LatchRegion RegionOf(const org::LatchBlock& a_latch, std::uint32_t a_slot)
-	{
-		return { ShaderBindings::LatchOf(a_latch, a_slot, offsetof(LatchData, constants)), a_latch.Resource()->GetAPIResource().GetHandle(),
-			a_latch.Offset(a_slot) + offsetof(LatchData, groups) };
-	}
-
-	void DispatchIndirect(org::PassRecordContext& a_recording, const Program& a_program, std::span<const std::uint32_t> a_block, const LatchRegion& a_region)
-	{
-		auto& commands = a_recording.Commands();
-		commands.BindLayout(a_program.compute->layout->GetHandle());
-		commands.BindPipeline(a_program.compute->Pipeline());
-		commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, static_cast<std::uint32_t>(a_block.size()), a_block.data());
-		commands.ExecuteIndirect(a_program.signature->GetHandle(), a_region.buffer, a_region.groups, {}, 0, 1);
-	}
 
 	/** @brief What a pass records from: kept for the build, so the recording can be submitted again. */
 	struct PassFrame
 	{
 		std::shared_ptr<const Programs> programs;
 		std::shared_ptr<const org::LatchBlock> latch;
-		const Program* program = nullptr;  // in programs
+		std::shared_ptr<const RenderGraph::RunGate> gate;
+		const ComputeProgram* program = nullptr;  // in programs
 		std::uint32_t pointSampler = 0;
 	};
 
@@ -227,8 +167,9 @@ namespace
 	public:
 		explicit ExtractionPass(const ScatterState& a_state) :
 			programs(a_state.programs),
-			program(a_state.mode == kBurley ? &a_state.programs->extractionBurley : &a_state.programs->extraction),
+			program(a_state.mode == kBurley ? a_state.programs->extractionBurley.get() : a_state.programs->extraction.get()),
 			latch(a_state.latch),
+			gate(a_state.gate),
 			output(a_state.diffuseNoAlbedo->Graph()),
 			targets(a_state.targets) {}
 
@@ -248,24 +189,26 @@ namespace
 		{
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(program));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(latch.get()));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(gate.get()));
 		}
 
-		PassFrame Prepare(const ExtractionBindings&, const org::PassPrepareContext&) const { return { programs, latch, program, 0 }; }
+		PassFrame Prepare(const ExtractionBindings&, const org::PassPrepareContext&) const { return { programs, latch, gate, program, 0 }; }
 
 		static void Record(const ExtractionBindings& a_bindings, const PassFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.program || !a_frame.latch)
+			if (!a_frame.program || !a_frame.latch || !a_frame.gate)
 				return;
-			const auto region = RegionOf(*a_frame.latch, a_recording.FrameSlot());
 			const ExtractionBlock block{ SharedConstants::Index(a_recording, a_bindings.shared), a_recording.Index(a_bindings.output),
-				a_recording.Index(a_bindings.color), a_recording.Index(a_bindings.mask), a_recording.Index(a_bindings.albedo), region.latch };
-			DispatchIndirect(a_recording, *a_frame.program, ShaderBindings::Data(block), region);
+				a_recording.Index(a_bindings.color), a_recording.Index(a_bindings.mask), a_recording.Index(a_bindings.albedo),
+				ShaderBindings::LatchOf(*a_frame.latch, a_recording.FrameSlot(), 0) };
+			a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), kGateEntry);
 		}
 
 	private:
 		std::shared_ptr<const Programs> programs;
-		const Program* program;
+		const ComputeProgram* program;
 		std::shared_ptr<const org::LatchBlock> latch;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
 		std::shared_ptr<org::Resource> output;
 		Targets targets;
 	};
@@ -283,8 +226,9 @@ namespace
 	public:
 		BlurPass(const ScatterState& a_state, const Program& a_program, std::shared_ptr<org::Resource> a_color, std::shared_ptr<org::Resource> a_output) :
 			programs(a_state.programs),
-			program(&a_program),
+			program(a_program.get()),
 			latch(a_state.latch),
+			gate(a_state.gate),
 			pointSampler(a_state.pointSampler.Index()),
 			color(std::move(a_color)),
 			output(std::move(a_output)),
@@ -308,26 +252,28 @@ namespace
 		{
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(program));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(latch.get()));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(gate.get()));
 			a_out.push_back(pointSampler);
 		}
 
-		PassFrame Prepare(const BlurBindings&, const org::PassPrepareContext&) const { return { programs, latch, program, pointSampler }; }
+		PassFrame Prepare(const BlurBindings&, const org::PassPrepareContext&) const { return { programs, latch, gate, program, pointSampler }; }
 
 		static void Record(const BlurBindings& a_bindings, const PassFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.program || !a_frame.latch)
+			if (!a_frame.program || !a_frame.latch || !a_frame.gate)
 				return;
-			const auto region = RegionOf(*a_frame.latch, a_recording.FrameSlot());
 			const BlurBlock block{ SharedConstants::Index(a_recording, a_bindings.shared), a_recording.Index(a_bindings.output),
 				a_recording.Index(a_bindings.color), a_recording.Index(a_bindings.depth), a_recording.Index(a_bindings.mask),
-				a_recording.Index(a_bindings.albedo), a_recording.Index(a_bindings.normal), a_frame.pointSampler, region.latch };
-			DispatchIndirect(a_recording, *a_frame.program, ShaderBindings::Data(block), region);
+				a_recording.Index(a_bindings.albedo), a_recording.Index(a_bindings.normal), a_frame.pointSampler,
+				ShaderBindings::LatchOf(*a_frame.latch, a_recording.FrameSlot(), 0) };
+			a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), kGateEntry);
 		}
 
 	private:
 		std::shared_ptr<const Programs> programs;
-		const Program* program;
+		const ComputeProgram* program;
 		std::shared_ptr<const org::LatchBlock> latch;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
 		std::uint32_t pointSampler;
 		std::shared_ptr<org::Resource> color;
 		std::shared_ptr<org::Resource> output;
@@ -336,11 +282,11 @@ namespace
 
 	using MakePass = std::function<std::shared_ptr<org::RenderPass>()>;
 
-	/** @brief A pass that runs in one mode only: null in builds for the other. */
+	/** @brief A pass that runs in one mode only (or both, kAnyMode) once the engine targets are imported: null in other builds. */
 	MakePass InMode(const std::shared_ptr<ScatterState>& a_state, int a_mode, std::function<std::shared_ptr<org::RenderPass>(const ScatterState&)> a_make)
 	{
 		return [a_state, a_mode, make = std::move(a_make)]() -> std::shared_ptr<org::RenderPass> {
-			return a_state->mode == a_mode ? make(*a_state) : nullptr;
+			return a_state->targets && (a_mode == kAnyMode || a_state->mode == a_mode) ? make(*a_state) : nullptr;
 		};
 	}
 
@@ -349,29 +295,31 @@ namespace
 
 struct ORGSubsurfaceScattering::Impl
 {
-	// The main target's description, from Setup: the intermediate textures' size and format.
-	D3D11_TEXTURE2D_DESC desc{};
-	// Made at the first frame the DeferredPasses epoch exists (Build); null until then.
 	std::shared_ptr<ScatterState> state;
 	bool programsDirty = false;
-	// Whether this frame's DeferredPasses epoch ran the passes (the commit was called).
+	// Whether this frame's DeferredPasses epoch ran the passes (the commit was called with the engine targets in place).
 	bool ranThisFrame = false;
-	bool registered = false;
-	// What the log has said about a wait, so each is said once.
-	bool epochLogged = false, targetsLogged = false, registerLogged = false;
+	// Whether the log has said the engine targets are not there yet, so it is said once.
+	bool targetsLogged = false;
 
-	/** @brief The anchor client: its passes, its resources and its commit. */
+	/**
+	 * @brief The anchor client: its passes, its resources and its commit. A build without the engine targets has no passes, and
+	 * its commit opens nothing: the D3D11 path draws those frames.
+	 */
 	static FrameAnchors::ClientDesc MakeClient(const std::shared_ptr<ScatterState>& state)
 	{
 		const auto main = [](const ScatterState& a_state) { return std::static_pointer_cast<org::Resource>(a_state.targets.main); };
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
 		client.sharedConstants = true;
+		client.gates = { state->gate };
 		// After SSGI's passes (whose orders are below 200) and before the composite, as the D3D11 path runs.
 		const auto pass = [](const char* a_name, std::int32_t a_order, MakePass a_make) {
 			return FrameAnchors::PassDesc{ .name = a_name, .anchor = FrameAnchors::Anchor::DeferredPasses, .order = a_order, .kind = FrameAnchors::PassKind::Compute, .make = std::move(a_make) };
 		};
-		client.passes.push_back(pass("cs.subsurface.extract", 200, [state]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ExtractionPass>(*state); }));
+		client.passes.push_back(pass("cs.subsurface.extract", 200, InMode(state, kAnyMode, [](const ScatterState& a_state) -> std::shared_ptr<org::RenderPass> {
+			return std::make_shared<ExtractionPass>(a_state);
+		})));
 		client.passes.push_back(pass("cs.subsurface.horizontal", 201, InMode(state, kSeparable, [](const ScatterState& a_state) -> std::shared_ptr<org::RenderPass> {
 			return std::make_shared<BlurPass>(a_state, a_state.programs->horizontal, a_state.diffuseNoAlbedo->Graph(), a_state.blurTemp->Graph());
 		})));
@@ -391,44 +339,36 @@ struct ORGSubsurfaceScattering::Impl
 			state->blurTemp->Register(a_graph);
 		};
 		client.commit = [state](const FrameAnchors::Point&) {
+			// The targets were set before this run's build, so this build has no passes either.
+			if (!state->targets)
+				return;
 			auto& feature = globals::features::subsurfaceScattering;
-			LatchData data{};
-			data.constants = feature.BuildBlurConstants(state->mode);
-			// Only when the frame drew skin, as DrawSSS's check.
+			const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
+			state->latch->WriteValue(slot, 0, feature.BuildBlurConstants(state->mode));
+			// Only when the frame drew skin, as DrawSSS's check. Otherwise the gate stays closed and the passes do no work.
 			if (feature.validMaterials) {
 				const auto groups = Util::GetScreenDispatchCount();
-				data.groups[0] = groups.x;
-				data.groups[1] = groups.y;
-				data.groups[2] = 1;
+				state->gate->OpenDispatch(kGateEntry, groups.x, groups.y, 1);
 			}
-			state->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, data);
 			if (auto& self = Get(); self.impl)
 				self.impl->ranThisFrame = true;
 		};
 		client.onFailed = [] {
 			logger::error("[ORG] Subsurface Scattering returns to D3D11: the render graph failed");
-			Get().impl.reset();
+			auto& self = Get();
+			auto onFailed = self.impl ? std::move(self.impl->state->onFailed) : std::function<void()>{};
+			self.impl.reset();
+			if (onFailed)
+				onFailed();
 		};
 		return client;
 	}
 
 	/**
-	 * @brief Registers the anchor client. The shared constant buffers cannot be made before State's first upload of them, so a
-	 * refused registration is tried again at the next frame, with the D3D11 path running meanwhile.
+	 * @brief The programs, the sampler, the intermediate textures, the latch and the run gate, each failure logged by name. Null
+	 * on a failure: the feature then stays on D3D11.
 	 */
-	bool Register()
-	{
-		registered = FrameAnchors::Register(MakeClient(state));
-		if (!registered && !std::exchange(registerLogged, true))
-			logger::info("[ORG] Subsurface Scattering: the anchor client is not registered yet; D3D11 draws until it is");
-		return registered;
-	}
-
-	/**
-	 * @brief The programs, the sampler, the intermediate textures and the latch, each failure logged by name. Null on a failure,
-	 * which is final: the feature then stays on D3D11.
-	 */
-	std::shared_ptr<ScatterState> Build() const
+	static std::shared_ptr<ScatterState> Build(const D3D11_TEXTURE2D_DESC& a_desc)
 	{
 		auto* host = RenderGraphRuntime::Get().Host();
 		auto next = std::make_shared<ScatterState>();
@@ -451,13 +391,16 @@ struct ORGSubsurfaceScattering::Impl
 		if (!next->pointSampler)
 			fail("its point sampler");
 		// Written before they are read and read only within the frame: transient, so aliasable.
-		next->diffuseNoAlbedo = std::make_unique<GraphResources::Texture2D>(desc, "SSS::DiffuseNoAlbedo");
+		next->diffuseNoAlbedo = std::make_unique<GraphResources::Texture2D>(a_desc, "SSS::DiffuseNoAlbedo");
 		if (!*next->diffuseNoAlbedo)
 			fail("its albedo-free texture");
-		next->blurTemp = std::make_unique<GraphResources::Texture2D>(desc, "SSS::BlurHorizontalTemp");
+		next->blurTemp = std::make_unique<GraphResources::Texture2D>(a_desc, "SSS::BlurHorizontalTemp");
 		if (!*next->blurTemp)
 			fail("its blur texture");
 		next->latch = std::make_shared<org::LatchBlock>("cs.subsurface.latch", static_cast<std::uint32_t>(sizeof(LatchData)), host->FrameSlots());
+		next->gate = RenderGraph::RunGate::Create("cs.subsurface.dispatch");
+		if (!next->gate)
+			fail("its run gate");
 		return ok ? next : nullptr;
 	}
 
@@ -466,79 +409,66 @@ struct ORGSubsurfaceScattering::Impl
 
 ORGSubsurfaceScattering::~ORGSubsurfaceScattering() = default;
 
-bool ORGSubsurfaceScattering::Running() const
+void ORGSubsurfaceScattering::Reserve()
 {
-	return impl != nullptr;
+	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::DeferredPasses))
+		logger::warn("[ORG] Subsurface Scattering stays on D3D11: the DeferredPasses anchor could not be reserved");
 }
 
-void ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
+bool ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::function<void()> a_onFailed)
 {
-	impl.reset();
-	if (!RenderGraphRuntime::Get().Host()) {
-		logger::warn("[ORG] Subsurface Scattering stays on D3D11: the render graph is not available");
-		return;
+	if (impl)
+		Stop();
+	if (!Requested())
+		return false;
+	auto& runtime = RenderGraphRuntime::Get();
+	if (!runtime.Host() || !runtime.IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DeferredPasses)) {
+		logger::warn("[ORG] Subsurface Scattering stays on D3D11: the render graph or its DeferredPasses anchor is not available");
+		return false;
 	}
-	// The rest at the first frames (AfterDeferredPasses): the anchor's epoch, the engine targets and the shared constants
-	// exist only once the world renders.
+	std::shared_ptr<ScatterState> state;
+	try {
+		state = Impl::Build(a_desc);
+	} catch (const std::exception& e) {
+		logger::error("[ORG] Subsurface Scattering setup failed, staying on D3D11: {}", e.what());
+	}
+	if (!state)
+		return false;
+	state->onFailed = std::move(a_onFailed);
+	// The engine targets may not exist yet: then the passes join the graph at the first frame they can be imported.
+	if (auto targets = ImportTargets())
+		state->targets = std::move(targets);
+	// Held by the anchors until State's first upload of the shared constants; the D3D11 path draws until the commit runs.
+	if (!FrameAnchors::Register(Impl::MakeClient(state))) {
+		logger::warn("[ORG] Subsurface Scattering stays on D3D11: the anchor client could not be registered");
+		return false;
+	}
 	impl = std::make_unique<Impl>();
-	impl->desc = a_desc;
-	logger::info("[ORG] Subsurface Scattering: the render graph path is requested ({}x{}); set up at the first frames", a_desc.Width, a_desc.Height);
+	impl->state = std::move(state);
+	logger::info("[ORG] Subsurface Scattering runs on the render graph ({}x{}, {} blur)", a_desc.Width, a_desc.Height, ModeName(impl->state->mode));
+	return true;
+}
+
+bool ORGSubsurfaceScattering::IsActive() const
+{
+	return impl && RenderGraphRuntime::Get().IsActive();
+}
+
+void ORGSubsurfaceScattering::Stop()
+{
+	FrameAnchors::Unregister(kClientId);
+	impl.reset();
 }
 
 bool ORGSubsurfaceScattering::AfterDeferredPasses()
 {
-	if (!impl)
+	if (!IsActive())
 		return false;
 	const auto giveUp = [this](const char* a_why) {
 		logger::error("[ORG] Subsurface Scattering returns to D3D11: {}", a_why);
-		FrameAnchors::Unregister(kClientId);
-		impl.reset();
-		return false;
+		Stop();
 	};
-	auto& runtime = RenderGraphRuntime::Get();
-	if (!runtime.IsActive()) {
-		if (impl->state)
-			return giveUp("the render graph is no longer active");
-		return false;
-	}
-
-	// Set up: waits are tried again at the next frame, with D3D11 drawing meanwhile.
-	if (!impl->state) {
-		if (!FrameAnchors::HasEpoch(FrameAnchors::Anchor::DeferredPasses)) {
-			if (!std::exchange(impl->epochLogged, true))
-				logger::info("[ORG] Subsurface Scattering: waiting for the DeferredPasses anchor's epoch");
-			return false;
-		}
-		try {
-			impl->state = impl->Build();
-		} catch (const std::exception& e) {
-			logger::error("[ORG] Subsurface Scattering setup failed: {}", e.what());
-		}
-		if (!impl->state)
-			return giveUp("its setup failed");
-		logger::info("[ORG] Subsurface Scattering runs on the render graph ({}x{}, {} blur)", impl->desc.Width, impl->desc.Height,
-			ModeName(impl->state->mode));
-	}
 	auto& state = *impl->state;
-	if (!state.targets) {
-		state.targets = ImportTargets();
-		if (!state.targets) {
-			if (!std::exchange(impl->targetsLogged, true)) {
-				logger::info("[ORG] Subsurface Scattering: waiting for the engine targets (main {}, masks {}, albedo {}, normals {}, depth {})",
-					state.targets.main != nullptr, state.targets.mask != nullptr, state.targets.albedo != nullptr, state.targets.normal != nullptr,
-					state.targets.depth != nullptr);
-			}
-			state.targets = {};
-			return false;
-		}
-	}
-	if (!impl->registered) {
-		// From the next frame once the client is registered (State has uploaded the shared constants by now).
-		if (impl->Register())
-			logger::info("[ORG] Subsurface Scattering: registered on the DeferredPasses anchor");
-		return false;
-	}
-
 	const bool ran = std::exchange(impl->ranThisFrame, false);
 	bool changed = false;
 	if (const int mode = Impl::CurrentMode(); mode != state.mode) {
@@ -548,7 +478,7 @@ bool ORGSubsurfaceScattering::AfterDeferredPasses()
 	}
 	if (impl->programsDirty) {
 		impl->programsDirty = false;
-		auto programs = LoadPrograms(runtime.Host()->Device());
+		auto programs = LoadPrograms(RenderGraphRuntime::Get().Host()->Device());
 		if (!programs) {
 			giveUp("its programs could not be built again");
 			return ran;
@@ -557,12 +487,18 @@ bool ORGSubsurfaceScattering::AfterDeferredPasses()
 		changed = true;
 	}
 	if (auto targets = ImportTargets(); !(targets == state.targets)) {
-		if (!targets) {
+		if (targets) {
+			if (!state.targets)
+				logger::info("[ORG] Subsurface Scattering: the engine targets are imported; the passes join the graph");
+			state.targets = std::move(targets);
+			changed = true;
+		} else if (state.targets) {
 			giveUp("an engine target could not be imported");
 			return ran;
+		} else if (!std::exchange(impl->targetsLogged, true)) {
+			logger::info("[ORG] Subsurface Scattering: waiting for the engine targets (main {}, masks {}, albedo {}, normals {}, depth {})",
+				targets.main != nullptr, targets.mask != nullptr, targets.albedo != nullptr, targets.normal != nullptr, targets.depth != nullptr);
 		}
-		state.targets = std::move(targets);
-		changed = true;
 	}
 	if (changed)
 		FrameAnchors::Refresh(kClientId);
@@ -582,9 +518,11 @@ struct ORGSubsurfaceScattering::Impl
 {};
 
 ORGSubsurfaceScattering::~ORGSubsurfaceScattering() = default;
-void ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC&) {}
-bool ORGSubsurfaceScattering::Running() const { return false; }
+void ORGSubsurfaceScattering::Reserve() {}
+bool ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC&, std::function<void()>) { return false; }
+bool ORGSubsurfaceScattering::IsActive() const { return false; }
 bool ORGSubsurfaceScattering::AfterDeferredPasses() { return false; }
 void ORGSubsurfaceScattering::ClearShaderCache() {}
+void ORGSubsurfaceScattering::Stop() {}
 
 #endif

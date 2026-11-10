@@ -2,7 +2,8 @@
 #define DYNAMIC_CUBEMAPS_CAPTURE_COMMON_HLSLI
 
 // Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers are heap reads
-// (ORG_SHARED_CONSTANTS) and the capture constants are the frame's latch region, declared below.
+// (ORG_SHARED_CONSTANTS) and the capture constants are the frame's latch region. D3D11 reads them
+// from the cbuffer at b0.
 #define ORG_SHARED_CONSTANTS
 #include "Common/OrgResources.hlsli"
 
@@ -32,7 +33,7 @@ struct UpdateCubemapConstants
 	X(SRV, Texture2D<float>, DepthTexture, 0)                           \
 	X(SRV, Texture2D<float4>, ColorTexture, 1)                          \
 	X(SAMPLER, SamplerState, LinearSampler, 0)                          \
-	X(EXTERN_LATCH, UpdateCubemapConstants, UpdateData, 0)
+	X(LATCH, UpdateCubemapConstants, UpdateData, 0)
 ORG_PUSH_BLOCK(CAPTURE_RESOURCES(ORG_HANDLE))
 
 #include "Common/Color.hlsli"
@@ -43,25 +44,6 @@ ORG_PUSH_BLOCK(CAPTURE_RESOURCES(ORG_HANDLE))
 
 CAPTURE_RESOURCES(ORG_RESOURCE)
 
-// The capture constants. D3D11: the cbuffer at b0. ORG: the frame's latch region, read through
-// the names the cbuffer gives them.
-#if defined(CS_ORG_BINDLESS)
-ORG_RESOURCE(LATCH, UpdateCubemapConstants, UpdateData, 0)
-#	define CameraPreviousPosAdjust2 UpdateData.CameraPreviousPosAdjust2
-#	define CaptureIndex UpdateData.CaptureIndex
-#	define CaptureDeltaTime UpdateData.CaptureDeltaTime
-#	define ResetCapture UpdateData.ResetCapture
-#else
-cbuffer UpdateData : register(b0)
-{
-	float3 CameraPreviousPosAdjust2;
-	uint CaptureIndex;
-	float CaptureDeltaTime;
-	uint ResetCapture;
-	uint2 UpdatePadding;
-}
-#endif
-
 static const float CaptureHistoryLifetime = 30.0;
 
 float GetCaptureTime()
@@ -71,7 +53,7 @@ float GetCaptureTime()
 
 bool CaptureHistoryExpired(float lastSeen)
 {
-	return CaptureDeltaTime >= CaptureHistoryLifetime || fmod(GetCaptureTime() - lastSeen + 64.0, 64.0) >= CaptureHistoryLifetime;
+	return UpdateData.CaptureDeltaTime >= CaptureHistoryLifetime || fmod(GetCaptureTime() - lastSeen + 64.0, 64.0) >= CaptureHistoryLifetime;
 }
 
 float3 GetSamplingVector(uint3 texel)
@@ -116,7 +98,7 @@ bool SampleCapture(uint3 texel, out float3 position, out float3 color, out float
 
 float3 AdjustCapturePosition(float3 position)
 {
-	return position + (CameraPreviousPosAdjust2 - FrameBuffer::CameraPosAdjust.xyz) * 0.001;
+	return position + (UpdateData.CameraPreviousPosAdjust2 - FrameBuffer::CameraPosAdjust.xyz) * 0.001;
 }
 
 bool CaptureGeometryMatches(float3 previousPosition, float3 position)

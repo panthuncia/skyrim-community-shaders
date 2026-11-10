@@ -3,7 +3,7 @@
 
 #define RADIANCE_DISOCC_RESOURCES(X)                    \
 	X(SHARED, ConstantBuffer, Shared, 0)                \
-	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 7)        \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 1)        \
 	X(EXTERN, SamplerState, samplerPointClamp, 0)       \
 	X(EXTERN, SamplerState, samplerLinearClamp, 1)      \
 	X(SRV, Texture2D<half4>, srcDiffuse, 0)             \
@@ -53,16 +53,16 @@ void readHistory(
 	// expensive world-space reconstruction.  Use a wider threshold than the
 	// world-space check to avoid rejecting valid taps displaced by parallax
 	// (e.g. camera rotation).
-	if (abs(curr_depth - prev_depth) > curr_depth * DepthDisocclusion * 3)
+	if (abs(curr_depth - prev_depth) > curr_depth * SsgiFrame.DepthDisocclusion * 3)
 		return;
 
 	float3 prev_pos = ScreenToViewPosition(screen_pos, prev_depth);
-	prev_pos = ViewToWorldPosition(prev_pos, PrevInvViewMat) + FrameBuffer::CameraPreviousPosAdjust.xyz;
+	prev_pos = ViewToWorldPosition(prev_pos, SsgiPrevInvViewMat()) + FrameBuffer::CameraPreviousPosAdjust.xyz;
 
 	float3 delta_pos = curr_pos - prev_pos;
 	// float normal_prod = dot(curr_normal, prev_normal);
 
-	const float movement_thres = curr_depth * DepthDisocclusion;
+	const float movement_thres = curr_depth * SsgiFrame.DepthDisocclusion;
 
 	bool depth_pass = dot(delta_pos, delta_pos) < movement_thres * movement_thres;
 	// bool normal_pass = normal_prod * normal_prod > NormalDisocclusion;
@@ -81,7 +81,7 @@ void readHistory(
 };
 
 [numthreads(8, 8, 1)] void main(const uint2 pixCoord : SV_DispatchThreadID) {
-	const float2 frameScale = FrameDim * RcpTexDim;
+	const float2 frameScale = SsgiFrame.FrameDim * SsgiFrame.RcpTexDim;
 
 	const float2 uv = (pixCoord + .5) * RCP_OUT_FRAME_DIM;
 	const float2 screen_pos = uv;
@@ -111,7 +111,7 @@ void readHistory(
 	}
 
 #ifdef REPROJECTION
-	if ((curr_depth <= DepthFadeRange.y) && !(any(prev_screen_pos < 0) || any(prev_screen_pos > 1))) {
+	if ((curr_depth <= SsgiFrame.DepthFadeRange.y) && !(any(prev_screen_pos < 0) || any(prev_screen_pos > 1))) {
 		// float3 curr_normal = GBuffer::DecodeNormal(srcCurrNormal[pixCoord]);
 		// curr_normal = ViewToWorldVector(curr_normal, FrameBuffer::CameraViewInverse);
 		float3 curr_pos = ScreenToViewPosition(screen_pos, curr_depth);
@@ -151,7 +151,7 @@ void readHistory(
 
 	half3 radiance = 0;
 #ifdef GI
-	radiance = ColorManagement::SceneToLinear(FULLRES_LOAD(srcDiffuse, pixCoord, uv * frameScale, samplerLinearClamp).rgb * GIStrength);
+	radiance = ColorManagement::SceneToLinear(FULLRES_LOAD(srcDiffuse, pixCoord, uv * frameScale, samplerLinearClamp).rgb * SsgiFrame.GIStrength);
 	radiance = filterNaN(radiance);
 	radiance = filterInf(radiance);
 	outRadianceDisocc[pixCoord] = radiance;
@@ -169,7 +169,7 @@ void readHistory(
 	// Fast camera/head movement means history is less trustworthy.
 	float2 motionVec = prev_screen_pos - screen_pos;
 	float motionLen = length(motionVec);
-	float motionMaxAccum = lerp(MaxAccumFrames, max(MaxAccumFrames * 0.25, 4), saturate(motionLen * 20));
+	float motionMaxAccum = lerp(SsgiFrame.MaxAccumFrames, max(SsgiFrame.MaxAccumFrames * 0.25, 4), saturate(motionLen * 20));
 
 	accum_frames = max(1, min(prevAccum + 1, motionMaxAccum));
 	outAccumFrames[pixCoord] = accum_frames / 255.0;

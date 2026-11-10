@@ -13,6 +13,7 @@
 
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/ShaderBindings.h"
 #include "TextureStreaming/Census.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/TextureFeedback.h"
@@ -70,57 +71,6 @@ namespace DCLF
 			if (r == 0 && g == 1 && b == 2 && a == 3)
 				return 0;
 			return r | (g << 3) | (b << 6) | (a << 9) | (1u << 12);
-		}
-
-		rhi::AddressMode AddressOf(D3D11_TEXTURE_ADDRESS_MODE a_mode)
-		{
-			switch (a_mode) {
-			case D3D11_TEXTURE_ADDRESS_WRAP:
-				return rhi::AddressMode::Wrap;
-			case D3D11_TEXTURE_ADDRESS_MIRROR:
-				return rhi::AddressMode::Mirror;
-			case D3D11_TEXTURE_ADDRESS_BORDER:
-				return rhi::AddressMode::Border;
-			case D3D11_TEXTURE_ADDRESS_MIRROR_ONCE:
-				return rhi::AddressMode::MirrorOnce;
-			default:
-				return rhi::AddressMode::Clamp;
-			}
-		}
-
-		rhi::SamplerDesc SamplerOf(const D3D11_SAMPLER_DESC& a_desc)
-		{
-			rhi::SamplerDesc desc{};
-			const auto filter = static_cast<std::uint32_t>(a_desc.Filter);
-			const bool anisotropic = (filter & 0x40) != 0;
-			desc.mipFilter = (filter & 0x1) || anisotropic ? rhi::MipFilter::Linear : rhi::MipFilter::Nearest;
-			desc.magFilter = (filter & 0x4) || anisotropic ? rhi::Filter::Linear : rhi::Filter::Nearest;
-			desc.minFilter = (filter & 0x10) || anisotropic ? rhi::Filter::Linear : rhi::Filter::Nearest;
-			desc.maxAnisotropy = anisotropic ? std::max(1u, a_desc.MaxAnisotropy) : 1u;
-			switch (filter & 0x180) {
-			case 0x80:
-				desc.compareEnable = true;
-				desc.reduction = rhi::ReductionMode::Comparison;
-				desc.compareOp = static_cast<rhi::CompareOp>(std::clamp<int>(a_desc.ComparisonFunc, 1, 8) - 1);
-				break;
-			case 0x100:
-				desc.reduction = rhi::ReductionMode::Min;
-				break;
-			case 0x180:
-				desc.reduction = rhi::ReductionMode::Max;
-				break;
-			default:
-				break;
-			}
-			desc.addressU = AddressOf(a_desc.AddressU);
-			desc.addressV = AddressOf(a_desc.AddressV);
-			desc.addressW = AddressOf(a_desc.AddressW);
-			desc.mipLodBias = a_desc.MipLODBias;
-			desc.minLod = a_desc.MinLOD;
-			desc.maxLod = a_desc.MaxLOD;
-			desc.borderPreset = rhi::BorderPreset::Custom;
-			std::copy(std::begin(a_desc.BorderColor), std::end(a_desc.BorderColor), desc.borderColor);
-			return desc;
 		}
 
 		bool DescribeView(const D3D11_SHADER_RESOURCE_VIEW_DESC& a_view, rhi::SrvDesc& a_out)
@@ -961,7 +911,7 @@ namespace DCLF
 		if (impl->samplerFailed[key])
 			return kInvalid;
 		try {
-			impl->samplerBindings[key] = service->CreateOwnedSampler(RenderGraphRuntime::Get().DeviceOwner(), SamplerOf(desc));
+			impl->samplerBindings[key] = service->CreateOwnedSampler(RenderGraphRuntime::Get().DeviceOwner(), ShaderBindings::SamplerFromD3D11(desc));
 			if (!impl->samplerBindings[key])
 				throw std::runtime_error("owned sampler creation failed");
 			index = impl->samplerBindings[key].Index();

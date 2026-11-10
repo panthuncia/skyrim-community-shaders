@@ -11,7 +11,9 @@
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/Switches.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
@@ -28,13 +30,17 @@
 namespace
 {
 	constexpr const char* kClientId = "cs.llf.local-shadows";
+	constexpr std::string_view kSwitch = "CS_ORG_LIGHT_LIMIT_FIX_SHADOWS";
+	// The switch's earlier name, which older scenario files still set.
+	constexpr std::string_view kDeprecatedSwitch = "CS_ORG_LLF_SHADOWS";
 	constexpr const char* kShader = "LightLimitFix/LocalShadowCopyCS.hlsl";
 	// LocalShadowCopyCS's group size (GROUP_SIZE).
 	constexpr std::uint32_t kGroupSize = 8;
 	// RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS.
 	constexpr std::uint32_t kShadowMaps = static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS);
 
-	// LocalShadowCopyCS's CopyConstants: one per copy, the latch's first kMaxCopies rows. TargetSize 0: no copy.
+	// LocalShadowCopyCS's CopyConstants: one per copy, the latch's first kMaxCopies rows. The run gate's entry of the same
+	// index says whether that copy runs this frame.
 	struct CopyConstants
 	{
 		std::uint32_t sourceSlice;
@@ -68,13 +74,18 @@ namespace
 		std::unique_ptr<GraphResources::Texture2D> cache;
 		std::unique_ptr<GraphResources::StructuredBuffer> data;
 		std::shared_ptr<org::LatchBlock> latch;
+		// One entry per possible copy: the commit opens those of the copies the frame staged.
+		std::shared_ptr<RenderGraph::RunGate> gate;
+		// Each copy's groups along x and y.
+		std::uint32_t groups = 0;
 		// The frame SetFrame gave, written into the latch at the anchor's commit. staged: SetFrame ran since the last commit.
 		std::vector<CopyConstants> copies = std::vector<CopyConstants>(ORGLocalShadows::kMaxCopies);
+		std::uint32_t copyCount = 0;
 		std::vector<std::byte> slotData;
 		bool staged = false;
 	};
 
-	// Copies the frame's fresh engine slices into the cache: a dispatch per possible copy, each reading its row of the latch.
+	// Copies the frame's fresh engine slices into the cache: a gated dispatch per possible copy, each reading its row of the latch.
 	struct CopyBindings
 	{
 		org::DeclaredViewToken source, cache;
@@ -84,7 +95,7 @@ namespace
 	{
 		std::shared_ptr<const ComputeProgram> program;
 		std::shared_ptr<const org::LatchBlock> latch;
-		std::uint32_t groups = 0;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
 	};
 
 	class ShadowCopyPass final : public org::TypedRenderGraphPass<ShadowCopyPass, CopyFrame, CopyBindings>
@@ -92,12 +103,7 @@ namespace
 	public:
 		// At the build, on the render thread: the resources as they are now (GraphResources' rule).
 		ShadowCopyPass(const Resources& a_resources, std::shared_ptr<org::Resource> a_source) :
-			program(a_resources.program), latch(a_resources.latch), source(std::move(a_source)), cache(a_resources.cache->Graph())
-		{
-			const auto& desc = a_resources.desc;
-			const std::uint32_t threadsPerTexel = (std::min)(desc.scale, kGroupSize);
-			groups = (desc.resolution * threadsPerTexel + kGroupSize - 1) / kGroupSize;
-		}
+			program(a_resources.program), latch(a_resources.latch), gate(a_resources.gate), source(std::move(a_source)), cache(a_resources.cache->Graph()) {}
 
 		CopyBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -112,28 +118,29 @@ namespace
 		{
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(program.get()));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(latch.get()));
-			a_out.push_back(groups);
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(gate.get()));
 		}
 
-		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { program, latch, groups }; }
+		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { program, latch, gate }; }
 
 		static void Record(const CopyBindings& a_bindings, const CopyFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.program || !a_frame.latch || !a_frame.groups)
+			if (!a_frame.program || !a_frame.latch || !a_frame.gate)
 				return;
 			CopyBlock block{ a_recording.Index(a_bindings.source), a_recording.Index(a_bindings.cache), {} };
+			// A copy the frame did not stage has zero groups in its gate entry, so it does no work.
 			for (std::uint32_t copy = 0; copy < ORGLocalShadows::kMaxCopies; ++copy) {
 				block.copy = ShaderBindings::LatchOf(*a_frame.latch, a_recording.FrameSlot(), copy * sizeof(CopyConstants));
-				a_frame.program->Dispatch(a_recording, ShaderBindings::Data(block), a_frame.groups, a_frame.groups, 1);
+				a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), copy);
 			}
 		}
 
 	private:
 		std::shared_ptr<const ComputeProgram> program;
 		std::shared_ptr<const org::LatchBlock> latch;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
 		std::shared_ptr<org::Resource> source;
 		std::shared_ptr<org::Resource> cache;
-		std::uint32_t groups = 0;
 	};
 
 	// Moves the slots' data from the latch into the buffer the engine's pixel shaders read at t102.
@@ -206,8 +213,10 @@ ORGLocalShadows::~ORGLocalShadows() = default;
 bool ORGLocalShadows::Requested()
 {
 	static const bool requested = [] {
-		char value[4]{};
-		return GetEnvironmentVariableA("CS_ORG_LLF_SHADOWS", value, sizeof(value)) && value[0] == '1';
+		if (Switches::IsSet(kSwitch) || !Switches::IsSet(kDeprecatedSwitch))
+			return Switches::On(kSwitch);
+		logger::warn("[ORG] {} is deprecated; set {} instead", kDeprecatedSwitch, kSwitch);
+		return Switches::On(kDeprecatedSwitch);
 	}();
 	return requested;
 }
@@ -218,7 +227,7 @@ void ORGLocalShadows::Reserve()
 		FrameAnchors::Reserve(FrameAnchors::Anchor::EarlyPrepass);
 }
 
-bool ORGLocalShadows::Setup(const Desc& a_desc)
+bool ORGLocalShadows::Setup(const Desc& a_desc, std::function<void()> a_onFailed)
 {
 	if (impl && impl->resources && SameShape(impl->resources->desc, a_desc) && IsActive())
 		return true;
@@ -288,6 +297,13 @@ bool ORGLocalShadows::Setup(const Desc& a_desc)
 		logger::warn("[ORG] LLF local shadows stay on D3D11: the latch could not be created: {}", e.what());
 		return false;
 	}
+	resources->gate = RenderGraph::RunGate::Create("LightLimitFix::LocalShadowCopyGate", kMaxCopies);
+	if (!resources->gate) {
+		logger::warn("[ORG] LLF local shadows stay on D3D11: the copies' run gate could not be created");
+		return false;
+	}
+	const std::uint32_t threadsPerTexel = (std::min)(a_desc.scale, kGroupSize);
+	resources->groups = (a_desc.resolution * threadsPerTexel + kGroupSize - 1) / kGroupSize;
 	resources->slotData.assign(static_cast<std::size_t>(a_desc.slots) * a_desc.dataStride, std::byte{ 0 });
 
 	FrameAnchors::ClientDesc client{};
@@ -318,20 +334,23 @@ bool ORGLocalShadows::Setup(const Desc& a_desc)
 		if (!graphHost)
 			return;
 		const std::uint32_t slot = graphHost->CurrentFrameSlot();
-		// A frame that staged nothing copies nothing: the engine's slices are not this frame's. The data stays as last staged.
-		if (std::exchange(resources->staged, false))
+		// A frame that staged nothing opens no copy (the run closed the gate): the engine's slices are not this frame's. The
+		// data stays as last staged.
+		if (std::exchange(resources->staged, false)) {
 			resources->latch->Write(slot, 0, std::as_bytes(std::span(resources->copies)));
-		else {
-			static const std::vector<CopyConstants> kNoCopies(ORGLocalShadows::kMaxCopies);
-			resources->latch->Write(slot, 0, std::as_bytes(std::span(kNoCopies)));
+			for (std::uint32_t copy = 0; copy < resources->copyCount; ++copy)
+				resources->gate->OpenDispatch(copy, resources->groups, resources->groups);
 		}
 		resources->latch->Write(slot, kDataOffset, resources->slotData);
 	};
-	client.onFailed = [] {
-		// LightLimitFix sees the cache inactive at its next EarlyPrepass and makes its D3D11 cache.
+	client.gates = { resources->gate };
+	client.onFailed = [onFailed = std::move(a_onFailed)] {
+		// LightLimitFix makes its D3D11 cache at its next EarlyPrepass.
 		logger::error("[ORG] LLF local shadows: the render graph failed; back to D3D11");
 		WithdrawCache();
 		Get().impl.reset();
+		if (onFailed)
+			onFailed();
 	};
 	if (!FrameAnchors::Register(std::move(client))) {
 		logger::warn("[ORG] LLF local shadows stay on D3D11: the EarlyPrepass client could not be registered");
@@ -373,8 +392,9 @@ void ORGLocalShadows::SetFrame(std::span<const Copy> a_copies, std::span<const s
 		return;
 	auto& resources = *impl->resources;
 	const auto& desc = resources.desc;
+	resources.copyCount = static_cast<std::uint32_t>((std::min)(a_copies.size(), static_cast<std::size_t>(kMaxCopies)));
 	for (std::uint32_t i = 0; i < kMaxCopies; ++i) {
-		if (i < a_copies.size())
+		if (i < resources.copyCount)
 			resources.copies[i] = { a_copies[i].sourceSlice, a_copies[i].targetSlot, desc.scale, desc.resolution };
 		else
 			resources.copies[i] = {};
@@ -411,7 +431,8 @@ ORGLocalShadows& ORGLocalShadows::Get()
 ORGLocalShadows::~ORGLocalShadows() = default;
 bool ORGLocalShadows::Requested() { return false; }
 void ORGLocalShadows::Reserve() {}
-bool ORGLocalShadows::Setup(const Desc&) { return false; }
+bool ORGLocalShadows::Setup(const Desc&, std::function<void()>) { return false; }
+
 void ORGLocalShadows::Release() {}
 bool ORGLocalShadows::IsActive() const { return false; }
 void ORGLocalShadows::SetFrame(std::span<const Copy>, std::span<const std::byte>) {}

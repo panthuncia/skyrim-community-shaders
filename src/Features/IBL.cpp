@@ -197,7 +197,6 @@ void IBL::Prepass()
 	auto context = globals::d3d::context;
 
 	auto& orgIBL = ORGIBL::Get();
-	orgIBL.DebugReadback(envIBLTexture ? envIBLTexture->resource.get() : nullptr, skyIBLTexture ? skyIBLTexture->resource.get() : nullptr);
 
 	// The render graph projects the SH at the Prepass anchor, right after this (CS_ORG_IBL=1): bind its textures for the main pass.
 	if (orgIBL.Prepass(settings.DALCMode < 2)) {
@@ -321,10 +320,10 @@ void IBL::CreateSHTextures()
 			.Texture2D = { .MipSlice = 0 }
 		};
 
-		envIBLTexture = new Texture2D(texDesc, "IBL::EnvIBL");
+		envIBLTexture = new Texture2D(texDesc, ORGIBL::kEnvId.data());
 		envIBLTexture->CreateSRV(srvDesc);
 		envIBLTexture->CreateUAV(uavDesc);
-		skyIBLTexture = new Texture2D(texDesc, "IBL::SkyIBL");
+		skyIBLTexture = new Texture2D(texDesc, ORGIBL::kSkyId.data());
 		skyIBLTexture->CreateSRV(srvDesc);
 		skyIBLTexture->CreateUAV(uavDesc);
 	}

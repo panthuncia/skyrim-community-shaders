@@ -9,81 +9,7 @@
 #include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
 #include "Features/IBL.h"
 #include "Globals.h"
-#include "State.h"
-#include "Utils/D3D.h"
-
-#include <DirectXPackedVector.h>
-
-#include <array>
-#include <cstring>
-
-namespace
-{
-	bool EnvironmentFlag(const char* a_name)
-	{
-		char value[8]{};
-		return GetEnvironmentVariableA(a_name, value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}
-
-	// The SH textures: three texels (R, G, B), each an sh2 (float4) in RGBA16F.
-	constexpr UINT kShTexels = 3;
-
-	D3D11_TEXTURE2D_DESC ShTextureDesc(bool a_staging)
-	{
-		D3D11_TEXTURE2D_DESC desc{};
-		desc.Width = kShTexels;
-		desc.Height = 1;
-		desc.MipLevels = 1;
-		desc.ArraySize = 1;
-		desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-		desc.SampleDesc.Count = 1;
-		desc.Usage = a_staging ? D3D11_USAGE_STAGING : D3D11_USAGE_DEFAULT;
-		desc.BindFlags = a_staging ? 0u : (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
-		desc.CPUAccessFlags = a_staging ? D3D11_CPU_ACCESS_READ : 0u;
-		return desc;
-	}
-}
-
-// The debug readback: plain D3D11 on both paths.
-struct ORGIBL::Readback
-{
-	static constexpr std::uint32_t kInterval = 250;
-
-	std::array<winrt::com_ptr<ID3D11Texture2D>, 2> staging;  // env, sky
-	std::uint32_t copiedFrame = 0;
-	bool pending = false;
-	bool path = false;  // the copy came from the render graph's textures
-
-	bool Create()
-	{
-		const auto desc = ShTextureDesc(true);
-		for (auto& texture : staging) {
-			if (FAILED(globals::d3d::device->CreateTexture2D(&desc, nullptr, texture.put())))
-				return false;
-			Util::SetResourceName(texture.get(), "IBL::ReadbackStaging");
-		}
-		return true;
-	}
-
-	/** @brief The texture's three texels as text, or why they could not be read; false while the copy is not done. */
-	bool Read(ID3D11Texture2D* a_texture, std::string& a_out)
-	{
-		auto* context = globals::d3d::context;
-		D3D11_MAPPED_SUBRESOURCE mapped{};
-		const HRESULT hr = context->Map(a_texture, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
-		if (hr == DXGI_ERROR_WAS_STILL_DRAWING)
-			return false;
-		if (FAILED(hr)) {
-			a_out = fmt::format("map failed 0x{:08X}", static_cast<std::uint32_t>(hr));
-			return true;
-		}
-		const auto* halves = static_cast<const DirectX::PackedVector::HALF*>(mapped.pData);
-		for (UINT i = 0; i < kShTexels * 4; ++i)
-			a_out += fmt::format("{}{:.6f}", i == 0 ? "" : (i % 4 == 0 ? " | " : " "), DirectX::PackedVector::XMConvertHalfToFloat(halves[i]));
-		context->Unmap(a_texture, 0);
-		return true;
-	}
-};
+#include "RenderGraph/Switches.h"
 
 ORGIBL& ORGIBL::Get()
 {
@@ -95,46 +21,8 @@ ORGIBL::~ORGIBL() = default;
 
 bool ORGIBL::Requested()
 {
-	static const bool requested = EnvironmentFlag("CS_ORG_IBL");
+	static const bool requested = Switches::On("CS_ORG_IBL");
 	return requested;
-}
-
-void ORGIBL::DebugReadback(ID3D11Texture2D* a_env, ID3D11Texture2D* a_sky)
-{
-	static const bool requested = EnvironmentFlag("CS_ORG_IBL_READBACK");
-	if (!requested)
-		return;
-	if (!readback) {
-		readback = std::make_unique<Readback>();
-		if (!readback->Create()) {
-			logger::error("[IBL] SH readback: the staging textures could not be created");
-			return;
-		}
-	}
-	auto& state = *readback;
-	if (!state.staging[0])
-		return;
-	if (state.pending) {
-		std::string env, sky;
-		if (!state.Read(state.staging[0].get(), env) || !state.Read(state.staging[1].get(), sky))
-			return;
-		state.pending = false;
-		logger::info("[IBL] SH readback ({}) frame {}: env [{}] sky [{}]", state.path ? "ORG" : "D3D11", state.copiedFrame, env, sky);
-		return;
-	}
-	const std::uint32_t frame = globals::state->frameCount;
-	if (frame % Readback::kInterval != 0)
-		return;
-	state.path = IsActive();
-	auto* env = state.path ? Exported(true) : a_env;
-	auto* sky = state.path ? Exported(false) : a_sky;
-	if (!env || !sky)
-		return;
-	// The last frame's result: the D3D11 path has not dispatched yet, the graph's Prepass anchor has not run yet.
-	globals::d3d::context->CopyResource(state.staging[0].get(), env);
-	globals::d3d::context->CopyResource(state.staging[1].get(), sky);
-	state.copiedFrame = frame;
-	state.pending = true;
 }
 
 #if defined(CS_HAS_RENDER_GRAPH)
@@ -145,6 +33,7 @@ void ORGIBL::DebugReadback(ID3D11Texture2D* a_env, ID3D11Texture2D* a_sky)
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/UavClearPass.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/OwnedDescriptorBinding.h>
@@ -156,8 +45,23 @@ namespace
 {
 	constexpr const char* kClientId = "cs.ibl";
 	constexpr const char* kShader = "IBL/DiffuseIBLCS.hlsl";
-	// Dynamic Cubemaps' environment cubemap on its ORG path, published under this id (ORGDynamicCubemaps).
-	constexpr std::string_view kDynamicCubemapsEnvId = "DynamicCubemaps::Env";
+
+	// The SH textures: three texels (R, G, B), each an sh2 (float4) in RGBA16F.
+	constexpr UINT kShTexels = 3;
+
+	D3D11_TEXTURE2D_DESC ShTextureDesc()
+	{
+		D3D11_TEXTURE2D_DESC desc{};
+		desc.Width = kShTexels;
+		desc.Height = 1;
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		return desc;
+	}
 
 	// DiffuseIBLCS's push block (DIFFUSE_IBL_RESOURCES, in list order).
 	struct DiffuseIBLBlock
@@ -260,7 +164,7 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	}
 	auto state = std::make_unique<Impl>();
 	ComputeProgram::Desc desc{ .source = kShader, .constantWords = ShaderBindings::Words<DiffuseIBLBlock>() };
-	// The D3D11 path's defines (IBL::GetDiffuseIBLCS).
+	// The D3D11 path's own defines (IBL::GetDiffuseIBLCS); ComputeProgram adds the common ones.
 	if (globals::features::dynamicCubemaps.loaded)
 		desc.defines.push_back({ L"DYNAMIC_CUBEMAPS", L"" });
 	state->program = ComputeProgram::Load(host->Device(), desc);
@@ -268,8 +172,8 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	state->sampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{});
 	// Read in the next frame (the reflection prepass binds the last frame's SH), and by D3D11 until its readers are ported.
 	const GraphResources::Options options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV };
-	state->env = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(false), std::string(kEnvId), options);
-	state->sky = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(false), std::string(kSkyId), options);
+	state->env = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(), std::string(kEnvId), options);
+	state->sky = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(), std::string(kSkyId), options);
 	if (!state->program || !state->sampler || !*state->env || !*state->sky || !state->env->SRV() || !state->sky->SRV()) {
 		logger::error("[ORG] IBL: its program, sampler or SH textures could not be made; IBL stays on D3D11");
 		return false;
@@ -283,9 +187,12 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 			return nullptr;
 		const auto& source = a_env ? current->envSource : current->skySource;
 		const auto& target = a_env ? current->env : current->sky;
-		// The environment only while the DALC mode reads it (the D3D11 path skips it too); a missing source leaves the last values.
-		if (!source || (a_env && !current->useEnvironment))
+		// The environment only while the DALC mode reads it: the D3D11 path skips it too, and the last values stay.
+		if (a_env && !current->useEnvironment)
 			return nullptr;
+		// A missing cubemap: the D3D11 path projects a null view, which samples zero, so the SH is zero.
+		if (!source)
+			return GraphPasses::MakeUavClear(target->Graph(), {});
 		return std::make_shared<ProjectPass>(current->program, current->sampler.Index(), source, target->Graph());
 	};
 	FrameAnchors::ClientDesc client{};
@@ -300,14 +207,7 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	};
 	// IBL::Prepass returns before computing anything while the scene disables IBL.
 	client.active = [] { return !globals::features::ibl.IsDisabledForCurrentScene(); };
-	client.onFailed = [self] {
-		logger::error("[ORG] IBL: the render graph failed; IBL returns to D3D11");
-		PublishedResources::Withdraw(kEnvId);
-		PublishedResources::Withdraw(kSkyId);
-		auto failed = std::move(self->impl);
-		if (failed && failed->onFailed)
-			failed->onFailed();
-	};
+	client.onFailed = [self] { self->Fail("the render graph failed", false); };
 	impl = std::move(state);
 	if (!FrameAnchors::Register(std::move(client))) {
 		impl.reset();
@@ -326,15 +226,32 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	return true;
 }
 
+void ORGIBL::Fail(const char* a_reason, bool a_unregister)
+{
+	logger::error("[ORG] IBL returns to D3D11: {}", a_reason);
+	if (a_unregister)
+		FrameAnchors::Unregister(kClientId);
+	PublishedResources::Withdraw(kEnvId);
+	PublishedResources::Withdraw(kSkyId);
+	auto failed = std::move(impl);
+	if (failed && failed->onFailed)
+		failed->onFailed();
+}
+
 bool ORGIBL::IsActive() const
 {
-	return impl != nullptr;
+	return impl && RenderGraphRuntime::Get().IsActive();
 }
 
 bool ORGIBL::Prepass(bool a_useEnvironment)
 {
 	if (!impl)
 		return false;
+	// The runtime stopped without a failed epoch of this anchor (another epoch faulted): leave as onFailed does.
+	if (!RenderGraphRuntime::Get().IsActive()) {
+		Fail("the render graph is no longer active", true);
+		return false;
+	}
 	auto& state = *impl;
 	// Imported once; imported again (and every anchor rebuilt) when the engine or Dynamic Cubemaps replace the texture.
 	const Source sky{ FrameAnchors::EngineCubemap(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS), {} };
@@ -344,11 +261,10 @@ bool ORGIBL::Prepass(bool a_useEnvironment)
 		const auto* texture = dynamicCubemaps.envTexture;
 		// On Dynamic Cubemaps' ORG path its texture is the graph twin's export: read the published twin, ordered after its writes.
 		// Importing the export would make a second graph resource of the same image, which nothing orders after them.
-		const auto& graphCubemaps = ORGDynamicCubemaps::Get();
-		if (graphCubemaps.IsActive() && texture->resource.get() == graphCubemaps.Exported().env && PublishedResources::IsPublished(kDynamicCubemapsEnvId))
-			env.published = kDynamicCubemapsEnvId;
+		if (PublishedResources::IsExportOf(texture->srv.get(), ORGDynamicCubemaps::kEnvId))
+			env.published = ORGDynamicCubemaps::kEnvId;
 		else
-			env.resource = FrameAnchors::D3D11Texture("DynamicCubemaps::EnvTexture", texture->resource.get(), texture->srv.get(), texture->uav.get());
+			env.resource = FrameAnchors::D3D11Texture(ORGDynamicCubemaps::kEnvId, texture->resource.get(), texture->srv.get(), texture->uav.get());
 	}
 	if (sky != state.skySource || env != state.envSource || a_useEnvironment != state.useEnvironment) {
 		if (env.published != state.envSource.published)
@@ -361,10 +277,6 @@ bool ORGIBL::Prepass(bool a_useEnvironment)
 	return true;
 }
 
-ID3D11Texture2D* ORGIBL::Exported(bool a_env) const
-{
-	return impl ? (a_env ? impl->env : impl->sky)->D3D11() : nullptr;
-}
 
 ID3D11ShaderResourceView* ORGIBL::EnvSRV() const
 {
@@ -386,7 +298,7 @@ void ORGIBL::Reserve() {}
 bool ORGIBL::Setup(std::function<void()>) { return false; }
 bool ORGIBL::IsActive() const { return false; }
 bool ORGIBL::Prepass(bool) { return false; }
-ID3D11Texture2D* ORGIBL::Exported(bool) const { return nullptr; }
+void ORGIBL::Fail(const char*, bool) {}
 ID3D11ShaderResourceView* ORGIBL::EnvSRV() const { return nullptr; }
 ID3D11ShaderResourceView* ORGIBL::SkySRV() const { return nullptr; }
 

@@ -25,12 +25,6 @@ groupshared float g_scratchDepths[GROUP_SIZE][GROUP_SIZE];
 
 // Each thread min-reduces its own footprint, then the group tree-reduces until one thread per cache texel remains.
 [numthreads(GROUP_SIZE, GROUP_SIZE, 1)] void main(uint2 dispatchThreadId : SV_DispatchThreadID, uint2 groupThreadId : SV_GroupThreadID) {
-#if defined(CS_ORG_BINDLESS)
-	// The render graph records a dispatch for every copy a frame may make; one without a copy this frame has no target.
-	if (Copy.TargetSize == 0)
-		return;
-#endif
-
 	const uint footprint = max(Copy.Scale / GROUP_SIZE, 1);
 	const uint threadsPerTexel = Copy.Scale / footprint;
 	const uint2 sourceBase = dispatchThreadId * footprint;

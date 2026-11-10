@@ -7,17 +7,7 @@
 
 #include "Features/DynamicCubemaps.h"
 #include "Globals.h"
-
-#include <cstring>
-
-namespace
-{
-	bool EnvironmentFlag(const char* a_name)
-	{
-		char value[8]{};
-		return GetEnvironmentVariableA(a_name, value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}
-}
+#include "RenderGraph/Switches.h"
 
 ORGDynamicCubemaps& ORGDynamicCubemaps::Get()
 {
@@ -27,7 +17,7 @@ ORGDynamicCubemaps& ORGDynamicCubemaps::Get()
 
 bool ORGDynamicCubemaps::Requested()
 {
-	static const bool requested = EnvironmentFlag("CS_ORG_DYNAMIC_CUBEMAPS");
+	static const bool requested = Switches::On("CS_ORG_DYNAMIC_CUBEMAPS");
 	return requested;
 }
 
@@ -41,7 +31,6 @@ bool ORGDynamicCubemaps::Requested()
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
-#	include "Utils/D3D.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
@@ -80,8 +69,6 @@ namespace
 	constexpr std::uint32_t kFaces = 6;
 	// After Subsurface Scattering's passes (199-202) at DeferredPasses.
 	constexpr std::int32_t kOrder = 300;
-	// Frames AfterUpdate waits for the inputs before the cubemaps return to D3D11.
-	constexpr std::uint32_t kRegisterAttempts = 600;
 
 	using ShaderBindings::Handle;
 	using Groups = GraphPasses::DispatchGroups;
@@ -145,14 +132,8 @@ namespace
 
 	constexpr std::uint32_t GroupsOffset(std::size_t a_fieldOffset, std::uint32_t a_index) { return static_cast<std::uint32_t>(a_fieldOffset) + a_index * sizeof(Groups); }
 
-	/** @brief A program, with the indirect dispatch signature made against its layout. */
-	struct Program
-	{
-		std::shared_ptr<const ComputeProgram> compute;
-		rhi::CommandSignaturePtr signature;
-
-		explicit operator bool() const { return compute && signature; }
-	};
+	/** @brief A program; it owns its indirect dispatch signature (ComputeProgram::DispatchIndirect). */
+	using Program = std::shared_ptr<const ComputeProgram>;
 
 	struct Programs
 	{
@@ -168,52 +149,30 @@ namespace
 		}
 	};
 
-	/** @brief The defines a_own plus those Util::CompileShader gives every D3D11 build, so both paths build one permutation. */
-	std::vector<std::pair<std::wstring, std::wstring>> ProgramDefines(std::vector<std::pair<std::string, std::string>> a_own)
-	{
-		std::vector<std::string_view> names;
-		for (const auto& define : a_own)
-			names.push_back(define.first);
-		for (auto& define : Util::GetCommonShaderDefines(names))
-			a_own.push_back(std::move(define));
-		for (const char* name : { "COMPUTESHADER", "WINPC", "DX11" })
-			a_own.emplace_back(name, "");
-		// Defines are ASCII.
-		std::vector<std::pair<std::wstring, std::wstring>> wide;
-		for (const auto& [name, value] : a_own)
-			wide.emplace_back(std::wstring(name.begin(), name.end()), std::wstring(value.begin(), value.end()));
-		return wide;
-	}
-
+	/** @brief A program with a_define, if given. ComputeProgram adds the defines every D3D11 build gets, so both paths build one permutation. */
 	template <class Block>
-	Program LoadProgram(rhi::Device a_device, const char* a_source, std::vector<std::pair<std::string, std::string>> a_defines)
+	Program LoadProgram(rhi::Device a_device, const char* a_source, const wchar_t* a_define = nullptr)
 	{
-		Program program;
-		program.compute = ComputeProgram::Load(a_device,
-			{ .source = a_source, .constantWords = ShaderBindings::Words<Block>(), .defines = ProgramDefines(std::move(a_defines)) });
-		if (!program.compute)
-			return {};
-		rhi::IndirectArg args[] = { { .kind = rhi::IndirectArgKind::Dispatch } };
-		if (a_device.CreateCommandSignature(rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, 1), sizeof(std::uint32_t) * 3 },
-				program.compute->layout->GetHandle(), program.signature) != rhi::Result::Ok)
-			return {};
-		return program;
+		ComputeProgram::Desc desc{ .source = a_source, .constantWords = ShaderBindings::Words<Block>() };
+		if (a_define)
+			desc.defines.push_back({ a_define, L"" });
+		return ComputeProgram::Load(a_device, desc);
 	}
 
 	/** @brief Every program, as DynamicCubemaps' GetComputeShader* compile them, and ORG's GenerateMips for arrays and cubes. */
 	std::shared_ptr<const Programs> LoadPrograms(rhi::Device a_device)
 	{
 		auto programs = std::make_shared<Programs>();
-		programs->detect = LoadProgram<CaptureBlock>(a_device, kDetectShader, {});
-		programs->update[kBase] = LoadProgram<CaptureBlock>(a_device, kUpdateShader, {});
-		programs->update[kReflections] = LoadProgram<CaptureBlock>(a_device, kUpdateShader, { { "REFLECTIONS", "" } });
-		programs->update[kFake] = LoadProgram<CaptureBlock>(a_device, kUpdateShader, { { "FAKEREFLECTIONS", "" } });
-		programs->infer[kBase] = LoadProgram<InferBlock>(a_device, kInferShader, {});
-		programs->infer[kReflections] = LoadProgram<InferBlock>(a_device, kInferShader, { { "REFLECTIONS", "" } });
-		programs->infer[kFake] = LoadProgram<InferBlock>(a_device, kInferShader, { { "FAKEREFLECTIONS", "" } });
-		programs->irradiance = LoadProgram<IrradianceBlock>(a_device, kIrradianceShader, {});
-		programs->encode = LoadProgram<EncodeBlock>(a_device, kEncodeShader, {});
-		programs->publish = LoadProgram<PublishBlock>(a_device, kPublishShader, {});
+		programs->detect = LoadProgram<CaptureBlock>(a_device, kDetectShader);
+		programs->update[kBase] = LoadProgram<CaptureBlock>(a_device, kUpdateShader);
+		programs->update[kReflections] = LoadProgram<CaptureBlock>(a_device, kUpdateShader, L"REFLECTIONS");
+		programs->update[kFake] = LoadProgram<CaptureBlock>(a_device, kUpdateShader, L"FAKEREFLECTIONS");
+		programs->infer[kBase] = LoadProgram<InferBlock>(a_device, kInferShader);
+		programs->infer[kReflections] = LoadProgram<InferBlock>(a_device, kInferShader, L"REFLECTIONS");
+		programs->infer[kFake] = LoadProgram<InferBlock>(a_device, kInferShader, L"FAKEREFLECTIONS");
+		programs->irradiance = LoadProgram<IrradianceBlock>(a_device, kIrradianceShader);
+		programs->encode = LoadProgram<EncodeBlock>(a_device, kEncodeShader);
+		programs->publish = LoadProgram<PublishBlock>(a_device, kPublishShader);
 		programs->mips = GraphPasses::LoadGenerateMips(a_device, true);
 		if (!*programs)
 			return nullptr;
@@ -332,9 +291,6 @@ namespace
 			if (!current || !current->latch)
 				return;
 			const std::uint32_t slot = a_recording.FrameSlot();
-			auto& commands = a_recording.Commands();
-			const auto latchBuffer = current->latch->Resource()->GetAPIResource().GetHandle();
-			const std::uint64_t region = current->latch->Offset(slot);
 			const auto shared = current->shared ? SharedConstants::Index(a_recording, a_bindings.shared) : SharedConstants::Handles{};
 			std::array<std::uint32_t, ShaderBindings::kMaxPushWords> words{};
 			for (const auto& dispatch : current->dispatches) {
@@ -367,16 +323,13 @@ namespace
 						}
 					}
 				}
-				const auto& compute = *dispatch.program->compute;
+				const auto& compute = **dispatch.program;
 				// A block that does not match the program's records nothing (a programming error, caught in the first test).
 				if (count != compute.constantWords)
 					continue;
 				if (dispatch.barrier)
 					a_recording.UavBarrier();
-				commands.BindLayout(compute.layout->GetHandle());
-				commands.BindPipeline(compute.Pipeline());
-				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, count, words.data());
-				commands.ExecuteIndirect(dispatch.program->signature->GetHandle(), latchBuffer, region + dispatch.groups, {}, 0, 1);
+				compute.DispatchIndirect(a_recording, std::span<const std::uint32_t>(words.data(), count), *current->latch, dispatch.groups);
 			}
 		}
 
@@ -533,11 +486,6 @@ struct ORGDynamicCubemaps::Impl
 	std::array<bool, 2> encoded{};
 	std::array<bool, 2> copying{};
 	std::function<void()> onFailed;
-
-	// The anchor client, registered at the first AfterUpdate with every input (Setup runs before the engine targets exist).
-	bool registered = false;
-	std::uint32_t registerAttempts = 0;
-	bool waitLogged = false;
 
 	bool Complete() const
 	{
@@ -826,6 +774,13 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 			logger::warn("[ORG] Dynamic Cubemaps: its programs, sampler or textures could not be made; the cubemaps stay on D3D11");
 			return false;
 		}
+		// The engine made its targets just before CS's setup, and the feature loaded its default cubemap.
+		state->imports = Import();
+		if (!state->imports) {
+			logger::warn("[ORG] Dynamic Cubemaps: its inputs cannot be imported (depth {}, main {}, reflections {}, default cubemap {}); the cubemaps stay on D3D11",
+				state->imports.depth != nullptr, state->imports.main != nullptr, state->imports.reflections != nullptr, state->imports.defaultCubemap != nullptr);
+			return false;
+		}
 		// Black until the first publish, as the D3D11 path's cubemaps are.
 		for (std::uint32_t i = 0; i < 2; ++i) {
 			ZeroTexture(state->env[i]->D3D11());
@@ -833,20 +788,29 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 		}
 		state->onFailed = std::move(a_onFailed);
 		impl = std::move(state);
+		// The client may register before CS's first constant upload: the anchors hold it until the shared constants exist. The
+		// readers see the black cubemaps until the first publish.
+		if (!RegisterClient()) {
+			logger::warn("[ORG] Dynamic Cubemaps: the anchor client could not be registered; the cubemaps stay on D3D11");
+			impl.reset();
+			return false;
+		}
 		for (std::uint32_t i = 0; i < 2; ++i)
 			if (!PublishedResources::Publish(*impl->env[i]) || !PublishedResources::Publish(*impl->bc6h[i])) {
 				logger::warn("[ORG] Dynamic Cubemaps: the cubemaps could not be published; they stay on D3D11");
+				FrameAnchors::Unregister(kClientId);
 				Withdraw();
 				impl.reset();
 				return false;
 			}
-		// The client registers at the first AfterUpdate that has the engine targets and the shared constants.
-		logger::info("[ORG] Dynamic Cubemaps: the cubemaps update on the render graph ({}x{}, {} mips)", size, size, kMips);
+		logger::info("[ORG] Dynamic Cubemaps: the cubemaps update on the render graph at DeferredPasses ({}x{}, {} mips)", size, size, kMips);
 		return true;
 	} catch (const std::exception& e) {
 		logger::error("[ORG] Dynamic Cubemaps setup failed, staying on D3D11: {}", e.what());
-		if (impl)
+		if (impl) {
+			FrameAnchors::Unregister(kClientId);
 			Withdraw();
+		}
 		impl.reset();
 		return false;
 	}
@@ -932,7 +896,7 @@ void ORGDynamicCubemaps::Fail(const char* a_reason, bool a_unregister)
 
 bool ORGDynamicCubemaps::IsActive() const
 {
-	return impl != nullptr;
+	return impl && RenderGraphRuntime::Get().IsActive();
 }
 
 ORGDynamicCubemaps::Outputs ORGDynamicCubemaps::Exported() const
@@ -943,36 +907,22 @@ ORGDynamicCubemaps::Outputs ORGDynamicCubemaps::Exported() const
 		impl->bc6h[1]->D3D11(), impl->bc6h[1]->SRV() };
 }
 
-void ORGDynamicCubemaps::AfterUpdate()
+bool ORGDynamicCubemaps::AfterUpdate()
 {
 	if (!impl)
-		return;
+		return false;
+	// The runtime stopped without a failed epoch of this anchor (another epoch faulted): leave as onFailed does, this frame skipped.
 	if (!RenderGraphRuntime::Get().IsActive()) {
 		Fail("the render graph is no longer active", true);
-		return;
+		return true;
 	}
 	auto& state = *impl;
-	if (!state.registered) {
-		// Once the engine targets are there and CS has uploaded its shared constants: the first frames in the world. The anchor runs
-		// the client from the next frame; the readers see the black cubemaps until the first publish.
-		state.imports = Import();
-		if (state.imports && RegisterClient()) {
-			state.registered = true;
-			logger::info("[ORG] Dynamic Cubemaps: registered on the DeferredPasses anchor");
-		} else if (++state.registerAttempts >= kRegisterAttempts) {
-			Fail("its inputs or its anchor client were not ready in time", true);
-		} else if (!std::exchange(state.waitLogged, true)) {
-			logger::info("[ORG] Dynamic Cubemaps: waiting for the engine targets and the shared constants (depth {}, main {}, reflections {}, default cubemap {})",
-				state.imports.depth != nullptr, state.imports.main != nullptr, state.imports.reflections != nullptr, state.imports.defaultCubemap != nullptr);
-		}
-		return;
-	}
 	bool refresh = false;
 	if (state.programsDirty) {
 		auto programs = LoadPrograms(RenderGraphRuntime::Get().Host()->Device());
 		if (!programs) {
 			Fail("its programs could not be built again", true);
-			return;
+			return true;
 		}
 		state.programs = std::move(programs);
 		state.programsDirty = false;
@@ -990,6 +940,7 @@ void ORGDynamicCubemaps::AfterUpdate()
 		}
 	if (refresh)
 		FrameAnchors::Refresh(kClientId);
+	return true;
 }
 
 void ORGDynamicCubemaps::ClearShaderCache()
@@ -1011,7 +962,7 @@ void ORGDynamicCubemaps::Reserve() {}
 bool ORGDynamicCubemaps::Setup(std::function<void()>) { return false; }
 bool ORGDynamicCubemaps::IsActive() const { return false; }
 ORGDynamicCubemaps::Outputs ORGDynamicCubemaps::Exported() const { return {}; }
-void ORGDynamicCubemaps::AfterUpdate() {}
+bool ORGDynamicCubemaps::AfterUpdate() { return false; }
 void ORGDynamicCubemaps::ClearShaderCache() {}
 void ORGDynamicCubemaps::Withdraw() {}
 void ORGDynamicCubemaps::Fail(const char*, bool) {}

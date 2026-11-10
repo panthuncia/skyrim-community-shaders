@@ -22,7 +22,7 @@ namespace DCLF::Integrations::CloudShadows
 		bool Bound()
 		{
 			const auto& cloudShadows = globals::features::cloudShadows;
-			if (!cloudShadows.loaded || !globals::state->activeReflections || !cloudShadows.texCubemapCloudOccCopy)
+			if (!cloudShadows.loaded || !globals::state->activeReflections || !cloudShadows.OcclusionSRV())
 				return false;
 			const auto* sky = globals::game::sky;
 			return sky && sky->mode.get() == RE::Sky::Mode::kFull && sky->currentClimate;

@@ -14,27 +14,28 @@
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/Switches.h"
 #	include "RenderGraph/UavClearPass.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/Buffers/Buffer.h>
 #	include <Resources/ExternalTextureResource.h>
 
 #	include <cstddef>
-#	include <cstring>
-#	include <format>
 
 namespace
 {
-	constexpr const char* kClientId = "cs.sss";
+	constexpr const char* kClientId = "cs.screen-space-shadows";
 	constexpr const char* kShader = "ScreenSpaceShadows/RaymarchCS.hlsl";
 	// The shadow texture's name, which it is published under: Drawcall Limit Fix's t45.
 	constexpr std::string_view kTextureName = ORGScreenSpaceShadows::kShadowTextureId;
-	constexpr const char* kBlendedDepthName = "terrain-blending.blended-depth";
+	// Terrain Blending's D3D11 blended depth, imported while its graph path is off (FrameAnchors::D3D11Texture adds "cs.d3d11.").
+	constexpr std::string_view kBlendedDepthName = "terrain-blending.blended-depth";
+	constexpr std::string_view kBlendedDepthImportId = "cs.d3d11.terrain-blending.blended-depth";
 	constexpr std::uint32_t kMaxDispatches = ScreenSpaceShadows::Dispatches::kMax;
 
 	// RaymarchCS's push block under ORG, in list order: three handles, then PerFrame's latch region.
@@ -45,21 +46,29 @@ namespace
 	};
 
 	// One execution's values, in its slot of the latch block: each dispatch's constants (RaymarchConstants, read at their
-	// offset by the shader) and its thread-group counts, which the dispatch reads indirectly.
+	// offset by the shader). The group counts are in the run gate.
 	struct RaymarchLatchData
 	{
 		ScreenSpaceShadows::RaymarchCB constants[kMaxDispatches];
-		std::uint32_t groups[kMaxDispatches][4];  // x, y, z, padding
 	};
 	static_assert(sizeof(ScreenSpaceShadows::RaymarchCB) % 16 == 0);
-	static_assert(offsetof(RaymarchLatchData, groups) % 16 == 0);
 
-	/** @brief The raymarch program for one sample count, with the dispatch signature made against its layout. */
+	/** @brief The raymarch program for one sample count. */
 	struct Program
 	{
 		std::shared_ptr<const ComputeProgram> compute;
-		rhi::CommandSignaturePtr signature;
 		std::uint32_t sampleCount = 0;
+	};
+
+	/** @brief The depth the raymarch reads: an import, or Terrain Blending's published blended depth by its id. */
+	struct DepthSource
+	{
+		std::shared_ptr<org::Resource> resource;
+		std::string_view published;
+		bool blendImport = false;  // the import of Terrain Blending's D3D11 blended depth
+
+		explicit operator bool() const { return resource || !published.empty(); }
+		bool operator==(const DepthSource&) const = default;
 	};
 
 	/** @brief What the passes are made from; changed on the render thread only, between builds (then FrameAnchors::Refresh). */
@@ -68,8 +77,10 @@ namespace
 		std::shared_ptr<const Program> program;
 		std::unique_ptr<GraphResources::Texture2D> output;
 		std::shared_ptr<org::LatchBlock> latch;
+		std::shared_ptr<RenderGraph::RunGate> gate;
 		org::OwnedDescriptorBinding sampler;
-		std::shared_ptr<org::Resource> depth;
+		DepthSource depth;
+		std::function<void()> onFailed;
 	};
 
 	std::shared_ptr<const Program> LoadProgram(rhi::Device a_device, std::uint32_t a_sampleCount)
@@ -81,41 +92,37 @@ namespace
 		auto program = std::make_shared<Program>();
 		program->sampleCount = a_sampleCount;
 		program->compute = ComputeProgram::Load(a_device, { .source = kShader, .constantWords = ShaderBindings::Words<RaymarchBlock>(), .defines = defines });
-		if (!program->compute)
-			return nullptr;
-		rhi::IndirectArg args[] = { { .kind = rhi::IndirectArgKind::Dispatch } };
-		if (a_device.CreateCommandSignature(rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, 1), sizeof(std::uint32_t) * 3 },
-				program->compute->layout->GetHandle(), program->signature) != rhi::Result::Ok)
-			return nullptr;
-		return program;
+		return program->compute ? program : nullptr;
 	}
 
 	/**
 	 * @brief The depth the D3D11 path reads at Prepass (Util::GetCurrentSceneDepthSRV(false)), as a graph texture: on Terrain
 	 * Blending's ORG path its published blended depth, which the graph orders after the blend.
 	 */
-	std::shared_ptr<org::Resource> CurrentDepth()
+	DepthSource CurrentDepth()
 	{
 		auto& terrainBlending = globals::features::terrainBlending;
 		if (terrainBlending.loaded && terrainBlending.settings.Enabled) {
-			if (auto graph = ORGTerrainBlending::Get().BlendedDepthGraph())
-				return graph;
+			if (PublishedResources::IsPublished(ORGTerrainBlending::kBlendedDepthId))
+				return { nullptr, ORGTerrainBlending::kBlendedDepthId };
 			if (terrainBlending.blendedDepthTexture)
-				return FrameAnchors::D3D11Texture(kBlendedDepthName, terrainBlending.blendedDepthTexture->resource.get(),
-					terrainBlending.blendedDepthTexture->srv.get(), nullptr);
+				return { FrameAnchors::D3D11Texture(kBlendedDepthName, terrainBlending.blendedDepthTexture->resource.get(),
+							 terrainBlending.blendedDepthTexture->srv.get(), nullptr),
+					{}, true };
 		}
-		return FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
+		return { FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY), {}, false };
 	}
 
-	const char* DepthLabel()
+	const char* DepthLabel(const DepthSource& a_depth)
 	{
 		auto& terrainBlending = globals::features::terrainBlending;
 		if (!terrainBlending.loaded || !terrainBlending.settings.Enabled)
 			return "the z-prepass copy";
-		return ORGTerrainBlending::Get().Active() ? "Terrain Blending's graph texture" : "Terrain Blending";
+		return a_depth.published.empty() ? "Terrain Blending" : "Terrain Blending's graph texture";
 	}
 
-	// Every dispatch of the list's capacity, each reading its constants and group counts from the execution's latch region.
+	// Every dispatch of the list's capacity, each reading its constants from the execution's latch region and its group counts
+	// from its run gate entry.
 	struct RaymarchBindings
 	{
 		org::DeclaredViewToken depth, output;
@@ -125,6 +132,7 @@ namespace
 	{
 		std::shared_ptr<const Program> program;
 		std::shared_ptr<const org::LatchBlock> latch;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
 		std::uint32_t sampler = 0;
 	};
 
@@ -133,53 +141,57 @@ namespace
 	public:
 		// At the build, on the render thread: the state as it is now.
 		explicit RaymarchPass(const ShadowState& a_state) :
-			program(a_state.program), latch(a_state.latch), sampler(a_state.sampler.Index()), depth(a_state.depth), output(a_state.output->Graph()) {}
+			program(a_state.program), latch(a_state.latch), gate(a_state.gate), sampler(a_state.sampler.Index()), depth(a_state.depth), output(a_state.output->Graph()) {}
 
 		RaymarchBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			return { a_builder.ShaderResource(depth).View(), a_builder.UnorderedAccess(output).View() };
+			const auto in = depth.resource ? a_builder.ShaderResource(depth.resource).View() :
+			                                 a_builder.ShaderResource(org::ResourceIdentifier(depth.published)).View();
+			return { in, a_builder.UnorderedAccess(output).View() };
 		}
 
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(program.get()));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(latch.get()));
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(depth.get()));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(gate.get()));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(depth.resource.get()));
+			a_out.push_back(std::hash<std::string_view>{}(depth.published));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(output.get()));
 		}
 
-		RaymarchFrame Prepare(const RaymarchBindings&, const org::PassPrepareContext&) const { return { program, latch, sampler }; }
+		RaymarchFrame Prepare(const RaymarchBindings&, const org::PassPrepareContext&) const { return { program, latch, gate, sampler }; }
 
 		static void Record(const RaymarchBindings& a_bindings, const RaymarchFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.program || !a_frame.latch)
+			if (!a_frame.program || !a_frame.latch || !a_frame.gate)
 				return;
-			const auto& compute = *a_frame.program->compute;
-			auto& commands = a_recording.Commands();
-			commands.BindLayout(compute.layout->GetHandle());
-			commands.BindPipeline(compute.Pipeline());
 			const std::uint32_t slot = a_recording.FrameSlot();
-			const std::uint64_t region = a_frame.latch->Offset(slot);
-			const auto latchBuffer = a_frame.latch->Resource()->GetAPIResource().GetHandle();
 			RaymarchBlock block{ a_recording.Index(a_bindings.depth), a_recording.Index(a_bindings.output), a_frame.sampler, {} };
 			// Bend's dispatches write separate pixels, so they need no barrier between them (as on D3D11).
 			for (std::uint32_t i = 0; i < kMaxDispatches; ++i) {
 				block.perFrame = ShaderBindings::LatchOf(*a_frame.latch, slot,
 					static_cast<std::uint32_t>(offsetof(RaymarchLatchData, constants) + i * sizeof(ScreenSpaceShadows::RaymarchCB)));
-				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, ShaderBindings::Words<RaymarchBlock>(), reinterpret_cast<const std::uint32_t*>(&block));
-				commands.ExecuteIndirect(a_frame.program->signature->GetHandle(), latchBuffer,
-					region + offsetof(RaymarchLatchData, groups) + i * sizeof(RaymarchLatchData::groups[0]), {}, 0, 1);
+				a_frame.gate->Dispatch(a_recording, *a_frame.program->compute, ShaderBindings::Data(block), i);
 			}
 		}
 
 	private:
 		std::shared_ptr<const Program> program;
 		std::shared_ptr<const org::LatchBlock> latch;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
 		std::uint32_t sampler;
-		std::shared_ptr<org::Resource> depth;
+		DepthSource depth;
 		std::shared_ptr<org::Resource> output;
 	};
+
+	/** @brief Drops the import of Terrain Blending's D3D11 blended depth when the raymarch stops reading it. */
+	void ReleaseBlendImport(const DepthSource& a_previous, const DepthSource& a_next)
+	{
+		if (a_previous.blendImport && !a_next.blendImport)
+			FrameAnchors::ReleaseImport(kBlendedDepthImportId);
+	}
 }
 
 struct ORGScreenSpaceShadows::Impl
@@ -189,11 +201,14 @@ struct ORGScreenSpaceShadows::Impl
 
 bool ORGScreenSpaceShadows::Requested()
 {
-	static const bool requested = [] {
-		char value[8]{};
-		return GetEnvironmentVariableA("CS_ORG_SCREEN_SPACE_SHADOWS", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}();
+	static const bool requested = Switches::On("CS_ORG_SCREEN_SPACE_SHADOWS");
 	return requested;
+}
+
+void ORGScreenSpaceShadows::Reserve()
+{
+	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::Prepass))
+		logger::warn("[ORG] Screen Space Shadows stays on D3D11: the Prepass anchor could not be reserved");
 }
 
 ORGScreenSpaceShadows& ORGScreenSpaceShadows::Get()
@@ -204,19 +219,21 @@ ORGScreenSpaceShadows& ORGScreenSpaceShadows::Get()
 
 ORGScreenSpaceShadows::~ORGScreenSpaceShadows() = default;
 
-void ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
+bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::function<void()> a_onFailed)
 {
-	impl.reset();
-	// Readers return to D3D11 until the new texture is published.
-	PublishedResources::Withdraw(kTextureName);
+	if (impl)
+		Stop();
+	if (!Requested())
+		return false;
 	auto& runtime = RenderGraphRuntime::Get();
 	auto* host = runtime.Host();
 	if (!host || !runtime.IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::Prepass)) {
 		logger::warn("[ORG] Screen Space Shadows stays on D3D11: the render graph or its Prepass anchor is not available");
-		return;
+		return false;
 	}
 	try {
 		auto state = std::make_shared<ShadowState>();
+		state->onFailed = std::move(a_onFailed);
 		state->program = LoadProgram(host->Device(), globals::features::screenSpaceShadows.GetScaledSampleCount());
 		// The D3D11 sampler's: point, border white (beyond the screen is far depth, no shadow).
 		state->sampler = ShaderBindings::CreateSampler({ .minFilter = rhi::Filter::Nearest,
@@ -229,72 +246,93 @@ void ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 		// Written in full every frame, but the engine's draws read it through D3D11: exported, so never aliased.
 		state->output = std::make_unique<GraphResources::Texture2D>(a_desc, std::string(kTextureName),
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient, .d3d11 = GraphResources::Export::SRV });
-		state->latch = std::make_shared<org::LatchBlock>("cs.sss.latch", static_cast<std::uint32_t>(sizeof(RaymarchLatchData)), host->FrameSlots());
+		state->latch = std::make_shared<org::LatchBlock>("cs.screen-space-shadows.latch", static_cast<std::uint32_t>(sizeof(RaymarchLatchData)), host->FrameSlots());
+		// One entry per dispatch of Bend's list: the commit opens those this frame uses.
+		state->gate = RenderGraph::RunGate::Create("cs.screen-space-shadows.dispatches", kMaxDispatches);
 		state->depth = CurrentDepth();
-		if (!state->program || !state->sampler || !*state->output || !state->output->SRV() || !state->depth) {
-			logger::warn("[ORG] Screen Space Shadows stays on D3D11: its program, sampler, texture or depth input could not be made");
-			return;
+		if (!state->program || !state->sampler || !*state->output || !state->output->SRV() || !state->gate || !state->depth) {
+			logger::warn("[ORG] Screen Space Shadows stays on D3D11: its program, sampler, texture, gate or depth input could not be made");
+			ReleaseBlendImport(state->depth, {});
+			return false;
 		}
 
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
-		client.passes.push_back({ .name = "cs.sss.clear",
+		client.passes.push_back({ .name = "cs.screen-space-shadows.clear",
 			.anchor = FrameAnchors::Anchor::Prepass,
 			.order = 100,
 			.kind = FrameAnchors::PassKind::Compute,
 			// The clear to white (no shadow), as the D3D11 path clears before its dispatches.
 			.make = [state] { return GraphPasses::MakeUavClear(state->output->Graph(), { 1.0f, 1.0f, 1.0f, 1.0f }); } });
-		client.passes.push_back({ .name = "cs.sss.raymarch",
+		client.passes.push_back({ .name = "cs.screen-space-shadows.raymarch",
 			.anchor = FrameAnchors::Anchor::Prepass,
 			.order = 101,
 			.kind = FrameAnchors::PassKind::Compute,
 			.make = [state]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<RaymarchPass>(*state); } });
 		client.registerResources = [state](org::RenderGraph& a_graph) { state->output->Register(a_graph); };
+		client.gates = { state->gate };
 		client.commit = [state](const FrameAnchors::Point&) {
 			auto& feature = globals::features::screenSpaceShadows;
+			// The gate is closed for this run: a frame without the full sky dispatches nothing.
+			if (!feature.ShouldDraw())
+				return;
+			const auto dispatches = feature.BuildDispatches();
 			RaymarchLatchData data{};
-			if (feature.ShouldDraw()) {
-				const auto dispatches = feature.BuildDispatches();
-				for (std::uint32_t i = 0; i < dispatches.count; ++i) {
-					data.constants[i] = dispatches.constants[i];
-					std::memcpy(data.groups[i], dispatches.groups[i], sizeof(dispatches.groups[i]));
-				}
-			}
+			for (std::uint32_t i = 0; i < dispatches.count; ++i)
+				data.constants[i] = dispatches.constants[i];
 			state->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, data);
+			for (std::uint32_t i = 0; i < dispatches.count; ++i)
+				state->gate->OpenDispatch(i, dispatches.groups[i][0], dispatches.groups[i][1], dispatches.groups[i][2]);
 		};
 		client.onFailed = [] {
 			logger::error("[ORG] Screen Space Shadows returns to D3D11: the render graph failed");
+			auto& self = Get();
 			PublishedResources::Withdraw(kTextureName);
-			Get().impl.reset();
+			auto onFailed = self.impl ? std::move(self.impl->state->onFailed) : std::function<void()>{};
+			self.impl.reset();
+			if (onFailed)
+				onFailed();
 		};
-		if (!FrameAnchors::Register(std::move(client)))
-			return;
+		if (!FrameAnchors::Register(std::move(client))) {
+			ReleaseBlendImport(state->depth, {});
+			return false;
+		}
 		// Drawcall Limit Fix's colour passes read it by name, ordered after the raymarch (Integrations/ScreenSpaceShadows).
 		if (!PublishedResources::Publish(*state->output)) {
 			logger::warn("[ORG] Screen Space Shadows stays on D3D11: the shadow texture could not be published");
 			FrameAnchors::Unregister(kClientId);
-			return;
+			ReleaseBlendImport(state->depth, {});
+			return false;
 		}
 		impl = std::make_unique<Impl>();
 		impl->state = std::move(state);
 		logger::info("[ORG] Screen Space Shadows runs on the render graph ({}x{}, {} samples, depth from {})", a_desc.Width, a_desc.Height,
-			impl->state->program->sampleCount, DepthLabel());
+			impl->state->program->sampleCount, DepthLabel(impl->state->depth));
+		return true;
 	} catch (const std::exception& e) {
 		logger::error("[ORG] Screen Space Shadows setup failed, staying on D3D11: {}", e.what());
 		Stop();
+		return false;
 	}
+}
+
+bool ORGScreenSpaceShadows::IsActive() const
+{
+	return impl && RenderGraphRuntime::Get().IsActive();
 }
 
 void ORGScreenSpaceShadows::Stop()
 {
 	FrameAnchors::Unregister(kClientId);
 	PublishedResources::Withdraw(kTextureName);
+	if (impl)
+		ReleaseBlendImport(impl->state->depth, {});
 	impl.reset();
 }
 
 ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass()
 {
-	if (!impl || !RenderGraphRuntime::Get().IsActive())
+	if (!IsActive())
 		return nullptr;
 	auto& state = *impl->state;
 	bool changed = false;
@@ -309,14 +347,15 @@ ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass()
 		state.program = std::move(program);
 		changed = true;
 	}
-	// Terrain Blending on or off, or a new engine depth texture.
-	if (auto depth = CurrentDepth(); depth != state.depth) {
+	// Terrain Blending on or off, its graph path started or stopped, or a new depth texture.
+	if (auto depth = CurrentDepth(); !(depth == state.depth)) {
 		if (!depth) {
 			Stop();
 			return nullptr;
 		}
+		ReleaseBlendImport(state.depth, depth);
 		state.depth = std::move(depth);
-		logger::info("[ORG] Screen Space Shadows: depth now from {}", DepthLabel());
+		logger::info("[ORG] Screen Space Shadows: depth now from {}", DepthLabel(state.depth));
 		changed = true;
 	}
 	if (changed)
@@ -326,7 +365,7 @@ ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass()
 
 ID3D11ShaderResourceView* ORGScreenSpaceShadows::ShadowSRV() const
 {
-	return impl && RenderGraphRuntime::Get().IsActive() ? impl->state->output->SRV() : nullptr;
+	return IsActive() ? impl->state->output->SRV() : nullptr;
 }
 
 #else  // !CS_HAS_RENDER_GRAPH
@@ -338,6 +377,7 @@ struct ORGScreenSpaceShadows::Impl
 {};
 
 bool ORGScreenSpaceShadows::Requested() { return false; }
+void ORGScreenSpaceShadows::Reserve() {}
 
 ORGScreenSpaceShadows& ORGScreenSpaceShadows::Get()
 {
@@ -346,7 +386,8 @@ ORGScreenSpaceShadows& ORGScreenSpaceShadows::Get()
 }
 
 ORGScreenSpaceShadows::~ORGScreenSpaceShadows() = default;
-void ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC&) {}
+bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC&, std::function<void()>) { return false; }
+bool ORGScreenSpaceShadows::IsActive() const { return false; }
 ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass() { return nullptr; }
 ID3D11ShaderResourceView* ORGScreenSpaceShadows::ShadowSRV() const { return nullptr; }
 void ORGScreenSpaceShadows::Stop() {}

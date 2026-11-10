@@ -119,6 +119,9 @@ public:
 	/** @brief Publishes the collision texture and lastPerFrame for DCLF's grass draws (GrassShared). */
 	void PublishCollision() const;
 
+	/** @brief Binds the per-frame constants (VS b5) and the collision texture (VS t100) for the engine's grass draws. */
+	void BindCollision() const;
+
 	/** @brief Logs the colliders of the frame every 120 frames when CS_GRASS_COLLISION_STATS=1. */
 	void LogColliders(const char* a_path) const;
 

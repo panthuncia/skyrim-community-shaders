@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <span>
 
 #include "Buffer.h"
 
@@ -81,8 +82,6 @@ public:
 	std::unique_ptr<Texture2D> texShadowHeight = nullptr;
 	uint heightMapWidth = 0;
 	uint heightMapHeight = 0;
-	// The cached heightmap's textures are the render graph's (ORGTerrainShadows), not texHeightMap and texShadowHeight.
-	bool orgHeightmap = false;
 
 	/** @brief The shadow height map's view that t60 binds, on whichever path holds it; null before one exists. */
 	ID3D11ShaderResourceView* GetShadowHeightSRV() const;
@@ -124,6 +123,12 @@ public:
 	 * @return True when the compute dispatch was submitted.
 	 */
 	bool UpdateShadow(bool a_refreshImmediately);
+
+	/**
+	 * @brief Runs the shadow update's stripes on D3D11, one dispatch a stripe, when the D3D11 textures hold the heightmap.
+	 * @return True when the dispatches were issued.
+	 */
+	bool DispatchShadowUpdate(std::span<const ShadowUpdateCB> a_dispatches, uint a_groups);
 
 	/** @brief Binds the shadow height texture to shader resource slots for reflection rendering. */
 	virtual void ReflectionsPrepass() override;

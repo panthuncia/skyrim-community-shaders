@@ -15,28 +15,6 @@
 
 #define I18N_KEY_PREFIX "feature.skylighting."
 
-namespace
-{
-	/** @brief Debug readback (CS_SKYLIGHTING_READBACK=1): every 250 frames, the probe and shadow-visibility volumes' means (it stalls). */
-	void DebugReadback(ID3D11ShaderResourceView* a_probes, ID3D11ShaderResourceView* a_visibility, bool a_graph)
-	{
-		static const bool requested = [] {
-			char value[8]{};
-			return GetEnvironmentVariableA("CS_SKYLIGHTING_READBACK", value, sizeof(value)) && value[0] == '1';
-		}();
-		if (!requested || globals::state->frameCount % 250 != 0)
-			return;
-		const auto sh = Util::VolumeMeans(a_probes);
-		const auto visibility = Util::VolumeMeans(a_visibility);
-		if (!sh || !visibility) {
-			logger::warn("[Skylighting] readback failed");
-			return;
-		}
-		logger::info("[Skylighting] readback ({}) frame {}: SH mean [{:.5f} {:.5f} {:.5f} {:.5f}], shadow visibility mean {:.5f}", a_graph ? "ORG" : "D3D11",
-			globals::state->frameCount, (*sh)[0], (*sh)[1], (*sh)[2], (*sh)[3], (*visibility)[0]);
-	}
-}
-
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Skylighting::Settings,
 	MaxZenith,
@@ -137,7 +115,12 @@ void Skylighting::SetupResources()
 		texOcclusion->CreateDSV(dsvDesc);
 	}
 
-	CreateProbeVolumes();
+	// CS_ORG_SKYLIGHTING=1: the render graph owns the volumes. If it fails later, the D3D11 ones are made and reset.
+	if (!ORGSkylighting::Get().Setup(*this, [this] {
+			CreateProbeVolumes();
+			ResetSkylighting();
+		}))
+		CreateProbeVolumes();
 
 	{
 		D3D11_SAMPLER_DESC samplerDesc = {};
@@ -186,25 +169,25 @@ void Skylighting::CreateProbeVolumes()
 			.WSize = texDesc.Depth }
 	};
 
-	texProbeArray = new Texture3D(texDesc, "Skylighting::ProbeArray");
+	texProbeArray = new Texture3D(texDesc, ORGSkylighting::kProbeArrayId.data());
 	texProbeArray->CreateSRV(srvDesc);
 	texProbeArray->CreateUAV(uavDesc);
 
 	texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R8_UINT;
 
-	texAccumFramesArray = new Texture3D(texDesc, "Skylighting::AccumFramesArray");
+	texAccumFramesArray = new Texture3D(texDesc, ORGSkylighting::kAccumFramesId.data());
 	texAccumFramesArray->CreateSRV(srvDesc);
 	texAccumFramesArray->CreateUAV(uavDesc);
 
 	texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R32_UINT;
 
-	texShadowBitmask = new Texture3D(texDesc, "Skylighting::ShadowBitmask");
+	texShadowBitmask = new Texture3D(texDesc, ORGSkylighting::kShadowBitmaskId.data());
 	texShadowBitmask->CreateSRV(srvDesc);
 	texShadowBitmask->CreateUAV(uavDesc);
 
 	texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R8_UNORM;
 
-	texShadowVisibility = new Texture3D(texDesc, "Skylighting::ShadowVisibility");
+	texShadowVisibility = new Texture3D(texDesc, ORGSkylighting::kShadowVisibilityId.data());
 	texShadowVisibility->CreateSRV(srvDesc);
 	texShadowVisibility->CreateUAV(uavDesc);
 }
@@ -222,7 +205,8 @@ bool Skylighting::UpdateProbesOnGraph()
 	if (!ORGSkylighting::Requested())
 		return false;
 	const bool onGraph = ORGSkylighting::Get().Update(*this);
-	// The first frame on the graph, or back on D3D11 after the graph failed: the other path's volumes go, the new ones start reset.
+	// Only one path's volumes exist. When the graph path stops without its onFailed (the runtime went down), the D3D11 volumes are
+	// made here and start reset.
 	if (onGraph == (texProbeArray != nullptr)) {
 		if (onGraph)
 			ReleaseProbeVolumes();
@@ -285,10 +269,10 @@ void Skylighting::CompileComputeShaders()
 Skylighting::SkylightingCB Skylighting::GetCommonBufferData(bool a_inWorld)
 {
 	if (!a_inWorld)
-		return frameSettings = Skylighting::SkylightingCB{};
+		return Skylighting::SkylightingCB{};
 
 	if (globals::state->isMapMenuOpen)
-		return frameSettings = Skylighting::SkylightingCB{};
+		return Skylighting::SkylightingCB{};
 
 	static float3 prevCellID = { 0, 0, 0 };
 
@@ -307,7 +291,7 @@ Skylighting::SkylightingCB Skylighting::GetCommonBufferData(bool a_inWorld)
 	float3 cellIDDiff = prevCellID - cellID;
 	prevCellID = cellID;
 
-	return frameSettings = {
+	return {
 		.OcclusionViewProj = OcclusionTransform,
 		.OcclusionSHBasis4Pi = OcclusionSHBasis4Pi,
 		.PosOffset = cellOrigin - eyePos,
@@ -381,8 +365,6 @@ void Skylighting::Prepass()
 			context->CSSetShader(nullptr, nullptr, 0);
 		}
 	}
-
-	DebugReadback(ProbeArraySRV(), ShadowVisibilitySRV(), ORGSkylighting::Get().IsActive());
 
 	// Set PS shader resources
 	{

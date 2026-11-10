@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d11.h>
+#include <functional>
 #include <memory>
 
 /**
@@ -15,9 +16,9 @@
  * (FrameAnchors::EngineTarget, EngineDepth), so the D3D11 composite and everything after it read the result as before. The two
  * intermediate textures are graph textures that live within the frame, so the graph may alias them.
  *
- * The constants change every frame while the recording is kept: the client's commit writes them, with the dispatches' group
- * counts, into the execution's region of a latch block. A frame without skin dispatches zero groups. The shared constant
- * buffers come from SharedConstants.
+ * The constants change every frame while the recording is kept: the client's commit writes them into the execution's region
+ * of a latch block, and opens the passes' run gate on a frame with skin. A frame without skin dispatches no groups. The shared
+ * constant buffers come from SharedConstants.
  *
  * On any failure the feature returns to its D3D11 path. Render thread throughout.
  *
@@ -29,22 +30,27 @@ public:
 	/** @brief Whether CS_ORG_SUBSURFACE_SCATTERING=1 is set. */
 	static bool Requested();
 
+	/** @brief Reserves the DeferredPasses anchor when requested. Call before the render graph initializes (PostPostLoad). */
+	static void Reserve();
+
 	static ORGSubsurfaceScattering& Get();
 
 	/**
-	 * @brief Requests the render-graph path (the feature's SetupResources). a_desc: the main target's description with SRV and
-	 * UAV binds, for the intermediate textures. The programs, textures and latch are made at the first frame the DeferredPasses
-	 * anchor has an epoch, the engine targets are imported and the client registered at the frames after (AfterDeferredPasses).
+	 * @brief At the feature's SetupResources, with the runtime active: makes the programs, the intermediate textures (a_desc: the
+	 * main target's description with SRV and UAV binds), the latch and the run gate, and registers the anchor client. The client
+	 * joins the graphs once CS's shared constants exist; the D3D11 path draws until then.
+	 * @param a_onFailed Called once if the graph fails later; the feature returns to D3D11.
+	 * @return Whether the passes run on the render graph; false keeps the D3D11 path.
 	 */
-	void Setup(const D3D11_TEXTURE2D_DESC& a_desc);
+	bool Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::function<void()> a_onFailed);
 
-	/** @brief Whether the render-graph path is requested and has not failed: its passes run, or will once it is set up. */
-	bool Running() const;
+	/** @brief Whether the render-graph path is set up and the runtime is still up. */
+	bool IsActive() const;
 
 	/**
-	 * @brief At the feature's DrawSSS, after the DeferredPasses anchor ran: finishes the setup over the first frames, then keeps
-	 * the passes current for the next frame (the mode, the programs after a shader cache clear, the engine targets).
-	 * @return Whether the render graph ran this frame's passes; false when the feature uses its D3D11 path.
+	 * @brief At the feature's DrawSSS, after the DeferredPasses anchor ran: keeps the passes current for the next frame (the mode,
+	 * the programs after a shader cache clear, the engine targets).
+	 * @return Whether the render graph ran this frame's passes; false when the feature uses its D3D11 path this frame.
 	 */
 	bool AfterDeferredPasses();
 
@@ -55,6 +61,9 @@ public:
 
 private:
 	ORGSubsurfaceScattering() = default;
+
+	/** @brief Leaves the ORG path: the client unregistered, the state dropped. */
+	void Stop();
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;

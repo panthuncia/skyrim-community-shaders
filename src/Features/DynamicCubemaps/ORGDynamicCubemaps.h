@@ -49,14 +49,13 @@ public:
 
 	/**
 	 * @brief At SetupResources, with the runtime active and the feature's default cubemap loaded: makes the programs, the graph
-	 * textures and the latch, and publishes the outputs. The anchor client registers at the first AfterUpdate with the engine
-	 * targets and the shared constants there.
+	 * textures and the latch, imports the engine targets, registers the anchor client and publishes the outputs.
 	 * @param a_onFailed Called once if the graph fails later: the feature returns to D3D11 (it must drop its views of the outputs).
 	 * @return Whether the update runs on the render graph; false keeps the D3D11 path.
 	 */
 	bool Setup(std::function<void()> a_onFailed);
 
-	/** @brief Whether the update runs on the render graph. */
+	/** @brief Whether the update runs on the render graph: set up, and the runtime still up. */
 	bool IsActive() const;
 
 	/** @brief The exported outputs: the environment cubemaps (R11G11B10, every mip) and their BC6H copies. Null when inactive. */
@@ -74,11 +73,12 @@ public:
 	Outputs Exported() const;
 
 	/**
-	 * @brief After the anchor ran (the feature's UpdateCubemap): registers the client once its inputs are there (and gives up after
-	 * a while), rebuilds the programs after ClearShaderCache, follows a new engine target or reflections cubemap, and adds a cubemap's
-	 * BC6H copy once it was first encoded. Each rebuilds the anchor's graph at its next execution.
+	 * @brief After the anchor ran (the feature's UpdateCubemap): rebuilds the programs after ClearShaderCache, follows a new engine
+	 * target or reflections cubemap, and adds a cubemap's BC6H copy once it was first encoded. Each rebuilds the anchor's graph at
+	 * its next execution. When the runtime stopped, the feature returns to D3D11 as on a graph failure.
+	 * @return Whether the graph path owned this frame's update; false means the D3D11 update runs.
 	 */
-	void AfterUpdate();
+	bool AfterUpdate();
 
 	/** @brief The programs are built again at the next AfterUpdate, and no cubemap counts as encoded until its next publish. */
 	void ClearShaderCache();

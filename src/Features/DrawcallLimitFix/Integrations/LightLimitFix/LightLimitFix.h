@@ -7,7 +7,7 @@
 // - the room index (Api::AncestorValueContribution): the object's room (its nearest BSMultiBoundRoom or BSPortalSharedNode, LLF's
 //   GetParentRoomNode) looked up in LLF's room map, in the object record's first word;
 // - its graph buffers (Api::FrameGraphBuffers): the lights, light index list and light grid at t35-t37;
-// - its local shadow cache's slot data and shadow maps (t102, t103), frame textures for its graph path only (CS_ORG_LLF_SHADOWS): the
+// - its local shadow cache's slot data and shadow maps (t102, t103), frame textures for its graph path only (CS_ORG_LIGHT_LIMIT_FIX_SHADOWS): the
 //   colour commits keep the captured views, and read the published resources while the views CS bound are the graph's exports;
 // - its parity (Diagnostics/LightDataParity.cpp): CaptureParity's StrictLightData check.
 //

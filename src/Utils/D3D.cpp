@@ -11,13 +11,11 @@
 #include "Utils/Format.h"
 #include "Utils/Logging.h"
 #include <DDSTextureLoader.h>
-#include <DirectXPackedVector.h>
 #include <DirectXTex.h>
 #include <bcrypt.h>
 #include <d3dcompiler.h>
 #include <fstream>
 #include <mutex>
-#include <optional>
 #include <unordered_set>
 
 namespace Util
@@ -614,111 +612,5 @@ namespace Util
 		}
 
 		return S_OK;
-	}
-	std::optional<std::array<double, 4>> VolumeMeans(ID3D11ShaderResourceView* a_view, std::optional<UINT> a_slice)
-	{
-		if (!a_view)
-			return std::nullopt;
-		winrt::com_ptr<ID3D11Resource> resource;
-		a_view->GetResource(resource.put());
-		auto* device = globals::d3d::device;
-		auto* context = globals::d3d::context;
-
-		// A staging copy of mip 0: a 3D texture's slices or a 2D texture's array slices, each read as one depth layer.
-		DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-		UINT width = 0, height = 0, layers = 0;
-		winrt::com_ptr<ID3D11Resource> staging;
-		if (auto volume = resource.try_as<ID3D11Texture3D>()) {
-			D3D11_TEXTURE3D_DESC desc{};
-			volume->GetDesc(&desc);
-			format = desc.Format;
-			width = desc.Width, height = desc.Height, layers = desc.Depth;
-			desc.MipLevels = 1;
-			desc.Usage = D3D11_USAGE_STAGING;
-			desc.BindFlags = 0;
-			desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-			desc.MiscFlags = 0;
-			winrt::com_ptr<ID3D11Texture3D> texture;
-			if (FAILED(device->CreateTexture3D(&desc, nullptr, texture.put())))
-				return std::nullopt;
-			context->CopySubresourceRegion(texture.get(), 0, 0, 0, 0, volume.get(), 0, nullptr);
-			staging = texture;
-		} else if (auto array = resource.try_as<ID3D11Texture2D>()) {
-			D3D11_TEXTURE2D_DESC desc{};
-			array->GetDesc(&desc);
-			if (a_slice && *a_slice >= desc.ArraySize)
-				return std::nullopt;
-			const UINT mips = desc.MipLevels;
-			const UINT first = a_slice.value_or(0);
-			format = desc.Format;
-			width = desc.Width, height = desc.Height, layers = a_slice ? 1 : desc.ArraySize;
-			desc.MipLevels = 1;
-			desc.ArraySize = layers;
-			desc.SampleDesc = { 1, 0 };
-			desc.Usage = D3D11_USAGE_STAGING;
-			desc.BindFlags = 0;
-			desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-			desc.MiscFlags = 0;
-			winrt::com_ptr<ID3D11Texture2D> texture;
-			if (FAILED(device->CreateTexture2D(&desc, nullptr, texture.put())))
-				return std::nullopt;
-			for (UINT layer = 0; layer < layers; ++layer)
-				context->CopySubresourceRegion(texture.get(), layer, 0, 0, 0, array.get(), D3D11CalcSubresource(0, first + layer, mips), nullptr);
-			staging = texture;
-		} else {
-			return std::nullopt;
-		}
-		if (format != DXGI_FORMAT_R32G32B32A32_FLOAT && format != DXGI_FORMAT_R16G16B16A16_FLOAT && format != DXGI_FORMAT_R11G11B10_FLOAT &&
-			format != DXGI_FORMAT_R32_FLOAT && format != DXGI_FORMAT_R8_UNORM && format != DXGI_FORMAT_R8_UINT)
-			return std::nullopt;
-
-		std::array<double, 4> sums{};
-		const bool isVolume = resource.try_as<ID3D11Texture3D>() != nullptr;
-		for (UINT layer = 0; layer < (isVolume ? 1u : layers); ++layer) {
-			D3D11_MAPPED_SUBRESOURCE mapped{};
-			if (FAILED(context->Map(staging.get(), layer, D3D11_MAP_READ, 0, &mapped)))
-				return std::nullopt;
-			const auto* bytes = static_cast<const std::uint8_t*>(mapped.pData);
-			for (UINT z = 0; z < (isVolume ? layers : 1u); ++z)
-				for (UINT y = 0; y < height; ++y) {
-					const auto* row = bytes + z * mapped.DepthPitch + y * mapped.RowPitch;
-					for (UINT x = 0; x < width; ++x) {
-						switch (format) {
-						case DXGI_FORMAT_R32G32B32A32_FLOAT:
-							for (UINT c = 0; c < 4; ++c)
-								sums[c] += reinterpret_cast<const float*>(row)[x * 4 + c];
-							break;
-						case DXGI_FORMAT_R16G16B16A16_FLOAT:
-							for (UINT c = 0; c < 4; ++c)
-								sums[c] += DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const DirectX::PackedVector::HALF*>(row)[x * 4 + c]);
-							break;
-						case DXGI_FORMAT_R11G11B10_FLOAT:
-							{
-								DirectX::PackedVector::XMFLOAT3PK packed;
-								packed.v = reinterpret_cast<const std::uint32_t*>(row)[x];
-								const auto value = DirectX::PackedVector::XMLoadFloat3PK(&packed);
-								sums[0] += DirectX::XMVectorGetX(value);
-								sums[1] += DirectX::XMVectorGetY(value);
-								sums[2] += DirectX::XMVectorGetZ(value);
-								break;
-							}
-						case DXGI_FORMAT_R32_FLOAT:
-							sums[0] += reinterpret_cast<const float*>(row)[x];
-							break;
-						case DXGI_FORMAT_R8_UNORM:
-							sums[0] += row[x] / 255.0;
-							break;
-						default:
-							sums[0] += row[x];
-							break;
-						}
-					}
-				}
-			context->Unmap(staging.get(), layer);
-		}
-		const double count = static_cast<double>(width) * height * layers;
-		for (auto& sum : sums)
-			sum /= count;
-		return sums;
 	}
 }  // namespace Util

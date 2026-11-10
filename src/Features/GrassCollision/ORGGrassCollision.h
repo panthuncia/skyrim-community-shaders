@@ -39,12 +39,16 @@ public:
 		D3D11_TEXTURE2D_DESC texture{};    // the collision texture (SRV and UAV)
 	};
 
-	/** @brief One frame's values: copied by Stage, nothing kept by reference. */
+	/**
+	 * @brief One frame's collision update as Grass Collision describes it for either path: its per-frame values, colliders and whether
+	 * the setting is on. Copied by Stage, nothing kept by reference.
+	 */
 	struct Frame
 	{
-		std::span<const std::byte> perFrame;
-		std::span<const std::byte> boxes;
-		std::span<const std::byte> instances;
+		std::span<const std::byte> perFrame;   // GrassCollision::PerFrame
+		std::span<const std::byte> boxes;      // GrassCollision::BoundingBoxPacked[BoundingBoxCount]
+		std::span<const std::byte> instances;  // float4 collision spheres
+		bool enabled = true;                   // off: the update clears the texture, as the D3D11 path does
 	};
 
 	static ORGGrassCollision& Get();
@@ -62,13 +66,14 @@ public:
 	 */
 	bool Setup(const Limits& a_limits, std::function<void()> a_onFailed);
 
-	/** @brief Whether the update runs on the render graph. */
+	/** @brief Whether the update runs on the render graph: set up, not failed, and the runtime still up. */
 	bool IsActive() const;
 
 	/**
 	 * @brief Before each run of the EarlyPrepass anchor (Grass Collision's EarlyPrepass, which Deferred calls right before it): the
-	 * values the anchor's commit writes into the latch block. Sizes past the limits are cut to them. The client is active only on
-	 * a frame that staged, so a frame without one (no camera) updates nothing, and the passes never read an unwritten region.
+	 * values the anchor's commit writes into the latch block. Sizes past the limits are cut to them. The commit opens the update's run
+	 * gate only on a frame that staged, so a frame without one (no camera) updates nothing. A disabled frame is staged as one that
+	 * writes zero everywhere.
 	 */
 	void Stage(const Frame& a_frame);
 
