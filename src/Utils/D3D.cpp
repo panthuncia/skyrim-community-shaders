@@ -668,8 +668,8 @@ namespace Util
 		} else {
 			return std::nullopt;
 		}
-		if (format != DXGI_FORMAT_R32G32B32A32_FLOAT && format != DXGI_FORMAT_R16G16B16A16_FLOAT && format != DXGI_FORMAT_R32_FLOAT &&
-			format != DXGI_FORMAT_R8_UNORM && format != DXGI_FORMAT_R8_UINT)
+		if (format != DXGI_FORMAT_R32G32B32A32_FLOAT && format != DXGI_FORMAT_R16G16B16A16_FLOAT && format != DXGI_FORMAT_R11G11B10_FLOAT &&
+			format != DXGI_FORMAT_R32_FLOAT && format != DXGI_FORMAT_R8_UNORM && format != DXGI_FORMAT_R8_UINT)
 			return std::nullopt;
 
 		std::array<double, 4> sums{};
@@ -692,6 +692,16 @@ namespace Util
 							for (UINT c = 0; c < 4; ++c)
 								sums[c] += DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const DirectX::PackedVector::HALF*>(row)[x * 4 + c]);
 							break;
+						case DXGI_FORMAT_R11G11B10_FLOAT:
+							{
+								DirectX::PackedVector::XMFLOAT3PK packed;
+								packed.v = reinterpret_cast<const std::uint32_t*>(row)[x];
+								const auto value = DirectX::PackedVector::XMLoadFloat3PK(&packed);
+								sums[0] += DirectX::XMVectorGetX(value);
+								sums[1] += DirectX::XMVectorGetY(value);
+								sums[2] += DirectX::XMVectorGetZ(value);
+								break;
+							}
 						case DXGI_FORMAT_R32_FLOAT:
 							sums[0] += reinterpret_cast<const float*>(row)[x];
 							break;

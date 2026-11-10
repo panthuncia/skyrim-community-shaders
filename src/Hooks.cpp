@@ -460,6 +460,16 @@ namespace PostProcessingExtensions
 			const auto input = static_cast<RE::RENDER_TARGET>(a3);
 			const auto output = static_cast<RE::RENDER_TARGET>(a4);
 
+			// Debug readback (CS_TONEMAP_INPUT_READBACK=1): the tonemap input's means through D3D11, before the anchor, every 500 frames.
+			static const bool inputReadback = [] {
+				char value[8]{};
+				return GetEnvironmentVariableA("CS_TONEMAP_INPUT_READBACK", value, sizeof(value)) && value[0] == '1';
+			}();
+			if (inputReadback && globals::state->frameCount % 500 == 0) {
+				const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[a3];
+				if (const auto means = Util::VolumeMeans(target.SRV))
+					logger::info("[Hooks] tonemap input {} (D3D11) frame {}: mean [{:.4f} {:.4f} {:.4f}]", a3, globals::state->frameCount, (*means)[0], (*means)[1], (*means)[2]);
+			}
 			// The ORG FX runtime (CS_ORG_FX=1) settles its passes for this frame before the anchor runs them.
 			ORGFxRuntime::Get().Prepare(a3, a4);
 			// Before the anchor runs: Post Processing's chain may run in its epoch (ORGPostProcessing).
