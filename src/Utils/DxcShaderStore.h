@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -39,6 +40,9 @@ namespace Util
 
 	/** @brief Returns the shader from the store if it is still valid, else builds and saves it. */
 	DxcResult ResolveDxcShader(const DxcRequest& a_request);
+
+	/** @brief The SPIR-V module a DXC container (DxcResult::blob) carries. Empty for FXC's DXBC. */
+	std::vector<uint32_t> DxcSpirvModule(std::span<const std::byte> a_container);
 
 	/** @brief What ReflectConstantBuffers reads, from D3DReflect or from a DXC container's SPIR-V. */
 	struct ShaderReflection

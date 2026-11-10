@@ -196,10 +196,10 @@ namespace Util
 		}
 
 		// The chunk's bytes in a container, empty if it has none.
-		std::span<const std::byte> FindChunk(ID3DBlob& a_blob, uint32_t a_tag)
+		std::span<const std::byte> FindChunk(std::span<const std::byte> a_container, uint32_t a_tag)
 		{
-			const auto* bytes = static_cast<const std::byte*>(a_blob.GetBufferPointer());
-			const size_t size = a_blob.GetBufferSize();
+			const auto* bytes = a_container.data();
+			const size_t size = a_container.size();
 			if (size < 32)
 				return {};
 			uint32_t count = 0;
@@ -215,6 +215,11 @@ namespace Util
 					return { bytes + offset + 8, chunkSize };
 			}
 			return {};
+		}
+
+		std::span<const std::byte> FindChunk(ID3DBlob& a_blob, uint32_t a_tag)
+		{
+			return FindChunk({ static_cast<const std::byte*>(a_blob.GetBufferPointer()), a_blob.GetBufferSize() }, a_tag);
 		}
 
 		bool ReflectDxbc(ID3DBlob& a_blob, ShaderReflection& a_reflection)
@@ -350,6 +355,16 @@ namespace Util
 		result.blob = MakeContainer(std::move(inputs), std::move(outputs), placed);
 		result.fromStore = fromStore;
 		return result;
+	}
+
+	std::vector<uint32_t> DxcSpirvModule(std::span<const std::byte> a_container)
+	{
+		// Copied: a chunk need not be aligned for its words.
+		const auto code = FindChunk(a_container, Tag("SPRV"));
+		std::vector<uint32_t> words(code.size() / sizeof(uint32_t));
+		if (!words.empty())
+			std::memcpy(words.data(), code.data(), words.size() * sizeof(uint32_t));
+		return words;
 	}
 
 	const ShaderReflection::Buffer* ShaderReflection::FindBuffer(std::string_view a_name) const
