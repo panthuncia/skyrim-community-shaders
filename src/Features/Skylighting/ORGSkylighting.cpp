@@ -393,8 +393,8 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature, std::function<void()> a
 	}
 	next->resources = resources;
 
-	// The four reset clears, then the update (order 0).
-	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::Prepass, kClientId, -4);
+	// The four reset clears, then the update at -1, before IBL (0 and 1).
+	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::Prepass, kClientId, -5);
 	auto client = next->MakeClient(builder, std::move(a_onFailed));
 	if (builder.Failed()) {
 		logger::warn("[ORG] Skylighting: {}; the probe update stays on D3D11", builder.Failure());
