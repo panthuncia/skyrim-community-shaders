@@ -53,8 +53,6 @@ namespace
 {
 	constexpr const char* kClientId = "cs.terrain-shadows";
 	constexpr const char* kShader = "TerrainShadows/ShadowUpdate.cs.hlsl";
-	// The shadow height map's name, which it is published under: Drawcall Limit Fix's t60.
-	constexpr const char* kShadowHeightName = "TerrainShadows::ShadowHeight";
 	// ShadowUpdate.cs.hlsl's NTHREADS: the pixels of one stripe along the light.
 	constexpr std::uint32_t kStripeLength = 128;
 
@@ -306,7 +304,7 @@ void ORGTerrainShadows::Fail()
 {
 	failed = true;
 	FrameAnchors::Unregister(kClientId);
-	PublishedResources::Withdraw(kShadowHeightName);
+	PublishedResources::Withdraw(kShadowHeightId);
 	if (impl)
 		UnbindShadowHeight();
 	impl.reset();
@@ -340,7 +338,7 @@ bool ORGTerrainShadows::SetHeightmap(const DirectX::Image& a_image)
 	desc.Format = DXGI_FORMAT_R16G16_UNORM;
 	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 	// Engine draws read it at t60 (and Drawcall Limit Fix through that view) until they are ported.
-	next->shadowHeights = std::make_unique<GraphResources::Texture2D>(desc, kShadowHeightName,
+	next->shadowHeights = std::make_unique<GraphResources::Texture2D>(desc, std::string(kShadowHeightId),
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV });
 	if (!*next->heightMap || !*next->shadowHeights || !next->shadowHeights->SRV()) {
 		logger::error("[ORG] Terrain Shadows: its {}x{} graph textures could not be created; back to D3D11", width, height);
@@ -391,7 +389,7 @@ bool ORGTerrainShadows::SetHeightmap(const DirectX::Image& a_image)
 	client.onFailed = [] {
 		logger::error("[ORG] Terrain Shadows: the render graph failed; back to D3D11");
 		UnbindShadowHeight();
-		PublishedResources::Withdraw(kShadowHeightName);
+		PublishedResources::Withdraw(kShadowHeightId);
 		auto& self = Get();
 		self.failed = true;
 		self.impl.reset();

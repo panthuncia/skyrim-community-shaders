@@ -4,6 +4,7 @@
 #include <d3d11.h>
 #include <memory>
 #include <span>
+#include <string_view>
 
 #include "Features/TerrainShadows.h"
 
@@ -36,6 +37,9 @@ namespace DirectX
 class ORGTerrainShadows
 {
 public:
+	/** @brief The shadow height map's published id (PublishedResources), its twin's name. */
+	static constexpr std::string_view kShadowHeightId = "TerrainShadows::ShadowHeight";
+
 	/** @brief Whether CS_ORG_TERRAIN_SHADOWS=1 is set. */
 	static bool Requested();
 

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <d3d11.h>
 #include <memory>
+#include <string_view>
 
 struct Skylighting;
 
@@ -25,6 +26,10 @@ struct Skylighting;
 class ORGSkylighting
 {
 public:
+	/** @brief The published ids (PublishedResources), the volumes' names: the probe array and the shadow visibility. */
+	static constexpr std::string_view kProbeArrayId = "Skylighting::ProbeArray";
+	static constexpr std::string_view kShadowVisibilityId = "Skylighting::ShadowVisibility";
+
 	/** @brief The probe volumes, in UpdateProbesCS's UAV order. */
 	enum class Volume : std::uint32_t
 	{

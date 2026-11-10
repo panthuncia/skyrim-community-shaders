@@ -2,6 +2,7 @@
 
 #include <d3d11.h>
 #include <memory>
+#include <string_view>
 
 /**
  * @brief Cloud Shadows' occlusion copy as a render-graph pass (CS_ORG_CLOUD_SHADOWS=1).
@@ -29,6 +30,9 @@
 class ORGCloudShadows
 {
 public:
+	/** @brief The occlusion cubemap's published id (PublishedResources), its twin's name. */
+	static constexpr std::string_view kOcclusionId = "CloudShadows::Occlusion";
+
 	/** @brief Whether CS_ORG_CLOUD_SHADOWS=1 is set. */
 	static bool Requested();
 

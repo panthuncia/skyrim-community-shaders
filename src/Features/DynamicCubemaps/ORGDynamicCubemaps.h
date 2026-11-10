@@ -3,6 +3,7 @@
 #include <d3d11.h>
 #include <functional>
 #include <memory>
+#include <string_view>
 
 /**
  * @brief Dynamic Cubemaps' update pipeline on the render graph (CS_ORG_DYNAMIC_CUBEMAPS=1).
@@ -32,6 +33,12 @@
 class ORGDynamicCubemaps
 {
 public:
+	/** @brief The published ids (PublishedResources), the D3D11 path's names: the environment cubemaps and their BC6H copies. */
+	static constexpr std::string_view kEnvId = "DynamicCubemaps::Env";
+	static constexpr std::string_view kEnvReflectionsId = "DynamicCubemaps::EnvReflections";
+	static constexpr std::string_view kEnvBC6HId = "DynamicCubemaps::EnvTextureBC6H";
+	static constexpr std::string_view kEnvReflectionsBC6HId = "DynamicCubemaps::EnvReflectionsBC6H";
+
 	static ORGDynamicCubemaps& Get();
 
 	/** @brief Whether CS_ORG_DYNAMIC_CUBEMAPS=1 asks for the render-graph path. */

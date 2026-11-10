@@ -71,15 +71,12 @@ namespace
 	constexpr const char* kShaderDir = "ExponentialHeightFog/";
 	// After IBL (0, 1) and Skylighting at the Prepass anchor; the graph orders the reads of their outputs in any case.
 	constexpr std::int32_t kOrder = 300;
-	// The integrated volumes' names, which they are published under (MakeVolume's prefixes): Drawcall Limit Fix's t19 and t22.
-	constexpr const char* kNearIntegratedName = "ExponentialHeightFog::IntegratedLightScattering";
-	constexpr const char* kFarIntegratedName = "ExponentialHeightFog::FarIntegratedLightScattering";
 
 	/** @brief The integrated volumes are no longer written by the graph: their readers return to the D3D11 views. */
 	void WithdrawIntegrated()
 	{
-		PublishedResources::Withdraw(kNearIntegratedName);
-		PublishedResources::Withdraw(kFarIntegratedName);
+		PublishedResources::Withdraw(ORGExponentialHeightFog::kNearIntegratedId);
+		PublishedResources::Withdraw(ORGExponentialHeightFog::kFarIntegratedId);
 	}
 
 	using ShaderBindings::Handle;
@@ -694,7 +691,8 @@ struct ORGExponentialHeightFog::Impl
 		a_volume.vBuffer = std::make_unique<GraphResources::Texture3D>(VolumeDesc(a_size, DXGI_FORMAT_R16G16B16A16_FLOAT), prefix + "VBufferA", transient);
 		a_volume.scattering = std::make_unique<GraphResources::Texture3D>(VolumeDesc(a_size, DXGI_FORMAT_R32G32B32A32_FLOAT), prefix + "LightScattering", transient);
 		a_volume.scatteringHistory = std::make_unique<GraphResources::Texture3D>(VolumeDesc(a_size, DXGI_FORMAT_R32G32B32A32_FLOAT), prefix + "LightScatteringHistory", history);
-		a_volume.integrated = std::make_unique<GraphResources::Texture3D>(VolumeDesc(a_size, DXGI_FORMAT_R16G16B16A16_FLOAT), prefix + "IntegratedLightScattering", exported);
+		a_volume.integrated = std::make_unique<GraphResources::Texture3D>(VolumeDesc(a_size, DXGI_FORMAT_R16G16B16A16_FLOAT),
+			std::string(a_far ? ORGExponentialHeightFog::kFarIntegratedId : ORGExponentialHeightFog::kNearIntegratedId), exported);
 		a_volume.conservativeDepth = std::make_unique<GraphResources::Texture2D>(DepthDesc(a_size), prefix + "ConservativeDepth", transient);
 		a_volume.conservativeDepthHistory = std::make_unique<GraphResources::Texture2D>(DepthDesc(a_size), prefix + "ConservativeDepthHistory", history);
 		if (!*a_volume.vBuffer || !*a_volume.scattering || !*a_volume.scatteringHistory || !*a_volume.integrated || !a_volume.integrated->SRV() ||

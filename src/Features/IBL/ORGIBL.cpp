@@ -156,9 +156,6 @@ namespace
 {
 	constexpr const char* kClientId = "cs.ibl";
 	constexpr const char* kShader = "IBL/DiffuseIBLCS.hlsl";
-	// The SH textures' names, which they are published under: Drawcall Limit Fix's t76 and t77.
-	constexpr const char* kEnvName = "IBL::EnvIBL";
-	constexpr const char* kSkyName = "IBL::SkyIBL";
 	// Dynamic Cubemaps' environment cubemap on its ORG path, published under this id (ORGDynamicCubemaps).
 	constexpr std::string_view kDynamicCubemapsEnvId = "DynamicCubemaps::Env";
 
@@ -271,8 +268,8 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	state->sampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{});
 	// Read in the next frame (the reflection prepass binds the last frame's SH), and by D3D11 until its readers are ported.
 	const GraphResources::Options options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV };
-	state->env = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(false), kEnvName, options);
-	state->sky = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(false), kSkyName, options);
+	state->env = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(false), std::string(kEnvId), options);
+	state->sky = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(false), std::string(kSkyId), options);
 	if (!state->program || !state->sampler || !*state->env || !*state->sky || !state->env->SRV() || !state->sky->SRV()) {
 		logger::error("[ORG] IBL: its program, sampler or SH textures could not be made; IBL stays on D3D11");
 		return false;
@@ -305,8 +302,8 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	client.active = [] { return !globals::features::ibl.IsDisabledForCurrentScene(); };
 	client.onFailed = [self] {
 		logger::error("[ORG] IBL: the render graph failed; IBL returns to D3D11");
-		PublishedResources::Withdraw(kEnvName);
-		PublishedResources::Withdraw(kSkyName);
+		PublishedResources::Withdraw(kEnvId);
+		PublishedResources::Withdraw(kSkyId);
 		auto failed = std::move(self->impl);
 		if (failed && failed->onFailed)
 			failed->onFailed();
@@ -320,8 +317,8 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	if (!PublishedResources::Publish(*impl->env) || !PublishedResources::Publish(*impl->sky)) {
 		logger::error("[ORG] IBL: the SH textures could not be published; IBL stays on D3D11");
 		FrameAnchors::Unregister(kClientId);
-		PublishedResources::Withdraw(kEnvName);
-		PublishedResources::Withdraw(kSkyName);
+		PublishedResources::Withdraw(kEnvId);
+		PublishedResources::Withdraw(kSkyId);
 		impl.reset();
 		return false;
 	}

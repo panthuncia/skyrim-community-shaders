@@ -2,6 +2,7 @@
 
 #include <d3d11.h>
 #include <memory>
+#include <string_view>
 
 /**
  * @brief Exponential Height Fog's volumetric fog on the render graph (CS_ORG_EXPONENTIAL_HEIGHT_FOG=1).
@@ -29,6 +30,10 @@
 class ORGExponentialHeightFog
 {
 public:
+	/** @brief The integrated volumes' published ids (PublishedResources), their twins' names. */
+	static constexpr std::string_view kNearIntegratedId = "ExponentialHeightFog::IntegratedLightScattering";
+	static constexpr std::string_view kFarIntegratedId = "ExponentialHeightFog::FarIntegratedLightScattering";
+
 	/** @brief Whether CS_ORG_EXPONENTIAL_HEIGHT_FOG=1 is set. */
 	static bool Requested();
 

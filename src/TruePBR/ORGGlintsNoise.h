@@ -2,6 +2,7 @@
 
 #include <d3d11.h>
 #include <memory>
+#include <string_view>
 
 /**
  * @brief TruePBR's glints noise as a render-graph pass (CS_ORG_GLINTS=1).
@@ -27,6 +28,9 @@
 class ORGGlintsNoise
 {
 public:
+	/** @brief The noise texture's published id (PublishedResources), its twin's name. */
+	static constexpr std::string_view kNoiseId = "TruePBR::GlintsNoise";
+
 	/** @brief Whether CS_ORG_GLINTS=1 is set. */
 	static bool Requested();
 
