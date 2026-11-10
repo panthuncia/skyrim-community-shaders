@@ -379,6 +379,27 @@ namespace
 		return src;
 	}
 
+	// What a capture would copy now, for ORGScreenshot::Prime, without HDR's clean composite (a dispatch): false while that is
+	// the source.
+	bool CaptureSourceHint(winrt::com_ptr<ID3D11Texture2D>& holder, ORGScreenshot::Source& source)
+	{
+		auto* renderer = globals::game::renderer;
+		if (!renderer)
+			return false;
+		if (IsFlatHdrScreenshotCapture()) {
+			if (Menu::GetSingleton()->IsOpen())
+				return false;
+			source = { .texture = ResolveDisplayedBackBuffer(holder), .importName = "screenshot.back-buffer" };
+			return source.texture != nullptr;
+		}
+		auto& slot = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
+		source = { .texture = ResolveSlotTexture(slot, holder),
+			.srv = slot.SRV,
+			.engineTarget = static_cast<std::int32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER),
+			.importName = "screenshot.framebuffer" };
+		return source.texture != nullptr;
+	}
+
 	// True when our hotkey is the single PrintScreen key vanilla binds. Anything
 	// else (different key, chord, modifier) means the user wants both ours and
 	// vanilla independently.
@@ -867,6 +888,12 @@ void ScreenshotFeature::Reset()
 void ScreenshotFeature::ProcessCaptureRequest()
 {
 	ProcessPendingReadbacks();
+	if (ORGScreenshot::Requested()) {
+		winrt::com_ptr<ID3D11Texture2D> hintKeepAlive;
+		ORGScreenshot::Source hint{};
+		if (CaptureSourceHint(hintKeepAlive, hint))
+			ORGScreenshot::Get().Prime(hint);
+	}
 	captureOutputPath.clear();
 	{
 		std::lock_guard lock(requestedPathsMutex);
@@ -1074,18 +1101,23 @@ void ScreenshotFeature::Capture()
 	const bool saveAsHdrAvif = flatHdrCapture && hdrUseAvif;
 	const bool saveAsSdrPng = !flatHdrCapture && sdrUsePng;
 
-	PendingScreenshot screenshot;
-	screenshot.format = srcDesc.Format;
-	screenshot.width = copyW;
-	screenshot.height = copyH;
-	screenshot.saveAsHdrPng = saveAsHdrPng;
-	screenshot.saveAsHdrAvif = saveAsHdrAvif;
-	screenshot.saveAsSdrPng = saveAsSdrPng;
-	screenshot.hdrPngBitDepth = static_cast<int>(hdrPngBitDepth);
 	const char* extension = saveAsHdrAvif ? ".avif" : (saveAsHdrPng || saveAsSdrPng ? ".png" : ".bmp");
-	screenshot.outputPath = captureOutputPath.empty() ? BuildScreenshotPath(screenshotPath, extension) : std::filesystem::path(captureOutputPath).replace_extension(extension);
-	screenshot.copyToClipboard = copyToClipboard && captureOutputPath.empty();
-	screenshot.notify = captureOutputPath.empty();
+	const auto outputPath = captureOutputPath.empty() ? BuildScreenshotPath(screenshotPath, extension) : std::filesystem::path(captureOutputPath).replace_extension(extension);
+	auto makeScreenshot = [&] {
+		PendingScreenshot made;
+		made.format = srcDesc.Format;
+		made.width = copyW;
+		made.height = copyH;
+		made.saveAsHdrPng = saveAsHdrPng;
+		made.saveAsHdrAvif = saveAsHdrAvif;
+		made.saveAsSdrPng = saveAsSdrPng;
+		made.hdrPngBitDepth = static_cast<int>(hdrPngBitDepth);
+		made.outputPath = outputPath;
+		made.copyToClipboard = copyToClipboard && captureOutputPath.empty();
+		made.notify = captureOutputPath.empty();
+		return made;
+	};
+	PendingScreenshot screenshot = makeScreenshot();
 
 	// The render graph's readback (CS_ORG_SCREENSHOT=1): the whole source is copied, and the worker crops it. Not for the UI
 	// composite, which is D3D11's.
@@ -1107,11 +1139,18 @@ void ScreenshotFeature::Capture()
 				logger::error("Screenshot failed: could not hand off to worker thread: {}", e.what());
 			}
 		});
-		if (onGraph) {
+		if (!onGraph) {
+			screenshot = std::move(*shared);
+		} else if (ORGScreenshot::CompareRequested()) {
+			// The same frame copied with D3D11 too, saved beside it (CS_ORG_SCREENSHOT_COMPARE).
+			screenshot = makeScreenshot();
+			screenshot.outputPath.replace_filename(outputPath.stem().string() + "-d3d11" + outputPath.extension().string());
+			screenshot.copyToClipboard = false;
+			screenshot.notify = false;
+		} else {
 			logger::debug("Screenshot copied on the render graph from {}", src.description);
 			return;
 		}
-		screenshot = std::move(*shared);
 	}
 
 	D3D11_TEXTURE2D_DESC stagingDesc = srcDesc;
