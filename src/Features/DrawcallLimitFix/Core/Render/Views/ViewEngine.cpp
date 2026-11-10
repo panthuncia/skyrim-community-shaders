@@ -174,8 +174,8 @@ namespace DCLF
 				                   texture && texture->view     ? static_cast<ID3D11ShaderResourceView*>(texture->view()) :
 				                                                  nullptr;
 				std::uint32_t graphIndex = 0;
-				if (texture &&
-					Extensions::GraphTextureIndex(Extensions::GraphTextureReader::Faces, t, texture->name, view, texture->graphResources, graphIndex)) {
+				const auto reader = Extensions::GraphTextureReader::Faces;
+				if (texture && Extensions::GraphTextureIndex(reader, t, texture->name, view, texture->graphResources, graphIndex)) {
 					// The graph registers the published texture: no import to hold.
 					HoldFrameTexture(a_state.frameTextureViews[t], a_state.frameTextureBindings[t], nullptr, t, 0u, a_owners);
 					a_state.frameTextures[t] = graphIndex;

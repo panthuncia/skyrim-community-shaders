@@ -799,8 +799,10 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 			// The history and positions only at mip 0 (the D3D11 path gives them the whole chain, which nothing reads).
 			state->raw[i] = std::make_unique<GraphResources::Texture2D>(TextureDesc(size, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, kReadWrite, false), kRawNames[i], history);
 			state->position[i] = std::make_unique<GraphResources::Texture2D>(TextureDesc(size, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, kReadWrite, false), kPositionNames[i], history);
-			state->env[i] = std::make_unique<GraphResources::Texture2D>(TextureDesc(size, kMips, DXGI_FORMAT_R11G11B10_FLOAT, kReadWrite, true), std::string(kEnvNames[i]), exportedOptions);
-			state->bc6h[i] = std::make_unique<GraphResources::Texture2D>(TextureDesc(size, kMips, DXGI_FORMAT_BC6H_UF16, D3D11_BIND_SHADER_RESOURCE, true), std::string(kBC6HNames[i]), exportedOptions);
+			state->env[i] = std::make_unique<GraphResources::Texture2D>(TextureDesc(size, kMips, DXGI_FORMAT_R11G11B10_FLOAT, kReadWrite, true),
+				std::string(kEnvNames[i]), exportedOptions);
+			state->bc6h[i] = std::make_unique<GraphResources::Texture2D>(TextureDesc(size, kMips, DXGI_FORMAT_BC6H_UF16, D3D11_BIND_SHADER_RESOURCE, true),
+				std::string(kBC6HNames[i]), exportedOptions);
 			for (std::uint32_t mip = 0; mip < kMips; ++mip) {
 				// One uint4 block per 4x4 texels; mips under 4x4 still take one block.
 				const UINT blocks = (std::max)((std::max)(size >> mip, 1u) / 4, 1u);

@@ -487,7 +487,8 @@ bool ORGSkylighting::Update(const Skylighting& a_feature)
 		};
 		for (std::size_t i = 0; i < kVolumes; ++i) {
 			auto& volume = resources->volumes[i];
-			volume = std::make_unique<GraphResources::Texture3D>(VolumeDesc(dims, volumeInfo[i].first), std::string(volumeInfo[i].second), volumeOptions);
+			volume = std::make_unique<GraphResources::Texture3D>(VolumeDesc(dims, volumeInfo[i].first), std::string(volumeInfo[i].second),
+				volumeOptions);
 			if (!*volume || !volume->SRV()) {
 				logger::warn("[ORG] Skylighting: {} could not be made and exported; the probe update stays on D3D11", volumeInfo[i].second);
 				return false;
