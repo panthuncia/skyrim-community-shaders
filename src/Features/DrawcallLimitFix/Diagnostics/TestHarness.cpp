@@ -453,8 +453,6 @@ namespace DCLF
 							});
 						return;
 					}
-					// "dclf:menu=<menu name>=show|hide": a menu opened or closed through the UI message queue (e.g. "Journal Menu", the
-					// system menu Escape opens), so a scripted run pauses the game as a player does.
 					// "dclf:window=minimize|restore|background|foreground|<W>x<H>": the game window as alt-tab and a window drag leave it, with no
 					// key press (a synthetic Alt reaches the game's input). All asynchronous: the window's thread handles them between frames.
 					if (command.rfind("dclf:window=", 0) == 0) {
@@ -495,6 +493,8 @@ namespace DCLF
 							Menu::GetSingleton()->Close();
 						return;
 					}
+					// "dclf:menu=<menu name>=show|hide": a menu opened or closed through the UI message queue (e.g. "Journal Menu", the
+					// system menu Escape opens), so a scripted run pauses the game as a player does.
 					if (command.rfind("dclf:menu=", 0) == 0) {
 						const auto rest = command.substr(10);
 						const auto equals = rest.rfind('=');
