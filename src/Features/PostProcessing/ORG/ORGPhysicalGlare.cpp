@@ -19,7 +19,6 @@ namespace ORGPostChain
 	{
 		constexpr DXGI_FORMAT kComplexFormat = DXGI_FORMAT_R32G32_FLOAT;       // texFFT's, texPSF_FFT's and texApertureBase's
 		constexpr DXGI_FORMAT kPackedFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;  // texGlarePacked's
-		constexpr const char* kOutputName = "PostProcessing::PhysicalGlare::Output";
 		constexpr const char* kChannels[3] = { "R", "G", "B" };
 
 		// The push blocks, each the shader's resource list in order (PhysicalGlare/*.cs.hlsl).
@@ -144,7 +143,7 @@ namespace ORGPostChain
 							D3D11_BIND_UNORDERED_ACCESS, size, size);
 				const auto packed = a_builder.CreateImage("PostProcessing::PhysicalGlare::Packed", kPackedFormat, D3D11_BIND_UNORDERED_ACCESS, size, size);
 				// As PhysicalGlare::SetupResources: the output takes kMAIN_COPY's format.
-				const auto output = a_builder.CreateImage(kOutputName, shape.mainCopyFormat, D3D11_BIND_UNORDERED_ACCESS);
+				const auto output = a_builder.CreateImage(Published::kGlare, shape.mainCopyFormat, D3D11_BIND_UNORDERED_ACCESS);
 				if (a_builder.Failed())
 					return;
 
@@ -219,7 +218,7 @@ namespace ORGPostChain
 					.program = composite,
 					.bindings = { Bind::Srv(a_builder.Current()), Bind::Srv(packed), Bind::Uav(output), glareLatch },
 					.groups = { (shape.width + 7) >> 3, (shape.height + 7) >> 3, 1 } });
-				a_builder.Publish(kOutputName, output);
+				a_builder.Publish(Published::kGlare, output);
 				width = static_cast<float>(shape.width);
 				height = static_cast<float>(shape.height);
 			}

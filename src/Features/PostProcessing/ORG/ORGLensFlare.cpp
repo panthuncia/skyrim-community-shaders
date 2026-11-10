@@ -68,7 +68,7 @@ namespace ORGPostChain
 		 * @brief LensFlare::Draw on the graph. The threshold pass, then either the Fast path (ghosts and halo, then the Kawase
 		 * blur) or the FFT path (Quality, Ultra): the thresholded scene's spectrum, then per kernel group the bokeh kernel's
 		 * spectrum, the product, the inverse transform and the ghost compose, added into the ghosts-and-halo image. That image
-		 * is published for Composite (kLensFlareOutput); the main image is left alone, as on D3D11.
+		 * is published for Composite (Published::kLensFlareOutput); the main image is left alone, as on D3D11.
 		 *
 		 * Every pass has its own latch copy of LensFlareCB, since the D3D11 path changes the per-pass sizes, the kernel scale,
 		 * the ghost mask and the halo strength between dispatches. What sets the passes (mode, FFT size, kernel group count,
@@ -123,7 +123,7 @@ namespace ORGPostChain
 				else
 					BuildFast(a_builder, threshold, ghostHalo);
 
-				a_builder.Publish(kLensFlareOutput, ghostHalo);
+				a_builder.Publish(Published::kLensFlareOutput, ghostHalo);
 			}
 
 			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override

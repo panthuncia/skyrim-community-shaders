@@ -1,19 +1,10 @@
 #include "ORGPostProcessing.h"
 
-#include <cstring>
-
-namespace
-{
-	bool ReadRequested()
-	{
-		char value[8]{};
-		return GetEnvironmentVariableA("CS_ORG_POST_PROCESSING", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}
-}
+#include "RenderGraph/Switches.h"
 
 bool ORGPostProcessing::Requested()
 {
-	static const bool requested = ReadRequested();
+	static const bool requested = Switches::On("CS_ORG_POST_PROCESSING");
 	return requested;
 }
 
@@ -53,6 +44,7 @@ ORGPostProcessing& ORGPostProcessing::Get()
 #	include <algorithm>
 #	include <atomic>
 #	include <cmath>
+#	include <cstring>
 #	include <format>
 #	include <map>
 #	include <span>

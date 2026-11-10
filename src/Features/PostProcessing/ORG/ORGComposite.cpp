@@ -16,11 +16,6 @@ namespace ORGPostChain
 	{
 		constexpr DXGI_FORMAT kFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;  // Composite::texOutput's
 
-		// The names COD Bloom and Lens Flare publish under (their kBloomOutput, kLensFlareOutput): bloom's mip 1, and the ghosts
-		// and halo at half size, max(w / 2, 1) x max(h / 2, 1).
-		constexpr std::string_view kBloomName = "PostProcessing::CODBloom::Bloom";
-		constexpr std::string_view kLensFlareName = "PostProcessing::LensFlare::GhostHalo";
-
 		// composite.ps.hlsl's push block: COMPOSITE_RESOURCES, in order.
 		struct CompositeBlock
 		{
@@ -41,8 +36,8 @@ namespace ORGPostChain
 			void Build(Builder& a_builder, PostProcessFeature&) override
 			{
 				drawn = false;
-				const auto bloom = a_builder.Find(kBloomName);
-				const auto flare = a_builder.Find(kLensFlareName);
+				const auto bloom = a_builder.Find(Published::kBloomOutput);
+				const auto flare = a_builder.Find(Published::kLensFlareOutput);
 				const auto glare = a_builder.Find(Published::kGlare);
 				const auto adaptation = a_builder.Find(Published::kAdaptation);
 				const auto autoExposure = a_builder.FindLatch<HistogramAutoExposure::AutoExposureCB>(Published::kAutoExposureConstants);

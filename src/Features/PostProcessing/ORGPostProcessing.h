@@ -20,6 +20,7 @@ public:
 	/** @brief Whether CS_ORG_POST_PROCESSING=1 is set. */
 	static bool Requested();
 
+	/** @brief The chain's one instance, for the session. Render thread. */
 	static ORGPostProcessing& Get();
 
 	/** @brief Before the render graph initializes (PostProcessing::PostPostLoad): reserves the Tonemap anchor when requested. */

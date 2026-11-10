@@ -123,9 +123,6 @@ namespace ORGPostChain
 		}
 	};
 
-	/** @brief The name CODBloom publishes its accumulated bloom under: mip 1 of its chain, which Composite upsamples. */
-	inline constexpr const char* kBloomOutput = "PostProcessing::CODBloom::Bloom";
-
 	/** @brief What a build is made for: kMAIN's size and the main targets' formats. */
 	struct Shape
 	{
@@ -153,7 +150,11 @@ namespace ORGPostChain
 	 */
 	namespace Published
 	{
-		// COD Bloom and Lens Flare declare their own names (kBloomOutput, kLensFlareOutput); Composite reads them by those ids.
+		// CODBloom: the accumulated bloom, mip 1 of its chain (a published Image of that mip), which Composite upsamples.
+		inline constexpr std::string_view kBloomOutput = "PostProcessing::CODBloom::Bloom";
+		// LensFlare: the ghosts and halo, RGBA16F, at max(width / 2, 1) x max(height / 2, 1) of the chain's Shape
+		// (LensFlare::texGhostHalo's size, Composite's FlareSize).
+		inline constexpr std::string_view kLensFlareOutput = "PostProcessing::LensFlare::GhostHalo";
 		// PhysicalGlare: the glare, the size of the chain's images.
 		inline constexpr std::string_view kGlare = "PostProcessing::PhysicalGlare::Output";
 		// HistogramAutoExposure: the adapted luminance (a structured buffer of one float) and a HistogramAutoExposure::AutoExposureCB.
@@ -391,12 +392,6 @@ namespace ORGPostChain
 	std::unique_ptr<Effect> MakeLUT();
 	std::unique_ptr<Effect> MakeBorder();
 	std::unique_ptr<Effect> MakeLensFlare();
-
-	/**
-	 * @brief Lens Flare's published side output, which Composite reads: the ghosts and halo, RGBA16F, at max(width / 2, 1) x
-	 * max(height / 2, 1) of the chain's Shape (LensFlare::texGhostHalo's size, Composite's FlareSize).
-	 */
-	inline constexpr std::string_view kLensFlareOutput = "PostProcessing::LensFlare::GhostHalo";
 	std::unique_ptr<Effect> MakeCODBloom();
 	std::unique_ptr<Effect> MakePhysicalGlare();
 	std::unique_ptr<Effect> MakeDoF();
