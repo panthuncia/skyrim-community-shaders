@@ -3,6 +3,7 @@
 #include "TextureStreaming/Streamer.h"
 #include "Vram/DxvkMemory.h"
 
+#include "Globals.h"
 #include "Menu.h"
 #include "Utils/UI.h"
 
@@ -95,14 +96,41 @@ namespace
 		func(a_manager, false, false);
 	}
 
-	/** @brief The worldspace's own 3D (its portal graph, scene nodes and the 3D of its persistent objects), as `pcb` drops it in
-	 * an interior before detaching the grid. */
-	void UnloadWorldSpace3D(RE::TESWorldSpace* a_worldSpace)
+	/** @brief The cells held by both buffers (the current interior included). */
+	std::uint32_t BufferedCells(const RE::TES* a_tes)
 	{
-		using func_t = void(RE::TESWorldSpace*);
-		static REL::Relocation<func_t> func{ REL::RelocationID(20072, 20515) };
-		func(a_worldSpace);
+		const auto count = [](RE::TESObjectCELL* const* a_buffer, std::uint32_t a_slots) {
+			return a_buffer ? static_cast<std::uint32_t>(std::count_if(a_buffer, a_buffer + a_slots, [](auto* a_cell) { return a_cell != nullptr; })) : 0u;
+		};
+		return count(a_tes->exteriorBuffer, ExteriorBufferSize()) + count(a_tes->interiorBuffer, InteriorBufferSize());
 	}
+
+	/** @brief The thread's name, for the log; empty without one. */
+	std::string ThreadName()
+	{
+		PWSTR name = nullptr;
+		std::string result;
+		if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &name)) && name) {
+			for (const wchar_t* c = name; *c; ++c)
+				result.push_back(*c < 0x80 ? static_cast<char>(*c) : '?');
+			LocalFree(name);
+		}
+		return result;
+	}
+
+	/** @brief `JobListManager::ServingThread`'s frame-job wait near the end of `Main::Update` (its only caller). When it
+	 * returns the frame's jobs are done, the AI job and its queued 3D attaches included. The engine is back to one
+	 * thread here, so this is where the controller runs. */
+	struct WaitForFrameJobs
+	{
+		static void thunk()
+		{
+			func();
+			if (globals::features::vramBudget.loaded)
+				globals::features::vramBudget.OnFrameJobsDone();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
 
 	constexpr std::uint8_t kLoadedDetached = 4;      // TESObjectCELL::cellState of a buffered cell nobody is attaching
 	constexpr std::uint32_t kStillLoading = 1u << 21;  // TESForm::formFlags: an IO thread is still building the cell
@@ -179,20 +207,29 @@ void VRAMBudget::RestoreDefaultSettings()
 void VRAMBudget::EarlyPrepass()
 {
 	Vram::SetDxvkDefragPressure(settings.ThresholdPercent);
+}
 
-	// Only the cadence lives here; the controller runs on the main thread, as an SKSE task, one at a time.
+void VRAMBudget::PostPostLoad()
+{
+	// SE 34554, AE 35409. Main::Update is its only caller in both.
+	stl::detour_thunk<WaitForFrameJobs>(REL::RelocationID(34554, 35409));
+	if (!WaitForFrameJobs::func.address())
+		logger::error("[VRAM Budget] could not hook the frame-job wait; cells will not be unloaded");
+}
+
+void VRAMBudget::OnFrameJobsDone()
+{
 	const std::int64_t now = Now();
-	std::int64_t due = nextTick.load(std::memory_order_relaxed);
-	if (now < due || !nextTick.compare_exchange_strong(due, now + Ticks(kTickInterval)) || tickQueued.exchange(true))
+	if (now < nextTick)
 		return;
-	if (const auto tasks = SKSE::GetTaskInterface()) {
-		tasks->AddTask([this]() {
-			Tick();
-			tickQueued = false;
-		});
-	} else {
-		tickQueued = false;
+	nextTick = now + Ticks(kTickInterval);
+
+	if (!threadLogged) {
+		threadLogged = true;
+		const std::string name = ThreadName();
+		logger::info("[VRAM Budget] controller runs on thread {} ({}), after Main::Update's frame-job wait", GetCurrentThreadId(), name.empty() ? "unnamed" : name);
 	}
+	Tick();
 }
 
 bool VRAMBudget::Sample()
@@ -238,7 +275,8 @@ void VRAMBudget::Tick()
 			if (now < phaseEnd)
 				return;
 			const double drop = stepUsageMiB - usageMiB;
-			if (stepCells && drop > 0.0)
+			// A pcb step frees a whole space at once (grid, distant land, other interiors): no per-cell figure to learn.
+			if (stepLearns && stepCells && drop > 0.0)
 				mibPerCell = std::clamp(0.5 * mibPerCell + 0.5 * drop / stepCells, 4.0, 1024.0);
 			mibPerCellShown = static_cast<float>(mibPerCell);
 			logger::info("[VRAM Budget] step response: {:.0f} -> {:.0f} MiB ({:+.0f}) after {} cells; {:.0f} MiB a cell", stepUsageMiB, usageMiB, -drop, stepCells, mibPerCell);
@@ -330,16 +368,17 @@ std::uint32_t VRAMBudget::Unload(RE::TES* a_tes, std::uint32_t a_cells, std::str
 {
 	if (a_tes->interiorCell != terrainUnloadedIn)
 		terrainUnloadedIn = nullptr;
+	stepLearns = true;
 	const auto grid = a_tes->gridCells;
 	const bool gridAttached = grid->cells && std::any_of(grid->cells, grid->cells + grid->length * grid->length, [](auto* a_cell) { return a_cell != nullptr; });
 	void* terrainManager = ActiveTerrainManager();
 
-	// Inside, in this order: the buffered exteriors; the exterior grid, which the engine keeps attached while the player is in
-	// an interior (detached as pcb does, then unloaded like the others); the invisible distant land; the other interiors.
+	// Inside, in this order: the buffered exteriors; then pcb, which drops the exterior grid the engine keeps attached
+	// while the player is in an interior; then the invisible distant land; then the other interiors.
 	enum class Step
 	{
 		kCells,
-		kDetachGrid,
+		kPurgeBuffers,
 		kDistantLand
 	};
 	const auto victims = PickVictims(a_tes, a_cells);
@@ -347,26 +386,35 @@ std::uint32_t VRAMBudget::Unload(RE::TES* a_tes, std::uint32_t a_cells, std::str
 	Step step = Step::kCells;
 	if (a_tes->interiorCell && !exteriorsLeft) {
 		if (gridAttached)
-			step = Step::kDetachGrid;
+			step = Step::kPurgeBuffers;
 		else if (!terrainUnloadedIn && terrainManager)
 			step = Step::kDistantLand;
 	}
 	if (step == Step::kCells && victims.empty())
 		return 0;
 
+	if (step == Step::kPurgeBuffers) {
+		// The whole of pcb, never a part of it. Detaching the grid unloads the worldspace's portal graph, and an actor left
+		// in a detached exterior cell crashes the next time the engine attaches its 3D there (19165 reads the null graph).
+		// pcb unloads every detached exterior in the same call and releases the worldspace once none is left.
+		const std::uint32_t before = BufferedCells(a_tes);
+		a_tes->PurgeBufferedCells();
+		const std::uint32_t after = BufferedCells(a_tes);
+		const std::uint32_t count = before > after ? before - after : 0;
+		terrainUnloadedIn = a_tes->interiorCell;  // pcb unloads the distant land too while inside
+		stepLearns = false;
+		o_what = std::format("purged the cell buffers as pcb does: the exterior grid, the distant land and {} cells ({} left)", count, after);
+		return count;
+	}
+
 	char state[2]{};
 	BeginMemoryFree(state);
 
-	if (step == Step::kDetachGrid) {
-		if (auto* worldSpace = a_tes->GetRuntimeData2().worldSpace)
-			UnloadWorldSpace3D(worldSpace);
-		grid->DetachAll();
-		o_what = "detached the exterior grid; ";
-	}
 	std::uint32_t count = 0;
 	if (step == Step::kDistantLand) {
 		UnloadDistantLand(terrainManager);
 		terrainUnloadedIn = a_tes->interiorCell;
+		stepLearns = false;
 		o_what = "unloaded the distant land";
 	} else {
 		// Picked again with IO paused: the cell loader tasks write the buffers from IO threads.
@@ -378,7 +426,7 @@ std::uint32_t VRAMBudget::Unload(RE::TES* a_tes, std::uint32_t a_cells, std::str
 			else
 				RemoveExteriorFromBuffer(a_tes, cell);
 		}
-		o_what += std::format("unloaded {} cells: {}", count, names.empty() ? "none (taken meanwhile)" : names);
+		o_what = std::format("unloaded {} cells: {}", count, names.empty() ? "none (taken meanwhile)" : names);
 	}
 	FreeAll();
 	EndMemoryFree(state);
