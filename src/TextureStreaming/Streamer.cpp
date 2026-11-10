@@ -4,9 +4,11 @@
 #include "Globals.h"
 #include "Policy.h"
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "TextureStreaming/ORGWindows.h"
 #include "Utils/SwitchFile.h"
 #include "Vram/Debug.h"
 #include "Vram/DxvkMemory.h"
+#include "Vram/OrgMemory.h"
 
 #include <DirectXTex.h>
 
@@ -132,6 +134,7 @@ namespace TextureStreaming
 			std::mutex stateMutex;
 			ID3D11ShaderResourceView* shell = nullptr;  // not held: the record goes when the view does
 			std::uint64_t residentBytes = 0;
+			std::shared_ptr<ORG::Window> graphWindow;  // the shell's current window, when the render graph owns it
 
 			std::mutex buildMutex;  // one build of a texture at a time
 			std::atomic<std::uint32_t> residentTop{ Policy::kNoWindow };
@@ -285,63 +288,92 @@ namespace TextureStreaming
 			return offset;
 		}
 
-		void Build(Texture& a_texture, std::uint32_t a_top)
+		void Fail(Texture& a_texture, const char* a_why)
 		{
-			std::scoped_lock build(a_texture.buildMutex);
-			const auto resident = a_texture.residentTop.load(std::memory_order_relaxed);
-			// A late base request does not coarsen what is there.
-			if (a_top == kBaseTop && resident != Policy::kNoWindow)
-				return;
-			const auto top = LimitTop(a_texture, a_top);
-			if (resident == top)
-				return;
-			const auto fail = [&](const char* a_why) {
-				g_loadFailures.fetch_add(1, std::memory_order_relaxed);
-				logger::warn("[TextureStreaming] {}: {}", a_texture.path, a_why);
-				// A base window that cannot come opens the gate: its objects read zero rather than wait for ever.
-				a_texture.failed.store(true, std::memory_order_relaxed);
-				a_texture.baseReady.store(true, std::memory_order_release);
-			};
-			const auto bytes = BytesFrom(a_texture.desc, top);
+			g_loadFailures.fetch_add(1, std::memory_order_relaxed);
+			logger::warn("[TextureStreaming] {}: {}", a_texture.path, a_why);
+			// A base window that cannot come opens the gate: its objects read zero rather than wait for ever.
+			a_texture.failed.store(true, std::memory_order_relaxed);
+			a_texture.baseReady.store(true, std::memory_order_release);
+		}
+
+		/** @brief A window's mips, read from the file: its description, its bytes and each mip's place in them. */
+		struct WindowRead
+		{
+			std::uint32_t resident = Policy::kNoWindow;  // the window there when the build started
+			std::uint32_t top = 0;
+			std::uint64_t bytes = 0;
+			D3D11_TEXTURE2D_DESC desc{};
 			std::vector<std::byte> contents;
-			const auto started = std::chrono::steady_clock::now();
-			if (!ReadFile(a_texture.path, WindowOffset(a_texture, top), bytes, contents))
-				return fail("could not read the file");
-			const auto readDone = std::chrono::steady_clock::now();
+			std::vector<D3D11_SUBRESOURCE_DATA> data;
+			std::chrono::steady_clock::time_point started, readDone;
+		};
 
-			auto desc = a_texture.desc;
-			desc.Width = MipSide(desc.Width, top);
-			desc.Height = MipSide(desc.Height, top);
-			desc.MipLevels = desc.MipLevels - top;
-			const auto data = Subresources(a_texture.desc, top, contents);
-			winrt::com_ptr<ID3D11Texture2D> window;
-			winrt::com_ptr<ID3D11ShaderResourceView> view;
-			if (FAILED(a_texture.device->CreateTexture2D(&desc, data.data(), window.put())) ||
-				FAILED(a_texture.device->CreateShaderResourceView(window.get(), nullptr, view.put())))
-				return fail("could not create the window");
-			Vram::Debug::TagGameTexture(window.get(), a_texture.path);
-			{
-				const auto micros = [](auto a_span) { return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(a_span).count()); };
-				const bool base = resident == Policy::kNoWindow;
-				(base ? g_baseBuilds : g_otherBuilds).fetch_add(1, std::memory_order_relaxed);
-				(base ? g_baseReadMicros : g_otherReadMicros).fetch_add(micros(readDone - started), std::memory_order_relaxed);
-				(base ? g_baseCreateMicros : g_otherCreateMicros).fetch_add(micros(std::chrono::steady_clock::now() - readDone), std::memory_order_relaxed);
+		enum class ReadResult : std::uint8_t
+		{
+			Ready,
+			Skip,   // the window asked for is there, or a late base request would coarsen it
+			Failed  // counted and logged
+		};
+
+		// The build's first half: what to build, and its bytes from the file. The caller holds the texture's build lock.
+		ReadResult ReadWindow(Texture& a_texture, std::uint32_t a_top, WindowRead& a_read)
+		{
+			a_read.resident = a_texture.residentTop.load(std::memory_order_relaxed);
+			// A late base request does not coarsen what is there.
+			if (a_top == kBaseTop && a_read.resident != Policy::kNoWindow)
+				return ReadResult::Skip;
+			a_read.top = LimitTop(a_texture, a_top);
+			if (a_read.resident == a_read.top)
+				return ReadResult::Skip;
+			a_read.bytes = BytesFrom(a_texture.desc, a_read.top);
+			a_read.started = std::chrono::steady_clock::now();
+			if (!ReadFile(a_texture.path, WindowOffset(a_texture, a_read.top), a_read.bytes, a_read.contents)) {
+				Fail(a_texture, "could not read the file");
+				return ReadResult::Failed;
 			}
+			a_read.readDone = std::chrono::steady_clock::now();
+			a_read.desc = a_texture.desc;
+			a_read.desc.Width = MipSide(a_read.desc.Width, a_read.top);
+			a_read.desc.Height = MipSide(a_read.desc.Height, a_read.top);
+			a_read.desc.MipLevels = a_read.desc.MipLevels - a_read.top;
+			a_read.data = Subresources(a_texture.desc, a_read.top, a_read.contents);
+			return ReadResult::Ready;
+		}
 
+		void CountBuild(const WindowRead& a_read)
+		{
+			const auto micros = [](auto a_span) { return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(a_span).count()); };
+			const bool base = a_read.resident == Policy::kNoWindow;
+			(base ? g_baseBuilds : g_otherBuilds).fetch_add(1, std::memory_order_relaxed);
+			(base ? g_baseReadMicros : g_otherReadMicros).fetch_add(micros(a_read.readDone - a_read.started), std::memory_order_relaxed);
+			(base ? g_baseCreateMicros : g_otherCreateMicros).fetch_add(micros(std::chrono::steady_clock::now() - a_read.readDone), std::memory_order_relaxed);
+		}
+
+		/**
+		 * @brief Shows a new window: the shell's binds read a_view from here on, and the listener hears of the swap. a_owner keeps a graph
+		 * window's memory (ORG::Window); a D3D11 window needs none, since the shell's reference to its view holds it.
+		 */
+		void Install(Texture& a_texture, std::uint32_t a_top, std::uint64_t a_bytes, ID3D11ShaderResourceView* a_view, std::shared_ptr<ORG::Window> a_owner)
+		{
 			const ID3D11ShaderResourceView* shell = nullptr;
+			std::uint32_t resident = Policy::kNoWindow;
+			std::shared_ptr<ORG::Window> replaced;  // let go outside the texture's lock
 			{
 				std::scoped_lock state(a_texture.stateMutex);
 				if (!a_texture.shell)
 					return;
 				shell = a_texture.shell;
-				Dxvk().setWindow(a_texture.shell, view.get());
-				g_residentBytes.fetch_add(bytes, std::memory_order_relaxed);
+				Dxvk().setWindow(a_texture.shell, a_view);
+				g_residentBytes.fetch_add(a_bytes, std::memory_order_relaxed);
 				g_residentBytes.fetch_sub(a_texture.residentBytes, std::memory_order_relaxed);
-				a_texture.residentBytes = bytes;
+				a_texture.residentBytes = a_bytes;
+				// A replaced graph window goes once its imports let go of it too, and then after D3D11's last use of it.
+				replaced = std::exchange(a_texture.graphWindow, std::move(a_owner));
+				resident = a_texture.residentTop.exchange(a_top, std::memory_order_acq_rel);
 			}
 			if (resident == Policy::kNoWindow)
 				g_withWindow.fetch_add(1, std::memory_order_relaxed);
-			a_texture.residentTop.store(top, std::memory_order_release);
 			g_windowsBuilt.fetch_add(1, std::memory_order_relaxed);
 			a_texture.baseReady.store(true, std::memory_order_release);
 
@@ -352,6 +384,65 @@ namespace TextureStreaming
 			}
 			if (listener && resident != Policy::kNoWindow)
 				listener(shell);
+		}
+
+		// The build's second half on D3D11: the window made with its mips as initial data, the call the engine's loader makes.
+		void CreateOnD3D11(Texture& a_texture, const WindowRead& a_read)
+		{
+			winrt::com_ptr<ID3D11Texture2D> window;
+			winrt::com_ptr<ID3D11ShaderResourceView> view;
+			if (FAILED(a_texture.device->CreateTexture2D(&a_read.desc, a_read.data.data(), window.put())) ||
+				FAILED(a_texture.device->CreateShaderResourceView(window.get(), nullptr, view.put())))
+				return Fail(a_texture, "could not create the window");
+			Vram::Debug::TagGameTexture(window.get(), a_texture.path);
+			CountBuild(a_read);
+			Install(a_texture, a_read.top, a_read.bytes, view.get(), nullptr);
+		}
+
+		void Build(Texture& a_texture, std::uint32_t a_top)
+		{
+			std::scoped_lock build(a_texture.buildMutex);
+			WindowRead read;
+			if (ReadWindow(a_texture, a_top, read) == ReadResult::Ready)
+				CreateOnD3D11(a_texture, read);
+		}
+
+		void PostBuild(Texture& a_texture, std::uint64_t a_revision, std::uint32_t a_top);
+
+		/**
+		 * @brief A scheduled build. With graph windows the mips are staged here, and the window is made and installed on the render thread
+		 * (ORG::Queue). Otherwise, or when the graph cannot take it, it is built on D3D11 at once.
+		 */
+		std::shared_ptr<PendingWindow> BuildAsync(const std::shared_ptr<Texture>& a_texture, std::uint32_t a_top)
+		{
+			if (!ORG::Available()) {
+				Build(*a_texture, a_top);
+				return nullptr;
+			}
+			std::scoped_lock build(a_texture->buildMutex);
+			WindowRead read;
+			if (ReadWindow(*a_texture, a_top, read) != ReadResult::Ready)
+				return nullptr;
+			ORG::Upload upload;
+			upload.desc = read.desc;
+			upload.path = a_texture->path;
+			upload.mips = read.data;
+			upload.install = [texture = std::weak_ptr<Texture>(a_texture), top = read.top, bytes = read.bytes](const std::shared_ptr<ORG::Window>& a_window) {
+				if (const auto locked = texture.lock(); locked && a_window)
+					Install(*locked, top, bytes, ORG::ViewOf(*a_window), a_window);
+			};
+			// The graph gave up on it: the build again, as a new revision, which now goes to D3D11.
+			upload.retry = [id = a_texture->id, top = read.top] {
+				if (const auto texture = Find(id))
+					PostBuild(*texture, texture->nextRevision.fetch_add(1, std::memory_order_relaxed), top);
+			};
+			auto pending = ORG::Queue(std::move(upload));
+			if (!pending) {
+				CreateOnD3D11(*a_texture, read);
+				return nullptr;
+			}
+			CountBuild(read);
+			return pending;
 		}
 
 		void PostBuild(Texture& a_texture, std::uint64_t a_revision, std::uint32_t a_top)
@@ -380,6 +471,7 @@ namespace TextureStreaming
 		void __stdcall OnGone(std::uint64_t a_id)
 		{
 			std::shared_ptr<Texture> texture;
+			std::shared_ptr<ORG::Window> graphWindow;  // let go outside the texture's lock
 			{
 				std::unique_lock lock(g_mutex);
 				const auto it = g_textures.find(a_id);
@@ -395,6 +487,7 @@ namespace TextureStreaming
 				texture->shell = nullptr;
 				g_residentBytes.fetch_sub(texture->residentBytes, std::memory_order_relaxed);
 				texture->residentBytes = 0;
+				graphWindow = std::move(texture->graphWindow);
 			}
 			if (texture->residentTop.load(std::memory_order_acquire) != Policy::kNoWindow)
 				g_withWindow.fetch_sub(1, std::memory_order_relaxed);
@@ -584,12 +677,73 @@ namespace TextureStreaming
 		struct Controller
 		{
 			Policy::Pullback pullback;
-			std::uint64_t outsideBytes = 0;  // device-local memory that is not DXVK's: ORG, the swap chain, the driver
+			std::uint64_t outsideBytes = 0;  // device-local memory that is not DXVK's (nor, when it is read, ORG's allocator's): the swap chain, the driver
 			std::uint64_t otherBytes = 0;    // what is not windows, smoothed
 			const void* world = nullptr;     // an identity: the worldspace last seen
 			std::uint32_t worldChangeTicks = 0;
 			bool measured = false;
 		};
+
+		/** @brief What the controller reads of the device's memory: the driver's figures, and what CS's allocators hold. */
+		struct MemoryReading
+		{
+			std::uint64_t heapSize = 0;      // the card's own VRAM
+			std::uint64_t driverUsage = 0;   // the process's use of it, as the driver reports it
+			std::uint64_t driverBudget = 0;  // what the driver offers this process of it
+			std::uint64_t allocated = 0;     // device-local memory DXVK (and ORG's allocator) took from the driver
+			std::uint64_t used = 0;          // of which in use
+			std::uint64_t overflow = 0;      // what is in system memory that wanted video memory, or may
+			bool clamped = false;            // the driver's use is at its budget: what is beyond it cannot be read
+		};
+
+		// DXVK's heap reports: its memory and the driver's, per Vulkan heap.
+		bool ReadDxvkMemory(MemoryReading& a_reading)
+		{
+			for (const auto& report : Vram::DxvkHeapReports()) {
+				if (report.heapFlags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+					if (!report.hasVkBudget)
+						return false;
+					a_reading.heapSize += report.heapSize;
+					a_reading.driverUsage += report.vkUsage;
+					a_reading.driverBudget += report.vkBudget;
+					a_reading.allocated += report.dxvkAllocated;
+					a_reading.used += report.dxvkUsed;
+				} else {
+					a_reading.overflow += report.dxvkUsed;
+				}
+			}
+			a_reading.clamped = static_cast<double>(a_reading.driverUsage) >= static_cast<double>(a_reading.driverBudget) * kClampedShare;
+			return a_reading.driverBudget != 0;
+		}
+
+		/**
+		 * @brief BasicRHI's memory budget and ORG's allocator (Vram/OrgMemory.h), with DXVK's memory beside it while DXVK is loaded. Graph
+		 * windows live in ORG's allocator, so with them DXVK's reports alone would count them as outside DXVK, which the clamp hides.
+		 */
+		bool ReadOrgMemory(MemoryReading& a_reading)
+		{
+			const auto heaps = Vram::Org::ReadHeaps();
+			if (!heaps.local.valid || !heaps.local.budget)
+				return false;
+			a_reading.heapSize = heaps.local.capacity;
+			a_reading.driverUsage = heaps.local.usage;
+			a_reading.driverBudget = heaps.local.budget;
+			for (const auto& report : Vram::DxvkHeapReports()) {
+				if (report.heapFlags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+					a_reading.allocated += report.dxvkAllocated;
+					a_reading.used += report.dxvkUsed;
+				} else {
+					a_reading.overflow += report.dxvkUsed;
+				}
+			}
+			a_reading.allocated += heaps.local.allocatorBlocks;
+			a_reading.used += heaps.local.allocatorUsed;
+			// Spillable allocations placed in system memory: the windows past the budget.
+			a_reading.overflow += Vram::Org::SpilledBytes();
+			a_reading.clamped = heaps.local.usageAtBudget ||
+			                    static_cast<double>(a_reading.driverUsage) >= static_cast<double>(a_reading.driverBudget) * kClampedShare;
+			return true;
+		}
 
 		/**
 		 * @brief What the windows may take: the budget's target less what everything else uses. The windows are subtracted from the measured use
@@ -598,29 +752,18 @@ namespace TextureStreaming
 		 * This counts DXVK's memory itself, wherever it lies, because the driver's figures cannot show use beyond its budget. Past that budget DXVK
 		 * places what can spill in system memory, and AMD's driver reports the device-local heap's use as the budget at most. While it does, what
 		 * is not DXVK's cannot be read: use less DXVK's allocations would seem to rise each time DXVK frees a chunk. So it keeps the value from
-		 * before. False when it cannot tell.
+		 * before. With graph windows, or CS_ORG_VRAM_SOURCE=org, ORG's allocator counts beside DXVK's memory (ReadOrgMemory), and BasicRHI's
+		 * own flag says when the use is clamped. False when it cannot tell.
 		 */
 		bool MeasureAllowance(Controller& a_controller, std::uint64_t& a_allowance)
 		{
-			std::uint64_t heapSize = 0, driverUsage = 0, driverBudget = 0, allocated = 0, used = 0, overflow = 0;
-			for (const auto& report : Vram::DxvkHeapReports()) {
-				if (report.heapFlags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
-					if (!report.hasVkBudget)
-						return false;
-					heapSize += report.heapSize;
-					driverUsage += report.vkUsage;
-					driverBudget += report.vkBudget;
-					allocated += report.dxvkAllocated;
-					used += report.dxvkUsed;
-				} else {
-					overflow += report.dxvkUsed;
-				}
-			}
-			if (!driverBudget)
+			MemoryReading reading;
+			const bool org = ORG::Available() || Vram::Org::Selected();
+			if (!(org ? ReadOrgMemory(reading) : ReadDxvkMemory(reading)))
 				return false;
+			const auto [heapSize, driverUsage, driverBudget, allocated, used, overflow, clamped] = reading;
 
 			const std::uint64_t outside = driverUsage > allocated ? driverUsage - allocated : 0;
-			const bool clamped = static_cast<double>(driverUsage) >= static_cast<double>(driverBudget) * kClampedShare;
 			if (!clamped || !a_controller.measured)
 				a_controller.outsideBytes = outside;
 			const std::uint64_t total = used + a_controller.outsideBytes + overflow;
@@ -1040,6 +1183,21 @@ namespace TextureStreaming
 		return FindShell(a_shell) ? Dxvk().getWindow(a_shell) : nullptr;
 	}
 
+	bool GraphWindowOf(ID3D11ShaderResourceView* a_shell, const ID3D11ShaderResourceView* a_window, GraphWindow& a_out)
+	{
+		if (!Enabled() || !a_shell || !a_window)
+			return false;
+		const auto texture = FindShell(a_shell);
+		if (!texture)
+			return false;
+		std::scoped_lock state(texture->stateMutex);
+		if (!texture->graphWindow || ORG::ViewOf(*texture->graphWindow) != a_window)
+			return false;
+		a_out.index = ORG::IndexOf(*texture->graphWindow);
+		a_out.owner = texture->graphWindow;
+		return true;
+	}
+
 	bool BaseReady(const ID3D11ShaderResourceView* a_view)
 	{
 		if (!Enabled() || !a_view)
@@ -1069,14 +1227,29 @@ namespace TextureStreaming
 		return false;
 	}
 
-	void BuildWindow(TextureId a_id, std::uint32_t a_top)
+	namespace
 	{
 		// A test's slow disk: what a late window looks like.
-		static const std::uint32_t delay = SwitchNumber("CS_DCLF_TEX_STREAM_DELAY_MS", 0);
-		if (delay)
-			std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+		void TestDelay()
+		{
+			static const std::uint32_t delay = SwitchNumber("CS_DCLF_TEX_STREAM_DELAY_MS", 0);
+			if (delay)
+				std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+		}
+	}
+
+	void BuildWindow(TextureId a_id, std::uint32_t a_top)
+	{
+		TestDelay();
 		if (const auto texture = Find(a_id))
 			Build(*texture, a_top);
+	}
+
+	std::shared_ptr<PendingWindow> BuildWindowAsync(TextureId a_id, std::uint32_t a_top)
+	{
+		TestDelay();
+		const auto texture = Find(a_id);
+		return texture ? BuildAsync(texture, a_top) : nullptr;
 	}
 
 	void SetScheduler(Scheduler a_scheduler)
@@ -1163,6 +1336,10 @@ namespace TextureStreaming
 		stats.otherBuilds = g_otherBuilds.load(std::memory_order_relaxed);
 		stats.otherReadMicroseconds = g_otherReadMicros.load(std::memory_order_relaxed);
 		stats.otherCreateMicroseconds = g_otherCreateMicros.load(std::memory_order_relaxed);
+		const auto graph = ORG::GetCounters();
+		stats.graphWindows = graph.uploaded;
+		stats.graphBatches = graph.batches;
+		stats.graphRetried = graph.retried;
 		stats.cardBytes = g_cardBytes.load(std::memory_order_relaxed);
 		stats.driverBudgetBytes = g_driverBudgetBytes.load(std::memory_order_relaxed);
 		stats.budgetBytes = g_budgetBytes.load(std::memory_order_relaxed);

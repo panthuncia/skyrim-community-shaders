@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 
 struct ID3D11ShaderResourceView;
@@ -54,6 +55,19 @@ namespace TextureStreaming
 	/** @brief The shell's current window with a reference, or null. The caller releases it. Any thread; a_shell must be alive. */
 	ID3D11ShaderResourceView* CurrentWindow(ID3D11ShaderResourceView* a_shell);
 
+	/** @brief A window the render graph owns (CS_ORG_TEXTURE_STREAMING=1): read by index, kept alive by owner. */
+	struct GraphWindow
+	{
+		std::uint32_t index = 0;            // its descriptor in ORG's resource heap: the whole chain
+		std::shared_ptr<const void> owner;  // keeps the window, its descriptor and its memory
+	};
+
+	/**
+	 * @brief Whether a_window (what CurrentWindow returned for a_shell) is a window the render graph owns, and if so its index. Any
+	 * thread; a_shell must be alive. False for a D3D11 window, or one replaced since.
+	 */
+	bool GraphWindowOf(ID3D11ShaderResourceView* a_shell, const ID3D11ShaderResourceView* a_window, GraphWindow& a_out);
+
 	/** @brief Whether a view needs nothing more to be drawn: not a shell, or it has its base window, or its load failed. Any thread. */
 	bool BaseReady(const ID3D11ShaderResourceView* a_view);
 
@@ -75,10 +89,31 @@ namespace TextureStreaming
 	/** @brief Builds a window: a blocking read and upload, for a background thread. a_top is limited to what the texture allows. */
 	void BuildWindow(TextureId a_id, std::uint32_t a_top);
 
+	/**
+	 * @brief A window build that ends after its call: with graph windows (CS_ORG_TEXTURE_STREAMING=1, TextureStreaming/ORGWindows.h)
+	 * the window is in place only once the render graph's copy pass for it was submitted. Whoever waits for the window gates on this
+	 * rather than on the call, so no frame waits for it.
+	 */
+	class PendingWindow
+	{
+	public:
+		virtual ~PendingWindow() = default;
+		/** @brief Whether the window is in place, or the build gave up. Any thread. */
+		virtual bool Done() const = 0;
+		/** @brief a_wake runs once, when Done turns true: on the render thread, or at once on this thread if it already is. Any thread. */
+		virtual void Subscribe(std::function<void()> a_wake) = 0;
+	};
+
+	/**
+	 * @brief BuildWindow for a scheduled build: the file is read on this thread, and the window may be made later on the render thread.
+	 * @return What to wait for, or null when the window is in place on return (built on D3D11, or the build failed).
+	 */
+	std::shared_ptr<PendingWindow> BuildWindowAsync(TextureId a_id, std::uint32_t a_top);
+
 	/** @brief Where window builds run. Without one, the worker runs them itself, and new loads stay the engine's (FullMode aside). Empty to stop. */
 	struct Scheduler
 	{
-		std::function<void(TextureId a_id, std::uint64_t a_revision, std::uint32_t a_top)> post;  // any thread, never blocks; later runs BuildWindow
+		std::function<void(TextureId a_id, std::uint64_t a_revision, std::uint32_t a_top)> post;  // any thread, never blocks; later runs BuildWindowAsync
 		std::function<void(TextureId a_id)> retire;                                               // the worker's: the texture is gone
 	};
 	void SetScheduler(Scheduler a_scheduler);
@@ -140,6 +175,7 @@ namespace TextureStreaming
 		std::uint64_t feedbackReported = 0, feedbackFiner = 0;                                  // since the start
 		std::uint64_t baseBuilds = 0, baseReadMicroseconds = 0, baseCreateMicroseconds = 0;     // the first window of each texture
 		std::uint64_t otherBuilds = 0, otherReadMicroseconds = 0, otherCreateMicroseconds = 0;  // later ones
+		std::uint64_t graphWindows = 0, graphBatches = 0, graphRetried = 0;                     // windows the render graph uploaded, its copy passes, and builds it gave back to D3D11
 
 		// The budget's controller, from its last tick. All zero until it has measured.
 		std::uint64_t cardBytes = 0;          // the card's own VRAM

@@ -27,6 +27,11 @@ struct TextureStreamingFeature : Feature
 	/** @brief On by default, unlike other pre-release core features. */
 	virtual bool IsDisabledByDefault() const override { return false; }
 
+	/** @brief Reserves the render graph's anchor for graph windows (CS_ORG_TEXTURE_STREAMING=1), before the graph initializes. */
+	virtual void PostPostLoad() override;
+	/** @brief After each Present, on the render thread: graph windows' uploads and releases (TextureStreaming/ORGWindows.h). */
+	virtual void Reset() override;
+
 	/** @brief Draws the settings and the current totals. */
 	virtual void DrawSettings() override;
 	virtual void LoadSettings(json& o_json) override;
