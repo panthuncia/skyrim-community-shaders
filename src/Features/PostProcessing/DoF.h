@@ -1,5 +1,6 @@
 #pragma once
 
+#include "BokehResources.h"
 #include "Buffer.h"
 #include "PostProcessFeature.h"
 
@@ -140,6 +141,29 @@ struct DoF : public PostProcessFeature
 
 	virtual void Draw(TextureInfo&) override;
 	void UpdateProceduralBokehSamples(int bladeCount, float bladeRoundness, bool force = false);
+
+	/** @brief One frame of DoF as both paths draw it (PrepareFrame). */
+	struct Frame
+	{
+		bool run = false;             // false: the image stays as it is this frame (Target Focus without a target)
+		bool postSmoothing = false;   // the two post smoothing passes run
+		bool adaptiveGather = false;  // the setting; the D3D11 path also needs its shaders ready
+		size_t gatherQuality = 0;     // 0: four rings, 1: five
+		int customShapeIndex = 0;     // the custom aperture, when constants.BokehMode is 1
+		DoFCB constants{};
+	};
+
+	/**
+	 * @brief This frame's lens, focus and bokeh: the Cinematic Camera or the settings, the focus target, the procedural sample table
+	 * brought up to date, and the constants for an a_width x a_height image. It resolves the focus target, so call it once a frame.
+	 */
+	Frame PrepareFrame(float a_width, float a_height);
+
+	/** @brief a_frame's gather sample table: the custom shape's or the procedural one, as the D3D11 buffers hold them. */
+	const std::array<BokehResources::ShapeSample, BokehResources::GATHER_SAMPLE_COUNT>& BokehSamples(const Frame& a_frame) const;
+
+	// The procedural table as last built: the ORG path reads it from the CPU.
+	std::array<BokehResources::ShapeSample, BokehResources::GATHER_SAMPLE_COUNT> proceduralSamples{};
 
 	float debugDistance = 0.0f;
 	float debugFocusPlane = 0.0f;

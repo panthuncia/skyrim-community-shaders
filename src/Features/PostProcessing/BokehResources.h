@@ -32,6 +32,8 @@ struct BokehResources
 	std::array<eastl::unique_ptr<StructuredBuffer>, MAX_SHAPES> shapeSampleBuffers = {};
 	std::array<float, MAX_SHAPES> shapeSampleRadiusScales = {};
 	std::array<float, MAX_SHAPES> shapeSampleMaxRadii = {};
+	// The tables as uploaded, for the ORG path, which reads them from the CPU (ORG/ORGDoF.cpp).
+	std::array<std::array<ShapeSample, GATHER_SAMPLE_COUNT>, MAX_SHAPES> shapeSamples = {};
 	int numLoadedShapes = NUM_BUILTIN_SHAPES;
 
 	const std::filesystem::path bokehShapesPath = "Data\\Shaders\\PostProcessing\\DoF\\bokehshapes";
@@ -54,6 +56,8 @@ struct BokehResources
 	ID3D11ShaderResourceView* GetShapeSampleSRV(int shapeIndex) const;
 	float GetShapeSampleRadiusScale(int shapeIndex) const;
 	float GetShapeSampleMaxRadius(int shapeIndex) const;
+	/** @brief The shape's gather sample table as GetShapeSampleSRV's buffer holds it; null when the shape has none. */
+	const std::array<ShapeSample, GATHER_SAMPLE_COUNT>* GetShapeSamples(int shapeIndex) const;
 	int GetTotalShapeCount() const { return numLoadedShapes; }
 
 	const char* GetShapeName(int index) const;

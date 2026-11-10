@@ -302,6 +302,7 @@ void DoF::UpdateProceduralBokehSamples(int bladeCount, float bladeRoundness, boo
 	}
 
 	proceduralBokehSamples->Update(samples.data(), sizeof(samples));
+	proceduralSamples = samples;
 	const float analyticMaxRadius = std::lerp(circumRadius, 1.0f, roundness) * areaScale;
 	proceduralBokehMaxRadius = std::max(maxRadius, analyticMaxRadius);
 	cachedBokehBladeCount = bladeCount;
@@ -540,18 +541,10 @@ void DoF::CompileComputeShaders()
 // TDM lookup) lives in CinematicCamera::FocusResolver, shared with the
 // Cinematic Camera focus modes. See CinematicCamera.cpp.
 
-void DoF::Draw(TextureInfo& inout_tex)
+DoF::Frame DoF::PrepareFrame(float a_width, float a_height)
 {
+	Frame frame;
 	Settings renderSettings = settings;
-	auto state = globals::state;
-	auto context = globals::d3d::context;
-	auto renderer = globals::game::renderer;
-	auto* depthSRV = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV;
-	if (!depthSRV) {
-		return;
-	}
-
-	float2 res = { (float)texOutput->desc.Width, (float)texOutput->desc.Height };
 	float focusLen = renderSettings.FocalLength;
 	float fNumber = renderSettings.FNumber;
 	float sensorWidthMM = renderSettings.SensorWidthMM;
@@ -610,7 +603,7 @@ void DoF::Draw(TextureInfo& inout_tex)
 
 		RE::TESObjectREFR* target = resolver->FindTarget(renderSettings.consoleSelection, currentRef);
 		if (!target)
-			return;
+			return frame;
 
 		targetFocusDistanceGame = resolver->GetDistanceToReference(target);
 		debugDistance = targetFocusDistanceGame;
@@ -636,49 +629,36 @@ void DoF::Draw(TextureInfo& inout_tex)
 		debugFocusPlane = manualFocus;
 	}
 
-	// No-op the whole frame until the core kernels are ready -- a partial
-	// sequential pipeline would write garbage into the scene target.
-	const bool needPostSmoothing = renderSettings.PostBlurSmoothing >= 0.01f;
-	const bool coreReady = AllShadersReady({ &UpdateFocusCS, &CalculateCoCCS, &CoCTileFlattenCS,
-		&CoCTileDilateHCS, &CoCTileDilateVCS, &DownsampleLegacyCS, &FarBlurCS, &NearBlurCS,
-		&GatherPostfilterCS, &CombinerCS });
-	if (!coreReady || (needPostSmoothing && !AllShadersReady({ &PostSmoothing1CS, &PostSmoothing2AndFocusingCS })))
-		return;
-	state->BeginPerfEvent("Depth of Field");
+	frame.postSmoothing = renderSettings.PostBlurSmoothing >= 0.01f;
+	frame.adaptiveGather = renderSettings.UseAdaptiveGather;
+	frame.gatherQuality = (size_t)std::clamp(renderSettings.GatherQuality, 0, 1);
 
-	const uint halfResX = std::max(1u, (uint)res.x / 2);
-	const uint halfResY = std::max(1u, (uint)res.y / 2);
+	const uint halfResX = std::max(1u, (uint)a_width / 2);
+	const uint halfResY = std::max(1u, (uint)a_height / 2);
 	const uint tileDimX = std::max(1u, (halfResX + 7) / 8);
 	const uint tileDimY = std::max(1u, (halfResY + 7) / 8);
-	const size_t gatherQuality = (size_t)std::clamp(renderSettings.GatherQuality, 0, 1);
 	UpdateProceduralBokehSamples(bladeCount, bladeRoundness);
 
 	const int requestedBokehMode = std::clamp(renderSettings.BokehMode, 0, 1);
 	int customShapeIndex = 0;
-	ID3D11ShaderResourceView* customShapeSRV = nullptr;
-	ID3D11ShaderResourceView* customShapeSampleSRV = nullptr;
+	bool customShapeLoaded = false;
 	if (owner && requestedBokehMode == 1) {
 		customShapeIndex = std::clamp(renderSettings.HighlightShape - 1, 0, std::max(owner->bokehResources.GetTotalShapeCount() - 1, 0));
-		customShapeSRV = owner->bokehResources.GetShapeSRV(customShapeIndex);
-		customShapeSampleSRV = owner->bokehResources.GetShapeSampleSRV(customShapeIndex);
+		customShapeLoaded = owner->bokehResources.GetShapeSRV(customShapeIndex) && owner->bokehResources.GetShapeSampleSRV(customShapeIndex);
 	}
-	const uint bokehMode = requestedBokehMode == 1 && customShapeSRV && customShapeSampleSRV ? 1u : 0u;
-	ID3D11ShaderResourceView* bokehSampleSRV = bokehMode == 1 ? customShapeSampleSRV : proceduralBokehSamples->SRV();
+	const uint bokehMode = requestedBokehMode == 1 && customShapeLoaded ? 1u : 0u;
+	frame.customShapeIndex = customShapeIndex;
 	const float customShapeRadiusScale = bokehMode == 1 ? owner->bokehResources.GetShapeSampleRadiusScale(customShapeIndex) : 1.0f;
 	const float bokehMaxRadius = bokehMode == 1 ? owner->bokehResources.GetShapeSampleMaxRadius(customShapeIndex) : proceduralBokehMaxRadius;
-	const bool adaptiveGatherReady = bokehSampleSRV &&
-	                                 AllShadersReady({ &DownsampleCS, &ReduceColorCoCCS, &ReduceColorCS,
-										 &FarGatherCS[gatherQuality], &NearGatherCS[gatherQuality] });
-	const bool useAdaptiveGather = renderSettings.UseAdaptiveGather && adaptiveGatherReady;
 
 	// Tile propagation carries the near disc reach itself, so the same low-resolution dilation used
 	// for group culling now replaces the two old half-resolution Gaussian passes.
-	const float wantNearRadiusPx = std::max(renderSettings.MaxNearCoCRadius, 1e-4f) * res.x * std::max(nearBlur, 0.0f) * bokehMaxRadius;
+	const float wantNearRadiusPx = std::max(renderSettings.MaxNearCoCRadius, 1e-4f) * a_width * std::max(nearBlur, 0.0f) * bokehMaxRadius;
 	constexpr float conservativeTileStepPx = 16.0f * 0.70710678f;
 	const uint tileDilateRadius = wantNearRadiusPx > 0.0f ? std::min(48u, (uint)std::ceil(wantNearRadiusPx / conservativeTileStepPx) + 1u) : 0u;
 	const float nearMaxReachPx = tileDilateRadius > 0u ? std::min(wantNearRadiusPx, (float)(tileDilateRadius - 1u) * conservativeTileStepPx) : 0.0f;
 
-	DoFCB dofData = {
+	frame.constants = {
 		.TransitionSpeed = transitionSpeed,
 		.FocusCoord = focusCoord,
 		.ManualFocusPlane = manualFocus,
@@ -711,7 +691,58 @@ void DoF::Draw(TextureInfo& inout_tex)
 		.ProceduralBokehAreaScale = proceduralBokehAreaScale,
 		.SensorWidthMM = std::max(sensorWidthMM, 1.0f)
 	};
-	dofCB->Update(dofData);
+	frame.run = true;
+	return frame;
+}
+
+const std::array<BokehResources::ShapeSample, BokehResources::GATHER_SAMPLE_COUNT>& DoF::BokehSamples(const Frame& a_frame) const
+{
+	if (a_frame.constants.BokehMode == 1 && owner) {
+		if (const auto* samples = owner->bokehResources.GetShapeSamples(a_frame.customShapeIndex))
+			return *samples;
+	}
+	return proceduralSamples;
+}
+
+void DoF::Draw(TextureInfo& inout_tex)
+{
+	auto state = globals::state;
+	auto context = globals::d3d::context;
+	auto renderer = globals::game::renderer;
+	auto* depthSRV = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV;
+	if (!depthSRV) {
+		return;
+	}
+
+	float2 res = { (float)texOutput->desc.Width, (float)texOutput->desc.Height };
+	const Frame frame = PrepareFrame(res.x, res.y);
+	if (!frame.run)
+		return;
+
+	// No-op the whole frame until the core kernels are ready -- a partial
+	// sequential pipeline would write garbage into the scene target.
+	const bool needPostSmoothing = frame.postSmoothing;
+	const bool coreReady = AllShadersReady({ &UpdateFocusCS, &CalculateCoCCS, &CoCTileFlattenCS,
+		&CoCTileDilateHCS, &CoCTileDilateVCS, &DownsampleLegacyCS, &FarBlurCS, &NearBlurCS,
+		&GatherPostfilterCS, &CombinerCS });
+	if (!coreReady || (needPostSmoothing && !AllShadersReady({ &PostSmoothing1CS, &PostSmoothing2AndFocusingCS })))
+		return;
+	state->BeginPerfEvent("Depth of Field");
+
+	const uint halfResX = frame.constants.HalfResDimX;
+	const uint halfResY = frame.constants.HalfResDimY;
+	const uint tileDimX = frame.constants.CoCTileDimX;
+	const uint tileDimY = frame.constants.CoCTileDimY;
+	const size_t gatherQuality = frame.gatherQuality;
+	const uint bokehMode = frame.constants.BokehMode;
+	ID3D11ShaderResourceView* customShapeSRV = bokehMode == 1 ? owner->bokehResources.GetShapeSRV(frame.customShapeIndex) : nullptr;
+	ID3D11ShaderResourceView* bokehSampleSRV = bokehMode == 1 ? owner->bokehResources.GetShapeSampleSRV(frame.customShapeIndex) : proceduralBokehSamples->SRV();
+	const bool adaptiveGatherReady = bokehSampleSRV &&
+	                                 AllShadersReady({ &DownsampleCS, &ReduceColorCoCCS, &ReduceColorCS,
+										 &FarGatherCS[gatherQuality], &NearGatherCS[gatherQuality] });
+	const bool useAdaptiveGather = frame.adaptiveGather && adaptiveGatherReady;
+
+	dofCB->Update(frame.constants);
 
 	std::array<ID3D11ShaderResourceView*, 20> srvs = {};
 	std::array<ID3D11UnorderedAccessView*, 4> uavs = {};
