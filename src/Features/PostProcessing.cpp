@@ -13,6 +13,7 @@
 #include "State.h"
 #include "Util.h"
 
+#include "PostProcessing/ORGPostProcessing.h"
 #include "PostProcessing/RasterPass.h"
 
 #include "Features/HDRDisplay.h"
@@ -495,6 +496,33 @@ void PostProcessing::SyncPipelineResources()
 	}
 }
 
+void PostProcessing::UpdatePipeline()
+{
+	for (auto& pipe : pipeline) {
+		if (pipe && pipe->IsAutoEnabled())
+			pipe->UpdateAutoEnabled();
+	}
+	SyncPipelineResources();
+}
+
+std::vector<PostProcessing::FeaturePipelineIndex> PostProcessing::ChainOrder() const
+{
+	std::vector<FeaturePipelineIndex> order;
+	if (bypass)
+		return order;
+	const bool inMainLoadingMenu = globals::state->IsMainOrLoadingMenuOpen();
+	const bool upscalingLoaded = globals::features::upscaling.loaded;
+	for (const bool afterGrading : { false, true }) {
+		for (size_t index = 0; index < pipeline.size(); ++index) {
+			const auto& pipe = pipeline[index];
+			if (pipe && pipe->IsActive() && pipe->DrawAfterColorGrading() == afterGrading && !(inMainLoadingMenu && pipe->DisableInMainLoadingMenu()) &&
+				(!pipe->DrawBeforeUpscaling() || !upscalingLoaded))
+				order.push_back(static_cast<FeaturePipelineIndex>(index));
+		}
+	}
+	return order;
+}
+
 void PostProcessing::ApplyDefaultEnabledStates()
 {
 	using enum FeaturePipelineIndex;
@@ -602,6 +630,8 @@ void PostProcessing::SetupResources()
 
 	ProcessSettings(pendingSettings);
 	pendingSettings = {};
+
+	ORGPostProcessing::Get().Setup();
 }
 
 void PostProcessing::Reset()
@@ -685,6 +715,19 @@ void PostProcessing::BeginLinearProcessing(PostProcessFeature::TextureInfo& text
 	texture = { texInput->resource.get(), texInput->srv.get() };
 }
 
+PostProcessing::CopyCB PostProcessing::OutputConversion(bool a_colorGraded) const
+{
+	auto& ll = globals::features::linearLighting;
+	const bool sceneOutput = globals::state->GetTonemapOwner() != State::TonemapOwner::kPostProcessing;
+	const auto sceneGamut = ll.IsACEScgActive() ? Gamut::ACEScg : Gamut::Rec709;
+	const auto displayGamut = globals::features::hdrDisplay.loaded && globals::features::hdrDisplay.settings.enableHDR ? Gamut::Rec2020 : Gamut::Rec709;
+	return {
+		.inputGamut = a_colorGraded ? displayGamut : sceneGamut,
+		.outputGamut = sceneOutput ? sceneGamut : displayGamut,
+		.gamma = sceneOutput && !ll.IsLinearLightingActive() ? Util::ColorSpace::GAME_GAMMA_INV : 1.f
+	};
+}
+
 void PostProcessing::DrawFeature(PostProcessFeature& feature, PostProcessFeature::TextureInfo& lastTexColor)
 {
 	if (feature.WritesToMainTexture()) {
@@ -714,12 +757,7 @@ void PostProcessing::DrawBeforeUpscaling()
 
 	state->BeginPerfEvent("[Post Processing] Pre-Upscale");
 
-	// update auto-enabled features
-	for (auto& pipe : pipeline) {
-		if (pipe && pipe->IsAutoEnabled())
-			pipe->UpdateAutoEnabled();
-	}
-	SyncPipelineResources();
+	UpdatePipeline();
 
 	// go through each fx
 	for (auto& pipe : pipeline) {
@@ -741,8 +779,25 @@ void PostProcessing::DrawBeforeUpscaling()
 	state->EndPerfEvent();
 }
 
+void PostProcessing::BeforeTonemapAnchor(RE::RENDER_TARGET a_input)
+{
+	ORGPostProcessing::Get().BeforeTonemap(ReadsMainCopy(a_input));
+}
+
+bool PostProcessing::ReadsMainCopy(RE::RENDER_TARGET a_input) const
+{
+	// The tonemap hook hands us the pass input directly, so no need to probe the bound RTV.
+	// Refraction still routes through kMAIN_COPY without that being reflected in a_input.
+	return isrefraction || a_input == RE::RENDER_TARGETS::kMAIN_COPY;
+}
+
 void PostProcessing::PreProcess(RE::RENDER_TARGET a_input)
 {
+	// The render graph ran the chain in the Tonemap anchor's epoch.
+	if (ORGPostProcessing::Get().Ran()) {
+		isrefraction = false;
+		return;
+	}
 	if (globals::features::linearLighting.IsLinearLightingActive() &&
 		(globals::state->permutationData.RenderToUI || globals::state->IsMainOrLoadingMenuOpen()))
 		return;
@@ -753,64 +808,37 @@ void PostProcessing::PreProcess(RE::RENDER_TARGET a_input)
 
 	auto renderer = globals::game::renderer;
 
-	auto& upscaling = globals::features::upscaling;
-
 	// This runs before the HDR chain, so ISRefraction still has kMAIN_COPY bound as a render
 	// target. D3D11 silently nulls any SRV of a resource that is also an output, which would
 	// make the pipeline sample black instead of the scene.
 	globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);
 	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 
-	bool inMainLoadingMenu = globals::state->IsMainOrLoadingMenuOpen();
-
 	auto& gameTexMainRT = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 	auto& gameTexMainCopyRT = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
 
-	// The tonemap hook hands us the pass input directly, so no need to probe the bound RTV.
-	// Refraction still routes through kMAIN_COPY without that being reflected in a_input.
-	bool useMainCopy = isrefraction || a_input == RE::RENDER_TARGETS::kMAIN_COPY;
+	bool useMainCopy = ReadsMainCopy(a_input);
 
 	auto gameTexMain = useMainCopy ? gameTexMainCopyRT : gameTexMainRT;
 	PostProcessFeature::TextureInfo lastTexColor = { gameTexMain.texture, gameTexMain.SRV };
 	BeginLinearProcessing(lastTexColor);
 	auto gameTexMainAlt = useMainCopy ? gameTexMainRT : gameTexMainCopyRT;
 
-	// update auto-enabled features
-	for (auto& pipe : pipeline) {
-		if (pipe && pipe->IsAutoEnabled())
-			pipe->UpdateAutoEnabled();
-	}
-	SyncPipelineResources();
+	UpdatePipeline();
 
 	// go through each fx
 	bool colorGraded = false;
-	for (auto& pipe : pipeline) {
-		if (pipe && !bypass && pipe->IsActive() && !pipe->DrawAfterColorGrading() && !(inMainLoadingMenu && pipe->DisableInMainLoadingMenu()) && (!pipe->DrawBeforeUpscaling() || !upscaling.loaded)) {
-			auto* input = lastTexColor.tex;
-			DrawFeature(*pipe, lastTexColor);
-			if (pipe == pipeline[static_cast<size_t>(FeaturePipelineIndex::ColorGrading)])
-				colorGraded = lastTexColor.tex != input;
-		}
-	}
-
-	for (auto& pipe : pipeline) {
-		if (!bypass && pipe && pipe->IsActive() && pipe->DrawAfterColorGrading() && !(inMainLoadingMenu && pipe->DisableInMainLoadingMenu()) && (!pipe->DrawBeforeUpscaling() || !upscaling.loaded)) {
-			DrawFeature(*pipe, lastTexColor);
-		}
+	for (const auto index : ChainOrder()) {
+		auto* input = lastTexColor.tex;
+		DrawFeature(*pipeline[static_cast<size_t>(index)], lastTexColor);
+		if (index == FeaturePipelineIndex::ColorGrading)
+			colorGraded = lastTexColor.tex != input;
 	}
 
 	Texture2D* mainConvertTex = texCopyMain.get();
 	Texture2D* mainCopyConvertTex = texCopyMainCopy ? texCopyMainCopy.get() : texCopyMain.get();
 
-	const bool sceneOutput = globals::state->GetTonemapOwner() != State::TonemapOwner::kPostProcessing;
-	const auto sceneGamut = ll.IsACEScgActive() ? Gamut::ACEScg : Gamut::Rec709;
-	const auto displayGamut = globals::features::hdrDisplay.loaded && globals::features::hdrDisplay.settings.enableHDR ? Gamut::Rec2020 : Gamut::Rec709;
-	const CopyCB conversion{
-		.inputGamut = colorGraded ? displayGamut : sceneGamut,
-		.outputGamut = sceneOutput ? sceneGamut : displayGamut,
-		.gamma = sceneOutput && !linear ? Util::ColorSpace::GAME_GAMMA_INV : 1.f
-	};
-	CopyToRenderTarget(gameTexMain, useMainCopy ? mainCopyConvertTex : mainConvertTex, lastTexColor.tex, lastTexColor.srv, conversion);
+	CopyToRenderTarget(gameTexMain, useMainCopy ? mainCopyConvertTex : mainConvertTex, lastTexColor.tex, lastTexColor.srv, OutputConversion(colorGraded));
 	CopyToRenderTarget(gameTexMainAlt, useMainCopy ? mainConvertTex : mainCopyConvertTex, gameTexMain.texture, gameTexMain.SRV, CopyCB{});
 
 	isrefraction = false;
@@ -927,4 +955,6 @@ void PostProcessing::PostPostLoad()
 	stl::write_vfunc<0x6, VanillaDoF_IsActive>(RE::VTABLE_ImageSpaceEffectDepthOfField[0]);
 	stl::write_vfunc<0x1, VanillaBlur_Render>(RE::VTABLE_ImageSpaceEffectBlur[0]);
 	stl::write_vfunc<0x2, BSImagespaceShaderRefraction_SetupTechnique>(RE::VTABLE_BSImagespaceShaderRefraction[0]);
+
+	ORGPostProcessing::Reserve();
 }

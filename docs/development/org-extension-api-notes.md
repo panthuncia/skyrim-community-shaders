@@ -630,6 +630,7 @@ Keys used so far:
 - **Who:** CS's HDRDisplay (`CS_ORG_HDR_DISPLAY`, the copy at HDROutput); plugins that `CopyResource` into `GetBuffer(0)`.
 - **Where it fits:** today the client publishes the area in an atomic at `active`, and the passes put it in their `Revision`
 - **Where it fits:** `RecordingContext::Index` is the only way to learn a declared view's heap index, and only at record
+- **Where it fits:** a client at the Tonemap anchor that registers again (`FrameAnchors::Register` with the same id) when
   unless the graph loses it.
 - **Who:** CS's TruePBR glints noise (`src/TruePBR/ORGGlintsNoise.cpp`, `CS_ORG_GLINTS`); any plugin with a generated LUT.
 - **Where it fits:** today the client registers a fill pass at the earliest anchor its readers follow (EarlyPrepass), is
@@ -743,3 +744,44 @@ Keys used so far:
 - **Where it fits:** `GraphPasses::MakeUavClear` needs a UAV. The FX runtime records a render pass that only clears
   (`LoadOp::Clear`, no draw). A shared `MakeRenderTargetClear` beside `MakeUavClear` would serve every port.
 - **Found by:** P3 W5, ORG FX runtime execution (2026-11-09).
+### A chain of optional effects built from settings
+
+- **Need:** run a sequence of effects, each one optional and each reading the previous one's image, whose members, order
+  and passes follow user settings (Post Processing's 13 sub-effects at the tonemap), with the intermediate images aliased.
+- **Who:** CS's Post Processing (`ORGPostEffect.h`); post-processing plugins with their own effect lists.
+  a key of the chain's shape changes: the effects in it, the targets' size and formats, program variants. Each effect adds
+  its passes through a builder that hands it the current image, makes its outputs as transient `GraphResources` (which the
+  graph aliases, so no ping-pong is written by hand) and reserves latch regions. A plugin API would export that builder, so
+  a plugin's effect can join the chain at a named position instead of registering a client of its own.
+- **Found by:** P3 W3, Post Processing (2026-11-09).
+
+### Keeping a client's passes out of an epoch another client runs
+
+- **Need:** a client whose passes write engine targets must record nothing in a frame it is inactive, even when another
+  client of the anchor runs the epoch (Post Processing's output pass writes kMAIN and kMAIN_COPY; run on a stale latch it
+  would overwrite the frame the D3D11 fallback then reads).
+- **Who:** CS's Post Processing chain; the ORG FX runtime will share the Tonemap anchor with it.
+- **Where it fits:** Post Processing gates every pass on one flag the hook sets before the anchor runs. `Prepare` returns
+  no frame data while it is off, and `Revision` follows the value the pass was prepared with (the copy pass of
+  `ORGCloudShadows.cpp`), so a kept recording is prepared again when the flag changes. A per-client skip in
+  `FrameAnchors` (see "Skipping an inactive client's passes") would replace this.
+- **Found by:** P3 W3, Post Processing (2026-11-09).
+
+### An anchor input that is one of two targets
+
+- **Need:** read the image an engine pass hands to the anchor when it is one of several targets, chosen per frame (the
+  tonemap's input is kMAIN or kMAIN_COPY, depending on refraction and the ImageSpace chain).
+- **Who:** CS's Post Processing; any plugin pass at the Tonemap anchor.
+- **Where it fits:** the pass declares both targets and a latch value picks one (`copy.ps.hlsl`'s `Copy.source` under
+  ORG), so the recording does not change with the choice. An API would resolve `FrameAnchors::Point::input` to the graph
+  resource itself, with a per-execution binding.
+- **Found by:** P3 W3, Post Processing (2026-11-09).
+
+### 16-bit types in shared shader headers
+
+- **Need:** compile shader headers written for SM 6.2+ with 16-bit types (RenoDX's `math/sign.hlsl` declares `uint16_t`
+  whenever the target is 6.2 or later) on the ORG path, which DXC runs without `-enable-16bit-types`.
+- **Who:** CS's Color Grading (RenoDX tonemappers); plugins that bring RenoDX or other SM6 shader libraries.
+- **Where it fits:** CS guards those sections with `__HLSL_ENABLE_16_BIT` as well. A plugin API's program build would
+  need a per-program option for 16-bit types (which changes `half` everywhere in that program) rather than a global flag.
+- **Found by:** P3 W3, Post Processing (2026-11-09).

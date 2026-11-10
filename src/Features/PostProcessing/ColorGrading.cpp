@@ -975,9 +975,8 @@ void ColorGrading::ReloadActiveShaders()
 
 void ColorGrading::CompileShaders()
 {
-	const auto& tonemappers = TonemapperInfo::GetTonemappers();
-
-	auto tonemapFuncName = settings.useOpenDrt ? "OpenDRTTransform" : tonemappers[tonemapperType].func_name.data();
+	// The function names are literals, so data() is null-terminated.
+	auto tonemapFuncName = TonemapFunctionName().data();
 
 	const std::vector<ComputeShaderCompileInfo> shaderInfos = {
 		{ &lutgenCS, "colorgrading.hlsl", { { "TONEMAP_FUNC", tonemapFuncName } }, "CSLUTGen" },
@@ -995,22 +994,8 @@ void ColorGrading::CompileShaders()
 	curveNeedsUpdate = true;  // shader changed, curve must update
 }
 
-void ColorGrading::Draw(TextureInfo& inout_tex)
+ColorGrading::ColorCB ColorGrading::BuildConstants()
 {
-	auto context = globals::d3d::context;
-	auto state = globals::state;
-
-	if (recompileFlag)
-		ReloadActiveShaders();
-
-	if (!AllShadersReady({ &colorgradingPS }) || !AllShadersReady({ &lutgenCS }))
-		return;
-	if (!owner || !owner->GetFullscreenVS())
-		return;
-
-	globals::profiler->BeginPass("PostProcessing::ColorGrading");
-	state->BeginPerfEvent("Color Grading and Tonemapping");
-
 	auto& pp = globals::features::postProcessing;
 
 	RE::ImageSpaceData imageSpaceData = pp.imageSpaceManager->gameISData;
@@ -1033,7 +1018,7 @@ void ColorGrading::Draw(TextureInfo& inout_tex)
 		storeMatrix(getWhiteAdaptedRGBMatrix("XYZ", spaces[wsIdx]), xyzToWorkingMatrix);
 	}
 
-	ColorCB colorCBData = {
+	return {
 		.asccdl = { settings.slope, settings.power, settings.cdlOffset },
 		.liftgammagain = { settings.lift, settings.gamma, settings.gain },
 		.inOutGamma = settings.inOutGamma,
@@ -1077,6 +1062,31 @@ void ColorGrading::Draw(TextureInfo& inout_tex)
 		}(),
 		.odrtConfig = settings.odrtConfig,
 	};
+}
+
+std::string_view ColorGrading::TonemapFunctionName() const
+{
+	const auto& tonemappers = TonemapperInfo::GetTonemappers();
+	return settings.useOpenDrt ? "OpenDRTTransform"sv : tonemappers[tonemapperType].func_name;
+}
+
+void ColorGrading::Draw(TextureInfo& inout_tex)
+{
+	auto context = globals::d3d::context;
+	auto state = globals::state;
+
+	if (recompileFlag)
+		ReloadActiveShaders();
+
+	if (!AllShadersReady({ &colorgradingPS }) || !AllShadersReady({ &lutgenCS }))
+		return;
+	if (!owner || !owner->GetFullscreenVS())
+		return;
+
+	globals::profiler->BeginPass("PostProcessing::ColorGrading");
+	state->BeginPerfEvent("Color Grading and Tonemapping");
+
+	const ColorCB colorCBData = BuildConstants();
 	colorCB->Update(colorCBData);
 
 	// Check if curve needs update (CB changed = settings changed)

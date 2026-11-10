@@ -462,6 +462,9 @@ namespace PostProcessingExtensions
 
 			// The ORG FX runtime (CS_ORG_FX=1) settles its passes for this frame before the anchor runs them.
 			ORGFxRuntime::Get().Prepare(a3, a4);
+			// Before the anchor runs: Post Processing's chain may run in its epoch (ORGPostProcessing).
+			if (globals::features::postProcessing.loaded)
+				globals::features::postProcessing.BeforeTonemapAnchor(input);
 			FrameAnchors::Run({ .anchor = FrameAnchors::Anchor::Tonemap, .input = static_cast<std::int32_t>(a3), .output = static_cast<std::int32_t>(a4) });
 
 			// Effects11 replaces the pass outright; when it does, the vanilla call is skipped

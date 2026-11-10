@@ -113,6 +113,15 @@ void Border::CompileComputeShaders()
 	CompileComputeShadersAsync(L"Data\\Shaders\\PostProcessing\\Border", shaderInfos);
 }
 
+Border::BorderCB Border::Constants(float2 a_dim) const
+{
+	return {
+		.BorderColor = float4(settings.BorderColor.x, settings.BorderColor.y, settings.BorderColor.z, settings.DepthThreshold),
+		.Scale = settings.Scale,
+		.BufferDim = float4(a_dim.x, a_dim.y, 1.f / a_dim.x, 1.f / a_dim.y)
+	};
+}
+
 void Border::ClearMotionVectorsForFrameGen()
 {
 	if (!borderCB || !AllShadersReady({ &borderClearMVCS }))
@@ -128,12 +137,7 @@ void Border::ClearMotionVectorsForFrameGen()
 	float2 screenSize{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
 	auto dynResDim = Util::ConvertToDynamic(screenSize, true);
 
-	BorderCB data = {
-		.BorderColor = float4(settings.BorderColor.x, settings.BorderColor.y, settings.BorderColor.z, settings.DepthThreshold),
-		.Scale = settings.Scale,
-		.BufferDim = float4(dynResDim.x, dynResDim.y, 1.f / dynResDim.x, 1.f / dynResDim.y)
-	};
-	borderCB->Update(data);
+	borderCB->Update(Constants(dynResDim));
 
 	auto* depthSRV = Util::GetCurrentSceneDepthSRV(false);
 	if (!depthSRV) {
@@ -172,12 +176,7 @@ void Border::Draw(TextureInfo& inout_tex)
 	float2 res = { (float)texOutput->desc.Width, (float)texOutput->desc.Height };
 	res = Util::ConvertToDynamic(res);
 
-	BorderCB data = {
-		.BorderColor = float4(settings.BorderColor.x, settings.BorderColor.y, settings.BorderColor.z, settings.DepthThreshold),
-		.Scale = settings.Scale,
-		.BufferDim = float4(res.x, res.y, 1.f / res.x, 1.f / res.y)
-	};
-	borderCB->Update(data);
+	borderCB->Update(Constants(res));
 
 	auto* depthSRV = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV;
 	if (!depthSRV) {

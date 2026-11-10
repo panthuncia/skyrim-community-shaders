@@ -43,6 +43,9 @@ struct Border : public PostProcessFeature
 
 	virtual void Draw(TextureInfo&) override;
 
+	/** @brief The constants for a dispatch over a_dim pixels. Shared by the D3D11 passes and the ORG chain. */
+	BorderCB Constants(float2 a_dim) const;
+
 	/// Clear motion vectors in border areas before frame generation copies them.
 	/// Must be called before frame generation reads the motion vectors, to prevent FrameGen artifacts.
 	void ClearMotionVectorsForFrameGen();
