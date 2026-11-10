@@ -770,6 +770,8 @@ void HDRDisplay::SetupResources()
 	UpdateHDRData();
 
 	GetHDROutputCS();
+	// CS_ORG_HDR_DISPLAY: ApplyHDR composes on the render graph from now on, or stays on D3D11.
+	ORGHDRDisplay::Get().Setup();
 
 	UpgradeLDRRenderTargets();
 }
