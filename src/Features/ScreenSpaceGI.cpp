@@ -878,7 +878,7 @@ void ScreenSpaceGI::DrawSSGI()
 		TracyD3D11Zone(globals::state->tracyCtx, "SSGI - Radiance Disocc");
 
 		resetViews();
-		srvs.at(0) = rts[deferred->forwardRenderTargets[0]].SRV;
+		srvs.at(0) = Unwrap(rts[deferred->forwardRenderTargets[0]].SRV);
 		srvs.at(1) = texWorkingDepth->srv.get();
 		srvs.at(2) = Unwrap(rts[NORMALROUGHNESS].SRV);
 		srvs.at(3) = texPrevGeo->srv.get();
