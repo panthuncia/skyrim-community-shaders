@@ -34,6 +34,9 @@ bool ORGSkylighting::Requested()
 #	include <Resources/ExternalTextureResource.h>
 
 #	include <array>
+#	include <atomic>
+#	include <cmath>
+#	include <numbers>
 #	include <optional>
 #	include <type_traits>
 
@@ -155,12 +158,88 @@ namespace
 		std::shared_ptr<org::ExternalTextureResource> occlusion, shadowCascades, esramShadows;
 	};
 
-	/** @brief What the render thread hands the anchor's commit: this frame's values, and how many idle frames were latched since. */
+	/**
+	 * @brief What the render thread hands the anchor's commit: this frame's values, how many idle frames were latched since, and a queued
+	 * reset of the volumes (ResetSkylighting).
+	 */
 	struct ClientState
 	{
 		std::optional<Frame> pending;
 		std::uint32_t idleCommits = ~0u;
 		bool failed = false;
+		// Render thread: a reset waits for a build with the reset pass, then for that pass to be prepared; the next build drops it.
+		bool resetQueued = false;
+		std::atomic<bool> resetPrepared{ false };  // set where the reset pass prepares (possibly the host's thread)
+	};
+
+	struct ResetBindings
+	{
+		std::array<org::ResourceBindingToken, kVolumes> resources;
+		std::array<org::DeclaredViewToken, kVolumes> shaderVisible, cpuVisible;
+	};
+
+	struct ResetFrame
+	{};
+
+	/** @brief The volumes cleared to their reset values: in builds after a reset only (ClientState::resetQueued). */
+	class ResetVolumesPass final : public org::TypedRenderGraphPass<ResetVolumesPass, ResetFrame, ResetBindings>
+	{
+	public:
+		ResetVolumesPass(const std::array<std::shared_ptr<org::Resource>, kVolumes>& a_volumes, std::shared_ptr<ClientState> a_state) :
+			volumes(a_volumes), state(std::move(a_state)) {}
+
+		ResetBindings Declare(org::PassBuilder& a_builder)
+		{
+			a_builder.PreferQueue(org::QueueKind::Graphics);
+			ResetBindings bindings{};
+			for (std::size_t i = 0; i < kVolumes; ++i) {
+				const auto use = a_builder.UnorderedAccessClear(volumes[i]);
+				bindings.resources[i] = use.resources.front();
+				bindings.shaderVisible[i] = use.views[0];
+				bindings.cpuVisible[i] = use.views[1];
+			}
+			return bindings;
+		}
+
+		void Revision(std::vector<std::uint64_t>& a_out) const
+		{
+			for (const auto& volume : volumes)
+				a_out.push_back(reinterpret_cast<std::uintptr_t>(volume.get()));
+		}
+
+		// The reset counts as done once this pass was prepared: a build made too late for this run's epoch has not cleared anything.
+		ResetFrame Prepare(const ResetBindings&, const org::PassPrepareContext&) const
+		{
+			state->resetPrepared.store(true, std::memory_order_release);
+			return {};
+		}
+
+		static void Record(const ResetBindings& a_bindings, const ResetFrame&, org::PassRecordContext& a_recording)
+		{
+			auto& commands = a_recording.Commands();
+			const auto info = [&](ORGSkylighting::Volume a_volume) {
+				const auto i = static_cast<std::size_t>(a_volume);
+				rhi::UavClearInfo clear{};
+				clear.shaderVisible = a_recording.View(a_bindings.shaderVisible[i]);
+				clear.cpuVisible = a_recording.View(a_bindings.cpuVisible[i]);
+				clear.resource = a_recording.Resolve(a_bindings.resources[i]);
+				return clear;
+			};
+			// The values the D3D11 path's ResetSkylighting clears to: unit SH (fully unoccluded, matching Skylighting::UNIT_SH), no
+			// accumulated frames, all 32 history bits lit (a reset does not fade in from black), full visibility.
+			const float unitSH[4] = { std::sqrt(4.0f * std::numbers::pi_v<float>), 0.0f, 0.0f, 0.0f };
+			const float visible[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+			const std::uint32_t none[4] = { 0, 0, 0, 0 };
+			const std::uint32_t lit[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+			commands.ClearUavFloat(info(ORGSkylighting::Volume::ProbeArray), rhi::UavClearFloat(unitSH));
+			commands.ClearUavUint(info(ORGSkylighting::Volume::AccumFrames), rhi::UavClearUint(none));
+			commands.ClearUavUint(info(ORGSkylighting::Volume::ShadowBitmask), rhi::UavClearUint(lit));
+			commands.ClearUavFloat(info(ORGSkylighting::Volume::ShadowVisibility), rhi::UavClearFloat(visible));
+		}
+
+	private:
+		std::array<std::shared_ptr<org::Resource>, kVolumes> volumes;
+		std::shared_ptr<ClientState> state;
 	};
 
 	struct ProbeBindings
@@ -305,6 +384,19 @@ struct ORGSkylighting::Impl
 	{
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
+		// Before the update, which then reads the reset volumes.
+		client.passes.push_back({ .name = std::string(kClientId) + ".reset",
+			.anchor = FrameAnchors::Anchor::Prepass,
+			.order = -1,
+			.kind = FrameAnchors::PassKind::Compute,
+			.make = [resources = resources, state = state]() -> std::shared_ptr<org::RenderPass> {
+				if (!state->resetQueued)
+					return nullptr;
+				std::array<std::shared_ptr<org::Resource>, kVolumes> volumes;
+				for (std::size_t i = 0; i < kVolumes; ++i)
+					volumes[i] = resources->volumes[i]->Graph();
+				return std::make_shared<ResetVolumesPass>(volumes, state);
+			} });
 		client.passes.push_back({ .name = std::string(kClientId) + ".update-probes",
 			.anchor = FrameAnchors::Anchor::Prepass,
 			.kind = FrameAnchors::PassKind::Compute,
@@ -316,9 +408,14 @@ struct ORGSkylighting::Impl
 		// Each frame slot holds its own latch: after the last update, every slot is latched idle once before the client rests, so a
 		// slot submitted again by another client's epoch never replays an old update.
 		client.active = [state = state, resources = resources] {
-			return state->pending.has_value() || state->idleCommits < resources->latch->Slots();
+			return state->pending.has_value() || state->idleCommits < resources->latch->Slots() || state->resetQueued;
 		};
 		client.commit = [state = state, resources = resources](const FrameAnchors::Point&) {
+			// A reset pass was prepared: the next build leaves it out.
+			if (state->resetQueued && state->resetPrepared.exchange(false, std::memory_order_acq_rel)) {
+				state->resetQueued = false;
+				FrameAnchors::Refresh(kClientId);
+			}
 			Frame frame{};
 			if (state->pending) {
 				frame = *state->pending;
@@ -383,8 +480,8 @@ bool ORGSkylighting::Update(const Skylighting& a_feature)
 			logger::warn("[ORG] Skylighting: the probe update's program or sampler could not be made; it stays on D3D11");
 			return false;
 		}
-		// Read by D3D11 (the engine's draws, the composite, fog, DCLF) and cleared by ResetSkylighting: exported SRV and UAV.
-		constexpr GraphResources::Options volumeOptions{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV | GraphResources::Export::UAV };
+		// Read by D3D11 (the engine's draws, the composite): exported SRV. ResetSkylighting clears them on the graph (QueueReset).
+		constexpr GraphResources::Options volumeOptions{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV };
 		constexpr std::pair<DXGI_FORMAT, const char*> volumeInfo[kVolumes] = {
 			{ DXGI_FORMAT_R16G16B16A16_FLOAT, kProbeArrayName },
 			{ DXGI_FORMAT_R8_UINT, "Skylighting::AccumFramesArray" },
@@ -394,7 +491,7 @@ bool ORGSkylighting::Update(const Skylighting& a_feature)
 		for (std::size_t i = 0; i < kVolumes; ++i) {
 			auto& volume = resources->volumes[i];
 			volume = std::make_unique<GraphResources::Texture3D>(VolumeDesc(dims, volumeInfo[i].first), volumeInfo[i].second, volumeOptions);
-			if (!*volume || !volume->SRV() || !volume->UAV()) {
+			if (!*volume || !volume->SRV()) {
 				logger::warn("[ORG] Skylighting: {} could not be made and exported; the probe update stays on D3D11", volumeInfo[i].second);
 				return false;
 			}
@@ -434,9 +531,19 @@ ID3D11ShaderResourceView* ORGSkylighting::SRV(Volume a_volume) const
 	return impl && a_volume < Volume::Count ? impl->resources->volumes[static_cast<std::size_t>(a_volume)]->SRV() : nullptr;
 }
 
-ID3D11UnorderedAccessView* ORGSkylighting::UAV(Volume a_volume) const
+bool ORGSkylighting::QueueReset()
 {
-	return impl && a_volume < Volume::Count ? impl->resources->volumes[static_cast<std::size_t>(a_volume)]->UAV() : nullptr;
+	if (!IsActive())
+		return false;
+	auto& state = *impl->state;
+	if (!state.resetQueued) {
+		state.resetQueued = true;
+		state.resetPrepared.store(false, std::memory_order_release);
+		// The next build holds the reset pass.
+		FrameAnchors::Refresh(kClientId);
+		logger::info("[ORG] Skylighting: the probe volumes reset on the render graph (cs.skylighting.reset at the next Prepass)");
+	}
+	return true;
 }
 
 #else  // !CS_HAS_RENDER_GRAPH
@@ -456,6 +563,6 @@ void ORGSkylighting::Reserve() {}
 bool ORGSkylighting::Update(const Skylighting&) { return false; }
 bool ORGSkylighting::IsActive() const { return false; }
 ID3D11ShaderResourceView* ORGSkylighting::SRV(Volume) const { return nullptr; }
-ID3D11UnorderedAccessView* ORGSkylighting::UAV(Volume) const { return nullptr; }
+bool ORGSkylighting::QueueReset() { return false; }
 
 #endif
