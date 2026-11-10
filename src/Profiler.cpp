@@ -112,8 +112,7 @@ void Profiler::Release()
 	totalTimeMs = 0.0f;
 	cpuTotalTimeMs = 0.0f;
 	cpuFrame.clear();
-	closedCpuFrame.clear();
-	cpuFrameClosed = false;
+	closedCpuFrames.clear();
 	initialized = false;
 	frameActive = false;
 	context = nullptr;
@@ -230,11 +229,8 @@ void Profiler::EndFrame()
 	frameActive = false;
 	passOpen = false;
 	if (!d3d11Ranges) {
-		// The frame's CPU times, for the next collection. Frames not collected yet add up as one.
-		for (const auto& [name, ms] : cpuFrame)
-			closedCpuFrame[name] += ms;
-		cpuFrame.clear();
-		cpuFrameClosed = true;
+		// The frame's CPU times, for the next collection: one sample per frame, never a sum of frames.
+		closedCpuFrames.push_back(std::exchange(cpuFrame, {}));
 		return;
 	}
 	if (std::exchange(frameSkipped, false))
@@ -291,22 +287,26 @@ bool Profiler::CollectFrame(FrameQueries& frame, std::unordered_map<std::string,
 
 bool Profiler::CollectCpuFrame(std::unordered_map<std::string, std::pair<float, float>>& activeTimers)
 {
-	if (!std::exchange(cpuFrameClosed, false))
+	if (closedCpuFrames.empty())
 		return false;
-	collectedFrames++;
-	for (const auto& [name, cpuMs] : closedCpuFrame) {
-		auto [it, inserted] = knownTimerIndex.try_emplace(name, knownTimers.size());
-		if (inserted) {
-			KnownTimer kt;
-			kt.name = name;
-			knownTimers.push_back(std::move(kt));
+	// Each closed frame is its own sample; the last one's times are the current values.
+	for (const auto& frame : closedCpuFrames) {
+		collectedFrames++;
+		activeTimers.clear();
+		for (const auto& [name, cpuMs] : frame) {
+			auto [it, inserted] = knownTimerIndex.try_emplace(name, knownTimers.size());
+			if (inserted) {
+				KnownTimer kt;
+				kt.name = name;
+				knownTimers.push_back(std::move(kt));
+			}
+			auto& known = knownTimers[it->second];
+			known.cpu.PushSample(cpuMs);
+			known.lastSampleFrame = collectedFrames;
+			activeTimers[name] = { 0.0f, cpuMs };
 		}
-		auto& known = knownTimers[it->second];
-		known.cpu.PushSample(cpuMs);
-		known.lastSampleFrame = collectedFrames;
-		activeTimers[name] = { 0.0f, cpuMs };
 	}
-	closedCpuFrame.clear();
+	closedCpuFrames.clear();
 	return true;
 }
 

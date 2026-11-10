@@ -517,6 +517,9 @@ struct FaceGen_CopyRenderTarget
 
 void Upscaling::PostPostLoad()
 {
+	// The frame anchors run it after every late epoch: the upscaler, frame generation or the present may follow one directly.
+	FrameAnchors::SetLateEpochHook([] { globals::features::upscaling.SeparateFromGraphEpochs(); });
+
 	bool isGOG = !GetModuleHandle(L"steam_api64.dll");
 	stl::detour_thunk<MenuManagerDrawInterfaceStartHook>(REL::RelocationID(79947, 82084));
 

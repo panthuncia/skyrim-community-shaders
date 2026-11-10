@@ -9,6 +9,7 @@
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GpuTimingSource.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/Switches.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
@@ -100,9 +101,7 @@ namespace GpuLoadPass
 
 		bool OnGraph()
 		{
-			char value[32]{};
-			return GpuTimingSource::SelectedTimers() == GpuTimingSource::Timers::Graph && GetEnvironmentVariableA("CS_GPU_LOAD", value, sizeof(value)) &&
-			       std::strtoul(value, nullptr, 10) > 0;
+			return GpuTimingSource::SelectedTimers() == GpuTimingSource::Timers::Graph && Switches::Number("CS_GPU_LOAD") > 0;
 		}
 	}
 

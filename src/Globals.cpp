@@ -267,7 +267,7 @@ namespace globals
 	void OnGameWindowClose()
 	{
 		game::quitGame = true;
-		RenderGraph::Engine::Tripwire::Report("exit");
+		RenderGraph::Engine::Tripwire::Stop();
 		if (shaderCache)
 			shaderCache->StopCompilation();
 	}

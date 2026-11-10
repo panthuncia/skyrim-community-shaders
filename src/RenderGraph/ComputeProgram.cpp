@@ -7,7 +7,9 @@
 
 #	include "RenderGraph/RenderGraphRuntime.h"
 
+#	include <Render/LatchBlock.h>
 #	include <Render/PreparedPass.h>
+#	include <Resources/Buffers/Buffer.h>
 
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
 #		include "RenderGraph/ProgramBuild.h"
@@ -106,50 +108,80 @@ void ComputeProgram::Dispatch(org::RecordingContext& a_recording, std::span<cons
 	commands.Dispatch(a_x, a_y, a_z);
 }
 
+void ComputeProgram::DispatchIndirect(org::RecordingContext& a_recording, std::span<const std::uint32_t> a_constants, rhi::ResourceHandle a_arguments,
+	std::uint64_t a_offset) const
+{
+	if (a_constants.size() > constantWords || !slot || !dispatchSignature)
+		return;
+	auto& commands = a_recording.Commands();
+	commands.BindLayout(layout->GetHandle());
+	commands.BindPipeline(Pipeline());
+	if (!a_constants.empty())
+		commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, static_cast<std::uint32_t>(a_constants.size()), a_constants.data());
+	commands.ExecuteIndirect(dispatchSignature->GetHandle(), a_arguments, a_offset, {}, 0, 1);
+}
+
+void ComputeProgram::DispatchIndirect(org::RecordingContext& a_recording, std::span<const std::uint32_t> a_constants, const org::LatchBlock& a_latch,
+	std::uint32_t a_offset) const
+{
+	DispatchIndirect(a_recording, a_constants, a_latch.Resource()->GetAPIResource().GetHandle(), a_latch.Offset(a_recording.FrameSlot()) + a_offset);
+}
+
 std::shared_ptr<const ComputeProgram> ComputeProgram::Load(rhi::Device a_device, const Desc& a_desc)
 {
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+	// The defines resolved once, here: a hot reload compiles the same permutation.
+	Desc desc = a_desc;
+	if (desc.commonDefines)
+		desc.defines = RenderGraph::ProgramBuild::WithCommonDefines(a_desc.defines, L"cs_6_6");
+	desc.commonDefines = false;
 	auto* compiler = RenderGraphRuntime::Get().ShaderCompiler();
 	if (!compiler) {
-		logger::warn("[ORG] {}: no runtime shader compiler", a_desc.source);
+		logger::warn("[ORG] {}: no runtime shader compiler", desc.source);
 		return {};
 	}
 	auto& registry = *RenderGraphRuntime::PipelineRegistry();
 	// Before the source is read: a reload that starts after rebuilds it (PipelineRegistry::Register).
 	const std::uint64_t builtFor = registry.SourcesGeneration();
-	const std::filesystem::path path = RenderGraph::ProgramBuild::SourcePath(a_desc.source);
+	const std::filesystem::path path = RenderGraph::ProgramBuild::SourcePath(desc.source);
 	const auto bytes = ReadSource(path);
 	if (bytes.empty()) {
 		logger::error("[ORG] Missing shader source {}", path.string());
 		return {};
 	}
-	const std::string entry = Util::WStringToString(a_desc.entry);
-	const auto artifact = compiler->Compile(MakeRequest(a_desc, path, bytes));
+	const std::string entry = Util::WStringToString(desc.entry);
+	const auto artifact = compiler->Compile(MakeRequest(desc, path, bytes));
 	if (!artifact) {
-		logger::error("[ORG] SPIR-V build of {} ({}) failed:\n{}", a_desc.source, entry, artifact.diagnostics.substr(0, 2000));
+		logger::error("[ORG] SPIR-V build of {} ({}) failed:\n{}", desc.source, entry, artifact.diagnostics.substr(0, 2000));
 		return {};
 	}
 
 	auto program = std::make_shared<ComputeProgram>();
-	program->constantWords = a_desc.constantWords;
+	program->constantWords = desc.constantWords;
 	rhi::PushConstantRangeDesc constants{};
 	constants.visibility = rhi::ShaderStage::Compute;
-	constants.num32BitValues = a_desc.constantWords;
+	constants.num32BitValues = desc.constantWords;
 	if (a_device.CreatePipelineLayout(rhi::PipelineLayoutDesc{ .pushConstants = { &constants, 1 }, .flags = rhi::PipelineLayoutFlags::PF_None }, program->layout) !=
 		rhi::Result::Ok) {
-		logger::error("[ORG] {}: the pipeline layout could not be created", a_desc.source);
+		logger::error("[ORG] {}: the pipeline layout could not be created", desc.source);
 		return {};
 	}
-	auto pipeline = CreatePipeline(a_device, program->layout->GetHandle(), artifact.binary, entry, a_desc.source);
+	auto pipeline = CreatePipeline(a_device, program->layout->GetHandle(), artifact.binary, entry, desc.source);
 	if (!pipeline) {
-		logger::error("[ORG] {}: the compute pipeline could not be created", a_desc.source);
+		logger::error("[ORG] {}: the compute pipeline could not be created", desc.source);
+		return {};
+	}
+	rhi::IndirectArg dispatch[] = { { .kind = rhi::IndirectArgKind::Dispatch } };
+	if (a_device.CreateCommandSignature(rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatch, 1), sizeof(std::uint32_t) * 3 },
+			program->layout->GetHandle(), program->dispatchSignature) != rhi::Result::Ok) {
+		logger::error("[ORG] {}: the dispatch signature could not be created", desc.source);
 		return {};
 	}
 	// Live while an owner holds the program (the slot is its).
 	org::services::LivePipelineDesc live;
-	live.id = fmt::format("{} ({})", a_desc.source, entry);
-	live.sources = { a_desc.source };
-	live.rebuild = Rebuild(program, a_device, a_desc);
+	live.id = fmt::format("{} ({})", desc.source, entry);
+	live.sources = { desc.source };
+	live.rebuild = Rebuild(program, a_device, desc);
 	program->slot = registry.Register(std::move(live), std::make_shared<rhi::PipelinePtr>(std::move(pipeline)), HashBinary(artifact.binary), builtFor);
 	return program;
 #	else

@@ -20,6 +20,7 @@ namespace RenderGraph::Engine
 
 #	include <array>
 #	include <atomic>
+#	include <chrono>
 #	include <condition_variable>
 #	include <mutex>
 #	include <utility>
@@ -42,7 +43,13 @@ namespace RenderGraph::Engine
 			case DXGI_FORMAT_B8G8R8A8_UNORM:
 			case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
 				return rhi::Format::B8G8R8A8_UNorm;
+			case DXGI_FORMAT_R8G8B8A8_UNORM:
+			case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+				return rhi::Format::R8G8B8A8_UNorm;
 			default:
+				// The blit converts, so the frame still shows, but in a format the game did not ask for.
+				logger::warn("[ORG] Owned frame: the game's swap chain format {} has no swap chain format here; R8G8B8A8_UNORM is used",
+					static_cast<int>(a_format));
 				return rhi::Format::R8G8B8A8_UNorm;
 			}
 		}
@@ -78,6 +85,8 @@ namespace RenderGraph::Engine
 			PFN_vkCmdBlitImage vkCmdBlitImage = nullptr;
 			PFN_vkQueueSubmit2 vkQueueSubmit2 = nullptr;
 			PFN_vkWaitSemaphores vkWaitSemaphores = nullptr;
+			PFN_vkDestroySemaphore vkDestroySemaphore = nullptr;
+			PFN_vkDestroyCommandPool vkDestroyCommandPool = nullptr;
 		} fn;
 
 		std::shared_ptr<rhi::DevicePtr> device;
@@ -169,6 +178,47 @@ namespace RenderGraph::Engine
 			completionChanged.wait(lock, [&] { return completed.load(std::memory_order_acquire) == queued; });
 		}
 
+		// Drain, bounded: false when a tail did not run in time (DXVK dropped its queue at teardown).
+		bool DrainFor(std::chrono::milliseconds a_timeout)
+		{
+			std::unique_lock lock(completionMutex);
+			return completionChanged.wait_for(lock, a_timeout, [&] { return completed.load(std::memory_order_acquire) == queued; });
+		}
+
+		// Shutdown: the tails drained, the copies done on the GPU, then every Vulkan object this frame made.
+		void Destroy()
+		{
+			if (!DrainFor(std::chrono::seconds(5))) {
+				logger::warn("[ORG] Owned frame: queued presents never ran; the swap chain is left to the process exit");
+				return;
+			}
+			if (hostValue) {
+				VkSemaphoreWaitInfo wait{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+				wait.semaphoreCount = 1;
+				wait.pSemaphores = &hostSemaphore;
+				wait.pValues = &hostValue;
+				if (fn.vkWaitSemaphores(vkDevice, &wait, 1'000'000'000ull) != VK_SUCCESS) {
+					logger::warn("[ORG] Owned frame: the last present's copy did not finish; the swap chain is left to the process exit");
+					return;
+				}
+			}
+			swapchain.Reset();
+			if (pool)
+				fn.vkDestroyCommandPool(vkDevice, std::exchange(pool, VK_NULL_HANDLE), nullptr);
+			commands = {};
+			if (guestFrame)
+				fn.vkDestroySemaphore(vkDevice, std::exchange(guestFrame, VK_NULL_HANDLE), nullptr);
+			hostTimeline.Reset();
+			hostSemaphore = VK_NULL_HANDLE;
+			images.clear();
+			backBuffer = nullptr;
+			frameSource = nullptr;
+			sourceTexture = nullptr;
+			rejectedSource = nullptr;
+			device.reset();
+			logger::info("[ORG] Owned frame: the swap chain and the present's objects are destroyed");
+		}
+
 		// Drained, and every copy done on the GPU: a source image nothing tracks for DXVK can be released.
 		void WaitCopies()
 		{
@@ -235,14 +285,7 @@ namespace RenderGraph::Engine
 			GuestDevice::QueueHeldScope held;
 			auto& frame = *static_cast<Frame*>(a_user);
 			auto& self = *frame.state;
-			// CS_ORG_OWNED_SKIPTAIL=1 (diagnostic): the tail neither copies nor presents, so nothing is shown. It tells whether a stall
-			// needs the Vulkan present on DXVK's submission thread.
-			static const bool s_skip = [] {
-				char value[2] = {};
-				return GetEnvironmentVariableA("CS_ORG_OWNED_SKIPTAIL", value, sizeof(value)) && value[0] == '1';
-			}();
-			if (!s_skip)
-				self.PresentFrame(frame);
+			self.PresentFrame(frame);
 			self.completed.fetch_add(1, std::memory_order_acq_rel);
 			{
 				std::lock_guard lock(self.completionMutex);
@@ -408,6 +451,8 @@ namespace RenderGraph::Engine
 		resolved = (s->fn.vkCmdBlitImage = reinterpret_cast<PFN_vkCmdBlitImage>(GuestDevice::Get().DeviceProc("vkCmdBlitImage"))) && resolved;
 		resolved = (s->fn.vkQueueSubmit2 = reinterpret_cast<PFN_vkQueueSubmit2>(GuestDevice::Get().DeviceProc("vkQueueSubmit2"))) && resolved;
 		resolved = (s->fn.vkWaitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(GuestDevice::Get().DeviceProc("vkWaitSemaphores"))) && resolved;
+		resolved = (s->fn.vkDestroySemaphore = reinterpret_cast<PFN_vkDestroySemaphore>(GuestDevice::Get().DeviceProc("vkDestroySemaphore"))) && resolved;
+		resolved = (s->fn.vkDestroyCommandPool = reinterpret_cast<PFN_vkDestroyCommandPool>(GuestDevice::Get().DeviceProc("vkDestroyCommandPool"))) && resolved;
 		if (!resolved) {
 			logger::error("[ORG] Owned frame: the Vulkan entry points could not be resolved");
 			delete s;
@@ -454,6 +499,10 @@ namespace RenderGraph::Engine
 		}
 		if (!ok) {
 			logger::error("[ORG] Owned frame: the present's timelines or command buffers could not be created");
+			if (s->pool)
+				s->fn.vkDestroyCommandPool(s->vkDevice, s->pool, nullptr);
+			if (s->guestFrame)
+				s->fn.vkDestroySemaphore(s->vkDevice, s->guestFrame, nullptr);
 			delete s;
 			return false;
 		}
@@ -473,8 +522,10 @@ namespace RenderGraph::Engine
 		state->getResourceInfo = reinterpret_cast<PFN_dxvkGetInteropResourceInfo>(::GetProcAddress(d3d11, "dxvkGetInteropResourceInfo"));
 		const auto enqueue = reinterpret_cast<PFN_dxvkEnqueueQueueCallback>(::GetProcAddress(d3d11, "dxvkEnqueueQueueCallback"));
 		if (!state->emitExternalCommands || !state->getResourceInfo || !enqueue) {
-			logger::error("[ORG] Owned frame: this DXVK build lacks the interop exports the present needs; nothing will be shown");
-			return false;
+			// GuestDevice::Prepare checked them before making the device, so only another dxvk_d3d11.dll gets here. The game's swap
+			// chain is headless: going on would show nothing.
+			stl::report_and_fail("Community Shaders: the owned frame (CS_ORG_OWNED_FRAME=1) cannot present: the loaded dxvk_d3d11.dll lacks "
+								 "dxvkEmitExternalCommands, dxvkGetInteropResourceInfo or dxvkEnqueueQueueCallback. Turn CS_ORG_OWNED_FRAME off.");
 		}
 		state->d3dDevice = a_device;
 		state->enqueueQueueCallback = enqueue;
@@ -487,9 +538,8 @@ namespace RenderGraph::Engine
 	{
 		auto& s = *state;
 		std::lock_guard lock(s.presentMutex);
-		if (s.lost.load(std::memory_order_relaxed))
-			return DXGI_ERROR_DEVICE_REMOVED;
-		if (a_flags & DXGI_PRESENT_TEST)
+		// A lost device or a torn-down frame shows nothing more, but the guest frame still ends, and the game sees its result.
+		if (s.lost.load(std::memory_order_relaxed) || !s.enqueueQueueCallback || (a_flags & DXGI_PRESENT_TEST))
 			return a_guestPresent(a_swapChain, a_syncInterval, a_flags);
 		const bool showSource = std::exchange(s.frameSource, nullptr) != nullptr;
 
@@ -524,8 +574,12 @@ namespace RenderGraph::Engine
 		commands.signals = &signal;
 		commands.label = "CS owned frame: guest frame done";
 		if (FAILED(s.emitExternalCommands(s.d3dDevice, &commands))) {
-			logger::error("[ORG] Owned frame: the guest frame's point could not be emitted");
-			return E_FAIL;
+			// Nothing to copy behind: this frame is not shown, the guest's still ends.
+			--s.guestValue;
+			static std::atomic_flag logged;
+			if (!logged.test_and_set())
+				logger::error("[ORG] Owned frame: the guest frame's point could not be emitted; such frames are not shown");
+			return a_guestPresent(a_swapChain, a_syncInterval, a_flags);
 		}
 		const long result = a_guestPresent(a_swapChain, a_syncInterval, a_flags);
 
@@ -542,11 +596,26 @@ namespace RenderGraph::Engine
 		frame.sourceLayout = source->layout;
 		frame.sourceExtent = { source->extent.width, source->extent.height };
 		if (FAILED(s.enqueueQueueCallback(s.d3dDevice, &State::Tail, &frame))) {
-			logger::error("[ORG] Owned frame: the present could not be queued behind DXVK's stream");
-			return E_FAIL;
+			static std::atomic_flag logged;
+			if (!logged.test_and_set())
+				logger::error("[ORG] Owned frame: the present could not be queued behind DXVK's stream; such frames are not shown");
+			return result;
 		}
 		++s.queued;
 		return result;
+	}
+
+	void OwnedFrame::Shutdown()
+	{
+		if (!state)
+			return;
+		auto& s = *state;
+		std::lock_guard lock(s.presentMutex);
+		if (!s.enqueueQueueCallback && !s.swapchain)
+			return;
+		// No new frame from here (Active is false, Present only ends the guest's).
+		s.enqueueQueueCallback = nullptr;
+		s.Destroy();
 	}
 
 	bool OwnedFrame::SetFrameSource(ID3D11Texture2D* a_texture)
@@ -604,6 +673,7 @@ namespace RenderGraph::Engine
 	bool OwnedFrame::Active() { return false; }
 	bool OwnedFrame::CreateSwapchain(const DXGI_SWAP_CHAIN_DESC&) { return false; }
 	bool OwnedFrame::Initialize(IDXGISwapChain*, ID3D11Device*) { return false; }
+	void OwnedFrame::Shutdown() {}
 	long OwnedFrame::Present(IDXGISwapChain* a_swapChain, unsigned a_syncInterval, unsigned a_flags,
 		const std::function<long(IDXGISwapChain*, unsigned, unsigned)>& a_guestPresent)
 	{

@@ -1,20 +1,10 @@
 #include "ORGDeferredComposite.h"
 
-#include <cstring>
-
-namespace
-{
-	bool ReadRequested()
-	{
-		char value[8]{};
-		return GetEnvironmentVariableA("CS_ORG_COMPOSITE", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-	}
-}
+#include "RenderGraph/Switches.h"
 
 bool ORGDeferredComposite::Requested()
 {
-	static const bool requested = ReadRequested();
-	return requested;
+	return Switches::On("CS_ORG_COMPOSITE");
 }
 
 ORGDeferredComposite& ORGDeferredComposite::Get()
@@ -49,7 +39,7 @@ ORGDeferredComposite& ORGDeferredComposite::Get()
 #	include <Resources/ExternalTextureResource.h>
 
 #	include <atomic>
-#	include <deque>
+#	include <cstring>
 #	include <optional>
 #	include <vector>
 
@@ -92,9 +82,13 @@ namespace
 		bool operator==(const Targets&) const = default;
 	};
 
-	/** @brief One frame's inputs that are not declared views: immutable once published, replaced only when they change. */
+	/**
+	 * @brief One frame's inputs that are not declared views: immutable once published, replaced only when they change. The
+	 * recordings that read one keep it, with its descriptors, until their GPU work retires (RecordingContext::Retain).
+	 */
 	struct Execution
 	{
+		std::uint64_t serial = 0;  // the pass's revision: a new one for every execution made
 		std::shared_ptr<const ComputeProgram> program;
 		std::uint32_t groupsX = 0, groupsY = 0;
 		std::uint32_t normals = 0;       // which of kNormalsTargets the composite writes
@@ -156,7 +150,8 @@ namespace
 		// The recorded dispatch depends on the execution only: the shared constants are uploaded each run.
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(shared->execution.load(std::memory_order_acquire).get()));
+			const auto execution = shared->execution.load(std::memory_order_acquire);
+			a_out.push_back(execution ? execution->serial : 0);
 		}
 
 		CompositeFrame Prepare(const CompositeBindings&, const org::PassPrepareContext&) const
@@ -170,6 +165,8 @@ namespace
 			const auto* execution = a_frame.execution.get();
 			if (!execution || !execution->program)
 				return;
+			// The descriptors it names live as long as any submission of this recording.
+			a_recording.Retain(a_frame.execution);
 			const auto& views = execution->views;
 			const Handle null = views[0];  // slot 0 is always imported: its entry holds the null descriptor
 			CompositeBlock block{};
@@ -201,34 +198,15 @@ namespace
 		std::shared_ptr<Shared> shared;
 	};
 
-	/** @brief The defines Deferred::GetComputeMainComposite(Interior) and Util::CompileShader give the D3D11 build. */
+	/** @brief Deferred::CompositeDefines as the program takes them; ComputeProgram adds the common ones, as Util::CompileShader does. */
 	std::vector<std::pair<std::wstring, std::wstring>> CompositeDefines(bool a_interior)
 	{
-		std::vector<std::pair<std::string, std::string>> defines;
-		if (a_interior)
-			defines.emplace_back("INTERIOR", "");
-		if (globals::features::dynamicCubemaps.loaded)
-			defines.emplace_back("DYNAMIC_CUBEMAPS", "");
-		if (globals::features::skylighting.loaded)
-			defines.emplace_back("SKYLIGHTING", "");
-		if (globals::features::screenSpaceGI.loaded)
-			defines.emplace_back("SSGI", "");
-		if (globals::features::ibl.loaded)
-			defines.emplace_back("IBL", "");
-		if (globals::features::terrainBlending.loaded)
-			defines.emplace_back("TERRAIN_BLENDING", "");
-		std::vector<std::string_view> names;
-		for (const auto& define : defines)
-			names.push_back(define.first);
-		for (auto& define : Util::GetCommonShaderDefines(names))
-			defines.push_back(std::move(define));
-		for (const char* name : { "COMPUTESHADER", "WINPC", "DX11" })
-			defines.emplace_back(name, "");
 		// Defines are ASCII.
-		std::vector<std::pair<std::wstring, std::wstring>> wide;
-		for (const auto& [name, value] : defines)
-			wide.emplace_back(std::wstring(name.begin(), name.end()), std::wstring(value.begin(), value.end()));
-		return wide;
+		const auto wide = [](const char* a_text) { return a_text ? std::wstring(a_text, a_text + std::strlen(a_text)) : std::wstring(); };
+		std::vector<std::pair<std::wstring, std::wstring>> defines;
+		for (const auto& [name, value] : Deferred::CompositeDefines(a_interior))
+			defines.emplace_back(wide(name), wide(value));
+		return defines;
 	}
 }
 
@@ -249,8 +227,7 @@ struct ORGDeferredComposite::Impl
 	// The last execution for each normals target: the engine alternates them, so each frame reuses one.
 	std::array<std::shared_ptr<const Execution>, 2> byNormals;
 	bool composited = false;
-	// Replaced executions, kept until no submission can still read their descriptors.
-	std::deque<std::shared_ptr<const Execution>> retired;
+	std::uint64_t executions = 0;  // the serial of the last execution made
 
 	bool LoadPrograms()
 	{
@@ -312,20 +289,10 @@ struct ORGDeferredComposite::Impl
 				registered = false; },
 			.sharedConstants = true,
 		});
+		// The recordings that read the old executions keep them (CompositePass::Record).
 		if (previous)
-			for (auto& execution : byNormals)
-				Retire(std::exchange(execution, nullptr));
+			byNormals = {};
 		return registered;
-	}
-
-	void Retire(std::shared_ptr<const Execution> a_execution)
-	{
-		if (!a_execution)
-			return;
-		retired.push_back(std::move(a_execution));
-		const std::size_t keep = RenderGraphRuntime::Get().Host() ? RenderGraphRuntime::Get().Host()->FrameSlots() + 2u : 8u;
-		while (retired.size() > keep)
-			retired.pop_front();
 	}
 
 	/** @brief In the epoch: this frame's execution, resolved when its inputs changed. */
@@ -363,6 +330,7 @@ struct ORGDeferredComposite::Impl
 			return;
 		}
 		auto next = std::make_shared<Execution>();
+		next->serial = ++executions;
 		next->program = program;
 		next->groupsX = frame.groupsX;
 		next->groupsY = frame.groupsY;
@@ -387,7 +355,7 @@ struct ORGDeferredComposite::Impl
 		// A view that cannot be read this frame: no dispatch, and Deferred composites with D3D11.
 		std::shared_ptr<const Execution> published = resolved ? std::shared_ptr<const Execution>(std::move(next)) : nullptr;
 		shared->execution.store(published, std::memory_order_release);
-		Retire(std::exchange(cached, published));
+		cached = published;
 		composited = resolved;
 	}
 };

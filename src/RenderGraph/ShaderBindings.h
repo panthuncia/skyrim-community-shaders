@@ -82,6 +82,16 @@ namespace ShaderBindings
 	org::OwnedDescriptorBinding CreateSampler(const rhi::SamplerDesc& a_desc);
 
 	/**
+	 * @brief The rhi sampler a D3D11 sampler description makes: filters (point, linear, anisotropic, comparison, minimum and
+	 * maximum), address modes, LOD bias and range, and the border colour (a BorderPreset when it is transparent black, opaque
+	 * black or opaque white, else Custom). The one converter for every port whose D3D11 path made a D3D11_SAMPLER_DESC.
+	 */
+	rhi::SamplerDesc SamplerFromD3D11(const D3D11_SAMPLER_DESC& a_desc);
+
+	/** @brief CreateSampler of SamplerFromD3D11(a_desc). */
+	inline org::OwnedDescriptorBinding CreateSampler(const D3D11_SAMPLER_DESC& a_desc) { return CreateSampler(SamplerFromD3D11(a_desc)); }
+
+	/**
 	 * @brief A shader resource view of a resource the graph does not track (a_resource stays alive through a_owner), in the graph's
 	 * descriptor heap: its Index() is the handle. The descriptor names the resource's shader-read layout, so the caller keeps the
 	 * resource there whenever a shader may read it. Render thread, with the runtime active. Empty, logged, when there is no

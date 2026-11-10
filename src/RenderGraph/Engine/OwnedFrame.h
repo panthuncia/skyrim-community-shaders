@@ -34,13 +34,24 @@ namespace RenderGraph::Engine
 		 */
 		bool CreateSwapchain(const DXGI_SWAP_CHAIN_DESC& a_desc);
 
-		/** @brief After the game's device and headless swap chain exist: resolves DXVK's interop exports. */
+		/**
+		 * @brief After the game's device and headless swap chain exist: resolves DXVK's interop exports (GuestDevice::Prepare checked
+		 * them before the device was made). A failure here is fatal: the game's swap chain is headless, so nothing could be shown.
+		 */
 		bool Initialize(IDXGISwapChain* a_swapChain, ID3D11Device* a_device);
+
+		/**
+		 * @brief Teardown, before DXVK destroys its device (RenderGraphRuntime::Shutdown): no new frame is taken, every queued tail
+		 * runs, the host timeline is waited for, and the swap chain, the semaphore and the command pool are destroyed. Bounded: a
+		 * tail that never runs (DXVK dropped its queue) leaves them, as at process exit. Any thread; once.
+		 */
+		void Shutdown();
 
 		/**
 		 * @brief The game's Present in the owned frame (the innermost call of CS's Present chain). Any thread that drives the immediate
 		 * context under the engine's lock.
-		 * @param a_guestPresent DXVK's Present: on a headless swap chain it ends the guest frame and flushes.
+		 * @param a_guestPresent DXVK's Present: on a headless swap chain it ends the guest frame and flushes. Every path calls it
+		 * once and returns its result, the failures too, so the game's frame always ends.
 		 */
 		long Present(IDXGISwapChain* a_swapChain, unsigned a_syncInterval, unsigned a_flags,
 			const std::function<long(IDXGISwapChain*, unsigned, unsigned)>& a_guestPresent);
@@ -72,6 +83,8 @@ namespace RenderGraph::Engine
 	private:
 		OwnedFrame() = default;
 		struct State;
-		State* state = nullptr;  // never freed: DXVK's submission thread may still run a tail at static destruction
+		// Made once the swap chain exists; freed on CreateSwapchain's failures. Shutdown releases what it holds and keeps the struct,
+		// which a Present racing the teardown still reads (inactive).
+		State* state = nullptr;
 	};
 }

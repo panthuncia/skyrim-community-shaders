@@ -1,6 +1,7 @@
 #include "RenderGraph/Engine/Tripwire/TripwireHandles.h"
 
 #include "RenderGraph/Engine/Tripwire/TripwireSelfTest.h"
+#include "RenderGraph/Switches.h"
 #include "Utils/D3D.h"
 
 #if defined(CS_HAS_RENDER_GRAPH)
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -21,16 +23,9 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		constexpr std::size_t kKinds = static_cast<std::size_t>(Kind::Count);
 
-		std::string EnvValue(const char* a_name)
-		{
-			char value[64]{};
-			const DWORD length = GetEnvironmentVariableA(a_name, value, sizeof(value));
-			return length && length < sizeof(value) ? std::string(value, length) : std::string();
-		}
-
 		bool LogRequested()
 		{
-			static const bool requested = EnvValue("CS_ORG_TRIPWIRE_LOG") == "1";
+			static const bool requested = Switches::On("CS_ORG_TRIPWIRE_LOG");
 			return requested;
 		}
 
@@ -165,10 +160,29 @@ namespace RenderGraph::Engine::Tripwire
 			a_sites.reportedCalls = a_sites.calls;
 		}
 
-		void ReportLoop(std::chrono::seconds a_interval)
+		/** @brief The periodic report's thread, stopped and joined by Stop. */
+		struct Reporter
 		{
+			std::mutex lock;
+			std::condition_variable_any wake;
+			std::jthread thread;
+		};
+
+		Reporter& GetReporter()
+		{
+			static Reporter s_reporter;
+			return s_reporter;
+		}
+
+		void ReportLoop(std::stop_token a_stop, std::chrono::seconds a_interval)
+		{
+			auto& reporter = GetReporter();
 			for (;;) {
-				std::this_thread::sleep_for(a_interval);
+				{
+					std::unique_lock wait(reporter.lock);
+					if (reporter.wake.wait_for(wait, a_stop, a_interval, [] { return false; }) || a_stop.stop_requested())
+						return;
+				}
 				auto& sites = GetSites();
 				std::lock_guard guard(sites.lock);
 				if (sites.calls != sites.reportedCalls)
@@ -686,10 +700,19 @@ namespace RenderGraph::Engine::Tripwire
 			SelfTest::Run();
 		if (!LogRequested())
 			return;
-		const auto interval = EnvValue("CS_ORG_TRIPWIRE_LOG_INTERVAL");
-		const unsigned long seconds = interval.empty() ? 60ul : std::strtoul(interval.c_str(), nullptr, 10);
+		const auto seconds = Switches::Number("CS_ORG_TRIPWIRE_LOG_INTERVAL", 60);
 		logger::info("[ORG] tripwire log on (CS_ORG_TRIPWIRE_LOG=1): a report {}", seconds ? fmt::format("every {} s when calls changed, and at exit", seconds) : std::string("at exit"));
 		if (seconds)
-			std::thread(ReportLoop, std::chrono::seconds(seconds)).detach();
+			GetReporter().thread = std::jthread(ReportLoop, std::chrono::seconds(seconds));
+	}
+
+	void Stop()
+	{
+		auto& reporter = GetReporter();
+		if (reporter.thread.joinable()) {
+			reporter.thread.request_stop();
+			reporter.thread.join();
+		}
+		Report("exit");
 	}
 }

@@ -30,6 +30,15 @@ namespace RenderGraph::ProgramBuild
 	std::uint64_t HashBinary(std::span<const std::byte> a_bytes);
 
 	/**
+	 * @brief a_own, then what Util::CompileShader gives every D3D11 build of the stage, so both paths build one permutation:
+	 * CS's common shader defines (Util::GetCommonShaderDefines: the user's shader defines and the loaded features'), the stage's
+	 * define for a_target (COMPUTESHADER for "cs_*", VSHADER for "vs_*", PSHADER for "ps_*"), WINPC and DX11. A name a_own already
+	 * has is not added again, so a caller that adds them itself compiles the same permutation. Reads State's defines: call it at
+	 * setup (a program's Load), not from a compile thread.
+	 */
+	Defines WithCommonDefines(const Defines& a_own, const wchar_t* a_target);
+
+	/**
 	 * @brief The DXC request for one stage: SPIR-V for a_target ("cs_6_6", "vs_6_6", "ps_6_6"), with debug info, Data/Shaders as
 	 * the include directory, BASICRHI_SHADER_API_VULKAN, CS_ORG_BINDLESS (Common/OrgResources.hlsli), CS_GPU_AMD on AMD, then a_defines. a_source must outlive the request.
 	 */

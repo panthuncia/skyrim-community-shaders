@@ -7,8 +7,10 @@
 
 #	include "RenderGraph/RenderGraphRuntime.h"
 
+#	include <Render/LatchBlock.h>
 #	include <Render/PreparedPass.h>
 #	include <Render/ResourceUseDeclaration.h>
+#	include <Resources/Buffers/Buffer.h>
 
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
 #		include "RenderGraph/ProgramBuild.h"
@@ -97,7 +99,7 @@ namespace
 	{
 		std::string vertexSource, pixelSource;
 		std::wstring vertexEntry, pixelEntry;
-		Build::Defines defines;
+		Build::Defines vertexDefines, pixelDefines;
 		std::string label;
 		std::string vertexText, pixelText;
 		std::wstring languageVersion = L"2021";
@@ -115,7 +117,8 @@ namespace
 	org::services::ShaderCompileRequest StageRequest(const std::filesystem::path& a_path, std::span<const std::byte> a_source, const std::wstring& a_entry,
 		const wchar_t* a_target, const Stages& a_stages)
 	{
-		auto request = Build::MakeRequest(a_path, a_source, a_entry, a_target, a_stages.defines);
+		const bool vertex = std::wstring_view(a_target).starts_with(L"vs_");
+		auto request = Build::MakeRequest(a_path, a_source, a_entry, a_target, vertex ? a_stages.vertexDefines : a_stages.pixelDefines);
 		request.languageVersion = a_stages.languageVersion;
 		return request;
 	}
@@ -211,7 +214,10 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 	auto& registry = *RenderGraphRuntime::PipelineRegistry();
 	// Before the sources are read: a reload that starts after rebuilds it (PipelineRegistry::Register).
 	const std::uint64_t builtFor = registry.SourcesGeneration();
-	Stages stages{ a_desc.vertexSource, a_desc.pixelSource, a_desc.vertexEntry, a_desc.pixelEntry, a_desc.defines,
+	// The defines resolved once, here: a hot reload compiles the same permutation.
+	Stages stages{ a_desc.vertexSource, a_desc.pixelSource, a_desc.vertexEntry, a_desc.pixelEntry,
+		a_desc.commonDefines ? Build::WithCommonDefines(a_desc.defines, L"vs_6_6") : a_desc.defines,
+		a_desc.commonDefines ? Build::WithCommonDefines(a_desc.defines, L"ps_6_6") : a_desc.defines,
 		fmt::format("{} ({})", std::filesystem::path(a_desc.pixelSource).stem().string(), Util::WStringToString(a_desc.pixelEntry)), a_desc.vertexText,
 		a_desc.pixelText, a_desc.languageVersion };
 	const auto vertex = CompileStage(*compiler, stages.vertexSource, stages.vertexText, stages.vertexEntry, L"vs_6_6", stages);
@@ -236,6 +242,12 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 		Util::WStringToString(stages.pixelEntry), stages.label);
 	if (!pipeline) {
 		logger::error("[ORG] {}: the raster pipeline could not be created", stages.label);
+		return {};
+	}
+	rhi::IndirectArg draw[] = { { .kind = rhi::IndirectArgKind::Draw } };
+	if (a_device.CreateCommandSignature(rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(draw, 1), sizeof(std::uint32_t) * 4 },
+			program->layout->GetHandle(), program->drawSignature) != rhi::Result::Ok) {
+		logger::error("[ORG] {}: the draw signature could not be created", stages.label);
 		return {};
 	}
 	// Live while an owner holds the program (the slot is its).
@@ -306,7 +318,11 @@ void RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 	commands.BindPipeline(Pipeline());
 	if (!a_draw.constants.empty())
 		commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, 0, 0, static_cast<std::uint32_t>(a_draw.constants.size()), a_draw.constants.data());
-	commands.Draw(a_draw.vertexCount, a_draw.instanceCount, 0, 0);
+	if (a_draw.indirect && drawSignature)
+		commands.ExecuteIndirect(drawSignature->GetHandle(), a_draw.indirect->Resource()->GetAPIResource().GetHandle(),
+			a_draw.indirect->Offset(a_recording.FrameSlot()) + a_draw.indirectOffset, {}, 0, 1);
+	else
+		commands.Draw(a_draw.vertexCount, a_draw.instanceCount, 0, 0);
 	commands.EndPass();
 }
 

@@ -9,6 +9,7 @@
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/Switches.h"
 #	include "Utils/D3D.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -21,6 +22,8 @@ namespace GraphResources::SelfTest
 {
 	namespace
 	{
+		void Check();
+
 		constexpr const char* kShader = "RenderGraph/GraphResourcesSelfTest.hlsl";
 		constexpr const char* kClientId = "cs.org.graphres-selftest";
 		constexpr const char* kTextureName = "GraphResourcesSelfTest::Texture";
@@ -163,6 +166,7 @@ namespace GraphResources::SelfTest
 				Test().resources.reset();
 				logger::error("[ORG] graph resource self-test: stopped, the render graph failed");
 			};
+			client.executed = [](const FrameAnchors::Point&) { Check(); };
 			return client;
 		}
 
@@ -192,14 +196,17 @@ namespace GraphResources::SelfTest
 
 	bool Requested()
 	{
-		static const bool requested = [] {
-			char value[8]{};
-			return GetEnvironmentVariableA("CS_ORG_GRAPHRES_SELFTEST", value, sizeof(value)) && std::strcmp(value, "1") == 0;
-		}();
+		static const bool requested = Switches::On("CS_ORG_GRAPHRES_SELFTEST");
 		return requested;
 	}
 
-	void Ensure()
+	void Reserve()
+	{
+		if (Requested())
+			FrameAnchors::Reserve(FrameAnchors::Anchor::DeferredPasses);
+	}
+
+	void Setup()
 	{
 		auto& test = Test();
 		if (!Requested() || std::exchange(test.attempted, true))
@@ -223,48 +230,51 @@ namespace GraphResources::SelfTest
 			kSizes[0], kSizes[0], test.resources->texture->Aliasable());
 	}
 
-	void AfterRun()
+	namespace
 	{
-		auto& test = Test();
-		if (!test.resources)
-			return;
-		auto& resources = *test.resources;
-		auto* context = globals::d3d::context;
-		if (test.copyPending) {
-			D3D11_MAPPED_SUBRESOURCE mapped{};
-			const HRESULT hr = context->Map(resources.staging.get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
-			if (hr == DXGI_ERROR_WAS_STILL_DRAWING)
+		void Check()
+		{
+			auto& test = Test();
+			if (!test.resources)
 				return;
-			test.copyPending = false;
-			if (FAILED(hr)) {
-				logger::error("[ORG] graph resource self-test: the staging copy could not be mapped (0x{:08X}); off", static_cast<std::uint32_t>(hr));
-				FrameAnchors::Unregister(kClientId);
-				test.resources.reset();
-				return;
+			auto& resources = *test.resources;
+			auto* context = globals::d3d::context;
+			if (test.copyPending) {
+				D3D11_MAPPED_SUBRESOURCE mapped{};
+				const HRESULT hr = context->Map(resources.staging.get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+				if (hr == DXGI_ERROR_WAS_STILL_DRAWING)
+					return;
+				test.copyPending = false;
+				if (FAILED(hr)) {
+					logger::error("[ORG] graph resource self-test: the staging copy could not be mapped (0x{:08X}); off", static_cast<std::uint32_t>(hr));
+					FrameAnchors::Unregister(kClientId);
+					test.resources.reset();
+					return;
+				}
+				std::uint32_t got = 0;
+				std::memcpy(&got, static_cast<const std::byte*>(mapped.pData) + kTexelY * mapped.RowPitch + kTexelX * sizeof(std::uint32_t), sizeof(got));
+				context->Unmap(resources.staging.get(), 0);
+				const UINT size = resources.texture->Desc().Width;
+				const std::uint32_t expected = ValueOf(size);
+				if (got == expected) {
+					logger::info("[ORG] graph resource self-test: {}x{} OK after {} copies (the graph wrote 0x{:08X}, D3D11 read 0x{:08X} through the export)",
+						size, size, test.copies, expected, got);
+					Advance(test);
+					return;
+				}
+				// Zero: DXVK's initial clear, before the rebuilt graph's first write.
+				if (got != 0 || test.copies >= kPatience) {
+					logger::error("[ORG] graph resource self-test: {}x{} MISMATCH: D3D11 read 0x{:08X}, expected 0x{:08X}", size, size, got, expected);
+					FrameAnchors::Unregister(kClientId);
+					test.resources.reset();
+					return;
+				}
 			}
-			std::uint32_t got = 0;
-			std::memcpy(&got, static_cast<const std::byte*>(mapped.pData) + kTexelY * mapped.RowPitch + kTexelX * sizeof(std::uint32_t), sizeof(got));
-			context->Unmap(resources.staging.get(), 0);
-			const UINT size = resources.texture->Desc().Width;
-			const std::uint32_t expected = ValueOf(size);
-			if (got == expected) {
-				logger::info("[ORG] graph resource self-test: {}x{} OK after {} copies (the graph wrote 0x{:08X}, D3D11 read 0x{:08X} through the export)",
-					size, size, test.copies, expected, got);
-				Advance(test);
-				return;
-			}
-			// Zero: DXVK's initial clear, before the rebuilt graph's first write.
-			if (got != 0 || test.copies >= kPatience) {
-				logger::error("[ORG] graph resource self-test: {}x{} MISMATCH: D3D11 read 0x{:08X}, expected 0x{:08X}", size, size, got, expected);
-				FrameAnchors::Unregister(kClientId);
-				test.resources.reset();
-				return;
-			}
+			// Right after the epoch in D3D11's stream: the graph gave the texture back in its home layout.
+			context->CopyResource(resources.staging.get(), resources.texture->D3D11());
+			test.copyPending = true;
+			++test.copies;
 		}
-		// Right after the epoch in D3D11's stream: the graph gave the texture back in its home layout.
-		context->CopyResource(resources.staging.get(), resources.texture->D3D11());
-		test.copyPending = true;
-		++test.copies;
 	}
 }
 

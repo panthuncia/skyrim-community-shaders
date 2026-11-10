@@ -14,6 +14,7 @@
 
 namespace org
 {
+	class LatchBlock;
 	class RecordingContext;
 	struct DeclaredViewToken;
 }
@@ -51,6 +52,9 @@ struct RasterProgram
 	std::uint32_t constantWords = 0;
 	std::uint32_t targetCount = 0;
 	bool hasDepth = false;
+	// The draw command signature under the program's layout (vertex count, instance count, first vertex, first instance), for
+	// DrawDesc::indirect.
+	rhi::CommandSignaturePtr drawSignature;
 
 	/** @brief Record time: the pipeline to bind, the slot's current one (it changes only at a graph build, where nothing records). */
 	rhi::PipelineHandle Pipeline() const;
@@ -81,6 +85,10 @@ struct RasterProgram
 		rhi::DepthStencilState depth{ .depthEnable = false, .depthWrite = false, .depthFunc = rhi::CompareOp::Always };
 		rhi::RasterState raster{ .cull = rhi::CullMode::None };
 		bool alphaToCoverage = false;
+		// Also the defines the D3D11 build of each stage gets (ProgramBuild::WithCommonDefines: VSHADER, PSHADER, CS's common
+		// defines), so a dual-target shader compiles the same permutation on both paths. Off for generated stages (the FX
+		// runtime's), which have no D3D11 build with CS's defines.
+		bool commonDefines = true;
 	};
 
 	/**
@@ -123,6 +131,11 @@ struct RasterProgram
 		std::uint32_t vertexCount = 3;             // the fullscreen triangle
 		std::uint32_t instanceCount = 1;
 		const char* debugName = nullptr;
+		// When set, the draw's four uints (vertex count, instance count, first vertex, first instance) are read from this latch
+		// block, indirectOffset bytes into the region of the recording's frame slot, instead of vertexCount and instanceCount. A
+		// vertex count of zero there draws nothing, so a kept recording can do no work on a frame by its data alone.
+		const org::LatchBlock* indirect = nullptr;
+		std::uint32_t indirectOffset = 0;
 	};
 
 	/**

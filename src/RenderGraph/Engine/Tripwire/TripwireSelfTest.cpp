@@ -1,6 +1,7 @@
 #include "RenderGraph/Engine/Tripwire/TripwireSelfTest.h"
 
 #include "RenderGraph/Engine/Tripwire/TripwireHandles.h"
+#include "RenderGraph/Switches.h"
 #include "Utils/D3D.h"
 
 #include <cstring>
@@ -430,8 +431,7 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 
 	bool Requested()
 	{
-		char value[8]{};
-		return GetEnvironmentVariableA("CS_ORG_TRIPWIRE_SELFTEST", value, sizeof(value)) && std::strcmp(value, "1") == 0;
+		return Switches::On("CS_ORG_TRIPWIRE_SELFTEST");
 	}
 
 	void Run()

@@ -62,7 +62,8 @@ One entry per need. Give:
   ("Async epochs cannot record these uploads"). So the DDS bytes go into an upload-heap `org::Buffer` at once, laid out by
   `rhi::helpers::PlanTextureUploadSubresources`, and a copy pass (`CopyBufferToTexture`) in the client fills the texture in
   the first epoch. The next frame the client is rebuilt without that pass (`FrameAnchors::Refresh`), and the buffer goes
-  with the last build that holds it. BC formats work. An API for plugins needs a texture upload that async epochs record.
+  with the last build that holds it. Phase 3.5 makes this a framework helper: an `AnchorPasses::Upload` is a one-shot pass
+  (`PassDesc::once`) that the anchors drop themselves once a run with it was submitted. BC formats work. An API for plugins needs a texture upload that async epochs record.
 - **Found by:** survey for the plan (2026-11-09); the graph upload by P3 TerrainShadows (2026-11-09).
 
 ### Sharing graph resources with D3D11 code
@@ -75,9 +76,10 @@ One entry per need. Give:
     - an exported resource is never aliased;
     - its D3D11 views go before its memory, and the memory waits for D3D11's last use (CS's `ReleaseAfterD3D11`);
     - a texture rests in DXVK's layout for it between epochs, and its views use its own typed format;
-    - a resize rebuilds the client's anchors (`FrameAnchors::Refresh`).
+    - a resize rebuilds the client's anchors and republishes the resource (the twins' resize generation, which the anchors
+      read; no call from the owner).
 
-  The DXVK exports underneath are `dxvkCreateBufferFromVkBuffer` and `dxvkCreateTextureFromVkImage` (interop version 6). A plugin
+  The DXVK exports underneath are `dxvkCreateBufferFromVkBuffer` and `dxvkCreateTextureFromVkImage` (interop version 7). A plugin
   that calls them itself must create images with every usage the D3D11 bind flags imply. In the DXVK-free build there is no
   D3D11 side, so the export becomes a tripwire handle (P4.1).
 - **Found by:** P2.1 (2026-11-09).
@@ -447,6 +449,9 @@ Keys used so far:
   flag into its latch and stays active until every frame slot has been latched idle once, then rests. A framework answer
   would be a per-client "skip" the anchor applies to the client's passes (an empty dispatch, or a predicate the graph
   owns), so clients need not carry the flag into their shaders.
+- **Answered in CS (Phase 3.5):** run gates (`RenderGraph::RunGate`, `ClientDesc::gates`). Every run of an anchor closes the
+  gates of each client in its graph before any commit, so an inactive client's gated dispatches and draws are empty
+  indirect work, never an older slot's values. A plugin API would expose the same gate.
 - **Found by:** P3 Skylighting (2026-11-09).
 
 ### Per-frame values from CS's shared constant buffers
@@ -483,6 +488,9 @@ Keys used so far:
   come too late for the run that asked. A reset flag in a pass's `Revision` cannot replace the rebuilds: with async epochs a
   ticket is prepared before the client's commit, so the revision would lag a frame and a kept recording with the clear
   could be reused.
+- **Answered in CS (Phase 3.5):** one-shot passes (`PassDesc::once`): the pass is in the graph until a run with it was submitted,
+  then the anchors build without it; `FrameAnchors::Rearm` makes it pending again. One build per reset instead of two, and no
+  flag set in `Prepare`. `ClientDesc::executed` says when the reset's run was submitted.
 - **Found by:** P3 W2, Screen Space GI (2026-11-09); Skylighting's reset (2026-11-09).
 
 ### Ping-pong history as two lifetimes
@@ -591,6 +599,9 @@ Keys used so far:
   (copy from a persistent source that only the gated work changes), or join the graph by `FrameAnchors::Refresh` once
   they are needed. A framework answer would be predicated copies and mip generation (a condition word in a buffer the
   commit writes), or variants a kept recording selects by a latched index.
+- **Answered in part (Phase 3.5):** the run gate (`RenderGraph::RunGate`) is the one mechanism for gated dispatches and draws
+  (`ComputeProgram::DispatchIndirect`, `RasterProgram::DrawDesc::indirect`). Copies and mip generation still have no
+  predicate.
 - **Found by:** P3 W2, Dynamic Cubemaps (2026-11-09).
 
 ### ORG's built-in passes in a host without a pipeline compiler
@@ -643,6 +654,8 @@ Keys used so far:
   would be an "initialize" callback on a persistent resource, which the graph runs once before the resource's first use
   in any epoch and again after a device or graph reset. There is no reset event today: a failed graph returns the
   feature to D3D11, which makes the texture again.
+- **Answered in CS (Phase 3.5):** a one-shot pass (`PassDesc::once`) does this without the client's bookkeeping. A reset event
+  is still missing.
 - **Found by:** P3 W4, TruePBR glints noise (2026-11-09).
 ### Reading back a frame without waiting
 
@@ -725,9 +738,9 @@ Keys used so far:
   command list in flight and ends with a full memory barrier, so the next list's epoch sees its writes, and the exported
   textures rest in DXVK's layout on both sides. Two things a plugin API would need: an anchor the plugin itself runs at its own
   point of the frame (today only CS code calls `FrameAnchors::Run`), and the hazard separator before the SDK's submission
-  (`Upscaling::SeparateFromGraphEpochs`), which every late anchor already applies. Per-run work in a kept recording is a bit
-  each pass reads at `Prepare` and adds to its revision ("Skipping a frame in a kept recording"); Upscaling and Cloud Shadows
-  both carry that pattern, which a framework predicate would replace.
+  (`Upscaling::SeparateFromGraphEpochs`), which Upscaling installs as the anchors' late-epoch hook. Per-run work in a kept
+  recording is a bit each pass reads at `Prepare` and adds to its revision ("Skipping a frame in a kept recording"); Upscaling
+  and Cloud Shadows both carry that pattern, which the run gate replaces (lane L4 moves them).
 - **Found by:** P3 W3, Upscaling's own passes (2026-11-09).
 ### Heap indices outside the recording
 
