@@ -3,14 +3,21 @@
 /// https://bruop.github.io/exposure/
 /// https://knarkowicz.wordpress.com/2016/01/09/automatic-exposure/
 
+#include "Common/OrgResources.hlsli"
 #include "PostProcessing/HistogramAutoExposure/common.hlsli"
 
 #include "Common/Color.hlsli"
 
-RWStructuredBuffer<uint> RWBufferHistogram : register(u0);
-RWStructuredBuffer<float> RWBufferAdaptation : register(u1);
-
-Texture2D<float4> TexColor : register(t0);
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (HistogramAutoExposure::AutoExposureCB at
+// b1). The ORG chain (ORG/ORGHistogramAutoExposure.cpp) gives heap handles in the push block and the constants from
+// its latch.
+#define HISTOGRAM_RESOURCES(X)                               \
+	X(SRV, Texture2D<float4>, TexColor, 0)                   \
+	X(UAV, RWStructuredBuffer<uint>, RWBufferHistogram, 0)   \
+	X(UAV, RWStructuredBuffer<float>, RWBufferAdaptation, 1) \
+	X(LATCH, AutoExposureConstants, AutoExposure, 1)
+ORG_PUSH_BLOCK(HISTOGRAM_RESOURCES(ORG_HANDLE))
+HISTOGRAM_RESOURCES(ORG_RESOURCE)
 
 const static float MinLogLum = -13;
 const static float LogLumRange = 31;
@@ -38,7 +45,7 @@ float2 hash2D(float2 p)
 // Precompute box bounds to avoid per-pixel calculations
 float4 ComputeBoxBounds(float2 dims)
 {
-	float4 box = float4(.5 - AdaptArea * .5, .5 + AdaptArea * .5);
+	float4 box = float4(.5 - AutoExposure.AdaptArea * .5, .5 + AutoExposure.AdaptArea * .5);
 	return float4(
 		dims.x * box.r,
 		dims.y * box.g,
@@ -139,7 +146,7 @@ float4 ComputeBoxBounds(float2 dims)
 			RWBufferHistogram[clearBin] = 0;
 		}
 
-		float adaptedLum = lerp(max(1e-5, RWBufferAdaptation[0]), avgLum, AdaptLerp);
+		float adaptedLum = lerp(max(1e-5, RWBufferAdaptation[0]), avgLum, AutoExposure.AdaptLerp);
 		RWBufferAdaptation[0] = adaptedLum;
 	}
 }

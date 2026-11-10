@@ -1,4 +1,6 @@
-cbuffer AutoExposureCB : register(b1)
+// HistogramAutoExposure::AutoExposureCB, as a struct for a LATCH entry (Common/OrgResources.hlsli). The members keep the
+// cbuffer offsets the D3D11 path uploads; the padding is a float3 so the struct also packs tightly for the ORG latch.
+struct AutoExposureConstants
 {
 	float2 AdaptArea;
 	float2 AdaptationRange;
@@ -8,5 +10,5 @@ cbuffer AutoExposureCB : register(b1)
 	float PurkinjeMaxEV;
 	float PurkinjeStrength;
 
-	float pad[3];
+	float3 pad;
 };
