@@ -29,8 +29,8 @@ namespace org
  * The engine's fields hold the D3D11 objects, or tripwire handles wrapping them once the tripwire's guest context is
  * installed (Tripwire::GuestContextInstalled), since only then does every engine bind go through a handle-aware context.
  *
- * Releases come from any thread, as the engine's do: the D3D11 texture's and view's last references carry a sentinel (private
- * data) whose release queues the texture's record. The render thread hands those to ReleaseAfterD3D11 (ServiceRetired), so the
+ * Releases come from any thread, as the engine's do: the D3D11 texture and view each hold the record through
+ * Tripwire::AttachGraphResource, which hands it to ReleaseAfterD3D11 (Tripwire::ServiceRetired) once DXVK destroys them, so the
  * image outlives every D3D11 command issued before the release. Graph readers (DCLF) hold the record themselves.
  */
 namespace RenderGraph::Engine::Textures
@@ -93,13 +93,10 @@ namespace RenderGraph::Engine::Textures
 	bool Create(const CreateInfo& a_info, Created& a_out);
 
 	/**
-	 * @brief The engine texture a view belongs to (its D3D11 view or its tripwire handle), or null. Any thread; a_view must be
-	 * alive. The record stays valid as long as the caller holds it.
+	 * @brief The engine texture a view belongs to (its D3D11 view or its tripwire handle, found through
+	 * Tripwire::GraphResourceOf), or null. Any thread; a_view must be alive. The record stays valid as long as the caller holds it.
 	 */
 	std::shared_ptr<const Texture> Find(const ID3D11ShaderResourceView* a_view);
-
-	/** @brief Render thread, each frame (RenderGraphRuntime::SignalFramePace): released textures go to ReleaseAfterD3D11. */
-	void ServiceRetired();
 
 	/** @brief Totals for the reports. */
 	struct Stats

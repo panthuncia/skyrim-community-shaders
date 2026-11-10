@@ -16,7 +16,6 @@
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/Engine/GuestDevice.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
-#include "RenderGraph/Engine/Textures/EngineTextures.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/Switches.h"
@@ -2082,12 +2081,10 @@ std::uint32_t RenderGraphRuntime::TakeSubmittedSegments()
 void RenderGraphRuntime::SignalFramePace(bool a_active)
 {
 	// The frame's end on the render thread (the graph's owner), every frame: shader hot reload's owner point, and the point
-	// where exported resources whose last D3D11 use is done are freed, and released tripwire handles' resources and engine
-	// textures queued for that.
+	// where exported resources whose last D3D11 use is done are freed, and released tripwire handles' resources queued for that.
 	ServicePipelineReload();
 	ServiceD3D11Releases();
 	RenderGraph::Engine::Tripwire::ServiceRetired();
-	RenderGraph::Engine::Textures::ServiceRetired();
 	// The self-tests register as ordinary clients after the first frame, when the engine's targets they import exist. Each
 	// does so once, and nothing when its switch is off.
 	if (IsActive()) {

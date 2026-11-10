@@ -20,6 +20,7 @@ namespace RenderGraph::Engine::Textures
 #	include "Globals.h"
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
+#	include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "Utils/D3D.h"
@@ -38,23 +39,15 @@ namespace RenderGraph::Engine::Textures
 #	include <unordered_map>
 #	include <vector>
 
-namespace RenderGraph::Engine::Tripwire
-{
-	// P4.1 (Tripwire/GuestDevice.h): whether the engine's device and context pointers hold the guest wrapping handles, so a handle
-	// in an engine field reaches DXVK only unwrapped.
-	bool GuestContextInstalled();
-}
-
 namespace RenderGraph::Engine::Textures
 {
 	namespace
 	{
-		namespace Tripwire = RenderGraph::Engine::Tripwire;
-
-		// {6F0B2C41-9D3E-4A57-B1C8-2E7D5A3F9C04}: the sentinel each texture's D3D11 texture and view carry.
-		constexpr GUID kSentinelGuid = { 0x6f0b2c41, 0x9d3e, 0x4a57, { 0xb1, 0xc8, 0x2e, 0x7d, 0x5a, 0x3f, 0x9c, 0x04 } };
-
 		std::atomic<std::uint64_t> g_created{ 0 }, g_live{ 0 }, g_handles{ 0 }, g_left{ 0 }, g_failed{ 0 };
+
+		// Graph textures to their records, for Find. Held weakly: the engine's references decide the lifetime.
+		std::shared_mutex g_registryMutex;
+		std::unordered_map<const org::Resource*, std::weak_ptr<const Texture>> g_registry;
 
 		/** @brief A texture's record: the image ORG owns, and what Texture says about it. */
 		struct Record final : Texture
@@ -63,6 +56,11 @@ namespace RenderGraph::Engine::Textures
 
 			~Record() override
 			{
+				// Its graph texture stays unique until here, so no other record has the key.
+				if (graph) {
+					std::unique_lock lock(g_registryMutex);
+					g_registry.erase(graph.get());
+				}
 				// The graph's import of the image first, then the image.
 				graph.reset();
 				image = {};
@@ -70,86 +68,27 @@ namespace RenderGraph::Engine::Textures
 			}
 		};
 
-		// Views (D3D11 views and their tripwire handles) to their records. Held weakly: the engine's references decide the lifetime.
-		std::shared_mutex g_registryMutex;
-		std::unordered_map<const void*, std::weak_ptr<Record>> g_registry;
-
-		// What released textures left, for the render thread's ReleaseAfterD3D11.
-		std::mutex g_retiredMutex;
-		std::vector<std::shared_ptr<const void>> g_retired;
-
-		void Retire(std::shared_ptr<const void> a_owner)
+		/**
+		 * @brief A record whose D3D11 texture DXVK's stream may already name, with nothing to tie it to: the wrap failed after
+		 * DXVK began it. Kept for the session (it is rare, and logged), since nothing says when DXVK is done with it.
+		 */
+		void Abandon(std::shared_ptr<Record> a_record)
 		{
-			std::scoped_lock lock(g_retiredMutex);
-			g_retired.push_back(std::move(a_owner));
-		}
-
-		void Forget(const void* a_key, const Record* a_record)
-		{
-			std::unique_lock lock(g_registryMutex);
-			const auto found = g_registry.find(a_key);
-			if (found == g_registry.end())
-				return;
-			// A newer texture's view at the same address keeps its entry.
-			const auto live = found->second.lock();
-			if (!live || live.get() == a_record)
-				g_registry.erase(found);
+			static std::mutex mutex;
+			static std::vector<std::shared_ptr<Record>> abandoned;
+			std::scoped_lock lock(mutex);
+			abandoned.push_back(std::move(a_record));
 		}
 
 		/**
-		 * @brief Private data on a D3D11 texture or view: its object's destruction (on whatever thread drops the last reference) is
-		 * its last Release. That queues the record for ReleaseAfterD3D11, and a view's also leaves the registry.
+		 * @brief Drops a record that a D3D11 texture was made on: freed once DXVK destroys the texture and the GPU is past it. If the
+		 * texture refuses the tag, the record still goes through Tripwire::ServiceRetired, which is after this release too.
 		 */
-		class Sentinel final : public IUnknown
+		void DropWithTexture(winrt::com_ptr<ID3D11Resource>& a_texture, std::shared_ptr<Record> a_record)
 		{
-		public:
-			Sentinel(std::shared_ptr<Record> a_record, const void* a_view, const void* a_handle) :
-				record(std::move(a_record)), view(a_view), handle(a_handle) {}
-
-			HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_iid, void** a_out) override
-			{
-				if (!a_out)
-					return E_POINTER;
-				if (a_iid == __uuidof(IUnknown)) {
-					*a_out = static_cast<IUnknown*>(this);
-					AddRef();
-					return S_OK;
-				}
-				*a_out = nullptr;
-				return E_NOINTERFACE;
-			}
-
-			ULONG STDMETHODCALLTYPE AddRef() override { return refs.fetch_add(1, std::memory_order_relaxed) + 1; }
-
-			ULONG STDMETHODCALLTYPE Release() override
-			{
-				const ULONG left = refs.fetch_sub(1, std::memory_order_acq_rel) - 1;
-				if (left == 0) {
-					if (view)
-						Forget(view, record.get());
-					if (handle)
-						Forget(handle, record.get());
-					Retire(std::move(record));
-					delete this;
-				}
-				return left;
-			}
-
-			/** @brief Attaches a new sentinel to a_object; false when it does not take private data. */
-			static bool Attach(ID3D11DeviceChild* a_object, std::shared_ptr<Record> a_record, const void* a_view, const void* a_handle)
-			{
-				auto* sentinel = new Sentinel(std::move(a_record), a_view, a_handle);
-				const HRESULT result = a_object->SetPrivateDataInterface(kSentinelGuid, sentinel);
-				sentinel->Release();  // the object holds it now, or nothing does
-				return SUCCEEDED(result);
-			}
-
-		private:
-			std::atomic<ULONG> refs{ 1 };
-			std::shared_ptr<Record> record;
-			const void* view;
-			const void* handle;
-		};
+			Tripwire::AttachGraphResource(a_texture.get(), a_record->graph, std::move(a_record));
+			a_texture = nullptr;
+		}
 
 		/** @brief Logs a reason once: the first texture it applies to names it, the counters count the rest. */
 		void LogOnce(std::atomic<bool>& a_logged, std::string_view a_name, std::string_view a_why)
@@ -269,16 +208,15 @@ namespace RenderGraph::Engine::Textures
 		DxvkOrgInteropResourceInfo info{};
 		auto texture = runtime.WrapTexture(record->image.Get(), wrap, info, a_info.name.c_str(), a_info.initialData);
 		if (!texture) {
-			// DXVK's stream may name the image already: it goes once D3D11 is past this point.
-			Retire(std::move(record));
+			// DXVK's stream may name the image already, and no texture is left to tie it to.
+			Abandon(std::move(record));
 			return fail(g_loggedWrap, "DXVK could not wrap the image");
 		}
 
 		// The graph's view of it, in the layout DXVK rests it in.
 		record->graph = RenderGraph::ImportDxvkTexture(host->Device(), info.image, Describe(a_info, format), a_info.name.c_str());
 		if (!record->graph) {
-			texture = nullptr;
-			Retire(std::move(record));
+			DropWithTexture(texture, std::move(record));
 			return fail(g_loggedLayout, "the graph cannot import the layout DXVK rests it in");
 		}
 		record->name = a_info.name;
@@ -299,11 +237,25 @@ namespace RenderGraph::Engine::Textures
 
 		winrt::com_ptr<ID3D11ShaderResourceView> view;
 		if (FAILED(globals::d3d::device->CreateShaderResourceView(texture.get(), &a_info.srv, view.put()))) {
-			texture = nullptr;
-			Retire(std::move(record));
+			DropWithTexture(texture, std::move(record));
 			return fail(g_loggedView, "D3D11 refused the view");
 		}
 		Util::SetResourceName(view.get(), "%s SRV", a_info.name.c_str());
+
+		// The D3D11 objects hold the record: it is freed once DXVK destroyed both and the GPU is past them (Tripwire::ServiceRetired),
+		// and GraphResourceOf finds the graph texture from either. Before anything else holds them; handles made from them below tie
+		// the same record to them again.
+		if (!Tripwire::AttachGraphResource(view.get(), record->graph, record)) {
+			view = nullptr;
+			DropWithTexture(texture, std::move(record));
+			return fail(g_loggedView, "the D3D11 view did not take private data");
+		}
+		if (!Tripwire::AttachGraphResource(texture.get(), record->graph, record)) {
+			// The view's tag holds the record, and the view holds the texture.
+			view = nullptr;
+			texture = nullptr;
+			return fail(g_loggedView, "the D3D11 texture did not take private data");
+		}
 
 		// Tripwire handles in the engine's fields, once every engine bind goes through the guest context.
 		winrt::com_ptr<ID3D11Resource> textureHandle;
@@ -325,20 +277,9 @@ namespace RenderGraph::Engine::Textures
 			g_handles.fetch_add(1, std::memory_order_relaxed);
 		}
 
-		// The sentinels: the D3D11 objects' destruction retires the record; the view's also leaves the registry.
-		if (!Sentinel::Attach(texture.get(), record, nullptr, nullptr) || !Sentinel::Attach(view.get(), record, view.get(), viewHandle.get())) {
-			viewHandle = nullptr;
-			textureHandle = nullptr;
-			view = nullptr;
-			texture = nullptr;
-			Retire(std::move(record));
-			return fail(g_loggedView, "the D3D11 objects did not take private data");
-		}
 		{
 			std::unique_lock lock(g_registryMutex);
-			g_registry[view.get()] = record;
-			if (viewHandle)
-				g_registry[viewHandle.get()] = record;
+			g_registry[record->graph.get()] = record;
 		}
 		g_created.fetch_add(1, std::memory_order_relaxed);
 		if (viewHandle) {
@@ -355,31 +296,13 @@ namespace RenderGraph::Engine::Textures
 	{
 		if (!a_view || !Requested())
 			return nullptr;
-		std::shared_ptr<Record> record;
-		{
-			std::shared_lock lock(g_registryMutex);
-			const auto found = g_registry.find(a_view);
-			if (found == g_registry.end())
-				return nullptr;
-			record = found->second.lock();
-		}
-		// A handle's entry leaves with its view's sentinel, which a D3D11 binding can outlive the handle by: a handle made since at
-		// that address must stand for this record.
-		if (record && Tripwire::IsHandle(a_view) && Tripwire::Describe(a_view).graph != record->graph)
+		// The handle's, or the one AttachGraphResource tied to the D3D11 view.
+		const auto graph = Tripwire::GraphResourceOf(a_view);
+		if (!graph)
 			return nullptr;
-		return record;
-	}
-
-	void ServiceRetired()
-	{
-		std::vector<std::shared_ptr<const void>> retired;
-		{
-			std::scoped_lock lock(g_retiredMutex);
-			retired.swap(g_retired);
-		}
-		auto& runtime = RenderGraphRuntime::Get();
-		for (auto& owner : retired)
-			runtime.ReleaseAfterD3D11(std::move(owner));
+		std::shared_lock lock(g_registryMutex);
+		const auto found = g_registry.find(graph.get());
+		return found == g_registry.end() ? nullptr : found->second.lock();
 	}
 
 	Stats GetStats()
@@ -405,7 +328,6 @@ namespace RenderGraph::Engine::Textures
 		return false;
 	}
 	std::shared_ptr<const Texture> Find(const ID3D11ShaderResourceView*) { return nullptr; }
-	void ServiceRetired() {}
 	Stats GetStats() { return {}; }
 }
 

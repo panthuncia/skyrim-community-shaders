@@ -132,7 +132,7 @@ namespace RenderGraph::Engine::Textures
 						info.width = a_width;
 						info.height = a_height;
 						info.format = a_format;
-						info.bindFlags = D3D11_BIND_SHADER_RESOURCE | (a_uav ? D3D11_BIND_UNORDERED_ACCESS : 0u);
+						info.bindFlags = UINT(D3D11_BIND_SHADER_RESOURCE) | (a_uav ? UINT(D3D11_BIND_UNORDERED_ACCESS) : 0u);
 						info.initialData = a_data ? &data : nullptr;
 						info.srv.Format = a_format;
 						info.srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;

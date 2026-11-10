@@ -84,9 +84,10 @@ One path, `Textures::Create`, for every texture this takes:
 4. The D3D11 view is made as the engine would make it.
 5. Once the tripwire's guest context is installed (`Tripwire::GuestContextInstalled`, P4.1), the engine's block gets
    tripwire handles wrapping the texture and view; before that, the D3D11 objects themselves.
-6. A sentinel goes into each D3D11 object's private data. Its release (the object's destruction, on any thread) queues the
-   record; the render thread hands it to `ReleaseAfterD3D11` each frame, so the image outlives every D3D11 command issued
-   before. A view's sentinel also removes the view (and its handle) from the registry.
+6. `Tripwire::AttachGraphResource` (P4.1) ties the record to the D3D11 texture and view. When DXVK destroys them (on any
+   thread) the record goes through `Tripwire::ServiceRetired` to `ReleaseAfterD3D11`, so the image outlives every D3D11
+   command issued before. `Find` maps a view to its record through `Tripwire::GraphResourceOf` and a registry keyed by the
+   graph texture, which the record leaves when it is freed.
 
 Hooks: 75724/77538 (2D, cube, arrays and 3D; 1D stays the engine's) and 75511/77303 (DEFAULT only). 75721/77533 is hooked
 only to name the texture after its file ("Engine::textures\\...").
