@@ -8,7 +8,8 @@
  * @brief Image Based Lighting's SH projection (DiffuseIBLCS) as render-graph passes, behind CS_ORG_IBL=1.
  *
  * Two compute passes at the Prepass anchor project the environment cubemap (Dynamic Cubemaps' EnvTexture, while the DALC mode
- * uses it) and the engine's reflections cubemap (RENDER_TARGETS_CUBEMAP::kREFLECTIONS) into the same 3x1 SH textures the D3D11
+ * uses it; on Dynamic Cubemaps' ORG path its published "DynamicCubemaps::Env", by name) and the engine's reflections cubemap
+ * (RENDER_TARGETS_CUBEMAP::kREFLECTIONS) into the same 3x1 SH textures the D3D11
  * path writes. The textures are graph twins (GraphResources::Texture2D) exported as D3D11 SRVs: the deferred composite (t14,
  * t15) and the engine's pixel shaders (t76, t77) read those until their draws move to the graph. Exponential Height Fog's passes
  * read the twins by name. They are also published (PublishedResources), and Drawcall Limit Fix's colour passes read them so.

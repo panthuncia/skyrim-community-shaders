@@ -6,6 +6,7 @@
 #include "ORGIBL.h"
 
 #include "Features/DynamicCubemaps.h"
+#include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
 #include "Features/IBL.h"
 #include "Globals.h"
 #include "State.h"
@@ -158,6 +159,8 @@ namespace
 	// The SH textures' names, which they are published under: Drawcall Limit Fix's t76 and t77.
 	constexpr const char* kEnvName = "IBL::EnvIBL";
 	constexpr const char* kSkyName = "IBL::SkyIBL";
+	// Dynamic Cubemaps' environment cubemap on its ORG path, published under this id (ORGDynamicCubemaps).
+	constexpr std::string_view kDynamicCubemapsEnvId = "DynamicCubemaps::Env";
 
 	// DiffuseIBLCS's push block (DIFFUSE_IBL_RESOURCES, in list order).
 	struct DiffuseIBLBlock
@@ -177,24 +180,37 @@ namespace
 		ShaderBindings::Handle sampler = 0;
 	};
 
+	/** @brief A projection's source cubemap: an imported texture, or another feature's published graph texture by its id. */
+	struct Source
+	{
+		std::shared_ptr<org::Resource> resource;
+		std::string_view published;
+
+		explicit operator bool() const { return resource || !published.empty(); }
+		bool operator==(const Source&) const = default;
+	};
+
 	class ProjectPass final : public org::TypedRenderGraphPass<ProjectPass, ProjectFrame, ProjectBindings>
 	{
 	public:
-		ProjectPass(std::shared_ptr<const ComputeProgram> a_program, ShaderBindings::Handle a_sampler, std::shared_ptr<org::Resource> a_source,
-			std::shared_ptr<org::Resource> a_target) :
+		ProjectPass(std::shared_ptr<const ComputeProgram> a_program, ShaderBindings::Handle a_sampler, Source a_source, std::shared_ptr<org::Resource> a_target) :
 			program(std::move(a_program)), sampler(a_sampler), source(std::move(a_source)), target(std::move(a_target)) {}
 
 		ProjectBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			// The source's default view: a cube view of mip 0, as the D3D11 path samples it.
-			return { a_builder.ShaderResource(source).View(), a_builder.UnorderedAccess(target).View() };
+			// An import's default view: a cube view of mip 0, as the D3D11 path samples it. A published cubemap by name: its cube view.
+			if (source.resource)
+				return { a_builder.ShaderResource(source.resource).View(), a_builder.UnorderedAccess(target).View() };
+			const org::SrvView cube{ .variant = static_cast<std::uint32_t>(org::SRVViewType::TextureCube) };
+			return { a_builder.ShaderResource(org::ResourceIdentifier(source.published), cube).View(), a_builder.UnorderedAccess(target).View() };
 		}
 
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(program.get()));
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(source.get()));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(source.resource.get()));
+			a_out.push_back(std::hash<std::string_view>{}(source.published));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(target.get()));
 		}
 
@@ -211,7 +227,7 @@ namespace
 	private:
 		std::shared_ptr<const ComputeProgram> program;
 		ShaderBindings::Handle sampler;
-		std::shared_ptr<org::Resource> source;
+		Source source;
 		std::shared_ptr<org::Resource> target;
 	};
 }
@@ -223,8 +239,8 @@ struct ORGIBL::Impl
 	std::unique_ptr<GraphResources::Texture2D> env;
 	std::unique_ptr<GraphResources::Texture2D> sky;
 	// This frame's sources (render thread): the passes read them when they are made.
-	std::shared_ptr<org::ExternalTextureResource> envSource;
-	std::shared_ptr<org::ExternalTextureResource> skySource;
+	Source envSource;
+	Source skySource;
 	bool useEnvironment = false;
 	std::function<void()> onFailed;
 };
@@ -324,15 +340,23 @@ bool ORGIBL::Prepass(bool a_useEnvironment)
 		return false;
 	auto& state = *impl;
 	// Imported once; imported again (and every anchor rebuilt) when the engine or Dynamic Cubemaps replace the texture.
-	auto sky = FrameAnchors::EngineCubemap(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS);
-	std::shared_ptr<org::ExternalTextureResource> env;
+	const Source sky{ FrameAnchors::EngineCubemap(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS), {} };
+	Source env;
 	const auto& dynamicCubemaps = globals::features::dynamicCubemaps;
 	if (a_useEnvironment && dynamicCubemaps.loaded && dynamicCubemaps.envTexture) {
 		const auto* texture = dynamicCubemaps.envTexture;
-		env = FrameAnchors::D3D11Texture("DynamicCubemaps::EnvTexture", texture->resource.get(), texture->srv.get(), texture->uav.get());
+		// On Dynamic Cubemaps' ORG path its texture is the graph twin's export: read the published twin, ordered after its writes.
+		// Importing the export would make a second graph resource of the same image, which nothing orders after them.
+		const auto& graphCubemaps = ORGDynamicCubemaps::Get();
+		if (graphCubemaps.IsActive() && texture->resource.get() == graphCubemaps.Exported().env && PublishedResources::IsPublished(kDynamicCubemapsEnvId))
+			env.published = kDynamicCubemapsEnvId;
+		else
+			env.resource = FrameAnchors::D3D11Texture("DynamicCubemaps::EnvTexture", texture->resource.get(), texture->srv.get(), texture->uav.get());
 	}
 	if (sky != state.skySource || env != state.envSource || a_useEnvironment != state.useEnvironment) {
-		state.skySource = std::move(sky);
+		if (env.published != state.envSource.published)
+			logger::info("[ORG] IBL: the environment SH reads {}", env.published.empty() ? "Dynamic Cubemaps' D3D11 texture" : "Dynamic Cubemaps' published cubemap");
+		state.skySource = sky;
 		state.envSource = std::move(env);
 		state.useEnvironment = a_useEnvironment;
 		FrameAnchors::Refresh(kClientId);
