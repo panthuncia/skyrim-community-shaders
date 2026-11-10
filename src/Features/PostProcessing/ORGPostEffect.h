@@ -42,7 +42,8 @@
  * 5. Build (render thread, at a rebuild): read Builder::Current(), create the outputs with Builder::CreateImage, add the
  *    passes (Draw, Dispatch, Copy, or Add for a custom pass), reserve latch regions, then SetCurrent(output) when the
  *    effect replaces the image (WritesToMainTexture). An effect that only produces side data (bloom, exposure) leaves
- *    Current alone and Publishes its result by name; Composite Finds it. Programs come from Builder::Raster/Compute,
+ *    Current alone and Publishes its result by name, and its constants by PublishLatch; Composite Finds them under the
+ *    names in ORGPostChain::Published. Programs come from Builder::Raster/Compute,
  *    which cache them across builds (a first build blocks on the compile). A shader's SHARED entry is Bind::Shared:
  *    the chain then uploads CS's shared constants at the anchor (FrameBuffer, SharedData: frame count, depth params).
  * 6. Commit (in the epoch, every frame): write this frame's values into the regions Build reserved. Work that runs only
@@ -122,6 +123,29 @@ namespace ORGPostChain
 	{
 		std::uint32_t offset = 0;
 	};
+
+	/**
+	 * @brief The side outputs Composite reads, under the names their effects publish them (Builder::Publish, PublishLatch).
+	 *
+	 * An effect that is on publishes every entry of its group; Composite treats a group with an entry missing as that
+	 * contributor off, as the D3D11 Composite treats a missing SRV (the effect off, or its output not ready). Composite reads
+	 * each image through Bind::Srv, so publish an image that views the level named here. A latch entry is
+	 * a region holding the C++ struct the D3D11 path uploads, written by the publisher's Commit.
+	 */
+	namespace Published
+	{
+		// COD Bloom and Lens Flare declare their own names (kBloomOutput, kLensFlareOutput); Composite reads them by those ids.
+		// PhysicalGlare: the glare, the size of the chain's images.
+		inline constexpr std::string_view kGlare = "PostProcessing::PhysicalGlare::Output";
+		// HistogramAutoExposure: the adapted luminance (a structured buffer of one float) and a HistogramAutoExposure::AutoExposureCB.
+		inline constexpr std::string_view kAdaptation = "PostProcessing::AutoExposure::Adaptation";
+		inline constexpr std::string_view kAutoExposureConstants = "PostProcessing::AutoExposure::Constants";
+		// LocalExposure: the scene's log luminance (mip 0), the luminance grid (3D), the blurred base and a LocalExposure::LocalExposureCB.
+		inline constexpr std::string_view kLogLuminance = "PostProcessing::LocalExposure::LogLuminance";
+		inline constexpr std::string_view kLuminanceGrid = "PostProcessing::LocalExposure::LuminanceGrid";
+		inline constexpr std::string_view kBlurredLuminance = "PostProcessing::LocalExposure::BlurredLuminance";
+		inline constexpr std::string_view kLocalExposureConstants = "PostProcessing::LocalExposure::Constants";
+	}
 
 	/**
 	 * @brief One entry of a pass's push block, in the shader's resource list order (ShaderBindings.h): SRV and UAV entries
@@ -209,6 +233,22 @@ namespace ORGPostChain
 		void Publish(std::string_view a_name, const Image& a_image);
 		Image Find(std::string_view a_name) const;
 
+		/**
+		 * @brief Publishes a latch region (an effect's constants, which a later effect binds too) under a name. FindLatch returns it,
+		 * or nothing when none was published; a region published for another type fails the build.
+		 */
+		template <class T>
+		void PublishLatch(std::string_view a_name, const LatchRegion<T>& a_region)
+		{
+			PublishLatchBytes(a_name, a_region.offset, static_cast<std::uint32_t>(sizeof(T)));
+		}
+		template <class T>
+		std::optional<LatchRegion<T>> FindLatch(std::string_view a_name)
+		{
+			const auto offset = FindLatchBytes(a_name, static_cast<std::uint32_t>(sizeof(T)));
+			return offset ? std::optional<LatchRegion<T>>(LatchRegion<T>{ *offset }) : std::nullopt;
+		}
+
 		/** @brief Reserves a latch region for a T: 16-byte aligned, at most kLatchBytes for the whole build. */
 		template <class T>
 		LatchRegion<T> Latch()
@@ -251,6 +291,8 @@ namespace ORGPostChain
 	private:
 		std::uint32_t Reserve(std::uint32_t a_bytes);
 		std::string PassName(std::string_view a_step) const;
+		void PublishLatchBytes(std::string_view a_name, std::uint32_t a_offset, std::uint32_t a_size);
+		std::optional<std::uint32_t> FindLatchBytes(std::string_view a_name, std::uint32_t a_size);
 
 		BuildState& state;
 		Programs& programs;
@@ -311,6 +353,9 @@ namespace ORGPostChain
 	std::unique_ptr<Effect> MakeColorGrading();
 	std::unique_ptr<Effect> MakeLUT();
 	std::unique_ptr<Effect> MakeBorder();
+	std::unique_ptr<Effect> MakeCamera();
+	std::unique_ptr<Effect> MakeComposite();
+	std::unique_ptr<Effect> MakeMotionBlur();
 }
 
 #endif

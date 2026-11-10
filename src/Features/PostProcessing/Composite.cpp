@@ -113,13 +113,19 @@ Composite::CompositeCB Composite::Constants(float2 a_outputSize, bool a_bloom, b
 		return cbData;
 	if (a_bloom) {
 		const auto* bloom = owner->GetPipelineFeature<CODBloom>(PostProcessing::FeaturePipelineIndex::CODBloom);
+		if (!bloom)
+			return cbData;
 		cbData.BloomRadius = bloom->settings.UpsampleRadius;
 		cbData.BloomIntensity = bloom->settings.BlendFactor;
 	}
 	if (a_flare) {
 		const auto* flare = owner->GetPipelineFeature<LensFlare>(PostProcessing::FeaturePipelineIndex::LensFlare);
-		cbData.FlareSize[0] = (float)flare->texGhostHalo->desc.Width;
-		cbData.FlareSize[1] = (float)flare->texGhostHalo->desc.Height;
+		if (!flare)
+			return cbData;
+		if (flare->texGhostHalo) {
+			cbData.FlareSize[0] = (float)flare->texGhostHalo->desc.Width;
+			cbData.FlareSize[1] = (float)flare->texGhostHalo->desc.Height;
+		}
 		std::copy(flare->settings.Tint.begin(), flare->settings.Tint.end(), cbData.FlareTint);
 		cbData.FlareIntensity = flare->settings.Intensity;
 	}
