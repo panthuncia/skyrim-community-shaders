@@ -2102,8 +2102,8 @@ void RenderGraphRuntime::OnEpochFailed(std::uint32_t a_epoch, bool a_keptGraph, 
 		disabledReason = a_error;
 		return;
 	}
-	const auto segment = static_cast<Segment>(a_epoch);
-	logger::error("[ORG] {} failed ({}); the other epochs run on: {}", Impl::SegmentLabel(segment),
+	const auto epochSegment = static_cast<Segment>(a_epoch);
+	logger::error("[ORG] {} failed ({}); the other epochs run on: {}", Impl::SegmentLabel(epochSegment),
 		a_keptGraph ? "its previous graph still runs" : "it runs nothing until it is built again", a_error);
 	// The frame anchors drop the clients of the anchor's failed build and build the anchor again without them.
 	if (FrameAnchors::NamesOf(a_epoch)) {
@@ -2111,8 +2111,8 @@ void RenderGraphRuntime::OnEpochFailed(std::uint32_t a_epoch, bool a_keptGraph, 
 		return;
 	}
 	// Drawcall Limit Fix hands drawing back to the engine at its next frame start.
-	if (IsDclfSegment(segment)) {
-		DrawcallLimitFix::OnGraphEpochFailed(Impl::SegmentLabel(segment), a_error);
+	if (IsDclfSegment(epochSegment)) {
+		DrawcallLimitFix::OnGraphEpochFailed(Impl::SegmentLabel(epochSegment), a_error);
 		return;
 	}
 	// Any other epoch (Light Limit Fix's light culling): ExecuteEpoch returns false for it from now on, and its feature falls back

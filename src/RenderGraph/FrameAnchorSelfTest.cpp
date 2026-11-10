@@ -446,8 +446,8 @@ namespace FrameAnchors::SelfTest
 					test.resources->main ? fmt::format("{:.4f}", std::bit_cast<float>(words[kMainWord + anchor])) : std::string("not read"), globals::state->frameCount,
 					globals::state->IsMainOrLoadingMenuOpen() ? ", main or loading menu open" : "");
 				// With the failing client, the main client does not run at its anchor.
-				const std::uint32_t expected = ((1u << kAnchors) - 1) & ~(FailRequested() ? 1u << static_cast<std::uint32_t>(kFailAnchor) : 0u);
-				if (test.passed == expected)
+				const std::uint32_t wanted = ((1u << kAnchors) - 1) & ~(FailRequested() ? 1u << static_cast<std::uint32_t>(kFailAnchor) : 0u);
+				if (test.passed == wanted)
 					logger::info("[ORG] anchor self-test: every anchor OK");
 			} else if (got != 0) {
 				test.reported[anchor] = true;
