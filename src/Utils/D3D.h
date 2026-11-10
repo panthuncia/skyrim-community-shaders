@@ -82,6 +82,9 @@ namespace Util
 	 */
 	std::string GetNameFromRTV(ID3D11RenderTargetView* a_rtv);
 
+	/** @brief WKPDID_D3DDebugObjectName, the private-data GUID SetResourceName names objects with. */
+	extern GUID WKPDID_D3DDebugObjectNameT;
+
 	/**
 	 * @brief Set a debug name on a D3D11 resource for RenderDoc debuggability.
 	 * @param Resource The D3D11 device child to name.
