@@ -194,13 +194,4 @@ namespace Util
 	 * @return The depth SRV, or nullptr if unavailable.
 	 */
 	ID3D11ShaderResourceView* GetCurrentSceneDepthSRV(bool prefer16bit = false);
-
-	/**
-	 * @brief Debug readback: the per-channel means of the 3D texture or 2D texture (or array) behind a_view (mip 0), through a
-	 * blocking staging copy (it stalls the GPU). Supports R32G32B32A32_FLOAT, R16G16B16A16_FLOAT, R11G11B10_FLOAT, R32_FLOAT,
-	 * R8_UNORM and R8_UINT; unused channels read 0.
-	 * @param a_slice One array slice of a 2D texture (a cube face) instead of all of them.
-	 * @return The four means, or nothing when the view's texture is not supported or the copy failed.
-	 */
-	std::optional<std::array<double, 4>> VolumeMeans(ID3D11ShaderResourceView* a_view, std::optional<UINT> a_slice = std::nullopt);
 }  // namespace Util
