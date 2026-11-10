@@ -42,6 +42,12 @@ namespace RenderGraph::Engine::Tripwire
 		/** @brief Counts a call at a_caller; the first one from there is logged. a_detail goes into that first line (an IID). */
 		void Record(std::uint16_t a_slot, const char* a_method, void* a_caller, bool a_forwarded, std::string_view a_detail) const;
 
+		/**
+		 * @brief A forwarded call at a_caller passed the handle a_argument, unwrapped for the wrapped object: a reader that still goes
+		 * through D3D11. Counted at the call's site like Record; the first one names the argument.
+		 */
+		void RecordArgument(std::uint16_t a_slot, const char* a_method, void* a_caller, const HandleCore& a_argument) const;
+
 		std::string Name() const;
 		void SetName(std::string a_name);
 
@@ -99,21 +105,49 @@ namespace RenderGraph::Engine::Tripwire
 				std::memset(a_out, 0, a_size);
 		}
 
-		/** @brief An interface array with its handles replaced by the objects they wrap; the source itself when it holds none. */
+		/** @brief Where a forwarded call came from: the handle forwarding it, its method and its caller. */
+		struct CallSite
+		{
+			const HandleCore* core = nullptr;
+			std::uint16_t slot = 0;
+			const char* method = nullptr;
+			void* caller = nullptr;
+		};
+
+		/** @brief A forwarded call passes the handle a_handle to the wrapped object: recorded at a_site (RecordArgument). */
+		void NoteHandleArgument(const CallSite& a_site, const void* a_handle);
+
+		/** @brief Unwrap for one argument of a forwarded call: a handle is recorded at a_site, then replaced by what it wraps. */
+		template <class T>
+		T* UnwrapAt(T* a_object, const CallSite& a_site)
+		{
+			if (!a_object || !IsHandle(a_object))
+				return a_object;
+			NoteHandleArgument(a_site, a_object);
+			return Unwrap(a_object);
+		}
+
+		/**
+		 * @brief An interface array with its handles replaced by the objects they wrap; the source itself when it holds none. With
+		 * a_site, the first handle found is recorded there.
+		 */
 		template <class T>
 		class UnwrappedArray
 		{
 		public:
-			UnwrappedArray(T* const* a_source, UINT a_count) :
+			UnwrappedArray(T* const* a_source, UINT a_count, const CallSite* a_site = nullptr) :
 				result(a_source)
 			{
 				if (!a_source)
 					return;
-				bool any = false;
-				for (UINT i = 0; i < a_count && !any; ++i)
-					any = a_source[i] && IsHandle(a_source[i]);
-				if (!any)
+				UINT first = a_count;
+				for (UINT i = 0; i < a_count && first == a_count; ++i)
+					if (a_source[i] && IsHandle(a_source[i]))
+						first = i;
+				if (first == a_count)
 					return;
+				if (a_site)
+					NoteHandleArgument(*a_site, a_source[first]);
 				T** out = local.data();
 				if (a_count > local.size()) {
 					heap.resize(a_count);
@@ -135,9 +169,9 @@ namespace RenderGraph::Engine::Tripwire
 		};
 
 		template <class T>
-		UnwrappedArray<T> UnwrapArray(T* const* a_source, UINT a_count)
+		UnwrappedArray<T> UnwrapArray(T* const* a_source, UINT a_count, const CallSite* a_site = nullptr)
 		{
-			return { a_source, a_count };
+			return { a_source, a_count, a_site };
 		}
 
 		/** @brief Makes a handle class's objects recognisable (IsHandle): its vtable and how to reach its core. */
@@ -159,17 +193,22 @@ namespace RenderGraph::Engine::Tripwire
 #define TW_ZERO_N(p, n) ::RenderGraph::Engine::Tripwire::Detail::ZeroN(p, n);
 #define TW_ZERO_N_AT(p, n) ::RenderGraph::Engine::Tripwire::Detail::ZeroAt(p, n);
 #define TW_ZERO_BYTES(p, n) ::RenderGraph::Engine::Tripwire::Detail::ZeroBytes(p, n);
-#define TW_UNWRAP(p) ::RenderGraph::Engine::Tripwire::Unwrap(p)
-#define TW_UNWRAP_ARRAY(p, n) ::RenderGraph::Engine::Tripwire::Detail::UnwrapArray(p, n)
+#define TW_UNWRAP(p) ::RenderGraph::Engine::Tripwire::Detail::UnwrapAt(p, twSite)
+#define TW_UNWRAP_ARRAY(p, n) ::RenderGraph::Engine::Tripwire::Detail::UnwrapArray(p, n, &twSite)
 
 #define TW_SLOT_ENUM(Ret, Name, Params, Args, Fail) Name,
 #define TW_SLOT_NAME(Ret, Name, Params, Args, Fail) #Name,
-// A tripwire method: recorded as HandleCore::Enter decides, forwarded when an object is wrapped, else failed.
+// A tripwire method: recorded as HandleCore::Enter decides, forwarded when an object is wrapped, else failed. A forwarded
+// call's handle arguments are recorded at its site (twSite) as they are unwrapped.
 #define TW_TRIP(Ret, Name, Params, Args, Fail)                                                         \
 	Ret STDMETHODCALLTYPE Name Params override                                                         \
 	{                                                                                                  \
-		if (core.Enter(static_cast<std::uint16_t>(Slot::Name), #Name, _ReturnAddress()))               \
+		void* const twCaller = _ReturnAddress();                                                       \
+		if (core.Enter(static_cast<std::uint16_t>(Slot::Name), #Name, twCaller)) {                     \
+			[[maybe_unused]] const ::RenderGraph::Engine::Tripwire::Detail::CallSite twSite{ &core,    \
+				static_cast<std::uint16_t>(Slot::Name), #Name, twCaller };                             \
 			return static_cast<Interface*>(core.wrapped)->Name Args;                                   \
+		}                                                                                              \
 		TW_STRIP Fail return ::RenderGraph::Engine::Tripwire::Detail::Failure<Ret>();                  \
 	}
 
@@ -372,10 +411,31 @@ namespace RenderGraph::Engine::Tripwire
 		const std::vector<std::uint8_t> vsBytecode;
 	};
 
-	/** @brief The device and the context: everything but IUnknown and the debug name is a tripwire. */
-	template <class Trips, Kind K>
-	class PlainHandle final : public Handle<PlainHandle<Trips, K>, Trips, K>
+	/**
+	 * @brief The device: GetImmediateContext answers the context handle paired with it (PairDeviceAndContext), so a reader that
+	 * asks the device for its context gets the wrapping one. Everything else but IUnknown and the debug name is a tripwire.
+	 */
+	class DeviceHandle final : public Handle<DeviceHandle, ID3D11DeviceTrips, Kind::Device>
 	{
+	public:
+		~DeviceHandle();
+		void STDMETHODCALLTYPE GetImmediateContext(ID3D11DeviceContext** a_out) override;
+
+		/** @brief The paired context (a reference held), set once by PairDeviceAndContext. */
+		winrt::com_ptr<ID3D11DeviceContext> immediate;
+	};
+
+	/**
+	 * @brief The context: GetDevice answers the device handle paired with it. Everything else but IUnknown and the debug name is a
+	 * tripwire.
+	 */
+	class DeviceContextHandle final : public Handle<DeviceContextHandle, ID3D11DeviceContextTrips, Kind::DeviceContext>
+	{
+	public:
+		void STDMETHODCALLTYPE GetDevice(ID3D11Device** a_out) override;
+
+		/** @brief The paired device, no reference held (the device holds this context): cleared by the device's destructor. */
+		std::atomic<ID3D11Device*> device{ nullptr };
 	};
 
 	/** @brief The swap chain: GetDesc answered. */
@@ -411,6 +471,4 @@ namespace RenderGraph::Engine::Tripwire
 	using RasterizerStateHandle = DescHandle<ID3D11RasterizerStateTrips, Kind::RasterizerState, D3D11_RASTERIZER_DESC>;
 	using SamplerStateHandle = DescHandle<ID3D11SamplerStateTrips, Kind::SamplerState, D3D11_SAMPLER_DESC>;
 	using QueryHandle = DescHandle<ID3D11QueryTrips, Kind::Query, D3D11_QUERY_DESC>;
-	using DeviceContextHandle = PlainHandle<ID3D11DeviceContextTrips, Kind::DeviceContext>;
-	using DeviceHandle = PlainHandle<ID3D11DeviceTrips, Kind::Device>;
 }
