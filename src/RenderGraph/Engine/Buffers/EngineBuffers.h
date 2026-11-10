@@ -14,15 +14,17 @@ struct ID3D11Device;
  * - Static geometry: the buffers the geometry facade's creators (75473, 75476, 75481) make are ORG buffers in GPUUpload memory,
  *   filled through their mapping. The engine's TriShape fields get a guest DXVK buffer made from each, or a tripwire handle
  *   wrapping it when P4.1's wrapping context is installed. Releases come from any thread and go through the tripwire retirement.
+ * - The dynamic ring (75484): an ORG upload ring of persistently mapped chunks behind the engine's map contract. A full chunk is
+ *   retired through RenderGraphRuntime::ReleaseAfterD3D11 instead of the engine's event query, so nothing spins.
  *
- * Anything that fails falls back to the engine's D3D11 path for that buffer.
+ * Anything that fails falls back to the engine's D3D11 path for that buffer, or for the ring as a whole.
  */
 namespace RenderGraph::Engine::Buffers
 {
 	/** @brief Whether CS_ORG_ENGINE_BUFFERS=1. Any thread. */
 	bool Requested();
 
-	/** @brief Hooks::Install: when requested, detours the geometry creators. */
+	/** @brief Hooks::Install: when requested, detours the geometry creators, the ring's map and its unmaps. */
 	void InstallGameHooks();
 
 	/** @brief After the game's device exists (InitD3D): when requested, detours the device's CreateBuffer. */
@@ -47,6 +49,8 @@ namespace RenderGraph::Engine::Buffers
 	{
 		std::uint64_t created = 0, createdBytes = 0;  // static buffers made on ORG
 		std::uint64_t fallbacks = 0;                  // static buffers left to D3D11
+		std::uint32_t ringChunks = 0;                 // chunks the ring has made
+		bool ringActive = false;
 	};
 	Stats GetStats();
 }

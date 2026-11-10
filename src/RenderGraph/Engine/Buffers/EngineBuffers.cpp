@@ -170,10 +170,11 @@ namespace RenderGraph::Engine::Buffers
 	{
 		if (!Requested())
 			return;
-		logger::info("[ORG] engine buffers (CS_ORG_ENGINE_BUFFERS=1): hooking the geometry creators");
+		logger::info("[ORG] engine buffers (CS_ORG_ENGINE_BUFFERS=1): hooking the geometry creators and the dynamic ring");
 		stl::detour_thunk<CreateGeometry<0>>(REL::RelocationID(75473, 77259));  // CreateTriShape
 		stl::detour_thunk<CreateGeometry<1>>(REL::RelocationID(75476, 77262));  // CreateTriShapeSharedVertices
 		stl::detour_thunk<CreateGeometry<2>>(REL::RelocationID(75481, 77268));  // CreateDynamicTriShapeData
+		detail::InstallRingHooks();
 	}
 
 	void InstallDeviceHooks(ID3D11Device* a_device)
@@ -209,6 +210,8 @@ namespace RenderGraph::Engine::Buffers
 		stats.created = counters.created.load(std::memory_order_relaxed);
 		stats.createdBytes = counters.createdBytes.load(std::memory_order_relaxed);
 		stats.fallbacks = counters.fallbacks.load(std::memory_order_relaxed);
+		stats.ringChunks = counters.ringChunks.load(std::memory_order_relaxed);
+		stats.ringActive = counters.ringActive.load(std::memory_order_relaxed);
 		return stats;
 	}
 }

@@ -1,6 +1,6 @@
 #pragma once
 
-// What the engine buffers share (EngineBuffers.h). Only built with the render graph.
+// Shared by the static buffers and the dynamic ring (EngineBuffers.h). Only built with the render graph.
 
 #include <d3d11.h>
 
@@ -45,6 +45,11 @@ namespace RenderGraph::Engine::Buffers::detail
 	struct Counters
 	{
 		std::atomic<std::uint64_t> created{ 0 }, createdBytes{ 0 }, fallbacks{ 0 };
+		std::atomic<std::uint32_t> ringChunks{ 0 };
+		std::atomic<bool> ringActive{ false };
 	};
 	Counters& GetCounters();
+
+	/** @brief InstallGameHooks' part for the ring: the map (75484) and the three unmaps. */
+	void InstallRingHooks();
 }
