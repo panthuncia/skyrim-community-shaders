@@ -194,6 +194,13 @@ namespace FrameAnchors
 	 */
 	void Refresh(std::string_view a_id);
 
+	/**
+	 * @brief Whether a_anchor's graph, as last built, holds this registration of client a_id: its next run submits the client's
+	 * passes. A client registered or refreshed since then is not in it yet (the graph is built again on the host's thread).
+	 * Render thread.
+	 */
+	bool InBuiltGraph(std::string_view a_id, Anchor a_anchor);
+
 	/** @brief The client's one-shot passes (PassDesc::once) pending again: each runs at its anchor's next run. Render thread. */
 	void Rearm(std::string_view a_id);
 

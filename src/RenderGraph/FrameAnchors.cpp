@@ -17,6 +17,8 @@
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
+
+#	include <set>
 #	include <Resources/ExternalTextureResource.h>
 #	include <Resources/TextureDescription.h>
 #	include <rhi_helpers.h>
@@ -580,6 +582,14 @@ namespace FrameAnchors
 		}
 	}
 
+	bool InBuiltGraph(std::string_view a_id, Anchor a_anchor)
+	{
+		auto& state = Anchors();
+		const std::uint32_t index = IndexOf(a_anchor);
+		const auto* client = FindClient(state, a_id);
+		return client && index < kAnchors && client->serial <= state.built[index].load(std::memory_order_acquire);
+	}
+
 	void Rearm(std::string_view a_id)
 	{
 		auto& state = Anchors();
@@ -708,7 +718,17 @@ namespace FrameAnchors
 			if (!InGraphs(*client.desc) || !HasPasses(*client.desc, a_point.anchor))
 				continue;
 			const bool active = !client.desc->active || client.desc->active();
-			work = work || active || HasPendingOnce(client, a_point.anchor);
+			// A registration the graph does not hold yet also runs the epoch: the host builds the graph again only when the
+			// epoch is submitted, so a client waiting for it (InBuiltGraph) would otherwise wait forever. Its passes do nothing
+			// while it is inactive, as for any inactive client.
+			const bool joining = client.serial > state.built[index].load(std::memory_order_acquire);
+			if (joining) {
+				static std::set<std::string, std::less<>> logged;
+				if (logged.emplace(client.desc->id).second)
+					logger::info("[ORG] frame anchors: {} joins the {} graph (registration {}, graph built from {}): the epoch runs to build it",
+						client.desc->id, Name(a_point.anchor), client.serial, state.built[index].load(std::memory_order_acquire));
+			}
+			work = work || active || joining || HasPendingOnce(client, a_point.anchor);
 			clients.push_back({ client.desc, client.serial, active });
 		}
 		if (!work)
@@ -786,7 +806,17 @@ namespace FrameAnchors
 		if (!renderer || a_target >= static_cast<std::uint32_t>(RE::RENDER_TARGET::kTOTAL))
 			return nullptr;
 		const auto target = renderer->GetRuntimeData().renderTargets[a_target];
-		return Import(target.texture, fmt::format("cs.engine.target.{}", a_target),
+		// kFRAMEBUFFER is the swap chain's back buffer: the engine keeps only its RTV, so the texture comes from the view.
+		auto* texture = target.texture;
+		winrt::com_ptr<ID3D11Texture2D> fromView;
+		if (!texture && target.RTV) {
+			winrt::com_ptr<ID3D11Resource> resource;
+			reinterpret_cast<ID3D11RenderTargetView*>(target.RTV)->GetResource(resource.put());
+			if (resource)
+				fromView = resource.try_as<ID3D11Texture2D>();
+			texture = reinterpret_cast<decltype(texture)>(fromView.get());
+		}
+		return Import(texture, fmt::format("cs.engine.target.{}", a_target),
 			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, target.SRV, target.RTV, target.UAV); });
 	}
 
@@ -961,6 +991,7 @@ namespace FrameAnchors
 	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*, ID3D11UnorderedAccessView*) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> ImportDepth(const RE::BSGraphics::DepthStencilData&, const std::string&) { return nullptr; }
 	void ReleaseImport(std::string_view) {}
+	bool InBuiltGraph(std::string_view, Anchor) { return false; }
 	void Rearm(std::string_view) {}
 	void SetLateEpochHook(std::function<void()>) {}
 	std::uint32_t SegmentOf(Anchor) { return 0; }
