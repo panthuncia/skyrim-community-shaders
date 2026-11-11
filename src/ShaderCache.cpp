@@ -110,15 +110,28 @@ namespace SIE
 		}
 
 		/**
+		 * @brief Whether an image-space shader is BSLensFlare, the lens flare sprite.
+		 *
+		 * Tells it by name (+0x120, set by every image-space constructor; SE and AE). Its constructor never sets
+		 * originalShaderName (+0x128), so that field holds whatever the allocation held: never read it for this shader.
+		 */
+		static bool IsLensFlareSprite(const RE::BSImagespaceShader& a_shader)
+		{
+			return a_shader.name != nullptr && std::string_view(a_shader.name) == "BSLensFlare";
+		}
+
+		/**
 		 * @brief The source file (under Data/Shaders, without .hlsl) an image-space shader builds from.
 		 *
-		 * This is the engine's originalShaderName, except for two engine quirks: BSLensFlare has none, and the three
-		 * lighting composites carry the misspelling "ISLigthingComposite".
+		 * This is the engine's originalShaderName, except for two engine quirks: BSLensFlare has none (the field is left
+		 * uninitialized), and the three lighting composites carry the misspelling "ISLigthingComposite".
 		 */
 		static const char* GetImagespaceSourceName(const RE::BSImagespaceShader& a_shader)
 		{
+			if (IsLensFlareSprite(a_shader))
+				return "ISLensFlare";
 			if (a_shader.originalShaderName == nullptr)
-				return a_shader.name != nullptr && std::string_view(a_shader.name) == "BSLensFlare" ? "ISLensFlare" : "ImageSpace";
+				return "ImageSpace";
 			if (std::string_view(a_shader.originalShaderName) == "ISLigthingComposite")
 				return "ISLightingComposite";
 			return a_shader.originalShaderName;
@@ -1367,8 +1380,11 @@ namespace SIE
 
 		static std::string GetShaderString(ShaderClass shaderClass, const RE::BSShader& shader, uint32_t descriptor, bool hashkey)
 		{
-			// BSLensFlare has no fxp name; fall back on its source file name so the key never formats a null string.
-			const char* sourceShaderFile = shader.fxpFilename ? shader.fxpFilename : GetSourceName(shader);
+			// BSLensFlare's fxp name is "LensFlare", which says nothing of its source and does not start with "IS" as
+			// GetTypeFromShaderString expects, so its key uses its source file name. A null fxp name falls back the same way.
+			const bool lensFlareSprite = shader.shaderType == RE::BSShader::Type::ImageSpace &&
+			                             IsLensFlareSprite(static_cast<const RE::BSImagespaceShader&>(shader));
+			const char* sourceShaderFile = shader.fxpFilename && !lensFlareSprite ? shader.fxpFilename : GetSourceName(shader);
 			std::array<D3D_SHADER_MACRO, 64> defines{};
 			SIE::SShaderCache::GetShaderDefines(shader, descriptor, std::span{ defines });
 			std::string result;

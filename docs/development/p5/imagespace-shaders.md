@@ -28,8 +28,10 @@ x2, SAOBlur H/V CS, SAOCameraZAndMipsCS, SAORawAO, SAORawAONoTemporal, SAORawAOC
 
 The log line is `CS_IMAGESPACE_SOURCES=<value>: image-space shaders build from CS sources`. The 39 active slots stay in the old
 map and are not affected. ShaderCache now resolves an image-space source file through one helper (`GetImagespaceSourceName`),
-which maps BSLensFlare (no `originalShaderName`) to `ISLensFlare.hlsl` and the misspelled `ISLigthingComposite` to
-`ISLightingComposite.hlsl`. A null fxp name no longer reaches the cache key.
+which maps BSLensFlare to `ISLensFlare.hlsl` and the misspelled `ISLigthingComposite` to
+`ISLightingComposite.hlsl`. BSLensFlare is told by its name (+0x120): its constructor never sets `originalShaderName`
+(+0x128), so that field holds leftover heap bytes (an AE crash dump showed `0x001000f208000036`) and is never read for it.
+Its fxp name (+0x88) is `LensFlare`; its cache key uses `ISLensFlare` instead.
 
 Scenarios: `tools/cs-ab/scenarios/is-sources-0.env` (off) and `is-sources-1.env` (`all`) take the same shots: Whiterun by day
 and at night, the world map (`dclf:menu=MapMenu=show`), Dragonsreach and Riverwood's water. Underwater is not scripted: no
