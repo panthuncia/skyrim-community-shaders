@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include <winrt/base.h>
+
 #include "Features/Skin.h"
 #include "Globals.h"
 
@@ -30,12 +32,15 @@ namespace DCLF::Integrations::AdvancedSkin
 		constexpr auto kFaceGenRGBTint = static_cast<std::uint32_t>(RE::BSShaderMaterial::Feature::kFaceGenRGBTint);
 		constexpr auto kHashKey = static_cast<std::uint16_t>(offsetof(RE::BSShaderMaterial, hashKey));
 
-		/** @brief Advanced Skin's t71/t74 views for one material hash key (Skin::skinExtraTextures, resolved as MaterialTexturesOf does). */
+		/**
+		 * @brief Advanced Skin's t71/t74 views for one material hash key (Skin::skinExtraTextures, resolved as MaterialTexturesOf does),
+		 * referenced: Skin drops its entries (an actor unloaded, a load) while records made from this table still name the views.
+		 */
 		struct SkinTextures
 		{
 			std::uint32_t hashKey = 0;
-			ID3D11ShaderResourceView* rfaos = nullptr;    // t71
-			ID3D11ShaderResourceView* wetness = nullptr;  // t74
+			winrt::com_ptr<ID3D11ShaderResourceView> rfaos;    // t71
+			winrt::com_ptr<ID3D11ShaderResourceView> wetness;  // t74
 		};
 		// The contributor's held table: sorted by hashKey; shared between frames while unchanged. A key missing here is one
 		// MaterialTexturesOf has not set up yet (SetupExtraTexture, render thread): covers is false for it.
@@ -48,15 +53,19 @@ namespace DCLF::Integrations::AdvancedSkin
 			static SkinTextureTable scratch;
 			scratch.clear();
 			for (const auto& [hashKey, entry] : globals::features::skin.skinExtraTextures) {
-				SkinTextures textures{ hashKey, a_black, a_black };
+				SkinTextures textures{ hashKey };
+				textures.rfaos.copy_from(a_black);
+				textures.wetness.copy_from(a_black);
 				if (entry.hasExtraTexture || entry.hasWetnessTexture) {
-					textures.rfaos = MaterialPort::ViewOfTexture(entry.rfaosTexture.get());
-					textures.wetness = MaterialPort::ViewOfTexture(entry.wetnessTexture.get());
+					textures.rfaos.copy_from(MaterialPort::ViewOfTexture(entry.rfaosTexture.get()));
+					textures.wetness.copy_from(MaterialPort::ViewOfTexture(entry.wetnessTexture.get()));
 				}
-				scratch.push_back(textures);
+				scratch.push_back(std::move(textures));
 			}
 			std::sort(scratch.begin(), scratch.end(), [](const SkinTextures& a, const SkinTextures& b) { return a.hashKey < b.hashKey; });
-			const auto same = [](const SkinTextures& a, const SkinTextures& b) { return a.hashKey == b.hashKey && a.rfaos == b.rfaos && a.wetness == b.wetness; };
+			const auto same = [](const SkinTextures& a, const SkinTextures& b) {
+				return a.hashKey == b.hashKey && a.rfaos.get() == b.rfaos.get() && a.wetness.get() == b.wetness.get();
+			};
 			if (!held || !std::equal(held->begin(), held->end(), scratch.begin(), scratch.end(), same))
 				held = std::make_shared<const SkinTextureTable>(scratch);
 			return held;
@@ -119,7 +128,7 @@ namespace DCLF::Integrations::AdvancedSkin
 				return Api::MaterialOutcome::Made;
 			}
 			if (const auto* textures = FindSkinTextures(a_evaluation, hashKey))
-				skin(textures->rfaos, textures->wetness);
+				skin(textures->rfaos.get(), textures->wetness.get());
 			// A key Advanced Skin has not set up yet: left null (Covers is false for it).
 			return Api::MaterialOutcome::Made;
 		}

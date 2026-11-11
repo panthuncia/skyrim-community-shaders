@@ -2,6 +2,11 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
+#include <vector>
+
+#include <d3d11.h>
+#include <winrt/base.h>
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialHookFrame.h"
@@ -28,6 +33,17 @@ namespace DCLF::MaterialPort
 		bool operator==(const FrameComponentsWitness&) const = default;
 	};
 
+	/**
+	 * @brief References on every view a frame's sources hand an evaluation (render targets, default textures, the contributors' held
+	 * tables), taken by the render thread where it samples them. A record made from the frame names those views as bare pointers;
+	 * whatever keeps the record (a material slot's pins) keeps this. Shared between frames while the views are unchanged.
+	 */
+	struct FrameViewHold
+	{
+		std::vector<winrt::com_ptr<ID3D11ShaderResourceView>> views;
+		std::vector<std::shared_ptr<const void>> contributors;  // the samples' held tables (Advanced Skin's holds its views)
+	};
+
 	/** @brief The per-frame sources SetupMaterial reads (sampled by the render thread at the frame's start: FrameGlobals::material). */
 	struct MaterialFrame
 	{
@@ -35,6 +51,7 @@ namespace DCLF::MaterialPort
 		HookFrame hook;        // MaterialHookFrame.h
 		Extensions::MaterialContributorSamples contributors;  // the material contributors' samples (Core/Extensions/Materials.h)
 		FrameComponentsWitness components;  // of the three (SampleFrame)
+		std::shared_ptr<const FrameViewHold> held;  // the references on the views above (SampleFrame)
 	};
 
 	/** @brief Pure: a_frame's witness (SampleFrame sets MaterialFrame::components from it). */

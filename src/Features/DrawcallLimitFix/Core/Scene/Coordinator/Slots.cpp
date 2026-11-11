@@ -182,7 +182,7 @@ namespace DCLF::Scene
 		tables.Retire(Tables::kRetiredMaterialLookup, a_slot);
 	}
 
-	void Coordinator::PinMaterialViews(std::uint32_t a_slot)
+	void Coordinator::PinMaterialViews(std::uint32_t a_slot, const MaterialPort::HeldSnapshot& a_held, const MaterialPort::MaterialFrame& a_frame)
 	{
 		if (a_slot >= tables.materials.size())
 			return;
@@ -199,17 +199,23 @@ namespace DCLF::Scene
 		if (materialViewPins.size() <= a_slot)
 			materialViewPins.resize(std::size_t(a_slot) + 1);
 		auto& pins = materialViewPins[a_slot];
-		// The same views (a rewrite that moved only constants): the references held already.
-		if (pins && std::equal(named.begin(), named.end(), pins->views.begin(), pins->views.end(),
-						[](ID3D11ShaderResourceView* a_view, const winrt::com_ptr<ID3D11ShaderResourceView>& a_pin) { return a_view == a_pin.get(); }))
+		// The same views (a rewrite that moved only constants): the pins hold them, so the pointers are the same objects.
+		if (pins ? pins->named == named : named.empty())
 			return;
-		if (!pins && named.empty())
-			return;
-		auto next = named.empty() ? nullptr : std::make_shared<MaterialViewPins>();
-		if (next) {
-			next->views.resize(named.size());
-			for (std::size_t i = 0; i < named.size(); ++i)
-				next->views[i].copy_from(named[i]);
+		std::shared_ptr<MaterialViewPins> next;
+		if (!named.empty()) {
+			next = std::make_shared<MaterialViewPins>();
+			next->named = named;
+			const auto count = std::min<std::size_t>(a_held.snapshot.textureCount, a_held.views.size());
+			for (auto* view : named) {
+				// The capture's reference (it holds the view), else the frame's sources hold it. Never one taken on the pointer itself.
+				const auto captured = std::find_if(a_held.views.begin(), a_held.views.begin() + static_cast<std::ptrdiff_t>(count),
+					[&](const winrt::com_ptr<ID3D11ShaderResourceView>& a_ref) { return a_ref.get() == view; });
+				if (captured != a_held.views.begin() + static_cast<std::ptrdiff_t>(count))
+					next->views.push_back(*captured);
+				else
+					next->frame = a_frame.held;
+			}
 		}
 		// Taken before the old ones go: a view in both is never released in between.
 		ReleaseMaterialViews(a_slot);

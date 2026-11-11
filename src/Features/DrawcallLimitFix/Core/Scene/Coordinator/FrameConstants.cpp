@@ -218,7 +218,7 @@ namespace DCLF::Scene
 			if (result.same)
 				continue;
 			tables.materials[item.slot] = std::move(result.record);
-			PinMaterialViews(item.slot);
+			PinMaterialViews(item.slot, *materialSnapshots.find(item.material)->second.held, sources);
 			tables.materialVersion[item.slot] = ++materialVersions;
 			tables.NoteMaterial(item.slot);
 			++r.rewritten;

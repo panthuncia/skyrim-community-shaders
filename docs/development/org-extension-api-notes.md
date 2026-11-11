@@ -1596,6 +1596,9 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   cell unloads; R6.1, R6.6), and an object that holds the material does not keep its textures' views alive. A raw view
   pointer is valid only while the reader holds its own reference: take it at the read, where the engine provably holds
   the texture, and keep it for as long as the pointer is stored (DCLF: `HeldSnapshot::views` at capture,
-  `Coordinator::PinMaterialViews` per material slot). In tripwire guest mode the reference keeps the handle alive too.
-  An API should hand out referenced views (or a stable texture identity), never bare pointers.
-- **Found by:** the SRV lifetime fix (2026-11-11), a crash in `GpuTextures::Request` from `UpdateMaterialBindings`.
+  `MaterialFrame::held` for the frame's sources, Advanced Skin's table). A later holder copies the reference from the
+  first one (`Coordinator::PinMaterialViews` copies the capture's and the frame's); an AddRef on a stored pointer comes
+  too late, as the view may be dead already. In tripwire guest mode the reference keeps the handle alive too. An API
+  should hand out referenced views (or a stable texture identity), never bare pointers.
+- **Found by:** the SRV lifetime fixes (2026-11-11), crashes in `GpuTextures::Request` from `UpdateMaterialBindings`
+  and in the first `PinMaterialViews`, which took its references on the record's pointers.

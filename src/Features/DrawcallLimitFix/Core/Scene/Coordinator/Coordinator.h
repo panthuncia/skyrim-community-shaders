@@ -581,19 +581,26 @@ namespace DCLF
 				retirement.Open().owners.push_back(std::make_shared<MaterialReference>(std::move(a_material)));
 		}
 		/**
-		 * @brief A reference on each view a material slot's record names. The record's views are raw pointers read from the engine's
-		 * textures, and the engine releases a texture on any thread (loader threads, ClearTextures on a cell's unload). The held capture
-		 * the record was made from pins them only until a newer capture replaces it or it ages out, while the record can stay longer (a
-		 * rewrite the port cannot evaluate keeps it). The slot holds its own references for as long as its record names the views.
+		 * @brief What keeps the views a material slot's record names alive. The record's views are raw pointers read from the engine's
+		 * textures and the frame's sources, and the engine releases a texture on any thread (loader threads, ClearTextures on a cell's
+		 * unload; Advanced Skin drops its entries on a load). The held capture the record was made from holds its views only until a newer
+		 * capture replaces it or it ages out, while the record can stay longer (a rewrite the port cannot evaluate keeps it). The slot
+		 * takes its references from what holds the views when the record is stored: the capture's own (HeldSnapshot::views) and the
+		 * frame's (MaterialFrame::held). A pointer read from the record is never referenced: it may be dead already.
 		 */
 		struct MaterialViewPins
 		{
-			std::vector<winrt::com_ptr<ID3D11ShaderResourceView>> views;
+			std::vector<ID3D11ShaderResourceView*> named;                 // the record's views, in record order (pins kept while the same)
+			std::vector<winrt::com_ptr<ID3D11ShaderResourceView>> views;  // copied from the capture's references
+			std::shared_ptr<const MaterialPort::FrameViewHold> frame;     // the frame's, when the record names a view the capture does not
 		};
 		// Per material slot: the views its record names (PinMaterialViews), retired through the chain with the slot's other references.
 		std::vector<std::shared_ptr<MaterialViewPins>> materialViewPins;
-		/** @brief After a_slot's record was stored (its views alive: its capture holds them): references on its views, the old ones retired. */
-		void PinMaterialViews(std::uint32_t a_slot);
+		/**
+		 * @brief After a_slot's record was stored from a_held under a_frame (both alive, holding the record's views): the slot's references,
+		 * the old ones retired.
+		 */
+		void PinMaterialViews(std::uint32_t a_slot, const MaterialPort::HeldSnapshot& a_held, const MaterialPort::MaterialFrame& a_frame);
 		/** @brief a_slot's view references, retired through the chain (a publication may still name the record). */
 		void ReleaseMaterialViews(std::uint32_t a_slot);
 		struct RetirementStats

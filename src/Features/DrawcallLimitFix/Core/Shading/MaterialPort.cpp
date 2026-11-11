@@ -128,12 +128,49 @@ namespace DCLF::MaterialPort
 		return w;
 	}
 
+	namespace
+	{
+		/** @brief Render thread, where the engine holds them: references on the frame's views; the last hold again while they are the same. */
+		std::shared_ptr<const FrameViewHold> HoldFrameViews(const MaterialFrame& a_frame)
+		{
+			static std::shared_ptr<const FrameViewHold> last;
+			std::vector<ID3D11ShaderResourceView*> views;
+			auto add = [&](ID3D11ShaderResourceView* a_view) {
+				if (a_view)
+					views.push_back(a_view);
+			};
+			add(a_frame.vanilla.envMaskDefaultView);
+			for (auto* view : a_frame.vanilla.renderTargetViews)
+				add(view);
+			for (auto* view : a_frame.hook.renderTargetViews)
+				add(view);
+			add(a_frame.hook.defaultBlackView);
+			add(a_frame.hook.defaultWhiteView);
+			add(a_frame.hook.defaultNormalMapView);
+			std::vector<std::shared_ptr<const void>> contributors;
+			for (const auto& sample : a_frame.contributors.contributors)
+				if (sample.held)
+					contributors.push_back(sample.held);
+			const auto same = [](const winrt::com_ptr<ID3D11ShaderResourceView>& a_held, ID3D11ShaderResourceView* a_view) { return a_held.get() == a_view; };
+			if (last && std::equal(last->views.begin(), last->views.end(), views.begin(), views.end(), same) && last->contributors == contributors)
+				return last;
+			auto hold = std::make_shared<FrameViewHold>();
+			hold->views.resize(views.size());
+			for (std::size_t i = 0; i < views.size(); ++i)
+				hold->views[i].copy_from(views[i]);
+			hold->contributors = std::move(contributors);
+			last = std::move(hold);
+			return last;
+		}
+	}
+
 	MaterialFrame SampleFrame()
 	{
 		MaterialFrame frame{ SampleVanillaFrame(), SampleHookFrame() };
 		// The contributors after the hook frame (Advanced Skin's table resolves against its default black view).
 		Extensions::SampleMaterialContributors(frame.hook, frame.contributors);
 		frame.components = WitnessOf(frame.vanilla, frame.hook, frame.contributors);
+		frame.held = HoldFrameViews(frame);
 		return frame;
 	}
 
