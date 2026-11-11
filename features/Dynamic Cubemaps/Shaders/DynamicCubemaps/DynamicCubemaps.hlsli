@@ -3,6 +3,7 @@
 
 #include "Common/BRDF.hlsli"
 #include "Common/ColorManagement.hlsli"
+#include "Common/OrgResources.hlsli"
 
 #if defined(SKYLIGHTING)
 #	include "Skylighting/Skylighting.hlsli"
@@ -14,8 +15,8 @@
 
 namespace DynamicCubemaps
 {
-	TextureCube<float3> EnvReflectionsTexture : register(t30);
-	TextureCube<float3> EnvTexture : register(t31);
+	ORG_HEADER_SRV(TextureCube<float3>, EnvReflectionsTexture, 30)
+	ORG_HEADER_SRV(TextureCube<float3>, EnvTexture, 31)
 
 #if !defined(WATER)
 

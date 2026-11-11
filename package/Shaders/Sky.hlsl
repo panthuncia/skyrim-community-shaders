@@ -3,7 +3,8 @@
 
 #if defined(CS_ORG_BINDLESS)
 // The ORG build (Drawcall Limit Fix's sky family, Features/DrawcallLimitFix/Features/Sky). One push block serves both stages. The
-// shared constants and the headers' resources (the scene depth t17, Cloud Shadows' t25 and t26) come from the heap.
+// shared constants and the headers' resources (the scene depth t17, Cloud Shadows' t25 and t26, IBL's t76 and t77 and Dynamic
+// Cubemaps' t30 and t31, which the Exponential Height Fog header includes) come from the heap.
 #	define ORG_SHARED_CONSTANTS
 #	define ORG_HEADER_RESOURCES
 #	include "Common/OrgResources.hlsli"
@@ -46,6 +47,10 @@ struct SkyOrgGeometry
 		X(EXTERN, Texture2D<float4>, DepthTexture, 17)            \
 		X(EXTERN, TextureCube<float>, CloudShadowsTexture, 25)    \
 		X(EXTERN, TextureCube<float>, CloudSelfShadowTexture, 26) \
+		X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)              \
+		X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)              \
+		X(EXTERN, TextureCube<float3>, EnvReflectionsTexture, 30) \
+		X(EXTERN, TextureCube<float3>, EnvTexture, 31)            \
 		X(SAMPLER, SamplerState, SampBaseSampler, 0)              \
 		X(SAMPLER, SamplerState, SampBlendSampler, 1)             \
 		X(SAMPLER, SamplerState, SampNoiseGradSampler, 2)         \
