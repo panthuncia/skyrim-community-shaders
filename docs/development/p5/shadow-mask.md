@@ -107,6 +107,22 @@ t5, the main depth's stencil view (DXGI 47, X24_TYPELESS_G8_UINT), and takes the
   a view: org-extension-api-notes.md, "A stencil view of a depth-stencil image". Until then the only way would be a D3D11 copy
   of the stencil into an R8_UINT texture the graph imports.
 
+### The shadow map at t3 and t4
+
+The shadow mask descriptors carry filter selector 3 (bits 17 and 18), which ShaderCache does not support: it logs
+`Unsupported Utility shadow-filter selector 0x3` and builds SHADOWFILTER 0 for both builds (dclf-validation.md, "Bugs found by
+parity"). SHADOWFILTER 0 samples the shadow map through its plain view, t3, and compares by hand; the other filters use the
+comparison view, t4.
+
+- **Why the world's sun masks came out black.** Latched from t3, the sun's masks read a null view (2026-11-11, a probe of the
+  bound views' sizes: t3 0 wide, t4 the cascade array, about 4096 wide with 2 slices). Every sample was 0, below every compare
+  value, so every pixel was in shadow, and with the masks on the graph the sun lit nothing.
+- **The ORG build** reads the plain view through t4's index (`TexShadowMapSampler` is `Textures[1].x`): t3 and t4 are views of the
+  same shadow map, and every light type samples both at the same slice. t3 is no longer a read slot (`SlotRead`); its sampler, s3,
+  still is (`SamplerRead`), since the filter-0 path samples through it.
+- `shadow-mask-org1.env` against `shadow-mask-org0.env` after the change: mean diffs 2.2 (Whiterun), 4.7 (Dragonsreach), 2.5 and
+  2.5 (inventory, magic), the differences walking NPCs; 16 to 22 before.
+
 ### The shader's ORG build
 
 `Utility.hlsl` under `CS_ORG_BINDLESS` (RasterProgram's builds only; DCLF's own Utility builds define `DCLF_BINDLESS` and are unchanged)

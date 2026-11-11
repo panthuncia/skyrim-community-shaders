@@ -1145,6 +1145,18 @@ Bugs DCLF's parity checks found in other Community Shaders features, in the engi
     follows the fix. A FaceGen material with no hash key or no extra texture binds black to both. Capture parity's `skin parity`
     line compares t71 and t74.
 
+**ShaderCache: the shadow masks' filter selector 3 is unsupported, so every shadow mask builds SHADOWFILTER 0.** Still present.
+-   Where: `ShaderCache.cpp`'s Utility defines take the shadow mask filter from the descriptor's bits 17-20 and accept 0, 1, 2, 4
+    and 8. The engine's sun, spot and point light masks carry 3 there (bits 17 and 18: descriptors `0x262102`, `0x462102`,
+    `0x1062002`, `0x462002`), so each build logs `Unsupported Utility shadow-filter selector 0x3` and falls back to SHADOWFILTER 0:
+    one plain sample of t3 and a hand compare, with no PCF. Both the D3D11 and the ORG builds take the same defines.
+-   Unverified: what the engine means by 3. The table treats the field as one bit per filter; the field may be a number, and 3 a
+    filter the table maps to nothing. The vanilla shader's own handling (the engine's Utility PS for these descriptors) is the
+    reference to read before choosing a fix.
+-   Found by the shadow mask port's parity (p5/shadow-mask.md, "The shadow map at t3 and t4"): the ORG build read t3 as the engine
+    latched it, a null view, and every sun mask came out black. The ORG build now reads the shadow map through t4's index, so it
+    matches the D3D11 build whatever the fix here turns out to be.
+
 **Terrain Blending leaks write mode 1 into the blended decals that follow its hook.** The difference is on RT0 alpha only, which
 the composite never reads. DCLF's rule: derive write mode 11 for those decals; the difference is accepted.
 
