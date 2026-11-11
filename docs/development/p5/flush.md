@@ -187,6 +187,25 @@ DrawTriShape (77263) from Bink's DrawTiles +0x146, DrawDynamicTriShape (77275) f
 build logged one line per draw-function site, so DrawTriShape's other callers went unnamed; the latch now logs once per site
 and caller chain.
 
+## The census after wave 3 (2026-11-11, `1111-131713-p35-p5-all-census-misc-fin`)
+
+`p5-all-census-misc.env` with the wave 3 fixes (shadow masks, family inputs, ImageSpace's end-of-frame effects). Settled Whiterun
+reads 40 engine draws a frame, down from about 95; the load windows read 80-205 (DCLF's objects not yet claimed, by design).
+
+| Class (settled Whiterun) | Per frame | Owner |
+| --- | --- | --- |
+| Sky cloud layers into the reflection cube (15.3) and `kMAIN` (8) | 23.3 | `CS_ORG_SKY_CLOUDS`, off in the scenario: needs its verification run |
+| Sky, descriptor 0, through AE 106604 +0x131, into `kMAIN` with `kMAIN` and with `kPOST_ZPREPASS_COPY` | 2 | Not identified yet (the sky family's scope) |
+| Utility RENDER_NORMAL into `kREFRACTION_NORMALS` | 3 | DCLF's refraction class |
+| Effect through the particle draw (+0x101): master particle systems | 3 | `CS_DCLF_MASTER_PARTICLES`, off by default |
+| ImageSpace: DistantBlur (`kFRAMEBUFFER`), HDRDownSample4 into `kLDR_DOWNSAMPLE0`, ISWaterBlend, ISSAOCompositeFog, ISApplyVolumetricLighting (two draws, two compute blurs) | 7 | P5.6 |
+| Volumetric lighting's dispatches (AE 107023 +0x31C, +0x48B) | 2 | P5.6's VL row |
+
+Elsewhere: Blackreach's precipitation particles (10 a frame, no port), the map and journal windows' Utility (16-20, the menu
+scenes' and the map's own views, P5.8/P5.9), Scaleform's `DrawBitmaps` paths (AE 84956, 84961: 2-5 a frame), and
+`zz_SkyrimEngineTelemetry.dll` (7, another plugin). Flushes: 89 a frame, 49 followed by no draw; shader binds 63 each, 49
+followed by no draw (all from `BeginTechnique`).
+
 ## DCLF's share
 
 The census of 2026-11-11 (`1111-072658-p35-p5-all-census-w3`, `p5-all-census.env`) read for what Drawcall Limit Fix leaves the
