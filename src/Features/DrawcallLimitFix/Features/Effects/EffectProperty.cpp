@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
+#include "Features/DrawcallLimitFix/Features/Effects/EffectDescriptors.h"
 
 #include <algorithm>
 
@@ -39,14 +40,18 @@ namespace DCLF::Features::Effects
 		const auto* material = static_cast<const RE::BSEffectShaderMaterial*>(effect.material);
 		auto& row = a_shading.out;
 		auto& shading = row.shading;
-		shading.materialData[0] = shading.materialData[1] = shading.materialData[3] = 0.0f;
+		shading.materialData[0] = shading.materialData[1] = 0.0f;
 		shading.materialData[2] = a_shading.member && material ? material->baseColor.alpha : effect.alpha;
+		// The Lighting variant's light 0 (Effect.hlsl, DLightColor): 1 for the cloud light's row, which FUN_1414fcf80 takes for a
+		// kCloudLOD property (CS_DCLF_EFFECT_CLOUD_LIGHT; without it such a property is a variant the engine draws), 0 for the sun's.
+		const bool cloudLight = Ported().cloudLighting && effect.flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kCloudLOD);
+		shading.materialData[3] = cloudLight ? 1.0f : 0.0f;
 		const auto* emittance = effect.emittanceColor;
 		shading.emitColor[0] = emittance ? emittance->red : 1.0f;
 		shading.emitColor[1] = emittance ? emittance->green : 1.0f;
 		shading.emitColor[2] = emittance ? emittance->blue : 1.0f;
 		shading.ssrSpecular = 0.0f;
-		row.written = 4u | 0x70u;
+		row.written = 4u | 0x70u;  // MaterialData.w is DCLF's own (no SetupGeometry write to compare)
 		row.padding[0] = row.padding[1] = row.padding[2] = 0u;
 		std::fill(std::begin(row.featureBlock), std::end(row.featureBlock), 0.0f);
 	}

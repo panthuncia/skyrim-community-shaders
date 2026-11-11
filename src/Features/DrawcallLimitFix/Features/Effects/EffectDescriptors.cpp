@@ -19,6 +19,7 @@ namespace DCLF::Features::Effects
 		constexpr std::uint64_t Bit(Flag a_flag) { return static_cast<std::uint64_t>(a_flag); }
 
 		Api::ClassifyInputId lightLimitFix;  // install (NeedLightLimitFix)
+		PortedVariants ported;               // install (SetPortedVariants)
 
 		/** @brief How DeriveEffectDescriptors draws a pass it keeps: the decal, opaque or forward group, and the blend mode. */
 		struct EffectDraw
@@ -51,6 +52,13 @@ namespace DCLF::Features::Effects
 			// blended by the frame's alpha: DCLF keeps it opaque (dclf-architecture.md, "Opaque effects").
 			const bool opaqueEffects = Extensions::ObjectClassTaken(Api::ObjectClass::OpaqueEffect);
 			a_draw.opaque = !a_draw.blending && !a_draw.decal;
+			// Falloff without blending (CS_DCLF_EFFECT_FALLOFF): GetRenderPasses (0x1414bd890) makes the pass hint 1 for the descriptor's
+			// Falloff alone, and the alpha setup (FUN_14150bc80) without a blending alpha property leaves blending off while the property
+			// alpha is one (alpha over below one). The forward epoch draws it unblended in its sort, depth as its flags say. While the
+			// property alpha is below one (a fade) the engine blends it and DCLF does not, as with the opaque effects. Particles never
+			// have the descriptor's Falloff.
+			if (a_draw.opaque && ported.falloff && (f & Bit(Flag::kFalloff)) && !ParticleGeometryType(a_leaf.Type()))
+				a_draw.opaque = false;
 			if (a_draw.opaque && (!opaqueEffects || !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Decal) || (f & Bit(Flag::kFalloff)) || !(f & Bit(Flag::kZBufferTest)) ||
 									 !(f & Bit(Flag::kZBufferWrite)) || ParticleGeometryType(a_leaf.Type())))
 				return Ineligible::EffectOpaque;
@@ -214,7 +222,9 @@ namespace DCLF::Features::Effects
 		// the sun (ShadowSceneNode +0x200) unless kCloudLOD picks the cloud light (+0x208); the port has the sun's alone. Point lights
 		// are Light Limit Fix's clusters (Effect.hlsl, GetLightingColor), the pass's own PerGeometry lights without it.
 		if (f & Bit(Flag::kEffectLighting)) {
-			if (f & Bit(Flag::kCloudLOD))
+			// With CS_DCLF_EFFECT_CLOUD_LIGHT the cloud light's colour is a frame row of its own (EffectFrame.cpp) and the shading row
+			// picks it (EffectProperty.cpp), so kCloudLOD is no variant.
+			if ((f & Bit(Flag::kCloudLOD)) && !ported.cloudLighting)
 				variants |= kEffectVariantCloudLighting;
 			if (!Extensions::ClassifyInputOn(lightLimitFix))
 				variants |= kEffectVariantLightingNoLlf;
@@ -237,6 +247,16 @@ namespace DCLF::Features::Effects
 			return reason;
 		WriteEffectDescriptors(EffectPassOf(a_property, a_leaf, draw.particles), a_property.flags, draw, a_out);
 		return Ineligible::None;
+	}
+
+	void SetPortedVariants(const PortedVariants& a_variants)
+	{
+		ported = a_variants;
+	}
+
+	const PortedVariants& Ported()
+	{
+		return ported;
 	}
 
 	void NeedLightLimitFix(Api::InstallContext& a_context)

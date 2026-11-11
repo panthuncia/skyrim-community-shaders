@@ -44,7 +44,7 @@ namespace DCLF::Features::Effects
 		kEffectVariantDecal = 1u << 2,          // kDecal / kDynamicDecal with CS_DCLF_DECALS off, or one that registers no pass
 		kEffectVariantSkyObject = 1u << 3,      // bit 45: hint 0x12, geometry group 13
 		kEffectVariantWireframe = 1u << 4,      // bit 48
-		kEffectVariantCloudLighting = 1u << 5,  // kEffectLighting with kCloudLOD: the cloud light is its light 0 (FUN_1414fcf80)
+		kEffectVariantCloudLighting = 1u << 5,  // kEffectLighting with kCloudLOD while CS_DCLF_EFFECT_CLOUD_LIGHT is 0
 		kEffectVariantLightingNoLlf = 1u << 6,  // kEffectLighting without Light Limit Fix (PerGeometry PLight*)
 		kEffectVariantBlood = 1u << 7,          // kWeaponBlood
 		kEffectVariantProjectedUv = 1u << 8,    // kProjectedUV
@@ -65,6 +65,20 @@ namespace DCLF::Features::Effects
 	/** @brief Every particle cause bit. */
 	inline constexpr std::uint32_t kEffectVariantParticles = kEffectVariantParticle | kEffectVariantParticleClass | kEffectVariantParticleData |
 	                                                         kEffectVariantParticleAligned | kEffectVariantParticleUnblended | kEffectVariantParticleDecal;
+	/**
+	 * @brief The variants the port draws behind switches of their own (read once at install, EffectsFeature.cpp; before any
+	 * classification, so any thread reads them after):
+	 * - cloudLighting (CS_DCLF_EFFECT_CLOUD_LIGHT): the Lighting variant of a kCloudLOD property, lit by the scene's cloud light
+	 *   (EffectFrame.cpp's cloud light row, chosen by the shading row: EffectProperty.cpp);
+	 * - falloff (CS_DCLF_EFFECT_FALLOFF): a mesh with Falloff and no blending alpha property, drawn unblended in the forward sort.
+	 */
+	struct PortedVariants
+	{
+		bool cloudLighting = false;
+		bool falloff = false;
+	};
+	void SetPortedVariants(const PortedVariants& a_variants);
+	const PortedVariants& Ported();
 	/** @brief The EffectVariantBit set of an effect property on a leaf, from the records. */
 	std::uint32_t EffectVariantsOf(const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf);
 	/** @brief The effect pass descriptor's Skinned bit (FUN_1414bde90): the property's kSkinned and a skinned vertex description. */

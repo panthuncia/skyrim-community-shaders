@@ -55,9 +55,9 @@ namespace DCLF::Extensions
 	void RunCommitHooks(const Api::CommitContext& a_commit);
 
 	/**
-	 * @brief Core's feature rows of the lighting slot (PS b13): c17 up to c19, after the extras' pixel row (c16). A frame constant row
+	 * @brief Core's feature rows of the lighting slot (PS b13): c17 up to c20, after the extras' pixel row (c16). A frame constant row
 	 * takes one of them (Features/Manifest.cpp checks the features' rows, the install every registration's).
 	 */
 	inline constexpr std::uint32_t kFrameConstantRowFirst = 17;
-	inline constexpr std::uint32_t kFrameConstantRowsEnd = 20;
+	inline constexpr std::uint32_t kFrameConstantRowsEnd = 21;
 }

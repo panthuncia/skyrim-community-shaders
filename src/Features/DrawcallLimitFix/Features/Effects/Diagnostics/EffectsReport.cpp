@@ -57,11 +57,13 @@ namespace DCLF::Features::Effects
 						on ? "on" : "off", members, lit, decals, skinned, forwardMembers, opaque, materials, pipelines.requested, pipelines.ready, pipelines.failed,
 						pipelines.failed ? " <- EFFECT PIPELINE FAILED" : "", firstOpaque);
 			}
-			// CS_DCLF_SET_PARITY: the members' Lighting-variant passes the engine registered, against the sun light the port reads as their light 0.
-			if (const auto [checked, other] = TakeLight(); checked)
-				text += fmt::format("[DCLF] effects' Lighting variant (CS_DCLF_SET_PARITY): {} engine passes of members checked, {} with a light 0 other than the sun "
-									"light{}\n",
-					checked, other, other ? " <- EFFECT LIGHT" : " <- OK");
+			// CS_DCLF_SET_PARITY: the members' Lighting-variant passes the engine registered, against the light the port reads as their light 0
+			// (the cloud light for kCloudLOD, else the sun light).
+			if (const auto [checked, other, cloud] = TakeLight(); checked)
+				text += fmt::format(
+					"[DCLF] effects' Lighting variant (CS_DCLF_SET_PARITY): {} engine passes of members checked ({} kCloudLOD), {} with a light 0 "
+					"other than the port's{}\n",
+					checked, cloud, other, other ? " <- EFFECT LIGHT" : " <- OK");
 			a_text += text;
 		}
 	}

@@ -32,11 +32,17 @@ namespace DCLF::Features::Effects
 
 	// Diagnostics/EffectLight.cpp: CS_DCLF_SET_PARITY's observer of the members' blended passes the main camera's registration withholds
 	// (PassCapture's hooks, on whatever thread the engine registers): <- EFFECT LIGHT, of those the Effect shader's Lighting variant's
-	// (checked), the ones whose light 0 is not the scene's sun light (other): the port draws them with the sun light's DLightColor
-	// (EffectFrame.cpp, SampleEffectLight), which holds while FUN_1414fcf80 gives them ShadowSceneNode +0x200.
+	// (checked), the ones whose light 0 is not the light the port reads (other): the port draws them with the sun light's DLightColor
+	// (EffectFrame.cpp, SampleEffectLight), or the cloud light's for a kCloudLOD property (SampleEffectCloudLight), which holds while
+	// FUN_1414fcf80 gives them ShadowSceneNode +0x200 or +0x208.
 	void SubscribeLight();
-	/** @brief The Effect Lighting passes checked and those with another light 0, since the last call. Render thread, once a report. */
-	std::pair<std::uint32_t, std::uint32_t> TakeLight();
+	/** @brief The Effect Lighting passes checked, those with another light 0, and those of kCloudLOD properties. */
+	struct LightCounts
+	{
+		std::uint32_t checked = 0, other = 0, cloud = 0;
+	};
+	/** @brief The counts since the last call. Render thread, once a report. */
+	LightCounts TakeLight();
 
 	// Diagnostics/EffectsReport.cpp: the report lines (among the forward epoch's).
 	void RegisterReport(Api::InstallContext& a_context);

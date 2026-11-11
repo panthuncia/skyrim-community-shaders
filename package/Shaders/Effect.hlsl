@@ -709,6 +709,9 @@ cbuffer DCLFFrameLighting : register(b13)
 	// Blood's AlphaTestRef.yz (SetupGeometry: the weapon blood's two globals, 0x1433dccf0 and 0x1433dccf4): the frame's (LightingConstants.h,
 	// SampleEffectBlood).
 	float4 DCLFEffectBlood : packoffset(c19);
+	// The Lighting variant's DLightColor for a kCloudLOD property: light 0 is then the scene's cloud light (FUN_1414fcf80: ShadowSceneNode
+	// +0x208), read as c18 is (LightingConstants.h, SampleEffectCloudLight). The object's shading row says which (MaterialData.w).
+	float4 DCLFEffectCloudLightColor : packoffset(c20);
 };
 static const float4 CameraDataEffect = DCLFEffectCamera;
 // The soft depth (Soft: SetupTechnique binds the depth copy, kPOST_ZPREPASS_COPY, to t3): the frame record's, by name (DrawPipelines.h,
@@ -758,9 +761,14 @@ static float4 PropertyColor;  // the pulled main's
 static const float4 PropertyColor = float4(DCLFShading[DCLFObjectIndex].EmitColor.xyz,
 	DCLFShading[DCLFObjectIndex].MaterialData.z * DCLFAlphaFade(DCLFObjectIndex, (DCLFObjectWord & 0x40000000u) != 0));
 #		endif
-// The Lighting variant's DLightColor is the frame's (DCLFFrameLighting c18); its point lights are Light Limit Fix's clusters (the PLight
-// variables above are read only outside the world, which a DCLF draw never is: a Lighting effect without Light Limit Fix stays the engine's).
-static const float4 DLightColor = DCLFEffectDLightColor;
+// The Lighting variant's DLightColor is the frame's (DCLFFrameLighting c18, or c20 for a kCloudLOD property, whose shading row's
+// MaterialData.w is 1); its point lights are Light Limit Fix's clusters (the PLight variables above are read only outside the world,
+// which a DCLF draw never is: a Lighting effect without Light Limit Fix stays the engine's).
+#		if defined(DCLF_PULLED)
+static float4 DLightColor;  // the pulled main's
+#		else
+static const float4 DLightColor = DCLFShading[DCLFObjectIndex].MaterialData.w > 0.5 ? DCLFEffectCloudLightColor : DCLFEffectDLightColor;
+#		endif
 // External Emittance's suppress bit (ExternalEmittance::UpdatePermutation in BSEffectShader::SetupGeometry's hook) is the object's, in its
 // record (LightingConstants.h, kRecordEffectSuppressEmittance), not the pipeline row's permutation block.
 #		if defined(DCLF_PULLED)
@@ -1365,6 +1373,7 @@ PS_OUTPUT DCLFPulledPixel(PS_INPUT input, uint a_instance)
 #		if defined(DCLF_BINDLESS)
 	PropertyColor = float4(DCLFShading[DCLFObjectIndex].EmitColor.xyz,
 		DCLFShading[DCLFObjectIndex].MaterialData.z * DCLFAlphaFade(DCLFObjectIndex, (DCLFObjectWord & 0x40000000u) != 0));
+	DLightColor = DCLFShading[DCLFObjectIndex].MaterialData.w > 0.5 ? DCLFEffectCloudLightColor : DCLFEffectDLightColor;
 	DCLFSuppressExternalEmittance = (DCLFObjects[DCLFObjectIndex].DCLFRecordFlags & 0x8u) != 0;
 #		endif
 	return DCLFShadePS(input);

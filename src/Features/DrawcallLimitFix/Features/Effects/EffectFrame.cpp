@@ -1,5 +1,5 @@
-// The Effect port's frame inputs: its three frame constant rows (Api::FrameConstantRow: the camera's planes, the Lighting variant's light
-// colour, Blood's globals; PS b13 c17-c19) and the soft effects' depth (Api::FrameTexture, t118; Terrain Blending's published blended
+// The Effect port's frame inputs: its four frame constant rows (Api::FrameConstantRow: the camera's planes, the Lighting variant's light
+// colour, Blood's globals, the Lighting variant's cloud light colour; PS b13 c17-c20) and the soft effects' depth (Api::FrameTexture, t118; Terrain Blending's published blended
 // depth while the depth table names its export). Sampled on the render thread by each main commit (the rows) and each colour commit
 // (the depth).
 
@@ -47,21 +47,21 @@ namespace DCLF::Features::Effects
 		}
 
 		/**
-		 * @brief The Lighting variant: PS DLightColor as BSEffectShader::SetupGeometry (0x1414eab10) writes it: light 0 (FUN_1414fcf80: the
-		 * sun, ShadowSceneNode[0] +0x200, without kCloudLOD), its NiLight fade (+0x134) times the HDR multiplier (ImageSpaceManager +0xe0)
-		 * times each channel of NiDirectionalLight +0x14c (the weather's effect lighting); w 0. PS b13 c18 (DCLFEffectDLightColor); zero
-		 * without a sun light.
+		 * @brief The Lighting variant: PS DLightColor as BSEffectShader::SetupGeometry (0x1414eab10) writes it from light 0: its NiLight fade
+		 * (+0x134) times the HDR multiplier (ImageSpaceManager +0xe0) times each channel of NiLight +0x14c (the weather's effect lighting);
+		 * w 0. Zero without the light. a_cloud: light 0 of a kCloudLOD property, which FUN_1414fcf80 (AE 0x1414fcf80) takes from
+		 * ShadowSceneNode[0] +0x208 (the cloud light) in place of the sun (+0x200).
 		 */
-		std::array<float, 4> SampleEffectLight()
+		std::array<float, 4> SampleLightZero(bool a_cloud)
 		{
 			// SetupGeometry (0x1414eab10), the Lighting bit: PS DLightColor = (ImageSpaceManager +0xe0) x (NiLight +0x134), then that times each
 			// of the light's +0x14c, +0x150, +0x154 (the multiplier first, as the engine's mulss order). Light 0 is BSLight +0x48's NiLight.
 			static const REL::Relocation<const std::byte* const*> imageSpace{ REL::Offset(Engine::Address::kImageSpaceManager) };
 			auto* sceneNode = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
-			const RE::BSLight* sun = sceneNode ? sceneNode->GetRuntimeData().sunLight : nullptr;
+			const RE::BSLight* lightZero = sceneNode ? (a_cloud ? sceneNode->GetRuntimeData().cloudLight : sceneNode->GetRuntimeData().sunLight) : nullptr;
 			const std::byte* light = nullptr;
-			if (sun)
-				std::memcpy(&light, reinterpret_cast<const std::byte*>(sun) + 0x48, sizeof(light));
+			if (lightZero)
+				std::memcpy(&light, reinterpret_cast<const std::byte*>(lightZero) + 0x48, sizeof(light));
 			const std::byte* manager = *imageSpace.get();
 			if (!light || !manager)
 				return {};
@@ -73,6 +73,12 @@ namespace DCLF::Features::Effects
 			const float scale = read(manager, 0xe0) * read(light, 0x134);
 			return { scale * read(light, 0x14c), scale * read(light, 0x150), scale * read(light, 0x154), 0.0f };
 		}
+
+		/** @brief PS b13 c18 (DCLFEffectDLightColor): the sun's (SampleLightZero). */
+		std::array<float, 4> SampleEffectLight() { return SampleLightZero(false); }
+
+		/** @brief PS b13 c20 (DCLFEffectCloudLightColor): the cloud light's, for a kCloudLOD property (SampleLightZero). */
+		std::array<float, 4> SampleEffectCloudLight() { return SampleLightZero(true); }
 
 		template <std::array<float, 4> (*Sample)()>
 		void SampleRow(float (&a_out)[4])
@@ -94,11 +100,14 @@ namespace DCLF::Features::Effects
 
 	void RegisterFrame(Api::InstallContext& a_context)
 	{
-		// The camera planes soft effects read (DCLFEffectCamera), the sun's effect colour (DCLFEffectDLightColor), and Blood's
-		// AlphaTestRef.yz: the weapon blood's two globals (DCLFEffectBlood). Latched in row order whatever the registration's.
+		// The camera planes soft effects read (DCLFEffectCamera), the sun's effect colour (DCLFEffectDLightColor), Blood's
+		// AlphaTestRef.yz: the weapon blood's two globals (DCLFEffectBlood), and the cloud light's effect colour for kCloudLOD properties
+		// (DCLFEffectCloudLightColor; read only while CS_DCLF_EFFECT_CLOUD_LIGHT lets DCLF take them). Latched in row order whatever the
+		// registration's.
 		a_context.RegisterFrameConstantRow({ "effect camera", kEffectCameraFrameRow, &SampleRow<&SampleEffectCamera> });
 		a_context.RegisterFrameConstantRow({ "effect light", kEffectLightFrameRow, &SampleRow<&SampleEffectLight> });
 		a_context.RegisterFrameConstantRow({ "effect blood", kEffectBloodFrameRow, &SampleRow<&SampleEffectBlood> });
+		a_context.RegisterFrameConstantRow({ "effect cloud light", kEffectCloudLightFrameRow, &SampleRow<&SampleEffectCloudLight> });
 		a_context.RegisterFrameTexture({ .name = "effect soft depth", .textureRegister = kSoftDepthRegister, .view = &SoftDepthView,
 			.graphResources = { ORGTerrainBlending::kBlendedDepthId } });
 	}

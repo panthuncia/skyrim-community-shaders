@@ -246,12 +246,14 @@ namespace DCLF::Features
 			return true;
 		}
 
-		// Every frame constant row (Api::FrameConstantRow; its HLSL declares the same: Effects' camera planes, light colour and blood,
-		// Effect.hlsl's DCLFEffectCamera, DCLFEffectDLightColor and DCLFEffectBlood): within Core's feature rows of PS b13, none another's.
+		// Every frame constant row (Api::FrameConstantRow; its HLSL declares the same: Effects' camera planes, light colour, blood and
+		// cloud light colour, Effect.hlsl's DCLFEffectCamera, DCLFEffectDLightColor, DCLFEffectBlood and DCLFEffectCloudLightColor): within
+		// Core's feature rows of PS b13, none another's.
 		constexpr std::uint32_t kFrameConstantRows[] = {
 			Effects::kEffectCameraFrameRow,
 			Effects::kEffectLightFrameRow,
 			Effects::kEffectBloodFrameRow,
+			Effects::kEffectCloudLightFrameRow,
 		};
 
 		constexpr bool FrameConstantRowsValid()

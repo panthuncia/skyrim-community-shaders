@@ -102,7 +102,7 @@ namespace DCLF::Draws
 	// descriptor-buffer model (BasicRHI's SPIR-V lowering).
 	static_assert(kFrameSlotBytes % 256 == 0 && sizeof(FrameLighting) % 16 == 0);
 	// Then Core's feature rows (c17 up to Extensions::kFrameConstantRowsEnd, Core/Extensions/Commits.h): the frame constant rows
-	// (Api::FrameConstantRow; the Effect port's camera planes, light colour and blood at c17-c19), 16 bytes each. Uploads.cpp checks the
+	// (Api::FrameConstantRow; the Effect port's camera planes, light colour, blood and cloud light colour at c17-c20), 16 bytes each. Uploads.cpp checks the
 	// first is right after the extras' pixel row.
 	constexpr std::uint64_t FrameConstantRowOffset(std::uint32_t a_row) { return std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + std::uint64_t(a_row) * 16; }
 	static_assert(sizeof(FrameFog) == 3 * 16);

@@ -115,11 +115,13 @@ namespace DCLF::Features::Effects
 	/**
 	 * @brief The Effect port's frame constant rows (Api::FrameConstantRow, PS b13; EffectFrame.cpp): c17 the camera's planes
 	 * (SampleEffectCamera; Effect.hlsl, DCLFEffectCamera), c18 its Lighting variant's DLightColor (SampleEffectLight; DCLFEffectDLightColor),
-	 * c19 Blood's AlphaTestRef.yz globals (SampleEffectBlood; DCLFEffectBlood).
+	 * c19 Blood's AlphaTestRef.yz globals (SampleEffectBlood; DCLFEffectBlood), c20 the Lighting variant's DLightColor for a kCloudLOD
+	 * property (SampleEffectCloudLight; DCLFEffectCloudLightColor).
 	 */
 	inline constexpr std::uint32_t kEffectCameraFrameRow = 17;
 	inline constexpr std::uint32_t kEffectLightFrameRow = 18;
 	inline constexpr std::uint32_t kEffectBloodFrameRow = 19;
+	inline constexpr std::uint32_t kEffectCloudLightFrameRow = 20;
 	/**
 	 * @brief t118 (kTextureRegisters - 10): the soft effects' depth (Api::FrameTexture; Effect.hlsl, DCLFEffectSoftDepth), which the
 	 * engine's SetupTechnique binds at t3 for a Soft pass: the depth copy (kPOST_ZPREPASS_COPY, the main view's 0x14328cbfc). A render
