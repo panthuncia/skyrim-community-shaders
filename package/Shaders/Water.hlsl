@@ -67,8 +67,8 @@ PS_OUTPUT main(PS_INPUT input)
 #	if defined(CS_ORG_BINDLESS)
 // The ORG build (Drawcall Limit Fix's water family, Features/DrawcallLimitFix/Features/Water). One push block serves both stages.
 // A draw's engine constants (both stages' PerTechnique, PerMaterial and PerGeometry), its descriptors, its textures' and samplers'
-// heap indices and its geometry are one latch region; Light Limit Fix's strict lights (PS b3) follow it. The shared constants and
-// the headers' resources come from the heap through the push block.
+// heap indices and its geometry are one latch region; Light Limit Fix's strict lights (PS b3) and the directional shadow record (t98)
+// follow it. The shared constants and the headers' other resources come from the heap through the push block.
 #		define ORG_SHARED_CONSTANTS
 #		define ORG_HEADER_RESOURCES
 // The permutation block is the draw's (WaterOrgPermutation), not a shared buffer: the pixel stage branches on its descriptor.
@@ -119,7 +119,7 @@ struct WaterOrgDraw
 			X(EXTERN, Texture2D<float4>, TexPrecipOcclusion, 70)                                 \
 			X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)                                         \
 			X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)                                         \
-			X(EXTERN, StructuredBuffer<DirectionalShadowLightData>, DirectionalShadowLights, 98) \
+			X(EXTERN_LATCH, DirectionalShadowLightData, DirectionalShadowLight, 98)              \
 			X(EXTERN, StructuredBuffer<LocalShadowData>, LocalShadows, 102)                      \
 			X(EXTERN, Texture2DArray<float>, LocalShadowMaps, 103)
 ORG_PUSH_BLOCK(WATER_ORG_RESOURCES(ORG_HANDLE))

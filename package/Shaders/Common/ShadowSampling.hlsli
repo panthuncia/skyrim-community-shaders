@@ -32,7 +32,14 @@ struct DirectionalShadowLightData
 	float2 StartSplitDistances;
 };
 
+#if defined(CS_ORG_BINDLESS) && defined(ORG_HEADER_RESOURCES)
+// An ORG pass shader (ORG_HEADER_RESOURCES): the frame's one record is a latch region, an EXTERN_LATCH entry of the shader's resource
+// list, read through the same name. Deferred writes it on the CPU, so a pass copies it into its latch.
+ORG_RESOURCE(LATCH, DirectionalShadowLightData, DirectionalShadowLight, 98)
+static const DirectionalShadowLightData DirectionalShadowLights[1] = { DirectionalShadowLight };
+#else
 ORG_HEADER_SRV(StructuredBuffer<DirectionalShadowLightData>, DirectionalShadowLights, 98)
+#endif
 
 #if defined(VOLUMETRIC_SHADOWS)
 #	include "VolumetricShadows/VolumetricShadows.hlsli"
