@@ -51,6 +51,7 @@ pinned submodule commits exist only locally, so a fresh clone cannot fetch them.
 | P5 wave 3: frame slot budget 512, ImageSpace end-of-frame effects, shadow masks, water's published slots         | Merged and run (2026-11-11); details below                                          | CS `org-port/p5`, ORG `org-port/frame-slots` (9cbc8b3)   |
 | P5.13 (the flush and the shader binds as tripwires)                                                              | Census and latch built (`CS_ORG_RESIDUE_CENSUS`, `CS_ORG_ENGINE_FLUSH_LATCH`); not flipped | CS `org-port/p5`                                         |
 | P5 primary path: ports precompile at load, pipelines before use, no readiness fallback; latch allowed draws         | Merged and run (2026-11-11); census 40/frame settled; latch shots match with it off  | CS `org-port/p5`, ORG `org-port/fix-retire-2` (b6fb82a)  |
+| Phase 5.5 (no engine fall-through): the gate before Phase 6                                                        | Started 2026-11-11; 5.5.0's compile-stall fixes merged                              | CS `org-port/p5`                                         |
 
 **Root cause worth knowing:** a BasicRHI-created Vulkan device failed on AMD because the driver rejects acceleration
 structures in a mutable descriptor list at any count. DXVK never enables acceleration structures, so the adopted device
@@ -194,21 +195,19 @@ commands, clear weather forced) — every latch window should end in `0 engine d
 should match. Census scenarios force `fw 81a` before Whiterun: compare runs only with matching commands. The water's
 geometry group 10 batch (AE 106584 +0x143) is vouched, not taken.
 
-**Open items:**
+**Open items** (every engine draw that still reaches D3D11 is a Phase 5.5 item, not listed here):
 
-- The sky's cloud layers on the graph stay off by default (`CS_ORG_SKY_CLOUDS`) until a run verifies them.
 - Without Light Limit Fix, a draw's point lights are selected per pixel from the 128-row table; selecting them once per
   object is dclf-roadmap.md 3.7.
 - ORG's `StatisticsManager` still has a race on its shared query pool and no headroom in it: every new pass name replaces
   the pool, and the retirement fix only keeps the old one alive for the lists that recorded with it.
-- P5.13: settled windows read 40 engine draws a frame (the sky's cloud layers 23, ImageSpace's SAO composite and VL apply,
-  DCLF's refraction normals and master particles); the latch stays default off until load windows skip nothing.
-- The cloud layers on the graph are not verified: weather blending still differs between sky-river runs.
-- ImageSpace left on D3D11: the distant blur (its output is `kFRAMEBUFFER`), `Main::RenderWaterEffects`' copies (a
-  queued texture each), refraction's late shape (it joins at the next cell change).
 - Dragonsreach is darker with the ImageSpace port on (`imagespace-sao-ssr-org1.env`); likely the eye adaptation chain
   split between the graph and D3D11.
-- With DCLF on, the owned frame stops presenting at the first menu or loading screen (P1).
+- With DCLF on, the owned frame stops presenting at the first menu or loading screen (P1; task P6.0).
+- A latch census run after a shader change (2026-11-11): `CS_DISABLE_FEATURES` had turned the startup precompile off, every
+  edited shader compiled on demand in the first world frames, and DCLF's 5 s snapshot wait failed the run. Fixed on
+  `org-port/compile-stall` (merged): the precompile stays for features without shader defines, and the wait counts 5 s from
+  the last compile or pipeline build (120 s cap).
 
 **Phase 5 findings worth knowing:**
 
@@ -720,17 +719,95 @@ Each item carries its RE dependency. They are ordered so the frame's skeleton (t
 
 - Screenshots against the DXVK build at the standard cells, plus the case each item adds (water at Riverwood, rain, a menu with a 3D item, the race menu, the local map, the Bethesda logo Bink, loading screens).
 - Set parity for culling changes on the RX 6600.
-- DXVK pass counters (`dclf:` census) fall toward 0.
+- The residue census (`CS_ORG_RESIDUE_CENSUS`) reads 0 for the item's draws, and the item's vouch reason is deleted from
+  the source.
+
+---
+
+## Phase 5.5: no engine fall-through (the gate before Phase 6)
+
+Phase 5 left every engine subsystem running on ORG, but the latch census (2026-11-11,
+`1111-173912-p35-latch-census-stall2`) still shows engine draws reaching D3D11: about 40-70 a frame in settled windows, and
+60-1,300 skipped per load window on top of the vouched ones. The flush latch's vouch list (`Flush::VouchPass`,
+`Flush::EngineDraws`) is an allow-list of known fallbacks: each vouched draw is still drawn by DXVK, and with DXVK off
+nothing draws it. Growing that list does not move the port forward.
+
+**Rule:** the port continues until the residue census reads 0 engine draws and dispatches reaching D3D11 in every window of
+the census tours, load windows included. Phase 6 does not start before that. The measure is the census count; vouch
+reasons are deleted as their items land, and no new ones are added.
+
+**Gate:**
+
+- `latch-census.env` and the added scenarios (rain, the local map and a menu with a 3D item, a main-thread Bink and the
+  startup logo, Riverwood water, first person) read `0 engine draws and dispatches a frame reach D3D11` in every 300-frame
+  window, with the latch on, on the RX 6600 with `DXVK_DEBUG=hang`.
+- No `[E] [ORG] flush latch: engine ...` line, and no `Flush::Reason` left in the source.
+- Census tours run with `zz_SkyrimEngineTelemetry` disabled: it only passes the engine's calls through, so with it off the
+  census names the engine's own call sites.
+
+| # | Item | Work | Deletes reason |
+| --- | --- | --- | --- |
+| 5.5.0 | Prerequisites | Merge `org-port/compile-stall` (done). Disable the telemetry plugin in the census scenarios. A census mode that fails the run on any engine draw, for batch checks. | |
+| 5.5.1 | Load windows: DCLF owns every object from the first frame | Below. | `dclf: not claimed (main views, shadow views, reflection faces, occlusion maps)` |
+| 5.5.2 | Sky cloud layers | Run `sky-river-org1-clouds{,-main,-faces}.env` with weather forced; fix the texture fault and the weather-blend difference; `CS_ORG_SKY_CLOUDS` on by default. | `sky: cloud layers`, `sky: left to the engine` |
+| 5.5.3 | Volumetric Lighting on ORG | `ORGVolumetricLighting.{h,cpp}`: generate, raymarch and both blurs as compute passes, with 3D and 1D graph textures, the shadow cascades and Terrain/Cloud Shadows' published ids. Replaces the 107023 detour's scope and the `Hooks.cpp` shader swap. | `imagespace: volumetric lighting compute` |
+| 5.5.4 | ImageSpace remainder | VL apply (3D/1D imports in `FrameAnchors`, reading 5.5.3's volume); the SAO composite (dual-target `IBL.hlsli` and `ExponentialHeightFog.hlsli`, their outputs by published id); `Main::RenderWaterEffects`' copies (a bindless source in the latch); refraction's late shape registered at Setup; the distant blur confirmed at 0. | `imagespace: effect not on the graph`, `shape refused`, `shape not in the manifest`, `failed on the graph` |
+| 5.5.5 | Sun occlusion query | An rhi occlusion pool mirroring the engine's ring (75565/77366, Begin/End 75567-8 / 77368-9); an ORG pass replays SunOcclude between them; `GetQueryData` (75569/77370) answers once the frame retires. The second user (35563, read by 29262) the same way. Design in `p4/p4.6-shaders-states.md`. | `sky: sun occlusion query` |
+| 5.5.6 | DCLF residue | Refraction normals (name them with `p5-all-census-dclf.env`, then claim them); master particles (parity checks, then `CS_DCLF_MASTER_PARTICLES` on by default); precipitation (a family for the grouped-alphas particle draws, AE 107673); first person behind menus (RE RenderDepth's first-person block, take it in `Features/FirstPerson`); water's group-10 batch (the water family spans it). | `precipitation: no port`, `water: geometry group 10 batch`, the families' `left to the engine` reasons |
+| 5.5.7 | Menus (P5.8/P5.9 stages 2-3, `p5/menus.md`) | A Menu3D view on Core's view contract (menu lighting, the stencil key, a frame for freeze-frame menus), with the loading-screen model; a local map view with the Utility `LOCALMAP_FOGOFWAR` family into `kLOCAL_MAP_SWAP`. | `menu views: menu 3D left to the engine`, `menu views: local map left to the engine` |
+| 5.5.8 | Scaleform remainder | GFx render targets as graph resources; the blur filter family (offset table transcribed); 3D draws, line strips, 32-bit indices, XY32f, gouraud 4-5, YUV textures. `CS_ORG_SCALEFORM_D3D11_PARTS` removed. | `scaleform: display not taken`, `D3D11 part`, `segment replayed` |
+| 5.5.9 | Bink remainder | Mode-2 movies at the `DrawTiles` point; HDR output into HDR Display's UI texture; movies over 2048x1152; ticks between a resize and the next build; the logo's frame 1. | `bink: tick not taken` |
+| 5.5.10 | D3D11 state readers | `EngineDrawFamily.cpp` `ResolveHeader` reads `RSS.PSTexture[]`; diagnostics read the latch or are listed as DXVK-only. | |
+| 5.5.11 | On by default | Every port switch the census tours use becomes the default, and the latch is on by default in ORG builds, so the gate runs on the shipping configuration. | |
+
+**Order:** 5.5.0, then 5.5.1 (the largest, and structural), then 5.5.2-5.5.6, then 5.5.7-5.5.9, then 5.5.10-5.5.11.
+Lanes that can run in parallel: {5.5.2}, {5.5.3 then 5.5.4's VL apply}, {5.5.4's rest}, {5.5.5}, {5.5.6 per sub-item},
+{5.5.7}, {5.5.8}, {5.5.9}. The main session runs the census after each merge.
+
+### 5.5.1: load windows
+
+**Now:** after a load DCLF clears its slot tables (`Core/Scene/Coordinator/Walk.cpp`, `Slots.cpp`) and rebuilds them only
+once the loading screen closes, so the engine draws every object until its claim is installed (`FrameView::InstallClaims`).
+Smaller gaps: materials with pending texture imports, pipelines not compiled, group renderers made mid-frame
+(`MainRendererNow`), and the grass and tree LOD families, owned all or nothing.
+
+**Decision (user, 2026-11-11):** the loading screen stays up until DCLF's claims settle; no black frames, no pop-in.
+
+1. **Readiness signal:** the coordinator publishes "the load's objects are settled" beside `lackingCount`
+   (`Core/Scene/Model/Publication.h`, `SceneSet.cpp`): no live slot waits on a transient reason (`MainReady`/`PhaseReady`
+   whys 0, 1, 2, 3, 4, 9, 10), grass and tree LOD are owned or have nothing to draw, and shadow and occlusion coverage is
+   in as `StartupHold` judges it.
+2. **The loading menu keeps presenting** until that signal and the first adopted snapshot that carries it, while the
+   world's first frames run withheld and unpresented. A cap logs what still waits; it never hands frames to the engine.
+3. **Everything of DCLF's classes is withheld during the hold**, in every registration hook
+   (`Core/Handoff/PassCapture.cpp`), matching `MainRendererNow` as well as `IsMainRenderer`; grass stands down through
+   `GrassShared`.
+4. **After the hold, an unready object is withheld until it is ready**, as `WaitsForBaseMips` does now. `KeepForEngine`
+   then has no DCLF case left.
+5. **A `coc`/`cow` with no loading menu** uses the same hold and presents the previous frame.
+6. **Shortening the hold:** pipeline keys and texture imports are requested from the mirror's attach records during the
+   load, without touching freed buffers.
+
+Files: `Core/Render/StartupHold.{h,cpp}` (generalised to every load), `Core/Scene/FrameView/FrameView.{h,cpp}`,
+`Core/Scene/Coordinator/{SceneSet,Walk}.cpp`, `Core/Scene/Model/Publication.h`, `Core/Handoff/PassCapture.{h,cpp}`,
+`Core/Render/DrawFamilies/FamilyDecisions.cpp`, `Features/Grass/GrassDraws.cpp`, `src/Features/GrassOptimizations.cpp`,
+`Core/Render/FrameDriver.cpp`, and the loading-screen path in `src/RenderGraph/Engine` (P5.12).
+
+**Verify:** the loading menu stays up until the signal and logs its hold time; no frame after it skips or vouches a draw; a
+cold-cache run reaches the world without a DCLF watchdog failure.
 
 ---
 
 ## Phase 6: cutover, a DXVK-free Vulkan build as a development option
 
+**Entry condition:** the Phase 5.5 gate passes.
+
 | #    | Task                                                                                                                                                                                                                                                                           |
 | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| P6.0 | The owned frame (P1) presents with DCLF on: rerun `owned-frame.env` on current ORG (the deleter-thread fix may have changed the stall), then root-cause the lost wake in DXVK's submission queue (render-graph.md, "Status (2026-11-09)"). |
 | P6.1 | `CS_ORG_NATIVE=1`: `DxvkLoader` does not load DXVK. `InitD3D` (75595) is replaced: no `D3D11CreateDeviceAndSwapChain`; the RendererData device/context/swap chain fields (+0x38/+0x40/+0x60) and their globals (SE 0x143025f08, 0x143027ea0) hold tripwire handles.            |
 | P6.2 | Everything that still needs DXVK becomes a startup error that names it, so it cannot silently fall back. The DXVK build stays the default.                                                                                                                                     |
-| P6.3 | Third-party D3D11 users fail with a clear message from the tripwire (the plugin's module name from the caller address), and each one is recorded in the API notes doc (P8.4).                                                                                                  |
+| P6.3 | Third-party D3D11 users fail with a clear message from the tripwire (the plugin's module name from the caller address), and each one is recorded in the API notes doc (P8.4). SkyrimEngineTelemetry only passes the engine's calls through: it is recorded as such and stays disabled in census tours.                                                                                                  |
 | P6.4 | Validation: a full tour on the RX 6600 with Vulkan validation layers (`VK_LOADER_LAYERS_DISABLE='*nsight*'`), hang markers through P0.11, SE and AE, HDR on and off, upscalers, frame generation where hardware allows, and Release-preset frame times against the DXVK build. |
 
 ---
@@ -773,7 +850,8 @@ Each item carries its RE dependency. They are ordered so the frame's skeleton (t
 3. P3 waves W1-W4 start once P2.2-P2.4 exist. W5 (FX runtime) can run in parallel with its own design doc.
 4. P4 after R6/R11, alongside late P3.
 5. P5 items in the listed order, each after its RE task and P4.2-P4.5.
-6. P6, then P7, then P8 when the user decides.
+6. Phase 5.5 until its gate passes: no engine draw reaches D3D11 in any census window.
+7. P6, then P7, then P8 when the user decides.
 
 **Commits:** each task's branch (see "Keeping the work separate and clean") is merged into `org_integration` by the main session after it builds and validates. Submodule changes to BasicRHI, ORG and DXVK go to their own repos first; ask before pushing the shared DXVK remote.
 
@@ -815,3 +893,7 @@ Each item carries its RE dependency. They are ordered so the frame's skeleton (t
 
 1. **GrassOptimizations is retired** at cutover, not ported. DCLF's grass is the only grass path in the ORG build.
 2. **NVIDIA checks are deferred.** Development runs on the RX 6600 and the iGPU. The DLSS-G and NVIDIA Streamline checks in P1.4 and P7.3 are gates to run whenever an NVIDIA card is available. They do not block the other phases.
+3. **No engine fall-through before Phase 6** (2026-11-11). The measure is the residue census, not the vouch list: an item
+   is done when its draws leave the census and its reason is deleted.
+4. **Post-load frames** (2026-11-11): the loading screen stays up until DCLF's claims settle. No black frames, no pop-in,
+   and the engine never draws the gap.
