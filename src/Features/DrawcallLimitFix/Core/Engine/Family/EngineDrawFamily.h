@@ -209,11 +209,38 @@ namespace DCLF::Family
 	namespace Flush = ::RenderGraph::Engine::Flush;
 
 	/**
-	 * @brief What a family leaves to the engine on purpose, vouched for under the flush latch (Flush::EngineDraws): a batch handed back
-	 * whole opens a scope around the engine's call; a batch refused partway emplaces one at the refusal, kept until the engine's batch
-	 * returns, so the rest of the batch (whatever draw function it reaches) is let through.
+	 * @brief The rest of a batch a family leaves to the engine on purpose after refusing a draw partway, vouched for under the flush latch
+	 * (Flush::BeginEngineRest at the refusal, EndEngineRest when the engine's batch returns), whatever draw function it reaches. Not an
+	 * EngineDraws scope: the scopes the batch walk opens and closes for passes others vouched for would otherwise end it. A batch handed
+	 * back whole opens an EngineDraws scope around the engine's call instead.
 	 */
-	using EngineRest = std::optional<Flush::EngineDraws>;
+	class EngineRest
+	{
+	public:
+		EngineRest() = default;
+		EngineRest(const EngineRest&) = delete;
+		EngineRest& operator=(const EngineRest&) = delete;
+		~EngineRest() { reset(); }
+
+		/** @brief Begins the rest with a_reason. */
+		void emplace(const Flush::Reason& a_reason)
+		{
+			Flush::BeginEngineRest(a_reason);
+			active = true;
+		}
+
+		/** @brief Ends it (nothing when none began). */
+		void reset()
+		{
+			if (std::exchange(active, false))
+				Flush::EndEngineRest();
+		}
+
+		explicit operator bool() const { return active; }
+
+	private:
+		bool active = false;
+	};
 
 	/**
 	 * @brief The constant buffers bound for the draw about to be latched, as the engine constants capture saw them written and bound

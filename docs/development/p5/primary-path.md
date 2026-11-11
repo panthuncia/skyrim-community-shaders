@@ -191,3 +191,17 @@ play rebuilds every graph through its own Publish.
   published under its id, and PublishedResources registers every id in every graph, so a replaced id rebuilds every graph anyway;
   and readers declare engine imports by pointer (`FrameAnchors::EngineTarget`), which ORG does not track by graph
   (`GraphHost::RequestRebuildFor` covers names looked up). Scoping it needs ORG to record pointer-declared resources per graph.
+
+### Streamed textures and the latch's vouch (2026-11-11, `org-port/primary-families-5`)
+
+- Run `1111-161326-p35-latch-census-vouch`: a water surface draw (Water 0x35e into kRAW_WATER) was refused once for `a streamed texture
+  without its full window yet`, then reached D3D11 every frame. Two causes:
+  - The texture never got its full window. `TextureStreaming::PinFull` asked for it once; the controller's later requests (a smaller
+    step, a release under pressure) are later revisions that replace that ask, and a pinned texture's upgrade back to full counted as
+    off screen, so the allowance skipped it. PinFull now asks again every second while the window is missing, and the controller counts a
+    pinned texture as on screen (Streamer.cpp). The families ask on every batch (`GpuTextures::ResolveBinding` calls PinFull), so the
+    draw returns to the graph once the window is resident.
+  - The refused batch's rest was not vouched for under the latch. It was an `EngineDraws` scope opened at the refusal and closed after
+    the batch, but the latch's `RenderPassImmediately` detour, for a pass DCLF vouched for (`dclf-vouch`), restores the reason it saw at
+    the pass's start when the pass ends, which ended the family's scope for every later pass. `Family::EngineRest` now uses
+    `Flush::BeginEngineRest` / `EndEngineRest`, a thread-local reason outside the scopes' nesting (an open scope's reason counts first).

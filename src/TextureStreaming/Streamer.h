@@ -76,7 +76,8 @@ namespace TextureStreaming
 
 	/**
 	 * @brief A holder keeps this view's first import rather than follow swaps (grass, tree LOD): its texture stays at full resolution.
-	 * @return whether the full window is there; if not, it was asked for, and the holder asks again later.
+	 * @return whether the full window is there; if not, it was asked for (again every second while it is missing, since the
+	 * controller's later requests replace the ask), and the holder asks again later. A pinned texture's upgrade counts as on screen.
 	 */
 	bool PinFull(const ID3D11ShaderResourceView* a_view);
 
