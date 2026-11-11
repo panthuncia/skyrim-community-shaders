@@ -170,7 +170,9 @@ window" is the next.
 | Effect on a rigid skin (a skin instance, no Skinned bit in the pass) | not seen in this run | `effect-variant (skinned)` | Built behind `CS_DCLF_EFFECT_RIGID_SKINS=1` (default off until its shots are checked) |
 | Particle (`BSParticleShader`, vs `0x4`) through the grouped alphas | about 10 settled (Blackreach) | Precipitation (Blackreach's spores): not a DCLF class | Blocked: no precipitation port (dclf-roadmap.md 1.5; DCLF draws only the precipitation occlusion mask) |
 | Skinned Utility depth and sun shadows (vs `0x2004`, `0xc004`) through AE 70776 | 3-4 in the map and journal windows | The player's first-person parts (`lighting: hidden` in main depth and a shadow view): DCLF's verdict is Hidden, the engine still draws them there | Blocked: why the engine draws hidden first-person parts into main depth and the sun's shadows behind a menu is not read (RenderDepth's first-person block; Features/FirstPerson covers its own accumulator only) |
-| Utility into `kSHADOW_MASK` (AE 107141, 52728), into `kREFRACTION_NORMALS`, Water | | Not DCLF's | The shadow-mask pass (no owner yet), Menu3D (P5.8), water (P5.4) |
+| Utility into `kSHADOW_MASK` (AE 107141 +0x1C4/+0x346: the world's; 52728 +0x1E5: a menu scene's, the inventory's 1.7) | 1-2.5 settled, 1.7 in the inventory | Not DCLF's: each shadow-casting light's pass over the screen quad | Built behind `CS_ORG_SHADOW_MASK=1` (p5/shadow-mask.md; `org-port/w3-misc`). Should be 0 in `p5-all-census-misc.env` and `shadow-mask-org1.env` |
+| Water (vs `0x4904`, `0x31e`, `0x4906`) into `kRAW_WATER` and `kMAIN` (DS `kMAIN`, through 107637 +0x1A2 and +0x4CE) | 3-8 | The water family's surface view refused every batch: a material slot held a published engine target (the refraction copy, the SSR targets, which the ImageSpace port's reads publish). Later the mask view too: its published inputs changed after its client registered | Fixed on `org-port/w3-misc` (p5/water.md, "Published material slots"): the slot is read by its id, declared by the client. Should be 0 in `p5-all-census-misc.env` and `water-org1-imagespace.env`; a `published inputs changed (...)` line now names what changed |
+| Utility RENDER_NORMAL (vs `0x61b`, ps `0x203`: FALLOFF, VC, NORMALS, BINORMAL_TANGENT) into `kREFRACTION_NORMALS` (DS `kMAIN`) | 1-3 (Whiterun, Dragonsreach) | Not the water's: Lighting objects' refraction pass (kRefraction or kTempRefraction, hint 4, group 5, which FUN_1414b4860 binds `kREFRACTION_NORMALS` for). BSEffectShaderProperty::GetRenderPasses (AE 0x1414bd890) makes no Utility pass, so these are Lighting geometry DCLF's refraction class (`CS_DCLF_REFRACTION`, on by default) did not claim | Open: DCLF's census (`p5-all-census-dclf.env`) names the objects and the reason (`refraction` among the classes); likely load-window objects or a variant the one refraction pipeline (Utility `0x20A`) does not take |
 
 Scenarios (`tools/cs-ab/scenarios/`): `p5-all-census-dclf.env` (both censuses, `CS_ORG_RESIDUE_CENSUS_TOP=60`),
 `p5-all-census-dclf-take.env` (plus `CS_DCLF_MASTER_PARTICLES=1` and `CS_DCLF_EFFECT_RIGID_SKINS=1`) and `dclf-residue-census.env`
@@ -178,3 +180,20 @@ Scenarios (`tools/cs-ab/scenarios/`): `p5-all-census-dclf.env` (both censuses, `
 through AE 71150 and the census class `effect: effect-variant (skinned)`; `-take.env` should also lose the settled windows'
 particle `Effect` draws and `effect: untracked, eligible` for `MPS*` systems, with screenshots matching. Nothing here registers a
 graph client, so nothing in it can trigger a graph rebuild.
+
+## What is left
+
+The census classes of `1111-072658-p35-p5-all-census-w3` that are not DCLF's, and where each stands:
+
+| Class | Per frame | State |
+| --- | --- | --- |
+| Utility into `kSHADOW_MASK` (AE 107141, 52728) | 1-2.5, 1.7 in the inventory | `CS_ORG_SHADOW_MASK=1` (p5/shadow-mask.md), both the world's and a menu scene's |
+| Water into `kRAW_WATER` and `kMAIN` | 3-8 | The water family's published material slots (p5/water.md) |
+| Utility into `kREFRACTION_NORMALS` | 1-3 | DCLF's refraction class (above): not the water's |
+| Menu 3D's Utility in the inventory (AE 52728 under UI3DSceneManager::Render) | 1.7 | The menu scene's shadow masks: `CS_ORG_SHADOW_MASK=1`. The menu model's own Lighting draws are P5.8's view (p5/menus.md, not written) |
+| Bink's startup logo, frame 1 of 166 | | The logo's first tick claims rendering and builds the joining client's graph at its start (p5/bink.md, "The first frame") |
+| ImageSpace (Refraction, ISWaterBlend, the SAO chain, the water displacement's dispatches, the HDR chain in menus) | | P5.6's lanes (p5/imagespace.md) |
+| Sky into the reflection cube (DS `kCUBEMAP_REFLECTIONS`) | 15-55 | P5.3 (p5/sky.md) |
+
+Scenario: `p5-all-census-misc.env` (p5-all-census with `CS_ORG_SHADOW_MASK=1`, 60 entries a list). It needs `org-port/w3-slots`'s frame
+slot budget (EngineDraws runs five times a frame).

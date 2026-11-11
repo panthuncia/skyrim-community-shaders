@@ -37,6 +37,10 @@ the lock's `OwningThread`, so a mere thread check handed rendering to its caller
     makes the calling thread the owner. Its only callers are the main frame (SE 0x1405b1020, which takes `Renderer::Lock` just
     before), the loading loop (38085) and `BSMoviePlayer::Tick` when no frame is open (the logo). So the thread that begins an
     engine frame owns rendering until another thread begins one.
+  - **One earlier claim, Bink's** (`org-port/w3-misc`, p5/bink.md "The first frame"): a blocking movie's tick on a thread that
+    holds `Renderer::Lock` and does not own rendering (the logo's first tick) claims at the tick's start, the same claim its
+    `Begin` makes a few calls later, so the tick's graph checks see the owner. The lock is held for the whole sequence, so no other
+    thread renders in between.
   - `IsRenderOwner` answers true on the owner only. Every other call answers false. A false answer is always safe: the caller
     keeps the engine's or D3D11's path for that call (the main thread between a load's end and its next `Begin`, a movie's
     clear before its `Begin`).

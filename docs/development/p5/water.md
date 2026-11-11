@@ -126,11 +126,30 @@ header resolver, the async programs, the kept leases and the run step.
   geometry, too many draws (64), not BSWaterShader, topology, a colour target the client does not import, constants not mirrored yet,
   state objects, the program, buffer or texture imports, a published texture in a material slot, samplers, another draw path.
 
+### Published material slots
+
+With the ImageSpace port and the engine targets on (every p5-all run), the refraction copy and the SSR targets the water samples at
+its material slots are engine targets a graph pass writes, and EngineTargets publishes a target once a graph reader asks for it. A slot
+holding a published export was refused (`a texture slot holds a published graph texture`), so the surface view (kMAIN and kRAW_WATER)
+stayed the engine's in every p5-all run: the residue census's `RT kRAW_WATER DS kMAIN` and Water classes, 3-8 draws a frame
+(`1111-072658-p35-p5-all-census-w3`).
+
+Now (`org-port/w3-misc`) such a slot is read by its id (`Family::PublishedSlot`: the id's whole-resource view index in the draw's
+latch), and the id is part of the view's shape (`Shape::materialIds`): the client's pass declares it, so the graph orders the target's
+write before the water. The ids are learnt by probes: a view's batches before its client exists are probes now (they also ask for the
+programs), and a slot keeps its id once seen, so a target sampled on some frames only does not change the shape. A withheld batch whose
+draw samples a published target its client was not made for falls back as any other refusal. A `published inputs changed since its
+client registered` line now names what changed (`t1 none -> Engine::kMAIN_COPY, ...`): in that census both views logged it once with
+no detail, so its cause is still to read from the next run.
+
+**Not the water's:** the census's Utility draws into `kREFRACTION_NORMALS` (vs `0x61b`) are Lighting objects' refraction pass, DCLF's
+refraction class (flush.md, "DCLF's share").
+
 ### Graph rebuilds
 
 - **A client is made once per view**, after its shape (the headers' published ids) held for 30 batches, so the ported features'
   first-frame publications have settled. That registration is the family's only graph build; with DCLF it happens at DCLF's build point.
-- **Nothing registers again during play.** A batch whose published headers differ from its client's stays the engine's (logged once), a
+- **Nothing registers again during play.** A batch whose published headers or material slots differ from its client's stays the engine's (logged once, with what changed), a
   D3D11 header input changes only a heap index in the recording (re-recorded, not rebuilt), and the targets are imported once (the
   mask's alternating normals target is two imports, chosen per draw).
 - Toggling a ported feature's ORG path mid-session therefore leaves the water on the engine until the next start.
