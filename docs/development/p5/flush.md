@@ -100,39 +100,91 @@ and Hooks.cpp's). With the latch on:
 - **A flush CS asks for is real.** A `SetDirtyStates` call whose return address is in CS's own image (DCLF's
   `ApplyPendingState`, Grass Optimizations' grass draws, ImageSpace's withholding) first puts the owed bits back and binds the
   owed vertex and pixel shaders on DXVK's context, then runs as usual. These callers read the D3D11 state back or draw with it.
-- **An engine draw that still reaches D3D11 is skipped.** A `Draw*` from one of the BSGraphics draw functions (the R1 list,
-  SE 75477-75500 and AE 77263-77290, with AE 77275) or a dispatch inside `DispatchCSShader` would run with state that was never
-  bound, so the guest context drops it and logs the site once, as an `[E]` line:
-  `[ORG] flush latch: engine DrawIndexed in DrawTriShape (75477/77263) at SkyrimSE.exe+0x.. (ID ..) <- ... reached D3D11 with the engine's state latched: skipped`.
-  A draw from elsewhere in the game (Scaleform's renderer, which binds its own state) is forwarded; the census shows it.
+- **A draw someone vouched for is real.** Inside an `EngineDraws` scope (below, "Allowed engine draws") the engine's flushes pay
+  what is owed and run unlatched, its shader binds and dispatches reach D3D11, and its draws go through, counted by reason.
+- **An engine draw nobody vouched for is skipped.** A `Draw*` from one of the BSGraphics draw functions (the R1 list,
+  SE 75477-75500 and AE 77263-77290, with AE 77275) or a dispatch inside `DispatchCSShader`, outside an `EngineDraws` scope,
+  would run with state that was never bound, so the guest context drops it and logs the site once per caller chain, as an `[E]`
+  line: `[ORG] flush latch: engine DrawIndexed in DrawTriShape (75477/77263) at SkyrimSE.exe+0x.. (ID ..) <- ... reached D3D11 with
+  the engine's state latched and nobody vouched for it (Flush::EngineDraws, Flush::VouchPass): skipped`. Each such line is a bug in
+  whatever left that draw to the engine. A draw from elsewhere in the game (Scaleform's renderer, which binds its own state) is
+  forwarded; the census shows it.
 - Every `CS_ORG_RESIDUE_CENSUS_FRAMES` frames: `[ORG] flush latch: N frames: .. flushes and .. shader binds a frame latched,
-  .. D3D11 binds a frame dropped, .. flushes a frame from CS code applied the owed state, .. engine draws and dispatches skipped`.
+  .. D3D11 binds a frame dropped, .. flushes a frame from CS code applied the owed state, .. flushes a frame of allowed engine
+  draws applied it; allowed engine draws a frame: <reason> .. (.. passes vouched), ...; .. engine draws and dispatches skipped`.
+- CS's custom shaders bound in `BSShader::BeginTechnique` (Hooks.cpp, both the thunks at the engine's SetShader and
+  SetPixelShader calls and the shader-cache path after it) go through `Flush::BindVertexShader` / `BindPixelShader`, so the owed
+  shaders are always the last ones bound.
 - `CS_ORG_ENGINE_FLUSH_LATCH_KEEP=PSSetShaderResources,OMSetRenderTargets,...` names binds that still reach D3D11 inside the
   latched functions, to find which reader below still needs which bind.
 - The compute shader and `CSSetConstantBuffers(0)` of a latched dispatch are not owed: nothing in CS dispatches with the
   engine's compute state.
 
-Nothing in this lane registers a graph client, so it causes no graph rebuild.
+Nothing in this lane registers a graph client, so it causes no graph rebuild. With the latch off nothing here is on the frame
+path beyond the four detours' flag test: the pass marks table and the `RenderPassImmediately` detour exist only with the latch.
+
+### Allowed engine draws
+
+Some engine draws reach D3D11 on purpose and will for a while: DCLF's objects not yet claimed in load windows ("DCLF's share"
+below) and each port's inherent refusals (primary-path.md rule 4). The code that leaves a draw to the engine vouches for it, and
+the latch lets exactly those through (`Flush.h`):
+
+- `Flush::Reason`: one per reason, made once (a function-local `static const`), its name starting with the owner
+  (`"dclf: not claimed (main views)"`, `"sky: batch handed back"`). At most 31 names; more share "more reasons".
+- `Flush::EngineDraws scope(reason)`: for a synchronous call of the engine's draw, batch or flush (a family handing a batch back,
+  a port calling the engine's Render, Bink's tiles). Opened just before the call, closed right after. Thread-local, nests (the
+  innermost reason counts). Inside it, `SetDirtyStates` pays the owed bits and shaders and runs unlatched (its D3D11 binds go
+  through), `SetShader`/`SetPixelShader`/CS's shader thunks bind and clear what was owed for their stage, `DispatchCSShader`
+  dispatches, and every draw or dispatch from the draw functions is let through and counted under the reason.
+- `Flush::VouchPass(pass, reason)`: for a pass the engine registers now and draws later in its batch walk. A table of 2^17 marks
+  keyed by the pass's slot in the engine's render-pass arena (0x48-byte slots) holds the pass, its geometry and the frame. The
+  latch's detour of `BSBatchRenderer::RenderPassImmediately` (100854 / 107644, which holds the geometry-type dispatcher and the
+  skin path) opens an `EngineDraws` scope for a pass whose mark matches (same pass, same geometry, made this frame or the last).
+  A collision or a reused pass reads as unvouched: skipped and logged, never let through by mistake. `Flush::Vouching()` says
+  whether marks are kept (the latch is on), for callers whose decision costs anything.
+
+**DCLF** vouches at its registration hooks (`Core/Handoff/PassCapture.cpp`, `PassCapture::KeepForEngine`): every pass it hands on
+(not withheld, not bypassed) whose property is a `BSLightingShaderProperty` (grass included; its depth and shadow passes are
+Utility on the same property), `BSEffectShaderProperty` or `BSDistantTreeShaderProperty`, into a renderer DCLF withholds from:
+the main views and the first person's (`dclf: not claimed (main views)`), the shadow views (`... (shadow views)`), the reflection
+faces (`... (reflection faces)`) and the occlusion maps it draws (`... (occlusion maps)`). Nothing else: the sky, water,
+particles, the shadow mask, ImageSpace, Bink and Scaleform are other ports' to vouch for, at their refusal points, with
+`EngineDraws`. Passes the engine registers through functions DCLF does not hook (the reflection cube's render mode 0x19,
+`FUN_1414b2b90`; `RenderPersistentPassList`'s persistent passes, the cloud layers) are not vouched by DCLF.
+
+What the other lanes call, at each place they leave a draw to the engine:
+
+| Lane | Where | Call |
+| --- | --- | --- |
+| Engine draw families (`EngineDrawFamily.cpp`) | the `DrawTriShape` detour when no taker takes the draw; a batch handed back | `EngineDraws` around the original `DrawTriShape` / the batch, one reason per family and refusal kind |
+| Sky (P5.3) | the cloud layers while `CS_ORG_SKY_CLOUDS` is off, a refused batch | `EngineDraws` around the engine's batch, or `VouchPass` at the persistent pass list |
+| Water, blood, shadow masks | a refused or handed-back batch | `EngineDraws` around the engine's batch |
+| ImageSpace (P5.6) | each effect left to the engine (the rows imagespace.md marks Next, the VL dispatches) | `EngineDraws` around `BSImagespaceShader::Render` / the dispatch |
+| Bink, Scaleform, menus 3D | a movie on another thread, an engine `DrawBitmaps` path, the menu scene's own views | `EngineDraws` around the engine's call |
 
 ### Readers of the D3D11 state
 
-CS code that asks D3D11 what the engine bound, outside a flush it asked for, reads stale state under the latch. These have to
-read the shadow state (`RSS.PSTexture[]` +0x140, `RSS.renderTargets[]` with the renderer's view tables, `RSS.viewPort` +0x70)
-or a published graph resource before the latch can be the default. From `grep` on 2026-11-11:
+CS code that asks D3D11 what the engine bound reads stale state under the latch unless a real flush (one CS asked for, or one in an
+`EngineDraws` scope) has just run. Such readers read the shadow state (`RSS.PSTexture[]` +0x140, `RSS.renderTargets[]` and the cube
+target with the renderer's view tables, `RSS.viewPort` +0x70) or a published graph resource. Every D3D11 context `Get*` call in
+`src/` (grep on 2026-11-11, `org-port/latch`), classified:
 
-| Reader | Reads | When |
-| --- | --- | --- |
-| DCLF `Core/Engine/Family/EngineDrawFamily.cpp` `ResolveHeader` | `PSGetShaderResources(register)` | every family's texture headers |
-| DCLF `Core/Render/Resources/FrameRecords.cpp` | `PSGetShaderResources` | frame records |
-| DCLF `Core/Render/Resources/FrameSlots.cpp` `CaptureBindings` | PS t0.., `OMGetRenderTargets`, `RSGetViewports` | after `ApplyPendingState` (a real flush, so correct) and wherever else it is called |
-| DCLF `Features/MainView/MainViewPoints.cpp` | `OMGetRenderTargets` | the main view's points |
-| DCLF `Features/Water/WaterCapture.cpp` | PS directional shadow register | water capture |
-| `Skylighting::CaptureShadowCascadeSRV`, `VolumetricShadows`, `ExponentialHeightFog::CaptureDirectionalShadowMap` | PS t4 (the shadow cascades) | from `State::Draw`, right after the engine's flush |
-| `CloudShadows.cpp` | `OMGetRenderTargets` | the reflection faces |
-| `RenderGraph/Engine/Scaleform/Renderer.cpp` | `OMGetRenderTargets` | the Scaleform renderer's target |
-
-The state backups around CS's own D3D11 passes (Effects11 `D3D11StateBackup`, `Globals.cpp`, HDRDisplay, PostProcessing's
-raster pass, the screenshot, ImGui, GPU timers) save and restore whatever is bound and need no engine state.
+| Reader | Reads | Class | State |
+| --- | --- | --- | --- |
+| `State::Draw` shadow-mask path (`Skylighting::CaptureShadowCascadeSRV`, `VolumetricShadows::CopyShadowLightData`, `ExponentialHeightFog::CaptureDirectionalShadowMap`) | PS t4 | engine state | Fixed: `RSS.PSTexture[4]`, unwrapped, as ShadowMaskCapture.cpp |
+| `CloudShadows::SkyShaderHacks` | `OMGetRenderTargets` | engine state | Fixed: the shadow state's cube target (`kREFLECTIONS`) and face; SetDirtyStates binds that face alone in cube mode (RE: AE 77386) |
+| DCLF `Core/Render/Resources/FrameSlots.cpp` `CaptureBindings` from `CaptureMainPass` and `CaptureDepthPass` | VS/PS b0.., PS t0.., `OMGetRenderTargets`, `RSGetViewports` | after a real flush | Fine: both run right after `Engine::ApplyPendingState` (FrameDriver::BeforeOpaquePass, MainEpochs CaptureDepthPass), a flush from CS code. The constant buffers are bound by the engine outside the flush, t16 and up by CS |
+| DCLF `Features/MainView/MainViewPoints.cpp` `CurrentTargetFormats` | `OMGetRenderTargets` | after a real flush | Fine: only from `BeforeOpaque`, inside `FrameDriver::BeforeOpaquePass` after `ApplyPendingState` |
+| DCLF `Core/Render/Resources/FrameRecords.cpp` `BoundPixelBuffer` | PS t16.. (frame buffers) | CS's own binds | Fine: registers past the engine's 16 are bound by CS on DXVK's context (Deferred's cascades at t98), never by the flush |
+| `Effects11/ORGSunRays.cpp` `BoundPixelView` | PS t17, t25 | CS's own binds | Fine (CS binds both) |
+| `Menu/ImGuiRenderer.cpp` `UpdateTarget` | `OMGetRenderTargets` | CS's own binds | Fine: HDRDisplay binds the UI or frame target before the overlay |
+| DCLF `Core/Engine/Family/EngineDrawFamily.cpp` `ResolveHeader` | PS t(register) | engine state | Other lane (families): read `RSS.PSTexture[]` |
+| DCLF `Features/Water/WaterCapture.cpp` | PS directional shadow register | engine state | Other lane (water) |
+| `RenderGraph/Engine/ImageSpace/ImageSpace.cpp` `ReadViewport` | `RSGetViewports` | after ImageSpace's own flush | Other lane (ImageSpace): fine while its `SetDirtyStates` call is CS's; the shadow state's `viewPort` would not depend on it |
+| `RenderGraph/Engine/Scaleform/Renderer.cpp` (two) | `OMGetRenderTargets` | engine or Scaleform state | Other lane (Scaleform) |
+| DCLF `Diagnostics/Draws/CapturePoint.cpp` (`CaptureBindings`), `Diagnostics/Scene/CaptureParity.cpp`, `Diagnostics/Feature/FeatureInstall.cpp` (blend and t55 log), `OpenDefectProbes.cpp`, `TargetDump.cpp`, `Features/Reflection/Diagnostics/FaceCameraParity.cpp`, `Integrations/*/Diagnostics/TextureParity.cpp`; `Globals.cpp` `TraceNativeDraw`; `GpuEventTimers.cpp` op details | bindings at a native draw | diagnostics, off by default | Stale under the latch for unvouched draws; correct inside an `EngineDraws` scope. Not fixed: read their results with the latch off |
+| Effects11 `D3D11StateBackup.h`, PostProcessing `RasterPass.cpp`, `ScreenshotFeature.cpp`, `TruePBR.cpp` (glints noise), `GrassOptimizations/HiZPyramid.cpp`, `HDRDisplay.cpp` (viewport at Present), `GpuEventTimers.cpp` (load pass) | whatever is bound | state backup around CS's own pass | Fine: saved and restored, no engine state needed |
+| `RenderGraph/Engine/Tripwire/TripwireInterfaces.inl`, `TripwireSelfTest.cpp` | the forwarding wrappers and the self-test | not a reader | Fine |
 
 ## What reaching zero needs
 
@@ -140,7 +192,10 @@ The census is the measure. The latch becomes the default only when, over a full 
 
 1. the census reads zero: every window's `<z> with no engine draw reaching D3D11` equals its frame count, and "flushes from CS
    code" is zero or only callers that read the shadow state;
-2. a `p5-all-latch.env` run logs no `[ORG] flush latch: engine ... skipped` line, and its screenshots match `p5-all.env`;
+2. a `p5-all-latch.env` run logs no `[ORG] flush latch: engine ... skipped` line, and its screenshots match `p5-all.env`. In the
+   guest phase the census does not read zero: the allowed engine draws reach D3D11 on purpose. Then the measure is
+   `latch-census.env` against `latch-census-off.env` and `latch-whiterun.env` against `latch-whiterun-off.env`: no `[E]` skipped
+   line, matching shots, and the allowed draws by reason only DCLF's load windows and the ports' named refusals;
 3. the readers above read the shadow state or a graph resource.
 
 Then `SetShader` and `SetPixelShader` can drop their D3D11 call for good (Bink's DrawTiles is their only engine caller once

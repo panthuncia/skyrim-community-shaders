@@ -253,7 +253,8 @@ bool Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertex
 			shaderFound = false;
 		} else {
 			state->settingCustomShader = true;
-			globals::d3d::context->VSSetShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader), NULL, NULL);
+			// Through the flush latch, so a latched frame owes this shader rather than an older one.
+			RenderGraph::Engine::Flush::BindVertexShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader), _ReturnAddress());
 			state->customVertexShader = vertexShader;
 			*globals::game::currentVertexShader = vertexShader;
 			globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
@@ -263,7 +264,7 @@ bool Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertex
 			*globals::game::currentPixelShader = pixelShader;
 			state->customPixelShader = pixelShader;
 			if (pixelShader)
-				globals::d3d::context->PSSetShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader), NULL, NULL);
+				RenderGraph::Engine::Flush::BindPixelShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader), _ReturnAddress());
 			state->settingCustomShader = false;
 			shaderFound = true;
 		}

@@ -151,19 +151,18 @@ void CloudShadows::SkyShaderHacks()
 
 	auto reflections = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS];
 
-	// render targets
-	ID3D11RenderTargetView* rtvs[3] = {};
-	ID3D11DepthStencilView* dsv = nullptr;
-	context->OMGetRenderTargets(3, rtvs, &dsv);
-
-	// The faces can be tripwire handles; OMGetRenderTargets on DXVK's context returns what they wrap.
+	// The draw's targets, from the engine's shadow state (the flush has just applied it; under the flush latch, P5.13, it bound
+	// nothing). A reflection face is the cube target with its face as the view, and SetDirtyStates then binds that face alone.
+	// The faces can be tripwire handles: DXVK's context takes what they wrap.
 	using RenderGraph::Engine::Tripwire::Unwrap;
+	const auto& shadowState = globals::game::shadowState->GetRuntimeData();
+	ID3D11RenderTargetView* rtvs[3] = {};
 	int side = -1;
-	for (int i = 0; i < 6; ++i)
-		if (rtvs[0] && rtvs[0] == Unwrap(reflections.cubeSideRTV[i])) {
-			side = i;
-			break;
-		}
+	if (shadowState.cubeMapRenderTarget == static_cast<std::uint32_t>(RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS) && shadowState.cubeMapRenderTargetView < 6) {
+		rtvs[0] = Unwrap(reflections.cubeSideRTV[shadowState.cubeMapRenderTargetView]);
+		if (rtvs[0])
+			side = static_cast<int>(shadowState.cubeMapRenderTargetView);
+	}
 
 	if (side >= 0) {
 		CheckResourcesSide(side);
@@ -204,14 +203,6 @@ void CloudShadows::SkyShaderHacks()
 
 		renderedLayersMask[side] |= (1u << layer);
 	}
-
-	// Release the references OMGetRenderTargets added
-	for (int i = 0; i < 3; ++i) {
-		if (rtvs[i])
-			rtvs[i]->Release();
-	}
-	if (dsv)
-		dsv->Release();
 }
 
 int CloudShadows::FindCloudLayer(RE::BSRenderPass* Pass)
