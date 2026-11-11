@@ -69,9 +69,40 @@ namespace DCLF::Features::Water
 	 * (kDirectionalShadowRegister), between 77 and 102 in the push block.
 	 */
 	inline constexpr std::array<std::uint32_t, 18> kHeaderRegisters{ 17, 18, 19, 22, 25, 26, 30, 31, 35, 36, 37, 50, 60, 70, 76, 77, 102, 103 };
-	/** @brief Which of kHeaderRegisters are buffers: the graph reads only a published one (a D3D11 buffer cannot be imported). */
-	inline constexpr std::array<bool, 18> kHeaderIsBuffer{ false, false, false, false, false, false, false, false, true, true, true, false, false, false, false,
-		false, true, false };
+	/** @brief A resource's dimension, as the shader declares it: a slot the engine or CS leaves empty takes a null view of it. */
+	enum class ResourceKind : std::uint8_t
+	{
+		Texture2D,
+		Texture2DArray,
+		Texture3D,
+		Cube,
+		Buffer,  // the graph reads only a published one (a D3D11 buffer cannot be imported)
+	};
+
+	/** @brief Each of kHeaderRegisters' declared dimension (Water.hlsl's EXTERN entries and the headers declaring them). */
+	inline constexpr std::array<ResourceKind, 18> kHeaderKinds{
+		ResourceKind::Texture2D,       // t17 DepthTexture
+		ResourceKind::Texture2D,       // t18 SharedShadowMap
+		ResourceKind::Texture3D,       // t19 the fog's near volume
+		ResourceKind::Texture3D,       // t22 the fog's far volume
+		ResourceKind::Cube,            // t25 CloudShadowsTexture
+		ResourceKind::Cube,            // t26 CloudSelfShadowTexture
+		ResourceKind::Cube,            // t30 EnvReflectionsTexture
+		ResourceKind::Cube,            // t31 EnvTexture
+		ResourceKind::Buffer,          // t35 lights
+		ResourceKind::Buffer,          // t36 lightList
+		ResourceKind::Buffer,          // t37 lightGrid
+		ResourceKind::Texture3D,       // t50 SkylightingProbeArray
+		ResourceKind::Texture2D,       // t60 ShadowHeightTexture
+		ResourceKind::Texture2D,       // t70 TexPrecipOcclusion
+		ResourceKind::Texture2D,       // t76 EnvIBLTexture
+		ResourceKind::Texture2D,       // t77 SkyIBLTexture
+		ResourceKind::Buffer,          // t102 LocalShadows
+		ResourceKind::Texture2DArray,  // t103 LocalShadowMaps
+	};
+
+	/** @brief The material slots' declared dimension (Water.hlsl's t0-t11): the cubemap at t3, 2D textures elsewhere. */
+	constexpr ResourceKind MaterialKind(std::uint32_t a_slot) { return a_slot == 3 ? ResourceKind::Cube : ResourceKind::Texture2D; }
 	/** @brief The headers before the directional shadow record in the push block. */
 	inline constexpr std::size_t kHeadersBeforeShadow = 16;
 	/** @brief Deferred's directional shadow record (ShadowSampling.hlsli), which the CPU writes: copied into each draw's latch. */
@@ -138,6 +169,7 @@ namespace DCLF::Features::Water
 		PipelineKey key;
 		std::shared_ptr<const void> program;    // the RasterProgram (WaterDraws.cpp)
 		std::array<std::uint8_t, 2> colours{};  // indices into the view's targets (kMaskTargets, kSurfaceTargets)
+		bool skip = false;                      // latched and withheld, but not drawn (CS_ORG_WATER_TECHNIQUES)
 		std::uint32_t stencilRef = 0;
 		std::uint32_t indexCount = 0;
 		std::uint32_t viewport[4]{};
@@ -166,6 +198,22 @@ namespace DCLF::Features::Water
 		std::uint64_t revision = 0;                                          // what the recording depends on (WaterDraws::RevisionOf)
 		std::vector<std::shared_ptr<const void>> owners;                     // the textures' imports and the buffers' leases
 	};
+
+	/**
+	 * @brief The diagnostic switches (render-graph.md, "Switches"), read once: CS_ORG_WATER_PARTS (mask, surface or both, comma
+	 * separated; CS_ORG_WATER_VIEWS is its old one-view form), CS_ORG_WATER_TECHNIQUES (the techniques drawn, comma separated: the others
+	 * are latched and withheld but not drawn) and CS_ORG_WATER_SAFE (1: the pixel stage writes a constant and reads nothing; 2: the passes
+	 * run with no draw calls).
+	 */
+	struct Diagnostics
+	{
+		bool mask = true, surface = true;
+		std::uint32_t techniques = ~0u;  // a bit per technique (Water.hlsl's descriptor >> 11 & 0xF)
+		std::uint32_t safe = 0;
+		bool Takes(View a_view) const { return a_view == View::Mask ? mask : surface; }
+		bool Draws(std::uint32_t a_technique) const { return (techniques >> (a_technique & 31)) & 1; }
+	};
+	const Diagnostics& GetDiagnostics();
 
 	// WaterFeature.cpp: the feature's entry (Features/FeatureList.cpp).
 	Api::Feature Feature();
