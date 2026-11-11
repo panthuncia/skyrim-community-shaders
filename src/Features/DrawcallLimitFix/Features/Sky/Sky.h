@@ -10,8 +10,11 @@
 // then drawn by an ORG pass at the Sky anchor (the main pass) or the SkyReflections anchor (a reflection face), in the engine's order,
 // with CS's Sky.hlsl built for ORG and the pipeline states the engine's state objects describe (SkyDraws.cpp).
 //
-// On the faces Cloud Shadows' fourth render target becomes an output of the faces' cloud draws: its occlusion faces are a graph texture
-// of the family's (kCloudFacesId), published, which Cloud Shadows' ORG copy reads in place of its last D3D11 layer.
+// The cloud layers are not in that batch: they are geometry group 13's pass list, which FinishAccumulating draws right after it. When
+// that list holds only sky TriShapes, the capture spans it too, and the anchor runs after it (SkyCapture.cpp, CloudGroup).
+//
+// On the faces Cloud Shadows' fourth render target becomes an output of the faces' cloud draws: Cloud Shadows' graph faces
+// (ORGCloudShadows::GraphFaces), which its ORG copy reads for every face whose clouds the graph drew last (ORGCloudShadows::NoteFace).
 //
 // Anything the family cannot draw stays the engine's: a draw it cannot latch is drawn by the engine where it was, and a batch whose
 // targets the anchor's client was not built for runs on D3D11 while the client is made again.
@@ -36,6 +39,9 @@ namespace DCLF::Features::Sky
 	{
 		// FinishAccumulating's RenderBatches(accumulator, 0x5C00005D, 0x5C000064, flags, -1): the sky techniques' batch (SE 99938, AE 106583).
 		inline constexpr Engine::Offset kSkyBatch{ { 106583, 0x237 }, { 99938, 0x247 } };
+		// FinishAccumulating's RenderPersistentPassList(geometry group 13, flags), right after the sky batch: the cloud layers (BSSkyShader
+		// passes of accumulation hint 0x11) and the sky-object effects (hint 0x12). SE 0x1412caf54, AE 0x1414b3004.
+		inline constexpr Engine::Offset kCloudGroup{ { 106583, 0x274 }, { 99938, 0x284 } };
 		// BSGraphics::Renderer::DrawTriShape(renderer, TriShape*, startIndex, triangleCount): a static TriShape's draw (R1).
 		inline constexpr Engine::Offset kDrawTriShape{ { 77263 }, { 75477 } };
 	}
@@ -44,8 +50,8 @@ namespace DCLF::Features::Sky
 	inline constexpr std::uint32_t kFirstSkyTechnique = 0x5C00005D;
 	inline constexpr std::uint32_t kLastSkyTechnique = 0x5C000064;
 
-	/** @brief The published id of the faces' cloud occlusion (a 6-slice array, a slice per face), which Cloud Shadows' ORG copy reads. */
-	inline constexpr std::string_view kCloudFacesId = "Sky::CloudOcclusionFaces";
+	/** @brief The geometry group the cloud layers are registered into (accumulation hint 0x11; BSBatchRenderer::geometryGroups). */
+	inline constexpr std::uint32_t kCloudGeometryGroup = 13;
 
 	/** @brief Where a batch draws. */
 	enum class View : std::uint8_t
@@ -114,6 +120,7 @@ namespace DCLF::Features::Sky
 		std::string sceneDepthId;                           // or a published graph texture's id
 		const void* sceneDepthView = nullptr;               // or the D3D11 view CS binds (Terrain Blending's D3D11 depth), imported
 		bool cloudShadows = false;                          // Cloud Shadows' published occlusion is read (t25, t26)
+		bool clouds = false;                                // the cloud layers (geometry group 13) are the graph's when the group allows
 		// The headers' textures the sky's includes read (kHeaderRegisters): what CS binds there for the pass, as a published graph
 		// texture's id, or the D3D11 view (imported) when it is not one's export. Neither: nothing is bound there.
 		std::array<std::string, 4> headerIds;
@@ -143,6 +150,12 @@ namespace DCLF::Features::Sky
 	/** @brief Whether CS_ORG_SKY=1 turned the family on (read at install). */
 	bool Enabled();
 
+	/** @brief Whether the graph takes a_view's batches (the CS_ORG_SKY_VIEWS diagnostic: main, faces, or both when unset). */
+	bool TakesView(View a_view);
+
+	/** @brief Whether the graph takes the cloud layers too (CS_ORG_SKY_CLOUDS=0 leaves them to the engine). */
+	bool TakesClouds();
+
 	// SkyCapture.cpp: the engine hooks, from the feature's install.
 	void InstallHooks();
 	void PreflightHooks();
@@ -164,15 +177,6 @@ namespace DCLF::Features::Sky
 		 * first use); null when it cannot be built. a_shader: the engine's BSSkyShader, whose defines ShaderCache composes.
 		 */
 		std::shared_ptr<const void> Program(const PipelineKey& a_key, const void* a_shader);
-		/** @brief The face cloud draws' occlusion target exists (Cloud Shadows' ORG copy reads it): created when first asked. */
-		bool CloudFacesReady();
-		/** @brief The faces' cloud occlusion is cleared at the next faces' run (a weather without cloud layers). */
-		void ClearCloudFaces();
-		/**
-		 * @brief Whether Cloud Shadows' copy reads the faces' cloud occlusion (true: the faces' cloud draws are the graph's) or its last
-		 * D3D11 layer (false: the engine draws them). Render thread; a change rebuilds Cloud Shadows' client once.
-		 */
-		void UseCloudFaces(bool a_use);
 		/** @brief Runs a_run's anchor with its draws (an empty run builds and prepares the client only). */
 		void Submit(std::shared_ptr<Run> a_run);
 		/** @brief One status line. */

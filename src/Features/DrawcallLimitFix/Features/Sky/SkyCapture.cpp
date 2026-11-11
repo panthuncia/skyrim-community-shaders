@@ -1,6 +1,7 @@
-// The sky family's engine side: the sky batch's hook, which lets the engine's batch run with its draws latched and hands them to the
-// anchor's pass; DrawTriShape's detour, which latches a sky draw in place of drawing it; and BSSkyShader::SetupGeometry's, which has
-// ConstantMirror watch the constant buffers the sky's draws read. Render thread.
+// The sky family's engine side: the sky batch's hook, which lets the engine's batch run with its draws latched; the cloud group's
+// hook, which latches the cloud layers drawn right after it and hands the draws to the anchor's pass; DrawTriShape's detour, which
+// latches a sky draw in place of drawing it; and BSSkyShader::SetupGeometry's, which has ConstantMirror watch the constant buffers the
+// sky's draws read. Render thread.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -15,7 +16,6 @@
 #include "Deferred.h"
 #include "Features/CloudShadows.h"
 #include "Features/CloudShadows/ORGCloudShadows.h"
-#include "RenderGraph/Switches.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -123,7 +123,17 @@ namespace DCLF::Features::Sky
 			std::uint32_t pendingType = 0xFF;
 			std::uint32_t otherTypes = 0;  // the geometry types of the batch's passes that drew elsewhere, a bit each
 			std::set<std::uint32_t> logged;   // (refusal, technique, view) logged once each
-			bool cloudsCleared = false;   // the faces' occlusion was cleared for a weather without cloud layers
+			Shape shape;                      // the batch's view and targets (CurrentShape)
+			// Geometry group 13 when the capture spans the cloud layers too: the batch's draws are handed over after it (CloudGroup).
+			const RE::BSBatchRenderer::GeometryGroup* cloudGroup = nullptr;
+			bool deferred = false;      // the sky batch ran; the capture is finished after the cloud group
+			bool inClouds = false;      // the cloud group is being drawn
+			bool skyShort = false;      // the sky batch had a pass that did not draw through DrawTriShape
+			bool skyFailed = false;     // a refusal in the sky batch
+			bool cloudsFailed = false;  // a refusal in the cloud group
+			// A probe whose only refusals were cloud draws: the view's cloud layers stay the engine's for the session, so a cloud
+			// technique the graph cannot draw never keeps the rest of the view's sky off the graph.
+			std::array<bool, static_cast<std::size_t>(View::Count)> cloudsRefused{};
 		};
 
 		Capture& GetCapture()
@@ -181,6 +191,8 @@ namespace DCLF::Features::Sky
 			if (cloudShadows.loaded && !ORGCloudShadows::Get().IsActive())
 				return false;
 			a_shape.cloudShadows = cloudShadows.loaded;
+			// The cloud layers are geometry group 13, which the capture spans only through the cloud group's hook.
+			a_shape.clouds = TakesClouds() && Address::kCloudGroup.Known();
 			// The headers' textures the sky's pixel stage may read (kHeaderRegisters), as CS binds them for the pass.
 			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
 				ID3D11ShaderResourceView* view = nullptr;
@@ -204,6 +216,8 @@ namespace DCLF::Features::Sky
 				a_face = rss.cubeMapRenderTargetView;
 				const auto& cube = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS];
 				a_capture.colourFormats[0] = FormatOf(cube.cubeSideRTV[0]);
+				// The faces' cloud draws write Cloud Shadows' occlusion into its graph faces: without them the clouds stay the engine's.
+				a_shape.clouds = a_shape.clouds && (!a_shape.cloudShadows || ORGCloudShadows::Get().GraphFaces());
 				return a_face < 6 && a_capture.colourFormats[0] && a_shape.depth == static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kCUBEMAP_REFLECTIONS);
 			}
 			if (rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
@@ -403,6 +417,7 @@ namespace DCLF::Features::Sky
 		void Refuse(Capture& a_capture, Refusal a_refusal, std::uint32_t a_technique)
 		{
 			a_capture.failed = true;
+			(a_capture.inClouds ? a_capture.cloudsFailed : a_capture.skyFailed) = true;
 			const std::uint32_t key = (static_cast<std::uint32_t>(a_refusal) << 16) | ((a_technique & 0xFF) << 8) | static_cast<std::uint32_t>(a_capture.view);
 			if (a_capture.logged.insert(key).second)
 				logger::warn("[DCLF] sky: a {} sky draw of technique {} stays the engine's: {}{}", a_capture.view == View::Main ? "main" : "face", a_technique,
@@ -425,110 +440,170 @@ namespace DCLF::Features::Sky
 		}
 
 		/**
-		 * @brief A weather without cloud layers draws no cloud on the faces, so nothing writes their occlusion: it is cleared once, as
-		 * CloudShadows::ReflectionsPrepass clears its last layer.
+		 * @brief The accumulator's geometry group 13 when the capture can span it: a pass list (FinishAccumulating draws it with
+		 * RenderPersistentPassList) of BSSkyShader TriShapes only, the cloud layers. Null otherwise, logged once per reason and view: an
+		 * empty group, or one with a sky-object effect (BSEffectShader, hint 0x12) or another geometry type, is drawn by the engine after
+		 * the anchor's run, in the engine's order.
 		 */
-		void NoteCloudLayers(Capture& a_capture)
+		const RE::BSBatchRenderer::GeometryGroup* CloudGroupOf(const void* a_accumulator, Capture& a_capture)
 		{
-			const auto* sky = globals::game::sky;
-			const bool layers = sky && sky->clouds && sky->clouds->numLayers > 0;
-			if (layers) {
-				a_capture.cloudsCleared = false;
-			} else if (!a_capture.cloudsCleared) {
-				SkyDraws::ClearCloudFaces();
-				a_capture.cloudsCleared = true;
+			const auto* batch = Engine::At<RE::BSBatchRenderer*>(a_accumulator, 0x130);
+			const auto* group = batch ? batch->geometryGroups[kCloudGeometryGroup] : nullptr;
+			if (!group || !group->passList.head)
+				return nullptr;
+			const char* reason = nullptr;
+			std::uint32_t code = 0;
+			if (!(group->flags & 1)) {
+				reason = "it is not a pass list";
+				code = 1;
 			}
+			for (const auto* pass = group->passList.head; pass && !reason; pass = pass->passGroupNext) {
+				if (!pass->geometry)
+					continue;
+				if (!pass->shader || pass->shader->shaderType.get() != RE::BSShader::Type::Sky) {
+					reason = "it holds a pass of another shader (a sky-object effect)";
+					code = 2;
+				} else if (Engine::At<std::uint8_t>(pass->geometry, 0x150) != static_cast<std::uint8_t>(RE::BSGeometry::Type::kTriShape)) {
+					reason = "it holds a sky pass that is not a TriShape";
+					code = 3;
+				}
+			}
+			if (!reason)
+				return group;
+			if (a_capture.logged.insert(0xFE000000u | (code << 8) | static_cast<std::uint32_t>(a_capture.shape.view)).second)
+				logger::info("[DCLF] sky: the {} cloud layers stay the engine's while {}", a_capture.shape.view == View::Main ? "main" : "face", reason);
+			return nullptr;
+		}
+
+		/**
+		 * @brief The end of a latched capture (after the sky batch, or after the cloud group when it spans it): its checks, the probe's
+		 * verdict, and the run handed to the anchor.
+		 */
+		void Finish(Capture& a_capture)
+		{
+			a_capture.active = false;
+			a_capture.deferred = false;
+			a_capture.cloudGroup = nullptr;
+			auto run = std::move(a_capture.run);
+			const View view = a_capture.shape.view;
+			const char* name = view == View::Main ? "main" : "face";
+			auto& clean = a_capture.clean[static_cast<std::size_t>(view)];
+			// Every pass must draw through DrawTriShape: one that drew through another function was the engine's, at its place in the
+			// batch, ahead of the graph's draws.
+			if (a_capture.pendingType != 0xFF)
+				a_capture.otherTypes |= 1u << (a_capture.pendingType & 31);
+			// A shortfall the sky batch did not have is the cloud group's (CloudGroup noted the batch's).
+			a_capture.inClouds = a_capture.inClouds && !a_capture.skyShort;
+			if (a_capture.drawn < a_capture.passes || a_capture.otherTypes) {
+				if (a_capture.logged.insert(0xFF000000u | a_capture.otherTypes).second)
+					logger::warn("[DCLF] sky: {} of {} {} sky passes drew without DrawTriShape (geometry types {:#x}, R1's dispatcher)",
+						a_capture.passes > a_capture.drawn ? a_capture.passes - a_capture.drawn : 0, a_capture.passes, name, a_capture.otherTypes);
+				Refuse(a_capture, Refusal::OtherDrawPath, a_capture.lastTechnique);
+			}
+			a_capture.inClouds = false;
+			if (!run)
+				return;
+			if (a_capture.probe) {
+				if (a_capture.failed && a_capture.cloudsFailed && !a_capture.skyFailed) {
+					a_capture.cloudsRefused[static_cast<std::size_t>(view)] = true;
+					logger::warn("[DCLF] sky: the {} cloud layers stay the engine's for the session: a cloud draw cannot be drawn by the graph (above)", name);
+				}
+				clean = !a_capture.failed;
+				if (clean)
+					logger::info("[DCLF] sky: every {} sky draw can be drawn by the graph; its batches are the graph's from the next", name);
+				return;
+			}
+			if (a_capture.failed) {
+				clean = false;
+				logger::warn("[DCLF] sky: a {} sky draw could not be drawn by the graph; the engine draws the batches while the view probes again", name);
+			}
+			// The face's clouds drawn by the graph, all of them: Cloud Shadows' copy reads this face from its graph faces. A batch that
+			// failed partway left some to the engine, which noted the D3D11 layer (SkyShaderHacks).
+			if (view == View::Face && a_capture.shape.cloudShadows && !a_capture.failed &&
+				std::ranges::any_of(run->draws, [](const Draw& a_draw) { return a_draw.key.occlusion; }))
+				ORGCloudShadows::Get().NoteFace(run->face, ORGCloudShadows::FaceSource::Graph);
+			SkyDraws::Submit(std::move(run));
 		}
 
 		/**
 		 * @brief FinishAccumulating's RenderBatches of the sky techniques (SE 99938 +0x247, AE 106583 +0x237): for the main camera's
-		 * GBuffer pass and a reflection face, the batch runs with its draws latched, then the anchor's pass draws them at this point.
+		 * GBuffer pass and a reflection face, the batch runs with its draws latched, then the anchor's pass draws them at this point, or
+		 * after the cloud group when the capture spans it (CloudGroup).
 		 */
 		struct SkyBatch
 		{
 			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
 			{
 				auto& capture = GetCapture();
+				// A capture still waiting for its cloud group (which FinishAccumulating always reaches next) is finished first: its draws
+				// are drawn late rather than lost.
+				if (capture.deferred)
+					Finish(capture);
 				if (capture.active || !ShellState::Running() || !FrameAnchors::OnRenderThread() || !SkyDraws::Available()) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
 				Shape shape;
 				std::uint32_t face = 0;
-				// Diagnostics: CS_ORG_SKY_VIEWS=main or faces takes only that view on the graph.
-				static const std::string views = Switches::Value("CS_ORG_SKY_VIEWS");
-				if (!CurrentShape(a_accumulator, shape, face, capture) || (views == "main" && shape.view != View::Main) ||
-					(views == "faces" && shape.view != View::Face)) {
+				if (!CurrentShape(a_accumulator, shape, face, capture) || !TakesView(shape.view)) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
-				if (shape.view == View::Face && shape.cloudShadows)
-					NoteCloudLayers(capture);
 				auto run = std::make_shared<Run>();
 				run->view = shape.view;
 				run->face = face;
-				auto& clean = capture.clean[static_cast<std::size_t>(shape.view)];
 				if (!SkyDraws::Ready(shape)) {
 					// The client is new or was made again: an empty run builds and prepares it, the engine draws this batch, and the
 					// view probes again (the new targets may need other programs).
-					clean = false;
-					if (shape.view == View::Face)
-						SkyDraws::UseCloudFaces(false);
+					capture.clean[static_cast<std::size_t>(shape.view)] = false;
 					SkyDraws::Submit(std::move(run));
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
-				const bool probe = !clean;
-				// Cloud Shadows' copy reads the faces' cloud occlusion only while the graph draws the faces' clouds: decided after the
-				// batch from its draws (a probe's batch is the engine's). Set once per change, so the copy's registration is stable.
-				if (probe && shape.view == View::Face && shape.cloudShadows)
-					SkyDraws::UseCloudFaces(false);
-				capture.view = shape.view;
-				capture.run = run;
-				capture.probe = probe;
+				capture.shape = std::move(shape);
+				capture.view = capture.shape.view;
+				capture.run = std::move(run);
+				capture.probe = !capture.clean[static_cast<std::size_t>(capture.view)];
 				capture.failed = false;
+				capture.skyFailed = false;
+				capture.cloudsFailed = false;
+				capture.skyShort = false;
 				capture.passes = 0;
 				capture.drawn = 0;
 				capture.pendingType = 0xFF;
 				capture.otherTypes = 0;
+				capture.cloudGroup = capture.shape.clouds && !capture.cloudsRefused[static_cast<std::size_t>(capture.view)] ? CloudGroupOf(a_accumulator, capture) : nullptr;
 				capture.active = true;
 				func(a_accumulator, a_first, a_last, a_flags, a_group);
 				capture.active = false;
-				capture.run.reset();
-				// Every pass must draw through DrawTriShape: one that drew through another function was the engine's, at its place in
-				// the batch, ahead of the graph's draws.
-				if (capture.pendingType != 0xFF)
-					capture.otherTypes |= 1u << (capture.pendingType & 31);
-				if (capture.drawn < capture.passes || capture.otherTypes) {
-					if (capture.logged.insert(0xFF000000u | capture.otherTypes).second)
-						logger::warn("[DCLF] sky: {} of {} {} sky passes drew without DrawTriShape (geometry types {:#x}, R1's dispatcher)",
-							capture.passes > capture.drawn ? capture.passes - capture.drawn : 0, capture.passes, shape.view == View::Main ? "main" : "face",
-							capture.otherTypes);
-					Refuse(capture, Refusal::OtherDrawPath, capture.lastTechnique);
-				}
-				if (probe) {
-					clean = !capture.failed;
-					if (clean)
-						logger::info("[DCLF] sky: every {} sky draw can be drawn by the graph; its batches are the graph's from the next", shape.view == View::Main ? "main" : "face");
+				if (capture.cloudGroup) {
+					capture.deferred = true;
 					return;
 				}
-				if (capture.failed) {
-					clean = false;
-					logger::warn("[DCLF] sky: a {} sky draw could not be drawn by the graph; the engine draws the batches while the view probes again",
-						shape.view == View::Main ? "main" : "face");
+				Finish(capture);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/**
+		 * @brief FinishAccumulating's RenderPersistentPassList of geometry group 13 (SE 99938 +0x284, AE 106583 +0x274), right after
+		 * the sky batch with write mode 11: when the sky batch's capture spans it, the cloud layers are latched as the batch's draws
+		 * were, and the capture is finished after them, so the anchor's pass draws the sky and its clouds in the engine's order.
+		 */
+		struct CloudGroup
+		{
+			static void thunk(RE::BSBatchRenderer::GeometryGroup* a_group, std::uint32_t a_flags)
+			{
+				auto& capture = GetCapture();
+				if (!capture.deferred || capture.cloudGroup != a_group) {
+					func(a_group, a_flags);
+					return;
 				}
-				// The graph writes the faces' occlusion only through this run's cloud draws. A run without one leaves it unwritten, so
-				// Cloud Shadows' copy keeps reading its D3D11 layer.
-				if (shape.view == View::Face && shape.cloudShadows) {
-					const bool clouds = !capture.failed && std::ranges::any_of(run->draws, [](const Draw& a_draw) { return a_draw.key.occlusion; });
-					if (!clouds) {
-						static std::atomic_flag logged;
-						if (!logged.test_and_set())
-							logger::warn("[DCLF] sky: a face batch on the graph has no cloud draw; Cloud Shadows' copy keeps its D3D11 layer");
-					}
-					SkyDraws::UseCloudFaces(clouds);
-				}
-				SkyDraws::Submit(std::move(run));
+				capture.skyShort = capture.drawn < capture.passes || capture.otherTypes || capture.pendingType != 0xFF;
+				capture.active = true;
+				capture.inClouds = true;
+				func(a_group, a_flags);
+				Finish(capture);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -589,6 +664,8 @@ namespace DCLF::Features::Sky
 		if (!Address::kSkyBatch.Known() || !Address::kDrawTriShape.Known())
 			return;
 		HookSites::RequireCall("the sky batch (FinishAccumulating's RenderBatches of the sky techniques)", REL::Offset(Address::kSkyBatch).address());
+		if (TakesClouds() && Address::kCloudGroup.Known())
+			HookSites::RequireCall("the cloud group (FinishAccumulating's RenderPersistentPassList of group 13)", REL::Offset(Address::kCloudGroup).address());
 	}
 
 	void InstallHooks()
@@ -598,9 +675,12 @@ namespace DCLF::Features::Sky
 			return;
 		}
 		stl::write_thunk_call<SkyBatch>(REL::Offset(Address::kSkyBatch).address());
+		if (TakesClouds() && Address::kCloudGroup.Known())
+			stl::write_thunk_call<CloudGroup>(REL::Offset(Address::kCloudGroup).address());
 		stl::detour_thunk<DrawTriShape>(REL::Offset(Address::kDrawTriShape).address());
 		HookSites::NoteDetour("BSGraphics::Renderer::DrawTriShape (the sky's draws)", DrawTriShape::func.address());
 		stl::write_vfunc<0x6, SetupGeometry>(RE::VTABLE_BSSkyShader[0]);
-		logger::info("[DCLF] sky: hooks installed (the sky batch, DrawTriShape, BSSkyShader::SetupGeometry)");
+		logger::info("[DCLF] sky: hooks installed (the sky batch{}, DrawTriShape, BSSkyShader::SetupGeometry)",
+			TakesClouds() && Address::kCloudGroup.Known() ? ", the cloud group" : "");
 	}
 }
