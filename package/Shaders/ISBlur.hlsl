@@ -63,7 +63,8 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 
 #	if defined(BRIGHTPASS)
-	float avgLum = Color::RGBToLuminance(AvgLumTex.Sample(AvgLumSampler, input.TexCoord.xy).xyz);
+	// Vanilla scales the average luminance texel by the color range, like the image taps.
+	float avgLum = Color::RGBToLuminance(AvgLumTex.Sample(AvgLumSampler, input.TexCoord.xy).xyz * blurScale.y);
 	color.w = avgLum;
 #	endif
 
