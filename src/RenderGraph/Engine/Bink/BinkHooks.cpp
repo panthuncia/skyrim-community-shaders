@@ -294,28 +294,52 @@ namespace RenderGraph::Engine::Bink
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief BSMovie::FreeTiles (SE 87905, AE 90276): releases the tile textures and quads and frees the set. */
+		/** @brief A tile set is about to be freed: its record goes, and the client leaves the Present anchor after a graph movie. */
+		void Forget(const void* a_set)
+		{
+			if (!a_set)
+				return;
+			bool graphMovie = false;
+			{
+				auto& records = GetRecords();
+				std::scoped_lock lock(records.mutex);
+				const auto found = records.sets.find(a_set);
+				if (found == records.sets.end())
+					return;
+				const auto& record = found->second;
+				graphMovie = record.movie != nullptr;
+				if (graphMovie || record.graphFrames)
+					logger::info("[ORG] Bink: a {}x{} movie ended: {} frames drawn by the render graph, {} by the engine", record.layout.videoWidth,
+						record.layout.videoHeight, record.graphFrames, record.engineFrames);
+				records.sets.erase(found);
+			}
+			// The frames in flight keep the graph's textures until their GPU work retires.
+			if (graphMovie && FrameAnchors::OnMainThread())
+				Graph::MovieEnded();
+		}
+
+		/**
+		 * @brief BSMovie::FreeTiles (SE 87905, AE 90276): releases the tile textures and quads and frees the set. SE's play loop
+		 * calls it directly; on AE only Close frees tiles, with this inlined.
+		 */
 		struct FreeTiles
 		{
 			static void thunk(void* a_set)
 			{
-				bool graphMovie = false;
-				{
-					auto& records = GetRecords();
-					std::scoped_lock lock(records.mutex);
-					if (const auto found = records.sets.find(a_set); found != records.sets.end()) {
-						const auto& record = found->second;
-						graphMovie = record.movie != nullptr;
-						if (graphMovie || record.graphFrames)
-							logger::info("[ORG] Bink: a {}x{} movie ended: {} frames drawn by the render graph, {} by the engine", record.layout.videoWidth,
-								record.layout.videoHeight, record.graphFrames, record.engineFrames);
-						records.sets.erase(found);
-					}
-				}
-				// The frames in flight keep the graph's textures until their GPU work retires.
-				if (graphMovie && FrameAnchors::OnMainThread())
-					Graph::MovieEnded();
+				Forget(a_set);
 				func(a_set);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/** @brief BSMoviePlayer::Close (SE 87891, AE 90260): BinkClose, then the player's tiles freed (FreeTiles, inlined on AE). */
+		struct ClosePlayer
+		{
+			static void thunk(std::uintptr_t a_player)
+			{
+				if (a_player)
+					Forget(Read<const void*>(reinterpret_cast<const void*>(a_player), kPlayerTiles));
+				func(a_player);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -343,5 +367,6 @@ namespace RenderGraph::Engine::Bink
 		stl::detour_thunk<DrawTiles>(REL::RelocationID(87907, 90279));
 		stl::detour_thunk<CreateTileTextures>(REL::RelocationID(87904, 90275));
 		stl::detour_thunk<FreeTiles>(REL::RelocationID(87905, 90276));
+		stl::detour_thunk<ClosePlayer>(REL::RelocationID(87891, 90260));
 	}
 }
