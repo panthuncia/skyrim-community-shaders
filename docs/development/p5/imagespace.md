@@ -129,8 +129,9 @@ is where the set of shapes comes from: it is known before the session's first fr
   four engine table fields (mode, alpha to coverage, write mode, extra), the viewport in pixels. Two sessions name the same shape the
   same way.
 - **The manifest.** Every shape the port sees is written to `Data/ShaderCache/v2/ImageSpaceShapes.json` (beside the shader store), with
-  its place in the frame (scope and draw index). The file is rewritten when a session sees a new shape, at most every 300 frames.
-  A shape not seen for 16 sessions is dropped; at most 256 are kept (the gate's entries).
+  its place in the frame (scope and draw index), and each seen effect's program defines. The file is rewritten whenever the session
+  has seen shapes since the last write (new ones, or known ones whose last session it updates), at most every 300 frames, so the
+  world's shapes are written after the main menu's. A shape not seen for 16 sessions is dropped; at most 256 are kept.
 - **Setup registers the manifest.** `ImageSpace::Setup` (startup, before the main menu) reads the manifest, makes a pass for each
   shape whose targets exist (with the shapes the RE says each implies: the kMAIN / kMAIN_COPY swap, the luminance chain's alternating
   level, every bloom radius), and registers the client once. The anchor's graph is built with it at the first build point, in the
@@ -151,6 +152,16 @@ shaders into the shader store. The gate is the client's first graph build: each 
 (logged once per program: `built <program> on the render thread`). That build is at the first build point after Setup, in the main
 menu, so a world frame never waits for a program and never leaves a draw to the engine because one is building. A program that fails
 to build leaves its pass out of the graph (logged as an error); its shape's draws are refused for the session.
+
+**What is read at the build, not at Setup.** The first run (`1111-145713-p35-p5-all-census-misc-prim`) showed that the engine fills
+its blend and sampler tables after CS's Setup: every shape whose blend fields or sampler modes were turned into ORG state there was
+dropped (`no engine blend state`, `a sampler has no ORG form`), and settled Whiterun sent 33 ImageSpace draws a frame to D3D11. Setup now
+imports the targets only. The blend state, the samplers and the program are taken in the pass's `make`, at the graph's build. Some
+engine effect objects are made later still (ISCopySubRegionCS's): their program defines come from the manifest, which saves each
+seen effect's defines. A pass left out of a build (an unfilled table, no defines, no program) has its shape's draws refused
+(`its pass was left out of the graph's build`), never withheld. When a pass was left out because a table was still empty, the
+client's graph is built once more (`FrameAnchors::Refresh`) at the next frame outside the world in which the tables hold what the
+passes need; in a world frame it is left for the next session (logged), never rebuilt in play.
 
 ### Resize
 
@@ -363,7 +374,7 @@ are passes from Setup. By class:
 | ISSAOCompositeFog / SAO / SAOFog into kMAIN | **Stays.** Its source includes `IBL/IBL.hlsli` and `ExponentialHeightFog/ExponentialHeightFog.hlsli` with those features' own registers (and s9) and reads `SharedData` feature settings. Taking it needs a dual-target form of the two feature headers (shared with the Lighting shaders) and IBL's and EHF's graph outputs bound by name: a change to two other features' shader interfaces. Reason `imagespace: effect not on the graph`. |
 | ISApplyVolumetricLighting (two raster draws into `kIMAGESPACE_VOLUMETRIC_LIGHTING` / `_PREVIOUS`) | **Stays.** It reads the VL volume (t2, a `Texture3D` from `texture3DRenderTargets`), the repartition texture (t3, a `Texture1D` the VL helper made) and the noise gradient (t4, a loaded texture). FrameAnchors imports 2D render targets, depth and cube targets only; importing a 3D target and a 1D texture is a FrameAnchors addition, and the VL volume is written by the dispatches below, which stay the engine's. Reason `imagespace: effect not on the graph`. |
 | The VL blur (ISVolumetricLightingBlurHCS / VCS through 107206 -> 107209/107210 -> 107734) | **Stays.** With the VolumetricLighting feature loaded, `CSShadersSupport::Renderer_DispatchCSShader` swaps in CS's own shaders (`GetOrCreateBlurHCS/VCS`), binds its own CS b1 (`SetDimensionsCB`, a CS buffer the capture does not see) and rewrites the group counts. Taking it needs those two sources dual-target with the VL data in the latch, and the effect's input (written by ISApplyVolumetricLighting, above) is the engine's anyway. Reason `imagespace: effect not on the graph`. |
-| The VL dispatches from AE 107023 (+0x31C generate, +0x48B raymarch; SE 100309) | **Stays.** They call `DispatchCSShader` directly with CS's ISVolumetricLightingGenerateCS / RaymarchCS: the shadow cascades as `Texture2DArray` (both shadow maps), the inverse repartition `Texture1D`, the noise `Texture3D`, Terrain and Cloud Shadows' inputs through `ShadowSampling.hlsli`, and a `RWTexture3D` density volume, with CS b0 from the engine's PerTechnique. None of those is an import FrameAnchors makes today, and the feature inputs belong to their ports. This is a Phase 3 style port of VolumetricLighting (`ORGVolumetricLighting.*`). The dispatches are recognised by return address (within AE 107023 / SE 100309) and vouched for: `imagespace: volumetric lighting compute`. |
+| The VL dispatches from AE 107023 (+0x31C generate, +0x48B raymarch; SE 100309) | **Stays.** They call `DispatchCSShader` directly with CS's ISVolumetricLightingGenerateCS / RaymarchCS: the shadow cascades as `Texture2DArray` (both shadow maps), the inverse repartition `Texture1D`, the noise `Texture3D`, Terrain and Cloud Shadows' inputs through `ShadowSampling.hlsli`, and a `RWTexture3D` density volume, with CS b0 from the engine's PerTechnique. None of those is an import FrameAnchors makes today, and the feature inputs belong to their ports. This is a Phase 3 style port of VolumetricLighting (`ORGVolumetricLighting.*`). The function is detoured (AE `0x1414c4f40`, called from Main::Draw AE 36559) and runs in an `EngineDraws` scope: `imagespace: volumetric lighting compute`. A return-address test inside the DispatchCSShader detour did not see 107023 (Hooks.cpp's detour of the same function sits outside it). |
 | ISCopySubRegionCS from `Main::RenderWaterEffects` (BGSAutoWater's queue) | **Stays.** Each call copies a loaded texture (a different one per call) into the water texture at `DAT_1431d0f80 + 0x48`; neither is an engine render target. A fixed pass set cannot name a texture per call; it needs a bindless source in the latch. Refusal `its UAV is not an engine render target's`, reason `imagespace: shape refused`. |
 | The tonemap (55, 56) | Stays: CS's tonemap owners (Effects11, Post Processing, HDR Display). |
 | A fractional viewport, the dynamic-resolution quad (`unk58`), a manager rectangle (menu 3D) | Stay, as before (inherent refusals). |
