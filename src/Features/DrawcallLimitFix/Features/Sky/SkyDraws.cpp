@@ -260,7 +260,10 @@ namespace DCLF::Features::Sky::SkyDraws
 		 */
 		void StagesOf(bool a_pixel, std::uint32_t a_descriptor, std::vector<Family::StageRequest>& a_out)
 		{
-			if (!a_pixel)
+			// The sun glare (raw technique 1, pass 0x5C006072) is outside the sky batch's techniques (0x5C00005D-0x5C000064): the family
+			// never draws it. Its ORG vertex stage would not build either: its GetSunGlareVisibility reads SharedData in the vertex stage,
+			// which with the vertex pull makes DXC 1.9 emit invalid SPIR-V (a ConstantBuffer<T> in Function storage, VUID-10684).
+			if (!a_pixel || (a_descriptor & 0xFF) == 1)
 				return;
 			a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Pixel, .variant = (a_descriptor & 256) ? 0u : kVariantFaces });
 		}

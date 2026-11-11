@@ -105,7 +105,8 @@ struct RasterProgram
 
 	/**
 	 * @brief Compiles both stages of a_desc into the shader store (or finds them there) without making a pipeline, so a later Load
-	 * of a desc with the same sources and defines finds them. False when the runtime has no compiler yet or a stage failed (logged).
+	 * of a desc with the same sources and defines finds them. False when the runtime has no compiler yet or a stage failed
+	 * (logged as a warning: the caller names the permutation).
 	 * Blocks on the compile: call it from a compile thread or at setup.
 	 */
 	static bool CompileStages(const Desc& a_desc);

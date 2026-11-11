@@ -136,7 +136,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 
 		/**
 		 * @brief The shadow mask programs a Utility pixel descriptor CS loads can be drawn with: those with a RenderShadowmask* technique
-		 * bit (the world's and the menu scenes' masks: shadow-mask.md, "The shader"). Every other Utility descriptor is DCLF's or the
+		 * bit and RenderDepth (the world's and the menu scenes' masks: shadow-mask.md, "The shader"). Every other Utility descriptor is DCLF's or the
 		 * engine's.
 		 */
 		void StagesOf(bool a_pixel, std::uint32_t a_descriptor, std::vector<Family::StageRequest>& a_out)
@@ -144,7 +144,9 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			using Flags = SIE::ShaderCache::UtilityShaderFlags;
 			constexpr auto kMasks = static_cast<std::uint32_t>(Flags::RenderShadowmask) | static_cast<std::uint32_t>(Flags::RenderShadowmaskSpot) |
 			                        static_cast<std::uint32_t>(Flags::RenderShadowmaskPb) | static_cast<std::uint32_t>(Flags::RenderShadowmaskDpb);
-			if (a_pixel && (a_descriptor & kMasks))
+			// Utility.hlsl's ORG build is RENDER_DEPTH with a RENDER_SHADOWMASK* technique only (its #error): a descriptor with a mask bit
+			// but no RenderDepth is another technique whose bits overlap (the legacy layouts), which the family never draws.
+			if (a_pixel && (a_descriptor & kMasks) && (a_descriptor & static_cast<std::uint32_t>(Flags::RenderDepth)))
 				a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Pixel });
 		}
 
