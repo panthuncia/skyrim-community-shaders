@@ -94,6 +94,29 @@ Not in this task: `CopyResource` at AE 107193+0x466 (0x1414d1af0, the ImageSpace
   D3D11 draws still read them (P5.2 finishes DCLF's coverage). `ClearState` and the b12 binds in `Renderer::Begin`: no handle
   passes through them, and the D3D11 readers that remain rely on both; the per-frame buffer's Map belongs to P5.7.
 
+## The primary path (2026-11-11, `org-port/primary-ui`)
+
+With `CS_ORG_ENGINE_SKELETON=1` the graph is the only path for the clears and the copy it takes (primary-path.md).
+
+- The clear programs were already built synchronously at Setup, one per format and depth flags.
+- The groups and the depth copy register at `Skeleton::Setup` (from `Engine::Setup`). `Engine::PostSetup` (from `State::Setup`, after the features' `SetupResources`) runs the setup's build point,
+`FrameAnchors::BuildPending`: every client registered so far is in its anchors' graphs before the first frame. Log:
+`[ORG] frame anchors: graphs built at CS's setup; every registered client is in its anchors' graphs`.
+- **Deleted:** the groups' and the copy's `joined` flags and their `RequestJoin` polling. `CanRun` stays: it is false only on
+  a full ring or between a resize's re-registration and the next build point.
+- **A run that did not execute** (no `executed` signal) is an error: `[ORG] engine skeleton: a run of <group> did not execute
+  (run status N); the engine's calls were made for it`, once per group and status. The engine's calls are still made for that
+  run, in order, so the frame stays whole.
+- **Rebuild trigger:** a target of a group made again (a resize). The group registers once with new passes, and the next build
+  point between frames builds it. CS keeps the window from resizing after its menu initialized, so this is a startup case.
+- The flush latch lets clears and copies through, so the skeleton's refusals need no `Flush::EngineDraws` scope.
+
+### What stays the engine's
+
+The views outside the skeleton's list or the engine's tables; views that are not one mip-0 slice; integer formats; clear
+values other than depth 1 and stencil 0; depth flags with no draw; calls off the render owner; a full ring; the clears between a
+resize and the next build; a failed group.
+
 ## Runs per frame (the deadlock found in the first run)
 
 Each run of an anchor is an epoch run, and an epoch's runs take the slots of its ring of `kGameFramesInFlight` (4) in turn.
@@ -121,10 +144,9 @@ Per call, the engine's D3D11 call is made (in the original order, at the flush, 
 
 - the view is not in the skeleton's list or not in the engine's tables, is not one mip-0 slice, has an integer format, its
   value is not depth 1 / stencil 0, or its depth flags have no draw (a depth-only clear of a stencil format);
-- the caller is not the render owner, the registration is not in the anchor's built graph yet, or the anchor's ring is full
-  this frame (`CanRun`);
-- the run did not submit with the pass (no `executed` signal: a failed epoch);
-- the engine made the view's target again: the group registers again, and clears stay the engine's until it has joined;
+- the caller is not the render owner, or the anchor's ring is full this frame (`CanRun`);
+- the run did not submit with the pass (no `executed` signal: a failed epoch, logged as an error);
+- the engine made the view's target again: the group registers again, and clears stay the engine's until the next build point;
 - the group failed (anchor failure).
 
 Any clear value is drawn by the view's one pass (the colour is latched), so there is no per-value limit, and the old limits (4

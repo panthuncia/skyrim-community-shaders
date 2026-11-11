@@ -52,6 +52,20 @@ From the 2026-11-11 survey of `org-port/p5`:
 
 `RunGate` stays: it keeps recordings stable across runs and is not a readiness device.
 
+## The UI lane (`org-port/primary-ui`)
+
+Scaleform, Bink, the frame skeleton and the loading thread follow the rules above (scaleform.md, bink.md, skeleton.md and
+loading-screen.md, each under "The primary path"). Shared pieces:
+
+- **Setup's build point.** `Engine::PostSetup` runs from `State::Setup` after the features' `SetupResources`. It sets Scaleform up,
+  then calls `FrameAnchors::BuildPending`, which builds every graph a registered client waits to join, between frames on the
+  render owner. That is how rule 3's "in the anchor's graph before the first frame that needs it" is met, without `RequestJoin`.
+- **`ProgramCache::Require`.** It returns the key's program, built on the calling thread when the build thread has not finished
+  it (logged: `built on the render thread at its first use`). It is rule 2's last resort. `Get` stays for queueing at setup.
+- **What is still a rebuild trigger:** a resize, or HDR rebuilding its UI texture. Scaleform's role surface, Bink's framebuffer
+  and the skeleton's groups register once again, and the next build point between frames builds them. The work in between stays
+  the engine's.
+
 ## Proven ports
 
 The ports that matched their D3D11 runs (org-full-port.md, Status): the frame skeleton, engine constants, the sky's main
