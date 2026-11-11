@@ -48,7 +48,8 @@ pinned submodule commits exist only locally, so a fresh clone cannot fetch them.
 | P5.10 finish: the A8 glyph cache, the colour matrix filter, displays split around D3D11 parts                    | Merged and run; the part path runs with `CS_ORG_SCALEFORM_D3D11_PARTS`               | CS `org-port/p5`, BasicRHI (A8_UNorm, format remap)      |
 | P5 review and its fix lanes: framework, families, engine, Scaleform passes, DCLF core                            | Merged; `p5-all.env` runs with every port on                                        | CS `org-port/p5`                                         |
 | ORG: retire replaced statistics query pools after the in-stream lists that write them                            | Done; the device loss after in-session rebuilds                                     | ORG `org-port/rebuild-retire` (3100d0e)                  |
-| P5.13 (the flush and the shader binds as tripwires)                                                              | Not started                                                                         |                                                          |
+| P5 wave 3: frame slot budget 512, ImageSpace end-of-frame effects, shadow masks, water's published slots         | Merged and run (2026-11-11); details below                                          | CS `org-port/p5`, ORG `org-port/frame-slots` (9cbc8b3)   |
+| P5.13 (the flush and the shader binds as tripwires)                                                              | Census and latch built (`CS_ORG_RESIDUE_CENSUS`, `CS_ORG_ENGINE_FLUSH_LATCH`); not flipped | CS `org-port/p5`                                         |
 
 **Root cause worth knowing:** a BasicRHI-created Vulkan device failed on AMD because the driver rejects acceleration
 structures in a mutable descriptor list at any count. DXVK never enables acceleration structures, so the adopted device
@@ -129,6 +130,27 @@ The Phase 5 review (2026-11-11) and its fix lanes:
   the device loss after in-session rebuilds. A replaced pool now lives until the last list that recorded with it is
   released, and the retirement frontier covers values given out on the host's shared timelines.
 
+Phase 5 wave 3 and the fixes after it (2026-11-11), each against its D3D11 run with VRAM Budget off:
+
+- **Missing terrain after a save load:** DCLF refused every graph-owned `B8G8R8X8` engine texture (`CS_ORG_ENGINE_TEXTURES`):
+  the A8 format-remap change compared the view's identity swizzle with BasicRHI's own alpha-to-one swizzle and called them
+  different. Material pairs reading such a texture were skipped while DCLF still withheld their draws, so land quads with a
+  BGRX diffuse drew nothing. An identity view now takes BasicRHI's swizzle, and a refused format logs once.
+  `terrain-load.env` is a two-minute check.
+- **Frame slots and ImageSpace:** ORG's 32-bit frame slots and a budget of 512 let ImageSpace run 13 times a frame. The
+  end-of-frame effects (depth of field and its compute blurs, refraction, the radial blur, the snow copy) are their own
+  scopes. A draw's viewport is read from the context after the state flush, so effects with their own viewport and the
+  dynamic-resolution part of a target under upscaling are taken; the SAO camera-Z levels are mips of one import. The
+  graph holds 53 ImageSpace passes in `imagespace-sao-ssr-org1.env`, against 23 before.
+- **Family inputs:** water, sky and shadow masks list the published ids they can read when their client is made, and
+  each build declares the registered ones, so a target published later no longer keeps a family on the engine for the
+  session. Water now draws on the graph after the first frames (`p5-all-census-misc.env`), matching its D3D11 shots.
+- **Shadow masks** (`CS_ORG_SHADOW_MASK`): the menu scenes' masks draw on the graph; the world's never register yet.
+- **Bink:** the startup logo drew 166 of 166 frames on the graph (`loading-org1.env`).
+- **Crashes seen, not ours:** VRAM Budget unloading cells under memory pressure, then a `coc` into an interior faulting in
+  EngineFixes (the batches now disable VRAM Budget, see its known grid-detach crash); a pathing job jumping into heap
+  memory through `zz_SkyrimEngineTelemetry.dll`'s zone hooks.
+
 **Open items:**
 
 - The sky's cloud layers on the graph stay off by default (`CS_ORG_SKY_CLOUDS`) until a run verifies them.
@@ -136,7 +158,13 @@ The Phase 5 review (2026-11-11) and its fix lanes:
   object is dclf-roadmap.md 3.7.
 - ORG's `StatisticsManager` still has a race on its shared query pool and no headroom in it: every new pass name replaces
   the pool, and the retirement fix only keeps the old one alive for the lists that recorded with it.
-- P5.13 (the flush and the shader binds) is not done.
+- P5.13: the census still reads 40-170 engine draws a frame (cloud layers, DCLF residue in load windows, refraction
+  normals, particles, distant tree LOD), so the latch stays off.
+- The world shadow masks never register; the menu's t5 is a stencil view the importer rejects.
+- ImageSpace left on D3D11: the distant blur (its output is `kFRAMEBUFFER`), `Main::RenderWaterEffects`' copies (a
+  queued texture each), refraction's late shape (it joins at the next cell change).
+- Dragonsreach is darker with the ImageSpace port on (`imagespace-sao-ssr-org1.env`); likely the eye adaptation chain
+  split between the graph and D3D11.
 - With DCLF on, the owned frame stops presenting at the first menu or loading screen (P1).
 
 **Phase 5 findings worth knowing:**
