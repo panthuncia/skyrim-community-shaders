@@ -1838,7 +1838,8 @@ pass, so it was not kept.
     blocks in the driver (up to 20 ms measured while streaming). `ResolveBinding` imports inline only for the frame's textures. A
     failed sampler creation is logged once and returns no index, so the draws that need it are skipped (`GpuTextures::Sampler`).
 -   **Buffers**: `dxvkGetInteropResourceInfo` (`src/RenderGraph/DxvkOrgInterop.h`) returns the Vulkan handle and device address and
-    marks the resource stable. Buffers the game can map are rejected (`Ineligible::UnstableBuffer`). A cleared slot's import leases
+    marks the resource stable. Buffers the game can map are rejected (`Ineligible::UnstableBuffer`; `Coordinator::NoteUnstable`
+    counts them by cause and logs the first 16, `[DCLF] unstable buffer:`; dclf-roadmap.md 4.7). A cleared slot's import leases
     go to the next execution committed and are held until the GPU retires it: DCLF draws game buffers by device address, which DXVK
     does not see (a released chunk's memory once went to the next streamed buffer while a submitted pass still drew it).
 -   **RenderDoc**: with `renderdoc.dll` loaded the device has no `VK_EXT_descriptor_heap`, so the render graph cannot start and DCLF
@@ -2512,7 +2513,9 @@ the parities.
     passes declare, so the render thread makes them (`ShadowSlotsRequest`) and builds the graph with them. Either growth is a new
     shadow latch layout. A view is never left native for want of a slot.
 -   **Still the engine's**: the scissor rectangle, `UpdateCamera` and its focus counterpart themselves, and a view whose rasterizer
-    state no pipeline can express (wireframe, no depth clip).
+    state no pipeline can express: wireframe, or depth clip off on a device without `depthClamp` or with
+    `CS_DCLF_SHADOW_DEPTH_CLAMP=0`. Such a view is counted as `raster-state` in the `[DCLF] shadow views:` line's not-ready
+    reasons (`CS_DCLF_STATS=1`), and its state is warned about once (`shadow view rasterizer state not expressible`).
 
 #### Local shadow masks
 
@@ -2569,7 +2572,10 @@ passes (render modes `0x10`/`0x11`, `GetRenderPasses_ShadowMapOrMask`) are not w
 -   **The view's rasterizer state.** Each view draws with its own: depth bias, slope, clamp and cull, as the engine binds it. A view's
     state is its rasterizer table entry at cull mode 1, not the renderer's current one (the Utility shader sets the cull mode per pass,
     so the renderer's is whatever drew last); a view with no entry at 1 (the volumetric copy) takes its entry at 0. A two-sided caster
-    draws without culling (`kRasterTwoSided`). CS's `ShadowmapCascadeRasterizerFix` swaps per-cascade states in around the cascade
+    draws without culling (`kRasterTwoSided`). A state with `DepthClipEnable` off draws with depth clamped to the viewport's range
+    (`ShadowRasterState::depthClip` to BasicRHI's `RasterState::depthClip`, Vulkan `depthClamp`, as DXVK draws it), where
+    `FixedFunctionFeatureInfo::depthClipDisable` says the device can; `CS_DCLF_TEST_SHADOW_CLAMP=1` draws every view so, to exercise
+    the path with the engine's states (all of which clip). CS's `ShadowmapCascadeRasterizerFix` swaps per-cascade states in around the cascade
     loop only. States are registered by `DrawPipelines::ShadowRasterStateId` from `EngineRasterStates()`; the id is
     `ShadowPipelineKey::viewState`, a mode's states are sorted lists (`ModeRasterStates`: casters and volumetric-only), and a shadow
     input names a key slot resolved through the view's state row (`BuildDrawsLatch::pipelineMapOffset`). Not a union of every raster
@@ -2797,7 +2803,8 @@ with set phase `kSetReflection` and view bit `kViewReflection`.
     (`ReflectionFaces::SetRootsOwned`: `kLodRoots`, LOD land and objects, while both LOD classes are on and the swaps gated;
     `kTreeRoot`, LOD trees, while the faces draw tree LOD). `AddLodRoot` then skips the add-root (`FUN_1405275e0`) at all three LOD
     call sites (`0x14052080d` land, `0x140520826` objects, `0x14052083f` trees), so the engine neither culls nor registers them; the
-    sky's stays (`IndirectDraws::ViewLodRootsOwned`). The engine's face draws are then only the sky (about 21 passes). An
+    sky's stays (`IndirectDraws::ViewLodRootsOwned`). These four (`0x140520854` the sky's) are the cube camera's only roots: no cell
+    root is ever added (Ghidra, 2026-11-11). The engine's face draws are then only the sky (about 21 passes). An
     `OwnRenderers` view's residue under those roots is watched (`PassCapture::WatchViewResidue`).
 -   **Withholding**: the cube camera's accumulators (`+0x1A0`, `+0x1A8`) are the view's own renderers (`SetViewRenderers`,
     `SetViewWithholdActive`).
@@ -3068,9 +3075,11 @@ DCLF claims whole objects in the phases it draws; the engine keeps:
     cloud lighting, Lighting without Light Limit Fix, projected UV, unrecognised blend pairs, Falloff without blending, membrane,
     strip and mesh particle systems, skins or nested billboards under billboards).
 -   **By state**: an object not yet a member (the engine draws it until the publication that claims it is installed), a pair a
-    register is missing for, a texture still importing, an object whose geometry buffer the game can map (`UnstableBuffer`).
--   **By view**: first-person refraction; the reflection's modes `0x19` and `0x1B`; the reflection faces' sky; a shadow view whose
-    rasterizer state no pipeline expresses; the occlusion maps without Skylighting.
+    register is missing for, a texture still importing, an object whose geometry buffer the game can map (`UnstableBuffer`; none
+    in Whiterun with this load order, a RaceMenu body morph elsewhere).
+-   **By view**: first-person refraction; the reflection's modes `0x19` and `0x1B`; the reflection faces' sky (on ORG with
+    `CS_ORG_SKY`; the cube camera has no other root once DCLF skips the LOD ones: dclf-roadmap.md 1.2); a shadow view whose
+    rasterizer state no pipeline expresses (wireframe, or no depth clip without depth clamp); the occlusion maps without Skylighting.
 -   **Mixed entries** keep the engine's culls whole, though DCLF still draws their members.
 
 `CS_DCLF_CENSUS=1` counts every pass a registration hook hands on to a batch renderer, by view and class, and gives each Lighting

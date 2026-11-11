@@ -149,6 +149,7 @@ Each compares a live path with a reference built from scratch and flags every mi
 | `CS_DCLF_TEST_TOGGLE` | `<off frame>:<on frame>...` | Switches DCLF off and on. |
 | `CS_DCLF_TEST_EXIT` | `<frame>` | The game exits after that many frames. The count includes the main menu's frames, so below about 200 the game exits before DCLF draws. |
 | `CS_DCLF_TEST_REFUSE` | `<name>,...` | Geometry whose node name contains one of the names is refused as an unstable buffer (what a RaceMenu-morphed shape got on test2), so a run has engine-only geometry of any class: the engine-only subset's paths (`Core/Scene/EngineCasters.h`). `Rock` in Riverwood gives about 860 roots: the sun's whole skip and the occlusion maps cull them alone (their report lines). |
+| `CS_DCLF_TEST_SHADOW_CLAMP` | `1` | Every shadow view draws with depth clamped instead of clipped, as a view whose rasterizer state turns depth clipping off does (`CS_DCLF_SHADOW_DEPTH_CLAMP`, on unless `0`): the engine's own states all clip, so this is the only way a run reaches that path. Shadows may differ only where a caster crosses a view's near or far plane; the `shadow view rasterizer state N` lines say `depth clamped`. |
 
 ### Tuning
 
