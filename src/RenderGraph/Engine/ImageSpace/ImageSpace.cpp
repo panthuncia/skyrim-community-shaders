@@ -50,14 +50,15 @@ namespace RenderGraph::Engine::ImageSpace
 		namespace Pipeline = RenderGraph::Engine::Pipeline;
 
 		constexpr const char* kClientId = "cs.engine.imagespace";
-		// Gate entries (one per pass). An entry is never reused after a reset, so a recording made for an older shape can never
-		// draw with a newer pass's latch; a session that runs out keeps drawing the rest with D3D11.
+		// Gate entries (one per pass). Every registration numbers its passes from 0 by their place in the frame; no draw is taken
+		// between a registration and the graph that holds it (Phase::Joining), so an older graph never runs with a newer latch.
 		constexpr std::uint32_t kGateEntries = 128;
-		// The ImageSpace anchor's runs a frame (its kInfo entry in FrameAnchors.cpp says 4). Draws are taken for at most 2 batches a
-		// frame, the steady state (the pre-tonemap composites, the HDR effect up to its tonemap), and the runtime's fallback size
-		// when the anchors' slots would pass 255: a batch must never meet a full ring after its draws were withheld.
+		// The ImageSpace anchor's runs a frame (its kInfo entry in FrameAnchors.cpp). The steady state uses two (the pre-tonemap
+		// composites, the HDR effect up to the first draw it does not take); draws are taken while the frame has a run left. The
+		// ring holds kGameFramesInFlight times this, and a run waits only for runs three frames old, so four a frame never fill it.
+		// (When the anchors' slots would pass 255 the runtime sizes the anchor for 2 and logs "need too many frame slots"; a third
+		// run a frame could then meet a full ring: the batch fails and ImageSpace returns to D3D11.)
 		constexpr std::uint32_t kRunsPerFrame = 4;
-		constexpr std::uint32_t kTakenRunsPerFrame = 2;
 		// Frames without a new shape before the client registers: the luminance chain alternates its last targets every frame, and
 		// effects that follow the weather or the camera show up within a few seconds.
 		constexpr std::uint32_t kLearnFrames = 120;
@@ -132,18 +133,19 @@ namespace RenderGraph::Engine::ImageSpace
 		struct Pending
 		{
 			std::uint32_t entry = 0;
-			std::uint32_t srvIndex = 0;
-			std::uint32_t offset = 0;
+			ConstantsAt at;
 		};
 
 		/** @brief OrgEngineConstantsAt in Common/OrgEngineConstants.hlsli. */
 		struct ConstantsAt
 		{
-			std::uint32_t srv = 0;
+			std::uint32_t srv = 0;  // PerGeometry (PS b2)
 			std::uint32_t offset = 0;
-			std::uint32_t padding[2]{};
+			std::uint32_t frameSrv = 0;  // PerFrame (PS b12), read as FrameBuffer
+			std::uint32_t frameOffset = 0;
+			std::uint32_t padding[4]{};
 		};
-		static_assert(sizeof(ConstantsAt) == 16);
+		static_assert(sizeof(ConstantsAt) == 32);
 
 		enum class Phase : std::uint8_t
 		{
@@ -175,12 +177,15 @@ namespace RenderGraph::Engine::ImageSpace
 			std::shared_ptr<org::LatchBlock> latch;
 			std::map<std::pair<std::uint32_t, std::uint32_t>, org::OwnedDescriptorBinding> samplers;  // (address, filter)
 			std::map<std::tuple<std::size_t, rhi::Format, const void*>, std::shared_ptr<const RasterProgram>> programs;
-			std::vector<std::shared_ptr<const Spec>> specs;  // in the current registration, by entry
-			std::set<ShapeKey> refusedShapes;                // shapes no pass can be made for (logged once)
-			std::vector<ShapeKey> candidates;                // seen, not registered yet
-			std::vector<std::uint32_t> candidateOrder;       // each candidate's place among the frame's eligible draws
-			std::uint32_t drawIndex = 0;                     // eligible draws so far this frame
+			std::vector<std::shared_ptr<const Spec>> specs;         // in the current registration, by entry
+			std::set<ShapeKey> refusedShapes;                       // shapes no pass can be made for (logged once)
+			std::vector<ShapeKey> candidates;                       // seen, not registered yet
+			std::map<ShapeKey, std::uint32_t> positions;            // each shape's place in its frame: scope << 16 | draw within the scope
+			std::set<std::pair<std::int32_t, std::int32_t>> swaps;  // targets that stand in for each other (ping-pong, alternation)
+			std::uint32_t scope = 0;                                // the current scope (0 the pre-tonemap composites, 1 the HDR effect)
+			std::uint32_t drawIndex = 0;                            // eligible draws so far in the current scope
 			std::uint32_t nextEntry = 0;
+			bool paused = false;  // the game was paused at the last frame (a menu)
 			std::uint32_t registrations = 0;
 			std::uint32_t quietFrames = 0;
 			const void* registeredCell = nullptr;
@@ -502,7 +507,7 @@ namespace RenderGraph::Engine::ImageSpace
 				auto& current = IS();
 				const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
 				for (const auto& pending : current.batch) {
-					current.latch->WriteValue(slot, pending.entry * static_cast<std::uint32_t>(sizeof(ConstantsAt)), ConstantsAt{ .srv = pending.srvIndex, .offset = pending.offset });
+					current.latch->WriteValue(slot, pending.entry * static_cast<std::uint32_t>(sizeof(ConstantsAt)), pending.at);
 					current.gate->OpenDraw(pending.entry);
 				}
 			};
@@ -526,7 +531,32 @@ namespace RenderGraph::Engine::ImageSpace
 				state.specs.size(), state.registrations);
 		}
 
-		/** @brief Makes passes for the collected shapes and registers them with the current ones. */
+		/** @brief a_key with every mention of one target of a_pair replaced by the other. */
+		ShapeKey Swapped(const ShapeKey& a_key, const std::pair<std::int32_t, std::int32_t>& a_pair)
+		{
+			const auto swap = [&](std::int32_t a_target) { return a_target == a_pair.first ? a_pair.second : a_target == a_pair.second ? a_pair.first :
+				                                                                                                                         a_target; };
+			ShapeKey out = a_key;
+			out.output = swap(out.output);
+			for (auto& input : out.inputs)
+				input = swap(input);
+			return out;
+		}
+
+		bool Mentions(const ShapeKey& a_key, std::int32_t a_target)
+		{
+			return a_key.output == a_target || std::ranges::find(a_key.inputs, a_target) != a_key.inputs.end();
+		}
+
+		/**
+		 * @brief Registers every shape seen (the current passes' and the new ones), with the shapes their ping-pong partners make, and
+		 * numbers the passes from 0 by their place in the frame.
+		 *
+		 * Partners are targets that stand in for each other from frame to frame: kMAIN and kMAIN_COPY (the chain's source), and any two
+		 * outputs of the same shader with the same inputs (the luminance chain's last level, which alternates by frame). A shape seen
+		 * with one of them is registered with the other too, so the other frame's draws, and the light adaptation that reads the
+		 * other level, are passes before they are first seen.
+		 */
 		void JoinCandidates()
 		{
 			auto& state = IS();
@@ -534,23 +564,54 @@ namespace RenderGraph::Engine::ImageSpace
 				if (!state.candidates.empty())
 					logger::warn("[ORG] ImageSpace: {} registrations made; {} new shapes stay on D3D11 for the session", state.registrations, state.candidates.size());
 				state.candidates.clear();
-				state.candidateOrder.clear();
 				return;
 			}
-			// Entries (and so the passes' order) follow each shape's place in the frame, so the luminance chain's alternating levels
-			// sit before the bloom that follows them in either frame, and a frame's batch is not cut where it need not be.
-			std::vector<std::size_t> order(state.candidates.size());
-			for (std::size_t i = 0; i < order.size(); ++i)
-				order[i] = i;
-			std::ranges::stable_sort(order, [&](std::size_t a_left, std::size_t a_right) { return state.candidateOrder[a_left] < state.candidateOrder[a_right]; });
-			std::vector<std::shared_ptr<const Spec>> specs = state.specs;
-			for (const auto index : order)
-				if (auto spec = MakeSpec(state.candidates[index]))
-					specs.push_back(std::move(spec));
+			std::vector<ShapeKey> keys;
+			for (const auto& spec : state.specs)
+				keys.push_back(spec->key);
+			for (const auto& key : state.candidates)
+				if (std::ranges::find(keys, key) == keys.end())
+					keys.push_back(key);
+			const auto knownCount = state.specs.size();
 			state.candidates.clear();
-			state.candidateOrder.clear();
-			if (specs.size() == state.specs.size() && state.phase != Phase::Learning)
+			// Alternating outputs: the same draw but for its output.
+			for (std::size_t i = 0; i < keys.size(); ++i)
+				for (std::size_t j = i + 1; j < keys.size(); ++j) {
+					const auto& a = keys[i];
+					const auto& b = keys[j];
+					if (a.shader == b.shader && a.inputs == b.inputs && a.address == b.address && a.filter == b.filter && a.blend == b.blend && a.output != b.output)
+						state.swaps.insert(std::minmax(a.output, b.output));
+				}
+			state.swaps.insert({ static_cast<std::int32_t>(RE::RENDER_TARGET::kMAIN), static_cast<std::int32_t>(RE::RENDER_TARGET::kMAIN_COPY) });
+			// Each pair applied once to every shape seen: one partner per mention.
+			const auto seen = keys.size();
+			for (std::size_t i = 0; i < seen; ++i)
+				for (const auto& pair : state.swaps) {
+					if (!Mentions(keys[i], pair.first) && !Mentions(keys[i], pair.second))
+						continue;
+					const auto partner = Swapped(keys[i], pair);
+					if (std::ranges::find(keys, partner) != keys.end() || state.refusedShapes.contains(partner))
+						continue;
+					keys.push_back(partner);
+					state.positions.emplace(partner, state.positions.contains(keys[i]) ? state.positions[keys[i]] : 0u);
+				}
+			// Entries (and so the passes' order) follow each shape's place in its scope, so a frame's draws make one batch per scope
+			// whichever partners it uses.
+			std::ranges::stable_sort(keys, [&](const ShapeKey& a_left, const ShapeKey& a_right) {
+				const auto left = state.positions.find(a_left);
+				const auto right = state.positions.find(a_right);
+				return (left != state.positions.end() ? left->second : 0u) < (right != state.positions.end() ? right->second : 0u);
+			});
+			std::vector<std::shared_ptr<const Spec>> specs;
+			state.nextEntry = 0;
+			for (const auto& key : keys)
+				if (auto spec = MakeSpec(key))
+					specs.push_back(std::move(spec));
+			if (specs.size() == knownCount && state.phase != Phase::Learning) {
+				// Nothing new could be made: the current registration stands (its entries are unchanged, as the order is).
+				state.nextEntry = static_cast<std::uint32_t>(knownCount);
 				return;
+			}
 			state.specs = std::move(specs);
 			if (state.specs.empty()) {
 				state.phase = Phase::Learning;
@@ -570,7 +631,7 @@ namespace RenderGraph::Engine::ImageSpace
 			logger::info("[ORG] ImageSpace: {}; the shapes are learnt again", a_why);
 			state.specs.clear();
 			state.candidates.clear();
-			state.candidateOrder.clear();
+			state.positions.clear();
 			state.refusedShapes.clear();
 			state.quietFrames = 0;
 			state.phase = Phase::Learning;
@@ -617,18 +678,23 @@ namespace RenderGraph::Engine::ImageSpace
 			Flush();
 			state.frame = frame;
 			state.runsThisFrame = 0;
-			state.drawIndex = 0;
+			// A menu that pauses the game opening or closing, or a cell change, is a frame the player does not watch for continuity:
+			// shapes first seen since the registration join there (the graph is built again once).
+			auto* ui = RE::UI::GetSingleton();
+			const bool paused = ui && ui->GameIsPaused();
+			const bool pauseChanged = paused != state.paused;
+			state.paused = paused;
+			auto* player = RE::PlayerCharacter::GetSingleton();
+			const void* cell = player ? player->GetParentCell() : nullptr;
 			switch (state.phase) {
 			case Phase::Learning:
-				if (!state.candidates.empty() && ++state.quietFrames >= kLearnFrames)
+				// The window counts only frames with the player in a cell: the main menu has no eye adaptation and its own source.
+				if (!state.candidates.empty() && cell && ++state.quietFrames >= kLearnFrames)
 					JoinCandidates();
 				break;
 			case Phase::Live:
-				if (!state.candidates.empty()) {
-					auto* player = RE::PlayerCharacter::GetSingleton();
-					if (player && player->GetParentCell() != state.registeredCell)
-						JoinCandidates();
-				}
+				if (!state.candidates.empty() && (pauseChanged || cell != state.registeredCell))
+					JoinCandidates();
 				break;
 			default:
 				break;
@@ -667,10 +733,10 @@ namespace RenderGraph::Engine::ImageSpace
 			auto& state = IS();
 			if (state.refusedShapes.contains(a_key) || SpecFor(a_key) || std::ranges::find(state.candidates, a_key) != state.candidates.end())
 				return;
-			if (state.nextEntry + state.candidates.size() >= kGateEntries)
+			if (state.specs.size() + state.candidates.size() >= kGateEntries)
 				return;
 			state.candidates.push_back(a_key);
-			state.candidateOrder.push_back(state.drawIndex);
+			state.positions.emplace(a_key, state.scope << 16 | std::min(state.drawIndex, 0xFFFFu));
 			state.quietFrames = 0;
 			if (state.logShapes) {
 				const auto effect = EffectOf(static_cast<const RE::BSImagespaceShader*>(a_key.shader));
@@ -707,7 +773,7 @@ namespace RenderGraph::Engine::ImageSpace
 			if (!spec) {
 				NoteShape(key);
 				Flush();
-				Refuse("a shape first seen after the registration; it joins at the next cell change", effect.effectName);
+				Refuse("a shape first seen after the registration; it joins at the next pausing menu or cell change", effect.effectName);
 				return false;
 			}
 			// A target made again (a resize) has a new import: the passes made for the old one are dropped.
@@ -726,7 +792,7 @@ namespace RenderGraph::Engine::ImageSpace
 				Flush();
 			if (state.phase != Phase::Live)
 				return false;
-			if (state.batch.empty() && state.runsThisFrame >= kTakenRunsPerFrame) {
+			if (state.batch.empty() && state.runsThisFrame >= kRunsPerFrame) {
 				Refuse("the frame's ImageSpace anchor runs are used up", effect.effectName);
 				return false;
 			}
@@ -742,14 +808,23 @@ namespace RenderGraph::Engine::ImageSpace
 				Refuse("no captured PerGeometry constants", effect.effectName);
 				return false;
 			}
+			// FrameBuffer as the draw had it bound (PS b12, the engine's per-frame buffer), not CS's shared snapshot.
+			const auto* frameSlot = Constants::Find(use, Constants::Stage::Pixel, 12);
+			if (!frameSlot) {
+				Flush();
+				Refuse("no captured PerFrame constants", effect.effectName);
+				return false;
+			}
 			const auto at = Constants::Where(*slot);
-			if (!at.block) {
+			const auto frameAt = Constants::Where(*frameSlot);
+			if (!at.block || !frameAt.block) {
 				Flush();
 				Refuse("its constants have no ring chunk", effect.effectName);
 				return false;
 			}
-			state.batch.push_back({ .entry = spec->entry, .srvIndex = at.srvIndex, .offset = at.offset });
+			state.batch.push_back({ .entry = spec->entry, .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset } });
 			state.keepAlive.push_back(at.block);
+			state.keepAlive.push_back(frameAt.block);
 			state.lastEntry = spec->entry;
 			return true;
 		}
@@ -773,12 +848,17 @@ namespace RenderGraph::Engine::ImageSpace
 			return {};
 		}
 
-		void EnterScope()
+		/** @brief A scope begins: a_scope orders its draws' passes after the earlier scopes' (0 the composites, 1 the HDR effect). */
+		void EnterScope(std::uint32_t a_scope)
 		{
 			if (!Usable())
 				return;
 			BeginFrame();
-			++IS().scopeDepth;
+			auto& state = IS();
+			if (state.scopeDepth++ == 0) {
+				state.scope = a_scope;
+				state.drawIndex = 0;
+			}
 		}
 
 		void LeaveScope()
@@ -827,7 +907,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(void* a_effect, void* a_quad, void* a_param)
 			{
-				EnterScope();
+				EnterScope(1);
 				func(a_effect, a_quad, a_param);
 				LeaveScope();
 			}
@@ -839,7 +919,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(void* a_manager, std::uintptr_t a_source, std::uintptr_t a_destination)
 			{
-				EnterScope();
+				EnterScope(0);
 				func(a_manager, a_source, a_destination);
 				LeaveScope();
 			}
