@@ -1,13 +1,12 @@
 // The sky family's engine side: the sky batch's hook, which lets the engine's batch run with its draws latched; the cloud group's
 // hook, which latches the cloud layers drawn right after it and hands the draws to the anchor's pass; the family's DrawTriShape taker,
-// which latches a sky draw in place of drawing it; and its BSSkyShader::SetupGeometry watcher, which has ConstantMirror watch the
-// constant buffers the sky's draws read. Render thread.
+// which latches a sky draw in place of drawing it; and its BSSkyShader::SetupGeometry watcher, which counts a batch's passes. Render
+// thread.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
-#include "Features/DrawcallLimitFix/Core/Engine/Capture/ConstantMirror.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
@@ -36,77 +35,57 @@ namespace DCLF::Features::Sky
 	{
 		namespace Pipeline = ::RenderGraph::Engine::Pipeline;
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
+		using Stage = Family::Constants::Stage;
 
 		// The most draws one batch latches; past it a draw is the engine's (SkyDraws' latch has room for this many).
 		constexpr std::size_t kMaxLatched = 128;
 
 		const char* NameOf(View a_view) { return a_view == View::Main ? "main" : "face"; }
 
-		/** @brief The refusals and fallbacks, each logged once per reason. */
+		/** @brief The inherent refusals, each logged once per reason. */
 		Util::ReasonLog& Refusals()
 		{
 			static Util::ReasonLog log("[DCLF] sky: the engine draws", spdlog::level::warn);
 			return log;
 		}
 
+		/** @brief What the sky leaves to the engine on purpose (Flush::EngineDraws): a batch or its rest. */
+		const Family::Flush::Reason& EngineReason()
+		{
+			static const Family::Flush::Reason reason{ "sky: left to the engine" };
+			return reason;
+		}
+
+		/** @brief The cloud layers while CS_ORG_SKY_CLOUDS leaves them to the engine, or a group the capture cannot span. */
+		const Family::Flush::Reason& CloudsReason()
+		{
+			static const Family::Flush::Reason reason{ "sky: cloud layers" };
+			return reason;
+		}
+
 		/**
-		 * @brief The batch being latched (render thread).
-		 *
-		 * A view's batches are the graph's only after a probe: a batch that the engine draws while every draw is checked as the graph
-		 * would take it (its program built, its constants mirrored, its textures and buffers imported). A probe with every draw
-		 * latchable makes the view's next batches the graph's; a draw a later batch cannot latch makes that batch's remaining draws the
-		 * engine's and the view probes again. So nothing is withheld until its program exists.
+		 * @brief The batch being latched (render thread). Every draw is latched until one is refused: then the latched part runs at that
+		 * point (FlushLatched) and the rest of the batch, the cloud group's included, is the engine's.
 		 */
 		struct Capture
 		{
 			bool active = false;
-			bool probe = false;   // the engine draws the batch; the draws are only checked
-			bool failed = false;  // a draw of the batch could not be latched: the rest are the engine's
-			std::array<bool, static_cast<std::size_t>(View::Count)> clean{};  // the view's last probe latched every draw
+			bool failed = false;  // a draw was refused: the latched part ran, the rest is the engine's
 			View view = View::Main;
 			std::shared_ptr<Run> run;
 			std::array<std::uint32_t, 3> colourFormats{};  // the main pass's targets, or the face's (one)
 			std::uint32_t depthFormat = 0;
-			std::uint64_t fallbacks = 0;  // draws the engine drew during a latched batch
 			Family::Passes passes;
 			std::uint32_t lastTechnique = 0;   // the last pass's raw technique (State::currentPixelDescriptor & 0xFF)
 			std::int32_t lastCloudLayer = -1;  // the face's last cloud layer latched in this batch
 			Shape shape;                       // the batch's view and targets (CurrentShape)
 			// Geometry group 13 when the capture spans the cloud layers too: the batch's draws are handed over after it (CloudGroup).
 			const RE::BSBatchRenderer::GeometryGroup* cloudGroup = nullptr;
-			bool deferred = false;      // the sky batch ran; the capture is finished after the cloud group
-			bool inClouds = false;      // the cloud group is being drawn
-			bool skyShort = false;      // the sky batch had a pass that did not draw through DrawTriShape
-			bool skyFailed = false;     // a refusal in the sky batch
-			bool cloudsFailed = false;  // a refusal in the cloud group
+			bool deferred = false;  // the sky batch ran; the capture is finished after the cloud group
 			// The cloud group's call did not follow a sky batch that spanned it (another hook at its site): never spanned again.
 			bool deferralBroken = false;
-			// A probe whose only refusals were cloud draws leaves the view's cloud layers to the engine for a while, so a cloud
-			// technique the graph cannot draw never keeps the rest of the view's sky off the graph. The cause may pass (a program
-			// still building, a streamed texture not loaded yet), so the clouds are probed again after cloudsBackoff game frames,
-			// which doubles at each refusal up to kMaxCloudsBackoff.
-			std::array<bool, static_cast<std::size_t>(View::Count)> cloudsRefused{};
-			std::array<std::uint32_t, static_cast<std::size_t>(View::Count)> cloudsRetryFrame{};
-			std::array<std::uint32_t, static_cast<std::size_t>(View::Count)> cloudsBackoff{};
+			Family::EngineRest engineRest;  // the rest of a refused batch, vouched for (until Finish)
 		};
-
-		// The first wait before a refused view's clouds are probed again, and the longest (game frames).
-		constexpr std::uint32_t kFirstCloudsBackoff = 300;
-		constexpr std::uint32_t kMaxCloudsBackoff = 9600;
-
-		/** @brief Whether a_view's clouds are left to the engine now; a refusal whose wait is over is lifted (the next batch probes them). */
-		bool CloudsRefused(Capture& a_capture, View a_view)
-		{
-			const auto index = static_cast<std::size_t>(a_view);
-			if (!a_capture.cloudsRefused[index])
-				return false;
-			if (static_cast<std::int32_t>(Family::GameFrame() - a_capture.cloudsRetryFrame[index]) < 0)
-				return true;
-			// The wait is over: the view probes again, so the clouds are checked before any is withheld.
-			a_capture.cloudsRefused[index] = false;
-			a_capture.clean[index] = false;
-			return false;
-		}
 
 		Capture& GetCapture()
 		{
@@ -148,7 +127,7 @@ namespace DCLF::Features::Sky
 			return -1;
 		}
 
-		/** @brief The published ids a batch's headers and t17 export (empty: none), read once the view's client is ready. */
+		/** @brief The published ids a batch's headers and t17 export (empty: none), read once its view's client is known to take it. */
 		struct PublishedInputIds
 		{
 			std::array<std::string, kHeaderRegisters.size()> headers;
@@ -156,10 +135,10 @@ namespace DCLF::Features::Sky
 		};
 
 		/**
-		 * @brief The batch's view, targets and inputs from the shadow state and CS's bindings (what its draws would bind): a water reflection
-		 * face, or the main camera's GBuffer pass. The targets go into a_shape, the inputs' heap indices into a_run, and the ids of the
-		 * inputs that are published exports into a_published (ReadInputs reads them once the client is ready). False for anything else
-		 * (another accumulator, a cubemap of another kind, the forward pass, an input that cannot be read), which stays the engine's.
+		 * @brief The batch's view and targets from the shadow state, and its inputs from CS's bindings (what its draws would bind): a water
+		 * reflection face, or the main camera's GBuffer pass. The targets go into a_shape, the inputs' heap indices into a_run, and the ids
+		 * of the inputs that are published exports into a_published (ReadInputs). False for anything else (another accumulator, a cubemap
+		 * of another kind, the forward pass, an input that cannot be read), which stays the engine's.
 		 */
 		bool CurrentShape(const void* a_accumulator, Shape& a_shape, Run& a_run, PublishedInputIds& a_published, Capture& a_capture)
 		{
@@ -168,8 +147,10 @@ namespace DCLF::Features::Sky
 			const auto& depths = renderer->GetDepthStencilData().depthStencils;
 			auto& cloudShadows = globals::features::cloudShadows;
 			// The sky's pixel stages read Cloud Shadows' occlusion (t25), which the graph has only on its ORG path.
-			if (cloudShadows.loaded && !ORGCloudShadows::Get().IsActive())
+			if (cloudShadows.loaded && !ORGCloudShadows::Get().IsActive()) {
+				Refusals().Report("a batch while Cloud Shadows runs on D3D11", "its occlusion (t25) is not on the graph");
 				return false;
+			}
 			a_shape.cloudShadows = cloudShadows.loaded;
 			// The cloud layers are geometry group 13, which the capture spans only through the cloud group's hook.
 			a_shape.clouds = Address::kCloudGroup.Known();
@@ -219,22 +200,30 @@ namespace DCLF::Features::Sky
 				if (!a_capture.colourFormats[i])
 					return false;
 			}
-			// t17: the scene depth CS binds, an engine depth target or a published graph texture's export (Terrain Blending's ORG path).
-			// An engine depth is checked first: the client imports it as a target, and that import publishes it, so a later batch would
-			// see it as an export. When it is the depth target itself, kMAIN's depth (the same depth, VanillaBinding::BindSkyResources'
-			// choice).
+			// t17: the scene depth CS binds. The Z-prepass copy is the client's own import (kSceneDepth); the depth target itself reads a
+			// null view (VanillaBinding::BindSkyResources' choice when they are one); Terrain Blending's blended depth is a published
+			// graph texture's export on its ORG path, read by its id, or its D3D11 view, read by heap index. Any other engine depth is
+			// refused.
 			auto* sceneDepth = Util::GetCurrentSceneDepthSRV(true);
 			const auto engineDepth = DepthOfView(sceneDepth);
-			a_shape.sceneDepth = engineDepth;
-			if (a_shape.sceneDepth >= 0 && a_shape.sceneDepth == a_shape.depth) {
-				const auto main = static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
-				a_shape.sceneDepth = main != a_shape.depth ? main : -1;
+			if (engineDepth == static_cast<std::int32_t>(kSceneDepth))
+				return a_capture.depthFormat != 0;
+			if (engineDepth >= 0) {
+				if (engineDepth != a_shape.depth) {
+					Refusals().Report(std::format("a main batch whose scene depth (t17) is engine depth {}", engineDepth), "the client imports the Z-prepass copy");
+					return false;
+				}
+				a_run.sceneDepthNull = true;
+				return a_capture.depthFormat != 0;
 			}
-			if (sceneDepth && engineDepth < 0)
-				a_published.sceneDepth = PublishedResources::ExportedId(sceneDepth);
+			if (!sceneDepth) {
+				a_run.sceneDepthNull = true;
+				return a_capture.depthFormat != 0;
+			}
+			a_published.sceneDepth = PublishedResources::ExportedId(sceneDepth);
 			// Neither (Terrain Blending's D3D11 depth): the view itself, read by heap index. Without it the sun's depth test read zero and
 			// hid it.
-			if (sceneDepth && engineDepth < 0 && a_published.sceneDepth.empty()) {
+			if (a_published.sceneDepth.empty()) {
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
 				auto binding = GpuTextures::Get().ResolveBinding(sceneDepth, GpuTextures::Tag(GpuTextures::Source::FrameSlot, 17), &failure);
 				if (binding.index == GpuTextures::kInvalid) {
@@ -248,8 +237,8 @@ namespace DCLF::Features::Sky
 		}
 
 		/**
-		 * @brief The published inputs of a batch whose view's client is ready: each read by its id's index (SkyDraws::ReadPublished).
-		 * False, logged once per id and reason, when the client cannot read one yet: the batch is the engine's.
+		 * @brief The published inputs of a batch its view's client takes: each read by its id's index (SkyDraws::ReadPublished). False,
+		 * logged once per id and reason, when the client cannot read one: the batch is the engine's.
 		 */
 		bool ReadInputs(View a_view, const PublishedInputIds& a_published, Run& a_run)
 		{
@@ -289,16 +278,36 @@ namespace DCLF::Features::Sky
 			}
 		}
 
-		/** @brief Why a program is missing, for a refusal. */
-		const char* ProgramReason(Family::ProgramState a_state)
+		/** @brief The latched part of the batch, run now: in the engine's order, before anything the engine draws after it. */
+		void FlushLatched(Capture& a_capture)
 		{
-			return a_state == Family::ProgramState::Building ? "its ORG program is still building" : "its ORG program cannot be built";
+			auto run = std::move(a_capture.run);
+			if (!run)
+				return;
+			if (run->draws.empty()) {
+				SkyDraws::Keep(std::move(run->owners));
+				return;
+			}
+			SkyDraws::Submit(std::move(run));
+		}
+
+		/**
+		 * @brief A refusal: the latched part runs now, and the rest of the batch (the cloud group's included) is the engine's, vouched for
+		 * until Finish. Logged once per reason, technique and view.
+		 */
+		void Refuse(Capture& a_capture, std::string_view a_reason, std::uint32_t a_technique)
+		{
+			a_capture.failed = true;
+			Refusals().Report(std::format("a {} draw of technique {}: {}", NameOf(a_capture.view), a_technique, a_reason));
+			FlushLatched(a_capture);
+			if (!a_capture.engineRest)
+				a_capture.engineRest.emplace(EngineReason());
 		}
 
 		/**
 		 * @brief The draw the engine is about to make, latched: the shadow state SetDirtyStates would apply, the constants the shaders'
-		 * SetupGeometry wrote (ConstantMirror), the textures and samplers, the geometry. Null when latched (or, in a probe, when it could
-		 * be); otherwise why the graph cannot draw it, and the engine draws it.
+		 * SetupGeometry wrote (the engine constants capture), the textures and samplers, the geometry. Null when latched; otherwise why
+		 * the graph cannot draw it, and the engine draws it.
 		 */
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
@@ -330,13 +339,11 @@ namespace DCLF::Features::Sky
 			// The PerGeometry groups as SetupGeometry wrote them. A technique's group holds only the rows its vanilla shader declares
 			// (one may end before TexCoordOff, a pixel stage may have none): the rows past it are zero, which the technique's CS shader
 			// does not read either. The matrices and EyePosition/VParams (c0-c12) are every technique's.
-			auto& mirror = ConstantMirror::Get();
-			const auto* vertexBuffer = reinterpret_cast<const ID3D11Buffer*>(vs->constantBuffers[2].buffer);
-			const auto* pixelBuffer = reinterpret_cast<const ID3D11Buffer*>(ps->constantBuffers[2].buffer);
-			const auto vertexBytes = vertexBuffer ? mirror.Contents(vertexBuffer) : std::span<const std::byte>{};
-			const auto pixelBytes = pixelBuffer ? mirror.Contents(pixelBuffer) : std::span<const std::byte>{};
-			if (vertexBytes.size() < 13 * 16)
-				return "ConstantMirror has no copy of its vertex constants yet";
+			const auto use = Family::CaptureConstants();
+			if (!use.Valid())
+				return "the engine constants capture is not active";
+			if (Family::ConstantBytes(use, Stage::Vertex, 2) < 13 * 16)
+				return "its vertex PerGeometry is smaller than its matrices";
 
 			Draw draw{};
 			// The descriptors CS looks its shaders up by (State::ModifyShaderLookup): inside the deferred pass a sky pixel shader is
@@ -347,11 +354,11 @@ namespace DCLF::Features::Sky
 			draw.key.descriptor = pixelDescriptor;
 			draw.key.defineStage = Family::DefineStage::Pixel;
 			draw.key.variant = a_capture.view == View::Face ? kVariantFaces : 0;
-			draw.key.blend = occlusion ? static_cast<const void*>(cloudShadows.cloudShadowBlendState) :
-			                             Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra);
+			auto* blend = occlusion ? cloudShadows.cloudShadowBlendState :
+			                          Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra);
 			// Cloud Shadows binds no depth target for its occlusion draws (SkyShaderHacks).
-			draw.key.depthStencil = occlusion ? nullptr : depthStencil;
-			draw.key.raster = Pipeline::EngineRasterState(engine.fill, engine.cull, engine.depthBias, engine.scissor);
+			if (!Family::DescribeStates(draw.key, blend, occlusion ? nullptr : depthStencil, Pipeline::EngineRasterState(engine.fill, engine.cull, engine.depthBias, engine.scissor)))
+				return "a blend, depth-stencil or rasterizer state with no description";
 			if (a_capture.view == View::Main) {
 				std::copy(a_capture.colourFormats.begin(), a_capture.colourFormats.end(), draw.key.colourFormats.begin());
 				draw.key.depthFormat = a_capture.depthFormat;
@@ -359,12 +366,9 @@ namespace DCLF::Features::Sky
 				draw.key.colourFormats = { a_capture.colourFormats[0], occlusion ? static_cast<std::uint32_t>(rhi::helpers::ToRHI(DXGI_FORMAT_R8_UNORM)) : 0u, 0u, 0u };
 				draw.key.depthFormat = occlusion ? 0u : a_capture.depthFormat;
 			}
-			if (!draw.key.blend || !draw.key.raster)
-				return "no blend or rasterizer state object";
-			Family::ProgramState programState{};
-			draw.program = SkyDraws::Program(draw.key, *state->currentShader, programState);
+			draw.program = SkyDraws::Program(draw.key, *state->currentShader);
 			if (!draw.program)
-				return ProgramReason(programState);
+				return "its ORG program cannot be built";
 			if (occlusion) {
 				// The face's layers in the engine's order, each once: a later layer then holds every earlier one's occlusion (FaceClouds).
 				draw.occlusion = true;
@@ -373,9 +377,9 @@ namespace DCLF::Features::Sky
 					return "its cloud layer is out of order";
 				auto occlusionKey = draw.key;
 				occlusionKey.maskedTargets = 1;
-				draw.occlusionProgram = SkyDraws::Program(occlusionKey, *state->currentShader, programState);
+				draw.occlusionProgram = SkyDraws::Program(occlusionKey, *state->currentShader);
 				if (!draw.occlusionProgram)
-					return ProgramReason(programState);
+					return "its occlusion program cannot be built";
 			}
 
 			// The geometry, read by device address while its leases are held (the run keeps them until the GPU is done).
@@ -390,6 +394,9 @@ namespace DCLF::Features::Sky
 				return Family::ReasonOf(result);
 			}
 			auto& constants = draw.constants;
+			// PerGeometry as the vertex stage reads it (c0 to c16.xy) and the pixel stage's PParams; the rows after are set below.
+			Family::CopyConstants(use, Stage::Vertex, 2, { reinterpret_cast<std::byte*>(&constants), kVertexConstantBytes });
+			Family::CopyConstants(use, Stage::Pixel, 2, { reinterpret_cast<std::byte*>(constants.pParams), sizeof(constants.pParams) });
 			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
 			constants.vertexAddress[1] = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
 			constants.indexAddress[0] = static_cast<std::uint32_t>(geometry.indexAddress);
@@ -433,11 +440,8 @@ namespace DCLF::Features::Sky
 					return "its cloud layer's occlusion could not be imported";
 			}
 
-			// The constants: PerGeometry as the vertex stage reads it (c0 to c16.xy), the pixel stage's PParams, the alpha test reference
-			// SetDirtyStates would write (PS b11: the reference while the test is on, else 0) and CS's extra descriptor for this draw
-			// (State::UpdateSkyShaderPermutation ran in SetupGeometry).
-			std::memcpy(&constants, vertexBytes.data(), (std::min)(vertexBytes.size(), kVertexConstantBytes));
-			std::memcpy(constants.pParams, pixelBytes.data(), (std::min)(pixelBytes.size(), sizeof(constants.pParams)));
+			// The alpha test reference SetDirtyStates would write (PS b11: the reference while the test is on, else 0) and CS's extra
+			// descriptor for this draw (State::UpdateSkyShaderPermutation ran in SetupGeometry).
 			constants.alphaTestRef = rss.alphaTestEnabled ? rss.alphaTestRef : 0.0f;
 			constants.extraShaderDescriptor = state->permutationData.ExtraShaderDescriptor;
 			// The camera's depth range as it is, with no depth bias offset (mode 0). The sky draws at the far plane: an offset taken off its
@@ -446,13 +450,9 @@ namespace DCLF::Features::Sky
 			// range whole; the shadow state's bias mode is not the table's index for these draws.
 			draw.viewport = Family::LatchViewport(0);
 
-			// The imports are kept, a probe's too (SkyDraws::Keep): the next batch finds them instead of importing again.
 			for (auto& owner : owners)
 				if (owner)
 					run.owners.push_back(std::move(owner));
-			// A probe only checks: the engine draws it, with Cloud Shadows' overrides.
-			if (a_capture.probe)
-				return nullptr;
 			if (draw.occlusion) {
 				// Cloud Shadows' bookkeeping for the face and the layer's clear, on D3D11 before the anchor's run draws into it.
 				cloudShadows.NoteGraphCloudLayer(static_cast<int>(run.face), draw.layer);
@@ -463,33 +463,6 @@ namespace DCLF::Features::Sky
 			cloudShadows.overrideSky = false;
 			cloudShadows.bindLayerSelfShadow = false;
 			return nullptr;
-		}
-
-		/** @brief A refusal noted: the batch fails, and the reason is logged once per technique and view. */
-		void Refuse(Capture& a_capture, std::string_view a_reason, std::uint32_t a_technique)
-		{
-			a_capture.failed = true;
-			(a_capture.inClouds ? a_capture.cloudsFailed : a_capture.skyFailed) = true;
-			Refusals().Report(std::format("a {} draw of technique {}: {}", NameOf(a_capture.view), a_technique, a_reason), a_capture.probe ? "found by a probe" : "");
-		}
-
-		/**
-		 * @brief A draw latched (true: the graph draws it) or the engine's. A draw that fails marks the batch: its later draws are the
-		 * engine's too, so the engine's draws of the batch stay in order after the ones latched before (which the anchor draws after
-		 * the batch: one batch drawn out of order, then the view probes again).
-		 */
-		bool LatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
-		{
-			// A probe checks every draw, so one batch asks for every program the view needs; a batch the graph draws stops at the first
-			// draw it cannot take.
-			if (a_capture.failed && !a_capture.probe)
-				return false;
-			if (const char* reason = TryLatchDraw(a_capture, a_shape, a_start, a_triangles)) {
-				const auto* state = globals::state;
-				Refuse(a_capture, reason, state ? state->currentPixelDescriptor & 0xFF : 0xFF);
-				return false;
-			}
-			return !a_capture.probe;
 		}
 
 		/**
@@ -524,55 +497,16 @@ namespace DCLF::Features::Sky
 			return nullptr;
 		}
 
-		/**
-		 * @brief The end of a latched capture (after the sky batch, or after the cloud group when it spans it): its checks, the probe's
-		 * verdict, and the run handed to the anchor.
-		 */
+		/** @brief The end of a capture (after the sky batch, or after the cloud group when it spans it): the latched part runs. */
 		void Finish(Capture& a_capture)
 		{
 			a_capture.active = false;
 			a_capture.deferred = false;
-			const bool spannedClouds = a_capture.cloudGroup != nullptr;
 			a_capture.cloudGroup = nullptr;
-			auto run = std::move(a_capture.run);
-			const View view = a_capture.shape.view;
-			auto& clean = a_capture.clean[static_cast<std::size_t>(view)];
-			// A shortfall the sky batch did not have is the cloud group's (CloudGroup noted the batch's).
-			a_capture.inClouds = a_capture.inClouds && !a_capture.skyShort;
-			if (!a_capture.passes.End()) {
-				Refusals().Report(a_capture.passes.Describe(std::format("{} sky", NameOf(view))));
-				Refuse(a_capture, "a pass of the batch drew through another draw function than DrawTriShape", a_capture.lastTechnique);
-			}
-			a_capture.inClouds = false;
-			if (!run)
-				return;
-			if (a_capture.probe) {
-				const auto index = static_cast<std::size_t>(view);
-				if (a_capture.failed && a_capture.cloudsFailed && !a_capture.skyFailed && !a_capture.cloudsRefused[index]) {
-					auto& backoff = a_capture.cloudsBackoff[index];
-					backoff = backoff ? (std::min)(backoff * 2, kMaxCloudsBackoff) : kFirstCloudsBackoff;
-					a_capture.cloudsRefused[index] = true;
-					a_capture.cloudsRetryFrame[index] = Family::GameFrame() + backoff;
-					logger::warn("[DCLF] sky: the {} cloud layers stay the engine's for {} frames: a cloud draw cannot be drawn by the graph (above); they are probed again then",
-						NameOf(view), backoff);
-				} else if (!a_capture.failed && spannedClouds) {
-					// A clean probe of the clouds: a later refusal starts from the first wait again.
-					a_capture.cloudsBackoff[index] = 0;
-				}
-				const bool wasClean = clean;
-				clean = !a_capture.failed;
-				if (clean && !wasClean)
-					logger::info("[DCLF] sky: every {} sky draw can be drawn by the graph; its batches are the graph's from the next", NameOf(view));
-				SkyDraws::Keep(std::move(run->owners));
-				return;
-			}
-			if (a_capture.failed) {
-				clean = false;
-				Refusals().Report(std::format("a {} batch the graph had taken, from a draw it could not latch on", NameOf(view)), "the view probes again");
-			}
-			// A run that was not submitted lost its draws for this frame: the view probes again.
-			if (!SkyDraws::Submit(std::move(run)))
-				clean = false;
+			if (!a_capture.passes.End())
+				Refusals().Report(a_capture.passes.Describe(std::format("{} sky", NameOf(a_capture.shape.view))));
+			FlushLatched(a_capture);
+			a_capture.engineRest.reset();
 		}
 
 		/**
@@ -592,58 +526,39 @@ namespace DCLF::Features::Sky
 						logger::error("[DCLF] sky: the cloud group was not drawn after a sky batch that spanned it (another hook at its call?); the engine draws the cloud layers from now on");
 					Finish(capture);
 				}
-				if (capture.active || !ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SkyDraws::Available()) {
+				if (capture.active) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
+				const auto engineDraws = [&] {
+					Family::Flush::EngineDraws scope(EngineReason());
+					func(a_accumulator, a_first, a_last, a_flags, a_group);
+				};
+				if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SkyDraws::Available())
+					return engineDraws();
 				Family::BeginBatch();
 				Shape shape;
 				auto run = std::make_shared<Run>();
 				PublishedInputIds published;
-				if (!CurrentShape(a_accumulator, shape, *run, published, capture)) {
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-					return;
+				// The batch's view and targets, its client taking that shape with an anchor that can run now, and its published inputs:
+				// otherwise the engine draws the batch (each logged once).
+				if (!CurrentShape(a_accumulator, shape, *run, published, capture) || !SkyDraws::CanTake(shape) || !ReadInputs(shape.view, published, *run)) {
+					SkyDraws::Keep(std::move(run->owners));
+					return engineDraws();
 				}
 				run->view = shape.view;
-				const auto index = static_cast<std::size_t>(shape.view);
-				if (!SkyDraws::Ready(shape)) {
-					// The view's client is joining the graph, or was made for another shape: the engine draws this batch, and the view
-					// probes again once it is ready (the new targets may need other programs).
-					capture.clean[index] = false;
-					SkyDraws::Keep(std::move(run->owners));
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-					return;
-				}
-				// A published input the client cannot read yet (its first Publish's rebuild has not come): the engine draws the batch.
-				if (!ReadInputs(shape.view, published, *run)) {
-					SkyDraws::Keep(std::move(run->owners));
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-					return;
-				}
-				const bool cloudsRefused = CloudsRefused(capture, shape.view);
-				const bool probe = !capture.clean[index];
-				// Draws are withheld only when the anchor's run will draw them (a probe withholds nothing).
-				if (!probe && !SkyDraws::CanRun(shape.view)) {
-					Refusals().Report(std::format("a {} batch whose anchor cannot run now", NameOf(shape.view)), "the ring is full or the client left the built graph");
-					SkyDraws::Keep(std::move(run->owners));
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-					return;
-				}
 				capture.shape = std::move(shape);
 				capture.view = capture.shape.view;
 				capture.run = std::move(run);
-				capture.probe = probe;
 				capture.failed = false;
-				capture.skyFailed = false;
-				capture.cloudsFailed = false;
-				capture.skyShort = false;
 				capture.lastCloudLayer = -1;
 				capture.passes.Begin();
-				capture.cloudGroup = capture.shape.clouds && !cloudsRefused && !capture.deferralBroken ? CloudGroupOf(a_accumulator, capture) : nullptr;
+				capture.cloudGroup = capture.shape.clouds && !capture.deferralBroken ? CloudGroupOf(a_accumulator, capture) : nullptr;
 				capture.active = true;
 				func(a_accumulator, a_first, a_last, a_flags, a_group);
 				capture.active = false;
-				if (capture.cloudGroup) {
+				// A batch refused partway leaves the cloud group to the engine as well: nothing to span.
+				if (capture.cloudGroup && !capture.failed) {
 					capture.deferred = true;
 					return;
 				}
@@ -655,7 +570,8 @@ namespace DCLF::Features::Sky
 		/**
 		 * @brief FinishAccumulating's RenderPersistentPassList of geometry group 13 (SE 99938 +0x284, AE 106583 +0x274), right after
 		 * the sky batch with write mode 11: when the sky batch's capture spans it, the cloud layers are latched as the batch's draws
-		 * were, and the capture is finished after them, so the anchor's pass draws the sky and its clouds in the engine's order.
+		 * were, and the capture is finished after them, so the anchor's pass draws the sky and its clouds in the engine's order. Any other
+		 * call is the engine's, vouched for (the cloud layers while CS_ORG_SKY_CLOUDS leaves them to it).
 		 */
 		struct CloudGroup
 		{
@@ -663,13 +579,11 @@ namespace DCLF::Features::Sky
 			{
 				auto& capture = GetCapture();
 				if (!capture.deferred || capture.cloudGroup != a_group) {
+					Family::Flush::EngineDraws scope(CloudsReason());
 					func(a_group, a_flags);
 					return;
 				}
-				const auto& passes = capture.passes;
-				capture.skyShort = passes.drawn < passes.passes || passes.otherTypes || passes.pendingType != Family::Passes::kNone;
 				capture.active = true;
-				capture.inClouds = true;
 				func(a_group, a_flags);
 				Finish(capture);
 			}
@@ -680,34 +594,32 @@ namespace DCLF::Features::Sky
 		bool TakeDraw(const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
 			auto& capture = GetCapture();
-			if (!capture.active || !capture.run)
+			if (!capture.active)
 				return false;
 			capture.passes.OnDraw();
-			if (LatchDraw(capture, a_shape, a_start, a_triangles))
-				return true;
-			++capture.fallbacks;
-			return false;
+			if (capture.failed || !capture.run)
+				return false;
+			if (const char* reason = TryLatchDraw(capture, a_shape, a_start, a_triangles)) {
+				const auto* state = globals::state;
+				Refuse(capture, reason, state ? state->currentPixelDescriptor & 0xFF : 0xFF);
+				return false;
+			}
+			return true;
 		}
 
 		/**
-		 * @brief After BSSkyShader::SetupGeometry (chained after Cloud Shadows' and the frame annotations'): during a latched batch,
-		 * ConstantMirror watches the vertex and pixel stages' PerGeometry buffers, which the draw reads back. A buffer is mirrored from its
-		 * next write on, so a batch's first sight of one draws on the engine.
+		 * @brief After BSSkyShader::SetupGeometry (chained after Cloud Shadows' and the frame annotations'): counts the pass; one that will
+		 * not reach DrawTriShape ends the latched part before the engine draws it.
 		 */
 		void OnSetupGeometry(RE::BSRenderPass* a_pass)
 		{
 			auto& capture = GetCapture();
 			if (!capture.active)
 				return;
-			capture.passes.OnSetup(a_pass);
 			if (const auto* state = globals::state)
 				capture.lastTechnique = state->currentPixelDescriptor & 0xFF;
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-			auto& mirror = ConstantMirror::Get();
-			if (const auto* vs = rss.currentVertexShader; vs && vs->constantBuffers[2].buffer)
-				mirror.Watch(reinterpret_cast<ID3D11Buffer*>(vs->constantBuffers[2].buffer));
-			if (const auto* ps = rss.currentPixelShader; ps && ps->constantBuffers[2].buffer)
-				mirror.Watch(reinterpret_cast<ID3D11Buffer*>(ps->constantBuffers[2].buffer));
+			if (!capture.passes.OnSetup(a_pass) && !capture.failed)
+				Refuse(capture, "a pass whose geometry is not a TriShape (it draws through another draw function)", capture.lastTechnique);
 		}
 	}
 
@@ -720,7 +632,7 @@ namespace DCLF::Features::Sky
 		if (!known)
 			return;
 		HookSites::RequireCall("the sky batch (FinishAccumulating's RenderBatches of the sky techniques)", REL::Offset(Address::kSkyBatch).address());
-		if ((TakesClouds(View::Main) || TakesClouds(View::Face)) && Address::kCloudGroup.Known())
+		if (Address::kCloudGroup.Known())
 			HookSites::RequireCall("the cloud group (FinishAccumulating's RenderPersistentPassList of group 13)", REL::Offset(Address::kCloudGroup).address());
 	}
 
@@ -731,10 +643,13 @@ namespace DCLF::Features::Sky
 			return;
 		}
 		stl::write_thunk_call<SkyBatch>(REL::Offset(Address::kSkyBatch).address());
-		const bool clouds = (TakesClouds(View::Main) || TakesClouds(View::Face)) && Address::kCloudGroup.Known();
+		// The cloud group's call is hooked whether the graph takes the clouds or not: the engine's clouds are vouched for there.
+		const bool clouds = Address::kCloudGroup.Known();
 		if (clouds)
 			stl::write_thunk_call<CloudGroup>(REL::Offset(Address::kCloudGroup).address());
 		Family::WatchSetupGeometry<RE::BSShader::Type::Sky>(RE::VTABLE_BSSkyShader[0], &OnSetupGeometry);
+		// Both views' clients are made on the main thread once the graph runs (the main menu), before any world frame.
+		Family::AddSetup("sky", [] { return SkyDraws::Setup(); });
 		logger::info("[DCLF] sky: hooks installed (the sky batch{}, BSSkyShader::SetupGeometry)", clouds ? ", the cloud group" : "");
 	}
 }

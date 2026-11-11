@@ -1,5 +1,5 @@
-// The sky family's render graph side: a client per view at the Sky and SkyReflections anchors, made once, whose passes draw a batch's
-// latched draws in the engine's order with CS's Sky.hlsl built for ORG, and the faces' cloud draws into Cloud Shadows' layers.
+// The sky family's render graph side: a client per view at the Sky and SkyReflections anchors, made once at setup, whose passes draw a
+// batch's latched draws in the engine's order with CS's Sky.hlsl built for ORG, and the faces' cloud draws into Cloud Shadows' layers.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -7,14 +7,18 @@
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 
+#include "Deferred.h"
+#include "Features/CloudShadows.h"
 #include "Features/CloudShadows/ORGCloudShadows.h"
 #include "Globals.h"
+#include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "RenderGraph/SharedConstants.h"
+#include "Utils/Logging.h"
 
 #include <OpenRenderGraph/GraphHost.h>
 #include <Render/LatchBlock.h>
@@ -26,6 +30,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstring>
+#include <format>
 #include <string_view>
 
 namespace DCLF::Features::Sky::SkyDraws
@@ -171,9 +176,13 @@ namespace DCLF::Features::Sky::SkyDraws
 				const Part part = a_frame.part;
 				SkyBlock block{};
 				block.shared = SharedConstants::Index(a_recording, a_bindings.shared);
-				block.depth = a_bindings.hasSceneDepth                       ? a_recording.Index(a_bindings.sceneDepth) :
-				              run.sceneDepthIndex != GpuTextures::kInvalid ? run.sceneDepthIndex :
-				                                                             c.null2D;
+				// t17: the face's depth for its cloud draws; the main pass's own index (a D3D11 view, a published input), a null view, or the
+				// client's Z-prepass copy.
+				block.depth = part == Part::FaceClouds && a_bindings.hasSceneDepth ? a_recording.Index(a_bindings.sceneDepth) :
+				              run.sceneDepthNull                                   ? c.null2D :
+				              run.sceneDepthIndex != GpuTextures::kInvalid         ? run.sceneDepthIndex :
+				              a_bindings.hasSceneDepth                             ? a_recording.Index(a_bindings.sceneDepth) :
+				                                                                     c.null2D;
 				block.sharedDepth = block.depth;
 				block.cloudShadows = a_bindings.hasCloudShadows ? a_recording.Index(a_bindings.cloudShadows) : c.nullCube;
 				block.headers = run.headerIndices;
@@ -236,23 +245,48 @@ namespace DCLF::Features::Sky::SkyDraws
 			Part part;
 		};
 
+		/** @brief ProgramKey::variant's defines: SKY_ORG_FACES for a face's programs. */
+		Family::Defines VariantDefines(std::uint32_t a_variant)
+		{
+			if (a_variant & kVariantFaces)
+				return { { L"SKY_ORG_FACES", L"" } };
+			return {};
+		}
+
+		/**
+		 * @brief The programs a BSSkyShader pixel descriptor CS loads can be drawn with. CS loads each descriptor plain and with DEFERRED
+		 * (| 256, State::ModifyShaderLookup's main pass form): the main view draws with the deferred ones, the reflection faces with the
+		 * plain ones (variant SKY_ORG_FACES).
+		 */
+		void StagesOf(bool a_pixel, std::uint32_t a_descriptor, std::vector<Family::StageRequest>& a_out)
+		{
+			if (!a_pixel)
+				return;
+			a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Pixel, .variant = (a_descriptor & 256) ? 0u : kVariantFaces });
+		}
+
 		/** @brief Everything here: the render thread's. */
 		struct DrawsState
 		{
 			std::array<std::shared_ptr<Client>, kViews> clients;
-			std::array<bool, kViews> refused{};  // the view's client could not be made: its batches stay the engine's
-			Family::EngineDrawPrograms programs{ "sky", { .source = kShader, .languageVersion = L"2018", .constantWords = ShaderBindings::Words<SkyBlock>() } };
+			Family::EngineDrawPrograms programs{ "sky", { .source = kShader,
+															.languageVersion = L"2018",
+															.constantWords = ShaderBindings::Words<SkyBlock>(),
+															.shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Sky),
+															.variantDefines = &VariantDefines,
+															.stagesOf = &StagesOf } };
 			bool reserved = false;
+			bool setUp = false;
 			bool failed = false;
 			std::uint64_t runs = 0, draws = 0;
 			Family::KeptOwners kept;
 		};
 
 		/**
-		 * @brief Every published id a view's draws can read, listed when its client is made: what the ported features publish at the
-		 * headers' registers and at t17 (DCLF's registry: IBL's, Dynamic Cubemaps' and Terrain Blending's ids). Cloud Shadows'
-		 * occlusion is declared on its own (Shape::cloudShadows), and an engine depth at t17 is imported as a target. An export of an id
-		 * not listed here keeps its batch on the engine, logged once with the id: add the id here.
+		 * @brief Every published id a view's draws can read, listed when its client is made at setup: what the ported features publish at
+		 * the headers' registers and at t17 (DCLF's registry: IBL's, Dynamic Cubemaps' and Terrain Blending's ids). Cloud Shadows'
+		 * occlusion is declared on its own (Shape::cloudShadows), and the Z-prepass copy at t17 is imported as a target. An export of an
+		 * id not listed here is an inherent refusal, logged once with the id: add the id here.
 		 */
 		void ListInputs(Family::PublishedInputs& a_inputs)
 		{
@@ -314,12 +348,10 @@ namespace DCLF::Features::Sky::SkyDraws
 						return nullptr;
 					}
 				}
-				if (a_shape.sceneDepth >= 0) {
-					client->sceneDepth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(a_shape.sceneDepth));
-					if (!client->sceneDepth) {
-						logger::warn("[DCLF] sky: the scene depth CS binds at t17 cannot be imported; the sky stays the engine's");
-						return nullptr;
-					}
+				client->sceneDepth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(kSceneDepth));
+				if (!client->sceneDepth) {
+					logger::warn("[DCLF] sky: the Z-prepass copy CS binds at t17 cannot be imported; the sky stays the engine's");
+					return nullptr;
 				}
 			} else {
 				client->cubemap = FrameAnchors::EngineCubemap(static_cast<std::uint32_t>(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS));
@@ -387,9 +419,12 @@ namespace DCLF::Features::Sky::SkyDraws
 				logger::warn("[DCLF] sky: the {} client could not be registered; the sky stays the engine's", client->id);
 				return nullptr;
 			}
-			logger::info("[DCLF] sky: the {} client registered (depth {}, scene depth {}, cloud shadows {}, cloud layers {}, published inputs it may read: {})",
-				client->id, a_shape.depth, a_shape.sceneDepth, a_shape.cloudShadows ? "on" : "off", a_shape.clouds ? "the graph's" : "the engine's",
-				client->inputs.Describe());
+			const auto late = client->inputs.Unregistered();
+			logger::info("[DCLF] sky: the {} client registered at setup (targets {} {} {}, depth {}, cloud shadows {}, cloud layers {}, published inputs it may read: {}{})",
+				client->id, a_shape.colours[0], a_shape.colours[1], a_shape.colours[2], a_shape.depth, a_shape.cloudShadows ? "on" : "off",
+				a_shape.clouds ? "the graph's" : "the engine's", client->inputs.Describe(), late.empty() ? std::string() : std::format("; not published yet: {}", late));
+			// The one build request: the next build point (a menu frame's end) builds the graph with the client, before any world frame.
+			FrameAnchors::RequestJoin(client->id, client->anchor);
 			return client;
 		}
 
@@ -401,6 +436,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			mix(a_run.face);
 			mix(a_run.draws.size());
 			mix(a_run.sceneDepthIndex);
+			mix(a_run.sceneDepthNull);
 			for (const auto index : a_run.headerIndices)
 				mix(index);
 			for (const auto& draw : a_run.draws) {
@@ -432,27 +468,66 @@ namespace DCLF::Features::Sky::SkyDraws
 			logger::warn("[DCLF] sky: the Sky anchors could not be reserved; the sky stays the engine's");
 	}
 
-	bool Ready(const Shape& a_shape)
+	bool Setup()
+	{
+		auto& state = GetState();
+		if (state.setUp || state.failed)
+			return true;
+		if (!RenderGraphRuntime::Get().Host() || !FrameAnchors::IsRenderOwner() || !Available())
+			return false;
+		state.setUp = true;
+		Family::StartStagePrecompile();
+		state.programs.Prebuild();
+		if (!::RenderGraph::Engine::Constants::Requested()) {
+			logger::warn("[DCLF] sky: needs the engine constants capture (CS_ORG_ENGINE_CONSTANTS=1); the sky stays the engine's");
+			return true;
+		}
+		const bool cloudShadows = globals::features::cloudShadows.loaded;
+		if (cloudShadows && !ORGCloudShadows::Get().IsActive()) {
+			logger::warn("[DCLF] sky: Cloud Shadows runs on D3D11 (its occlusion, t25, is not on the graph: CS_ORG_CLOUD_SHADOWS=1); the sky stays the engine's");
+			return true;
+		}
+		// The shapes the views draw with (CurrentShape reads them per batch, and a batch of another shape is the engine's): the main
+		// pass inside CS's deferred pass writes its first three targets (Deferred::StartDeferred: kMAIN, kMOTION_VECTOR,
+		// NORMALROUGHNESS) with kMAIN's depth; a reflection face writes the reflection cubemap with its cube depth.
+		Shape main;
+		main.view = View::Main;
+		main.colours = { static_cast<std::int32_t>(RE::RENDER_TARGETS::kMAIN), static_cast<std::int32_t>(RE::RENDER_TARGETS::kMOTION_VECTOR),
+			static_cast<std::int32_t>(NORMALROUGHNESS) };
+		main.depth = static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
+		main.cloudShadows = cloudShadows;
+		main.clouds = Address::kCloudGroup.Known() && TakesClouds(View::Main);
+		Shape face;
+		face.view = View::Face;
+		face.depth = static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kCUBEMAP_REFLECTIONS);
+		face.cloudShadows = cloudShadows;
+		face.clouds = Address::kCloudGroup.Known() && TakesClouds(View::Face);
+		for (const auto& shape : { main, face })
+			state.clients[static_cast<std::size_t>(shape.view)] = MakeClient(shape);
+		return true;
+	}
+
+	bool CanTake(const Shape& a_shape)
 	{
 		auto& state = GetState();
 		if (state.failed || a_shape.view >= View::Count)
 			return false;
-		const auto index = static_cast<std::size_t>(a_shape.view);
-		auto& client = state.clients[index];
-		if (client) {
-			if (client->shape == a_shape)
-				return FrameAnchors::RequestJoin(client->id, client->anchor);
-			// No client is registered again during play (a graph rebuild on the frame's path): the batch stays the engine's. Only its
-			// targets can differ: its published inputs are a fixed list.
+		const auto& client = state.clients[static_cast<std::size_t>(a_shape.view)];
+		if (!client)
+			return false;
+		// No client is registered again during play (a graph rebuild on the frame's path): a batch of other targets is the engine's.
+		if (client->shape != a_shape) {
 			if (!std::exchange(client->shapeLogged, true))
-				logger::warn("[DCLF] sky: the {} batch's targets changed since its client registered; those batches stay the engine's", client->id);
+				logger::warn("[DCLF] sky: a {} batch draws into targets {} {} {} with depth {} (cloud shadows {}, cloud layers {}), not its client's; those batches stay the engine's",
+					client->id, a_shape.colours[0], a_shape.colours[1], a_shape.colours[2], a_shape.depth, a_shape.cloudShadows, a_shape.clouds);
 			return false;
 		}
-		if (state.refused[index])
+		if (!FrameAnchors::CanRun(client->id, client->anchor)) {
+			static Util::ReasonLog log("[DCLF] sky: the engine draws a batch", spdlog::level::err);
+			log.Report(std::format("{}: its anchor cannot run now (not in the built graph, or its ring is full)", client->id));
 			return false;
-		client = MakeClient(a_shape);
-		state.refused[index] = !client;
-		return false;
+		}
+		return true;
 	}
 
 	Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index)
@@ -463,18 +538,9 @@ namespace DCLF::Features::Sky::SkyDraws
 		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
 	}
 
-	bool CanRun(View a_view)
+	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
 	{
-		const auto& client = GetState().clients[static_cast<std::size_t>(a_view)];
-		return client && FrameAnchors::CanRun(client->id, client->anchor);
-	}
-
-	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, Family::ProgramState& a_state)
-	{
-		static const std::array<std::pair<std::wstring, std::wstring>, 1> kFacesDefines{ { { L"SKY_ORG_FACES", L"" } } };
-		const auto defines = (a_key.variant & kVariantFaces) ? std::span<const std::pair<std::wstring, std::wstring>>(kFacesDefines) :
-		                                                       std::span<const std::pair<std::wstring, std::wstring>>();
-		return GetState().programs.Get(a_key, a_shader, defines, a_state);
+		return GetState().programs.Get(a_key, a_shader);
 	}
 
 	void Keep(Family::Owners&& a_owners)

@@ -6,8 +6,8 @@
 // The engine's CPU code runs unchanged. At the engine's sky batch (BSShaderAccumulator::FinishAccumulating's RenderBatches of the sky
 // techniques, SkyCapture.cpp) the family lets the batch run with its draw choke point latched: every sky pass goes through the
 // engine's own BeginPass, SetupTechnique, SetupGeometry and render state, and its DrawTriShape (the engine draw families' one detour,
-// Core/Engine/Family) records the draw instead of drawing it (the shadow state, the constants SetupGeometry wrote, read through
-// ConstantMirror, the textures, the geometry). The batch's draws are then drawn by an ORG pass at the Sky anchor (the main pass) or the
+// Core/Engine/Family) records the draw instead of drawing it (the shadow state, the constants SetupGeometry wrote, read from the engine
+// constants capture, the textures, the geometry). The batch's draws are then drawn by an ORG pass at the Sky anchor (the main pass) or the
 // SkyReflections anchor (a reflection face), in the engine's order, with CS's Sky.hlsl built for ORG and the pipeline states the
 // engine's state objects describe (SkyDraws.cpp).
 //
@@ -20,8 +20,11 @@
 // cloud draw on the graph writes its layer through an import of it, and draws its occlusion into the face's later layers too
 // (SkyDraws.cpp, FaceClouds), so both paths keep and read the same layers.
 //
-// Anything the family cannot draw stays the engine's: a draw it cannot latch is drawn by the engine where it was, and a batch whose
-// targets or published inputs the view's client was not made for is drawn by the engine. A client is made once per view.
+// The family is the primary path for the sky (docs/development/p5/primary-path.md): its stages compile when CS loads BSSkyShader's
+// pixel descriptors, its programs are prebuilt from the manifest, and both views' clients are made at setup for the targets the views
+// draw into (SkyDraws::Setup), with every published input declared. A draw it cannot take (its inherent refusals,
+// docs/development/p5/sky.md "What stays the engine's") ends the batch's latched part: the latched draws run at that point and the
+// engine draws the rest, the cloud group's included. A batch whose targets differ from its client's is the engine's.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -46,6 +49,9 @@ namespace DCLF::Features::Sky
 		// passes of accumulation hint 0x11) and the sky-object effects (hint 0x12). SE 0x1412caf54, AE 0x1414b3004.
 		inline constexpr Engine::Offset kCloudGroup{ { 106583, 0x274 }, { 99938, 0x284 } };
 	}
+
+	/** @brief The scene depth the main view's client imports for t17: the Z-prepass copy (Util::GetCurrentSceneDepthSRV's own). */
+	inline constexpr auto kSceneDepth = RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY;
 
 	/** @brief The geometry group the cloud layers are registered into (accumulation hint 0x11; BSBatchRenderer::geometryGroups). */
 	inline constexpr std::uint32_t kCloudGeometryGroup = 13;
@@ -119,17 +125,17 @@ namespace DCLF::Features::Sky
 		GpuTextures::ViewKind::Cube, GpuTextures::ViewKind::Cube };
 
 	/**
-	 * @brief What a view's client is made for: its targets, which it imports once. The published inputs its passes declare are fixed
-	 * when the client is made (SkyDraws.cpp, ListInputs), so they are no part of it. The headers and a t17 that is no engine depth are
-	 * read by heap index, resolved per batch (Run): a D3D11 view's import, a null view, or a published input's index once the client's
-	 * graph declares it (SkyDraws::ReadPublished).
+	 * @brief What a view's client is made for: its targets, which it imports once at setup (SkyDraws::Setup predicts them: the deferred
+	 * pass's first three targets and kMAIN's depth, the reflection cubemap with its cube depth). The published inputs its passes declare
+	 * are fixed when the client is made (SkyDraws.cpp, ListInputs), so they are no part of it. The headers and a t17 other than the
+	 * Z-prepass copy are read by heap index, resolved per batch (Run): a D3D11 view's import, a null view, or a published input's
+	 * index (SkyDraws::ReadPublished).
 	 */
 	struct Shape
 	{
 		View view = View::Main;
 		std::array<std::int32_t, 3> colours{ -1, -1, -1 };  // RE::RENDER_TARGET, the main pass's
 		std::int32_t depth = -1;                            // RE::RENDER_TARGETS_DEPTHSTENCIL of the depth target
-		std::int32_t sceneDepth = -1;                       // the main pass's t17 when it is an engine depth target (-1: none)
 		bool cloudShadows = false;                          // Cloud Shadows' published occlusion is read (t25)
 		bool clouds = false;                                // the cloud layers (geometry group 13) are the graph's when the group allows
 		bool operator==(const Shape&) const = default;
@@ -141,7 +147,8 @@ namespace DCLF::Features::Sky
 		View view = View::Main;
 		std::uint32_t face = 0;
 		std::vector<Draw> draws;
-		std::uint32_t sceneDepthIndex = GpuTextures::kInvalid;  // t17 when no engine depth: its import, or a published id's index
+		std::uint32_t sceneDepthIndex = GpuTextures::kInvalid;  // t17 when not kSceneDepth: its import, or a published id's index
+		bool sceneDepthNull = false;                            // t17 is the depth target itself, or nothing: a null view
 		std::array<std::uint32_t, 4> headerIndices{};           // kHeaderRegisters: imports, published ids' indices or null views
 		std::uint64_t revision = 0;                             // what the recording depends on (SkyDraws.cpp, RevisionOf)
 		Family::Owners owners;                                  // the textures' imports and the buffers' leases
@@ -171,21 +178,24 @@ namespace DCLF::Features::Sky
 		/** @brief Reserves both anchors (the feature's install, before the render graph initializes). */
 		void Reserve();
 		/**
-		 * @brief Whether a_shape's view may withhold this batch: its client was made for a_shape's targets and is in the anchor's built
-		 * graph (FrameAnchors::RequestJoin). A view without a client gets one made for a_shape (false while it joins). A client made for
-		 * other targets is kept: the batch stays the engine's, logged once. No client is made again during play.
+		 * @brief The family's setup (Family::AddSetup, main thread): the stage precompile started, the manifest's programs queued, both
+		 * views' clients made for their predicted shapes and their build asked for. True once done (or refused for good, logged); false
+		 * while the graph has no host.
 		 */
-		bool Ready(const Shape& a_shape);
+		bool Setup();
+		/**
+		 * @brief Whether a_shape's batch is taken: its view's client was made for a_shape's targets, and a run of its anchor now would
+		 * draw (FrameAnchors::CanRun). False is logged once per reason; the engine draws the batch. No client is made again during play.
+		 */
+		bool CanTake(const Shape& a_shape);
 		/**
 		 * @brief How a_view's client reads a_id, the published id a bound header or t17 exports (Family::PublishedInputs::Resolve).
-		 * NotListed when the view has no client yet.
+		 * NotListed when the view has no client.
 		 */
 		Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index);
-		/** @brief Whether a run of a_view's anchor now would draw (FrameAnchors::CanRun): checked before a batch's draws are withheld. */
-		bool CanRun(View a_view);
-		/** @brief The program for a key, built off the render thread; null while it builds or when it cannot be (a_state says which). */
-		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, Family::ProgramState& a_state);
-		/** @brief Keeps a probe's imports and leases as long as a run's, so the next batches find them instead of importing again. */
+		/** @brief The program for a key (Family::EngineDrawPrograms::Get): null when it cannot be built. */
+		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
+		/** @brief Keeps a batch's imports and leases as long as a run's when it ran nothing, so the next batches find them. */
 		void Keep(Family::Owners&& a_owners);
 		/** @brief Runs a_run's anchor with its draws. True when the run was submitted; otherwise its draws were not drawn (logged). */
 		bool Submit(std::shared_ptr<Run> a_run);

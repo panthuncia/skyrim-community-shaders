@@ -9,16 +9,18 @@
 // draw choke point latched: every water pass goes through the engine's own BeginPass, SetupTechnique, SetupMaterial, SetupGeometry and
 // render state (Unified Water's, Light Limit Fix's and the cubemap fix's hooks with them), and DrawTriShape (the engine draw families'
 // one detour, Core/Engine/Family) records the draw instead of drawing it (the shadow state with its stencil mode and reference, the six
-// constant groups the Setup functions wrote, read through ConstantMirror, Light Limit Fix's strict lights, the twelve textures and
+// constant groups the Setup functions wrote, read from the engine constants capture with Light Limit Fix's strict lights, the twelve textures and
 // samplers, the geometry). The batch's draws are then drawn by an ORG pass at the EngineDraws anchor, in the engine's order, with CS's
 // Water.hlsl built for ORG and the pipeline states the engine's state objects describe (WaterDraws.cpp).
 //
 // The water displacement simulation (ImageSpaceEffectWaterDisplacement) stays the engine's: it runs earlier in the frame, and the
 // water's draws read its output (kWATER_DISPLACEMENT, t2) as the engine binds it.
 //
-// Anything the family cannot draw stays the engine's: a draw it cannot latch makes the rest of its batch the engine's, and so does a
-// published input its view's client does not declare. A client is made once per view, with every published input its draws can read
-// (WaterDraws.cpp, ListInputs); nothing the family does registers one again during play.
+// The family is the primary path for the water (docs/development/p5/primary-path.md): its stages compile when CS loads BSWaterShader's
+// vertex descriptors, its programs are prebuilt from the manifest, and both views' clients are made at setup with every published input
+// their draws can read (WaterDraws.cpp, ListInputs); nothing registers one again during play. A draw it cannot take (its inherent
+// refusals, docs/development/p5/water.md "What stays the engine's") ends the batch's latched part: the latched draws run at that point
+// and the engine draws the rest.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -215,20 +217,23 @@ namespace DCLF::Features::Water
 		/** @brief Reserves the EngineDraws anchor (the feature's install, before the render graph initializes). */
 		void Reserve();
 		/**
-		 * @brief Whether a_shape's view may withhold this batch: its client is in the anchor's built graph (FrameAnchors::RequestJoin).
-		 * A view without a client gets one (false while it joins). No client is registered again during play.
+		 * @brief The family's setup (Family::AddSetup, main thread): the stage precompile started, the manifest's programs queued, both
+		 * views' clients made and their build asked for. True once done (or refused for good, logged); false while the graph has no host.
 		 */
-		bool Ready(const Shape& a_shape);
+		bool Setup();
+		/**
+		 * @brief Whether a_view's batch is taken: its client exists and a run of the anchor now would draw (FrameAnchors::CanRun). False is
+		 * logged once; the engine draws the batch.
+		 */
+		bool CanTake(View a_view);
 		/**
 		 * @brief How a_view's client reads a_id, the published id a bound header or slot exports (Family::PublishedInputs::Resolve).
-		 * NotListed when the view has no client yet.
+		 * NotListed when the view has no client.
 		 */
 		Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index);
-		/** @brief Whether a run of the anchor now would draw a_view's work (FrameAnchors::CanRun): checked before a batch is withheld. */
-		bool CanRun(View a_view);
-		/** @brief The program for a key, built off the render thread; null while it builds or when it cannot be (a_state says which). */
-		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, Family::ProgramState& a_state);
-		/** @brief Keeps a probe's imports and leases as long as a run's, so the next batches find them instead of importing again. */
+		/** @brief The program for a key (Family::EngineDrawPrograms::Get): null when it cannot be built. */
+		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
+		/** @brief Keeps a batch's imports and leases as long as a run's when it ran nothing, so the next batches find them. */
 		void Keep(Family::Owners&& a_owners);
 		/** @brief Runs a_run's view at the anchor with its draws. True when the run was submitted; otherwise its draws were not drawn (logged). */
 		bool Submit(std::shared_ptr<Run> a_run);

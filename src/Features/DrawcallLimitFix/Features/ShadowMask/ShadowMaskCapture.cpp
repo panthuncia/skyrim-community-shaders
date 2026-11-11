@@ -1,12 +1,10 @@
 // The shadow mask family's engine side: the two shadow mask calls' hooks (the world's and a menu scene's), which let the engine's
 // function run with its draws latched and hand them to the anchor's pass; the family's DrawTriShape taker, which latches a shadow mask
-// draw in place of drawing it; and its BSUtilityShader::SetupGeometry watcher, which has ConstantMirror watch the constant buffers the
-// draws read. Render thread.
+// draw in place of drawing it; and its BSUtilityShader::SetupGeometry watcher, which counts a batch's passes. Render thread.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
-#include "Features/DrawcallLimitFix/Core/Engine/Capture/ConstantMirror.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
@@ -33,53 +31,35 @@ namespace DCLF::Features::ShadowMask
 	{
 		namespace Pipeline = ::RenderGraph::Engine::Pipeline;
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
+		using Stage = Family::Constants::Stage;
 
 		// The most draws one batch latches (ShadowMaskDraws' latch has room for this many): one per shadow-casting light, which the
 		// engine caps far below this.
 		constexpr std::size_t kMaxLatched = 32;
-		// Batches a view's probes run before its client is made: its programs and ConstantMirror's copies are asked for first.
-		constexpr std::uint32_t kSettleBatches = 30;
-		// Batches in a row after which a view that still stays the engine's says why (Lasting): about two seconds of frames.
-		constexpr std::uint32_t kLastingBatches = 120;
-		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
 
-		/** @brief The refusals and fallbacks, each logged once per reason. */
+		/** @brief The inherent refusals, each logged once per reason. */
 		Util::ReasonLog& Refusals()
 		{
 			static Util::ReasonLog log("[DCLF] shadow mask: the engine draws", spdlog::level::warn);
 			return log;
 		}
 
-		/**
-		 * @brief Why a view stays the engine's for good, logged once per view and reason. Refusals logs each reason only the first time
-		 * it is seen, so a refusal that lasts would otherwise go quiet after the first frames.
-		 */
-		Util::ReasonLog& Lasting()
+		/** @brief What the family leaves to the engine on purpose (Flush::EngineDraws): a batch or its rest. */
+		const Family::Flush::Reason& EngineReason()
 		{
-			static Util::ReasonLog log("[DCLF] shadow mask: a view stays the engine's", spdlog::level::warn);
-			return log;
+			static const Family::Flush::Reason reason{ "shadow mask: left to the engine" };
+			return reason;
 		}
 
-		/**
-		 * @brief The batch being latched (render thread). As the water's: a view's batches are the graph's only after a probe (a batch the
-		 * engine draws while every draw is checked as the graph would take it) found every draw latchable; a draw a later batch cannot
-		 * latch makes the rest of that batch the engine's and the view probes again.
-		 */
+		/** @brief The batch being latched (render thread). */
 		struct Capture
 		{
 			bool active = false;
-			bool probe = false;
-			bool failed = false;
-			bool ready = false;  // the view's client is in the built graph: its published inputs are read
-			std::array<bool, kViews> clean{};
-			std::array<std::uint32_t, kViews> settled{};
-			std::array<std::uint32_t, kViews> refusedProbes{};  // probes in a row that found a draw the graph cannot take, once ready
-			std::array<std::uint32_t, kViews> joining{};        // batches in a row whose view had settled but was not ready
-			std::array<std::string, kViews> lastRefusal{};      // the view's last refusal, for the Lasting log
-			std::string refusalDetail;                          // what TryLatchDraw's last refusal was about (a slot, the geometry)
+			bool failed = false;  // a draw was refused: the latched part ran, the rest of the batch is the engine's
 			View view = View::World;
 			std::shared_ptr<Run> run;
 			Family::Passes passes;
+			Family::EngineRest engineRest;  // the rest of a refused batch, vouched for until the batch returns
 		};
 
 		Capture& GetCapture()
@@ -97,15 +77,37 @@ namespace DCLF::Features::ShadowMask
 			return static_cast<std::uint32_t>(rhi::helpers::ToRHI(desc.Format));
 		}
 
+		/** @brief The latched part of the batch, run now: in the engine's order, before anything the engine draws after it. */
+		void FlushLatched(Capture& a_capture)
+		{
+			auto run = std::move(a_capture.run);
+			if (!run)
+				return;
+			if (run->draws.empty()) {
+				ShadowMaskDraws::Keep(std::move(run->owners));
+				return;
+			}
+			ShadowMaskDraws::Submit(std::move(run));
+		}
+
+		/** @brief A refusal: the latched part runs now and the rest of the batch is the engine's; logged once per reason and view. */
+		void Refuse(Capture& a_capture, std::string_view a_reason, std::string_view a_detail = {})
+		{
+			a_capture.failed = true;
+			Refusals().Report(std::format("a {} draw: {}", NameOf(a_capture.view), a_reason), a_detail);
+			FlushLatched(a_capture);
+			if (!a_capture.engineRest)
+				a_capture.engineRest.emplace(EngineReason());
+		}
+
 		/**
 		 * @brief The draw the engine is about to make, latched: the shadow state SetDirtyStates would apply, the constants the Utility
-		 * shader's Setup functions wrote (ConstantMirror), the slots' textures and samplers, the geometry (the screen quad). Null when
-		 * latched (or, in a probe, when it could be); otherwise why the graph cannot draw it, and the engine draws it.
+		 * shader's Setup functions wrote (the engine constants capture), the slots' textures and samplers, the geometry (the screen quad).
+		 * Null when latched; otherwise why the graph cannot draw it (a_detail: what it was about), and the engine draws it.
 		 */
-		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
+		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
 			auto& run = *a_capture.run;
-			a_capture.refusalDetail.clear();
 			if (run.draws.size() >= kMaxLatched)
 				return "more draws than the batch latches";
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
@@ -122,40 +124,38 @@ namespace DCLF::Features::ShadowMask
 
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			Draw draw{};
-			draw.key.descriptor = state->currentPixelDescriptor;
+			// The descriptor CS looks its shader up by (State::ModifyShaderLookup), which ShaderCompilationTask compiled the stages for.
+			draw.key.descriptor = state->modifiedPixelDescriptor;
 			draw.key.defineStage = Family::DefineStage::Pixel;
-			draw.key.blend = Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra);
-			draw.key.raster = Pipeline::EngineRasterState(engine.fill, engine.cull, engine.depthBias, engine.scissor);
+			if (!Family::DescribeStates(draw.key, Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra), nullptr,
+					Pipeline::EngineRasterState(engine.fill, engine.cull, engine.depthBias, engine.scissor)))
+				return "a blend or rasterizer state with no description";
 			draw.key.colourFormats[0] = FormatOf(globals::game::renderer->GetRuntimeData().renderTargets[kShadowMaskTarget].RTV);
-			if (!draw.key.blend || !draw.key.raster || !draw.key.colourFormats[0])
-				return "no blend or rasterizer state object, or no shadow mask target";
+			if (!draw.key.colourFormats[0])
+				return "no shadow mask target";
 
 			// PS b0 (SetupTechnique: VPOSOffset, the cascades' splits, the filter's parameters) and PS b2 (SetupGeometry: the light's
-			// projections), as the Setup functions wrote them, and the alpha test reference SetDirtyStates would write into b11.
+			// projections), as the engine constants capture saw them, and the alpha test reference SetDirtyStates would write into b11.
 			auto& constants = draw.constants;
-			if (!Family::CopyRows(ps->constantBuffers[0].buffer, constants.psTechnique, kTechniqueRows) ||
-				!Family::CopyRows(ps->constantBuffers[2].buffer, constants.psGeometry, kGeometryRows))
-				return "ConstantMirror has no copy of its constants yet";
-			if (!ps->constantBuffers[2].buffer)
+			const auto use = Family::CaptureConstants();
+			if (!use.Valid())
+				return "the engine constants capture is not active";
+			if (!Family::ConstantBytes(use, Stage::Pixel, 2))
 				return "no pixel PerGeometry";
+			Family::CopyRows(use, Stage::Pixel, 0, constants.psTechnique, kTechniqueRows);
+			Family::CopyRows(use, Stage::Pixel, 2, constants.psGeometry, kGeometryRows);
 			constants.alphaTestRef = rss.alphaTestEnabled ? rss.alphaTestRef : 0.0f;
 
-			Family::ProgramState programState{};
-			draw.program = ShadowMaskDraws::Program(draw.key, *state->currentShader, programState);
+			draw.program = ShadowMaskDraws::Program(draw.key, *state->currentShader);
 			if (!draw.program)
-				return programState == Family::ProgramState::Building ? "its ORG program is still building" : "its ORG program cannot be built";
+				return "its ORG program cannot be built";
 
 			// The screen quad, read by device address while its leases are held (the run keeps them until the GPU is done).
 			Family::Owners owners;
 			Family::Geometry geometry;
-			std::string geometryDetail;
-			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &geometryDetail);
-				result != Family::GeometryResult::Ok) {
-				if (!geometryDetail.empty())
-					Refusals().Report(std::format("a {} draw whose geometry is refused: {}", NameOf(a_capture.view), Family::ReasonOf(result)), geometryDetail);
-				a_capture.refusalDetail = std::move(geometryDetail);
+			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
+				result != Family::GeometryResult::Ok)
 				return Family::ReasonOf(result);
-			}
 			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
 			constants.vertexAddress[1] = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
 			constants.indexAddress[0] = static_cast<std::uint32_t>(geometry.indexAddress);
@@ -176,21 +176,19 @@ namespace DCLF::Features::ShadowMask
 				const auto slot = Family::SlotTexture(view, SlotKind(t), GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), constants.textures[t], owners, &failure);
 				if (slot == Family::SlotResult::Published) {
 					// A depth or target a graph pass writes: read by its id, which the view's client declares, so the graph orders the write
-					// before the masks. Before the client is ready, a probe only learns programs.
+					// before the masks.
 					const auto id = PublishedResources::ExportedId(view);
 					const auto result = ShadowMaskDraws::ReadPublished(a_capture.view, id, constants.textures[t]);
-					if (result != Family::InputResult::Graph && a_capture.ready) {
-						Refusals().Report(std::format("a {} draw's t{} holds '{}'", NameOf(a_capture.view), t, id), Family::ReasonOf(result));
-						a_capture.refusalDetail = std::format("t{} holds '{}': {}", t, id, Family::ReasonOf(result));
-						return "a slot holds a published graph texture its client cannot read";
+					if (result != Family::InputResult::Graph) {
+						a_detail = std::format("t{} holds '{}': {}", t, id, Family::ReasonOf(result));
+						return result == Family::InputResult::PublishedLate ? "a slot holds a texture published during play" : "a slot holds a published texture its client does not list";
 					}
 				} else if (slot != Family::SlotResult::Ok) {
-					a_capture.refusalDetail = GpuTextures::DescribeFailure(view, t, failure);
-					Refusals().Report(std::format("a {} draw's texture t{} could not be imported", NameOf(a_capture.view), t), a_capture.refusalDetail);
+					a_detail = GpuTextures::DescribeFailure(view, t, failure);
 					return "a texture it samples could not be imported";
 				}
 				constants.samplers[t] = SamplerRead(t) ? Family::SlotSampler(rss.PSTextureAddressMode[t].underlying(), rss.PSTextureFilterMode[t].underlying(), owners) :
-				                               Family::SlotSampler(0, 0, owners);
+				                                         Family::SlotSampler(0, 0, owners);
 				if (constants.samplers[t] == GpuTextures::kInvalid)
 					return "its sampler modes have no graph sampler";
 			}
@@ -198,50 +196,11 @@ namespace DCLF::Features::ShadowMask
 			// The viewport SetDirtyStates would set.
 			draw.viewport = Family::LatchViewport(engine.depthBias);
 
-			// The imports are kept, a probe's too (ShadowMaskDraws::Keep): the next batch finds them instead of importing again.
 			for (auto& owner : owners)
 				if (owner)
 					run.owners.push_back(std::move(owner));
-			if (a_capture.probe)
-				return nullptr;
 			run.draws.push_back(std::move(draw));
 			return nullptr;
-		}
-
-		/** @brief A refusal noted: the batch fails, and the reason is logged once per reason and view. */
-		void Refuse(Capture& a_capture, std::string_view a_reason)
-		{
-			a_capture.failed = true;
-			auto& lastReason = a_capture.lastRefusal[static_cast<std::size_t>(a_capture.view)];
-			lastReason = a_reason;
-			if (!a_capture.refusalDetail.empty())
-				lastReason += std::format(" ({})", a_capture.refusalDetail);
-			Refusals().Report(std::format("a {} draw: {}", NameOf(a_capture.view), a_reason), a_capture.probe ? "found by a probe" : "");
-		}
-
-		/**
-		 * @brief After a probe that did not make a_view clean: counts it, and once the view has stayed the engine's for kLastingBatches
-		 * batches in a row, logs why (Lasting). Either its client is not in the anchor's built graph yet (not made, refused, or still
-		 * joining), or its probes keep finding a draw the graph cannot take (the last refusal is named).
-		 */
-		void NoteUnclean(Capture& a_capture, View a_view, bool a_ready)
-		{
-			const auto index = static_cast<std::size_t>(a_view);
-			if (!a_ready) {
-				a_capture.refusedProbes[index] = 0;
-				if (a_capture.settled[index] < kSettleBatches || ++a_capture.joining[index] < kLastingBatches)
-					return;
-				Lasting().Report(std::format("its {} client is not in the EngineDraws anchor's built graph", NameOf(a_view)),
-					ShadowMaskDraws::HasClient(a_view) ? std::format("{}+ batches after it was made (FrameAnchors::RequestJoin)", kLastingBatches) :
-					                                     std::string("it was not made (see the line above for why)"));
-				return;
-			}
-			a_capture.joining[index] = 0;
-			if (++a_capture.refusedProbes[index] < kLastingBatches)
-				return;
-			const auto& reason = a_capture.lastRefusal[index];
-			Lasting().Report(std::format("every {} probe finds a draw the graph cannot take: {}", NameOf(a_view), reason.empty() ? "no reason recorded" : reason),
-				std::format("{}+ probes in a row since its client joined", kLastingBatches));
 		}
 
 		/**
@@ -254,69 +213,29 @@ namespace DCLF::Features::ShadowMask
 			static void thunk(void* a_arg1, void* a_arg2, void* a_arg3, void* a_arg4)
 			{
 				auto& capture = GetCapture();
-				if (capture.active || !TakesView(kView) || !ShellState::Running() || !FrameAnchors::IsRenderOwner() || !ShadowMaskDraws::Available()) {
+				if (capture.active || !TakesView(kView)) {
+					func(a_arg1, a_arg2, a_arg3, a_arg4);
+					return;
+				}
+				if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !ShadowMaskDraws::Available() || !ShadowMaskDraws::CanTake(kView)) {
+					Family::Flush::EngineDraws scope(EngineReason());
 					func(a_arg1, a_arg2, a_arg3, a_arg4);
 					return;
 				}
 				Family::BeginBatch();
-				const auto index = static_cast<std::size_t>(kView);
-				Shape shape;
-				shape.view = kView;
-				auto& clean = capture.clean[index];
-				// A view's client is made once, after kSettleBatches batches.
-				auto& settled = capture.settled[index];
-				settled = (std::min)(settled + 1, kSettleBatches);
-				// Until the view's client is made and in the built graph, the engine draws its batches as probes: they ask for the programs
-				// and ConstantMirror's copies.
-				const bool ready = settled >= kSettleBatches && ShadowMaskDraws::Ready(shape);
-				const bool probe = !ready || !clean;
-				// Draws are withheld only when the anchor's run will draw them (a probe withholds nothing).
-				if (!probe && !ShadowMaskDraws::CanRun(kView)) {
-					Refusals().Report(std::format("a {} batch whose anchor cannot run now", NameOf(kView)), "the ring is full or the client left the built graph");
-					func(a_arg1, a_arg2, a_arg3, a_arg4);
-					return;
-				}
-				auto run = std::make_shared<Run>();
-				run->view = kView;
 				capture.view = kView;
-				capture.run = run;
-				capture.ready = ready;
-				capture.probe = probe;
+				capture.run = std::make_shared<Run>();
+				capture.run->view = kView;
 				capture.failed = false;
 				capture.passes.Begin();
 				capture.active = true;
 				func(a_arg1, a_arg2, a_arg3, a_arg4);
 				capture.active = false;
-				capture.run.reset();
-				if (!capture.passes.End()) {
-					capture.refusalDetail = capture.passes.Describe(std::format("{} shadow mask", NameOf(kView)));
-					Refusals().Report(capture.refusalDetail);
-					Refuse(capture, "a pass of the batch drew through another draw function than DrawTriShape");
-				}
-				if (probe) {
-					clean = ready && !capture.failed;
-					if (clean) {
-						capture.refusedProbes[index] = 0;
-						capture.joining[index] = 0;
-						logger::info("[DCLF] shadow mask: every {} shadow mask draw can be drawn by the graph; its batches are the graph's from the next", NameOf(kView));
-					} else {
-						NoteUnclean(capture, kView, ready);
-					}
-					ShadowMaskDraws::Keep(std::move(run->owners));
-					return;
-				}
-				if (capture.failed) {
-					clean = false;
-					Refusals().Report(std::format("a {} batch the graph had taken, from a draw it could not latch on", NameOf(kView)), "the view probes again");
-				}
+				if (!capture.passes.End())
+					Refusals().Report(capture.passes.Describe(std::format("{} shadow mask", NameOf(kView))));
 				// A batch whose draws all stayed the engine's (no light cast this frame) has nothing to run.
-				if (run->draws.empty()) {
-					ShadowMaskDraws::Keep(std::move(run->owners));
-					return;
-				}
-				// A run that was not submitted lost its draws for this frame: the view probes again.
-				if (!ShadowMaskDraws::Submit(std::move(run)))
-					clean = false;
+				FlushLatched(capture);
+				capture.engineRest.reset();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -329,19 +248,16 @@ namespace DCLF::Features::ShadowMask
 		bool TakeDraw(const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
 			auto& capture = GetCapture();
-			if (!capture.active || !capture.run)
+			if (!capture.active)
 				return false;
 			capture.passes.OnDraw();
-			// A probe checks every draw; a batch the graph draws stops at the first draw it cannot take, so the engine's draws of the
-			// batch stay after the ones latched before.
-			if (capture.failed && !capture.probe)
+			if (capture.failed || !capture.run)
 				return false;
-			if (const char* reason = TryLatchDraw(capture, a_shape, a_start, a_triangles)) {
-				Refuse(capture, reason);
+			std::string detail;
+			if (const char* reason = TryLatchDraw(capture, a_shape, a_start, a_triangles, detail)) {
+				Refuse(capture, reason, detail);
 				return false;
 			}
-			if (capture.probe)
-				return false;
 			Engine::ApplyPendingState();
 			// The draw no longer reaches SetDirtyStates' hook (State::Draw), where Volumetric Shadows, Exponential Height Fog and
 			// Skylighting take the sun's shadow cascades from its t4: give them here.
@@ -350,23 +266,14 @@ namespace DCLF::Features::ShadowMask
 			return true;
 		}
 
-		/**
-		 * @brief After BSUtilityShader::SetupGeometry: during a latched batch, ConstantMirror watches the pixel stage's b0 and b2. A buffer
-		 * is mirrored from its next write on, so a batch's first sight of one draws on the engine.
-		 */
+		/** @brief After BSUtilityShader::SetupGeometry: counts the pass; one that will not reach DrawTriShape ends the latched part. */
 		void OnSetupGeometry(RE::BSRenderPass* a_pass)
 		{
 			auto& capture = GetCapture();
 			if (!capture.active)
 				return;
-			capture.passes.OnSetup(a_pass);
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-			auto& mirror = ConstantMirror::Get();
-			if (const auto* ps = rss.currentPixelShader) {
-				for (const std::uint32_t group : { 0u, 2u })
-					if (ps->constantBuffers[group].buffer)
-						mirror.Watch(reinterpret_cast<ID3D11Buffer*>(ps->constantBuffers[group].buffer));
-			}
+			if (!capture.passes.OnSetup(a_pass) && !capture.failed)
+				Refuse(capture, "a pass whose geometry is not a TriShape (it draws through another draw function)");
 		}
 	}
 
@@ -391,6 +298,8 @@ namespace DCLF::Features::ShadowMask
 		stl::write_thunk_call<MaskBatch<View::World>>(REL::Offset(Address::kWorldMasks).address());
 		stl::write_thunk_call<MaskBatch<View::Menu>>(REL::Offset(Address::kMenuMasks).address());
 		Family::WatchSetupGeometry<RE::BSShader::Type::Utility>(RE::VTABLE_BSUtilityShader[0], &OnSetupGeometry);
+		// Both views' clients are made on the main thread once the graph runs (the main menu), before any world frame.
+		Family::AddSetup("shadow mask", [] { return ShadowMaskDraws::Setup(); });
 		logger::info("[DCLF] shadow mask: hooks installed (the world's and the menu scenes' shadow masks, BSUtilityShader::SetupGeometry)");
 	}
 }
