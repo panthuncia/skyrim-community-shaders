@@ -115,7 +115,7 @@ namespace DCLF::Draws
 		// the frame anchors') keep theirs. A hosted segment has no graph of its own (its host's carries its passes).
 		for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment)
 			if (RenderGraphRuntime::IsDclfSegment(static_cast<RenderGraphRuntime::Segment>(segment)))
-				a_host.RequestRebuild(RenderGraphRuntime::EpochOf(static_cast<RenderGraphRuntime::Segment>(segment)));
+				a_host.RequestRebuild(RenderGraphRuntime::EpochOf(static_cast<RenderGraphRuntime::Segment>(segment)), "Drawcall Limit Fix's graph conditions changed");
 	}
 
 	const GraphConditions& CurrentGraphConditions()

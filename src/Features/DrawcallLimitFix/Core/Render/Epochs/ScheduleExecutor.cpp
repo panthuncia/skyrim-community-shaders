@@ -531,7 +531,35 @@ namespace DCLF::Draws
 		return out;
 	}
 
-	void GatherScheduled(Api::EpochShape a_shape, Api::EngineView a_view, const Api::PassContext& a_base, std::vector<org::RenderGraph::ExternalPassDesc>& a_out)
+	std::vector<std::uint32_t> ExtensionEpochs(Api::EpochShape a_shape, Api::EngineView a_view)
+	{
+		const auto& state = State();
+		std::vector<std::uint32_t> out;
+		const auto add = [&](RenderGraphRuntime::Segment a_segment) {
+			const auto epoch = RenderGraphRuntime::EpochOf(a_segment);
+			if (std::ranges::find(out, epoch) == out.end())
+				out.push_back(epoch);
+		};
+		const auto& shapes = state.epochs[static_cast<std::size_t>(a_shape)];
+		for (const auto& epoch : shapes)
+			if (a_shape != Api::EpochShape::View || epoch.view == a_view)
+				add(epoch.segment);
+		// A view's resources are drawn from by the Main epochs hosting its epochs too.
+		if (a_shape == Api::EpochShape::View)
+			for (const auto& host : state.epochs[static_cast<std::size_t>(Api::EpochShape::Main)])
+				for (std::uint32_t row = 0; row < state.epochCount; ++row)
+					if (((host.hosts >> row) & 1) && state.traits[row].index == static_cast<std::uint32_t>(a_view))
+						add(host.segment);
+		// Before the schedule is resolved: every Drawcall Limit Fix epoch.
+		if (out.empty())
+			for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment)
+				if (RenderGraphRuntime::IsDclfSegment(static_cast<RenderGraphRuntime::Segment>(segment)))
+					add(static_cast<RenderGraphRuntime::Segment>(segment));
+		return out;
+	}
+
+	void GatherScheduled(Api::EpochShape a_shape, Api::EngineView a_view, const Api::PassContext& a_base, std::uint32_t a_graphEpoch,
+		std::vector<org::RenderGraph::ExternalPassDesc>& a_out)
 	{
 		const auto& state = State();
 		// The CPU pipeline's graph (GraphConditions::cpuPipeline): the direct sites draw at their triggers, and an epoch keeps its passes
@@ -549,6 +577,10 @@ namespace DCLF::Draws
 			context.epochId = epoch.id;
 			context.segment = epoch.segment;
 			context.epoch = RenderGraphRuntime::EpochOf(epoch.segment);
+			// Another epoch's graph: it would drop these passes, so they are not made (a graph per epoch builds every extension made into it).
+			constexpr std::uint32_t kAllEpochs = UINT32_MAX;  // org::persistent::AllEpochs, as RenderGraphRuntime::EpochOf gives it
+			if (a_graphEpoch != kAllEpochs && context.epoch != kAllEpochs && context.epoch != a_graphEpoch)
+				continue;
 			// The view epochs it hosts (a Main epoch's: the main resources' views), each while its view's passes can be added
 			// (ViewPassesReady: its target imported, drawing from these main resources): their passes are made with their view, and the
 			// epoch's own passes see them (PassContext::hosted, in row order: the latched copies take their lists too). A view not ready
