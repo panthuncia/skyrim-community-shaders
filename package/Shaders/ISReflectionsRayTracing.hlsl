@@ -157,6 +157,20 @@ PS_OUTPUT main(PS_INPUT input)
 	PS_OUTPUT psout;
 	psout.Color = 0;
 
+#	if defined(SPECMASK)
+	// ISReflectionsDebugSpecMask, transcribed from vanilla: shows where reflections apply. Pixels with a reflection mask
+	// keep their color less a magenta tint scaled by the mask; the rest show half their red.
+	{
+		const float2 maskPosition = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(input.TexCoord);
+		const float2 normalZW = NormalTex.Sample(NormalSampler, maskPosition).zw;
+		const float3 color = ColorTex.Sample(ColorSampler, maskPosition).xyz;
+		const float mask = max(normalZW.y, normalZW.x >= 0.00001 ? 1.0 : 0.0);
+		const float3 tinted = (mask * color) * float3(-1.0, -0.5, -1.0) + color;
+		psout.Color = float4(mask < 0.00001 ? color * float3(0.5, 0.0, 0.0) : tinted, 1.0);
+		return psout;
+	}
+#	endif
+
 #	ifndef ENABLESSR
 	// Disable SSR raymarch
 	return psout;

@@ -21,11 +21,24 @@ struct VS_OUTPUT
 };
 
 #ifdef VSHADER
+#	if defined(RIPPLE_MAKER_WADING)
+cbuffer PerGeometry : register(b2)
+{
+	// The two rows of a 2D affine transform that places the ripple quad.
+	float4 TranslationMatrix0 : packoffset(c1);
+	float4 TranslationMatrix1 : packoffset(c2);
+};
+#	endif
+
 VS_OUTPUT main(VS_INPUT input)
 {
 	VS_OUTPUT vsout;
 
 	vsout.Position = float4(input.Position.xyz, 1);
+#	if defined(RIPPLE_MAKER_WADING)
+	vsout.Position.x = dot(float3(input.Position.xy, 1), TranslationMatrix0.xyz);
+	vsout.Position.y = dot(float3(input.Position.xy, 1), TranslationMatrix1.xyz);
+#	endif
 	vsout.TexCoord = input.TexCoord.xy;
 #	if defined(HEIGHTMAP)
 	vsout.TexCoord1 = input.TexCoord.xy + float2(-0.0009765625, -0.0009765625);

@@ -32,18 +32,19 @@ cbuffer PerGeometry : register(b2)
 	float haloFetch : packoffset(c2.z);
 	float haloWidthPow : packoffset(c2.w);
 	float dynamicSource : packoffset(c3.x);
-	float globalIntensity : packoffset(c4.x);
+	float globalIntensity : packoffset(c3.y);  // vanilla's place; the engine fills it by name
 };
 
 float4 GetSampleColor(float2 texCoord)
 {
 	float4 color = DownScaledBlurredHDRTex.Sample(DownScaledBlurredHDRSampler, texCoord);
-	if (max(0, color.x - lightsRangeDownshift) + max(0, color.y - lightsRangeDownshift) +
-			max(0, color.z - lightsRangeDownshift) <=
+	// Vanilla clamps both the bright-pass test and the color to [0, 1].
+	if (saturate(color.x - lightsRangeDownshift) + saturate(color.y - lightsRangeDownshift) +
+			saturate(color.z - lightsRangeDownshift) <=
 		0) {
 		return 0;
 	}
-	return max(0, color);
+	return saturate(color);
 }
 
 PS_OUTPUT main(PS_INPUT input)

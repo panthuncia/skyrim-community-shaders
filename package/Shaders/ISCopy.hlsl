@@ -1,4 +1,44 @@
-#include "Common/DummyVSTexCoord.hlsl"
+// ISCopyScaleBias and ISCopyTextureMask move the texture coordinates in their vertex shader, as vanilla's do. The other
+// copies pass them through.
+#if defined(VSHADER) && (defined(SCALE_BIAS) || defined(MASK))
+struct VS_INPUT
+{
+	float4 Position: POSITION0;
+	float2 TexCoord: TEXCOORD0;
+};
+
+struct VS_OUTPUT
+{
+	float4 Position: SV_POSITION0;
+	float2 TexCoord: TEXCOORD0;
+};
+
+cbuffer PerGeometry : register(b2)
+{
+#	if defined(MASK)
+	float4 RotationMatrix : packoffset(c0);  // a 2x2 matrix that turns the coordinates about the center
+#	else
+	float4 ScaleBias : packoffset(c2);  // xy: scale, zw: bias
+#	endif
+};
+
+VS_OUTPUT main(VS_INPUT input)
+{
+	VS_OUTPUT vsout;
+
+	vsout.Position = float4(input.Position.xyz, 1);
+#	if defined(MASK)
+	const float4 rotated = (input.TexCoord.xxyy - 0.5) * RotationMatrix;
+	vsout.TexCoord = (rotated.xy + rotated.zw) + 0.5;
+#	else
+	vsout.TexCoord = input.TexCoord * ScaleBias.xy + ScaleBias.zw;
+#	endif
+
+	return vsout;
+}
+#else
+#	include "Common/DummyVSTexCoord.hlsl"
+#endif
 #include "Common/FrameBuffer.hlsli"
 
 typedef VS_OUTPUT PS_INPUT;

@@ -1223,3 +1223,15 @@ Keys used so far:
 - **Where it fits:** an anchor at the draw, or the draw joining the epoch of whatever frame the caller is in. Until then
   those movies stay on D3D11.
 - **Found by:** P5.11 Bink (2026-11-10).
+
+### Register-bound shaders on a pass
+
+- **Need:** a pass draws or dispatches a shader written for D3D11 registers (textures t0-t15, samplers s0-s15, UAVs,
+  constants at b0, b2 and b12) that cannot move to a bindless push block, because the D3D11 path still finds its
+  constants by cbuffer member name. The ORG pass binds each register from a table filled per draw.
+- **Who:** every ImageSpace shader (P5.6: 124 slots), and any mod shader replacing one of them.
+- **Where it fits:** a descriptor-table binding model beside `ShaderBindings`' push block: the shader builds for SPIR-V
+  with register shifts (`-fvk-t-shift 0 0 -fvk-s-shift 100 0 -fvk-u-shift 200 0 -fvk-b-shift 300 0` builds and validates
+  for all of them), and the pass maps each binding to an engine target, texture or latch. See
+  `docs/development/p5/imagespace-shaders.md`, "What the ORG ImageSpace pass still needs".
+- **Found by:** P5.6 shader sources (2026-11-10).

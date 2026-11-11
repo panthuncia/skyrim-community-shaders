@@ -17,9 +17,10 @@ Texture2D<float4> DepthTex : register(t1);
 
 cbuffer PerGeometry : register(b2)
 {
-	float4 CameraParams : packoffset(c0);
-	float4 DepthParams : packoffset(c1);
-	float4 TexelSize : packoffset(c2);
+	// The engine fills these by name. The names are vanilla's, from the BSImagespaceShaderWorldMap constructor.
+	float4 TexelSize : packoffset(c0);     // xy: the blur step
+	float4 CameraParams : packoffset(c1);  // yzw: depth linearization
+	float4 DepthParams : packoffset(c2);   // x: focus distance, y: largest step, z: step per distance, w: scale nearer than focus
 };
 
 PS_OUTPUT main(PS_INPUT input)
@@ -30,26 +31,30 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float depth = DepthTex.Sample(DepthSampler, adjustedTexCoord).x;
 
-	float depthFactor = DepthParams.w / ((1 - depth) * DepthParams.z + DepthParams.y);
-	float offsetDelta = min(TexelSize.y, TexelSize.z * abs(depthFactor - TexelSize.x));
+	float depthFactor = CameraParams.w / ((1 - depth) * CameraParams.z + CameraParams.y);
+	float offsetDelta = min(DepthParams.y, DepthParams.z * abs(depthFactor - DepthParams.x));
 #	if defined(NO_SKY)
 	if (1 - depth <= 1e-4) {
 		offsetDelta = 0;
 	}
 #	endif
-	if (depthFactor < TexelSize.x) {
-		offsetDelta *= TexelSize.w;
+	if (depthFactor < DepthParams.x) {
+		offsetDelta *= DepthParams.w;
 	}
-	float2 startOffset = input.TexCoord - 3 * (CameraParams.xy * offsetDelta);
+	float2 startOffset = input.TexCoord - 3 * (TexelSize.xy * offsetDelta);
 
+	// The tap position steps by adding, as vanilla's does, so the taps land on the same texels.
 	float4 color = 0;
+	float tapX = startOffset.x;
 	for (int i = 0; i < 7; ++i) {
+		float tapY = startOffset.y;
 		for (int j = 0; j < 7; ++j) {
-			float2 currentTexCoord = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(
-				startOffset + CameraParams.xy * offsetDelta * float2(i, j));
+			float2 currentTexCoord = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(float2(tapX, tapY));
 			float4 currentColor = ImageTex.Sample(ImageSampler, currentTexCoord);
 			color += currentColor;
+			tapY = TexelSize.y * offsetDelta + tapY;
 		}
+		tapX = TexelSize.x * offsetDelta + tapX;
 	}
 
 	psout.Color = 0.0204081628 * color;
