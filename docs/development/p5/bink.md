@@ -205,13 +205,15 @@ The instance (C:\Modding\MO2, profile Default) does not skip the logo: no profil
 `Data\Video\BGS_Logo.bik` is present, and no installed plugin skips it. But the logo plays on the MoviePlayer thread, so it
 always takes the engine's path; it shows only that the hooks pass it through (no crash, the logo plays, the line above).
 
-To trigger a Bink on the main thread in a test, run the console's `PlayBink "BGS_Logo.bik"` through
-`CS_DCLF_TEST_COMMANDS`. It blocks the main thread for the movie's 7 seconds; the test harness's frame count does not move
+To trigger a Bink on the main thread in a test, use the harness command `dclf:bink=BGS_Logo.bik` in
+`CS_DCLF_TEST_COMMANDS`. The console's `PlayBink` does nothing there (the harness runs console commands as a compiled
+script), so `dclf:bink` calls `MoviePlayer::PlayMovie` (SE 87918, AE 90291) on the BGSMoviePlayer singleton (SE 525733, AE
+412214) with the console's defaults, from an SKSE task on the main thread. It blocks the main thread for the movie's 7 seconds; the test harness's frame count does not move
 meanwhile.
 
 Scenarios (`tools/cs-ab/scenarios/`):
 
-- `bink-org0.env`: the engine's path, `PlayBink` at frame 600, shots `bink-40.png` and `bink-120.png`, a game shot after.
+- `bink-org0.env`: the engine's path, `dclf:bink=BGS_Logo.bik` at frame 600, shots `bink-40.png` and `bink-120.png`, a game shot after.
 - `bink-org1.env`: the same with `CS_ORG_BINK=1`.
 
 What to check:
