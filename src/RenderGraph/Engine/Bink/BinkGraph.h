@@ -52,10 +52,10 @@ namespace RenderGraph::Engine::Bink
 		void Setup();
 
 		/**
-		 * @brief Render thread, at the start of a tick that could draw on the graph: whether this tick may. True only when the client
-		 * is in the Present anchor's built graph (FrameAnchors::RequestJoin), the anchor can run now (FrameAnchors::CanRun), the tile
-		 * program is built and the framebuffer is imported. A frame queued earlier that did not draw sends the rest of its movie to the
-		 * engine. False: the engine draws this tick.
+		 * @brief Render thread, at the start of a tick that could draw on the graph: whether this tick may. The client joined the
+		 * Present anchor's graph at setup's build point and the tile program was built at setup, so the only refusals are the ring
+		 * being full this frame (FrameAnchors::CanRun), a framebuffer that cannot be imported, and the ticks between a resize and the
+		 * next build. A frame queued earlier that did not draw is logged as an error. False: the engine draws this tick.
 		 */
 		bool Begin();
 

@@ -91,8 +91,8 @@ Ownership itself requests no graph build: the claim publishes nothing and touche
     menu, the Present anchor's clients).
   - A client that registers during the load joins at the end of the iteration it registered in (`FrameAnchors::RequestJoin` is
     the gate). A joining client no longer runs its anchor's epoch. Its caller keeps the D3D11 path meanwhile, as everywhere.
-- Bink no longer builds by itself: its one client registers at `State::Setup` and joins through `RequestJoin`, built at a
-  frame's end like any joining client (p5/bink.md).
+- Bink no longer builds by itself: its one client registers at `State::Setup` and is in the Present graph from setup's build
+  point (`Engine::PostSetup`, `FrameAnchors::BuildPending`), before the logo plays (p5/bink.md, "The primary path").
 
 ## Rebuilds in this lane
 
@@ -100,9 +100,16 @@ Ownership itself requests no graph build: the claim publishes nothing and touche
 | --- | --- | --- |
 | The ownership handoff | nothing | no build, no publish (above) |
 | A client that joins during a load | one build at the iteration's end (`OnFrameEnd`) | only while a client waits; a client that registers every iteration would rebuild every iteration (none does) |
-| Bink's client | registered once at Setup | no build of its own; joins at a frame's end (p5/bink.md) |
+| Bink's client | registered once at Setup | built at setup's build point (p5/bink.md) |
 | Texture streaming's copy pass per batch (`ORGWindows::Register`, one-shot) | asks for a Present-anchor build per batch and one after it ran | pre-existing (p4/texture-streaming.md, "Risks"). On the loading thread, with DCLF on, those builds wait for the build point, so a batch staged during a load is uploaded in the first world frame, as today; with DCLF off they are built at the next submission, as in any frame. Removing them at the source (a kept pass with a gated copy list in place of a one-shot pass per batch) is texture streaming's change, listed as open |
-| Scaleform's new surface (a display onto a target with no pass yet) | registers the client again | p5/scaleform.md's design; on the loading thread the display goes to D3D11 until the graph holds it |
+| Scaleform's surfaces | the framebuffer's and HDR's UI texture's, registered at setup | another target is an inherent refusal; a role's texture made again (a resize, HDR's rebuild) registers once, built at the next build point (p5/scaleform.md, "The primary path") |
+
+## The primary path (2026-11-11, `org-port/primary-ui`)
+
+The loading thread's rule is the claim at `Renderer::Begin` (and at the logo's tick start, BinkHooks.cpp). It has no readiness
+state of its own, so nothing was deleted here. What changed around it: the clients that draw on the loading thread (Scaleform,
+Bink, the skeleton) are in their graphs from setup's build point, so a loading screen's first frame draws on the graph like any
+other. Off the switch, the loading thread's displays and ticks stay D3D11's: an inherent refusal, named in each port's doc.
 
 ## Hazards
 

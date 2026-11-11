@@ -49,8 +49,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		constexpr std::uint32_t kMinimumStaging = 256u << 10;
 		// The most commands one segment draws on the graph: one run gate entry each. A longer segment is replayed into D3D11.
 		constexpr std::uint32_t kGateEntries = 1024;
-		// How often (in displays) the surfaces are checked for textures the engine released.
-		constexpr std::uint64_t kReleaseCheckDisplays = 1000;
 
 		using FrameAnchors::Anchor;
 
@@ -113,12 +111,22 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 		using Slots = RunSlots<Frame>;
 
+		/** @brief The targets UI::DrawInterface binds for the displays: the only ones the graph draws onto. */
+		enum class Role : std::uint8_t
+		{
+			Framebuffer,  // the back buffer (kFRAMEBUFFER's RTV, or HDR's saved one)
+			HdrUi,        // HDR's UI texture, while HDR redirects the interface into it
+		};
+		constexpr std::array<Role, 2> kRoles{ Role::Framebuffer, Role::HdrUi };
+
 		/**
-		 * @brief A target and depth pair the displays draw onto. It has two passes: one with the target alone, for displays without
-		 * masks, and one with the depth-stencil too, for displays with masks (when the depth can be imported).
+		 * @brief A target the displays draw onto, with kMAIN's depth-stencil for masks. It has two passes: one with the target alone,
+		 * for displays without masks, and one with the depth-stencil too, for displays with masks (when the depth can be imported).
+		 * One surface per role, made at setup; made again only when the role's texture was made again (a resize, HDR's textures).
 		 */
 		struct Surface
 		{
+			Role role = Role::Framebuffer;
 			winrt::com_ptr<ID3D11Texture2D> colourTexture;  // DXVK's: the surface's identity
 			winrt::com_ptr<ID3D11Texture2D> depthTexture;
 			std::shared_ptr<org::ExternalTextureResource> colour;
@@ -129,7 +137,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			std::uint32_t width = 0, height = 0;
 			std::shared_ptr<const Slots> colourSlots;  // null for a surface the graph cannot draw onto (no passes)
 			std::shared_ptr<const Slots> depthSlots;   // null without an importable depth-stencil
-			bool drawnSinceCheck = true;               // a display drew onto it since the last release check
 
 			bool Drawable() const { return colourSlots != nullptr; }
 
@@ -148,10 +155,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			bool reserved = false;
 			bool failed = false;
 			bool setUp = false;
-			bool joined = false;                                  // the first registration reached the Interface graph
 			std::array<org::OwnedDescriptorBinding, 4> samplers;  // the renderer's, by wrap * 2 + sample
-			std::vector<std::shared_ptr<Surface>> surfaces;
-			std::uint64_t displays = 0;
+			std::vector<std::shared_ptr<Surface>> surfaces;       // one per role that has a texture
 			std::uint32_t ownImports = 0;
 			std::uint32_t registrations = 0;
 			std::uint32_t largestSegment = 0;
@@ -279,6 +284,58 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			desc.depthFormat = a_key.depth;
 			desc.depth = DepthOf(a_key.state.stencil);
 			return desc;
+		}
+
+		/**
+		 * @brief Every draw state the capture can make (Renderer.cpp: the background, ApplyFill, DrawIndexedTriList's vertex kinds,
+		 * DrawBitmaps, the colour matrix filter), for the pass with the depth-stencil or the one without. The set is finite:
+		 * - vertex and pixel kinds: 1 with 1-3 (solid, bitmap), 2 with 4-6 (bitmaps), 3 with 12-14 and 16-18 (XY16iC32 gouraud),
+		 *   4 with 11, 13, 14, 15, 17, 18 (XY16iCF32 gouraud), 5 with 11, 14, 15, 18 (gouraud type 3); filters 23 and 24;
+		 * - blends: the Multiply and Darken kinds (3, 6, 15-18, filter 24) only with the multiply and darken states (4, 6), the other
+		 *   kinds with 1, 2, 3, 5, the glyph kind (4) with any, the filters from the filters' array (8 + the index); every kind with 7
+		 *   (a mask being drawn, the Alpha and Erase modes);
+		 * - stencils: off in the pass without masks; off and test with any blend, clear, increment and decrement only with 7 (inside
+		 *   BeginSubmitMask) in the pass with them.
+		 */
+		std::vector<DrawState> DrawStates(bool a_withDepth)
+		{
+			struct Kinds
+			{
+				std::uint8_t vertex;
+				std::vector<std::uint8_t> pixels;
+			};
+			const std::array<Kinds, 5> fills{ { { 1, { 1, 2, 3 } }, { 2, { 4, 5, 6 } }, { 3, { 12, 13, 14, 16, 17, 18 } }, { 4, { 11, 13, 14, 15, 17, 18 } },
+				{ 5, { 11, 14, 15, 18 } } } };
+			const auto multiply = [](std::uint8_t a_pixel) { return a_pixel == 3 || a_pixel == 6 || a_pixel >= 15; };
+			std::vector<DrawState> states;
+			const auto add = [&](DrawState a_state, const std::vector<std::uint8_t>& a_blends) {
+				for (const auto blend : a_blends) {
+					a_state.blend = blend;
+					a_state.stencil = Stencil::Off;
+					states.push_back(a_state);
+					if (a_withDepth) {
+						a_state.stencil = Stencil::Test;
+						states.push_back(a_state);
+					}
+				}
+				if (a_withDepth) {
+					a_state.blend = 7;
+					for (const auto stencil : { Stencil::Clear, Stencil::Increment, Stencil::Decrement }) {
+						a_state.stencil = stencil;
+						states.push_back(a_state);
+					}
+				}
+			};
+			for (const auto& kinds : fills)
+				for (const auto pixel : kinds.pixels) {
+					const std::vector<std::uint8_t> blends = pixel == 4 ? std::vector<std::uint8_t>{ 1, 2, 3, 4, 5, 6, 7 } :
+					                                         multiply(pixel) ? std::vector<std::uint8_t>{ 4, 6, 7 } :
+					                                                           std::vector<std::uint8_t>{ 1, 2, 3, 5, 7 };
+					add({ .vertexKind = kinds.vertex, .pixelKind = pixel }, blends);
+				}
+			add({ .vertexKind = 0, .pixelKind = 0, .filter = 23 }, { 9, 10, 11, 13, 15, 7 });
+			add({ .vertexKind = 0, .pixelKind = 0, .filter = 24 }, { 12, 14, 7 });
+			return states;
 		}
 
 		struct PassBindings
@@ -543,8 +600,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 
 		/**
-		 * @brief Registers the client with a pass pair for every surface. The anchor's graph is built with it at the next build point
-		 * (RequestJoin), between frames; until then the displays go to D3D11. False, and the path failed, when it is refused.
+		 * @brief Registers the client with a pass pair for every surface. At setup, the setup's build point (Engine::PostSetup) builds
+		 * the Interface graph with it before the first display; after a role's surface was made again, the next build point between
+		 * frames does. False, and the path failed, when it is refused.
 		 */
 		bool RegisterClient(PathState& a_state)
 		{
@@ -555,8 +613,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			}
 			++a_state.registrations;
 			const auto drawable = std::ranges::count_if(a_state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); });
-			logger::info("[ORG] Scaleform: registered with {} surfaces (registration {}); the Interface graph is built with them at the next build point",
-				drawable, a_state.registrations);
+			logger::info("[ORG] Scaleform: registered with {} surfaces (registration {})", drawable, a_state.registrations);
 			return true;
 		}
 
@@ -617,6 +674,18 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return texture;
 		}
 
+		/** @brief The role's texture now (DXVK's, referenced) and its view format; null when the role has none (HDR off). */
+		winrt::com_ptr<ID3D11Texture2D> RoleTexture(Role a_role, DXGI_FORMAT& a_format)
+		{
+			if (a_role == Role::Framebuffer)
+				return TextureOf(FramebufferRtv(), a_format);
+			const auto& hdr = globals::features::hdrDisplay;
+			a_format = DXGI_FORMAT_UNKNOWN;
+			return hdr.loaded && hdr.uiTexture && hdr.uiTexture->rtv ? TextureOf(hdr.uiTexture->rtv.get(), a_format) : nullptr;
+		}
+
+		const char* RoleName(Role a_role) { return a_role == Role::Framebuffer ? "framebuffer" : "HDR UI"; }
+
 		/** @brief kMAIN's depth-stencil texture (DXVK's), the one UI::DrawInterface binds; null without one. */
 		ID3D11Texture2D* MainDepth()
 		{
@@ -643,59 +712,11 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), info.image, desc, a_id.c_str());
 		}
 
-		/** @brief Whether anyone but this surface still holds a_texture (the probe's own reference aside). DXVK's views hold none. */
-		bool HeldElsewhere(ID3D11Texture2D* a_texture)
-		{
-			a_texture->AddRef();
-			return a_texture->Release() > 1;
-		}
-
-		/**
-		 * @brief Whether the engine released the surface's textures. A surface a display drew onto since the last check is in use. Its
-		 * colour is still the engine's while it is an engine target, the framebuffer's texture or HDR's UI texture, or anyone but this
-		 * surface holds it; its depth while it is an engine depth-stencil or held elsewhere.
-		 */
-		bool Released(const Surface& a_surface)
-		{
-			if (a_surface.drawnSinceCheck)
-				return false;
-			auto* colour = a_surface.colourTexture.get();
-			DXGI_FORMAT format{};
-			const auto& hdr = globals::features::hdrDisplay;
-			const bool colourLive = EngineTargetOf(colour) >= 0 || TextureOf(FramebufferRtv(), format).get() == colour ||
-			                        (hdr.uiTexture && hdr.uiTexture->resource.get() == colour) || HeldElsewhere(colour);
-			auto* depth = a_surface.depthTexture.get();
-			const bool depthLive = !depth || EngineDepthOf(depth) >= 0 || HeldElsewhere(depth);
-			return !colourLive || !depthLive;
-		}
-
-		/**
-		 * @brief Drops the surfaces whose textures the engine released (a resize, HDR's textures made again). The client is
-		 * registered again without them when one had passes; the textures go once D3D11 and the graph are done with them.
-		 */
-		void DropReleasedSurfaces(PathState& a_state)
-		{
-			bool hadPasses = false;
-			std::erase_if(a_state.surfaces, [&](const std::shared_ptr<Surface>& a_surface) {
-				if (!Released(*a_surface)) {
-					a_surface->drawnSinceCheck = false;
-					return false;
-				}
-				logger::info("[ORG] Scaleform: the surface {} ({}x{}) was released by the engine; dropped", a_surface->ownId.empty() ? "an engine target" : a_surface->ownId,
-					a_surface->width, a_surface->height);
-				hadPasses |= a_surface->Drawable();
-				a_surface->Clear();
-				RenderGraphRuntime::Get().ReleaseAfterD3D11(a_surface);
-				return true;
-			});
-			if (hadPasses && a_state.setUp && !a_state.failed)
-				RegisterClient(a_state);
-		}
-
-		/** @brief A surface for a_colour with a_depth (DXVK's), imported; without passes when the target cannot be imported. */
-		std::shared_ptr<Surface> MakeSurface(PathState& a_state, ID3D11Texture2D* a_colour, DXGI_FORMAT a_format, ID3D11Texture2D* a_depth)
+		/** @brief The role's surface for a_colour with a_depth (DXVK's), imported; without passes when the target cannot be imported. */
+		std::shared_ptr<Surface> MakeSurface(PathState& a_state, Role a_role, ID3D11Texture2D* a_colour, DXGI_FORMAT a_format, ID3D11Texture2D* a_depth)
 		{
 			auto surface = std::make_shared<Surface>();
+			surface->role = a_role;
 			surface->colourTexture.copy_from(a_colour);
 			surface->depthTexture.copy_from(a_depth);
 			D3D11_TEXTURE2D_DESC colourDesc{};
@@ -720,8 +741,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					surface->depthFormat = surface->depth->GetFormat();
 				}
 			}
-			logger::info("[ORG] Scaleform: a new surface: {} ({}x{}, DXGI format {}), depth {}", surface->ownId.empty() ? "an engine target" : surface->ownId,
-				colourDesc.Width, colourDesc.Height, static_cast<int>(a_format),
+			logger::info("[ORG] Scaleform: the {} surface: {} ({}x{}, DXGI format {}), depth {}", RoleName(a_role),
+				surface->ownId.empty() ? "an engine target" : surface->ownId, colourDesc.Width, colourDesc.Height, static_cast<int>(a_format),
 				surface->depth ? "an engine depth-stencil" : (a_depth ? "not importable" : "none"));
 			if (surface->colour && surface->colourFormat != rhi::Format::Unknown) {
 				const std::uint32_t slots = RenderGraphRuntime::Get().Host()->FrameSlots();
@@ -732,41 +753,71 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return surface;
 		}
 
-		Surface* Find(const PathState& a_state, ID3D11Texture2D* a_colour, ID3D11Texture2D* a_depth)
+		/**
+		 * @brief Every pipeline the surface's passes can draw with (DrawStates), queued on the program build thread: they build while
+		 * the game loads, from shaders the build compiles into the shader store. A key a display needs before its build finished is
+		 * built on the render thread (ProgramCache::Require, logged).
+		 */
+		void QueuePrograms(PathState& a_state, const Surface& a_surface)
+		{
+			if (!a_surface.Drawable())
+				return;
+			std::size_t queued = 0;
+			const auto queue = [&](bool a_withDepth) {
+				for (const auto& drawState : DrawStates(a_withDepth)) {
+					const ProgramKey key{ drawState, a_surface.colourFormat, a_withDepth ? a_surface.depthFormat : rhi::Format::Unknown };
+					(void)a_state.programs.Get(key, [&] { return DescOf(key); });
+					++queued;
+				}
+			};
+			queue(false);
+			if (a_surface.depthSlots)
+				queue(true);
+			logger::info("[ORG] Scaleform: {} pipelines queued for the {} surface", queued, RoleName(a_surface.role));
+		}
+
+		/** @brief The surface whose colour is a_colour (DXVK's), or null. */
+		Surface* Find(const PathState& a_state, ID3D11Texture2D* a_colour)
 		{
 			for (const auto& surface : a_state.surfaces)
-				if (surface->colourTexture.get() == a_colour && surface->depthTexture.get() == a_depth)
+				if (surface->colourTexture.get() == a_colour)
 					return surface.get();
 			return nullptr;
 		}
 
 		/**
-		 * @brief The surfaces UI::DrawInterface binds, made before the first registration so it holds their passes: the framebuffer
-		 * (the back buffer) and, with HDR, its UI texture, each with kMAIN's depth-stencil.
+		 * @brief The role's surface made from its texture now (with kMAIN's depth-stencil), its pipelines queued, replacing the role's
+		 * old one; false when the role has no texture (HDR off).
 		 */
-		void DeclareKnownSurfaces(PathState& a_state)
+		bool DeclareSurface(PathState& a_state, Role a_role)
 		{
-			auto* depth = MainDepth();
-			const auto add = [&](ID3D11RenderTargetView* a_rtv) {
-				DXGI_FORMAT format{};
-				const auto texture = TextureOf(a_rtv, format);
-				if (texture && format != DXGI_FORMAT_UNKNOWN && !Find(a_state, texture.get(), depth))
-					a_state.surfaces.push_back(MakeSurface(a_state, texture.get(), format, depth));
-			};
-			add(FramebufferRtv());
-			const auto& hdr = globals::features::hdrDisplay;
-			if (hdr.loaded && hdr.uiTexture && hdr.uiTexture->rtv)
-				add(hdr.uiTexture->rtv.get());
+			DXGI_FORMAT format{};
+			const auto texture = RoleTexture(a_role, format);
+			if (!texture || format == DXGI_FORMAT_UNKNOWN)
+				return false;
+			auto surface = MakeSurface(a_state, a_role, texture.get(), format, MainDepth());
+			QueuePrograms(a_state, *surface);
+			std::erase_if(a_state.surfaces, [&](const std::shared_ptr<Surface>& a_old) {
+				if (a_old->role != a_role)
+					return false;
+				// A pass of an older build that still holds it draws nothing more; its textures go once D3D11 and the graph are done.
+				a_old->Clear();
+				RenderGraphRuntime::Get().ReleaseAfterD3D11(a_old);
+				return true;
+			});
+			a_state.surfaces.push_back(std::move(surface));
+			return true;
 		}
 
 		/**
-		 * @brief The surface a_display draws onto. A new one is imported and the client registered again with passes for it: null
-		 * then, as when it cannot be imported; it is drawn once the Interface graph holds the registration.
+		 * @brief The surface a_display draws onto. Only the framebuffer's and HDR's UI texture's, declared at setup, are drawn on the
+		 * graph. When one of those roles' textures was made again (a resize, HDR's textures made again), its surface is made again
+		 * and the client registered again: the Interface graph is built with it at the next build point, between frames (a rebuild
+		 * trigger, logged). Null, with a_reason, otherwise.
 		 */
 		Surface* SurfaceFor(PathState& a_state, const Display& a_display, bool a_needsDepth, const char*& a_reason)
 		{
-			if (auto* surface = Find(a_state, a_display.target, a_display.depth)) {
-				surface->drawnSinceCheck = true;
+			if (auto* surface = Find(a_state, a_display.target)) {
 				if (!surface->Drawable()) {
 					a_reason = "a render target the graph cannot import";
 					return nullptr;
@@ -775,23 +826,24 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					a_reason = "a render target view in another format than its surface's";
 					return nullptr;
 				}
-				if (a_needsDepth && !surface->depthSlots) {
-					a_reason = "a mask on a depth-stencil the graph cannot import";
+				if (a_needsDepth && (!surface->depthSlots || a_display.depth != surface->depthTexture.get())) {
+					a_reason = "a mask on a depth-stencil other than kMAIN's, or one the graph cannot import";
 					return nullptr;
 				}
 				return surface;
 			}
-			// A new target: the released ones go first, so an old framebuffer after a resize is not kept beside the new one.
-			DropReleasedSurfaces(a_state);
-			auto surface = MakeSurface(a_state, a_display.target, a_display.targetFormat, a_display.depth);
-			const bool drawable = surface->Drawable();
-			// Kept without passes too, so the same target is not imported again each display; its displays go to D3D11.
-			a_state.surfaces.push_back(std::move(surface));
-			if (!drawable) {
-				a_reason = "a render target the graph cannot import";
+			for (const auto role : kRoles) {
+				DXGI_FORMAT format{};
+				if (RoleTexture(role, format).get() != a_display.target)
+					continue;
+				logger::info("[ORG] Scaleform: the {} texture was made again (a resize or an HDR change); the Interface graph is built again with it",
+					RoleName(role));
+				if (DeclareSurface(a_state, role))
+					RegisterClient(a_state);
+				a_reason = "a surface made again (drawn once the Interface graph is built with it)";
 				return nullptr;
 			}
-			a_reason = RegisterClient(a_state) ? "a new surface (drawn once the Interface graph holds it)" : "the client cannot be registered";
+			a_reason = "a render target other than the framebuffer and HDR's UI texture";
 			return nullptr;
 		}
 
@@ -806,35 +858,14 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				logger::info("[ORG] Scaleform: the largest segment so far has {} commands (the Interface gate holds {})", a_commands, kGateEntries);
 		}
 
-		/** @brief Once: the samplers, the gate, the staging pool and the known surfaces, then the first registration. */
-		bool SetUp(PathState& a_state)
+		/** @brief A run that did not draw: an error of the graph path, logged once per reason. Not a readiness state. */
+		void Failure(const char* a_reason)
 		{
-			for (std::uint32_t i = 0; i < a_state.samplers.size(); ++i) {
-				// CreateShaders' samplers: point or linear (sample mode), wrap or clamp (wrap mode), LOD bias -0.5, the top mip only.
-				D3D11_SAMPLER_DESC desc{};
-				desc.Filter = (i & 1) ? D3D11_FILTER_MIN_MAG_MIP_LINEAR : D3D11_FILTER_MIN_MAG_MIP_POINT;
-				desc.AddressU = desc.AddressV = desc.AddressW = (i & 2) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
-				desc.MipLODBias = -0.5f;
-				desc.MaxAnisotropy = 1;
-				desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
-				desc.MinLOD = 0.0f;
-				desc.MaxLOD = 0.0f;
-				a_state.samplers[i] = ShaderBindings::CreateSamplerFromD3D11(desc);
-				if (!a_state.samplers[i]) {
-					logger::error("[ORG] Scaleform: the samplers could not be made; the D3D11 renderer draws");
-					return false;
-				}
-			}
-			a_state.gate = RunGate::Create("cs.scaleform.gate", kGateEntries);
-			a_state.staging = FrameStaging::Create({ .name = "cs.scaleform.staging",
-				.minimumBytes = kMinimumStaging,
-				.runsPerFrame = FrameAnchors::RunsPerFrame(Anchor::Interface) });
-			if (!a_state.gate || !a_state.staging) {
-				logger::error("[ORG] Scaleform: the run gate or the staging pool could not be made; the D3D11 renderer draws");
-				return false;
-			}
-			DeclareKnownSurfaces(a_state);
-			return RegisterClient(a_state);
+			static std::vector<const char*> logged;
+			if (std::ranges::find(logged, a_reason) != logged.end())
+				return;
+			logged.push_back(a_reason);
+			logger::error("[ORG] Scaleform: a segment did not draw on the graph ({}); it was replayed into D3D11", a_reason);
 		}
 
 		/** @brief Submit's reason for a run that did not submit. */
@@ -862,40 +893,66 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		return state.reserved;
 	}
 
-	bool Ready()
+	void Setup()
 	{
 		auto& state = Path();
-		if (!state.reserved || state.failed || !RenderGraphRuntime::Get().IsActive() || !FrameAnchors::HasEpoch(Anchor::Interface))
-			return false;
-		if (!state.setUp) {
-			state.setUp = true;
-			if (!SetUp(state)) {
+		if (!state.reserved || state.setUp || state.failed)
+			return;
+		if (!RenderGraphRuntime::Get().IsActive() || !FrameAnchors::HasEpoch(Anchor::Interface)) {
+			state.failed = true;
+			logger::warn("[ORG] Scaleform: CS_ORG_SCALEFORM=1, but the render graph or its Interface anchor is not active; the D3D11 renderer draws");
+			return;
+		}
+		for (std::uint32_t i = 0; i < state.samplers.size(); ++i) {
+			// CreateShaders' samplers: point or linear (sample mode), wrap or clamp (wrap mode), LOD bias -0.5, the top mip only.
+			D3D11_SAMPLER_DESC desc{};
+			desc.Filter = (i & 1) ? D3D11_FILTER_MIN_MAG_MIP_LINEAR : D3D11_FILTER_MIN_MAG_MIP_POINT;
+			desc.AddressU = desc.AddressV = desc.AddressW = (i & 2) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
+			desc.MipLODBias = -0.5f;
+			desc.MaxAnisotropy = 1;
+			desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
+			desc.MinLOD = 0.0f;
+			desc.MaxLOD = 0.0f;
+			state.samplers[i] = ShaderBindings::CreateSamplerFromD3D11(desc);
+			if (!state.samplers[i]) {
 				state.failed = true;
-				return false;
+				logger::error("[ORG] Scaleform: the samplers could not be made; the D3D11 renderer draws");
+				return;
 			}
 		}
-		if (state.joined)
-			return true;
-		// A registration without passes (no known surface could be imported) has nothing to join: Submit adds the surfaces.
-		const bool hasPasses = std::ranges::any_of(state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); });
-		if (hasPasses && !FrameAnchors::RequestJoin(kClientId, Anchor::Interface))
-			return false;
-		state.joined = true;
-		logger::info("[ORG] Scaleform: drawing displays on the render graph (Interface anchor)");
-		return true;
+		state.gate = RunGate::Create("cs.scaleform.gate", kGateEntries);
+		state.staging = FrameStaging::Create({ .name = "cs.scaleform.staging",
+			.minimumBytes = kMinimumStaging,
+			.runsPerFrame = FrameAnchors::RunsPerFrame(Anchor::Interface) });
+		if (!state.gate || !state.staging) {
+			state.failed = true;
+			logger::error("[ORG] Scaleform: the run gate or the staging pool could not be made; the D3D11 renderer draws");
+			return;
+		}
+		for (const auto role : kRoles)
+			(void)DeclareSurface(state, role);
+		if (std::ranges::none_of(state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); })) {
+			state.failed = true;
+			logger::error("[ORG] Scaleform: neither the framebuffer nor HDR's UI texture can be imported; the D3D11 renderer draws");
+			return;
+		}
+		if (!RegisterClient(state))
+			return;
+		state.setUp = true;
+		logger::info("[ORG] Scaleform: on (CS_ORG_SCALEFORM); the client joins the Interface graph at setup's build point");
+	}
+
+	bool Ready()
+	{
+		const auto& state = Path();
+		return state.setUp && !state.failed && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(Anchor::Interface);
 	}
 
 	bool Submit(Display& a_display, const char*& a_reason)
 	{
 		auto& state = Path();
 		if (!Ready()) {
-			a_reason = "the render graph is not up";
-			return false;
-		}
-		if (++state.displays % kReleaseCheckDisplays == 0)
-			DropReleasedSurfaces(state);
-		if (state.failed) {
-			a_reason = "the client cannot be registered";
+			a_reason = "the graph path is off (not set up, or failed)";
 			return false;
 		}
 		if (a_display.commands.empty())
@@ -914,10 +971,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		if (!surface)
 			return false;
 
-		// Every pipeline the segment needs is asked for, so they build together; D3D11 draws the segment until all are built.
+		// Every pipeline was queued at setup; one the build thread has not finished yet is built here, never left to D3D11.
 		state.pendingPrograms.assign(a_display.commands.size(), nullptr);
-		bool missing = false;
-		bool failed = false;
 		for (std::size_t i = 0; i < a_display.commands.size(); ++i) {
 			const Command& command = a_display.commands[i];
 			if (command.kind != Command::Kind::Draw)
@@ -925,25 +980,18 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			ProgramKey key{ command.state, surface->colourFormat, needsDepth ? surface->depthFormat : rhi::Format::Unknown };
 			if (!needsDepth)
 				key.state.stencil = Stencil::Off;
-			state.pendingPrograms[i] = state.programs.Get(key, [&] { return DescOf(key); });
+			state.pendingPrograms[i] = state.programs.Require(key, [&] { return DescOf(key); });
 			if (!state.pendingPrograms[i]) {
-				missing = true;
-				failed |= state.programs.StatusOf(key) == ProgramStatus::Failed;
+				state.pendingPrograms.clear();
+				a_reason = "a pipeline that cannot be made";
+				return false;
 			}
-		}
-		if (missing) {
-			state.pendingPrograms.clear();
-			a_reason = failed ? "a pipeline cannot be made" : "a pipeline is being built";
-			return false;
-		}
-		if (!FrameAnchors::RequestJoin(kClientId, Anchor::Interface)) {
-			state.pendingPrograms.clear();
-			a_reason = "the Interface graph is being built with a new surface";
-			return false;
 		}
 		if (!FrameAnchors::CanRun(kClientId, Anchor::Interface)) {
 			state.pendingPrograms.clear();
-			a_reason = "the Interface anchor's ring is full this frame";
+			// Setup's build point put the client in the graph: it is outside it only after a surface was made again, until the next build.
+			a_reason = FrameAnchors::InBuiltGraph(kClientId, Anchor::Interface) ? "the Interface anchor's ring is full this frame" :
+			                                                                       "a surface made again (drawn once the Interface graph is built with it)";
 			return false;
 		}
 
@@ -965,6 +1013,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			a_reason = "the client was not in the Interface epoch";
 		else
 			return true;
+		Failure(a_reason);
 		return false;
 	}
 }
@@ -976,6 +1025,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 namespace RenderGraph::Engine::Scaleform::Passes
 {
 	bool Reserve() { return false; }
+	void Setup() {}
 	bool Ready() { return false; }
 	bool Submit(Display&, const char*& a_reason)
 	{

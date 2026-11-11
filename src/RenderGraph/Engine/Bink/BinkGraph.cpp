@@ -101,9 +101,9 @@ namespace RenderGraph::Engine::Bink::Graph
 		// bottom row's power-of-two edge tiles). A larger movie keeps the engine's path.
 		constexpr std::uint32_t kAtlasWidth = 2048;
 		constexpr std::uint32_t kAtlasHeight = 1152;
-		// Staging buffers: the frame the decoder fills and the frames in flight. A 1080p frame takes 8.3 MB; with none to take, a
-		// tick decodes on the engine's path.
-		constexpr std::uint32_t kMaxStaging = 4;
+		// Staging buffers: the frame the decoder fills and one for each frame in flight, so a tick always finds one. A 1080p frame
+		// takes 8.3 MB; with none to take (a capacity refusal, logged), a tick decodes on the engine's path.
+		constexpr std::uint32_t kMaxStaging = RenderGraphRuntime::kGameFramesInFlight + 1;
 
 		// Must match the push block of BinkCopy.hlsl: the TexBase and SampBase handles, then the BinkQuad PUSH entry on a 16-byte
 		// boundary.
@@ -164,7 +164,6 @@ namespace RenderGraph::Engine::Bink::Graph
 		{
 			bool setUp = false;
 			bool failed = false;
-			bool joined = false;  // the Present anchor's built graph holds this registration (FrameAnchors::RequestJoin)
 			std::unique_ptr<GraphResources::Texture2D> atlas;
 			std::shared_ptr<FrameStaging> staging;
 			// The frame each pass records, per host frame slot: the upload's and the draw's.
@@ -178,7 +177,7 @@ namespace RenderGraph::Engine::Bink::Graph
 			std::uint64_t queued = 0;         // frames queued
 			std::uint64_t committed = 0;      // the newest queued frame a commit stored
 			std::uint64_t executed = 0;       // the newest committed frame whose run had the passes in its graph
-			bool missed = false;              // a queued frame did not draw: the engine draws the rest of this movie
+			std::uint64_t lost = 0;           // queued frames that did not draw (logged as errors)
 		};
 
 		BinkState& Get()
@@ -187,16 +186,17 @@ namespace RenderGraph::Engine::Bink::Graph
 			return s_state;
 		}
 
-		/** @brief The tile program per framebuffer format, built off the render thread. */
+		/** @brief The tile program per framebuffer format: built at setup for the framebuffer's format, and when a resize changed it. */
 		ProgramCache<RasterProgram, rhi::Format>& Programs()
 		{
 			static ProgramCache<RasterProgram, rhi::Format> programs{ "Bink" };
 			return programs;
 		}
 
+		/** @brief The tile program for a_format, built on the calling thread when it is not built yet (logged); null only when it failed. */
 		std::shared_ptr<const RasterProgram> ProgramFor(rhi::Format a_format)
 		{
-			return Programs().Get(a_format, [&] {
+			return Programs().Require(a_format, [&] {
 				RasterProgram::Desc desc{};
 				desc.vertexSource = kShader;
 				desc.vertexEntry = L"VSMain";
@@ -393,8 +393,9 @@ namespace RenderGraph::Engine::Bink::Graph
 		}
 
 		/**
-		 * @brief The framebuffer as the draw's target. Made again only when the engine's back buffer changed (a resize): the client
-		 * is refreshed then and joins again; the engine draws until it has.
+		 * @brief The framebuffer as the draw's target, and its format's tile program, built here. Made again only when the engine's back
+		 * buffer changed (a resize): the client is refreshed then, a rebuild of the Present graph at the next build point between
+		 * frames, and the engine draws the ticks until it is built (logged).
 		 */
 		bool UpdateTarget(BinkState& a_state)
 		{
@@ -413,11 +414,12 @@ namespace RenderGraph::Engine::Bink::Graph
 			a_state.width = a_state.target->GetWidth();
 			a_state.height = a_state.target->GetHeight();
 			a_state.format = rhi::helpers::ToRHI(viewDesc.Format);
-			(void)ProgramFor(a_state.format);
 			logger::info("[ORG] Bink: drawing onto the framebuffer ({}x{}, DXGI format {})", a_state.width, a_state.height, static_cast<int>(viewDesc.Format));
+			if (!ProgramFor(a_state.format))
+				return false;
 			if (changed) {
 				// The draw declares the new target from the next build.
-				a_state.joined = false;
+				logger::info("[ORG] Bink: the framebuffer was made again (a resize); the Present graph is built again with it at the next build point");
 				FrameAnchors::Refresh(kClientId);
 			}
 			return true;
@@ -462,7 +464,7 @@ namespace RenderGraph::Engine::Bink::Graph
 		sampler.MaxLOD = D3D11_FLOAT32_MAX;
 		state.sampler = ShaderBindings::CreateSamplerFromD3D11(sampler);
 		if (!*state.atlas || !state.staging || !state.sampler || !UpdateTarget(state)) {
-			Fail(state, "its movie texture, staging, sampler or framebuffer could not be made");
+			Fail(state, "its movie texture, staging, sampler, framebuffer or tile program could not be made");
 			return;
 		}
 		// One client for the session: every movie draws through it, so a movie never rebuilds the graph.
@@ -471,7 +473,7 @@ namespace RenderGraph::Engine::Bink::Graph
 			return;
 		}
 		state.setUp = true;
-		logger::info("[ORG] Bink: on (CS_ORG_BINK); registered at the Present anchor for the session");
+		logger::info("[ORG] Bink: on (CS_ORG_BINK); registered at the Present anchor for the session, joined at setup's build point");
 	}
 
 	bool Begin()
@@ -488,25 +490,20 @@ namespace RenderGraph::Engine::Bink::Graph
 			return refuse("the graph path is not set up");
 		if (!RenderGraphRuntime::Get().IsActive())
 			return refuse("the render graph is not active");
-		// The frame queued last tick did not draw (its run did not submit with the passes): its tiles were withheld, so the engine
-		// draws the rest of this movie rather than miss another frame.
-		if (state.executed < state.queued && !state.missed) {
-			state.missed = true;
-			logger::warn("[ORG] Bink: a movie frame queued for the Present anchor did not draw; the engine draws the rest of this movie");
+		// A frame queued last tick that did not draw (its run did not submit with the passes) is an error, not a reason to stop: the
+		// next ticks draw on the graph as before.
+		if (state.executed < state.queued) {
+			state.lost += state.queued - state.executed;
+			logger::error("[ORG] Bink: a movie frame queued for the Present anchor did not draw ({} so far)", state.lost);
+			state.executed = state.queued;
 		}
-		if (state.missed)
-			return refuse("a frame of this movie did not draw on the graph");
 		state.pending.reset();
 		if (!UpdateTarget(state))
-			return refuse("the framebuffer cannot be imported");
-		if (!ProgramFor(state.format))
-			return refuse("the tile program is not built yet");
-		// Joined once the Present anchor's built graph holds the client; the build happens at the next build point (the frame's end in
-		// a blocking movie's loop). The engine draws meanwhile.
-		if (!state.joined && !(state.joined = FrameAnchors::RequestJoin(kClientId, FrameAnchors::Anchor::Present)))
-			return refuse("waiting for the Present anchor's graph to hold the client");
+			return refuse("the framebuffer cannot be imported, or its tile program cannot be made");
+		// The setup's build point put the client in the Present graph; outside it only after a resize, until the next build.
 		if (!FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::Present))
-			return refuse("the Present anchor cannot run this frame");
+			return refuse(FrameAnchors::InBuiltGraph(kClientId, FrameAnchors::Anchor::Present) ? "the Present anchor's ring is full this frame" :
+			                                                                                      "the framebuffer was made again (until the Present graph is built with it)");
 		return true;
 	}
 
@@ -591,7 +588,6 @@ namespace RenderGraph::Engine::Bink::Graph
 		state.uploaded = nullptr;
 		// The client stays registered for the next movie; the next movie starts from a clean count.
 		state.queued = state.committed = state.executed = 0;
-		state.missed = false;
 	}
 }
 

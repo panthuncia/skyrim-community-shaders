@@ -305,11 +305,19 @@ namespace
 		a_impl->failed = true;
 	}
 
-	/** @brief The copy program for a_format, made once per format (the D3D11 path compiles its shader on first use too). */
-	std::shared_ptr<const RasterProgram> CopyProgram(Impl& a_impl, rhi::Format a_format)
+	/** @brief The formats Upscaling::CreateHudlessTexture can give the hudless texture: its copy's targets, built at setup. */
+	constexpr std::array kHudlessFormats{ DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM };
+
+	/**
+	 * @brief The copy program for a_format: kMAIN's and the hudless formats are built at setup (a_atSetup); another one (a new
+	 * kMAIN format) is built at first sight and logged.
+	 */
+	std::shared_ptr<const RasterProgram> CopyProgram(Impl& a_impl, rhi::Format a_format, bool a_atSetup = false)
 	{
 		if (const auto found = a_impl.copyPrograms.find(a_format); found != a_impl.copyPrograms.end())
 			return found->second;
+		if (!a_atSetup)
+			logger::info("[ORG] Upscaling: the copy into format {} was not built at setup; building it now", static_cast<int>(a_format));
 		auto program = LoadCopyProgram(RenderGraphRuntime::Get().Host()->Device(), a_format);
 		if (program)
 			a_impl.copyPrograms.emplace(a_format, program);
@@ -508,9 +516,12 @@ bool ORGUpscaling::Setup()
 			next->underwaterProgram = LoadUnderwaterProgram(host->Device(), next->formats);
 		}
 		CurrentMain(next->inputs);
-		const auto mainProgram = next->inputs.main ? CopyProgram(*next, next->inputs.mainFormat) : nullptr;
-		if (!next->linearSampler || !next->latch || !next->upscaleGate || !next->hudlessGate || !mainProgram || !next->depthProgram ||
-			!next->underwaterProgram) {
+		const auto mainProgram = next->inputs.main ? CopyProgram(*next, next->inputs.mainFormat, true) : nullptr;
+		bool hudlessPrograms = true;
+		for (const auto format : kHudlessFormats)
+			hudlessPrograms &= CopyProgram(*next, rhi::helpers::ToRHI(format), true) != nullptr;
+		if (!next->linearSampler || !next->latch || !next->upscaleGate || !next->hudlessGate || !mainProgram || !hudlessPrograms ||
+			!next->depthProgram || !next->underwaterProgram) {
 			logger::warn("[ORG] Upscaling stays on D3D11: its sampler, latch, gates, programs or engine targets could not be made");
 			return false;
 		}
@@ -653,7 +664,8 @@ bool ORGUpscaling::QueueDepthUpscale(float2 a_jitter, float a_useWideKernel)
 	inputs.mainFormat = impl->inputs.mainFormat;
 	if (!(inputs == impl->inputs)) {
 		if (!(formats == impl->formats)) {
-			// New engine targets in other formats: the programs follow them.
+			// New engine targets in other formats: the programs follow them, built now.
+			logger::info("[ORG] Upscaling: the engine's depth upscale targets changed format; building their programs now");
 			auto* host = RenderGraphRuntime::Get().Host();
 			auto depthProgram = LoadDepthProgram(host->Device(), formats);
 			auto underwaterProgram = LoadUnderwaterProgram(host->Device(), formats);

@@ -1,6 +1,7 @@
 #include "RenderGraph/Engine/Scaleform/Scaleform.h"
 
 #include "Globals.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/Engine/Scaleform/Display.h"
 #include "RenderGraph/Engine/Scaleform/GRendererLayout.h"
 #include "RenderGraph/Engine/Scaleform/GfxTextures.h"
@@ -245,6 +246,7 @@ namespace RenderGraph::Engine::Scaleform
 			// D3D11 parts: whether the D3D11 renderer has begun the display, the render targets it has pushed (their draws are its),
 			// a filter it is drawing, and the display's fate so far.
 			bool d3d11Begun = false;
+			bool retargeted = false;  // the part since the last segment pushed a render target (ResumeAfterD3D11 checks the target)
 			std::uint32_t targetDepth = 0;
 			bool inFilter = false;
 			std::uint32_t d3d11Parts = 0;
@@ -276,6 +278,34 @@ namespace RenderGraph::Engine::Scaleform
 			ReplayScope(const ReplayScope&) = delete;
 			ReplayScope& operator=(const ReplayScope&) = delete;
 		};
+
+		// What the D3D11 renderer draws on purpose, for the flush latch (Flush::EngineDraws; flush.md, "Allowed engine draws").
+		/** @brief A whole display the graph does not take (BeginDisplay's refusals, another thread's display). */
+		const Flush::Reason& WholeReason()
+		{
+			static const Flush::Reason s_reason{ "scaleform: display not taken" };
+			return s_reason;
+		}
+
+		/** @brief A D3D11 part of a captured display: a call the graph does not take, a render target, a filter, the rest of a display. */
+		const Flush::Reason& PartReason()
+		{
+			static const Flush::Reason s_reason{ "scaleform: D3D11 part" };
+			return s_reason;
+		}
+
+		/** @brief A segment the graph refused or did not draw, replayed into the D3D11 renderer. */
+		const Flush::Reason& ReplayReason()
+		{
+			static const Flush::Reason s_reason{ "scaleform: segment replayed" };
+			return s_reason;
+		}
+
+		/** @brief The reason of a draw that reaches the D3D11 renderer outside a capture: a part of a captured display, or a whole one. */
+		const Flush::Reason& DeclinedReason()
+		{
+			return Current().active && FrameAnchors::IsRenderOwner() ? PartReason() : WholeReason();
+		}
 
 		void Keep(const Kept& a_call)
 		{
@@ -479,6 +509,7 @@ namespace RenderGraph::Engine::Scaleform
 			auto& capture = Current();
 			if (!capture.d3d11Begun) {
 				const ReplayScope scope;
+				const Flush::EngineDraws engine(PartReason());
 				const float* world = Field<const float*>(a_renderer, Layout::kWorld3D);
 				const std::uint32_t none = 0;
 				Original<BeginDisplayFn>(kBeginDisplay)(a_renderer, &none, &capture.viewport, capture.frame[0], capture.frame[1], capture.frame[2], capture.frame[3]);
@@ -507,6 +538,7 @@ namespace RenderGraph::Engine::Scaleform
 			}
 			{
 				const ReplayScope scope;
+				const Flush::EngineDraws engine(ReplayReason());
 				for (const auto& call : capture.kept)
 					Run(a_renderer, call);
 			}
@@ -599,18 +631,31 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		/**
+		 * @brief The texture of the render target the D3D11 renderer binds after its render target stack unwound (PopRenderTarget binds
+		 * the current render target's RTV, +0x740 then +0x50), from its own bookkeeping; null when it has none.
+		 */
+		ID3D11Resource* RendererTarget(void* a_renderer)
+		{
+			auto* target = Field<std::byte*>(a_renderer, Layout::kRenderTarget);
+			auto* rtv = target ? *reinterpret_cast<ID3D11RenderTargetView**>(target + Layout::kRenderTargetRtv) : nullptr;
+			if (!rtv)
+				return nullptr;
+			winrt::com_ptr<ID3D11Resource> resource;
+			Tripwire::Unwrap(rtv)->GetResource(resource.put());
+			return resource.get();  // the target keeps its own reference
+		}
+
+		/**
 		 * @brief The capture goes on after a D3D11 part, onto the target it began on. When the D3D11 renderer left another target
 		 * bound (its render target stack restores the display render target it was given), the rest of the display is D3D11's.
 		 */
 		void ResumeAfterD3D11(void* a_renderer)
 		{
 			auto& capture = Current();
-			winrt::com_ptr<ID3D11RenderTargetView> rtv;
-			globals::d3d::context->OMGetRenderTargets(1, rtv.put(), nullptr);
-			winrt::com_ptr<ID3D11Resource> resource;
-			if (rtv)
-				rtv->GetResource(resource.put());
-			if (resource.get() != static_cast<ID3D11Resource*>(capture.display.target)) {
+			// Only a part that pushed a render target (one of GFx's, a filter's) can leave another bound: the renderer's pop binds its
+			// current render target's view, read from its own bookkeeping (D3D11's state is stale under the flush latch).
+			const bool retargeted = std::exchange(capture.retargeted, false);
+			if (retargeted && RendererTarget(a_renderer) != static_cast<ID3D11Resource*>(capture.display.target)) {
 				EndCapture("another render target bound after a D3D11 part (the rest of the display)");
 				return;
 			}
@@ -634,6 +679,7 @@ namespace RenderGraph::Engine::Scaleform
 			{
 				// Its bytes stay until the next segment starts.
 				const ReplayScope scope;
+				const Flush::EngineDraws engine(PartReason());
 				Run(a_renderer, call);
 			}
 			ResumeAfterD3D11(a_renderer);
@@ -911,14 +957,25 @@ namespace RenderGraph::Engine::Scaleform
 			out[5] = m[5] * u[4] + m2 * u[3] + u[5];
 		}
 
-		/** @brief Render target 0 and the depth-stencil bound now, from DXVK's context (DXVK's objects, whatever the engine holds). */
+		/**
+		 * @brief Render target 0 and the depth-stencil UI::DrawInterface bound, from the engine's shadow state (its render target and
+		 * depth-stencil indices, as its ApplyState bound them), never from D3D11: under the flush latch the context's state is stale.
+		 * The objects are DXVK's, whatever the engine's tables hold.
+		 */
 		bool ReadTargets(Display& a_display)
 		{
-			winrt::com_ptr<ID3D11RenderTargetView> rtv;
-			winrt::com_ptr<ID3D11DepthStencilView> dsv;
-			globals::d3d::context->OMGetRenderTargets(1, rtv.put(), dsv.put());
+			auto* renderer = globals::game::renderer;
+			auto* shadow = globals::game::shadowState;
+			if (!renderer || !shadow)
+				return false;
+			const auto& rss = shadow->GetRuntimeData();
+			const auto index = static_cast<std::uint32_t>(rss.renderTargets[0]);
+			if (index >= static_cast<std::uint32_t>(RE::RENDER_TARGET::kTOTAL))
+				return false;
+			auto* rtv = renderer->GetRuntimeData().renderTargets[index].RTV;
 			if (!rtv)
 				return false;
+			rtv = Tripwire::Unwrap(rtv);
 			winrt::com_ptr<ID3D11Resource> resource;
 			rtv->GetResource(resource.put());
 			auto texture = resource.try_as<ID3D11Texture2D>();
@@ -928,14 +985,15 @@ namespace RenderGraph::Engine::Scaleform
 			rtv->GetDesc(&rtvDesc);
 			a_display.target = texture.detach();
 			a_display.targetFormat = rtvDesc.Format;
-			if (dsv) {
-				winrt::com_ptr<ID3D11Resource> depthResource;
-				dsv->GetResource(depthResource.put());
-				if (auto depth = depthResource.try_as<ID3D11Texture2D>()) {
-					D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
-					dsv->GetDesc(&dsvDesc);
-					a_display.depth = depth.detach();
-					a_display.depthFormat = dsvDesc.Format;
+			if (rss.depthStencil < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL)) {
+				const auto& depth = renderer->GetDepthStencilData().depthStencils[rss.depthStencil];
+				if (depth.texture) {
+					auto* raw = Tripwire::Unwrap(depth.texture);
+					raw->AddRef();
+					a_display.depth = raw;
+					D3D11_TEXTURE2D_DESC desc{};
+					raw->GetDesc(&desc);
+					a_display.depthFormat = desc.Format;
 				}
 			}
 			return true;
@@ -979,6 +1037,7 @@ namespace RenderGraph::Engine::Scaleform
 			// The capture is the render owner's: another thread's display neither reads nor ends it.
 			if (!FrameAnchors::IsRenderOwner()) {
 				CountD3D11("a whole display off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1)");
+				const Flush::EngineDraws engine(WholeReason());
 				original(a_renderer, a_background, a_viewport, a_x0, a_x1, a_y0, a_y1);
 				return;
 			}
@@ -986,13 +1045,14 @@ namespace RenderGraph::Engine::Scaleform
 				EndDangling(a_renderer);
 			const char* reason = nullptr;
 			if (!Passes::Ready())
-				reason = "a whole display before the render graph is up";
+				reason = "a whole display while the graph path is off (not set up, or failed)";
 			else if (!VideoModeSet(a_renderer))
 				reason = "a whole display without a video mode";
 			else if (a_viewport->flags & kViewportRenderTexture)
 				reason = "a whole display into a render texture of GFx's (graph displays read it after)";
 			if (reason) {
 				CountD3D11(reason);
+				const Flush::EngineDraws engine(WholeReason());
 				original(a_renderer, a_background, a_viewport, a_x0, a_x1, a_y0, a_y1);
 				return;
 			}
@@ -1001,11 +1061,13 @@ namespace RenderGraph::Engine::Scaleform
 			if (!ReadTargets(capture.display)) {
 				capture.display.Reset();
 				CountD3D11("a whole display with no render target bound");
+				const Flush::EngineDraws engine(WholeReason());
 				original(a_renderer, a_background, a_viewport, a_x0, a_x1, a_y0, a_y1);
 				return;
 			}
 			capture.active = true;
 			capture.d3d11Begun = false;
+			capture.retargeted = false;
 			capture.d3d11Parts = 0;
 			capture.graphSegments = 0;
 			capture.draws = 0;
@@ -1097,6 +1159,7 @@ namespace RenderGraph::Engine::Scaleform
 			if (Capturing()) {
 				BeginD3D11Part(a_renderer, a_reason);
 				capture.targetDepth = 1;
+				capture.retargeted = true;
 			} else if (capture.active && capture.targetDepth && !capture.inFilter && FrameAnchors::IsRenderOwner()) {
 				++capture.targetDepth;
 			}
@@ -1127,11 +1190,17 @@ namespace RenderGraph::Engine::Scaleform
 		void Filter(void* a_renderer, const char* a_reason, Fn&& a_draw)
 		{
 			auto& capture = Current();
-			if (!Capturing())
+			if (!Capturing()) {
+				const Flush::EngineDraws engine(DeclinedReason());
 				return a_draw();
+			}
 			BeginD3D11Part(a_renderer, a_reason);
 			capture.inFilter = true;
-			a_draw();
+			capture.retargeted = true;
+			{
+				const Flush::EngineDraws scope(PartReason());
+				a_draw();
+			}
 			capture.inFilter = false;
 			ResumeAfterD3D11(a_renderer);
 		}
@@ -1319,8 +1388,10 @@ namespace RenderGraph::Engine::Scaleform
 
 		void DrawIndexedTriList(void* a_renderer, std::int32_t a_base, std::int32_t a_min, std::int32_t a_count, std::int32_t a_start, std::int32_t a_triangles)
 		{
-			if (!Capturing())
+			if (!Capturing()) {
+				const Flush::EngineDraws engine(DeclinedReason());
 				return Original<DrawTrianglesFn>(kDrawIndexedTriList)(a_renderer, a_base, a_min, a_count, a_start, a_triangles);
+			}
 			Keep({ .slot = kDrawIndexedTriList, .args = { a_base, a_min, a_count, a_start, a_triangles } });
 			// The renderer's own early outs: nothing drawn.
 			if (!VideoModeSet(a_renderer) || !Field<const void*>(a_renderer, Layout::kVertexData) || !Field<const void*>(a_renderer, Layout::kIndexData) ||
@@ -1376,8 +1447,10 @@ namespace RenderGraph::Engine::Scaleform
 
 		void DrawLineStrip(void* a_renderer, std::int32_t a_base, std::int32_t a_lines)
 		{
-			if (!Capturing())
+			if (!Capturing()) {
+				const Flush::EngineDraws engine(DeclinedReason());
 				return Original<DrawLinesFn>(kDrawLineStrip)(a_renderer, a_base, a_lines);
+			}
 			Keep({ .slot = kDrawLineStrip, .args = { a_base, a_lines } });
 			if (!VideoModeSet(a_renderer) || !Field<const void*>(a_renderer, Layout::kVertexData))
 				return;
@@ -1387,8 +1460,10 @@ namespace RenderGraph::Engine::Scaleform
 		void DrawBitmaps(void* a_renderer, const BitmapDesc* a_bitmaps, std::int32_t a_listSize, std::int32_t a_start, std::int32_t a_count, RE::GTexture* a_texture,
 			const float* a_matrix, void* a_cache)
 		{
-			if (!Capturing())
+			if (!Capturing()) {
+				const Flush::EngineDraws engine(DeclinedReason());
 				return Original<DrawBitmapsFn>(kDrawBitmaps)(a_renderer, a_bitmaps, a_listSize, a_start, a_count, a_texture, a_matrix, a_cache);
+			}
 			if (!VideoModeSet(a_renderer) || !a_bitmaps || !a_texture || a_count <= 0)
 				return;  // the renderer draws nothing (and its state changes are the next draw's anyway)
 			// The matrix and the bitmaps kept, for a replay.
@@ -1580,6 +1655,12 @@ namespace RenderGraph::Engine::Scaleform
 	bool Requested()
 	{
 		return Switches::On("CS_ORG_SCALEFORM");
+	}
+
+	void Setup()
+	{
+		if (Requested())
+			Passes::Setup();
 	}
 
 	void Install()

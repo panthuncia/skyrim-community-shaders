@@ -4,6 +4,7 @@
 #include "Features/ScreenshotFeature.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Bink/BinkGraph.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #include "RenderGraph/Engine/MainTick.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -65,10 +66,9 @@ namespace RenderGraph::Engine::Bink
 		/**
 		 * @brief A blocking movie's tick on a thread that does not own rendering yet: the startup logo's first tick, on the MoviePlayer
 		 * thread. With CS_ORG_LOADING_THREAD=1 that thread takes rendering at the tick's Renderer::Begin, after Eligible would have
-		 * found it not the render owner, and the Present anchor's graph is built for the joining client only at that frame's end: the
-		 * logo's first frame was the engine's. The thread holds Renderer::Lock for the whole sequence, so no other thread renders until
-		 * it ends: the claim Begin makes is made at the tick's start instead, and the graph the client waits for is built now, between
-		 * frames, as at a frame's end (FrameAnchors::OnFrameEnd). Once per ownership change: the next ticks own rendering already.
+		 * found it not the render owner, so the logo's first frame was the engine's. The thread holds Renderer::Lock for the whole
+		 * sequence, so no other thread renders until it ends: the claim Begin makes is made at the tick's start instead. The client
+		 * is in the Present graph since setup's build point, so nothing is built here. Once per ownership change.
 		 */
 		void ClaimForBlockingTick(std::uintptr_t a_player)
 		{
@@ -77,7 +77,6 @@ namespace RenderGraph::Engine::Bink
 			if (Read<std::uint32_t>(reinterpret_cast<const void*>(a_player), kPlayerMode) != kModeBlocking || !HoldsRendererLock())
 				return;
 			FrameAnchors::ClaimRenderOwnership();
-			FrameAnchors::OnFrameEnd();
 			logger::info("[ORG] Bink: a blocking movie on thread {} under Renderer::Lock takes rendering at its tick's start{}", ::GetCurrentThreadId(),
 				FrameAnchors::IsRenderOwner() ? "" : " (the claim did not take: the engine draws this tick)");
 		}
@@ -312,6 +311,10 @@ namespace RenderGraph::Engine::Bink
 					return;
 				}
 				EngineDrew(a_set);
+				// The engine's draw on purpose (a tick the graph does not take): the flush latch lets it through (flush.md, "Allowed
+				// engine draws").
+				static const Flush::Reason kReason{ "bink: tick not taken" };
+				const Flush::EngineDraws scope(kReason);
 				func(a_set);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;

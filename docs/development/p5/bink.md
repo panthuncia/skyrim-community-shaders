@@ -111,6 +111,36 @@ DXIL (push block 32 bytes).
 - **Mode 2** (`TickInFrame`, players set up by 87915 / 0x1410a2a50 and 87919 / 0x1410a2dc0) draws inside the caller's frame and does not
   present.
 
+## The primary path (2026-11-11, `org-port/primary-ui`)
+
+With `CS_ORG_BINK=1` the graph is the only path for the ticks it takes (primary-path.md).
+
+- **The tile program is built at setup**, synchronously, for the framebuffer's format (`ProgramCache::Require` in `UpdateTarget`).
+  If a resize changes the format, the new program is built at the first tick that sees it. A tick never waits for a program.
+- **The client joins at setup.** It is registered at `Bink::Setup` (from `Engine::Setup`). `Engine::PostSetup` (from `State::Setup`, after the features' `SetupResources`) runs the setup's build point,
+`FrameAnchors::BuildPending`: every client registered so far is in its anchors' graphs before the first frame. Log:
+`[ORG] frame anchors: graphs built at CS's setup; every registered client is in its anchors' graphs`.
+  The startup logo plays after that, so its first tick finds the client in the Present graph.
+- **Deleted:** the `joined` flag and the per-tick `RequestJoin`, `the tile program is not built yet`, the `missed` latch (a
+  missed frame no longer hands the rest of the movie to the engine), and the build `ClaimForBlockingTick` made at the logo's
+  first tick (`OnFrameEnd`). The claim of rendering at that tick's start stays: it is ownership, not readiness.
+- **A queued frame that did not draw** (its run did not submit with the passes) is an error: `[ORG] Bink: a movie frame queued
+  for the Present anchor did not draw (N so far)`. The next ticks draw on the graph.
+- **Staging:** one block per frame in flight plus the one the decoder fills (5), so a tick finds one in normal play.
+- **The flush latch:** the engine's `DrawTiles` on a tick the graph does not take runs in `Flush::EngineDraws` (`bink: tick not
+  taken`).
+- **Rebuild trigger:** a new back buffer (a resize) refreshes the client once. The Present graph is built at the next build point
+  between frames, and the ticks until then are the engine's (`the framebuffer was made again`).
+
+### What stays the engine's
+
+- Movies in player mode 2 (drawn inside another frame), and ticks off the render owner (the logo without
+  `CS_ORG_LOADING_THREAD=1`).
+- HDR output on for the frame (the movie goes to HDR's UI texture).
+- A movie larger than the 2048x1152 movie texture, and a tile set whose layout is not the expected one.
+- The framebuffer that cannot be imported, the Present anchor's ring full this frame, no staging block to take, and the ticks
+  between a resize and the next build.
+
 ## Design
 
 ### The path
@@ -130,15 +160,15 @@ The seam is one call in `Hooks::Install` (`src/Hooks.cpp`): `RenderGraph::Engine
 the Present anchor. With the switch off and no `CS_ORG_BINK_SHOT`, nothing is hooked.
 
 A tick is a graph tick when the switch is on, the player is in mode 1, the tick runs on the render owner
-(`FrameAnchors::IsRenderOwner`), HDR output is off for the frame, the client is in the Present anchor's built graph
-(`FrameAnchors::RequestJoin`) and the anchor can run this frame (`FrameAnchors::CanRun`), the framebuffer is imported, the
-program for its format is built (`ProgramCache`), the movie fits the movie texture, and no frame of this movie failed to draw.
+(`FrameAnchors::IsRenderOwner`), HDR output is off for the frame, the anchor can run this frame (`FrameAnchors::CanRun`: the
+client is in the Present graph since setup's build point, and the ring has room), the framebuffer is imported, and the movie fits
+the movie texture.
 
 The ORG side (`BinkGraph.cpp`), the same shape as ImGui's backend (`ImGuiBasicRHI.cpp`):
 
 - **One client for the session**, registered at `State::Setup` (`Bink::Setup`, from `Engine::Setup`): a movie never registers,
   unregisters or refreshes anything. The framebuffer is `FrameAnchors::EngineTarget(kFRAMEBUFFER)`; a new back buffer (a
-  resize) refreshes the client once, and ticks are the engine's until it has joined again.
+  resize) refreshes the client once, and ticks are the engine's until the next build point has built it.
 - **The movie texture:** one persistent graph texture (`Bink::Movie`, 2048x1152 R8G8B8A8_UNORM, 9 MB) that holds the whole
   video, each tile at its place in it. A 1920x1080 movie's tiles reach 1920x1088; a larger movie keeps the engine's path. The
   graph orders its uses (no hand-written barriers). Linear filtering at a tile's edge now reads the neighbouring tile's
@@ -164,8 +194,7 @@ draw lands in the frame that Present shows, under CS's overlay and HDR output.
   epoch fails (`onFailed`): logged once (`[ORG] Bink: <why>; the engine draws Bink from now on`), and every later tick is the
   engine's.
 - A queued frame whose run did not submit with the passes (no `executed` signal; only an epoch failure after `CanRun` allowed
-  it): the rest of that movie is the engine's (`a movie frame queued for the Present anchor did not draw`). At most that one
-  frame is lost; the next movie tries the graph again.
+  it): logged as an error, and that frame is lost. The next ticks stay on the graph.
 - A tile set whose layout is not the expected one (bytes per pixel, tile count): logged, that movie stays the engine's.
 
 ### Threads, and what P5.12 needs
@@ -257,8 +286,8 @@ the two points. It happens once per ownership change; the next ticks own renderi
 `[ORG] Bink: a blocking movie on thread N under Renderer::Lock takes rendering at its tick's start`.
 
 Expected: `a 1920x1080 movie ended: 166 frames drawn by the render graph, 0 by the engine` in `loading-org1.env` and the p5-all runs,
-and no `a movie plays on thread N, not the render thread` line. If the tile program is still building at the logo's first frame,
-that frame stays the engine's (`the tile program is not built yet`).
+and no `a movie plays on thread N, not the render thread` line. Since the primary path the claim no longer builds at the tick: the
+client and the tile program are ready from setup ("The primary path").
 
 ## Open points
 

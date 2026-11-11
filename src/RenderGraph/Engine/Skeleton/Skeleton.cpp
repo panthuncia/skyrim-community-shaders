@@ -211,7 +211,6 @@ namespace RenderGraph::Engine::Skeleton
 			std::vector<Pending> pending;
 			std::uint32_t generation = 0;
 			bool registered = false;  // a registration is live
-			bool joined = false;      // the anchor's built graph holds it (FrameAnchors::RequestJoin)
 			bool stale = false;       // a view's texture was made again: registered again at the next flush with nothing pending
 			bool executed = false;    // the current run's executed signal
 			bool failed = false;      // stays on D3D11 for the session
@@ -225,7 +224,6 @@ namespace RenderGraph::Engine::Skeleton
 			const void* sourceTexture = nullptr;
 			const void* targetTexture = nullptr;
 			bool registered = false;
-			bool joined = false;
 			bool wanted = false;
 			bool executed = false;
 			bool failed = false;
@@ -445,6 +443,19 @@ namespace RenderGraph::Engine::Skeleton
 				logger::info("[ORG] engine skeleton: {} stays on D3D11 ({})", TargetName(a_target), a_reason);
 		}
 
+		/**
+		 * @brief A run that did not draw what it took (no executed signal): an error, logged once per kind of work and status, not a
+		 * readiness state. The caller makes the engine's calls for that run.
+		 */
+		void FailedRun(const char* a_what, FrameAnchors::RunStatus a_status)
+		{
+			static std::set<std::pair<std::string, int>> logged;
+			if (!logged.emplace(a_what, static_cast<int>(a_status)).second)
+				return;
+			logger::error("[ORG] engine skeleton: a run of {} did not execute (run status {}); the engine's calls were made for it", a_what,
+				static_cast<int>(a_status));
+		}
+
 		/** @brief The view's format and its array slice, from its D3D11 description; false when it is not one mip-0 slice. */
 		bool ViewShape(ID3D11View* a_view, bool a_depth, DXGI_FORMAT& a_format, std::uint32_t& a_slice)
 		{
@@ -582,7 +593,6 @@ namespace RenderGraph::Engine::Skeleton
 			}
 			group.specs.clear();
 			group.stale = false;
-			group.joined = false;
 			if (made.empty()) {
 				if (std::exchange(group.registered, false))
 					FrameAnchors::Unregister(kGroupIds[index]);
@@ -664,10 +674,9 @@ namespace RenderGraph::Engine::Skeleton
 					logger::info("[ORG] engine skeleton: {} was made again; the {} clears register again", TargetName(a_target), kGroupNames[IndexOf(a_group)]);
 				return nullptr;
 			}
-			const auto anchor = kGroupAnchors[IndexOf(a_group)];
-			if (!group.joined && !(group.joined = FrameAnchors::RequestJoin(kGroupIds[IndexOf(a_group)], anchor)))
-				return nullptr;
-			if (!FrameAnchors::CanRun(kGroupIds[IndexOf(a_group)], anchor))
+			// Setup's build point put the group in its anchor's graph. CanRun is false only on a full ring (an inherent limit) or between
+			// a re-registration after a resize and the next build point.
+			if (!FrameAnchors::CanRun(kGroupIds[IndexOf(a_group)], kGroupAnchors[IndexOf(a_group)]))
 				return nullptr;
 			for (const auto& draw : spec.draws)
 				if (draw.flags == a_flags)
@@ -712,7 +721,6 @@ namespace RenderGraph::Engine::Skeleton
 		{
 			auto& copy = Skel().copy;
 			auto* renderer = globals::game::renderer;
-			copy.joined = false;
 			if (!renderer)
 				return;
 			const auto& depths = renderer->GetDepthStencilData().depthStencils;
@@ -766,8 +774,6 @@ namespace RenderGraph::Engine::Skeleton
 			}
 			if (!copy.registered)
 				return false;
-			if (!copy.joined && !(copy.joined = FrameAnchors::RequestJoin(kCopyId, Anchor::EngineDepthCopy)))
-				return false;
 			if (!FrameAnchors::CanRun(kCopyId, Anchor::EngineDepthCopy))
 				return false;
 			copy.wanted = true;
@@ -781,6 +787,8 @@ namespace RenderGraph::Engine::Skeleton
 			const bool done = result && copy.executed;
 			if (done && !std::exchange(copy.announced, true))
 				logger::info("[ORG] engine skeleton: the main depth is copied into kPOST_ZPREPASS_COPY on the graph");
+			if (!done)
+				FailedRun("the depth copy", result.status);
 			return done;
 		}
 	}
@@ -876,13 +884,15 @@ namespace RenderGraph::Engine::Skeleton
 				auto& group = state.groups[i];
 				if (!group.pending.empty()) {
 					bool done = false;
+					auto status = FrameAnchors::RunStatus::Failed;
 					if (!group.failed) {
 						group.executed = false;
 						state.flushing = true;
 						const auto result = FrameAnchors::Run(kGroupAnchors[i]);
 						state.flushing = false;
-						// The executed signal says the run's graph held this registration's passes; without it (a failed run, a full
-						// ring) the engine's clears are made here, in their order.
+						status = result.status;
+						// The executed signal says the run's graph held this registration's passes. Without it the run failed (an error,
+						// logged): the engine's clears are made here, in their order, so the frame stays whole.
 						done = result && group.executed;
 					}
 					if (done) {
@@ -891,6 +901,7 @@ namespace RenderGraph::Engine::Skeleton
 							logger::info("[ORG] engine skeleton: the first {} clears ran on the graph ({} anchor)", kGroupNames[i], FrameAnchors::Name(kGroupAnchors[i]));
 					} else {
 						group.replayed += group.pending.size();
+						FailedRun(kGroupNames[i], status);
 						Replay(a_context, group.pending);
 					}
 					group.pending.clear();

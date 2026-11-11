@@ -137,6 +137,19 @@ namespace RenderGraph
 			return entry->program.load(std::memory_order_acquire);
 		}
 
+		/**
+		 * @brief GetNow for the primary path's last resort (docs/development/p5/primary-path.md, rule 2): a key setup did not
+		 * queue is built on the calling thread and logged, so missing enumerations are found. Render thread.
+		 */
+		std::shared_ptr<const Program> Require(const Key& a_key, const std::function<Desc()>& a_describe)
+		{
+			bool builtHere = false;
+			auto program = GetNow(a_key, a_describe, &builtHere);
+			if (builtHere && program)
+				logger::info("[ORG] {} programs: a program was built on the render thread at its first use (not queued at setup)", name);
+			return program;
+		}
+
 		/** @brief Where the key is: Missing, Building, Ready or Failed. */
 		ProgramStatus StatusOf(const Key& a_key) const
 		{

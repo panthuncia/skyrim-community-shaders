@@ -52,6 +52,20 @@ From the 2026-11-11 survey of `org-port/p5`:
 
 `RunGate` stays: it keeps recordings stable across runs and is not a readiness device.
 
+## The UI lane (`org-port/primary-ui`)
+
+Scaleform, Bink, the frame skeleton and the loading thread follow the rules above (scaleform.md, bink.md, skeleton.md and
+loading-screen.md, each under "The primary path"). Shared pieces:
+
+- **Setup's build point.** `Engine::PostSetup` runs from `State::Setup` after the features' `SetupResources`. It sets Scaleform up,
+  then calls `FrameAnchors::BuildPending`, which builds every graph a registered client waits to join, between frames on the
+  render owner. That is how rule 3's "in the anchor's graph before the first frame that needs it" is met, without `RequestJoin`.
+- **`ProgramCache::Require`.** It returns the key's program, built on the calling thread when the build thread has not finished
+  it (logged: `built on the render thread at its first use`). It is rule 2's last resort. `Get` stays for queueing at setup.
+- **What is still a rebuild trigger:** a resize, or HDR rebuilding its UI texture. Scaleform's role surface, Bink's framebuffer
+  and the skeleton's groups register once again, and the next build point between frames builds them. The work in between stays
+  the engine's.
+
 ## Proven ports
 
 The ports that matched their D3D11 runs (org-full-port.md, Status): the frame skeleton, engine constants, the sky's main
@@ -66,3 +80,32 @@ loading thread. Not yet proven, so they keep their current switches and logic un
   store and registered once at Setup; programs are queued at Setup and taken at the first graph build (`ProgramCache::GetNow`). A
   shape outside the manifest is refused for the session and registered from the next one: a graph change in play would need an
   asynchronous anchor build, which FrameAnchors does not have.
+
+## Phase 3 ports: programs at setup
+
+The Phase 3 feature ports (`src/Features/*/ORG*.cpp`, not Drawcall Limit Fix) keep their whole-feature fallback at setup. Their
+programs, audited 2026-11-11 (`org-port/primary-ui`):
+
+- **Built at setup already:** Cloud Shadows, Dynamic Cubemaps (all three reflection variants), Exponential Height Fog (near and far,
+  with and without group reduce), Grass Collision, HDR Display, IBL, LLF light culling and local shadows, Skylighting, Subsurface
+  Scattering (all five), Terrain Blending, Terrain Shadows, Volumetric Shadows, Screenshot (no program).
+- **Screen Space Shadows:** the raymarch's `SAMPLE_COUNT` follows the multiplier (1-4) and the render size. Setup builds every count
+  of each multiplier at the full and the current dynamic size (up to 8). A count outside that set (a dynamic scale seen later) is
+  built at first sight: `Screen Space Shadows: the N-sample program was not built at setup`. A count change still makes the
+  passes again (one graph rebuild, on a settings or render-size change only).
+- **Screen Space GI:** the current settings' programs are built at setup; every other configuration's (resolution mode x GI x
+  specular x temporal: 24 define sets, 160 programs) is queued on the program build thread (`ProgramCache`). A settings change takes
+  them from there, or builds the missing ones on the render thread: `Screen Space GI: ... was not prebuilt yet`. A settings change
+  is a new chain registration, as before.
+- **Effects11 rays:** the seven programs are built at setup for kMAIN's format (they were built at the first frame). Another
+  format (kMAIN made again) is built at first sight: `Effects11 rays: ... was not built at setup`.
+- **Upscaling:** kMAIN's copy, the depth upscale programs and the hudless copy for the three formats `CreateHudlessTexture` can
+  choose are built at setup. A new engine target format is built at first sight and logged.
+- **Post Processing:** its programs are built with the chain, synchronously, at the first Tonemap run and at a settings change that
+  makes the chain again (a graph rebuild in itself). The chain's shape (kMAIN's size and formats, the effects' settings) is known
+  only there, and enumerating every effect's permutations (Color Grading's tonemap function, DoF's ring count, Lens Flare's and
+  Physical Glare's FFT sizes) is not done. A program first needed after the first chain is logged: `Post Processing: ... is new to
+  this session`. The frame never runs on D3D11 because a program is building.
+
+Shader reloads from the menu (`ClearShaderCache`, `recompileFlag`) build programs again on the render thread, as their D3D11 paths
+do: a user action, not a readiness state.

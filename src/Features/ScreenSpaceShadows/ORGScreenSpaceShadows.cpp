@@ -18,6 +18,7 @@
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/Switches.h"
 #	include "RenderGraph/UavClearPass.h"
+#	include "Utils/Game.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
@@ -26,6 +27,8 @@
 #	include <Resources/ExternalTextureResource.h>
 
 #	include <cstddef>
+#	include <map>
+#	include <set>
 
 namespace
 {
@@ -60,6 +63,9 @@ namespace
 		std::uint32_t sampleCount = 0;
 	};
 
+	/** @brief The raymarch programs by sample count. */
+	using ProgramSet = std::map<std::uint32_t, std::shared_ptr<const Program>>;
+
 	/** @brief The depth the raymarch reads: an import, or Terrain Blending's published blended depth by its id. */
 	struct DepthSource
 	{
@@ -75,6 +81,7 @@ namespace
 	struct ShadowState
 	{
 		std::shared_ptr<const Program> program;
+		ProgramSet programs;  // built at setup; a count outside it is added at first sight
 		std::unique_ptr<GraphResources::Texture2D> output;
 		std::shared_ptr<org::LatchBlock> latch;
 		std::shared_ptr<RenderGraph::RunGate> gate;
@@ -93,6 +100,23 @@ namespace
 		program->sampleCount = a_sampleCount;
 		program->compute = ComputeProgram::Load(a_device, { .source = kShader, .constantWords = ShaderBindings::Words<RaymarchBlock>(), .defines = defines });
 		return program->compute ? program : nullptr;
+	}
+
+	/**
+	 * @brief Every sample count the settings can ask for at the screen size: each multiplier (1-4) at the full render size and
+	 * at the dynamic one now. A dynamic size seen later can ask for another; ProgramFor builds that one at first sight.
+	 */
+	std::set<std::uint32_t> SettingsSampleCounts()
+	{
+		const auto* graphics = globals::game::graphicsState;
+		const float2 full{ static_cast<float>(graphics->screenWidth), static_cast<float>(graphics->screenHeight) };
+		const float2 dynamic = Util::ConvertToDynamic(full);
+		std::set<std::uint32_t> counts;
+		for (std::uint32_t multiplier = 1; multiplier <= 4; ++multiplier) {
+			counts.insert(ScreenSpaceShadows::ScaleSampleCount(multiplier, full));
+			counts.insert(ScreenSpaceShadows::ScaleSampleCount(multiplier, dynamic));
+		}
+		return counts;
 	}
 
 	/**
@@ -186,6 +210,18 @@ namespace
 		std::shared_ptr<org::Resource> output;
 	};
 
+	/** @brief a_sampleCount's program: from the set built at setup, else built now (logged) and kept. Null when it fails. */
+	std::shared_ptr<const Program> ProgramFor(ShadowState& a_state, std::uint32_t a_sampleCount)
+	{
+		if (const auto found = a_state.programs.find(a_sampleCount); found != a_state.programs.end())
+			return found->second;
+		logger::info("[ORG] Screen Space Shadows: the {}-sample program was not built at setup; building it now", a_sampleCount);
+		auto program = LoadProgram(RenderGraphRuntime::Get().Host()->Device(), a_sampleCount);
+		if (program)
+			a_state.programs.emplace(a_sampleCount, program);
+		return program;
+	}
+
 	/** @brief Drops the import of Terrain Blending's D3D11 blended depth when the raymarch stops reading it. */
 	void ReleaseBlendImport(const DepthSource& a_previous, const DepthSource& a_next)
 	{
@@ -234,7 +270,16 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::funct
 	try {
 		auto state = std::make_shared<ShadowState>();
 		state->onFailed = std::move(a_onFailed);
-		state->program = LoadProgram(host->Device(), globals::features::screenSpaceShadows.GetScaledSampleCount());
+		// Every sample count the settings can ask for at this size, so a settings change or the upscaler's scale finds its program.
+		for (const auto count : SettingsSampleCounts()) {
+			auto program = LoadProgram(host->Device(), count);
+			if (!program) {
+				logger::warn("[ORG] Screen Space Shadows stays on D3D11: the {}-sample program could not be made", count);
+				return false;
+			}
+			state->programs.emplace(count, std::move(program));
+		}
+		state->program = ProgramFor(*state, globals::features::screenSpaceShadows.GetScaledSampleCount());
 		// The D3D11 sampler's: point, border white (beyond the screen is far depth, no shadow).
 		state->sampler = ShaderBindings::CreateSampler({ .minFilter = rhi::Filter::Nearest,
 			.magFilter = rhi::Filter::Nearest,
@@ -306,8 +351,8 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::funct
 		}
 		impl = std::make_unique<Impl>();
 		impl->state = std::move(state);
-		logger::info("[ORG] Screen Space Shadows runs on the render graph ({}x{}, {} samples, depth from {})", a_desc.Width, a_desc.Height,
-			impl->state->program->sampleCount, DepthLabel(impl->state->depth));
+		logger::info("[ORG] Screen Space Shadows runs on the render graph ({}x{}, {} samples, {} sample-count programs, depth from {})",
+			a_desc.Width, a_desc.Height, impl->state->program->sampleCount, impl->state->programs.size(), DepthLabel(impl->state->depth));
 		return true;
 	} catch (const std::exception& e) {
 		logger::error("[ORG] Screen Space Shadows setup failed, staying on D3D11: {}", e.what());
@@ -336,9 +381,10 @@ ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass()
 		return nullptr;
 	auto& state = *impl->state;
 	bool changed = false;
-	// The sample count follows the render size (as GetComputeRaymarch's recompile does).
+	// The sample count follows the settings and the render size (as GetComputeRaymarch's recompile does). The passes are made
+	// again with the new program: a graph rebuild, only when the count changes.
 	if (const auto sampleCount = globals::features::screenSpaceShadows.GetScaledSampleCount(); sampleCount != state.program->sampleCount) {
-		auto program = LoadProgram(RenderGraphRuntime::Get().Host()->Device(), sampleCount);
+		auto program = ProgramFor(state, sampleCount);
 		if (!program) {
 			logger::error("[ORG] Screen Space Shadows returns to D3D11: the {}-sample program could not be made", sampleCount);
 			Stop();

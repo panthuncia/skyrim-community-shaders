@@ -82,6 +82,8 @@ public:
 	void InvalidateRaymarchShaders();
 	/** @brief Calculates the resolution-scaled and quantized sample count for the raymarch shader. */
 	uint GetScaledSampleCount();
+	/** @brief The quantized sample count for a_multiplier (the setting, clamped to 1-4) at a_renderSize. */
+	static uint ScaleSampleCount(uint a_multiplier, float2 a_renderSize);
 	uint lastCompiledSampleCount = 0;
 	/**
 	 * @brief Returns the compiled raymarch compute shader, recompiling if the sample count changed.

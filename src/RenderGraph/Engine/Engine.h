@@ -24,4 +24,12 @@ namespace RenderGraph::Engine
 	 * ORG (Targets::TakeOver), then the subsystems that need them set up (Skeleton, ImageSpace).
 	 */
 	void Setup();
+
+	/**
+	 * @brief State::Setup, after the features' SetupResources and PostSetupResources (HDR's UI texture exists then): Scaleform's client
+	 * with its surfaces and its pipelines queued, then the graphs every client registered so far waits to join are built
+	 * (FrameAnchors::BuildPending), so the primary-path clients (Skeleton, Bink, Scaleform) are in their anchors' graphs before the
+	 * first frame. Render thread, between frames.
+	 */
+	void PostSetup();
 }
