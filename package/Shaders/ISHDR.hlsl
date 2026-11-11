@@ -3,6 +3,8 @@
 // heap, the shared constants (FrameBuffer, SharedData, Permutation) too, and PerGeometry from the engine-constants capture through the
 // pass's latch. The vertex stage is the graph's fullscreen triangle, which gives the engine quad's TEXCOORD0.
 #	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
 #	include "Common/OrgEngineConstants.hlsli"
 #	include "Common/OrgResources.hlsli"
 #	if defined(DOWNSAMPLE)

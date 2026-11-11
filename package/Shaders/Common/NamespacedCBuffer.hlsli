@@ -33,7 +33,21 @@
 #	define ORG_SHARED_CBUFFER(cb, view, reg) struct OrgSharedValues_##view
 #	define ORG_SHARED_PACKOFFSET(c)
 #	define ORG_SHARED_BOOL uint
-#	define ORG_SHARED_VIEW(view) static ConstantBuffer<OrgSharedValues_##view> OrgSharedView_##view = ResourceDescriptorHeap[OrgHandle_##view];
+#	if defined(ORG_SHARED_FRAMEBUFFER_AT)
+// An ORG pass that draws an engine draw in its place (RenderGraph/Engine/ImageSpace) reads FrameBuffer from the bytes that
+// draw had bound at b12, which the engine-constants capture copied: ORG_SHARED_FRAMEBUFFER_AT names the shader's latched
+// location (OrgEngineConstantsAt: FrameSrv, FrameOffset). The struct is loaded raw, so its row_major matrices come back
+// transposed: such a shader reads only the float4 members (the dynamic-resolution parameters, FrameParams).
+#		define ORG_SHARED_VIEW(view) ORG_SHARED_VIEW_##view
+#		define ORG_SHARED_VIEW_FrameBuffer                                                                                  \
+			static ByteAddressBuffer OrgSharedRing_FrameBuffer = ResourceDescriptorHeap[ORG_SHARED_FRAMEBUFFER_AT.FrameSrv]; \
+			static OrgSharedValues_FrameBuffer OrgSharedView_FrameBuffer = OrgSharedRing_FrameBuffer.Load<OrgSharedValues_FrameBuffer>(ORG_SHARED_FRAMEBUFFER_AT.FrameOffset);
+#		define ORG_SHARED_VIEW_SharedData static ConstantBuffer<OrgSharedValues_SharedData> OrgSharedView_SharedData = ResourceDescriptorHeap[OrgHandle_SharedData];
+#		define ORG_SHARED_VIEW_FeatureData static ConstantBuffer<OrgSharedValues_FeatureData> OrgSharedView_FeatureData = ResourceDescriptorHeap[OrgHandle_FeatureData];
+#		define ORG_SHARED_VIEW_Permutation static ConstantBuffer<OrgSharedValues_Permutation> OrgSharedView_Permutation = ResourceDescriptorHeap[OrgHandle_Permutation];
+#	else
+#		define ORG_SHARED_VIEW(view) static ConstantBuffer<OrgSharedValues_##view> OrgSharedView_##view = ResourceDescriptorHeap[OrgHandle_##view];
+#	endif
 #	define ORG_SHARED_ALIAS(view, ns, type, name) static const type name = OrgSharedView_##view.ns##_##name;
 #	define ORG_SHARED_ARRAY_ALIAS(view, ns, type, name, count) static const type name[count] = OrgSharedView_##view.ns##_##name;
 #else

@@ -15,17 +15,25 @@
 //   ORG_ENGINE_CONSTANTS(MyPerGeometry, PerGeometry, PerGeometryAt)
 //   static float4 Flags = PerGeometry.Flags;                  // the names the body reads
 //
+// FrameBuffer the same way: define ORG_SHARED_FRAMEBUFFER_AT as the latch's name before Common/FrameBuffer.hlsli is included
+// (Common/NamespacedCBuffer.hlsli), so the draw reads the PerFrame bytes it had bound, not CS's shared snapshot.
+//
 // The struct must have the cbuffer's layout as raw bytes: pad a member that cbuffer packing would
 // move to the next 16-byte row (a float before a float4 array is followed by a float3).
 
 #if defined(CS_ORG_BINDLESS)
 
-/** Where one captured constant buffer is: the ring chunk's SRV index and the byte offset in it. */
+/**
+ * Where a draw's captured constant buffers are: the ring chunk's SRV index and the byte offset of its PerGeometry (PS b2) and of
+ * its PerFrame (PS b12, read as FrameBuffer when the shader defines ORG_SHARED_FRAMEBUFFER_AT).
+ */
 struct OrgEngineConstantsAt
 {
 	uint Srv;
 	uint Offset;
-	uint2 Padding;
+	uint FrameSrv;
+	uint FrameOffset;
+	uint4 Padding;
 };
 
 #	define ORG_ENGINE_CONSTANTS(T, N, AT)                                           \

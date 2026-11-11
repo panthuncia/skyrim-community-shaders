@@ -2,6 +2,8 @@
 // The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t1 and s0-s1 from the heap, FrameBuffer
 // from the shared constants, PerGeometry from the engine-constants capture through the pass's latch.
 #	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
 #	include "Common/OrgEngineConstants.hlsli"
 #	include "Common/OrgResources.hlsli"
 #	define ISBLUR_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, ImageTex, 0) X(SRV, Texture2D<float4>, AvgLumTex, 1) X(SAMPLER, SamplerState, ImageSampler, 0) X(SAMPLER, SamplerState, AvgLumSampler, 1) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
