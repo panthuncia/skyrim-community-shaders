@@ -27,6 +27,8 @@
 /**
  * Where a draw's captured constant buffers are: the ring chunk's SRV index, the byte offset and the bound size of its
  * PerGeometry (PS b2) and of its PerFrame (PS b12, read as FrameBuffer when the shader defines ORG_SHARED_FRAMEBUFFER_AT).
+ * Source is a texture the draw reads by heap index (ORG_ENGINE_NO_SOURCE when none): the engine binds a different one
+ * each time (the water flow copies' loaded textures), so a pass recorded once cannot hold it.
  */
 struct OrgEngineConstantsAt
 {
@@ -36,8 +38,11 @@ struct OrgEngineConstantsAt
 	uint FrameOffset;
 	uint Size;
 	uint FrameSize;
-	uint2 Padding;
+	uint Source;
+	uint Padding;
 };
+
+#	define ORG_ENGINE_NO_SOURCE 0xFFFFFFFF
 
 /** One 16-byte row of a draw's PerGeometry; 0 past its bound size. */
 float4 OrgEngineRow(OrgEngineConstantsAt a_at, uint a_row)

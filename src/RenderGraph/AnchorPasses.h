@@ -51,8 +51,9 @@ namespace RenderGraph::AnchorPasses
 
 	/**
 	 * @brief One entry of a pass's push block, in the shader's resource list order (ShaderBindings.h): Srv and Uav are declared
-	 * resources (the whole texture or one mip), Handle a sampler or another descriptor index, Latch a LATCH entry's two words (an
-	 * offset into the builder's latch), Shared a SHARED entry's four words (SharedConstants.h).
+	 * resources (the whole texture or one mip), Published a read of a published resource by its id (PublishedResources.h: the
+	 * default view, ordered after its producer's writes in any epoch), Handle a sampler or another descriptor index, Latch a LATCH
+	 * entry's two words (an offset into the builder's latch), Shared a SHARED entry's four words (SharedConstants.h).
 	 */
 	struct Bind
 	{
@@ -60,6 +61,7 @@ namespace RenderGraph::AnchorPasses
 		{
 			Srv,
 			Uav,
+			Published,
 			Handle,
 			Latch,
 			Shared,
@@ -69,9 +71,11 @@ namespace RenderGraph::AnchorPasses
 		std::shared_ptr<org::Resource> resource;
 		std::uint32_t value = 0;       // Handle: the descriptor index; Latch: the region's offset
 		std::uint32_t mip = kAllMips;  // Srv and Uav: the one mip the view covers, or the default view
+		std::string id;                // Published: the id (PublishedResources::IsDeclarable at the build)
 
 		static Bind Srv(std::shared_ptr<org::Resource> a_resource, std::uint32_t a_mip = kAllMips) { return { Kind::Srv, std::move(a_resource), 0, a_mip }; }
 		static Bind Uav(std::shared_ptr<org::Resource> a_resource, std::uint32_t a_mip = kAllMips) { return { Kind::Uav, std::move(a_resource), 0, a_mip }; }
+		static Bind Published(std::string_view a_id) { return { Kind::Published, nullptr, 0, kAllMips, std::string(a_id) }; }
 		static Bind Handle(std::uint32_t a_index) { return { Kind::Handle, nullptr, a_index }; }
 		static Bind Unused() { return Handle(0); }
 		static Bind Latch(std::uint32_t a_offset) { return { Kind::Latch, nullptr, a_offset }; }

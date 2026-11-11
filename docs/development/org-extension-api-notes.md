@@ -1717,3 +1717,13 @@ looked it up (`RequestRebuildFor`). Building the replacement graph on a worker a
 would remove the remaining synchronous builds; it needs those shared services to accept a build that runs beside the host's
 thread's preparations.
 - **Found by:** the rebuild-storm investigation (2026-11-11), 31.6 s of synchronous rebuilds in a four-minute tour.
+
+### An owned UAV for an extension's image
+
+The water's flow copies (p5/imagespace.md, "5.5.4: the remainder") read each source texture by a heap index the commit writes into
+the latch, through `IDescriptorService::CreateOwnedShaderResourceView` (GpuTextures). The target, though, is a fixed import of the
+flow map, because the descriptor service has no owned UAV: an engine image written by a pass must be a graph resource, and so must
+exist when the graph is built. CS makes the engine's flow map at Setup to have it then. A `CreateOwnedUnorderedAccessView` beside
+the SRV one would let a pass write an image that appears later (read and write by index, with a barrier the pass records itself),
+at the cost of the graph not ordering that write.
+- **Found by:** 5.5.4 (2026-11-11).
