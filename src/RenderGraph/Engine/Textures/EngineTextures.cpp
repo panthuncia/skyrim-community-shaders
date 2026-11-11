@@ -137,7 +137,7 @@ namespace RenderGraph::Engine::Textures
 			return nullptr;
 		}
 
-		std::atomic<bool> g_loggedUnsupported{ false }, g_loggedImage{ false }, g_loggedWrap{ false }, g_loggedLayout{ false },
+		std::atomic<bool> g_loggedUnsupported{ false }, g_loggedFormat{ false }, g_loggedImage{ false }, g_loggedWrap{ false }, g_loggedLayout{ false },
 			g_loggedView{ false }, g_loggedInactive{ false };
 	}
 
@@ -171,8 +171,16 @@ namespace RenderGraph::Engine::Textures
 			return false;
 		};
 
-		// The image, which ORG owns.
+		// The image, which ORG owns. BasicRHI stores a format the device lacks as DXVK does (A8 as R8), so DXVK's texture on it
+		// agrees; what neither can sample (or store to, for a UAV) stays the engine's.
 		const auto format = rhi::helpers::ToRHI(a_info.format);
+		rhi::FormatSupport support{};
+		const std::uint32_t needed = rhi::FU_ShaderResource | ((a_info.bindFlags & D3D11_BIND_UNORDERED_ACCESS) ? rhi::FU_UnorderedAccess : rhi::FU_None);
+		if (host->Device().QueryFormatSupport(format, support) != rhi::Result::Ok || (support.usage & needed) != needed) {
+			g_left.fetch_add(1, std::memory_order_relaxed);
+			LogOnce(g_loggedFormat, a_info.name, "the device cannot sample (or store to) its format");
+			return false;
+		}
 		rhi::ResourceDesc desc{};
 		desc.type = Is3D(a_info) ? rhi::ResourceType::Texture3D : rhi::ResourceType::Texture2D;
 		desc.heapType = rhi::HeapType::DeviceLocal;

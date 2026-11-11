@@ -77,6 +77,33 @@ namespace DCLF
 			return r | (g << 3) | (b << 6) | (a << 9) | (1u << 12);
 		}
 
+		/**
+		 * @brief The view's own mapping (SrvDesc::componentMapping) for a DXVK image or an image DXVK wraps. DXVK's swizzle is its
+		 * format's: DXVK stores some formats in others (A8 as R8, read as (0, 0, 0, R)) and swizzles B8G8R8X8's alpha to one. BasicRHI
+		 * stores the same formats the same way and adds the same swizzle to every view of a_format (rhi::FormatSupport), so the view
+		 * adds nothing when the two agree, and DXVK's swizzle when BasicRHI has none. False when they disagree: a_dxvkFormat, when
+		 * given, must be the format BasicRHI stores a_format in.
+		 */
+		bool ViewMappingOf(const rhi::Device& a_device, rhi::Format a_format, const VkComponentMapping& a_dxvk, VkFormat a_dxvkFormat,
+			rhi::ComponentMapping& a_out)
+		{
+			rhi::FormatSupport support{};
+			if (a_device.QueryFormatSupport(a_format, support) != rhi::Result::Ok)
+				return false;
+			if (support.storedAs != rhi::Format::Unknown && a_dxvkFormat != VK_FORMAT_UNDEFINED && support.backendFormat != static_cast<std::uint32_t>(a_dxvkFormat))
+				return false;
+			const rhi::ComponentMapping dxvk = MappingOf(a_dxvk);
+			if (dxvk == support.srvSwizzle) {
+				a_out = 0;
+				return true;
+			}
+			if (support.srvSwizzle == 0) {
+				a_out = dxvk;
+				return true;
+			}
+			return false;
+		}
+
 		bool DescribeView(const D3D11_SHADER_RESOURCE_VIEW_DESC& a_view, rhi::SrvDesc& a_out)
 		{
 			a_out.formatOverride = rhi::helpers::ToRHI(a_view.Format);
@@ -485,8 +512,10 @@ namespace DCLF
 			rhi::SrvDesc srv{};
 			if (!DescribeView(viewDesc, srv) || !a_texture->graph)
 				return Reject::View;
-			srv.componentMapping = MappingOf({ static_cast<VkComponentSwizzle>(a_texture->components[0]), static_cast<VkComponentSwizzle>(a_texture->components[1]),
-				static_cast<VkComponentSwizzle>(a_texture->components[2]), static_cast<VkComponentSwizzle>(a_texture->components[3]) });
+			const VkComponentMapping components{ static_cast<VkComponentSwizzle>(a_texture->components[0]), static_cast<VkComponentSwizzle>(a_texture->components[1]),
+				static_cast<VkComponentSwizzle>(a_texture->components[2]), static_cast<VkComponentSwizzle>(a_texture->components[3]) };
+			if (!ViewMappingOf(a_context.device, srv.formatOverride, components, VK_FORMAT_UNDEFINED, srv.componentMapping))
+				return Reject::View;
 			const auto image = a_texture->graph->GetAPIResource();
 			auto backing = a_context.cleanup->Make<ImportedBacking>();
 			backing->view.copy_from(a_entry.view.get());
@@ -615,10 +644,9 @@ namespace DCLF
 						return Reject::Import;
 				}
 
-				srv.componentMapping = MappingOf(image.components);
-				// A device without VK_FORMAT_A8_UNORM_KHR: DXVK stores A8 as R8 and its views swizzle red into alpha (the mapping above).
-				if (viewDesc.Format == DXGI_FORMAT_A8_UNORM && image.viewFormat == VK_FORMAT_R8_UNORM)
-					srv.formatOverride = rhi::Format::R8_UNorm;
+				// The view's format is the D3D11 view's; BasicRHI stores and swizzles it as DXVK does (A8 as R8 included).
+				if (!ViewMappingOf(a_context.device, srv.formatOverride, image.components, image.viewFormat, srv.componentMapping))
+					return Reject::View;
 			}
 			auto backing = a_context.cleanup->Make<ImportedBacking>();
 			backing->view.copy_from(view);

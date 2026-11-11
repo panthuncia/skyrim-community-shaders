@@ -21,9 +21,6 @@ namespace RenderGraph::Engine::Scaleform::GfxTextures
 		std::once_flag g_deviceHooked;
 		std::atomic<std::uint64_t> g_created{ 0 };
 		std::atomic<bool> g_loggedFirst{ false };
-		// An A8 texture Create could not make (a device whose DXVK stores A8 as R8, so the image and DXVK's texture disagree):
-		// GFx's A8 textures stay DXVK's from then on.
-		std::atomic<bool> g_a8Failed{ false };
 
 		/** @brief ID3D11Device::CreateTexture2D (slot 5) on the device the renderer holds. */
 		struct CreateTexture2D
@@ -44,8 +41,7 @@ namespace RenderGraph::Engine::Scaleform::GfxTextures
 			static bool Eligible(const D3D11_TEXTURE2D_DESC& a_desc)
 			{
 				return a_desc.Usage == D3D11_USAGE_DEFAULT && a_desc.BindFlags == D3D11_BIND_SHADER_RESOURCE && a_desc.CPUAccessFlags == 0 &&
-				       a_desc.MiscFlags == 0 && a_desc.ArraySize == 1 && a_desc.SampleDesc.Count == 1 && a_desc.Width && a_desc.Height &&
-				       !(a_desc.Format == DXGI_FORMAT_A8_UNORM && g_a8Failed.load(std::memory_order_relaxed)) && Textures::Active();
+				       a_desc.MiscFlags == 0 && a_desc.ArraySize == 1 && a_desc.SampleDesc.Count == 1 && a_desc.Width && a_desc.Height && Textures::Active();
 			}
 
 			/** @brief The texture made on ORG with GFx's contents (DXVK's texture, or a tripwire handle of it), or null. */
@@ -66,11 +62,9 @@ namespace RenderGraph::Engine::Scaleform::GfxTextures
 				info.srv.Texture2D.MipLevels = ~0u;
 				info.name = fmt::format("Scaleform::Texture2D {}x{} format {}", a_desc.Width, a_desc.Height, static_cast<int>(a_desc.Format));
 				Textures::Created created;
-				if (!Textures::Create(info, created) || !created.texture) {
-					if (a_desc.Format == DXGI_FORMAT_A8_UNORM && !g_a8Failed.exchange(true, std::memory_order_relaxed))
-						logger::warn("[ORG] Scaleform: an A8 texture could not be made on ORG; GFx's A8 textures stay DXVK's (imported per view)");
+				// Textures::Create logs why it refused (once per reason); GFx's own texture is then DXVK's.
+				if (!Textures::Create(info, created) || !created.texture)
 					return nullptr;
-				}
 				if (!g_loggedFirst.exchange(true, std::memory_order_relaxed))
 					logger::info("[ORG] Scaleform: GFx's textures are made on ORG (first: {})", info.name);
 				g_created.fetch_add(1, std::memory_order_relaxed);
