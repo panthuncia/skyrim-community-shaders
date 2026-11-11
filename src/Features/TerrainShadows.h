@@ -68,8 +68,9 @@ public:
 		float3 Scale;
 		float2 ZRange;
 		float2 Offset;
-		float ZBlur;  // world-space half-width of the shadow transition
-		float3 pad0;
+		float ZBlur;   // world-space half-width of the shadow transition
+		float2 UVMax;  // the heightmap's extent in the shadow height map's UVs: 1 on D3D11, less when the graph's larger texture holds it
+		float pad0;
 	};
 	STATIC_ASSERT_ALIGNAS_16(PerFrame);
 

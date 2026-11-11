@@ -116,7 +116,8 @@ namespace SharedData
 		float2 ZRange;
 		float2 Offset;
 		float ZBlur;
-		float3 pad0;
+		float2 UVMax;
+		float pad0;
 	};
 
 	struct LightLimitFixSettings

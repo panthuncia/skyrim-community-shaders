@@ -128,8 +128,8 @@ Keys used so far:
 - Effects11's rays (`CS_ORG_E11_RAYS`): 100 to 103 (volumetric rays: raymarch, horizontal and vertical blur, apply) and 200 to
   204 (sun rays: mask, three blurs, composite) at PostComposite.
 - The shared constants' upload (`cs.shared.upload`): first at every anchor where a client reads them, outside the keys.
-- Terrain Shadows (`CS_ORG_TERRAIN_SHADOWS`): 99 (the heightmap upload, once per heightmap) and 100 (the update) at
-  EarlyPrepass.
+- Terrain Shadows (`CS_ORG_TERRAIN_SHADOWS`): 99 (the heightmap copy, recorded every run, copying on the runs that carry a new
+  heightmap) and 100 (the update) at EarlyPrepass.
 - Terrain Blending's depth blend (`CS_ORG_TERRAIN_BLENDING`): 0 at DepthDone.
 - Volumetric Shadows (`CS_ORG_VOLUMETRIC_SHADOWS`): 100 to 105 at EarlyPrepass (per mip: downsample, horizontal blur, vertical
   blur).
@@ -973,11 +973,14 @@ Keys used so far:
   Terrain Shadows' port does the graph half today. Its heightmap is a persistent graph texture (`GraphResources::Texture2D`,
   no export). The upload service cannot fill it: async epochs, which the anchors run, record only buffer uploads
   ("Async epochs cannot record these uploads"). So the DDS bytes go into an upload-heap `org::Buffer` at once, laid out by
-  `rhi::helpers::PlanTextureUploadSubresources`, and a copy pass (`CopyBufferToTexture`) in the client fills the texture in
-  the first epoch. The next frame the client is rebuilt without that pass (`FrameAnchors::Refresh`), and the buffer goes
-  with the last build that holds it. Phase 3.5 makes this a framework helper: an `AnchorPasses::Upload` is a one-shot pass
-  (`PassDesc::once`) that the anchors drop themselves once a run with it was submitted. BC formats work. An API for
-  plugins needs a texture upload that async epochs record.
+  `rhi::helpers::PlanTextureUploadSubresources`, and a copy pass (`CopyBufferToTexture`) in the client fills the texture.
+  `AnchorPasses::Upload` makes that a one-shot pass (`PassDesc::once`), but a one-shot pass per event is a graph rebuild
+  per event, and new textures per heightmap replaced the published shadow heights, which rebuilt every graph. So since
+  2026-11-11 the textures are made once, at the largest installed heightmap's size, in R16_UNORM (BC4 decompressed and
+  16-bit maps converted on the CPU). A new heightmap goes into their top-left corner through a copy pass registered at
+  setup: it has no revision, so it is recorded every run, and it copies only on a run whose commit stored the buffer in
+  its frame slot (`RunSlots`, as Bink's upload). The client's `executed` callback ends the copying. An API for plugins
+  needs a texture upload that async epochs record.
 - **P4.3 (engine textures, `src/RenderGraph/Engine/Textures`):** `Textures::Create` is CS's one path for a texture
   on an ORG image from any thread, with no wait: BasicRHI creates the image, and while DXVK is the host it wraps the image
   with the contents uploaded in its own stream (`dxvkCreateTextureFromVkImageWithData`), so the contents are there before

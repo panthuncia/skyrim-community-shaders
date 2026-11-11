@@ -27,8 +27,14 @@ namespace TerrainShadows
 		if (!SharedData::terraOccSettings.EnableTerrainShadow)
 			return 1.0;
 		float2 uv = GetTerrainShadowUV(worldPos.xy);
-		if (any(uv < 0.0) || any(uv > 1.0))
+		// The heightmap may cover only the texture's top-left corner (UVMax): stop at its last texel centre, so filtering never
+		// reads the texels past it.
+		float2 uvMax = SharedData::terraOccSettings.UVMax;
+		if (any(uv < 0.0) || any(uv > uvMax))
 			return 1.0;
+		float2 dims;
+		ShadowHeightTexture.GetDimensions(dims.x, dims.y);
+		uv = min(uv, uvMax - 0.5 / dims);
 		float2 shadowHeight = GetTerrainZ(ShadowHeightTexture.SampleLevel(samp, uv, 0));
 		// Blurring in z hides the heightmap's xy resolution; capped by the bias so lit flat terrain stays lit.
 		float zBlur = min(SharedData::terraOccSettings.ZBlur, SelfShadowBias);
