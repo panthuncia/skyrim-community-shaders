@@ -506,6 +506,8 @@ struct ORGSunRays::Impl
 	// Programs by source, defines and target formats, kept across shapes: a resize does not compile again.
 	std::map<std::string, std::shared_ptr<const RasterProgram>> rasterPrograms;
 	std::map<std::string, std::shared_ptr<const ComputeProgram>> computePrograms;
+	// Set once Setup built kMAIN's programs: a program built after that is logged (a format setup did not know).
+	bool prebuilt = false;
 	// This frame's values, gathered by VolumetricRays and SunRays, handed to the run at the hook and latched by the commit.
 	LatchData pending{};
 	bool pendingVolumetric = false, pendingSun = false;
@@ -527,6 +529,8 @@ struct ORGSunRays::Impl
 			key += ";" + std::to_string(static_cast<std::uint32_t>(target.format)) + (target.blend.enable ? "+" : "");
 		auto& program = rasterPrograms[key];
 		if (!program) {
+			if (prebuilt)
+				logger::info("[ORG] Effects11 rays: {} for this target was not built at setup; building it now", a_source);
 			RasterProgram::Desc desc{};
 			desc.pixelSource = std::string(kShaderDir) + a_source;
 			desc.constantWords = a_words;
@@ -543,10 +547,41 @@ struct ORGSunRays::Impl
 		for (const auto& define : a_defines)
 			key += ";" + define;
 		auto& program = computePrograms[key];
+		if (!program && prebuilt)
+			logger::info("[ORG] Effects11 rays: {} was not built at setup; building it now", a_source);
 		if (!program)
 			program = ComputeProgram::Load(RenderGraphRuntime::Get().Host()->Device(),
 				{ .source = std::string(kShaderDir) + a_source, .constantWords = a_words, .defines = Defines(a_defines) });
 		return program;
+	}
+
+	/** @brief The programs for kMAIN in a_mainFormat into a_state: from the maps, or built now. False, logged, when one fails. */
+	bool LoadPrograms(RaysState& a_state, rhi::Format a_mainFormat)
+	{
+		// The D3D11 path's defines (Effects11::DrawVolumetricRays, EnsureSunRaysResources).
+		std::vector<std::string> raymarchDefines;
+		if (globals::features::cloudShadows.loaded)
+			raymarchDefines.emplace_back("CLOUD_SHADOWS");
+		if (globals::features::terrainShadows.loaded)
+			raymarchDefines.emplace_back("TERRAIN_SHADOWS");
+		std::vector<std::string> maskDefines{ "MASK" };
+		if (globals::features::cloudShadows.loaded)
+			maskDefines.emplace_back("CLOUD_SHADOWS");
+		const RasterProgram::Target additive{ .format = a_mainFormat, .blend = AdditiveBlend() };
+		const RasterProgram::Target half{ .format = rhi::Format::R16_Float };
+		const RasterProgram::Target halfDepth{ .format = rhi::Format::R32_Float };
+		a_state.raymarch = Raster("RaymarchVolumetricRaysPS.hlsl", raymarchDefines, { half, halfDepth }, ShaderBindings::Words<RaymarchBlock>());
+		a_state.apply = Raster("ApplyVolumetricRaysPS.hlsl", {}, { additive }, ShaderBindings::Words<ApplyBlock>());
+		a_state.blurH = Compute("BlurVolumetricRaysCS.hlsl", { "HORIZONTAL" }, ShaderBindings::Words<BlurBlock>());
+		a_state.blurV = Compute("BlurVolumetricRaysCS.hlsl", {}, ShaderBindings::Words<BlurBlock>());
+		a_state.sunMask = Raster("SunRaysPS.hlsl", maskDefines, { half }, ShaderBindings::Words<SunRaysBlock>());
+		a_state.sunBlur = Raster("SunRaysPS.hlsl", { "BLUR" }, { half }, ShaderBindings::Words<SunRaysBlock>());
+		a_state.sunComposite = Raster("SunRaysPS.hlsl", { "COMPOSITE" }, { additive }, ShaderBindings::Words<SunRaysBlock>());
+		if (!a_state.raymarch || !a_state.apply || !a_state.blurH || !a_state.blurV || !a_state.sunMask || !a_state.sunBlur || !a_state.sunComposite) {
+			logger::error("[ORG] Effects11 rays: a program could not be built");
+			return false;
+		}
+		return true;
 	}
 
 	/** @brief A new state for a_shape, registered as the client. False, logged, when anything could not be made. */
@@ -557,30 +592,8 @@ struct ORGSunRays::Impl
 		built->latch = latch;
 		built->gate = gate;
 		built->linearSampler = linearSampler.Index();
-
-		// The D3D11 path's defines (Effects11::DrawVolumetricRays, EnsureSunRaysResources).
-		std::vector<std::string> raymarchDefines;
-		if (globals::features::cloudShadows.loaded)
-			raymarchDefines.emplace_back("CLOUD_SHADOWS");
-		if (globals::features::terrainShadows.loaded)
-			raymarchDefines.emplace_back("TERRAIN_SHADOWS");
-		std::vector<std::string> maskDefines{ "MASK" };
-		if (globals::features::cloudShadows.loaded)
-			maskDefines.emplace_back("CLOUD_SHADOWS");
-		const RasterProgram::Target additive{ .format = a_shape.mainFormat, .blend = AdditiveBlend() };
-		const RasterProgram::Target half{ .format = rhi::Format::R16_Float };
-		const RasterProgram::Target halfDepth{ .format = rhi::Format::R32_Float };
-		built->raymarch = Raster("RaymarchVolumetricRaysPS.hlsl", raymarchDefines, { half, halfDepth }, ShaderBindings::Words<RaymarchBlock>());
-		built->apply = Raster("ApplyVolumetricRaysPS.hlsl", {}, { additive }, ShaderBindings::Words<ApplyBlock>());
-		built->blurH = Compute("BlurVolumetricRaysCS.hlsl", { "HORIZONTAL" }, ShaderBindings::Words<BlurBlock>());
-		built->blurV = Compute("BlurVolumetricRaysCS.hlsl", {}, ShaderBindings::Words<BlurBlock>());
-		built->sunMask = Raster("SunRaysPS.hlsl", maskDefines, { half }, ShaderBindings::Words<SunRaysBlock>());
-		built->sunBlur = Raster("SunRaysPS.hlsl", { "BLUR" }, { half }, ShaderBindings::Words<SunRaysBlock>());
-		built->sunComposite = Raster("SunRaysPS.hlsl", { "COMPOSITE" }, { additive }, ShaderBindings::Words<SunRaysBlock>());
-		if (!built->raymarch || !built->apply || !built->blurH || !built->blurV || !built->sunMask || !built->sunBlur || !built->sunComposite) {
-			logger::error("[ORG] Effects11 rays: a program could not be built");
+		if (!LoadPrograms(*built, a_shape.mainFormat))
 			return false;
-		}
 
 		// Written and read within the frame, as the D3D11 path's own textures: transient and aliasable.
 		const GraphResources::Options transient{ .lifetime = GraphResources::Lifetime::Transient };
@@ -709,6 +722,20 @@ bool ORGSunRays::Setup(std::function<void()> a_onFailed)
 		failed = true;
 		return false;
 	}
+	// The programs for kMAIN's format now, so the first frame that draws the rays compiles nothing.
+	const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+	if (main.RTV) {
+		D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
+		main.RTV->GetDesc(&rtvDesc);
+		RaysState programs;
+		if (const auto format = rhi::helpers::ToRHI(rtvDesc.Format); format == rhi::Format::Unknown || !state->LoadPrograms(programs, format)) {
+			logger::error("[ORG] Effects11 rays: the programs for kMAIN could not be built; the rays stay on D3D11");
+			failed = true;
+			return false;
+		}
+		state->prebuilt = true;
+	} else
+		logger::warn("[ORG] Effects11 rays: kMAIN does not exist at setup; the programs are built at the first frame");
 	state->onFailed = std::move(a_onFailed);
 	impl = std::move(state);
 	return true;
