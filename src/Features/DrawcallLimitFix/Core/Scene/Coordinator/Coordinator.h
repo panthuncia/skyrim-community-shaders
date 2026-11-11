@@ -173,6 +173,9 @@ namespace DCLF
 			std::uint32_t slotsSwept = 0;
 			std::uint32_t geometriesRefreshed = 0;
 			std::uint32_t geometriesRelocated = 0;  // slots made stale by a move of their buffers (pinless imports), since the start
+			// The pass's Ineligible::UnstableBuffer objects by cause (UnstableCause): a buffer the game can map, one DXVK refused
+			// otherwise, no buffers to resolve (no renderer data, no particle palette).
+			std::array<std::uint32_t, 3> unstableCauses{};
 			std::uint32_t slotViolations = 0;  // objects whose slots failed CheckObjectSlots (the gate: 0)
 			std::uint32_t shadowCasters = 0;  // records the engine would draw into a shadow map
 			std::array<std::uint32_t, 16> shadowRejects{};  // by ShadowReject, over the frame's records
@@ -1255,6 +1258,12 @@ namespace DCLF
 		 * the coordinator owns it (rootOwners), so it lives while the publication does; a caster with neither counts as untargeted.
 		 */
 		std::shared_ptr<const EngineOnlySubset> PublishEngineCasters();
+		/**
+		 * @brief An object ResolveWriteGeometry left native as UnstableBuffer: counted by cause (Stats::unstableCauses), the first ones
+		 * logged with their buffers' usage ("[DCLF] unstable buffer: ...").
+		 */
+		void NoteUnstable(RE::BSGeometry* a_geometry, const SceneCapture::GeometryRecord& a_record);
+		std::uint32_t unstableLogged = 0;  // NoteUnstable's lines, this session
 		/** @brief MergeWrite's geometry slots (a skin's partitions linked, or a LOD chain's ranges); Tables::kSlotFree: unstable, rebucketed. */
 		std::uint32_t ResolveWriteGeometry(RE::BSGeometry* a_geometry, const SceneCapture::GeometryRecord& a_record, const EvalResult& a_result, PartTimer& a_timer,
 			Ineligible& a_bucket);

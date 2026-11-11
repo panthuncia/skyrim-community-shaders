@@ -128,6 +128,7 @@ namespace DCLF::Scene
 		// The components take their events since the last walk (Features/Faces: the heads' publications).
 		ComponentsWalkBegun();
 		stats.ineligible.fill(0);
+		stats.unstableCauses.fill(0);
 		stats.techniqueRejects.fill(0);
 		stats.shadowMaskPipelines = 0;
 		stats.materialsEvaluated = 0;
@@ -545,6 +546,7 @@ namespace DCLF::Scene
 			--stats.ineligible[static_cast<std::size_t>(reason)];
 			++stats.ineligible[static_cast<std::size_t>(Ineligible::UnstableBuffer)];
 			a_bucket = Ineligible::UnstableBuffer;
+			NoteUnstable(geometry, g);
 			return Tables::kSlotFree;
 		}
 		// The other partitions' slots, linked from the first; all of them whatever this frame's mask, since the main camera's may differ.
@@ -568,6 +570,7 @@ namespace DCLF::Scene
 				--stats.ineligible[static_cast<std::size_t>(reason)];
 				++stats.ineligible[static_cast<std::size_t>(Ineligible::UnstableBuffer)];
 				a_bucket = Ineligible::UnstableBuffer;
+				NoteUnstable(geometry, g);
 				return Tables::kSlotFree;
 			}
 			if (tables.geometries[previous].nextPartition != kNoPartition) {
@@ -576,6 +579,44 @@ namespace DCLF::Scene
 			}
 		}
 		return geometrySlot;
+	}
+
+	void Coordinator::NoteUnstable(RE::BSGeometry* a_geometry, const SceneCapture::GeometryRecord& a_record)
+	{
+		// Every buffer the object draws: a skin's partitions', else its own.
+		std::vector<ID3D11Buffer*> buffers;
+		if (a_record.skin && a_record.skinPartition && !a_record.partitions.empty()) {
+			for (const auto& p : a_record.partitions)
+				buffers.insert(buffers.end(), { p.vertexBuffer, p.indexBuffer });
+		} else {
+			buffers.insert(buffers.end(), { a_record.vertexBuffer, a_record.indexBuffer });
+		}
+		// The game can map a DYNAMIC buffer or one with CPU access: DXVK renames it on every discard map, so it cannot be imported.
+		std::string described;
+		bool mappable = false, any = false;
+		for (auto* buffer : buffers) {
+			if (!buffer)
+				continue;
+			any = true;
+			D3D11_BUFFER_DESC desc{};
+			buffer->GetDesc(&desc);
+			mappable |= desc.Usage == D3D11_USAGE_DYNAMIC || desc.CPUAccessFlags != 0;
+			described += fmt::format("{}{} B usage {} CPU access {:#x}", described.empty() ? "" : ", ", desc.ByteWidth, static_cast<int>(desc.Usage), desc.CPUAccessFlags);
+		}
+		// A particle system draws its palette's quads, not its own buffers.
+		std::size_t cause = 2;
+		if (!a_record.particles.system && mappable)
+			cause = 0;
+		else if (!a_record.particles.system && any)
+			cause = 1;
+		++stats.unstableCauses[cause];
+		constexpr std::uint32_t kMaxLogged = 16;
+		if (unstableLogged >= kMaxLogged)
+			return;
+		++unstableLogged;
+		constexpr std::array<const char*, 3> kCauses{ "a buffer the game can map", "a buffer DXVK refused to describe", "no buffers to resolve (no renderer data or particle palette)" };
+		logger::info("[DCLF] unstable buffer: '{}' stays the engine's: {} ({}){}", a_geometry && a_geometry->name.c_str() ? a_geometry->name.c_str() : "",
+			kCauses[cause], described.empty() ? "none" : described, unstableLogged == kMaxLogged ? "; no more such lines this session" : "");
 	}
 
 	ObjectRecord Coordinator::RecordOfWrite(RE::BSGeometry* geometry, const SceneCapture::LeafView& leaf, const EvalResult& r, std::uint32_t geometrySlot,

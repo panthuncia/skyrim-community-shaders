@@ -436,6 +436,8 @@ namespace DCLF::Reports
 			for (std::size_t i = 1; i < stats.ineligible.size(); ++i)
 				if (stats.ineligible[i])
 					ineligibleText += fmt::format(" {}={}", kIneligibleNames[i], stats.ineligible[i]);
+			if (const auto& u = stats.unstableCauses; u[0] || u[1] || u[2])
+				ineligibleText += fmt::format(" (unstable: {} mappable, {} refused, {} no source)", u[0], u[1], u[2]);
 			// The per-part breakdown appears only under CS_DCLF_PROFILE=1, because that is the only time it is measured (per whole pass).
 			std::string partText;
 			if (Diagnostics::Observe().profile) {
