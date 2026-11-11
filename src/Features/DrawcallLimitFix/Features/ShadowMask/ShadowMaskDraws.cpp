@@ -6,6 +6,7 @@
 
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
 
+#include "Features/TerrainBlending/ORGTerrainBlending.h"
 #include "Globals.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RasterProgram.h"
@@ -161,9 +162,10 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 
 		/**
 		 * @brief Every published id a view's draws can read, listed when its client is made: the engine depths the slots hold
-		 * (shadow-mask.md, "The shader": the scene depth at t2, the light's shadow maps at t3 and t4, the focus shadow maps at t6) and
-		 * what the ported features publish as the scene depth (DCLF's registry at t17: Terrain Blending's blended depth). An export of an
-		 * id not listed here keeps its batch on the engine, logged once with the id: add the id here.
+		 * (shadow-mask.md, "The shader": the scene depth at t2, the light's shadow maps at t3 and t4) and what the ported features
+		 * publish as the scene depth. Terrain Blending binds its blended depth at t2 ("TerrainBlending::BlendedDepth", R32) and lists
+		 * its 16-bit copy in DCLF's registry at t17. An export of an id not listed here keeps its batch on the engine, logged once with
+		 * the id: add the id here.
 		 */
 		void ListInputs(Family::PublishedInputs& a_inputs)
 		{
@@ -171,6 +173,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			for (const auto depth : { Depth::kMAIN, Depth::kMAIN_COPY, Depth::kPOST_ZPREPASS_COPY, Depth::kSHADOWMAPS, Depth::kSHADOWMAPS_ESRAM,
 					 Depth::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM, Depth::kFOCUS_NEO })
 				a_inputs.Add(Family::EngineTargetId(depth));
+			a_inputs.Add(ORGTerrainBlending::kBlendedDepthId);
 			constexpr std::array<std::uint32_t, 1> kSceneDepthRegister{ 17 };
 			a_inputs.Add(Family::RegisteredIdsAt(kSceneDepthRegister));
 		}
@@ -285,6 +288,9 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 		}
 		if (state.refused[index])
 			return false;
+		// No host yet is not a refusal: the next batch asks again.
+		if (!RenderGraphRuntime::Get().Host())
+			return false;
 		client = MakeClient(a_shape);
 		state.refused[index] = !client;
 		return false;
@@ -296,6 +302,11 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			return Family::InputResult::NotListed;
 		const auto& client = GetState().clients[static_cast<std::size_t>(a_view)];
 		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
+	}
+
+	bool HasClient(View a_view)
+	{
+		return a_view < View::Count && GetState().clients[static_cast<std::size_t>(a_view)] != nullptr;
 	}
 
 	bool CanRun(View a_view)

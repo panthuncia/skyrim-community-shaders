@@ -1012,7 +1012,10 @@ PS_OUTPUT main(PS_INPUT input)
 
 	shadowMapDepth = depth;
 
-#			if defined(FOCUS_SHADOW)
+	// The ORG build keeps stencilValue 0. The engine's draw reads the stencil view's red component, which DXVK's
+	// X24_TYPELESS_G8_UINT view returns as 0 (the stencil is in green), so it never takes the focus shadows' branch either.
+	// BasicRHI has no stencil view of a depth-stencil image (shadow-mask.md, "The focus shadows' stencil").
+#			if defined(FOCUS_SHADOW) && !defined(UTILITY_ORG)
 	uint3 stencilDimensions;
 	TexStencilSampler.GetDimensions(0, stencilDimensions.x, stencilDimensions.y, stencilDimensions.z);
 	stencilValue = TexStencilSampler.Load(float3(stencilDimensions.xy * depthUv, 0)).x;

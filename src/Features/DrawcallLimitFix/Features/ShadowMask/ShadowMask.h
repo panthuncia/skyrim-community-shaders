@@ -63,10 +63,16 @@ namespace DCLF::Features::ShadowMask
 	}
 
 	/**
-	 * @brief Whether Utility.hlsl's ORG build samples slot a_slot. It never reads t1 or t7, so those are latched as null views, whatever
-	 * the engine left bound there.
+	 * @brief Whether Utility.hlsl's ORG build reads slot a_slot: only the scene depth (t2) and the light's shadow maps (t3, t4). Every
+	 * other slot is latched as a null view, whatever is bound there, so it can never refuse a draw.
+	 * - t0, t1, t7: the shadow mask techniques never use them. t0 often still holds the last material's texture (a streamed one may
+	 *   not be importable yet).
+	 * - t5, t6: the focus shadows' stencil and maps. The engine's draw reads the stencil from the view's red component
+	 *   (TexStencilSampler.Load(...).x). DXVK's stencil view (X24_TYPELESS_G8_UINT) holds the stencil in green and zero in red, so the
+	 *   engine's draw reads 0 and never samples t6. The ORG build reads 0 as well, without a view: BasicRHI cannot view the stencil
+	 *   of a depth-stencil image, so GpuTextures rejects that view.
 	 */
-	constexpr bool SlotRead(std::uint32_t a_slot) { return a_slot != 1 && a_slot != 7; }
+	constexpr bool SlotRead(std::uint32_t a_slot) { return a_slot >= 2 && a_slot <= 4; }
 
 	/** @brief The rows of PS b0 (PerTechnique) and PS b2 (PerGeometry) the latch takes (Utility.hlsl's packoffsets). */
 	inline constexpr std::uint32_t kTechniqueRows = 5;
@@ -158,6 +164,8 @@ namespace DCLF::Features::ShadowMask
 		 * when the view has no client yet.
 		 */
 		Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index);
+		/** @brief Whether a_view's client is made (it may still be joining the anchor's graph). */
+		bool HasClient(View a_view);
 		/** @brief Whether a run of the anchor now would draw a_view's work (FrameAnchors::CanRun): checked before a batch is withheld. */
 		bool CanRun(View a_view);
 		/** @brief The program for a key, built off the render thread; null while it builds or when it cannot be (a_state says which). */
