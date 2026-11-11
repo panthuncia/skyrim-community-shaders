@@ -19,6 +19,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Capture/Capture.h"
 #include "Features/DrawcallLimitFix/Diagnostics/PlayerParity.h"
 #include "Features/DrawcallLimitFix/Diagnostics/TelemetryProfile.h"
+#include "CSEditor/EditorWindow.h"
 #include "Features/HDRDisplay.h"
 #include "Features/PostProcessing.h"
 #include "Features/RemoteControl/GpuCounters.h"
@@ -653,6 +654,44 @@ namespace DCLF
 							manager->LoadMostRecentSaveGame();
 						else
 							manager->Load(name.c_str());
+						return;
+					}
+					// "dclf:weather=<form id or editor id>|off": the weather set at once and held with the CS editor's weather lock, which scripts
+					// and climate timers cannot move. The console's fw starts a transition whose end depends on frame timing, so two runs could
+					// differ.
+					if (command.rfind("dclf:weather=", 0) == 0) {
+						auto* editor = EditorWindow::GetSingleton();
+						const auto value = command.substr(13);
+						if (value == "off") {
+							editor->UnlockWeather();
+							return;
+						}
+						// A weather by editor id first, then by hex form id.
+						RE::TESWeather* weather = nullptr;
+						std::string known;
+						if (auto* data = RE::TESDataHandler::GetSingleton()) {
+							for (auto* candidate : data->GetFormArray<RE::TESWeather>()) {
+								if (!candidate)
+									continue;
+								const char* name = candidate->GetFormEditorID();
+								if (name && *name && _stricmp(name, value.c_str()) == 0)
+									weather = candidate;
+								known += fmt::format("{}{:08X} {}", known.empty() ? "" : ", ", candidate->GetFormID(), name && *name ? name : "?");
+							}
+						}
+						if (!weather) {
+							char* end = nullptr;
+							const auto id = static_cast<RE::FormID>(std::strtoul(value.c_str(), &end, 16));
+							if (end && *end == '\0')
+								weather = RE::TESForm::LookupByID<RE::TESWeather>(id);
+						}
+						if (!weather) {
+							logger::warn("[DCLF] test command {}: no such weather. Loaded weathers: {}", command, known);
+							return;
+						}
+						logger::info("[DCLF] test command {}: weather {:08X} {}", command, weather->GetFormID(),
+							weather->GetFormEditorID() ? weather->GetFormEditorID() : "?");
+						editor->LockWeatherForUser(weather);
 						return;
 					}
 					// "dclf:bink=<file>": a Bink movie from Data\Video played as the console's PlayBink plays it, on the main thread at its next
