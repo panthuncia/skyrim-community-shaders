@@ -1291,3 +1291,25 @@ Keys used so far:
   - **Render ownership on another thread** (the loading screen, P5.12): anchors run on the main thread only, so a UI drawn
     from the loading-screen thread stays on D3D11.
 - **Found by:** P5.10 (2026-11-10).
+
+### Engine draw families with stencil and many inputs (water, screen blood)
+
+- **Need:** an engine shader family with per-draw stencil state and reference, six engine constant groups, a CPU-written structured
+  buffer and about twenty feature header resources drawn at its own call (BSWaterShader), or a tiny one into the back buffer
+  (BSBloodSplatterShader).
+- **Who:** P5.4 and P5.5; the menu 3D families (P5.8) and anything else with stencil.
+- **Where it fits:** the sky's pattern, at one shared anchor (`EngineDraws`). What it needed or would make cheaper:
+  - **Stencil reference on `RasterProgram`** (`DrawDesc::stencilReference`, added here): set on the list before every draw, since
+    the reference holds across passes.
+  - **The 32-segment limit.** `TakeSubmittedSegments` holds one bit per segment, and `EngineDraws` took the last one. Every new anchor
+    after it needs the mask widened (or one anchor shared by families that run at different calls, as here).
+  - **Push block room.** Twenty header handles, the shared constants and three latch regions are 28 of the 32 words. Per-draw values
+    (textures, samplers, geometry, permutation descriptors) go in the latch as heap indices instead (Water.hlsl's `WaterOrgDraw`). A
+    header table resource (an array of handles in one buffer) would free the push block for families with more headers.
+  - **D3D11 buffers cannot be imported** (GpuTextures rejects non-images): a CPU-written one is copied into the latch and read through a
+    LATCH entry under the header's name (ShadowSampling's t98 under `ORG_HEADER_RESOURCES`); a GPU-written one must be a published graph
+    resource. A buffer import (DXVK interop for buffers, as for images) would remove both workarounds.
+  - **No re-registration during play** makes a client's declared inputs fixed at its first registration: a family that reads
+    published resources waits for them to settle (the water waits 30 batches). An API that declares an optional published input
+    (bound when published, null otherwise, without a rebuild) would let a client be made at startup.
+- **Found by:** P5.4 and P5.5 (2026-11-10).
