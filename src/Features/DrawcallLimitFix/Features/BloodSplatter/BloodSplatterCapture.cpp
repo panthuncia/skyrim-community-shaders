@@ -12,6 +12,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h"
+#include "Features/DrawcallLimitFix/Features/Water/TextureFailure.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
@@ -57,6 +58,7 @@ namespace DCLF::Features::BloodSplatter
 			std::shared_ptr<Run> run;
 			std::uint32_t passes = 0, drawn = 0;
 			std::set<std::pair<const char*, std::uint32_t>> logged;  // (reason, technique) logged once each
+			std::set<std::string> failures;                          // texture import failures (TextureFailure.h), logged once each
 		};
 
 		Capture& GetCapture()
@@ -149,9 +151,14 @@ namespace DCLF::Features::BloodSplatter
 				auto* view = Unwrap(rss.PSTexture[t]);
 				if (view && !PublishedResources::ExportedId(view).empty())
 					return "a texture slot holds a published graph texture";
+				const auto rejections = Water::RejectionCount();
 				auto binding = view ? textures.ResolveBinding(view, 64 + t) : textures.NullBinding();
-				if (binding.index == GpuTextures::kInvalid)
+				if (binding.index == GpuTextures::kInvalid) {
+					if (view)
+						if (auto failure = Water::DescribeTextureFailure(view, t, rejections); a_capture.failures.insert(failure).second)
+							logger::warn("[DCLF] blood splatter: a draw's texture could not be imported: {}", failure);
 					return "a texture it samples could not be imported";
+				}
 				constants.textures[t] = binding.index;
 				owners.push_back(std::move(binding.owner));
 				auto sampler = textures.SamplerBinding(rss.PSTextureAddressMode[t].underlying(), rss.PSTextureFilterMode[t].underlying());

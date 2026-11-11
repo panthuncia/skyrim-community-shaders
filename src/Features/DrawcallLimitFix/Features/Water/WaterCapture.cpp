@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
+#include "Features/DrawcallLimitFix/Features/Water/TextureFailure.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 
 #include "Features/LightLimitFix.h"
@@ -139,6 +140,7 @@ namespace DCLF::Features::Water
 			std::uint32_t pendingType = 0xFF;
 			std::uint32_t otherTypes = 0;    // the geometry types of the batch's passes that drew elsewhere, a bit each
 			std::set<std::uint32_t> logged;  // (refusal, technique, view) logged once each
+			std::set<std::string> failures;  // texture import failures (TextureFailure.h), logged once each
 		};
 
 		Capture& GetCapture()
@@ -281,8 +283,12 @@ namespace DCLF::Features::Water
 							logger::warn("[DCLF] water: t{} is a D3D11 buffer the graph cannot read (turn on its feature's ORG path); the water stays the engine's",
 								kHeaderRegisters[h]);
 					} else {
+						const auto rejections = RejectionCount();
 						auto binding = textures.ResolveBinding(view, 96 + static_cast<std::uint32_t>(h));
 						ok = binding.index != GpuTextures::kInvalid;
+						if (!ok)
+							if (auto failure = DescribeTextureFailure(view, kHeaderRegisters[h], rejections); a_capture.failures.insert(failure).second)
+								logger::warn("[DCLF] water: the {} batch's header texture could not be imported: {}", NameOf(a_view), failure);
 						a_run.headerIndices[h] = binding.index;
 						if (binding.owner)
 							a_run.owners.push_back(std::move(binding.owner));
@@ -453,9 +459,14 @@ namespace DCLF::Features::Water
 				auto* view = Unwrap(rss.PSTexture[t]);
 				if (view && !PublishedResources::ExportedId(view).empty())
 					return Refusal::PublishedTexture;
+				const auto rejections = RejectionCount();
 				auto binding = view ? textures.ResolveBinding(view, 64 + t) : NullOf(MaterialKind(t));
-				if (binding.index == GpuTextures::kInvalid)
+				if (binding.index == GpuTextures::kInvalid) {
+					if (view)
+						if (auto failure = DescribeTextureFailure(view, t, rejections); a_capture.failures.insert(failure).second)
+							logger::warn("[DCLF] water: a {} draw's texture could not be imported: {}", NameOf(a_capture.view), failure);
 					return Refusal::Texture;
+				}
 				constants.textures[t] = binding.index;
 				owners.push_back(std::move(binding.owner));
 				auto sampler = textures.SamplerBinding(rss.PSTextureAddressMode[t].underlying(), rss.PSTextureFilterMode[t].underlying());

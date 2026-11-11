@@ -118,7 +118,8 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		struct DrawsState
 		{
 			std::shared_ptr<Client> client;
-			bool tried = false;  // the client is made once
+			bool tried = false;        // the client is made once
+			bool drawnLogged = false;  // the first batch the graph drew was logged
 			std::vector<ProgramEntry> programs;
 			std::vector<PipelineKey> failedPrograms;
 			bool reserved = false;
@@ -300,6 +301,10 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		state.kept.emplace_back(frame, std::move(a_run->owners));
 		++state.runs;
 		state.draws += a_run->draws.size();
+		if (!a_run->draws.empty() && !state.drawnLogged) {
+			state.drawnLogged = true;
+			logger::info("[DCLF] blood splatter: the first screen blood batch drawn by the graph ({} draws)", a_run->draws.size());
+		}
 		auto& client = *state.client;
 		std::atomic_store(&client.run, std::shared_ptr<const Run>(std::move(a_run)));
 		client.pending = true;

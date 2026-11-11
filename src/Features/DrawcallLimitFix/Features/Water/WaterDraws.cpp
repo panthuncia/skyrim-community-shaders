@@ -70,6 +70,7 @@ namespace DCLF::Features::Water::WaterDraws
 			std::atomic<bool> prepared{ false };
 			bool pending = false;
 			bool shapeLogged = false;
+			bool drawnLogged = false;  // the first batch the graph drew was logged
 		};
 
 		struct Bindings
@@ -425,6 +426,10 @@ namespace DCLF::Features::Water::WaterDraws
 		state.kept.emplace_back(frame, std::move(a_run->owners));
 		++state.runs;
 		state.draws += a_run->draws.size();
+		if (!a_run->draws.empty() && !client->drawnLogged) {
+			client->drawnLogged = true;
+			logger::info("[DCLF] water: the first {} batch drawn by the graph ({} draws)", client->id, a_run->draws.size());
+		}
 		std::atomic_store(&client->run, std::shared_ptr<const Run>(std::move(a_run)));
 		client->pending = true;
 		FrameAnchors::Run(FrameAnchors::Anchor::EngineDraws);
