@@ -50,6 +50,7 @@ pinned submodule commits exist only locally, so a fresh clone cannot fetch them.
 | ORG: retire replaced statistics query pools after the in-stream lists that write them                            | Done; the device loss after in-session rebuilds                                     | ORG `org-port/rebuild-retire` (3100d0e)                  |
 | P5 wave 3: frame slot budget 512, ImageSpace end-of-frame effects, shadow masks, water's published slots         | Merged and run (2026-11-11); details below                                          | CS `org-port/p5`, ORG `org-port/frame-slots` (9cbc8b3)   |
 | P5.13 (the flush and the shader binds as tripwires)                                                              | Census and latch built (`CS_ORG_RESIDUE_CENSUS`, `CS_ORG_ENGINE_FLUSH_LATCH`); not flipped | CS `org-port/p5`                                         |
+| P5 primary path: ports precompile at load, pipelines before use, no readiness fallback; latch allowed draws         | Merged and run (2026-11-11); census 40/frame settled; latch shots match with it off  | CS `org-port/p5`, ORG `org-port/fix-retire-2` (b6fb82a)  |
 
 **Root cause worth knowing:** a BasicRHI-created Vulkan device failed on AMD because the driver rejects acceleration
 structures in a mutable descriptor list at any count. DXVK never enables acceleration structures, so the adopted device
@@ -163,6 +164,29 @@ Phase 5 wave 3 and the fixes after it (2026-11-11), each against its D3D11 run w
   EngineFixes (the batches now disable VRAM Budget, see its known grid-detach crash); a pathing job jumping into heap
   memory through `zz_SkyrimEngineTelemetry.dll`'s zone hooks.
 
+The primary-path pass and the host fixes (2026-11-11, `docs/development/p5/primary-path.md`):
+
+- **The ports are the primary path.** Sky, water, screen blood and shadow masks compile their stages when the engine loads
+  its shaders and keep the program keys they used in a manifest the next session builds at setup; ImageSpace keeps its
+  shapes in a manifest and registers them once at setup; Scaleform, Bink, the skeleton and the Phase 3 ports build their
+  programs at setup. The probe, settle, learning and join-polling machinery is deleted; a key never seen builds once on the
+  render thread, logged. Settled Whiterun sends 40 engine draws a frame to D3D11, the same as before the rewrite; its shots
+  match.
+- **The flush latch lets vouched engine draws through** (`Flush::EngineDraws`, `Flush::VouchPass`): DCLF's unclaimed
+  objects and each port's listed refusals apply the owed state and draw; anything else is skipped and logged. With the latch
+  on, the tour's shots match the latch-off run; the skips left are DCLF objects in load windows (being closed).
+- **A deadlock on the first world frame** (found with `p5-all-census-dclf-take.env`, every run): ORG's host thread freed
+  retired objects in `PrepareTicket`; WDDM holds a free until the GPU is done with the memory, and that GPU work waited for
+  a value only the host thread or the render thread (waiting on the host thread) would signal. Driver frees now run on a
+  deleter thread, and the deletion frontier covers DCLF's CPU-frame timeline and the window between taking queue values and
+  publishing them. Some frees still wait up to 1.2 s for the GPU; `ORG runtime: freeing ... took` names them.
+- **Graph rebuilds during play:** 31.6 s of synchronous rebuilds in a tour fell to about 1 s. Each rebuild now logs its
+  cause; DCLF's extensions build only into its own epochs, so one epoch's rebuild no longer gathers every extension; a new
+  published id rebuilds only the graphs that read it; Terrain Shadows makes its heightmap textures once per session
+  (sized for the largest installed heightmap: about 225 MB with Solstheim's, against 52 MB for Tamriel's before).
+- **Hang tooling:** ORG and BasicRHI build with debug info; DCLF's frame-start timeout prints ORG's host state; the staging
+  script now ships the current crash-dump helper (an old one answered every hang request without writing).
+
 **Open items:**
 
 - The sky's cloud layers on the graph stay off by default (`CS_ORG_SKY_CLOUDS`) until a run verifies them.
@@ -170,8 +194,9 @@ Phase 5 wave 3 and the fixes after it (2026-11-11), each against its D3D11 run w
   object is dclf-roadmap.md 3.7.
 - ORG's `StatisticsManager` still has a race on its shared query pool and no headroom in it: every new pass name replaces
   the pool, and the retirement fix only keeps the old one alive for the lists that recorded with it.
-- P5.13: the census still reads 40-170 engine draws a frame (cloud layers, DCLF residue in load windows, refraction
-  normals, particles, distant tree LOD), so the latch stays off.
+- P5.13: settled windows read 40 engine draws a frame (the sky's cloud layers 23, ImageSpace's SAO composite and VL apply,
+  DCLF's refraction normals and master particles); the latch stays default off until load windows skip nothing.
+- The cloud layers on the graph are not verified: weather blending still differs between sky-river runs.
 - ImageSpace left on D3D11: the distant blur (its output is `kFRAMEBUFFER`), `Main::RenderWaterEffects`' copies (a
   queued texture each), refraction's late shape (it joins at the next cell change).
 - Dragonsreach is darker with the ImageSpace port on (`imagespace-sao-ssr-org1.env`); likely the eye adaptation chain
