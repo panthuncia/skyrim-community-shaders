@@ -264,17 +264,32 @@ thread. So the free never returned.
 
 **What ORG changed.**
 
--   Frees leave the host thread (the deleter thread above). A free there that takes over 100 ms logs
-    `ORG runtime: a deferred free took N ms on the deleter thread`. One still running after a second logs
-    `ORG runtime: the deleter thread has been in one free for N ms` at the next hand-off.
+-   Frees leave the host thread (the deleter thread above). One still running after a second logs
+    `ORG runtime: the deleter thread has been in one free for N ms` at the next hand-off. A batch that took over 100 ms logs
+    `ORG runtime: freeing a batch of ... took N ms`.
 -   The deletion frontier also covers the values external streams signal after their own uses of ORG objects
     (`Runtime::NoteExternalPoint`). Descriptor releases already waited for DCLF's CPU-frame timeline; deletions did not. A buffer
     the CPU pipeline's direct draws read in DXVK's command buffer could be freed once ORG's own values were reached, before those
     draws ran.
 -   A deferred deletion batch is not sealed while a submission holds values it has not published yet (`Runtime::AssignmentScope`).
 
-**What is left.** DXVK's own D3D11 work that reads an ORG resource (a graph resource's D3D11 export) after the last ORG value in
-DXVK's stream is still not covered by any ORG timeline. The allocator (`extern/BasicRHI`, `rhi_allocator.cpp`) runs the driver free
+**Reading a slow free.** Every retired object's free that takes over 100 ms logs one line,
+`ORG runtime: freeing <kind> '<name>' (<bytes> bytes) took N ms on the <deleter|calling> thread`, with:
+
+-   where it was marked (the `MarkForDelete` caller; a backing's name is its resource's), where its batch was sealed and how long
+    before the free, and where it was retired;
+-   the frontier it was sealed with: each point's sealed value and its timeline's completed value at the free. `queue#n` are the
+    runtime's queues in registration order (graphics, compute, copy, each once when kinds share a queue, then the upload queue); `host timeline#0..2` the host's graphics, compute and
+    copy timelines; `external#n` a value noted by `NoteExternalPoint` (DCLF's CPU-frame timeline);
+-   every timeline's last value and completed value now;
+-   a verdict. `A sealed point is not reached` means a gap in the frontier: the object was retired while GPU work still used it.
+    `Every sealed point was reached` means the free waited for something else: other queued GPU work (a queue whose last value
+    is above its completed one, often work waiting before a signal), or the kernel's paging under memory pressure.
+
+The first 100 are logged, then one in 100.
+
+**What is left.** D3D11 exports are released through `RenderGraphRuntime::ReleaseAfterD3D11`, which waits for D3D11's last use
+before the graph resource is dropped; nothing ORG-side covers a D3D11 reader that bypasses it. The allocator (`extern/BasicRHI`, `rhi_allocator.cpp`) runs the driver free
 under its own mutexes, so a free blocked on the deleter thread also blocks other threads' allocations from the same allocator.
 
 ## External commands in DXVK's command buffer
