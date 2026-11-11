@@ -1472,6 +1472,11 @@ From P5.8/P5.9 (`docs/development/p5/menus.md`). Two needs a menu scene's view b
     back (1,790 displays in a loading run). It now maps to `VK_FORMAT_A8_UNORM_KHR`. DXVK stores A8 as R8 with a (0, 0, 0, R) swizzle
     on a device without that format; an import must then name the format DXVK chose (`DxvkOrgInteropImageInfo::viewFormat`), not the
     DXGI view's. A BasicRHI query for a format's support, or the interop info naming the RHI format, would make this general.
+    **Done (Phase 5 review):** `rhi::Device::QueryFormatSupport` (device ABI 16) reports a format's usage, the format the backend
+    stores it in and the swizzle its views add. The Vulkan backend keeps a per-device remap table with DXVK's rules (A8 as R8 read
+    as (0, 0, 0, R); the D24 family as D32S8 where D24S8 is no depth attachment), applies it to resources, views and attachments,
+    and refuses storage and render target views of a format stored with its channels moved. Callers name the D3D11 view's format;
+    GpuTextures passes DXVK's swizzle only where BasicRHI adds none (`ViewMappingOf`). Phase 6, without DXVK, keeps the rule.
   - **Several render passes in one client pass:** a filter writes a temp target, reads it in the next pass, and so on, all inside
     one display. ORG declares one use per resource per pass, so this is either a pass per filter pass (a client that registers
     passes per display shape: rebuilds) or one pass that records render passes on its own images with its own barriers between
