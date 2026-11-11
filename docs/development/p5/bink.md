@@ -211,7 +211,7 @@ meanwhile.
 
 Scenarios (`tools/cs-ab/scenarios/`):
 
-- `bink-org0.env`: the engine's path, `PlayBink` at frame 600, shots `bink-40.png` and `bink-120.png`, a game shot after.
+- `bink-org0.env`: the engine's path, `dclf:bink=BGS_Logo.bik` at frame 600, shots `bink-40.png` and `bink-120.png`, a game shot after.
 - `bink-org1.env`: the same with `CS_ORG_BINK=1`.
 
 What to check:
