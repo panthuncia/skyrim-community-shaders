@@ -1,7 +1,9 @@
 # P5.12: the loading screen and the startup logo on the render graph
 
-Status: written, not built or run yet. Switch: `CS_ORG_LOADING_THREAD=1` (default off: anchors run on the main thread only,
-as before).
+Status: built and run in game (2026-11-11), in the `loading-org1` runs and with every port on (`p5-all.env`, runs
+`1111-063518-p35-p5-all-r1` and `1111-064846-p35-p5-all-w2`): each load logs the serving thread's claim and `the load ended`,
+the main thread takes the frame back after it, and the startup logo is drawn by the graph. Switch: `CS_ORG_LOADING_THREAD=1`
+(default off: anchors run on the main thread only, as before).
 
 ## What the engine does (Ghidra, SE 1.5.97 and AE 1.6.1170)
 
@@ -174,8 +176,9 @@ In org1's log:
 
 1. `[ORG] render ownership: the CS_ORG_LOADING_THREAD rule is on`.
 2. At the logo: `[ORG] render ownership: thread N (holding Renderer::Lock) takes it from thread M`. Bink's `a WxH movie
-   ended: G frames drawn by the render graph` has G near 166 only if the client was registered before the logo (State::Setup);
-   not run in game yet with the session-long client.
+   ended: G frames drawn by the render graph` has G near 166 only if the client was registered before the logo (State::Setup).
+   With the session-long client: 164 by the graph and 2 by the engine in `1111-063518-p35-p5-all-r1`, 165 and 1 in
+   `1111-064846-p35-p5-all-w2`.
 3. Per load: `[ORG] loading screen: the serving thread renders until the load ends`, a claim by the serving thread, then
    `[ORG] loading screen: the load ended (K ownership changes); the main thread renders again`.
 4. **No** `UploadInstance '...' called off the owner thread` line, **no** `PublishedResources used on thread` line, and no

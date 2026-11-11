@@ -243,8 +243,10 @@ Not checked without a build: compilation, and AE (the IDs and layouts are the sa
 
 ## Open points
 
-- The startup logo on the graph: P5.12's `CS_ORG_LOADING_THREAD=1` (above). It has not been run in game, and the client now
-  registers at `State::Setup`, which may come after the logo: then the logo is the engine's.
+- The startup logo on the graph: P5.12's `CS_ORG_LOADING_THREAD=1` (above). It has run in game: with every port on, the logo
+  drew 164 of its 166 frames on the graph (`1111-063518-p35-p5-all-r1`; 165 in `1111-064846-p35-p5-all-w2`), the first
+  ones the engine's while the client joins. The client registers at `State::Setup`; if that ever comes after the logo, the
+  logo is the engine's.
 - HDR output's UI texture as the target.
 - Mode 2 movies (inside another frame) need their draw at the point of `DrawTiles`, not at the Present: an anchor at that
   point, or a draw into the frame's own epoch.

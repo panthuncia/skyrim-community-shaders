@@ -9,7 +9,7 @@ shaders `package/Shaders/Scaleform/`, behind `CS_ORG_SCALEFORM=1` (default off).
 
 - **Built (wave 1):** every display of the HUD and of menus that use solid, bitmap and gouraud fills, glyphs (`DrawBitmaps`),
   blend modes, the blend stack and stencil masks, drawn on the render owner onto the framebuffer or HDR's UI texture.
-- **Built (P5.10 finish, 2026-11-11, code only):**
+- **Built (P5.10 finish, 2026-11-11; run in game since):**
   - The texture fallback ("a texture's view cannot be resolved", about 1,790 displays a loading-screen run) was **one texture**:
     GFx's glyph cache, an `A8_UNORM` texture, whose view BasicRHI could not describe (`[DCLF] Game texture view not supported:
     format 65, dimension 4`, the only such line in every run). Every display with text fell back. BasicRHI now has `A8_UNorm`
@@ -26,14 +26,16 @@ shaders `package/Shaders/Scaleform/`, behind `CS_ORG_SCALEFORM=1` (default off).
   parts above. In the 15 runs before this change (HUD, inventory, map, journal, loads) **no** filter, render target, line strip
   or render-texture display appeared at all; the census line says how often they occur now.
 - **Shaders:** all 53 embedded sources are transcribed and checked (below, "Shaders"); `FILTER` 23/24 now have a C++ user.
-- **Run in game:** in the last P5.10 run 3,996 of 4,000 displays were drawn on the graph. No menu in the test runs made a D3D11
-  part, so that path has not run; `CS_ORG_SCALEFORM_D3D11_PARTS=N` forces every Nth draw into one (scenario
-  `scaleform-org1-parts.env`).
-- **Phase 5 review fixes (2026-11-11, code only):** GFx's textures are made through the guest device's interception point
+- **Run in game:** in the last P5.10 run 3,996 of 4,000 displays were drawn on the graph. No menu in the test runs makes a
+  D3D11 part on its own, so `CS_ORG_SCALEFORM_D3D11_PARTS=N` forces every Nth draw into one (scenario
+  `scaleform-org1-parts.env`). That path has run: in `1111-061333-p35-scaleform-org1-parts-f5`, of 11,000 displays 6,835
+  were drawn on the graph with D3D11 parts, 4,151 on the graph alone and 14 on D3D11. With every port on
+  (`1111-063518-p35-p5-all-r1`), 10,982 of 11,000 displays were drawn on the graph, none with a D3D11 part.
+- **Phase 5 review fixes (2026-11-11; in the `scaleform-org1-r1` to `-r4` and `p5-all-r1` runs):** GFx's textures are made through the guest device's interception point
   instead of a device vtable patch; A8 goes through BasicRHI's format remap; the D3D11 blend stack is rebuilt for each part;
   a segment starts from the renderer's live arrays; kept calls are plain records that replay from the staging bytes; the
   capture is touched only on the render owner.
-- **Phase 5 review fixes, wave 2 (2026-11-11, code only):** the Interface pass draws through a `RunGate` (one entry per command,
+- **Phase 5 review fixes, wave 2 (2026-11-11; in `1111-064846-p35-p5-all-w2`, 8,985 of 9,000 displays on the graph):** the Interface pass draws through a `RunGate` (one entry per command,
   opened in the commit) with its frames handed over by `RunSlots` and its staging from `FrameStaging`; the client registers once
   with the framebuffer's and HDR's UI texture's surfaces and joins through `RequestJoin`; a surface goes only when the engine
   released its texture; displays without masks draw in a pass without the depth-stencil; the pipelines come from a
