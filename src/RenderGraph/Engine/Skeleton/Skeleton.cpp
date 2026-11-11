@@ -15,6 +15,7 @@ bool RenderGraph::Engine::Skeleton::Requested()
 #	include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
 
 #	include "Globals.h"
+#	include "State.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/RasterProgram.h"
@@ -52,6 +53,15 @@ namespace RenderGraph::Engine::Skeleton
 		constexpr std::uint32_t kGateEntries = 128;
 		// Times a group (or the copy) may be built again for new engine textures before it stays on D3D11 for the session.
 		constexpr std::uint32_t kMaxResets = 16;
+		// Runs of one skeleton anchor per frame (between two Presents). Each run of an epoch takes the next slot of the epoch's ring
+		// of kGameFramesInFlight, and a slot's next preparation waits on the host thread for its last run's GPU work. That work is in
+		// DXVK's stream, which reaches the GPU only at DXVK's next flush (the Present). The host prepares the next ticket right after a
+		// submission, so with R runs a frame the preparation after the frame's last run waits for the run kGameFramesInFlight - 1
+		// before it: from the frame before only while R < kGameFramesInFlight. With more, the host waits for work this frame has not
+		// submitted, the render thread waits for the host at its next epoch, and the frame deadlocks. Runs past the budget get the
+		// engine's D3D11 calls.
+		constexpr std::uint32_t kRunsPerFrame = RenderGraphRuntime::kGameFramesInFlight - 1;
+		static_assert(kRunsPerFrame >= 1);
 		// Clear passes per view (one per clear value): a view whose clear colour keeps changing stays on D3D11 instead of using up
 		// its group's gate entries.
 		constexpr std::size_t kMaxKeysPerTarget = 4;
@@ -185,6 +195,31 @@ namespace RenderGraph::Engine::Skeleton
 			UINT8 stencil = 0;
 		};
 
+		/** @brief One anchor's runs this frame (kRunsPerFrame). */
+		struct RunBudget
+		{
+			std::uint32_t frame = ~0u;
+			std::uint32_t runs = 0;
+			std::uint64_t refused = 0;  // runs refused over the session (logged once)
+
+			/** @brief Whether the anchor may run once more this frame; counts the run when it may. */
+			bool Take(const char* a_what)
+			{
+				const std::uint32_t now = globals::state ? globals::state->frameCount : 0u;
+				if (frame != now) {
+					frame = now;
+					runs = 0;
+				}
+				if (runs < kRunsPerFrame) {
+					++runs;
+					return true;
+				}
+				if (refused++ == 0)
+					logger::info("[ORG] engine skeleton: {} needed more than {} runs in one frame; the rest of such a frame's use D3D11", a_what, kRunsPerFrame);
+				return false;
+			}
+		};
+
 		struct GroupState
 		{
 			std::vector<Entry> entries;
@@ -198,6 +233,7 @@ namespace RenderGraph::Engine::Skeleton
 			bool announced = false;   // the first clear on the graph was logged
 			std::uint32_t resets = 0;
 			std::uint64_t taken = 0, replayed = 0;
+			RunBudget budget;
 		};
 
 		struct CopyState
@@ -208,6 +244,7 @@ namespace RenderGraph::Engine::Skeleton
 			bool failed = false;
 			bool announced = false;
 			std::uint32_t resets = 0;
+			RunBudget budget;
 		};
 
 		struct SkeletonState
@@ -648,6 +685,8 @@ namespace RenderGraph::Engine::Skeleton
 				if (!RegisterCopy(source, target))
 					return false;
 			}
+			if (!copy.budget.Take("the depth copy"))
+				return false;
 			copy.wanted = true;
 			copy.executed = false;
 			auto& state = Skel();
@@ -763,7 +802,7 @@ namespace RenderGraph::Engine::Skeleton
 					continue;
 				group.executed = false;
 				state.flushing = true;
-				const bool ran = group.registered && FrameAnchors::Run(kGroupAnchors[i]);
+				const bool ran = group.registered && group.budget.Take(FrameAnchors::Name(kGroupAnchors[i])) && FrameAnchors::Run(kGroupAnchors[i]);
 				state.flushing = false;
 				// The executed signal says the run's graph held this registration's passes; without it (a graph built before the last
 				// entry joined, a failed run, a call off the main thread) the engine's clears are made here, in their order.
