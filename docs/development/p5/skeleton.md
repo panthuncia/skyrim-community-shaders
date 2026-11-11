@@ -92,16 +92,16 @@ the Present. With every shadow clear batch a run of its own, `EngineShadowClear`
 waited in `WaitSlot` for a run of the same frame that was still unsubmitted, and the render thread waited for that host in
 `WaitTicket` (the first skeleton-org1 run: black screen, watchdog).
 
-So each skeleton anchor runs at most `kGameFramesInFlight - 1` (3) times between two Presents (`RunBudget`, counted by
-`State::frameCount`). With R runs a frame, the preparation after the frame's last run waits for the run three before it, which
-is in the frame before only while R is at most 3. Clears and copies past the budget get the engine's D3D11 calls (logged once:
-`... needed more than 3 runs in one frame`). In practice: the reflection faces (two a frame) and the depth copies fit; the
-frame's first three shadow-view clears and the first three other clear batches are on the graph, the rest on D3D11, so some of
-the tripwire's clear lines stay (they then name `CommunityShaders.dll`).
+The fix is in ORG's host: an epoch that runs many times a frame has a ring that grows (`GraphHost::Desc::epochRuns`). The
+skeleton's anchors are listed with their runs a frame in the anchor table (`FrameAnchors.cpp`: `EngineShadowClear` 8,
+`EngineFrameClear` 8, `EngineCubeClear` 4, `EngineDepthCopy` 3; `ReflectionsPrepass` 2 too). Each such ring holds
+`kGameFramesInFlight` (4) times that many slots and starts with 4. When the slot a run would take next ran less than three
+Presents ago, the ring takes one slot more instead of waiting, so the host's thread waits only for runs earlier Presents
+flushed. A frame with more runs of an anchor than its whole ring (32 shadow clears) is the only limit left: the runs past it get
+the engine's D3D11 calls (logged once: `... ran more than its 32 frame slots in one frame; runs past them fall back until the
+next Present`). The skeleton has no cap of its own any more.
 
-The way to more: an anchor that may run many times a frame needs a ring of its own size (ORG: slots per epoch), or the clears
-batched into fewer runs (a shadow view's clear moved earlier, to one run before the shadow maps, needs the frame's slices
-known in advance). Both are open. Other multi-run anchors (ReflectionsPrepass) are under the same rule.
+This issue exists only because, in the guest phase, each anchor is a separate host epoch spliced into DXVK's stream, which DXVK submits at Present. Once ORG owns the frame (the Phase 6 cutover), these clears and the other per-call engine work are passes inside one frame graph, and the slot-per-run ring no longer applies.
 
 ## Fallback
 
@@ -111,7 +111,7 @@ Per call, the engine's D3D11 call is made (in the original order, at the flush, 
 - the view is new (its pass is made and registered at the flush; its first clear stays on D3D11);
 - the run did not hold the pass: the anchor's `executed` signal did not come (a graph built before the pass joined, a failed
   epoch, a call off the main thread such as a loading screen);
-- the anchor already ran three times this frame (above);
+- the anchor ran more times this frame than its ring of slots holds (above);
 - the group failed (anchor failure, 128 gate entries used up, more than 16 rebuilds for new textures) or a view's clear value
   kept changing (more than 4 values: that view stays on D3D11).
 
@@ -126,8 +126,7 @@ with `CS_ORG_ENGINE_SKELETON=1`).
 - Log: `engine skeleton: 11 of 11 engine call sites patched, Renderer::ClearColor detoured`, the `joins the ... anchor` lines,
   `the first shadow/cube/frame clears ran on the graph`, `the main depth is copied into kPOST_ZPREPASS_COPY on the graph`. No
   `[E]`, no `the ... anchor failed`, no `stays on D3D11` for the targets below.
-- Tripwire lines that should disappear (the first three batches of a frame per anchor; later ones stay, from
-  `CommunityShaders.dll`): `ClearDepthStencilView` from 77247+0x18a, 77386+0x1c2 and 77252+0x4f;
+- Tripwire lines that should disappear: `ClearDepthStencilView` from 77247+0x18a, 77386+0x1c2 and 77252+0x4f;
   `ClearRenderTargetView` from 77247+0x8b, 77247+0xe7, 77386+0xf7, 36559+0x6df and 36559+0x712; `CopyResource` from
   107139+0xa46. The binds' `OMSetRenderTargets` lines now name `CommunityShaders.dll` (the bind thunk makes the call); so does
   any fallback clear. 107193+0x466 and 77453+0x54 stay.

@@ -46,7 +46,9 @@ light culling is the first feature that does this. Its D3D11 path stays in place
     work: the "ticket wait" in `CS_ORG_EPOCH_STATS`, on the host's thread, which the render thread sees only when the ring
     is shorter than the CPU's lead over the GPU. The ring used to be a fixed 16 slots: the reflection faces' sixth epoch
     shortened it to 2.7 frames, and every few frames the render thread waited 2-7 ms on whichever epoch came round
-    (p99 frame time 25 ms instead of 12). Sized by the epochs, a new segment needs no change here.
+    (p99 frame time 25 ms instead of 12). Sized by the epochs, a new segment needs no change here. With async epochs each
+    epoch has a ring of its own; an anchor that runs several times a frame has a ring that grows (below, "Frames in flight"
+    under the frame anchors).
 
 ## Ordering against D3D11
 
@@ -530,10 +532,19 @@ FrameAnchors::Register({ .id = "cs.myfeature",
     rebuild them (`RenderGraphRuntime::IsDclfSegment`).
 -   **Cost.** An anchor nobody reserved has no epoch: no graph, no frame slots, and its hook is one load. A reserved anchor whose
     clients are all inactive (`active`) submits nothing at its hook; its ticket waits, prepared, for the next run.
--   **Frames in flight.** The host's frame slots are frames in flight times the epochs, so every reserved anchor adds
-    `kGameFramesInFlight` slots. Size `LatchBlock`s from `GraphHost::FrameSlots()` after the runtime is up, as LLF does. An anchor that
-    runs several times a frame (`ReflectionsPrepass`, at each cubemap render) uses its ring that much faster, and may wait for a
-    slot when the CPU is far ahead of the GPU.
+-   **Frames in flight.** The host's frame slots are frames in flight times the epochs' runs a frame, so every reserved anchor
+    adds `kGameFramesInFlight` slots, times its `runsPerFrame` (the anchor table in `FrameAnchors.cpp`). Size `LatchBlock`s from
+    `GraphHost::FrameSlots()` after the runtime is up, as LLF does: it is fixed once the host exists.
+    -   **Anchors that run several times a frame** (`ReflectionsPrepass` at each cubemap render, the engine skeleton's clears
+        and depth copy) are listed with their runs a frame (`GraphHost::Desc::epochRuns`, from `FrameAnchors::RunsPerFrame`).
+        Each run takes a slot of the anchor's ring, and the host's thread waits for a slot's last run before it prepares the
+        slot again. A run's work is in DXVK's stream until Present, so waiting for a run of the same frame deadlocks: the
+        host's thread waits for work DXVK has not submitted while the render thread waits for the host's thread. A listed
+        anchor's ring grows instead (up to `kGameFramesInFlight` times its runs), and waits only for runs at least three
+        Presents old (`SealPresented` counts them). A frame with more runs than the whole ring makes `ExecuteEpoch` return
+        false for the rest (`EpochRingFullError`, logged once: `... ran more than its N frame slots in one frame`), and
+        `FrameAnchors::Run`'s callers fall back for those runs. Nothing hangs.
+    -   This issue exists only because, in the guest phase, each anchor is a separate host epoch spliced into DXVK's stream, which DXVK submits at Present. Once ORG owns the frame (the Phase 6 cutover), these clears and the other per-call engine work are passes inside one frame graph, and the slot-per-run ring no longer applies.
 -   **The main thread only.** A loading screen presents from a job thread (SE 38085) while the main thread loads. Anchors run
     only on the main thread (`FrameAnchors::OnMainThread`, latched in `SKSEPlugin_Load`): at a loading screen's Present `Run`
     returns false and one-shot passes wait for the next main-thread frame. Per-Present work that feeds an anchor checks the same
