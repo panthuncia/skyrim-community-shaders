@@ -203,11 +203,9 @@ void State::Draw()
 		if (currentShader && updateShader) {
 			if (currentShader->shaderType.get() == RE::BSShader::Type::Utility) {
 				if (currentPixelDescriptor & static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmask)) {
-					ID3D11ShaderResourceView* shadowMap = nullptr;
-					context->PSGetShaderResources(4, 1, &shadowMap);
-					OnShadowMaskDraw(shadowMap);
-					if (shadowMap)
-						shadowMap->Release();
+					// The sun's shadow cascades, from the engine's shadow state: the flush has just applied it (the same view as PS t4),
+					// and under the flush latch (P5.13) it bound nothing. DXVK's view, as ShadowMaskCapture gives it.
+					OnShadowMaskDraw(RenderGraph::Engine::Tripwire::Unwrap(globals::game::shadowState->GetRuntimeData().PSTexture[4]));
 				}
 			}
 		}
