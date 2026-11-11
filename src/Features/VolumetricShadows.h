@@ -66,8 +66,11 @@ public:
 	/** @brief Releases and recompiles all compute shaders. */
 	virtual void ClearShaderCache() override;
 
-	/** @brief Copies and downsamples the directional shadow map, then applies Gaussian blur filtering. */
-	void CopyShadowLightData();
+	/**
+	 * @brief Copies and downsamples the directional shadow map (a_shadowMap, the shadow mask's t4: the cascades), then applies Gaussian
+	 * blur filtering. At the sun's shadow mask draw (State::OnShadowMaskDraw).
+	 */
+	void CopyShadowLightData(ID3D11ShaderResourceView* a_shadowMap);
 
 	virtual void LoadSettings(json& o_json) override;
 	virtual void SaveSettings(json& o_json) override;

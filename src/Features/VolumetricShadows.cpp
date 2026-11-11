@@ -77,7 +77,7 @@ void VolumetricShadows::ClearShaderCache()
 	blurShadowVerticalCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\VolumetricShadows\\BlurShadowCS.hlsl", defines, "cs_5_0"));
 }
 
-void VolumetricShadows::CopyShadowLightData()
+void VolumetricShadows::CopyShadowLightData(ID3D11ShaderResourceView* a_shadowMap)
 {
 	ZoneScoped;
 	TracyD3D11Zone(globals::state->tracyCtx, "VolumetricShadows::CopyShadowLightData");
@@ -92,8 +92,9 @@ void VolumetricShadows::CopyShadowLightData()
 
 		// The render graph path (CS_ORG_VOLUMETRIC_SHADOWS=1): its passes ran at EarlyPrepass; only the binding happens here.
 		if (auto& orgPath = ORGVolumetricShadows::Get(); orgPath.IsActive()) {
-			ID3D11ShaderResourceView* shadowMap = nullptr;
-			context->PSGetShaderResources(4, 1, &shadowMap);
+			ID3D11ShaderResourceView* shadowMap = a_shadowMap;
+			if (shadowMap)
+				shadowMap->AddRef();
 			orgPath.CheckShadowMaskInput(shadowMap);
 			const bool active = orgPath.IsActive();
 			if (active)
@@ -104,7 +105,9 @@ void VolumetricShadows::CopyShadowLightData()
 				return;
 		}
 
-		context->PSGetShaderResources(4, 1, &shadowView);
+		shadowView = a_shadowMap;
+		if (shadowView)
+			shadowView->AddRef();
 
 		// Downsample shadow texture array to fixed 512x512 (mip1: 256x256)
 		if (shadowView) {

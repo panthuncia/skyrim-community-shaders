@@ -828,11 +828,11 @@ void Skylighting::RenderOcclusion()
 	}
 }
 
-void Skylighting::CaptureShadowCascadeSRV()
+void Skylighting::CaptureShadowCascadeSRV(ID3D11ShaderResourceView* a_shadowMap)
 {
-	auto context = globals::d3d::context;
-	ID3D11ShaderResourceView* srv = nullptr;
-	context->PSGetShaderResources(4, 1, &srv);
+	ID3D11ShaderResourceView* srv = a_shadowMap;
+	if (srv)
+		srv->AddRef();
 	if (shadowCascadeSRV)
 		shadowCascadeSRV->Release();
 	shadowCascadeSRV = srv;

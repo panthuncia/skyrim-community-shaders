@@ -90,6 +90,13 @@ public:
 
 	/** @brief Per-draw-call hook: updates feature state, constant buffers, and overlay. */
 	void Draw();
+
+	/**
+	 * @brief The sun's shadow mask draw (a Utility RenderShadowmask pass): the features that take the shadow cascades from it
+	 * (a_shadowMap, its t4) take them now. Draw calls it for a draw that reaches D3D11, and Drawcall Limit Fix's shadow mask family
+	 * for a draw it takes onto the render graph (that draw never reaches SetDirtyStates' hook). Render thread.
+	 */
+	void OnShadowMaskDraw(ID3D11ShaderResourceView* a_shadowMap);
 	/** @brief Accumulates per-shader-type draw call counts and frame timing for the performance overlay. */
 	void Debug();
 	/** @brief Per-frame reset: advances timer, caches menu state, resets descriptors and frame counters. */

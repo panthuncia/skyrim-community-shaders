@@ -140,6 +140,16 @@ void State::UpdateEffectShaderPermutation(RE::BSRenderPass* a_pass)
 	}
 }
 
+void State::OnShadowMaskDraw(ID3D11ShaderResourceView* a_shadowMap)
+{
+	if (globals::features::volumetricShadows.loaded)
+		globals::features::volumetricShadows.CopyShadowLightData(a_shadowMap);
+	if (globals::features::exponentialHeightFog.loaded)
+		globals::features::exponentialHeightFog.CaptureDirectionalShadowMap(a_shadowMap);
+	if (globals::features::skylighting.loaded)
+		globals::features::skylighting.CaptureShadowCascadeSRV(a_shadowMap);
+}
+
 void State::Draw()
 {
 	ZoneScoped;
@@ -153,8 +163,6 @@ void State::Draw()
 	auto& skin = globals::features::skin;
 	auto& truePBR = globals::features::truePBR;
 	auto context = globals::d3d::context;
-	auto& volumetricShadows = globals::features::volumetricShadows;
-	auto& skylighting = globals::features::skylighting;
 
 	if (shaderCache->IsEnabled()) {
 		if (terrainBlending.loaded && terrainBlending.settings.Enabled) {
@@ -195,12 +203,11 @@ void State::Draw()
 		if (currentShader && updateShader) {
 			if (currentShader->shaderType.get() == RE::BSShader::Type::Utility) {
 				if (currentPixelDescriptor & static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmask)) {
-					if (volumetricShadows.loaded)
-						volumetricShadows.CopyShadowLightData();
-					if (globals::features::exponentialHeightFog.loaded)
-						globals::features::exponentialHeightFog.CaptureDirectionalShadowMap();
-					if (skylighting.loaded)
-						skylighting.CaptureShadowCascadeSRV();
+					ID3D11ShaderResourceView* shadowMap = nullptr;
+					context->PSGetShaderResources(4, 1, &shadowMap);
+					OnShadowMaskDraw(shadowMap);
+					if (shadowMap)
+						shadowMap->Release();
 				}
 			}
 		}

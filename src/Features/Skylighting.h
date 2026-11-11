@@ -130,7 +130,8 @@ public:
 	void ReleaseProbeVolumes();
 	/** @brief The probe update on the render graph (CS_ORG_SKYLIGHTING=1), its volumes then replacing the D3D11 ones; false: D3D11's dispatch. */
 	bool UpdateProbesOnGraph();
-	void CaptureShadowCascadeSRV();
+	/** @brief Keeps a_shadowMap, the sun's shadow cascades (the shadow mask's t4). */
+	void CaptureShadowCascadeSRV(ID3D11ShaderResourceView* a_shadowMap);
 
 	std::chrono::time_point<std::chrono::system_clock> lastUpdateTimer = std::chrono::system_clock::now();
 

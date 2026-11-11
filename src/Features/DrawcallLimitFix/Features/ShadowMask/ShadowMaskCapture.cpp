@@ -17,6 +17,7 @@
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/PublishedResources.h"
+#include "ShaderCache.h"
 #include "State.h"
 #include "Utils/Logging.h"
 
@@ -211,10 +212,10 @@ namespace DCLF::Features::ShadowMask
 		void Refuse(Capture& a_capture, std::string_view a_reason)
 		{
 			a_capture.failed = true;
-			auto& last = a_capture.lastRefusal[static_cast<std::size_t>(a_capture.view)];
-			last = a_reason;
+			auto& lastReason = a_capture.lastRefusal[static_cast<std::size_t>(a_capture.view)];
+			lastReason = a_reason;
 			if (!a_capture.refusalDetail.empty())
-				last += std::format(" ({})", a_capture.refusalDetail);
+				lastReason += std::format(" ({})", a_capture.refusalDetail);
 			Refusals().Report(std::format("a {} draw: {}", NameOf(a_capture.view), a_reason), a_capture.probe ? "found by a probe" : "");
 		}
 
@@ -342,6 +343,10 @@ namespace DCLF::Features::ShadowMask
 			if (capture.probe)
 				return false;
 			Engine::ApplyPendingState();
+			// The draw no longer reaches SetDirtyStates' hook (State::Draw), where Volumetric Shadows, Exponential Height Fog and
+			// Skylighting take the sun's shadow cascades from its t4: give them here.
+			if (globals::state->currentPixelDescriptor & static_cast<std::uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmask))
+				globals::state->OnShadowMaskDraw(Unwrap(RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().PSTexture[4]));
 			return true;
 		}
 

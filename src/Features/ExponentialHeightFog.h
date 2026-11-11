@@ -44,8 +44,8 @@ public:
 	virtual void LoadSettings(json& o_json) override;
 	virtual void SaveSettings(json& o_json) override;
 
-	/** @brief Captures the current directional shadow map SRV for use in volumetric fog light scattering. */
-	void CaptureDirectionalShadowMap();
+	/** @brief Keeps a_shadowMap, the directional shadow map (the shadow mask's t4), for volumetric fog light scattering. */
+	void CaptureDirectionalShadowMap(ID3D11ShaderResourceView* a_shadowMap);
 
 	struct alignas(16) Settings
 	{
