@@ -16,6 +16,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/Engine/Constants/EngineConstants.h"
+#	include "RenderGraph/Engine/Flush/Flush.h"
 #	include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #	include "RenderGraph/Engine/Pipeline/StateConversion.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -28,16 +29,19 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "ShaderCache.h"
 #	include "State.h"
 #	include "Utils/Logging.h"
+#	include "Utils/SharedShaderStore.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
 #	include <Resources/ExternalTextureResource.h>
+#	include <rhi_helpers.h>
 
 #	include <algorithm>
 #	include <array>
 #	include <cctype>
 #	include <cmath>
 #	include <filesystem>
+#	include <fstream>
 #	include <map>
 #	include <memory>
 #	include <optional>
@@ -55,17 +59,19 @@ namespace RenderGraph::Engine::ImageSpace
 		using FrameAnchors::Anchor;
 		namespace Constants = RenderGraph::Engine::Constants;
 		namespace Pipeline = RenderGraph::Engine::Pipeline;
+		// The flush latch's allowed engine draws (Flush.h). Named Latch here: Flush is this file's batch run.
+		namespace Latch = ::RenderGraph::Engine::Flush;
 		using Effects = RE::ImageSpaceManager;
 
 		constexpr const char* kClientId = "cs.engine.imagespace";
-		// Gate entries (one per pass). Every registration numbers its passes from 0 by their place in the frame; no draw is taken
-		// between a registration and the graph that holds it (Phase::Joining), so an older graph never runs with a newer latch.
+		// Gate entries (one per pass, numbered by the shapes' place in the frame).
 		constexpr std::uint32_t kGateEntries = 256;
-		// Frames in a cell without a new shape before the first registration: the luminance chain alternates its last targets
-		// every frame, and effects that follow the weather or the camera show up within a few seconds.
-		constexpr std::uint32_t kLearnFrames = 120;
 		// SRV slots a shader file's ORG push block lists at most (t0..t(n-1); its samplers and UAVs follow).
 		constexpr std::uint32_t kMaxSlots = 5;
+		// The shape manifest: a shape not seen for this many sessions is dropped, and it is written at most this often.
+		constexpr std::uint32_t kManifestSessions = 16;
+		constexpr std::uint32_t kManifestWriteFrames = 300;
+		constexpr std::uint32_t kManifestVersion = 1;
 
 		/**
 		 * @brief How a ShapeKey names an input: an engine render target (its RE::RENDER_TARGET), or with one of these bits an engine
@@ -91,6 +97,9 @@ namespace RenderGraph::Engine::ImageSpace
 		/** @brief The engine target index of a name (without its kind and mip bits). */
 		constexpr std::uint32_t IndexOfName(std::int32_t a_name) { return static_cast<std::uint32_t>(a_name & kInputIndexMask); }
 
+		/** @brief The name without its mip bits: the texture it imports. */
+		constexpr std::int32_t ImportOfName(std::int32_t a_name) { return a_name < 0 ? a_name : (a_name & ~kMipBits); }
+
 		/** @brief The mip a name views, or AnchorPasses::kAllMips for the target's own view. */
 		constexpr std::uint32_t MipOfName(std::int32_t a_name)
 		{
@@ -102,7 +111,7 @@ namespace RenderGraph::Engine::ImageSpace
 		struct EffectInfo
 		{
 			Effects::ImageSpaceEffectEnum id;  // its index in ImageSpaceManager::effects (ImageSpaceManager::GetCurrentIndex)
-			std::string_view effectName;       // R4's enum name
+			std::string_view effectName;       // R4's enum name, also its name in the shape manifest
 			std::string_view group;            // for CS_ORG_IMAGESPACE_EFFECTS
 			const char* source;                // under Data/Shaders
 			std::uint32_t slots;               // the source's SRV count in its ORG resource list
@@ -112,13 +121,15 @@ namespace RenderGraph::Engine::ImageSpace
 			bool compute = false;              // a compute shader (BSImagespaceShader::DispatchComputeShader): one UAV, CS b0
 			// Drawn outside every scope (ScopeKind::Effect): the effect's own call is its scope, and its batch runs at the call's end.
 			bool ownScope = false;
+			std::uint32_t targets = 1;  // render targets it writes (SV_Target0..): 2 for ISWaterBlend
 		};
 
 		// The engine slots and their names are R4's (engine-d3d11-surface.md); the read masks follow each source's code for the
 		// effect's defines (GetShaderMacros, p5/imagespace-shaders.md).
 		constexpr auto kEffects = std::to_array<EffectInfo>({
 			{ Effects::ISHDRDownSample16, "ISHDRDownSample16", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
-			{ Effects::ISHDRDownSample4, "ISHDRDownSample4", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
+			// Also drawn outside the HDR effect, into kLDR_DOWNSAMPLE0 (Render, 107732): a scope of its own there.
+			{ Effects::ISHDRDownSample4, "ISHDRDownSample4", "hdr", "ISHDR.hlsl", 3, 0b001, 3, 0, false, true },
 			{ Effects::ISHDRDownSample16Lum, "ISHDRDownSample16Lum", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
 			{ Effects::ISHDRDownSample4RGB2Lum, "ISHDRDownSample4RGB2Lum", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
 			{ Effects::ISHDRDownSample4LumClamp, "ISHDRDownSample4LumClamp", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
@@ -136,7 +147,7 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISCompositeLensFlare, "ISCompositeLensFlare", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b10, 2 },
 			{ Effects::ISCompositeLensFlareVolumetricLighting, "ISCompositeLensFlareVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b11, 2 },
 			// RenderSSAO (100520 / 107245), through the explicit-target Render (100951 / 107733). Its composite (ISSAOComposite*) stays
-			// D3D11: CS binds fog, IBL and other feature inputs to it that the engine's texture list does not name.
+			// with the engine: CS binds fog, IBL and other feature inputs to it that the engine's texture list does not name.
 			{ Effects::ISSAOCameraZ, "ISSAOCameraZ", "sao", "ISSAOCameraZ.hlsl", 1, 0b1, 1 },
 			{ Effects::ISMinify, "ISMinify", "sao", "ISSAOMinify.hlsl", 1, 0b1, 1 },
 			{ Effects::ISMinifyContrast, "ISMinifyContrast", "sao", "ISSAOMinify.hlsl", 1, 0b1, 1 },
@@ -152,7 +163,7 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISReflectionBlurVCS, "ISReflectionBlurVCS", "ssr", "ISBlurCS.hlsl", 2, 0b01, 2, 0, true },
 			// The end-of-frame chain's effects (ImageSpaceManager 99023 / 105674): depth of field and the distant blur (t0 the image,
 			// t1 the blurred image, t2 the depth, t3 the average depth unless MASKED, t4 the mask with MASKED), refraction (t1 the
-			// refraction normals) and the radial blur. Each is a scope of its own.
+			// refraction normals) and the radial blur. Each is a scope of its own. The chain's last effect draws into kFRAMEBUFFER.
 			{ Effects::ISDepthOfField, "ISDepthOfField", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false, true },
 			{ Effects::ISDepthOfFieldFogged, "ISDepthOfFieldFogged", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false, true },
 			{ Effects::ISDepthOfFieldMaskedFogged, "ISDepthOfFieldMaskedFogged", "dof", "ISDepthOfField.hlsl", 5, 0b10111, 5, 0, false, true },
@@ -169,40 +180,64 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISDepthOfFieldBlurVCS, "ISDepthOfFieldBlurVCS", "dof", "ISBlurCS.hlsl", 2, 0b11, 2, 0, true, true },
 			// The snow pass's sub-rectangle copy (107734 <- 107217 <- Main::RenderWorld): t0 to u0, no sampler.
 			{ Effects::ISCopySubRegionCS, "ISCopySubRegionCS", "copy", "ISCopySubRegionCS.hlsl", 1, 0b1, 0, 0, true, true },
+			// The water's temporal blend (the explicit-target Render, outside the other scopes): t0 the image, t1 the water history,
+			// t2 the motion vectors, t3 the depth, t4 the water mask; into kMAIN (SV_Target0) and the next history (SV_Target1).
+			{ Effects::ISWaterBlend, "ISWaterBlend", "waterblend", "ISWaterBlend.hlsl", 5, 0b11111, 5, 0, false, true, 2 },
 		});
 
 		/**
-		 * @brief What one pass is made for: the effect's shader, its output and inputs, its samplers, its blend state and its
-		 * viewport. A compute shape's output is the render target behind its UAV (u0); it has no blend state and no viewport.
+		 * @brief The engine blend state a draw uses, by value: its four fields in the engine's blend table (SetDirtyStates' index:
+		 * mode, alpha to coverage, write mode, extra), one byte each. kNoBlend for a dispatch.
+		 */
+		constexpr std::uint32_t kNoBlend = UINT32_MAX;
+
+		constexpr std::uint32_t PackBlend(std::uint32_t a_mode, std::uint32_t a_alphaToCoverage, std::uint32_t a_writeMode, std::uint32_t a_extra)
+		{
+			return (a_mode & 0xFF) | (a_alphaToCoverage & 0xFF) << 8 | (a_writeMode & 0xFF) << 16 | (a_extra & 0xFF) << 24;
+		}
+
+		/** @brief The engine's blend state object of a packed blend (its table entry now), or null. */
+		ID3D11BlendState* BlendStateOf(std::uint32_t a_blend)
+		{
+			if (a_blend == kNoBlend)
+				return nullptr;
+			return Pipeline::EngineBlendState(a_blend & 0xFF, (a_blend >> 8) & 0xFF, (a_blend >> 16) & 0xFF, (a_blend >> 24) & 0xFF);
+		}
+
+		/**
+		 * @brief What one pass is made for, by value (the shape manifest stores it): the effect, its outputs and inputs, its samplers,
+		 * its blend state and its viewport. A compute shape's output is the render target behind its UAV (u0); it has no blend state and
+		 * no viewport.
 		 */
 		struct ShapeKey
 		{
-			const void* shader = nullptr;  // the engine's BSImagespaceShader
-			std::int32_t output = -1;      // RE::RENDER_TARGET, with a mip (WithMip)
+			std::uint32_t effect = 0;   // kEffects index
+			std::int32_t output = -1;   // RE::RENDER_TARGET, with a mip (WithMip)
+			std::int32_t output1 = -1;  // SV_Target1's render target (EffectInfo::targets 2), or -1
 			std::array<std::int32_t, kMaxSlots> inputs{ -1, -1, -1, -1, -1 };  // kDepthInput / kCubeInput, or a render target (with a mip)
 			std::array<std::uint32_t, kMaxSlots> address{};
 			std::array<std::uint32_t, kMaxSlots> filter{};
-			const void* blend = nullptr;  // the engine's ID3D11BlendState for the draw (its state table entry)
+			std::uint32_t blend = kNoBlend;  // PackBlend
 			bool compute = false;
 			std::array<std::uint32_t, 4> viewport{};  // x, y, width, height in the output's pixels (of its mip)
 
-			auto Tie() const { return std::tie(shader, output, inputs, address, filter, blend, compute, viewport); }
+			auto Tie() const { return std::tie(effect, output, output1, inputs, address, filter, blend, compute, viewport); }
 			bool operator<(const ShapeKey& a_other) const { return Tie() < a_other.Tie(); }
 			bool operator==(const ShapeKey& a_other) const { return Tie() == a_other.Tie(); }
 		};
 
-		/** @brief One pass: its immutable spec, made at a registration. */
+		/** @brief One pass: its immutable spec, made at a registration. Its program is taken when the pass is made (a graph build). */
 		struct Spec
 		{
 			ShapeKey key;
-			std::size_t effect = 0;
 			std::uint32_t entry = 0;  // gate entry, latch region (entry * 32) and order key
 			std::string name;
 			std::shared_ptr<org::ExternalTextureResource> output;
+			std::shared_ptr<org::ExternalTextureResource> output1;
 			std::array<std::shared_ptr<org::ExternalTextureResource>, kMaxSlots> inputs;
-			std::shared_ptr<const RasterProgram> program;
-			std::shared_ptr<const ComputeProgram> computeProgram;
 			std::array<std::uint32_t, kMaxSlots> samplers{};  // sampler heap indices
+			rhi::Format format = rhi::Format::Unknown;        // the outputs' render target view formats
+			rhi::Format format1 = rhi::Format::Unknown;
 		};
 
 		/** @brief OrgEngineConstantsAt in Common/OrgEngineConstants.hlsli. */
@@ -225,14 +260,6 @@ namespace RenderGraph::Engine::ImageSpace
 			ConstantsAt at;
 			bool compute = false;
 			std::array<std::uint32_t, 3> groups{};
-		};
-
-		enum class Phase : std::uint8_t
-		{
-			Off,       // not requested, not set up, or failed
-			Learning,  // the engine draws; new shapes are collected
-			Joining,   // registered; the anchor's graph is being built with the client (FrameAnchors::RequestJoin)
-			Live,      // the client's passes draw the shapes they were made for
 		};
 
 		/** @brief The BSImagespaceShader::Render (or DispatchComputeShader) call in progress. */
@@ -263,10 +290,10 @@ namespace RenderGraph::Engine::ImageSpace
 		 * @brief How many batches each kind of scope may start in a frame: its share of the anchor's runs a frame. Each kind has a
 		 * share of its own, so the scopes early in the frame never use up the runs of the ones after them. The SAO and reflection
 		 * passes and the HDR effect have a second run for a batch cut short by a draw the graph does not take. Effect scopes have
-		 * one run per call: the depth-of-field (or distant blur) draw, its two compute blurs, refraction, the radial blur and the
-		 * snow copy. The anchor is sized for the sum (FrameAnchors.cpp, kInfo); Setup checks it.
+		 * one run per call: the depth-of-field (or distant blur) draw, its two compute blurs, refraction, the radial blur, the
+		 * snow copy, the water blend and the LDR downsample. The anchor is sized for the sum (FrameAnchors.cpp, kInfo); Setup checks it.
 		 */
-		constexpr std::array<std::uint32_t, static_cast<std::size_t>(ScopeKind::Count)> kScopeRuns{ 1, 2, 2, 2, 6 };
+		constexpr std::array<std::uint32_t, static_cast<std::size_t>(ScopeKind::Count)> kScopeRuns{ 1, 2, 2, 2, 8 };
 
 		constexpr std::uint32_t ScopeRunsTotal()
 		{
@@ -276,36 +303,47 @@ namespace RenderGraph::Engine::ImageSpace
 			return total;
 		}
 
-		/** @brief A program's key: the effect, the target's format and the engine blend state (none for a compute program). */
-		using ProgramKey = std::tuple<std::size_t, rhi::Format, const void*>;
+		/** @brief A raster program's key: the effect, the outputs' formats and the packed blend state. */
+		using ProgramKey = std::tuple<std::size_t, rhi::Format, rhi::Format, std::uint32_t>;
+
+		/** @brief One shape of the manifest: where it is in the frame, and the last session that saw it. */
+		struct ManifestEntry
+		{
+			std::uint32_t position = 0;  // scope << 16 | draw within the scope
+			std::uint32_t lastSession = 0;
+		};
 
 		struct ImageSpaceState
 		{
 			bool installed = false;
 			bool reserved = false;
+			bool on = false;  // set up; off again for the session after a failure
 			bool flushing = false;
 			bool logShapes = false;
-			Phase phase = Phase::Off;
 			std::array<bool, kEffects.size()> enabled{};
 			std::unordered_map<const void*, std::int32_t> effectOf;  // engine shader -> kEffects index (filled from the manager's effects)
 			std::shared_ptr<RunGate> gate;
 			std::shared_ptr<org::LatchBlock> latch;
 			std::map<std::pair<std::uint32_t, std::uint32_t>, org::OwnedDescriptorBinding> samplers;  // (address, filter)
-			std::set<const void*> unsupportedBlends;                                                  // blend states no program can take
-			std::vector<std::shared_ptr<const Spec>> specs;                                           // in the current registration, by entry
-			std::set<ShapeKey> refusedShapes;                                                         // shapes no pass can be made for (logged once)
-			std::set<ShapeKey> loggedConstants;                                                       // shapes whose constant sizes were logged (CS_ORG_IMAGESPACE_LOG)
-			std::vector<ShapeKey> candidates;                                                         // seen, not registered yet
-			std::map<ShapeKey, std::uint32_t> positions;            // each shape's place in its frame: scope << 16 | draw within the scope
-			std::set<std::pair<std::int32_t, std::int32_t>> swaps;  // targets that stand in for each other (ping-pong, alternation)
-			std::uint32_t scope = 0;                                // the current scope (ScopeKind)
-			std::uint32_t drawIndex = 0;                            // eligible draws and dispatches so far in the current scope
-			std::array<std::uint32_t, kScopeRuns.size()> scopeRuns{};  // batches each kind of scope started this frame
-			std::uint32_t nextEntry = 0;
+			// The registration: every pass, by entry and by shape, and the engine objects its imports were made from (a resize check).
+			std::vector<std::shared_ptr<const Spec>> specs;
+			std::map<ShapeKey, const Spec*> specOf;
+			std::map<std::int32_t, const void*> importedObjects;
+			std::set<ShapeKey> refusedShapes;    // shapes no pass can be made for (logged once)
+			std::set<ShapeKey> loggedConstants;  // shapes whose constant sizes were logged (CS_ORG_IMAGESPACE_LOG)
 			std::uint32_t registrations = 0;
-			std::uint32_t quietFrames = 0;
-			const void* registeredCell = nullptr;
+			// The shape manifest (Data/ShaderCache/v2/ImageSpaceShapes.json): read at Setup, written when a session sees new shapes.
+			std::map<ShapeKey, ManifestEntry> manifest;
+			std::set<ShapeKey> seen;  // shapes drawn or refused this session
+			std::uint32_t session = 0;
+			bool manifestDirty = false;   // a new shape since the last write
+			bool manifestTouched = false;  // the seen shapes' sessions written once this session
+			std::uint32_t manifestWritten = 0;
+			bool programsQueued = false;
 			// The frame and its batches.
+			std::uint32_t scope = 0;                                   // the current scope (ScopeKind)
+			std::uint32_t drawIndex = 0;                               // eligible draws and dispatches so far in the current scope
+			std::array<std::uint32_t, kScopeRuns.size()> scopeRuns{};  // batches each kind of scope started this frame
 			std::uint32_t frame = UINT32_MAX;
 			std::uint32_t runsThisFrame = 0;
 			std::uint32_t scopeDepth = 0;
@@ -314,10 +352,16 @@ namespace RenderGraph::Engine::ImageSpace
 			std::vector<std::shared_ptr<const org::LatchBlock>> keepAlive;  // the batch's constant chunks, until its run
 			std::uint32_t lastEntry = 0;
 			bool executed = false;
+			// The engine's ImageSpace calls in progress (Render, the explicit-target Render, DispatchComputeShader): a draw or dispatch
+			// inside one that is not taken is the engine's on purpose, under declined (set by the refusal) or NotPortedReason.
+			std::uint32_t engineCalls = 0;
+			const Latch::Reason* declined = nullptr;
 			// Counters.
 			std::uint64_t taken = 0, engineDrawn = 0, batches = 0, lost = 0;
-			// Why each effect's draws stayed with the engine, logged once per reason and effect.
+			// Why each effect's draws stayed with the engine, logged once per reason and effect: refusals (cases the port does not
+			// take) at info, failures (what should not happen on the primary path) at error.
 			std::array<std::unique_ptr<Util::ReasonLog>, kEffects.size()> fallbacks;
+			std::array<std::unique_ptr<Util::ReasonLog>, kEffects.size()> failures;
 		};
 
 		ImageSpaceState& IS()
@@ -326,7 +370,38 @@ namespace RenderGraph::Engine::ImageSpace
 			return state;
 		}
 
-		/** @brief The effects' programs, built on the program build thread (a shape waits for its program before it registers). */
+		/**
+		 * @brief Why ImageSpace leaves a draw or dispatch to the engine on purpose, for the flush latch (Latch::EngineDraws around the
+		 * engine's call): an effect the port does not cover or did not select, a shape it refused (an inherent refusal), a shape this
+		 * session did not register, a failure on the graph's side, and the volumetric lighting compute (AE 107023 / SE 100309).
+		 */
+		const Latch::Reason& NotPortedReason()
+		{
+			static const Latch::Reason reason{ "imagespace: effect not on the graph" };
+			return reason;
+		}
+		const Latch::Reason& RefusedReason()
+		{
+			static const Latch::Reason reason{ "imagespace: shape refused" };
+			return reason;
+		}
+		const Latch::Reason& UnregisteredReason()
+		{
+			static const Latch::Reason reason{ "imagespace: shape not in the manifest" };
+			return reason;
+		}
+		const Latch::Reason& FailedReason()
+		{
+			static const Latch::Reason reason{ "imagespace: failed on the graph" };
+			return reason;
+		}
+		const Latch::Reason& VolumetricReason()
+		{
+			static const Latch::Reason reason{ "imagespace: volumetric lighting compute" };
+			return reason;
+		}
+
+		/** @brief The effects' raster programs, by value key. Queued at Setup; a pass made at a graph build takes its own with GetNow. */
 		ProgramCache<RasterProgram, ProgramKey>& Programs()
 		{
 			static ProgramCache<RasterProgram, ProgramKey> programs{ "ImageSpace" };
@@ -340,16 +415,24 @@ namespace RenderGraph::Engine::ImageSpace
 			return programs;
 		}
 
-		/**
-		 * @brief A draw of a_effect stays with the engine: counted, and the reason (with a_detail, when given) logged the first time
-		 * for that effect.
-		 */
+		/** @brief A draw of a_effect stays with the engine: an inherent refusal, counted, logged the first time for that effect and reason. */
 		void Refuse(std::string_view a_reason, std::size_t a_effect, std::string_view a_detail = {})
 		{
 			auto& state = IS();
 			++state.engineDrawn;
+			state.declined = &RefusedReason();
 			if (auto& log = state.fallbacks[a_effect])
 				log->Report(a_reason, a_detail);
+		}
+
+		/** @brief As Refuse, for what should not happen on the primary path (constants the capture missed): logged as an error. */
+		void Failure(std::string_view a_reason, std::size_t a_effect)
+		{
+			auto& state = IS();
+			++state.engineDrawn;
+			state.declined = &FailedReason();
+			if (auto& log = state.failures[a_effect])
+				log->Report(a_reason);
 		}
 
 		/** @brief A target name for the log: "rt<index>", "rt<index>.mip<n>", "depth<index>" or "cube<index>". */
@@ -366,14 +449,14 @@ namespace RenderGraph::Engine::ImageSpace
 			return mip == AnchorPasses::kAllMips ? fmt::format("rt{}", index) : fmt::format("rt{}.mip{}", index, mip);
 		}
 
-		/** @brief Every effect to D3D11 for the session. */
+		/** @brief Every effect to the engine for the session. */
 		void Fail(std::string_view a_why)
 		{
 			auto& state = IS();
-			if (state.phase == Phase::Off)
+			if (!state.on)
 				return;
-			state.phase = Phase::Off;
-			logger::error("[ORG] ImageSpace: {}; every ImageSpace effect returns to D3D11", a_why);
+			state.on = false;
+			logger::error("[ORG] ImageSpace: {}; every ImageSpace effect returns to the engine", a_why);
 			FrameAnchors::Unregister(kClientId);
 		}
 
@@ -430,6 +513,15 @@ namespace RenderGraph::Engine::ImageSpace
 						state.effectOf.emplace(shader, static_cast<std::int32_t>(i));
 			const auto it = state.effectOf.find(a_shader);
 			return it != state.effectOf.end() ? it->second : -1;
+		}
+
+		/** @brief A kEffects index by its name (the manifest's), or -1. */
+		std::int32_t EffectNamed(std::string_view a_name)
+		{
+			for (std::size_t i = 0; i < kEffects.size(); ++i)
+				if (kEffects[i].effectName == a_name)
+					return static_cast<std::int32_t>(i);
+			return -1;
 		}
 
 		/** @brief The engine render target whose own texture is a_resource, or -1. */
@@ -505,17 +597,49 @@ namespace RenderGraph::Engine::ImageSpace
 			return -1;
 		}
 
-		/** @brief The graph's import of an input as ShapeKey names it (a render target, a depth target or a cubemap). */
-		std::shared_ptr<org::ExternalTextureResource> ImportInput(std::int32_t a_input)
+		/** @brief The graph's import of a target as ShapeKey names it (a render target, a depth target or a cubemap; any mip is its texture's). */
+		std::shared_ptr<org::ExternalTextureResource> ImportOf(std::int32_t a_name)
 		{
-			if (a_input < 0)
+			if (a_name < 0)
 				return nullptr;
-			const auto index = static_cast<std::uint32_t>(a_input & kInputIndexMask);
-			if (a_input & kDepthInput)
+			const auto index = IndexOfName(a_name);
+			if (a_name & kDepthInput)
 				return FrameAnchors::EngineDepth(index);
-			if (a_input & kCubeInput)
+			if (a_name & kCubeInput)
 				return FrameAnchors::EngineCubemap(index);
 			return FrameAnchors::EngineTarget(index);
+		}
+
+		/**
+		 * @brief The engine object an import of a_name is made from now: the texture (kFRAMEBUFFER's RTV, which the engine keeps alone),
+		 * read from the renderer's tables without a D3D11 call. A change means the engine made the target again (a resize).
+		 */
+		const void* EngineObjectOf(std::int32_t a_name)
+		{
+			auto* renderer = globals::game::renderer;
+			if (!renderer || a_name < 0)
+				return nullptr;
+			const auto index = IndexOfName(a_name);
+			if (a_name & kDepthInput)
+				return index < RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL ? renderer->GetDepthStencilData().depthStencils[index].texture : nullptr;
+			if (a_name & kCubeInput)
+				return index < RE::RENDER_TARGETS_CUBEMAP::kTOTAL ? renderer->GetRendererData().cubemapRenderTargets[index].texture : nullptr;
+			if (index >= RE::RENDER_TARGET::kTOTAL)
+				return nullptr;
+			const auto& target = renderer->GetRuntimeData().renderTargets[index];
+			return target.texture ? static_cast<const void*>(target.texture) : static_cast<const void*>(target.RTV);
+		}
+
+		/** @brief The format of an output's render target view (the program's target format), from the target or the texture it is a mip of. */
+		rhi::Format RtvFormatOf(std::int32_t a_name, const std::shared_ptr<org::ExternalTextureResource>& a_import)
+		{
+			const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
+			if (auto* rtv = targets[IndexOfName(a_name)].RTV) {
+				D3D11_RENDER_TARGET_VIEW_DESC view{};
+				rtv->GetDesc(&view);
+				return rhi::helpers::ToRHI(view.Format);
+			}
+			return a_import ? a_import->GetFormat() : rhi::Format::Unknown;
 		}
 
 		/**
@@ -533,7 +657,7 @@ namespace RenderGraph::Engine::ImageSpace
 
 		/**
 		 * @brief A shape's inputs from the shadow state's slots (the PS ones for a draw, the CS ones for a dispatch): false with a
-		 * reason when one is not an engine target or is the output. A cube slot is the reflection cubemap CS binds itself.
+		 * reason when one is not an engine target or is an output. A cube slot is the reflection cubemap CS binds itself.
 		 */
 		template <class AddressModes, class FilterModes>
 		bool ReadInputs(const EffectInfo& a_effect, ID3D11ShaderResourceView* const* a_views, const AddressModes* a_address, const FilterModes* a_filter,
@@ -551,7 +675,7 @@ namespace RenderGraph::Engine::ImageSpace
 					a_refusal = "an input that is not an engine target";
 					return false;
 				}
-				if (Overlaps(input, a_out.output)) {
+				if (Overlaps(input, a_out.output) || Overlaps(input, a_out.output1)) {
 					a_refusal = "it reads its own output";
 					return false;
 				}
@@ -565,10 +689,11 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/** @brief A dispatch's shape from the shadow state's compute slots, as SetDirtyStates(true) is about to apply them. */
-		bool ReadComputeShape(const RE::BSImagespaceShader* a_shader, const EffectInfo& a_effect, ShapeKey& a_out, std::string_view& a_refusal)
+		bool ReadComputeShape(std::size_t a_effect, ShapeKey& a_out, std::string_view& a_refusal)
 		{
+			const auto& effect = kEffects[a_effect];
 			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-			a_out.shader = a_shader;
+			a_out.effect = static_cast<std::uint32_t>(a_effect);
 			a_out.compute = true;
 			a_out.output = TargetOfUav(shadow.CSUAV[0]);
 			if (a_out.output < 0) {
@@ -580,7 +705,7 @@ namespace RenderGraph::Engine::ImageSpace
 					a_refusal = "more than one UAV";
 					return false;
 				}
-			return ReadInputs(a_effect, shadow.CSTexture, shadow.CSTextureAddressMode, shadow.CSTextureFilterMode, a_out, a_refusal);
+			return ReadInputs(effect, shadow.CSTexture, shadow.CSTextureAddressMode, shadow.CSTextureFilterMode, a_out, a_refusal);
 		}
 
 		/** @brief A draw's output: its name (with the mip it writes) and that mip's size. */
@@ -591,15 +716,17 @@ namespace RenderGraph::Engine::ImageSpace
 		};
 
 		/**
-		 * @brief The output of a draw into engine render target a_target. A target with a texture is itself. A target with only an
-		 * RTV of one mip of another target's texture (the SAO camera-Z levels) is that texture's target at that mip: the pass draws
-		 * through that texture's import, so the owner must have an RTV, and the mip's view the import's formats.
+		 * @brief The output of a draw into engine render target a_target. A target with a texture is itself. kFRAMEBUFFER keeps only its
+		 * RTV: it is itself, its size the RTV's texture's (FrameAnchors::EngineTarget imports that texture). A target with only an RTV
+		 * of one mip of another target's texture (the SAO camera-Z levels) is that texture's target at that mip: the pass draws through
+		 * that texture's import, so the owner must have an RTV, and the mip's view the import's formats.
 		 */
 		bool ResolveOutput(std::int32_t a_target, OutputView& a_out, std::string_view& a_refusal)
 		{
 			const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
 			const auto& target = targets[a_target];
 			ID3D11Texture2D* texture = target.texture;
+			winrt::com_ptr<ID3D11Texture2D> viewTexture;
 			std::uint32_t mip = 0;
 			a_out.name = a_target;
 			if (!texture) {
@@ -611,34 +738,47 @@ namespace RenderGraph::Engine::ImageSpace
 				target.RTV->GetDesc(&view);
 				winrt::com_ptr<ID3D11Resource> resource;
 				target.RTV->GetResource(resource.put());
-				const auto owner = TargetOfTexture(resource.get());
-				if (view.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || view.Texture2D.MipSlice > kMaxMip || owner < 0) {
-					a_refusal = "its output has no texture and is no mip of an engine target's";
-					return false;
+				if (a_target == static_cast<std::int32_t>(RE::RENDER_TARGET::kFRAMEBUFFER)) {
+					if (view.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || view.Texture2D.MipSlice != 0 || !resource) {
+						a_refusal = "its output is kFRAMEBUFFER through a view other than the whole back buffer";
+						return false;
+					}
+					viewTexture = resource.try_as<ID3D11Texture2D>();
+					texture = viewTexture.get();
+					if (!texture) {
+						a_refusal = "its output is kFRAMEBUFFER without a texture";
+						return false;
+					}
+				} else {
+					const auto owner = TargetOfTexture(resource.get());
+					if (view.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || view.Texture2D.MipSlice > kMaxMip || owner < 0) {
+						a_refusal = "its output has no texture and is no mip of an engine target's";
+						return false;
+					}
+					const auto& ownerTarget = targets[owner];
+					if (!ownerTarget.RTV) {
+						a_refusal = "its output is a mip of a texture without a render target view";
+						return false;
+					}
+					// The import's format is its SRV's (the program's target format), its RTVs the owner RTV's format.
+					D3D11_RENDER_TARGET_VIEW_DESC ownerView{};
+					ownerTarget.RTV->GetDesc(&ownerView);
+					D3D11_TEXTURE2D_DESC ownerDesc{};
+					ownerTarget.texture->GetDesc(&ownerDesc);
+					DXGI_FORMAT importFormat = ownerDesc.Format;
+					if (ownerTarget.SRV) {
+						D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
+						ownerTarget.SRV->GetDesc(&srv);
+						importFormat = srv.Format;
+					}
+					if (view.Format != ownerView.Format || view.Format != importFormat) {
+						a_refusal = "its output is a mip view in another format than its texture's";
+						return false;
+					}
+					texture = ownerTarget.texture;
+					mip = view.Texture2D.MipSlice;
+					a_out.name = WithMip(owner, mip);
 				}
-				const auto& ownerTarget = targets[owner];
-				if (!ownerTarget.RTV) {
-					a_refusal = "its output is a mip of a texture without a render target view";
-					return false;
-				}
-				// The import's format is its SRV's (the program's target format), its RTVs the owner RTV's format.
-				D3D11_RENDER_TARGET_VIEW_DESC ownerView{};
-				ownerTarget.RTV->GetDesc(&ownerView);
-				D3D11_TEXTURE2D_DESC ownerDesc{};
-				ownerTarget.texture->GetDesc(&ownerDesc);
-				DXGI_FORMAT importFormat = ownerDesc.Format;
-				if (ownerTarget.SRV) {
-					D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
-					ownerTarget.SRV->GetDesc(&srv);
-					importFormat = srv.Format;
-				}
-				if (view.Format != ownerView.Format || view.Format != importFormat) {
-					a_refusal = "its output is a mip view in another format than its texture's";
-					return false;
-				}
-				texture = ownerTarget.texture;
-				mip = view.Texture2D.MipSlice;
-				a_out.name = WithMip(owner, mip);
 			}
 			D3D11_TEXTURE2D_DESC desc{};
 			texture->GetDesc(&desc);
@@ -652,21 +792,15 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief The viewport the engine's draw uses, read from DXVK's context after SetDirtyStates applied the shadow state: the
-		 * whole target (Render's UpdateViewPort), the caller's (the explicit-target Render), the one a custom-viewport effect keeps
-		 * (ImageSpaceEffect::unk88: Render leaves the viewport as it is), or the dynamic-resolution part of the target. The pass draws
-		 * it as its render area, so it must be whole pixels inside the output. False with a reason (and the viewport as a_detail).
+		 * @brief The viewport the engine's draw uses, from the shadow state (RendererShadowState::viewPort, +0x70: what SetDirtyStates
+		 * applies): the whole target (Render's UpdateViewPort), the caller's (the explicit-target Render), the one a custom-viewport
+		 * effect keeps (ImageSpaceEffect::unk88: Render leaves the viewport as it is), or the dynamic-resolution part of the target. Never
+		 * the D3D11 context's: under the flush latch it is stale. The pass draws it as its render area, so it must be whole pixels inside
+		 * the output. False with a reason (and the viewport as a_detail).
 		 */
 		bool ReadViewport(const OutputView& a_output, ShapeKey& a_key, std::string_view& a_refusal, std::string& a_detail)
 		{
-			UINT count = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-			std::array<D3D11_VIEWPORT, D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> viewports{};
-			globals::d3d::context->RSGetViewports(&count, viewports.data());
-			if (count == 0) {
-				a_refusal = "no viewport";
-				return false;
-			}
-			const auto& viewport = viewports[0];
+			const auto& viewport = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().viewPort;
 			a_detail = fmt::format("{}x{} at ({}, {}) in {}x{}, depth {} to {}", viewport.Width, viewport.Height, viewport.TopLeftX, viewport.TopLeftY, a_output.width,
 				a_output.height, viewport.MinDepth, viewport.MaxDepth);
 			// The dynamic-resolution viewport's depth range is a float product too (0 to 0.99998 seen). A taken draw has depth testing and
@@ -699,26 +833,42 @@ namespace RenderGraph::Engine::ImageSpace
 			return true;
 		}
 
+		/** @brief Whether a render target index is one of the engine's table (kFRAMEBUFFER included). */
+		bool IsEngineTarget(std::int32_t a_target)
+		{
+			return a_target >= static_cast<std::int32_t>(RE::RENDER_TARGET::kFRAMEBUFFER) && a_target < static_cast<std::int32_t>(RE::RENDER_TARGET::kTOTAL);
+		}
+
 		/**
 		 * @brief The draw's shape from the shadow state, as SetDirtyStates is about to apply it (all but the viewport: ReadViewport
 		 * reads it once SetDirtyStates ran); false with a reason when no pass can draw it.
 		 */
-		bool ReadShape(const RE::BSImagespaceShader* a_shader, const EffectInfo& a_effect, ShapeKey& a_out, OutputView& a_output, std::string_view& a_refusal)
+		bool ReadShape(std::size_t a_effect, ShapeKey& a_out, OutputView& a_output, std::string_view& a_refusal)
 		{
+			const auto& effect = kEffects[a_effect];
 			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-			a_out.shader = a_shader;
+			a_out.effect = static_cast<std::uint32_t>(a_effect);
 			if (!globals::game::renderer) {
 				a_refusal = "no renderer";
 				return false;
 			}
 			const auto output = static_cast<std::int32_t>(shadow.renderTargets[0]);
-			if (output < static_cast<std::int32_t>(RE::RENDER_TARGET::kMAIN) || output >= static_cast<std::int32_t>(RE::RENDER_TARGET::kTOTAL)) {
+			if (!IsEngineTarget(output)) {
 				a_refusal = "its output is not an engine render target";
 				return false;
 			}
-			for (std::size_t i = 1; i < std::size(shadow.renderTargets); ++i)
+			// SV_Target1 for an effect that writes two (ISWaterBlend): an engine target with a texture of its own, not the first.
+			if (effect.targets > 1) {
+				const auto second = static_cast<std::int32_t>(shadow.renderTargets[1]);
+				if (!IsEngineTarget(second) || second == output || !globals::game::renderer->GetRuntimeData().renderTargets[second].texture) {
+					a_refusal = "its second output is not an engine render target with a texture";
+					return false;
+				}
+				a_out.output1 = second;
+			}
+			for (std::size_t i = effect.targets; i < std::size(shadow.renderTargets); ++i)
 				if (static_cast<std::int32_t>(shadow.renderTargets[i]) != static_cast<std::int32_t>(RE::RENDER_TARGET::kNONE)) {
-					a_refusal = "more than one render target";
+					a_refusal = "more render targets than its shader writes";
 					return false;
 				}
 			// The engine leaves a depth target bound through the chain with the test off: the pass binds none then, and the draw is the same.
@@ -740,11 +890,11 @@ namespace RenderGraph::Engine::ImageSpace
 				return false;
 			}
 			a_out.output = a_output.name;
-			if (!ReadInputs(a_effect, shadow.PSTexture, shadow.PSTextureAddressMode, shadow.PSTextureFilterMode, a_out, a_refusal))
+			if (!ReadInputs(effect, shadow.PSTexture, shadow.PSTextureAddressMode, shadow.PSTextureFilterMode, a_out, a_refusal))
 				return false;
 			const auto draw = Pipeline::EngineDrawState::Latch();
-			a_out.blend = Pipeline::EngineBlendState(draw.blendMode, draw.alphaToCoverage, draw.writeMode, draw.blendExtra);
-			if (!a_out.blend) {
+			a_out.blend = PackBlend(draw.blendMode, draw.alphaToCoverage, draw.writeMode, draw.blendExtra);
+			if (!BlendStateOf(a_out.blend)) {
 				a_refusal = "a blend state outside the engine's table";
 				return false;
 			}
@@ -767,207 +917,337 @@ namespace RenderGraph::Engine::ImageSpace
 			return binding ? binding.Index() : UINT32_MAX;
 		}
 
-		/** @brief Where a shape's program is. */
-		enum class ProgramState : std::uint8_t
+		/** @brief The ORG form of a packed engine blend state for a_targets attachments: false with a reason when it has none. */
+		bool BlendFor(std::uint32_t a_blend, std::uint32_t a_targets, std::array<rhi::BlendAttachment, 2>& a_out, std::string& a_error)
 		{
-			Ready,
-			Building,  // queued on the program build thread: the shape waits as a candidate
-			Failed,    // logged once; the shape stays with the engine
-		};
+			auto* object = BlendStateOf(a_blend);
+			if (!object) {
+				a_error = "no engine blend state";
+				return false;
+			}
+			D3D11_BLEND_DESC desc{};
+			object->GetDesc(&desc);
+			rhi::BlendState blend{};
+			if (!Pipeline::BlendFromD3D11(desc, blend, a_error) || Pipeline::ReadsBlendFactor(desc) || Pipeline::UsesDualSource(desc)) {
+				if (a_error.empty())
+					a_error = "a blend factor or dual-source blending";
+				return false;
+			}
+			a_out[0] = blend.attachments[0];
+			// D3D11 blends every target as the first unless IndependentBlendEnable.
+			a_out[1] = a_targets > 1 && desc.IndependentBlendEnable ? blend.attachments[1] : blend.attachments[0];
+			return true;
+		}
+
+		/** @brief The effect's macros and CS's feature defines, as ShaderCache composes them for its D3D11 build (without the stage define). */
+		std::vector<std::pair<std::wstring, std::wstring>> DefinesOf(std::size_t a_effect, SIE::ShaderClass a_class)
+		{
+			std::vector<std::pair<std::wstring, std::wstring>> defines;
+			if (const auto* shader = ShaderOf(a_effect))
+				for (const auto& [name, value] : SIE::ShaderCache::GetCompileDefines(*shader, a_class, 0)) {
+					if (name == "VSHADER" || name == "PSHADER" || name == "CSHADER")
+						continue;
+					defines.emplace_back(std::wstring(name.begin(), name.end()), std::wstring(value.begin(), value.end()));
+				}
+			return defines;
+		}
+
+		/** @brief The raster program's description for a key (the blend was checked by BlendFor). Needs the engine's effect object. */
+		RasterProgram::Desc DescribeRaster(const ProgramKey& a_key)
+		{
+			const auto& [effectIndex, format, format1, blendBits] = a_key;
+			const auto& effect = kEffects[effectIndex];
+			std::array<rhi::BlendAttachment, 2> blend{};
+			std::string error;
+			BlendFor(blendBits, effect.targets, blend, error);
+			RasterProgram::Desc desc{};
+			desc.pixelSource = effect.source;
+			// FXC-era sources (vector conditions in ?:).
+			desc.languageVersion = L"2018";
+			// Shared (4 words), the SRVs, the samplers, the latch (2).
+			desc.constantWords = 4 + effect.slots + effect.samplers + 2;
+			// The stage defines are RasterProgram's own.
+			desc.defines = DefinesOf(effectIndex, SIE::ShaderClass::Pixel);
+			desc.targets = { { .format = format, .blend = blend[0] } };
+			if (format1 != rhi::Format::Unknown)
+				desc.targets.push_back({ .format = format1, .blend = blend[1] });
+			return desc;
+		}
+
+		/** @brief The compute program's description (BSImagespaceShader::DispatchComputeShader dispatches technique 0, 100952 / 107734). */
+		ComputeProgram::Desc DescribeCompute(std::size_t a_effect)
+		{
+			const auto& effect = kEffects[a_effect];
+			ComputeProgram::Desc desc{};
+			desc.source = effect.source;
+			// Shared (4 words), the SRVs, the samplers, the UAV, the latch (2).
+			desc.constantWords = 4 + effect.slots + effect.samplers + 1 + 2;
+			// The engine's macros (GRIDSIZE, TEXTAP, ...) and CS's feature defines.
+			desc.defines = DefinesOf(a_effect, SIE::ShaderClass::Compute);
+			return desc;
+		}
+
+		/** @brief A spec's raster program key. */
+		ProgramKey KeyOf(const Spec& a_spec) { return { a_spec.key.effect, a_spec.format, a_spec.format1, a_spec.key.blend }; }
 
 		/**
-		 * @brief The effect's program for a target format and blend state from the program cache: the first ask queues its build
-		 * (never on the render thread), and a_out is set once it is built.
+		 * @brief Queues the program of every registered pass on the program build thread, once the engine's effect objects exist (their
+		 * macros are the programs' defines): at Setup, or at the first ImageSpace call when the manager was not made by then.
 		 */
-		ProgramState ProgramFor(std::size_t a_effect, rhi::Format a_format, ID3D11BlendState* a_blend, std::shared_ptr<const RasterProgram>& a_out)
+		void QueuePrograms()
 		{
 			auto& state = IS();
-			if (state.unsupportedBlends.contains(a_blend))
-				return ProgramState::Failed;
-			D3D11_BLEND_DESC blendDesc{};
-			a_blend->GetDesc(&blendDesc);
-			rhi::BlendState blend{};
-			std::string error;
-			if (!Pipeline::BlendFromD3D11(blendDesc, blend, error) || Pipeline::ReadsBlendFactor(blendDesc) || Pipeline::UsesDualSource(blendDesc)) {
-				state.unsupportedBlends.insert(a_blend);
-				logger::info("[ORG] ImageSpace: a blend state of {} has no ORG form ({}); its draws stay with the engine", kEffects[a_effect].effectName,
-					error.empty() ? "a blend factor or dual-source blending" : error);
-				return ProgramState::Failed;
+			if (state.programsQueued || state.specs.empty())
+				return;
+			for (const auto& spec : state.specs)
+				if (!ShaderOf(spec->key.effect))
+					return;
+			state.programsQueued = true;
+			for (const auto& spec : state.specs) {
+				if (spec->key.compute)
+					ComputePrograms().Get(spec->key.effect, [&] { return DescribeCompute(spec->key.effect); });
+				else
+					Programs().Get(KeyOf(*spec), [&] { return DescribeRaster(KeyOf(*spec)); });
 			}
-			const ProgramKey key{ a_effect, a_format, a_blend };
-			a_out = Programs().Get(key, [&] {
-				const auto& effect = kEffects[a_effect];
-				RasterProgram::Desc desc{};
-				desc.pixelSource = effect.source;
-				// FXC-era sources (vector conditions in ?:).
-				desc.languageVersion = L"2018";
-				// Shared (4 words), the SRVs, the samplers, the latch (2).
-				desc.constantWords = 4 + effect.slots + effect.samplers + 2;
-				// The engine's macros for the shader and CS's feature defines, as ShaderCache composes them for the D3D11 build; the
-				// stage defines are RasterProgram's own.
-				if (const auto* shader = ShaderOf(a_effect))
-					for (const auto& [name, value] : SIE::ShaderCache::GetCompileDefines(*shader, SIE::ShaderClass::Pixel, 0)) {
-						if (name == "VSHADER" || name == "PSHADER")
-							continue;
-						desc.defines.emplace_back(std::wstring(name.begin(), name.end()), std::wstring(value.begin(), value.end()));
-					}
-				desc.targets = { { .format = a_format, .blend = blend.attachments[0] } };
-				return desc;
-			});
-			if (a_out)
-				return ProgramState::Ready;
-			return Programs().StatusOf(key) == ProgramStatus::Failed ? ProgramState::Failed : ProgramState::Building;
 		}
 
-		/** @brief A compute effect's program from the compute program cache, as ProgramFor. */
-		ProgramState ComputeProgramFor(std::size_t a_effect, std::shared_ptr<const ComputeProgram>& a_out)
+		/**
+		 * @brief The graph pass of a spec, made at a build of the anchor's graph (render thread): its program taken now (built, waited
+		 * for, or built here and logged), then the pass AnchorPasses makes for its draw or dispatch. Null leaves it out of that build
+		 * (logged): its shape's draws are refused by the commit's caller, since the gate entry stays closed and CanRun still holds.
+		 */
+		std::shared_ptr<org::RenderPass> MakePass(const std::shared_ptr<const Spec>& a_spec, const std::shared_ptr<const org::LatchBlock>& a_latch,
+			const std::shared_ptr<const RunGate>& a_gate)
 		{
-			a_out = ComputePrograms().Get(a_effect, [&] {
-				const auto& effect = kEffects[a_effect];
-				ComputeProgram::Desc desc{};
-				desc.source = effect.source;
-				// Shared (4 words), the SRVs, the samplers, the UAV, the latch (2).
-				desc.constantWords = 4 + effect.slots + effect.samplers + 1 + 2;
-				// The engine's macros (GRIDSIZE, TEXTAP, ...) and CS's feature defines, as ShaderCache composes them for the D3D11 build.
-				// BSImagespaceShader::DispatchComputeShader dispatches technique 0 (100952 / 107734).
-				if (const auto* shader = ShaderOf(a_effect))
-					for (const auto& [name, value] : SIE::ShaderCache::GetCompileDefines(*shader, SIE::ShaderClass::Compute, 0)) {
-						if (name == "CSHADER")
-							continue;
-						desc.defines.emplace_back(std::wstring(name.begin(), name.end()), std::wstring(value.begin(), value.end()));
-					}
-				return desc;
-			});
-			if (a_out)
-				return ProgramState::Ready;
-			return ComputePrograms().StatusOf(a_effect) == ProgramStatus::Failed ? ProgramState::Failed : ProgramState::Building;
+			const auto& spec = *a_spec;
+			const auto& effect = kEffects[spec.key.effect];
+			if (!ShaderOf(spec.key.effect)) {
+				logger::error("[ORG] ImageSpace: {} has no engine effect object at the graph's build; its pass is left out", spec.name);
+				return nullptr;
+			}
+			bool builtHere = false;
+			std::shared_ptr<const RasterProgram> raster;
+			std::shared_ptr<const ComputeProgram> compute;
+			if (spec.key.compute)
+				compute = ComputePrograms().GetNow(spec.key.effect, [&] { return DescribeCompute(spec.key.effect); }, &builtHere);
+			else
+				raster = Programs().GetNow(KeyOf(spec), [&] { return DescribeRaster(KeyOf(spec)); }, &builtHere);
+			if (builtHere)
+				logger::info("[ORG] ImageSpace: built the program of {} on the render thread at the graph's build (Setup did not queue it)", spec.name);
+			if (!raster && !compute) {
+				logger::error("[ORG] ImageSpace: {} has no program; its pass is left out of the graph", spec.name);
+				return nullptr;
+			}
+			// The shader's resource list order: the shared constants, t0.., s0.., (u0), the constants' location.
+			std::vector<AnchorPasses::Bind> bindings;
+			bindings.push_back(AnchorPasses::Bind::Shared());
+			for (std::uint32_t slot = 0; slot < effect.slots; ++slot)
+				bindings.push_back(spec.inputs[slot] ? AnchorPasses::Bind::Srv(spec.inputs[slot], MipOfName(spec.key.inputs[slot])) : AnchorPasses::Bind::Unused());
+			for (std::uint32_t slot = 0; slot < effect.samplers; ++slot)
+				bindings.push_back(spec.inputs[slot] && !(effect.cubes & (1u << slot)) ? AnchorPasses::Bind::Handle(spec.samplers[slot]) : AnchorPasses::Bind::Unused());
+			if (effect.compute)
+				bindings.push_back(AnchorPasses::Bind::Uav(spec.output));
+			bindings.push_back(AnchorPasses::Bind::Latch(spec.entry * static_cast<std::uint32_t>(sizeof(ConstantsAt))));
+			AnchorPasses::Builder builder(Anchor::ImageSpace, kClientId, static_cast<std::int32_t>(spec.entry), a_latch, a_gate);
+			if (effect.compute) {
+				AnchorPasses::Dispatch dispatch{};
+				dispatch.name = spec.name;
+				dispatch.program = compute;
+				dispatch.bindings = std::move(bindings);
+				dispatch.gate = spec.entry;
+				builder.Add(std::move(dispatch));
+			} else {
+				AnchorPasses::Draw draw{};
+				draw.name = spec.name;
+				draw.program = raster;
+				draw.bindings = std::move(bindings);
+				draw.target = spec.output;
+				draw.mip = MipOfName(spec.key.output);
+				if (spec.output1)
+					draw.extraTargets.push_back(spec.output1);
+				// The engine's viewport (ReadViewport): the whole target, or a part of it (dynamic resolution, a custom viewport).
+				const auto& viewport = spec.key.viewport;
+				draw.viewport = { .x = viewport[0], .y = viewport[1], .width = viewport[2], .height = viewport[3] };
+				draw.load = rhi::LoadOp::Load;
+				draw.gate = spec.entry;
+				builder.Add(std::move(draw));
+			}
+			auto passes = builder.Take();
+			if (builder.Failed() || passes.empty() || !passes.front().make) {
+				logger::error("[ORG] ImageSpace: {} could not be made ({}); its pass is left out of the graph", spec.name, builder.Failure());
+				return nullptr;
+			}
+			return passes.front().make();
 		}
 
-		/** @brief MakeSpec's result: the pass, or why there is none (Building: ask again at the next registration). */
-		struct Made
-		{
-			std::shared_ptr<const Spec> spec;
-			bool building = false;
-		};
-
-		/** @brief The pass for a shape, made now (its textures imported, its program from the cache), or none. */
-		Made MakeSpec(const ShapeKey& a_key)
+		/** @brief The pass for a shape, made now (its textures imported, its samplers made), or none (logged once). */
+		std::shared_ptr<const Spec> MakeSpec(const ShapeKey& a_key, std::uint32_t a_entry)
 		{
 			auto& state = IS();
-			const auto* shader = static_cast<const RE::BSImagespaceShader*>(a_key.shader);
-			const auto effectIndex = EffectOf(shader);
-			if (effectIndex < 0)
-				return {};
-			const auto& effect = kEffects[static_cast<std::size_t>(effectIndex)];
+			const auto& effect = kEffects[a_key.effect];
 			auto spec = std::make_shared<Spec>();
 			spec->key = a_key;
-			spec->effect = static_cast<std::size_t>(effectIndex);
-			spec->output = FrameAnchors::EngineTarget(IndexOfName(a_key.output));
+			spec->entry = a_entry;
+			spec->output = ImportOf(ImportOfName(a_key.output));
+			spec->output1 = ImportOf(a_key.output1);
 			std::string_view refusal;
-			if (!spec->output)
+			std::string error;
+			if (!spec->output || (a_key.output1 >= 0 && !spec->output1))
 				refusal = "its output could not be imported";
 			else if (!a_key.compute) {
-				// The viewport was read against the D3D11 texture; the import must hold it too (a resize remakes the passes from the
-				// old shapes).
+				// The viewport was read against the target's size when the shape was seen; this session's import must hold it.
 				const auto mip = MipOfName(a_key.output);
 				const auto shift = mip == AnchorPasses::kAllMips ? 0u : mip;
 				const auto width = (std::max)(spec->output->GetWidth() >> shift, 1u);
 				const auto height = (std::max)(spec->output->GetHeight() >> shift, 1u);
+				std::array<rhi::BlendAttachment, 2> blend{};
 				if (a_key.viewport[0] + a_key.viewport[2] > width || a_key.viewport[1] + a_key.viewport[3] > height)
-					refusal = "its viewport is outside its imported output";
+					refusal = "its viewport is outside its imported output (another resolution)";
+				else if (!BlendFor(a_key.blend, effect.targets, blend, error))
+					refusal = "its blend state has no ORG form";
+				spec->format = RtvFormatOf(a_key.output, spec->output);
+				if (spec->output1)
+					spec->format1 = RtvFormatOf(a_key.output1, spec->output1);
 			}
 			for (std::uint32_t slot = 0; refusal.empty() && slot < effect.slots; ++slot) {
 				if (!(effect.reads & (1u << slot)))
 					continue;
-				spec->inputs[slot] = ImportInput(a_key.inputs[slot]);
+				spec->inputs[slot] = ImportOf(a_key.inputs[slot]);
 				if (!spec->inputs[slot])
 					refusal = "an input could not be imported";
 				else if (slot < effect.samplers && !(effect.cubes & (1u << slot)) &&
 						 (spec->samplers[slot] = SamplerFor(a_key.address[slot], a_key.filter[slot])) == UINT32_MAX)
 					refusal = "a sampler has no ORG form";
 			}
-			if (refusal.empty()) {
-				const auto program = a_key.compute ?
-				                         ComputeProgramFor(spec->effect, spec->computeProgram) :
-				                         ProgramFor(spec->effect, spec->output->GetFormat(), static_cast<ID3D11BlendState*>(const_cast<void*>(a_key.blend)), spec->program);
-				switch (program) {
-				case ProgramState::Building:
-					return { .building = true };
-				case ProgramState::Failed:
-					refusal = "no program";
-					break;
-				default:
-					break;
-				}
-			}
-			if (refusal.empty() && state.nextEntry >= kGateEntries)
-				refusal = "every gate entry is in use";
 			if (!refusal.empty()) {
 				if (state.refusedShapes.insert(a_key).second)
-					logger::info("[ORG] ImageSpace: {} into {} stays on D3D11 ({})", effect.effectName, NameForLog(a_key.output), refusal);
-				return {};
+					logger::info("[ORG] ImageSpace: {} into {} has no pass this session ({}{}{})", effect.effectName, NameForLog(a_key.output), refusal,
+						error.empty() ? "" : ": ", error);
+				return nullptr;
 			}
-			spec->entry = state.nextEntry++;
 			spec->name = fmt::format("{}.{}.{}", effect.effectName, NameForLog(a_key.output), spec->entry);
-			return { .spec = std::move(spec) };
+			return spec;
 		}
 
-		/** @brief The current registration's pass for a shape, or null. */
+		/** @brief The registration's pass for a shape, or null. */
 		const Spec* SpecFor(const ShapeKey& a_key)
 		{
-			for (const auto& spec : IS().specs)
-				if (spec->key == a_key)
-					return spec.get();
-			return nullptr;
+			const auto& specs = IS().specOf;
+			const auto found = specs.find(a_key);
+			return found != specs.end() ? found->second : nullptr;
 		}
 
-		/** @brief Registers the client with every pass it has: the old registration, if any, is replaced. */
-		void RegisterClient()
+		/** @brief a_key with every mention of one target of a_pair replaced by the other. */
+		ShapeKey Swapped(const ShapeKey& a_key, const std::pair<std::int32_t, std::int32_t>& a_pair)
+		{
+			const auto swap = [&](std::int32_t a_target) { return a_target == a_pair.first ? a_pair.second : a_target == a_pair.second ? a_pair.first :
+				                                                                                                                         a_target; };
+			ShapeKey out = a_key;
+			out.output = swap(out.output);
+			out.output1 = swap(out.output1);
+			for (auto& input : out.inputs)
+				input = swap(input);
+			return out;
+		}
+
+		bool Mentions(const ShapeKey& a_key, std::int32_t a_target)
+		{
+			return a_key.output == a_target || a_key.output1 == a_target || std::ranges::find(a_key.inputs, a_target) != a_key.inputs.end();
+		}
+
+		/** @brief Whether a kEffects index is one of the bright-pass blurs (one per bloom radius). */
+		bool IsBloom(std::size_t a_effect) { return kEffects[a_effect].group == "bloom"; }
+
+		/**
+		 * @brief The shapes the RE says the manifest's shapes imply, so they are passes before the engine first draws them:
+		 * - the chain's source alternates between kMAIN and kMAIN_COPY (the effects before HDR copy back and forth);
+		 * - the luminance chain's last level alternates by frame (+2 on odd frames, skeleton of HDR's Render in imagespace.md): two
+		 *   outputs of one effect with the same inputs are such a pair, and every shape mentioning one gets the other;
+		 * - the bloom radius picks one of seven bright-pass blur shaders (slot 79 + radius) with the same targets: a bloom shape
+		 *   implies the other six.
+		 * a_positions gets each implied shape's place (its source's).
+		 */
+		void AddImpliedShapes(std::vector<ShapeKey>& a_keys, std::map<ShapeKey, std::uint32_t>& a_positions)
 		{
 			auto& state = IS();
-			AnchorPasses::Builder builder(Anchor::ImageSpace, kClientId, 0, state.latch, state.gate);
-			for (const auto& spec : state.specs) {
-				const auto& effect = kEffects[spec->effect];
-				// The shader's resource list order: the shared constants, t0.., s0.., (u0), the constants' location.
-				std::vector<AnchorPasses::Bind> bindings;
-				bindings.push_back(AnchorPasses::Bind::Shared());
-				for (std::uint32_t slot = 0; slot < effect.slots; ++slot)
-					bindings.push_back(spec->inputs[slot] ? AnchorPasses::Bind::Srv(spec->inputs[slot], MipOfName(spec->key.inputs[slot])) : AnchorPasses::Bind::Unused());
-				for (std::uint32_t slot = 0; slot < effect.samplers; ++slot)
-					bindings.push_back(spec->inputs[slot] && !(effect.cubes & (1u << slot)) ? AnchorPasses::Bind::Handle(spec->samplers[slot]) : AnchorPasses::Bind::Unused());
-				if (effect.compute)
-					bindings.push_back(AnchorPasses::Bind::Uav(spec->output));
-				bindings.push_back(AnchorPasses::Bind::Latch(spec->entry * static_cast<std::uint32_t>(sizeof(ConstantsAt))));
-				if (effect.compute) {
-					AnchorPasses::Dispatch dispatch{};
-					dispatch.name = spec->name;
-					dispatch.program = spec->computeProgram;
-					dispatch.bindings = std::move(bindings);
-					dispatch.gate = spec->entry;
-					builder.Add(std::move(dispatch));
-					continue;
+			std::set<std::pair<std::int32_t, std::int32_t>> swaps;
+			for (std::size_t i = 0; i < a_keys.size(); ++i)
+				for (std::size_t j = i + 1; j < a_keys.size(); ++j) {
+					const auto& a = a_keys[i];
+					const auto& b = a_keys[j];
+					if (a.effect == b.effect && a.inputs == b.inputs && a.address == b.address && a.filter == b.filter && a.blend == b.blend && a.output != b.output)
+						swaps.insert(std::minmax(a.output, b.output));
 				}
-				AnchorPasses::Draw draw{};
-				draw.name = spec->name;
-				draw.program = spec->program;
-				draw.bindings = std::move(bindings);
-				draw.target = spec->output;
-				draw.mip = MipOfName(spec->key.output);
-				// The engine's viewport (ReadViewport): the whole target, or a part of it (dynamic resolution, a custom viewport).
-				const auto& viewport = spec->key.viewport;
-				draw.viewport = { .x = viewport[0], .y = viewport[1], .width = viewport[2], .height = viewport[3] };
-				draw.load = rhi::LoadOp::Load;
-				draw.gate = spec->entry;
-				builder.Add(std::move(draw));
+			swaps.insert({ static_cast<std::int32_t>(RE::RENDER_TARGET::kMAIN), static_cast<std::int32_t>(RE::RENDER_TARGET::kMAIN_COPY) });
+			const auto add = [&](const ShapeKey& a_partner, const ShapeKey& a_from) {
+				if (a_keys.size() >= kGateEntries || std::ranges::find(a_keys, a_partner) != a_keys.end() || state.refusedShapes.contains(a_partner))
+					return;
+				a_keys.push_back(a_partner);
+				a_positions.emplace(a_partner, a_positions.contains(a_from) ? a_positions[a_from] : 0u);
+			};
+			// Each pair applied once to every shape: one partner per mention.
+			const auto seen = a_keys.size();
+			for (std::size_t i = 0; i < seen; ++i)
+				for (const auto& pair : swaps)
+					if (Mentions(a_keys[i], pair.first) || Mentions(a_keys[i], pair.second))
+						add(Swapped(a_keys[i], pair), a_keys[i]);
+			const auto withSwaps = a_keys.size();
+			for (std::size_t i = 0; i < withSwaps; ++i) {
+				if (!IsBloom(a_keys[i].effect))
+					continue;
+				for (std::size_t other = 0; other < kEffects.size(); ++other) {
+					if (!IsBloom(other) || !state.enabled[other] || other == a_keys[i].effect)
+						continue;
+					ShapeKey partner = a_keys[i];
+					partner.effect = static_cast<std::uint32_t>(other);
+					add(partner, a_keys[i]);
+				}
 			}
-			if (builder.Failed()) {
-				Fail(fmt::format("its passes could not be made ({})", builder.Failure()));
+		}
+
+		/**
+		 * @brief Registers the client with a pass for every shape of a_keys (numbered from 0 by their place in the frame), replacing any
+		 * earlier registration. Setup's, and again on the same shapes when the engine made its targets again. The anchor's graph is
+		 * built with it at the next build point; FrameAnchors::CanRun says when.
+		 */
+		void RegisterClient(const std::vector<ShapeKey>& a_keys)
+		{
+			auto& state = IS();
+			state.specs.clear();
+			state.specOf.clear();
+			state.importedObjects.clear();
+			for (const auto& key : a_keys) {
+				if (state.specs.size() >= kGateEntries)
+					break;
+				if (auto spec = MakeSpec(key, static_cast<std::uint32_t>(state.specs.size()))) {
+					for (const auto name : { spec->key.output, spec->key.output1 })
+						if (name >= 0)
+							state.importedObjects[ImportOfName(name)] = EngineObjectOf(name);
+					for (const auto name : spec->key.inputs)
+						if (name >= 0)
+							state.importedObjects[ImportOfName(name)] = EngineObjectOf(name);
+					state.specOf.emplace(spec->key, spec.get());
+					state.specs.push_back(std::move(spec));
+				}
+			}
+			if (state.specs.empty()) {
+				logger::info("[ORG] ImageSpace: no shape to register; this session's draws stay with the engine and fill the manifest");
 				return;
+			}
+			std::vector<FrameAnchors::PassDesc> passes;
+			for (const auto& spec : state.specs) {
+				passes.push_back({ .name = fmt::format("{}.{}", kClientId, spec->name),
+					.anchor = Anchor::ImageSpace,
+					.order = static_cast<std::int32_t>(spec->entry),
+					.kind = spec->key.compute ? FrameAnchors::PassKind::Compute : FrameAnchors::PassKind::Render,
+					.make = [spec, latch = std::shared_ptr<const org::LatchBlock>(state.latch), gate = std::shared_ptr<const RunGate>(state.gate)] {
+						return MakePass(spec, latch, gate);
+					} });
 			}
 			FrameAnchors::ClientDesc client{};
 			client.id = kClientId;
-			client.passes = builder.Take();
-			client.sharedConstants = builder.ReadsSharedConstants();
+			client.passes = std::move(passes);
+			client.sharedConstants = true;
 			client.gates = { state.gate };
 			client.active = [] { return !IS().batch.empty(); };
 			client.commit = [](const FrameAnchors::Point&) {
@@ -984,9 +1264,9 @@ namespace RenderGraph::Engine::ImageSpace
 			client.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
 			client.onFailed = [] {
 				auto& current = IS();
-				if (current.phase != Phase::Off) {
-					current.phase = Phase::Off;
-					logger::error("[ORG] ImageSpace: the ImageSpace anchor failed; every ImageSpace effect returns to D3D11");
+				if (current.on) {
+					current.on = false;
+					logger::error("[ORG] ImageSpace: the ImageSpace anchor failed; every ImageSpace effect returns to the engine");
 				}
 			};
 			if (!FrameAnchors::Register(std::move(client))) {
@@ -994,156 +1274,214 @@ namespace RenderGraph::Engine::ImageSpace
 				return;
 			}
 			++state.registrations;
-			state.phase = Phase::Joining;
-			if (auto* player = RE::PlayerCharacter::GetSingleton())
-				state.registeredCell = player->GetParentCell();
-			logger::info("[ORG] ImageSpace: registered {} passes (registration {}); draws are taken once the graph holds them",
-				state.specs.size(), state.registrations);
+			logger::info("[ORG] ImageSpace: registered {} passes (registration {}); the anchor's graph holds them from its next build", state.specs.size(),
+				state.registrations);
 		}
 
-		/** @brief a_key with every mention of one target of a_pair replaced by the other. */
-		ShapeKey Swapped(const ShapeKey& a_key, const std::pair<std::int32_t, std::int32_t>& a_pair)
+		/** @brief The manifest's file, beside the shader store (Util::kShaderStoreDirName: Data/ShaderCache keeps only that folder). */
+		std::filesystem::path ManifestPath()
 		{
-			const auto swap = [&](std::int32_t a_target) { return a_target == a_pair.first ? a_pair.second : a_target == a_pair.second ? a_pair.first :
-				                                                                                                                         a_target; };
-			ShapeKey out = a_key;
-			out.output = swap(out.output);
-			for (auto& input : out.inputs)
-				input = swap(input);
-			return out;
+			return std::filesystem::path(L"Data/ShaderCache") / Util::kShaderStoreDirName / L"ImageSpaceShapes.json";
 		}
 
-		bool Mentions(const ShapeKey& a_key, std::int32_t a_target)
+		json ToJson(const ShapeKey& a_key, const ManifestEntry& a_entry)
 		{
-			return a_key.output == a_target || std::ranges::find(a_key.inputs, a_target) != a_key.inputs.end();
+			return json{ { "effect", kEffects[a_key.effect].effectName },
+				{ "output", a_key.output },
+				{ "output1", a_key.output1 },
+				{ "inputs", a_key.inputs },
+				{ "address", a_key.address },
+				{ "filter", a_key.filter },
+				{ "blend", a_key.blend },
+				{ "compute", a_key.compute },
+				{ "viewport", a_key.viewport },
+				{ "position", a_entry.position },
+				{ "lastSession", a_entry.lastSession } };
 		}
 
-		/** @brief Whether a kEffects index is one of the bright-pass blurs (one per bloom radius). */
-		bool IsBloom(std::size_t a_effect) { return kEffects[a_effect].group == "bloom"; }
+		/** @brief A manifest shape, or nothing for an entry this build does not know (another version's effect, a malformed line). */
+		std::optional<std::pair<ShapeKey, ManifestEntry>> FromJson(const json& a_item)
+		{
+			try {
+				const auto effect = EffectNamed(a_item.at("effect").get<std::string>());
+				if (effect < 0)
+					return std::nullopt;
+				ShapeKey key{};
+				key.effect = static_cast<std::uint32_t>(effect);
+				key.output = a_item.at("output").get<std::int32_t>();
+				key.output1 = a_item.at("output1").get<std::int32_t>();
+				key.inputs = a_item.at("inputs").get<decltype(key.inputs)>();
+				key.address = a_item.at("address").get<decltype(key.address)>();
+				key.filter = a_item.at("filter").get<decltype(key.filter)>();
+				key.blend = a_item.at("blend").get<std::uint32_t>();
+				key.compute = a_item.at("compute").get<bool>();
+				key.viewport = a_item.at("viewport").get<decltype(key.viewport)>();
+				if (key.compute != kEffects[key.effect].compute)
+					return std::nullopt;
+				ManifestEntry entry{ .position = a_item.at("position").get<std::uint32_t>(), .lastSession = a_item.at("lastSession").get<std::uint32_t>() };
+				return std::make_pair(key, entry);
+			} catch (const std::exception&) {
+				return std::nullopt;
+			}
+		}
 
-		/**
-		 * @brief The shapes the RE says a seen shape implies, so they are passes before the engine first draws them:
-		 * - the chain's source alternates between kMAIN and kMAIN_COPY (the effects before HDR copy back and forth);
-		 * - the luminance chain's last level alternates by frame (+2 on odd frames, skeleton of HDR's Render in imagespace.md): two
-		 *   outputs of one shader with the same inputs are such a pair, and every shape mentioning one gets the other;
-		 * - the bloom radius picks one of seven bright-pass blur shaders (slot 79 + radius) with the same targets: a bloom shape
-		 *   implies the other six.
-		 */
-		void AddImpliedShapes(std::vector<ShapeKey>& a_keys)
+		/** @brief Setup: the manifest read (a missing or malformed file is an empty one), this session's number, and the old shapes dropped. */
+		void ReadManifest()
 		{
 			auto& state = IS();
-			for (std::size_t i = 0; i < a_keys.size(); ++i)
-				for (std::size_t j = i + 1; j < a_keys.size(); ++j) {
-					const auto& a = a_keys[i];
-					const auto& b = a_keys[j];
-					if (a.shader == b.shader && a.inputs == b.inputs && a.address == b.address && a.filter == b.filter && a.blend == b.blend && a.output != b.output)
-						state.swaps.insert(std::minmax(a.output, b.output));
-				}
-			state.swaps.insert({ static_cast<std::int32_t>(RE::RENDER_TARGET::kMAIN), static_cast<std::int32_t>(RE::RENDER_TARGET::kMAIN_COPY) });
-			const auto add = [&](const ShapeKey& a_partner, const ShapeKey& a_from) {
-				if (std::ranges::find(a_keys, a_partner) != a_keys.end() || state.refusedShapes.contains(a_partner))
+			std::error_code error;
+			const auto path = ManifestPath();
+			if (!std::filesystem::exists(path, error)) {
+				state.session = 1;
+				logger::info("[ORG] ImageSpace: no shape manifest yet ({}); this session's shapes stay with the engine and are written to it",
+					path.string());
+				return;
+			}
+			try {
+				std::ifstream file(path);
+				const auto root = json::parse(file);
+				if (root.value("version", 0u) != kManifestVersion) {
+					state.session = 1;
+					logger::info("[ORG] ImageSpace: the shape manifest is another version's; it is written again from this session");
 					return;
-				a_keys.push_back(a_partner);
-				state.positions.emplace(a_partner, state.positions.contains(a_from) ? state.positions[a_from] : 0u);
-			};
-			// Each pair applied once to every shape seen: one partner per mention.
-			const auto seen = a_keys.size();
-			for (std::size_t i = 0; i < seen; ++i)
-				for (const auto& pair : state.swaps)
-					if (Mentions(a_keys[i], pair.first) || Mentions(a_keys[i], pair.second))
-						add(Swapped(a_keys[i], pair), a_keys[i]);
-			const auto withSwaps = a_keys.size();
-			for (std::size_t i = 0; i < withSwaps; ++i) {
-				const auto effect = EffectOf(static_cast<const RE::BSImagespaceShader*>(a_keys[i].shader));
-				if (effect < 0 || !IsBloom(static_cast<std::size_t>(effect)))
-					continue;
-				for (std::size_t other = 0; other < kEffects.size(); ++other) {
-					const auto* shader = ShaderOf(other);
-					if (!IsBloom(other) || !state.enabled[other] || !shader || shader == a_keys[i].shader)
-						continue;
-					ShapeKey partner = a_keys[i];
-					partner.shader = shader;
-					add(partner, a_keys[i]);
 				}
+				state.session = root.value("session", 0u) + 1;
+				std::uint32_t dropped = 0;
+				for (const auto& item : root.value("shapes", json::array())) {
+					auto shape = FromJson(item);
+					if (!shape)
+						continue;
+					if (state.session - shape->second.lastSession > kManifestSessions) {
+						++dropped;
+						continue;
+					}
+					state.manifest.insert_or_assign(shape->first, shape->second);
+				}
+				logger::info("[ORG] ImageSpace: the shape manifest holds {} shapes (session {}; {} not seen for {} sessions dropped)", state.manifest.size(),
+					state.session, dropped, kManifestSessions);
+			} catch (const std::exception& e) {
+				state.manifest.clear();
+				state.session = 1;
+				logger::warn("[ORG] ImageSpace: the shape manifest could not be read ({}); it is written again from this session", e.what());
 			}
 		}
 
 		/**
-		 * @brief Registers every shape seen (the current passes' and the new ones) with the shapes they imply, numbered from 0 by
-		 * their place in the frame. A shape whose program is still building stays a candidate for the next registration. Nothing
-		 * when no new pass could be made: the current registration stands.
+		 * @brief The manifest written: every shape with the last session that saw it, the shapes seen this session marked with this one.
+		 * At most kGateEntries shapes, the most recently seen first. Render thread; a small file.
 		 */
-		void JoinCandidates()
+		void WriteManifest()
+		{
+			auto& state = IS();
+			for (const auto& key : state.seen)
+				state.manifest[key].lastSession = state.session;
+			std::vector<std::pair<ShapeKey, ManifestEntry>> shapes(state.manifest.begin(), state.manifest.end());
+			std::ranges::stable_sort(shapes, [](const auto& a_left, const auto& a_right) { return a_left.second.lastSession > a_right.second.lastSession; });
+			if (shapes.size() > kGateEntries)
+				shapes.resize(kGateEntries);
+			json items = json::array();
+			for (const auto& [key, entry] : shapes)
+				items.push_back(ToJson(key, entry));
+			const json root{ { "version", kManifestVersion }, { "session", state.session }, { "shapes", std::move(items) } };
+			std::error_code error;
+			const auto path = ManifestPath();
+			std::filesystem::create_directories(path.parent_path(), error);
+			const auto temporary = std::filesystem::path(path).concat(L".tmp");
+			{
+				std::ofstream file(temporary, std::ios::trunc);
+				file << root.dump(1, '\t');
+				if (!file) {
+					logger::warn("[ORG] ImageSpace: the shape manifest could not be written ({})", path.string());
+					return;
+				}
+			}
+			std::filesystem::rename(temporary, path, error);
+			if (error) {
+				logger::warn("[ORG] ImageSpace: the shape manifest could not be replaced ({}: {})", path.string(), error.message());
+				return;
+			}
+			state.manifestDirty = false;
+			state.manifestTouched = true;
+			state.manifestWritten = state.frame;
+			logger::info("[ORG] ImageSpace: wrote the shape manifest ({} shapes, {} seen this session)", shapes.size(), state.seen.size());
+		}
+
+		/** @brief Once a frame: the manifest written when a new shape was seen, or once a session for the seen shapes' sessions. */
+		void MaybeWriteManifest()
+		{
+			auto& state = IS();
+			if (!state.manifestDirty && state.manifestTouched)
+				return;
+			if (state.seen.empty() || state.frame - state.manifestWritten < kManifestWriteFrames)
+				return;
+			WriteManifest();
+		}
+
+		/** @brief A shape drawn or refused this session: noted for the manifest (a new one at its place in the frame). */
+		void NoteShape(const ShapeKey& a_key)
+		{
+			auto& state = IS();
+			if (!state.seen.insert(a_key).second)
+				return;
+			if (state.manifest.contains(a_key))
+				return;
+			state.manifest.emplace(a_key, ManifestEntry{ .position = state.scope << 16 | std::min(state.drawIndex, 0xFFFFu), .lastSession = state.session });
+			state.manifestDirty = true;
+			if (state.logShapes) {
+				const auto& viewport = a_key.viewport;
+				logger::info("[ORG] ImageSpace: new shape {} into {}{}{} from {} {} {}, viewport {}x{} at ({}, {})", kEffects[a_key.effect].effectName,
+					NameForLog(a_key.output), a_key.output1 >= 0 ? " and " : "", a_key.output1 >= 0 ? NameForLog(a_key.output1) : "", NameForLog(a_key.inputs[0]),
+					NameForLog(a_key.inputs[1]), NameForLog(a_key.inputs[2]), viewport[2], viewport[3], viewport[0], viewport[1]);
+			}
+		}
+
+		/** @brief The shapes to register at Setup: the manifest's (selected effects only) and the shapes they imply, in frame order. */
+		std::vector<ShapeKey> ShapesToRegister()
 		{
 			auto& state = IS();
 			std::vector<ShapeKey> keys;
-			for (const auto& spec : state.specs)
-				keys.push_back(spec->key);
-			for (const auto& key : state.candidates)
-				if (std::ranges::find(keys, key) == keys.end())
-					keys.push_back(key);
-			const auto knownCount = state.specs.size();
-			state.candidates.clear();
-			AddImpliedShapes(keys);
+			std::map<ShapeKey, std::uint32_t> positions;
+			for (const auto& [key, entry] : state.manifest) {
+				if (!state.enabled[key.effect])
+					continue;
+				keys.push_back(key);
+				positions.emplace(key, entry.position);
+			}
+			AddImpliedShapes(keys, positions);
 			// Entries (and so the passes' order) follow each shape's place in its scope, so a frame's draws make one batch per scope
 			// whichever partners it uses.
-			std::ranges::stable_sort(keys, [&](const ShapeKey& a_left, const ShapeKey& a_right) {
-				const auto left = state.positions.find(a_left);
-				const auto right = state.positions.find(a_right);
-				return (left != state.positions.end() ? left->second : 0u) < (right != state.positions.end() ? right->second : 0u);
-			});
-			std::vector<std::shared_ptr<const Spec>> specs;
-			bool building = false;
-			state.nextEntry = 0;
-			for (const auto& key : keys) {
-				auto made = MakeSpec(key);
-				if (made.spec)
-					specs.push_back(std::move(made.spec));
-				building = building || made.building;
-			}
-			if (building) {
-				// A program is still building: nothing registers yet, so one registration holds every shape. The shapes not registered
-				// stay candidates, and the next frame asks again.
-				for (const auto& key : keys)
-					if (!SpecFor(key) && !state.refusedShapes.contains(key))
-						state.candidates.push_back(key);
-				state.nextEntry = static_cast<std::uint32_t>(knownCount);
-				return;
-			}
-			if (specs.size() == knownCount && state.phase != Phase::Learning) {
-				// Nothing new could be made: the current registration stands (its entries are unchanged, as the order is).
-				state.nextEntry = static_cast<std::uint32_t>(knownCount);
-				return;
-			}
-			state.specs = std::move(specs);
-			if (state.specs.empty()) {
-				state.phase = Phase::Learning;
-				return;
-			}
-			RegisterClient();
+			std::ranges::stable_sort(keys, [&](const ShapeKey& a_left, const ShapeKey& a_right) { return positions[a_left] < positions[a_right]; });
+			return keys;
 		}
 
 		/**
-		 * @brief The engine's targets were made again (a resize): the same shapes are made again on the new imports and registered
-		 * at once. The anchors build again for the new imports anyway, so this adds no build of its own.
+		 * @brief Once a frame: when the engine made a registered target again (a resize), the client registers the same shapes on the
+		 * new imports. FrameAnchors::EngineTarget's new import already asks every anchor's graph to be built again; this registration
+		 * joins that build. Until it is built, CanRun refuses the draws.
 		 */
-		void Remake()
+		void CheckImports()
 		{
 			auto& state = IS();
-			logger::info("[ORG] ImageSpace: the engine's targets were made again; its {} passes are made again on them", state.specs.size());
+			bool changed = false;
+			for (const auto& [name, object] : state.importedObjects)
+				if (EngineObjectOf(name) != object) {
+					changed = true;
+					break;
+				}
+			if (!changed)
+				return;
+			logger::info("[ORG] ImageSpace: the engine made its targets again; the {} passes register again on the new imports", state.specs.size());
+			std::vector<ShapeKey> keys;
 			for (const auto& spec : state.specs)
-				if (std::ranges::find(state.candidates, spec->key) == state.candidates.end())
-					state.candidates.push_back(spec->key);
-			state.specs.clear();
+				keys.push_back(spec->key);
 			state.refusedShapes.clear();
-			state.phase = Phase::Learning;
-			JoinCandidates();
+			RegisterClient(keys);
 		}
 
 		bool Usable()
 		{
 			const auto& state = IS();
-			return state.phase != Phase::Off && !state.flushing && FrameAnchors::IsRenderOwner() && RenderGraphRuntime::Get().IsActive();
+			return state.on && !state.flushing && FrameAnchors::IsRenderOwner() && RenderGraphRuntime::Get().IsActive();
 		}
 
 		/**
@@ -1151,7 +1489,7 @@ namespace RenderGraph::Engine::ImageSpace
 		 *
 		 * Its draws were taken only while FrameAnchors::CanRun said the run would draw them, so a run that did not submit is an epoch
 		 * failure (its onFailed returns ImageSpace to the engine at the next poll). The engine's state for those draws is gone by
-		 * now, so they cannot be drawn by the engine any more: they are counted and logged, and ImageSpace keeps running.
+		 * now, so they cannot be drawn by the engine any more: they are counted and logged as an error.
 		 */
 		void Flush()
 		{
@@ -1168,7 +1506,7 @@ namespace RenderGraph::Engine::ImageSpace
 			state.keepAlive.clear();
 			if (!result || !state.executed) {
 				state.lost += count;
-				static Util::ReasonLog s_lost("[ORG] ImageSpace: a batch the anchor could run did not draw", spdlog::level::warn);
+				static Util::ReasonLog s_lost("[ORG] ImageSpace: a batch the anchor could run did not draw", spdlog::level::err);
 				s_lost.Report(result ? "its graph did not hold the client" : "the anchor's run did not submit", fmt::format("{} draws missed this frame", count));
 				return;
 			}
@@ -1178,20 +1516,7 @@ namespace RenderGraph::Engine::ImageSpace
 				logger::info("[ORG] ImageSpace: the first batch ({} draws) ran on the graph", count);
 		}
 
-		/**
-		 * @brief The registration in the anchor's built graph: draws are taken from now. Until then RequestJoin has the build made at
-		 * the next build point; the anchor is never run just to build it.
-		 */
-		void Join()
-		{
-			auto& state = IS();
-			if (state.phase != Phase::Joining || !FrameAnchors::RequestJoin(kClientId, Anchor::ImageSpace))
-				return;
-			state.phase = Phase::Live;
-			logger::info("[ORG] ImageSpace: the graph holds {} passes; their draws are the graph's from now", state.specs.size());
-		}
-
-		/** @brief Once a frame, on the first ImageSpace call of the render owner: the frame's runs, the learning window, cell changes. */
+		/** @brief Once a frame, on the first ImageSpace call of the render owner: the frame's runs, a resize, the programs, the manifest. */
 		void BeginFrame()
 		{
 			auto& state = IS();
@@ -1202,44 +1527,9 @@ namespace RenderGraph::Engine::ImageSpace
 			state.frame = frame;
 			state.runsThisFrame = 0;
 			state.scopeRuns.fill(0);
-			auto* player = RE::PlayerCharacter::GetSingleton();
-			const void* cell = player ? player->GetParentCell() : nullptr;
-			switch (state.phase) {
-			case Phase::Learning:
-				// The window counts only frames with the player in a cell: the main menu has no eye adaptation and its own source. It
-				// also waits for the candidates' programs, so the first registration holds them all.
-				if (!state.candidates.empty() && cell && ++state.quietFrames >= kLearnFrames)
-					JoinCandidates();
-				break;
-			case Phase::Live:
-				// Shapes first seen after the registration join at a cell change only: a loading screen is not a frame the player
-				// watches, and the count of shapes bounds how often that can happen.
-				if (!state.candidates.empty() && cell != state.registeredCell)
-					JoinCandidates();
-				break;
-			default:
-				break;
-			}
-			Join();
-		}
-
-		void NoteShape(const ShapeKey& a_key)
-		{
-			auto& state = IS();
-			if (state.refusedShapes.contains(a_key) || SpecFor(a_key) || std::ranges::find(state.candidates, a_key) != state.candidates.end())
-				return;
-			if (state.specs.size() + state.candidates.size() >= kGateEntries)
-				return;
-			state.candidates.push_back(a_key);
-			state.positions.emplace(a_key, state.scope << 16 | std::min(state.drawIndex, 0xFFFFu));
-			state.quietFrames = 0;
-			if (state.logShapes) {
-				const auto effect = EffectOf(static_cast<const RE::BSImagespaceShader*>(a_key.shader));
-				const auto& viewport = a_key.viewport;
-				logger::info("[ORG] ImageSpace: new shape {} into {} from {} {} {}, viewport {}x{} at ({}, {})",
-					effect >= 0 ? kEffects[static_cast<std::size_t>(effect)].effectName : std::string_view("?"), NameForLog(a_key.output), NameForLog(a_key.inputs[0]),
-					NameForLog(a_key.inputs[1]), NameForLog(a_key.inputs[2]), viewport[2], viewport[3], viewport[0], viewport[1]);
-			}
+			QueuePrograms();
+			CheckImports();
+			MaybeWriteManifest();
 		}
 
 		/**
@@ -1249,32 +1539,16 @@ namespace RenderGraph::Engine::ImageSpace
 		const Spec* AdmitShape(const ShapeKey& a_key, std::size_t a_effect)
 		{
 			auto& state = IS();
-			const auto& effect = kEffects[a_effect];
-			if (state.phase != Phase::Live) {
-				NoteShape(a_key);
-				Flush();
-				++state.engineDrawn;
-				return nullptr;
-			}
+			NoteShape(a_key);
 			const Spec* spec = SpecFor(a_key);
 			if (!spec) {
-				NoteShape(a_key);
 				Flush();
-				Refuse("a shape first seen after the registration; it joins at the next cell change", a_effect);
+				Refuse("a shape this session did not register; the manifest has it from the next session", a_effect);
+				state.declined = &UnregisteredReason();
 				return nullptr;
 			}
-			// A target made again (a resize) has a new import: the passes are made again on the new ones.
-			bool current = spec->output == FrameAnchors::EngineTarget(IndexOfName(a_key.output));
-			for (std::uint32_t slot = 0; current && slot < effect.slots; ++slot)
-				current = !spec->inputs[slot] || spec->inputs[slot] == ImportInput(a_key.inputs[slot]);
-			if (!current) {
-				Flush();
-				Remake();
-				++state.engineDrawn;
-				return nullptr;
-			}
-			// A batch runs in its passes' order: a pass at or before the last one taken (the engine's order differs from the first
-			// registration's, or the same pass again) starts a new batch.
+			// A batch runs in its passes' order: a pass at or before the last one taken (the engine's order differs from the manifest's,
+			// or the same pass again) starts a new batch.
 			if (!state.batch.empty() && spec->entry <= state.lastEntry)
 				Flush();
 			// A new batch is a new run: withheld only when the run can draw it now (owner, built graph, ring room), only for the runs a
@@ -1284,8 +1558,13 @@ namespace RenderGraph::Engine::ImageSpace
 					Refuse("its scope used its runs this frame", a_effect);
 					return nullptr;
 				}
-				if (state.runsThisFrame >= FrameAnchors::RunsPerFrame(Anchor::ImageSpace) || !FrameAnchors::CanRun(kClientId, Anchor::ImageSpace)) {
-					Refuse("the ImageSpace anchor cannot run another batch this frame", a_effect);
+				if (state.runsThisFrame >= FrameAnchors::RunsPerFrame(Anchor::ImageSpace)) {
+					Refuse("the ImageSpace anchor ran as often as it is sized for this frame", a_effect);
+					return nullptr;
+				}
+				if (!FrameAnchors::CanRun(kClientId, Anchor::ImageSpace)) {
+					// Before the first build after Setup or after a resize's registration (one build point), or a full ring.
+					Refuse("the ImageSpace anchor's graph does not hold this registration yet, or its ring is full", a_effect);
 					return nullptr;
 				}
 			}
@@ -1319,13 +1598,13 @@ namespace RenderGraph::Engine::ImageSpace
 			ShapeKey key{};
 			OutputView output;
 			std::string_view refusal;
-			if (!ReadShape(scope.shader, effect, key, output, refusal)) {
+			if (!ReadShape(scope.effect, key, output, refusal)) {
 				Flush();
 				Refuse(refusal, scope.effect);
 				return false;
 			}
 			// The engine's state for the draw goes to D3D11 as before (the draw would apply it; when the engine draws, its own call
-			// finds nothing left to apply). Then DXVK's context holds the viewport the draw uses.
+			// finds nothing left to apply). The shadow state then holds the viewport the draw uses.
 			static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
 			setDirtyStates(false);
 			std::string detail;
@@ -1343,21 +1622,21 @@ namespace RenderGraph::Engine::ImageSpace
 			// The ImageSpace setups write PerGeometry into the PS b2 size-class pool (PSGeometry); a custom mapper's ring is accepted too.
 			if (!slot || (slot->group != Constants::Group::PSGeometry && slot->group != Constants::Group::Custom)) {
 				Flush();
-				Refuse("no captured PerGeometry constants", scope.effect);
+				Failure("the capture holds no PerGeometry constants for its draw", scope.effect);
 				return false;
 			}
 			// FrameBuffer as the draw had it bound (PS b12, the engine's per-frame buffer), not CS's shared snapshot.
 			const auto* frameSlot = Constants::Find(use, Constants::Stage::Pixel, 12);
 			if (!frameSlot) {
 				Flush();
-				Refuse("no captured PerFrame constants", scope.effect);
+				Failure("the capture holds no PerFrame constants for its draw", scope.effect);
 				return false;
 			}
 			const auto at = Constants::Where(*slot);
 			const auto frameAt = Constants::Where(*frameSlot);
 			if (!at.block || !frameAt.block) {
 				Flush();
-				Refuse("its constants have no ring chunk", scope.effect);
+				Failure("its captured constants have no ring chunk", scope.effect);
 				return false;
 			}
 			const std::array blocks{ at.block, frameAt.block };
@@ -1382,7 +1661,7 @@ namespace RenderGraph::Engine::ImageSpace
 			++state.drawIndex;
 			ShapeKey key{};
 			std::string_view refusal;
-			if (!ReadComputeShape(scope.shader, effect, key, refusal)) {
+			if (!ReadComputeShape(scope.effect, key, refusal)) {
 				Flush();
 				Refuse(refusal, scope.effect);
 				return false;
@@ -1403,7 +1682,7 @@ namespace RenderGraph::Engine::ImageSpace
 			ID3D11Buffer* constants = Tripwire::Unwrap(Constants::EngineComputeBuffer());
 			if (!constants) {
 				Flush();
-				Refuse("no engine compute constant buffer", scope.effect);
+				Failure("no engine compute constant buffer", scope.effect);
 				return false;
 			}
 			globals::d3d::context->CSSetConstantBuffers(0, 1, &constants);
@@ -1411,13 +1690,13 @@ namespace RenderGraph::Engine::ImageSpace
 			const auto* slot = use.Valid() ? Constants::Find(use, Constants::Stage::Compute, 0) : nullptr;
 			if (!slot || slot->group != Constants::Group::Compute) {
 				Flush();
-				Refuse("no captured compute constants", scope.effect);
+				Failure("the capture holds no compute constants for its dispatch", scope.effect);
 				return false;
 			}
 			const auto at = Constants::Where(*slot);
 			if (!at.block) {
 				Flush();
-				Refuse("its constants have no ring chunk", scope.effect);
+				Failure("its captured constants have no ring chunk", scope.effect);
 				return false;
 			}
 			const std::array blocks{ at.block };
@@ -1433,8 +1712,8 @@ namespace RenderGraph::Engine::ImageSpace
 			if (!Constants::Active())
 				return "the engine-constants capture is not active (CS_ORG_ENGINE_CONSTANTS=1)";
 			// ImageSpaceEffect+0x88 (unk88): the effect keeps its own viewport; BSImagespaceShader::Render skips UpdateViewPort then
-			// (checked in Ghidra on SE 0x14130cd20 and AE 0x1414f88b0). Not a refusal: the draw's shape takes the viewport the D3D11
-			// context holds once SetDirtyStates ran (ReadViewport), whoever set it.
+			// (checked in Ghidra on SE 0x14130cd20 and AE 0x1414f88b0). Not a refusal: the draw's shape takes the viewport the shadow
+			// state holds once SetDirtyStates ran (ReadViewport), whoever set it.
 			auto* manager = RE::ImageSpaceManager::GetSingleton();
 			if (!manager)
 				return "no ImageSpaceManager";
@@ -1556,6 +1835,37 @@ namespace RenderGraph::Engine::ImageSpace
 			return true;
 		}
 
+		/**
+		 * @brief a_call (the engine's ImageSpace function) counted as an engine ImageSpace call: a draw or dispatch inside it that the
+		 * port does not take is the engine's on purpose (DrawTriShape and DispatchCSShader open the latch's scope for it).
+		 */
+		template <class Call>
+		void EngineCall(Call&& a_call)
+		{
+			auto& state = IS();
+			++state.engineCalls;
+			a_call();
+			--state.engineCalls;
+		}
+
+		/**
+		 * @brief The engine's draw or dispatch, which ImageSpace leaves to it: inside an engine ImageSpace call, in the flush latch's
+		 * EngineDraws scope under the reason it was declined for (an effect not on the graph when nothing declined it).
+		 */
+		template <class Call>
+		void EngineDraw(Call&& a_call)
+		{
+			auto& state = IS();
+			if (state.engineCalls == 0) {
+				a_call();
+				return;
+			}
+			const auto* reason = state.current && state.current->eligible && state.declined ? state.declined : &NotPortedReason();
+			state.declined = nullptr;
+			Latch::EngineDraws scope(*reason);
+			a_call();
+		}
+
 		/** @brief BSImagespaceShader::Render (100950 / 107732): every raster ImageSpace shader's draw, through DrawTriShape. */
 		struct ShaderRender
 		{
@@ -1569,30 +1879,38 @@ namespace RenderGraph::Engine::ImageSpace
 				const auto* effect = static_cast<const RE::ImageSpaceEffect*>(a_effect);
 				const auto* shader = static_cast<const RE::BSImagespaceShader*>(effect);
 				const bool covered = EffectOf(shader) >= 0;
-				const bool scoped = InScope(shader, [&] {
-					WithEffect(shader, false, covered ? Ineligible() : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
+				EngineCall([&] {
+					const bool scoped = InScope(shader, [&] {
+						WithEffect(shader, false, covered ? Ineligible() : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
+					});
+					if (!scoped)
+						func(a_effect, a_quad, a_param);
 				});
-				if (!scoped)
-					func(a_effect, a_quad, a_param);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
 		/**
 		 * @brief BSImagespaceShader's explicit-target Render (100951 / 107733): the draw of a shader whose caller bound its target and
-		 * textures (RenderSSAO, the reflections pass), through DrawTriShape. Its this is the BSImagespaceShader itself.
+		 * textures (RenderSSAO, the reflections pass, the water blend), through DrawTriShape. Its this is the BSImagespaceShader itself.
+		 * Outside every scope only an own-scope effect is taken (the water blend).
 		 */
 		struct ExplicitRender
 		{
 			static void thunk(RE::BSImagespaceShader* a_shader, void* a_geometry)
 			{
-				auto& state = IS();
-				if (state.scopeDepth == 0 || !a_shader || !Usable()) {
+				if (!a_shader || !Usable()) {
 					func(a_shader, a_geometry);
 					return;
 				}
 				const bool covered = EffectOf(a_shader) >= 0;
-				WithEffect(a_shader, false, covered ? IneligibleExplicit(a_geometry) : std::string_view{}, [&] { func(a_shader, a_geometry); });
+				EngineCall([&] {
+					const bool scoped = InScope(a_shader, [&] {
+						WithEffect(a_shader, false, covered ? IneligibleExplicit(a_geometry) : std::string_view{}, [&] { func(a_shader, a_geometry); });
+					});
+					if (!scoped)
+						func(a_shader, a_geometry);
+				});
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -1609,9 +1927,11 @@ namespace RenderGraph::Engine::ImageSpace
 					func(a_shader, a_x, a_y, a_z);
 					return;
 				}
-				const bool scoped = InScope(a_shader, [&] { WithEffect(a_shader, true, IneligibleDispatch(), [&] { func(a_shader, a_x, a_y, a_z); }); });
-				if (!scoped)
-					func(a_shader, a_x, a_y, a_z);
+				EngineCall([&] {
+					const bool scoped = InScope(a_shader, [&] { WithEffect(a_shader, true, IneligibleDispatch(), [&] { func(a_shader, a_x, a_y, a_z); }); });
+					if (!scoped)
+						func(a_shader, a_x, a_y, a_z);
+				});
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -1677,17 +1997,30 @@ namespace RenderGraph::Engine::ImageSpace
 			static void thunk(void* a_renderer, void* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 			{
 				auto& state = IS();
-				if (state.phase != Phase::Off && !state.flushing && FrameAnchors::IsRenderOwner()) {
+				if (state.on && !state.flushing && FrameAnchors::IsRenderOwner()) {
 					if (state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->compute && !state.current->drew) {
 						if (TakeDraw())
 							return;
 					} else
 						Flush();
+					EngineDraw([&] { func(a_renderer, a_shape, a_start, a_triangles); });
+					return;
 				}
 				func(a_renderer, a_shape, a_start, a_triangles);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+
+		/**
+		 * @brief Whether a return address is in the volumetric lighting's render function (SE 100309, AE 107023; its dispatches are at
+		 * AE +0x31C and +0x48B): within its first 0x800 bytes.
+		 */
+		bool FromVolumetricLighting(const void* a_return)
+		{
+			static const std::uintptr_t start = REL::RelocationID(100309, 107023).address();
+			const auto at = reinterpret_cast<std::uintptr_t>(a_return);
+			return at > start && at - start < 0x800;
+		}
 
 		/**
 		 * @brief BSGraphics::Renderer::DispatchCSShader (75532 / 77329): the current compute effect's dispatch is taken; any other
@@ -1698,31 +2031,27 @@ namespace RenderGraph::Engine::ImageSpace
 			static void thunk(void* a_renderer, void* a_shader, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z)
 			{
 				auto& state = IS();
-				if (state.phase != Phase::Off && !state.flushing && FrameAnchors::IsRenderOwner()) {
+				if (state.on && !state.flushing && FrameAnchors::IsRenderOwner()) {
 					if (state.scopeDepth > 0 && state.current && state.current->eligible && state.current->compute && !state.current->drew) {
 						if (TakeDispatch(a_x, a_y, a_z))
 							return;
 					} else
 						Flush();
+					// The volumetric lighting's own dispatches (AE 107023 +0x31C and +0x48B, SE 100309: the generate and raymarch compute
+					// with CS's ISVolumetricLighting* replacements) call DispatchCSShader directly, outside every ImageSpace call. They stay
+					// the engine's (imagespace.md, "What stays the engine's").
+					if (FromVolumetricLighting(_ReturnAddress())) {
+						Latch::EngineDraws scope(VolumetricReason());
+						func(a_renderer, a_shader, a_x, a_y, a_z);
+						return;
+					}
+					EngineDraw([&] { func(a_renderer, a_shader, a_x, a_y, a_z); });
+					return;
 				}
 				func(a_renderer, a_shader, a_x, a_y, a_z);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
-
-		const char* PhaseName(Phase a_phase)
-		{
-			switch (a_phase) {
-			case Phase::Learning:
-				return "learning";
-			case Phase::Joining:
-				return "joining";
-			case Phase::Live:
-				return "live";
-			default:
-				return "off";
-			}
-		}
 	}
 
 	void Install()
@@ -1759,7 +2088,7 @@ namespace RenderGraph::Engine::ImageSpace
 	void Setup()
 	{
 		auto& state = IS();
-		if (!Requested() || state.phase != Phase::Off)
+		if (!Requested() || state.on)
 			return;
 		const auto off = [](std::string_view a_why) { logger::warn("[ORG] ImageSpace: CS_ORG_IMAGESPACE=1, but {}; the ImageSpace chain stays on D3D11", a_why); };
 		if (!state.installed)
@@ -1780,28 +2109,37 @@ namespace RenderGraph::Engine::ImageSpace
 		if (!state.gate || !state.latch)
 			return off("its run gate or latch could not be made");
 		SelectEffects();
-		for (std::size_t i = 0; i < kEffects.size(); ++i)
-			state.fallbacks[i] = std::make_unique<Util::ReasonLog>(fmt::format("[ORG] ImageSpace: {} stays on D3D11", kEffects[i].effectName));
+		for (std::size_t i = 0; i < kEffects.size(); ++i) {
+			state.fallbacks[i] = std::make_unique<Util::ReasonLog>(fmt::format("[ORG] ImageSpace: {} stays with the engine", kEffects[i].effectName));
+			state.failures[i] = std::make_unique<Util::ReasonLog>(fmt::format("[ORG] ImageSpace: {} failed on the graph and stays with the engine", kEffects[i].effectName),
+				spdlog::level::err);
+		}
 		state.logShapes = Switches::On("CS_ORG_IMAGESPACE_LOG");
 		if (const auto sized = FrameAnchors::RunsPerFrame(Anchor::ImageSpace); sized < ScopeRunsTotal())
 			logger::warn(
 				"[ORG] ImageSpace: the ImageSpace anchor is sized for {} runs a frame, fewer than the {} its scopes may start; the draws of the "
 				"scopes that come last stay with the engine when the runs are used up",
 				sized, ScopeRunsTotal());
-		state.phase = Phase::Learning;
+		state.on = true;
 		std::string selected;
 		for (std::size_t i = 0; i < kEffects.size(); ++i)
 			if (state.enabled[i])
 				selected += fmt::format("{}{}", selected.empty() ? "" : ",", kEffects[i].effectName);
-		logger::info("[ORG] ImageSpace: on (CS_ORG_IMAGESPACE); effects {}; the client registers after {} frames without a new shape",
-			selected.empty() ? "none" : selected, kLearnFrames);
+		logger::info("[ORG] ImageSpace: on (CS_ORG_IMAGESPACE); effects {}", selected.empty() ? "none" : selected);
+		// The session's shapes, registered once: the manifest's and the shapes they imply. Their programs are queued now when the
+		// engine's effects exist (else at the first ImageSpace call); each pass takes its own at the graph's first build.
+		ReadManifest();
+		RegisterClient(ShapesToRegister());
+		QueuePrograms();
 	}
 
 	std::string Status()
 	{
 		const auto& state = IS();
-		return fmt::format("ImageSpace: {}, {} passes, {} candidates, {} registrations, {} draws taken in {} batches, {} left to D3D11, {} missed", PhaseName(state.phase),
-			state.specs.size(), state.candidates.size(), state.registrations, state.taken, state.batches, state.engineDrawn, state.lost);
+		return fmt::format("ImageSpace: {}, {} passes, {} registrations, {} shapes in the manifest ({} seen this session), {} draws taken in {} batches, {} left to the "
+						   "engine, {} missed",
+			state.on ? "on" : "off", state.specs.size(), state.registrations, state.manifest.size(), state.seen.size(), state.taken, state.batches, state.engineDrawn,
+			state.lost);
 	}
 }
 

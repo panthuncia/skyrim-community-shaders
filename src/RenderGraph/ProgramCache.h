@@ -98,24 +98,43 @@ namespace RenderGraph
 			}
 			Desc desc = a_describe();
 			ProgramCacheDetail::ResolveDefines(desc);
-			const bool queued = ProgramCacheDetail::Post([entry, desc = std::move(desc), cacheName = name]() {
-				std::shared_ptr<const Program> program;
-				try {
-					program = ProgramCacheDetail::Load(desc);
-				} catch (const std::exception& e) {
-					logger::error("[ORG] {} programs: building {} threw: {}", cacheName, ProgramCacheDetail::Label(desc), e.what());
-				}
-				if (program) {
-					entry->program.store(std::move(program), std::memory_order_release);
-					entry->status.store(ProgramStatus::Ready, std::memory_order_release);
-					return;
-				}
-				entry->status.store(ProgramStatus::Failed, std::memory_order_release);
-				logger::error("[ORG] {} programs: {} could not be built; what needs it stays with the engine", cacheName, ProgramCacheDetail::Label(desc));
-			});
+			const bool queued = ProgramCacheDetail::Post([entry, desc = std::move(desc), cacheName = name]() { Build(*entry, desc, cacheName); });
 			if (!queued)
-				entry->status.store(ProgramStatus::Failed, std::memory_order_release);
+				Finish(*entry, nullptr);
 			return nullptr;
+		}
+
+		/**
+		 * @brief The key's program now, for a caller that cannot go on without it (a pass made at a graph build): a built one is
+		 * returned, one queued or building is waited for, and a missing one is built on the calling thread. Null when the build
+		 * failed or without a render graph. a_builtHere is set when this call built it (the caller logs it: a program its setup
+		 * did not ask for in time). Render thread. Never call it after StopProgramBuilds: a dropped build is never finished.
+		 */
+		std::shared_ptr<const Program> GetNow(const Key& a_key, const std::function<Desc()>& a_describe, bool* a_builtHere = nullptr)
+		{
+			std::shared_ptr<Entry> entry;
+			bool fresh = false;
+			{
+				std::scoped_lock lock(mutex);
+				if (const auto found = entries.find(a_key); found != entries.end())
+					entry = found->second;
+				else if (!ProgramCacheDetail::Available())
+					return nullptr;
+				else {
+					entry = std::make_shared<Entry>();
+					entries.emplace(a_key, entry);
+					fresh = true;
+				}
+			}
+			if (fresh) {
+				Desc desc = a_describe();
+				ProgramCacheDetail::ResolveDefines(desc);
+				Build(*entry, desc, name);
+				if (a_builtHere)
+					*a_builtHere = true;
+			} else
+				entry->status.wait(ProgramStatus::Building, std::memory_order_acquire);
+			return entry->program.load(std::memory_order_acquire);
 		}
 
 		/** @brief Where the key is: Missing, Building, Ready or Failed. */
@@ -146,6 +165,30 @@ namespace RenderGraph
 			std::atomic<std::shared_ptr<const Program>> program;
 			std::atomic<ProgramStatus> status{ ProgramStatus::Building };
 		};
+
+		/** @brief The entry's final state: Ready with a_program, or Failed without one. Wakes every GetNow waiting on it. */
+		static void Finish(Entry& a_entry, std::shared_ptr<const Program> a_program)
+		{
+			const bool built = a_program != nullptr;
+			if (built)
+				a_entry.program.store(std::move(a_program), std::memory_order_release);
+			a_entry.status.store(built ? ProgramStatus::Ready : ProgramStatus::Failed, std::memory_order_release);
+			a_entry.status.notify_all();
+		}
+
+		/** @brief Builds a_desc into a_entry on the calling thread (the build thread, or GetNow's caller). */
+		static void Build(Entry& a_entry, const Desc& a_desc, const std::string& a_cacheName)
+		{
+			std::shared_ptr<const Program> program;
+			try {
+				program = ProgramCacheDetail::Load(a_desc);
+			} catch (const std::exception& e) {
+				logger::error("[ORG] {} programs: building {} threw: {}", a_cacheName, ProgramCacheDetail::Label(a_desc), e.what());
+			}
+			if (!program)
+				logger::error("[ORG] {} programs: {} could not be built; what needs it stays with the engine", a_cacheName, ProgramCacheDetail::Label(a_desc));
+			Finish(a_entry, std::move(program));
+		}
 
 		std::string name;
 		mutable std::mutex mutex;

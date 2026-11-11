@@ -25,26 +25,26 @@
  * entry (RunGate::OpenDispatch).
  *
  * Scopes: the HDR effect, the pre-tonemap composites, RenderSSAO and the reflection pass, and each call of an own-scope effect made
- * outside them (the end-of-frame effects, the depth-of-field blur, the snow copy). A batch runs at its scope's end at the latest
- * (CS code between these calls uses D3D11 and runs other anchors). Each kind of scope has its own share of the anchor's 13 runs a
+ * outside them (the end-of-frame effects, the depth-of-field blur, the snow copy, the water blend, the LDR downsample). A batch runs at its scope's end at the latest
+ * (CS code between these calls uses D3D11 and runs other anchors). Each kind of scope has its own share of the anchor's 15 runs a
  * frame, so the early scopes never use up the later ones' runs.
  *
- * Graph rebuilds: the client is registered once the shapes (shader, targets, samplers, blend) of a learning window are known and
- * their programs are built (RenderGraph::ProgramCache, off the render thread), with the shapes the RE says they imply (the source's
- * kMAIN / kMAIN_COPY alternation, the luminance chain's alternating level, the other bloom radii). Every shape is a pass behind a
- * gate entry, so effects that run on some frames only never rebuild the graph. The client joins through FrameAnchors::RequestJoin
- * (built at the next build point, never by running the anchor). A shape first seen later draws with D3D11 until the next cell
- * change; the engine's targets made again (a resize) make the same passes again on the new imports.
+ * The pass set is fixed for the session at Setup (docs/development/p5/imagespace.md, "The primary path"): every shape (effect,
+ * outputs, inputs, samplers, blend state, viewport, all by value) of the shape manifest beside the shader store, with the shapes
+ * the RE says they imply, is a pass behind a gate entry, registered once. Programs are queued at Setup and taken by each pass when
+ * the graph is first built (ProgramCache::GetNow), before any world frame. A shape outside the manifest stays with the engine for
+ * the session (logged once) and is written to the manifest for the next one: nothing registers again during play. The engine's
+ * targets made again (a resize) register the same shapes on the new imports, into the build the new imports ask for anyway.
  *
- * Fallback, per draw: anything the port cannot take (an effect not selected, a target outside the engine's table, a custom viewport,
- * a scissor rectangle, dynamic resolution, a clear, no captured constants, a caller that is not the render owner, a graph not built
- * yet, an anchor that cannot run another batch now: FrameAnchors::CanRun, its runs a frame) is drawn by the engine as before. A batch
- * that is pending when the engine draws something else is run first, so the engine's order is kept. A failed graph returns every
- * effect to D3D11 for the session.
+ * Inherent refusals, per draw: an effect not selected, a target outside the engine's table, a scissor rectangle, dynamic
+ * resolution's quad, a manager rectangle, a clear at the bind, a shape outside the session's set, an anchor that cannot run another
+ * batch now (FrameAnchors::CanRun, its runs a frame). Constants the capture missed are failures, logged as errors. A batch that is
+ * pending when the engine draws something else is run first, so the engine's order is kept. A failed graph returns every effect to
+ * the engine for the session.
  *
  * Switches: CS_ORG_IMAGESPACE=1 (default off: nothing is hooked). Diagnostics: CS_ORG_IMAGESPACE_EFFECTS=<list> (engine names,
  * effect names or the groups hdr, bloom, composite, sao, ssr; unset or "all": every covered effect) narrows the port to bisect an
- * effect; CS_ORG_IMAGESPACE_LOG=1 logs each new shape and each effect's constant sizes.
+ * effect; CS_ORG_IMAGESPACE_LOG=1 logs each shape new to the manifest and each effect's constant sizes.
  */
 namespace RenderGraph::Engine::ImageSpace
 {
@@ -57,9 +57,9 @@ namespace RenderGraph::Engine::ImageSpace
 	/** @brief State::Setup, before the render graph initializes: the ImageSpace anchor is reserved. */
 	void Reserve();
 
-	/** @brief State::Setup, once the graph is up: the latch and the run gate. The client registers after its learning window. */
+	/** @brief State::Setup, once the graph is up: the latch, the run gate, the manifest's shapes registered and their programs queued. */
 	void Setup();
 
-	/** @brief One status line (phase, passes, taken and refused draws). Main thread. */
+	/** @brief One status line (passes, manifest, taken and refused draws). Main thread. */
 	std::string Status();
 }

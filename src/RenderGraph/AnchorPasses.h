@@ -86,6 +86,8 @@ namespace RenderGraph::AnchorPasses
 		std::vector<Bind> bindings;
 		std::shared_ptr<org::Resource> target;
 		std::uint32_t mip = kAllMips;
+		// SV_Target1 and up (whole textures, the same load op): for a program with several targets.
+		std::vector<std::shared_ptr<org::Resource>> extraTargets;
 		RasterProgram::Viewport viewport;  // the render area (required): the target's (or the mip's) size, or a part of it
 		rhi::LoadOp load = rhi::LoadOp::Load;
 		std::array<float, 4> clear{};  // with LoadOp::Clear

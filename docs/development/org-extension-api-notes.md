@@ -1693,3 +1693,13 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   should hand out referenced views (or a stable texture identity), never bare pointers.
 - **Found by:** the SRV lifetime fixes (2026-11-11), crashes in `GpuTextures::Request` from `UpdateMaterialBindings`
   and in the first `PinMaterialViews`, which took its references on the record's pointers.
+
+### A pass whose targets are chosen per run
+
+ImageSpace (p5/imagespace.md, "The primary path") would have liked one pass per effect slot whose output, inputs and viewport are
+picked per run. ORG fixes a pass's render targets and reads at its build, one pass cannot declare an image as both a target and a
+read, its push words are part of its kept recording, and the render area is the viewport. Per-run choice would need either a
+revision that reads per-frame-slot state (re-recording on change) or descriptor handles read from a latch in every dual-target
+shader. A port with draw-time shapes therefore keeps one pass per shape and must know its shapes before its first build (a
+manifest). An asynchronous anchor build switched in at the next snapshot (as DCLF's epochs) would let a port add a shape in play
+without a synchronous rebuild.

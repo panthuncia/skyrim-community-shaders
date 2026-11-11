@@ -58,3 +58,11 @@ The ports that matched their D3D11 runs (org-full-port.md, Status): the frame sk
 view and faces, water, screen blood, shadow masks, ImageSpace's taken effects, Bink, Scaleform's graph draws, the
 loading thread. Not yet proven, so they keep their current switches and logic until they are: the sky's cloud layers
 (`CS_ORG_SKY_CLOUDS`), the menu 3D and map views (a probe only).
+
+## Done
+
+- **ImageSpace** (`org-port/primary-imagespace`, p5/imagespace.md "The primary path"): the learning and joining phases, the
+  candidate list, cell-change joins and the Building fallback are gone. Shapes are value keys kept in a manifest beside the shader
+  store and registered once at Setup; programs are queued at Setup and taken at the first graph build (`ProgramCache::GetNow`). A
+  shape outside the manifest is refused for the session and registered from the next one: a graph change in play would need an
+  asynchronous anchor build, which FrameAnchors does not have.
