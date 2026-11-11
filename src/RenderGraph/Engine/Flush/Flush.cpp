@@ -10,8 +10,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <intrin.h>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -109,6 +111,10 @@ namespace RenderGraph::Engine::Flush
 		thread_local int t_latchScope = 0;
 		// Inside DispatchCSShader: its Dispatch is attributed to it.
 		thread_local int t_dispatchScope = 0;
+		// Inside an EngineDraws scope: the reason's id, else -1. The engine draws here on purpose.
+		thread_local int t_engineReason = -1;
+
+		bool InEngineDraws() { return t_engineReason >= 0; }
 
 		struct LatchScope
 		{
@@ -168,6 +174,7 @@ namespace RenderGraph::Engine::Flush
 		{
 			std::atomic<std::uint64_t> latchedFlushes{ 0 };
 			std::atomic<std::uint64_t> realFlushes{ 0 };
+			std::atomic<std::uint64_t> allowedFlushes{ 0 };
 			std::atomic<std::uint64_t> latchedBinds{ 0 };
 			std::atomic<std::uint64_t> dropped{ 0 };
 			std::atomic<std::uint64_t> skipped{ 0 };
@@ -180,7 +187,86 @@ namespace RenderGraph::Engine::Flush
 			return s_latch;
 		}
 
-		/** @brief A flush CS asked for: the owed bits back in the shadow state and the owed shaders bound, so it applies everything. */
+		/** @brief The allowed-draw reasons (Reason): their names, and per reason the draws let through and the passes vouched for. */
+		constexpr std::size_t kReasons = 32;
+
+		struct Reasons
+		{
+			std::mutex lock;  // interning only
+			std::array<const char*, kReasons> names{};
+			std::size_t count = 0;
+			std::array<std::atomic<std::uint64_t>, kReasons> draws{};
+			std::array<std::atomic<std::uint64_t>, kReasons> passes{};
+		};
+
+		Reasons& GetReasons()
+		{
+			static Reasons s_reasons;
+			return s_reasons;
+		}
+
+		std::uint8_t Intern(const char* a_name)
+		{
+			auto& reasons = GetReasons();
+			std::lock_guard guard(reasons.lock);
+			for (std::size_t i = 0; i < reasons.count; ++i)
+				if (reasons.names[i] == a_name || std::strcmp(reasons.names[i], a_name) == 0)
+					return static_cast<std::uint8_t>(i);
+			if (reasons.count == kReasons - 1)
+				reasons.names[reasons.count++] = "more reasons";
+			if (reasons.count == kReasons)
+				return static_cast<std::uint8_t>(kReasons - 1);
+			reasons.names[reasons.count] = a_name;
+			return static_cast<std::uint8_t>(reasons.count++);
+		}
+
+		/**
+		 * @brief The vouched passes (VouchPass), one entry per pass object. The engine's passes are 0x48-byte slots of one arena (65535
+		 * of them), so the slot index modulo the table size keeps them apart; a pass from elsewhere can collide, and the pass and
+		 * geometry checks then read it as not vouched for (skipped and logged, never let through by mistake). Writers store the pass
+		 * last; the batch walk reads it on the render thread after the registration jobs.
+		 */
+		struct Mark
+		{
+			std::atomic<const void*> pass{ nullptr };
+			std::atomic<const void*> geometry{ nullptr };
+			std::atomic<std::uint32_t> stamp{ 0 };  // the frame (Tick's count, 24 bits) << 8 | the reason
+		};
+		constexpr std::size_t kMarks = 1u << 17;
+		constexpr std::size_t kPassBytes = 0x48;  // sizeof(RE::BSRenderPass)
+
+		std::unique_ptr<Mark[]>& GetMarks()
+		{
+			static std::unique_ptr<Mark[]> s_marks;
+			return s_marks;
+		}
+
+		// Tick's frame count, for the marks' age: a mark stands for the frame it was made in and the next.
+		std::atomic<std::uint32_t> s_markFrame{ 0 };
+
+		Mark& MarkOf(const void* a_pass, Mark* a_marks)
+		{
+			return a_marks[(reinterpret_cast<std::uintptr_t>(a_pass) / kPassBytes) & (kMarks - 1)];
+		}
+
+		/** @brief The reason a_pass was vouched for, or -1. */
+		int VouchedReason(const RE::BSRenderPass* a_pass)
+		{
+			Mark* marks = GetMarks().get();
+			if (!marks || !a_pass)
+				return -1;
+			const Mark& mark = MarkOf(a_pass, marks);
+			if (mark.pass.load(std::memory_order_acquire) != a_pass || mark.geometry.load(std::memory_order_relaxed) != a_pass->geometry)
+				return -1;
+			const std::uint32_t stamp = mark.stamp.load(std::memory_order_relaxed);
+			const std::uint32_t age = ((s_markFrame.load(std::memory_order_relaxed) & 0xFFFFFFu) - (stamp >> 8)) & 0xFFFFFFu;
+			return age <= 1 ? static_cast<int>(stamp & 0xFFu) : -1;
+		}
+
+		/**
+		 * @brief A flush CS asked for, or one inside an EngineDraws scope: the owed bits back in the shadow state and the owed shaders
+		 * bound, so it applies everything.
+		 */
 		void PayOwed(std::uint32_t* a_words)
 		{
 			auto& owed = GetOwed();
@@ -195,7 +281,8 @@ namespace RenderGraph::Engine::Flush
 			}
 			owed.vertexOwed = false;
 			owed.pixelOwed = false;
-			GetLatch().realFlushes.fetch_add(1, std::memory_order_relaxed);
+			auto& latch = GetLatch();
+			(InEngineDraws() ? latch.allowedFlushes : latch.realFlushes).fetch_add(1, std::memory_order_relaxed);
 		}
 
 		// ---- The census -----------------------------------------------------------------------------------------------------
@@ -546,16 +633,32 @@ namespace RenderGraph::Engine::Flush
 				}
 			}
 			if (config.latch) {
+				s_markFrame.fetch_add(1, std::memory_order_relaxed);
 				auto& latch = GetLatch();
 				if (++latch.frames >= config.frames) {
 					const double frames = static_cast<double>(latch.frames);
 					latch.frames = 0;
+					auto& reasons = GetReasons();
+					std::size_t count = 0;
+					{
+						std::lock_guard guard(reasons.lock);
+						count = reasons.count;
+					}
+					std::string allowed;
+					for (std::size_t i = 0; i < count; ++i) {
+						const auto draws = reasons.draws[i].exchange(0, std::memory_order_relaxed);
+						const auto passes = reasons.passes[i].exchange(0, std::memory_order_relaxed);
+						if (draws || passes)
+							allowed += fmt::format("{}{} {:.1f} ({:.1f} passes vouched)", allowed.empty() ? "" : ", ", reasons.names[i],
+								static_cast<double>(draws) / frames, static_cast<double>(passes) / frames);
+					}
 					logger::info(
 						"[ORG] flush latch: {:.0f} frames: {:.1f} flushes and {:.1f} shader binds a frame latched, {:.1f} D3D11 binds a frame dropped, "
-						"{:.1f} flushes a frame from CS code applied the owed state, {} engine draws and dispatches skipped",
+						"{:.1f} flushes a frame from CS code applied the owed state, {:.1f} flushes a frame of allowed engine draws applied it; "
+						"allowed engine draws a frame: {}; {} engine draws and dispatches skipped",
 						frames, static_cast<double>(latch.latchedFlushes.exchange(0)) / frames, static_cast<double>(latch.latchedBinds.exchange(0)) / frames,
 						static_cast<double>(latch.dropped.exchange(0)) / frames, static_cast<double>(latch.realFlushes.exchange(0)) / frames,
-						latch.skipped.exchange(0));
+						static_cast<double>(latch.allowedFlushes.exchange(0)) / frames, allowed.empty() ? "none" : allowed, latch.skipped.exchange(0));
 				}
 			}
 		}
@@ -587,8 +690,8 @@ namespace RenderGraph::Engine::Flush
 				chain += fmt::format(" (via CS {})", Tripwire::DescribeCaller(key.viaCs));
 			const auto& config = GetConfig();
 			logger::error(
-				"[ORG] flush latch: engine {} in {} at {}{} reached D3D11 with the engine's state latched: skipped (first from these callers; "
-				"CS_ORG_RESIDUE_CENSUS=1 counts them)",
+				"[ORG] flush latch: engine {} in {} at {}{} reached D3D11 with the engine's state latched and nobody vouched for it "
+				"(Flush::EngineDraws, Flush::VouchPass): skipped (first from these callers; CS_ORG_RESIDUE_CENSUS=1 counts them)",
 				a_slot < kSlots && config.names[a_slot] ? config.names[a_slot] : "?", FunctionName(site), Tripwire::DescribeCaller(site), chain);
 		}
 
@@ -605,8 +708,12 @@ namespace RenderGraph::Engine::Flush
 				GetLatch().dropped.fetch_add(1, std::memory_order_relaxed);
 				return false;
 			}
-			// A draw or a dispatch. Inside a latch scope (DispatchCSShader's dispatch) or from a draw function, its state was latched.
-			const bool skip = config.latch && (t_latchScope > 0 || InDrawFunction(a_caller));
+			// A draw or a dispatch. Inside a latch scope (DispatchCSShader's dispatch) or from a draw function, its state was latched, unless
+			// it is inside an EngineDraws scope: then its flush was real and the draw is the engine's on purpose.
+			const bool engine = config.latch && (t_latchScope > 0 || (type == SlotClass::Dispatch && t_dispatchScope > 0) || InDrawFunction(a_caller));
+			const bool skip = engine && !InEngineDraws();
+			if (engine && !skip)
+				GetReasons().draws[static_cast<std::size_t>(t_engineReason)].fetch_add(1, std::memory_order_relaxed);
 			if (config.census)
 				NoteDraw(a_slot, a_caller, skip);
 			if (skip)
@@ -650,7 +757,7 @@ namespace RenderGraph::Engine::Flush
 					func(a_isCompute);
 					return;
 				}
-				if (fromCs && t_latchScope == 0) {
+				if ((fromCs || InEngineDraws()) && t_latchScope == 0) {
 					PayOwed(words);
 					func(a_isCompute);
 					return;
@@ -680,6 +787,11 @@ namespace RenderGraph::Engine::Flush
 					func(a_renderer, a_shader);
 					return;
 				}
+				if (InEngineDraws()) {
+					func(a_renderer, a_shader);
+					GetOwed().vertexOwed = false;
+					return;
+				}
 				{
 					LatchScope scope;
 					func(a_renderer, a_shader);
@@ -698,6 +810,11 @@ namespace RenderGraph::Engine::Flush
 					NoteBind(false, _ReturnAddress());
 				if (!Latched()) {
 					func(a_renderer, a_shader);
+					return;
+				}
+				if (InEngineDraws()) {
+					func(a_renderer, a_shader);
+					GetOwed().pixelOwed = false;
 					return;
 				}
 				{
@@ -719,12 +836,33 @@ namespace RenderGraph::Engine::Flush
 				std::uint32_t a_z)
 			{
 				DispatchScope dispatch;
-				if (!Latched()) {
+				if (!Latched() || InEngineDraws()) {
 					func(a_renderer, a_shader, a_x, a_y, a_z);
 					return;
 				}
 				LatchScope scope;
 				func(a_renderer, a_shader, a_x, a_y, a_z);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/**
+		 * @brief BSBatchRenderer::RenderPassImmediately (100854 / 107644), the batch walk's draw of one pass (the geometry-type dispatcher
+		 * and the skin path are inside it): a pass vouched for at registration (VouchPass) draws in an EngineDraws scope of its reason.
+		 * Installed with the latch only.
+		 */
+		struct RenderPassImmediately
+		{
+			static void thunk(RE::BSRenderPass* a_pass, std::uint32_t a_technique, bool a_alphaTest, std::uint32_t a_renderFlags)
+			{
+				const int reason = Latched() ? VouchedReason(a_pass) : -1;
+				if (reason < 0) {
+					func(a_pass, a_technique, a_alphaTest, a_renderFlags);
+					return;
+				}
+				const int previous = std::exchange(t_engineReason, reason);
+				func(a_pass, a_technique, a_alphaTest, a_renderFlags);
+				t_engineReason = previous;
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -807,10 +945,20 @@ namespace RenderGraph::Engine::Flush
 		stl::detour_thunk<SetShader>(REL::RelocationID(75550, 77351));
 		stl::detour_thunk<SetPixelShader>(REL::RelocationID(75555, 77356));
 		stl::detour_thunk<DispatchCSShader>(REL::RelocationID(75532, 77329));
-		if (!SetDirtyStates::func.address() || !SetShader::func.address() || !SetPixelShader::func.address() || !DispatchCSShader::func.address()) {
-			logger::error("[ORG] engine flush: a detour did not attach (SetDirtyStates {}, SetShader {}, SetPixelShader {}, DispatchCSShader {}); the latch stays off",
-				SetDirtyStates::func.address() != 0, SetShader::func.address() != 0, SetPixelShader::func.address() != 0, DispatchCSShader::func.address() != 0);
+		if (config.latch) {
+			// Outside Hooks.cpp's prefetch detour. The vouched passes' table exists only with the latch.
+			GetMarks() = std::make_unique<Mark[]>(kMarks);
+			stl::detour_thunk<RenderPassImmediately>(REL::RelocationID(100854, 107644));
+		}
+		if (!SetDirtyStates::func.address() || !SetShader::func.address() || !SetPixelShader::func.address() || !DispatchCSShader::func.address() ||
+			(config.latch && !RenderPassImmediately::func.address())) {
+			logger::error(
+				"[ORG] engine flush: a detour did not attach (SetDirtyStates {}, SetShader {}, SetPixelShader {}, DispatchCSShader {}, RenderPassImmediately {}); "
+				"the latch stays off",
+				SetDirtyStates::func.address() != 0, SetShader::func.address() != 0, SetPixelShader::func.address() != 0, DispatchCSShader::func.address() != 0,
+				RenderPassImmediately::func.address() != 0);
 			config.latch = false;
+			GetMarks().reset();
 		}
 		Tripwire::SetContextFilter(&ContextFilter);
 		MainTick::Add("Engine flush census", [] { Tick(); });
@@ -824,10 +972,13 @@ namespace RenderGraph::Engine::Flush
 	{
 		if (GetConfig().census)
 			NoteBind(true, a_caller);
-		if (Latched()) {
+		const bool latched = Latched();
+		if (latched && !InEngineDraws()) {
 			OweVertexShader(a_shader);
 			return;
 		}
+		if (latched)
+			GetOwed().vertexOwed = false;
 		globals::d3d::context->VSSetShader(a_shader, nullptr, 0);
 	}
 
@@ -835,10 +986,48 @@ namespace RenderGraph::Engine::Flush
 	{
 		if (GetConfig().census)
 			NoteBind(false, a_caller);
-		if (Latched()) {
+		const bool latched = Latched();
+		if (latched && !InEngineDraws()) {
 			OwePixelShader(a_shader);
 			return;
 		}
+		if (latched)
+			GetOwed().pixelOwed = false;
 		globals::d3d::context->PSSetShader(a_shader, nullptr, 0);
+	}
+
+	Reason::Reason(const char* a_name) :
+		id(Intern(a_name ? a_name : "unnamed"))
+	{}
+
+	EngineDraws::EngineDraws(const Reason& a_reason)
+	{
+		if (!Latched())
+			return;
+		previous = std::exchange(t_engineReason, static_cast<int>(a_reason.Id()));
+		active = true;
+	}
+
+	EngineDraws::~EngineDraws()
+	{
+		if (active)
+			t_engineReason = previous;
+	}
+
+	bool Vouching()
+	{
+		return GetMarks() != nullptr;
+	}
+
+	void VouchPass(const RE::BSRenderPass* a_pass, const Reason& a_reason)
+	{
+		Mark* marks = GetMarks().get();
+		if (!marks || !a_pass)
+			return;
+		Mark& mark = MarkOf(a_pass, marks);
+		mark.geometry.store(a_pass->geometry, std::memory_order_relaxed);
+		mark.stamp.store(((s_markFrame.load(std::memory_order_relaxed) & 0xFFFFFFu) << 8) | a_reason.Id(), std::memory_order_relaxed);
+		mark.pass.store(a_pass, std::memory_order_release);
+		GetReasons().passes[a_reason.Id()].fetch_add(1, std::memory_order_relaxed);
 	}
 }
