@@ -24,6 +24,8 @@ namespace RenderGraph::Engine::Constants
 
 #	include <Render/LatchBlock.h>
 
+#	include <d3d11_1.h>
+
 #	include <algorithm>
 #	include <array>
 #	include <bit>
@@ -160,8 +162,8 @@ namespace RenderGraph::Engine::Constants
 				Entry* entry = Track(a_resource);
 				if (!entry)
 					return;
-				const std::uint32_t bound = std::exchange(customBound, 0);
-				entry->written = bound ? (std::min)(bound, entry->byteWidth) : entry->byteWidth;
+				const std::uint32_t customBytes = std::exchange(customBound, 0);
+				entry->written = customBytes ? (std::min)(customBytes, entry->byteWidth) : entry->byteWidth;
 				entry->contents.OnMap(a_data);
 			}
 
