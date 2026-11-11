@@ -39,6 +39,9 @@ vcpkg_cmake_configure(
         -DDOWNLOAD_CAPSTONE=OFF
         -DLEGACY=ON
         -DTRACY_ENABLE=ON
+        # Listen on localhost only: listening on every interface makes Windows Firewall ask for network access at
+        # every game launch. A local Tracy GUI still connects; profiling from another machine needs this off.
+        -DTRACY_ONLY_LOCALHOST=ON
         ${FEATURE_OPTIONS}
     OPTIONS_RELEASE
         ${TOOLS_OPTIONS}
