@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
+#include "Features/DrawcallLimitFix/Features/Water/TextureFailure.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 
 #include "Features/LightLimitFix.h"
@@ -20,6 +21,7 @@
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/Switches.h"
 #include "State.h"
+#include "Utils/D3D.h"
 
 #include <rhi_helpers.h>
 
@@ -50,6 +52,7 @@ namespace DCLF::Features::Water
 		{
 			None,
 			Geometry,          // no TriShape or no buffers
+			GeometryBounds,    // the index range is past the index buffer, or a vertex is smaller than its position
 			TooMany,           // past kMaxLatched draws in one batch
 			Shader,            // the bound shader is not BSWaterShader, or no shader objects
 			Topology,          // not a triangle list
@@ -69,6 +72,8 @@ namespace DCLF::Features::Water
 			switch (a_refusal) {
 			case Refusal::Geometry:
 				return "no TriShape buffers";
+			case Refusal::GeometryBounds:
+				return "its index range or vertex stride is out of its buffers' bounds";
 			case Refusal::TooMany:
 				return "more draws than the batch latches";
 			case Refusal::Shader:
@@ -135,6 +140,7 @@ namespace DCLF::Features::Water
 			std::uint32_t pendingType = 0xFF;
 			std::uint32_t otherTypes = 0;    // the geometry types of the batch's passes that drew elsewhere, a bit each
 			std::set<std::uint32_t> logged;  // (refusal, technique, view) logged once each
+			std::set<std::string> failures;  // texture import failures (TextureFailure.h), logged once each
 		};
 
 		Capture& GetCapture()
@@ -162,6 +168,65 @@ namespace DCLF::Features::Water
 		}
 
 		std::uint32_t TechniqueOf(std::uint32_t a_descriptor) { return (a_descriptor >> 11) & 0xF; }
+
+		/**
+		 * @brief Zero textures of each dimension the water's shader declares (1x1, RGBA32F), made on first use. GpuTextures' null view is
+		 * a 2D one, and a cube, 3D or array read through a 2D descriptor is undefined on the GPU (a device loss on AMD), so an empty slot
+		 * reads one of these instead.
+		 */
+		struct NullTextures
+		{
+			winrt::com_ptr<ID3D11ShaderResourceView> texture2D, texture2DArray, texture3D, cube;
+			bool made = false;
+		};
+
+		NullTextures& GetNullTextures()
+		{
+			static NullTextures nulls;
+			if (nulls.made)
+				return nulls;
+			nulls.made = true;
+			auto* device = globals::d3d::device;
+			const float zero[4 * 6]{};
+			std::array<D3D11_SUBRESOURCE_DATA, 6> data{};
+			for (auto& slice : data)
+				slice = { .pSysMem = zero, .SysMemPitch = 16, .SysMemSlicePitch = 16 };
+			const auto make2D = [&](std::uint32_t a_slices, std::uint32_t a_misc, const D3D11_SHADER_RESOURCE_VIEW_DESC* a_view, const char* a_name,
+									winrt::com_ptr<ID3D11ShaderResourceView>& a_out) {
+				const D3D11_TEXTURE2D_DESC desc{ .Width = 1, .Height = 1, .MipLevels = 1, .ArraySize = a_slices, .Format = DXGI_FORMAT_R32G32B32A32_FLOAT, .SampleDesc = { .Count = 1 }, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE, .MiscFlags = a_misc };
+				winrt::com_ptr<ID3D11Texture2D> texture;
+				if (FAILED(device->CreateTexture2D(&desc, data.data(), texture.put())) || FAILED(device->CreateShaderResourceView(texture.get(), a_view, a_out.put())))
+					return;
+				Util::SetResourceName(texture.get(), a_name);
+			};
+			make2D(1, 0, nullptr, "DCLF::Water::Null2D", nulls.texture2D);
+			D3D11_SHADER_RESOURCE_VIEW_DESC arrayView{ .Format = DXGI_FORMAT_R32G32B32A32_FLOAT, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY };
+			arrayView.Texture2DArray = { .MostDetailedMip = 0, .MipLevels = 1, .FirstArraySlice = 0, .ArraySize = 1 };
+			make2D(1, 0, &arrayView, "DCLF::Water::Null2DArray", nulls.texture2DArray);
+			make2D(6, D3D11_RESOURCE_MISC_TEXTURECUBE, nullptr, "DCLF::Water::NullCube", nulls.cube);
+			const D3D11_TEXTURE3D_DESC volume{ .Width = 1, .Height = 1, .Depth = 1, .MipLevels = 1, .Format = DXGI_FORMAT_R32G32B32A32_FLOAT, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE };
+			winrt::com_ptr<ID3D11Texture3D> texture3D;
+			if (SUCCEEDED(device->CreateTexture3D(&volume, data.data(), texture3D.put())) &&
+				SUCCEEDED(device->CreateShaderResourceView(texture3D.get(), nullptr, nulls.texture3D.put())))
+				Util::SetResourceName(texture3D.get(), "DCLF::Water::Null3D");
+			if (!nulls.texture2D || !nulls.texture2DArray || !nulls.cube || !nulls.texture3D)
+				logger::error("[DCLF] water: the null textures could not be made; a water draw with an empty slot stays the engine's");
+			return nulls;
+		}
+
+		/** @brief An empty slot's binding: a zero view of the slot's declared dimension (kInvalid when it could not be made). */
+		GpuTextures::Binding NullOf(ResourceKind a_kind)
+		{
+			auto& textures = GpuTextures::Get();
+			if (a_kind == ResourceKind::Buffer)
+				return { .index = textures.NullBufferIndex(false) };
+			auto& nulls = GetNullTextures();
+			ID3D11ShaderResourceView* view = a_kind == ResourceKind::Cube           ? nulls.cube.get() :
+			                                 a_kind == ResourceKind::Texture3D      ? nulls.texture3D.get() :
+			                                 a_kind == ResourceKind::Texture2DArray ? nulls.texture2DArray.get() :
+			                                                                          nulls.texture2D.get();
+			return view ? textures.ResolveBinding(view, 120 + static_cast<std::uint32_t>(a_kind)) : GpuTextures::Binding{};
+		}
 
 		/** @brief Whether a_view's resource is a buffer. */
 		bool IsBufferView(ID3D11ShaderResourceView* a_view)
@@ -200,7 +265,12 @@ namespace DCLF::Features::Water
 				ID3D11ShaderResourceView* view = nullptr;
 				globals::d3d::context->PSGetShaderResources(kHeaderRegisters[h], 1, &view);
 				if (!view) {
-					a_run.headerIndices[h] = kHeaderIsBuffer[h] ? textures.NullBufferIndex(false) : textures.NullIndex();
+					auto binding = NullOf(kHeaderKinds[h]);
+					if (binding.index == GpuTextures::kInvalid)
+						return false;
+					a_run.headerIndices[h] = binding.index;
+					if (binding.owner)
+						a_run.owners.push_back(std::move(binding.owner));
 					continue;
 				}
 				a_shape.headerIds[h] = PublishedResources::ExportedId(view);
@@ -213,8 +283,12 @@ namespace DCLF::Features::Water
 							logger::warn("[DCLF] water: t{} is a D3D11 buffer the graph cannot read (turn on its feature's ORG path); the water stays the engine's",
 								kHeaderRegisters[h]);
 					} else {
+						const auto rejections = RejectionCount();
 						auto binding = textures.ResolveBinding(view, 96 + static_cast<std::uint32_t>(h));
 						ok = binding.index != GpuTextures::kInvalid;
+						if (!ok)
+							if (auto failure = DescribeTextureFailure(view, kHeaderRegisters[h], rejections); a_capture.failures.insert(failure).second)
+								logger::warn("[DCLF] water: the {} batch's header texture could not be imported: {}", NameOf(a_view), failure);
 						a_run.headerIndices[h] = binding.index;
 						if (binding.owner)
 							a_run.owners.push_back(std::move(binding.owner));
@@ -361,6 +435,12 @@ namespace DCLF::Features::Water
 			auto indices = buffers.Acquire(a_shape->indexBuffer);
 			if (!vertices || !indices || !vertices->buffer.address || !indices->buffer.address)
 				return Refusal::Buffers;
+			// The draw's 16-bit indices must lie in the index buffer, and a vertex must hold at least the position the stage pulls
+			// (R32G32B32A32: DCLFPullPosition). The index stage loads 4-byte words, so the last one may reach 2 bytes past the range.
+			const std::uint32_t stride = static_cast<std::uint32_t>(a_shape->vertexDesc & 0xF) * 4;
+			const std::uint64_t lastIndexByte = (std::uint64_t(a_start) + std::uint64_t(a_triangles) * 3) * 2;
+			if (!a_triangles || stride < 16 || ((lastIndexByte + 3) & ~std::uint64_t(3)) > indices->buffer.size || vertices->buffer.size < stride)
+				return Refusal::GeometryBounds;
 			const std::uint64_t layout = vs->vertexDesc & a_shape->vertexDesc;
 			constants.vertexAddress[0] = static_cast<std::uint32_t>(vertices->buffer.address);
 			constants.vertexAddress[1] = static_cast<std::uint32_t>(vertices->buffer.address >> 32);
@@ -368,7 +448,7 @@ namespace DCLF::Features::Water
 			constants.indexAddress[1] = static_cast<std::uint32_t>(indices->buffer.address >> 32);
 			constants.vertexLayout[0] = static_cast<std::uint32_t>(layout);
 			constants.vertexLayout[1] = static_cast<std::uint32_t>(layout >> 32);
-			constants.vertexStride = static_cast<std::uint32_t>(a_shape->vertexDesc & 0xF) * 4;
+			constants.vertexStride = stride;
 			constants.firstIndex = a_start;
 			draw.indexCount = a_triangles * 3;
 
@@ -379,9 +459,14 @@ namespace DCLF::Features::Water
 				auto* view = Unwrap(rss.PSTexture[t]);
 				if (view && !PublishedResources::ExportedId(view).empty())
 					return Refusal::PublishedTexture;
-				auto binding = view ? textures.ResolveBinding(view, 64 + t) : textures.NullBinding();
-				if (binding.index == GpuTextures::kInvalid)
+				const auto rejections = RejectionCount();
+				auto binding = view ? textures.ResolveBinding(view, 64 + t) : NullOf(MaterialKind(t));
+				if (binding.index == GpuTextures::kInvalid) {
+					if (view)
+						if (auto failure = DescribeTextureFailure(view, t, rejections); a_capture.failures.insert(failure).second)
+							logger::warn("[DCLF] water: a {} draw's texture could not be imported: {}", NameOf(a_capture.view), failure);
 					return Refusal::Texture;
+				}
 				constants.textures[t] = binding.index;
 				owners.push_back(std::move(binding.owner));
 				auto sampler = textures.SamplerBinding(rss.PSTextureAddressMode[t].underlying(), rss.PSTextureFilterMode[t].underlying());
@@ -399,6 +484,9 @@ namespace DCLF::Features::Water
 			draw.viewport[3] = static_cast<std::uint32_t>(rss.viewPort.Height);
 			draw.depthRange[0] = cameraDepthRange.get()[0];
 			draw.depthRange[1] = cameraDepthRange.get()[1] - kBiasViewportOffsets[(std::min)(engine.depthBias, 11u)];
+
+			// Diagnostics: a technique CS_ORG_WATER_TECHNIQUES leaves out is withheld from the engine and not drawn.
+			draw.skip = !GetDiagnostics().Draws(TechniqueOf(draw.key.pixelDescriptor));
 
 			// A probe only checks: the engine draws it.
 			if (a_capture.probe)
@@ -454,13 +542,11 @@ namespace DCLF::Features::Water
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
-				// Diagnostics: CS_ORG_WATER_VIEWS=mask or surface takes only that view on the graph.
-				static const std::string views = Switches::Value("CS_ORG_WATER_VIEWS");
+				// Diagnostics: CS_ORG_WATER_PARTS takes only the views it names on the graph.
 				Shape shape;
 				auto run = std::make_shared<Run>();
 				run->view = kView;
-				if ((views == "mask" && kView != View::Mask) || (views == "surface" && kView != View::Surface) ||
-					!CurrentShape(a_accumulator, kView, shape, *run, capture)) {
+				if (!GetDiagnostics().Takes(kView) || !CurrentShape(a_accumulator, kView, shape, *run, capture)) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}

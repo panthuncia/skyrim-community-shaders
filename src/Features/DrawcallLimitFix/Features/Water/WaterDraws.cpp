@@ -70,6 +70,7 @@ namespace DCLF::Features::Water::WaterDraws
 			std::atomic<bool> prepared{ false };
 			bool pending = false;
 			bool shapeLogged = false;
+			bool drawnLogged = false;  // the first batch the graph drew was logged
 		};
 
 		struct Bindings
@@ -141,7 +142,7 @@ namespace DCLF::Features::Water::WaterDraws
 				const std::uint32_t slot = a_recording.FrameSlot();
 				for (std::uint32_t i = 0; i < run.draws.size(); ++i) {
 					const auto& draw = run.draws[i];
-					if (!draw.program)
+					if (!draw.program || draw.skip)
 						continue;
 					const auto& program = *static_cast<const RasterProgram*>(draw.program.get());
 					const std::uint32_t offset = i * kDrawStride;
@@ -169,7 +170,8 @@ namespace DCLF::Features::Water::WaterDraws
 												  .depth = &depth,
 												  .viewport = { .x = draw.viewport[0], .y = draw.viewport[1], .width = draw.viewport[2], .height = draw.viewport[3], .minDepth = draw.depthRange[0], .maxDepth = draw.depthRange[1] },
 												  .constants = ShaderBindings::Data(block),
-												  .vertexCount = draw.indexCount,
+												  // CS_ORG_WATER_SAFE=2: the passes and their targets without a draw call.
+												  .vertexCount = GetDiagnostics().safe >= 2 ? 0u : draw.indexCount,
 												  .debugName = run.view == View::Mask ? "WaterMask" : "Water",
 												  .stencilReference = draw.stencilRef });
 				}
@@ -290,7 +292,7 @@ namespace DCLF::Features::Water::WaterDraws
 				mix(index);
 			for (const auto& draw : a_run.draws) {
 				mix(reinterpret_cast<std::uintptr_t>(draw.program.get()));
-				mix((std::uint64_t(draw.colours[0]) << 8) | draw.colours[1]);
+				mix((std::uint64_t(draw.skip) << 16) | (std::uint64_t(draw.colours[0]) << 8) | draw.colours[1]);
 				mix((std::uint64_t(draw.stencilRef) << 32) | draw.indexCount);
 				for (const auto v : draw.viewport)
 					mix(v);
@@ -388,6 +390,9 @@ namespace DCLF::Features::Water::WaterDraws
 		depthStencil->GetDesc(&depthDesc);
 		desc.depth = ::RenderGraph::Engine::Pipeline::DepthStencilFromD3D11(depthDesc);
 		desc.depthFormat = static_cast<rhi::Format>(a_key.depthFormat);
+		// CS_ORG_WATER_SAFE: the pixel stage writes a constant and reads no resource (Water.hlsl, WATER_ORG_SAFE).
+		if (GetDiagnostics().safe)
+			desc.defines.emplace_back(L"WATER_ORG_SAFE", L"");
 		D3D11_RASTERIZER_DESC rasterDesc{};
 		raster->GetDesc(&rasterDesc);
 		desc.raster = ::RenderGraph::Engine::Pipeline::RasterFromD3D11(rasterDesc);
@@ -421,6 +426,10 @@ namespace DCLF::Features::Water::WaterDraws
 		state.kept.emplace_back(frame, std::move(a_run->owners));
 		++state.runs;
 		state.draws += a_run->draws.size();
+		if (!a_run->draws.empty() && !client->drawnLogged) {
+			client->drawnLogged = true;
+			logger::info("[DCLF] water: the first {} batch drawn by the graph ({} draws)", client->id, a_run->draws.size());
+		}
 		std::atomic_store(&client->run, std::shared_ptr<const Run>(std::move(a_run)));
 		client->pending = true;
 		FrameAnchors::Run(FrameAnchors::Anchor::EngineDraws);

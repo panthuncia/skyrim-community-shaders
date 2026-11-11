@@ -66,12 +66,18 @@ screen blood the engine's for the session, logged once.
 
 ## Test plan
 
-1. `blood-org0.env` and `blood-org1.env`: Riverwood, first person (`dclf:pov=first`), health raised, three melee bandits
-   (`player.placeatme 1bcd8 3`: EncBandit01Melee1HNordM in Skyrim.esm) placed at the player, five shots while they hit. No console
-   command applies screen blood directly; hits taken in first person do.
-2. Log: `[DCLF] blood splatter: on`, `the cs.blood-splatter client registered` (at startup, not at the first hit), `built the program
+1. `blood-org0.env` and `blood-org1.env`: Riverwood, first person (`dclf:pov=first`), health raised, one melee bandit
+   (`player.placeatme 1bcd8 1`: EncBandit01Melee1HNordM in Skyrim.esm), the splatters made to last (`setgs fBloodSplatterDuration`
+   and `FadeStart` 1000). After about 8 s every actor's AI is turned off (`tai`) and the camera looks down at the ground, then two
+   shots and a third-person one. No console command applies screen blood directly; hits taken in first person do, and their
+   placement and count are the engine's random draws: compare the splatters' look, not their pixels.
+2. The blood textures (`sBloodSplatterColor01OPTFilename`, `Alpha01`, `Flare01`) are streamed: GpuTextures pins every view it imports
+   at its full window, so a probe that sees one before its full window is loaded refuses the draw (`a streamed texture without its
+   full window yet`, with the slot, format and size) and a later batch takes it. Expect that line once per texture, then
+   `every screen blood draw can be drawn by the graph` and `the first screen blood batch drawn by the graph (N draws)`.
+3. Log: `[DCLF] blood splatter: on`, `the cs.blood-splatter client registered` (at startup, not at the first hit), `built the program
    for technique 0 (splatter)` (and 1 when a light flare shows), `every screen blood draw can be drawn by the graph`. No `stays the
    engine's` after the first batches.
-3. Shots: red splatters darkening the frame (multiply) in org1 as in org0; their placement varies by run.
-4. Not verified without a build: everything above. The risk to look at first is the back buffer import under HDR output or frame
+4. Shots: red splatters darkening the frame (multiply) in org1 as in org0; their placement varies by run.
+5. Not verified without a build: everything above. The risk to look at first is the back buffer import under HDR output or frame
    generation (another swap chain image layout).
