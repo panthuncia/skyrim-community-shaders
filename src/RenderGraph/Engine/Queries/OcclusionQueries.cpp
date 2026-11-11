@@ -452,8 +452,15 @@ namespace RenderGraph::Engine::OcclusionQueries
 
 	void Install()
 	{
-		if (!Requested())
+		// CS_ORG_OCCLUSION_QUERY_LOG=1 alone: only GetQueryData, to log D3D11's answers for a comparison with the graph's.
+		if (!Requested()) {
+			if (REL::Module::IsVR() || !Switches::On("CS_ORG_OCCLUSION_QUERY_LOG"))
+				return;
+			stl::detour_thunk<Hooks::GetQueryData>(REL::RelocationID(75569, 77370));
+			if (Hooks::GetQueryData::func.address())
+				logger::info("[ORG] occlusion queries: logging D3D11's answers (CS_ORG_OCCLUSION_QUERY_LOG=1); the queries stay on D3D11");
 			return;
+		}
 		stl::detour_thunk<Hooks::BeginQuery>(REL::RelocationID(75567, 77368));
 		stl::detour_thunk<Hooks::EndQuery>(REL::RelocationID(75568, 77369));
 		stl::detour_thunk<Hooks::GetQueryData>(REL::RelocationID(75569, 77370));

@@ -40,7 +40,10 @@ namespace RenderGraph::Engine::OcclusionQueries
 	/** @brief Whether the detours are installed: a Bracket then takes the engine's query. */
 	bool Active();
 
-	/** @brief Main thread, Engine::InstallGameHooks: the BeginQuery, EndQuery and GetQueryData detours, when Requested(). */
+	/**
+	 * @brief Main thread, Engine::InstallGameHooks: the BeginQuery, EndQuery and GetQueryData detours, when Requested(). With
+	 * CS_ORG_OCCLUSION_QUERY_LOG=1 alone, only GetQueryData's, which logs what D3D11 answers (the reference for a comparison).
+	 */
 	void Install();
 
 	/**
