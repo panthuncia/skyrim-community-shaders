@@ -71,13 +71,41 @@ The pieces are the water's and the screen blood's (water.md, "The family").
   `kPOST_ZPREPASS_COPY`, `kSHADOWMAPS`, `kSHADOWMAPS_ESRAM`, `kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM`, `kFOCUS_NEO`, and the ids DCLF's
   registry lists at t17), declared at each build while registered, and read by index once a build declared them. Until then, and for
   an id not listed, the batch stays the engine's, logged once per id (`a world draw's t3 holds '<id>', ...`). The water does the same
-  (water.md, "Published inputs"). Utility.hlsl's ORG build never samples t1 or t7, so those are latched as null views whatever is
-  bound (`SlotRead`).
+  (water.md, "Published inputs"). Terrain Blending binds its blended depth at t2, so `TerrainBlending::BlendedDepth` is listed too
+  (p5-all-census-misc showed `a world draw's t2 holds 'TerrainBlending::BlendedDepth'` before it was).
+- **Slots read.** Utility.hlsl's ORG build reads only t2, t3 and t4 (`SlotRead`). t0, t1, t5, t6 and t7 are latched as null views
+  whatever is bound, so they can never refuse a draw: t0 usually still holds the last material's texture, often a streamed one
+  that is not importable yet; t5 and t6 are the focus shadows' (below).
 - **Per-draw latch** (640 bytes, `DrawConstants` / `UtilityOrgShadowMaskDraw`): the rows, the reference, the slots' indices, the
   geometry. The push block (24 bytes): the shared constants and the latch region.
 - **Probes, refusals and the shape** as the water's: a view's batches are the graph's only after a probe found every draw latchable;
   a draw a later batch cannot latch makes the rest of the batch the engine's and the view probes again; reasons logged once
   (`[DCLF] shadow mask: the engine draws: ...`).
+- **Lasting refusals.** Those reasons are logged the first time only, so a refusal that never clears used to go quiet. A view that
+  stays the engine's for 120 batches in a row now says why, once per view and reason (`[DCLF] shadow mask: a view stays the
+  engine's: ...`): either `its world client is not in the EngineDraws anchor's built graph` (not made, or still joining), or
+  `every world probe finds a draw the graph cannot take: <reason> (<slot or geometry detail>)`. A missing render graph host when
+  the client is due is no longer a permanent refusal: the next batch asks again.
+
+### The focus shadows' stencil (t5)
+
+The world's sun mask and the spot lights' masks are FOCUS_SHADOW techniques when an actor has a focus shadow (CS's descriptor bit
+0x100 with RENDER_SHADOWMASK or RENDER_SHADOWMASKSPOT: `0x262102` for the sun, `0x462102` for a spot light). Their shader loads
+t5, the main depth's stencil view (DXGI 47, X24_TYPELESS_G8_UINT), and takes the focus shadow maps (t6) where the stencil is not 0.
+
+- **Why the world never moved.** GpuTextures rejects that view (`rhi::helpers::ToRHI` has no X24_TYPELESS_G8_UINT, and BasicRHI's
+  Vulkan views of a depth-stencil format always take the depth aspect: `VkSampledImageAspectMaskForFormat`). Every world probe
+  failed on it from the first sun mask on, and the refusal was logged once (`a world draw's texture t5 could not be imported, t5:
+  format 47 ...`), then never again: the view stayed on the engine with no further line. The menu's DPB lights are no
+  FOCUS_SHADOW technique, but the stencil view was often still bound there, so a menu batch was refused the same way now and then.
+- **What the engine's draw reads.** Utility.hlsl reads the stencil from the view's red component (`.x`). DXVK's stencil view puts
+  the stencil in green and zero in red (`d3d11_view_srv.cpp`: "Shaders expect the stencil value in the G component", swizzle
+  ZERO, R, ZERO, ZERO). So on this DXVK build the engine's draw reads 0 and never takes the focus shadows' branch.
+- **The ORG build** keeps the stencil value 0 without a view (`!defined(UTILITY_ORG)` around the load), the same as the engine's
+  draw, and t5 and t6 are latched as null views. No stencil import is needed.
+- **If Utility.hlsl is changed to read `.y`** (focus shadows on), the ORG build needs the stencil too, and BasicRHI cannot give it
+  a view: org-extension-api-notes.md, "A stencil view of a depth-stencil image". Until then the only way would be a D3D11 copy
+  of the stencil into an R8_UINT texture the graph imports.
 
 ### The shader's ORG build
 
@@ -116,11 +144,17 @@ both, comma separated; the default) keeps the other view on the engine.
 2. Log (org1): `[DCLF] shadow mask: on (CS_ORG_SHADOW_MASK=1)`, `hooks installed`, `the cs.shadow-mask.world client registered`,
    `built the program for descriptor ...`, `every world shadow mask draw can be drawn by the graph`, `the first cs.shadow-mask.world run
    drawn by the graph`, and the same for `menu` in the inventory. No `back to the engine's draws`, no `a withheld batch was not drawn`,
-   no `the engine draws` after the first frames, no `SPIR-V build of Utility.hlsl` error, no `[E]` line but the known EFFECTS11 one.
+   no `the engine draws` after the first frames (the first batches' `ConstantMirror has no copy` and `its ORG program is still
+   building` are expected), no `a view stays the engine's`, no `texture t0` or `texture t5 could not be imported`, no `SPIR-V
+   build of Utility.hlsl` error, no `[E]` line but the known EFFECTS11 one and `Unsupported Utility shadow-filter selector 0x3`
+   (below).
 3. The census windows lose `RT kSHADOW_MASK DS none` and the draws `<- ... (ID 107141+0x1c4)`, `+0x346` and `(ID 52728+0x1e5)`.
 4. Shots against org0's: the sun's shadows in Whiterun (cascades, their blend), Dragonsreach's point and spot light shadows, the item's
    shadow in the inventory. A mask never cleared shows last frame's shadows smeared; a wrong matrix shows shadows offset or missing.
 
+Known, not this family's: ShaderCache logs `Unsupported Utility shadow-filter selector 0x3` for every shadow mask descriptor (bits
+17 and 18 of CS's descriptor are set) and builds SHADOWFILTER 0. CS's D3D11 builds take the same defines, so both builds agree.
+
 Not verified without a build: everything above. Risks to look at first: the column_major rebuild of ShadowMapProj, whether the quad's
 vertex stride passes `LatchGeometry` (16 bytes at least), the comparison sampler (filter mode 4) through `GpuTextures::SamplerBinding`,
-the stencil SRV at t5 (FOCUS_SHADOW) through `GpuTextures`, and the alpha test reference when the engine leaves the test disabled.
+and the alpha test reference when the engine leaves the test disabled.

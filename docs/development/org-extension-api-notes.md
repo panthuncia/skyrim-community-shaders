@@ -1505,6 +1505,19 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   every clear and the flush is latch-only, the pending clear could be handed to the family's own pass as a load op instead.
 - **Found by:** the w3 misc lane (2026-11-11, `p5/shadow-mask.md`).
 
+### A stencil view of a depth-stencil image
+
+- **Need:** a shader resource view of a depth-stencil image's stencil aspect, as D3D11's X24_TYPELESS_G8_UINT (or
+  X32_TYPELESS_G8X24_UINT) SRV gives it, imported from DXVK or made on a graph texture.
+- **Who:** the shadow mask family, if Utility.hlsl ever reads the focus shadows' stencil from the component DXVK puts it in (`.y`).
+  Today the shader reads `.x`, which DXVK returns as 0, so the ORG build reads 0 without a view. Any port that reads the main depth's
+  stencil in a shader would need it too.
+- **Where it fits:** BasicRHI. `rhi::Format` has no stencil-read format, `rhi::helpers::ToRHI` maps DXGI 47 to `Unknown`, and the
+  Vulkan backend's sampled view of a depth-stencil format always takes the depth aspect (`VkSampledImageAspectMaskForFormat`);
+  `SrvDesc::tex2D.planeSlice` (D3D12's plane 1 is the stencil) is not read by the Vulkan backend. A stencil format or a plane slice
+  honoured as `VK_IMAGE_ASPECT_STENCIL_BIT`, with DXVK's swizzle (stencil in green), would let GpuTextures import the view as is.
+- **Found by:** the shadow mask world fix (2026-11-11, `p5/shadow-mask.md`, "The focus shadows' stencil").
+
 ### A movie or loading thread's first frame on the graph
 
 - **Need:** the first frame a non-main thread renders (the startup logo's MoviePlayer thread) is checked against the graph before that
