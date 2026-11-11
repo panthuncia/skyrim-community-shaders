@@ -12,8 +12,7 @@ cbuffer PerTechnique : register(b0)
 	uint2 padding;
 };
 
-[numthreads(8, 8, 1)] void main(uint3 dispatchID : SV_DispatchThreadID)
-{
+[numthreads(8, 8, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
 	if (all(dispatchID.xy < srcRect.zw)) {
 		OutputTexture[dispatchID.xy + destOffset] = InputTexture.Load(int3(dispatchID.xy + srcRect.xy, 0));
 	}

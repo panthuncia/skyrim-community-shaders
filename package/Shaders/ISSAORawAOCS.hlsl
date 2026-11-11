@@ -19,8 +19,7 @@ cbuffer PerTechnique : register(b0)
 	float4 cb0[4];
 };
 
-[numthreads(16, 16, 1)] void main(uint3 dispatchID : SV_DispatchThreadID)
-{
+[numthreads(16, 16, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
 	uint4 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0;
 	r0.xy = asuint((float2)(dispatchID.xy));
 	r0.xy = asuint(asfloat(r0.xy) * cb0[2].zw);
@@ -116,9 +115,11 @@ cbuffer PerTechnique : register(b0)
 	r4.w = asuint(asfloat(r4.w) * 5.0 + asfloat(r5.x));
 	r5.x = asuint(cb0[1].y * cb0[1].y);
 	r5.yz = uint2(0x00000000u, 0x00000000u);
-	[loop] while (true) {
+	[loop] while (true)
+	{
 		r5.w = asuint(-(int)((asint(r5.z)) >= (asint(0x00000005u))));
-		if (r5.w != 0u) break;
+		if (r5.w != 0u)
+			break;
 		r5.w = asuint((float)(asint(r5.z)));
 		r5.w = asuint(asfloat(r5.w) + 0.5);
 		r6.x = asuint(asfloat(r2.w) * asfloat(r5.w));

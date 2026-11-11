@@ -53,9 +53,9 @@ Texture2D<float4> VisTex : register(t1);  // one texel per light: the visibility
 
 cbuffer PerGeometry : register(b2)
 {
-	float4 Color : packoffset(c0);         // xyz: tint, w > 0: scale the sprite by its visibility
-	float4 VisScale : packoffset(c1);      // weights of the visibility texel's channels
-	float LightIndex : packoffset(c2.x);   // which visibility texel
+	float4 Color : packoffset(c0);        // xyz: tint, w > 0: scale the sprite by its visibility
+	float4 VisScale : packoffset(c1);     // weights of the visibility texel's channels
+	float LightIndex : packoffset(c2.x);  // which visibility texel
 	float GlobalIntensity : packoffset(c2.y);
 };
 

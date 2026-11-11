@@ -8,8 +8,8 @@
 #include "Common/DummyVSTexCoord.hlsl"
 
 #if defined(PSHADER)
-#if defined(EDITOR)
-#include "Common/FrameBuffer.hlsli"
+#	if defined(EDITOR)
+#		include "Common/FrameBuffer.hlsli"
 
 SamplerState CS_Z_BufferSampler : register(s0);
 SamplerState NormalsSampler : register(s1);
@@ -71,9 +71,11 @@ void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Ta
 	r3.x = asuint(asfloat(r3.x) * 10.0 + g_SSAOInfos.z);
 	r2.w = asuint(asfloat(r2.w) + asfloat(r3.x));
 	r3.xy = uint2(0x00000000u, 0x00000000u);
-	[loop] while (true) {
+	[loop] while (true)
+	{
 		r3.z = asuint(-(int)((asint(r3.y)) >= (asint(0x0000000fu))));
-		if (r3.z != 0u) break;
+		if (r3.z != 0u)
+			break;
 		r3.z = asuint((float)(asint(r3.y)));
 		r3.z = asuint(asfloat(r3.z) + 0.5);
 		r3.w = asuint(asfloat(r1.w) * asfloat(r3.z));
@@ -151,8 +153,8 @@ void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Ta
 	o0.x = (r0.x != 0u ? 1.0 : asfloat(r0.y));
 	o0.w = 1.0;
 }
-#else
-#include "Common/FrameBuffer.hlsli"
+#	else
+#		include "Common/FrameBuffer.hlsli"
 
 SamplerState CS_Z_BufferSampler : register(s0);
 SamplerState NormalsSampler : register(s1);
@@ -222,9 +224,11 @@ void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Ta
 	r2.z = asuint(asfloat(r2.z) * 10.0 + g_SSAOInfos.z);
 	r1.y = asuint(asfloat(r1.y) + asfloat(r2.z));
 	r2.zw = uint2(0x00000000u, 0x00000000u);
-	[loop] while (true) {
+	[loop] while (true)
+	{
 		r3.w = asuint(-(int)((asint(r2.w)) >= (asint(0x00000005u))));
-		if (r3.w != 0u) break;
+		if (r3.w != 0u)
+			break;
 		r3.w = asuint((float)(asint(r2.w)));
 		r3.w = asuint(asfloat(r3.w) + 0.5);
 		r4.w = asuint(asfloat(r1.x) * asfloat(r3.w));
@@ -340,5 +344,5 @@ void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Ta
 	o0.x = (r0.x != 0u ? 1.0 : asfloat(r0.y));
 	o0.w = 1.0;
 }
-#endif
+#	endif
 #endif

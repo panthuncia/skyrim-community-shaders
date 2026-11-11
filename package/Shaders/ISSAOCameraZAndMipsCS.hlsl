@@ -17,8 +17,7 @@ cbuffer PerTechnique : register(b0)
 	float4 cb0[1];
 };
 
-[numthreads(8, 8, 1)] void main(uint3 dispatchID : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThreadID)
-{
+[numthreads(8, 8, 1)] void main(uint3 dispatchID : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThreadID) {
 	uint4 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0;
 	r0.xyzw = asuint((float4)(dispatchID.xyyy));
 	r1.xy = asuint(asfloat(r0.xw) + asfloat(r0.xw));

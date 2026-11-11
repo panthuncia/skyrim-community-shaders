@@ -92,65 +92,64 @@ float4 ToOutput(Texel value)
 #else
 [numthreads(1, GROUP, 1)]
 #endif
-void main(uint3 groupThreadId : SV_GroupThreadID, uint3 groupId : SV_GroupID)
-{
+	void main(uint3 groupThreadId : SV_GroupThreadID, uint3 groupId : SV_GroupID) {
 #if defined(GRIDSIZE_X)
-	const int lane = groupThreadId.x;
-	const int along = lane - HALO;
-	const int2 pixel = int2(groupId.x * SPAN + along, groupId.y);
+		const int lane = groupThreadId.x;
+		const int along = lane - HALO;
+		const int2 pixel = int2(groupId.x * SPAN + along, groupId.y);
 #else
-	const int lane = groupThreadId.y;
-	const int along = lane - HALO;
-	const int2 pixel = int2(groupId.x, groupId.y * SPAN + along);
+		const int lane = groupThreadId.y;
+		const int along = lane - HALO;
+		const int2 pixel = int2(groupId.x, groupId.y * SPAN + along);
 #endif
 
-	// Every lane loads one texel, the halo lanes included. The clamp keeps reads inside the rendered area.
-	const float2 uv = min((float2(pixel) + 0.5) * InvSize.xy, MaxUV.xy);
-	const Texel center = ReadInput(uv);
-	Line[lane] = center;
+		// Every lane loads one texel, the halo lanes included. The clamp keeps reads inside the rendered area.
+		const float2 uv = min((float2(pixel) + 0.5) * InvSize.xy, MaxUV.xy);
+		const Texel center = ReadInput(uv);
+		Line[lane] = center;
 #if defined(DEPTH_THRESHOLD)
-	const float centerDepth = DepthTexture.SampleLevel(DepthSampler, uv, 0).x;
-	LineDepth[lane] = centerDepth;
+		const float centerDepth = DepthTexture.SampleLevel(DepthSampler, uv, 0).x;
+		LineDepth[lane] = centerDepth;
 #endif
 
-	GroupMemoryBarrierWithGroupSync();
+		GroupMemoryBarrierWithGroupSync();
 
-	if (along < 0 || along >= SPAN)
-		return;
+		if (along < 0 || along >= SPAN)
+			return;
 
-	// D3D drops stores outside the texture. Vulkan does not promise to, so test here.
-	uint2 size;
-	OutputTexture.GetDimensions(size.x, size.y);
-	if (any(uint2(pixel) >= size))
-		return;
+		// D3D drops stores outside the texture. Vulkan does not promise to, so test here.
+		uint2 size;
+		OutputTexture.GetDimensions(size.x, size.y);
+		if (any(uint2(pixel) >= size))
+			return;
 
 #if defined(DEPTH_THRESHOLD)
-	// How far the center's depth is from the taps' depths: TEXTAP times the center, less every tap.
-	float depthDifference = TEXTAP * centerDepth;
-	[unroll] for (int d = 0; d < TEXTAP; ++d)
-		depthDifference -= LineDepth[lane + (d - TEXTAP / 2) * BLUR_SCALE];
+		// How far the center's depth is from the taps' depths: TEXTAP times the center, less every tap.
+		float depthDifference = TEXTAP * centerDepth;
+		[unroll] for (int d = 0; d < TEXTAP; ++d)
+			depthDifference -= LineDepth[lane + (d - TEXTAP / 2) * BLUR_SCALE];
 #endif
 
-	Texel sum = 0;
+		Texel sum = 0;
 #if defined(EARLY_DEPTH_REJECT)
-	// Across a depth edge the pixel keeps its own value.
-	[branch] if (abs(depthDifference) > DEPTH_THRESHOLD)
-	{
-		sum = center;
-	}
-	else
+		// Across a depth edge the pixel keeps its own value.
+		[branch] if (abs(depthDifference) > DEPTH_THRESHOLD)
+		{
+			sum = center;
+		}
+		else
 #endif
-	{
-		[unroll] for (int i = 0; i < TEXTAP; ++i)
-			sum += Line[lane + (i - TEXTAP / 2) * BLUR_SCALE] * TapWeights[i];
-	}
+		{
+			[unroll] for (int i = 0; i < TEXTAP; ++i)
+				sum += Line[lane + (i - TEXTAP / 2) * BLUR_SCALE] * TapWeights[i];
+		}
 
 #if defined(DEPTH_THRESHOLD) && !defined(EARLY_DEPTH_REJECT)
-	// Near a depth edge, blend halfway back toward the unblurred pixel (a smoothstep of the difference).
-	const float edge = min(abs(depthDifference) * (1.0 / DEPTH_THRESHOLD), 1.0);
-	const float keep = edge * edge * (3.0 - 2.0 * edge) * 0.5;
-	sum = sum + keep * (center - sum);
+		// Near a depth edge, blend halfway back toward the unblurred pixel (a smoothstep of the difference).
+		const float edge = min(abs(depthDifference) * (1.0 / DEPTH_THRESHOLD), 1.0);
+		const float keep = edge * edge * (3.0 - 2.0 * edge) * 0.5;
+		sum = sum + keep * (center - sum);
 #endif
 
-	OutputTexture[pixel] = ToOutput(sum);
-}
+		OutputTexture[pixel] = ToOutput(sum);
+	}

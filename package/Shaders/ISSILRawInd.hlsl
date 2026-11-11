@@ -79,9 +79,11 @@ void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Ta
 	r3.x = asuint(g_IndInfos.y * g_IndInfos.y);
 	r3.yzw = uint3(0x00000000u, 0x00000000u, 0x00000000u);
 	r4.x = 0x00000000u;
-	[loop] while (true) {
+	[loop] while (true)
+	{
 		r4.y = asuint(-(int)((asint(r4.x)) >= (asint(0x0000000fu))));
-		if (r4.y != 0u) break;
+		if (r4.y != 0u)
+			break;
 		r4.y = asuint((float)(asint(r4.x)));
 		r4.y = asuint(asfloat(r4.y) + 0.5);
 		r4.z = asuint(asfloat(r1.w) * asfloat(r4.y));

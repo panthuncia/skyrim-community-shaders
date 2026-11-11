@@ -17,8 +17,7 @@ cbuffer PerTechnique : register(b0)
 	float4 cb0[1];
 };
 
-[numthreads(1, 552, 1)] void main(uint3 dispatchID : SV_DispatchThreadID, uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadID)
-{
+[numthreads(1, 552, 1)] void main(uint3 dispatchID : SV_DispatchThreadID, uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadID) {
 	uint4 r0 = 0, r1 = 0, r2 = 0, r3 = 0;
 	r0.x = asuint(asint(groupThreadID.y) + asint(0xfffffffau));
 	r0.y = (uint)(cb0[0].y);
@@ -106,8 +105,7 @@ cbuffer PerTechnique : register(b0)
 	float4 cb0[1];
 };
 
-[numthreads(972, 1, 1)] void main(uint3 dispatchID : SV_DispatchThreadID, uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadID)
-{
+[numthreads(972, 1, 1)] void main(uint3 dispatchID : SV_DispatchThreadID, uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadID) {
 	uint4 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0;
 	r0.x = asuint(asint(groupThreadID.x) + asint(0xfffffffau));
 	r0.y = (uint)(cb0[0].x);

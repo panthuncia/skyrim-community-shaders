@@ -14,8 +14,7 @@ cbuffer PerTechnique : register(b0)
 	float4 cb0[1];
 };
 
-[numthreads(32, 32, 1)] void main(uint3 dispatchID : SV_DispatchThreadID)
-{
+[numthreads(32, 32, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
 	uint4 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0, r10 = 0;
 	r0.xw = uint2(0x00000000u, 0x3f800000u);
 	r1.xyz = asuint((float3)(dispatchID.xyz));
@@ -132,8 +131,7 @@ cbuffer PerTechnique : register(b0)
 	float4 cb0[1];
 };
 
-[numthreads(32, 32, 1)] void main(uint3 dispatchID : SV_DispatchThreadID)
-{
+[numthreads(32, 32, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
 	uint4 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0, r10 = 0;
 	r0.xw = uint2(0x00000000u, 0x3f800000u);
 	r1.xyz = asuint((float3)(dispatchID.xyz));
