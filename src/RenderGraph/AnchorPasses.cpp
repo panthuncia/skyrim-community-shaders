@@ -15,6 +15,7 @@
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/Buffers/Buffer.h>
+#	include <Resources/GloballyIndexedResource.h>
 
 #	include <algorithm>
 #	include <format>
@@ -66,7 +67,11 @@ namespace RenderGraph::AnchorPasses
 			for (std::size_t i = 0; i < a_bindings.size(); ++i) {
 				const auto& bind = a_bindings[i];
 				const bool whole = bind.mip == kAllMips;
-				if (bind.kind == Bind::Kind::Srv)
+				if (bind.kind == Bind::Kind::Srv && !bind.resource)
+					declared.views[i] = a_builder.ShaderResource(org::ResourceIdentifier(bind.id), org::SrvView{ .variant = bind.variant }).View();
+				else if (bind.kind == Bind::Kind::Srv && bind.variant != UINT32_MAX)
+					declared.views[i] = a_builder.ShaderResource(bind.resource, org::SrvView{ .variant = bind.variant }).View();
+				else if (bind.kind == Bind::Kind::Srv)
 					declared.views[i] = whole ? a_builder.ShaderResource(bind.resource).View() :
 					                            a_builder.ShaderResource(MipOf(bind.resource, bind.mip), org::SrvView{ .mip = bind.mip }).View();
 				else if (bind.kind == Bind::Kind::Uav)
@@ -288,6 +293,13 @@ namespace RenderGraph::AnchorPasses
 		};
 	}
 
+	Bind Bind::SrvArray(std::shared_ptr<org::Resource> a_resource)
+	{
+		Bind bind = Srv(std::move(a_resource));
+		bind.variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull);
+		return bind;
+	}
+
 	Builder::Builder(FrameAnchors::Anchor a_anchor, std::string a_prefix, std::int32_t a_orderBase, std::shared_ptr<const org::LatchBlock> a_latch,
 		std::shared_ptr<const RunGate> a_gate) :
 		anchor(a_anchor), prefix(std::move(a_prefix)), orderBase(a_orderBase), latch(std::move(a_latch)), gate(std::move(a_gate))
@@ -296,7 +308,7 @@ namespace RenderGraph::AnchorPasses
 	bool Builder::Check(std::string_view a_name, const std::vector<Bind>& a_bindings, std::uint32_t a_programWords, std::optional<std::uint32_t> a_gate)
 	{
 		for (const auto& bind : a_bindings) {
-			if ((bind.kind == Bind::Kind::Srv || bind.kind == Bind::Kind::Uav) && !bind.resource) {
+			if ((bind.kind == Bind::Kind::Srv || bind.kind == Bind::Kind::Uav) && !bind.resource && (bind.kind == Bind::Kind::Uav || bind.id.empty())) {
 				Fail(std::format("{}: an input is missing", a_name));
 				return false;
 			}

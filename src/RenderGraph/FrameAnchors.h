@@ -88,6 +88,9 @@ namespace FrameAnchors
 		// FinishAccumulatingPostResolveDepth's water batch, a menu scene's shadow masks at UI3DSceneManager::Render, and the screen
 		// blood at Main::RenderScreenSplatter. Zero to five runs a frame, so it is listed out of frame order.
 		EngineDraws,
+		// Out of frame order (appended): Volumetric Lighting's GPU work (Features/VolumetricLighting/ORGVolumetricLighting,
+		// CS_ORG_VOLUMETRIC_LIGHTING), once a frame where the engine's VL blur would dispatch, inside RenderWorldPostProcess.
+		VolumetricLighting,
 		Count
 	};
 

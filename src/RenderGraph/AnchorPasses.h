@@ -52,7 +52,9 @@ namespace RenderGraph::AnchorPasses
 	/**
 	 * @brief One entry of a pass's push block, in the shader's resource list order (ShaderBindings.h): Srv and Uav are declared
 	 * resources (the whole texture or one mip), Handle a sampler or another descriptor index, Latch a LATCH entry's two words (an
-	 * offset into the builder's latch), Shared a SHARED entry's four words (SharedConstants.h).
+	 * offset into the builder's latch), Shared a SHARED entry's four words (SharedConstants.h). An Srv names its resource, or
+	 * another client's published resource by its id (PublishedResources), and may ask for a view variant (a texture array's
+	 * whole-array view: its default view is its first slice).
 	 */
 	struct Bind
 	{
@@ -69,8 +71,14 @@ namespace RenderGraph::AnchorPasses
 		std::shared_ptr<org::Resource> resource;
 		std::uint32_t value = 0;       // Handle: the descriptor index; Latch: the region's offset
 		std::uint32_t mip = kAllMips;  // Srv and Uav: the one mip the view covers, or the default view
+		std::string id;                // Srv without a resource: a published resource's id
+		std::uint32_t variant = UINT32_MAX;  // Srv: the view variant (org::SRVViewType), UINT32_MAX for the default view
 
 		static Bind Srv(std::shared_ptr<org::Resource> a_resource, std::uint32_t a_mip = kAllMips) { return { Kind::Srv, std::move(a_resource), 0, a_mip }; }
+		/** @brief An Srv of a texture array's whole-array view (Texture2DArrayFull), for a shader that declares Texture2DArray. */
+		static Bind SrvArray(std::shared_ptr<org::Resource> a_resource);
+		/** @brief An Srv of another client's published resource, declared by its id: the graph orders the read after its producer. */
+		static Bind Published(std::string a_id) { return { Kind::Srv, nullptr, 0, kAllMips, std::move(a_id) }; }
 		static Bind Uav(std::shared_ptr<org::Resource> a_resource, std::uint32_t a_mip = kAllMips) { return { Kind::Uav, std::move(a_resource), 0, a_mip }; }
 		static Bind Handle(std::uint32_t a_index) { return { Kind::Handle, nullptr, a_index }; }
 		static Bind Unused() { return Handle(0); }
