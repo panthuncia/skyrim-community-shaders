@@ -9,9 +9,22 @@
 #	define ORG_HEADER_RESOURCES
 #	include "Common/OrgResources.hlsli"
 
-// A draw's constants, latched by the family from what the engine's SetupGeometry wrote: the vertex stage's PerGeometry (c0 to
-// c16.xy), the pixel stage's PParams, the alpha test reference (PS b11) and CS's extra descriptor for the draw. The matrices are
-// rows: a latch is loaded with Load<T>, which does not keep row_major.
+// A draw's geometry: the engine's static vertex and index buffers by device address, which the vertex stage pulls (ORG draws have
+// no input assembly). VertexLayout is the engine's input layout key (the vertex shader's mask and the geometry's VertexDesc).
+struct SkyOrgGeometry
+{
+	uint2 VertexAddress;
+	uint2 IndexAddress;
+	uint2 VertexLayout;
+	uint VertexStride;
+	uint FirstIndex;
+};
+
+// A draw's values, latched by the family: the vertex stage's PerGeometry as the engine's SetupGeometry wrote it (c0 to c16.xy), the
+// pixel stage's PParams, the alpha test reference (PS b11), CS's extra descriptor for the draw, the geometry, and the heap indices of
+// t0-t2 with their samplers. Textures.w is Cloud Shadows' self-shadowing input (t26) for the draw: a cloud layer's occlusion in the
+// main pass, or SKY_ORG_OCCLUSION for the occlusion cubemap (t25). The matrices are rows: a latch is loaded with Load<T>, which does
+// not keep row_major. Everything per draw is here, so a recording is kept while only these change.
 struct SkyOrgDraw
 {
 	float4 WorldViewProjRows[4];
@@ -25,39 +38,34 @@ struct SkyOrgDraw
 	float AlphaTestRef;
 	uint ExtraShaderDescriptor;
 	uint2 Padding;
+	SkyOrgGeometry Geometry;
+	uint4 Textures;
+	uint4 Samplers;
 };
 
-// A draw's geometry: the engine's static vertex and index buffers by device address, which the vertex stage pulls (ORG draws have
-// no input assembly). VertexLayout is the engine's input layout key (the vertex shader's mask and the geometry's VertexDesc).
-struct SkyOrgGeometry
-{
-	uint2 VertexAddress;
-	uint2 IndexAddress;
-	uint2 VertexLayout;
-	uint VertexStride;
-	uint FirstIndex;
-};
+#	define SKY_ORG_OCCLUSION 0xFFFFFFFF
 
 #	define SKY_ORG_RESOURCES(X)                                \
 		X(SHARED, ConstantBuffer, Shared, 0)                      \
-		X(SRV, Texture2D<float4>, TexBaseSampler, 0)              \
-		X(SRV, Texture2D<float4>, TexBlendSampler, 1)             \
-		X(SRV, Texture2D<float4>, TexNoiseGradSampler, 2)         \
 		X(SRV, Texture2D<float>, TexDepthSampler, 17)             \
 		X(EXTERN, Texture2D<float4>, DepthTexture, 17)            \
 		X(EXTERN, TextureCube<float>, CloudShadowsTexture, 25)    \
-		X(EXTERN, TextureCube<float>, CloudSelfShadowTexture, 26) \
 		X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)              \
 		X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)              \
 		X(EXTERN, TextureCube<float3>, EnvReflectionsTexture, 30) \
 		X(EXTERN, TextureCube<float3>, EnvTexture, 31)            \
-		X(SAMPLER, SamplerState, SampBaseSampler, 0)              \
-		X(SAMPLER, SamplerState, SampBlendSampler, 1)             \
-		X(SAMPLER, SamplerState, SampNoiseGradSampler, 2)         \
-		X(LATCH, SkyOrgDraw, SkyDraw, 2)                          \
-		X(PUSH, SkyOrgGeometry, SkyGeometry, 3)
+		X(LATCH, SkyOrgDraw, SkyDraw, 2)
 ORG_PUSH_BLOCK(SKY_ORG_RESOURCES(ORG_HANDLE))
 SKY_ORG_RESOURCES(ORG_RESOURCE)
+static SkyOrgGeometry SkyGeometry = SkyDraw.Geometry;
+static Texture2D<float4> TexBaseSampler = ResourceDescriptorHeap[SkyDraw.Textures.x];
+static Texture2D<float4> TexBlendSampler = ResourceDescriptorHeap[SkyDraw.Textures.y];
+static Texture2D<float4> TexNoiseGradSampler = ResourceDescriptorHeap[SkyDraw.Textures.z];
+static SamplerState SampBaseSampler = SamplerDescriptorHeap[SkyDraw.Samplers.x];
+static SamplerState SampBlendSampler = SamplerDescriptorHeap[SkyDraw.Samplers.y];
+static SamplerState SampNoiseGradSampler = SamplerDescriptorHeap[SkyDraw.Samplers.z];
+// Cloud Shadows' header reads CloudSelfShadowTexture through this handle.
+static uint OrgHandle_CloudSelfShadowTexture = SkyDraw.Textures.w != SKY_ORG_OCCLUSION ? SkyDraw.Textures.w : OrgHandle_CloudShadowsTexture;
 // Exponential Height Fog's header declares its froxel volumes (t19, t22), which the sky never reads: no handles in the push block.
 static const uint OrgHandle_ExponentialHeightFogIntegratedLightScattering = 0;
 static const uint OrgHandle_ExponentialHeightFogIntegratedLightScatteringFar = 0;
