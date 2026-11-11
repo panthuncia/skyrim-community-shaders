@@ -528,7 +528,8 @@ namespace DCLF
 
 		/**
 		 * @brief Render thread: the id (1 and up) of a shadow view's rasterizer state, registering it the first time; 0 if a pipeline
-		 * cannot express it (no depth clipping, wireframe). Equal states share an id and pipelines.
+		 * cannot express it (wireframe; no depth clipping without the device's depth clamp or with CS_DCLF_SHADOW_DEPTH_CLAMP=0). Equal
+		 * states share an id and pipelines.
 		 *
 		 * The state must be read while the view is drawn (CaptureShadowView): ShadowmapCascadeRasterizerFix swaps in per-cascade
 		 * copies with their own depth bias for exactly that window, and the volumetric copy draws without culling. A new state reaches

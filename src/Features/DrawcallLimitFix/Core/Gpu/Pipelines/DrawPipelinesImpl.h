@@ -594,6 +594,7 @@ namespace DCLF
 		bool supported = false;
 		bool deviceGenerated = false;  // DrawPipelines::DeviceGenerated: the classes' execution sets and signatures are made
 		bool gpuDriven = false;        // DrawPipelines::GpuDriven: counted indirect draws, so the GPU path's buckets draw
+		bool depthClipDisable = false;  // FixedFunctionFeatureInfo::depthClipDisable: a pipeline can turn depth clipping off
 		bool attempted = false;
 		org::services::PipelineService service;
 		/**
@@ -724,6 +725,8 @@ namespace DCLF
 			float slopeScaledDepthBias = 0.0f;
 			rhi::CullMode cull = rhi::CullMode::Back;
 			bool frontCCW = false;
+			// D3D11's DepthClipEnable: off clamps depth to the viewport's range instead of clipping (Vulkan depthClamp).
+			bool depthClip = true;
 
 			bool operator==(const ShadowRasterState&) const = default;
 		};

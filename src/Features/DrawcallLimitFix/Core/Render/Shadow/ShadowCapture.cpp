@@ -338,7 +338,7 @@ namespace DCLF
 			rasterState = EngineRasterStateId(shadowState.rasterStateFillMode, 0, shadowState.rasterStateDepthBiasMode, shadowState.rasterStateScissorMode,
 				a_renderMode);
 		if (rasterState == 0)
-			return notReady(ShadowNotReady::Pipelines);
+			return notReady(ShadowNotReady::RasterState);
 
 		auto& view = engine.pendingViews.emplace_back();
 		view.viewId = a_viewId;
