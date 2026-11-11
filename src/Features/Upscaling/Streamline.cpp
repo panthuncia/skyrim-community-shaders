@@ -7,6 +7,7 @@
 #include "../../DxvkLoader.h"
 #include "Utils/SwitchFile.h"
 #include "../../Globals.h"
+#include "../../RenderGraph/RenderGraphRuntime.h"
 #include "../../RenderGraph/Switches.h"
 #include "../../State.h"
 #include "../../Utils/Game.h"
@@ -1254,7 +1255,7 @@ static bool cs_CanReleaseFailedFSRFrame(DXVKInterop* a_dxvk,
 
 
 // Diagnostic (CS_DCLF_TARGET_DUMP frames): the upscaler's inputs and output copied inside its
-// own command buffer, just before and just after the evaluate, and read back once complete (InCbReadback::Drain).
+// own command buffer, just before and just after the evaluate, and read back kGameFramesInFlight frames later (InCbReadback::Drain).
 namespace InCbReadback
 {
 	struct Copy
@@ -1431,12 +1432,14 @@ namespace InCbReadback
 	}
 
 	// At each evaluate: once the armed frame's buffer can have completed, waits for it and writes its statistics and raw copies.
-	static void Drain(DXVKInterop* a_dxvk)
+	static void Drain()
 	{
 		auto& s = Get();
-		if (!s.pending || ++s.framesWaited < 4)
-			return;
-		if (!a_dxvk->WaitDeviceIdle())
+		// Read once the frame's work is surely done, without waiting: the graph's frame slot ring waits for a slot's last GPU work
+		// before reusing it, so kGameFramesInFlight frames later the frame that recorded the copies (and everything queued before
+		// them) has completed. A device-wide idle wait here, mid-frame on the render thread, can deadlock: queued work may wait on a
+		// timeline this thread signals only once it moves on.
+		if (!s.pending || ++s.framesWaited <= RenderGraphRuntime::kGameFramesInFlight)
 			return;
 		auto dir = logger::log_directory().value_or(std::filesystem::path{}) / "dclf-dump" / "incb";
 		std::error_code error;
@@ -1466,7 +1469,7 @@ static sl::Result cs_EvaluateFeatureCore(sl::Feature a_feature, const sl::Viewpo
 	auto* dxvk = DXVKInterop::GetSingleton();
 	if (!dxvk)
 		return sl::Result::eErrorNotInitialized;
-	InCbReadback::Drain(dxvk);
+	InCbReadback::Drain();
 
 	sl::FrameToken* token = RenderFrameToken();
 	if (!token) {
