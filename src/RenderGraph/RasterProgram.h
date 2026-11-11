@@ -151,14 +151,19 @@ struct RasterProgram
 		// vertex count of zero there draws nothing, so a kept recording can do no work on a frame by its data alone.
 		const org::LatchBlock* indirect = nullptr;
 		std::uint32_t indirectOffset = 0;
+		// When valid, the draw is counted by this occlusion query: it is begun after the render pass begins and ended before the pass
+		// ends, so it holds this draw alone. The caller resets the query before and resolves it after.
+		rhi::QueryPoolHandle occlusionPool{};
+		std::uint32_t occlusionIndex = 0;
 	};
 
 	/**
 	 * @brief Record time: begins a render pass on the draw's targets, binds the program, pushes the constants, draws, and ends the
 	 * pass. The descriptor heaps are the frame's, which the graph binds before the first pass. Records nothing when the draw does
-	 * not match the program (target count, depth, constants) or its viewport is empty.
+	 * not match the program (target count, depth, constants) or its viewport is empty, and returns false then: its occlusion query,
+	 * if it has one, was not begun.
 	 */
-	void Draw(org::RecordingContext& a_recording, const DrawDesc& a_draw) const;
+	bool Draw(org::RecordingContext& a_recording, const DrawDesc& a_draw) const;
 };
 
 #endif
