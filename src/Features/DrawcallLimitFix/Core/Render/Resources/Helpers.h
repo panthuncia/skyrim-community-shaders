@@ -112,8 +112,6 @@ namespace DCLF::Draws
 	// buffers: Api::PerDrawBuffer); everything else bound in the main pass is per frame and comes from its CPU mirror.
 
 	constexpr std::uint32_t kStrictLightDataBytes = 1216;  // LightLimitFix.hlsli StrictLightData (15 lights)
-	// The point light table's lights (Common/DCLFPointLights.hlsli, kDCLFMaxPointLights): PS b3 without Light Limit Fix.
-	constexpr std::uint32_t kPointLightTableLights = 128;
 	constexpr std::uint32_t kCharacterLightMaterialRegister = 11;  // the engine's register of the character light's noise (kCharacterLightRegister)
 	constexpr std::uint32_t kInvalidIndex = GpuTextures::kInvalid;
 }

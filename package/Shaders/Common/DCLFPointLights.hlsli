@@ -9,8 +9,11 @@
 // lights whose sphere meets its bound, at most seven, in the table's order. Requires Common/DCLFObjects.hlsli.
 #if defined(DCLF_BINDLESS_DRAW)
 
-// The table's size (FrameRecords.cpp, kPointLightTableLights) and a light's flags.
-#	define kDCLFMaxPointLights 128
+// The table's size: the CPU's (GpuLayouts.h, kPointLightTableLights), defined by DCLF's program build (ShaderPrograms.cpp). A light's flags.
+#	if !defined(DCLF_POINT_LIGHT_TABLE_LIGHTS)
+#		error "DCLF_POINT_LIGHT_TABLE_LIGHTS is DCLF's program build's (ShaderPrograms.cpp)"
+#	endif
+#	define kDCLFMaxPointLights DCLF_POINT_LIGHT_TABLE_LIGHTS
 #	define kDCLFPointLightShadowChannel 0xFFu   // bits 0-7: a shadow light's mask channel + 1; 0 for a plain light
 #	define kDCLFPointLightAffectsLand 0x100u    // a plain light the landscape properties take (BSLight +0x61)
 
@@ -23,7 +26,7 @@ struct DCLFPointLight
 
 cbuffer DCLFPointLights : register(b3)
 {
-	uint4 DCLFPointLightCounts;  // x: the lights in the table, the shadow lights first
+	uint4 DCLFPointLightCounts;  // x: the lights in the table, the selectable shadow lights (a channel) first (FrameRecords.cpp)
 	DCLFPointLight DCLFPointLightTable[kDCLFMaxPointLights];
 };
 

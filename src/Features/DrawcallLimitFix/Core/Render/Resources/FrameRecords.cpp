@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace DCLF::Draws
@@ -31,12 +32,19 @@ namespace DCLF::Draws
 		constexpr std::uint32_t kPointLightShadowChannel = 0xFFu;
 		constexpr std::uint32_t kPointLightAffectsLand = 0x100u;
 
-		/** @brief Render thread: this commit's table, from the light volumes contribution (Extensions::SamplePointLights). */
+		/**
+		 * @brief Render thread: this commit's table, from the light volumes contribution (Extensions::SamplePointLights). The shadow lights
+		 * the shader can select (a mask channel 0-3: DCLFLocalShadowMask's four bits) come first, then every other light as a plain one, each
+		 * part in the contribution's order: the shader takes a draw's lights in table order and counts its first ShadowCount as shadow lights
+		 * (Lighting.hlsl reads shadowColor[channel - 1] for them), so no plain row may come before a shadow row.
+		 */
 		const GpuPointLightTable& SamplePointLightTable()
 		{
 			static GpuPointLightTable table{};
 			static std::array<Api::PointLight, kPointLightTableLights> lights{};
 			const std::uint32_t count = Extensions::SamplePointLights(lights.data(), kPointLightTableLights);
+			const auto shadowChannel = [](const Api::PointLight& a_light) { return a_light.shadowMaskIndex < 4 ? a_light.shadowMaskIndex + 1 : 0u; };
+			std::stable_partition(lights.begin(), lights.begin() + count, [&](const Api::PointLight& a_light) { return shadowChannel(a_light) != 0; });
 			table = {};
 			table.counts[0] = count;
 			for (std::uint32_t i = 0; i < count; ++i) {
@@ -45,9 +53,7 @@ namespace DCLF::Draws
 				std::memcpy(row.positionRadius, light.position, sizeof(light.position));
 				row.positionRadius[3] = light.radius;
 				std::memcpy(row.color, light.color, sizeof(light.color));
-				// The shader's channels are the shadow mask's four (DCLFLocalShadowMask): any other index is no shadow light.
-				const std::uint32_t channel = light.shadowMaskIndex < 4 ? light.shadowMaskIndex + 1 : 0u;
-				row.flags = (channel & kPointLightShadowChannel) | (light.affectsLand ? kPointLightAffectsLand : 0u);
+				row.flags = (shadowChannel(light) & kPointLightShadowChannel) | (light.affectsLand ? kPointLightAffectsLand : 0u);
 			}
 			return table;
 		}
