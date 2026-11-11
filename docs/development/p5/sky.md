@@ -105,7 +105,9 @@ from `Main::RenderWorld`'s end into the sun's own accumulator (Sun+0x50) with an
 
 **The depth bias viewport offsets** (`BSGraphics::CreateDepthBiasViewportOffsets`, SE 75829 `0x140d891f0`, AE `0x140e65d10`, renamed
 in SE): the table is a constant, `{0, 1.5e-5, 0, 0, 0, 0, 2.6e-5, 1.5e-5, 2.8e-5, 1.7e-5, 3e-5, 1.9e-5}` (SE `0x141794530`, AE
-`0x1419db270`). The sky's bias modes (0, 2, 3) take nothing off the viewport's depth range.
+`0x1419db270`). The sky takes nothing off the viewport's depth range: the graph's sky with the offset of the shadow state's bias mode
+wrote its far-plane depth short of 1, and the deferred pass lit and fogged it as geometry (grey overcast sky, darker exposure, clouds
+over the moons; sky-river-org1 on 2026-11-11). The family latches the viewport with mode 0.
 
 ### Cloud Shadows on D3D11
 
@@ -141,8 +143,8 @@ families").
   of drawn: the shadow state SetDirtyStates would apply (`EngineDrawState::Latch`), the alpha test reference, CS's extra descriptor,
   the PerGeometry constants SetupGeometry wrote (ConstantMirror), the technique's textures and samplers, the static vertex and index
   buffers (`GpuResources::Frame` leases, by device address, their index range and stride checked against the buffers, a triangle
-  list only: `Family::LatchGeometry`) and the viewport (`Family::LatchViewport`, with the depth bias table; the sky's modes take
-  nothing off). Cloud Shadows' `overrideSky` and `bindLayerSelfShadow` are taken and cleared.
+  list only: `Family::LatchGeometry`) and the viewport (`Family::LatchViewport(0)`: the sky takes no depth bias offset, see
+  "The depth bias viewport offsets"). Cloud Shadows' `overrideSky` and `bindLayerSelfShadow` are taken and cleared.
 - **The latch.** Everything per draw is in the draw's latch region (`SkyOrgDraw`, 352 bytes): the constants, the geometry, the heap
   indices of t0-t2 and their samplers, and t26. The push block (52 bytes) holds only what a client's pass declares (the shared
   constants, t17, t25, the headers) and the latch handle, so a recording is kept while textures, buffers or constants change.

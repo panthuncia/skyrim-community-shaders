@@ -381,8 +381,11 @@ namespace DCLF::Features::Sky
 			std::memcpy(constants.pParams, pixelBytes.data(), (std::min)(pixelBytes.size(), sizeof(constants.pParams)));
 			constants.alphaTestRef = rss.alphaTestEnabled ? rss.alphaTestRef : 0.0f;
 			constants.extraShaderDescriptor = state->permutationData.ExtraShaderDescriptor;
-			// The sky's depth bias modes (0, 2, 3) take nothing off the depth range.
-			draw.viewport = Family::LatchViewport(engine.depthBias);
+			// The camera's depth range as it is, with no depth bias offset (mode 0). The sky draws at the far plane: an offset taken off its
+			// maximum depth wrote the dome and the moon masks short of 1, so the deferred pass lit and fogged the sky as geometry (grey
+			// overcast, a darker exposure) and the clouds drew over the moons (sky-river-org1, 2026-11-11). The engine's sky leaves the
+			// range whole; the shadow state's bias mode is not the table's index for these draws.
+			draw.viewport = Family::LatchViewport(0);
 
 			// The imports are kept, a probe's too (SkyDraws::Keep): the next batch finds them instead of importing again.
 			for (auto& owner : owners)
