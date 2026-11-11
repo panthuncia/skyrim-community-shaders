@@ -43,10 +43,10 @@ namespace RenderGraph
 	public:
 		struct Desc
 		{
-			std::string name;                     // the blocks' debug name
+			std::string name;                        // the blocks' debug name
 			std::uint32_t minimumBytes = 64u << 10;  // the smallest block made
-			std::uint32_t runsPerFrame = 1;       // the client's runs a frame, each holding one block (spares kept: kGameFramesInFlight times this, plus one)
-			std::uint32_t maxBlocks = 0;          // 0: no limit
+			std::uint32_t runsPerFrame = 1;          // the client's runs a frame, each holding one block (spares kept: kGameFramesInFlight times this, plus one)
+			std::uint32_t maxBlocks = 0;             // 0: no limit
 		};
 
 		/** @brief A pool. Any thread. */

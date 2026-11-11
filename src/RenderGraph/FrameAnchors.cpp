@@ -883,8 +883,9 @@ namespace FrameAnchors
 		if (runs >= RingCapacity(index)) {
 			static std::array<std::atomic_flag, kAnchors> logged;
 			if (!logged[index].test_and_set())
-				logger::warn("[ORG] frame anchors: {} ran {} times since the last Present, all its ring holds ({} runs a frame x {} frames); "
-							 "later runs this frame are skipped and their callers keep the engine's path",
+				logger::warn(
+					"[ORG] frame anchors: {} ran {} times since the last Present, all its ring holds ({} runs a frame x {} frames); "
+					"later runs this frame are skipped and their callers keep the engine's path",
 					Name(a_point.anchor), runs, kInfo[index].runsPerFrame, RenderGraphRuntime::kGameFramesInFlight);
 			return { RunStatus::RingFull };
 		}
@@ -1073,9 +1074,10 @@ namespace FrameAnchors
 				continue;
 			const std::uint64_t over = total();
 			state.reserved[index] = false;
-			logger::error("[ORG] frame anchor {}: reservation dropped. The frame slots ({} frames in flight x every epoch's runs a frame) would be {}, "
-						  "more than the host's {}; its clients stay on D3D11. Lower an anchor's runs a frame in FrameAnchors.cpp (kInfo; "
-						  "CS_ORG_EPOCH_STATS=1 logs the peaks) or merge anchors",
+			logger::error(
+				"[ORG] frame anchor {}: reservation dropped. The frame slots ({} frames in flight x every epoch's runs a frame) would be {}, "
+				"more than the host's {}; its clients stay on D3D11. Lower an anchor's runs a frame in FrameAnchors.cpp (kInfo; "
+				"CS_ORG_EPOCH_STATS=1 logs the peaks) or merge anchors",
 				kInfo[index].name, frames, over, a_maxSlots);
 		}
 		std::string anchors;
