@@ -492,10 +492,16 @@ Keys used so far:
   batch).
 - **Who:** CS's engine skeleton (P5.1); ReflectionsPrepass when many cubemaps render in one frame.
 - **Where it fits:** an epoch's runs take its ring of `framesInFlight` slots in turn, and the host's next preparation waits for
-  a slot's GPU work. In-stream work reaches the GPU only at DXVK's flush, so a fourth run in one frame left the host waiting for
-  unsubmitted work and the render thread waiting for the host: a deadlock. The skeleton caps itself at three runs a frame. A
-  per-epoch ring size (slots per epoch) would lift it; so would a host that never waits for a slot whose work is still in the
-  stream (prepare on demand instead).
+  a slot's GPU work. In-stream work reaches the GPU only at DXVK's flush, so a fifth run in one frame left the host waiting for
+  unsubmitted work and the render thread waiting for the host: a deadlock.
+- **Done (ORG `org-port/p5-slots`):** `GraphHost::Desc::epochRuns` lists such epochs with their runs a frame. Each has a ring
+  of `framesInFlight` times that many slots, counted in `FrameSlots()` (fixed when the host is made, so latch blocks sized from
+  it stay right), and starts on `framesInFlight` of them. When the next slot's last run is fewer than
+  `max(framesInFlight - 1, 1)` frame boundaries (`SealSubmitted`) old, the ring grows by a slot instead of waiting. A frame with
+  more runs than the whole ring makes `SubmitEpoch` throw `EpochRingFullError` for the rest until the next seal: the caller
+  falls back for those runs. CS lists its anchors' runs in the anchor table (`FrameAnchors.cpp`, `runsPerFrame`); the
+  skeleton's own three-runs cap is gone. A new anchor that runs more than once a frame sets its `runsPerFrame` there.
+- **Guest phase only:** This issue exists only because, in the guest phase, each anchor is a separate host epoch spliced into DXVK's stream, which DXVK submits at Present. Once ORG owns the frame (the Phase 6 cutover), these clears and the other per-call engine work are passes inside one frame graph, and the slot-per-run ring no longer applies.
 - **Found by:** P5.1, the first skeleton-org1 run (2026-11-10).
 
 ### Work at an engine draw that is not an anchor

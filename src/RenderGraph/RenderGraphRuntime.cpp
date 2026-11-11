@@ -531,6 +531,7 @@ struct RenderGraphRuntime::Impl
 	std::atomic<bool> faulted = false;
 	// Render thread: the segments whose failed epoch ExecuteEpoch has logged, one bit each. A segment's bit clears when it submits again.
 	std::uint32_t failedEpochsLogged = 0;
+	std::uint32_t ringFullLogged = 0;  // segments whose ring was full once (EpochRingFullError), logged once each
 
 	// The thread that drives the D3D11 immediate context (the one running epochs).
 	// Its submissions go into DXVK's command stream; other threads submit directly.
@@ -746,8 +747,10 @@ struct RenderGraphRuntime::Impl
 	// ORG's pass timestamps, per segment. An epoch is one host frame; the segment it ran is remembered by
 	// frame number until its timestamps come back, framesInFlight frames later.
 	static constexpr std::size_t kSegments = static_cast<std::size_t>(Segment::Count);
-	// Past the host's frame slots (kGameFramesInFlight frames of at most every segment): a frame's segment outlives its slot's reuse.
-	static constexpr std::size_t kSegmentRing = 2 * std::size_t(kGameFramesInFlight) * kSegments;
+	// Past the host's frame slots (at most 255: kGameFramesInFlight frames of every segment's runs, GraphHost::FrameSlotsFor) and a
+	// ticket prepared ahead per segment: a frame's segment outlives its slot's reuse.
+	static constexpr std::size_t kSegmentRing = 1024;
+	static_assert(kSegmentRing >= 2 * (255 + kSegments));
 	struct PassTime
 	{
 		double inclusiveMs = 0.0;
@@ -1735,7 +1738,8 @@ bool RenderGraphRuntime::Initialize()
 		// is ordered against the graph by these barriers (same queue, submission order).
 		desc.queueBoundary = { .entry = true, .exit = true };
 		// Game frames in flight: the host's frame slots are this many frames of every epoch in the order (FrameSlots), so a new
-		// segment keeps the same lead over the GPU, and a slot's wait is backpressure from that many frames back.
+		// segment keeps the same lead over the GPU, and a slot's wait is backpressure from that many frames back. An anchor that runs
+		// several times a frame has this many frames of its runs (Desc::epochRuns, below).
 		desc.framesInFlight = kGameFramesInFlight;
 		// CS_ORG_CLOSED (default off, =1 on): each epoch leaves every resource in its home state and starts with a full barrier, so
 		// its admission is independent of the epochs before it. An interop fallback: the epochs' resources otherwise flow between them
@@ -1767,6 +1771,31 @@ bool RenderGraphRuntime::Initialize()
 		GraphResources::SelfTest::Reserve();
 		// The frame anchors' reserved epochs, where the frame reaches them (FrameAnchors.h).
 		FrameAnchors::AddToFrame(desc.epochOrder);
+		// The anchors that run several times a frame (the engine skeleton's clears, the reflections prepass): each anchor is an epoch
+		// of its own in DXVK's stream, which DXVK submits at Present, so a run must never wait for one of the same frame. Their rings
+		// grow up to kGameFramesInFlight times their runs instead (GraphHost::Desc::epochRuns). Present seals each frame
+		// (SealPresented), which is what the rings count frames by.
+		for (const auto& [epoch, runs] : FrameAnchors::RunsPerFrame())
+			if (std::ranges::find(desc.epochOrder, epoch) != desc.epochOrder.end())
+				desc.epochRuns.push_back({ .epoch = epoch, .runsPerFrame = runs });
+		std::uint32_t frameSlots = 0;
+		try {
+			frameSlots = org::GraphHost::FrameSlotsFor(desc);
+		} catch (const std::invalid_argument& e) {
+			// More than the runtime's 255 slots: each such anchor gets two frames' worth of slots only. Its ring still grows rather than
+			// waiting for a run of the same frame, and a frame with more runs than it holds skips the rest (FrameAnchors::Run returns
+			// false; the callers fall back).
+			logger::warn("[ORG] the anchors' runs a frame need too many frame slots ({}); each of them is sized for 2 runs a frame", e.what());
+			for (auto& entry : desc.epochRuns)
+				entry.runsPerFrame = 2;
+			frameSlots = org::GraphHost::FrameSlotsFor(desc);
+		}
+		if (!desc.epochRuns.empty()) {
+			std::string runs;
+			for (const auto& entry : desc.epochRuns)
+				runs += fmt::format("{}{}:{}", runs.empty() ? "" : ",", entry.epoch, entry.runsPerFrame);
+			logger::info("[ORG] {} frame slots; epochs that run several times a frame (epoch:runs): {}", frameSlots, runs);
+		}
 		if (!desc.epochOrder.empty())
 			logger::info("[ORG] epoch order: {}", fmt::join(desc.epochOrder, ","));
 		// Diagnostic: CS_ORG_ALIAS_LOG=1 logs every alias plan's placements, ranks and exclusions.
@@ -1782,9 +1811,9 @@ bool RenderGraphRuntime::Initialize()
 		settings.collectPipelineStatistics = false;
 		org::runtime::SetOpenRenderGraphSettings(settings);
 #endif
-		// The runtime's slots: the host's frame slots (frames in flight times epochs), which its upload pages and statistics follow.
-		state->orgRuntime = org::Runtime::Create({ .device = state->device->Get(), .backend = rhi::Backend::Vulkan,
-			.slots = desc.framesInFlight * (std::max)(static_cast<uint32_t>(desc.epochOrder.size()), 1u) });
+		// The runtime's slots: the host's frame slots (frames in flight times the epochs' runs a frame), which its upload pages and
+		// statistics follow.
+		state->orgRuntime = org::Runtime::Create({ .device = state->device->Get(), .backend = rhi::Backend::Vulkan, .slots = frameSlots });
 		desc.runtime = state->orgRuntime;
 		state->host = std::make_unique<org::GraphHost>(std::move(desc));
 		// The frame-wait timeline, before anything builds the graph (its packets bind it when prepared): only with a queue of the
@@ -2434,6 +2463,18 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 		impl->submittedSegments |= 1u << static_cast<std::uint32_t>(a_segment);
 		impl->failedEpochsLogged &= ~(1u << static_cast<std::uint32_t>(a_segment));
 		return true;
+	} catch (const org::GraphHost::EpochRingFullError& e) {
+		// The anchor ran more times since the last Present than its ring of slots holds (FrameAnchors' runsPerFrame): nothing was
+		// submitted and nothing failed. The caller falls back for this run; the next frame's runs go on.
+		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
+		if (impl->batching)
+			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
+		if (const std::uint32_t bit = 1u << static_cast<std::uint32_t>(a_segment); !(impl->ringFullLogged & bit)) {
+			impl->ringFullLogged |= bit;
+			logger::info("[ORG] {} ran more than its {} frame slots in one frame; runs past them fall back until the next Present", Impl::SegmentLabel(a_segment),
+				e.capacity);
+		}
+		return false;
 	} catch (const org::GraphHost::EpochFailedError& e) {
 		// Only this epoch's graph failed, and nothing of it was submitted. The graph stays up for the other epochs. The epoch's owner
 		// hears of it at the next PollEpochFailures (OnEpochFailed); until then the caller falls back for this run.
