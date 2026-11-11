@@ -242,6 +242,41 @@ buffer alone did not.
 
 The descriptor-heap hazard above, with NVIDIA's driver, may be the same kind of state record surviving the graph's secondaries.
 
+## Hazard: driver frees on a thread the GPU waits for
+
+**Rule.** ORG's graph host thread never frees driver memory. Its deferred deletions and descriptor-backed objects go to the ORG
+runtime's deleter thread (`org::Runtime::RetireDetached`, `DestroyDetached`). The render thread must not free them either: the
+frees take the device's memory locks. And anything that draws ORG objects from DXVK's stream, outside ORG's queues, must give ORG a
+value it signals after that work: `GraphHost::NoteExternalSlotUse` does it for DCLF's CPU frames.
+
+**What happened.** On the RX 6600 (AMD's Windows driver, 2026-11-11), Community Shaders deadlocked on the first world frame after
+`coc`. That frame rebuilds DCLF's epochs about 200 times, so many old graphs' resources retire at once. A dump showed:
+
+-   The render thread in `DCLF::IndirectDraws::AdoptCurrentSnapshot`, timed out after 5 s waiting for epoch recordings from ORG's host
+    thread.
+-   The host thread in `GraphHost::PrepareTicket` -> `Runtime::Retire` -> `TrackedHandle::Reset` -> `Allocation::ReleaseThis` ->
+    `vkDestroyBuffer` -> `NtGdiDdDDIFreeGpuVirtualAddress`, blocked in the kernel with little CPU time.
+-   DXVK's submission and finish threads idle: everything DXVK had was submitted.
+
+On WDDM, freeing a GPU virtual address waits for the GPU. Submitted work was waiting (wait before signal) for a timeline value that
+only later work gives: work the host thread prepares, or the render thread submits, and the render thread waits for the host
+thread. So the free never returned.
+
+**What ORG changed.**
+
+-   Frees leave the host thread (the deleter thread above). A free there that takes over 100 ms logs
+    `ORG runtime: a deferred free took N ms on the deleter thread`. One still running after a second logs
+    `ORG runtime: the deleter thread has been in one free for N ms` at the next hand-off.
+-   The deletion frontier also covers the values external streams signal after their own uses of ORG objects
+    (`Runtime::NoteExternalPoint`). Descriptor releases already waited for DCLF's CPU-frame timeline; deletions did not. A buffer
+    the CPU pipeline's direct draws read in DXVK's command buffer could be freed once ORG's own values were reached, before those
+    draws ran.
+-   A deferred deletion batch is not sealed while a submission holds values it has not published yet (`Runtime::AssignmentScope`).
+
+**What is left.** DXVK's own D3D11 work that reads an ORG resource (a graph resource's D3D11 export) after the last ORG value in
+DXVK's stream is still not covered by any ORG timeline. The allocator (`extern/BasicRHI`, `rhi_allocator.cpp`) runs the driver free
+under its own mutexes, so a free blocked on the deleter thread also blocks other threads' allocations from the same allocator.
+
 ## External commands in DXVK's command buffer
 
 `RenderGraphRuntime::EmitExternalCommands(record, user, waits, signals, bindsState, label, fullBarrier)` (render thread) queues
