@@ -1443,3 +1443,21 @@ From P5.8/P5.9 (`docs/development/p5/menus.md`). Two needs a menu scene's view b
   first and the engine draws the rest after it. An anchor that can be "held open" across engine calls, with its run submitted at the
   close, would make this a FrameAnchors feature rather than per-family bookkeeping.
 - **Found by:** P5.3 (2026-11-11).
+### Per-object lights a shared pipeline block cannot hold, and coverage that depends on other features (P5.2)
+
+- **Need:** draw a family whose engine shader takes per-pass values from a block the graph shares per pipeline, and test a mod's
+  coverage with and without the features it integrates with.
+- **Who:** DCLF's Lighting family without Light Limit Fix (the engine's per-pass `PointLightPosition`/`PointLightColor`); any mod
+  porting an engine shader whose PerGeometry block varies per object; any A/B of a feature combination.
+- **Where it fits:**
+  - **Per-object values in a shared block become a frame table plus a per-draw pick.** DCLF latches the frame's point lights into
+    one table (a register the shader does not otherwise use: PS b3 without Light Limit Fix) and each draw picks its own from it by its
+    object's bound and shadow mask, the same for every pixel of the draw (`Common/DCLFPointLights.hlsli`). A latched write must keep
+    the same size every commit (the recordings' latch shape), so the table is fixed-size (128 lights). A per-draw selection buffer
+    written by the build would remove the per-pixel pick; an API for a feature-owned latched block (beside the 16-byte frame constant
+    rows) would let a feature own such a table without a Core change.
+  - **A block that another reader treats as zeros cannot also hold data.** DCLF's shared light slot doubled as the shadow layouts'
+    zero block; the table went in the slot's second half, with PS b3 moved there. A dedicated, documented zero block would avoid this.
+  - **Disabling features per run.** `CS_DISABLE_FEATURES=<short name>,...` disables features at boot for one run without touching the
+    saved settings, so scenarios on a shared instance can run without Light Limit Fix or Skylighting.
+- **Found by:** P5.2 config lane (2026-11-11).

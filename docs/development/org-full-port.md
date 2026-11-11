@@ -551,7 +551,8 @@ Each item carries its RE dependency. They are ordered so the frame's skeleton (t
 - **P8.1:** Delete the D3D11 paths per feature, the DXVK-only tooling (`GpuIdleTrace`, the `dxvk*` exports in `DxvkOrgInterop.h`), and `CS_NATIVE_D3D11`. Delete ORG's embedding machinery once nothing uses it (external epochs, segment splits, queue boundaries, home states, `HostOwned` imports). This only happens when the user chooses to make the native build the default.
 - **P8.2:** Fix the doc drift found in the survey:
     - `dclf-architecture.md` / `dclf-roadmap.md` 1.5 still say the engine draws grass.
-    - Roadmap 4.6 and `OcclusionMapsFeature.h` disagree about the precipitation mask.
+    - Roadmap 4.6 and `OcclusionMapsFeature.h` disagreed about the precipitation mask: done in P5.2 (4.6 was built, `9c577fae2`; the
+      roadmap item is removed).
 - **P8.3:** Update `docs/development/render-graph.md` for the owned frame.
 - **P8.4, from the start and ongoing:** `docs/development/org-extension-api-notes.md`. Each phase adds what an external mod would need:
     - an overlay pass after the UI;

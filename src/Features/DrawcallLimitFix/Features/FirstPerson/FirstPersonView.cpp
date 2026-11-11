@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
+#include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/SceneSet.h"
@@ -159,8 +160,12 @@ namespace DCLF::Features::FirstPerson
 		// graph as built. Its members need no frame before's inputs: both epochs draw this frame's scene list with this frame's camera.
 		const auto& f = FrameState();
 		const auto& c = a_coverage;
+		// Its forward part has no plain buckets: a GPU-driven graph without device-generated commands draws it only through the direct
+		// forward family (GraphConditions::firstPersonForwardDirect). Without that the engine keeps the view, blended draws and all.
+		const auto& conditions = Draws::CurrentGraphConditions();
+		const bool forwardDrawn = conditions.cpuPipeline || conditions.firstPersonForwardDirect || DrawPipelines::Get().DeviceGenerated();
 		return c.main && c.on && f.latch && f.latchFrame == c.frame && c.epochsCovered && c.targetImported && !c.rebuildPending && c.mainResourcesCurrent &&
-		       !c.rebuildRequested;
+		       !c.rebuildRequested && forwardDrawn;
 	}
 
 	void CaptureRoot(Api::ViewRootCapture& a_capture)

@@ -484,7 +484,7 @@ namespace DCLF::Draws
 				framePSBits[j] |= framePS[j][slot] ? 1u << slot : 0u;
 			}
 		}
-		sharedLightBlock = in.addresses.frameConstants + std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes;
+		sharedLightBlock = in.addresses.frameConstants + kSharedLightBlockOffset;
 		frameLightingBlock = in.addresses.frameConstants + std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes;
 	}
 

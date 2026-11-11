@@ -60,6 +60,29 @@ static thread_local std::vector<TracyCZoneCtx> s_tracyPerfZones;
 #endif
 static thread_local std::vector<bool> s_perfEventEmitted;
 
+namespace
+{
+	/**
+	 * @brief Whether CS_DISABLE_FEATURES (a comma-separated list of short names, for test runs) names a_featureName. Such a feature is
+	 * disabled at boot for this run only: the saved "Disable at Boot" settings are not changed.
+	 */
+	bool DisabledByEnvironment(const std::string& a_featureName)
+	{
+		static const std::vector<std::string> names = [] {
+			std::vector<std::string> list;
+			char value[1024]{};
+			const DWORD length = GetEnvironmentVariableA("CS_DISABLE_FEATURES", value, sizeof(value));
+			if (length == 0 || length >= sizeof(value))
+				return list;
+			pystring::split(value, list, ",");
+			for (auto& name : list)
+				name = pystring::strip(name);
+			return list;
+		}();
+		return std::ranges::find(names, a_featureName) != names.end();
+	}
+}
+
 void State::UpdateLightingShaderPermutation(RE::BSRenderPass* a_pass)
 {
 	constexpr auto additiveLighting = static_cast<uint32_t>(ExtraShaderDescriptors::AdditiveLighting);
@@ -630,6 +653,10 @@ void State::Load(bool a_allowReload)
 					logger::info("Feature '{}' is disabled by default", featureName);
 				}
 				bool isDisabled = !feature->IsAlwaysEnabled() && disabledFeatures.contains(featureName) && disabledFeatures[featureName];
+				if (!isDisabled && !feature->IsAlwaysEnabled() && DisabledByEnvironment(featureName)) {
+					isDisabled = true;
+					logger::info("Feature '{}' is disabled at boot by CS_DISABLE_FEATURES (this run only)", featureName);
+				}
 				if (!isDisabled) {
 					logger::info("Loading Feature: '{}'", featureName);
 

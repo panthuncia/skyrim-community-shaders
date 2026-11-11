@@ -1,7 +1,8 @@
 #pragma once
 
 // The light volumes contract's Core side (Api/LightVolumes.h): the contribution's entry, resolved once at InstallFeatures (none
-// registered: no volumes, no landscape rule), and the sink its sample fills: the colour commit's GpuShadowVolume list.
+// registered: no volumes, no landscape rule, no point light table), and the sink its sample fills: the colour commit's GpuShadowVolume
+// list.
 
 #include "Features/DrawcallLimitFix/Api/LightVolumes.h"
 
@@ -42,6 +43,8 @@ namespace DCLF::Extensions
 		std::string name;
 		std::uint64_t landscapeFlags = 0;  // per join, data: the properties taking only affectsLand volumes
 		decltype(Api::LightVolumesContribution::sample) sample = nullptr;
+		decltype(Api::LightVolumesContribution::pointLightsActive) pointLightsActive = nullptr;
+		decltype(Api::LightVolumesContribution::pointLights) pointLights = nullptr;
 	};
 
 	/** @brief Main thread, the end of InstallFeatures: the entry from the registration (no name: none). Once. */
@@ -53,4 +56,8 @@ namespace DCLF::Extensions
 	 * nothing without one.
 	 */
 	void SampleLightVolumes(Api::LightVolumeSink& a_sink);
+	/** @brief Any thread, after InstallFeatures: whether the Lighting draws read the frame's point light table (the contribution's). */
+	bool PointLightsActive();
+	/** @brief Render thread, once per commit while PointLightsActive: the frame's point lights into a_out (at most a_capacity); how many. */
+	std::uint32_t SamplePointLights(Api::PointLight* a_out, std::uint32_t a_capacity);
 }

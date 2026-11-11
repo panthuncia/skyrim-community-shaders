@@ -77,12 +77,18 @@ namespace DCLF::Draws
 
 	// The per-frame constant blocks - whatever the main pass binds outside the per-draw registers - live
 	// in Resources::frameConstants at fixed slots, so that a record can name a block before its contents
-	// exist: the vertex stage's b0-b13, then the pixel stage's, then the zeroed StrictLightData block
-	// every bindless draw's b3 reads, and the frame lighting every DCLF_BINDLESS draw's b13 reads
-	// (FrameView::FrameCapture::lighting). A slot is D3D11's constant buffer maximum, so no block overflows.
+	// exist: the vertex stage's b0-b13, then the pixel stage's, then the shared light slot, and the frame
+	// lighting every DCLF_BINDLESS draw's b13 reads (FrameView::FrameCapture::lighting). A slot is D3D11's
+	// constant buffer maximum, so no block overflows.
 	constexpr std::uint64_t kFrameSlotBytes = 65536;
 	constexpr std::uint32_t kFrameSlotSharedLight = 2 * kConstantBufferRegisters;
 	constexpr std::uint32_t kFrameSlotLighting = kFrameSlotSharedLight + 1;
+	// The shared light slot holds two blocks. Its first half starts with the zero block the main shadow layout reads
+	// (MainShadowLayoutPush), zeroed once. Its second half is every bindless draw's PS b3: Light Limit Fix's StrictLightData,
+	// zeroed once (DCLF supplies its two per-object words from the object record), or without Light Limit Fix the frame's point
+	// light table, latched by every commit (FrameRecords.cpp, Common/DCLFPointLights.hlsli).
+	constexpr std::uint64_t kSharedLightBlockBytes = kFrameSlotBytes / 2;
+	constexpr std::uint64_t kSharedLightBlockOffset = std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes + kSharedLightBlockBytes;
 	// The frame record (DrawBindings): every register a draw's rows do not give - the frame slots' addresses, the frame's
 	// textures (t16 and up), the object and bone tables - written by each commit (FrameRecordOf).
 	constexpr std::uint32_t kFrameSlotRecord = kFrameSlotLighting + 1;
@@ -128,7 +134,7 @@ namespace DCLF::Draws
 	constexpr std::uint64_t FrameBlockOffset(bool a_pixel, std::uint32_t a_register)
 	{
 		if (a_pixel && a_register == 3)
-			return std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes;
+			return kSharedLightBlockOffset;
 		if (a_pixel && a_register == kFrameLightingRegister)
 			return std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes;
 		return FrameSlotOffset(a_pixel, a_register);

@@ -4,11 +4,55 @@
 #include "Features/DrawcallLimitFix/Core/Render/Resources/FrameRecords.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/LightVolumes.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
 
+#include <cstring>
+
 namespace DCLF::Draws
 {
+	namespace
+	{
+		// The frame's point light table at PS b3 without Light Limit Fix (Common/DCLFPointLights.hlsli): the light count, then a row each.
+		struct GpuPointLight
+		{
+			float positionRadius[4];
+			float color[3];
+			std::uint32_t flags;  // kPointLightShadowChannel: the shadow mask channel + 1; kPointLightAffectsLand
+		};
+		struct GpuPointLightTable
+		{
+			std::uint32_t counts[4];
+			GpuPointLight lights[kPointLightTableLights];
+		};
+		static_assert(sizeof(GpuPointLight) == 32 && sizeof(GpuPointLightTable) == 16 + 32 * kPointLightTableLights);
+		static_assert(sizeof(GpuPointLightTable) <= kSharedLightBlockBytes);
+		constexpr std::uint32_t kPointLightShadowChannel = 0xFFu;
+		constexpr std::uint32_t kPointLightAffectsLand = 0x100u;
+
+		/** @brief Render thread: this commit's table, from the light volumes contribution (Extensions::SamplePointLights). */
+		const GpuPointLightTable& SamplePointLightTable()
+		{
+			static GpuPointLightTable table{};
+			static std::array<Api::PointLight, kPointLightTableLights> lights{};
+			const std::uint32_t count = Extensions::SamplePointLights(lights.data(), kPointLightTableLights);
+			table = {};
+			table.counts[0] = count;
+			for (std::uint32_t i = 0; i < count; ++i) {
+				const auto& light = lights[i];
+				auto& row = table.lights[i];
+				std::memcpy(row.positionRadius, light.position, sizeof(light.position));
+				row.positionRadius[3] = light.radius;
+				std::memcpy(row.color, light.color, sizeof(light.color));
+				// The shader's channels are the shadow mask's four (DCLFLocalShadowMask): any other index is no shadow light.
+				const std::uint32_t channel = light.shadowMaskIndex < 4 ? light.shadowMaskIndex + 1 : 0u;
+				row.flags = (channel & kPointLightShadowChannel) | (light.affectsLand ? kPointLightAffectsLand : 0u);
+			}
+			return table;
+		}
+	}
+
 	void WriteRecordBuffers(DrawBindings& a_record, const PayloadVersions& a_parts, const FrameValueIndices& a_values, const NamedVersions& a_adopted,
 		const SceneBuffers& a_scene, std::uint32_t a_frame)
 	{
@@ -32,7 +76,7 @@ namespace DCLF::Draws
 			record.vertexConstants[r] = ((a_vsMask >> r) & 1) ? a_frameConstants + FrameSlotOffset(false, r) : 0;
 			record.pixelConstants[r] = ((a_psMask >> r) & 1) ? a_frameConstants + FrameSlotOffset(true, r) : 0;
 		}
-		record.pixelConstants[3] = a_frameConstants + std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes;
+		record.pixelConstants[3] = a_frameConstants + kSharedLightBlockOffset;
 		record.pixelConstants[kFrameLightingRegister] = a_frameConstants + std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes;
 		std::ranges::copy(a_blocks.indices, record.frameBlocks);
 		for (std::uint32_t t = 0; t < kTextureRegisters; ++t)
@@ -46,7 +90,10 @@ namespace DCLF::Draws
 		if (a_zeroed)
 			return;
 		static const std::array<std::uint32_t, kStrictLightDataBytes / 4> zeroLight{};
+		// The zero block, and Light Limit Fix's StrictLightData at PS b3 (without it every commit latches the point light table there).
 		a_uploads(a_target, zeroLight.data(), sizeof(zeroLight), std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes);
+		if (!Extensions::PointLightsActive())
+			a_uploads(a_target, zeroLight.data(), sizeof(zeroLight), kSharedLightBlockOffset);
 		a_zeroed = true;
 	}
 
@@ -71,6 +118,11 @@ namespace DCLF::Draws
 			row.sample(value);
 			a_latched(a_target, value, sizeof(value), FrameConstantRowOffset(row.row));
 		}
+		// Without Light Limit Fix, the frame's point lights at PS b3 (the Lighting draws pick theirs from it).
+		if (Extensions::PointLightsActive()) {
+			const auto& table = SamplePointLightTable();
+			a_latched(a_target, &table, sizeof(table), kSharedLightBlockOffset);
+		}
 	}
 
 	void FrameRowWrites(void (*a_add)(void* a_context, std::size_t a_bytes, std::uint64_t a_offset), void* a_context)
@@ -82,6 +134,8 @@ namespace DCLF::Draws
 		a_add(a_context, sizeof(ExtrasFrame::projectedGlobals), kExtrasPixelFrameOffset);
 		for (const auto& row : Extensions::RegisteredFrameConstantRows())
 			a_add(a_context, sizeof(float[4]), FrameConstantRowOffset(row.row));
+		if (Extensions::PointLightsActive())
+			a_add(a_context, sizeof(GpuPointLightTable), kSharedLightBlockOffset);
 	}
 
 	bool LatchFrameBuffer(LatchedUploads& a_latched, const FrameBuffer& a_frameBuffer, std::span<const std::byte> a_contents)

@@ -1265,6 +1265,12 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 #		include "LightLimitFix/LightLimitFix.hlsli"
 #	endif
 
+#	if defined(DCLF_BINDLESS_DRAW) && !defined(LIGHT_LIMIT_FIX) && !defined(LOD) && !defined(DCLF_DEPTH_ONLY)
+// Drawcall Limit Fix without Light Limit Fix: a draw's point lights come from the frame's table, not its pipeline's PerGeometry.
+#		define DCLF_POINT_LIGHTS
+#		include "Common/DCLFPointLights.hlsli"
+#	endif
+
 #	if defined(TREE_ANIM)
 #		undef WETNESS_EFFECTS
 #	endif
@@ -2266,8 +2272,15 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	}
 #	endif
 
+#	if defined(DCLF_POINT_LIGHTS)
+	// The draw's lights, picked from the frame's table by its shadow mask and bound (Common/DCLFPointLights.hlsli).
+	const DCLFPointLightSelection dclfPointLights = DCLFSelectPointLights(DCLFShadowLightMask(), DCLFPlacements[DCLFObjectIndex].Bound);
+	uint numLights = dclfPointLights.Count;
+	uint numShadowLights = dclfPointLights.ShadowCount;
+#	else
 	uint numLights = min(7, uint(NumLightNumShadowLight.x));
 	uint numShadowLights = min(4, uint(NumLightNumShadowLight.y));
+#	endif
 
 #	if defined(MODELSPACENORMALS) && !defined(SKINNED)
 	float3 worldNormal = normal.xyz;
@@ -3078,9 +3091,22 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		if !defined(LIGHT_LIMIT_FIX)
 	[loop] for (uint lightIndex = 0; lightIndex < numLights; lightIndex++)
 	{
-		float3 lightDirection = PointLightPosition[lightIndex].xyz - input.WorldPosition.xyz;
+		// The light's position relative to the eye with its radius in w, its colour, and its shadow mask channel.
+#			if defined(DCLF_POINT_LIGHTS)
+		// The table's positions are absolute, as the object rows: relative to the drawing view's eye, as WorldPosition.
+		const DCLFPointLight dclfPointLight = DCLFPointLightTable[DCLFPointLightIndex(dclfPointLights, lightIndex)];
+		const float4 lightPositionRadius = float4(dclfPointLight.PositionRadius.xyz - FrameBuffer::CameraPosAdjust.xyz, dclfPointLight.PositionRadius.w);
+		const float3 lightSourceColor = dclfPointLight.Color;
+		const uint lightMaskSelect = (dclfPointLight.Flags & kDCLFPointLightShadowChannel) - 1;
+#			else
+		const float4 lightPositionRadius = PointLightPosition[lightIndex];
+		const float3 lightSourceColor = PointLightColor[lightIndex].xyz;
+		const uint lightMaskSelect = ShadowLightMaskSelect[lightIndex];
+#			endif
+
+		float3 lightDirection = lightPositionRadius.xyz - input.WorldPosition.xyz;
 		float lightDist = length(lightDirection);
-		float intensityFactor = saturate(lightDist / PointLightPosition[lightIndex].w);
+		float intensityFactor = saturate(lightDist / lightPositionRadius.w);
 		if (intensityFactor == 1)
 			continue;
 
@@ -3088,11 +3114,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #			if defined(ENABLE_LL)
 		intensityMultiplier = pow(intensityMultiplier, TransferFunctions::GAME_GAMMA);
 #			endif
-		float3 lightColor = Color::PointLight(PointLightColor[lightIndex].xyz) * intensityMultiplier;
+		float3 lightColor = Color::PointLight(lightSourceColor) * intensityMultiplier;
 		float lightShadow = 1.f;
 		if (PixelDescriptor() & Permutation::LightingFlags::DefShadow) {
 			if (lightIndex < numShadowLights) {
-				lightShadow *= shadowColor[ShadowLightMaskSelect[lightIndex]];
+				lightShadow *= shadowColor[lightMaskSelect];
 			}
 		}
 

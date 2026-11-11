@@ -23,7 +23,9 @@ namespace DCLF::Draws
 			const rhi::DescriptorSlot slot = views->service->AllocateDescriptorSlot(rhi::DescriptorHeapType::CbvSrvUav, true);
 			views->slots[a_block] = slot;
 			views->made = a_block + 1;
-			const rhi::CbvDesc desc{ .byteOffset = FrameBlockOffset(a_pixel, a_register), .byteSize = static_cast<std::uint32_t>(kFrameSlotBytes) };
+			// The shared light block is half a slot (FrameSlots.h, kSharedLightBlockBytes).
+			const std::uint64_t bytes = a_pixel && a_register == 3 ? kSharedLightBlockBytes : kFrameSlotBytes;
+			const rhi::CbvDesc desc{ .byteOffset = FrameBlockOffset(a_pixel, a_register), .byteSize = static_cast<std::uint32_t>(bytes) };
 			if (!slot.heap.valid() || a_device.CreateConstantBufferView(slot, resource, desc) != rhi::Result::Ok) {
 				logger::error("[DCLF] frame block views: the view of {} b{} could not be made", a_pixel ? "PS" : "VS", a_register);
 				ok = false;
@@ -52,7 +54,7 @@ namespace DCLF::Draws
 		if (slot < 2 * kConstantBufferRegisters)
 			return fmt::format("frame constants PS b{}", slot - kConstantBufferRegisters);
 		if (slot == kFrameSlotSharedLight)
-			return "frame constants: zeroed light block";
+			return within < kSharedLightBlockBytes ? "frame constants: zero block" : "frame constants: shared light block (PS b3)";
 		if (slot == kFrameSlotLighting)
 			return within < sizeof(FrameLighting)                                   ? "frame constants: frame lighting" :
 			       within < sizeof(FrameLighting) + sizeof(LodFadeFrame)           ? "frame constants: LOD fade frame" :
