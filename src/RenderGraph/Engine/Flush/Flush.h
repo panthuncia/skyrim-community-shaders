@@ -1,0 +1,58 @@
+#pragma once
+
+#include <d3d11.h>
+
+/**
+ * @brief The engine's state flush and shader binds on the way to P5.13 (org-full-port.md; docs/development/p5/flush.md).
+ *
+ * The four engine functions (RE in flush.md, SE / AE):
+ * - BSGraphics::SetDirtyStates (75580 / 77386): the one state flush. It applies the shadow state's dirty bits to D3D11.
+ * - Renderer::SetShader (75550 / 77351): RSS.currentVertexShader, dirty bit 0x400, VSSetShader.
+ * - Renderer::SetPixelShader (75555 / 77356): RSS.currentPixelShader, PSSetShader.
+ * - Renderer::DispatchCSShader (75532 / 77329): SetDirtyStates(true), CSSetShader, CSSetConstantBuffers(0), Dispatch.
+ *
+ * Two diagnostics, both off by default, both through the guest context (CS_ORG_TRIPWIRE_GUEST=1), whose filter
+ * (Tripwire::SetContextFilter) sees every engine call before it reaches D3D11:
+ *
+ * - CS_ORG_RESIDUE_CENSUS=1: counts every engine draw and dispatch that reaches D3D11, after DCLF and the families had their chance
+ *   to withhold it. Each is classed by its draw function and its callers (Address Library IDs), the last BSShader technique (type,
+ *   file or ImageSpace name, vertex and pixel descriptors) and the view (RSS render target 0, depth stencil, cube target). It also
+ *   counts state flushes and shader binds that no draw follows. The report is logged every CS_ORG_RESIDUE_CENSUS_FRAMES main-thread
+ *   frames (default 600), with the CS_ORG_RESIDUE_CENSUS_TOP biggest entries (default 25).
+ *
+ * - CS_ORG_ENGINE_FLUSH_LATCH=1: the four functions still run on the CPU (shadow state, dirty bits, deferred clears, input layouts),
+ *   but the state they would bind goes nowhere: inside them the guest context drops every IASet, VSSet, PSSet, CSSet, OMSet and RSSet
+ *   call and the dispatch. Map, Unmap (the alpha-test constant), clears and queries still go through. A draw from one of the engine's
+ *   draw functions that then reaches D3D11 is skipped, because its state was never bound, and logged once per call site. The state a
+ *   latched flush consumed is owed: a flush CS itself asks for (DCLF's ApplyPendingState, Grass Optimizations, ImageSpace) applies it
+ *   first, with the latched shaders, so CS's D3D11 readers still see the engine's current state. CS code that asks D3D11 what the
+ *   engine bound at any other point (PSGetShaderResources, OMGetRenderTargets, RSGetViewports) reads stale state: flush.md lists it.
+ *   CS_ORG_ENGINE_FLUSH_LATCH_KEEP=<method>,... names binds that still reach D3D11 inside the four functions, to bisect those readers.
+ */
+namespace RenderGraph::Engine::Flush
+{
+	/** @brief Whether CS_ORG_RESIDUE_CENSUS=1 asks for the residual engine-draw census. */
+	bool CensusRequested();
+
+	/** @brief Whether CS_ORG_ENGINE_FLUSH_LATCH=1 asks for the latch-only flush. */
+	bool LatchRequested();
+
+	/** @brief Whether the latch is in effect now: requested, installed, and the guest context in the engine's pointers. */
+	bool Latched();
+
+	/**
+	 * @brief Main thread, Engine::InstallGameHooks, after Hooks.cpp's SetDirtyStates detour and before any other DispatchCSShader
+	 * detour: the four detours, the guest context's filter and the main-thread report. Nothing when neither switch is on, or when
+	 * CS_ORG_TRIPWIRE_GUEST is off (logged).
+	 */
+	void Install();
+
+	/**
+	 * @brief CS's BeginTechnique vertex-shader thunk (Hooks.cpp), which replaces the engine's SetShader call there: binds a_shader on
+	 * D3D11 now, or owes it while Latched(). a_caller is the engine's call site, for the census.
+	 */
+	void BindVertexShader(ID3D11VertexShader* a_shader, void* a_caller);
+
+	/** @brief The same for CS's BeginTechnique pixel-shader thunk (the engine's SetPixelShader call there). */
+	void BindPixelShader(ID3D11PixelShader* a_shader, void* a_caller);
+}

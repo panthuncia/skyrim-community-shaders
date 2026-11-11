@@ -69,6 +69,23 @@ namespace RenderGraph::Engine::Tripwire
 			return range;
 		}
 
+		/** @brief The address range of the game executable's image. */
+		const ImageRange& GameImage()
+		{
+			static const ImageRange range = [] {
+				ImageRange out;
+				const auto base = REL::Module::get().base();
+				if (!base)
+					return out;
+				const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+				const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+				out.begin = base;
+				out.end = base + nt->OptionalHeader.SizeOfImage;
+				return out;
+			}();
+			return range;
+		}
+
 		std::string ModuleName(HMODULE a_module)
 		{
 			wchar_t path[MAX_PATH]{};
@@ -430,6 +447,37 @@ namespace RenderGraph::Engine::Tripwire
 			set.bits.set(static_cast<std::size_t>(found - names.begin()));
 		}
 		return set;
+	}
+
+	namespace Detail
+	{
+		std::atomic<ContextFilter> contextFilter{ nullptr };
+	}
+
+	void SetContextFilter(ContextFilter a_filter)
+	{
+		Detail::contextFilter.store(a_filter, std::memory_order_release);
+	}
+
+	bool IsOwnCode(const void* a_address)
+	{
+		const auto& image = OwnImage();
+		const auto address = reinterpret_cast<std::uintptr_t>(a_address);
+		return address >= image.begin && address < image.end;
+	}
+
+	bool IsGameCode(const void* a_address)
+	{
+		const auto& image = GameImage();
+		const auto address = reinterpret_cast<std::uintptr_t>(a_address);
+		return address >= image.begin && address < image.end;
+	}
+
+	bool GameFunction(const void* a_address, std::uint64_t& a_id, std::uint64_t& a_within)
+	{
+		if (!IsGameCode(a_address))
+			return false;
+		return GameId(reinterpret_cast<std::uintptr_t>(a_address) - GameImage().begin, a_id, a_within);
 	}
 
 	std::string DescribeCaller(const void* a_address)

@@ -3,6 +3,7 @@
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #include "RenderGraph/Engine/Pipeline/EngineHooks.h"
@@ -15,6 +16,9 @@ namespace RenderGraph::Engine
 {
 	void InstallGameHooks()
 	{
+		// CS_ORG_RESIDUE_CENSUS / CS_ORG_ENGINE_FLUSH_LATCH: first, so its DispatchCSShader detour is inside ImageSpace's and Hooks.cpp's;
+		// its SetDirtyStates detour is outside Hooks.cpp's, which is installed before this.
+		Flush::Install();
 		Textures::InstallHooks();
 		Buffers::InstallGameHooks();
 		Constants::InstallGameHooks();
