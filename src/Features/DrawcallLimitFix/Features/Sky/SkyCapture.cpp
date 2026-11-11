@@ -17,6 +17,7 @@
 #include "Features/CloudShadows.h"
 #include "Features/CloudShadows/ORGCloudShadows.h"
 #include "Globals.h"
+#include "RenderGraph/Switches.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -119,6 +120,8 @@ namespace DCLF::Features::Sky
 			std::uint32_t passes = 0;     // the batch's SetupGeometry calls
 			std::uint32_t drawn = 0;      // the batch's DrawTriShape calls
 			std::uint32_t lastTechnique = 0;  // the last pass's raw technique (State::currentPixelDescriptor & 0xFF)
+			const RE::BSRenderPass* lastPass = nullptr;  // the last pass SetupGeometry set up (TraceCloudDraw)
+			std::uint32_t traced = 0;                    // cloud draws traced (CS_ORG_SKY_TRACE)
 			// The last pass's geometry type (BSGeometry +0x150, R1's dispatcher) while its draw has not reached DrawTriShape; 0xFF none.
 			std::uint32_t pendingType = 0xFF;
 			std::uint32_t otherTypes = 0;  // the geometry types of the batch's passes that drew elsewhere, a bit each
@@ -192,7 +195,7 @@ namespace DCLF::Features::Sky
 				return false;
 			a_shape.cloudShadows = cloudShadows.loaded;
 			// The cloud layers are geometry group 13, which the capture spans only through the cloud group's hook.
-			a_shape.clouds = TakesClouds() && Address::kCloudGroup.Known();
+			a_shape.clouds = Address::kCloudGroup.Known();
 			// The headers' textures the sky's pixel stage may read (kHeaderRegisters), as CS binds them for the pass.
 			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
 				ID3D11ShaderResourceView* view = nullptr;
@@ -217,7 +220,7 @@ namespace DCLF::Features::Sky
 				const auto& cube = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS];
 				a_capture.colourFormats[0] = FormatOf(cube.cubeSideRTV[0]);
 				// The faces' cloud draws write Cloud Shadows' occlusion into its graph faces: without them the clouds stay the engine's.
-				a_shape.clouds = a_shape.clouds && (!a_shape.cloudShadows || ORGCloudShadows::Get().GraphFaces());
+				a_shape.clouds = a_shape.clouds && TakesClouds(View::Face) && (!a_shape.cloudShadows || ORGCloudShadows::Get().GraphFaces());
 				return a_face < 6 && a_capture.colourFormats[0] && a_shape.depth == static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kCUBEMAP_REFLECTIONS);
 			}
 			if (rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
@@ -227,6 +230,7 @@ namespace DCLF::Features::Sky
 			if (a_accumulator != *mainAccumulator || !globals::deferred || !globals::deferred->deferredPass)
 				return false;
 			a_shape.view = View::Main;
+			a_shape.clouds = a_shape.clouds && TakesClouds(View::Main);
 			const auto& targets = renderer->GetRuntimeData().renderTargets;
 			for (std::size_t i = 0; i < a_shape.colours.size(); ++i) {
 				a_shape.colours[i] = static_cast<std::int32_t>(rss.renderTargets[i]);
@@ -270,6 +274,62 @@ namespace DCLF::Features::Sky
 			default:  // SunOcclude
 				return { false, false, false };
 			}
+		}
+
+		/** @brief A D3D11 blend description's first two targets, for the trace. */
+		std::string BlendText(const void* a_blend)
+		{
+			if (!a_blend)
+				return "none";
+			D3D11_BLEND_DESC desc{};
+			static_cast<ID3D11BlendState*>(const_cast<void*>(a_blend))->GetDesc(&desc);
+			std::string out = fmt::format("a2c {} independent {}", desc.AlphaToCoverageEnable, desc.IndependentBlendEnable);
+			for (int i = 0; i < 2; ++i) {
+				const auto& t = desc.RenderTarget[i];
+				out += fmt::format(" | rt{} on {} {}/{} op {} alpha {}/{} mask {:#x}", i, t.BlendEnable, static_cast<int>(t.SrcBlend), static_cast<int>(t.DestBlend),
+					static_cast<int>(t.BlendOp), static_cast<int>(t.SrcBlendAlpha), static_cast<int>(t.DestBlendAlpha), t.RenderTargetWriteMask);
+			}
+			return out;
+		}
+
+		/**
+		 * @brief CS_ORG_SKY_TRACE=1: the first 48 cloud draws (techniques 4-6) a capture checks or latches, with what the engine's
+		 * property holds (kBlendColor +0x88, fBlendValue +0xb8, usCloudLayer +0xbc, bFadeSecondTexture +0xbe, the sky object +0xc0) beside
+		 * what the latch took, so a wrong constant, texture, buffer or state shows in one run.
+		 */
+		void TraceCloudDraw(Capture& a_capture, const Draw& a_draw, const EngineTriShape* a_shape, std::span<const std::byte> a_vertexBytes,
+			std::span<const std::byte> a_pixelBytes)
+		{
+			static const bool trace = Switches::On("CS_ORG_SKY_TRACE");
+			const std::uint32_t technique = a_draw.key.pixelDescriptor & 0xFF;
+			if (!trace || technique < 4 || technique > 6 || a_capture.traced >= 48)
+				return;
+			++a_capture.traced;
+			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto* pass = a_capture.lastPass;
+			const auto* property = pass ? pass->shaderProperty : nullptr;
+			const float* blendColor = property ? &Engine::At<float>(property, 0x88) : nullptr;
+			const auto& c = a_draw.constants;
+			D3D11_BUFFER_DESC vertexDesc{};
+			a_shape->vertexBuffer->GetDesc(&vertexDesc);
+			D3D11_SHADER_RESOURCE_VIEW_DESC t0{};
+			if (auto* view = Unwrap(rss.PSTexture[0]))
+				view->GetDesc(&t0);
+			logger::info(
+				"[DCLF] sky trace: {} {} draw {} technique {} geometry {:p}: property layer {} sky object {} blend colour ({:.3f} {:.3f} {:.3f} {:.3f}) "
+				"blend value {:.3f} fade second {} | latched blend colour0 ({:.3f} {:.3f} {:.3f} {:.3f}) colour1 ({:.3f} {:.3f} {:.3f}) uv offset ({:.3f} {:.3f}) "
+				"vparams {:.3f} pparams ({:.3f} {:.3f}) alpha test {} ref {:.3f} | constant bytes vs {} ps {} | layout {:#x} stride {} first {} count {} vb usage {} "
+				"bytes {} | t0 {} format {} mips {} sampler {}/{} | write mode {} blend mode {} occlusion {} | {}",
+				a_capture.view == View::Main ? "main" : "face", a_capture.probe ? "probe" : "latched", a_capture.run ? a_capture.run->draws.size() : 0, technique,
+				static_cast<const void*>(pass ? pass->geometry : nullptr), property ? Engine::At<std::uint16_t>(property, 0xbc) : 0xFFFF,
+				property ? Engine::At<std::uint32_t>(property, 0xc0) : 0xFFFF, blendColor ? blendColor[0] : -1.0f, blendColor ? blendColor[1] : -1.0f,
+				blendColor ? blendColor[2] : -1.0f, blendColor ? blendColor[3] : -1.0f, property ? Engine::At<float>(property, 0xb8) : -1.0f,
+				property ? Engine::At<std::uint8_t>(property, 0xbe) : 0xFF, c.blendColor[0], c.blendColor[1], c.blendColor[2], c.blendColor[3], c.blendColor[4],
+				c.blendColor[5], c.blendColor[6], c.texCoordOff[0], c.texCoordOff[1], c.vParams, c.pParams[0], c.pParams[1], rss.alphaTestEnabled, c.alphaTestRef,
+				a_vertexBytes.size(), a_pixelBytes.size(), a_draw.vertexLayout, a_draw.vertexStride, a_draw.firstIndex, a_draw.indexCount,
+				static_cast<int>(vertexDesc.Usage), vertexDesc.ByteWidth, a_draw.textures[0], static_cast<int>(t0.Format), t0.Texture2D.MipLevels,
+				rss.PSTextureAddressMode[0].underlying(), rss.PSTextureFilterMode[0].underlying(), static_cast<std::uint32_t>(rss.alphaBlendWriteMode),
+				static_cast<std::uint32_t>(rss.alphaBlendMode), a_draw.key.occlusion, BlendText(a_draw.key.blend));
 		}
 
 		/**
@@ -395,6 +455,7 @@ namespace DCLF::Features::Sky
 			draw.depthRange[0] = cameraDepthRange.get()[0];
 			draw.depthRange[1] = cameraDepthRange.get()[1];
 
+			TraceCloudDraw(a_capture, draw, a_shape, vertexBytes, pixelBytes);
 			// A probe only checks: the engine draws it, with Cloud Shadows' overrides.
 			if (a_capture.probe)
 				return Refusal::None;
@@ -643,6 +704,7 @@ namespace DCLF::Features::Sky
 				if (capture.pendingType != 0xFF)
 					capture.otherTypes |= 1u << (capture.pendingType & 31);
 				capture.pendingType = a_pass && a_pass->geometry ? Engine::At<std::uint8_t>(a_pass->geometry, 0x150) : 0xFE;
+				capture.lastPass = a_pass;
 				if (const auto* state = globals::state)
 					capture.lastTechnique = state->currentPixelDescriptor & 0xFF;
 				const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
@@ -664,7 +726,7 @@ namespace DCLF::Features::Sky
 		if (!Address::kSkyBatch.Known() || !Address::kDrawTriShape.Known())
 			return;
 		HookSites::RequireCall("the sky batch (FinishAccumulating's RenderBatches of the sky techniques)", REL::Offset(Address::kSkyBatch).address());
-		if (TakesClouds() && Address::kCloudGroup.Known())
+		if ((TakesClouds(View::Main) || TakesClouds(View::Face)) && Address::kCloudGroup.Known())
 			HookSites::RequireCall("the cloud group (FinishAccumulating's RenderPersistentPassList of group 13)", REL::Offset(Address::kCloudGroup).address());
 	}
 
@@ -675,12 +737,12 @@ namespace DCLF::Features::Sky
 			return;
 		}
 		stl::write_thunk_call<SkyBatch>(REL::Offset(Address::kSkyBatch).address());
-		if (TakesClouds() && Address::kCloudGroup.Known())
+		if ((TakesClouds(View::Main) || TakesClouds(View::Face)) && Address::kCloudGroup.Known())
 			stl::write_thunk_call<CloudGroup>(REL::Offset(Address::kCloudGroup).address());
 		stl::detour_thunk<DrawTriShape>(REL::Offset(Address::kDrawTriShape).address());
 		HookSites::NoteDetour("BSGraphics::Renderer::DrawTriShape (the sky's draws)", DrawTriShape::func.address());
 		stl::write_vfunc<0x6, SetupGeometry>(RE::VTABLE_BSSkyShader[0]);
 		logger::info("[DCLF] sky: hooks installed (the sky batch{}, DrawTriShape, BSSkyShader::SetupGeometry)",
-			TakesClouds() && Address::kCloudGroup.Known() ? ", the cloud group" : "");
+			(TakesClouds(View::Main) || TakesClouds(View::Face)) && Address::kCloudGroup.Known() ? ", the cloud group" : "");
 	}
 }
