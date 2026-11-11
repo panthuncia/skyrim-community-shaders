@@ -423,7 +423,7 @@ namespace DCLF
 								Register(a_graph, id(fmt::format("{}{}", Extensions::DrawFamilies()[d].rowName, f)), resources->faceRows[d][f]);
 				}
 
-				void GatherStructuralPasses(org::RenderGraph&, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
+				void GatherStructuralPasses(org::RenderGraph& a_graph, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
 				{
 					if (!resources->main || !ViewPassesReady(*resources, *resources->main))
 						return;
@@ -431,7 +431,7 @@ namespace DCLF
 					Api::PassContext context{};
 					context.main = &resources->main;
 					context.view = &resources;
-					GatherScheduled(Api::EpochShape::View, resources->traits->kind, context, a_out);
+					GatherScheduled(Api::EpochShape::View, resources->traits->kind, context, a_graph.PassEpochFilter(), a_out);
 				}
 
 			private:

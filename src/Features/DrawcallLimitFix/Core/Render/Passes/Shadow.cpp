@@ -36,12 +36,12 @@ namespace DCLF::Draws
 			}
 		}
 
-		void GatherStructuralPasses(org::RenderGraph&, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
+		void GatherStructuralPasses(org::RenderGraph& a_graph, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
 		{
-			// The shadow epoch's passes (Schedule/Frame.cpp).
+			// The shadow epoch's passes (Schedule/Frame.cpp): the graph's epoch's.
 			Api::PassContext context{};
 			context.shadow = &resources;
-			GatherScheduled(Api::EpochShape::Shadow, {}, context, a_out);
+			GatherScheduled(Api::EpochShape::Shadow, {}, context, a_graph.PassEpochFilter(), a_out);
 		}
 
 	private:

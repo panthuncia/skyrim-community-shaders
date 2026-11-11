@@ -80,8 +80,17 @@ namespace DCLF::Draws
 	 * pass added to a_out, an anchor's emit called. A Main epoch hosting views' epochs makes each one's passes, in its list's order, with
 	 * that view's resources (Resources::views) as their view, while they can be added (ViewPassesReady, each view on its own); its own
 	 * passes see the views whose passes are added (PassContext::hosted).
+	 * a_graphEpoch: the epoch of the graph being built (org::RenderGraph::PassEpochFilter). Only that epoch's passes are made: the graph
+	 * would drop the others' (UINT32_MAX, org::persistent::AllEpochs: every epoch's).
 	 */
-	void GatherScheduled(Api::EpochShape a_shape, Api::EngineView a_view, const Api::PassContext& a_base, std::vector<org::RenderGraph::ExternalPassDesc>& a_out);
+	void GatherScheduled(Api::EpochShape a_shape, Api::EngineView a_view, const Api::PassContext& a_base, std::uint32_t a_graphEpoch,
+		std::vector<org::RenderGraph::ExternalPassDesc>& a_out);
+	/**
+	 * @brief Render thread: the graph epochs (RenderGraphRuntime::EpochOf) an extension gathering a_shape's epochs (a_view's, for the View
+	 * shape) is made into (org::GraphHost::AddExtension's epochs): their own, and for a view the Main epochs hosting it. Every Drawcall Limit
+	 * Fix epoch before the schedule is resolved.
+	 */
+	std::vector<std::uint32_t> ExtensionEpochs(Api::EpochShape a_shape, Api::EngineView a_view = {});
 	/**
 	 * @brief Any thread, after InstallFeatures: whether epoch row a_epoch (not hosted) has CPU pipeline work (a pass with Api::PassDef::cpuPipeline and
 	 * a make, its own or a hosted epoch's): in the CPU pipeline those passes are its graph's, the revisions record it, and its site

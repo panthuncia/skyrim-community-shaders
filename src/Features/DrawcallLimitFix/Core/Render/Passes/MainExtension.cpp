@@ -89,12 +89,12 @@ namespace DCLF::Draws
 				resources->sort->Register(a_graph);
 		}
 
-		void GatherStructuralPasses(org::RenderGraph&, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
+		void GatherStructuralPasses(org::RenderGraph& a_graph, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
 		{
-			// The depth, colour and forward epochs' passes (Schedule/Frame.cpp; Passes/CorePasses.cpp makes them).
+			// The depth, colour and forward epochs' passes (Schedule/Frame.cpp; Passes/CorePasses.cpp makes them): the graph's epoch's.
 			Api::PassContext context{};
 			context.main = &resources;
-			GatherScheduled(Api::EpochShape::Main, {}, context, a_out);
+			GatherScheduled(Api::EpochShape::Main, {}, context, a_graph.PassEpochFilter(), a_out);
 		}
 
 	private:

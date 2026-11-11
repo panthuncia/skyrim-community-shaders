@@ -46,6 +46,8 @@ namespace PublishedResources
 		struct State
 		{
 			std::vector<Entry> entries;
+			// Ids a build skipped before they were published (IsDeclarable): their publish builds every graph again.
+			std::vector<std::string> skipped;
 			// Stays atomic although every call is on the render thread: it is cheap, and an extension made off that thread (a build
 			// on another owner thread) would still read a whole snapshot.
 			std::atomic<std::shared_ptr<const Snapshot>> snapshot;
@@ -107,16 +109,38 @@ namespace PublishedResources
 			std::shared_ptr<const Snapshot> snapshot;
 		};
 
-		/** @brief Stores the entries for the next builds and rebuilds every graph with them (adding the extension rebuilds them all). */
-		void Store(State& a_state, org::GraphHost& a_host)
+		/** @brief How an entry changed: what Store rebuilds for it. */
+		enum class Change
+		{
+			Added,     // a new id: only the graphs that looked it up need it
+			Replaced,  // another resource under the id: every graph holds the old one
+		};
+
+		/**
+		 * @brief Stores the entries for the next builds (a_what: the ids changed, quoted). The extension, added once, registers the latest
+		 * snapshot at every build. A new id (the last entry)
+		 * rebuilds only the graphs that looked it up (a reader registering with it builds its own epoch again); a replaced resource
+		 * rebuilds every graph, since each holds the old one until it is built again.
+		 */
+		void Store(State& a_state, org::GraphHost& a_host, Change a_change, std::string_view a_what)
 		{
 			auto snapshot = std::make_shared<Snapshot>();
 			for (const auto& entry : a_state.entries)
 				snapshot->resources.emplace_back(entry.id, entry.resource);
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
-			a_host.AddExtension(kExtensionId, [&a_state]() -> std::unique_ptr<org::RenderGraph::IRenderGraphExtension> {
-				return std::make_unique<PublishedExtension>(a_state.snapshot.load(std::memory_order_acquire));
-			});
+			if (!a_host.HasExtension(kExtensionId)) {
+				a_host.AddExtension(kExtensionId, [&a_state]() -> std::unique_ptr<org::RenderGraph::IRenderGraphExtension> {
+					return std::make_unique<PublishedExtension>(a_state.snapshot.load(std::memory_order_acquire));
+				});
+				return;
+			}
+			const auto& added = a_state.entries.back().id;
+			if (a_change == Change::Added && std::erase(a_state.skipped, added))
+				a_host.RequestRebuild(fmt::format("published resource {} added, which a build skipped", a_what));
+			else if (a_change == Change::Added)
+				a_host.RequestRebuildFor(org::ResourceIdentifier(added), fmt::format("published resource {} added", a_what));
+			else
+				a_host.RequestRebuild(fmt::format("published resource {} replaced", a_what));
 		}
 
 		/** @brief The view a whole-resource read takes of a 2D texture: a cube's TextureCube, a 2D array's full array, else Texture2D. */
@@ -153,6 +177,7 @@ namespace PublishedResources
 					logger::info("[ORG] '{}' published again", a_id);
 				return true;
 			}
+			const auto change = entry ? Change::Replaced : Change::Added;
 			if (!entry)
 				entry = &state.entries.emplace_back(Entry{ .id = std::string(a_id) });
 			entry->resource = a_resource.Graph();
@@ -161,7 +186,7 @@ namespace PublishedResources
 			entry->srv = a_resource.SRV();
 			entry->twin = &a_resource;
 			entry->alive = a_resource.Alive();
-			Store(state, *host);
+			Store(state, *host, change, fmt::format("'{}'", a_id));
 			logger::info("[ORG] '{}' published to every epoch's graph ({})", a_id, a_resource.Name());
 			return true;
 		}
@@ -193,17 +218,17 @@ namespace PublishedResources
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host || !RenderGraphRuntime::Get().IsActive())
 			return;
-		bool changed = false;
+		std::string changed;
 		for (auto& entry : state.entries) {
 			if (!entry.twin || entry.alive.expired() || !*entry.twin || entry.twin->Graph() == entry.resource)
 				continue;
 			entry.resource = entry.twin->Graph();
 			entry.srv = entry.published ? entry.twin->SRV() : nullptr;  // a withdrawn id has no export to match
-			changed = true;
+			changed += fmt::format("{}'{}'", changed.empty() ? "" : ", ", entry.id);
 			logger::info("[ORG] '{}' published again after a resize ({})", entry.id, entry.twin->Name());
 		}
-		if (changed)
-			Store(state, *host);
+		if (!changed.empty())
+			Store(state, *host, Change::Replaced, changed);
 	}
 
 	void Withdraw(std::string_view a_id)
@@ -226,6 +251,16 @@ namespace PublishedResources
 	bool IsRegistered(std::string_view a_id)
 	{
 		return Find(Published(), a_id) && RenderGraphRuntime::Get().IsActive();
+	}
+
+	bool IsDeclarable(std::string_view a_id)
+	{
+		auto& state = Published();
+		if (Find(state, a_id))
+			return RenderGraphRuntime::Get().IsActive();
+		if (std::ranges::find(state.skipped, a_id) == state.skipped.end())
+			state.skipped.emplace_back(a_id);
+		return false;
 	}
 
 	bool IsExportOf(const ID3D11ShaderResourceView* a_view, std::string_view a_id)
@@ -288,6 +323,7 @@ namespace PublishedResources
 	void Withdraw(std::string_view) {}
 	bool IsPublished(std::string_view) { return false; }
 	bool IsRegistered(std::string_view) { return false; }
+	bool IsDeclarable(std::string_view) { return false; }
 	bool IsExportOf(const ID3D11ShaderResourceView*, std::string_view) { return false; }
 	bool ShaderResourceIndex(std::string_view, std::uint32_t&) { return false; }
 	std::string ExportedId(const ID3D11ShaderResourceView*) { return {}; }
