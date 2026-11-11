@@ -78,9 +78,17 @@ The pieces are the water's and the screen blood's (water.md, "The family").
   that is not importable yet; t5 and t6 are the focus shadows' (below).
 - **Per-draw latch** (640 bytes, `DrawConstants` / `UtilityOrgShadowMaskDraw`): the rows, the reference, the slots' indices, the
   geometry. The push block (24 bytes): the shared constants and the latch region.
-- **Probes, refusals and the shape** as the water's: a view's batches are the graph's only after a probe found every draw latchable;
-  a draw a later batch cannot latch makes the rest of the batch the engine's and the view probes again; reasons logged once
-  (`[DCLF] shadow mask: the engine draws: ...`).
+- **Setup, withholding, running** (primary path, primary-path.md). The client is made at setup (`Family::AddSetup`: the first
+  main-thread tick the render graph runs, in the main menu) and asks for its build once (`RequestJoin`); the menu frame's end builds
+  it, so it is in the graph before any world frame. A batch is taken when the client's targets match and `FrameAnchors::CanRun` says
+  the anchor's run will draw it; otherwise the engine draws the batch, vouched for (`Flush::EngineDraws`), logged once. After the
+  batch (or at a refusal) `Family::RunWithheld` runs the anchor; any status but `Ran` is an error, logged once, and nothing is
+  retried. The client's `executed` callback counts the runs that drew.
+- **Refusals end the latched part.** There is no probe: every batch is latched from the first. A draw the family cannot take (its
+  inherent refusals, "What stays the engine's") runs the draws latched so far at that point and leaves the rest of the batch to the
+  engine, vouched for (`Flush::EngineDraws` until the batch returns), so the engine's draws come after the graph's in the engine's
+  order. A pass whose geometry is not a TriShape is refused at its SetupGeometry, before the engine draws it. A batch that ran nothing
+  keeps its imports (`Keep`).
 - **Lasting refusals.** Those reasons are logged the first time only, so a refusal that never clears used to go quiet. A view that
   stays the engine's for 120 batches in a row now says why, once per view and reason (`[DCLF] shadow mask: a view stays the
   engine's: ...`): either `its world client is not in the EngineDraws anchor's built graph` (not made, or still joining), or
@@ -141,9 +149,8 @@ Merge that first. A frame with more runs than that (none is known) gets the engi
 
 ### Graph rebuilds
 
-- **A client is made once per view**, after 30 probe batches (its programs and constant copies are asked for first). That
-  registration is the family's only graph build of its own; with DCLF it happens at DCLF's build point, in a menu-only frame at the
-  frame's end.
+- **Both clients are made at setup** (the main menu), with every published input listed; the engine depths among them are
+  imported then, so the first build declares them.
 - **Nothing registers again during play.** The published inputs are a fixed list: a newly published one joins the declared reads at
   the rebuild its first Publish causes for every graph. D3D11 slots change only a heap index in the latch, and kSHADOW_MASK is
   imported once: made again (a resolution change), the view stays the engine's until the next start.
@@ -174,3 +181,40 @@ Known, not this family's: ShaderCache logs `Unsupported Utility shadow-filter se
 Not verified without a build: everything above. Risks to look at first: the column_major rebuild of ShadowMapProj, whether the quad's
 vertex stride passes `LatchGeometry` (16 bytes at least), the comparison sampler (filter mode 4) through `GpuTextures::SamplerBinding`,
 and the alpha test reference when the engine leaves the test disabled.
+
+## Primary path (2026-11-11, `org-port/primary-families`)
+
+Programs (all four families, `Core/Engine/Family/EngineDrawProgram.{h,cpp}`): the family's ORG stages are compiled into the shader
+store when CS loads each of its shader's descriptors (`ShaderCompilationTask` -> `DrawcallLimitFix::PrecompileShader` ->
+`Family::PrecompileStages`; before the render graph has a compiler they wait for `Family::StartStagePrecompile` at setup). A program
+key is a value: the descriptor CS looks the shader up by (`State::modified*Descriptor`), the variant, the D3D11 descriptions of the
+blend, depth-stencil and rasterizer states field by field (`Family::DescribeStates`), the target formats. Every key drawn is written
+to `Data/ShaderCache/v2/engine-draw-programs.txt`, and the next start queues the listed keys on ProgramCache's build thread at setup
+(`EngineDrawPrograms::Prebuild`). A draw whose prebuilt key is still building waits for it (`the first draw waited N ms for its
+prebuilt program`); a key never seen is built on the render thread at its first draw and logged once (`was not prebuilt: built on the
+render thread at its first draw`). Constants come from the engine constants capture (`Family::CaptureConstants`,
+`CS_ORG_ENGINE_CONSTANTS=1`, which the families now require), so a buffer's first use has its bytes.
+
+### What stays the engine's
+
+- A view kept off by `CS_ORG_SHADOW_MASK_VIEWS`, and kSHADOW_MASK made again since its client imported it (a resolution change).
+- Per draw: not BSUtilityShader, a target other than kSHADOW_MASK alone (or a depth target bound), a state with no description or no
+  ORG form, geometry that is not a static triangle-list TriShape within its buffers, a read slot holding a published texture not
+  listed (or published during play), a texture that cannot be imported, more than 32 draws, an inactive engine constants capture.
+
+Changed with the primary path: the program's descriptor is CS's lookup (`State::modifiedPixelDescriptor`), and the stages are
+compiled for Utility's RenderShadowmask* pixel descriptors only.
+
+### What can trigger a graph rebuild (primary path)
+
+The two clients' registrations at setup. Nothing in play registers again.
+
+### What to look for in the log
+
+- `[DCLF] <family>: the <id> client registered at setup (...)` once per client, in the main menu, and no `frame anchors: cs.<family>.*
+  registered` line after it; `; not published yet: <ids>` names inputs no producer had published by then.
+- `[DCLF] engine draw programs: the manifest lists N keys`, `[DCLF] <family>: N programs from the manifest queued`, and on a second
+  run no `was not prebuilt` line. Each such line names a key the enumeration or the manifest missed.
+- `[DCLF] <family>: the engine draws: ...` lines name inherent refusals (once each); `[E]` `latched draws were not drawn this frame`
+  and `the engine draws a batch: ... its anchor cannot run now` are errors.
+- With the latch on, the census's `allowed engine draws` show `<family>: left to the engine` (and `sky: cloud layers`).

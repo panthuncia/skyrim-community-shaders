@@ -91,9 +91,12 @@ header resolver, the async programs, the kept leases and the run step.
 - **The batches** (`WaterCapture.cpp`, thunks on both calls). For the main camera's accumulator with kMAIN's depth bound, the batch
   runs with its draws latched: every pass goes through BeginPass, SetupTechnique, SetupMaterial, SetupGeometry (Unified Water's, Light
   Limit Fix's, the cubemap fix's and the frame annotations' hooks with them) and render state as before.
-- **Joining, withholding, running.** A view's client joins with `FrameAnchors::RequestJoin`; a batch is withheld only when
-  `FrameAnchors::CanRun` says the anchor's run will draw it; `Family::RunWithheld` runs it, and any status but `Ran` is logged once
-  per status and makes the view probe again. The client's `executed` callback counts the runs that drew.
+- **Setup, withholding, running** (primary path, primary-path.md). The client is made at setup (`Family::AddSetup`: the first
+  main-thread tick the render graph runs, in the main menu) and asks for its build once (`RequestJoin`); the menu frame's end builds
+  it, so it is in the graph before any world frame. A batch is taken when the client's targets match and `FrameAnchors::CanRun` says
+  the anchor's run will draw it; otherwise the engine draws the batch, vouched for (`Flush::EngineDraws`), logged once. After the
+  batch (or at a refusal) `Family::RunWithheld` runs the anchor; any status but `Ran` is an error, logged once, and nothing is
+  retried. The client's `executed` callback counts the runs that drew.
 - **The choke point** (the family's taker at the shared DrawTriShape detour). A latched draw records: the shadow state
   (`EngineDrawState::Latch`: depth, **stencil mode and reference**, blend, write mode, cull, bias), the six constant groups (VS and PS
   b0-b2) through **ConstantMirror** (watched from a SetupGeometry hook), Light Limit Fix's strict lights (PS b3, its CB mirrored),
@@ -119,9 +122,11 @@ header resolver, the async programs, the kept leases and the run step.
   view of the header's declared kind (`GpuTextures::NullOf`: 2D, 2D array, 3D, cube or a buffer); a **D3D11 buffer** (Light Limit Fix's D3D11 local shadows) cannot be read, so the batch stays the engine's (logged once:
   turn on its feature's ORG path). The checks built every technique with every feature define (below), so no header resource is left
   register-bound.
-- **Probes** as the sky's: a view's batches are the graph's only after a batch the engine drew passed every check; a draw a later batch
-  cannot latch makes the rest of that batch the engine's and the view probes again. Every pass must draw through DrawTriShape. A probe
-  keeps its imports and leases (`WaterDraws::Keep`): before, the next batch found none and imported every texture again.
+- **Refusals end the latched part.** There is no probe: every batch is latched from the first. A draw the family cannot take (its
+  inherent refusals, "What stays the engine's") runs the draws latched so far at that point and leaves the rest of the batch to the
+  engine, vouched for (`Flush::EngineDraws` until the batch returns), so the engine's draws come after the graph's in the engine's
+  order. A pass whose geometry is not a TriShape is refused at its SetupGeometry, before the engine draws it. A batch that ran nothing
+  keeps its imports (`Keep`).
 - **Refusals** are logged once per reason, technique and view (`[DCLF] water: the engine draws: a surface draw of technique N: <reason>`,
   `Util::ReasonLog`; a texture that cannot be imported says why, `GpuTextures::DescribeFailure`):
   geometry, too many draws (64), not BSWaterShader, topology, a colour target the client does not import, constants not mirrored yet,
@@ -180,8 +185,8 @@ refraction class (flush.md, "DCLF's share").
 
 ### Graph rebuilds
 
-- **A client is made once per view**, after 30 probe batches (its programs and constant copies are asked for first). That
-  registration is the family's only graph build of its own; with DCLF it happens at DCLF's build point.
+- **Both clients are made at setup** (the main menu), with every published input listed; the engine targets among them are
+  imported then, so the first build declares them.
 - **Nothing registers again during play.** The published inputs are a fixed list (above): a newly published one joins the declared
   reads at the rebuild its first Publish causes for every graph, not through a new client. A header's input changes only a heap index
   in the recording (re-recorded, not rebuilt), and the targets are imported once (the mask's alternating normals target is two
@@ -235,3 +240,44 @@ LIGHT_LIMIT_FIX reads nothing (no push block). Sky's ORG build still passes (its
 Not verified without a build: everything above. Risks to look at first: Load<T> of the column-major matrices in the t98 latch, the
 TextureProj transpose, the mask's write mode 9 (two targets with different
 masks), and GpuTextures reads of engine render targets the graph writes in earlier epochs (kMAIN_COPY, the SSR targets).
+
+## Primary path (2026-11-11, `org-port/primary-families`)
+
+Programs (all four families, `Core/Engine/Family/EngineDrawProgram.{h,cpp}`): the family's ORG stages are compiled into the shader
+store when CS loads each of its shader's descriptors (`ShaderCompilationTask` -> `DrawcallLimitFix::PrecompileShader` ->
+`Family::PrecompileStages`; before the render graph has a compiler they wait for `Family::StartStagePrecompile` at setup). A program
+key is a value: the descriptor CS looks the shader up by (`State::modified*Descriptor`), the variant, the D3D11 descriptions of the
+blend, depth-stencil and rasterizer states field by field (`Family::DescribeStates`), the target formats. Every key drawn is written
+to `Data/ShaderCache/v2/engine-draw-programs.txt`, and the next start queues the listed keys on ProgramCache's build thread at setup
+(`EngineDrawPrograms::Prebuild`). A draw whose prebuilt key is still building waits for it (`the first draw waited N ms for its
+prebuilt program`); a key never seen is built on the render thread at its first draw and logged once (`was not prebuilt: built on the
+render thread at its first draw`). Constants come from the engine constants capture (`Family::CaptureConstants`,
+`CS_ORG_ENGINE_CONSTANTS=1`, which the families now require), so a buffer's first use has its bytes.
+
+### What stays the engine's
+
+- A batch of another accumulator than the main camera's, a cube face, or with a depth target other than kMAIN's.
+- A header that is a D3D11 buffer (Light Limit Fix on D3D11) or cannot be imported; a published header or slot not listed, or first
+  published during play (an error).
+- Per draw: not BSWaterShader, a colour target its view's client does not import, a state with no description or no ORG form,
+  geometry that is not a static triangle-list TriShape within its buffers, a texture that cannot be imported, sampler modes with no
+  graph sampler, more than 64 draws, an inactive engine constants capture.
+- The water displacement simulation (ImageSpace's, P5.6) and the raw-water and refraction-normal passes DCLF does not claim.
+
+Changed with the primary path: the program's descriptor is CS's lookup (`State::modifiedVertexDescriptor`, which drops the
+Reflections, Cubemap and Interior bits as CS's own D3D11 shader does), so the startup enumeration and the draw agree. The directional
+shadow record (t98) is read from Deferred's CPU data (`Deferred::GetDirectionalShadowLightData`), not from the bound buffer.
+
+### What can trigger a graph rebuild (primary path)
+
+The two clients' registrations at setup. Nothing in play registers again.
+
+### What to look for in the log
+
+- `[DCLF] <family>: the <id> client registered at setup (...)` once per client, in the main menu, and no `frame anchors: cs.<family>.*
+  registered` line after it; `; not published yet: <ids>` names inputs no producer had published by then.
+- `[DCLF] engine draw programs: the manifest lists N keys`, `[DCLF] <family>: N programs from the manifest queued`, and on a second
+  run no `was not prebuilt` line. Each such line names a key the enumeration or the manifest missed.
+- `[DCLF] <family>: the engine draws: ...` lines name inherent refusals (once each); `[E]` `latched draws were not drawn this frame`
+  and `the engine draws a batch: ... its anchor cannot run now` are errors.
+- With the latch on, the census's `allowed engine draws` show `<family>: left to the engine` (and `sky: cloud layers`).

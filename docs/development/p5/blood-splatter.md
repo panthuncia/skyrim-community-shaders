@@ -42,15 +42,21 @@ The pieces every engine draw family shares are `Core/Engine/Family` (render-grap
   taker at the shared DrawTriShape detour records each draw: VS b2 c0-c5 and PS b2 c0 through ConstantMirror (watched from the shared
   SetupGeometry watch), t0-t3 and their samplers (GpuTextures), the geometry (index range and stride checked against the buffers, a
   triangle list only) and the viewport. A draw that tests depth or stencil, or whose targets are not the back buffer alone, is refused.
-- **Joining, withholding, running.** The client joins with `FrameAnchors::RequestJoin`; a batch is withheld only when
-  `FrameAnchors::CanRun` says the anchor will draw it; `Family::RunWithheld` runs it, and any status but `Ran` is logged once per
-  status and makes the family probe again. The client's `executed` callback counts the runs that drew.
+- **Setup, withholding, running** (primary path, primary-path.md). The client is made at setup (`Family::AddSetup`: the first
+  main-thread tick the render graph runs, in the main menu) and asks for its build once (`RequestJoin`); the menu frame's end builds
+  it, so it is in the graph before any world frame. A batch is taken when the client's targets match and `FrameAnchors::CanRun` says
+  the anchor's run will draw it; otherwise the engine draws the batch, vouched for (`Flush::EngineDraws`), logged once. After the
+  batch (or at a refusal) `Family::RunWithheld` runs the anchor; any status but `Ran` is an error, logged once, and nothing is
+  retried. The client's `executed` callback counts the runs that drew.
 - **The pass** (`BloodSplatterDraws.cpp`): the `cs.blood-splatter` client at the EngineDraws anchor (shared with the water), one
   RasterProgram draw per latched draw into the back buffer (FrameAnchors::EngineTarget(0)), no depth attachment, the engine's blend and
   rasterizer states (their descriptions), `BloodSplatter.hlsl` built for ORG off the render thread (`Family::EngineDrawPrograms`; a
   draw whose program is still building stays the engine's), a 176-byte latch region per draw; the push block is the latch's two words.
-- **Probes and refusals** as the water's: logged once per reason and technique (`Util::ReasonLog`), a failed draw hands the rest of
-  the batch back and the next batch probes again. A probe keeps its imports.
+- **Refusals end the latched part.** There is no probe: every batch is latched from the first. A draw the family cannot take (its
+  inherent refusals, "What stays the engine's") runs the draws latched so far at that point and leaves the rest of the batch to the
+  engine, vouched for (`Flush::EngineDraws` until the batch returns), so the engine's draws come after the graph's in the engine's
+  order. A pass whose geometry is not a TriShape is refused at its SetupGeometry, before the engine draws it. A batch that ran nothing
+  keeps its imports (`Keep`).
 
 ### Graph rebuilds
 
@@ -87,3 +93,37 @@ screen blood the engine's for the session, logged once.
 4. Shots: red splatters darkening the frame (multiply) in org1 as in org0; their placement varies by run.
 5. Not verified without a build: everything above. The risk to look at first is the back buffer import under HDR output or frame
    generation (another swap chain image layout).
+
+## Primary path (2026-11-11, `org-port/primary-families`)
+
+Programs (all four families, `Core/Engine/Family/EngineDrawProgram.{h,cpp}`): the family's ORG stages are compiled into the shader
+store when CS loads each of its shader's descriptors (`ShaderCompilationTask` -> `DrawcallLimitFix::PrecompileShader` ->
+`Family::PrecompileStages`; before the render graph has a compiler they wait for `Family::StartStagePrecompile` at setup). A program
+key is a value: the descriptor CS looks the shader up by (`State::modified*Descriptor`), the variant, the D3D11 descriptions of the
+blend, depth-stencil and rasterizer states field by field (`Family::DescribeStates`), the target formats. Every key drawn is written
+to `Data/ShaderCache/v2/engine-draw-programs.txt`, and the next start queues the listed keys on ProgramCache's build thread at setup
+(`EngineDrawPrograms::Prebuild`). A draw whose prebuilt key is still building waits for it (`the first draw waited N ms for its
+prebuilt program`); a key never seen is built on the render thread at its first draw and logged once (`was not prebuilt: built on the
+render thread at its first draw`). Constants come from the engine constants capture (`Family::CaptureConstants`,
+`CS_ORG_ENGINE_CONSTANTS=1`, which the families now require), so a buffer's first use has its bytes.
+
+### What stays the engine's
+
+- A back buffer other than the one the client imported (a swap chain made again): every batch, logged once.
+- Per draw: not BSBloodSplatterShader, a depth or stencil test, targets other than the back buffer alone, a state with no
+  description or no ORG form, geometry that is not a static triangle-list TriShape within its buffers, a slot holding a published
+  texture, a texture that cannot be imported, more than 32 draws, an inactive engine constants capture.
+
+### What can trigger a graph rebuild (primary path)
+
+The client's registration at setup. Nothing in play registers again.
+
+### What to look for in the log
+
+- `[DCLF] <family>: the <id> client registered at setup (...)` once per client, in the main menu, and no `frame anchors: cs.<family>.*
+  registered` line after it; `; not published yet: <ids>` names inputs no producer had published by then.
+- `[DCLF] engine draw programs: the manifest lists N keys`, `[DCLF] <family>: N programs from the manifest queued`, and on a second
+  run no `was not prebuilt` line. Each such line names a key the enumeration or the manifest missed.
+- `[DCLF] <family>: the engine draws: ...` lines name inherent refusals (once each); `[E]` `latched draws were not drawn this frame`
+  and `the engine draws a batch: ... its anchor cannot run now` are errors.
+- With the latch on, the census's `allowed engine draws` show `<family>: left to the engine` (and `sky: cloud layers`).

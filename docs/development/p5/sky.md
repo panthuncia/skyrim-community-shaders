@@ -127,18 +127,21 @@ families").
 - **The batch** (`SkyCapture.cpp`, a thunk on the +0x247 / +0x237 call). For the main camera's accumulator inside CS's deferred pass,
   or a face of `kREFLECTIONS`, the batch runs with its draws latched: every sky pass goes through the engine's BeginPass,
   SetupTechnique, SetupGeometry (Cloud Shadows' and the frame annotations' hooks with it) and render state as before.
-- **Joining, withholding, running.** A view's client is made once, for the first batch's shape, and joins with
-  `FrameAnchors::RequestJoin`: until the anchor's built graph holds it, the engine draws. A batch is withheld only when
-  `FrameAnchors::CanRun` says the anchor's run will draw it (a probe withholds nothing). After the batch, `Family::RunWithheld` runs the
-  anchor; any status but `Ran` is logged once per status (`a withheld batch was not drawn this frame`) and the view probes again.
-  The client's `executed` callback counts the runs that drew (the status line's `drawn`).
+- **Setup, withholding, running** (primary path, primary-path.md). The client is made at setup (`Family::AddSetup`: the first
+  main-thread tick the render graph runs, in the main menu) and asks for its build once (`RequestJoin`); the menu frame's end builds
+  it, so it is in the graph before any world frame. A batch is taken when the client's targets match and `FrameAnchors::CanRun` says
+  the anchor's run will draw it; otherwise the engine draws the batch, vouched for (`Flush::EngineDraws`), logged once. After the
+  batch (or at a refusal) `Family::RunWithheld` runs the anchor; any status but `Ran` is an error, logged once, and nothing is
+  retried. The client's `executed` callback counts the runs that drew.
 - **The cloud group** (a thunk on the +0x284 / +0x274 call), with `CS_ORG_SKY_CLOUDS`. When group 13 is a pass list of BSSkyShader
   TriShapes only, the capture spans it: the batch's capture stays open, the cloud passes are latched the same way, and the run is
   handed to the anchor after the group. FinishAccumulating calls the group exactly when the capture spans it (non-null, flag 1). If
   the call does not come (another hook at its site), the capture is finished at the next sky batch and no batch spans the group again
   for the session (`the cloud group was not drawn after a sky batch that spanned it`). A group with another shader's pass (a
   sky-object effect, hint `0x12`), another geometry type, or no pass list is drawn by the engine after the anchor's run, in the
-  engine's order (logged once). A probe whose only refusals were cloud draws leaves that view's clouds to the engine for 300 game frames, then the view probes them again; the wait doubles at each refusal (up to 9600 frames) and starts over after a clean probe of the clouds, since the cause may pass (a program still building, a streamed texture).
+  engine's order (logged once). A cloud draw the family cannot take is an inherent refusal for that batch (there is no backoff: the programs are prebuilt and the
+  textures streamed, which were the backoff's reasons). With `CS_ORG_SKY_CLOUDS` off the group is the engine's, vouched for
+  (`sky: cloud layers`); the group's call is hooked either way.
 - **The choke point** (the family's taker at the shared `DrawTriShape` detour). While a batch is latched, a draw is recorded instead
   of drawn: the shadow state SetDirtyStates would apply (`EngineDrawState::Latch`), the alpha test reference, CS's extra descriptor,
   the PerGeometry constants SetupGeometry wrote (ConstantMirror), the technique's textures and samplers, the static vertex and index
@@ -170,9 +173,11 @@ families").
 - **Self shadowing (t26).** A main pass cloud layer reads its own layer (`texCloudShadowLayers[currentLayerForDraw]`, by heap
   index), as SkyShaderHacks binds it; everything else reads the occlusion cubemap (t25's, `SKY_ORG_OCCLUSION`), as the face clouds do
   on D3D11. Binding the whole occlusion to the main clouds darkened every layer by all of them: the overcast look of the graph's clouds.
-- **Probes.** A view's batches are the graph's only after a probe: a batch the engine draws while each draw is checked as the
-  family would take it. Once a probe latched every draw, the view's next batches are the graph's. A draw a later batch cannot latch
-  makes the rest of that batch the engine's and the view probes again. A probe keeps its imports (`SkyDraws::Keep`).
+- **Refusals end the latched part.** There is no probe: every batch is latched from the first. A draw the family cannot take (its
+  inherent refusals, "What stays the engine's") runs the draws latched so far at that point and leaves the rest of the batch to the
+  engine, vouched for (`Flush::EngineDraws` until the batch returns), so the engine's draws come after the graph's in the engine's
+  order. A pass whose geometry is not a TriShape is refused at its SetupGeometry, before the engine draws it. A batch that ran nothing
+  keeps its imports (`Keep`).
 - **Refusals.** A draw the family cannot take is logged once per reason, technique and view (`[DCLF] sky: the engine draws: a main draw
   of technique N: <reason>`, `Util::ReasonLog`). Every pass of a batch must draw through `DrawTriShape` (`Family::Passes`).
 - **Inputs.** The headers (t76, t77, t30, t31) resolve through `Family::ResolveHeader`. t17 is first matched against the engine's
@@ -245,3 +250,52 @@ is registered in DCLF's list (`Features/FeatureList.cpp`, `Sky::Feature()`, befo
 Not verified without a build: everything above. Risks to look at first: the latch's layout (`SkyOrgDraw` at 352 bytes, `Load<T>`),
 the layer imports declared as render targets (192 face views) in the faces' cloud pass, the main clouds reading a layer the faces'
 epoch wrote through a heap index, and the D3D11 clear of a layer at the latch before the anchor's run.
+
+## Primary path (2026-11-11, `org-port/primary-families`)
+
+Programs (all four families, `Core/Engine/Family/EngineDrawProgram.{h,cpp}`): the family's ORG stages are compiled into the shader
+store when CS loads each of its shader's descriptors (`ShaderCompilationTask` -> `DrawcallLimitFix::PrecompileShader` ->
+`Family::PrecompileStages`; before the render graph has a compiler they wait for `Family::StartStagePrecompile` at setup). A program
+key is a value: the descriptor CS looks the shader up by (`State::modified*Descriptor`), the variant, the D3D11 descriptions of the
+blend, depth-stencil and rasterizer states field by field (`Family::DescribeStates`), the target formats. Every key drawn is written
+to `Data/ShaderCache/v2/engine-draw-programs.txt`, and the next start queues the listed keys on ProgramCache's build thread at setup
+(`EngineDrawPrograms::Prebuild`). A draw whose prebuilt key is still building waits for it (`the first draw waited N ms for its
+prebuilt program`); a key never seen is built on the render thread at its first draw and logged once (`was not prebuilt: built on the
+render thread at its first draw`). Constants come from the engine constants capture (`Family::CaptureConstants`,
+`CS_ORG_ENGINE_CONSTANTS=1`, which the families now require), so a buffer's first use has its bytes.
+
+### What stays the engine's
+
+- **The sun occlusion queries** (AE 106604 at `0x1414b4c00`, from `Sun::SubmitOcclusionQuery` at its +0xAF; SE 99958): the census's
+  "Sky, descriptor 0, through AE 106604 +0x131, into kMAIN with DS kMAIN and with kPOST_ZPREPASS_COPY", 2 a frame. Ghidra: the
+  function takes the accumulator, the sun's geometry (Sun+0x28), a query index below 3 and the camera; it acquires the accumulator's
+  occlusion query for that index (+0x70 + index * 0x18), `BeginQuery`, makes a BSSkyShader pass (SunOcclude, descriptor 0: no colour
+  write), draws it through `RenderPassImmediately`, `EndQuery`. `Sun::UpdateOcclusionQueries` reads the results back for the sun glare.
+  The family cannot take it: a graph draw is not counted by the engine's D3D11 query, so the glare would read the sun as hidden. It
+  needs an ORG occlusion query that feeds the engine's query object (p4.6's `QueryMapping::Occlusion`), a separate item.
+- **The sun glare** (`0x5C006072`, outside the batch's technique range).
+- A batch whose targets are not its client's (the main view's: `kMAIN`, `kMOTION_VECTOR`, `NORMALROUGHNESS` with kMAIN's depth; the
+  faces': the reflection cubemap with `kCUBEMAP_REFLECTIONS`), or another accumulator, cubemap or the forward pass.
+- Cloud Shadows on D3D11 (its occlusion at t25 is not on the graph): no client is made.
+- A t17 that is an engine depth other than the Z-prepass copy or the depth target; a header that is a D3D11 buffer or cannot be
+  imported; a published input not listed, or first published during play (`PublishedLate`, an error).
+- Per draw: not BSSkyShader, a depth-stencil state with stencil, a state with no description or no ORG form (dual source), geometry
+  that is not a static triangle-list TriShape within its buffers, a texture that cannot be imported, sampler modes with no graph
+  sampler, a face's cloud layers out of order, more than 128 draws, an inactive engine constants capture.
+- The cloud layers while `CS_ORG_SKY_CLOUDS` is off (not yet proven), and a cloud group with another shader's pass (a sky-object
+  effect) or another geometry type.
+
+### What can trigger a graph rebuild (primary path)
+
+The two clients' registrations at setup (in the main menu, one build at that frame's end). Nothing in play registers, refreshes or
+imports again. A producer that publishes an input for the first time during play rebuilds every graph by its own Publish.
+
+### What to look for in the log
+
+- `[DCLF] <family>: the <id> client registered at setup (...)` once per client, in the main menu, and no `frame anchors: cs.<family>.*
+  registered` line after it; `; not published yet: <ids>` names inputs no producer had published by then.
+- `[DCLF] engine draw programs: the manifest lists N keys`, `[DCLF] <family>: N programs from the manifest queued`, and on a second
+  run no `was not prebuilt` line. Each such line names a key the enumeration or the manifest missed.
+- `[DCLF] <family>: the engine draws: ...` lines name inherent refusals (once each); `[E]` `latched draws were not drawn this frame`
+  and `the engine draws a batch: ... its anchor cannot run now` are errors.
+- With the latch on, the census's `allowed engine draws` show `<family>: left to the engine` (and `sky: cloud layers`).
