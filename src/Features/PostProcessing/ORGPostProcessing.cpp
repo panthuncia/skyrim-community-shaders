@@ -67,6 +67,8 @@ namespace ORGPostChain
 		rhi::Device device;
 		std::unordered_map<std::string, std::shared_ptr<const RasterProgram>> raster;
 		std::unordered_map<std::string, std::shared_ptr<const ComputeProgram>> compute;
+		// Set after the first chain built: a program built later (a setting's new permutation) is logged.
+		bool chainBuilt = false;
 	};
 
 	/** @brief One build of the chain: what its passes are made from. Immutable once registered. */
@@ -247,6 +249,8 @@ namespace ORGPostChain
 		}
 		if (const auto found = programs.raster.find(key); found != programs.raster.end())
 			return found->second;
+		if (programs.chainBuilt)
+			logger::info("[ORG] Post Processing: {} ({}) is new to this session; building it now", a_source, key);
 		RasterProgram::Desc desc{};
 		desc.pixelSource = std::string(a_source);
 		desc.pixelEntry = std::move(a_entry);
@@ -268,6 +272,8 @@ namespace ORGPostChain
 		auto key = ProgramKey(a_source, a_entry, a_words, a_defines);
 		if (const auto found = programs.compute.find(key); found != programs.compute.end())
 			return found->second;
+		if (programs.chainBuilt)
+			logger::info("[ORG] Post Processing: {} ({}) is new to this session; building it now", a_source, key);
 		auto program = ComputeProgram::Load(programs.device,
 			{ .source = std::string(a_source), .entry = std::move(a_entry), .constantWords = a_words, .defines = RenderGraph::AnchorPasses::Defines(a_defines) });
 		if (!program) {
@@ -580,6 +586,7 @@ struct ORGPostProcessing::Impl
 		}
 		build = std::move(next);
 		key = std::move(a_key);
+		programs.chainBuilt = true;
 		input = nextInput;
 		output = nextOutput;
 		std::string steps = "input";
