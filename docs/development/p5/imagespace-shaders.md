@@ -19,23 +19,16 @@ R4's list of 17 without a source holds 14 real ones: FXAA, BSLensFlare, CopySubR
 x2, SAOBlur H/V CS, SAOCameraZAndMipsCS, SAORawAO, SAORawAONoTemporal, SAORawAOCS and SILRawInd. The other three
 (LightingComposite x3) had `ISLightingComposite.hlsl` all along.
 
-**The switch.** `CS_IMAGESPACE_SOURCES` (`src/ShaderCache.cpp`, `OptionalImagespaceShaders`):
-
-- unset, empty or `0`: unchanged, vanilla's DXBC runs for all 85 optional slots;
-- `all`: every optional slot checked against vanilla (82: all but ISMap and the two TAA variants);
-- a comma list: those slots, by engine name (`BSImagespaceShaderCopyScaleBias`) or effect name (`ISCopyScaleBias`), any case.
-  Naming one of the three left out of `all` enables it.
-
-The log line is `CS_IMAGESPACE_SOURCES=<value>: image-space shaders build from CS sources`. The 39 active slots stay in the old
-map and are not affected. ShaderCache now resolves an image-space source file through one helper (`GetImagespaceSourceName`),
+**On by default (no switch).** The 82 checked slots build from CS's HLSL (`src/ShaderCache.cpp`, `CheckedImagespaceShaders`):
+the in-game A/B (`is-sources-0` against `is-sources-1`, 2026-11-10) matched, so `CS_IMAGESPACE_SOURCES` was removed and the
+68 commented-out descriptor entries with it. ISMap and the two TAA variants stay on vanilla's DXBC (`enabled = false`, with the
+reason beside each). The 39 active slots stay in the old map. ShaderCache now resolves an image-space source file through one helper (`GetImagespaceSourceName`),
 which maps BSLensFlare to `ISLensFlare.hlsl` and the misspelled `ISLigthingComposite` to
 `ISLightingComposite.hlsl`. BSLensFlare is told by its name (+0x120): its constructor never sets `originalShaderName`
 (+0x128), so that field holds leftover heap bytes (an AE crash dump showed `0x001000f208000036`) and is never read for it.
 Its fxp name (+0x88) is `LensFlare`; its cache key uses `ISLensFlare` instead.
 
-Scenarios: `tools/cs-ab/scenarios/is-sources-0.env` (off) and `is-sources-1.env` (`all`) take the same shots: Whiterun by day
-and at night, the world map (`dclf:menu=MapMenu=show`), Dragonsreach and Riverwood's water. Underwater is not scripted: no
-checked position below the water. FXAA runs only with the game's FXAA setting on.
+The A/B scenarios (`is-sources-0.env`, `is-sources-1.env`) went with the switch. FXAA runs only with the game's FXAA setting on.
 
 ## How each source was checked
 
@@ -258,5 +251,5 @@ dynamic resolution, its TAA, SSR); this work did not change them.
 - **Per-slot state** that the engine sets around each draw (blend, stencil NOT_EQUAL for menu 3D, viewports such as
   ISCopyCustomViewport's) is not in the shaders and comes from R2's state tables.
 - **TAA_UI and TAA_Water** need sources (above). **ISMap** needs a decision.
-- **Checks in game:** `is-sources-1.env` against `is-sources-0.env` (the shots should match), and FXAA, the local map,
-  snow (CopySubRegionCS, SnowSSS) and the lens flares with their settings on.
+- **Checks in game still open:** FXAA, the local map, snow (CopySubRegionCS, SnowSSS) and the lens flares with their settings
+  on (the A/B covered the default settings).
