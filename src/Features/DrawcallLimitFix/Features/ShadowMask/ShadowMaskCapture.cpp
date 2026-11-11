@@ -189,7 +189,7 @@ namespace DCLF::Features::ShadowMask
 					Refusals().Report(std::format("a {} draw's texture t{} could not be imported", NameOf(a_capture.view), t), a_capture.refusalDetail);
 					return "a texture it samples could not be imported";
 				}
-				constants.samplers[t] = read ? Family::SlotSampler(rss.PSTextureAddressMode[t].underlying(), rss.PSTextureFilterMode[t].underlying(), owners) :
+				constants.samplers[t] = SamplerRead(t) ? Family::SlotSampler(rss.PSTextureAddressMode[t].underlying(), rss.PSTextureFilterMode[t].underlying(), owners) :
 				                               Family::SlotSampler(0, 0, owners);
 				if (constants.samplers[t] == GpuTextures::kInvalid)
 					return "its sampler modes have no graph sampler";

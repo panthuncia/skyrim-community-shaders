@@ -692,7 +692,9 @@ static SamplerComparisonState SampFocusShadowMapSamplerComp = SamplerDescriptorH
 
 static Texture2D<float4> TexBaseSampler = ResourceDescriptorHeap[ShadowMaskDraw.Textures[0].x];
 static Texture2D<float4> TexDepthUtilitySampler = ResourceDescriptorHeap[ShadowMaskDraw.Textures[0].z];
-static Texture2DArray<float4> TexShadowMapSampler = ResourceDescriptorHeap[ShadowMaskDraw.Textures[0].w];
+// The filter-0 path's plain view (t3) is the same shadow map as the comparison view (t4): read through t4's index. Latched from t3,
+// the sun's masks read a null view (ShadowMask.h, SlotRead).
+static Texture2DArray<float4> TexShadowMapSampler = ResourceDescriptorHeap[ShadowMaskDraw.Textures[1].x];
 static Texture2DArray<float4> TexShadowMapSamplerComp = ResourceDescriptorHeap[ShadowMaskDraw.Textures[1].x];
 static Texture2D<uint4> TexStencilSampler = ResourceDescriptorHeap[ShadowMaskDraw.Textures[1].y];
 static Texture2DArray<float4> TexFocusShadowMapSamplerComp = ResourceDescriptorHeap[ShadowMaskDraw.Textures[1].z];

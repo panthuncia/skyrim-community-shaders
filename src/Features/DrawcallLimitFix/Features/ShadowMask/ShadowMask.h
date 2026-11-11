@@ -63,8 +63,11 @@ namespace DCLF::Features::ShadowMask
 	}
 
 	/**
-	 * @brief Whether Utility.hlsl's ORG build reads slot a_slot: only the scene depth (t2) and the light's shadow maps (t3, t4). Every
-	 * other slot is latched as a null view, whatever is bound there, so it can never refuse a draw.
+	 * @brief Whether Utility.hlsl's ORG build reads slot a_slot's texture: only the scene depth (t2) and the light's shadow map (t4).
+	 * Every other slot is latched as a null view, whatever is bound there, so it can never refuse a draw.
+	 * - t3: the plain view of the shadow map the filter-0 path samples. The ORG build reads the same map through t4's index instead
+	 *   (Utility.hlsl), with s3's sampler: latched from t3, the sun's masks read a null view (every sample 0, so every pixel in
+	 *   shadow), while t4 held the cascade array.
 	 * - t0, t1, t7: the shadow mask techniques never use them. t0 often still holds the last material's texture (a streamed one may
 	 *   not be importable yet).
 	 * - t5, t6: the focus shadows' stencil and maps. The engine's draw reads the stencil from the view's red component
@@ -72,7 +75,10 @@ namespace DCLF::Features::ShadowMask
 	 *   engine's draw reads 0 and never samples t6. The ORG build reads 0 as well, without a view: BasicRHI cannot view the stencil
 	 *   of a depth-stencil image, so GpuTextures rejects that view.
 	 */
-	constexpr bool SlotRead(std::uint32_t a_slot) { return a_slot >= 2 && a_slot <= 4; }
+	constexpr bool SlotRead(std::uint32_t a_slot) { return a_slot == 2 || a_slot == 4; }
+
+	/** @brief Whether Utility.hlsl's ORG build reads slot a_slot's sampler: the read slots', and s3, the filter-0 path's plain sampler. */
+	constexpr bool SamplerRead(std::uint32_t a_slot) { return SlotRead(a_slot) || a_slot == 3; }
 
 	/** @brief The rows of PS b0 (PerTechnique) and PS b2 (PerGeometry) the latch takes (Utility.hlsl's packoffsets). */
 	inline constexpr std::uint32_t kTechniqueRows = 5;
