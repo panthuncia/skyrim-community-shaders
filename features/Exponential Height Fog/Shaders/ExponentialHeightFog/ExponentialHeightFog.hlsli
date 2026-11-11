@@ -2,6 +2,7 @@
 #define __EXPONENTIAL_HEIGHT_FOG_HLSLI__
 
 #include "Common/Color.hlsli"
+#include "Common/OrgResources.hlsli"
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"
 #include "ExponentialHeightFog/VolumetricFogCommon.hlsli"
@@ -14,8 +15,8 @@
 #	include "IBL/IBL.hlsli"
 #endif
 
-Texture3D<float4> ExponentialHeightFogIntegratedLightScattering : register(t19);
-Texture3D<float4> ExponentialHeightFogIntegratedLightScatteringFar : register(t22);
+ORG_HEADER_SRV(Texture3D<float4>, ExponentialHeightFogIntegratedLightScattering, 19)
+ORG_HEADER_SRV(Texture3D<float4>, ExponentialHeightFogIntegratedLightScatteringFar, 22)
 
 namespace ExponentialHeightFog
 {

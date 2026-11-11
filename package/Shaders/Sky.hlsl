@@ -58,6 +58,9 @@ struct SkyOrgGeometry
 		X(PUSH, SkyOrgGeometry, SkyGeometry, 3)
 ORG_PUSH_BLOCK(SKY_ORG_RESOURCES(ORG_HANDLE))
 SKY_ORG_RESOURCES(ORG_RESOURCE)
+// Exponential Height Fog's header declares its froxel volumes (t19, t22), which the sky never reads: no handles in the push block.
+static const uint OrgHandle_ExponentialHeightFogIntegratedLightScattering = 0;
+static const uint OrgHandle_ExponentialHeightFogIntegratedLightScatteringFar = 0;
 #endif
 
 #include "Common/ColorManagement.hlsli"

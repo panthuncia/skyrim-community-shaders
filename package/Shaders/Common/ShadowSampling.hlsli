@@ -3,6 +3,7 @@
 
 #include "Common/ColorManagement.hlsli"
 #include "Common/Math.hlsli"
+#include "Common/OrgResources.hlsli"
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"
 
@@ -31,7 +32,7 @@ struct DirectionalShadowLightData
 	float2 StartSplitDistances;
 };
 
-StructuredBuffer<DirectionalShadowLightData> DirectionalShadowLights : register(t98);
+ORG_HEADER_SRV(StructuredBuffer<DirectionalShadowLightData>, DirectionalShadowLights, 98)
 
 #if defined(VOLUMETRIC_SHADOWS)
 #	include "VolumetricShadows/VolumetricShadows.hlsli"

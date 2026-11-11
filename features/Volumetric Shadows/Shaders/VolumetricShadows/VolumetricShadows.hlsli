@@ -1,12 +1,14 @@
 #ifndef __VOLUMETRIC_SHADOWS_HLSLI__
 #define __VOLUMETRIC_SHADOWS_HLSLI__
 
+#include "Common/OrgResources.hlsli"
+
 // Variance Shadow Maps (VSM)
 // Chebyshev's inequality on filtered depth moments
 
 namespace VolumetricShadows
 {
-	Texture2D<float2> SharedShadowMap : register(t18);
+	ORG_HEADER_SRV(Texture2D<float2>, SharedShadowMap, 18)
 
 	static const float VSM_MIN_VARIANCE = 0.00001;
 	static const float VSM_BLEEDING_REDUCTION = 0.2;
