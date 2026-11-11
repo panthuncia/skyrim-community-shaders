@@ -80,8 +80,9 @@ struct RasterProgram
 		std::wstring languageVersion = L"2021";                      // DXC -HV: "2018" for FXC-era sources (vector ?:, && and || on vectors)
 		std::uint32_t constantWords = 0;                             // the push block, in 32-bit words, read by both stages
 		std::vector<std::pair<std::wstring, std::wstring>> defines;  // both stages
-		std::vector<Target> targets;                                 // 1 to 8 colour targets, in SV_Target order
-		rhi::Format depthFormat = rhi::Format::Unknown;              // Unknown: no depth attachment
+		std::vector<Target> targets;                                 // 1 to 8 colour targets, in SV_Target order; none for a depth-only program
+		rhi::Format depthFormat = rhi::Format::Unknown;              // Unknown: no depth attachment (then targets must not be empty)
+		// Draw sets no stencil reference: a program that writes the stencil uses ops that need none (Zero).
 		rhi::DepthStencilState depth{ .depthEnable = false, .depthWrite = false, .depthFunc = rhi::CompareOp::Always };
 		rhi::RasterState raster{ .cull = rhi::CullMode::None };
 		bool alphaToCoverage = false;

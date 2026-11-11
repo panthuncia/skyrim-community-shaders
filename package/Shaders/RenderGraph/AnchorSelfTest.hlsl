@@ -8,7 +8,7 @@ cbuffer SelfTestConstants : register(b0)
 {
 	uint Value;         // what the raster pass writes
 	uint TextureIndex;  // RWTexture2D<uint>: the anchor's texture
-	uint OutputIndex;   // RWStructuredBuffer<uint>: word Anchor is the check, word 16 + Anchor kMAIN's texel
+	uint OutputIndex;   // RWStructuredBuffer<uint>: word Anchor is the check, word 32 + Anchor kMAIN's texel
 	uint Anchor;
 	uint MainIndex;     // Texture2D<float4>: kMAIN, or 0xFFFFFFFF without it
 	uint3 Padding;
@@ -34,6 +34,6 @@ uint PSMain(PSInput input) : SV_Target0
 	texture[kTexel] = 0;
 	if (MainIndex != 0xFFFFFFFFu) {
 		Texture2D<float4> main = ResourceDescriptorHeap[MainIndex];
-		output[16 + Anchor] = asuint(main.Load(int3(0, 0, 0)).r);
+		output[32 + Anchor] = asuint(main.Load(int3(0, 0, 0)).r);
 	}
 }

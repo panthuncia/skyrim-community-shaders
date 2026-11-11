@@ -4,6 +4,7 @@
 #include "HangWatchdog.h"
 #include "GpuIdleTrace.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Pipeline/EngineHooks.h"
@@ -1471,6 +1472,8 @@ namespace Hooks
 		logger::info("Hooking BSShaderRenderTargets::Create");
 		stl::detour_thunk<BSShaderRenderTargets_Create>(REL::RelocationID(100458, 107175));
 		RenderGraph::Engine::Targets::Install();
+		// CS_ORG_ENGINE_SKELETON: the engine's clear and depth copy call sites.
+		RenderGraph::Engine::Skeleton::Install();
 
 		logger::info("Hooking BSShaderRenderTargets::Create::CreateRenderTarget(s)");
 		stl::write_thunk_call<CreateRenderTarget_Main>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x3F0, 0x3F3));

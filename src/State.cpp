@@ -41,6 +41,7 @@
 #include "ORGDeferredComposite.h"
 #include "PostProcessingMode.h"
 #include "Presets/UnifiedPresetCatalog.h"
+#include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuLoadPass.h"
@@ -392,9 +393,12 @@ void State::Setup()
 	// Anchors are reserved before the graph initializes: the frame's epochs are fixed then.
 	ORGDeferredComposite::Reserve();
 	ImGuiRenderer::ReserveAnchor();
+	RenderGraph::Engine::Skeleton::Reserve();
 	RenderGraphRuntime::Get().Initialize();
 	// CS_ORG_ENGINE_TARGETS: the engine's targets, made on D3D11 before the graph existed, move to ORG before any feature reads them.
 	RenderGraph::Engine::Targets::TakeOver();
+	// CS_ORG_ENGINE_SKELETON: the engine's clears and its main depth copy on the graph, once its targets are where they stay.
+	RenderGraph::Engine::Skeleton::Setup();
 
 	Feature::ForEachLoadedFeature("SetupResources", [](Feature* feature) { feature->SetupResources(); });
 	{
