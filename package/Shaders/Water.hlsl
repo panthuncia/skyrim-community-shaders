@@ -1604,19 +1604,8 @@ PS_OUTPUT main(PS_INPUT input)
 #		if defined(CS_ORG_BINDLESS)
 PS_OUTPUT main(PS_INPUT input)
 {
-#			if defined(WATER_ORG_SAFE)
-	// Diagnostics (CS_ORG_WATER_SAFE): a constant and no resource read, so a fault left is the geometry's or the pass's.
-	PS_OUTPUT psout = (PS_OUTPUT)0;
-#				if defined(STENCIL)
-	psout.WaterMask = float4(0, 0, 1, 0);
-#				else
-	psout.Lighting = float4(0.1, 0.3, 0.6, 1);
-#				endif
-	return psout;
-#			else
 	WaterOrgPermutation();
 	return WaterPixel(input);
-#			endif
 }
 #		endif
 

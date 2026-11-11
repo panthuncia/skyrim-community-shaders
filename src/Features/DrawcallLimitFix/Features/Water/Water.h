@@ -7,11 +7,11 @@
 // The engine's CPU code runs unchanged. At the engine's two water batches (FinishAccumulating's RenderBatches of the Stencil technique,
 // FinishAccumulatingPostResolveDepth's RenderBatches of the water techniques: WaterCapture.cpp) the family lets the batch run with its
 // draw choke point latched: every water pass goes through the engine's own BeginPass, SetupTechnique, SetupMaterial, SetupGeometry and
-// render state (Unified Water's, Light Limit Fix's and the cubemap fix's hooks with them), and DrawTriShape records the draw instead of
-// drawing it (the shadow state with its stencil mode and reference, the six constant groups the Setup functions wrote, read through
-// ConstantMirror, Light Limit Fix's strict lights, the twelve textures and samplers, the geometry). The batch's draws are then drawn by
-// an ORG pass at the EngineDraws anchor, in the engine's order, with CS's Water.hlsl built for ORG and the pipeline states the engine's
-// state objects describe (WaterDraws.cpp).
+// render state (Unified Water's, Light Limit Fix's and the cubemap fix's hooks with them), and DrawTriShape (the engine draw families'
+// one detour, Core/Engine/Family) records the draw instead of drawing it (the shadow state with its stencil mode and reference, the six
+// constant groups the Setup functions wrote, read through ConstantMirror, Light Limit Fix's strict lights, the twelve textures and
+// samplers, the geometry). The batch's draws are then drawn by an ORG pass at the EngineDraws anchor, in the engine's order, with CS's
+// Water.hlsl built for ORG and the pipeline states the engine's state objects describe (WaterDraws.cpp).
 //
 // The water displacement simulation (ImageSpaceEffectWaterDisplacement) stays the engine's: it runs earlier in the frame, and the
 // water's draws read its output (kWATER_DISPLACEMENT, t2) as the engine binds it.
@@ -22,6 +22,8 @@
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
 
 #include <array>
 #include <cstddef>
@@ -39,8 +41,6 @@ namespace DCLF::Features::Water
 		inline constexpr Engine::Offset kMaskBatch{ { 106583, 0x492 }, { 99938, 0x4A6 } };
 		// FinishAccumulatingPostResolveDepth's RenderBatches(accumulator, 0x5C000071, 0x5C006071, flags, -1): the water (SE 99939, AE 106584).
 		inline constexpr Engine::Offset kSurfaceBatch{ { 106584, 0x161 }, { 99939, 0x164 } };
-		// BSGraphics::Renderer::DrawTriShape(renderer, TriShape*, startIndex, triangleCount): a static TriShape's draw (R1).
-		inline constexpr Engine::Offset kDrawTriShape{ { 77263 }, { 75477 } };
 	}
 
 	/** @brief Where a batch draws. */
@@ -69,40 +69,33 @@ namespace DCLF::Features::Water
 	 * (kDirectionalShadowRegister), between 77 and 102 in the push block.
 	 */
 	inline constexpr std::array<std::uint32_t, 18> kHeaderRegisters{ 17, 18, 19, 22, 25, 26, 30, 31, 35, 36, 37, 50, 60, 70, 76, 77, 102, 103 };
-	/** @brief A resource's dimension, as the shader declares it: a slot the engine or CS leaves empty takes a null view of it. */
-	enum class ResourceKind : std::uint8_t
-	{
-		Texture2D,
-		Texture2DArray,
-		Texture3D,
-		Cube,
-		Buffer,  // the graph reads only a published one (a D3D11 buffer cannot be imported)
-	};
 
-	/** @brief Each of kHeaderRegisters' declared dimension (Water.hlsl's EXTERN entries and the headers declaring them). */
-	inline constexpr std::array<ResourceKind, 18> kHeaderKinds{
-		ResourceKind::Texture2D,       // t17 DepthTexture
-		ResourceKind::Texture2D,       // t18 SharedShadowMap
-		ResourceKind::Texture3D,       // t19 the fog's near volume
-		ResourceKind::Texture3D,       // t22 the fog's far volume
-		ResourceKind::Cube,            // t25 CloudShadowsTexture
-		ResourceKind::Cube,            // t26 CloudSelfShadowTexture
-		ResourceKind::Cube,            // t30 EnvReflectionsTexture
-		ResourceKind::Cube,            // t31 EnvTexture
-		ResourceKind::Buffer,          // t35 lights
-		ResourceKind::Buffer,          // t36 lightList
-		ResourceKind::Buffer,          // t37 lightGrid
-		ResourceKind::Texture3D,       // t50 SkylightingProbeArray
-		ResourceKind::Texture2D,       // t60 ShadowHeightTexture
-		ResourceKind::Texture2D,       // t70 TexPrecipOcclusion
-		ResourceKind::Texture2D,       // t76 EnvIBLTexture
-		ResourceKind::Texture2D,       // t77 SkyIBLTexture
-		ResourceKind::Buffer,          // t102 LocalShadows
-		ResourceKind::Texture2DArray,  // t103 LocalShadowMaps
+	using Kind = GpuTextures::ViewKind;
+
+	/** @brief Each of kHeaderRegisters' declared dimension (Water.hlsl's EXTERN entries and the headers declaring them). A buffer is read only when published. */
+	inline constexpr std::array<Kind, 18> kHeaderKinds{
+		Kind::Texture2D,       // t17 DepthTexture
+		Kind::Texture2D,       // t18 SharedShadowMap
+		Kind::Texture3D,       // t19 the fog's near volume
+		Kind::Texture3D,       // t22 the fog's far volume
+		Kind::Cube,            // t25 CloudShadowsTexture
+		Kind::Cube,            // t26 CloudSelfShadowTexture
+		Kind::Cube,            // t30 EnvReflectionsTexture
+		Kind::Cube,            // t31 EnvTexture
+		Kind::Buffer,          // t35 lights
+		Kind::Buffer,          // t36 lightList
+		Kind::Buffer,          // t37 lightGrid
+		Kind::Texture3D,       // t50 SkylightingProbeArray
+		Kind::Texture2D,       // t60 ShadowHeightTexture
+		Kind::Texture2D,       // t70 TexPrecipOcclusion
+		Kind::Texture2D,       // t76 EnvIBLTexture
+		Kind::Texture2D,       // t77 SkyIBLTexture
+		Kind::Buffer,          // t102 LocalShadows
+		Kind::Texture2DArray,  // t103 LocalShadowMaps
 	};
 
 	/** @brief The material slots' declared dimension (Water.hlsl's t0-t11): the cubemap at t3, 2D textures elsewhere. */
-	constexpr ResourceKind MaterialKind(std::uint32_t a_slot) { return a_slot == 3 ? ResourceKind::Cube : ResourceKind::Texture2D; }
+	constexpr Kind MaterialKind(std::uint32_t a_slot) { return a_slot == 3 ? Kind::Cube : Kind::Texture2D; }
 	/** @brief The headers before the directional shadow record in the push block. */
 	inline constexpr std::size_t kHeadersBeforeShadow = 16;
 	/** @brief Deferred's directional shadow record (ShadowSampling.hlsli), which the CPU writes: copied into each draw's latch. */
@@ -149,31 +142,15 @@ namespace DCLF::Features::Water
 	};
 	static_assert(sizeof(DrawLatch) == 2656 && sizeof(DrawLatch) % 16 == 0, "a draw's latch region keeps 16-byte rows");
 
-	/** @brief What a draw's pipeline is made of: CS's Water shaders and the engine's state objects for the draw. */
-	struct PipelineKey
-	{
-		View view = View::Surface;
-		std::uint32_t vertexDescriptor = 0, pixelDescriptor = 0;
-		const void* blend = nullptr;  // the engine's ID3D11BlendState for the draw
-		const void* depthStencil = nullptr;
-		const void* raster = nullptr;
-		std::uint32_t alphaToCoverage = 0;
-		std::array<std::uint32_t, 2> colourFormats{};  // rhi::Format values, 0 past the targets
-		std::uint32_t depthFormat = 0;
-		bool operator==(const PipelineKey&) const = default;
-	};
-
 	/** @brief One latched draw. */
 	struct Draw
 	{
-		PipelineKey key;
+		Family::ProgramKey key;
 		std::shared_ptr<const void> program;    // the RasterProgram (WaterDraws.cpp)
 		std::array<std::uint8_t, 2> colours{};  // indices into the view's targets (kMaskTargets, kSurfaceTargets)
-		bool skip = false;                      // latched and withheld, but not drawn (CS_ORG_WATER_TECHNIQUES)
 		std::uint32_t stencilRef = 0;
 		std::uint32_t indexCount = 0;
-		std::uint32_t viewport[4]{};
-		float depthRange[2]{ 0.0f, 1.0f };
+		Family::Viewport viewport;
 		DrawLatch latch{};
 	};
 
@@ -195,25 +172,15 @@ namespace DCLF::Features::Water
 		View view = View::Surface;
 		std::vector<Draw> draws;
 		std::array<std::uint32_t, kHeaderRegisters.size()> headerIndices{};  // the unpublished headers' heap indices
-		std::uint64_t revision = 0;                                          // what the recording depends on (WaterDraws::RevisionOf)
-		std::vector<std::shared_ptr<const void>> owners;                     // the textures' imports and the buffers' leases
+		std::uint64_t revision = 0;                                          // what the recording depends on (WaterDraws.cpp, RevisionOf)
+		Family::Owners owners;                                               // the textures' imports and the buffers' leases
 	};
 
 	/**
-	 * @brief The diagnostic switches (render-graph.md, "Switches"), read once: CS_ORG_WATER_PARTS (mask, surface or both, comma
-	 * separated; CS_ORG_WATER_VIEWS is its old one-view form), CS_ORG_WATER_TECHNIQUES (the techniques drawn, comma separated: the others
-	 * are latched and withheld but not drawn) and CS_ORG_WATER_SAFE (1: the pixel stage writes a constant and reads nothing; 2: the passes
-	 * run with no draw calls).
+	 * @brief Whether the graph takes a_view's batches. CS_ORG_WATER_PARTS (mask, surface, or both comma separated; default both)
+	 * keeps a part on the engine while the other is the graph's (render-graph.md, "Switches"). Read once.
 	 */
-	struct Diagnostics
-	{
-		bool mask = true, surface = true;
-		std::uint32_t techniques = ~0u;  // a bit per technique (Water.hlsl's descriptor >> 11 & 0xF)
-		std::uint32_t safe = 0;
-		bool Takes(View a_view) const { return a_view == View::Mask ? mask : surface; }
-		bool Draws(std::uint32_t a_technique) const { return (techniques >> (a_technique & 31)) & 1; }
-	};
-	const Diagnostics& GetDiagnostics();
+	bool TakesView(View a_view);
 
 	// WaterFeature.cpp: the feature's entry (Features/FeatureList.cpp).
 	Api::Feature Feature();
@@ -233,18 +200,19 @@ namespace DCLF::Features::Water
 		/** @brief Reserves the EngineDraws anchor (the feature's install, before the render graph initializes). */
 		void Reserve();
 		/**
-		 * @brief The view's client, made for a_shape and prepared once: its draws may be withheld. A view without a client gets one made
-		 * for a_shape (false: the batch stays the engine's while it joins the graph). A client made for another shape is kept: the batch
-		 * stays the engine's (logged once), and no client is registered again during play.
+		 * @brief Whether a_shape's view may withhold this batch: its client was made for a_shape and is in the anchor's built graph
+		 * (FrameAnchors::RequestJoin). A view without a client gets one made for a_shape (false while it joins). A client made for another
+		 * shape is kept: the batch stays the engine's (logged once), and no client is registered again during play.
 		 */
 		bool Ready(const Shape& a_shape);
-		/**
-		 * @brief The program for a key (a RasterProgram), compiled the first time (it blocks then, as CS's D3D11 shaders compile on
-		 * first use); null when it cannot be built. a_shader: the engine's BSWaterShader, whose defines ShaderCache composes.
-		 */
-		std::shared_ptr<const void> Program(const PipelineKey& a_key, const void* a_shader);
-		/** @brief Runs a_run's view at the anchor with its draws (an empty run builds and prepares the client only). */
-		void Submit(std::shared_ptr<Run> a_run);
+		/** @brief Whether a run of the anchor now would draw a_view's work (FrameAnchors::CanRun): checked before a batch is withheld. */
+		bool CanRun(View a_view);
+		/** @brief The program for a key, built off the render thread; null while it builds or when it cannot be (a_state says which). */
+		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, Family::ProgramState& a_state);
+		/** @brief Keeps a probe's imports and leases as long as a run's, so the next batches find them instead of importing again. */
+		void Keep(Family::Owners&& a_owners);
+		/** @brief Runs a_run's view at the anchor with its draws. True when the run was submitted; otherwise its draws were not drawn (logged). */
+		bool Submit(std::shared_ptr<Run> a_run);
 		/** @brief One status line. */
 		std::string Status();
 	}
