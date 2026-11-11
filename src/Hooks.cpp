@@ -50,6 +50,7 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
+#include "RenderGraph/Engine/Scaleform/Scaleform.h"
 #include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Utils/ImportCallSites.h"
@@ -1462,6 +1463,7 @@ namespace Hooks
 		logger::info("Hooking BSShaderRenderTargets::Create");
 		stl::detour_thunk<BSShaderRenderTargets_Create>(REL::RelocationID(100458, 107175));
 		RenderGraph::Engine::Targets::Install();
+		RenderGraph::Engine::Scaleform::Install();
 
 		logger::info("Hooking BSShaderRenderTargets::Create::CreateRenderTarget(s)");
 		stl::write_thunk_call<CreateRenderTarget_Main>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x3F0, 0x3F3));
