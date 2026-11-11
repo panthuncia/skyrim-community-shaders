@@ -68,13 +68,17 @@ void ScreenSpaceShadows::ClearShaderCache()
 uint ScreenSpaceShadows::GetScaledSampleCount()
 {
 	float2 renderSize = Util::ConvertToDynamic(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
+	return ScaleSampleCount(bendSettings.SampleCount, renderSize);
+}
 
+uint ScreenSpaceShadows::ScaleSampleCount(uint a_multiplier, float2 a_renderSize)
+{
 	// Scale sample count based on both dimensions relative to 1920x1080 reference
 	float2 referenceRes = { 1920.0f, 1080.0f };
 	float referenceArea = referenceRes.x * referenceRes.y;
-	float currentArea = renderSize.x * renderSize.y;
+	float currentArea = a_renderSize.x * a_renderSize.y;
 	float areaScale = std::sqrt(currentArea / referenceArea);
-	uint scaledSampleCount = static_cast<uint>(std::round(std::clamp(bendSettings.SampleCount, 1u, 4u) * 60 * areaScale));
+	uint scaledSampleCount = static_cast<uint>(std::round(std::clamp(a_multiplier, 1u, 4u) * 60 * areaScale));
 
 	// Quantize to steps of 8 to prevent frequent recompilation from small DRS oscillations
 	scaledSampleCount = ((scaledSampleCount + 7u) / 8u) * 8u;
