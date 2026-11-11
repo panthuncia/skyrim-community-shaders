@@ -1142,3 +1142,38 @@ Keys used so far:
   layouts need their strides at pipeline creation, so the key carries the geometry's strides unless the pipeline takes
   dynamic strides.
 - **Found by:** P4.6 (2026-11-10).
+
+### Textures the CPU rewrites every frame
+
+- **Need:** a texture whose whole contents the CPU writes each frame (a decoded video frame, a software-rendered overlay)
+  reaches a pass without a D3D11 `Map(WRITE_DISCARD)` and without the producer waiting for the GPU.
+- **Who:** the engine's Bink player (256x256 BGRA tiles through `Renderer::LockTexture`, SE 75514); ImGui's font pages
+  (updated by rectangle). Plugins that play their own video or draw their own CPU canvas do the same with dynamic textures.
+- **Where it fits:** both ports keep a small pool of host-visible `LatchBlock` staging buffers, hand the producer a pointer
+  into one, and have the pass record the copies and the textures' barriers itself (`src/RenderGraph/Engine/Bink/BinkGraph.cpp`,
+  `src/RenderGraph/ImGuiBasicRHI.cpp`); the frame keeps its buffer until its GPU work retires. The pool and the copy recording
+  are written twice now: one upload-ring helper (a buffer per frame from a retire-aware pool, plus "copy these regions into
+  this untracked texture" for a pass) would serve both and a plugin API.
+- **Found by:** P5.11 Bink (2026-11-10).
+
+### Anchors on the thread that holds the renderer's lock
+
+- **Need:** run anchor epochs on whichever thread is rendering a frame under the engine's `Renderer::Lock`, not only the
+  main thread.
+- **Who:** the engine's startup sequence (the Bethesda logo decodes and presents on the "MoviePlayer" thread, which holds
+  the lock for the whole sequence) and its loading screen (P5.12). Today `FrameAnchors::Run` returns false there and those
+  frames stay on D3D11.
+- **Where it fits:** `FrameAnchors::OnMainThread` widened to "the main thread, or the owner of `Renderer::Lock` while the
+  main thread is not in a frame". The engine already serializes frames by that lock, so anchor runs never overlap and the
+  lock orders the anchors' state between threads. The design is in `docs/development/p5/bink.md`, "Threads, and what P5.12
+  needs".
+- **Found by:** P5.11 Bink (2026-11-10).
+
+### A pass at an engine draw inside another frame
+
+- **Need:** draw where an engine subsystem draws inside a frame it does not own, under what is drawn after it.
+- **Who:** Bink's in-frame movies (player mode 2, `MoviePlayer::TickInFrame`, SE 87920 / AE 90293), which draw their tiles
+  into the caller's frame and do not present; the Present anchor is too late for them (it would draw over the UI).
+- **Where it fits:** an anchor at the draw, or the draw joining the epoch of whatever frame the caller is in. Until then
+  those movies stay on D3D11.
+- **Found by:** P5.11 Bink (2026-11-10).
