@@ -83,6 +83,26 @@ Not in this task: `CopyResource` at AE 107193+0x466 (0x1414d1af0, the ImageSpace
   D3D11 draws still read them (P5.2 finishes DCLF's coverage). `ClearState` and the b12 binds in `Renderer::Begin`: no handle
   passes through them, and the D3D11 readers that remain rely on both; the per-frame buffer's Map belongs to P5.7.
 
+## Runs per frame (the deadlock found in the first run)
+
+Each run of an anchor is an epoch run, and an epoch's runs take the slots of its ring of `kGameFramesInFlight` (4) in turn.
+The host prepares a slot's next ticket only after the slot's last run finished on the GPU, and it prepares the next ticket
+right after each submission. A skeleton run's GPU work is in DXVK's stream, which reaches the GPU only at DXVK's next flush,
+the Present. With every shadow clear batch a run of its own, `EngineShadowClear` ran more than four times in one frame: the host
+waited in `WaitSlot` for a run of the same frame that was still unsubmitted, and the render thread waited for that host in
+`WaitTicket` (the first skeleton-org1 run: black screen, watchdog).
+
+So each skeleton anchor runs at most `kGameFramesInFlight - 1` (3) times between two Presents (`RunBudget`, counted by
+`State::frameCount`). With R runs a frame, the preparation after the frame's last run waits for the run three before it, which
+is in the frame before only while R is at most 3. Clears and copies past the budget get the engine's D3D11 calls (logged once:
+`... needed more than 3 runs in one frame`). In practice: the reflection faces (two a frame) and the depth copies fit; the
+frame's first three shadow-view clears and the first three other clear batches are on the graph, the rest on D3D11, so some of
+the tripwire's clear lines stay (they then name `CommunityShaders.dll`).
+
+The way to more: an anchor that may run many times a frame needs a ring of its own size (ORG: slots per epoch), or the clears
+batched into fewer runs (a shadow view's clear moved earlier, to one run before the shadow maps, needs the frame's slices
+known in advance). Both are open. Other multi-run anchors (ReflectionsPrepass) are under the same rule.
+
 ## Fallback
 
 Per call, the engine's D3D11 call is made (in the original order, at the flush, for taken clears) when:
@@ -91,6 +111,7 @@ Per call, the engine's D3D11 call is made (in the original order, at the flush, 
 - the view is new (its pass is made and registered at the flush; its first clear stays on D3D11);
 - the run did not hold the pass: the anchor's `executed` signal did not come (a graph built before the pass joined, a failed
   epoch, a call off the main thread such as a loading screen);
+- the anchor already ran three times this frame (above);
 - the group failed (anchor failure, 128 gate entries used up, more than 16 rebuilds for new textures) or a view's clear value
   kept changing (more than 4 values: that view stays on D3D11).
 
@@ -105,7 +126,8 @@ with `CS_ORG_ENGINE_SKELETON=1`).
 - Log: `engine skeleton: 11 of 11 engine call sites patched, Renderer::ClearColor detoured`, the `joins the ... anchor` lines,
   `the first shadow/cube/frame clears ran on the graph`, `the main depth is copied into kPOST_ZPREPASS_COPY on the graph`. No
   `[E]`, no `the ... anchor failed`, no `stays on D3D11` for the targets below.
-- Tripwire lines that should disappear: `ClearDepthStencilView` from 77247+0x18a, 77386+0x1c2 and 77252+0x4f;
+- Tripwire lines that should disappear (the first three batches of a frame per anchor; later ones stay, from
+  `CommunityShaders.dll`): `ClearDepthStencilView` from 77247+0x18a, 77386+0x1c2 and 77252+0x4f;
   `ClearRenderTargetView` from 77247+0x8b, 77247+0xe7, 77386+0xf7, 36559+0x6df and 36559+0x712; `CopyResource` from
   107139+0xa46. The binds' `OMSetRenderTargets` lines now name `CommunityShaders.dll` (the bind thunk makes the call); so does
   any fallback clear. 107193+0x466 and 77453+0x54 stay.

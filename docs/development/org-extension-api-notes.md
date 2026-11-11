@@ -473,6 +473,18 @@ Keys used so far:
   render pass begin) would replace it.
 - **Found by:** P5.1 (2026-11-10).
 
+### An anchor that runs many times a frame
+
+- **Need:** run the same anchor's epoch more than `kGameFramesInFlight - 1` times between two Presents (one run per engine clear
+  batch).
+- **Who:** CS's engine skeleton (P5.1); ReflectionsPrepass when many cubemaps render in one frame.
+- **Where it fits:** an epoch's runs take its ring of `framesInFlight` slots in turn, and the host's next preparation waits for
+  a slot's GPU work. In-stream work reaches the GPU only at DXVK's flush, so a fourth run in one frame left the host waiting for
+  unsubmitted work and the render thread waiting for the host: a deadlock. The skeleton caps itself at three runs a frame. A
+  per-epoch ring size (slots per epoch) would lift it; so would a host that never waits for a slot whose work is still in the
+  stream (prepare on demand instead).
+- **Found by:** P5.1, the first skeleton-org1 run (2026-11-10).
+
 ### Work at an engine draw that is not an anchor
 
 - **Need:** run a pass where an engine draw happens (a specific Utility pass, a shader bind) instead of at an anchor.
