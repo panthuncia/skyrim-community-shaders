@@ -46,10 +46,20 @@ namespace DCLF::Features::Sky
 			std::uint64_t vertexDesc;
 		};
 
-		/** @brief The batch being latched (render thread). */
+		/**
+		 * @brief The batch being latched (render thread).
+		 *
+		 * A view's batches are the graph's only after a probe: a batch that the engine draws while every draw is checked as the graph
+		 * would take it (its program built, its constants mirrored, its textures and buffers imported). A probe with every draw
+		 * latchable makes the view's next batches the graph's; a draw a later batch cannot latch makes that batch's remaining draws the
+		 * engine's and the view probes again. So nothing is withheld until its program exists.
+		 */
 		struct Capture
 		{
 			bool active = false;
+			bool probe = false;   // the engine draws the batch; the draws are only checked
+			bool failed = false;  // a draw of the batch could not be latched: the rest are the engine's
+			std::array<bool, static_cast<std::size_t>(View::Count)> clean{};  // the view's last probe latched every draw
 			View view = View::Main;
 			std::shared_ptr<Run> run;
 			std::array<std::uint32_t, 3> colourFormats{};  // the main pass's targets, or the face's (one)
@@ -113,6 +123,18 @@ namespace DCLF::Features::Sky
 			if (cloudShadows.loaded && !ORGCloudShadows::Get().IsActive())
 				return false;
 			a_shape.cloudShadows = cloudShadows.loaded;
+			// The headers' textures the sky's pixel stage may read (kHeaderRegisters), as CS binds them for the pass.
+			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
+				ID3D11ShaderResourceView* view = nullptr;
+				globals::d3d::context->PSGetShaderResources(kHeaderRegisters[h], 1, &view);
+				if (!view)
+					continue;
+				a_shape.headerIds[h] = PublishedResources::ExportedId(view);
+				if (a_shape.headerIds[h].empty())
+					a_shape.headerViews[h] = view;
+				// The binding keeps the view alive; the shape keeps its identity.
+				view->Release();
+			}
 			a_shape.depth = static_cast<std::int32_t>(rss.depthStencil);
 			if (!IsDepth(a_shape.depth))
 				return false;
@@ -180,7 +202,7 @@ namespace DCLF::Features::Sky
 		 * SetupGeometry wrote (ConstantMirror), the textures and samplers, the geometry. False when it cannot be drawn by the graph: the
 		 * engine draws it then.
 		 */
-		bool LatchDraw(Capture& a_capture, const EngineTriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
+		bool TryLatchDraw(Capture& a_capture, const EngineTriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
 			auto& run = *a_capture.run;
 			if (!a_shape || !a_shape->vertexBuffer || !a_shape->indexBuffer || run.draws.size() >= kMaxLatched)
@@ -193,11 +215,9 @@ namespace DCLF::Features::Sky
 				return false;
 
 			// Cloud Shadows' override (ModifySky, from SetupGeometry): on a face its fourth target, which this draw writes on the graph.
-			// Its D3D11 overrides (SkyShaderHacks) run only at a draw's state flush, which a latched draw never reaches.
+			// Its flags are taken only once the draw is latched (LatchDraw); a draw the engine makes keeps them for SkyShaderHacks.
 			auto& cloudShadows = globals::features::cloudShadows;
 			const bool occlusion = a_capture.view == View::Face && cloudShadows.loaded && cloudShadows.overrideSky && cloudShadows.cloudShadowBlendState;
-			cloudShadows.overrideSky = false;
-			cloudShadows.bindLayerSelfShadow = false;
 
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			auto* depthStencil = Pipeline::EngineDepthStencilState(engine.depthMode, engine.stencilMode);
@@ -293,11 +313,32 @@ namespace DCLF::Features::Sky
 			draw.depthRange[0] = cameraDepthRange.get()[0];
 			draw.depthRange[1] = cameraDepthRange.get()[1];
 
+			// A probe only checks: the engine draws it, with Cloud Shadows' overrides.
+			if (a_capture.probe)
+				return true;
 			run.draws.push_back(std::move(draw));
 			for (auto& owner : owners)
 				if (owner)
 					run.owners.push_back(std::move(owner));
+			// Its D3D11 overrides (SkyShaderHacks) run only at a draw's state flush, which a latched draw never reaches.
+			cloudShadows.overrideSky = false;
+			cloudShadows.bindLayerSelfShadow = false;
 			return true;
+		}
+
+		/**
+		 * @brief A draw latched (true: the graph draws it) or the engine's. A draw that fails marks the batch: its later draws are the
+		 * engine's too, so the engine's draws of the batch stay in order after the ones latched before (which the anchor draws after
+		 * the batch: one batch drawn out of order, then the view probes again).
+		 */
+		bool LatchDraw(Capture& a_capture, const EngineTriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
+		{
+			if (a_capture.failed)
+				return false;
+			const bool latched = TryLatchDraw(a_capture, a_shape, a_start, a_triangles);
+			if (!latched)
+				a_capture.failed = true;
+			return latched && !a_capture.probe;
 		}
 
 		/**
@@ -340,18 +381,40 @@ namespace DCLF::Features::Sky
 				auto run = std::make_shared<Run>();
 				run->view = shape.view;
 				run->face = face;
+				auto& clean = capture.clean[static_cast<std::size_t>(shape.view)];
 				if (!SkyDraws::Ready(shape)) {
-					// The client is new or was made again: an empty run builds and prepares it, and the engine draws this batch.
+					// The client is new or was made again: an empty run builds and prepares it, the engine draws this batch, and the
+					// view probes again (the new targets may need other programs).
+					clean = false;
+					if (shape.view == View::Face)
+						SkyDraws::UseCloudFaces(false);
 					SkyDraws::Submit(std::move(run));
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
+				const bool probe = !clean;
+				// Cloud Shadows' copy reads the faces' cloud occlusion only while the graph draws the faces' clouds.
+				if (shape.view == View::Face && shape.cloudShadows)
+					SkyDraws::UseCloudFaces(!probe);
 				capture.view = shape.view;
 				capture.run = run;
+				capture.probe = probe;
+				capture.failed = false;
 				capture.active = true;
 				func(a_accumulator, a_first, a_last, a_flags, a_group);
 				capture.active = false;
 				capture.run.reset();
+				if (probe) {
+					clean = !capture.failed;
+					if (clean)
+						logger::info("[DCLF] sky: every {} sky draw can be drawn by the graph; its batches are the graph's from the next", shape.view == View::Main ? "main" : "face");
+					return;
+				}
+				if (capture.failed) {
+					clean = false;
+					logger::warn("[DCLF] sky: a {} sky draw could not be drawn by the graph; the engine draws the batches while the view probes again",
+						shape.view == View::Main ? "main" : "face");
+				}
 				SkyDraws::Submit(std::move(run));
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
