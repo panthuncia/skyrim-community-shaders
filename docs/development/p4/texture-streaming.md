@@ -92,8 +92,10 @@ worker (streaming domain)            render thread, after Present        Present
 -   BC tail mips smaller than a block (2x2, 1x1) are copied with their texel size. BasicRHI's Vulkan copy takes the row
     length in texels from the 256-byte pitch (`VkBuildBufferImageCopy`), and Vulkan accepts an extent equal to the mip's. The
     D3D12 path has not been looked at.
--   The Present anchor runs in menus and on the map, not on loading screens' own present loop: windows staged during a
-    loading screen wait for the first presented frame. Objects are not drawn then either.
+-   The Present anchor runs in menus and on the map, and on loading screens' own present loop only with
+    `CS_ORG_LOADING_THREAD=1` (P5.12). Without it, windows staged during a loading screen wait for the first presented frame.
+    With it, a batch is registered there, but with Drawcall Limit Fix's explicit builds its graph is built only at the first
+    world frame's build point, so the upload still lands then (p5/loading-screen.md, "Rebuilds in this lane").
 -   Each batch rebuilds the Present anchor's graph twice (with and without the one-shot pass). At most one batch is in flight,
     so this is at most two builds a frame while streaming is busy.
 

@@ -235,6 +235,9 @@ loads. Anchors run only on the main thread (`FrameAnchors::OnMainThread`), so ev
   happens with no epoch in progress (outside `Renderer::Lock`), so a release-acquire on the owner id is enough.
 - **Then** the loading screen's displays take the ORG path like the main thread's, and its `Present` runs the Present
   anchor; the loading menu's 3D model (MistMenu, `UI3DSceneManager`) is P5's menu 3D work.
+- **Built** in P5.12 behind `CS_ORG_LOADING_THREAD=1` ([loading-screen.md](./loading-screen.md)): the capture checks
+  `FrameAnchors::OnRenderThread()`. The owner is claimed by the thread holding `Renderer::Lock` rather than at
+  `SetLoadingScreenActive(true)`, which only starts the loop; `SetLoadingScreenActive(false)` hands it back.
 
 ### The switch
 

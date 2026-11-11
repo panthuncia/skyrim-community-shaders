@@ -182,9 +182,10 @@ The way to put it on the graph, which P5.12 needs for the loading-screen thread 
    `Register` from a feature's setup) must not touch the anchors' per-run state; registration already only publishes a new
    client list, built at the next run.
 
-With that, Bink's eligibility test switches from `FrameAnchors::OnMainThread()` to the new predicate and the logo takes the
-graph path unchanged. Until then the logo's ticks log `[ORG] Bink: a movie plays on thread N, not the main thread ...` once
-and draw through the engine (FrameAnchors logs its own one-time line about a Present off the main thread too).
+Built in P5.12 ([loading-screen.md](./loading-screen.md)): Bink's checks call `FrameAnchors::OnRenderThread()`, and with
+`CS_ORG_LOADING_THREAD=1` the logo's MoviePlayer thread owns rendering while it holds the lock, so the logo takes the graph
+path unchanged. Without the switch the logo's ticks log `[ORG] Bink: a movie plays on thread N, not the render thread ...`
+once and draw through the engine (FrameAnchors logs its own one-time line about a Present off the main thread too).
 
 ### HDR output
 
@@ -232,7 +233,7 @@ already has the pass; the miss counter tolerates two lost frames), and AE (the I
 
 ## Open points
 
-- The startup logo on the graph waits for P5.12's render-thread rule (above).
+- The startup logo on the graph: P5.12's `CS_ORG_LOADING_THREAD=1` (above); not run in game yet.
 - HDR output's UI texture as the target.
 - Mode 2 movies (inside another frame) need their draw at the point of `DrawTiles`, not at the Present: an anchor at that
   point, or a draw into the frame's own epoch.

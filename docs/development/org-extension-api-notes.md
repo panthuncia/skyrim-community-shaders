@@ -1233,6 +1233,23 @@ Keys used so far:
   lock orders the anchors' state between threads. The design is in `docs/development/p5/bink.md`, "Threads, and what P5.12
   needs".
 - **Found by:** P5.11 Bink (2026-11-10).
+- **Built (P5.12, `CS_ORG_LOADING_THREAD=1`):** `FrameAnchors::OnRenderThread`, a render owner claimed by the thread that holds
+  the lock (`docs/development/p5/loading-screen.md`). ORG needed no change: `GraphHost::Uploads()->SetOwnerThread()` moves the
+  frame upload instance, and the host has no thread id of its own. What a plugin API would want: an explicit
+  `GraphHost::SetOwnerThread()` that moves every owner-thread structure at once (today only the upload instance keeps one), and
+  a debug check in the host that its owner-thread calls come from one thread between two such moves.
+
+### Builds that wait for an explicit point while no world frame runs
+
+- **Need:** a client that joins an anchor's graph while no world frame runs (a load, a blocking movie) is built only at
+  Drawcall Limit Fix's build point, the next world frame; a synchronous `BuildIfRequested` on the frame's path is what the
+  rebuild rule forbids.
+- **Who:** clients registering during a load (texture streaming's per-batch copy pass, a new Scaleform surface); Bink's logo
+  builds once by itself.
+- **Where it fits:** the host building a requested graph on its own thread and switching to it at the next submission that
+  allows it (as DCLF's revisions do), or features that never register during play (one kept pass with gated work in place of
+  one-shot passes per batch).
+- **Found by:** P5.12 loading screen (2026-11-10).
 
 ### A pass at an engine draw inside another frame
 
