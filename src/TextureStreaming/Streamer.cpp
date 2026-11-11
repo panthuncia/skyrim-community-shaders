@@ -142,6 +142,9 @@ namespace TextureStreaming
 			std::atomic<bool> failed{ false };
 			std::atomic<bool> baseRequested{ false };
 			std::atomic<bool> pinned{ false };
+			// When PinFull last asked for the full window (steady clock, ms): it asks again while the window is not there (a later revision
+			// of the controller's may have replaced the request).
+			std::atomic<std::int64_t> pinAskedMs{ 0 };
 			std::atomic<std::uint64_t> nextRevision{ kBaseRevision + 1 };
 
 			std::mutex fillMutex;
@@ -997,7 +1000,9 @@ namespace TextureStreaming
 					wanted = LimitTop(t, static_cast<std::uint32_t>(force));
 				t.wantedTop = wanted;
 				wantedBytes += t.bytesFrom[wanted];
-				const bool visible = VisibleTop(t, pullback.visible) <= DistanceTop(t, pullback.distance);
+				// A pinned texture (a holder that keeps its first import: grass, tree LOD, the engine draw families) counts as on screen: its
+				// upgrade to the full window loads whatever the allowance says, as a visible one's, or the holder would wait for it forever.
+				const bool visible = t.pinned.load(std::memory_order_relaxed) || VisibleTop(t, pullback.visible) <= DistanceTop(t, pullback.distance);
 				if (visible)
 					visibleBytes += t.bytesFrom[wanted];
 
@@ -1222,7 +1227,13 @@ namespace TextureStreaming
 		const auto texture = FindShell(a_view);
 		if (!texture || texture->failed.load(std::memory_order_relaxed) || texture->residentTop.load(std::memory_order_acquire) == 0)
 			return true;
-		if (!texture->pinned.exchange(true, std::memory_order_acq_rel))
+		// Asked for once, and again every second while the window is not there: the controller's own requests (a step of a smaller
+		// window, a release under pressure) are later revisions that replace this one.
+		constexpr std::int64_t kAskAgainMs = 1000;
+		const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		const bool first = !texture->pinned.exchange(true, std::memory_order_acq_rel);
+		auto asked = texture->pinAskedMs.load(std::memory_order_relaxed);
+		if ((first || now - asked >= kAskAgainMs) && texture->pinAskedMs.compare_exchange_strong(asked, now, std::memory_order_relaxed))
 			PostBuild(*texture, texture->nextRevision.fetch_add(1, std::memory_order_relaxed), 0);
 		return false;
 	}

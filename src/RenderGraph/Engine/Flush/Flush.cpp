@@ -114,7 +114,14 @@ namespace RenderGraph::Engine::Flush
 		// Inside an EngineDraws scope: the reason's id, else -1. The engine draws here on purpose.
 		thread_local int t_engineReason = -1;
 
-		bool InEngineDraws() { return t_engineReason >= 0; }
+		// A draw family's rest of a batch left to the engine (BeginEngineRest): not part of the scopes' nesting, so a pass's own scope
+		// (RenderPassImmediately's for a vouched pass) restoring its previous reason never ends it.
+		thread_local int t_restReason = -1;
+
+		/** @brief The reason the engine draws now: the innermost scope's, else a family's rest of a batch; -1 for none. */
+		int CurrentReason() { return t_engineReason >= 0 ? t_engineReason : t_restReason; }
+
+		bool InEngineDraws() { return CurrentReason() >= 0; }
 
 		struct LatchScope
 		{
@@ -713,7 +720,7 @@ namespace RenderGraph::Engine::Flush
 			const bool engine = config.latch && (t_latchScope > 0 || (type == SlotClass::Dispatch && t_dispatchScope > 0) || InDrawFunction(a_caller));
 			const bool skip = engine && !InEngineDraws();
 			if (engine && !skip)
-				GetReasons().draws[static_cast<std::size_t>(t_engineReason)].fetch_add(1, std::memory_order_relaxed);
+				GetReasons().draws[static_cast<std::size_t>(CurrentReason())].fetch_add(1, std::memory_order_relaxed);
 			if (config.census)
 				NoteDraw(a_slot, a_caller, skip);
 			if (skip)
@@ -1012,6 +1019,16 @@ namespace RenderGraph::Engine::Flush
 	{
 		if (active)
 			t_engineReason = previous;
+	}
+
+	void BeginEngineRest(const Reason& a_reason)
+	{
+		t_restReason = static_cast<int>(a_reason.Id());
+	}
+
+	void EndEngineRest()
+	{
+		t_restReason = -1;
 	}
 
 	bool Vouching()

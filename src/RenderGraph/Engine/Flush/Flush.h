@@ -104,6 +104,16 @@ namespace RenderGraph::Engine::Flush
 		bool active = false;
 	};
 
+	/**
+	 * @brief The rest of a batch the engine draws on purpose, from a point inside it: a draw family that refuses a draw partway
+	 * (Features/DrawcallLimitFix/Core/Engine/Family) begins it at the refusal and ends it when the engine's batch call returns. Unlike an
+	 * EngineDraws scope it does not nest, so the scopes a pass opens and closes inside the batch (RenderPassImmediately's for a vouched
+	 * pass) do not end it; an open scope's reason counts first. Thread-local; nothing is checked with the latch off. Begin while one is
+	 * open replaces its reason.
+	 */
+	void BeginEngineRest(const Reason& a_reason);
+	void EndEngineRest();
+
 	/** @brief Whether VouchPass records anything (the latch is on). Test it before work that only feeds VouchPass. Any thread. */
 	bool Vouching();
 
