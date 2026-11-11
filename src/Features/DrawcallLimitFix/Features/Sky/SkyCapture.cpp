@@ -26,7 +26,10 @@
 
 #include <rhi_helpers.h>
 
+#include <algorithm>
 #include <cstring>
+#include <set>
+#include <span>
 
 namespace DCLF::Features::Sky
 {
@@ -37,6 +40,53 @@ namespace DCLF::Features::Sky
 
 		// The most draws one batch latches; past it a draw is the engine's (SkyDraws' latch has room for this many).
 		constexpr std::size_t kMaxLatched = 128;
+
+		/** @brief Why a sky draw could not be latched: each logged once per technique and view (Refuse). */
+		enum class Refusal : std::uint8_t
+		{
+			None,
+			Geometry,       // no TriShape or no buffers
+			TooMany,        // past kMaxLatched draws in one batch
+			Shader,         // the bound shader is not BSSkyShader, or no shader objects
+			DepthStencil,   // no depth-stencil state, or one with stencil (the raster program has no stencil reference)
+			Constants,      // ConstantMirror has no copy of the vertex stage's PerGeometry yet
+			States,         // no blend or rasterizer state object for the draw
+			Program,        // the ORG program could not be built
+			Buffers,        // the vertex or index buffer could not be imported
+			Texture,        // a texture the technique samples could not be imported
+			Sampler,        // the sampler for the slot's modes is not in the graph's table
+			OtherDrawPath,  // a sky pass of the batch drew through another draw function than DrawTriShape
+		};
+
+		const char* ReasonOf(Refusal a_refusal)
+		{
+			switch (a_refusal) {
+			case Refusal::Geometry:
+				return "no TriShape buffers";
+			case Refusal::TooMany:
+				return "more draws than the batch latches";
+			case Refusal::Shader:
+				return "the bound shader is not BSSkyShader";
+			case Refusal::DepthStencil:
+				return "its depth-stencil state is missing or uses stencil";
+			case Refusal::Constants:
+				return "ConstantMirror has no copy of its vertex constants yet";
+			case Refusal::States:
+				return "no blend or rasterizer state object";
+			case Refusal::Program:
+				return "its ORG program could not be built";
+			case Refusal::Buffers:
+				return "its vertex or index buffer could not be imported";
+			case Refusal::Texture:
+				return "a texture it samples could not be imported";
+			case Refusal::Sampler:
+				return "its sampler modes have no graph sampler";
+			case Refusal::OtherDrawPath:
+				return "a pass of the batch drew through another draw function than DrawTriShape";
+			default:
+				return "none";
+			}
+		}
 
 		/** @brief BSGraphics::TriShape's head (R1): the static vertex and index buffers and the VertexDesc. */
 		struct EngineTriShape
@@ -65,6 +115,13 @@ namespace DCLF::Features::Sky
 			std::array<std::uint32_t, 3> colourFormats{};  // the main pass's targets, or the face's (one)
 			std::uint32_t depthFormat = 0;
 			std::uint64_t fallbacks = 0;  // draws the engine drew during a latched batch
+			std::uint32_t passes = 0;     // the batch's SetupGeometry calls
+			std::uint32_t drawn = 0;      // the batch's DrawTriShape calls
+			std::uint32_t lastTechnique = 0;  // the last pass's raw technique (State::currentPixelDescriptor & 0xFF)
+			// The last pass's geometry type (BSGeometry +0x150, R1's dispatcher) while its draw has not reached DrawTriShape; 0xFF none.
+			std::uint32_t pendingType = 0xFF;
+			std::uint32_t otherTypes = 0;  // the geometry types of the batch's passes that drew elsewhere, a bit each
+			std::set<std::uint32_t> logged;   // (refusal, technique, view) logged once each
 			bool cloudsCleared = false;   // the faces' occlusion was cleared for a weather without cloud layers
 		};
 
@@ -169,6 +226,9 @@ namespace DCLF::Features::Sky
 			auto* sceneDepth = Util::GetCurrentSceneDepthSRV(true);
 			a_shape.sceneDepthId = sceneDepth ? PublishedResources::ExportedId(sceneDepth) : std::string();
 			a_shape.sceneDepth = a_shape.sceneDepthId.empty() ? DepthOfView(sceneDepth) : -1;
+			// Neither (Terrain Blending's D3D11 depth): the view itself, imported. Without it the sun's depth test read zero and hid it.
+			if (sceneDepth && a_shape.sceneDepthId.empty() && a_shape.sceneDepth < 0)
+				a_shape.sceneDepthView = sceneDepth;
 			if (a_shape.sceneDepth == a_shape.depth) {
 				const auto main = static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
 				a_shape.sceneDepth = main != a_shape.depth ? main : -1;
@@ -202,17 +262,19 @@ namespace DCLF::Features::Sky
 		 * SetupGeometry wrote (ConstantMirror), the textures and samplers, the geometry. False when it cannot be drawn by the graph: the
 		 * engine draws it then.
 		 */
-		bool TryLatchDraw(Capture& a_capture, const EngineTriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
+		Refusal TryLatchDraw(Capture& a_capture, const EngineTriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
 			auto& run = *a_capture.run;
-			if (!a_shape || !a_shape->vertexBuffer || !a_shape->indexBuffer || run.draws.size() >= kMaxLatched)
-				return false;
+			if (!a_shape || !a_shape->vertexBuffer || !a_shape->indexBuffer)
+				return Refusal::Geometry;
+			if (run.draws.size() >= kMaxLatched)
+				return Refusal::TooMany;
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 			const auto* vs = rss.currentVertexShader;
 			const auto* ps = rss.currentPixelShader;
 			const auto* state = globals::state;
 			if (!vs || !ps || !state || !state->currentShader || state->currentShader->shaderType.get() != RE::BSShader::Type::Sky)
-				return false;
+				return Refusal::Shader;
 
 			// Cloud Shadows' override (ModifySky, from SetupGeometry): on a face its fourth target, which this draw writes on the graph.
 			// Its flags are taken only once the draw is latched (LatchDraw); a draw the engine makes keeps them for SkyShaderHacks.
@@ -222,18 +284,23 @@ namespace DCLF::Features::Sky
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			auto* depthStencil = Pipeline::EngineDepthStencilState(engine.depthMode, engine.stencilMode);
 			if (!depthStencil)
-				return false;
+				return Refusal::DepthStencil;
 			D3D11_DEPTH_STENCIL_DESC depthDesc{};
 			depthStencil->GetDesc(&depthDesc);
 			// The raster program has no stencil reference; the sky uses none.
 			if (depthDesc.StencilEnable)
-				return false;
+				return Refusal::DepthStencil;
 
+			// The PerGeometry groups as SetupGeometry wrote them. A technique's group holds only the rows its vanilla shader declares
+			// (one may end before TexCoordOff, a pixel stage may have none): the rows past it are zero, which the technique's CS shader
+			// does not read either. The matrices and EyePosition/VParams (c0-c12) are every technique's.
 			auto& mirror = ConstantMirror::Get();
-			const auto vertexBytes = mirror.Contents(reinterpret_cast<const ID3D11Buffer*>(vs->constantBuffers[2].buffer));
-			const auto pixelBytes = mirror.Contents(reinterpret_cast<const ID3D11Buffer*>(ps->constantBuffers[2].buffer));
-			if (vertexBytes.size() < kVertexConstantBytes || pixelBytes.size() < 2 * sizeof(float))
-				return false;
+			const auto* vertexBuffer = reinterpret_cast<const ID3D11Buffer*>(vs->constantBuffers[2].buffer);
+			const auto* pixelBuffer = reinterpret_cast<const ID3D11Buffer*>(ps->constantBuffers[2].buffer);
+			const auto vertexBytes = vertexBuffer ? mirror.Contents(vertexBuffer) : std::span<const std::byte>{};
+			const auto pixelBytes = pixelBuffer ? mirror.Contents(pixelBuffer) : std::span<const std::byte>{};
+			if (vertexBytes.size() < 13 * 16)
+				return Refusal::Constants;
 
 			Draw draw{};
 			draw.key.view = a_capture.view;
@@ -254,17 +321,17 @@ namespace DCLF::Features::Sky
 				draw.key.depthFormat = occlusion ? 0u : a_capture.depthFormat;
 			}
 			if (!draw.key.blend || !draw.key.raster)
-				return false;
+				return Refusal::States;
 			draw.program = SkyDraws::Program(draw.key, state->currentShader);
 			if (!draw.program)
-				return false;
+				return Refusal::Program;
 
 			// The geometry, read by device address while its leases are held (the run keeps them until the GPU is done).
 			auto& buffers = GpuResources::Frame();
 			auto vertices = buffers.Acquire(a_shape->vertexBuffer);
 			auto indices = buffers.Acquire(a_shape->indexBuffer);
 			if (!vertices || !indices || !vertices->buffer.address || !indices->buffer.address)
-				return false;
+				return Refusal::Buffers;
 			std::uint64_t mask = vs->vertexDesc;
 			draw.vertexAddress = vertices->buffer.address;
 			draw.indexAddress = indices->buffer.address;
@@ -284,13 +351,13 @@ namespace DCLF::Features::Sky
 					binding = view ? textures.ResolveBinding(view, 64 + t) : textures.NullBinding();
 				}
 				if (binding.index == GpuTextures::kInvalid)
-					return false;
+					return Refusal::Texture;
 				draw.textures[t] = binding.index;
 				owners.push_back(std::move(binding.owner));
 				auto sampler = used[t] ? textures.SamplerBinding(rss.PSTextureAddressMode[t].underlying(), rss.PSTextureFilterMode[t].underlying()) :
 				                         textures.SamplerBinding(0, 0);
 				if (sampler.index == GpuTextures::kInvalid)
-					return false;
+					return Refusal::Sampler;
 				draw.samplers[t] = sampler.index;
 				owners.push_back(std::move(sampler.owner));
 			}
@@ -298,8 +365,8 @@ namespace DCLF::Features::Sky
 			// The constants: PerGeometry as the vertex stage reads it (c0 to c16.xy), the pixel stage's PParams, the alpha test reference
 			// SetDirtyStates would write (PS b11: the reference while the test is on, else 0) and CS's extra descriptor for this draw
 			// (State::UpdateSkyShaderPermutation ran in SetupGeometry).
-			std::memcpy(&draw.constants, vertexBytes.data(), kVertexConstantBytes);
-			std::memcpy(draw.constants.pParams, pixelBytes.data(), sizeof(draw.constants.pParams));
+			std::memcpy(&draw.constants, vertexBytes.data(), (std::min)(vertexBytes.size(), kVertexConstantBytes));
+			std::memcpy(draw.constants.pParams, pixelBytes.data(), (std::min)(pixelBytes.size(), sizeof(draw.constants.pParams)));
 			draw.constants.alphaTestRef = rss.alphaTestEnabled ? rss.alphaTestRef : 0.0f;
 			draw.constants.extraShaderDescriptor = state->permutationData.ExtraShaderDescriptor;
 
@@ -315,7 +382,7 @@ namespace DCLF::Features::Sky
 
 			// A probe only checks: the engine draws it, with Cloud Shadows' overrides.
 			if (a_capture.probe)
-				return true;
+				return Refusal::None;
 			run.draws.push_back(std::move(draw));
 			for (auto& owner : owners)
 				if (owner)
@@ -323,7 +390,7 @@ namespace DCLF::Features::Sky
 			// Its D3D11 overrides (SkyShaderHacks) run only at a draw's state flush, which a latched draw never reaches.
 			cloudShadows.overrideSky = false;
 			cloudShadows.bindLayerSelfShadow = false;
-			return true;
+			return Refusal::None;
 		}
 
 		/**
@@ -331,14 +398,29 @@ namespace DCLF::Features::Sky
 		 * engine's too, so the engine's draws of the batch stay in order after the ones latched before (which the anchor draws after
 		 * the batch: one batch drawn out of order, then the view probes again).
 		 */
+		/** @brief A refusal noted: the batch fails, and the reason is logged once per technique and view. */
+		void Refuse(Capture& a_capture, Refusal a_refusal, std::uint32_t a_technique)
+		{
+			a_capture.failed = true;
+			const std::uint32_t key = (static_cast<std::uint32_t>(a_refusal) << 16) | ((a_technique & 0xFF) << 8) | static_cast<std::uint32_t>(a_capture.view);
+			if (a_capture.logged.insert(key).second)
+				logger::warn("[DCLF] sky: a {} sky draw of technique {} stays the engine's: {}{}", a_capture.view == View::Main ? "main" : "face", a_technique,
+					ReasonOf(a_refusal), a_capture.probe ? " (probe)" : "");
+		}
+
 		bool LatchDraw(Capture& a_capture, const EngineTriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
-			if (a_capture.failed)
+			// A probe checks every draw, so one batch builds every program the view needs; a batch the graph draws stops at the first
+			// draw it cannot take.
+			if (a_capture.failed && !a_capture.probe)
 				return false;
-			const bool latched = TryLatchDraw(a_capture, a_shape, a_start, a_triangles);
-			if (!latched)
-				a_capture.failed = true;
-			return latched && !a_capture.probe;
+			const auto refusal = TryLatchDraw(a_capture, a_shape, a_start, a_triangles);
+			if (refusal != Refusal::None) {
+				const auto* state = globals::state;
+				Refuse(a_capture, refusal, state ? state->currentPixelDescriptor & 0xFF : 0xFF);
+				return false;
+			}
+			return !a_capture.probe;
 		}
 
 		/**
@@ -400,10 +482,25 @@ namespace DCLF::Features::Sky
 				capture.run = run;
 				capture.probe = probe;
 				capture.failed = false;
+				capture.passes = 0;
+				capture.drawn = 0;
+				capture.pendingType = 0xFF;
+				capture.otherTypes = 0;
 				capture.active = true;
 				func(a_accumulator, a_first, a_last, a_flags, a_group);
 				capture.active = false;
 				capture.run.reset();
+				// Every pass must draw through DrawTriShape: one that drew through another function was the engine's, at its place in
+				// the batch, ahead of the graph's draws.
+				if (capture.pendingType != 0xFF)
+					capture.otherTypes |= 1u << (capture.pendingType & 31);
+				if (capture.drawn < capture.passes || capture.otherTypes) {
+					if (capture.logged.insert(0xFF000000u | capture.otherTypes).second)
+						logger::warn("[DCLF] sky: {} of {} {} sky passes drew without DrawTriShape (geometry types {:#x}, R1's dispatcher)",
+							capture.passes > capture.drawn ? capture.passes - capture.drawn : 0, capture.passes, shape.view == View::Main ? "main" : "face",
+							capture.otherTypes);
+					Refuse(capture, Refusal::OtherDrawPath, capture.lastTechnique);
+				}
 				if (probe) {
 					clean = !capture.failed;
 					if (clean)
@@ -427,6 +524,8 @@ namespace DCLF::Features::Sky
 			{
 				auto& capture = GetCapture();
 				if (capture.active && capture.run) {
+					++capture.drawn;
+					capture.pendingType = 0xFF;
 					if (LatchDraw(capture, a_shape, a_start, a_triangles))
 						return;
 					++capture.fallbacks;
@@ -446,8 +545,15 @@ namespace DCLF::Features::Sky
 			static void thunk(RE::BSShader* a_this, RE::BSRenderPass* a_pass, std::uint32_t a_flags)
 			{
 				func(a_this, a_pass, a_flags);
-				if (!GetCapture().active)
+				auto& capture = GetCapture();
+				if (!capture.active)
 					return;
+				++capture.passes;
+				if (capture.pendingType != 0xFF)
+					capture.otherTypes |= 1u << (capture.pendingType & 31);
+				capture.pendingType = a_pass && a_pass->geometry ? Engine::At<std::uint8_t>(a_pass->geometry, 0x150) : 0xFE;
+				if (const auto* state = globals::state)
+					capture.lastTechnique = state->currentPixelDescriptor & 0xFF;
 				const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 				auto& mirror = ConstantMirror::Get();
 				if (const auto* vs = rss.currentVertexShader; vs && vs->constantBuffers[2].buffer)

@@ -320,6 +320,16 @@ namespace DCLF::Features::Sky::SkyDraws
 				}
 				if (a_shape.sceneDepth >= 0)
 					client->sceneDepth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(a_shape.sceneDepth));
+				if (auto* view = static_cast<ID3D11ShaderResourceView*>(const_cast<void*>(a_shape.sceneDepthView))) {
+					winrt::com_ptr<ID3D11Resource> resource;
+					view->GetResource(resource.put());
+					const auto texture = resource.try_as<ID3D11Texture2D>();
+					client->sceneDepth = texture ? FrameAnchors::D3D11Texture("Sky::SceneDepth", texture.get(), view, nullptr) : nullptr;
+				}
+				if ((a_shape.sceneDepth >= 0 || a_shape.sceneDepthView) && !client->sceneDepth) {
+					logger::warn("[DCLF] sky: the scene depth CS binds at t17 cannot be imported; the sky stays the engine's");
+					return nullptr;
+				}
 			} else {
 				client->cubemap = FrameAnchors::EngineCubemap(static_cast<std::uint32_t>(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS));
 				if (!client->cubemap) {
@@ -398,8 +408,8 @@ namespace DCLF::Features::Sky::SkyDraws
 				logger::warn("[DCLF] sky: the {} client could not be registered; the sky stays the engine's", client->id);
 				return nullptr;
 			}
-			logger::info("[DCLF] sky: the {} client registered (depth {}, scene depth {}{}, cloud shadows {})", client->id, a_shape.depth, a_shape.sceneDepth,
-				a_shape.sceneDepthId.empty() ? "" : " " + a_shape.sceneDepthId, a_shape.cloudShadows ? "on" : "off");
+			logger::info("[DCLF] sky: the {} client registered (depth {}, scene depth {}{}{}, cloud shadows {})", client->id, a_shape.depth, a_shape.sceneDepth,
+				a_shape.sceneDepthId.empty() ? "" : " " + a_shape.sceneDepthId, a_shape.sceneDepthView ? " (a D3D11 view)" : "", a_shape.cloudShadows ? "on" : "off");
 			return client;
 		}
 

@@ -112,6 +112,7 @@ namespace DCLF::Features::Sky
 		std::int32_t depth = -1;                            // RE::RENDER_TARGETS_DEPTHSTENCIL of the depth target
 		std::int32_t sceneDepth = -1;                       // the main pass's t17, an engine depth target (-1: none)
 		std::string sceneDepthId;                           // or a published graph texture's id
+		const void* sceneDepthView = nullptr;               // or the D3D11 view CS binds (Terrain Blending's D3D11 depth), imported
 		bool cloudShadows = false;                          // Cloud Shadows' published occlusion is read (t25, t26)
 		// The headers' textures the sky's includes read (kHeaderRegisters): what CS binds there for the pass, as a published graph
 		// texture's id, or the D3D11 view (imported) when it is not one's export. Neither: nothing is bound there.

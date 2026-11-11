@@ -144,6 +144,18 @@ The engine's CPU code runs unchanged; its draw choke point latches state (Phase 
   rest of that batch the engine's (the draws latched before it are drawn after the batch: one batch out of order) and the view
   probes again. Cloud Shadows' copy reads the faces' graph occlusion only while the faces' batches are the graph's
   (`UseCloudFaces`), its D3D11 layer otherwise. Nothing is withheld for a program that does not build.
+- **Refusals.** A draw the family cannot take is logged once per reason, technique and view (`a main sky draw of technique N stays
+  the engine's: <reason>`): no TriShape buffers, too many draws, not BSSkyShader, a stencil state, no mirrored vertex constants, no
+  state object, no program, a buffer or texture import, a sampler. A probe checks every draw (so one probe builds every program); a
+  batch the graph draws stops at the first refusal. Every pass of a batch must draw through `DrawTriShape` (SetupGeometry calls
+  against DrawTriShape calls): a pass that draws through another of R1's draw functions is the engine's at its place in the batch,
+  ahead of the graph's draws, so the batch is refused and the log names the geometry types (`drew without DrawTriShape`).
+  Round 2 found that the cloud layers (techniques 4-6) never reached DrawTriShape in a probe, so the engine drew them during the
+  batch and the graph's dome then covered them (the white sky); the next run's log names their geometry type.
+- **Constants.** A technique's PerGeometry group holds only the rows its vanilla shader declares; the latch takes what there is
+  (at least c0-c12) and zeroes the rest, and a pixel stage without a group gets zero PParams.
+- **The scene depth.** When CS's t17 is neither an engine depth nor a published texture (Terrain Blending's D3D11 depth), its view
+  is imported (`Sky::SceneDepth`). Round 2 bound nothing there, so the sun's depth test read zero and hid the sun.
 - **The headers' textures.** Exponential Height Fog's header includes IBL's (t76, t77) and Dynamic Cubemaps' (t30, t31) headers;
   the reflection fog reads t31. They are `EXTERN` entries of the ORG build (Dynamic Cubemaps' are header SRVs now), bound to what
   CS binds there for the pass: a published texture by id, or the D3D11 view imported (`Sky::t<register>`).
