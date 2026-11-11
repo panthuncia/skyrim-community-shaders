@@ -10,7 +10,7 @@
 // D3D11 renderer writes into its two constant buffers (mvp and texgen for the vertex stage, cxmul and cxadd for the pixel
 // stage), so both stages compute exactly what the D3D11 shaders compute.
 //
-// The push block must match FillDraw and FillBlock in src/RenderGraph/Engine/Scaleform/ScaleformPasses.cpp.
+// The push block must match FillBlock in src/RenderGraph/Engine/Scaleform/Passes.cpp.
 
 #	include "Common/OrgResources.hlsli"
 
