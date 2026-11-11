@@ -206,8 +206,14 @@ namespace DCLF::Features::Effects
 			variants |= kEffectVariantShape;
 		}
 		// The palette path (CS_DCLF_SKINNED) draws a skinned effect when the descriptor's Skinned bit (EffectSkinned) matches the
-		// leaf having a skin instance. kSkinned on a static shape without skinned vertices is no variant; any other mismatch is.
-		if (EffectSkinned(a_property, a_leaf) != a_leaf.Skinned() || (a_leaf.Skinned() && !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Skinned)))
+		// leaf having a skin instance. kSkinned on a static shape without skinned vertices is no variant. A skin instance under a
+		// descriptor without the bit is a rigid skin: SetupGeometry (AE 0x1414eab10) writes World from the geometry's world when the
+		// descriptor's bit 3 is clear, and the skin path (RenderPassImmediately +0x1DF) draws each partition with the unskinned
+		// vertex shader, as DCLF draws it with rigidSkins. The other mismatch (the bit without a skin instance) reads bones nothing
+		// set, so it stays a variant.
+		const bool effectSkinned = EffectSkinned(a_property, a_leaf);
+		if ((a_leaf.Skinned() && !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Skinned)) || (effectSkinned && !a_leaf.Skinned()) ||
+			(!effectSkinned && a_leaf.Skinned() && !ported.rigidSkins))
 			variants |= kEffectVariantSkinned;
 		// Effect decals (hints 2 and 3) go to DCLF's decal groups (G-buffer pass, DEFERRED). kTempRefraction with kDynamicDecal
 		// registers no pass at all (GetRenderPasses), so it stays a variant.

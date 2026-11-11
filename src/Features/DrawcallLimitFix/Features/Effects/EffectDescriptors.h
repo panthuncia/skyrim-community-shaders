@@ -40,7 +40,7 @@ namespace DCLF::Features::Effects
 	enum EffectVariantBit : std::uint32_t
 	{
 		kEffectVariantShape = 1u << 0,          // any shape but a BSTriShape or a particle system (dynamic shapes)
-		kEffectVariantSkinned = 1u << 1,        // EffectSkinned disagrees with the leaf's skin instance, or CS_DCLF_SKINNED off
+		kEffectVariantSkinned = 1u << 1,        // EffectSkinned disagrees with the leaf's skin instance (a rigid skin only without its switch), or CS_DCLF_SKINNED off
 		kEffectVariantDecal = 1u << 2,          // kDecal / kDynamicDecal with CS_DCLF_DECALS off, or one that registers no pass
 		kEffectVariantSkyObject = 1u << 3,      // bit 45: hint 0x12, geometry group 13
 		kEffectVariantWireframe = 1u << 4,      // bit 48
@@ -70,12 +70,17 @@ namespace DCLF::Features::Effects
 	 * classification, so any thread reads them after):
 	 * - cloudLighting (CS_DCLF_EFFECT_CLOUD_LIGHT): the Lighting variant of a kCloudLOD property, lit by the scene's cloud light
 	 *   (EffectFrame.cpp's cloud light row, chosen by the shading row: EffectProperty.cpp);
-	 * - falloff (CS_DCLF_EFFECT_FALLOFF): a mesh with Falloff and no blending alpha property, drawn unblended in the forward sort.
+	 * - falloff (CS_DCLF_EFFECT_FALLOFF): a mesh with Falloff and no blending alpha property, drawn unblended in the forward sort;
+	 * - rigidSkins (CS_DCLF_EFFECT_RIGID_SKINS): a shape with a skin instance whose pass descriptor has no Skinned bit (the property
+	 *   without kSkinned, or vertices without skin data). The engine draws each partition with the unskinned vertex shader and
+	 *   World from the geometry's world (SetupGeometry writes World when the descriptor has no Skinned bit), as DCLF's partition
+	 *   slots and placement row do.
 	 */
 	struct PortedVariants
 	{
 		bool cloudLighting = false;
 		bool falloff = false;
+		bool rigidSkins = false;
 	};
 	void SetPortedVariants(const PortedVariants& a_variants);
 	const PortedVariants& Ported();
