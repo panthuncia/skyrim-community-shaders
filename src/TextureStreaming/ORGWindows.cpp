@@ -182,7 +182,10 @@ namespace TextureStreaming::ORG
 		 * @brief Makes the window: an image ORG's allocator holds, wrapped for D3D11 with its mips as initial data, and imported into the
 		 * graph for its descriptor. DXVK writes the mips in its own stream (its initializer, ahead of any later D3D11 or graph work), so
 		 * no graph pass copies them: nothing registers with the graph, and the graph is never built again for a window. Any thread, as
-		 * D3D11's texture creation is. False: the backend cannot make this window.
+		 * D3D11's texture creation is. The import is safe off the render thread too, the same path engine textures take
+		 * (Engine/Textures, Textures::Create): BasicRHI's resource registry allocates under its own lock, ORG's DescriptorHeapManager
+		 * assigns the SRV slot under its mutation mutex, and the resource's ECS token is posted to ECSManager's queue, never made
+		 * in the world on this thread. The host lives until DXVK destroys its device. False: the backend cannot make this window.
 		 */
 		bool MakeWindow(Staged& a_item, const D3D11_TEXTURE2D_DESC& a_desc, std::shared_ptr<org::memory::AllocatedResource> a_image,
 			const std::vector<D3D11_SUBRESOURCE_DATA>& a_mips)
