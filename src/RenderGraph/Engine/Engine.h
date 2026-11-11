@@ -11,7 +11,7 @@
 namespace RenderGraph::Engine
 {
 	/**
-	 * @brief Main thread, Hooks::Install: every subsystem's game hooks, in this order: Textures, Buffers, Constants, Bink,
+	 * @brief Main thread, Hooks::Install: every subsystem's game hooks, in this order: Flush, Textures, Buffers, Constants, Bink,
 	 * LoadingScreen, Pipeline, Targets, Skeleton, ImageSpace, Scaleform.
 	 */
 	void InstallGameHooks();

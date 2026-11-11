@@ -5,6 +5,7 @@
 #include "GpuIdleTrace.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
@@ -66,6 +67,7 @@
 #include "TextureStreaming/Census.h"
 #include "TextureStreaming/Streamer.h"
 
+#include <intrin.h>
 #include <xmmintrin.h>
 #include <unordered_map>
 
@@ -1184,7 +1186,7 @@ namespace Hooks
 					if (state->ShaderEnabled(type)) {
 						RE::BSGraphics::VertexShader* vertexShader = shaderCache->GetVertexShader(*currentShader, state->modifiedVertexDescriptor);
 						if (vertexShader) {
-							globals::d3d::context->VSSetShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader), NULL, NULL);
+							RenderGraph::Engine::Flush::BindVertexShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader), _ReturnAddress());
 							state->customVertexShader = vertexShader;
 							*globals::game::currentVertexShader = a_vertexShader;
 							globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
@@ -1199,7 +1201,7 @@ namespace Hooks
 			state->customVertexShader = nullptr;
 			*globals::game::currentVertexShader = a_vertexShader;
 			// An engine shader can be a tripwire handle (P4.6), which DXVK's own context cannot take.
-			globals::d3d::context->VSSetShader(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11VertexShader*>(a_vertexShader->shader)), NULL, NULL);
+			RenderGraph::Engine::Flush::BindVertexShader(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11VertexShader*>(a_vertexShader->shader)), _ReturnAddress());
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -1218,7 +1220,7 @@ namespace Hooks
 					if (state->ShaderEnabled(type)) {
 						RE::BSGraphics::PixelShader* pixelShader = shaderCache->GetPixelShader(*currentShader, state->modifiedPixelDescriptor);
 						if (pixelShader) {
-							globals::d3d::context->PSSetShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader), NULL, NULL);
+							RenderGraph::Engine::Flush::BindPixelShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader), _ReturnAddress());
 							state->customPixelShader = pixelShader;
 							*globals::game::currentPixelShader = a_pixelShader;
 							return;
@@ -1231,7 +1233,7 @@ namespace Hooks
 			state->customPixelShader = nullptr;
 
 			if (a_pixelShader)
-				globals::d3d::context->PSSetShader(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11PixelShader*>(a_pixelShader->shader)), NULL, NULL);
+				RenderGraph::Engine::Flush::BindPixelShader(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11PixelShader*>(a_pixelShader->shader)), _ReturnAddress());
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
