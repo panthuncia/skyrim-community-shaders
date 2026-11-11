@@ -220,6 +220,30 @@ namespace RenderGraph::Engine::Tripwire
 	}
 
 	/**
+	 * @brief Makes a texture in place of a device handle's CreateTexture2D: true when it did (*a_out holds one reference to it),
+	 * false to let the call go on to the wrapped device.
+	 */
+	using CreateTexture2DHook = bool (*)(const D3D11_TEXTURE2D_DESC& a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture2D** a_out);
+
+	/**
+	 * @brief While one lives, a device handle's CreateTexture2D called on this thread asks a_hook first (Scaleform's textures:
+	 * GfxTextures.cpp). It is the interception point for engine texture creation: no vtable is patched, and a device that is not
+	 * a handle (the guest off) never calls it. Scopes nest; the hook itself runs with none set, so the textures it makes are
+	 * plain ones.
+	 */
+	class ScopedCreateTexture2DHook
+	{
+	public:
+		explicit ScopedCreateTexture2DHook(CreateTexture2DHook a_hook);
+		~ScopedCreateTexture2DHook();
+		ScopedCreateTexture2DHook(const ScopedCreateTexture2DHook&) = delete;
+		ScopedCreateTexture2DHook& operator=(const ScopedCreateTexture2DHook&) = delete;
+
+	private:
+		CreateTexture2DHook previous;
+	};
+
+	/**
 	 * @brief Render thread, each frame (P4.2 installs the call): hands the ORG resources and owners of handles released since the
 	 * last call to RenderGraphRuntime::ReleaseAfterD3D11, which keeps them until the GPU is past the D3D11 work issued so far. Without
 	 * the render graph they are dropped.

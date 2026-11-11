@@ -720,6 +720,35 @@ namespace RenderGraph::Engine::Tripwire
 		Detail::Zero(a_out);
 	}
 
+	namespace
+	{
+		/** @brief The calling thread's ScopedCreateTexture2DHook, if any. */
+		thread_local CreateTexture2DHook t_createTexture2D = nullptr;
+	}
+
+	ScopedCreateTexture2DHook::ScopedCreateTexture2DHook(CreateTexture2DHook a_hook) :
+		previous(std::exchange(t_createTexture2D, a_hook))
+	{}
+
+	ScopedCreateTexture2DHook::~ScopedCreateTexture2DHook()
+	{
+		t_createTexture2D = previous;
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateTexture2D(const D3D11_TEXTURE2D_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture2D** a_out)
+	{
+		if (const auto hook = t_createTexture2D; hook && a_desc && a_out) {
+			// The hook runs with no scope set, so a texture it makes through a device handle is a plain one.
+			const ScopedCreateTexture2DHook none(nullptr);
+			if (hook(*a_desc, a_data, a_out))
+				return S_OK;
+		}
+		if (core.Enter(static_cast<std::uint16_t>(Slot::CreateTexture2D), "CreateTexture2D", _ReturnAddress()))
+			return static_cast<ID3D11Device*>(core.wrapped)->CreateTexture2D(a_desc, a_data, a_out);
+		Detail::Zero(a_out);
+		return Detail::Failure<HRESULT>();
+	}
+
 	void STDMETHODCALLTYPE DeviceContextHandle::GetDevice(ID3D11Device** a_out)
 	{
 		if (auto* paired = device.load(std::memory_order_acquire)) {
