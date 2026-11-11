@@ -692,6 +692,25 @@ Scaleform):
 4.  **Count it done** in the client's `executed` callback, which runs only for a run that was submitted with this registration's
     passes in its graph. It is the standard signal that withheld work reached submission.
 
+#### Leaving a draw to the engine under the flush latch
+
+With the flush latch on (`CS_ORG_ENGINE_FLUSH_LATCH=1`, [p5/flush.md](p5/flush.md) "Allowed engine draws"), the engine's flushes
+bind nothing, and an engine draw that reaches D3D11 is skipped unless someone vouched for it. So every place that hands work back
+to the engine on purpose (an inherent refusal, a batch handed back, step 3's fallback, DCLF's objects not yet claimed) says so,
+with `src/RenderGraph/Engine/Flush/Flush.h`:
+
+-   Make one `Flush::Reason` per reason, once (a function-local `static const`), its name starting with the owner:
+    `static const Flush::Reason kRefused{ "sky: batch handed back" };`.
+-   Around a synchronous call of the engine's draw, batch or flush, open `Flush::EngineDraws scope(kRefused);` just before the call
+    and close it right after. Inside it, flushes apply the owed state, shader binds and dispatches reach D3D11, and draws go
+    through, counted under the reason.
+-   For a pass the engine registers now and its batch walk draws later, call `Flush::VouchPass(pass, kReason)` where the pass is
+    registered (test `Flush::Vouching()` first if deciding costs anything). The latch's `RenderPassImmediately` detour opens the
+    scope for that pass's draws in that frame or the next.
+
+Both cost one flag test with the latch off. A draw nobody vouched for is still skipped and logged as an `[E]` line: that is a bug in
+whatever left it to the engine. The latch's periodic line lists the allowed draws by reason.
+
 ### Pass helpers
 
 `src/RenderGraph/AnchorPasses.h` makes a client's common passes from plain descriptions, generalised from Post Processing's chain
