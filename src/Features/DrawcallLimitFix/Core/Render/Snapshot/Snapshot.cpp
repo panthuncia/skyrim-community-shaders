@@ -961,7 +961,10 @@ namespace DCLF
 													 "hand drawing back to the engine within a frame it draws",
 						frame, failure));
 				s.ReleaseTicketsForRecordings(*host, 0);
-				Direct::SubmitQueued();
+				// Everything in DXVK's stream to the device: a recording waits for each slot's last run, and the host's thread prepares no
+				// ticket on a run that is neither done nor sealed. A run of this frame still in the stream reaches neither until this
+				// thread flushes it (the seal is this thread's Present), so the wait would never end.
+				Direct::SubmitQueued(true);
 				Direct::ReleaseCompletedSlots();
 				PollHostRetirement();
 				ticketsAt = now;
