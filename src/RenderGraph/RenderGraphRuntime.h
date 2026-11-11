@@ -102,6 +102,7 @@ public:
 		AnchorOverlay,
 		AnchorHDROutput,
 		AnchorCapture,
+		AnchorInterface,
 		Count
 	};
 

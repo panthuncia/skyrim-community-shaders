@@ -65,6 +65,9 @@ namespace FrameAnchors
 		Overlay,             // the overlay's draw (OverlayRenderer::FinalizeImGuiFrame), after ImGui built its frame, before HDR output
 		HDROutput,           // HDRDisplay's output composite (ApplyHDR), after the overlay and other mods' Present hooks, before the present
 		Capture,             // the screenshot capture (ScreenshotFeature::ProcessCaptureRequest), after HDR output, before the native Present
+		// Out of frame order (appended, so the values above stay): each Scaleform display's EndDisplay on the main thread, between
+		// FrameGeneration and Present (RenderGraph/Engine/Scaleform), several times a frame.
+		Interface,
 		Count
 	};
 
