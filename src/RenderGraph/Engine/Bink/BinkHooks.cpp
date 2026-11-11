@@ -348,6 +348,70 @@ namespace RenderGraph::Engine::Bink
 		};
 	}
 
+	namespace
+	{
+		struct PendingPlay
+		{
+			std::mutex mutex;
+			std::vector<std::string> files;
+			std::atomic<bool> any{ false };
+		};
+
+		PendingPlay& Pending()
+		{
+			static PendingPlay s_pending;
+			return s_pending;
+		}
+
+		/** @brief MoviePlayer::PlayMovie (SE 87918, AE 90291) as Console::PlayBink calls it, with its defaults. */
+		void Play(const std::string& a_file)
+		{
+			using PlayMovie = bool(void* a_player, const char* a_file, bool, bool, bool, bool, bool, bool, bool, bool);
+			static REL::Relocation<void**> player{ REL::RelocationID(525733, 412214) };
+			static REL::Relocation<PlayMovie*> play{ REL::RelocationID(87918, 90291) };
+			if (!*player) {
+				logger::warn("[ORG] Bink: no movie player to play {}", a_file);
+				return;
+			}
+			logger::info("[ORG] Bink: playing {} on thread {} (main thread: {})", a_file, ::GetCurrentThreadId(), FrameAnchors::OnMainThread());
+			const bool played = play(*player, a_file.c_str(), false, false, false, false, true, false, true, true);
+			logger::info("[ORG] Bink: {} {}", a_file, played ? "played" : "did not play to its end");
+		}
+
+		/** @brief JobListManager's frame-job wait (SE 34554, AE 35409), called only by Main::Update, on the main thread. */
+		struct WaitForFrameJobs
+		{
+			static void thunk()
+			{
+				func();
+				auto& pending = Pending();
+				if (!pending.any.load(std::memory_order_acquire))
+					return;
+				std::vector<std::string> files;
+				{
+					std::scoped_lock lock(pending.mutex);
+					files.swap(pending.files);
+					pending.any.store(false, std::memory_order_release);
+				}
+				for (const auto& file : files)
+					Play(file);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+	}
+
+	void RequestPlay(std::string a_file)
+	{
+		if (!WaitForFrameJobs::func.address()) {
+			logger::warn("[ORG] Bink: the frame-job wait is not hooked; {} is not played", a_file);
+			return;
+		}
+		auto& pending = Pending();
+		std::scoped_lock lock(pending.mutex);
+		pending.files.push_back(std::move(a_file));
+		pending.any.store(true, std::memory_order_release);
+	}
+
 	bool Requested()
 	{
 		static const bool requested = !REL::Module::IsVR() && Switches::On("CS_ORG_BINK");
@@ -358,6 +422,8 @@ namespace RenderGraph::Engine::Bink
 	{
 		if (REL::Module::IsVR())
 			return;
+		// RequestPlay's main-thread point (the test harness's dclf:bink); one atomic load a frame when nothing is asked.
+		stl::detour_thunk<WaitForFrameJobs>(REL::RelocationID(34554, 35409));
 		const bool shots = !ShotFrames().empty();
 		if (!Requested() && !shots)
 			return;

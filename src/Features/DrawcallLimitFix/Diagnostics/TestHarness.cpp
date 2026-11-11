@@ -3,6 +3,7 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "TestHarness.h"
+#include "RenderGraph/Engine/Bink/Bink.h"
 
 #include "Vram/MemProbe.h"
 #include "Vram/SpillLab.h"
@@ -608,28 +609,12 @@ namespace DCLF
 							manager->Load(name.c_str());
 						return;
 					}
-					// "dclf:bink=<file>": a Bink movie from Data\Video played as the console's PlayBink plays it, through
-					// MoviePlayer::PlayMovie (SE 87918, AE 90291) with the console's defaults, on the main thread from a task (not inside
-					// this Present: the movie presents its own frames). The console's PlayBink does nothing when run as a compiled script.
+					// "dclf:bink=<file>": a Bink movie from Data\Video played as the console's PlayBink plays it, on the main thread at its next
+					// frame-job wait (Bink::RequestPlay). The console's PlayBink does nothing as a compiled script, and SKSE tasks run on job
+					// threads.
 					if (command.rfind("dclf:bink=", 0) == 0) {
-						const auto file = command.substr(10);
-						auto* tasks = SKSE::GetTaskInterface();
-						if (file.empty() || !tasks || REL::Module::IsVR()) {
-							logger::warn("[DCLF] test command {}: no file, no task interface or VR", command);
-							return;
-						}
-						tasks->AddTask([file] {
-							using PlayMovie = bool(void* a_player, const char* a_file, bool, bool, bool, bool, bool, bool, bool, bool);
-							static REL::Relocation<void**> player{ REL::RelocationID(525733, 412214) };
-							static REL::Relocation<PlayMovie*> play{ REL::RelocationID(87918, 90291) };
-							if (!*player) {
-								logger::warn("[DCLF] test command dclf:bink: no movie player");
-								return;
-							}
-							logger::info("[DCLF] dclf:bink: playing {}", file);
-							const bool played = play(*player, file.c_str(), false, false, false, false, true, false, true, true);
-							logger::info("[DCLF] dclf:bink: {} {}", file, played ? "played" : "did not play to its end");
-						});
+						if (command.size() > 10)
+							RenderGraph::Engine::Bink::RequestPlay(command.substr(10));
 						return;
 					}
 					// "dclf:mark[=<label>]": nothing but this line in the log, a phase's boundary for the run's analysis.

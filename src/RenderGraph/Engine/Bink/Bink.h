@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 /**
  * @brief Bink video drawn by the render graph (org-full-port.md P5.11), behind CS_ORG_BINK=1. The RE and the design are in
  * docs/development/p5/bink.md.
@@ -27,4 +29,11 @@ namespace RenderGraph::Engine::Bink
 	 * requested or when the CS_ORG_BINK_SHOT diagnostic is set, and reserves the Present anchor when requested.
 	 */
 	void InstallHooks();
+
+	/**
+	 * @brief Any thread: plays a_file (from Data\Video) on the engine's main thread at its next frame-job wait (SE 34554, AE
+	 * 35409, in Main::Update), through MoviePlayer::PlayMovie with the console's PlayBink defaults. The test harness's
+	 * dclf:bink: the console's PlayBink does nothing as a compiled script, and SKSE tasks run on job threads here.
+	 */
+	void RequestPlay(std::string a_file);
 }
