@@ -69,23 +69,23 @@ namespace RenderGraph::Engine::Bink
 #	include "Globals.h"
 #	include "RenderGraph/Engine/Bink/Bink.h"
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/FrameStaging.h"
+#	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/ProgramCache.h"
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "Utils/Logging.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
 #	include <Render/PreparedPass.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/Buffers/Buffer.h>
 #	include <Resources/ExternalTextureResource.h>
 #	include <rhi_helpers.h>
 
 #	include <algorithm>
-#	include <atomic>
 #	include <cstring>
-#	include <map>
-#	include <mutex>
 #	include <optional>
 
 namespace RenderGraph::Engine::Bink::Graph
@@ -97,8 +97,13 @@ namespace RenderGraph::Engine::Bink::Graph
 		// D3D12's copy rules, which Vulkan's satisfy: rows of a texture copy 256-byte aligned, a copy's start 512.
 		constexpr std::uint32_t kRowAlignment = 256;
 		constexpr std::uint64_t kPlacementAlignment = 512;
-		// Frames queued in a row whose run never came: the graph path stops after this many.
-		constexpr std::uint32_t kMaxMisses = 3;
+		// The movie texture every tile is copied into, at its place in the video: a 1920x1080 movie's tiles reach 1920x1088 (the
+		// bottom row's power-of-two edge tiles). A larger movie keeps the engine's path.
+		constexpr std::uint32_t kAtlasWidth = 2048;
+		constexpr std::uint32_t kAtlasHeight = 1152;
+		// Staging buffers: the frame the decoder fills and the frames in flight. A 1080p frame takes 8.3 MB; with none to take, a
+		// tick decodes on the engine's path.
+		constexpr std::uint32_t kMaxStaging = 4;
 
 		// Must match the push block of BinkCopy.hlsl: the TexBase and SampBase handles, then the BinkQuad PUSH entry on a 16-byte
 		// boundary.
@@ -108,68 +113,18 @@ namespace RenderGraph::Engine::Bink::Graph
 			ShaderBindings::Handle sampler = 0;
 			std::uint32_t padding[2]{};
 			float rect[4]{};
+			float uv[4]{};
 		};
-		static_assert(sizeof(QuadBlock) == 32);
+		static_assert(sizeof(QuadBlock) == 48);
 		constexpr std::uint32_t kQuadWords = ShaderBindings::Words<QuadBlock>();
 
 		std::uint64_t AlignUp(std::uint64_t a_value, std::uint64_t a_alignment) { return (a_value + a_alignment - 1) / a_alignment * a_alignment; }
 	}
 
-	/** @brief Host-visible staging buffers of one size, reused once the frame that used one retired (its last owner gave it back). */
-	struct StagingPool
-	{
-		std::mutex mutex;
-		std::vector<std::shared_ptr<org::LatchBlock>> spare;
-		std::uint32_t bytes = 0;
-		std::uint32_t made = 0;
-	};
-
-	namespace
-	{
-		// Frames in flight that can each hold a buffer, and the one the decoder fills. A 1080p movie takes 8.3 MB a buffer; with
-		// none spare, a tick decodes on the engine's path.
-		constexpr std::uint32_t kMaxStaging = 4;
-
-		std::shared_ptr<org::LatchBlock> AcquireStaging(const std::shared_ptr<StagingPool>& a_pool)
-		{
-			std::shared_ptr<org::LatchBlock> block;
-			{
-				std::scoped_lock lock(a_pool->mutex);
-				if (!a_pool->spare.empty()) {
-					block = std::move(a_pool->spare.back());
-					a_pool->spare.pop_back();
-				} else if (a_pool->made >= kMaxStaging) {
-					return nullptr;
-				}
-			}
-			if (!block) {
-				try {
-					block = org::LatchBlock::Create("cs.bink.staging", a_pool->bytes, 1);
-				} catch (const std::exception& e) {
-					logger::error("[ORG] Bink: a staging buffer of {} bytes could not be made: {}", a_pool->bytes, e.what());
-					return nullptr;
-				}
-				std::scoped_lock lock(a_pool->mutex);
-				++a_pool->made;
-			}
-			// The pool is held weakly: a buffer coming back after the movie ended is released.
-			std::weak_ptr<StagingPool> pool = a_pool;
-			auto* raw = block.get();
-			return std::shared_ptr<org::LatchBlock>(raw, [pool, block = std::move(block)](org::LatchBlock*) mutable {
-				if (auto owner = pool.lock()) {
-					std::scoped_lock lock(owner->mutex);
-					owner->spare.push_back(std::move(block));
-				}
-			});
-		}
-	}
-
-	/** @brief One tile's ORG texture and where its bytes sit in a staging buffer. */
+	/** @brief One tile: its rectangle of the video (and of the movie texture) and where its bytes sit in a staging buffer. */
 	struct Tile
 	{
 		TileDesc desc;
-		std::shared_ptr<rhi::ResourcePtr> resource;  // shared with its view, which owns it
-		org::OwnedDescriptorBinding view;
 		std::uint64_t offset = 0;
 		std::uint32_t rowPitch = 0;
 		bool edge = false;  // a power-of-two edge tile: the decoder fills only the video's part of it
@@ -179,38 +134,23 @@ namespace RenderGraph::Engine::Bink::Graph
 	{
 	public:
 		std::vector<Tile> tiles;
-		std::shared_ptr<StagingPool> pool = std::make_shared<StagingPool>();
-		// Main thread.
+		std::uint64_t stagingBytes = 0;
+		// Render thread.
 		std::shared_ptr<org::LatchBlock> decoding;  // this tick's staging buffer, from the first lock
-		bool uploaded = false;                      // a frame's upload was committed: the textures left their undefined layout
-		bool current = false;                       // the textures (once uploaded) hold the newest decoded frame
+		bool current = false;                       // the movie texture (once uploaded) holds the newest decoded frame
 	};
 
 	namespace
 	{
-		/** @brief What one execution of the pass records: immutable once the commit stored it. */
+		/** @brief What one run of the passes draws: immutable once the commit stored it. */
 		struct Frame
 		{
 			std::shared_ptr<const Movie> movie;
-			std::shared_ptr<org::LatchBlock> staging;  // null: draw the textures as they are
-			bool first = false;                        // the upload starts from the undefined layout
+			std::shared_ptr<org::LatchBlock> staging;  // null: draw the movie texture as it is
 			std::shared_ptr<const RasterProgram> program;
 			ShaderBindings::Handle sampler = 0;
 			std::shared_ptr<const void> samplerOwner;
 			std::uint32_t width = 0, height = 0;
-		};
-
-		/** @brief The frames the commit stored, one per host frame slot; Record takes its slot's. */
-		struct Slots
-		{
-			explicit Slots(std::uint32_t a_count) :
-				frames(std::make_unique<std::atomic<std::shared_ptr<const Frame>>[]>(a_count)), count(a_count) {}
-
-			std::shared_ptr<const Frame> Take(std::uint32_t a_slot) const { return frames[a_slot % count].exchange(nullptr, std::memory_order_acq_rel); }
-			void Store(std::uint32_t a_slot, std::shared_ptr<const Frame> a_frame) const { frames[a_slot % count].store(std::move(a_frame), std::memory_order_release); }
-
-			std::unique_ptr<std::atomic<std::shared_ptr<const Frame>>[]> frames;
-			std::uint32_t count;
 		};
 
 		/** @brief A frame queued for the Present anchor's run. */
@@ -222,22 +162,23 @@ namespace RenderGraph::Engine::Bink::Graph
 
 		struct BinkState
 		{
+			bool setUp = false;
 			bool failed = false;
-			bool registered = false;
-			std::shared_ptr<org::ExternalTextureResource> target;
-			ID3D11Texture2D* targetTexture = nullptr;  // the framebuffer texture the client's pass declares
+			bool joined = false;  // the Present anchor's built graph holds this registration (FrameAnchors::RequestJoin)
+			std::unique_ptr<GraphResources::Texture2D> atlas;
+			std::shared_ptr<FrameStaging> staging;
+			// The frame each pass records, per host frame slot: the upload's and the draw's.
+			std::shared_ptr<const RunSlots<Frame>> uploads, draws;
+			std::shared_ptr<org::ExternalTextureResource> target;  // the framebuffer the pass draws (FrameAnchors::EngineTarget)
 			std::uint32_t width = 0, height = 0;
-			std::uint32_t format = 0;  // rhi::Format of the framebuffer's RTV
-			std::map<std::uint32_t, std::shared_ptr<const RasterProgram>> programs;
-			std::map<std::uint32_t, bool> failedPrograms;
+			rhi::Format format = rhi::Format::Unknown;  // of the framebuffer's RTV
 			org::OwnedDescriptorBinding sampler;
-			std::shared_ptr<Slots> slots;
 			std::optional<Pending> pending;
-			std::uint64_t queued = 0;     // frames queued
-			std::uint64_t committed = 0;  // the newest queued frame a commit stored
-			std::uint64_t executed = 0;   // the newest committed frame whose run had the pass in its graph
-			std::uint64_t checked = 0;    // the newest queued frame Begin has checked
-			std::uint32_t misses = 0;     // checked frames in a row that did not run
+			const Movie* uploaded = nullptr;  // the movie whose frame the movie texture holds
+			std::uint64_t queued = 0;         // frames queued
+			std::uint64_t committed = 0;      // the newest queued frame a commit stored
+			std::uint64_t executed = 0;       // the newest committed frame whose run had the passes in its graph
+			bool missed = false;              // a queued frame did not draw: the engine draws the rest of this movie
 		};
 
 		BinkState& Get()
@@ -246,128 +187,122 @@ namespace RenderGraph::Engine::Bink::Graph
 			return s_state;
 		}
 
+		/** @brief The tile program per framebuffer format, built off the render thread. */
+		ProgramCache<RasterProgram, rhi::Format>& Programs()
+		{
+			static ProgramCache<RasterProgram, rhi::Format> programs{ "Bink" };
+			return programs;
+		}
+
+		std::shared_ptr<const RasterProgram> ProgramFor(rhi::Format a_format)
+		{
+			return Programs().Get(a_format, [&] {
+				RasterProgram::Desc desc{};
+				desc.vertexSource = kShader;
+				desc.vertexEntry = L"VSMain";
+				desc.pixelSource = kShader;
+				desc.pixelEntry = L"PSMain";
+				desc.constantWords = kQuadWords;
+				// BSMovie::DrawTiles sets blending off (alpha blend mode 0) and depth off (depth mode 0); the engine's rasterizer state at
+				// that point culls nothing, and the quads wind counter-clockwise.
+				desc.targets = { RasterProgram::Target{ .format = a_format } };
+				return desc;
+			});
+		}
+
 		void Fail(BinkState& a_state, const char* a_why)
 		{
 			if (a_state.failed)
 				return;
 			a_state.failed = true;
 			a_state.pending.reset();
-			if (a_state.registered) {
-				FrameAnchors::Unregister(kClientId);
-				a_state.registered = false;
-			}
+			FrameAnchors::Unregister(kClientId);
 			logger::error("[ORG] Bink: {}; the engine draws Bink from now on", a_why);
 		}
 
-		const RasterProgram* ProgramFor(BinkState& a_state, std::uint32_t a_format)
+		Util::ReasonLog& EngineDraws()
 		{
-			if (const auto found = a_state.programs.find(a_format); found != a_state.programs.end())
-				return found->second.get();
-			if (a_state.failedPrograms.contains(a_format))
-				return nullptr;
-			auto* host = RenderGraphRuntime::Get().Host();
-			if (!host)
-				return nullptr;
-			RasterProgram::Desc desc{};
-			desc.vertexSource = kShader;
-			desc.vertexEntry = L"VSMain";
-			desc.pixelSource = kShader;
-			desc.pixelEntry = L"PSMain";
-			desc.constantWords = kQuadWords;
-			// BSMovie::DrawTiles sets blending off (alpha blend mode 0) and depth off (depth mode 0); the engine's rasterizer state at
-			// that point culls nothing, and the quads wind counter-clockwise.
-			desc.targets = { RasterProgram::Target{ .format = static_cast<rhi::Format>(a_format) } };
-			auto program = RasterProgram::Load(host->Device(), desc);
-			if (!program) {
-				a_state.failedPrograms[a_format] = true;
-				logger::error("[ORG] Bink: the pipeline for target format {} could not be made", a_format);
-				return nullptr;
-			}
-			auto* raw = program.get();
-			a_state.programs[a_format] = std::move(program);
-			return raw;
+			static Util::ReasonLog s_log("[ORG] Bink: the engine draws this frame");
+			return s_log;
 		}
 
-		/** @brief The frame's tile copies and their barriers, before the draws (the graph does not track these textures). */
-		void RecordUpload(const Frame& a_frame, rhi::CommandList& a_commands)
+		struct UploadBindings
 		{
-			if (!a_frame.staging)
-				return;
-			const auto& tiles = a_frame.movie->tiles;
-			std::vector<rhi::TextureBarrier> barriers;
-			barriers.reserve(tiles.size());
-			for (const auto& tile : tiles) {
-				rhi::TextureBarrier barrier{};
-				barrier.texture = (*tile.resource)->GetHandle();
-				barrier.range.mipCount = 1;
-				barrier.beforeSync = a_frame.first ? rhi::ResourceSyncState::None : rhi::ResourceSyncState::PixelShading;
-				barrier.afterSync = rhi::ResourceSyncState::Copy;
-				barrier.beforeAccess = a_frame.first ? rhi::ResourceAccessType::None : rhi::ResourceAccessType::ShaderResource;
-				barrier.afterAccess = rhi::ResourceAccessType::CopyDest;
-				barrier.beforeLayout = a_frame.first ? rhi::ResourceLayout::Undefined : rhi::ResourceLayout::ShaderResource;
-				barrier.afterLayout = rhi::ResourceLayout::CopyDest;
-				// Every texel is written: the tile's whole texture is in the staging buffer.
-				barrier.discard = true;
-				barriers.push_back(barrier);
-			}
-			a_commands.Barriers({ .textures = { barriers.data(), static_cast<std::uint32_t>(barriers.size()) } });
-			const auto staging = a_frame.staging->Resource()->GetAPIResource().GetHandle();
-			for (const auto& tile : tiles) {
-				rhi::BufferTextureCopyFootprint copy{};
-				copy.texture = (*tile.resource)->GetHandle();
-				copy.buffer = staging;
-				copy.mip = 0;
-				copy.arraySlice = 0;
-				copy.x = 0;
-				copy.y = 0;
-				copy.footprint = { tile.offset, tile.rowPitch, tile.desc.width, tile.desc.height, 1 };
-				a_commands.CopyBufferToTexture(copy);
-			}
-			for (auto& barrier : barriers) {
-				barrier.beforeSync = rhi::ResourceSyncState::Copy;
-				barrier.afterSync = rhi::ResourceSyncState::PixelShading;
-				barrier.beforeAccess = rhi::ResourceAccessType::CopyDest;
-				barrier.afterAccess = rhi::ResourceAccessType::ShaderResource;
-				barrier.beforeLayout = rhi::ResourceLayout::CopyDest;
-				barrier.afterLayout = rhi::ResourceLayout::ShaderResource;
-				barrier.discard = false;
-			}
-			a_commands.Barriers({ .textures = { barriers.data(), static_cast<std::uint32_t>(barriers.size()) } });
-		}
+			org::ResourceBindingToken atlas;
+		};
 
-		struct PassBindings
+		struct DrawBindings
 		{
 			org::DeclaredViewToken target;
+			org::DeclaredViewToken atlas;
 		};
 
 		struct PassFrame
 		{
-			std::shared_ptr<const Slots> slots;
+			std::shared_ptr<const RunSlots<Frame>> slots;
 		};
 
-		/** @brief The tiles' upload and draw at the Present anchor, onto the framebuffer. Re-recorded every run (no Revision). */
-		class TilePass final : public org::TypedRenderGraphPass<TilePass, PassFrame, PassBindings>
+		/**
+		 * @brief A decoded frame's tiles copied from its staging buffer into the movie texture, each at its place in the video. Records
+		 * nothing on a run with no frame (the slot is empty). Recorded every run (no Revision): the slot decides.
+		 */
+		class UploadPass final : public org::TypedRenderGraphPass<UploadPass, PassFrame, UploadBindings>
 		{
 		public:
-			TilePass(std::shared_ptr<org::ExternalTextureResource> a_target, std::shared_ptr<const Slots> a_slots) :
-				target(std::move(a_target)), slots(std::move(a_slots)) {}
+			UploadPass(std::shared_ptr<org::Resource> a_atlas, std::shared_ptr<const RunSlots<Frame>> a_slots) :
+				atlas(std::move(a_atlas)), slots(std::move(a_slots)) {}
 
-			PassBindings Declare(org::PassBuilder& a_builder) { return { a_builder.RenderTarget(target).View() }; }
-
-			PassFrame Prepare(const PassBindings&, const org::PassPrepareContext&) const { return { slots }; }
-
-			static void Record(const PassBindings& a_bindings, const PassFrame& a_pass, org::PassRecordContext& a_recording)
+			UploadBindings Declare(org::PassBuilder& a_builder)
 			{
-				if (!a_pass.slots)
+				a_builder.PreferQueue(org::QueueKind::Graphics);
+				return { a_builder.CopyDestination(atlas) };
+			}
+
+			PassFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { slots }; }
+
+			static void Record(const UploadBindings& a_bindings, const PassFrame& a_pass, org::PassRecordContext& a_recording)
+			{
+				const auto frame = a_pass.slots->Take(a_recording.FrameSlot());
+				if (!frame || !frame->staging || !frame->movie)
 					return;
+				// The staging buffer stays until this recording's GPU work retires.
+				a_recording.Retain(frame);
+				const auto texture = a_recording.Resolve(a_bindings.atlas).GetHandle();
+				const auto staging = frame->staging->Resource()->GetAPIResource().GetHandle();
+				for (const auto& tile : frame->movie->tiles) {
+					rhi::BufferTextureCopyFootprint copy{};
+					copy.texture = texture;
+					copy.buffer = staging;
+					copy.x = tile.desc.x;
+					copy.y = tile.desc.y;
+					copy.footprint = { tile.offset, tile.rowPitch, tile.desc.width, tile.desc.height, 1 };
+					a_recording.Commands().CopyBufferToTexture(copy);
+				}
+			}
+
+		private:
+			std::shared_ptr<org::Resource> atlas;
+			std::shared_ptr<const RunSlots<Frame>> slots;
+		};
+
+		/** @brief The tiles drawn from the movie texture onto the framebuffer. Recorded every run (no Revision): the slot decides. */
+		class DrawPass final : public org::TypedRenderGraphPass<DrawPass, PassFrame, DrawBindings>
+		{
+		public:
+			DrawPass(std::shared_ptr<org::ExternalTextureResource> a_target, std::shared_ptr<org::Resource> a_atlas, std::shared_ptr<const RunSlots<Frame>> a_slots) :
+				target(std::move(a_target)), atlas(std::move(a_atlas)), slots(std::move(a_slots)) {}
+
+			DrawBindings Declare(org::PassBuilder& a_builder) { return { a_builder.RenderTarget(target).View(), a_builder.ShaderResource(atlas).View() }; }
+
+			PassFrame Prepare(const DrawBindings&, const org::PassPrepareContext&) const { return { slots }; }
+
+			static void Record(const DrawBindings& a_bindings, const PassFrame& a_pass, org::PassRecordContext& a_recording)
+			{
 				const auto frame = a_pass.slots->Take(a_recording.FrameSlot());
 				if (!frame || !frame->program || !frame->movie)
 					return;
-				// The staging buffer, the tile textures and their views stay until this recording's GPU work retires.
 				a_recording.Retain(frame);
 				auto& commands = a_recording.Commands();
-				RecordUpload(*frame, commands);
-
 				// The engine's tick cleared the framebuffer (its SetRenderTarget with the clear mode) before this run: the tiles go
 				// over it.
 				rhi::ColorAttachment colour{};
@@ -385,10 +320,15 @@ namespace RenderGraph::Engine::Bink::Graph
 				commands.BindLayout(frame->program->layout->GetHandle());
 				commands.BindPipeline(frame->program->Pipeline());
 				QuadBlock block{};
+				block.texture = a_recording.Index(a_bindings.atlas);
 				block.sampler = frame->sampler;
 				for (const auto& tile : frame->movie->tiles) {
-					block.texture = tile.view.Index();
 					std::memcpy(block.rect, tile.desc.rect, sizeof(block.rect));
+					// The tile's own texels of the movie texture.
+					block.uv[0] = static_cast<float>(tile.desc.x) / kAtlasWidth;
+					block.uv[1] = static_cast<float>(tile.desc.y) / kAtlasHeight;
+					block.uv[2] = static_cast<float>(tile.desc.x + tile.desc.width) / kAtlasWidth;
+					block.uv[3] = static_cast<float>(tile.desc.y + tile.desc.height) / kAtlasHeight;
 					commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, 0, 0, kQuadWords, reinterpret_cast<const std::uint32_t*>(&block));
 					commands.Draw(6, 1, 0, 0);
 				}
@@ -397,237 +337,204 @@ namespace RenderGraph::Engine::Bink::Graph
 
 		private:
 			std::shared_ptr<org::ExternalTextureResource> target;
-			std::shared_ptr<const Slots> slots;
+			std::shared_ptr<org::Resource> atlas;
+			std::shared_ptr<const RunSlots<Frame>> slots;
 		};
 
 		FrameAnchors::ClientDesc MakeClient()
 		{
+			auto& state = Get();
 			FrameAnchors::ClientDesc client{};
 			client.id = kClientId;
 			// First in the anchor: the movie frame is the image the other Present clients draw over.
+			client.passes.push_back({ .name = "cs.bink.upload",
+				.anchor = FrameAnchors::Anchor::Present,
+				.order = -1001,
+				.kind = FrameAnchors::PassKind::Copy,
+				.make = [atlas = state.atlas->Graph(), slots = state.uploads] { return std::make_shared<UploadPass>(atlas, slots); } });
 			client.passes.push_back({ .name = "cs.bink.tiles",
 				.anchor = FrameAnchors::Anchor::Present,
 				.order = -1000,
 				.kind = FrameAnchors::PassKind::Render,
 				.make = [] {
-					auto& state = Get();
-					return state.target && state.slots ? std::make_shared<TilePass>(state.target, state.slots) : nullptr;
+					auto& current = Get();
+					return std::make_shared<DrawPass>(current.target, current.atlas->Graph(), current.draws);
 				} });
+			client.registerResources = [](org::RenderGraph& a_graph) { Get().atlas->Register(a_graph); };
 			client.commit = [](const FrameAnchors::Point&) {
-				auto& state = Get();
+				auto& current = Get();
 				auto* host = RenderGraphRuntime::Get().Host();
-				if (!state.pending || !host || !state.slots)
+				if (!current.pending || !host)
 					return;
-				auto pending = std::move(*state.pending);
-				state.pending.reset();
-				const auto found = state.programs.find(state.format);
-				if (found == state.programs.end())
-					return;
+				auto pending = std::move(*current.pending);
+				current.pending.reset();
 				auto frame = std::make_shared<Frame>();
 				frame->movie = pending.movie;
 				frame->staging = std::move(pending.staging);
-				frame->first = frame->staging && !pending.movie->uploaded;
-				frame->program = found->second;
-				frame->sampler = state.sampler.Index();
-				frame->samplerOwner = state.sampler.Owner();
-				frame->width = state.width;
-				frame->height = state.height;
+				frame->program = ProgramFor(current.format);
+				frame->sampler = current.sampler.Index();
+				frame->samplerOwner = current.sampler.Owner();
+				frame->width = current.width;
+				frame->height = current.height;
 				if (frame->staging)
-					pending.movie->uploaded = true;
-				state.slots->Store(host->CurrentFrameSlot(), std::move(frame));
-				state.committed = state.queued;
+					current.uploaded = pending.movie.get();
+				const std::uint32_t slot = host->CurrentFrameSlot();
+				current.uploads->Store(slot, frame);
+				current.draws->Store(slot, std::move(frame));
+				current.committed = current.queued;
 			};
 			client.active = [] { return Get().pending.has_value(); };
 			client.executed = [](const FrameAnchors::Point&) {
-				auto& state = Get();
-				state.executed = state.committed;
+				auto& current = Get();
+				current.executed = current.committed;
 			};
-			client.onFailed = [] {
-				auto& state = Get();
-				state.registered = false;
-				Fail(state, "the render graph failed");
-			};
+			client.onFailed = [] { Fail(Get(), "the render graph failed"); };
 			return client;
 		}
 
-		/** @brief The framebuffer as the pass's target: imported, sized, and its program made. False: the engine draws this tick. */
+		/**
+		 * @brief The framebuffer as the draw's target. Made again only when the engine's back buffer changed (a resize): the client
+		 * is refreshed then and joins again; the engine draws until it has.
+		 */
 		bool UpdateTarget(BinkState& a_state)
 		{
-			auto* renderer = globals::game::renderer;
-			if (!renderer)
+			auto target = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER));
+			if (!target)
 				return false;
-			const auto& framebuffer = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
-			auto* texture = reinterpret_cast<ID3D11Texture2D*>(framebuffer.texture);
-			auto* rtv = reinterpret_cast<ID3D11RenderTargetView*>(framebuffer.RTV);
-			// The back buffer: the engine keeps only its RTV (FrameAnchors::EngineTarget takes the texture from it too).
-			winrt::com_ptr<ID3D11Texture2D> fromView;
-			if (!texture && rtv) {
-				winrt::com_ptr<ID3D11Resource> resource;
-				rtv->GetResource(resource.put());
-				if (resource)
-					fromView = resource.try_as<ID3D11Texture2D>();
-				texture = fromView.get();
-			}
-			if (!texture || !rtv)
-				return false;
-			if (texture == a_state.targetTexture && a_state.target)
+			if (target == a_state.target)
 				return true;
-			D3D11_TEXTURE2D_DESC textureDesc{};
-			texture->GetDesc(&textureDesc);
+			auto* rtv = reinterpret_cast<ID3D11RenderTargetView*>(globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER].RTV);
+			if (!rtv)
+				return false;
 			D3D11_RENDER_TARGET_VIEW_DESC viewDesc{};
 			rtv->GetDesc(&viewDesc);
-			const auto format = static_cast<std::uint32_t>(rhi::helpers::ToRHI(viewDesc.Format));
-			auto target = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER));
-			if (!target) {
-				Fail(a_state, "the framebuffer could not be imported");
-				return false;
-			}
-			if (!ProgramFor(a_state, format)) {
-				Fail(a_state, "the tile pipeline could not be made");
-				return false;
-			}
-			const bool changed = a_state.targetTexture != nullptr;
+			const bool changed = a_state.target != nullptr;
 			a_state.target = std::move(target);
-			a_state.targetTexture = texture;
-			a_state.width = textureDesc.Width;
-			a_state.height = textureDesc.Height;
-			a_state.format = format;
-			logger::info("[ORG] Bink: drawing onto the framebuffer ({}x{}, DXGI format {})", textureDesc.Width, textureDesc.Height, static_cast<int>(viewDesc.Format));
-			if (changed && a_state.registered) {
-				// The pass declares the new target from the next build; this tick stays the engine's.
+			a_state.width = a_state.target->GetWidth();
+			a_state.height = a_state.target->GetHeight();
+			a_state.format = rhi::helpers::ToRHI(viewDesc.Format);
+			(void)ProgramFor(a_state.format);
+			logger::info("[ORG] Bink: drawing onto the framebuffer ({}x{}, DXGI format {})", a_state.width, a_state.height, static_cast<int>(viewDesc.Format));
+			if (changed) {
+				// The draw declares the new target from the next build.
+				a_state.joined = false;
 				FrameAnchors::Refresh(kClientId);
-				return false;
 			}
 			return true;
 		}
 	}
 
+	void Setup()
+	{
+		auto& state = Get();
+		if (!Requested() || state.setUp || state.failed)
+			return;
+		auto* host = RenderGraphRuntime::Get().Host();
+		if (!host || !RenderGraphRuntime::Get().IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::Present) || !globals::game::renderer) {
+			logger::warn("[ORG] Bink: CS_ORG_BINK=1, but the render graph or its Present anchor is not active; the engine draws Bink");
+			return;
+		}
+		D3D11_TEXTURE2D_DESC atlas{};
+		atlas.Width = kAtlasWidth;
+		atlas.Height = kAtlasHeight;
+		atlas.MipLevels = 1;
+		atlas.ArraySize = 1;
+		atlas.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		atlas.SampleDesc.Count = 1;
+		atlas.Usage = D3D11_USAGE_DEFAULT;
+		atlas.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		// Persistent: a tick that decoded nothing draws the movie texture as the last upload left it.
+		state.atlas = std::make_unique<GraphResources::Texture2D>(atlas, "Bink::Movie", GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
+		state.staging = FrameStaging::Create({ .name = "cs.bink.staging",
+			.minimumBytes = 1u << 20,
+			.runsPerFrame = FrameAnchors::RunsPerFrame(FrameAnchors::Anchor::Present),
+			.maxBlocks = kMaxStaging });
+		state.uploads = std::make_shared<const RunSlots<Frame>>(host->FrameSlots());
+		state.draws = std::make_shared<const RunSlots<Frame>>(host->FrameSlots());
+		// The engine's PS sampler for this draw: address mode 0, filter mode 2 (CreateSamplerStates, SE 75831): trilinear, clamped, no
+		// bias, every LOD.
+		D3D11_SAMPLER_DESC sampler{};
+		sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+		sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+		sampler.MaxAnisotropy = 1;
+		sampler.ComparisonFunc = D3D11_COMPARISON_NEVER;
+		sampler.MinLOD = 0.0f;
+		sampler.MaxLOD = D3D11_FLOAT32_MAX;
+		state.sampler = ShaderBindings::CreateSamplerFromD3D11(sampler);
+		if (!*state.atlas || !state.staging || !state.sampler || !UpdateTarget(state)) {
+			Fail(state, "its movie texture, staging, sampler or framebuffer could not be made");
+			return;
+		}
+		// One client for the session: every movie draws through it, so a movie never rebuilds the graph.
+		if (!FrameAnchors::Register(MakeClient())) {
+			Fail(state, "the Present anchor's client could not be registered");
+			return;
+		}
+		state.setUp = true;
+		logger::info("[ORG] Bink: on (CS_ORG_BINK); registered at the Present anchor for the session");
+	}
+
 	bool Begin()
 	{
-		// Why a tick stays the engine's, once per reason.
+		// Why a tick stays the engine's, logged once per reason.
 		const auto refuse = [](std::string_view a_reason) {
-			static std::mutex mutex;
-			static std::vector<std::string> logged;
-			std::scoped_lock lock(mutex);
-			if (std::ranges::find(logged, a_reason) == logged.end()) {
-				logged.emplace_back(a_reason);
-				logger::info("[ORG] Bink: the engine draws this frame: {}", a_reason);
-			}
+			EngineDraws().Report(a_reason);
 			return false;
 		};
 		auto& state = Get();
 		if (state.failed)
 			return refuse("the graph path failed earlier");
-		auto& runtime = RenderGraphRuntime::Get();
-		auto* host = runtime.Host();
-		if (!runtime.IsActive() || !host)
+		if (!state.setUp)
+			return refuse("the graph path is not set up");
+		if (!RenderGraphRuntime::Get().IsActive())
 			return refuse("the render graph is not active");
-		if (!FrameAnchors::HasEpoch(FrameAnchors::Anchor::Present))
-			return refuse("the Present anchor has no epoch");
-		// Until the Present anchor's graph holds the pass (built again on the host's thread after the registration), the engine
-		// draws: a queued frame would not be drawn.
-		if (state.registered && !FrameAnchors::InBuiltGraph(kClientId, FrameAnchors::Anchor::Present)) {
-			// Drawcall Limit Fix makes builds explicit, at its build point in each world frame, and a blocking movie runs no world
-			// frame. A movie tick runs between frames (after a Present, before the next build point), where a build is safe.
-			if (host->RebuildRequested())
-				(void)runtime.BuildIfRequested();
-			if (!FrameAnchors::InBuiltGraph(kClientId, FrameAnchors::Anchor::Present)) {
-				state.queued = state.committed = state.executed = state.checked = 0;
-				state.misses = 0;
-				return refuse("waiting for the Present anchor's graph to hold the pass");
-			}
+		// The frame queued last tick did not draw (its run did not submit with the passes): its tiles were withheld, so the engine
+		// draws the rest of this movie rather than miss another frame.
+		if (state.executed < state.queued && !state.missed) {
+			state.missed = true;
+			logger::warn("[ORG] Bink: a movie frame queued for the Present anchor did not draw; the engine draws the rest of this movie");
 		}
-		// Once per queued frame: whether the run after it had the pass in its graph.
-		if (state.queued != state.checked) {
-			state.checked = state.queued;
-			if (state.executed < state.queued) {
-				if (++state.misses >= kMaxMisses) {
-					Fail(state, "queued frames did not reach the Present anchor's runs");
-					return false;
-				}
-			} else {
-				state.misses = 0;
-			}
-		}
+		if (state.missed)
+			return refuse("a frame of this movie did not draw on the graph");
 		state.pending.reset();
 		if (!UpdateTarget(state))
 			return refuse("the framebuffer cannot be imported");
-		if (!state.sampler) {
-			// The engine's PS sampler for this draw: address mode 0, filter mode 2 (CreateSamplerStates, SE 75831): trilinear,
-			// clamped, no bias, every LOD.
-			D3D11_SAMPLER_DESC sampler{};
-			sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-			sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-			sampler.MaxAnisotropy = 1;
-			sampler.ComparisonFunc = D3D11_COMPARISON_NEVER;
-			sampler.MinLOD = 0.0f;
-			sampler.MaxLOD = D3D11_FLOAT32_MAX;
-			state.sampler = ShaderBindings::CreateSamplerFromD3D11(sampler);
-			if (!state.sampler) {
-				Fail(state, "the tile sampler could not be made");
-				return false;
-			}
-		}
-		if (!state.slots || state.slots->count != host->FrameSlots())
-			state.slots = std::make_shared<Slots>(host->FrameSlots());
-		if (!state.registered) {
-			if (!FrameAnchors::Register(MakeClient())) {
-				Fail(state, "the Present anchor's client could not be registered");
-				return false;
-			}
-			state.registered = true;
-			state.queued = state.committed = state.executed = state.checked = 0;
-			state.misses = 0;
-			logger::info("[ORG] Bink: registered at the Present anchor; the graph draws from the next frame");
-			return false;
-		}
+		if (!ProgramFor(state.format))
+			return refuse("the tile program is not built yet");
+		// Joined once the Present anchor's built graph holds the client; the build happens at the next build point (the frame's end in
+		// a blocking movie's loop). The engine draws meanwhile.
+		if (!state.joined && !(state.joined = FrameAnchors::RequestJoin(kClientId, FrameAnchors::Anchor::Present)))
+			return refuse("waiting for the Present anchor's graph to hold the client");
+		if (!FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::Present))
+			return refuse("the Present anchor cannot run this frame");
 		return true;
 	}
 
 	std::shared_ptr<Movie> CreateMovie(const Layout& a_layout)
 	{
-		auto* host = RenderGraphRuntime::Get().Host();
-		if (!host || a_layout.tiles.empty())
+		if (!Get().setUp || a_layout.tiles.empty())
 			return nullptr;
 		auto movie = std::make_shared<Movie>();
 		std::uint64_t bytes = 0;
-		for (std::size_t i = 0; i < a_layout.tiles.size(); ++i) {
-			const auto& desc = a_layout.tiles[i];
+		for (const auto& desc : a_layout.tiles) {
 			if (!desc.width || !desc.height)
 				return nullptr;
+			if (desc.x + desc.width > kAtlasWidth || desc.y + desc.height > kAtlasHeight) {
+				logger::info("[ORG] Bink: a {}x{} movie is larger than the {}x{} movie texture; the engine draws it", a_layout.videoWidth, a_layout.videoHeight,
+					kAtlasWidth, kAtlasHeight);
+				return nullptr;
+			}
 			Tile tile;
 			tile.desc = desc;
 			tile.rowPitch = static_cast<std::uint32_t>(AlignUp(std::uint64_t(desc.width) * 4, kRowAlignment));
 			tile.offset = bytes;
 			tile.edge = desc.x + desc.width > a_layout.videoWidth || desc.y + desc.height > a_layout.videoHeight;
 			bytes = AlignUp(bytes + std::uint64_t(tile.rowPitch) * desc.height, kPlacementAlignment);
-
-			rhi::ResourceDesc resourceDesc{};
-			resourceDesc.type = rhi::ResourceType::Texture2D;
-			const auto name = fmt::format("cs.bink.tile.{}", i);
-			resourceDesc.debugName = name.c_str();
-			resourceDesc.texture.format = rhi::Format::R8G8B8A8_UNorm;
-			resourceDesc.texture.width = desc.width;
-			resourceDesc.texture.height = desc.height;
-			resourceDesc.texture.mipLevels = 1;
-			tile.resource = std::make_shared<rhi::ResourcePtr>();
-			if (host->Device().CreateCommittedResource(resourceDesc, *tile.resource) != rhi::Result::Ok || !*tile.resource) {
-				logger::error("[ORG] Bink: tile {} ({}x{}) could not be created", i, desc.width, desc.height);
-				return nullptr;
-			}
-			rhi::SrvDesc srv{};
-			srv.dimension = rhi::SrvDim::Texture2D;
-			srv.formatOverride = rhi::Format::R8G8B8A8_UNorm;
-			srv.tex2D.mostDetailedMip = 0;
-			srv.tex2D.mipLevels = 1;
-			tile.view = ShaderBindings::CreateShaderResourceView(tile.resource->Get(), tile.resource, srv);
-			if (!tile.view)
-				return nullptr;
-			movie->tiles.push_back(std::move(tile));
+			movie->tiles.push_back(tile);
 		}
 		if (bytes > 0xFFFFFFFFull)
 			return nullptr;
-		movie->pool->bytes = static_cast<std::uint32_t>(bytes);
+		movie->stagingBytes = bytes;
 		logger::info("[ORG] Bink: a {}x{} movie in {} tiles, {} bytes of staging a frame", a_layout.videoWidth, a_layout.videoHeight, movie->tiles.size(), bytes);
 		return movie;
 	}
@@ -637,7 +544,7 @@ namespace RenderGraph::Engine::Bink::Graph
 		if (a_tile >= a_movie.tiles.size())
 			return nullptr;
 		if (!a_movie.decoding)
-			a_movie.decoding = AcquireStaging(a_movie.pool);
+			a_movie.decoding = Get().staging->Acquire(a_movie.stagingBytes);
 		if (!a_movie.decoding)
 			return nullptr;
 		const auto& tile = a_movie.tiles[a_tile];
@@ -652,13 +559,13 @@ namespace RenderGraph::Engine::Bink::Graph
 	bool Queue(const std::shared_ptr<Movie>& a_movie)
 	{
 		auto& state = Get();
-		if (state.failed || !state.registered || !a_movie)
+		if (state.failed || !state.setUp || !a_movie)
 			return false;
 		if (a_movie->decoding) {
 			state.pending = Pending{ a_movie, std::move(a_movie->decoding) };
 			a_movie->decoding.reset();
 			a_movie->current = true;
-		} else if (a_movie->uploaded && a_movie->current) {
+		} else if (a_movie->current && state.uploaded == a_movie.get()) {
 			state.pending = Pending{ a_movie, nullptr };
 		} else {
 			return false;
@@ -681,13 +588,10 @@ namespace RenderGraph::Engine::Bink::Graph
 	{
 		auto& state = Get();
 		state.pending.reset();
-		if (state.registered) {
-			FrameAnchors::Unregister(kClientId);
-			state.registered = false;
-		}
-		// The next movie starts from a clean count.
-		state.queued = state.committed = state.executed = state.checked = 0;
-		state.misses = 0;
+		state.uploaded = nullptr;
+		// The client stays registered for the next movie; the next movie starts from a clean count.
+		state.queued = state.committed = state.executed = 0;
+		state.missed = false;
 	}
 }
 
@@ -697,6 +601,7 @@ namespace RenderGraph::Engine::Bink::Graph
 {
 	class Movie
 	{};
+	void Setup() {}
 	bool Begin() { return false; }
 	std::shared_ptr<Movie> CreateMovie(const Layout&) { return nullptr; }
 	std::byte* Lock(Movie&, std::uint32_t, std::uint32_t&) { return nullptr; }

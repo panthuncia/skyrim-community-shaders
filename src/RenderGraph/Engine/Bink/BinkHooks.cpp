@@ -4,12 +4,14 @@
 #include "Features/ScreenshotFeature.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Bink/BinkGraph.h"
+#include "RenderGraph/Engine/MainTick.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Switches.h"
+#include "Utils/Logging.h"
 
 #include <algorithm>
 #include <atomic>
-#include <cstdlib>
+#include <charconv>
 #include <filesystem>
 #include <mutex>
 #include <set>
@@ -87,19 +89,17 @@ namespace RenderGraph::Engine::Bink
 
 		thread_local Tick* t_tick = nullptr;
 
-		/** @brief CS_ORG_BINK_SHOT=<n>[,<n>...]: decoded frames whose Present is saved as dclf-shots/bink-<n>.png. */
+		/** @brief CS_ORG_BINK_SHOT=<n>[,<n>...] (a diagnostic): decoded frames whose Present is saved as dclf-shots/bink-<n>.png. */
 		const std::set<std::uint32_t>& ShotFrames()
 		{
 			static const std::set<std::uint32_t> frames = [] {
 				std::set<std::uint32_t> result;
-				const std::string value = Switches::Value("CS_ORG_BINK_SHOT");
-				std::size_t start = 0;
-				while (start < value.size()) {
-					const auto end = std::min(value.find(',', start), value.size());
-					const auto number = value.substr(start, end - start);
-					if (!number.empty())
-						result.insert(static_cast<std::uint32_t>(std::strtoul(number.c_str(), nullptr, 10)));
-					start = end + 1;
+				for (const auto& item : Switches::List("CS_ORG_BINK_SHOT")) {
+					std::uint32_t frame = 0;
+					if (const auto [end, error] = std::from_chars(item.data(), item.data() + item.size(), frame); error == std::errc{} && end == item.data() + item.size())
+						result.insert(frame);
+					else
+						logger::warn("[ORG] Bink: CS_ORG_BINK_SHOT lists {}, which is not a frame number", item);
 				}
 				return result;
 			}();
@@ -123,11 +123,8 @@ namespace RenderGraph::Engine::Bink
 		/** @brief Logs, once per reason, why a tick stays the engine's. */
 		void EngineKeeps(std::string_view a_reason)
 		{
-			static std::mutex mutex;
-			static std::set<std::string, std::less<>> logged;
-			std::scoped_lock lock(mutex);
-			if (logged.emplace(a_reason).second)
-				logger::info("[ORG] Bink: the engine draws this movie: {}", a_reason);
+			static Util::ReasonLog s_log("[ORG] Bink: the engine draws this movie");
+			s_log.Report(a_reason);
 		}
 
 		/** @brief Whether this tick may draw on the graph, before Graph::Begin: the engine's path in every case the port does not cover. */
@@ -135,8 +132,8 @@ namespace RenderGraph::Engine::Bink
 		{
 			if (!Requested() || !a_player || !a_set)
 				return false;
-			if (const auto mode = Read<std::uint32_t>(reinterpret_cast<const void*>(a_player), kPlayerMode); mode != kModeBlocking) {
-				EngineKeeps(fmt::format("player mode {}, not the blocking mode {}", mode, kModeBlocking));
+			if (Read<std::uint32_t>(reinterpret_cast<const void*>(a_player), kPlayerMode) != kModeBlocking) {
+				EngineKeeps("it plays inside another frame (player mode 2), not in the blocking loop");
 				return false;
 			}
 			if (!FrameAnchors::IsRenderOwner()) {
@@ -154,7 +151,7 @@ namespace RenderGraph::Engine::Bink
 			return true;
 		}
 
-		/** @brief The graph side of a tile set, made the first time a tick of it draws on the graph. Main thread. */
+		/** @brief The graph side of a tile set, made the first time a tick of it draws on the graph. Render thread. */
 		bool StartGraphTick(Tick& a_tick)
 		{
 			auto& records = GetRecords();
@@ -397,38 +394,49 @@ namespace RenderGraph::Engine::Bink
 			logger::info("[ORG] Bink: {} {}", a_file, played ? "played" : "did not play to its end");
 		}
 
-		/** @brief JobListManager's frame-job wait (SE 34554, AE 35409), called only by Main::Update, on the main thread. */
-		struct WaitForFrameJobs
+		/** @brief The main-thread tick (MainTick, after the frame-job wait): plays the files the test harness asked for. */
+		void PlayRequested()
 		{
-			static void thunk()
+			auto& pending = Pending();
+			if (!pending.any.load(std::memory_order_acquire))
+				return;
+			std::vector<std::string> files;
 			{
-				func();
-				auto& pending = Pending();
-				if (!pending.any.load(std::memory_order_acquire))
-					return;
-				std::vector<std::string> files;
-				{
-					std::scoped_lock lock(pending.mutex);
-					files.swap(pending.files);
-					pending.any.store(false, std::memory_order_release);
-				}
-				for (const auto& file : files)
-					Play(file);
+				std::scoped_lock lock(pending.mutex);
+				files.swap(pending.files);
+				pending.any.store(false, std::memory_order_release);
 			}
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
+			for (const auto& file : files)
+				Play(file);
+		}
+
+		/** @brief Whether the test harness runs (CS_DCLF_TEST_COMMANDS): RequestPlay is its command, and is installed only then. */
+		bool HarnessRuns()
+		{
+			static const bool runs = Switches::IsSet("CS_DCLF_TEST_COMMANDS");
+			return runs;
+		}
+
+		// Set at plugin load once PlayRequested is on the main-thread tick.
+		std::atomic<bool> s_playTick{ false };
 	}
 
 	void RequestPlay(std::string a_file)
 	{
-		if (!WaitForFrameJobs::func.address()) {
-			logger::warn("[ORG] Bink: the frame-job wait is not hooked; {} is not played", a_file);
+		if (!s_playTick.load(std::memory_order_acquire)) {
+			logger::warn("[ORG] Bink: no main-thread tick for the test harness's movies; {} is not played", a_file);
 			return;
 		}
 		auto& pending = Pending();
 		std::scoped_lock lock(pending.mutex);
 		pending.files.push_back(std::move(a_file));
 		pending.any.store(true, std::memory_order_release);
+	}
+
+	void Setup()
+	{
+		if (Requested())
+			Graph::Setup();
 	}
 
 	bool Requested()
@@ -441,8 +449,9 @@ namespace RenderGraph::Engine::Bink
 	{
 		if (REL::Module::IsVR())
 			return;
-		// RequestPlay's main-thread point (the test harness's dclf:bink); one atomic load a frame when nothing is asked.
-		stl::detour_thunk<WaitForFrameJobs>(REL::RelocationID(34554, 35409));
+		// The test harness's dclf:bink plays through the main-thread tick, added at plugin load when the harness runs.
+		if (HarnessRuns())
+			s_playTick.store(MainTick::Add("Bink::RequestPlay", &PlayRequested), std::memory_order_release);
 		const bool shots = !ShotFrames().empty();
 		if (!Requested() && !shots)
 			return;

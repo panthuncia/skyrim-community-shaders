@@ -6,8 +6,8 @@
 #include <vector>
 
 /**
- * @brief The render-graph side of Bink (Bink.h): the tile textures, the staging buffers the decoder writes, the Present anchor's
- * client and its pass. The engine side (BinkHooks.cpp) decides per tick whether the graph draws, and feeds this.
+ * @brief The render-graph side of Bink (Bink.h): the movie texture, the staging buffers the decoder writes, the Present anchor's
+ * client and its passes. The engine side (BinkHooks.cpp) decides per tick whether the graph draws, and feeds this.
  *
  * Threads: everything here runs on the render thread (FrameAnchors::IsRenderOwner: the main thread, or with
  * CS_ORG_LOADING_THREAD=1 the startup logo's MoviePlayer thread, which holds Renderer::Lock), in a tick of the movie player (Begin, CreateMovie, Lock, Queue, EndTick) or in
@@ -46,36 +46,42 @@ namespace RenderGraph::Engine::Bink
 		class Movie;
 
 		/**
-		 * @brief Main thread, at the start of a tick that could draw on the graph: whether this tick may. Registers the Present
-		 * anchor's client the first time (that tick stays the engine's: the client joins the graph from the next run), checks the
-		 * framebuffer and the program for its format, and counts the frames queued that never ran (three in a row turn the graph path
-		 * off). False: the engine draws this tick.
+		 * @brief State::Setup, once the graph is up: the movie texture, the staging pool and the sampler, and the Present anchor's client,
+		 * registered once for the session. Nothing when CS_ORG_BINK is off; logged and off when anything cannot be made.
+		 */
+		void Setup();
+
+		/**
+		 * @brief Render thread, at the start of a tick that could draw on the graph: whether this tick may. True only when the client
+		 * is in the Present anchor's built graph (FrameAnchors::RequestJoin), the anchor can run now (FrameAnchors::CanRun), the tile
+		 * program is built and the framebuffer is imported. A frame queued earlier that did not draw sends the rest of its movie to the
+		 * engine. False: the engine draws this tick.
 		 */
 		bool Begin();
 
-		/** @brief Main thread: the movie's ORG tile textures and staging pool; null, logged, when they cannot be made. */
+		/** @brief Render thread: the movie's tiles and their place in a staging buffer; null, logged, when the graph path cannot draw it. */
 		std::shared_ptr<Movie> CreateMovie(const Layout& a_layout);
 
 		/**
-		 * @brief Main thread, from the renderer's texture lock: where the decoder writes tile a_tile of this tick's frame, and its row
+		 * @brief Render thread, from the renderer's texture lock: where the decoder writes tile a_tile of this tick's frame, and its row
 		 * pitch. The first call of a tick takes a staging buffer from the movie's pool. Null when there is none to take.
 		 */
 		std::byte* Lock(Movie& a_movie, std::uint32_t a_tile, std::uint32_t& a_rowPitch);
 
 		/**
-		 * @brief Main thread, in place of the engine's tile draw: the movie's frame queued for the Present anchor's run (this tick's
+		 * @brief Render thread, in place of the engine's tile draw: the movie's frame queued for the Present anchor's run (this tick's
 		 * staging buffer, uploaded first, or the last frame uploaded when this tick decoded nothing). False when there is nothing the
 		 * graph can draw: the engine's draw runs.
 		 */
 		bool Queue(const std::shared_ptr<Movie>& a_movie);
 
-		/** @brief Main thread, at the end of every tick that called Begin: drops a staging buffer the tick took but did not queue. */
+		/** @brief Render thread, at the end of every tick that called Begin: drops a staging buffer the tick took but did not queue. */
 		void EndTick(Movie& a_movie);
 
-		/** @brief Main thread: the engine's tile textures hold a newer frame than the graph's (a tick decoded on the engine's path). */
+		/** @brief Render thread: the engine's tile textures hold a newer frame than the graph's (a tick decoded on the engine's path). */
 		void MarkStale(Movie& a_movie);
 
-		/** @brief Main thread, when a movie's tiles are freed: unregisters the client, so the Present anchor costs nothing again. */
+		/** @brief Render thread, when a movie's tiles are freed: the next movie starts from a clean count. The client stays registered. */
 		void MovieEnded();
 	}
 }
