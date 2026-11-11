@@ -94,7 +94,7 @@ namespace RenderGraph::Engine::Textures
 
 	/**
 	 * @brief The engine texture a view belongs to (its D3D11 view or its tripwire handle, found through
-	 * Tripwire::GraphResourceOf), or null. Any thread; a_view must be alive. The record stays valid as long as the caller holds it.
+	 * Tripwire::GraphResourceOf; a view made later on the texture is found through its texture), or null. Any thread; a_view must be alive. The record stays valid as long as the caller holds it.
 	 */
 	std::shared_ptr<const Texture> Find(const ID3D11ShaderResourceView* a_view);
 

@@ -1461,3 +1461,21 @@ From P5.8/P5.9 (`docs/development/p5/menus.md`). Two needs a menu scene's view b
   - **Disabling features per run.** `CS_DISABLE_FEATURES=<short name>,...` disables features at boot for one run without touching the
     saved settings, so scenarios on a shared instance can run without Light Limit Fix or Skylighting.
 - **Found by:** P5.2 config lane (2026-11-11).
+### Formats DXVK stores as another format, and render-to-texture inside one display (Scaleform, P5.10)
+
+- **Need:** descriptors for every format a D3D11 game samples, and a UI library's render-to-texture and filter passes inside one
+  display, in order with the display's other draws.
+- **Who:** Scaleform's glyph cache (A8_UNORM; every text draw), its filters (blur, shadow, glow, bevel: several passes through
+  temp targets per filter) and its render-to-texture.
+- **Where it fits:**
+  - **Formats:** BasicRHI had no `A8_UNorm`, so the glyph cache's view could not be described and every display with text fell
+    back (1,790 displays in a loading run). It now maps to `VK_FORMAT_A8_UNORM_KHR`. DXVK stores A8 as R8 with a (0, 0, 0, R) swizzle
+    on a device without that format; an import must then name the format DXVK chose (`DxvkOrgInteropImageInfo::viewFormat`), not the
+    DXGI view's. A BasicRHI query for a format's support, or the interop info naming the RHI format, would make this general.
+  - **Several render passes in one client pass:** a filter writes a temp target, reads it in the next pass, and so on, all inside
+    one display. ORG declares one use per resource per pass, so this is either a pass per filter pass (a client that registers
+    passes per display shape: rebuilds) or one pass that records render passes on its own images with its own barriers between
+    them. The second needs `PassRecordContext` to allow barriers on images the pass owns (not declared to the graph) and to restore
+    their resting layout at the end. Until then CS splits the display: graph segments, with the D3D11 renderer drawing the filter
+    and render-target parts between them (one Interface epoch run per segment).
+- **Found by:** P5.10 finish (2026-11-11).

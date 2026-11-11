@@ -616,6 +616,9 @@ namespace DCLF
 				}
 
 				srv.componentMapping = MappingOf(image.components);
+				// A device without VK_FORMAT_A8_UNORM_KHR: DXVK stores A8 as R8 and its views swizzle red into alpha (the mapping above).
+				if (viewDesc.Format == DXGI_FORMAT_A8_UNORM && image.viewFormat == VK_FORMAT_R8_UNORM)
+					srv.formatOverride = rhi::Format::R8_UNorm;
 			}
 			auto backing = a_context.cleanup->Make<ImportedBacking>();
 			backing->view.copy_from(view);

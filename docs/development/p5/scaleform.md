@@ -7,13 +7,43 @@ shaders `package/Shaders/Scaleform/`, behind `CS_ORG_SCALEFORM=1` (default off).
 
 ## Status
 
-- **Built:** every display of the HUD and of menus that use solid, bitmap and gouraud fills, glyphs (`DrawBitmaps`), blend
-  modes, the blend stack and stencil masks, drawn on the main thread onto the framebuffer or HDR's UI texture.
-- **Still D3D11:** a display that uses a filter (blur, glow, drop shadow, bevel, colour matrix), a render target of its own,
-  3D, a line strip, a YUV video texture or a 32-bit index list; every display on the loading-screen thread; and any display
-  the graph cannot take (below, "Fallback"). Such a display is drawn whole by the D3D11 renderer, at the same point.
-- **Shaders:** all 53 embedded sources are transcribed and checked (below, "Shaders"); the filter shaders have no C++ user yet.
+- **Built (wave 1):** every display of the HUD and of menus that use solid, bitmap and gouraud fills, glyphs (`DrawBitmaps`),
+  blend modes, the blend stack and stencil masks, drawn on the render owner onto the framebuffer or HDR's UI texture.
+- **Built (P5.10 finish, 2026-11-11, code only):**
+  - The texture fallback ("a texture's view cannot be resolved", about 1,790 displays a loading-screen run) was **one texture**:
+    GFx's glyph cache, an `A8_UNORM` texture, whose view BasicRHI could not describe (`[DCLF] Game texture view not supported:
+    format 65, dimension 4`, the only such line in every run). Every display with text fell back. BasicRHI now has `A8_UNorm`
+    (`VK_FORMAT_A8_UNORM_KHR`); on a device without it DXVK stores A8 as R8 with a swizzle, and the descriptor names R8.
+  - GFx's own textures (images, gradients, the glyph cache) are made on ORG at creation (below, "Lifetime of textures").
+  - A display no longer falls back whole. What the graph does not draw becomes a **D3D11 part** between graph segments (below,
+    "D3D11 parts"): render to a texture, filter sources, blur/shadow/glow/bevel filters, line strips, 3D, 32-bit indices,
+    video textures.
+  - The colour matrix filter onto a display's target is a graph draw with the transcribed `FilterVS.hlsl`/`FilterPS.hlsl`.
+- **Still D3D11:** the blur family's passes (`DrawBlurRect`, a D3D11 part), everything drawn into GFx's own render targets
+  (their textures are then read by graph draws), a whole display into a render texture (`kViewportRenderTexture`), and the
+  parts above. In the 15 runs before this change (HUD, inventory, map, journal, loads) **no** filter, render target, line strip
+  or render-texture display appeared at all; the census line says how often they occur now.
+- **Shaders:** all 53 embedded sources are transcribed and checked (below, "Shaders"); `FILTER` 23/24 now have a C++ user.
 - **Not run in game yet** (code only; the main session builds and tests).
+
+## Census
+
+Every 1000 displays, and the first time each reason comes up (`[ORG] Scaleform: the D3D11 renderer draws: <reason>`):
+
+```
+[ORG] Scaleform census: N displays: G on the graph, M on the graph with D3D11 parts, D on D3D11; S graph segments; D3D11 parts: <count reason, ...>
+```
+
+- **on the graph:** every draw of the display was a graph draw (one or more segments, no D3D11 part).
+- **on the graph with D3D11 parts:** graph segments with D3D11 parts between them.
+- **on D3D11:** no graph segment: a whole display refused at `BeginDisplay` (off the render thread, before the graph is up, no
+  video mode, into a render texture, no render target), or one whose only segment the graph could not draw.
+- **D3D11 parts** counts each part by reason; a whole display refused at `BeginDisplay` counts once under its reason ("a whole
+  display ..."). Segment failures name the graph's reason (a new surface, a pipeline, a texture's view, the epoch).
+
+Expected after this change: no "a texture's view cannot be resolved"; the remaining whole-display reasons are the first two
+displays per surface ("a new surface (drawn from the next display)") and a few "the client was not in the Interface epoch"
+right after a registration (6 in a loading run before).
 
 ## The renderer object
 
@@ -132,18 +162,79 @@ A display (`BeginDisplay` to `EndDisplay`) is either the graph's or D3D11's, nev
    kept, with copies of what they point at (vertex and index arrays, bitmap lists, matrices, fill textures), and each draw is
    turned into an ORG draw at once: its pipeline (vertex kind, pixel kind, blend, stencil), a record with the D3D11
    constants, its geometry in the display's staging bytes, its textures' SRVs.
-2. A call the graph cannot take (the list in Status) **aborts** the capture: the kept calls are replayed into the D3D11
-   renderer from its `BeginDisplay`, and the rest of the display goes there directly. The output is the D3D11 output: the
-   replay happens at the same point of the D3D11 stream, before anything else is drawn.
-3. `EndDisplay` submits the display: the Interface anchor runs its epoch there, drawing the display onto the bound target. If
-   the epoch does not run, or the client was not in it, or the commit failed, the kept calls are replayed instead. Then the
-   D3D11 `EndDisplay` runs either way: it releases the textures GFx queued for release.
+2. A call the graph does not take makes a **D3D11 part** (below): the segment captured so far is drawn first, then the D3D11
+   renderer draws the part, then the capture goes on with a new segment. The order is the D3D11 order.
+3. `EndDisplay` submits the last segment: the Interface anchor runs its epoch there, drawing it onto the bound target. If the
+   epoch does not run, or the client was not in it, or the commit failed, the segment's kept calls are replayed instead. Then
+   the D3D11 `EndDisplay` runs either way: it releases the textures GFx queued for release, and the targets a D3D11
+   `BeginDisplay` took.
+
+### D3D11 parts
+
+A display is a sequence of graph segments and D3D11 parts. Each segment is one `Passes::Submit` (one Interface epoch run).
+
+- **Starting a part** (`BeginD3D11Part`): the segment so far is submitted (or replayed into D3D11 when the graph cannot draw it).
+  The first part of a display runs the D3D11 `BeginDisplay` with the saved arguments and a zero background (the graph drew the
+  background), puts back the world 3D matrix it resets, and then sets the D3D11 renderer's blend mode (+0x720) and mask state
+  (+0x4A0 submitting, +0x4A4 level, +0x4A8 the depth-stencil state from +0x468's five, bound with the mirrored reference) to the
+  mirrored state. That is the state the renderer's own mask calls leave, so its draws and `PopRenderTarget` (which rebinds
+  +0x4A8 with +0x4A4) behave as in a D3D11 display.
+- **Render targets:** `PushRenderTarget` / `PushTempRenderTarget` at depth 0 start a part; until the matching `PopRenderTarget`
+  every call goes to D3D11 directly (nested pushes counted). GFx's render target textures are DXVK's; graph draws later read them
+  through GpuTextures like any texture, in-stream after the D3D11 work.
+- **Filters onto the display's target:** `DrawBlurRect` (its intermediate passes push and pop temp targets through the same
+  vtable, which pass straight through while the filter runs) is a part. `DrawColorMatrixRect` is a graph draw (below); a part
+  only when its source cannot be read.
+- **Single calls:** a draw the graph does not take (a line strip, a 3D draw, 32-bit indices, XY32f triangles, gouraud types
+  4-5, the fill off, a video or lost texture) is a part of one call.
+- **Resuming:** after a target or filter part, render target 0 must still be the display's target (GFx's target stack rebinds
+  the display render target it was given, +0x740); otherwise the rest of the display is D3D11's. After 8 parts the rest of the
+  display is D3D11's too (each part costs an Interface epoch run).
+- **Replaying a later segment** (the graph could not draw it): the D3D11 renderer is set to the blend and mask state the segment
+  began in, then its kept calls run. The arrays a segment reads are kept at its start (`KeepArray`), so a replay reads the
+  copies. Known gap: the D3D11 renderer's blend *stack* (+0x728) is not rebuilt, so a `PopBlendMode` in a replayed segment that
+  pops a push from an earlier segment leaves the D3D11 mode as its own empty stack says.
+
+### The colour matrix filter
+
+`DrawColorMatrixRect` (SE 0x140f5e840) draws one rectangle: vertex shader VS-B 1 with the current matrix (`ApplyMatrix(+0x51C)`),
+pixel shader PS-B 25 (26 for Multiply and Darken), a strip of four vertices `(x, y, u, v)` from the destination rectangle and the
+source rectangle over the texture's size (+0x38/+0x3C), the source bound with `Bind(0, clamp, linear)`, and the filters' blend
+array (+0x418, `table[mode]`) unless a mask is being drawn. The pixel constants are 80 bytes: `cxadd` (the matrix argument's
+floats 16-19) at 0, the column-major matrix (floats 0-15) at 16. The graph draw is a `FilterRecord` (Display.h): six vertices
+(float4 position, float2 coordinate), the matrix, the constants, drawn by `FilterVS.hlsl`/`FilterPS.hlsl` with `FILTER` 23/24.
+
+The filters' blend array (SE 0x1417c2588) is the first one with source colour factor One where the first has SrcAlpha
+(multiply keeps DstColor; entry 7 writes nothing). Read from memory:
+
+| Index | First array (0x1417c1d48) | Filters' array (0x1417c2588) |
+| --- | --- | --- |
+| 1 normal | SrcAlpha, InvSrcAlpha, Add; alpha One, InvSrcAlpha | One, InvSrcAlpha, Add; alpha the same |
+| 2 add | SrcAlpha, One, Add; alpha Zero, One | One, One, Add |
+| 3 subtract | SrcAlpha, One, RevSub; alpha Zero, One | One, One, RevSub |
+| 4 multiply | DstColor, Zero, Add; alpha DstAlpha, Zero | the same |
+| 5 lighten | SrcAlpha, One, Max; alpha One, One | One, One, Max |
+| 6 darken | SrcAlpha, One, Min | One, One, Min |
+| 7 none | no colour write | the same |
+
+### The blur family (not on the graph yet)
+
+`DrawBlurRect` (SE 0x140f5db10) runs `passes` passes (params +0xC, doubled when the box is larger than a threshold; flag 0x20000
+skips to the last). Each pass but the last pushes a temp target (`PushTempRenderTarget(frame, w, h, false)`, vtable +0x50),
+draws the previous pass's texture through PS-B 21/22 (one- or two-dimensional blur), pops it and releases the previous texture;
+the last pass draws onto the current target with the current matrix and the filter's own pixel shader (inner/outer shadow,
+highlight, knockout, shadow only, chosen from the flags at +0 bits 1, 2, 6, 8, 10; +2 for Multiply and Darken), reading the
+original source as `srctex` (t1). Its constants come from a per-shader offset table at SE 0x141e0ac70 (the reflection's offsets
+of cxadd, cxmul, fsize, offset, scolor, scolor2, srctexscale, texscale, and the sampler slot). Putting it on the graph needs
+GFx's temp targets as graph resources that one display's passes write and read in turn (render passes on ORG images with
+barriers between them inside the Interface pass, or a pass per filter pass), and that table transcribed. Until then the census
+shows how often it runs.
 
 The background rectangle `BeginDisplay` draws is one of the display's draws.
 
 ### Slot by slot
 
-"Pure": writes fields, no D3D11 call. "Kept": recorded for a replay. "Abort": ends the capture (replay, then D3D11).
+"Pure": writes fields, no D3D11 call. "Kept": recorded for a replay. "Abort": a D3D11 part of that one call (above).
 
 | Slot | Function | D3D11 renderer | ORG path |
 | --- | --- | --- | --- |
@@ -152,8 +243,8 @@ The background rectangle `BeginDisplay` draws is one of the display's draws.
 | 2, 3 | CreateTexture, CreateTextureYUV | GTextureD3D1x under +0x640's lock (loader threads) | unchanged: textures stay D3D11; the graph reads their SRVs |
 | 4, 5 | BeginFrame, EndFrame | no-op; event handlers | unchanged |
 | 6 | CreateRenderTarget | a GRenderTargetD3D1x | unchanged |
-| 7 | SetDisplayRenderTarget | +0x740, OMSetRenderTargets | abort in a display, else unchanged |
-| 8, 9, 10 | Push/PopRenderTarget, PushTempRenderTarget | render to texture (filters, cached shapes) | abort |
+| 7 | SetDisplayRenderTarget | +0x740, OMSetRenderTargets | in a display: a D3D11 part, then the rest of the display is D3D11's |
+| 8, 9, 10 | Push/PopRenderTarget, PushTempRenderTarget(frame, w, h, stencil) | render to texture (filters, cached shapes) | a D3D11 part from the push to the matching pop |
 | 11 | ReleaseTempRenderTargets | releases pooled targets | unchanged |
 | 12 | BeginDisplay | viewport, matrix, states, background | starts a capture (main thread, graph up, video mode set, not a render texture) |
 | 13 | EndDisplay | releases RT/DSV, queued releases | submits (or replays), then the D3D11 EndDisplay |
@@ -171,7 +262,8 @@ The background rectangle `BeginDisplay` draws is one of the display's draws.
 | 39 | DrawDistanceFieldBitmaps | no-op | unchanged |
 | 40, 41, 42 | Begin/EndSubmitMask, DisableMask | stencil states, clear | mirrored: a stencil clear command and each draw's stencil state and reference; abort without a depth target the graph has |
 | 43 | CheckFilterSupport | answers the caps | unchanged |
-| 44, 45 | DrawBlurRect, DrawColorMatrixRect | filter passes on temp targets | abort |
+| 44 | DrawBlurRect | filter passes on temp targets | a D3D11 part |
+| 45 | DrawColorMatrixRect | one rectangle | a graph draw (FILTER 23/24); a D3D11 part when its source cannot be read |
 | 46-57 | no-ops, stats, ReleaseResources, handlers, video mode, display status, GetDevice/Context | | unchanged |
 
 ### The ORG pass
@@ -200,16 +292,26 @@ The background rectangle `BeginDisplay` draws is one of the display's draws.
 
 ### Fallback
 
-Every step falls back to D3D11 for that display, logged once per reason, with counts every 1000 displays
-(`[ORG] Scaleform: ...`): the graph not up or failed, a display off the main thread, an abort reason, a target or depth that
-cannot be imported, a new surface, a pipeline that cannot be made, a texture whose view cannot be resolved, an epoch that did
-not run. The graph's failure (`onFailed`) stops captures for the session.
+A segment the graph cannot draw is replayed into D3D11 (a target or depth that cannot be imported, a new surface, a pipeline
+that cannot be made, a texture whose view cannot be resolved, an epoch that did not run); a display refused at `BeginDisplay`
+is D3D11's whole. Each reason is logged once and counted in the census (above). The graph's failure (`onFailed`) stops captures
+for the session.
 
 ### Lifetime of textures and caches
 
-- **Textures** stay the D3D11 renderer's (`CreateTexture` is untouched, and runs on loader threads under +0x640's lock as
-  before). The font cache texture is one of them: GFx updates it with `UpdateSubresource` on the immediate context during
-  `Display`, before the draws that use it. The ORG draws run at `EndDisplay`, after every update of that display. The one
+- **Textures** (`GfxTextures.cpp`): `GTextureD3D1x` (vtable SE 292188 / AE 243114, the same slots on both) makes its texture in
+  slot 1 `InitTexture(GImageBase*)` (images, gradients: DEFAULT, SRV, the image's mips as initial data) or slot 2
+  `InitDynamicTexture(w, h, format, mips, usage)` (the glyph cache: format 9 = A8_UNORM, filled with 0x40; usage 0x20 makes it
+  DYNAMIC, 0x40 adds a render target bind, format 0x12E is a D24S8 depth target). Both call the renderer's device (+0x68, then
+  +0x490) `CreateTexture2D` then `CreateShaderResourceView`. With `CS_ORG_ENGINE_TEXTURES=1`, while slot 1 or 2 runs on a
+  thread, that device's `CreateTexture2D` (slot 5, hooked at the first texture) makes a DEFAULT shader-resource 2D texture
+  through `Engine::Textures::Create`: an ORG image, DXVK's texture on it with GFx's initial data, a tripwire handle in GFx's
+  field once the guest context is installed. GFx's own view of it is found by `Textures::Find` through its texture, so
+  GpuTextures writes the descriptor from the record: no DXVK import, no pin, no relocation. Render targets, DYNAMIC and depth
+  textures, and textures made before the graph can wrap images stay DXVK's and are imported per view (once each). An A8 texture
+  that cannot be made this way (DXVK storing A8 as R8) turns the A8 path off for the session (one leaked image, logged). The
+  external images (`BSScaleformExternalTexture`, 75511) are engine textures already; GFx's view of them is found the same way.
+- The glyph cache is updated with `UpdateSubresource` on the immediate context during `Display`, before the draws that use it. The ORG draws run at `EndDisplay`, after every update of that display. The one
   difference: an update made after a draw that read the old texels in the same display (a font cache eviction within one
   display) is seen by that draw too. GFx's font cache keeps the glyphs a display uses until it ends, so this should not
   happen _(inferred, not checked)_.
@@ -223,9 +325,15 @@ not run. The graph's failure (`onFailed`) stops captures for the session.
 
 ### The loading-screen thread (with P5.12)
 
+**Now (P5.12 merged):** with `CS_ORG_LOADING_THREAD=1` the serving thread is the render owner while it draws, and its displays
+are captured like the main thread's. In the last loading run before this change 5,373 of 7,000 displays were on the graph; the
+rest were the glyph-cache fallback (1,619), two new-surface displays and six "not in the Interface epoch". The A8 fix and the
+ORG-made textures cover the first; GFx's textures made on loader threads go through `Textures::Create` too (any thread). The
+original proposal, kept for its reasoning:
+
 The loading screen draws on `JobListManager::ServingThread` (38085 / 39039) under `Renderer::Lock`, while the main thread
-loads. Anchors run only on the main thread (`FrameAnchors::OnMainThread`), so every display there goes to D3D11 (counted as
-"off the main thread"). The proposal for P5.12:
+loads. Anchors ran only on the main thread (`FrameAnchors::OnMainThread`), so every display there went to D3D11. The proposal
+for P5.12:
 
 - **Render ownership instead of the main thread.** The thread allowed to run anchors becomes the render owner. The main
   thread owns rendering, except between `SetLoadingScreenActive(true)` and `(false)` (34552 / 35407), which hand ownership
@@ -247,11 +355,15 @@ good on a graph failure.
 
 ## Testing
 
-Scenarios `tools/cs-ab/scenarios/scaleform-org0.env` (D3D11) and `scaleform-org1.env` (ORG, with the tripwire guest and the
-P4 engine switches) shoot the HUD in Whiterun, then the inventory, the map and the journal, each shown and hidden. Compare the
-shots; in the -org1 log look for `[ORG] Scaleform: drawing displays on the render graph`, the per-reason fallback lines and the
-1000-display counts. A menu whose displays all fall back (filters) looks identical by construction; the HUD and plain menus are
-the ORG path.
+Scenarios `tools/cs-ab/scenarios/scaleform-org0.env` (D3D11) and `scaleform-org1.env` (ORG), both with the tripwire guest, the
+P4 engine switches and `CS_ORG_LOADING_THREAD=1`, shoot the main menu (frame 400), the loading screen of `coc Whiterun` (730; it
+may land after the load), the HUD, the inventory, the magic menu, the map and the journal. Compare the shots. In the -org1 log:
 
-What a build must confirm first: the pipelines compile (`[ORG] Scaleform: pipeline ...` errors), no `[E]` from the anchor
-epoch, and glyphs, masks (the compass, the map's frame) and blend modes look as on D3D11.
+1. `[ORG] Scaleform: drawing displays on the render graph`, `GTextureD3D1x's InitTexture and InitDynamicTexture hooked`,
+   `GFx's textures go through Engine::Textures::Create` and `GFx's textures are made on ORG (first: ...)`.
+2. No `a texture's view cannot be resolved`, no `[DCLF] Game texture view not supported: format 65`.
+3. The census lines; every `the D3D11 renderer draws: <reason>` line (each reason once) says what is left.
+4. No `[ORG] Scaleform: pipeline ... could not be made` (the filter pipelines are new: `filter 23` / `filter 24`).
+
+What a build must confirm first: no `[E]` from the anchor epoch, glyphs (now A8 on the graph), masks (the compass, the map's
+frame), blend modes, and any menu with a D3D11 part look as on D3D11.

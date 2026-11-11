@@ -297,7 +297,13 @@ namespace RenderGraph::Engine::Textures
 		if (!a_view || !Requested())
 			return nullptr;
 		// The handle's, or the one AttachGraphResource tied to the D3D11 view.
-		const auto graph = Tripwire::GraphResourceOf(a_view);
+		auto graph = Tripwire::GraphResourceOf(a_view);
+		if (!graph) {
+			// A view made later on the texture (Scaleform makes its own view of every texture it is given): its texture's.
+			winrt::com_ptr<ID3D11Resource> resource;
+			const_cast<ID3D11ShaderResourceView*>(a_view)->GetResource(resource.put());
+			graph = Tripwire::GraphResourceOf(resource.get());
+		}
 		if (!graph)
 			return nullptr;
 		std::shared_lock lock(g_registryMutex);
