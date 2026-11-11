@@ -1,5 +1,6 @@
 #include "Globals.h"
 #include "GpuEventTimers.h"
+#include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #include "CSEditor/SceneManager/SceneManager.h"
@@ -312,6 +313,7 @@ namespace globals
 				if (*globals::game::perFrame.get() == pResource)
 					globals::game::mappedFrameBuffer = pMappedResource;
 				DrawcallLimitFix::OnMap(pResource, pMappedResource->pData);
+				RenderGraph::Engine::Constants::OnMap(pResource, MapType, pMappedResource->pData);
 			}
 			return hr;
 		}
@@ -331,6 +333,7 @@ namespace globals
 				CacheFramebuffer();
 			}
 			DrawcallLimitFix::OnUnmap(pResource);
+			RenderGraph::Engine::Constants::OnUnmap(pResource);
 			func(This, pResource, Subresource);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -343,6 +346,7 @@ namespace globals
 			UINT SrcDepthPitch)
 		{
 			DrawcallLimitFix::OnUpdateSubresource(pDstResource, pDstBox, pSrcData);
+			RenderGraph::Engine::Constants::OnUpdateSubresource(pDstResource, pDstBox, pSrcData);
 			func(This, pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -858,6 +862,8 @@ namespace globals
 		stl::detour_vfunc<14, ID3D11DeviceContext_Map>(a_context);
 		stl::detour_vfunc<15, ID3D11DeviceContext_Unmap>(a_context);
 		stl::detour_vfunc<48, ID3D11DeviceContext_UpdateSubresource>(a_context);
+		// CS_ORG_ENGINE_CONSTANTS=1: the constant-buffer binds behind the per-use capture.
+		RenderGraph::Engine::Constants::InstallD3DHooks(a_context);
 		// CS_DCLF_DRAW_TRACE / CS_DCLF_DEPTH_TRACE (Drawcall Limit Fix's diagnostics).
 		const bool depthTrace = Util::SwitchFile::Enabled("CS_DCLF_DEPTH_TRACE");
 		if (Util::SwitchFile::Enabled("CS_DCLF_DRAW_TRACE") && !depthTrace)

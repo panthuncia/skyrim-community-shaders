@@ -3,6 +3,7 @@
 #include "GpuEventTimers.h"
 #include "HangWatchdog.h"
 #include "GpuIdleTrace.h"
+#include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Pipeline/EngineHooks.h"
@@ -587,6 +588,8 @@ struct IDXGISwapChain_Present
 		// What the graph submitted before the present is on its way to the device: the points a mid-frame producer may wait for.
 		if (presentSucceeded)
 			RenderGraphRuntime::Get().SealPresented();
+		// CS_ORG_ENGINE_CONSTANTS=1: every anchor of the frame has run, so the frame's captured constants can retire.
+		RenderGraph::Engine::Constants::EndFrame();
 		{
 			ZoneScopedN("CS.Present.FramePace");
 			RenderGraphRuntime::Get().WaitFramePace();
@@ -709,8 +712,11 @@ void Hooks::BSGraphics_SetDirtyStates::thunk(bool isCompute)
 {
 	func(isCompute);
 	globals::state->Draw();
-	if (!isCompute)
+	if (!isCompute) {
 		VanillaBinding::BindDrawResources();
+		// CS_ORG_ENGINE_CONSTANTS=1: every engine draw calls this right before its draw, with its constants bound.
+		RenderGraph::Engine::Constants::OnDraw();
+	}
 }
 
 void Hooks::BSBatchRenderer_RenderPassImmediately1::thunk(RE::BSRenderPass* pass, uint32_t technique, bool alphaTest, uint32_t renderFlags)
@@ -1351,6 +1357,8 @@ namespace Hooks
 					}
 				}
 				func(renderer, shader, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+				// CS_ORG_ENGINE_CONSTANTS=1: the dispatch's CS b0 is bound inside the original, after its SetDirtyStates(true).
+				RenderGraph::Engine::Constants::OnDispatch();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -1446,6 +1454,7 @@ namespace Hooks
 		TextureStreaming::InstallGameHooks();
 		RenderGraph::Engine::Textures::InstallHooks();
 		RenderGraph::Engine::Buffers::InstallGameHooks();
+		RenderGraph::Engine::Constants::InstallGameHooks();
 
 		logger::info("Hooking BSGraphics::Renderer::InitD3D");
 		stl::write_thunk_call<BSGraphics_Renderer_Init_InitD3D>(REL::RelocationID(75595, 77226).address() + REL::Relocate(0x50, 0x2BC));
