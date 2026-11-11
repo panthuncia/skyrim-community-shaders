@@ -51,6 +51,41 @@ namespace DCLF::Scene
 			return listing;
 		}
 
+		/** @brief Api::UnheldRootSink calling a_add for each root. */
+		template <class AddFn>
+		class UnheldRootVisitor final : public Api::UnheldRootSink
+		{
+		public:
+			explicit UnheldRootVisitor(AddFn& a_add) :
+				add(a_add) {}
+			void Add(RE::NiNode* a_root) override
+			{
+				if (a_root)
+					add(a_root);
+			}
+
+		private:
+			AddFn& add;
+		};
+
+		/**
+		 * @brief The unheld roots contribution's roots (Api::UnheldRootsContribution: the particle manager's masters), a_add for each,
+		 * inside the contribution's enter and leave when a_enter (a caller that entered itself passes false). None without a contribution.
+		 */
+		template <class AddFn>
+		void ForEachUnheldRoot(AddFn&& a_add, bool a_enter)
+		{
+			const auto& unheld = Extensions::RegisteredUnheldRoots();
+			if (!unheld.gather)
+				return;
+			UnheldRootVisitor<std::remove_reference_t<AddFn>> visitor(a_add);
+			if (a_enter)
+				unheld.enter();
+			unheld.gather(visitor);
+			if (a_enter)
+				unheld.leave();
+		}
+
 		/**
 		 * @brief The frame start's engine reads that need no fixed engine moment and push nothing onto the tracker's stack, done on
 		 * DCLF's pool inside the engine-read window (step C2): the category capture's pins, then its post; the fade node requests. Made by
@@ -211,6 +246,9 @@ namespace DCLF::Scene
 			for (const auto root : Extensions::RegisteredCategoryRoots())
 				if (root)
 					hash.Mix(root());
+			// The unheld roots' owner (the particle manager): its child edits are watched edits.
+			if (const auto& unheld = Extensions::RegisteredUnheldRoots(); unheld.owner)
+				hash.Mix(unheld.owner());
 			if (auto* tes = RE::TES::GetSingleton()) {
 				hash.Mix(tes->objRoot);
 				hash.Mix(tes->interiorCell);
@@ -231,7 +269,7 @@ namespace DCLF::Scene
 		 * (AddSubtree needs the category node known), so it folds in everything CaptureCategories reads to *find* nodes, not just the
 		 * cell pointers. a_watch: the nodes whose attaches and detaches can change it (SceneTracker::WatchCategoryNodes).
 		 */
-		std::uint64_t ReadCategorySignature(std::vector<const void*>* a_watch)
+		std::uint64_t ReadCategorySignature(std::vector<const void*>* a_watch, bool a_enter = true)
 		{
 			Fnv1a hash;
 			auto mix = [&hash](const void* a_value) { hash.Mix(a_value); };
@@ -282,6 +320,19 @@ namespace DCLF::Scene
 				mix(tes->interiorCell);
 				Engine::ForEachLoadedCell(*tes, mixCell);
 			}
+			// The unheld roots (the particle manager's masters) and their owner, whose child edits add and remove them (SceneTracker's
+			// NoteEdit names the owner as the parent of a root its array holds).
+			if (const auto& unheld = Extensions::RegisteredUnheldRoots(); unheld.owner) {
+				watch(unheld.owner());
+				std::uint64_t count = 0;
+				ForEachUnheldRoot(
+					[&](RE::NiNode* a_root) {
+						mix(a_root);
+						++count;
+					},
+					a_enter);
+				hash.Mix(count);
+			}
 			// The scene's roots a cell's 3D attaches under (watched whether or not a cell is loaded yet).
 			for (auto* sceneNode : RE::BSShaderManager::State::GetSingleton().shadowSceneNode)
 				watch(sceneNode);
@@ -325,7 +376,7 @@ namespace DCLF::Scene
 
 		/**
 		 * @brief CaptureCategories' category signature (render thread): read again on a forced capture, a watched edit or a moved input;
-		 * otherwise (CS_DCLF_PERSISTENT_PARITY) checked against a full read.
+		 * otherwise (CS_DCLF_PERSISTENT_PARITY) checked against a full read. Inside the unheld roots' enter (CaptureCategories).
 		 */
 		std::uint64_t RefreshCategorySignature(bool a_force, std::uint32_t a_frame)
 		{
@@ -335,7 +386,7 @@ namespace DCLF::Scene
 			const std::uint64_t inputs = CategoryInputs();
 			if (a_force || !watch.read || edits != watch.edits || inputs != watch.inputs) {
 				std::vector<const void*> watched;
-				watch.signature = ReadCategorySignature(&watched);
+				watch.signature = ReadCategorySignature(&watched, false);
 				SceneTracker::WatchCategoryNodes(std::move(watched));
 				watch.read = true;
 				watch.edits = edits;
@@ -345,7 +396,7 @@ namespace DCLF::Scene
 				// CS_DCLF_PERSISTENT_PARITY: a signature that moved with no edit seen and no input moved (an event the watch lacks).
 				++watch.checked;
 				static std::uint64_t flagged = 0;
-				if (const std::uint64_t full = ReadCategorySignature(nullptr); full != watch.signature && std::exchange(flagged, full) != full)
+				if (const std::uint64_t full = ReadCategorySignature(nullptr, false); full != watch.signature && std::exchange(flagged, full) != full)
 					if (watch.missed++ < 8)
 						logger::warn("[DCLF] category signature (C2 parity): moved with no watched edit and no input moved (frame {}) <- FLAG", a_frame);
 			}
@@ -353,13 +404,27 @@ namespace DCLF::Scene
 		}
 
 		/**
-		 * @brief The capture's category nodes, parentless roots and view roots (render thread): ObjectLODRoot's multibounds, the listed
-		 * classes' category roots, every loaded cell's category nodes, multibound and portal graph, then the CategoryRoot views' roots.
+		 * @brief The capture's category nodes, parentless roots and view roots (render thread): the unheld roots, ObjectLODRoot's
+		 * multibounds, the listed classes' category roots, every loaded cell's category nodes, multibound and portal graph, then the
+		 * CategoryRoot views' roots. Inside the unheld roots' enter (CaptureCategories).
 		 */
 		void GatherCategoryNodes(CategoryCapture& a_capture)
 		{
 			auto& current = a_capture.nodes;
 			auto& currentRoots = a_capture.roots;
+
+			// The unheld roots first (Api::UnheldRootsContribution: the particle manager's master particle systems, parentless, in its
+			// array): category nodes and roots filed under themselves, held by key alone. The engine frees a master whose count drops
+			// below 3, so the capture keeps no reference past its first application: each is pinned in `pins`, which the render thread
+			// lets go of once the coordinator applied the capture. First, so a root another list names too stays unheld.
+			ForEachUnheldRoot(
+				[&](RE::NiNode* a_root) {
+					current.insert(a_root);
+					currentRoots.try_emplace(a_root, CategoryCapture::Root{ {}, a_root, a_root });
+					a_capture.unheld.insert(a_root);
+					a_capture.pins.emplace_back(a_root);
+				},
+				false);
 
 			auto addCell = [&](RE::TESObjectCELL* a_cell) {
 				if (!a_cell || !a_cell->IsAttached())
@@ -390,7 +455,7 @@ namespace DCLF::Scene
 						// (FindCategoryNode). Held, so a root that leaves the list can still be walked when its tracked content is dropped.
 						for (const auto& child : graph->alwaysRenderChildren) {
 							if (child && !child->parent)
-								currentRoots.try_emplace(child.get(), CategoryCapture::Root{ child, shared });
+								currentRoots.try_emplace(child.get(), CategoryCapture::Root{ child, shared, child.get() });
 						}
 					}
 				}
@@ -430,7 +495,7 @@ namespace DCLF::Scene
 					Extensions::ViewEntryOf(view).captureRoot(root);
 					if (auto* node = root.root) {
 						current.insert(node);
-						currentRoots.try_emplace(node, CategoryCapture::Root{ RE::NiPointer<RE::NiAVObject>(node), node });
+						currentRoots.try_emplace(node, CategoryCapture::Root{ RE::NiPointer<RE::NiAVObject>(node), node, node });
 						a_capture.viewRoots[static_cast<std::size_t>(view)] = node;
 					}
 				}
@@ -454,13 +519,15 @@ namespace DCLF::Scene
 					a_job.pinNodes.push_back(node);
 			for (const auto& [root, entry] : a_capture.roots)
 				if (all || !base->roots.contains(root) || !base->nodes.contains(entry.category))
-					a_job.pinRoots.push_back(entry.root.get());
+					a_job.pinRoots.push_back(entry.object);
 		}
 
 		/**
 		 * @brief The parentless roots are the mirror's world from now on: each new one captured whole, each gone one detached (a_previous, the
 		 * last capture, still holds it), pushed onto the tracker's stack mirror-only, here (each read and pushed at once, as the hooks do theirs:
-		 * other threads attach and detach inside the window), before the job posts the capture.
+		 * other threads attach and detach inside the window), before the job posts the capture. A gone unheld root is not walked (nothing
+		 * holds it): its exit was an event (the owner's child edits, the contribution's removal hook), pushed before the engine let go. Inside
+		 * the unheld roots' enter, so no removal falls between their gather and their captures here.
 		 */
 		void PushCategoryRoots(const CategoryCapture& a_capture, const CategoryCapture* a_previous, std::uint64_t& a_records, std::uint64_t& a_captures)
 		{
@@ -472,7 +539,7 @@ namespace DCLF::Scene
 			SceneCapture::SetDrawnRoots(roots);
 			if (a_previous)
 				for (const auto& [root, entry] : a_previous->roots)
-					if (!currentRoots.contains(root)) {
+					if (!currentRoots.contains(root) && entry.root) {
 						auto* event = new SceneTracker::Event{};
 						event->type = SceneTracker::EventType::Detached;
 						SceneTracker::CollectGeometry(entry.root.get(), event->removed, &event->removedNodes);
@@ -660,6 +727,23 @@ namespace DCLF::Scene
 		for (const auto& held : categoryCapturesHeld)
 			if (held->generation <= pinsReleased && !held->pins.empty())
 				std::exchange(held->pins, {});
+		// The unheld roots' owner keeps its removals out from the signature's read to the roots' mirror pushes (PushCategoryRoots).
+		struct UnheldRootsScope
+		{
+			const Api::UnheldRootsContribution& unheld = Extensions::RegisteredUnheldRoots();
+			UnheldRootsScope()
+			{
+				if (unheld.gather)
+					unheld.enter();
+			}
+			~UnheldRootsScope()
+			{
+				if (unheld.gather)
+					unheld.leave();
+			}
+			UnheldRootsScope(const UnheldRootsScope&) = delete;
+			UnheldRootsScope& operator=(const UnheldRootsScope&) = delete;
+		} unheldScope;
 		const std::uint64_t signature = RefreshCategorySignature(a_force, frame);
 		if (!a_force && categoryCapture && signature == categoryCapture->signature)
 			return timed();
@@ -668,9 +752,11 @@ namespace DCLF::Scene
 		capture->generation = ++categoryCaptures;
 		capture->signature = signature;
 		GatherCategoryNodes(*capture);
+		// Every category node held while the capture is kept, but the unheld roots (pinned until its first application alone).
 		capture->held.reserve(capture->nodes.size());
 		for (auto* node : capture->nodes)
-			capture->held.emplace_back(node);
+			if (!capture->unheld.contains(node))
+				capture->held.emplace_back(node);
 		auto& job = *frameStartJob;
 		job.capture = capture;
 		PlanCategoryPins(job, *capture, categoryCapturesHeld, applied);

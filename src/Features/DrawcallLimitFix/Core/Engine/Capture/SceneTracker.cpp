@@ -26,7 +26,7 @@ namespace DCLF
 			// A SetAt of the child the slot already held is no structure change for the kept lists.
 			if (!event.unchanged)
 				PrimaryCull::Get().NoteListStructure(static_cast<const RE::NiNode*>(event.parent), child, true);
-			SceneTracker::Get().PushAttached(child);
+			SceneTracker::Get().PushAttached(child, static_cast<const RE::NiAVObject*>(event.parent));
 		}
 
 		void OnChildDetaching(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
@@ -34,7 +34,7 @@ namespace DCLF
 			const auto& event = *reinterpret_cast<const SWF_ChildEvent*>(a_event);
 			auto* child = static_cast<RE::NiAVObject*>(event.child);
 			PrimaryCull::Get().NoteListStructure(static_cast<const RE::NiNode*>(event.parent), child, false);
-			SceneTracker::Get().PushDetached(child);
+			SceneTracker::Get().PushDetached(child, static_cast<const RE::NiAVObject*>(event.parent));
 		}
 
 		// The watched subtree's root (WatchSubtree): compared by the hooks, never dereferenced but for its descendants' parent chains.
@@ -155,7 +155,7 @@ namespace DCLF
 			a_out.push_back(parent);
 	}
 
-	void SceneTracker::PushAttached(RE::NiAVObject* a_child)
+	void SceneTracker::PushAttached(RE::NiAVObject* a_child, const RE::NiAVObject* a_parent)
 	{
 		if (!a_child || stopped.load(std::memory_order_acquire))
 			return;
@@ -165,20 +165,21 @@ namespace DCLF
 		CollectAncestors(a_child, event->ancestors);
 		// The mirror's records, on this thread after the engine's attach: only what is in the world.
 		event->captured = SceneCapture::CaptureAttached(*a_child);
-		// After the engine's attach: the child's parent is the node it went under.
-		NoteEdit(a_child, event->captured != nullptr);
+		// After the engine's attach: the child's parent is the node it went under, or (a parentless root) the node whose array took it.
+		NoteEdit(a_child, a_parent ? a_parent : a_child->parent, event->captured != nullptr);
 		if (const auto* root = watchedRoot.load(std::memory_order_acquire); root && a_child != root && Under(a_child, root))
 			SubtreeEvents().Push(SubtreeEvent{ a_child, SubtreeEvent::Kind::Attached });
 		Push(event);
 	}
 
-	void SceneTracker::PushDetached(RE::NiAVObject* a_child)
+	void SceneTracker::PushDetached(RE::NiAVObject* a_child, const RE::NiAVObject* a_parent)
 	{
 		if (!a_child || stopped.load(std::memory_order_acquire))
 			return;
-		// Before the engine's detach (which follows the hook): the child's parent is still the node it leaves.
+		// Before the engine's detach (which follows the hook): the child's parent is still the node it leaves, or (a parentless root) the
+		// node whose array holds it.
 		const bool inWorld = SceneCapture::InWorld(a_child);
-		NoteEdit(a_child, inWorld);
+		NoteEdit(a_child, a_parent ? a_parent : a_child->parent, inWorld);
 		// The watched subtree's keys it takes away, each named (pushed before the engine can free any of them).
 		if (const auto* root = watchedRoot.load(std::memory_order_acquire); root && a_child != root && Under(a_child, root))
 			Engine::ForEachLive(a_child, [](RE::NiAVObject& a_object, std::uint32_t) { SubtreeEvents().Push(SubtreeEvent{ &a_object, SubtreeEvent::Kind::Removed }); });
@@ -285,13 +286,14 @@ namespace DCLF
 		});
 	}
 
-	void SceneTracker::NoteEdit(const RE::NiAVObject* a_child, bool a_inWorld)
+	void SceneTracker::NoteEdit(const RE::NiAVObject* a_child, const RE::NiAVObject* a_parent, bool a_inWorld)
 	{
-		// A watched category node attached or detached, or a child of one (the hook's thread: the child and its parent alive).
+		// A watched category node attached or detached, or a child of one (the hook's thread: the child alive). The parent is the node
+		// whose array holds the child: a parentless root's owner (the particle manager's masters) is not its parent.
 		categoryReaders.fetch_add(1, std::memory_order_seq_cst);
 		if (const auto* set = categoryNodes.load(std::memory_order_seq_cst))
 			if (std::ranges::binary_search(*set, static_cast<const void*>(a_child)) ||
-				(a_child->parent && std::ranges::binary_search(*set, static_cast<const void*>(a_child->parent))))
+				(a_parent && std::ranges::binary_search(*set, static_cast<const void*>(a_parent))))
 				categoryEdits.fetch_add(1, std::memory_order_release);
 		categoryReaders.fetch_sub(1, std::memory_order_seq_cst);
 		// The frame start's leased captures push in order with the hooks only while nothing in the world is attached or detached inside

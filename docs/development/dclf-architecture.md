@@ -2215,6 +2215,13 @@ Effect-shaded `NiParticleSystem`s are drawn in the forward sort (Features/Partic
 -   **Draw**: `Effect.hlsl` `PARTICLES` under `DCLF_PARTICLE_PULL`: no vertex input but `SV_VertexID`, corners pulled
     (`DCLFParticleInput`). A forward object culled with the snapshot's bound and sorted by its centre.
 -   First-person particle members are expanded faced to the first-person eye.
+-   **Master particle systems** (`CS_DCLF_MASTER_PARTICLES`, default off; `Features/Particles/MasterParticles.cpp`; roadmap 1.4):
+    the particle manager's `BSMasterParticleSystem`s are parentless children of its array. They are unheld roots
+    (`Api::UnheldRootsContribution`): category nodes filed under themselves, held by key alone, because the engine removes an
+    idle master once its count is below 3. Their exits are events: the manager's child edits and remove-all through
+    SceneWriterFramework, and a hook on the manager's update that pushes the detach before it clears an idle master's slot. The
+    category capture runs inside the contribution's gate, so no removal falls between a master's listing and its capture. Blood
+    impact sprays are masters fed by the impact effect's emitters.
 
 ### Billboards and aligned particles
 
@@ -3117,10 +3124,10 @@ Per-snapshot views pop at their edges.
 ## What the engine still draws
 
 DCLF claims whole objects in the phases it draws; the engine keeps:
--   **By class**: water, sky, grass, precipitation, the particle manager's master particle systems (torches, candles, street mist),
-    temporary effects outside DCLF's categories (blood impact particles), and the effect variants not ported (sky objects, wireframe,
-    Lighting without Light Limit Fix, projected UV, unrecognised blend pairs, membrane, strip and mesh particle systems, skins or
-    nested billboards under billboards, Lighting leaves under billboards).
+-   **By class**: water, sky, grass, precipitation, the particle manager's master particle systems (torches, candles, street mist,
+    blood impact sprays; DCLF's with `CS_DCLF_MASTER_PARTICLES=1`, off by default), and the effect variants not ported (sky objects,
+    wireframe, the effect Lighting variant without Light Limit Fix, projected UV, unrecognised blend pairs, membrane, strip and mesh
+    particle systems, skins or nested billboards under billboards, Lighting leaves under billboards).
 -   **By state**: an object not yet a member (the engine draws it until the publication that claims it is installed), a pair a
     register is missing for, a texture still importing, an object whose geometry buffer the game can map (`UnstableBuffer`; none
     in Whiterun with this load order, a RaceMenu body morph elsewhere).

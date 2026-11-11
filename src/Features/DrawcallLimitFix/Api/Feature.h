@@ -141,6 +141,8 @@ namespace DCLF::Api
 		virtual void RegisterParent(const ParentContribution& a_parent) = 0;
 		/** @brief Fails the install for a class another feature has, or without a registered toggle. */
 		virtual void RegisterObjectClass(const ObjectClassContribution& a_class) = 0;
+		/** @brief Fails the install for a second contribution, or one without owner, enter, leave or gather. */
+		virtual void RegisterUnheldRoots(const UnheldRootsContribution& a_roots) = 0;
 		/**
 		 * @brief Fails the install for a class or form type another contribution has, a class a geometry type's entry rule names (or None),
 		 * no name, or ownMotion without everyFrame.

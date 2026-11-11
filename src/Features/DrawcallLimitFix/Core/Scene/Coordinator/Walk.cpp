@@ -1315,6 +1315,12 @@ namespace DCLF::Scene
 
 	bool Coordinator::OwnRoot(const RE::NiAVObject* a_root, bool a_live)
 	{
+		// An unheld root (the particle manager's masters) is never owned: the engine frees it when its count drops, and an owner would
+		// keep it alive for good.
+		if (const auto unheld = alwaysRenderRoots.find(a_root); unheld != alwaysRenderRoots.end() && !unheld->second.root) {
+			++referenceStats.refused;
+			return false;
+		}
 		auto& owner = rootOwners[a_root];
 		if (owner)
 			return true;

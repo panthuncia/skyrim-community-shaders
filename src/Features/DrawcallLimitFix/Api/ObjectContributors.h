@@ -284,6 +284,38 @@ namespace DCLF::Api
 		RE::NiNode* (*categoryRoot)() = nullptr;
 	};
 
+	/** @brief Where UnheldRootsContribution::gather lists its roots (the category capture's). */
+	class UnheldRootSink
+	{
+	public:
+		/** @brief One root: a category node filed under itself, held by key alone. It must be alive, and stay so until leave. */
+		virtual void Add(RE::NiNode* a_root) = 0;
+
+	protected:
+		~UnheldRootSink() = default;
+	};
+
+	/**
+	 * @brief Parentless roots an engine array owns that DCLF tracks as category roots filed under themselves, held by key alone: the
+	 * particle manager's master particle systems (Features/Particles, CS_DCLF_MASTER_PARTICLES). The engine frees such a root when its
+	 * reference count is low, so no capture, coordinator or publication may keep a reference to it. Its exits must all be events: the
+	 * owner's child edits (SceneWriterFramework's), and the feature's own hooks, which push SceneTracker::PushDetached before the engine
+	 * lets go.
+	 *
+	 * - owner: the node whose child edits add or remove roots. The category signature watches it, so its edits move the signature.
+	 * - enter / leave: the render thread's category capture calls enter before gather and leave after the roots' mirror pushes, so no
+	 *   removal is pushed between a root's listing and its capture (the feature's removal hook waits for leave).
+	 * - gather: each root, through the sink, between enter and leave.
+	 * One feature contributes it, at most.
+	 */
+	struct UnheldRootsContribution
+	{
+		RE::NiNode* (*owner)() = nullptr;
+		void (*enter)() = nullptr;
+		void (*leave)() = nullptr;
+		void (*gather)(UnheldRootSink& a_sink) = nullptr;
+	};
+
 	/**
 	 * @brief A class of tracked entries Core's walk classifies but whose records wait on a coordinator component: the component that
 	 * follows it (CoordinatorComponent::entryClass, Api/CoordinatorComponents.h) supplies what their writes need, and its objects are

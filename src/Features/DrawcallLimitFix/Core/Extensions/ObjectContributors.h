@@ -270,6 +270,8 @@ namespace DCLF::Extensions
 	using CategoryRoots = std::array<RE::NiNode* (*)(), static_cast<std::size_t>(Api::ObjectClass::Count)>;
 	/** @brief Any thread, after InstallFeatures (all null before): the classes' category roots (Api::ObjectClassContribution::categoryRoot). */
 	const CategoryRoots& RegisteredCategoryRoots();
+	/** @brief Any thread, after InstallFeatures: the unheld roots contribution (gather null: none). */
+	const Api::UnheldRootsContribution& RegisteredUnheldRoots();
 
 	/**
 	 * @brief Whether a feature took a_class at install, whatever its toggle: a class whose registration stands for a load-time switch, read

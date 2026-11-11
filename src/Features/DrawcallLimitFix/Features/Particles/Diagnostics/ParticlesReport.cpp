@@ -2,6 +2,7 @@
 // passes against them.
 
 #include "Features/DrawcallLimitFix/Features/Particles/Particles.h"
+#include "Features/DrawcallLimitFix/Features/Particles/MasterParticles.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ProgramFamilySlots.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Records.h"
@@ -50,6 +51,8 @@ namespace DCLF::Features::Particles
 									"them without a snapshot DCLF expanded in its last {} runs{}{}\n",
 					p.passes, p.uncovered, ParticleSnapshots::kCoveredRuns, p.uncovered ? " <- PARTICLES" : " <- OK", first);
 			}
+			// The master particle systems' lifetime and references (CS_DCLF_MASTER_PARTICLES).
+			MasterParticles::Lines(text);
 			a_text += text;
 		}
 	}

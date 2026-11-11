@@ -16,11 +16,13 @@ namespace DCLF::Scene
 		std::uint64_t categorySignature = 0;
 		ankerl::unordered_dense::set<RE::NiNode*> categoryNodes;
 		// The portal graphs' parentless roots (alwaysRenderChildren), each filed under its graph's shared portal node, a category node
-		// (FindCategoryNode, RefreshCategoryNodes); held while listed.
+		// (FindCategoryNode, RefreshCategoryNodes); held while listed. Also the unheld roots (CategoryCapture::unheld: the particle manager's
+		// masters), filed under themselves and held by key alone.
 		struct AlwaysRenderRoot
 		{
-			RE::NiPointer<RE::NiAVObject> root;
+			RE::NiPointer<RE::NiAVObject> root;  // null for an unheld root
 			RE::NiNode* category = nullptr;
+			RE::NiAVObject* object = nullptr;  // the root (a key for an unheld one)
 		};
 		ankerl::unordered_dense::map<const RE::NiAVObject*, AlwaysRenderRoot> alwaysRenderRoots;
 		// By view, a CategoryRoot view's members' category node, its root (CategoryCapture::viewRoots: the first person's). Its kHidden is

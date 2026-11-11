@@ -68,11 +68,13 @@ namespace DCLF::Scene
 		std::uint64_t generation = 0;
 		std::uint64_t signature = 0;
 		ankerl::unordered_dense::set<RE::NiNode*> nodes;
-		std::vector<RE::NiPointer<RE::NiNode>> held;
+		std::vector<RE::NiPointer<RE::NiNode>> held;  // every node but the unheld roots
 		struct Root
 		{
-			RE::NiPointer<RE::NiAVObject> root;
+			RE::NiPointer<RE::NiAVObject> root;  // null for an unheld root
 			RE::NiNode* category = nullptr;
+			// The root itself. An unheld root's is a key: read only while the capture's pins hold it (its first application).
+			RE::NiAVObject* object = nullptr;
 		};
 		ankerl::unordered_dense::map<const RE::NiAVObject*, Root> roots;
 		// The category nodes new to the coordinator's set: their children's keys.
@@ -85,6 +87,9 @@ namespace DCLF::Scene
 		// By view, a CategoryRoot view's root (Api::ViewContribution::captureRoot: the player's first-person root while its toggle is on),
 		// both a category node and a root (filed under itself), or null.
 		std::array<const RE::NiNode*, Extensions::kEngineViews> viewRoots{};
+		// The unheld roots (Api::UnheldRootsContribution: the particle manager's masters), category nodes and roots filed under themselves,
+		// held by key alone: no `held` entry, no Root reference. The capture pins each (in `pins`) only until the coordinator applied it.
+		ankerl::unordered_dense::set<const RE::NiAVObject*> unheld;
 	};
 
 	/**
