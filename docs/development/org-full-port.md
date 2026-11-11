@@ -187,6 +187,13 @@ The primary-path pass and the host fixes (2026-11-11, `docs/development/p5/prima
 - **Hang tooling:** ORG and BasicRHI build with debug info; DCLF's frame-start timeout prints ORG's host state; the staging
   script now ships the current crash-dump helper (an old one answered every hang request without writing).
 
+**Handoff, end of 2026-11-11.** `org-port/p5` (b3cd6afe7, ORG e7733ec) builds and runs the census and latch tours.
+Not built yet: the last merge (`dclf-vouch-2`: interior shadow casters vouched at the shadow registration, SE 99932 / AE
+106576; the latch tours now stop in Dragonsreach). Verify next: `latch-census.env` and `latch-census-off.env` (identical
+commands, clear weather forced) — every latch window should end in `0 engine draws and dispatches skipped` and the shots
+should match. Census scenarios force `fw 81a` before Whiterun: compare runs only with matching commands. The water's
+geometry group 10 batch (AE 106584 +0x143) is vouched, not taken.
+
 **Open items:**
 
 - The sky's cloud layers on the graph stay off by default (`CS_ORG_SKY_CLOUDS`) until a run verifies them.
