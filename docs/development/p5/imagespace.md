@@ -180,7 +180,7 @@ holds) is no longer a refusal: the draw's viewport is read at the choke point, w
 **The choke point.** In `DrawTriShape`, an eligible effect's draw reads the shadow state as SetDirtyStates is about to apply it:
 render target 0 (an engine target, no other target, no depth or stencil, no clear at the bind), no scissor, the PS textures the
 effect reads (each an engine target's SRV), their address and filter modes, and the blend state from the engine's table. Then
-it calls `SetDirtyStates(false)` itself and reads the viewport from DXVK's context (`RSGetViewports`): that is the viewport the
+it calls `SetDirtyStates(false)` itself and reads the viewport from the shadow state (`viewPort`, what that flush applied): that is the viewport the
 engine's draw uses, whether Render set it (the whole target), the caller did (the explicit-target Render), the effect kept it
 (`unk88`) or it is the dynamic-resolution part of the target (Upscaling sets the engine's dynamic-resolution ratios, so SAO and
 the reflections draw into the top-left part of their targets). The viewport must be whole pixels (within 1/64, as the
@@ -260,57 +260,49 @@ own, which is what the capture does already.
 | Trigger | Handling |
 | --- | --- |
 | Effects that run on some frames only (bloom radius changes, adaptation, composites without VL) | Each shape is a pass behind its gate entry; a run opens only the entries it draws. No rebuild. |
-| A new viewport (a dynamic-resolution scale change, Upscaling's quality mode) | A new shape: the engine draws it until it joins at the next cell change. Upscaling's render size is fixed for a quality mode, so the shapes settle. |
-| Targets changing between effects (the luminance chain's alternation, ping-pong) | Learnt as separate shapes in the learning window (120 frames in a cell without a new shape), with the shapes the RE says they imply (kMAIN / kMAIN_COPY as the source, the alternating last luminance level, every bloom radius for a bloom shape), all registered at once. No rebuild. |
-| A shape first seen after the registration (an effect's first use) | Drawn by D3D11 and queued; it joins only at the next cell change. The number of shapes (at most 128 gate entries) bounds how often. A pausing menu no longer triggers a join. |
-| Programs | From `RenderGraph::ProgramCache`, built off the render thread. A registration waits until every shape's program is built, so it is one registration, not one per program. |
-| The engine's targets made again (a resize) | The same shapes are made again on the new imports and registered at once; the anchors rebuild for the new imports anyway. |
-| Registration itself | Once after the learning window. The draws stay the engine's until `FrameAnchors::RequestJoin` says the built graph holds it; the build is at the next build point, never a run of the anchor. |
+| Targets changing between effects (the luminance chain's alternation, ping-pong, SAO's AO history) | Separate shapes in the manifest, with the shapes the RE says they imply (kMAIN / kMAIN_COPY, the alternating last luminance level, every bloom radius), all registered at Setup. No rebuild. |
+| A shape the session did not register (a new viewport, a new effect, the first session) | Refused for the session and written to the manifest; the next session registers it at Setup. No rebuild during play. |
+| Programs | Queued at Setup on the program build thread; each pass takes its program at the graph's first build (`ProgramCache::GetNow`), in the main menu. Never a rebuild. |
+| The engine's targets made again (a resize) | The new import (`FrameAnchors::EngineTarget`) already asks every anchor's graph to be built again; the client registers the same shapes on the new imports into that build. No build of its own. |
+| Registration itself | Once, at Setup, before the main menu's first build point. |
 
 ## Fallbacks and failure
 
-- Per draw, to D3D11 (each reason logged once per effect, `Util::ReasonLog`): not selected, ineligible (above), a shape the
-  shadow state does not describe fully, a shape without a pass, an anchor that cannot run another batch now, no captured
-  constants.
-- Per shape, at registration: an import that fails, a sampler or blend without an ORG form (blend factor, dual source), a program
-  that does not build. Logged once; that shape stays D3D11.
-- A failed anchor epoch (`onFailed`) returns every effect to D3D11 for the session. A batch that does not draw after `CanRun`
-  allowed it (only an epoch that fails in that run) loses those draws for that frame: the engine's state for them is gone by
-  then. It is counted (`missed` in `Status`) and logged once; the next frames go on as before (an epoch failure turns the port
-  off at the next poll).
+- Per draw, to the engine (each reason logged once per effect, `Util::ReasonLog`): not selected, ineligible (above), a shape the
+  shadow state does not describe fully, a shape the session did not register, a scope that used its runs, an anchor whose graph
+  does not hold the registration yet (before the first build, or for one build point after a resize) or whose ring is full. These
+  are inherent refusals, at info.
+- Failures, at error (`<effect> failed on the graph and stays with the engine`): constants the capture does not hold for the draw,
+  or a ring chunk missing. On the primary path these should not happen.
+- Per shape, at Setup: an import that fails, a viewport outside this resolution's target, a sampler or blend without an ORG form
+  (blend factor, dual source): `<effect> into <target> has no pass this session (<reason>)`. A program that does not build leaves
+  its pass out of the graph (error).
+- Each draw ImageSpace leaves to the engine runs in the flush latch's `EngineDraws` scope (flush.md, "Allowed engine draws"), under
+  one of five reasons: `imagespace: effect not on the graph`, `imagespace: shape refused`, `imagespace: shape not in the manifest`,
+  `imagespace: failed on the graph`, `imagespace: volumetric lighting compute`. Under the latch they are drawn and counted, not
+  skipped.
+- A failed anchor epoch (`onFailed`) returns every effect to the engine for the session. A batch that does not draw after `CanRun`
+  allowed it loses those draws for that frame (counted as `missed`, logged as an error).
 
 ## Switches and log lines
 
 | Switch | Effect |
 | --- | --- |
-| `CS_ORG_IMAGESPACE=1` | Installs the hooks and takes the covered draws. Needs `CS_ORG_ENGINE_CONSTANTS=1`. |
-| `CS_ORG_IMAGESPACE_EFFECTS=<list>` | A diagnostic for bisecting an effect. Comma list (`Switches::List`) of engine names (`BSImagespaceShaderHDRDownSample4`), effect names (`ISHDRDownSample4`) or groups (`hdr`, `bloom`, `composite`), any case. Unset or `all`: every covered effect. |
-| `CS_ORG_IMAGESPACE_LOG=1` | A diagnostic: logs each new shape (with its viewport), and each shape's constant sizes once when its first draw is taken (`<effect> into <target> taken with <n> bytes of ...`). Not a refusal. |
+| `CS_ORG_IMAGESPACE=1` | Installs the hooks, registers the manifest's shapes at Setup and takes their draws. Needs `CS_ORG_ENGINE_CONSTANTS=1`. |
+| `CS_ORG_IMAGESPACE_EFFECTS=<list>` | A diagnostic for bisecting an effect. Comma list of engine names, effect names or groups (`hdr`, `bloom`, `composite`, `sao`, `ssr`, `dof`, `refraction`, `radialblur`, `copy`, `waterblend`), any case. Unset or `all`: every covered effect. |
+| `CS_ORG_IMAGESPACE_LOG=1` | A diagnostic: logs each shape new to the manifest (with its viewport), and each shape's constant sizes once when its first draw is taken. |
 
-Covered effect names: ISHDRDownSample16, ISHDRDownSample4, ISHDRDownSample16Lum, ISHDRDownSample4RGB2Lum,
-ISHDRDownSample4LumClamp, ISHDRDownSample16LumClamp, ISHDRDownSample4LightAdapt, ISHDRDownSample16LightAdapt (hdr);
-ISBrightPassBlur3 to ISBrightPassBlur15 (bloom); ISCompositeVolumetricLighting, ISCompositeLensFlare,
-ISCompositeLensFlareVolumetricLighting (composite); ISSAOCameraZ, ISMinify, ISMinifyContrast, ISSAORawAO, ISSAORawAONoTemporal,
-ISSAOBlurH, ISSAOBlurV (sao); ISDownsampleIgnoreBrightest, ISReflectionsRayTracing, ISReflectionBlurHCS, ISReflectionBlurVCS (ssr);
-ISDepthOfField, ISDepthOfFieldFogged, ISDepthOfFieldMaskedFogged, ISDistantBlur, ISDistantBlurFogged, ISDistantBlurMaskedFogged,
-ISDepthOfFieldBlurHCS, ISDepthOfFieldBlurVCS (dof); ISRefraction (refraction); ISRadialBlur, ISRadialBlurMedium, ISRadialBlurHigh
-(radialblur); ISCopySubRegionCS (copy).
+Covered effect names: the HDR group (ISHDRDownSample16, ISHDRDownSample4 (also into kLDR_DOWNSAMPLE0 outside the HDR effect, a scope of
+its own), the Lum, LumClamp, RGB2Lum and LightAdapt forms), ISBrightPassBlur3 to 15, the three composites, the SAO chain but its
+composite, the reflection pass, the depth of field and distant blur (into kFRAMEBUFFER too) with their compute blur, ISRefraction,
+the radial blurs, ISCopySubRegionCS (the snow pass's) and ISWaterBlend (two targets: kMAIN and the water history).
 
-New refusal reasons (wave 3): `its scope used its runs this frame`, `a geometry other than the full-screen quad`,
-`its UAV is not an engine render target's`, `more than one UAV`, `no captured compute constants`, `an input that is not an engine
-target`.
-
-Viewport and mip reasons (fix-imagespace-tail, replacing `a custom viewport` and `a viewport smaller than its target`; the
-viewport-sized ones log the viewport and the output's size): `a viewport that is not whole pixels`, `a viewport outside its
-target`, `a viewport depth range other than 0 to 1`, `an empty viewport`, `no viewport`, `its output has no texture and is no mip
-of an engine target's`, `its output is a mip of a texture without a render target view`, `its output is a mip view in another
-format than its texture's`, `its output is a mip its texture does not have`; at registration `its viewport is outside its
-imported output`. `its output has no texture` remains for a target with neither a texture nor an RTV.
-
-Log lines (all `[ORG] ImageSpace:`): `hooks installed (...)`; `on (CS_ORG_IMAGESPACE); effects <list>; ...`; `built <effect> for
-format <n>`; `registered <n> passes (registration <k>)`; `the graph holds <n> passes; their draws are the graph's from now`; `the
-first batch (<n> draws) ran on the graph`; `<effect> stays on D3D11 (<reason>)`; errors: `... every ImageSpace effect returns to
-D3D11`.
+Log lines (all `[ORG] ImageSpace:`): `hooks installed (...)`; `on (CS_ORG_IMAGESPACE); effects <list>`; `the shape manifest holds <n>
+shapes (session <k>; ...)` or `no shape manifest yet`; `registered <n> passes (registration <k>); the anchor's graph holds them from
+its next build`; `built the program of <pass> on the render thread at the graph's build` (a program Setup could not queue in time);
+`the first batch (<n> draws) ran on the graph`; `<effect> stays with the engine: <reason>`; `wrote the shape manifest (<n> shapes,
+<m> seen this session)`; `the engine made its targets again; the <n> passes register again on the new imports`; errors: `<effect>
+failed on the graph ...`, `<pass> has no program`, `... every ImageSpace effect returns to the engine`.
 
 ## Test plan
 
@@ -355,35 +347,34 @@ HDR classes (107732 into `kHDR_*`) stay at zero once the client is live. Since w
 whose shape is refused stays (its reason is logged once). Scenarios: `imagespace-census.env` (and
 `imagespace-census-org0.env` for the same tour with the port off), `imagespace-sao-ssr-org0.env`/`-org1.env` for the shots.
 
-## What is left
+## What stays the engine's
 
-The run budget is no longer the limit (w3-slots: ORG's slot index is 32-bit, CS's budget 512, this anchor 13 runs). What stays
-D3D11 from the residue, and why:
+The final-build census (flush.md, "The census after wave 3") left seven ImageSpace draws and dispatches and two volumetric lighting
+dispatches a frame in settled Whiterun. Most of the ImageSpace ones were shapes first seen after the learning window's registration
+(`1111-131713-p35-p5-all-census-misc-fin`: the whole SAO and reflection chains until registrations 2 to 4); with the manifest they
+are passes from Setup. By class:
 
-- **The SAO composite** (ISSAOCompositeSAO/Fog/SAOFog into kMAIN). Its source includes `IBL/IBL.hlsli` and
-  `ExponentialHeightFog/ExponentialHeightFog.hlsli` with the IBL and EHF features' own register bindings (and s9), and reads
-  `SharedData` feature settings. Taking it means a dual-target form of those two feature headers, which the Lighting shaders
-  share, and binding IBL's and EHF's graph outputs (both are ORG ports) by name. That is a change to two other features'
-  shader interfaces, not to this mechanism: left for their owners or a later wave.
-- **WaterBlend** (ISWaterBlend into kMAIN and the water history). It writes two render targets (SV_Target0 and SV_Target1).
-  `ReadShape` takes one target and `AnchorPasses::Draw` has one `target`; a second attachment there is the missing piece. The
-  D3D11 clear CS makes of the second target first is not a blocker: it is earlier in DXVK's stream than the batch's run.
-- **The volumetric lighting compute.** It runs the VolumetricLighting feature's own compute shaders and constants
-  (`GetOrCreateGenerateCS`, `SetDimensionsCB`, chosen in `CSShadersSupport::Renderer_DispatchCSShader`), not the engine's. It is
-  an ORG port of that feature's compute in the Phase 3 style (`src/Features/VolumetricLighting/ORGVolumetricLighting.*`, its
-  four sources dual-target), which this lane did not reach.
-- **ISCopySubRegionCS from `Main::RenderWaterEffects`** (SE 0x1405b2300; engine-d3d11-surface.md, R4). It copies each texture in
-  BGSAutoWater's queue (a loaded texture's SRV, a different one per call) into a sub-rectangle of the texture at
-  `DAT_1431d0f80 + 0x48` that the water shader reads (its UAV). Neither is an engine render target. A pass is made per shape,
-  and a shape here would be per queued texture, used once: importing each would cost a graph build per texture for one dispatch.
-  It stays D3D11 (`its UAV is not an engine render target's`). The snow copy from RenderWorld (kMAIN to kSNOW_SWAP) is taken.
-- **A fractional viewport.** The pass's render area is whole pixels. A dynamic-resolution viewport more than 1/64 of a pixel off
-  whole (an odd render size halved for a half-resolution target, for example) would cover the same pixels but give a slightly
-  different TEXCOORD0, so it stays D3D11 (`a viewport that is not whole pixels`, with the viewport logged). Taking it needs the
-  viewport passed to the shader, or a render area separate from the viewport.
-- **The dynamic-resolution quad** (`unk58`, quad +0x50). Not seen with Upscaling (its draws go through the +0x48 quad with a
-  smaller viewport). Its UVs were not traced: it stays refused (`dynamic resolution`).
+| Class | Now |
+| --- | --- |
+| DistantBlur (99023's last effect) into `kFRAMEBUFFER` | Taken: `kFRAMEBUFFER` is an output (`EngineTarget` imports the RTV's texture); the refusal was `its output is not an engine render target` (index 0 was outside the range checked). |
+| HDRDownSample4 into `kLDR_DOWNSAMPLE0` (Render 107732 outside the HDR effect) | Taken when its input is an engine target: ISHDRDownSample4 is an own-scope effect outside the HDR effect. If its input is not one, the refusal says so (`an input that is not an engine target`). |
+| ISWaterBlend into kMAIN and the water history | Taken: two-target passes (`AnchorPasses::Draw::extraTargets`), ISWaterBlend.hlsl dual-target, own scope through the explicit-target Render. |
+| Refraction's late shape (ISRefraction into kMAIN_COPY at the full output size) | A shape like any other: in the manifest from the session that first saw it. |
+| ISSAOCompositeFog / SAO / SAOFog into kMAIN | **Stays.** Its source includes `IBL/IBL.hlsli` and `ExponentialHeightFog/ExponentialHeightFog.hlsli` with those features' own registers (and s9) and reads `SharedData` feature settings. Taking it needs a dual-target form of the two feature headers (shared with the Lighting shaders) and IBL's and EHF's graph outputs bound by name: a change to two other features' shader interfaces. Reason `imagespace: effect not on the graph`. |
+| ISApplyVolumetricLighting (two raster draws into `kIMAGESPACE_VOLUMETRIC_LIGHTING` / `_PREVIOUS`) | **Stays.** It reads the VL volume (t2, a `Texture3D` from `texture3DRenderTargets`), the repartition texture (t3, a `Texture1D` the VL helper made) and the noise gradient (t4, a loaded texture). FrameAnchors imports 2D render targets, depth and cube targets only; importing a 3D target and a 1D texture is a FrameAnchors addition, and the VL volume is written by the dispatches below, which stay the engine's. Reason `imagespace: effect not on the graph`. |
+| The VL blur (ISVolumetricLightingBlurHCS / VCS through 107206 -> 107209/107210 -> 107734) | **Stays.** With the VolumetricLighting feature loaded, `CSShadersSupport::Renderer_DispatchCSShader` swaps in CS's own shaders (`GetOrCreateBlurHCS/VCS`), binds its own CS b1 (`SetDimensionsCB`, a CS buffer the capture does not see) and rewrites the group counts. Taking it needs those two sources dual-target with the VL data in the latch, and the effect's input (written by ISApplyVolumetricLighting, above) is the engine's anyway. Reason `imagespace: effect not on the graph`. |
+| The VL dispatches from AE 107023 (+0x31C generate, +0x48B raymarch; SE 100309) | **Stays.** They call `DispatchCSShader` directly with CS's ISVolumetricLightingGenerateCS / RaymarchCS: the shadow cascades as `Texture2DArray` (both shadow maps), the inverse repartition `Texture1D`, the noise `Texture3D`, Terrain and Cloud Shadows' inputs through `ShadowSampling.hlsli`, and a `RWTexture3D` density volume, with CS b0 from the engine's PerTechnique. None of those is an import FrameAnchors makes today, and the feature inputs belong to their ports. This is a Phase 3 style port of VolumetricLighting (`ORGVolumetricLighting.*`). The dispatches are recognised by return address (within AE 107023 / SE 100309) and vouched for: `imagespace: volumetric lighting compute`. |
+| ISCopySubRegionCS from `Main::RenderWaterEffects` (BGSAutoWater's queue) | **Stays.** Each call copies a loaded texture (a different one per call) into the water texture at `DAT_1431d0f80 + 0x48`; neither is an engine render target. A fixed pass set cannot name a texture per call; it needs a bindless source in the latch. Refusal `its UAV is not an engine render target's`, reason `imagespace: shape refused`. |
+| The tonemap (55, 56) | Stays: CS's tonemap owners (Effects11, Post Processing, HDR Display). |
+| A fractional viewport, the dynamic-resolution quad (`unk58`), a manager rectangle (menu 3D) | Stay, as before (inherent refusals). |
 
-Then everything marked Next above: the tonemap when no CS feature owns it, the rest of 99023's slots (DOF, radial and full-screen blur, get hit, refraction, FXAA, world map), the
-pre-tonemap SIL and IB lens flares, SSAO, the local map, the copies, and the dynamic-resolution path. Then the engine's draw can
-be withheld without the D3D11 bind (P5.13).
+### The darker Dragonsreach (`imagespace-sao-ssr-org1.env`)
+
+The suspicion was the eye-adaptation chain split between the graph and D3D11. The run `1111-120550-p35-imagespace-sao-ssr-org1-sm2`
+does not support it: after `coc WhiterunDragonsreach` the log shows no new shape but ISRefraction's, so every HDR draw in
+Dragonsreach was the graph's, with the same shapes as in Whiterun (the last luminance level alternating rt30 / rt32, read by the
+D3D11 tonemap). What does change in an interior is SAO: interiors use the full-strength composite (ISSAOCompositeSAO, D3D11, reading
+kSAO), while Whiterun's ISSAOCompositeFog barely shows it. So the graph's SAO chain (camera Z and its mips, RawAO with its history
+ping-pong rt62 / rt64 and the normals rt4 / rt5, the blurs into kSAO) is the first suspect, not the HDR chain. With the whole HDR
+chain on the graph from Setup the split cannot happen any more in a registered session either. To tell: `primary-imagespace-dr-sao.env`
+and `primary-imagespace-dr-hdr.env` take only the SAO or only the HDR group; the darker one names the chain.
