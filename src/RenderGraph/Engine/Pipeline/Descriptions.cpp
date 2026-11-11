@@ -160,11 +160,12 @@ namespace RenderGraph::Engine::Pipeline
 			return std::static_pointer_cast<const D>(found->second.description);
 		}
 
-		// A state object's description, made from GetDesc on first sight.
+		// A state object's description, made from GetDesc on first sight. It needs no recording (CS_ORG_ENGINE_SHADERS): the engine
+		// draw families build their pipelines from these with the switch off too.
 		template <class D, class Object, class Make>
 		std::shared_ptr<const D> FindOrDescribe(Object* a_object, EntryKind a_kind, Make&& a_make)
 		{
-			if (!a_object || !Enabled())
+			if (!a_object)
 				return nullptr;
 			// The wrapped object, or the object itself; a native handle answers GetDesc too.
 			auto* real = RealOf(a_object);

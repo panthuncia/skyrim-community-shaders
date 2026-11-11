@@ -31,8 +31,9 @@ namespace RE::BSGraphics
  * pipelines from latched engine state in Phase 5.
  *
  * CS_ORG_ENGINE_SHADERS=1 turns the recording on (EngineHooks.h installs it). Every shader and input layout the device creates is
- * described when it is created; state objects and queries are described from GetDesc the first time they are looked up. A
- * description lives as long as its D3D11 object: a token kept in the object's private data removes it when the object goes.
+ * described when it is created. State objects and queries are described from GetDesc the first time they are looked up, with or
+ * without the switch (the engine draw families build their pipelines from them). A description lives as long as its D3D11 object: a
+ * token kept in the object's private data removes it when the object goes.
  *
  * Every Find takes a tripwire handle or a D3D11 object, and returns null for an object nothing described. Callable from any
  * thread. RE: docs/development/p4/p4.6-shaders-states.md.
