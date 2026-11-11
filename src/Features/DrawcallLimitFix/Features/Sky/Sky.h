@@ -180,6 +180,8 @@ namespace DCLF::Features::Sky
 		 * first use); null when it cannot be built. a_shader: the engine's BSSkyShader, whose defines ShaderCache composes.
 		 */
 		std::shared_ptr<const void> Program(const PipelineKey& a_key, const void* a_shader);
+		/** @brief Keeps a probe's imports and leases as long as a run's, so the next batches find them instead of importing again. */
+		void Keep(std::vector<std::shared_ptr<const void>> a_owners);
 		/** @brief Runs a_run's anchor with its draws (an empty run builds and prepares the client only). */
 		void Submit(std::shared_ptr<Run> a_run);
 		/** @brief One status line. */
