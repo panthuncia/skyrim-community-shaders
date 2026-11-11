@@ -475,6 +475,7 @@ of adding a `Segment` and editing the epoch order. Each anchor is one of CS's ho
 | `EngineShadowClear`, `EngineCubeClear`, `EngineFrameClear` | the engine skeleton's clear sites (`Renderer::ApplyState`, `SetDirtyStates`, `ClearColor`, `ClearDepthStencil`), before the engine's bind (`p5/skeleton.md`) |
 | `EngineDepthCopy` | the engine skeleton's `kPOST_ZPREPASS_COPY` copies: `Main::RenderDepth`, FinishAccumulating, `Deferred::DeferredPasses` |
 | `Interface` | each Scaleform `EndDisplay` the graph draws (`RenderGraph/Engine/Scaleform`, `CS_ORG_SCALEFORM`), inside `UI::DrawInterface`, several times a frame |
+| `ImageSpace` | a batch of the engine's ImageSpace draws the graph draws in the engine's place (`RenderGraph/Engine/ImageSpace`, `CS_ORG_IMAGESPACE`): at the end of the HDR effect's or the pre-tonemap composites' render, or before the first engine draw that is not the graph's; up to 4 times a frame (`p5/imagespace.md`) |
 
 Each anchor's ordering rule is in [org-extension-api-notes.md](./org-extension-api-notes.md), "Attaching passes to the frame".
 

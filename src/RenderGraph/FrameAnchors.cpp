@@ -35,7 +35,7 @@ namespace FrameAnchors
 		using Segment = RenderGraphRuntime::Segment;
 
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
-		static_assert(static_cast<std::uint32_t>(Segment::AnchorInterface) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
+		static_assert(static_cast<std::uint32_t>(Segment::AnchorImageSpace) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
 			"one segment per anchor, in the anchors' order");
 		static_assert(static_cast<std::uint32_t>(Segment::Count) <= 32, "TakeSubmittedSegments holds one bit per segment");
 
@@ -82,6 +82,9 @@ namespace FrameAnchors
 			{ "EngineDepthCopy", { "CS anchor: engine depth copy", "CS anchor: engine depth copy inputs", "FrameAnchors::EngineDepthCopy / ", "cs.anchor.engine-depth-copy" }, false, 3 },
 			// Runs a frame: one per Scaleform display drawn on the main thread
 			{ "Interface", { "CS anchor: interface", "CS anchor: interface inputs", "FrameAnchors::Interface / ", "cs.anchor.interface" }, true, 6 },
+			// Runs a frame: one per batch of ImageSpace draws (the HDR effect's, the pre-tonemap composites', and a batch cut short by a
+			// draw the graph does not take). Late: the TAA or the upscaler can follow a batch inside the chain.
+			{ "ImageSpace", { "CS anchor: image space", "CS anchor: image space inputs", "FrameAnchors::ImageSpace / ", "cs.anchor.image-space" }, true, 4 },
 		} };
 
 		// Where each segment runs in a frame: AddToFrame puts an anchor before the first epoch of the order that runs after it. A
@@ -112,6 +115,7 @@ namespace FrameAnchors
 			Segment::FirstPerson,
 			Segment::AnchorPostProcessing,   // Main_PostProcessing, before the upscaler
 			Segment::AnchorUpscale,          // after the upscaler's evaluate
+			Segment::AnchorImageSpace,       // the ImageSpace chain's batches (pre-tonemap composites, the HDR effect), a few times a frame
 			Segment::AnchorTonemap,          // in the ImageSpace chain after it
 			Segment::AnchorFrameGeneration,  // after the ImageSpace chain, before frame generation
 			Segment::AnchorInterface,        // Scaleform's displays (UI::DrawInterface), several times a frame
