@@ -1291,3 +1291,15 @@ Keys used so far:
   - **Render ownership on another thread** (the loading screen, P5.12): anchors run on the main thread only, so a UI drawn
     from the loading-screen thread stays on D3D11.
 - **Found by:** P5.10 (2026-11-10).
+
+### Views that appear with a menu, and frames the engine does not draw
+
+From P5.8/P5.9 (`docs/development/p5/menus.md`). Two needs a menu scene's view brings that the graph API does not cover yet:
+- **A view whose target varies per frame** (the menu model draws into whatever RT0 `UI::Render` left: kMAIN or the back buffer). Making
+  the pass for the current target rebuilds the graph on every menu change. The pattern used instead: import every candidate target once
+  at install and record one pass per candidate in the view's fixed shape, chosen per frame by a latch (the other draws nothing). An ORG
+  "one of N imports, chosen at execution" binding would remove the duplicate passes.
+- **A frame the engine does not draw the world in** (a menu with `kFreezeFrameBackground`: Main's frame composites the frozen frame and
+  never calls `Main::Draw`). DCLF's frame, its adoption of a publication and its explicit build point all live in `Main::Draw`, so a
+  menu view has no frame there. It needs a frame start outside the world frame (at `UI::Render`) that adopts the newest publication and
+  calls `host->BuildIfRequested()`, as Bink's blocking loop does.
