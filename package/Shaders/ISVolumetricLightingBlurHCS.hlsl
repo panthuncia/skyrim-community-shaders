@@ -1,10 +1,32 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build (Features/VolumetricLighting/ORGVolumetricLighting): the textures from the heap, SharedData from the shared
+// constants, and VLData from the port's latch. CBSize and the samplers are never read.
+#	define ORG_SHARED_CONSTANTS
+#	include "Common/OrgResources.hlsli"
+
+struct VolumetricLightingBlurConstants
+{
+	int2 screenSize;
+	int2 screenSizeMin1;
+};
+
+#	define VL_BLUR_RESOURCES(X)                       		X(SHARED, ConstantBuffer, Shared, 0)           		X(SRV, Texture2D<float>, InVLTexture, 0)       		X(SRV, Texture2D<float>, DepthTexture, 1)      		X(UAV, RWTexture2D<float>, OutVLTexture, 0)    		X(LATCH, VolumetricLightingBlurConstants, VLData, 1)
+ORG_PUSH_BLOCK(VL_BLUR_RESOURCES(ORG_HANDLE))
+VL_BLUR_RESOURCES(ORG_RESOURCE)
+
+static int2 screenSize = VLData.screenSize;
+static int2 screenSizeMin1 = VLData.screenSizeMin1;
+#endif
+
 #include "Common/SharedData.hlsli"
 
+#if !defined(CS_ORG_BINDLESS)
 Texture2D<float> InVLTexture : register(t0);
 Texture2D<float> DepthTexture : register(t1);
 SamplerState LinearSampler : register(s0);
 SamplerState PointSampler : register(s1);
 RWTexture2D<float> OutVLTexture : register(u0);
+#endif
 
 #ifndef TG_DIM
 #	define TG_DIM 256
@@ -14,6 +36,7 @@ RWTexture2D<float> OutVLTexture : register(u0);
 #	define WINDOW 12
 #endif
 
+#if !defined(CS_ORG_BINDLESS)
 cbuffer CBSize : register(b0)
 {
 	float4 invSize;
@@ -25,6 +48,7 @@ cbuffer VLData : register(b1)
 	int2 screenSize;
 	int2 screenSizeMin1;
 }
+#endif
 
 static const int TapOffsets[5] = { -12, -6, 0, 6, 12 };
 static const float TapWeights[5] = { 0.178400, 0.210431, 0.222338, 0.210431, 0.178400 };
