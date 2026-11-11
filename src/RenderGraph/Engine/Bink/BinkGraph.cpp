@@ -126,8 +126,9 @@ namespace RenderGraph::Engine::Bink::Graph
 
 	namespace
 	{
-		// Frames in flight that can each hold a buffer, and the one the decoder fills.
-		constexpr std::uint32_t kMaxStaging = 6;
+		// Frames in flight that can each hold a buffer, and the one the decoder fills. A 1080p movie takes 8.3 MB a buffer; with
+		// none spare, a tick decodes on the engine's path.
+		constexpr std::uint32_t kMaxStaging = 4;
 
 		std::shared_ptr<org::LatchBlock> AcquireStaging(const std::shared_ptr<StagingPool>& a_pool)
 		{
