@@ -21,9 +21,6 @@
 
 namespace DCLF::Features::Particles::MasterParticles
 {
-	/** @brief Whether CS_DCLF_MASTER_PARTICLES is "1" (read once, from the environment or the switches file). */
-	bool Enabled();
-
 	/** @brief Main thread, at DCLF's preflight: the removal call site, when enabled. */
 	void Preflight();
 
@@ -33,6 +30,6 @@ namespace DCLF::Features::Particles::MasterParticles
 	 */
 	void Install(Api::InstallContext& a_context);
 
-	/** @brief The report's lines (the particles report, CS_DCLF_STATS): <- MASTER SET and <- MASTER REFS. */
+	/** @brief The report's lines (the particles report, CS_DCLF_STATS; the observers behind them run only then): <- MASTER SET and <- MASTER REFS. */
 	void Lines(std::string& a_text);
 }
