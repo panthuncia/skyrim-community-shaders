@@ -15,6 +15,7 @@
 #include "Deferred.h"
 #include "Features/CloudShadows.h"
 #include "Features/CloudShadows/ORGCloudShadows.h"
+#include "RenderGraph/Switches.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -454,7 +455,10 @@ namespace DCLF::Features::Sky
 				}
 				Shape shape;
 				std::uint32_t face = 0;
-				if (!CurrentShape(a_accumulator, shape, face, capture)) {
+				// Diagnostics: CS_ORG_SKY_VIEWS=main or faces takes only that view on the graph.
+				static const std::string views = Switches::Value("CS_ORG_SKY_VIEWS");
+				if (!CurrentShape(a_accumulator, shape, face, capture) || (views == "main" && shape.view != View::Main) ||
+					(views == "faces" && shape.view != View::Face)) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
@@ -475,9 +479,10 @@ namespace DCLF::Features::Sky
 					return;
 				}
 				const bool probe = !clean;
-				// Cloud Shadows' copy reads the faces' cloud occlusion only while the graph draws the faces' clouds.
-				if (shape.view == View::Face && shape.cloudShadows)
-					SkyDraws::UseCloudFaces(!probe);
+				// Cloud Shadows' copy reads the faces' cloud occlusion only while the graph draws the faces' clouds: decided after the
+				// batch from its draws (a probe's batch is the engine's). Set once per change, so the copy's registration is stable.
+				if (probe && shape.view == View::Face && shape.cloudShadows)
+					SkyDraws::UseCloudFaces(false);
 				capture.view = shape.view;
 				capture.run = run;
 				capture.probe = probe;
@@ -511,6 +516,17 @@ namespace DCLF::Features::Sky
 					clean = false;
 					logger::warn("[DCLF] sky: a {} sky draw could not be drawn by the graph; the engine draws the batches while the view probes again",
 						shape.view == View::Main ? "main" : "face");
+				}
+				// The graph writes the faces' occlusion only through this run's cloud draws. A run without one leaves it unwritten, so
+				// Cloud Shadows' copy keeps reading its D3D11 layer.
+				if (shape.view == View::Face && shape.cloudShadows) {
+					const bool clouds = !capture.failed && std::ranges::any_of(run->draws, [](const Draw& a_draw) { return a_draw.key.occlusion; });
+					if (!clouds) {
+						static std::atomic_flag logged;
+						if (!logged.test_and_set())
+							logger::warn("[DCLF] sky: a face batch on the graph has no cloud draw; Cloud Shadows' copy keeps its D3D11 layer");
+					}
+					SkyDraws::UseCloudFaces(clouds);
 				}
 				SkyDraws::Submit(std::move(run));
 			}
