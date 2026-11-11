@@ -1478,6 +1478,43 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   calls `host->BuildIfRequested()`, as Bink's blocking loop does.
 - **Found by:** P5.8 and P5.9 (`docs/development/p5/menus.md`).
 
+### Engine targets a graph pass writes, sampled by a replaced engine draw
+
+- **Need:** an engine draw a family replaces samples an engine render target (the water's refraction copy and SSR targets, a shadow
+  mask's depth) that another port writes on the graph. The family's pass must be ordered after that write, but which targets are
+  published depends on which ports run and which readers asked for them, and it is only known at the draw.
+- **Who:** the water and shadow mask families (`Family::SlotTexture` answers `Published`); any plugin that re-issues an engine draw
+  whose inputs the graph may own.
+- **Where it fits:** `Family::PublishedSlot` gives the id and its whole-resource view index; the family's shape holds the ids its draws
+  sampled (`Family::PublishedIds`, a set, so a slot alternating between a target and its swap keeps one shape), learnt by probes
+  before its client is made and kept once seen, and its pass declares the reads for their order only. A graph-level
+  "this pass reads whatever published resources its draws name, resolved at execution" would let the shape stay fixed and remove the
+  learning window; today a target published after the client is made keeps that view on the engine for the session.
+- **Found by:** the w3 misc lane (2026-11-11, `docs/development/p5/water.md` "Published material slots", `p5/shadow-mask.md`).
+
+### An engine pass whose deferred clear its draw function would have issued
+
+- **Need:** the engine records a target clear (SetRenderTarget with a clear mode) and issues it at the next SetDirtyStates, which is
+  usually the first draw's own. A family that takes that draw in place of the draw function skips the clear: it lands at some later
+  engine flush (after the family's pass) or is lost when the target is replaced.
+- **Who:** the shadow mask family (kSHADOW_MASK is cleared by its function, issued by the first light's draw).
+- **Where it fits:** the family applies the engine's pending state after latching a taken draw (`Engine::ApplyPendingState`), as the
+  draw function would: the clear lands before the anchor's run (on D3D11, or as the engine skeleton's clear pass at EngineFrameClear)
+  and the dirty bits are consumed as before. Under the flush latch it is a flush from CS code, which is applied. Once the skeleton owns
+  every clear and the flush is latch-only, the pending clear could be handed to the family's own pass as a load op instead.
+- **Found by:** the w3 misc lane (2026-11-11, `p5/shadow-mask.md`).
+
+### A movie or loading thread's first frame on the graph
+
+- **Need:** the first frame a non-main thread renders (the startup logo's MoviePlayer thread) is checked against the graph before that
+  thread claims rendering at its `Renderer::Begin`, and the client it needs joins its anchor's graph only at that frame's end.
+- **Who:** Bink's startup logo (1 of 166 frames); any plugin that renders from its own thread under `Renderer::Lock`.
+- **Where it fits:** the claim and the join build can both move to the start of the thread's first unit of work when the thread provably
+  holds `Renderer::Lock` (the CRITICAL_SECTION's owner): `FrameAnchors::ClaimRenderOwnership` then `FrameAnchors::OnFrameEnd` between
+  frames (Bink's `ClaimForBlockingTick`). A framework call "this thread holds the renderer lock and starts a frame now" would make it one
+  rule for every such thread.
+- **Found by:** the w3 misc lane (2026-11-11, `p5/bink.md` "The first frame").
+
 ## Present, output and capture
 
 ### An overlay pass after the UI

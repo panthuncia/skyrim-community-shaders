@@ -63,7 +63,11 @@ namespace DCLF::Features::Water
 			std::array<bool, static_cast<std::size_t>(View::Count)> clean{};                   // the view's last probe latched every draw
 			std::array<std::optional<Shape>, static_cast<std::size_t>(View::Count)> settling;  // the shape a view waits on (kSettleBatches)
 			std::array<std::uint32_t, static_cast<std::size_t>(View::Count)> settled{};
+			// The published graph textures each view's draws were seen sampling at their material slots (Shape::materialIds).
+			std::array<Family::PublishedIds, static_cast<std::size_t>(View::Count)> knownMaterials;
 			View view = View::Surface;
+			Shape shape;                                       // the batch's: what its view's client must have been made for
+			Family::PublishedIds observed;                     // the published ids the batch's draws sampled
 			std::shared_ptr<Run> run;
 			std::uint32_t depthFormat = 0;
 			std::uint64_t fallbacks = 0;      // draws the engine drew during a latched batch
@@ -258,13 +262,20 @@ namespace DCLF::Features::Water
 			draw.indexCount = geometry.indexCount;
 
 			// The twelve texture slots as the shadow state holds them (an empty slot reads zero, as on D3D11) and every slot's sampler.
-			for (std::uint32_t t = 0; t < 12; ++t) {
+			for (std::uint32_t t = 0; t < kMaterialSlots; ++t) {
 				auto* view = Unwrap(rss.PSTexture[t]);
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
 				const auto slot = Family::SlotTexture(view, MaterialKind(t), GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), constants.textures[t], owners, &failure);
-				if (slot == Family::SlotResult::Published)
-					return "a texture slot holds a published graph texture";
-				if (slot != Family::SlotResult::Ok) {
+				if (slot == Family::SlotResult::Published) {
+					// An engine target a graph pass writes (the refraction copy, the SSR targets): read by its id, which the view's client
+					// declares, so the graph orders the write before the water. The id joins the view's shape (WaterBatch).
+					std::string id;
+					if (!Family::PublishedSlot(view, id, constants.textures[t]))
+						return "a texture slot holds a published graph texture without a shader resource view";
+					if (!a_capture.probe && !a_capture.shape.materialIds.contains(id))
+						return "a texture slot holds a published graph texture its client was not made for";
+					a_capture.observed.insert(std::move(id));
+				} else if (slot != Family::SlotResult::Ok) {
 					Refusals().Report(std::format("a {} draw's texture t{} could not be imported", NameOf(a_capture.view), t), GpuTextures::DescribeFailure(view, t, failure));
 					return "a texture it samples could not be imported";
 				}
@@ -336,6 +347,8 @@ namespace DCLF::Features::Water
 					return;
 				}
 				const auto index = static_cast<std::size_t>(kView);
+				auto& known = capture.knownMaterials[index];
+				shape.materialIds = known;
 				auto& clean = capture.clean[index];
 				// A view's client is made once, for a shape that held for kSettleBatches batches.
 				auto& settling = capture.settling[index];
@@ -344,14 +357,10 @@ namespace DCLF::Features::Water
 					capture.settled[index] = 0;
 				}
 				const bool settled = ++capture.settled[index] >= kSettleBatches;
-				if (!settled || !WaterDraws::Ready(shape)) {
-					// The client is not made yet or is joining the graph: the engine draws this batch, and the view probes again.
-					clean = false;
-					WaterDraws::Keep(std::move(run->owners));
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-					return;
-				}
-				const bool probe = !clean;
+				// Until the view's client is made and in the built graph, the engine draws its batches as probes: they learn the published
+				// engine targets the draws sample (the shape's material slots) and ask for the programs.
+				const bool ready = settled && WaterDraws::Ready(shape);
+				const bool probe = !ready || !clean;
 				// Draws are withheld only when the anchor's run will draw them (a probe withholds nothing).
 				if (!probe && !WaterDraws::CanRun(kView)) {
 					Refusals().Report(std::format("a {} batch whose anchor cannot run now", NameOf(kView)), "the ring is full or the client left the built graph");
@@ -361,6 +370,8 @@ namespace DCLF::Features::Water
 				}
 				capture.view = kView;
 				capture.run = run;
+				capture.shape = shape;
+				capture.observed = {};
 				capture.probe = probe;
 				capture.failed = false;
 				capture.passes.Begin();
@@ -371,6 +382,13 @@ namespace DCLF::Features::Water
 				if (!capture.passes.End()) {
 					Refusals().Report(capture.passes.Describe(std::format("{} water", NameOf(kView))));
 					Refuse(capture, "a pass of the batch drew through another draw function than DrawTriShape", capture.lastTechnique);
+				}
+				// The published ids the batch sampled join the view's (an id stays once seen); a new one is the next batch's shape.
+				known.insert(capture.observed.begin(), capture.observed.end());
+				if (!ready) {
+					clean = false;
+					WaterDraws::Keep(std::move(run->owners));
+					return;
 				}
 				if (probe) {
 					clean = !capture.failed;

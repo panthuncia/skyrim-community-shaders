@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -199,6 +200,23 @@ namespace DCLF::Family
 	 */
 	SlotResult SlotTexture(ID3D11ShaderResourceView* a_view, GpuTextures::ViewKind a_kind, std::uint32_t a_tag, std::uint32_t& a_index, Owners& a_owners,
 		GpuTextures::ResolveFailure* a_failure = nullptr);
+
+	/**
+	 * @brief A slot SlotTexture answered Published for: the id whose twin exports a_view, and the bindless index of the id's
+	 * whole-resource view (PublishedResources::ShaderResourceIndex). The family's client declares a read of the id (its shape lists
+	 * it), so the graph orders the producer's writes before the draw; the draw's latch carries the index. False when a_view is no
+	 * published export, or its id has no such view.
+	 */
+	bool PublishedSlot(const ID3D11ShaderResourceView* a_view, std::string& a_id, std::uint32_t& a_index);
+
+	/**
+	 * @brief The published ids a family's draws sample at their slots (PublishedSlot), as a view's shape holds them: a set, not a slot
+	 * each, so a slot that alternates between targets frame by frame (a swap pair) keeps one shape.
+	 */
+	using PublishedIds = std::set<std::string, std::less<>>;
+
+	/** @brief What differs between two id sets, in words ("+Engine::kMAIN_COPY, -..."), for a log; empty when nothing does. */
+	std::string DescribeChange(const PublishedIds& a_from, const PublishedIds& a_to);
 
 	/** @brief The engine sampler for a slot's address and filter modes. kInvalid when the graph has none. */
 	std::uint32_t SlotSampler(std::uint32_t a_addressMode, std::uint32_t a_filterMode, Owners& a_owners);

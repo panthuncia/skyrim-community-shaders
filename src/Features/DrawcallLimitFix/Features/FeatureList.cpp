@@ -24,6 +24,7 @@
 #include "Features/DrawcallLimitFix/Features/Portals/Portals.h"
 #include "Features/DrawcallLimitFix/Features/Reflection/Reflection.h"
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuViews.h"
+#include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/Local.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/Sun.h"
@@ -56,7 +57,7 @@ namespace DCLF::Features
 		// - Faces' coordinator component runs after the others', except Fades'. Both act on the slot tables' reset.
 		// - Sky registers nothing with Core (its hooks and its anchors' clients are its own), so its place sets no order; it is before Fades.
 		// - Menu views registers only report lines (its probe's hooks are its own), so its place sets no order either; it is before Fades.
-		// - Water and Blood splatter are the same kind (the EngineDraws anchor's clients); they are listed after Menu views.
+		// - Water, Blood splatter and Shadow mask are the same kind (the EngineDraws anchor's clients); they are listed after Menu views.
 		// - Fades is last. Its pool, scene resources, commit hook, pass setups, coordinator component and stand-in observer run after every
 		//   other feature's. Its channels are the last BeforeStructural ones.
 		//
@@ -93,6 +94,7 @@ namespace DCLF::Features
 			MenuViews::Feature(),
 			Water::Feature(),
 			BloodSplatter::Feature(),
+			ShadowMask::Feature(),
 			Fades::Feature(),
 		};
 		return kFeatures;

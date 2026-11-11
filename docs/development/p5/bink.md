@@ -241,6 +241,25 @@ What to check:
 Not checked without a build: compilation, and AE (the IDs and layouts are the same in Ghidra). The startup logo plays before
 `State::Setup` registers the client, so it may stay the engine's even with `CS_ORG_LOADING_THREAD=1`.
 
+## The first frame
+
+With every port on, the logo drew 165 of its 166 frames on the graph (`1111-080217-p35-p5-all-s4`): its first tick decides whether it
+is a graph tick (`Eligible`) before its own `Renderer::Begin`, where the MoviePlayer thread takes rendering, and the Present anchor's
+graph held the `cs.bink` client (registered at `State::Setup`) only from the build at that frame's end (`graphs built at the frame's
+end for clients joining them (build 1)`). So the first frame was the engine's for two reasons.
+
+`org-port/w3-misc` (`BinkHooks.cpp`, `ClaimForBlockingTick`): a tick of a blocking movie (player mode 1) on a thread that holds
+`Renderer::Lock` (the renderer's CRITICAL_SECTION, Renderer +0x2790 SE, +0x27F0 AE, owned by the caller) but does not own rendering,
+with `CS_ORG_LOADING_THREAD=1`, claims rendering at the tick's start (`FrameAnchors::ClaimRenderOwnership`, the claim its `Begin`
+makes a few calls later) and builds the graphs a joining client waits for there (`FrameAnchors::OnFrameEnd`: the build a frame's end
+makes, made between frames one frame earlier). PlaySequence holds the lock for the whole sequence, so no other thread renders between
+the two points. It happens once per ownership change; the next ticks own rendering already. Logged:
+`[ORG] Bink: a blocking movie on thread N under Renderer::Lock takes rendering at its tick's start`.
+
+Expected: `a 1920x1080 movie ended: 166 frames drawn by the render graph, 0 by the engine` in `loading-org1.env` and the p5-all runs,
+and no `a movie plays on thread N, not the render thread` line. If the tile program is still building at the logo's first frame,
+that frame stays the engine's (`the tile program is not built yet`).
+
 ## Open points
 
 - The startup logo on the graph: P5.12's `CS_ORG_LOADING_THREAD=1` (above). It has run in game: with every port on, the logo

@@ -1,3 +1,41 @@
+#if defined(CS_ORG_BINDLESS) && !defined(DCLF_BINDLESS)
+// The ORG build: the engine's shadow masks (Drawcall Limit Fix's shadow mask family, Features/DrawcallLimitFix/Features/ShadowMask),
+// each shadow-casting light's pass over the screen quad into kSHADOW_MASK: RENDER_SHADOWMASK* with RENDER_DEPTH. A draw's engine
+// constants (PS PerTechnique and PerGeometry, the alpha test reference), its textures' and samplers' heap indices and its geometry are
+// one latch region. FrameBuffer and SharedData are the shared constants, written at the anchor's run right after the engine's batch,
+// so they hold the camera the engine's draw would have read (the menu's in a menu scene).
+#	if !defined(RENDER_DEPTH) || !(defined(RENDER_SHADOWMASK) || defined(RENDER_SHADOWMASKSPOT) || defined(RENDER_SHADOWMASKPB) || defined(RENDER_SHADOWMASKDPB))
+#		error "Utility.hlsl's ORG build draws the shadow masks (RENDER_SHADOWMASK* with RENDER_DEPTH) only"
+#	endif
+#	define UTILITY_ORG
+#	define ORG_SHARED_CONSTANTS
+#	include "Common/OrgResources.hlsli"
+
+// A shadow mask draw's latched values (DrawConstants in Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h). The engine's
+// rows as its constant buffers hold them: a matrix is its column registers (column_major packing), rebuilt below.
+struct UtilityOrgShadowMaskDraw
+{
+	float4 PSTechnique[5];  // PS b0: VPOSOffset, ShadowSampleParam, EndSplitDistances, StartSplitDistances, FocusShadowFadeParam
+	float4 PSGeometry[28];  // PS b2: DebugColor, PropertyColor, AlphaTestRef, ShadowLightParam, FocusShadowMapProj (c4-c15), ShadowMapProj (c16-)
+	float AlphaTestRefRS;   // b11
+	uint VertexStride;
+	uint FirstIndex;
+	uint Padding;
+	uint4 Textures[2];  // t0-t7 heap indices
+	uint4 Samplers[2];  // s0-s7 sampler heap indices
+	uint2 VertexAddress;
+	uint2 IndexAddress;
+	uint2 VertexLayout;
+	uint2 Padding2;
+};
+
+#	define UTILITY_ORG_RESOURCES(X)         \
+		X(SHARED, ConstantBuffer, Shared, 0) \
+		X(LATCH, UtilityOrgShadowMaskDraw, ShadowMaskDraw, 2)
+ORG_PUSH_BLOCK(UTILITY_ORG_RESOURCES(ORG_HANDLE))
+UTILITY_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/Color.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/LodLandscape.hlsli"
@@ -123,7 +161,7 @@ struct VS_OUTPUT
 #endif
 };
 
-#ifdef VSHADER
+#if defined(VSHADER) && !defined(UTILITY_ORG)
 cbuffer PerTechnique : register(b0)
 {
 	float4 HighDetailRange : packoffset(c0);  // loaded cells center in xy, size in zw
@@ -603,6 +641,38 @@ VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 #	endif
 #endif
 
+#if defined(VSHADER) && defined(UTILITY_ORG)
+#	if defined(__spirv__)
+#		define DCLF_PULLED_VERTICES
+#		include "Common/DCLFVertexPull.hlsli"
+
+// The ORG build's vertex stage: the engine's screen quad (ImageSpaceManager's, which every shadow mask pass draws), its vertex pulled as
+// the input assembler reads it (its 16-bit index, then its position), placed as the D3D11 stage places it. The depth the D3D11 stage
+// writes is not read: the pass has no depth target.
+VS_OUTPUT main(uint a_vertexID: SV_VertexID)
+{
+	DCLFDrawVertexLayout = ShadowMaskDraw.VertexLayout;
+	const uint indexNumber = ShadowMaskDraw.FirstIndex + a_vertexID;
+	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(ShadowMaskDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	DCLFStream first = { DCLFAddress(ShadowMaskDraw.VertexAddress), ShadowMaskDraw.VertexStride };
+	DCLFStream second = { uint64_t(0), 0u };
+	DCLFStreamsAt(index, first, second);
+	VS_OUTPUT vsout;
+	vsout.PositionCS = float4(DCLFPullPosition(first, second).xy, 0, 1);
+	return vsout;
+}
+#	else
+// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing (every vertex at one place; the depth is not read).
+VS_OUTPUT main(uint a_vertexID: SV_VertexID)
+{
+	VS_OUTPUT vsout;
+	vsout.PositionCS = float4(0, 0, (float)ShadowMaskDraw.FirstIndex, 1);
+	return vsout;
+}
+#	endif
+#endif
+
 typedef VS_OUTPUT PS_INPUT;
 
 struct PS_OUTPUT
@@ -612,6 +682,54 @@ struct PS_OUTPUT
 
 #ifdef PSHADER
 
+#	if defined(UTILITY_ORG)
+// The ORG build's resources, from the draw's latch: the slots' heap indices and the engine's constant rows.
+static SamplerState SampBaseSampler = SamplerDescriptorHeap[ShadowMaskDraw.Samplers[0].x];
+static SamplerState SampDepthSampler = SamplerDescriptorHeap[ShadowMaskDraw.Samplers[0].z];
+static SamplerState SampShadowMapSampler = SamplerDescriptorHeap[ShadowMaskDraw.Samplers[0].w];
+static SamplerComparisonState SampShadowMapSamplerComp = SamplerDescriptorHeap[ShadowMaskDraw.Samplers[1].x];
+static SamplerComparisonState SampFocusShadowMapSamplerComp = SamplerDescriptorHeap[ShadowMaskDraw.Samplers[1].z];
+
+static Texture2D<float4> TexBaseSampler = ResourceDescriptorHeap[ShadowMaskDraw.Textures[0].x];
+static Texture2D<float4> TexDepthUtilitySampler = ResourceDescriptorHeap[ShadowMaskDraw.Textures[0].z];
+static Texture2DArray<float4> TexShadowMapSampler = ResourceDescriptorHeap[ShadowMaskDraw.Textures[0].w];
+static Texture2DArray<float4> TexShadowMapSamplerComp = ResourceDescriptorHeap[ShadowMaskDraw.Textures[1].x];
+static Texture2D<uint4> TexStencilSampler = ResourceDescriptorHeap[ShadowMaskDraw.Textures[1].y];
+static Texture2DArray<float4> TexFocusShadowMapSamplerComp = ResourceDescriptorHeap[ShadowMaskDraw.Textures[1].z];
+
+static float4 VPOSOffset = ShadowMaskDraw.PSTechnique[0];
+static float4 ShadowSampleParam = ShadowMaskDraw.PSTechnique[1];
+static float4 EndSplitDistances = ShadowMaskDraw.PSTechnique[2];
+static float4 StartSplitDistances = ShadowMaskDraw.PSTechnique[3];
+static float4 FocusShadowFadeParam = ShadowMaskDraw.PSTechnique[4];
+
+static float4 DebugColor = ShadowMaskDraw.PSGeometry[0];
+static float4 PropertyColor = ShadowMaskDraw.PSGeometry[1];
+static float4 AlphaTestRef = ShadowMaskDraw.PSGeometry[2];
+static float4 ShadowLightParam = ShadowMaskDraw.PSGeometry[3];
+
+/** @brief A column_major float4x3 of the latched PerGeometry rows: its three column registers from a_row. */
+float4x3 UtilityOrgMatrix4x3(uint a_row)
+{
+	return transpose(float3x4(ShadowMaskDraw.PSGeometry[a_row], ShadowMaskDraw.PSGeometry[a_row + 1], ShadowMaskDraw.PSGeometry[a_row + 2]));
+}
+
+/** @brief A column_major float4x4 of the latched PerGeometry rows: its four column registers from a_row. */
+float4x4 UtilityOrgMatrix4x4(uint a_row)
+{
+	return transpose(float4x4(ShadowMaskDraw.PSGeometry[a_row], ShadowMaskDraw.PSGeometry[a_row + 1], ShadowMaskDraw.PSGeometry[a_row + 2],
+		ShadowMaskDraw.PSGeometry[a_row + 3]));
+}
+
+static float4x3 FocusShadowMapProj[4] = { UtilityOrgMatrix4x3(4), UtilityOrgMatrix4x3(7), UtilityOrgMatrix4x3(10), UtilityOrgMatrix4x3(13) };
+#		if defined(RENDER_SHADOWMASK)
+static float4x3 ShadowMapProj[3] = { UtilityOrgMatrix4x3(16), UtilityOrgMatrix4x3(19), UtilityOrgMatrix4x3(22) };
+#		else
+static float4x4 ShadowMapProj[3] = { UtilityOrgMatrix4x4(16), UtilityOrgMatrix4x4(20), UtilityOrgMatrix4x4(24) };
+#		endif
+
+static float AlphaTestRefRS = ShadowMaskDraw.AlphaTestRefRS;
+#	else
 SamplerState SampBaseSampler : register(s0);
 SamplerState SampNormalSampler : register(s1);
 SamplerState SampDepthSampler : register(s2);
@@ -676,6 +794,7 @@ cbuffer AlphaTestRefCB : register(b11)
 {
 	float AlphaTestRefRS : packoffset(c0);
 }
+#	endif
 
 #	if SHADOWFILTER == 8
 static const uint ShadowPCFSampleCount = 16;

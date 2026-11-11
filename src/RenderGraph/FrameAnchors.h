@@ -83,9 +83,10 @@ namespace FrameAnchors
 		// Out of frame order (appended): the engine's ImageSpace draws the graph draws in the engine's place
 		// (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE), a batch at a time, a few times a frame inside the ImageSpace chain.
 		ImageSpace,
-		// The engine's draw families drawn at their own call (Drawcall Limit Fix's water and screen blood families): the water mask
-		// at FinishAccumulating's stencil batch, the water at FinishAccumulatingPostResolveDepth's water batch, and the screen blood
-		// at Main::RenderScreenSplatter. Zero to three runs a frame, so it is listed out of frame order.
+		// The engine's draw families drawn at their own call (Drawcall Limit Fix's water, screen blood and shadow mask families): the
+		// world's shadow masks at Main::RenderShadowMasks, the water mask at FinishAccumulating's stencil batch, the water at
+		// FinishAccumulatingPostResolveDepth's water batch, a menu scene's shadow masks at UI3DSceneManager::Render, and the screen
+		// blood at Main::RenderScreenSplatter. Zero to five runs a frame, so it is listed out of frame order.
 		EngineDraws,
 		Count
 	};

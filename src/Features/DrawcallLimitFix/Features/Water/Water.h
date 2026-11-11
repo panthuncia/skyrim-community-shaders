@@ -94,6 +94,9 @@ namespace DCLF::Features::Water
 		Kind::Texture2DArray,  // t103 LocalShadowMaps
 	};
 
+	/** @brief The material slots a draw samples (Water.hlsl's t0-t11). */
+	inline constexpr std::uint32_t kMaterialSlots = 12;
+
 	/** @brief The material slots' declared dimension (Water.hlsl's t0-t11): the cubemap at t3, 2D textures elsewhere. */
 	constexpr Kind MaterialKind(std::uint32_t a_slot) { return a_slot == 3 ? Kind::Cube : Kind::Texture2D; }
 	/** @brief The headers before the directional shadow record in the push block. */
@@ -118,8 +121,8 @@ namespace DCLF::Features::Water
 		std::uint32_t vertexStride;
 		std::uint32_t firstIndex;
 		std::uint32_t padding;
-		std::uint32_t textures[12];
-		std::uint32_t samplers[12];
+		std::uint32_t textures[kMaterialSlots];
+		std::uint32_t samplers[kMaterialSlots];
 		std::uint32_t vertexAddress[2];
 		std::uint32_t indexAddress[2];
 		std::uint32_t vertexLayout[2];
@@ -155,16 +158,23 @@ namespace DCLF::Features::Water
 	};
 
 	/**
-	 * @brief What a view's client is made for: the headers' inputs that are published graph textures (declared by its pass, so the
-	 * graph orders their writes before the water's reads). A header bound to a D3D11 view or nothing is read by heap index instead,
-	 * resolved per batch, and is no part of the shape.
+	 * @brief What a view's client is made for: the inputs that are published graph textures, declared by its pass so the graph orders
+	 * their writes before the water's reads. The headers' are read at each batch's start. The material slots' are the engine targets a
+	 * draw samples that a graph pass writes (with the ImageSpace port and engine targets on: the refraction copy, the SSR targets), seen
+	 * by the view's probes and kept: an id stays in the shape once seen, so a target sampled on some frames only, or a slot alternating
+	 * between two, does not change it. A header or slot bound to a D3D11 view or nothing is read by heap index instead, resolved per
+	 * batch, and is no part of the shape.
 	 */
 	struct Shape
 	{
 		View view = View::Surface;
 		std::array<std::string, kHeaderRegisters.size()> headerIds;
+		Family::PublishedIds materialIds;
 		bool operator==(const Shape&) const = default;
 	};
+
+	/** @brief What differs between two shapes, in words ("t1 kMAIN_COPY -> none, ..."), for a log. */
+	std::string DescribeChange(const Shape& a_from, const Shape& a_to);
 
 	/** @brief A batch's draws, as the anchor's pass records them. */
 	struct Run

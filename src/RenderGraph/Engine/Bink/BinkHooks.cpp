@@ -4,6 +4,7 @@
 #include "Features/ScreenshotFeature.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Bink/BinkGraph.h"
+#include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #include "RenderGraph/Engine/MainTick.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Switches.h"
@@ -46,6 +47,39 @@ namespace RenderGraph::Engine::Bink
 		T Read(const void* a_base, std::size_t a_offset)
 		{
 			return *reinterpret_cast<const T*>(reinterpret_cast<const std::byte*>(a_base) + a_offset);
+		}
+
+		/**
+		 * @brief Whether this thread holds Renderer::Lock: the renderer's CRITICAL_SECTION (Renderer +0x2790 SE, +0x27F0 AE; bink.md,
+		 * "Threads") is owned by it. The startup logo's PlaySequence holds it for the whole sequence.
+		 */
+		bool HoldsRendererLock()
+		{
+			auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+			if (!renderer)
+				return false;
+			const auto* lock = reinterpret_cast<const CRITICAL_SECTION*>(reinterpret_cast<const std::byte*>(renderer) + REL::Relocate(0x2790, 0x27F0));
+			return lock->OwningThread == reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(::GetCurrentThreadId()));
+		}
+
+		/**
+		 * @brief A blocking movie's tick on a thread that does not own rendering yet: the startup logo's first tick, on the MoviePlayer
+		 * thread. With CS_ORG_LOADING_THREAD=1 that thread takes rendering at the tick's Renderer::Begin, after Eligible would have
+		 * found it not the render owner, and the Present anchor's graph is built for the joining client only at that frame's end: the
+		 * logo's first frame was the engine's. The thread holds Renderer::Lock for the whole sequence, so no other thread renders until
+		 * it ends: the claim Begin makes is made at the tick's start instead, and the graph the client waits for is built now, between
+		 * frames, as at a frame's end (FrameAnchors::OnFrameEnd). Once per ownership change: the next ticks own rendering already.
+		 */
+		void ClaimForBlockingTick(std::uintptr_t a_player)
+		{
+			if (!Requested() || !a_player || !LoadingScreen::Requested() || FrameAnchors::IsRenderOwner())
+				return;
+			if (Read<std::uint32_t>(reinterpret_cast<const void*>(a_player), kPlayerMode) != kModeBlocking || !HoldsRendererLock())
+				return;
+			FrameAnchors::ClaimRenderOwnership();
+			FrameAnchors::OnFrameEnd();
+			logger::info("[ORG] Bink: a blocking movie on thread {} under Renderer::Lock takes rendering at its tick's start{}", ::GetCurrentThreadId(),
+				FrameAnchors::IsRenderOwner() ? "" : " (the claim did not take: the engine draws this tick)");
 		}
 
 		/** @brief A tile set the engine made: its layout, its tile textures (to know the locks), and its graph side once made. */
@@ -207,6 +241,7 @@ namespace RenderGraph::Engine::Bink
 				Tick tick;
 				tick.player = a_player;
 				tick.set = a_player ? Read<const void*>(reinterpret_cast<const void*>(a_player), kPlayerTiles) : nullptr;
+				ClaimForBlockingTick(a_player);
 				if (Eligible(a_player, tick.set) && Graph::Begin())
 					StartGraphTick(tick);
 				auto* const outer = std::exchange(t_tick, &tick);

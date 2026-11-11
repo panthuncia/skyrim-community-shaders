@@ -173,6 +173,14 @@ renders off the main thread (counted as such); the loading model is the p5-loadi
    hand (no test command), then `[DCLF] menu views: local map ...` (orthographic, RT0 17, depth 0).
 3. The census (both): with the world map and the race menu open, no Lighting member drawn by the engine.
 
+## The menu scene's shadow masks
+
+The residue census's Utility draws in the inventory (about 1.7 a frame, `52728+0x1E5` under UI3DSceneManager::Render, RT
+`kSHADOW_MASK`, no depth) are not the model's draws: UI3DSceneManager::Render calls the menu scene's shadow masks (SE 51856 at +0x466,
+AE 52728 at +0x461), one BSUtilityShader pass over the screen quad per menu light that casts shadows, before step 6's stencil. They are
+drawn on the graph by the shadow mask family with `CS_ORG_SHADOW_MASK=1` (p5/shadow-mask.md, its `menu` view), which needs none of
+the menu 3D view below. The model's own Lighting draws, step 9, stay the engine's until that view exists.
+
 ## Not done
 
 - The menu 3D and local map views (stage 2 and 3 above): a third and fourth engine view through Core's view machinery, the menu
