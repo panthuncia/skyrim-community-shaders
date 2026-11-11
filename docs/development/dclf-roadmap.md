@@ -79,26 +79,42 @@ grass, about 3 particle effects), reflection faces only the sky (about 21), sun 
 ### 1.4 The master particle systems
 
 -   **Goal.** Torches, candles and street mist (`MPSTorchFire01.nif`, `MPSCandleFlame01.nif`, `MPSMistStreet01.nif`, ...) are
-    drawn by DCLF's particle path.
+    drawn by DCLF's particle path. Blood impact particles are master particle systems too (4.3).
 -   **Why.** They are among the engine's remaining main passes, and DCLF's blended draws go before every remaining engine
     blended pass, so they are drawn in the wrong order where they lie behind a DCLF surface (dclf-open-defects.md).
--   **State.** Designed, not started. No `CS_DCLF_MASTER_PARTICLES` switch, no removal or reset thunk.
-    `Core/Engine/Capture/SceneTracker.h`'s `NoteEdit` still takes `(child, bool inWorld)`.
--   **Design.** The systems hang under parentless `BSMasterParticleSystem` roots owned by `BSParticleSystemManager`
-    (ShadowSceneNode child 5, culled through the portal graph's `alwaysRenderChildren`, registered into the main accumulator
-    only through hint 1). Each master is a category root filed under itself, **held by key only**: the engine removes a master
-    when its refcount drops below 3, so any lasting DCLF reference leaks it. Lifetime comes from events:
-    -   the manager's `AttachChild`, which is already detoured; `NoteEdit` takes `(child, parent)` in all seven detours;
-    -   a removal thunk at 0x140e2a589 that pushes `NoteEdit(master, manager)` and `PushDetached(master)` before the slot
-        clears;
-    -   a reset thunk at 0x140649254 for every child.
-
-    Steps: `NoteEdit(child, parent)`; the removal and reset thunks with counts; unheld `Root` / `AlwaysRenderRoot`; the
-    signature and gather behind `CS_DCLF_MASTER_PARTICLES`; a visual check; observers `<- MASTER SET`, `<- MASTER REFS`, and
-    `<- PARTICLES` uncovered 0.
--   **Risks.** A lasting reference; the first category root whose array owner is not its parent; a removal inside the
-    engine-read window; the interior route; a master has no fade node.
--   **Needs.** The particle path (`Features/Particles`) as built.
+-   **State.** Built behind `CS_DCLF_MASTER_PARTICLES` (default off), not validated in game yet (scenarios
+    `tools/cs-ab/scenarios/master-particles-0.env` and `-1.env`). What exists:
+    -   `SceneTracker::PushAttached` and `PushDetached` take the node whose array holds the child, and `NoteEdit` takes
+        `(child, parent, inWorld)`. SceneWriterFramework's child events pass their parent.
+    -   `Api::UnheldRootsContribution` (`Api/ObjectContributors.h`, `InstallContext::RegisterUnheldRoots`): roots listed as
+        category nodes filed under themselves, with no `held` entry and a null `CategoryCapture::Root::root` and
+        `AlwaysRenderRoot::root` (the key is `object`). The capture pins each root only until its first application.
+        `Coordinator::OwnRoot` refuses an unheld root. A gone unheld root is not walked; its exit was an event.
+    -   `CaptureCategories` runs inside the contribution's enter and leave, from the signature read to `PushCategoryRoots`. The
+        signature watches the owner (the manager) and mixes its roots.
+    -   `Features/Particles/MasterParticles.cpp`: the gather (the manager's children under its `BSReadWriteLock`, the global
+        + 8), the removal hook, the counters and the observers `<- MASTER SET` (a master left with no event) and
+        `<- MASTER REFS` (an idle master held past removal for 600 frames). `<- PARTICLES` is the particles' parity line.
+-   **What the engine does** (Ghidra, AE 1.6.1170 / SE 1.5.97, the same code at the same offsets):
+    -   The manager (`gParticleSystemManager`, AE ID 411270 / SE 524630) is ShadowSceneNode child 5. Its `AttachChild`
+        override (AE `0x140e29f90`) takes only a `BSMasterParticleSystem` whose slot (`+0x158`) is set, and stores it with
+        the array's `SetAt` under the lock at the global + 8. It never writes the master's parent.
+    -   `UpdateParticleSystemManagerJob` (AE ID 19206) runs `FUN_140e2a520` (AE ID 76601 / SE 74853) per slot on job threads:
+        `if (master+0x166 && refCount < 3 && FUN_140e2b430(master) == 0) children.SetAt(index, null)`, else the master's
+        `UpdateDownwardPass`. The `SetAt` call at +0x69 (`NiTObjectArray::SetAt`, AE ID 70322 / SE 68970) is hooked; it fires
+        no child edit. `FUN_140e2a5c0` (AE ID 76602 / SE 74854), the same test in a loop, has no caller in either runtime.
+    -   The world reset (`FUN_140648cd0` +0x584, AE ID 36601 / SE 35593 +0x475) calls the remove-all on the manager:
+        SceneWriterFramework's remove-all detour fires a detach for every master, so no reset thunk was needed.
+    -   A master's drawn content is its NiNode children (the MPS model's `NiParticleSystem`s). Emitters feed it through
+        `BSParticleSystemManager::sub` (AE `0x140e2a2f0`): the source's addon `BSValueNode` is held in the master's `+0x128`
+        array (count `+0x138`), found by `FUN_1402df8a0` when a reference's or a temporary effect's 3D attaches.
+-   **Risks.** A lasting reference (guarded: no `held`, no root reference, no root owner; `<- MASTER REFS` watches). A removal
+    through the manager's own `DetachChild` overrides does not wait for the capture's gate: none is known during play.
+    `SceneCapture::SetDrawnRoots` keeps every published set, which now changes with every master attach and removal. The
+    interior route is not checked: a master listed in a portal graph's `alwaysRenderChildren` stays unheld (the gather runs
+    first). A master has no fade node. The removal hook is one more trampoline call (the plugin allocates 4 KB).
+-   **Needs.** A run of each scenario: the shots against the switch off, the report lines, and the test that no master stays
+    listed after its torches are gone (`master particles ... listed`).
 
 ### 1.5 The remaining residue classes: grass, water, sky
 
@@ -396,8 +412,28 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
 ### 4.3 Blood impact particles
 
 -   **Goal.** `pBloodSplat02`, `pBloodDrops06` and `pBloodLines` are drawn by DCLF.
--   **State.** Not started: they are temporary effects outside DCLF's categories, and their chain was never read.
--   **Needs.** Reverse engineering of where the engine attaches them.
+-   **State.** Covered by 1.4: no separate switch. These are the particle systems of master particle systems, so
+    `CS_DCLF_MASTER_PARTICLES=1` takes them (scenarios `tools/cs-ab/scenarios/blood-particles-0.env` and `-1.env`, not run
+    yet). `CS_DCLF_BLOOD_PARTICLES` was not added: a blood-only filter over the masters would be a second listing rule for the
+    same roots.
+-   **What the engine does** (Ghidra AE 1.6.1170, and the game's meshes):
+    -   A melee hit (`Actor::CalculateCurrentHitTargetForWeaponSwing`) and `BGSImpactManager::PlayImpactEffect` spawn a
+        `BSTempEffectParticle` (`BSTempEffectParticle::Spawn`, AE `0x1404a7320`) with the impact data's model, for the actor's
+        cell. The effect keeps the cell 3D's child 4 (the Dynamic category node, `+0x48`). Once its clone task is done, its
+        update (`FUN_1404a8150`) attaches the 3D (`FUN_1404a78f0`) under that node, through `AttachChild` or the task queue's
+        node attach. Both reach SceneWriterFramework, so DCLF tracks the impact's own 3D like any Dynamic member. TES pools up
+        to three clones per model (`TES+0x290`, `FUN_1401a3c90`); a reused clone is attached again. The effect's
+        `Detach` calls the parent's `DetachChild`.
+    -   Before the attach, `FUN_1402df8a0` walks the 3D. Each addon `BSValueNode` whose addon form has the master flag
+        (`+0x7a & 1`) gets its master (`FUN_140256390` loads the MPS model and attaches it to the manager) and is held as one of
+        the master's emitters (`BSParticleSystemManager::sub`).
+    -   The impact models (`meshes\effects\impacteffects\bloodspray*.nif`) hold the emitters (`pBloodLines02`,
+        `pBloodDrops08`, ...) and value nodes named after their masters (`MPSBloodSprayTiny05`, `MPSBloodSprayImpact03`,
+        `MPSMeatChunk`). The three names in the census are only in the masters' models: `pBloodSplat02` in
+        `meshes\mps\mpsbloodsplatimpact02.nif`, `pBloodDrops06` and `pBloodLines` in `meshes\mps\mpsbloodspraytiny03.nif`
+        (`pBloodLines` also in `mpsbloodspraybigdrops.nif` and the DLC1 explosion). So they are under the particle manager,
+        not "temporary effects outside DCLF's categories".
+-   **Needs.** 1.4's validation, then a run of `blood-particles-1.env`.
 
 ### 4.4 Object LOD's segments in occlusion
 
