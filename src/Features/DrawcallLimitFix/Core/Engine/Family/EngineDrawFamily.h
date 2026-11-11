@@ -1,15 +1,19 @@
 #pragma once
 
-// What every DCLF family that draws the engine's own draws on the graph shares (the sky, the water, the screen blood): the one
-// DrawTriShape detour they latch through, their SetupGeometry watch, the batch's pass count, the geometry, viewport, constant, texture
-// and header reads of a latched draw, and the leases a run keeps. render-graph.md, "Shared helpers for engine families", has the
-// pattern: join with RequestJoin, withhold only when CanRun, run, and count the work done in executed.
+// What every DCLF family that draws the engine's own draws on the graph shares (the sky, the water, the screen blood, the shadow masks):
+// the one DrawTriShape detour they latch through, their SetupGeometry watch, the batch's pass count, the geometry, viewport, constant,
+// texture and header reads of a latched draw, the leases a run keeps, and the setup point where their clients register. The families
+// are the primary path for their draws (docs/development/p5/primary-path.md): a client registers at setup with every input declared,
+// a batch is withheld when its anchor can run, and a draw the family cannot take ends the latched part of its batch: the latched draws
+// run at that point and the engine draws the rest, in order.
 //
 // Render thread (the render owner) unless a function says otherwise.
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 
+#include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/FrameAnchors.h"
 
 #include <array>
@@ -17,7 +21,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <set>
 #include <span>
 #include <string>
@@ -102,6 +108,13 @@ namespace DCLF::Family
 	}
 
 	/**
+	 * @brief Runs a_setup on the main thread after every frame-job wait (RenderGraph::Engine::MainTick) until it returns true: a
+	 * family's setup, which registers its clients and queues its programs once the render graph runs (the first main menu frame),
+	 * before any world frame. Install time (main thread). False, logged, when the tick could not be installed.
+	 */
+	bool AddSetup(std::string_view a_family, std::function<bool()> a_setup);
+
+	/**
 	 * @brief Once a game frame, from the first family batch: the render thread's buffer registry (GpuResources::Frame) drops the entries
 	 * whose leases went and takes DXVK's buffer moves. Grass and tree LOD do the same at their depth commit; the families' leases need
 	 * it whether those run or not.
@@ -125,8 +138,12 @@ namespace DCLF::Family
 		std::uint32_t otherTypes = 0;       // the geometry types of passes that drew elsewhere, a bit each
 
 		void Begin() { *this = {}; }
-		/** @brief A pass set up (its geometry's type, BSGeometry::GetType: R1's dispatcher picks the draw function by it). */
-		void OnSetup(const RE::BSRenderPass* a_pass);
+		/**
+		 * @brief A pass set up (its geometry's type, BSGeometry::GetType: R1's dispatcher picks the draw function by it). False when the
+		 * pass will not draw through DrawTriShape (its geometry is not a TriShape): the family ends its latched part there, before the
+		 * engine draws the pass.
+		 */
+		bool OnSetup(const RE::BSRenderPass* a_pass);
 		/** @brief A DrawTriShape of the batch. */
 		void OnDraw()
 		{
@@ -180,16 +197,36 @@ namespace DCLF::Family
 	 */
 	Viewport LatchViewport(std::uint32_t a_depthBias);
 
+	namespace Constants = ::RenderGraph::Engine::Constants;
+	namespace Flush = ::RenderGraph::Engine::Flush;
+
 	/**
-	 * @brief A constant buffer's bytes as the draw reads them, copied into a_out (zeros past them: a technique whose vanilla shader
-	 * declares fewer rows does not read those). True for no buffer; false when it is bound but ConstantMirror has no copy yet.
+	 * @brief What a family leaves to the engine on purpose, vouched for under the flush latch (Flush::EngineDraws): a batch handed back
+	 * whole opens a scope around the engine's call; a batch refused partway emplaces one at the refusal, kept until the engine's batch
+	 * returns, so the rest of the batch (whatever draw function it reaches) is let through.
 	 */
-	bool CopyConstants(const ID3D11Buffer* a_buffer, std::span<std::byte> a_out);
+	using EngineRest = std::optional<Flush::EngineDraws>;
+
+	/**
+	 * @brief The constant buffers bound for the draw about to be latched, as the engine constants capture saw them written and bound
+	 * (Constants::Capture of the vertex and pixel stages: it tracks every buffer's writes from startup, so a buffer's first use has its
+	 * bytes). Invalid when the capture is not active (CS_ORG_ENGINE_CONSTANTS=1, which the families require).
+	 */
+	Constants::UseId CaptureConstants();
+
+	/** @brief The bytes of a_slot of a_stage the use bound (0: nothing bound there). */
+	std::uint32_t ConstantBytes(Constants::UseId a_use, Constants::Stage a_stage, std::uint32_t a_slot);
+
+	/**
+	 * @brief A slot's constants as the draw reads them, copied into a_out (zeros past them: a technique whose vanilla shader declares
+	 * fewer rows does not read those). True for nothing bound there; false for an invalid use.
+	 */
+	bool CopyConstants(Constants::UseId a_use, Constants::Stage a_stage, std::uint32_t a_slot, std::span<std::byte> a_out);
 
 	/** @brief CopyConstants into whole 16-byte rows. */
-	inline bool CopyRows(const void* a_buffer, float (*a_rows)[4], std::uint32_t a_count)
+	inline bool CopyRows(Constants::UseId a_use, Constants::Stage a_stage, std::uint32_t a_slot, float (*a_rows)[4], std::uint32_t a_count)
 	{
-		return CopyConstants(static_cast<const ID3D11Buffer*>(a_buffer), { reinterpret_cast<std::byte*>(a_rows), a_count * std::size_t{ 16 } });
+		return CopyConstants(a_use, a_stage, a_slot, { reinterpret_cast<std::byte*>(a_rows), a_count * std::size_t{ 16 } });
 	}
 
 	/** @brief What a texture slot of a latched draw reads. */
@@ -227,24 +264,24 @@ namespace DCLF::Family
 	/** @brief How a client reads a published export bound at a slot or a header (PublishedInputs::Resolve). */
 	enum class InputResult : std::uint8_t
 	{
-		Graph,        // by the id's bindless index: a build of the client's graph declared the id
-		NotListed,    // the id is not among the client's inputs: the batch is the engine's (the family's list should name it)
-		NotDeclared,  // listed, but no build has declared it yet: the rebuild its first Publish asked for will
-		NoView,       // the id has no whole-resource view (PublishedResources::ShaderResourceIndex)
+		Graph,          // by the id's bindless index: the client's graph declares the id
+		NotListed,      // the id is not among the client's inputs: an inherent refusal (the family's list should name it)
+		PublishedLate,  // listed, but first published after the client's graph was built: a producer that publishes during play (an error)
+		NoView,         // the id has no whole-resource view (PublishedResources::ShaderResourceIndex)
 	};
 
 	/** @brief InputResult in words, for a log. */
 	const char* ReasonOf(InputResult a_result);
 
 	/**
-	 * @brief The published ids a family client's draws can read, fixed when the client is made. They do not depend on which ids are
-	 * published when its first batch comes.
+	 * @brief The published ids a family client's draws can read, fixed when the client is made at setup.
 	 *
-	 * At each build of its anchor's graph, the client's pass declares a read of every listed id that every graph registers
-	 * (PublishedResources::IsRegistered), for order only, and records it as declared. An id stays registered once published, so the
-	 * set only grows. It grows on an id's first Publish, which rebuilds every graph anyway, so the client is never registered again
-	 * for it. A batch reads a published export by its id's index once a build declared the id, and stays the engine's until then.
-	 * DCLF's frame textures follow the same rule (Extensions::DeclareGraphTextures, GraphTextureIndex).
+	 * The engine targets among them are imported when listed (AddEngine), which publishes them, so the client's first build declares
+	 * them. The ported features publish theirs at their own setup (SetupResources), before the families' setup. At each build of its
+	 * anchor's graph, the client's pass declares a read of every listed id that every graph registers (PublishedResources::IsRegistered),
+	 * for order only, and records it as declared. An id stays registered once published, so the set only grows. A producer that
+	 * publishes an id for the first time during play rebuilds every graph by that Publish (not the family); until that rebuild the id is
+	 * PublishedLate, an error the family logs once, and that batch is the engine's.
 	 *
 	 * Filled before the client registers, then shared with the client's passes.
 	 */
@@ -255,6 +292,10 @@ namespace DCLF::Family
 		void Add(std::string_view a_id);
 		/** @brief Lists each of a_ids. */
 		void Add(std::span<const std::string> a_ids);
+		/** @brief Lists an engine target's id and imports the target now, which publishes it (render thread, at setup). */
+		void AddEngine(RE::RENDER_TARGET a_target);
+		void AddEngine(RE::RENDER_TARGET_DEPTHSTENCIL a_target);
+		void AddEngine(RE::RENDER_TARGET_CUBEMAP a_target);
 
 		/** @brief Graph build: declares a read, through no view, of each listed id every graph registers, and records it as declared. */
 		void Declare(org::RenderPassBuilder& a_builder);
@@ -267,6 +308,9 @@ namespace DCLF::Family
 
 		/** @brief The listed ids, comma separated, for the registration's log line. */
 		std::string Describe() const;
+
+		/** @brief The listed ids no graph registers yet (comma separated; empty: none), for the setup's log line. */
+		std::string Unregistered() const;
 
 	private:
 		std::vector<std::string> ids;
@@ -295,13 +339,17 @@ namespace DCLF::Family
 	 * @brief The one header resolver: PS t<a_register> as CS binds it for the batch. A published resource's export resolves to its id
 	 * first; an empty register to the null view of a_kind; any other view to its import (a_tag, GpuTextures::Source::FamilyHeader + the
 	 * header's index). Imports go into a_owners. a_view, when given, receives the bound view (not kept) for a log.
+	 *
+	 * The headers are CS's registers (t16 and up; the engine binds t0-t15 only), which CS binds on DXVK's own context
+	 * (globals::d3d::context), never through the engine's guest context. The flush latch drops only the guest's binds, so this read stays
+	 * true under it (docs/development/p5/primary-path.md, "D3D11 state reads"). A register below 16 is refused.
 	 */
 	HeaderResult ResolveHeader(std::uint32_t a_register, GpuTextures::ViewKind a_kind, std::uint32_t a_tag, Header& a_out, Owners& a_owners,
 		GpuTextures::ResolveFailure* a_failure = nullptr, ID3D11ShaderResourceView** a_view = nullptr);
 
 	/**
-	 * @brief Leases and imports kept for a few frames: a run's (the GPU may be that far behind) and a probe's (its imports are found
-	 * again by the next batch instead of imported again; a probe that dropped them freed each descriptor as soon as it was made).
+	 * @brief Leases and imports kept for a few frames: a run's (the GPU may be that far behind) and a batch's that ran nothing (its
+	 * imports are found again by the next batch instead of imported again).
 	 */
 	class KeptOwners
 	{
@@ -317,10 +365,10 @@ namespace DCLF::Family
 	std::uint32_t KeptFrames();
 
 	/**
-	 * @brief Runs a_anchor for a client whose batch was withheld (CanRun said it would draw): a_pending, which the client's active
-	 * callback returns, is set for the run. True when the run was submitted (RunStatus::Ran). Any other status means the withheld draws
-	 * were not drawn this frame: it is logged once per status ("[DCLF] <a_family>: ...", with a_client) and the caller's view probes
-	 * again. The client's executed callback counts the runs that drew.
+	 * @brief Runs a_anchor for a client whose latched draws are ready (CanRun said it would draw): a_pending, which the client's active
+	 * callback returns, is set for the run. True when the run was submitted (RunStatus::Ran). Any other status is an error: the latched
+	 * draws were not drawn this frame, logged once per status as an error (with a_family and a_client). Nothing is retried. The client's
+	 * executed callback counts the runs that drew.
 	 */
 	bool RunWithheld(std::string_view a_family, std::string_view a_client, FrameAnchors::Anchor a_anchor, bool& a_pending);
 }

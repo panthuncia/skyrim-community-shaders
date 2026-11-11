@@ -1,17 +1,16 @@
 // The water family's engine side: the two water batches' hooks, which let the engine's batch run with its draws latched and hand them
 // to the anchor's pass; the family's DrawTriShape taker, which latches a water draw in place of drawing it; and its
-// BSWaterShader::SetupGeometry watcher, which has ConstantMirror watch the constant buffers the water's draws read. Render thread.
+// BSWaterShader::SetupGeometry watcher, which counts a batch's passes. Render thread.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
-#include "Features/DrawcallLimitFix/Core/Engine/Capture/ConstantMirror.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 
-#include "Features/LightLimitFix.h"
+#include "Deferred.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -23,6 +22,7 @@
 #include <rhi_helpers.h>
 
 #include <algorithm>
+#include <cstring>
 #include <format>
 
 namespace DCLF::Features::Water
@@ -31,43 +31,44 @@ namespace DCLF::Features::Water
 	{
 		namespace Pipeline = ::RenderGraph::Engine::Pipeline;
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
+		using Stage = Family::Constants::Stage;
+
+		static_assert(sizeof(Deferred::DirectionalShadowLightData) == kDirectionalShadowBytes, "t98's record");
 
 		// The most draws one batch latches; past it a draw is the engine's (WaterDraws' latch has room for this many).
 		constexpr std::size_t kMaxLatched = 64;
-		// Batches a view's probes run before its client is made: its programs and ConstantMirror's copies are asked for first.
-		constexpr std::uint32_t kSettleBatches = 30;
+		// Light Limit Fix's strict lights (PS b3: LightLimitFix::StrictLightDataCB, bound once a frame by CS).
+		constexpr std::uint32_t kStrictLightSlot = 3;
 
 		const char* NameOf(View a_view) { return a_view == View::Mask ? "mask" : "surface"; }
 
-		/** @brief The refusals and fallbacks, each logged once per reason. */
+		/** @brief The inherent refusals, each logged once per reason. */
 		Util::ReasonLog& Refusals()
 		{
 			static Util::ReasonLog log("[DCLF] water: the engine draws", spdlog::level::warn);
 			return log;
 		}
 
-		/**
-		 * @brief The batch being latched (render thread).
-		 *
-		 * A view's batches are the graph's only after a probe: a batch the engine draws while every draw is checked as the graph would
-		 * take it (its program built, its constants mirrored, its textures and buffers imported). A probe with every draw latchable
-		 * makes the view's next batches the graph's; a draw a later batch cannot latch makes that batch's remaining draws the engine's
-		 * and the view probes again. So nothing is withheld until its program exists.
-		 */
+		/** @brief What the family leaves to the engine on purpose (Flush::EngineDraws): a batch or its rest. */
+		const Family::Flush::Reason& EngineReason()
+		{
+			static const Family::Flush::Reason reason{ "water: left to the engine" };
+			return reason;
+		}
+
+		/** @brief The batch being latched (render thread). */
 		struct Capture
 		{
 			bool active = false;
-			bool probe = false;                                               // the engine draws the batch; the draws are only checked
-			bool failed = false;                                              // a draw of the batch could not be latched: the rest are the engine's
-			bool ready = false;                                               // the view's client is in the built graph: its published inputs are read
-			std::array<bool, static_cast<std::size_t>(View::Count)> clean{};  // the view's last probe latched every draw
-			std::array<std::uint32_t, static_cast<std::size_t>(View::Count)> settled{};
+			bool failed = false;  // a draw was refused: the latched part ran, the rest of the batch is the engine's
 			View view = View::Surface;
 			std::shared_ptr<Run> run;
 			std::uint32_t depthFormat = 0;
-			std::uint64_t fallbacks = 0;      // draws the engine drew during a latched batch
 			Family::Passes passes;
 			std::uint32_t lastTechnique = 0;  // the last pass's technique (State::currentPixelDescriptor >> 11 & 0xF)
+			// Deferred's directional shadow record as last uploaded: the frames with no sun shadow light keep it, as t98 keeps its buffer.
+			Deferred::DirectionalShadowLightData directionalShadow{};
+			Family::EngineRest engineRest;  // the rest of a refused batch, vouched for until the batch returns
 		};
 
 		Capture& GetCapture()
@@ -96,16 +97,36 @@ namespace DCLF::Features::Water
 
 		std::uint32_t TechniqueOf(std::uint32_t a_descriptor) { return (a_descriptor >> 11) & 0xF; }
 
-		/** @brief The published ids a batch's headers export, by header (empty: none), read once the view's client is ready. */
-		using PublishedHeaders = std::array<std::string, kHeaderRegisters.size()>;
+		/** @brief The latched part of the batch, run now: in the engine's order, before anything the engine draws after it. */
+		void FlushLatched(Capture& a_capture)
+		{
+			auto run = std::move(a_capture.run);
+			if (!run)
+				return;
+			if (run->draws.empty()) {
+				WaterDraws::Keep(std::move(run->owners));
+				return;
+			}
+			WaterDraws::Submit(std::move(run));
+		}
+
+		/** @brief A refusal: the latched part runs now and the rest of the batch is the engine's; logged once per reason, technique and view. */
+		void Refuse(Capture& a_capture, std::string_view a_reason, std::uint32_t a_technique)
+		{
+			a_capture.failed = true;
+			Refusals().Report(std::format("a {} draw of technique {}: {}", NameOf(a_capture.view), a_technique, a_reason));
+			FlushLatched(a_capture);
+			if (!a_capture.engineRest)
+				a_capture.engineRest.emplace(EngineReason());
+		}
 
 		/**
 		 * @brief The batch's view and its headers' inputs: the main camera's accumulator with kMAIN's depth bound (the only view the
-		 * family takes), the headers' heap indices (a_run) and the ids of those that are published exports (a_published, resolved
-		 * once the view's client is ready: ReadHeaders). A view that reads no header latches null views. False for anything else
-		 * (another accumulator, a cube face, a header buffer the graph cannot read), which stays the engine's.
+		 * family takes), and each header's heap index (an import, a published id's index, or a null view) into a_run. A view that reads no
+		 * header latches null views. False, logged once per reason, for anything else (another accumulator, a cube face, a header buffer
+		 * the graph cannot read, a published header its client cannot read), which stays the engine's.
 		 */
-		bool CurrentShape(const void* a_accumulator, View a_view, Shape& a_shape, Run& a_run, PublishedHeaders& a_published, Capture& a_capture)
+		bool CurrentShape(const void* a_accumulator, View a_view, Run& a_run, Capture& a_capture)
 		{
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 			static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
@@ -121,7 +142,6 @@ namespace DCLF::Features::Water
 			if (!a_capture.depthFormat)
 				return false;
 
-			a_shape.view = a_view;
 			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
 				// The mask's pixel stage reads no header: whatever CS binds there is no input of its draws.
 				if (!HeadersRead(a_view)) {
@@ -148,56 +168,23 @@ namespace DCLF::Features::Water
 						GpuTextures::DescribeFailure(view, kHeaderRegisters[h], failure));
 					return false;
 				}
-				a_published[h] = std::move(header.publishedId);
 				a_run.headerIndices[h] = header.index;
-			}
-			return true;
-		}
-
-		/**
-		 * @brief The published headers of a batch whose view's client is ready: each read by its id's index (WaterDraws::ReadPublished).
-		 * False, logged once per id and reason, when the client cannot read one yet: the batch is the engine's.
-		 */
-		bool ReadHeaders(View a_view, const PublishedHeaders& a_published, Run& a_run)
-		{
-			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
-				if (a_published[h].empty())
+				if (header.publishedId.empty())
 					continue;
-				const auto result = WaterDraws::ReadPublished(a_view, a_published[h], a_run.headerIndices[h]);
-				if (result != Family::InputResult::Graph) {
-					Refusals().Report(std::format("a {} batch whose t{} holds '{}'", NameOf(a_view), kHeaderRegisters[h], a_published[h]), Family::ReasonOf(result));
+				// A published header: read by its id's index, which the view's client declares.
+				const auto read = WaterDraws::ReadPublished(a_view, header.publishedId, a_run.headerIndices[h]);
+				if (read != Family::InputResult::Graph) {
+					Refusals().Report(std::format("a {} batch whose t{} holds '{}'", NameOf(a_view), kHeaderRegisters[h], header.publishedId), Family::ReasonOf(read));
 					return false;
 				}
 			}
 			return true;
 		}
 
-		/** @brief The buffer behind the view bound at PS t98 (Deferred's directional shadow record), or null. Not kept. */
-		ID3D11Buffer* DirectionalShadowBuffer()
-		{
-			ID3D11ShaderResourceView* view = nullptr;
-			globals::d3d::context->PSGetShaderResources(kDirectionalShadowRegister, 1, &view);
-			if (!view)
-				return nullptr;
-			winrt::com_ptr<ID3D11Resource> resource;
-			view->GetResource(resource.put());
-			view->Release();
-			const auto buffer = resource.try_as<ID3D11Buffer>();
-			// The binding keeps it alive for the draw.
-			return buffer.get();
-		}
-
-		/** @brief Light Limit Fix's strict light buffer (PS b3), or null without the feature. */
-		ID3D11Buffer* StrictLightBuffer()
-		{
-			auto& lightLimitFix = globals::features::lightLimitFix;
-			return lightLimitFix.loaded && lightLimitFix.strictLightDataCB ? lightLimitFix.strictLightDataCB->CB() : nullptr;
-		}
-
 		/**
 		 * @brief The draw the engine is about to make, latched: the shadow state SetDirtyStates would apply, the constants the shaders'
-		 * Setup functions wrote (ConstantMirror), the textures and samplers, the geometry. Null when latched (or, in a probe, when it could
-		 * be); otherwise why the graph cannot draw it, and the engine draws it.
+		 * Setup functions wrote (the engine constants capture), the textures and samplers, the geometry. Null when latched; otherwise why
+		 * the graph cannot draw it, and the engine draws it.
 		 */
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
@@ -229,31 +216,35 @@ namespace DCLF::Features::Water
 			draw.key.depthFormat = a_capture.depthFormat;
 
 			// The depth-stencil state: the water's per-type stencil bits, tested or written with the shadow state's reference.
-			draw.key.depthStencil = Pipeline::EngineDepthStencilState(engine.depthMode, engine.stencilMode);
-			draw.key.blend = Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra);
-			draw.key.raster = Pipeline::EngineRasterState(engine.fill, engine.cull, engine.depthBias, engine.scissor);
+			if (!Family::DescribeStates(draw.key, Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra),
+					Pipeline::EngineDepthStencilState(engine.depthMode, engine.stencilMode), Pipeline::EngineRasterState(engine.fill, engine.cull, engine.depthBias, engine.scissor)))
+				return "a depth-stencil, blend or rasterizer state with no description";
 			draw.stencilRef = engine.stencilRef;
-			if (!draw.key.depthStencil || !draw.key.blend || !draw.key.raster)
-				return "no depth-stencil, blend or rasterizer state object";
-			// The vertex descriptor's defines serve both stages: the vertex stage reads Wading, which State strips from the pixel descriptor
-			// (the pixel stage reads it at run time, as Water.hlsl's pixel build undefines it).
-			draw.key.descriptor = state->currentVertexDescriptor;
+			// The vertex descriptor CS looks its shader up by (State::ModifyShaderLookup), which ShaderCompilationTask compiled the stages for;
+			// its defines serve both stages: the vertex stage reads Wading, which State strips from the pixel descriptor (the pixel stage reads
+			// it at run time, as Water.hlsl's pixel build undefines it).
+			draw.key.descriptor = state->modifiedVertexDescriptor;
 			draw.key.defineStage = Family::DefineStage::Vertex;
 
-			// The six constant groups as the Setup functions wrote them, Light Limit Fix's strict lights and the directional shadow record.
+			// The six constant groups as the Setup functions wrote them and Light Limit Fix's strict lights (the engine constants capture), and
+			// the directional shadow record Deferred uploads to t98, from the same CPU data.
 			auto& constants = draw.latch.constants;
-			if (!Family::CopyRows(vs->constantBuffers[0].buffer, constants.vsTechnique, kGroupRows[0]) ||
-				!Family::CopyRows(vs->constantBuffers[1].buffer, constants.vsMaterial, kGroupRows[1]) ||
-				!Family::CopyRows(vs->constantBuffers[2].buffer, constants.vsGeometry, kGroupRows[2]) ||
-				!Family::CopyRows(ps->constantBuffers[0].buffer, constants.psTechnique, kGroupRows[3]) ||
-				!Family::CopyRows(ps->constantBuffers[1].buffer, constants.psMaterial, kGroupRows[4]) ||
-				!Family::CopyRows(ps->constantBuffers[2].buffer, constants.psGeometry, kGroupRows[5]))
-				return "ConstantMirror has no copy of its constants yet";
+			const auto use = Family::CaptureConstants();
+			if (!use.Valid())
+				return "the engine constants capture is not active";
 			// The vertex stage's matrices and PerGeometry are every technique's: a draw without them is not one the engine made.
-			if (!vs->constantBuffers[2].buffer)
+			if (!Family::ConstantBytes(use, Stage::Vertex, 2))
 				return "no vertex PerGeometry";
-			if (!Family::CopyConstants(StrictLightBuffer(), draw.latch.strictLights) || !Family::CopyConstants(DirectionalShadowBuffer(), draw.latch.directionalShadow))
-				return "ConstantMirror has no copy of its strict lights or shadow record yet";
+			Family::CopyRows(use, Stage::Vertex, 0, constants.vsTechnique, kGroupRows[0]);
+			Family::CopyRows(use, Stage::Vertex, 1, constants.vsMaterial, kGroupRows[1]);
+			Family::CopyRows(use, Stage::Vertex, 2, constants.vsGeometry, kGroupRows[2]);
+			Family::CopyRows(use, Stage::Pixel, 0, constants.psTechnique, kGroupRows[3]);
+			Family::CopyRows(use, Stage::Pixel, 1, constants.psMaterial, kGroupRows[4]);
+			Family::CopyRows(use, Stage::Pixel, 2, constants.psGeometry, kGroupRows[5]);
+			Family::CopyConstants(use, Stage::Pixel, kStrictLightSlot, draw.latch.strictLights);
+			if (globals::deferred)
+				globals::deferred->GetDirectionalShadowLightData(a_capture.directionalShadow);
+			std::memcpy(draw.latch.directionalShadow, &a_capture.directionalShadow, kDirectionalShadowBytes);
 			// CS's permutation block for the draw (State's SetupGeometry hooks filled it): the pixel stage branches on its descriptors.
 			const auto& permutation = state->permutationData;
 			constants.descriptors[0] = permutation.VertexShaderDescriptor;
@@ -262,10 +253,9 @@ namespace DCLF::Features::Water
 			constants.descriptors[3] = permutation.ExtraFeatureDescriptor;
 			constants.effectRadius = permutation.EffectRadius;
 
-			Family::ProgramState programState{};
-			draw.program = WaterDraws::Program(draw.key, *state->currentShader, programState);
+			draw.program = WaterDraws::Program(draw.key, *state->currentShader);
 			if (!draw.program)
-				return programState == Family::ProgramState::Building ? "its ORG program is still building" : "its ORG program cannot be built";
+				return "its ORG program cannot be built";
 
 			// The geometry, read by device address while its leases are held (the run keeps them until the GPU is done).
 			Family::Owners owners;
@@ -297,10 +287,10 @@ namespace DCLF::Features::Water
 				const auto slot = Family::SlotTexture(view, MaterialKind(t), GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), constants.textures[t], owners, &failure);
 				if (slot == Family::SlotResult::Published) {
 					// An engine target a graph pass writes (the refraction copy, the SSR targets): read by its id, which the view's client
-					// declares, so the graph orders the write before the water. Before the client is ready, a probe only learns programs.
+					// declares, so the graph orders the write before the water.
 					const auto id = PublishedResources::ExportedId(view);
 					const auto result = WaterDraws::ReadPublished(a_capture.view, id, constants.textures[t]);
-					if (result != Family::InputResult::Graph && a_capture.ready) {
+					if (result != Family::InputResult::Graph) {
 						Refusals().Report(std::format("a {} draw's t{} holds '{}'", NameOf(a_capture.view), t, id), Family::ReasonOf(result));
 						return "a texture slot holds a published graph texture its client cannot read";
 					}
@@ -317,41 +307,11 @@ namespace DCLF::Features::Water
 			// The viewport SetDirtyStates would set, with the depth bias mode's offset taken off its maximum depth.
 			draw.viewport = Family::LatchViewport(engine.depthBias);
 
-			// The imports are kept, a probe's too (WaterDraws::Keep): the next batch finds them instead of importing again.
 			for (auto& owner : owners)
 				if (owner)
 					run.owners.push_back(std::move(owner));
-			// A probe only checks: the engine draws it.
-			if (a_capture.probe)
-				return nullptr;
 			run.draws.push_back(std::move(draw));
 			return nullptr;
-		}
-
-		/** @brief A refusal noted: the batch fails, and the reason is logged once per technique and view. */
-		void Refuse(Capture& a_capture, std::string_view a_reason, std::uint32_t a_technique)
-		{
-			a_capture.failed = true;
-			Refusals().Report(std::format("a {} draw of technique {}: {}", NameOf(a_capture.view), a_technique, a_reason), a_capture.probe ? "found by a probe" : "");
-		}
-
-		/**
-		 * @brief A draw latched (true: the graph draws it) or the engine's. A draw that fails marks the batch: its later draws are the
-		 * engine's too, so the engine's draws of the batch stay in order after the ones latched before (which the anchor draws after the
-		 * batch: one batch drawn out of order, then the view probes again).
-		 */
-		bool LatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
-		{
-			// A probe checks every draw, so one batch asks for every program the view needs; a batch the graph draws stops at the first
-			// draw it cannot take.
-			if (a_capture.failed && !a_capture.probe)
-				return false;
-			if (const char* reason = TryLatchDraw(a_capture, a_shape, a_start, a_triangles)) {
-				const auto* state = globals::state;
-				Refuse(a_capture, reason, state ? TechniqueOf(state->currentPixelDescriptor) : 0xFF);
-				return false;
-			}
-			return !a_capture.probe;
 		}
 
 		/**
@@ -364,74 +324,36 @@ namespace DCLF::Features::Water
 			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
 			{
 				auto& capture = GetCapture();
-				if (capture.active || !TakesView(kView) || !ShellState::Running() || !FrameAnchors::IsRenderOwner() || !WaterDraws::Available()) {
+				if (capture.active || !TakesView(kView)) {
+					func(a_accumulator, a_first, a_last, a_flags, a_group);
+					return;
+				}
+				if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !WaterDraws::Available()) {
+					Family::Flush::EngineDraws scope(EngineReason());
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
 				Family::BeginBatch();
-				Shape shape;
 				auto run = std::make_shared<Run>();
 				run->view = kView;
-				PublishedHeaders published;
-				if (!CurrentShape(a_accumulator, kView, shape, *run, published, capture)) {
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-					return;
-				}
-				const auto index = static_cast<std::size_t>(kView);
-				auto& clean = capture.clean[index];
-				// A view's client is made once, after kSettleBatches batches.
-				auto& settled = capture.settled[index];
-				settled = (std::min)(settled + 1, kSettleBatches);
-				// Until the view's client is made and in the built graph, the engine draws its batches as probes: they ask for the programs
-				// and ConstantMirror's copies.
-				const bool ready = settled >= kSettleBatches && WaterDraws::Ready(shape);
-				// A published header the client cannot read yet (its first Publish's rebuild has not come): the engine draws the batch.
-				if (ready && !ReadHeaders(kView, published, *run)) {
+				// The view's client and an anchor that can run now, then the batch's shape: otherwise the engine draws it (logged once each).
+				if (!WaterDraws::CanTake(kView) || !CurrentShape(a_accumulator, kView, *run, capture)) {
 					WaterDraws::Keep(std::move(run->owners));
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-					return;
-				}
-				const bool probe = !ready || !clean;
-				// Draws are withheld only when the anchor's run will draw them (a probe withholds nothing).
-				if (!probe && !WaterDraws::CanRun(kView)) {
-					Refusals().Report(std::format("a {} batch whose anchor cannot run now", NameOf(kView)), "the ring is full or the client left the built graph");
-					WaterDraws::Keep(std::move(run->owners));
+					Family::Flush::EngineDraws scope(EngineReason());
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
 				capture.view = kView;
-				capture.run = run;
-				capture.ready = ready;
-				capture.probe = probe;
+				capture.run = std::move(run);
 				capture.failed = false;
 				capture.passes.Begin();
 				capture.active = true;
 				func(a_accumulator, a_first, a_last, a_flags, a_group);
 				capture.active = false;
-				capture.run.reset();
-				if (!capture.passes.End()) {
+				if (!capture.passes.End())
 					Refusals().Report(capture.passes.Describe(std::format("{} water", NameOf(kView))));
-					Refuse(capture, "a pass of the batch drew through another draw function than DrawTriShape", capture.lastTechnique);
-				}
-				if (!ready) {
-					clean = false;
-					WaterDraws::Keep(std::move(run->owners));
-					return;
-				}
-				if (probe) {
-					clean = !capture.failed;
-					if (clean)
-						logger::info("[DCLF] water: every {} water draw can be drawn by the graph; its batches are the graph's from the next", NameOf(kView));
-					WaterDraws::Keep(std::move(run->owners));
-					return;
-				}
-				if (capture.failed) {
-					clean = false;
-					Refusals().Report(std::format("a {} batch the graph had taken, from a draw it could not latch on", NameOf(kView)), "the view probes again");
-				}
-				// A run that was not submitted lost its draws for this frame: the view probes again.
-				if (!WaterDraws::Submit(std::move(run)))
-					clean = false;
+				FlushLatched(capture);
+				capture.engineRest.reset();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -440,41 +362,32 @@ namespace DCLF::Features::Water
 		bool TakeDraw(const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
 			auto& capture = GetCapture();
-			if (!capture.active || !capture.run)
+			if (!capture.active)
 				return false;
 			capture.passes.OnDraw();
-			if (LatchDraw(capture, a_shape, a_start, a_triangles))
-				return true;
-			++capture.fallbacks;
-			return false;
+			if (capture.failed || !capture.run)
+				return false;
+			if (const char* reason = TryLatchDraw(capture, a_shape, a_start, a_triangles)) {
+				const auto* state = globals::state;
+				Refuse(capture, reason, state ? TechniqueOf(state->currentPixelDescriptor) : 0xFF);
+				return false;
+			}
+			return true;
 		}
 
 		/**
 		 * @brief After BSWaterShader::SetupGeometry (chained after Unified Water's, Light Limit Fix's, the cubemap fix's and the frame
-		 * annotations'): during a latched batch, ConstantMirror watches the buffers the draw reads back (both stages' three groups, Light
-		 * Limit Fix's strict lights, the directional shadow record). A buffer is mirrored from its next write on, so a batch's first sight
-		 * of one draws on the engine.
+		 * annotations'): counts the pass; one that will not reach DrawTriShape ends the latched part before the engine draws it.
 		 */
 		void OnSetupGeometry(RE::BSRenderPass* a_pass)
 		{
 			auto& capture = GetCapture();
 			if (!capture.active)
 				return;
-			capture.passes.OnSetup(a_pass);
 			if (const auto* state = globals::state)
 				capture.lastTechnique = TechniqueOf(state->currentPixelDescriptor);
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-			auto& mirror = ConstantMirror::Get();
-			for (std::uint32_t g = 0; g < 3; ++g) {
-				if (const auto* vs = rss.currentVertexShader; vs && vs->constantBuffers[g].buffer)
-					mirror.Watch(reinterpret_cast<ID3D11Buffer*>(vs->constantBuffers[g].buffer));
-				if (const auto* ps = rss.currentPixelShader; ps && ps->constantBuffers[g].buffer)
-					mirror.Watch(reinterpret_cast<ID3D11Buffer*>(ps->constantBuffers[g].buffer));
-			}
-			if (auto* strictLights = StrictLightBuffer())
-				mirror.Watch(strictLights);
-			if (auto* directionalShadow = DirectionalShadowBuffer())
-				mirror.Watch(directionalShadow);
+			if (!capture.passes.OnSetup(a_pass) && !capture.failed)
+				Refuse(capture, "a pass whose geometry is not a TriShape (it draws through another draw function)", capture.lastTechnique);
 		}
 	}
 
@@ -500,6 +413,8 @@ namespace DCLF::Features::Water
 		stl::write_thunk_call<WaterBatch<View::Mask>>(REL::Offset(Address::kMaskBatch).address());
 		stl::write_thunk_call<WaterBatch<View::Surface>>(REL::Offset(Address::kSurfaceBatch).address());
 		Family::WatchSetupGeometry<RE::BSShader::Type::Water>(RE::VTABLE_BSWaterShader[0], &OnSetupGeometry);
+		// Both views' clients are made on the main thread once the graph runs (the main menu), before any world frame.
+		Family::AddSetup("water", [] { return WaterDraws::Setup(); });
 		logger::info("[DCLF] water: hooks installed (the water mask and water batches, BSWaterShader::SetupGeometry)");
 	}
 }

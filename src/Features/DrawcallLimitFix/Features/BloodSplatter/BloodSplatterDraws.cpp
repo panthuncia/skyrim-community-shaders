@@ -1,5 +1,5 @@
-// The blood splatter family's render graph side: one client at the EngineDraws anchor, made once at the first main-thread tick the
-// graph runs, whose pass draws a batch's latched draws into the back buffer with CS's BloodSplatter.hlsl built for ORG.
+// The blood splatter family's render graph side: one client at the EngineDraws anchor, made once at setup (the first main-thread tick
+// the graph runs), whose pass draws a batch's latched draws into the back buffer with CS's BloodSplatter.hlsl built for ORG.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -7,11 +7,13 @@
 #include "Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h"
 
 #include "Globals.h"
+#include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
+#include "Utils/Logging.h"
 
 #include <OpenRenderGraph/GraphHost.h>
 #include <Render/LatchBlock.h>
@@ -106,11 +108,21 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			std::shared_ptr<Client> client;
 		};
 
+		/** @brief Every pixel descriptor of BSBloodSplatterShader CS loads is a program's (the splatter and the flare). */
+		void StagesOf(bool a_pixel, std::uint32_t a_descriptor, std::vector<Family::StageRequest>& a_out)
+		{
+			if (a_pixel)
+				a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Pixel });
+		}
+
 		struct DrawsState
 		{
 			std::shared_ptr<Client> client;
 			bool tried = false;  // the client is made once
-			Family::EngineDrawPrograms programs{ "blood splatter", { .source = kShader, .constantWords = ShaderBindings::Words<BloodBlock>() } };
+			Family::EngineDrawPrograms programs{ "blood splatter", { .source = kShader,
+																	   .constantWords = ShaderBindings::Words<BloodBlock>(),
+																	   .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::BloodSplatter),
+																	   .stagesOf = &StagesOf } };
 			bool reserved = false;
 			bool failed = false;
 			std::uint64_t runs = 0, draws = 0;
@@ -160,26 +172,32 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			logger::warn("[DCLF] blood splatter: the EngineDraws anchor could not be reserved; the screen blood stays the engine's");
 	}
 
-	void EnsureClient()
+	bool Setup()
 	{
 		auto& state = GetState();
 		if (state.tried || state.failed)
-			return;
+			return true;
 		auto* host = RenderGraphRuntime::Get().Host();
-		if (!host)
-			return;
+		if (!host || !FrameAnchors::IsRenderOwner() || !Available())
+			return false;
 		state.tried = true;
+		Family::StartStagePrecompile();
+		state.programs.Prebuild();
+		if (!::RenderGraph::Engine::Constants::Requested()) {
+			logger::warn("[DCLF] blood splatter: needs the engine constants capture (CS_ORG_ENGINE_CONSTANTS=1); the screen blood stays the engine's");
+			return true;
+		}
 		auto client = std::make_shared<Client>();
 		client->latch = std::make_shared<org::LatchBlock>(std::string(kClientId) + ".latch", kMaxDraws * kDrawStride, host->FrameSlots());
 		client->gate = ::RenderGraph::RunGate::Create(std::string(kClientId) + ".gate", kMaxDraws);
 		if (!client->gate) {
 			logger::warn("[DCLF] blood splatter: the run gate could not be made; the screen blood stays the engine's");
-			return;
+			return true;
 		}
 		client->target = FrameAnchors::EngineTarget(0);
 		if (!client->target) {
 			logger::warn("[DCLF] blood splatter: the back buffer cannot be imported; the screen blood stays the engine's");
-			return;
+			return true;
 		}
 		FrameAnchors::ClientDesc desc{};
 		desc.id = kClientId;
@@ -210,15 +228,16 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		desc.onFailed = [] { Fail("the render graph failed with the screen blood's pass in it"); };
 		if (!FrameAnchors::Register(std::move(desc))) {
 			logger::warn("[DCLF] blood splatter: the {} client could not be registered; the screen blood stays the engine's", kClientId);
-			return;
+			return true;
 		}
 		state.client = std::move(client);
-		// Asks for the build now, so the client is in the graph before the first hit.
+		// The one build request: the next build point (a menu frame's end) builds the graph with the client, before the first hit.
 		FrameAnchors::RequestJoin(kClientId, FrameAnchors::Anchor::EngineDraws);
-		logger::info("[DCLF] blood splatter: the {} client registered", kClientId);
+		logger::info("[DCLF] blood splatter: the {} client registered at setup", kClientId);
+		return true;
 	}
 
-	bool Ready()
+	bool CanTake()
 	{
 		auto& state = GetState();
 		const auto& client = state.client;
@@ -231,17 +250,17 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 				logger::warn("[DCLF] blood splatter: the back buffer changed since the client registered; the screen blood stays the engine's");
 			return false;
 		}
-		return FrameAnchors::RequestJoin(kClientId, FrameAnchors::Anchor::EngineDraws);
+		if (!FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::EngineDraws)) {
+			static Util::ReasonLog log("[DCLF] blood splatter: the engine draws a batch", spdlog::level::err);
+			log.Report("its anchor cannot run now (not in the built graph, or its ring is full)");
+			return false;
+		}
+		return true;
 	}
 
-	bool CanRun()
+	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
 	{
-		return GetState().client && FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::EngineDraws);
-	}
-
-	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, Family::ProgramState& a_state)
-	{
-		return GetState().programs.Get(a_key, a_shader, {}, a_state);
+		return GetState().programs.Get(a_key, a_shader);
 	}
 
 	void Keep(Family::Owners&& a_owners)

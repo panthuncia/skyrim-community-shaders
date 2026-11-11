@@ -103,6 +103,13 @@ struct RasterProgram
 	 */
 	static std::shared_ptr<const RasterProgram> Load(rhi::Device a_device, const Desc& a_desc);
 
+	/**
+	 * @brief Compiles both stages of a_desc into the shader store (or finds them there) without making a pipeline, so a later Load
+	 * of a desc with the same sources and defines finds them. False when the runtime has no compiler yet or a stage failed (logged).
+	 * Blocks on the compile: call it from a compile thread or at setup.
+	 */
+	static bool CompileStages(const Desc& a_desc);
+
 	/** @brief A colour attachment: a declared RenderTarget view and what the pass does with its contents first. */
 	struct Colour
 	{

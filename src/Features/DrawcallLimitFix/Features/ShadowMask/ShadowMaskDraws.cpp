@@ -8,6 +8,9 @@
 
 #include "Features/TerrainBlending/ORGTerrainBlending.h"
 #include "Globals.h"
+#include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "ShaderCache.h"
+#include "Utils/Logging.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -24,6 +27,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <format>
 #include <string_view>
 
 namespace DCLF::Features::ShadowMask::ShadowMaskDraws
@@ -130,13 +134,30 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			std::shared_ptr<Client> client;
 		};
 
+		/**
+		 * @brief The shadow mask programs a Utility pixel descriptor CS loads can be drawn with: those with a RenderShadowmask* technique
+		 * bit (the world's and the menu scenes' masks: shadow-mask.md, "The shader"). Every other Utility descriptor is DCLF's or the
+		 * engine's.
+		 */
+		void StagesOf(bool a_pixel, std::uint32_t a_descriptor, std::vector<Family::StageRequest>& a_out)
+		{
+			using Flags = SIE::ShaderCache::UtilityShaderFlags;
+			constexpr auto kMasks = static_cast<std::uint32_t>(Flags::RenderShadowmask) | static_cast<std::uint32_t>(Flags::RenderShadowmaskSpot) |
+			                        static_cast<std::uint32_t>(Flags::RenderShadowmaskPb) | static_cast<std::uint32_t>(Flags::RenderShadowmaskDpb);
+			if (a_pixel && (a_descriptor & kMasks))
+				a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Pixel });
+		}
+
 		/** @brief Everything here: the render thread's. */
 		struct DrawsState
 		{
 			std::array<std::shared_ptr<Client>, kViews> clients;
-			std::array<bool, kViews> refused{};  // the view's client could not be made: its batches stay the engine's
-			Family::EngineDrawPrograms programs{ "shadow mask", { .source = kShader, .constantWords = ShaderBindings::Words<ShadowMaskBlock>() } };
+			Family::EngineDrawPrograms programs{ "shadow mask", { .source = kShader,
+																	.constantWords = ShaderBindings::Words<ShadowMaskBlock>(),
+																	.shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Utility),
+																	.stagesOf = &StagesOf } };
 			bool reserved = false;
+			bool setUp = false;
 			bool failed = false;
 			std::uint64_t runs = 0, draws = 0;
 			Family::KeptOwners kept;
@@ -161,18 +182,18 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 		}
 
 		/**
-		 * @brief Every published id a view's draws can read, listed when its client is made: the engine depths the slots hold
-		 * (shadow-mask.md, "The shader": the scene depth at t2, the light's shadow maps at t3 and t4) and what the ported features
-		 * publish as the scene depth. Terrain Blending binds its blended depth at t2 ("TerrainBlending::BlendedDepth", R32) and lists
-		 * its 16-bit copy in DCLF's registry at t17. An export of an id not listed here keeps its batch on the engine, logged once with
-		 * the id: add the id here.
+		 * @brief Every published id a view's draws can read, listed when its client is made at setup: the engine depths the slots hold
+		 * (shadow-mask.md, "The shader": the scene depth at t2, the light's shadow maps at t3 and t4), imported now so the first build
+		 * declares them, and what the ported features publish as the scene depth. Terrain Blending binds its blended depth at t2
+		 * ("TerrainBlending::BlendedDepth", R32) and lists its 16-bit copy in DCLF's registry at t17. An export of an id not listed here
+		 * is an inherent refusal, logged once with the id: add the id here.
 		 */
 		void ListInputs(Family::PublishedInputs& a_inputs)
 		{
 			using Depth = RE::RENDER_TARGET_DEPTHSTENCIL;
 			for (const auto depth : { Depth::kMAIN, Depth::kMAIN_COPY, Depth::kPOST_ZPREPASS_COPY, Depth::kSHADOWMAPS, Depth::kSHADOWMAPS_ESRAM,
 					 Depth::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM, Depth::kFOCUS_NEO })
-				a_inputs.Add(Family::EngineTargetId(depth));
+				a_inputs.AddEngine(depth);
 			a_inputs.Add(ORGTerrainBlending::kBlendedDepthId);
 			constexpr std::array<std::uint32_t, 1> kSceneDepthRegister{ 17 };
 			a_inputs.Add(Family::RegisteredIdsAt(kSceneDepthRegister));
@@ -232,7 +253,11 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				logger::warn("[DCLF] shadow mask: the {} client could not be registered; those shadow masks stay the engine's", client->id);
 				return nullptr;
 			}
-			logger::info("[DCLF] shadow mask: the {} client registered (published inputs it may read: {})", client->id, client->inputs.Describe());
+			const auto late = client->inputs.Unregistered();
+			logger::info("[DCLF] shadow mask: the {} client registered at setup (published inputs it may read: {}{})", client->id, client->inputs.Describe(),
+				late.empty() ? std::string() : std::format("; not published yet: {}", late));
+			// The one build request: the next build point (a menu frame's end) builds the graph with the client, before any world frame.
+			FrameAnchors::RequestJoin(client->id, FrameAnchors::Anchor::EngineDraws);
 			return client;
 		}
 
@@ -269,31 +294,47 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			logger::warn("[DCLF] shadow mask: the EngineDraws anchor could not be reserved; the shadow masks stay the engine's");
 	}
 
-	bool Ready(const Shape& a_shape)
+	bool Setup()
 	{
 		auto& state = GetState();
-		if (state.failed || a_shape.view >= View::Count)
+		if (state.setUp || state.failed)
+			return true;
+		if (!RenderGraphRuntime::Get().Host() || !FrameAnchors::IsRenderOwner() || !Available())
 			return false;
-		const auto index = static_cast<std::size_t>(a_shape.view);
-		auto& client = state.clients[index];
-		if (client) {
-			// A client is made once for its view: its published inputs are a fixed list, so no later batch needs another.
-			// kSHADOW_MASK made again (a resolution change) is another import: those batches stay the engine's until the next start.
-			if (FrameAnchors::EngineTarget(kShadowMaskTarget) != client->target) {
-				if (!std::exchange(client->targetLogged, true))
-					logger::warn("[DCLF] shadow mask: kSHADOW_MASK changed since the {} client registered; those batches stay the engine's", client->id);
-				return false;
-			}
-			return FrameAnchors::RequestJoin(client->id, FrameAnchors::Anchor::EngineDraws);
+		state.setUp = true;
+		Family::StartStagePrecompile();
+		state.programs.Prebuild();
+		if (!::RenderGraph::Engine::Constants::Requested()) {
+			logger::warn("[DCLF] shadow mask: needs the engine constants capture (CS_ORG_ENGINE_CONSTANTS=1); the shadow masks stay the engine's");
+			return true;
 		}
-		if (state.refused[index])
+		for (const auto view : { View::World, View::Menu })
+			if (TakesView(view))
+				state.clients[static_cast<std::size_t>(view)] = MakeClient({ .view = view });
+		return true;
+	}
+
+	bool CanTake(View a_view)
+	{
+		auto& state = GetState();
+		if (state.failed || a_view >= View::Count)
 			return false;
-		// No host yet is not a refusal: the next batch asks again.
-		if (!RenderGraphRuntime::Get().Host())
+		const auto& client = state.clients[static_cast<std::size_t>(a_view)];
+		if (!client)
 			return false;
-		client = MakeClient(a_shape);
-		state.refused[index] = !client;
-		return false;
+		// kSHADOW_MASK made again (a resolution change) is another import: those batches stay the engine's until the next start (no
+		// client is registered again during play).
+		if (FrameAnchors::EngineTarget(kShadowMaskTarget) != client->target) {
+			if (!std::exchange(client->targetLogged, true))
+				logger::warn("[DCLF] shadow mask: kSHADOW_MASK changed since the {} client registered; those batches stay the engine's", client->id);
+			return false;
+		}
+		if (!FrameAnchors::CanRun(client->id, FrameAnchors::Anchor::EngineDraws)) {
+			static Util::ReasonLog log("[DCLF] shadow mask: the engine draws a batch", spdlog::level::err);
+			log.Report(std::format("{}: its anchor cannot run now (not in the built graph, or its ring is full)", client->id));
+			return false;
+		}
+		return true;
 	}
 
 	Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index)
@@ -304,20 +345,9 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
 	}
 
-	bool HasClient(View a_view)
+	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
 	{
-		return a_view < View::Count && GetState().clients[static_cast<std::size_t>(a_view)] != nullptr;
-	}
-
-	bool CanRun(View a_view)
-	{
-		const auto& client = GetState().clients[static_cast<std::size_t>(a_view)];
-		return client && FrameAnchors::CanRun(client->id, FrameAnchors::Anchor::EngineDraws);
-	}
-
-	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, Family::ProgramState& a_state)
-	{
-		return GetState().programs.Get(a_key, a_shader, {}, a_state);
+		return GetState().programs.Get(a_key, a_shader);
 	}
 
 	void Keep(Family::Owners&& a_owners)

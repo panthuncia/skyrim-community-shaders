@@ -189,6 +189,35 @@ namespace
 		}
 		return artifact.binary;
 	}
+
+	/** @brief What a desc compiles: its sources, entries and each stage's defines, resolved now (CS's common defines read State). */
+	Stages StagesOf(const RasterProgram::Desc& a_desc)
+	{
+		return { a_desc.vertexSource, a_desc.pixelSource, a_desc.vertexEntry, a_desc.pixelEntry,
+			!a_desc.vertexStageDefines.empty() ? a_desc.vertexStageDefines :
+			a_desc.commonDefines               ? Build::WithCommonDefines(a_desc.defines, L"vs_6_6") :
+												 a_desc.defines,
+			!a_desc.pixelStageDefines.empty() ? a_desc.pixelStageDefines :
+			a_desc.commonDefines              ? Build::WithCommonDefines(a_desc.defines, L"ps_6_6") :
+												a_desc.defines,
+			fmt::format("{} ({})", std::filesystem::path(a_desc.pixelSource).stem().string(), Util::WStringToString(a_desc.pixelEntry)), a_desc.vertexText,
+			a_desc.pixelText, a_desc.languageVersion };
+	}
+#	endif
+}
+
+bool RasterProgram::CompileStages(const Desc& a_desc)
+{
+#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+	auto* compiler = RenderGraphRuntime::Get().ShaderCompiler();
+	if (!compiler)
+		return false;
+	const Stages stages = StagesOf(a_desc);
+	return !CompileStage(*compiler, stages.vertexSource, stages.vertexText, stages.vertexEntry, L"vs_6_6", stages).empty() &&
+	       !CompileStage(*compiler, stages.pixelSource, stages.pixelText, stages.pixelEntry, L"ps_6_6", stages).empty();
+#	else
+	(void)a_desc;
+	return false;
 #	endif
 }
 
@@ -219,15 +248,7 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 	// Before the sources are read: a reload that starts after rebuilds it (PipelineRegistry::Register).
 	const std::uint64_t builtFor = registry.SourcesGeneration();
 	// The defines resolved once, here: a hot reload compiles the same permutation.
-	Stages stages{ a_desc.vertexSource, a_desc.pixelSource, a_desc.vertexEntry, a_desc.pixelEntry,
-		!a_desc.vertexStageDefines.empty() ? a_desc.vertexStageDefines :
-		a_desc.commonDefines               ? Build::WithCommonDefines(a_desc.defines, L"vs_6_6") :
-											 a_desc.defines,
-		!a_desc.pixelStageDefines.empty() ? a_desc.pixelStageDefines :
-		a_desc.commonDefines              ? Build::WithCommonDefines(a_desc.defines, L"ps_6_6") :
-											a_desc.defines,
-		fmt::format("{} ({})", std::filesystem::path(a_desc.pixelSource).stem().string(), Util::WStringToString(a_desc.pixelEntry)), a_desc.vertexText,
-		a_desc.pixelText, a_desc.languageVersion };
+	const Stages stages = StagesOf(a_desc);
 	const auto vertex = CompileStage(*compiler, stages.vertexSource, stages.vertexText, stages.vertexEntry, L"vs_6_6", stages);
 	const auto pixel = vertex.empty() ? std::vector<std::byte>{} : CompileStage(*compiler, stages.pixelSource, stages.pixelText, stages.pixelEntry, L"ps_6_6", stages);
 	if (vertex.empty() || pixel.empty())

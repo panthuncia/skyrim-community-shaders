@@ -5,13 +5,13 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 
-#include "Features/DrawcallLimitFix/Core/Engine/Capture/ConstantMirror.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
 
 #include "Globals.h"
+#include "RenderGraph/Engine/MainTick.h"
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -86,6 +86,18 @@ namespace DCLF::Family
 		return !Takers().empty();
 	}
 
+	bool AddSetup(std::string_view a_family, std::function<bool()> a_setup)
+	{
+		auto done = std::make_shared<bool>(false);
+		const bool added = ::RenderGraph::Engine::MainTick::Add(std::format("the {} family's setup", a_family), [done, setup = std::move(a_setup)] {
+			if (!*done)
+				*done = setup();
+		});
+		if (!added)
+			logger::error("[DCLF] {}: the main-thread tick could not be installed; the family's clients are never made and its draws stay the engine's", a_family);
+		return added;
+	}
+
 	void BeginBatch()
 	{
 		static std::uint32_t last = ~0u;
@@ -102,12 +114,14 @@ namespace DCLF::Family
 		return *counter;
 	}
 
-	void Passes::OnSetup(const RE::BSRenderPass* a_pass)
+	bool Passes::OnSetup(const RE::BSRenderPass* a_pass)
 	{
 		++passes;
 		if (pendingType != kNone)
 			otherTypes |= 1u << (pendingType & 31);
 		pendingType = a_pass && a_pass->geometry ? static_cast<std::uint32_t>(a_pass->geometry->GetType().underlying()) : 0xFE;
+		// R1's dispatcher draws a TriShape through DrawTriShape (+0x1A2); every other type through another draw function.
+		return pendingType == static_cast<std::uint32_t>(RE::BSGeometry::Type::kTriShape);
 	}
 
 	bool Passes::End()
@@ -192,14 +206,26 @@ namespace DCLF::Family
 		return viewport;
 	}
 
-	bool CopyConstants(const ID3D11Buffer* a_buffer, std::span<std::byte> a_out)
+	Constants::UseId CaptureConstants()
+	{
+		return Constants::Active() ? Constants::Capture(Constants::kDrawStages) : Constants::UseId{};
+	}
+
+	std::uint32_t ConstantBytes(Constants::UseId a_use, Constants::Stage a_stage, std::uint32_t a_slot)
+	{
+		const auto* slot = a_use.Valid() ? Constants::Find(a_use, a_stage, a_slot) : nullptr;
+		return slot ? slot->size : 0;
+	}
+
+	bool CopyConstants(Constants::UseId a_use, Constants::Stage a_stage, std::uint32_t a_slot, std::span<std::byte> a_out)
 	{
 		std::memset(a_out.data(), 0, a_out.size());
-		if (!a_buffer)
-			return true;
-		const auto bytes = ConstantMirror::Get().Contents(a_buffer);
-		if (bytes.empty())
+		if (!a_use.Valid())
 			return false;
+		const auto* slot = Constants::Find(a_use, a_stage, a_slot);
+		if (!slot)
+			return true;
+		const auto bytes = Constants::Bytes(*slot);
 		std::memcpy(a_out.data(), bytes.data(), (std::min)(bytes.size(), a_out.size()));
 		return true;
 	}
@@ -257,8 +283,8 @@ namespace DCLF::Family
 		switch (a_result) {
 		case InputResult::NotListed:
 			return "it is not among the view's published inputs";
-		case InputResult::NotDeclared:
-			return "no build of its client's graph has declared it yet";
+		case InputResult::PublishedLate:
+			return "it was first published after its client's graph was built (its producer publishes during play)";
 		case InputResult::NoView:
 			return "it has no whole-resource shader resource view";
 		default:
@@ -276,6 +302,24 @@ namespace DCLF::Family
 	{
 		for (const auto& id : a_ids)
 			Add(id);
+	}
+
+	void PublishedInputs::AddEngine(RE::RENDER_TARGET a_target)
+	{
+		FrameAnchors::EngineTarget(static_cast<std::uint32_t>(a_target));
+		Add(EngineTargetId(a_target));
+	}
+
+	void PublishedInputs::AddEngine(RE::RENDER_TARGET_DEPTHSTENCIL a_target)
+	{
+		FrameAnchors::EngineDepth(static_cast<std::uint32_t>(a_target));
+		Add(EngineTargetId(a_target));
+	}
+
+	void PublishedInputs::AddEngine(RE::RENDER_TARGET_CUBEMAP a_target)
+	{
+		FrameAnchors::EngineCubemap(static_cast<std::uint32_t>(a_target));
+		Add(EngineTargetId(a_target));
 	}
 
 	void PublishedInputs::Declare(org::RenderPassBuilder& a_builder)
@@ -303,10 +347,10 @@ namespace DCLF::Family
 	{
 		if (a_id.empty() || std::ranges::find(ids, a_id) == ids.end())
 			return InputResult::NotListed;
-		// The declared check comes first: an undeclared id must never be read.
+		// The declared check comes first: an undeclared id must never be read (nothing orders the read after its writes).
 		const auto known = declared.load(std::memory_order_acquire);
 		if (!known || !known->contains(a_id))
-			return InputResult::NotDeclared;
+			return InputResult::PublishedLate;
 		return PublishedResources::ShaderResourceIndex(a_id, a_index) ? InputResult::Graph : InputResult::NoView;
 	}
 
@@ -316,6 +360,15 @@ namespace DCLF::Family
 		for (const auto& id : ids)
 			out += std::format("{}{}", out.empty() ? "" : ", ", id);
 		return out.empty() ? std::string("none") : out;
+	}
+
+	std::string PublishedInputs::Unregistered() const
+	{
+		std::string out;
+		for (const auto& id : ids)
+			if (!PublishedResources::IsRegistered(id))
+				out += std::format("{}{}", out.empty() ? "" : ", ", id);
+		return out;
 	}
 
 	std::uint32_t SlotSampler(std::uint32_t a_addressMode, std::uint32_t a_filterMode, Owners& a_owners)
@@ -330,6 +383,9 @@ namespace DCLF::Family
 		GpuTextures::ResolveFailure* a_failure, ID3D11ShaderResourceView** a_view)
 	{
 		a_out = {};
+		// Only CS's registers: the engine's t0-t15 are latched under the flush latch and read from the shadow state (SlotTexture).
+		if (a_register < 16)
+			return HeaderResult::Texture;
 		ID3D11ShaderResourceView* view = nullptr;
 		globals::d3d::context->PSGetShaderResources(a_register, 1, &view);
 		if (a_view)
@@ -383,7 +439,7 @@ namespace DCLF::Family
 		default:
 			break;
 		}
-		static Util::ReasonLog log("[DCLF] engine draw families: a withheld batch was not drawn this frame (its view probes again)", spdlog::level::warn);
+		static Util::ReasonLog log("[DCLF] engine draw families: latched draws were not drawn this frame (their anchor's run did not submit)", spdlog::level::err);
 		log.Report(std::format("{} {}: {}", a_family, a_client, why));
 		return false;
 	}

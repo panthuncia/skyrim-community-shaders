@@ -8,6 +8,8 @@
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 
 #include "Globals.h"
+#include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "Utils/Logging.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -25,6 +27,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstring>
+#include <format>
 #include <string_view>
 
 namespace DCLF::Features::Water::WaterDraws
@@ -170,25 +173,38 @@ namespace DCLF::Features::Water::WaterDraws
 			std::shared_ptr<Client> client;
 		};
 
+		/**
+		 * @brief The programs a BSWaterShader vertex descriptor CS loads can be drawn with: the family keys its programs by the vertex
+		 * descriptor (both stages take its defines), so every one is a program's, for the mask (the Stencil technique) and the surface alike.
+		 */
+		void StagesOf(bool a_pixel, std::uint32_t a_descriptor, std::vector<Family::StageRequest>& a_out)
+		{
+			if (!a_pixel)
+				a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Vertex });
+		}
+
 		/** @brief Everything here: the render thread's. */
 		struct DrawsState
 		{
 			std::array<std::shared_ptr<Client>, kViews> clients;
-			std::array<bool, kViews> refused{};  // the view's client could not be made: its batches stay the engine's
-			Family::EngineDrawPrograms programs{ "water", { .source = kShader, .constantWords = ShaderBindings::Words<WaterBlock>() } };
+			Family::EngineDrawPrograms programs{ "water", { .source = kShader,
+															  .constantWords = ShaderBindings::Words<WaterBlock>(),
+															  .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Water),
+															  .stagesOf = &StagesOf } };
 			bool reserved = false;
+			bool setUp = false;
 			bool failed = false;
 			std::uint64_t runs = 0, draws = 0;
 			Family::KeptOwners kept;
 		};
 
 		/**
-		 * @brief Every published id a_view's draws can read, listed when its client is made. That is what the ported features publish
-		 * at the headers' registers (DCLF's registry), the engine depths CS binds at a header (the scene depth at t17, Wetness Effects'
-		 * precipitation occlusion at t70), and the engine targets the surface's material slots hold (water.md, "The shader": the
+		 * @brief Every published id a_view's draws can read, listed when its client is made at setup. That is what the ported features
+		 * publish at the headers' registers (DCLF's registry), the engine depths CS binds at a header (the scene depth at t17, Wetness
+		 * Effects' precipitation occlusion at t70), and the engine targets the surface's material slots hold (water.md, "The shader": the
 		 * refraction copy at t1, the displacement at t2, the reflection cubemap at t3, the depth copy at t7, the flow at t8, the SSR
-		 * targets at t10 and t11). The mask reads no header and no slot (HeadersRead, SlotRead). An export of an id not listed here
-		 * keeps its batch on the engine, logged once with the id: add the id here.
+		 * targets at t10 and t11), imported now so the first build declares them. The mask reads no header and no slot (HeadersRead,
+		 * SlotRead). An export of an id not listed here is an inherent refusal, logged once with the id: add the id here.
 		 */
 		void ListInputs(View a_view, Family::PublishedInputs& a_inputs)
 		{
@@ -198,11 +214,11 @@ namespace DCLF::Features::Water::WaterDraws
 			using Depth = RE::RENDER_TARGET_DEPTHSTENCIL;
 			a_inputs.Add(Family::RegisteredIdsAt(kHeaderRegisters));
 			for (const auto depth : { Depth::kPOST_ZPREPASS_COPY, Depth::kMAIN_COPY, Depth::kPRECIPITATION_OCCLUSION_MAP })
-				a_inputs.Add(Family::EngineTargetId(depth));
+				a_inputs.AddEngine(depth);
 			for (const auto colour : { Colour::kMAIN_COPY, Colour::kREFRACTION_NORMALS, Colour::kWATER_DISPLACEMENT, Colour::kWATER_DISPLACEMENT_SWAP,
 					 Colour::kWATER_FLOW, Colour::kSSR, Colour::kSSR_RAW, Colour::kSSR_BLURRED0 })
-				a_inputs.Add(Family::EngineTargetId(colour));
-			a_inputs.Add(Family::EngineTargetId(RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS));
+				a_inputs.AddEngine(colour);
+			a_inputs.AddEngine(RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS);
 		}
 
 		DrawsState& GetState()
@@ -287,7 +303,11 @@ namespace DCLF::Features::Water::WaterDraws
 				logger::warn("[DCLF] water: the {} client could not be registered; the water stays the engine's", client->id);
 				return nullptr;
 			}
-			logger::info("[DCLF] water: the {} client registered (published inputs it may read: {})", client->id, client->inputs.Describe());
+			const auto late = client->inputs.Unregistered();
+			logger::info("[DCLF] water: the {} client registered at setup (published inputs it may read: {}{})", client->id, client->inputs.Describe(),
+				late.empty() ? std::string() : std::format("; not published yet: {}", late));
+			// The one build request: the next build point (a menu frame's end) builds the graph with the client, before any world frame.
+			FrameAnchors::RequestJoin(client->id, FrameAnchors::Anchor::EngineDraws);
 			return client;
 		}
 
@@ -328,21 +348,41 @@ namespace DCLF::Features::Water::WaterDraws
 			logger::warn("[DCLF] water: the EngineDraws anchor could not be reserved; the water stays the engine's");
 	}
 
-	bool Ready(const Shape& a_shape)
+	bool Setup()
 	{
 		auto& state = GetState();
-		if (state.failed || a_shape.view >= View::Count)
+		if (state.setUp || state.failed)
+			return true;
+		if (!RenderGraphRuntime::Get().Host() || !FrameAnchors::IsRenderOwner() || !Available())
 			return false;
-		const auto index = static_cast<std::size_t>(a_shape.view);
-		auto& client = state.clients[index];
+		state.setUp = true;
+		Family::StartStagePrecompile();
+		state.programs.Prebuild();
+		if (!::RenderGraph::Engine::Constants::Requested()) {
+			logger::warn("[DCLF] water: needs the engine constants capture (CS_ORG_ENGINE_CONSTANTS=1); the water stays the engine's");
+			return true;
+		}
 		// A client is made once for its view. Its targets and published inputs are fixed lists, so no later batch needs another.
-		if (client)
-			return FrameAnchors::RequestJoin(client->id, FrameAnchors::Anchor::EngineDraws);
-		if (state.refused[index])
+		for (const auto view : { View::Mask, View::Surface })
+			if (TakesView(view))
+				state.clients[static_cast<std::size_t>(view)] = MakeClient({ .view = view });
+		return true;
+	}
+
+	bool CanTake(View a_view)
+	{
+		auto& state = GetState();
+		if (state.failed || a_view >= View::Count)
 			return false;
-		client = MakeClient(a_shape);
-		state.refused[index] = !client;
-		return false;
+		const auto& client = state.clients[static_cast<std::size_t>(a_view)];
+		if (!client)
+			return false;
+		if (!FrameAnchors::CanRun(client->id, FrameAnchors::Anchor::EngineDraws)) {
+			static Util::ReasonLog log("[DCLF] water: the engine draws a batch", spdlog::level::err);
+			log.Report(std::format("{}: its anchor cannot run now (not in the built graph, or its ring is full)", client->id));
+			return false;
+		}
+		return true;
 	}
 
 	Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index)
@@ -353,15 +393,9 @@ namespace DCLF::Features::Water::WaterDraws
 		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
 	}
 
-	bool CanRun(View a_view)
+	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
 	{
-		const auto& client = GetState().clients[static_cast<std::size_t>(a_view)];
-		return client && FrameAnchors::CanRun(client->id, FrameAnchors::Anchor::EngineDraws);
-	}
-
-	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, Family::ProgramState& a_state)
-	{
-		return GetState().programs.Get(a_key, a_shader, {}, a_state);
+		return GetState().programs.Get(a_key, a_shader);
 	}
 
 	void Keep(Family::Owners&& a_owners)

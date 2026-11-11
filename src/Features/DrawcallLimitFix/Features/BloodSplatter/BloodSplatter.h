@@ -9,8 +9,11 @@
 // Core/Engine/Family) records the draw instead of drawing it. The batch's draws are then drawn by an ORG pass at the EngineDraws anchor,
 // in the engine's order, with CS's BloodSplatter.hlsl built for ORG (BloodSplatterDraws.cpp).
 //
-// The client is made once, at the first main-thread tick the render graph runs (RenderGraph::Engine::MainTick, before any blood is
-// drawn), so the first hit does not rebuild the anchor's graph. Anything the family cannot draw stays the engine's.
+// The family is the primary path for the screen blood (docs/development/p5/primary-path.md): its stages compile when CS loads the
+// shader's descriptors, its programs are prebuilt from the manifest, and its client is made once at setup (the first main-thread tick
+// the render graph runs, Family::AddSetup), so the first hit neither rebuilds the anchor's graph nor waits. What it cannot draw (its
+// inherent refusals, docs/development/p5/blood-splatter.md "What stays the engine's") ends the batch's latched part: the latched draws
+// run at that point and the engine draws the rest.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -84,18 +87,19 @@ namespace DCLF::Features::BloodSplatter
 		bool Available();
 		/** @brief Reserves the EngineDraws anchor (the feature's install). */
 		void Reserve();
-		/** @brief Makes the client once (the first main-thread tick the graph runs). Main thread, the render owner. */
-		void EnsureClient();
 		/**
-		 * @brief Whether a batch may be withheld: the client exists, imports the back buffer the engine binds now, and is in the anchor's
-		 * built graph (FrameAnchors::RequestJoin).
+		 * @brief The family's setup (Family::AddSetup, main thread): the stage precompile started, the manifest's programs queued, the client
+		 * made and its build asked for. True once done (or refused for good, logged); false while the render graph has no host yet.
 		 */
-		bool Ready();
-		/** @brief Whether a run of the anchor now would draw the client's work (FrameAnchors::CanRun). */
-		bool CanRun();
-		/** @brief The program for a key, built off the render thread; null while it builds or when it cannot be (a_state says which). */
-		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, Family::ProgramState& a_state);
-		/** @brief Keeps a probe's imports and leases as long as a run's. */
+		bool Setup();
+		/**
+		 * @brief Whether a batch is taken: the client exists, imports the back buffer the engine binds now, and a run of the anchor now
+		 * would draw (FrameAnchors::CanRun). False is logged once per reason; the engine draws the batch.
+		 */
+		bool CanTake();
+		/** @brief The program for a key (Family::EngineDrawPrograms::Get): null when it cannot be built. */
+		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
+		/** @brief Keeps a batch's imports and leases as long as a run's, when it ran nothing. */
 		void Keep(Family::Owners&& a_owners);
 		/** @brief Runs the anchor with a_run's draws. True when the run was submitted; otherwise its draws were not drawn (logged). */
 		bool Submit(std::shared_ptr<Run> a_run);

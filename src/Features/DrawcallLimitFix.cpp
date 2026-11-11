@@ -40,6 +40,7 @@
 #	include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #	include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #	include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
+#	include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
 #	include "DrawcallLimitFix/Core/Handoff/ShadowViews.h"
 #	include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #	include "Features/DrawcallLimitFix/Core/Render/Snapshot/ViewBatches.h"
@@ -1028,6 +1029,8 @@ void DrawcallLimitFix::WriteAlphaFlags(RE::NiAlphaProperty* a_alpha, std::uint16
 void DrawcallLimitFix::PrecompileShader(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor)
 {
 	DCLF::ShaderPrograms::Get().Precompile(a_shader, a_pixel, a_descriptor);
+	// The engine draw families' ORG stages for the descriptor (the sky, the water, the screen blood, the shadow masks).
+	DCLF::Family::PrecompileStages(a_shader, a_pixel, a_descriptor);
 }
 
 void DrawcallLimitFix::OnMap(ID3D11Resource* a_resource, void* a_data)
