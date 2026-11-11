@@ -82,7 +82,7 @@ struct RasterProgram
 		std::vector<std::pair<std::wstring, std::wstring>> defines;  // both stages
 		std::vector<Target> targets;                                 // 1 to 8 colour targets, in SV_Target order; none for a depth-only program
 		rhi::Format depthFormat = rhi::Format::Unknown;              // Unknown: no depth attachment (then targets must not be empty)
-		// Draw sets no stencil reference: a program that writes the stencil uses ops that need none (Zero).
+		// The stencil reference is the draw's (DrawDesc::stencilReference, 0 by default).
 		rhi::DepthStencilState depth{ .depthEnable = false, .depthWrite = false, .depthFunc = rhi::CompareOp::Always };
 		rhi::RasterState raster{ .cull = rhi::CullMode::None };
 		bool alphaToCoverage = false;
@@ -132,6 +132,8 @@ struct RasterProgram
 		std::uint32_t vertexCount = 3;             // the fullscreen triangle
 		std::uint32_t instanceCount = 1;
 		const char* debugName = nullptr;
+		// The stencil test's and REPLACE's reference (OMSetDepthStencilState's), for a program whose depth state enables stencil.
+		std::uint32_t stencilReference = 0;
 		// When set, the draw's four uints (vertex count, instance count, first vertex, first instance) are read from this latch
 		// block, indirectOffset bytes into the region of the recording's frame slot, instead of vertexCount and instanceCount. A
 		// vertex count of zero there draws nothing, so a kept recording can do no work on a frame by its data alone.
