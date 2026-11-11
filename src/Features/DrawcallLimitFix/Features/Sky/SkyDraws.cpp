@@ -15,7 +15,6 @@
 #include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "RenderGraph/SharedConstants.h"
-#include "Utils/Logging.h"
 
 #include <OpenRenderGraph/GraphHost.h>
 #include <Render/LatchBlock.h>
@@ -258,29 +257,6 @@ namespace DCLF::Features::Sky::SkyDraws
 			return state;
 		}
 
-		/** @brief Runs that were not submitted after their draws were withheld, logged once per status. */
-		Util::ReasonLog& LostRuns()
-		{
-			static Util::ReasonLog log("[DCLF] sky: a withheld batch was not drawn this frame (the view probes again)", spdlog::level::warn);
-			return log;
-		}
-
-		const char* NameOf(FrameAnchors::RunStatus a_status)
-		{
-			switch (a_status) {
-			case FrameAnchors::RunStatus::Idle:
-				return "the anchor had nothing to run";
-			case FrameAnchors::RunStatus::Refused:
-				return "the anchor refused the run (not the render owner, or no runtime)";
-			case FrameAnchors::RunStatus::RingFull:
-				return "the anchor's ring was full";
-			case FrameAnchors::RunStatus::Failed:
-				return "the anchor's epoch failed";
-			default:
-				return "ran";
-			}
-		}
-
 		/** @brief Stops the family for good: every batch is the engine's again. */
 		void Fail(const char* a_why)
 		{
@@ -504,12 +480,7 @@ namespace DCLF::Features::Sky::SkyDraws
 		++state.runs;
 		state.draws += a_run->draws.size();
 		std::atomic_store(&client->run, std::shared_ptr<const Run>(std::move(a_run)));
-		client->pending = true;
-		const auto result = FrameAnchors::Run(client->anchor);
-		client->pending = false;
-		if (!result)
-			LostRuns().Report(NameOf(result.status), client->id);
-		return result;
+		return Family::RunWithheld("sky", client->id, client->anchor, client->pending);
 	}
 
 	std::string Status()

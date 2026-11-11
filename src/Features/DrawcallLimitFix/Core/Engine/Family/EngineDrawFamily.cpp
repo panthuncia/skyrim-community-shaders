@@ -13,6 +13,7 @@
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "Utils/Logging.h"
 
 #include <algorithm>
 #include <cstring>
@@ -242,6 +243,35 @@ namespace DCLF::Family
 	std::uint32_t KeptFrames()
 	{
 		return RenderGraphRuntime::kGameFramesInFlight + 2;
+	}
+
+	bool RunWithheld(std::string_view a_family, std::string_view a_client, FrameAnchors::Anchor a_anchor, bool& a_pending)
+	{
+		a_pending = true;
+		const auto result = FrameAnchors::Run(a_anchor);
+		a_pending = false;
+		if (result)
+			return true;
+		const char* why = "ran";
+		switch (result.status) {
+		case FrameAnchors::RunStatus::Idle:
+			why = "the anchor had nothing to run";
+			break;
+		case FrameAnchors::RunStatus::Refused:
+			why = "the anchor refused the run (not the render owner, or no runtime)";
+			break;
+		case FrameAnchors::RunStatus::RingFull:
+			why = "the anchor's ring was full";
+			break;
+		case FrameAnchors::RunStatus::Failed:
+			why = "the anchor's epoch failed";
+			break;
+		default:
+			break;
+		}
+		static Util::ReasonLog log("[DCLF] engine draw families: a withheld batch was not drawn this frame (its view probes again)", spdlog::level::warn);
+		log.Report(std::format("{} {}: {}", a_family, a_client, why));
+		return false;
 	}
 
 	void KeptOwners::Keep(Owners&& a_owners)

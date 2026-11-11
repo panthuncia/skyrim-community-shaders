@@ -10,6 +10,8 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 
+#include "RenderGraph/FrameAnchors.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -238,4 +240,12 @@ namespace DCLF::Family
 
 	/** @brief Game frames a run's owners are kept: the frames the graph may run behind, with a margin. */
 	std::uint32_t KeptFrames();
+
+	/**
+	 * @brief Runs a_anchor for a client whose batch was withheld (CanRun said it would draw): a_pending, which the client's active
+	 * callback returns, is set for the run. True when the run was submitted (RunStatus::Ran). Any other status means the withheld draws
+	 * were not drawn this frame: it is logged once per status ("[DCLF] <a_family>: ...", with a_client) and the caller's view probes
+	 * again. The client's executed callback counts the runs that drew.
+	 */
+	bool RunWithheld(std::string_view a_family, std::string_view a_client, FrameAnchors::Anchor a_anchor, bool& a_pending);
 }
