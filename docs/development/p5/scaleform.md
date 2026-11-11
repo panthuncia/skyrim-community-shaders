@@ -33,6 +33,11 @@ shaders `package/Shaders/Scaleform/`, behind `CS_ORG_SCALEFORM=1` (default off).
   instead of a device vtable patch; A8 goes through BasicRHI's format remap; the D3D11 blend stack is rebuilt for each part;
   a segment starts from the renderer's live arrays; kept calls are plain records that replay from the staging bytes; the
   capture is touched only on the render owner.
+- **Phase 5 review fixes, wave 2 (2026-11-11, code only):** the Interface pass draws through a `RunGate` (one entry per command,
+  opened in the commit) with its frames handed over by `RunSlots` and its staging from `FrameStaging`; the client registers once
+  with the framebuffer's and HDR's UI texture's surfaces and joins through `RequestJoin`; a surface goes only when the engine
+  released its texture; displays without masks draw in a pass without the depth-stencil; the pipelines come from a
+  `ProgramCache` (D3D11 draws a segment until its pipelines are built). Below, "The ORG pass".
 
 ## Census
 
@@ -49,9 +54,14 @@ Every 1000 displays, and the first time each reason comes up (`[ORG] Scaleform: 
 - **D3D11 parts** counts each part by reason; a whole display refused at `BeginDisplay` counts once under its reason ("a whole
   display ..."). Segment failures name the graph's reason (a new surface, a pipeline, a texture's view, the epoch).
 
-Expected after this change: no "a texture's view cannot be resolved"; the remaining whole-display reasons are the first two
-displays per surface ("a new surface (drawn from the next display)") and a few "the client was not in the Interface epoch"
-right after a registration (6 in a loading run before).
+Expected after the wave 2 review fixes: no "a texture's view cannot be resolved"; displays before the first build are "a whole
+display before the render graph is up" (one frame, at the first display); "a pipeline is being built" while the first
+pipelines compile (a few frames at the first menu with a new blend or fill, then never); "a new surface (drawn once the
+Interface graph holds it)" and "the Interface graph is being built with a new surface" only for a target other than the
+framebuffer and HDR's UI texture, for one frame, once per session. "the Interface anchor's ring is full this frame" means
+the anchor needs more runs a frame than it is sized for (below, "The ORG pass"). "a segment with more commands than the
+Interface gate holds" means kGateEntries (1024) is too small; `[ORG] Scaleform: the largest segment so far has N commands` logs
+each new power of two from 64.
 
 ## The renderer object
 
@@ -161,7 +171,7 @@ stage.
 
 The D3D11 renderer stays. `Install` (the seam in `Hooks::Install`) detours its factory (`Scaleform__GRendererD3D11__Create`,
 SE 82831 / AE 84952) and gives the new object a copy of its 58-slot vtable in which the slots below are CS's. Every other slot,
-and every call off the render owner (`FrameAnchors::OnRenderThread`), goes to the D3D11 renderer unchanged. The object's state is the D3D11 renderer's: CS
+and every call off the render owner (`FrameAnchors::IsRenderOwner`), goes to the D3D11 renderer unchanged. The object's state is the D3D11 renderer's: CS
 forwards the pure setters (they write fields and touch no D3D11 state) and reads the fields at each draw.
 
 A display (`BeginDisplay` to `EndDisplay`) is a sequence of graph segments and D3D11 parts, in D3D11's order:
@@ -291,27 +301,53 @@ The background rectangle `BeginDisplay` draws is one of the display's draws.
   Running each display's epoch at its `EndDisplay` keeps the D3D11 order exact (menu 3D, Bink or another mod's D3D11 drawing
   between two movies stays between them). One epoch per frame at the end of `UI::DrawInterface` would be cheaper and is the
   next step once nothing D3D11 draws between displays (P5 menu 3D).
-- **Surface:** the RT 0 texture bound at `BeginDisplay` (read from DXVK's context, so tripwire handles do not matter) is the
-  engine target it belongs to (`FrameAnchors::EngineTarget`) or, for HDR's UI texture, an import of its own
-  (`cs.scaleform.target.<n>`). The DSV is kMAIN's (`EngineDepth`). Each (target, depth) pair is a surface with a pass of its
-  own in the client; a new surface registers the client again and that display goes to D3D11 (a client registered now is in
-  the next run). Steady state has one or two surfaces and no rebuilds.
-- **Per display:** the commit copies the display's bytes (geometry, then one 192-byte record per draw) into a host-visible
-  staging buffer from a pool, resolves each texture's SRV to a descriptor (`DCLF::GpuTextures::ResolveBinding`, DXVK's image
-  in its resting layout, untracked), and stores the frame in the surface's slot for this frame slot (and nothing in the
-  others). The pass records one render pass: the viewport and scissor of `BeginDisplay`, then per command a stencil clear
+- **Sizing (2026-11-11):** in the `p35-tmp-p5-all` runs (HUD, inventory, map, journal, a load, the race menu; 9,000 displays,
+  no D3D11 part) the anchors logged `ran N times in one frame, above the M it is sized for` for EngineFrameClear and
+  EngineCubeClear but never for Interface: it stayed within 6. With every switch on the frame slot budget is 252 of 255 at 4
+  frames in flight, so one more run a frame (4 slots) does not fit; 6 stays. A frame that needs more sends the extra displays to
+  D3D11 (`the Interface anchor's ring is full this frame` in the census) instead of waiting. Read
+  `[ORG] frame anchors: Interface ran N times in one frame` (any run) and, with `CS_ORG_EPOCH_STATS=1`,
+  `[ORG] frame anchors, peak runs in one frame / sized for: ... Interface N/6`. If menus with D3D11 parts need more, the next
+  step above (one epoch per `UI::DrawInterface`) is the way, not a larger ring; it needs menu 3D on the graph first.
+- **Surfaces, registered once:** a surface is a target and depth pair (DXVK's textures). The first `Ready` makes the two that
+  `UI::DrawInterface` binds, the framebuffer (the back buffer, through kFRAMEBUFFER's RTV, or HDR's saved one while HDR points
+  kFRAMEBUFFER at its UI texture) and HDR's UI texture, each with kMAIN's depth-stencil, and registers the client with their
+  passes. The client joins with `FrameAnchors::RequestJoin`: the graph is built at the next build point (DCLF's, or the frame's
+  end), never on the frame's path; until then displays go to D3D11. A target outside those two (the colour from an engine
+  target, `FrameAnchors::EngineTarget`, or an import of its own, `cs.scaleform.target.<n>`) is added when a display first draws
+  onto it: the client is registered again and joins the same way, so that display and those until the build go to D3D11.
+  A surface is dropped only when the engine released its texture, checked every 1,000 displays and before a new surface is
+  added: not drawn onto since the last check, and its colour is no longer an engine target, the framebuffer's, HDR's UI texture
+  or held by anyone but the surface (DXVK's views hold no public reference, so a target whose owner keeps only views and that
+  sits unused for 1,000 displays is dropped and joins again when next drawn onto).
+- **Passes:** each surface has a pass with the target alone, for displays without masks, and one with kMAIN's depth-stencil
+  too (`DepthReadWrite`), for displays with masks. The commit empties every pass's `RunSlots` entry for this frame slot and
+  stores the display's frame in the one that draws it; that pass's Record takes it. The other passes record nothing. Their
+  declarations stay in the graph, so their targets keep their barriers at each run.
+- **The run gate:** each draw is an indirect draw whose vertex count is its command's entry of the client's `RunGate`
+  (`kGateEntries` = 1024 entries, 16 KB a frame slot). The anchors close the gate at every run and the commit opens the entries
+  of this run's draws, so a run without this client's commit draws nothing, whatever frame a slot still holds. The pass has no
+  `Revision`, so ORG never keeps its recording: it is recorded at every run from that run's frame, whose pipelines are the
+  display's, and its push blocks (the staging buffer's index, the record offset, the textures' and samplers' indices) are that
+  run's. A kept recording would need the pipeline sequence fixed, which a display's is not.
+- **Per display:** the commit copies the display's bytes (geometry, then one 192-byte record per draw) into a staging block from
+  a `FrameStaging` pool (sized for frames in flight times the anchor's runs a frame), resolves each texture's SRV to a
+  descriptor (`DCLF::GpuTextures::ResolveBinding`, DXVK's image in its resting layout, untracked), and stores the frame. The
+  pass records one render pass: the viewport and scissor of `BeginDisplay`, then per command a stencil clear
   (`ClearDepthStencilView`, which BasicRHI turns into `vkCmdClearAttachments` over the render area inside the pass) or a draw
-  (pipeline, stencil reference, push block, `Draw`). The recording keeps the frame, its staging buffer and its texture
-  owners until its GPU work retires.
-- **Pipelines:** a `RasterProgram` per (vertex kind, pixel kind, blend state, stencil state, colour format, depth format),
-  made when a display first needs it (blocking on the shader store at the first use only). A pipeline that cannot be made
-  sends that display to D3D11 and is not tried again.
+  (pipeline, stencil reference, push block, indirect draw through the gate). The recording keeps the frame, its staging block
+  and its texture owners until its GPU work retires.
+- **Pipelines:** a `RasterProgram` per (vertex kind, pixel kind, blend state, stencil state, colour format, depth format; no
+  depth and the stencil off in the pass without masks), from a `ProgramCache` built on the program build thread. A segment
+  asks for all of its pipelines at once and is replayed into D3D11 until every one is built; a pipeline that fails is logged
+  once (`[ORG] Scaleform programs: ... could not be built`) and its displays stay on D3D11.
 
 ### Fallback
 
-A segment the graph cannot draw is replayed into D3D11 (a target or depth that cannot be imported, a new surface, a pipeline
-that cannot be made, a texture whose view cannot be resolved, an epoch that did not run); a display refused at `BeginDisplay`
-is D3D11's whole. Each reason is logged once and counted in the census (above). The graph's failure (`onFailed`) stops captures
+A segment the graph cannot draw is replayed into D3D11 (a target or depth that cannot be imported, a new surface or a graph
+still being built with it, a pipeline still building or that cannot be made, a segment longer than the gate, the anchor's ring
+full, a texture whose view cannot be resolved, an epoch that did not run); a display refused at `BeginDisplay` is D3D11's
+whole. Each reason is logged once and counted in the census (above). The graph's failure (`onFailed`) stops captures
 for the session.
 
 ### Lifetime of textures and caches
@@ -372,6 +408,18 @@ for P5.12:
 is hooked and the D3D11 renderer is the only one. The ORG path starts at the first display after the graph is up, and stops for
 good on a graph failure.
 
+## Phase 6
+
+What the guest phase leaves for the cutover:
+
+- **Private target imports (a blocker).** A target that is not an engine target (the back buffer, HDR's UI texture) is imported
+  with `RenderGraph::ImportDxvkTexture` as `cs.scaleform.target.<n>`, beside HDR's own import of its UI texture
+  (`cs.d3d11.hdr.ui`, which has no RTV). No graph-native path exists for either yet: the back buffer becomes the owned frame's
+  swap chain image and HDR's UI texture a `GraphResources` twin with an RTV (HDR's port); the surfaces then read them by name.
+  Until then there are two graph resources on one image, ordered with each other only by DXVK's stream.
+- **One Interface epoch a frame** at the end of `UI::DrawInterface`, once menu 3D is on the graph (above, "The ORG pass").
+- **The per-run ring.** Each display is a run of its own and so a frame slot; inside one frame graph the displays are passes.
+
 ## Testing
 
 Scenarios `tools/cs-ab/scenarios/scaleform-org0.env` (D3D11) and `scaleform-org1.env` (ORG), both with the tripwire guest, the
@@ -382,7 +430,12 @@ may land after the load), the HUD, the inventory, the magic menu, the map and th
    `GFx's textures go through Engine::Textures::Create` and `GFx's textures are made on ORG (first: ...)`.
 2. No `a texture's view cannot be resolved`, no `[DCLF] Game texture view not supported: format 65`.
 3. The census lines; every `the D3D11 renderer draws: <reason>` line (each reason once) says what is left.
-4. No `[ORG] Scaleform: pipeline ... could not be made` (the filter pipelines are new: `filter 23` / `filter 24`).
+4. No `[ORG] Scaleform programs: ... could not be built` (the filter pipelines are new: `FILTER` 23 and 24).
+5. `[ORG] Scaleform: registered with 2 surfaces (registration 1)` once (1 surface without HDR), and a further registration only
+   for a target outside those (each with `a new surface: ...`). No `was released by the engine; dropped` in a run without a
+   resize or an HDR toggle.
+6. No `[ORG] frame anchors: Interface ran N times in one frame`; the census counts no `the Interface anchor's ring is full this
+   frame` and no `a segment with more commands than the Interface gate holds`.
 
 `scaleform-org1-parts.env` is the same tour with `CS_ORG_SCALEFORM_D3D11_PARTS=5`: the census should count `a draw made a D3D11
 part by CS_ORG_SCALEFORM_D3D11_PARTS` and `too many D3D11 parts in one display`, and the shots should still match.

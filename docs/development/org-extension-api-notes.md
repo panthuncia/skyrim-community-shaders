@@ -330,7 +330,8 @@ Keys used so far:
   EarlyPrepass.
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
 - CS's ImGui (`CS_ORG_IMGUI`): 1000 at Overlay, last.
-- Scaleform (`CS_ORG_SCALEFORM`): 100 upward at Interface, one pass per surface (target and depth pair); one draws per run.
+- Scaleform (`CS_ORG_SCALEFORM`): 100 upward at Interface, two passes per surface (target and depth pair: one without the
+  depth-stencil, one with it for masks); one draws per run, through the client's run gate.
 - The Screenshot feature (`CS_ORG_SCREENSHOT`): 100 (the readback copy) at Capture.
 - The engine skeleton (`CS_ORG_ENGINE_SKELETON`): its gate entry (0 to 127) at EngineShadowClear, EngineCubeClear and
   EngineFrameClear; 0 (the copy) at EngineDepthCopy.
@@ -1328,6 +1329,14 @@ Keys used so far:
   - **Several runs of an anchor a frame are slots.** Each display is an epoch, and each uses a frame slot. A per-frame batch
     (one epoch at the end of `UI::DrawInterface`) needs the D3D11 work between displays (menu 3D, Bink, other mods) on the
     graph first.
+  - **A gated draw list whose length and pipelines change every run.** A run gate entry per command gives each draw its
+    vertex count for this run only (1024 entries, 16 KB a frame slot over every host frame slot), but the pass is still
+    recorded at every run (no `Revision`) because its pipeline sequence is the display's. A recorded draw list that binds
+    pipelines from a latch (an indirect pipeline bind, or ORG keeping recordings keyed by the pipeline sequence) would let
+    such a pass be kept and its push blocks move to the latch.
+  - **A release signal for imported D3D11 textures.** A surface holds a public reference to know the texture is the same one;
+    DXVK's views hold only private ones, so "the engine let it go" is a refcount probe plus an idle check. A DXVK callback when
+    a texture's last view or reference other than the importer's goes would replace both.
   - **Render ownership on another thread** (the loading screen): built in P5.12 (above, "Anchors on the thread that holds the
     renderer's lock"). With `CS_ORG_LOADING_THREAD=1` the anchors run on the render owner, so the loading screen's UI draws on
     the graph; without it they run on the main thread only and that UI stays on D3D11.
