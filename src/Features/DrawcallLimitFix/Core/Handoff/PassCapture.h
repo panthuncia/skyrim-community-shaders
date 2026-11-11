@@ -199,6 +199,12 @@ namespace DCLF
 		/** @brief Whether a_batch is a shadow view's renderer this frame, with its mode index. */
 		bool ShadowModeOfBatch(const RE::BSBatchRenderer* a_batch, std::uint32_t& a_mode) const;
 		/**
+		 * @brief Render thread, with the flush latch on (RenderGraph::Engine::Flush::Vouching): the batch renderers of every shadow light the
+		 * engine keeps this frame (ShadowViews::AddCaster), covered by DCLF or not. Their passes DCLF does not withhold are the engine's to
+		 * draw (KeepForEngine). Null drops them (BeginCasters).
+		 */
+		void SetEngineShadowRenderers(std::shared_ptr<const ankerl::unordered_dense::set<const RE::BSBatchRenderer*>> a_renderers);
+		/**
 		 * @brief The set Withhold tests a pass into a_batch against: the frame's when a_batch is a shadow view's and DCLF draws the shadow
 		 * views this frame, else null. The Sun source's accumulation uses the same test.
 		 */
@@ -245,6 +251,7 @@ namespace DCLF
 		std::span<const Entry> lastDrain;
 		std::shared_ptr<const ShadowRendererMap> shadowRenderers;
 		std::shared_ptr<const ShadowRendererMap> focusRenderers;
+		std::shared_ptr<const ankerl::unordered_dense::set<const RE::BSBatchRenderer*>> engineShadowRenderers;
 		std::array<std::atomic<std::uint32_t>, kShadowModes> shadowWithheld{};
 		std::atomic<std::uint32_t> volumetricWithheld{ 0 };
 		std::atomic<std::uint32_t> directWithheld{ 0 };
@@ -318,9 +325,15 @@ namespace DCLF
 		 * @brief A pass handed on to the engine (not withheld): with the flush latch on (P5.13, p5/flush.md "Allowed engine draws"),
 		 * one DCLF leaves to the engine on purpose is vouched for (RenderGraph::Engine::Flush::VouchPass), so the engine still draws
 		 * it: a Lighting, Effect or DistantTree property's pass into a renderer DCLF withholds from (the main views and the first
-		 * person's, the shadow views, the reflection faces, the occlusion maps with a_occlusion). Nothing else, and nothing while
-		 * bypassed or with the latch off.
+		 * person's, the shadow views, the reflection faces, the occlusion maps with a_occlusion), and the sky's precipitation, which
+		 * nothing ports. Nothing else, and nothing while bypassed or with the latch off.
 		 */
 		void KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, bool a_occlusion = false) const;
+		/**
+		 * @brief KeepForEngine's test when the published sets do not hold a_batch: whether it is one of the main views' batch renderers now
+		 * (the accumulators' geometry and alpha groups read live). The engine makes a group's renderer at the group's first pass, during
+		 * the registrations, after the render thread made the sets (RefreshMainRenderers): its passes that frame are the engine's too.
+		 */
+		bool MainRendererNow(const RE::BSBatchRenderer* a_batch) const;
 	};
 }

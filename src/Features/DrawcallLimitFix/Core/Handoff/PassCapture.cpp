@@ -144,6 +144,21 @@ namespace DCLF
 			if (batch->alphaGroup && batch->alphaGroup->batchRenderer)
 				a_out.push_back(batch->alphaGroup->batchRenderer);
 		}
+
+		/** @brief Whether a_batch is one of a_accumulator's batch renderers now (CollectRenderers' list, read live). */
+		bool HasRenderer(const void* a_accumulator, const RE::BSBatchRenderer* a_batch)
+		{
+			const auto* accumulator = static_cast<const RE::BSGraphics::BSShaderAccumulator*>(a_accumulator);
+			const auto* batch = accumulator ? accumulator->GetRuntimeData().batchRenderer : nullptr;
+			if (!batch)
+				return false;
+			if (batch == a_batch)
+				return true;
+			for (const auto* group : batch->geometryGroups)
+				if (group && group->batchRenderer == a_batch)
+					return true;
+			return batch->alphaGroup && batch->alphaGroup->batchRenderer == a_batch;
+		}
 	}
 
 	void PassCapture::RefreshMainRenderers()
@@ -357,6 +372,11 @@ namespace DCLF
 		std::atomic_store(&shadowRenderers, std::move(a_renderers));
 	}
 
+	void PassCapture::SetEngineShadowRenderers(std::shared_ptr<const RendererSet> a_renderers)
+	{
+		std::atomic_store(&engineShadowRenderers, std::move(a_renderers));
+	}
+
 	void PassCapture::SetFocusBatchRenderers(std::shared_ptr<const ShadowRendererMap> a_renderers)
 	{
 		std::atomic_store(&focusRenderers, std::move(a_renderers));
@@ -420,14 +440,41 @@ namespace DCLF
 		Diagnostics::Notify(Diagnostics::PassKept{ a_batch, a_pass, static_cast<RegistrationCensus::Site>(a_site), face, a_occlusionPhase });
 	}
 
+	bool PassCapture::MainRendererNow(const RE::BSBatchRenderer* a_batch) const
+	{
+		static REL::Relocation<RE::BSGraphics::BSShaderAccumulator**> depthAccumulator{ REL::Offset(Engine::Address::kDepthAccumulator) };
+		static REL::Relocation<RE::BSGraphics::BSShaderAccumulator**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
+		if (HasRenderer(*depthAccumulator, a_batch) || HasRenderer(*mainAccumulator, a_batch))
+			return true;
+		// The InMainRenderers views' accumulators as RefreshMainRenderers last stored them (the first person's: an engine global, kept for
+		// the session). An OwnRenderers view's (a cube camera's) may not outlive its set, so it is not read here.
+		const auto& views = Extensions::Views();
+		for (std::uint32_t i = 0; i < views.mainRendererCount; ++i) {
+			const auto& accumulators = viewRenderers[static_cast<std::size_t>(views.mainRendererViews[i])].accumulators;
+			for (std::uint32_t a = 0; a < accumulators.count; ++a)
+				if (HasRenderer(accumulators.accumulators[a], a_batch))
+					return true;
+		}
+		return false;
+	}
+
 	void PassCapture::KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, bool a_occlusion) const
 	{
 		namespace Flush = RenderGraph::Engine::Flush;
 		if (!Flush::Vouching() || !a_pass || !a_pass->geometry || !a_pass->shaderProperty || bypassed.load(std::memory_order_acquire))
 			return;
-		// DCLF's classes: Lighting objects (their depth and shadow passes are Utility on the same property), effects, tree LOD.
-		// The sky, water, particles and the rest are other ports' to vouch for.
+		// DCLF's classes: Lighting objects (their depth and shadow passes are Utility on the same property), effects, tree LOD. The
+		// sky's precipitation (a particle shader on the sky's geometry) has no port: the engine draws it, whatever view culls it.
+		// Water, other particles and the rest are other ports' to vouch for.
 		const auto* property = a_pass->shaderProperty;
+		if (netimmerse_cast<const RE::BSParticleShaderProperty*>(property)) {
+			static const Flush::Reason kPrecipitation{ "precipitation: no port" };
+			const auto* sky = RE::Sky::GetSingleton();
+			const auto* precipitation = sky ? sky->precip : nullptr;
+			if (precipitation && (a_pass->geometry == precipitation->currentPrecip.get() || a_pass->geometry == precipitation->lastPrecip.get()))
+				Flush::VouchPass(a_pass, kPrecipitation);
+			return;
+		}
 		if (!netimmerse_cast<const RE::BSLightingShaderProperty*>(property) && !netimmerse_cast<const RE::BSEffectShaderProperty*>(property) &&
 			!netimmerse_cast<const RE::BSDistantTreeShaderProperty*>(property))
 			return;
@@ -443,11 +490,16 @@ namespace DCLF
 			reason = &kMain;
 		else if (ShadowModeOfBatch(a_batch, mode))
 			reason = &kShadow;
+		else if (const auto engineShadows = std::atomic_load(&engineShadowRenderers); engineShadows && engineShadows->contains(a_batch))
+			reason = &kShadow;  // a shadow view DCLF does not cover this frame: the engine draws it whole
 		else {
 			const auto& views = Extensions::Views();
 			for (std::uint32_t i = 0; i < views.ownRendererCount && !reason; ++i)
 				if (IsViewRenderer(views.ownRendererViews[i], a_batch))
 					reason = &kFaces;
+			// A main view's geometry group renderer the engine made during this frame's registrations: in no set until the next frame's.
+			if (!reason && MainRendererNow(a_batch))
+				reason = &kMain;
 		}
 		if (reason)
 			Flush::VouchPass(a_pass, *reason);
@@ -650,8 +702,8 @@ namespace DCLF
 				}
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::Occlusion), phase);
-			if (phase)
-				capture.KeepForEngine(a_batch, a_pass, true);
+			// Every occluder DCLF does not draw into the map: all of them while the map is not DCLF's (phase 0, the engine draws it whole).
+			capture.KeepForEngine(a_batch, a_pass, true);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
