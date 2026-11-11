@@ -113,7 +113,8 @@ public:
 
 	/**
 	 * @brief Game frames the graph's work may run behind the render thread (GraphHost::Desc::framesInFlight). The host
-	 * sizes its frame slot ring from it, a slot per epoch of every frame (FrameSlots), and each epoch's next slot waits for that
+	 * sizes its frame slot ring from it, a slot per epoch of every frame (FrameSlots; an anchor that runs several times a frame
+	 * has a slot per run, FrameAnchors::RunsPerFrame), and each epoch's next slot waits for that
 	 * slot's last GPU work: fewer frames than the CPU runs ahead of the GPU (DXVK's frame latency) would stall the render thread
 	 * every few frames.
 	 */

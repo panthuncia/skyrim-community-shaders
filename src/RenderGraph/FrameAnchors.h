@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 struct ID3D11ShaderResourceView;
@@ -282,6 +283,14 @@ namespace FrameAnchors
 	 * reservations.
 	 */
 	void AddToFrame(std::vector<std::uint32_t>& a_epochs);
+
+	/**
+	 * @brief Initialize, after AddToFrame: the reserved anchors that may run more than once a frame, each as its epoch and the most
+	 * runs a frame its epoch is sized for (GraphHost::Desc::epochRuns). Each such epoch's ring of frame slots grows up to
+	 * kGameFramesInFlight times its runs, so the host never waits for a run of the same frame (one DXVK has not submitted yet). A
+	 * frame with more runs than the ring holds skips the rest (ExecuteEpoch returns false) instead of hanging.
+	 */
+	std::vector<std::pair<std::uint32_t, std::uint32_t>> RunsPerFrame();
 
 	/**
 	 * @brief Render thread (RenderGraphRuntime::PollEpochFailures): an anchor's epoch failed to build or prepare. Every client with
