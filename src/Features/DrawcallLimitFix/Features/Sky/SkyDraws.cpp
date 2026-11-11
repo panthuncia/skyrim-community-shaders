@@ -54,13 +54,14 @@ namespace DCLF::Features::Sky::SkyDraws
 			SharedConstants::Handles shared;
 			ShaderBindings::Handle base, blend, noise, depth;
 			ShaderBindings::Handle sharedDepth, cloudShadows, cloudSelfShadow;
+			std::array<ShaderBindings::Handle, kHeaderRegisters.size()> headers;  // EnvIBLTexture, SkyIBLTexture, EnvReflectionsTexture, EnvTexture
 			ShaderBindings::Handle baseSampler, blendSampler, noiseSampler;
 			ShaderBindings::Latch draw;
 			std::uint32_t vertexAddress[2], indexAddress[2], vertexLayout[2];
 			std::uint32_t vertexStride, firstIndex;
 		};
-		static_assert(sizeof(SkyBlock) == 96, "Sky.hlsl's push block is 96 bytes");
-		static_assert(offsetof(SkyBlock, vertexAddress) == 64, "the PUSH struct starts on a 16-byte row");
+		static_assert(sizeof(SkyBlock) == 112, "Sky.hlsl's push block is 112 bytes");
+		static_assert(offsetof(SkyBlock, vertexAddress) == 80, "the PUSH struct starts on a 16-byte row");
 
 		/** @brief Which of a run's draws a pass records. */
 		enum class Part : std::uint8_t
@@ -86,6 +87,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			// The targets as imported at the registration (FrameAnchors keeps each while the engine's texture stays the same).
 			std::array<std::shared_ptr<org::ExternalTextureResource>, 3> colours;
 			std::shared_ptr<org::ExternalTextureResource> cubemap, depth, sceneDepth;
+			std::array<std::shared_ptr<org::ExternalTextureResource>, kHeaderRegisters.size()> headers;  // imported D3D11 views (Shape::headerViews)
 			std::shared_ptr<org::Resource> cloudFaces;
 			// Render thread writes, the host's thread reads.
 			std::shared_ptr<const Run> run;
@@ -100,7 +102,9 @@ namespace DCLF::Features::Sky::SkyDraws
 			std::array<org::DeclaredViewToken, kFaces> faces{};
 			std::array<org::DeclaredViewToken, kFaces> occlusion{};
 			org::DeclaredViewToken depth{}, sceneDepth{}, cloudShadows{};
+			std::array<org::DeclaredViewToken, kHeaderRegisters.size()> headers{};
 			bool hasDepth = false, hasSceneDepth = false, hasCloudShadows = false;
+			std::array<bool, kHeaderRegisters.size()> hasHeaders{};
 		};
 
 		struct Frame
@@ -144,6 +148,15 @@ namespace DCLF::Features::Sky::SkyDraws
 						bindings.hasSceneDepth = true;
 					}
 				}
+				for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
+					if (c.headers[h]) {
+						bindings.headers[h] = a_builder.ShaderResource(c.headers[h]).View();
+						bindings.hasHeaders[h] = true;
+					} else if (!c.shape.headerIds[h].empty()) {
+						bindings.headers[h] = a_builder.ShaderResource(org::ResourceIdentifier(c.shape.headerIds[h])).View();
+						bindings.hasHeaders[h] = true;
+					}
+				}
 				if (c.shape.cloudShadows) {
 					bindings.cloudShadows = a_builder.ShaderResource(org::ResourceIdentifier(std::string(ORGCloudShadows::kOcclusionId))).View();
 					bindings.hasCloudShadows = true;
@@ -176,6 +189,9 @@ namespace DCLF::Features::Sky::SkyDraws
 				const std::uint32_t sceneDepth = a_bindings.hasSceneDepth ? a_recording.Index(a_bindings.sceneDepth) : nullIndex;
 				const std::uint32_t cloudShadows = a_bindings.hasCloudShadows ? a_recording.Index(a_bindings.cloudShadows) : nullIndex;
 				const std::uint32_t face = run.face < kFaces ? run.face : 0;
+				std::array<ShaderBindings::Handle, kHeaderRegisters.size()> headers{};
+				for (std::size_t h = 0; h < headers.size(); ++h)
+					headers[h] = a_bindings.hasHeaders[h] ? a_recording.Index(a_bindings.headers[h]) : nullIndex;
 				bool occlusionCleared = false;
 				for (std::uint32_t i = 0; i < run.draws.size(); ++i) {
 					const auto& draw = run.draws[i];
@@ -191,6 +207,7 @@ namespace DCLF::Features::Sky::SkyDraws
 					block.sharedDepth = sceneDepth;
 					block.cloudShadows = cloudShadows;
 					block.cloudSelfShadow = cloudShadows;
+					block.headers = headers;
 					block.baseSampler = draw.samplers[0];
 					block.blendSampler = draw.samplers[1];
 					block.noiseSampler = draw.samplers[2];
@@ -250,6 +267,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			std::unique_ptr<GraphResources::Texture2D> cloudFaces;
 			bool reserved = false;
 			bool failed = false;
+			bool usingCloudFaces = false;  // Cloud Shadows' copy reads the faces' cloud occlusion (UseCloudFaces)
 			std::uint64_t runs = 0, draws = 0;
 			std::deque<std::pair<std::uint32_t, std::vector<std::shared_ptr<const void>>>> kept;  // (game frame, owners)
 		};
@@ -276,6 +294,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			for (auto& client : state.clients)
 				if (client)
 					FrameAnchors::Unregister(client->id);
+			state.usingCloudFaces = false;
 			ORGCloudShadows::Get().UseGraphSource({});
 		}
 
@@ -312,6 +331,19 @@ namespace DCLF::Features::Sky::SkyDraws
 			if (!client->depth) {
 				logger::warn("[DCLF] sky: the depth target {} cannot be imported; the sky stays the engine's", a_shape.depth);
 				return nullptr;
+			}
+			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
+				auto* view = static_cast<ID3D11ShaderResourceView*>(const_cast<void*>(a_shape.headerViews[h]));
+				if (!view)
+					continue;
+				winrt::com_ptr<ID3D11Resource> resource;
+				view->GetResource(resource.put());
+				const auto texture = resource.try_as<ID3D11Texture2D>();
+				client->headers[h] = texture ? FrameAnchors::D3D11Texture(fmt::format("Sky::t{}", kHeaderRegisters[h]), texture.get(), view, nullptr) : nullptr;
+				if (!client->headers[h]) {
+					logger::warn("[DCLF] sky: the texture CS binds at t{} cannot be imported; the sky stays the engine's", kHeaderRegisters[h]);
+					return nullptr;
+				}
 			}
 			const bool faceClouds = a_shape.view == View::Face && a_shape.cloudShadows;
 			if (faceClouds) {
@@ -534,9 +566,18 @@ namespace DCLF::Features::Sky::SkyDraws
 			return false;
 		}
 		state.cloudFaces = std::move(faces);
-		ORGCloudShadows::Get().UseGraphSource(kCloudFacesId);
-		logger::info("[DCLF] sky: the faces' cloud occlusion is a graph texture ({}x{}, {} mips), Cloud Shadows' copy reads it", desc.Width, desc.Height, desc.MipLevels);
+		logger::info("[DCLF] sky: the faces' cloud occlusion is a graph texture ({}x{}, {} mips)", desc.Width, desc.Height, desc.MipLevels);
 		return true;
+	}
+
+	void UseCloudFaces(bool a_use)
+	{
+		auto& state = GetState();
+		const bool use = a_use && state.cloudFaces && !state.failed;
+		if (use == state.usingCloudFaces)
+			return;
+		state.usingCloudFaces = use;
+		ORGCloudShadows::Get().UseGraphSource(use ? kCloudFacesId : std::string_view{});
 	}
 
 	void ClearCloudFaces()

@@ -113,8 +113,18 @@ namespace DCLF::Features::Sky
 		std::int32_t sceneDepth = -1;                       // the main pass's t17, an engine depth target (-1: none)
 		std::string sceneDepthId;                           // or a published graph texture's id
 		bool cloudShadows = false;                          // Cloud Shadows' published occlusion is read (t25, t26)
+		// The headers' textures the sky's includes read (kHeaderRegisters): what CS binds there for the pass, as a published graph
+		// texture's id, or the D3D11 view (imported) when it is not one's export. Neither: nothing is bound there.
+		std::array<std::string, 4> headerIds;
+		std::array<const void*, 4> headerViews{};
 		bool operator==(const Shape&) const = default;
 	};
+
+	/**
+	 * @brief The headers' texture registers the sky's pixel stage may read, in Sky.hlsl's EXTERN order: IBL's t76 and t77 and Dynamic
+	 * Cubemaps' t30 and t31, which Exponential Height Fog's header includes (its reflection fog reads t31).
+	 */
+	inline constexpr std::array<std::uint32_t, 4> kHeaderRegisters{ 76, 77, 30, 31 };
 
 	/** @brief A batch's draws, as the anchor's pass records them. */
 	struct Run
@@ -157,6 +167,11 @@ namespace DCLF::Features::Sky
 		bool CloudFacesReady();
 		/** @brief The faces' cloud occlusion is cleared at the next faces' run (a weather without cloud layers). */
 		void ClearCloudFaces();
+		/**
+		 * @brief Whether Cloud Shadows' copy reads the faces' cloud occlusion (true: the faces' cloud draws are the graph's) or its last
+		 * D3D11 layer (false: the engine draws them). Render thread; a change rebuilds Cloud Shadows' client once.
+		 */
+		void UseCloudFaces(bool a_use);
 		/** @brief Runs a_run's anchor with its draws (an empty run builds and prepares the client only). */
 		void Submit(std::shared_ptr<Run> a_run);
 		/** @brief One status line. */
