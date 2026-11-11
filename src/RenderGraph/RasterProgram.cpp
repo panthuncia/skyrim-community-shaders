@@ -6,6 +6,9 @@
 #	include "RenderGraph/RasterProgram.h"
 
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "Utils/Logging.h"
+
+#	include <format>
 
 #	include <Render/LatchBlock.h>
 #	include <Render/PreparedPass.h>
@@ -275,14 +278,24 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 
 void RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_draw) const
 {
-	if (a_draw.colours.size() != targetCount || (a_draw.depth != nullptr) != hasDepth || a_draw.constants.size() > constantWords || !a_draw.viewport.width ||
-		!a_draw.viewport.height || !slot)
-		return;
+	// A draw this program cannot record is skipped, and its reason logged once: a skipped draw leaves its targets as they were.
+	static Util::ReasonLog skipped("[ORG] raster program: a draw was not recorded", spdlog::level::warn);
+	const auto skip = [&](std::string_view a_reason) { skipped.Report(a_reason, a_draw.debugName ? a_draw.debugName : ""); };
+	if (a_draw.colours.size() != targetCount)
+		return skip(std::format("{} colour targets given, the program has {}", a_draw.colours.size(), targetCount));
+	if ((a_draw.depth != nullptr) != hasDepth)
+		return skip(hasDepth ? "no depth target given, the program has one" : "a depth target given, the program has none");
+	if (a_draw.constants.size() > constantWords)
+		return skip(std::format("{} constant words given, the program takes {}", a_draw.constants.size(), constantWords));
+	if (!a_draw.viewport.width || !a_draw.viewport.height)
+		return skip("an empty viewport");
+	if (!slot)
+		return skip("no pipeline slot");
 	std::array<rhi::ColorAttachment, 8> colours{};
 	for (std::uint32_t i = 0; i < targetCount; ++i) {
 		const auto& colour = a_draw.colours[i];
 		if (!colour.view)
-			return;
+			return skip("a colour target without a view");
 		auto& attachment = colours[i];
 		attachment.rtv = a_recording.View(*colour.view);
 		attachment.resource = a_recording.Resolve(*colour.view).GetHandle();
@@ -294,7 +307,7 @@ void RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 	rhi::DepthAttachment depth{};
 	if (a_draw.depth) {
 		if (!a_draw.depth->view)
-			return;
+			return skip("a depth target without a view");
 		depth.dsv = a_recording.View(*a_draw.depth->view);
 		depth.resource = a_recording.Resolve(*a_draw.depth->view).GetHandle();
 		depth.readOnly = a_draw.depth->readOnly;
