@@ -6,7 +6,7 @@
 // book, journal, stats, lockpicking and loading-screen models) and the local map render (LocalMapRenderer::Render). The race menu and the
 // world map are not among them: they are the main world render with another camera, which DCLF's main view already draws.
 //
-// This first stage is the probe the plan asks for before anything is withheld. At each menu scene's SubmitAccumulator the feature reads
+// This first stage is a diagnostic probe, behind CS_ORG_MENU3D and CS_ORG_MAP, the plan asks for before anything is withheld. At each menu scene's SubmitAccumulator the feature reads
 // what a view of the scene would need (its camera, its targets and stencil, its root's geometry, whether DCLF's scene tracks that geometry
 // and has a frame of its own this frame) and logs it once per change. Nothing is withheld: the engine draws every menu scene, and the
 // feature registers no graph client, so it causes no graph rebuild. The view itself (menus.md, "The menu 3D view") is built on top of
