@@ -155,6 +155,8 @@ void CloudShadows::SkyShaderHacks()
 
 	if (side >= 0) {
 		CheckResourcesSide(side);
+		// The engine draws this face's clouds into the D3D11 layers: the ORG copy reads the face from the last layer.
+		ORGCloudShadows::Get().NoteFace(static_cast<std::uint32_t>(side), ORGCloudShadows::FaceSource::Layer);
 
 		int layer = currentLayerForDraw;
 
@@ -256,6 +258,8 @@ void CloudShadows::ReflectionsPrepass()
 				float black[4] = { 0, 0, 0, 0 };
 				for (auto* rtv : cloudShadowLayerRTVs[kMaxCloudLayers - 1])
 					context->ClearRenderTargetView(rtv, black);
+				// Every face of the cleared layer is current: the ORG copy reads them all from it.
+				ORGCloudShadows::Get().NoteAllFaces(ORGCloudShadows::FaceSource::Layer);
 				occlusionClearedWithoutClouds = true;
 			}
 		} else {

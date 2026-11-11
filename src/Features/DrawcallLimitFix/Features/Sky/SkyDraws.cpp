@@ -17,9 +17,9 @@
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "RenderGraph/SharedConstants.h"
-#include "RenderGraph/UavClearPass.h"
 #include "ShaderCache.h"
 
 #include <OpenRenderGraph/GraphHost.h>
@@ -84,6 +84,8 @@ namespace DCLF::Features::Sky::SkyDraws
 			std::string id;
 			FrameAnchors::Anchor anchor = FrameAnchors::Anchor::Sky;
 			std::shared_ptr<org::LatchBlock> latch;
+			// A draw's vertex count, opened by the commit for its run only: a recording replayed for a run that did not commit draws nothing.
+			std::shared_ptr<::RenderGraph::RunGate> gate;
 			// The targets as imported at the registration (FrameAnchors keeps each while the engine's texture stays the same).
 			std::array<std::shared_ptr<org::ExternalTextureResource>, 3> colours;
 			std::shared_ptr<org::ExternalTextureResource> cubemap, depth, sceneDepth;
@@ -111,6 +113,7 @@ namespace DCLF::Features::Sky::SkyDraws
 		{
 			std::shared_ptr<const Run> run;
 			std::shared_ptr<const org::LatchBlock> latch;
+			std::shared_ptr<const ::RenderGraph::RunGate> gate;
 			Part part = Part::Main;
 		};
 
@@ -175,12 +178,12 @@ namespace DCLF::Features::Sky::SkyDraws
 			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const
 			{
 				client->prepared.store(true, std::memory_order_release);
-				return { std::atomic_load(&client->run), client->latch, part };
+				return { std::atomic_load(&client->run), client->latch, client->gate, part };
 			}
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{
-				if (!a_frame.run || !a_frame.latch)
+				if (!a_frame.run || !a_frame.latch || !a_frame.gate)
 					return;
 				const auto& run = *a_frame.run;
 				const Part part = a_frame.part;
@@ -240,8 +243,10 @@ namespace DCLF::Features::Sky::SkyDraws
 												  .viewport = { .x = draw.viewport[0], .y = draw.viewport[1], .width = draw.viewport[2], .height = draw.viewport[3],
 													  .minDepth = draw.depthRange[0], .maxDepth = draw.depthRange[1] },
 												  .constants = ShaderBindings::Data(block),
-												  .vertexCount = draw.indexCount,
-												  .debugName = "Sky" });
+												  .debugName = "Sky",
+												  // The count comes from the draw's gate entry, which the client's commit opens for this run only.
+												  .indirect = &a_frame.gate->Latch(),
+												  .indirectOffset = a_frame.gate->Offset(i) });
 				}
 			}
 
@@ -264,10 +269,8 @@ namespace DCLF::Features::Sky::SkyDraws
 			std::array<std::optional<Shape>, static_cast<std::size_t>(View::Count)> refused;
 			std::vector<ProgramEntry> programs;
 			std::vector<PipelineKey> failedPrograms;
-			std::unique_ptr<GraphResources::Texture2D> cloudFaces;
 			bool reserved = false;
 			bool failed = false;
-			bool usingCloudFaces = false;  // Cloud Shadows' copy reads the faces' cloud occlusion (UseCloudFaces)
 			std::uint64_t runs = 0, draws = 0;
 			std::deque<std::pair<std::uint32_t, std::vector<std::shared_ptr<const void>>>> kept;  // (game frame, owners)
 		};
@@ -284,7 +287,10 @@ namespace DCLF::Features::Sky::SkyDraws
 			return *counter;
 		}
 
-		/** @brief Stops the family for good: every batch is the engine's again, and Cloud Shadows' copy reads its D3D11 layer. */
+		/**
+		 * @brief Stops the family for good: every batch is the engine's again. Cloud Shadows' copy reads a face from its D3D11 layer again
+		 * once the engine draws that face's clouds (ORGCloudShadows::NoteFace).
+		 */
 		void Fail(const char* a_why)
 		{
 			auto& state = GetState();
@@ -294,8 +300,6 @@ namespace DCLF::Features::Sky::SkyDraws
 			for (auto& client : state.clients)
 				if (client)
 					FrameAnchors::Unregister(client->id);
-			state.usingCloudFaces = false;
-			ORGCloudShadows::Get().UseGraphSource({});
 		}
 
 		/** @brief The client of a_shape's view, registered with the anchors for a_shape. Null, logged, when a target cannot be imported. */
@@ -310,6 +314,11 @@ namespace DCLF::Features::Sky::SkyDraws
 			client->id = a_shape.view == View::Main ? "cs.sky.main" : "cs.sky.faces";
 			client->anchor = a_shape.view == View::Main ? FrameAnchors::Anchor::Sky : FrameAnchors::Anchor::SkyReflections;
 			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kMaxDraws * static_cast<std::uint32_t>(sizeof(DrawConstants)), host->FrameSlots());
+			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kMaxDraws);
+			if (!client->gate) {
+				logger::warn("[DCLF] sky: the {} run gate could not be made; the sky stays the engine's", client->id);
+				return nullptr;
+			}
 			if (a_shape.view == View::Main) {
 				for (std::size_t i = 0; i < client->colours.size(); ++i) {
 					client->colours[i] = a_shape.colours[i] >= 0 ? FrameAnchors::EngineTarget(static_cast<std::uint32_t>(a_shape.colours[i])) : nullptr;
@@ -355,16 +364,21 @@ namespace DCLF::Features::Sky::SkyDraws
 					return nullptr;
 				}
 			}
-			const bool faceClouds = a_shape.view == View::Face && a_shape.cloudShadows;
+			// The faces' cloud draws write Cloud Shadows' occlusion into its graph faces (ORGCloudShadows::GraphFaces).
+			const bool faceClouds = a_shape.view == View::Face && a_shape.cloudShadows && a_shape.clouds;
 			if (faceClouds) {
-				if (!CloudFacesReady())
+				auto* faces = ORGCloudShadows::Get().GraphFaces();
+				client->cloudFaces = faces ? faces->Graph() : nullptr;
+				if (!client->cloudFaces) {
+					logger::warn("[DCLF] sky: Cloud Shadows has no graph faces; the faces' sky stays the engine's");
 					return nullptr;
-				client->cloudFaces = GetState().cloudFaces->Graph();
+				}
 			}
 
 			FrameAnchors::ClientDesc desc{};
 			desc.id = client->id;
 			desc.sharedConstants = true;
+			desc.gates = { client->gate };
 			const auto addPass = [&](const char* a_name, Part a_part, std::int32_t a_order) {
 				desc.passes.push_back({ .name = client->id + "." + a_name,
 					.anchor = client->anchor,
@@ -376,21 +390,13 @@ namespace DCLF::Features::Sky::SkyDraws
 				addPass("draws", Part::Main, 0);
 			} else {
 				addPass("draws", Part::FaceSky, 0);
-				if (faceClouds) {
+				// A weather without cloud layers clears Cloud Shadows' D3D11 last layer, and its copy then reads every face from it.
+				if (faceClouds)
 					addPass("clouds", Part::FaceClouds, 1);
-					// A weather without cloud layers clears the faces' occlusion once (Rearm), as CloudShadows::ReflectionsPrepass clears its last layer.
-					auto faces = client->cloudFaces;
-					desc.passes.push_back({ .name = client->id + ".clouds-clear",
-						.anchor = client->anchor,
-						.order = -1,
-						.kind = FrameAnchors::PassKind::Compute,
-						.make = [faces]() { return GraphPasses::MakeUavClear(faces, { 0.0f, 0.0f, 0.0f, 0.0f }); },
-						.once = true });
-				}
 			}
 			if (faceClouds)
 				desc.registerResources = [](org::RenderGraph& a_graph) {
-					if (auto& faces = GetState().cloudFaces)
+					if (auto* faces = ORGCloudShadows::Get().GraphFaces())
 						faces->Register(a_graph);
 				};
 			desc.commit = [client](const FrameAnchors::Point&) {
@@ -399,8 +405,12 @@ namespace DCLF::Features::Sky::SkyDraws
 				if (!run || !host)
 					return;
 				const std::uint32_t slot = host->CurrentFrameSlot();
-				for (std::uint32_t i = 0; i < run->draws.size(); ++i)
-					client->latch->WriteValue(slot, i * static_cast<std::uint32_t>(sizeof(DrawConstants)), run->draws[i].constants);
+				for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
+					const auto& draw = run->draws[i];
+					client->latch->WriteValue(slot, i * static_cast<std::uint32_t>(sizeof(DrawConstants)), draw.constants);
+					if (draw.program)
+						client->gate->OpenDraw(i, draw.indexCount, 1);
+				}
 			};
 			desc.active = [client] { return client->pending; };
 			desc.onFailed = [] { Fail("the render graph failed with the sky's passes in it"); };
@@ -408,8 +418,9 @@ namespace DCLF::Features::Sky::SkyDraws
 				logger::warn("[DCLF] sky: the {} client could not be registered; the sky stays the engine's", client->id);
 				return nullptr;
 			}
-			logger::info("[DCLF] sky: the {} client registered (depth {}, scene depth {}{}{}, cloud shadows {})", client->id, a_shape.depth, a_shape.sceneDepth,
-				a_shape.sceneDepthId.empty() ? "" : " " + a_shape.sceneDepthId, a_shape.sceneDepthView ? " (a D3D11 view)" : "", a_shape.cloudShadows ? "on" : "off");
+			logger::info("[DCLF] sky: the {} client registered (depth {}, scene depth {}{}{}, cloud shadows {}, cloud layers {})", client->id, a_shape.depth,
+				a_shape.sceneDepth, a_shape.sceneDepthId.empty() ? "" : " " + a_shape.sceneDepthId, a_shape.sceneDepthView ? " (a D3D11 view)" : "",
+				a_shape.cloudShadows ? "on" : "off", a_shape.clouds ? "the graph's" : "the engine's");
 			return client;
 		}
 
@@ -545,56 +556,6 @@ namespace DCLF::Features::Sky::SkyDraws
 			a_key.view == View::Main ? "main" : "faces", a_key.occlusion ? ", cloud occlusion" : "");
 		state.programs.push_back({ a_key, program });
 		return program;
-	}
-
-	bool CloudFacesReady()
-	{
-		auto& state = GetState();
-		if (state.cloudFaces)
-			return true;
-		auto& cloudShadows = globals::features::cloudShadows;
-		auto* lastLayer = cloudShadows.texCloudShadowLayers[CloudShadows::kMaxCloudLayers - 1];
-		if (!cloudShadows.loaded || !lastLayer || !ORGCloudShadows::Get().IsActive()) {
-			logger::warn("[DCLF] sky: Cloud Shadows' ORG path is not active (CS_ORG_CLOUD_SHADOWS=1); the faces' sky stays the engine's");
-			return false;
-		}
-		D3D11_TEXTURE2D_DESC layer{};
-		lastLayer->resource->GetDesc(&layer);
-		// Cloud Shadows' layer shape as a plain 6-slice array (a slice per face), so its copy reads each face as it reads its layer's.
-		const D3D11_TEXTURE2D_DESC desc{ .Width = layer.Width,
-			.Height = layer.Height,
-			.MipLevels = layer.MipLevels,
-			.ArraySize = kFaces,
-			.Format = layer.Format,
-			.SampleDesc = { .Count = 1 },
-			.Usage = D3D11_USAGE_DEFAULT,
-			.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS };
-		// Faces the reflection does not draw in a frame keep their occlusion, so it lives across frames.
-		auto faces = std::make_unique<GraphResources::Texture2D>(desc, std::string(kCloudFacesId), GraphResources::Options{ .lifetime = GraphResources::Lifetime::History });
-		if (!*faces || !PublishedResources::Publish(*faces)) {
-			logger::error("[DCLF] sky: the faces' cloud occlusion ({}x{}) could not be made or published; the faces' sky stays the engine's", desc.Width, desc.Height);
-			return false;
-		}
-		state.cloudFaces = std::move(faces);
-		logger::info("[DCLF] sky: the faces' cloud occlusion is a graph texture ({}x{}, {} mips)", desc.Width, desc.Height, desc.MipLevels);
-		return true;
-	}
-
-	void UseCloudFaces(bool a_use)
-	{
-		auto& state = GetState();
-		const bool use = a_use && state.cloudFaces && !state.failed;
-		if (use == state.usingCloudFaces)
-			return;
-		state.usingCloudFaces = use;
-		ORGCloudShadows::Get().UseGraphSource(use ? kCloudFacesId : std::string_view{});
-	}
-
-	void ClearCloudFaces()
-	{
-		auto& state = GetState();
-		if (const auto& client = state.clients[static_cast<std::size_t>(View::Face)]; client && client->cloudFaces)
-			FrameAnchors::Rearm(client->id);
 	}
 
 	void Submit(std::shared_ptr<Run> a_run)
