@@ -174,7 +174,7 @@ namespace
 
 	/** @brief One stage compiled now (blocking); empty, logged, on failure. */
 	std::vector<std::byte> CompileStage(org::services::ShaderCompiler& a_compiler, const std::string& a_source, const std::string& a_text, const std::wstring& a_entry,
-		const wchar_t* a_target, const Stages& a_stages)
+		const wchar_t* a_target, const Stages& a_stages, spdlog::level::level_enum a_level = spdlog::level::err)
 	{
 		const auto path = Build::SourcePath(a_source);
 		const auto bytes = StageBytes(path, a_text);
@@ -184,7 +184,7 @@ namespace
 		}
 		const auto artifact = a_compiler.Compile(StageRequest(path, bytes, a_entry, a_target, a_stages));
 		if (!artifact) {
-			logger::error("[ORG] SPIR-V build of {} ({}) failed:\n{}", a_source, Util::WStringToString(a_entry), artifact.diagnostics.substr(0, 2000));
+			spdlog::log(a_level, "[ORG] SPIR-V build of {} ({}) failed:\n{}", a_source, Util::WStringToString(a_entry), artifact.diagnostics.substr(0, 2000));
 			return {};
 		}
 		return artifact.binary;
@@ -213,8 +213,9 @@ bool RasterProgram::CompileStages(const Desc& a_desc)
 	if (!compiler)
 		return false;
 	const Stages stages = StagesOf(a_desc);
-	return !CompileStage(*compiler, stages.vertexSource, stages.vertexText, stages.vertexEntry, L"vs_6_6", stages).empty() &&
-	       !CompileStage(*compiler, stages.pixelSource, stages.pixelText, stages.pixelEntry, L"ps_6_6", stages).empty();
+	// A precompile's failure is a warning: the caller names the permutation, and a Load that needs it logs its own error.
+	return !CompileStage(*compiler, stages.vertexSource, stages.vertexText, stages.vertexEntry, L"vs_6_6", stages, spdlog::level::warn).empty() &&
+	       !CompileStage(*compiler, stages.pixelSource, stages.pixelText, stages.pixelEntry, L"ps_6_6", stages, spdlog::level::warn).empty();
 #	else
 	(void)a_desc;
 	return false;

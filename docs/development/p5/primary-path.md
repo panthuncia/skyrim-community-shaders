@@ -168,3 +168,20 @@ record (t98) is now Deferred's CPU data (`Deferred::GetDirectionalShadowLightDat
 The families' client registrations at CS's setup (in its one graph build). Nothing during play: no client registers,
 refreshes or imports again; a batch of other targets is an inherent refusal. A producer publishing an input for the first time during
 play rebuilds every graph through its own Publish.
+
+### Stage filters and the first world frame (2026-11-11, `org-port/primary-families-3`)
+
+- The LoadShaders enumeration compiles only what a family draws. Shadow masks: Utility pixel descriptors with a RenderShadowmask*
+  bit and RenderDepth, as Utility.hlsl's ORG build requires (legacy layouts set bits 21-24 for other techniques). Sky: every
+  technique but the sun glare (raw 1, pass `0x5C006072`, outside the batch), whose ORG vertex stage reads SharedData next to the
+  vertex pull and makes DXC 1.9 emit invalid SPIR-V (a `ConstantBuffer<T>` in Function storage, VUID-10684; reproduced with
+  `check-dual-target-shaders.py Sky.hlsl --stage vs -D VSHADER -D TEX -D DITHER`; without the pull it builds). A precompile's
+  failure is a warning (`RasterProgram::CompileStages`); the family's line names the descriptor.
+- The first world batches still found their anchors unable to run (`its anchor cannot run now`) once in run
+  `1111-153238-p35-p5-all-census-misc-fix2`, although the clients were in the setup's build. The cause is not the families: at the
+  first world frame the engine makes targets for the first time (the volumetric lighting volumes, `MakeVolume`; the skeleton logs
+  `kMAIN or kPOST_ZPREPASS_COPY was made again`), and EngineTargets bumps the global resize generation for them
+  (`EngineTexture::BumpGeneration`). `FrameAnchors::Service` then marks every client current and asks every anchor to build again
+  (`graph resources resized (x2)`, built at 15:33:29), so every client, any feature's, is outside its built graph until then. A
+  first creation that only publishes a new id would need no rebuild of graphs that do not read it (PublishedResources rebuilds
+  readers only); that change belongs to the engine targets' and frame anchors' lane.
