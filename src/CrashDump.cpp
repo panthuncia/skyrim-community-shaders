@@ -60,7 +60,12 @@ namespace CrashDump
 			std::string access;
 			if (a_record.ExceptionCode == EXCEPTION_ACCESS_VIOLATION && a_record.NumberParameters >= 2) {
 				const auto kind = a_record.ExceptionInformation[0];
-				access = fmt::format(", {} {:#x}", kind == 8 ? "executing" : kind == 1 ? "writing" : "reading", a_record.ExceptionInformation[1]);
+				const char* verb = "reading";
+				if (kind == 8)
+					verb = "executing";
+				else if (kind == 1)
+					verb = "writing";
+				access = fmt::format(", {} {:#x}", verb, a_record.ExceptionInformation[1]);
 			}
 			return fmt::format("{:#x} at {} ({}+{:#x}{}) on thread {}", a_record.ExceptionCode, fmt::ptr(address), moduleName, offset, access,
 				GetCurrentThreadId());
