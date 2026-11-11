@@ -97,6 +97,76 @@ mechanism below unless the row says otherwise.
   frames run on the serving thread, where this port takes draws only when that thread owns rendering
   (`FrameAnchors::IsRenderOwner`, `CS_ORG_LOADING_THREAD=1`); `FrameAnchors::CanRun` checks it before any draw is withheld.
 
+## The primary path (org-port/primary-imagespace)
+
+With `CS_ORG_IMAGESPACE=1` the port is the only path for the effects it covers ([primary-path.md](./primary-path.md)). Until
+wave 3 it learnt its passes in play: the engine drew every effect for a 120-frame window, the client registered the shapes it had
+seen, waited for their programs and for its graph to be built, and a shape first seen later drew on the engine until the next cell
+change. The census run `1111-131713-p35-p5-all-census-misc-fin` shows what that costs: the first registration (21 passes, in the main
+menu) did not hold the SAO and reflection chains, so they drew on the engine until three later registrations, each a graph build in
+play.
+
+### Why the shapes stay passes
+
+The design the task suggested (a pass per effect slot that reads and writes every engine target ImageSpace can touch, the target and
+inputs picked per run from latched data) does not fit ORG:
+
+- A pass declares its render targets and its reads when its graph is built (`PassBuilder::RenderTarget`, `ShaderResource`). A run can
+  only draw into a view the pass declared, and one pass cannot declare the same image as a target and as a read, so every ping-pong
+  (kMAIN and kMAIN_COPY, the luminance chain's alternating level, SAO's AO history) still needs a pass per direction.
+- A pass's push words (its SRV and sampler handles) are part of its kept recording. Choosing them per run means re-recording on each
+  change (the revision would have to read live state per frame slot), or reading every handle from a latch, a change to
+  `Common/OrgResources.hlsli` that every dual-target shader shares.
+- The render area is the viewport (`RasterProgram::Viewport`, "BasicRHI has no separate dynamic viewport yet"), also recorded.
+
+So a pass stays one shape: effect, output (one or two targets, or one mip), inputs, samplers, blend state and viewport. What changes
+is where the set of shapes comes from: it is known before the session's first frame, and it never grows during play.
+
+### Where the shapes come from: the shape manifest
+
+- **Value keys.** A shape names everything by value: the effect by its `kEffects` index (never the engine's shader object), targets
+  by `RE::RENDER_TARGET` (with the mip, the depth or cube bit), samplers by their address and filter modes, the blend state by its
+  four engine table fields (mode, alpha to coverage, write mode, extra), the viewport in pixels. Two sessions name the same shape the
+  same way.
+- **The manifest.** Every shape the port sees is written to `Data/ShaderCache/v2/ImageSpaceShapes.json` (beside the shader store), with
+  its place in the frame (scope and draw index). The file is rewritten when a session sees a new shape, at most every 300 frames.
+  A shape not seen for 16 sessions is dropped; at most 256 are kept (the gate's entries).
+- **Setup registers the manifest.** `ImageSpace::Setup` (startup, before the main menu) reads the manifest, makes a pass for each
+  shape whose targets exist (with the shapes the RE says each implies: the kMAIN / kMAIN_COPY swap, the luminance chain's alternating
+  level, every bloom radius), and registers the client once. The anchor's graph is built with it at the first build point, in the
+  main menu. There is no learning window, no joining phase and no cell-change join: from the first world frame every registered shape
+  draws on the graph.
+- **A shape outside the manifest** (the first session after a new install, a new resolution or Upscaling mode, an effect the tour
+  never reached) is refused for the session: the engine draws it, the reason is logged once per effect (`a shape this session did not
+  register; the manifest has it from the next session`), and the shape goes into the manifest. No graph build follows during play
+  (FrameAnchors has no asynchronous anchor build to switch in at a snapshot, so the rebuild rule leaves no other choice). Under the
+  flush latch such a draw is lost: the first run of a new variant fills the manifest, and runs after it are the ones to judge.
+
+### Programs before the first world frame
+
+Programs are keyed by value, `(effect, output format, second output format, blend fields)` for a raster effect and the effect for a
+compute one. Setup queues every registered shape's program on the program build thread (`ProgramCache::Get`), which compiles its
+shaders into the shader store. The gate is the client's first graph build: each pass's `make` takes its program with
+`ProgramCache::GetNow`, which returns a built program, waits for one still building, or builds a missing one on the render thread
+(logged once per program: `built <program> on the render thread`). That build is at the first build point after Setup, in the main
+menu, so a world frame never waits for a program and never leaves a draw to the engine because one is building. A program that fails
+to build leaves its pass out of the graph (logged as an error); its shape's draws are refused for the session.
+
+### Resize
+
+The engine makes its targets again on a resolution change. Each frame the port compares the textures behind the registered imports
+with the engine's (one read per target used, no D3D11 call); when one changed, `FrameAnchors::EngineTarget` imports the new texture,
+which already asks every anchor's graph to be built again, and the client registers the same shapes on the new imports into that same
+build. The draws between the change and that build (one build point) are refused by `FrameAnchors::CanRun`. The port adds no build of
+its own: the import's build is the framework's, as for every reader of engine targets.
+
+### Reads of the D3D11 context
+
+Under the flush latch the guest context's state is stale. The draw's shape is read from the engine's shadow state
+(`RendererShadowState`: render targets, depth state, PS and CS slots, sampler modes, blend fields) and the captured constants; the
+viewport comes from the shadow state's `viewPort` (+0x70), not `RSGetViewports`. What is still queried from D3D11 objects (a view's
+description and resource, to find the target a mip view belongs to) reads immutable objects, not context state.
+
 ## How the built part works
 
 **Scopes.** Draws are taken only inside scopes, detoured at their function starts: the HDR effect's Render and
