@@ -957,6 +957,7 @@ switches (`CS_ORG_<FEATURE>=1`) read through it too.
 | `CS_GPU_TIMERS=graph` | GPU timers from the render graph alone ("GPU timers from the graph"): the profiler makes no D3D11 query, its D3D11 ranges keep CPU times only, `CS_GPU_EVENT_TIMERS` logs the graph's ranges (`[GpuEvents] graph ...`), and `CS_GPU_LOAD` runs as a graph pass at the Present anchor. Default `d3d11`. |
 | `CS_GPU_IDLE_SOURCE=graph` | `CS_GPU_IDLE_TRACE` reads the graph's graphics-queue ranges instead of DXVK's submission trace. Default `dxvk`. |
 | `CS_PROFILER_LOG=<frames>` | Log the profiling window's rolling averages every that many collected frames, sorted by cost, with `[split N%]` on timers that straddle DXVK submissions. For comparing two configurations from their logs. |
+| `CS_IMAGESPACE_SOURCES=all` or `=<names>` | Image-space shaders CS has a source for but does not enable by default build from CS's HLSL: `all` for every one checked against vanilla, or a comma list of engine names (`BSImagespaceShaderCopyScaleBias`) or effect names (`ISCopyScaleBias`). Logs `CS_IMAGESPACE_SOURCES=<value>: image-space shaders build from CS sources`. Unset, the game's DXBC runs for them (`docs/development/p5/imagespace-shaders.md`). |
 
 Every `CS_*` switch can also be set in `CommunityShaders.env`, beside `CommunityShaders.log`
 (`Documents\My Games\Skyrim Special Edition\SKSE`): one `NAME=value` per line, `#` for comments, read
