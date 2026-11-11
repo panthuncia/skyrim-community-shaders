@@ -37,6 +37,12 @@ namespace RenderGraph::Engine::Scaleform::Layout
 	inline constexpr std::size_t kVertexCount = 0x6BC;      // std::int32_t
 	inline constexpr std::size_t kIndexCount = 0x6C0;       // std::int32_t
 	inline constexpr std::size_t kBlendMode = 0x720;        // std::uint32_t: BlendType below
+	// The current render target (a GRenderTargetD3D1x*): SetDisplayRenderTarget's, or the top of the stack Push/PopRenderTarget
+	// keep. PopRenderTarget binds its views with OMSetRenderTargets(1, target + 0x50, *(target + 0x58)) (SE 0x140f61270, AE
+	// 0x14104be10, the same offsets).
+	inline constexpr std::size_t kRenderTarget = 0x740;
+	inline constexpr std::size_t kRenderTargetRtv = 0x50;  // in the GRenderTargetD3D1x: ID3D11RenderTargetView*
+	inline constexpr std::size_t kRenderTargetDsv = 0x58;  // ID3D11DepthStencilView*
 	// The blend stack, a GArray<std::uint32_t> at +0x728 (data, then this size, then the capacity): PushBlendMode appends the mode
 	// before, PopBlendMode (a no-op when empty) removes the last. Checked on both (SE 0x140f61770 / 0x140f61120, AE 0x14104c300 /
 	// 0x14104bd10, vtable slots 17 and 18).

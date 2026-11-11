@@ -23,4 +23,10 @@ namespace RenderGraph::Engine::Scaleform
 	 * otherwise.
 	 */
 	void Install();
+
+	/**
+	 * @brief Engine::PostSetup, when Requested(): the Interface client with its surfaces, and every pipeline queued
+	 * (Passes::Setup). Nothing otherwise.
+	 */
+	void Setup();
 }
