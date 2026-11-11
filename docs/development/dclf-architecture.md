@@ -78,8 +78,11 @@ then indirect draws. Each object is drawn once, by DCLF or by the engine, never 
     objects, refraction, effects, particles and billboards in a forward epoch.
 -   **Every shadow view:** the sun's cascades and their volumetric lighting copy, spot lights, point lights' paraboloids and the
     focus shadows.
--   **Both occlusion maps** while Skylighting is loaded: Skylighting's sky occlusion map and the precipitation mask.
--   **The water reflection's** plain cube faces, and **the first-person** view.
+-   **The occlusion maps:** the precipitation mask with or without Skylighting, and Skylighting's sky occlusion map while it is
+    loaded.
+-   **The water reflection's** plain cube faces, and **the first-person** view (on by default).
+-   **Lighting with or without Light Limit Fix:** without it each draw takes its point lights from the frame's point light table
+    ([Point lights without Light Limit Fix](#point-lights-without-light-limit-fix)).
 -   **Object classes:** static and dynamic Lighting geometry, terrain, trees (with GPU tree wind), skins of any number of
     partitions, actors and NPC faces, effects, particles, billboards, decals, and object, terrain and tree LOD.
 
@@ -1654,6 +1657,35 @@ shader is `<- LIGHTING SHADER`.
     character-light signature's live sample (`MaterialSources::CharacterLightView`). Not a second pipeline layout, because an
     indirect pipeline set needs one layout for all its pipelines (BasicRHI `IndirectPipelineSetDesc`).
 -   **The sampler table** is a copy of the renderer's own D3D11 sampler states, read at its AE address (`GpuTextures.cpp`).
+
+### Point lights without Light Limit Fix
+
+The engine gives each Lighting pass its own point lights in PerGeometry (`SetupGeometry`'s point light routine, AE `0x1414df650`:
+`PointLightPosition`, `PointLightColor`, `ShadowLightMaskSelect`, the count in `NumLightNumShadowLight`). A DCLF pipeline's
+PerGeometry block is shared by every object it draws, and its template pass has the sun alone, so without Light Limit Fix (whose
+clustered lights replace them) a DCLF Lighting draw had no point lights. Now:
+-   **The table.** Every commit latches the frame's point lights into PS b3 (`LatchFrameRows`, `Common/DCLFPointLights.hlsli`: a count,
+    then up to 128 rows of position and radius, colour, flags). PS b3 is Light Limit Fix's `StrictLightData` register, unused without
+    it. The table is the light volumes contribution's (`Api::LightVolumesContribution::pointLights`, Features/LocalLights'
+    `LocalShadowLights::SamplePointLights`), active while the "light limit fix" classify input is off. It holds the lights the
+    engine's light selection (`FUN_1414fcf80`) can give a pass, valued as the point light routine writes them: first the shadow
+    lights, the selection's kept lights after the sun, with their mask indices; then `ShadowSceneNode::activeLights` in order, less a
+    frustum-culled light (`+0x5C` 0xFF) or a hidden one. Colour is the diffuse times the NiLight's fade and the BSLight's
+    `lodDimmer`; positions are absolute, as the object rows.
+-   **Each draw's lights** (`DCLFSelectPointLights`, in `Lighting.hlsl` under `DCLF_POINT_LIGHTS`): a shadow light when its channel is in
+    the draw's shadow mask (`DCLFShadowLightMask`, BuildDrawsCS's volumes: the engine's mask bits), then a plain light when its sphere
+    meets the object's bound (the placement row's), at most seven, in the table's order. The loop is the same for every pixel of a
+    draw. The vanilla light loop then runs with each light's position less the view's `CameraPosAdjust`.
+-   **PS b3's place.** The shared light slot holds two blocks: its first half starts with the zero block the main shadow layout reads
+    (`MainShadowLayoutPush`), and its second half is PS b3 (`kSharedLightBlockOffset`): zeroed once with Light Limit Fix loaded,
+    the table without it.
+-   **Accepted differences.** The engine's light assignment (`FUN_1414a1540`) fills a geometry's light list from its rooms and
+    portals and in its own order; DCLF's test is the bound against the light's sphere, in `activeLights`' order, so a draw near a
+    room boundary or under more than seven lights can take other lights than the engine's pass. A non-shadow light takes a landscape
+    draw only when it affects land (`+0x61`), the rule the engine applies to shadow lights. First-person draws take the world's lights,
+    as they do with Light Limit Fix; the engine's first-person passes take the first-person scene's.
+-   **Not covered.** The Effect shader's Lighting variant without Light Limit Fix (`kEffectVariantLightingNoLlf`) stays native; it
+    reads its own PerGeometry lights and could read the same table.
 
 ### Rows and bindings
 

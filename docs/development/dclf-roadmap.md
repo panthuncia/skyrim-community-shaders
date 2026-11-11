@@ -321,7 +321,8 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
 -   **State.** Done: the main, terrain, decal and forward buckets (`CS_DCLF_*_PLAIN`, on by default) draw each pipeline's range with
     one counted indirect draw and the pulled colour pipelines, which find their sequence by instance. Without device-generated
     commands with pipeline sets (AMD, Intel) they are the only colour draws (dclf-architecture.md, "Explicit DGC preprocessing
-    and pipeline set versions"). Open: the first-person forward part has no buckets, so it needs the direct forward family there.
+    and pipeline set versions"). Open: the first-person forward part has no buckets, so it needs the direct forward family there;
+    without it the first-person view is not covered and the engine draws it.
 
 ### 3.2 Early builds on the compute queue
 
@@ -382,7 +383,9 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
     projected UV, unrecognised blend pairs, Falloff without blending, membrane, strip and mesh particle systems, skins under
     billboards, nested billboards, and Lighting leaves under billboards.
 -   **Design.** Each is an `Api::ObjectClass` contribution in `Features/Effects` or `Features/Billboards`, ordered by the
-    residue census.
+    residue census. The effect Lighting variant without Light Limit Fix can read the frame's point light table the Lighting draws
+    already read (dclf-architecture.md, "Point lights without Light Limit Fix"): `Effect.hlsl`'s PerGeometry lights from the table,
+    picked by the object's bound.
 
 ### 4.2 First-person refraction
 
@@ -411,13 +414,6 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
     advances one `DeltaTime` a frame. Never validated: no such tree was in the test scene.
 -   **The near list's count cap.** Not replicated (`Features/TreeWind/TreeWindSeeds.cpp`). With more selectable trees in range
     than the cap, DCLF gusts them all where the engine gusts only the nearest.
-
-### 4.6 The precipitation mask without Skylighting
-
--   **Goal.** DCLF draws the precipitation mask whether or not Skylighting is loaded.
--   **State.** Not started. The mask is DCLF's only through Skylighting's occlusion hooks (`RenderOcclusionAtShadowMaps`, `RenderOcclusion`)
-    (`Features/OcclusionMaps/OcclusionMapsFeature.cpp`, `CS_DCLF_PRECIPITATION`); without Skylighting the engine draws it.
--   **Design.** DCLF hooks the engine's precipitation mask itself when Skylighting is absent.
 
 ---
 
