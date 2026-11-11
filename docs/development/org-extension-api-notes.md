@@ -1096,7 +1096,12 @@ Keys used so far:
   that defines `ORG_HEADER_RESOURCES` lists them as `EXTERN` entries (shader-workflow.md, "Resources that headers declare").
 - **Where it fits:** the dual-target shader ABI. A plugin needs the list of header resources and their names kept stable.
   DXC's SPIR-V ignores `row_major` in a templated raw buffer `Load<T>`, so LATCH structs hold matrices as `float4` rows.
-- **Found by:** P3 ExponentialHeightFog (2026-11-09).
+  Which header resources a shader must list depends on its defines (every loaded feature's define reaches a pass program),
+  so a header that gains a resource breaks every ORG pass shader that includes it without listing it: Phase 5 wave 1 made
+  LLF's b3 and ShadowSampling's t98 latches, and the height fog's light scattering and the Effects11 rays fell back to
+  D3D11. Unread ones are now `UNREAD`/`UNREAD_LATCH` entries (no push word, constant 0 handle). An API would let a header
+  declare a resource lazily, or a build check would compile every ORG pass shader with all feature defines.
+- **Found by:** P3 ExponentialHeightFog (2026-11-09); the unread entries by the P5 shader latch fix (2026-11-11).
 
 ### CS's shared constants in a plugin's pass
 

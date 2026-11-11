@@ -78,6 +78,8 @@ The shader body does not change. Each entry is `X(kind, type, name, register num
 | `PUSH` | as `CBUFFER` | the struct itself, inside the push block |
 | `EXTERN` | nothing: the header that declares it binds the register | its handle; the header reads `OrgHandle_<name>` |
 | `EXTERN_LATCH` | nothing: the header that declares it binds the register | its handle and offset; the header declares the `LATCH` |
+| `UNREAD` | nothing | nothing in the push block: `OrgHandle_<name>` is a constant 0, for a header resource the shader never reads |
+| `UNREAD_LATCH` | nothing | as `UNREAD`, with `OrgOffset_<name>` also 0, for a header's `LATCH` the shader never reads |
 | `SHARED` | nothing: `FrameBuffer`, `SharedData`, `FeatureData` and `Permutation` stay the headers' cbuffers | four handles, in that order |
 
 `SRV` and `UAV` cover `Texture2D`, `Texture3D`, `TextureCube` and their arrays, the `RW` textures, `(RW)StructuredBuffer`,
@@ -147,6 +149,15 @@ Cloud Shadows' `CloudShadowsTexture` (t25). They stay register-bound everywhere,
 list them. An ORG pass shader that defines `ORG_HEADER_RESOURCES` before including `Common/OrgResources.hlsli` reads them from the
 heap, and lists, as `EXTERN` entries, every one of them that the headers it includes declare (the height fog's
 `VolumetricFogLightScatteringCS.hlsl` is the example).
+
+Under `ORG_HEADER_RESOURCES` two headers declare a latch instead of a register-bound buffer: Light Limit Fix's strict lights
+(`StrictLightData`, b3) and ShadowSampling's directional shadow record (`DirectionalShadowLight`, t98, read as
+`DirectionalShadowLights[0]`). A shader that reads one lists it as `EXTERN_LATCH`, and its pass writes the latch (the water family
+does both). Every header resource, latch or not, that a shader's headers declare under its defines but its body never reads is an
+`UNREAD` or `UNREAD_LATCH` entry: it costs no push block word, its handle is a constant 0, and DXC drops the declaration. A header
+resource missing from the list is a DXC error (`use of undeclared identifier 'OrgHandle_<name>'`), and the program falls back to
+D3D11, so check the shader with the defines its program really gets: its own, plus every loaded feature's define
+(`Util::GetCommonShaderDefines`). With all of them, ShadowSampling also includes Volumetric Shadows (t18) and IBL (t76, t77).
 
 **The shared constant buffers.** `FrameBuffer` (b12), `SharedData` (b5), `FeatureData` (b6) and `Permutation` (b4) are
 declared with the `ORG_SHARED_*` macros (`Common/NamespacedCBuffer.hlsli`). Under FXC, and under DXC by default, they are
