@@ -1717,3 +1717,15 @@ looked it up (`RequestRebuildFor`). Building the replacement graph on a worker a
 would remove the remaining synchronous builds; it needs those shared services to accept a build that runs beside the host's
 thread's preparations.
 - **Found by:** the rebuild-storm investigation (2026-11-11), 31.6 s of synchronous rebuilds in a four-minute tour.
+
+### Engine occlusion queries answered by the graph
+
+- **Need:** an engine (or plugin) occlusion query whose draws the graph makes must still get its count: the engine polls
+  `GetData` for the sun glare and the decal placement.
+- **Where it fits:** the draw's own render pass holds the query (begun after `BeginPass`, ended before `EndPass`), a range of
+  queries per frame slot so a kept recording names its own, and a readback read once the run's GPU point is reached or at the
+  frame slot's next commit. On Vulkan the occlusion reset must be a command (`vkCmdResetQueryPool`), not a host reset at record
+  time, or replays begin unreset queries; queries no draw began must be begun and ended empty before a `WAIT_BIT` copy. A blocking
+  read may wait only for sealed work (in the guest phase the run may sit in DXVK's stream behind the current frame). An API would
+  give a client "count this draw, hand me the count when it retires" without the bookkeeping (`RenderGraph/Engine/Queries`).
+- **Found by:** Phase 5.5.5 (2026-11-11), the sun occlusion query.

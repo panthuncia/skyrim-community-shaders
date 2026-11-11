@@ -1121,6 +1121,15 @@ SE +0x50 / AE Init +0x2BC), then 0x140d88c90, 0x140d891f0, 0x140d89230, 0x140d89
 `Renderer::Init` (75445/77226) then creates 64 OCCLUSION queries (0x143025f60) and 6 TIMESTAMP_DISJOINT queries
 (0x14302ac78, stride 0x50) and creates `Data/ShaderCache`.
 
+The occlusion ring's functions, confirmed in Ghidra (2026-11-11, Phase 5.5.5; details in `p5/occlusion-queries.md`): ring SE
+524740 / 0x143025f60, AE 411344 / 0x143286800 (64 `ID3D11Query*`, next index at ring + 0x200). `AcquireOcclusionQuery` SE 75565 /
+0x140d70150, AE 77366 / 0x140e4ae40; `ReleaseOcclusionQuery` (a user count only) SE 75566 / 0x140d70180, AE 77367 / 0x140e4ae70;
+`BeginQuery` SE 75567 / 0x140d70190, AE 77368 / 0x140e4ae80; `EndQuery` SE 75568 / 0x140d701b0, AE 77369 / 0x140e4aea0;
+`GetQueryData(renderer, entry, wait, flush)` SE 75569 / 0x140d701d0, AE 77370 / 0x140e4aec0 (8 bytes read, low 32 bits returned,
+0xFFFFFFFF when not ready, `wait` spins with `Sleep(0)`). Users: the sun's draw SE 99958 / AE 106604 (from `Sun::SubmitOcclusionQuery`
+SE 25799 / AE 26353), read by SE 99967 / AE 106605 and AE 106614; the decal occlusion test SE 35563 / AE 36562, read by SE 29262 /
+AE 30117. `Sun::SubmitOcclusionQuery` is called by `Main::RenderWorld` (index 1) and AE 107129 (index 2).
+
 #### R6.5 BSGraphics::TriShape ownership
 
 Layout (CommonLib `RE/N/NiSkinPartition.h`, confirmed by 75473):

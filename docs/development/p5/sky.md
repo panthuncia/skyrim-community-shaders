@@ -99,9 +99,10 @@ cube depth (`kCUBEMAP_REFLECTIONS`, slice 0, shared by every face) and submits t
 reaches the same FinishAccumulating, so the same +0x247 call draws each face's sky after its opaque groups. DCLF's face draws come
 later, in the depth epoch, loading the face (`reflection/view.faces`).
 
-What is not in the batch: the **sun occlusion query** (SunOcclude) is drawn by `Sun::SubmitOcclusionQuery` (99958, `0x1403bbf20`)
-from `Main::RenderWorld`'s end into the sun's own accumulator (Sun+0x50) with an engine occlusion query, read back by
-`Sun::UpdateOcclusionQueries`; the **sun glare** (0x5C006072) is outside the range. Both stay the engine's.
+What is not in the batch: the **sun occlusion query** (SunOcclude) is drawn by `Sun::SubmitOcclusionQuery` (SE 25799, `0x1403bbf20`;
+its draw SE 99958) from `Main::RenderWorld`'s end into the sun's own accumulator (Sun+0x50) with an engine occlusion query, read back
+by `Sun::UpdateOcclusionQueries`; the **sun glare** (0x5C006072) is outside the range. The glare stays the engine's; the query is the
+graph's with `CS_ORG_OCCLUSION_QUERIES=1` ([occlusion-queries.md](./occlusion-queries.md)).
 
 **The depth bias viewport offsets** (`BSGraphics::CreateDepthBiasViewportOffsets`, SE 75829 `0x140d891f0`, AE `0x140e65d10`, renamed
 in SE): the table is a constant, `{0, 1.5e-5, 0, 0, 0, 0, 2.6e-5, 1.5e-5, 2.8e-5, 1.7e-5, 3e-5, 1.9e-5}` (SE `0x141794530`, AE
@@ -215,7 +216,8 @@ made once with the faces' client.
   the failure.
 - **The face clouds' layers are drawn again** into every later layer: n(n-1)/2 extra occlusion-only draws a face for n layers.
 - **The moon masks' depth** is written into the Z-prepass copy as on D3D11, by the anchor's pass at the same point.
-- **The sun occlusion query and the sun glare** stay the engine's (above).
+- **The sun glare** stays the engine's (above). The sun occlusion query is the graph's with `CS_ORG_OCCLUSION_QUERIES=1`
+  ([occlusion-queries.md](./occlusion-queries.md)).
 
 ## Cloud layers
 
@@ -271,10 +273,11 @@ render thread at its first draw`). Constants come from the engine constants capt
   function takes the accumulator, the sun's geometry (Sun+0x28), a query index below 3 and the camera; it acquires the accumulator's
   occlusion query for that index (+0x70 + index * 0x18), `BeginQuery`, makes a BSSkyShader pass (SunOcclude, descriptor 0: no colour
   write), draws it through `RenderPassImmediately`, `EndQuery`. `Sun::UpdateOcclusionQueries` reads the results back for the sun glare.
-  The family cannot take it: a graph draw is not counted by the engine's D3D11 query, so the glare would read the sun as hidden. It
-  needs an ORG occlusion query that feeds the engine's query object (p4.6's `QueryMapping::Occlusion`), a separate item. Until then
-  the family detours it (SE 99958 at `0x1412ccad0`, its caller `Sun::SubmitOcclusionQuery` SE 25799 +0xAD) and vouches for it under
-  the flush latch (`sky: sun occlusion query`).
+  A graph draw is not counted by the engine's D3D11 query, so the glare would read the sun as hidden. With
+  `CS_ORG_OCCLUSION_QUERIES=1` (Phase 5.5.5, [occlusion-queries.md](./occlusion-queries.md)) the family takes it with its query: the
+  engine's `BeginQuery` and `EndQuery` are bracketed, the draw is latched, and the `cs.sky.sun` client at the `EngineQueries` anchor
+  draws it with an ORG occlusion query whose count answers `GetQueryData`. Without the switch it is not hooked, and no vouch is left
+  for it (the `sky: sun occlusion query` reason is deleted).
 - **The sun glare** (`0x5C006072`, outside the batch's technique range).
 - A batch whose targets are not its client's (the main view's: `kMAIN`, `kMOTION_VECTOR`, `NORMALROUGHNESS` with kMAIN's depth; the
   faces': the reflection cubemap with `kCUBEMAP_REFLECTIONS`), or another accumulator, cubemap or the forward pass.
