@@ -1,3 +1,16 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t4 and s0-s3 from the heap (t4 is the
+// reflection cubemap CS binds, VanillaBinding.cpp), FrameBuffer and SharedData from the shared constants, PerGeometry from the
+// engine-constants capture through the pass's latch. FrameBuffer is CS's snapshot, not the draw's captured PerFrame: this shader
+// reads its matrices, which the raw load of the capture would transpose (Common/NamespacedCBuffer.hlsli).
+#	define ORG_SHARED_CONSTANTS
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISREFLECTIONS_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, NormalTex, 0) X(SRV, Texture2D<float4>, ColorTex, 1) X(SRV, Texture2D<float4>, DepthTex, 2) X(SRV, Texture2D<float4>, AlphaTex, 3) X(SRV, TextureCube<float4>, SkyReflectionTex, 4) X(SAMPLER, SamplerState, NormalSampler, 0) X(SAMPLER, SamplerState, ColorSampler, 1) X(SAMPLER, SamplerState, DepthSampler, 2) X(SAMPLER, SamplerState, AlphaSampler, 3) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISREFLECTIONS_ORG_RESOURCES(ORG_HANDLE))
+ISREFLECTIONS_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/DummyVSTexCoord.hlsl"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/MotionBlur.hlsli"
@@ -11,6 +24,10 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+static float4 SSRParams = OrgEngineRow(PerGeometryAt, 0);
+static float3 DefaultNormal = OrgEngineRow(PerGeometryAt, 1).xyz;
+#	else
 SamplerState NormalSampler : register(s0);
 SamplerState ColorSampler : register(s1);
 SamplerState DepthSampler : register(s2);
@@ -27,6 +44,7 @@ cbuffer PerGeometry : register(b2)
 	float4 SSRParams : packoffset(c0);  // fReflectionRayThickness in x, fReflectionMarchingRadius in y, fAlphaWeight in z, 1 / fReflectionMarchingRadius in w
 	float3 DefaultNormal : packoffset(c1);
 };
+#	endif
 
 static const int iterations = 64.0;
 static const int binaryIterations = ceil(log2(iterations));
