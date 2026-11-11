@@ -22,10 +22,16 @@ struct ShadowUpdateConstants
 ORG_PUSH_BLOCK(SHADOW_UPDATE_RESOURCES(ORG_HANDLE))
 SHADOW_UPDATE_RESOURCES(ORG_RESOURCE)
 
+// The heightmap's size. The textures can be larger (the render graph makes them once, at the largest heightmap's size),
+// so it comes from the constants, not from GetDimensions.
+uint2 GetHeightmapSize()
+{
+	return uint2(round(1.0 / ShadowUpdate.PxSize));
+}
+
 float2 GetInterpolatedHeightRW(float2 pxCoord, bool isVertical)
 {
-	uint2 dims;
-	RWTexShadowHeights.GetDimensions(dims.x, dims.y);
+	uint2 dims = GetHeightmapSize();
 
 	int2 lerpPxCoordA = int2(floor(pxCoord - .5 * float2(isVertical, !isVertical)));
 	int2 lerpPxCoordB = lerpPxCoordA + int2(isVertical, !isVertical);
@@ -48,8 +54,7 @@ uint GetWrappedCoord(int coord, uint dimension)
 }
 
 [numthreads(NTHREADS, 1, 1)] void main(const uint gtid : SV_GroupThreadID, const uint gid : SV_GroupID) {
-	uint2 dims;
-	TexHeight.GetDimensions(dims.x, dims.y);
+	uint2 dims = GetHeightmapSize();
 
 	bool isVertical = abs(ShadowUpdate.LightPxDir.y) > abs(ShadowUpdate.LightPxDir.x);
 	int majorStep = (isVertical ? ShadowUpdate.LightPxDir.y : ShadowUpdate.LightPxDir.x) > 0.0 ? 1 : -1;

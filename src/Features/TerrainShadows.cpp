@@ -340,8 +340,22 @@ void TerrainShadows::SetupResources()
 
 	CompileComputeShaders();
 
-	// The render graph's update, when requested. If the graph stops, EarlyPrepass loads the heightmap again on D3D11.
-	ORGTerrainShadows::Get().Setup([] { UnbindShadowHeight(); });
+	// The render graph's update, when requested, in textures made once at the largest heightmap's size: a worldspace change then
+	// replaces nothing on the graph. If the graph stops, EarlyPrepass loads the heightmap again on D3D11.
+	if (ORGTerrainShadows::Requested()) {
+		std::uint32_t maxWidth = 0, maxHeight = 0;
+		for (const auto& [worldspace, heightmap] : heightmaps) {
+			DirectX::TexMetadata metadata{};
+			const auto path = std::filesystem::path{ heightmap.dir } / heightmap.filename;
+			if (FAILED(DirectX::GetMetadataFromDDSFile(path.c_str(), DirectX::DDS_FLAGS_NONE, metadata))) {
+				logger::warn("[Terrain Shadows] {}: its DDS header cannot be read", heightmap.filename);
+				continue;
+			}
+			maxWidth = (std::max)(maxWidth, static_cast<std::uint32_t>(metadata.width));
+			maxHeight = (std::max)(maxHeight, static_cast<std::uint32_t>(metadata.height));
+		}
+		ORGTerrainShadows::Get().Setup(maxWidth, maxHeight, [] { UnbindShadowHeight(); });
+	}
 }
 
 void TerrainShadows::CompileComputeShaders()
@@ -376,6 +390,15 @@ TerrainShadows::PerFrame TerrainShadows::GetCommonBufferData()
 		// Texel centres lie on terrain vertices anchored at the south-west corner.
 		const float2 halfTexel = { 0.5f / heightMapWidth, -0.5f / heightMapHeight };
 		data.Offset = float2(-cachedHeightmap->pos0 * float2{ data.Scale.x, data.Scale.y }) + halfTexel;
+		// The render graph's texture is as large as the largest heightmap, and this one fills its top-left corner.
+		data.UVMax = { 1.f, 1.f };
+		std::uint32_t textureWidth = 0, textureHeight = 0;
+		if (ORGTerrainShadows::Get().TextureSize(textureWidth, textureHeight)) {
+			data.UVMax = { static_cast<float>(heightMapWidth) / textureWidth, static_cast<float>(heightMapHeight) / textureHeight };
+			data.Scale.x *= data.UVMax.x;
+			data.Scale.y *= data.UVMax.y;
+			data.Offset = data.Offset * data.UVMax;
+		}
 		data.ZRange = cachedHeightmap->zRange;
 		const float stepDescent = -0.5f * (shadowUpdateCBData.LightDeltaZ.x + shadowUpdateCBData.LightDeltaZ.y) * (data.ZRange.y - data.ZRange.x);
 		data.ZBlur = stepDescent * zBlurSteps;
