@@ -81,7 +81,7 @@ namespace FrameAnchors
 			{ "EngineFrameClear", { "CS anchor: engine frame clear", "CS anchor: engine frame clear inputs", "FrameAnchors::EngineFrameClear / ", "cs.anchor.engine-frame-clear" }, false, 8 },
 			// Runs a frame: Main::RenderDepth, FinishAccumulating and DeferredPasses
 			{ "EngineDepthCopy", { "CS anchor: engine depth copy", "CS anchor: engine depth copy inputs", "FrameAnchors::EngineDepthCopy / ", "cs.anchor.engine-depth-copy" }, false, 3 },
-			// Runs a frame: one per Scaleform display drawn on the main thread
+			// Runs a frame: one per Scaleform segment drawn on the graph (a display, and one more per D3D11 part); 6 was not passed in a menu tour
 			{ "Interface", { "CS anchor: interface", "CS anchor: interface inputs", "FrameAnchors::Interface / ", "cs.anchor.interface" }, true, 6 },
 			// Runs a frame: one per batch of ImageSpace draws (the HDR effect's, the pre-tonemap composites', and a batch cut short by a
 			// draw the graph does not take). Late: the TAA or the upscaler can follow a batch inside the chain.
