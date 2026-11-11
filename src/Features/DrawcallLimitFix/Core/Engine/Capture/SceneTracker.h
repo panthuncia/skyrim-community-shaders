@@ -86,9 +86,14 @@ namespace DCLF
 		Event* Drain();
 		static void FreeEvents(Event* a_head);
 
-		void PushAttached(RE::NiAVObject* a_child);
+		/**
+		 * @brief An attach, after the engine's. a_parent: the node whose array took the child (null: the child's parent). It differs for
+		 * a parentless root an array owns (the particle manager's master particle systems).
+		 */
+		void PushAttached(RE::NiAVObject* a_child, const RE::NiAVObject* a_parent = nullptr);
 		static void CollectAncestors(const RE::NiAVObject* a_node, std::vector<const void*>& a_out);
-		void PushDetached(RE::NiAVObject* a_child);
+		/** @brief A detach, before the engine's (the child still in its array). a_parent as PushAttached's. */
+		void PushDetached(RE::NiAVObject* a_child, const RE::NiAVObject* a_parent = nullptr);
 		/** @brief A hook's values (after its write, on the writer's thread): one stack with the attaches and detaches, so an address a
 		 * detach let go and an attach took again is never given an earlier object's values. */
 		void PushUpdate(SceneCapture::Update&& a_update, std::vector<RE::NiPointer<RE::NiRefObject>>&& a_pins = {});
@@ -163,7 +168,7 @@ namespace DCLF
 
 	private:
 		void Push(Event* a_event);
-		static void NoteEdit(const RE::NiAVObject* a_child, bool a_inWorld);
+		static void NoteEdit(const RE::NiAVObject* a_child, const RE::NiAVObject* a_parent, bool a_inWorld);
 
 		std::atomic<Event*> head{ nullptr };
 		std::atomic<bool> stopped{ false };
