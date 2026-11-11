@@ -87,8 +87,9 @@ namespace DCLF::Diagnostics
 		if (!mapped)
 			return;
 		const auto* w = static_cast<const std::uint32_t*>(mapped);
-		logger::info("[DCLF] frame trace: colour exec stamp {} (slot {}): drawn {} rejected {} tested {} occluded {} phase2 drawn {} rescued {}", w[Draws::kCountWords],
-			a_slot, w[0], w[1], w[2], w[6], w[17], w[18]);
+		logger::info("[DCLF] frame trace: colour exec stamp {} (slot {}): drawn {} rejected {} tested {} occluded {} phase2 drawn {} rescued {}; terrain groups {} {}; fade tested {} hidden {}; class unplanned {}",
+			w[Draws::kCountWords], a_slot, w[0], w[1], w[2], w[6], w[17], w[18], w[Draws::kCountTerrainGroupWord], w[Draws::kCountTerrainGroupWord + 1],
+			w[Draws::kCountFadeTestedWord], w[Draws::kCountFadeHiddenWord], w[Draws::kCountClassUnplannedWord]);
 		resource.Unmap(0, 0);
 	}
 }

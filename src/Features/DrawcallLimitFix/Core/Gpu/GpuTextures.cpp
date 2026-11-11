@@ -81,22 +81,41 @@ namespace DCLF
 		}
 
 		/**
+		 * @brief Logs a refused view's format once: every draw that reads such a view is withheld from the engine and drawn by nobody.
+		 */
+		void NoteRefusedMapping(rhi::Format a_format, const char* a_why, const rhi::FormatSupport& a_support, VkFormat a_dxvkFormat, rhi::ComponentMapping a_dxvk)
+		{
+			static std::mutex mutex;
+			static std::set<rhi::Format> noted;
+			std::lock_guard lock(mutex);
+			if (noted.insert(a_format).second)
+				logger::warn("[DCLF] Game texture views of format {} refused ({}): BasicRHI stores it as {} (backend {}, swizzle {:X}), DXVK's view format {}, swizzle {:X}; "
+							 "their draws are not drawn",
+					static_cast<int>(a_format), a_why, static_cast<int>(a_support.storedAs), a_support.backendFormat, a_support.srvSwizzle, static_cast<int>(a_dxvkFormat), a_dxvk);
+		}
+
+		/**
 		 * @brief The view's own mapping (SrvDesc::componentMapping) for a DXVK image or an image DXVK wraps. DXVK's swizzle is its
 		 * format's: DXVK stores some formats in others (A8 as R8, read as (0, 0, 0, R)) and swizzles B8G8R8X8's alpha to one. BasicRHI
 		 * stores the same formats the same way and adds the same swizzle to every view of a_format (rhi::FormatSupport), so the view
-		 * adds nothing when the two agree, and DXVK's swizzle when BasicRHI has none. False when they disagree: a_dxvkFormat, when
-		 * given, must be the format BasicRHI stores a_format in.
+		 * adds nothing when the two agree or when the source's own mapping is the identity (an image BasicRHI made, or one DXVK reads
+		 * as stored), and the source's swizzle when BasicRHI has none. False when they disagree: a_dxvkFormat, when given, must be the
+		 * format BasicRHI stores a_format in.
 		 */
 		bool ViewMappingOf(const rhi::Device& a_device, rhi::Format a_format, const VkComponentMapping& a_dxvk, VkFormat a_dxvkFormat,
 			rhi::ComponentMapping& a_out)
 		{
 			rhi::FormatSupport support{};
-			if (a_device.QueryFormatSupport(a_format, support) != rhi::Result::Ok)
+			if (a_device.QueryFormatSupport(a_format, support) != rhi::Result::Ok) {
+				NoteRefusedMapping(a_format, "no format support", support, a_dxvkFormat, 0);
 				return false;
-			if (support.storedAs != rhi::Format::Unknown && a_dxvkFormat != VK_FORMAT_UNDEFINED && support.backendFormat != static_cast<std::uint32_t>(a_dxvkFormat))
+			}
+			if (support.storedAs != rhi::Format::Unknown && a_dxvkFormat != VK_FORMAT_UNDEFINED && support.backendFormat != static_cast<std::uint32_t>(a_dxvkFormat)) {
+				NoteRefusedMapping(a_format, "stored differently", support, a_dxvkFormat, 0);
 				return false;
+			}
 			const rhi::ComponentMapping dxvk = MappingOf(a_dxvk);
-			if (dxvk == support.srvSwizzle) {
+			if (dxvk == 0 || dxvk == support.srvSwizzle) {
 				a_out = 0;
 				return true;
 			}
@@ -104,6 +123,7 @@ namespace DCLF
 				a_out = dxvk;
 				return true;
 			}
+			NoteRefusedMapping(a_format, "swizzles differ", support, a_dxvkFormat, dxvk);
 			return false;
 		}
 
