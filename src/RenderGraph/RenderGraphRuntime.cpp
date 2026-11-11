@@ -30,6 +30,7 @@
 
 #include <OpenRenderGraph/GraphHost.h>
 #include <OpenRenderGraph/Runtime.h>
+#include <Render/Runtime/IUploadService.h>
 #include <Render/Runtime/OpenRenderGraphSettings.h>
 // This module exports the contributor ABI's table (ORG_GetRenderGraphAPI, below).
 #define ORG_RENDER_GRAPH_HOST_EXPORTS
@@ -2202,6 +2203,15 @@ void RenderGraphRuntime::SealPresented()
 		impl->host->SealSubmitted();
 }
 
+void RenderGraphRuntime::MoveOwnerThread()
+{
+	// The host's other state needs no move: it has no thread id of its own, and ExecuteEpoch takes the calling thread as DXVK's
+	// stream thread at each epoch.
+	if (impl && impl->host)
+		if (auto* uploads = impl->host->Uploads())
+			uploads->SetOwnerThread();
+}
+
 void RenderGraphRuntime::WaitFramePace()
 {
 	if (!impl || !std::exchange(impl->framePaceSignalled, false) || !IsActive())
@@ -2992,6 +3002,7 @@ std::uint32_t RenderGraphRuntime::TakeSubmittedSegments() { return 0; }
 void RenderGraphRuntime::PollEpochFailures() {}
 void RenderGraphRuntime::SignalFramePace(bool) {}
 void RenderGraphRuntime::SealPresented() {}
+void RenderGraphRuntime::MoveOwnerThread() {}
 void RenderGraphRuntime::WaitFramePace() {}
 org::services::PipelineRegistry* RenderGraphRuntime::PipelineRegistry() { return nullptr; }
 void RenderGraphRuntime::RequestShaderReload(std::string_view, bool) {}

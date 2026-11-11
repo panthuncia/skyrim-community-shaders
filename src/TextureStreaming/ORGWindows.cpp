@@ -418,8 +418,9 @@ namespace TextureStreaming::ORG
 
 	void FrameTick()
 	{
-		// A loading screen's Present: the staged windows wait for the main thread's next frame.
-		if (!Requested() || !FrameAnchors::OnMainThread())
+		// Off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1): the staged windows wait for the main thread's next
+		// frame. With it, the loading loop's Presents run this too.
+		if (!Requested() || !FrameAnchors::OnRenderThread())
 			return;
 		auto& state = S();
 		ServiceRetiringBatches();

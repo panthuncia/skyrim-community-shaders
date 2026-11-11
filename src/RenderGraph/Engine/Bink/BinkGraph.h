@@ -9,7 +9,8 @@
  * @brief The render-graph side of Bink (Bink.h): the tile textures, the staging buffers the decoder writes, the Present anchor's
  * client and its pass. The engine side (BinkHooks.cpp) decides per tick whether the graph draws, and feeds this.
  *
- * Threads: everything here runs on the main thread, in a tick of the movie player (Begin, CreateMovie, Lock, Queue, EndTick) or in
+ * Threads: everything here runs on the render thread (FrameAnchors::OnRenderThread: the main thread, or with
+ * CS_ORG_LOADING_THREAD=1 the startup logo's MoviePlayer thread, which holds Renderer::Lock), in a tick of the movie player (Begin, CreateMovie, Lock, Queue, EndTick) or in
  * the Present anchor's run that follows (the client's commit). The pass's Prepare and Record run where the graph runs them, and
  * read only the frame slot the commit wrote.
  */
