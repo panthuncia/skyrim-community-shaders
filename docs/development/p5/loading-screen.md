@@ -85,9 +85,8 @@ Ownership itself requests no graph build: the claim publishes nothing and touche
     menu, the Present anchor's clients).
   - A client that registers during the load joins at the end of the iteration it registered in (`FrameAnchors::RequestJoin` is
     the gate). A joining client no longer runs its anchor's epoch. Its caller keeps the D3D11 path meanwhile, as everywhere.
-- Bink is the exception that already exists: a blocking movie runs no world frame, so `Bink::Graph` calls
-  `host->BuildIfRequested()` once while its client waits to join (p5/bink.md). On the MoviePlayer thread this is one build at
-  the logo's start, before any world frame exists.
+- Bink no longer builds by itself: its one client registers at `State::Setup` and joins through `RequestJoin`, built at a
+  frame's end like any joining client (p5/bink.md).
 
 ## Rebuilds in this lane
 
@@ -95,7 +94,7 @@ Ownership itself requests no graph build: the claim publishes nothing and touche
 | --- | --- | --- |
 | The ownership handoff | nothing | no build, no publish (above) |
 | A client that joins during a load | one build at the iteration's end (`OnFrameEnd`) | only while a client waits; a client that registers every iteration would rebuild every iteration (none does) |
-| Bink's join at the logo's first graph tick | one `BuildIfRequested` | unchanged (p5/bink.md); before the first world frame |
+| Bink's client | registered once at Setup | no build of its own; joins at a frame's end (p5/bink.md) |
 | Texture streaming's copy pass per batch (`ORGWindows::Register`, one-shot) | asks for a Present-anchor build per batch and one after it ran | pre-existing (p4/texture-streaming.md, "Risks"). On the loading thread, with DCLF on, those builds wait for the build point, so a batch staged during a load is uploaded in the first world frame, as today; with DCLF off they are built at the next submission, as in any frame. Removing them at the source (a kept pass with a gated copy list in place of a one-shot pass per batch) is texture streaming's change, listed as open |
 | Scaleform's new surface (a display onto a target with no pass yet) | registers the client again | p5/scaleform.md's design; on the loading thread the display goes to D3D11 until the graph holds it |
 
@@ -174,8 +173,9 @@ switches and `CS_ORG_TEXTURE_STREAMING=1`, `CS_ORG_SCALEFORM=1`, `CS_ORG_BINK=1`
 In org1's log:
 
 1. `[ORG] render ownership: the CS_ORG_LOADING_THREAD rule is on`.
-2. At the logo: `[ORG] render ownership: thread N (holding Renderer::Lock) takes it from thread M`, then Bink's
-   `a WxH movie ended: G frames drawn by the render graph` with G near 166.
+2. At the logo: `[ORG] render ownership: thread N (holding Renderer::Lock) takes it from thread M`. Bink's `a WxH movie
+   ended: G frames drawn by the render graph` has G near 166 only if the client was registered before the logo (State::Setup);
+   not run in game yet with the session-long client.
 3. Per load: `[ORG] loading screen: the serving thread renders until the load ends`, a claim by the serving thread, then
    `[ORG] loading screen: the load ended (K ownership changes); the main thread renders again`.
 4. **No** `UploadInstance '...' called off the owner thread` line, **no** `PublishedResources used on thread` line, and no

@@ -124,30 +124,35 @@ Hooks (`BinkHooks.cpp`, all detours by ID, so SE and AE are the same):
 | `LockTexture` | for the tick's tiles: the tile's place in this tick's staging buffer | the engine's |
 | `UnlockTexture` | for the tick's tiles: nothing | the engine's |
 | `DrawTiles` | withheld; the frame is queued (`Graph::Queue`) | the engine's, and the graph's textures are marked stale |
-| `FreeTiles`, `Close` | the record goes; after a graph movie the client leaves the Present anchor | the same |
+| `FreeTiles`, `Close` | the record goes; the next movie starts from a clean count (the client stays) | the same |
 
 The seam is one call in `Hooks::Install` (`src/Hooks.cpp`): `RenderGraph::Engine::Bink::InstallHooks()`, which also reserves
 the Present anchor. With the switch off and no `CS_ORG_BINK_SHOT`, nothing is hooked.
 
-A tick is a graph tick when the switch is on, the player is in mode 1, the tick runs on the main thread
-(`FrameAnchors::OnMainThread`), HDR output is off for the frame, the runtime is active with the Present anchor's epoch, the
-framebuffer is imported and the program for its format is built, the client is registered (the first eligible tick registers
-it and stays the engine's), and the set's ORG textures exist (made at its first graph tick).
+A tick is a graph tick when the switch is on, the player is in mode 1, the tick runs on the render owner
+(`FrameAnchors::IsRenderOwner`), HDR output is off for the frame, the client is in the Present anchor's built graph
+(`FrameAnchors::RequestJoin`) and the anchor can run this frame (`FrameAnchors::CanRun`), the framebuffer is imported, the
+program for its format is built (`ProgramCache`), the movie fits the movie texture, and no frame of this movie failed to draw.
 
 The ORG side (`BinkGraph.cpp`), the same shape as ImGui's backend (`ImGuiBasicRHI.cpp`):
 
-- **Tile textures:** one BasicRHI R8G8B8A8_UNORM texture per tile at the engine's size, with its SRV. Not graph resources:
-  the pass records their barriers itself (undefined to copy-dest the first time, shader-read after).
-- **The upload ring:** host-visible `LatchBlock` staging buffers, one frame each, every tile's rows at a 256-byte pitch and
-  512-byte placement. A pool of at most four: a buffer goes back when the last frame that names it retired. With none free,
-  the tick decodes on the engine's path. No D3D11 `Map` is involved on a graph tick. The edge tiles' parts beyond the video
-  are zeroed, as the engine's zero-filled textures hold.
-- **The pass:** client `cs.bink`, pass `cs.bink.tiles` at the Present anchor, order -1000 (before any other Present client),
-  kind Render, onto `EngineTarget(kFRAMEBUFFER)`. The commit stores the queued frame in the host's frame slot. `Record`
-  takes it, retains it, records the copies (when the tick decoded) with their barriers, then one render pass with load op
-  Load (the engine's clear already ran in D3D11, in stream order before the epoch) and one 6-vertex draw per tile, its
-  texture and rectangle in the push block. Blending off, no depth, no culling, the framebuffer's size as the viewport.
-- **Paused frames:** a tick that decoded nothing draws the textures as they are, when the newest frame is in them.
+- **One client for the session**, registered at `State::Setup` (`Bink::Setup`, from `Engine::Setup`): a movie never registers,
+  unregisters or refreshes anything. The framebuffer is `FrameAnchors::EngineTarget(kFRAMEBUFFER)`; a new back buffer (a
+  resize) refreshes the client once, and ticks are the engine's until it has joined again.
+- **The movie texture:** one persistent graph texture (`Bink::Movie`, 2048x1152 R8G8B8A8_UNORM, 9 MB) that holds the whole
+  video, each tile at its place in it. A 1920x1080 movie's tiles reach 1920x1088; a larger movie keeps the engine's path. The
+  graph orders its uses (no hand-written barriers). Linear filtering at a tile's edge now reads the neighbouring tile's
+  texels, where the engine's separate textures clamp: the seams the engine shows at 256-pixel steps are gone.
+- **The upload ring:** `RenderGraph::FrameStaging` (at most four blocks), one frame each, every tile's rows at a 256-byte pitch
+  and 512-byte placement. With none free, the tick decodes on the engine's path. No D3D11 `Map` is involved on a graph tick. The
+  edge tiles' parts beyond the video are zeroed, as the engine's zero-filled textures hold.
+- **The passes:** client `cs.bink` at the Present anchor, before any other Present client: `cs.bink.upload` (order -1001, a
+  copy pass: the staging buffer's tiles into the movie texture) and `cs.bink.tiles` (order -1000, one render pass with load
+  op Load onto the framebuffer, one 6-vertex draw per tile, its rectangle and its region of the movie texture in the push
+  block; blending off, no depth, no culling). The commit stores the queued frame for both in `RenderGraph::RunSlots`; each
+  pass takes its slot's frame and records nothing when there is none, so they are recorded every run (no revision) and never
+  repeat an older run's frame.
+- **Paused frames:** a tick that decoded nothing draws the movie texture as it is, when the newest frame of this movie is in it.
 
 The anchor runs at `IDXGISwapChain::Present`, which the tick's `Renderer::End` reaches right after `DrawTiles`, so the graph's
 draw lands in the frame that Present shows, under CS's overlay and HDR output.
@@ -155,17 +160,18 @@ draw lands in the frame that Present shows, under CS's overlay and HDR output.
 ### Fallbacks
 
 - Any of the conditions above false: the engine's path for that tick, D3D11 as before.
-- The pipeline, the sampler, the framebuffer import or the registration fails, the client's epoch fails (`onFailed`), or three
-  queued frames in a row never run with the pass in the graph (counted from the `executed` signal): logged once
-  (`[ORG] Bink: <why>; the engine draws Bink from now on`), the client is unregistered, and every later tick is the engine's.
-  The engine's tiles get the next decoded frame, so at most the failing frame is lost.
+- The movie texture, the staging pool, the sampler, the framebuffer import or the registration fails at Setup, or the client's
+  epoch fails (`onFailed`): logged once (`[ORG] Bink: <why>; the engine draws Bink from now on`), and every later tick is the
+  engine's.
+- A queued frame whose run did not submit with the passes (no `executed` signal; only an epoch failure after `CanRun` allowed
+  it): the rest of that movie is the engine's (`a movie frame queued for the Present anchor did not draw`). At most that one
+  frame is lost; the next movie tries the graph again.
 - A tile set whose layout is not the expected one (bytes per pixel, tile count): logged, that movie stays the engine's.
 
 ### Threads, and what P5.12 needs
 
-Everything on the graph side runs on the main thread: the tick, the locks, the queue, and the Present anchor's run that the
-tick's Present reaches. Tile sets are made and freed on the playing thread, so their records are under a mutex; the ORG
-textures are made only on the main thread.
+Everything on the graph side runs on the render owner: the tick, the locks, the queue, and the Present anchor's run that the
+tick's Present reaches. Tile sets are made and freed on the playing thread, so their records are under a mutex.
 
 The startup logo stays on D3D11 for now: it presents from the MoviePlayer thread, where `FrameAnchors::Run` returns false.
 The way to put it on the graph, which P5.12 needs for the loading-screen thread too, is an explicit epoch run under
@@ -197,8 +203,8 @@ tiles into HDR's UI texture (imported as ImGui imports it) is the follow-up.
 
 | Variable | Effect |
 | --- | --- |
-| `CS_ORG_BINK=1` | Bink on the render graph as above. Logs `Hooking the Bink movie player (CS_ORG_BINK)`, then per movie `[ORG] Bink: drawing onto the framebuffer (...)`, `registered at the Present anchor ...`, `a WxH movie in N tiles, B bytes of staging a frame` and `a WxH movie ended: G frames drawn by the render graph, E by the engine`. |
-| `CS_ORG_BINK_SHOT=<n>[,<n>...]` | A diagnostic for either path: the Present of each listed decoded frame (player +0x10) on the main thread is saved through the Screenshot feature as `<log dir>/dclf-shots/bink-<n>.png` (cs-ab copies it to the run's `shots`). Logs `[ORG] Bink: capturing decoded frame n (render graph|engine)`. Hooks the player even with `CS_ORG_BINK` off. |
+| `CS_ORG_BINK=1` | Bink on the render graph as above. Logs `Hooking the Bink movie player (CS_ORG_BINK)`, at Setup `[ORG] Bink: drawing onto the framebuffer (...)` and `on (CS_ORG_BINK); registered at the Present anchor for the session`, then per movie `a WxH movie in N tiles, B bytes of staging a frame` and `a WxH movie ended: G frames drawn by the render graph, E by the engine`. Why a tick is the engine's is logged once per reason (`the engine draws this frame: ...`). |
+| `CS_ORG_BINK_SHOT=<n>[,<n>...]` | A diagnostic (read with `Switches::List`) for either path: the Present of each listed decoded frame (player +0x10) on the main thread is saved through the Screenshot feature as `<log dir>/dclf-shots/bink-<n>.png` (cs-ab copies it to the run's `shots`). Logs `[ORG] Bink: capturing decoded frame n (render graph|engine)`. Hooks the player even with `CS_ORG_BINK` off. |
 
 ## Test plan
 
@@ -209,8 +215,9 @@ always takes the engine's path; it shows only that the hooks pass it through (no
 To trigger a Bink on the main thread in a test, use the harness command `dclf:bink=BGS_Logo.bik` in
 `CS_DCLF_TEST_COMMANDS`. The console's `PlayBink` does nothing there (the harness runs console commands as a compiled
 script), so `dclf:bink` calls `MoviePlayer::PlayMovie` (SE 87918, AE 90291) on the BGSMoviePlayer singleton (SE 525733, AE
-412214) with the console's defaults, on the main thread at its next frame-job wait (SE 34554, AE 35409, hooked by
-`Bink::RequestPlay`; SKSE tasks run on job threads in this setup). It logs `[ORG] Bink: playing <file> on thread <id> (main
+412214) with the console's defaults, on the main thread at its next frame-job wait (SE 34554, AE 35409, through
+`RenderGraph::Engine::MainTick`, added at plugin load only while `CS_DCLF_TEST_COMMANDS` is set; SKSE tasks run on job threads
+in this setup). It logs `[ORG] Bink: playing <file> on thread <id> (main
 thread: true)`. It blocks the main thread for the movie's 7 seconds; the test harness's frame count does not move
 meanwhile.
 
@@ -223,17 +230,21 @@ What to check:
 
 1. Both runs: the logo at startup plays as before; no `[E]` lines besides the known one; no device loss.
 2. org1's log: the lines listed under the switch; the `movie ended` line with nearly every frame drawn by the render graph
-   (0 or 1 by the engine: the registration tick). Its absence, or `the engine draws Bink from now on`, is a failure.
+   (a few by the engine only while the tile program builds or the client joins). Its absence, `the engine draws Bink from now
+   on`, or `did not draw` is a failure.
 3. The shots: `bink-40.png` and `bink-120.png` of both runs should match byte for byte, or nearly (the same decoded bytes,
-   sampler and quads; a difference at tile seams or edges points at the rectangles, a red/blue swap at the shader).
-4. After the movie: the game draws again (the `after` shot), and the Present anchor costs nothing (the client unregistered).
+   sampler and quads, except at the 256-pixel tile seams, which the movie texture no longer shows; a difference elsewhere
+   points at the rectangles or texture regions, a red/blue swap at the shader).
+4. After the movie: the game draws again (the `after` shot). The client stays registered; with no movie its passes record
+   nothing (the movie texture's barriers only).
 
-Not checked without a build: compilation, the first graph frame after registration (whether the build at the next run
-already has the pass; the miss counter tolerates two lost frames), and AE (the IDs and layouts are the same in Ghidra).
+Not checked without a build: compilation, and AE (the IDs and layouts are the same in Ghidra). The startup logo plays before
+`State::Setup` registers the client, so it may stay the engine's even with `CS_ORG_LOADING_THREAD=1`.
 
 ## Open points
 
-- The startup logo on the graph: P5.12's `CS_ORG_LOADING_THREAD=1` (above); not run in game yet.
+- The startup logo on the graph: P5.12's `CS_ORG_LOADING_THREAD=1` (above). It has not been run in game, and the client now
+  registers at `State::Setup`, which may come after the logo: then the logo is the engine's.
 - HDR output's UI texture as the target.
 - Mode 2 movies (inside another frame) need their draw at the point of `DrawTiles`, not at the Present: an anchor at that
   point, or a draw into the frame's own epoch.

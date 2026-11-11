@@ -93,20 +93,24 @@ mechanism below unless the row says otherwise.
 - **VolumetricLighting** replaces the VL compute shaders in the dispatch hook; their ORG form is the compute half (next).
 - **p5-water**: the water displacement simulation (slot 31). **p5-menus**: menu 3D (51855's SimpleColor clear, stencil
   NOT_EQUAL composite, the manager rectangle) and the map camera; ISLocalMap is this task's. **p5-loading**: loading-screen
-  frames run on a job thread, where this port never takes a draw (`FrameAnchors::OnMainThread`).
+  frames run on the serving thread, where this port takes draws only when that thread owns rendering
+  (`FrameAnchors::IsRenderOwner`, `CS_ORG_LOADING_THREAD=1`); `FrameAnchors::CanRun` checks it before any draw is withheld.
 
 ## How the built part works
 
 **Scopes.** Draws are taken only inside two scopes, detoured at their function starts: the HDR effect's Render and
 RenderPreTonemapComposites. Inside a scope, `BSImagespaceShader::Render` records which shader is drawing; an effect is eligible
 when it is selected and the capture is active, and it has no custom viewport, no manager rectangle and no dynamic-resolution
-quad.
+quad. The three reads are CommonLib's fields, checked in Ghidra on SE and AE: `ImageSpaceEffect::unk88` (Render skips
+`UpdateViewPort` when it is set), the manager's `rect` (Render applies it when `left` and `right` are not -1, the engine's own
+test of two of its four fields) and `RUNTIME_DATA::unk58` (`RenderEffect` draws the quad at +0x50 instead of +0x48).
 
 **The choke point.** In `DrawTriShape`, an eligible effect's draw reads the shadow state as SetDirtyStates is about to apply it:
 render target 0 (an engine target, no other target, no depth or stencil, no clear at the bind), a viewport covering the target,
 no scissor, the PS textures the effect reads (each an engine target's SRV), their address and filter modes, and the blend state
 from the engine's table. That is the draw's shape. A shape with a pass then calls `SetDirtyStates(false)` itself, takes the
-captured PS b2 (`Constants::Find(Current(), Pixel, 2)`, group Custom), and joins the batch instead of drawing. Anything else is
+draw's constants (`Constants::Capture(kDrawStages)`, then `Find(use, Pixel, 2)` and `Find(use, Pixel, 12)`), and joins the
+batch instead of drawing. Anything else is
 drawn by the engine, after the pending batch runs.
 
 **Batches.** A batch runs (`FrameAnchors::Run(ImageSpace)`) before any engine draw or dispatch that is not taken, before a taken
@@ -114,10 +118,11 @@ draw whose pass is not after the last one in the batch (the graph runs passes in
 Its commit writes each draw's constant location (`OrgEngineConstantsAt`: ring chunk SRV and offset) into the client's latch
 at the draw's entry and opens its gate entry. The shaders read PerGeometry from the ring through that location
 (`Common/OrgEngineConstants.hlsli`), the shared constants for FrameBuffer and SharedData, and their textures and samplers by
-handle. Draws are taken for two batches a frame (the composites, the HDR effect before its tonemap), and a later batch's draws
-stay with D3D11. The anchor is sized for four runs (the joining runs use the rest), but the runtime sizes every multi-run
-anchor for two when the anchors' frame slots would pass 255, and a batch must never meet a full ring after its draws were
-withheld. Shapes get their entries (and so their order) by their place among the frame's draws, so the luminance chain's
+handle. A batch is started (its first draw withheld) only when `FrameAnchors::CanRun` says the anchor can run it now (the
+caller owns rendering, the registration is in the built graph, the ring has a slot left this frame) and the frame has used
+fewer runs than `FrameAnchors::RunsPerFrame(ImageSpace)` (4, from the anchor table; the steady state uses two: the
+composites and the HDR effect up to its tonemap). Otherwise the engine draws. The ring holds `kGameFramesInFlight` times
+the runs a frame, and `CanRun` sees a full one before a draw is withheld, so a withheld batch never meets it. Shapes get their entries (and so their order) by their place among the frame's draws, so the luminance chain's
 alternating levels do not cut the batch.
 
 **Passes.** One `AnchorPasses::Draw` per shape: the effect's RasterProgram (its CS source, the D3D11 build's defines from
@@ -136,27 +141,31 @@ own, which is what the capture does already.
 | Trigger | Handling |
 | --- | --- |
 | Effects that run on some frames only (bloom radius changes, adaptation, composites without VL) | Each shape is a pass behind its gate entry; a run opens only the entries it draws. No rebuild. |
-| Targets changing between effects (the luminance chain's alternation, ping-pong) | Learnt as separate shapes in the learning window (120 frames without a new shape), all registered at once. No rebuild. |
-| A shape first seen after the registration (a new weather's bloom radius, an effect's first use) | Drawn by D3D11 and queued; it joins only at the next cell change (a loading screen has just rebuilt things anyway), at most 16 registrations a session. |
-| The engine's targets made again (a resize) | The passes are dropped and the shapes learnt again; the anchors rebuild for the new imports anyway. |
-| Registration itself | Once per learning window. The draws stay the engine's until `FrameAnchors::InBuiltGraph` says the graph holds it; the port only runs the empty anchor (the anchors' joining rule) so the host builds it. How long that build holds the frame is the anchors' behaviour, the same as for every client; it happens once per registration, not per frame. |
+| Targets changing between effects (the luminance chain's alternation, ping-pong) | Learnt as separate shapes in the learning window (120 frames in a cell without a new shape), with the shapes the RE says they imply (kMAIN / kMAIN_COPY as the source, the alternating last luminance level, every bloom radius for a bloom shape), all registered at once. No rebuild. |
+| A shape first seen after the registration (an effect's first use) | Drawn by D3D11 and queued; it joins only at the next cell change. The number of shapes (at most 128 gate entries) bounds how often. A pausing menu no longer triggers a join. |
+| Programs | From `RenderGraph::ProgramCache`, built off the render thread. A registration waits until every shape's program is built, so it is one registration, not one per program. |
+| The engine's targets made again (a resize) | The same shapes are made again on the new imports and registered at once; the anchors rebuild for the new imports anyway. |
+| Registration itself | Once after the learning window. The draws stay the engine's until `FrameAnchors::RequestJoin` says the built graph holds it; the build is at the next build point, never a run of the anchor. |
 
 ## Fallbacks and failure
 
-- Per draw, to D3D11 (each reason logged once per effect): not selected, ineligible (above), a shape the shadow state does not
-  describe fully, a shape without a pass, the frame's runs used up, no captured constants.
+- Per draw, to D3D11 (each reason logged once per effect, `Util::ReasonLog`): not selected, ineligible (above), a shape the
+  shadow state does not describe fully, a shape without a pass, an anchor that cannot run another batch now, no captured
+  constants.
 - Per shape, at registration: an import that fails, a sampler or blend without an ORG form (blend factor, dual source), a program
   that does not build. Logged once; that shape stays D3D11.
-- A failed anchor epoch (`onFailed`) or a batch that did not run returns every effect to D3D11 for the session. A batch whose run
-  fails after its draws were withheld loses those draws for that one frame; the pass is never taken again.
+- A failed anchor epoch (`onFailed`) returns every effect to D3D11 for the session. A batch that does not draw after `CanRun`
+  allowed it (only an epoch that fails in that run) loses those draws for that frame: the engine's state for them is gone by
+  then. It is counted (`missed` in `Status`) and logged once; the next frames go on as before (an epoch failure turns the port
+  off at the next poll).
 
 ## Switches and log lines
 
 | Switch | Effect |
 | --- | --- |
 | `CS_ORG_IMAGESPACE=1` | Installs the hooks and takes the covered draws. Needs `CS_ORG_ENGINE_CONSTANTS=1`. |
-| `CS_ORG_IMAGESPACE_EFFECTS=<list>` | Comma list of engine names (`BSImagespaceShaderHDRDownSample4`), effect names (`ISHDRDownSample4`) or groups (`hdr`, `bloom`, `composite`), any case. Unset or `all`: every covered effect. |
-| `CS_ORG_IMAGESPACE_LOG=1` | Logs each new shape. |
+| `CS_ORG_IMAGESPACE_EFFECTS=<list>` | A diagnostic for bisecting an effect. Comma list (`Switches::List`) of engine names (`BSImagespaceShaderHDRDownSample4`), effect names (`ISHDRDownSample4`) or groups (`hdr`, `bloom`, `composite`), any case. Unset or `all`: every covered effect. |
+| `CS_ORG_IMAGESPACE_LOG=1` | A diagnostic: logs each new shape and each effect's constant sizes once. |
 
 Covered effect names: ISHDRDownSample16, ISHDRDownSample4, ISHDRDownSample16Lum, ISHDRDownSample4RGB2Lum,
 ISHDRDownSample4LumClamp, ISHDRDownSample16LumClamp, ISHDRDownSample4LightAdapt, ISHDRDownSample16LightAdapt (hdr);

@@ -62,23 +62,34 @@ Not in this task: `CopyResource` at AE 107193+0x466 (0x1414d1af0, the ImageSpace
 
 | Engine work | On the graph | Anchor |
 | --- | --- | --- |
-| Shadow slice clears (depth targets 2, 3, 4, 10) | a gated depth-clear draw per slice | `EngineShadowClear` |
-| Reflection face clears (cube faces, depth 6) | a gated colour draw per face, a gated depth draw | `EngineCubeClear` |
-| Every other clear through the sites above | a gated draw per view and clear value | `EngineFrameClear` |
+| Shadow slice clears (depth targets 2, 3, 4, 10) | a pass per slice, its gated depth-clear draw | `EngineShadowClear` |
+| Reflection face clears (cube faces, depth 6) | a pass per face (gated colour draw), one for the depth | `EngineCubeClear` |
+| kMAIN, targets 2-7, kSHADOW_MASK and the main depth | a pass per view: a gated colour draw, or a gated draw per depth flag set | `EngineFrameClear` |
 | The three `kPOST_ZPREPASS_COPY` copies | one copy pass `kMAIN` to `kPOST_ZPREPASS_COPY` | `EngineDepthCopy` |
 
 - **The thunks.** The 8 ApplyState/SetDirtyStates calls, the ClearDepthStencil call and the two engine copies are patched with
   `call [rip+x]` (a NOP after the 7-byte ones); `ClearColor` is detoured whole. Each site's bytes are checked first, and a
   function whose sites are not all the RE's is left alone.
+- **Registered once.** At Setup every view of the fixed list above that the engine's tables hold is made a pass (its program
+  built then, one per format and depth flags), and each group registers once. A clear never registers anything: a view not
+  in the list keeps the engine's call (logged once per view). A group registers again only when the engine made one of its
+  targets again (its texture or view in the table changed: a resize), with a new gate and colour latch, so a recording of the
+  old registration (its gate closed by the anchors) cannot clear the wrong view. The depth copy does the same.
 - **Clears.** A clear thunk finds the view in the engine's tables (`renderTargets[i].RTV`, `depthStencils[i].views[s]`,
-  `cubemapRenderTargets[i].cubeSideRTV[f]`; `kFRAMEBUFFER` is left out) and takes it when its group has a registered pass for
-  that view and value. The bind thunk (and ClearColor/ClearDepthStencil, which have no bind) flushes: each group with clears
-  runs its anchor, whose commit opens those passes' gate entries. The engine's `OMSetRenderTargets` follows.
+  `cubemapRenderTargets[i].cubeSideRTV[f]`; `kFRAMEBUFFER` is left out) and takes it when its group's registration has a pass
+  for that view and flags, the registration is in the anchor's built graph (`FrameAnchors::RequestJoin`) and the anchor can run
+  now (`FrameAnchors::CanRun`). The bind thunk (and ClearColor/ClearDepthStencil, which have no bind) flushes: each group with
+  clears runs its anchor, whose commit writes each colour clear's value into the group's colour latch and opens the draws'
+  gate entries. The engine's `OMSetRenderTargets` follows. A run that did not submit (no `executed` signal) gets the engine's
+  calls, in order.
 - **Why draws.** An anchor's passes are fixed and its recordings are kept, and an ORG clear cannot be switched off per run. A
   fullscreen triangle through a `RunGate` can: the clear programs (`package/Shaders/RenderGraph/EngineClear.hlsl`) write depth 1
-  from the vertex stage (test Always) and zero the stencil with `StencilOp::Zero`, or write a colour from the push block. This
+  from the vertex stage (test Always) and zero the stencil with `StencilOp::Zero`, or write the colour latched for the run (a
+  LATCH entry: one pass serves every clear colour). This
   needed depth-only raster programs (`RasterProgram`, no colour target with a depth format).
-- **Copy.** `AnchorPasses::Copy` (both aspects of a depth-stencil format).
+- **Copy.** `AnchorPasses::Copy` (both aspects of a depth-stencil format). It has no run gate: a copy has no indirect form,
+  and a raster copy cannot write the stencil the engine's `CopyResource` copies. It needs none: `EngineDepthCopy` is the
+  skeleton's own anchor, nothing else registers there, and every run of it is `RunCopy`'s, which wants the copy.
 - **Kept on D3D11 on purpose.** The binds (`OMSetRenderTargets`): the engine's residue casters, the face residue and the other
   D3D11 draws still read them (P5.2 finishes DCLF's coverage). `ClearState` and the b12 binds in `Renderer::Begin`: no handle
   passes through them, and the D3D11 readers that remain rely on both; the per-frame buffer's Map belongs to P5.7.
@@ -99,7 +110,8 @@ skeleton's anchors are listed with their runs a frame in the anchor table (`Fram
 Presents ago, the ring takes one slot more instead of waiting, so the host's thread waits only for runs earlier Presents
 flushed. A frame with more runs of an anchor than its whole ring (32 shadow clears) is the only limit left: the runs past it get
 the engine's D3D11 calls (logged once: `... ran more than its 32 frame slots in one frame; runs past them fall back until the
-next Present`). The skeleton has no cap of its own any more.
+next Present`). The skeleton has no cap of its own; `FrameAnchors::CanRun` sees the full ring before a clear is withheld,
+so those clears are the engine's from the start.
 
 This issue exists only because, in the guest phase, each anchor is a separate host epoch spliced into DXVK's stream, which DXVK submits at Present. Once ORG owns the frame (the Phase 6 cutover), these clears and the other per-call engine work are passes inside one frame graph, and the slot-per-run ring no longer applies.
 
@@ -107,16 +119,16 @@ This issue exists only because, in the guest phase, each anchor is a separate ho
 
 Per call, the engine's D3D11 call is made (in the original order, at the flush, for taken clears) when:
 
-- the view is not in the engine's tables, is not one mip-0 slice, has an integer format, or its value is not depth 1 / stencil 0;
-- the view is new (its pass is made and registered at the flush; its first clear stays on D3D11);
-- the run did not hold the pass: the anchor's `executed` signal did not come (a graph built before the pass joined, a failed
-  epoch, a call off the main thread such as a loading screen);
-- the anchor ran more times this frame than its ring of slots holds (above);
-- the group failed (anchor failure, 128 gate entries used up, more than 16 rebuilds for new textures) or a view's clear value
-  kept changing (more than 4 values: that view stays on D3D11).
+- the view is not in the skeleton's list or not in the engine's tables, is not one mip-0 slice, has an integer format, its
+  value is not depth 1 / stencil 0, or its depth flags have no draw (a depth-only clear of a stencil format);
+- the caller is not the render owner, the registration is not in the anchor's built graph yet, or the anchor's ring is full
+  this frame (`CanRun`);
+- the run did not submit with the pass (no `executed` signal: a failed epoch);
+- the engine made the view's target again: the group registers again, and clears stay the engine's until it has joined;
+- the group failed (anchor failure).
 
-A resize gives the targets new textures: the group drops its passes and makes them again from new gate entries, so a kept
-recording made before cannot clear the wrong view.
+Any clear value is drawn by the view's one pass (the colour is latched), so there is no per-value limit, and the old limits (4
+values a view, 128 gate entries, 16 rebuilds, 32 clears) are gone.
 
 ## Test plan
 

@@ -1509,3 +1509,29 @@ From P5.8/P5.9 (`docs/development/p5/menus.md`). Two needs a menu scene's view b
   and the 255-slot limit (an 8-bit slot index) is what forces CS to drop anchors at startup when every port is on
   (`FrameAnchors::FitSlotBudget`). A wider slot index, or rings sized per epoch outside the shared slot space, would lift it.
 - **Found by:** the Phase 5 review (2026-11-11).
+
+### Mid-frame rebuilds and the engine skeleton's device loss (Phase 5 review fixes)
+
+- **Seen:** with every port on, the device was lost during a loading screen each time. Just before it the skeleton joined a new
+  view (rt18, kSHADOW_MASK): its first use made `Targets` publish `Engine::kSHADOW_MASK`, the skeleton registered its frame
+  group again, and the serving thread built epochs 28, 30 and 23 again within 150 ms; the host's timelines then read
+  `UINT64_MAX` (lost). Fixed on the CS side by removing the trigger: the skeleton imports every target it clears and registers
+  once at Setup, and no clear registers or imports anything.
+- **Why a rebuild there can lose the device (not proven; for the ORG side to check):**
+  - `GraphHost::SubmitEpoch` builds the epoch's graph inline when `BuildDue` (no explicit builds, or no graph yet): on the
+    render thread, between two submissions of the same frame. `BuildInstance` retires the old graph with
+    `done = SubmittedPoint()`: the host's assigned timeline values. For in-stream epochs those signals ride on DXVK's
+    submission of the command list the segments landed in, which happens at the next Present; `ReleaseRetiredGraphs` frees
+    the old graph only once `done.Reached()`, which is safe only if every segment of the old graph emitted so far carries a
+    signal at or below that point. A segment emitted with a value assigned after `SubmittedPoint` was read, or a kept
+    recording of the old graph still queued in DXVK's CS chunk without its own signal, would free descriptors, pipelines or
+    transient memory a pending command buffer still uses.
+  - A first publish of a resource (`PublishedResources::Store`) asks every epoch to build again, but explicit builds build only
+    the epochs whose instance is due at the build point, one at a time (the log shows three). Until all are built, some
+    epochs' graphs know the new resource and others do not; their external home states (the layout each epoch returns an
+    image to) then disagree for that image within one frame.
+- **Proposed ORG change:** retire a replaced in-stream graph only behind a point DXVK has signalled for it (an explicit
+  wait-only external command after the last segment of the old graph, as `CloseComputeEpoch` adds), never behind
+  `SubmittedPoint`; and give `SubmitEpoch` a mode that never builds inline (fail the run as `NotBuilt` so the caller keeps the
+  engine's path), so a rebuild can only happen at a build point.
+- **Found by:** fix-engine (2026-11-11), from run `1111-053411-p35-p5-all-f1`.
