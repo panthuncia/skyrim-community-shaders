@@ -5,7 +5,9 @@
 //
 // A crash: a vectored handler runs before any SEH frame swallows the fault, so it sees the exception even when something downstream
 // would turn it into a silent exit (the frame-generation interop could take the process down during a load with no Windows Error
-// Reporting record). It writes CommunityShaders.dmp beside the game.
+// Reporting record). It writes CommunityShaders.dmp beside the game, for the session's first access violation (or other fault code)
+// on any thread. That is a first-chance exception: a handler of the code that raised it may still catch it, so the log line says so,
+// names the module and offset, and the helper keeps serving requests afterwards (a hang report that follows is still written).
 //
 // A hang: the watchdog (HangWatchdog.h) asks for the stuck thread's report. The helper writes every thread's stack as text and a
 // minidump.

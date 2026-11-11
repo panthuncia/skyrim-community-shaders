@@ -5,6 +5,7 @@
 // while holding the heap's lock hung the game in the dump (2026-10-11). The crash handler only writes the faulting thread and its
 // exception pointers into a shared section, signals the helper and waits for it: no allocation, no lock.
 
+#include <cstring>
 #include <mutex>
 #include <thread>
 
@@ -20,6 +21,9 @@ namespace CrashDump
 			std::uint64_t exceptionPointers;
 			wchar_t dumpPath[1024];
 			wchar_t textPath[1024];
+			std::uint32_t written;  // the helper's answer: 1 when the minidump was written
+			std::uint32_t error;    // else the Win32 error it failed with
+			std::uint64_t bytes;    // the minidump's size
 		};
 		constexpr std::uint32_t kCrash = 0, kHang = 1;
 
@@ -54,8 +58,30 @@ namespace CrashDump
 			if (written.exchange(true))
 				return EXCEPTION_CONTINUE_SEARCH;
 
-			logger::critical("[CRASH] exception {:#x} at {} - writing CommunityShaders.dmp", code,
-				fmt::ptr(a_exception->ExceptionRecord->ExceptionAddress));
+			// A vectored handler runs before the frame handlers of the code that raised the exception: this is the first chance, and a
+			// handler further down may still catch it (a driver's probe, a __try). Only what follows in the log says whether the game
+			// went on. The module and offset name the code without a debugger.
+			const auto* address = a_exception->ExceptionRecord->ExceptionAddress;
+			HMODULE module = nullptr;
+			char moduleName[MAX_PATH] = "no module";
+			if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCSTR>(address), &module) &&
+				module) {
+				char path[MAX_PATH]{};
+				if (GetModuleFileNameA(module, path, MAX_PATH)) {
+					const char* slash = std::strrchr(path, '\\');
+					strncpy_s(moduleName, slash ? slash + 1 : path, _TRUNCATE);
+				}
+			}
+			const auto offset = module ? reinterpret_cast<std::uintptr_t>(address) - reinterpret_cast<std::uintptr_t>(module) : 0;
+			// An access violation's kind and address (ExceptionInformation: 0 read, 1 write, 8 execute).
+			std::string access;
+			if (const auto& record = *a_exception->ExceptionRecord; code == EXCEPTION_ACCESS_VIOLATION && record.NumberParameters >= 2) {
+				const auto kind = record.ExceptionInformation[0];
+				access = fmt::format(", {} {:#x}", kind == 8 ? "executing" : kind == 1 ? "writing" : "reading", record.ExceptionInformation[1]);
+			}
+			logger::critical("[CRASH] first-chance exception {:#x} at {} ({}+{:#x}{}) on thread {}; a handler may still catch it. Writing "
+							 "CommunityShaders.dmp",
+				code, fmt::ptr(address), moduleName, offset, access, GetCurrentThreadId());
 			spdlog::default_logger()->flush();
 
 			if (helper.shared) {
@@ -67,7 +93,13 @@ namespace CrashDump
 				helper.shared->exceptionPointers = reinterpret_cast<std::uintptr_t>(a_exception);
 				ResetEvent(helper.done);
 				SetEvent(helper.request);
-				WaitForSingleObject(helper.done, kCrashDumpWaitMs);
+				if (WaitForSingleObject(helper.done, kCrashDumpWaitMs) != WAIT_OBJECT_0)
+					logger::critical("[CRASH] the crash dump helper did not answer within {} s", kCrashDumpWaitMs / 1000);
+				else if (helper.shared->written)
+					logger::critical("[CRASH] wrote CommunityShaders.dmp ({} KB)", helper.shared->bytes / 1024);
+				else
+					logger::critical("[CRASH] CommunityShaders.dmp could not be written (error {})", helper.shared->error);
+				spdlog::default_logger()->flush();
 			}
 			return EXCEPTION_CONTINUE_SEARCH;
 		}

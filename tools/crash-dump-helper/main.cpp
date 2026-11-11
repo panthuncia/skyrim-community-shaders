@@ -3,7 +3,9 @@
 // The plugin starts this helper once at load (src/CrashDump.cpp, CrashDump::Start) with four inherited handles: the game process,
 // the request event, the done event and a small shared section. A request is one of two kinds:
 // - A crash. The plugin's vectored handler writes the faulting thread and its EXCEPTION_POINTERS address into the section, signals
-//   the request event and waits for the done event. The helper writes a minidump to the path on its command line.
+//   the request event and waits for the done event. The helper writes a minidump to the path on its command line. The handler sees
+//   first-chance exceptions, which some handler may still catch, so the helper keeps serving requests after a crash dump (a hang
+//   that follows still gets its report).
 // - A hang. The plugin's watchdog (src/HangWatchdog.cpp) found the render thread stuck. It writes that thread and two paths into
 //   the section. The helper writes a text file with every thread's stack (the stuck thread first, symbols from the PDBs beside the
 //   modules), then a minidump.
@@ -35,6 +37,9 @@ namespace
 		std::uint64_t exceptionPointers;  // a crash's EXCEPTION_POINTERS* in the game's address space
 		wchar_t dumpPath[1024];           // a hang's minidump
 		wchar_t textPath[1024];           // a hang's stacks
+		std::uint32_t written;            // the helper's answer: 1 when the minidump was written
+		std::uint32_t error;              // else MiniDumpWriteDump's GetLastError (or CreateFile's)
+		std::uint64_t bytes;              // the minidump's size
 	};
 
 	constexpr std::uint32_t kHang = 1;  // Shared::kind; 0 is a crash
@@ -45,21 +50,51 @@ namespace
 		return reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(std::wcstoull(a_text, nullptr, 10)));
 	}
 
-	void WriteMinidump(HANDLE a_process, const wchar_t* a_path, const Shared* a_shared, bool a_exception)
+	/**
+	 * @brief MiniDumpWriteDump's callback: memory it cannot read is left out instead of failing the whole dump. A stack word that points
+	 * into an unreadable range (a driver's mapping, a guard page) made the indirectly referenced memory fail and left a 0-byte dump.
+	 */
+	BOOL CALLBACK DumpCallback(PVOID, const PMINIDUMP_CALLBACK_INPUT a_input, PMINIDUMP_CALLBACK_OUTPUT a_output)
 	{
+		if (!a_input || !a_output)
+			return TRUE;
+		if (a_input->CallbackType == ReadMemoryFailureCallback)
+			a_output->Status = S_OK;
+		return TRUE;
+	}
+
+	/** @brief Writes the minidump and records the result in a_shared (written, error, bytes). A failed one leaves no file. */
+	void WriteMinidump(HANDLE a_process, const wchar_t* a_path, Shared* a_shared, bool a_exception)
+	{
+		a_shared->written = 0;
+		a_shared->error = 0;
+		a_shared->bytes = 0;
 		const HANDLE file = CreateFileW(a_path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-		if (file == INVALID_HANDLE_VALUE)
+		if (file == INVALID_HANDLE_VALUE) {
+			a_shared->error = GetLastError();
 			return;
+		}
 		MINIDUMP_EXCEPTION_INFORMATION info{};
 		if (a_exception) {
 			info.ThreadId = a_shared->threadId;
 			info.ExceptionPointers = reinterpret_cast<PEXCEPTION_POINTERS>(static_cast<std::uintptr_t>(a_shared->exceptionPointers));
 			info.ClientPointers = TRUE;  // the pointers are the game's
 		}
-		MiniDumpWriteDump(a_process, GetProcessId(a_process), file,
+		MINIDUMP_CALLBACK_INFORMATION callback{ &DumpCallback, nullptr };
+		const BOOL written = MiniDumpWriteDump(a_process, GetProcessId(a_process), file,
 			static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory), a_exception ? &info : nullptr, nullptr,
-			nullptr);
+			&callback);
+		const DWORD error = written ? 0 : GetLastError();
+		LARGE_INTEGER size{};
+		GetFileSizeEx(file, &size);
 		CloseHandle(file);
+		if (!written) {
+			DeleteFileW(a_path);
+			a_shared->error = error;
+			return;
+		}
+		a_shared->written = 1;
+		a_shared->bytes = static_cast<std::uint64_t>(size.QuadPart);
 	}
 
 	std::string Utf8(const wchar_t* a_text)
@@ -199,9 +234,10 @@ int wmain(int a_argc, wchar_t** a_argv)
 	const HANDLE done = HandleArg(a_argv[3]);
 	const HANDLE section = HandleArg(a_argv[4]);
 	const wchar_t* crashPath = a_argv[5];
-	const auto* shared = static_cast<const Shared*>(MapViewOfFile(section, FILE_MAP_READ, 0, 0, sizeof(Shared)));
+	auto* shared = static_cast<Shared*>(MapViewOfFile(section, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(Shared)));
 
-	// One request after another, until a crash or the game exiting (the process handle signalled).
+	// One request after another, until the game exits (the process handle signalled). A crash request does not end it: the
+	// exception may be one a handler catches, and a hang report may follow.
 	for (;;) {
 		const HANDLE waits[2]{ request, process };
 		if (WaitForMultipleObjects(2, waits, FALSE, INFINITE) != WAIT_OBJECT_0)
@@ -219,6 +255,5 @@ int wmain(int a_argc, wchar_t** a_argv)
 		}
 		WriteMinidump(process, crashPath, shared, true);
 		SetEvent(done);
-		return 0;
 	}
 }
