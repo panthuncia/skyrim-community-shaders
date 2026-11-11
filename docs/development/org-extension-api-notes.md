@@ -286,6 +286,12 @@ Each anchor's rule:
   after the present hooks (the deferred composite), after other mods' Present hooks and frame generation's hudless capture.
   Before the real present. It runs only on frames HDR composites (HDR on, the window usable), and only when
   `CS_ORG_HDR_DISPLAY=1`: HDRDisplay calls it. The UI texture is complete here, and the back buffer is not yet presented.
+- **EngineShadowClear, EngineCubeClear, EngineFrameClear.** Where the engine clears a target (`Renderer::ApplyState`,
+  `SetDirtyStates`, `Renderer::ClearColor`, `ClearDepthStencil`), right before the engine binds it: shadow map slices, the
+  reflection faces and their depth, and every other engine clear. Zero or more times a frame. Reserved only by the engine
+  skeleton (`CS_ORG_ENGINE_SKELETON=1`, `p5/skeleton.md`) and the self-test.
+- **EngineDepthCopy.** Where the main depth is copied into `kPOST_ZPREPASS_COPY`: `Main::RenderDepth`'s end, FinishAccumulating's
+  copy, and `Deferred::DeferredPasses` before the DeferredPasses anchor. Reserved only by the engine skeleton and the self-test.
 
 Keys used so far:
 
@@ -313,6 +319,8 @@ Keys used so far:
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
 - CS's ImGui (`CS_ORG_IMGUI`): 1000 at Overlay, last.
 - The Screenshot feature (`CS_ORG_SCREENSHOT`): 100 (the readback copy) at Capture.
+- The engine skeleton (`CS_ORG_ENGINE_SKELETON`): its gate entry (0 to 127) at EngineShadowClear, EngineCubeClear and
+  EngineFrameClear; 0 (the copy) at EngineDepthCopy.
 - HDR Display (`CS_ORG_HDR_DISPLAY`): 100 (the output composite), 101 (the copy into the back buffer, not in the owned frame)
   and 102 (the UI texture's clear) at HDROutput.
 - Upscaling (`CS_ORG_UPSCALING`): 100 (the upscaled colour into `kMAIN`), 200 to 204 (the depth and refraction normal copies,
@@ -453,6 +461,18 @@ Keys used so far:
   DCLF's code; a general API should move it beside `FrameAnchors::EngineTarget`. ORG's `ExternalTextureResource` needs a 3D
   view kind before such imports can be graph-tracked.
 - **Found by:** P2.7 (2026-11-09).
+### Clears that some runs skip
+
+- **Need:** a clear that runs on some runs of an anchor only, with the recording kept: the engine skeleton clears one shadow
+  slice or one cube face per run, out of a fixed set.
+- **Who:** CS's engine skeleton (P5.1). Any plugin that clears a target on some frames only.
+- **Where it fits:** ORG's clears (`ClearRTV`, `ClearDSV`, a pass's load op) cannot be gated, and a per-run revision would make
+  every variant a recording of its own. Today the skeleton draws the clear: a fullscreen triangle through a run gate, depth 1
+  from the vertex stage, the stencil zeroed by its ops (`RasterProgram` allows depth-only programs for this). That loses fast
+  clears, and every gated pass still begins its render pass. An ORG clear command with an indirect "skip" word (or a gated
+  render pass begin) would replace it.
+- **Found by:** P5.1 (2026-11-10).
+
 ### Work at an engine draw that is not an anchor
 
 - **Need:** run a pass where an engine draw happens (a specific Utility pass, a shader bind) instead of at an anchor.
