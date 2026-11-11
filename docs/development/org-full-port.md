@@ -43,26 +43,32 @@ pinned submodule commits exist only locally, so a fresh clone cannot fetch them.
 | P4 guest-phase order: every handle after the guest and the objects it wraps; CS readers of engine fields unwrap  | Done; 83 targets, 648 states and 70 queries get handles, shots match                | CS `org-port/p4`                                         |
 | P4 verify: tour (menus, map, journal, race menu, load, Blackreach), VRAM totals, streaming retire fix            | Done; shots match, VRAM within 4% of the D3D11 path; SE deferred                    | CS `org-port/p4`                                         |
 | P5 wave 1: constants capture, frame skeleton, sky, Bink, Scaleform subset, ImageSpace shader sources, slot rings | Merged and run; each matches its D3D11 reference (details below)                    | CS `org-port/p5`, ORG `org-port/p5-slots`                |
-| P5 wave 2: menus probe, loading screen, ImageSpace chain, water, screen blood; crash fixes                         | Merged and run; each matches its D3D11 reference within run noise (details below)  | CS `org-port/p5`, BasicRHI `org-port/p5-crash-basicrhi` |
+| P5 wave 2: menus probe, loading screen, ImageSpace chain, water, screen blood; crash fixes                       | Merged and run; each matches its D3D11 reference within run noise (details below)   | CS `org-port/p5`, BasicRHI `org-port/p5-crash-basicrhi` |
+| P5.2: DCLF coverage (cloud-lit and falloff effects, shadow depth clamp, point lights without LLF, first person)   | Merged and run; each scenario against the engine's own draws (details below)        | CS `org-port/p5`                                         |
+| P5.10 finish: the A8 glyph cache, the colour matrix filter, displays split around D3D11 parts                    | Merged and run; the part path runs with `CS_ORG_SCALEFORM_D3D11_PARTS`               | CS `org-port/p5`, BasicRHI (A8_UNorm, format remap)      |
+| P5 review and its fix lanes: framework, families, engine, Scaleform passes, DCLF core                            | Merged; `p5-all.env` runs with every port on                                        | CS `org-port/p5`                                         |
+| ORG: retire replaced statistics query pools after the in-stream lists that write them                            | Done; the device loss after in-session rebuilds                                     | ORG `org-port/rebuild-retire` (3100d0e)                  |
+| P5 wave 3: frame slot budget 512, ImageSpace end-of-frame effects, shadow masks, water's published slots         | Merged and run (2026-11-11); details below                                          | CS `org-port/p5`, ORG `org-port/frame-slots` (9cbc8b3)   |
+| P5.13 (the flush and the shader binds as tripwires)                                                              | Census and latch built (`CS_ORG_RESIDUE_CENSUS`, `CS_ORG_ENGINE_FLUSH_LATCH`); not flipped | CS `org-port/p5`                                         |
 
 **Root cause worth knowing:** a BasicRHI-created Vulkan device failed on AMD because the driver rejects acceleration
 structures in a mutable descriptor list at any count. DXVK never enables acceleration structures, so the adopted device
 never hit it. Acceleration-structure SRVs are now dropped from the descriptor-buffer model where this happens.
 
-**Phases 3, 3.5 and 4 are done; Phase 5's first two waves run in game** on `org-port/p5`. Phase 4's tour (menus, map,
+**Phases 3, 3.5 and 4 are done; Phase 5 runs in game** on `org-port/p5`, all but P5.13. Phase 4's tour (menus, map,
 journal, race menu, a load, Blackreach) matches the baseline with every switch on, and VRAM read from ORG is within 4% of
 the D3D11 path. SE 1.5.97 is deferred. Phase 5 wave 1, each against its D3D11 run:
 
 - **P5.7 constants:** every engine constant-buffer use is captured into graph memory; a read-back check found 0 differences.
 - **P5.1 skeleton:** the engine's nine clear and depth-copy sites run on the graph; no tripwire line from them is left.
-- **P5.3 sky:** the main view and the reflection faces draw on the graph (mean diff 1.0-1.6). The faces' clouds still
-  draw on the engine's path, so Cloud Shadows' copy keeps its D3D11 layer.
+- **P5.3 sky:** the main view and the reflection faces draw on the graph (mean diff 1.0-1.6). The cloud layers stay the
+  engine's by default (`CS_ORG_SKY_CLOUDS`, off until a run confirms them; p5/sky.md, "Cloud layers").
 - **P5.11 Bink:** a main-thread movie draws on the graph (165 of 166 frames), decoded frames identical. The startup logo
-  plays on its own thread and stays the engine's until P5.12.
-- **P5.10 Scaleform:** about half the displays draw on the graph, shots match. The rest: loading-screen displays (P5.12),
-  textures whose view cannot be resolved yet, filters and render-to-texture.
-- **ImageSpace sources:** all 124 slots have CS HLSL behind `CS_IMAGESPACE_SOURCES` (off by default). `all` matches in the
-  latest runs; an earlier colour shift and one fast-fail abort with the ISCopy group did not reproduce and stay open.
+  plays on its own thread; with P5.12's `CS_ORG_LOADING_THREAD=1` it draws on the graph too (164 or 165 of 166 frames).
+- **P5.10 Scaleform:** about half the displays drew on the graph in wave 1, shots match. The rest were loading-screen
+  displays (P5.12), the glyph cache's A8 view and filters or render-to-texture; the P5.10 finish covers them (below).
+- **ImageSpace sources:** all 124 slots have CS HLSL. The 82 checked ones build from it by default: the in-game A/B matched
+  (2026-11-10), so `CS_IMAGESPACE_SOURCES` was removed. ISMap and the two TAA variants stay on vanilla's DXBC.
 
 Phase 5 wave 2, each against its D3D11 run:
 
@@ -85,7 +91,81 @@ Crashes in the default-path runs, investigated with dumps and Ghidra:
   since; open.
 - Texture streaming registered a one-shot client per batch, about 250 graph rebuilds in a minute. Its windows are now
   made with their mips as initial data, without a pass: 54 rebuilds left, seven per epoch, one per load.
-- The crash handler logs first-chance faults as such, keeps its helper after a crash, and reports a failed dump.
+- The crash handler keeps its helper after a crash and reports a failed dump. First-chance faults only log (module and
+  offset); the session's one crash dump is written by an unhandled exception filter, for the fault that ends the process.
+  Before, the first first-chance access violation used the dump and held its thread for up to 120 s even when a handler
+  caught it.
+
+Phase 5.2 and the P5.10 finish, each against the engine's own draws:
+
+- **P5.2 DCLF coverage:** Lighting-variant effects lit by the cloud light and falloff effects without a blending alpha
+  property (`CS_DCLF_EFFECT_CLOUD_LIGHT`, `CS_DCLF_EFFECT_FALLOFF`); residue shadow views whose rasterizer state turns depth
+  clipping off, drawn with depth clamped (`CS_DCLF_SHADOW_DEPTH_CLAMP`); point lights without Light Limit Fix, from a
+  128-row frame table each draw picks from (`dclf-nollf-lights.env`); the precipitation mask without Skylighting
+  (`dclf-noskylighting-precip.env`, with its parity); first person on by default (`CS_DCLF_FIRST_PERSON`,
+  `dclf-first-person.env`); the particle manager's master particle systems behind `CS_DCLF_MASTER_PARTICLES` (off by
+  default; `master-particles-*.env`, `blood-particles-*.env`). `CS_DISABLE_FEATURES` disables features for one run.
+- **P5.10 finish:** the texture fallback was one texture, GFx's `A8_UNORM` glyph cache; BasicRHI now has `A8_UNorm` and a
+  per-device format remap (`Device::QueryFormatSupport`), so text draws on the graph. The colour matrix filter is a graph
+  draw. What the graph does not draw (other filters, render targets, line strips) is a D3D11 part between graph segments
+  instead of the whole display (p5/scaleform.md). With every port on, 10,982 of 11,000 displays drew on the graph.
+
+The Phase 5 review (2026-11-11) and its fix lanes:
+
+- **Framework primitives** (render-graph.md, "Joining, running and withholding"): `FrameAnchors::Run` returns a
+  `RunResult`, `CanRun` before withholding, `RequestJoin` as the one join gate (builds at DCLF's build point or at frame
+  end), `ClientDesc::executed`, `ProgramCache`, `FrameStaging`, `RunSlots`, `MainTick`, `Util::ReasonLog`, and the frame
+  slot budget logged at startup.
+- **Families helper:** the sky, water and screen blood take the engine's draws through one shared family helper
+  (`Core/Engine/Family`); the sky's cloud layers' occlusion is drawn into the later layers.
+- **Engine registrations once:** the skeleton imports every target it clears and registers once at Setup; Bink keeps one
+  client for the session; ImageSpace joins before it withholds; engine constants are captured on demand. A clear that
+  registered again had rebuilt three epochs within 150 ms during a load.
+- **Scaleform passes:** the Interface pass draws through a run gate, with `RunSlots` and `FrameStaging`; the client
+  registers once with both surfaces and joins through `RequestJoin`; pipelines come from a `ProgramCache`.
+- **DCLF core:** drawn roots retire and unheld roots are diffed; master particle observers run with the stats only;
+  shadow point light rows go first; first person is left out when it cannot be drawn; DCLF stops after a build failure.
+- **ORG's query-pool retirement** (`org-port/rebuild-retire`, 3100d0e): every new pass name replaced ORG's shared
+  statistics query pool, and the old one was destroyed while DXVK's pending command buffer still wrote into it. That was
+  the device loss after in-session rebuilds. A replaced pool now lives until the last list that recorded with it is
+  released, and the retirement frontier covers values given out on the host's shared timelines.
+
+Phase 5 wave 3 and the fixes after it (2026-11-11), each against its D3D11 run with VRAM Budget off:
+
+- **Missing terrain after a save load:** DCLF refused every graph-owned `B8G8R8X8` engine texture (`CS_ORG_ENGINE_TEXTURES`):
+  the A8 format-remap change compared the view's identity swizzle with BasicRHI's own alpha-to-one swizzle and called them
+  different. Material pairs reading such a texture were skipped while DCLF still withheld their draws, so land quads with a
+  BGRX diffuse drew nothing. An identity view now takes BasicRHI's swizzle, and a refused format logs once.
+  `terrain-load.env` is a two-minute check.
+- **Frame slots and ImageSpace:** ORG's 32-bit frame slots and a budget of 512 let ImageSpace run 13 times a frame. The
+  end-of-frame effects (depth of field and its compute blurs, refraction, the radial blur, the snow copy) are their own
+  scopes. A draw's viewport is read from the context after the state flush, so effects with their own viewport and the
+  dynamic-resolution part of a target under upscaling are taken; the SAO camera-Z levels are mips of one import. The
+  graph holds 53 ImageSpace passes in `imagespace-sao-ssr-org1.env`, against 23 before.
+- **Family inputs:** water, sky and shadow masks list the published ids they can read when their client is made, and
+  each build declares the registered ones, so a target published later no longer keeps a family on the engine for the
+  session. Water now draws on the graph after the first frames (`p5-all-census-misc.env`), matching its D3D11 shots.
+- **Shadow masks** (`CS_ORG_SHADOW_MASK`): the menu scenes' masks draw on the graph; the world's never register yet.
+- **Bink:** the startup logo drew 166 of 166 frames on the graph (`loading-org1.env`).
+- **Crashes seen, not ours:** VRAM Budget unloading cells under memory pressure, then a `coc` into an interior faulting in
+  EngineFixes (the batches now disable VRAM Budget, see its known grid-detach crash); a pathing job jumping into heap
+  memory through `zz_SkyrimEngineTelemetry.dll`'s zone hooks.
+
+**Open items:**
+
+- The sky's cloud layers on the graph stay off by default (`CS_ORG_SKY_CLOUDS`) until a run verifies them.
+- Without Light Limit Fix, a draw's point lights are selected per pixel from the 128-row table; selecting them once per
+  object is dclf-roadmap.md 3.7.
+- ORG's `StatisticsManager` still has a race on its shared query pool and no headroom in it: every new pass name replaces
+  the pool, and the retirement fix only keeps the old one alive for the lists that recorded with it.
+- P5.13: the census still reads 40-170 engine draws a frame (cloud layers, DCLF residue in load windows, refraction
+  normals, particles, distant tree LOD), so the latch stays off.
+- The world shadow masks never register; the menu's t5 is a stencil view the importer rejects.
+- ImageSpace left on D3D11: the distant blur (its output is `kFRAMEBUFFER`), `Main::RenderWaterEffects`' copies (a
+  queued texture each), refraction's late shape (it joins at the next cell change).
+- Dragonsreach is darker with the ImageSpace port on (`imagespace-sao-ssr-org1.env`); likely the eye adaptation chain
+  split between the graph and D3D11.
+- With DCLF on, the owned frame stops presenting at the first menu or loading screen (P1).
 
 **Phase 5 findings worth knowing:**
 
@@ -98,7 +178,8 @@ Crashes in the default-path runs, investigated with dumps and Ghidra:
   runs the epoch, `FrameAnchors::InBuiltGraph` tells a client when it is in, and a blocking movie builds between frames.
 - The engine keeps only kFRAMEBUFFER's RTV (the back buffer); `EngineTarget` takes the texture from it.
 - Switching a client's source every batch rebuilds the graph each time; a few hundred rebuilds ran the device out of
-  memory, so rebuilds are not freeing memory promptly (open).
+  memory. Rebuilds during play are removed at their trigger; one that cannot be avoided builds asynchronously and switches
+  in at the next snapshot, as DCLF's epochs do.
 - SKSE tasks run on job threads, not the main thread; Tracy now listens on localhost only (no firewall prompt).
 
 **Phase 4 findings worth knowing:**
@@ -410,7 +491,7 @@ These repos are separate, so changes land there first, then go into CS through a
 | W1: small compute producers | IBL (2 CS), ScreenSpaceShadows, TerrainShadows (1 CS, persistent heightmap), Skylighting probes (`UpdateProbesCS`), GrassCollision, VolumetricShadows (6 CS; hooked at the RenderShadowmask draw in `State::Draw`), LLF's remainder (lights buffer, local shadow copy `LocalShadowCopyCS`, fallback culling)                                                                                             | Each is a few passes; outputs already go to DCLF integrations |
 | W2: lighting                | ExponentialHeightFog (5-10 CS, history copies, LLF lists), SSGI (7 CS, history split for aliasing), SSS (2-3 CS), DynamicCubemaps (about 9 CS + GenerateMips + BC6H, 3-frame state machine), CloudShadows (4th MRT on the sky's cubemap draws: keep the engine draw until P5 sky, port the propagation copies now)                                                                                       | SSGI/SSS/composite order inside the DeferredPasses anchor     |
 | W3: post and output         | PostProcessing (13 sub-effects, about 45 dispatch sites + raster passes; about 1.2 GB aliasable at 4K), HDRDisplay remainder, Screenshot (staging readback through ORG readback), Upscaling's own passes (`UpscaleDepth` 2 PS, `CopyHudlessColor`, the copy into kMAIN), with Streamline inputs as graph resources. When no DXVK images remain, `SeparateFromGraphEpochs()` and the DXVK command ring go | Largest single port; split by sub-effect                      |
-| W4: engine-coupled          | TerrainBlending (re-issues terrain depth passes: becomes a DCLF terrain depth variant plus the `DepthBlend` CS), UnifiedWater flowmap (D3D11 deferred context; now built on the CPU), TruePBR glints noise (setup CS), Effects11 volumetric/sun rays (raymarch PS, 2 blur CS, apply PS)                                                                                                                  |                                                               |
+| W4: engine-coupled          | TerrainBlending (re-issues terrain depth passes: becomes a DCLF terrain depth variant plus the `DepthBlend` CS), UnifiedWater flowmap (was a D3D11 deferred context; now a CPU copy, no pass), TruePBR glints noise (setup CS), Effects11 volumetric/sun rays (raymarch PS, 2 blur CS, apply PS)                                                                                                         |                                                               |
 | W5: the FX runtime          | Replace FX11 (`Effects11/Effects/Effect.cpp`, `D3DX11CreateEffectFromMemory`): an `.fx` parser (techniques, passes, annotations, UI variables, render-target and texture declarations), DXC compile per pass, execution as ORG passes in the Tonemap anchor. Test against the presets Effects11 ships with. Keep FX11 behind the switch                                                                  | L; its own design doc first                                   |
 
 **Not ported:** GrassOptimizations. Its HiZ, culling and indirect draws drive the engine's grass, which DCLF's grass family already replaces. Its D3D11 path stays until cutover, then is deleted.
@@ -590,7 +671,7 @@ Each item carries its RE dependency. They are ordered so the frame's skeleton (t
 | P5.10 | Scaleform                      | A new `GRenderer` implementation (vtable SE 0x1417dbf90, constructed by 82790, `SetDependentVideoMode` 82918) that records ORG raster passes: batched triangles, masks (stencil, P0.1), blend modes, render-to-texture, the font cache texture, Scaleform's shaders rewritten in HLSL from R5's DXBC. Swap it in at `BSScaleformManager` init (80603). Largest new subsystem in this phase. (R5) The renderer bypasses BSGraphics (raw device and context from `GetScaleformRendererParameters`). Its 58-slot vtable, 55 SM 4.0 blobs and the embedded HLSL source of its shaders are mapped in the surface doc, so the shaders are transcribed, not rewritten. Masks use its own stencil with INCR/DECR.                                             |
 | P5.11 | Bink                           | Bink has no YUV path: `BinkCopyToBufferRect` writes RGBA8 256x256 tiles on the CPU and a copy shader draws them. The port is an RGBA8 upload ring plus a blit, presented through the ORG present stage from the blocking play loop or the sequence thread. (R10)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | P5.12 | Loading screen                 | The loop is `JobListManager::ServingThread` mode 2 (SE 38085 / AE 39039) under `Renderer::Lock` (recursive critical section, Renderer+0x2790 SE / +0x27F0 AE), drawing Scaleform and the loading-screen 3D model through the full accumulator and ImageSpace path. ORG submission and present must be safe from that thread under the same lock. (R6)                                                                                                                                                                                                                                                                                                                                                                                                 |
-| P5.13 | The flush and the shader binds | When the tripwire shows no draws left, `SetDirtyStates` 75580, `SetShader` 75550, `SetPixelShader` 75555 and `DispatchCSShader` 75532 become latch-only or no-ops, and their D3D11 sides are tripwires.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| P5.13 | The flush and the shader binds | When the tripwire shows no draws left, `SetDirtyStates` 75580/77386, `SetShader` 75550/77351, `SetPixelShader` 75555/77356 and `DispatchCSShader` 75532/77329 become latch-only or no-ops, and their D3D11 sides are tripwires. Code in `src/RenderGraph/Engine/Flush/`, RE and design in [p5/flush.md](./p5/flush.md). `CS_ORG_RESIDUE_CENSUS=1` counts every engine draw and dispatch that still reaches D3D11 through the guest context (by draw function, callers, last technique and view) and the flushes and binds no draw follows (`p5-all-census.env`). `CS_ORG_ENGINE_FLUSH_LATCH=1` runs the four functions on the CPU only and skips, logging once per site, any engine draw that then reaches D3D11; flushes CS asks for apply the owed state (`p5-all-latch.env`). Both off by default. The latch becomes the default only when the census reads zero over a full tour, the latch run skips nothing, and the D3D11-state readers in flush.md read the shadow state. Census of 2026-11-11 (p5-all tour): engine draws reach D3D11 in every frame, about 95 a frame in Whiterun (up to 199): the cloud layers (P5.3, `CS_ORG_SKY_CLOUDS`) 35-55, the ImageSpace raster and compute effects not yet taken (SAO, SSR, water blend, HDR blur, VL; P5.6) about 35, DCLF residue in `RenderBatches` (prepass Utility, Lighting, instanced DistantTree, shadow casters; P5.2) 20-60, water's raw-water and refraction-normal passes (P5.4), particles and skinned Effect partitions (P5.2), the shadow-mask pass (no owner yet), menu 3D Utility (P5.8), Bink's first frame and off-thread logo (P5.11/P5.12), a little Scaleform (P5.10); flush.md "What is left" has the table. The latch run skipped them all and every shot broke, as expected. |
 
 **Verify each item:**
 
@@ -628,7 +709,8 @@ Each item carries its RE dependency. They are ordered so the frame's skeleton (t
 - **P8.1:** Delete the D3D11 paths per feature, the DXVK-only tooling (`GpuIdleTrace`, the `dxvk*` exports in `DxvkOrgInterop.h`), and `CS_NATIVE_D3D11`. Delete ORG's embedding machinery once nothing uses it (external epochs, segment splits, queue boundaries, home states, `HostOwned` imports). This only happens when the user chooses to make the native build the default.
 - **P8.2:** Fix the doc drift found in the survey:
     - `dclf-architecture.md` / `dclf-roadmap.md` 1.5 still say the engine draws grass.
-    - Roadmap 4.6 and `OcclusionMapsFeature.h` disagree about the precipitation mask.
+    - Roadmap 4.6 and `OcclusionMapsFeature.h` disagreed about the precipitation mask: done in P5.2 (4.6 was built, `9c577fae2`; the
+      roadmap item is removed).
 - **P8.3:** Update `docs/development/render-graph.md` for the owned frame.
 - **P8.4, from the start and ongoing:** `docs/development/org-extension-api-notes.md`. Each phase adds what an external mod would need:
     - an overlay pass after the UI;
