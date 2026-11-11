@@ -8,6 +8,9 @@
 #include "RenderGraph/Switches.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <filesystem>
 #include <mutex>
 #include <set>
 #include <string>
