@@ -299,6 +299,11 @@ Each anchor's rule:
   skeleton (`CS_ORG_ENGINE_SKELETON=1`, `p5/skeleton.md`) and the self-test.
 - **EngineDepthCopy.** Where the main depth is copied into `kPOST_ZPREPASS_COPY`: `Main::RenderDepth`'s end, FinishAccumulating's
   copy, and `Deferred::DeferredPasses` before the DeferredPasses anchor. Reserved only by the engine skeleton and the self-test.
+- **Interface.** At each Scaleform display's `EndDisplay` that the graph draws (`RenderGraph/Engine/Scaleform`, P5.10), on the
+  main thread, inside `UI::DrawInterface`: after FrameGeneration's hudless capture, before Present. It runs once per display
+  (the HUD, each menu, the cursor), so several times a frame, and only with `CS_ORG_SCALEFORM=1`. Its passes draw onto the
+  target the display began on (render target 0, the framebuffer or HDR's UI texture) with kMAIN's depth-stencil for masks.
+  A late anchor: frame generation or the present may follow it.
 
 Keys used so far:
 
@@ -325,6 +330,7 @@ Keys used so far:
   EarlyPrepass.
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
 - CS's ImGui (`CS_ORG_IMGUI`): 1000 at Overlay, last.
+- Scaleform (`CS_ORG_SCALEFORM`): 100 upward at Interface, one pass per surface (target and depth pair); one draws per run.
 - The Screenshot feature (`CS_ORG_SCREENSHOT`): 100 (the readback copy) at Capture.
 - The engine skeleton (`CS_ORG_ENGINE_SKELETON`): its gate entry (0 to 127) at EngineShadowClear, EngineCubeClear and
   EngineFrameClear; 0 (the copy) at EngineDepthCopy.
@@ -1261,3 +1267,21 @@ Keys used so far:
   stencil reference either. ORG makes per-slice views of a cube array as cube-array views, so a pass cannot bind one cube of an
   array as a `TextureCube` (Cloud Shadows' per-layer occlusion stays out of the ORG sky for that reason).
 - **Found by:** P5.3 (2026-11-10).
+### Drawing a UI library's batches on the graph
+
+- **Need:** a 2D renderer (Scaleform, another UI library, a plugin's HUD) draws many small batches per frame, each with its
+  own blend mode, stencil mask state, scissor and textures, interleaved with D3D11 work, and wants them on the graph without a
+  pipeline per batch made at record time.
+- **Who:** the engine's Scaleform (P5.10); HUD plugins that draw through Scaleform's renderer or their own D3D11 code.
+- **Where it fits:** the Interface anchor and the pattern P5.10 uses: a CPU capture of the batches, one staging buffer per
+  display holding the geometry and a constants record per draw (read by `SV_VertexID`), and a `RasterProgram` per (shader
+  pair, blend, stencil, formats) made on first use. What would make it cheaper:
+  - **Topology in `RasterProgram`.** Its pipelines are triangle lists only, so Scaleform's line strips stay on D3D11.
+  - **Pipelines keyed at record time** for raster programs (P0.6 has them for ORG's own pipelines): a blend or stencil state
+    per batch without a program object each.
+  - **Several runs of an anchor a frame are slots.** Each display is an epoch, and each uses a frame slot. A per-frame batch
+    (one epoch at the end of `UI::DrawInterface`) needs the D3D11 work between displays (menu 3D, Bink, other mods) on the
+    graph first.
+  - **Render ownership on another thread** (the loading screen, P5.12): anchors run on the main thread only, so a UI drawn
+    from the loading-screen thread stays on D3D11.
+- **Found by:** P5.10 (2026-11-10).

@@ -108,6 +108,7 @@ public:
 		AnchorEngineCubeClear,
 		AnchorEngineFrameClear,
 		AnchorEngineDepthCopy,
+		AnchorInterface,
 		Count
 	};
 

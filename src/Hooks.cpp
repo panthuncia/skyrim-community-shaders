@@ -53,6 +53,7 @@
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
+#include "RenderGraph/Engine/Scaleform/Scaleform.h"
 #include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Utils/ImportCallSites.h"
@@ -1477,6 +1478,7 @@ namespace Hooks
 		RenderGraph::Engine::Targets::Install();
 		// CS_ORG_ENGINE_SKELETON: the engine's clear and depth copy call sites.
 		RenderGraph::Engine::Skeleton::Install();
+		RenderGraph::Engine::Scaleform::Install();
 
 		logger::info("Hooking BSShaderRenderTargets::Create::CreateRenderTarget(s)");
 		stl::write_thunk_call<CreateRenderTarget_Main>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x3F0, 0x3F3));

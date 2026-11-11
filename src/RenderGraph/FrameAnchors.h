@@ -73,6 +73,9 @@ namespace FrameAnchors
 		EngineCubeClear,    // a reflection face's clears (Renderer::ApplyState in BSCubeMapCamera::RenderFaces)
 		EngineFrameClear,   // every other engine clear (ApplyState, SetDirtyStates, Renderer::ClearColor and ClearDepthStencil)
 		EngineDepthCopy,    // the main depth copied into kPOST_ZPREPASS_COPY (Main::RenderDepth, FinishAccumulating, DeferredPasses)
+		// Out of frame order (appended, so the values above stay): each Scaleform display's EndDisplay on the main thread, between
+		// FrameGeneration and Present (RenderGraph/Engine/Scaleform), several times a frame.
+		Interface,
 		Count
 	};
 
