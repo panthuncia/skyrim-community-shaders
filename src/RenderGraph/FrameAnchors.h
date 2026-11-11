@@ -250,6 +250,9 @@ namespace FrameAnchors
 	 */
 	void TakeRenderOwnership();
 
+	/** @brief Whether the calling thread is the engine's main thread (or none was latched yet). Any thread; claims nothing. */
+	bool IsMainThread();
+
 	/** @brief How many times rendering changed threads so far (CS_ORG_LOADING_THREAD=1). Any thread. */
 	std::uint64_t RenderOwnerChanges();
 

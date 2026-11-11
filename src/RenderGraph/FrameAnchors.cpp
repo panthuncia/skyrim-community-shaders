@@ -785,6 +785,12 @@ namespace FrameAnchors
 		return ownerChanges.load(std::memory_order_acquire);
 	}
 
+	bool IsMainThread()
+	{
+		const DWORD main = mainThread.load(std::memory_order_acquire);
+		return main == 0 || main == ::GetCurrentThreadId();
+	}
+
 	bool Run(const Point& a_point)
 	{
 		auto& state = Anchors();
@@ -1080,6 +1086,7 @@ namespace FrameAnchors
 	bool OnRenderThread() { return true; }
 	void TakeRenderOwnership() {}
 	std::uint64_t RenderOwnerChanges() { return 0; }
+	bool IsMainThread() { return true; }
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> EngineCubemap(std::uint32_t) { return nullptr; }
