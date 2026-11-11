@@ -25,12 +25,7 @@ struct PS_OUTPUT
 
 #if defined(PSHADER)
 #	if defined(CS_ORG_BINDLESS)
-struct ISCompositePerGeometry
-{
-	float4 VolumetricLightingColor;
-};
-ORG_ENGINE_CONSTANTS(ISCompositePerGeometry, PerGeometry, PerGeometryAt)
-static float4 VolumetricLightingColor = PerGeometry.VolumetricLightingColor;
+static float4 VolumetricLightingColor = OrgEngineRow(PerGeometryAt, 0);
 #	else
 SamplerState VLSourceSampler : register(s0);
 SamplerState LFSourceSampler : register(s1);

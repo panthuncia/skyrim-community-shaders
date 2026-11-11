@@ -25,19 +25,10 @@ struct PS_OUTPUT
 #if defined(PSHADER)
 #	if defined(CS_ORG_BINDLESS)
 // BlurRadius has a row of its own in the cbuffer: BlurOffsets starts at c3.
-struct ISBlurPerGeometry
-{
-	float4 BlurBrightPass;
-	float4 BlurScale;
-	float BlurRadius;
-	float3 OrgPadding;
-	float4 BlurOffsets[16];
-};
-ORG_ENGINE_CONSTANTS(ISBlurPerGeometry, PerGeometry, PerGeometryAt)
-static float4 BlurBrightPass = PerGeometry.BlurBrightPass;
-static float4 BlurScale = PerGeometry.BlurScale;
-static float BlurRadius = PerGeometry.BlurRadius;
-static float4 BlurOffsets[16] = PerGeometry.BlurOffsets;
+static float4 BlurBrightPass = OrgEngineRow(PerGeometryAt, 0);
+static float4 BlurScale = OrgEngineRow(PerGeometryAt, 1);
+static float BlurRadius = OrgEngineRow(PerGeometryAt, 2).x;
+static float4 BlurOffsets[16] = ORG_ENGINE_ROWS16(PerGeometryAt, 3);
 #	else
 SamplerState ImageSampler : register(s0);
 SamplerState AvgLumSampler : register(s1);

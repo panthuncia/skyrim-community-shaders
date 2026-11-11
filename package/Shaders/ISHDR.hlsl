@@ -32,26 +32,14 @@ struct PS_OUTPUT
 
 #if defined(PSHADER)
 #	if defined(CS_ORG_BINDLESS)
-struct ISHDRPerGeometry
-{
-	float4 Flags;
-	float4 TimingData;
-	float4 Param;
-	float4 Cinematic;
-	float4 Tint;
-	float4 Fade;
-	float4 BlurScale;
-	float4 BlurOffsets[16];
-};
-ORG_ENGINE_CONSTANTS(ISHDRPerGeometry, PerGeometry, PerGeometryAt)
-static float4 Flags = PerGeometry.Flags;
-static float4 TimingData = PerGeometry.TimingData;
-static float4 Param = PerGeometry.Param;
-static float4 Cinematic = PerGeometry.Cinematic;
-static float4 Tint = PerGeometry.Tint;
-static float4 Fade = PerGeometry.Fade;
-static float4 BlurScale = PerGeometry.BlurScale;
-static float4 BlurOffsets[16] = PerGeometry.BlurOffsets;
+static float4 Flags = OrgEngineRow(PerGeometryAt, 0);
+static float4 TimingData = OrgEngineRow(PerGeometryAt, 1);
+static float4 Param = OrgEngineRow(PerGeometryAt, 2);
+static float4 Cinematic = OrgEngineRow(PerGeometryAt, 3);
+static float4 Tint = OrgEngineRow(PerGeometryAt, 4);
+static float4 Fade = OrgEngineRow(PerGeometryAt, 5);
+static float4 BlurScale = OrgEngineRow(PerGeometryAt, 6);
+static float4 BlurOffsets[16] = ORG_ENGINE_ROWS16(PerGeometryAt, 7);
 #	else
 SamplerState ImageSampler : register(s0);
 #		if defined(DOWNSAMPLE)

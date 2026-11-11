@@ -143,7 +143,9 @@ namespace RenderGraph::Engine::ImageSpace
 			std::uint32_t offset = 0;
 			std::uint32_t frameSrv = 0;  // PerFrame (PS b12), read as FrameBuffer
 			std::uint32_t frameOffset = 0;
-			std::uint32_t padding[4]{};
+			std::uint32_t size = 0;  // the bound bytes of each: rows past them read 0, as on D3D11
+			std::uint32_t frameSize = 0;
+			std::uint32_t padding[2]{};
 		};
 		static_assert(sizeof(ConstantsAt) == 32);
 
@@ -822,9 +824,12 @@ namespace RenderGraph::Engine::ImageSpace
 				Refuse("its constants have no ring chunk", effect.effectName);
 				return false;
 			}
-			state.batch.push_back({ .entry = spec->entry, .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset } });
+			state.batch.push_back({ .entry = spec->entry, .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = at.size, .frameSize = frameAt.size } });
 			state.keepAlive.push_back(at.block);
 			state.keepAlive.push_back(frameAt.block);
+			if (state.logShapes && state.loggedRefusals.insert(fmt::format("sizes {}", effect.effectName)).second)
+				logger::info("[ORG] ImageSpace: {} binds {} bytes of PerGeometry ({}) and {} of PerFrame", effect.effectName, at.size,
+					slot->group == Constants::Group::PSGeometry ? "PS geometry pool" : "custom", frameAt.size);
 			state.lastEntry = spec->entry;
 			return true;
 		}
