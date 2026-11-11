@@ -731,12 +731,13 @@ namespace RenderGraph::Engine::ImageSpace
 				return false;
 			}
 			// The engine's state for the draw goes to D3D11 as before (the draw would apply it), and the capture records the draw's
-			// constants as a use.
+			// constants as a use: the draw is withheld, so no draw hook records it.
 			static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
 			setDirtyStates(false);
-			const auto use = Constants::Current();
+			const auto use = Constants::Capture(Constants::kDrawStages);
 			const auto* slot = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 2) : nullptr;
-			if (!slot || slot->group != Constants::Group::Custom) {
+			// The ImageSpace setups write PerGeometry into the PS b2 size-class pool (PSGeometry); a custom mapper's ring is accepted too.
+			if (!slot || (slot->group != Constants::Group::PSGeometry && slot->group != Constants::Group::Custom)) {
 				Flush();
 				Refuse("no captured PerGeometry constants", effect.effectName);
 				return false;
