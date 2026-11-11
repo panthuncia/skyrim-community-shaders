@@ -145,12 +145,37 @@ namespace DCLF
 		 * - "signal:<name>": dclf:signal=<name> was run (a remote client's, through DevBench's communityshaders.dclf); consumed.
 		 * - "shaders": Community Shaders' compile queue is empty (a run that compiles on demand, CS_DISABLE_FEATURES: the shaders the
 		 *   frames asked for are built, so a shot after it draws everything in view).
+		 * Every wait has a limit: kWaitLimitFrames, or the frames after an '@' (dclf:wait=shaders@12000). A wait that reaches it logs
+		 * "test wait '<condition>' timed out" and the list goes on, so a condition that never holds cannot hold a run (or its
+		 * CS_DCLF_TEST_EXIT, which the waits move later) for ever.
 		 */
 		struct Wait
 		{
 			std::string condition;
 			std::uint32_t since = 0;  // the frame it started at
+			std::uint32_t limit = 0;  // the frames it may hold
 		};
+
+		// A wait's limit without an '@': 3000 frames, about a minute at 50 fps (a cold shader compile of a new variant takes longer:
+		// give that wait its own).
+		constexpr std::uint32_t kWaitLimitFrames = 3000;
+
+		/** @brief The wait a "dclf:wait=<condition>[@<frames>]" command's argument names, starting at a_frame. */
+		Wait ParseWait(std::string_view a_argument, std::uint32_t a_frame)
+		{
+			Wait wait{ std::string(a_argument), a_frame, kWaitLimitFrames };
+			if (const auto at = a_argument.rfind('@'); at != std::string_view::npos) {
+				wait.condition = std::string(a_argument.substr(0, at));
+				const std::string frames(a_argument.substr(at + 1));
+				char* end = nullptr;
+				const unsigned long limit = std::strtoul(frames.c_str(), &end, 10);
+				if (frames.empty() || *end != '\0' || limit == 0)
+					logger::warn("[DCLF] test wait '{}': '{}' is no frame count; its limit is {} frames", wait.condition, frames, kWaitLimitFrames);
+				else
+					wait.limit = static_cast<std::uint32_t>(std::min<unsigned long>(limit, UINT32_MAX));
+			}
+			return wait;
+		}
 
 		bool WaitHolds(const Wait& a_wait)
 		{
@@ -253,13 +278,19 @@ namespace DCLF
 					return;
 				const std::uint32_t a_frame = ++frame;
 				if (wait) {
-					if (!WaitHolds(*wait)) {
+					const bool held = WaitHolds(*wait);
+					const bool timedOut = !held && a_frame - wait->since >= wait->limit;
+					if (!held && !timedOut) {
 						Publish(a_frame);
 						return;
 					}
 					shift += a_frame - wait->since;
-					logger::info("[DCLF] test wait '{}' held frames {}-{} ({} frames); the commands after it run {} frames later", wait->condition, wait->since, a_frame,
-						a_frame - wait->since, shift);
+					if (timedOut)
+						logger::warn("[DCLF] test wait '{}' timed out: held frames {}-{} ({} frames, its limit); the commands after it run {} frames later", wait->condition,
+							wait->since, a_frame, a_frame - wait->since, shift);
+					else
+						logger::info("[DCLF] test wait '{}' held frames {}-{} ({} frames); the commands after it run {} frames later", wait->condition, wait->since, a_frame,
+							a_frame - wait->since, shift);
 					wait.reset();
 				}
 				while (!wait && next < commands.size() && a_frame >= commands[next].frame + shift) {
@@ -269,7 +300,7 @@ namespace DCLF
 						continue;
 					}
 					logger::info("[DCLF] test command at frame {}: {}", a_frame, command);
-					wait = Wait{ command.substr(10), a_frame };
+					wait = ParseWait(std::string_view(command).substr(10), a_frame);
 					if (WaitHolds(*wait)) {
 						logger::info("[DCLF] test wait '{}' held at once", wait->condition);
 						wait.reset();
@@ -1274,7 +1305,8 @@ namespace DCLF
 		}
 		// CS_DCLF_TEST_EXIT=<frame>: a startup loop's run ends here, loading screens not counted. The log is flushed, then the
 		// process ends without the engine's shutdown, which is slow and not what such a run tests.
-		// The frames the command list's waits held move it later, as they move the commands after them.
+		// The frames the command list's waits held move it later, as they move the commands after them; each wait holds at most its
+		// limit (kWaitLimitFrames, or its '@' frames), so the exit comes however the waits end.
 		static TestCommands testCommands;
 		static const std::uint32_t exitFrame = static_cast<std::uint32_t>(std::strtoul(DCLF::SwitchValue(DCLF::Switch::TestExit).c_str(), nullptr, 10));
 		static std::uint32_t exitCount = 0;

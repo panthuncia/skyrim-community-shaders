@@ -64,15 +64,15 @@ namespace
 {
 	/**
 	 * @brief Whether CS_DISABLE_FEATURES (a comma-separated list of short names, for test runs) names a_featureName. Such a feature is
-	 * disabled at boot for this run only: the saved "Disable at Boot" settings are not changed.
+	 * disabled at boot for this run only: the saved "Disable at Boot" settings are not changed. Read from the environment alone (a
+	 * run's own setting: the switches file outlives the run).
 	 */
 	bool DisabledByEnvironment(const std::string& a_featureName)
 	{
 		static const std::vector<std::string> names = [] {
 			std::vector<std::string> list;
-			char value[1024]{};
-			const DWORD length = GetEnvironmentVariableA("CS_DISABLE_FEATURES", value, sizeof(value));
-			if (length == 0 || length >= sizeof(value))
+			const std::string value = Util::SwitchFile::Value("CS_DISABLE_FEATURES", true);
+			if (value.empty())
 				return list;
 			pystring::split(value, list, ",");
 			for (auto& name : list)
