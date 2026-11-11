@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <format>
+#include <string>
 
 namespace DCLF::Features::ShadowMask
 {
@@ -37,12 +38,24 @@ namespace DCLF::Features::ShadowMask
 		constexpr std::size_t kMaxLatched = 32;
 		// Batches a view's probes run before its client is made: its programs and ConstantMirror's copies are asked for first.
 		constexpr std::uint32_t kSettleBatches = 30;
+		// Batches in a row after which a view that still stays the engine's says why (Lasting): about two seconds of frames.
+		constexpr std::uint32_t kLastingBatches = 120;
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
 
 		/** @brief The refusals and fallbacks, each logged once per reason. */
 		Util::ReasonLog& Refusals()
 		{
 			static Util::ReasonLog log("[DCLF] shadow mask: the engine draws", spdlog::level::warn);
+			return log;
+		}
+
+		/**
+		 * @brief Why a view stays the engine's for good, logged once per view and reason. Refusals logs each reason only the first time
+		 * it is seen, so a refusal that lasts would otherwise go quiet after the first frames.
+		 */
+		Util::ReasonLog& Lasting()
+		{
+			static Util::ReasonLog log("[DCLF] shadow mask: a view stays the engine's", spdlog::level::warn);
 			return log;
 		}
 
@@ -59,6 +72,10 @@ namespace DCLF::Features::ShadowMask
 			bool ready = false;  // the view's client is in the built graph: its published inputs are read
 			std::array<bool, kViews> clean{};
 			std::array<std::uint32_t, kViews> settled{};
+			std::array<std::uint32_t, kViews> refusedProbes{};  // probes in a row that found a draw the graph cannot take, once ready
+			std::array<std::uint32_t, kViews> joining{};        // batches in a row whose view had settled but was not ready
+			std::array<std::string, kViews> lastRefusal{};      // the view's last refusal, for the Lasting log
+			std::string refusalDetail;                          // what TryLatchDraw's last refusal was about (a slot, the geometry)
 			View view = View::World;
 			std::shared_ptr<Run> run;
 			Family::Passes passes;
@@ -87,6 +104,7 @@ namespace DCLF::Features::ShadowMask
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
 			auto& run = *a_capture.run;
+			a_capture.refusalDetail.clear();
 			if (run.draws.size() >= kMaxLatched)
 				return "more draws than the batch latches";
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
@@ -134,6 +152,7 @@ namespace DCLF::Features::ShadowMask
 				result != Family::GeometryResult::Ok) {
 				if (!geometryDetail.empty())
 					Refusals().Report(std::format("a {} draw whose geometry is refused: {}", NameOf(a_capture.view), Family::ReasonOf(result)), geometryDetail);
+				a_capture.refusalDetail = std::move(geometryDetail);
 				return Family::ReasonOf(result);
 			}
 			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
@@ -146,9 +165,9 @@ namespace DCLF::Features::ShadowMask
 			constants.firstIndex = geometry.firstIndex;
 			draw.indexCount = geometry.indexCount;
 
-			// The eight slots as the shadow state holds them (the scene depth, the light's shadow maps, the focus shadows' stencil and maps;
-			// an empty slot reads a null view of its declared kind) and every slot's sampler. A slot the shader never samples reads a null
-			// view and the first sampler (SlotRead).
+			// The slots the ORG build reads as the shadow state holds them (the scene depth, the light's shadow maps; an empty slot reads a
+			// null view of its declared kind) and their samplers. Every other slot reads a null view and the first sampler, whatever is
+			// bound there (SlotRead: the focus shadows' stencil at t5 among them, which the engine's draw reads as 0).
 			for (std::uint32_t t = 0; t < kSlots; ++t) {
 				const bool read = SlotRead(t);
 				auto* view = read ? Unwrap(rss.PSTexture[t]) : nullptr;
@@ -161,10 +180,12 @@ namespace DCLF::Features::ShadowMask
 					const auto result = ShadowMaskDraws::ReadPublished(a_capture.view, id, constants.textures[t]);
 					if (result != Family::InputResult::Graph && a_capture.ready) {
 						Refusals().Report(std::format("a {} draw's t{} holds '{}'", NameOf(a_capture.view), t, id), Family::ReasonOf(result));
+						a_capture.refusalDetail = std::format("t{} holds '{}': {}", t, id, Family::ReasonOf(result));
 						return "a slot holds a published graph texture its client cannot read";
 					}
 				} else if (slot != Family::SlotResult::Ok) {
-					Refusals().Report(std::format("a {} draw's texture t{} could not be imported", NameOf(a_capture.view), t), GpuTextures::DescribeFailure(view, t, failure));
+					a_capture.refusalDetail = GpuTextures::DescribeFailure(view, t, failure);
+					Refusals().Report(std::format("a {} draw's texture t{} could not be imported", NameOf(a_capture.view), t), a_capture.refusalDetail);
 					return "a texture it samples could not be imported";
 				}
 				constants.samplers[t] = read ? Family::SlotSampler(rss.PSTextureAddressMode[t].underlying(), rss.PSTextureFilterMode[t].underlying(), owners) :
@@ -190,7 +211,36 @@ namespace DCLF::Features::ShadowMask
 		void Refuse(Capture& a_capture, std::string_view a_reason)
 		{
 			a_capture.failed = true;
+			auto& last = a_capture.lastRefusal[static_cast<std::size_t>(a_capture.view)];
+			last = a_reason;
+			if (!a_capture.refusalDetail.empty())
+				last += std::format(" ({})", a_capture.refusalDetail);
 			Refusals().Report(std::format("a {} draw: {}", NameOf(a_capture.view), a_reason), a_capture.probe ? "found by a probe" : "");
+		}
+
+		/**
+		 * @brief After a probe that did not make a_view clean: counts it, and once the view has stayed the engine's for kLastingBatches
+		 * batches in a row, logs why (Lasting). Either its client is not in the anchor's built graph yet (not made, refused, or still
+		 * joining), or its probes keep finding a draw the graph cannot take (the last refusal is named).
+		 */
+		void NoteUnclean(Capture& a_capture, View a_view, bool a_ready)
+		{
+			const auto index = static_cast<std::size_t>(a_view);
+			if (!a_ready) {
+				a_capture.refusedProbes[index] = 0;
+				if (a_capture.settled[index] < kSettleBatches || ++a_capture.joining[index] < kLastingBatches)
+					return;
+				Lasting().Report(std::format("its {} client is not in the EngineDraws anchor's built graph", NameOf(a_view)),
+					ShadowMaskDraws::HasClient(a_view) ? std::format("{}+ batches after it was made (FrameAnchors::RequestJoin)", kLastingBatches) :
+					                                     std::string("it was not made (see the line above for why)"));
+				return;
+			}
+			a_capture.joining[index] = 0;
+			if (++a_capture.refusedProbes[index] < kLastingBatches)
+				return;
+			const auto& reason = a_capture.lastRefusal[index];
+			Lasting().Report(std::format("every {} probe finds a draw the graph cannot take: {}", NameOf(a_view), reason.empty() ? "no reason recorded" : reason),
+				std::format("{}+ probes in a row since its client joined", kLastingBatches));
 		}
 
 		/**
@@ -238,13 +288,19 @@ namespace DCLF::Features::ShadowMask
 				capture.active = false;
 				capture.run.reset();
 				if (!capture.passes.End()) {
-					Refusals().Report(capture.passes.Describe(std::format("{} shadow mask", NameOf(kView))));
+					capture.refusalDetail = capture.passes.Describe(std::format("{} shadow mask", NameOf(kView)));
+					Refusals().Report(capture.refusalDetail);
 					Refuse(capture, "a pass of the batch drew through another draw function than DrawTriShape");
 				}
 				if (probe) {
 					clean = ready && !capture.failed;
-					if (clean)
+					if (clean) {
+						capture.refusedProbes[index] = 0;
+						capture.joining[index] = 0;
 						logger::info("[DCLF] shadow mask: every {} shadow mask draw can be drawn by the graph; its batches are the graph's from the next", NameOf(kView));
+					} else {
+						NoteUnclean(capture, kView, ready);
+					}
 					ShadowMaskDraws::Keep(std::move(run->owners));
 					return;
 				}
