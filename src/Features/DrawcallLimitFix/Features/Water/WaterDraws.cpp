@@ -1,36 +1,30 @@
-// The water family's render graph side: a client per view at the EngineDraws anchor, whose pass draws a batch's latched draws in the
-// engine's order with CS's Water.hlsl built for ORG, with the engine's stencil state and reference per draw.
+// The water family's render graph side: a client per view at the EngineDraws anchor, made once, whose pass draws a batch's latched draws
+// in the engine's order with CS's Water.hlsl built for ORG, with the engine's stencil state and reference per draw.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
-#include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 
 #include "Globals.h"
-#include "RenderGraph/Engine/Pipeline/StateConversion.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "RenderGraph/SharedConstants.h"
-#include "ShaderCache.h"
 
 #include <OpenRenderGraph/GraphHost.h>
 #include <Render/LatchBlock.h>
 #include <Render/RenderGraph/RenderGraph.h>
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
 #include <Resources/ExternalTextureResource.h>
-#include <rhi_helpers.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstring>
-#include <deque>
-#include <optional>
 
 namespace DCLF::Features::Water::WaterDraws
 {
@@ -40,8 +34,6 @@ namespace DCLF::Features::Water::WaterDraws
 		// The most draws a batch latches (WaterCapture's kMaxLatched); a batch's draws past it are the engine's.
 		constexpr std::uint32_t kMaxDraws = 64;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawLatch));
-		// Runs whose imports and leases are kept: the frames the graph may run behind, with a margin.
-		constexpr std::uint32_t kKeptFrames = RenderGraphRuntime::kGameFramesInFlight + 2;
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
 
 		/** @brief Water.hlsl's push block (WATER_ORG_RESOURCES), in list order. */
@@ -71,10 +63,9 @@ namespace DCLF::Features::Water::WaterDraws
 			std::shared_ptr<org::ExternalTextureResource> depth;
 			// Render thread writes, the host's thread reads.
 			std::shared_ptr<const Run> run;
-			std::atomic<bool> prepared{ false };
 			bool pending = false;
 			bool shapeLogged = false;
-			bool drawnLogged = false;  // the first batch the graph drew was logged
+			std::atomic<std::uint64_t> executed{ 0 };  // runs submitted with this client's pass (its executed callback)
 		};
 
 		struct Bindings
@@ -90,8 +81,7 @@ namespace DCLF::Features::Water::WaterDraws
 		struct Frame
 		{
 			std::shared_ptr<const Run> run;
-			std::shared_ptr<const org::LatchBlock> latch;
-			std::shared_ptr<const ::RenderGraph::RunGate> gate;
+			std::shared_ptr<const Client> client;
 		};
 
 		/** @brief A run's draws, recorded in the engine's order: a render pass and a draw each (RasterProgram::Draw). */
@@ -129,17 +119,14 @@ namespace DCLF::Features::Water::WaterDraws
 				a_out.push_back(run ? run->revision : 0);
 			}
 
-			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const
-			{
-				client->prepared.store(true, std::memory_order_release);
-				return { std::atomic_load(&client->run), client->latch, client->gate };
-			}
+			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const { return { std::atomic_load(&client->run), client }; }
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{
-				if (!a_frame.run || !a_frame.latch || !a_frame.gate)
+				if (!a_frame.run || !a_frame.client)
 					return;
 				const auto& run = *a_frame.run;
+				const auto& c = *a_frame.client;
 				const auto shared = SharedConstants::Index(a_recording, a_bindings.shared);
 				std::array<ShaderBindings::Handle, kHeaderRegisters.size()> headers{};
 				for (std::size_t h = 0; h < headers.size(); ++h)
@@ -147,15 +134,15 @@ namespace DCLF::Features::Water::WaterDraws
 				const std::uint32_t slot = a_recording.FrameSlot();
 				for (std::uint32_t i = 0; i < run.draws.size(); ++i) {
 					const auto& draw = run.draws[i];
-					if (!draw.program || draw.skip)
+					if (!draw.program)
 						continue;
 					const auto& program = *static_cast<const RasterProgram*>(draw.program.get());
 					const std::uint32_t offset = i * kDrawStride;
 					WaterBlock block{};
 					block.shared = shared;
-					block.draw = ShaderBindings::LatchOf(*a_frame.latch, slot, offset);
-					block.strictLights = ShaderBindings::LatchOf(*a_frame.latch, slot, offset + static_cast<std::uint32_t>(offsetof(DrawLatch, strictLights)));
-					block.directionalShadow = ShaderBindings::LatchOf(*a_frame.latch, slot, offset + static_cast<std::uint32_t>(offsetof(DrawLatch, directionalShadow)));
+					block.draw = ShaderBindings::LatchOf(*c.latch, slot, offset);
+					block.strictLights = ShaderBindings::LatchOf(*c.latch, slot, offset + static_cast<std::uint32_t>(offsetof(DrawLatch, strictLights)));
+					block.directionalShadow = ShaderBindings::LatchOf(*c.latch, slot, offset + static_cast<std::uint32_t>(offsetof(DrawLatch, directionalShadow)));
 					std::copy_n(headers.begin(), kHeadersBeforeShadow, block.headers.begin());
 					std::copy(headers.begin() + kHeadersBeforeShadow, headers.end(), block.lateHeaders.begin());
 
@@ -173,13 +160,14 @@ namespace DCLF::Features::Water::WaterDraws
 					const RasterProgram::Depth depth{ .view = &a_bindings.depth, .readOnly = false };
 					program.Draw(a_recording, { .colours = std::span<const RasterProgram::Colour>(colours.data(), colourCount),
 												  .depth = &depth,
-												  .viewport = { .x = draw.viewport[0], .y = draw.viewport[1], .width = draw.viewport[2], .height = draw.viewport[3], .minDepth = draw.depthRange[0], .maxDepth = draw.depthRange[1] },
+												  .viewport = { .x = draw.viewport.rect[0], .y = draw.viewport.rect[1], .width = draw.viewport.rect[2], .height = draw.viewport.rect[3],
+													  .minDepth = draw.viewport.depthRange[0], .maxDepth = draw.viewport.depthRange[1] },
 												  .constants = ShaderBindings::Data(block),
 												  .debugName = run.view == View::Mask ? "WaterMask" : "Water",
 												  .stencilReference = draw.stencilRef,
 												  // The counts come from the draw's gate entry, which the client's commit opens for this run only.
-												  .indirect = &a_frame.gate->Latch(),
-												  .indirectOffset = a_frame.gate->Offset(i) });
+												  .indirect = &c.gate->Latch(),
+												  .indirectOffset = c.gate->Offset(i) });
 				}
 			}
 
@@ -187,35 +175,22 @@ namespace DCLF::Features::Water::WaterDraws
 			std::shared_ptr<Client> client;
 		};
 
-		struct ProgramEntry
-		{
-			PipelineKey key;
-			std::shared_ptr<const RasterProgram> program;
-		};
-
 		/** @brief Everything here: the render thread's. */
 		struct DrawsState
 		{
 			std::array<std::shared_ptr<Client>, kViews> clients;
 			std::array<bool, kViews> refused{};  // the view's client could not be made: its batches stay the engine's
-			std::vector<ProgramEntry> programs;
-			std::vector<PipelineKey> failedPrograms;
+			Family::EngineDrawPrograms programs{ "water", { .source = kShader, .constantWords = ShaderBindings::Words<WaterBlock>() } };
 			bool reserved = false;
 			bool failed = false;
 			std::uint64_t runs = 0, draws = 0;
-			std::deque<std::pair<std::uint32_t, std::vector<std::shared_ptr<const void>>>> kept;  // (game frame, owners)
+			Family::KeptOwners kept;
 		};
 
 		DrawsState& GetState()
 		{
 			static DrawsState state;
 			return state;
-		}
-
-		std::uint32_t GameFrame()
-		{
-			static REL::Relocation<std::uint32_t*> counter{ REL::Offset(Engine::Address::kFrameCounter) };
-			return *counter;
 		}
 
 		/** @brief Stops the family for good: every batch is the engine's again. */
@@ -279,10 +254,13 @@ namespace DCLF::Features::Water::WaterDraws
 				for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
 					const auto& draw = run->draws[i];
 					client->latch->WriteValue(slot, i * kDrawStride, draw.latch);
-					// CS_ORG_WATER_SAFE=2: the passes and their targets without a draw call.
-					if (draw.program && !draw.skip && GetDiagnostics().safe < 2)
+					if (draw.program)
 						client->gate->OpenDraw(i, draw.indexCount, 1);
 				}
+			};
+			desc.executed = [client](const FrameAnchors::Point&) {
+				if (client->executed.fetch_add(1, std::memory_order_relaxed) == 0)
+					logger::info("[DCLF] water: the first {} run drawn by the graph", client->id);
 			};
 			desc.active = [client] { return client->pending; };
 			desc.onFailed = [] { Fail("the render graph failed with the water's passes in it"); };
@@ -309,12 +287,12 @@ namespace DCLF::Features::Water::WaterDraws
 				mix(index);
 			for (const auto& draw : a_run.draws) {
 				mix(reinterpret_cast<std::uintptr_t>(draw.program.get()));
-				mix((std::uint64_t(draw.skip) << 16) | (std::uint64_t(draw.colours[0]) << 8) | draw.colours[1]);
+				mix((std::uint64_t(draw.colours[0]) << 8) | draw.colours[1]);
 				mix(draw.stencilRef);
-				for (const auto v : draw.viewport)
+				for (const auto v : draw.viewport.rect)
 					mix(v);
 				std::uint32_t range[2];
-				std::memcpy(range, draw.depthRange, sizeof(range));
+				std::memcpy(range, draw.viewport.depthRange.data(), sizeof(range));
 				mix((std::uint64_t(range[0]) << 32) | range[1]);
 			}
 			return hash;
@@ -344,11 +322,10 @@ namespace DCLF::Features::Water::WaterDraws
 		auto& client = state.clients[index];
 		if (client) {
 			if (client->shape == a_shape)
-				return client->prepared.load(std::memory_order_acquire);
+				return FrameAnchors::RequestJoin(client->id, FrameAnchors::Anchor::EngineDraws);
 			// No client is registered again during play (a rebuild on the frame's path): the batch stays the engine's.
-			if (!client->shapeLogged)
+			if (!std::exchange(client->shapeLogged, true))
 				logger::warn("[DCLF] water: the {} batch's published inputs changed since its client registered; those batches stay the engine's", client->id);
-			client->shapeLogged = true;
 			return false;
 		}
 		if (state.refused[index])
@@ -358,99 +335,36 @@ namespace DCLF::Features::Water::WaterDraws
 		return false;
 	}
 
-	std::shared_ptr<const void> Program(const PipelineKey& a_key, const void* a_shader)
+	bool CanRun(View a_view)
 	{
-		auto& state = GetState();
-		for (const auto& entry : state.programs)
-			if (entry.key == a_key)
-				return entry.program;
-		for (const auto& failed : state.failedPrograms)
-			if (failed == a_key)
-				return nullptr;
-		auto* host = RenderGraphRuntime::Get().Host();
-		const auto* shader = static_cast<const RE::BSShader*>(a_shader);
-		auto* blend = static_cast<ID3D11BlendState*>(const_cast<void*>(a_key.blend));
-		auto* depthStencil = static_cast<ID3D11DepthStencilState*>(const_cast<void*>(a_key.depthStencil));
-		auto* raster = static_cast<ID3D11RasterizerState*>(const_cast<void*>(a_key.raster));
-		if (!host || !shader || !blend || !raster || !depthStencil) {
-			state.failedPrograms.push_back(a_key);
-			return nullptr;
-		}
-
-		RasterProgram::Desc desc{};
-		desc.pixelSource = kShader;
-		desc.vertexSource = kShader;
-		desc.constantWords = ShaderBindings::Words<WaterBlock>();
-		// The vertex descriptor's defines serve both stages: the vertex stage reads Wading, which State strips from the pixel descriptor
-		// (the pixel stage reads it at run time, as Water.hlsl's pixel build undefines it). Each stage's VSHADER or PSHADER is
-		// RasterProgram's (commonDefines).
-		for (const auto& [name, value] : SIE::ShaderCache::GetCompileDefines(*shader, SIE::ShaderClass::Vertex, a_key.vertexDescriptor)) {
-			if (name == "VSHADER" || name == "PSHADER")
-				continue;
-			desc.defines.emplace_back(std::wstring(name.begin(), name.end()), std::wstring(value.begin(), value.end()));
-		}
-
-		// The engine's state objects for the draw, as SetDirtyStates would bind them. GetDesc answers on a tripwire handle too.
-		D3D11_BLEND_DESC blendDesc{};
-		blend->GetDesc(&blendDesc);
-		rhi::BlendState blendState{};
-		std::string error;
-		if (!::RenderGraph::Engine::Pipeline::BlendFromD3D11(blendDesc, blendState, error) || ::RenderGraph::Engine::Pipeline::UsesDualSource(blendDesc)) {
-			logger::warn("[DCLF] water: a draw's blend state has no ORG form ({}); its technique stays the engine's", error);
-			state.failedPrograms.push_back(a_key);
-			return nullptr;
-		}
-		for (std::size_t i = 0; i < a_key.colourFormats.size() && a_key.colourFormats[i]; ++i)
-			desc.targets.push_back({ .format = static_cast<rhi::Format>(a_key.colourFormats[i]), .blend = blendState.attachments[i] });
-		desc.alphaToCoverage = blendState.alphaToCoverage;
-		D3D11_DEPTH_STENCIL_DESC depthDesc{};
-		depthStencil->GetDesc(&depthDesc);
-		desc.depth = ::RenderGraph::Engine::Pipeline::DepthStencilFromD3D11(depthDesc);
-		desc.depthFormat = static_cast<rhi::Format>(a_key.depthFormat);
-		// CS_ORG_WATER_SAFE: the pixel stage writes a constant and reads no resource (Water.hlsl, WATER_ORG_SAFE).
-		if (GetDiagnostics().safe)
-			desc.defines.emplace_back(L"WATER_ORG_SAFE", L"");
-		D3D11_RASTERIZER_DESC rasterDesc{};
-		raster->GetDesc(&rasterDesc);
-		desc.raster = ::RenderGraph::Engine::Pipeline::RasterFromD3D11(rasterDesc);
-
-		auto program = RasterProgram::Load(host->Device(), desc);
-		const auto technique = (a_key.pixelDescriptor >> 11) & 0xF;
-		if (!program) {
-			logger::warn("[DCLF] water: the program for technique {} (descriptors {:#x}/{:#x}, {}) could not be built; it stays the engine's", technique,
-				a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.view == View::Mask ? "mask" : "surface");
-			state.failedPrograms.push_back(a_key);
-			return nullptr;
-		}
-		logger::info("[DCLF] water: built the program for technique {} (descriptors {:#x}/{:#x}, {}, stencil {})", technique, a_key.vertexDescriptor,
-			a_key.pixelDescriptor, a_key.view == View::Mask ? "mask" : "surface", depthDesc.StencilEnable ? "on" : "off");
-		state.programs.push_back({ a_key, program });
-		return program;
+		const auto& client = GetState().clients[static_cast<std::size_t>(a_view)];
+		return client && FrameAnchors::CanRun(client->id, FrameAnchors::Anchor::EngineDraws);
 	}
 
-	void Submit(std::shared_ptr<Run> a_run)
+	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, Family::ProgramState& a_state)
+	{
+		return GetState().programs.Get(a_key, a_shader, {}, a_state);
+	}
+
+	void Keep(Family::Owners&& a_owners)
+	{
+		GetState().kept.Keep(std::move(a_owners));
+	}
+
+	bool Submit(std::shared_ptr<Run> a_run)
 	{
 		auto& state = GetState();
 		if (!a_run || state.failed)
-			return;
+			return false;
 		const auto& client = state.clients[static_cast<std::size_t>(a_run->view)];
 		if (!client)
-			return;
+			return false;
 		a_run->revision = RevisionOf(*a_run);
-		const std::uint32_t frame = GameFrame();
-		while (!state.kept.empty() && frame - state.kept.front().first > kKeptFrames)
-			state.kept.pop_front();
-		state.kept.emplace_back(frame, std::move(a_run->owners));
+		state.kept.Keep(std::move(a_run->owners));
 		++state.runs;
 		state.draws += a_run->draws.size();
-		if (!a_run->draws.empty() && !client->drawnLogged) {
-			client->drawnLogged = true;
-			logger::info("[DCLF] water: the first {} batch drawn by the graph ({} draws)", client->id, a_run->draws.size());
-		}
 		std::atomic_store(&client->run, std::shared_ptr<const Run>(std::move(a_run)));
-		client->pending = true;
-		FrameAnchors::Run(FrameAnchors::Anchor::EngineDraws);
-		client->pending = false;
+		return Family::RunWithheld("water", client->id, FrameAnchors::Anchor::EngineDraws, client->pending);
 	}
 
 	std::string Status()
@@ -460,6 +374,10 @@ namespace DCLF::Features::Water::WaterDraws
 			return "off (CS_ORG_WATER)";
 		if (state.failed)
 			return "failed: the engine draws the water";
-		return fmt::format("{} runs, {} draws, {} programs", state.runs, state.draws, state.programs.size());
+		std::uint64_t executed = 0;
+		for (const auto& client : state.clients)
+			if (client)
+				executed += client->executed.load(std::memory_order_relaxed);
+		return fmt::format("{} runs ({} drawn), {} draws, {} programs", state.runs, executed, state.draws, state.programs.Built());
 	}
 }

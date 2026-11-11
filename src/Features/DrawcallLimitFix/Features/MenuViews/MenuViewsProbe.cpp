@@ -41,7 +41,8 @@ namespace DCLF::Features::MenuViews
 
 		const char* SchemeName(std::uint32_t a_scheme)
 		{
-			// RE::INTERFACE_LIGHT_SCHEME, the index of UI3DSceneManager's menuObjects (+0x38) and current scheme (+0x90).
+			// RE::INTERFACE_LIGHT_SCHEME, the index of UI3DSceneManager's menuObjects (+0x38) and currentlightScheme (+0x90): CommonLib's
+			// members, the same on SE and AE (UI3DSceneManager::Render reads both there, SE 0x1408d2390, AE 0x140972590).
 			constexpr std::array<const char*, 8> kNames{ "journal", "inventory", "magic", "book", "loading", "unk05", "stats", "lockpicking" };
 			return a_scheme < kNames.size() ? kNames[a_scheme] : "?";
 		}
@@ -70,9 +71,12 @@ namespace DCLF::Features::MenuViews
 		};
 
 		/** @brief The probe's state (main thread) and its report counters (taken by the report). */
-		struct State
+		struct ProbeState
 		{
 			std::array<Probe, static_cast<std::size_t>(MenuScene::Count)> last{};
+			// The menu root's geometry last checked against DCLF's tables (ReadGeometry): its signature and the counts it gave.
+			std::uint64_t scannedSignature = 0;
+			std::uint32_t scannedTracked = 0, scannedClaimed = 0, rendersSinceScan = 0;
 			std::array<std::uint32_t, static_cast<std::size_t>(MenuScene::Count)> lastFrame{};
 			std::array<bool, static_cast<std::size_t>(MenuScene::Count)> seen{};  // rendered before (lastFrame holds a frame)
 			std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(MenuScene::Count)> renders{};
@@ -80,9 +84,9 @@ namespace DCLF::Features::MenuViews
 			std::atomic<std::uint64_t> offThread{ 0 };
 		};
 
-		State& GetState()
+		ProbeState& GetState()
 		{
-			static State state;
+			static ProbeState state;
 			return state;
 		}
 
@@ -100,7 +104,14 @@ namespace DCLF::Features::MenuViews
 			return false;
 		}
 
-		/** @brief The root's geometry, against the installed tables: tracked by DCLF's scene, and claimed by a set phase. */
+		// Menu renders between two scans of DCLF's tables while the root's geometry stays the same (a few seconds at the menu's rate).
+		constexpr std::uint32_t kRescanRenders = 300;
+
+		/**
+		 * @brief The root's geometry, against the installed tables: tracked by DCLF's scene, and claimed by a set phase. The tables are
+		 * scanned again only when the root's geometry changed, or every kRescanRenders renders: a menu renders every frame, and a scan
+		 * walks every table.
+		 */
 		void ReadGeometry(RE::NiAVObject* a_root, Probe& a_probe)
 		{
 			std::vector<RE::BSGeometry*> geometry;
@@ -121,6 +132,14 @@ namespace DCLF::Features::MenuViews
 			a_probe.installed = view.HasInstalled();
 			if (geometry.empty() || !a_probe.installed)
 				return;
+			auto& state = GetState();
+			if (signature == state.scannedSignature && ++state.rendersSinceScan < kRescanRenders) {
+				a_probe.tracked = state.scannedTracked;
+				a_probe.claimed = state.scannedClaimed;
+				return;
+			}
+			state.scannedSignature = signature;
+			state.rendersSinceScan = 0;
 			const ankerl::unordered_dense::set<const RE::BSGeometry*> wanted(geometry.begin(), geometry.end());
 			const auto& tables = view.GetTables();
 			const auto claims = view.FrameClaims();
@@ -132,6 +151,8 @@ namespace DCLF::Features::MenuViews
 				if (claims && claims->PhasesOf(g))
 					++a_probe.claimed;
 			}
+			state.scannedTracked = a_probe.tracked;
+			state.scannedClaimed = a_probe.claimed;
 		}
 
 		/**

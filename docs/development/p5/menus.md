@@ -103,7 +103,10 @@ shape (no graph rebuild); a scene is withheld only when its view claims every ge
 At each menu scene's SubmitAccumulator (main thread only) `MenuViewsProbe.cpp` reads the targets, depth and stencil mode the engine set,
 the camera's projection, whether DCLF's frame ran since the scene's last render (its frame number moved) and whether a freeze-frame menu
 is open, and for menu 3D the scheme's root geometry: how many are Lighting, skinned, tracked by DCLF's installed tables and claimed by a
-set phase. A change logs one line with a verdict (the first input a view lacks). It never withholds and registers no graph client.
+set phase. A change logs one line with a verdict (the first input a view lacks). It never withholds and registers no graph client. It
+is a diagnostic: it runs only with `CS_ORG_MENU3D=1` or `CS_ORG_MAP=1`. DCLF's tables are scanned only when the menu root's geometry
+changes, or every 300 renders, not at every menu render. The manager's +0x38 and +0x90 are CommonLib's members, checked in Ghidra on
+both runtimes (`Render` reads both there).
 
 Expected first results: menu 3D's geometry is not tracked (no view names the menu roots as category roots yet), and the inventory may
 have no DCLF frame (if it freezes the world).

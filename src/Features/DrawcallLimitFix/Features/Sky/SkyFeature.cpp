@@ -3,7 +3,6 @@
 
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
 
-#include "Features/CloudShadows/ORGCloudShadows.h"
 #include "RenderGraph/Switches.h"
 
 #include <string>
@@ -18,11 +17,9 @@ namespace DCLF::Features::Sky
 				return;
 			// At PostPostLoad, before the render graph initializes: the anchors' epochs are fixed then.
 			SkyDraws::Reserve();
-			// The faces' clouds write Cloud Shadows' occlusion into its graph faces, which it makes at its setup (after this).
-			if (TakesView(View::Face) && TakesClouds(View::Face))
-				ORGCloudShadows::RequestGraphFaces();
 			InstallHooks();
-			logger::info("[DCLF] sky: on (CS_ORG_SKY=1): the engine's sky batches are drawn at the Sky and SkyReflections anchors");
+			logger::info("[DCLF] sky: on (CS_ORG_SKY=1): the engine's sky batches are drawn at the Sky and SkyReflections anchors; cloud layers: main {}, faces {}",
+				TakesClouds(View::Main) ? "the graph's" : "the engine's", TakesClouds(View::Face) ? "the graph's" : "the engine's");
 		}
 
 		std::string Status()
@@ -37,15 +34,9 @@ namespace DCLF::Features::Sky
 		return enabled;
 	}
 
-	bool TakesView(View a_view)
-	{
-		static const std::string views = Switches::Value("CS_ORG_SKY_VIEWS");
-		return !(views == "main" && a_view != View::Main) && !(views == "faces" && a_view != View::Face);
-	}
-
 	bool TakesClouds(View a_view)
 	{
-		// Off unless asked for: the graph's clouds do not match the engine's yet (docs/development/p5/sky.md, "Open").
+		// A feature choice, off unless asked for: docs/development/p5/sky.md, "Cloud layers".
 		static const std::string clouds = Switches::Value("CS_ORG_SKY_CLOUDS");
 		return clouds == "1" || (clouds == "main" && a_view == View::Main) || (clouds == "faces" && a_view == View::Face);
 	}

@@ -45,7 +45,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		constexpr const char* kFilterVertexShader = "Scaleform/FilterVS.hlsl";
 		constexpr const char* kFilterPixelShader = "Scaleform/FilterPS.hlsl";
 		// GpuTextures' diagnostic source tag for Scaleform's views (ImGui's is 256).
-		constexpr std::uint32_t kSourceTag = 257;
+		constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::Scaleform);
 		constexpr std::uint32_t kMinimumStaging = 256u << 10;
 		// The most commands one segment draws on the graph: one run gate entry each. A longer segment is replayed into D3D11.
 		constexpr std::uint32_t kGateEntries = 1024;

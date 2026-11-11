@@ -120,6 +120,18 @@ void CloudShadows::PropagateToCompletion(int side)
 	}
 }
 
+void CloudShadows::NoteGraphCloudLayer(int side, int layer)
+{
+	if (side < 0 || side >= 6 || layer < 0 || layer >= kMaxCloudLayers)
+		return;
+	// As SkyShaderHacks for the engine's draw, but the layer starts empty: the graph draws the face's earlier layers into it again
+	// instead of the copy from the layer below, which the graph has not drawn yet at this point of the D3D11 stream.
+	CheckResourcesSide(side);
+	float black[4] = { 0, 0, 0, 0 };
+	globals::d3d::context->ClearRenderTargetView(cloudShadowLayerRTVs[layer][side], black);
+	renderedLayersMask[side] |= (1u << layer);
+}
+
 void CloudShadows::SkyShaderHacks()
 {
 	auto context = globals::d3d::context;
@@ -155,8 +167,6 @@ void CloudShadows::SkyShaderHacks()
 
 	if (side >= 0) {
 		CheckResourcesSide(side);
-		// The engine draws this face's clouds into the D3D11 layers: the ORG copy reads the face from the last layer.
-		ORGCloudShadows::Get().NoteFace(static_cast<std::uint32_t>(side), ORGCloudShadows::FaceSource::Layer);
 
 		int layer = currentLayerForDraw;
 
@@ -258,8 +268,6 @@ void CloudShadows::ReflectionsPrepass()
 				float black[4] = { 0, 0, 0, 0 };
 				for (auto* rtv : cloudShadowLayerRTVs[kMaxCloudLayers - 1])
 					context->ClearRenderTargetView(rtv, black);
-				// Every face of the cleared layer is current: the ORG copy reads them all from it.
-				ORGCloudShadows::Get().NoteAllFaces(ORGCloudShadows::FaceSource::Layer);
 				occlusionClearedWithoutClouds = true;
 			}
 		} else {

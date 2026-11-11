@@ -59,7 +59,7 @@ namespace ImGuiRenderer
 		constexpr const char* kClientId = "cs.imgui";
 		constexpr const char* kTargetId = "cs.imgui.target";
 		// GpuTextures' diagnostic source tag for ImGui's views (above its own ranges).
-		constexpr std::uint32_t kSourceTag = 256;
+		constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::ImGui);
 
 		/** @brief A draw's D3D11 view as a descriptor: an icon's ORG copy, else DXVK's image imported (Drawcall Limit Fix's import). */
 		ImGuiBasicRHI::Binding Resolve(std::uint64_t a_texture)

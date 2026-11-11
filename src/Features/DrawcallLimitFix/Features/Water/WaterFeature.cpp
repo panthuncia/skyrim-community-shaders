@@ -6,7 +6,7 @@
 #include "RenderGraph/Switches.h"
 
 #include <algorithm>
-#include <cstdlib>
+#include <array>
 #include <string>
 
 namespace DCLF::Features::Water
@@ -20,7 +20,8 @@ namespace DCLF::Features::Water
 			// At PostPostLoad, before the render graph initializes: the anchors' epochs are fixed then.
 			WaterDraws::Reserve();
 			InstallHooks();
-			logger::info("[DCLF] water: on (CS_ORG_WATER=1): the engine's water batches are drawn at the EngineDraws anchor");
+			logger::info("[DCLF] water: on (CS_ORG_WATER=1): the engine's water batches are drawn at the EngineDraws anchor (mask {}, surface {})",
+				TakesView(View::Mask) ? "the graph's" : "the engine's", TakesView(View::Surface) ? "the graph's" : "the engine's");
 		}
 
 		std::string Status()
@@ -29,44 +30,16 @@ namespace DCLF::Features::Water
 		}
 	}
 
-	const Diagnostics& GetDiagnostics()
+	bool TakesView(View a_view)
 	{
-		static const Diagnostics diagnostics = [] {
-			Diagnostics out;
-			const auto split = [](const std::string& a_list, auto&& a_each) {
-				std::size_t start = 0;
-				while (start <= a_list.size()) {
-					const auto end = (std::min)(a_list.find(',', start), a_list.size());
-					if (end > start)
-						a_each(a_list.substr(start, end - start));
-					start = end + 1;
-				}
-			};
-			auto parts = Switches::Value("CS_ORG_WATER_PARTS");
+		static const std::array<bool, static_cast<std::size_t>(View::Count)> taken = [] {
+			const auto parts = Switches::List("CS_ORG_WATER_PARTS");
 			if (parts.empty())
-				parts = Switches::Value("CS_ORG_WATER_VIEWS");
-			if (!parts.empty()) {
-				out.mask = out.surface = false;
-				split(parts, [&](const std::string& a_part) {
-					out.mask = out.mask || a_part == "mask";
-					out.surface = out.surface || a_part == "surface";
-				});
-			}
-			if (const auto techniques = Switches::Value("CS_ORG_WATER_TECHNIQUES"); !techniques.empty()) {
-				out.techniques = 0;
-				split(techniques, [&](const std::string& a_technique) {
-					const auto value = std::strtoul(a_technique.c_str(), nullptr, 10);
-					if (value < 32)
-						out.techniques |= 1u << value;
-				});
-			}
-			out.safe = static_cast<std::uint32_t>(std::strtoul(Switches::Value("CS_ORG_WATER_SAFE").c_str(), nullptr, 10));
-			if (!parts.empty() || out.techniques != ~0u || out.safe)
-				logger::info("[DCLF] water: diagnostics: parts {}{}, techniques {:#x}, safe {}", out.mask ? "mask " : "", out.surface ? "surface" : "",
-					out.techniques, out.safe);
-			return out;
+				return std::array<bool, static_cast<std::size_t>(View::Count)>{ true, true };
+			const auto named = [&](const char* a_part) { return std::ranges::find(parts, a_part) != parts.end(); };
+			return std::array<bool, static_cast<std::size_t>(View::Count)>{ named("mask"), named("surface") };
 		}();
-		return diagnostics;
+		return a_view < View::Count && taken[static_cast<std::size_t>(a_view)];
 	}
 
 	bool Enabled()

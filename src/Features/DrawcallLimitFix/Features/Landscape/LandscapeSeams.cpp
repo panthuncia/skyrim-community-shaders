@@ -101,7 +101,7 @@ namespace DCLF::Features::Landscape
 			bool valid = views[0] && views[1];
 			for (std::size_t t = 0; t < views.size(); ++t) {
 				auto& binding = previous.bindings[t];
-				binding = textures.ResolveBinding(views[t], 64 + LandscapeSeamsFix::FirstPSTexture + static_cast<std::uint32_t>(t));
+				binding = textures.ResolveBinding(views[t], GpuTextures::Tag(GpuTextures::Source::FrameSlot, LandscapeSeamsFix::FirstPSTexture + static_cast<std::uint32_t>(t)));
 				valid &= binding.index != GpuTextures::kInvalid;
 				indices[t] = binding.index + 1;  // Zero is an unpopulated row; descriptor zero is still usable.
 				owners.push_back(binding.owner);

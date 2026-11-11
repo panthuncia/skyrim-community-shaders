@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "Features/DrawcallLimitFix/Core/Gpu/ImportRelocations.h"
@@ -95,15 +96,69 @@ namespace DCLF
 			std::array<Binding, kSamplerCount> samplers{};
 		};
 
+		/**
+		 * @brief Who first asked for a view (ResolveBinding's and Request's a_sourceTag): diagnostic only, counted per tag by
+		 * DescribeSuperseded and plotted by Tracy. A source with several slots adds the slot (Tag).
+		 */
+		enum class Source : std::uint32_t
+		{
+			Material = 0,         // a material's t0-t15 (+ the slot)
+			Feature = 16,         // a material's feature texture (+ its index)
+			Projected = 32,       // a projected decal's
+			Mask = 48,            // the pipeline mask
+			FrameSlot = 64,       // a frame texture or an engine draw's slot tN (+ N)
+			FamilyHeader = 96,    // an engine draw family's header texture (+ the header's index)
+			FamilyNull = 120,     // an engine draw family's null view (+ its ViewKind)
+			ShadowDiffuse = 192,  // the shadow pass's diffuse
+			ImGui = 256,          // CS's ImGui textures
+			Scaleform = 257,      // the engine's Scaleform textures
+		};
+
+		/** @brief a_source's tag, a_offset past its first. */
+		static constexpr std::uint32_t Tag(Source a_source, std::uint32_t a_offset = 0) { return static_cast<std::uint32_t>(a_source) + a_offset; }
+
+		/**
+		 * @brief A shader resource's declared dimension. A slot the engine or CS leaves empty reads a null view of it (NullOf): a cube, 3D
+		 * or array read through a 2D descriptor is undefined on the GPU, and AMD loses the device on it.
+		 */
+		enum class ViewKind : std::uint8_t
+		{
+			Texture2D,
+			Texture2DArray,
+			Texture3D,
+			Cube,
+			Buffer,  // a structured or raw buffer
+		};
+
+		/** @brief Why ResolveBinding gave no binding (its optional out parameter). */
+		enum class ResolveFailure : std::uint8_t
+		{
+			None,
+			Rejected,        // the view cannot be imported (a reject count in the status says why)
+			Pending,         // the import thread is importing it: a later call takes it
+			StreamedWindow,  // a streamed texture whose full window is not loaded yet (asked for: a later call takes it)
+			NoContext,       // outside an epoch's descriptor service
+		};
+
 		static GpuTextures& Get();
 
 		/** @brief The superseded imports still alive, each holding an old storage and its chunk: who asked for them. */
 		std::string DescribeSuperseded() const;
 
-		/** @brief Resolve with CPU ownership of this exact import and descriptor slot, importing inline if needed. */
-		// sourceTag is diagnostic only: material t0-t15, feature 16+, projected 32+,
-		// pipeline mask 48, frame tN as 64+N, shadow diffuse 192.
-		Binding ResolveBinding(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag = ~0u);
+		/**
+		 * @brief Resolve with CPU ownership of this exact import and descriptor slot, importing inline if needed. a_sourceTag is diagnostic
+		 * only (Tag). a_failure, when given, says why the binding is kInvalid.
+		 */
+		Binding ResolveBinding(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag = ~0u, ResolveFailure* a_failure = nullptr);
+
+		/**
+		 * @brief An empty slot's binding: a view of a_kind that reads zero (1x1 RGBA32F D3D11 textures made on first use, imported once;
+		 * a buffer's is NullBufferIndex(false)). kInvalid when it could not be made. Render thread.
+		 */
+		Binding NullOf(ViewKind a_kind);
+
+		/** @brief One line for a refusal's log: a_view (slot a_slot) as D3D11 describes it, and a_failure in words. Reads nothing else. */
+		static std::string DescribeFailure(ID3D11ShaderResourceView* a_view, std::uint32_t a_slot, ResolveFailure a_failure);
 
 		/**
 		 * @brief Any thread: a_view's binding, answered as an event into a_replies (its one consumer drains it; it lives as long as the

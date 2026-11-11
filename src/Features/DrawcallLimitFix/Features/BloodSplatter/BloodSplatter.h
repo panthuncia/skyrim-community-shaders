@@ -5,15 +5,17 @@
 //
 // The engine's CPU code runs unchanged. At the screen splatter accumulator's RenderBatches (FinishAccumulatingScreenSplatter, from
 // Main::RenderScreenSplatter: BloodSplatterCapture.cpp) the family lets the batch run with its draw choke point latched: each pass goes
-// through the engine's BeginPass, SetupTechnique and SetupGeometry, and DrawTriShape records the draw instead of drawing it. The batch's
-// draws are then drawn by an ORG pass at the EngineDraws anchor, in the engine's order, with CS's BloodSplatter.hlsl built for ORG
-// (BloodSplatterDraws.cpp).
+// through the engine's BeginPass, SetupTechnique and SetupGeometry, and DrawTriShape (the engine draw families' one detour,
+// Core/Engine/Family) records the draw instead of drawing it. The batch's draws are then drawn by an ORG pass at the EngineDraws anchor,
+// in the engine's order, with CS's BloodSplatter.hlsl built for ORG (BloodSplatterDraws.cpp).
 //
-// The client is made once, at the first frame the render graph runs (the frame-job wait, before any blood is drawn), so the first hit
-// does not rebuild the anchor's graph. Anything the family cannot draw stays the engine's.
+// The client is made once, at the first main-thread tick the render graph runs (RenderGraph::Engine::MainTick, before any blood is
+// drawn), so the first hit does not rebuild the anchor's graph. Anything the family cannot draw stays the engine's.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
 
 #include <array>
 #include <cstdint>
@@ -28,8 +30,6 @@ namespace DCLF::Features::BloodSplatter
 	{
 		// FinishAccumulatingScreenSplatter's RenderBatches(accumulator, 0x5C006073, 0x5C006074, 0, -1) (SE 99956, AE 106601).
 		inline constexpr Engine::Offset kSplatterBatch{ { 106601, 0x21 }, { 99956, 0x1D } };
-		// BSGraphics::Renderer::DrawTriShape (R1).
-		inline constexpr Engine::Offset kDrawTriShape{ { 77263 }, { 75477 } };
 	}
 
 	/** @brief BloodSplatterOrgDraw in BloodSplatter.hlsl: a draw's latched values, 176 bytes. */
@@ -49,23 +49,13 @@ namespace DCLF::Features::BloodSplatter
 	};
 	static_assert(sizeof(DrawConstants) == 176, "BloodSplatterOrgDraw's layout");
 
-	/** @brief What a draw's pipeline is made of. */
-	struct PipelineKey
-	{
-		std::uint32_t descriptor = 0;  // 0 splatter, 1 flare
-		const void* blend = nullptr;
-		const void* raster = nullptr;
-		std::uint32_t colourFormat = 0;
-		bool operator==(const PipelineKey&) const = default;
-	};
-
 	/** @brief One latched draw. */
 	struct Draw
 	{
-		PipelineKey key;
+		Family::ProgramKey key;
 		std::shared_ptr<const void> program;  // the RasterProgram
 		std::uint32_t indexCount = 0;
-		std::uint32_t viewport[4]{};
+		Family::Viewport viewport;
 		DrawConstants constants{};
 	};
 
@@ -74,7 +64,7 @@ namespace DCLF::Features::BloodSplatter
 	{
 		std::vector<Draw> draws;
 		std::uint64_t revision = 0;
-		std::vector<std::shared_ptr<const void>> owners;
+		Family::Owners owners;
 	};
 
 	// BloodSplatterFeature.cpp: the feature's entry (Features/FeatureList.cpp).
@@ -94,14 +84,21 @@ namespace DCLF::Features::BloodSplatter
 		bool Available();
 		/** @brief Reserves the EngineDraws anchor (the feature's install). */
 		void Reserve();
-		/** @brief Makes the client once (the first frame the graph runs). Main thread. */
+		/** @brief Makes the client once (the first main-thread tick the graph runs). Main thread, the render owner. */
 		void EnsureClient();
-		/** @brief Whether the client exists, imports the back buffer the engine binds now, and was prepared once. */
+		/**
+		 * @brief Whether a batch may be withheld: the client exists, imports the back buffer the engine binds now, and is in the anchor's
+		 * built graph (FrameAnchors::RequestJoin).
+		 */
 		bool Ready();
-		/** @brief The program for a key, compiled the first time; null when it cannot be built. a_shader: the engine's shader. */
-		std::shared_ptr<const void> Program(const PipelineKey& a_key, const void* a_shader);
-		/** @brief Runs the anchor with a_run's draws. */
-		void Submit(std::shared_ptr<Run> a_run);
+		/** @brief Whether a run of the anchor now would draw the client's work (FrameAnchors::CanRun). */
+		bool CanRun();
+		/** @brief The program for a key, built off the render thread; null while it builds or when it cannot be (a_state says which). */
+		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, Family::ProgramState& a_state);
+		/** @brief Keeps a probe's imports and leases as long as a run's. */
+		void Keep(Family::Owners&& a_owners);
+		/** @brief Runs the anchor with a_run's draws. True when the run was submitted; otherwise its draws were not drawn (logged). */
+		bool Submit(std::shared_ptr<Run> a_run);
 		/** @brief One status line. */
 		std::string Status();
 	}

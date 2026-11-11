@@ -48,6 +48,14 @@ public:
 	 */
 	void SkyShaderHacks();
 
+	/**
+	 * @brief Drawcall Limit Fix's sky family latched a face's cloud draw of a_layer, which the render graph draws into that layer's face
+	 * after the batch: the face's bookkeeping as SkyShaderHacks keeps it, and the layer's face cleared for the graph's draws.
+	 * @param side Cubemap face index (0-5).
+	 * @param layer Cloud layer (0 to kMaxCloudLayers - 1).
+	 */
+	void NoteGraphCloudLayer(int side, int layer);
+
 	Texture2D* texCloudShadowLayers[kMaxCloudLayers] = {};
 	ID3D11RenderTargetView* cloudShadowLayerRTVs[kMaxCloudLayers][6] = {};
 	// The D3D11 occlusion copy: null on the ORG path (OcclusionCopy makes it).

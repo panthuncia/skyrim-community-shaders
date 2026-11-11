@@ -1130,12 +1130,12 @@ namespace FrameAnchors
 	}
 
 	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv,
-		ID3D11UnorderedAccessView* a_uav)
+		ID3D11UnorderedAccessView* a_uav, ID3D11RenderTargetView* a_rtv)
 	{
 		if (a_name.empty())
 			return nullptr;
 		return Import(a_texture, fmt::format("cs.d3d11.{}", a_name),
-			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, a_srv, nullptr, a_uav); });
+			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, a_srv, a_rtv, a_uav); });
 	}
 
 	std::shared_ptr<org::ExternalTextureResource> ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id)
@@ -1289,7 +1289,7 @@ namespace FrameAnchors
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> EngineCubemap(std::uint32_t) { return nullptr; }
-	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*, ID3D11UnorderedAccessView*) { return nullptr; }
+	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*, ID3D11UnorderedAccessView*, ID3D11RenderTargetView*) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> ImportDepth(const RE::BSGraphics::DepthStencilData&, const std::string&) { return nullptr; }
 	void ReleaseImport(std::string_view) {}
 	bool InBuiltGraph(std::string_view, Anchor) { return false; }

@@ -36,26 +36,32 @@ flags 0)` at **SE 99956 `+0x1D` / AE 106601 `+0x21`**, then the first-person vie
 
 ## The family
 
-- **The batch** (`BloodSplatterCapture.cpp`): a thunk on the RenderBatches call runs the batch with its draws latched; DrawTriShape's
-  detour (chained with the sky's and the water's) records each draw: VS b2 c0-c5 and PS b2 c0 through ConstantMirror (watched from a
-  SetupGeometry hook), t0-t3 and their samplers (GpuTextures), the geometry and the viewport. A draw that tests depth or stencil, or
-  whose targets are not the back buffer alone, is refused.
+The pieces every engine draw family shares are `Core/Engine/Family` (render-graph.md, "Shared helpers for engine families").
+
+- **The batch** (`BloodSplatterCapture.cpp`): a thunk on the RenderBatches call runs the batch with its draws latched; the family's
+  taker at the shared DrawTriShape detour records each draw: VS b2 c0-c5 and PS b2 c0 through ConstantMirror (watched from the shared
+  SetupGeometry watch), t0-t3 and their samplers (GpuTextures), the geometry (index range and stride checked against the buffers, a
+  triangle list only) and the viewport. A draw that tests depth or stencil, or whose targets are not the back buffer alone, is refused.
+- **Joining, withholding, running.** The client joins with `FrameAnchors::RequestJoin`; a batch is withheld only when
+  `FrameAnchors::CanRun` says the anchor will draw it; `Family::RunWithheld` runs it, and any status but `Ran` is logged once per
+  status and makes the family probe again. The client's `executed` callback counts the runs that drew.
 - **The pass** (`BloodSplatterDraws.cpp`): the `cs.blood-splatter` client at the EngineDraws anchor (shared with the water), one
   RasterProgram draw per latched draw into the back buffer (FrameAnchors::EngineTarget(0)), no depth attachment, the engine's blend and
-  rasterizer states, `BloodSplatter.hlsl` built for ORG (a 176-byte latch region per draw; the push block is the latch's two words).
-- **Probes and refusals** as the water's: logged once per reason and technique, a failed draw hands the rest of the batch back and the
-  next batch probes again.
+  rasterizer states (their descriptions), `BloodSplatter.hlsl` built for ORG off the render thread (`Family::EngineDrawPrograms`; a
+  draw whose program is still building stays the engine's), a 176-byte latch region per draw; the push block is the latch's two words.
+- **Probes and refusals** as the water's: logged once per reason and technique (`Util::ReasonLog`), a failed draw hands the rest of
+  the batch back and the next batch probes again. A probe keeps its imports.
 
 ### Graph rebuilds
 
-The client is made once, at the first frame-job wait (SE 34554 / AE 35409, the main thread) after the render graph runs, before any
-blood is drawn: the first hit does not rebuild the EngineDraws graph mid-fight. The first batch then runs an empty run that prepares the
-client (the engine draws that batch), the second probes. Nothing registers again: a new back buffer (a swap chain made again) keeps the
+The client is made once, at the first main-thread tick (`RenderGraph::Engine::MainTick`, after the frame-job wait) the render graph
+runs, before any blood is drawn, and asks for its build there (`RequestJoin`): the first hit does not rebuild the EngineDraws graph
+mid-fight. The first batch after the client is in the built graph probes. Nothing registers again: a new back buffer (a swap chain made again) keeps the
 screen blood the engine's for the session, logged once.
 
 ### Accepted differences
 
-- **Pipeline builds block** the first time each technique meets its state.
+- **A withheld batch whose run then fails** (an epoch failure, after `CanRun` passed) is not drawn that frame.
 - **The flare's HDR source** (t3) is a render target read through GpuTextures; if a later port moves its writer onto the graph, it must
   be read as a published resource instead.
 
@@ -74,10 +80,10 @@ screen blood the engine's for the session, logged once.
 2. The blood textures (`sBloodSplatterColor01OPTFilename`, `Alpha01`, `Flare01`) are streamed: GpuTextures pins every view it imports
    at its full window, so a probe that sees one before its full window is loaded refuses the draw (`a streamed texture without its
    full window yet`, with the slot, format and size) and a later batch takes it. Expect that line once per texture, then
-   `every screen blood draw can be drawn by the graph` and `the first screen blood batch drawn by the graph (N draws)`.
-3. Log: `[DCLF] blood splatter: on`, `the cs.blood-splatter client registered` (at startup, not at the first hit), `built the program
-   for technique 0 (splatter)` (and 1 when a light flare shows), `every screen blood draw can be drawn by the graph`. No `stays the
-   engine's` after the first batches.
+   `every screen blood draw can be drawn by the graph` and `the first screen blood run drawn by the graph`.
+3. Log: `[DCLF] blood splatter: on`, `the cs.blood-splatter client registered` (at startup, not at the first hit), `[DCLF] blood
+   splatter: built the program for descriptor 0x0` (and 0x1 when a light flare shows), `every screen blood draw can be drawn by the
+   graph`. No `the engine draws` after the first batches, no `a withheld batch was not drawn this frame`.
 4. Shots: red splatters darkening the frame (multiply) in org1 as in org0; their placement varies by run.
 5. Not verified without a build: everything above. The risk to look at first is the back buffer import under HDR output or frame
    generation (another swap chain image layout).

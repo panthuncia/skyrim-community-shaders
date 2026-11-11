@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+struct ID3D11RenderTargetView;
 struct ID3D11ShaderResourceView;
 struct ID3D11Texture2D;
 struct ID3D11UnorderedAccessView;
@@ -324,11 +325,12 @@ namespace FrameAnchors
 	std::shared_ptr<org::ExternalTextureResource> EngineCubemap(std::uint32_t a_cubemap);
 
 	/**
-	 * @brief EngineTarget for a texture a feature still owns in D3D11 (one not ported yet), with the views given (either may be null):
-	 * "cs.d3d11.<name>". Imported again when a_texture changes. A cube texture (D3D11_RESOURCE_MISC_TEXTURECUBE) gets cube views.
+	 * @brief EngineTarget for a texture a feature still owns in D3D11 (one not ported yet), with the views given (any may be null; an
+	 * RTV makes it a render target the graph can draw into): "cs.d3d11.<name>". Imported again when a_texture changes. A cube texture
+	 * (D3D11_RESOURCE_MISC_TEXTURECUBE) gets cube views. The first import of a name decides its views: import it the same way everywhere.
 	 */
 	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv,
-		ID3D11UnorderedAccessView* a_uav);
+		ID3D11UnorderedAccessView* a_uav, ID3D11RenderTargetView* a_rtv = nullptr);
 
 	/**
 	 * @brief EngineDepth for a depth texture outside the engine's table (a feature's own map, or one only a view of reaches the

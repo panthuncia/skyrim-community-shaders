@@ -1,7 +1,7 @@
 # P5.3: the sky on the render graph
 
 Plan task P5.3 ([org-full-port.md](../org-full-port.md), Phase 5): the BSSkyShader draw family drawn by ORG through Drawcall Limit
-Fix, in the main view and the water reflection's faces, with Cloud Shadows' fourth render target as an output of the ORG pass.
+Fix, in the main view and the water reflection's faces, with Cloud Shadows' fourth render target (its layers) an output of the ORG pass.
 Reverse engineered with GhidraMCP on SE 1.5.97 and AE 1.6.1170 (2026-11-10). IDs are Address Library IDs. The code is
 `src/Features/DrawcallLimitFix/Features/Sky/` and the switch is `CS_ORG_SKY=1` (default off).
 
@@ -117,143 +117,119 @@ and no depth target. The last layer is copied into the occlusion cubemap at the 
 
 ## The family
 
-The engine's CPU code runs unchanged; its draw choke point latches state (Phase 5's second pattern).
+The engine's CPU code runs unchanged; its draw choke point latches state (Phase 5's second pattern). The pieces every engine draw
+family shares (the DrawTriShape taker, the SetupGeometry watch, the pass count, the geometry, viewport, constant, texture and header
+reads, the async programs, the kept leases, the run step) are `Core/Engine/Family` (render-graph.md, "Shared helpers for engine
+families").
 
 - **The batch** (`SkyCapture.cpp`, a thunk on the +0x247 / +0x237 call). For the main camera's accumulator inside CS's deferred pass,
   or a face of `kREFLECTIONS`, the batch runs with its draws latched: every sky pass goes through the engine's BeginPass,
   SetupTechnique, SetupGeometry (Cloud Shadows' and the frame annotations' hooks with it) and render state as before.
-- **The cloud group** (a thunk on the +0x284 / +0x274 call). When group 13 is a pass list of BSSkyShader TriShapes only, the capture
-  spans it: the batch's capture stays open, the cloud passes are latched the same way, and the run is handed to the anchor after the
-  group. A group with another shader's pass (a sky-object effect, hint `0x12`), another geometry type, or no pass list is drawn by
-  the engine after the anchor's run, in the engine's order (logged once: `the main cloud layers stay the engine's while ...`). A
-  probe whose only refusals were cloud draws leaves that view's clouds to the engine for the session (`the {main,face} cloud layers
-  stay the engine's for the session`), so a cloud technique the graph cannot draw never keeps the dome off the graph.
-- **The choke point** (a detour on `DrawTriShape`). While a batch is latched, a draw is recorded instead of drawn: the shadow state
-  SetDirtyStates would apply (`EngineDrawState::Latch`: depth, blend, write mode, cull, bias, alpha-to-coverage), the alpha test
-  reference, CS's extra descriptor (`IsSun`, `IsMoon`, `InReflection`), the PerGeometry constants SetupGeometry wrote (read through
-  **ConstantMirror**: `Watch` from a SetupGeometry hook, `Contents` at the draw; no new decode was needed, the bytes are Sky.hlsl's
-  layout), the technique's textures and samplers (`GpuTextures`), the static vertex and index buffers (`GpuResources::Frame` leases,
-  by device address) and the viewport. Cloud Shadows' `overrideSky` and `bindLayerSelfShadow` are taken and cleared, so its D3D11
-  overrides never apply to another draw.
-- **The pass** (`SkyDraws.cpp`). After the batch (or the cloud group) the anchor runs: `Sky` for the main pass, `SkyReflections` for a face (new anchors
-  at this call, in FrameAnchors). Its client's pass draws the batch's draws in the engine's order, one RasterProgram draw each, with
-  CS's `Sky.hlsl` built for ORG: the defines are ShaderCache's for the pixel descriptor (`GetCompileDefines`), and the pipeline is
-  the engine's state objects for the draw (`EngineBlendState` and the others, through `StateConversion`). The vertex stage pulls the
-  geometry (`DCLFVertexPull.hlsli`); the constants are a latch region per draw; the shared constants come from `SharedConstants`.
-  - Main: the three GBuffer targets the shadow state names, the depth target (the Z-prepass copy) read and written (the moon masks
-    write depth), t17 the scene depth CS binds (Terrain Blending's published depth, or an engine depth; `kMAIN`'s when it is the
-    depth target itself, as `VanillaBinding::BindSkyResources` does).
-  - Faces: two passes. The draws that write no occlusion, on the face (the cube's slice) with the cube depth. Then the cloud draws
-    Cloud Shadows overrides, on the face and its occlusion target (`SKY_ORG_FACES`: SV_Target1), without a depth target and with
-    the cube depth at t17, with Cloud Shadows' blend state; the face's first such draw clears its occlusion slice.
-  - Order: the cloud group follows the batch, so every cloud draw comes after the dome, stars, moon masks, sun and moons, in the
-    group's registration order.
-  - Every draw's vertex count is a run gate entry (`cs.sky.main.gate`, `cs.sky.faces.gate`) the client's commit opens for its run
-    only, so a recording replayed for a run that did not commit (another client keeping the anchor's run) draws nothing. The Sky and
-    SkyReflections anchors have no other client today.
-- **Cloud Shadows' 4th MRT.** The faces' occlusion is Cloud Shadows' graph faces, `CloudShadows::Faces` (the layers' size and mips,
-  R8, a 6-slice array, History, published), which `ORGCloudShadows::Setup` makes when the family asked for it at its install
-  (`RequestGraphFaces`, unless `CS_ORG_SKY_VIEWS=main` or `CS_ORG_SKY_CLOUDS=0`). The face's cloud draws blend into its slice in
-  order (the first clears it), which is what the last D3D11 layer holds.
-- **The copy's source is fixed for the session.** Cloud Shadows' copy declares both sources from its first build, the D3D11 last
-  layer and the graph faces, with a gated dispatch per source, face and mip, and its commit opens, for each face, the source that drew
-  that face's clouds last: `ORGCloudShadows::NoteFace(face, Graph)` when a face run the graph draws holds every cloud draw, `Layer`
-  from Cloud Shadows' `SkyShaderHacks` when the engine draws a face's clouds (a probe, a fallback, the family off), and every face
-  `Layer` when `ReflectionsPrepass` clears the last layer for a weather without clouds. A change of writer is data, not a graph
-  change: nothing rebuilds. (Wave 1's copy re-declared its source per change, from the faces' batches, and rebuilt the graph a few
-  hundred times a minute until the device ran out of memory.) t25 and t26 keep their one-frame delay, and DCLF's frame texture and the
-  height fog read the published occlusion as before.
-- **Recording.** A pass's revision is the batch's draws without their constants (programs, buffers, textures, counts, face, viewport);
-  the constants are the latch. A face batch has another revision per face, so the faces' pass is recorded again per face.
+- **Joining, withholding, running.** A view's client is made once, for the first batch's shape, and joins with
+  `FrameAnchors::RequestJoin`: until the anchor's built graph holds it, the engine draws. A batch is withheld only when
+  `FrameAnchors::CanRun` says the anchor's run will draw it (a probe withholds nothing). After the batch, `Family::RunWithheld` runs the
+  anchor; any status but `Ran` is logged once per status (`a withheld batch was not drawn this frame`) and the view probes again.
+  The client's `executed` callback counts the runs that drew (the status line's `drawn`).
+- **The cloud group** (a thunk on the +0x284 / +0x274 call), with `CS_ORG_SKY_CLOUDS`. When group 13 is a pass list of BSSkyShader
+  TriShapes only, the capture spans it: the batch's capture stays open, the cloud passes are latched the same way, and the run is
+  handed to the anchor after the group. FinishAccumulating calls the group exactly when the capture spans it (non-null, flag 1). If
+  the call does not come (another hook at its site), the capture is finished at the next sky batch and no batch spans the group again
+  for the session (`the cloud group was not drawn after a sky batch that spanned it`). A group with another shader's pass (a
+  sky-object effect, hint `0x12`), another geometry type, or no pass list is drawn by the engine after the anchor's run, in the
+  engine's order (logged once). A probe whose only refusals were cloud draws leaves that view's clouds to the engine for the session.
+- **The choke point** (the family's taker at the shared `DrawTriShape` detour). While a batch is latched, a draw is recorded instead
+  of drawn: the shadow state SetDirtyStates would apply (`EngineDrawState::Latch`), the alpha test reference, CS's extra descriptor,
+  the PerGeometry constants SetupGeometry wrote (ConstantMirror), the technique's textures and samplers, the static vertex and index
+  buffers (`GpuResources::Frame` leases, by device address, their index range and stride checked against the buffers, a triangle
+  list only: `Family::LatchGeometry`) and the viewport (`Family::LatchViewport`, with the depth bias table; the sky's modes take
+  nothing off). Cloud Shadows' `overrideSky` and `bindLayerSelfShadow` are taken and cleared.
+- **The latch.** Everything per draw is in the draw's latch region (`SkyOrgDraw`, 352 bytes): the constants, the geometry, the heap
+  indices of t0-t2 and their samplers, and t26. The push block (52 bytes) holds only what a client's pass declares (the shared
+  constants, t17, t25, the headers) and the latch handle, so a recording is kept while textures, buffers or constants change.
+- **The pass** (`SkyDraws.cpp`). The anchor (`Sky` for the main pass, `SkyReflections` for a face) draws the batch's draws in the
+  engine's order, one RasterProgram draw each, with CS's `Sky.hlsl` built for ORG: the defines are ShaderCache's for the pixel
+  descriptor, the pipeline the engine's state objects' descriptions (`Pipeline::FindBlend`, `FindDepthStencil`, `FindRaster`),
+  built off the render thread (`Family::EngineDrawPrograms` over `ProgramCache`): a draw whose program is still building stays the
+  engine's. The vertex stage pulls the geometry (`DCLFVertexPull.hlsli`).
+  - Main: the three GBuffer targets, the depth target read and written (the moon masks write depth), t17 the scene depth CS binds.
+  - Faces: two passes. The draws that write no occlusion, on the face with the cube depth. Then the cloud draws Cloud Shadows
+    overrides, on the face and their Cloud Shadows layer (below), without a depth target and with the cube depth at t17.
+  - Every draw's index count is a run gate entry the client's commit opens for its run only.
+- **Cloud Shadows' layers.** Cloud Shadows keeps per-layer occlusion: layer L of a face holds the occlusion of the face's layers up to
+  L (SkyShaderHacks copies the layer below into it before the layer's draw). The main pass's clouds read their own layer at t26 for
+  their self shadowing, and Cloud Shadows' copy reads the last layer into the occlusion cubemap. A face's cloud draw on the graph writes
+  its layer through an import of it (`ORGCloudShadows::ImportLayer`, the D3D11 texture with its SRV and RTVs; the copy imports the
+  last layer the same way, so one graph resource serves both). The copy from the layer below cannot be made at the latch (the layer
+  below is drawn by the graph after the batch), so the layer starts cleared (`CloudShadows::NoteGraphCloudLayer`, on D3D11 at the
+  latch, with the face's bookkeeping) and each cloud draw also draws its occlusion into the face's later layers (its face target
+  write-masked, `ProgramKey::maskedTargets`). A layer then holds the occlusion of every layer up to it, on both paths; the cloud
+  layers must come in rising order (a batch where they do not is the engine's). No clear runs outside the gate: a replayed recording
+  only loads.
+- **Self shadowing (t26).** A main pass cloud layer reads its own layer (`texCloudShadowLayers[currentLayerForDraw]`, by heap
+  index), as SkyShaderHacks binds it; everything else reads the occlusion cubemap (t25's, `SKY_ORG_OCCLUSION`), as the face clouds do
+  on D3D11. Binding the whole occlusion to the main clouds darkened every layer by all of them: the overcast look of the graph's clouds.
 - **Probes.** A view's batches are the graph's only after a probe: a batch the engine draws while each draw is checked as the
-  family would take it (its program built, its constants mirrored, its textures and buffers imported; Cloud Shadows' flags left for
-  the engine). Once a probe latched every draw, the view's next batches are the graph's. A draw a later batch cannot latch makes the
-  rest of that batch the engine's (the draws latched before it are drawn after the batch: one batch out of order) and the view
-  probes again. Nothing is withheld for a program that does not build.
-- **Refusals.** A draw the family cannot take is logged once per reason, technique and view (`a main sky draw of technique N stays
-  the engine's: <reason>`): no TriShape buffers, too many draws, not BSSkyShader, a stencil state, no mirrored vertex constants, no
-  state object, no program, a buffer or texture import, a sampler. A probe checks every draw (so one probe builds every program); a
-  batch the graph draws stops at the first refusal. Every pass of a batch must draw through `DrawTriShape` (SetupGeometry calls
-  against DrawTriShape calls): a pass that draws through another of R1's draw functions is the engine's at its place in the batch,
-  ahead of the graph's draws, so the batch is refused and the log names the geometry types (`drew without DrawTriShape`).
-  The cloud layers never reached the batch at all: they are group 13 (above), now spanned by the capture.
-- **Constants.** A technique's PerGeometry group holds only the rows its vanilla shader declares; the latch takes what there is
-  (at least c0-c12) and zeroes the rest, and a pixel stage without a group gets zero PParams.
-- **The scene depth.** When CS's t17 is neither an engine depth nor a published texture (Terrain Blending's D3D11 depth), its view
-  is imported (`Sky::SceneDepth`). Round 2 bound nothing there, so the sun's depth test read zero and hid the sun.
-- **The headers' textures.** Exponential Height Fog's header includes IBL's (t76, t77) and Dynamic Cubemaps' (t30, t31) headers;
-  the reflection fog reads t31. They are `EXTERN` entries of the ORG build (Dynamic Cubemaps' are header SRVs now), bound to what
-  CS binds there for the pass: a published texture by id, or the D3D11 view imported (`Sky::t<register>`).
-- **Fallbacks.** The faces' clouds stay the engine's (with Cloud Shadows' D3D11 override) when Cloud Shadows has no graph faces.
-  A batch whose view or targets are not one of these, or whose client is new (registered for the new targets, then
-  built and prepared by an empty run), is drawn by the engine. A draw that cannot be latched (a buffer not mirrored yet: the first
-  batch after start; a texture or buffer import failing; a stencil state; a program that does not build; more than 128 draws) is drawn
-  by the engine where it was. A failed graph returns every batch to the engine; Cloud Shadows' copy then reads each face from its D3D11
-  layer once the engine has drawn that face's clouds again.
+  family would take it. Once a probe latched every draw, the view's next batches are the graph's. A draw a later batch cannot latch
+  makes the rest of that batch the engine's and the view probes again. A probe keeps its imports (`SkyDraws::Keep`).
+- **Refusals.** A draw the family cannot take is logged once per reason, technique and view (`[DCLF] sky: the engine draws: a main draw
+  of technique N: <reason>`, `Util::ReasonLog`). Every pass of a batch must draw through `DrawTriShape` (`Family::Passes`).
+- **Inputs.** t17, the headers (t76, t77, t30, t31) and t25 resolve through `Family::ResolveHeader`: a published graph texture is
+  declared by the client's pass and is part of the client's shape; a D3D11 view (Terrain Blending's D3D11 depth, a header CS binds as a
+  D3D11 view) is read by heap index, resolved per batch; an empty register reads a null view of its declared kind
+  (`GpuTextures::NullOf`: a cube for t25, t30 and t31). A 2D null read as a cube is undefined on the GPU; AMD loses the device on it.
+- **Fallbacks.** No client is registered again during play: a batch whose targets or published inputs differ from its client's
+  shape stays the engine's (logged once). A draw that cannot be latched is drawn by the engine where it was. A failed graph returns
+  every batch to the engine.
+
+### What can trigger a graph rebuild
+
+The two clients' first registrations (one per view, at the first batch of each). Nothing in play registers, refreshes or imports
+again: the shape holds only published ids, D3D11 inputs are heap indices in the latch or the run, and the layer imports are made once
+with the faces' client.
 
 ### Accepted differences
 
-- **The main view's cloud self shadowing** (Effects11's cloud scattering, t26) reads the full occlusion of last frame's faces, where
-  D3D11 binds the layers up to the drawn layer of this frame's faces. Per-layer occlusion cubes would need cube views of a cube
-  array's slices, which ORG makes as cube-array views.
 - **A face's cloud layer Cloud Shadows does not find** (not in `Sky::clouds`) is drawn with the face's other draws, before the
   overridden cloud layers.
-- **Pipeline builds block** the render thread the first time a technique and state meet, as CS's D3D11 shaders compile on first use.
 - **Up to seven anchor runs a frame** (the main pass and six faces), each an epoch.
-- **A face batch that fails partway** leaves its occlusion split between the graph faces (the clouds latched before the refusal) and
-  the D3D11 layers (the rest); the copy reads that face from its D3D11 layer for that frame.
-- **The main view's clouds drawn by the engine** while the faces' are the graph's bind the D3D11 layer of their own index at t26,
-  which the graph's faces no longer write: their self shadowing reads that layer's last D3D11 contents.
+- **A face batch that fails partway** draws the rest of its clouds on the engine before the graph's: their layers' copies read the
+  layer below before the graph has drawn it, for that frame.
+- **A withheld batch whose run then fails** (an epoch failure, after `CanRun` passed) is not drawn that frame; the family stops at
+  the failure.
+- **The face clouds' layers are drawn again** into every later layer: n(n-1)/2 extra occlusion-only draws a face for n layers.
 - **The moon masks' depth** is written into the Z-prepass copy as on D3D11, by the anchor's pass at the same point.
 - **The sun occlusion query and the sun glare** stay the engine's (above).
 
-## Open (2026-11-11)
+## Cloud layers
 
-The graph's cloud layers do not match the engine's, so they are off by default (`CS_ORG_SKY_CLOUDS=1`, `main` or `faces` turns
-them on). With them on, the sky is a grey overcast and the whole scene darker and hazier (river shots: 86-98% of pixels differ by
-more than 8); with `main` only or `faces` only it is as wrong, so each view's cloud draws are wrong on their own (the faces through
-Cloud Shadows' occlusion, which shadows terrain and feeds the height fog and the sky's scattering). The trace
-(`CS_ORG_SKY_TRACE=1`) shows every latched cloud draw with the engine's constants, a texture per layer, the engine's blend state,
-geometry and samplers, so the difference is in what the pixel stage reads besides the draw's own data (the shared constants,
-Effects11's cloud settings, t17, t25, t26, the headers) or in the shader build. Found and fixed on the way: the main view's
-programs were built without DEFERRED (CS looks the sky's shaders up with `ModifyShaderLookup`, which adds 256 in the deferred pass).
-Two device losses happened right after `set gamehour to 22` with the faces' clouds on the graph, none with them off. Next step: a
-RenderDoc capture of one frame with `sky-river-org1-clouds-main.env` against `sky-river-org0.env`, comparing one cloud layer's
-draw (its output alpha, and its bound t17/t25/t26 and shared constants).
+`CS_ORG_SKY_CLOUDS` (`1`, `main` or `faces`) takes the cloud layers on the graph; unset, the engine draws them after the anchor's
+run while the dome, stars, sun and moons stay the graph's. It stays off by default until the scenarios below show the graph's clouds
+match: the two causes found (t26 bound to the whole occlusion for the main clouds; the faces' graph occlusion leaving the D3D11 layers
+stale for the engine's main clouds) are fixed, and the faces now keep Cloud Shadows' layers as the engine does, but no run has
+checked it yet. Found and fixed earlier: the main view's programs were built without DEFERRED (CS looks the sky's shaders up with
+`ModifyShaderLookup`, which adds 256 in the deferred pass).
 
 ## The switch
 
 `CS_ORG_SKY=1` (render-graph.md, "Switches"); default off. It needs DCLF running and, while Cloud Shadows is loaded,
-`CS_ORG_CLOUD_SHADOWS=1` (else the sky stays the engine's, logged once). Diagnostics: `CS_ORG_SKY_VIEWS=main` or `faces` takes only
-that view; `CS_ORG_SKY_CLOUDS=0` leaves the cloud layers to the engine in both views. The feature is registered in DCLF's list
-(`Features/FeatureList.cpp`, `Sky::Feature()`, before Fades); its status line is DCLF's `sky` entry.
+`CS_ORG_CLOUD_SHADOWS=1` (else the sky stays the engine's, logged once). `CS_ORG_SKY_CLOUDS` is the feature choice above. The feature
+is registered in DCLF's list (`Features/FeatureList.cpp`, `Sky::Feature()`, before Fades); its status line is DCLF's `sky` entry
+(`runs (drawn), draws, programs`).
 
 ## Test plan
 
 1. Build, then `sky-org0.env` and `sky-org1.env` (`tools/cs-ab/scenarios/`): Whiterun at 13:00 and 22:00 in cloudy weather (12f2d),
-   a shot up at the sky (`player.setangle x -75`) and at the horizon each time, then Dragonsreach. Then `sky-river-org0.env` and
-   `sky-river-org1.env`: Riverwood's river in the same weather, a shot down at the water (the faces' sky and clouds in its
-   reflection) and one up at the sky at each hour.
-2. Log: `[DCLF] sky: on (CS_ORG_SKY=1)`, `hooks installed (the sky batch, the cloud group, ...)`, `[ORG] Cloud Shadows: the occlusion
-   copy runs on the render graph (...); each face from its last writer, the D3D11 layer or CloudShadows::Faces`, `the cs.sky.main
-   client registered (..., cloud layers the graph's)`, `the cs.sky.faces client registered` (with water in view), `built the
-   program for technique N` for 4, 5 or 6 (`faces, cloud occlusion` for the faces), `every main sky draw can be drawn by the graph`
-   (and `face`). The faces' warning `a face batch on the graph has no cloud draw` is gone. No `cloud layers stay the engine's`
-   (if one appears, its reason says why), no `back to the engine's draws`, no repeated `could not be drawn by the graph`, no
-   `SPIR-V build of Sky.hlsl` errors, no `[E]` lines but the known EFFECTS11 one.
-   The graph must not rebuild during play: after the clients' first registrations no `frame anchors: cs.sky.* registered` line
-   appears again (a weather or time change adds none), the device does not run out of memory, and the `Persistent preparation
-   cost` lines keep listing `cs.sky.faces.clouds`.
-   The ORG build was checked with every feature define CS has (check-dual-target-shaders.py, ps and vs, every technique, DEFERRED
-   and SKY_ORG_FACES: FXC, SPIR-V, DXIL, no binding outside the heap); defines with values (feature options) were not.
-3. Shots: `sky-noon`, `sky-night` (the dome, clouds, sun, moons, stars behind the moon masks) and the horizon shots against
-   sky-org0's; `river-noon`, `river-night` (the water's reflection of the sky and its clouds) against sky-river-org0's; terrain cloud
-   shadows in every shot (they read the faces' occlusion, now the graph's).
-4. The DCLF census (`CS_DCLF_CENSUS=1`) still counts the sky's passes as registered (they are, and the engine's batch runs); the
-   DXVK draw count of the GBuffer pass drops by the sky's draws.
-5. With `CS_ORG_ANCHOR_SELFTEST=1` and `CS_ORG_SKY=1` the self-test reports Sky and SkyReflections OK.
+   a shot up at the sky and at the horizon each time, then Dragonsreach. Then `sky-river-org0.env`, `sky-river-org1.env` and
+   `sky-river-org1-clouds.env` (`-clouds-main`, `-clouds-faces`): Riverwood's river in the same weather.
+2. Log: `[DCLF] sky: on (CS_ORG_SKY=1) ... cloud layers: main ..., faces ...`, `takes its draws at the engine draw families'
+   DrawTriShape detour`, `the cs.sky.main client registered`, `the cs.sky.faces client registered` (with water in view), `[DCLF] sky:
+   built the program for descriptor ...`, `every main sky draw can be drawn by the graph` (and `face`), `the first cs.sky.main run drawn
+   by the graph`. No `back to the engine's draws`, no `a withheld batch was not drawn this frame`, no `[E]` lines but the known
+   EFFECTS11 one. After the clients' first registrations no `frame anchors: cs.sky.* registered` line appears again.
+3. Shots against sky-org0's and sky-river-org0's: the dome, clouds, sun, moons, stars; the water's reflection of the sky; with the
+   clouds on, cloud brightness and terrain cloud shadows (t25 from the last layer).
+4. With `CS_ORG_ANCHOR_SELFTEST=1` and `CS_ORG_SKY=1` the self-test reports Sky and SkyReflections OK.
 
-Not verified without a build: everything above, and the cloud group's RE (from the decompiles: that every cloud pass is group 13's
-and a TriShape, and that the faces' accumulators register them there too). Risks to look at first: the vertex pulling (index alignment, the VertexDesc key),
-the faces' per-slice RTVs of the 6-slice array, `GpuResources::Frame()` leases outside tree LOD's BeginFrame, and the face depth
-read as an SRV in the cloud pass after the other pass wrote it.
+Not verified without a build: everything above. Risks to look at first: the latch's layout (`SkyOrgDraw` at 352 bytes, `Load<T>`),
+the layer imports declared as render targets (192 face views) in the faces' cloud pass, the main clouds reading a layer the faces'
+epoch wrote through a heap index, and the D3D11 clear of a layer at the latch before the anchor's run.
