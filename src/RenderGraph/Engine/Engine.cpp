@@ -7,6 +7,7 @@
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #include "RenderGraph/Engine/Pipeline/EngineHooks.h"
+#include "RenderGraph/Engine/Queries/OcclusionQueries.h"
 #include "RenderGraph/Engine/Scaleform/Scaleform.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
@@ -35,6 +36,8 @@ namespace RenderGraph::Engine
 		// CS_ORG_IMAGESPACE: the ImageSpace draws the graph takes (BSImagespaceShader::Render, the HDR effect, the pre-tonemap composites).
 		ImageSpace::Install();
 		Scaleform::Install();
+		// CS_ORG_OCCLUSION_QUERIES: the engine's BeginQuery, EndQuery and GetQueryData; a port's bracket answers its query from the graph.
+		OcclusionQueries::Install();
 	}
 
 	void Reserve()

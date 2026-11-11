@@ -1,7 +1,7 @@
 // The sky family's engine side: the sky batch's hook, which lets the engine's batch run with its draws latched; the cloud group's
-// hook, which latches the cloud layers drawn right after it and hands the draws to the anchor's pass; the family's DrawTriShape taker,
-// which latches a sky draw in place of drawing it; and its BSSkyShader::SetupGeometry watcher, which counts a batch's passes. Render
-// thread.
+// hook, which latches the cloud layers drawn right after it and hands the draws to the anchor's pass; the sun's occlusion query draw's
+// hook, which brackets the engine's query and latches its draw (CS_ORG_OCCLUSION_QUERIES); the family's DrawTriShape taker, which
+// latches a sky draw in place of drawing it; and its BSSkyShader::SetupGeometry watcher, which counts a batch's passes. Render thread.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -16,6 +16,7 @@
 #include "Features/CloudShadows/ORGCloudShadows.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
+#include "RenderGraph/Engine/Queries/OcclusionQueries.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/PublishedResources.h"
@@ -40,7 +41,16 @@ namespace DCLF::Features::Sky
 		// The most draws one batch latches; past it a draw is the engine's (SkyDraws' latch has room for this many).
 		constexpr std::size_t kMaxLatched = 128;
 
-		const char* NameOf(View a_view) { return a_view == View::Main ? "main" : "face"; }
+		const char* NameOf(View a_view) { return a_view == View::Main ? "main" : a_view == View::Face ? "face" : "sun occlusion"; }
+
+		namespace Queries = ::RenderGraph::Engine::OcclusionQueries;
+
+		/** @brief Why a sun occlusion draw is skipped (its query answers its last count), each logged once. */
+		Util::ReasonLog& SunSkips()
+		{
+			static Util::ReasonLog log("[DCLF] sky: a sun occlusion draw is skipped, its query answers its last count", spdlog::level::warn);
+			return log;
+		}
 
 		/** @brief The inherent refusals, each logged once per reason. */
 		Util::ReasonLog& Refusals()
@@ -331,7 +341,8 @@ namespace DCLF::Features::Sky
 			// A stencil test or write (a face's technique 8) uses the shadow state's reference, as the engine's draw would.
 			draw.stencilRef = engine.stencilRef;
 			draw.key.defineStage = Family::DefineStage::Pixel;
-			draw.key.variant = a_capture.view == View::Face ? kVariantFaces : 0;
+			// A face and the sun's occlusion draw bind one target (SKY_ORG_FACES).
+			draw.key.variant = a_capture.view != View::Main ? kVariantFaces : 0;
 			auto* blend = occlusion ? cloudShadows.cloudShadowBlendState :
 			                          Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra);
 			// Cloud Shadows binds no depth target for its occlusion draws (SkyShaderHacks).
@@ -565,16 +576,99 @@ namespace DCLF::Features::Sky
 		};
 
 		/**
-		 * @brief BSShaderAccumulator's occlusion query draw (SE 99958, AE 106604), from Sun::SubmitOcclusionQuery: the engine's, vouched for.
-		 * A graph draw would not be counted by the engine's D3D11 query, and the sun glare reads that count.
+		 * @brief The sun occlusion draw's view from the shadow state: kMAIN with kMAIN's depth or the Z-prepass copy as the depth target
+		 * (Main::RenderWorld's call, and the later one in AE 107129). The formats go into a_capture, the depth target's choice into a_run.
+		 * Null when taken; otherwise why not.
+		 */
+		const char* SunShape(Capture& a_capture, Run& a_run)
+		{
+			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			auto* renderer = globals::game::renderer;
+			if (rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
+				return "it draws into a cubemap";
+			constexpr auto kMain = static_cast<std::int32_t>(RE::RENDER_TARGETS::kMAIN);
+			if (static_cast<std::int32_t>(rss.renderTargets[0]) != kMain)
+				return "its first target is not kMAIN";
+			const auto depth = static_cast<std::int32_t>(rss.depthStencil);
+			if (depth == static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN))
+				a_run.sunCopyDepth = false;
+			else if (depth == static_cast<std::int32_t>(kSceneDepth))
+				a_run.sunCopyDepth = true;
+			else
+				return "its depth target is neither kMAIN's nor the Z-prepass copy";
+			a_capture.colourFormats = { FormatOf(renderer->GetRuntimeData().renderTargets[kMain].RTV), 0, 0 };
+			a_capture.depthFormat = FormatOf(renderer->GetDepthStencilData().depthStencils[depth].views[0]);
+			return a_capture.colourFormats[0] && a_capture.depthFormat ? nullptr : "a target format cannot be read";
+		}
+
+		/**
+		 * @brief BSShaderAccumulator's occlusion query draw (SE 99958, AE 106604), from Sun::SubmitOcclusionQuery: it acquires the
+		 * accumulator's query for the index (+0x70 + index * 0x18), BeginQuery, draws the sun's SunOcclude pass through
+		 * RenderPassImmediately, EndQuery. Installed only with CS_ORG_OCCLUSION_QUERIES=1: the engine's call then runs inside a query
+		 * bracket (its BeginQuery and EndQuery go nowhere) with its draw latched, and the EngineQueries anchor's pass draws it with the ORG
+		 * occlusion query that answers the engine's GetQueryData. A draw the graph cannot take is skipped, logged once per reason, and the
+		 * query answers its last count: nothing of it reaches D3D11. Without the sun's client (the family failed or was refused at setup)
+		 * the call is the engine's on D3D11, as with the switch off.
 		 */
 		struct SunOcclusionQuery
 		{
 			static void thunk(void* a_accumulator, RE::BSGeometry* a_geometry, std::uint32_t a_query, RE::NiCamera* a_camera)
 			{
-				static const Family::Flush::Reason reason{ "sky: sun occlusion query" };
-				Family::Flush::EngineDraws scope(reason);
+				if (!Queries::Active() || !SkyDraws::HasSunClient()) {
+					func(a_accumulator, a_geometry, a_query, a_camera);
+					return;
+				}
+				auto& capture = GetCapture();
+				// The sun's queries are submitted after the accumulator's batches, never inside a sky capture.
+				if (capture.active || capture.deferred) {
+					SunSkips().Report("a sun query inside a sky batch's capture: the engine's call is left out");
+					return;
+				}
+				Queries::Bracket bracket;
+				Family::BeginBatch();
+				auto run = std::make_shared<Run>();
+				run->view = View::Sun;
+				const char* refusal = SunShape(capture, *run);
+				if (!refusal && (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SkyDraws::Available()))
+					refusal = "the graph cannot draw now";
+				if (!refusal && !SkyDraws::CanTakeSun())
+					refusal = "its anchor cannot run now";
+				if (refusal)
+					SunSkips().Report(refusal);
+				// The capture takes every draw of the call, latched or skipped (TakeDraw).
+				capture.view = View::Sun;
+				capture.shape = {};
+				capture.shape.view = View::Sun;
+				capture.run = run;
+				capture.failed = refusal != nullptr;
+				capture.lastCloudLayer = -1;
+				capture.cloudGroup = nullptr;
+				capture.passes.Begin();
+				capture.active = true;
 				func(a_accumulator, a_geometry, a_query, a_camera);
+				capture.active = false;
+				capture.run.reset();
+				if (!capture.passes.End() && !capture.failed) {
+					capture.failed = true;
+					SunSkips().Report(capture.passes.Describe("sun occlusion"));
+				}
+				// Nothing begun and nothing drawn: the accumulator had a result pending, or no query.
+				if (bracket.Slot() == Queries::kNoSlot && run->draws.empty() && !capture.failed) {
+					SkyDraws::Keep(std::move(run->owners));
+					return;
+				}
+				const char* skip = capture.failed                     ? "its draw was refused" :
+				                   bracket.Slot() == Queries::kNoSlot ? "a draw with no query begun" :
+				                   run->draws.size() != 1             ? "not exactly one draw between its BeginQuery and EndQuery" :
+				                                                        nullptr;
+				if (skip) {
+					SkyDraws::Keep(std::move(run->owners));
+					bracket.Skip(skip);
+					return;
+				}
+				run->query = bracket.Slot();
+				if (!SkyDraws::Submit(std::move(run)))
+					bracket.Skip("its run was not submitted");
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -586,6 +680,17 @@ namespace DCLF::Features::Sky
 			if (!capture.active)
 				return false;
 			capture.passes.OnDraw();
+			// The sun's occlusion draw is never the engine's: one draw is latched, anything else is skipped (SunOcclusionQuery).
+			if (capture.view == View::Sun) {
+				if (capture.failed || !capture.run)
+					return true;
+				const char* reason = capture.run->draws.empty() ? TryLatchDraw(capture, a_shape, a_start, a_triangles) : "a second draw in its bracket";
+				if (reason) {
+					capture.failed = true;
+					SunSkips().Report(reason, std::format("technique {}", globals::state ? globals::state->currentPixelDescriptor & 0xFF : 0xFF));
+				}
+				return true;
+			}
 			if (capture.failed || !capture.run)
 				return false;
 			if (const char* reason = TryLatchDraw(capture, a_shape, a_start, a_triangles)) {
@@ -607,8 +712,14 @@ namespace DCLF::Features::Sky
 				return;
 			if (const auto* state = globals::state)
 				capture.lastTechnique = state->currentPixelDescriptor & 0xFF;
-			if (!capture.passes.OnSetup(a_pass) && !capture.failed)
-				Refuse(capture, "a pass the dispatcher draws through another function than DrawTriShape", capture.lastTechnique);
+			if (capture.passes.OnSetup(a_pass) || capture.failed)
+				return;
+			if (capture.view == View::Sun) {
+				capture.failed = true;
+				SunSkips().Report("a pass the dispatcher draws through another function than DrawTriShape", "that draw reaches D3D11");
+				return;
+			}
+			Refuse(capture, "a pass the dispatcher draws through another function than DrawTriShape", capture.lastTechnique);
 		}
 	}
 
@@ -637,9 +748,10 @@ namespace DCLF::Features::Sky
 		if (clouds)
 			stl::write_thunk_call<CloudGroup>(REL::Offset(Address::kCloudGroup).address());
 		Family::WatchSetupGeometry<RE::BSShader::Type::Sky>(RE::VTABLE_BSSkyShader[0], &OnSetupGeometry);
-		if (Address::kSunOcclusionQuery.Known()) {
+		// The sun's occlusion query draw: the graph's with CS_ORG_OCCLUSION_QUERIES=1; otherwise not hooked (the engine's, on D3D11).
+		if (Queries::Requested() && Address::kSunOcclusionQuery.Known()) {
 			stl::detour_thunk<SunOcclusionQuery>(REL::Offset(Address::kSunOcclusionQuery).address());
-			HookSites::NoteDetour("BSShaderAccumulator's occlusion query draw (the sun's, vouched for)", SunOcclusionQuery::func.address());
+			HookSites::NoteDetour("BSShaderAccumulator's occlusion query draw (the sun's, on the graph)", SunOcclusionQuery::func.address());
 		}
 		// Both views' clients are made on the main thread once the graph runs (the main menu), before any world frame.
 		Family::AddSetup("sky", [] { return SkyDraws::Setup(); });

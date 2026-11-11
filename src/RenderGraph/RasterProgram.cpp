@@ -298,11 +298,14 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 #	endif
 }
 
-void RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_draw) const
+bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_draw) const
 {
 	// A draw this program cannot record is skipped, and its reason logged once: a skipped draw leaves its targets as they were.
 	static Util::ReasonLog skipped("[ORG] raster program: a draw was not recorded", spdlog::level::warn);
-	const auto skip = [&](std::string_view a_reason) { skipped.Report(a_reason, a_draw.debugName ? a_draw.debugName : ""); };
+	const auto skip = [&](std::string_view a_reason) {
+		skipped.Report(a_reason, a_draw.debugName ? a_draw.debugName : "");
+		return false;
+	};
 	if (a_draw.colours.size() != targetCount)
 		return skip(std::format("{} colour targets given, the program has {}", a_draw.colours.size(), targetCount));
 	if ((a_draw.depth != nullptr) != hasDepth)
@@ -360,12 +363,19 @@ void RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 	commands.SetStencilRef(a_draw.stencilReference);
 	if (!a_draw.constants.empty())
 		commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, 0, 0, static_cast<std::uint32_t>(a_draw.constants.size()), a_draw.constants.data());
+	// Inside the render pass: Vulkan ends a query begun inside a pass in that same pass, and the count is this draw's alone.
+	const bool counted = a_draw.occlusionPool.valid();
+	if (counted)
+		commands.BeginQuery(a_draw.occlusionPool, a_draw.occlusionIndex);
 	if (a_draw.indirect && drawSignature)
 		commands.ExecuteIndirect(drawSignature->GetHandle(), a_draw.indirect->Resource()->GetAPIResource().GetHandle(),
 			a_draw.indirect->Offset(a_recording.FrameSlot()) + a_draw.indirectOffset, {}, 0, 1);
 	else
 		commands.Draw(a_draw.vertexCount, a_draw.instanceCount, 0, 0);
+	if (counted)
+		commands.EndQuery(a_draw.occlusionPool, a_draw.occlusionIndex);
 	commands.EndPass();
+	return true;
 }
 
 #endif

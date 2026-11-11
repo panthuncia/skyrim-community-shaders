@@ -88,6 +88,10 @@ namespace FrameAnchors
 		// FinishAccumulatingPostResolveDepth's water batch, a menu scene's shadow masks at UI3DSceneManager::Render, and the screen
 		// blood at Main::RenderScreenSplatter. Zero to five runs a frame, so it is listed out of frame order.
 		EngineDraws,
+		// The engine's occlusion queries the graph answers (RenderGraph/Engine/Queries, CS_ORG_OCCLUSION_QUERIES): the sun's occlusion
+		// draw between its BeginQuery and EndQuery (Drawcall Limit Fix's sky family), at Sun::SubmitOcclusionQuery's call, up to three
+		// times a frame (the engine's three sun queries). A client of its own, so every run's queries are that client's.
+		EngineQueries,
 		Count
 	};
 

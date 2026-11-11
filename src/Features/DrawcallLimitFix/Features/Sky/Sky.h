@@ -25,6 +25,12 @@
 // draw into (SkyDraws::Setup), with every published input declared. A draw it cannot take (its inherent refusals,
 // docs/development/p5/sky.md "What stays the engine's") ends the batch's latched part: the latched draws run at that point and the
 // engine draws the rest, the cloud group's included. A batch whose targets differ from its client's is the engine's.
+//
+// With CS_ORG_OCCLUSION_QUERIES=1 the sun's occlusion query draw is the graph's too (docs/development/p5/occlusion-queries.md): at
+// Sun::SubmitOcclusionQuery's draw (SkyCapture.cpp, SunOcclusionQuery) the engine's query is bracketed
+// (RenderGraph/Engine/Queries), its SunOcclude draw is latched as a batch's draws are, and the EngineQueries anchor's pass draws it
+// with an ORG occlusion query whose count answers the engine's GetQueryData. A draw it cannot take is skipped, never the engine's: the
+// query answers its last count.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -48,9 +54,9 @@ namespace DCLF::Features::Sky
 		// FinishAccumulating's RenderPersistentPassList(geometry group 13, flags), right after the sky batch: the cloud layers (BSSkyShader
 		// passes of accumulation hint 0x11) and the sky-object effects (hint 0x12). SE 0x1412caf54, AE 0x1414b3004.
 		inline constexpr Engine::Offset kCloudGroup{ { 106583, 0x274 }, { 99938, 0x284 } };
-		// The accumulator's occlusion query draw (Sun::SubmitOcclusionQuery's, SE 25799 +0xAD, AE +0xAF): the sun's SunOcclude pass between
-		// BeginQuery and EndQuery, read back for the sun glare. The engine's, vouched for (docs/development/p5/sky.md, "What stays the
-		// engine's"). SE 99958 at 0x1412ccad0, AE 106604 at 0x1414b4c00.
+		// The accumulator's occlusion query draw (Sun::SubmitOcclusionQuery's, SE 25799 +0xAD, AE 26353 +0xAF): the sun's SunOcclude pass
+		// between BeginQuery and EndQuery, read back for the sun glare by Sun::UpdateOcclusionQueries (SE 99967, AE 106605). The graph's
+		// with CS_ORG_OCCLUSION_QUERIES=1 (docs/development/p5/occlusion-queries.md). SE 99958 at 0x1412ccad0, AE 106604 at 0x1414b4c00.
 		inline constexpr Engine::Offset kSunOcclusionQuery{ { 106604 }, { 99958 } };
 	}
 
@@ -68,6 +74,7 @@ namespace DCLF::Features::Sky
 	{
 		Main,  // the main pass's GBuffer (the Sky anchor)
 		Face,  // a water reflection face (the SkyReflections anchor)
+		Sun,   // the sun's occlusion query draw into kMAIN (the EngineQueries anchor, CS_ORG_OCCLUSION_QUERIES)
 		Count
 	};
 
@@ -157,6 +164,9 @@ namespace DCLF::Features::Sky
 		std::array<std::uint32_t, 4> headerIndices{};           // kHeaderRegisters: imports, published ids' indices or null views
 		std::uint64_t revision = 0;                             // what the recording depends on (SkyDraws.cpp, RevisionOf)
 		Family::Owners owners;                                  // the textures' imports and the buffers' leases
+		// View::Sun: the depth target is kPOST_ZPREPASS_COPY (else kMAIN's), and the engine ring slot its one draw counts.
+		bool sunCopyDepth = false;
+		std::int32_t query = -1;
 	};
 
 	// SkyFeature.cpp: the feature's entry (Features/FeatureList.cpp).
@@ -198,6 +208,10 @@ namespace DCLF::Features::Sky
 		void Keep(Family::Owners&& a_owners);
 		/** @brief Runs a_run's anchor with its draws. True when the run was submitted; otherwise its draws were not drawn (logged). */
 		bool Submit(std::shared_ptr<Run> a_run);
+		/** @brief Whether the sun's occlusion client was made at setup and the family has not failed: the graph answers its queries. */
+		bool HasSunClient();
+		/** @brief Whether a run of the sun's anchor now would draw (FrameAnchors::CanRun). False is logged once. */
+		bool CanTakeSun();
 		/** @brief One status line. */
 		std::string Status();
 	}

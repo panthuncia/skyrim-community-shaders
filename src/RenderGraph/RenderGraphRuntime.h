@@ -111,6 +111,7 @@ public:
 		AnchorInterface,
 		AnchorImageSpace,
 		AnchorEngineDraws,
+		AnchorEngineQueries,
 		Count
 	};
 

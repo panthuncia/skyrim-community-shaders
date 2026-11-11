@@ -1,5 +1,6 @@
 // The sky family's render graph side: a client per view at the Sky and SkyReflections anchors, made once at setup, whose passes draw a
 // batch's latched draws in the engine's order with CS's Sky.hlsl built for ORG, and the faces' cloud draws into Cloud Shadows' layers.
+// With CS_ORG_OCCLUSION_QUERIES=1 a third client at the EngineQueries anchor draws the sun's occlusion draw with an ORG occlusion query.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -12,6 +13,7 @@
 #include "Features/CloudShadows/ORGCloudShadows.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/Queries/OcclusionQueries.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -60,12 +62,18 @@ namespace DCLF::Features::Sky::SkyDraws
 			Main,        // every draw, on the GBuffer targets with the depth target
 			FaceSky,     // a face's draws that write no occlusion, with the face's depth target
 			FaceClouds,  // a face's cloud draws that write Cloud Shadows' layers, without a depth target (as Cloud Shadows binds them)
+			SunMain,     // the sun's occlusion draw on kMAIN with kMAIN's depth, reading the Z-prepass copy at t17
+			SunCopy,     // the same with kPOST_ZPREPASS_COPY as the depth target, and a null view at t17 (D3D11 unbinds it)
 		};
+
+		bool IsSun(Part a_part) { return a_part == Part::SunMain || a_part == Part::SunCopy; }
 
 		bool InPart(Part a_part, const Draw& a_draw)
 		{
-			return a_part == Part::Main || (a_part == Part::FaceClouds) == a_draw.occlusion;
+			return a_part == Part::Main || IsSun(a_part) || (a_part == Part::FaceClouds) == a_draw.occlusion;
 		}
+
+		namespace Queries = ::RenderGraph::Engine::OcclusionQueries;
 
 		/** @brief A client's state, which its passes share. */
 		struct Client
@@ -80,6 +88,9 @@ namespace DCLF::Features::Sky::SkyDraws
 			// The targets as imported at the registration (FrameAnchors keeps each while the engine's texture stays the same).
 			std::array<std::shared_ptr<org::ExternalTextureResource>, 3> colours;
 			std::shared_ptr<org::ExternalTextureResource> cubemap, depth, sceneDepth;
+			// View::Sun: kPOST_ZPREPASS_COPY as a depth target (the import sceneDepth holds), and the ORG queries of its runs.
+			std::shared_ptr<org::ExternalTextureResource> copyDepth;
+			std::shared_ptr<Queries::QueryRing> queries;
 			// Cloud Shadows' layers, which the faces' cloud draws write (ORGCloudShadows::ImportLayer).
 			std::array<std::shared_ptr<org::ExternalTextureResource>, kCloudLayers> layers;
 			// Null views of the dimensions the push block's handles declare, for an input the batch does not have.
@@ -123,6 +134,17 @@ namespace DCLF::Features::Sky::SkyDraws
 				Bindings bindings{};
 				bindings.shared = SharedConstants::Declare(a_builder);
 				const auto& c = *client;
+				if (IsSun(part)) {
+					// kMAIN alone (SunOcclude writes no colour), the depth target of the part, t17 for the main depth's part.
+					bindings.colours[0] = a_builder.RenderTarget(c.colours[0]).View();
+					bindings.depth = a_builder.DepthReadWrite(part == Part::SunCopy ? c.copyDepth : c.depth).View();
+					bindings.hasDepth = true;
+					if (part == Part::SunMain) {
+						bindings.sceneDepth = a_builder.ShaderResource(c.sceneDepth).View();
+						bindings.hasSceneDepth = true;
+					}
+					return bindings;
+				}
 				if (part == Part::Main) {
 					for (std::size_t i = 0; i < c.colours.size(); ++i)
 						bindings.colours[i] = a_builder.RenderTarget(c.colours[i]).View();
@@ -174,6 +196,9 @@ namespace DCLF::Features::Sky::SkyDraws
 				const auto& run = *a_frame.run;
 				const auto& c = *a_frame.client;
 				const Part part = a_frame.part;
+				// The sun's parts: only the one of the run's depth target records, and it alone touches the run's queries.
+				if (IsSun(part) && (part == Part::SunCopy) != run.sunCopyDepth)
+					return;
 				SkyBlock block{};
 				block.shared = SharedConstants::Index(a_recording, a_bindings.shared);
 				// t17: the face's depth for its cloud draws; the main pass's own index (a D3D11 view, a published input), a null view, or the
@@ -189,11 +214,12 @@ namespace DCLF::Features::Sky::SkyDraws
 				const std::uint32_t face = run.face < kFaces ? run.face : 0;
 				const std::uint32_t slot = a_recording.FrameSlot();
 
-				const auto draw = [&](const RasterProgram& a_program, std::uint32_t a_index, std::span<const RasterProgram::Colour> a_colours) {
+				const auto draw = [&](const RasterProgram& a_program, std::uint32_t a_index, std::span<const RasterProgram::Colour> a_colours,
+									  rhi::QueryPoolHandle a_queries = {}, std::uint32_t a_query = 0) {
 					const auto& latched = run.draws[a_index];
 					block.draw = ShaderBindings::LatchOf(*c.latch, slot, a_index * kDrawStride);
 					const RasterProgram::Depth depth{ .view = &a_bindings.depth, .readOnly = false };
-					a_program.Draw(a_recording, { .colours = a_colours,
+					return a_program.Draw(a_recording, { .colours = a_colours,
 													.depth = a_bindings.hasDepth ? &depth : nullptr,
 													.viewport = { .x = latched.viewport.rect[0], .y = latched.viewport.rect[1], .width = latched.viewport.rect[2],
 														.height = latched.viewport.rect[3], .minDepth = latched.viewport.depthRange[0], .maxDepth = latched.viewport.depthRange[1] },
@@ -202,8 +228,31 @@ namespace DCLF::Features::Sky::SkyDraws
 													.stencilReference = latched.stencilRef,
 													// The count comes from the draw's gate entry, which the client's commit opens for this run only.
 													.indirect = &c.gate->Latch(),
-													.indirectOffset = c.gate->Offset(a_index) });
+													.indirectOffset = c.gate->Offset(a_index),
+													.occlusionPool = a_queries,
+													.occlusionIndex = a_query });
 				};
+
+				if (IsSun(part)) {
+					// Its inputs: t17 as the part declares it, null views for the headers and Cloud Shadows (SunOcclude samples none).
+					block.depth = a_bindings.hasSceneDepth ? a_recording.Index(a_bindings.sceneDepth) : c.null2D;
+					block.sharedDepth = block.depth;
+					block.cloudShadows = c.nullCube;
+					block.headers = { c.null2D, c.null2D, c.nullCube, c.nullCube };
+					// Each draw counted by its own query of the frame slot's range: reset first, resolved after (every query available).
+					const auto& queries = *c.queries;
+					auto& commands = a_recording.Commands();
+					queries.Reset(commands, slot);
+					std::uint32_t begun = 0;
+					const RasterProgram::Colour colour{ .view = &a_bindings.colours[0] };
+					for (std::uint32_t i = 0; i < run.draws.size() && i < queries.PerRun(); ++i) {
+						const auto& latched = run.draws[i];
+						if (latched.program && draw(*static_cast<const RasterProgram*>(latched.program.get()), i, { &colour, 1 }, queries.Pool(), queries.Index(slot, i)))
+							begun |= 1u << i;
+					}
+					queries.Resolve(commands, slot, begun);
+					return;
+				}
 
 				for (std::uint32_t i = 0; i < run.draws.size(); ++i) {
 					const auto& latched = run.draws[i];
@@ -326,8 +375,10 @@ namespace DCLF::Features::Sky::SkyDraws
 			auto client = std::make_shared<Client>();
 			client->view = a_shape.view;
 			client->shape = a_shape;
-			client->id = a_shape.view == View::Main ? "cs.sky.main" : "cs.sky.faces";
-			client->anchor = a_shape.view == View::Main ? FrameAnchors::Anchor::Sky : FrameAnchors::Anchor::SkyReflections;
+			client->id = a_shape.view == View::Main ? "cs.sky.main" : a_shape.view == View::Face ? "cs.sky.faces" : "cs.sky.sun";
+			client->anchor = a_shape.view == View::Main ? FrameAnchors::Anchor::Sky :
+			                 a_shape.view == View::Face ? FrameAnchors::Anchor::SkyReflections :
+			                                              FrameAnchors::Anchor::EngineQueries;
 			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kMaxDraws * kDrawStride, host->FrameSlots());
 			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kMaxDraws);
 			if (!client->gate) {
@@ -344,7 +395,17 @@ namespace DCLF::Features::Sky::SkyDraws
 				(kind == GpuTextures::ViewKind::Cube ? client->nullCube : client->null2D) = binding.index;
 				client->nullOwners.push_back(std::move(binding.owner));
 			}
-			if (a_shape.view == View::Main) {
+			if (a_shape.view == View::Sun) {
+				// kMAIN, with kMAIN's depth or the Z-prepass copy as the depth target, and that copy at t17 with kMAIN's.
+				client->colours[0] = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN));
+				client->copyDepth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(kSceneDepth));
+				client->sceneDepth = client->copyDepth;
+				client->queries = ::RenderGraph::Engine::OcclusionQueries::QueryRing::Create(client->id + ".queries", 1);
+				if (!client->colours[0] || !client->copyDepth || !client->queries) {
+					logger::warn("[DCLF] sky: the sun's occlusion client cannot be made (kMAIN, the Z-prepass copy or its query ring); the sun's queries stay the engine's");
+					return nullptr;
+				}
+			} else if (a_shape.view == View::Main) {
 				for (std::size_t i = 0; i < client->colours.size(); ++i) {
 					client->colours[i] = a_shape.colours[i] >= 0 ? FrameAnchors::EngineTarget(static_cast<std::uint32_t>(a_shape.colours[i])) : nullptr;
 					if (!client->colours[i]) {
@@ -364,7 +425,8 @@ namespace DCLF::Features::Sky::SkyDraws
 					return nullptr;
 				}
 			}
-			ListInputs(client->inputs);
+			if (a_shape.view != View::Sun)
+				ListInputs(client->inputs);
 			client->depth = a_shape.depth >= 0 ? FrameAnchors::EngineDepth(static_cast<std::uint32_t>(a_shape.depth)) : nullptr;
 			if (!client->depth) {
 				logger::warn("[DCLF] sky: the depth target {} cannot be imported; the sky stays the engine's", a_shape.depth);
@@ -393,7 +455,10 @@ namespace DCLF::Features::Sky::SkyDraws
 					.kind = FrameAnchors::PassKind::Render,
 					.make = [client, a_part]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<SkyPass>(client, a_part); } });
 			};
-			if (a_shape.view == View::Main) {
+			if (a_shape.view == View::Sun) {
+				addPass("occlusion", Part::SunMain, 0);
+				addPass("occlusion-copy", Part::SunCopy, 1);
+			} else if (a_shape.view == View::Main) {
 				addPass("draws", Part::Main, 0);
 			} else {
 				addPass("draws", Part::FaceSky, 0);
@@ -412,8 +477,13 @@ namespace DCLF::Features::Sky::SkyDraws
 					if (draw.program)
 						client->gate->OpenDraw(i, draw.indexCount, 1);
 				}
+				// The engine ring slot the run's draw counts.
+				if (client->queries)
+					client->queries->Commit(slot, std::span<const std::int32_t>(&run->query, 1));
 			};
 			desc.executed = [client](const FrameAnchors::Point&) {
+				if (client->queries)
+					client->queries->Executed();
 				if (client->executed.fetch_add(1, std::memory_order_relaxed) == 0)
 					logger::info("[DCLF] sky: the first {} run drawn by the graph", client->id);
 			};
@@ -438,6 +508,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			std::uint64_t hash = 1469598103934665603ull;
 			const auto mix = [&](std::uint64_t a_value) { hash = (hash ^ a_value) * 1099511628211ull; };
 			mix(a_run.face);
+			mix(a_run.sunCopyDepth);
 			mix(a_run.draws.size());
 			mix(a_run.sceneDepthIndex);
 			mix(a_run.sceneDepthNull);
@@ -471,6 +542,9 @@ namespace DCLF::Features::Sky::SkyDraws
 		state.reserved = FrameAnchors::Reserve(FrameAnchors::Anchor::Sky) && FrameAnchors::Reserve(FrameAnchors::Anchor::SkyReflections);
 		if (!state.reserved)
 			logger::warn("[DCLF] sky: the Sky anchors could not be reserved; the sky stays the engine's");
+		// The sun's occlusion queries (CS_ORG_OCCLUSION_QUERIES): their anchor, or the engine keeps them.
+		if (state.reserved && ::RenderGraph::Engine::OcclusionQueries::Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::EngineQueries))
+			logger::warn("[DCLF] sky: the EngineQueries anchor could not be reserved; the sun's occlusion queries stay the engine's");
 	}
 
 	bool Setup()
@@ -509,6 +583,14 @@ namespace DCLF::Features::Sky::SkyDraws
 		face.clouds = Address::kCloudGroup.Known();
 		for (const auto& shape : { main, face })
 			state.clients[static_cast<std::size_t>(shape.view)] = MakeClient(shape);
+		// The sun's occlusion draw (CS_ORG_OCCLUSION_QUERIES with its detours in): kMAIN and the depth targets it draws with.
+		if (::RenderGraph::Engine::OcclusionQueries::Active() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::EngineQueries)) {
+			Shape sun;
+			sun.view = View::Sun;
+			sun.colours = { static_cast<std::int32_t>(RE::RENDER_TARGETS::kMAIN), -1, -1 };
+			sun.depth = static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
+			state.clients[static_cast<std::size_t>(View::Sun)] = MakeClient(sun);
+		}
 		return true;
 	}
 
@@ -529,6 +611,26 @@ namespace DCLF::Features::Sky::SkyDraws
 		}
 		if (!FrameAnchors::CanRun(client->id, client->anchor)) {
 			static Util::ReasonLog log("[DCLF] sky: the engine draws a batch", spdlog::level::err);
+			log.Report(std::format("{}: its anchor cannot run now (not in the built graph, or its ring is full)", client->id));
+			return false;
+		}
+		return true;
+	}
+
+	bool HasSunClient()
+	{
+		const auto& state = GetState();
+		return !state.failed && state.clients[static_cast<std::size_t>(View::Sun)] != nullptr;
+	}
+
+	bool CanTakeSun()
+	{
+		const auto& state = GetState();
+		const auto& client = state.clients[static_cast<std::size_t>(View::Sun)];
+		if (state.failed || !client)
+			return false;
+		if (!FrameAnchors::CanRun(client->id, client->anchor)) {
+			static Util::ReasonLog log("[DCLF] sky: a sun occlusion query answers its last count", spdlog::level::err);
 			log.Report(std::format("{}: its anchor cannot run now (not in the built graph, or its ring is full)", client->id));
 			return false;
 		}
@@ -580,6 +682,7 @@ namespace DCLF::Features::Sky::SkyDraws
 		for (const auto& client : state.clients)
 			if (client)
 				executed += client->executed.load(std::memory_order_relaxed);
-		return fmt::format("{} runs ({} drawn), {} draws, {} programs", state.runs, executed, state.draws, state.programs.Built());
+		return fmt::format("{} runs ({} drawn), {} draws, {} programs; occlusion queries: {}", state.runs, executed, state.draws, state.programs.Built(),
+			::RenderGraph::Engine::OcclusionQueries::Status());
 	}
 }
