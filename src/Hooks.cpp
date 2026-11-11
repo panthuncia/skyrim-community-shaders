@@ -545,7 +545,7 @@ struct IDXGISwapChain_Present
 
 		// DXVK's moves of the pinless imports, once per Present on the thread that renders: the frames DCLF does not run (a loading
 		// screen, a menu) draw with imports too (docs/development/p5/loading-screen.md, "Scaleform on the loading thread: pinless imports").
-		if (FrameAnchors::OnRenderThread())
+		if (FrameAnchors::IsRenderOwner())
 			DCLF::ImportRelocations::Poll();
 
 		FrameAnchors::Run(FrameAnchors::Anchor::Present);

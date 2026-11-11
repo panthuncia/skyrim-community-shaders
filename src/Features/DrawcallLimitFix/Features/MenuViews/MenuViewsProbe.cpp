@@ -209,7 +209,7 @@ namespace DCLF::Features::MenuViews
 		{
 			if (!ShellState::Running())
 				return false;
-			if (!FrameAnchors::OnRenderThread()) {
+			if (!FrameAnchors::IsRenderOwner()) {
 				GetState().offThread.fetch_add(1, std::memory_order_relaxed);
 				return false;
 			}

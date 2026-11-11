@@ -112,7 +112,7 @@ buffer's contents as the GPU will read them.
 - **Classification:** a buffer's group (Custom, AlphaTest, VS/PS technique, material, geometry, Compute, PerFrame,
   InstanceGroup, or Other for CS's and other plugins' buffers) and its pool index come from its place in the block.
 - **Threads:** the hooks run on whichever thread drives the immediate context (serialized by `Renderer::Lock`). Uses are
-  captured, and the frame ends, only on the render thread (`FrameAnchors::OnRenderThread`), where the anchors run. A loading
+  captured, and the frame ends, only on the render thread (`FrameAnchors::IsRenderOwner`), where the anchors run. A loading
   screen's job-thread frames are captured only with `CS_ORG_LOADING_THREAD=1` (P5.12, `loading-screen.md`).
 
 ## The consumer API

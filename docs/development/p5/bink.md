@@ -182,7 +182,7 @@ The way to put it on the graph, which P5.12 needs for the loading-screen thread 
    `Register` from a feature's setup) must not touch the anchors' per-run state; registration already only publishes a new
    client list, built at the next run.
 
-Built in P5.12 ([loading-screen.md](./loading-screen.md)): Bink's checks call `FrameAnchors::OnRenderThread()`, and with
+Built in P5.12 ([loading-screen.md](./loading-screen.md)): Bink's checks call `FrameAnchors::IsRenderOwner()`, and with
 `CS_ORG_LOADING_THREAD=1` the logo's MoviePlayer thread owns rendering while it holds the lock, so the logo takes the graph
 path unchanged. Without the switch the logo's ticks log `[ORG] Bink: a movie plays on thread N, not the render thread ...`
 once and draw through the engine (FrameAnchors logs its own one-time line about a Present off the main thread too).

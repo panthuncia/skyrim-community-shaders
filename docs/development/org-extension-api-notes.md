@@ -1233,7 +1233,7 @@ Keys used so far:
   lock orders the anchors' state between threads. The design is in `docs/development/p5/bink.md`, "Threads, and what P5.12
   needs".
 - **Found by:** P5.11 Bink (2026-11-10).
-- **Built (P5.12, `CS_ORG_LOADING_THREAD=1`):** `FrameAnchors::OnRenderThread`, a render owner claimed by the thread that holds
+- **Built (P5.12, `CS_ORG_LOADING_THREAD=1`):** `FrameAnchors::IsRenderOwner`, a render owner claimed by the thread that holds
   the lock (`docs/development/p5/loading-screen.md`). ORG needed no change: `GraphHost::Uploads()->SetOwnerThread()` moves the
   frame upload instance, and the host has no thread id of its own. What a plugin API would want: an explicit
   `GraphHost::SetOwnerThread()` that moves every owner-thread structure at once (today only the upload instance keeps one), and

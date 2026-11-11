@@ -59,13 +59,13 @@ namespace PublishedResources
 
 		/**
 		 * @brief Logs once when called off the render thread: the entries are not locked. That is the thread that first used them, or
-		 * with CS_ORG_LOADING_THREAD=1 the render owner (FrameAnchors::OnRenderThread), which a loading screen's thread may be.
+		 * with CS_ORG_LOADING_THREAD=1 the render owner (FrameAnchors::IsRenderOwner), which a loading screen's thread may be.
 		 */
 		void CheckThread()
 		{
 			if (RenderGraph::Engine::LoadingScreen::Requested()) {
 				static std::atomic<bool> s_offOwner{ false };
-				if (!FrameAnchors::OnRenderThread() && !s_offOwner.exchange(true, std::memory_order_relaxed))
+				if (!FrameAnchors::IsRenderOwner() && !s_offOwner.exchange(true, std::memory_order_relaxed))
 					logger::critical("[ORG] PublishedResources used on thread {}, not the render owner: its entries are not locked", ::GetCurrentThreadId());
 				return;
 			}

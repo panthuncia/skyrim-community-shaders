@@ -19,7 +19,6 @@
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
 
-#	include <set>
 #	include <Resources/ExternalTextureResource.h>
 #	include <Resources/TextureDescription.h>
 #	include <rhi_helpers.h>
@@ -177,10 +176,23 @@ namespace FrameAnchors
 			std::vector<std::uint64_t> armed;
 		};
 
+		/**
+		 * @brief The run gates of a registration that left the graphs (unregistered, replaced or dropped). The anchors' graphs built
+		 * before snapshot serial still hold its passes, which replay whenever another client runs the anchor: every such run closes
+		 * these gates, so the old passes do no work and never read latch slots nobody wrote for that run.
+		 */
+		struct RetiredGates
+		{
+			std::vector<std::shared_ptr<RenderGraph::RunGate>> gates;
+			std::uint32_t mask = 0;    // the anchors its passes were at
+			std::uint64_t serial = 0;  // the first snapshot without them
+		};
+
 		/** @brief The anchors' state. Render thread, but the snapshot and the built serials, which a build writes and reads. */
 		struct State
 		{
 			std::array<bool, kAnchors> reserved{};
+			std::vector<Anchor> reserveOrder;  // Reserve's order: FitSlotBudget drops the last ones first
 			bool frozen = false;  // AddToFrame ran: the reservations are the frame's epochs
 			org::GraphHost* host = nullptr;
 			std::vector<Client> clients;
@@ -188,6 +200,12 @@ namespace FrameAnchors
 			std::uint64_t serial = 0;                                  // bumped by every Publish
 			std::uint64_t resizeGeneration = 0;                        // GraphResources' last seen
 			std::function<void()> lateHook;
+			std::vector<RetiredGates> retired;
+			// Per anchor: its submitted runs since the host's seal runsSeal (the last Present), and the most it ever had in one frame.
+			std::array<std::uint32_t, kAnchors> runsThisFrame{};
+			std::array<std::uint64_t, kAnchors> runsSeal{};
+			std::array<std::atomic<std::uint32_t>, kAnchors> peakRuns{};
+			std::uint64_t buildPointsSeen = 0;  // RenderGraphRuntime::BuildPoints at the last frame end
 			std::atomic<std::shared_ptr<const Snapshot>> snapshot;
 			std::array<std::atomic<std::uint64_t>, kAnchors> built{};  // the snapshot each anchor's graph was last built from
 			// The snapshot each anchor's last build was made from, and the one before it. An epoch failure drops the clients of the
@@ -310,6 +328,61 @@ namespace FrameAnchors
 				if (IndexOf(pass.anchor) < kAnchors && (!a_onceOnly || pass.once))
 					mask |= 1u << IndexOf(pass.anchor);
 			return mask;
+		}
+
+		/**
+		 * @brief After Publish: a_client's registration left the graphs. Its gates (but a_kept, which the registration replacing it
+		 * still has and closes as its own) are closed at every run of its anchors until each is built from this snapshot or a later
+		 * one (RetiredGates).
+		 */
+		void RetireGates(State& a_state, const ClientDesc& a_client, const std::vector<std::shared_ptr<RenderGraph::RunGate>>& a_kept = {})
+		{
+			std::vector<std::shared_ptr<RenderGraph::RunGate>> gates;
+			for (const auto& gate : a_client.gates)
+				if (gate && std::ranges::find(a_kept, gate) == a_kept.end())
+					gates.push_back(gate);
+			if (!gates.empty())
+				a_state.retired.push_back({ std::move(gates), AnchorMask(a_client), a_state.serial });
+		}
+
+		/** @brief Retired gates whose anchors' graphs were all built without their passes are let go. */
+		void PruneRetired(State& a_state)
+		{
+			std::erase_if(a_state.retired, [&](const RetiredGates& a_retired) {
+				for (std::uint32_t i = 0; i < kAnchors; ++i)
+					if ((a_retired.mask >> i & 1u) && a_state.reserved[i] && a_state.built[i].load(std::memory_order_acquire) < a_retired.serial)
+						return false;
+				return true;
+			});
+		}
+
+		/** @brief The anchor epoch's ring of frame slots: kGameFramesInFlight times its runs a frame (GraphHost::Desc::epochRuns). */
+		std::uint32_t RingCapacity(std::uint32_t a_index)
+		{
+			return RenderGraphRuntime::kGameFramesInFlight * kInfo[a_index].runsPerFrame;
+		}
+
+		/** @brief The anchor's submitted runs since the host's last seal (SealPresented): the count starts again at each seal. */
+		std::uint32_t& RunsSinceSeal(State& a_state, std::uint32_t a_index)
+		{
+			const std::uint64_t seals = a_state.host->Seals();
+			if (a_state.runsSeal[a_index] != seals) {
+				a_state.runsSeal[a_index] = seals;
+				a_state.runsThisFrame[a_index] = 0;
+			}
+			return a_state.runsThisFrame[a_index];
+		}
+
+		/** @brief Whether the client waits for one of its anchors' graphs to be built with its registration. */
+		bool WaitsToJoin(const State& a_state, const Client& a_client)
+		{
+			if (!InGraphs(*a_client.desc))
+				return false;
+			const std::uint32_t mask = AnchorMask(*a_client.desc);
+			for (std::uint32_t i = 0; i < kAnchors; ++i)
+				if ((mask >> i & 1u) && a_state.reserved[i] && a_client.serial > a_state.built[i].load(std::memory_order_acquire))
+					return true;
+			return false;
 		}
 
 		/**
@@ -530,6 +603,7 @@ namespace FrameAnchors
 			return false;
 		}
 		state.reserved[IndexOf(a_anchor)] = true;
+		state.reserveOrder.push_back(a_anchor);
 		return true;
 	}
 
@@ -571,14 +645,18 @@ namespace FrameAnchors
 			client.armed.push_back(pass.once ? 1 : 0);
 		std::uint32_t mask = AnchorMask(*client.desc);
 		auto* existing = FindClient(state, client.desc->id);
+		std::shared_ptr<const ClientDesc> replaced;
 		if (existing) {
 			mask |= AnchorMask(*existing->desc);
+			replaced = existing->desc;
 			*existing = std::move(client);
 		} else {
 			existing = &state.clients.emplace_back(std::move(client));
 		}
 		Publish(state);
 		MarkCurrent(state, *existing);
+		if (replaced)
+			RetireGates(state, *replaced, existing->desc->gates);
 		Rebuild(state, mask);
 		logger::info("[ORG] frame anchors: {} registered ({} passes){}", existing->desc->id, existing->desc->passes.size(),
 			InGraphs(*existing->desc) ? "" : "; it joins the graphs once the shared constants exist");
@@ -593,8 +671,10 @@ namespace FrameAnchors
 		if (existing == state.clients.end())
 			return;
 		const std::uint32_t mask = AnchorMask(*existing->desc);
+		const auto desc = existing->desc;
 		state.clients.erase(existing);
 		Publish(state);
+		RetireGates(state, *desc);
 		Rebuild(state, mask);
 	}
 
@@ -674,6 +754,7 @@ namespace FrameAnchors
 				});
 				Publish(a_state);
 				for (const auto& client : failed) {
+					RetireGates(a_state, *client);
 					logger::error("[ORG] frame anchors: {} is removed: the shared constants it reads could not be made", client->id);
 					if (client->onFailed)
 						client->onFailed();
@@ -706,26 +787,11 @@ namespace FrameAnchors
 		std::atomic<DWORD> renderOwner{ 0 };
 		std::atomic<std::uint64_t> ownerChanges{ 0 };
 
-		/** @brief The thread holding Renderer::Lock (the CRITICAL_SECTION at Renderer +0x2790 SE / +0x27F0 AE), 0 when free. */
-		DWORD LockHolder()
+		/** @brief The thread that owns rendering now: the last claim's, or the main thread before any. */
+		DWORD Owner()
 		{
-			auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
-			if (!renderer)
-				return 0;
-			// Written by whichever thread enters or leaves the lock; a word-sized read is enough to tell "this thread" or "free".
-			const auto* owning = reinterpret_cast<void* const volatile*>(&renderer->GetLock().owningThread);
-			return static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(*owning));
-		}
-
-		/** @brief The calling thread owns rendering: the upload instance moves with it. Under the anchors' guard. */
-		void Claim(DWORD a_self, DWORD a_previous)
-		{
-			renderOwner.store(a_self, std::memory_order_release);
-			const auto changes = ownerChanges.fetch_add(1, std::memory_order_acq_rel) + 1;
-			RenderGraphRuntime::Get().MoveOwnerThread();
-			if (changes <= 32 || changes % 1000 == 0)
-				logger::info("[ORG] render ownership: thread {} ({}) takes it from thread {} (change {})", a_self,
-					LockHolder() == a_self ? "holding Renderer::Lock" : "the main thread", a_previous, changes);
+			const DWORD stored = renderOwner.load(std::memory_order_acquire);
+			return stored ? stored : mainThread.load(std::memory_order_acquire);
 		}
 	}
 
@@ -734,7 +800,7 @@ namespace FrameAnchors
 		mainThread.store(::GetCurrentThreadId(), std::memory_order_release);
 	}
 
-	bool OnRenderThread()
+	bool IsRenderOwner()
 	{
 		const DWORD main = mainThread.load(std::memory_order_acquire);
 		const DWORD self = ::GetCurrentThreadId();
@@ -747,37 +813,32 @@ namespace FrameAnchors
 				return true;
 			static std::atomic_flag logged;
 			if (!logged.test_and_set())
-				logger::info("[ORG] frame anchors: a Present on thread {} (a loading screen), not the main thread {}: anchors wait for the main thread",
+				logger::info("[ORG] frame anchors: a call on thread {} (a loading screen or a movie), not the main thread {}: the graph waits for the main thread",
 					self, main);
 			return false;
 		}
-		const DWORD stored = renderOwner.load(std::memory_order_acquire);
-		const DWORD owner = stored ? stored : main;
-		const DWORD holder = LockHolder();
-		// The owner renders unless another thread is inside Renderer::Lock (it renders now, and claims at its next call).
-		if (owner == self)
-			return holder == 0 || holder == self;
-		// Another thread takes ownership only from inside the lock: the engine renders every frame there, on one thread at a time.
-		// The main thread also takes it back while no other thread holds the lock (its frames between loads).
-		if (holder != self && !(self == main && holder == 0))
-			return false;
-		auto lock = Guard();
-		const DWORD current = renderOwner.load(std::memory_order_acquire);
-		if ((current ? current : main) != self)
-			Claim(self, current ? current : main);
-		return true;
+		return Owner() == self;
 	}
 
-	void TakeRenderOwnership()
+	void ClaimRenderOwnership()
 	{
 		if (!RenderGraph::Engine::LoadingScreen::Requested() || mainThread.load(std::memory_order_acquire) == 0)
 			return;
 		const DWORD self = ::GetCurrentThreadId();
+		// Every engine frame begins here: most claims are by the thread that already owns rendering.
+		if (Owner() == self)
+			return;
+		// Under the anchors' mutex: no claim lands inside another thread's anchor run, and the main thread's calls outside a frame
+		// (Register, imports) never interleave with it.
 		auto lock = Guard();
-		const DWORD current = renderOwner.load(std::memory_order_acquire);
-		const DWORD owner = current ? current : mainThread.load(std::memory_order_acquire);
-		if (owner != self)
-			Claim(self, owner);
+		const DWORD previous = Owner();
+		if (previous == self)
+			return;
+		renderOwner.store(self, std::memory_order_release);
+		const auto changes = ownerChanges.fetch_add(1, std::memory_order_acq_rel) + 1;
+		RenderGraphRuntime::Get().MoveOwnerThread();
+		if (changes <= 32 || changes % 1000 == 0)
+			logger::info("[ORG] render ownership: thread {} begins a frame and takes it from thread {} (change {})", self, previous, changes);
 	}
 
 	std::uint64_t RenderOwnerChanges()
@@ -785,45 +846,48 @@ namespace FrameAnchors
 		return ownerChanges.load(std::memory_order_acquire);
 	}
 
-	bool Run(const Point& a_point)
+	RunResult Run(const Point& a_point)
 	{
 		auto& state = Anchors();
 		const std::uint32_t index = IndexOf(a_point.anchor);
 		if (index >= kAnchors || !state.reserved[index] || !state.host)
-			return false;
-		if (!OnRenderThread())
-			return false;
+			return { RunStatus::Idle };
+		// Ownership is checked under the mutex a claim takes: it cannot move in the middle of this run.
 		auto lock = Guard();
+		if (!IsRenderOwner())
+			return { RunStatus::Refused };
 		auto& runtime = RenderGraphRuntime::Get();
 		if (!runtime.IsActive())
-			return false;
+			return { RunStatus::Refused };
 		// Before the clients are read: an anchor whose epoch failed drops its clients here (OnEpochFailed), not in the middle of a run.
 		runtime.PollEpochFailures();
 		if (!runtime.IsActive())
-			return false;
+			return { RunStatus::Failed };
 		Service(state);
-		// The clients in this anchor's graph; the run happens when one is active or has a one-shot pass pending.
+		// The clients in this anchor's graph; the run happens when one is active or has a one-shot pass pending. A client waiting to
+		// join (RequestJoin) does not run the epoch: its graph is built at the next build point.
 		std::vector<RunClient> clients;
 		bool work = false;
 		for (const auto& client : state.clients) {
 			if (!InGraphs(*client.desc) || !HasPasses(*client.desc, a_point.anchor))
 				continue;
 			const bool active = !client.desc->active || client.desc->active();
-			// A registration the graph does not hold yet also runs the epoch: the host builds the graph again only when the
-			// epoch is submitted, so a client waiting for it (InBuiltGraph) would otherwise wait forever. Its passes do nothing
-			// while it is inactive, as for any inactive client.
-			const bool joining = client.serial > state.built[index].load(std::memory_order_acquire);
-			if (joining) {
-				static std::set<std::string, std::less<>> logged;
-				if (logged.emplace(client.desc->id).second)
-					logger::info("[ORG] frame anchors: {} joins the {} graph (registration {}, graph built from {}): the epoch runs to build it",
-						client.desc->id, Name(a_point.anchor), client.serial, state.built[index].load(std::memory_order_acquire));
-			}
-			work = work || active || joining || HasPendingOnce(client, a_point.anchor);
+			work = work || active || HasPendingOnce(client, a_point.anchor);
 			clients.push_back({ client.desc, client.serial, active });
 		}
 		if (!work)
-			return false;
+			return { RunStatus::Idle };
+		// Past the ring: the host would throw EpochRingFullError (an epoch it sizes for several runs) or wait for a run of this frame,
+		// which DXVK has not submitted (one it sizes for one). Skipped instead, and logged once per anchor.
+		auto& runs = RunsSinceSeal(state, index);
+		if (runs >= RingCapacity(index)) {
+			static std::array<std::atomic_flag, kAnchors> logged;
+			if (!logged[index].test_and_set())
+				logger::warn("[ORG] frame anchors: {} ran {} times since the last Present, all its ring holds ({} runs a frame x {} frames); "
+							 "later runs this frame are skipped and their callers keep the engine's path",
+					Name(a_point.anchor), runs, kInfo[index].runsPerFrame, RenderGraphRuntime::kGameFramesInFlight);
+			return { RunStatus::RingFull };
+		}
 		const auto segment = static_cast<Segment>(SegmentOf(a_point.anchor));
 		// The graph holds the upload whenever a registered client reads the shared constants, active or not.
 		std::vector<std::shared_ptr<const ClientDesc>> descs;
@@ -831,40 +895,57 @@ namespace FrameAnchors
 			descs.push_back(client.desc);
 		const bool sharedConstants = UsesSharedConstants(descs, a_point.anchor);
 		std::uint64_t built = 0;
-		bool ran = false;
+		RenderGraphRuntime::EpochResult result = RenderGraphRuntime::EpochResult::Stopped;
 		{
 			RenderGraphRuntime::EpochBodyScope body(segment);
-			ran = runtime.ExecuteEpoch(segment, [&](org::RenderGraph&) {
+			result = runtime.TryExecuteEpoch(segment, [&](org::RenderGraph&) {
 				// The graph this run submits is built by now.
 				built = state.built[index].load(std::memory_order_acquire);
 				if (sharedConstants)
 					SharedConstants::Commit();
-				// Every gate closed first: a run does work only where this run's commits open it.
+				// Every gate closed first: a run does work only where this run's commits open it. That includes the gates of
+				// registrations whose passes this graph still holds after they left (RetiredGates).
 				for (const auto& client : clients)
 					for (const auto& gate : client.desc->gates)
 						if (gate)
+							gate->Close();
+				for (const auto& retired : state.retired)
+					if ((retired.mask >> index & 1u) && built < retired.serial)
+						for (const auto& gate : retired.gates)
 							gate->Close();
 				for (const auto& client : clients)
 					if (client.active && client.desc->commit)
 						client.desc->commit(a_point);
 			});
 		}
-		if (!ran && runtime.IsActive()) {
-			// Only this anchor's epoch failed (ExecuteEpoch logged why). Its clients are dropped at the next poll (OnEpochFailed); the
-			// other anchors and their clients run on. Or the anchor ran more times this frame than its ring of slots holds
-			// (AnchorInfo::runsPerFrame): this run is skipped, nothing is dropped, and the next frame runs it again.
-			return false;
+		if (result == RenderGraphRuntime::EpochResult::RingFull) {
+			// The host's own count of unsealed runs was reached first (ExecuteEpoch logged it): nothing ran, nothing is dropped.
+			return { RunStatus::RingFull };
 		}
-		if (!ran) {
+		if (result == RenderGraphRuntime::EpochResult::EpochFailed) {
+			// Only this anchor's epoch failed (ExecuteEpoch logged why). Its clients are dropped at the next poll (OnEpochFailed); the
+			// other anchors and their clients run on.
+			return { RunStatus::Failed };
+		}
+		if (result != RenderGraphRuntime::EpochResult::Submitted) {
 			// The graph failed and stopped (ExecuteEpoch logged why): every client returns to its D3D11 path.
 			logger::error("[ORG] frame anchors: the {} epoch failed; {} clients return to D3D11", Name(a_point.anchor), state.clients.size());
 			auto failed = std::move(state.clients);
 			state.clients.clear();
+			state.retired.clear();
 			Publish(state);
 			for (const auto& client : failed)
 				if (client.desc->onFailed)
 					client.desc->onFailed();
-			return false;
+			return { RunStatus::Failed };
+		}
+		// The run counts against the ring, and the peak is what RunsPerFrame should be sized from (LogRunStats).
+		++runs;
+		if (runs > state.peakRuns[index].load(std::memory_order_relaxed)) {
+			state.peakRuns[index].store(runs, std::memory_order_relaxed);
+			if (runs > kInfo[index].runsPerFrame)
+				logger::info("[ORG] frame anchors: {} ran {} times in one frame, above the {} it is sized for (its ring holds {})", Name(a_point.anchor),
+					runs, kInfo[index].runsPerFrame, RingCapacity(index));
 		}
 		// An epoch must not be the last GPU work before a third-party Vulkan consumer (render-graph.md, "Hazard: external Vulkan
 		// work directly after a graph epoch"). After the late anchors an upscaler, frame generation or the present may follow.
@@ -872,6 +953,7 @@ namespace FrameAnchors
 			state.lateHook();
 		if (sharedConstants)
 			SharedConstants::CheckAfterRun();
+		PruneRetired(state);
 		// One-shot passes in the graph this run submitted have run: the next build leaves them out.
 		bool ranOnce = false;
 		for (auto& client : state.clients)
@@ -888,7 +970,120 @@ namespace FrameAnchors
 		for (const auto& client : clients)
 			if (client.active && client.desc->executed && client.serial <= built)
 				client.desc->executed(a_point);
-		return true;
+		return { RunStatus::Ran };
+	}
+
+	bool RequestJoin(std::string_view a_id, Anchor a_anchor)
+	{
+		auto lock = Guard();
+		auto& state = Anchors();
+		const std::uint32_t index = IndexOf(a_anchor);
+		const auto* client = FindClient(state, a_id);
+		if (!client || index >= kAnchors || !state.reserved[index] || !HasPasses(*client->desc, a_anchor))
+			return false;
+		if (client->serial <= state.built[index].load(std::memory_order_acquire))
+			return true;
+		// Register or Refresh asked for this build already; asking again costs nothing and covers a build that failed meanwhile
+		// (OnEpochFailed keeps the old graph). OnFrameEnd, or Drawcall Limit Fix's build point, builds it.
+		Rebuild(state, 1u << index);
+		return false;
+	}
+
+	bool CanRun(std::string_view a_id, Anchor a_anchor)
+	{
+		auto lock = Guard();
+		auto& state = Anchors();
+		const std::uint32_t index = IndexOf(a_anchor);
+		if (index >= kAnchors || !state.reserved[index] || !state.host || !IsRenderOwner() || !RenderGraphRuntime::Get().IsActive())
+			return false;
+		const auto* client = FindClient(state, a_id);
+		if (!client || !InGraphs(*client->desc) || client->serial > state.built[index].load(std::memory_order_acquire))
+			return false;
+		return RunsSinceSeal(state, index) < RingCapacity(index);
+	}
+
+	std::uint32_t RunsPerFrame(Anchor a_anchor)
+	{
+		return IndexOf(a_anchor) < kAnchors ? kInfo[IndexOf(a_anchor)].runsPerFrame : 0;
+	}
+
+	std::uint32_t PeakRunsPerFrame(Anchor a_anchor)
+	{
+		return IndexOf(a_anchor) < kAnchors ? Anchors().peakRuns[IndexOf(a_anchor)].load(std::memory_order_relaxed) : 0;
+	}
+
+	void OnFrameEnd()
+	{
+		auto& state = Anchors();
+		if (!state.host || !IsRenderOwner())
+			return;
+		auto lock = Guard();
+		auto& runtime = RenderGraphRuntime::Get();
+		if (!runtime.IsActive())
+			return;
+		// A frame that had a build point (Drawcall Limit Fix's, in a world frame) builds there: nothing to do here.
+		const std::uint64_t points = runtime.BuildPoints();
+		const bool hadBuildPoint = points != state.buildPointsSeen;
+		state.buildPointsSeen = points;
+		if (hadBuildPoint || std::ranges::none_of(state.clients, [&](const Client& a_client) { return WaitsToJoin(state, a_client); }))
+			return;
+		// Between frames, and only while a client waits: a menu, a loading screen or a movie builds its joining clients here.
+		const bool built = runtime.BuildIfRequested();
+		state.buildPointsSeen = runtime.BuildPoints();
+		static std::uint32_t s_builds = 0;
+		if (built && (++s_builds <= 16 || s_builds % 100 == 0))
+			logger::info("[ORG] frame anchors: graphs built at the frame's end for clients joining them (build {})", s_builds);
+	}
+
+	void LogRunStats()
+	{
+		const auto& state = Anchors();
+		std::string runs;
+		for (std::uint32_t i = 0; i < kAnchors; ++i)
+			if (state.reserved[i] && state.frozen)
+				runs += fmt::format("{}{} {}/{}", runs.empty() ? "" : ", ", kInfo[i].name, state.peakRuns[i].load(std::memory_order_relaxed), kInfo[i].runsPerFrame);
+		if (!runs.empty())
+			logger::info("[ORG] frame anchors, peak runs in one frame / sized for: {}", runs);
+	}
+
+	void FitSlotBudget(const std::vector<std::uint32_t>& a_epochs, std::uint32_t a_framesInFlight, std::uint32_t a_maxSlots)
+	{
+		auto& state = Anchors();
+		if (!RenderGraphRuntime::EpochsEnabled())
+			return;
+		// Every epoch of the order that is not a reserved anchor's runs once a frame.
+		std::uint64_t others = 0;
+		for (const auto epoch : a_epochs) {
+			const Anchor anchor = AnchorOfEpoch(epoch);
+			if (anchor == Anchor::Count || !state.reserved[IndexOf(anchor)])
+				++others;
+		}
+		const std::uint64_t frames = (std::max)(a_framesInFlight, 1u);
+		const auto total = [&] {
+			std::uint64_t runs = others;
+			for (std::uint32_t i = 0; i < kAnchors; ++i)
+				if (state.reserved[i])
+					runs += kInfo[i].runsPerFrame;
+			return runs * frames;
+		};
+		// Over the budget, the anchors reserved last lose their reservation: loud, and never a smaller ring than kInfo says.
+		for (auto it = state.reserveOrder.rbegin(); it != state.reserveOrder.rend() && total() > a_maxSlots; ++it) {
+			const std::uint32_t index = IndexOf(*it);
+			if (!state.reserved[index])
+				continue;
+			const std::uint64_t over = total();
+			state.reserved[index] = false;
+			logger::error("[ORG] frame anchor {}: reservation dropped. The frame slots ({} frames in flight x every epoch's runs a frame) would be {}, "
+						  "more than the host's {}; its clients stay on D3D11. Lower an anchor's runs a frame in FrameAnchors.cpp (kInfo; "
+						  "CS_ORG_EPOCH_STATS=1 logs the peaks) or merge anchors",
+				kInfo[index].name, frames, over, a_maxSlots);
+		}
+		std::string anchors;
+		for (std::uint32_t i = 0; i < kAnchors; ++i)
+			if (state.reserved[i])
+				anchors += fmt::format("{}{}:{}", anchors.empty() ? "" : ", ", kInfo[i].name, kInfo[i].runsPerFrame);
+		logger::info("[ORG] frame slot budget: {} of {} ({} frames x ({} other epochs + anchors' runs a frame: {}))", total(), a_maxSlots, frames, others,
+			anchors.empty() ? "none" : anchors);
 	}
 
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t a_target)
@@ -1000,6 +1195,8 @@ namespace FrameAnchors
 		}
 		// The anchor, and the dropped clients' other anchors, built again without them.
 		Publish(state);
+		for (const auto& client : dropped)
+			RetireGates(state, *client);
 		Rebuild(state, mask);
 		std::string ids;
 		for (const auto& client : dropped)
@@ -1075,10 +1272,17 @@ namespace FrameAnchors
 	bool Register(ClientDesc) { return false; }
 	void Unregister(std::string_view) {}
 	void Refresh(std::string_view) {}
-	bool Run(const Point&) { return false; }
+	RunResult Run(const Point&) { return {}; }
 	void LatchMainThread() {}
-	bool OnRenderThread() { return true; }
-	void TakeRenderOwnership() {}
+	bool IsRenderOwner() { return true; }
+	void ClaimRenderOwnership() {}
+	bool RequestJoin(std::string_view, Anchor) { return false; }
+	bool CanRun(std::string_view, Anchor) { return false; }
+	std::uint32_t RunsPerFrame(Anchor) { return 0; }
+	std::uint32_t PeakRunsPerFrame(Anchor) { return 0; }
+	void FitSlotBudget(const std::vector<std::uint32_t>&, std::uint32_t, std::uint32_t) {}
+	void OnFrameEnd() {}
+	void LogRunStats() {}
 	std::uint64_t RenderOwnerChanges() { return 0; }
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t) { return nullptr; }

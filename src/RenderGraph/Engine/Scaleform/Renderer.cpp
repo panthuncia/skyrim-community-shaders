@@ -251,7 +251,7 @@ namespace RenderGraph::Engine::Scaleform
 		bool Capturing()
 		{
 			const auto& capture = Current();
-			return capture.active && capture.targetDepth == 0 && !capture.inFilter && FrameAnchors::OnRenderThread();
+			return capture.active && capture.targetDepth == 0 && !capture.inFilter && FrameAnchors::IsRenderOwner();
 		}
 
 		void Keep(std::function<void(void*)> a_call)
@@ -767,7 +767,7 @@ namespace RenderGraph::Engine::Scaleform
 				FinishDisplay();
 			}
 			const char* reason = nullptr;
-			if (!FrameAnchors::OnRenderThread())
+			if (!FrameAnchors::IsRenderOwner())
 				reason = "a whole display off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1)";
 			else if (!Passes::Ready())
 				reason = "a whole display before the render graph is up";
@@ -849,7 +849,7 @@ namespace RenderGraph::Engine::Scaleform
 		void EndDisplay(void* a_renderer)
 		{
 			auto& capture = Current();
-			if (capture.active && FrameAnchors::OnRenderThread()) {
+			if (capture.active && FrameAnchors::IsRenderOwner()) {
 				// The last segment: by the graph, or replayed into D3D11.
 				Flush(a_renderer);
 				capture.active = false;
@@ -885,7 +885,7 @@ namespace RenderGraph::Engine::Scaleform
 			if (Capturing()) {
 				BeginD3D11Part(a_renderer, a_reason);
 				capture.targetDepth = 1;
-			} else if (capture.active && capture.targetDepth && !capture.inFilter && FrameAnchors::OnRenderThread()) {
+			} else if (capture.active && capture.targetDepth && !capture.inFilter && FrameAnchors::IsRenderOwner()) {
 				++capture.targetDepth;
 			}
 		}
@@ -906,7 +906,7 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			Original<VoidFn>(kPopRenderTarget)(a_renderer);
 			auto& capture = Current();
-			if (capture.active && capture.targetDepth && !capture.inFilter && FrameAnchors::OnRenderThread() && --capture.targetDepth == 0)
+			if (capture.active && capture.targetDepth && !capture.inFilter && FrameAnchors::IsRenderOwner() && --capture.targetDepth == 0)
 				ResumeAfterD3D11(a_renderer);
 		}
 

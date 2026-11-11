@@ -187,7 +187,7 @@ namespace DCLF::Features::BloodSplatter
 			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
 			{
 				auto& capture = GetCapture();
-				if (capture.active || !ShellState::Running() || !FrameAnchors::OnRenderThread() || !BloodSplatterDraws::Available()) {
+				if (capture.active || !ShellState::Running() || !FrameAnchors::IsRenderOwner() || !BloodSplatterDraws::Available()) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
@@ -277,7 +277,7 @@ namespace DCLF::Features::BloodSplatter
 			static void thunk()
 			{
 				func();
-				if (FrameAnchors::OnRenderThread() && BloodSplatterDraws::Available())
+				if (FrameAnchors::IsRenderOwner() && BloodSplatterDraws::Available())
 					BloodSplatterDraws::EnsureClient();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;

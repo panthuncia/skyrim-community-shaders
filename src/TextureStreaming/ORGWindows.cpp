@@ -251,7 +251,7 @@ namespace TextureStreaming::ORG
 	{
 		// Off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1): the made windows wait for the main thread's next
 		// frame. With it, the loading loop's Presents run this too.
-		if (!Requested() || !FrameAnchors::OnRenderThread())
+		if (!Requested() || !FrameAnchors::IsRenderOwner())
 			return;
 		auto& state = S();
 		ServiceRetired();

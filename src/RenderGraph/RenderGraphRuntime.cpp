@@ -751,7 +751,7 @@ struct RenderGraphRuntime::Impl
 	// Past the host's frame slots (at most 255: kGameFramesInFlight frames of every segment's runs, GraphHost::FrameSlotsFor) and a
 	// ticket prepared ahead per segment: a frame's segment outlives its slot's reuse.
 	static constexpr std::size_t kSegmentRing = 1024;
-	static_assert(kSegmentRing >= 2 * (255 + kSegments));
+	static_assert(kSegmentRing >= 2 * (RenderGraphRuntime::kMaxFrameSlots + kSegments));
 	struct PassTime
 	{
 		double inclusiveMs = 0.0;
@@ -1040,6 +1040,7 @@ struct RenderGraphRuntime::Impl
 				async.submitted, async.waited, async.stale, async.uploads, async.recordedUploadLists, async.queueUploadCopies, async.sparedUploadWaits,
 				async.wakesSkipped, async.staleBacking, async.rebuilds, async.recorded, async.kept, async.reused, async.adopted, async.predicted, async.planned);
 		}
+		FrameAnchors::LogRunStats();
 		epochCount = 0;
 	}
 
@@ -1770,6 +1771,8 @@ bool RenderGraphRuntime::Initialize()
 		// The self-tests reserve their anchors as any client does, before the reservations freeze.
 		FrameAnchors::SelfTest::Reserve();
 		GraphResources::SelfTest::Reserve();
+		// The frame slot budget (GraphHost::FrameSlotsFor allows 255): anchors that do not fit lose their reservation, logged.
+		FrameAnchors::FitSlotBudget(desc.epochOrder, desc.framesInFlight, kMaxFrameSlots);
 		// The frame anchors' reserved epochs, where the frame reaches them (FrameAnchors.h).
 		FrameAnchors::AddToFrame(desc.epochOrder);
 		// The anchors that run several times a frame (the engine skeleton's clears, the reflections prepass): each anchor is an epoch
@@ -1779,18 +1782,8 @@ bool RenderGraphRuntime::Initialize()
 		for (const auto& [epoch, runs] : FrameAnchors::RunsPerFrame())
 			if (std::ranges::find(desc.epochOrder, epoch) != desc.epochOrder.end())
 				desc.epochRuns.push_back({ .epoch = epoch, .runsPerFrame = runs });
-		std::uint32_t frameSlots = 0;
-		try {
-			frameSlots = org::GraphHost::FrameSlotsFor(desc);
-		} catch (const std::invalid_argument& e) {
-			// More than the runtime's 255 slots: each such anchor gets two frames' worth of slots only. Its ring still grows rather than
-			// waiting for a run of the same frame, and a frame with more runs than it holds skips the rest (FrameAnchors::Run returns
-			// false; the callers fall back).
-			logger::warn("[ORG] the anchors' runs a frame need too many frame slots ({}); each of them is sized for 2 runs a frame", e.what());
-			for (auto& entry : desc.epochRuns)
-				entry.runsPerFrame = 2;
-			frameSlots = org::GraphHost::FrameSlotsFor(desc);
-		}
+		// FitSlotBudget kept the total within the host's limit; a throw here is a real error, and the graph does not start.
+		const std::uint32_t frameSlots = org::GraphHost::FrameSlotsFor(desc);
 		if (!desc.epochRuns.empty()) {
 			std::string runs;
 			for (const auto& entry : desc.epochRuns)
@@ -2137,6 +2130,7 @@ bool RenderGraphRuntime::BuildIfRequested()
 {
 	if (!IsActive())
 		return false;
+	++buildPoints;
 	try {
 		return impl->host->BuildIfRequested();
 	} catch (const std::exception& e) {
@@ -2216,6 +2210,8 @@ void RenderGraphRuntime::SealPresented()
 {
 	if (impl && impl->host)
 		impl->host->SealSubmitted();
+	// The build point of the frames Drawcall Limit Fix does not run: a client waiting to join an anchor's graph is built here.
+	FrameAnchors::OnFrameEnd();
 }
 
 void RenderGraphRuntime::MoveOwnerThread()
@@ -2301,9 +2297,15 @@ std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternal
 bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare,
 	std::shared_ptr<const void> a_resourceOwner)
 {
+	return TryExecuteEpoch(a_segment, a_beforePrepare, std::move(a_resourceOwner)) == EpochResult::Submitted;
+}
+
+RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare,
+	std::shared_ptr<const void> a_resourceOwner)
+{
 	ZoneScopedN("CS.ORG.ExecuteEpoch");
 	if (!IsActive())
-		return false;
+		return EpochResult::Stopped;
 	// Diagnostics (dclf:epochs=0): Drawcall Limit Fix's epochs report submitted without submitting anything, so a run times the frame
 	// without their boundaries (the flush, the queue barriers, the split render passes). Their objects are then drawn by nobody.
 	if (IsDclfSegment(a_segment) && (dclfEpochsSkipped.load(std::memory_order_relaxed) >> static_cast<std::uint32_t>(a_segment) & 1u)) {
@@ -2379,7 +2381,7 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 			if (FAILED(impl->enqueueSubmissions(globals::d3d::device, &batch)))
 				impl->streamEnqueued.fetch_sub(1, std::memory_order_acq_rel);
 		}
-		return true;
+		return EpochResult::Submitted;
 	}
 	// An epoch must not be the last GPU work before a third-party Vulkan consumer (Streamline's upscalers, frame generation): their
 	// evaluate then reads the wrong descriptors. docs/development/render-graph.md, "Hazard: external Vulkan work directly after a graph epoch".
@@ -2487,7 +2489,7 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 		}
 		impl->submittedSegments |= std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment);
 		impl->failedEpochsLogged &= ~(std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment));
-		return true;
+		return EpochResult::Submitted;
 	} catch (const org::GraphHost::EpochRingFullError& e) {
 		// The anchor ran more times since the last Present than its ring of slots holds (FrameAnchors' runsPerFrame): nothing was
 		// submitted and nothing failed. The caller falls back for this run; the next frame's runs go on.
@@ -2499,7 +2501,7 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 			logger::info("[ORG] {} ran more than its {} frame slots in one frame; runs past them fall back until the next Present", Impl::SegmentLabel(a_segment),
 				e.capacity);
 		}
-		return false;
+		return EpochResult::RingFull;
 	} catch (const org::GraphHost::EpochFailedError& e) {
 		// Only this epoch's graph failed, and nothing of it was submitted. The graph stays up for the other epochs. The epoch's owner
 		// hears of it at the next PollEpochFailures (OnEpochFailed); until then the caller falls back for this run.
@@ -2510,7 +2512,7 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 			impl->failedEpochsLogged |= bit;
 			logger::error("[ORG] {} did not run, its graph failed (the other epochs run on): {}", Impl::SegmentLabel(a_segment), e.what());
 		}
-		return false;
+		return EpochResult::EpochFailed;
 	} catch (const std::exception& e) {
 		// What the graph did submit still goes to DXVK in order (it has committed it); then the graph stops.
 		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
@@ -2520,7 +2522,7 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 		logger::error("[ORG] Render graph epoch failed, disabling the graph: {}", e.what());
 		impl->faulted = true;
 		disabledReason = e.what();
-		return false;
+		return EpochResult::Stopped;
 	}
 }
 
@@ -2987,6 +2989,7 @@ std::shared_ptr<rhi::TimelinePtr> RenderGraphRuntime::FrameWaitTimeline() const 
 std::shared_ptr<const void> RenderGraphRuntime::DeviceOwner() const { return {}; }
 bool RenderGraphRuntime::ExecuteEpoch(Segment, const std::function<void(org::RenderGraph&)>&,
 	std::shared_ptr<const void>) { return false; }
+RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment, const std::function<void(org::RenderGraph&)>&, std::shared_ptr<const void>) { return EpochResult::Stopped; }
 bool RenderGraphRuntime::DescribeResource(IUnknown*, DxvkOrgInteropResourceInfo&) { return false; }
 bool RenderGraphRuntime::DescribeResources(std::span<IUnknown* const>, std::span<DxvkOrgInteropResourceInfo>, std::span<HRESULT>) { return false; }
 bool RenderGraphRuntime::PinlessImports() const { return false; }

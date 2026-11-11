@@ -551,7 +551,7 @@ FrameAnchors::Register({ .id = "cs.myfeature",
         `FrameAnchors::Run`'s callers fall back for those runs. Nothing hangs.
     -   This issue exists only because, in the guest phase, each anchor is a separate host epoch spliced into DXVK's stream, which DXVK submits at Present. Once ORG owns the frame (the Phase 6 cutover), these clears and the other per-call engine work are passes inside one frame graph, and the slot-per-run ring no longer applies.
 -   **The render thread only.** A loading screen presents from a job thread (SE 38085) while the main thread loads, and the
-    startup logo from the MoviePlayer thread. Anchors run only on the render thread (`FrameAnchors::OnRenderThread`). By
+    startup logo from the MoviePlayer thread. Anchors run only on the render thread (`FrameAnchors::IsRenderOwner`). By
     default that is the main thread (latched in `SKSEPlugin_Load`): at a loading screen's Present `Run` returns false and
     one-shot passes wait for the next main-thread frame. With `CS_ORG_LOADING_THREAD=1` it is the render owner: the thread that
     holds `Renderer::Lock` takes ownership, the main thread takes it back after a load, and the graph's frame upload instance

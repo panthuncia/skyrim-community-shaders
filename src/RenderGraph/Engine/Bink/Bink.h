@@ -10,7 +10,7 @@
  * (smaller power-of-two tiles at the right and bottom edges) at a time, through the renderer's texture lock and unlock, and the
  * engine draws one textured quad per tile into kFRAMEBUFFER before the Present that shows the frame.
  *
- * With the switch on, a tick of the player that runs on the render thread (FrameAnchors::OnRenderThread) and presents itself (the blocking play loop: console and
+ * With the switch on, a tick of the player that runs on the render thread (FrameAnchors::IsRenderOwner) and presents itself (the blocking play loop: console and
  * Papyrus PlayBink, the main menu's intro movie) decodes into a host-visible staging buffer instead of the engine's dynamic
  * textures, and its tile draw is withheld. The Present anchor's epoch then copies the staging buffer into ORG tile textures and
  * draws the tiles with the same shaders built for ORG (package/Shaders/Bink/BinkCopy.hlsl), into the framebuffer the Present shows.

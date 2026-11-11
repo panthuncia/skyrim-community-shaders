@@ -25,7 +25,7 @@ reach an anchor.
 
 ## The rule: the render owner
 
-`FrameAnchors::OnMainThread` becomes `FrameAnchors::OnRenderThread`: true on the thread that owns rendering now.
+`FrameAnchors::OnMainThread` becomes `FrameAnchors::IsRenderOwner`: true on the thread that owns rendering now.
 
 - **Switch off:** the main thread only, as before (the one-time `a Present on thread N ... not the main thread` line).
 - **Switch on:** one owner at a time, the main thread at the start.
@@ -144,7 +144,7 @@ The exact access that faults was not isolated. The fix removes the gap: the move
 ### The fix
 
 - **One poll per Present, on the render owner.** `IDXGISwapChain_Present` (`Hooks.cpp`) calls `DCLF::ImportRelocations::Poll`
-  when `FrameAnchors::OnRenderThread()`, before the Present anchor. That covers the main thread's world frames and menus, the
+  when `FrameAnchors::IsRenderOwner()`, before the Present anchor. That covers the main thread's world frames and menus, the
   loading loop, and the logo. DCLF's frame start no longer polls. Its next frame sees the same state, taken at the Present
   before it: a move seen a frame later is safe, because the old storage stays valid until it is released.
 - **Safe outside DCLF's frame.** `GpuTextures::NoteRelocations` works under the registry's lock. The buffer moves go to the two

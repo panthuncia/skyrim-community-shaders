@@ -233,7 +233,7 @@ namespace RenderGraph::Engine::Skeleton
 		bool Usable()
 		{
 			auto& state = Skel();
-			return state.setUp && !state.flushing && FrameAnchors::OnRenderThread() && RenderGraphRuntime::Get().IsActive();
+			return state.setUp && !state.flushing && FrameAnchors::IsRenderOwner() && RenderGraphRuntime::Get().IsActive();
 		}
 
 		std::string TargetName(const Target& a_target)
@@ -744,8 +744,8 @@ namespace RenderGraph::Engine::Skeleton
 		void Flush(ID3D11DeviceContext* a_context)
 		{
 			auto& state = Skel();
-			// Clears are taken on the render thread only (FrameAnchors::OnRenderThread); another thread has none to flush.
-			if (!state.setUp || state.flushing || !FrameAnchors::OnRenderThread())
+			// Clears are taken on the render thread only (FrameAnchors::IsRenderOwner); another thread has none to flush.
+			if (!state.setUp || state.flushing || !FrameAnchors::IsRenderOwner())
 				return;
 			for (std::size_t i = 0; i < kGroups; ++i) {
 				auto& group = state.groups[i];

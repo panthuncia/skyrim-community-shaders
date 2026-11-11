@@ -41,8 +41,8 @@ namespace RenderGraph
  * ("cs.org.frame-anchors") makes every client's passes at each build; a client change rebuilds only its anchors' epochs. The ordering
  * rule of each anchor is in docs/development/org-extension-api-notes.md, "Attaching passes to the frame".
  *
- * Threads: everything here is called on the render thread (OnRenderThread: the main thread, or with CS_ORG_LOADING_THREAD=1 the
- * thread that renders under Renderer::Lock). With that switch the state is also under a mutex, so a feature's Register from the
+ * Threads: everything here is called on the render thread (IsRenderOwner: the main thread, or with CS_ORG_LOADING_THREAD=1 the
+ * thread that last began an engine frame). With that switch the state is also under a mutex, so a feature's Register from the
  * main thread during a load never interleaves with a loading-screen run. A pass's Prepare and Record run on the graph host's
  * thread, as for any graph pass, so they read only what they were made with or what the client's commit wrote into a LatchBlock.
  *
@@ -154,11 +154,13 @@ namespace FrameAnchors
 	 *   then writes their values at the hook and uploads them before the anchor's first pass. Such a client may register before
 	 *   CS's first upload sized them: its passes join the graphs once the buffers can be made.
 	 * - gates: the client's run gates (RunGate.h). Every run of one of its anchors closes them before any commit, so its gated
-	 *   dispatches and draws do work only where this run's commit opened them.
+	 *   dispatches and draws do work only where this run's commit opened them. After Unregister (or a Register that replaced
+	 *   them) the gates are still closed at every run of those anchors until their graphs are built without the old passes.
 	 * - executed: after a run whose epoch was submitted with this registration's passes in its graph (built from this
 	 *   registration or a later Refresh) and whose commit ran: what that commit wrote is in a submitted execution, and every
-	 *   later GPU use of the client's resources is ordered after it. Render thread. The signal for work a client counts done
-	 *   once it ran (a regenerated table, a reset), in place of frame counts or flags set in Prepare.
+	 *   later GPU use of the client's resources is ordered after it. Render thread. The standard way to know a run reached
+	 *   submission: count work done here (a regenerated table, a reset, a withheld draw that was drawn), never from commit,
+	 *   frame counts or flags set in Prepare. A run that did not submit (any RunStatus but Ran) calls no executed.
 	 */
 	struct ClientDesc
 	{
@@ -193,7 +195,10 @@ namespace FrameAnchors
 	 */
 	bool Register(ClientDesc a_client);
 
-	/** @brief Removes a client; its anchors' graphs are built again at their next execution. Nothing when the id is unknown. */
+	/**
+	 * @brief Removes a client; its anchors' graphs are built again at their next build. Nothing when the id is unknown. Until then
+	 * the old graphs still hold its passes: their runs close its gates (ClientDesc::gates) and call none of its callbacks.
+	 */
 	void Unregister(std::string_view a_id);
 
 	/**
@@ -205,10 +210,26 @@ namespace FrameAnchors
 
 	/**
 	 * @brief Whether a_anchor's graph, as last built, holds this registration of client a_id: its next run submits the client's
-	 * passes. A client registered or refreshed since then is not in it yet (the graph is built again on the host's thread).
-	 * Render thread.
+	 * passes. A client registered or refreshed since then is not in it yet. Render thread.
 	 */
 	bool InBuiltGraph(std::string_view a_id, Anchor a_anchor);
+
+	/**
+	 * @brief The one way to join an anchor's graph: true once a_anchor's built graph holds this registration of a_id (InBuiltGraph);
+	 * false meanwhile, and the build that adds it is asked for. Render thread. Never builds on the caller's path: the graph is built
+	 * at the next build point, between frames (Drawcall Limit Fix's build point in a world frame, or the frame's end, OnFrameEnd,
+	 * in a frame that had none: a menu, a loading screen, a blocking movie). Register and Refresh ask for the same build, so a
+	 * client only polls this until it is true, and keeps the engine's or D3D11's path meanwhile. False for an unknown id.
+	 */
+	bool RequestJoin(std::string_view a_id, Anchor a_anchor);
+
+	/**
+	 * @brief Whether a run of a_anchor now would draw a_id's work: the caller owns rendering, the runtime is active, this
+	 * registration is in the anchor's built graph (InBuiltGraph), and the anchor's ring has room for another run this frame. Call
+	 * it before withholding the engine's work for the anchor; when false, leave the work to the engine. Render thread. Run can
+	 * still fail afterwards (RunStatus::Failed): the client's executed callback is how it knows the work was submitted.
+	 */
+	bool CanRun(std::string_view a_id, Anchor a_anchor);
 
 	/** @brief The client's one-shot passes (PassDesc::once) pending again: each runs at its anchor's next run. Render thread. */
 	void Rearm(std::string_view a_id);
@@ -221,34 +242,61 @@ namespace FrameAnchors
 	 */
 	void SetLateEpochHook(std::function<void()> a_hook);
 
+	/** @brief What a run did. */
+	enum class RunStatus : std::uint8_t
+	{
+		Ran,       // the epoch was submitted; the executed callbacks of the clients in the built graph ran
+		Idle,      // nothing to run: no client active and no one-shot pass pending, or the anchor has no epoch
+		Refused,   // the caller does not own rendering (IsRenderOwner), or the runtime is not active
+		RingFull,  // skipped: the anchor ran as many times since the last Present as its ring of frame slots holds
+		Failed,    // the epoch failed (its clients are dropped at the next poll), or the graph stopped
+	};
+
+	/**
+	 * @brief Run's result. Converts to true only for RunStatus::Ran, so a caller that only asks "did it submit" reads it as a bool.
+	 * A caller that withheld the engine's work draws it through the engine for any other status.
+	 */
+	struct RunResult
+	{
+		RunStatus status = RunStatus::Idle;
+		constexpr operator bool() const noexcept { return status == RunStatus::Ran; }
+	};
+
 	/**
 	 * @brief The hook: runs the anchor's epoch at this point of the D3D11 stream when it has an active client or a pending one-shot
-	 * pass. After the late anchors it runs the late-epoch hook (SetLateEpochHook).
-	 * @return Whether an epoch was submitted.
+	 * pass. After the late anchors it runs the late-epoch hook (SetLateEpochHook). Render owner only, checked under the anchors'
+	 * mutex. A run past the anchor's ring (kGameFramesInFlight times RunsPerFrame since the last Present) is skipped (RingFull).
 	 */
-	bool Run(const Point& a_point);
+	RunResult Run(const Point& a_point);
 
 	/** @brief Run for a hook without engine targets. */
-	inline bool Run(Anchor a_anchor) { return Run(Point{ .anchor = a_anchor }); }
+	inline RunResult Run(Anchor a_anchor) { return Run(Point{ .anchor = a_anchor }); }
+
+	/** @brief The most runs a frame the anchor's epoch is sized for (kInfo); its ring holds kGameFramesInFlight times that. Any thread. */
+	std::uint32_t RunsPerFrame(Anchor a_anchor);
+
+	/** @brief The most runs the anchor submitted between two Presents so far this session, to size RunsPerFrame from. Any thread. */
+	std::uint32_t PeakRunsPerFrame(Anchor a_anchor);
 
 	/**
-	 * @brief True on the thread that owns rendering now: the only thread where anchors run (Run returns false elsewhere) and where
-	 * per-frame work that feeds them (texture streaming's tick, Scaleform's capture, Bink's tick) may use the graph.
+	 * @brief True on the thread that owns rendering now: the only thread where anchors run (Run refuses elsewhere) and where per-frame
+	 * work that feeds them (texture streaming's tick, Scaleform's capture, Bink's tick) may use the graph. A pure query: it never
+	 * changes the owner. Any thread.
 	 *
 	 * Without CS_ORG_LOADING_THREAD=1 that is the engine's main thread alone: a loading screen (a job thread) and the startup logo
-	 * (the MoviePlayer thread) stay on D3D11. With it, one thread owns rendering at a time, the main thread at the start: a thread
-	 * that holds Renderer::Lock takes ownership (the engine renders every frame inside that lock, on one thread at a time), and the
-	 * main thread also takes it while no other thread holds the lock. A claim moves the graph's frame upload instance with it
-	 * (RenderGraphRuntime::MoveOwnerThread). docs/development/p5/loading-screen.md has the rule and its hazards. A false answer is
-	 * always safe: the caller keeps its D3D11 or engine path for that call.
+	 * (the MoviePlayer thread) stay on D3D11. With it, the owner is the thread that last began an engine frame (ClaimRenderOwnership,
+	 * from Renderer::Begin): the main thread, the loading loop's thread or the logo's MoviePlayer thread. The engine begins every
+	 * frame inside Renderer::Lock, on one thread at a time. docs/development/p5/loading-screen.md has the rule and its hazards. A
+	 * false answer is always safe: the caller keeps its D3D11 or engine path for that call.
 	 */
-	bool OnRenderThread();
+	bool IsRenderOwner();
 
 	/**
-	 * @brief The calling thread owns rendering from now on (CS_ORG_LOADING_THREAD=1; nothing otherwise). The loading-screen handoff
-	 * calls it on the main thread once SetLoadingScreenActive(false) returned, when the loading loop has stopped.
+	 * @brief The one claim point (CS_ORG_LOADING_THREAD=1; nothing otherwise): the calling thread owns rendering from now on. Called
+	 * by the Renderer::Begin detour (SE 75460, AE 77245; RenderGraph/Engine/LoadingScreen) at the start of every engine frame, on the
+	 * thread that renders it. Moves the graph's frame upload instance with it (RenderGraphRuntime::MoveOwnerThread).
 	 */
-	void TakeRenderOwnership();
+	void ClaimRenderOwnership();
 
 	/** @brief How many times rendering changed threads so far (CS_ORG_LOADING_THREAD=1). Any thread. */
 	std::uint64_t RenderOwnerChanges();
@@ -313,6 +361,26 @@ namespace FrameAnchors
 		const char* contributor;
 	};
 	const SegmentNames* NamesOf(std::uint32_t a_segment);
+
+	/**
+	 * @brief Initialize, before AddToFrame: the frame slot budget. The host's frame slots are a_framesInFlight times every epoch's
+	 * runs a frame (each epoch of a_epochs that is not an anchor's runs once, each reserved anchor its RunsPerFrame), at most
+	 * a_maxSlots. Logs the total and each anchor's share. Over the budget, the anchors reserved last lose their reservation, each
+	 * with an error line, until it fits: their clients then fail to register and stay on D3D11. No anchor is ever sized for fewer
+	 * runs than its kInfo entry says.
+	 */
+	void FitSlotBudget(const std::vector<std::uint32_t>& a_epochs, std::uint32_t a_framesInFlight, std::uint32_t a_maxSlots);
+
+	/**
+	 * @brief The frame's end, on the thread that presents (RenderGraphRuntime::SealPresented, after the host's seal). On the render
+	 * owner, when a client waits to join a graph (RequestJoin, Register, Refresh) and no build point ran during the frame (no
+	 * RenderGraphRuntime::BuildIfRequested since the last frame end), builds the graphs that were asked for: the build point of the
+	 * frames Drawcall Limit Fix does not run.
+	 */
+	void OnFrameEnd();
+
+	/** @brief Logs each reserved anchor's peak runs a frame against its sizing (CS_ORG_EPOCH_STATS's report). Render thread. */
+	void LogRunStats();
 
 	/**
 	 * @brief Initialize, for the host's epoch order and again for its async epochs: the reserved anchors' epochs inserted into

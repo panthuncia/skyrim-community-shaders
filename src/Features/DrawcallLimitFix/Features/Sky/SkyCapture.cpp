@@ -611,7 +611,7 @@ namespace DCLF::Features::Sky
 				// are drawn late rather than lost.
 				if (capture.deferred)
 					Finish(capture);
-				if (capture.active || !ShellState::Running() || !FrameAnchors::OnRenderThread() || !SkyDraws::Available()) {
+				if (capture.active || !ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SkyDraws::Available()) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}

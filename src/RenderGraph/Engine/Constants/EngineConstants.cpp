@@ -214,7 +214,7 @@ namespace RenderGraph::Engine::Constants
 
 			UseId Capture(std::uint32_t a_stageMask)
 			{
-				if (!Active() || !FrameAnchors::OnRenderThread())
+				if (!Active() || !FrameAnchors::IsRenderOwner())
 					return {};
 				if (uses.size() >= kMaxUsesPerFrame) {
 					++window.dropped;
@@ -274,7 +274,7 @@ namespace RenderGraph::Engine::Constants
 
 			void EndFrame()
 			{
-				if (!enabled || !FrameAnchors::OnRenderThread())
+				if (!enabled || !FrameAnchors::IsRenderOwner())
 					return;
 				Retire();
 				window.peakChunks = (std::max)(window.peakChunks, peakChunksThisFrame);

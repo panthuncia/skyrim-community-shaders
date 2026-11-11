@@ -126,6 +126,12 @@ public:
 	static constexpr std::uint32_t kGameFramesInFlight = 4;
 
 	/**
+	 * @brief The most frame slots the host may have (GraphHost::FrameSlotsFor: a slot index is 8 bits): kGameFramesInFlight times
+	 * every epoch's runs a frame must stay within it (FrameAnchors::FitSlotBudget).
+	 */
+	static constexpr std::uint32_t kMaxFrameSlots = 255;
+
+	/**
 	 * @brief CS_ORG_EPOCHS (default on, =0 off): each segment is an ORG host epoch. The graph compiles once
 	 * over the whole frame - scheduling and transient aliasing see every segment's lifetimes, in frame order -
 	 * and each ExecuteEpoch prepares, admits, records and submits only its own segment's passes. Off, every
@@ -194,6 +200,19 @@ public:
 	bool ExecuteEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare = {},
 		std::shared_ptr<const void> a_resourceOwner = {});
 
+	/** @brief What TryExecuteEpoch did. */
+	enum class EpochResult : std::uint8_t
+	{
+		Submitted,    // the epoch was submitted
+		RingFull,     // skipped: it ran more times since the last Present than its ring of frame slots holds; nothing failed
+		EpochFailed,  // only this epoch's graph failed (org::GraphHost::EpochFailedError); the graph runs on for the other epochs
+		Stopped,      // inactive, or the graph failed and stopped
+	};
+
+	/** @brief ExecuteEpoch, telling a skipped run (RingFull) from a failure (FrameAnchors::Run's status). */
+	EpochResult TryExecuteEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare = {},
+		std::shared_ptr<const void> a_resourceOwner = {});
+
 	/**
 	 * @brief Render thread: the epochs whose graph failed to build or prepare since the last call, each handed to its owner
 	 * (render-graph.md, "Failure isolation"). A frame anchor's clients of that build are dropped and the anchor built again without
@@ -211,6 +230,9 @@ public:
 	 * @return Whether anything was built. False when inactive or when the graph stopped.
 	 */
 	bool BuildIfRequested();
+
+	/** @brief How many times BuildIfRequested was called (a build point ran), built or not. Render thread. */
+	std::uint64_t BuildPoints() const { return buildPoints; }
 
 	/**
 	 * @brief Render thread: an external epoch (org::GraphHost::SetExternalEpochs) submitted at the current point of the
@@ -277,7 +299,7 @@ public:
 	void SealPresented();
 	/**
 	 * @brief The calling thread becomes the owner of the graph's frame upload instance (GraphHost::Uploads()->SetOwnerThread):
-	 * the thread that records and retires its uploads at each submission. FrameAnchors::OnRenderThread calls it when rendering
+	 * the thread that records and retires its uploads at each submission. FrameAnchors::ClaimRenderOwnership calls it when rendering
 	 * changes threads (CS_ORG_LOADING_THREAD=1: the loading screen, the startup logo). The previous owner reaches the instance only
 	 * through its mailboxes afterwards (UploadData posts). Requests no graph build. Nothing without a graph.
 	 */
@@ -467,6 +489,7 @@ private:
 	std::string disabledReason = "not initialized";
 	std::string gpuTimingSummary;
 	EpochCpuTotals epochTotals;
+	std::uint64_t buildPoints = 0;  // BuildIfRequested's calls
 	Segment segment = Segment::LightCulling;
 	bool attempted = false;
 	FrameConfig frameConfig;  // ConfigureFrame's (frameConfigured)

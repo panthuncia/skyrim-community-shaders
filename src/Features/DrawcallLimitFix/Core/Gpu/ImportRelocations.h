@@ -28,7 +28,7 @@ namespace DCLF::ImportRelocations
 	};
 
 	/**
-	 * @brief The render owner (FrameAnchors::OnRenderThread), at every Present (IDXGISwapChain_Present): takes DXVK's relocations
+	 * @brief The render owner (FrameAnchors::IsRenderOwner), at every Present (IDXGISwapChain_Present): takes DXVK's relocations
 	 * and hands each to its kind's importers (GpuTextures; both GpuResources instances, which take them at their next BeginFrame).
 	 * Every Present, not Drawcall Limit Fix's frame start: whoever draws with an import (Scaleform on a loading screen, ImGui in a
 	 * menu) does so in frames DCLF does not run, and an import that moves is read from its old storage until the move is taken.
