@@ -1218,7 +1218,8 @@ Keys used so far:
   into one, and have the pass record the copies and the textures' barriers itself (`src/RenderGraph/Engine/Bink/BinkGraph.cpp`,
   `src/RenderGraph/ImGuiBasicRHI.cpp`); the frame keeps its buffer until its GPU work retires. The pool and the copy recording
   are written twice now: one upload-ring helper (a buffer per frame from a retire-aware pool, plus "copy these regions into
-  this untracked texture" for a pass) would serve both and a plugin API.
+  this untracked texture" for a pass) would serve both and a plugin API. The pool half exists now: `RenderGraph::FrameStaging`
+  and `RenderGraph::RunSlots` (render-graph.md, "Shared helpers for engine families"); the copy recording is still each port's.
 - **Found by:** P5.11 Bink (2026-11-10).
 
 ### Anchors on the thread that holds the renderer's lock
@@ -1233,9 +1234,11 @@ Keys used so far:
   lock orders the anchors' state between threads. The design is in `docs/development/p5/bink.md`, "Threads, and what P5.12
   needs".
 - **Found by:** P5.11 Bink (2026-11-10).
-- **Built (P5.12, `CS_ORG_LOADING_THREAD=1`):** `FrameAnchors::IsRenderOwner`, a render owner claimed by the thread that holds
-  the lock (`docs/development/p5/loading-screen.md`). ORG needed no change: `GraphHost::Uploads()->SetOwnerThread()` moves the
-  frame upload instance, and the host has no thread id of its own. What a plugin API would want: an explicit
+- **Built (P5.12, `CS_ORG_LOADING_THREAD=1`; reworked in the Phase 5 review):** `FrameAnchors::IsRenderOwner`, a pure query
+  of the render owner, which the thread that begins an engine frame claims (`FrameAnchors::ClaimRenderOwnership`, from a
+  `Renderer::Begin` detour; `docs/development/p5/loading-screen.md`). The first version claimed inside the query, from the
+  lock's `OwningThread`, so any thread check handed rendering to its caller. ORG needed no change:
+  `GraphHost::Uploads()->SetOwnerThread()` moves the frame upload instance, and the host has no thread id of its own. What a plugin API would want: an explicit
   `GraphHost::SetOwnerThread()` that moves every owner-thread structure at once (today only the upload instance keeps one), and
   a debug check in the host that its owner-thread calls come from one thread between two such moves.
 
@@ -1264,6 +1267,12 @@ Keys used so far:
   allows it (as DCLF's revisions do), or features that never register during play (one kept pass with gated work in place of
   one-shot passes per batch).
 - **Found by:** P5.12 loading screen (2026-11-10).
+- **Now (Phase 5 review):** one join primitive, `FrameAnchors::RequestJoin`, with `InBuiltGraph` as the gate. A frame that ran
+  no build point (no `BuildIfRequested` call: a menu, a load, a movie, DCLF off) builds the waiting clients' graphs at its end
+  (`FrameAnchors::OnFrameEnd`, from `SealPresented`): between frames, never on a run's path, and only while a client waits. The
+  build itself is still on the render thread, because ORG builds a graph only on its owner thread. What a plugin API wants is
+  still the host-side piece above: `GraphHost::BuildEpochAsync(epoch)` building on the host's thread and swapping the graph in at
+  that epoch's next submission.
 
 ### A pass at an engine draw inside another frame
 
@@ -1319,8 +1328,9 @@ Keys used so far:
   - **Several runs of an anchor a frame are slots.** Each display is an epoch, and each uses a frame slot. A per-frame batch
     (one epoch at the end of `UI::DrawInterface`) needs the D3D11 work between displays (menu 3D, Bink, other mods) on the
     graph first.
-  - **Render ownership on another thread** (the loading screen, P5.12): anchors run on the main thread only, so a UI drawn
-    from the loading-screen thread stays on D3D11.
+  - **Render ownership on another thread** (the loading screen): built in P5.12 (above, "Anchors on the thread that holds the
+    renderer's lock"). With `CS_ORG_LOADING_THREAD=1` the anchors run on the render owner, so the loading screen's UI draws on
+    the graph; without it they run on the main thread only and that UI stays on D3D11.
 - **Found by:** P5.10 (2026-11-10).
 
 ### Views that appear with a menu, and frames the engine does not draw
@@ -1479,3 +1489,18 @@ From P5.8/P5.9 (`docs/development/p5/menus.md`). Two needs a menu scene's view b
     their resting layout at the end. Until then CS splits the display: graph segments, with the D3D11 renderer drawing the filter
     and render-target parts between them (one Interface epoch run per segment).
 - **Found by:** P5.10 finish (2026-11-11).
+
+### Framework primitives every engine family needs (Phase 5 review)
+
+- **Need:** the families that draw the engine's work on the graph (sky, water, blood, ImageSpace, Bink, Scaleform, the skeleton)
+  each wrote the same pieces: a run result they could act on, a check before withholding, a program cache, a staging pool, a
+  main-thread tick, a log-once-per-reason set.
+- **Built (CS side, `docs/development/render-graph.md`, "Joining, running and withholding" and "Shared helpers for engine
+  families"):** `FrameAnchors::RunResult` (Ran, Idle, Refused, RingFull, Failed), `CanRun`, `RequestJoin`, `RunsPerFrame`,
+  `PeakRunsPerFrame`; `RenderGraph::ProgramCache`, `FrameStaging`, `RunSlots`; `RenderGraph::Engine::MainTick`;
+  `Util::ReasonLog`; `RenderGraphRuntime::TryExecuteEpoch` (RingFull told apart from a failure).
+- **Where it fits in ORG:** `GraphHost::SubmitEpoch` could return the same status instead of throwing `EpochRingFullError` for
+  a normal skip; a per-epoch "can submit now" query (ring headroom since the last seal) would replace CS counting runs itself;
+  and the 255-slot limit (an 8-bit slot index) is what forces CS to drop anchors at startup when every port is on
+  (`FrameAnchors::FitSlotBudget`). A wider slot index, or rings sized per epoch outside the shared slot space, would lift it.
+- **Found by:** the Phase 5 review (2026-11-11).

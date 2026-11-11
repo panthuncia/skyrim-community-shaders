@@ -538,25 +538,38 @@ FrameAnchors::Register({ .id = "cs.myfeature",
 -   **Cost.** An anchor nobody reserved has no epoch: no graph, no frame slots, and its hook is one load. A reserved anchor whose
     clients are all inactive (`active`) submits nothing at its hook; its ticket waits, prepared, for the next run.
 -   **Frames in flight.** The host's frame slots are frames in flight times the epochs' runs a frame, so every reserved anchor
-    adds `kGameFramesInFlight` slots, times its `runsPerFrame` (the anchor table in `FrameAnchors.cpp`). Size `LatchBlock`s from
-    `GraphHost::FrameSlots()` after the runtime is up, as LLF does: it is fixed once the host exists.
+    adds `kGameFramesInFlight` slots, times its `runsPerFrame` (the anchor table `kInfo` in `FrameAnchors.cpp`;
+    `FrameAnchors::RunsPerFrame(anchor)` reads it, never copy the number). Size `LatchBlock`s from `GraphHost::FrameSlots()`
+    after the runtime is up, as LLF does: it is fixed once the host exists.
+    -   **The slot budget.** The host allows 255 slots (`RenderGraphRuntime::kMaxFrameSlots`). At startup
+        `FrameAnchors::FitSlotBudget` logs the total (`[ORG] frame slot budget: N of 255 (4 frames x (E other epochs + anchors'
+        runs a frame: ...))`). Over it, the anchors reserved last lose their reservation, each with an error line
+        (`frame anchor X: reservation dropped ...`), and their clients stay on D3D11. No anchor is ever given a smaller ring than
+        its `kInfo` entry says. Size `kInfo` from measurements: every run past the sizing logs `X ran N times in one frame, above
+        the M it is sized for`, and `CS_ORG_EPOCH_STATS=1` logs every anchor's peak (`peak runs in one frame / sized for`,
+        `FrameAnchors::PeakRunsPerFrame`).
     -   **Anchors that run several times a frame** (`ReflectionsPrepass` at each cubemap render, the engine skeleton's clears
         and depth copy) are listed with their runs a frame (`GraphHost::Desc::epochRuns`, from `FrameAnchors::RunsPerFrame`).
         Each run takes a slot of the anchor's ring, and the host's thread waits for a slot's last run before it prepares the
         slot again. A run's work is in DXVK's stream until Present, so waiting for a run of the same frame deadlocks: the
         host's thread waits for work DXVK has not submitted while the render thread waits for the host's thread. A listed
         anchor's ring grows instead (up to `kGameFramesInFlight` times its runs), and waits only for runs at least three
-        Presents old (`SealPresented` counts them). A frame with more runs than the whole ring makes `ExecuteEpoch` return
-        false for the rest (`EpochRingFullError`, logged once: `... ran more than its N frame slots in one frame`), and
-        `FrameAnchors::Run`'s callers fall back for those runs. Nothing hangs.
+        Presents old (`SealPresented` counts them). A frame with more runs than the whole ring is skipped for the rest:
+        `FrameAnchors::Run` counts each anchor's runs since the last seal and returns `RunStatus::RingFull` before it would
+        reach the host (logged once per anchor), and the host's own `EpochRingFullError` gives the same status
+        (`RenderGraphRuntime::TryExecuteEpoch`). The callers keep the engine's path for those runs. Nothing hangs. An anchor
+        sized for one run a frame gets the same check, since its host ring would wait for a run of the same frame.
     -   This issue exists only because, in the guest phase, each anchor is a separate host epoch spliced into DXVK's stream, which DXVK submits at Present. Once ORG owns the frame (the Phase 6 cutover), these clears and the other per-call engine work are passes inside one frame graph, and the slot-per-run ring no longer applies.
--   **The render thread only.** A loading screen presents from a job thread (SE 38085) while the main thread loads, and the
-    startup logo from the MoviePlayer thread. Anchors run only on the render thread (`FrameAnchors::IsRenderOwner`). By
-    default that is the main thread (latched in `SKSEPlugin_Load`): at a loading screen's Present `Run` returns false and
-    one-shot passes wait for the next main-thread frame. With `CS_ORG_LOADING_THREAD=1` it is the render owner: the thread that
-    holds `Renderer::Lock` takes ownership, the main thread takes it back after a load, and the graph's frame upload instance
-    moves with it ([p5/loading-screen.md](./p5/loading-screen.md)). Per-Present work that feeds an anchor checks the same
-    (texture streaming's `FrameTick`, Scaleform's capture, Bink's tick).
+-   **The render owner only.** A loading screen presents from a job thread (SE 38085) while the main thread loads, and the
+    startup logo from the MoviePlayer thread. Anchors run only on the render owner (`FrameAnchors::IsRenderOwner`, a pure
+    query that never moves ownership). By default that is the main thread (latched in `SKSEPlugin_Load`): at a loading
+    screen's Present `Run` returns `RunStatus::Refused` and one-shot passes wait for the next main-thread frame. With
+    `CS_ORG_LOADING_THREAD=1` the owner is the thread that last began an engine frame: the one claim point is a detour of
+    `Renderer::Begin` (SE 75460, AE 77245; `RenderGraph/Engine/LoadingScreen`), whose only callers are the main frame, the
+    loading loop and the logo's movie tick. `FrameAnchors::ClaimRenderOwnership` moves the graph's frame upload instance with
+    it ([p5/loading-screen.md](./p5/loading-screen.md)). `Run` checks ownership under the anchors' mutex, which a claim takes
+    too. Per-Present work that feeds an anchor checks the same query (texture streaming's `FrameTick`, Scaleform's capture,
+    Bink's tick, `PublishedResources`' thread check).
 -   **The hazard rule.** After the late anchors (`PostProcessing`, `Upscale`, `Tonemap`, `FrameGeneration`, `Present`, `Overlay`,
     `HDROutput`, `Capture`) have run an epoch, `Run` calls the late-epoch hook, which Upscaling installs in `PostPostLoad`
     (`FrameAnchors::SetLateEpochHook`, `Upscaling::SeparateFromGraphEpochs`). An upscaler, frame generation or the present can
@@ -578,7 +591,7 @@ A failure in one epoch stays with that epoch. It never stops the graph host's th
 -   **What fails.** An epoch's graph can fail to build (a client's `registerResources`, a pass's `Declare`, the compile) or to
     prepare (a pass's `Prepare` or `Record`, or a bindless view it resolves that its resource does not have). The host marks
     that epoch failed and keeps running (`org::GraphHost`, ORG's `docs/persistent-epochs.md`, "Failure isolation").
--   **The run.** `ExecuteEpoch` returns false for a failed epoch and logs it once. Nothing of it was submitted. The runtime stays
+-   **The run.** `ExecuteEpoch` returns false for a failed epoch (`TryExecuteEpoch`: `EpochFailed`; an anchor run: `RunStatus::Failed`) and logs it once. Nothing of it was submitted. The runtime stays
     active, so the caller falls back for that run only.
 -   **The owner.** `RenderGraphRuntime::PollEpochFailures` hands each failure to the epoch's owner. It runs at every frame's end,
     before every anchor run, and at DCLF's frame start. It never runs in the middle of an anchor's run.
@@ -644,6 +657,34 @@ How the anchors know: every `Publish` of the clients has a serial, each client r
 they are now, and an anchor graph's build records the serial it was made from. A run's commit reads that serial, so it compares
 two numbers instead of watching passes prepare.
 
+-   **Retired gates.** A registration that leaves (`Unregister`, a `Register` that replaces it with other gates, a client dropped
+    by an epoch failure) keeps its passes in the graphs built before it left, and those passes replay whenever another client
+    runs the anchor. The anchors keep its gates and close them at every such run, until each of its anchors is built from a
+    snapshot without it. So an old pass never draws with open entries or reads latch slots nobody wrote for that run.
+
+### Joining, running and withholding
+
+The one pattern for a family that withholds the engine's work and draws it on the graph (sky, water, blood, ImageSpace, Bink,
+Scaleform):
+
+1.  **Join** with `FrameAnchors::RequestJoin(id, anchor)`: true once the anchor's built graph holds this registration. Until
+    then the engine draws. It never builds on the caller's path: `Register`, `Refresh` and `RequestJoin` ask for the anchor's
+    build, and it happens at the next build point, between frames. In a world frame with Drawcall Limit Fix on that is DCLF's
+    build point (`IndirectDraws::BuildPoint`, explicit builds). In a frame with no build point (a menu, a loading screen, a
+    blocking movie, or DCLF off) it is the frame's end: `RenderGraphRuntime::SealPresented` calls `FrameAnchors::OnFrameEnd`,
+    which builds (`BuildIfRequested`) only when a client waits to join and nothing built during the frame (logged as
+    `graphs built at the frame's end for clients joining them`). A joining client no longer runs its anchor's epoch just to
+    trigger a build. A registration that changes every frame therefore rebuilds every frame: register once, gate per run.
+2.  **Check before withholding** with `FrameAnchors::CanRun(id, anchor)`: the caller owns rendering, the runtime is active, the
+    registration is in the built graph, and the anchor's ring has room for one more run this frame. False: leave this batch to
+    the engine.
+3.  **Run** with `FrameAnchors::Run(point)`, which returns a `RunResult`: `RunStatus::Ran` (submitted), `Idle` (nothing active,
+    or no epoch), `Refused` (not the render owner, or no runtime), `RingFull` (skipped) or `Failed` (the epoch failed; its clients
+    are dropped at the next poll). It converts to true only for `Ran`. Anything else after withholding: draw the withheld work
+    through the engine now.
+4.  **Count it done** in the client's `executed` callback, which runs only for a run that was submitted with this registration's
+    passes in its graph. It is the standard signal that withheld work reached submission.
+
 ### Pass helpers
 
 `src/RenderGraph/AnchorPasses.h` makes a client's common passes from plain descriptions, generalised from Post Processing's chain
@@ -665,6 +706,30 @@ programs", Defines); `AnchorPasses::Defines` widens a port's own list.
 `ComputeProgram` owns its dispatch command signature (`DispatchIndirect`, from a buffer or a latch region of the frame slot),
 and `RasterProgram` its draw signature (`DrawDesc::indirect`). `ShaderBindings::SamplerFromD3D11` (and `CreateSampler` of a
 `D3D11_SAMPLER_DESC`) is the one D3D11-to-rhi sampler converter.
+
+### Shared helpers for engine families
+
+What every family that draws the engine's work on the graph needs, in one place each. The families move onto them in their own
+lanes; new code uses them from the start.
+
+-   **Programs: `RenderGraph::ProgramCache<Program, Key>`** (`src/RenderGraph/ProgramCache.h`). A keyed cache of `RasterProgram`
+    or `ComputeProgram` builds made on one build thread. `Get(key, describe)` returns the program once built and null until then
+    (the caller keeps the engine's draw meanwhile); the first `Get` of a key calls `describe` on the caller's thread (CS's common
+    defines are resolved there: they read State) and queues the build. A failed key is logged once
+    (`[ORG] <name> programs: <label> could not be built`) and stays `Failed` until `ClearFailed`. Never load a program
+    synchronously on the render thread per batch. `RenderGraphRuntime::Shutdown` stops the builds before the device goes.
+-   **Per-run CPU data: `RenderGraph::FrameStaging`** (`src/RenderGraph/FrameStaging.h`). One-slot `LatchBlock`s of at least the
+    size asked for, reused once the recording that retained them is done; the pool keeps `kGameFramesInFlight` times the
+    client's runs a frame (plus one), so a steady frame makes none. `maxBlocks` caps large pools (decoded movie frames).
+    `RenderGraph::RunSlots<T>` hands one immutable frame object per host frame slot from the commit (`Store` at
+    `CurrentFrameSlot`) to `Record` (`Take` at `FrameSlot`), which retains it.
+-   **Main-thread tick: `RenderGraph::Engine::MainTick::Add(name, callback)`** (`src/RenderGraph/Engine/MainTick.h`). Runs on the
+    main thread after Main::Update's frame-job wait (SE 34554, AE 35409), the frame's jobs done. One detour for every user;
+    SKSE tasks run on job threads, so this is the main-thread point.
+-   **Fallback logs: `Util::ReasonLog`** (`src/Utils/Logging.h`). `Report(reason, detail)` logs the first time of each reason
+    under one prefix and counts the rest (`Count`). For per-frame fallbacks ("the engine draws this batch: ...").
+-   **Engine startup: `RenderGraph::Engine::InstallGameHooks`, `Reserve`, `Setup`** (`src/RenderGraph/Engine/Engine.h`). The
+    one call each from `Hooks::Install` and `State::Setup` into the engine subsystems; a new subsystem is added there.
 
 ## Raster programs
 
@@ -897,9 +962,10 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 
 ## Switches
 
-Every switch is read once, through `src/RenderGraph/Switches.h` (`Switches::On`, `Off`, `Equals`, `Value`, `Number`): the first
-read of a name is kept for the session, from any thread. New switches go through it and get a row here. The feature ports' own
-switches (`CS_ORG_<FEATURE>=1`) read through it too.
+Every switch is read once, through `src/RenderGraph/Switches.h` (`Switches::On`, `Off`, `Equals`, `Value`, `Number`, `List`):
+the first read of a name is kept for the session, from any thread, whole at any length. New switches go through it and get a row
+here. The feature ports' own switches (`CS_ORG_<FEATURE>=1`) read through it too. A list switch (names or numbers separated by
+commas) is read with `Switches::List`: each item trimmed, empty items left out, case kept. Never parse one by hand.
 
 | Variable | Effect |
 | --- | --- |
@@ -966,7 +1032,7 @@ switches (`CS_ORG_<FEATURE>=1`) read through it too.
 | `CS_ORG_ENGINE_BUFFERS=1` | The engine's static vertex and index buffers (the geometry creators 75473/75476/75481) are ORG buffers in GPUUpload memory, handed to the engine as guest DXVK buffers or tripwire handles, and its dynamic ring (75484) is an ORG upload ring retired through `ReleaseAfterD3D11` instead of an event query. DCLF reads those buffers directly. See [p4/p4.5-buffers.md](./p4/p4.5-buffers.md). |
 | `CS_ORG_ENGINE_CONSTANTS=1` | Every engine constant-buffer use is captured into graph memory: at each engine draw (after `SetDirtyStates(false)`) and dispatch (after `DispatchCSShader`), the bytes of every bound VS/PS/CS constant buffer are copied into a per-frame ring of LatchBlocks, once per version and window, and the use gets an id consumers read by stage and slot (`src/RenderGraph/Engine/Constants`, [p5/constants.md](./p5/constants.md)). The engine's D3D11 buffers are unchanged. Logs `[ORG] engine constants: capturing every engine constant-buffer use` at startup and a summary line every `CS_ORG_ENGINE_CONSTANTS_LOG_FRAMES` frames (default 600). |
 | `CS_ORG_ENGINE_CONSTANTS_CHECK=1` | With `CS_ORG_ENGINE_CONSTANTS=1`, about once a second one captured slot is compared with a staging read-back of its D3D11 buffer (stalls). The summary line adds `checked N, M differ`; a mismatch logs `[ORG] engine constants check: ... differs ...`. |
-| `CS_ORG_LOADING_THREAD=1` | The render graph's frame work runs on whichever thread renders under `Renderer::Lock`: the loading loop (ServingThread, SE 38085 / AE 39039) and the startup logo (MoviePlayer thread) run the anchors, Scaleform's displays and Bink's tick on the graph. Ownership changes are logged (`[ORG] render ownership: thread N ... takes it from thread M`), and each load's end (`[ORG] loading screen: the load ended (K ownership changes ...)`). Off: anchors run on the main thread only ([p5/loading-screen.md](./p5/loading-screen.md)). |
+| `CS_ORG_LOADING_THREAD=1` | The render graph's frame work runs on whichever thread began the engine's frame (`Renderer::Begin`, detoured as the one claim point): the loading loop (ServingThread, SE 38085 / AE 39039) and the startup logo (MoviePlayer thread) run the anchors, Scaleform's displays and Bink's tick on the graph. Ownership changes are logged (`[ORG] render ownership: thread N begins a frame and takes it from thread M`), and each load's end (`[ORG] loading screen: the load ended (K ownership changes ...)`). Off: anchors run on the main thread only ([p5/loading-screen.md](./p5/loading-screen.md)). |
 | `CS_ORG_BINK=1` | Bink movies a main-thread blocking tick plays (console and Papyrus `PlayBink`, the main menu's intro) decode into host-visible staging buffers instead of the engine's dynamic textures, and the `cs.bink.tiles` pass at the `Present` anchor uploads ORG tile textures and draws them into the framebuffer (`src/RenderGraph/Engine/Bink`, [p5/bink.md](./p5/bink.md)). The startup logo (the MoviePlayer thread), in-frame movies and HDR output stay on D3D11. Logs `[ORG] Bink: ... movie ended: G frames drawn by the render graph, E by the engine`; a failure logs `the engine draws Bink from now on`. |
 | `CS_ORG_BINK_SHOT=<n>[,<n>...]` | Saves the Present of each listed decoded Bink frame (main thread, either path) as `dclf-shots/bink-<n>.png`. |
 | `CS_ORG_EPOCHS=0` | One graph for every segment instead of a graph per epoch; no frame anchor can be reserved. |
@@ -985,7 +1051,7 @@ switches (`CS_ORG_<FEATURE>=1`) read through it too.
 | `CS_FRAME_LATENCY=<n>` | The frame-pace timeline's depth, 0 to `kGameFramesInFlight` (0 turns the render thread's own pacing off). |
 | `CS_GPU_LOAD=<groups>` | A synthetic GPU load of that many groups each frame (`GpuEventTimers`; a graph pass at the Present anchor with `CS_GPU_TIMERS=graph`). |
 | `CS_GPU_EVENT_TIMERS=<frames>` | Log the GPU event timers every that many frames ("GPU timers from the graph"). |
-| `CS_ORG_EPOCH_STATS=1` | Log render-thread CPU time per epoch (average and maximum every 600 epochs). |
+| `CS_ORG_EPOCH_STATS=1` | Log render-thread CPU time per epoch (average and maximum every 600 epochs), and each reserved anchor's peak runs in one frame against its sizing (`[ORG] frame anchors, peak runs in one frame / sized for: ...`). |
 | `CS_ORG_ASYNC_EPOCHS=0` | Run the epochs synchronously. By default each epoch is prepared and recorded ahead on the graph host's thread, and the render thread only admits and submits ("Revisions and recordings" in `dclf-architecture.md`). |
 | `CS_ORG_IN_STREAM=0` | Enqueue the async epochs' batches behind DXVK's command list (`dxvkEnqueueInteropSubmission`) instead of running their graphics work inside it. A list such as `0,3` keeps only those epochs in the stream. |
 | `CS_ORG_EXTERNAL_HOME=0` | Epochs no longer give DXVK's images back on the graphics queue in their home state (unsafe: DXVK expects them there). |

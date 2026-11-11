@@ -25,18 +25,21 @@ reach an anchor.
 
 ## The rule: the render owner
 
-`FrameAnchors::OnMainThread` becomes `FrameAnchors::IsRenderOwner`: true on the thread that owns rendering now.
+`FrameAnchors::OnMainThread` became `FrameAnchors::IsRenderOwner`: true on the thread that owns rendering now. It is a pure
+query; the claim is a separate, single point (reworked in the Phase 5 review: the first version claimed inside the query, from
+the lock's `OwningThread`, so a mere thread check handed rendering to its caller).
 
-- **Switch off:** the main thread only, as before (the one-time `a Present on thread N ... not the main thread` line).
+- **Switch off:** the main thread only, as before (the one-time `a call on thread N ... not the main thread` line).
 - **Switch on:** one owner at a time, the main thread at the start.
-  - The owner answers true unless another thread holds `Renderer::Lock` (that thread renders now; the owner is not inside a frame).
-  - Another thread answers true when it holds `Renderer::Lock` itself (`OwningThread` of the critical section is its id): it
-    takes ownership. The loading loop's first anchor, Scaleform display or Present of an iteration, or the logo's first frame,
-    does this.
-  - The main thread takes ownership back at the first call it makes holding the lock (its next frame), or with the lock free,
-    and at once when `SetLoadingScreenActive(false)` returns (the handoff hook, below).
-  - Every other call answers false. A false answer is always safe: the caller keeps the engine's or D3D11's path for that call.
-- **The claim** happens under the anchors' mutex (`FrameAnchors`), so no claim lands inside another thread's anchor run.
+  - **The claim point** is `Renderer::Begin` (SE 75460 / 0x140d6a0c0, AE 77245), detoured: `FrameAnchors::ClaimRenderOwnership`
+    makes the calling thread the owner. Its only callers are the main frame (SE 0x1405b1020, which takes `Renderer::Lock` just
+    before), the loading loop (38085) and `BSMoviePlayer::Tick` when no frame is open (the logo). So the thread that begins an
+    engine frame owns rendering until another thread begins one.
+  - `IsRenderOwner` answers true on the owner only. Every other call answers false. A false answer is always safe: the caller
+    keeps the engine's or D3D11's path for that call (the main thread between a load's end and its next `Begin`, a movie's
+    clear before its `Begin`).
+- **The claim** happens under the anchors' mutex (`FrameAnchors`), and `Run` checks ownership under it too, so no claim lands
+  inside another thread's anchor run.
 
 Why the lock is enough: the engine never renders on two threads at once, and the lock's release and acquire order every write
 the previous owner made before the next owner reads it (the anchors' clients, the host's slot rings and tickets, the upload
@@ -65,22 +68,23 @@ Ownership itself requests no graph build: the claim publishes nothing and touche
 `SetLoadingScreenActive` (34552 / 35407) is detoured when the switch is on (`RenderGraph/Engine/LoadingScreen`):
 
 - `true`: logged (`[ORG] loading screen: the serving thread renders until the load ends`). The serving thread claims at its
-  first call under the lock.
-- `false`: after the engine's function returns (the loop has stopped), the main thread takes ownership back and logs how many
-  claims the load made.
+  first `Renderer::Begin`.
+- `false`: after the engine's function returns (the loop has stopped), logs how many claims the load made. The main thread
+  claims back at its next frame's `Renderer::Begin`; the hook itself claims nothing.
 
 ## Explicit builds and Drawcall Limit Fix during a load
 
 - DCLF draws only in world frames. A loading iteration runs no world frame (no `Main_Draw_Early`, no `FrameDriver::BeginFrame`),
   so DCLF's epochs never run there and its build point (`IndirectDraws::BuildPoint`) does not run either. Its Present work
   (`BeforePresent`, `EndFrame` with `Running()` false) is what it does at any menu Present: no change.
-- With DCLF on, builds are explicit (`SetExplicitBuilds`): a rebuild an anchor asks for during the load waits for DCLF's next
-  build point, the first world frame after the load. The loading thread builds nothing by itself: a synchronous build on a
-  frame's path is what the build rule forbids, and the handoff must not cause one.
+- With DCLF on, builds are explicit (`SetExplicitBuilds`): a rebuild an anchor asks for waits for a build point. A loading
+  iteration has no DCLF build point, so the frame's end is one (`FrameAnchors::OnFrameEnd`, after the Present's seal): it builds
+  only when a client waits to join an anchor's graph and nothing else built during the frame. That build is between frames,
+  never on a run's path, and the handoff itself never causes one.
   - A client already in an anchor's built graph runs on the loading thread at once (Scaleform's framebuffer surface from the main
     menu, the Present anchor's clients).
-  - A client that registers during the load waits (the anchors' joining rule still runs the epoch so the host can build it where
-    builds are not explicit; with DCLF on it waits for the build point). Its caller keeps the D3D11 path meanwhile, as everywhere.
+  - A client that registers during the load joins at the end of the iteration it registered in (`FrameAnchors::RequestJoin` is
+    the gate). A joining client no longer runs its anchor's epoch. Its caller keeps the D3D11 path meanwhile, as everywhere.
 - Bink is the exception that already exists: a blocking movie runs no world frame, so `Bink::Graph` calls
   `host->BuildIfRequested()` once while its client waits to join (p5/bink.md). On the MoviePlayer thread this is one build at
   the logo's start, before any world frame exists.
@@ -90,6 +94,7 @@ Ownership itself requests no graph build: the claim publishes nothing and touche
 | Source | What it does | Handling |
 | --- | --- | --- |
 | The ownership handoff | nothing | no build, no publish (above) |
+| A client that joins during a load | one build at the iteration's end (`OnFrameEnd`) | only while a client waits; a client that registers every iteration would rebuild every iteration (none does) |
 | Bink's join at the logo's first graph tick | one `BuildIfRequested` | unchanged (p5/bink.md); before the first world frame |
 | Texture streaming's copy pass per batch (`ORGWindows::Register`, one-shot) | asks for a Present-anchor build per batch and one after it ran | pre-existing (p4/texture-streaming.md, "Risks"). On the loading thread, with DCLF on, those builds wait for the build point, so a batch staged during a load is uploaded in the first world frame, as today; with DCLF off they are built at the next submission, as in any frame. Removing them at the source (a kept pass with a gated copy list in place of a one-shot pass per batch) is texture streaming's change, listed as open |
 | Scaleform's new surface (a display onto a target with no pass yet) | registers the client again | p5/scaleform.md's design; on the loading thread the display goes to D3D11 until the graph holds it |
