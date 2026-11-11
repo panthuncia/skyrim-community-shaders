@@ -19,6 +19,12 @@ namespace RenderGraph::Engine::Scaleform::Layout
 	inline constexpr std::size_t kVideoModeSet = 0xC0;     // std::uint8_t: every draw is skipped without it
 	inline constexpr std::size_t kVertexConstants = 0x1C0;  // float[32]: mvp[4] then texgen[4], the VS cbuffer's CPU copy
 	inline constexpr std::size_t kTexgen = 0x200;           // float[16]: texgen[4]
+	inline constexpr std::size_t kDepthStencilStates = 0x468;  // ID3D11DepthStencilState*[5]: Stencil's order (off, clear, increment, decrement, test)
+	inline constexpr std::size_t kDevice = 0x490;              // ID3D11Device*: the device the renderer and its textures create with
+	inline constexpr std::size_t kContext = 0x498;             // ID3D11DeviceContext*: the context the renderer draws with
+	inline constexpr std::size_t kMaskSubmitting = 0x4A0;      // std::uint8_t: inside BeginSubmitMask to EndSubmitMask
+	inline constexpr std::size_t kMaskLevel = 0x4A4;           // std::int32_t: the stencil level (the test's reference)
+	inline constexpr std::size_t kDepthStencilState = 0x4A8;   // ID3D11DepthStencilState*: the one bound now (PopRenderTarget binds it again)
 	inline constexpr std::size_t kUserMatrix = 0x4B8;       // float[6]
 	inline constexpr std::size_t kMatrix = 0x51C;           // float[6]
 	inline constexpr std::size_t kCxform = 0x534;           // float[8]
@@ -69,6 +75,7 @@ namespace RenderGraph::Engine::Scaleform::Layout
 	static_assert(offsetof(FillStyle, cxform) == 0xC && offsetof(FillStyle, textures) == 0x30);
 
 	/** @brief GTextureD3D1x's fields. */
+	inline constexpr std::size_t kTextureOwner = 0x68;     // the GRendererD3D1x that made it
 	inline constexpr std::size_t kTextureResource = 0x70;  // ID3D11Texture2D*: null when the data is lost
 	inline constexpr std::size_t kTextureView = 0x78;      // ID3D11ShaderResourceView*
 	inline constexpr std::size_t kTextureFormat = 0x48;    // DXGI_FORMAT

@@ -9,7 +9,8 @@
 #include <vector>
 
 /**
- * @brief One Scaleform display (BeginDisplay to EndDisplay) as the ORG path draws it: built by the capture (Renderer.cpp) on the
+ * @brief One segment of a Scaleform display (BeginDisplay to EndDisplay, or to and from the D3D11 work inside it) as the ORG path
+ * draws it: built by the capture (Renderer.cpp) on the
  * render thread, then committed and recorded by Passes.cpp. Plain data, no ORG types.
  */
 namespace RenderGraph::Engine::Scaleform
@@ -89,15 +90,21 @@ namespace RenderGraph::Engine::Scaleform
 		/** @brief Empty again: the references dropped. */
 		void Reset()
 		{
-			for (auto* view : textures)
-				view->Release();
-			textures.clear();
+			ResetCommands();
 			if (target)
 				target->Release();
 			if (depth)
 				depth->Release();
 			target = depth = nullptr;
 			targetFormat = depthFormat = DXGI_FORMAT_UNKNOWN;
+		}
+
+		/** @brief The commands, their bytes and textures dropped; the target and viewport kept (the next segment of the display). */
+		void ResetCommands()
+		{
+			for (auto* view : textures)
+				view->Release();
+			textures.clear();
 			staging.clear();
 			commands.clear();
 		}
