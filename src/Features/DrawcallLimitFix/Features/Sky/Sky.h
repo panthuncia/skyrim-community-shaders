@@ -119,19 +119,19 @@ namespace DCLF::Features::Sky
 		GpuTextures::ViewKind::Cube, GpuTextures::ViewKind::Cube };
 
 	/**
-	 * @brief What a view's client is made for: its targets and the inputs its passes declare (published graph textures). An input bound
-	 * as a D3D11 view is read by heap index, resolved per batch (Run), and is no part of it.
+	 * @brief What a view's client is made for: its targets, which it imports once. The published inputs its passes declare are fixed
+	 * when the client is made (SkyDraws.cpp, ListInputs), so they are no part of it. The headers and a t17 that is no engine depth are
+	 * read by heap index, resolved per batch (Run): a D3D11 view's import, a null view, or a published input's index once the client's
+	 * graph declares it (SkyDraws::ReadPublished).
 	 */
 	struct Shape
 	{
 		View view = View::Main;
 		std::array<std::int32_t, 3> colours{ -1, -1, -1 };  // RE::RENDER_TARGET, the main pass's
 		std::int32_t depth = -1;                            // RE::RENDER_TARGETS_DEPTHSTENCIL of the depth target
-		std::int32_t sceneDepth = -1;                       // the main pass's t17, an engine depth target (-1: none)
-		std::string sceneDepthId;                           // or a published graph texture's id
+		std::int32_t sceneDepth = -1;                       // the main pass's t17 when it is an engine depth target (-1: none)
 		bool cloudShadows = false;                          // Cloud Shadows' published occlusion is read (t25)
 		bool clouds = false;                                // the cloud layers (geometry group 13) are the graph's when the group allows
-		std::array<std::string, 4> headerIds;               // kHeaderRegisters' published graph textures
 		bool operator==(const Shape&) const = default;
 	};
 
@@ -141,8 +141,8 @@ namespace DCLF::Features::Sky
 		View view = View::Main;
 		std::uint32_t face = 0;
 		std::vector<Draw> draws;
-		std::uint32_t sceneDepthIndex = GpuTextures::kInvalid;  // t17 bound as a D3D11 view (Terrain Blending's D3D11 depth): its import
-		std::array<std::uint32_t, 4> headerIndices{};           // kHeaderRegisters not published: their imports or null views
+		std::uint32_t sceneDepthIndex = GpuTextures::kInvalid;  // t17 when no engine depth: its import, or a published id's index
+		std::array<std::uint32_t, 4> headerIndices{};           // kHeaderRegisters: imports, published ids' indices or null views
 		std::uint64_t revision = 0;                             // what the recording depends on (SkyDraws.cpp, RevisionOf)
 		Family::Owners owners;                                  // the textures' imports and the buffers' leases
 	};
@@ -171,11 +171,16 @@ namespace DCLF::Features::Sky
 		/** @brief Reserves both anchors (the feature's install, before the render graph initializes). */
 		void Reserve();
 		/**
-		 * @brief Whether a_shape's view may withhold this batch: its client was made for a_shape and is in the anchor's built graph
-		 * (FrameAnchors::RequestJoin). A view without a client gets one made for a_shape (false while it joins). A client made for another
-		 * shape is kept: the batch stays the engine's, logged once. No client is made again during play.
+		 * @brief Whether a_shape's view may withhold this batch: its client was made for a_shape's targets and is in the anchor's built
+		 * graph (FrameAnchors::RequestJoin). A view without a client gets one made for a_shape (false while it joins). A client made for
+		 * other targets is kept: the batch stays the engine's, logged once. No client is made again during play.
 		 */
 		bool Ready(const Shape& a_shape);
+		/**
+		 * @brief How a_view's client reads a_id, the published id a bound header or t17 exports (Family::PublishedInputs::Resolve).
+		 * NotListed when the view has no client yet.
+		 */
+		Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index);
 		/** @brief Whether a run of a_view's anchor now would draw (FrameAnchors::CanRun): checked before a batch's draws are withheld. */
 		bool CanRun(View a_view);
 		/** @brief The program for a key, built off the render thread; null while it builds or when it cannot be (a_state says which). */

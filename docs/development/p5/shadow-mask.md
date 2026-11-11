@@ -66,8 +66,13 @@ The pieces are the water's and the screen blood's (water.md, "The family").
   epoch writes at its run from what D3D11 would read then (`frameBufferCached`). The run follows the batch, so a menu scene's run reads
   the menu camera's per-frame buffer, as the engine's draw would.
 - **Published slots.** A slot holding a published graph texture's export (a depth or an engine target a graph pass writes) is read by
-  the id's whole-resource index (`Family::PublishedSlot`), and the id joins the view's shape (a set of ids, kept once seen): the probes
-  learn it, and the pass declares the read so the graph orders the write first. The water does the same (water.md).
+  the id's whole-resource index, and the pass declares the read so the graph orders the write first. The ids are fixed when the client
+  is made (`Family::PublishedInputs`, `ListInputs` in `ShadowMaskDraws.cpp`: the engine depths `Engine::Depth::kMAIN`, `kMAIN_COPY`,
+  `kPOST_ZPREPASS_COPY`, `kSHADOWMAPS`, `kSHADOWMAPS_ESRAM`, `kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM`, `kFOCUS_NEO`, and the ids DCLF's
+  registry lists at t17), declared at each build while registered, and read by index once a build declared them. Until then, and for
+  an id not listed, the batch stays the engine's, logged once per id (`a world draw's t3 holds '<id>', ...`). The water does the same
+  (water.md, "Published inputs"). Utility.hlsl's ORG build never samples t1 or t7, so those are latched as null views whatever is
+  bound (`SlotRead`).
 - **Per-draw latch** (640 bytes, `DrawConstants` / `UtilityOrgShadowMaskDraw`): the rows, the reference, the slots' indices, the
   geometry. The push block (24 bytes): the shared constants and the latch region.
 - **Probes, refusals and the shape** as the water's: a view's batches are the graph's only after a probe found every draw latchable;
@@ -92,11 +97,12 @@ Merge that first. A frame with more runs than that (none is known) gets the engi
 
 ### Graph rebuilds
 
-- **A client is made once per view**, after its shape held for 30 batches (the ported features' first publications settle). That
-  registration is the family's only graph build; with DCLF it happens at DCLF's build point, in a menu-only frame at the frame's end.
-- **Nothing registers again during play.** A batch whose published slots differ from its client's stays the engine's (logged once,
-  with what changed), D3D11 slots change only a heap index in the latch, and kSHADOW_MASK is imported once: made again (a resolution
-  change), the view stays the engine's until the next start.
+- **A client is made once per view**, after 30 probe batches (its programs and constant copies are asked for first). That
+  registration is the family's only graph build of its own; with DCLF it happens at DCLF's build point, in a menu-only frame at the
+  frame's end.
+- **Nothing registers again during play.** The published inputs are a fixed list: a newly published one joins the declared reads at
+  the rebuild its first Publish causes for every graph. D3D11 slots change only a heap index in the latch, and kSHADOW_MASK is
+  imported once: made again (a resolution change), the view stays the engine's until the next start.
 
 ## The switch
 

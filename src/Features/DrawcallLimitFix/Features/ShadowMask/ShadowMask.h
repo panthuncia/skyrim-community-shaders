@@ -12,9 +12,9 @@
 // draws are then drawn by an ORG pass at the EngineDraws anchor, in the engine's order, with CS's Utility.hlsl built for ORG (its shadow
 // mask techniques, ShadowMaskDraws.cpp) and the pipeline the engine's state objects describe.
 //
-// Anything the family cannot draw stays the engine's: a draw it cannot latch makes the rest of its batch the engine's, and a batch whose
-// published inputs the view's client was not made for is drawn by the engine. A client is made once per view; nothing here registers
-// one again during play.
+// Anything the family cannot draw stays the engine's: a draw it cannot latch makes the rest of its batch the engine's, and so does a
+// published slot its view's client does not declare. A client is made once per view, with every published input its draws can read
+// (ShadowMaskDraws.cpp, ListInputs); nothing here registers one again during play.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace DCLF::Features::ShadowMask
@@ -61,6 +62,12 @@ namespace DCLF::Features::ShadowMask
 		return a_slot == 3 || a_slot == 4 || a_slot == 6 ? Kind::Texture2DArray : Kind::Texture2D;
 	}
 
+	/**
+	 * @brief Whether Utility.hlsl's ORG build samples slot a_slot. It never reads t1 or t7, so those are latched as null views, whatever
+	 * the engine left bound there.
+	 */
+	constexpr bool SlotRead(std::uint32_t a_slot) { return a_slot != 1 && a_slot != 7; }
+
 	/** @brief The rows of PS b0 (PerTechnique) and PS b2 (PerGeometry) the latch takes (Utility.hlsl's packoffsets). */
 	inline constexpr std::uint32_t kTechniqueRows = 5;
 	inline constexpr std::uint32_t kGeometryRows = 28;
@@ -94,14 +101,14 @@ namespace DCLF::Features::ShadowMask
 	};
 
 	/**
-	 * @brief What a view's client is made for: the slots' published graph textures (an engine target a graph pass writes, a depth the
-	 * graph publishes), declared by its pass so the graph orders their writes before the masks. Seen by the view's probes and kept: an
-	 * id stays once seen. A slot bound to a D3D11 view or nothing is read by heap index, resolved per batch, and is no part of it.
+	 * @brief What a view's client is made for: its view. Its target is kSHADOW_MASK, and the published inputs its pass declares are
+	 * fixed when the client is made (ShadowMaskDraws.cpp, ListInputs), so neither is part of it. Every slot is read by heap index,
+	 * resolved per draw: a D3D11 view's import, a null view, or a published input's index once the client's graph declares it
+	 * (ShadowMaskDraws::ReadPublished).
 	 */
 	struct Shape
 	{
 		View view = View::World;
-		Family::PublishedIds slotIds;
 		bool operator==(const Shape&) const = default;
 	};
 
@@ -141,11 +148,16 @@ namespace DCLF::Features::ShadowMask
 		/** @brief Reserves the EngineDraws anchor (the feature's install, before the render graph initializes). */
 		void Reserve();
 		/**
-		 * @brief Whether a_shape's view may withhold this batch: its client was made for a_shape and is in the anchor's built graph
-		 * (FrameAnchors::RequestJoin). A view without a client gets one made for a_shape (false while it joins). A client made for another
-		 * shape is kept: the batch stays the engine's (logged once), and no client is registered again during play.
+		 * @brief Whether a_shape's view may withhold this batch: its client is in the anchor's built graph (FrameAnchors::RequestJoin)
+		 * and kSHADOW_MASK is still the import it was made with. A view without a client gets one (false while it joins). No client is
+		 * registered again during play.
 		 */
 		bool Ready(const Shape& a_shape);
+		/**
+		 * @brief How a_view's client reads a_id, the published id a bound slot exports (Family::PublishedInputs::Resolve). NotListed
+		 * when the view has no client yet.
+		 */
+		Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index);
 		/** @brief Whether a run of the anchor now would draw a_view's work (FrameAnchors::CanRun): checked before a batch is withheld. */
 		bool CanRun(View a_view);
 		/** @brief The program for a key, built off the render thread; null while it builds or when it cannot be (a_state says which). */
