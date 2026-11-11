@@ -226,10 +226,12 @@ namespace CrashDump
 
 	bool Available() { return helper.shared != nullptr; }
 
-	bool RequestHangDump(std::uint32_t a_threadId, const std::filesystem::path& a_dump, const std::filesystem::path& a_text, std::uint32_t a_timeoutMs)
+	HangDumpResult RequestHangDump(std::uint32_t a_threadId, const std::filesystem::path& a_dump, const std::filesystem::path& a_text, std::uint32_t a_timeoutMs,
+		std::uint32_t& a_error)
 	{
+		a_error = 0;
 		if (!helper.shared)
-			return false;
+			return HangDumpResult::NoHelper;
 		std::lock_guard lock(hangMutex);
 		hangBusy.store(true, std::memory_order_release);
 		helper.shared->threadId = a_threadId;
@@ -237,10 +239,18 @@ namespace CrashDump
 		helper.shared->exceptionPointers = 0;
 		CopyPath(helper.shared->dumpPath, a_dump);
 		CopyPath(helper.shared->textPath, a_text);
+		helper.shared->written = 0;
+		helper.shared->error = 0;
 		ResetEvent(helper.done);
 		SetEvent(helper.request);
 		const bool answered = WaitForSingleObject(helper.done, a_timeoutMs) == WAIT_OBJECT_0;
 		hangBusy.store(false, std::memory_order_release);
-		return answered;
+		if (!answered)
+			return HangDumpResult::NoAnswer;
+		if (!helper.shared->written) {
+			a_error = helper.shared->error;
+			return HangDumpResult::Failed;
+		}
+		return HangDumpResult::Written;
 	}
 }

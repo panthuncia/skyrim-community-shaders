@@ -77,10 +77,22 @@ namespace HangWatchdog
 			spdlog::default_logger()->flush();
 			PruneReports(*dir);
 			const auto begin = GetTickCount64();
-			if (CrashDump::RequestHangDump(thread, dump, text, kHelperTimeoutMs))
+			std::uint32_t error = 0;
+			switch (CrashDump::RequestHangDump(thread, dump, text, kHelperTimeoutMs, error)) {
+			case CrashDump::HangDumpResult::Written:
 				logger::critical("[HANG] wrote {} and {} in {:.1f} s", text.filename().string(), dump.filename().string(), (GetTickCount64() - begin) / 1000.0);
-			else
+				break;
+			case CrashDump::HangDumpResult::Failed:
+				logger::error("[HANG] the crash dump helper could not write {} (Win32 error {}); see {} for the stacks, if written", dump.filename().string(), error,
+					text.filename().string());
+				break;
+			case CrashDump::HangDumpResult::NoHelper:
+				logger::error("[HANG] the crash dump helper is not running: no report");
+				break;
+			case CrashDump::HangDumpResult::NoAnswer:
 				logger::error("[HANG] the crash dump helper did not answer within {} s: no report", kHelperTimeoutMs / 1000);
+				break;
+			}
 			spdlog::default_logger()->flush();
 		}
 

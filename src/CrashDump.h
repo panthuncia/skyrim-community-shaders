@@ -23,9 +23,19 @@ namespace CrashDump
 	/** @brief Whether the helper runs (it is missing, or could not start, in a broken install). */
 	bool Available();
 
+	/** @brief What a hang report request came to. */
+	enum class HangDumpResult
+	{
+		Written,     ///< the helper wrote the stacks and the minidump
+		Failed,      ///< the helper answered, but the minidump was not written (HangDumpError has the Win32 error)
+		NoHelper,    ///< the helper is not running
+		NoAnswer,    ///< the helper did not answer within the timeout
+	};
+
 	/**
 	 * @brief Any thread but a_threadId: the helper writes every thread's stack, a_threadId's first, to a_text, then a minidump to
-	 * a_dump. Returns once it is done, or after a_timeoutMs; false when the helper is not running or did not answer.
+	 * a_dump. Returns once it is done, or after a_timeoutMs. On Failed, a_error receives the helper's Win32 error.
 	 */
-	bool RequestHangDump(std::uint32_t a_threadId, const std::filesystem::path& a_dump, const std::filesystem::path& a_text, std::uint32_t a_timeoutMs);
+	HangDumpResult RequestHangDump(std::uint32_t a_threadId, const std::filesystem::path& a_dump, const std::filesystem::path& a_text, std::uint32_t a_timeoutMs,
+		std::uint32_t& a_error);
 }
