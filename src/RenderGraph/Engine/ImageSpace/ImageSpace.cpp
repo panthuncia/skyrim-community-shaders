@@ -305,8 +305,10 @@ namespace RenderGraph::Engine::ImageSpace
 					a_refusal = "more than one render target";
 					return false;
 				}
-			if (shadow.depthStencil != UINT32_MAX || shadow.depthStencilStencilMode != 0) {
-				a_refusal = "a depth or stencil target";
+			// The engine leaves a depth target bound through the chain with the test off: the pass binds none then, and the draw is the same.
+			if (shadow.depthStencil != UINT32_MAX &&
+				(shadow.depthStencilDepthMode != RE::BSGraphics::DepthStencilDepthMode::kDisabled || shadow.depthStencilStencilMode != 0)) {
+				a_refusal = "a depth or stencil test";
 				return false;
 			}
 			// A clear is applied by SetDirtyStates when the target is bound; the pending batch would run after it.
