@@ -530,7 +530,7 @@ namespace RenderGraph::Engine::Bink::Graph
 			// Drawcall Limit Fix makes builds explicit, at its build point in each world frame, and a blocking movie runs no world
 			// frame. A movie tick runs between frames (after a Present, before the next build point), where a build is safe.
 			if (host->RebuildRequested())
-				(void)host->BuildIfRequested();
+				(void)runtime.BuildIfRequested();
 			if (!FrameAnchors::InBuiltGraph(kClientId, FrameAnchors::Anchor::Present)) {
 				state.queued = state.committed = state.executed = state.checked = 0;
 				state.misses = 0;

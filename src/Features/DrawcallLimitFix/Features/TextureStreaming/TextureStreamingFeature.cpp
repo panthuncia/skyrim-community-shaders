@@ -164,7 +164,7 @@ namespace DCLF::Features::Streaming
 
 		/**
 		 * @brief A window build's readiness for the state graph: null when the window is in place (a D3D11 window), else done once the render
-		 * graph's copy pass for it was submitted, which wakes the graph (TextureStreaming::PendingWindow).
+		 * thread installed it, which wakes the graph (TextureStreaming::PendingWindow).
 		 */
 		std::shared_ptr<const org::async::GpuSubmissionSet> Readiness(std::shared_ptr<TextureStreaming::PendingWindow> a_pending)
 		{

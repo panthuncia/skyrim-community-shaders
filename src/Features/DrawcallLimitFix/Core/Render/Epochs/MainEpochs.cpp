@@ -207,8 +207,7 @@ namespace DCLF
 			// recordings are then of the build before, and that frame waits at its start for a snapshot made for them
 			// (AdoptCurrentSnapshot; their context is posted for the builder below, PostResourcesAhead).
 			if (ready && impl->resources != resourcesBefore && resourcesBefore)
-				if (auto* host = RenderGraphRuntime::Get().Host())
-					(void)host->BuildIfRequested();
+				(void)RenderGraphRuntime::Get().BuildIfRequested();
 		} catch (const std::exception& e) {
 			// Never retried: the feature stays on the native path.
 			logger::error("[DCLF] Main-pass graph resources could not be created: {}", e.what());

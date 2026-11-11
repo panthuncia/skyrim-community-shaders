@@ -1375,3 +1375,20 @@ From P5.8/P5.9 (`docs/development/p5/menus.md`). Two needs a menu scene's view b
     published resources waits for them to settle (the water waits 30 batches). An API that declares an optional published input
     (bound when published, null otherwise, without a rebuild) would let a client be made at startup.
 - **Found by:** P5.4 and P5.5 (2026-11-10).
+
+### Host-wide failure and per-batch clients (crash triage, Phase 5)
+
+- **Need:** a way to tell a whole-graph failure from an epoch's, and to upload streamed textures without changing the graph.
+- **Who:** every caller of `GraphHost` outside `ExecuteEpoch` (DCLF's build point, Bink, the main epochs); texture streaming.
+- **Where it fits:**
+  - **A host failure throws from every host call.** When the host's thread fails (a completion timeline reads UINT64_MAX, which is
+    how Windows reports a removed device), `BuildIfRequested` rethrows on the frame's thread. Call `RenderGraphRuntime::BuildIfRequested`
+    instead: it stops the graph as a failed submission does. A `GraphHost::Failed()` query (and a host-failure callback beside
+    `SetEpochFailedCallback`) would let callers stop without a throw.
+  - **A client per batch rebuilds its anchor twice a batch** (joining, then leaving once its one-shot pass ran). Texture streaming did
+    this at Present: 137 registrations, 206 builds in a minute of loading. Data that only needs to reach an image goes in at its
+    creation instead (`RenderGraphRuntime::WrapTexture` with initial data, as engine textures do), and the graph only imports the
+    image for its descriptor. An upload service that copies into imported images without a pass would cover data that changes later.
+  - **Crash markers on an adopted device:** `BASICRHI_VK_CRASH_MARKERS=1` (with DXVK_DEBUG=hang, which enables VK_AMD_buffer_marker)
+    marks BasicRHI's own lists; the first timeline that reads UINT64_MAX dumps them. DXVK's markers cover only DXVK's commands.
+- **Found by:** P5 crash triage (2026-11-11).

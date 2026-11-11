@@ -18,8 +18,6 @@
 
 #	include <OpenRenderGraph/DeviceMemory.h>
 #	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/ExternalTextureResource.h>
 #	include <Resources/TextureDescription.h>
 #	include <rhi_helpers.h>
@@ -40,11 +38,6 @@ namespace TextureStreaming::ORG
 #if defined(CS_HAS_RENDER_GRAPH)
 	namespace
 	{
-		constexpr std::string_view kClientId = "cs.texstream";
-		// The most windows one copy pass carries, and the most staged bytes: what is left goes in the next one.
-		constexpr std::size_t kMaxBatchWindows = 256;
-		constexpr std::uint64_t kMaxBatchBytes = std::uint64_t(256) << 20;
-
 		/** @brief A build's completion: done once its window is installed, or handed back to D3D11. */
 		class Completion final : public PendingWindow
 		{
@@ -106,23 +99,11 @@ namespace TextureStreaming::ORG
 		/** @brief A window between its build and its install. */
 		struct Staged
 		{
-			D3D11_TEXTURE2D_DESC desc{};
 			std::string path;
-			std::shared_ptr<org::memory::AllocatedResource> image;    // until its window holds it
-			std::shared_ptr<org::memory::AllocatedResource> staging;  // until the copy pass is past it
-			std::vector<rhi::helpers::TextureUploadFootprint> footprints;
-			std::uint64_t bytes = 0;
 			std::function<void(const std::shared_ptr<Window>&)> install;
 			std::function<void()> retry;
 			std::shared_ptr<Completion> completion;
-			std::shared_ptr<Window> window;  // made on the render thread
-		};
-
-		/** @brief The windows one copy pass carries. Render thread. */
-		struct Batch
-		{
-			std::vector<std::shared_ptr<Staged>> items;
-			bool done = false;
+			std::shared_ptr<Window> window;
 		};
 
 		struct State
@@ -130,10 +111,6 @@ namespace TextureStreaming::ORG
 			std::mutex mutex;
 			std::vector<std::shared_ptr<Staged>> staged;  // the workers'
 			std::vector<Retired> retired;                 // any thread's
-			std::shared_ptr<Batch> batch;                 // the render thread's: the one in flight
-			// The render thread's: done batches, kept with their staging buffers and windows until nothing else holds them. A one-shot
-			// pass may be recorded again (a ticket prepared ahead) after its run, so its copies' sources stay alive until then.
-			std::vector<std::shared_ptr<Batch>> retiring;
 			std::atomic<bool> ready{ false };
 			std::atomic<bool> failed{ false };
 			std::atomic<std::uint64_t> serial{ 0 };
@@ -169,225 +146,87 @@ namespace TextureStreaming::ORG
 
 	namespace
 	{
-		struct UploadBindings
-		{
-			std::vector<org::ResourceBindingToken> targets;
-		};
-
-		struct UploadFrame
-		{
-			std::shared_ptr<const Batch> batch;
-		};
-
-		/** @brief The batch's copies, each from its staging buffer into its window's mips. The graph moves each window to the copy layout and back. */
-		class UploadPass final : public org::TypedRenderGraphPass<UploadPass, UploadFrame, UploadBindings>
-		{
-		public:
-			explicit UploadPass(std::shared_ptr<const Batch> a_batch) :
-				batch(std::move(a_batch)) {}
-
-			UploadBindings Declare(org::PassBuilder& a_builder)
-			{
-				a_builder.PreferQueue(org::QueueKind::Graphics);
-				UploadBindings bindings;
-				bindings.targets.reserve(batch->items.size());
-				for (const auto& item : batch->items)
-					bindings.targets.push_back(a_builder.CopyDestination(item->window->texture));
-				return bindings;
-			}
-
-			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(batch.get())); }
-
-			UploadFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { batch }; }
-
-			static void Record(const UploadBindings& a_bindings, const UploadFrame& a_frame, org::PassRecordContext& a_recording)
-			{
-				const auto& items = a_frame.batch->items;
-				for (std::size_t i = 0; i < items.size() && i < a_bindings.targets.size(); ++i) {
-					const auto& item = *items[i];
-					if (!item.staging)
-						continue;
-					const auto target = a_recording.Resolve(a_bindings.targets[i]).GetHandle();
-					const auto staging = item.staging->Resource().GetHandle();
-					for (const auto& footprint : item.footprints) {
-						rhi::BufferTextureCopyFootprint copy{};
-						copy.texture = target;
-						copy.buffer = staging;
-						copy.mip = footprint.mip;
-						copy.arraySlice = 0;
-						copy.footprint = { footprint.offset, footprint.rowPitch, footprint.width, footprint.height, 1 };
-						a_recording.Commands().CopyBufferToTexture(copy);
-					}
-				}
-			}
-
-		private:
-			std::shared_ptr<const Batch> batch;
-		};
-
 		std::string GraphName(std::uint64_t a_serial)
 		{
 			return std::format("cs.texstream.window-{}", a_serial);
 		}
 
-		/** @brief Hands a staged window back to the D3D11 path. Render thread. a_inBatch: its batch retires its staging buffer. */
-		void Retry(Staged& a_item, bool a_inBatch = false)
+		/** @brief Hands a staged window back to the D3D11 path. Render thread. */
+		void Retry(Staged& a_item)
 		{
 			S().retried.fetch_add(1, std::memory_order_relaxed);
-			if (!a_inBatch)
-				RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(a_item.staging));
+			a_item.window = nullptr;
 			if (a_item.retry)
 				a_item.retry();
 			a_item.completion->Finish();
 		}
 
-		/**
-		 * @brief Turns the backend off for the session: every window it holds is built again on D3D11, so nothing waits on a pass that
-		 * will not come. Render thread. a_unregister: the client is still registered (not when the graph already dropped it).
-		 */
-		void Fail(std::string_view a_why, bool a_unregister = true)
+		/** @brief Turns the backend off for the session: every window it holds is built again on D3D11. Render thread. */
+		void Fail(std::string_view a_why, std::vector<std::shared_ptr<Staged>> a_staged)
 		{
 			auto& state = S();
-			if (state.failed.exchange(true))
-				return;
-			state.ready.store(false, std::memory_order_release);
-			logger::error("[TextureStreaming] graph windows are off for this session, windows are built on D3D11 again: {}", a_why);
-			std::vector<std::shared_ptr<Staged>> staged;
+			if (!state.failed.exchange(true)) {
+				state.ready.store(false, std::memory_order_release);
+				logger::error("[TextureStreaming] graph windows are off for this session, windows are built on D3D11 again: {}", a_why);
+			}
 			{
 				std::scoped_lock lock(state.mutex);
-				staged.swap(state.staged);
+				a_staged.insert(a_staged.end(), state.staged.begin(), state.staged.end());
+				state.staged.clear();
 			}
-			std::shared_ptr<Batch> batch;
-			if (auto inFlight = std::exchange(state.batch, nullptr); inFlight && !inFlight->done) {
-				inFlight->done = true;
-				batch = std::move(inFlight);
-				state.retiring.push_back(batch);
-			}
-			if (a_unregister)
-				FrameAnchors::Unregister(kClientId);
-			if (batch)
-				for (const auto& item : batch->items)
-					Retry(*item, true);
-			for (const auto& item : staged)
+			for (const auto& item : a_staged)
 				Retry(*item);
 		}
 
-		/** @brief Wraps a staged window for D3D11 and imports it into the graph. False: the backend cannot make windows. Render thread. */
-		bool MakeWindow(Staged& a_item)
+		/**
+		 * @brief Makes the window: an image ORG's allocator holds, wrapped for D3D11 with its mips as initial data, and imported into the
+		 * graph for its descriptor. DXVK writes the mips in its own stream (its initializer, ahead of any later D3D11 or graph work), so
+		 * no graph pass copies them: nothing registers with the graph, and the graph is never built again for a window. Any thread, as
+		 * D3D11's texture creation is. False: the backend cannot make this window.
+		 */
+		bool MakeWindow(Staged& a_item, const D3D11_TEXTURE2D_DESC& a_desc, std::shared_ptr<org::memory::AllocatedResource> a_image,
+			const std::vector<D3D11_SUBRESOURCE_DATA>& a_mips)
 		{
 			auto& runtime = RenderGraphRuntime::Get();
+			auto* host = runtime.Host();
+			if (!host)
+				return false;
 			const auto name = GraphName(S().serial.fetch_add(1, std::memory_order_relaxed));
 			DxvkOrgInteropTextureWrap wrap{};
 			wrap.dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
-			wrap.width = a_item.desc.Width;
-			wrap.height = a_item.desc.Height;
+			wrap.width = a_desc.Width;
+			wrap.height = a_desc.Height;
 			wrap.depthOrArraySize = 1;
-			wrap.mipLevels = a_item.desc.MipLevels;
-			wrap.format = static_cast<std::uint32_t>(a_item.desc.Format);
+			wrap.mipLevels = a_desc.MipLevels;
+			wrap.format = static_cast<std::uint32_t>(a_desc.Format);
 			wrap.sampleCount = 1;
 			wrap.bindFlags = D3D11_BIND_SHADER_RESOURCE;
 			DxvkOrgInteropResourceInfo info{};
 			auto window = std::make_shared<Window>();
 			// From here on DXVK's stream may touch the image: it goes only through the window's release.
-			window->image = std::move(a_item.image);
-			// DXVK zeroes the image in its stream here: the copy pass comes later in the stream.
-			window->d3d11 = runtime.WrapTexture(window->image->Resource(), wrap, info, a_item.path.c_str());
+			window->image = std::move(a_image);
+			window->d3d11 = runtime.WrapTexture(window->image->Resource(), wrap, info, a_item.path.c_str(), a_mips.data());
 			if (!window->d3d11)
 				return false;
 			if (FAILED(globals::d3d::device->CreateShaderResourceView(window->d3d11.get(), nullptr, window->view.put())))
 				return false;
 			Util::SetResourceName(window->view.get(), "TextureStreaming::%s", a_item.path.c_str());
 
-			const auto format = rhi::helpers::ToRHI(a_item.desc.Format);
+			const auto format = rhi::helpers::ToRHI(a_desc.Format);
 			org::TextureDescription desc{};
 			desc.type = rhi::ResourceType::Texture2D;
 			desc.format = format;
 			desc.hasSRV = true;
 			desc.srvFormat = format;
-			for (UINT mip = 0; mip < a_item.desc.MipLevels; ++mip)
-				desc.imageDimensions.push_back({ (std::max)(a_item.desc.Width >> mip, 1u), (std::max)(a_item.desc.Height >> mip, 1u), 0, 0 });
-			// In the layout DXVK rests it in: the graph moves it for the copy and gives it back there.
-			window->texture = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), info.image, std::move(desc), name.c_str());
+			for (UINT mip = 0; mip < a_desc.MipLevels; ++mip)
+				desc.imageDimensions.push_back({ (std::max)(a_desc.Width >> mip, 1u), (std::max)(a_desc.Height >> mip, 1u), 0, 0 });
+			// In the layout DXVK rests it in. No pass of the graph names it, so the graph never moves it out of there.
+			window->texture = RenderGraph::ImportDxvkTexture(host->Device(), info.image, std::move(desc), name.c_str());
 			if (!window->texture)
 				return false;
 			window->index = window->texture->GetSRVInfo(0).slot.index;
 			a_item.window = std::move(window);
 			return true;
-		}
-
-		/**
-		 * @brief The batch's copies were submitted in DXVK's stream: its windows are installed. The batch keeps its staging buffers
-		 * and windows until it retires (ServiceRetiringBatches). Render thread.
-		 */
-		void Install(const std::shared_ptr<Batch>& a_batch)
-		{
-			auto& state = S();
-			a_batch->done = true;
-			for (const auto& item : a_batch->items) {
-				if (item->install)
-					item->install(item->window);
-				item->completion->Finish();
-			}
-			state.retiring.push_back(a_batch);
-			state.uploaded.fetch_add(a_batch->items.size(), std::memory_order_relaxed);
-			state.batches.fetch_add(1, std::memory_order_relaxed);
-		}
-
-		/**
-		 * @brief Done batches that nothing else holds (no pass instance, no prepared ticket: their copies cannot be recorded again)
-		 * give up their staging buffers and windows. The buffers go once D3D11's stream, which carried every copy, is past this
-		 * point. Render thread.
-		 */
-		void ServiceRetiringBatches()
-		{
-			auto& retiring = S().retiring;
-			std::erase_if(retiring, [](std::shared_ptr<Batch>& a_batch) {
-				if (a_batch.use_count() > 1)
-					return false;
-				for (const auto& item : a_batch->items) {
-					RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(item->staging));
-					item->window = nullptr;
-				}
-				return true;
-			});
-		}
-
-		/** @brief The next batch's client: its one-shot copy pass at the Present anchor. Replaces the last batch's. Render thread. */
-		bool Register(const std::shared_ptr<Batch>& a_batch)
-		{
-			FrameAnchors::ClientDesc client;
-			client.id = std::string(kClientId);
-			client.passes.push_back(FrameAnchors::PassDesc{ .name = "cs.texstream.upload",
-				.anchor = FrameAnchors::Anchor::Present,
-				.order = 0,
-				.kind = FrameAnchors::PassKind::Copy,
-				.make = [batch = std::shared_ptr<const Batch>(a_batch)]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<UploadPass>(batch); },
-				.once = true });
-			// Only while the copy is to come: the build after it (the one-shot pass dropped) leaves the windows out of the graph.
-			// Weak, as the other callbacks: a done batch is held only by its passes and tickets, so it can retire.
-			client.registerResources = [weak = std::weak_ptr<Batch>(a_batch)](org::RenderGraph& a_graph) {
-				const auto batch = weak.lock();
-				if (!batch || batch->done)
-					return;
-				for (const auto& item : batch->items)
-					if (item->window && item->window->texture)
-						a_graph.RegisterResource(org::ResourceIdentifier(item->window->texture->GetName()), item->window->texture);
-			};
-			client.active = [batch = std::weak_ptr<Batch>(a_batch)] {
-				const auto locked = batch.lock();
-				return locked && !locked->done;
-			};
-			client.commit = [](const FrameAnchors::Point&) {};
-			client.executed = [batch = std::weak_ptr<Batch>(a_batch)](const FrameAnchors::Point&) {
-				auto& state = S();
-				const auto locked = batch.lock();
-				if (!locked || locked->done || state.batch != locked)
-					return;
-				Install(locked);
-				state.batch = nullptr;
-			};
-			client.onFailed = [] { Fail("the render graph failed", false); };
-			return FrameAnchors::Register(std::move(client));
 		}
 
 		void ServiceRetired()
@@ -408,70 +247,44 @@ namespace TextureStreaming::ORG
 		}
 	}
 
-	void Reserve()
-	{
-		if (!Requested() || !TextureStreaming::Enabled() || TextureStreaming::FullMode())
-			return;
-		if (!FrameAnchors::Reserve(FrameAnchors::Anchor::Present))
-			logger::warn("[TextureStreaming] the Present anchor could not be reserved: windows stay on D3D11");
-	}
-
 	void FrameTick()
 	{
-		// Off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1): the staged windows wait for the main thread's next
+		// Off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1): the made windows wait for the main thread's next
 		// frame. With it, the loading loop's Presents run this too.
 		if (!Requested() || !FrameAnchors::OnRenderThread())
 			return;
 		auto& state = S();
-		ServiceRetiringBatches();
 		ServiceRetired();
 		if (state.failed.load(std::memory_order_acquire))
 			return;
 		auto& runtime = RenderGraphRuntime::Get();
-		const bool up = runtime.IsActive() && runtime.CanWrapTextures() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::Present);
+		const bool up = TextureStreaming::Enabled() && !TextureStreaming::FullMode() && runtime.IsActive() && runtime.CanWrapTexturesWithData();
 		if (up != state.ready.load(std::memory_order_acquire)) {
 			state.ready.store(up, std::memory_order_release);
 			if (up)
-				logger::info("[TextureStreaming] windows are made on the render graph: uploaded at the Present anchor, read by index");
+				logger::info("[TextureStreaming] windows are made on the render graph: created with their mips in DXVK's stream, read by index");
 		}
-		if (!up) {
-			// The graph went away with windows staged: they are built on D3D11.
-			bool holding = state.batch != nullptr;
-			{
-				std::scoped_lock lock(state.mutex);
-				holding = holding || !state.staged.empty();
-			}
-			if (holding)
-				Fail("the render graph is not active");
-			return;
-		}
-		if (state.batch)
-			return;  // one copy pass in flight at a time
-
-		auto batch = std::make_shared<Batch>();
+		std::vector<std::shared_ptr<Staged>> staged;
 		{
 			std::scoped_lock lock(state.mutex);
-			std::uint64_t bytes = 0;
-			std::size_t taken = 0;
-			for (; taken < state.staged.size() && batch->items.size() < kMaxBatchWindows && (bytes < kMaxBatchBytes || batch->items.empty()); ++taken) {
-				bytes += state.staged[taken]->bytes;
-				batch->items.push_back(state.staged[taken]);
-			}
-			state.staged.erase(state.staged.begin(), state.staged.begin() + static_cast<std::ptrdiff_t>(taken));
+			staged.swap(state.staged);
 		}
-		if (batch->items.empty())
+		if (!up) {
+			// The graph went away with windows made: they are built on D3D11.
+			if (!staged.empty())
+				Fail("the render graph is not active", std::move(staged));
 			return;
-		for (const auto& item : batch->items) {
-			if (!MakeWindow(*item)) {
-				// The ones made so far go back with the rest.
-				state.batch = batch;
-				Fail(std::format("{} could not be wrapped for D3D11 or imported", item->path));
-				return;
-			}
 		}
-		state.batch = batch;
-		if (!Register(batch))
-			Fail("the copy pass could not be registered");
+		if (staged.empty())
+			return;
+		// Their mips are in DXVK's stream since their creation: the shells may name them from this frame on.
+		for (const auto& item : staged) {
+			if (item->install)
+				item->install(item->window);
+			item->completion->Finish();
+		}
+		state.uploaded.fetch_add(staged.size(), std::memory_order_relaxed);
+		state.batches.fetch_add(1, std::memory_order_relaxed);
 	}
 
 	bool Available()
@@ -498,16 +311,7 @@ namespace TextureStreaming::ORG
 		if (format == rhi::Format::Unknown)
 			return nullptr;
 
-		std::vector<rhi::helpers::SubresourceData> sources;
-		sources.reserve(a_upload.mips.size());
-		for (const auto& mip : a_upload.mips)
-			sources.push_back({ mip.pSysMem, mip.SysMemPitch, mip.SysMemSlicePitch });
-		const rhi::Span<const rhi::helpers::SubresourceData> span{ sources.data(), static_cast<std::uint32_t>(sources.size()) };
-		const auto plan = rhi::helpers::PlanTextureUploadSubresources(format, a_upload.desc.Width, a_upload.desc.Height, 1, a_upload.desc.MipLevels, 1, span);
-		if (plan.footprints.size() != sources.size() || !plan.totalSize)
-			return nullptr;
-
-		auto item = std::make_shared<Staged>();
+		std::shared_ptr<org::memory::AllocatedResource> image;
 		{
 			rhi::ResourceDesc desc{};
 			desc.type = rhi::ResourceType::Texture2D;
@@ -525,32 +329,15 @@ namespace TextureStreaming::ORG
 			// Like DXVK's windows: the spill pool first, system memory past the budget.
 			allocation.flags = rhi::ma::AllocationFlagSpillable;
 			allocation.owner = Vram::Debug::GameTextureOwner(a_upload.path);
-			if (org::memory::CreateAllocatedResource(desc, allocation, item->image) != rhi::Result::Ok || !item->image)
+			if (org::memory::CreateAllocatedResource(desc, allocation, image) != rhi::Result::Ok || !image)
 				return nullptr;
 		}
-		{
-			rhi::ResourceDesc desc{};
-			desc.type = rhi::ResourceType::Buffer;
-			desc.heapType = rhi::HeapType::Upload;
-			desc.resourceFlags = rhi::ResourceFlags::RF_None;
-			desc.debugName = "TextureStreaming::WindowUpload";
-			desc.buffer.sizeBytes = plan.totalSize;
-			rhi::ma::AllocationDesc allocation{};
-			allocation.heapType = rhi::HeapType::Upload;
-			allocation.owner = "CS/TextureStreaming/Upload";
-			if (org::memory::CreateAllocatedResource(desc, allocation, item->staging) != rhi::Result::Ok || !item->staging)
-				return nullptr;
-			void* mapped = nullptr;
-			item->staging->Resource().Map(&mapped);
-			if (!mapped)
-				return nullptr;
-			rhi::helpers::WriteTextureUploadSubresources(plan, span, mapped);
-			item->staging->Resource().Unmap(0, plan.totalSize);
-		}
-		item->desc = a_upload.desc;
+
+		auto item = std::make_shared<Staged>();
 		item->path = std::move(a_upload.path);
-		item->footprints = plan.footprints;
-		item->bytes = plan.totalSize;
+		// The caller builds on D3D11 when this window cannot be made; the image goes with item.
+		if (!MakeWindow(*item, a_upload.desc, std::move(image), a_upload.mips))
+			return nullptr;
 		item->install = std::move(a_upload.install);
 		item->retry = std::move(a_upload.retry);
 		item->completion = std::make_shared<Completion>();
@@ -558,7 +345,7 @@ namespace TextureStreaming::ORG
 		{
 			auto& state = S();
 			std::scoped_lock lock(state.mutex);
-			// Turned off since the check above: the caller builds on D3D11, and the images go with item.
+			// Turned off since the check above: the caller builds on D3D11, and the window goes with item.
 			if (state.failed.load(std::memory_order_acquire))
 				return nullptr;
 			state.staged.push_back(std::move(item));
@@ -576,7 +363,6 @@ namespace TextureStreaming::ORG
 	{
 	};
 
-	void Reserve() {}
 	void FrameTick() {}
 	bool Available() { return false; }
 	ID3D11ShaderResourceView* ViewOf(const Window&) { return nullptr; }

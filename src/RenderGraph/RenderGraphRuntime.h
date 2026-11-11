@@ -204,6 +204,15 @@ public:
 	void PollEpochFailures();
 
 	/**
+	 * @brief Owner thread: the host's builds that were asked for, made now (org::GraphHost::BuildIfRequested). Call this, never the
+	 * host's own, outside ExecuteEpoch: once the host's thread failed (a GPU completion timeline read UINT64_MAX, which is how
+	 * Windows reports a removed device), every host call throws, and that is a whole-graph failure. It stops the graph here as
+	 * ExecuteEpoch's does (IsActive false, GetDisabledReason the error) instead of leaving the frame's thread with an exception.
+	 * @return Whether anything was built. False when inactive or when the graph stopped.
+	 */
+	bool BuildIfRequested();
+
+	/**
 	 * @brief Render thread: an external epoch (org::GraphHost::SetExternalEpochs) submitted at the current point of the
 	 * D3D11 stream, as ExecuteEpoch submits one, but executed by the caller: its ticket's recording comes back to be executed in
 	 * DXVK's own command buffer (EmitExternalCommands, with its waits and signals), and nothing is flushed or submitted here. Null

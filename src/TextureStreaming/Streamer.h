@@ -91,7 +91,7 @@ namespace TextureStreaming
 
 	/**
 	 * @brief A window build that ends after its call: with graph windows (CS_ORG_TEXTURE_STREAMING=1, TextureStreaming/ORGWindows.h)
-	 * the window is in place only once the render graph's copy pass for it was submitted. Whoever waits for the window gates on this
+	 * the window is in place only once the render thread installed it (after the next Present). Whoever waits for the window gates on this
 	 * rather than on the call, so no frame waits for it.
 	 */
 	class PendingWindow
@@ -175,7 +175,7 @@ namespace TextureStreaming
 		std::uint64_t feedbackReported = 0, feedbackFiner = 0;                                  // since the start
 		std::uint64_t baseBuilds = 0, baseReadMicroseconds = 0, baseCreateMicroseconds = 0;     // the first window of each texture
 		std::uint64_t otherBuilds = 0, otherReadMicroseconds = 0, otherCreateMicroseconds = 0;  // later ones
-		std::uint64_t graphWindows = 0, graphBatches = 0, graphRetried = 0;                     // windows the render graph uploaded, its copy passes, and builds it gave back to D3D11
+		std::uint64_t graphWindows = 0, graphBatches = 0, graphRetried = 0;                     // windows the render graph made, the frames that installed them, and builds it gave back to D3D11
 
 		// The budget's controller, from its last tick. All zero until it has measured.
 		std::uint64_t cardBytes = 0;          // the card's own VRAM

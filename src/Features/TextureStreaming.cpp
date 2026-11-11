@@ -98,11 +98,6 @@ void TextureStreamingFeature::SaveSettings(json& o_json)
 	o_json = settings;
 }
 
-void TextureStreamingFeature::PostPostLoad()
-{
-	TextureStreaming::ORG::Reserve();
-}
-
 void TextureStreamingFeature::Reset()
 {
 	TextureStreaming::ORG::FrameTick();
