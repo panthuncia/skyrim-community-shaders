@@ -51,7 +51,7 @@ namespace DCLF
 			std::uint32_t byteWidth = 0;
 			// The last finished mapping is copied once, by the first read after it (Contents) or a partial UpdateSubresource, rather
 			// than at every Unmap (a buffer is unmapped more often than it is read).
-			RenderGraph::Engine::Constants::BufferContents contents;
+			::RenderGraph::Engine::Constants::BufferContents contents;
 		};
 
 		Entry* Find(const ID3D11Resource* a_resource);
