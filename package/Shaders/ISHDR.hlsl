@@ -1,3 +1,19 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): the engine's slots t0-t2 and s0-s2 come from the
+// heap, the shared constants (FrameBuffer, SharedData, Permutation) too, and PerGeometry from the engine-constants capture through the
+// pass's latch. The vertex stage is the graph's fullscreen triangle, which gives the engine quad's TEXCOORD0.
+#	define ORG_SHARED_CONSTANTS
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	if defined(DOWNSAMPLE)
+#		define ISHDR_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, ImageTex, 0) X(SRV, Texture2D<float4>, AdaptTex, 1) X(SRV, Texture2D<float4>, AvgTex, 2) X(SAMPLER, SamplerState, ImageSampler, 0) X(SAMPLER, SamplerState, AdaptSampler, 1) X(SAMPLER, SamplerState, AvgSampler, 2) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+#	else
+#		define ISHDR_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, ImageTex, 0) X(SRV, Texture2D<float4>, BlendTex, 1) X(SRV, Texture2D<float4>, AvgTex, 2) X(SAMPLER, SamplerState, ImageSampler, 0) X(SAMPLER, SamplerState, BlendSampler, 1) X(SAMPLER, SamplerState, AvgSampler, 2) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+#	endif
+ORG_PUSH_BLOCK(ISHDR_ORG_RESOURCES(ORG_HANDLE))
+ISHDR_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/Color.hlsli"
 #include "Common/DummyVSTexCoord.hlsl"
 #include "Common/FrameBuffer.hlsli"
@@ -13,20 +29,42 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+struct ISHDRPerGeometry
+{
+	float4 Flags;
+	float4 TimingData;
+	float4 Param;
+	float4 Cinematic;
+	float4 Tint;
+	float4 Fade;
+	float4 BlurScale;
+	float4 BlurOffsets[16];
+};
+ORG_ENGINE_CONSTANTS(ISHDRPerGeometry, PerGeometry, PerGeometryAt)
+static float4 Flags = PerGeometry.Flags;
+static float4 TimingData = PerGeometry.TimingData;
+static float4 Param = PerGeometry.Param;
+static float4 Cinematic = PerGeometry.Cinematic;
+static float4 Tint = PerGeometry.Tint;
+static float4 Fade = PerGeometry.Fade;
+static float4 BlurScale = PerGeometry.BlurScale;
+static float4 BlurOffsets[16] = PerGeometry.BlurOffsets;
+#	else
 SamplerState ImageSampler : register(s0);
-#	if defined(DOWNSAMPLE)
+#		if defined(DOWNSAMPLE)
 SamplerState AdaptSampler : register(s1);
-#	elif defined(BLEND)
+#		elif defined(BLEND)
 SamplerState BlendSampler : register(s1);
-#	endif
+#		endif
 SamplerState AvgSampler : register(s2);
 
 Texture2D<float4> ImageTex : register(t0);
-#	if defined(DOWNSAMPLE)
+#		if defined(DOWNSAMPLE)
 Texture2D<float4> AdaptTex : register(t1);
-#	elif defined(BLEND)
+#		elif defined(BLEND)
 Texture2D<float4> BlendTex : register(t1);
-#	endif
+#		endif
 Texture2D<float4> AvgTex : register(t2);
 
 cbuffer PerGeometry : register(b2)
@@ -40,6 +78,7 @@ cbuffer PerGeometry : register(b2)
 	float4 BlurScale : packoffset(c6);
 	float4 BlurOffsets[16] : packoffset(c7);
 };
+#	endif
 
 float ReinhardDerivative(float x, float p)
 {

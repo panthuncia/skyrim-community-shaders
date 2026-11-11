@@ -1,3 +1,14 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t1 and s0-s1 from the heap, FrameBuffer
+// and SharedData from the shared constants, PerGeometry from the engine-constants capture through the pass's latch.
+#	define ORG_SHARED_CONSTANTS
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISCOMPOSITE_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, VLSourceTex, 0) X(SRV, Texture2D<float4>, LFSourceTex, 1) X(SAMPLER, SamplerState, VLSourceSampler, 0) X(SAMPLER, SamplerState, LFSourceSampler, 1) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISCOMPOSITE_ORG_RESOURCES(ORG_HANDLE))
+ISCOMPOSITE_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/Color.hlsli"
 #include "Common/DummyVSTexCoord.hlsl"
 #include "Common/FrameBuffer.hlsli"
@@ -11,6 +22,14 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+struct ISCompositePerGeometry
+{
+	float4 VolumetricLightingColor;
+};
+ORG_ENGINE_CONSTANTS(ISCompositePerGeometry, PerGeometry, PerGeometryAt)
+static float4 VolumetricLightingColor = PerGeometry.VolumetricLightingColor;
+#	else
 SamplerState VLSourceSampler : register(s0);
 SamplerState LFSourceSampler : register(s1);
 
@@ -21,6 +40,7 @@ cbuffer PerGeometry : register(b2)
 {
 	float4 VolumetricLightingColor : packoffset(c0);
 };
+#	endif
 
 PS_OUTPUT main(PS_INPUT input)
 {
