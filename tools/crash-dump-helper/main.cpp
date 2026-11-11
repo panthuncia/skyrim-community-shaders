@@ -2,10 +2,9 @@
 //
 // The plugin starts this helper once at load (src/CrashDump.cpp, CrashDump::Start) with four inherited handles: the game process,
 // the request event, the done event and a small shared section. A request is one of two kinds:
-// - A crash. The plugin's vectored handler writes the faulting thread and its EXCEPTION_POINTERS address into the section, signals
-//   the request event and waits for the done event. The helper writes a minidump to the path on its command line. The handler sees
-//   first-chance exceptions, which some handler may still catch, so the helper keeps serving requests after a crash dump (a hang
-//   that follows still gets its report).
+// - A crash. The plugin's unhandled exception filter writes the faulting thread and its EXCEPTION_POINTERS address into the
+//   section, signals the request event and waits for the done event. The helper writes a minidump to the path on its command line,
+//   then keeps serving requests (another filter in the chain may still keep the process alive, and a hang report may follow).
 // - A hang. The plugin's watchdog (src/HangWatchdog.cpp) found the render thread stuck. It writes that thread and two paths into
 //   the section. The helper writes a text file with every thread's stack (the stuck thread first, symbols from the PDBs beside the
 //   modules), then a minidump.
@@ -27,22 +26,13 @@
 #include <string>
 #include <vector>
 
+#include "../../src/CrashDumpShared.h"
+
 namespace
 {
-	// The section's layout, written by the plugin (src/CrashDump.cpp, Shared). The first 16 bytes are the crash request's.
-	struct Shared
-	{
-		std::uint32_t threadId;
-		std::uint32_t kind;               // 0: a crash, 1: a hang
-		std::uint64_t exceptionPointers;  // a crash's EXCEPTION_POINTERS* in the game's address space
-		wchar_t dumpPath[1024];           // a hang's minidump
-		wchar_t textPath[1024];           // a hang's stacks
-		std::uint32_t written;            // the helper's answer: 1 when the minidump was written
-		std::uint32_t error;              // else MiniDumpWriteDump's GetLastError (or CreateFile's)
-		std::uint64_t bytes;              // the minidump's size
-	};
+	using CrashDump::RequestKind;
+	using CrashDump::Shared;
 
-	constexpr std::uint32_t kHang = 1;  // Shared::kind; 0 is a crash
 	constexpr int kMaxFrames = 96;
 
 	HANDLE HandleArg(const wchar_t* a_text)
@@ -236,8 +226,8 @@ int wmain(int a_argc, wchar_t** a_argv)
 	const wchar_t* crashPath = a_argv[5];
 	auto* shared = static_cast<Shared*>(MapViewOfFile(section, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(Shared)));
 
-	// One request after another, until the game exits (the process handle signalled). A crash request does not end it: the
-	// exception may be one a handler catches, and a hang report may follow.
+	// One request after another, until the game exits (the process handle signalled). A crash request does not end it: a filter
+	// later in the chain may keep the process alive, and a hang report may follow.
 	for (;;) {
 		const HANDLE waits[2]{ request, process };
 		if (WaitForMultipleObjects(2, waits, FALSE, INFINITE) != WAIT_OBJECT_0)
@@ -247,7 +237,7 @@ int wmain(int a_argc, wchar_t** a_argv)
 			SetEvent(done);
 			return 1;
 		}
-		if (shared->kind == kHang) {
+		if (shared->kind == RequestKind::kHang) {
 			WriteStacks(process, shared);
 			WriteMinidump(process, shared->dumpPath, shared, false);
 			SetEvent(done);

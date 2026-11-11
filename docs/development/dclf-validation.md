@@ -939,9 +939,14 @@ and state); with the shadow site on it loses the device (dclf-architecture.md, "
     be wrong (it labels by the nearest symbol), and a probable frame is not the same as a stack-scan hit.
 -   **Community Shaders' minidump**, `CommunityShaders.dmp` beside the game executable, is written from outside the game by
     `tools/crash-dump-helper` (`CommunityShadersCrashDump.exe`). The plugin starts it at load (`CrashDump.cpp`,
-    `CrashDump::Start`); on a crash its vectored handler signals it and logs `[CRASH] exception ... - writing
-    CommunityShaders.dmp`. `MiniDumpWriteDump` run inside the game deadlocked on the heap lock. Read the dump with cdb or
-    WinDbg.
+    `CrashDump::Start`). The dump is for the exception that ends the process: an unhandled exception filter (chained to the
+    one installed before it) signals the helper and logs `[CRASH] unhandled exception <code> at ... (<module>+<offset>) ...
+    Writing CommunityShaders.dmp`. A vectored handler logs the session's first 16 faults at first chance (`[CRASH]
+    first-chance exception ...; a handler may still catch it`) without a dump: a handler may still catch them, and the
+    game goes on. A crash logger installed after Community Shaders that does not chain its filter replaces this one, and
+    then there is no dump. `MiniDumpWriteDump` run inside the game deadlocked on the heap lock. Read the dump with cdb or
+    WinDbg. `CS_TEST_CRASH=<seconds>` faults a worker thread that long after load, to test the path end to end; it is
+    read before the dev environment file is applied, so set it in the process environment.
 -   **Heap corruption** shows its fault later and elsewhere. Typical DCLF causes are an engine object read through a raw pointer
     nothing held, and a last release on the wrong thread. `CS_DCLF_RELEASE_GUARD`, `CS_DCLF_HIDDEN_WATCH` and
     `CS_DCLF_MIRROR_WATCH` name the thread or writer.
