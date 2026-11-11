@@ -29,7 +29,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 		constexpr std::uint32_t kNotReady = 0xFFFFFFFF;
 		// The first answers logged one by one, then one summary per ring slot every kSummaryReads answers.
 		constexpr std::uint32_t kLoggedAnswers = 12;
-		constexpr std::uint32_t kSummaryReads = 300;
+		constexpr std::uint32_t kSummaryReads = 100;
 
 #if defined(CS_HAS_RENDER_GRAPH)
 		using Ring = QueryRing::State;
