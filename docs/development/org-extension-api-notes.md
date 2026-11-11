@@ -1149,3 +1149,22 @@ Keys used so far:
   layouts need their strides at pipeline creation, so the key carries the geometry's strides unless the pipeline takes
   dynamic strides.
 - **Found by:** P4.6 (2026-11-10).
+
+### Drawing an engine family at its own call with the engine's state latched
+
+- **Need:** replace a family of engine draws (the sky) at the exact point in the engine's pass where it draws, with the engine's
+  own CPU setup, constants and state, and draw it on the graph there. The point is inside the engine's render pass and can run
+  several times a frame (the main pass, each reflection face).
+- **Who:** Phase 5 families that the engine draws in a batch of its own (sky, water, blood splatter); a plugin that replaces an
+  engine shader's draws.
+- **Where it fits:** a frame anchor at the call (CS added `Sky` and `SkyReflections` for this, P5.3), whose client's pass is
+  recorded per run from a snapshot the render thread publishes before `FrameAnchors::Run` (revision = the snapshot's draws without
+  their constants, constants in a latch). The engine's batch runs with its draw function latched (a detour that records instead of
+  drawing), so every engine side effect of the setup stays. `ConstantMirror` (`Watch` from the shader's SetupGeometry, `Contents` at
+  the draw) gives the constants without a decode.
+- **Gaps found:** an anchor is a fixed enum, so every such point is a framework edit; a generic "run an epoch here" for families
+  would avoid that. `RasterProgram` has no vertex input or index buffer: a family pulls its vertices by device address
+  (`DCLFVertexPull.hlsli`, SPIR-V only, so its DXIL build draws nothing yet), and draws one render pass per draw. It has no
+  stencil reference either. ORG makes per-slice views of a cube array as cube-array views, so a pass cannot bind one cube of an
+  array as a `TextureCube` (Cloud Shadows' per-layer occlusion stays out of the ORG sky for that reason).
+- **Found by:** P5.3 (2026-11-10).
