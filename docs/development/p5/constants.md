@@ -1,7 +1,7 @@
 # P5.7: the engine's constants, captured per use
 
-RE and design for plan task P5.7 ([org-full-port.md](../org-full-port.md), Phase 5): every engine constant-buffer write,
-captured per use into graph memory, so the ORG passes that draw the engine's work (sky, ImageSpace, menus, DCLF) read the
+RE and design for plan task P5.7 ([org-full-port.md](../org-full-port.md), Phase 5): every engine constant-buffer write
+and bind tracked, and the uses a consumer asks for captured into graph memory, so the ORG passes that draw the engine's work (sky, ImageSpace, menus, DCLF) read the
 constants of that exact use instead of the engine's pooled D3D11 buffers. Found with Ghidra (GhidraMCP) and the Address
 Library on 2026-11-10, SE 1.5.97 and AE 1.6.1170. It extends R2 and R3 of
 [engine-d3d11-surface.md](../engine-d3d11-surface.md) and answers its open questions 5 and 6 for the constant buffers.
@@ -98,10 +98,15 @@ buffer's contents as the GPU will read them.
   from the existing hooks in `Globals.cpp`.
 - **Binds:** `VS/PS/CSSetConstantBuffers` and their `*1` forms (CS's windowed binds, GrassOptimizations) and `ClearState`
   are detoured on DXVK's immediate context. Each slot remembers its buffer and window.
-- **Capture:** after `SetDirtyStates(false)` (and CS's own per-draw work in the same hook) for VS and PS, and after
-  `DispatchCSShader` for CS. Each bound slot's window is copied into the frame's ring unless the same buffer version and
-  window was already copied this frame, in which case the use points at the earlier copy. A buffer bound for 500 draws and
-  written once is copied once.
+- **Capture, on demand:** a consumer that withholds an engine draw calls `Capture(stageMask)` at its own choke point, once the
+  draw's constants are bound (ImageSpace in `DrawTriShape`, after `SetDirtyStates(false)`). Each bound slot's window of the
+  asked stages is copied into the frame's ring unless the same buffer version and window was already copied this frame, in
+  which case the use points at the earlier copy. Draws nobody asks about cost nothing: there is no capture at every
+  `SetDirtyStates` or `DispatchCSShader` any more (it copied every draw's constants for one consumer that captured its own).
+- **Buffer index:** an entry holds a reference to its buffer, so the address cannot come back as another resource while the
+  entry lives. A bind, Map or update of a known buffer is a lookup with no D3D11 call; an unknown resource is checked once
+  (`GetType`, `GetDesc`) and entered when it is a constant buffer. An entry unseen for 1800 capture frames lets its
+  buffer go and is never found again.
 - **Ring:** 1 MiB `org::LatchBlock` chunks (one slot each, host-visible, read in shaders as a ByteAddressBuffer). A slot's
   copy starts on 16 bytes. A frame's chunks retire after the Present through `RenderGraphRuntime::ReleaseAfterD3D11` and
   come back to a free list once the GPU is past the D3D11 work issued until then. That work includes every anchor epoch of
@@ -122,17 +127,16 @@ buffer's contents as the GPU will read them.
 | Call                                   | Use                                                                                                                                  |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `Active()`                             | The capture runs: switch on, render graph active, no ring failure.                                                                   |
-| `Current()`                            | The last draw or dispatch captured this frame. Call it right after the engine's draw call (or inside a hook that runs after `SetDirtyStates`). |
 | `Capture(stageMask)`                   | Captures what is bound now as a new use: for a consumer that withholds the engine's draw at its own choke point, once the Setup* calls have bound their buffers. `kDrawStages` or `StageBit(Stage::Compute)`. |
 | `Slots(use)`, `Find(use, stage, slot)` | The use's slots; one slot's constants, or null when nothing was bound there.                                                          |
 | `Where(slot)`                          | `{ block, srvIndex, offset, size }`: the chunk (hold the `shared_ptr` while recording) and where the bytes are.                      |
 | `Bytes(slot)`                          | The bytes on the CPU. The ring is write-combined memory: reading it is slow, so this is for diagnostics, not per-draw use.          |
 | `GetStats()`                           | Totals since the start.                                                                                                              |
 
-**ImageSpace (P5.6).** An ImageSpace effect's b2 is an ordinary slot of its draw: `Find(Current(), Stage::Pixel, 2)` right
-after the effect drew gives its constants (group `Custom`, the same bytes the VS b2 slot points at). An ORG ImageSpace pass
-that withholds the D3D11 draw calls `Capture(kDrawStages)` after the effect's setup function returned (its custom buffer is
-then written, unmapped and bound to VS and PS b2) and keeps that id.
+**ImageSpace (P5.6), the one consumer today.** An ImageSpace effect's b2 is an ordinary slot of its draw. The ORG ImageSpace
+pass that withholds the D3D11 draw calls `SetDirtyStates(false)` itself, then `Capture(kDrawStages)` (the effect's custom
+buffer is then written, unmapped and bound to VS and PS b2), and reads `Find(use, Stage::Pixel, 2)` and `Find(use,
+Stage::Pixel, 12)` (group `Custom` or `PSGeometry`, and the per-frame buffer).
 
 **Kept recordings.** A pass whose recording is reused must not bake `srvIndex` or `offset`: its commit writes them into its
 own LatchBlock at the frame slot (`latch->WriteValue(host->CurrentFrameSlot(), ...)`), and the shader loads the constants
@@ -141,8 +145,8 @@ location directly and retain the block (`RecordingContext::Retain`).
 
 ```cpp
 namespace C = RenderGraph::Engine::Constants;
-// In a hook that runs after the engine's sky draw (DCLF-style latch at the draw's choke point).
-if (const C::UseId use = C::Current(); use.Valid()) {
+// At the draw's choke point, once its constants are bound, in place of the engine's draw.
+if (const C::UseId use = C::Capture(C::kDrawStages); use.Valid()) {
 	if (const auto* geometry = C::Find(use, C::Stage::Vertex, 2)) {
 		const C::Location at = C::Where(*geometry);
 		latched.push_back({ at.srvIndex, at.offset, at.size });  // written into the pass's latch at commit
@@ -154,17 +158,35 @@ if (const C::UseId use = C::Current(); use.Valid()) {
 DCLF's `ConstantMirror` keeps its API (`Watch`, `Contents`): p5-sky and DCLF's epochs read through it as before. Its write
 tracking is now `BufferContents`.
 
+### Merging with DCLF's ConstantMirror (planned, not done)
+
+The two track the same writes through the same `Globals.cpp` seams, each with its own buffer index: `ConstantMirror` a
+linear list of the few buffers DCLF watches (a held reference each), the capture an open-addressed index of every constant
+buffer (a held reference each since the review fixes). The merge:
+
+1. **One write tracker.** The capture's `Tracker` index becomes the only place `OnMap`, `OnUnmap` and `OnUpdateSubresource`
+   land; `ConstantMirror::Watch(buffer)` becomes "keep this buffer's entry, and settle its copy". `ConstantMirror`'s own hooks
+   and entries go. `Contents(buffer)` reads the entry's `BufferContents::Settled`.
+2. **Write tracking on when either asks.** Today the capture's binds and `MapCustomConstantBuffer` are hooked only with
+   `CS_ORG_ENGINE_CONSTANTS=1`. The write tracking (Map, Unmap, UpdateSubresource, the custom mapper's bound) would be on
+   whenever DCLF or the switch wants it; the bind hooks and the ring only with the switch.
+3. **DCLF's per-draw reads become uses.** The sky family and DCLF's epochs that latch a watched buffer's bytes per batch could
+   call `Capture` at their choke point and keep the location instead of copying `Contents` into their own latch; whole-frame
+   reads (a scene's per-frame constants) stay `Contents`.
+4. **Order:** after P5.13, when the engine's Setup* maps go to the ring instead of D3D11, so the merged tracker has one owner
+   of the bytes.
+
 ## Switches and log lines
 
 | Switch                                  | Effect                                                                                                         |
 | --------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `CS_ORG_ENGINE_CONSTANTS=1`             | Installs the hooks and captures every use. Off (default): nothing is hooked beyond the existing Map/Unmap seams, which return at once. |
+| `CS_ORG_ENGINE_CONSTANTS=1`             | Installs the hooks and tracks every constant buffer's writes and binds; uses are captured when a consumer asks (`Capture`). Off (default): nothing is hooked beyond the existing Map/Unmap seams, which return at once. |
 | `CS_ORG_ENGINE_CONSTANTS_LOG_FRAMES=N`  | The summary line's window (default 600 frames).                                                                 |
-| `CS_ORG_ENGINE_CONSTANTS_CHECK=1`       | About once a second, one captured slot is compared with a staging read-back of its D3D11 buffer (`CopyResource`, `Map(READ)`: stalls). |
+| `CS_ORG_ENGINE_CONSTANTS_CHECK=1`       | A diagnostic: about once a second, one captured slot is compared with a staging read-back of its D3D11 buffer (`CopyResource`, `Map(READ)`: stalls). |
 
 Log lines (all `[ORG] engine constants`):
 
-- `capturing every engine constant-buffer use (CS_ORG_ENGINE_CONSTANTS=1)` at startup.
+- `capturing every engine constant-buffer use (CS_ORG_ENGINE_CONSTANTS=1)` at startup (the uses are the ones consumers ask for).
 - `<N> frames: per frame <u> uses, <s> slots, <c> copies, <k> KiB (peak <p> KiB, <n> chunks); copies per frame by group:
   ...; unwritten slots <w>, dropped uses <d>[; checked <x>, <m> differ]` every window.
 - `the ring has <n> chunks (<m> MiB)` when the ring grows past 4 chunks (at powers of two).
@@ -177,9 +199,9 @@ Scenario `tools/cs-ab/scenarios/constants-org1.env`: the `dclf-publish2-0` tour 
 tripwire guest and every P4 switch, the summary every 300 frames. `constants-org1-check.env` adds the check.
 
 1. **Build and start:** the startup line; no `[E]` lines beyond the known Effects11 one; no `Render graph disabled`.
-2. **It captures:** in Whiterun and Dragonsreach the summary shows uses and copies above zero, the groups `VS geometry`,
-   `PS geometry`, `per-frame`, `custom` (ImageSpace, bones) and `compute` (ImageSpace compute effects), and `unwritten
-   slots` near zero after the first window (a slot bound before its first write since the hooks went in shows there once).
+2. **It captures what is asked:** with `CS_ORG_IMAGESPACE=1` in Whiterun and Dragonsreach the summary shows uses and copies
+   above zero, the groups `custom` or `PS geometry` and `per-frame` (ImageSpace's b2 and b12), and `unwritten slots` near
+   zero after the first window. Without a consumer the summary shows no uses and no copies.
 3. **It is cheap:** copies and KiB per frame stay bounded (expect a few thousand copies and a few MiB per frame in
    Whiterun with DCLF; `dropped uses 0`), the chunk count stops growing after the first windows, and the frame rate matches
    `dclf-publish2-0` with the P4 switches (GPU-bound comparison, one sample each, Dev-Fast is /Od).
@@ -190,18 +212,16 @@ tripwire guest and every P4 switch, the summary every 300 frames. `constants-org
 
 ## Risks and limits
 
-- **The capture point is after CS's own per-draw work** in the `SetDirtyStates` hook (`State::Draw`, `VanillaBinding`), so a
-  use also records CS's buffers (permutation, shared data) bound at that draw, as group Other. A consumer that wants only the
-  engine's slots filters by group.
-- **Uses that never draw.** DCLF and GrassOptimizations call `SetDirtyStates(false)` themselves; those calls are uses too.
-  They cost a few slot records and no copies when nothing was written since.
+- **A use records every bound slot of its stages**, CS's buffers too (permutation, shared data, as group Other) when the
+  consumer captures after CS's per-draw work. A consumer that wants only the engine's slots filters by group or asks by slot.
 - **An anchor epoch on an async queue** is not ordered by `ReleaseAfterD3D11`'s event query. Consumers read the ring on the
   graphics queue (the anchors in DXVK's stream) until that is checked.
 - **Loading-screen frames** (the job thread) are not captured, and a long loading screen does not end capture frames: no
   chunk is in use then, so nothing grows.
-- **Stale identities:** a released buffer's address can come back as another resource. The type and description are read
-  again at every write and first bind, so a reused address is classified again, but an engine global's group tag is kept
-  from its first sighting (the block is filled once at init and never released before shutdown).
+- **Held buffers:** each constant buffer seen is referenced until it goes unseen for 1800 capture frames, so a buffer another
+  plugin releases is freed up to that much later. The engine's pools and CS's buffers live for the session anyway. A
+  plugin that makes constant buffers every frame fills the index (8192 entries) over a long session; later buffers are
+  then not captured (logged once).
 - **The ring's memory** is host-visible, device-local with resizable BAR. Without it the GPU reads constants over PCIe,
   which is what the engine's DYNAMIC buffers do today on DXVK.
 - **Not done here:** the dual write ends at P5.13, when `SetDirtyStates`, `SetShader`, `SetPixelShader` and

@@ -55,6 +55,8 @@ namespace RenderGraph::Engine::Constants
 		constexpr std::uint32_t kMaxUsesPerFrame = 1u << 20;
 		// The custom buffers are 0xf00 bytes; the mapper's size argument bounds a use (MapCustomConstantBuffer).
 		constexpr std::uint32_t kCustomBytes = 0xf00;
+		// A buffer not bound, mapped or updated for this many frames is let go (its reference released, its entry retired).
+		constexpr std::uint64_t kUnseenFrames = 1800;
 
 		/**
 		 * @brief The engine's constant-buffer globals, as CreateConstantBufferPools (SE 75592 `0x140d720d0`, AE 77400 `0x140e4d000`)
@@ -87,10 +89,16 @@ namespace RenderGraph::Engine::Constants
 			return block.get();
 		}
 
-		/** @brief One constant buffer the capture has seen. Entries are never freed: a released buffer's address may come back. */
+		/**
+		 * @brief One constant buffer the capture has seen. The entry holds a reference, so the buffer's address cannot come back as
+		 * another resource while the entry lives: a found entry needs no D3D11 call to check it. Entries never move; one unseen for
+		 * kUnseenFrames lets its buffer go and is retired (buffer null, never found again).
+		 */
 		struct Entry
 		{
-			ID3D11Buffer* buffer = nullptr;  // not referenced: identity only
+			ID3D11Buffer* buffer = nullptr;  // its identity; null once retired
+			winrt::com_ptr<ID3D11Buffer> held;
+			std::uint64_t seenFrame = 0;  // the last capture frame it was bound, mapped or updated
 			std::uint32_t byteWidth = 0;
 			std::uint32_t written = 0;  // what the last Map wrote: the custom mapper's bound, else byteWidth
 			Group group = Group::Other;
@@ -243,11 +251,8 @@ namespace RenderGraph::Engine::Constants
 				}
 				uses.push_back(record);
 				++window.uses;
-				current = { frame, static_cast<std::uint32_t>(uses.size() - 1) };
-				return current;
+				return { frame, static_cast<std::uint32_t>(uses.size() - 1) };
 			}
-
-			UseId Current() const { return current.frame == frame ? current : UseId{}; }
 
 			std::span<const SlotConstants> Slots(UseId a_use) const
 			{
@@ -283,7 +288,8 @@ namespace RenderGraph::Engine::Constants
 				bytesThisFrame = 0;
 				uses.clear();
 				slots.clear();
-				current = {};
+				if (frame % kUnseenFrames == 0)
+					LetGoUnseen();
 				++frame;
 				++totals.frames;
 				++window.frames;
@@ -327,26 +333,43 @@ namespace RenderGraph::Engine::Constants
 				return nullptr;
 			}
 
-			/** @brief The entry of a constant buffer, made the first time it is seen; null for any other resource. Refreshes the size. */
+			/**
+			 * @brief The entry of a constant buffer, made the first time it is seen; null for any other resource. A known buffer costs a
+			 * lookup: its entry's reference keeps its address from being reused, so it is not checked again. An unknown resource is
+			 * checked once (its type and description) and, when it is a constant buffer, entered.
+			 */
 			Entry* Track(ID3D11Resource* a_resource)
 			{
 				if (!a_resource)
 					return nullptr;
-				// A released buffer's address can come back as another resource: the type and size are read again every time.
+				if (Entry* entry = Find(a_resource)) {
+					entry->seenFrame = frame;
+					return entry;
+				}
 				D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
 				a_resource->GetType(&dimension);
 				if (dimension != D3D11_RESOURCE_DIMENSION_BUFFER)
 					return nullptr;
-				Entry* entry = Find(a_resource);
 				D3D11_BUFFER_DESC desc{};
 				static_cast<ID3D11Buffer*>(a_resource)->GetDesc(&desc);
 				if (!(desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER))
 					return nullptr;
-				if (!entry)
-					entry = Insert(static_cast<ID3D11Buffer*>(a_resource));
+				Entry* entry = Insert(static_cast<ID3D11Buffer*>(a_resource));
 				if (entry)
 					entry->byteWidth = desc.ByteWidth;
 				return entry;
+			}
+
+			/** @brief Buffers unseen for kUnseenFrames: their references go, and their entries are never found again. */
+			void LetGoUnseen()
+			{
+				for (auto& entry : entries) {
+					if (!entry.buffer || frame - entry.seenFrame < kUnseenFrames)
+						continue;
+					entry.buffer = nullptr;
+					entry.held = nullptr;
+					entry.contents = {};
+				}
 			}
 
 			Entry* Track(ID3D11Buffer* a_buffer) { return Track(static_cast<ID3D11Resource*>(a_buffer)); }
@@ -362,6 +385,8 @@ namespace RenderGraph::Engine::Constants
 				}
 				Entry& entry = entries.emplace_back();
 				entry.buffer = a_buffer;
+				entry.held.copy_from(a_buffer);
+				entry.seenFrame = frame;
 				Classify(entry);
 				std::uint32_t at = Hash(a_buffer);
 				while (index[at])
@@ -593,7 +618,6 @@ namespace RenderGraph::Engine::Constants
 			std::uint64_t frame = 0;
 			std::vector<UseRecord> uses;
 			std::vector<SlotConstants> slots;
-			UseId current;
 
 			// The ring.
 			std::vector<std::shared_ptr<org::LatchBlock>> frameChunks;
@@ -673,8 +697,6 @@ namespace RenderGraph::Engine::Constants
 
 	bool Active() { return Tracker::Get().Active(); }
 
-	UseId Current() { return Tracker::Get().Current(); }
-
 	UseId Capture(std::uint32_t a_stageMask) { return Tracker::Get().Capture(a_stageMask); }
 
 	std::span<const SlotConstants> Slots(UseId a_use) { return Tracker::Get().Slots(a_use); }
@@ -739,18 +761,6 @@ namespace RenderGraph::Engine::Constants
 			tracker.OnUpdate(a_resource, a_box, a_data);
 	}
 
-	void OnDraw()
-	{
-		if (auto& tracker = Tracker::Get(); tracker.Enabled())
-			tracker.Capture(kDrawStages);
-	}
-
-	void OnDispatch()
-	{
-		if (auto& tracker = Tracker::Get(); tracker.Enabled())
-			tracker.Capture(StageBit(Stage::Compute));
-	}
-
 	void EndFrame() { Tracker::Get().EndFrame(); }
 
 	Stats GetStats() { return Tracker::Get().GetStats(); }
@@ -761,7 +771,6 @@ namespace RenderGraph::Engine::Constants
 namespace RenderGraph::Engine::Constants
 {
 	bool Active() { return false; }
-	UseId Current() { return {}; }
 	UseId Capture(std::uint32_t) { return {}; }
 	std::span<const SlotConstants> Slots(UseId) { return {}; }
 	const SlotConstants* Find(UseId, Stage, std::uint32_t) { return nullptr; }
@@ -772,8 +781,6 @@ namespace RenderGraph::Engine::Constants
 	void OnMap(ID3D11Resource*, D3D11_MAP, void*) {}
 	void OnUnmap(ID3D11Resource*) {}
 	void OnUpdateSubresource(ID3D11Resource*, const D3D11_BOX*, const void*) {}
-	void OnDraw() {}
-	void OnDispatch() {}
 	void EndFrame() {}
 	Stats GetStats() { return {}; }
 }

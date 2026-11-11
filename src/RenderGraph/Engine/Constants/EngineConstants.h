@@ -13,14 +13,16 @@ namespace org
 }
 
 /**
- * @brief Every engine constant-buffer use, captured into graph memory (org-full-port.md P5.7, docs/development/p5/constants.md).
+ * @brief The engine's constant-buffer uses a consumer asks for, captured into graph memory (org-full-port.md P5.7,
+ * docs/development/p5/constants.md).
  *
  * The engine's constant buffers are pooled by size and rewritten with WRITE_DISCARD before each use, so a buffer pointer never
- * identifies a shader, and the D3D11 buffer only holds the latest use. With CS_ORG_ENGINE_CONSTANTS=1 the capture copies, at each
- * engine draw (after SetDirtyStates(false), 75580 / 77386) and dispatch (after DispatchCSShader, 75532 / 77329), the bytes of every
- * constant buffer bound to the draw's stages into a per-frame upload ring of LatchBlocks. A buffer's bytes are copied once per
- * version (Map or UpdateSubresource) and bound window, however many draws use them. Each draw or dispatch gets a UseId; a consumer
- * (an ORG pass that draws the engine's work) asks for the constants of that use by stage and slot, and reads them from the ring.
+ * identifies a shader, and the D3D11 buffer only holds the latest use. With CS_ORG_ENGINE_CONSTANTS=1 the capture tracks every
+ * constant buffer's writes and binds, and a consumer that withholds an engine draw (an ORG pass that draws the engine's work, at its
+ * own choke point once the draw's constants are bound) calls Capture: the bytes of every constant buffer bound to the asked stages
+ * are copied into a per-frame upload ring of LatchBlocks, once per buffer version (Map or UpdateSubresource) and bound window
+ * however many captures use them. Nothing is copied for draws nobody asked about. The UseId Capture returns names that use; the
+ * consumer asks for its constants by stage and slot, and reads them from the ring.
  *
  * The engine keeps writing and binding its D3D11 buffers as before (until P5.13): the capture only reads.
  *
@@ -120,9 +122,6 @@ namespace RenderGraph::Engine::Constants
 	/** @brief Whether the capture runs: requested, the render graph active, and no ring failure. */
 	bool Active();
 
-	/** @brief The last draw or dispatch captured this frame; invalid when none was. */
-	UseId Current();
-
 	/**
 	 * @brief Captures the slots bound now for the stages in a_stageMask (StageBit) as a new use, for a consumer that withholds the
 	 * engine's draw at its own choke point (the bindings are the engine's once its Setup* calls returned). Invalid when inactive.
@@ -161,12 +160,6 @@ namespace RenderGraph::Engine::Constants
 	/** @brief The immediate context's UpdateSubresource, before it runs. */
 	void OnUpdateSubresource(ID3D11Resource* a_resource, const D3D11_BOX* a_box, const void* a_data);
 
-	/** @brief After SetDirtyStates(false) and CS's per-draw work: the draw that follows is a use of the VS and PS slots. */
-	void OnDraw();
-
-	/** @brief After DispatchCSShader (75532 / 77329): the dispatch was a use of the CS slots. */
-	void OnDispatch();
-
 	/** @brief After the Present, on the presenting thread: the frame's chunks are retired, the uses cleared, the summary logged. */
 	void EndFrame();
 
@@ -176,7 +169,7 @@ namespace RenderGraph::Engine::Constants
 	struct Stats
 	{
 		std::uint64_t frames = 0;
-		std::uint64_t uses = 0;      // draws and dispatches captured
+		std::uint64_t uses = 0;      // uses captured (Capture calls)
 		std::uint64_t slots = 0;     // bound slots recorded
 		std::uint64_t copies = 0;    // versions copied into the ring
 		std::uint64_t bytes = 0;     // bytes copied

@@ -724,11 +724,8 @@ void Hooks::BSGraphics_SetDirtyStates::thunk(bool isCompute)
 {
 	func(isCompute);
 	globals::state->Draw();
-	if (!isCompute) {
+	if (!isCompute)
 		VanillaBinding::BindDrawResources();
-		// CS_ORG_ENGINE_CONSTANTS=1: every engine draw calls this right before its draw, with its constants bound.
-		RenderGraph::Engine::Constants::OnDraw();
-	}
 }
 
 void Hooks::BSBatchRenderer_RenderPassImmediately1::thunk(RE::BSRenderPass* pass, uint32_t technique, bool alphaTest, uint32_t renderFlags)
@@ -1369,8 +1366,6 @@ namespace Hooks
 					}
 				}
 				func(renderer, shader, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
-				// CS_ORG_ENGINE_CONSTANTS=1: the dispatch's CS b0 is bound inside the original, after its SetDirtyStates(true).
-				RenderGraph::Engine::Constants::OnDispatch();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
