@@ -192,6 +192,17 @@ Keys used so far:
   runtime told a client when any other anchor or CS D3D11 pass is about to run (a "before any other in-stream work" callback).
 - **Guest phase only:** inside one frame graph (Phase 6) the batches are passes and the per-run slot cost goes away.
 - **Found by:** P5.6 wave 3, ImageSpace's share of the P5.13 residue (2026-11-11).
+- **Resolved (`org-port/frame-slots`, 2026-11-11):** the 255 was ORG's 8-bit slot index (the settings' `numFramesInFlight`, the
+  upload service's frame index, tickets, and the kept-recording key `epoch << 8 | slot`), not a design limit. ORG's slot indices
+  are now 32-bit with a sanity bound of `org::Runtime::kMaxSlots` (4096); CS's budget is `RenderGraphRuntime::kMaxFrameSlots`
+  (512), set by memory. Sharing one slot between the runs of an anchor was rejected: each run is its own submission, so it needs
+  its own latch region, its own kept recording (a list cannot be pending twice) and its own slot wait; sub-allocating those per
+  run inside a slot is the slot ring again, one level down, and every latch user would have to learn a run index. ImageSpace
+  now has 13 runs a frame (288 of 512 slots with every switch on).
+- **Still open:** per-slot tables are sized from the host's whole slot count (`GraphHost::FrameSlots()`), while each epoch only
+  uses its own ring. A latch of one epoch could be sized to its ring's capacity (`LatchBlock::Offset` takes the slot modulo the
+  block's slots, which is distinct within any ring), if the host exposed each epoch's ring range. That would make a run a frame
+  cost memory only in its own clients' tables.
 
 ### A once-a-frame pass at an anchor that runs several times a frame
 

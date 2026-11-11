@@ -1077,7 +1077,7 @@ namespace FrameAnchors
 			state.reserved[index] = false;
 			logger::error(
 				"[ORG] frame anchor {}: reservation dropped. The frame slots ({} frames in flight x every epoch's runs a frame) would be {}, "
-				"more than the host's {}; its clients stay on D3D11. Lower an anchor's runs a frame in FrameAnchors.cpp (kInfo; "
+				"more than the budget of {} (RenderGraphRuntime::kMaxFrameSlots); its clients stay on D3D11. Lower an anchor's runs a frame in FrameAnchors.cpp (kInfo; "
 				"CS_ORG_EPOCH_STATS=1 logs the peaks) or merge anchors",
 				kInfo[index].name, frames, over, a_maxSlots);
 		}
