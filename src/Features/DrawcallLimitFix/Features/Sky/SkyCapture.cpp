@@ -383,8 +383,13 @@ namespace DCLF::Features::Sky
 			Draw draw{};
 			draw.key.view = a_capture.view;
 			draw.key.occlusion = occlusion;
-			draw.key.vertexDescriptor = state->currentVertexDescriptor;
-			draw.key.pixelDescriptor = state->currentPixelDescriptor;
+			// The descriptors CS looks its shaders up by (State::ModifyShaderLookup): inside the deferred pass a sky pixel shader is
+			// the DEFERRED one (descriptor | 256), whose clouds write no Cloud Shadows target and reject nothing by the scene depth.
+			std::uint32_t vertexDescriptor = state->currentVertexDescriptor;
+			std::uint32_t pixelDescriptor = state->currentPixelDescriptor;
+			globals::state->ModifyShaderLookup(*state->currentShader, vertexDescriptor, pixelDescriptor);
+			draw.key.vertexDescriptor = vertexDescriptor;
+			draw.key.pixelDescriptor = pixelDescriptor;
 			draw.key.blend = occlusion ? static_cast<const void*>(cloudShadows.cloudShadowBlendState) :
 			                             Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra);
 			draw.key.depthStencil = depthStencil;

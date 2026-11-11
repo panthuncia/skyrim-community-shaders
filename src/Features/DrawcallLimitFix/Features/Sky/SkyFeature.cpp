@@ -45,8 +45,9 @@ namespace DCLF::Features::Sky
 
 	bool TakesClouds(View a_view)
 	{
+		// Off unless asked for: the graph's clouds do not match the engine's yet (docs/development/p5/sky.md, "Open").
 		static const std::string clouds = Switches::Value("CS_ORG_SKY_CLOUDS");
-		return clouds != "0" && !(clouds == "main" && a_view != View::Main) && !(clouds == "faces" && a_view != View::Face);
+		return clouds == "1" || (clouds == "main" && a_view == View::Main) || (clouds == "faces" && a_view == View::Face);
 	}
 
 	Api::Feature Feature()

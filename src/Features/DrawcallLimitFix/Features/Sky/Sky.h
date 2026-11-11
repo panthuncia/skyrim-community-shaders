@@ -154,8 +154,8 @@ namespace DCLF::Features::Sky
 	bool TakesView(View a_view);
 
 	/**
-	 * @brief Whether the graph takes a_view's cloud layers too (CS_ORG_SKY_CLOUDS: 0 leaves them to the engine, main or faces takes
-	 * only that view's; unset: both).
+	 * @brief Whether the graph takes a_view's cloud layers too (CS_ORG_SKY_CLOUDS: 1 both views', main or faces only that view's;
+	 * unset or 0: the engine draws them).
 	 */
 	bool TakesClouds(View a_view);
 

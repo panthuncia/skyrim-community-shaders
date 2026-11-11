@@ -207,6 +207,20 @@ The engine's CPU code runs unchanged; its draw choke point latches state (Phase 
 - **The moon masks' depth** is written into the Z-prepass copy as on D3D11, by the anchor's pass at the same point.
 - **The sun occlusion query and the sun glare** stay the engine's (above).
 
+## Open (2026-11-11)
+
+The graph's cloud layers do not match the engine's, so they are off by default (`CS_ORG_SKY_CLOUDS=1`, `main` or `faces` turns
+them on). With them on, the sky is a grey overcast and the whole scene darker and hazier (river shots: 86-98% of pixels differ by
+more than 8); with `main` only or `faces` only it is as wrong, so each view's cloud draws are wrong on their own (the faces through
+Cloud Shadows' occlusion, which shadows terrain and feeds the height fog and the sky's scattering). The trace
+(`CS_ORG_SKY_TRACE=1`) shows every latched cloud draw with the engine's constants, a texture per layer, the engine's blend state,
+geometry and samplers, so the difference is in what the pixel stage reads besides the draw's own data (the shared constants,
+Effects11's cloud settings, t17, t25, t26, the headers) or in the shader build. Found and fixed on the way: the main view's
+programs were built without DEFERRED (CS looks the sky's shaders up with `ModifyShaderLookup`, which adds 256 in the deferred pass).
+Two device losses happened right after `set gamehour to 22` with the faces' clouds on the graph, none with them off. Next step: a
+RenderDoc capture of one frame with `sky-river-org1-clouds-main.env` against `sky-river-org0.env`, comparing one cloud layer's
+draw (its output alpha, and its bound t17/t25/t26 and shared constants).
+
 ## The switch
 
 `CS_ORG_SKY=1` (render-graph.md, "Switches"); default off. It needs DCLF running and, while Cloud Shadows is loaded,
