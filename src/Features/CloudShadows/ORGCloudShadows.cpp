@@ -40,6 +40,7 @@ ORGCloudShadows& ORGCloudShadows::Get()
 #	include <algorithm>
 #	include <array>
 #	include <span>
+#	include <string>
 #	include <vector>
 
 namespace
@@ -69,6 +70,8 @@ struct ORGCloudShadows::Impl
 	UINT height = 0;
 	UINT mips = 0;
 	std::function<void()> onFailed;
+	// The copy's source when it is a published graph texture (UseGraphSource); empty: the last D3D11 layer's import.
+	std::string graphSource;
 
 	// Render thread: ReflectionsPrepass queued this frame's copy; the commit of the next run opens the gate and clears it.
 	bool pending = false;
@@ -109,13 +112,18 @@ namespace
 				mipViews.push_back({ .variant = static_cast<std::uint32_t>(org::UAVViewType::Texture2DArrayFull), .mip = mip });
 			}
 			CopyBindings bindings;
-			bindings.faces = a_builder.ShaderResource(from, std::span<const org::SrvView>(faceViews)).views;
+			bindings.faces = impl->graphSource.empty() ? a_builder.ShaderResource(from, std::span<const org::SrvView>(faceViews)).views :
+			                                             a_builder.ShaderResource(org::ResourceIdentifier(impl->graphSource), std::span<const org::SrvView>(faceViews)).views;
 			bindings.mips = a_builder.UnorderedAccess(to, std::span<const org::UavView>(mipViews)).views;
 			return bindings;
 		}
 
 		// The recording depends only on what the pass was made with.
-		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(impl.get())); }
+		void Revision(std::vector<std::uint64_t>& a_out) const
+		{
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(impl.get()));
+			a_out.push_back(std::hash<std::string>{}(impl->graphSource));
+		}
 
 		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { impl }; }
 
@@ -270,6 +278,15 @@ bool ORGCloudShadows::Setup(std::function<void()> a_onFailed)
 	return true;
 }
 
+void ORGCloudShadows::UseGraphSource(std::string_view a_publishedId)
+{
+	if (!IsActive() || impl->graphSource == a_publishedId)
+		return;
+	impl->graphSource = std::string(a_publishedId);
+	FrameAnchors::Refresh(kClientId);
+	logger::info("[ORG] Cloud Shadows: the occlusion copy reads {}", impl->graphSource.empty() ? "its last D3D11 layer" : impl->graphSource);
+}
+
 bool ORGCloudShadows::QueueOcclusionCopy()
 {
 	if (!IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::ReflectionsPrepass))
@@ -292,6 +309,7 @@ bool ORGCloudShadows::IsActive() const { return false; }
 ID3D11ShaderResourceView* ORGCloudShadows::OcclusionSRV() const { return nullptr; }
 void ORGCloudShadows::Stop() {}
 bool ORGCloudShadows::QueueOcclusionCopy() { return false; }
+void ORGCloudShadows::UseGraphSource(std::string_view) {}
 ORGCloudShadows::~ORGCloudShadows() = default;
 
 #endif
