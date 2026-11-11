@@ -219,11 +219,20 @@ made once with the faces' client.
 
 ## Cloud layers
 
-`CS_ORG_SKY_CLOUDS` (`1`, `main` or `faces`) takes the cloud layers on the graph; unset, the engine draws them after the anchor's
-run while the dome, stars, sun and moons stay the graph's. It stays off by default until the scenarios below show the graph's clouds
-match: the two causes found (t26 bound to the whole occlusion for the main clouds; the faces' graph occlusion leaving the D3D11 layers
-stale for the engine's main clouds) are fixed, and the faces now keep Cloud Shadows' layers as the engine does, but no run has
-checked it yet. Found and fixed earlier: the main view's programs were built without DEFERRED (CS looks the sky's shaders up with
+With `CS_ORG_SKY=1` the cloud layers are always the graph's, in the main view and the faces (Phase 5.5.2, 2026-11-11). The
+`CS_ORG_SKY_CLOUDS` switch is gone. Checked with `sky-river-org1.env` against `sky-river-org0.env` with the weather locked
+(`dclf:weather=SkyrimCloudy_A`): the sky shots match (mean 0.30 at night, 0.42 at noon), Dragonsreach 0.28.
+
+Earlier sky A/B runs compared different weathers: their `fw 12f2d` (and the census's `fw 81a`) named no weather, so each run had
+the region's own. The scenarios now use `dclf:weather=<editor id or form id>`, which sets the weather at once and holds it with the
+CS editor's weather lock; an unknown name logs every loaded weather.
+
+A face draw with a stencil test (technique 8) is drawn with the engine's depth-stencil state and the shadow state's reference per
+draw, as the water's draws are; it used to be refused. Anything the capture still refuses (below) reaches D3D11 unvouched: the flush
+latch skips it and the census counts it. The `sky: left to the engine` and `sky: cloud layers` reasons are deleted.
+
+The two causes of wrong clouds found before (t26 bound to the whole occlusion for the main clouds; the faces' graph occlusion
+leaving the D3D11 layers stale for the engine's main clouds) are fixed. Found and fixed earlier: the main view's programs were built without DEFERRED (CS looks the sky's shaders up with
 `ModifyShaderLookup`, which adds 256 in the deferred pass).
 
 ## The switch
@@ -281,11 +290,10 @@ render thread at its first draw`). Constants come from the engine constants capt
 - Cloud Shadows on D3D11 (its occlusion at t25 is not on the graph): no client is made.
 - A t17 that is an engine depth other than the Z-prepass copy or the depth target; a header that is a D3D11 buffer or cannot be
   imported; a published input not listed, or first published during play (`PublishedLate`, an error).
-- Per draw: not BSSkyShader, a depth-stencil state with stencil, a state with no description or no ORG form (dual source), geometry
+- Per draw: not BSSkyShader, a state with no description or no ORG form (dual source), geometry
   that is not a static triangle-list TriShape within its buffers, a texture that cannot be imported, sampler modes with no graph
   sampler, a face's cloud layers out of order, more than 128 draws, an inactive engine constants capture.
-- The cloud layers while `CS_ORG_SKY_CLOUDS` is off (not yet proven), and a cloud group with another shader's pass (a sky-object
-  effect) or another geometry type.
+- A cloud group with another shader's pass (a sky-object effect) or another geometry type.
 
 ### What can trigger a graph rebuild (primary path)
 

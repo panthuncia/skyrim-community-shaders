@@ -199,6 +199,7 @@ namespace DCLF::Features::Sky::SkyDraws
 														.height = latched.viewport.rect[3], .minDepth = latched.viewport.depthRange[0], .maxDepth = latched.viewport.depthRange[1] },
 													.constants = ShaderBindings::Data(block),
 													.debugName = "Sky",
+													.stencilReference = latched.stencilRef,
 													// The count comes from the draw's gate entry, which the client's commit opens for this run only.
 													.indirect = &c.gate->Latch(),
 													.indirectOffset = c.gate->Offset(a_index) });
@@ -446,6 +447,7 @@ namespace DCLF::Features::Sky::SkyDraws
 				mix(reinterpret_cast<std::uintptr_t>(draw.program.get()));
 				mix(reinterpret_cast<std::uintptr_t>(draw.occlusionProgram.get()));
 				mix((std::uint64_t(draw.occlusion) << 32) | static_cast<std::uint32_t>(draw.layer));
+				mix(draw.stencilRef);
 				for (const auto v : draw.viewport.rect)
 					mix(v);
 				std::uint32_t range[2];
@@ -499,12 +501,12 @@ namespace DCLF::Features::Sky::SkyDraws
 			static_cast<std::int32_t>(NORMALROUGHNESS) };
 		main.depth = static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
 		main.cloudShadows = cloudShadows;
-		main.clouds = Address::kCloudGroup.Known() && TakesClouds(View::Main);
+		main.clouds = Address::kCloudGroup.Known();
 		Shape face;
 		face.view = View::Face;
 		face.depth = static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kCUBEMAP_REFLECTIONS);
 		face.cloudShadows = cloudShadows;
-		face.clouds = Address::kCloudGroup.Known() && TakesClouds(View::Face);
+		face.clouds = Address::kCloudGroup.Known();
 		for (const auto& shape : { main, face })
 			state.clients[static_cast<std::size_t>(shape.view)] = MakeClient(shape);
 		return true;

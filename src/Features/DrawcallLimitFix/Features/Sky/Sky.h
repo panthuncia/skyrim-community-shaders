@@ -12,7 +12,7 @@
 // engine's state objects describe (SkyDraws.cpp).
 //
 // The cloud layers are not in that batch: they are geometry group 13's pass list, which FinishAccumulating draws right after it. When
-// that list holds only sky TriShapes and CS_ORG_SKY_CLOUDS takes the view's clouds, the capture spans it too, and the anchor runs after
+// that list holds only sky TriShapes, the capture spans it too, and the anchor runs after
 // it (SkyCapture.cpp, CloudGroup).
 //
 // Cloud Shadows keeps its per-layer occlusion in its D3D11 layer cubemaps: layer L of a face holds the occlusion of the face's layers
@@ -116,6 +116,7 @@ namespace DCLF::Features::Sky
 		std::int32_t layer = -1;
 		std::shared_ptr<const void> occlusionProgram;
 		std::uint32_t indexCount = 0;
+		std::uint32_t stencilRef = 0;  // the shadow state's stencil reference (command list state, not the pipeline's)
 		Family::Viewport viewport;
 		DrawConstants constants{};
 	};
@@ -163,12 +164,6 @@ namespace DCLF::Features::Sky
 
 	/** @brief Whether CS_ORG_SKY=1 turned the family on (read at install). */
 	bool Enabled();
-
-	/**
-	 * @brief Whether the graph takes a_view's cloud layers too (CS_ORG_SKY_CLOUDS: 1 both views', main or faces only that view's;
-	 * unset or 0: the engine draws them).
-	 */
-	bool TakesClouds(View a_view);
 
 	// SkyCapture.cpp: the engine hooks, from the feature's install.
 	void InstallHooks();

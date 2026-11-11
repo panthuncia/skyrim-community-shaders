@@ -49,28 +49,14 @@ namespace DCLF::Features::Sky
 			return log;
 		}
 
-		/** @brief What the sky leaves to the engine on purpose (Flush::EngineDraws): a batch or its rest. */
-		const Family::Flush::Reason& EngineReason()
-		{
-			static const Family::Flush::Reason reason{ "sky: left to the engine" };
-			return reason;
-		}
-
-		/** @brief The cloud layers while CS_ORG_SKY_CLOUDS leaves them to the engine, or a group the capture cannot span. */
-		const Family::Flush::Reason& CloudsReason()
-		{
-			static const Family::Flush::Reason reason{ "sky: cloud layers" };
-			return reason;
-		}
-
 		/**
 		 * @brief The batch being latched (render thread). Every draw is latched until one is refused: then the latched part runs at that
-		 * point (FlushLatched) and the rest of the batch, the cloud group's included, is the engine's.
+		 * point (FlushLatched) and the rest of the batch reaches D3D11, where the flush latch skips it and the census counts it.
 		 */
 		struct Capture
 		{
 			bool active = false;
-			bool failed = false;  // a draw was refused: the latched part ran, the rest is the engine's
+			bool failed = false;  // a draw was refused: the latched part ran, the rest is not the graph's
 			View view = View::Main;
 			std::shared_ptr<Run> run;
 			std::array<std::uint32_t, 3> colourFormats{};  // the main pass's targets, or the face's (one)
@@ -84,7 +70,6 @@ namespace DCLF::Features::Sky
 			bool deferred = false;  // the sky batch ran; the capture is finished after the cloud group
 			// The cloud group's call did not follow a sky batch that spanned it (another hook at its site): never spanned again.
 			bool deferralBroken = false;
-			Family::EngineRest engineRest;  // the rest of a refused batch, vouched for (until Finish)
 		};
 
 		Capture& GetCapture()
@@ -180,7 +165,6 @@ namespace DCLF::Features::Sky
 				a_run.face = rss.cubeMapRenderTargetView;
 				const auto& cube = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS];
 				a_capture.colourFormats[0] = FormatOf(cube.cubeSideRTV[0]);
-				a_shape.clouds = a_shape.clouds && TakesClouds(View::Face);
 				return a_run.face < 6 && a_capture.colourFormats[0] && a_shape.depth == static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kCUBEMAP_REFLECTIONS);
 			}
 			if (rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
@@ -190,7 +174,6 @@ namespace DCLF::Features::Sky
 			if (a_accumulator != *mainAccumulator || !globals::deferred || !globals::deferred->deferredPass)
 				return false;
 			a_shape.view = View::Main;
-			a_shape.clouds = a_shape.clouds && TakesClouds(View::Main);
 			const auto& targets = renderer->GetRuntimeData().renderTargets;
 			for (std::size_t i = 0; i < a_shape.colours.size(); ++i) {
 				a_shape.colours[i] = static_cast<std::int32_t>(rss.renderTargets[i]);
@@ -300,8 +283,6 @@ namespace DCLF::Features::Sky
 			a_capture.failed = true;
 			Refusals().Report(std::format("a {} draw of technique {}: {}", NameOf(a_capture.view), a_technique, a_reason));
 			FlushLatched(a_capture);
-			if (!a_capture.engineRest)
-				a_capture.engineRest.emplace(EngineReason());
 		}
 
 		/**
@@ -330,11 +311,6 @@ namespace DCLF::Features::Sky
 			auto* depthStencil = Pipeline::EngineDepthStencilState(engine.depthMode, engine.stencilMode);
 			if (!depthStencil)
 				return "no depth-stencil state";
-			D3D11_DEPTH_STENCIL_DESC depthDesc{};
-			depthStencil->GetDesc(&depthDesc);
-			// The raster program has no stencil reference; the sky uses none.
-			if (depthDesc.StencilEnable)
-				return "its depth-stencil state uses stencil";
 
 			// The PerGeometry groups as SetupGeometry wrote them. A technique's group holds only the rows its vanilla shader declares
 			// (one may end before TexCoordOff, a pixel stage may have none): the rows past it are zero, which the technique's CS shader
@@ -352,6 +328,8 @@ namespace DCLF::Features::Sky
 			std::uint32_t pixelDescriptor = state->currentPixelDescriptor;
 			globals::state->ModifyShaderLookup(*state->currentShader, vertexDescriptor, pixelDescriptor);
 			draw.key.descriptor = pixelDescriptor;
+			// A stencil test or write (a face's technique 8) uses the shadow state's reference, as the engine's draw would.
+			draw.stencilRef = engine.stencilRef;
 			draw.key.defineStage = Family::DefineStage::Pixel;
 			draw.key.variant = a_capture.view == View::Face ? kVariantFaces : 0;
 			auto* blend = occlusion ? cloudShadows.cloudShadowBlendState :
@@ -506,7 +484,6 @@ namespace DCLF::Features::Sky
 			if (!a_capture.passes.End())
 				Refusals().Report(a_capture.passes.Describe(std::format("{} sky", NameOf(a_capture.shape.view))));
 			FlushLatched(a_capture);
-			a_capture.engineRest.reset();
 		}
 
 		/**
@@ -530,10 +507,8 @@ namespace DCLF::Features::Sky
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
-				const auto engineDraws = [&] {
-					Family::Flush::EngineDraws scope(EngineReason());
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-				};
+				// A batch the graph does not take reaches D3D11: the flush latch skips it and the census counts it.
+				const auto engineDraws = [&] { func(a_accumulator, a_first, a_last, a_flags, a_group); };
 				if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SkyDraws::Available())
 					return engineDraws();
 				Family::BeginBatch();
@@ -571,7 +546,7 @@ namespace DCLF::Features::Sky
 		 * @brief FinishAccumulating's RenderPersistentPassList of geometry group 13 (SE 99938 +0x284, AE 106583 +0x274), right after
 		 * the sky batch with write mode 11: when the sky batch's capture spans it, the cloud layers are latched as the batch's draws
 		 * were, and the capture is finished after them, so the anchor's pass draws the sky and its clouds in the engine's order. Any other
-		 * call is the engine's, vouched for (the cloud layers while CS_ORG_SKY_CLOUDS leaves them to it).
+		 * call reaches D3D11: the flush latch skips it and the census counts it.
 		 */
 		struct CloudGroup
 		{
@@ -579,7 +554,6 @@ namespace DCLF::Features::Sky
 			{
 				auto& capture = GetCapture();
 				if (!capture.deferred || capture.cloudGroup != a_group) {
-					Family::Flush::EngineDraws scope(CloudsReason());
 					func(a_group, a_flags);
 					return;
 				}

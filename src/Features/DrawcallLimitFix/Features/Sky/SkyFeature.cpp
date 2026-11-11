@@ -18,8 +18,7 @@ namespace DCLF::Features::Sky
 			// At PostPostLoad, before the render graph initializes: the anchors' epochs are fixed then.
 			SkyDraws::Reserve();
 			InstallHooks();
-			logger::info("[DCLF] sky: on (CS_ORG_SKY=1): the engine's sky batches are drawn at the Sky and SkyReflections anchors; cloud layers: main {}, faces {}",
-				TakesClouds(View::Main) ? "the graph's" : "the engine's", TakesClouds(View::Face) ? "the graph's" : "the engine's");
+			logger::info("[DCLF] sky: on (CS_ORG_SKY=1): the engine's sky batches and cloud layers are drawn at the Sky and SkyReflections anchors");
 		}
 
 		std::string Status()
@@ -32,13 +31,6 @@ namespace DCLF::Features::Sky
 	{
 		static const bool enabled = Switches::On("CS_ORG_SKY");
 		return enabled;
-	}
-
-	bool TakesClouds(View a_view)
-	{
-		// A feature choice, off unless asked for: docs/development/p5/sky.md, "Cloud layers".
-		static const std::string clouds = Switches::Value("CS_ORG_SKY_CLOUDS");
-		return clouds == "1" || (clouds == "main" && a_view == View::Main) || (clouds == "faces" && a_view == View::Face);
 	}
 
 	Api::Feature Feature()

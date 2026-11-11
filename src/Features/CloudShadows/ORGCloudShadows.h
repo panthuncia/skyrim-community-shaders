@@ -22,7 +22,7 @@ namespace org
  * What Cloud Shadows draws and copies:
  * - Each cloud layer drawn into the reflections cubemap also writes its occlusion into one of Cloud Shadows' 32 layer cubemaps (a 4th
  *   render target the feature adds). Layer L of a face holds the occlusion of the face's layers up to L: the main pass's clouds read
- *   their own layer for self shadowing (t26). With Drawcall Limit Fix's sky family drawing the faces' clouds (CS_ORG_SKY_CLOUDS), the
+ *   their own layer for self shadowing (t26). With Drawcall Limit Fix's sky family drawing the faces' clouds (CS_ORG_SKY), the
  *   graph writes the same layers through their imports (ImportLayer).
  * - Between those draws, Cloud Shadows clears and copies layer faces (CheckResourcesSide, SkyShaderHacks, and PropagateToCompletion
  *   when the next face starts). These run inside the engine's draw stream, where there is no anchor, so they stay on D3D11.
