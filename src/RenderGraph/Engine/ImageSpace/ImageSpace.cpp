@@ -177,10 +177,10 @@ namespace RenderGraph::Engine::ImageSpace
 			std::shared_ptr<RunGate> gate;
 			std::shared_ptr<org::LatchBlock> latch;
 			std::map<std::pair<std::uint32_t, std::uint32_t>, org::OwnedDescriptorBinding> samplers;  // (address, filter)
-			std::set<const void*> unsupportedBlends;                                                // blend states no program can take
-			std::vector<std::shared_ptr<const Spec>> specs;                                         // in the current registration, by entry
-			std::set<ShapeKey> refusedShapes;                                                       // shapes no pass can be made for (logged once)
-			std::vector<ShapeKey> candidates;                                                       // seen, not registered yet
+			std::set<const void*> unsupportedBlends;                                                  // blend states no program can take
+			std::vector<std::shared_ptr<const Spec>> specs;                                           // in the current registration, by entry
+			std::set<ShapeKey> refusedShapes;                                                         // shapes no pass can be made for (logged once)
+			std::vector<ShapeKey> candidates;                                                         // seen, not registered yet
 			std::map<ShapeKey, std::uint32_t> positions;            // each shape's place in its frame: scope << 16 | draw within the scope
 			std::set<std::pair<std::int32_t, std::int32_t>> swaps;  // targets that stand in for each other (ping-pong, alternation)
 			std::uint32_t scope = 0;                                // the current scope (0 the pre-tonemap composites, 1 the HDR effect)
