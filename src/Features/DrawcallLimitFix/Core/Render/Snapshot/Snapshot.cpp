@@ -946,7 +946,12 @@ namespace DCLF
 			// payload version may wait for a backing the last frames read or hold.
 			s.ServeRevisionRequests();
 			if (s.revisions.explicitBuilds && host->RebuildRequested())
-				s.BuildIfAsked(*host);
+				s.BuildIfAsked();
+			// The graph stopped (its host failed: a lost device): no snapshot will come. The frame start reports it (FrameDriver).
+			if (!RenderGraphRuntime::Get().IsActive()) {
+				s.frameWaiting.store(false, std::memory_order_release);
+				return publication;
+			}
 			if (const auto now = Clock::now(); now - ticketsAt >= kTicketPeriod) {
 				// One of DCLF's epochs failed to build or prepare (a build just above, say): no snapshot will be current for it. This
 				// frame already draws with DCLF, so the error ends the game here, clearly, instead of a 5 s wait and a GPU timeout.

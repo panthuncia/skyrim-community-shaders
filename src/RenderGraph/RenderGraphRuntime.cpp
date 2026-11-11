@@ -2133,6 +2133,21 @@ void RenderGraphRuntime::PollEpochFailures()
 	}
 }
 
+bool RenderGraphRuntime::BuildIfRequested()
+{
+	if (!IsActive())
+		return false;
+	try {
+		return impl->host->BuildIfRequested();
+	} catch (const std::exception& e) {
+		// The host's thread failed (or a build threw): nothing of the graph runs from here, as when an epoch's submission throws.
+		logger::error("[ORG] Render graph build failed, disabling the graph: {}", e.what());
+		impl->faulted = true;
+		disabledReason = e.what();
+		return false;
+	}
+}
+
 void RenderGraphRuntime::OnEpochFailed(std::uint32_t a_epoch, bool a_keptGraph, const std::string& a_error)
 {
 	// Epochs are segment values. Without epochs (CS_ORG_EPOCHS=0) the one graph runs every segment: its failure is the whole graph's.
@@ -3000,6 +3015,7 @@ void RenderGraphRuntime::ServiceD3D11Releases() {}
 void RenderGraphRuntime::ReportGpuTimings(std::uint32_t, bool) {}
 std::uint64_t RenderGraphRuntime::TakeSubmittedSegments() { return 0; }
 void RenderGraphRuntime::PollEpochFailures() {}
+bool RenderGraphRuntime::BuildIfRequested() { return false; }
 void RenderGraphRuntime::SignalFramePace(bool) {}
 void RenderGraphRuntime::SealPresented() {}
 void RenderGraphRuntime::MoveOwnerThread() {}

@@ -6,6 +6,8 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 #include "Deferred.h"
+#include "Globals.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Scene.h"
@@ -160,10 +162,18 @@ namespace DCLF
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
 			if (draws.DecideCoverage() && view.HasInstalled())
 				view.InstallClaims();
-			else if (!view.NotDrawingYet() && !loading)
+			else if (!view.NotDrawingYet() && !loading) {
+				// The graph itself stopped (its host's thread failed, or a submission threw): no snapshot can cover a frame any more, and the
+				// frame did not wait for one (AdoptCurrentSnapshot has no host). Its reason is the defect, not the coverage. "GPU completion
+				// timeline failed" is a timeline that read UINT64_MAX: Windows sets a removed device's fences to that value.
+				if (auto& runtime = RenderGraphRuntime::Get(); !runtime.IsActive())
+					stl::report_and_fail(fmt::format("Drawcall Limit Fix: the render graph stopped before frame {} ({}), and DCLF draws only through it once it "
+													 "draws. D3D11's device removed reason: {:#x}",
+						view.GetFrame(), runtime.GetDisabledReason(), static_cast<std::uint32_t>(globals::d3d::device->GetDeviceRemovedReason())));
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: frame {} is not covered by the snapshot it adopted after waiting for a current one, and DCLF "
 												 "does not hand drawing back to the engine once it draws: {}",
 					view.GetFrame(), draws.CoverageState()));
+			}
 			// The releases' report (the render thread's: the flip to its release), with the engine side's, once a report window.
 			Reports::GateReleases(view.GetFrame());
 			// The components' adoption of the installed publications' deltas, before the culls (in the frame whose claims are post-swap):

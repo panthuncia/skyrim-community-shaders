@@ -32,17 +32,18 @@ namespace DCLF
 		}
 		// The passes this frame needs (an interior's, the cull mode's): a change rebuilds the graph here, before anything records on it.
 		Draws::RefreshGraphConditions(*host);
-		impl->BuildIfAsked(*host);
+		impl->BuildIfAsked();
 		// The epochs the last frame did not submit (no water in view) give their tickets back while a revision waits for recordings.
 		impl->ReleaseTicketsForRecordings(*host, RenderGraphRuntime::Get().TakeSubmittedSegments());
 	}
 
-	void IndirectDraws::Impl::BuildIfAsked(org::GraphHost& a_host)
+	void IndirectDraws::Impl::BuildIfAsked()
 	{
 		// What the revision code asked of the owner thread (shadow view slots: their buffers and the extension declaring them), built
 		// here with the rest.
 		ServeRevisionRequests();
-		if (revisions.explicitBuilds && a_host.BuildIfRequested())
+		// Through the runtime: a host that failed (a lost device) stops the graph there instead of throwing into the frame.
+		if (revisions.explicitBuilds && RenderGraphRuntime::Get().BuildIfRequested())
 			++revisions.builds;
 		// The graph's build and its heaps, the pipelines' generations, the toggles: revision inputs, posted when they moved.
 		PostRevisionInputs();
