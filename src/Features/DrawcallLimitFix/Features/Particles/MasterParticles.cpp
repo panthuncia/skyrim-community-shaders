@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Utils/SwitchFile.h"
 
 #include <atomic>
@@ -39,7 +40,7 @@ namespace DCLF::Features::Particles::MasterParticles
 		// update). With none, its particles die out and the removal's live count (FUN_140e2b430, AE ID 76620 / SE 74872) reaches 0. Read
 		// as a plain count: the live count walks arrays its update rebuilds on a job thread.
 		constexpr std::size_t kMasterEmitters = 0x138;
-		constexpr std::uint32_t kHeldFrames = 600;  // a removable master kept by a reference this long is flagged (<- MASTER REFS)
+		constexpr std::uint32_t kHeldFrames = 600;  // an idle master kept only by DCLF's pins this long is flagged (<- MASTER REFS)
 
 		RE::NiNode* Manager()
 		{
@@ -68,19 +69,28 @@ namespace DCLF::Features::Particles::MasterParticles
 		} counts;
 		EventQueue<const void*> exits;
 
+		// A master read at a gather: idle (removable, no emitter left) with more references than the slot's and the model entry's, and
+		// how many of those the category captures still held pin (FrameView::CapturePinsOf).
+		struct MasterRead
+		{
+			RE::NiNode* master = nullptr;
+			bool idleHeld = false;
+			std::uint32_t references = 0, pins = 0;
+		};
+
 		// The render thread's view at its last gather (inside enter): the masters listed, those that left with no event seen, and each
-		// removable master's first frame seen held by a reference beyond the engine's two.
+		// idle master's first frame seen kept from removal by DCLF's pins.
 		struct Observed
 		{
 			std::vector<const void*> listed, gathered;
 			std::vector<std::pair<const void*, std::uint32_t>> held;
 			std::uint64_t unseenLeft = 0, flaggedHeld = 0;
-			std::uint32_t lastListed = 0, maxListed = 0, heldNow = 0;
-			std::string firstUnseen, firstHeld;
+			std::uint32_t lastListed = 0, maxListed = 0, idleEngine = 0, idleDclf = 0;
+			std::string firstUnseen, firstHeld, firstEngine;
 		} observed;
 		std::mutex observedLock;  // the render thread's gathers write, the report reads
 
-		void Observe(const std::vector<std::pair<RE::NiNode*, bool>>& a_masters)
+		void Observe(const std::vector<MasterRead>& a_masters)
 		{
 			const std::scoped_lock lock(observedLock);
 			auto& o = observed;
@@ -88,8 +98,8 @@ namespace DCLF::Features::Particles::MasterParticles
 			exits.Drain([&](const void* a_key) { exited.push_back(a_key); });
 			std::ranges::sort(exited);
 			o.gathered.clear();
-			for (const auto& [master, held] : a_masters)
-				o.gathered.push_back(master);
+			for (const auto& read : a_masters)
+				o.gathered.push_back(read.master);
 			std::ranges::sort(o.gathered);
 			for (const auto* key : o.listed)
 				if (!std::ranges::binary_search(o.gathered, key) && !std::ranges::binary_search(exited, key))
@@ -98,26 +108,33 @@ namespace DCLF::Features::Particles::MasterParticles
 			std::swap(o.listed, o.gathered);
 			o.lastListed = static_cast<std::uint32_t>(o.listed.size());
 			o.maxListed = std::max(o.maxListed, o.lastListed);
-			// Held past removal: removable, no emitter left, and more references than the engine's own two (the slot's and one more), for
-			// kHeldFrames between gathers (DCLF's own pins last a frame or two).
+			// An idle master with a third reference is the engine's own state when an emitter's BSValueNode still names it (its
+			// associatedObject, +0x130, a NiPointer set by the manager's pending-master step FUN_140e2a6c0: TES's pooled impact clones keep
+			// theirs while detached). Only the references DCLF's capture pins add are DCLF's: an idle master that the engine would remove
+			// without them (references - pins < 3) for kHeldFrames between gathers is flagged (a pin never let go of).
 			const std::uint32_t frame = FrameCounter();
 			std::vector<std::pair<const void*, std::uint32_t>> held;
-			o.heldNow = 0;
-			for (const auto& [master, removableHeld] : a_masters) {
-				if (!removableHeld)
+			o.idleEngine = o.idleDclf = 0;
+			for (const auto& read : a_masters) {
+				if (!read.idleHeld)
 					continue;
-				++o.heldNow;
+				if (read.references - std::min(read.pins, read.references) > 2) {
+					if (o.idleEngine++ == 0 && o.firstEngine.empty())
+						o.firstEngine = fmt::format("'{}' ({} references)", read.master->name.c_str() ? read.master->name.c_str() : "", read.references);
+					continue;
+				}
+				++o.idleDclf;
 				std::uint32_t since = frame;
 				for (const auto& [key, first] : o.held)
-					if (key == master)
+					if (key == read.master)
 						since = first;
-				if (frame - since >= kHeldFrames && since != ~0u) {
+				if (since != ~0u && frame - since >= kHeldFrames) {
 					if (o.flaggedHeld++ == 0)
-						o.firstHeld = fmt::format("'{}' {} ({} references)", master->name.c_str() ? master->name.c_str() : "", static_cast<const void*>(master),
-							master->GetRefCount());
+						o.firstHeld = fmt::format("'{}' {} ({} references, {} of them DCLF's capture pins)", read.master->name.c_str() ? read.master->name.c_str() : "",
+							static_cast<const void*>(read.master), read.references, read.pins);
 					since = ~0u;  // flagged once
 				}
-				held.emplace_back(master, since);
+				held.emplace_back(read.master, since);
 			}
 			o.held = std::move(held);
 		}
@@ -138,7 +155,7 @@ namespace DCLF::Features::Particles::MasterParticles
 			if (!manager)
 				return;
 			counts.gathers.fetch_add(1, std::memory_order_relaxed);
-			std::vector<std::pair<RE::NiNode*, bool>> masters;
+			std::vector<MasterRead> masters;
 			// Under the manager's lock: its AttachChild grows the array under it. The removal hook waits for Leave, so no idle removal
 			// clears a slot read here before the sink pins its master (the manager's own DetachChild overrides do not wait: none is known
 			// to detach a master during play).
@@ -148,15 +165,25 @@ namespace DCLF::Features::Particles::MasterParticles
 				auto* master = child ? child->AsNode() : nullptr;
 				if (!master || master->parent)
 					continue;
-				// Read before the sink pins it. An idle master (removable, no emitter left) with a reference beyond the engine's own two (the
-				// slot's and one more) is one the engine would remove once its particles died out.
-				const bool removableHeld = Engine::At<std::uint8_t>(master, kMasterRemovable) && master->GetRefCount() > 2 &&
-				                           std::atomic_ref<std::uint32_t>(Engine::At<std::uint32_t>(master, kMasterEmitters)).load(std::memory_order_relaxed) == 0;
-				masters.emplace_back(master, removableHeld);
+				// Read before the sink pins it. Idle: removable, no emitter left; held: more references than the engine's removal allows.
+				MasterRead read{ .master = master, .references = master->GetRefCount() };
+				read.idleHeld = Engine::At<std::uint8_t>(master, kMasterRemovable) && read.references > 2 &&
+				                std::atomic_ref<std::uint32_t>(Engine::At<std::uint32_t>(master, kMasterEmitters)).load(std::memory_order_relaxed) == 0;
+				masters.push_back(read);
 			}
 			lock.UnlockForRead();
-			for (const auto& [master, held] : masters)
-				a_sink.Add(master);
+			// The pins the captures still held add to those idle masters' counts (render thread: the captures are FrameView's).
+			std::vector<const void*> keys;
+			for (const auto& read : masters)
+				if (read.idleHeld)
+					keys.push_back(read.master);
+			std::vector<std::uint32_t> pins(keys.size());
+			Scene::FrameView::Get().CapturePinsOf(keys, pins);
+			for (std::size_t k = 0, m = 0; m < masters.size(); ++m)
+				if (masters[m].idleHeld)
+					masters[m].pins = pins[k++];
+			for (const auto& read : masters)
+				a_sink.Add(read.master);
 			Observe(masters);
 		}
 
@@ -268,7 +295,10 @@ namespace DCLF::Features::Particles::MasterParticles
 			"edits), {} idle removals hooked, {} gathers; {} left with no event{}{}\n",
 			o.lastListed, o.maxListed, attaches, detaches, removals, gathers, o.unseenLeft, o.unseenLeft ? " <- MASTER SET" : " <- OK",
 			o.firstUnseen.empty() ? std::string() : fmt::format(" (first {})", o.firstUnseen));
-		a_text += fmt::format("[DCLF] master particles' references: {} idle masters held past removal at the last gather, {} held {} frames or more{}{}\n", o.heldNow,
-			o.flaggedHeld, kHeldFrames, o.flaggedHeld ? " <- MASTER REFS" : " <- OK", o.firstHeld.empty() ? std::string() : fmt::format(" (first {})", o.firstHeld));
+		a_text += fmt::format(
+			"[DCLF] master particles' references at the last gather: {} idle masters kept by the engine's own references (an emitter's value "
+			"node){}; {} kept only by DCLF's capture pins, {} of them {} frames or more{}{}\n",
+			o.idleEngine, o.firstEngine.empty() ? std::string() : fmt::format(" (first {})", o.firstEngine), o.idleDclf, o.flaggedHeld, kHeldFrames,
+			o.flaggedHeld ? " <- MASTER REFS" : " <- OK", o.firstHeld.empty() ? std::string() : fmt::format(" (first {})", o.firstHeld));
 	}
 }

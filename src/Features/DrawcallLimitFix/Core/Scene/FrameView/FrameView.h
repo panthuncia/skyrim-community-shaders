@@ -266,6 +266,22 @@ namespace DCLF::Scene
 			return installed && installed->claims && installed->claims->phases.contains(a_geometry);
 		}
 		/**
+		 * @brief Render thread: how many references the category captures still held pin each of a_keys (their `pins`, let go of once
+		 * the coordinator applied them), into a_counts (a_keys' order). The unheld roots' observer (Features/Particles' master particles)
+		 * tells DCLF's holds from the engine's.
+		 */
+		void CapturePinsOf(std::span<const void* const> a_keys, std::span<std::uint32_t> a_counts) const
+		{
+			std::ranges::fill(a_counts, 0u);
+			if (a_keys.empty())
+				return;
+			for (const auto& capture : categoryCapturesHeld)
+				for (const auto& pin : capture->pins)
+					for (std::size_t i = 0; i < a_keys.size(); ++i)
+						if (pin.get() == a_keys[i])
+							++a_counts[i];
+		}
+		/**
 		 * @brief Render thread, at an execution's commit: import leases of cleared geometry slots, held until the GPU retires it.
 		 * In-flight frames read those buffers by device address, invisible to DXVK, which would otherwise reuse the memory.
 		 */
