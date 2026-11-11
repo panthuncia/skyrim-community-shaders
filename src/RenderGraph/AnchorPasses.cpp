@@ -6,6 +6,7 @@
 #	include "RenderGraph/AnchorPasses.h"
 
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
@@ -15,6 +16,7 @@
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/Buffers/Buffer.h>
+#	include <Resources/ResourceIdentifier.h>
 
 #	include <algorithm>
 #	include <format>
@@ -72,6 +74,8 @@ namespace RenderGraph::AnchorPasses
 				else if (bind.kind == Bind::Kind::Uav)
 					declared.views[i] = whole ? a_builder.UnorderedAccess(bind.resource).View() :
 					                            a_builder.UnorderedAccess(MipOf(bind.resource, bind.mip), org::UavView{ .mip = bind.mip }).View();
+				else if (bind.kind == Bind::Kind::Published)
+					declared.views[i] = a_builder.ShaderResource(org::ResourceIdentifier(bind.id)).View();
 			}
 			if (ReadsShared(a_bindings))
 				declared.shared = SharedConstants::Declare(a_builder);
@@ -87,6 +91,7 @@ namespace RenderGraph::AnchorPasses
 				switch (bind.kind) {
 				case Bind::Kind::Srv:
 				case Bind::Kind::Uav:
+				case Bind::Kind::Published:
 					words.data[words.count++] = a_recording.Index(a_declared.views[i]);
 					break;
 				case Bind::Kind::Handle:
@@ -298,6 +303,10 @@ namespace RenderGraph::AnchorPasses
 		for (const auto& bind : a_bindings) {
 			if ((bind.kind == Bind::Kind::Srv || bind.kind == Bind::Kind::Uav) && !bind.resource) {
 				Fail(std::format("{}: an input is missing", a_name));
+				return false;
+			}
+			if (bind.kind == Bind::Kind::Published && !PublishedResources::IsDeclarable(bind.id)) {
+				Fail(std::format("{}: {} is not published", a_name, bind.id));
 				return false;
 			}
 			if (bind.kind == Bind::Kind::Latch && !latch) {
