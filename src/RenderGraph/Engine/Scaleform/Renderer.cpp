@@ -249,6 +249,7 @@ namespace RenderGraph::Engine::Scaleform
 			bool inFilter = false;
 			std::uint32_t d3d11Parts = 0;
 			std::uint32_t graphSegments = 0;
+			std::uint64_t draws = 0;  // the display's draws so far (CS_ORG_SCALEFORM_D3D11_PARTS)
 		};
 
 		Capture& Current()
@@ -639,6 +640,16 @@ namespace RenderGraph::Engine::Scaleform
 			return false;
 		}
 
+		/**
+		 * @brief CS_ORG_SCALEFORM_D3D11_PARTS=N (diagnostics, docs/development/render-graph.md): every Nth draw of a display is a D3D11
+		 * part, so the D3D11 part path (D3D11Ready, SyncD3D11, a replay's state, ResumeAfterD3D11) runs on ordinary menus. 0: off.
+		 */
+		bool ForcedPart()
+		{
+			static const std::uint64_t every = Switches::Number("CS_ORG_SCALEFORM_D3D11_PARTS", 0);
+			return every && ++Current().draws % every == 0;
+		}
+
 		bool VideoModeSet(void* a_renderer)
 		{
 			return Field<std::uint8_t>(a_renderer, Layout::kVideoModeSet) != 0;
@@ -997,6 +1008,7 @@ namespace RenderGraph::Engine::Scaleform
 			capture.d3d11Begun = false;
 			capture.d3d11Parts = 0;
 			capture.graphSegments = 0;
+			capture.draws = 0;
 			const std::uint32_t background = *a_background;
 			const Viewport viewport = *a_viewport;
 			capture.viewport = viewport;
@@ -1314,6 +1326,10 @@ namespace RenderGraph::Engine::Scaleform
 			if (!VideoModeSet(a_renderer) || !Field<const void*>(a_renderer, Layout::kVertexData) || !Field<const void*>(a_renderer, Layout::kIndexData) ||
 				!Field<std::uint32_t>(a_renderer, Layout::kIndexFormat) || a_triangles <= 0)
 				return;
+			if (ForcedPart()) {
+				Abort(a_renderer, "a draw made a D3D11 part by CS_ORG_SCALEFORM_D3D11_PARTS");
+				return;
+			}
 			if (Field<const float*>(a_renderer, Layout::kWorld3D)) {
 				Abort(a_renderer, "a 3D draw");
 				return;
@@ -1380,6 +1396,10 @@ namespace RenderGraph::Engine::Scaleform
 			const auto* bitmaps = a_bitmaps + a_start;
 			const std::uint32_t bitmapBytes = KeepBytes(bitmaps, sizeof(BitmapDesc) * static_cast<std::size_t>(a_count));
 			Keep({ .slot = kDrawBitmaps, .bytes = matrixBytes, .args = { a_count, static_cast<std::int32_t>(bitmapBytes) }, .object = a_texture });
+			if (ForcedPart()) {
+				Abort(a_renderer, "a draw made a D3D11 part by CS_ORG_SCALEFORM_D3D11_PARTS");
+				return;
+			}
 			if (!IsPlainTexture(a_texture)) {
 				Abort(a_renderer, "bitmaps of a texture that is not a plain GTextureD3D1x (video)");
 				return;
