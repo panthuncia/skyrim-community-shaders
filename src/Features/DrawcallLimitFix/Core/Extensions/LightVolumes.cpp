@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/LightVolumes.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace DCLF::Api
@@ -40,7 +41,10 @@ namespace DCLF::Extensions
 			stl::report_and_fail("Drawcall Limit Fix: the light volumes were resolved twice");
 		if (a_registered.name.empty())
 			return;
-		resolved = { true, std::string(a_registered.name), a_registered.landscapeFlags, a_registered.sample };
+		// A table needs both: whether it is read, and what fills it.
+		if (!a_registered.pointLightsActive != !a_registered.pointLights)
+			stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s point lights need both pointLightsActive and pointLights", a_registered.name));
+		resolved = { true, std::string(a_registered.name), a_registered.landscapeFlags, a_registered.sample, a_registered.pointLightsActive, a_registered.pointLights };
 	}
 
 	const LightVolumesEntry& LightVolumes() { return resolved; }
@@ -49,5 +53,15 @@ namespace DCLF::Extensions
 	{
 		if (resolved.sample)
 			resolved.sample(a_sink);
+	}
+
+	bool PointLightsActive()
+	{
+		return resolved.pointLightsActive && resolved.pointLightsActive();
+	}
+
+	std::uint32_t SamplePointLights(Api::PointLight* a_out, std::uint32_t a_capacity)
+	{
+		return resolved.pointLights ? std::min(resolved.pointLights(a_out, a_capacity), a_capacity) : 0u;
 	}
 }

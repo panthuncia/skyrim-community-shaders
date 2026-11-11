@@ -7,6 +7,7 @@
 #include "Features/DrawcallLimitFix/Features/LocalLights/LocalShadowLights.h"
 #include "Features/DrawcallLimitFix/Features/LocalLights/Diagnostics/LightSelectionParity.h"
 
+#include "Features/DrawcallLimitFix/Core/Extensions/ClassifyInputs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/LightVolumes.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
@@ -25,6 +26,15 @@ namespace DCLF::Features::LocalLights
 		{
 			if (a_hooks.source == Api::ShadowSource::Spot)
 				LightSelection::Get().Install();
+		}
+
+		// "light limit fix" (Integrations/LightLimitFix's classify input): loaded, its clustered lights light the Lighting draws.
+		Api::ClassifyInputId lightLimitFix;
+
+		/** @brief Without Light Limit Fix the Lighting draws take their point lights from the frame's table (constant for the session). */
+		bool PointLightsActive()
+		{
+			return !Extensions::ClassifyInputOn(lightLimitFix);
 		}
 
 		/** @brief Local shadow lights accumulated this frame, a volume per shadowmap descriptor, for Light Limit Fix's shadow mask. */
@@ -53,8 +63,14 @@ namespace DCLF::Features::LocalLights
 		{
 			RegisterLightContexts(a_context);
 			// Each colour commit's volumes, from the selection's lights and the Lights board; the landscape properties take only the
-			// lights that affect land.
-			a_context.RegisterLightVolumes({ .name = "local shadow lights", .landscapeFlags = kLandscapeFlags, .sample = &Sample });
+			// lights that affect land. Without Light Limit Fix, each commit's point light table too: the volumes' lights, then the
+			// scene's plain point lights (the Lighting draws' per-object lights).
+			lightLimitFix = a_context.NeedClassifyInput("light limit fix");
+			a_context.RegisterLightVolumes({ .name = "local shadow lights",
+				.landscapeFlags = kLandscapeFlags,
+				.sample = &Sample,
+				.pointLightsActive = &PointLightsActive,
+				.pointLights = &LocalShadowLights::SamplePointLights });
 			// CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY: the light selection and its rooms against the engine's.
 			if (Diagnostics::Observe().claimsOrScene)
 				Diagnostics::LightSelectionParity::Install();

@@ -49,5 +49,14 @@ namespace DCLF
 
 		/** @brief This frame's, from DCLF's selection and light views (render thread, after the lights accumulated). */
 		static LocalShadowLights Sample();
+
+		/**
+		 * @brief The frame's point light table without Light Limit Fix (Api::LightVolumesContribution::pointLights): the lights
+		 * BSLightingShaderProperty's light selection (FUN_1414fcf80) can give a pass, as SetupGeometry writes them (FUN_1414df650). First
+		 * the shadow lights, Sample's lights in its order with their mask indices; then ShadowSceneNode's active lights in their order,
+		 * but a frustum-culled one (+0x5C 0xFF) or a hidden one (its NiLight's kHidden). At most a_capacity; returns how many (render
+		 * thread, after the lights accumulated).
+		 */
+		static std::uint32_t SamplePointLights(Api::PointLight* a_out, std::uint32_t a_capacity);
 	};
 }

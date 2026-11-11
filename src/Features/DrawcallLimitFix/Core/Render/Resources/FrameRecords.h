@@ -54,13 +54,16 @@ namespace DCLF::Draws
 		std::uint32_t a_nullIndex, const PayloadVersions& a_parts, const FrameValueIndices& a_values, const NamedVersions& a_adopted, const SceneBuffers& a_scene,
 		std::uint32_t a_frame);
 
-	/** @brief The zeroed light block every bindless draw's PS b3 reads, staged into a_target once (a_zeroed). */
+	/**
+	 * @brief The zero block, and the zeroed light block every bindless draw's PS b3 reads while Light Limit Fix is loaded, staged into
+	 * a_target once (a_zeroed).
+	 */
 	void ZeroSharedLightOnce(CommitUploads& a_uploads, const std::shared_ptr<org::Buffer>& a_target, bool& a_zeroed);
 
 	/**
 	 * @brief The frame-wide rows into a_target: the frame lighting (PS b13), the LOD fades' frame inputs after it, the frame fog (VS b13),
-	 * the extras' vertex part after the fog and pixel part at PS b13 c16, and the frame constant rows (PS b13 c17 and up), in ascending row
-	 * order. This frame's: sampled now.
+	 * the extras' vertex part after the fog and pixel part at PS b13 c16, the frame constant rows (PS b13 c17 and up), in ascending row
+	 * order, and without Light Limit Fix the point light table (PS b3, Extensions::SamplePointLights). This frame's: sampled now.
 	 */
 	void LatchFrameRows(LatchedUploads& a_latched, const std::shared_ptr<org::Buffer>& a_target);
 	/** @brief Each write LatchFrameRows makes, in its order: a_add(a_context, bytes, offset) (a shape's latched copies). */
