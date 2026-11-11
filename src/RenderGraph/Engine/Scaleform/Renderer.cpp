@@ -930,8 +930,69 @@ namespace RenderGraph::Engine::Scaleform
 				[&] { Original<BlurFn>(kDrawBlurRect)(a_renderer, a_source, a_sourceRect, a_destRect, a_params); });
 		}
 
+		/**
+		 * @brief DrawColorMatrixRect as a graph draw: FilterVS.hlsl and FilterPS.hlsl's FILTER 23 (24 for Multiply and Darken), with
+		 * the constants the D3D11 renderer writes (SE 0x140f5e840): the current matrix, the source rectangle over the texture's size,
+		 * the filters' blend array, the source bound clamped and linear. A source the graph cannot read makes it a D3D11 part.
+		 */
+		void CaptureColorMatrix(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const float* a_matrix)
+		{
+			auto& capture = Current();
+			std::array<float, 4> source;
+			std::array<float, 4> dest;
+			std::array<float, 20> matrix;
+			std::memcpy(source.data(), a_sourceRect, sizeof(source));
+			std::memcpy(dest.data(), a_destRect, sizeof(dest));
+			std::memcpy(matrix.data(), a_matrix, sizeof(matrix));
+			Keep([=](void* a_self) { Original<ColorMatrixFn>(kDrawColorMatrixRect)(a_self, a_source, source.data(), dest.data(), matrix.data()); });
+			if (!IsPlainTexture(a_source) || !Field<void*>(a_source, Layout::kTextureResource)) {
+				Abort(a_renderer, "a colour matrix filter of a texture the graph cannot read");
+				return;
+			}
+			const auto index = TextureIndex(a_renderer, a_source);
+			if (index < 0)
+				return;
+
+			FilterRecord record{};
+			const float width = static_cast<float>((std::max)(Field<std::uint32_t>(a_source, Layout::kTextureWidth), 1u));
+			const float height = static_cast<float>((std::max)(Field<std::uint32_t>(a_source, Layout::kTextureHeight), 1u));
+			const float u0 = source[0] / width, v0 = source[1] / height, u1 = source[2] / width, v1 = source[3] / height;
+			const float corners[4][6] = {
+				{ dest[0], dest[1], 0.0f, 1.0f, u0, v0 },
+				{ dest[2], dest[1], 0.0f, 1.0f, u1, v0 },
+				{ dest[0], dest[3], 0.0f, 1.0f, u0, v1 },
+				{ dest[2], dest[3], 0.0f, 1.0f, u1, v1 },
+			};
+			// The renderer's strip of four as two triangles.
+			constexpr int kOrder[6] = { 0, 1, 2, 2, 1, 3 };
+			for (int i = 0; i < 6; ++i)
+				std::memcpy(record.vertices[i], corners[kOrder[i]], sizeof(record.vertices[i]));
+			DrawRecord matrixRecord{};
+			MatrixConstants(Field<float[6]>(a_renderer, Layout::kMatrix), matrixRecord);
+			std::memcpy(record.mvp, matrixRecord.mvp, sizeof(record.mvp));
+			std::memcpy(record.cxmul, matrix.data(), sizeof(record.cxmul));
+			std::memcpy(record.cxadd, matrix.data() + 16, sizeof(record.cxadd));
+
+			Command command{};
+			command.kind = Command::Kind::Draw;
+			command.state.vertexKind = 0;
+			command.state.pixelKind = 0;
+			command.state.filter = Multiply() ? 24 : 23;
+			// The filters' blend array for the mode; nothing while a mask is drawn (the colour writes stay off, as the renderer leaves them).
+			command.state.blend = capture.inMask ? 7 : static_cast<std::uint8_t>(8 + kBlendStates[capture.blendMode > 14 ? 0 : capture.blendMode]);
+			command.state.stencil = capture.stencil;
+			command.stencilRef = capture.stencilRef;
+			command.textures[0] = index;
+			command.samplers[0] = command.samplers[1] = 3;  // Bind(0, clamp, linear)
+			command.record = capture.display.Append(&record, sizeof(record), 16);
+			command.vertexCount = 6;
+			capture.display.commands.push_back(command);
+		}
+
 		void DrawColorMatrixRect(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const float* a_matrix)
 		{
+			if (Capturing() && a_source && a_sourceRect && a_destRect && a_matrix)
+				return CaptureColorMatrix(a_renderer, a_source, a_sourceRect, a_destRect, a_matrix);
 			Filter(a_renderer, "a colour matrix filter (DrawColorMatrixRect)",
 				[&] { Original<ColorMatrixFn>(kDrawColorMatrixRect)(a_renderer, a_source, a_sourceRect, a_destRect, a_matrix); });
 		}

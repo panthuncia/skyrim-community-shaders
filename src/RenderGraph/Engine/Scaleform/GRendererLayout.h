@@ -75,6 +75,8 @@ namespace RenderGraph::Engine::Scaleform::Layout
 	static_assert(offsetof(FillStyle, cxform) == 0xC && offsetof(FillStyle, textures) == 0x30);
 
 	/** @brief GTextureD3D1x's fields. */
+	inline constexpr std::size_t kTextureWidth = 0x38;     // std::uint32_t: its D3D11 description's width
+	inline constexpr std::size_t kTextureHeight = 0x3C;    // std::uint32_t: and height
 	inline constexpr std::size_t kTextureOwner = 0x68;     // the GRendererD3D1x that made it
 	inline constexpr std::size_t kTextureResource = 0x70;  // ID3D11Texture2D*: null when the data is lost
 	inline constexpr std::size_t kTextureView = 0x78;      // ID3D11ShaderResourceView*

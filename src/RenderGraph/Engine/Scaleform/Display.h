@@ -28,10 +28,11 @@ namespace RenderGraph::Engine::Scaleform
 	/** @brief A draw's pipeline, apart from the surface's formats. */
 	struct DrawState
 	{
-		std::uint8_t vertexKind = 1;  // FillVS.hlsl's VS_KIND
-		std::uint8_t pixelKind = 1;   // FillPS.hlsl's PS_KIND
-		std::uint8_t blend = 1;       // the renderer's blend state index, 1 to 7
+		std::uint8_t vertexKind = 1;  // FillVS.hlsl's VS_KIND (0 for a filter draw)
+		std::uint8_t pixelKind = 1;   // FillPS.hlsl's PS_KIND (0 for a filter draw)
+		std::uint8_t blend = 1;       // the renderer's blend state index: 1 to 7, or 9 to 15 for the filters' array (8 + index)
 		Stencil stencil = Stencil::Off;
+		std::uint8_t filter = 0;  // FilterPS.hlsl's FILTER for a filter draw (FilterVS.hlsl, a FilterRecord), 0 for a fill draw
 
 		auto operator<=>(const DrawState&) const = default;
 	};
@@ -68,6 +69,22 @@ namespace RenderGraph::Engine::Scaleform
 		std::uint32_t padding[3];
 	};
 	static_assert(sizeof(DrawRecord) == 192);
+
+	/**
+	 * @brief A filter draw's bytes (Scaleform/Filter.hlsli): its rectangle as two triangles (float4 position, float2 texture
+	 * coordinate), the vertex stage's matrix and the pixel stage's constants (the colour matrix filter's: cxadd, then the matrix).
+	 */
+	struct FilterRecord
+	{
+		float vertices[6][6];
+		float mvp[4][4];
+		float cxadd[4];
+		float cxmul[4][4];
+	};
+	static_assert(sizeof(FilterRecord) == 288);
+	inline constexpr std::uint32_t kFilterMatrixOffset = 144;     // offsetof(FilterRecord, mvp)
+	inline constexpr std::uint32_t kFilterConstantsOffset = 208;  // offsetof(FilterRecord, cxadd)
+	static_assert(offsetof(FilterRecord, mvp) == kFilterMatrixOffset && offsetof(FilterRecord, cxadd) == kFilterConstantsOffset);
 
 	/** @brief What a display draws and onto what. */
 	struct Display

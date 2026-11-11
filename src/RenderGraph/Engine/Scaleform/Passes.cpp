@@ -42,6 +42,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		constexpr const char* kClientId = "cs.scaleform";
 		constexpr const char* kVertexShader = "Scaleform/FillVS.hlsl";
 		constexpr const char* kPixelShader = "Scaleform/FillPS.hlsl";
+		constexpr const char* kFilterVertexShader = "Scaleform/FilterVS.hlsl";
+		constexpr const char* kFilterPixelShader = "Scaleform/FilterPS.hlsl";
 		// GpuTextures' diagnostic source tag for Scaleform's views (ImGui's is 256).
 		constexpr std::uint32_t kSourceTag = 257;
 		constexpr std::uint32_t kMinimumStaging = 256u << 10;
@@ -60,6 +62,21 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		};
 		static_assert(sizeof(FillBlock) == 48);
 		constexpr std::uint32_t kConstantWords = ShaderBindings::Words<FillBlock>();
+
+		// Must match the push block in Scaleform/Filter.hlsli; padded to the fill block's size, so every program has one layout.
+		struct FilterBlock
+		{
+			std::uint32_t geometry;
+			std::uint32_t vertexOffset;
+			std::uint32_t matrixOffset;
+			std::uint32_t constantsOffset;
+			std::uint32_t source;
+			std::uint32_t second;
+			std::uint32_t sampler0;
+			std::uint32_t sampler1;
+			std::uint32_t padding[4];
+		};
+		static_assert(sizeof(FilterBlock) == sizeof(FillBlock));
 
 		/** @brief A pipeline: the draw's state and the surface's formats. */
 		struct ProgramKey
@@ -201,11 +218,20 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			});
 		}
 
-		/** @brief The renderer's blend state (CreateShaders' first array, indices 1 to 7). */
+		/**
+		 * @brief The renderer's blend state: CreateShaders' first array (indices 1 to 7), or the filters' array (9 to 15: the same with
+		 * source colour factor One where the first has SrcAlpha, for premultiplied filter output; read from SE 0x1417c2588).
+		 */
 		rhi::BlendAttachment BlendOf(std::uint8_t a_index)
 		{
 			using F = rhi::BlendFactor;
 			using O = rhi::BlendOp;
+			if (a_index > 8) {
+				rhi::BlendAttachment blend = BlendOf(static_cast<std::uint8_t>(a_index - 8));
+				if (blend.srcColor == F::SrcAlpha)
+					blend.srcColor = F::One;
+				return blend;
+			}
 			rhi::BlendAttachment blend{};
 			blend.enable = true;
 			auto set = [&](F a_src, F a_dst, O a_op, F a_srcAlpha, F a_dstAlpha, O a_alphaOp) {
@@ -289,10 +315,16 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (!host)
 				return nullptr;
 			RasterProgram::Desc desc{};
-			desc.vertexSource = kVertexShader;
-			desc.pixelSource = kPixelShader;
 			desc.constantWords = kConstantWords;
-			desc.defines = { { L"VS_KIND", std::to_wstring(a_key.state.vertexKind) }, { L"PS_KIND", std::to_wstring(a_key.state.pixelKind) } };
+			if (a_key.state.filter) {
+				desc.vertexSource = kFilterVertexShader;
+				desc.pixelSource = kFilterPixelShader;
+				desc.defines = { { L"FILTER", std::to_wstring(a_key.state.filter) } };
+			} else {
+				desc.vertexSource = kVertexShader;
+				desc.pixelSource = kPixelShader;
+				desc.defines = { { L"VS_KIND", std::to_wstring(a_key.state.vertexKind) }, { L"PS_KIND", std::to_wstring(a_key.state.pixelKind) } };
+			}
 			RasterProgram::Target target{ .format = a_key.colour };
 			target.blend = BlendOf(a_key.state.blend);
 			desc.targets = { target };
@@ -301,8 +333,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			auto program = RasterProgram::Load(host->Device(), desc);
 			if (!program) {
 				a_state.failedPrograms.insert(a_key);
-				logger::error("[ORG] Scaleform: pipeline VS {} PS {} blend {} stencil {} (formats {} / {}) could not be made; displays that need it are drawn by D3D11",
-					static_cast<int>(a_key.state.vertexKind), static_cast<int>(a_key.state.pixelKind), static_cast<int>(a_key.state.blend), static_cast<int>(a_key.state.stencil), static_cast<int>(a_key.colour),
+				logger::error("[ORG] Scaleform: pipeline VS {} PS {} filter {} blend {} stencil {} (formats {} / {}) could not be made; displays that need it are drawn by D3D11",
+					static_cast<int>(a_key.state.vertexKind), static_cast<int>(a_key.state.pixelKind), static_cast<int>(a_key.state.filter), static_cast<int>(a_key.state.blend),
+					static_cast<int>(a_key.state.stencil), static_cast<int>(a_key.colour),
 					static_cast<int>(a_key.depth));
 				return nullptr;
 			}
@@ -454,11 +487,27 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				out.program = state.pendingPrograms[i].get();
 				out.stencilRef = command.stencilRef;
 				out.vertexCount = command.vertexCount;
+				const auto textureOf = [&](std::uint32_t a_stage) {
+					const std::int32_t texture = command.textures[a_stage];
+					return texture >= 0 ? textures[static_cast<std::size_t>(texture)] : 0u;
+				};
+				if (command.state.filter) {
+					FilterBlock filter{};
+					filter.geometry = frame->staging->SrvIndex();
+					filter.vertexOffset = command.record;
+					filter.matrixOffset = command.record + kFilterMatrixOffset;
+					filter.constantsOffset = command.record + kFilterConstantsOffset;
+					filter.source = textureOf(0);
+					filter.second = textureOf(1);
+					filter.sampler0 = state.samplers[command.samplers[0] & 3].Index();
+					filter.sampler1 = state.samplers[command.samplers[1] & 3].Index();
+					std::memcpy(&out.block, &filter, sizeof(filter));
+					continue;
+				}
 				out.block.geometry = frame->staging->SrvIndex();
 				out.block.record = command.record;
 				for (std::uint32_t stage = 0; stage < 2; ++stage) {
-					const std::int32_t texture = command.textures[stage];
-					out.block.textures[stage] = texture >= 0 ? textures[static_cast<std::size_t>(texture)] : 0;
+					out.block.textures[stage] = textureOf(stage);
 					out.block.samplers[stage] = state.samplers[command.samplers[stage] & 3].Index();
 				}
 				out.block.samplers[2] = out.block.samplers[3] = out.block.samplers[0];
