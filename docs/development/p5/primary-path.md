@@ -177,11 +177,17 @@ play rebuilds every graph through its own Publish.
   vertex pull and makes DXC 1.9 emit invalid SPIR-V (a `ConstantBuffer<T>` in Function storage, VUID-10684; reproduced with
   `check-dual-target-shaders.py Sky.hlsl --stage vs -D VSHADER -D TEX -D DITHER`; without the pull it builds). A precompile's
   failure is a warning (`RasterProgram::CompileStages`); the family's line names the descriptor.
-- The first world batches still found their anchors unable to run (`its anchor cannot run now`) once in run
-  `1111-153238-p35-p5-all-census-misc-fix2`, although the clients were in the setup's build. The cause is not the families: at the
-  first world frame the engine makes targets for the first time (the volumetric lighting volumes, `MakeVolume`; the skeleton logs
-  `kMAIN or kPOST_ZPREPASS_COPY was made again`), and EngineTargets bumps the global resize generation for them
-  (`EngineTexture::BumpGeneration`). `FrameAnchors::Service` then marks every client current and asks every anchor to build again
-  (`graph resources resized (x2)`, built at 15:33:29), so every client, any feature's, is outside its built graph until then. A
-  first creation that only publishes a new id would need no rebuild of graphs that do not read it (PublishedResources rebuilds
-  readers only); that change belongs to the engine targets' and frame anchors' lane.
+- The first world batches found their anchors unable to run (`its anchor cannot run now`) once in run
+  `1111-153238-p35-p5-all-census-misc-fix2`, although the clients were in the setup's build. At the first world frame the engine makes
+  targets for the first time (the volumetric lighting's volumes, Create3DRenderTarget), and EngineTargets bumped the global resize
+  generation for each; `FrameAnchors::Service` then marks every client current and asks every anchor to build again (`graph
+  resources resized (x2)`), so every client was outside its built graph until the frame's end. Fixed on `org-port/primary-families-4`
+  (EngineTargets.cpp): an engine texture notes when a reader is handed its image (`Serve`: `Find`, `FindImage`), and only the
+  replacement of such an image bumps the generation (`Move`, logged as `[ORG] engine targets: <name> made again while a reader held
+  its old image; the anchors build again`). A first creation, or one no reader asked for yet, only publishes (a registered id again).
+  Sets (EndSet), TakeOver, Recreate and Restore follow the same rule; a target the engine makes alone outside a set now moves too
+  (before, replacing a held one there bumped nothing and left graphs on the old image).
+- Not narrowed: when a held image is replaced, every anchor still builds again and every client waits for it. The image is
+  published under its id, and PublishedResources registers every id in every graph, so a replaced id rebuilds every graph anyway;
+  and readers declare engine imports by pointer (`FrameAnchors::EngineTarget`), which ORG does not track by graph
+  (`GraphHost::RequestRebuildFor` covers names looked up). Scoping it needs ORG to record pointer-declared resources per graph.

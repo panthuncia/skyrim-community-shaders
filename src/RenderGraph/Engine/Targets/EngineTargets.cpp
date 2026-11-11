@@ -99,8 +99,19 @@ namespace RenderGraph::Engine::Targets
 			explicit EngineTexture(std::string a_name) :
 				Resource(std::move(a_name), { GraphResources::Lifetime::Persistent, GraphResources::Export::SRV }) {}
 
-			/** @brief Takes a new image and its SRV; the old one goes (its image lives while its D3D11 texture does). */
-			void Adopt(const GraphResources::ExportedTexture& a_image, ID3D11ShaderResourceView* a_srv)
+			/**
+			 * @brief Takes a new image and its SRV; the old one goes (its image lives while its D3D11 texture does). Notes in the state
+			 * whether the old image had been handed to a reader (Serve): a graph may hold that one, so it must be built again.
+			 */
+			void Adopt(const GraphResources::ExportedTexture& a_image, ID3D11ShaderResourceView* a_srv);
+
+			/** @brief A reader was handed the image (Serve): a graph may hold it from now on. */
+			void MarkServed() { served = true; }
+
+			/** @brief Whether a reader was handed the current image. */
+			bool Served() const { return served; }
+
+			void AdoptImage(const GraphResources::ExportedTexture& a_image, ID3D11ShaderResourceView* a_srv)
 			{
 				Drop();
 				graph = a_image.graph;
@@ -128,6 +139,7 @@ namespace RenderGraph::Engine::Targets
 		private:
 			std::shared_ptr<org::ExternalTextureResource> external;
 			std::uint64_t image = 0;
+			bool served = false;  // a reader was handed the current image (Serve)
 		};
 
 		struct Colour
@@ -166,6 +178,11 @@ namespace RenderGraph::Engine::Targets
 			std::array<Cube, kCubeSlots> cubes;
 			std::array<Volume, kVolumeSlots> volumes;
 			bool changed = false;  // a target was made on ORG since the last EndSet
+			// An image a reader had been handed (EngineTexture::Served) was replaced since the last move: graphs may hold the old one, so
+			// the move bumps the resize generation (every anchor builds again). A target made for the first time, or one no reader asked
+			// for yet, only publishes: no graph holds it.
+			bool heldReplaced = false;
+			bool inSet = false;  // between BeginSet and EndSet: the set's move is EndSet's
 			// Images whose texture refused the retire token: kept for the session rather than freed under DXVK.
 			std::vector<std::shared_ptr<const void>> pinned;
 		};
@@ -177,6 +194,19 @@ namespace RenderGraph::Engine::Targets
 		}
 
 		RE::BSGraphics::Renderer* Renderer() { return RE::BSGraphics::Renderer::GetSingleton(); }
+
+		void EngineTexture::Adopt(const GraphResources::ExportedTexture& a_image, ID3D11ShaderResourceView* a_srv)
+		{
+			if (std::exchange(served, false) && Graph())
+				Targets().heldReplaced = true;
+			AdoptImage(a_image, a_srv);
+		}
+
+		/**
+		 * @brief After a target was made (or made again) on ORG: its id published again when a reader asked for it, and the resize
+		 * generation bumped only when an image a reader held was replaced. Returns whether it bumped.
+		 */
+		bool Move(const std::unique_ptr<EngineTexture>& a_texture);
 
 		// The engine's tables, by index past CommonLib's array sizes (AE has 116 render targets where CommonLib declares 114).
 		RE::BSGraphics::RenderTargetData& ColourData(std::uint32_t a_index) { return (&Renderer()->GetRuntimeData().renderTargets[0])[a_index]; }
@@ -355,7 +385,19 @@ namespace RenderGraph::Engine::Targets
 				return nullptr;
 			if (!PublishedResources::Publish(a_texture->Name(), *a_texture))
 				return nullptr;
+			a_texture->MarkServed();
 			return a_texture->External();
+		}
+
+		bool Move(const std::unique_ptr<EngineTexture>& a_texture)
+		{
+			auto& state = Targets();
+			Republish(a_texture);
+			if (!std::exchange(state.heldReplaced, false))
+				return false;
+			EngineTexture::BumpGeneration();
+			logger::info("[ORG] engine targets: {} made again while a reader held its old image; the anchors build again", a_texture ? a_texture->Name() : "?");
+			return true;
 		}
 
 		// --- Render targets (75467 / 77253) ---
@@ -505,8 +547,12 @@ namespace RenderGraph::Engine::Targets
 				auto& record = Targets().colours[a_target];
 				record.props = *a_properties;
 				record.known = true;
-				if (CanOwnColour(a_target, *a_properties) && Active() && MakeColour(a_target, record, ShapeOf(*a_properties), Fields::Released))
+				if (CanOwnColour(a_target, *a_properties) && Active() && MakeColour(a_target, record, ShapeOf(*a_properties), Fields::Released)) {
+					// Outside the set (a target the engine makes later): its own move.
+					if (!Targets().inSet)
+						Move(record.texture);
 					return;
+				}
 				// The D3D11 path: before the graph exists (TakeOver follows), for the targets ORG does not make, and on a failure.
 				if (record.texture && record.texture->Graph())
 					logger::info("[ORG] {}: made on D3D11 again", record.texture->Name());
@@ -646,8 +692,11 @@ namespace RenderGraph::Engine::Targets
 				auto& record = Targets().depths[a_target];
 				record.props = *a_properties;
 				record.known = true;
-				if (Active() && MakeDepth(a_target, record, false))
+				if (Active() && MakeDepth(a_target, record, false)) {
+					if (!Targets().inSet)
+						Move(record.texture);
 					return;
+				}
 				Forget(record.texture);
 				func(a_renderer, a_target, a_name, a_properties);
 			}
@@ -732,8 +781,11 @@ namespace RenderGraph::Engine::Targets
 				auto& record = Targets().cubes[a_target];
 				record.props = *a_properties;
 				record.known = true;
-				if (Active() && MakeCube(a_target, record, false))
+				if (Active() && MakeCube(a_target, record, false)) {
+					if (!Targets().inSet)
+						Move(record.texture);
 					return;
+				}
 				Forget(record.texture);
 				func(a_renderer, a_target, a_name, a_properties);
 			}
@@ -804,9 +856,9 @@ namespace RenderGraph::Engine::Targets
 			data.srv = Give(std::move(srv), data.texture, name + " SRV", image.graph, handles);
 			data.uav = Give(std::move(uav), data.texture, name + " UAV", image.graph, handles);
 			data.created = 1;
-			// Made outside a set: the readers see it at the anchors' next build.
-			EngineTexture::BumpGeneration();
-			Republish(a_record.texture);
+			// Made outside a set (the volumetric lighting makes its volumes when it first renders, in the first world frame): a first
+			// creation only publishes; an image a reader held makes the anchors build again.
+			Move(a_record.texture);
 			return true;
 		}
 
@@ -899,11 +951,13 @@ namespace RenderGraph::Engine::Targets
 	void BeginSet()
 	{
 		Targets().changed = false;
+		Targets().inSet = true;
 	}
 
 	void EndSet()
 	{
 		auto& state = Targets();
+		state.inSet = false;
 		if (!state.changed || !Active())
 			return;
 		state.changed = false;
@@ -912,9 +966,11 @@ namespace RenderGraph::Engine::Targets
 			colours += colour.texture && colour.texture->Graph() ? 1u : 0u;
 		for (const auto& depth : state.depths)
 			depths += depth.texture && depth.texture->Graph() ? 1u : 0u;
-		// One move for the whole set: the anchors build again once and PublishedResources publishes every replaced id again.
+		// One move for the whole set: PublishedResources publishes every replaced id again, and the anchors build again once when an
+		// image a reader held was replaced.
 		ForEachTexture([](const std::unique_ptr<EngineTexture>& a_texture) { Republish(a_texture); });
-		EngineTexture::BumpGeneration();
+		if (std::exchange(state.heldReplaced, false))
+			EngineTexture::BumpGeneration();
 		logger::info("[ORG] engine targets: the set was made again on the render graph ({} render targets, {} depth-stencil targets)", colours, depths);
 	}
 
@@ -972,7 +1028,8 @@ namespace RenderGraph::Engine::Targets
 		}
 		state.changed = false;
 		ForEachTexture([](const std::unique_ptr<EngineTexture>& a_texture) { Republish(a_texture); });
-		EngineTexture::BumpGeneration();
+		if (std::exchange(state.heldReplaced, false))
+			EngineTexture::BumpGeneration();
 		logger::info("[ORG] engine targets: {} targets now on the render graph, {} mip views made again on them, {} kept on D3D11 after a failure", taken, mipViews, kept);
 	}
 
@@ -1071,8 +1128,7 @@ namespace RenderGraph::Engine::Targets
 		if (!MakeColour(a_target, record, shape, a_keepCopy ? Fields::KeepCopy : Fields::Replace))
 			return false;
 		Targets().changed = false;
-		Republish(record.texture);
-		EngineTexture::BumpGeneration();
+		Move(record.texture);
 		logger::info("[ORG] {}: made again as {} ({}x{}, format {})", record.texture->Name(), a_name ? a_name : "?", a_desc.Width, a_desc.Height, static_cast<int>(a_desc.Format));
 		return true;
 	}
@@ -1087,8 +1143,7 @@ namespace RenderGraph::Engine::Targets
 		if (!MakeColour(a_target, record, shape, Fields::KeepCopy))
 			return false;
 		Targets().changed = false;
-		Republish(record.texture);
-		EngineTexture::BumpGeneration();
+		Move(record.texture);
 		return true;
 	}
 
