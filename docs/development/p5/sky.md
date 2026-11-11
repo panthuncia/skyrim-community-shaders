@@ -138,6 +138,15 @@ The engine's CPU code runs unchanged; its draw choke point latches state (Phase 
   weather without cloud layers clears it once (the client's once pass, `Rearm`), as `CloudShadows::ReflectionsPrepass` does.
 - **Recording.** A pass's revision is the batch's draws without their constants (programs, buffers, textures, counts, face, viewport);
   the constants are the latch. A face batch has another revision per face, so the faces' pass is recorded again per face.
+- **Probes.** A view's batches are the graph's only after a probe: a batch the engine draws while each draw is checked as the
+  family would take it (its program built, its constants mirrored, its textures and buffers imported; Cloud Shadows' flags left for
+  the engine). Once a probe latched every draw, the view's next batches are the graph's. A draw a later batch cannot latch makes the
+  rest of that batch the engine's (the draws latched before it are drawn after the batch: one batch out of order) and the view
+  probes again. Cloud Shadows' copy reads the faces' graph occlusion only while the faces' batches are the graph's
+  (`UseCloudFaces`), its D3D11 layer otherwise. Nothing is withheld for a program that does not build.
+- **The headers' textures.** Exponential Height Fog's header includes IBL's (t76, t77) and Dynamic Cubemaps' (t30, t31) headers;
+  the reflection fog reads t31. They are `EXTERN` entries of the ORG build (Dynamic Cubemaps' are header SRVs now), bound to what
+  CS binds there for the pass: a published texture by id, or the D3D11 view imported (`Sky::t<register>`).
 - **Fallbacks.** A batch whose view or targets are not one of these, or whose client is new (registered for the new targets, then
   built and prepared by an empty run), is drawn by the engine. A draw that cannot be latched (a buffer not mirrored yet: the first
   batch after start; a texture or buffer import failing; a stencil state; a program that does not build; more than 128 draws) is drawn
@@ -164,10 +173,14 @@ The engine's CPU code runs unchanged; its draw choke point latches state (Phase 
 ## Test plan
 
 1. Build, then `sky-org0.env` and `sky-org1.env` (`tools/cs-ab/scenarios/`): Whiterun at 13:00 and 22:00 in cloudy weather (12f2d),
-   a shot up at the sky (`player.setangle x -35`) and at the horizon each time, then Dragonsreach.
+   a shot up at the sky (`player.setangle x -75`) and at the horizon each time, then Dragonsreach.
 2. Log: `[DCLF] sky: on (CS_ORG_SKY=1)`, `the cs.sky.main client registered`, `the cs.sky.faces client registered` (with water in
-   view), `built the program for technique N`, `the faces' cloud occlusion is a graph texture`, `[ORG] Cloud Shadows: the occlusion
-   copy reads Sky::CloudOcclusionFaces`. No `back to the engine's draws`, no `[E]` lines but the known EFFECTS11 one.
+   view), `built the program for technique N`, `every main sky draw can be drawn by the graph` (and `face`), `the faces' cloud
+   occlusion is a graph texture`, `[ORG] Cloud Shadows: the occlusion copy reads Sky::CloudOcclusionFaces`. No `back to the
+   engine's draws`, no repeated `could not be drawn by the graph`, no `SPIR-V build of Sky.hlsl` errors, no `[E]` lines but the
+   known EFFECTS11 one.
+   The ORG build was checked with every feature define CS has (check-dual-target-shaders.py, ps and vs, every technique, DEFERRED
+   and SKY_ORG_FACES: FXC, SPIR-V, DXIL, no binding outside the heap); defines with values (feature options) were not.
 3. Shots: `sky-noon`, `sky-night` (the dome, clouds, sun, moons, stars behind the moon masks) and the horizon shots against
    sky-org0's; the water's reflection of the sky; terrain cloud shadows (they read the faces' occlusion).
 4. The DCLF census (`CS_DCLF_CENSUS=1`) still counts the sky's passes as registered (they are, and the engine's batch runs); the
