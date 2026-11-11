@@ -37,6 +37,10 @@ namespace RenderGraph::Engine::Scaleform::Layout
 	inline constexpr std::size_t kVertexCount = 0x6BC;      // std::int32_t
 	inline constexpr std::size_t kIndexCount = 0x6C0;       // std::int32_t
 	inline constexpr std::size_t kBlendMode = 0x720;        // std::uint32_t: BlendType below
+	// The blend stack, a GArray<std::uint32_t> at +0x728 (data, then this size, then the capacity): PushBlendMode appends the mode
+	// before, PopBlendMode (a no-op when empty) removes the last. Checked on both (SE 0x140f61770 / 0x140f61120, AE 0x14104c300 /
+	// 0x14104bd10, vtable slots 17 and 18).
+	inline constexpr std::size_t kBlendStackSize = 0x730;   // std::uint64_t
 	inline constexpr std::size_t kFillStyle = 0x7D8;        // FillStyle
 	inline constexpr std::size_t kLineStyle = 0x858;        // FillStyle (mode and colour only)
 
@@ -49,6 +53,15 @@ namespace RenderGraph::Engine::Scaleform::Layout
 		kVertexXY16iC32 = 3,
 		kVertexXY16iCF32 = 4,
 	};
+
+	/**
+	 * @brief SetIndexData's format argument (GRenderer::IndexFormat: 0 none, 1 16-bit, 2 32-bit) for the DXGI format it stores at
+	 * kIndexFormat (SetIndexData SE 82921 / AE 85037). SetVertexData stores its format argument as it is.
+	 */
+	inline constexpr std::int32_t IndexFormatOf(std::uint32_t a_dxgiFormat)
+	{
+		return a_dxgiFormat == 0x39 ? 1 : (a_dxgiFormat == 0x2A ? 2 : 0);  // DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R32_UINT
+	}
 
 	/** @brief GRenderer::FillTexture. */
 	struct FillTexture

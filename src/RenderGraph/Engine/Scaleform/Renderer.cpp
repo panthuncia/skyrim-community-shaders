@@ -12,10 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
-#include <deque>
-#include <functional>
 #include <map>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -182,20 +179,51 @@ namespace RenderGraph::Engine::Scaleform
 		/** @brief The most D3D11 parts a display has between graph segments; past it the rest of the display is D3D11's. */
 		constexpr std::uint32_t kMaxD3D11Parts = 8;
 
+		/**
+		 * @brief A call kept for a replay into the D3D11 renderer: its slot and arguments. What an argument points at is copied into
+		 * Capture::bytes at `bytes` (matrices, fills, bitmaps); for SetVertexData and SetIndexData `bytes` is the ArrayUse's index,
+		 * whose copy is in the segment's staging bytes once a draw read it.
+		 */
+		struct Kept
+		{
+			Slot slot;
+			std::uint32_t bytes = kNoOffset;
+			std::int32_t args[5] = {};
+			void* object = nullptr;  // a GTexture argument
+		};
+
+		/**
+		 * @brief A vertex or index array a segment sets. GFx's memory is valid while it is set (the D3D11 renderer reads it at every
+		 * draw); the copy in the segment's staging bytes is made at the first draw there that reads it.
+		 */
+		struct ArrayUse
+		{
+			const void* source = nullptr;
+			std::int32_t count = 0;
+			std::uint32_t elementSize = 0;
+			std::uint32_t staging = kNoOffset;
+		};
+
 		/** @brief The display being captured. Render thread only. */
 		struct Capture
 		{
 			bool active = false;
+			// The D3D11 renderer runs kept calls (a replay, an aborted call): every call it makes goes to it directly.
+			bool replaying = false;
 			Display display;  // the segment being captured
-			// The segment's calls, to replay into the D3D11 renderer, and the copies they point at (alive until the next display).
-			std::vector<std::function<void(void*)>> calls;
-			std::deque<std::vector<std::byte>> copies;
+			// The segment's calls, what they point at, and the arrays they set, until the next segment.
+			std::vector<Kept> kept;
+			std::vector<std::byte> bytes;
+			std::vector<ArrayUse> arrays;
+			std::int32_t vertexArray = -1;  // the ArrayUse the renderer's vertex fields hold now
+			std::int32_t indexArray = -1;   // and its index fields
 			// BeginDisplay's arguments, for the D3D11 renderer's BeginDisplay when it draws a part (D3D11Ready).
 			Viewport viewport{};
 			float frame[4]{};  // x0, x1, y0, y1
 			// The mirrored state.
 			std::uint32_t blendMode = 0;
 			std::uint32_t savedBlendMode = 0;  // the renderer's when the display began
+			// The renderer's blend stack (+0x728): the mode before each push still on it.
 			std::vector<std::uint32_t> blendStack;
 			bool inMask = false;
 			std::int32_t maskLevel = 0;
@@ -208,6 +236,7 @@ namespace RenderGraph::Engine::Scaleform
 			struct MaskState
 			{
 				std::uint32_t blendMode = 0;
+				std::vector<std::uint32_t> blendStack;
 				bool inMask = false;
 				std::int32_t maskLevel = 0;
 				Stencil stencil = Stencil::Off;
@@ -220,25 +249,6 @@ namespace RenderGraph::Engine::Scaleform
 			bool inFilter = false;
 			std::uint32_t d3d11Parts = 0;
 			std::uint32_t graphSegments = 0;
-			// The vertex and index arrays the draws read: the renderer's fields when they were copied, the copy, its offset in the
-			// segment's staging bytes, and the cell the kept SetVertexData/SetIndexData replays from.
-			struct Array
-			{
-				const void* source = nullptr;
-				std::int32_t count = 0;
-				std::uint32_t elementSize = 0;
-				const std::byte* copy = nullptr;
-				std::uint32_t staging = kNoOffset;
-				std::shared_ptr<const void*> cell;
-				// GFx's last call, put back after a replay.
-				bool set = false;
-				const void* data = nullptr;
-				std::int32_t elements = 0;
-				std::int32_t format = 0;
-				void* cache = nullptr;
-			};
-			Array vertices;
-			Array indices;
 		};
 
 		Capture& Current()
@@ -247,30 +257,201 @@ namespace RenderGraph::Engine::Scaleform
 			return s_capture;
 		}
 
-		/** @brief Whether calls are captured now: a display is, and the D3D11 renderer is not drawing a render target or filter of it. */
+		/**
+		 * @brief Whether calls are captured now: a display is, the D3D11 renderer is not drawing a render target or filter of it, and
+		 * it is not running kept calls.
+		 */
 		bool Capturing()
 		{
 			const auto& capture = Current();
-			return capture.active && capture.targetDepth == 0 && !capture.inFilter && FrameAnchors::OnRenderThread();
+			return capture.active && !capture.replaying && capture.targetDepth == 0 && !capture.inFilter && FrameAnchors::OnRenderThread();
 		}
 
-		void Keep(std::function<void(void*)> a_call)
+		/** @brief Marks the D3D11 renderer running kept calls for the scope. */
+		struct ReplayScope
 		{
-			Current().calls.push_back(std::move(a_call));
+			ReplayScope() { Current().replaying = true; }
+			~ReplayScope() { Current().replaying = false; }
+			ReplayScope(const ReplayScope&) = delete;
+			ReplayScope& operator=(const ReplayScope&) = delete;
+		};
+
+		void Keep(const Kept& a_call)
+		{
+			Current().kept.push_back(a_call);
 		}
 
-		/** @brief a_size bytes of a_source kept until the next display (a replay's argument). */
-		const std::byte* Copy(const void* a_source, std::size_t a_size)
+		/** @brief a_size bytes of a_source kept for a replay of the segment (16-aligned); their offset in Capture::bytes. */
+		std::uint32_t KeepBytes(const void* a_source, std::size_t a_size)
 		{
-			auto& copy = Current().copies.emplace_back(a_size);
+			auto& bytes = Current().bytes;
+			const std::size_t offset = (bytes.size() + 15) & ~std::size_t{ 15 };
+			bytes.resize(offset + a_size);
 			if (a_size && a_source)
-				std::memcpy(copy.data(), a_source, a_size);
-			return copy.data();
+				std::memcpy(bytes.data() + offset, a_source, a_size);
+			return static_cast<std::uint32_t>(offset);
 		}
 
-		/** @brief The D3D11 renderer's blend and mask fields set to a_state, and its depth-stencil state bound as its mask calls bind it. */
+		/** @brief A new ArrayUse for the array the renderer's fields describe; its index. */
+		std::int32_t UseArray(const void* a_source, std::int32_t a_count, std::uint32_t a_elementSize)
+		{
+			auto& arrays = Current().arrays;
+			arrays.push_back({ a_source, a_count, a_elementSize, kNoOffset });
+			return static_cast<std::int32_t>(arrays.size() - 1);
+		}
+
+		/** @brief What a replayed SetVertexData or SetIndexData passes: the segment's copy, or GFx's array when no draw read it. */
+		const void* ArrayData(std::uint32_t a_index)
+		{
+			const auto& capture = Current();
+			if (a_index >= capture.arrays.size())
+				return nullptr;
+			const auto& use = capture.arrays[a_index];
+			return use.staging != kNoOffset ? capture.display.staging.data() + use.staging : use.source;
+		}
+
+		std::uint32_t IndexSize(std::uint32_t a_dxgiFormat)
+		{
+			return a_dxgiFormat == DXGI_FORMAT_R16_UINT ? 2 : 4;
+		}
+
+		/** @brief The renderer's arrays as SetVertexData and SetIndexData take them (data, count, GFx's format). */
+		struct LiveArrays
+		{
+			const void* vertices = nullptr;
+			std::int32_t vertexCount = 0;
+			std::int32_t vertexFormat = 0;
+			const void* indices = nullptr;
+			std::int32_t indexCount = 0;
+			std::int32_t indexFormat = 0;
+		};
+
+		LiveArrays ReadArrays(void* a_renderer)
+		{
+			LiveArrays live;
+			live.vertices = Field<const void*>(a_renderer, Layout::kVertexData);
+			live.vertexCount = Field<std::int32_t>(a_renderer, Layout::kVertexCount);
+			live.vertexFormat = Field<std::int32_t>(a_renderer, Layout::kVertexFormat);
+			live.indices = Field<const void*>(a_renderer, Layout::kIndexData);
+			live.indexCount = Field<std::int32_t>(a_renderer, Layout::kIndexCount);
+			live.indexFormat = Layout::IndexFormatOf(Field<std::uint32_t>(a_renderer, Layout::kIndexFormat));
+			return live;
+		}
+
+		/** @brief The renderer's arrays set through its setters (which also mark its dynamic buffers stale). */
+		void WriteArrays(void* a_renderer, const LiveArrays& a_arrays)
+		{
+			Original<DataFn>(kSetVertexData)(a_renderer, a_arrays.vertices, a_arrays.vertexCount, a_arrays.vertexFormat, nullptr);
+			Original<DataFn>(kSetIndexData)(a_renderer, a_arrays.indices, a_arrays.indexCount, a_arrays.indexFormat, nullptr);
+		}
+
+		/**
+		 * @brief The segment starts from the arrays the renderer holds now: kept as its first setters, so a replay of the segment draws
+		 * from them (their copies once a draw read them) whatever GFx set after.
+		 */
+		void KeepLiveArrays(void* a_renderer)
+		{
+			auto& capture = Current();
+			const LiveArrays live = ReadArrays(a_renderer);
+			capture.vertexArray = UseArray(live.vertices, live.vertexCount, Field<std::uint32_t>(a_renderer, Layout::kVertexStride));
+			Keep({ .slot = kSetVertexData, .bytes = static_cast<std::uint32_t>(capture.vertexArray), .args = { live.vertexCount, live.vertexFormat } });
+			capture.indexArray = UseArray(live.indices, live.indexCount, IndexSize(Field<std::uint32_t>(a_renderer, Layout::kIndexFormat)));
+			Keep({ .slot = kSetIndexData, .bytes = static_cast<std::uint32_t>(capture.indexArray), .args = { live.indexCount, live.indexFormat } });
+		}
+
+		/** @brief One kept call run in the D3D11 renderer, its arguments read back from the segment's bytes. */
+		void Run(void* a_renderer, const Kept& a_call)
+		{
+			auto& capture = Current();
+			const bool array = a_call.slot == kSetVertexData || a_call.slot == kSetIndexData;
+			const std::byte* bytes = !array && a_call.bytes != kNoOffset ? capture.bytes.data() + a_call.bytes : nullptr;
+			const auto* floats = reinterpret_cast<const float*>(bytes);
+			const auto& a = a_call.args;
+			switch (a_call.slot) {
+			case kBeginDisplay:
+				{
+					const auto background = static_cast<std::uint32_t>(a[0]);
+					Original<BeginDisplayFn>(kBeginDisplay)(a_renderer, &background, &capture.viewport, capture.frame[0], capture.frame[1], capture.frame[2], capture.frame[3]);
+					break;
+				}
+			case kSetMatrix:
+			case kSetUserMatrix:
+			case kSetCxform:
+			case kSetPerspective3D:
+			case kSetView3D:
+			case kSetWorld3D:  // null when kept without a matrix
+				Original<SetMatrixFn>(a_call.slot)(a_renderer, floats);
+				break;
+			case kPushBlendMode:
+				Original<SetBlendFn>(kPushBlendMode)(a_renderer, static_cast<std::uint32_t>(a[0]));
+				break;
+			case kPopBlendMode:
+			case kLineStyleDisable:
+			case kFillStyleDisable:
+			case kEndSubmitMask:
+			case kDisableMask:
+				Original<VoidFn>(a_call.slot)(a_renderer);
+				break;
+			case kSetVertexData:
+			case kSetIndexData:
+				Original<DataFn>(a_call.slot)(a_renderer, ArrayData(a_call.bytes), a[0], a[1], nullptr);
+				break;
+			case kDrawIndexedTriList:
+				Original<DrawTrianglesFn>(kDrawIndexedTriList)(a_renderer, a[0], a[1], a[2], a[3], a[4]);
+				break;
+			case kDrawLineStrip:
+				Original<DrawLinesFn>(kDrawLineStrip)(a_renderer, a[0], a[1]);
+				break;
+			case kLineStyleColor:
+			case kFillStyleColor:
+				{
+					const auto color = static_cast<std::uint32_t>(a[0]);
+					Original<ColorFn>(a_call.slot)(a_renderer, &color);
+					break;
+				}
+			case kFillStyleBitmap:
+				Original<FillBitmapFn>(kFillStyleBitmap)(a_renderer, reinterpret_cast<const FillTexture*>(bytes));
+				break;
+			case kFillStyleGouraud:
+				{
+					// The three textures, each present when its bit in args[1] is.
+					const auto* fills = reinterpret_cast<const FillTexture*>(bytes);
+					Original<FillGouraudFn>(kFillStyleGouraud)(a_renderer, a[0], (a[1] & 1) ? &fills[0] : nullptr, (a[1] & 2) ? &fills[1] : nullptr,
+						(a[1] & 4) ? &fills[2] : nullptr);
+					break;
+				}
+			case kDrawBitmaps:
+				{
+					// The matrix at `bytes`, the bitmaps at args[1].
+					const auto* bitmaps = reinterpret_cast<const BitmapDesc*>(capture.bytes.data() + a[1]);
+					Original<DrawBitmapsFn>(kDrawBitmaps)(a_renderer, bitmaps, a[0], 0, a[0], static_cast<RE::GTexture*>(a_call.object), floats, nullptr);
+					break;
+				}
+			case kBeginSubmitMask:
+				Original<MaskFn>(kBeginSubmitMask)(a_renderer, a[0]);
+				break;
+			case kDrawColorMatrixRect:
+				// The source rectangle, the destination rectangle and the matrix, one after the other.
+				Original<ColorMatrixFn>(kDrawColorMatrixRect)(a_renderer, static_cast<RE::GTexture*>(a_call.object), floats, floats + 4, floats + 8);
+				break;
+			default:
+				break;
+			}
+		}
+
+		/**
+		 * @brief The D3D11 renderer's blend stack, blend and mask fields set to a_state, and its depth-stencil state bound as its mask
+		 * calls bind it. The stack is rebuilt through its own Pop/PushBlendMode (a push stores the mode the field holds), so the
+		 * display's later PopBlendMode calls pop what GFx pushed.
+		 */
 		void SyncD3D11(void* a_renderer, const Capture::MaskState& a_state)
 		{
+			while (Field<std::uint64_t>(a_renderer, Layout::kBlendStackSize) != 0)
+				Original<VoidFn>(kPopBlendMode)(a_renderer);
+			for (const std::uint32_t mode : a_state.blendStack) {
+				Field<std::uint32_t>(a_renderer, Layout::kBlendMode) = mode;
+				Original<SetBlendFn>(kPushBlendMode)(a_renderer, 0);  // modes 0 to 2 keep the field's mode
+			}
 			Field<std::uint32_t>(a_renderer, Layout::kBlendMode) = a_state.blendMode;
 			Field<std::uint8_t>(a_renderer, Layout::kMaskSubmitting) = a_state.inMask ? 1 : 0;
 			Field<std::int32_t>(a_renderer, Layout::kMaskLevel) = a_state.maskLevel;
@@ -284,17 +465,19 @@ namespace RenderGraph::Engine::Scaleform
 		Capture::MaskState MirroredState()
 		{
 			const auto& capture = Current();
-			return { capture.blendMode, capture.inMask, capture.maskLevel, capture.stencil, capture.stencilRef };
+			return { capture.blendMode, capture.blendStack, capture.inMask, capture.maskLevel, capture.stencil, capture.stencilRef };
 		}
 
 		/**
 		 * @brief The D3D11 renderer ready to draw a part of the display: its BeginDisplay run once (without the background, which
-		 * the graph's first segment drew; the world 3D matrix it resets put back), and its blend and mask state the mirrored one.
+		 * the graph's first segment drew; the world 3D matrix it resets put back), and its blend stack, blend and mask state the
+		 * mirrored ones.
 		 */
 		void D3D11Ready(void* a_renderer)
 		{
 			auto& capture = Current();
 			if (!capture.d3d11Begun) {
+				const ReplayScope scope;
 				const float* world = Field<const float*>(a_renderer, Layout::kWorld3D);
 				const std::uint32_t none = 0;
 				Original<BeginDisplayFn>(kBeginDisplay)(a_renderer, &none, &capture.viewport, capture.frame[0], capture.frame[1], capture.frame[2], capture.frame[3]);
@@ -304,10 +487,15 @@ namespace RenderGraph::Engine::Scaleform
 			SyncD3D11(a_renderer, MirroredState());
 		}
 
-		/** @brief The segment's kept calls replayed into the D3D11 renderer; GFx's arrays set back after. */
+		/**
+		 * @brief The segment's kept calls replayed into the D3D11 renderer. GFx's arrays and world 3D matrix, which the replay leaves
+		 * as the segment's copies, are set back after.
+		 */
 		void Replay(void* a_renderer)
 		{
 			auto& capture = Current();
+			const LiveArrays live = ReadArrays(a_renderer);
+			const float* world = Field<const float*>(a_renderer, Layout::kWorld3D);
 			if (capture.d3d11Begun) {
 				// A later segment: from the state it began in.
 				SyncD3D11(a_renderer, capture.segmentStart);
@@ -316,43 +504,37 @@ namespace RenderGraph::Engine::Scaleform
 				Field<std::uint32_t>(a_renderer, Layout::kBlendMode) = capture.savedBlendMode;
 				capture.d3d11Begun = true;
 			}
-			for (const auto& call : capture.calls)
-				call(a_renderer);
-			capture.calls.clear();
-			if (capture.vertices.set)
-				Original<DataFn>(kSetVertexData)(a_renderer, capture.vertices.data, capture.vertices.elements, capture.vertices.format, capture.vertices.cache);
-			if (capture.indices.set)
-				Original<DataFn>(kSetIndexData)(a_renderer, capture.indices.data, capture.indices.elements, capture.indices.format, capture.indices.cache);
+			{
+				const ReplayScope scope;
+				for (const auto& call : capture.kept)
+					Run(a_renderer, call);
+			}
+			capture.kept.clear();
+			WriteArrays(a_renderer, live);
+			Field<const float*>(a_renderer, Layout::kWorld3D) = world;
 		}
 
-		/** @brief The array's setter kept at a segment's start, so a replay of the segment reads the copy (or GFx's array, not drawn yet). */
-		template <Slot S>
-		void KeepArray(Capture::Array& a_array)
-		{
-			a_array.staging = kNoOffset;
-			if (!a_array.set)
-				return;
-			auto cell = std::make_shared<const void*>(static_cast<const void*>(a_array.copy));
-			a_array.cell = cell;
-			const void* data = a_array.data;
-			const std::int32_t count = a_array.elements;
-			const std::int32_t format = a_array.format;
-			Keep([cell, data, count, format](void* a_self) { Original<DataFn>(S)(a_self, *cell ? *cell : data, count, format, nullptr); });
-		}
-
-		/** @brief A new segment: nothing kept yet, the state it begins in noted. a_afterD3D11: the D3D11 renderer drew since the last. */
-		void StartSegment(void* a_renderer, bool a_afterD3D11)
+		/** @brief The segment's commands, kept calls and their bytes dropped. */
+		void ClearSegment()
 		{
 			auto& capture = Current();
-			capture.calls.clear();
+			capture.kept.clear();
+			capture.bytes.clear();
+			capture.arrays.clear();
+			capture.vertexArray = capture.indexArray = -1;
 			capture.display.ResetCommands();
 			capture.textureIndex.clear();
+		}
+
+		/** @brief A new segment: nothing kept yet but the arrays it starts from, the state it begins in noted. After a D3D11 part. */
+		void StartSegment(void* a_renderer)
+		{
+			auto& capture = Current();
+			ClearSegment();
 			capture.segmentStart = MirroredState();
-			KeepArray<kSetVertexData>(capture.vertices);
-			KeepArray<kSetIndexData>(capture.indices);
+			KeepLiveArrays(a_renderer);
 			// The renderer's texgen rows are the ones its last draw left.
-			if (a_afterD3D11)
-				std::memcpy(capture.texgen, &Field<float>(a_renderer, Layout::kTexgen), sizeof(capture.texgen));
+			std::memcpy(capture.texgen, &Field<float>(a_renderer, Layout::kTexgen), sizeof(capture.texgen));
 		}
 
 		/** @brief A D3D11 part of the display, counted (its reason logged the first time). */
@@ -398,10 +580,8 @@ namespace RenderGraph::Engine::Scaleform
 		/** @brief The capture ends: the rest of the display goes to the D3D11 renderer directly (it is ready for it). */
 		void EndCapture(const char* a_reason)
 		{
-			auto& capture = Current();
-			capture.active = false;
-			capture.calls.clear();
-			capture.display.ResetCommands();
+			Current().active = false;
+			ClearSegment();
 			NotePart(a_reason);
 			FinishDisplay();
 		}
@@ -437,7 +617,7 @@ namespace RenderGraph::Engine::Scaleform
 				EndCapture("too many D3D11 parts in one display (the rest of the display)");
 				return;
 			}
-			StartSegment(a_renderer, true);
+			StartSegment(a_renderer);
 		}
 
 		/**
@@ -447,15 +627,15 @@ namespace RenderGraph::Engine::Scaleform
 		bool Abort(void* a_renderer, const char* a_reason)
 		{
 			auto& capture = Current();
-			auto call = std::move(capture.calls.back());
-			capture.calls.pop_back();
+			const Kept call = capture.kept.back();
+			capture.kept.pop_back();
 			BeginD3D11Part(a_renderer, a_reason);
-			call(a_renderer);
-			if (capture.d3d11Parts >= kMaxD3D11Parts) {
-				EndCapture("too many D3D11 parts in one display (the rest of the display)");
-				return false;
+			{
+				// Its bytes stay until the next segment starts.
+				const ReplayScope scope;
+				Run(a_renderer, call);
 			}
-			StartSegment(a_renderer, true);
+			ResumeAfterD3D11(a_renderer);
 			return false;
 		}
 
@@ -601,35 +781,31 @@ namespace RenderGraph::Engine::Scaleform
 			return true;
 		}
 
-		/** @brief The array a field set describes, copied (once while the fields stay the same) into the replay copies and the staging bytes. */
-		void EnsureArray(Capture::Array& a_array, const void* a_source, std::int32_t a_count, std::uint32_t a_elementSize)
+		/**
+		 * @brief The array the renderer's fields hold, in the segment's staging bytes: copied once, at the segment's first draw that
+		 * reads it (a replay then reads that copy too). Its offset.
+		 */
+		std::uint32_t StageArray(std::int32_t& a_use, const void* a_source, std::int32_t a_count, std::uint32_t a_elementSize)
 		{
-			const std::size_t size = static_cast<std::size_t>(std::max(a_count, 0)) * a_elementSize;
-			if (a_array.copy && a_array.source == a_source && a_array.count == a_count && a_array.elementSize == a_elementSize) {
-				// Copied already; a new segment's staging bytes need it again.
-				if (a_array.staging == kNoOffset)
-					a_array.staging = Current().display.Append(a_array.copy, size, 4);
-				return;
-			}
-			a_array.copy = Copy(a_source, size);
-			a_array.source = a_source;
-			a_array.count = a_count;
-			a_array.elementSize = a_elementSize;
-			a_array.staging = Current().display.Append(a_array.copy, size, 4);
-			if (a_array.cell)
-				*a_array.cell = a_array.copy;
+			auto& capture = Current();
+			if (a_use < 0 || capture.arrays[a_use].source != a_source || capture.arrays[a_use].count != a_count || capture.arrays[a_use].elementSize != a_elementSize)
+				a_use = UseArray(a_source, a_count, a_elementSize);  // the setters keep every change, so this is the kept one in practice
+			auto& use = capture.arrays[a_use];
+			if (use.staging == kNoOffset)
+				use.staging = capture.display.Append(a_source, static_cast<std::size_t>(std::max(a_count, 0)) * a_elementSize, 4);
+			return use.staging;
 		}
 
-		void EnsureVertices(void* a_renderer)
+		std::uint32_t StageVertices(void* a_renderer)
 		{
-			EnsureArray(Current().vertices, Field<const void*>(a_renderer, Layout::kVertexData), Field<std::int32_t>(a_renderer, Layout::kVertexCount),
+			return StageArray(Current().vertexArray, Field<const void*>(a_renderer, Layout::kVertexData), Field<std::int32_t>(a_renderer, Layout::kVertexCount),
 				Field<std::uint32_t>(a_renderer, Layout::kVertexStride));
 		}
 
-		void EnsureIndices(void* a_renderer)
+		std::uint32_t StageIndices(void* a_renderer)
 		{
-			const std::uint32_t size = Field<std::uint32_t>(a_renderer, Layout::kIndexFormat) == DXGI_FORMAT_R16_UINT ? 2 : 4;
-			EnsureArray(Current().indices, Field<const void*>(a_renderer, Layout::kIndexData), Field<std::int32_t>(a_renderer, Layout::kIndexCount), size);
+			return StageArray(Current().indexArray, Field<const void*>(a_renderer, Layout::kIndexData), Field<std::int32_t>(a_renderer, Layout::kIndexCount),
+				IndexSize(Field<std::uint32_t>(a_renderer, Layout::kIndexFormat)));
 		}
 
 		/** @brief A draw: its record appended (192 bytes, 16-aligned) and its command. */
@@ -756,20 +932,49 @@ namespace RenderGraph::Engine::Scaleform
 
 		// The slots.
 
+		/** @brief The capture's state dropped at a display's end (render thread). */
+		void ClearDisplay()
+		{
+			auto& capture = Current();
+			ClearSegment();
+			capture.display.Reset();
+			capture.targetDepth = 0;
+			capture.inFilter = false;
+		}
+
+		/**
+		 * @brief A display that never ended (no EndDisplay before the next BeginDisplay): its last segment drawn, and the D3D11
+		 * renderer's EndDisplay run when it began the display (it releases the render target and depth-stencil views its
+		 * BeginDisplay took).
+		 */
+		void EndDangling(void* a_renderer)
+		{
+			auto& capture = Current();
+			Flush(a_renderer);
+			capture.active = false;
+			Field<std::uint32_t>(a_renderer, Layout::kBlendMode) = capture.blendMode;
+			FinishDisplay();
+			ClearDisplay();
+			if (capture.d3d11Begun) {
+				capture.d3d11Begun = false;
+				Original<VoidFn>(kEndDisplay)(a_renderer);
+			}
+		}
+
 		void BeginDisplay(void* a_renderer, const std::uint32_t* a_background, const Viewport* a_viewport, float a_x0, float a_x1, float a_y0, float a_y1)
 		{
 			auto& capture = Current();
 			const auto original = Original<BeginDisplayFn>(kBeginDisplay);
-			if (capture.active) {
-				// A display that never ended: its last segment is drawn now.
-				Flush(a_renderer);
-				capture.active = false;
-				FinishDisplay();
+			// The capture is the render owner's: another thread's display neither reads nor ends it.
+			if (!FrameAnchors::OnRenderThread()) {
+				CountD3D11("a whole display off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1)");
+				original(a_renderer, a_background, a_viewport, a_x0, a_x1, a_y0, a_y1);
+				return;
 			}
+			if (capture.active)
+				EndDangling(a_renderer);
 			const char* reason = nullptr;
-			if (!FrameAnchors::OnRenderThread())
-				reason = "a whole display off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1)";
-			else if (!Passes::Ready())
+			if (!Passes::Ready())
 				reason = "a whole display before the render graph is up";
 			else if (!VideoModeSet(a_renderer))
 				reason = "a whole display without a video mode";
@@ -781,12 +986,7 @@ namespace RenderGraph::Engine::Scaleform
 				return;
 			}
 
-			capture.display.Reset();
-			capture.calls.clear();
-			capture.copies.clear();
-			capture.textureIndex.clear();
-			capture.vertices = {};
-			capture.indices = {};
+			ClearDisplay();
 			if (!ReadTargets(capture.display)) {
 				capture.display.Reset();
 				CountD3D11("a whole display with no render target bound");
@@ -795,8 +995,6 @@ namespace RenderGraph::Engine::Scaleform
 			}
 			capture.active = true;
 			capture.d3d11Begun = false;
-			capture.targetDepth = 0;
-			capture.inFilter = false;
 			capture.d3d11Parts = 0;
 			capture.graphSegments = 0;
 			const std::uint32_t background = *a_background;
@@ -806,7 +1004,9 @@ namespace RenderGraph::Engine::Scaleform
 			capture.frame[1] = a_x1;
 			capture.frame[2] = a_y0;
 			capture.frame[3] = a_y1;
-			Keep([=](void* a_self) { Original<BeginDisplayFn>(kBeginDisplay)(a_self, &background, &viewport, a_x0, a_x1, a_y0, a_y1); });
+			// The first segment's calls: the BeginDisplay (from the saved viewport and frame), then the arrays the display starts from.
+			Keep({ .slot = kBeginDisplay, .args = { static_cast<std::int32_t>(background) } });
+			KeepLiveArrays(a_renderer);
 
 			// What BeginDisplay resets, and the state it starts from.
 			capture.blendMode = capture.savedBlendMode = Field<std::uint32_t>(a_renderer, Layout::kBlendMode);
@@ -849,18 +1049,18 @@ namespace RenderGraph::Engine::Scaleform
 		void EndDisplay(void* a_renderer)
 		{
 			auto& capture = Current();
-			if (capture.active && FrameAnchors::OnRenderThread()) {
-				// The last segment: by the graph, or replayed into D3D11.
-				Flush(a_renderer);
-				capture.active = false;
-				Field<std::uint32_t>(a_renderer, Layout::kBlendMode) = capture.blendMode;
-				FinishDisplay();
+			// The capture is the render owner's: another thread's display neither ends nor resets it.
+			if (FrameAnchors::OnRenderThread()) {
+				if (capture.active) {
+					// The last segment: by the graph, or replayed into D3D11.
+					Flush(a_renderer);
+					capture.active = false;
+					Field<std::uint32_t>(a_renderer, Layout::kBlendMode) = capture.blendMode;
+					FinishDisplay();
+				}
+				ClearDisplay();
+				capture.d3d11Begun = false;
 			}
-			capture.calls.clear();
-			capture.display.Reset();
-			capture.textureIndex.clear();
-			capture.targetDepth = 0;
-			capture.inFilter = false;
 			// Either way: it releases the textures GFx queued for release, and the targets a D3D11 BeginDisplay took.
 			Original<VoidFn>(kEndDisplay)(a_renderer);
 		}
@@ -938,13 +1138,15 @@ namespace RenderGraph::Engine::Scaleform
 		void CaptureColorMatrix(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const float* a_matrix)
 		{
 			auto& capture = Current();
-			std::array<float, 4> source;
-			std::array<float, 4> dest;
-			std::array<float, 20> matrix;
-			std::memcpy(source.data(), a_sourceRect, sizeof(source));
-			std::memcpy(dest.data(), a_destRect, sizeof(dest));
-			std::memcpy(matrix.data(), a_matrix, sizeof(matrix));
-			Keep([=](void* a_self) { Original<ColorMatrixFn>(kDrawColorMatrixRect)(a_self, a_source, source.data(), dest.data(), matrix.data()); });
+			// The source rectangle, the destination rectangle and the matrix, kept one after the other.
+			std::array<float, 28> arguments;
+			std::memcpy(arguments.data(), a_sourceRect, sizeof(float) * 4);
+			std::memcpy(arguments.data() + 4, a_destRect, sizeof(float) * 4);
+			std::memcpy(arguments.data() + 8, a_matrix, sizeof(float) * 20);
+			Keep({ .slot = kDrawColorMatrixRect, .bytes = KeepBytes(arguments.data(), sizeof(arguments)), .object = a_source });
+			const float* source = arguments.data();
+			const float* dest = arguments.data() + 4;
+			const float* matrix = arguments.data() + 8;
 			if (!IsPlainTexture(a_source) || !Field<void*>(a_source, Layout::kTextureResource)) {
 				Abort(a_renderer, "a colour matrix filter of a texture the graph cannot read");
 				return;
@@ -970,8 +1172,8 @@ namespace RenderGraph::Engine::Scaleform
 			DrawRecord matrixRecord{};
 			MatrixConstants(Field<float[6]>(a_renderer, Layout::kMatrix), matrixRecord);
 			std::memcpy(record.mvp, matrixRecord.mvp, sizeof(record.mvp));
-			std::memcpy(record.cxmul, matrix.data(), sizeof(record.cxmul));
-			std::memcpy(record.cxadd, matrix.data() + 16, sizeof(record.cxadd));
+			std::memcpy(record.cxmul, matrix, sizeof(record.cxmul));
+			std::memcpy(record.cxadd, matrix + 16, sizeof(record.cxadd));
 
 			Command command{};
 			command.kind = Command::Kind::Draw;
@@ -1004,26 +1206,22 @@ namespace RenderGraph::Engine::Scaleform
 			Original<SetMatrixFn>(S)(a_renderer, a_values);
 			if (!Capturing())
 				return;
-			std::array<float, N> values;
-			std::memcpy(values.data(), a_values, sizeof(values));
-			Keep([values](void* a_self) { Original<SetMatrixFn>(S)(a_self, values.data()); });
+			Keep({ .slot = S, .bytes = KeepBytes(a_values, sizeof(float) * N) });
 		}
 
-		/** @brief SetWorld3D keeps the pointer it is given: a replay gives it a copy that lives until the next display. */
+		/** @brief SetWorld3D keeps the pointer it is given: a replay gives it the segment's copy, and puts GFx's back after. */
 		void SetWorld3D(void* a_renderer, const float* a_matrix)
 		{
 			Original<SetMatrixFn>(kSetWorld3D)(a_renderer, a_matrix);
-			if (!Capturing())
-				return;
-			const auto* matrix = a_matrix ? reinterpret_cast<const float*>(Copy(a_matrix, sizeof(float) * 16)) : nullptr;
-			Keep([matrix](void* a_self) { Original<SetMatrixFn>(kSetWorld3D)(a_self, matrix); });
+			if (Capturing())
+				Keep({ .slot = kSetWorld3D, .bytes = a_matrix ? KeepBytes(a_matrix, sizeof(float) * 16) : kNoOffset });
 		}
 
 		void PushBlendMode(void* a_renderer, std::uint32_t a_mode)
 		{
 			if (!Capturing())
 				return Original<SetBlendFn>(kPushBlendMode)(a_renderer, a_mode);
-			Keep([a_mode](void* a_self) { Original<SetBlendFn>(kPushBlendMode)(a_self, a_mode); });
+			Keep({ .slot = kPushBlendMode, .args = { static_cast<std::int32_t>(a_mode) } });
 			// The renderer's rule: the stack keeps the mode before; Normal and Layer keep the parent's mode.
 			auto& capture = Current();
 			capture.blendStack.push_back(capture.blendMode);
@@ -1035,7 +1233,7 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			if (!Capturing())
 				return Original<VoidFn>(kPopBlendMode)(a_renderer);
-			Keep([](void* a_self) { Original<VoidFn>(kPopBlendMode)(a_self); });
+			Keep({ .slot = kPopBlendMode });
 			auto& capture = Current();
 			if (capture.blendStack.empty())
 				return;
@@ -1056,18 +1254,13 @@ namespace RenderGraph::Engine::Scaleform
 			Original<DataFn>(S)(a_renderer, a_data, a_count, a_format, a_cache);
 			if (!Capturing())
 				return;
-			auto& array = S == kSetVertexData ? Current().vertices : Current().indices;
-			// The copy is made at the array's first draw (GFx's memory is valid until then); a replay passes it, or GFx's pointer
-			// when no draw read the array.
-			auto cell = std::make_shared<const void*>(nullptr);
-			array.cell = cell;
-			array.copy = nullptr;
-			array.set = true;
-			array.data = a_data;
-			array.elements = a_count;
-			array.format = a_format;
-			array.cache = a_cache;
-			Keep([cell, a_data, a_count, a_format](void* a_self) { Original<DataFn>(S)(a_self, *cell ? *cell : a_data, a_count, a_format, nullptr); });
+			// The copy is made at the array's first draw (StageArray); a replay passes it, or GFx's pointer when no draw read the array.
+			auto& capture = Current();
+			std::int32_t& use = S == kSetVertexData ? capture.vertexArray : capture.indexArray;
+			const std::uint32_t elementSize = S == kSetVertexData ? Field<std::uint32_t>(a_renderer, Layout::kVertexStride) :
+			                                                        IndexSize(Field<std::uint32_t>(a_renderer, Layout::kIndexFormat));
+			use = UseArray(a_data, a_count, elementSize);
+			Keep({ .slot = S, .bytes = static_cast<std::uint32_t>(use), .args = { a_count, a_format } });
 		}
 
 		template <Slot S>
@@ -1075,7 +1268,7 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			Original<VoidFn>(S)(a_renderer);
 			if (Capturing())
-				Keep([](void* a_self) { Original<VoidFn>(S)(a_self); });
+				Keep({ .slot = S });
 		}
 
 		template <Slot S>
@@ -1084,8 +1277,7 @@ namespace RenderGraph::Engine::Scaleform
 			Original<ColorFn>(S)(a_renderer, a_color);
 			if (!Capturing())
 				return;
-			const std::uint32_t color = *a_color;
-			Keep([color](void* a_self) { Original<ColorFn>(S)(a_self, &color); });
+			Keep({ .slot = S, .args = { static_cast<std::int32_t>(*a_color) } });
 		}
 
 		void FillStyleBitmap(void* a_renderer, const FillTexture* a_fill)
@@ -1093,8 +1285,7 @@ namespace RenderGraph::Engine::Scaleform
 			Original<FillBitmapFn>(kFillStyleBitmap)(a_renderer, a_fill);
 			if (!Capturing())
 				return;
-			const FillTexture fill = *a_fill;
-			Keep([fill](void* a_self) { Original<FillBitmapFn>(kFillStyleBitmap)(a_self, &fill); });
+			Keep({ .slot = kFillStyleBitmap, .bytes = KeepBytes(a_fill, sizeof(FillTexture)) });
 		}
 
 		void FillStyleGouraud(void* a_renderer, std::int32_t a_type, const FillTexture* a_texture0, const FillTexture* a_texture1, const FillTexture* a_texture2)
@@ -1102,35 +1293,27 @@ namespace RenderGraph::Engine::Scaleform
 			Original<FillGouraudFn>(kFillStyleGouraud)(a_renderer, a_type, a_texture0, a_texture1, a_texture2);
 			if (!Capturing())
 				return;
-			struct Fills
-			{
-				FillTexture textures[3];
-				bool present[3];
-			} fills{};
+			// The three textures kept side by side, each present when its bit in args[1] is.
+			FillTexture fills[3]{};
 			const FillTexture* given[3] = { a_texture0, a_texture1, a_texture2 };
+			std::int32_t present = 0;
 			for (int i = 0; i < 3; ++i)
 				if (given[i]) {
-					fills.textures[i] = *given[i];
-					fills.present[i] = true;
+					fills[i] = *given[i];
+					present |= 1 << i;
 				}
-			Keep([a_type, fills](void* a_self) {
-				Original<FillGouraudFn>(kFillStyleGouraud)(a_self, a_type, fills.present[0] ? &fills.textures[0] : nullptr, fills.present[1] ? &fills.textures[1] : nullptr,
-					fills.present[2] ? &fills.textures[2] : nullptr);
-			});
+			Keep({ .slot = kFillStyleGouraud, .bytes = KeepBytes(fills, sizeof(fills)), .args = { a_type, present } });
 		}
 
 		void DrawIndexedTriList(void* a_renderer, std::int32_t a_base, std::int32_t a_min, std::int32_t a_count, std::int32_t a_start, std::int32_t a_triangles)
 		{
 			if (!Capturing())
 				return Original<DrawTrianglesFn>(kDrawIndexedTriList)(a_renderer, a_base, a_min, a_count, a_start, a_triangles);
-			Keep([=](void* a_self) { Original<DrawTrianglesFn>(kDrawIndexedTriList)(a_self, a_base, a_min, a_count, a_start, a_triangles); });
+			Keep({ .slot = kDrawIndexedTriList, .args = { a_base, a_min, a_count, a_start, a_triangles } });
 			// The renderer's own early outs: nothing drawn.
 			if (!VideoModeSet(a_renderer) || !Field<const void*>(a_renderer, Layout::kVertexData) || !Field<const void*>(a_renderer, Layout::kIndexData) ||
 				!Field<std::uint32_t>(a_renderer, Layout::kIndexFormat) || a_triangles <= 0)
 				return;
-			// Copied first: a replay needs the arrays whatever ends the capture.
-			EnsureVertices(a_renderer);
-			EnsureIndices(a_renderer);
 			if (Field<const float*>(a_renderer, Layout::kWorld3D)) {
 				Abort(a_renderer, "a 3D draw");
 				return;
@@ -1165,9 +1348,10 @@ namespace RenderGraph::Engine::Scaleform
 			auto& capture = Current();
 			MatrixConstants(Field<float[6]>(a_renderer, Layout::kMatrix), record);
 			std::memcpy(record.texgen, capture.texgen, sizeof(record.texgen));
-			record.vertexOffset = capture.vertices.staging;
-			record.vertexStride = capture.vertices.elementSize;
-			record.indexOffset = capture.indices.staging + static_cast<std::uint32_t>(a_start) * 2;
+			// The draws read the arrays from the segment's staging bytes, copied at their first draw there.
+			record.vertexOffset = StageVertices(a_renderer);
+			record.vertexStride = Field<std::uint32_t>(a_renderer, Layout::kVertexStride);
+			record.indexOffset = StageIndices(a_renderer) + static_cast<std::uint32_t>(a_start) * 2;
 			record.indexSize = 2;
 			record.baseVertex = a_base;
 			command.vertexCount = static_cast<std::uint32_t>(a_triangles) * 3;
@@ -1178,10 +1362,9 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			if (!Capturing())
 				return Original<DrawLinesFn>(kDrawLineStrip)(a_renderer, a_base, a_lines);
-			Keep([=](void* a_self) { Original<DrawLinesFn>(kDrawLineStrip)(a_self, a_base, a_lines); });
+			Keep({ .slot = kDrawLineStrip, .args = { a_base, a_lines } });
 			if (!VideoModeSet(a_renderer) || !Field<const void*>(a_renderer, Layout::kVertexData))
 				return;
-			EnsureVertices(a_renderer);
 			Abort(a_renderer, "a line strip");
 		}
 
@@ -1192,11 +1375,11 @@ namespace RenderGraph::Engine::Scaleform
 				return Original<DrawBitmapsFn>(kDrawBitmaps)(a_renderer, a_bitmaps, a_listSize, a_start, a_count, a_texture, a_matrix, a_cache);
 			if (!VideoModeSet(a_renderer) || !a_bitmaps || !a_texture || a_count <= 0)
 				return;  // the renderer draws nothing (and its state changes are the next draw's anyway)
-			// The bitmaps and matrix copied, for a replay.
-			const auto* bitmaps = reinterpret_cast<const BitmapDesc*>(Copy(a_bitmaps + a_start, sizeof(BitmapDesc) * static_cast<std::size_t>(a_count)));
-			std::array<float, 6> matrix;
-			std::memcpy(matrix.data(), a_matrix, sizeof(matrix));
-			Keep([=](void* a_self) { Original<DrawBitmapsFn>(kDrawBitmaps)(a_self, bitmaps, a_count, 0, a_count, a_texture, matrix.data(), nullptr); });
+			// The matrix and the bitmaps kept, for a replay.
+			const std::uint32_t matrixBytes = KeepBytes(a_matrix, sizeof(float) * 6);
+			const auto* bitmaps = a_bitmaps + a_start;
+			const std::uint32_t bitmapBytes = KeepBytes(bitmaps, sizeof(BitmapDesc) * static_cast<std::size_t>(a_count));
+			Keep({ .slot = kDrawBitmaps, .bytes = matrixBytes, .args = { a_count, static_cast<std::int32_t>(bitmapBytes) }, .object = a_texture });
 			if (!IsPlainTexture(a_texture)) {
 				Abort(a_renderer, "bitmaps of a texture that is not a plain GTextureD3D1x (video)");
 				return;
@@ -1216,7 +1399,7 @@ namespace RenderGraph::Engine::Scaleform
 
 			auto& capture = Current();
 			DrawRecord record{};
-			MatrixConstants(*reinterpret_cast<const float(*)[6]>(matrix.data()), record);
+			MatrixConstants(*reinterpret_cast<const float (*)[6]>(a_matrix), record);
 			CxformConstants(Field<float[8]>(a_renderer, Layout::kCxform), record);
 			std::memcpy(record.texgen, capture.texgen, sizeof(record.texgen));
 			// Six vertices a bitmap (x, y, u, v, colour): left-top, right-top, left-bottom, then left-bottom, right-top, right-bottom.
@@ -1247,7 +1430,7 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			if (!Capturing())
 				return Original<MaskFn>(kBeginSubmitMask)(a_renderer, a_mode);
-			Keep([a_mode](void* a_self) { Original<MaskFn>(kBeginSubmitMask)(a_self, a_mode); });
+			Keep({ .slot = kBeginSubmitMask, .args = { a_mode } });
 			if (!VideoModeSet(a_renderer))
 				return;
 			auto& capture = Current();
@@ -1276,7 +1459,7 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			if (!Capturing())
 				return Original<VoidFn>(kEndSubmitMask)(a_renderer);
-			Keep([](void* a_self) { Original<VoidFn>(kEndSubmitMask)(a_self); });
+			Keep({ .slot = kEndSubmitMask });
 			if (!VideoModeSet(a_renderer))
 				return;
 			auto& capture = Current();
@@ -1289,7 +1472,7 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			if (!Capturing())
 				return Original<VoidFn>(kDisableMask)(a_renderer);
-			Keep([](void* a_self) { Original<VoidFn>(kDisableMask)(a_self); });
+			Keep({ .slot = kDisableMask });
 			if (!VideoModeSet(a_renderer))
 				return;
 			auto& capture = Current();
