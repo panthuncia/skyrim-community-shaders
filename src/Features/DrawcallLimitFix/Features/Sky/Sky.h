@@ -153,8 +153,11 @@ namespace DCLF::Features::Sky
 	/** @brief Whether the graph takes a_view's batches (the CS_ORG_SKY_VIEWS diagnostic: main, faces, or both when unset). */
 	bool TakesView(View a_view);
 
-	/** @brief Whether the graph takes the cloud layers too (CS_ORG_SKY_CLOUDS=0 leaves them to the engine). */
-	bool TakesClouds();
+	/**
+	 * @brief Whether the graph takes a_view's cloud layers too (CS_ORG_SKY_CLOUDS: 0 leaves them to the engine, main or faces takes
+	 * only that view's; unset: both).
+	 */
+	bool TakesClouds(View a_view);
 
 	// SkyCapture.cpp: the engine hooks, from the feature's install.
 	void InstallHooks();

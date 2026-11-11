@@ -19,7 +19,7 @@ namespace DCLF::Features::Sky
 			// At PostPostLoad, before the render graph initializes: the anchors' epochs are fixed then.
 			SkyDraws::Reserve();
 			// The faces' clouds write Cloud Shadows' occlusion into its graph faces, which it makes at its setup (after this).
-			if (TakesView(View::Face) && TakesClouds())
+			if (TakesView(View::Face) && TakesClouds(View::Face))
 				ORGCloudShadows::RequestGraphFaces();
 			InstallHooks();
 			logger::info("[DCLF] sky: on (CS_ORG_SKY=1): the engine's sky batches are drawn at the Sky and SkyReflections anchors");
@@ -43,10 +43,10 @@ namespace DCLF::Features::Sky
 		return !(views == "main" && a_view != View::Main) && !(views == "faces" && a_view != View::Face);
 	}
 
-	bool TakesClouds()
+	bool TakesClouds(View a_view)
 	{
-		static const bool clouds = !Switches::Off("CS_ORG_SKY_CLOUDS");
-		return clouds;
+		static const std::string clouds = Switches::Value("CS_ORG_SKY_CLOUDS");
+		return clouds != "0" && !(clouds == "main" && a_view != View::Main) && !(clouds == "faces" && a_view != View::Face);
 	}
 
 	Api::Feature Feature()
