@@ -154,7 +154,9 @@ faces (`... (reflection faces)`) and the occlusion maps (`... (occlusion maps)`)
   accumulators' groups live when the set does not hold the renderer.
 - **A shadow view DCLF does not cover.** The withholding map holds the covered views only, and nothing before the selection has
   published. With the latch on, `ShadowViews::AddCaster` also publishes every kept light's renderers (`SetEngineShadowRenderers`),
-  whatever the coverage; `BeginCasters` drops them.
+  whatever the coverage; `BeginCasters` drops them. That missed the interior lights' casters (below), so the shadow modes'
+  registration (`FUN_1414b2a60`, SE 99932 / AE 106576: the one function that builds a caster's shadow-map passes) is detoured under
+  the latch: while it runs for an accumulator in render mode 0xD-0xF, every pass its hooks hand on is `... (shadow views)`.
 - **An occlusion map DCLF does not draw** (phase 0, `occlusion map not taken`): every occluder is the engine's, vouched as
   `... (occlusion maps)`.
 
@@ -334,6 +336,16 @@ share, above; this run's map and journal windows skipped nothing); passes regist
 Reasons added: `menu views: menu 3D left to the engine`, `menu views: local map left to the engine`, `precipitation: no port` (22 of
 31). To check: `latch-census.env` logs `0 engine draws and dispatches skipped` in every window and no `[E] [ORG] flush latch: engine`
 line; the shots match `latch-census-off.env`. Nothing here registers a graph client, so nothing triggers a graph rebuild.
+
+### Interiors (`1111-165741-p35-latch-whiterun-g10`)
+
+After `org-port/dclf-vouch`, settled Whiterun skipped nothing, but WhiterunDragonsreach skipped 14 draws a frame, all into
+`kSHADOWMAPS` with clamped shadow-map Utility descriptors (vs `0xc000`, `0xc004`, `0xc09e`, `0xc09f`): rigid casters through
+RenderBatches and skinned ones through the skin path (71150, 70776). The window vouched no shadow-view pass at all, so neither the
+withholding map nor `SetEngineShadowRenderers` held the interior lights' renderers. Fix: the shadow registration detour above
+(branch `org-port/dclf-vouch-2`). `latch-census.env` and `latch-census-off.env` now stop in WhiterunDragonsreach (shot
+`dragonsreach`) after Blackreach and before the race menu; the interior's windows should log `dclf: not claimed (shadow views)` and
+`0 engine draws and dispatches skipped`.
 
 ## What is left
 
