@@ -130,6 +130,7 @@ namespace RenderGraph::AnchorPasses
 		struct DrawBindings
 		{
 			org::DeclaredViewToken target;
+			std::vector<org::DeclaredViewToken> extraTargets;
 			DeclaredBindings declared;
 		};
 
@@ -144,7 +145,10 @@ namespace RenderGraph::AnchorPasses
 				const auto& draw = spec->step;
 				auto view = draw.mip == kAllMips ? a_builder.RenderTarget(draw.target).View() :
 				                                   a_builder.RenderTarget(MipOf(draw.target, draw.mip), org::RtvView{ .mip = draw.mip }).View();
-				return { view, DeclareBindings(a_builder, draw.bindings) };
+				std::vector<org::DeclaredViewToken> extra;
+				for (const auto& target : draw.extraTargets)
+					extra.push_back(a_builder.RenderTarget(target).View());
+				return { view, std::move(extra), DeclareBindings(a_builder, draw.bindings) };
 			}
 
 			// The recording depends only on what the pass was made with.
@@ -157,8 +161,13 @@ namespace RenderGraph::AnchorPasses
 				const auto& spec = *a_frame.spec;
 				const auto& draw = spec.step;
 				const auto words = FillWords(draw.bindings, a_bindings.declared, spec.latch.get(), a_recording);
-				const RasterProgram::Colour colour{ .view = &a_bindings.target, .load = draw.load, .clear = draw.clear };
-				RasterProgram::DrawDesc desc{ .colours = { &colour, 1 }, .viewport = draw.viewport, .constants = words.Span(), .debugName = draw.name.c_str() };
+				std::array<RasterProgram::Colour, 8> colours{};
+				std::size_t colourCount = 0;
+				colours[colourCount++] = { .view = &a_bindings.target, .load = draw.load, .clear = draw.clear };
+				for (const auto& extra : a_bindings.extraTargets)
+					if (colourCount < colours.size())
+						colours[colourCount++] = { .view = &extra, .load = draw.load, .clear = draw.clear };
+				RasterProgram::DrawDesc desc{ .colours = { colours.data(), colourCount }, .viewport = draw.viewport, .constants = words.Span(), .debugName = draw.name.c_str() };
 				if (draw.gate) {
 					desc.indirect = &spec.gate->Latch();
 					desc.indirectOffset = spec.gate->Offset(*draw.gate);
@@ -320,7 +329,7 @@ namespace RenderGraph::AnchorPasses
 
 	void Builder::Add(Draw a_draw)
 	{
-		if (!a_draw.program || !a_draw.target) {
+		if (!a_draw.program || !a_draw.target || std::ranges::any_of(a_draw.extraTargets, [](const auto& a_target) { return !a_target; })) {
 			Fail(std::format("{}: a program or target is missing", a_draw.name));
 			return;
 		}
