@@ -413,13 +413,15 @@ namespace RenderGraph::Engine::Tripwire
 
 	/**
 	 * @brief The device: GetImmediateContext answers the context handle paired with it (PairDeviceAndContext), so a reader that
-	 * asks the device for its context gets the wrapping one. Everything else but IUnknown and the debug name is a tripwire.
+	 * asks the device for its context gets the wrapping one. CreateTexture2D asks the calling thread's ScopedCreateTexture2DHook
+	 * first. Everything else but IUnknown and the debug name is a tripwire.
 	 */
 	class DeviceHandle final : public Handle<DeviceHandle, ID3D11DeviceTrips, Kind::Device>
 	{
 	public:
 		~DeviceHandle();
 		void STDMETHODCALLTYPE GetImmediateContext(ID3D11DeviceContext** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateTexture2D(const D3D11_TEXTURE2D_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture2D** a_out) override;
 
 		/** @brief The paired context (a reference held), set once by PairDeviceAndContext. */
 		winrt::com_ptr<ID3D11DeviceContext> immediate;
