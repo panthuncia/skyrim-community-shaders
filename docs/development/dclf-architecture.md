@@ -2064,7 +2064,7 @@ Core keeps the ranges, the `kRasterForward` bits, `ForwardSortCS`, the shared ep
         plain draws read, so without it plain decals draw nothing. The colour dispatch gets `forwardCapacity` and `refractionCapacity` 0, so the
         build stages no forward draw. The shape keeps both, for the epoch's `empty`, `PrepareRefraction` and the layout. First person's forward
         slots map to no bucket (`GraphConditions::firstPersonForwardDirect`, its colour epoch in the stream).
-    -   **First person** (`CS_DCLF_FIRST_PERSON`, off by default: the engine draws it). `DepthCommitted` in a GPU-driven frame opens no site. It
+    -   **First person** (`CS_DCLF_FIRST_PERSON`, on by default). `DepthCommitted` in a GPU-driven frame opens no site. It
         only culls the hosted view with that commit. `FirstPersonColourReached` hands off to `view.direct`, which records the forward part alone.
     -   **Accepted differences against the GPU path.** No HZB test: the depth test still hides the pixels, at the cost of their overdraw. Frustum
         by sphere (the CPU cull's). LOD selection reads the observer's this-frame state while the shaders read `t120`, the GPU's state a frame
@@ -2835,7 +2835,12 @@ alpha test on; the sky tests without writing.
 The player's first-person skeleton is a category root of the one scene, drawn by two view epochs, the depth one hosted by the depth
 epoch (Features/FirstPerson; Core's view
 engine, `Core/Render/Epochs/ViewEpoch*.cpp`, `Core/Render/Views/ViewSlots.h`, shared with the reflection faces;
-`CS_DCLF_FIRST_PERSON`, needs skinned and actors; `CS_DCLF_FIRST_PERSON_DECALS`).
+`CS_DCLF_FIRST_PERSON`, on by default, needs skinned and actors; `CS_DCLF_FIRST_PERSON_DECALS`).
+-   **Coverage** (`Covered`): the latch, both epochs covered, the depth copy imported, no rebuild pending, and a way to draw its
+    forward part. That part has no plain buckets, so a GPU-driven graph without device-generated commands (AMD, Intel) draws it only
+    through the direct forward family (`GraphConditions::firstPersonForwardDirect`). Without either, the engine keeps the whole view.
+    It was off by default until 2026-11 because the engine's few dozen draws cost less than the two epochs (0.15 ms in the
+    hand-back sweep); it is on because coverage that depends on a switch is engine work left on the render thread.
 -   **Membership**: the first-person root (`CaptureRoot`), its geometry tracked like an actor's. Set phase `kSetFirstPerson`, view bit
     `kViewFirstPerson`, never `kViewMain`, a caster or an occluder bit. The classification stops at the root before the hidden test
     (its `kHidden` is the view's). A first-person slot takes part for opaque, alpha-tested and forward keys; never for refraction or

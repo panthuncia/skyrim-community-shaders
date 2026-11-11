@@ -72,8 +72,8 @@ Each texture keeps two demands, because they give up detail in different orders:
     case covers what cannot report (alpha-tested Lighting, grass, Effect shaders), which would otherwise blur on screen when distance is pulled back.
 -   **Distance only:** everything else, which is mostly surfaces out of view.
 
-First person is drawn by the engine unless `CS_DCLF_FIRST_PERSON=1`, so the arms and weapon cannot report. Native binds are their only on-screen demand, which
-is why that rule's wait is short. Their distance demand exists, but it is the third-person body's and proves nothing about what the view shows.
+With `CS_DCLF_FIRST_PERSON=0` first person is drawn by the engine, so the arms and weapon cannot report. Native binds are then their only on-screen
+demand, which is why that rule's wait is short. Their distance demand exists, but it is the third-person body's and proves nothing about what the view shows.
 
 The finest of the two wins, after the budget's pull-back. The render thread's only part is a position, a direction and two ratios per frame, in a
 commit hook.
