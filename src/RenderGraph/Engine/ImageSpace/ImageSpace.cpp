@@ -129,13 +129,6 @@ namespace RenderGraph::Engine::ImageSpace
 			std::array<std::uint32_t, kMaxSlots> samplers{};  // sampler heap indices
 		};
 
-		/** @brief A taken draw waiting for its batch's run: its pass and where its constants are. */
-		struct Pending
-		{
-			std::uint32_t entry = 0;
-			ConstantsAt at;
-		};
-
 		/** @brief OrgEngineConstantsAt in Common/OrgEngineConstants.hlsli. */
 		struct ConstantsAt
 		{
@@ -148,6 +141,13 @@ namespace RenderGraph::Engine::ImageSpace
 			std::uint32_t padding[2]{};
 		};
 		static_assert(sizeof(ConstantsAt) == 32);
+
+		/** @brief A taken draw waiting for its batch's run: its pass and where its constants are. */
+		struct Pending
+		{
+			std::uint32_t entry = 0;
+			ConstantsAt at;
+		};
 
 		enum class Phase : std::uint8_t
 		{
