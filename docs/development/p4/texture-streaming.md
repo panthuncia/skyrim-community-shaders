@@ -8,7 +8,7 @@ Both are behind switches, and the DXVK paths stay the default:
 
 | Switch | What it does |
 | --- | --- |
-| `CS_ORG_TEXTURE_STREAMING=1` | Scheduled window builds make ORG textures, uploaded by a copy pass at the Present anchor. |
+| `CS_ORG_TEXTURE_STREAMING=1` | Scheduled window builds make ORG textures, created with their mips and read by index. |
 | `CS_ORG_VRAM_SOURCE=org` | VRAM attribution and the budget controller read BasicRHI's memory budget and ORG's allocator. |
 
 Graph windows imply the ORG reading for the controller even without the second switch, because their memory is in ORG's
@@ -31,33 +31,42 @@ allocator.
 ## Design
 
 ```
-worker (streaming domain)            render thread, after Present        Present anchor (next frame)
-  read mips from the file      ->      wrap the image for D3D11      ->     copy staging -> image (one-shot pass)
-  allocate image (ORG allocator)       import it into the graph             executed: install, gate opens
-  stage mips in an upload buffer       register the batch's copy pass
+worker (streaming domain)                          render thread, at Present (FrameTick)
+  read mips from the file                    ->      install each staged window in its shell
+  allocate the image (ORG allocator)                 finish its completion: the gate opens
+  wrap it for D3D11 with the mips as initial data
+  import it into the graph for its descriptor
 ```
+
+The first version staged the mips in an upload buffer and filled each batch with a one-shot copy pass at the Present anchor.
+Each batch then rebuilt the anchor's graph twice (joining, then leaving once its pass ran): 137 registrations and 206 builds
+in a minute of loading. The windows are now made with their contents, and nothing registers with the graph.
 
 -   **Windows are ORG textures.** The image comes from ORG's allocator (`org::memory::CreateAllocatedResource`, added to ORG
     for this), labelled `Game/Textures/<folder>` like DXVK's windows and spillable like them. DXVK wraps it
-    (`dxvkCreateTextureFromVkImage`) so the shell can redirect native binds to it; that is the guest phase. DXVK zeroes the
-    image in its stream at the wrap, which is before the copy pass in the same stream.
+    with its mips as initial data (`RenderGraphRuntime::WrapTexture`, `dxvkCreateTextureFromVkImageWithData`), so the shell can
+    redirect native binds to it; that is the guest phase. DXVK writes the mips in its own stream (its initializer), ahead of
+    any later D3D11 or graph use of the image.
 -   **Bindless.** The image is imported into the graph in the layout DXVK rests it in (`RenderGraph::ImportDxvkTexture`). Its
     default SRV is a descriptor in ORG's resource heap. Drawcall Limit Fix's importer (`GpuTextures::Import`) takes that
     index for a graph window (`TextureStreaming::GraphWindowOf`), with no DXVK import, tracking or second descriptor.
--   **Uploads.** One one-shot copy pass per batch (`PassDesc::once`) at the Present anchor declares each window as its copy
-    destination, so the graph moves the image to the copy layout and back to its home. Async epochs cannot record texture
-    uploads through the upload service, which is why it is a pass. It runs on the graphics queue, in DXVK's stream: no copy
-    queue and no wait, so the shared copy queue's rule never comes up. A batch is at most 256 windows or 256 MiB.
+-   **Uploads.** None on the graph: DXVK's initializer writes the mips at the wrap. No pass of the graph names a window, so
+    the graph never moves it out of DXVK's resting layout, and the graph is never built again for a window.
+-   **Threads.** The worker makes the image, the wrap, the import and its descriptor (`ORGWindows.cpp`, `MakeWindow`), as
+    engine textures do (`Textures::Create`). That is safe off the render thread: BasicRHI's resource registry allocates under
+    its lock, ORG's `DescriptorHeapManager` assigns the SRV slot under its mutation mutex, and the resource's ECS token is
+    posted to `ECSManager`'s queue. The host lives until DXVK destroys its device.
 -   **Readiness.** `BuildWindowAsync` returns a `PendingWindow`. DCLF's state graph turns it into the window artifact's GPU
     submission set, and the texture gate now asks for `GpuReady`. A D3D11 window has none and is GPU ready at once, as before.
     So objects wait for their base window as they always did, and frames never wait.
--   **Install.** After the run that submitted the batch (`ClientDesc::executed`), the render thread sets each shell's window
-    and tells DCLF of the swap. Native binds after that point in the stream read the new window.
+-   **Install.** At the render owner's next Present (`ORG::FrameTick`), the render thread sets each staged window in its
+    shell and tells DCLF of the swap. Its mips are in DXVK's stream since the wrap, so native binds after that point read the
+    new window.
 -   **Release.** A window is held by its texture's record and by each DCLF import. When the last one lets go, its D3D11 view
     and wrap are released on the render thread, then its descriptor and memory go through `ReleaseAfterD3D11`.
 -   **Fallback.** Synchronous builds (the safety net, an import that finds no window, the full-chain test mode) stay on D3D11.
-    If the graph cannot wrap, import or register, the backend turns off for the session and every window it holds is posted
-    again as a D3D11 build.
+    If the graph cannot wrap or import a window, the caller builds it on D3D11; if the graph goes away with windows staged,
+    the backend turns off for the session and every window it holds is posted again as a D3D11 build.
 -   **Controller.** `Policy::StepPullback` and the rest of the policy are unchanged. Only the reading under it moves:
     `ReadOrgMemory` adds ORG's allocator to DXVK's memory, uses BasicRHI's `usageAtBudget` flag for AMD's clamp (keeping the
     0.995 share as a second test), and counts spilled allocations as overflow. The clamp rule (hold what is outside while
@@ -79,8 +88,9 @@ worker (streaming domain)            render thread, after Present        Present
 ## What to test first
 
 1.  `tools/cs-ab/scenarios/tex-org.env` against `tex-org-off.env`: the log line `[TextureStreaming] windows are made on the
-    render graph`, `dclf:tex-stats`'s new line (`render graph windows: N uploaded in M copy passes, 0 built on D3D11
-    instead`), no `graph windows are off` error, screenshots equal to the baseline (distant land included).
+    render graph`, `dclf:tex-stats`'s line `render graph windows: N made, installed in M frames, 0 built on D3D11 instead`
+    (`TextureStreaming::Stats::graphWindows`, `graphInstallFrames`, `graphRetried`), no `graph windows are off` error, screenshots
+    equal to the baseline (distant land included).
 2.  `CS_DCLF_TEX_STREAM_DELAY_MS=100` with `tex-org.env`: late windows still hold objects back (no flat silhouettes).
 3.  `vram-org.env`: `dclf:vram-json` has `"heapSource": "org"`, and its device-local totals match the DXVK run within a few
     percent. On the RX 6600, check the clamp note appears when the use reaches the budget.
@@ -89,15 +99,11 @@ worker (streaming domain)            render thread, after Present        Present
 
 -   The window's descriptor index assumes ORG's resource heap is the heap DCLF's shaders index, as `IDescriptorService`'s
     descriptors are. If DCLF draws read garbage for graph windows only, this is the first thing to check.
--   BC tail mips smaller than a block (2x2, 1x1) are copied with their texel size. BasicRHI's Vulkan copy takes the row
-    length in texels from the 256-byte pitch (`VkBuildBufferImageCopy`), and Vulkan accepts an extent equal to the mip's. The
-    D3D12 path has not been looked at.
--   The Present anchor runs in menus and on the map, and on loading screens' own present loop only with
-    `CS_ORG_LOADING_THREAD=1` (P5.12). Without it, windows staged during a loading screen wait for the first presented frame.
-    With it, a batch is registered there, but with Drawcall Limit Fix's explicit builds its graph is built only at the first
-    world frame's build point, so the upload still lands then (p5/loading-screen.md, "Rebuilds in this lane").
--   Each batch rebuilds the Present anchor's graph twice (with and without the one-shot pass). At most one batch is in flight,
-    so this is at most two builds a frame while streaming is busy.
+-   BC tail mips smaller than a block (2x2, 1x1) are written by DXVK's initializer from the `D3D11_SUBRESOURCE_DATA` pitches,
+    as for any D3D11 texture with initial data.
+-   The install runs on the render owner's Presents: in menus and on the map, and on loading screens' own present loop only
+    with `CS_ORG_LOADING_THREAD=1` (P5.12). Without it, windows made during a loading screen wait for the main thread's first
+    presented frame. No graph build is involved either way.
 
 ## Native mode (later)
 

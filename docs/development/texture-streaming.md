@@ -132,9 +132,9 @@ noise (16.5 against 16.0 fps) and hid the overflow from DXVK's figures, so it wa
 ### On the render graph
 
 With `CS_ORG_TEXTURE_STREAMING=1` a scheduled window is an ORG texture instead of a D3D11 one: ORG's allocator holds its memory,
-DXVK wraps it so the shell still names it for native binds, a one-shot copy pass at the Present anchor fills it, and Drawcall
-Limit Fix reads it by its own descriptor index. The window artifact is GPU ready once that pass was submitted, and the texture
-gate waits for that. The policy, the controller and the switches above are unchanged. Synchronous builds (the safety net) stay
+DXVK wraps it with its mips as initial data so the shell still names it for native binds (no graph pass fills it), and Drawcall
+Limit Fix reads it by its own descriptor index. The window artifact is GPU ready once the render thread installed it at its
+next Present, and the texture gate waits for that. The policy, the controller and the switches above are unchanged. Synchronous builds (the safety net) stay
 D3D11 windows, and the two kinds mix freely. Details: [p4/texture-streaming.md](./p4/texture-streaming.md).
 
 ## What carries over from BasicRenderer

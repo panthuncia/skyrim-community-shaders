@@ -69,8 +69,8 @@ namespace TextureStreaming::ORG
 	/** @brief For the reports: windows the graph made, the frames that installed them, and builds it gave back to D3D11. */
 	struct Counters
 	{
-		std::uint64_t uploaded = 0;
-		std::uint64_t batches = 0;
+		std::uint64_t made = 0;
+		std::uint64_t installFrames = 0;
 		std::uint64_t retried = 0;
 	};
 	Counters GetCounters();

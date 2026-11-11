@@ -1337,8 +1337,8 @@ namespace TextureStreaming
 		stats.otherReadMicroseconds = g_otherReadMicros.load(std::memory_order_relaxed);
 		stats.otherCreateMicroseconds = g_otherCreateMicros.load(std::memory_order_relaxed);
 		const auto graph = ORG::GetCounters();
-		stats.graphWindows = graph.uploaded;
-		stats.graphBatches = graph.batches;
+		stats.graphWindows = graph.made;
+		stats.graphInstallFrames = graph.installFrames;
 		stats.graphRetried = graph.retried;
 		stats.cardBytes = g_cardBytes.load(std::memory_order_relaxed);
 		stats.driverBudgetBytes = g_driverBudgetBytes.load(std::memory_order_relaxed);

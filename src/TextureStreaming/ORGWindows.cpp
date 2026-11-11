@@ -114,7 +114,7 @@ namespace TextureStreaming::ORG
 			std::atomic<bool> ready{ false };
 			std::atomic<bool> failed{ false };
 			std::atomic<std::uint64_t> serial{ 0 };
-			std::atomic<std::uint64_t> uploaded{ 0 }, batches{ 0 }, retried{ 0 };
+			std::atomic<std::uint64_t> made{ 0 }, installFrames{ 0 }, retried{ 0 };
 		};
 
 		// Never destroyed: a window let go during the process's exit still finds it.
@@ -286,8 +286,8 @@ namespace TextureStreaming::ORG
 				item->install(item->window);
 			item->completion->Finish();
 		}
-		state.uploaded.fetch_add(staged.size(), std::memory_order_relaxed);
-		state.batches.fetch_add(1, std::memory_order_relaxed);
+		state.made.fetch_add(staged.size(), std::memory_order_relaxed);
+		state.installFrames.fetch_add(1, std::memory_order_relaxed);
 	}
 
 	bool Available()
@@ -359,7 +359,7 @@ namespace TextureStreaming::ORG
 	Counters GetCounters()
 	{
 		const auto& state = S();
-		return { state.uploaded.load(std::memory_order_relaxed), state.batches.load(std::memory_order_relaxed), state.retried.load(std::memory_order_relaxed) };
+		return { state.made.load(std::memory_order_relaxed), state.installFrames.load(std::memory_order_relaxed), state.retried.load(std::memory_order_relaxed) };
 	}
 #else
 	class Window
