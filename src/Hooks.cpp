@@ -53,6 +53,7 @@
 #include "Features/Upscaling/DXVKInterop.h"
 #include "Features/Upscaling/Streamline.h"
 #include "Features/VolumetricLighting.h"
+#include "Features/VolumetricLighting/ORGVolumetricLighting.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
@@ -1354,6 +1355,13 @@ namespace Hooks
 		{
 			static void thunk(RE::BSGraphics::Renderer* renderer, RE::BSGraphics::ComputeShader* shader, uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
 			{
+				// Volumetric Lighting on the render graph: the VL render's dispatches are the graph's, never D3D11's.
+				auto& orgVolumetricLighting = ORGVolumetricLighting::Get();
+				if (orgVolumetricLighting.TakeEngineDispatch(CurrentlyDispatchedComputeShader && CurrentlyDispatchedComputeShader->name ?
+																 std::string_view(CurrentlyDispatchedComputeShader->name) :
+																 std::string_view{}))
+					return;
+
 				auto state = globals::state;
 				auto shaderCache = globals::shaderCache;
 				auto& vl = globals::features::volumetricLighting;
@@ -1361,6 +1369,8 @@ namespace Hooks
 				if (shaderCache->IsEnabled() && state->ShaderEnabled(RE::BSShader::Type::ImageSpace)) {
 					RE::BSImagespaceShader* isShader = CurrentlyDispatchedShader;
 					uint32_t techniqueId = CurrentComputeShaderTechniqueId;
+					// The D3D11 path's VL shaders. On the ORG path the VL render's dispatches are taken above, and the VL blur's
+					// call is the graph's (ORGVolumetricLighting), so none of these reach here.
 					if (vl.loaded) {
 						if (CurrentlyDispatchedShader == nullptr) {
 							techniqueId = 0;

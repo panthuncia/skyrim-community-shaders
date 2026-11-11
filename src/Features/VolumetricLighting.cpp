@@ -1,5 +1,6 @@
 #include "VolumetricLighting.h"
 
+#include "Features/VolumetricLighting/ORGVolumetricLighting.h"
 #include "I18n/I18n.h"
 #include "InteriorSun.h"
 #include "ShaderCache.h"
@@ -172,11 +173,31 @@ void VolumetricLighting::PostPostLoad()
 	REL::safe_fill(REL::RelocationID(100309, 107023).address() + REL::Relocate(0xA4, 0x406), REL::NOP, 3);
 	// Exit the loop after the first iteration
 	REL::safe_fill(REL::RelocationID(100309, 107023).address() + REL::Relocate(0x147, 0x4A9), REL::NOP, 6);
+
+	// The render-graph path (CS_ORG_VOLUMETRIC_LIGHTING=1): its anchor, and the engine's VL render, apply and blur detoured.
+	ORGVolumetricLighting::Reserve();
+	ORGVolumetricLighting::Install();
 }
 
 void VolumetricLighting::SetupResources()
 {
 	vlDataCB = new ConstantBuffer(ConstantBufferDesc<VLData>(), "VolumetricLighting::VLDataCB");
+	ORGVolumetricLighting::Get().Setup();
+}
+
+VolumetricLighting::TextureSize VolumetricLighting::VolumeSize(const bool a_interior) const
+{
+	// As SetupVL: the quality picks the engine's preset; Custom is set into the High preset's slot.
+	switch (static_cast<Quality>(a_interior ? settings.InteriorQuality : settings.ExteriorQuality)) {
+	case Quality::Low:
+		return *gVolumetricLightingSizeLow;
+	case Quality::Medium:
+		return *gVolumetricLightingSizeMedium;
+	case Quality::Custom:
+		return a_interior ? settings.InteriorCustomSize : settings.ExteriorCustomSize;
+	default:
+		return defaultSizeHigh;
+	}
 }
 
 void VolumetricLighting::EarlyPrepass()
