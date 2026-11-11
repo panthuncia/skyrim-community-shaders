@@ -379,7 +379,8 @@ namespace RenderGraph::Engine::ImageSpace
 		/**
 		 * @brief Why ImageSpace leaves a draw or dispatch to the engine on purpose, for the flush latch (Latch::EngineDraws around the
 		 * engine's call): an effect the port does not cover or did not select, a shape it refused (an inherent refusal), a shape this
-		 * session did not register, a failure on the graph's side, and the volumetric lighting compute (AE 107023 / SE 100309).
+		 * session did not register, and a failure on the graph's side. The volumetric lighting's render, apply and blur are
+		 * Features/VolumetricLighting/ORGVolumetricLighting's (CS_ORG_VOLUMETRIC_LIGHTING).
 		 */
 		const Latch::Reason& NotPortedReason()
 		{
@@ -399,11 +400,6 @@ namespace RenderGraph::Engine::ImageSpace
 		const Latch::Reason& FailedReason()
 		{
 			static const Latch::Reason reason{ "imagespace: failed on the graph" };
-			return reason;
-		}
-		const Latch::Reason& VolumetricReason()
-		{
-			static const Latch::Reason reason{ "imagespace: volumetric lighting compute" };
 			return reason;
 		}
 
@@ -2121,27 +2117,6 @@ namespace RenderGraph::Engine::ImageSpace
 		};
 
 		/**
-		 * @brief The volumetric lighting's render function (SE 100309, AE 107023 at 0x1414c4f40; called by Main::Draw, AE 36559+0x335):
-		 * its own dispatches (AE +0x31C generate, +0x48B raymarch, with CS's ISVolumetricLighting* replacements) call DispatchCSShader
-		 * directly and stay the engine's (imagespace.md, "What stays the engine's"), so the whole call runs in the latch's EngineDraws
-		 * scope. A detour, not a return-address test: Hooks.cpp's DispatchCSShader detour may sit outside this file's, so the return
-		 * address seen here can be CS's. Its arguments (Ghidra, AE: the VL data, a pointer, a byte) are integers; four are passed on.
-		 */
-		struct VolumetricLighting
-		{
-			static void thunk(void* a_data, void* a_second, std::uintptr_t a_third, std::uintptr_t a_fourth)
-			{
-				if (!IS().on) {
-					func(a_data, a_second, a_third, a_fourth);
-					return;
-				}
-				Latch::EngineDraws scope(VolumetricReason());
-				func(a_data, a_second, a_third, a_fourth);
-			}
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
-		/**
 		 * @brief BSGraphics::Renderer::DispatchCSShader (75532 / 77329): the current compute effect's dispatch is taken; any other
 		 * engine dispatch runs the batch first.
 		 */
@@ -2178,15 +2153,14 @@ namespace RenderGraph::Engine::ImageSpace
 		stl::detour_thunk<RenderReflections>(REL::RelocationID(100428, 107146));
 		stl::detour_thunk<DrawTriShape>(REL::RelocationID(75477, 77263));
 		stl::detour_thunk<DispatchCSShader>(REL::RelocationID(75532, 77329));
-		stl::detour_thunk<VolumetricLighting>(REL::RelocationID(100309, 107023));
 		auto& state = IS();
 		state.installed = ShaderRender::func.address() && HDRRender::func.address() && PreTonemapComposites::func.address() && ExplicitRender::func.address() &&
 		                  DispatchComputeShader::func.address() && RenderSSAO::func.address() && RenderReflections::func.address() && DrawTriShape::func.address() &&
-		                  DispatchCSShader::func.address() && VolumetricLighting::func.address();
+		                  DispatchCSShader::func.address();
 		if (state.installed)
 			logger::info(
 				"[ORG] ImageSpace: hooks installed (BSImagespaceShader::Render and its explicit-target form, DispatchComputeShader, the HDR effect, the pre-tonemap "
-				"composites, RenderSSAO, the reflections pass, DrawTriShape, DispatchCSShader, the volumetric lighting)");
+				"composites, RenderSSAO, the reflections pass, DrawTriShape, DispatchCSShader)");
 		else
 			logger::error("[ORG] ImageSpace: a hook could not be installed; the ImageSpace chain stays on D3D11");
 	}
