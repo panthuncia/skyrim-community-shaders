@@ -177,6 +177,22 @@ Keys used so far:
   per-call engine work are passes inside one frame graph, and the slot-per-run ring no longer applies.
 - **Found by:** P5.1, the first skeleton-org1 run (2026-11-10).
 
+### More runs of one anchor than the frame slot budget holds
+
+- **Need:** run an engine family's withheld work at as many points of the frame as the engine reaches it (ImageSpace: the SAO
+  chain in RenderWorld, the reflection pass, the pre-tonemap composites, the HDR effect, the end-of-frame effects, the copy
+  sub-region, the volumetric lighting compute), each point a batch that must run before the D3D11 or CS work that follows it.
+- **Who:** CS's ImageSpace port (P5.6). With every switch on the frame slots are 252 of 255 (4 frames in flight times every
+  epoch's runs a frame), so ImageSpace has four runs a frame and no room for a fifth. It takes RenderSSAO and the reflection pass
+  at one batch each and keeps two runs for the composites and the HDR effect; the end-of-frame effects (DOF/distant blur,
+  refraction, radial blur), the snow copy sub-region and the volumetric lighting compute stay D3D11 for want of a run.
+- **Where it fits:** a run that costs no slot of its own: several anchors' batches recorded into one epoch submission, or a
+  per-run cost below one ring slot for small epochs (a slot holds a whole graph's recordings; these batches are a few passes).
+  Alternatively a batch could be deferred past a scope's end until the next point that needs the D3D11 stream ordered, if the
+  runtime told a client when any other anchor or CS D3D11 pass is about to run (a "before any other in-stream work" callback).
+- **Guest phase only:** inside one frame graph (Phase 6) the batches are passes and the per-run slot cost goes away.
+- **Found by:** P5.6 wave 3, ImageSpace's share of the P5.13 residue (2026-11-11).
+
 ### A once-a-frame pass at an anchor that runs several times a frame
 
 - **Need:** a pass that runs once a frame at an anchor whose hook runs more than once a frame.

@@ -5,12 +5,31 @@
 // constant layout are vanilla's. Temporaries hold raw bits (uint4), as DXBC registers do; integer work goes
 // through asint/asuint and float work through asfloat. Checked against the vanilla shader on random inputs.
 
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t3 and s0-s3 from the heap (the EDITOR
+// build reads t0-t1), FrameBuffer from the captured PerFrame, PerGeometry from the engine-constants capture through the pass's latch.
+#	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISSAORAWAO_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, CS_Z_BufferTex, 0) X(SRV, Texture2D<float4>, NormalsTex, 1) X(SRV, Texture2D<float4>, AccumAOTex, 2) X(SRV, Texture2D<float4>, MotionVectorsTex, 3) X(SAMPLER, SamplerState, CS_Z_BufferSampler, 0) X(SAMPLER, SamplerState, NormalsSampler, 1) X(SAMPLER, SamplerState, AccumAOSampler, 2) X(SAMPLER, SamplerState, MotionVectorsSampler, 3) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISSAORAWAO_ORG_RESOURCES(ORG_HANDLE))
+ISSAORAWAO_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/DummyVSTexCoord.hlsl"
 
 #if defined(PSHADER)
 #	if defined(EDITOR)
 #		include "Common/FrameBuffer.hlsli"
 
+#		if defined(CS_ORG_BINDLESS)
+static float4 g_ProjInfos = OrgEngineRow(PerGeometryAt, 0);
+static float4 g_SSAOInfos = OrgEngineRow(PerGeometryAt, 1);
+static float4 g_ScreenInfos = OrgEngineRow(PerGeometryAt, 2);
+static float4 g_SSAOInfos2 = OrgEngineRow(PerGeometryAt, 3);
+#		else
 SamplerState CS_Z_BufferSampler : register(s0);
 SamplerState NormalsSampler : register(s1);
 Texture2D<float4> CS_Z_BufferTex : register(t0);
@@ -24,6 +43,7 @@ cbuffer PerGeometry : register(b2)
 	float4 g_ScreenInfos : packoffset(c2);
 	float4 g_SSAOInfos2 : packoffset(c3);
 };
+#		endif
 
 void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Target0)
 {
@@ -156,6 +176,12 @@ void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Ta
 #	else
 #		include "Common/FrameBuffer.hlsli"
 
+#		if defined(CS_ORG_BINDLESS)
+static float4 g_ProjInfos = OrgEngineRow(PerGeometryAt, 0);
+static float4 g_SSAOInfos = OrgEngineRow(PerGeometryAt, 1);
+static float4 g_ScreenInfos = OrgEngineRow(PerGeometryAt, 2);
+static float4 g_SSAOInfos2 = OrgEngineRow(PerGeometryAt, 3);
+#		else
 SamplerState CS_Z_BufferSampler : register(s0);
 SamplerState NormalsSampler : register(s1);
 SamplerState AccumAOSampler : register(s2);
@@ -173,6 +199,7 @@ cbuffer PerGeometry : register(b2)
 	float4 g_ScreenInfos : packoffset(c2);
 	float4 g_SSAOInfos2 : packoffset(c3);
 };
+#		endif
 
 void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Target0)
 {

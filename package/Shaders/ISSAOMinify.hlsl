@@ -1,3 +1,16 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0 and s0 from the heap, FrameBuffer
+// from the captured PerFrame, PerGeometry from the engine-constants capture through the pass's latch.
+#	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISSAOMINIFY_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, sourceTex, 0) X(SAMPLER, SamplerState, sourceSampler, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISSAOMINIFY_ORG_RESOURCES(ORG_HANDLE))
+ISSAOMINIFY_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/DummyVSTexCoord.hlsl"
 #include "Common/FrameBuffer.hlsli"
 
@@ -9,6 +22,11 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+static float4 g_RenderTargetResolution = OrgEngineRow(PerGeometryAt, 0);
+static float4 g_ContrastParams = OrgEngineRow(PerGeometryAt, 1);
+static float g_UseDynamicSampling = OrgEngineRow(PerGeometryAt, 2).x;
+#	else
 SamplerState sourceSampler : register(s0);
 
 Texture2D<float4> sourceTex : register(t0);
@@ -19,6 +37,7 @@ cbuffer PerGeometry : register(b2)
 	float4 g_ContrastParams : packoffset(c1);
 	float g_UseDynamicSampling : packoffset(c2);
 };
+#	endif
 
 float2 GetMinifiedTexCoord(float2 texCoord)
 {

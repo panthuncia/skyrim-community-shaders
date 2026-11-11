@@ -9,6 +9,18 @@
 // plus GRIDSIZE_X (horizontal) or GRIDSIZE_Y (vertical). The thread group sizes are vanilla's, because the game sizes the
 // dispatch for them. The weights are vanilla's numbers.
 
+#if defined(CS_ORG_BINDLESS)
+// The ORG build (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t1, s0-s1 and u0 from the heap (t1 and s1 are read only
+// with DEPTH_THRESHOLD), and the constants the engine uploaded for this dispatch (CS b0) from the engine-constants capture through
+// the pass's latch.
+#	define ORG_SHARED_CONSTANTS
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISBLURCS_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, InputTexture, 0) X(SRV, Texture2D<float4>, DepthTexture, 1) X(SAMPLER, SamplerState, LinearSampler, 0) X(SAMPLER, SamplerState, DepthSampler, 1) X(UAV, RWTexture2D<float4>, OutputTexture, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 0)
+ORG_PUSH_BLOCK(ISBLURCS_ORG_RESOURCES(ORG_HANDLE))
+ISBLURCS_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #if !defined(OUTPUT_CHANNEL_COUNT)
 #	define OUTPUT_CHANNEL_COUNT 3
 #endif
@@ -33,6 +45,10 @@ typedef float3 Texel;
 typedef float4 Texel;
 #endif
 
+#if defined(CS_ORG_BINDLESS)
+static float4 InvSize = OrgEngineRow(PerGeometryAt, 0);  // xy: one over the input size
+static float4 MaxUV = OrgEngineRow(PerGeometryAt, 1);    // xy: the largest UV to sample
+#else
 Texture2D<float4> InputTexture : register(t0);
 SamplerState LinearSampler : register(s0);
 #if defined(DEPTH_THRESHOLD)
@@ -47,6 +63,7 @@ cbuffer PerGeometry : register(b0)
 	float4 InvSize;  // xy: one over the input size
 	float4 MaxUV;    // xy: the largest UV to sample
 }
+#endif
 
 #if defined(GRIDSIZE_X)
 #	define SPAN GRIDSIZE_X

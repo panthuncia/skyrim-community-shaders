@@ -14,9 +14,11 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
+#	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/Engine/Constants/EngineConstants.h"
 #	include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #	include "RenderGraph/Engine/Pipeline/StateConversion.h"
+#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/ProgramCache.h"
 #	include "RenderGraph/RasterProgram.h"
@@ -39,6 +41,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include <memory>
 #	include <optional>
 #	include <set>
+#	include <span>
 #	include <string_view>
 #	include <tuple>
 #	include <unordered_map>
@@ -56,58 +59,88 @@ namespace RenderGraph::Engine::ImageSpace
 		constexpr const char* kClientId = "cs.engine.imagespace";
 		// Gate entries (one per pass). Every registration numbers its passes from 0 by their place in the frame; no draw is taken
 		// between a registration and the graph that holds it (Phase::Joining), so an older graph never runs with a newer latch.
-		constexpr std::uint32_t kGateEntries = 128;
+		constexpr std::uint32_t kGateEntries = 256;
 		// Frames in a cell without a new shape before the first registration: the luminance chain alternates its last targets
 		// every frame, and effects that follow the weather or the camera show up within a few seconds.
 		constexpr std::uint32_t kLearnFrames = 120;
-		// SRV and sampler slots a shader file's ORG push block lists (t0..t(n-1), then s0..s(n-1)).
-		constexpr std::uint32_t kMaxSlots = 3;
+		// SRV slots a shader file's ORG push block lists at most (t0..t(n-1); its samplers and UAVs follow).
+		constexpr std::uint32_t kMaxSlots = 5;
+
+		/**
+		 * @brief How a ShapeKey names an input: an engine render target (its RE::RENDER_TARGET), or with one of these bits an engine
+		 * depth-stencil target's depth SRV (RE::RENDER_TARGETS_DEPTHSTENCIL) or a cubemap target (RE::RENDER_TARGETS_CUBEMAP).
+		 */
+		constexpr std::int32_t kDepthInput = 0x10000;
+		constexpr std::int32_t kCubeInput = 0x20000;
+		constexpr std::int32_t kInputIndexMask = 0xFFFF;
 
 		/** @brief One effect the port covers: the engine's effect, its CS source and the slots it reads. */
 		struct EffectInfo
 		{
-			Effects::ImageSpaceEffectEnum id;  // its index in ImageSpaceManager::effects (the same on SE and AE)
+			Effects::ImageSpaceEffectEnum id;  // its index in ImageSpaceManager::effects (ImageSpaceManager::GetCurrentIndex)
 			std::string_view effectName;       // R4's enum name
 			std::string_view group;            // for CS_ORG_IMAGESPACE_EFFECTS
 			const char* source;                // under Data/Shaders
-			std::uint32_t slots;               // the source's SRV and sampler count in its ORG resource list
-			std::uint32_t reads;               // bit per texture slot the pixel stage reads with these defines
+			std::uint32_t slots;               // the source's SRV count in its ORG resource list
+			std::uint32_t reads;               // bit per texture slot the shader reads with these defines
+			std::uint32_t samplers;            // the source's sampler count (s0..s(n-1)): a read slot below it has its sampler
+			std::uint32_t cubes = 0;           // bit per slot CS binds the reflection cubemap to itself (VanillaBinding.cpp)
+			bool compute = false;              // a compute shader (BSImagespaceShader::DispatchComputeShader): one UAV, CS b0
 		};
 
 		// The engine slots and their names are R4's (engine-d3d11-surface.md); the read masks follow each source's code for the
 		// effect's defines (GetShaderMacros, p5/imagespace-shaders.md).
-		constexpr std::array<EffectInfo, 18> kEffects{ {
-			{ Effects::ISHDRDownSample16, "ISHDRDownSample16", "hdr", "ISHDR.hlsl", 3, 0b001 },
-			{ Effects::ISHDRDownSample4, "ISHDRDownSample4", "hdr", "ISHDR.hlsl", 3, 0b001 },
-			{ Effects::ISHDRDownSample16Lum, "ISHDRDownSample16Lum", "hdr", "ISHDR.hlsl", 3, 0b001 },
-			{ Effects::ISHDRDownSample4RGB2Lum, "ISHDRDownSample4RGB2Lum", "hdr", "ISHDR.hlsl", 3, 0b001 },
-			{ Effects::ISHDRDownSample4LumClamp, "ISHDRDownSample4LumClamp", "hdr", "ISHDR.hlsl", 3, 0b001 },
-			{ Effects::ISHDRDownSample16LumClamp, "ISHDRDownSample16LumClamp", "hdr", "ISHDR.hlsl", 3, 0b001 },
-			{ Effects::ISHDRDownSample4LightAdapt, "ISHDRDownSample4LightAdapt", "hdr", "ISHDR.hlsl", 3, 0b011 },
-			{ Effects::ISHDRDownSample16LightAdapt, "ISHDRDownSample16LightAdapt", "hdr", "ISHDR.hlsl", 3, 0b011 },
-			{ Effects::ISBrightPassBlur3, "ISBrightPassBlur3", "bloom", "ISBlur.hlsl", 2, 0b11 },
-			{ Effects::ISBrightPassBlur5, "ISBrightPassBlur5", "bloom", "ISBlur.hlsl", 2, 0b11 },
-			{ Effects::ISBrightPassBlur7, "ISBrightPassBlur7", "bloom", "ISBlur.hlsl", 2, 0b11 },
-			{ Effects::ISBrightPassBlur9, "ISBrightPassBlur9", "bloom", "ISBlur.hlsl", 2, 0b11 },
-			{ Effects::ISBrightPassBlur11, "ISBrightPassBlur11", "bloom", "ISBlur.hlsl", 2, 0b11 },
-			{ Effects::ISBrightPassBlur13, "ISBrightPassBlur13", "bloom", "ISBlur.hlsl", 2, 0b11 },
-			{ Effects::ISBrightPassBlur15, "ISBrightPassBlur15", "bloom", "ISBlur.hlsl", 2, 0b11 },
-			{ Effects::ISCompositeVolumetricLighting, "ISCompositeVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b01 },
-			{ Effects::ISCompositeLensFlare, "ISCompositeLensFlare", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b10 },
-			{ Effects::ISCompositeLensFlareVolumetricLighting, "ISCompositeLensFlareVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b11 },
-		} };
+		constexpr auto kEffects = std::to_array<EffectInfo>({
+			{ Effects::ISHDRDownSample16, "ISHDRDownSample16", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
+			{ Effects::ISHDRDownSample4, "ISHDRDownSample4", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
+			{ Effects::ISHDRDownSample16Lum, "ISHDRDownSample16Lum", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
+			{ Effects::ISHDRDownSample4RGB2Lum, "ISHDRDownSample4RGB2Lum", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
+			{ Effects::ISHDRDownSample4LumClamp, "ISHDRDownSample4LumClamp", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
+			{ Effects::ISHDRDownSample16LumClamp, "ISHDRDownSample16LumClamp", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
+			{ Effects::ISHDRDownSample4LightAdapt, "ISHDRDownSample4LightAdapt", "hdr", "ISHDR.hlsl", 3, 0b011, 3 },
+			{ Effects::ISHDRDownSample16LightAdapt, "ISHDRDownSample16LightAdapt", "hdr", "ISHDR.hlsl", 3, 0b011, 3 },
+			{ Effects::ISBrightPassBlur3, "ISBrightPassBlur3", "bloom", "ISBlur.hlsl", 2, 0b11, 2 },
+			{ Effects::ISBrightPassBlur5, "ISBrightPassBlur5", "bloom", "ISBlur.hlsl", 2, 0b11, 2 },
+			{ Effects::ISBrightPassBlur7, "ISBrightPassBlur7", "bloom", "ISBlur.hlsl", 2, 0b11, 2 },
+			{ Effects::ISBrightPassBlur9, "ISBrightPassBlur9", "bloom", "ISBlur.hlsl", 2, 0b11, 2 },
+			{ Effects::ISBrightPassBlur11, "ISBrightPassBlur11", "bloom", "ISBlur.hlsl", 2, 0b11, 2 },
+			{ Effects::ISBrightPassBlur13, "ISBrightPassBlur13", "bloom", "ISBlur.hlsl", 2, 0b11, 2 },
+			{ Effects::ISBrightPassBlur15, "ISBrightPassBlur15", "bloom", "ISBlur.hlsl", 2, 0b11, 2 },
+			{ Effects::ISCompositeVolumetricLighting, "ISCompositeVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b01, 2 },
+			{ Effects::ISCompositeLensFlare, "ISCompositeLensFlare", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b10, 2 },
+			{ Effects::ISCompositeLensFlareVolumetricLighting, "ISCompositeLensFlareVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b11, 2 },
+			// RenderSSAO (100520 / 107245), through the explicit-target Render (100951 / 107733). Its composite (ISSAOComposite*) stays
+			// D3D11: CS binds fog, IBL and other feature inputs to it that the engine's texture list does not name.
+			{ Effects::ISSAOCameraZ, "ISSAOCameraZ", "sao", "ISSAOCameraZ.hlsl", 1, 0b1, 1 },
+			{ Effects::ISMinify, "ISMinify", "sao", "ISSAOMinify.hlsl", 1, 0b1, 1 },
+			{ Effects::ISMinifyContrast, "ISMinifyContrast", "sao", "ISSAOMinify.hlsl", 1, 0b1, 1 },
+			{ Effects::ISSAORawAO, "ISSAORawAO", "sao", "ISSAORawAO.hlsl", 4, 0b1111, 4 },
+			{ Effects::ISSAORawAONoTemporal, "ISSAORawAONoTemporal", "sao", "ISSAORawAO.hlsl", 4, 0b0011, 4 },
+			{ Effects::ISSAOBlurH, "ISSAOBlurH", "sao", "ISSAOBlur.hlsl", 1, 0b1, 1 },
+			{ Effects::ISSAOBlurV, "ISSAOBlurV", "sao", "ISSAOBlur.hlsl", 1, 0b1, 1 },
+			// The screen-space reflections pass (100428 / 107146): the normal mask's downsample, the ray march (t4: the reflection
+			// cubemap CS binds) and the separable compute blur (107207: horizontal, then vertical, each through 107734).
+			{ Effects::ISDownsampleIgnoreBrightest, "ISDownsampleIgnoreBrightest", "ssr", "ISDownsample.hlsl", 3, 0b001, 3 },
+			{ Effects::ISReflectionsRayTracing, "ISReflectionsRayTracing", "ssr", "ISReflectionsRayTracing.hlsl", 5, 0b11111, 4, 0b10000 },
+			{ Effects::ISReflectionBlurHCS, "ISReflectionBlurHCS", "ssr", "ISBlurCS.hlsl", 2, 0b01, 2, 0, true },
+			{ Effects::ISReflectionBlurVCS, "ISReflectionBlurVCS", "ssr", "ISBlurCS.hlsl", 2, 0b01, 2, 0, true },
+		});
 
-		/** @brief What one pass is made for: the effect's shader, its output and inputs, its samplers and its blend state. */
+		/**
+		 * @brief What one pass is made for: the effect's shader, its output and inputs, its samplers and its blend state. A compute
+		 * shape's output is the render target behind its UAV (u0), and it has no blend state.
+		 */
 		struct ShapeKey
 		{
 			const void* shader = nullptr;  // the engine's BSImagespaceShader
 			std::int32_t output = -1;      // RE::RENDER_TARGET
-			std::array<std::int32_t, kMaxSlots> inputs{ -1, -1, -1 };
+			std::array<std::int32_t, kMaxSlots> inputs{ -1, -1, -1, -1, -1 };  // kDepthInput / kCubeInput, or a render target
 			std::array<std::uint32_t, kMaxSlots> address{};
 			std::array<std::uint32_t, kMaxSlots> filter{};
 			const void* blend = nullptr;  // the engine's ID3D11BlendState for the draw (its state table entry)
+			bool compute = false;
 
-			auto Tie() const { return std::tie(shader, output, inputs, address, filter, blend); }
+			auto Tie() const { return std::tie(shader, output, inputs, address, filter, blend, compute); }
 			bool operator<(const ShapeKey& a_other) const { return Tie() < a_other.Tie(); }
 			bool operator==(const ShapeKey& a_other) const { return Tie() == a_other.Tie(); }
 		};
@@ -122,15 +155,16 @@ namespace RenderGraph::Engine::ImageSpace
 			std::shared_ptr<org::ExternalTextureResource> output;
 			std::array<std::shared_ptr<org::ExternalTextureResource>, kMaxSlots> inputs;
 			std::shared_ptr<const RasterProgram> program;
+			std::shared_ptr<const ComputeProgram> computeProgram;
 			std::array<std::uint32_t, kMaxSlots> samplers{};  // sampler heap indices
 		};
 
 		/** @brief OrgEngineConstantsAt in Common/OrgEngineConstants.hlsli. */
 		struct ConstantsAt
 		{
-			std::uint32_t srv = 0;  // PerGeometry (PS b2)
+			std::uint32_t srv = 0;  // PerGeometry (PS b2), or a dispatch's constants (CS b0)
 			std::uint32_t offset = 0;
-			std::uint32_t frameSrv = 0;  // PerFrame (PS b12), read as FrameBuffer
+			std::uint32_t frameSrv = 0;  // PerFrame (PS b12), read as FrameBuffer; unused by a dispatch
 			std::uint32_t frameOffset = 0;
 			std::uint32_t size = 0;  // the bound bytes of each: rows past them read 0, as on D3D11
 			std::uint32_t frameSize = 0;
@@ -138,11 +172,13 @@ namespace RenderGraph::Engine::ImageSpace
 		};
 		static_assert(sizeof(ConstantsAt) == 32);
 
-		/** @brief A taken draw waiting for its batch's run: its pass and where its constants are. */
+		/** @brief A taken draw or dispatch waiting for its batch's run: its pass, where its constants are, and a dispatch's groups. */
 		struct Pending
 		{
 			std::uint32_t entry = 0;
 			ConstantsAt at;
+			bool compute = false;
+			std::array<std::uint32_t, 3> groups{};
 		};
 
 		enum class Phase : std::uint8_t
@@ -153,16 +189,39 @@ namespace RenderGraph::Engine::ImageSpace
 			Live,      // the client's passes draw the shapes they were made for
 		};
 
-		/** @brief The BSImagespaceShader::Render call in progress. */
+		/** @brief The BSImagespaceShader::Render (or DispatchComputeShader) call in progress. */
 		struct EffectScope
 		{
 			const RE::BSImagespaceShader* shader = nullptr;
 			std::size_t effect = 0;
 			bool eligible = false;  // a covered, selected effect whose draw may be taken
-			bool drew = false;      // its draw reached DrawTriShape
+			bool drew = false;      // its draw reached DrawTriShape (its dispatch DispatchCSShader)
+			bool compute = false;   // a DispatchComputeShader call
 		};
 
-		/** @brief A program's key: the effect, the target's format and the engine blend state. */
+		/**
+		 * @brief The engine functions whose ImageSpace work is taken, each a scope: its draws are batched, and the batch runs at the
+		 * scope's end at the latest (CS code around these calls may use D3D11 or run other anchors).
+		 */
+		enum class ScopeKind : std::uint32_t
+		{
+			Composites,   // ImageSpaceManager::RenderPreTonemapComposites (99024 / 105675)
+			HDR,          // ImageSpaceEffectHDR::Render (100465 / 107183)
+			SSAO,         // RenderSSAO (100520 / 107245)
+			Reflections,  // the screen-space reflections pass (100428 / 107146)
+		};
+
+		/**
+		 * @brief How many batches a scope may start in a frame. The SAO and reflection passes come early in the frame; one batch each
+		 * keeps two of the anchor's runs a frame (FrameAnchors::RunsPerFrame, 4) for the composites and the HDR effect, which come
+		 * last. A cut SAO or reflection batch leaves the rest of that scope's draws to the engine.
+		 */
+		constexpr std::uint32_t BatchesAllowed(ScopeKind a_kind)
+		{
+			return a_kind == ScopeKind::SSAO || a_kind == ScopeKind::Reflections ? 1u : UINT32_MAX;
+		}
+
+		/** @brief A program's key: the effect, the target's format and the engine blend state (none for a compute program). */
 		using ProgramKey = std::tuple<std::size_t, rhi::Format, const void*>;
 
 		struct ImageSpaceState
@@ -183,8 +242,10 @@ namespace RenderGraph::Engine::ImageSpace
 			std::vector<ShapeKey> candidates;                                                         // seen, not registered yet
 			std::map<ShapeKey, std::uint32_t> positions;            // each shape's place in its frame: scope << 16 | draw within the scope
 			std::set<std::pair<std::int32_t, std::int32_t>> swaps;  // targets that stand in for each other (ping-pong, alternation)
-			std::uint32_t scope = 0;                                // the current scope (0 the pre-tonemap composites, 1 the HDR effect)
-			std::uint32_t drawIndex = 0;                            // eligible draws so far in the current scope
+			std::uint32_t scope = 0;                                // the current scope (ScopeKind)
+			std::uint32_t drawIndex = 0;                            // eligible draws and dispatches so far in the current scope
+			std::uint32_t scopeBatches = 0;                         // batches the current scope started
+			std::uint32_t scopeBatchLimit = UINT32_MAX;             // BatchesAllowed of the current scope
 			std::uint32_t nextEntry = 0;
 			std::uint32_t registrations = 0;
 			std::uint32_t quietFrames = 0;
@@ -214,6 +275,13 @@ namespace RenderGraph::Engine::ImageSpace
 		ProgramCache<RasterProgram, ProgramKey>& Programs()
 		{
 			static ProgramCache<RasterProgram, ProgramKey> programs{ "ImageSpace" };
+			return programs;
+		}
+
+		/** @brief The compute effects' programs, by kEffects index. */
+		ProgramCache<ComputeProgram, std::size_t>& ComputePrograms()
+		{
+			static ProgramCache<ComputeProgram, std::size_t> programs{ "ImageSpace compute" };
 			return programs;
 		}
 
@@ -274,7 +342,7 @@ namespace RenderGraph::Engine::ImageSpace
 		const RE::BSImagespaceShader* ShaderOf(std::size_t a_effect)
 		{
 			auto* manager = RE::ImageSpaceManager::GetSingleton();
-			const auto index = static_cast<std::uint32_t>(kEffects[a_effect].id);
+			const std::uint32_t index = RE::ImageSpaceManager::GetCurrentIndex(kEffects[a_effect].id);
 			if (!manager || index >= manager->effects.size())
 				return nullptr;
 			return static_cast<const RE::BSImagespaceShader*>(manager->effects[static_cast<decltype(manager->effects)::size_type>(index)]);
@@ -292,8 +360,11 @@ namespace RenderGraph::Engine::ImageSpace
 			return it != state.effectOf.end() ? it->second : -1;
 		}
 
-		/** @brief The engine render target a shader resource view is, or -1. kFRAMEBUFFER (an RTV only) is never one. */
-		std::int32_t TargetOfView(const ID3D11ShaderResourceView* a_view)
+		/**
+		 * @brief The engine target a shader resource view is: a render target's index, a depth-stencil target's depth SRV as
+		 * kDepthInput | index, or -1. kFRAMEBUFFER (an RTV only) is never one.
+		 */
+		std::int32_t InputOfView(const ID3D11ShaderResourceView* a_view)
 		{
 			auto* renderer = globals::game::renderer;
 			if (!renderer || !a_view)
@@ -302,7 +373,89 @@ namespace RenderGraph::Engine::ImageSpace
 			for (std::uint32_t i = RE::RENDER_TARGET::kMAIN; i < RE::RENDER_TARGET::kTOTAL; ++i)
 				if (targets[i].SRV == a_view)
 					return static_cast<std::int32_t>(i);
+			const auto& depths = renderer->GetDepthStencilData().depthStencils;
+			for (std::uint32_t i = 0; i < RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL; ++i)
+				if (depths[i].depthSRV == a_view)
+					return kDepthInput | static_cast<std::int32_t>(i);
 			return -1;
+		}
+
+		/** @brief The engine render target an unordered access view is, or -1. */
+		std::int32_t TargetOfUav(const ID3D11UnorderedAccessView* a_view)
+		{
+			auto* renderer = globals::game::renderer;
+			if (!renderer || !a_view)
+				return -1;
+			const auto& targets = renderer->GetRuntimeData().renderTargets;
+			for (std::uint32_t i = RE::RENDER_TARGET::kMAIN; i < RE::RENDER_TARGET::kTOTAL; ++i)
+				if (targets[i].UAV == a_view)
+					return static_cast<std::int32_t>(i);
+			return -1;
+		}
+
+		/** @brief The graph's import of an input as ShapeKey names it (a render target, a depth target or a cubemap). */
+		std::shared_ptr<org::ExternalTextureResource> ImportInput(std::int32_t a_input)
+		{
+			if (a_input < 0)
+				return nullptr;
+			const auto index = static_cast<std::uint32_t>(a_input & kInputIndexMask);
+			if (a_input & kDepthInput)
+				return FrameAnchors::EngineDepth(index);
+			if (a_input & kCubeInput)
+				return FrameAnchors::EngineCubemap(index);
+			return FrameAnchors::EngineTarget(index);
+		}
+
+		/**
+		 * @brief A shape's inputs from the shadow state's slots (the PS ones for a draw, the CS ones for a dispatch): false with a
+		 * reason when one is not an engine target or is the output. A cube slot is the reflection cubemap CS binds itself.
+		 */
+		template <class AddressModes, class FilterModes>
+		bool ReadInputs(const EffectInfo& a_effect, ID3D11ShaderResourceView* const* a_views, const AddressModes* a_address, const FilterModes* a_filter,
+			ShapeKey& a_out, std::string_view& a_refusal)
+		{
+			for (std::uint32_t slot = 0; slot < a_effect.slots; ++slot) {
+				if (!(a_effect.reads & (1u << slot)))
+					continue;
+				if (a_effect.cubes & (1u << slot)) {
+					a_out.inputs[slot] = kCubeInput | static_cast<std::int32_t>(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS);
+					continue;
+				}
+				const auto input = InputOfView(a_views[slot]);
+				if (input < 0) {
+					a_refusal = "an input that is not an engine target";
+					return false;
+				}
+				if (input == a_out.output) {
+					a_refusal = "it reads its own output";
+					return false;
+				}
+				a_out.inputs[slot] = input;
+				if (slot < a_effect.samplers) {
+					a_out.address[slot] = a_address[slot].underlying();
+					a_out.filter[slot] = a_filter[slot].underlying();
+				}
+			}
+			return true;
+		}
+
+		/** @brief A dispatch's shape from the shadow state's compute slots, as SetDirtyStates(true) is about to apply them. */
+		bool ReadComputeShape(const RE::BSImagespaceShader* a_shader, const EffectInfo& a_effect, ShapeKey& a_out, std::string_view& a_refusal)
+		{
+			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			a_out.shader = a_shader;
+			a_out.compute = true;
+			a_out.output = TargetOfUav(shadow.CSUAV[0]);
+			if (a_out.output < 0) {
+				a_refusal = "its UAV is not an engine render target's";
+				return false;
+			}
+			for (std::size_t i = 1; i < std::size(shadow.CSUAV); ++i)
+				if (shadow.CSUAV[i]) {
+					a_refusal = "more than one UAV";
+					return false;
+				}
+			return ReadInputs(a_effect, shadow.CSTexture, shadow.CSTextureAddressMode, shadow.CSTextureFilterMode, a_out, a_refusal);
 		}
 
 		/**
@@ -354,22 +507,8 @@ namespace RenderGraph::Engine::ImageSpace
 				return false;
 			}
 			a_out.output = output;
-			for (std::uint32_t slot = 0; slot < a_effect.slots; ++slot) {
-				if (!(a_effect.reads & (1u << slot)))
-					continue;
-				const auto input = TargetOfView(shadow.PSTexture[slot]);
-				if (input < 0) {
-					a_refusal = "an input that is not an engine render target";
-					return false;
-				}
-				if (input == output) {
-					a_refusal = "it reads its own output";
-					return false;
-				}
-				a_out.inputs[slot] = input;
-				a_out.address[slot] = shadow.PSTextureAddressMode[slot].underlying();
-				a_out.filter[slot] = shadow.PSTextureFilterMode[slot].underlying();
-			}
+			if (!ReadInputs(a_effect, shadow.PSTexture, shadow.PSTextureAddressMode, shadow.PSTextureFilterMode, a_out, a_refusal))
+				return false;
 			const auto draw = Pipeline::EngineDrawState::Latch();
 			a_out.blend = Pipeline::EngineBlendState(draw.blendMode, draw.alphaToCoverage, draw.writeMode, draw.blendExtra);
 			if (!a_out.blend) {
@@ -429,7 +568,8 @@ namespace RenderGraph::Engine::ImageSpace
 				desc.pixelSource = effect.source;
 				// FXC-era sources (vector conditions in ?:).
 				desc.languageVersion = L"2018";
-				desc.constantWords = 4 + 2 * effect.slots + 2;
+				// Shared (4 words), the SRVs, the samplers, the latch (2).
+				desc.constantWords = 4 + effect.slots + effect.samplers + 2;
 				// The engine's macros for the shader and CS's feature defines, as ShaderCache composes them for the D3D11 build; the
 				// stage defines are RasterProgram's own.
 				if (const auto* shader = ShaderOf(a_effect))
@@ -444,6 +584,30 @@ namespace RenderGraph::Engine::ImageSpace
 			if (a_out)
 				return ProgramState::Ready;
 			return Programs().StatusOf(key) == ProgramStatus::Failed ? ProgramState::Failed : ProgramState::Building;
+		}
+
+		/** @brief A compute effect's program from the compute program cache, as ProgramFor. */
+		ProgramState ComputeProgramFor(std::size_t a_effect, std::shared_ptr<const ComputeProgram>& a_out)
+		{
+			a_out = ComputePrograms().Get(a_effect, [&] {
+				const auto& effect = kEffects[a_effect];
+				ComputeProgram::Desc desc{};
+				desc.source = effect.source;
+				// Shared (4 words), the SRVs, the samplers, the UAV, the latch (2).
+				desc.constantWords = 4 + effect.slots + effect.samplers + 1 + 2;
+				// The engine's macros (GRIDSIZE, TEXTAP, ...) and CS's feature defines, as ShaderCache composes them for the D3D11 build.
+				// BSImagespaceShader::DispatchComputeShader dispatches technique 0 (100952 / 107734).
+				if (const auto* shader = ShaderOf(a_effect))
+					for (const auto& [name, value] : SIE::ShaderCache::GetCompileDefines(*shader, SIE::ShaderClass::Compute, 0)) {
+						if (name == "CSHADER")
+							continue;
+						desc.defines.emplace_back(std::wstring(name.begin(), name.end()), std::wstring(value.begin(), value.end()));
+					}
+				return desc;
+			});
+			if (a_out)
+				return ProgramState::Ready;
+			return ComputePrograms().StatusOf(a_effect) == ProgramStatus::Failed ? ProgramState::Failed : ProgramState::Building;
 		}
 
 		/** @brief MakeSpec's result: the pass, or why there is none (Building: ask again at the next registration). */
@@ -472,15 +636,18 @@ namespace RenderGraph::Engine::ImageSpace
 			for (std::uint32_t slot = 0; refusal.empty() && slot < effect.slots; ++slot) {
 				if (!(effect.reads & (1u << slot)))
 					continue;
-				spec->inputs[slot] = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(a_key.inputs[slot]));
-				spec->samplers[slot] = SamplerFor(a_key.address[slot], a_key.filter[slot]);
+				spec->inputs[slot] = ImportInput(a_key.inputs[slot]);
 				if (!spec->inputs[slot])
 					refusal = "an input could not be imported";
-				else if (spec->samplers[slot] == UINT32_MAX)
+				else if (slot < effect.samplers && !(effect.cubes & (1u << slot)) &&
+						 (spec->samplers[slot] = SamplerFor(a_key.address[slot], a_key.filter[slot])) == UINT32_MAX)
 					refusal = "a sampler has no ORG form";
 			}
 			if (refusal.empty()) {
-				switch (ProgramFor(spec->effect, spec->output->GetFormat(), static_cast<ID3D11BlendState*>(const_cast<void*>(a_key.blend)), spec->program)) {
+				const auto program = a_key.compute ?
+				                         ComputeProgramFor(spec->effect, spec->computeProgram) :
+				                         ProgramFor(spec->effect, spec->output->GetFormat(), static_cast<ID3D11BlendState*>(const_cast<void*>(a_key.blend)), spec->program);
+				switch (program) {
 				case ProgramState::Building:
 					return { .building = true };
 				case ProgramState::Failed:
@@ -518,15 +685,29 @@ namespace RenderGraph::Engine::ImageSpace
 			AnchorPasses::Builder builder(Anchor::ImageSpace, kClientId, 0, state.latch, state.gate);
 			for (const auto& spec : state.specs) {
 				const auto& effect = kEffects[spec->effect];
+				// The shader's resource list order: the shared constants, t0.., s0.., (u0), the constants' location.
+				std::vector<AnchorPasses::Bind> bindings;
+				bindings.push_back(AnchorPasses::Bind::Shared());
+				for (std::uint32_t slot = 0; slot < effect.slots; ++slot)
+					bindings.push_back(spec->inputs[slot] ? AnchorPasses::Bind::Srv(spec->inputs[slot]) : AnchorPasses::Bind::Unused());
+				for (std::uint32_t slot = 0; slot < effect.samplers; ++slot)
+					bindings.push_back(spec->inputs[slot] && !(effect.cubes & (1u << slot)) ? AnchorPasses::Bind::Handle(spec->samplers[slot]) : AnchorPasses::Bind::Unused());
+				if (effect.compute)
+					bindings.push_back(AnchorPasses::Bind::Uav(spec->output));
+				bindings.push_back(AnchorPasses::Bind::Latch(spec->entry * static_cast<std::uint32_t>(sizeof(ConstantsAt))));
+				if (effect.compute) {
+					AnchorPasses::Dispatch dispatch{};
+					dispatch.name = spec->name;
+					dispatch.program = spec->computeProgram;
+					dispatch.bindings = std::move(bindings);
+					dispatch.gate = spec->entry;
+					builder.Add(std::move(dispatch));
+					continue;
+				}
 				AnchorPasses::Draw draw{};
 				draw.name = spec->name;
 				draw.program = spec->program;
-				draw.bindings.push_back(AnchorPasses::Bind::Shared());
-				for (std::uint32_t slot = 0; slot < effect.slots; ++slot)
-					draw.bindings.push_back(spec->inputs[slot] ? AnchorPasses::Bind::Srv(spec->inputs[slot]) : AnchorPasses::Bind::Unused());
-				for (std::uint32_t slot = 0; slot < effect.slots; ++slot)
-					draw.bindings.push_back(spec->inputs[slot] ? AnchorPasses::Bind::Handle(spec->samplers[slot]) : AnchorPasses::Bind::Unused());
-				draw.bindings.push_back(AnchorPasses::Bind::Latch(spec->entry * static_cast<std::uint32_t>(sizeof(ConstantsAt))));
+				draw.bindings = std::move(bindings);
 				draw.target = spec->output;
 				draw.viewport = { .x = 0, .y = 0, .width = spec->output->GetWidth(), .height = spec->output->GetHeight() };
 				draw.load = rhi::LoadOp::Load;
@@ -548,7 +729,10 @@ namespace RenderGraph::Engine::ImageSpace
 				const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
 				for (const auto& pending : current.batch) {
 					current.latch->WriteValue(slot, pending.entry * static_cast<std::uint32_t>(sizeof(ConstantsAt)), pending.at);
-					current.gate->OpenDraw(pending.entry);
+					if (pending.compute)
+						current.gate->OpenDispatch(pending.entry, pending.groups[0], pending.groups[1], pending.groups[2]);
+					else
+						current.gate->OpenDraw(pending.entry);
 				}
 			};
 			client.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
@@ -810,6 +994,69 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
+		 * @brief The pass for a read shape, and room for it in a batch: the spec when the draw or dispatch may be withheld (any pending
+		 * batch it cannot join has run), or null when the engine keeps it (its reason counted).
+		 */
+		const Spec* AdmitShape(const ShapeKey& a_key, std::size_t a_effect)
+		{
+			auto& state = IS();
+			const auto& effect = kEffects[a_effect];
+			if (state.phase != Phase::Live) {
+				NoteShape(a_key);
+				Flush();
+				++state.engineDrawn;
+				return nullptr;
+			}
+			const Spec* spec = SpecFor(a_key);
+			if (!spec) {
+				NoteShape(a_key);
+				Flush();
+				Refuse("a shape first seen after the registration; it joins at the next cell change", a_effect);
+				return nullptr;
+			}
+			// A target made again (a resize) has a new import: the passes are made again on the new ones.
+			bool current = spec->output == FrameAnchors::EngineTarget(static_cast<std::uint32_t>(a_key.output));
+			for (std::uint32_t slot = 0; current && slot < effect.slots; ++slot)
+				current = !spec->inputs[slot] || spec->inputs[slot] == ImportInput(a_key.inputs[slot]);
+			if (!current) {
+				Flush();
+				Remake();
+				++state.engineDrawn;
+				return nullptr;
+			}
+			// A batch runs in its passes' order: a pass at or before the last one taken (the engine's order differs from the first
+			// registration's, or the same pass again) starts a new batch.
+			if (!state.batch.empty() && spec->entry <= state.lastEntry)
+				Flush();
+			// A new batch is a new run: withheld only when the run can draw it now (owner, built graph, ring room), only for the runs a
+			// frame the anchor is sized for, and only as often as the scope may start one (BatchesAllowed).
+			if (state.batch.empty()) {
+				if (state.scopeBatches >= state.scopeBatchLimit) {
+					Refuse("its scope already ran its one batch this frame", a_effect);
+					return nullptr;
+				}
+				if (state.runsThisFrame >= FrameAnchors::RunsPerFrame(Anchor::ImageSpace) || !FrameAnchors::CanRun(kClientId, Anchor::ImageSpace)) {
+					Refuse("the ImageSpace anchor cannot run another batch this frame", a_effect);
+					return nullptr;
+				}
+			}
+			return spec;
+		}
+
+		/** @brief A withheld draw or dispatch joins the batch (a new batch counts against its scope). */
+		void AddToBatch(const Spec& a_spec, Pending a_pending, std::span<const std::shared_ptr<const org::LatchBlock>> a_blocks)
+		{
+			auto& state = IS();
+			if (state.batch.empty())
+				++state.scopeBatches;
+			a_pending.entry = a_spec.entry;
+			state.batch.push_back(a_pending);
+			for (const auto& block : a_blocks)
+				state.keepAlive.push_back(block);
+			state.lastEntry = a_spec.entry;
+		}
+
+		/**
 		 * @brief The engine's draw of the current effect: taken into the batch (true; the caller skips the engine's draw) or left to the
 		 * engine (false, after running any pending batch so the engine's order holds).
 		 */
@@ -827,40 +1074,9 @@ namespace RenderGraph::Engine::ImageSpace
 				Refuse(refusal, scope.effect);
 				return false;
 			}
-			if (state.phase != Phase::Live) {
-				NoteShape(key);
-				Flush();
-				++state.engineDrawn;
+			const Spec* spec = AdmitShape(key, scope.effect);
+			if (!spec)
 				return false;
-			}
-			const Spec* spec = SpecFor(key);
-			if (!spec) {
-				NoteShape(key);
-				Flush();
-				Refuse("a shape first seen after the registration; it joins at the next cell change", scope.effect);
-				return false;
-			}
-			// A target made again (a resize) has a new import: the passes are made again on the new ones.
-			bool current = spec->output == FrameAnchors::EngineTarget(static_cast<std::uint32_t>(key.output));
-			for (std::uint32_t slot = 0; current && slot < effect.slots; ++slot)
-				current = !spec->inputs[slot] || spec->inputs[slot] == FrameAnchors::EngineTarget(static_cast<std::uint32_t>(key.inputs[slot]));
-			if (!current) {
-				Flush();
-				Remake();
-				++state.engineDrawn;
-				return false;
-			}
-			// A batch runs in its passes' order: a pass at or before the last one taken (the engine's order differs from the first
-			// registration's, or the same pass again) starts a new batch.
-			if (!state.batch.empty() && spec->entry <= state.lastEntry)
-				Flush();
-			// A new batch is a new run: withheld only when the run can draw it now (owner, built graph, ring room), and only for the
-			// runs a frame the anchor is sized for.
-			if (state.batch.empty() &&
-				(state.runsThisFrame >= FrameAnchors::RunsPerFrame(Anchor::ImageSpace) || !FrameAnchors::CanRun(kClientId, Anchor::ImageSpace))) {
-				Refuse("the ImageSpace anchor cannot run another batch this frame", scope.effect);
-				return false;
-			}
 			// The engine's state for the draw goes to D3D11 as before (the draw would apply it), and the capture records the draw's
 			// constants as a use: the draw is withheld, so no draw hook records it.
 			static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
@@ -887,13 +1103,70 @@ namespace RenderGraph::Engine::ImageSpace
 				Refuse("its constants have no ring chunk", scope.effect);
 				return false;
 			}
-			state.batch.push_back({ .entry = spec->entry, .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = at.size, .frameSize = frameAt.size } });
-			state.keepAlive.push_back(at.block);
-			state.keepAlive.push_back(frameAt.block);
+			const std::array blocks{ at.block, frameAt.block };
+			AddToBatch(*spec, { .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = at.size, .frameSize = frameAt.size } }, blocks);
 			if (state.logShapes)
 				state.fallbacks[scope.effect]->Report("constant sizes (CS_ORG_IMAGESPACE_LOG)",
 					fmt::format("{} bytes of PerGeometry ({}) and {} of PerFrame", at.size, slot->group == Constants::Group::PSGeometry ? "PS geometry pool" : "custom", frameAt.size));
-			state.lastEntry = spec->entry;
+			return true;
+		}
+
+		/**
+		 * @brief The engine's dispatch of the current compute effect (DispatchCSShader inside DispatchComputeShader): taken into the
+		 * batch with its group counts (true; the caller skips the engine's dispatch) or left to the engine (false, after running any
+		 * pending batch).
+		 */
+		bool TakeDispatch(std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z)
+		{
+			auto& state = IS();
+			auto& scope = *state.current;
+			scope.drew = true;
+			const auto& effect = kEffects[scope.effect];
+			++state.drawIndex;
+			ShapeKey key{};
+			std::string_view refusal;
+			if (!ReadComputeShape(scope.shader, effect, key, refusal)) {
+				Flush();
+				Refuse(refusal, scope.effect);
+				return false;
+			}
+			if (a_x == 0 || a_y == 0 || a_z == 0) {
+				// Nothing to dispatch: the engine's call does nothing either.
+				Flush();
+				Refuse("an empty dispatch", scope.effect);
+				return false;
+			}
+			const Spec* spec = AdmitShape(key, scope.effect);
+			if (!spec)
+				return false;
+			// As DispatchCSShader would: the compute state to D3D11 (SetDirtyStates(true) clears the modified bits as the dispatch would),
+			// then CS b0, which DispatchCSShader binds itself: bound here so the capture records this dispatch's constants as a use.
+			static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
+			setDirtyStates(true);
+			ID3D11Buffer* constants = Tripwire::Unwrap(Constants::EngineComputeBuffer());
+			if (!constants) {
+				Flush();
+				Refuse("no engine compute constant buffer", scope.effect);
+				return false;
+			}
+			globals::d3d::context->CSSetConstantBuffers(0, 1, &constants);
+			const auto use = Constants::Capture(Constants::StageBit(Constants::Stage::Compute));
+			const auto* slot = use.Valid() ? Constants::Find(use, Constants::Stage::Compute, 0) : nullptr;
+			if (!slot || slot->group != Constants::Group::Compute) {
+				Flush();
+				Refuse("no captured compute constants", scope.effect);
+				return false;
+			}
+			const auto at = Constants::Where(*slot);
+			if (!at.block) {
+				Flush();
+				Refuse("its constants have no ring chunk", scope.effect);
+				return false;
+			}
+			const std::array blocks{ at.block };
+			AddToBatch(*spec, { .at = { .srv = at.srvIndex, .offset = at.offset, .size = at.size }, .compute = true, .groups = { a_x, a_y, a_z } }, blocks);
+			if (state.logShapes)
+				state.fallbacks[scope.effect]->Report("constant sizes (CS_ORG_IMAGESPACE_LOG)", fmt::format("{} bytes of compute constants", at.size));
 			return true;
 		}
 
@@ -923,16 +1196,47 @@ namespace RenderGraph::Engine::ImageSpace
 			return {};
 		}
 
-		/** @brief A scope begins: a_scope orders its draws' passes after the earlier scopes' (0 the composites, 1 the HDR effect). */
-		void EnterScope(std::uint32_t a_scope)
+		/**
+		 * @brief Why a draw through the explicit-target Render (100951 / 107733) cannot be taken, or empty. That Render sets neither
+		 * the target nor the viewport (its caller does; the draw's shape checks both) and applies no manager rectangle; it draws
+		 * a_geometry, or the manager's quad (+0x48) when that is null (checked in Ghidra on AE 0x1414f8b00).
+		 */
+		std::string_view IneligibleExplicit(const void* a_geometry)
+		{
+			if (!Constants::Active())
+				return "the engine-constants capture is not active (CS_ORG_ENGINE_CONSTANTS=1)";
+			auto* manager = RE::ImageSpaceManager::GetSingleton();
+			if (!manager)
+				return "no ImageSpaceManager";
+			const auto* quad = *reinterpret_cast<void* const*>(reinterpret_cast<const std::byte*>(manager) + 0x48);
+			if (a_geometry && a_geometry != quad)
+				return "a geometry other than the full-screen quad";
+			return {};
+		}
+
+		/** @brief Why a compute effect's dispatch cannot be taken, or empty. */
+		std::string_view IneligibleDispatch()
+		{
+			if (!Constants::Active())
+				return "the engine-constants capture is not active (CS_ORG_ENGINE_CONSTANTS=1)";
+			return {};
+		}
+
+		/**
+		 * @brief A scope begins (ScopeKind): its draws' passes are ordered by their place in it, and it may start BatchesAllowed batches.
+		 * Nested scopes are part of the outer one.
+		 */
+		void EnterScope(ScopeKind a_scope)
 		{
 			if (!Usable())
 				return;
 			BeginFrame();
 			auto& state = IS();
 			if (state.scopeDepth++ == 0) {
-				state.scope = a_scope;
+				state.scope = static_cast<std::uint32_t>(a_scope);
 				state.drawIndex = 0;
+				state.scopeBatches = 0;
+				state.scopeBatchLimit = BatchesAllowed(a_scope);
 			}
 		}
 
@@ -943,6 +1247,30 @@ namespace RenderGraph::Engine::ImageSpace
 				return;
 			if (--state.scopeDepth == 0 && FrameAnchors::IsRenderOwner())
 				Flush();
+		}
+
+		/**
+		 * @brief The effect call in progress inside a scope: a_shader's draw or dispatch is taken when the effect is covered, selected
+		 * and a_ineligible gives no reason; a_call runs the engine's function.
+		 */
+		template <class Call>
+		void WithEffect(const RE::BSImagespaceShader* a_shader, bool a_compute, std::string_view a_ineligible, Call&& a_call)
+		{
+			auto& state = IS();
+			const auto index = EffectOf(a_shader);
+			EffectScope scope{ .shader = a_shader, .effect = index >= 0 ? static_cast<std::size_t>(index) : 0, .compute = a_compute };
+			if (index >= 0 && state.enabled[static_cast<std::size_t>(index)] && kEffects[scope.effect].compute == a_compute) {
+				scope.eligible = a_ineligible.empty();
+				if (!scope.eligible)
+					Refuse(a_ineligible, scope.effect);
+			}
+			const auto previous = state.current;
+			state.current = scope;
+			a_call();
+			if (state.current->eligible && !state.current->drew)
+				state.fallbacks[scope.effect]->Report(a_compute ? "it ran without DispatchCSShader; its dispatches stay the engine's" :
+																  "it drew without DrawTriShape; its draws stay the engine's");
+			state.current = previous;
 		}
 
 		/** @brief BSImagespaceShader::Render (100950 / 107732): every raster ImageSpace shader's draw, through DrawTriShape. */
@@ -958,20 +1286,45 @@ namespace RenderGraph::Engine::ImageSpace
 				// The ImageSpaceEffect base sits at +0x90 of a BSImagespaceShader (SE and AE: Render's this - 0x90).
 				const auto* effect = static_cast<const RE::ImageSpaceEffect*>(a_effect);
 				const auto* shader = static_cast<const RE::BSImagespaceShader*>(effect);
-				const auto index = EffectOf(shader);
-				EffectScope scope{ .shader = shader, .effect = index >= 0 ? static_cast<std::size_t>(index) : 0 };
-				if (index >= 0 && state.enabled[static_cast<std::size_t>(index)]) {
-					const auto reason = Ineligible(effect);
-					scope.eligible = reason.empty();
-					if (!scope.eligible)
-						Refuse(reason, scope.effect);
+				const bool covered = EffectOf(shader) >= 0;
+				WithEffect(shader, false, covered ? Ineligible(effect) : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/**
+		 * @brief BSImagespaceShader's explicit-target Render (100951 / 107733): the draw of a shader whose caller bound its target and
+		 * textures (RenderSSAO, the reflections pass), through DrawTriShape. Its this is the BSImagespaceShader itself.
+		 */
+		struct ExplicitRender
+		{
+			static void thunk(RE::BSImagespaceShader* a_shader, void* a_geometry)
+			{
+				auto& state = IS();
+				if (state.scopeDepth == 0 || !a_shader || !Usable()) {
+					func(a_shader, a_geometry);
+					return;
 				}
-				const auto previous = state.current;
-				state.current = scope;
-				func(a_effect, a_quad, a_param);
-				if (state.current->eligible && !state.current->drew)
-					state.fallbacks[scope.effect]->Report("it drew without DrawTriShape; its draws stay the engine's");
-				state.current = previous;
+				const bool covered = EffectOf(a_shader) >= 0;
+				WithEffect(a_shader, false, covered ? IneligibleExplicit(a_geometry) : std::string_view{}, [&] { func(a_shader, a_geometry); });
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/**
+		 * @brief BSImagespaceShader::DispatchComputeShader (100952 / 107734): a compute effect's dispatch (its setup, then
+		 * BSComputeShader::Dispatch, then DispatchCSShader, where it is taken).
+		 */
+		struct DispatchComputeShader
+		{
+			static void thunk(RE::BSImagespaceShader* a_shader, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z)
+			{
+				auto& state = IS();
+				if (state.scopeDepth == 0 || !a_shader || !Usable()) {
+					func(a_shader, a_x, a_y, a_z);
+					return;
+				}
+				WithEffect(a_shader, true, IneligibleDispatch(), [&] { func(a_shader, a_x, a_y, a_z); });
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -981,7 +1334,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(void* a_effect, void* a_quad, void* a_param)
 			{
-				EnterScope(1);
+				EnterScope(ScopeKind::HDR);
 				func(a_effect, a_quad, a_param);
 				LeaveScope();
 			}
@@ -993,8 +1346,39 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(void* a_manager, std::uintptr_t a_source, std::uintptr_t a_destination)
 			{
-				EnterScope(0);
+				EnterScope(ScopeKind::Composites);
 				func(a_manager, a_source, a_destination);
+				LeaveScope();
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/**
+		 * @brief RenderSSAO (100520 / 107245; its this is the SAO helper at ImageSpaceManager+0x1c8, then the source and destination):
+		 * the camera depth, its mips, the raw AO and its blurs, then the composite. Called from Main::RenderWorld.
+		 */
+		struct RenderSSAO
+		{
+			static std::uint64_t thunk(void* a_helper, std::int32_t a_source, std::uint64_t a_destination)
+			{
+				EnterScope(ScopeKind::SSAO);
+				const auto result = func(a_helper, a_source, a_destination);
+				LeaveScope();
+				return result;
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/**
+		 * @brief The screen-space reflections pass (100428 / 107146, no arguments; the helper at ImageSpaceManager+0x1c0): the normal
+		 * mask's downsample, the ray march, and the separable compute blur (107207).
+		 */
+		struct RenderReflections
+		{
+			static void thunk()
+			{
+				EnterScope(ScopeKind::Reflections);
+				func();
 				LeaveScope();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -1007,7 +1391,7 @@ namespace RenderGraph::Engine::ImageSpace
 			{
 				auto& state = IS();
 				if (state.phase != Phase::Off && !state.flushing && FrameAnchors::IsRenderOwner()) {
-					if (state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->drew) {
+					if (state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->compute && !state.current->drew) {
 						if (TakeDraw())
 							return;
 					} else
@@ -1018,14 +1402,22 @@ namespace RenderGraph::Engine::ImageSpace
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief BSGraphics::Renderer::DispatchCSShader (75532 / 77329): an engine dispatch runs the batch first. */
+		/**
+		 * @brief BSGraphics::Renderer::DispatchCSShader (75532 / 77329): the current compute effect's dispatch is taken; any other
+		 * engine dispatch runs the batch first.
+		 */
 		struct DispatchCSShader
 		{
 			static void thunk(void* a_renderer, void* a_shader, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z)
 			{
-				const auto& state = IS();
-				if (state.phase != Phase::Off && !state.batch.empty() && FrameAnchors::IsRenderOwner())
-					Flush();
+				auto& state = IS();
+				if (state.phase != Phase::Off && !state.flushing && FrameAnchors::IsRenderOwner()) {
+					if (state.scopeDepth > 0 && state.current && state.current->eligible && state.current->compute && !state.current->drew) {
+						if (TakeDispatch(a_x, a_y, a_z))
+							return;
+					} else
+						Flush();
+				}
 				func(a_renderer, a_shader, a_x, a_y, a_z);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -1053,13 +1445,20 @@ namespace RenderGraph::Engine::ImageSpace
 		stl::detour_thunk<ShaderRender>(REL::RelocationID(100950, 107732));
 		stl::detour_thunk<HDRRender>(REL::RelocationID(100465, 107183));
 		stl::detour_thunk<PreTonemapComposites>(REL::RelocationID(99024, 105675));
+		stl::detour_thunk<ExplicitRender>(REL::RelocationID(100951, 107733));
+		stl::detour_thunk<DispatchComputeShader>(REL::RelocationID(100952, 107734));
+		stl::detour_thunk<RenderSSAO>(REL::RelocationID(100520, 107245));
+		stl::detour_thunk<RenderReflections>(REL::RelocationID(100428, 107146));
 		stl::detour_thunk<DrawTriShape>(REL::RelocationID(75477, 77263));
 		stl::detour_thunk<DispatchCSShader>(REL::RelocationID(75532, 77329));
 		auto& state = IS();
-		state.installed = ShaderRender::func.address() && HDRRender::func.address() && PreTonemapComposites::func.address() && DrawTriShape::func.address() &&
+		state.installed = ShaderRender::func.address() && HDRRender::func.address() && PreTonemapComposites::func.address() && ExplicitRender::func.address() &&
+		                  DispatchComputeShader::func.address() && RenderSSAO::func.address() && RenderReflections::func.address() && DrawTriShape::func.address() &&
 		                  DispatchCSShader::func.address();
 		if (state.installed)
-			logger::info("[ORG] ImageSpace: hooks installed (BSImagespaceShader::Render, the HDR effect, the pre-tonemap composites, DrawTriShape, DispatchCSShader)");
+			logger::info(
+				"[ORG] ImageSpace: hooks installed (BSImagespaceShader::Render and its explicit-target form, DispatchComputeShader, the HDR effect, the pre-tonemap "
+				"composites, RenderSSAO, the reflections pass, DrawTriShape, DispatchCSShader)");
 		else
 			logger::error("[ORG] ImageSpace: a hook could not be installed; the ImageSpace chain stays on D3D11");
 	}
