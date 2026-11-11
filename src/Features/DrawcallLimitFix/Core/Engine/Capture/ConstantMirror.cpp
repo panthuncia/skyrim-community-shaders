@@ -2,7 +2,6 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/ConstantMirror.h"
 
-#include <cstring>
 #include <utility>
 
 namespace DCLF
@@ -36,50 +35,34 @@ namespace DCLF
 		a_buffer->AddRef();
 		Entry entry;
 		entry.buffer = a_buffer;
-		entry.bytes.resize(desc.ByteWidth);
+		entry.byteWidth = desc.ByteWidth;
 		entries.push_back(std::move(entry));
 	}
 
 	std::span<const std::byte> ConstantMirror::Contents(const ID3D11Buffer* a_buffer)
 	{
 		auto* entry = Find(reinterpret_cast<const ID3D11Resource*>(a_buffer));
-		if (!entry || !entry->valid)
-			return {};
 		// The mapping's memory stays the writer's last contents after Unmap (DXVK keeps the slice until it is reused).
-		if (entry->unread)
-			std::memcpy(entry->bytes.data(), std::exchange(entry->unread, nullptr), entry->bytes.size());
-		return entry->bytes;
+		return entry ? entry->contents.Settled(entry->byteWidth) : std::span<const std::byte>{};
 	}
 
 	void ConstantMirror::OnMap(ID3D11Resource* a_resource, void* a_data)
 	{
 		if (auto* entry = Find(a_resource))
-			entry->mapped = a_data;
+			entry->contents.OnMap(a_data);
 	}
 
 	void ConstantMirror::OnUnmap(ID3D11Resource* a_resource)
 	{
-		auto* entry = Find(a_resource);
-		if (!entry || !entry->mapped)
-			return;
 		// WRITE_DISCARD: whatever the writer left in the mapping is the buffer's new contents (copied when read: Contents).
-		entry->unread = std::exchange(entry->mapped, nullptr);
-		entry->valid = true;
+		if (auto* entry = Find(a_resource))
+			entry->contents.OnUnmap();
 	}
 
 	void ConstantMirror::OnUpdateSubresource(ID3D11Resource* a_resource, const D3D11_BOX* a_box, const void* a_data)
 	{
-		auto* entry = Find(a_resource);
-		if (!entry || !a_data)
-			return;
-		// A partial update applies over the last mapping's contents.
-		if (entry->unread)
-			std::memcpy(entry->bytes.data(), std::exchange(entry->unread, nullptr), entry->bytes.size());
-		const std::size_t begin = a_box ? a_box->left : 0;
-		const std::size_t end = a_box ? std::min<std::size_t>(a_box->right, entry->bytes.size()) : entry->bytes.size();
-		if (begin < end)
-			std::memcpy(entry->bytes.data() + begin, a_data, end - begin);
-		// A partial update only counts once the buffer was fully written before.
-		entry->valid |= !a_box;
+		// A partial update applies over the last mapping's contents, and only counts once the buffer was fully written before.
+		if (auto* entry = Find(a_resource))
+			entry->contents.OnUpdate(a_box, a_data, entry->byteWidth);
 	}
 }

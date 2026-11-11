@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/Engine/Constants/BufferContents.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -15,7 +17,8 @@ namespace DCLF
 	 * @brief CPU copies of D3D11 buffers the graph needs but must not lock: constant buffers and dynamic
 	 * structured buffers the game and Community Shaders rewrite with Map(WRITE_DISCARD) or
 	 * UpdateSubresource. A buffer is mirrored once it is watched: every later write through the immediate
-	 * context lands in its copy too.
+	 * context lands in its copy too. The write tracking is RenderGraph::Engine::Constants::BufferContents, which the per-use
+	 * capture of the engine's constants (EngineConstants.h) shares.
 	 *
 	 * D3D11 immediate-context thread only (the render thread), like the hooks that feed it.
 	 */
@@ -45,12 +48,10 @@ namespace DCLF
 		struct Entry
 		{
 			ID3D11Buffer* buffer = nullptr;  // referenced while watched
-			std::vector<std::byte> bytes;
-			void* mapped = nullptr;
-			// The last finished mapping, not copied into bytes yet: copied once, by the first read after it (Contents) or a partial
-			// UpdateSubresource, rather than at every Unmap (a buffer is unmapped more often than it is read).
-			void* unread = nullptr;
-			bool valid = false;
+			std::uint32_t byteWidth = 0;
+			// The last finished mapping is copied once, by the first read after it (Contents) or a partial UpdateSubresource, rather
+			// than at every Unmap (a buffer is unmapped more often than it is read).
+			RenderGraph::Engine::Constants::BufferContents contents;
 		};
 
 		Entry* Find(const ID3D11Resource* a_resource);
