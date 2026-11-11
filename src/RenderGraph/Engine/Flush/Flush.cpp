@@ -13,10 +13,10 @@
 #include <intrin.h>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace RenderGraph::Engine::Flush
@@ -562,20 +562,23 @@ namespace RenderGraph::Engine::Flush
 
 		// ---- The latch ------------------------------------------------------------------------------------------------------
 
-		/** @brief A draw or dispatch the latch skipped: counted, and logged once per site with its callers. */
+		/**
+		 * @brief A draw or dispatch the latch skipped: counted, and logged once per site and caller chain (DrawTriShape alone serves
+		 * the batch walk, the cloud pass list, ImageSpace and Bink's tiles).
+		 */
 		void NoteSkipped(std::uint16_t a_slot, void* a_caller)
 		{
 			GetLatch().skipped.fetch_add(1, std::memory_order_relaxed);
 			void* const site = t_dispatchScope > 0 ? DispatchFunction() : a_caller;
-			static std::mutex s_lock;
-			static std::unordered_set<void*> s_seen;
-			{
-				std::lock_guard guard(s_lock);
-				if (!s_seen.insert(site).second)
-					return;
-			}
 			DrawKey key;
 			Walk(a_caller, key);
+			static std::mutex s_lock;
+			static std::set<std::array<void*, 4>> s_seen;
+			{
+				std::lock_guard guard(s_lock);
+				if (!s_seen.insert({ site, key.up[0], key.up[1], key.up[2] }).second)
+					return;
+			}
 			std::string chain;
 			for (const void* frame : key.up)
 				if (frame)
@@ -584,7 +587,7 @@ namespace RenderGraph::Engine::Flush
 				chain += fmt::format(" (via CS {})", Tripwire::DescribeCaller(key.viaCs));
 			const auto& config = GetConfig();
 			logger::error(
-				"[ORG] flush latch: engine {} in {} at {}{} reached D3D11 with the engine's state latched: skipped (first at this site; "
+				"[ORG] flush latch: engine {} in {} at {}{} reached D3D11 with the engine's state latched: skipped (first from these callers; "
 				"CS_ORG_RESIDUE_CENSUS=1 counts them)",
 				a_slot < kSlots && config.names[a_slot] ? config.names[a_slot] : "?", FunctionName(site), Tripwire::DescribeCaller(site), chain);
 		}

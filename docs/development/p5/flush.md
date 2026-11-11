@@ -146,10 +146,46 @@ The census is the measure. The latch becomes the default only when, over a full 
 Then `SetShader` and `SetPixelShader` can drop their D3D11 call for good (Bink's DrawTiles is their only engine caller once
 Bink is on the graph), `SetDirtyStates` keeps only its CPU side, and the guest context's binds become tripwires.
 
-**Census results.** None yet: no run with the census switch has been made on this branch. The tripwire run of
-`p5-all.env` (2026-11-11) showed, before the census existed, engine draws still reaching D3D11 from SetDirtyStates (AE 77386,
-77247), shader binds from AE 90279 (Bink's DrawTiles), the draw functions AE 77263/77264/77265/77275/77276, `CopyResource`
-77453/107193, compute dispatch setup 77329/77386 and queries 106604/77370.
+## The census of 2026-11-11
+
+Run `1111-072658-p35-p5-all-census-w3` (`p5-all-census.env`, AE, the p5-all tour: Whiterun, inventory, map, journal, a save
+and its load, Blackreach, the race menu). No window had a frame without engine draws reaching D3D11. Per frame: about 95 in
+Whiterun's exterior (DrawIndexed 86, Dispatch 9), 199 in the first window, 157 in Blackreach, 180 in the race menu. Flushes:
+100-230 a frame, 2 from CS code, about 25 followed by no draw. Vertex and pixel shader binds: 60-100 each, about 28 followed
+by no draw, all from `BeginTechnique` (AE 108328): techniques set up for passes that DCLF or a family then withheld. The latch
+removes those for free.
+
+Almost every draw comes through `BSBatchRenderer::RenderPassImmediately` (100854 / 107644) and the geometry-type dispatcher
+(100847 / 107637: +0x1A2 TriShape, +0x41E the LOD multi-index shapes' alternate index buffer, +0x650 instanced, +0x101 dynamic
+and particle shapes) into the R1 draw functions. The caller above those names the subsystem. Callers were named from CS's own
+relocations and Ghidra (AE IDs; the SE ID where CS already uses one). The technique column is the last `BeginTechnique`'s,
+so it is stale for compute dispatches.
+
+| # | Class (callers above the draw function) | Technique, view | Per frame | Who takes it |
+| --- | --- | --- | --- | --- |
+| 1 | `BSShaderAccumulator::RenderPersistentPassList` (100840 / 107630), geometry group 13 | Sky techniques 5/6 (CloudsLerp, CloudsFade); the reflection faces (DS `kCUBEMAP_REFLECTIONS`) 15-35, the main view 18 | 35-55 | P5.3: the cloud layers on the graph (`CS_ORG_SKY_CLOUDS`, off in p5-all until its texture fault is fixed; sky.md "The cloud layers are not in the sky batch") |
+| 2 | `BSImagespaceShader::Render` (100950 / 107732) and its explicit-target variant (AE 107733, called by the ImageSpaceManager effect runner AE 107193 and AE 0x1414d21b0) | SAO: ISSAOCameraZ, ISMinify for every camera-Z mip, ISSAOBlurH/V, ISSAOCompositeFog; ISDownsampleIgnoreBrightest, ISMinifyContrast, ISWaterBlend, ReflectionsRayTracing (SSR), DistantBlur, Refraction, RadialBlurHigh; the HDR chain (DownSample4, DownSample16Lum, BrightPassBlur15, Blur15, TonemapBlendCinematic, DownSample4RGB2Lum) in the windows where it was not taken | 25-30 | P5.6: the rows imagespace.md marks Next (SSAO, water blend, reflections, DOF and blurs, refraction, radial blur), and the HDR chain's refusals |
+| 3 | `BSImagespaceShader::DispatchComputeShader` (100952 / 107734) from the separable compute blur pair (AE 107209 / 107210, through AE 107208 and AE 107207) and `DispatchCopySubRegion` (AE 107217, from `Main::RenderWorld` AE 107142) | HDRDownSample4's blur, the SSR blur (targets 0x6E, 0x6F, 0x6D), ISSAOBlurV's CopySubRegionCS (117) | 4-7 | P5.6's compute form (imagespace.md: latch the dispatch in CSShadersSupport, CS b0 from the capture) |
+| 4 | Volumetric lighting: AE 107023 (SE 100309), from `Main::Draw` (AE 36559), dispatching directly (+0x31C, +0x48B) and through its blur (AE 107235) | stale (Sky, BSISWaterDisplacementTexOffset); noise, generate, raymarch, blur | 2-3 | P5.6's VL row (with CS's ISVolumetricLighting* replacements) |
+| 5 | `BSBatchRenderer::RenderBatches` (100852 / 107642): batches DCLF does not take | Utility (depth prepass: DS `kMAIN`, no RT) up to 20, Lighting up to 11, DistantTree instanced 7 (through a CS hook at CommunityShaders.dll+0x278130d), Sky 3, shadow maps (DS `kSHADOWMAPS`) 7-11 in Whiterun | 20-60 | P5.2: DCLF residue (unclaimed shapes, the alternate index buffer at +0x41E, instanced DistantTree, residue shadow casters) |
+| 6 | Water through `RenderBatches`: RT `kRAW_WATER` and `kREFRACTION_NORMALS` (DS `kMAIN`), dispatcher +0x1A2 and +0x4CE | Water | 3-8 | P5.4: the raw-water and refraction-normal passes |
+| 7 | AE 107673 (SE 100877, the pass LLF hooks as RenderPass1) and the dispatcher's dynamic shapes (77275 via +0x101) | Particle up to 10, Effect up to 5 | 0-15 | P5.2: particle and effect families |
+| 8 | Skinned partitions: `NiSkinPartition::Unk_25` (AE 71151, through AE 71150) and `BSDismemberSkinInstance::Unk_25` (AE 70776), called from `RenderPassImmediately`+0x1DF, drawing each partition with DrawTriShape or DrawDynamicTriShape (77276) | Effect up to 14 (effect shaders on actors), Utility 3 | 3-17 | P5.2: skinned Effect and Utility passes (DCLF takes the Lighting ones) |
+| 9 | The shadow-mask pass (AE 107141, between `Main::RenderDepth` and `Main::RenderWorld`): each shadow-casting light into `kSHADOW_MASK` | Utility | 1-2.5 | No owner yet: a new P5 item (Volumetric Shadows and Screen Space Shadows read the mask) |
+| 10 | Menu 3D: `UI3DSceneManager::Render` (AE 52727) through AE 52728 | Utility | 1.7 in the inventory | P5.8: the utility pass it does not take |
+| 11 | Bink: `BSMovie::DrawTiles` (87907 / 90279) from `BSMoviePlayer::Tick` (AE 90259) in `PlayBlocking` (AE 90256) | Bink's tiles | 1 frame per movie | P5.11 / P5.12: the startup logo plays on a thread that is not the render owner ("a movie plays on thread ..., not the render thread: the engine draws it"), and the first frame while the tile program builds |
+| 12 | Scaleform: `DrawBitmaps` (82835 / 84956) and AE 84961 | | 0.1 | P5.10: the renderer's remaining engine paths |
+| 13 | Another plugin: `zz_SkyrimEngineTelemetry.dll`+0xB9097 (a `Draw`) | | 0.1 | Outside CS: org-extension-api-notes.md |
+
+The flushes from CS code (about 2 a frame) are DCLF's `ApplyPendingState` before its captures. They stay real under the latch,
+but their readers belong in the list above ("Readers of the D3D11 state").
+
+**The latch run** (`1111-073039-p35-p5-all-latch-w3`): no device loss; 22 000 to 650 000 engine draws skipped per 300 frames;
+every screenshot broken (83-99 % of pixels differ), as expected while classes 1-12 and the D3D11-state readers remain. Its
+`[E]` sites: DrawInstancedTriShape (77265) from the dispatcher +0x650, the alternate index buffer (77264) from +0x41E,
+DrawTriShape (77263) from Bink's DrawTiles +0x146, DrawDynamicTriShape (77275) from +0x101, and the VL blur's dispatch. That
+build logged one line per draw-function site, so DrawTriShape's other callers went unnamed; the latch now logs once per site
+and caller chain.
 
 ## DCLF's share
 
