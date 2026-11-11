@@ -75,7 +75,8 @@ namespace DCLF::Features::Effects
 		{
 			const std::uint64_t f = a_property.flags;
 			const auto* alpha = a_leaf.alpha;
-			const std::uint64_t vertexDesc = a_leaf.geometry ? a_leaf.geometry->vertexDesc : 0;
+			// The geometry's own description (+0x148), as FUN_1414bde90 reads it: a skinned shape's renderer data has another or none.
+			const std::uint64_t vertexDesc = a_leaf.geometry ? a_leaf.geometry->shapeVertexDesc : 0;
 			using namespace EffectFlag;
 			std::uint32_t d = 0;
 			if (f & Bit(Flag::kVertexColors))
@@ -167,8 +168,10 @@ namespace DCLF::Features::Effects
 	bool EffectSkinned(const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf)
 	{
 		// FUN_1414bde90: kSkinned and the geometry's vertex description (+0x148) with a skin flag (VF_SKINNED's bits, 0x1004000000000000).
+		// Not the renderer data's (GeometryRecord::vertexDesc): a skinned shape's is another TriShape or none, which read as unskinned
+		// made every skinned effect a skinned variant.
 		constexpr std::uint64_t kVertexSkinned = 0x1004000000000000ull;
-		const std::uint64_t vertexDesc = a_leaf.geometry ? a_leaf.geometry->vertexDesc : 0;
+		const std::uint64_t vertexDesc = a_leaf.geometry ? a_leaf.geometry->shapeVertexDesc : 0;
 		return (a_property.flags & Bit(Flag::kSkinned)) && (vertexDesc & kVertexSkinned);
 	}
 
