@@ -90,10 +90,10 @@ namespace RenderGraph::Engine::Skeleton
 			void* thunk;
 		};
 
-		constexpr std::array<std::uint8_t, 7> kClearTarget{ 0xFF, 0x90, 0x90, 0x01, 0x00, 0x00 };     // call [rax+0x190] ClearRenderTargetView
-		constexpr std::array<std::uint8_t, 7> kClearDepth{ 0xFF, 0x90, 0xA8, 0x01, 0x00, 0x00 };      // call [rax+0x1a8] ClearDepthStencilView
-		constexpr std::array<std::uint8_t, 7> kBindTargets{ 0xFF, 0x90, 0x08, 0x01, 0x00, 0x00 };     // call [rax+0x108] OMSetRenderTargets
-		constexpr std::array<std::uint8_t, 7> kCopy{ 0x41, 0xFF, 0x91, 0x78, 0x01, 0x00, 0x00 };      // call [r9+0x178] CopyResource
+		constexpr std::array<std::uint8_t, 7> kClearTarget{ 0xFF, 0x90, 0x90, 0x01, 0x00, 0x00 };         // call [rax+0x190] ClearRenderTargetView
+		constexpr std::array<std::uint8_t, 7> kClearDepth{ 0xFF, 0x90, 0xA8, 0x01, 0x00, 0x00 };          // call [rax+0x1a8] ClearDepthStencilView
+		constexpr std::array<std::uint8_t, 7> kBindTargets{ 0xFF, 0x90, 0x08, 0x01, 0x00, 0x00 };         // call [rax+0x108] OMSetRenderTargets
+		constexpr std::array<std::uint8_t, 7> kCopy{ 0x41, 0xFF, 0x91, 0x78, 0x01, 0x00, 0x00 };          // call [r9+0x178] CopyResource
 		constexpr std::array<std::uint8_t, 7> kClearDepthR9{ 0x41, 0xFF, 0x91, 0xA8, 0x01, 0x00, 0x00 };  // call [r9+0x1a8] ClearDepthStencilView
 
 		const std::array<Site, 11>& PatchSites()
