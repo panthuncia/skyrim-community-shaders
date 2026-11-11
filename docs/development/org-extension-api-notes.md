@@ -1239,6 +1239,20 @@ Keys used so far:
   `GraphHost::SetOwnerThread()` that moves every owner-thread structure at once (today only the upload instance keeps one), and
   a debug check in the host that its owner-thread calls come from one thread between two such moves.
 
+### Moves of an import, taken by whoever records with it
+
+- **Need:** an import that can move (DXVK's pinless imports: `dxvkTrackInteropResources`) needs its relocations polled by
+  whoever records with it, at that recorder's own cadence. A poll tied to one feature's frame leaves every other recorder drawing
+  from old storages for as long as that feature does not run.
+- **Who:** Scaleform on the loading screen (P5.12) recorded about 760 displays a load from imports whose moves were taken only
+  at Drawcall Limit Fix's frame start, and the device was lost in the first world frames after the load. Pinned imports were
+  clean.
+- **Where it fits:** today `ImportRelocations::Poll` runs once per Present on the render owner (`Hooks.cpp`). For a plugin API,
+  the import service should own the poll: drained at each submission of any client that holds imports, or from a single place
+  per frame boundary the host declares (`SealSubmitted`), so no client has to know who else imports. Moves that no import has
+  claimed yet must be kept until every import that was described before the move has registered, not for a fixed time.
+- **Found by:** P5.12 loading screen (2026-11-11).
+
 ### Builds that wait for an explicit point while no world frame runs
 
 - **Need:** a client that joins an anchor's graph while no world frame runs (a load, a blocking movie) is built only at

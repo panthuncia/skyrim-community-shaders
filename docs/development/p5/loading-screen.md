@@ -115,53 +115,50 @@ Ownership itself requests no graph build: the claim publishes nothing and touche
 | --- | --- | --- |
 | `FrameAnchors::Run` | main thread only | the owner |
 | Texture streaming's `FrameTick` (`ORGWindows.cpp`) | skipped on the loading thread | runs on the owner: retired batches and windows are serviced and new batches registered there |
-| Scaleform's capture (`BeginDisplay`, `EndDisplay`, `Capturing`) | D3D11 off the main thread | captured on the owner, **but kept on D3D11 on the loading thread** (below) |
+| Scaleform's capture (`BeginDisplay`, `EndDisplay`, `Capturing`) | D3D11 off the main thread | captured on the owner |
 | Bink's tick, shots and movie end | engine off the main thread | the owner: the startup logo takes the graph path |
 | Engine constants, the engine skeleton, DCLF's sky capture | main thread only | the owner (the same call, renamed) |
 | `PublishedResources`' thread check | the first thread that used it | the owner |
+| Pinless import relocations (`ImportRelocations::Poll`) | DCLF's frame start | every Present of the owner |
 
-## Scaleform on the loading thread (device loss, open)
+## Scaleform on the loading thread: pinless imports
 
 First runs (2026-11-11, RX 6600, `loading-org1.env`): ownership moved as designed, the logo drew 165 of 166 frames on the graph,
 and no off-owner warning appeared. But the device was lost about 6 s after the first save load ended, in Drawcall Limit Fix's
-first world frames, on 3 of 3 runs. With `CS_ORG_SCALEFORM=0` the run was clean; with `CS_ORG_TEXTURE_STREAMING=0` it still
-failed. So the trigger is Scaleform's displays on the serving thread (about 790 Interface epochs during a load). DXVK's hang
-report names no D3D11 work.
+first world frames, on 3 of 3 runs. It was clean with `CS_ORG_SCALEFORM=0`, and still failed with
+`CS_ORG_TEXTURE_STREAMING=0`. With Scaleform's loading-screen displays on the graph and `CS_ORG_PINNED_IMPORTS=1`, it ran clean
+(759 loading-screen displays on the graph, all shots). **The cause is in the pinless import path.**
 
-Until the cause is found, `BeginDisplay` keeps the loading thread's displays on D3D11 (counted as `on the loading thread
-(loading-screen displays stay on D3D11)`). `CS_ORG_SCALEFORM_LOADING_THREAD=1` puts them back on the graph, for diagnosis
-only. The logo, texture streaming and the other anchors keep the owner rule.
+- `GpuTextures::ResolveBinding` imports every display texture pinless (`Import`, `TrackResources`). DXVK may move a tracked
+  image while it stays imported, copying its contents, and reports each move as a relocation that holds the old storage
+  (`DxvkOrgInterop.h`, "Pinless imports"; DXVK `pushOrgRelocation`).
+- The relocations were taken only at Drawcall Limit Fix's frame start (`FrameDriver.cpp`, `ImportRelocations::Poll`). A load
+  runs no DCLF frame. So for the whole load the serving thread drew with imports whose moves were never taken: the descriptors
+  read old storages, and DXVK held every old storage as a locked allocation through the load's VRAM churn.
+- At the first world frame DCLF took the whole load's moves at once. Moves whose import had gone were dropped after 2 s.
+- Without a load's worth of graph draws from imports (switch off, or Scaleform off), this never happens: DCLF's own imports
+  are taken every world frame.
 
-What was checked and ruled out by reading the code:
+The exact access that faults was not isolated. The fix removes the gap: the moves are taken where the imports are drawn.
 
-- **GpuTextures' cleanup queue.** The active descriptor service is thread-local
-  (ORG `DescriptorServiceAccess.h`), but every graph takes the runtime's services (`RenderGraph::UseRuntimeServices`), so an
-  entry made on the serving thread lands in the same queue as one made on the main thread. And `ResourceCleanupQueue` only moves
-  destruction elsewhere (`ResourceCleanupQueue.h`, `Make`): GPU lifetime comes from the recordings' `Retain`, not from the queue.
-- **The frame upload instance.** Moving its owner makes the serving thread record the uploads other threads posted. Drawcall
-  Limit Fix does not post there: it stages batches (`Payload/Uploads.h`) and uses the dedicated streaming queue
-  (`FrameValues.cpp`). The engine's buffers are persistently mapped (`Buffers/EngineBuffers.cpp`), and the engine's textures
-  get their contents in DXVK's stream (`Textures/EngineTextures.cpp`).
-- **Scaleform's frame slots.** `Commit` stores at `CurrentFrameSlot()`, which is the slot `SubmitTicket` sets for the ticket
-  that `Record` then runs for (`GraphHost.cpp`, `m_asyncSlot`). A frame, its staging buffer, its descriptors and views are held
-  by shared owners until the recording that names them retires. Nothing here depends on the thread.
+### The fix
 
-What differs only when the loading thread draws Scaleform, and is the next thing to test:
+- **One poll per Present, on the render owner.** `IDXGISwapChain_Present` (`Hooks.cpp`) calls `DCLF::ImportRelocations::Poll`
+  when `FrameAnchors::OnRenderThread()`, before the Present anchor. That covers the main thread's world frames and menus, the
+  loading loop, and the logo. DCLF's frame start no longer polls. Its next frame sees the same state, taken at the Present
+  before it: a move seen a frame later is safe, because the old storage stays valid until it is released.
+- **Safe outside DCLF's frame.** `GpuTextures::NoteRelocations` works under the registry's lock. The buffer moves go to the two
+  `GpuResources` inboxes (their own lock), which DCLF takes at its next `BeginFrame`. Nothing else in `Poll` reads DCLF's frame
+  state.
+- **The 2 s hold can no longer drop a move an import still needs.** A move nobody claims at the poll is kept for an import that
+  was described before the move but registers after it.
+  - Any registered import that reads the old storage gets it from `Supersede`, and holds it behind its recordings.
+  - The gap was an import whose description took longer than 2 s. That is `TrackResources`, a synchronous chunk on DXVK's
+    CS thread, which a load keeps busy.
+  - Every import now holds a ticket from before its description until after its registration (`Registry::importsInFlight`). An
+    unclaimed move is dropped only once it is 2 s old **and** no import that began before it was taken is still in flight.
 
-- **Pinless imports during a load.** `ResolveBinding` imports each display texture pinless (`GpuTextures.cpp`, `Import`:
-  `TrackResources`). DXVK may move a tracked image while it stays imported (`DxvkOrgInterop.h`, "Pinless imports"), and
-  moves are polled only at DCLF's frame start (`FrameDriver.cpp`, `ImportRelocations::Poll`), so during a whole load the
-  serving thread's draws read old storages and the moves pile up. At the first world frame they are all taken at once; a move
-  with no registered import is held only 2 s (`NoteRelocations`, `kUnclaimedFor`). In the switch-off runs no import is made
-  during a load, so this path never sees a load's worth of moves. **Test:** `loading-org1-sfload.env` (the displays on the
-  graph again) against `loading-org1-sfload-pinned.env` (the same with `CS_ORG_PINNED_IMPORTS=1`). If pinned imports are clean,
-  the fix is in the pinless path. The likely fix would be to poll relocations at every Present of the render owner, not only at
-  DCLF's frame start.
-- **The first displays of the session on the serving thread.** In the failing runs the Scaleform surfaces, samplers,
-  pipelines, the GpuTextures registry, and the publication of `Engine::kMAIN` / `Engine::Depth::kMAIN` were all made on the
-  serving thread during the initial data load (before the main menu). In the switch-off runs they are made in the main menu.
-  If the pinned run also fails, the next test is to make these on the main thread first: keep the displays on D3D11 until the
-  first main-thread display has set up the path.
+The loading thread's Scaleform displays go on the graph again (the D3D11 fallback and its switch are removed).
 
 ## Testing
 
