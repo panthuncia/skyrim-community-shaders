@@ -669,7 +669,9 @@ namespace RenderGraph::Engine::ImageSpace
 			const auto& viewport = viewports[0];
 			a_detail = fmt::format("{}x{} at ({}, {}) in {}x{}, depth {} to {}", viewport.Width, viewport.Height, viewport.TopLeftX, viewport.TopLeftY, a_output.width,
 				a_output.height, viewport.MinDepth, viewport.MaxDepth);
-			if (viewport.MinDepth != 0.0f || viewport.MaxDepth != 1.0f) {
+			// The dynamic-resolution viewport's depth range is a float product too (0 to 0.999998). A taken draw has depth testing and
+			// writes off (ReadShape), so a range within 1e-5 of 0 to 1 writes the same pixels.
+			if (std::abs(viewport.MinDepth) > 1e-5f || std::abs(viewport.MaxDepth - 1.0f) > 1e-5f) {
 				a_refusal = "a viewport depth range other than 0 to 1";
 				return false;
 			}
