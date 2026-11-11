@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 /**
  * @brief CS's environment switches (CS_ORG_*, CS_GPU_*, the diagnostics), read once.
@@ -16,7 +17,7 @@
  */
 namespace Switches
 {
-	/** @brief The switch's value as it was first read; empty when it is unset. */
+	/** @brief The switch's value as it was first read, whole at any length; empty when it is unset. */
 	std::string Value(std::string_view a_name);
 
 	/** @brief Whether the switch is set to a non-empty value. */
@@ -36,4 +37,10 @@ namespace Switches
 
 	/** @brief The switch as an unsigned number; a_default when it is unset or not a number. */
 	std::uint64_t Number(std::string_view a_name, std::uint64_t a_default = 0);
+
+	/**
+	 * @brief The switch as a comma-separated list: each item with the white space around it removed, empty items left out, case
+	 * kept. Empty when the switch is unset. For lists of names or numbers ("CS_DISABLE_FEATURES=Skylighting, SSGI").
+	 */
+	std::vector<std::string> List(std::string_view a_name);
 }

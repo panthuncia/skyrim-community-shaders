@@ -1,6 +1,7 @@
 #include "RenderGraph/Switches.h"
 
 #include <cctype>
+#include <ranges>
 #include <charconv>
 #include <map>
 #include <mutex>
@@ -9,11 +10,23 @@ namespace Switches
 {
 	namespace
 	{
+		/** @brief The variable's whole value. A list switch can be long, so nothing is cut: the buffer grows to the value's size. */
 		std::string ReadEnvironment(const std::string& a_name)
 		{
-			char value[512]{};
-			const DWORD length = GetEnvironmentVariableA(a_name.c_str(), value, sizeof(value));
-			return length && length < sizeof(value) ? std::string(value, length) : std::string();
+			std::string value(256, '\0');
+			for (int attempt = 0; attempt < 4; ++attempt) {
+				const DWORD length = GetEnvironmentVariableA(a_name.c_str(), value.data(), static_cast<DWORD>(value.size()));
+				if (length == 0)
+					return {};
+				if (length < value.size()) {
+					value.resize(length);
+					return value;
+				}
+				// Too small: length is the size it needs, with the terminator. The value may change between the calls.
+				value.assign(length, '\0');
+			}
+			logger::warn("[Switches] {} kept changing size while it was read; it is treated as unset", a_name);
+			return {};
 		}
 	}
 
@@ -57,5 +70,21 @@ namespace Switches
 		std::uint64_t number = 0;
 		const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), number);
 		return error == std::errc() && end != value.data() ? number : a_default;
+	}
+
+	std::vector<std::string> List(std::string_view a_name)
+	{
+		std::vector<std::string> items;
+		const auto value = Value(a_name);
+		for (const auto part : std::views::split(value, ',')) {
+			std::string_view item(part.begin(), part.end());
+			while (!item.empty() && std::isspace(static_cast<unsigned char>(item.front())))
+				item.remove_prefix(1);
+			while (!item.empty() && std::isspace(static_cast<unsigned char>(item.back())))
+				item.remove_suffix(1);
+			if (!item.empty())
+				items.emplace_back(item);
+		}
+		return items;
 	}
 }

@@ -47,6 +47,7 @@
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuLoadPass.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/Switches.h"
 #include "ShaderCache.h"
 #include "TruePBR.h"
 #include "Utils/FileSystem.h"
@@ -68,17 +69,7 @@ namespace
 	 */
 	bool DisabledByEnvironment(const std::string& a_featureName)
 	{
-		static const std::vector<std::string> names = [] {
-			std::vector<std::string> list;
-			char value[1024]{};
-			const DWORD length = GetEnvironmentVariableA("CS_DISABLE_FEATURES", value, sizeof(value));
-			if (length == 0 || length >= sizeof(value))
-				return list;
-			pystring::split(value, list, ",");
-			for (auto& name : list)
-				name = pystring::strip(name);
-			return list;
-		}();
+		static const std::vector<std::string> names = Switches::List("CS_DISABLE_FEATURES");
 		return std::ranges::find(names, a_featureName) != names.end();
 	}
 }
