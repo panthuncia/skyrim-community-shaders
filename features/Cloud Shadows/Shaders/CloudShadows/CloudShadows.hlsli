@@ -9,7 +9,7 @@ namespace CloudShadows
 	ORG_HEADER_SRV(TextureCube<float>, CloudShadowsTexture, 25)
 #if defined(CLOUDS)
 	// Cloud occlusion of the layers drawn up to the current one, for cloud self shadowing
-	TextureCube<float> CloudSelfShadowTexture : register(t26);
+	ORG_HEADER_SRV(TextureCube<float>, CloudSelfShadowTexture, 26)
 #endif
 
 	const static float CloudHeight = (2e3f / GAME_UNIT_TO_M);
