@@ -39,6 +39,8 @@ namespace RenderGraph::Engine::Constants
 				return;
 			unread = static_cast<const std::byte*>(std::exchange(mapped, nullptr));
 			valid = true;
+			// Again here: a read between Map and Unmap saw the previous contents under the Map's version.
+			++version;
 		}
 
 		/**
@@ -85,7 +87,7 @@ namespace RenderGraph::Engine::Constants
 			return { copy.data(), a_byteWidth };
 		}
 
-		/** @brief Bumped by every Map and update: two reads with the same version see the same bytes. */
+		/** @brief Bumped by every Map, Unmap and update: two reads with the same version see the same bytes. */
 		std::uint32_t Version() const { return version; }
 
 		/** @brief Whether the buffer has been fully written since it was first seen. */
