@@ -635,11 +635,38 @@ namespace FrameAnchors
 		};
 	}
 
+	namespace
+	{
+		std::atomic<DWORD> mainThread{ 0 };
+	}
+
+	void LatchMainThread()
+	{
+		mainThread.store(::GetCurrentThreadId(), std::memory_order_release);
+	}
+
+	// A loading screen presents from a job thread (SE 38085). The anchors' state and the graph's frame upload instance belong to
+	// the main thread, so one-shot passes wait for the next main-thread frame.
+	bool OnMainThread()
+	{
+		const DWORD main = mainThread.load(std::memory_order_acquire);
+		const DWORD self = ::GetCurrentThreadId();
+		if (main == 0 || main == self)
+			return true;
+		static std::atomic_flag logged;
+		if (!logged.test_and_set())
+			logger::info("[ORG] frame anchors: a Present on thread {} (a loading screen), not the main thread {}: anchors wait for the main thread",
+				self, main);
+		return false;
+	}
+
 	bool Run(const Point& a_point)
 	{
 		auto& state = Anchors();
 		const std::uint32_t index = IndexOf(a_point.anchor);
 		if (index >= kAnchors || !state.reserved[index] || !state.host)
+			return false;
+		if (!OnMainThread())
 			return false;
 		auto& runtime = RenderGraphRuntime::Get();
 		if (!runtime.IsActive())
@@ -888,6 +915,8 @@ namespace FrameAnchors
 	void Unregister(std::string_view) {}
 	void Refresh(std::string_view) {}
 	bool Run(const Point&) { return false; }
+	void LatchMainThread() {}
+	bool OnMainThread() { return true; }
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> EngineCubemap(std::uint32_t) { return nullptr; }

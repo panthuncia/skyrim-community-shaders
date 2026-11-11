@@ -204,6 +204,15 @@ namespace FrameAnchors
 	inline bool Run(Anchor a_anchor) { return Run(Point{ .anchor = a_anchor }); }
 
 	/**
+	 * @brief True on the engine's main thread, which renders the frame. A loading screen presents from a job thread while the main
+	 * thread loads; no anchor runs there (Run returns false), and per-Present work that feeds the anchors skips it too.
+	 */
+	bool OnMainThread();
+
+	/** @brief Records the calling thread as the engine's main thread. SKSEPlugin_Load calls it: SKSE loads plugins there. */
+	void LatchMainThread();
+
+	/**
 	 * @brief The engine's render target (RE::RENDER_TARGET) as a graph texture, imported once and kept while the engine's texture
 	 * stays the same. Its views follow the engine's (SRV, RTV, UAV where the engine made one). Registered with every graph as
 	 * "cs.engine.target.<index>". Render thread (it synchronizes with DXVK's worker the first time). Null when the target does not

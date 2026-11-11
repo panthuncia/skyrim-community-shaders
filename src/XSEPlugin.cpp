@@ -12,6 +12,7 @@
 #include "Menu/ThemeManager.h"
 #include "NativeMenu/NativeMenu.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/LogTee.h"
@@ -98,6 +99,8 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	while (!REX::W32::IsDebuggerPresent()) {};
 #endif
 	InitializeLog();
+	// SKSE loads plugins on the game's main thread, the one that renders: the render graph's anchors run only there.
+	FrameAnchors::LatchMainThread();
 	CrashDump::Start();
 	logger::info("Loaded {} {} (build {})", Plugin::NAME, Plugin::VERSION.string(), Plugin::BUILD_DESCRIBE);
 	ApplyDevEnvironmentFile();

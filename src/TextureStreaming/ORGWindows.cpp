@@ -388,7 +388,8 @@ namespace TextureStreaming::ORG
 
 	void FrameTick()
 	{
-		if (!Requested())
+		// A loading screen's Present: the staged windows wait for the main thread's next frame.
+		if (!Requested() || !FrameAnchors::OnMainThread())
 			return;
 		auto& state = S();
 		ServiceRetired();
