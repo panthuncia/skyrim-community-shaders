@@ -592,7 +592,7 @@ Slots 57, 61 and 63 are created but not used by this Render _(inferred)_.
 | +0x180 | 0x1412e82f0 | 105, 119-122, 124                | 100481 / 0x1412e8470, from 99024; kIBLENSFLARES_* RTs                                              |
 | +0x188 | 0x1412ea1a0 | 106-113 (CS blurs)               | 100486 / 0x1412ea290 (VL), 100488 / 0x1412ea340 (DOF)                                              |
 | +0x190 | 0x1412ea8e0 | 114-116                          | 100493 / 0x1412ea900, from 99024                                                                   |
-| +0x198 | 0x1412eabc0 | 117                              | RenderWorld 100424 (snow: kMAIN to kSNOW_SWAP) and RenderWaterEffects                              |
+| +0x198 | 0x1412eabc0 | 117                              | RenderWorld 100424 (snow: kMAIN to kSNOW_SWAP) and RenderWaterEffects (below)                      |
 | +0x1a0 | 0x1412eade0 | 118                              | debug only                                                                                         |
 | +0x1a8 | 0x1412eaf20 | 123                              | -                                                                                                  |
 | +0x1b0 | 0x1412eb050 | 125-127                          | unused in vanilla                                                                                  |
@@ -607,6 +607,21 @@ Slots 57, 61 and 63 are created but not used by this Render _(inferred)_.
 | +0x1f8 | 0x1412f0360 | 154                              | 100548                                                                                             |
 | +0x200 | 0x1412f0590 | 155 WaterBlend                   | not traced                                                                                         |
 | +0x208 | 0x1412f0b90 | 156 UnderwaterMask               | not traced                                                                                         |
+
+**The viewport of a raster effect (checked 2026-11-11, SE).** `BSImagespaceShader::Render` (100950) calls
+`Renderer::UpdateViewPort(0, 0, true)` (SE 0x140d69d00: the whole current target, the dynamic-resolution scale ignored) only
+when the effect's `unk88` (+0x88) is clear. With it set, the draw keeps the viewport the state already holds. `UpdateViewPort`
+with `false` scales by the dynamic-resolution ratios (SE `DAT_14302c98c` / `DAT_14302c990`, unless the lock `DAT_14302c9a0` is
+set) and marks the shadow state's viewport dirty (0x2). 99023 keeps `unk88` set on its ISCopy (+0x110) except around the
+screenshot copy, then calls `UpdateViewPort(0, 0, false)`; the depth-of-field effect's Render (SE 0x1412f90d0) sets `unk88` on
+its first child for that child's draw. `SetDirtyStates` applies the shadow viewport (adjusting its depth range only with a
+depth-bias raster mode).
+
+**ISCopySubRegionCS's two callers (+0x198).** `DispatchCopySubRegion` (SE 0x1412eabf0, AE 0x1414d48c0) binds t0 and u0 in one of
+three modes (+0x60). RenderWorld uses mode 2, engine target indices: `kMAIN` (1) to `kSNOW_SWAP` (0x71), the SRV and UAV from
+`renderTargets`. `Main::RenderWaterEffects` (SE 0x1405b2300) uses mode 0, raw views: for each texture in BGSAutoWater's queue,
+that texture's SRV is copied into a sub-rectangle of the UAV of the texture at `DAT_1431d0f80 + 0x48`, which
+`BSWaterShader::SetupGeometry` reads. Neither view is an engine render target's.
 
 **Other 99025 call sites:**
 

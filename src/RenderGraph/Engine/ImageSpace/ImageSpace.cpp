@@ -36,6 +36,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include <algorithm>
 #	include <array>
 #	include <cctype>
+#	include <cmath>
 #	include <filesystem>
 #	include <map>
 #	include <memory>
@@ -73,6 +74,29 @@ namespace RenderGraph::Engine::ImageSpace
 		constexpr std::int32_t kDepthInput = 0x10000;
 		constexpr std::int32_t kCubeInput = 0x20000;
 		constexpr std::int32_t kInputIndexMask = 0xFFFF;
+		/**
+		 * @brief A render target that is one mip of another target's texture (the SAO camera-Z levels: an RTV and SRV of one mip, no
+		 * texture of their own) is named by the texture's target with its mip + 1 in these bits. 0 there is the target's own view.
+		 */
+		constexpr std::int32_t kMipShift = 20;
+		constexpr std::int32_t kMipBits = 0xF << kMipShift;
+		constexpr std::uint32_t kMaxMip = 14;
+
+		/** @brief The name of one mip of an engine render target. */
+		constexpr std::int32_t WithMip(std::int32_t a_target, std::uint32_t a_mip)
+		{
+			return a_target | static_cast<std::int32_t>((a_mip + 1) << kMipShift);
+		}
+
+		/** @brief The engine target index of a name (without its kind and mip bits). */
+		constexpr std::uint32_t IndexOfName(std::int32_t a_name) { return static_cast<std::uint32_t>(a_name & kInputIndexMask); }
+
+		/** @brief The mip a name views, or AnchorPasses::kAllMips for the target's own view. */
+		constexpr std::uint32_t MipOfName(std::int32_t a_name)
+		{
+			const auto bits = a_name < 0 ? 0u : static_cast<std::uint32_t>((a_name & kMipBits) >> kMipShift);
+			return bits ? bits - 1 : AnchorPasses::kAllMips;
+		}
 
 		/** @brief One effect the port covers: the engine's effect, its CS source and the slots it reads. */
 		struct EffectInfo
@@ -148,20 +172,21 @@ namespace RenderGraph::Engine::ImageSpace
 		});
 
 		/**
-		 * @brief What one pass is made for: the effect's shader, its output and inputs, its samplers and its blend state. A compute
-		 * shape's output is the render target behind its UAV (u0), and it has no blend state.
+		 * @brief What one pass is made for: the effect's shader, its output and inputs, its samplers, its blend state and its
+		 * viewport. A compute shape's output is the render target behind its UAV (u0); it has no blend state and no viewport.
 		 */
 		struct ShapeKey
 		{
 			const void* shader = nullptr;  // the engine's BSImagespaceShader
-			std::int32_t output = -1;      // RE::RENDER_TARGET
-			std::array<std::int32_t, kMaxSlots> inputs{ -1, -1, -1, -1, -1 };  // kDepthInput / kCubeInput, or a render target
+			std::int32_t output = -1;      // RE::RENDER_TARGET, with a mip (WithMip)
+			std::array<std::int32_t, kMaxSlots> inputs{ -1, -1, -1, -1, -1 };  // kDepthInput / kCubeInput, or a render target (with a mip)
 			std::array<std::uint32_t, kMaxSlots> address{};
 			std::array<std::uint32_t, kMaxSlots> filter{};
 			const void* blend = nullptr;  // the engine's ID3D11BlendState for the draw (its state table entry)
 			bool compute = false;
+			std::array<std::uint32_t, 4> viewport{};  // x, y, width, height in the output's pixels (of its mip)
 
-			auto Tie() const { return std::tie(shader, output, inputs, address, filter, blend, compute); }
+			auto Tie() const { return std::tie(shader, output, inputs, address, filter, blend, compute, viewport); }
 			bool operator<(const ShapeKey& a_other) const { return Tie() < a_other.Tie(); }
 			bool operator==(const ShapeKey& a_other) const { return Tie() == a_other.Tie(); }
 		};
@@ -269,6 +294,7 @@ namespace RenderGraph::Engine::ImageSpace
 			std::set<const void*> unsupportedBlends;                                                  // blend states no program can take
 			std::vector<std::shared_ptr<const Spec>> specs;                                           // in the current registration, by entry
 			std::set<ShapeKey> refusedShapes;                                                         // shapes no pass can be made for (logged once)
+			std::set<ShapeKey> loggedConstants;                                                       // shapes whose constant sizes were logged (CS_ORG_IMAGESPACE_LOG)
 			std::vector<ShapeKey> candidates;                                                         // seen, not registered yet
 			std::map<ShapeKey, std::uint32_t> positions;            // each shape's place in its frame: scope << 16 | draw within the scope
 			std::set<std::pair<std::int32_t, std::int32_t>> swaps;  // targets that stand in for each other (ping-pong, alternation)
@@ -314,13 +340,30 @@ namespace RenderGraph::Engine::ImageSpace
 			return programs;
 		}
 
-		/** @brief A draw of a_effect stays with the engine: counted, and the reason logged the first time for that effect. */
-		void Refuse(std::string_view a_reason, std::size_t a_effect)
+		/**
+		 * @brief A draw of a_effect stays with the engine: counted, and the reason (with a_detail, when given) logged the first time
+		 * for that effect.
+		 */
+		void Refuse(std::string_view a_reason, std::size_t a_effect, std::string_view a_detail = {})
 		{
 			auto& state = IS();
 			++state.engineDrawn;
 			if (auto& log = state.fallbacks[a_effect])
-				log->Report(a_reason);
+				log->Report(a_reason, a_detail);
+		}
+
+		/** @brief A target name for the log: "rt<index>", "rt<index>.mip<n>", "depth<index>" or "cube<index>". */
+		std::string NameForLog(std::int32_t a_name)
+		{
+			if (a_name < 0)
+				return "none";
+			const auto index = IndexOfName(a_name);
+			if (a_name & kDepthInput)
+				return fmt::format("depth{}", index);
+			if (a_name & kCubeInput)
+				return fmt::format("cube{}", index);
+			const auto mip = MipOfName(a_name);
+			return mip == AnchorPasses::kAllMips ? fmt::format("rt{}", index) : fmt::format("rt{}.mip{}", index, mip);
 		}
 
 		/** @brief Every effect to D3D11 for the session. */
@@ -389,11 +432,51 @@ namespace RenderGraph::Engine::ImageSpace
 			return it != state.effectOf.end() ? it->second : -1;
 		}
 
+		/** @brief The engine render target whose own texture is a_resource, or -1. */
+		std::int32_t TargetOfTexture(ID3D11Resource* a_resource)
+		{
+			auto* renderer = globals::game::renderer;
+			if (!renderer || !a_resource)
+				return -1;
+			auto* resource = Tripwire::Unwrap(a_resource);
+			const auto& targets = renderer->GetRuntimeData().renderTargets;
+			for (std::uint32_t i = RE::RENDER_TARGET::kMAIN; i < RE::RENDER_TARGET::kTOTAL; ++i)
+				if (targets[i].texture && Tripwire::Unwrap(static_cast<ID3D11Resource*>(targets[i].texture)) == resource)
+					return static_cast<std::int32_t>(i);
+			return -1;
+		}
+
 		/**
-		 * @brief The engine target a shader resource view is: a render target's index, a depth-stencil target's depth SRV as
-		 * kDepthInput | index, or -1. kFRAMEBUFFER (an RTV only) is never one.
+		 * @brief The name of a target without a texture of its own whose SRV is one mip of another target's texture (the SAO camera-Z
+		 * levels), or -1. The pass reads it through that texture's import, so the view must have the import's format.
 		 */
-		std::int32_t InputOfView(const ID3D11ShaderResourceView* a_view)
+		std::int32_t MipInputOfView(ID3D11ShaderResourceView* a_view)
+		{
+			D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+			a_view->GetDesc(&desc);
+			if (desc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D || desc.Texture2D.MipLevels != 1 || desc.Texture2D.MostDetailedMip > kMaxMip)
+				return -1;
+			winrt::com_ptr<ID3D11Resource> resource;
+			a_view->GetResource(resource.put());
+			const auto owner = TargetOfTexture(resource.get());
+			if (owner < 0)
+				return -1;
+			auto* ownerView = globals::game::renderer->GetRuntimeData().renderTargets[owner].SRV;
+			if (!ownerView)
+				return -1;
+			D3D11_SHADER_RESOURCE_VIEW_DESC ownerDesc{};
+			ownerView->GetDesc(&ownerDesc);
+			if (ownerDesc.Format != desc.Format)
+				return -1;
+			return WithMip(owner, desc.Texture2D.MostDetailedMip);
+		}
+
+		/**
+		 * @brief The engine target a shader resource view is: a render target's index (with a mip for a target that is one mip of
+		 * another's texture), a depth-stencil target's depth SRV as kDepthInput | index, or -1. kFRAMEBUFFER (an RTV only) is never
+		 * one.
+		 */
+		std::int32_t InputOfView(ID3D11ShaderResourceView* a_view)
 		{
 			auto* renderer = globals::game::renderer;
 			if (!renderer || !a_view)
@@ -401,7 +484,7 @@ namespace RenderGraph::Engine::ImageSpace
 			const auto& targets = renderer->GetRuntimeData().renderTargets;
 			for (std::uint32_t i = RE::RENDER_TARGET::kMAIN; i < RE::RENDER_TARGET::kTOTAL; ++i)
 				if (targets[i].SRV == a_view)
-					return static_cast<std::int32_t>(i);
+					return targets[i].texture ? static_cast<std::int32_t>(i) : MipInputOfView(a_view);
 			const auto& depths = renderer->GetDepthStencilData().depthStencils;
 			for (std::uint32_t i = 0; i < RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL; ++i)
 				if (depths[i].depthSRV == a_view)
@@ -436,6 +519,19 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
+		 * @brief Whether an input reads what the output writes: the same render target, unless both name different mips of it (the
+		 * SAO camera-Z chain reads one level and writes the next).
+		 */
+		bool Overlaps(std::int32_t a_input, std::int32_t a_output)
+		{
+			if (a_input < 0 || a_output < 0 || (a_input & (kDepthInput | kCubeInput)) || IndexOfName(a_input) != IndexOfName(a_output))
+				return false;
+			const auto inputMip = MipOfName(a_input);
+			const auto outputMip = MipOfName(a_output);
+			return inputMip == AnchorPasses::kAllMips || outputMip == AnchorPasses::kAllMips || inputMip == outputMip;
+		}
+
+		/**
 		 * @brief A shape's inputs from the shadow state's slots (the PS ones for a draw, the CS ones for a dispatch): false with a
 		 * reason when one is not an engine target or is the output. A cube slot is the reflection cubemap CS binds itself.
 		 */
@@ -455,7 +551,7 @@ namespace RenderGraph::Engine::ImageSpace
 					a_refusal = "an input that is not an engine target";
 					return false;
 				}
-				if (input == a_out.output) {
+				if (Overlaps(input, a_out.output)) {
 					a_refusal = "it reads its own output";
 					return false;
 				}
@@ -487,15 +583,132 @@ namespace RenderGraph::Engine::ImageSpace
 			return ReadInputs(a_effect, shadow.CSTexture, shadow.CSTextureAddressMode, shadow.CSTextureFilterMode, a_out, a_refusal);
 		}
 
+		/** @brief A draw's output: its name (with the mip it writes) and that mip's size. */
+		struct OutputView
+		{
+			std::int32_t name = -1;
+			std::uint32_t width = 0, height = 0;
+		};
+
 		/**
-		 * @brief The draw's shape from the shadow state, as SetDirtyStates is about to apply it; false with a reason when no pass can
-		 * draw it.
+		 * @brief The output of a draw into engine render target a_target. A target with a texture is itself. A target with only an
+		 * RTV of one mip of another target's texture (the SAO camera-Z levels) is that texture's target at that mip: the pass draws
+		 * through that texture's import, so the owner must have an RTV, and the mip's view the import's formats.
 		 */
-		bool ReadShape(const RE::BSImagespaceShader* a_shader, const EffectInfo& a_effect, ShapeKey& a_out, std::string_view& a_refusal)
+		bool ResolveOutput(std::int32_t a_target, OutputView& a_out, std::string_view& a_refusal)
+		{
+			const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
+			const auto& target = targets[a_target];
+			ID3D11Texture2D* texture = target.texture;
+			std::uint32_t mip = 0;
+			a_out.name = a_target;
+			if (!texture) {
+				if (!target.RTV) {
+					a_refusal = "its output has no texture";
+					return false;
+				}
+				D3D11_RENDER_TARGET_VIEW_DESC view{};
+				target.RTV->GetDesc(&view);
+				winrt::com_ptr<ID3D11Resource> resource;
+				target.RTV->GetResource(resource.put());
+				const auto owner = TargetOfTexture(resource.get());
+				if (view.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || view.Texture2D.MipSlice > kMaxMip || owner < 0) {
+					a_refusal = "its output has no texture and is no mip of an engine target's";
+					return false;
+				}
+				const auto& ownerTarget = targets[owner];
+				if (!ownerTarget.RTV) {
+					a_refusal = "its output is a mip of a texture without a render target view";
+					return false;
+				}
+				// The import's format is its SRV's (the program's target format), its RTVs the owner RTV's format.
+				D3D11_RENDER_TARGET_VIEW_DESC ownerView{};
+				ownerTarget.RTV->GetDesc(&ownerView);
+				D3D11_TEXTURE2D_DESC ownerDesc{};
+				ownerTarget.texture->GetDesc(&ownerDesc);
+				DXGI_FORMAT importFormat = ownerDesc.Format;
+				if (ownerTarget.SRV) {
+					D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
+					ownerTarget.SRV->GetDesc(&srv);
+					importFormat = srv.Format;
+				}
+				if (view.Format != ownerView.Format || view.Format != importFormat) {
+					a_refusal = "its output is a mip view in another format than its texture's";
+					return false;
+				}
+				texture = ownerTarget.texture;
+				mip = view.Texture2D.MipSlice;
+				a_out.name = WithMip(owner, mip);
+			}
+			D3D11_TEXTURE2D_DESC desc{};
+			texture->GetDesc(&desc);
+			if (mip >= desc.MipLevels) {
+				a_refusal = "its output is a mip its texture does not have";
+				return false;
+			}
+			a_out.width = (std::max)(desc.Width >> mip, 1u);
+			a_out.height = (std::max)(desc.Height >> mip, 1u);
+			return true;
+		}
+
+		/**
+		 * @brief The viewport the engine's draw uses, read from DXVK's context after SetDirtyStates applied the shadow state: the
+		 * whole target (Render's UpdateViewPort), the caller's (the explicit-target Render), the one a custom-viewport effect keeps
+		 * (ImageSpaceEffect::unk88: Render leaves the viewport as it is), or the dynamic-resolution part of the target. The pass draws
+		 * it as its render area, so it must be whole pixels inside the output. False with a reason (and the viewport as a_detail).
+		 */
+		bool ReadViewport(const OutputView& a_output, ShapeKey& a_key, std::string_view& a_refusal, std::string& a_detail)
+		{
+			UINT count = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+			std::array<D3D11_VIEWPORT, D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> viewports{};
+			globals::d3d::context->RSGetViewports(&count, viewports.data());
+			if (count == 0) {
+				a_refusal = "no viewport";
+				return false;
+			}
+			const auto& viewport = viewports[0];
+			a_detail = fmt::format("{}x{} at ({}, {}) in {}x{}, depth {} to {}", viewport.Width, viewport.Height, viewport.TopLeftX, viewport.TopLeftY, a_output.width,
+				a_output.height, viewport.MinDepth, viewport.MaxDepth);
+			if (viewport.MinDepth != 0.0f || viewport.MaxDepth != 1.0f) {
+				a_refusal = "a viewport depth range other than 0 to 1";
+				return false;
+			}
+			// The dynamic-resolution sizes are float products. Within 1/64 of a whole pixel, the pixels covered are the same and
+			// TEXCOORD0 differs by far less than a texel.
+			const std::array values{ viewport.TopLeftX, viewport.TopLeftY, viewport.Width, viewport.Height };
+			std::array<std::uint32_t, 4> rect{};
+			for (std::size_t i = 0; i < values.size(); ++i) {
+				const float rounded = std::round(values[i]);
+				if (!(rounded >= 0.0f) || std::abs(values[i] - rounded) > 1.0f / 64.0f) {
+					a_refusal = "a viewport that is not whole pixels";
+					return false;
+				}
+				rect[i] = static_cast<std::uint32_t>(rounded);
+			}
+			if (rect[2] == 0 || rect[3] == 0) {
+				a_refusal = "an empty viewport";
+				return false;
+			}
+			if (rect[0] + rect[2] > a_output.width || rect[1] + rect[3] > a_output.height) {
+				a_refusal = "a viewport outside its target";
+				return false;
+			}
+			a_key.viewport = rect;
+			return true;
+		}
+
+		/**
+		 * @brief The draw's shape from the shadow state, as SetDirtyStates is about to apply it (all but the viewport: ReadViewport
+		 * reads it once SetDirtyStates ran); false with a reason when no pass can draw it.
+		 */
+		bool ReadShape(const RE::BSImagespaceShader* a_shader, const EffectInfo& a_effect, ShapeKey& a_out, OutputView& a_output, std::string_view& a_refusal)
 		{
 			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-			auto* renderer = globals::game::renderer;
 			a_out.shader = a_shader;
+			if (!globals::game::renderer) {
+				a_refusal = "no renderer";
+				return false;
+			}
 			const auto output = static_cast<std::int32_t>(shadow.renderTargets[0]);
 			if (output < static_cast<std::int32_t>(RE::RENDER_TARGET::kMAIN) || output >= static_cast<std::int32_t>(RE::RENDER_TARGET::kTOTAL)) {
 				a_refusal = "its output is not an engine render target";
@@ -518,24 +731,13 @@ namespace RenderGraph::Engine::ImageSpace
 				a_refusal = "its target is cleared at the bind";
 				return false;
 			}
-			auto* texture = renderer ? renderer->GetRuntimeData().renderTargets[output].texture : nullptr;
-			if (!texture) {
-				a_refusal = "its output has no texture";
+			if (!ResolveOutput(output, a_output, a_refusal))
 				return false;
-			}
-			D3D11_TEXTURE2D_DESC desc{};
-			texture->GetDesc(&desc);
-			const auto& viewport = shadow.viewPort;
-			if (viewport.TopLeftX != 0.0f || viewport.TopLeftY != 0.0f || viewport.Width != static_cast<float>(desc.Width) ||
-				viewport.Height != static_cast<float>(desc.Height) || viewport.MinDepth != 0.0f || viewport.MaxDepth != 1.0f) {
-				a_refusal = "a viewport smaller than its target";
-				return false;
-			}
 			if (shadow.rasterStateScissorMode != 0) {
 				a_refusal = "a scissor rectangle";
 				return false;
 			}
-			a_out.output = output;
+			a_out.output = a_output.name;
 			if (!ReadInputs(a_effect, shadow.PSTexture, shadow.PSTextureAddressMode, shadow.PSTextureFilterMode, a_out, a_refusal))
 				return false;
 			const auto draw = Pipeline::EngineDrawState::Latch();
@@ -658,10 +860,20 @@ namespace RenderGraph::Engine::ImageSpace
 			auto spec = std::make_shared<Spec>();
 			spec->key = a_key;
 			spec->effect = static_cast<std::size_t>(effectIndex);
-			spec->output = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(a_key.output));
+			spec->output = FrameAnchors::EngineTarget(IndexOfName(a_key.output));
 			std::string_view refusal;
 			if (!spec->output)
 				refusal = "its output could not be imported";
+			else if (!a_key.compute) {
+				// The viewport was read against the D3D11 texture; the import must hold it too (a resize remakes the passes from the
+				// old shapes).
+				const auto mip = MipOfName(a_key.output);
+				const auto shift = mip == AnchorPasses::kAllMips ? 0u : mip;
+				const auto width = (std::max)(spec->output->GetWidth() >> shift, 1u);
+				const auto height = (std::max)(spec->output->GetHeight() >> shift, 1u);
+				if (a_key.viewport[0] + a_key.viewport[2] > width || a_key.viewport[1] + a_key.viewport[3] > height)
+					refusal = "its viewport is outside its imported output";
+			}
 			for (std::uint32_t slot = 0; refusal.empty() && slot < effect.slots; ++slot) {
 				if (!(effect.reads & (1u << slot)))
 					continue;
@@ -690,11 +902,11 @@ namespace RenderGraph::Engine::ImageSpace
 				refusal = "every gate entry is in use";
 			if (!refusal.empty()) {
 				if (state.refusedShapes.insert(a_key).second)
-					logger::info("[ORG] ImageSpace: {} into rt{} stays on D3D11 ({})", effect.effectName, a_key.output, refusal);
+					logger::info("[ORG] ImageSpace: {} into {} stays on D3D11 ({})", effect.effectName, NameForLog(a_key.output), refusal);
 				return {};
 			}
 			spec->entry = state.nextEntry++;
-			spec->name = fmt::format("{}.rt{}.{}", effect.effectName, a_key.output, spec->entry);
+			spec->name = fmt::format("{}.{}.{}", effect.effectName, NameForLog(a_key.output), spec->entry);
 			return { .spec = std::move(spec) };
 		}
 
@@ -718,7 +930,7 @@ namespace RenderGraph::Engine::ImageSpace
 				std::vector<AnchorPasses::Bind> bindings;
 				bindings.push_back(AnchorPasses::Bind::Shared());
 				for (std::uint32_t slot = 0; slot < effect.slots; ++slot)
-					bindings.push_back(spec->inputs[slot] ? AnchorPasses::Bind::Srv(spec->inputs[slot]) : AnchorPasses::Bind::Unused());
+					bindings.push_back(spec->inputs[slot] ? AnchorPasses::Bind::Srv(spec->inputs[slot], MipOfName(spec->key.inputs[slot])) : AnchorPasses::Bind::Unused());
 				for (std::uint32_t slot = 0; slot < effect.samplers; ++slot)
 					bindings.push_back(spec->inputs[slot] && !(effect.cubes & (1u << slot)) ? AnchorPasses::Bind::Handle(spec->samplers[slot]) : AnchorPasses::Bind::Unused());
 				if (effect.compute)
@@ -738,7 +950,10 @@ namespace RenderGraph::Engine::ImageSpace
 				draw.program = spec->program;
 				draw.bindings = std::move(bindings);
 				draw.target = spec->output;
-				draw.viewport = { .x = 0, .y = 0, .width = spec->output->GetWidth(), .height = spec->output->GetHeight() };
+				draw.mip = MipOfName(spec->key.output);
+				// The engine's viewport (ReadViewport): the whole target, or a part of it (dynamic resolution, a custom viewport).
+				const auto& viewport = spec->key.viewport;
+				draw.viewport = { .x = viewport[0], .y = viewport[1], .width = viewport[2], .height = viewport[3] };
 				draw.load = rhi::LoadOp::Load;
 				draw.gate = spec->entry;
 				builder.Add(std::move(draw));
@@ -1018,8 +1233,10 @@ namespace RenderGraph::Engine::ImageSpace
 			state.quietFrames = 0;
 			if (state.logShapes) {
 				const auto effect = EffectOf(static_cast<const RE::BSImagespaceShader*>(a_key.shader));
-				logger::info("[ORG] ImageSpace: new shape {} into rt{} from rt{} rt{} rt{}", effect >= 0 ? kEffects[static_cast<std::size_t>(effect)].effectName : std::string_view("?"), a_key.output,
-					a_key.inputs[0], a_key.inputs[1], a_key.inputs[2]);
+				const auto& viewport = a_key.viewport;
+				logger::info("[ORG] ImageSpace: new shape {} into {} from {} {} {}, viewport {}x{} at ({}, {})",
+					effect >= 0 ? kEffects[static_cast<std::size_t>(effect)].effectName : std::string_view("?"), NameForLog(a_key.output), NameForLog(a_key.inputs[0]),
+					NameForLog(a_key.inputs[1]), NameForLog(a_key.inputs[2]), viewport[2], viewport[3], viewport[0], viewport[1]);
 			}
 		}
 
@@ -1045,7 +1262,7 @@ namespace RenderGraph::Engine::ImageSpace
 				return nullptr;
 			}
 			// A target made again (a resize) has a new import: the passes are made again on the new ones.
-			bool current = spec->output == FrameAnchors::EngineTarget(static_cast<std::uint32_t>(a_key.output));
+			bool current = spec->output == FrameAnchors::EngineTarget(IndexOfName(a_key.output));
 			for (std::uint32_t slot = 0; current && slot < effect.slots; ++slot)
 				current = !spec->inputs[slot] || spec->inputs[slot] == ImportInput(a_key.inputs[slot]);
 			if (!current) {
@@ -1098,19 +1315,27 @@ namespace RenderGraph::Engine::ImageSpace
 			const auto& effect = kEffects[scope.effect];
 			++state.drawIndex;
 			ShapeKey key{};
+			OutputView output;
 			std::string_view refusal;
-			if (!ReadShape(scope.shader, effect, key, refusal)) {
+			if (!ReadShape(scope.shader, effect, key, output, refusal)) {
 				Flush();
 				Refuse(refusal, scope.effect);
+				return false;
+			}
+			// The engine's state for the draw goes to D3D11 as before (the draw would apply it; when the engine draws, its own call
+			// finds nothing left to apply). Then DXVK's context holds the viewport the draw uses.
+			static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
+			setDirtyStates(false);
+			std::string detail;
+			if (!ReadViewport(output, key, refusal, detail)) {
+				Flush();
+				Refuse(refusal, scope.effect, detail);
 				return false;
 			}
 			const Spec* spec = AdmitShape(key, scope.effect);
 			if (!spec)
 				return false;
-			// The engine's state for the draw goes to D3D11 as before (the draw would apply it), and the capture records the draw's
-			// constants as a use: the draw is withheld, so no draw hook records it.
-			static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
-			setDirtyStates(false);
+			// The capture records the draw's constants as a use: the draw is withheld, so no draw hook records it.
 			const auto use = Constants::Capture(Constants::kDrawStages);
 			const auto* slot = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 2) : nullptr;
 			// The ImageSpace setups write PerGeometry into the PS b2 size-class pool (PSGeometry); a custom mapper's ring is accepted too.
@@ -1135,9 +1360,9 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			const std::array blocks{ at.block, frameAt.block };
 			AddToBatch(*spec, { .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = at.size, .frameSize = frameAt.size } }, blocks);
-			if (state.logShapes)
-				state.fallbacks[scope.effect]->Report("constant sizes (CS_ORG_IMAGESPACE_LOG)",
-					fmt::format("{} bytes of PerGeometry ({}) and {} of PerFrame", at.size, slot->group == Constants::Group::PSGeometry ? "PS geometry pool" : "custom", frameAt.size));
+			if (state.logShapes && state.loggedConstants.insert(key).second)
+				logger::info("[ORG] ImageSpace: {} into {} taken with {} bytes of PerGeometry ({}) and {} of PerFrame", effect.effectName, NameForLog(key.output), at.size,
+					slot->group == Constants::Group::PSGeometry ? "PS geometry pool" : "custom", frameAt.size);
 			return true;
 		}
 
@@ -1195,20 +1420,19 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			const std::array blocks{ at.block };
 			AddToBatch(*spec, { .at = { .srv = at.srvIndex, .offset = at.offset, .size = at.size }, .compute = true, .groups = { a_x, a_y, a_z } }, blocks);
-			if (state.logShapes)
-				state.fallbacks[scope.effect]->Report("constant sizes (CS_ORG_IMAGESPACE_LOG)", fmt::format("{} bytes of compute constants", at.size));
+			if (state.logShapes && state.loggedConstants.insert(key).second)
+				logger::info("[ORG] ImageSpace: {} into {} taken with {} bytes of compute constants", effect.effectName, NameForLog(key.output), at.size);
 			return true;
 		}
 
 		/** @brief Why an effect's Render cannot have its draw taken, or empty. */
-		std::string_view Ineligible(const RE::ImageSpaceEffect* a_effect)
+		std::string_view Ineligible()
 		{
 			if (!Constants::Active())
 				return "the engine-constants capture is not active (CS_ORG_ENGINE_CONSTANTS=1)";
 			// ImageSpaceEffect+0x88 (unk88): the effect keeps its own viewport; BSImagespaceShader::Render skips UpdateViewPort then
-			// (checked in Ghidra on SE 0x14130cd20 and AE 0x1414f88b0).
-			if (a_effect->unk88)
-				return "a custom viewport";
+			// (checked in Ghidra on SE 0x14130cd20 and AE 0x1414f88b0). Not a refusal: the draw's shape takes the viewport the D3D11
+			// context holds once SetDirtyStates ran (ReadViewport), whoever set it.
 			auto* manager = RE::ImageSpaceManager::GetSingleton();
 			if (!manager)
 				return "no ImageSpaceManager";
@@ -1344,7 +1568,7 @@ namespace RenderGraph::Engine::ImageSpace
 				const auto* shader = static_cast<const RE::BSImagespaceShader*>(effect);
 				const bool covered = EffectOf(shader) >= 0;
 				const bool scoped = InScope(shader, [&] {
-					WithEffect(shader, false, covered ? Ineligible(effect) : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
+					WithEffect(shader, false, covered ? Ineligible() : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
 				});
 				if (!scoped)
 					func(a_effect, a_quad, a_param);

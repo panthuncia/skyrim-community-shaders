@@ -101,18 +101,29 @@ mechanism below unless the row says otherwise.
 
 **Scopes.** Draws are taken only inside scopes, detoured at their function starts: the HDR effect's Render and
 RenderPreTonemapComposites, RenderSSAO and the reflection pass (below), and the own-scope effects (below). Inside a scope, `BSImagespaceShader::Render` records which shader is drawing; an effect is eligible
-when it is selected and the capture is active, and it has no custom viewport, no manager rectangle and no dynamic-resolution
-quad. The three reads are CommonLib's fields, checked in Ghidra on SE and AE: `ImageSpaceEffect::unk88` (Render skips
-`UpdateViewPort` when it is set), the manager's `rect` (Render applies it when `left` and `right` are not -1, the engine's own
-test of two of its four fields) and `RUNTIME_DATA::unk58` (`RenderEffect` draws the quad at +0x50 instead of +0x48).
+when it is selected and the capture is active, and it has no manager rectangle and no dynamic-resolution quad. The two reads
+are CommonLib's fields, checked in Ghidra on SE and AE: the manager's `rect` (Render applies it when `left` and `right` are not
+-1, the engine's own test of two of its four fields) and `RUNTIME_DATA::unk58` (`RenderEffect` draws the quad at +0x50 instead
+of +0x48). A custom viewport (`ImageSpaceEffect::unk88`: Render skips `UpdateViewPort`, so the draw keeps the viewport the state
+holds) is no longer a refusal: the draw's viewport is read at the choke point, whoever set it.
 
 **The choke point.** In `DrawTriShape`, an eligible effect's draw reads the shadow state as SetDirtyStates is about to apply it:
-render target 0 (an engine target, no other target, no depth or stencil, no clear at the bind), a viewport covering the target,
-no scissor, the PS textures the effect reads (each an engine target's SRV), their address and filter modes, and the blend state
-from the engine's table. That is the draw's shape. A shape with a pass then calls `SetDirtyStates(false)` itself, takes the
-draw's constants (`Constants::Capture(kDrawStages)`, then `Find(use, Pixel, 2)` and `Find(use, Pixel, 12)`), and joins the
-batch instead of drawing. Anything else is
-drawn by the engine, after the pending batch runs.
+render target 0 (an engine target, no other target, no depth or stencil, no clear at the bind), no scissor, the PS textures the
+effect reads (each an engine target's SRV), their address and filter modes, and the blend state from the engine's table. Then
+it calls `SetDirtyStates(false)` itself and reads the viewport from DXVK's context (`RSGetViewports`): that is the viewport the
+engine's draw uses, whether Render set it (the whole target), the caller did (the explicit-target Render), the effect kept it
+(`unk88`) or it is the dynamic-resolution part of the target (Upscaling sets the engine's dynamic-resolution ratios, so SAO and
+the reflections draw into the top-left part of their targets). The viewport must be whole pixels (within 1/64, as the
+dynamic-resolution sizes are float products), inside the output, with depth 0 to 1. All of that is the draw's shape. A shape
+with a pass takes the draw's constants (`Constants::Capture(kDrawStages)`, then `Find(use, Pixel, 2)` and `Find(use, Pixel,
+12)`) and joins the batch instead of drawing. Anything else is drawn by the engine, after the pending batch runs.
+
+**Mip targets.** The SAO camera-Z levels (`kSAO_CAMERAZ_MIP_LEVEL_*`) have no texture of their own: each is an RTV and an SRV of
+one mip of another target's texture. A shape names such a target as the texture's target with the mip (`WithMip`; logged as
+`rt<n>.mip<m>`), found by the view's resource (`TargetOfTexture`) and its mip slice. The pass draws into that mip of the
+texture's import (`Draw::mip`) and reads one mip (`Bind::Srv(..., mip)`), so ISSAOCameraZ and ISMinify read one level and write
+the next of one graph resource. The view must have the import's format and its texture's target an RTV (output) or SRV (input);
+otherwise the draw stays with the engine. A draw that reads the mip it writes, or the whole texture, reads its own output.
 
 **Batches.** A batch runs (`FrameAnchors::Run(ImageSpace)`) before any engine draw or dispatch that is not taken, before a taken
 draw whose pass is not after the last one in the batch (the graph runs passes in order-key order), and at the end of a scope.
@@ -165,8 +176,9 @@ target (an unbound average-depth slot, for example) keeps that effect with the e
 **Passes.** One `AnchorPasses::Draw` per shape: the effect's RasterProgram (its CS source, the D3D11 build's defines from
 `ShaderCache::GetCompileDefines`, the target's format, the engine blend state as an rhi blend), the output and inputs as
 `FrameAnchors::EngineTarget` imports (the P4 targets' published textures under `CS_ORG_ENGINE_TARGETS`), samplers made from
-the engine's sampler table, load op Load, and the gate entry. The ping-pong of the chain is in the shapes: each (output,
-inputs) pair the engine uses is its own pass.
+the engine's sampler table, load op Load, the shape's viewport as the render area, and the gate entry. The ping-pong of the
+chain is in the shapes: each (output, inputs, viewport) the engine uses is its own pass. The graph's fullscreen triangle gives
+TEXCOORD0 from 0 to 1 over the render area, as the engine's quad does over its viewport.
 
 **Why the capture, not ConstantMirror.** The ImageSpace constants go through the 4-buffer custom mapper, rewritten for every
 draw. The capture already copies each use's window into the frame's ring at the draw, and gives a location a kept recording can
@@ -178,6 +190,7 @@ own, which is what the capture does already.
 | Trigger | Handling |
 | --- | --- |
 | Effects that run on some frames only (bloom radius changes, adaptation, composites without VL) | Each shape is a pass behind its gate entry; a run opens only the entries it draws. No rebuild. |
+| A new viewport (a dynamic-resolution scale change, Upscaling's quality mode) | A new shape: the engine draws it until it joins at the next cell change. Upscaling's render size is fixed for a quality mode, so the shapes settle. |
 | Targets changing between effects (the luminance chain's alternation, ping-pong) | Learnt as separate shapes in the learning window (120 frames in a cell without a new shape), with the shapes the RE says they imply (kMAIN / kMAIN_COPY as the source, the alternating last luminance level, every bloom radius for a bloom shape), all registered at once. No rebuild. |
 | A shape first seen after the registration (an effect's first use) | Drawn by D3D11 and queued; it joins only at the next cell change. The number of shapes (at most 128 gate entries) bounds how often. A pausing menu no longer triggers a join. |
 | Programs | From `RenderGraph::ProgramCache`, built off the render thread. A registration waits until every shape's program is built, so it is one registration, not one per program. |
@@ -202,7 +215,7 @@ own, which is what the capture does already.
 | --- | --- |
 | `CS_ORG_IMAGESPACE=1` | Installs the hooks and takes the covered draws. Needs `CS_ORG_ENGINE_CONSTANTS=1`. |
 | `CS_ORG_IMAGESPACE_EFFECTS=<list>` | A diagnostic for bisecting an effect. Comma list (`Switches::List`) of engine names (`BSImagespaceShaderHDRDownSample4`), effect names (`ISHDRDownSample4`) or groups (`hdr`, `bloom`, `composite`), any case. Unset or `all`: every covered effect. |
-| `CS_ORG_IMAGESPACE_LOG=1` | A diagnostic: logs each new shape and each effect's constant sizes once. |
+| `CS_ORG_IMAGESPACE_LOG=1` | A diagnostic: logs each new shape (with its viewport), and each shape's constant sizes once when its first draw is taken (`<effect> into <target> taken with <n> bytes of ...`). Not a refusal. |
 
 Covered effect names: ISHDRDownSample16, ISHDRDownSample4, ISHDRDownSample16Lum, ISHDRDownSample4RGB2Lum,
 ISHDRDownSample4LumClamp, ISHDRDownSample16LumClamp, ISHDRDownSample4LightAdapt, ISHDRDownSample16LightAdapt (hdr);
@@ -216,6 +229,13 @@ ISDepthOfFieldBlurHCS, ISDepthOfFieldBlurVCS (dof); ISRefraction (refraction); I
 New refusal reasons (wave 3): `its scope used its runs this frame`, `a geometry other than the full-screen quad`,
 `its UAV is not an engine render target's`, `more than one UAV`, `no captured compute constants`, `an input that is not an engine
 target`.
+
+Viewport and mip reasons (fix-imagespace-tail, replacing `a custom viewport` and `a viewport smaller than its target`; the
+viewport-sized ones log the viewport and the output's size): `a viewport that is not whole pixels`, `a viewport outside its
+target`, `a viewport depth range other than 0 to 1`, `an empty viewport`, `no viewport`, `its output has no texture and is no mip
+of an engine target's`, `its output is a mip of a texture without a render target view`, `its output is a mip view in another
+format than its texture's`, `its output is a mip its texture does not have`; at registration `its viewport is outside its
+imported output`. `its output has no texture` remains for a target with neither a texture nor an RTV.
 
 Log lines (all `[ORG] ImageSpace:`): `hooks installed (...)`; `on (CS_ORG_IMAGESPACE); effects <list>; ...`; `built <effect> for
 format <n>`; `registered <n> passes (registration <k>)`; `the graph holds <n> passes; their draws are the graph's from now`; `the
@@ -249,9 +269,11 @@ technique, the target), with what wave 3 does about each:
 | 107732 <- HDR Render: downsample, luminance, adaptation, bloom | 7 where refused | Graph as before; two runs kept for it |
 | 107732 <- HDR Render: the tonemap into kFRAMEBUFFER | 1 | D3D11: CS's tonemap owners |
 | 107733 ISWaterBlend into kMAIN (two targets; CS clears the second with D3D11 first) | 1 | D3D11 (below) |
-| 107732 <- 99023: ISDistantBlur, ISRefraction, ISRadialBlur | 1-2 | Graph (w3-slots: own scopes) |
+| 107732 <- 99023: ISDistantBlur, ISRefraction, ISRadialBlur | 1-2 | Graph (w3-slots: own scopes). ISDistantBlur and ISRefraction keep their own viewport (`unk88`); since fix-imagespace-tail they are taken with the viewport the context holds. A draw into kFRAMEBUFFER (the chain's last effect) stays D3D11: no engine target. |
 | 107734 <- 107209 <- 107208: the DOF / distant blur compute | 1 | Graph (w3-slots: own scope, the compute form) |
 | 107734 <- 107217 <- RenderWorld: ISCopySubRegionCS (snow) | 1 | Graph (w3-slots: own scope, the compute form) |
+| 107734 <- RenderWaterEffects: ISCopySubRegionCS (BGSAutoWater's queue) | 0-1 | D3D11: neither view is an engine target's (below) |
+| 107733 <- RenderSSAO and the reflection pass, with Upscaling | (the SAO and SSR rows) | Graph since fix-imagespace-tail: the dynamic-resolution viewport is the pass's render area, and the camera-Z levels are mips of one import. |
 | 107023 <- Main::Draw: the volumetric lighting compute (VolumetricLighting's CS) | 2-3 | D3D11 (below) |
 
 So with `CS_ORG_IMAGESPACE=1` the census classes that should drop to zero are: the `ImageSpace` draws in DrawTriShape whose frames
@@ -280,6 +302,17 @@ D3D11 from the residue, and why:
   (`GetOrCreateGenerateCS`, `SetDimensionsCB`, chosen in `CSShadersSupport::Renderer_DispatchCSShader`), not the engine's. It is
   an ORG port of that feature's compute in the Phase 3 style (`src/Features/VolumetricLighting/ORGVolumetricLighting.*`, its
   four sources dual-target), which this lane did not reach.
+- **ISCopySubRegionCS from `Main::RenderWaterEffects`** (SE 0x1405b2300; engine-d3d11-surface.md, R4). It copies each texture in
+  BGSAutoWater's queue (a loaded texture's SRV, a different one per call) into a sub-rectangle of the texture at
+  `DAT_1431d0f80 + 0x48` that the water shader reads (its UAV). Neither is an engine render target. A pass is made per shape,
+  and a shape here would be per queued texture, used once: importing each would cost a graph build per texture for one dispatch.
+  It stays D3D11 (`its UAV is not an engine render target's`). The snow copy from RenderWorld (kMAIN to kSNOW_SWAP) is taken.
+- **A fractional viewport.** The pass's render area is whole pixels. A dynamic-resolution viewport more than 1/64 of a pixel off
+  whole (an odd render size halved for a half-resolution target, for example) would cover the same pixels but give a slightly
+  different TEXCOORD0, so it stays D3D11 (`a viewport that is not whole pixels`, with the viewport logged). Taking it needs the
+  viewport passed to the shader, or a render area separate from the viewport.
+- **The dynamic-resolution quad** (`unk58`, quad +0x50). Not seen with Upscaling (its draws go through the +0x48 quad with a
+  smaller viewport). Its UVs were not traced: it stays refused (`dynamic resolution`).
 
 Then everything marked Next above: the tonemap when no CS feature owns it, the rest of 99023's slots (DOF, radial and full-screen blur, get hit, refraction, FXAA, world map), the
 pre-tonemap SIL and IB lens flares, SSAO, the local map, the copies, and the dynamic-resolution path. Then the engine's draw can
