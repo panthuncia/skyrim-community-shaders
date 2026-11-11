@@ -181,7 +181,7 @@ D3D11`.
 
 Scenarios `tools/cs-ab/scenarios/imagespace-org0.env` (D3D11, the capture on) and `imagespace-org1.env` (every covered effect):
 Whiterun by day and at night, the world map, the journal (menu blur), Dragonsreach, Riverwood. Bisection:
-`imagespace-org1-hdr.env`, `-bloom.env`, `-composite.env`, or any effect name in `CS_ORG_IMAGESPACE_EFFECTS`.
+a copy of `imagespace-org1.env` with `CS_ORG_IMAGESPACE_EFFECTS` set to a group (`hdr`, `bloom`, `composite`) or any effect name.
 
 1. The log shows the startup lines, `registered`, `the graph holds` and `the first batch`; no ImageSpace error, no `Render graph
    disabled`, no `[DCLF] Forced off`.
