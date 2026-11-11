@@ -169,6 +169,9 @@ namespace DCLF::SceneCapture
 		// its renderer data while the worker still resolves the previous capture (before GpuResources takes its lease).
 		std::array<winrt::com_ptr<ID3D11Buffer>, 2> buffersHeld;
 		std::uint64_t vertexDesc = 0;
+		// The geometry's own vertex description (BSGeometry +0x148), which the pass descriptors read (the Effect shader's FUN_1414bde90:
+		// Skinned, MotionVectorsNormals). A skinned shape's renderer data, whose description vertexDesc holds, is another TriShape or none.
+		std::uint64_t shapeVertexDesc = 0;
 		std::uint32_t vertexCount = 0, triangleCount = 0;
 		const void* skin = nullptr;
 		const void* skinRtti = nullptr;

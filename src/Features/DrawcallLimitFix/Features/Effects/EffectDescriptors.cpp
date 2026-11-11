@@ -75,7 +75,8 @@ namespace DCLF::Features::Effects
 		{
 			const std::uint64_t f = a_property.flags;
 			const auto* alpha = a_leaf.alpha;
-			const std::uint64_t vertexDesc = a_leaf.geometry ? a_leaf.geometry->vertexDesc : 0;
+			// The geometry's own description (+0x148), as FUN_1414bde90 reads it: a skinned shape's renderer data has another or none.
+			const std::uint64_t vertexDesc = a_leaf.geometry ? a_leaf.geometry->shapeVertexDesc : 0;
 			using namespace EffectFlag;
 			std::uint32_t d = 0;
 			if (f & Bit(Flag::kVertexColors))
@@ -167,8 +168,10 @@ namespace DCLF::Features::Effects
 	bool EffectSkinned(const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf)
 	{
 		// FUN_1414bde90: kSkinned and the geometry's vertex description (+0x148) with a skin flag (VF_SKINNED's bits, 0x1004000000000000).
+		// Not the renderer data's (GeometryRecord::vertexDesc): a skinned shape's is another TriShape or none, which read as unskinned
+		// made every skinned effect a skinned variant.
 		constexpr std::uint64_t kVertexSkinned = 0x1004000000000000ull;
-		const std::uint64_t vertexDesc = a_leaf.geometry ? a_leaf.geometry->vertexDesc : 0;
+		const std::uint64_t vertexDesc = a_leaf.geometry ? a_leaf.geometry->shapeVertexDesc : 0;
 		return (a_property.flags & Bit(Flag::kSkinned)) && (vertexDesc & kVertexSkinned);
 	}
 
@@ -206,8 +209,14 @@ namespace DCLF::Features::Effects
 			variants |= kEffectVariantShape;
 		}
 		// The palette path (CS_DCLF_SKINNED) draws a skinned effect when the descriptor's Skinned bit (EffectSkinned) matches the
-		// leaf having a skin instance. kSkinned on a static shape without skinned vertices is no variant; any other mismatch is.
-		if (EffectSkinned(a_property, a_leaf) != a_leaf.Skinned() || (a_leaf.Skinned() && !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Skinned)))
+		// leaf having a skin instance. kSkinned on a static shape without skinned vertices is no variant. A skin instance under a
+		// descriptor without the bit is a rigid skin: SetupGeometry (AE 0x1414eab10) writes World from the geometry's world when the
+		// descriptor's bit 3 is clear, and the skin path (RenderPassImmediately +0x1DF) draws each partition with the unskinned
+		// vertex shader, as DCLF draws it with rigidSkins. The other mismatch (the bit without a skin instance) reads bones nothing
+		// set, so it stays a variant.
+		const bool effectSkinned = EffectSkinned(a_property, a_leaf);
+		if ((a_leaf.Skinned() && !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Skinned)) || (effectSkinned && !a_leaf.Skinned()) ||
+			(!effectSkinned && a_leaf.Skinned() && !ported.rigidSkins))
 			variants |= kEffectVariantSkinned;
 		// Effect decals (hints 2 and 3) go to DCLF's decal groups (G-buffer pass, DEFERRED). kTempRefraction with kDynamicDecal
 		// registers no pass at all (GetRenderPasses), so it stays a variant.

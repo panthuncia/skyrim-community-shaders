@@ -39,6 +39,12 @@ first-person parts in main depth. The race menu adds the player's face shapes (`
 under `BSFaceGenNiNodeSkinned`) in main, main depth and focus shadows, about 20 passes a frame. Not yet read why; the likely cause
 is that the menu's edits reach the shapes by another writer than the head's morph job, so Features/Faces has no snapshot.
 
+The ORG residue census of the p5-all tour (2026-11-11, `1111-072658-p35-p5-all-census-w3`; p5/flush.md "DCLF's share") agrees: in
+a settled window DCLF leaves the engine about 3 particle effects a frame in Whiterun (master particle systems, 1.4) and 9 skinned
+effects in Blackreach. The skinned effects, like the one skinned effect variant above (dog eyes), were the Effect port reading the
+renderer data's vertex description instead of the shape's (fixed: `GeometryRecord::shapeVertexDesc`). Everything else DCLF leaves
+is in the window after a load. Scenarios: `p5-all-census-dclf.env`, `-take.env`, `dclf-residue-census.env`.
+
 ### 1.1 The residue without traversal: stop queuing the list jobs
 
 -   **Goal.** The engine's list jobs (`ListAccumulationJob`) are no longer queued for the main camera, and the render thread no
@@ -134,6 +140,8 @@ is that the menu's edits reach the shapes by another writer than the head's morp
     through the manager's own `DetachChild` overrides does not wait for the capture's gate: none is known during play. The
     interior route is not checked: a master listed in a portal graph's `alwaysRenderChildren` stays unheld (the gather runs
     first). A master has no fade node. The removal hook is one more trampoline call (the plugin allocates 4 KB).
+-   **Residue.** They are the steady Effect draws in the residue census (Whiterun, about 3 a frame: `DrawDynamicTriShape (DrawData
+    copy)` from the dispatcher's +0x101, geometry type 1). `p5-all-census-dclf-take.env` runs the tour with the switch on.
 -   **Needs.** Before it is on by default: a run of the unheld roots diff (its count, "unheld roots diffs", is in the C2 parity
     line with `CS_DCLF_PERSISTENT_PARITY`), and the test that no master stays listed after its torches are gone (`master
     particles ... listed`).
@@ -143,7 +151,9 @@ is that the menu's edits reach the shapes by another writer than the head's morp
 -   **Goal.** DCLF draws grass, water and the sky, each as an object class with its own view bits.
 -   **Why.** They are most of the engine's remaining main passes (about 75 a frame with the particle effects), and each
     keeps an engine walk.
--   **State.** Not started.
+-   **State.** Not started. Precipitation is in the same position: the `BSParticleShader` techniques (rain, snow, Blackreach's
+    spores; residue census `Particle` vs `0x4`, about 10 a frame in Blackreach) are drawn by the engine through the grouped
+    alphas (AE 107673); DCLF draws only the precipitation occlusion mask.
 -   **Design.** Take them class by class in measured cost order. Grass interacts with Grass Collision and
     `GrassOptimizations`; water with the water reflection (1.2) and its shaders; the sky also fills the reflection faces.
 -   **Needs.** A census of each class's cost before choosing the first.
@@ -448,6 +458,8 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
     -   **Membrane** (pass bit 15): SetupGeometry takes `BSEffectShader__sub` instead of its usual body (the TESEffectShader
         membrane: normal and noise textures, `MembraneRimColor`, `MembraneVars`, `TexcoordOffsetMembrane`). The pass is an
         effect pass on an actor's geometry. Needs that function's port and the actor pass.
+    -   **Rigid skins** (a skin instance whose pass has no Skinned bit): built behind `CS_DCLF_EFFECT_RIGID_SKINS` (default off),
+        not yet run in game.
     -   **Strip and mesh particle systems**: strips are built on the CPU each frame (`FUN_140d76d80`, a triangle strip into
         the dynamic ring); mesh particles draw an instanced mesh. Both need their own particle rows (`Features/Particles`).
     -   **Skins under billboards, nested billboards, Lighting leaves under billboards**: the billboard row turns one node

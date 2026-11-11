@@ -2160,7 +2160,8 @@ the frame rows (`EffectFrame.cpp`) and the controllers' write hooks (`EffectWrit
 -   **What DCLF draws**: blended static meshes (hint 1) in the forward sort; decals (hints 2/3) in the decal groups (`DEFERRED` pixel
     stage); skinned effects through the palettes; opaque effects (below); the Lighting variant (`kEffectLighting`); weapon blood.
 -   **Still variants** (`EffectVariantBit`, `Ineligible::EffectVariant`), the engine's: a shape that is not a `BSTriShape` or
-    particle system, a skin mismatch, a decal that registers no pass, sky objects (bit 45), wireframe (bit 48), cloud lighting
+    particle system, a skin mismatch (the Skinned bit without a skin instance; a skin instance without the bit, a rigid skin,
+    without `CS_DCLF_EFFECT_RIGID_SKINS`), a decal that registers no pass, sky objects (bit 45), wireframe (bit 48), cloud lighting
     with `CS_DCLF_EFFECT_CLOUD_LIGHT=0`, Lighting without Light Limit Fix, projected UV, an unrecognised blend pair, and the
     particle causes.
 -   **Membership.** The synthetic pass is derived from the property every time (`PrimaryCull::MembershipPass`); `PassCapture` keeps no
@@ -2188,7 +2189,12 @@ the frame rows (`EffectFrame.cpp`) and the controllers' write hooks (`EffectWrit
     MotionVectorsNormals), `kObjectDecal`. The member decal's chain key (`decalKey`) is ordered by the pass enum, so a group's
     effect decals precede its Lighting ones, as the engine draws them.
 -   **Skinned effects** read `DCLFPalettes` at the record's bone offsets (`GetBoneTransformMatrixBindless`). A skinned blended effect
-    is a forward object; a skinned decal a decal.
+    is a forward object; a skinned decal a decal. The descriptor's Skinned and MotionVectorsNormals bits come from the shape's own
+    vertex description (`GeometryRecord::shapeVertexDesc`, BSGeometry `+0x148`, as `FUN_1414bde90` reads it), not the renderer
+    data's: a skinned shape's renderer data is another TriShape.
+-   **Rigid skins** (`CS_DCLF_EFFECT_RIGID_SKINS`, default off): a skin instance under a descriptor without the Skinned bit. The
+    engine's skin path still draws each partition, with the unskinned vertex shader and World from the geometry's world
+    (SetupGeometry writes World only when the descriptor's bit 3 is clear); DCLF draws the partition slots with its placement row.
 -   **Weapon blood**: the descriptor's Blood bit; the record's alpha test reference = threshold / 255 (`AlphaTestRefOf`); the two
     globals `BSTempEffectWeaponBlood` writes each update are a frame value.
 

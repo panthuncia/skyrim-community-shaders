@@ -142,6 +142,7 @@ namespace DCLF::SceneCapture
 		std::uint32_t d = 0;
 		d |= type != a_o.type ? kType : 0u;
 		d |= (rendererData != a_o.rendererData || vertexBuffer != a_o.vertexBuffer || indexBuffer != a_o.indexBuffer || vertexDesc != a_o.vertexDesc ||
+				 shapeVertexDesc != a_o.shapeVertexDesc ||
 				 vertexCount != a_o.vertexCount || triangleCount != a_o.triangleCount || particles != a_o.particles) ?
 		         kRenderer :
 		         0u;
@@ -252,6 +253,7 @@ namespace DCLF::SceneCapture
 			indexBuffer = a_o.indexBuffer;
 			buffersHeld = a_o.buffersHeld;
 			vertexDesc = a_o.vertexDesc;
+			shapeVertexDesc = a_o.shapeVertexDesc;
 			vertexCount = a_o.vertexCount;
 			triangleCount = a_o.triangleCount;
 			particles = a_o.particles;
@@ -543,6 +545,7 @@ namespace DCLF::SceneCapture
 		GeometryRecord r;
 		r.key = &a_geometry;
 		r.type = static_cast<std::uint8_t>(geometry.GetType().get());
+		r.shapeVertexDesc = std::bit_cast<std::uint64_t>(data.vertexDesc);
 		if (const auto* triShape = data.rendererData) {
 			r.rendererData = triShape;
 			r.vertexBuffer = reinterpret_cast<ID3D11Buffer*>(triShape->vertexBuffer);

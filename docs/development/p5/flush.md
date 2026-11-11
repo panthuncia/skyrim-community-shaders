@@ -150,3 +150,31 @@ Bink is on the graph), `SetDirtyStates` keeps only its CPU side, and the guest c
 `p5-all.env` (2026-11-11) showed, before the census existed, engine draws still reaching D3D11 from SetDirtyStates (AE 77386,
 77247), shader binds from AE 90279 (Bink's DrawTiles), the draw functions AE 77263/77264/77265/77275/77276, `CopyResource`
 77453/107193, compute dispatch setup 77329/77386 and queries 106604/77370.
+
+## DCLF's share
+
+The census of 2026-11-11 (`1111-072658-p35-p5-all-census-w3`, `p5-all-census.env`) read for what Drawcall Limit Fix leaves the
+engine: the batches through `BSBatchRenderer::RenderBatches` (AE 107642), the grouped alphas (AE 107673), the skin path (AE 71150,
+70776) and the particle draw (`DrawDynamicTriShape (DrawData copy)` from the dispatcher's +0x101, geometry type 1: NiParticles).
+That run had no DCLF census and listed 25 classes a window, so some causes below are read from the code and Ghidra, and the
+scenarios below name the rest. A "load window" is the first 300-frame window after `coc`, a save's load or `cow`; a "settled
+window" is the next.
+
+| Class (residue census) | Per frame | Why the engine draws it | State |
+| --- | --- | --- | --- |
+| Lighting (RT `kMAIN`), Utility depth (DS `kMAIN`, vs `0x2000`, `0x209b`, `0x400209b`), shadow casters (DS `kSHADOWMAPS`), Effect in the grouped alphas (AE 107673), through `RenderBatches` | 15-45 in load windows, 0 settled | Objects not yet members: the engine draws an object until the publication that claims it is installed (dclf-architecture.md, "Load screens" and "Pass capture") | By design. What would shorten it: claims for a load's objects in the first frame their draws are ready. Measure the delay with `CS_DCLF_STATS` (`[DCLF] event to adoption`) in `p5-all-census-dclf.env` |
+| Instanced DistantTree (dispatcher +0x650, via CS's tree LOD hook) | 4-7 in the first world window only | Tree LOD before its gates and family are ready after the first load | By design, as above |
+| The alternate index buffer (77264, dispatcher +0x41E) | 0.2, one load window | A multi-index shape's layer pass (hint 12) before its base is a member (`CS_DCLF_LAYERS`) | By design, as above |
+| Effect through the particle draw (+0x101) | about 3 settled (Whiterun) | The master particle systems (`MPS*`: chimney smoke, candles, torches): `effect: untracked, eligible` in DCLF's census | Built behind `CS_DCLF_MASTER_PARTICLES=1` (default off, dclf-roadmap.md 1.4: needs the unheld roots diff run before it is the default) |
+| Effect through the skin path (AE 71150: vs `0x44b`, `0x55b`, `0x4a`) | 3 (dog eyes), 7.5-13.7 and 1.2-2.8 in Blackreach | `effect-variant (skinned)`: the Effect port read Skinned from the renderer data's vertex description, which a skinned shape's is not | Fixed on `org-port/w3-dclf` (`GeometryRecord::shapeVertexDesc`, BSGeometry +0x148 as `FUN_1414bde90` reads it). Should be 0 in `p5-all-census-dclf.env` |
+| Effect on a rigid skin (a skin instance, no Skinned bit in the pass) | not seen in this run | `effect-variant (skinned)` | Built behind `CS_DCLF_EFFECT_RIGID_SKINS=1` (default off until its shots are checked) |
+| Particle (`BSParticleShader`, vs `0x4`) through the grouped alphas | about 10 settled (Blackreach) | Precipitation (Blackreach's spores): not a DCLF class | Blocked: no precipitation port (dclf-roadmap.md 1.5; DCLF draws only the precipitation occlusion mask) |
+| Skinned Utility depth and sun shadows (vs `0x2004`, `0xc004`) through AE 70776 | 3-4 in the map and journal windows | The player's first-person parts (`lighting: hidden` in main depth and a shadow view): DCLF's verdict is Hidden, the engine still draws them there | Blocked: why the engine draws hidden first-person parts into main depth and the sun's shadows behind a menu is not read (RenderDepth's first-person block; Features/FirstPerson covers its own accumulator only) |
+| Utility into `kSHADOW_MASK` (AE 107141, 52728), into `kREFRACTION_NORMALS`, Water | | Not DCLF's | The shadow-mask pass (no owner yet), Menu3D (P5.8), water (P5.4) |
+
+Scenarios (`tools/cs-ab/scenarios/`): `p5-all-census-dclf.env` (both censuses, `CS_ORG_RESIDUE_CENSUS_TOP=60`),
+`p5-all-census-dclf-take.env` (plus `CS_DCLF_MASTER_PARTICLES=1` and `CS_DCLF_EFFECT_RIGID_SKINS=1`) and `dclf-residue-census.env`
+(DCLF without the graph families). Against the census above, `p5-all-census-dclf.env` should lose every skinned `Effect` class
+through AE 71150 and the census class `effect: effect-variant (skinned)`; `-take.env` should also lose the settled windows'
+particle `Effect` draws and `effect: untracked, eligible` for `MPS*` systems, with screenshots matching. Nothing here registers a
+graph client, so nothing in it can trigger a graph rebuild.
