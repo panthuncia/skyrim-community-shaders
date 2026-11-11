@@ -270,4 +270,29 @@ namespace RenderGraph::Engine::Tripwire
 	 * ID of the function that contains it), "Module.dll+0x1234" for any other module, the bare address when no module holds it.
 	 */
 	std::string DescribeCaller(const void* a_address);
+
+	/** @brief Whether a_address lies in CS's own image (CS code, not the game's or another plugin's). One range compare. */
+	bool IsOwnCode(const void* a_address);
+
+	/** @brief Whether a_address lies in the game executable's image. One range compare. */
+	bool IsGameCode(const void* a_address);
+
+	/**
+	 * @brief The Address Library ID of the game function holding a_address and the offset within it, as DescribeCaller names it.
+	 * False when a_address is not in the game executable or no ID is near enough. Any thread.
+	 */
+	bool GameFunction(const void* a_address, std::uint64_t& a_id, std::uint64_t& a_within);
+
+	/**
+	 * @brief Asked before the guest context forwards any call: a_slot is the method's vtable slot (SlotNames(Kind::DeviceContext)),
+	 * a_caller the code that called it. True forwards the call as usual; false drops it, as a native handle fails it (outputs zeroed,
+	 * nothing recorded). Must be cheap and must not call the guest context. Any thread.
+	 */
+	using ContextFilter = bool (*)(std::uint16_t a_slot, void* a_caller);
+
+	/**
+	 * @brief Installs the guest context's filter (null removes it): the residue census and the flush latch (Flush.h). One filter at a
+	 * time; only the guest context's calls reach it, not other handles' and not CS's own calls on globals::d3d::context.
+	 */
+	void SetContextFilter(ContextFilter a_filter);
 }

@@ -14,6 +14,12 @@
 
 namespace RenderGraph::Engine::Tripwire
 {
+	namespace Detail
+	{
+		/** @brief The guest context's filter (SetContextFilter), null when none. */
+		extern std::atomic<ContextFilter> contextFilter;
+	}
+
 	/** @brief The state every handle has, whatever its interface. */
 	class HandleCore
 	{
@@ -29,10 +35,15 @@ namespace RenderGraph::Engine::Tripwire
 
 		/**
 		 * @brief The start of every tripwire method: records the call when it is watched (every call in native mode) and says whether
-		 * it is forwarded (a wrapped object exists).
+		 * it is forwarded (a wrapped object exists). A guest context asks its filter first (SetContextFilter): a dropped call is
+		 * neither recorded nor forwarded.
 		 */
 		bool Enter(std::uint16_t a_slot, const char* a_method, void* a_caller)
 		{
+			if (kind == Kind::DeviceContext) {
+				if (const auto filter = Detail::contextFilter.load(std::memory_order_relaxed); filter && wrapped && !filter(a_slot, a_caller))
+					return false;
+			}
 			const bool forward = wrapped != nullptr;
 			if (!forward || watch.Test(a_slot))
 				Record(a_slot, a_method, a_caller, forward, {});
