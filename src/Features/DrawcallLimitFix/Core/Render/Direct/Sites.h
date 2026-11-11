@@ -70,9 +70,11 @@ namespace DCLF::Direct
 	 * submitted - the last CPU frame's signal (EndFrame queues it after Present, into DXVK's next command list) or a host submission made
 	 * since (a graph build's, the wait's own). The frame's own work would submit them; anything waiting for them meanwhile (a slot's
 	 * release, a payload version built into a backing they retire) would wait for the waiting frame. DXVK's list is flushed only when
-	 * something is queued.
+	 * something is queued, or always with a_always.
+	 * @param a_always Flush even when nothing counted is queued. A wait that may hang on any work in DXVK's stream (an epoch's run
+	 * of this frame, which the host's recordings wait for) passes it; DXVK returns at once when its list is empty.
 	 */
-	void SubmitQueued();
+	void SubmitQueued(bool a_always = false);
 
 	/**
 	 * @brief Render thread, outside a CPU frame (after CPU frames, and while a frame's start waits): the slots whose frames' GPU work is
