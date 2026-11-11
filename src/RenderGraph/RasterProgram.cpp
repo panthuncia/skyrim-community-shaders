@@ -217,8 +217,12 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 	const std::uint64_t builtFor = registry.SourcesGeneration();
 	// The defines resolved once, here: a hot reload compiles the same permutation.
 	Stages stages{ a_desc.vertexSource, a_desc.pixelSource, a_desc.vertexEntry, a_desc.pixelEntry,
-		a_desc.commonDefines ? Build::WithCommonDefines(a_desc.defines, L"vs_6_6") : a_desc.defines,
-		a_desc.commonDefines ? Build::WithCommonDefines(a_desc.defines, L"ps_6_6") : a_desc.defines,
+		!a_desc.vertexStageDefines.empty() ? a_desc.vertexStageDefines :
+		a_desc.commonDefines               ? Build::WithCommonDefines(a_desc.defines, L"vs_6_6") :
+		                                     a_desc.defines,
+		!a_desc.pixelStageDefines.empty() ? a_desc.pixelStageDefines :
+		a_desc.commonDefines              ? Build::WithCommonDefines(a_desc.defines, L"ps_6_6") :
+		                                    a_desc.defines,
 		fmt::format("{} ({})", std::filesystem::path(a_desc.pixelSource).stem().string(), Util::WStringToString(a_desc.pixelEntry)), a_desc.vertexText,
 		a_desc.pixelText, a_desc.languageVersion };
 	const auto vertex = CompileStage(*compiler, stages.vertexSource, stages.vertexText, stages.vertexEntry, L"vs_6_6", stages);

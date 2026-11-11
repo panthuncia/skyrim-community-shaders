@@ -90,6 +90,10 @@ struct RasterProgram
 		// defines), so a dual-target shader compiles the same permutation on both paths. Off for generated stages (the FX
 		// runtime's), which have no D3D11 build with CS's defines.
 		bool commonDefines = true;
+		// Each stage's whole define list, used as is when not empty (defines and commonDefines are then ignored for that stage). Set
+		// by ProgramCache on the requesting thread: CS's common defines read State, which a build thread must not.
+		std::vector<std::pair<std::wstring, std::wstring>> vertexStageDefines;
+		std::vector<std::pair<std::wstring, std::wstring>> pixelStageDefines;
 	};
 
 	/**

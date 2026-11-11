@@ -19,6 +19,7 @@
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuTimingSource.h"
+#include "RenderGraph/ProgramCache.h"
 #include "RenderGraph/Switches.h"
 #include "Features/RemoteControl/GpuTimestamps.h"
 #include "Features/RemoteControl/GpuCounters.h"
@@ -1952,6 +1953,8 @@ void RenderGraphRuntime::Shutdown()
 {
 	// The owned frame's swap chain and present objects first: they are on the same device, and DXVK's teardown follows.
 	RenderGraph::Engine::OwnedFrame::Get().Shutdown();
+	// No program build may create a pipeline on a device being torn down (ProgramCache).
+	RenderGraph::StopProgramBuilds();
 	if (!impl)
 		return;
 	auto state = std::move(impl);
