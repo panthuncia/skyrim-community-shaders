@@ -52,9 +52,11 @@ namespace RenderGraph::Engine::ImageSpace
 		// Gate entries (one per pass). An entry is never reused after a reset, so a recording made for an older shape can never
 		// draw with a newer pass's latch; a session that runs out keeps drawing the rest with D3D11.
 		constexpr std::uint32_t kGateEntries = 128;
-		// The ImageSpace anchor's runs a frame (its kInfo entry in FrameAnchors.cpp). A draw is taken only while the frame has a run
-		// left for its batch.
+		// The ImageSpace anchor's runs a frame (its kInfo entry in FrameAnchors.cpp says 4). Draws are taken for at most 2 batches a
+		// frame, the steady state (the pre-tonemap composites, the HDR effect up to its tonemap), and the runtime's fallback size
+		// when the anchors' slots would pass 255: a batch must never meet a full ring after its draws were withheld.
 		constexpr std::uint32_t kRunsPerFrame = 4;
+		constexpr std::uint32_t kTakenRunsPerFrame = 2;
 		// Frames without a new shape before the client registers: the luminance chain alternates its last targets every frame, and
 		// effects that follow the weather or the camera show up within a few seconds.
 		constexpr std::uint32_t kLearnFrames = 120;
@@ -174,7 +176,9 @@ namespace RenderGraph::Engine::ImageSpace
 			std::map<std::tuple<std::size_t, rhi::Format, const void*>, std::shared_ptr<const RasterProgram>> programs;
 			std::vector<std::shared_ptr<const Spec>> specs;  // in the current registration, by entry
 			std::set<ShapeKey> refusedShapes;                // shapes no pass can be made for (logged once)
-			std::vector<ShapeKey> candidates;                // seen, not registered yet, in first-seen order
+			std::vector<ShapeKey> candidates;                // seen, not registered yet
+			std::vector<std::uint32_t> candidateOrder;       // each candidate's place among the frame's eligible draws
+			std::uint32_t drawIndex = 0;                     // eligible draws so far this frame
 			std::uint32_t nextEntry = 0;
 			std::uint32_t registrations = 0;
 			std::uint32_t quietFrames = 0;
@@ -527,13 +531,21 @@ namespace RenderGraph::Engine::ImageSpace
 				if (!state.candidates.empty())
 					logger::warn("[ORG] ImageSpace: {} registrations made; {} new shapes stay on D3D11 for the session", state.registrations, state.candidates.size());
 				state.candidates.clear();
+				state.candidateOrder.clear();
 				return;
 			}
+			// Entries (and so the passes' order) follow each shape's place in the frame, so the luminance chain's alternating levels
+			// sit before the bloom that follows them in either frame, and a frame's batch is not cut where it need not be.
+			std::vector<std::size_t> order(state.candidates.size());
+			for (std::size_t i = 0; i < order.size(); ++i)
+				order[i] = i;
+			std::ranges::stable_sort(order, [&](std::size_t a_left, std::size_t a_right) { return state.candidateOrder[a_left] < state.candidateOrder[a_right]; });
 			std::vector<std::shared_ptr<const Spec>> specs = state.specs;
-			for (const auto& key : state.candidates)
-				if (auto spec = MakeSpec(key))
+			for (const auto index : order)
+				if (auto spec = MakeSpec(state.candidates[index]))
 					specs.push_back(std::move(spec));
 			state.candidates.clear();
+			state.candidateOrder.clear();
 			if (specs.size() == state.specs.size() && state.phase != Phase::Learning)
 				return;
 			state.specs = std::move(specs);
@@ -555,6 +567,7 @@ namespace RenderGraph::Engine::ImageSpace
 			logger::info("[ORG] ImageSpace: {}; the shapes are learnt again", a_why);
 			state.specs.clear();
 			state.candidates.clear();
+			state.candidateOrder.clear();
 			state.refusedShapes.clear();
 			state.quietFrames = 0;
 			state.phase = Phase::Learning;
@@ -601,6 +614,7 @@ namespace RenderGraph::Engine::ImageSpace
 			Flush();
 			state.frame = frame;
 			state.runsThisFrame = 0;
+			state.drawIndex = 0;
 			switch (state.phase) {
 			case Phase::Learning:
 				if (!state.candidates.empty() && ++state.quietFrames >= kLearnFrames)
@@ -653,6 +667,7 @@ namespace RenderGraph::Engine::ImageSpace
 			if (state.nextEntry + state.candidates.size() >= kGateEntries)
 				return;
 			state.candidates.push_back(a_key);
+			state.candidateOrder.push_back(state.drawIndex);
 			state.quietFrames = 0;
 			if (state.logShapes) {
 				const auto effect = EffectOf(static_cast<const RE::BSImagespaceShader*>(a_key.shader));
@@ -671,6 +686,7 @@ namespace RenderGraph::Engine::ImageSpace
 			auto& scope = *state.current;
 			scope.drew = true;
 			const auto& effect = kEffects[scope.effect];
+			++state.drawIndex;
 			ShapeKey key{};
 			std::string_view refusal;
 			if (!ReadShape(scope.shader, effect, key, refusal)) {
@@ -707,7 +723,7 @@ namespace RenderGraph::Engine::ImageSpace
 				Flush();
 			if (state.phase != Phase::Live)
 				return false;
-			if (state.batch.empty() && state.runsThisFrame >= kRunsPerFrame) {
+			if (state.batch.empty() && state.runsThisFrame >= kTakenRunsPerFrame) {
 				Refuse("the frame's ImageSpace anchor runs are used up", effect.effectName);
 				return false;
 			}

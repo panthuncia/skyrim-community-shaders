@@ -114,8 +114,11 @@ draw whose pass is not after the last one in the batch (the graph runs passes in
 Its commit writes each draw's constant location (`OrgEngineConstantsAt`: ring chunk SRV and offset) into the client's latch
 at the draw's entry and opens its gate entry. The shaders read PerGeometry from the ring through that location
 (`Common/OrgEngineConstants.hlsli`), the shared constants for FrameBuffer and SharedData, and their textures and samplers by
-handle. Typically two runs a frame (the composites, the HDR effect before its tonemap); the anchor is sized for four, and a
-frame with no run left draws the rest with D3D11.
+handle. Draws are taken for two batches a frame (the composites, the HDR effect before its tonemap), and a later batch's draws
+stay with D3D11. The anchor is sized for four runs (the joining runs use the rest), but the runtime sizes every multi-run
+anchor for two when the anchors' frame slots would pass 255, and a batch must never meet a full ring after its draws were
+withheld. Shapes get their entries (and so their order) by their place among the frame's draws, so the luminance chain's
+alternating levels do not cut the batch.
 
 **Passes.** One `AnchorPasses::Draw` per shape: the effect's RasterProgram (its CS source, the D3D11 build's defines from
 `ShaderCache::GetCompileDefines`, the target's format, the engine blend state as an rhi blend), the output and inputs as
