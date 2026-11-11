@@ -459,6 +459,15 @@ namespace RenderGraph::Engine::Bink::Graph
 			const auto& framebuffer = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 			auto* texture = reinterpret_cast<ID3D11Texture2D*>(framebuffer.texture);
 			auto* rtv = reinterpret_cast<ID3D11RenderTargetView*>(framebuffer.RTV);
+			// The back buffer: the engine keeps only its RTV (FrameAnchors::EngineTarget takes the texture from it too).
+			winrt::com_ptr<ID3D11Texture2D> fromView;
+			if (!texture && rtv) {
+				winrt::com_ptr<ID3D11Resource> resource;
+				rtv->GetResource(resource.put());
+				if (resource)
+					fromView = resource.try_as<ID3D11Texture2D>();
+				texture = fromView.get();
+			}
 			if (!texture || !rtv)
 				return false;
 			if (texture == a_state.targetTexture && a_state.target)
@@ -495,13 +504,39 @@ namespace RenderGraph::Engine::Bink::Graph
 
 	bool Begin()
 	{
+		// Why a tick stays the engine's, once per reason.
+		const auto refuse = [](std::string_view a_reason) {
+			static std::mutex mutex;
+			static std::vector<std::string> logged;
+			std::scoped_lock lock(mutex);
+			if (std::ranges::find(logged, a_reason) == logged.end()) {
+				logged.emplace_back(a_reason);
+				logger::info("[ORG] Bink: the engine draws this frame: {}", a_reason);
+			}
+			return false;
+		};
 		auto& state = Get();
 		if (state.failed)
-			return false;
+			return refuse("the graph path failed earlier");
 		auto& runtime = RenderGraphRuntime::Get();
 		auto* host = runtime.Host();
-		if (!runtime.IsActive() || !host || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::Present))
-			return false;
+		if (!runtime.IsActive() || !host)
+			return refuse("the render graph is not active");
+		if (!FrameAnchors::HasEpoch(FrameAnchors::Anchor::Present))
+			return refuse("the Present anchor has no epoch");
+		// Until the Present anchor's graph holds the pass (built again on the host's thread after the registration), the engine
+		// draws: a queued frame would not be drawn.
+		if (state.registered && !FrameAnchors::InBuiltGraph(kClientId, FrameAnchors::Anchor::Present)) {
+			// Drawcall Limit Fix makes builds explicit, at its build point in each world frame, and a blocking movie runs no world
+			// frame. A movie tick runs between frames (after a Present, before the next build point), where a build is safe.
+			if (host->RebuildRequested())
+				(void)host->BuildIfRequested();
+			if (!FrameAnchors::InBuiltGraph(kClientId, FrameAnchors::Anchor::Present)) {
+				state.queued = state.committed = state.executed = state.checked = 0;
+				state.misses = 0;
+				return refuse("waiting for the Present anchor's graph to hold the pass");
+			}
+		}
 		// Once per queued frame: whether the run after it had the pass in its graph.
 		if (state.queued != state.checked) {
 			state.checked = state.queued;
@@ -516,7 +551,7 @@ namespace RenderGraph::Engine::Bink::Graph
 		}
 		state.pending.reset();
 		if (!UpdateTarget(state))
-			return false;
+			return refuse("the framebuffer cannot be imported");
 		if (!state.sampler) {
 			// The engine's PS sampler for this draw: address mode 0, filter mode 2 (CreateSamplerStates, SE 75831): trilinear,
 			// clamped, no bias, every LOD.

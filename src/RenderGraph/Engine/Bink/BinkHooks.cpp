@@ -120,13 +120,25 @@ namespace RenderGraph::Engine::Bink
 			globals::features::screenshotFeature.RequestCapture(dir / fmt::format("bink-{}.png", frame));
 		}
 
+		/** @brief Logs, once per reason, why a tick stays the engine's. */
+		void EngineKeeps(std::string_view a_reason)
+		{
+			static std::mutex mutex;
+			static std::set<std::string, std::less<>> logged;
+			std::scoped_lock lock(mutex);
+			if (logged.emplace(a_reason).second)
+				logger::info("[ORG] Bink: the engine draws this movie: {}", a_reason);
+		}
+
 		/** @brief Whether this tick may draw on the graph, before Graph::Begin: the engine's path in every case the port does not cover. */
 		bool Eligible(std::uintptr_t a_player, const void* a_set)
 		{
 			if (!Requested() || !a_player || !a_set)
 				return false;
-			if (Read<std::uint32_t>(reinterpret_cast<const void*>(a_player), kPlayerMode) != kModeBlocking)
+			if (const auto mode = Read<std::uint32_t>(reinterpret_cast<const void*>(a_player), kPlayerMode); mode != kModeBlocking) {
+				EngineKeeps(fmt::format("player mode {}, not the blocking mode {}", mode, kModeBlocking));
 				return false;
+			}
 			if (!FrameAnchors::OnMainThread()) {
 				static std::atomic_flag logged;
 				if (!logged.test_and_set())
@@ -134,8 +146,10 @@ namespace RenderGraph::Engine::Bink
 				return false;
 			}
 			// HDR output routes the movie into its UI texture (HDRDisplay's DrawTiles hook); the graph's pass draws the framebuffer.
-			if (globals::features::hdrDisplay.loaded && globals::features::hdrDisplay.IsHDREnabledForFrame())
+			if (globals::features::hdrDisplay.loaded && globals::features::hdrDisplay.IsHDREnabledForFrame()) {
+				EngineKeeps("HDR output is on");
 				return false;
+			}
 			return true;
 		}
 
@@ -145,15 +159,19 @@ namespace RenderGraph::Engine::Bink
 			auto& records = GetRecords();
 			std::scoped_lock lock(records.mutex);
 			const auto found = records.sets.find(a_tick.set);
-			if (found == records.sets.end())
+			if (found == records.sets.end()) {
+				EngineKeeps("its tile set was not recorded at creation");
 				return false;
+			}
 			auto& record = found->second;
 			if (!record.movie && !record.movieFailed) {
 				record.movie = Graph::CreateMovie(record.layout);
 				record.movieFailed = !record.movie;
 			}
-			if (!record.movie)
+			if (!record.movie) {
+				EngineKeeps("the graph's movie could not be made");
 				return false;
+			}
 			a_tick.movie = record.movie;
 			a_tick.blocks = record.blocks;
 			return true;
