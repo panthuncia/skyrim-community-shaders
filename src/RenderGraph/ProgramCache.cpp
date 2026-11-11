@@ -6,6 +6,7 @@
 #	include "RenderGraph/ProgramCache.h"
 
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "Utils/Format.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 
@@ -54,16 +55,11 @@ namespace RenderGraph
 			return s_builder;
 		}
 
-		std::string Narrow(const std::wstring& a_text)
-		{
-			return std::string(a_text.begin(), a_text.end());
-		}
-
 		std::string DefinesLabel(const std::vector<std::pair<std::wstring, std::wstring>>& a_defines)
 		{
 			std::string text;
 			for (const auto& [define, value] : a_defines)
-				text += fmt::format("{}{}{}{}", text.empty() ? "" : " ", Narrow(define), value.empty() ? "" : "=", Narrow(value));
+				text += fmt::format("{}{}{}{}", text.empty() ? "" : " ", Util::WStringToString(define), value.empty() ? "" : "=", Util::WStringToString(value));
 			return text;
 		}
 	}
@@ -98,12 +94,12 @@ namespace RenderGraph
 
 		std::string Label(const RasterProgram::Desc& a_desc)
 		{
-			return fmt::format("{} + {} ({}) [{}]", a_desc.vertexSource, a_desc.pixelSource, Narrow(a_desc.pixelEntry), DefinesLabel(a_desc.defines));
+			return fmt::format("{} + {} ({}) [{}]", a_desc.vertexSource, a_desc.pixelSource, Util::WStringToString(a_desc.pixelEntry), DefinesLabel(a_desc.defines));
 		}
 
 		std::string Label(const ComputeProgram::Desc& a_desc)
 		{
-			return fmt::format("{} ({}) [{}]", a_desc.source, Narrow(a_desc.entry), DefinesLabel(a_desc.defines));
+			return fmt::format("{} ({}) [{}]", a_desc.source, Util::WStringToString(a_desc.entry), DefinesLabel(a_desc.defines));
 		}
 
 		std::shared_ptr<const RasterProgram> Load(const RasterProgram::Desc& a_desc)
