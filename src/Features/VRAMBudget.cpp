@@ -5,6 +5,7 @@
 
 #include "Globals.h"
 #include "Menu.h"
+#include "RenderGraph/Engine/MainTick.h"
 #include "Utils/UI.h"
 
 #define I18N_KEY_PREFIX "feature.vram_budget."
@@ -118,20 +119,6 @@ namespace
 		return result;
 	}
 
-	/** @brief `JobListManager::ServingThread`'s frame-job wait near the end of `Main::Update` (its only caller). When it
-	 * returns the frame's jobs are done, the AI job and its queued 3D attaches included. The engine is back to one
-	 * thread here, so this is where the controller runs. */
-	struct WaitForFrameJobs
-	{
-		static void thunk()
-		{
-			func();
-			if (globals::features::vramBudget.loaded)
-				globals::features::vramBudget.OnFrameJobsDone();
-		}
-		static inline REL::Relocation<decltype(thunk)> func;
-	};
-
 	constexpr std::uint8_t kLoadedDetached = 4;      // TESObjectCELL::cellState of a buffered cell nobody is attaching
 	constexpr std::uint32_t kStillLoading = 1u << 21;  // TESForm::formFlags: an IO thread is still building the cell
 
@@ -211,9 +198,12 @@ void VRAMBudget::EarlyPrepass()
 
 void VRAMBudget::PostPostLoad()
 {
-	// SE 34554, AE 35409. Main::Update is its only caller in both.
-	stl::detour_thunk<WaitForFrameJobs>(REL::RelocationID(34554, 35409));
-	if (!WaitForFrameJobs::func.address())
+	// After Main::Update's frame-job wait: the frame's jobs are done, the AI job and its queued 3D attaches included, and the engine
+	// is back to one thread, so this is where the controller runs.
+	if (!RenderGraph::Engine::MainTick::Add("VRAM Budget", [] {
+			if (globals::features::vramBudget.loaded)
+				globals::features::vramBudget.OnFrameJobsDone();
+		}))
 		logger::error("[VRAM Budget] could not hook the frame-job wait; cells will not be unloaded");
 }
 
