@@ -361,7 +361,7 @@ All are USAGE_DYNAMIC, BIND_CONSTANT_BUFFER, CPU_ACCESS_WRITE, and are written w
 
 | SE global                    | AE global        | Size                 | Use                                                                                                            |
 | ---------------------------- | ---------------- | -------------------- | -------------------------------------------------------------------------------------------------------------- |
-| 0x143027a08[4]               | (in 0x14328xxxx) | 0xf00 each           | 4 rotating "custom" CBs handed out by GetID3D11Resource 75561 (Ghidra name is wrong: it is a custom-CB mapper) |
+| 0x143027a08[4]               | 0x143288308[4]   | 0xf00 each           | 4 rotating "custom" CBs handed out by `MapCustomConstantBuffer` 75561 / 77362 (Ghidra called it GetID3D11Resource) |
 | 0x143027a30 + i*8, i = 1..19 |                  | 0x10*i (up to 0x130) | **VS PerTechnique (b0) size-class pool**                                                                       |
 | 0x143027ad0 + i*8, i = 1..9  |                  | up to 0x90           | **VS PerMaterial (b1) pool**                                                                                   |
 | 0x143027b20 + i*8, i = 1..27 |                  | up to 0x1b0          | **VS PerGeometry (b2) pool**                                                                                   |
@@ -499,7 +499,8 @@ BSGraphics and SetDirtyStates.
 4. Format 0x20 for 75490's TEXCOORD1 (R8G8B8A8_SINT) is unusual. Check the shader's input signature.
 5. The PS size-class pools (0x143027c00, 0x143027ca0, 0x143027d40) are mapped to tech, material and
    geometry by symmetry only. 75582 `0x140d70e60` reads 0x143027c08 and is presumably the PS serializer.
-   Confirm.
+   Confirm. **Answered (P5.7):** 75582 is `SavePixelShader` and maps levels 0, 1, 2 to those three pools. The AE
+   addresses of every constant-buffer global are in [p5/constants.md](./p5/constants.md).
 6. AE twins not matched by hash: InitD3D 77649 (by xref), raster 77652, samplers 77653 (by xref), Init
    ~77635, device creation ~77396, 75546 ~77346. Also the AE addresses of the size-class pools and the
    custom-CB ring (only the AE alpha, compute, per-frame and type-7 CBs were confirmed).

@@ -586,6 +586,20 @@ Keys used so far:
   Light Limit Fix's lights upload and this fog's upload both do by hand.
 - **Found by:** P3 ExponentialHeightFog (2026-11-09).
 
+### The constants of an engine draw a plugin replaces
+
+- **Need:** a pass that draws engine work on ORG (or a plugin's replacement of an engine draw) reads the constants that one
+  engine draw used. The engine's constant buffers are pooled by size and rewritten with WRITE_DISCARD before each use, so
+  neither the buffer pointer nor its contents at any later point identify that draw.
+- **Who:** Phase 5's sky, ImageSpace, menu 3D and DCLF families; any plugin that hooks an engine draw and re-issues it
+  (today they read the bound D3D11 buffer back or mirror its Map, as DCLF's `ConstantMirror` does for b12).
+- **Where it fits:** `RenderGraph::Engine::Constants` (P5.7, [p5/constants.md](./p5/constants.md)): each engine draw and
+  dispatch is a use with an id; a plugin asks for a stage and slot and gets a host-visible ring location for its shader. A
+  plugin that issues its own D3D11 binds is captured too (group Other). A kept recording reads the location through its own
+  latch, never baked. Gaps: async-queue readers are not ordered by the ring's retirement, and loading-screen frames on the
+  job thread are not captured.
+- **Found by:** P5.7 (2026-11-10).
+
 ### Resources declared by shared shader headers
 
 - **Need:** a plugin's ORG shader includes CS headers that declare their own resources (SharedData's depth, Light Limit
