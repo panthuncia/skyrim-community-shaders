@@ -81,8 +81,9 @@ namespace DCLF::Draws
 		if (!next.cpuPipeline && !next.firstPersonForwardDirect && !DrawPipelines::Get().DeviceGenerated()) {
 			static std::atomic<bool> logged{ false };
 			if (!logged.exchange(true))
-				logger::warn("[DCLF] GPU-driven without device-generated commands and without the direct forward family (CS_DCLF_FORWARD_DIRECT): "
-							 "first person stays the engine's");
+				logger::warn(
+					"[DCLF] GPU-driven without device-generated commands and without the direct forward family (CS_DCLF_FORWARD_DIRECT): "
+					"first person stays the engine's");
 		}
 		{
 			std::lock_guard lock(cutsMutex);
