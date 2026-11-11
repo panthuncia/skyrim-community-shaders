@@ -88,6 +88,7 @@ only `0` turns it off. Parity, diagnostic and test switches are off unless set.
 | `CS_DCLF_OPAQUE_EFFECTS` | on (unless 0) | `0`: opaque effect meshes (hint 0: forge coals, slag) stay the engine's. Needs decals. |
 | `CS_DCLF_EFFECT_CLOUD_LIGHT` | on (unless 0) | `0`: Lighting-variant effects with `kCloudLOD` (lit by the cloud light) stay the engine's (`cloud-lighting`). |
 | `CS_DCLF_EFFECT_FALLOFF` | on (unless 0) | `0`: effect meshes with Falloff and no blending alpha property stay the engine's (`effect-opaque`). Needs forward. |
+| `CS_DCLF_EFFECT_RIGID_SKINS` | **off** | `1`: effect meshes with a skin instance whose pass has no Skinned bit (the property without `kSkinned`) are DCLF's, each partition drawn with the unskinned vertex stage and the geometry's world, as the engine draws them; `0` they stay the engine's (`effect-variant (skinned)`). Needs effects and `CS_DCLF_SKINNED`. See "The residue census and DCLF" below. |
 | `CS_DCLF_PARTICLES` | on (unless 1) | `0`: effect-shaded particle systems stay native. Needs `CS_DCLF_EFFECTS`. |
 | `CS_DCLF_BILLBOARDS` | on (unless 1) | `0`: effect meshes under an `NiBillboardNode` (fire cards, spray jets) stay native. Needs `CS_DCLF_EFFECTS`. |
 | `CS_DCLF_BILLBOARD_PARTICLES` | on (unless 0) | `0`: particle systems under billboard nodes (the magic hands' fire cores) stay the engine's. Needs billboards and particles. |
@@ -580,6 +581,35 @@ report, with or without `CS_DCLF_STATS`. So it shows what the engine still draws
 -   `N passes under entries DCLF draws whole` with `<- OK` or `<- WHOLE ENTRY; first: ...` (`PrimaryCull::DrawsWhole`).
 -   Expected in the main view: no `alpha-blend`, refraction `technique`, `effect-opaque`, `billboard` or `unsupported-parent`
     classes beyond the variants DCLF does not draw.
+
+### The residue census and DCLF
+
+The ORG residue census (`CS_ORG_RESIDUE_CENSUS=1`, [p5/flush.md](./p5/flush.md)) counts the engine draws that reach D3D11; the
+registration census says why DCLF left each pass to the engine. Run both together:
+
+-   `tools/cs-ab/scenarios/p5-all-census-dclf.env`: the p5-all tour with every graph family, both censuses and the report
+    (`CS_ORG_RESIDUE_CENSUS_TOP=60`, so the small classes are listed too).
+-   `p5-all-census-dclf-take.env`: the same with the residue switches that are off by default (`CS_DCLF_MASTER_PARTICLES=1`,
+    `CS_DCLF_EFFECT_RIGID_SKINS=1`).
+-   `dclf-residue-census.env`: DCLF without the graph families, so every Lighting, Utility, Effect, Particle and DistantTree
+    draw left is DCLF's to explain.
+
+Read a residue draw class (`[ORG] residue census: draw #..`) by its caller chain and technique, then the DCLF census class of the
+same view: a `Lighting` or `Utility` draw through `RenderBatches` (AE 107642) is a `lighting: ...` class of `main` or `main depth`
+(or a shadow view for DS `kSHADOWMAPS`); an `Effect` draw through the skin path (AE 71150, 70776) an `effect: ... (skinned)`
+class; an `Effect` draw through the particle draw (`DrawDynamicTriShape (DrawData copy)`, the dispatcher's +0x101: geometry
+type 1, NiParticles) an `effect: untracked, eligible` master particle system (`MPS*`). What to expect:
+
+-   **After a load** (the first window after `coc`, a save's load, `cow`): Lighting, Utility depth (vs `0x2000`, `0x209b`,
+    `0x400209b`), shadow casters and grouped alphas (AE 107673) for a window. These are objects not yet members (the engine draws
+    an object until the publication that claims it is installed) and tree LOD before its gates open. They must be gone from the
+    next window on; one that stays is a defect.
+-   **In a settled window**: no `Lighting` or `Utility` draw through `RenderBatches` but water's (RT `kREFRACTION_NORMALS`) and
+    the shadow mask (AE 107141), no skinned `Effect` draw (`effect-variant (skinned)` was the Effect port reading the renderer
+    data's vertex description instead of the shape's, fixed), and with `CS_DCLF_MASTER_PARTICLES=1` no particle `Effect` draw.
+-   **Left by class**: `Particle` (the `BSParticleShader` techniques: precipitation, Blackreach's spores) and the menus' hidden
+    first-person parts (`lighting: hidden`; skinned `Utility` vs `0x2004` and `0xc004` through AE 70776). p5/flush.md "DCLF's
+    share" has the blocker of each.
 
 ### Lines in every report
 
