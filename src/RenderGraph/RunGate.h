@@ -29,7 +29,9 @@ namespace RenderGraph
 	 *
 	 * The frame anchors close every gate of a client (ClientDesc::gates) at the start of each run, before any commit: a run does
 	 * work only through the entries its client's commit opened. A client that is inactive for a run, or whose commit opens
-	 * nothing, therefore runs its passes as no work, and never repeats an older run's counts.
+	 * nothing, therefore runs its passes as no work, and never repeats an older run's counts. After the client unregisters (or
+	 * registers again with other gates), the anchors keep closing its old gates at every run until their graphs no longer hold
+	 * its passes.
 	 *
 	 * Threads: Open and Close on the render thread, inside the anchor's epoch (the client's commit). The record helpers on the
 	 * graph host's thread.
