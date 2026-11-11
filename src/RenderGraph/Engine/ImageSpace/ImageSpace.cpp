@@ -576,7 +576,7 @@ namespace RenderGraph::Engine::ImageSpace
 		bool Usable()
 		{
 			const auto& state = IS();
-			return state.phase != Phase::Off && !state.flushing && FrameAnchors::OnMainThread() && RenderGraphRuntime::Get().IsActive();
+			return state.phase != Phase::Off && !state.flushing && FrameAnchors::OnRenderThread() && RenderGraphRuntime::Get().IsActive();
 		}
 
 		/** @brief Runs the pending batch at the ImageSpace anchor, here in the D3D11 stream. */
@@ -782,7 +782,7 @@ namespace RenderGraph::Engine::ImageSpace
 			auto& state = IS();
 			if (state.scopeDepth == 0)
 				return;
-			if (--state.scopeDepth == 0 && FrameAnchors::OnMainThread()) {
+			if (--state.scopeDepth == 0 && FrameAnchors::OnRenderThread()) {
 				Flush();
 				Join();
 			}
@@ -848,7 +848,7 @@ namespace RenderGraph::Engine::ImageSpace
 			static void thunk(void* a_renderer, void* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 			{
 				auto& state = IS();
-				if (state.phase != Phase::Off && !state.flushing && FrameAnchors::OnMainThread()) {
+				if (state.phase != Phase::Off && !state.flushing && FrameAnchors::OnRenderThread()) {
 					if (state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->drew) {
 						if (TakeDraw())
 							return;
@@ -866,7 +866,7 @@ namespace RenderGraph::Engine::ImageSpace
 			static void thunk(void* a_renderer, void* a_shader, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z)
 			{
 				const auto& state = IS();
-				if (state.phase != Phase::Off && !state.batch.empty() && FrameAnchors::OnMainThread())
+				if (state.phase != Phase::Off && !state.batch.empty() && FrameAnchors::OnRenderThread())
 					Flush();
 				func(a_renderer, a_shader, a_x, a_y, a_z);
 			}

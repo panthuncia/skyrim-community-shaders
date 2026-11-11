@@ -323,7 +323,7 @@ namespace DCLF
 		 */
 		void BuildIfAsked(org::GraphHost& a_host);
 		/** @brief Render thread: while recordings are outstanding, every epoch's ready ticket outside a_submitted (segment bits) given back. */
-		void ReleaseTicketsForRecordings(org::GraphHost& a_host, std::uint32_t a_submitted);
+		void ReleaseTicketsForRecordings(org::GraphHost& a_host, std::uint64_t a_submitted);
 		/** @brief Render thread: posts the revision inputs when anything moved. Called where each value is captured (and ShadowHost's). */
 		void PostRevisionInputs() override;
 		/**

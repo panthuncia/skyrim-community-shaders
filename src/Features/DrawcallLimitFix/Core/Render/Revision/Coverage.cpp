@@ -48,7 +48,7 @@ namespace DCLF
 		PostRevisionInputs();
 	}
 
-	void IndirectDraws::Impl::ReleaseTicketsForRecordings(org::GraphHost& a_host, std::uint32_t a_submitted)
+	void IndirectDraws::Impl::ReleaseTicketsForRecordings(org::GraphHost& a_host, std::uint64_t a_submitted)
 	{
 		// A live epoch's recording waits for the slot its ready, unsubmitted ticket holds: an epoch outside a_submitted gives that ticket
 		// back while a revision waits for recordings, so none waits on it. Recordings outstanding: an atomic the completions count down
@@ -57,7 +57,7 @@ namespace DCLF
 			return;
 		for (std::uint32_t e = 0, epochs = EpochCount(); e < epochs; ++e)
 			if (const auto segment = EpochTraitsOf(e).segment;
-				EpochTraitsOf(e).hostedBy == kNoEpoch && !(a_submitted & (1u << static_cast<std::uint32_t>(segment))))
+				EpochTraitsOf(e).hostedBy == kNoEpoch && !(a_submitted & (std::uint64_t{ 1 } << static_cast<std::uint32_t>(segment))))
 				revisions.ticketsReleased += a_host.ReleaseEpochTicket(RenderGraphRuntime::EpochOf(segment)) ? 1 : 0;
 	}
 

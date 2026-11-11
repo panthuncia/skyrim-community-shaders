@@ -531,8 +531,8 @@ struct RenderGraphRuntime::Impl
 	rhi::TimelinePtr nativeTimelines;
 	std::atomic<bool> faulted = false;
 	// Render thread: the segments whose failed epoch ExecuteEpoch has logged, one bit each. A segment's bit clears when it submits again.
-	std::uint32_t failedEpochsLogged = 0;
-	std::uint32_t ringFullLogged = 0;  // segments whose ring was full once (EpochRingFullError), logged once each
+	std::uint64_t failedEpochsLogged = 0;
+	std::uint64_t ringFullLogged = 0;  // segments whose ring was full once (EpochRingFullError), logged once each
 
 	// The thread that drives the D3D11 immediate context (the one running epochs).
 	// Its submissions go into DXVK's command stream; other threads submit directly.
@@ -552,7 +552,7 @@ struct RenderGraphRuntime::Impl
 	uint32_t epochCount = 0;
 	// Queue submissions the graph hands to the hook during the current epoch (each is one DXVK enqueue).
 	uint32_t epochHookCalls = 0;
-	std::uint32_t submittedSegments = 0;  // since TakeSubmittedSegments
+	std::uint64_t submittedSegments = 0;  // since TakeSubmittedSegments
 	// DXVK enqueues during the current epoch: one per hook call, or one for the whole epoch when batching.
 	uint32_t epochEnqueues = 0;
 
@@ -2117,9 +2117,9 @@ RenderGraphRuntime::EpochBodyScope::~EpochBodyScope()
 	stats.bodyJoinUs += state.bodyJoinUs;
 }
 
-std::uint32_t RenderGraphRuntime::TakeSubmittedSegments()
+std::uint64_t RenderGraphRuntime::TakeSubmittedSegments()
 {
-	return impl ? std::exchange(impl->submittedSegments, 0u) : 0u;
+	return impl ? std::exchange(impl->submittedSegments, std::uint64_t{ 0 }) : 0;
 }
 
 void RenderGraphRuntime::PollEpochFailures()
@@ -2470,8 +2470,8 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 				impl->bodyEpochUs += std::chrono::duration<double, std::micro>(elapsed).count();
 			}
 		}
-		impl->submittedSegments |= 1u << static_cast<std::uint32_t>(a_segment);
-		impl->failedEpochsLogged &= ~(1u << static_cast<std::uint32_t>(a_segment));
+		impl->submittedSegments |= std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment);
+		impl->failedEpochsLogged &= ~(std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment));
 		return true;
 	} catch (const org::GraphHost::EpochRingFullError& e) {
 		// The anchor ran more times since the last Present than its ring of slots holds (FrameAnchors' runsPerFrame): nothing was
@@ -2479,7 +2479,7 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
 		if (impl->batching)
 			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
-		if (const std::uint32_t bit = 1u << static_cast<std::uint32_t>(a_segment); !(impl->ringFullLogged & bit)) {
+		if (const std::uint64_t bit = std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment); !(impl->ringFullLogged & bit)) {
 			impl->ringFullLogged |= bit;
 			logger::info("[ORG] {} ran more than its {} frame slots in one frame; runs past them fall back until the next Present", Impl::SegmentLabel(a_segment),
 				e.capacity);
@@ -2491,7 +2491,7 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
 		if (impl->batching)
 			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
-		if (const std::uint32_t bit = 1u << static_cast<std::uint32_t>(a_segment); !(impl->failedEpochsLogged & bit)) {
+		if (const std::uint64_t bit = std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment); !(impl->failedEpochsLogged & bit)) {
 			impl->failedEpochsLogged |= bit;
 			logger::error("[ORG] {} did not run, its graph failed (the other epochs run on): {}", Impl::SegmentLabel(a_segment), e.what());
 		}
@@ -2998,7 +2998,7 @@ bool RenderGraphRuntime::CanWrapTexturesWithData() const { return false; }
 void RenderGraphRuntime::ReleaseAfterD3D11(std::shared_ptr<const void>) {}
 void RenderGraphRuntime::ServiceD3D11Releases() {}
 void RenderGraphRuntime::ReportGpuTimings(std::uint32_t, bool) {}
-std::uint32_t RenderGraphRuntime::TakeSubmittedSegments() { return 0; }
+std::uint64_t RenderGraphRuntime::TakeSubmittedSegments() { return 0; }
 void RenderGraphRuntime::PollEpochFailures() {}
 void RenderGraphRuntime::SignalFramePace(bool) {}
 void RenderGraphRuntime::SealPresented() {}

@@ -317,6 +317,8 @@ void RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 	commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
 	commands.BindLayout(layout->GetHandle());
 	commands.BindPipeline(Pipeline());
+	// Set every draw: the reference holds across the list's passes, so a draw that wants 0 must not inherit another's.
+	commands.SetStencilRef(a_draw.stencilReference);
 	if (!a_draw.constants.empty())
 		commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, 0, 0, static_cast<std::uint32_t>(a_draw.constants.size()), a_draw.constants.data());
 	if (a_draw.indirect && drawSignature)

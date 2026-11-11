@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Features/FeatureList.h"
 #include "Features/DrawcallLimitFix/Features/Actors/Actors.h"
 #include "Features/DrawcallLimitFix/Features/Billboards/Billboards.h"
+#include "Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h"
 #include "Features/DrawcallLimitFix/Features/Decals/Decals.h"
 #include "Features/DrawcallLimitFix/Features/Effects/Effects.h"
 #include "Features/DrawcallLimitFix/Features/Fades/Fades.h"
@@ -33,6 +34,7 @@
 #include "Features/DrawcallLimitFix/Features/TextureTransforms/TextureTransforms.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWind.h"
+#include "Features/DrawcallLimitFix/Features/Water/Water.h"
 
 #include <array>
 
@@ -54,6 +56,7 @@ namespace DCLF::Features
 		// - Faces' coordinator component runs after the others', except Fades'. Both act on the slot tables' reset.
 		// - Sky registers nothing with Core (its hooks and its anchors' clients are its own), so its place sets no order; it is before Fades.
 		// - Menu views registers only report lines (its probe's hooks are its own), so its place sets no order either; it is before Fades.
+		// - Water and Blood splatter are the same kind (the EngineDraws anchor's clients); they are listed after Menu views.
 		// - Fades is last. Its pool, scene resources, commit hook, pass setups, coordinator component and stand-in observer run after every
 		//   other feature's. Its channels are the last BeforeStructural ones.
 		//
@@ -88,6 +91,8 @@ namespace DCLF::Features
 			FirstPerson::Feature(),
 			Sky::Feature(),
 			MenuViews::Feature(),
+			Water::Feature(),
+			BloodSplatter::Feature(),
 			Fades::Feature(),
 		};
 		return kFeatures;

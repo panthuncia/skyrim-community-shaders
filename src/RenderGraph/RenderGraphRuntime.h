@@ -110,6 +110,7 @@ public:
 		AnchorEngineDepthCopy,
 		AnchorInterface,
 		AnchorImageSpace,
+		AnchorEngineDraws,
 		Count
 	};
 
@@ -274,7 +275,7 @@ public:
 	void MoveOwnerThread();
 
 	/** @brief Render thread: the segments submitted since the last call, one bit per Segment. */
-	std::uint32_t TakeSubmittedSegments();
+	std::uint64_t TakeSubmittedSegments();
 
 	/**
 	 * @brief The Vulkan resource behind a D3D11 buffer, texture or SRV (dxvkGetInteropResourceInfo).

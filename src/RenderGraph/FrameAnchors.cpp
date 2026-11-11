@@ -37,9 +37,9 @@ namespace FrameAnchors
 		using Segment = RenderGraphRuntime::Segment;
 
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
-		static_assert(static_cast<std::uint32_t>(Segment::AnchorImageSpace) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
+		static_assert(static_cast<std::uint32_t>(Segment::AnchorEngineDraws) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
 			"one segment per anchor, in the anchors' order");
-		static_assert(static_cast<std::uint32_t>(Segment::Count) <= 32, "TakeSubmittedSegments holds one bit per segment");
+		static_assert(static_cast<std::uint32_t>(Segment::Count) <= 64, "TakeSubmittedSegments holds one bit per segment");
 
 		constexpr const char* kExtensionId = "cs.org.frame-anchors";
 
@@ -87,6 +87,8 @@ namespace FrameAnchors
 			// Runs a frame: one per batch of ImageSpace draws (the HDR effect's, the pre-tonemap composites', and a batch cut short by a
 			// draw the graph does not take). Late: the TAA or the upscaler can follow a batch inside the chain.
 			{ "ImageSpace", { "CS anchor: image space", "CS anchor: image space inputs", "FrameAnchors::ImageSpace / ", "cs.anchor.image-space" }, true, 4 },
+			// Runs a frame: the water mask, the water and the screen blood
+			{ "EngineDraws", { "CS anchor: engine draws", "CS anchor: engine draws inputs", "FrameAnchors::EngineDraws / ", "cs.anchor.engine-draws" }, true, 3 },
 		} };
 
 		// Where each segment runs in a frame: AddToFrame puts an anchor before the first epoch of the order that runs after it. A
@@ -113,6 +115,7 @@ namespace FrameAnchors
 			Segment::AnchorDeferredPasses,     // EndDeferred, after the blended decals
 			Segment::AnchorDeferredComposite,  // DeferredPasses, after the D3D11 SSGI and SSS
 			Segment::AnchorPostComposite,      // DeferredPasses' end, after the composite
+			Segment::AnchorEngineDraws,        // the water, before the forward epoch (nominally here: the water mask runs before, the blood after)
 			Segment::Forward,
 			Segment::FirstPerson,
 			Segment::AnchorPostProcessing,   // Main_PostProcessing, before the upscaler

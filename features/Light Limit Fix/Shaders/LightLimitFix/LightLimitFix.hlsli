@@ -14,6 +14,28 @@ namespace LightLimitFix
 
 #include "LightLimitFix/Common.hlsli"
 
+#if defined(CS_ORG_BINDLESS) && defined(ORG_HEADER_RESOURCES)
+	// An ORG pass shader (ORG_HEADER_RESOURCES): the draw's strict lights are a latch region, an EXTERN_LATCH entry of the
+	// shader's resource list (Common/OrgResources.hlsli), with the cbuffer's layout. The names below read it.
+	struct StrictLightDataValues
+	{
+		uint NumStrictLights;
+		int RoomIndex;
+		uint ShadowBitMask;
+		uint FirstPerson;
+		float4 WorldEyePosition;
+		Light StrictLights[15];
+	};
+	ORG_RESOURCE(LATCH, StrictLightDataValues, StrictLightData, 3)
+	static const uint NumStrictLights = StrictLightData.NumStrictLights;
+	static const int RoomIndex = StrictLightData.RoomIndex;
+	static const uint ShadowBitMask = StrictLightData.ShadowBitMask;
+	static const uint FirstPerson = StrictLightData.FirstPerson;
+	static const float4 WorldEyePosition = StrictLightData.WorldEyePosition;
+	static const Light StrictLights[15] = StrictLightData.StrictLights;
+	int RoomIndexOf() { return RoomIndex; }
+	uint ShadowBitMaskOf() { return ShadowBitMask; }
+#else
 	cbuffer StrictLightData : register(b3)
 	{
 		uint NSCB(LightLimitFix, NumStrictLights);
@@ -49,6 +71,7 @@ namespace LightLimitFix
 	NSCB_ALIAS(LightLimitFix, uint, FirstPerson)
 	NSCB_ALIAS(LightLimitFix, float4, WorldEyePosition)
 	NSCB_ARRAY_ALIAS(LightLimitFix, Light, StrictLights, 15)
+#endif  // CS_ORG_BINDLESS && ORG_HEADER_RESOURCES
 
 	ORG_HEADER_SRV(StructuredBuffer<Light>, lights, 35)
 	ORG_HEADER_SRV(StructuredBuffer<uint>, lightList, 36)       //MAX_CLUSTER_LIGHTS * 16^3
