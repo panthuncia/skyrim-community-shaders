@@ -15,6 +15,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Engine/Events.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
 #include "TextureStreaming/Streamer.h"
 
 namespace DCLF
@@ -419,6 +420,39 @@ namespace DCLF
 		Diagnostics::Notify(Diagnostics::PassKept{ a_batch, a_pass, static_cast<RegistrationCensus::Site>(a_site), face, a_occlusionPhase });
 	}
 
+	void PassCapture::KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, bool a_occlusion) const
+	{
+		namespace Flush = RenderGraph::Engine::Flush;
+		if (!Flush::Vouching() || !a_pass || !a_pass->geometry || !a_pass->shaderProperty || bypassed.load(std::memory_order_acquire))
+			return;
+		// DCLF's classes: Lighting objects (their depth and shadow passes are Utility on the same property), effects, tree LOD.
+		// The sky, water, particles and the rest are other ports' to vouch for.
+		const auto* property = a_pass->shaderProperty;
+		if (!netimmerse_cast<const RE::BSLightingShaderProperty*>(property) && !netimmerse_cast<const RE::BSEffectShaderProperty*>(property) &&
+			!netimmerse_cast<const RE::BSDistantTreeShaderProperty*>(property))
+			return;
+		static const Flush::Reason kMain{ "dclf: not claimed (main views)" };
+		static const Flush::Reason kShadow{ "dclf: not claimed (shadow views)" };
+		static const Flush::Reason kFaces{ "dclf: not claimed (reflection faces)" };
+		static const Flush::Reason kOcclusion{ "dclf: not claimed (occlusion maps)" };
+		const Flush::Reason* reason = nullptr;
+		std::uint32_t mode = 0;
+		if (a_occlusion)
+			reason = &kOcclusion;
+		else if (IsMainRenderer(a_batch))
+			reason = &kMain;
+		else if (ShadowModeOfBatch(a_batch, mode))
+			reason = &kShadow;
+		else {
+			const auto& views = Extensions::Views();
+			for (std::uint32_t i = 0; i < views.ownRendererCount && !reason; ++i)
+				if (IsViewRenderer(views.ownRendererViews[i], a_batch))
+					reason = &kFaces;
+		}
+		if (reason)
+			Flush::VouchPass(a_pass, *reason);
+	}
+
 	namespace
 	{
 		thread_local std::uint32_t passesOnThisThread = 0;
@@ -478,6 +512,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>())
 				capture.NoteKept(a_this, a_pass, Census(RegistrationCensus::Site::RegisterPass));
+			capture.KeepForEngine(a_this, a_pass);
 			func(a_this, a_pass, a_techniqueID);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -514,6 +549,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::Volumetric));
+			capture.KeepForEngine(a_batch, a_pass);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -539,6 +575,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::ShadowDirect));
+			capture.KeepForEngine(a_batch, a_pass);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -567,6 +604,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::MainGroup));
+			capture.KeepForEngine(a_batch, a_pass);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -587,6 +625,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::MainList));
+			capture.KeepForEngine(a_batch, a_pass);
 			func(a_batch, a_pass, a_list);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -611,6 +650,8 @@ namespace DCLF
 				}
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::Occlusion), phase);
+			if (phase)
+				capture.KeepForEngine(a_batch, a_pass, true);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
