@@ -387,7 +387,7 @@ namespace DCLF::Features::Water
 			if (const auto* state = globals::state)
 				capture.lastTechnique = TechniqueOf(state->currentPixelDescriptor);
 			if (!capture.passes.OnSetup(a_pass) && !capture.failed)
-				Refuse(capture, "a pass whose geometry is not a TriShape (it draws through another draw function)", capture.lastTechnique);
+				Refuse(capture, "a pass the dispatcher draws through another function than DrawTriShape", capture.lastTechnique);
 		}
 	}
 

@@ -108,11 +108,16 @@ namespace DCLF::Family
 	}
 
 	/**
-	 * @brief Runs a_setup on the main thread after every frame-job wait (RenderGraph::Engine::MainTick) until it returns true: a
-	 * family's setup, which registers its clients and queues its programs once the render graph runs (the first main menu frame),
-	 * before any world frame. Install time (main thread). False, logged, when the tick could not be installed.
+	 * @brief Adds a family's setup, which registers its clients and queues its programs. It runs at CS's setup (RunSetups, from
+	 * DrawcallLimitFix::PostSetupResources), before the setup's graph build (RenderGraph::Engine::PostSetup, FrameAnchors::BuildPending),
+	 * so the clients are in their anchors' graphs before any world frame. A setup that returns false there (no render graph host) is
+	 * tried again on the main thread after every frame-job wait (RenderGraph::Engine::MainTick) until it returns true. Install time
+	 * (main thread). False, logged, when the tick could not be installed.
 	 */
 	bool AddSetup(std::string_view a_family, std::function<bool()> a_setup);
+
+	/** @brief CS's setup (main thread, after every feature's SetupResources): every family's setup added so far, once. */
+	void RunSetups();
 
 	/**
 	 * @brief Once a game frame, from the first family batch: the render thread's buffer registry (GpuResources::Frame) drops the entries
@@ -140,7 +145,7 @@ namespace DCLF::Family
 		void Begin() { *this = {}; }
 		/**
 		 * @brief A pass set up (its geometry's type, BSGeometry::GetType: R1's dispatcher picks the draw function by it). False when the
-		 * pass will not draw through DrawTriShape (its geometry is not a TriShape): the family ends its latched part there, before the
+		 * pass will not draw through DrawTriShape (DrawsThroughTriShape): the family ends its latched part there, before the
 		 * engine draws the pass.
 		 */
 		bool OnSetup(const RE::BSRenderPass* a_pass);
@@ -155,6 +160,9 @@ namespace DCLF::Family
 		/** @brief The shortfall in words, for a log. */
 		std::string Describe(std::string_view a_what) const;
 	};
+
+	/** @brief Whether R1's geometry-type dispatcher draws a_pass through DrawTriShape (its geometry type and accumulation hint). */
+	bool DrawsThroughTriShape(const RE::BSRenderPass* a_pass);
 
 	/** @brief A latched draw's geometry, read by device address while its leases are held. */
 	struct Geometry

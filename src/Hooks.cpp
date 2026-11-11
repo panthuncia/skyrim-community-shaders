@@ -149,6 +149,25 @@ struct BSShader_LoadShaders
 
 		auto state = globals::state;
 		auto shaderCache = globals::shaderCache;
+		// The engine draw families' ORG stages for every descriptor the engine loaded, in CS's lookup form, whatever CS's own precompile
+		// below does (with background compilation it compiles nothing here): the sky, water, screen blood and shadow mask programs exist
+		// before their first draw (DrawcallLimitFix::PrecompileFamilyStages).
+		for (const auto& entry : shader->vertexShaders) {
+			auto vertexDescriptor = entry->id;
+			auto pixelDescriptor = entry->id;
+			NormalizeLegacyUtilityDescriptors(*shader, vertexDescriptor, pixelDescriptor);
+			state->ModifyShaderLookup(*shader, vertexDescriptor, pixelDescriptor);
+			DrawcallLimitFix::PrecompileFamilyStages(*shader, false, vertexDescriptor);
+		}
+		for (const auto& entry : shader->pixelShaders) {
+			for (const bool deferred : { false, true }) {
+				auto vertexDescriptor = entry->id;
+				auto pixelDescriptor = entry->id;
+				NormalizeLegacyUtilityDescriptors(*shader, vertexDescriptor, pixelDescriptor);
+				state->ModifyShaderLookup(*shader, vertexDescriptor, pixelDescriptor, deferred);
+				DrawcallLimitFix::PrecompileFamilyStages(*shader, true, pixelDescriptor);
+			}
+		}
 		if ((shaderCache->IsDiskCache() && !shaderCache->backgroundCompilation) || shaderCache->IsDump()) {
 			if (shaderCache->IsDiskCache() && !shaderCache->backgroundCompilation) {
 				Feature::ForEachLoadedFeature("GenerateShaderPermutations", [shader](Feature* feature) {

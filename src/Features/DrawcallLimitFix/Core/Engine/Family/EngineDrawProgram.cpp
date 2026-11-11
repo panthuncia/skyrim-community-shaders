@@ -173,6 +173,15 @@ namespace DCLF::Family
 			return words;
 		}
 
+		/** @brief A short hash of a key's words, so log lines tell keys of one descriptor apart. */
+		std::uint32_t HashOf(const ProgramKey& a_key)
+		{
+			std::uint32_t hash = 2166136261u;
+			for (const auto word : WordsOf(a_key))
+				hash = (hash ^ word) * 16777619u;
+			return hash;
+		}
+
 		/** @brief A key from the manifest's words; nothing for a malformed line. */
 		std::optional<ProgramKey> KeyOf(std::span<const std::uint32_t> a_words)
 		{
@@ -316,7 +325,8 @@ namespace DCLF::Family
 		std::condition_variable changed;  // an entry left Building
 		std::map<ProgramKey, std::shared_ptr<Entry>> entries;
 		std::atomic<std::size_t> built{ 0 };
-		bool prebuilt = false;
+		std::atomic<bool> prebuildAsked{ false };  // the family's setup asked for the manifest's keys (Prebuild)
+		std::atomic<bool> prebuilt{ false };      // they were queued (TryPrebuild), once
 		bool waitLogged = false;
 		// The stage requests compiled or queued (PrecompileStages), each once.
 		std::mutex stageMutex;
@@ -413,6 +423,9 @@ namespace DCLF::Family
 			}
 		}
 
+		/** @brief The manifest's keys queued on the build thread, once setup asked for them and the shader object is known. */
+		void TryPrebuild();
+
 		/** @brief Lists a key in the manifest; a new one is saved on the build thread. */
 		void Remember(const ProgramKey& a_key) const
 		{
@@ -498,7 +511,9 @@ namespace DCLF::Family
 	std::shared_ptr<const RasterProgram> EngineDrawPrograms::Get(const ProgramKey& a_key, const RE::BSShader& a_shader)
 	{
 		const RE::BSShader* none = nullptr;
-		impl->shader.compare_exchange_strong(none, &a_shader);
+		// The shader object seen first at a draw (the engine loaded it before the family installed): the manifest's keys queue now.
+		if (impl->shader.compare_exchange_strong(none, &a_shader))
+			impl->TryPrebuild();
 		std::shared_ptr<Entry> entry;
 		{
 			std::unique_lock lock(impl->mutex);
@@ -545,51 +560,52 @@ namespace DCLF::Family
 				a_key.variant);
 			return nullptr;
 		}
-		logger::warn("[DCLF] {}: the program for descriptor {:#x} (variant {}) was not prebuilt: built on the render thread at its first draw in {} ms ({} built); "
-					 "the manifest lists it from now on",
-			impl->family, a_key.descriptor, a_key.variant, took, Built());
+		logger::warn("[DCLF] {}: the program for descriptor {:#x} (variant {}, key {:08x}) was not prebuilt: built on the render thread at its first draw in {} ms "
+					 "({} built); the manifest lists it from now on",
+			impl->family, a_key.descriptor, a_key.variant, HashOf(a_key), took, Built());
 		impl->Remember(a_key);
 		return program;
 	}
 
 	void EngineDrawPrograms::Prebuild()
 	{
-		if (std::exchange(impl->prebuilt, true))
+		impl->prebuildAsked.store(true, std::memory_order_release);
+		if (!impl->shader.load())
+			logger::info("[DCLF] {}: the manifest's programs are queued once the engine loads the family's shader", impl->family);
+		impl->TryPrebuild();
+	}
+
+	void EngineDrawPrograms::Impl::TryPrebuild()
+	{
+		const auto* loaded = shader.load(std::memory_order_acquire);
+		if (!loaded || !prebuildAsked.load(std::memory_order_acquire) || prebuilt.exchange(true))
 			return;
-		const auto keys = Manifest::Get().Of(impl->tag);
-		if (keys.empty())
-			return;
-		const auto* shader = impl->shader.load();
-		if (!shader) {
-			logger::warn("[DCLF] {}: no descriptor of its shader was loaded at startup (CS's disk cache off?); the manifest's {} programs build at their first draw",
-				impl->family, keys.size());
-			return;
-		}
+		const auto keys = Manifest::Get().Of(tag);
 		std::size_t queued = 0, refused = 0;
 		for (const auto& key : keys) {
 			std::shared_ptr<Entry> entry;
 			{
-				std::scoped_lock lock(impl->mutex);
-				if (impl->entries.contains(key))
+				std::scoped_lock lock(mutex);
+				if (entries.contains(key))
 					continue;
 				entry = std::make_shared<Entry>();
-				impl->entries.emplace(key, entry);
+				entries.emplace(key, entry);
 			}
 			std::string why;
-			auto desc = impl->DescOf(key, *shader, why);
+			auto desc = DescOf(key, *loaded, why);
 			if (!desc) {
 				++refused;
-				impl->Finish(entry, nullptr);
+				Finish(entry, nullptr);
 				continue;
 			}
-			const bool posted = Detail::Post([impl = impl.get(), entry, desc = std::move(*desc)] { impl->Finish(entry, Impl::Load(desc, impl->family)); });
+			const bool posted = Detail::Post([self = this, entry, desc = std::move(*desc)] { self->Finish(entry, Load(desc, self->family)); });
 			if (!posted) {
-				impl->Finish(entry, nullptr);
+				Finish(entry, nullptr);
 				continue;
 			}
 			++queued;
 		}
-		logger::info("[DCLF] {}: {} programs from the manifest queued on the program build thread{}", impl->family, queued,
+		logger::info("[DCLF] {}: {} programs from the manifest queued on the program build thread{}", family, queued,
 			refused ? std::format(" ({} listed keys have no ORG form)", refused) : std::string());
 	}
 
@@ -597,13 +613,15 @@ namespace DCLF::Family
 	{
 		auto& registry = Stages();
 		std::vector<std::pair<EngineDrawPrograms::Impl*, StageRequest>> now;
+		std::vector<EngineDrawPrograms::Impl*> seen;  // families whose shader object this call made known
 		{
 			std::scoped_lock lock(registry.mutex);
 			for (auto* family : registry.families) {
 				if (family->source.shaderType != static_cast<std::uint32_t>(a_shader.shaderType.underlying()) || !family->source.stagesOf)
 					continue;
 				const RE::BSShader* none = nullptr;
-				family->shader.compare_exchange_strong(none, &a_shader);
+				if (family->shader.compare_exchange_strong(none, &a_shader))
+					seen.push_back(family);
 				std::vector<StageRequest> requests;
 				family->source.stagesOf(a_pixel, a_descriptor, requests);
 				for (const auto& request : requests) {
@@ -619,9 +637,12 @@ namespace DCLF::Family
 				}
 			}
 		}
-		// On this compile thread, as DCLF's precompile: CS's bounded workers stay busy until the task's stages are in the store.
+		// On CS's compile pool: the engine's shader load (main thread) and ShaderCompilationTask alike never wait on a compile here.
 		for (const auto& [family, request] : now)
-			CompileStageRequest(*family, a_shader, request);
+			SIE::ShaderCache::Instance().compilationPool.detach_task([family, shader = &a_shader, request] { CompileStageRequest(*family, *shader, request); });
+		// A family whose setup asked for its manifest before the engine loaded its shader queues it now.
+		for (auto* family : seen)
+			family->TryPrebuild();
 	}
 
 	void StartStagePrecompile()

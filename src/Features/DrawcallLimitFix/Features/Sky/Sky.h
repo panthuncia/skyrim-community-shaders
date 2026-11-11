@@ -48,6 +48,10 @@ namespace DCLF::Features::Sky
 		// FinishAccumulating's RenderPersistentPassList(geometry group 13, flags), right after the sky batch: the cloud layers (BSSkyShader
 		// passes of accumulation hint 0x11) and the sky-object effects (hint 0x12). SE 0x1412caf54, AE 0x1414b3004.
 		inline constexpr Engine::Offset kCloudGroup{ { 106583, 0x274 }, { 99938, 0x284 } };
+		// The accumulator's occlusion query draw (Sun::SubmitOcclusionQuery's, SE 25799 +0xAD, AE +0xAF): the sun's SunOcclude pass between
+		// BeginQuery and EndQuery, read back for the sun glare. The engine's, vouched for (docs/development/p5/sky.md, "What stays the
+		// engine's"). SE 99958 at 0x1412ccad0, AE 106604 at 0x1414b4c00.
+		inline constexpr Engine::Offset kSunOcclusionQuery{ { 106604 }, { 99958 } };
 	}
 
 	/** @brief The scene depth the main view's client imports for t17: the Z-prepass copy (Util::GetCurrentSceneDepthSRV's own). */

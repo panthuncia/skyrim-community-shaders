@@ -86,16 +86,47 @@ namespace DCLF::Family
 		return !Takers().empty();
 	}
 
+	namespace
+	{
+		struct Setup
+		{
+			std::string family;
+			std::function<bool()> run;
+			bool done = false;
+		};
+
+		// Added at install, run on the main thread: never touched by two threads at once.
+		std::vector<std::shared_ptr<Setup>>& Setups()
+		{
+			static std::vector<std::shared_ptr<Setup>> setups;
+			return setups;
+		}
+	}
+
 	bool AddSetup(std::string_view a_family, std::function<bool()> a_setup)
 	{
-		auto done = std::make_shared<bool>(false);
-		const bool added = ::RenderGraph::Engine::MainTick::Add(std::format("the {} family's setup", a_family), [done, setup = std::move(a_setup)] {
-			if (!*done)
-				*done = setup();
+		auto setup = std::make_shared<Setup>(Setup{ std::string(a_family), std::move(a_setup) });
+		Setups().push_back(setup);
+		const bool added = ::RenderGraph::Engine::MainTick::Add(std::format("the {} family's setup", a_family), [setup] {
+			if (!setup->done)
+				setup->done = setup->run();
 		});
 		if (!added)
-			logger::error("[DCLF] {}: the main-thread tick could not be installed; the family's clients are never made and its draws stay the engine's", a_family);
+			logger::error("[DCLF] {}: the main-thread tick could not be installed; the family's setup runs only at CS's setup", a_family);
 		return added;
+	}
+
+	void RunSetups()
+	{
+		for (const auto& setup : Setups()) {
+			if (setup->done)
+				continue;
+			setup->done = setup->run();
+			if (!setup->done)
+				logger::warn("[DCLF] {}: the render graph was not ready at CS's setup; the family's clients are made at the first main-thread tick that has it, "
+							 "and join at that frame's build point",
+					setup->family);
+		}
 	}
 
 	void BeginBatch()
@@ -120,8 +151,32 @@ namespace DCLF::Family
 		if (pendingType != kNone)
 			otherTypes |= 1u << (pendingType & 31);
 		pendingType = a_pass && a_pass->geometry ? static_cast<std::uint32_t>(a_pass->geometry->GetType().underlying()) : 0xFE;
-		// R1's dispatcher draws a TriShape through DrawTriShape (+0x1A2); every other type through another draw function.
-		return pendingType == static_cast<std::uint32_t>(RE::BSGeometry::Type::kTriShape);
+		return DrawsThroughTriShape(a_pass);
+	}
+
+	bool DrawsThroughTriShape(const RE::BSRenderPass* a_pass)
+	{
+		if (!a_pass || !a_pass->geometry)
+			return false;
+		// R1's geometry-type dispatcher (AE 107637, SE 100847; Ghidra 2026-11-11) by BSGeometry::GetType: a TriShape (3, +0x1A2), a mesh
+		// LOD TriShape (5), a sub-index TriShape (8) and a sub-index land TriShape (9, +0x430 and +0x4CE: one DrawTriShape a segment) draw
+		// through DrawTriShape; the LOD and plain multi-index TriShapes (6, 7) too, but through the alternate index buffer's draw (AE 77264)
+		// when the pass's accumulation hint (BSRenderPass +0x1C) is 12. Every other type draws through another function.
+		using Type = RE::BSGeometry::Type;
+		const auto type = a_pass->geometry->GetType().get();
+		const auto hint = *reinterpret_cast<const std::uint8_t*>(reinterpret_cast<const std::byte*>(a_pass) + 0x1C);
+		switch (type) {
+		case Type::kTriShape:
+		case Type::kMeshLODTriShape:
+		case Type::kSubIndexTriShape:
+		case Type::kSubIndexLandTriShape:
+			return true;
+		case Type::kLODMultiIndexTriShape:
+		case Type::kMultiIndexTriShape:
+			return hint != 12;
+		default:
+			return false;
+		}
 	}
 
 	bool Passes::End()

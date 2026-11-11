@@ -239,7 +239,7 @@ namespace DCLF::Features::BloodSplatter
 			if (!capture.active)
 				return;
 			if (!capture.passes.OnSetup(a_pass) && !capture.failed)
-				Refuse(capture, "a pass whose geometry is not a TriShape (it draws through another draw function)", 0xFF);
+				Refuse(capture, "a pass the dispatcher draws through another function than DrawTriShape", 0xFF);
 		}
 	}
 

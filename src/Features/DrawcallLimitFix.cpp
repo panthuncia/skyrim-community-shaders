@@ -40,6 +40,7 @@
 #	include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #	include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #	include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
+#	include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #	include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
 #	include "DrawcallLimitFix/Core/Handoff/ShadowViews.h"
 #	include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
@@ -1033,6 +1034,19 @@ void DrawcallLimitFix::PrecompileShader(const RE::BSShader& a_shader, bool a_pix
 	DCLF::Family::PrecompileStages(a_shader, a_pixel, a_descriptor);
 }
 
+void DrawcallLimitFix::PrecompileFamilyStages(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor)
+{
+	DCLF::Family::PrecompileStages(a_shader, a_pixel, a_descriptor);
+}
+
+void DrawcallLimitFix::PostSetupResources()
+{
+	// The sky's, the water's, the screen blood's and the shadow masks' clients, registered before the setup's graph build
+	// (RenderGraph::Engine::PostSetup), so they are in their anchors' graphs before the first world frame.
+	if (installed)
+		DCLF::Family::RunSetups();
+}
+
 void DrawcallLimitFix::OnMap(ID3D11Resource* a_resource, void* a_data)
 {
 	if (DCLF::CaptureParity::Enabled())
@@ -1139,6 +1153,8 @@ void DrawcallLimitFix::WriteAlphaFlags(RE::NiAlphaProperty* a_alpha, std::uint16
 		a_alpha->alphaFlags = a_flags;
 }
 void DrawcallLimitFix::PrecompileShader(const RE::BSShader&, bool, std::uint32_t) {}
+void DrawcallLimitFix::PrecompileFamilyStages(const RE::BSShader&, bool, std::uint32_t) {}
+void DrawcallLimitFix::PostSetupResources() {}
 void DrawcallLimitFix::OnMap(ID3D11Resource*, void*) {}
 void DrawcallLimitFix::OnUnmap(ID3D11Resource*) {}
 void DrawcallLimitFix::OnUpdateSubresource(ID3D11Resource*, const D3D11_BOX*, const void*) {}

@@ -91,9 +91,8 @@ header resolver, the async programs, the kept leases and the run step.
 - **The batches** (`WaterCapture.cpp`, thunks on both calls). For the main camera's accumulator with kMAIN's depth bound, the batch
   runs with its draws latched: every pass goes through BeginPass, SetupTechnique, SetupMaterial, SetupGeometry (Unified Water's, Light
   Limit Fix's, the cubemap fix's and the frame annotations' hooks with them) and render state as before.
-- **Setup, withholding, running** (primary path, primary-path.md). The client is made at setup (`Family::AddSetup`: the first
-  main-thread tick the render graph runs, in the main menu) and asks for its build once (`RequestJoin`); the menu frame's end builds
-  it, so it is in the graph before any world frame. A batch is taken when the client's targets match and `FrameAnchors::CanRun` says
+- **Setup, withholding, running** (primary path, primary-path.md). The client is made at CS's setup (`Family::RunSetups`,
+  before the setup's graph build), so it is in its anchor's graph before any world frame. A batch is taken when the client's targets match and `FrameAnchors::CanRun` says
   the anchor's run will draw it; otherwise the engine draws the batch, vouched for (`Flush::EngineDraws`), logged once. After the
   batch (or at a refusal) `Family::RunWithheld` runs the anchor; any status but `Ran` is an error, logged once, and nothing is
   retried. The client's `executed` callback counts the runs that drew.
@@ -125,7 +124,8 @@ header resolver, the async programs, the kept leases and the run step.
 - **Refusals end the latched part.** There is no probe: every batch is latched from the first. A draw the family cannot take (its
   inherent refusals, "What stays the engine's") runs the draws latched so far at that point and leaves the rest of the batch to the
   engine, vouched for (`Flush::EngineDraws` until the batch returns), so the engine's draws come after the graph's in the engine's
-  order. A pass whose geometry is not a TriShape is refused at its SetupGeometry, before the engine draws it. A batch that ran nothing
+  order. A pass the dispatcher draws through another function than DrawTriShape
+  (`Family::DrawsThroughTriShape`) is refused at its SetupGeometry, before the engine draws it. A batch that ran nothing
   keeps its imports (`Keep`).
 - **Refusals** are logged once per reason, technique and view (`[DCLF] water: the engine draws: a surface draw of technique N: <reason>`,
   `Util::ReasonLog`; a texture that cannot be imported says why, `GpuTextures::DescribeFailure`):
@@ -274,7 +274,7 @@ The two clients' registrations at setup. Nothing in play registers again.
 
 ### What to look for in the log
 
-- `[DCLF] <family>: the <id> client registered at setup (...)` once per client, in the main menu, and no `frame anchors: cs.<family>.*
+- `[DCLF] <family>: the <id> client registered at setup (...)` once per client, at CS's setup, before `graphs built at CS's setup`, and no `frame anchors: cs.<family>.*
   registered` line after it; `; not published yet: <ids>` names inputs no producer had published by then.
 - `[DCLF] engine draw programs: the manifest lists N keys`, `[DCLF] <family>: N programs from the manifest queued`, and on a second
   run no `was not prebuilt` line. Each such line names a key the enumeration or the manifest missed.

@@ -590,6 +590,21 @@ namespace DCLF::Features::Sky
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/**
+		 * @brief BSShaderAccumulator's occlusion query draw (SE 99958, AE 106604), from Sun::SubmitOcclusionQuery: the engine's, vouched for.
+		 * A graph draw would not be counted by the engine's D3D11 query, and the sun glare reads that count.
+		 */
+		struct SunOcclusionQuery
+		{
+			static void thunk(void* a_accumulator, RE::BSGeometry* a_geometry, std::uint32_t a_query, RE::NiCamera* a_camera)
+			{
+				static const Family::Flush::Reason reason{ "sky: sun occlusion query" };
+				Family::Flush::EngineDraws scope(reason);
+				func(a_accumulator, a_geometry, a_query, a_camera);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		/** @brief The family's DrawTriShape taker: during a latched sky batch, the draw is latched instead. */
 		bool TakeDraw(const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
@@ -619,7 +634,7 @@ namespace DCLF::Features::Sky
 			if (const auto* state = globals::state)
 				capture.lastTechnique = state->currentPixelDescriptor & 0xFF;
 			if (!capture.passes.OnSetup(a_pass) && !capture.failed)
-				Refuse(capture, "a pass whose geometry is not a TriShape (it draws through another draw function)", capture.lastTechnique);
+				Refuse(capture, "a pass the dispatcher draws through another function than DrawTriShape", capture.lastTechnique);
 		}
 	}
 
@@ -648,6 +663,10 @@ namespace DCLF::Features::Sky
 		if (clouds)
 			stl::write_thunk_call<CloudGroup>(REL::Offset(Address::kCloudGroup).address());
 		Family::WatchSetupGeometry<RE::BSShader::Type::Sky>(RE::VTABLE_BSSkyShader[0], &OnSetupGeometry);
+		if (Address::kSunOcclusionQuery.Known()) {
+			stl::detour_thunk<SunOcclusionQuery>(REL::Offset(Address::kSunOcclusionQuery).address());
+			HookSites::NoteDetour("BSShaderAccumulator's occlusion query draw (the sun's, vouched for)", SunOcclusionQuery::func.address());
+		}
 		// Both views' clients are made on the main thread once the graph runs (the main menu), before any world frame.
 		Family::AddSetup("sky", [] { return SkyDraws::Setup(); });
 		logger::info("[DCLF] sky: hooks installed (the sky batch{}, BSSkyShader::SetupGeometry)", clouds ? ", the cloud group" : "");
