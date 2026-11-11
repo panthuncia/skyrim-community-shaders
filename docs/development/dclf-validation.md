@@ -83,6 +83,8 @@ only `0` turns it off. Parity, diagnostic and test switches are off unless set.
 | `CS_DCLF_FIRST_PERSON` | off | `1`: DCLF draws the first-person arms, weapons and magic hands; unset or `0` they stay native (cheaper: hand-back sweep 0.15 ms). |
 | `CS_DCLF_FIRST_PERSON_DECALS` | on (unless 0) | `0`: decals on first-person entries (an effect's blood on the arms, a weapon's `BloodLighting`) stay the engine's. Needs `CS_DCLF_FIRST_PERSON` and `CS_DCLF_DECALS`. |
 | `CS_DCLF_OPAQUE_EFFECTS` | on (unless 0) | `0`: opaque effect meshes (hint 0: forge coals, slag) stay the engine's. Needs decals. |
+| `CS_DCLF_EFFECT_CLOUD_LIGHT` | on (unless 0) | `0`: Lighting-variant effects with `kCloudLOD` (lit by the cloud light) stay the engine's (`cloud-lighting`). |
+| `CS_DCLF_EFFECT_FALLOFF` | on (unless 0) | `0`: effect meshes with Falloff and no blending alpha property stay the engine's (`effect-opaque`). Needs forward. |
 | `CS_DCLF_PARTICLES` | on (unless 1) | `0`: effect-shaded particle systems stay native. Needs `CS_DCLF_EFFECTS`. |
 | `CS_DCLF_BILLBOARDS` | on (unless 1) | `0`: effect meshes under an `NiBillboardNode` (fire cards, spray jets) stay native. Needs `CS_DCLF_EFFECTS`. |
 | `CS_DCLF_BILLBOARD_PARTICLES` | on (unless 0) | `0`: particle systems under billboard nodes (the magic hands' fire cores) stay the engine's. Needs billboards and particles. |

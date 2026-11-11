@@ -1392,3 +1392,14 @@ From P5.8/P5.9 (`docs/development/p5/menus.md`). Two needs a menu scene's view b
   - **Crash markers on an adopted device:** `BASICRHI_VK_CRASH_MARKERS=1` (with DXVK_DEBUG=hang, which enables VK_AMD_buffer_marker)
     marks BasicRHI's own lists; the first timeline that reads UINT64_MAX dumps them. DXVK's markers cover only DXVK's commands.
 - **Found by:** P5 crash triage (2026-11-11).
+
+### Per-object choices in a reused recording (DCLF effect variants)
+
+- **Need:** a per-object value that picks between frame values (here: which light colour an effect's Lighting variant reads), with
+  no per-object push data and no new pipeline.
+- **Who:** DCLF's Effect port (`CS_DCLF_EFFECT_CLOUD_LIGHT`); first-person refraction under billboards (roadmap 4.2) has the same need.
+- **Where it fits:** the object record's flag word (`DCLFRecordFlags`) is full (bits 0-8 are taken, 9-31 the fade root), so the choice
+  went into a shading-row component the port does not otherwise read (`MaterialData.w`), and the frame value into a new frame
+  constant row (PS b13 c20; Core's feature rows now end at c21). A spare per-object word in the record that a family or feature can
+  claim through the install (as `Api::LightingObjectFlag` claims a bit) would keep such choices out of the shading row.
+- **Found by:** P5.2 effects (2026-11-11).

@@ -378,20 +378,51 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
 
 -   **Goal.** Every effect variant the engine draws in the main view is DCLF's.
 -   **Why.** Each unported variant stays native, keeps the list jobs (1.1) and draws after DCLF's forward epoch, out of order.
--   **State.** Not started for: the sky object, wireframe, cloud lighting (`kCloudLOD`), Lighting without Light Limit Fix,
-    projected UV, unrecognised blend pairs, Falloff without blending, membrane, strip and mesh particle systems, skins under
-    billboards, nested billboards, and Lighting leaves under billboards.
--   **Design.** Each is an `Api::ObjectClass` contribution in `Features/Effects` or `Features/Billboards`, ordered by the
-    residue census.
+-   **State.** Partly built. Cloud lighting (`CS_DCLF_EFFECT_CLOUD_LIGHT`) and Falloff without blending (`CS_DCLF_EFFECT_FALLOFF`)
+    are DCLF's (dclf-architecture.md, "The Effect shader in the forward epoch"). Not started, each with what it needs:
+    -   **Sky objects** (bit 45, hint 0x12, geometry group 13). The sky family (`Features/Sky`, `CS_ORG_SKY`) latches only the
+        `BSSkyShader` techniques' batch (`0x5C00005D`-`0x5C000064`), so an effect sky object is still drawn by the engine's
+        group 13 effect batch. Needs SetupGeometry's own cull and alpha setup (`FUN_14150bc80` with the alpha test) and a draw
+        in the sky's place (before the opaque world), so the sky family is the natural owner, not the forward epoch.
+    -   **Wireframe** (bit 48): SetupGeometry sets depth mode 3 and the rasterizer's fill mode 1. BasicRHI has
+        `rhi::FillMode::Wireframe`, but DCLF's `PipelineKey` has no fill-mode bit. No vanilla content is known to set it.
+    -   **Projected UV** (pass bit 17): SetupGeometry writes VS `MatProj` from the transpose of the pass geometry's `+0x16c`
+        matrix and binds a texture from `BSGraphics::State +0x48` (`+0x10`) with filter and address 3. Needs the writer of the
+        geometry's `+0x16c` and that texture as a frame texture.
+    -   **Unrecognised blend pairs**: `FUN_14150bc80` leaves the blend state as the previous draw left it, so the result
+        depends on the engine's draw order. Not portable as a fixed key.
+    -   **Membrane** (pass bit 15): SetupGeometry takes `BSEffectShader__sub` instead of its usual body (the TESEffectShader
+        membrane: normal and noise textures, `MembraneRimColor`, `MembraneVars`, `TexcoordOffsetMembrane`). The pass is an
+        effect pass on an actor's geometry. Needs that function's port and the actor pass.
+    -   **Strip and mesh particle systems**: strips are built on the CPU each frame (`FUN_140d76d80`, a triangle strip into
+        the dynamic ring); mesh particles draw an instanced mesh. Both need their own particle rows (`Features/Particles`).
+    -   **Skins under billboards, nested billboards, Lighting leaves under billboards**: the billboard row turns one node
+        from one base transform (`BillboardRow.h`); a nested chain needs a row per node, a skin needs the turn applied to
+        its palette, and a Lighting leaf needs the turn in Lighting.hlsl's vertex stages (depth, colour, shadow) and a place
+        for the mode, since a Lighting record's bits 4-7 are refraction's.
+-   **Order.** By the residue census (below), most passes first.
+-   **Census.** `CS_DCLF_CENSUS=1` (dclf-validation.md, "The registration census"). The lines to read are
+    `[DCLF] census class effect: effect-variant (<variants>)` and `[DCLF] census class effect: effect-opaque`, with their
+    passes a frame and top geometries. Run it before and after a change in the same cells, with the variant's switch on and
+    at 0 (`tools/cs-ab/scenarios/effect-variants-census.env`, `effect-variants-census-off.env`).
+-   **Design.** Each is an `Api::ObjectClass` contribution in `Features/Effects` or `Features/Billboards`, or a variant bit
+    dropped from `EffectVariantsOf` behind its own switch.
 
 ### 4.2 First-person refraction
 
 -   **Goal.** `HeatRefraction` in first person (Flames) is drawn by DCLF.
 -   **Why.** One engine pass a frame while Flames is drawn.
--   **State.** Not started.
+-   **State.** Not started. What the engine does: `Main::RenderFirstPersonView` (AE `0x1414cb6d0`) submits the first-person
+    accumulator, then calls `FUN_1414b4860` on it, which draws its group 5 (the refraction normals) as the main view's does.
+    The leaf is a Lighting `kRefraction` shape under an `NiBillboardNode` in the hand's NIF.
 -   **Design.** A billboard turn in the Utility refraction stage, and a refraction pass in the first-person colour epoch (the
-    first-person camera and depth range, `kPOST_ZPREPASS_COPY`, the begun/drawn flags).
--   **Needs.** Nothing.
+    first-person camera and depth range, `kPOST_ZPREPASS_COPY`, the begun/drawn flags so the main view's normals are not
+    cleared again). In the CPU forward family (`CS_DCLF_FORWARD_DIRECT`) the first-person site needs a refraction view as the
+    main one has (`Core/Render/Direct/Sites.cpp`).
+-   **Needs.** Lighting leaves under billboards (4.1): the classification admits only effect shapes
+    (`BillboardTurnedLeaf`), and the refraction record uses bits 2-7, where the Effect family keeps the billboard mode, so the
+    mode needs another place (a shading-row component refraction does not read). The first-person view's slots also exclude
+    refraction (`ViewEpoch.cpp`). And first person itself (`CS_DCLF_FIRST_PERSON`, off by default).
 
 ### 4.3 Blood impact particles
 
