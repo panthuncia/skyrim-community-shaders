@@ -4,6 +4,7 @@
 #include "HangWatchdog.h"
 #include "GpuIdleTrace.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
@@ -1463,13 +1464,8 @@ namespace Hooks
 		Vram::Debug::InstallGameHooks();
 		TextureStreaming::Census::InstallGameHooks();
 		TextureStreaming::InstallGameHooks();
-		RenderGraph::Engine::Textures::InstallHooks();
-		RenderGraph::Engine::Buffers::InstallGameHooks();
-		RenderGraph::Engine::Constants::InstallGameHooks();
-		// CS_ORG_BINK: the movie player's tiles on the render graph (reserves the Present anchor).
-		RenderGraph::Engine::Bink::InstallHooks();
-		// CS_ORG_LOADING_THREAD: the render graph on whichever thread renders under Renderer::Lock (the loading screen, the logo).
-		RenderGraph::Engine::LoadingScreen::Install();
+		// The engine-on-graph subsystems' game hooks (each behind its own switch).
+		RenderGraph::Engine::InstallGameHooks();
 
 		logger::info("Hooking BSGraphics::Renderer::InitD3D");
 		stl::write_thunk_call<BSGraphics_Renderer_Init_InitD3D>(REL::RelocationID(75595, 77226).address() + REL::Relocate(0x50, 0x2BC));
@@ -1481,16 +1477,8 @@ namespace Hooks
 		logger::info("Hooking WndProcHandler");
 		stl::write_thunk_call<RegisterClassA_Hook, 6>(REL::VariantID(75591, 77226, 0xDC4B90).address() + REL::VariantOffset(0x8E, 0x15C, 0x99).offset());
 
-		RenderGraph::Engine::Pipeline::InstallGameHooks();
-
 		logger::info("Hooking BSShaderRenderTargets::Create");
 		stl::detour_thunk<BSShaderRenderTargets_Create>(REL::RelocationID(100458, 107175));
-		RenderGraph::Engine::Targets::Install();
-		// CS_ORG_ENGINE_SKELETON: the engine's clear and depth copy call sites.
-		RenderGraph::Engine::Skeleton::Install();
-		// CS_ORG_IMAGESPACE: the ImageSpace draws the graph takes (BSImagespaceShader::Render, the HDR effect, the pre-tonemap composites).
-		RenderGraph::Engine::ImageSpace::Install();
-		RenderGraph::Engine::Scaleform::Install();
 
 		logger::info("Hooking BSShaderRenderTargets::Create::CreateRenderTarget(s)");
 		stl::write_thunk_call<CreateRenderTarget_Main>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x3F0, 0x3F3));
