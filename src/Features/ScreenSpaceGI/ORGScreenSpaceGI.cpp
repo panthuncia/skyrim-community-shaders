@@ -12,6 +12,7 @@
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/ProgramCache.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
@@ -24,6 +25,7 @@
 
 #	include <array>
 #	include <format>
+#	include <map>
 #	include <vector>
 
 namespace
@@ -117,6 +119,37 @@ namespace
 		if (a_config.specular)
 			defines.emplace_back("GI_SPECULAR", "");
 		return defines;
+	}
+
+	/** @brief A step's program key: the step and the settings its defines come from (not enabled or blur, which add none). */
+	std::uint32_t ProgramKey(const Config& a_config, std::uint32_t a_step)
+	{
+		return a_step | (static_cast<std::uint32_t>(a_config.resolutionMode) << 4) | (static_cast<std::uint32_t>(a_config.temporal) << 6) |
+		       (static_cast<std::uint32_t>(a_config.gi) << 7) | (static_cast<std::uint32_t>(a_config.specular) << 8);
+	}
+
+	/** @brief A step's program for a configuration. */
+	ComputeProgram::Desc StepDesc(const Config& a_config, std::uint32_t a_step)
+	{
+		return { .source = kStepInfo[a_step].source,
+			.constantWords = kFixedWords + kStepInfo[a_step].views,
+			.defines = AnchorPasses::Defines(StepDefines(static_cast<Step>(a_step), a_config)) };
+	}
+
+	/** @brief Whether a configuration dispatches a step. */
+	bool UsesStep(const Config& a_config, std::uint32_t a_step)
+	{
+		return !(a_step == kBlur && !a_config.blur) && !(a_step == kUpsample && a_config.FullRes());
+	}
+
+	/** @brief Every configuration the settings can select, for the programs: each resolution mode and define option, blur on. */
+	std::vector<Config> SettingsConfigs()
+	{
+		std::vector<Config> configs;
+		for (int mode = 0; mode <= 2; ++mode)
+			for (std::uint32_t bits = 0; bits < 8; ++bits)
+				configs.push_back({ .resolutionMode = mode, .enabled = true, .gi = (bits & 1) != 0, .specular = (bits & 2) != 0, .temporal = (bits & 4) != 0, .blur = true });
+		return configs;
 	}
 
 	/** @brief The engine and feature textures the chain reads, as graph textures. */
@@ -248,6 +281,10 @@ struct ORGScreenSpaceGI::Impl
 	std::shared_ptr<RenderGraph::RunGate> gate;
 	D3D11_TEXTURE2D_DESC main{};
 	std::function<void()> onFailed;
+	// The programs by ProgramKey: the current configuration's built at setup, every other one queued then on the program build
+	// thread (prebuilt) so a settings change finds it. Taken into programs at first use.
+	std::map<std::uint32_t, std::shared_ptr<const ComputeProgram>> programs;
+	RenderGraph::ProgramCache<ComputeProgram, std::uint32_t> prebuilt{ "Screen Space GI" };
 	bool registered = false;
 	// Set by Prepass on frames the chain has its inputs: the client's active.
 	bool frameReady = false;
@@ -272,8 +309,38 @@ struct ORGScreenSpaceGI::Impl
 			GraphResources::Options{ .lifetime = a_lifetime, .d3d11 = a_exported ? GraphResources::Export::SRV : GraphResources::Export::None });
 	}
 
-	/** @brief The programs and textures of a configuration; null, logged, when one cannot be made. */
-	std::shared_ptr<GiState> Build(const Config& a_config) const
+	/** @brief Queues every configuration's programs on the program build thread, except those already built. */
+	void Prebuild()
+	{
+		for (const auto& config : SettingsConfigs())
+			for (std::uint32_t step = 0; step < kSteps; ++step)
+				if (UsesStep(config, step) && !programs.contains(ProgramKey(config, step)))
+					(void)prebuilt.Get(ProgramKey(config, step), [&] { return StepDesc(config, step); });
+	}
+
+	/**
+	 * @brief A step's program: built before, or by Prebuild's queue, or built now on this thread. a_expected: setup or a shader
+	 * reload, where building now is the plan; otherwise it is logged (a program setup did not prebuild in time).
+	 */
+	std::shared_ptr<const ComputeProgram> ProgramFor(const Config& a_config, std::uint32_t a_step, bool a_expected)
+	{
+		const auto key = ProgramKey(a_config, a_step);
+		if (const auto found = programs.find(key); found != programs.end())
+			return found->second;
+		auto program = prebuilt.StatusOf(key) == RenderGraph::ProgramStatus::Ready ? prebuilt.Get(key, [&] { return StepDesc(a_config, a_step); }) : nullptr;
+		if (!program) {
+			if (!a_expected)
+				logger::info("[ORG] Screen Space GI: {} for these settings was not prebuilt yet; building it now", kStepInfo[a_step].source);
+			auto* host = RenderGraphRuntime::Get().Host();
+			program = host ? ComputeProgram::Load(host->Device(), StepDesc(a_config, a_step)) : nullptr;
+		}
+		if (program)
+			programs.emplace(key, program);
+		return program;
+	}
+
+	/** @brief The programs and textures of a configuration; null, logged, when one cannot be made. a_expected: as ProgramFor. */
+	std::shared_ptr<GiState> Build(const Config& a_config, bool a_expected)
 	{
 		auto gi = std::make_shared<GiState>();
 		gi->config = a_config;
@@ -283,11 +350,9 @@ struct ORGScreenSpaceGI::Impl
 		if (!host)
 			return nullptr;
 		for (std::uint32_t step = 0; step < kSteps; ++step) {
-			if ((step == kBlur && !a_config.blur) || (step == kUpsample && a_config.FullRes()))
+			if (!UsesStep(a_config, step))
 				continue;
-			gi->programs[step] = ComputeProgram::Load(host->Device(), { .source = kStepInfo[step].source,
-																			  .constantWords = kFixedWords + kStepInfo[step].views,
-																			  .defines = AnchorPasses::Defines(StepDefines(static_cast<Step>(step), a_config)) });
+			gi->programs[step] = ProgramFor(a_config, step, a_expected);
 			if (!gi->programs[step]) {
 				logger::error("[ORG] Screen Space GI: {} could not be built", kStepInfo[step].source);
 				return nullptr;
@@ -499,7 +564,9 @@ bool ORGScreenSpaceGI::Setup(const D3D11_TEXTURE2D_DESC& a_main, std::function<v
 		next->latch = std::make_shared<org::LatchBlock>("cs.ssgi.latch", static_cast<std::uint32_t>(sizeof(ScreenSpaceGI::SSGICB)),
 			runtime.Host()->FrameSlots());
 		next->gate = RenderGraph::RunGate::Create("cs.ssgi.gate", kSteps);
-		next->state = next->Build(Config::Current());
+		next->state = next->Build(Config::Current(), true);
+		// The other configurations' programs, off the render thread: a settings change then makes no compile.
+		next->Prebuild();
 		if (!next->pointSampler || !next->linearSampler || !next->gate || !next->state) {
 			logger::warn("[ORG] Screen Space GI stays on D3D11: its samplers, programs or textures could not be made");
 			return false;
@@ -530,15 +597,21 @@ void ORGScreenSpaceGI::Prepass()
 	// A setting the programs or textures depend on, or a recompile from the menu: both made again, and the history with them.
 	bool newState = false;
 	if (feature.recompileFlag) {
-		// The D3D11 shaders too, so a later fallback finds them current. It also queues the history reset.
+		// The D3D11 shaders too, so a later fallback finds them current. It also queues the history reset. The graph's programs are
+		// built again from the reloaded sources: the current ones now, the others queued again.
 		feature.ClearShaderCache();
+		self.programs.clear();
+		self.prebuilt.Clear();
 		newState = true;
 	}
 	const auto config = Config::Current();
 	if (newState || config != self.state->config) {
-		auto state = self.Build(config);
+		const bool reload = newState;
+		auto state = self.Build(config, reload);
 		if (!state)
 			return fail("the new settings' programs or textures could not be made");
+		if (reload)
+			self.Prebuild();
 		state->inputs = self.state->inputs;
 		self.state = std::move(state);
 		newState = true;
