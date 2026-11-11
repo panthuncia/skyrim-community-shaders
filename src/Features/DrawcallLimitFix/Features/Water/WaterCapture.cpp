@@ -365,6 +365,21 @@ namespace DCLF::Features::Water
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/**
+		 * @brief Geometry group 10's batch before the water batch: the engine's on purpose, so under the flush latch its draws (water into
+		 * kRAW_WATER among them) are vouched for, and run with the state they bind.
+		 */
+		struct Group10Batch
+		{
+			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
+			{
+				static const Family::Flush::Reason reason{ "water: geometry group 10 batch" };
+				Family::Flush::EngineDraws scope(reason);
+				func(a_accumulator, a_first, a_last, a_flags, a_group);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		/** @brief The family's DrawTriShape taker: during a latched water batch, the draw is latched instead. */
 		bool TakeDraw(const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
@@ -409,6 +424,8 @@ namespace DCLF::Features::Water
 		HookSites::RequireCall("the water mask batch (FinishAccumulating's RenderBatches of the Stencil technique)", REL::Offset(Address::kMaskBatch).address());
 		HookSites::RequireCall("the water batch (FinishAccumulatingPostResolveDepth's RenderBatches of the water techniques)",
 			REL::Offset(Address::kSurfaceBatch).address());
+		if (Address::kGroup10Batch.Known())
+			HookSites::RequireCall("geometry group 10's batch (FinishAccumulatingPostResolveDepth, before the water)", REL::Offset(Address::kGroup10Batch).address());
 	}
 
 	void InstallHooks()
@@ -419,6 +436,8 @@ namespace DCLF::Features::Water
 		}
 		stl::write_thunk_call<WaterBatch<View::Mask>>(REL::Offset(Address::kMaskBatch).address());
 		stl::write_thunk_call<WaterBatch<View::Surface>>(REL::Offset(Address::kSurfaceBatch).address());
+		if (Address::kGroup10Batch.Known() && Family::Flush::LatchRequested())
+			stl::write_thunk_call<Group10Batch>(REL::Offset(Address::kGroup10Batch).address());
 		Family::WatchSetupGeometry<RE::BSShader::Type::Water>(RE::VTABLE_BSWaterShader[0], &OnSetupGeometry);
 		// Both views' clients are made on the main thread once the graph runs (the main menu), before any world frame.
 		Family::AddSetup("water", [] { return WaterDraws::Setup(); });

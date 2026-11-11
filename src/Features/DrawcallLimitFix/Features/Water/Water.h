@@ -44,6 +44,9 @@ namespace DCLF::Features::Water
 		inline constexpr Engine::Offset kMaskBatch{ { 106583, 0x492 }, { 99938, 0x4A6 } };
 		// FinishAccumulatingPostResolveDepth's RenderBatches(accumulator, 0x5C000071, 0x5C006071, flags, -1): the water (SE 99939, AE 106584).
 		inline constexpr Engine::Offset kSurfaceBatch{ { 106584, 0x161 }, { 99939, 0x164 } };
+		// The same function's RenderBatches(accumulator, 1, 0x5C006074, flags, 10) just before it: geometry group 10, whose passes
+		// include water drawn into kRAW_WATER (SE 99939 +0x146, AE 106584 +0x143). The family does not take it; the engine draws it.
+		inline constexpr Engine::Offset kGroup10Batch{ { 106584, 0x143 }, { 99939, 0x146 } };
 	}
 
 	/** @brief Where a batch draws. */
