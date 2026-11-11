@@ -1,31 +1,26 @@
-// The blood splatter family's render graph side: one client at the EngineDraws anchor, made once at the first frame the graph runs,
-// whose pass draws a batch's latched draws into the back buffer with CS's BloodSplatter.hlsl built for ORG.
+// The blood splatter family's render graph side: one client at the EngineDraws anchor, made once at the first main-thread tick the
+// graph runs, whose pass draws a batch's latched draws into the back buffer with CS's BloodSplatter.hlsl built for ORG.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
-#include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h"
 
 #include "Globals.h"
-#include "RenderGraph/Engine/Pipeline/StateConversion.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
-#include "ShaderCache.h"
 
 #include <OpenRenderGraph/GraphHost.h>
 #include <Render/LatchBlock.h>
 #include <Render/RenderGraph/RenderGraph.h>
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
 #include <Resources/ExternalTextureResource.h>
-#include <rhi_helpers.h>
 
 #include <atomic>
 #include <cstring>
-#include <deque>
 
 namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 {
@@ -35,7 +30,6 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		constexpr const char* kClientId = "cs.blood-splatter";
 		constexpr std::uint32_t kMaxDraws = 32;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawConstants));
-		constexpr std::uint32_t kKeptFrames = RenderGraphRuntime::kGameFramesInFlight + 2;
 
 		/** @brief BloodSplatter.hlsl's push block (BLOOD_SPLATTER_ORG_RESOURCES). */
 		struct BloodBlock
@@ -52,9 +46,9 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			std::shared_ptr<::RenderGraph::RunGate> gate;
 			std::shared_ptr<org::ExternalTextureResource> target;  // the back buffer, as imported at the registration
 			std::shared_ptr<const Run> run;
-			std::atomic<bool> prepared{ false };
 			bool pending = false;
 			bool targetLogged = false;
+			std::atomic<std::uint64_t> executed{ 0 };  // runs submitted with this client's pass (its executed callback)
 		};
 
 		struct Bindings
@@ -65,8 +59,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		struct Frame
 		{
 			std::shared_ptr<const Run> run;
-			std::shared_ptr<const org::LatchBlock> latch;
-			std::shared_ptr<const ::RenderGraph::RunGate> gate;
+			std::shared_ptr<const Client> client;
 		};
 
 		/** @brief A run's draws, in the engine's order: a render pass and a draw each. */
@@ -84,31 +77,28 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 				a_out.push_back(run ? run->revision : 0);
 			}
 
-			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const
-			{
-				client->prepared.store(true, std::memory_order_release);
-				return { std::atomic_load(&client->run), client->latch, client->gate };
-			}
+			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const { return { std::atomic_load(&client->run), client }; }
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{
-				if (!a_frame.run || !a_frame.latch || !a_frame.gate)
+				if (!a_frame.run || !a_frame.client)
 					return;
+				const auto& c = *a_frame.client;
 				const std::uint32_t slot = a_recording.FrameSlot();
 				for (std::uint32_t i = 0; i < a_frame.run->draws.size(); ++i) {
 					const auto& draw = a_frame.run->draws[i];
 					if (!draw.program)
 						continue;
 					const auto& program = *static_cast<const RasterProgram*>(draw.program.get());
-					const BloodBlock block{ ShaderBindings::LatchOf(*a_frame.latch, slot, i * kDrawStride) };
+					const BloodBlock block{ ShaderBindings::LatchOf(*c.latch, slot, i * kDrawStride) };
 					const RasterProgram::Colour colour{ .view = &a_bindings.target };
 					program.Draw(a_recording, { .colours = std::span<const RasterProgram::Colour>(&colour, 1),
-												  .viewport = { .x = draw.viewport[0], .y = draw.viewport[1], .width = draw.viewport[2], .height = draw.viewport[3] },
+												  .viewport = { .x = draw.viewport.rect[0], .y = draw.viewport.rect[1], .width = draw.viewport.rect[2], .height = draw.viewport.rect[3] },
 												  .constants = ShaderBindings::Data(block),
 												  .debugName = "BloodSplatter",
 												  // The counts come from the draw's gate entry, which the client's commit opens for this run only.
-												  .indirect = &a_frame.gate->Latch(),
-												  .indirectOffset = a_frame.gate->Offset(i) });
+												  .indirect = &c.gate->Latch(),
+												  .indirectOffset = c.gate->Offset(i) });
 				}
 			}
 
@@ -116,35 +106,21 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			std::shared_ptr<Client> client;
 		};
 
-		struct ProgramEntry
-		{
-			PipelineKey key;
-			std::shared_ptr<const RasterProgram> program;
-		};
-
 		struct DrawsState
 		{
 			std::shared_ptr<Client> client;
-			bool tried = false;        // the client is made once
-			bool drawnLogged = false;  // the first batch the graph drew was logged
-			std::vector<ProgramEntry> programs;
-			std::vector<PipelineKey> failedPrograms;
+			bool tried = false;  // the client is made once
+			Family::EngineDrawPrograms programs{ "blood splatter", { .source = kShader, .constantWords = ShaderBindings::Words<BloodBlock>() } };
 			bool reserved = false;
 			bool failed = false;
 			std::uint64_t runs = 0, draws = 0;
-			std::deque<std::pair<std::uint32_t, std::vector<std::shared_ptr<const void>>>> kept;
+			Family::KeptOwners kept;
 		};
 
 		DrawsState& GetState()
 		{
 			static DrawsState state;
 			return state;
-		}
-
-		std::uint32_t GameFrame()
-		{
-			static REL::Relocation<std::uint32_t*> counter{ REL::Offset(Engine::Address::kFrameCounter) };
-			return *counter;
 		}
 
 		void Fail(const char* a_why)
@@ -163,7 +139,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			mix(a_run.draws.size());
 			for (const auto& draw : a_run.draws) {
 				mix(reinterpret_cast<std::uintptr_t>(draw.program.get()));
-					for (const auto v : draw.viewport)
+				for (const auto v : draw.viewport.rect)
 					mix(v);
 			}
 			return hash;
@@ -226,6 +202,10 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 					client->gate->OpenDraw(i, draw.indexCount, 1);
 			}
 		};
+		desc.executed = [client](const FrameAnchors::Point&) {
+			if (client->executed.fetch_add(1, std::memory_order_relaxed) == 0)
+				logger::info("[DCLF] blood splatter: the first screen blood run drawn by the graph");
+		};
 		desc.active = [client] { return client->pending; };
 		desc.onFailed = [] { Fail("the render graph failed with the screen blood's pass in it"); };
 		if (!FrameAnchors::Register(std::move(desc))) {
@@ -233,6 +213,8 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			return;
 		}
 		state.client = std::move(client);
+		// Asks for the build now, so the client is in the graph before the first hit.
+		FrameAnchors::RequestJoin(kClientId, FrameAnchors::Anchor::EngineDraws);
 		logger::info("[DCLF] blood splatter: the {} client registered", kClientId);
 	}
 
@@ -240,92 +222,45 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 	{
 		auto& state = GetState();
 		const auto& client = state.client;
-		if (state.failed || !client || !client->prepared.load(std::memory_order_acquire))
+		if (state.failed || !client)
 			return false;
 		// The back buffer the engine binds now must be the one the client imported: a new swap chain keeps the screen blood the engine's
 		// (no client is registered again during play).
 		if (FrameAnchors::EngineTarget(0) != client->target) {
-			if (!client->targetLogged)
+			if (!std::exchange(client->targetLogged, true))
 				logger::warn("[DCLF] blood splatter: the back buffer changed since the client registered; the screen blood stays the engine's");
-			client->targetLogged = true;
 			return false;
 		}
-		return true;
+		return FrameAnchors::RequestJoin(kClientId, FrameAnchors::Anchor::EngineDraws);
 	}
 
-	std::shared_ptr<const void> Program(const PipelineKey& a_key, const void* a_shader)
+	bool CanRun()
 	{
-		auto& state = GetState();
-		for (const auto& entry : state.programs)
-			if (entry.key == a_key)
-				return entry.program;
-		for (const auto& failed : state.failedPrograms)
-			if (failed == a_key)
-				return nullptr;
-		auto* host = RenderGraphRuntime::Get().Host();
-		const auto* shader = static_cast<const RE::BSShader*>(a_shader);
-		auto* blend = static_cast<ID3D11BlendState*>(const_cast<void*>(a_key.blend));
-		auto* raster = static_cast<ID3D11RasterizerState*>(const_cast<void*>(a_key.raster));
-		if (!host || !shader || !blend || !raster) {
-			state.failedPrograms.push_back(a_key);
-			return nullptr;
-		}
-		RasterProgram::Desc desc{};
-		desc.pixelSource = kShader;
-		desc.vertexSource = kShader;
-		desc.constantWords = ShaderBindings::Words<BloodBlock>();
-		for (const auto& [name, value] : SIE::ShaderCache::GetCompileDefines(*shader, SIE::ShaderClass::Pixel, a_key.descriptor)) {
-			if (name == "VSHADER" || name == "PSHADER")
-				continue;
-			desc.defines.emplace_back(std::wstring(name.begin(), name.end()), std::wstring(value.begin(), value.end()));
-		}
-		D3D11_BLEND_DESC blendDesc{};
-		blend->GetDesc(&blendDesc);
-		rhi::BlendState blendState{};
-		std::string error;
-		if (!::RenderGraph::Engine::Pipeline::BlendFromD3D11(blendDesc, blendState, error) || ::RenderGraph::Engine::Pipeline::UsesDualSource(blendDesc)) {
-			logger::warn("[DCLF] blood splatter: a draw's blend state has no ORG form ({}); it stays the engine's", error);
-			state.failedPrograms.push_back(a_key);
-			return nullptr;
-		}
-		desc.targets.push_back({ .format = static_cast<rhi::Format>(a_key.colourFormat), .blend = blendState.attachments[0] });
-		desc.alphaToCoverage = blendState.alphaToCoverage;
-		D3D11_RASTERIZER_DESC rasterDesc{};
-		raster->GetDesc(&rasterDesc);
-		desc.raster = ::RenderGraph::Engine::Pipeline::RasterFromD3D11(rasterDesc);
-
-		auto program = RasterProgram::Load(host->Device(), desc);
-		if (!program) {
-			logger::warn("[DCLF] blood splatter: the program for technique {} could not be built; it stays the engine's", a_key.descriptor);
-			state.failedPrograms.push_back(a_key);
-			return nullptr;
-		}
-		logger::info("[DCLF] blood splatter: built the program for technique {} ({})", a_key.descriptor, a_key.descriptor ? "flare" : "splatter");
-		state.programs.push_back({ a_key, program });
-		return program;
+		return GetState().client && FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::EngineDraws);
 	}
 
-	void Submit(std::shared_ptr<Run> a_run)
+	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, Family::ProgramState& a_state)
+	{
+		return GetState().programs.Get(a_key, a_shader, {}, a_state);
+	}
+
+	void Keep(Family::Owners&& a_owners)
+	{
+		GetState().kept.Keep(std::move(a_owners));
+	}
+
+	bool Submit(std::shared_ptr<Run> a_run)
 	{
 		auto& state = GetState();
 		if (!a_run || state.failed || !state.client)
-			return;
+			return false;
 		a_run->revision = RevisionOf(*a_run);
-		const std::uint32_t frame = GameFrame();
-		while (!state.kept.empty() && frame - state.kept.front().first > kKeptFrames)
-			state.kept.pop_front();
-		state.kept.emplace_back(frame, std::move(a_run->owners));
+		state.kept.Keep(std::move(a_run->owners));
 		++state.runs;
 		state.draws += a_run->draws.size();
-		if (!a_run->draws.empty() && !state.drawnLogged) {
-			state.drawnLogged = true;
-			logger::info("[DCLF] blood splatter: the first screen blood batch drawn by the graph ({} draws)", a_run->draws.size());
-		}
 		auto& client = *state.client;
 		std::atomic_store(&client.run, std::shared_ptr<const Run>(std::move(a_run)));
-		client.pending = true;
-		FrameAnchors::Run(FrameAnchors::Anchor::EngineDraws);
-		client.pending = false;
+		return Family::RunWithheld("blood splatter", kClientId, FrameAnchors::Anchor::EngineDraws, client.pending);
 	}
 
 	std::string Status()
@@ -335,6 +270,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			return "off (CS_ORG_BLOOD_SPLATTER)";
 		if (state.failed)
 			return "failed: the engine draws the screen blood";
-		return fmt::format("{} runs, {} draws, {} programs", state.runs, state.draws, state.programs.size());
+		return fmt::format("{} runs ({} drawn), {} draws, {} programs", state.runs, state.client ? state.client->executed.load(std::memory_order_relaxed) : 0,
+			state.draws, state.programs.Built());
 	}
 }
