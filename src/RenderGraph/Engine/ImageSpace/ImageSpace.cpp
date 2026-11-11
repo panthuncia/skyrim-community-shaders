@@ -86,6 +86,8 @@ namespace RenderGraph::Engine::ImageSpace
 			std::uint32_t samplers;            // the source's sampler count (s0..s(n-1)): a read slot below it has its sampler
 			std::uint32_t cubes = 0;           // bit per slot CS binds the reflection cubemap to itself (VanillaBinding.cpp)
 			bool compute = false;              // a compute shader (BSImagespaceShader::DispatchComputeShader): one UAV, CS b0
+			// Drawn outside every scope (ScopeKind::Effect): the effect's own call is its scope, and its batch runs at the call's end.
+			bool ownScope = false;
 		};
 
 		// The engine slots and their names are R4's (engine-d3d11-surface.md); the read masks follow each source's code for the
@@ -124,6 +126,25 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISReflectionsRayTracing, "ISReflectionsRayTracing", "ssr", "ISReflectionsRayTracing.hlsl", 5, 0b11111, 4, 0b10000 },
 			{ Effects::ISReflectionBlurHCS, "ISReflectionBlurHCS", "ssr", "ISBlurCS.hlsl", 2, 0b01, 2, 0, true },
 			{ Effects::ISReflectionBlurVCS, "ISReflectionBlurVCS", "ssr", "ISBlurCS.hlsl", 2, 0b01, 2, 0, true },
+			// The end-of-frame chain's effects (ImageSpaceManager 99023 / 105674): depth of field and the distant blur (t0 the image,
+			// t1 the blurred image, t2 the depth, t3 the average depth unless MASKED, t4 the mask with MASKED), refraction (t1 the
+			// refraction normals) and the radial blur. Each is a scope of its own.
+			{ Effects::ISDepthOfField, "ISDepthOfField", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false, true },
+			{ Effects::ISDepthOfFieldFogged, "ISDepthOfFieldFogged", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false, true },
+			{ Effects::ISDepthOfFieldMaskedFogged, "ISDepthOfFieldMaskedFogged", "dof", "ISDepthOfField.hlsl", 5, 0b10111, 5, 0, false, true },
+			{ Effects::ISDistantBlur, "ISDistantBlur", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false, true },
+			{ Effects::ISDistantBlurFogged, "ISDistantBlurFogged", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false, true },
+			{ Effects::ISDistantBlurMaskedFogged, "ISDistantBlurMaskedFogged", "dof", "ISDepthOfField.hlsl", 5, 0b10111, 5, 0, false, true },
+			{ Effects::ISRefraction, "ISRefraction", "refraction", "ISRefraction.hlsl", 2, 0b11, 2, 0, false, true },
+			{ Effects::ISRadialBlur, "ISRadialBlur", "radialblur", "ISRadialBlur.hlsl", 1, 0b1, 1, 0, false, true },
+			{ Effects::ISRadialBlurMedium, "ISRadialBlurMedium", "radialblur", "ISRadialBlur.hlsl", 1, 0b1, 1, 0, false, true },
+			{ Effects::ISRadialBlurHigh, "ISRadialBlurHigh", "radialblur", "ISRadialBlur.hlsl", 1, 0b1, 1, 0, false, true },
+			// The depth-of-field compute blur (107734 <- 107209 <- 107208, inside 99023): ISBlurCS's depth-of-field build, which reads
+			// the depth at t1 (DEPTH_THRESHOLD). Horizontal, then vertical, each call a scope of its own.
+			{ Effects::ISDepthOfFieldBlurHCS, "ISDepthOfFieldBlurHCS", "dof", "ISBlurCS.hlsl", 2, 0b11, 2, 0, true, true },
+			{ Effects::ISDepthOfFieldBlurVCS, "ISDepthOfFieldBlurVCS", "dof", "ISBlurCS.hlsl", 2, 0b11, 2, 0, true, true },
+			// The snow pass's sub-rectangle copy (107734 <- 107217 <- Main::RenderWorld): t0 to u0, no sampler.
+			{ Effects::ISCopySubRegionCS, "ISCopySubRegionCS", "copy", "ISCopySubRegionCS.hlsl", 1, 0b1, 0, 0, true, true },
 		});
 
 		/**
@@ -209,16 +230,25 @@ namespace RenderGraph::Engine::ImageSpace
 			HDR,          // ImageSpaceEffectHDR::Render (100465 / 107183)
 			SSAO,         // RenderSSAO (100520 / 107245)
 			Reflections,  // the screen-space reflections pass (100428 / 107146)
+			Effect,       // one call of an effect drawn outside every other scope (EffectInfo::ownScope)
+			Count
 		};
 
 		/**
-		 * @brief How many batches a scope may start in a frame. The SAO and reflection passes come early in the frame; one batch each
-		 * keeps two of the anchor's runs a frame (FrameAnchors::RunsPerFrame, 4) for the composites and the HDR effect, which come
-		 * last. A cut SAO or reflection batch leaves the rest of that scope's draws to the engine.
+		 * @brief How many batches each kind of scope may start in a frame: its share of the anchor's runs a frame. Each kind has a
+		 * share of its own, so the scopes early in the frame never use up the runs of the ones after them. The SAO and reflection
+		 * passes and the HDR effect have a second run for a batch cut short by a draw the graph does not take. Effect scopes have
+		 * one run per call: the depth-of-field (or distant blur) draw, its two compute blurs, refraction, the radial blur and the
+		 * snow copy. The anchor is sized for the sum (FrameAnchors.cpp, kInfo); Setup checks it.
 		 */
-		constexpr std::uint32_t BatchesAllowed(ScopeKind a_kind)
+		constexpr std::array<std::uint32_t, static_cast<std::size_t>(ScopeKind::Count)> kScopeRuns{ 1, 2, 2, 2, 6 };
+
+		constexpr std::uint32_t ScopeRunsTotal()
 		{
-			return a_kind == ScopeKind::SSAO || a_kind == ScopeKind::Reflections ? 1u : UINT32_MAX;
+			std::uint32_t total = 0;
+			for (const auto runs : kScopeRuns)
+				total += runs;
+			return total;
 		}
 
 		/** @brief A program's key: the effect, the target's format and the engine blend state (none for a compute program). */
@@ -244,8 +274,7 @@ namespace RenderGraph::Engine::ImageSpace
 			std::set<std::pair<std::int32_t, std::int32_t>> swaps;  // targets that stand in for each other (ping-pong, alternation)
 			std::uint32_t scope = 0;                                // the current scope (ScopeKind)
 			std::uint32_t drawIndex = 0;                            // eligible draws and dispatches so far in the current scope
-			std::uint32_t scopeBatches = 0;                         // batches the current scope started
-			std::uint32_t scopeBatchLimit = UINT32_MAX;             // BatchesAllowed of the current scope
+			std::array<std::uint32_t, kScopeRuns.size()> scopeRuns{};  // batches each kind of scope started this frame
 			std::uint32_t nextEntry = 0;
 			std::uint32_t registrations = 0;
 			std::uint32_t quietFrames = 0;
@@ -955,6 +984,7 @@ namespace RenderGraph::Engine::ImageSpace
 			Flush();
 			state.frame = frame;
 			state.runsThisFrame = 0;
+			state.scopeRuns.fill(0);
 			auto* player = RE::PlayerCharacter::GetSingleton();
 			const void* cell = player ? player->GetParentCell() : nullptr;
 			switch (state.phase) {
@@ -1029,10 +1059,10 @@ namespace RenderGraph::Engine::ImageSpace
 			if (!state.batch.empty() && spec->entry <= state.lastEntry)
 				Flush();
 			// A new batch is a new run: withheld only when the run can draw it now (owner, built graph, ring room), only for the runs a
-			// frame the anchor is sized for, and only as often as the scope may start one (BatchesAllowed).
+			// frame the anchor is sized for, and only as often as its kind of scope may start one this frame (kScopeRuns).
 			if (state.batch.empty()) {
-				if (state.scopeBatches >= state.scopeBatchLimit) {
-					Refuse("its scope already ran its one batch this frame", a_effect);
+				if (state.scopeRuns[state.scope] >= kScopeRuns[state.scope]) {
+					Refuse("its scope used its runs this frame", a_effect);
 					return nullptr;
 				}
 				if (state.runsThisFrame >= FrameAnchors::RunsPerFrame(Anchor::ImageSpace) || !FrameAnchors::CanRun(kClientId, Anchor::ImageSpace)) {
@@ -1048,7 +1078,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			auto& state = IS();
 			if (state.batch.empty())
-				++state.scopeBatches;
+				++state.scopeRuns[state.scope];
 			a_pending.entry = a_spec.entry;
 			state.batch.push_back(a_pending);
 			for (const auto& block : a_blocks)
@@ -1223,8 +1253,8 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief A scope begins (ScopeKind): its draws' passes are ordered by their place in it, and it may start BatchesAllowed batches.
-		 * Nested scopes are part of the outer one.
+		 * @brief A scope begins (ScopeKind): its draws' passes are ordered by their place in it, and its kind may start kScopeRuns
+		 * batches a frame. Nested scopes are part of the outer one.
 		 */
 		void EnterScope(ScopeKind a_scope)
 		{
@@ -1235,8 +1265,6 @@ namespace RenderGraph::Engine::ImageSpace
 			if (state.scopeDepth++ == 0) {
 				state.scope = static_cast<std::uint32_t>(a_scope);
 				state.drawIndex = 0;
-				state.scopeBatches = 0;
-				state.scopeBatchLimit = BatchesAllowed(a_scope);
 			}
 		}
 
@@ -1273,13 +1301,41 @@ namespace RenderGraph::Engine::ImageSpace
 			state.current = previous;
 		}
 
+		/** @brief Whether a_shader is a selected effect drawn outside every scope, whose call is a scope of its own (ScopeKind::Effect). */
+		bool OwnsScope(const RE::BSImagespaceShader* a_shader)
+		{
+			const auto index = EffectOf(a_shader);
+			return index >= 0 && kEffects[static_cast<std::size_t>(index)].ownScope && IS().enabled[static_cast<std::size_t>(index)];
+		}
+
+		/**
+		 * @brief a_call inside the scope the effect needs: the enclosing scope, or one of its own (ScopeKind::Effect) for an own-scope
+		 * effect called outside every scope; false when the effect is not taken there (a_call not run).
+		 */
+		template <class Call>
+		bool InScope(const RE::BSImagespaceShader* a_shader, Call&& a_call)
+		{
+			auto& state = IS();
+			if (state.scopeDepth > 0) {
+				a_call();
+				return true;
+			}
+			if (!OwnsScope(a_shader))
+				return false;
+			EnterScope(ScopeKind::Effect);
+			if (state.scopeDepth == 0)
+				return false;
+			a_call();
+			LeaveScope();
+			return true;
+		}
+
 		/** @brief BSImagespaceShader::Render (100950 / 107732): every raster ImageSpace shader's draw, through DrawTriShape. */
 		struct ShaderRender
 		{
 			static void thunk(void* a_effect, void* a_quad, void* a_param)
 			{
-				auto& state = IS();
-				if (state.scopeDepth == 0 || !a_effect || !Usable()) {
+				if (!a_effect || !Usable()) {
 					func(a_effect, a_quad, a_param);
 					return;
 				}
@@ -1287,7 +1343,11 @@ namespace RenderGraph::Engine::ImageSpace
 				const auto* effect = static_cast<const RE::ImageSpaceEffect*>(a_effect);
 				const auto* shader = static_cast<const RE::BSImagespaceShader*>(effect);
 				const bool covered = EffectOf(shader) >= 0;
-				WithEffect(shader, false, covered ? Ineligible(effect) : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
+				const bool scoped = InScope(shader, [&] {
+					WithEffect(shader, false, covered ? Ineligible(effect) : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
+				});
+				if (!scoped)
+					func(a_effect, a_quad, a_param);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -1319,12 +1379,13 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(RE::BSImagespaceShader* a_shader, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z)
 			{
-				auto& state = IS();
-				if (state.scopeDepth == 0 || !a_shader || !Usable()) {
+				if (!a_shader || !Usable()) {
 					func(a_shader, a_x, a_y, a_z);
 					return;
 				}
-				WithEffect(a_shader, true, IneligibleDispatch(), [&] { func(a_shader, a_x, a_y, a_z); });
+				const bool scoped = InScope(a_shader, [&] { WithEffect(a_shader, true, IneligibleDispatch(), [&] { func(a_shader, a_x, a_y, a_z); }); });
+				if (!scoped)
+					func(a_shader, a_x, a_y, a_z);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -1496,6 +1557,11 @@ namespace RenderGraph::Engine::ImageSpace
 		for (std::size_t i = 0; i < kEffects.size(); ++i)
 			state.fallbacks[i] = std::make_unique<Util::ReasonLog>(fmt::format("[ORG] ImageSpace: {} stays on D3D11", kEffects[i].effectName));
 		state.logShapes = Switches::On("CS_ORG_IMAGESPACE_LOG");
+		if (const auto sized = FrameAnchors::RunsPerFrame(Anchor::ImageSpace); sized < ScopeRunsTotal())
+			logger::warn(
+				"[ORG] ImageSpace: the ImageSpace anchor is sized for {} runs a frame, fewer than the {} its scopes may start; the draws of the "
+				"scopes that come last stay with the engine when the runs are used up",
+				sized, ScopeRunsTotal());
 		state.phase = Phase::Learning;
 		std::string selected;
 		for (std::size_t i = 0; i < kEffects.size(); ++i)
