@@ -147,10 +147,28 @@ the latch lets exactly those through (`Flush.h`):
 (not withheld, not bypassed) whose property is a `BSLightingShaderProperty` (grass included; its depth and shadow passes are
 Utility on the same property), `BSEffectShaderProperty` or `BSDistantTreeShaderProperty`, into a renderer DCLF withholds from:
 the main views and the first person's (`dclf: not claimed (main views)`), the shadow views (`... (shadow views)`), the reflection
-faces (`... (reflection faces)`) and the occlusion maps it draws (`... (occlusion maps)`). Nothing else: the sky, water,
-particles, the shadow mask, ImageSpace, Bink and Scaleform are other ports' to vouch for, at their refusal points, with
-`EngineDraws`. Passes the engine registers through functions DCLF does not hook (the reflection cube's render mode 0x19,
-`FUN_1414b2b90`; `RenderPersistentPassList`'s persistent passes, the cloud layers) are not vouched by DCLF.
+faces (`... (reflection faces)`) and the occlusion maps (`... (occlusion maps)`). Three cases the renderer sets alone missed:
+- **A group renderer made this frame.** The engine makes a geometry group's batch renderer at the group's first pass
+  (`FUN_1414f17f0`), during the registrations, after `RefreshMainRenderers` made the main views' set; it joins the set the next frame
+  (the log's `[DCLF] the main camera's views: N batch renderers` grows). `MainRendererNow` reads the Z-prepass, main and first-person
+  accumulators' groups live when the set does not hold the renderer.
+- **A shadow view DCLF does not cover.** The withholding map holds the covered views only, and nothing before the selection has
+  published. With the latch on, `ShadowViews::AddCaster` also publishes every kept light's renderers (`SetEngineShadowRenderers`),
+  whatever the coverage; `BeginCasters` drops them.
+- **An occlusion map DCLF does not draw** (phase 0, `occlusion map not taken`): every occluder is the engine's, vouched as
+  `... (occlusion maps)`.
+
+The sky's precipitation (a `BSParticleShaderProperty` pass on `Sky::precip`'s current or last geometry) has no port; the same hook
+vouches it as `precipitation: no port`. Nothing else: water, other particles, the shadow mask, ImageSpace, Bink and Scaleform are
+other ports' to vouch for, at their refusal points, with `EngineDraws`. Passes the engine registers through functions DCLF does not
+hook (the reflection cube's render mode 0x19, `FUN_1414b2b90`; `RenderPersistentPassList`'s persistent passes, the cloud layers) are
+not vouched by DCLF.
+
+**Menu views** (`Features/MenuViews/MenuViewsFeature.cpp`): with the latch requested, detours of `UI3DSceneManager::Render` (SE 51855,
+AE 52727) and `LocalMapRenderer::Render` (SE 16094, AE 16335) run each in an `EngineDraws` scope (`menu views: menu 3D left to the
+engine`, `menu views: local map left to the engine`), whatever `CS_ORG_MENU3D` and `CS_ORG_MAP` say: no view takes a menu scene yet
+(p5/menus.md). This covers the loading screen's and the main menu's model (scheme 4, on the serving thread too), with its depth,
+shadow maps and particles.
 
 What the other lanes call, at each place they leave a draw to the engine:
 
@@ -158,7 +176,8 @@ What the other lanes call, at each place they leave a draw to the engine:
 | --- | --- | --- |
 | Engine draw families (`EngineDrawFamily.cpp`) | the `DrawTriShape` detour when no taker takes the draw; a batch handed back | `EngineDraws` around the original `DrawTriShape` / the batch, one reason per family and refusal kind |
 | Sky (P5.3) | the cloud layers while `CS_ORG_SKY_CLOUDS` is off, a refused batch | `EngineDraws` around the engine's batch, or `VouchPass` at the persistent pass list |
-| Water, blood, shadow masks | a refused or handed-back batch | `EngineDraws` around the engine's batch |
+| Water, blood, shadow masks | a refused or handed-back batch; a water view `CS_ORG_WATER_PARTS` leaves out | `EngineDraws` around the engine's batch |
+| Menu views (DCLF) | every menu scene: the menu 3D models (loading screen included) and the local map | `EngineDraws` around `UI3DSceneManager::Render` / `LocalMapRenderer::Render` |
 | ImageSpace (P5.6) | each effect left to the engine (the rows imagespace.md marks Next, the VL dispatches) | `EngineDraws` around `BSImagespaceShader::Render` / the dispatch |
 | Bink, Scaleform, menus 3D | a movie on another thread, an engine `DrawBitmaps` path, the menu scene's own views | `EngineDraws` around the engine's call |
 
@@ -278,7 +297,7 @@ window" is the next.
 | Effect through the particle draw (+0x101) | about 3 settled (Whiterun) | The master particle systems (`MPS*`: chimney smoke, candles, torches): `effect: untracked, eligible` in DCLF's census | Built behind `CS_DCLF_MASTER_PARTICLES=1` (default off, dclf-roadmap.md 1.4: needs the unheld roots diff run before it is the default) |
 | Effect through the skin path (AE 71150: vs `0x44b`, `0x55b`, `0x4a`) | 3 (dog eyes), 7.5-13.7 and 1.2-2.8 in Blackreach | `effect-variant (skinned)`: the Effect port read Skinned from the renderer data's vertex description, which a skinned shape's is not | Fixed on `org-port/w3-dclf` (`GeometryRecord::shapeVertexDesc`, BSGeometry +0x148 as `FUN_1414bde90` reads it). Should be 0 in `p5-all-census-dclf.env` |
 | Effect on a rigid skin (a skin instance, no Skinned bit in the pass) | not seen in this run | `effect-variant (skinned)` | Built behind `CS_DCLF_EFFECT_RIGID_SKINS=1` (default off until its shots are checked) |
-| Particle (`BSParticleShader`, vs `0x4`) through the grouped alphas | about 10 settled (Blackreach) | Precipitation (Blackreach's spores): not a DCLF class | Blocked: no precipitation port (dclf-roadmap.md 1.5; DCLF draws only the precipitation occlusion mask) |
+| Particle (`BSParticleShader`, vs `0x4`) through the grouped alphas | about 10 settled (Blackreach) | Precipitation (Blackreach's spores): not a DCLF class | No precipitation port (dclf-roadmap.md 1.5; DCLF draws only the precipitation occlusion mask). Vouched under the latch as `precipitation: no port` |
 | Skinned Utility depth and sun shadows (vs `0x2004`, `0xc004`) through AE 70776 | 3-4 in the map and journal windows | The player's first-person parts (`lighting: hidden` in main depth and a shadow view): DCLF's verdict is Hidden, the engine still draws them there | Blocked: why the engine draws hidden first-person parts into main depth and the sun's shadows behind a menu is not read (RenderDepth's first-person block; Features/FirstPerson covers its own accumulator only) |
 | Utility into `kSHADOW_MASK` (AE 107141 +0x1C4/+0x346: the world's; 52728 +0x1E5: a menu scene's, the inventory's 1.7) | 1-2.5 settled, 1.7 in the inventory | Not DCLF's: each shadow-casting light's pass over the screen quad | Built behind `CS_ORG_SHADOW_MASK=1` (p5/shadow-mask.md; `org-port/w3-misc`). Should be 0 in `p5-all-census-misc.env` and `shadow-mask-org1.env` |
 | Water (vs `0x4904`, `0x31e`, `0x4906`) into `kRAW_WATER` and `kMAIN` (DS `kMAIN`, through 107637 +0x1A2 and +0x4CE) | 3-8 | The water family's surface view refused every batch: a material slot held a published engine target (the refraction copy, the SSR targets, which the ImageSpace port's reads publish). Later the mask view too: its published inputs changed after its client registered | Fixed on `org-port/w3-misc` (p5/water.md, "Published material slots"): the slot is read by its id, declared by the client. Should be 0 in `p5-all-census-misc.env` and `water-org1-imagespace.env`. It was not (the inputs changed after the clients registered); `org-port/fix-family-inputs` fixes the inputs at registration (p5/water.md, "Published inputs") |
@@ -290,6 +309,31 @@ Scenarios (`tools/cs-ab/scenarios/`): `p5-all-census-dclf.env` (both censuses, `
 through AE 71150 and the census class `effect: effect-variant (skinned)`; `-take.env` should also lose the settled windows'
 particle `Effect` draws and `effect: untracked, eligible` for `MPS*` systems, with screenshots matching. Nothing here registers a
 graph client, so nothing in it can trigger a graph rebuild.
+
+## The latch census of 2026-11-11 (`1111-153615-p35-latch-census-fix2`)
+
+`latch-census.env`: shots matched the latch-off run and settled windows skipped nothing, but the load windows skipped 100-5000 draws.
+The eight `[E] ... nobody vouched for it` sites, read against the log's timing (the loading screen's start and end, the main views'
+renderer count, `occlusion map not taken`), and what vouches each now (branch `org-port/dclf-vouch`):
+
+| Site | What it was | Fix |
+| --- | --- | --- |
+| DrawTriShape via 107637 +0x1A2 <- RenderBatches (107642 +0x294): Lighting vs `0x201`/`0x200`, Utility depth vs `0x2000` and shadow vs `0x1401b`/`0x1401a`, the same count each (5.23, then 1.50 a frame) | The loading screen's model (`menu 3D scheme 4 (loading)`, 3 geometries, 1 Lighting): 1.50 a frame is one draw a frame of a 7.6 s loading screen; 0 in every window without one | Menu views' `UI3DSceneManager::Render` scope |
+| The same <- grouped alphas (107673 +0x1F3): Effect vs `0x43` | The loading model's effect part | The same |
+| DrawDynamicTriShape (DrawData copy) via +0x101: Effect vs `0x10c7` | The loading model's particles (first seen on the serving thread) | The same |
+| DrawTriShape <- grouped alphas: Particle vs `0x4` | Blackreach's precipitation (spores) | `precipitation: no port` at the registration hook |
+| DrawDynamicTriShape 77276 and DrawTriShape <- the skin path (71150, 70776 <- 107644 +0x1DF) | Skinned objects in frames whose registrations made a new main-view group renderer: the first world frame after the load (3 renderers, then 11) and the frame before the count went from 11 to 12 | `MainRendererNow` |
+| DrawInstancedTriShape via +0x650 (Grass Optimizations' `DrawVanilla`, last technique `RunGrass`) | Grass in those frames, colour and depth | The same |
+| DrawTriShape via +0x4CE (segmented geometry), Utility into `kPRECIPITATION_OCCLUSION_MAP` | The occlusion map DCLF did not take after `coc` (`occlusion map not taken`): `KeepForEngine` ran only with a phase. Not water | Occluders vouched at phase 0 too |
+
+Not seen in this run but closed the same way: uncovered shadow views (`SetEngineShadowRenderers`), the local map, a water view left
+out by `CS_ORG_WATER_PARTS`. Still open: the first-person parts drawn into main depth and the sun's shadows behind a menu (DCLF's
+share, above; this run's map and journal windows skipped nothing); passes registered through `FUN_1414b2810`'s layer insertion or
+`FUN_1414b2b90` (mode 0x19) into a group renderer no set holds.
+
+Reasons added: `menu views: menu 3D left to the engine`, `menu views: local map left to the engine`, `precipitation: no port` (22 of
+31). To check: `latch-census.env` logs `0 engine draws and dispatches skipped` in every window and no `[E] [ORG] flush latch: engine`
+line; the shots match `latch-census-off.env`. Nothing here registers a graph client, so nothing triggers a graph rebuild.
 
 ## What is left
 
