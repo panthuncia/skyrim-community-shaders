@@ -87,8 +87,9 @@ namespace FrameAnchors
 			// then the pre-tonemap composites' and the HDR effect's, and a batch cut short by a draw the graph does not take). The frame
 			// slot budget has no room for a fifth. Late: the TAA or the upscaler can follow a batch inside the chain.
 			{ "ImageSpace", { "CS anchor: image space", "CS anchor: image space inputs", "FrameAnchors::ImageSpace / ", "cs.anchor.image-space" }, true, 4 },
-			// Runs a frame: the water mask, the water and the screen blood
-			{ "EngineDraws", { "CS anchor: engine draws", "CS anchor: engine draws inputs", "FrameAnchors::EngineDraws / ", "cs.anchor.engine-draws" }, true, 3 },
+			// Runs a frame: the world's shadow masks, the water mask, the water, a menu scene's shadow masks and the screen blood. Five
+			// fit the frame slot budget of 512 (org-port/w3-slots), not the 255 before it
+			{ "EngineDraws", { "CS anchor: engine draws", "CS anchor: engine draws inputs", "FrameAnchors::EngineDraws / ", "cs.anchor.engine-draws" }, true, 5 },
 		} };
 
 		// Where each segment runs in a frame: AddToFrame puts an anchor before the first epoch of the order that runs after it. A
@@ -115,7 +116,7 @@ namespace FrameAnchors
 			Segment::AnchorDeferredPasses,     // EndDeferred, after the blended decals
 			Segment::AnchorDeferredComposite,  // DeferredPasses, after the D3D11 SSGI and SSS
 			Segment::AnchorPostComposite,      // DeferredPasses' end, after the composite
-			Segment::AnchorEngineDraws,        // the water, before the forward epoch (nominally here: the water mask runs before, the blood after)
+			Segment::AnchorEngineDraws,        // the water, before the forward epoch (nominally here: the shadow masks and the water mask run before, the blood after)
 			Segment::Forward,
 			Segment::FirstPerson,
 			Segment::AnchorPostProcessing,   // Main_PostProcessing, before the upscaler
