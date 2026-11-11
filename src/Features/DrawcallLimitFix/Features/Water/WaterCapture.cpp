@@ -324,7 +324,14 @@ namespace DCLF::Features::Water
 			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
 			{
 				auto& capture = GetCapture();
-				if (capture.active || !TakesView(kView)) {
+				// A batch inside a latched one: its draws reach TakeDraw as the outer batch's.
+				if (capture.active) {
+					func(a_accumulator, a_first, a_last, a_flags, a_group);
+					return;
+				}
+				// A view CS_ORG_WATER_PARTS leaves out: the engine's on purpose.
+				if (!TakesView(kView)) {
+					Family::Flush::EngineDraws scope(EngineReason());
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}

@@ -298,6 +298,10 @@ namespace DCLF
 		bool CoverFrom(std::size_t a_first);
 		/** @brief The covered views' renderers to PassCapture (the registration hook's withholding), whole. */
 		void PublishRenderers();
+		/** @brief With the flush latch on: a_light's renderers added to the engine's shadow renderers and published (AddCaster). */
+		void NoteEngineLight(const RE::BSShadowLight& a_light);
+		using EngineRenderers = ankerl::unordered_dense::set<const RE::BSBatchRenderer*>;
+		EngineRenderers engineRenderers;  // every kept light's this frame (NoteEngineLight), DCLF's or not
 		ankerl::unordered_dense::map<const RE::BSBatchRenderer*, std::uint32_t> batchToView;
 		ankerl::unordered_dense::map<const void*, std::uint32_t> accumulatorToView;
 		bool valid = false;
