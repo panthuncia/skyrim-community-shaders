@@ -80,6 +80,9 @@ namespace DCLF::Scene
 		for (auto& owner : materialOwners)
 			ReleaseMaterial(std::move(owner));
 		materialOwners.clear();
+		for (std::uint32_t slot = 0; slot < materialViewPins.size(); ++slot)
+			ReleaseMaterialViews(slot);
+		materialViewPins.clear();
 		bindQueue.clear();
 		membershipWitness = ~0u;
 		materialMember.clear();
@@ -171,11 +174,54 @@ namespace DCLF::Scene
 		UnlistMaterialDependent(key.first, a_slot);
 		// Released at Present (the last reference deletes the engine's material), once no publication names the slot.
 		ReleaseMaterial(std::move(materialOwners[a_slot]));
+		ReleaseMaterialViews(a_slot);
 		tables.materialSlotKey[a_slot] = { nullptr, 0u };
 		// Logged: what follows the material log (the texture-transform list) drops the slot's entries.
 		tables.NoteMaterial(a_slot);
 		tables.UnmarkMaterial(a_slot);
 		tables.Retire(Tables::kRetiredMaterialLookup, a_slot);
+	}
+
+	void Coordinator::PinMaterialViews(std::uint32_t a_slot)
+	{
+		if (a_slot >= tables.materials.size())
+			return;
+		const auto& record = tables.materials[a_slot];
+		// Every view the record names, in record order (the null descriptor's slots name none).
+		std::vector<ID3D11ShaderResourceView*> named;
+		named.reserve(record.textures.size() + record.featureTextures.size());
+		for (auto* view : record.textures)
+			if (view)
+				named.push_back(view);
+		for (auto* view : record.featureTextures)
+			if (view)
+				named.push_back(view);
+		if (materialViewPins.size() <= a_slot)
+			materialViewPins.resize(std::size_t(a_slot) + 1);
+		auto& pins = materialViewPins[a_slot];
+		// The same views (a rewrite that moved only constants): the references held already.
+		if (pins && std::equal(named.begin(), named.end(), pins->views.begin(), pins->views.end(),
+						[](ID3D11ShaderResourceView* a_view, const winrt::com_ptr<ID3D11ShaderResourceView>& a_pin) { return a_view == a_pin.get(); }))
+			return;
+		if (!pins && named.empty())
+			return;
+		auto next = named.empty() ? nullptr : std::make_shared<MaterialViewPins>();
+		if (next) {
+			next->views.resize(named.size());
+			for (std::size_t i = 0; i < named.size(); ++i)
+				next->views[i].copy_from(named[i]);
+		}
+		// Taken before the old ones go: a view in both is never released in between.
+		ReleaseMaterialViews(a_slot);
+		pins = std::move(next);
+	}
+
+	void Coordinator::ReleaseMaterialViews(std::uint32_t a_slot)
+	{
+		if (a_slot >= materialViewPins.size() || !materialViewPins[a_slot])
+			return;
+		retirement.Open().owners.push_back(std::move(materialViewPins[a_slot]));
+		materialViewPins[a_slot] = nullptr;
 	}
 
 	void Coordinator::UpdateSlotReferences()

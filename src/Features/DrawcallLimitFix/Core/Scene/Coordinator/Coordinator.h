@@ -580,6 +580,22 @@ namespace DCLF
 			if (a_material)
 				retirement.Open().owners.push_back(std::make_shared<MaterialReference>(std::move(a_material)));
 		}
+		/**
+		 * @brief A reference on each view a material slot's record names. The record's views are raw pointers read from the engine's
+		 * textures, and the engine releases a texture on any thread (loader threads, ClearTextures on a cell's unload). The held capture
+		 * the record was made from pins them only until a newer capture replaces it or it ages out, while the record can stay longer (a
+		 * rewrite the port cannot evaluate keeps it). The slot holds its own references for as long as its record names the views.
+		 */
+		struct MaterialViewPins
+		{
+			std::vector<winrt::com_ptr<ID3D11ShaderResourceView>> views;
+		};
+		// Per material slot: the views its record names (PinMaterialViews), retired through the chain with the slot's other references.
+		std::vector<std::shared_ptr<MaterialViewPins>> materialViewPins;
+		/** @brief After a_slot's record was stored (its views alive: its capture holds them): references on its views, the old ones retired. */
+		void PinMaterialViews(std::uint32_t a_slot);
+		/** @brief a_slot's view references, retired through the chain (a publication may still name the record). */
+		void ReleaseMaterialViews(std::uint32_t a_slot);
 		struct RetirementStats
 		{
 			std::uint64_t retired = 0, recycled = 0, dropped = 0, batches = 0;

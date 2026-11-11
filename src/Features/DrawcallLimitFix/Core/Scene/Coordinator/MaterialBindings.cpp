@@ -299,8 +299,8 @@ namespace DCLF::Scene
 			}
 			mb.cache.erase(it);
 		}
-		// Asked once per view in flight: the record holds the view, alive (its material's slot holds the material, which holds its
-		// textures), and the request takes its own reference on it at once.
+		// Asked once per view in flight: the slot holds a reference on each view its record names (PinMaterialViews; the material the
+		// slot holds does not keep its textures' views alive), and the request takes its own reference on it at once.
 		auto [waiters, asked] = mb.inFlight.try_emplace(a_view);
 		if (asked) {
 			GpuTextures::Get().Request(a_view, a_sourceTag, mb.replies, mb.cookie);

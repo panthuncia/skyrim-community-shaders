@@ -577,6 +577,7 @@ namespace DCLF::Scene
 				EngineReleases::PushOwner(std::make_shared<MaterialReference>(std::move(materialOwners[slot])));
 			materialOwners[slot].reset(const_cast<RE::BSShaderMaterial*>(material));
 			tables.materials[slot] = record;
+			PinMaterialViews(slot);
 			tables.materialVersion[slot] = ++materialVersions;
 			tables.NoteMaterial(slot);
 			tables.materialSlotKey[slot] = std::pair{ material, descriptors.pass };

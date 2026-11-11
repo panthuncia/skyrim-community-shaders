@@ -1585,3 +1585,17 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   a completion signal per frame or per submission (ORG's frame fences, or a callback after the epoch that used the
   resource retires).
 - **Found by:** P4.1 (2026-11-09).
+
+### Holding engine texture views across threads
+
+- **Need:** keep using a texture view read from an engine object (a material's NiSourceTexture, its renderer texture's
+  SRV) after the read, on another thread or in a later frame.
+- **Who:** DCLF's scene work, whose material records name the views of the textures their capture read; any plugin that
+  caches engine SRVs by pointer.
+- **Where it fits:** the engine releases textures on any thread, without a lock (loader threads, `ClearTextures` when a
+  cell unloads; R6.1, R6.6), and an object that holds the material does not keep its textures' views alive. A raw view
+  pointer is valid only while the reader holds its own reference: take it at the read, where the engine provably holds
+  the texture, and keep it for as long as the pointer is stored (DCLF: `HeldSnapshot::views` at capture,
+  `Coordinator::PinMaterialViews` per material slot). In tripwire guest mode the reference keeps the handle alive too.
+  An API should hand out referenced views (or a stable texture identity), never bare pointers.
+- **Found by:** the SRV lifetime fix (2026-11-11), a crash in `GpuTextures::Request` from `UpdateMaterialBindings`.
