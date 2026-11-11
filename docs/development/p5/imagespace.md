@@ -69,15 +69,15 @@ mechanism below unless the row says otherwise.
 | VL apply (103) and the VL CS blur (106/107 via +0x188) | RenderWorldPostProcess (100430) | depth, shadow maps | `kVOLUMETRIC_LIGHTING_*` | Next. 106/107 and CS's own `ISVolumetricLightingGenerateCS` / `RaymarchCS` / `BlurHCS` / `BlurVCS` are compute: `DispatchCSShader` (75532 / 77329) with CS's replacement chosen in `CSShadersSupport::Renderer_DispatchCSShader` (Hooks.cpp). The compute form of this mechanism latches the dispatch there: CS b0 from the capture (`Find(Current(), Compute, 0)` after `OnDispatch`), the CS SRVs/UAVs from the shadow state's CS slots, group counts into a gate entry (`OpenDispatch`). |
 | SSAO (SAO 132-145, `RenderSSAO` 100520 / 107245; compute set 134/135/137/145 via 100526) | RenderWorld | depth, normals, motion vectors, last frame's AO | SAO targets, then composite into kMAIN | **Built** but the composite (wave 3): CameraZ, Minify, MinifyContrast, RawAO, RawAONoTemporal, BlurH, BlurV through the explicit-target Render. The composites 138-140 stay D3D11: CS binds fog, IBL and other feature inputs to them that the engine's texture list does not name. The compute set is not used by a vanilla frame (the census saw none) and is not taken. |
 | Reflections (130 ray march, 120 mask downsample, 108/109 the compute blur) | the reflection pass 100428 / 107146 | normals mask, colour, depth, alpha, the reflection cubemap (CS, t4) | `kSSR_RAW`, the blurred pair | **Built** (wave 3): the downsample and the ray march through the explicit-target Render, the blur H/V through the compute form. The compute downsample (122) is taken by the same form when the game picks it. |
-| DOF (3: 58, 11 or the CS blur 112/113, 45-47) | 99023 slot 3 | downsample, swap, depth, underwater mask | the chain's target | Next: raster children through this mechanism; it runs only with DOF on (gated, no rebuild) |
-| Radial blur (5: 52-54), full-screen blur (6), get hit (7: 34, 10, 40) | 99023 slots 5-7 | | | Next: same mechanism; menu blur is FullScreenBlur (the journal) |
-| Refraction (1: 39) | 99023 slot 1 | src, `kREFRACTION_NORMALS` | the chain's target | Next |
+| DOF (3: 58, 11 or the CS blur 112/113, 45-47) and the distant blur (49-51) | 99023 slot 3 | downsample, swap, depth, underwater mask | the chain's target | **Built** (w3-slots): ISDepthOfField*/ISDistantBlur* and the compute blur 112/113 (ISBlurCS's DOF build), each call a scope of its own. The downsample (58) and the raster blur (11) are Next. |
+| Radial blur (5: 52-54), full-screen blur (6), get hit (7: 34, 10, 40) | 99023 slots 5-7 | | | Radial blur **built** (w3-slots, its own scope); the rest Next: same mechanism; menu blur is FullScreenBlur (the journal) |
+| Refraction (1: 39) | 99023 slot 1 | src, `kREFRACTION_NORMALS` | the chain's target | **Built** (w3-slots, its own scope) |
 | FXAA (2) | 99023 slot 2 | | | Next (transcribed source; with the game's FXAA setting only) |
 | World map (0: 43/44), Map (8: 42) | 99023 slot 0, the map menu | | | Next; the map camera is p5-menus'. ISMap's vanilla VS has no SV_Position (imagespace-shaders.md): decide whether the pass draws |
 | Local map (98) | 16094 | `kLOCAL_MAP_SWAP` | `kLOCAL_MAP` | Next: one draw, src to dst, outside the end-of-frame chain: a scope detour on 16094 and the same mechanism |
 | Water displacement (31: 86-94) | 31385, the water system | its own simulation targets | `kWATER_DISPLACEMENT*` | **p5-water's** (P5.4): the water family owns its simulation. The mechanism here is reusable: a scope on 31385 with the 86-94 sources dual-target. |
 | Water blend (155), underwater mask (156) | +0x200, +0x208 | | | Next (155 is active CS HLSL) |
-| Snow SSS (150), CopySubRegionCS (117) | RenderWorld | | | Next; 117 is compute |
+| Snow SSS (150), CopySubRegionCS (117) | RenderWorld | | | 117 **built** (w3-slots: the compute form, its own scope); 150 Next |
 | TAA (151-153) | +0x1f0 | | | Upscaling's (its TAA replacement); stays |
 | Dynamic-resolution upsample (154) | +0x1f8 | | | Next, with dynamic resolution (refused today) |
 | Noise (33), reflections (102, 108-109, 130-131), parallax mask blur (110-111), lighting composite (125-127), Perlin noise (128-129), debug (118, 149), simple colour (148), TAA UI/water | various | | | Next; 148 (menu 3D's clear) is p5-menus' boundary |
@@ -99,8 +99,8 @@ mechanism below unless the row says otherwise.
 
 ## How the built part works
 
-**Scopes.** Draws are taken only inside two scopes, detoured at their function starts: the HDR effect's Render and
-RenderPreTonemapComposites. Inside a scope, `BSImagespaceShader::Render` records which shader is drawing; an effect is eligible
+**Scopes.** Draws are taken only inside scopes, detoured at their function starts: the HDR effect's Render and
+RenderPreTonemapComposites, RenderSSAO and the reflection pass (below), and the own-scope effects (below). Inside a scope, `BSImagespaceShader::Render` records which shader is drawing; an effect is eligible
 when it is selected and the capture is active, and it has no custom viewport, no manager rectangle and no dynamic-resolution
 quad. The three reads are CommonLib's fields, checked in Ghidra on SE and AE: `ImageSpaceEffect::unk88` (Render skips
 `UpdateViewPort` when it is set), the manager's `rect` (Render applies it when `left` and `right` are not -1, the engine's own
@@ -142,11 +142,25 @@ it (`Capture(StageBit(Compute))`, `Find(use, Compute, 0)`), and the group counts
 pass is an `AnchorPasses::Dispatch` through the gate, with the CS source built by `ProgramCache<ComputeProgram>` from
 `GetCompileDefines(shader, Compute, 0)`. The separable blur helper (107209/107210) sizes the groups from the target and GRIDSIZE.
 
-**Runs a frame.** The anchor has four (`FrameAnchors.cpp`), and the frame slot budget (252 of 255 with every switch on) has no room
-for a fifth. RenderSSAO and the reflection pass come first in the frame and may start one batch each (`BatchesAllowed`): a batch cut
-there leaves the rest of that scope to the engine, so the composites and the HDR effect, which come last, keep two runs. Each scope's
+**Runs a frame.** Each kind of scope has its own share of the anchor's runs a frame (`kScopeRuns` in `ImageSpace.cpp`): the
+composites 1, the HDR effect 2, RenderSSAO 2, the reflection pass 2, and the own-scope effects 6 (one per call). The anchor is sized
+for the sum, 13 (`FrameAnchors.cpp`); Setup warns when it is sized for fewer. A share of its own per kind means the scopes early in
+the frame never use up the runs of the ones after them; the second run of SSAO, the reflections and HDR covers a batch cut short by
+a draw the graph does not take. A draw whose scope used its share is refused (`its scope used its runs this frame`). Each scope's
 batch still runs at the scope's end: CS code around these calls uses D3D11 and runs other anchors (the Tonemap anchor in
-`Main_HDRTonemapBlendCinematic_Render`, Upscaling's and HDR Display's hooks around the end-of-frame chain).
+`Main_HDRTonemapBlendCinematic_Render`, Upscaling's and HDR Display's hooks around the end-of-frame chain). The frame slots this
+costs: 13 runs times 4 frames in flight, 52 slots, within CS's budget of 512 (288 with every switch on; render-graph.md, "The slot
+budget"). Before `org-port/frame-slots` ORG's slot index was 8-bit, the budget 255, and this anchor had 4 runs.
+
+**Own-scope effects (w3-slots).** The end-of-frame chain's effects (99023: depth of field and the distant blur, refraction, the
+radial blur), the depth-of-field compute blur (107734 <- 107209 <- 107208) and the snow pass's ISCopySubRegionCS (107734 <- 107217
+<- RenderWorld) are drawn outside every other scope. Each is flagged `ownScope` in `kEffects`: a call of its `BSImagespaceShader::
+Render` or `DispatchComputeShader` outside a scope is a scope of its own (`ScopeKind::Effect`), entered and left around the call, so
+its batch runs at the call's end, before whatever the engine or CS does next. No new hook: the two effect hooks open the scope.
+Called inside another scope, such an effect is part of that scope as any other. The sources are dual-target (ISDepthOfField,
+ISRefraction, ISRadialBlur, ISCopySubRegionCS; ISBlurCS's DOF build already was). The copy tests its store against the output's
+size on ORG. Read masks: the depth of field reads t0-t3 (t4, the mask, instead of t3 with MASKED); an input that is not an engine
+target (an unbound average-depth slot, for example) keeps that effect with the engine.
 
 **Passes.** One `AnchorPasses::Draw` per shape: the effect's RasterProgram (its CS source, the D3D11 build's defines from
 `ShaderCache::GetCompileDefines`, the target's format, the engine blend state as an rhi blend), the output and inputs as
@@ -194,9 +208,12 @@ Covered effect names: ISHDRDownSample16, ISHDRDownSample4, ISHDRDownSample16Lum,
 ISHDRDownSample4LumClamp, ISHDRDownSample16LumClamp, ISHDRDownSample4LightAdapt, ISHDRDownSample16LightAdapt (hdr);
 ISBrightPassBlur3 to ISBrightPassBlur15 (bloom); ISCompositeVolumetricLighting, ISCompositeLensFlare,
 ISCompositeLensFlareVolumetricLighting (composite); ISSAOCameraZ, ISMinify, ISMinifyContrast, ISSAORawAO, ISSAORawAONoTemporal,
-ISSAOBlurH, ISSAOBlurV (sao); ISDownsampleIgnoreBrightest, ISReflectionsRayTracing, ISReflectionBlurHCS, ISReflectionBlurVCS (ssr).
+ISSAOBlurH, ISSAOBlurV (sao); ISDownsampleIgnoreBrightest, ISReflectionsRayTracing, ISReflectionBlurHCS, ISReflectionBlurVCS (ssr);
+ISDepthOfField, ISDepthOfFieldFogged, ISDepthOfFieldMaskedFogged, ISDistantBlur, ISDistantBlurFogged, ISDistantBlurMaskedFogged,
+ISDepthOfFieldBlurHCS, ISDepthOfFieldBlurVCS (dof); ISRefraction (refraction); ISRadialBlur, ISRadialBlurMedium, ISRadialBlurHigh
+(radialblur); ISCopySubRegionCS (copy).
 
-New refusal reasons (wave 3): `its scope already ran its one batch this frame`, `a geometry other than the full-screen quad`,
+New refusal reasons (wave 3): `its scope used its runs this frame`, `a geometry other than the full-screen quad`,
 `its UAV is not an engine render target's`, `more than one UAV`, `no captured compute constants`, `an input that is not an engine
 target`.
 
@@ -225,31 +242,45 @@ technique, the target), with what wave 3 does about each:
 
 | Class | Per frame | Now |
 | --- | --- | --- |
-| 107733 <- RenderSSAO: ISSAOCameraZ, ISMinify x10, ISMinifyContrast, ISSAORawAO(NoTemporal), ISSAOBlurH/V | 14-15 | Graph (one batch) |
+| 107733 <- RenderSSAO: ISSAOCameraZ, ISMinify x10, ISMinifyContrast, ISSAORawAO(NoTemporal), ISSAOBlurH/V | 14-15 | Graph (one batch; a second if one is cut) |
 | 107733 <- RenderSSAO: ISSAOCompositeFog / SAO / SAOFog into kMAIN | 1 | D3D11: CS's feature inputs |
 | 107733 <- the reflection pass: ISDownsampleIgnoreBrightest, ISReflectionsRayTracing | 2 | Graph (one batch with the blur) |
 | 107734 <- 107209/107210 <- 107207: the reflection blur H/V | 2 | Graph (compute form) |
 | 107732 <- HDR Render: downsample, luminance, adaptation, bloom | 7 where refused | Graph as before; two runs kept for it |
 | 107732 <- HDR Render: the tonemap into kFRAMEBUFFER | 1 | D3D11: CS's tonemap owners |
-| 107733 ISWaterBlend into kMAIN (two targets; CS clears the second with D3D11 first) | 1 | D3D11 |
-| 107732 <- 99023: ISDistantBlur, ISRefraction, ISRadialBlur | 1-2 | D3D11: no run left (below) |
-| 107734 <- 107209 <- 107208: the DOF / distant blur compute | 1 | D3D11: in 99023, no run left |
-| 107734 <- 107217 <- RenderWorld: ISCopySubRegionCS (snow) | 1 | D3D11: no run left |
+| 107733 ISWaterBlend into kMAIN (two targets; CS clears the second with D3D11 first) | 1 | D3D11 (below) |
+| 107732 <- 99023: ISDistantBlur, ISRefraction, ISRadialBlur | 1-2 | Graph (w3-slots: own scopes) |
+| 107734 <- 107209 <- 107208: the DOF / distant blur compute | 1 | Graph (w3-slots: own scope, the compute form) |
+| 107734 <- 107217 <- RenderWorld: ISCopySubRegionCS (snow) | 1 | Graph (w3-slots: own scope, the compute form) |
 | 107023 <- Main::Draw: the volumetric lighting compute (VolumetricLighting's CS) | 2-3 | D3D11 (below) |
 
 So with `CS_ORG_IMAGESPACE=1` the census classes that should drop to zero are: the `ImageSpace` draws in DrawTriShape whose frames
 are `107637 <- 107644 <- 107733` and whose target is a `kSAO_CAMERAZ_MIP_LEVEL_*`, `kSAO_RAWAO*`, `kSAO_TEMP_BLUR`, `kSAO`,
 `kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED` or `kSSR_RAW` target, and the dispatches `77329 <- 107734 <- 107209/107210 <- 107207`. The
-HDR classes (107732 into `kHDR_*`) stay at zero once the client is live. Scenarios: `imagespace-census.env` (and
+HDR classes (107732 into `kHDR_*`) stay at zero once the client is live. Since w3-slots these drop too: the draws
+`107637 <- 107644 <- 107732 <- 99023` (the distant blur or depth of field, refraction, the radial blur) and the dispatches
+`77329 <- 107734 <- 107209 <- 107208` (the depth-of-field blur) and `77329 <- 107734 <- 107217` (ISCopySubRegionCS). An effect
+whose shape is refused stays (its reason is logged once). Scenarios: `imagespace-census.env` (and
 `imagespace-census-org0.env` for the same tour with the port off), `imagespace-sao-ssr-org0.env`/`-org1.env` for the shots.
 
 ## What is left
 
-The run budget first: the end-of-frame effects, the DOF compute blur, CopySubRegion and the VL compute each need a run of their own
-(CS code or other anchors run between them and the batches before), and the anchor has none left (org-extension-api-notes.md, "More
-runs of one anchor than the frame slot budget holds"). The compute form is generic: each needs only its scope, a table entry and its
-source's ORG block (ISCopySubRegionCS, ISBlurCS's DOF build). The volumetric lighting compute also needs the VolumetricLighting
-feature's own shaders and constants (`GetOrCreateGenerateCS`, `SetDimensionsCB`), which are not the engine's; the SAO composite needs
-the inputs CS binds to it. Then everything marked Next above: the tonemap when no CS feature owns it, the rest of 99023's slots (DOF, radial and full-screen blur, get hit, refraction, FXAA, world map), the
+The run budget is no longer the limit (w3-slots: ORG's slot index is 32-bit, CS's budget 512, this anchor 13 runs). What stays
+D3D11 from the residue, and why:
+
+- **The SAO composite** (ISSAOCompositeSAO/Fog/SAOFog into kMAIN). Its source includes `IBL/IBL.hlsli` and
+  `ExponentialHeightFog/ExponentialHeightFog.hlsli` with the IBL and EHF features' own register bindings (and s9), and reads
+  `SharedData` feature settings. Taking it means a dual-target form of those two feature headers, which the Lighting shaders
+  share, and binding IBL's and EHF's graph outputs (both are ORG ports) by name. That is a change to two other features'
+  shader interfaces, not to this mechanism: left for their owners or a later wave.
+- **WaterBlend** (ISWaterBlend into kMAIN and the water history). It writes two render targets (SV_Target0 and SV_Target1).
+  `ReadShape` takes one target and `AnchorPasses::Draw` has one `target`; a second attachment there is the missing piece. The
+  D3D11 clear CS makes of the second target first is not a blocker: it is earlier in DXVK's stream than the batch's run.
+- **The volumetric lighting compute.** It runs the VolumetricLighting feature's own compute shaders and constants
+  (`GetOrCreateGenerateCS`, `SetDimensionsCB`, chosen in `CSShadersSupport::Renderer_DispatchCSShader`), not the engine's. It is
+  an ORG port of that feature's compute in the Phase 3 style (`src/Features/VolumetricLighting/ORGVolumetricLighting.*`, its
+  four sources dual-target), which this lane did not reach.
+
+Then everything marked Next above: the tonemap when no CS feature owns it, the rest of 99023's slots (DOF, radial and full-screen blur, get hit, refraction, FXAA, world map), the
 pre-tonemap SIL and IB lens flares, SSAO, the local map, the copies, and the dynamic-resolution path. Then the engine's draw can
 be withheld without the D3D11 bind (P5.13).
