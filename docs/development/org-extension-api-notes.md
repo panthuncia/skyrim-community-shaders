@@ -1509,3 +1509,18 @@ From P5.8/P5.9 (`docs/development/p5/menus.md`). Two needs a menu scene's view b
   and the 255-slot limit (an 8-bit slot index) is what forces CS to drop anchors at startup when every port is on
   (`FrameAnchors::FitSlotBudget`). A wider slot index, or rings sized per epoch outside the shared slot space, would lift it.
 - **Found by:** the Phase 5 review (2026-11-11).
+
+### A copy between draws of one pass, and reading an image another epoch wrote by heap index (the sky's cloud layers)
+
+- **Need:** Cloud Shadows' per-layer occlusion copies the layer below into a layer just before that layer's draw. On the graph the
+  draws of a face are one pass, so the copy (one subresource of another imported image, written earlier in the same pass) has no
+  place: a pass cannot declare an image both as a render target and as a read, and has no in-pass copy with barriers.
+- **Workaround (CS side, p5/sky.md, "Cloud Shadows' layers"):** each cloud draw also draws its occlusion into the face's later layers
+  (the face target write-masked), and the layer is cleared on D3D11 at the latch, before the anchor's run. n(n-1)/2 extra draws a
+  face for n layers. The main pass's clouds then read their layer by heap index (GpuTextures), relying on the faces' epoch having
+  returned the import to DXVK's layout at its end.
+- **Where it fits in ORG:** a pass-local copy or blit between subresources of declared resources (`PassRecordContext::CopyTexture`
+  with the graph's barriers), or subresource-granular declarations (a pass reading mip/slice A while writing B of one image). Also an
+  explicit "imported image read by index after a graph write" declaration, so the reading epoch orders after the writing one
+  without a declared view.
+- **Found by:** the families' review fix (2026-11-11).

@@ -84,19 +84,28 @@ than the EngineDraws epoch, and the water's draws read kWATER_DISPLACEMENT at t2
 
 ## The family
 
+The pieces every engine draw family shares are `Core/Engine/Family` (render-graph.md, "Shared helpers for engine families"): the
+DrawTriShape taker, the SetupGeometry watch, the pass count, the geometry latch, the viewport, constant copies, slot textures, the
+header resolver, the async programs, the kept leases and the run step.
+
 - **The batches** (`WaterCapture.cpp`, thunks on both calls). For the main camera's accumulator with kMAIN's depth bound, the batch
   runs with its draws latched: every pass goes through BeginPass, SetupTechnique, SetupMaterial, SetupGeometry (Unified Water's, Light
   Limit Fix's, the cubemap fix's and the frame annotations' hooks with them) and render state as before.
-- **The choke point** (a detour on DrawTriShape, chained with the sky's). A latched draw records: the shadow state
+- **Joining, withholding, running.** A view's client joins with `FrameAnchors::RequestJoin`; a batch is withheld only when
+  `FrameAnchors::CanRun` says the anchor's run will draw it; `Family::RunWithheld` runs it, and any status but `Ran` is logged once
+  per status and makes the view probe again. The client's `executed` callback counts the runs that drew.
+- **The choke point** (the family's taker at the shared DrawTriShape detour). A latched draw records: the shadow state
   (`EngineDrawState::Latch`: depth, **stencil mode and reference**, blend, write mode, cull, bias), the six constant groups (VS and PS
   b0-b2) through **ConstantMirror** (watched from a SetupGeometry hook), Light Limit Fix's strict lights (PS b3, its CB mirrored),
   Deferred's directional shadow record (t98, mirrored: the CPU writes it), CS's permutation block (`State::permutationData`: the pixel
-  stage branches on its descriptors), t0-t11 and their samplers (GpuTextures), the geometry (GpuResources leases) and the viewport
-  (less the bias mode's viewport offset).
+  stage branches on its descriptors), t0-t11 and their samplers (GpuTextures; an empty slot reads a null view of its declared kind, a cube at t3), the
+  geometry (GpuResources leases, the index range and stride checked against the buffers, a triangle list only) and the viewport (less
+  the bias mode's viewport offset, `Family::LatchViewport`).
 - **The pass** (`WaterDraws.cpp`). After the batch the EngineDraws anchor runs (a new anchor, shared with the screen blood, three runs a
   frame). Each view has a client (`cs.water.mask`, `cs.water.surface`) whose pass draws the batch's draws in the engine's order, one
   RasterProgram draw each, with `Water.hlsl` built for ORG: the defines are ShaderCache's for the vertex descriptor (the pixel stage reads
-  Wading at run time), the pipeline is the engine's state objects for the draw, and **`DrawDesc::stencilReference`** (new in
+  Wading at run time), the pipeline the engine's state objects' descriptions (`Pipeline::FindBlend` and the others), built off the
+  render thread (`Family::EngineDrawPrograms`: a draw whose program is still building stays the engine's), and **`DrawDesc::stencilReference`** (new in
   RasterProgram) sets the draw's reference. Targets: the mask's two (kNORMAL_TAAMASK_SSRMASK, its swap, kMOTION_VECTOR imported once;
   each draw names the ones its shadow state holds), the surface's one (kMAIN or kRAW_WATER), and kMAIN's depth-stencil read and written.
 - **Per-draw latch** (2656 bytes): the constant groups, descriptors, texture and sampler indices and geometry (`WaterOrgDraw`), the strict
@@ -105,13 +114,15 @@ than the EngineDraws epoch, and the water's draws read kWATER_DISPLACEMENT at t2
 - **The headers.** Water.hlsl's pixel stage includes Skylighting, the fog, Cloud Shadows, Dynamic Cubemaps, Light Limit Fix, IBL,
   Terrain and Volumetric Shadows, Wetness Effects and the shadow sampling header. Each resource is an `EXTERN` entry. What CS binds there
   at the batch decides how it is read: a **published** graph resource is declared by the client's pass (its writes are ordered before the
-  water); a D3D11 texture is read by heap index (GpuTextures, resolved per batch, no graph declaration); nothing reads the null
-  descriptor; a **D3D11 buffer** (Light Limit Fix's D3D11 local shadows) cannot be read, so the batch stays the engine's (logged once:
+  water); a D3D11 texture is read by heap index (GpuTextures, resolved per batch, no graph declaration); nothing reads a null
+  view of the header's declared kind (`GpuTextures::NullOf`: 2D, 2D array, 3D, cube or a buffer); a **D3D11 buffer** (Light Limit Fix's D3D11 local shadows) cannot be read, so the batch stays the engine's (logged once:
   turn on its feature's ORG path). The checks built every technique with every feature define (below), so no header resource is left
   register-bound.
 - **Probes** as the sky's: a view's batches are the graph's only after a batch the engine drew passed every check; a draw a later batch
-  cannot latch makes the rest of that batch the engine's and the view probes again. Every pass must draw through DrawTriShape.
-- **Refusals** are logged once per reason, technique and view (`a surface water draw of technique N stays the engine's: <reason>`):
+  cannot latch makes the rest of that batch the engine's and the view probes again. Every pass must draw through DrawTriShape. A probe
+  keeps its imports and leases (`WaterDraws::Keep`): before, the next batch found none and imported every texture again.
+- **Refusals** are logged once per reason, technique and view (`[DCLF] water: the engine draws: a surface draw of technique N: <reason>`,
+  `Util::ReasonLog`; a texture that cannot be imported says why, `GpuTextures::DescribeFailure`):
   geometry, too many draws (64), not BSWaterShader, topology, a colour target the client does not import, constants not mirrored yet,
   state objects, the program, buffer or texture imports, a published texture in a material slot, samplers, another draw path.
 
@@ -126,15 +137,17 @@ than the EngineDraws epoch, and the water's draws read kWATER_DISPLACEMENT at t2
 
 ### Accepted differences
 
-- **Pipeline builds block** the render thread the first time a technique and state meet, as CS's D3D11 shaders compile on first use.
+- **A withheld batch whose run then fails** (an epoch failure, after `CanRun` passed) is not drawn that frame; the family stops at
+  the failure.
 - **Light Limit Fix's strict lights** are copied into each draw's latch from its CB (1232 bytes a draw).
 - **The mask's and the water's batch order** against the engine's other work is the engine's: each runs where its batch was.
 - **First-person water, the local map's water and reflections** are other accumulators: the engine's.
 
 ## The switch
 
-`CS_ORG_WATER=1` (render-graph.md, "Switches"); default off. It needs DCLF running. Diagnostics: `CS_ORG_WATER_VIEWS=mask` or
-`surface` takes only that view. The feature is registered in DCLF's list (`Features/FeatureList.cpp`, `Water::Feature()`, after Sky);
+`CS_ORG_WATER=1` (render-graph.md, "Switches"); default off. It needs DCLF running. `CS_ORG_WATER_PARTS=mask`, `surface` (or both,
+comma separated; the default) keeps the other part on the engine, a fallback for a part the graph draws wrong. The bisect switches of
+the first runs (`CS_ORG_WATER_SAFE`, `CS_ORG_WATER_TECHNIQUES`, the `CS_ORG_WATER_VIEWS` alias) are gone: their faults were found. The feature is registered in DCLF's list (`Features/FeatureList.cpp`, `Water::Feature()`, after Sky);
 its status line is DCLF's `water` entry.
 
 ## Shader checks
@@ -156,9 +169,9 @@ LIGHT_LIMIT_FIX reads nothing (no push block). Sky's ORG build still passes (its
    bank (clear, then rain with `fw c821f`, SkyrimOvercastRain in Skyrim.esm), a shot under the river (z -420; the water plane is at -250
    there), then Dragonsreach. Both set `CS_ORG_LIGHT_LIMIT_FIX_SHADOWS=1` (the water reads t102 only as a published buffer).
 2. Log: `[DCLF] water: on (CS_ORG_WATER=1)`, `hooks installed`, `the cs.water.mask client registered (published inputs: ...)` and
-   `cs.water.surface`, `built the program for technique N (..., stencil on)`, `every mask water draw can be drawn by the graph` (and
-   `surface`). No `back to the engine's draws`, no repeated `could not be drawn by the graph`, no `stays the engine's` after the first
-   frames, no `SPIR-V build of Water.hlsl` errors, no `[E]` lines but the known EFFECTS11 one.
+   `cs.water.surface`, `[DCLF] water: built the program for descriptor ...`, `every mask water draw can be drawn by the graph` (and
+   `surface`), `the first cs.water.surface run drawn by the graph`. No `back to the engine's draws`, no `a withheld batch was not
+   drawn this frame`, no `the engine draws` after the first frames, no `SPIR-V build of Water.hlsl` errors, no `[E]` lines but the known EFFECTS11 one.
 3. Shots against water-org0's: the river's colour, reflections (sky and banks), refraction and depth fade, the flow, rain ripples
    (kWATER_DISPLACEMENT, the engine's), the SSR mask (the water's blue in the normals target feeds SSR: reflections on the water's
    surface), the underwater shot (fog, underwater technique), and the shoreline (stencil bits: no water drawn over the banks).
@@ -166,5 +179,5 @@ LIGHT_LIMIT_FIX reads nothing (no push block). Sky's ORG build still passes (its
 5. If the underwater shot is above water, lower `z` in both scenarios.
 
 Not verified without a build: everything above. Risks to look at first: Load<T> of the column-major matrices in the t98 latch, the
-TextureProj transpose, a null cubemap at t3 read through the 2D null descriptor, the mask's write mode 9 (two targets with different
+TextureProj transpose, the mask's write mode 9 (two targets with different
 masks), and GpuTextures reads of engine render targets the graph writes in earlier epochs (kMAIN_COPY, the SSR targets).
