@@ -131,6 +131,9 @@ namespace TextureStreaming::ORG
 			std::vector<std::shared_ptr<Staged>> staged;  // the workers'
 			std::vector<Retired> retired;                 // any thread's
 			std::shared_ptr<Batch> batch;                 // the render thread's: the one in flight
+			// The render thread's: done batches, kept with their staging buffers and windows until nothing else holds them. A one-shot
+			// pass may be recorded again (a ticket prepared ahead) after its run, so its copies' sources stay alive until then.
+			std::vector<std::shared_ptr<Batch>> retiring;
 			std::atomic<bool> ready{ false };
 			std::atomic<bool> failed{ false };
 			std::atomic<std::uint64_t> serial{ 0 };
@@ -227,12 +230,12 @@ namespace TextureStreaming::ORG
 			return std::format("cs.texstream.window-{}", a_serial);
 		}
 
-		/** @brief Hands a staged window back to the D3D11 path. Render thread. */
-		void Retry(Staged& a_item)
+		/** @brief Hands a staged window back to the D3D11 path. Render thread. a_inBatch: its batch retires its staging buffer. */
+		void Retry(Staged& a_item, bool a_inBatch = false)
 		{
 			S().retried.fetch_add(1, std::memory_order_relaxed);
-			// A copy pass may have been recorded with it.
-			RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(a_item.staging));
+			if (!a_inBatch)
+				RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(a_item.staging));
 			if (a_item.retry)
 				a_item.retry();
 			a_item.completion->Finish();
@@ -254,12 +257,17 @@ namespace TextureStreaming::ORG
 				std::scoped_lock lock(state.mutex);
 				staged.swap(state.staged);
 			}
-			if (auto batch = std::exchange(state.batch, nullptr); batch && !batch->done) {
-				batch->done = true;
-				staged.insert(staged.begin(), batch->items.begin(), batch->items.end());
+			std::shared_ptr<Batch> batch;
+			if (auto inFlight = std::exchange(state.batch, nullptr); inFlight && !inFlight->done) {
+				inFlight->done = true;
+				batch = std::move(inFlight);
+				state.retiring.push_back(batch);
 			}
 			if (a_unregister)
 				FrameAnchors::Unregister(kClientId);
+			if (batch)
+				for (const auto& item : batch->items)
+					Retry(*item, true);
 			for (const auto& item : staged)
 				Retry(*item);
 		}
@@ -307,21 +315,41 @@ namespace TextureStreaming::ORG
 			return true;
 		}
 
-		/** @brief The batch's copies were submitted in DXVK's stream: its windows are installed. Render thread. */
-		void Install(Batch& a_batch)
+		/**
+		 * @brief The batch's copies were submitted in DXVK's stream: its windows are installed. The batch keeps its staging buffers
+		 * and windows until it retires (ServiceRetiringBatches). Render thread.
+		 */
+		void Install(const std::shared_ptr<Batch>& a_batch)
 		{
 			auto& state = S();
-			a_batch.done = true;
-			for (const auto& item : a_batch.items) {
+			a_batch->done = true;
+			for (const auto& item : a_batch->items) {
 				if (item->install)
 					item->install(item->window);
-				// The staging buffer goes once D3D11 (and the copy, which is in its stream) is past this point.
-				RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(item->staging));
-				item->window = nullptr;
 				item->completion->Finish();
 			}
-			state.uploaded.fetch_add(a_batch.items.size(), std::memory_order_relaxed);
+			state.retiring.push_back(a_batch);
+			state.uploaded.fetch_add(a_batch->items.size(), std::memory_order_relaxed);
 			state.batches.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		/**
+		 * @brief Done batches that nothing else holds (no pass instance, no prepared ticket: their copies cannot be recorded again)
+		 * give up their staging buffers and windows. The buffers go once D3D11's stream, which carried every copy, is past this
+		 * point. Render thread.
+		 */
+		void ServiceRetiringBatches()
+		{
+			auto& retiring = S().retiring;
+			std::erase_if(retiring, [](std::shared_ptr<Batch>& a_batch) {
+				if (a_batch.use_count() > 1)
+					return false;
+				for (const auto& item : a_batch->items) {
+					RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(item->staging));
+					item->window = nullptr;
+				}
+				return true;
+			});
 		}
 
 		/** @brief The next batch's client: its one-shot copy pass at the Present anchor. Replaces the last batch's. Render thread. */
@@ -336,8 +364,10 @@ namespace TextureStreaming::ORG
 				.make = [batch = std::shared_ptr<const Batch>(a_batch)]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<UploadPass>(batch); },
 				.once = true });
 			// Only while the copy is to come: the build after it (the one-shot pass dropped) leaves the windows out of the graph.
-			client.registerResources = [batch = a_batch](org::RenderGraph& a_graph) {
-				if (batch->done)
+			// Weak, as the other callbacks: a done batch is held only by its passes and tickets, so it can retire.
+			client.registerResources = [weak = std::weak_ptr<Batch>(a_batch)](org::RenderGraph& a_graph) {
+				const auto batch = weak.lock();
+				if (!batch || batch->done)
 					return;
 				for (const auto& item : batch->items)
 					if (item->window && item->window->texture)
@@ -353,7 +383,7 @@ namespace TextureStreaming::ORG
 				const auto locked = batch.lock();
 				if (!locked || locked->done || state.batch != locked)
 					return;
-				Install(*locked);
+				Install(locked);
 				state.batch = nullptr;
 			};
 			client.onFailed = [] { Fail("the render graph failed", false); };
@@ -392,6 +422,7 @@ namespace TextureStreaming::ORG
 		if (!Requested() || !FrameAnchors::OnMainThread())
 			return;
 		auto& state = S();
+		ServiceRetiringBatches();
 		ServiceRetired();
 		if (state.failed.load(std::memory_order_acquire))
 			return;
