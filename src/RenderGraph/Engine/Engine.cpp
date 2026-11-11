@@ -11,6 +11,8 @@
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
 namespace RenderGraph::Engine
 {
@@ -51,5 +53,14 @@ namespace RenderGraph::Engine
 		ImageSpace::Setup();
 		// CS_ORG_BINK: the movie player's client at the Present anchor, registered once for the session.
 		Bink::Setup();
+	}
+
+	void PostSetup()
+	{
+		// CS_ORG_SCALEFORM: the framebuffer's and HDR's UI texture's surfaces (HDR made its texture in its SetupResources).
+		Scaleform::Setup();
+		// Every client registered at setup joins its anchors' graphs now, not at the first frame's build point.
+		if (RenderGraphRuntime::Get().IsActive())
+			(void)FrameAnchors::BuildPending("CS's setup");
 	}
 }

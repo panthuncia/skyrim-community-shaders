@@ -426,6 +426,8 @@ void State::Setup()
 		globals::deferred->SetupResources();
 	}
 	Feature::ForEachLoadedFeature("PostSetupResources", [](Feature* feature) { feature->PostSetupResources(); });
+	// The engine subsystems that read features' resources, then the setup's graph build: the primary-path clients join here.
+	RenderGraph::Engine::PostSetup();
 	PostProcessingMode::ApplyPending();
 	tonemapOwner.reset();
 }

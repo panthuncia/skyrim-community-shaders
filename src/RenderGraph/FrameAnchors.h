@@ -382,6 +382,14 @@ namespace FrameAnchors
 	 */
 	void OnFrameEnd();
 
+	/**
+	 * @brief Setup's build point (the primary path, docs/development/p5/primary-path.md rule 3): on the render owner, between frames,
+	 * the graphs that registered clients wait to join are built now, so those clients are in their anchors' graphs before the first
+	 * frame that needs them and never poll RequestJoin. a_caller names the caller in the log. Returns whether every registered client
+	 * is in its anchors' built graphs afterwards; false (logged) off the render owner, with the runtime inactive, or when a build failed.
+	 */
+	bool BuildPending(std::string_view a_caller);
+
 	/** @brief Logs each reserved anchor's peak runs a frame against its sizing (CS_ORG_EPOCH_STATS's report). Render thread. */
 	void LogRunStats();
 

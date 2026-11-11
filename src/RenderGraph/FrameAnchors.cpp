@@ -1038,6 +1038,30 @@ namespace FrameAnchors
 			logger::info("[ORG] frame anchors: graphs built at the frame's end for clients joining them (build {})", s_builds);
 	}
 
+	bool BuildPending(std::string_view a_caller)
+	{
+		auto& state = Anchors();
+		if (!state.host || !IsRenderOwner()) {
+			logger::error("[ORG] frame anchors: {} asked for the graphs off the render owner; its clients join at the first build point", a_caller);
+			return false;
+		}
+		auto lock = Guard();
+		auto& runtime = RenderGraphRuntime::Get();
+		if (!runtime.IsActive())
+			return false;
+		const auto waiting = [&] { return std::ranges::count_if(state.clients, [&](const Client& a_client) { return WaitsToJoin(state, a_client); }); };
+		if (waiting() == 0)
+			return true;
+		(void)runtime.BuildIfRequested();
+		state.buildPointsSeen = runtime.BuildPoints();
+		const auto left = waiting();
+		if (left == 0)
+			logger::info("[ORG] frame anchors: graphs built at {}; every registered client is in its anchors' graphs", a_caller);
+		else
+			logger::error("[ORG] frame anchors: graphs built at {}, but {} clients are still not in their anchors' graphs", a_caller, left);
+		return left == 0;
+	}
+
 	void LogRunStats()
 	{
 		const auto& state = Anchors();
@@ -1286,6 +1310,7 @@ namespace FrameAnchors
 	std::uint32_t PeakRunsPerFrame(Anchor) { return 0; }
 	void FitSlotBudget(const std::vector<std::uint32_t>&, std::uint32_t, std::uint32_t) {}
 	void OnFrameEnd() {}
+	bool BuildPending(std::string_view) { return false; }
 	void LogRunStats() {}
 	std::uint64_t RenderOwnerChanges() { return 0; }
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t) { return nullptr; }
