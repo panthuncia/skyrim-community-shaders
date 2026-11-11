@@ -202,8 +202,9 @@ rhi::PipelineHandle RasterProgram::Pipeline() const
 std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, const Desc& a_desc)
 {
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
-	if (a_desc.targets.empty() || a_desc.targets.size() > 8) {
-		logger::error("[ORG] {}: a raster program needs 1 to 8 colour targets, not {}", a_desc.pixelSource, a_desc.targets.size());
+	// A depth-only program (no colour target, a depth format) is allowed: the engine skeleton's depth clears draw one.
+	if ((a_desc.targets.empty() && a_desc.depthFormat == rhi::Format::Unknown) || a_desc.targets.size() > 8) {
+		logger::error("[ORG] {}: a raster program needs 1 to 8 colour targets, or none with a depth format, not {}", a_desc.pixelSource, a_desc.targets.size());
 		return {};
 	}
 	auto* compiler = RenderGraphRuntime::Get().ShaderCompiler();
@@ -295,7 +296,7 @@ void RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 		depth.readOnly = a_draw.depth->readOnly;
 		depth.depthLoad = a_draw.depth->load;
 		depth.depthStore = a_draw.depth->readOnly ? rhi::StoreOp::DontCare : rhi::StoreOp::Store;
-		// The stencil is kept as it is: no raster program tests or writes it.
+		// The stencil is loaded and stored: a program that writes it (Desc::depth's stencil ops) keeps what it wrote.
 		depth.stencilLoad = rhi::LoadOp::Load;
 		depth.stencilStore = rhi::StoreOp::Store;
 		depth.clear.type = rhi::ClearValueType::DepthStencil;
