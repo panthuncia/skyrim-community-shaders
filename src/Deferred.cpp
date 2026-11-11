@@ -20,6 +20,7 @@
 
 #include "Hooks.h"
 #include "ORGDeferredComposite.h"
+#include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -347,9 +348,11 @@ void Deferred::DeferredPasses()
 	// composite would otherwise see the background where those objects stand. Water also
 	// samples this copy for edge fade and refraction.
 	auto finalDepthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
+	// CS_ORG_ENGINE_SKELETON: the copy is a graph pass here; otherwise (or when it did not run) D3D11 copies.
 	// Engine target fields can be tripwire handles: DXVK takes the wrapped objects.
 	using RenderGraph::Engine::Tripwire::Unwrap;
-	context->CopyResource(Unwrap(finalDepthCopy.texture), Unwrap(depth.texture));
+	if (!RenderGraph::Engine::Skeleton::CopyPostZPrepassDepth())
+		context->CopyResource(Unwrap(finalDepthCopy.texture), Unwrap(depth.texture));
 	sceneDepthFinal = true;
 	// The render graph's passes here, before the D3D11 passes below read what they write.
 	FrameAnchors::Run(FrameAnchors::Anchor::DeferredPasses);
