@@ -532,6 +532,10 @@ FrameAnchors::Register({ .id = "cs.myfeature",
     `kGameFramesInFlight` slots. Size `LatchBlock`s from `GraphHost::FrameSlots()` after the runtime is up, as LLF does. An anchor that
     runs several times a frame (`ReflectionsPrepass`, at each cubemap render) uses its ring that much faster, and may wait for a
     slot when the CPU is far ahead of the GPU.
+-   **The main thread only.** A loading screen presents from a job thread (SE 38085) while the main thread loads. Anchors run
+    only on the main thread (`FrameAnchors::OnMainThread`, latched in `SKSEPlugin_Load`): at a loading screen's Present `Run`
+    returns false and one-shot passes wait for the next main-thread frame. Per-Present work that feeds an anchor checks the same
+    (texture streaming's `FrameTick`). The graph's frame upload instance belongs to the main thread.
 -   **The hazard rule.** After the late anchors (`PostProcessing`, `Upscale`, `Tonemap`, `FrameGeneration`, `Present`, `Overlay`,
     `HDROutput`, `Capture`) have run an epoch, `Run` calls the late-epoch hook, which Upscaling installs in `PostPostLoad`
     (`FrameAnchors::SetLateEpochHook`, `Upscaling::SeparateFromGraphEpochs`). An upscaler, frame generation or the present can
