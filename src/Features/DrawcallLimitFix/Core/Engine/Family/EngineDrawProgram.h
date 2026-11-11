@@ -15,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-class RasterProgram;
+struct RasterProgram;
 
 namespace RE
 {

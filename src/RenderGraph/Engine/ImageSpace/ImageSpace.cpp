@@ -277,7 +277,7 @@ namespace RenderGraph::Engine::ImageSpace
 			const auto index = static_cast<std::uint32_t>(kEffects[a_effect].id);
 			if (!manager || index >= manager->effects.size())
 				return nullptr;
-			return static_cast<const RE::BSImagespaceShader*>(manager->effects[index]);
+			return static_cast<const RE::BSImagespaceShader*>(manager->effects[static_cast<decltype(manager->effects)::size_type>(index)]);
 		}
 
 		std::int32_t EffectOf(const RE::BSImagespaceShader* a_shader)
@@ -912,7 +912,9 @@ namespace RenderGraph::Engine::ImageSpace
 			// The manager's rectangle (+0x10 left, +0x14 right, +0x18 top, +0x1C bottom; menu 3D sets it): Render applies it as the
 			// viewport when left and right are not -1. That is the engine's own test (the same two fields on SE and AE), so this
 			// tests the same two.
-			if (manager->rect.left != -1 && manager->rect.right != -1)
+			// NiRect keeps its fields protected: read them in their order (left, right, top, bottom).
+			const auto* rect = reinterpret_cast<const std::int32_t*>(&manager->rect);
+			if (rect[0] != -1 && rect[1] != -1)
 				return "a sub-rectangle of its target";
 			// +0x58 (RUNTIME_DATA::unk58, SE and AE; VR's layout differs): RenderEffect draws the dynamic-resolution quad (+0x50)
 			// instead of the full one (+0x48) when it is set (SE 0x141297b40, AE 0x141481ff0).
