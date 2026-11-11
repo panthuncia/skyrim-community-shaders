@@ -116,9 +116,14 @@ namespace DCLF::Features::BloodSplatter
 
 			Family::Owners owners;
 			Family::Geometry geometry;
-			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners);
-				result != Family::GeometryResult::Ok)
+			std::string geometryDetail;
+			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &geometryDetail);
+				result != Family::GeometryResult::Ok) {
+				if (!geometryDetail.empty())
+					Refusals().Report(std::format("a draw of technique {} whose geometry is refused: {}", state->currentPixelDescriptor & 0xFF, Family::ReasonOf(result)),
+						geometryDetail);
 				return Family::ReasonOf(result);
+			}
 			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
 			constants.vertexAddress[1] = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
 			constants.indexAddress[0] = static_cast<std::uint32_t>(geometry.indexAddress);

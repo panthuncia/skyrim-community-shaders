@@ -137,23 +137,34 @@ namespace DCLF::Family
 	}
 
 	GeometryResult LatchGeometry(const TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::uint64_t a_shaderVertexDesc,
-		std::uint32_t a_topology, Geometry& a_out, Owners& a_owners)
+		std::uint32_t a_topology, Geometry& a_out, Owners& a_owners, std::string* a_detail)
 	{
 		if (!a_shape || !a_shape->vertexBuffer || !a_shape->indexBuffer)
 			return GeometryResult::Missing;
-		if (a_topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST)
+		if (a_topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST) {
+			if (a_detail)
+				*a_detail = std::format("topology {}", a_topology);
 			return GeometryResult::Topology;
+		}
 		auto& buffers = GpuResources::Frame();
 		auto vertices = buffers.Acquire(a_shape->vertexBuffer);
 		auto indices = buffers.Acquire(a_shape->indexBuffer);
 		if (!vertices || !indices || !vertices->buffer.address || !indices->buffer.address)
 			return GeometryResult::Buffers;
-		// The draw's 16-bit indices must lie in the index buffer, and a vertex must hold at least the position the stage pulls. The
-		// index stage loads 4-byte words, so the last one may reach 2 bytes past the range.
+		// The draw's 16-bit indices must lie in the index buffer, and a vertex must hold at least the position the stage pulls. The index
+		// stage loads the 4-byte word holding each index, so an odd range's last word reaches 2 bytes past the buffer's end: inside its
+		// allocation, which DXVK pads to 4 bytes at least (its buffer slices are aligned; a dedicated allocation to 256 bytes). So the
+		// range is checked to its last byte, not its last word: a mesh with an odd index count (the cloud layers have them) is drawable.
 		const std::uint32_t stride = static_cast<std::uint32_t>(a_shape->vertexDesc & 0xF) * 4;
-		const std::uint64_t lastIndexByte = (std::uint64_t(a_start) + std::uint64_t(a_triangles) * 3) * 2;
-		if (!a_triangles || stride < 16 || ((lastIndexByte + 3) & ~std::uint64_t(3)) > indices->buffer.size || vertices->buffer.size < stride)
+		const std::uint64_t endIndexByte = (std::uint64_t(a_start) + std::uint64_t(a_triangles) * 3) * 2;
+		if (!a_triangles || stride < 16 || endIndexByte > indices->buffer.size || vertices->buffer.size < stride) {
+			if (a_detail)
+				*a_detail = std::format("first index {}, {} indices ({} bytes to its end) of a {}-byte index buffer; stride {} (VertexDesc {:#x}) in a {}-byte "
+										"vertex buffer ({} vertices)",
+					a_start, std::uint64_t(a_triangles) * 3, endIndexByte, indices->buffer.size, stride, a_shape->vertexDesc, vertices->buffer.size,
+					stride ? vertices->buffer.size / stride : 0);
 			return GeometryResult::Bounds;
+		}
 		a_out.vertexAddress = vertices->buffer.address;
 		a_out.indexAddress = indices->buffer.address;
 		a_out.layout = a_shaderVertexDesc & a_shape->vertexDesc;

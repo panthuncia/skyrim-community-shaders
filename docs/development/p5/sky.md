@@ -138,11 +138,11 @@ families").
   the call does not come (another hook at its site), the capture is finished at the next sky batch and no batch spans the group again
   for the session (`the cloud group was not drawn after a sky batch that spanned it`). A group with another shader's pass (a
   sky-object effect, hint `0x12`), another geometry type, or no pass list is drawn by the engine after the anchor's run, in the
-  engine's order (logged once). A probe whose only refusals were cloud draws leaves that view's clouds to the engine for the session.
+  engine's order (logged once). A probe whose only refusals were cloud draws leaves that view's clouds to the engine for 300 game frames, then the view probes them again; the wait doubles at each refusal (up to 9600 frames) and starts over after a clean probe of the clouds, since the cause may pass (a program still building, a streamed texture).
 - **The choke point** (the family's taker at the shared `DrawTriShape` detour). While a batch is latched, a draw is recorded instead
   of drawn: the shadow state SetDirtyStates would apply (`EngineDrawState::Latch`), the alpha test reference, CS's extra descriptor,
   the PerGeometry constants SetupGeometry wrote (ConstantMirror), the technique's textures and samplers, the static vertex and index
-  buffers (`GpuResources::Frame` leases, by device address, their index range and stride checked against the buffers, a triangle
+  buffers (`GpuResources::Frame` leases, by device address, their index range (to its last byte) and stride checked against the buffers, a refusal logged with the numbers, a triangle
   list only: `Family::LatchGeometry`) and the viewport (`Family::LatchViewport(0)`: the sky takes no depth bias offset, see
   "The depth bias viewport offsets"). Cloud Shadows' `overrideSky` and `bindLayerSelfShadow` are taken and cleared.
 - **The latch.** Everything per draw is in the draw's latch region (`SkyOrgDraw`, 352 bytes): the constants, the geometry, the heap

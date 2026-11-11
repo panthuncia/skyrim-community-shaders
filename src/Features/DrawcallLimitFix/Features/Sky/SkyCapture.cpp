@@ -81,10 +81,32 @@ namespace DCLF::Features::Sky
 			bool cloudsFailed = false;  // a refusal in the cloud group
 			// The cloud group's call did not follow a sky batch that spanned it (another hook at its site): never spanned again.
 			bool deferralBroken = false;
-			// A probe whose only refusals were cloud draws: the view's cloud layers stay the engine's for the session, so a cloud
-			// technique the graph cannot draw never keeps the rest of the view's sky off the graph.
+			// A probe whose only refusals were cloud draws leaves the view's cloud layers to the engine for a while, so a cloud
+			// technique the graph cannot draw never keeps the rest of the view's sky off the graph. The cause may pass (a program
+			// still building, a streamed texture not loaded yet), so the clouds are probed again after cloudsBackoff game frames,
+			// which doubles at each refusal up to kMaxCloudsBackoff.
 			std::array<bool, static_cast<std::size_t>(View::Count)> cloudsRefused{};
+			std::array<std::uint32_t, static_cast<std::size_t>(View::Count)> cloudsRetryFrame{};
+			std::array<std::uint32_t, static_cast<std::size_t>(View::Count)> cloudsBackoff{};
 		};
+
+		// The first wait before a refused view's clouds are probed again, and the longest (game frames).
+		constexpr std::uint32_t kFirstCloudsBackoff = 300;
+		constexpr std::uint32_t kMaxCloudsBackoff = 9600;
+
+		/** @brief Whether a_view's clouds are left to the engine now; a refusal whose wait is over is lifted (the next batch probes them). */
+		bool CloudsRefused(Capture& a_capture, View a_view)
+		{
+			const auto index = static_cast<std::size_t>(a_view);
+			if (!a_capture.cloudsRefused[index])
+				return false;
+			if (static_cast<std::int32_t>(Family::GameFrame() - a_capture.cloudsRetryFrame[index]) < 0)
+				return true;
+			// The wait is over: the view probes again, so the clouds are checked before any is withheld.
+			a_capture.cloudsRefused[index] = false;
+			a_capture.clean[index] = false;
+			return false;
+		}
 
 		Capture& GetCapture()
 		{
@@ -327,9 +349,14 @@ namespace DCLF::Features::Sky
 			// The geometry, read by device address while its leases are held (the run keeps them until the GPU is done).
 			Family::Owners owners;
 			Family::Geometry geometry;
-			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners);
-				result != Family::GeometryResult::Ok)
+			std::string geometryDetail;
+			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &geometryDetail);
+				result != Family::GeometryResult::Ok) {
+				if (!geometryDetail.empty())
+					Refusals().Report(std::format("a draw of technique {} whose geometry is refused: {}", state->currentPixelDescriptor & 0xFF, Family::ReasonOf(result)),
+						geometryDetail);
 				return Family::ReasonOf(result);
+			}
 			auto& constants = draw.constants;
 			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
 			constants.vertexAddress[1] = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
@@ -473,6 +500,7 @@ namespace DCLF::Features::Sky
 		{
 			a_capture.active = false;
 			a_capture.deferred = false;
+			const bool spannedClouds = a_capture.cloudGroup != nullptr;
 			a_capture.cloudGroup = nullptr;
 			auto run = std::move(a_capture.run);
 			const View view = a_capture.shape.view;
@@ -487,10 +515,17 @@ namespace DCLF::Features::Sky
 			if (!run)
 				return;
 			if (a_capture.probe) {
-				auto& refused = a_capture.cloudsRefused[static_cast<std::size_t>(view)];
-				if (a_capture.failed && a_capture.cloudsFailed && !a_capture.skyFailed && !refused) {
-					refused = true;
-					logger::warn("[DCLF] sky: the {} cloud layers stay the engine's for the session: a cloud draw cannot be drawn by the graph (above)", NameOf(view));
+				const auto index = static_cast<std::size_t>(view);
+				if (a_capture.failed && a_capture.cloudsFailed && !a_capture.skyFailed && !a_capture.cloudsRefused[index]) {
+					auto& backoff = a_capture.cloudsBackoff[index];
+					backoff = backoff ? (std::min)(backoff * 2, kMaxCloudsBackoff) : kFirstCloudsBackoff;
+					a_capture.cloudsRefused[index] = true;
+					a_capture.cloudsRetryFrame[index] = Family::GameFrame() + backoff;
+					logger::warn("[DCLF] sky: the {} cloud layers stay the engine's for {} frames: a cloud draw cannot be drawn by the graph (above); they are probed again then",
+						NameOf(view), backoff);
+				} else if (!a_capture.failed && spannedClouds) {
+					// A clean probe of the clouds: a later refusal starts from the first wait again.
+					a_capture.cloudsBackoff[index] = 0;
 				}
 				const bool wasClean = clean;
 				clean = !a_capture.failed;
@@ -546,6 +581,7 @@ namespace DCLF::Features::Sky
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
+				const bool cloudsRefused = CloudsRefused(capture, shape.view);
 				const bool probe = !capture.clean[index];
 				// Draws are withheld only when the anchor's run will draw them (a probe withholds nothing).
 				if (!probe && !SkyDraws::CanRun(shape.view)) {
@@ -564,7 +600,7 @@ namespace DCLF::Features::Sky
 				capture.skyShort = false;
 				capture.lastCloudLayer = -1;
 				capture.passes.Begin();
-				capture.cloudGroup = capture.shape.clouds && !capture.cloudsRefused[index] && !capture.deferralBroken ? CloudGroupOf(a_accumulator, capture) : nullptr;
+				capture.cloudGroup = capture.shape.clouds && !cloudsRefused && !capture.deferralBroken ? CloudGroupOf(a_accumulator, capture) : nullptr;
 				capture.active = true;
 				func(a_accumulator, a_first, a_last, a_flags, a_group);
 				capture.active = false;

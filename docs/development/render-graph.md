@@ -737,7 +737,7 @@ lanes; new code uses them from the start.
       SetupGeometry (slot 6) watch per shader type, run after the shader's own.
     - `BeginBatch()` at each batch: once a game frame it runs `GpuResources::Frame().BeginFrame()` (dropped leases, DXVK's buffer
       moves), which grass and tree LOD otherwise ran alone. `Passes`: every pass SetupGeometry set up must reach `DrawTriShape`.
-    - `LatchGeometry` (both buffers leased, the index range and stride checked against them, a triangle list only), `LatchViewport`
+    - `LatchGeometry` (both buffers leased, the index range checked to its last byte and the stride against them, a triangle list only; an odd range's last index word reads 2 bytes past the buffer, inside DXVK's padded allocation; a refusal's numbers in its detail), `LatchViewport`
       (the camera's depth range less the depth bias mode's offset), `CopyConstants`/`CopyRows` (ConstantMirror), `SlotTexture` (an
       import, a published export refused, an empty slot a null view of its declared kind: `GpuTextures::NullOf`), `SlotSampler`,
       and `ResolveHeader`, the one header resolver (a published resource's id first, else a D3D11 view's import or the kind's null

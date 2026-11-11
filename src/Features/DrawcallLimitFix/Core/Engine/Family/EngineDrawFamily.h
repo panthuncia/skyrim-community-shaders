@@ -154,10 +154,11 @@ namespace DCLF::Family
 	/**
 	 * @brief The draw's geometry: both buffers leased (into a_owners), the 16-bit index range checked against the index buffer and the
 	 * vertex stride against the position the vertex stage pulls (R32G32B32A32: DCLFPullPosition). a_shaderVertexDesc: the bound vertex
-	 * shader's VertexDesc mask; a_topology: the shadow state's.
+	 * shader's VertexDesc mask; a_topology: the shadow state's. a_detail, when given, receives the numbers of a refusal (the index range,
+	 * the buffers' bytes, the stride and the vertex count) for its log line.
 	 */
 	GeometryResult LatchGeometry(const TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::uint64_t a_shaderVertexDesc,
-		std::uint32_t a_topology, Geometry& a_out, Owners& a_owners);
+		std::uint32_t a_topology, Geometry& a_out, Owners& a_owners, std::string* a_detail = nullptr);
 
 	/** @brief The viewport SetDirtyStates would set, and its depth range. */
 	struct Viewport
