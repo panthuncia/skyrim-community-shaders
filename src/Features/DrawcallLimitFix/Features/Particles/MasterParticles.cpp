@@ -168,7 +168,7 @@ namespace DCLF::Features::Particles::MasterParticles
 				auto* manager = reinterpret_cast<RE::NiNode*>(static_cast<std::byte*>(a_array) - kChildrenArray);
 				std::unique_lock lock(gate);
 				const auto& children = manager->GetChildren();
-				if (RE::NiAVObject* master = a_index < children.free_idx() ? children[a_index].get() : nullptr) {
+				if (RE::NiAVObject* master = a_index < children.free_idx() ? children[static_cast<std::remove_cvref_t<decltype(children)>::size_type>(a_index)].get() : nullptr) {
 					counts.removals.fetch_add(1, std::memory_order_relaxed);
 					PrimaryCull::Get().NoteListStructure(manager, master, false);
 					SceneTracker::Get().PushDetached(master, manager);

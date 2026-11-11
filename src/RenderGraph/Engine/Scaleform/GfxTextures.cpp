@@ -91,7 +91,7 @@ namespace RenderGraph::Engine::Scaleform::GfxTextures
 			if (!device)
 				return;
 			std::call_once(g_deviceHooked, [device] {
-				auto** vtable = *reinterpret_cast<std::uintptr_t**>(device);
+				auto* vtable = *reinterpret_cast<std::uintptr_t**>(device);
 				CreateTexture2D::func = reinterpret_cast<CreateTexture2D::Fn>(vtable[5]);
 				REL::safe_write(reinterpret_cast<std::uintptr_t>(&vtable[5]), reinterpret_cast<std::uintptr_t>(&CreateTexture2D::thunk));
 				logger::info("[ORG] Scaleform: GFx's textures go through Engine::Textures::Create (device {})", fmt::ptr(device));
