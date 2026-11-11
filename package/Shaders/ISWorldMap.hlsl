@@ -43,14 +43,18 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 	float2 startOffset = input.TexCoord - 3 * (TexelSize.xy * offsetDelta);
 
+	// The tap position steps by adding, as vanilla's does, so the taps land on the same texels.
 	float4 color = 0;
+	float tapX = startOffset.x;
 	for (int i = 0; i < 7; ++i) {
+		float tapY = startOffset.y;
 		for (int j = 0; j < 7; ++j) {
-			float2 currentTexCoord = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(
-				startOffset + TexelSize.xy * offsetDelta * float2(i, j));
+			float2 currentTexCoord = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(float2(tapX, tapY));
 			float4 currentColor = ImageTex.Sample(ImageSampler, currentTexCoord);
 			color += currentColor;
+			tapY = TexelSize.y * offsetDelta + tapY;
 		}
+		tapX = TexelSize.x * offsetDelta + tapX;
 	}
 
 	psout.Color = 0.0204081628 * color;
