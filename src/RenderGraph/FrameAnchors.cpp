@@ -33,7 +33,7 @@ namespace FrameAnchors
 		using Segment = RenderGraphRuntime::Segment;
 
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
-		static_assert(static_cast<std::uint32_t>(Segment::AnchorCapture) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
+		static_assert(static_cast<std::uint32_t>(Segment::AnchorEngineDepthCopy) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
 			"one segment per anchor, in the anchors' order");
 		static_assert(static_cast<std::uint32_t>(Segment::Count) <= 32, "TakeSubmittedSegments holds one bit per segment");
 
@@ -62,18 +62,26 @@ namespace FrameAnchors
 			{ "Overlay", { "CS anchor: overlay", "CS anchor: overlay inputs", "FrameAnchors::Overlay / ", "cs.anchor.overlay" }, true },
 			{ "HDROutput", { "CS anchor: HDR output", "CS anchor: HDR output inputs", "FrameAnchors::HDROutput / ", "cs.anchor.hdr-output" }, true },
 			{ "Capture", { "CS anchor: capture", "CS anchor: capture inputs", "FrameAnchors::Capture / ", "cs.anchor.capture" }, true },
+			{ "EngineShadowClear", { "CS anchor: engine shadow clear", "CS anchor: engine shadow clear inputs", "FrameAnchors::EngineShadowClear / ", "cs.anchor.engine-shadow-clear" }, false },
+			{ "EngineCubeClear", { "CS anchor: engine cube clear", "CS anchor: engine cube clear inputs", "FrameAnchors::EngineCubeClear / ", "cs.anchor.engine-cube-clear" }, false },
+			{ "EngineFrameClear", { "CS anchor: engine frame clear", "CS anchor: engine frame clear inputs", "FrameAnchors::EngineFrameClear / ", "cs.anchor.engine-frame-clear" }, false },
+			{ "EngineDepthCopy", { "CS anchor: engine depth copy", "CS anchor: engine depth copy inputs", "FrameAnchors::EngineDepthCopy / ", "cs.anchor.engine-depth-copy" }, false },
 		} };
 
 		// Where each segment runs in a frame: AddToFrame puts an anchor before the first epoch of the order that runs after it. A
 		// segment's place only has to be right against the anchors next to it; the order sizes the frame slots and names the frame,
 		// while the ledgers order the work whatever runs.
 		constexpr std::array<Segment, static_cast<std::size_t>(Segment::Count)> kTimeline{
+			Segment::AnchorEngineShadowClear,  // each shadow map slice's clear, before its draws (nominally here)
 			Segment::ShadowView,
 			Segment::SkyOcclusion,
-			Segment::AnchorEarlyPrepass,  // Main::RenderShadowMaps returned
-			Segment::ZPrepass,            // Main::RenderDepth
+			Segment::AnchorEarlyPrepass,      // Main::RenderShadowMaps returned
+			Segment::AnchorEngineFrameClear,  // the main depth's clear in Main::RenderDepth (and the frame's other clears)
+			Segment::ZPrepass,                // Main::RenderDepth
 			Segment::FirstPersonDepth,
-			Segment::AnchorDepthDone,  // Main::RenderDepth returned, with the first-person depth
+			Segment::AnchorEngineDepthCopy,  // Main::RenderDepth's end (and the later copies of the same depth)
+			Segment::AnchorDepthDone,        // Main::RenderDepth returned, with the first-person depth
+			Segment::AnchorEngineCubeClear,  // each reflection face's clear, before its draws (nominally here)
 			Segment::Reflection,
 			Segment::AnchorReflectionsPrepass,  // the cubemap render, nominally here (zero or more times a frame)
 			Segment::LightCulling,              // Light Limit Fix's Prepass

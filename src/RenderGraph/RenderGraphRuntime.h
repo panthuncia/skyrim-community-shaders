@@ -102,6 +102,10 @@ public:
 		AnchorOverlay,
 		AnchorHDROutput,
 		AnchorCapture,
+		AnchorEngineShadowClear,
+		AnchorEngineCubeClear,
+		AnchorEngineFrameClear,
+		AnchorEngineDepthCopy,
 		Count
 	};
 
