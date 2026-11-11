@@ -313,14 +313,15 @@ namespace FrameAnchors
 					armed = a_state.serial;
 		}
 
-		/** @brief The anchors' epochs built again at their next execution (the others keep their graphs). */
-		void Rebuild(State& a_state, std::uint32_t a_anchorMask)
+		/** @brief The anchors' epochs built again at their next execution (the others keep their graphs); a_reason is logged with the build. */
+		void Rebuild(State& a_state, std::uint32_t a_anchorMask, std::string_view a_reason)
 		{
 			if (!a_state.host)
 				return;
+			const auto reason = fmt::format("frame anchors: {}", a_reason);
 			for (std::uint32_t i = 0; i < kAnchors; ++i)
 				if ((a_anchorMask >> i & 1u) && a_state.reserved[i])
-					a_state.host->RequestRebuild(EpochOfAnchor(static_cast<Anchor>(i)));
+					a_state.host->RequestRebuild(EpochOfAnchor(static_cast<Anchor>(i)), reason);
 		}
 
 		std::uint32_t AnchorMask(const ClientDesc& a_client, bool a_onceOnly = false)
@@ -521,8 +522,10 @@ namespace FrameAnchors
 				return owned;
 			// Anything else is imported as DXVK's own texture, never as a tripwire handle.
 			a_texture = RenderGraph::Engine::Tripwire::Unwrap(a_texture);
-			if (const auto found = state.imports.find(a_id); found != state.imports.end() && found->second.texture.get() == a_texture)
-				return found->second.resource;
+			const auto previous = state.imports.find(a_id);
+			if (previous != state.imports.end() && previous->second.texture.get() == a_texture)
+				return previous->second.resource;
+			const bool replacing = previous != state.imports.end();
 			// The same image under another id is a second graph resource: the graph orders neither's uses after the other's writes.
 			for (const auto& [id, other] : state.imports)
 				if (id != a_id && other.texture.get() == a_texture)
@@ -556,8 +559,12 @@ namespace FrameAnchors
 			import.id = a_id;
 			state.imports[a_id] = std::move(import);
 			Publish(state);
-			// The imports are registered with every anchor graph.
-			Rebuild(state, ~0u);
+			// The imports are registered with every anchor graph. A new one is built into the graphs that looked its id up (a client
+			// registering with it builds its own anchors again); one replaced is dropped, so every graph holding it is built again.
+			if (replacing)
+				Rebuild(state, ~0u, fmt::format("import '{}' replaced", a_id));
+			else if (state.host)
+				state.host->RequestRebuildFor(org::ResourceIdentifier(a_id), fmt::format("frame anchors: import '{}' added", a_id));
 			return resource;
 		}
 	}
@@ -659,7 +666,7 @@ namespace FrameAnchors
 		MarkCurrent(state, *existing);
 		if (replaced)
 			RetireGates(state, *replaced, existing->desc->gates);
-		Rebuild(state, mask);
+		Rebuild(state, mask, fmt::format("client '{}' registered{}", existing->desc->id, replaced ? " again" : ""));
 		logger::info("[ORG] frame anchors: {} registered ({} passes){}", existing->desc->id, existing->desc->passes.size(),
 			InGraphs(*existing->desc) ? "" : "; it joins the graphs once the shared constants exist");
 		return true;
@@ -677,7 +684,7 @@ namespace FrameAnchors
 		state.clients.erase(existing);
 		Publish(state);
 		RetireGates(state, *desc);
-		Rebuild(state, mask);
+		Rebuild(state, mask, fmt::format("client '{}' unregistered", desc->id));
 	}
 
 	void Refresh(std::string_view a_id)
@@ -687,7 +694,7 @@ namespace FrameAnchors
 		if (auto* client = FindClient(state, a_id)) {
 			Publish(state);
 			MarkCurrent(state, *client);
-			Rebuild(state, AnchorMask(*client->desc));
+			Rebuild(state, AnchorMask(*client->desc), fmt::format("client '{}' refreshed", client->desc->id));
 		}
 	}
 
@@ -719,7 +726,7 @@ namespace FrameAnchors
 		for (std::size_t i = 0; i < client->desc->passes.size(); ++i)
 			if (client->armed[i] == 1)
 				client->armed[i] = state.serial;
-		Rebuild(state, AnchorMask(*client->desc, true));
+		Rebuild(state, AnchorMask(*client->desc, true), fmt::format("client '{}' armed its one-shot passes", client->desc->id));
 	}
 
 	void SetLateEpochHook(std::function<void()> a_hook)
@@ -744,7 +751,7 @@ namespace FrameAnchors
 						MarkCurrent(a_state, client);
 						mask |= AnchorMask(*client.desc);
 					}
-				Rebuild(a_state, mask);
+				Rebuild(a_state, mask, "the shared constants exist");
 				logger::info("[ORG] frame anchors: the shared constants exist; the clients that read them join the graphs");
 			} else if (waiting && SharedConstants::Failed()) {
 				std::vector<std::shared_ptr<const ClientDesc>> failed;
@@ -769,7 +776,7 @@ namespace FrameAnchors
 				Publish(a_state);
 				for (auto& client : a_state.clients)
 					MarkCurrent(a_state, client);
-				Rebuild(a_state, ~0u);
+				Rebuild(a_state, ~0u, "graph resources resized");
 			}
 		}
 
@@ -967,7 +974,7 @@ namespace FrameAnchors
 				}
 		if (ranOnce) {
 			Publish(state);
-			Rebuild(state, 1u << index);
+			Rebuild(state, 1u << index, "one-shot passes ran");
 		}
 		// Last: an executed callback may register, refresh or rearm.
 		for (const auto& client : clients)
@@ -988,7 +995,7 @@ namespace FrameAnchors
 			return true;
 		// Register or Refresh asked for this build already; asking again costs nothing and covers a build that failed meanwhile
 		// (OnEpochFailed keeps the old graph). OnFrameEnd, or Drawcall Limit Fix's build point, builds it.
-		Rebuild(state, 1u << index);
+		Rebuild(state, 1u << index, fmt::format("client '{}' asked to join", a_id));
 		return false;
 	}
 
@@ -1181,7 +1188,7 @@ namespace FrameAnchors
 		auto owner = std::make_shared<EngineImport>(std::move(found->second));
 		state.imports.erase(found);
 		Publish(state);
-		Rebuild(state, ~0u);
+		Rebuild(state, ~0u, fmt::format("import '{}' released", a_id));
 		RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(owner));
 	}
 
@@ -1225,7 +1232,7 @@ namespace FrameAnchors
 		Publish(state);
 		for (const auto& client : dropped)
 			RetireGates(state, *client);
-		Rebuild(state, mask);
+		Rebuild(state, mask, "clients dropped after a failed build");
 		std::string ids;
 		for (const auto& client : dropped)
 			ids += fmt::format("{}{}", ids.empty() ? "" : ", ", client->id);

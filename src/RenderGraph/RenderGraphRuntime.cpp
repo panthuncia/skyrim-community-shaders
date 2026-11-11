@@ -2662,7 +2662,7 @@ void RenderGraphRuntime::ServicePipelineReload()
 	// Swapped in at the graph's next build (the "cs.org.pipeline-registry" extension's factory), where nothing records; with explicit
 	// builds that is the owner's build point (Drawcall Limit Fix's, at the next frame's start). With no graph nothing records: at once.
 	if (impl && impl->host) {
-		impl->host->RequestRebuild();
+		impl->host->RequestRebuild("shader reload: pipelines staged");
 	} else if (registry.Publish(0)) {
 		registry.Retire(~0ull);
 	}

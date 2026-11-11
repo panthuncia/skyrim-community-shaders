@@ -608,7 +608,7 @@ namespace DCLF
 					}
 					if (command == "dclf:rebuild") {
 						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild();
+							host->RequestRebuild("test harness command");
 						else
 							logger::warn("[DCLF] test command: no render graph host to rebuild");
 						return;
@@ -809,7 +809,7 @@ namespace DCLF
 						const std::string value = command.substr(19);
 						DCLF::Draws::asyncComputeOverride.store(value == "default" ? -1 : value != "0", std::memory_order_relaxed);
 						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild();
+							host->RequestRebuild("test harness command");
 						return;
 					}
 					// Cost attribution (diagnostics; a frozen camera, since a cut build leaves the draws reading an older frame's outputs):
@@ -855,7 +855,7 @@ namespace DCLF
 					if (command.rfind("dclf:pass-queries=", 0) == 0) {
 						org::diagnostics::DiagnosticSkipPassQueries().store(command.substr(18) == "0", std::memory_order_relaxed);
 						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild();
+							host->RequestRebuild("test harness command");
 						return;
 					}
 					// "dclf:drop-lists=0|1": DCLF's epochs submit their signals alone (RenderGraphRuntime::DropDclfLists).
@@ -894,7 +894,7 @@ namespace DCLF
 					if (command.rfind("dclf:heap-dedupe=", 0) == 0) {
 						rhi::DiagnosticDedupeHeapBinds().store(command.substr(17) == "1", std::memory_order_relaxed);
 						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild();
+							host->RequestRebuild("test harness command");
 						return;
 					}
 					// "dclf:skip-epochs=<shadow,z,colour,forward,fp>": those epochs alone not submitted (empty: every one submitted).
@@ -914,7 +914,7 @@ namespace DCLF
 					if (command.rfind("dclf:list-heaps=", 0) == 0) {
 						org::diagnostics::DiagnosticSkipListHeapBinds().store(command.substr(16) == "0", std::memory_order_relaxed);
 						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild();
+							host->RequestRebuild("test harness command");
 						return;
 					}
 					// "dclf:list-barriers=external|all|default": recordings leave out their full entry and exit barriers (the closed
@@ -923,7 +923,7 @@ namespace DCLF
 						const std::string value = command.substr(19);
 						org::diagnostics::DiagnosticSkipListBarriers().store(value == "external" ? 1 : value == "all" ? 2 : 0, std::memory_order_relaxed);
 						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild();
+							host->RequestRebuild("test harness command");
 						return;
 					}
 					// "dclf:rhi-globals=0|1": BasicRHI records global barriers or none (the upload lists' too; unsafe off: empty-epoch
@@ -931,7 +931,7 @@ namespace DCLF
 					if (command.rfind("dclf:rhi-globals=", 0) == 0) {
 						rhi::DiagnosticSkipGlobalBarriers().store(command.substr(17) == "0", std::memory_order_relaxed);
 						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild();
+							host->RequestRebuild("test harness command");
 						return;
 					}
 					// "dclf:queue-boundary=0|1": the graph's external entry and exit barriers (unsafe off: timing only), from a rebuild.

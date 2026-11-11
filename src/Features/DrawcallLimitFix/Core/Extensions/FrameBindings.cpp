@@ -120,8 +120,8 @@ namespace DCLF::Extensions
 		const auto declared = s_declared.load(std::memory_order_acquire);
 		std::vector<std::string_view> added;
 		for (const auto id : a_ids) {
-			// Only ids every graph registers: declaring another would fail the build.
-			if (!PublishedResources::IsRegistered(id))
+			// Only ids every graph registers: declaring another would fail the build. One skipped is built in once published.
+			if (!PublishedResources::IsDeclarable(id))
 				continue;
 			a_builder.ShaderResource(org::ResourceIdentifier(id), noViews);
 			if (!declared || std::ranges::find(*declared, id) == declared->end())

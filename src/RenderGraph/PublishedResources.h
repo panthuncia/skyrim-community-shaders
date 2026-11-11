@@ -72,6 +72,13 @@ namespace PublishedResources
 	bool IsRegistered(std::string_view a_id);
 
 	/**
+	 * @brief A pass's Declare, at a graph build: IsRegistered. An id not registered yet is remembered, and its first publish builds every
+	 * graph again: this build skipped it without looking it up, so nothing else names the graph that wants it. Declare with this, not
+	 * IsRegistered, an id that is published later.
+	 */
+	bool IsDeclarable(std::string_view a_id);
+
+	/**
 	 * @brief Whether a_view is the D3D11 export of a_id's twin while a_id is published. Does not allocate.
 	 */
 	bool IsExportOf(const ID3D11ShaderResourceView* a_view, std::string_view a_id);

@@ -328,8 +328,8 @@ namespace DCLF::Family
 		const auto known = declared.load(std::memory_order_acquire);
 		std::vector<std::string_view> added;
 		for (const auto& id : ids) {
-			// Only ids every graph registers: declaring another would fail the build.
-			if (!PublishedResources::IsRegistered(id))
+			// Only ids every graph registers: declaring another would fail the build. One skipped is built in once published.
+			if (!PublishedResources::IsDeclarable(id))
 				continue;
 			a_builder.ShaderResource(org::ResourceIdentifier(id), noViews);
 			if (!known || !known->contains(id))
