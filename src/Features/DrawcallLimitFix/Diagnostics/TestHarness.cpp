@@ -31,6 +31,7 @@
 #include <Tracy/Tracy.hpp>
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "ShaderCache.h"
 #include "State.h"
 #include "Vram/VramLedger.h"
 #include "Features/DrawcallLimitFix/Features/TextureStreaming/TextureStreaming.h"
@@ -142,6 +143,8 @@ namespace DCLF
 		 *   they choose (the graph built for it); at once with the feature off.
 		 * - "nvperf": the last dclf:nvperf capture done or failed.
 		 * - "signal:<name>": dclf:signal=<name> was run (a remote client's, through DevBench's communityshaders.dclf); consumed.
+		 * - "shaders": Community Shaders' compile queue is empty (a run that compiles on demand, CS_DISABLE_FEATURES: the shaders the
+		 *   frames asked for are built, so a shot after it draws everything in view).
 		 */
 		struct Wait
 		{
@@ -175,7 +178,9 @@ namespace DCLF
 			}
 			if (condition.rfind("signal:", 0) == 0)
 				return harness.signals.erase(condition.substr(7)) != 0;
-			logger::warn("[DCLF] test wait: no condition '{}' (reload, settled, nvperf, signal:<name>); not waiting", condition);
+			if (condition == "shaders")
+				return !SIE::ShaderCache::Instance().IsCompiling();
+			logger::warn("[DCLF] test wait: no condition '{}' (reload, settled, nvperf, signal:<name>, shaders); not waiting", condition);
 			return true;
 		}
 
@@ -239,6 +244,9 @@ namespace DCLF
 			 * at the same point in a run whether or not the feature is installed (a CS_DCLF=0 baseline included).
 			 * Loading screens do not count, so the two runs stay in step.
 			 */
+			/** @brief The frames the list's waits have held so far, the one in progress included: the exit frame moves by them too. */
+			std::uint32_t HeldFrames() const { return shift + (wait ? frame - wait->since : 0u); }
+
 			void OnFrame()
 			{
 				if (DCLF::Scene::FrameView::IsLoadingScreenUp())
@@ -1266,9 +1274,11 @@ namespace DCLF
 		}
 		// CS_DCLF_TEST_EXIT=<frame>: a startup loop's run ends here, loading screens not counted. The log is flushed, then the
 		// process ends without the engine's shutdown, which is slow and not what such a run tests.
+		// The frames the command list's waits held move it later, as they move the commands after them.
+		static TestCommands testCommands;
 		static const std::uint32_t exitFrame = static_cast<std::uint32_t>(std::strtoul(DCLF::SwitchValue(DCLF::Switch::TestExit).c_str(), nullptr, 10));
 		static std::uint32_t exitCount = 0;
-		if (exitFrame && !DCLF::Scene::FrameView::IsLoadingScreenUp() && ++exitCount >= exitFrame) {
+		if (exitFrame && !DCLF::Scene::FrameView::IsLoadingScreenUp() && ++exitCount >= exitFrame + testCommands.HeldFrames()) {
 			logger::info("[DCLF] test exit at frame {}", exitCount);
 			const auto moves = DCLF::Extensions::TransformMoveStats();
 			logger::info("[DCLF] transform moves at exit: {} spilled (allocated past the queue), {} dropped while no build drained", moves.spilled, moves.dropped);
@@ -1276,7 +1286,6 @@ namespace DCLF
 			spdlog::apply_all([](const std::shared_ptr<spdlog::logger>& a_logger) { a_logger->flush(); });
 			::TerminateProcess(::GetCurrentProcess(), 0);
 		}
-		static TestCommands testCommands;
 		testCommands.OnFrame();
 		static TestToggle testToggle;
 		testToggle.OnFrame(std::string(a_feature));
