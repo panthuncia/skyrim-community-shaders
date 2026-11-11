@@ -2,6 +2,7 @@
 // start), inside the engine-read window or under the engine call that holds the objects; the drawn-roots set and the counters.
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
 #include "Features/DrawcallLimitFix/Core/Engine/FrameClock.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
 
@@ -761,18 +762,21 @@ namespace DCLF::SceneCapture
 
 	namespace
 	{
-		std::atomic<const std::vector<const RE::NiAVObject*>*> drawnRoots{ nullptr };
-		std::vector<std::unique_ptr<const std::vector<const RE::NiAVObject*>>> drawnRootSets;  // render thread: every set published
+		// The drawn parentless roots (SetDrawnRoots): an immutable sorted set InWorld reads lock-free inside a SceneTracker::SetRead. A
+		// replaced set is retired through SceneTracker::RetireSet, freed once no read is in.
+		std::atomic<const std::vector<const void*>*> drawnRoots{ nullptr };
+		std::unique_ptr<const std::vector<const void*>> drawnRootsCurrent;  // render thread: the published set's owner
 	}
 
-	void SetDrawnRoots(std::vector<const RE::NiAVObject*> a_roots)
+	void SetDrawnRoots(std::vector<const void*> a_roots)
 	{
 		std::ranges::sort(a_roots);
-		if (const auto* current = drawnRoots.load(std::memory_order_acquire); current ? *current == a_roots : a_roots.empty())
+		if (drawnRootsCurrent ? *drawnRootsCurrent == a_roots : a_roots.empty())
 			return;
-		auto set = std::make_unique<const std::vector<const RE::NiAVObject*>>(std::move(a_roots));
-		drawnRoots.store(set.get(), std::memory_order_release);
-		drawnRootSets.push_back(std::move(set));
+		auto set = std::make_unique<const std::vector<const void*>>(std::move(a_roots));
+		drawnRoots.store(set.get(), std::memory_order_seq_cst);
+		SceneTracker::RetireSet(std::move(drawnRootsCurrent));
+		drawnRootsCurrent = std::move(set);
 	}
 
 	bool InWorld(const RE::NiAVObject* a_object)
@@ -786,9 +790,11 @@ namespace DCLF::SceneCapture
 			top = a_object;
 		}
 		// A portal graph's parentless root (SetDrawnRoots).
-		if (const auto* roots = drawnRoots.load(std::memory_order_acquire); roots && top && !top->parent)
-			return std::ranges::binary_search(*roots, top);
-		return false;
+		if (!top || top->parent)
+			return false;
+		const SceneTracker::SetRead read;
+		const auto* roots = drawnRoots.load(std::memory_order_seq_cst);
+		return roots && std::ranges::binary_search(*roots, static_cast<const void*>(top));
 	}
 
 	std::unique_ptr<Records> CaptureAttached(const RE::NiAVObject& a_root)

@@ -268,18 +268,21 @@ namespace DCLF::Scene
 		/**
 		 * @brief Render thread: how many references the category captures still held pin each of a_keys (their `pins`, let go of once
 		 * the coordinator applied them), into a_counts (a_keys' order). The unheld roots' observer (Features/Particles' master particles)
-		 * tells DCLF's holds from the engine's.
+		 * tells DCLF's holds from the engine's (CS_DCLF_STATS). One pass over the pins, each looked up among the keys.
 		 */
 		void CapturePinsOf(std::span<const void* const> a_keys, std::span<std::uint32_t> a_counts) const
 		{
 			std::ranges::fill(a_counts, 0u);
 			if (a_keys.empty())
 				return;
+			ankerl::unordered_dense::map<const void*, std::size_t> index;
+			index.reserve(a_keys.size());
+			for (std::size_t i = 0; i < a_keys.size(); ++i)
+				index.try_emplace(a_keys[i], i);
 			for (const auto& capture : categoryCapturesHeld)
 				for (const auto& pin : capture->pins)
-					for (std::size_t i = 0; i < a_keys.size(); ++i)
-						if (pin.get() == a_keys[i])
-							++a_counts[i];
+					if (const auto it = index.find(pin.get()); it != index.end())
+						++a_counts[it->second];
 		}
 		/**
 		 * @brief Render thread, at an execution's commit: import leases of cleared geometry slots, held until the GPU retires it.
@@ -319,8 +322,6 @@ namespace DCLF::Scene
 	private:
 		Channels& channels = Channels::Get();
 		void CaptureCategories(bool a_force);
-		/** @brief A cheap hash of everything the category capture reads to find category nodes. */
-		std::uint64_t CategorySignature() const;
 		/**
 		 * @brief Render thread, frame start: captures what the coordinator found the mirror lacking (Channels::mirrorCaptureRequests)
 		 * with its chain up to the world root (SceneCapture::CaptureAttached) onto the tracker's stack, mirror-only.

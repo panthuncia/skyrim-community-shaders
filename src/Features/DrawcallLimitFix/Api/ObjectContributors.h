@@ -302,9 +302,11 @@ namespace DCLF::Api
 	 * owner's child edits (SceneWriterFramework's), and the feature's own hooks, which push SceneTracker::PushDetached before the engine
 	 * lets go.
 	 *
-	 * - owner: the node whose child edits add or remove roots. The category signature watches it, so its edits move the signature.
+	 * - owner: the node whose child edits add or remove roots. The tracker counts its child edits apart (SceneTracker::UnheldEdits); after
+	 *   one the category capture gathers the roots again and diffs them alone, with no full capture. A new owner is a full capture.
 	 * - enter / leave: the render thread's category capture calls enter before gather and leave after the roots' mirror pushes, so no
-	 *   removal is pushed between a root's listing and its capture (the feature's removal hook waits for leave).
+	 *   removal is pushed between a root's listing and its capture (the feature's removal hook waits for leave). Called only on a frame
+	 *   that gathers the roots.
 	 * - gather: each root, through the sink, between enter and leave.
 	 * One feature contributes it, at most.
 	 */
