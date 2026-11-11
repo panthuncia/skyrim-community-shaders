@@ -800,9 +800,9 @@ the raw device and context, and every UI draw is its own D3D11 call.
 | factory                          | 82831 | 0x140f5d450 | 84952 | 0x141047dc0 | Allocates from the GFx heap.                                                                                                |
 | SetDependentVideoMode            | 82918 | 0x140f633d0 | 85033 | 0x14104dfe0 | Slot 53.                                                                                                                    |
 | CreateShaders and states         | 82863 | 0x140f5fae0 | 84984 | 0x14104a670 | Releases everything via 82894 on failure.                                                                                   |
-| BSScaleformManager renderer init | 80603 | 0x140edb730 | ?     | -           | Factory, `GetScaleformRendererParameters`, `SetDependentVideoMode(dev, ctx, 0)`, GFxRenderConfig (0x140f63d20, flags 0x11). |
+| BSScaleformManager renderer init | 80603 | 0x140edb730 | 82730 | 0x140fc31e0 | Factory, `GetScaleformRendererParameters`, `SetDependentVideoMode(dev, ctx, 0)`, GFxRenderConfig (0x140f63d20, flags 0x11). |
 
-**Members:** +0x490 device, +0x498 context, +0xC0 video mode set, +0xE0 the renderer's own DSV (mask stencil), +0x150..
+**Members:** +0x490 device, +0x498 context, +0xC0 video mode set, +0xD8/+0xE0 the RTV and DSV bound at BeginDisplay (the mask stencil is kMAIN's, see p5/scaleform.md), +0x150..
 VS, +0x248.. and +0x2D8.. PS, +0x110 input layout, +0x1B8 and +0x3B0 constant buffers (0x80 each), +0x3E0..+0x458 blend
 states (2x7), +0x410 color-write-off, +0x3B8..+0x3D0 samplers (4), +0x458/+0x460 rasterizer states, +0x468..+0x488
 depth-stencil states (5), +0x4A0 in-mask flag, +0x4A4 stencil ref, +0x620 texture list, +0x640 CRITICAL_SECTION, +0x720
@@ -942,7 +942,7 @@ ORG present stage must accept presents from the blocking loop and the sequence t
 1. AE render-target indices (116 vs 114): confirm the two extra are appended.
 2. Bink colour order: BINKSURFACE32's byte order may not match R8G8B8A8_UNORM; dump the PS at 0x141e0bf10 for a swizzle.
 3. Scaleform enable tables: what fills the `.bss` enable bytes, so which blobs are created at runtime.
-4. Pair the 53 embedded HLSL sources with the 55 blobs before porting.
+4. Pair the 53 embedded HLSL sources with the 55 blobs before porting. **Done** (P5.10, `tools/check-scaleform-shaders.py`): 46 identical, 5 differ in register allocation only, 2 sources have no blob; table in p5/scaleform.md.
 5. No callers found for slots 8 (Map), 33 (Noise), 49-51 (DistantBlur) and 57/61/63.
 6. Which console command or INI sets the HDR flag (SE `DAT_141e0eb24`), and what mgr+0x118 means.
 7. Missing AE IDs: 100430, 51855, 80603, 87887, 87889 and the helper render functions.
