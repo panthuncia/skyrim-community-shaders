@@ -314,5 +314,13 @@ namespace DCLF
 		/** @brief A pass handed on to the engine, for observers (Diagnostics::PassKept). */
 		void NoteKept(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint8_t a_site, std::uint8_t a_occlusionPhase = 0) const;
 		bool Withhold(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass);
+		/**
+		 * @brief A pass handed on to the engine (not withheld): with the flush latch on (P5.13, p5/flush.md "Allowed engine draws"),
+		 * one DCLF leaves to the engine on purpose is vouched for (RenderGraph::Engine::Flush::VouchPass), so the engine still draws
+		 * it: a Lighting, Effect or DistantTree property's pass into a renderer DCLF withholds from (the main views and the first
+		 * person's, the shadow views, the reflection faces, the occlusion maps with a_occlusion). Nothing else, and nothing while
+		 * bypassed or with the latch off.
+		 */
+		void KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, bool a_occlusion = false) const;
 	};
 }

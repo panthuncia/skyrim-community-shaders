@@ -1552,12 +1552,12 @@ namespace DCLF::Direct
 		ReleaseForwardSlots();
 	}
 
-	void SubmitQueued()
+	void SubmitQueued(bool a_always)
 	{
 		auto& s = S();
 		const auto* host = RenderGraphRuntime::Get().Host();
 		const std::uint64_t made = host ? host->SubmissionsMade() : 0;
-		if (s.submitted >= s.signalled && s.hostSubmitted >= made)
+		if (!a_always && s.submitted >= s.signalled && s.hostSubmitted >= made)
 			return;
 		DCLF_ZONE("CS.DCLF.SubmitQueued");
 		globals::d3d::context->Flush();

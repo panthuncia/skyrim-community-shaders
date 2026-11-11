@@ -2,6 +2,13 @@
 
 #include <d3d11.h>
 
+#include <cstdint>
+
+namespace RE
+{
+	class BSRenderPass;
+}
+
 /**
  * @brief The engine's state flush and shader binds on the way to P5.13 (org-full-port.md; docs/development/p5/flush.md).
  *
@@ -28,6 +35,14 @@
  *   first, with the latched shaders, so CS's D3D11 readers still see the engine's current state. CS code that asks D3D11 what the
  *   engine bound at any other point (PSGetShaderResources, OMGetRenderTargets, RSGetViewports) reads stale state: flush.md lists it.
  *   CS_ORG_ENGINE_FLUSH_LATCH_KEEP=<method>,... names binds that still reach D3D11 inside the four functions, to bisect those readers.
+ *
+ * Allowed engine draws: code that declines a draw on purpose (DCLF's objects not yet claimed, a port's inherent refusals) says so,
+ * and the latch lets that draw through with the owed state applied, as for a flush CS asks for. Two forms:
+ * - EngineDraws: a scope around a synchronous call of the engine's draw (a family handing a batch back, ImageSpace calling the
+ *   engine's Render). Every flush and draw on this thread inside it is real.
+ * - VouchPass: at registration, for a pass the engine's batch walk draws later (DCLF's PassCapture). The latch's
+ *   BSBatchRenderer::RenderPassImmediately detour opens an EngineDraws scope for a vouched pass.
+ * Each is counted by reason in the latch's periodic line. A draw nobody vouched for is still skipped and logged as an error.
  */
 namespace RenderGraph::Engine::Flush
 {
@@ -55,4 +70,47 @@ namespace RenderGraph::Engine::Flush
 
 	/** @brief The same for CS's BeginTechnique pixel-shader thunk (the engine's SetPixelShader call there). */
 	void BindPixelShader(ID3D11PixelShader* a_shader, void* a_caller);
+
+	/**
+	 * @brief Why the engine draws something on purpose while the latch is on. Make one per reason, once (a static), and name the owner
+	 * first: "dclf: object not yet claimed (main views)", "sky: cloud layer refused". At most 31 reasons; more share the last one.
+	 */
+	class Reason
+	{
+	public:
+		explicit Reason(const char* a_name);
+		std::uint8_t Id() const { return id; }
+
+	private:
+		std::uint8_t id;
+	};
+
+	/**
+	 * @brief A scope in which the engine's draws on this thread are the engine's on purpose: with the latch on, its flushes apply the
+	 * state latched flushes owe, its shader binds and dispatches reach D3D11, and its draws are let through and counted under a_reason.
+	 * Open it in the code that declines a draw, just before it calls the engine's original draw, batch or flush, and keep it to that
+	 * call. Nothing when the latch is off. Scopes nest; the innermost reason counts.
+	 */
+	class EngineDraws
+	{
+	public:
+		explicit EngineDraws(const Reason& a_reason);
+		~EngineDraws();
+		EngineDraws(const EngineDraws&) = delete;
+		EngineDraws& operator=(const EngineDraws&) = delete;
+
+	private:
+		int previous = -1;
+		bool active = false;
+	};
+
+	/** @brief Whether VouchPass records anything (the latch is on). Test it before work that only feeds VouchPass. Any thread. */
+	bool Vouching();
+
+	/**
+	 * @brief Any thread, where the engine registers a_pass with a batch renderer: the pass is the engine's to draw on purpose. When the
+	 * batch walk draws it (BSBatchRenderer::RenderPassImmediately) in this frame or the next, its draws run in an EngineDraws scope
+	 * of a_reason. The mark is kept per pass object and checked against the pass's geometry, so a reused pass is not vouched for.
+	 */
+	void VouchPass(const RE::BSRenderPass* a_pass, const Reason& a_reason);
 }

@@ -1603,6 +1603,19 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   since only submissions poll them. `RangeSpec` names mips and slices, not a rectangle: a crop is cut on the CPU.
 - **Found by:** P3 W3, Screenshot (2026-11-09).
 
+### Waiting for work in the host's stream
+
+- **Need:** wait, mid-frame, for an epoch's recording or ticket, or anything else behind a slot's last run.
+- **Who:** DCLF's frame start (`AdoptCurrentSnapshot` waits for revision recordings); any plugin that waits for a
+  graph result inside the frame that produced it.
+- **Where it fits:** in-stream epochs reach the device only when DXVK flushes, and the host seals them at Present. A wait
+  for a run of the current frame that nobody flushes never ends. ORG's host thread now never blocks on a slot whose run is
+  neither done nor sealed (`Async::Waitable`); it marks the ring full instead (`EpochRingFullError`) until a seal or a
+  completion. A render-thread wait must flush DXVK's stream itself while it waits (`Direct::SubmitQueued(true)`). An API
+  should offer waits only on sealed points, or flush for the caller.
+- **Found by:** the RX 6600 freeze after `coc Whiterun` (2026-11-11): the host's thread blocked on this frame's run of
+  a plain ring after abandoned tickets had moved the ring round to it.
+
 ## Plugins that still call D3D11
 
 ### Calling D3D11 in the DXVK-free build
