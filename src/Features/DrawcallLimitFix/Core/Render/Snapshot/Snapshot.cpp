@@ -965,6 +965,8 @@ namespace DCLF
 				// ticket on a run that is neither done nor sealed. A run of this frame still in the stream reaches neither until this
 				// thread flushes it (the seal is this thread's Present), so the wait would never end.
 				Direct::SubmitQueued(true);
+				// The recordings this wait needs come from ORG's host thread: wake it if it sleeps with them queued (a lost wake, logged).
+				(void)host->NudgeHostThread();
 				Direct::ReleaseCompletedSlots();
 				PollHostRetirement();
 				ticketsAt = now;
@@ -998,7 +1000,7 @@ namespace DCLF
 					"generation {}, main generation {}, payload {}. The builder (read racily, for this message): stage {}, passes {} ({} idle), work {}, draws {}, "
 					"payload {} (failed {}, source in flight {}, parts in flight: {}), sealed sequence {}, assembler latest {} pending {} (sealed {}, published {}, "
 					"failed {}, superseded {}, abandoned {}), active {}; its pump: runner active {}, requested epoch {}, drained {}, notifications {}, passes {}, "
-					"rejected {}; retirement: {}",
+					"rejected {}; retirement: {}. ORG's {}",
 					frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), host->BuildGeneration(), host->RebuildRequested(),
 					s.postedInputs.mainGeneration, DrawPipelines::Get().Generation(), stale, seen, s.recordingsOutstanding.load(std::memory_order_acquire),
 					s.snapshotInputsMoved.load(std::memory_order_acquire), s.publicationGated.load(std::memory_order_acquire),
@@ -1009,7 +1011,7 @@ namespace DCLF
 					s.snapshotBuilder.payload != nullptr, s.snapshotBuilder.payloadFailed, s.snapshotBuilder.payloadSource != nullptr, PayloadPools::PendingParts(),
 					s.snapshotBuilder.sealedSequence, s.revisions.assembler.LatestSequence(), s.revisions.assembler.Pending(), assembler.sealed, assembler.published,
 					assembler.failed, assembler.superseded, assembler.abandoned, active ? active->Sequence() : 0, pumpStats.runnerActive, pumpStats.requestedEpoch, pumpStats.drainedEpoch, pumpStats.notifications,
-					pumpStats.drainPasses, pumpStats.rejected, RetirementState()));
+					pumpStats.drainPasses, pumpStats.rejected, RetirementState(), host->DescribeAsyncState()));
 			}
 			if (waited < kSpin)
 				std::this_thread::yield();
