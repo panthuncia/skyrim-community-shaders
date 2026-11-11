@@ -3,6 +3,7 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "TestHarness.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
 
 #include "Vram/MemProbe.h"
@@ -560,6 +561,12 @@ namespace DCLF
 					// "dclf:rebuild": a graph rebuild requested (GraphHost::RequestRebuild, here at Present on the graph's owner
 					// thread), which the next frame's build point performs: every recording invalidated, so that frame waits at its start for
 					// a snapshot recorded on the new build (IndirectDraws::AdoptCurrentSnapshot; the strict epochs line counts the waits).
+					// "dclf:refresh=<client id>": FrameAnchors::Refresh of that anchor client, which rebuilds its anchors' epochs alone (the
+					// path a client changing its passes or resources takes), for stress runs.
+					if (command.rfind("dclf:refresh=", 0) == 0) {
+						FrameAnchors::Refresh(command.substr(13));
+						return;
+					}
 					if (command == "dclf:rebuild") {
 						if (auto* host = RenderGraphRuntime::Get().Host())
 							host->RequestRebuild();
