@@ -9,13 +9,15 @@
 //
 // The ORG build (CS_ORG_BINDLESS, src/RenderGraph/Engine/Bink/BinkGraph.cpp) has no vertex buffer. The vertex stage makes the
 // engine's quad from the tile's rectangle in the push block. Its corners are top left, bottom left, bottom right, top right, as
-// BSMovie::CreateTileQuad (SE 0x1410a2720) builds them, drawn as triangles 0-1-2 and 0-2-3.
+// BSMovie::CreateTileQuad (SE 0x1410a2720) builds them, drawn as triangles 0-1-2 and 0-2-3. Every tile is one region of a
+// single movie texture there, so the push block also gives the tile's texture coordinates in it.
 
 #include "Common/OrgResources.hlsli"
 
 struct BinkQuad
 {
 	float4 Rect;  // the tile's corners in clip space: left, top, right, bottom
+	float4 UV;    // ORG: the tile's region of the movie texture: left, top, right, bottom
 };
 
 #define BINK_COPY_RESOURCES(X)            \
@@ -40,7 +42,7 @@ VS_OUTPUT VSMain(uint vertexID : SV_VertexID)
 
 	VS_OUTPUT output;
 	output.Position = float4(lerp(Quad.Rect.xy, Quad.Rect.zw, uv), 0.0, 1.0);
-	output.TexCoord = uv;
+	output.TexCoord = lerp(Quad.UV.xy, Quad.UV.zw, uv);
 	return output;
 }
 #else

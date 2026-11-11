@@ -6,7 +6,7 @@
  * own switch whether it does anything.
  *
  * Device-time hooks (Tripwire, Pipeline and Buffers device hooks, engine handles) stay where the device is made (Hooks.cpp), and
- * per-call seams (Targets::BeginSet, Constants::OnDraw, the Tonemap anchor) stay at their call sites.
+ * per-call seams (Targets::BeginSet, the Constants Map/Unmap seams, the Tonemap anchor) stay at their call sites.
  */
 namespace RenderGraph::Engine
 {

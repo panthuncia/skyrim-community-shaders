@@ -45,5 +45,7 @@ namespace RenderGraph::Engine
 		Skeleton::Setup();
 		// CS_ORG_IMAGESPACE: the ImageSpace draws on the graph; the client registers once the effects' shapes are known.
 		ImageSpace::Setup();
+		// CS_ORG_BINK: the movie player's client at the Present anchor, registered once for the session.
+		Bink::Setup();
 	}
 }

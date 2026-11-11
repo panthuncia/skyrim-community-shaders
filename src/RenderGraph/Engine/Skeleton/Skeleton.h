@@ -12,13 +12,16 @@
  * - The copy of the main depth into kPOST_ZPREPASS_COPY at Main::RenderDepth's end (100421 / 107139), in FinishAccumulating
  *   (99938 / 106583), and CS's own in Deferred::DeferredPasses.
  *
- * Each clear is a draw through a run gate on one target view (a slice or a face), so its recording is kept and a run does only
- * the clears the engine asked for. The engine's call is withheld when the graph pass ran. The binds stay with D3D11: draws
- * DCLF does not claim yet still read them.
+ * Each view the engine clears (a fixed list from the RE: skeleton.md) is one pass, registered once at Setup from the engine's
+ * tables. Its clears are draws through a run gate, one per set of depth flags, and a colour clear's colour is latched, so the
+ * recording is kept and a run does only the clears the engine asked for. A group registers again only when the engine made one
+ * of its targets again (a resize). The engine's call is withheld only when the anchor can run the pass now
+ * (FrameAnchors::CanRun), and made at the flush when the run did not submit it. The binds stay with D3D11: draws DCLF does not
+ * claim yet still read them.
  *
- * Fallback, per call: a view outside the engine's tables, a format the clear programs cannot draw (integer formats), a clear
- * value other than the engine's (depth 1, stencil 0), a call off the main thread (a loading screen), a target seen for the
- * first time, or an anchor run that did not submit the pass. Each of those gets the engine's own D3D11 call.
+ * Fallback, per call: a view the skeleton has no pass for, a format the clear programs cannot draw (integer formats), a clear
+ * value other than the engine's (depth 1, stencil 0), a caller that is not the render owner, a registration not in its
+ * anchor's built graph yet, a full ring, or a run that did not submit. Each of those gets the engine's own D3D11 call.
  *
  * Default off: nothing is installed, and the engine's calls are unchanged.
  */
@@ -33,7 +36,7 @@ namespace RenderGraph::Engine::Skeleton
 	/** @brief State::Setup, before the render graph initializes: the skeleton's anchors are reserved. */
 	void Reserve();
 
-	/** @brief State::Setup, once the graph is up and the engine's targets moved: the run gates. Clients register as targets appear. */
+	/** @brief State::Setup, once the graph is up and the engine's targets moved: every clear pass and the depth copy, registered once. */
 	void Setup();
 
 	/**

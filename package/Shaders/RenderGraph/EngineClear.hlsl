@@ -1,12 +1,20 @@
 // The engine skeleton's clears (src/RenderGraph/Engine/Skeleton): a clear drawn as a fullscreen triangle, so a run gate can
 // switch it on or off per run while the recording is kept. The engine clears depth to 1.0 and stencil to 0 only; the depth
 // program writes depth 1.0 from the vertex stage with an Always test, and its stencil ops write zero. The colour program
-// writes the push block's colour. The push block must match ClearConstants in Skeleton.cpp.
+// writes the colour the run's commit latched for its view: a recording is kept across runs, so the colour cannot be in the
+// push block. ClearBlock in Skeleton.cpp mirrors the push block.
 
-cbuffer ClearConstants : register(b0)
+#include "Common/OrgResources.hlsli"
+
+struct ClearColour
 {
 	float4 Colour;
-}
+};
+
+#define ENGINE_CLEAR_RESOURCES(X) X(LATCH, ClearColour, Clear, 0)
+
+ORG_PUSH_BLOCK(ENGINE_CLEAR_RESOURCES(ORG_HANDLE))
+ENGINE_CLEAR_RESOURCES(ORG_RESOURCE)
 
 struct ClearVSOutput
 {
@@ -24,7 +32,7 @@ ClearVSOutput VSMain(uint vertexID : SV_VertexID)
 
 float4 PSColour(ClearVSOutput input) : SV_Target0
 {
-	return Colour;
+	return Clear.Colour;
 }
 
 void PSDepth(ClearVSOutput input)

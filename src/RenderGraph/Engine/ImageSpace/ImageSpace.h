@@ -16,18 +16,22 @@
  * and the volumetric lighting / lens flare composite of the pre-tonemap composites. The tonemap draw stays with D3D11 (Effects11, Post
  * Processing and HDR Display own it), as does every effect outside the list.
  *
- * Graph rebuilds: the client is registered once the shapes (shader, targets, samplers, blend) of a learning window are known; every
- * shape is a pass behind a gate entry, so effects that run on some frames only and the luminance chain's alternating targets never
- * rebuild the graph. A new shape later draws with D3D11 until the next registration, which happens only after a cell change or when
- * the engine's targets were made again (a resize).
+ * Graph rebuilds: the client is registered once the shapes (shader, targets, samplers, blend) of a learning window are known and
+ * their programs are built (RenderGraph::ProgramCache, off the render thread), with the shapes the RE says they imply (the source's
+ * kMAIN / kMAIN_COPY alternation, the luminance chain's alternating level, the other bloom radii). Every shape is a pass behind a
+ * gate entry, so effects that run on some frames only never rebuild the graph. The client joins through FrameAnchors::RequestJoin
+ * (built at the next build point, never by running the anchor). A shape first seen later draws with D3D11 until the next cell
+ * change; the engine's targets made again (a resize) make the same passes again on the new imports.
  *
  * Fallback, per draw: anything the port cannot take (an effect not selected, a target outside the engine's table, a custom viewport,
- * a scissor rectangle, dynamic resolution, a clear, no captured constants, a call off the main thread, a graph not built yet, the
- * frame's anchor runs used up) is drawn by the engine as before. A batch that is pending when the engine draws something else is run
- * first, so the engine's order is kept. A failed graph returns every effect to D3D11 for the session.
+ * a scissor rectangle, dynamic resolution, a clear, no captured constants, a caller that is not the render owner, a graph not built
+ * yet, an anchor that cannot run another batch now: FrameAnchors::CanRun, its runs a frame) is drawn by the engine as before. A batch
+ * that is pending when the engine draws something else is run first, so the engine's order is kept. A failed graph returns every
+ * effect to D3D11 for the session.
  *
- * Switches: CS_ORG_IMAGESPACE=1 (default off: nothing is hooked), CS_ORG_IMAGESPACE_EFFECTS=<list> (engine names, effect names or
- * the groups hdr, bloom, composite; unset or "all": every covered effect), CS_ORG_IMAGESPACE_LOG=1 (each new shape and each batch).
+ * Switches: CS_ORG_IMAGESPACE=1 (default off: nothing is hooked). Diagnostics: CS_ORG_IMAGESPACE_EFFECTS=<list> (engine names,
+ * effect names or the groups hdr, bloom, composite; unset or "all": every covered effect) narrows the port to bisect an effect;
+ * CS_ORG_IMAGESPACE_LOG=1 logs each new shape and each effect's constant sizes.
  */
 namespace RenderGraph::Engine::ImageSpace
 {
