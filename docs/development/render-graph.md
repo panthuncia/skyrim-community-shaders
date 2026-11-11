@@ -352,8 +352,11 @@ colour passes reading a feature's output), the producer publishes it (`src/Rende
 -   Only a resource the graph never aliases can be published: `History`, `Persistent`, or exported. An aliased transient keeps no
     contents across executions, and the reader's epoch is another execution. Publish refuses an aliasable twin.
 -   A reader in an epoch earlier in the frame than the producer's reads the previous frame's contents.
--   Publishing a new resource under an id (the first time, or after a `Resize`) adds the host extension
-    `cs.org.published-resources` again, which rebuilds every graph once. After a twin's `Resize` the anchors do it
+-   The host extension `cs.org.published-resources` is added once and registers the latest entries at every build. A new id
+    rebuilds only the graphs that looked it up (`GraphHost::RequestRebuildFor`); a reader that registers with it builds its own
+    epoch. A pass that skips an id until it is published declares it through `PublishedResources::IsDeclarable`: its publish
+    then rebuilds every graph once, since the skipping build never looked it up. A new resource under a known id (after a
+    `Resize`) rebuilds every graph, since each holds the old one. After a twin's `Resize` the anchors do it
     (`PublishedResources::Refresh`); the producer need not publish again.
 -   `Withdraw(id)` when the producer leaves its ORG path (its `onFailed`, a setting that turns it off). Readers then go back to D3D11.
     The resource stays registered until the next `Publish` under that id, because a graph built earlier may still declare it.
@@ -710,6 +713,62 @@ with `src/RenderGraph/Engine/Flush/Flush.h`:
 
 Both cost one flag test with the latch off. A draw nobody vouched for is still skipped and logged as an `[E]` line: that is a bug in
 whatever left it to the engine. The latch's periodic line lists the allowed draws by reason.
+
+### Rebuilds during play
+
+Every graph build runs on the render thread at a build point, and each epoch's graph builds every extension made into it. A
+rebuild of one epoch therefore costs every one of those extensions' gathers.
+
+**What the logs showed (2026-11-11, before the fix).** `1111-131713-p35-p5-all-census-misc-fin`: 394 `built again` lines in a
+four-minute tour, 31.6 s of synchronous builds. 332 of them came in 13 bursts that rebuilt every epoch (about 30 graphs each), and
+273 builds took over 50 ms: each one gathered `cs.dclf.main-opaque` and `cs.dclf.shadow` (about 100 ms each in Dev-Fast) although
+only Drawcall Limit Fix's epochs take those passes. `1111-144513-...-nudge3`: the first world frame after `coc Whiterun` built 28
+epochs at about 120 ms each, after five shadow maps were imported. The causes, from the code:
+
+-   Drawcall Limit Fix adds its extensions again whenever their resources change: the main resources (`Main-pass graph
+    resources`), the shadow resources, each imported shadow map (`shadow map N imported`), new shadow view slots (`shadow view
+    slots: N grown to M`) and the views' targets. `GraphHost::AddExtension` rebuilt every graph for each.
+-   A published resource (`'X' published to every epoch's graph`: 66 in that run, most of them engine targets published on a
+    reader's first request) added `cs.org.published-resources` again: every graph.
+-   A frame-anchors import (`cs.d3d11.*`, engine depth) rebuilt every anchor epoch, added or released.
+-   Clients registering, refreshing, arming one-shot passes and one-shot passes that ran rebuilt their own anchors' epochs. These
+    are the small bursts (41 bursts, 62 builds).
+
+The buffers Drawcall Limit Fix grows "as graph work" are versioned buffers: a new version needs no rebuild
+(`GraphHost::NoteNewVersions`). What rebuilds next to them is the shadow view slots' growth, which makes new per-slot buffers the
+shadow passes declare.
+
+**What changed.**
+
+-   Every request names its cause. The log line is `GraphHost: epoch N's graph built again (build B) in T ms; the other epochs'
+    graphs kept; why: <reason> (xcount); ...`, and a build point that builds several graphs adds `GraphHost: K epochs' graphs built
+    at one build point in T ms`. Reasons: `extension 'id' added again`, `frame anchors: client 'id' registered`, `frame anchors:
+    import 'id' added`, `published resource 'id' added`, `Drawcall Limit Fix's graph conditions changed`, `its alias placements are
+    in a pool another epoch's build grew`, `shader reload: pipelines staged`, and others.
+-   Drawcall Limit Fix's extensions are made only into their own epochs' graphs (`AddExtension(id, factory, epochs)`,
+    `Draws::ExtensionEpochs`): main into the main epochs, shadow into the shadow epochs, a view into its epochs and the main epochs
+    hosting them. Adding one again rebuilds only those. In a graph of one epoch they make only that epoch's passes
+    (`GatherScheduled`'s graph epoch), so an epoch's rebuild costs its own passes, not the whole frame's.
+-   A new published id or a new frame-anchors import rebuilds only the graphs that looked its name up (`RenderGraph::LookedUp`,
+    `GraphHost::RequestRebuildFor`); a reader registering with it rebuilds its own epoch anyway. A pass that skips an id until it
+    is published uses `PublishedResources::IsDeclarable`, whose publish rebuilds every graph once.
+
+**What remains, and why it stays synchronous.**
+
+-   A replaced published resource or import (a resize, a released engine target) rebuilds every graph that holds it: every graph
+    registers it, and a graph not rebuilt would keep the old resource alive (an import names DXVK's image, which goes with the
+    D3D11 texture).
+-   Drawcall Limit Fix's own resource changes rebuild its epochs: new resources need new passes to declare them. Shadow view slots
+    grow to the views counted (not with headroom), since every slot holds the scene's casting bound.
+-   Client registrations and one-shot passes rebuild their anchors. A port that registers per event should register once and
+    gate per run (Phase 5 rule).
+-   A rebuild in one epoch can grow a shared alias pool, which rebuilds the epochs placed in it (`its alias placements ...`).
+-   Builds stay on the render thread. `GraphHost::BuildInstance` changes services every graph shares (descriptor heaps, the alias
+    arena, the upload client) while the host's thread holds still, so building off the render thread needs ORG to make those
+    services safe for a concurrent build first. Drawcall Limit Fix's scene epochs (built asynchronously and switched in at the next
+    snapshot) are scene data, not graph builds; they cannot carry a graph build as they are. Since each rebuild now costs its own
+    epoch's passes, what remains is a few anchor graphs at about 1 to 5 ms and Drawcall Limit Fix's epochs on its own resource
+    changes.
 
 ### Pass helpers
 

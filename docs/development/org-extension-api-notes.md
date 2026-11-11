@@ -1703,3 +1703,14 @@ revision that reads per-frame-slot state (re-recording on change) or descriptor 
 shader. A port with draw-time shapes therefore keeps one pass per shape and must know its shapes before its first build (a
 manifest). An asynchronous anchor build switched in at the next snapshot (as DCLF's epochs) would let a port add a shape in play
 without a synchronous rebuild.
+
+### Graph builds off the render thread
+
+A host epoch's rebuild runs on the owner thread (`GraphHost::BuildInstance`), with the host's thread holding still, because a build
+changes services every epoch's graph shares (descriptor heaps, the alias arena, the upload client). Rebuilds during play
+(render-graph.md, "Rebuilds during play") are now scoped to the epochs that use what changed: extensions name their epochs
+(`AddExtension(id, factory, epochs)`), a graph gathers only its epoch's passes, and a changed name rebuilds only the graphs that
+looked it up (`RequestRebuildFor`). Building the replacement graph on a worker and swapping it in at the epoch's next submission
+would remove the remaining synchronous builds; it needs those shared services to accept a build that runs beside the host's
+thread's preparations.
+- **Found by:** the rebuild-storm investigation (2026-11-11), 31.6 s of synchronous rebuilds in a four-minute tour.
