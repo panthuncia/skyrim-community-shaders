@@ -9,6 +9,7 @@
 
 #include "Globals.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
@@ -25,6 +26,25 @@
 #include <atomic>
 #include <cstddef>
 #include <cstring>
+#include <set>
+#include <string_view>
+
+namespace DCLF::Features::Water
+{
+	std::string DescribeChange(const Shape& a_from, const Shape& a_to)
+	{
+		std::string out;
+		const auto note = [&](std::uint32_t a_register, const std::string& a_old, const std::string& a_new) {
+			if (a_old != a_new)
+				out += fmt::format("{}t{} {} -> {}", out.empty() ? "" : ", ", a_register, a_old.empty() ? "none" : a_old, a_new.empty() ? "none" : a_new);
+		};
+		for (std::uint32_t t = 0; t < kMaterialSlots; ++t)
+			note(t, a_from.materialIds[t], a_to.materialIds[t]);
+		for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h)
+			note(kHeaderRegisters[h], a_from.headerIds[h], a_to.headerIds[h]);
+		return out.empty() ? std::string("no input changed") : out;
+	}
+}
 
 namespace DCLF::Features::Water::WaterDraws
 {
@@ -109,6 +129,12 @@ namespace DCLF::Features::Water::WaterDraws
 					bindings.headers[h] = a_builder.ShaderResource(org::ResourceIdentifier(c.shape.headerIds[h])).View();
 					bindings.hasHeaders[h] = true;
 				}
+				// The material slots' published engine targets: declared for their order only (the draws' latches carry their indices),
+				// each id once. An id stays registered once published, so every graph built since can declare it.
+				std::set<std::string_view> declared(c.shape.headerIds.begin(), c.shape.headerIds.end());
+				for (const auto& id : c.shape.materialIds)
+					if (!id.empty() && PublishedResources::IsRegistered(id) && declared.insert(id).second)
+						static_cast<void>(a_builder.ShaderResource(org::ResourceIdentifier(id)).View());
 				return bindings;
 			}
 
@@ -272,6 +298,9 @@ namespace DCLF::Features::Water::WaterDraws
 			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h)
 				if (!a_shape.headerIds[h].empty())
 					published += fmt::format("{}t{} {}", published.empty() ? "" : ", ", kHeaderRegisters[h], a_shape.headerIds[h]);
+			for (std::uint32_t t = 0; t < kMaterialSlots; ++t)
+				if (!a_shape.materialIds[t].empty())
+					published += fmt::format("{}t{} {}", published.empty() ? "" : ", ", t, a_shape.materialIds[t]);
 			logger::info("[DCLF] water: the {} client registered (published inputs: {})", client->id, published.empty() ? "none" : published);
 			return client;
 		}
@@ -325,7 +354,8 @@ namespace DCLF::Features::Water::WaterDraws
 				return FrameAnchors::RequestJoin(client->id, FrameAnchors::Anchor::EngineDraws);
 			// No client is registered again during play (a rebuild on the frame's path): the batch stays the engine's.
 			if (!std::exchange(client->shapeLogged, true))
-				logger::warn("[DCLF] water: the {} batch's published inputs changed since its client registered; those batches stay the engine's", client->id);
+				logger::warn("[DCLF] water: the {} batch's published inputs changed since its client registered ({}); those batches stay the engine's", client->id,
+					DescribeChange(client->shape, a_shape));
 			return false;
 		}
 		if (state.refused[index])

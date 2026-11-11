@@ -215,6 +215,12 @@ namespace DCLF::Family
 		return SlotResult::Ok;
 	}
 
+	bool PublishedSlot(const ID3D11ShaderResourceView* a_view, std::string& a_id, std::uint32_t& a_index)
+	{
+		a_id = PublishedResources::ExportedId(a_view);
+		return !a_id.empty() && PublishedResources::ShaderResourceIndex(a_id, a_index);
+	}
+
 	std::uint32_t SlotSampler(std::uint32_t a_addressMode, std::uint32_t a_filterMode, Owners& a_owners)
 	{
 		auto sampler = GpuTextures::Get().SamplerBinding(a_addressMode, a_filterMode);
