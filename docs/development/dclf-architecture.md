@@ -346,8 +346,10 @@ Everything under attached cells' Static, Dynamic, MultiBound and Actor category 
 
 Markers and water are not tracked. The render thread makes the category capture (`Scene::Channels::CategoryCapture`; the scene
 work reads no TES, cell or portal graph), and makes it again only when the category signature moves, a pass saw a detach, or a
-load ended. `CategorySignature` folds in each portal graph's list, and the signature is recomputed only on a watched edit
-(`SceneTracker::WatchCategoryNodes`, `CategoryEdits`). `Coordinator::RefreshCategoryNodes` diffs it. Tracked entries are indexed
+load ended. The signature (`ReadCategorySignature`) folds in each portal graph's list, and it is recomputed only on a watched edit
+(`SceneTracker::WatchCategoryNodes`, `CategoryEdits`). The unheld roots (the particle manager's masters) are not in it: an edit of
+their owner's array (`SceneTracker::UnheldEdits`) makes a capture that is the last one with those roots gathered again
+(`DeriveUnheldCapture`). `Coordinator::RefreshCategoryNodes` diffs it. Tracked entries are indexed
 by category node (`categoryMembers`), so a cell going away drops its members without a scan.
 
 ### The scene mirror
@@ -1665,17 +1667,28 @@ The engine gives each Lighting pass its own point lights in PerGeometry (`SetupG
 PerGeometry block is shared by every object it draws, and its template pass has the sun alone, so without Light Limit Fix (whose
 clustered lights replace them) a DCLF Lighting draw had no point lights. Now:
 -   **The table.** Every commit latches the frame's point lights into PS b3 (`LatchFrameRows`, `Common/DCLFPointLights.hlsli`: a count,
-    then up to 128 rows of position and radius, colour, flags). PS b3 is Light Limit Fix's `StrictLightData` register, unused without
-    it. The table is the light volumes contribution's (`Api::LightVolumesContribution::pointLights`, Features/LocalLights'
-    `LocalShadowLights::SamplePointLights`), active while the "light limit fix" classify input is off. It holds the lights the
-    engine's light selection (`FUN_1414fcf80`) can give a pass, valued as the point light routine writes them: first the shadow
-    lights, the selection's kept lights after the sun, with their mask indices; then `ShadowSceneNode::activeLights` in order, less a
-    frustum-culled light (`+0x5C` 0xFF) or a hidden one. Colour is the diffuse times the NiLight's fade and the BSLight's
-    `lodDimmer`; positions are absolute, as the object rows.
+    then up to `kPointLightTableLights` rows of position and radius, colour, flags). The size has one source, `GpuLayouts.h`'s
+    `kPointLightTableLights` (128); DCLF's program build passes it to the shaders as `DCLF_POINT_LIGHT_TABLE_LIGHTS`. PS b3 is Light
+    Limit Fix's `StrictLightData` register, unused without it. The table is the light volumes contribution's
+    (`Api::LightVolumesContribution::pointLights`, Features/LocalLights' `LocalShadowLights::SamplePointLights`), active while the
+    "light limit fix" classify input is off. It holds the lights the engine's light selection (`FUN_1414fcf80`) can give a pass,
+    valued as the point light routine writes them: the shadow lights, the selection's kept lights after the sun, with their mask
+    indices; then `ShadowSceneNode::activeLights` in order, less a frustum-culled light (`+0x5C` 0xFF) or a hidden one. Colour is
+    the diffuse times the NiLight's fade and the BSLight's `lodDimmer`; positions are absolute, as the object rows.
+-   **Shadow rows first.** A shadow light has a channel (its mask index + 1) only for mask indices 0-3, the four bits of
+    `DCLFLocalShadowMask`. `SamplePointLightTable` stable-partitions the rows: the lights with a channel first, then every other
+    light, a shadow light with a mask index of 4 or more among them as a plain light. The shader counts a draw's first
+    `ShadowCount` lights as its shadow lights and reads `shadowColor[channel - 1]` for them, so a plain row before a shadow row
+    would read `shadowColor[0xFFFFFFFF]` (it did before the partition).
 -   **Each draw's lights** (`DCLFSelectPointLights`, in `Lighting.hlsl` under `DCLF_POINT_LIGHTS`): a shadow light when its channel is in
     the draw's shadow mask (`DCLFShadowLightMask`, BuildDrawsCS's volumes: the engine's mask bits), then a plain light when its sphere
-    meets the object's bound (the placement row's), at most seven, in the table's order. The loop is the same for every pixel of a
-    draw. The vanilla light loop then runs with each light's position less the view's `CameraPosAdjust`.
+    meets the object's bound (the placement row's), at most seven, in the table's order. The vanilla light loop then runs with each
+    light's position less the view's `CameraPosAdjust`.
+-   **Its cost.** The selection's inputs are the draw's (its object's bound and shadow mask), so its result is the same for every
+    pixel of the draw, but the pixel stage makes it: up to the table's 128 rows for each wave of pixels. The selection belongs
+    once per object (dclf-roadmap.md 3.7): BuildDrawsCS already selects the object's shadow lights there from the same bound, and
+    the vertex stage is the worse place (the loop for every vertex, and two more flat interpolants, which cost the pulled terrain
+    shader a warp of occupancy before).
 -   **PS b3's place.** The shared light slot holds two blocks: its first half starts with the zero block the main shadow layout reads
     (`MainShadowLayoutPush`), and its second half is PS b3 (`kSharedLightBlockOffset`): zeroed once with Light Limit Fix loaded,
     the table without it.

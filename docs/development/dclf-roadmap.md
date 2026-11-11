@@ -93,19 +93,30 @@ is that the menu's edits reach the shapes by another writer than the head's morp
     drawn by DCLF's particle path. Blood impact particles are master particle systems too (4.3).
 -   **Why.** They are among the engine's remaining main passes, and DCLF's blended draws go before every remaining engine
     blended pass, so they are drawn in the wrong order where they lie behind a DCLF surface (dclf-open-defects.md).
--   **State.** Built behind `CS_DCLF_MASTER_PARTICLES` (default off), not validated in game yet (scenarios
-    `tools/cs-ab/scenarios/master-particles-0.env` and `-1.env`). What exists:
+-   **State.** Built behind `CS_DCLF_MASTER_PARTICLES` (default off) and run in game (scenarios
+    `tools/cs-ab/scenarios/master-particles-0.env` and `-1.env`): the shots match the switch off, and the idle masters held with
+    three references are the engine's (an emitter's value node names them: `<- MASTER REFS` counts them apart from DCLF's pins).
+    What exists:
     -   `SceneTracker::PushAttached` and `PushDetached` take the node whose array holds the child, and `NoteEdit` takes
         `(child, parent, inWorld)`. SceneWriterFramework's child events pass their parent.
     -   `Api::UnheldRootsContribution` (`Api/ObjectContributors.h`, `InstallContext::RegisterUnheldRoots`): roots listed as
         category nodes filed under themselves, with no `held` entry and a null `CategoryCapture::Root::root` and
         `AlwaysRenderRoot::root` (the key is `object`). The capture pins each root only until its first application.
         `Coordinator::OwnRoot` refuses an unheld root. A gone unheld root is not walked; its exit was an event.
-    -   `CaptureCategories` runs inside the contribution's enter and leave, from the signature read to `PushCategoryRoots`. The
-        signature watches the owner (the manager) and mixes its roots.
+    -   The masters are not in the category signature. Their owner's child edits count `SceneTracker::UnheldEdits` (not
+        `CategoryEdits`), and an unheld root's detach forces no full capture (`Event::unheldExit`). After such an edit
+        `CaptureCategories` derives the capture from the last one with the unheld roots gathered again (`DeriveUnheldCapture`: no
+        cell or portal graph walked), and the coordinator's diff sees only the masters that came and went. A new owner is a full
+        capture. The contribution's enter and leave are taken only on a frame that gathers the roots, from the gather to
+        `PushCategoryRoots`.
+    -   `SceneCapture::SetDrawnRoots` retires a replaced set through `SceneTracker::RetireSet`; `InWorld` reads it inside a
+        `SceneTracker::SetRead`, and `RetireCategoryNodes` frees it once no read is in.
     -   `Features/Particles/MasterParticles.cpp`: the gather (the manager's children under its `BSReadWriteLock`, the global
-        + 8), the removal hook, the counters and the observers `<- MASTER SET` (a master left with no event) and
-        `<- MASTER REFS` (an idle master held past removal for 600 frames). `<- PARTICLES` is the particles' parity line.
+        + 8), the removal hook, the counters and, with `CS_DCLF_STATS` only, the observers `<- MASTER SET` (a master left with no
+        event) and `<- MASTER REFS` (an idle master held past removal for 600 frames). `<- PARTICLES` is the particles' parity line.
+    -   Lock order: the capture's gate, then the manager's lock. `FUN_140e2a520` (the removal) runs on a job thread with no lock
+        held (its one caller `UpdateParticleSystemManagerJob`, queued per slot by `FUN_1402c75c0` / `FUN_1402c76c0` under the
+        queue's spin lock only), so the removal hook never holds the manager's lock while it waits for the gate.
 -   **What the engine does** (Ghidra, AE 1.6.1170 / SE 1.5.97, the same code at the same offsets):
     -   The manager (`gParticleSystemManager`, AE ID 411270 / SE 524630) is ShadowSceneNode child 5. Its `AttachChild`
         override (AE `0x140e29f90`) takes only a `BSMasterParticleSystem` whose slot (`+0x158`) is set, and stores it with
@@ -120,12 +131,12 @@ is that the menu's edits reach the shapes by another writer than the head's morp
         `BSParticleSystemManager::sub` (AE `0x140e2a2f0`): the source's addon `BSValueNode` is held in the master's `+0x128`
         array (count `+0x138`), found by `FUN_1402df8a0` when a reference's or a temporary effect's 3D attaches.
 -   **Risks.** A lasting reference (guarded: no `held`, no root reference, no root owner; `<- MASTER REFS` watches). A removal
-    through the manager's own `DetachChild` overrides does not wait for the capture's gate: none is known during play.
-    `SceneCapture::SetDrawnRoots` keeps every published set, which now changes with every master attach and removal. The
+    through the manager's own `DetachChild` overrides does not wait for the capture's gate: none is known during play. The
     interior route is not checked: a master listed in a portal graph's `alwaysRenderChildren` stays unheld (the gather runs
     first). A master has no fade node. The removal hook is one more trampoline call (the plugin allocates 4 KB).
--   **Needs.** A run of each scenario: the shots against the switch off, the report lines, and the test that no master stays
-    listed after its torches are gone (`master particles ... listed`).
+-   **Needs.** Before it is on by default: a run of the unheld roots diff (its count, "unheld roots diffs", is in the C2 parity
+    line with `CS_DCLF_PERSISTENT_PARITY`), and the test that no master stays listed after its torches are gone (`master
+    particles ... listed`).
 
 ### 1.5 The remaining residue classes: grass, water, sky
 
@@ -402,6 +413,19 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
 
 ---
 
+### 3.7 Point light selection once per object
+
+-   **Goal.** Without Light Limit Fix, a draw's point lights are selected once per object, not by every wave of its pixels.
+-   **Why.** `DCLFSelectPointLights` (`Common/DCLFPointLights.hlsli`) loops over up to 128 table rows in the pixel stage, though
+    its inputs (the object's bound, the draw's shadow mask) are the draw's (dclf-architecture.md, "Point lights without Light
+    Limit Fix").
+-   **Design.** BuildDrawsCS, which already selects the object's shadow lights from the same bound (`LocalShadowMask`), writes
+    the plain lights' table indices (seven bytes and a count: two words) into a per-object buffer of the frame, like the
+    visibility words; the pixel stage takes the shadow rows from its mask (four rows at most, first in the table) and the plain
+    ones from those words. The CPU pipeline's cull (`Direct/Cull.cpp`) writes the same words for its draws. The table goes into
+    the build's latch. Not the vertex stage: it would run the loop for every vertex and add two flat interpolants.
+-   **Needs.** The buffer's graph resource and its read by the colour draws (a pixel-stage register), and both culls.
+
 ## 4. Coverage: classes and views still the engine's
 
 ### 4.1 Effect variants not ported
@@ -455,15 +479,17 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
 -   **Needs.** Lighting leaves under billboards (4.1): the classification admits only effect shapes
     (`BillboardTurnedLeaf`), and the refraction record uses bits 2-7, where the Effect family keeps the billboard mode, so the
     mode needs another place (a shading-row component refraction does not read). The first-person view's slots also exclude
-    refraction (`ViewEpoch.cpp`). And first person itself (`CS_DCLF_FIRST_PERSON`, off by default).
+    refraction (`ViewEpoch.cpp`). First person itself is on by default (`CS_DCLF_FIRST_PERSON`), except on a GPU-driven graph
+    without device-generated commands and without the direct forward family (`GraphConditions::firstPerson`: its epochs and slots
+    are left out there).
 
 ### 4.3 Blood impact particles
 
 -   **Goal.** `pBloodSplat02`, `pBloodDrops06` and `pBloodLines` are drawn by DCLF.
 -   **State.** Covered by 1.4: no separate switch. These are the particle systems of master particle systems, so
     `CS_DCLF_MASTER_PARTICLES=1` takes them (scenarios `tools/cs-ab/scenarios/blood-particles-0.env` and `-1.env`, not run
-    yet). `CS_DCLF_BLOOD_PARTICLES` was not added: a blood-only filter over the masters would be a second listing rule for the
-    same roots.
+    yet; 1.4's scenarios ran). `CS_DCLF_BLOOD_PARTICLES` was not added: a blood-only filter over the masters would be a second
+    listing rule for the same roots.
 -   **What the engine does** (Ghidra AE 1.6.1170, and the game's meshes):
     -   A melee hit (`Actor::CalculateCurrentHitTargetForWeaponSwing`) and `BGSImpactManager::PlayImpactEffect` spawn a
         `BSTempEffectParticle` (`BSTempEffectParticle::Spawn`, AE `0x1404a7320`) with the impact data's model, for the actor's
@@ -481,7 +507,7 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
         `meshes\mps\mpsbloodsplatimpact02.nif`, `pBloodDrops06` and `pBloodLines` in `meshes\mps\mpsbloodspraytiny03.nif`
         (`pBloodLines` also in `mpsbloodspraybigdrops.nif` and the DLC1 explosion). So they are under the particle manager,
         not "temporary effects outside DCLF's categories".
--   **Needs.** 1.4's validation, then a run of `blood-particles-1.env`.
+-   **Needs.** A run of `blood-particles-1.env`.
 
 ### 4.4 Object LOD's segments in occlusion
 
@@ -512,7 +538,8 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
 -   **Design.** Re-import through the path pinless imports already use, with no graph rebuild (geometry is drawn by device
     address, not as a graph resource). DXVK: a tracked import of a mappable buffer (a new `DxvkOrgInteropTrackedFlagBits` bit)
     keeps its discard renames and reports each as a relocation holding the old slice, alive until released. DCLF: the
-    relocation reaches `GpuResources`' `ImportRelocations` at the next `BeginFrame`, its geometry slots are marked
+    relocation reaches `GpuResources`' `ImportRelocations` at the next Present (`ImportRelocations::Poll` runs at every Present on
+    the render owner since 782c888bd, loads included), its geometry slots are marked
     (`relocatedGeometrySlots`), and `ResolveGeometrySource` acquires the new slice into the same slot (`staleGeometry`), as a
     defragmentation move does. The draws read the slice of the publication's frame, so an edit shows a frame or more late; a
     buffer discarded every frame refreshes its slot every frame. Gate it on the measured count: worth it only where the census
