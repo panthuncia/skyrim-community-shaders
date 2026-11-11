@@ -4,7 +4,8 @@
 #if defined(CS_ORG_BINDLESS)
 // The ORG build (Drawcall Limit Fix's sky family, Features/DrawcallLimitFix/Features/Sky). One push block serves both stages. The
 // shared constants and the headers' resources (the scene depth t17, Cloud Shadows' t25 and t26, IBL's t76 and t77 and Dynamic
-// Cubemaps' t30 and t31, which the Exponential Height Fog header includes) come from the heap.
+// Cubemaps' t30 and t31, which the Exponential Height Fog header includes) come from the heap. The fog's froxel volumes
+// (t19, t22), which its header declares, are never read here: UNREAD entries.
 #	define ORG_SHARED_CONSTANTS
 #	define ORG_HEADER_RESOURCES
 #	include "Common/OrgResources.hlsli"
@@ -45,15 +46,17 @@ struct SkyOrgDraw
 
 #	define SKY_ORG_OCCLUSION 0xFFFFFFFF
 
-#	define SKY_ORG_RESOURCES(X)                                \
-		X(SHARED, ConstantBuffer, Shared, 0)                      \
-		X(SRV, Texture2D<float>, TexDepthSampler, 17)             \
-		X(EXTERN, Texture2D<float4>, DepthTexture, 17)            \
-		X(EXTERN, TextureCube<float>, CloudShadowsTexture, 25)    \
-		X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)              \
-		X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)              \
-		X(EXTERN, TextureCube<float3>, EnvReflectionsTexture, 30) \
-		X(EXTERN, TextureCube<float3>, EnvTexture, 31)            \
+#	define SKY_ORG_RESOURCES(X)                                                           \
+		X(SHARED, ConstantBuffer, Shared, 0)                                               \
+		X(SRV, Texture2D<float>, TexDepthSampler, 17)                                      \
+		X(EXTERN, Texture2D<float4>, DepthTexture, 17)                                     \
+		X(EXTERN, TextureCube<float>, CloudShadowsTexture, 25)                             \
+		X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)                                       \
+		X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)                                       \
+		X(EXTERN, TextureCube<float3>, EnvReflectionsTexture, 30)                          \
+		X(EXTERN, TextureCube<float3>, EnvTexture, 31)                                     \
+		X(UNREAD, Texture3D<float4>, ExponentialHeightFogIntegratedLightScattering, 19)    \
+		X(UNREAD, Texture3D<float4>, ExponentialHeightFogIntegratedLightScatteringFar, 22) \
 		X(LATCH, SkyOrgDraw, SkyDraw, 2)
 ORG_PUSH_BLOCK(SKY_ORG_RESOURCES(ORG_HANDLE))
 SKY_ORG_RESOURCES(ORG_RESOURCE)
@@ -66,9 +69,6 @@ static SamplerState SampBlendSampler = SamplerDescriptorHeap[SkyDraw.Samplers.y]
 static SamplerState SampNoiseGradSampler = SamplerDescriptorHeap[SkyDraw.Samplers.z];
 // Cloud Shadows' header reads CloudSelfShadowTexture through this handle.
 static uint OrgHandle_CloudSelfShadowTexture = SkyDraw.Textures.w != SKY_ORG_OCCLUSION ? SkyDraw.Textures.w : OrgHandle_CloudShadowsTexture;
-// Exponential Height Fog's header declares its froxel volumes (t19, t22), which the sky never reads: no handles in the push block.
-static const uint OrgHandle_ExponentialHeightFogIntegratedLightScattering = 0;
-static const uint OrgHandle_ExponentialHeightFogIntegratedLightScatteringFar = 0;
 #endif
 
 #include "Common/ColorManagement.hlsli"

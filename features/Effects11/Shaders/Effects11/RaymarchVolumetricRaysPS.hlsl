@@ -1,16 +1,21 @@
 // Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers and the included headers'
 // resources (SharedData's depth, Terrain and Cloud Shadows) are heap reads through the push block
-// (ORG_SHARED_CONSTANTS, ORG_HEADER_RESOURCES): the EXTERN entries below.
+// (ORG_SHARED_CONSTANTS, ORG_HEADER_RESOURCES): the EXTERN entries below. ShadowSampling's other
+// resources are never read here: the UNREAD entries.
 #define ORG_SHARED_CONSTANTS
 #define ORG_HEADER_RESOURCES
 #include "Common/OrgResources.hlsli"
 
-#define RAYMARCH_VOLUMETRIC_RAYS_RESOURCES(X)            \
-	X(SHARED, ConstantBuffer, Shared, 0)                  \
-	X(SAMPLER, SamplerState, defaultSampler, 0)           \
-	X(EXTERN, Texture2D<float4>, DepthTexture, 17)        \
-	X(EXTERN, Texture2D<float2>, ShadowHeightTexture, 60) \
-	X(EXTERN, TextureCube<float>, CloudShadowsTexture, 25)
+#define RAYMARCH_VOLUMETRIC_RAYS_RESOURCES(X)                               \
+	X(SHARED, ConstantBuffer, Shared, 0)                                    \
+	X(SAMPLER, SamplerState, defaultSampler, 0)                             \
+	X(EXTERN, Texture2D<float4>, DepthTexture, 17)                          \
+	X(EXTERN, Texture2D<float2>, ShadowHeightTexture, 60)                   \
+	X(EXTERN, TextureCube<float>, CloudShadowsTexture, 25)                  \
+	X(UNREAD_LATCH, DirectionalShadowLightData, DirectionalShadowLight, 98) \
+	X(UNREAD, Texture2D<float2>, SharedShadowMap, 18)                       \
+	X(UNREAD, Texture2D<sh2>, EnvIBLTexture, 76)                            \
+	X(UNREAD, Texture2D<sh2>, SkyIBLTexture, 77)
 ORG_PUSH_BLOCK(RAYMARCH_VOLUMETRIC_RAYS_RESOURCES(ORG_HANDLE))
 
 #include "Common/FrameBuffer.hlsli"

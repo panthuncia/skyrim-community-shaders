@@ -1,6 +1,7 @@
 // Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers and the included headers'
 // resources (SharedData's depth, IBL, Skylighting, Terrain and Cloud Shadows, Light Limit Fix) are heap reads
-// through the push block (ORG_SHARED_CONSTANTS, ORG_HEADER_RESOURCES): the EXTERN entries below.
+// through the push block (ORG_SHARED_CONSTANTS, ORG_HEADER_RESOURCES): the EXTERN entries below. Light Limit
+// Fix's strict lights are never read here: an UNREAD_LATCH entry.
 #define ORG_SHARED_CONSTANTS
 #define ORG_HEADER_RESOURCES
 #include "Common/OrgResources.hlsli"
@@ -36,7 +37,8 @@ struct DirectionalShadowLightData
 	X(EXTERN, StructuredBuffer<uint>, lightList, 36)                                  \
 	X(EXTERN, StructuredBuffer<LightGrid>, lightGrid, 37)                             \
 	X(EXTERN, StructuredBuffer<LocalShadowData>, LocalShadows, 102)                   \
-	X(EXTERN, Texture2DArray<float>, LocalShadowMaps, 103)
+	X(EXTERN, Texture2DArray<float>, LocalShadowMaps, 103)                            \
+	X(UNREAD_LATCH, StrictLightDataValues, StrictLightData, 3)
 
 // The engine's local shadow maps, with Light Limit Fix only. Last in the push block, so the block's start is the
 // same in every permutation.

@@ -41,6 +41,11 @@
 //   header binds the register). ORG: its handle only; the header reads OrgHandle_<name>.
 // - EXTERN_LATCH: a LATCH an included header declares with ORG_RESOURCE. D3D11: nothing here. ORG:
 //   its handle and byte offset only, as a LATCH entry's; the header reads them.
+// - UNREAD: a resource an included header declares with ORG_HEADER_SRV that this shader never
+//   reads. D3D11: nothing here. ORG: nothing in the push block; OrgHandle_<name> is a constant 0,
+//   so the header's declaration builds, and DXC drops it as unused.
+// - UNREAD_LATCH: a LATCH an included header declares that this shader never reads. D3D11:
+//   nothing here. ORG: as UNREAD, with OrgHandle_<name> and OrgOffset_<name> constant 0.
 // - SHARED: CS's shared constant buffers, first in the list: X(SHARED, ConstantBuffer, Shared, 0)
 //   (type, name and register are not used). D3D11: nothing here; FrameBuffer (b12), SharedData
 //   (b5), FeatureData (b6) and Permutation (b4) stay the cbuffers their headers declare. ORG: four
@@ -69,7 +74,9 @@
 // and Cloud Shadows) are declared with ORG_HEADER_SRV(type, name, register). Everywhere they stay
 // register-bound as before. An ORG pass shader that defines ORG_HEADER_RESOURCES before including
 // this file reads them from the heap instead, and lists each one, of every such header it
-// includes, as an EXTERN entry.
+// includes, as an EXTERN entry (EXTERN_LATCH for a header's LATCH), or as an UNREAD
+// (UNREAD_LATCH) entry when it never reads it. A header resource missing from the list is an
+// undeclared OrgHandle_<name> in the DXC build.
 //
 // Large constant buffers read as globals: a shader whose D3D11 code reads a cbuffer's fields by
 // their bare names (not name.field) lists the fields once, as M(type, name) for a value and
@@ -106,6 +113,8 @@
 #	define ORG_HANDLE_PUSH(T, N, R) T N;
 #	define ORG_HANDLE_EXTERN(T, N, R) uint OrgHandle_##N;
 #	define ORG_HANDLE_EXTERN_LATCH(T, N, R) uint OrgHandle_##N, OrgOffset_##N;
+#	define ORG_HANDLE_UNREAD(T, N, R)
+#	define ORG_HANDLE_UNREAD_LATCH(T, N, R)
 #	define ORG_HANDLE_SHARED(T, N, R) \
 		uint OrgHandle_FrameBuffer;    \
 		uint OrgHandle_SharedData;     \
@@ -123,6 +132,10 @@
 #	define ORG_RESOURCE_PUSH(T, N, R)
 #	define ORG_RESOURCE_EXTERN(T, N, R)
 #	define ORG_RESOURCE_EXTERN_LATCH(T, N, R)
+#	define ORG_RESOURCE_UNREAD(T, N, R) static const uint OrgHandle_##N = 0;
+#	define ORG_RESOURCE_UNREAD_LATCH(T, N, R) \
+		static const uint OrgHandle_##N = 0;   \
+		static const uint OrgOffset_##N = 0;
 #	define ORG_RESOURCE_SHARED(T, N, R)
 #	define ORG_RESOURCE(K, T, N, R) ORG_RESOURCE_##K(T, N, R)
 
@@ -151,6 +164,8 @@
 #	define ORG_RESOURCE_PUSH(T, N, R) ORG_RESOURCE_CBUFFER(T, N, R)
 #	define ORG_RESOURCE_EXTERN(T, N, R)
 #	define ORG_RESOURCE_EXTERN_LATCH(T, N, R)
+#	define ORG_RESOURCE_UNREAD(T, N, R)
+#	define ORG_RESOURCE_UNREAD_LATCH(T, N, R)
 #	define ORG_RESOURCE_SHARED(T, N, R)
 #	define ORG_RESOURCE(K, T, N, R) ORG_RESOURCE_##K(T, N, R)
 
