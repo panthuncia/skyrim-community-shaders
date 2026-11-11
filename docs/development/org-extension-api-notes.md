@@ -241,6 +241,10 @@ Each anchor's rule:
 - **ReflectionsPrepass.** At `BSCubeMapCamera::RenderCubemap`, before the engine draws the cubemap. After every feature's
   `ReflectionsPrepass`. It runs once per cubemap render, which can be zero or several times a frame. Each run is one
   execution of its epoch.
+- **SkyReflections.** At a reflection face's sky batch (`BSShaderAccumulator::FinishAccumulating`'s `RenderBatches` of the sky
+  techniques, SE 99938 +0x247 / AE 106583 +0x237), while `BSCubeMapCamera::RenderFaces` draws that face: after the engine cleared
+  the face and its depth and drew the face's opaque groups, before its decals. Once per face drawn, so up to six runs per cubemap
+  render. Reserved and run only by Drawcall Limit Fix's sky family (`CS_ORG_SKY=1`); the anchor self-test reports it only then.
 - **EarlyPrepass.** After `Main::RenderShadowMaps` returns. The shadow maps are drawn, DCLF's shadow epoch included, and the
   shadow light data is copied (t98). After every feature's `EarlyPrepass`. Before `Main::RenderDepth`: the scene depth is
   not drawn yet.
@@ -251,6 +255,9 @@ Each anchor's rule:
 - **Prepass.** At the main pass's first opaque batch, inside `StartDeferred`. After every feature's `Prepass`, so after Light
   Limit Fix's culling epoch. Before DCLF's colour epoch. The Z-prepass depth is drawn. The GBuffer targets are bound but not
   cleared yet: they still hold the last frame.
+- **Sky.** At the main pass's sky batch (the same call, for the main camera's accumulator): after the opaque groups, before the
+  decals and Drawcall Limit Fix's colour epoch. The GBuffer targets are bound; the depth is the Z-prepass copy. Reserved and run
+  only by Drawcall Limit Fix's sky family (`CS_ORG_SKY=1`); the anchor self-test reports it only then.
 - **DeferredPasses.** In `EndDeferred`, after the opaque pass, the blended decals and the final depth copy into
   `kPOST_ZPREPASS_COPY`. Before the D3D11 SSGI, SSS, cubemap update, deferred composite and Effects11's rays. The GBuffer is
   complete. A pass that must follow the composite uses DeferredComposite.

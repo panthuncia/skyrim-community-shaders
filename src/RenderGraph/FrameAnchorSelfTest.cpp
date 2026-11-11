@@ -43,8 +43,8 @@ namespace FrameAnchors::SelfTest
 		constexpr std::uint32_t kFailPatience = 600;
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
 		constexpr std::uint32_t kTextureSize = 16;
-		constexpr std::uint32_t kOutputWords = 32;  // word a: the check; word 16 + a: kMAIN's texel
-		constexpr std::uint32_t kMainWord = 16;
+		constexpr std::uint32_t kOutputWords = 64;  // word a: the check; word 32 + a: kMAIN's texel
+		constexpr std::uint32_t kMainWord = 32;
 		constexpr std::uint32_t kNoIndex = 0xFFFFFFFFu;
 		// Runs without a value before the test reports that nothing came back.
 		constexpr std::uint32_t kPatience = 240;

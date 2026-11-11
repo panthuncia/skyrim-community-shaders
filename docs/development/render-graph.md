@@ -454,9 +454,11 @@ of adding a `Segment` and editing the epoch order. Each anchor is one of CS's ho
 | Anchor | Hook |
 | --- | --- |
 | `ReflectionsPrepass` | `Deferred::ReflectionsPrepasses` (`BSCubeMapCamera::RenderCubemap`) |
+| `SkyReflections` | DCLF's sky family (`Features/Sky`): a reflection face's sky batch, once per face (only with `CS_ORG_SKY=1`) |
 | `EarlyPrepass` | `Deferred::EarlyPrepasses` (after `Main::RenderShadowMaps`) |
 | `DepthDone` | `TerrainBlending::BlendPrepassDepths` (`Main::RenderDepth` returned; only with Terrain Blending on) |
 | `Prepass` | `Deferred::PrepassPasses` (the main pass's first opaque batch) |
+| `Sky` | DCLF's sky family (`Features/Sky`): the main pass's sky batch, after the opaque groups (only with `CS_ORG_SKY=1`) |
 | `DeferredPasses` | `Deferred::DeferredPasses`, after the final depth copy |
 | `DeferredComposite` | `Deferred::DeferredPasses`, after the D3D11 SSGI, SSS and cubemap update, where the composite runs |
 | `PostComposite` | the end of `Deferred::DeferredPasses`, after the composite (D3D11 or ORG), where Effects11's rays draw |
