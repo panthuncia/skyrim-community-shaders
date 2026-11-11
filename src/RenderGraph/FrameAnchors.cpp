@@ -86,8 +86,9 @@ namespace FrameAnchors
 			// Runs a frame: one per batch of ImageSpace draws and dispatches, the sum of ImageSpace.cpp's kScopeRuns: RenderSSAO's, the
 			// reflection pass's and the HDR effect's (two each: a batch cut short by a draw the graph does not take), the pre-tonemap
 			// composites' (one), and one per end-of-frame effect call (depth of field or the distant blur, its two compute blurs,
-			// refraction, the radial blur, the snow copy, the water blend, the LDR downsample: eight). Late: the TAA or the upscaler can follow a batch inside the chain.
-			{ "ImageSpace", { "CS anchor: image space", "CS anchor: image space inputs", "FrameAnchors::ImageSpace / ", "cs.anchor.image-space" }, true, 15 },
+			// refraction, the radial blur, the snow copy, the water blend, the LDR downsample: eight), and one per water flow copy (four).
+			// Late: the TAA or the upscaler can follow a batch inside the chain.
+			{ "ImageSpace", { "CS anchor: image space", "CS anchor: image space inputs", "FrameAnchors::ImageSpace / ", "cs.anchor.image-space" }, true, 19 },
 			// Runs a frame: the world's shadow masks, the water mask, the water, a menu scene's shadow masks and the screen blood.
 			{ "EngineDraws", { "CS anchor: engine draws", "CS anchor: engine draws inputs", "FrameAnchors::EngineDraws / ", "cs.anchor.engine-draws" }, true, 5 },
 		} };
