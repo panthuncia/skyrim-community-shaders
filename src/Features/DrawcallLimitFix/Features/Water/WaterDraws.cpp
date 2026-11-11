@@ -13,6 +13,7 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "RenderGraph/SharedConstants.h"
 #include "ShaderCache.h"
@@ -62,6 +63,9 @@ namespace DCLF::Features::Water::WaterDraws
 			Shape shape;
 			std::string id;
 			std::shared_ptr<org::LatchBlock> latch;
+			// One draw entry per latched draw. The anchor closes it at every run, and only this client's commit opens it, so a run of
+			// the anchor that another client keeps draws nothing of this client's older run.
+			std::shared_ptr<::RenderGraph::RunGate> gate;
 			// The targets as imported at the registration (FrameAnchors keeps each while the engine's texture stays the same).
 			std::array<std::shared_ptr<org::ExternalTextureResource>, 3> colours;
 			std::shared_ptr<org::ExternalTextureResource> depth;
@@ -87,6 +91,7 @@ namespace DCLF::Features::Water::WaterDraws
 		{
 			std::shared_ptr<const Run> run;
 			std::shared_ptr<const org::LatchBlock> latch;
+			std::shared_ptr<const ::RenderGraph::RunGate> gate;
 		};
 
 		/** @brief A run's draws, recorded in the engine's order: a render pass and a draw each (RasterProgram::Draw). */
@@ -127,12 +132,12 @@ namespace DCLF::Features::Water::WaterDraws
 			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const
 			{
 				client->prepared.store(true, std::memory_order_release);
-				return { std::atomic_load(&client->run), client->latch };
+				return { std::atomic_load(&client->run), client->latch, client->gate };
 			}
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{
-				if (!a_frame.run || !a_frame.latch)
+				if (!a_frame.run || !a_frame.latch || !a_frame.gate)
 					return;
 				const auto& run = *a_frame.run;
 				const auto shared = SharedConstants::Index(a_recording, a_bindings.shared);
@@ -170,10 +175,11 @@ namespace DCLF::Features::Water::WaterDraws
 												  .depth = &depth,
 												  .viewport = { .x = draw.viewport[0], .y = draw.viewport[1], .width = draw.viewport[2], .height = draw.viewport[3], .minDepth = draw.depthRange[0], .maxDepth = draw.depthRange[1] },
 												  .constants = ShaderBindings::Data(block),
-												  // CS_ORG_WATER_SAFE=2: the passes and their targets without a draw call.
-												  .vertexCount = GetDiagnostics().safe >= 2 ? 0u : draw.indexCount,
 												  .debugName = run.view == View::Mask ? "WaterMask" : "Water",
-												  .stencilReference = draw.stencilRef });
+												  .stencilReference = draw.stencilRef,
+												  // The counts come from the draw's gate entry, which the client's commit opens for this run only.
+												  .indirect = &a_frame.gate->Latch(),
+												  .indirectOffset = a_frame.gate->Offset(i) });
 				}
 			}
 
@@ -234,6 +240,11 @@ namespace DCLF::Features::Water::WaterDraws
 			client->shape = a_shape;
 			client->id = a_shape.view == View::Mask ? "cs.water.mask" : "cs.water.surface";
 			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kMaxDraws * kDrawStride, host->FrameSlots());
+			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kMaxDraws);
+			if (!client->gate) {
+				logger::warn("[DCLF] water: the {} run gate could not be made; the water stays the engine's", client->id);
+				return nullptr;
+			}
 			const auto& targets = TargetListOf(a_shape);
 			for (std::size_t i = 0; i < targets.size(); ++i) {
 				if (targets[i] < 0)
@@ -253,6 +264,7 @@ namespace DCLF::Features::Water::WaterDraws
 			FrameAnchors::ClientDesc desc{};
 			desc.id = client->id;
 			desc.sharedConstants = true;
+			desc.gates = { client->gate };
 			desc.passes.push_back({ .name = client->id + ".draws",
 				.anchor = FrameAnchors::Anchor::EngineDraws,
 				.order = a_shape.view == View::Mask ? 0 : 1,
@@ -264,8 +276,13 @@ namespace DCLF::Features::Water::WaterDraws
 				if (!run || !host)
 					return;
 				const std::uint32_t slot = host->CurrentFrameSlot();
-				for (std::uint32_t i = 0; i < run->draws.size(); ++i)
-					client->latch->WriteValue(slot, i * kDrawStride, run->draws[i].latch);
+				for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
+					const auto& draw = run->draws[i];
+					client->latch->WriteValue(slot, i * kDrawStride, draw.latch);
+					// CS_ORG_WATER_SAFE=2: the passes and their targets without a draw call.
+					if (draw.program && !draw.skip && GetDiagnostics().safe < 2)
+						client->gate->OpenDraw(i, draw.indexCount, 1);
+				}
 			};
 			desc.active = [client] { return client->pending; };
 			desc.onFailed = [] { Fail("the render graph failed with the water's passes in it"); };
@@ -281,7 +298,7 @@ namespace DCLF::Features::Water::WaterDraws
 			return client;
 		}
 
-		/** @brief What a run's recording depends on: everything of its draws but the latched values, and the unpublished headers. */
+		/** @brief What a run's recording depends on: everything of its draws but the latched values and counts, and the unpublished headers. */
 		std::uint64_t RevisionOf(const Run& a_run)
 		{
 			std::uint64_t hash = 1469598103934665603ull;
@@ -293,7 +310,7 @@ namespace DCLF::Features::Water::WaterDraws
 			for (const auto& draw : a_run.draws) {
 				mix(reinterpret_cast<std::uintptr_t>(draw.program.get()));
 				mix((std::uint64_t(draw.skip) << 16) | (std::uint64_t(draw.colours[0]) << 8) | draw.colours[1]);
-				mix((std::uint64_t(draw.stencilRef) << 32) | draw.indexCount);
+				mix(draw.stencilRef);
 				for (const auto v : draw.viewport)
 					mix(v);
 				std::uint32_t range[2];

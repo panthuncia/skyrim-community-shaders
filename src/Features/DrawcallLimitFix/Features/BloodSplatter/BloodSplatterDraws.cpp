@@ -12,6 +12,7 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "ShaderCache.h"
 
@@ -46,6 +47,9 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		struct Client
 		{
 			std::shared_ptr<org::LatchBlock> latch;
+			// One draw entry per latched draw. The anchor closes it at every run, and only this client's commit opens it, so a run of
+			// the anchor that another client keeps draws nothing of this client's older run.
+			std::shared_ptr<::RenderGraph::RunGate> gate;
 			std::shared_ptr<org::ExternalTextureResource> target;  // the back buffer, as imported at the registration
 			std::shared_ptr<const Run> run;
 			std::atomic<bool> prepared{ false };
@@ -62,6 +66,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		{
 			std::shared_ptr<const Run> run;
 			std::shared_ptr<const org::LatchBlock> latch;
+			std::shared_ptr<const ::RenderGraph::RunGate> gate;
 		};
 
 		/** @brief A run's draws, in the engine's order: a render pass and a draw each. */
@@ -82,12 +87,12 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const
 			{
 				client->prepared.store(true, std::memory_order_release);
-				return { std::atomic_load(&client->run), client->latch };
+				return { std::atomic_load(&client->run), client->latch, client->gate };
 			}
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{
-				if (!a_frame.run || !a_frame.latch)
+				if (!a_frame.run || !a_frame.latch || !a_frame.gate)
 					return;
 				const std::uint32_t slot = a_recording.FrameSlot();
 				for (std::uint32_t i = 0; i < a_frame.run->draws.size(); ++i) {
@@ -100,8 +105,10 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 					program.Draw(a_recording, { .colours = std::span<const RasterProgram::Colour>(&colour, 1),
 												  .viewport = { .x = draw.viewport[0], .y = draw.viewport[1], .width = draw.viewport[2], .height = draw.viewport[3] },
 												  .constants = ShaderBindings::Data(block),
-												  .vertexCount = draw.indexCount,
-												  .debugName = "BloodSplatter" });
+												  .debugName = "BloodSplatter",
+												  // The counts come from the draw's gate entry, which the client's commit opens for this run only.
+												  .indirect = &a_frame.gate->Latch(),
+												  .indirectOffset = a_frame.gate->Offset(i) });
 				}
 			}
 
@@ -156,8 +163,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			mix(a_run.draws.size());
 			for (const auto& draw : a_run.draws) {
 				mix(reinterpret_cast<std::uintptr_t>(draw.program.get()));
-				mix(draw.indexCount);
-				for (const auto v : draw.viewport)
+					for (const auto v : draw.viewport)
 					mix(v);
 			}
 			return hash;
@@ -189,6 +195,11 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		state.tried = true;
 		auto client = std::make_shared<Client>();
 		client->latch = std::make_shared<org::LatchBlock>(std::string(kClientId) + ".latch", kMaxDraws * kDrawStride, host->FrameSlots());
+		client->gate = ::RenderGraph::RunGate::Create(std::string(kClientId) + ".gate", kMaxDraws);
+		if (!client->gate) {
+			logger::warn("[DCLF] blood splatter: the run gate could not be made; the screen blood stays the engine's");
+			return;
+		}
 		client->target = FrameAnchors::EngineTarget(0);
 		if (!client->target) {
 			logger::warn("[DCLF] blood splatter: the back buffer cannot be imported; the screen blood stays the engine's");
@@ -196,6 +207,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		}
 		FrameAnchors::ClientDesc desc{};
 		desc.id = kClientId;
+		desc.gates = { client->gate };
 		desc.passes.push_back({ .name = std::string(kClientId) + ".draws",
 			.anchor = FrameAnchors::Anchor::EngineDraws,
 			.order = 2,
@@ -207,8 +219,12 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			if (!run || !host)
 				return;
 			const std::uint32_t slot = host->CurrentFrameSlot();
-			for (std::uint32_t i = 0; i < run->draws.size(); ++i)
-				client->latch->WriteValue(slot, i * kDrawStride, run->draws[i].constants);
+			for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
+				const auto& draw = run->draws[i];
+				client->latch->WriteValue(slot, i * kDrawStride, draw.constants);
+				if (draw.program)
+					client->gate->OpenDraw(i, draw.indexCount, 1);
+			}
 		};
 		desc.active = [client] { return client->pending; };
 		desc.onFailed = [] { Fail("the render graph failed with the screen blood's pass in it"); };
