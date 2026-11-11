@@ -714,6 +714,13 @@ namespace RenderGraph::Engine::Constants
 
 	Location Where(const SlotConstants& a_slot) { return Tracker::Get().Where(a_slot); }
 
+	ID3D11Buffer* EngineComputeBuffer()
+	{
+		// The Compute span's one slot (kEngineSpans).
+		constexpr std::uint32_t kComputeSlot = 143;
+		return EngineBlock()[kComputeSlot];
+	}
+
 	void InstallGameHooks()
 	{
 		if (!Requested())
@@ -776,6 +783,7 @@ namespace RenderGraph::Engine::Constants
 	const SlotConstants* Find(UseId, Stage, std::uint32_t) { return nullptr; }
 	std::span<const std::byte> Bytes(const SlotConstants&) { return {}; }
 	Location Where(const SlotConstants&) { return {}; }
+	ID3D11Buffer* EngineComputeBuffer() { return nullptr; }
 	void InstallGameHooks() {}
 	void InstallD3DHooks(ID3D11DeviceContext*) {}
 	void OnMap(ID3D11Resource*, D3D11_MAP, void*) {}

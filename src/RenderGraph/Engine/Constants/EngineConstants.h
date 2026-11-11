@@ -140,6 +140,13 @@ namespace RenderGraph::Engine::Constants
 	/** @brief A captured slot's location for a pass's shader. */
 	Location Where(const SlotConstants& a_slot);
 
+	/**
+	 * @brief The engine's compute constant buffer (CS b0: SetComputeShaderConstants writes it, DispatchCSShader binds it), as the
+	 * engine holds it (a tripwire handle under CS_ORG_TRIPWIRE_GUEST). A consumer that withholds a dispatch binds it to CS b0 on
+	 * DXVK's context (unwrapped) before Capture, since the withheld DispatchCSShader would have bound it. Null before the pools exist.
+	 */
+	ID3D11Buffer* EngineComputeBuffer();
+
 	///@}
 
 	/** @name Seams (the hooks that feed the capture). Inert unless requested. */
