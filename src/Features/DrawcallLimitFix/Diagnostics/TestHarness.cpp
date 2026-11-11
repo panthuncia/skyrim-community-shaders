@@ -590,6 +590,24 @@ namespace DCLF
 						logger::warn("[DCLF] test command {}: a wait holds CS_DCLF_TEST_COMMANDS' list; sent alone it does nothing", command);
 						return;
 					}
+					// "dclf:save=<name>", "dclf:load=<name>|recent": a save and a load through the engine's save manager. The console's save
+					// and load do nothing when run as a compiled script.
+					if (command.rfind("dclf:save=", 0) == 0 || command.rfind("dclf:load=", 0) == 0) {
+						auto* manager = RE::BGSSaveLoadManager::GetSingleton();
+						const auto name = command.substr(10);
+						if (!manager || name.empty()) {
+							logger::warn("[DCLF] test command {}: no save manager or no name", command);
+							return;
+						}
+						// "dclf:load=recent": the most recent save, which every instance has.
+						if (command[5] == 's')
+							manager->Save(name.c_str());
+						else if (name == "recent")
+							manager->LoadMostRecentSaveGame();
+						else
+							manager->Load(name.c_str());
+						return;
+					}
 					// "dclf:mark[=<label>]": nothing but this line in the log, a phase's boundary for the run's analysis.
 					if (command == "dclf:mark" || command.rfind("dclf:mark=", 0) == 0) {
 						MemProbe::Mark(command.size() > 10 ? std::string_view(command).substr(10) : std::string_view{}, a_frame);
