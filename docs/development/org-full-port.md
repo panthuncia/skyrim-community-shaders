@@ -145,7 +145,19 @@ Phase 5 wave 3 and the fixes after it (2026-11-11), each against its D3D11 run w
 - **Family inputs:** water, sky and shadow masks list the published ids they can read when their client is made, and
   each build declares the registered ones, so a target published later no longer keeps a family on the engine for the
   session. Water now draws on the graph after the first frames (`p5-all-census-misc.env`), matching its D3D11 shots.
-- **Shadow masks** (`CS_ORG_SHADOW_MASK`): the menu scenes' masks draw on the graph; the world's never register yet.
+- **Shadow masks** (`CS_ORG_SHADOW_MASK`): the menu scenes' and the world's masks draw on the graph. The world's never
+  registered (t5 was a stencil view the importer rejects; the ORG shader does not read it), then drew black: the filter-0
+  path samples the shadow map through t3, whose view the graph saw as null, while t4 holds the same cascade array. The
+  ORG build of Utility.hlsl now reads the map through t4's index (p5/shadow-mask.md, "The shadow map at t3 and t4"); the
+  four shots' mean diffs went from 16-22 to 2.2-4.7 (NPCs). The engine's filter selector 3 falls back to SHADOWFILTER 0 on
+  both paths, a pre-existing ShaderCache bug (dclf-validation.md, "Bugs found by parity").
+- **Taken shadow masks feed their readers:** Volumetric Shadows, Exponential Height Fog and Skylighting captured the sun's
+  cascades inside the engine's mask draw, which a taken draw never reaches. The family now hands them the view
+  (`State::OnShadowMaskDraw`).
+- **A hang in target-dump runs:** Upscaling's constant readback waited for the device to go idle mid-frame, a deadlock
+  inside DXVK's stream. It now reads after the frames in flight. The hang watchdog also reported a dump it never wrote;
+  it now names the helper's result (written, failed with the Win32 error, no helper, no answer).
+- **Silent raster skips:** a raster program draw that could not be recorded now logs its reason once.
 - **Bink:** the startup logo drew 166 of 166 frames on the graph (`loading-org1.env`).
 - **Crashes seen, not ours:** VRAM Budget unloading cells under memory pressure, then a `coc` into an interior faulting in
   EngineFixes (the batches now disable VRAM Budget, see its known grid-detach crash); a pathing job jumping into heap
@@ -160,7 +172,6 @@ Phase 5 wave 3 and the fixes after it (2026-11-11), each against its D3D11 run w
   the pool, and the retirement fix only keeps the old one alive for the lists that recorded with it.
 - P5.13: the census still reads 40-170 engine draws a frame (cloud layers, DCLF residue in load windows, refraction
   normals, particles, distant tree LOD), so the latch stays off.
-- The world shadow masks never register; the menu's t5 is a stencil view the importer rejects.
 - ImageSpace left on D3D11: the distant blur (its output is `kFRAMEBUFFER`), `Main::RenderWaterEffects`' copies (a
   queued texture each), refraction's late shape (it joins at the next cell change).
 - Dragonsreach is darker with the ImageSpace port on (`imagespace-sao-ssr-org1.env`); likely the eye adaptation chain
