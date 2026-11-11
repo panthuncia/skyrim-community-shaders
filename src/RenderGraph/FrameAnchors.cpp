@@ -36,7 +36,7 @@ namespace FrameAnchors
 		using Segment = RenderGraphRuntime::Segment;
 
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
-		static_assert(static_cast<std::uint32_t>(Segment::AnchorEngineDraws) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
+		static_assert(static_cast<std::uint32_t>(Segment::AnchorEngineQueries) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
 			"one segment per anchor, in the anchors' order");
 		static_assert(static_cast<std::uint32_t>(Segment::Count) <= 64, "TakeSubmittedSegments holds one bit per segment");
 
@@ -90,6 +90,8 @@ namespace FrameAnchors
 			{ "ImageSpace", { "CS anchor: image space", "CS anchor: image space inputs", "FrameAnchors::ImageSpace / ", "cs.anchor.image-space" }, true, 15 },
 			// Runs a frame: the world's shadow masks, the water mask, the water, a menu scene's shadow masks and the screen blood.
 			{ "EngineDraws", { "CS anchor: engine draws", "CS anchor: engine draws inputs", "FrameAnchors::EngineDraws / ", "cs.anchor.engine-draws" }, true, 5 },
+			// Runs a frame: one per sun occlusion query the engine submits (Sun::SubmitOcclusionQuery's indices 0 to 2; two seen a frame).
+			{ "EngineQueries", { "CS anchor: engine queries", "CS anchor: engine queries inputs", "FrameAnchors::EngineQueries / ", "cs.anchor.engine-queries" }, false, 3 },
 		} };
 
 		// Where each segment runs in a frame: AddToFrame puts an anchor before the first epoch of the order that runs after it. A
@@ -118,6 +120,7 @@ namespace FrameAnchors
 			Segment::AnchorPostComposite,      // DeferredPasses' end, after the composite
 			Segment::AnchorEngineDraws,        // the water, before the forward epoch (nominally here: the shadow masks and the water mask run before, the blood after)
 			Segment::Forward,
+			Segment::AnchorEngineQueries,  // the sun's occlusion queries, after Main::RenderWorld's accumulator (nominally here: a second runs later in the frame)
 			Segment::FirstPerson,
 			Segment::AnchorPostProcessing,   // Main_PostProcessing, before the upscaler
 			Segment::AnchorUpscale,          // after the upscaler's evaluate
