@@ -64,6 +64,68 @@ PS_OUTPUT main(PS_INPUT input)
 
 #else
 
+#	if defined(CS_ORG_BINDLESS)
+// The ORG build (Drawcall Limit Fix's water family, Features/DrawcallLimitFix/Features/Water). One push block serves both stages.
+// A draw's engine constants (both stages' PerTechnique, PerMaterial and PerGeometry), its descriptors, its textures' and samplers'
+// heap indices and its geometry are one latch region; Light Limit Fix's strict lights (PS b3) follow it. The shared constants and
+// the headers' resources come from the heap through the push block.
+#		define ORG_SHARED_CONSTANTS
+#		define ORG_HEADER_RESOURCES
+// The permutation block is the draw's (WaterOrgPermutation), not a shared buffer: the pixel stage branches on its descriptor.
+#		define DCLF_PULLED_ROWS
+#		define SKYLIGHTING_PROBE_REGISTER t50
+#		include "Common/OrgResources.hlsli"
+
+// A draw's latched values, as the engine's SetupTechnique, SetupMaterial and SetupGeometry wrote its constant buffers (c rows in
+// the D3D11 shaders' packoffsets). Matrices are rows: a latch is loaded with Load<T>, which does not keep row_major.
+struct WaterOrgDraw
+{
+	float4 VSTechnique[1];  // VS b0: QPosAdjust
+	float4 VSMaterial[6];   // VS b1: VSFogParam, VSFogNearColor, VSFogFarColor, NormalsScroll0, NormalsScroll1, NormalsScale
+	float4 VSGeometry[14];  // VS b2: World, PreviousWorld, WorldViewProj (rows), ObjectUV, CellTexCoordOffset
+	float4 PSTechnique[5];  // PS b0
+	float4 PSMaterial[14];  // PS b1
+	float4 PSGeometry[22];  // PS b2: TextureProj (its columns), ReflectPlane, ProjData, LightPos[8], LightColor[8]
+	uint4 Descriptors;      // CS's permutation block: vertex, pixel, extra and extra feature descriptors
+	float EffectRadius;
+	uint VertexStride;
+	uint FirstIndex;
+	uint Padding;
+	uint4 Textures[3];  // t0-t11 heap indices
+	uint4 Samplers[3];  // s0-s11 sampler heap indices
+	uint2 VertexAddress;
+	uint2 IndexAddress;
+	uint2 VertexLayout;
+	uint2 Padding2;
+};
+
+#		define WATER_ORG_RESOURCES(X)                                                         \
+			X(SHARED, ConstantBuffer, Shared, 0)                                                 \
+			X(LATCH, WaterOrgDraw, WaterDraw, 2)                                                 \
+			X(EXTERN_LATCH, StrictLightDataValues, StrictLightData, 3)                           \
+			X(EXTERN, Texture2D<float4>, DepthTexture, 17)                                       \
+			X(EXTERN, Texture2D<float2>, SharedShadowMap, 18)                                    \
+			X(EXTERN, Texture3D<float4>, ExponentialHeightFogIntegratedLightScattering, 19)      \
+			X(EXTERN, Texture3D<float4>, ExponentialHeightFogIntegratedLightScatteringFar, 22)   \
+			X(EXTERN, TextureCube<float>, CloudShadowsTexture, 25)                               \
+			X(EXTERN, TextureCube<float>, CloudSelfShadowTexture, 26)                            \
+			X(EXTERN, TextureCube<float3>, EnvReflectionsTexture, 30)                            \
+			X(EXTERN, TextureCube<float3>, EnvTexture, 31)                                       \
+			X(EXTERN, StructuredBuffer<Light>, lights, 35)                                       \
+			X(EXTERN, StructuredBuffer<uint>, lightList, 36)                                     \
+			X(EXTERN, StructuredBuffer<LightGrid>, lightGrid, 37)                                \
+			X(EXTERN, Texture3D<sh2>, SkylightingProbeArray, 50)                                 \
+			X(EXTERN, Texture2D<float2>, ShadowHeightTexture, 60)                                \
+			X(EXTERN, Texture2D<float4>, TexPrecipOcclusion, 70)                                 \
+			X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)                                         \
+			X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)                                         \
+			X(EXTERN, StructuredBuffer<DirectionalShadowLightData>, DirectionalShadowLights, 98) \
+			X(EXTERN, StructuredBuffer<LocalShadowData>, LocalShadows, 102)                      \
+			X(EXTERN, Texture2DArray<float>, LocalShadowMaps, 103)
+ORG_PUSH_BLOCK(WATER_ORG_RESOURCES(ORG_HANDLE))
+WATER_ORG_RESOURCES(ORG_RESOURCE)
+#	endif
+
 #	include "Common/FrameBuffer.hlsli"
 #	include "Common/MotionBlur.hlsli"
 #	include "Common/Permutation.hlsli"
@@ -82,6 +144,18 @@ PS_OUTPUT main(PS_INPUT input)
 #	endif
 
 #	include "Common/SharedData.hlsli"
+
+#	if defined(CS_ORG_BINDLESS)
+/** @brief The draw's permutation block (Permutation.hlsli, DCLF_PULLED_ROWS), set by each stage's main before anything reads it. */
+void WaterOrgPermutation()
+{
+	Permutation::VertexShaderDescriptor = WaterDraw.Descriptors.x;
+	Permutation::PixelShaderDescriptor = WaterDraw.Descriptors.y;
+	Permutation::ExtraShaderDescriptor = WaterDraw.Descriptors.z;
+	Permutation::ExtraFeatureDescriptor = WaterDraw.Descriptors.w;
+	Permutation::EffectRadius = WaterDraw.EffectRadius;
+}
+#	endif
 
 #	if defined(VSHADER)
 struct VS_INPUT
@@ -153,6 +227,20 @@ struct VS_OUTPUT
 
 #	ifdef VSHADER
 
+#		if defined(CS_ORG_BINDLESS)
+static float4 QPosAdjust = WaterDraw.VSTechnique[0];
+static float4 VSFogParam = WaterDraw.VSMaterial[0];
+static float4 VSFogNearColor = WaterDraw.VSMaterial[1];
+static float4 VSFogFarColor = WaterDraw.VSMaterial[2];
+static float4 NormalsScroll0 = WaterDraw.VSMaterial[3];
+static float4 NormalsScroll1 = WaterDraw.VSMaterial[4];
+static float4 NormalsScale = WaterDraw.VSMaterial[5];
+static float4x4 World = float4x4(WaterDraw.VSGeometry[0], WaterDraw.VSGeometry[1], WaterDraw.VSGeometry[2], WaterDraw.VSGeometry[3]);
+static float4x4 PreviousWorld = float4x4(WaterDraw.VSGeometry[4], WaterDraw.VSGeometry[5], WaterDraw.VSGeometry[6], WaterDraw.VSGeometry[7]);
+static float4x4 WorldViewProj = float4x4(WaterDraw.VSGeometry[8], WaterDraw.VSGeometry[9], WaterDraw.VSGeometry[10], WaterDraw.VSGeometry[11]);
+static float3 ObjectUV = WaterDraw.VSGeometry[12].xyz;
+static float4 CellTexCoordOffset = WaterDraw.VSGeometry[13];
+#		else
 cbuffer PerTechnique : register(b0)
 {
 	float4 QPosAdjust : packoffset(c0);
@@ -176,8 +264,13 @@ cbuffer PerGeometry : register(b2)
 	float3 ObjectUV : packoffset(c12);
 	float4 CellTexCoordOffset : packoffset(c13);
 };
+#		endif
 
+#		if defined(CS_ORG_BINDLESS)
+VS_OUTPUT WaterVertex(VS_INPUT input)
+#		else
 VS_OUTPUT main(VS_INPUT input)
+#		endif
 {
 	VS_OUTPUT vsout = (VS_OUTPUT)0;
 
@@ -314,6 +407,48 @@ VS_OUTPUT main(VS_INPUT input)
 	return vsout;
 }
 
+#		if defined(CS_ORG_BINDLESS)
+#			if defined(__spirv__)
+#				define DCLF_PULLED_VERTICES
+#				include "Common/DCLFVertexPull.hlsli"
+
+/** @brief The draw's vertex a_vertexID, pulled as the input assembler reads it: its 16-bit index, then its attributes. */
+VS_INPUT WaterPullVertex(uint a_vertexID)
+{
+	DCLFDrawVertexLayout = WaterDraw.VertexLayout;
+	const uint indexNumber = WaterDraw.FirstIndex + a_vertexID;
+	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(WaterDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	DCLFStream first = { DCLFAddress(WaterDraw.VertexAddress), WaterDraw.VertexStride };
+	DCLFStream second = { uint64_t(0), 0u };
+	DCLFStreamsAt(index, first, second);
+
+	VS_INPUT input = (VS_INPUT)0;
+	input.Position = DCLFPullPosition(first, second);
+#				if (defined(SPECULAR) || defined(UNDERWATER) || defined(STENCIL) || defined(SIMPLE)) && defined(NORMAL_TEXCOORD)
+	input.TexCoord0 = DCLFPullHalf2(1, first, second);
+#				endif
+#				if defined(VC)
+	input.Color = DCLFPullUnorm4(5, 0, first, second);
+#				endif
+	return input;
+}
+#			else
+// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
+VS_INPUT WaterPullVertex(uint a_vertexID)
+{
+	VS_INPUT input = (VS_INPUT)0;
+	return input;
+}
+#			endif
+
+VS_OUTPUT main(uint a_vertexID: SV_VertexID)
+{
+	WaterOrgPermutation();
+	return WaterVertex(WaterPullVertex(a_vertexID));
+}
+#		endif
+
 #	endif
 
 typedef VS_OUTPUT PS_INPUT;
@@ -332,6 +467,63 @@ struct PS_OUTPUT
 
 #	ifdef PSHADER
 
+#		if defined(CS_ORG_BINDLESS)
+static SamplerState ReflectionSampler = SamplerDescriptorHeap[WaterDraw.Samplers[0].x];
+static SamplerState RefractionSampler = SamplerDescriptorHeap[WaterDraw.Samplers[0].y];
+static SamplerState DisplacementSampler = SamplerDescriptorHeap[WaterDraw.Samplers[0].z];
+static SamplerState CubeMapSampler = SamplerDescriptorHeap[WaterDraw.Samplers[0].w];
+static SamplerState Normals01Sampler = SamplerDescriptorHeap[WaterDraw.Samplers[1].x];
+static SamplerState Normals02Sampler = SamplerDescriptorHeap[WaterDraw.Samplers[1].y];
+static SamplerState Normals03Sampler = SamplerDescriptorHeap[WaterDraw.Samplers[1].z];
+static SamplerState DepthSampler = SamplerDescriptorHeap[WaterDraw.Samplers[1].w];
+static SamplerState FlowMapSampler = SamplerDescriptorHeap[WaterDraw.Samplers[2].x];
+static SamplerState FlowMapNormalsSampler = SamplerDescriptorHeap[WaterDraw.Samplers[2].y];
+static SamplerState SSRReflectionSampler = SamplerDescriptorHeap[WaterDraw.Samplers[2].z];
+static SamplerState RawSSRReflectionSampler = SamplerDescriptorHeap[WaterDraw.Samplers[2].w];
+
+static Texture2D<float4> ReflectionTex = ResourceDescriptorHeap[WaterDraw.Textures[0].x];
+static Texture2D<float4> RefractionTex = ResourceDescriptorHeap[WaterDraw.Textures[0].y];
+static Texture2D<float4> DisplacementTex = ResourceDescriptorHeap[WaterDraw.Textures[0].z];
+static TextureCube<float4> CubeMapTex = ResourceDescriptorHeap[WaterDraw.Textures[0].w];
+static Texture2D<float4> Normals01Tex = ResourceDescriptorHeap[WaterDraw.Textures[1].x];
+static Texture2D<float4> Normals02Tex = ResourceDescriptorHeap[WaterDraw.Textures[1].y];
+static Texture2D<float4> Normals03Tex = ResourceDescriptorHeap[WaterDraw.Textures[1].z];
+static Texture2D<float4> DepthTex = ResourceDescriptorHeap[WaterDraw.Textures[1].w];
+static Texture2D<float4> FlowMapTex = ResourceDescriptorHeap[WaterDraw.Textures[2].x];
+static Texture2D<float4> FlowMapNormalsTex = ResourceDescriptorHeap[WaterDraw.Textures[2].y];
+static Texture2D<float4> SSRReflectionTex = ResourceDescriptorHeap[WaterDraw.Textures[2].z];
+static Texture2D<float4> RawSSRReflectionTex = ResourceDescriptorHeap[WaterDraw.Textures[2].w];
+
+static float4 VPOSOffset = WaterDraw.PSTechnique[0];
+static float4 PosAdjust = WaterDraw.PSTechnique[1];
+static float4 CameraDataWater = WaterDraw.PSTechnique[2];
+static float4 SunDir = WaterDraw.PSTechnique[3];
+static float4 SunColor = WaterDraw.PSTechnique[4];
+
+static float4 ShallowColor = WaterDraw.PSMaterial[0];
+static float4 DeepColor = WaterDraw.PSMaterial[1];
+static float4 ReflectionColor = WaterDraw.PSMaterial[2];
+static float4 FresnelRI = WaterDraw.PSMaterial[3];
+static float4 BlendRadius = WaterDraw.PSMaterial[4];
+static float4 VarAmounts = WaterDraw.PSMaterial[5];
+static float4 NormalsAmplitude = WaterDraw.PSMaterial[6];
+static float4 WaterParams = WaterDraw.PSMaterial[7];
+static float4 FogNearColor = WaterDraw.PSMaterial[8];
+static float4 FogFarColor = WaterDraw.PSMaterial[9];
+static float4 FogParam = WaterDraw.PSMaterial[10];
+static float4 DepthControl = WaterDraw.PSMaterial[11];
+static float4 SSRParams = WaterDraw.PSMaterial[12];
+static float4 SSRParams2 = WaterDraw.PSMaterial[13];
+
+// TextureProj is column-major in the D3D11 cbuffer: its four rows there are the matrix's columns.
+static float4x4 TextureProj = transpose(float4x4(WaterDraw.PSGeometry[0], WaterDraw.PSGeometry[1], WaterDraw.PSGeometry[2], WaterDraw.PSGeometry[3]));
+static float4 ReflectPlane[1] = { WaterDraw.PSGeometry[4] };
+static float4 ProjData = WaterDraw.PSGeometry[5];
+static float4 LightPos[8] = { WaterDraw.PSGeometry[6], WaterDraw.PSGeometry[7], WaterDraw.PSGeometry[8], WaterDraw.PSGeometry[9],
+	WaterDraw.PSGeometry[10], WaterDraw.PSGeometry[11], WaterDraw.PSGeometry[12], WaterDraw.PSGeometry[13] };
+static float4 LightColor[8] = { WaterDraw.PSGeometry[14], WaterDraw.PSGeometry[15], WaterDraw.PSGeometry[16], WaterDraw.PSGeometry[17],
+	WaterDraw.PSGeometry[18], WaterDraw.PSGeometry[19], WaterDraw.PSGeometry[20], WaterDraw.PSGeometry[21] };
+#		else
 SamplerState ReflectionSampler : register(s0);
 SamplerState RefractionSampler : register(s1);
 SamplerState DisplacementSampler : register(s2);
@@ -393,6 +585,7 @@ cbuffer PerGeometry : register(b2)
 	float4 LightPos[8] : packoffset(c6);
 	float4 LightColor[8] : packoffset(c14);
 }
+#		endif
 
 #		define SampColorSampler Normals01Sampler
 #		define LinearSampler Normals01Sampler
@@ -1035,7 +1228,11 @@ float3 GetSunColor(float3 normal, float3 viewDirection, float3 worldPosition)
 #			include "IBL/IBL.hlsli"
 #		endif
 
+#		if defined(CS_ORG_BINDLESS)
+PS_OUTPUT WaterPixel(PS_INPUT input)
+#		else
 PS_OUTPUT main(PS_INPUT input)
+#		endif
 {
 	PS_OUTPUT psout;
 
@@ -1403,6 +1600,14 @@ PS_OUTPUT main(PS_INPUT input)
 
 	return psout;
 }
+
+#		if defined(CS_ORG_BINDLESS)
+PS_OUTPUT main(PS_INPUT input)
+{
+	WaterOrgPermutation();
+	return WaterPixel(input);
+}
+#		endif
 
 #	endif
 
