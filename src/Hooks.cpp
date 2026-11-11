@@ -50,6 +50,7 @@
 #include "Features/Upscaling/Streamline.h"
 #include "Features/VolumetricLighting.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/Engine/TonemapAnchor.h"
@@ -1456,6 +1457,8 @@ namespace Hooks
 		RenderGraph::Engine::Textures::InstallHooks();
 		RenderGraph::Engine::Buffers::InstallGameHooks();
 		RenderGraph::Engine::Constants::InstallGameHooks();
+		// CS_ORG_BINK: the movie player's tiles on the render graph (reserves the Present anchor).
+		RenderGraph::Engine::Bink::InstallHooks();
 
 		logger::info("Hooking BSGraphics::Renderer::InitD3D");
 		stl::write_thunk_call<BSGraphics_Renderer_Init_InitD3D>(REL::RelocationID(75595, 77226).address() + REL::Relocate(0x50, 0x2BC));
