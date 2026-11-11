@@ -121,7 +121,8 @@ namespace DCLF::Features::Sky
 			std::uint32_t drawn = 0;      // the batch's DrawTriShape calls
 			std::uint32_t lastTechnique = 0;  // the last pass's raw technique (State::currentPixelDescriptor & 0xFF)
 			const RE::BSRenderPass* lastPass = nullptr;  // the last pass SetupGeometry set up (TraceCloudDraw)
-			std::uint32_t traced = 0;                    // cloud draws traced (CS_ORG_SKY_TRACE)
+			std::array<std::uint32_t, 2> traced{};       // cloud draws traced (CS_ORG_SKY_TRACE): probed, latched
+			std::uint32_t checked = 0;                   // the batch's draws checked so far (the trace's draw number)
 			// The last pass's geometry type (BSGeometry +0x150, R1's dispatcher) while its draw has not reached DrawTriShape; 0xFF none.
 			std::uint32_t pendingType = 0xFF;
 			std::uint32_t otherTypes = 0;  // the geometry types of the batch's passes that drew elsewhere, a bit each
@@ -293,7 +294,7 @@ namespace DCLF::Features::Sky
 		}
 
 		/**
-		 * @brief CS_ORG_SKY_TRACE=1: the first 48 cloud draws (techniques 4-6) a capture checks or latches, with what the engine's
+		 * @brief CS_ORG_SKY_TRACE=1: the first 16 cloud draws (techniques 4-6) probes check and the first 64 batches latch, with what the engine's
 		 * property holds (kBlendColor +0x88, fBlendValue +0xb8, usCloudLayer +0xbc, bFadeSecondTexture +0xbe, the sky object +0xc0) beside
 		 * what the latch took, so a wrong constant, texture, buffer or state shows in one run.
 		 */
@@ -302,9 +303,10 @@ namespace DCLF::Features::Sky
 		{
 			static const bool trace = Switches::On("CS_ORG_SKY_TRACE");
 			const std::uint32_t technique = a_draw.key.pixelDescriptor & 0xFF;
-			if (!trace || technique < 4 || technique > 6 || a_capture.traced >= 48)
+			auto& traced = a_capture.traced[a_capture.probe ? 0 : 1];
+			if (!trace || technique < 4 || technique > 6 || traced >= (a_capture.probe ? 16u : 64u))
 				return;
-			++a_capture.traced;
+			++traced;
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 			const auto* pass = a_capture.lastPass;
 			const auto* property = pass ? pass->shaderProperty : nullptr;
@@ -320,7 +322,7 @@ namespace DCLF::Features::Sky
 				"blend value {:.3f} fade second {} | latched blend colour0 ({:.3f} {:.3f} {:.3f} {:.3f}) colour1 ({:.3f} {:.3f} {:.3f}) uv offset ({:.3f} {:.3f}) "
 				"vparams {:.3f} pparams ({:.3f} {:.3f}) alpha test {} ref {:.3f} | constant bytes vs {} ps {} | layout {:#x} stride {} first {} count {} vb usage {} "
 				"bytes {} | t0 {} format {} mips {} sampler {}/{} | write mode {} blend mode {} occlusion {} | {}",
-				a_capture.view == View::Main ? "main" : "face", a_capture.probe ? "probe" : "latched", a_capture.run ? a_capture.run->draws.size() : 0, technique,
+				a_capture.view == View::Main ? "main" : "face", a_capture.probe ? "probe" : "latched", a_capture.checked, technique,
 				static_cast<const void*>(pass ? pass->geometry : nullptr), property ? Engine::At<std::uint16_t>(property, 0xbc) : 0xFFFF,
 				property ? Engine::At<std::uint32_t>(property, 0xc0) : 0xFFFF, blendColor ? blendColor[0] : -1.0f, blendColor ? blendColor[1] : -1.0f,
 				blendColor ? blendColor[2] : -1.0f, blendColor ? blendColor[3] : -1.0f, property ? Engine::At<float>(property, 0xb8) : -1.0f,
@@ -340,6 +342,7 @@ namespace DCLF::Features::Sky
 		Refusal TryLatchDraw(Capture& a_capture, const EngineTriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
 			auto& run = *a_capture.run;
+			++a_capture.checked;
 			if (!a_shape || !a_shape->vertexBuffer || !a_shape->indexBuffer)
 				return Refusal::Geometry;
 			if (run.draws.size() >= kMaxLatched)
@@ -456,13 +459,15 @@ namespace DCLF::Features::Sky
 			draw.depthRange[1] = cameraDepthRange.get()[1];
 
 			TraceCloudDraw(a_capture, draw, a_shape, vertexBytes, pixelBytes);
+			// The imports are kept, a probe's too (SkyDraws::Keep): a probe that dropped them freed each texture's descriptor as soon as
+			// it was made, so the next texture's import took the same index, and the next batch imported every texture again.
+			for (auto& owner : owners)
+				if (owner)
+					run.owners.push_back(std::move(owner));
 			// A probe only checks: the engine draws it, with Cloud Shadows' overrides.
 			if (a_capture.probe)
 				return Refusal::None;
 			run.draws.push_back(std::move(draw));
-			for (auto& owner : owners)
-				if (owner)
-					run.owners.push_back(std::move(owner));
 			// Its D3D11 overrides (SkyShaderHacks) run only at a draw's state flush, which a latched draw never reaches.
 			cloudShadows.overrideSky = false;
 			cloudShadows.bindLayerSelfShadow = false;
@@ -572,6 +577,7 @@ namespace DCLF::Features::Sky
 				clean = !a_capture.failed;
 				if (clean)
 					logger::info("[DCLF] sky: every {} sky draw can be drawn by the graph; its batches are the graph's from the next", name);
+				SkyDraws::Keep(std::move(run->owners));
 				return;
 			}
 			if (a_capture.failed) {
@@ -633,6 +639,7 @@ namespace DCLF::Features::Sky
 				capture.drawn = 0;
 				capture.pendingType = 0xFF;
 				capture.otherTypes = 0;
+				capture.checked = 0;
 				capture.cloudGroup = capture.shape.clouds && !capture.cloudsRefused[static_cast<std::size_t>(capture.view)] ? CloudGroupOf(a_accumulator, capture) : nullptr;
 				capture.active = true;
 				func(a_accumulator, a_first, a_last, a_flags, a_group);

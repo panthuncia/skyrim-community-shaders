@@ -558,6 +558,17 @@ namespace DCLF::Features::Sky::SkyDraws
 		return program;
 	}
 
+	void Keep(std::vector<std::shared_ptr<const void>> a_owners)
+	{
+		auto& state = GetState();
+		if (a_owners.empty())
+			return;
+		const std::uint32_t frame = GameFrame();
+		while (!state.kept.empty() && frame - state.kept.front().first > kKeptFrames)
+			state.kept.pop_front();
+		state.kept.emplace_back(frame, std::move(a_owners));
+	}
+
 	void Submit(std::shared_ptr<Run> a_run)
 	{
 		auto& state = GetState();
