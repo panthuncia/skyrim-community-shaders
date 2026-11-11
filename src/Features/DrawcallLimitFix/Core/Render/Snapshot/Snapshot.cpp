@@ -919,6 +919,8 @@ namespace DCLF
 		// Generous: a snapshot made again for a build (its recordings, its draws for new main resources and their payload) takes
 		// milliseconds; five seconds without one is a builder that cannot make it, never a slow one. New targets wait for the pipeline lane's
 		// catalog for them instead, which compiles every pipeline of the set for the new formats: up to kCatalogTimeout, logged as it goes.
+		// Shader compiles and pipeline builds share the threads the builder runs on, and a cold cache makes each take seconds. So the five
+		// seconds count from the last time no compile or build was running, up to kCatalogTimeout in all.
 		constexpr auto kTimeout = std::chrono::seconds(5);
 		constexpr auto kCatalogTimeout = std::chrono::seconds(120);
 		auto progressAt = std::chrono::seconds(5);
@@ -926,6 +928,9 @@ namespace DCLF
 		constexpr auto kTicketPeriod = std::chrono::milliseconds(16);
 		const auto start = Clock::now();
 		auto ticketsAt = start;  // the build point gave back the unsubmitted epochs' tickets just now
+		auto busyAt = start;     // the last poll that saw a shader compile or a pipeline build running
+		std::size_t busyBuilds = 0;
+		bool busyCompiling = false;
 		const auto staleBefore = s.snapshotsStale;
 		const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
 		// The frame adopts whatever is posted next: the publication gate's scene pass half open (this frame's pass is woken only when its
@@ -969,6 +974,10 @@ namespace DCLF
 				(void)host->NudgeHostThread();
 				Direct::ReleaseCompletedSlots();
 				PollHostRetirement();
+				busyBuilds = DrawPipelines::Get().BuildsInFlight();
+				busyCompiling = SIE::ShaderCache::Instance().IsCompiling();
+				if (busyBuilds != 0 || busyCompiling)
+					busyAt = now;
 				ticketsAt = now;
 			}
 			if (const std::uint64_t posted = s.snapshotsPosted.load(std::memory_order_acquire); posted != seen) {
@@ -977,14 +986,21 @@ namespace DCLF
 				if (s.AdoptedCurrent())
 					break;
 			}
-			const auto waited = Clock::now() - start;
+			const auto checkedAt = Clock::now();
+			const auto waited = checkedAt - start;
+			const auto idle = checkedAt - busyAt;
 			const bool catalogWait = s.adoptedSnapshot && s.StaleKindOf(*s.adoptedSnapshot) == Impl::kStaleTargets;
-			if (catalogWait && waited > progressAt && waited <= kCatalogTimeout) {
-				logger::info("[DCLF] frame {} has waited {} s at its start for the pipelines of the new target formats (generation {})", frame,
-					std::chrono::duration_cast<std::chrono::seconds>(waited).count(), DrawPipelines::Get().Generation());
+			if (waited > progressAt && waited <= kCatalogTimeout) {
+				if (catalogWait)
+					logger::info("[DCLF] frame {} has waited {} s at its start for the pipelines of the new target formats (generation {})", frame,
+						std::chrono::duration_cast<std::chrono::seconds>(waited).count(), DrawPipelines::Get().Generation());
+				else if (idle < kTimeout)
+					logger::info("[DCLF] frame {} has waited {} s at its start for a scene snapshot while shaders compile ({} pipeline builds in flight, "
+								 "Community Shaders' compile workers {})",
+						frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), busyBuilds, busyCompiling ? "busy" : "idle");
 				progressAt += std::chrono::seconds(5);
 			}
-			if (waited > (catalogWait ? kCatalogTimeout : kTimeout)) {
+			if (catalogWait ? waited > kCatalogTimeout : (idle > kTimeout || waited > kCatalogTimeout)) {
 				const auto& adopted = s.adoptedSnapshot;
 				const auto pumpStats = s.SnapshotPump().GetStats();
 				const auto assembler = s.revisions.assembler.GetStats();
@@ -994,14 +1010,14 @@ namespace DCLF
 					stale += fmt::format("{}{}", k ? "/" : "", s.snapshotsStale[k] - staleBefore[k]);
 				stl::report_and_fail(fmt::format(
 					"Drawcall Limit Fix: frame {} waited {} s at its start for a scene snapshot current for the graph as built and never got one, and DCLF does "
-					"not hand drawing back to the engine. Waiting for: build generation {} (rebuild requested: {}), main resources generation {}, targets "
+					"not hand drawing back to the engine (no shader compile or pipeline build ran for the last {} s). Waiting for: build generation {} (rebuild requested: {}), main resources generation {}, targets "
 					"generation {}. Stale snapshots taken meanwhile (build/targets/shadow format/main): {}; snapshots posted {}, recordings outstanding {}, "
 					"inputs moved {}, publication gated {}, build ahead running {}. Adopted snapshot: serial {}, revision {}, draws complete {}, build "
 					"generation {}, main generation {}, payload {}. The builder (read racily, for this message): stage {}, passes {} ({} idle), work {}, draws {}, "
 					"payload {} (failed {}, source in flight {}, parts in flight: {}), sealed sequence {}, assembler latest {} pending {} (sealed {}, published {}, "
 					"failed {}, superseded {}, abandoned {}), active {}; its pump: runner active {}, requested epoch {}, drained {}, notifications {}, passes {}, "
 					"rejected {}; retirement: {}. ORG's {}",
-					frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), host->BuildGeneration(), host->RebuildRequested(),
+					frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), std::chrono::duration_cast<std::chrono::seconds>(idle).count(), host->BuildGeneration(), host->RebuildRequested(),
 					s.postedInputs.mainGeneration, DrawPipelines::Get().Generation(), stale, seen, s.recordingsOutstanding.load(std::memory_order_acquire),
 					s.snapshotInputsMoved.load(std::memory_order_acquire), s.publicationGated.load(std::memory_order_acquire),
 					s.aheadRunning.load(std::memory_order_acquire), adopted ? adopted->serial : 0, adopted && adopted->revision, adopted && adopted->drawsComplete,

@@ -651,9 +651,12 @@ void State::Load(bool a_allowReload)
 				if (!isDisabled && !feature->IsAlwaysEnabled() && DisabledByEnvironment(featureName)) {
 					isDisabled = true;
 					logger::info("Feature '{}' is disabled at boot by CS_DISABLE_FEATURES (this run only)", featureName);
-					// Another feature set changes most shaders' defines, so the disk cache is cold for it. The startup precompile then
-					// holds the main menu (kDataLoaded waits for it) for far longer than a test run: compile on demand instead.
-					if (!globals::shaderCache->backgroundCompilation) {
+					// A feature with shader defines changes most shaders' defines when it is off, so the disk cache is cold for that
+					// feature set. The startup precompile then holds the main menu (kDataLoaded waits for it) for far longer than a test
+					// run: compile on demand instead. A feature without defines (VRAM Budget) leaves every cache key as it was, so the
+					// precompile stays: compiling on demand would stall the first world frames instead.
+					const bool changesDefines = !feature->GetShaderDefineName().empty() || !feature->GetCommonShaderDefines().empty();
+					if (changesDefines && !globals::shaderCache->backgroundCompilation) {
 						globals::shaderCache->SetBackgroundCompilation(true);
 						logger::info("CS_DISABLE_FEATURES: shaders compile in the background, on demand (no startup precompile)");
 					}
