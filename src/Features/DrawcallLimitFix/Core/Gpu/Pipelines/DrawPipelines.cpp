@@ -277,6 +277,11 @@ namespace DCLF
 		return Enabled() && impl->deviceGenerated;
 	}
 
+	std::size_t DrawPipelines::BuildsInFlight() const
+	{
+		return impl->service.InFlightCount();
+	}
+
 	bool DrawPipelines::GpuDriven() const
 	{
 		return Enabled() && impl->gpuDriven;

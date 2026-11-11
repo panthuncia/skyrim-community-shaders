@@ -592,6 +592,9 @@ namespace DCLF
 		/** @brief Any thread: render-thread and lane counters (relaxed reads, for the report). */
 		Stats GetStats() const;
 
+		/** @brief Any thread: pipeline builds queued or running in the lane's service. */
+		std::size_t BuildsInFlight() const;
+
 		/** @brief Lighting constant variable names by index, per stage. */
 		static std::span<const std::string_view> LightingVariableNames(bool a_pixel);
 
