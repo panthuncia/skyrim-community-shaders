@@ -5,6 +5,8 @@
 
 #	include "RenderGraph/PublishedResources.h"
 
+#	include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
+#	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 
@@ -55,9 +57,18 @@ namespace PublishedResources
 			return s_state;
 		}
 
-		/** @brief Logs once when called off the thread that first used the entries (the render thread): they are not locked. */
+		/**
+		 * @brief Logs once when called off the render thread: the entries are not locked. That is the thread that first used them, or
+		 * with CS_ORG_LOADING_THREAD=1 the render owner (FrameAnchors::OnRenderThread), which a loading screen's thread may be.
+		 */
 		void CheckThread()
 		{
+			if (RenderGraph::Engine::LoadingScreen::Requested()) {
+				static std::atomic<bool> s_offOwner{ false };
+				if (!FrameAnchors::OnRenderThread() && !s_offOwner.exchange(true, std::memory_order_relaxed))
+					logger::critical("[ORG] PublishedResources used on thread {}, not the render owner: its entries are not locked", ::GetCurrentThreadId());
+				return;
+			}
 			static std::atomic<DWORD> s_owner{ 0 };
 			static std::atomic<bool> s_logged{ false };
 			const DWORD self = ::GetCurrentThreadId();

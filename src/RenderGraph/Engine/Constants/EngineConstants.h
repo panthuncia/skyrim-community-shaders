@@ -31,7 +31,8 @@ namespace org
  *   VS b11. Its size argument bounds how much of the 0xf00-byte buffer a use copies.
  *
  * Threads: the hooks run on whichever thread drives the immediate context (Renderer::Lock serializes them). Uses are captured, and
- * the frame ends, on the main thread only (FrameAnchors::OnMainThread): a loading screen's job-thread frames are not captured.
+ * the frame ends, on the render thread only (FrameAnchors::OnRenderThread): the main thread, or with CS_ORG_LOADING_THREAD=1 the
+ * thread rendering under Renderer::Lock (a loading screen, the startup logo).
  * The consumer API is main-thread only.
  *
  * Lifetime: a frame's ring chunks are retired at the end of the frame (after the Present, through

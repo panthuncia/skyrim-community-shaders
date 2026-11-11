@@ -6,6 +6,7 @@
 #	include "RenderGraph/FrameAnchors.h"
 
 #	include "Globals.h"
+#	include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #	include "RenderGraph/Engine/Targets/EngineTargets.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/DxvkImageImport.h"
@@ -27,6 +28,7 @@
 #	include <array>
 #	include <atomic>
 #	include <map>
+#	include <mutex>
 
 namespace FrameAnchors
 {
@@ -191,6 +193,20 @@ namespace FrameAnchors
 		{
 			static State s_state;
 			return s_state;
+		}
+
+		/**
+		 * @brief With CS_ORG_LOADING_THREAD=1, the anchors' state is also under this mutex: the render owner's runs and claims, and every
+		 * call that changes the clients or imports (a feature's Register on the main thread during a load, while the loading thread
+		 * runs). Recursive: a run's commit, executed and onFailed callbacks may register. Nothing under it takes Renderer::Lock, and
+		 * the host's thread never takes it (the builds read the published snapshot). Without the switch it is not taken.
+		 */
+		std::unique_lock<std::recursive_mutex> Guard()
+		{
+			if (!RenderGraph::Engine::LoadingScreen::Requested())
+				return {};
+			static std::recursive_mutex s_mutex;
+			return std::unique_lock(s_mutex);
 		}
 
 		bool HasPasses(const ClientDesc& a_client, Anchor a_anchor)
@@ -412,6 +428,7 @@ namespace FrameAnchors
 		std::shared_ptr<org::ExternalTextureResource> Import(ID3D11Texture2D* a_texture, const std::string& a_id,
 			const std::function<org::TextureDescription(const D3D11_TEXTURE2D_DESC&)>& a_describe)
 		{
+			auto lock = Guard();
 			auto& state = Anchors();
 			auto& runtime = RenderGraphRuntime::Get();
 			if (!a_texture || !runtime.IsActive())
@@ -517,6 +534,7 @@ namespace FrameAnchors
 
 	bool Register(ClientDesc a_client)
 	{
+		auto lock = Guard();
 		auto& state = Anchors();
 		if (!state.host || !RenderGraphRuntime::Get().IsActive()) {
 			logger::warn("[ORG] frame anchors: {} not registered, the render graph is not active", a_client.id);
@@ -562,6 +580,7 @@ namespace FrameAnchors
 
 	void Unregister(std::string_view a_id)
 	{
+		auto lock = Guard();
 		auto& state = Anchors();
 		const auto existing = std::ranges::find_if(state.clients, [&](const Client& a_other) { return a_other.desc->id == a_id; });
 		if (existing == state.clients.end())
@@ -574,6 +593,7 @@ namespace FrameAnchors
 
 	void Refresh(std::string_view a_id)
 	{
+		auto lock = Guard();
 		auto& state = Anchors();
 		if (auto* client = FindClient(state, a_id)) {
 			Publish(state);
@@ -584,6 +604,7 @@ namespace FrameAnchors
 
 	bool InBuiltGraph(std::string_view a_id, Anchor a_anchor)
 	{
+		auto lock = Guard();
 		auto& state = Anchors();
 		const std::uint32_t index = IndexOf(a_anchor);
 		const auto* client = FindClient(state, a_id);
@@ -592,6 +613,7 @@ namespace FrameAnchors
 
 	void Rearm(std::string_view a_id)
 	{
+		auto lock = Guard();
 		auto& state = Anchors();
 		auto* client = FindClient(state, a_id);
 		if (!client)
@@ -673,6 +695,31 @@ namespace FrameAnchors
 	namespace
 	{
 		std::atomic<DWORD> mainThread{ 0 };
+		// With CS_ORG_LOADING_THREAD=1: the thread that owns rendering (0 until the first claim: the main thread), and the claims.
+		std::atomic<DWORD> renderOwner{ 0 };
+		std::atomic<std::uint64_t> ownerChanges{ 0 };
+
+		/** @brief The thread holding Renderer::Lock (the CRITICAL_SECTION at Renderer +0x2790 SE / +0x27F0 AE), 0 when free. */
+		DWORD LockHolder()
+		{
+			auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+			if (!renderer)
+				return 0;
+			// Written by whichever thread enters or leaves the lock; a word-sized read is enough to tell "this thread" or "free".
+			const auto* owning = reinterpret_cast<void* const volatile*>(&renderer->GetLock().owningThread);
+			return static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(*owning));
+		}
+
+		/** @brief The calling thread owns rendering: the upload instance moves with it. Under the anchors' guard. */
+		void Claim(DWORD a_self, DWORD a_previous)
+		{
+			renderOwner.store(a_self, std::memory_order_release);
+			const auto changes = ownerChanges.fetch_add(1, std::memory_order_acq_rel) + 1;
+			RenderGraphRuntime::Get().MoveOwnerThread();
+			if (changes <= 32 || changes % 1000 == 0)
+				logger::info("[ORG] render ownership: thread {} ({}) takes it from thread {} (change {})", a_self,
+					LockHolder() == a_self ? "holding Renderer::Lock" : "the main thread", a_previous, changes);
+		}
 	}
 
 	void LatchMainThread()
@@ -680,19 +727,55 @@ namespace FrameAnchors
 		mainThread.store(::GetCurrentThreadId(), std::memory_order_release);
 	}
 
-	// A loading screen presents from a job thread (SE 38085). The anchors' state and the graph's frame upload instance belong to
-	// the main thread, so one-shot passes wait for the next main-thread frame.
-	bool OnMainThread()
+	bool OnRenderThread()
 	{
 		const DWORD main = mainThread.load(std::memory_order_acquire);
 		const DWORD self = ::GetCurrentThreadId();
-		if (main == 0 || main == self)
+		if (main == 0)
 			return true;
-		static std::atomic_flag logged;
-		if (!logged.test_and_set())
-			logger::info("[ORG] frame anchors: a Present on thread {} (a loading screen), not the main thread {}: anchors wait for the main thread",
-				self, main);
-		return false;
+		if (!RenderGraph::Engine::LoadingScreen::Requested()) {
+			// A loading screen presents from a job thread (SE 38085). The anchors' state and the graph's frame upload instance belong
+			// to the main thread, so one-shot passes wait for the next main-thread frame.
+			if (main == self)
+				return true;
+			static std::atomic_flag logged;
+			if (!logged.test_and_set())
+				logger::info("[ORG] frame anchors: a Present on thread {} (a loading screen), not the main thread {}: anchors wait for the main thread",
+					self, main);
+			return false;
+		}
+		const DWORD stored = renderOwner.load(std::memory_order_acquire);
+		const DWORD owner = stored ? stored : main;
+		const DWORD holder = LockHolder();
+		// The owner renders unless another thread is inside Renderer::Lock (it renders now, and claims at its next call).
+		if (owner == self)
+			return holder == 0 || holder == self;
+		// Another thread takes ownership only from inside the lock: the engine renders every frame there, on one thread at a time.
+		// The main thread also takes it back while no other thread holds the lock (its frames between loads).
+		if (holder != self && !(self == main && holder == 0))
+			return false;
+		auto lock = Guard();
+		const DWORD current = renderOwner.load(std::memory_order_acquire);
+		if ((current ? current : main) != self)
+			Claim(self, current ? current : main);
+		return true;
+	}
+
+	void TakeRenderOwnership()
+	{
+		if (!RenderGraph::Engine::LoadingScreen::Requested() || mainThread.load(std::memory_order_acquire) == 0)
+			return;
+		const DWORD self = ::GetCurrentThreadId();
+		auto lock = Guard();
+		const DWORD current = renderOwner.load(std::memory_order_acquire);
+		const DWORD owner = current ? current : mainThread.load(std::memory_order_acquire);
+		if (owner != self)
+			Claim(self, owner);
+	}
+
+	std::uint64_t RenderOwnerChanges()
+	{
+		return ownerChanges.load(std::memory_order_acquire);
 	}
 
 	bool Run(const Point& a_point)
@@ -701,8 +784,9 @@ namespace FrameAnchors
 		const std::uint32_t index = IndexOf(a_point.anchor);
 		if (index >= kAnchors || !state.reserved[index] || !state.host)
 			return false;
-		if (!OnMainThread())
+		if (!OnRenderThread())
 			return false;
+		auto lock = Guard();
 		auto& runtime = RenderGraphRuntime::Get();
 		if (!runtime.IsActive())
 			return false;
@@ -857,6 +941,7 @@ namespace FrameAnchors
 
 	void ReleaseImport(std::string_view a_id)
 	{
+		auto lock = Guard();
 		auto& state = Anchors();
 		const auto found = state.imports.find(a_id);
 		if (found == state.imports.end())
@@ -872,6 +957,7 @@ namespace FrameAnchors
 
 	void OnEpochFailed(std::uint32_t a_epoch, const std::string& a_error, bool a_keptGraph)
 	{
+		auto lock = Guard();
 		auto& state = Anchors();
 		const Anchor anchor = AnchorOfEpoch(a_epoch);
 		if (anchor == Anchor::Count)
@@ -984,7 +1070,9 @@ namespace FrameAnchors
 	void Refresh(std::string_view) {}
 	bool Run(const Point&) { return false; }
 	void LatchMainThread() {}
-	bool OnMainThread() { return true; }
+	bool OnRenderThread() { return true; }
+	void TakeRenderOwnership() {}
+	std::uint64_t RenderOwnerChanges() { return 0; }
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> EngineCubemap(std::uint32_t) { return nullptr; }

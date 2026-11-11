@@ -109,7 +109,7 @@ namespace RenderGraph::Engine::Bink
 		void RequestShot(std::uintptr_t a_player, bool a_graph)
 		{
 			const auto& frames = ShotFrames();
-			if (frames.empty() || !a_player || !FrameAnchors::OnMainThread())
+			if (frames.empty() || !a_player || !FrameAnchors::OnRenderThread())
 				return;
 			static std::set<std::uint32_t> taken;
 			const auto frame = Read<std::uint32_t>(reinterpret_cast<const void*>(a_player), kPlayerFrames);
@@ -139,10 +139,11 @@ namespace RenderGraph::Engine::Bink
 				EngineKeeps(fmt::format("player mode {}, not the blocking mode {}", mode, kModeBlocking));
 				return false;
 			}
-			if (!FrameAnchors::OnMainThread()) {
+			if (!FrameAnchors::OnRenderThread()) {
 				static std::atomic_flag logged;
 				if (!logged.test_and_set())
-					logger::info("[ORG] Bink: a movie plays on thread {}, not the main thread (the startup sequence): the engine draws it", ::GetCurrentThreadId());
+					logger::info("[ORG] Bink: a movie plays on thread {}, not the render thread (the startup sequence without CS_ORG_LOADING_THREAD=1): the engine draws it",
+						::GetCurrentThreadId());
 				return false;
 			}
 			// HDR output routes the movie into its UI texture (HDRDisplay's DrawTiles hook); the graph's pass draws the framebuffer.
@@ -335,7 +336,7 @@ namespace RenderGraph::Engine::Bink
 				records.sets.erase(found);
 			}
 			// The frames in flight keep the graph's textures until their GPU work retires.
-			if (graphMovie && FrameAnchors::OnMainThread())
+			if (graphMovie && FrameAnchors::OnRenderThread())
 				Graph::MovieEnded();
 		}
 
@@ -391,7 +392,7 @@ namespace RenderGraph::Engine::Bink
 				logger::warn("[ORG] Bink: no movie player to play {}", a_file);
 				return;
 			}
-			logger::info("[ORG] Bink: playing {} on thread {} (main thread: {})", a_file, ::GetCurrentThreadId(), FrameAnchors::OnMainThread());
+			logger::info("[ORG] Bink: playing {} on thread {} (render thread: {})", a_file, ::GetCurrentThreadId(), FrameAnchors::OnRenderThread());
 			const bool played = play(*player, a_file.c_str(), false, false, false, false, true, false, true, true);
 			logger::info("[ORG] Bink: {} {}", a_file, played ? "played" : "did not play to its end");
 		}

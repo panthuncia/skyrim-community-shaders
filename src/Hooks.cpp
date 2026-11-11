@@ -51,6 +51,7 @@
 #include "Features/VolumetricLighting.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
+#include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/Engine/Scaleform/Scaleform.h"
@@ -1460,6 +1461,8 @@ namespace Hooks
 		RenderGraph::Engine::Constants::InstallGameHooks();
 		// CS_ORG_BINK: the movie player's tiles on the render graph (reserves the Present anchor).
 		RenderGraph::Engine::Bink::InstallHooks();
+		// CS_ORG_LOADING_THREAD: the render graph on whichever thread renders under Renderer::Lock (the loading screen, the logo).
+		RenderGraph::Engine::LoadingScreen::Install();
 
 		logger::info("Hooking BSGraphics::Renderer::InitD3D");
 		stl::write_thunk_call<BSGraphics_Renderer_Init_InitD3D>(REL::RelocationID(75595, 77226).address() + REL::Relocate(0x50, 0x2BC));

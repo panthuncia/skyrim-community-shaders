@@ -548,10 +548,13 @@ FrameAnchors::Register({ .id = "cs.myfeature",
         false for the rest (`EpochRingFullError`, logged once: `... ran more than its N frame slots in one frame`), and
         `FrameAnchors::Run`'s callers fall back for those runs. Nothing hangs.
     -   This issue exists only because, in the guest phase, each anchor is a separate host epoch spliced into DXVK's stream, which DXVK submits at Present. Once ORG owns the frame (the Phase 6 cutover), these clears and the other per-call engine work are passes inside one frame graph, and the slot-per-run ring no longer applies.
--   **The main thread only.** A loading screen presents from a job thread (SE 38085) while the main thread loads. Anchors run
-    only on the main thread (`FrameAnchors::OnMainThread`, latched in `SKSEPlugin_Load`): at a loading screen's Present `Run`
-    returns false and one-shot passes wait for the next main-thread frame. Per-Present work that feeds an anchor checks the same
-    (texture streaming's `FrameTick`). The graph's frame upload instance belongs to the main thread.
+-   **The render thread only.** A loading screen presents from a job thread (SE 38085) while the main thread loads, and the
+    startup logo from the MoviePlayer thread. Anchors run only on the render thread (`FrameAnchors::OnRenderThread`). By
+    default that is the main thread (latched in `SKSEPlugin_Load`): at a loading screen's Present `Run` returns false and
+    one-shot passes wait for the next main-thread frame. With `CS_ORG_LOADING_THREAD=1` it is the render owner: the thread that
+    holds `Renderer::Lock` takes ownership, the main thread takes it back after a load, and the graph's frame upload instance
+    moves with it ([p5/loading-screen.md](./p5/loading-screen.md)). Per-Present work that feeds an anchor checks the same
+    (texture streaming's `FrameTick`, Scaleform's capture, Bink's tick).
 -   **The hazard rule.** After the late anchors (`PostProcessing`, `Upscale`, `Tonemap`, `FrameGeneration`, `Present`, `Overlay`,
     `HDROutput`, `Capture`) have run an epoch, `Run` calls the late-epoch hook, which Upscaling installs in `PostPostLoad`
     (`FrameAnchors::SetLateEpochHook`, `Upscaling::SeparateFromGraphEpochs`). An upscaler, frame generation or the present can
@@ -949,6 +952,7 @@ switches (`CS_ORG_<FEATURE>=1`) read through it too.
 | `CS_ORG_ENGINE_BUFFERS=1` | The engine's static vertex and index buffers (the geometry creators 75473/75476/75481) are ORG buffers in GPUUpload memory, handed to the engine as guest DXVK buffers or tripwire handles, and its dynamic ring (75484) is an ORG upload ring retired through `ReleaseAfterD3D11` instead of an event query. DCLF reads those buffers directly. See [p4/p4.5-buffers.md](./p4/p4.5-buffers.md). |
 | `CS_ORG_ENGINE_CONSTANTS=1` | Every engine constant-buffer use is captured into graph memory: at each engine draw (after `SetDirtyStates(false)`) and dispatch (after `DispatchCSShader`), the bytes of every bound VS/PS/CS constant buffer are copied into a per-frame ring of LatchBlocks, once per version and window, and the use gets an id consumers read by stage and slot (`src/RenderGraph/Engine/Constants`, [p5/constants.md](./p5/constants.md)). The engine's D3D11 buffers are unchanged. Logs `[ORG] engine constants: capturing every engine constant-buffer use` at startup and a summary line every `CS_ORG_ENGINE_CONSTANTS_LOG_FRAMES` frames (default 600). |
 | `CS_ORG_ENGINE_CONSTANTS_CHECK=1` | With `CS_ORG_ENGINE_CONSTANTS=1`, about once a second one captured slot is compared with a staging read-back of its D3D11 buffer (stalls). The summary line adds `checked N, M differ`; a mismatch logs `[ORG] engine constants check: ... differs ...`. |
+| `CS_ORG_LOADING_THREAD=1` | The render graph's frame work runs on whichever thread renders under `Renderer::Lock`: the loading loop (ServingThread, SE 38085 / AE 39039) and the startup logo (MoviePlayer thread) run the anchors, Scaleform's displays and Bink's tick on the graph. Ownership changes are logged (`[ORG] render ownership: thread N ... takes it from thread M`), and each load's end (`[ORG] loading screen: the load ended (K ownership changes ...)`). Off: anchors run on the main thread only ([p5/loading-screen.md](./p5/loading-screen.md)). |
 | `CS_ORG_BINK=1` | Bink movies a main-thread blocking tick plays (console and Papyrus `PlayBink`, the main menu's intro) decode into host-visible staging buffers instead of the engine's dynamic textures, and the `cs.bink.tiles` pass at the `Present` anchor uploads ORG tile textures and draws them into the framebuffer (`src/RenderGraph/Engine/Bink`, [p5/bink.md](./p5/bink.md)). The startup logo (the MoviePlayer thread), in-frame movies and HDR output stay on D3D11. Logs `[ORG] Bink: ... movie ended: G frames drawn by the render graph, E by the engine`; a failure logs `the engine draws Bink from now on`. |
 | `CS_ORG_BINK_SHOT=<n>[,<n>...]` | Saves the Present of each listed decoded Bink frame (main thread, either path) as `dclf-shots/bink-<n>.png`. |
 | `CS_ORG_EPOCHS=0` | One graph for every segment instead of a graph per epoch; no frame anchor can be reserved. |

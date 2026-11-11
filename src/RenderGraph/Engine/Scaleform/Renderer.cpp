@@ -218,7 +218,7 @@ namespace RenderGraph::Engine::Scaleform
 
 		bool Capturing()
 		{
-			return Current().active && FrameAnchors::OnMainThread();
+			return Current().active && FrameAnchors::OnRenderThread();
 		}
 
 		void Keep(std::function<void(void*)> a_call)
@@ -562,8 +562,8 @@ namespace RenderGraph::Engine::Scaleform
 				Abort(a_renderer, "a display that never ended");
 			}
 			const char* reason = nullptr;
-			if (!FrameAnchors::OnMainThread())
-				reason = "off the main thread (loading screen)";
+			if (!FrameAnchors::OnRenderThread())
+				reason = "off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1)";
 			else if (!Passes::Ready())
 				reason = "the render graph is not up";
 			else if (!VideoModeSet(a_renderer))
@@ -633,7 +633,7 @@ namespace RenderGraph::Engine::Scaleform
 		void EndDisplay(void* a_renderer)
 		{
 			auto& capture = Current();
-			if (capture.active && FrameAnchors::OnMainThread()) {
+			if (capture.active && FrameAnchors::OnRenderThread()) {
 				capture.active = false;
 				const char* reason = nullptr;
 				if (Passes::Submit(capture.display, reason)) {

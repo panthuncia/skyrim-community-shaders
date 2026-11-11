@@ -264,6 +264,13 @@ public:
 	 * points a mid-frame producer may wait for.
 	 */
 	void SealPresented();
+	/**
+	 * @brief The calling thread becomes the owner of the graph's frame upload instance (GraphHost::Uploads()->SetOwnerThread):
+	 * the thread that records and retires its uploads at each submission. FrameAnchors::OnRenderThread calls it when rendering
+	 * changes threads (CS_ORG_LOADING_THREAD=1: the loading screen, the startup logo). The previous owner reaches the instance only
+	 * through its mailboxes afterwards (UploadData posts). Requests no graph build. Nothing without a graph.
+	 */
+	void MoveOwnerThread();
 
 	/** @brief Render thread: the segments submitted since the last call, one bit per Segment. */
 	std::uint32_t TakeSubmittedSegments();

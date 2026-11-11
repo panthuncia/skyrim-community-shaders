@@ -41,8 +41,10 @@ namespace RenderGraph
  * ("cs.org.frame-anchors") makes every client's passes at each build; a client change rebuilds only its anchors' epochs. The ordering
  * rule of each anchor is in docs/development/org-extension-api-notes.md, "Attaching passes to the frame".
  *
- * Threads: everything here is called on the render thread. A pass's Prepare and Record run on the graph host's thread, as for any
- * graph pass, so they read only what they were made with or what the client's commit wrote into a LatchBlock.
+ * Threads: everything here is called on the render thread (OnRenderThread: the main thread, or with CS_ORG_LOADING_THREAD=1 the
+ * thread that renders under Renderer::Lock). With that switch the state is also under a mutex, so a feature's Register from the
+ * main thread during a load never interleaves with a loading-screen run. A pass's Prepare and Record run on the graph host's
+ * thread, as for any graph pass, so they read only what they were made with or what the client's commit wrote into a LatchBlock.
  *
  * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
@@ -223,10 +225,26 @@ namespace FrameAnchors
 	inline bool Run(Anchor a_anchor) { return Run(Point{ .anchor = a_anchor }); }
 
 	/**
-	 * @brief True on the engine's main thread, which renders the frame. A loading screen presents from a job thread while the main
-	 * thread loads; no anchor runs there (Run returns false), and per-Present work that feeds the anchors skips it too.
+	 * @brief True on the thread that owns rendering now: the only thread where anchors run (Run returns false elsewhere) and where
+	 * per-frame work that feeds them (texture streaming's tick, Scaleform's capture, Bink's tick) may use the graph.
+	 *
+	 * Without CS_ORG_LOADING_THREAD=1 that is the engine's main thread alone: a loading screen (a job thread) and the startup logo
+	 * (the MoviePlayer thread) stay on D3D11. With it, one thread owns rendering at a time, the main thread at the start: a thread
+	 * that holds Renderer::Lock takes ownership (the engine renders every frame inside that lock, on one thread at a time), and the
+	 * main thread also takes it while no other thread holds the lock. A claim moves the graph's frame upload instance with it
+	 * (RenderGraphRuntime::MoveOwnerThread). docs/development/p5/loading-screen.md has the rule and its hazards. A false answer is
+	 * always safe: the caller keeps its D3D11 or engine path for that call.
 	 */
-	bool OnMainThread();
+	bool OnRenderThread();
+
+	/**
+	 * @brief The calling thread owns rendering from now on (CS_ORG_LOADING_THREAD=1; nothing otherwise). The loading-screen handoff
+	 * calls it on the main thread once SetLoadingScreenActive(false) returned, when the loading loop has stopped.
+	 */
+	void TakeRenderOwnership();
+
+	/** @brief How many times rendering changed threads so far (CS_ORG_LOADING_THREAD=1). Any thread. */
+	std::uint64_t RenderOwnerChanges();
 
 	/** @brief Records the calling thread as the engine's main thread. SKSEPlugin_Load calls it: SKSE loads plugins there. */
 	void LatchMainThread();
