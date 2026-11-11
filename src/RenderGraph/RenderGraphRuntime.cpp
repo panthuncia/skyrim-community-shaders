@@ -1626,6 +1626,12 @@ bool RenderGraphRuntime::Initialize()
 	adopt.device = info.device;
 	adopt.enabledDeviceExtensions = info.enabledExtensions;
 	adopt.enabledDeviceExtensionCount = info.enabledExtensionCount;
+	{
+		bool budget = false;
+		for (std::uint32_t i = 0; i < info.enabledExtensionCount; ++i)
+			budget = budget || std::string_view(info.enabledExtensions[i]) == VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
+		logger::info("[ORG] adopted device: {} extensions, VK_EXT_memory_budget {}", info.enabledExtensionCount, budget ? "on" : "off");
+	}
 	adopt.diagnostics.registerMarker = &Aftermath::RegisterOrgCheckpoint;
 	adopt.diagnostics.detailedCommands = Switches::Equals("CS_ORG_DETAILED_CHECKPOINTS", "1");
 	// Whether VK_EXT_debug_utils is on, so that BasicRHI names objects and labels passes only then.
