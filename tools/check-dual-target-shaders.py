@@ -115,6 +115,8 @@ def main():
     parser.add_argument("-D", "--define", action="append", default=[], metavar="NAME[=VALUE]",
                         help="A define for every build of every shader (repeat for more)")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "build/dual-target-shaders")
+    parser.add_argument("--hlsl-version", default="2021", choices=["2018", "2021"],
+                        help="DXC -HV (default 2021; 2018 for FXC-era sources, as RasterProgram::Desc::languageVersion builds them)")
     args = parser.parse_args()
 
     dxc = find_dxc(args.dxc)
@@ -137,8 +139,8 @@ def main():
         fxc_defines = ["/D" if arg == "-D" else arg for arg in defines]
         results = [
             run("FXC " + stage + "_5_0", [str(fxc), "/nologo", "/T", stage + "_5_0", "/E", args.entry, *fxc_defines, *fxc_includes, "/Fo", f"{out}.cso", str(path)]),
-            run("DXC SPIR-V " + stage + "_6_6", [str(dxc), "-HV", "2021", "-T", stage + "_6_6", *spirv_flags(), "-D", "CS_ORG_BINDLESS=1", "-Fo", f"{out}.spv", *common]),
-            run("DXC DXIL " + stage + "_6_6", [str(dxc), "-HV", "2021", "-T", stage + "_6_6", "-D", "CS_ORG_BINDLESS=1", "-Fo", f"{out}.dxil", *common]),
+            run("DXC SPIR-V " + stage + "_6_6", [str(dxc), "-HV", args.hlsl_version, "-T", stage + "_6_6", *spirv_flags(), "-D", "CS_ORG_BINDLESS=1", "-Fo", f"{out}.spv", *common]),
+            run("DXC DXIL " + stage + "_6_6", [str(dxc), "-HV", args.hlsl_version, "-T", stage + "_6_6", "-D", "CS_ORG_BINDLESS=1", "-Fo", f"{out}.dxil", *common]),
         ]
         ok = all(r.returncode == 0 for r in results)
         if ok and spirv_val.is_file():
