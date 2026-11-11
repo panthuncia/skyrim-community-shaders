@@ -32,6 +32,7 @@
 #include "Features/DrawcallLimitFix/Features/TextureTransforms/TextureTransforms.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWind.h"
+#include "Features/DrawcallLimitFix/Features/Water/Water.h"
 
 #include <array>
 
@@ -52,6 +53,7 @@ namespace DCLF::Features
 		// - Tree LOD's table uploads run after tree wind's, and Grass's scene resources and commit hook run after Tree LOD's.
 		// - Faces' coordinator component runs after the others', except Fades'. Both act on the slot tables' reset.
 		// - Sky registers nothing with Core (its hooks and its anchors' clients are its own), so its place sets no order; it is before Fades.
+		//   Water is the same kind (the EngineDraws anchor's clients), listed after it.
 		// - Fades is last. Its pool, scene resources, commit hook, pass setups, coordinator component and stand-in observer run after every
 		//   other feature's. Its channels are the last BeforeStructural ones.
 		//
@@ -85,6 +87,7 @@ namespace DCLF::Features
 			Faces::Feature(),
 			FirstPerson::Feature(),
 			Sky::Feature(),
+			Water::Feature(),
 			Fades::Feature(),
 		};
 		return kFeatures;
