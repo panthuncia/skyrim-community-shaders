@@ -744,7 +744,8 @@ namespace RenderGraph::Engine::Skeleton
 		void Flush(ID3D11DeviceContext* a_context)
 		{
 			auto& state = Skel();
-			if (!state.setUp || state.flushing)
+			// Clears are taken on the main thread only; a loading screen's thread has none to flush.
+			if (!state.setUp || state.flushing || !FrameAnchors::OnMainThread())
 				return;
 			for (std::size_t i = 0; i < kGroups; ++i) {
 				auto& group = state.groups[i];
