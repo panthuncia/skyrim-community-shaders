@@ -305,8 +305,8 @@ The background rectangle `BeginDisplay` draws is one of the display's draws.
   next step once nothing D3D11 draws between displays (P5 menu 3D).
 - **Sizing (2026-11-11):** in the `p35-tmp-p5-all` runs (HUD, inventory, map, journal, a load, the race menu; 9,000 displays,
   no D3D11 part) the anchors logged `ran N times in one frame, above the M it is sized for` for EngineFrameClear and
-  EngineCubeClear but never for Interface: it stayed within 6. With every switch on the frame slot budget is 252 of 255 at 4
-  frames in flight, so one more run a frame (4 slots) does not fit; 6 stays. A frame that needs more sends the extra displays to
+  EngineCubeClear but never for Interface: it stayed within 6, so 6 stays. (The slot budget was 252 of 255 then; since
+  `org-port/w3-slots` it is 288 of 512, and a run a frame costs 4 slots: render-graph.md, "The slot budget".) A frame that needs more sends the extra displays to
   D3D11 (`the Interface anchor's ring is full this frame` in the census) instead of waiting. Read
   `[ORG] frame anchors: Interface ran N times in one frame` (any run) and, with `CS_ORG_EPOCH_STATS=1`,
   `[ORG] frame anchors, peak runs in one frame / sized for: ... Interface N/6`. If menus with D3D11 parts need more, the next

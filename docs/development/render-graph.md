@@ -541,9 +541,16 @@ FrameAnchors::Register({ .id = "cs.myfeature",
     adds `kGameFramesInFlight` slots, times its `runsPerFrame` (the anchor table `kInfo` in `FrameAnchors.cpp`;
     `FrameAnchors::RunsPerFrame(anchor)` reads it, never copy the number). Size `LatchBlock`s from `GraphHost::FrameSlots()`
     after the runtime is up, as LLF does: it is fixed once the host exists.
-    -   **The slot budget.** The host allows 255 slots (`RenderGraphRuntime::kMaxFrameSlots`). At startup
-        `FrameAnchors::FitSlotBudget` logs the total (`[ORG] frame slot budget: N of 255 (4 frames x (E other epochs + anchors'
-        runs a frame: ...))`). Over it, the anchors reserved last lose their reservation, each with an error line
+    -   **The slot budget.** CS allows 512 slots (`RenderGraphRuntime::kMaxFrameSlots`); ORG allows up to
+        `org::Runtime::kMaxSlots` (4096). Slot indices are 32-bit in ORG, so neither is a type limit (ORG's was 8-bit until
+        `org-port/frame-slots`, hence the old 255). The budget is a memory bound: every `LatchBlock`, `RunSlots`, Drawcall Limit
+        Fix's per-slot preprocess lists and readbacks are sized from `GraphHost::FrameSlots()`, and ORG's statistics pools hold
+        two timestamps per pass per slot, so each slot costs a region in every one of them. A run of an anchor cannot share
+        another run's slot: it is a submission of its own, with its own latch region, its own kept recording (a list cannot be
+        pending twice) and its own slot wait. So a run a frame costs `kGameFramesInFlight` slots whichever anchor it belongs to.
+        At startup `FrameAnchors::FitSlotBudget` logs the total (`[ORG] frame slot budget: N of 512 (4 frames x (E other epochs +
+        anchors' runs a frame: ...))`; 288 with every switch on). Over it, the anchors reserved last lose their reservation, each
+        with an error line
         (`frame anchor X: reservation dropped ...`), and their clients stay on D3D11. No anchor is ever given a smaller ring than
         its `kInfo` entry says. Size `kInfo` from measurements: every run past the sizing logs `X ran N times in one frame, above
         the M it is sized for`, and `CS_ORG_EPOCH_STATS=1` logs every anchor's peak (`peak runs in one frame / sized for`,

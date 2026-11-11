@@ -126,10 +126,14 @@ public:
 	static constexpr std::uint32_t kGameFramesInFlight = 4;
 
 	/**
-	 * @brief The most frame slots the host may have (GraphHost::FrameSlotsFor: a slot index is 8 bits): kGameFramesInFlight times
-	 * every epoch's runs a frame must stay within it (FrameAnchors::FitSlotBudget).
+	 * @brief CS's frame slot budget: kGameFramesInFlight times every epoch's runs a frame must stay within it
+	 * (FrameAnchors::FitSlotBudget). ORG allows up to org::Runtime::kMaxSlots (4096; slot indices are 32-bit). This budget is
+	 * lower because each slot costs memory in every per-slot table: every LatchBlock and RunSlots, Drawcall Limit Fix's
+	 * per-slot preprocess lists and readbacks are sized from GraphHost::FrameSlots, and ORG's statistics query pools hold two
+	 * timestamps per pass per slot. A run of an anchor needs a slot of its own (its own latch region, kept recording and
+	 * slot wait), so the cost grows with the runs a frame, not with the anchors.
 	 */
-	static constexpr std::uint32_t kMaxFrameSlots = 255;
+	static constexpr std::uint32_t kMaxFrameSlots = 512;
 
 	/**
 	 * @brief CS_ORG_EPOCHS (default on, =0 off): each segment is an ORG host epoch. The graph compiles once

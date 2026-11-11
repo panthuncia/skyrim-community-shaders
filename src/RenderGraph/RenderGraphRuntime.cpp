@@ -749,10 +749,11 @@ struct RenderGraphRuntime::Impl
 	// ORG's pass timestamps, per segment. An epoch is one host frame; the segment it ran is remembered by
 	// frame number until its timestamps come back, framesInFlight frames later.
 	static constexpr std::size_t kSegments = static_cast<std::size_t>(Segment::Count);
-	// Past the host's frame slots (at most 255: kGameFramesInFlight frames of every segment's runs, GraphHost::FrameSlotsFor) and a
-	// ticket prepared ahead per segment: a frame's segment outlives its slot's reuse.
-	static constexpr std::size_t kSegmentRing = 1024;
+	// Past the host's frame slots (at most kMaxFrameSlots: kGameFramesInFlight frames of every segment's runs,
+	// GraphHost::FrameSlotsFor) and a ticket prepared ahead per segment: a frame's segment outlives its slot's reuse.
+	static constexpr std::size_t kSegmentRing = 2048;
 	static_assert(kSegmentRing >= 2 * (RenderGraphRuntime::kMaxFrameSlots + kSegments));
+	static_assert(RenderGraphRuntime::kMaxFrameSlots <= org::Runtime::kMaxSlots, "CS's frame slot budget is within ORG's limit");
 	struct PassTime
 	{
 		double inclusiveMs = 0.0;
@@ -1772,7 +1773,7 @@ bool RenderGraphRuntime::Initialize()
 		// The self-tests reserve their anchors as any client does, before the reservations freeze.
 		FrameAnchors::SelfTest::Reserve();
 		GraphResources::SelfTest::Reserve();
-		// The frame slot budget (GraphHost::FrameSlotsFor allows 255): anchors that do not fit lose their reservation, logged.
+		// The frame slot budget (kMaxFrameSlots, under ORG's org::Runtime::kMaxSlots): anchors that do not fit lose their reservation, logged.
 		FrameAnchors::FitSlotBudget(desc.epochOrder, desc.framesInFlight, kMaxFrameSlots);
 		// The frame anchors' reserved epochs, where the frame reaches them (FrameAnchors.h).
 		FrameAnchors::AddToFrame(desc.epochOrder);

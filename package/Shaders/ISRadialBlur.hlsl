@@ -1,3 +1,16 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0 and s0 from the heap, the shared
+// constants, and PerGeometry from the engine-constants capture through the pass's latch.
+#	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISRADIALBLUR_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, ImageTex, 0) X(SAMPLER, SamplerState, ImageSampler, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISRADIALBLUR_ORG_RESOURCES(ORG_HANDLE))
+ISRADIALBLUR_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/DummyVSTexCoord.hlsl"
 #include "Common/FrameBuffer.hlsli"
 
@@ -9,6 +22,10 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+static float4 Params = OrgEngineRow(PerGeometryAt, 0);
+static float4 Center = OrgEngineRow(PerGeometryAt, 1);
+#	else
 SamplerState ImageSampler : register(s0);
 
 Texture2D<float4> ImageTex : register(t0);
@@ -18,6 +35,7 @@ cbuffer PerGeometry : register(b2)
 	float4 Params : packoffset(c0);
 	float4 Center : packoffset(c1);
 };
+#	endif
 
 float2 GetSourceTexCoord(float2 texCoord)
 {

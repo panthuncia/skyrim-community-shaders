@@ -83,10 +83,11 @@ namespace FrameAnchors
 			{ "EngineDepthCopy", { "CS anchor: engine depth copy", "CS anchor: engine depth copy inputs", "FrameAnchors::EngineDepthCopy / ", "cs.anchor.engine-depth-copy" }, false, 3 },
 			// Runs a frame: one per Scaleform segment drawn on the graph (a display, and one more per D3D11 part); 6 was not passed in a menu tour
 			{ "Interface", { "CS anchor: interface", "CS anchor: interface inputs", "FrameAnchors::Interface / ", "cs.anchor.interface" }, true, 6 },
-			// Runs a frame: one per batch of ImageSpace draws and dispatches (RenderSSAO's and the reflection pass's, one each at most,
-			// then the pre-tonemap composites' and the HDR effect's, and a batch cut short by a draw the graph does not take). The frame
-			// slot budget has no room for a fifth. Late: the TAA or the upscaler can follow a batch inside the chain.
-			{ "ImageSpace", { "CS anchor: image space", "CS anchor: image space inputs", "FrameAnchors::ImageSpace / ", "cs.anchor.image-space" }, true, 4 },
+			// Runs a frame: one per batch of ImageSpace draws and dispatches, the sum of ImageSpace.cpp's kScopeRuns: RenderSSAO's, the
+			// reflection pass's and the HDR effect's (two each: a batch cut short by a draw the graph does not take), the pre-tonemap
+			// composites' (one), and one per end-of-frame effect call (depth of field or the distant blur, its two compute blurs,
+			// refraction, the radial blur, the snow copy: six). Late: the TAA or the upscaler can follow a batch inside the chain.
+			{ "ImageSpace", { "CS anchor: image space", "CS anchor: image space inputs", "FrameAnchors::ImageSpace / ", "cs.anchor.image-space" }, true, 13 },
 			// Runs a frame: the water mask, the water and the screen blood
 			{ "EngineDraws", { "CS anchor: engine draws", "CS anchor: engine draws inputs", "FrameAnchors::EngineDraws / ", "cs.anchor.engine-draws" }, true, 3 },
 		} };
@@ -1077,7 +1078,7 @@ namespace FrameAnchors
 			state.reserved[index] = false;
 			logger::error(
 				"[ORG] frame anchor {}: reservation dropped. The frame slots ({} frames in flight x every epoch's runs a frame) would be {}, "
-				"more than the host's {}; its clients stay on D3D11. Lower an anchor's runs a frame in FrameAnchors.cpp (kInfo; "
+				"more than the budget of {} (RenderGraphRuntime::kMaxFrameSlots); its clients stay on D3D11. Lower an anchor's runs a frame in FrameAnchors.cpp (kInfo; "
 				"CS_ORG_EPOCH_STATS=1 logs the peaks) or merge anchors",
 				kInfo[index].name, frames, over, a_maxSlots);
 		}
