@@ -551,13 +551,6 @@ namespace RenderGraph::Engine::Scaleform
 			return true;
 		}
 
-		/** @brief CS_ORG_SCALEFORM_LOADING_THREAD=1 (diagnostic): the loading thread's displays go on the graph too. */
-		bool LoadingThreadDisplays()
-		{
-			static const bool allowed = Switches::On("CS_ORG_SCALEFORM_LOADING_THREAD");
-			return allowed;
-		}
-
 		// The slots.
 
 		void BeginDisplay(void* a_renderer, const std::uint32_t* a_background, const Viewport* a_viewport, float a_x0, float a_x1, float a_y0, float a_y1)
@@ -571,10 +564,6 @@ namespace RenderGraph::Engine::Scaleform
 			const char* reason = nullptr;
 			if (!FrameAnchors::OnRenderThread())
 				reason = "off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1)";
-			else if (!FrameAnchors::IsMainThread() && !LoadingThreadDisplays())
-				// The loading screen's displays (CS_ORG_LOADING_THREAD=1) lost the device in the first world frames after a load
-				// (p5/loading-screen.md, "Scaleform on the loading thread"): they stay on D3D11 until that is understood.
-				reason = "on the loading thread (loading-screen displays stay on D3D11)";
 			else if (!Passes::Ready())
 				reason = "the render graph is not up";
 			else if (!VideoModeSet(a_renderer))

@@ -146,9 +146,8 @@ namespace DCLF
 		// contribution's frameStart: Features/Shadows/Local's SunExclusionSlot::BeginFrame).
 		Extensions::ShadowExclusionFrameStart();
 		// The lookups are the installed publication's; what only the frame has goes to the scene lane (PostLookupInputs). DXVK's moves
-		// of the pinless imports first: the superseded textures leave the registry, the buffers go to their instances' next pass.
+		// of the pinless imports were taken at the last Present (ImportRelocations::Poll, every Present of the render owner).
 		Diagnostics::Notify<Diagnostics::FramePoint::LookupsInstalled>();
-		ImportRelocations::Poll();
 		draws.PostLookupInputs();
 		TracyCZoneEnd(bfViewsStart);
 		{

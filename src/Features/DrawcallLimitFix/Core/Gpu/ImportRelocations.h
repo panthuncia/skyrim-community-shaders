@@ -28,8 +28,11 @@ namespace DCLF::ImportRelocations
 	};
 
 	/**
-	 * @brief Render thread, at frame start: takes DXVK's relocations and hands each to its kind's importers (GpuTextures; both
-	 * GpuResources instances, which take them at their next BeginFrame). Nothing without pinless imports.
+	 * @brief The render owner (FrameAnchors::OnRenderThread), at every Present (IDXGISwapChain_Present): takes DXVK's relocations
+	 * and hands each to its kind's importers (GpuTextures; both GpuResources instances, which take them at their next BeginFrame).
+	 * Every Present, not Drawcall Limit Fix's frame start: whoever draws with an import (Scaleform on a loading screen, ImGui in a
+	 * menu) does so in frames DCLF does not run, and an import that moves is read from its old storage until the move is taken.
+	 * Safe outside DCLF's frame: the texture registry and the buffer inboxes take their own locks. Nothing without pinless imports.
 	 */
 	void Poll();
 

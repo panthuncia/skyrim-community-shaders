@@ -33,6 +33,7 @@
 
 #include "CSEditor/SceneManager/WeatherTransition.h"
 #include "Features/DrawcallLimitFix.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/ImportRelocations.h"
 #include "Features/Effects11.h"
 #include "Features/GrassOptimizations.h"
 #include "Features/HDRDisplay.h"
@@ -541,6 +542,11 @@ struct IDXGISwapChain_Present
 		streamline->SetPCLMarker(Streamline::PclMarker::RenderSubmitEnd);
 		streamline->SetPCLMarker(Streamline::PclMarker::TriggerFlash);
 		streamline->SetPCLMarker(Streamline::PclMarker::PresentStart);
+
+		// DXVK's moves of the pinless imports, once per Present on the thread that renders: the frames DCLF does not run (a loading
+		// screen, a menu) draw with imports too (docs/development/p5/loading-screen.md, "Scaleform on the loading thread: pinless imports").
+		if (FrameAnchors::OnRenderThread())
+			DCLF::ImportRelocations::Poll();
 
 		FrameAnchors::Run(FrameAnchors::Anchor::Present);
 
