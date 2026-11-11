@@ -183,8 +183,12 @@ namespace DCLF::Features::Water
 			if (a_accumulator != *mainAccumulator || rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
 				return false;
 			const auto main = static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
-			if (rss.depthStencil != main)
+			if (rss.depthStencil != main) {
+				if (a_capture.logged.insert(0xFD000000u | (rss.depthStencil & 0xFF) << 1 | static_cast<std::uint32_t>(a_view)).second)
+					logger::warn("[DCLF] water: the main camera's {} batch has depth target {} bound, not kMAIN's; it stays the engine's", NameOf(a_view),
+						rss.depthStencil);
 				return false;
+			}
 			const auto& depths = globals::game::renderer->GetDepthStencilData().depthStencils;
 			a_capture.depthFormat = FormatOf(depths[main].views[0]);
 			if (!a_capture.depthFormat)
