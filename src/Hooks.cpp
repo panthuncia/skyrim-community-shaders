@@ -4,6 +4,7 @@
 #include "HangWatchdog.h"
 #include "GpuIdleTrace.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
@@ -1481,6 +1482,8 @@ namespace Hooks
 		RenderGraph::Engine::Targets::Install();
 		// CS_ORG_ENGINE_SKELETON: the engine's clear and depth copy call sites.
 		RenderGraph::Engine::Skeleton::Install();
+		// CS_ORG_IMAGESPACE: the ImageSpace draws the graph takes (BSImagespaceShader::Render, the HDR effect, the pre-tonemap composites).
+		RenderGraph::Engine::ImageSpace::Install();
 		RenderGraph::Engine::Scaleform::Install();
 
 		logger::info("Hooking BSShaderRenderTargets::Create::CreateRenderTarget(s)");

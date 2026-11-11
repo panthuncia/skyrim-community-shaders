@@ -41,6 +41,7 @@
 #include "ORGDeferredComposite.h"
 #include "PostProcessingMode.h"
 #include "Presets/UnifiedPresetCatalog.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -394,11 +395,14 @@ void State::Setup()
 	ORGDeferredComposite::Reserve();
 	ImGuiRenderer::ReserveAnchor();
 	RenderGraph::Engine::Skeleton::Reserve();
+	RenderGraph::Engine::ImageSpace::Reserve();
 	RenderGraphRuntime::Get().Initialize();
 	// CS_ORG_ENGINE_TARGETS: the engine's targets, made on D3D11 before the graph existed, move to ORG before any feature reads them.
 	RenderGraph::Engine::Targets::TakeOver();
 	// CS_ORG_ENGINE_SKELETON: the engine's clears and its main depth copy on the graph, once its targets are where they stay.
 	RenderGraph::Engine::Skeleton::Setup();
+	// CS_ORG_IMAGESPACE: the ImageSpace draws on the graph; the client registers once the effects' shapes are known.
+	RenderGraph::Engine::ImageSpace::Setup();
 
 	Feature::ForEachLoadedFeature("SetupResources", [](Feature* feature) { feature->SetupResources(); });
 	{

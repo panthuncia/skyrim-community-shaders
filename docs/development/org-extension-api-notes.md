@@ -1320,3 +1320,22 @@ From P5.8/P5.9 (`docs/development/p5/menus.md`). Two needs a menu scene's view b
   never calls `Main::Draw`). DCLF's frame, its adoption of a publication and its explicit build point all live in `Main::Draw`, so a
   menu view has no frame there. It needs a frame start outside the world frame (at `UI::Render`) that adopts the newest publication and
   calls `host->BuildIfRequested()`, as Bink's blocking loop does.
+
+### Taking over an engine draw family by shape
+
+- **Need:** draw a family of engine fullscreen draws (ImageSpace effects, a plugin's post effects) on the graph in the engine's
+  place, where which draws run, their targets and their constants change per frame, without a graph rebuild per change and
+  without a frame slot per draw.
+- **Who:** CS's ImageSpace port (P5.6). Plugins that replace an engine ImageSpace effect (ENB-style tonemaps, bloom mods) hook
+  its setup or its draw today.
+- **Where it fits:** a learnt set of draw shapes (shader, output, inputs, samplers, blend), each a pass behind a run gate entry,
+  registered once; draws latched at the engine's draw choke point and run as a batch at one anchor, flushed before any engine
+  work that is not taken. What the API would need:
+  - **A per-draw constant source a kept recording can read:** the pass's latch holds the capture ring's SRV index and offset,
+    and the shader loads its cbuffer struct from there (`Common/OrgEngineConstants.hlsli`). A first-class "engine constants
+    at use N" binding would remove the double load.
+  - **Ordering inside a batch:** passes run in order-key order, so a batch is cut wherever the engine's order differs from the
+    keys. An anchor whose passes run in the order the commit lists would drop those cuts.
+  - **Segments are a 32-bit mask** (`TakeSubmittedSegments`): with the ImageSpace anchor `Segment::Count` is 32. Another anchor
+    needs a wider mask.
+- **Found by:** P5.6 (2026-11-11).

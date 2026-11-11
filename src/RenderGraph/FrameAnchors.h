@@ -79,6 +79,9 @@ namespace FrameAnchors
 		// Out of frame order (appended, so the values above stay): each Scaleform display's EndDisplay on the main thread, between
 		// FrameGeneration and Present (RenderGraph/Engine/Scaleform), several times a frame.
 		Interface,
+		// Out of frame order (appended): the engine's ImageSpace draws the graph draws in the engine's place
+		// (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE), a batch at a time, a few times a frame inside the ImageSpace chain.
+		ImageSpace,
 		Count
 	};
 
