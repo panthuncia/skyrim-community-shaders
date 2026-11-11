@@ -43,12 +43,13 @@ pinned submodule commits exist only locally, so a fresh clone cannot fetch them.
 | P4 guest-phase order: every handle after the guest and the objects it wraps; CS readers of engine fields unwrap  | Done; 83 targets, 648 states and 70 queries get handles, shots match                | CS `org-port/p4`                                         |
 | P4 verify: tour (menus, map, journal, race menu, load, Blackreach), VRAM totals, streaming retire fix            | Done; shots match, VRAM within 4% of the D3D11 path; SE deferred                    | CS `org-port/p4`                                         |
 | P5 wave 1: constants capture, frame skeleton, sky, Bink, Scaleform subset, ImageSpace shader sources, slot rings | Merged and run; each matches its D3D11 reference (details below)                    | CS `org-port/p5`, ORG `org-port/p5-slots`                |
+| P5 wave 2: menus probe, loading screen, ImageSpace chain, water, screen blood; crash fixes                         | Merged and run; each matches its D3D11 reference within run noise (details below)  | CS `org-port/p5`, BasicRHI `org-port/p5-crash-basicrhi` |
 
 **Root cause worth knowing:** a BasicRHI-created Vulkan device failed on AMD because the driver rejects acceleration
 structures in a mutable descriptor list at any count. DXVK never enables acceleration structures, so the adopted device
 never hit it. Acceleration-structure SRVs are now dropped from the descriptor-buffer model where this happens.
 
-**Phases 3, 3.5 and 4 are done; Phase 5's first wave runs in game** on `org-port/p5`. Phase 4's tour (menus, map,
+**Phases 3, 3.5 and 4 are done; Phase 5's first two waves run in game** on `org-port/p5`. Phase 4's tour (menus, map,
 journal, race menu, a load, Blackreach) matches the baseline with every switch on, and VRAM read from ORG is within 4% of
 the D3D11 path. SE 1.5.97 is deferred. Phase 5 wave 1, each against its D3D11 run:
 
@@ -62,6 +63,29 @@ the D3D11 path. SE 1.5.97 is deferred. Phase 5 wave 1, each against its D3D11 ru
   textures whose view cannot be resolved yet, filters and render-to-texture.
 - **ImageSpace sources:** all 124 slots have CS HLSL behind `CS_IMAGESPACE_SOURCES` (off by default). `all` matches in the
   latest runs; an earlier colour shift and one fast-fail abort with the ISCopy group did not reproduce and stay open.
+
+Phase 5 wave 2, each against its D3D11 run:
+
+- **P5.8/P5.9 menus:** a probe for the menu 3D scenes and the map (`CS_ORG_MENU3D`, `CS_ORG_MAP`); shots match.
+- **P5.12 loading screen:** the serving thread renders under `Renderer::Lock` as the render owner
+  (`CS_ORG_LOADING_THREAD`); the Bink logo and the loading-screen Scaleform displays draw on the graph. Shots match.
+- **P5.6 ImageSpace:** the HDR, blur and composite effects draw at the ImageSpace anchor (`CS_ORG_IMAGESPACE`); six shots
+  match, Riverwood is within its run noise.
+- **P5.4/P5.5 water and screen blood:** at the EngineDraws anchor (`CS_ORG_WATER`, `CS_ORG_BLOOD_SPLATTER`). Water matches
+  within run noise; the blood draws, but the fight differs per run, so its shots are not comparable.
+
+Crashes in the default-path runs, investigated with dumps and Ghidra:
+
+- An access violation in the engine's navmesh search (`BSNavmeshInfoSearch`, ID 90542) on a freed object during a load.
+  **Engine**; CS does not touch that code.
+- Device loss in the water runs: the water mask, the water surface and the screen blood share an anchor, and a run that
+  one client kept also recorded the others' passes with latch slots never written for that run. Each client's draws now
+  go through a run gate (**ours**, fixed). A device loss now stops the graph cleanly, and DCLF's fail-stop names it.
+- A pure virtual call on a destroyed shader resource view in DCLF's texture import thread. **Ours**, not reproduced
+  since; open.
+- Texture streaming registered a one-shot client per batch, about 250 graph rebuilds in a minute. Its windows are now
+  made with their mips as initial data, without a pass: 54 rebuilds left, seven per epoch, one per load.
+- The crash handler logs first-chance faults as such, keeps its helper after a crash, and reports a failed dump.
 
 **Phase 5 findings worth knowing:**
 
