@@ -3078,9 +3078,14 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		if !defined(LIGHT_LIMIT_FIX)
 	[loop] for (uint lightIndex = 0; lightIndex < numLights; lightIndex++)
 	{
-		float3 lightDirection = PointLightPosition[lightIndex].xyz - input.WorldPosition.xyz;
+		// The light's position relative to the eye with its radius in w, its colour, and its shadow mask channel.
+		const float4 lightPositionRadius = PointLightPosition[lightIndex];
+		const float3 lightSourceColor = PointLightColor[lightIndex].xyz;
+		const uint lightMaskSelect = ShadowLightMaskSelect[lightIndex];
+
+		float3 lightDirection = lightPositionRadius.xyz - input.WorldPosition.xyz;
 		float lightDist = length(lightDirection);
-		float intensityFactor = saturate(lightDist / PointLightPosition[lightIndex].w);
+		float intensityFactor = saturate(lightDist / lightPositionRadius.w);
 		if (intensityFactor == 1)
 			continue;
 
@@ -3088,11 +3093,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #			if defined(ENABLE_LL)
 		intensityMultiplier = pow(intensityMultiplier, TransferFunctions::GAME_GAMMA);
 #			endif
-		float3 lightColor = Color::PointLight(PointLightColor[lightIndex].xyz) * intensityMultiplier;
+		float3 lightColor = Color::PointLight(lightSourceColor) * intensityMultiplier;
 		float lightShadow = 1.f;
 		if (PixelDescriptor() & Permutation::LightingFlags::DefShadow) {
 			if (lightIndex < numShadowLights) {
-				lightShadow *= shadowColor[ShadowLightMaskSelect[lightIndex]];
+				lightShadow *= shadowColor[lightMaskSelect];
 			}
 		}
 
