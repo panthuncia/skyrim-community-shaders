@@ -113,7 +113,8 @@ namespace DCLF::Features::FirstPerson
 			return;
 		auto& f = FrameState();
 		const std::uint32_t frame = a_context.frame;
-		const bool on = Extensions::ViewOn(ActiveToggles(), kView) && !a_context.failed;
+		// Nothing is set up while the graph cannot draw the view (GraphConditions::firstPerson): no targets, slots or resources.
+		const bool on = Extensions::ViewOn(ActiveToggles(), kView) && !a_context.failed && Draws::CurrentGraphConditions().firstPerson;
 		f.latch = false;
 		f.latchFrame = frame;
 		if (!on)
@@ -161,11 +162,10 @@ namespace DCLF::Features::FirstPerson
 		const auto& f = FrameState();
 		const auto& c = a_coverage;
 		// Its forward part has no plain buckets: a GPU-driven graph without device-generated commands draws it only through the direct
-		// forward family (GraphConditions::firstPersonForwardDirect). Without that the engine keeps the view, blended draws and all.
-		const auto& conditions = Draws::CurrentGraphConditions();
-		const bool forwardDrawn = conditions.cpuPipeline || conditions.firstPersonForwardDirect || DrawPipelines::Get().DeviceGenerated();
+		// forward family. Without that the engine keeps the view, blended draws and all (GraphConditions::firstPerson: BeginFrame sets
+		// nothing up and the epochs have no passes).
 		return c.main && c.on && f.latch && f.latchFrame == c.frame && c.epochsCovered && c.targetImported && !c.rebuildPending && c.mainResourcesCurrent &&
-		       !c.rebuildRequested && forwardDrawn;
+		       !c.rebuildRequested && Draws::CurrentGraphConditions().firstPerson;
 	}
 
 	void CaptureRoot(Api::ViewRootCapture& a_capture)
