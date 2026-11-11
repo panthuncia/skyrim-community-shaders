@@ -87,6 +87,7 @@ namespace DCLF::Extensions
 			ParentToggles parents{};
 			ObjectClassToggles objectClasses{};
 			CategoryRoots categoryRoots{};
+			Api::UnheldRootsContribution unheldRoots{};
 			std::vector<ShadingContributionEntry> shadingContributions;
 			std::vector<FrameGlobalsEntry> frameGlobals;
 			std::uint32_t frameGlobalsFloats = 0;
@@ -930,6 +931,15 @@ namespace DCLF::Extensions
 				lists.categoryRoots[static_cast<std::size_t>(a_class.objectClass)] = a_class.categoryRoot;
 			}
 
+			void RegisterUnheldRoots(const Api::UnheldRootsContribution& a_roots) override
+			{
+				if (!a_roots.owner || !a_roots.enter || !a_roots.leave || !a_roots.gather)
+					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete unheld roots contribution", feature));
+				if (lists.unheldRoots.gather)
+					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes unheld roots, which another feature has", feature));
+				lists.unheldRoots = a_roots;
+			}
+
 			void RegisterEntryClass(const Api::EntryClassContribution& a_class) override
 			{
 				// Its own motion (every frame, no event) makes its entries per frame.
@@ -1361,6 +1371,7 @@ namespace DCLF::Extensions
 	std::string_view OwnedEntriesLabel(bool a_withoutRecord) { return a_withoutRecord ? Registered().ownedWithoutRecordLabel : Registered().ownedLabel; }
 	std::span<const PropertyFlagRule> PropertyFlagRules() { return std::span(Registered().propertyFlagRules).first(Registered().propertyFlagRuleCount); }
 	const CategoryRoots& RegisteredCategoryRoots() { return Registered().categoryRoots; }
+	const Api::UnheldRootsContribution& RegisteredUnheldRoots() { return Registered().unheldRoots; }
 	const ParentToggles& RegisteredParents() { return Registered().parents; }
 	const ObjectClassToggles& RegisteredObjectClasses() { return Registered().objectClasses; }
 	std::span<const ShadingContributionEntry> RegisteredShadingContributions() { return Registered().shadingContributions; }

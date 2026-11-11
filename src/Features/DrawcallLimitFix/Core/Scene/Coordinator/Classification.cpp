@@ -166,7 +166,7 @@ namespace DCLF::Scene
 		std::vector<RE::NiAVObject*> addedRoots;
 		for (const auto& [root, entry] : currentRoots) {
 			if (!alwaysRenderRoots.contains(root) && categoryNodes.contains(entry.category))
-				addedRoots.push_back(entry.root.get());
+				addedRoots.push_back(entry.object);
 		}
 
 		// Cells that appeared: their content was attached before the cell was, so scan it now.
@@ -179,10 +179,10 @@ namespace DCLF::Scene
 		nodeSetsDirty = true;  // the publication's copy made again (IsCategoryNode)
 		for (auto& [root, entry] : alwaysRenderRoots)
 			HandBack(std::move(entry.root));
-		// Copies of the capture's references (never made from a key).
+		// Copies of the capture's references (never made from a key: an unheld root's is null, the root a key alone).
 		alwaysRenderRoots.clear();
 		for (const auto& [root, entry] : currentRoots)
-			alwaysRenderRoots.emplace(root, AlwaysRenderRoot{ entry.root, entry.category });
+			alwaysRenderRoots.emplace(root, AlwaysRenderRoot{ entry.root, entry.category, entry.object });
 		std::erase_if(categoryFound, [&](const auto& a_entry) { return !categoryNodes.contains(const_cast<RE::NiNode*>(a_entry.first)); });
 		TrackAppearedCategories(*capture, added, addedRoots, cause);
 	}
@@ -271,10 +271,11 @@ namespace DCLF::Scene
 			for (const auto* child : keys->second)
 				walked.emplace_back(const_cast<RE::NiAVObject*>(child), SubtreeSource::CategoryWalk);
 		}
-		// Roots of a graph whose shared node just appeared.
+		// Roots of a graph whose shared node just appeared, and unheld roots new to the set (each its own category node). The walk reads
+		// the mirror by key.
 		for (const auto& [root, entry] : alwaysRenderRoots) {
 			if (std::find(a_added.begin(), a_added.end(), entry.category) != a_added.end())
-				walked.emplace_back(entry.root.get(), SubtreeSource::CategoryWalk);
+				walked.emplace_back(entry.object, SubtreeSource::CategoryWalk);
 		}
 		for (auto* root : a_addedRoots)
 			walked.emplace_back(root, SubtreeSource::CategoryWalk);
