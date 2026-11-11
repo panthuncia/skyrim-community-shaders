@@ -1771,7 +1771,8 @@ namespace SIE
 		 * @brief Whether CS_IMAGESPACE_SOURCES enables an optional image-space shader.
 		 *
 		 * The switch is "all" (every entry marked inAll) or a comma list of names: the engine's shader name
-		 * (BSImagespaceShaderCopyScaleBias) or the ImageSpaceManager effect name (ISCopyScaleBias), in any case. Unset,
+		 * (BSImagespaceShaderCopyScaleBias) or the ImageSpaceManager effect name (ISCopyScaleBias), in any case; a trailing '*'
+		 * matches every name with that prefix (ISBlur*). Unset,
 		 * empty or "0" enables none, which leaves vanilla's DXBC running for all of them.
 		 */
 		static bool IsImagespaceSourceEnabled(const OptionalImagespaceShader& a_entry)
@@ -1807,7 +1808,13 @@ namespace SIE
 				return false;
 			const std::string engineName = lower(a_entry.engineName);
 			const std::string effectName = lower(RE::ImageSpaceManager::GetImageSpaceEffectName(a_entry.effect));
-			return std::ranges::any_of(selection.names, [&](const std::string& a_name) { return a_name == engineName || a_name == effectName; });
+			const auto matches = [](const std::string& a_pattern, const std::string& a_text) {
+				// A trailing '*' matches any rest, so a family fits in one short entry (the switch is read into 512 bytes).
+				if (!a_pattern.empty() && a_pattern.back() == '*')
+					return a_text.starts_with(std::string_view(a_pattern).substr(0, a_pattern.size() - 1));
+				return a_pattern == a_text;
+			};
+			return std::ranges::any_of(selection.names, [&](const std::string& a_name) { return matches(a_name, engineName) || matches(a_name, effectName); });
 		}
 
 		static bool GetImagespaceShaderDescriptor(const RE::BSImagespaceShader& imagespaceShader, uint32_t& descriptor)
