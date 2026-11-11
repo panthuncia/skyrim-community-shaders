@@ -77,6 +77,10 @@ namespace FrameAnchors
 		// Out of frame order (appended, so the values above stay): each Scaleform display's EndDisplay on the main thread, between
 		// FrameGeneration and Present (RenderGraph/Engine/Scaleform), several times a frame.
 		Interface,
+		// The engine's draw families drawn at their own call (Drawcall Limit Fix's water and screen blood families): the water mask
+		// at FinishAccumulating's stencil batch, the water at FinishAccumulatingPostResolveDepth's water batch, and the screen blood
+		// at Main::RenderScreenSplatter. Zero to three runs a frame, so it is listed out of frame order.
+		EngineDraws,
 		Count
 	};
 

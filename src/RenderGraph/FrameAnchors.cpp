@@ -35,7 +35,7 @@ namespace FrameAnchors
 		using Segment = RenderGraphRuntime::Segment;
 
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
-		static_assert(static_cast<std::uint32_t>(Segment::AnchorInterface) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
+		static_assert(static_cast<std::uint32_t>(Segment::AnchorEngineDraws) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
 			"one segment per anchor, in the anchors' order");
 		static_assert(static_cast<std::uint32_t>(Segment::Count) <= 32, "TakeSubmittedSegments holds one bit per segment");
 
@@ -82,6 +82,8 @@ namespace FrameAnchors
 			{ "EngineDepthCopy", { "CS anchor: engine depth copy", "CS anchor: engine depth copy inputs", "FrameAnchors::EngineDepthCopy / ", "cs.anchor.engine-depth-copy" }, false, 3 },
 			// Runs a frame: one per Scaleform display drawn on the main thread
 			{ "Interface", { "CS anchor: interface", "CS anchor: interface inputs", "FrameAnchors::Interface / ", "cs.anchor.interface" }, true, 6 },
+			// Runs a frame: the water mask, the water and the screen blood
+			{ "EngineDraws", { "CS anchor: engine draws", "CS anchor: engine draws inputs", "FrameAnchors::EngineDraws / ", "cs.anchor.engine-draws" }, true, 3 },
 		} };
 
 		// Where each segment runs in a frame: AddToFrame puts an anchor before the first epoch of the order that runs after it. A
@@ -108,6 +110,7 @@ namespace FrameAnchors
 			Segment::AnchorDeferredPasses,     // EndDeferred, after the blended decals
 			Segment::AnchorDeferredComposite,  // DeferredPasses, after the D3D11 SSGI and SSS
 			Segment::AnchorPostComposite,      // DeferredPasses' end, after the composite
+			Segment::AnchorEngineDraws,        // the water, before the forward epoch (nominally here: the water mask runs before, the blood after)
 			Segment::Forward,
 			Segment::FirstPerson,
 			Segment::AnchorPostProcessing,   // Main_PostProcessing, before the upscaler
