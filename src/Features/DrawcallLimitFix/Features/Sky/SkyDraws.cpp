@@ -34,6 +34,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <optional>
 
 namespace DCLF::Features::Sky::SkyDraws
 {
@@ -239,9 +240,11 @@ namespace DCLF::Features::Sky::SkyDraws
 		};
 
 		/** @brief Everything here: the render thread's. */
-		struct State
+		struct DrawsState
 		{
 			std::array<std::shared_ptr<Client>, static_cast<std::size_t>(View::Count)> clients;
+			// The last shape a view's client could not be made for: not tried again until the shape changes.
+			std::array<std::optional<Shape>, static_cast<std::size_t>(View::Count)> refused;
 			std::vector<ProgramEntry> programs;
 			std::vector<PipelineKey> failedPrograms;
 			std::unique_ptr<GraphResources::Texture2D> cloudFaces;
@@ -251,9 +254,9 @@ namespace DCLF::Features::Sky::SkyDraws
 			std::deque<std::pair<std::uint32_t, std::vector<std::shared_ptr<const void>>>> kept;  // (game frame, owners)
 		};
 
-		State& GetState()
+		DrawsState& GetState()
 		{
-			static State state;
+			static DrawsState state;
 			return state;
 		}
 
@@ -274,13 +277,6 @@ namespace DCLF::Features::Sky::SkyDraws
 				if (client)
 					FrameAnchors::Unregister(client->id);
 			ORGCloudShadows::Get().UseGraphSource({});
-		}
-
-		rhi::Format FormatOf(ID3D11RenderTargetView* a_rtv)
-		{
-			D3D11_RENDER_TARGET_VIEW_DESC desc{};
-			a_rtv->GetDesc(&desc);
-			return rhi::helpers::ToRHI(desc.Format);
 		}
 
 		/** @brief The client of a_shape's view, registered with the anchors for a_shape. Null, logged, when a target cannot be imported. */
@@ -425,9 +421,16 @@ namespace DCLF::Features::Sky::SkyDraws
 		auto& client = state.clients[static_cast<std::size_t>(a_shape.view)];
 		if (client && client->shape == a_shape)
 			return client->prepared.load(std::memory_order_acquire);
+		auto& refused = state.refused[static_cast<std::size_t>(a_shape.view)];
+		if (refused && *refused == a_shape)
+			return false;
 		if (client)
 			FrameAnchors::Unregister(client->id);
 		client = MakeClient(a_shape);
+		if (client)
+			refused.reset();
+		else
+			refused = a_shape;
 		return false;
 	}
 
