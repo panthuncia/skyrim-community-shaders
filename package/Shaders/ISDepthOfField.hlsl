@@ -1,3 +1,17 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t4 and s0-s4 from the heap, the shared
+// constants, and PerGeometry from the engine-constants capture through the pass's latch.
+// Depth of field and the distant blur (DISTANT) share this source.
+#	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISDEPTHOFFIELD_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, ImageTex, 0) X(SRV, Texture2D<float4>, BlurredTex, 1) X(SRV, Texture2D<float>, DepthTex, 2) X(SRV, Texture2D<float4>, AvgDepthTex, 3) X(SRV, Texture2D<float4>, MaskTex, 4) X(SAMPLER, SamplerState, ImageSampler, 0) X(SAMPLER, SamplerState, BlurredSampler, 1) X(SAMPLER, SamplerState, DepthSampler, 2) X(SAMPLER, SamplerState, AvgDepthSampler, 3) X(SAMPLER, SamplerState, MaskSampler, 4) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISDEPTHOFFIELD_ORG_RESOURCES(ORG_HANDLE))
+ISDEPTHOFFIELD_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/DummyVSTexCoord.hlsl"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/SharedData.hlsli"
@@ -10,6 +24,16 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+static float4 invScreenRes = OrgEngineRow(PerGeometryAt, 0);  // inverse render target width and height in xy
+static float4 params = OrgEngineRow(PerGeometryAt, 1);        // DOF near range in x, far range in y
+static float4 params2 = OrgEngineRow(PerGeometryAt, 2);       // DOF near blur in x, far blur in w
+static float4 params3 = OrgEngineRow(PerGeometryAt, 3);       // 1 / (far - near) in z, near / (far - near) in w
+static float4 params4 = OrgEngineRow(PerGeometryAt, 4);
+static float4 params5 = OrgEngineRow(PerGeometryAt, 5);
+static float4 params6 = OrgEngineRow(PerGeometryAt, 6);
+static float4 params7 = OrgEngineRow(PerGeometryAt, 7);
+#	else
 SamplerState ImageSampler : register(s0);
 SamplerState BlurredSampler : register(s1);
 SamplerState DepthSampler : register(s2);
@@ -33,6 +57,7 @@ cbuffer PerGeometry : register(b2)
 	float4 params6 : packoffset(c6);
 	float4 params7 : packoffset(c7);
 };
+#	endif
 
 void CheckOffsetDepth(float2 center, float2 offset, inout float crossSection,
 	inout float totalDepth)
