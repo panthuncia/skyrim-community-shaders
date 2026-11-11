@@ -11,38 +11,160 @@ Work happens on `org-port/*` branches, never on `org_integration` itself (only d
 collects on the CS branch `org-port/integration`, which also carries the submodule bumps. Nothing is pushed yet; several
 pinned submodule commits exist only locally, so a fresh clone cannot fetch them.
 
-| Task                                                                                                           | State                                                                               | Where                                                    |
-| -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| Phase R                                                                                                        | Done                                                                                | `engine-d3d11-surface.md`                                |
-| P0.1-P0.4 (stencil, blend constants, dual source, logic op, sample mask, depth clip, dynamic viewport/scissor) | Done, D3D12 and Vulkan smokes                                                       | BasicRHI `org-port/p0-pipeline-state`                    |
-| P0.5-P0.6 (input layouts, keyed pipelines at record time, generate mips, MSAA resolve)                         | Done, ORG tests 32/32                                                               | ORG `org-port/p0-pipelines`                              |
-| P0.7, P0.11 (memory budget, native crash markers) and the AMD device-creation fix                              | Done                                                                                | BasicRHI `org-port/p0-device-diagnostics`                |
-| P0.8-P0.10 (present without a host wait, HDR colour spaces and metadata, frame latency, tearing)               | Done; HDR and present_wait not run (no HDR display, no driver support)              | BasicRHI `org-port/p0-present`                           |
-| P0.12-P0.13 (on-disk pipeline cache, allocator owners and spillable memory)                                    | Done; defragmentation not built                                                     | BasicRHI `org-port/p0-cache-alloc`                       |
-| All of Phase 0 merged                                                                                          | Done, every smoke passes on both backends                                           | BasicRHI `org-port/p0-integration`; CS builds against it |
-| P2.1-P2.5 (graph resources, anchors, shader builds, raster programs, GPU timers)                               | Done, checked in game                                                               | CS `org-port/integration`                                |
-| P2.6-P2.7 (shared constants, deferred composite)                                                               | Done; composite registers once, A/B within noise                                    | CS `org-port/integration`                                |
-| P1 (ownership inversion) and its fix (graph in the owned frame, HDR without a copy)                            | Merged; **open:** with DCLF on the owned frame stops presenting                     | CS `org-port/integration`                                |
-| P1.6 (ImGui on BasicRHI, Overlay anchor)                                                                       | Done; menu A/B matches D3D11                                                        | CS `org-port/integration`                                |
-| P3 W1: IBL, Screen Space/Terrain/Volumetric Shadows, Skylighting, Grass Collision, LLF remainder               | Merged; A/B within noise, Grass Collision and LLF local shadows included            | CS `org-port/integration`                                |
-| P3 W2: SSGI, Subsurface Scattering, Exponential Height Fog                                                     | Merged; fog and Subsurface A/B within noise (fog volumes read back equal)           | CS `org-port/integration`                                |
-| DCLF graph textures (publish API, t30 proof)                                                                   | Merged; **open:** switching path mid-scene loses the device                         | CS `org-port/integration`                                |
-| P3 W2: Dynamic Cubemaps, Cloud Shadows                                                                         | Merged; A/B within noise, DCLF reads both through the graph                         | CS `org-port/integration`                                |
-| P3 W4: UnifiedWater flowmap (built on the CPU, no GPU pass)                                                    | Merged; same file hash on both paths                                                | CS `org-port/integration`                                |
-| P3 W5: FX runtime parser and lowering                                                                          | Merged; execution not written yet                                                   | CS `org-port/integration`                                |
-| P3 W3: HDR Display output, Screenshot readback, Upscaling's own passes                                         | Merged; A/B within noise, graph screenshots byte-identical to D3D11 copies          | CS `org-port/integration`                                |
-| P3 W3: Post Processing framework and its effects                                                               | Merged; six effect scenarios (bloom, DoF, exposure, flares, glare) A/B within noise | CS `org-port/integration`                                |
-| P3 W4: Terrain Blending, TruePBR glints, Effects11 sun and volumetric rays                                     | Merged; A/B within noise, glints noise reads back equal                             | CS `org-port/integration`                                |
-| P3 W5: FX runtime execution                                                                                    | Merged behind CS_ORG_FX; matches FX11 in both cells with recording reuse on         | CS `org-port/integration`                                |
-| DCLF reads fog, IBL, Skylighting, Terrain/Volumetric Shadows as published resources                            | Merged; A/B within noise                                                            | CS `org-port/integration`                                |
-| DCLF reads Terrain Blending's depths, Cloud Shadows' self shadow and the faces' inputs as published resources  | Merged; A/B within noise, no D3D11 export reads left                                | CS `org-port/integration`                                |
-| DXVK: placeholder binds after external commands, interop layout order, relocation copies                       | Done; validation clean apart from a known kMAIN GENERAL layout                      | DXVK `org-port/p3-kept-layouts`, bumped on integration   |
+| Task                                                                                                             | State                                                                               | Where                                                    |
+| ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| Phase R                                                                                                          | Done                                                                                | `engine-d3d11-surface.md`                                |
+| P0.1-P0.4 (stencil, blend constants, dual source, logic op, sample mask, depth clip, dynamic viewport/scissor)   | Done, D3D12 and Vulkan smokes                                                       | BasicRHI `org-port/p0-pipeline-state`                    |
+| P0.5-P0.6 (input layouts, keyed pipelines at record time, generate mips, MSAA resolve)                           | Done, ORG tests 32/32                                                               | ORG `org-port/p0-pipelines`                              |
+| P0.7, P0.11 (memory budget, native crash markers) and the AMD device-creation fix                                | Done                                                                                | BasicRHI `org-port/p0-device-diagnostics`                |
+| P0.8-P0.10 (present without a host wait, HDR colour spaces and metadata, frame latency, tearing)                 | Done; HDR and present_wait not run (no HDR display, no driver support)              | BasicRHI `org-port/p0-present`                           |
+| P0.12-P0.13 (on-disk pipeline cache, allocator owners and spillable memory)                                      | Done; defragmentation not built                                                     | BasicRHI `org-port/p0-cache-alloc`                       |
+| All of Phase 0 merged                                                                                            | Done, every smoke passes on both backends                                           | BasicRHI `org-port/p0-integration`; CS builds against it |
+| P2.1-P2.5 (graph resources, anchors, shader builds, raster programs, GPU timers)                                 | Done, checked in game                                                               | CS `org-port/integration`                                |
+| P2.6-P2.7 (shared constants, deferred composite)                                                                 | Done; composite registers once, A/B within noise                                    | CS `org-port/integration`                                |
+| P1 (ownership inversion) and its fix (graph in the owned frame, HDR without a copy)                              | Merged; **open:** with DCLF on the owned frame stops presenting                     | CS `org-port/integration`                                |
+| P1.6 (ImGui on BasicRHI, Overlay anchor)                                                                         | Done; menu A/B matches D3D11                                                        | CS `org-port/integration`                                |
+| P3 W1: IBL, Screen Space/Terrain/Volumetric Shadows, Skylighting, Grass Collision, LLF remainder                 | Merged; A/B within noise, Grass Collision and LLF local shadows included            | CS `org-port/integration`                                |
+| P3 W2: SSGI, Subsurface Scattering, Exponential Height Fog                                                       | Merged; fog and Subsurface A/B within noise (fog volumes read back equal)           | CS `org-port/integration`                                |
+| DCLF graph textures (publish API, t30 proof)                                                                     | Merged; **open:** switching path mid-scene loses the device                         | CS `org-port/integration`                                |
+| P3 W2: Dynamic Cubemaps, Cloud Shadows                                                                           | Merged; A/B within noise, DCLF reads both through the graph                         | CS `org-port/integration`                                |
+| P3 W4: UnifiedWater flowmap (built on the CPU, no GPU pass)                                                      | Merged; same file hash on both paths                                                | CS `org-port/integration`                                |
+| P3 W5: FX runtime parser and lowering                                                                            | Merged; execution not written yet                                                   | CS `org-port/integration`                                |
+| P3 W3: HDR Display output, Screenshot readback, Upscaling's own passes                                           | Merged; A/B within noise, graph screenshots byte-identical to D3D11 copies          | CS `org-port/integration`                                |
+| P3 W3: Post Processing framework and its effects                                                                 | Merged; six effect scenarios (bloom, DoF, exposure, flares, glare) A/B within noise | CS `org-port/integration`                                |
+| P3 W4: Terrain Blending, TruePBR glints, Effects11 sun and volumetric rays                                       | Merged; A/B within noise, glints noise reads back equal                             | CS `org-port/integration`                                |
+| P3 W5: FX runtime execution                                                                                      | Merged behind CS_ORG_FX; matches FX11 in both cells with recording reuse on         | CS `org-port/integration`                                |
+| DCLF reads fog, IBL, Skylighting, Terrain/Volumetric Shadows as published resources                              | Merged; A/B within noise                                                            | CS `org-port/integration`                                |
+| DCLF reads Terrain Blending's depths, Cloud Shadows' self shadow and the faces' inputs as published resources    | Merged; A/B within noise, no D3D11 export reads left                                | CS `org-port/integration`                                |
+| DXVK: placeholder binds after external commands, interop layout order, relocation copies                         | Done; validation clean apart from a known kMAIN GENERAL layout                      | DXVK `org-port/p3-kept-layouts`, bumped on integration   |
+| P3.5: consolidation (bugs, DCLF one rule, framework primitives, ports on them, submodule fixes)                  | Done; A/B within noise, validation clean, hot reload checked                        | CS `org-port/integration`                                |
+| VRAM Budget: runs on the main thread, purges as pcb does                                                         | Done; the interior grid-detach crash is gone                                        | CS `fix/vram-budget-main-thread`, merged                 |
+| P4.1-P4.7: tripwire handles and guest device, targets, textures, streaming, buffers, shaders and states, VRAM    | Merged and run in game; each lane alone and all together match the baseline         | CS `org-port/p4`                                         |
+| P4 guest-phase order: every handle after the guest and the objects it wraps; CS readers of engine fields unwrap  | Done; 83 targets, 648 states and 70 queries get handles, shots match                | CS `org-port/p4`                                         |
+| P4 verify: tour (menus, map, journal, race menu, load, Blackreach), VRAM totals, streaming retire fix            | Done; shots match, VRAM within 4% of the D3D11 path; SE deferred                    | CS `org-port/p4`                                         |
+| P5 wave 1: constants capture, frame skeleton, sky, Bink, Scaleform subset, ImageSpace shader sources, slot rings | Merged and run; each matches its D3D11 reference (details below)                    | CS `org-port/p5`, ORG `org-port/p5-slots`                |
+| P5 wave 2: menus probe, loading screen, ImageSpace chain, water, screen blood; crash fixes                       | Merged and run; each matches its D3D11 reference within run noise (details below)   | CS `org-port/p5`, BasicRHI `org-port/p5-crash-basicrhi` |
+| P5.2: DCLF coverage (cloud-lit and falloff effects, shadow depth clamp, point lights without LLF, first person)   | Merged and run; each scenario against the engine's own draws (details below)        | CS `org-port/p5`                                         |
+| P5.10 finish: the A8 glyph cache, the colour matrix filter, displays split around D3D11 parts                    | Merged and run; the part path runs with `CS_ORG_SCALEFORM_D3D11_PARTS`               | CS `org-port/p5`, BasicRHI (A8_UNorm, format remap)      |
+| P5 review and its fix lanes: framework, families, engine, Scaleform passes, DCLF core                            | Merged; `p5-all.env` runs with every port on                                        | CS `org-port/p5`                                         |
+| ORG: retire replaced statistics query pools after the in-stream lists that write them                            | Done; the device loss after in-session rebuilds                                     | ORG `org-port/rebuild-retire` (3100d0e)                  |
+| P5.13 (the flush and the shader binds as tripwires)                                                              | Not started                                                                         |                                                          |
 
 **Root cause worth knowing:** a BasicRHI-created Vulkan device failed on AMD because the driver rejects acceleration
 structures in a mutable descriptor list at any count. DXVK never enables acceleration structures, so the adopted device
 never hit it. Acceleration-structure SRVs are now dropped from the descriptor-buffer model where this happens.
 
-**Phase 3 is done.** Phase 3.5 (consolidation, below) comes before Phase 4.
+**Phases 3, 3.5 and 4 are done; Phase 5 runs in game** on `org-port/p5`, all but P5.13. Phase 4's tour (menus, map,
+journal, race menu, a load, Blackreach) matches the baseline with every switch on, and VRAM read from ORG is within 4% of
+the D3D11 path. SE 1.5.97 is deferred. Phase 5 wave 1, each against its D3D11 run:
+
+- **P5.7 constants:** every engine constant-buffer use is captured into graph memory; a read-back check found 0 differences.
+- **P5.1 skeleton:** the engine's nine clear and depth-copy sites run on the graph; no tripwire line from them is left.
+- **P5.3 sky:** the main view and the reflection faces draw on the graph (mean diff 1.0-1.6). The cloud layers stay the
+  engine's by default (`CS_ORG_SKY_CLOUDS`, off until a run confirms them; p5/sky.md, "Cloud layers").
+- **P5.11 Bink:** a main-thread movie draws on the graph (165 of 166 frames), decoded frames identical. The startup logo
+  plays on its own thread; with P5.12's `CS_ORG_LOADING_THREAD=1` it draws on the graph too (164 or 165 of 166 frames).
+- **P5.10 Scaleform:** about half the displays drew on the graph in wave 1, shots match. The rest were loading-screen
+  displays (P5.12), the glyph cache's A8 view and filters or render-to-texture; the P5.10 finish covers them (below).
+- **ImageSpace sources:** all 124 slots have CS HLSL. The 82 checked ones build from it by default: the in-game A/B matched
+  (2026-11-10), so `CS_IMAGESPACE_SOURCES` was removed. ISMap and the two TAA variants stay on vanilla's DXBC.
+
+Phase 5 wave 2, each against its D3D11 run:
+
+- **P5.8/P5.9 menus:** a probe for the menu 3D scenes and the map (`CS_ORG_MENU3D`, `CS_ORG_MAP`); shots match.
+- **P5.12 loading screen:** the serving thread renders under `Renderer::Lock` as the render owner
+  (`CS_ORG_LOADING_THREAD`); the Bink logo and the loading-screen Scaleform displays draw on the graph. Shots match.
+- **P5.6 ImageSpace:** the HDR, blur and composite effects draw at the ImageSpace anchor (`CS_ORG_IMAGESPACE`); six shots
+  match, Riverwood is within its run noise.
+- **P5.4/P5.5 water and screen blood:** at the EngineDraws anchor (`CS_ORG_WATER`, `CS_ORG_BLOOD_SPLATTER`). Water matches
+  within run noise; the blood draws, but the fight differs per run, so its shots are not comparable.
+
+Crashes in the default-path runs, investigated with dumps and Ghidra:
+
+- An access violation in the engine's navmesh search (`BSNavmeshInfoSearch`, ID 90542) on a freed object during a load.
+  **Engine**; CS does not touch that code.
+- Device loss in the water runs: the water mask, the water surface and the screen blood share an anchor, and a run that
+  one client kept also recorded the others' passes with latch slots never written for that run. Each client's draws now
+  go through a run gate (**ours**, fixed). A device loss now stops the graph cleanly, and DCLF's fail-stop names it.
+- A pure virtual call on a destroyed shader resource view in DCLF's texture import thread. **Ours**, not reproduced
+  since; open.
+- Texture streaming registered a one-shot client per batch, about 250 graph rebuilds in a minute. Its windows are now
+  made with their mips as initial data, without a pass: 54 rebuilds left, seven per epoch, one per load.
+- The crash handler keeps its helper after a crash and reports a failed dump. First-chance faults only log (module and
+  offset); the session's one crash dump is written by an unhandled exception filter, for the fault that ends the process.
+  Before, the first first-chance access violation used the dump and held its thread for up to 120 s even when a handler
+  caught it.
+
+Phase 5.2 and the P5.10 finish, each against the engine's own draws:
+
+- **P5.2 DCLF coverage:** Lighting-variant effects lit by the cloud light and falloff effects without a blending alpha
+  property (`CS_DCLF_EFFECT_CLOUD_LIGHT`, `CS_DCLF_EFFECT_FALLOFF`); residue shadow views whose rasterizer state turns depth
+  clipping off, drawn with depth clamped (`CS_DCLF_SHADOW_DEPTH_CLAMP`); point lights without Light Limit Fix, from a
+  128-row frame table each draw picks from (`dclf-nollf-lights.env`); the precipitation mask without Skylighting
+  (`dclf-noskylighting-precip.env`, with its parity); first person on by default (`CS_DCLF_FIRST_PERSON`,
+  `dclf-first-person.env`); the particle manager's master particle systems behind `CS_DCLF_MASTER_PARTICLES` (off by
+  default; `master-particles-*.env`, `blood-particles-*.env`). `CS_DISABLE_FEATURES` disables features for one run.
+- **P5.10 finish:** the texture fallback was one texture, GFx's `A8_UNORM` glyph cache; BasicRHI now has `A8_UNorm` and a
+  per-device format remap (`Device::QueryFormatSupport`), so text draws on the graph. The colour matrix filter is a graph
+  draw. What the graph does not draw (other filters, render targets, line strips) is a D3D11 part between graph segments
+  instead of the whole display (p5/scaleform.md). With every port on, 10,982 of 11,000 displays drew on the graph.
+
+The Phase 5 review (2026-11-11) and its fix lanes:
+
+- **Framework primitives** (render-graph.md, "Joining, running and withholding"): `FrameAnchors::Run` returns a
+  `RunResult`, `CanRun` before withholding, `RequestJoin` as the one join gate (builds at DCLF's build point or at frame
+  end), `ClientDesc::executed`, `ProgramCache`, `FrameStaging`, `RunSlots`, `MainTick`, `Util::ReasonLog`, and the frame
+  slot budget logged at startup.
+- **Families helper:** the sky, water and screen blood take the engine's draws through one shared family helper
+  (`Core/Engine/Family`); the sky's cloud layers' occlusion is drawn into the later layers.
+- **Engine registrations once:** the skeleton imports every target it clears and registers once at Setup; Bink keeps one
+  client for the session; ImageSpace joins before it withholds; engine constants are captured on demand. A clear that
+  registered again had rebuilt three epochs within 150 ms during a load.
+- **Scaleform passes:** the Interface pass draws through a run gate, with `RunSlots` and `FrameStaging`; the client
+  registers once with both surfaces and joins through `RequestJoin`; pipelines come from a `ProgramCache`.
+- **DCLF core:** drawn roots retire and unheld roots are diffed; master particle observers run with the stats only;
+  shadow point light rows go first; first person is left out when it cannot be drawn; DCLF stops after a build failure.
+- **ORG's query-pool retirement** (`org-port/rebuild-retire`, 3100d0e): every new pass name replaced ORG's shared
+  statistics query pool, and the old one was destroyed while DXVK's pending command buffer still wrote into it. That was
+  the device loss after in-session rebuilds. A replaced pool now lives until the last list that recorded with it is
+  released, and the retirement frontier covers values given out on the host's shared timelines.
+
+**Open items:**
+
+- The sky's cloud layers on the graph stay off by default (`CS_ORG_SKY_CLOUDS`) until a run verifies them.
+- Without Light Limit Fix, a draw's point lights are selected per pixel from the 128-row table; selecting them once per
+  object is dclf-roadmap.md 3.7.
+- ORG's `StatisticsManager` still has a race on its shared query pool and no headroom in it: every new pass name replaces
+  the pool, and the retirement fix only keeps the old one alive for the lists that recorded with it.
+- P5.13 (the flush and the shader binds) is not done.
+- With DCLF on, the owned frame stops presenting at the first menu or loading screen (P1).
+
+**Phase 5 findings worth knowing:**
+
+- In the guest phase each anchor is its own epoch in DXVK's stream, with a fixed ring of frame slots. An anchor run more
+  than the ring holds in one frame (the skeleton's shadow clears) waited on work DXVK had not submitted: a deadlock. ORG's
+  host now grows a listed epoch's ring (`GraphHost::Desc::epochRuns`, sized per anchor in FrameAnchors). This goes away once
+  ORG owns the frame and these are passes in one graph.
+- A client registered while its anchor has no active client never joined the graph: the host builds a graph only when
+  it is submitted, and Drawcall Limit Fix makes builds explicit at its per-world-frame build point. A joining client now
+  runs the epoch, `FrameAnchors::InBuiltGraph` tells a client when it is in, and a blocking movie builds between frames.
+- The engine keeps only kFRAMEBUFFER's RTV (the back buffer); `EngineTarget` takes the texture from it.
+- Switching a client's source every batch rebuilds the graph each time; a few hundred rebuilds ran the device out of
+  memory. Rebuilds during play are removed at their trigger; one that cannot be avoided builds asynchronously and switches
+  in at the next snapshot, as DCLF's epochs do.
+- SKSE tasks run on job threads, not the main thread; Tracy now listens on localhost only (no firewall prompt).
+
+**Phase 4 findings worth knowing:**
+
+- The engine's `Renderer::Init` makes the render targets (where CS's `State::Setup` runs) before the blend-table
+  builder (where the guest device goes in), and the state tables and queries after it. Handles are installed at the
+  end of Init, `BSGraphics::State` setup's call (SE 75445+0x310, AE 77226+0x9C3); see `p4/p4.1-tripwire.md`.
+- Once target fields hold handles, any CS code that hands a field to DXVK's own context crashes in `d3d11_context.cpp`.
+  `Tripwire::Unwrap` fixes it. The audit missed indirect indices (SSGI's `forwardRenderTargets[0]`) and the engine's
+  shadow-state slot array (GrassOptimizations' material textures); both were found by crash and fixed.
+- A loading screen presents from a job thread. Texture streaming's Present-anchor pass ran there, on the graph's upload
+  instance off its owner thread. Anchors now run only on the main thread, latched at plugin load (CommonLib's
+  `Main::threadID` gives a wrong value on AE 1.6.1170).
 
 **Second root cause worth knowing:** after `vkCmdExecuteCommands`, AMD's Windows driver keeps the vertex and index
 buffers the primary bound before it. When DXVK re-binds the same index buffer after the graph's secondaries, the driver
@@ -53,6 +175,14 @@ own binds always reach the driver. Details: "Hazard: bindings the driver keeps a
 `render-graph.md`.
 
 **Bugs found by in-game testing (fixed on `org-port/integration`):**
+
+- VRAM Budget's interior step unloaded the worldspace 3D and detached the grid, then unloaded the old grid cells over later
+  ticks. An actor in a detached cell got its 3D attached by the AI job, which read the null worldspace portal graph and
+  crashed (SkyrimSE+0x2C4BD6). Its controller also ran on a job thread, not the main thread its comment claimed. It now
+  runs after the frame jobs on the main thread and calls the engine's whole `pcb` for the interior step.
+- A failed build of one graph epoch ended ORG's host thread, so every epoch stopped and DCLF waited until the GPU timed
+  out (HDR Display's UI clear asked for a view its import lacked). A failure now stays with its epoch: that anchor's
+  clients return to D3D11 and the rest runs on. Imports with a UAV now also publish the CPU-side UAV a clear needs.
 
 - ORG's alias planner sized a texture with an authored mip chain as one mip, so placements overlapped (SSGI's working
   depth ran into its radiance). Placement now sizes textures from the description the backing creates them with.
