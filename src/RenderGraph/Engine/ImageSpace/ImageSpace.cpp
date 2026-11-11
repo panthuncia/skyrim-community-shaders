@@ -32,6 +32,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include <algorithm>
 #	include <array>
 #	include <cctype>
+#	include <filesystem>
 #	include <map>
 #	include <optional>
 #	include <set>
@@ -929,6 +930,10 @@ namespace RenderGraph::Engine::ImageSpace
 			return off("the render graph is not active");
 		if (!Constants::Requested())
 			return off("the engine-constants capture is off (set CS_ORG_ENGINE_CONSTANTS=1)");
+		// The ORG builds read PerGeometry through this header. Shaders staged from before the ORG builds (no header) compile their
+		// D3D11 declarations under DXC, and every pipeline then fails on an unmapped cbuffer (PerFrame at b12 first).
+		if (std::error_code error; !std::filesystem::exists(std::filesystem::path(RenderGraphRuntime::kShaderDirectory) / "Common/OrgEngineConstants.hlsli", error))
+			return off("Data/Shaders has no Common/OrgEngineConstants.hlsli: the staged shaders predate the ORG builds of ISHDR, ISBlur and the VL composite");
 		state.gate = RunGate::Create("ImageSpace", kGateEntries);
 		state.latch = org::LatchBlock::Create("ImageSpace::ConstantsAt", kGateEntries * static_cast<std::uint32_t>(sizeof(ConstantsAt)), host->FrameSlots());
 		if (!state.gate || !state.latch)
