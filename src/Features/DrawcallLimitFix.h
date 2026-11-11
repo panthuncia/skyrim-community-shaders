@@ -35,6 +35,8 @@ struct DrawcallLimitFix : Feature
 	/** @brief SKSE kDataLoaded: SceneWriterFramework's integrity check, once every plugin has installed its hooks. */
 	virtual void DataLoaded() override;
 	virtual void SetupResources() override;
+	/** @brief After every feature's SetupResources: the engine draw families' setup (their clients join the setup's graph build). */
+	virtual void PostSetupResources() override;
 	virtual bool AppliesBootToggleLive() const override { return true; }
 	virtual void Reset() override;
 	/** @brief The Present hook, before the present: FrameDriver::BeforePresent, once installed. */
@@ -167,6 +169,11 @@ struct DrawcallLimitFix : Feature
 	static void WriteAlphaFlags(RE::NiAlphaProperty* a_alpha, std::uint16_t a_flags);
 	/** @brief ShaderCache's precompile of a Lighting/Effect/DistantTree permutation: DCLF's SPIR-V build of the same one. */
 	static void PrecompileShader(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor);
+	/**
+	 * @brief A descriptor the engine loaded for a_shader (BSShader::LoadShaders, CS's lookup form): the engine draw families' ORG stages
+	 * for it, and the shader object their prebuilt programs take their defines from. Whatever CS's own precompile does.
+	 */
+	static void PrecompileFamilyStages(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor);
 	/** @brief The D3D11 context's Map/Unmap/UpdateSubresource (Globals' hooks): DCLF's constant buffer mirror and capture parity. */
 	static void OnMap(ID3D11Resource* a_resource, void* a_data);
 	static void OnUnmap(ID3D11Resource* a_resource);

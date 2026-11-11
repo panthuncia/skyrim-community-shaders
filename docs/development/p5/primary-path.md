@@ -115,26 +115,33 @@ do: a user action, not a readiness state.
 Done on 2026-11-11 (code in `src/Features/DrawcallLimitFix/Core/Engine/Family/` and `Features/{Sky,Water,BloodSplatter,ShadowMask}/`;
 each family doc has a "Primary path" section with its own "What stays the engine's").
 
-- **Stages at shader load (rule 1).** `ShaderCompilationTask` -> `DrawcallLimitFix::PrecompileShader` -> `Family::PrecompileStages`:
-  every descriptor CS loads for BSSkyShader (pixel; plain for the faces' variant, `| 256` for the main view's), BSWaterShader
+- **Stages at shader load (rule 1).** `BSShader::LoadShaders` (Hooks.cpp, every descriptor the engine loaded, in CS's lookup form,
+  whatever CS's own precompile does) -> `DrawcallLimitFix::PrecompileFamilyStages`, and `ShaderCompilationTask` ->
+  `DrawcallLimitFix::PrecompileShader`, both -> `Family::PrecompileStages` (each stage once, compiled on CS's compile pool): every
+  descriptor for BSSkyShader (pixel; plain for the faces' variant, `| 256` for the main view's), BSWaterShader
   (vertex), BSBloodSplatterShader (pixel) and BSUtilityShader (pixel, RenderShadowmask* bits only) compiles the family's two ORG stages
   into the shader store (`RasterProgram::CompileStages`, the same defines `Load` resolves). Requests before the render graph has a
-  compiler wait for the families' setup (`Family::StartStagePrecompile`). This runs where CS precompiles its own shaders: with the disk
-  cache on (the default); without it, CS compiles at first draw and so do the families.
+  compiler wait for the families' setup (`Family::StartStagePrecompile`). The first run of 2026-11-11 had CS's background compilation
+  on, so its `ShaderCompilationTask`s for the sky and the water came only at their first draws: no shader object was known at setup and
+  the manifest's sky and water keys were all built on the render thread (`no descriptor of its shader was loaded`). The LoadShaders
+  enumeration fixes that; the shader object also comes from it.
 - **Program keys are values (rule 2).** `Family::ProgramKey` holds the descriptor CS looks the shader up by (`State::modified*`), the
   variant, the target formats and the D3D11 descriptions of the blend, depth-stencil and rasterizer states field by field
   (`Family::DescribeStates` over `Pipeline::FindBlend/FindDepthStencil/FindRaster`). A program is built from its key alone. The
   manifest is `Data/ShaderCache/v2/engine-draw-programs.txt` (one line a key, family tag then the key's words; at most 512 keys a
-  family; written on ProgramCache's thread when a key is first drawn). At setup each family queues the manifest's keys on
-  ProgramCache's build thread (`EngineDrawPrograms::Prebuild`).
-- **The gate.** The families' setup runs at the first main-thread tick the render graph runs (`Family::AddSetup` over `MainTick`: the
-  main menu), so the prebuilds have the whole main menu and the load. A draw whose prebuilt key is still building waits for it on the
+  family; written on ProgramCache's thread when a key is first drawn). At setup each family asks for the manifest's keys
+  (`EngineDrawPrograms::Prebuild`), which are queued on ProgramCache's build thread as soon as the family's shader object is known
+  (setup, the LoadShaders enumeration, or at the latest the first draw). The `not prebuilt` line carries the key's hash: one descriptor
+  has several keys when its draws differ in state (a face's sky with and without its depth, say).
+- **The gate.** The families' setup runs at CS's setup (`Family::RunSetups` from `DrawcallLimitFix::PostSetupResources`, after every
+  feature's SetupResources and before `RenderGraph::Engine::PostSetup`'s `FrameAnchors::BuildPending`), so their clients are in the
+  setup's graph build and the prebuilds have the whole main menu and the load. (The first version registered at the first MainTick,
+  after that build: the first world batches logged `its anchor cannot run now`.) MainTick only retries a setup that found no host. A draw whose prebuilt key is still building waits for it on the
   render thread (logged once a family: `the first draw waited N ms for its prebuilt program`), never the engine. A key in neither the
   enumeration nor the manifest is built on the render thread at its first draw (`was not prebuilt: built on the render thread at its
   first draw in N ms`, a warning, once per key). `ProgramState::Building` is gone; `EngineDrawPrograms` no longer uses ProgramCache's
   map (it keeps its own, with the wait), only its build thread and `Load`.
-- **Producers trusted (rule 3).** Every client registers at setup with its fixed published inputs, asks for its build once, and is
-  in the graph from the menu frame's end on. The engine targets a family lists are imported at setup (`PublishedInputs::AddEngine`),
+- **Producers trusted (rule 3).** Every client registers at CS's setup with its fixed published inputs and is in the setup's graph build. The engine targets a family lists are imported at setup (`PublishedInputs::AddEngine`),
   which publishes them before that build. A batch is taken when `FrameAnchors::CanRun` says the run will draw (else the engine draws it,
   logged as an error once); there is no per-batch `RequestJoin`, probe, settle, clean flag or cloud backoff. A listed id first published
   during play is `InputResult::PublishedLate`: its producer's Publish rebuilds every graph (not the family), and until then that
@@ -142,8 +149,10 @@ each family doc has a "Primary path" section with its own "What stays the engine
   families need `CS_ORG_ENGINE_CONSTANTS=1`), which tracks every buffer from startup; ConstantMirror is no longer used by them.
 - **Refusals keep the engine's order.** A draw a family cannot take runs the latched part at that point (`FlushLatched`) and leaves
   the rest of the batch to the engine, vouched for under the flush latch (`Flush::EngineDraws`, reasons `sky: left to the engine`,
-  `sky: cloud layers`, `water: left to the engine`, `shadow mask: left to the engine`, `blood splatter: left to the engine`). A pass
-  whose geometry is not a TriShape is refused at its SetupGeometry, before its draw. A run that does not submit is an error, logged
+  `sky: cloud layers`, `sky: sun occlusion query`, `water: left to the engine`, `shadow mask: left to the engine`, `blood splatter: left to the engine`). A pass the
+  geometry-type dispatcher draws through another function (`Family::DrawsThroughTriShape`: types 3, 5, 8 and 9, and 6 and 7 unless
+  the pass's accumulation hint is 12, from Ghidra of AE 107637) is refused at its SetupGeometry, before its draw. (The first version
+  took TriShape alone and refused the water's sub-index land shapes, type 9 at the dispatcher's +0x430/+0x4CE: 12 water draws a frame.) A run that does not submit is an error, logged
   once; nothing is retried.
 
 ### D3D11 state reads
@@ -156,6 +165,6 @@ record (t98) is now Deferred's CPU data (`Deferred::GetDirectionalShadowLightDat
 
 ### What can trigger a graph rebuild
 
-The families' client registrations at setup (one build at the main menu frame's end). Nothing during play: no client registers,
+The families' client registrations at CS's setup (in its one graph build). Nothing during play: no client registers,
 refreshes or imports again; a batch of other targets is an inherent refusal. A producer publishing an input for the first time during
 play rebuilds every graph through its own Publish.

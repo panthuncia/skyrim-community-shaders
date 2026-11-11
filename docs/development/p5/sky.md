@@ -127,9 +127,8 @@ families").
 - **The batch** (`SkyCapture.cpp`, a thunk on the +0x247 / +0x237 call). For the main camera's accumulator inside CS's deferred pass,
   or a face of `kREFLECTIONS`, the batch runs with its draws latched: every sky pass goes through the engine's BeginPass,
   SetupTechnique, SetupGeometry (Cloud Shadows' and the frame annotations' hooks with it) and render state as before.
-- **Setup, withholding, running** (primary path, primary-path.md). The client is made at setup (`Family::AddSetup`: the first
-  main-thread tick the render graph runs, in the main menu) and asks for its build once (`RequestJoin`); the menu frame's end builds
-  it, so it is in the graph before any world frame. A batch is taken when the client's targets match and `FrameAnchors::CanRun` says
+- **Setup, withholding, running** (primary path, primary-path.md). The client is made at CS's setup (`Family::RunSetups`,
+  before the setup's graph build), so it is in its anchor's graph before any world frame. A batch is taken when the client's targets match and `FrameAnchors::CanRun` says
   the anchor's run will draw it; otherwise the engine draws the batch, vouched for (`Flush::EngineDraws`), logged once. After the
   batch (or at a refusal) `Family::RunWithheld` runs the anchor; any status but `Ran` is an error, logged once, and nothing is
   retried. The client's `executed` callback counts the runs that drew.
@@ -176,7 +175,8 @@ families").
 - **Refusals end the latched part.** There is no probe: every batch is latched from the first. A draw the family cannot take (its
   inherent refusals, "What stays the engine's") runs the draws latched so far at that point and leaves the rest of the batch to the
   engine, vouched for (`Flush::EngineDraws` until the batch returns), so the engine's draws come after the graph's in the engine's
-  order. A pass whose geometry is not a TriShape is refused at its SetupGeometry, before the engine draws it. A batch that ran nothing
+  order. A pass the dispatcher draws through another function than DrawTriShape
+  (`Family::DrawsThroughTriShape`) is refused at its SetupGeometry, before the engine draws it. A batch that ran nothing
   keeps its imports (`Keep`).
 - **Refusals.** A draw the family cannot take is logged once per reason, technique and view (`[DCLF] sky: the engine draws: a main draw
   of technique N: <reason>`, `Util::ReasonLog`). Every pass of a batch must draw through `DrawTriShape` (`Family::Passes`).
@@ -272,7 +272,9 @@ render thread at its first draw`). Constants come from the engine constants capt
   occlusion query for that index (+0x70 + index * 0x18), `BeginQuery`, makes a BSSkyShader pass (SunOcclude, descriptor 0: no colour
   write), draws it through `RenderPassImmediately`, `EndQuery`. `Sun::UpdateOcclusionQueries` reads the results back for the sun glare.
   The family cannot take it: a graph draw is not counted by the engine's D3D11 query, so the glare would read the sun as hidden. It
-  needs an ORG occlusion query that feeds the engine's query object (p4.6's `QueryMapping::Occlusion`), a separate item.
+  needs an ORG occlusion query that feeds the engine's query object (p4.6's `QueryMapping::Occlusion`), a separate item. Until then
+  the family detours it (SE 99958 at `0x1412ccad0`, its caller `Sun::SubmitOcclusionQuery` SE 25799 +0xAD) and vouches for it under
+  the flush latch (`sky: sun occlusion query`).
 - **The sun glare** (`0x5C006072`, outside the batch's technique range).
 - A batch whose targets are not its client's (the main view's: `kMAIN`, `kMOTION_VECTOR`, `NORMALROUGHNESS` with kMAIN's depth; the
   faces': the reflection cubemap with `kCUBEMAP_REFLECTIONS`), or another accumulator, cubemap or the forward pass.
@@ -292,7 +294,7 @@ imports again. A producer that publishes an input for the first time during play
 
 ### What to look for in the log
 
-- `[DCLF] <family>: the <id> client registered at setup (...)` once per client, in the main menu, and no `frame anchors: cs.<family>.*
+- `[DCLF] <family>: the <id> client registered at setup (...)` once per client, at CS's setup, before `graphs built at CS's setup`, and no `frame anchors: cs.<family>.*
   registered` line after it; `; not published yet: <ids>` names inputs no producer had published by then.
 - `[DCLF] engine draw programs: the manifest lists N keys`, `[DCLF] <family>: N programs from the manifest queued`, and on a second
   run no `was not prebuilt` line. Each such line names a key the enumeration or the manifest missed.

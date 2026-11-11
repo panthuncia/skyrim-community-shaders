@@ -42,9 +42,8 @@ The pieces every engine draw family shares are `Core/Engine/Family` (render-grap
   taker at the shared DrawTriShape detour records each draw: VS b2 c0-c5 and PS b2 c0 through ConstantMirror (watched from the shared
   SetupGeometry watch), t0-t3 and their samplers (GpuTextures), the geometry (index range and stride checked against the buffers, a
   triangle list only) and the viewport. A draw that tests depth or stencil, or whose targets are not the back buffer alone, is refused.
-- **Setup, withholding, running** (primary path, primary-path.md). The client is made at setup (`Family::AddSetup`: the first
-  main-thread tick the render graph runs, in the main menu) and asks for its build once (`RequestJoin`); the menu frame's end builds
-  it, so it is in the graph before any world frame. A batch is taken when the client's targets match and `FrameAnchors::CanRun` says
+- **Setup, withholding, running** (primary path, primary-path.md). The client is made at CS's setup (`Family::RunSetups`,
+  before the setup's graph build), so it is in its anchor's graph before any world frame. A batch is taken when the client's targets match and `FrameAnchors::CanRun` says
   the anchor's run will draw it; otherwise the engine draws the batch, vouched for (`Flush::EngineDraws`), logged once. After the
   batch (or at a refusal) `Family::RunWithheld` runs the anchor; any status but `Ran` is an error, logged once, and nothing is
   retried. The client's `executed` callback counts the runs that drew.
@@ -55,7 +54,8 @@ The pieces every engine draw family shares are `Core/Engine/Family` (render-grap
 - **Refusals end the latched part.** There is no probe: every batch is latched from the first. A draw the family cannot take (its
   inherent refusals, "What stays the engine's") runs the draws latched so far at that point and leaves the rest of the batch to the
   engine, vouched for (`Flush::EngineDraws` until the batch returns), so the engine's draws come after the graph's in the engine's
-  order. A pass whose geometry is not a TriShape is refused at its SetupGeometry, before the engine draws it. A batch that ran nothing
+  order. A pass the dispatcher draws through another function than DrawTriShape
+  (`Family::DrawsThroughTriShape`) is refused at its SetupGeometry, before the engine draws it. A batch that ran nothing
   keeps its imports (`Keep`).
 
 ### Graph rebuilds
@@ -120,7 +120,7 @@ The client's registration at setup. Nothing in play registers again.
 
 ### What to look for in the log
 
-- `[DCLF] <family>: the <id> client registered at setup (...)` once per client, in the main menu, and no `frame anchors: cs.<family>.*
+- `[DCLF] <family>: the <id> client registered at setup (...)` once per client, at CS's setup, before `graphs built at CS's setup`, and no `frame anchors: cs.<family>.*
   registered` line after it; `; not published yet: <ids>` names inputs no producer had published by then.
 - `[DCLF] engine draw programs: the manifest lists N keys`, `[DCLF] <family>: N programs from the manifest queued`, and on a second
   run no `was not prebuilt` line. Each such line names a key the enumeration or the manifest missed.
