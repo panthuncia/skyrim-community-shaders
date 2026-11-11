@@ -440,6 +440,33 @@ namespace DCLF
 		Diagnostics::Notify(Diagnostics::PassKept{ a_batch, a_pass, static_cast<RegistrationCensus::Site>(a_site), face, a_occlusionPhase });
 	}
 
+	namespace
+	{
+		// The shadow-map registration this thread runs now (ShadowRegistration): its accumulator's render mode is a shadow view's.
+		thread_local bool t_shadowRegistration = false;
+
+		/**
+		 * @brief The shadow modes' registration (FUN_1414b2a60, SE 99932 / AE 106576; the Z-prepass's 0xC too): the one function that builds
+		 * a caster's shadow-map passes (the property's GetRenderPasses_ShadowMapOrMask, vtable +0x158) and hands them to the accumulator's
+		 * renderers. Every hook it reaches (RegisterPass, its direct group insertions) runs inside it on this thread, so the accumulator's
+		 * render mode says the pass is a shadow view's, whatever renderer sets DCLF published. Installed with the flush latch only.
+		 */
+		struct ShadowRegistration
+		{
+			static std::uint64_t thunk(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, RE::BSShaderProperty* a_property)
+			{
+				const auto* data = a_accumulator ? a_accumulator->GetRuntimeData() : nullptr;
+				const auto mode = data ? static_cast<std::uint32_t>(data->renderMode) : 0u;
+				const bool previous = std::exchange(t_shadowRegistration,
+					mode >= PassCapture::kFirstShadowMode && mode < PassCapture::kFirstShadowMode + PassCapture::kShadowModes);
+				const auto result = func(a_accumulator, a_geometry, a_property);
+				t_shadowRegistration = previous;
+				return result;
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+	}
+
 	bool PassCapture::MainRendererNow(const RE::BSBatchRenderer* a_batch) const
 	{
 		static REL::Relocation<RE::BSGraphics::BSShaderAccumulator**> depthAccumulator{ REL::Offset(Engine::Address::kDepthAccumulator) };
@@ -492,6 +519,8 @@ namespace DCLF
 			reason = &kShadow;
 		else if (const auto engineShadows = std::atomic_load(&engineShadowRenderers); engineShadows && engineShadows->contains(a_batch))
 			reason = &kShadow;  // a shadow view DCLF does not cover this frame: the engine draws it whole
+		else if (t_shadowRegistration)
+			reason = &kShadow;  // a shadow-map caster pass into a renderer no set holds (an interior light's view, a group made this frame)
 		else {
 			const auto& views = Extensions::Views();
 			for (std::uint32_t i = 0; i < views.ownRendererCount && !reason; ++i)
@@ -787,6 +816,11 @@ namespace DCLF
 		InstallMainGroup<MainGroupHook<2>>(13);
 		InstallMainGroup<MainListHook>(14);
 		InstallMainGroup<OcclusionGroupHook>(15);
+		if (RenderGraph::Engine::Flush::LatchRequested()) {
+			stl::detour_thunk<ShadowRegistration>(REL::RelocationID(99932, 106576));
+			if (!ShadowRegistration::func.address())
+				logger::warn("[DCLF] pass capture: the shadow registration's detour did not attach; the flush latch skips shadow casters no set holds");
+		}
 		installed = true;
 		logger::info("[DCLF] pass capture installed on BSBatchRenderer::RegisterPass");
 	}
