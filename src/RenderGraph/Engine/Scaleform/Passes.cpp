@@ -45,7 +45,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		constexpr const char* kFilterVertexShader = "Scaleform/FilterVS.hlsl";
 		constexpr const char* kFilterPixelShader = "Scaleform/FilterPS.hlsl";
 		// GpuTextures' diagnostic source tag for Scaleform's views (ImGui's is 256).
-		constexpr std::uint32_t kSourceTag = 257;
+		constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::Scaleform);
 		constexpr std::uint32_t kMinimumStaging = 256u << 10;
 		constexpr std::size_t kSpareStaging = 8;
 		// A surface not drawn onto for this many displays is dropped when a new one is made (an old framebuffer after a resize).

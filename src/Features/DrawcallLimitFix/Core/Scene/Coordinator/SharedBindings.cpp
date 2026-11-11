@@ -8,9 +8,9 @@ namespace DCLF::Scene
 	namespace
 	{
 		// GpuTextures' diagnostic source tags: the projected textures from 32, the technique mask 48, a caster's diffuse 192.
-		constexpr std::uint32_t kProjectedSourceTag = 32;
-		constexpr std::uint32_t kMaskSourceTag = 48;
-		constexpr std::uint32_t kShadowSourceTag = 192;
+		constexpr std::uint32_t kProjectedSourceTag = GpuTextures::Tag(GpuTextures::Source::Projected);
+		constexpr std::uint32_t kMaskSourceTag = GpuTextures::Tag(GpuTextures::Source::Mask);
+		constexpr std::uint32_t kShadowSourceTag = GpuTextures::Tag(GpuTextures::Source::ShadowDiffuse);
 		// The masks' change-set parity's pass offset (Diagnostics::ParityDue).
 		constexpr std::uint32_t kMaskParityOffset = 41;
 	}

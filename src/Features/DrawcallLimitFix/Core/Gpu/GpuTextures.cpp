@@ -11,6 +11,9 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
+#include "Globals.h"
+#include "Utils/D3D.h"
+
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -809,28 +812,46 @@ namespace DCLF
 		return textures;
 	}
 
-	GpuTextures::Binding GpuTextures::ResolveBinding(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag)
+	GpuTextures::Binding GpuTextures::ResolveBinding(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag, ResolveFailure* a_failure)
 	{
 		DCLF_ZONE("CS.DCLF.Texture.ResolveBinding");
+		ResolveFailure ignored = ResolveFailure::None;
+		auto& failure = a_failure ? *a_failure : ignored;
+		failure = ResolveFailure::None;
 		if (!a_view)
 			return NullBinding();
 		// These holders keep their first import and do not follow a swap: the full window, and they ask again until it is there.
-		if (!TextureStreaming::PinFull(a_view))
+		if (!TextureStreaming::PinFull(a_view)) {
+			failure = ResolveFailure::StreamedWindow;
 			return { kInvalid, {} };
+		}
 		auto registry = impl->registry;
 		if (registry) {
 			DCLF_ZONE("CS.DCLF.Texture.RegistryLookup");
 			Binding binding;
 			std::scoped_lock lock(registry->mutex);
-			if (impl->Find(*registry, a_view, binding) != Impl::Found::Unknown)
-				return binding;  // a pending import is not waited for: the caller asks again (its binding is kInvalid)
+			// A pending import is not waited for: the caller asks again (its binding is kInvalid).
+			switch (impl->Find(*registry, a_view, binding)) {
+			case Impl::Found::Unknown:
+				break;
+			case Impl::Found::Pending:
+				failure = ResolveFailure::Pending;
+				return binding;
+			case Impl::Found::Rejected:
+				failure = ResolveFailure::Rejected;
+				return binding;
+			case Impl::Found::Ready:
+				return binding;
+			}
 		}
 		// A descriptor import is legal only inside an epoch. Do not cache an Import
 		// rejection merely because the caller reached us outside that boundary:
 		// the same view may become executable at the next epoch.
 		Impl::ImportContext context;
-		if (!Impl::MakeContext(context))
+		if (!Impl::MakeContext(context)) {
+			failure = ResolveFailure::NoContext;
 			return { kInvalid, {} };
+		}
 		{
 			DCLF_ZONE("CS.DCLF.Texture.Import");
 			impl->cleanup = context.cleanup;
@@ -858,10 +879,112 @@ namespace DCLF
 				else
 					Impl::Register(*registry, entry);
 			}
-			if (reject != Reject::None)
+			if (reject != Reject::None) {
+				failure = ResolveFailure::Rejected;
 				return { kInvalid, {} };
+			}
 			return { entry->index, entry };
 		}
+	}
+
+	GpuTextures::Binding GpuTextures::NullOf(ViewKind a_kind)
+	{
+		if (a_kind == ViewKind::Buffer)
+			return { .index = NullBufferIndex(false) };
+		// Zero textures of each dimension, made once on the render thread. The null descriptor (NullBinding) is a 2D view.
+		struct NullViews
+		{
+			winrt::com_ptr<ID3D11ShaderResourceView> texture2D, texture2DArray, texture3D, cube;
+		};
+		static const NullViews nulls = [] {
+			NullViews out;
+			auto* device = globals::d3d::device;
+			if (!device)
+				return out;
+			const float zero[4 * 6]{};
+			std::array<D3D11_SUBRESOURCE_DATA, 6> data{};
+			for (auto& slice : data)
+				slice = { .pSysMem = zero, .SysMemPitch = 16, .SysMemSlicePitch = 16 };
+			const auto make2D = [&](std::uint32_t a_slices, std::uint32_t a_misc, const D3D11_SHADER_RESOURCE_VIEW_DESC* a_view, const char* a_name,
+									winrt::com_ptr<ID3D11ShaderResourceView>& a_out) {
+				const D3D11_TEXTURE2D_DESC desc{ .Width = 1,
+					.Height = 1,
+					.MipLevels = 1,
+					.ArraySize = a_slices,
+					.Format = DXGI_FORMAT_R32G32B32A32_FLOAT,
+					.SampleDesc = { .Count = 1 },
+					.Usage = D3D11_USAGE_DEFAULT,
+					.BindFlags = D3D11_BIND_SHADER_RESOURCE,
+					.MiscFlags = a_misc };
+				winrt::com_ptr<ID3D11Texture2D> texture;
+				if (FAILED(device->CreateTexture2D(&desc, data.data(), texture.put())) || FAILED(device->CreateShaderResourceView(texture.get(), a_view, a_out.put())))
+					return;
+				Util::SetResourceName(texture.get(), a_name);
+			};
+			make2D(1, 0, nullptr, "DCLF::GpuTextures::Null2D", out.texture2D);
+			D3D11_SHADER_RESOURCE_VIEW_DESC arrayView{ .Format = DXGI_FORMAT_R32G32B32A32_FLOAT, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY };
+			arrayView.Texture2DArray = { .MostDetailedMip = 0, .MipLevels = 1, .FirstArraySlice = 0, .ArraySize = 1 };
+			make2D(1, 0, &arrayView, "DCLF::GpuTextures::Null2DArray", out.texture2DArray);
+			make2D(6, D3D11_RESOURCE_MISC_TEXTURECUBE, nullptr, "DCLF::GpuTextures::NullCube", out.cube);
+			const D3D11_TEXTURE3D_DESC volume{ .Width = 1,
+				.Height = 1,
+				.Depth = 1,
+				.MipLevels = 1,
+				.Format = DXGI_FORMAT_R32G32B32A32_FLOAT,
+				.Usage = D3D11_USAGE_DEFAULT,
+				.BindFlags = D3D11_BIND_SHADER_RESOURCE };
+			winrt::com_ptr<ID3D11Texture3D> texture3D;
+			if (SUCCEEDED(device->CreateTexture3D(&volume, data.data(), texture3D.put())) &&
+				SUCCEEDED(device->CreateShaderResourceView(texture3D.get(), nullptr, out.texture3D.put())))
+				Util::SetResourceName(texture3D.get(), "DCLF::GpuTextures::Null3D");
+			if (!out.texture2D || !out.texture2DArray || !out.cube || !out.texture3D)
+				logger::error("[DCLF] textures: the null views by kind could not be made; an engine draw with an empty slot stays the engine's");
+			return out;
+		}();
+		ID3D11ShaderResourceView* view = a_kind == ViewKind::Cube           ? nulls.cube.get() :
+		                                 a_kind == ViewKind::Texture3D      ? nulls.texture3D.get() :
+		                                 a_kind == ViewKind::Texture2DArray ? nulls.texture2DArray.get() :
+		                                                                      nulls.texture2D.get();
+		return view ? ResolveBinding(view, Tag(Source::FamilyNull, static_cast<std::uint32_t>(a_kind))) : Binding{};
+	}
+
+	std::string GpuTextures::DescribeFailure(ID3D11ShaderResourceView* a_view, std::uint32_t a_slot, ResolveFailure a_failure)
+	{
+		if (!a_view)
+			return std::format("t{}: no view", a_slot);
+		D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+		a_view->GetDesc(&view);
+		std::uint32_t width = 0, height = 0, depth = 0, mips = 0;
+		winrt::com_ptr<ID3D11Resource> resource;
+		a_view->GetResource(resource.put());
+		if (const auto texture = resource.try_as<ID3D11Texture2D>()) {
+			D3D11_TEXTURE2D_DESC desc{};
+			texture->GetDesc(&desc);
+			width = desc.Width, height = desc.Height, depth = desc.ArraySize, mips = desc.MipLevels;
+		} else if (const auto volume = resource.try_as<ID3D11Texture3D>()) {
+			D3D11_TEXTURE3D_DESC desc{};
+			volume->GetDesc(&desc);
+			width = desc.Width, height = desc.Height, depth = desc.Depth, mips = desc.MipLevels;
+		}
+		const char* why = "no reason recorded";
+		switch (a_failure) {
+		case ResolveFailure::Rejected:
+			why = "GpuTextures rejected it (see its reject counts in the status)";
+			break;
+		case ResolveFailure::Pending:
+			why = "the import thread is importing it (a later batch takes it)";
+			break;
+		case ResolveFailure::StreamedWindow:
+			why = "a streamed texture without its full window yet (asked for; a later batch takes it)";
+			break;
+		case ResolveFailure::NoContext:
+			why = "no import context (outside an epoch's descriptor service)";
+			break;
+		default:
+			break;
+		}
+		return std::format("t{}: format {}, dimension {}, {}x{}x{}, {} mips: {}", a_slot, static_cast<std::uint32_t>(view.Format),
+			static_cast<std::uint32_t>(view.ViewDimension), width, height, depth, mips, why);
 	}
 
 	void GpuTextures::Request(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag, Replies& a_replies, std::uint64_t a_cookie)

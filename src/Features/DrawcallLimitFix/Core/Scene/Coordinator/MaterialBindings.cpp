@@ -10,7 +10,7 @@ namespace DCLF::Scene
 		// A character-light pass's t11 is the frame's (MaterialSources::FrameCharacterLight): its record holds the modes, no view.
 		constexpr std::uint32_t kCharacterLightTexture = 11;
 		// GpuTextures' diagnostic source tags: a material's t0-t15 as themselves, its feature textures from 16.
-		constexpr std::uint32_t kFeatureSourceTag = 16;
+		constexpr std::uint32_t kFeatureSourceTag = GpuTextures::Tag(GpuTextures::Source::Feature);
 		// The lookups' material log's bound (VersionMaterialBindings): a publication's changes fit many times over.
 		constexpr std::size_t kMaterialLogEntries = std::size_t(1) << 15;
 	}
