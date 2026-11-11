@@ -35,6 +35,7 @@
 #include <deque>
 #include <mutex>
 #include <format>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -144,8 +145,14 @@ namespace DCLF
 				std::uint64_t serial = 0;
 				std::shared_ptr<const void> storage;
 				std::chrono::steady_clock::time_point taken;
+				std::uint64_t ticket = 0;  // nextTicket when it was taken: an import with a ticket up to this began before
 			};
 			ankerl::unordered_dense::map<std::uint64_t, std::vector<Unclaimed>> unclaimed;
+			// The imports between their description and their registration, by ticket. An unclaimed move is kept past
+			// kUnclaimedFor while an import that began before it was taken is still in flight: that import may describe the old
+			// storage and claim it at its Register, however long its description took (DXVK's CS thread is slow in a load).
+			std::uint64_t nextTicket = 0;
+			std::set<std::uint64_t> importsInFlight;
 			// The superseded imports' views, oldest first: [logEnd - log.size(), logEnd).
 			std::deque<ID3D11ShaderResourceView*> log;
 			std::uint64_t logEnd = 0;
@@ -362,6 +369,28 @@ namespace DCLF
 			while (a_registry.log.size() > kRelocationLogEntries)
 				a_registry.log.pop_front();
 		}
+
+		/** @brief An import from before its description to after its registration (Registry::importsInFlight). Takes the lock. */
+		struct InFlight
+		{
+			explicit InFlight(std::shared_ptr<Registry> a_registry) :
+				registry(std::move(a_registry))
+			{
+				std::scoped_lock lock(registry->mutex);
+				ticket = ++registry->nextTicket;
+				registry->importsInFlight.insert(ticket);
+			}
+			~InFlight()
+			{
+				std::scoped_lock lock(registry->mutex);
+				registry->importsInFlight.erase(ticket);
+			}
+			InFlight(const InFlight&) = delete;
+			InFlight& operator=(const InFlight&) = delete;
+
+			std::shared_ptr<Registry> registry;
+			std::uint64_t ticket = 0;
+		};
 
 		/**
 		 * @brief A settled import, listed by its resource (the registry's lock held). A relocation taken since it was described (it
@@ -662,6 +691,7 @@ namespace DCLF
 				}
 			}
 			if (entry) {
+				const InFlight inFlight(a_published.registry);
 				Reject reject = Reject::Import;
 				try {
 					reject = Import(*entry, a_published.context, *a_published.counters, a_work.sourceTag);
@@ -779,6 +809,7 @@ namespace DCLF
 			entry->view.copy_from(a_view);
 			entry->registry = registry;
 			entry->key = a_view;
+			const Impl::InFlight inFlight(registry);
 			const auto reject = Impl::Import(*entry, context, *impl->counters, a_sourceTag);
 			Impl::Settle(*entry, reject, *impl->counters);
 			{
@@ -983,19 +1014,24 @@ namespace DCLF
 		if (!registry)
 			return;  // nothing imported: the old storages go with the caller's
 		DCLF_ZONE("CS.DCLF.Texture.NoteRelocations");
-		// Kept this long for an import tracked before its move and registered after it (an import takes milliseconds).
+		// Kept this long for an import tracked before its move and registered after it (an import takes milliseconds), and longer
+		// while such an import is still in flight (Registry::importsInFlight). A move with no import of the old storage registered
+		// or in flight has no reader: every registered import that reads it holds it from Supersede, behind its recordings.
 		constexpr auto kUnclaimedFor = std::chrono::seconds(2);
 		const auto now = std::chrono::steady_clock::now();
 		std::scoped_lock lock(registry->mutex);
 		for (const auto& relocation : a_relocations) {
-			registry->unclaimed[relocation.cookie].push_back({ relocation.serial, relocation.storage, now });
+			registry->unclaimed[relocation.cookie].push_back({ relocation.serial, relocation.storage, now, registry->nextTicket });
 			if (const auto found = registry->byCookie.find(relocation.cookie); found != registry->byCookie.end())
 				for (const auto& weak : found->second)
 					if (const auto entry = weak.lock(); entry && entry->storageSerial < relocation.serial)
 						Impl::Supersede(*registry, *entry, relocation.storage);
 		}
 		std::erase_if(registry->unclaimed, [&](auto& a_unclaimed) {
-			std::erase_if(a_unclaimed.second, [&](const auto& a_relocation) { return now - a_relocation.taken > kUnclaimedFor; });
+			std::erase_if(a_unclaimed.second, [&](const auto& a_relocation) {
+				const bool olderImport = !registry->importsInFlight.empty() && *registry->importsInFlight.begin() <= a_relocation.ticket;
+				return now - a_relocation.taken > kUnclaimedFor && !olderImport;
+			});
 			return a_unclaimed.second.empty();
 		});
 	}
