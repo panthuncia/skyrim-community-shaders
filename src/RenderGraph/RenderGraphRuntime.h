@@ -88,9 +88,11 @@ public:
 		// The frame anchors' epochs (FrameAnchors.h), in FrameAnchors::Anchor's order. Each is an epoch only when a feature
 		// reserved its anchor before Initialize.
 		AnchorReflectionsPrepass,
+		AnchorSkyReflections,
 		AnchorEarlyPrepass,
 		AnchorDepthDone,
 		AnchorPrepass,
+		AnchorSky,
 		AnchorDeferredPasses,
 		AnchorDeferredComposite,
 		AnchorPostComposite,

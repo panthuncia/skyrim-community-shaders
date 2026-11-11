@@ -48,9 +48,11 @@ namespace FrameAnchors
 
 		constexpr std::array<AnchorInfo, kAnchors> kInfo{ {
 			{ "ReflectionsPrepass", { "CS anchor: reflections prepass", "CS anchor: reflections prepass inputs", "FrameAnchors::ReflectionsPrepass / ", "cs.anchor.reflections-prepass" }, false },
+			{ "SkyReflections", { "CS anchor: reflection sky", "CS anchor: reflection sky inputs", "FrameAnchors::SkyReflections / ", "cs.anchor.sky-reflections" }, false },
 			{ "EarlyPrepass", { "CS anchor: early prepass", "CS anchor: early prepass inputs", "FrameAnchors::EarlyPrepass / ", "cs.anchor.early-prepass" }, false },
 			{ "DepthDone", { "CS anchor: depth done", "CS anchor: depth done inputs", "FrameAnchors::DepthDone / ", "cs.anchor.depth-done" }, false },
 			{ "Prepass", { "CS anchor: prepass", "CS anchor: prepass inputs", "FrameAnchors::Prepass / ", "cs.anchor.prepass" }, false },
+			{ "Sky", { "CS anchor: sky", "CS anchor: sky inputs", "FrameAnchors::Sky / ", "cs.anchor.sky" }, false },
 			{ "DeferredPasses", { "CS anchor: deferred passes", "CS anchor: deferred passes inputs", "FrameAnchors::DeferredPasses / ", "cs.anchor.deferred-passes" }, false },
 			{ "DeferredComposite", { "CS anchor: deferred composite", "CS anchor: deferred composite inputs", "FrameAnchors::DeferredComposite / ", "cs.anchor.deferred-composite" }, false },
 			{ "PostComposite", { "CS anchor: post-composite", "CS anchor: post-composite inputs", "FrameAnchors::PostComposite / ", "cs.anchor.post-composite" }, false },
@@ -84,8 +86,10 @@ namespace FrameAnchors
 			Segment::AnchorEngineCubeClear,  // each reflection face's clear, before its draws (nominally here)
 			Segment::Reflection,
 			Segment::AnchorReflectionsPrepass,  // the cubemap render, nominally here (zero or more times a frame)
+			Segment::AnchorSkyReflections,      // its faces' sky, once per face drawn
 			Segment::LightCulling,              // Light Limit Fix's Prepass
 			Segment::AnchorPrepass,             // after every feature's Prepass
+			Segment::AnchorSky,                 // the main pass's sky batch, before Drawcall Limit Fix's colour epoch
 			Segment::MainOpaque,
 			Segment::AnchorDeferredPasses,     // EndDeferred, after the blended decals
 			Segment::AnchorDeferredComposite,  // DeferredPasses, after the D3D11 SSGI and SSS

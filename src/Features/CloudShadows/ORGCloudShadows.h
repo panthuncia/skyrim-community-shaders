@@ -67,6 +67,13 @@ public:
 	/** @brief The occlusion cubemap's exported view (t25, t26); null when inactive. */
 	ID3D11ShaderResourceView* OcclusionSRV() const;
 
+	/**
+	 * @brief The copy's source: a published graph texture of the layers' shape as a 6-slice array (Drawcall Limit Fix's sky family
+	 * writes its faces' cloud occlusion there, kCloudFacesId), or empty for the last D3D11 layer. Render thread; the client's graph is
+	 * built again at its next run. Nothing when inactive.
+	 */
+	void UseGraphSource(std::string_view a_publishedId);
+
 	~ORGCloudShadows();
 
 	/** @brief The resources and per-frame state the pass and the client share (ORGCloudShadows.cpp). */

@@ -51,9 +51,11 @@ namespace FrameAnchors
 	enum class Anchor : std::uint32_t
 	{
 		ReflectionsPrepass,  // BSCubeMapCamera::RenderCubemap, after the features' ReflectionsPrepass (Deferred::ReflectionsPrepasses)
+		SkyReflections,      // a reflection face's sky batch (Drawcall Limit Fix's sky family), once per face drawn
 		EarlyPrepass,        // Main::RenderShadowMaps returned, after the features' EarlyPrepass (Deferred::EarlyPrepasses)
 		DepthDone,           // Main::RenderDepth returned (Terrain Blending's depth hook), before the features' Prepass
 		Prepass,             // the main pass's first opaque batch, after the features' Prepass (Deferred::PrepassPasses)
+		Sky,                 // the main pass's sky batch (Drawcall Limit Fix's sky family), after the opaque groups, before the decals
 		DeferredPasses,      // the opaque pass done, after the final depth copy, before the D3D11 SSGI, SSS and composite
 		DeferredComposite,   // after the D3D11 SSGI, SSS and cubemap update, where the deferred composite runs
 		PostComposite,       // the end of the deferred passes, after the composite (D3D11 or ORG), where Effects11's rays run
