@@ -32,7 +32,12 @@ views still drawn by the engine, then tooling. Outside DCLF comes last.
 ## 1. Engine work left on the render thread
 
 The census after the last round: about 110 engine-kept passes a frame, none a DCLF member's. Main about 75 (water, sky,
-grass, about 3 particle effects), reflection faces only the sky (about 21), sun cascades about 5.
+grass, about 3 particle effects), reflection faces only the sky (about 21), sun cascades about 5. Whiterun's census of
+2026-11-11 (`menus-org1.env`, before the menus open: about 69 a frame) had no shadow view's pass at all: main (water, sky,
+master particles, Lighting under billboards, one skinned effect variant), the reflection faces' sky, and four hidden
+first-person parts in main depth. The race menu adds the player's face shapes (`lighting: eligible, no record`, BSDynamicTriShape
+under `BSFaceGenNiNodeSkinned`) in main, main depth and focus shadows, about 20 passes a frame. Not yet read why; the likely cause
+is that the menu's edits reach the shapes by another writer than the head's morph job, so Features/Faces has no snapshot.
 
 ### 1.1 The residue without traversal: stop queuing the list jobs
 
@@ -51,19 +56,25 @@ grass, about 3 particle effects), reflection faces only the sky (about 21), sun 
     class DCLF takes over (sections 1.4, 1.5, 4) shrinks the flat pass's input.
 -   **Needs.** Nothing for the flat pass; it gets cheaper with every class ported.
 
-### 1.2 The water reflection: filter the engine's reflection-camera cull
+### 1.2 The water reflection: what the engine still culls in the cube faces
 
--   **Goal.** The engine's cull for the water reflection's two cube faces skips what DCLF draws, as the main camera's lists
-    already do.
--   **Why.** `TESWaterReflections::Update` costs 1.66 ms median, 5.3 ms worst (two `BSCubeMapCamera::RenderFace` a frame).
-    DCLF draws the faces' content, but the engine still culls the scene for both faces (0.75/4.1 ms, mostly
-    `BSFaceGenNiNode::OnVisible` re-culling heads, about 1,100 `ProcessObject` a frame), then builds and draws its batches
-    (only the sky is left in them).
--   **State.** Partly built. `Features/Reflection/ReflectionFaces.cpp` skips the LOD add-roots DCLF draws (`skipRoots`) and
-    withholds the faces' passes; the cell roots are still culled by the engine.
--   **Design.** Keep the cube camera's roots, but filter the cull below them for DCLF's owned roots, the way `PrimaryCull`
-    excludes entries from the main camera's cull. Only the sky (and any unported residue) is left to cull.
--   **Needs.** Nothing.
+-   **Goal.** The engine's cull for the water reflection's two cube faces reaches nothing DCLF draws.
+-   **Why.** `TESWaterReflections::Update` once cost 1.66 ms median, 5.3 ms worst (two `BSCubeMapCamera::RenderFace` a frame), with
+    0.75/4.1 ms of face cull (about 1,100 `ProcessObject` a frame). That was measured before the LOD add-roots were skipped.
+-   **State.** Built for every root DCLF draws. The cube camera has no cell roots: its roots array (`+0x188`) is filled only by
+    `FUN_1405275e0`, called four times, all in the update (AE `0x14052080d` LOD land `0x14315b898`, `0x140520826` LOD objects
+    `0x14315b8a0`, `0x14052083f` LOD trees `0x14315b880`, `0x140520854` the sky root `*(TES+0x100)+8`; checked in Ghidra
+    2026-11-11: the three globals are written by the terrain manager and read by `BGSTerrainChunk`, `BGSDistantObjectBlock` and
+    `BGSDistantTreeBlock`). `BSCubeMapCamera::RenderFaces` (`0x1414ed920`) culls only those roots into its accumulator. DCLF
+    skips the three LOD add-roots while it draws them (`ReflectionFaces::AddLodRoot`), adding back only the engine-only subset's
+    colour roots under them, so the faces' engine cull is the sky root alone, and the sky's draws are Features/Sky's on the ORG
+    path (`CS_ORG_SKY`, the `SkyReflections` anchor).
+-   **Measure.** One run with `CS_DCLF_CENSUS=1`: `[DCLF] census view reflection faces:` names only `Sky: BSTriShape`
+    (about 19 passes a frame in Whiterun), and `[DCLF] reflection faces (T4 ...): N updates, N without the tree root, N without
+    the LOD roots (0 engine-only roots added under them)`. Anything else in the census view is residue. A Tracy capture of
+    `TESWaterReflections::Update` would say what the sky root's cull still costs.
+-   **Left.** The sky root's cull. Removing it needs the sky's CPU work (its geometry updates and registration) off the engine,
+    which Features/Sky keeps by design.
 
 ### 1.3 The LOD roots out of the main camera's cull
 
@@ -357,8 +368,10 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
 ### 3.5 Shadow raster state per draw
 
 -   **Goal.** A shadow view's raster state is a value per draw, chosen with an indirect execution set.
--   **Why.** Views take one state from the table entry (`Core/Render/Shadow/ShadowBuild.cpp`, `modeRasterStates`), so a view
-    whose rasterizer state no pipeline expresses stays native.
+-   **Why.** Views take one state from the table entry (`Core/Render/Shadow/ShadowBuild.cpp`, `modeRasterStates`). A view whose
+    entry turns depth clipping off draws with depth clamped (`ShadowRasterState::depthClip`, BasicRHI's
+    `RasterState::depthClip`, `CS_DCLF_SHADOW_DEPTH_CLAMP`); only a wireframe entry, or depth clip off on a device without
+    `depthClamp`, stays native (`not ready (raster-state=N)` in the `[DCLF] shadow views:` line).
 -   **State.** Not started.
 -   **Needs.** The indirect execution sets' validation errors closed first (dclf-open-defects.md).
 
@@ -449,6 +462,29 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
 -   **State.** Not started. The mask is DCLF's only through Skylighting's occlusion hooks (`RenderOcclusionAtShadowMaps`, `RenderOcclusion`)
     (`Features/OcclusionMaps/OcclusionMapsFeature.cpp`, `CS_DCLF_PRECIPITATION`); without Skylighting the engine draws it.
 -   **Design.** DCLF hooks the engine's precipitation mask itself when Skylighting is absent.
+
+### 4.7 Geometry the game can map (`UnstableBuffer`)
+
+-   **Goal.** A shape whose vertex or index buffer the game can map (D3D11 `USAGE_DYNAMIC` or CPU access) is DCLF's.
+-   **Why.** DXVK renames such a buffer on every discard map, so neither `dxvkGetInteropResourceInfo` nor
+    `dxvkTrackInteropResources` imports it, and the object stays the engine's in every view (`Ineligible::UnstableBuffer`). The
+    engine's own geometry creators make `DEFAULT` buffers (p4/p4.5-buffers.md), so these come from plugins: a RaceMenu body morph
+    on test2. None appeared in the Whiterun census of this load order (2026-11-11, `menus-org1.env`: no
+    `lighting: unstable-buffer` class).
+-   **State.** Measured, not claimed. `Coordinator::NoteUnstable` counts each such object by cause (`Stats::unstableCauses`: a
+    buffer the game can map, one DXVK refused otherwise, no buffers to resolve) and logs the first 16 with their buffers' usage
+    (`[DCLF] unstable buffer: '<name>' stays the engine's: <cause> (<bytes> B usage <u> CPU access <flags>, ...)`). With
+    `CS_DCLF_STATS=1` the coordinator's line ends `(unstable: M mappable, R refused, S no source)`; the census names their passes
+    `lighting: unstable-buffer`.
+-   **Design.** Re-import through the path pinless imports already use, with no graph rebuild (geometry is drawn by device
+    address, not as a graph resource). DXVK: a tracked import of a mappable buffer (a new `DxvkOrgInteropTrackedFlagBits` bit)
+    keeps its discard renames and reports each as a relocation holding the old slice, alive until released. DCLF: the
+    relocation reaches `GpuResources`' `ImportRelocations` at the next `BeginFrame`, its geometry slots are marked
+    (`relocatedGeometrySlots`), and `ResolveGeometrySource` acquires the new slice into the same slot (`staleGeometry`), as a
+    defragmentation move does. The draws read the slice of the publication's frame, so an edit shows a frame or more late; a
+    buffer discarded every frame refreshes its slot every frame. Gate it on the measured count: worth it only where the census
+    finds such shapes.
+-   **Needs.** The DXVK interop change and a load order that makes such buffers (RaceMenu body morphs) to test it.
 
 ---
 

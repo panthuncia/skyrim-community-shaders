@@ -1403,3 +1403,20 @@ From P5.8/P5.9 (`docs/development/p5/menus.md`). Two needs a menu scene's view b
   constant row (PS b13 c20; Core's feature rows now end at c21). A spare per-object word in the record that a family or feature can
   claim through the install (as `Api::LightingObjectFlag` claims a bit) would keep such choices out of the shading row.
 - **Found by:** P5.2 effects (2026-11-11).
+### Fixed-function caps and mappable geometry buffers (DCLF coverage, P5.2)
+
+- **Need:** draw an engine view whose D3D11 rasterizer state turns depth clipping off, and draw geometry whose buffers the game can
+  map.
+- **Who:** DCLF's shadow views (`ShadowRasterStateId`); any plugin pass that replays engine state; DCLF's geometry slots for
+  plugin-made buffers (a RaceMenu body morph).
+- **Where it fits:**
+  - **Depth clip is a pipeline value.** BasicRHI's `RasterState::depthClip` (P0.3) clamps depth to the viewport's range as DXVK
+    does for `DepthClipEnable = FALSE`; it needs `FixedFunctionFeatureInfo::depthClipDisable`, so query it once with the device
+    (`DrawPipelines::Impl::Initialize`) and keep the engine's draw where it is false. A plugin API that turns an engine
+    `D3D11_RASTERIZER_DESC` into ORG raster state should answer "not expressible" for wireframe and for no depth clip without the
+    cap, rather than fail the pipeline build.
+  - **A mappable buffer cannot be imported.** `dxvkTrackInteropResources` and `dxvkGetInteropResourceInfo(s)` reject `USAGE_DYNAMIC`
+    and CPU-access buffers, because a discard map renames them. A tracked-import flag that keeps the renames and reports each as a
+    relocation holding the old slice would let a client re-import through its relocation path (DCLF's `ImportRelocations` and
+    geometry-slot refresh), with no graph change. Design in dclf-roadmap.md 4.7.
+- **Found by:** P5.2 residue (2026-11-11).

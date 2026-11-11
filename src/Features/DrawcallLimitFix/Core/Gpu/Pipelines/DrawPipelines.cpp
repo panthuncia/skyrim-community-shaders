@@ -145,6 +145,9 @@ namespace DCLF
 		}
 		deviceGenerated = indirect.pipelineSets && indirect.indexBufferArguments && indirect.maxPipelineSetCount >= kMaxPipelines;
 		gpuDriven = indirect.countedDraws;
+		// A shadow view whose rasterizer state turns depth clipping off draws with depth clamped (ShadowRasterStateId).
+		::FixedFunctionFeatureInfo fixedFunction{};
+		depthClipDisable = device.QueryFeatureInfo(&fixedFunction.header) == rhi::Result::Ok && fixedFunction.depthClipDisable;
 		if (!gpuDriven)
 			logger::warn("[DCLF] Counted indirect draws unavailable (drawIndirectCount): every cell draws CPU-driven");
 		else if (!deviceGenerated)

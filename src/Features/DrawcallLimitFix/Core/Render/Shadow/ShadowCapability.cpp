@@ -13,14 +13,14 @@ namespace DCLF
 		auto& table = EngineRasterStates();
 		std::vector<D3D11_RASTERIZER_DESC> engine, cascades;
 		for (std::uint32_t bias = 0; bias < 12; ++bias) {
-			// The entry at cull mode 1, else 0 (as CaptureShadowView). Fill and depth clip DCLF cannot express are skipped: such a
-			// view stays the engine's.
+			// The entry at cull mode 1, else 0 (as CaptureShadowView). A wireframe entry is skipped, and ShadowRasterStateId refuses a
+			// depth clip it cannot express: such a view stays the engine's.
 			auto* entry = table[0][1][bias][0] ? table[0][1][bias][0] : table[0][0][bias][0];
 			if (!entry)
 				continue;
 			D3D11_RASTERIZER_DESC desc{};
 			entry->GetDesc(&desc);
-			if (desc.FillMode != D3D11_FILL_SOLID || !desc.DepthClipEnable)
+			if (desc.FillMode != D3D11_FILL_SOLID)
 				continue;
 			engine.push_back(desc);
 			// The cascades draw with ShadowmapCascadeRasterizerFix's clones, each with the cascade's bias.

@@ -26,6 +26,7 @@ namespace DCLF
 		TerrainPlain,
 		DecalPlain,
 		ShadowMerge,
+		ShadowDepthClamp,
 		LazyRows,
 		Workers,
 		FrameWorkers,
@@ -92,6 +93,7 @@ namespace DCLF
 		TestToggle,
 		TestExit,
 		TestRefuse,
+		TestShadowClamp,
 
 		// Other features' switches, read through the same file.
 		UpscaleSubmit,

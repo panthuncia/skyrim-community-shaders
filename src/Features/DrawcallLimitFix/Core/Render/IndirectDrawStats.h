@@ -127,6 +127,7 @@ namespace DCLF
 		Depth,      // the engine's shadow map could not be imported, or the view draws into an unknown target
 		Epoch,      // the epoch itself failed
 		Placement,  // the view drew where no placement is (target, slice, viewport), under another state, or twice: a defect
+		RasterState,  // the view's rasterizer state is one no pipeline expresses (wireframe, or no depth clip without depth clamp)
 		Count
 	};
 
@@ -185,7 +186,7 @@ namespace DCLF
 	};
 
 	inline constexpr std::array<const char*, static_cast<std::size_t>(ShadowViewNotReady::Count)> kShadowNotReadyNames{
-		"setup", "pipelines", "tables", "depth", "epoch", "placement"
+		"setup", "pipelines", "tables", "depth", "epoch", "placement", "raster-state"
 	};
 
 	inline constexpr std::array<const char*, static_cast<std::size_t>(DrawSkip::Count)> kSkipNames{ "pipeline", "geometry", "texture", "sampler",

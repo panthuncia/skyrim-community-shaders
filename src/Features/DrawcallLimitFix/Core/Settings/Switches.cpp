@@ -68,6 +68,8 @@ namespace DCLF
 				"0: the decal groups draw device-generated, a call per state class (the engine's order within a class), instead of a plain draw per pipeline (the engine's order within a pipeline)" },
 			{ ShadowMerge, "CS_DCLF_SHADOW_MERGE", F, Reduced::Zero, false,
 				"0: a shadow view's pipelines keep every technique bit and vertex layout of its casters' keys, instead of one pipeline per canonical depth-only technique (CanonicalShadowTechnique; the layout read per draw)" },
+			{ ShadowDepthClamp, "CS_DCLF_SHADOW_DEPTH_CLAMP", F, Reduced::Zero, false,
+				"0: a shadow view whose rasterizer state turns depth clipping off stays the engine's, instead of drawing with depth clamped to the viewport's range (RasterState::depthClip, where the device has depthClamp)" },
 			{ LazyRows, "CS_DCLF_LAZY_ROWS", F, Reduced::Zero, false,
 				"0: a pulled build reads every row block member into a static at entry (live through the shader) instead of loading each where it is used" },
 			{ Workers, "CS_DCLF_WORKERS", F, N, false, "the preparation pool's threads (default hardware threads - 2, at least 1)" },
@@ -164,6 +166,8 @@ namespace DCLF
 			{ TestExit, "CS_DCLF_TEST_EXIT", T, N, false, "<frame>: the game exits at once after that many frames (startup loops)" },
 			{ TestRefuse, "CS_DCLF_TEST_REFUSE", T, N, false,
 				"<name>,...: geometry whose node name contains one is refused as an unstable buffer (a RaceMenu morph on test2): the engine-only subset's paths" },
+			{ TestShadowClamp, "CS_DCLF_TEST_SHADOW_CLAMP", T, N, false,
+				"1: every shadow view draws with depth clamped instead of clipped, as a view whose rasterizer state turns depth clipping off would (CS_DCLF_SHADOW_DEPTH_CLAMP's path; shadows differ only where casters cross a view's near or far plane)" },
 
 			{ UpscaleSubmit, "CS_UPSCALE_SUBMIT", O, N, false, "direct: upscaling's ring submissions wait for DXVK's command stream" },
 			{ StreamlineReflex, "CS_STREAMLINE_REFLEX", O, N, false, "0: Streamline does not load Reflex, PCL or DLSS-G (for Nsight captures)" },

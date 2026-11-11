@@ -282,6 +282,7 @@ namespace DCLF
 		desc.raster.rs.depthBias = a_state.depthBias;
 		desc.raster.rs.depthBiasClamp = a_state.depthBiasClamp;
 		desc.raster.rs.slopeScaledDepthBias = a_state.slopeScaledDepthBias;
+		desc.raster.rs.depthClip = a_state.depthClip;
 		desc.depth.ds.depthEnable = true;
 		desc.depth.ds.depthWrite = true;
 		desc.depth.ds.depthFunc = rhi::CompareOp::Less;
@@ -292,14 +293,26 @@ namespace DCLF
 
 	std::uint32_t DrawPipelines::ShadowRasterStateId(const D3D11_RASTERIZER_DESC& a_desc, std::uint32_t a_renderMode)
 	{
-		// The scissor is not part of it: the epoch's pass is bounded by the view's viewport.
-		if (a_desc.FillMode != D3D11_FILL_SOLID || !a_desc.DepthClipEnable) {
-			if (impl->loggedShadowRasterFailures++ < kMaxLoggedFailures)
-				logger::warn("[DCLF] shadow view rasterizer state not expressible (fill {}, depth clip {}); the view stays native",
-					static_cast<int>(a_desc.FillMode), a_desc.DepthClipEnable);
+		// The scissor is not part of it: the epoch's pass is bounded by the view's viewport. Depth clipping off is depth clamped to the
+		// viewport's range, as DXVK draws it (Vulkan depthClamp), where the device has it and CS_DCLF_SHADOW_DEPTH_CLAMP is not 0.
+		static const bool depthClamp = SwitchOnUnlessZero(Switch::ShadowDepthClamp);
+		const bool clampable = depthClamp && Enabled() && impl->depthClipDisable;
+		if (a_desc.FillMode != D3D11_FILL_SOLID || (!a_desc.DepthClipEnable && !clampable)) {
+			if (impl->loggedShadowRasterFailures++ < kMaxLoggedFailures) {
+				const char* clampText = "available";
+				if (!depthClamp)
+					clampText = "off (CS_DCLF_SHADOW_DEPTH_CLAMP=0)";
+				else if (!impl->depthClipDisable)
+					clampText = "not supported by the device";
+				logger::warn("[DCLF] shadow view rasterizer state not expressible (fill {}, depth clip {}; depth clamp {}); the view stays native",
+					static_cast<int>(a_desc.FillMode), a_desc.DepthClipEnable, clampText);
+			}
 			return 0;
 		}
+		// CS_DCLF_TEST_SHADOW_CLAMP: every state clamped, so a run exercises that path with the engine's states.
+		static const bool testClamp = SwitchEnabled(Switch::TestShadowClamp);
 		Impl::ShadowRasterState state;
+		state.depthClip = a_desc.DepthClipEnable != FALSE && !(testClamp && clampable);
 		state.depthBias = static_cast<float>(a_desc.DepthBias);
 		state.depthBiasClamp = a_desc.DepthBiasClamp;
 		state.slopeScaledDepthBias = a_desc.SlopeScaledDepthBias;
@@ -310,8 +323,9 @@ namespace DCLF
 			if (states[i] == state)
 				return static_cast<std::uint32_t>(i + 1);
 		states.push_back(state);
-		logger::info("[DCLF] shadow view rasterizer state {} (mode {:#x}): depth bias {} (clamp {}, slope {}), cull {}, front {}", states.size(), a_renderMode,
-			state.depthBias, state.depthBiasClamp, state.slopeScaledDepthBias, static_cast<int>(a_desc.CullMode), a_desc.FrontCounterClockwise ? "CCW" : "CW");
+		logger::info("[DCLF] shadow view rasterizer state {} (mode {:#x}): depth bias {} (clamp {}, slope {}), cull {}, front {}, depth {}", states.size(), a_renderMode,
+			state.depthBias, state.depthBiasClamp, state.slopeScaledDepthBias, static_cast<int>(a_desc.CullMode), a_desc.FrontCounterClockwise ? "CCW" : "CW",
+			state.depthClip ? "clipped" : "clamped");
 		// Keys of this id wait in the lane until it arrives with the frame's inputs.
 		impl->renderInput.shadowStates = std::make_shared<const std::vector<Impl::ShadowRasterState>>(states);
 		if (Enabled())
