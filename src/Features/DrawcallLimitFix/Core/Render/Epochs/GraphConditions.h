@@ -38,6 +38,10 @@ namespace DCLF::Draws
 		bool forwardDirect = false;
 		// With it, first person's forward part too, while its colour epoch is in DXVK's stream.
 		bool firstPersonForwardDirect = false;
+		// DCLF can draw the first-person view whole: the CPU pipeline, device-generated commands, or firstPersonForwardDirect for its
+		// forward part (which has no plain buckets). Without it the view is the engine's: its epochs have no passes and its slots are
+		// not asked for (Features/FirstPerson).
+		bool firstPerson = true;
 		std::string cuts;              // diagnostics (dclf:cut=): comma-separated pass key prefixes left out ("*": every pass)
 
 		bool operator==(const GraphConditions&) const = default;

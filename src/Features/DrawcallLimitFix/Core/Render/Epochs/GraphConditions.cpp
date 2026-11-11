@@ -77,13 +77,15 @@ namespace DCLF::Draws
 		                     std::ranges::contains(RenderGraphRuntime::Get().InStreamEpochs(), RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::Forward));
 		next.firstPersonForwardDirect = next.forwardDirect &&
 		                                std::ranges::contains(RenderGraphRuntime::Get().InStreamEpochs(), RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::FirstPerson));
-		// The first-person forward part has no plain buckets: without device-generated commands only the CPU pipeline draws it.
-		if (!next.cpuPipeline && !next.firstPersonForwardDirect && !DrawPipelines::Get().DeviceGenerated()) {
+		// The first-person forward part has no plain buckets: without device-generated commands only the CPU pipeline or the direct
+		// forward family draws it, and without either the view is the engine's (no epochs, no slots).
+		next.firstPerson = next.cpuPipeline || next.firstPersonForwardDirect || DrawPipelines::Get().DeviceGenerated();
+		if (!next.firstPerson) {
 			static std::atomic<bool> logged{ false };
 			if (!logged.exchange(true))
 				logger::warn(
 					"[DCLF] GPU-driven without device-generated commands and without the direct forward family (CS_DCLF_FORWARD_DIRECT): "
-					"first person stays the engine's");
+					"first person stays the engine's (its epochs and pipeline slots are left out)");
 		}
 		{
 			std::lock_guard lock(cutsMutex);
@@ -91,9 +93,9 @@ namespace DCLF::Draws
 		}
 		if (next == current)
 			return;
-		logger::info("[DCLF] graph conditions: {} cell, {}, {} pipeline{}{}{}; the graph is rebuilt", next.interior ? "interior" : "exterior",
+		logger::info("[DCLF] graph conditions: {} cell, {}, {} pipeline{}{}{}{}; the graph is rebuilt", next.interior ? "interior" : "exterior",
 				next.twoPassOcclusion ? "two-pass occlusion" : "no occlusion pass (portal and frustum culling)", next.cpuPipeline ? "CPU" : "GPU",
-				next.forwardDirect ? ", forward draws on the CPU" : "",
+				next.forwardDirect ? ", forward draws on the CPU" : "", next.firstPerson ? "" : ", first person the engine's",
 				next.cuts.empty() ? "" : ", passes cut: ", next.cuts);
 		// The epochs the CPU pipeline's sites execute themselves (their passes before the draws), before the build the change requests,
 		// with the ones executed in DXVK's stream (RenderGraphRuntime::InStreamEpochs).

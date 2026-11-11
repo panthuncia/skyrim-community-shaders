@@ -3,6 +3,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/PulledSource.h"
+#include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
 
 #include <algorithm>
 #include <array>
@@ -524,6 +525,8 @@ namespace DCLF
 			// reference, the emissive multiplier, and Light Limit Fix's room index and shadow bit mask.
 			request.defines.push_back({ L"DCLF_BINDLESS", L"1" });
 			request.defines.push_back({ L"DCLF_BINDLESS_DRAW", L"1" });
+			// The point light table's size without Light Limit Fix (Common/DCLFPointLights.hlsli): the CPU's, which latches it.
+			request.defines.push_back({ L"DCLF_POINT_LIGHT_TABLE_LIGHTS", std::to_wstring(Draws::kPointLightTableLights) });
 			// The shadow views' Utility stages and the Z-prepass's Lighting ones draw with plain indirect draws (ShadowViewPass,
 			// MainOpaquePass) and fetch their own indices, vertices and per-draw words (Utility.hlsl, Lighting.hlsl).
 			if (a_pulled)

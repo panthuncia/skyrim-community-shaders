@@ -58,6 +58,9 @@ namespace DCLF
 			// the mirror holds is the events' to keep: the frame's start can catch an ancestor in a state the engine sets and undoes within
 			// the frame, with no event).
 			bool mirrorFill = false;
+			// A Detached event of an unheld root leaving its owner's array (WatchUnheldOwner): the category capture's unheld roots diff
+			// follows it, so it forces no full capture (Channels::categoryDetachSeen).
+			bool unheldExit = false;
 			// When an event that wakes the scene pass was pushed (steady clock, ns) and the render thread's frame then
 			// (SceneCapture::Frame): the event-to-publication and event-to-adoption latencies.
 			std::uint64_t stampNs = 0;
@@ -144,7 +147,7 @@ namespace DCLF
 		static EventQueue<SubtreeEvent>& SubtreeEvents();
 
 		/**
-		 * @brief Render thread: the nodes the category capture finds its category nodes through (FrameView::CategorySignature: TES's object
+		 * @brief Render thread: the nodes the category capture finds its category nodes through (FrameView's category signature: TES's object
 		 * root, the cells' 3D and their parents, the portal graphs' shared nodes and parentless roots). An attach or detach of one of them,
 		 * or of a child of one, counts an edit (CategoryEdits), so the frame's start re-reads the signature only after one.
 		 */
@@ -153,6 +156,31 @@ namespace DCLF
 		static std::uint64_t CategoryEdits();
 		/** @brief Render thread, once at the frame's start (before any read of the watched set it replaces is retired): frees replaced sets no reader holds. */
 		static void RetireCategoryNodes();
+
+		/**
+		 * @brief Any thread: a read of a set published lock-free (the watched category nodes, the subtree's members, SceneCapture's drawn
+		 * roots). Counted in from before its load to after its last use, so a replaced set handed to RetireSet is freed only once no read
+		 * that could have loaded it is in.
+		 */
+		class SetRead
+		{
+		public:
+			SetRead();
+			~SetRead();
+			SetRead(const SetRead&) = delete;
+			SetRead& operator=(const SetRead&) = delete;
+		};
+		/** @brief Render thread, after the set's replacement was stored: a replaced set, freed by RetireCategoryNodes once no SetRead is in. */
+		static void RetireSet(std::unique_ptr<const std::vector<const void*>> a_set);
+
+		/**
+		 * @brief Render thread: the unheld roots' owner (Api::UnheldRootsContribution::owner: the particle manager; null: none). Its child
+		 * edits (a root added to or removed from its array) count UnheldEdits instead of CategoryEdits: the category capture follows them
+		 * with an unheld roots diff, not a full capture.
+		 */
+		static void WatchUnheldOwner(const RE::NiAVObject* a_owner);
+		/** @brief Any thread: the unheld roots owner's child edits since the start. */
+		static std::uint64_t UnheldEdits();
 
 		/**
 		 * @brief The ordering premise of the frame start's leased captures (FrameView::ServeFrameRequests): no attach or detach in the world
@@ -168,7 +196,8 @@ namespace DCLF
 
 	private:
 		void Push(Event* a_event);
-		static void NoteEdit(const RE::NiAVObject* a_child, const RE::NiAVObject* a_parent, bool a_inWorld);
+		/** @brief Counts a_child's edit under a_parent; returns whether a_parent is the unheld roots' owner (WatchUnheldOwner). */
+		static bool NoteEdit(const RE::NiAVObject* a_child, const RE::NiAVObject* a_parent, bool a_inWorld);
 
 		std::atomic<Event*> head{ nullptr };
 		std::atomic<bool> stopped{ false };

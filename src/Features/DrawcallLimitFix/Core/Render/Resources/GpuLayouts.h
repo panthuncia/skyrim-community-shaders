@@ -17,6 +17,9 @@ namespace DCLF::Draws
 	constexpr const char* kShadowExtensionId = "cs.dclf.shadow";
 	constexpr const char* kReflectionExtensionId = "cs.dclf.reflection";
 	constexpr const char* kFirstPersonExtensionId = "cs.dclf.first-person";
+	// The point light table's lights (PS b3 without Light Limit Fix): the one source of its size. The Lighting programs get it as
+	// DCLF_POINT_LIGHT_TABLE_LIGHTS (ShaderPrograms.cpp), which Common/DCLFPointLights.hlsli sizes the table by.
+	constexpr std::uint32_t kPointLightTableLights = 128;
 	// Render modes 0xD plain, 0xE clamped, 0xF paraboloid, then one per occlusion view (kOcclusionViews; render mode 0x1C both).
 	constexpr std::uint32_t kFirstOcclusionMode = 3;
 	constexpr std::uint32_t kShadowModeCount = kFirstOcclusionMode + kOcclusionViews;

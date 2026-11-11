@@ -66,7 +66,8 @@ namespace
 {
 	/**
 	 * @brief Whether CS_DISABLE_FEATURES (a comma-separated list of short names, for test runs) names a_featureName. Such a feature is
-	 * disabled at boot for this run only: the saved "Disable at Boot" settings are not changed.
+	 * disabled at boot for this run only: the saved "Disable at Boot" settings are not changed. Read from the environment alone (a
+	 * run's own setting: the switches file outlives the run).
 	 */
 	bool DisabledByEnvironment(const std::string& a_featureName)
 	{

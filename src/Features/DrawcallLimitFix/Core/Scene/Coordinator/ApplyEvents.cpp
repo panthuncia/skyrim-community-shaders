@@ -97,7 +97,8 @@ namespace DCLF::Scene
 			}
 			if (event->mirrorOnly)
 				continue;
-			if (event->type == SceneTracker::EventType::Detached)
+			// An unheld root's exit is followed by the category capture's unheld roots diff (SceneTracker::UnheldEdits), not a full capture.
+			if (event->type == SceneTracker::EventType::Detached && !event->unheldExit)
 				channels.categoryDetachSeen.store(true, std::memory_order_relaxed);
 			else if (event->type == SceneTracker::EventType::Attached && event->node) {
 				if (!catchUp)

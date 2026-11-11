@@ -1264,6 +1264,8 @@ namespace DCLF
 		 */
 		void NoteUnstable(RE::BSGeometry* a_geometry, const SceneCapture::GeometryRecord& a_record);
 		std::uint32_t unstableLogged = 0;  // NoteUnstable's lines, this session
+		// NoteUnstable's causes by the geometry's first buffer (its geometry slot's key): its buffers' descriptions read once, not every walk.
+		ankerl::unordered_dense::map<const void*, std::uint8_t> unstableCauseOf;
 		/** @brief MergeWrite's geometry slots (a skin's partitions linked, or a LOD chain's ranges); Tables::kSlotFree: unstable, rebucketed. */
 		std::uint32_t ResolveWriteGeometry(RE::BSGeometry* a_geometry, const SceneCapture::GeometryRecord& a_record, const EvalResult& a_result, PartTimer& a_timer,
 			Ineligible& a_bucket);

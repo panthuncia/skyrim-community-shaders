@@ -33,6 +33,9 @@ namespace DCLF
 		// The passes this frame needs (an interior's, the cull mode's): a change rebuilds the graph here, before anything records on it.
 		Draws::RefreshGraphConditions(*host);
 		impl->BuildIfAsked();
+		// A build that failed stops the graph (RenderGraphRuntime::BuildIfRequested on a host failure): nothing after it may run on it.
+		if (!RenderGraphRuntime::Get().IsActive())
+			return;
 		// The epochs the last frame did not submit (no water in view) give their tickets back while a revision waits for recordings.
 		impl->ReleaseTicketsForRecordings(*host, RenderGraphRuntime::Get().TakeSubmittedSegments());
 	}

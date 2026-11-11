@@ -275,7 +275,6 @@ namespace DCLF::Draws
 			// The frame registers' blocks (FrameRegisters), per segment.
 			std::array<std::array<std::uint64_t, kConstantBufferRegisters>, 2> frameVS{}, framePS{};
 			std::array<std::uint32_t, 2> frameVSBits{}, framePSBits{};  // the registers above that are bound (bit per register)
-			std::uint64_t sharedLightBlock = 0, frameLightingBlock = 0;
 			std::vector<PipelineBlocks> pipelineBlocks;
 			// Per (material, pipeline) pair: its verdict this build.
 			ankerl::unordered_dense::map<std::uint64_t, ResolvedBindings> resolvedBindings;
@@ -484,8 +483,6 @@ namespace DCLF::Draws
 				framePSBits[j] |= framePS[j][slot] ? 1u << slot : 0u;
 			}
 		}
-		sharedLightBlock = in.addresses.frameConstants + kSharedLightBlockOffset;
-		frameLightingBlock = in.addresses.frameConstants + std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes;
 	}
 
 	void MainBuild::PackPipelines()

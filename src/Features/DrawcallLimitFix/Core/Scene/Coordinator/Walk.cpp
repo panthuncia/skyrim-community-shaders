@@ -584,36 +584,51 @@ namespace DCLF::Scene
 	void Coordinator::NoteUnstable(RE::BSGeometry* a_geometry, const SceneCapture::GeometryRecord& a_record)
 	{
 		// Every buffer the object draws: a skin's partitions', else its own.
-		std::vector<ID3D11Buffer*> buffers;
-		if (a_record.skin && a_record.skinPartition && !a_record.partitions.empty()) {
-			for (const auto& p : a_record.partitions)
-				buffers.insert(buffers.end(), { p.vertexBuffer, p.indexBuffer });
-		} else {
-			buffers.insert(buffers.end(), { a_record.vertexBuffer, a_record.indexBuffer });
-		}
-		// The game can map a DYNAMIC buffer or one with CPU access: DXVK renames it on every discard map, so it cannot be imported.
-		std::string described;
-		bool mappable = false, any = false;
-		for (auto* buffer : buffers) {
-			if (!buffer)
-				continue;
-			any = true;
-			D3D11_BUFFER_DESC desc{};
-			buffer->GetDesc(&desc);
-			mappable |= desc.Usage == D3D11_USAGE_DYNAMIC || desc.CPUAccessFlags != 0;
-			described += fmt::format("{}{} B usage {} CPU access {:#x}", described.empty() ? "" : ", ", desc.ByteWidth, static_cast<int>(desc.Usage), desc.CPUAccessFlags);
-		}
-		// A particle system draws its palette's quads, not its own buffers.
+		const auto forEachBuffer = [&](auto&& a_visit) {
+			if (a_record.skin && a_record.skinPartition && !a_record.partitions.empty()) {
+				for (const auto& p : a_record.partitions)
+					for (auto* buffer : { p.vertexBuffer, p.indexBuffer })
+						if (buffer)
+							a_visit(buffer);
+			} else {
+				for (auto* buffer : { a_record.vertexBuffer, a_record.indexBuffer })
+					if (buffer)
+						a_visit(buffer);
+			}
+		};
+		// A particle system draws its palette's quads, not its own buffers (cause 2, as for no buffers at all). Otherwise the cause is
+		// its buffers', read once by its first buffer: the game can map a DYNAMIC buffer or one with CPU access, which DXVK renames on
+		// every discard map, so it cannot be imported (0); a buffer DXVK will not describe as such is cause 1.
+		const void* key = nullptr;
+		forEachBuffer([&](ID3D11Buffer* a_buffer) { key = key ? key : a_buffer; });
 		std::size_t cause = 2;
-		if (!a_record.particles.system && mappable)
-			cause = 0;
-		else if (!a_record.particles.system && any)
-			cause = 1;
+		if (!a_record.particles.system && key) {
+			// Keys are addresses a freed buffer can hand on: the map is a cache of a statistic's cause, dropped whole when it grows.
+			if (unstableCauseOf.size() >= 4096)
+				unstableCauseOf.clear();
+			auto [it, inserted] = unstableCauseOf.try_emplace(key, std::uint8_t(1));
+			if (inserted) {
+				bool mappable = false;
+				forEachBuffer([&](ID3D11Buffer* a_buffer) {
+					D3D11_BUFFER_DESC desc{};
+					a_buffer->GetDesc(&desc);
+					mappable |= desc.Usage == D3D11_USAGE_DYNAMIC || desc.CPUAccessFlags != 0;
+				});
+				it->second = mappable ? 0 : 1;
+			}
+			cause = it->second;
+		}
 		++stats.unstableCauses[cause];
 		constexpr std::uint32_t kMaxLogged = 16;
 		if (unstableLogged >= kMaxLogged)
 			return;
 		++unstableLogged;
+		std::string described;
+		forEachBuffer([&](ID3D11Buffer* a_buffer) {
+			D3D11_BUFFER_DESC desc{};
+			a_buffer->GetDesc(&desc);
+			described += fmt::format("{}{} B usage {} CPU access {:#x}", described.empty() ? "" : ", ", desc.ByteWidth, static_cast<int>(desc.Usage), desc.CPUAccessFlags);
+		});
 		constexpr std::array<const char*, 3> kCauses{ "a buffer the game can map", "a buffer DXVK refused to describe", "no buffers to resolve (no renderer data or particle palette)" };
 		logger::info("[DCLF] unstable buffer: '{}' stays the engine's: {} ({}){}", a_geometry && a_geometry->name.c_str() ? a_geometry->name.c_str() : "",
 			kCauses[cause], described.empty() ? "none" : described, unstableLogged == kMaxLogged ? "; no more such lines this session" : "");

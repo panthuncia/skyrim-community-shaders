@@ -539,8 +539,11 @@ namespace DCLF::Draws
 		// site executes them in DXVK's buffer).
 		const bool cpu = CurrentGraphConditions().cpuPipeline;
 		const auto cpuPass = [](const PassEntry& a_entry) { return a_entry.cpuPipeline && a_entry.make; };
+		// A first-person epoch, hosted or its own, has no passes while DCLF cannot draw the view (GraphConditions::firstPerson).
+		const bool firstPerson = CurrentGraphConditions().firstPerson;
+		constexpr auto kFirstPersonIndex = static_cast<std::uint32_t>(Api::EngineView::FirstPerson);
 		for (const auto& epoch : state.epochs[static_cast<std::size_t>(a_shape)]) {
-			if (a_shape == Api::EpochShape::View && epoch.view != a_view)
+			if (a_shape == Api::EpochShape::View && (epoch.view != a_view || (!firstPerson && epoch.view == Api::EngineView::FirstPerson)))
 				continue;
 			auto context = a_base;
 			context.epochId = epoch.id;
@@ -556,6 +559,8 @@ namespace DCLF::Draws
 				if (!((epoch.hosts >> row) & 1))
 					continue;
 				const auto view = state.traits[row].index;
+				if (!firstPerson && view == kFirstPersonIndex)
+					continue;
 				auto resources = context.Main()->views[view].lock();
 				if (resources && ViewPassesReady(*resources, *context.Main()))
 					hosted.push_back(hostedViews[view] = std::move(resources));

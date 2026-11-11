@@ -88,6 +88,8 @@ only `0` turns it off. Parity, diagnostic and test switches are off unless set.
 | `CS_DCLF_PARTICLES` | on (unless 1) | `0`: effect-shaded particle systems stay native. Needs `CS_DCLF_EFFECTS`. |
 | `CS_DCLF_BILLBOARDS` | on (unless 1) | `0`: effect meshes under an `NiBillboardNode` (fire cards, spray jets) stay native. Needs `CS_DCLF_EFFECTS`. |
 | `CS_DCLF_BILLBOARD_PARTICLES` | on (unless 0) | `0`: particle systems under billboard nodes (the magic hands' fire cores) stay the engine's. Needs billboards and particles. |
+| `CS_DCLF_MASTER_PARTICLES` | **off** | `1`: the particle manager's master particle systems (torches, candles, street mist, blood impacts) are DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4). Needs `CS_DCLF_PARTICLES`. Its observers (`<- MASTER SET`, `<- MASTER REFS` in the particles report) run with `CS_DCLF_STATS` only. Scenarios: `master-particles-0.env`, `-1.env`. |
+| `CS_DCLF_SHADOW_DEPTH_CLAMP` | on (unless 0) | `0`: a shadow view whose rasterizer state turns depth clipping off stays the engine's, instead of drawing with depth clamped to the viewport's range (where the device has `depthClamp`). `CS_DCLF_TEST_SHADOW_CLAMP=1` reaches the path. |
 | `CS_DCLF_EMPTY_FADE_NODE` | on (unless 0) | `0`: the engine's empty fade node (the `BSFadeNode` at `0x14332a2a0` every `BSShaderProperty` starts with) is listed as one fade root of all its geometry, instead of no root. |
 
 ### Parity checks and observers
@@ -149,8 +151,9 @@ Each compares a live path with a reference built from scratch and flags every mi
 | `CS_DCLF_TEST_MOVE` | `<start>:<end>:<units per frame>;...` | Carries the player forward. |
 | `CS_DCLF_TEST_TURN` | `<start>:<end>:<degrees per frame>;...` | Turns the player. |
 | `CS_DCLF_TEST_TOGGLE` | `<off frame>:<on frame>...` | Switches DCLF off and on. |
-| `CS_DCLF_TEST_EXIT` | `<frame>` | The game exits after that many frames. The count includes the main menu's frames, so below about 200 the game exits before DCLF draws. |
+| `CS_DCLF_TEST_EXIT` | `<frame>` | The game exits after that many frames, loading screens not counted, its log flushed first ("test exit at frame N"). The count includes the main menu's frames, so below about 200 the game exits before DCLF draws. The frames the command list's `dclf:wait=` held move it later, as they move the commands after them; each wait holds at most its limit, so the exit always comes. |
 | `CS_DCLF_TEST_REFUSE` | `<name>,...` | Geometry whose node name contains one of the names is refused as an unstable buffer (what a RaceMenu-morphed shape got on test2), so a run has engine-only geometry of any class: the engine-only subset's paths (`Core/Scene/EngineCasters.h`). `Rock` in Riverwood gives about 860 roots: the sun's whole skip and the occlusion maps cull them alone (their report lines). |
+| `CS_DISABLE_FEATURES` | `<short name>,...` | Those features are disabled at boot for this run only (the saved "Disable at Boot" settings are not changed). Read from the environment alone (`State.cpp`, `Util::SwitchFile::Value`), so a scenario sets it and the switches file does not carry it to later runs. Such a run compiles on demand: put `dclf:wait=shaders` before its shots. |
 | `CS_DCLF_TEST_SHADOW_CLAMP` | `1` | Every shadow view draws with depth clamped instead of clipped, as a view whose rasterizer state turns depth clipping off does (`CS_DCLF_SHADOW_DEPTH_CLAMP`, on unless `0`): the engine's own states all clip, so this is the only way a run reaches that path. Shadows may differ only where a caster crosses a view's near or far plane; the `shadow view rasterizer state N` lines say `depth clamped`. |
 
 ### Tuning
@@ -861,7 +864,10 @@ withheld and drawn by nobody. Before reading parity or timing, check in each run
         held ("test wait '...' held frames A-B"), so the gaps after it are frames of the outcome: `reload` (the last
         `dclf:reload-shaders` finished and its rebuilt pipelines swapped in; one takes ~20 s), `settled` (the frames draw under the
         requested toggles on the pipeline they choose; at once with the feature off), `nvperf` (the last `dclf:nvperf` capture
-        done) and `signal:<name>` (a remote client's `dclf:signal=<name>`).
+        done), `signal:<name>` (a remote client's `dclf:signal=<name>`) and `shaders` (Community Shaders' compile queue is empty: a
+        run that compiles on demand, as `CS_DISABLE_FEATURES` makes one, has every shader in view built). Every wait has a limit:
+        3000 frames, or the frames after an `@` (`dclf:wait=shaders@12000` for a cold compile). A wait that reaches it logs "test wait
+        '<condition>' timed out" and the list goes on, shifted by the frames it held; `CS_DCLF_TEST_EXIT` moves by the same frames.
     -   `dclf:define=<NAME>[=<value>],...` adds defines to every DCLF stage compiled from then on (empty: none). With
         `dclf:reload-shaders=<file>` and `dclf:wait=reload` after it, a shader A/B is an `#if` in the source compared in one launch.
     -   `dclf:capture[=<seconds>]` takes a [diagnostic capture](#the-diagnostic-capture) at the next Present (no Explorer window, nothing on the clipboard).

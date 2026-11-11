@@ -10,6 +10,8 @@
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
+#include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 #include "Utils/SwitchFile.h"
 
 #include <atomic>
@@ -57,10 +59,19 @@ namespace DCLF::Features::Particles::MasterParticles
 			return Engine::Global<std::uint32_t>(Engine::Address::kFrameCounter);
 		}
 
-		// The gate between the category capture (shared: enter to leave, the render thread) and the removal hook (exclusive): no removal
-		// is pushed between a master's listing and its capture's pushes.
+		// The gate between the category capture (shared: enter to leave, the render thread, only on a frame that gathers the masters) and
+		// the removal hook (exclusive): no removal is pushed between a master's listing and its capture's pushes.
+		//
+		// Lock order: gate, then the manager's lock. The render thread takes the gate (Enter), then the manager's lock for read inside it
+		// (Gather). The removal hook takes the gate alone: FUN_140e2a520 runs on a job thread with no lock held (AE: its one caller,
+		// UpdateParticleSystemManagerJob 0x1402c7470, queued once per array slot by FUN_1402c75c0 / FUN_1402c76c0, which take only the
+		// queue's spin lock DAT_1431374f8 while queueing; the job and FUN_140e2a520 take none, and SetAt FUN_140d1ee40 takes none). The
+		// manager's child-edit events (OnAttached, OnDetaching, SceneTracker's) never take the gate. So no thread holds the manager's lock
+		// while it waits for the gate.
 		std::shared_mutex gate;
 		bool installed = false;
+		Api::SwitchId masterSwitch;  // install
+		bool observing = false;      // install: CS_DCLF_STATS, the observers' report (Lines) is read
 
 		// The counters (any thread) and the masters' exits by event (keys, any thread; drained by the render thread's gathers).
 		struct Counts
@@ -90,6 +101,7 @@ namespace DCLF::Features::Particles::MasterParticles
 		} observed;
 		std::mutex observedLock;  // the render thread's gathers write, the report reads
 
+		/** @brief The observers (CS_DCLF_STATS alone): the masters that left with no event, the idle ones DCLF's pins keep. */
 		void Observe(const std::vector<MasterRead>& a_masters)
 		{
 			const std::scoped_lock lock(observedLock);
@@ -155,7 +167,9 @@ namespace DCLF::Features::Particles::MasterParticles
 			if (!manager)
 				return;
 			counts.gathers.fetch_add(1, std::memory_order_relaxed);
-			std::vector<MasterRead> masters;
+			// Render thread only (inside Enter): reused between gathers.
+			static std::vector<MasterRead> masters;
+			masters.clear();
 			// Under the manager's lock: its AttachChild grows the array under it. The removal hook waits for Leave, so no idle removal
 			// clears a slot read here before the sink pins its master (the manager's own DetachChild overrides do not wait: none is known
 			// to detach a master during play).
@@ -165,13 +179,20 @@ namespace DCLF::Features::Particles::MasterParticles
 				auto* master = child ? child->AsNode() : nullptr;
 				if (!master || master->parent)
 					continue;
-				// Read before the sink pins it. Idle: removable, no emitter left; held: more references than the engine's removal allows.
-				MasterRead read{ .master = master, .references = master->GetRefCount() };
-				read.idleHeld = Engine::At<std::uint8_t>(master, kMasterRemovable) && read.references > 2 &&
-				                std::atomic_ref<std::uint32_t>(Engine::At<std::uint32_t>(master, kMasterEmitters)).load(std::memory_order_relaxed) == 0;
+				MasterRead read{ .master = master };
+				if (observing) {
+					// Read before the sink pins it. Idle: removable, no emitter left; held: more references than the engine's removal allows.
+					read.references = master->GetRefCount();
+					read.idleHeld = Engine::At<std::uint8_t>(master, kMasterRemovable) && read.references > 2 &&
+					                std::atomic_ref<std::uint32_t>(Engine::At<std::uint32_t>(master, kMasterEmitters)).load(std::memory_order_relaxed) == 0;
+				}
 				masters.push_back(read);
 			}
 			lock.UnlockForRead();
+			for (const auto& read : masters)
+				a_sink.Add(read.master);
+			if (!observing)
+				return;
 			// The pins the captures still held add to those idle masters' counts (render thread: the captures are FrameView's).
 			std::vector<const void*> keys;
 			for (const auto& read : masters)
@@ -182,8 +203,6 @@ namespace DCLF::Features::Particles::MasterParticles
 			for (std::size_t k = 0, m = 0; m < masters.size(); ++m)
 				if (masters[m].idleHeld)
 					masters[m].pins = pins[k++];
-			for (const auto& read : masters)
-				a_sink.Add(read.master);
 			Observe(masters);
 		}
 
@@ -199,7 +218,8 @@ namespace DCLF::Features::Particles::MasterParticles
 					counts.removals.fetch_add(1, std::memory_order_relaxed);
 					PrimaryCull::Get().NoteListStructure(manager, master, false);
 					SceneTracker::Get().PushDetached(master, manager);
-					exits.Push(master);
+					if (observing)
+						exits.Push(master);
 				}
 				func(a_array, a_index, a_value);
 			}
@@ -220,7 +240,8 @@ namespace DCLF::Features::Particles::MasterParticles
 			const auto& event = *reinterpret_cast<const SWF_ChildEvent*>(a_event);
 			if (event.parent && event.parent == Manager() && event.child) {
 				counts.detaches.fetch_add(1, std::memory_order_relaxed);
-				exits.Push(event.child);
+				if (observing)
+					exits.Push(event.child);
 			}
 		}
 
@@ -230,15 +251,11 @@ namespace DCLF::Features::Particles::MasterParticles
 		}
 	}
 
-	bool Enabled()
-	{
-		static const bool enabled = Util::SwitchFile::Enabled("CS_DCLF_MASTER_PARTICLES");
-		return enabled;
-	}
-
 	void Preflight()
 	{
-		if (!Enabled())
+		// Before the features' installs, so before the switch is registered: read from the same environment or switches file the
+		// registry reads it from at Install (masterSwitch).
+		if (!Util::SwitchFile::Enabled("CS_DCLF_MASTER_PARTICLES"))
 			return;
 		HookSites::RequireKnown("the particle manager's master removal", SitesKnown());
 		if (SitesKnown())
@@ -247,9 +264,10 @@ namespace DCLF::Features::Particles::MasterParticles
 
 	void Install(Api::InstallContext& a_context)
 	{
-		a_context.RegisterSwitch({ .name = "CS_DCLF_MASTER_PARTICLES", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Never, .description = "1: the particle manager's master particle systems (torches, candles, street mist) tracked as DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4; needs CS_DCLF_PARTICLES); 0 (default) they stay the engine's", .after = "CS_DCLF_PARTICLES" });
-		if (!Enabled() || installed)
+		masterSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_MASTER_PARTICLES", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Never, .description = "1: the particle manager's master particle systems (torches, candles, street mist) tracked as DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4; needs CS_DCLF_PARTICLES); 0 (default) they stay the engine's", .after = "CS_DCLF_PARTICLES" });
+		if (!SwitchEnabled(masterSwitch) || installed)
 			return;
+		observing = Diagnostics::Observe().stats;
 		if (!SitesKnown()) {
 			logger::warn("[DCLF] master particles: this runtime has no address for the particle manager's master removal; they stay the engine's");
 			return;

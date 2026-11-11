@@ -394,10 +394,11 @@ namespace DCLF::SceneCapture
 	/** @brief Whether a_object is reached from Main::WorldRootNode by its parent chain. */
 	bool InWorld(const RE::NiAVObject* a_object);
 	/**
-	 * @brief The parentless roots the portal graph draws (alwaysRenderChildren), which InWorld counts as in the world. Written on the
-	 * render thread (CaptureCategories), read lock-free by the hooks; replaced sets are kept (a few dozen pointers) for late readers.
+	 * @brief The parentless roots the category capture files (the portal graphs' alwaysRenderChildren, the unheld roots, the views' roots),
+	 * which InWorld counts as in the world. Written on the render thread (CaptureCategories), read lock-free by the hooks inside a
+	 * SceneTracker::SetRead; a replaced set is freed by SceneTracker::RetireCategoryNodes once no read is in.
 	 */
-	void SetDrawnRoots(std::vector<const RE::NiAVObject*> a_roots);
+	void SetDrawnRoots(std::vector<const void*> a_roots);
 	/**
 	 * @brief An attach's capture (attaching thread, after the engine's call): everything under a_root and its ancestors to the world
 	 * root. Null when a_root is not in the world: a subtree being assembled is captured when attached to the world.
