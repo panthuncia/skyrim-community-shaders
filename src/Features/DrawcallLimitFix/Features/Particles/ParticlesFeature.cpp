@@ -3,6 +3,7 @@
 // parity.
 
 #include "Features/DrawcallLimitFix/Features/Particles/Particles.h"
+#include "Features/DrawcallLimitFix/Features/Particles/MasterParticles.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
@@ -34,6 +35,9 @@ namespace DCLF::Features::Particles
 			ParticleSnapshots::Get().Install(a_context);
 			// Their palette rows: the members' blocks and placements, from the snapshots, every frame.
 			RegisterRows(a_context);
+			// The particle manager's master particle systems (CS_DCLF_MASTER_PARTICLES, default off): its unheld roots, their particle
+			// systems this feature's like any other.
+			MasterParticles::Install(a_context);
 			RegisterReport(a_context);
 			// CS_DCLF_SET_PARITY: the members' withheld particle passes.
 			if (Diagnostics::Observe().claims)
@@ -43,7 +47,7 @@ namespace DCLF::Features::Particles
 
 	Api::Feature Feature()
 	{
-		return { "particles", &Install };
+		return { .name = "particles", .install = &Install, .preflight = &MasterParticles::Preflight };
 	}
 
 	Api::ToggleId Toggle()
