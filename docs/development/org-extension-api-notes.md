@@ -1392,3 +1392,27 @@ From P5.8/P5.9 (`docs/development/p5/menus.md`). Two needs a menu scene's view b
   - **Crash markers on an adopted device:** `BASICRHI_VK_CRASH_MARKERS=1` (with DXVK_DEBUG=hang, which enables VK_AMD_buffer_marker)
     marks BasicRHI's own lists; the first timeline that reads UINT64_MAX dumps them. DXVK's markers cover only DXVK's commands.
 - **Found by:** P5 crash triage (2026-11-11).
+
+### A pass whose input source changes at runtime
+
+- **Need:** a pass that reads one of several resources, chosen per frame, without a graph rebuild when the choice changes.
+- **Who:** Cloud Shadows' occlusion copy, whose faces come from its D3D11 layer when the engine drew a face's clouds and from the
+  sky family's graph texture when the graph did (P5.3); any consumer of a producer that may fall back to D3D11 per batch.
+- **Where it fits:** a source re-declared on change (`FrameAnchors::Refresh`) rebuilds the client's epoch at every change. Driven by
+  the sky's batches, wave 1 rebuilt a few hundred times a minute and ran the device out of memory. The copy now declares every
+  source from its first build and records a gated dispatch per source, face and mip; the commit opens one source per face
+  (`RunGate`). The cost is idle dispatch records and one declared read per source, which also orders the copy after both writers.
+  A graph-side "select" (a pass declaring alternatives, of which the run's data picks one, with barriers for the picked one only)
+  would remove the duplicate records and the extra ordering. A resource made by the consumer at its setup, before its first build,
+  avoids the publish-then-rebuild of a producer that appears later.
+- **Found by:** P5.3 (2026-11-11).
+
+### A family's draws split across two engine calls
+
+- **Need:** one anchor run for draws the engine makes at two consecutive calls (the sky batch, then the cloud layers' pass list).
+- **Who:** DCLF's sky family (P5.3).
+- **Where it fits:** the capture opens at the first call and the run is submitted after the second, which is checked up front (its
+  passes are all the family's), so the anchor still runs once a view. When the second call holds other work, the anchor runs at the
+  first and the engine draws the rest after it. An anchor that can be "held open" across engine calls, with its run submitted at the
+  close, would make this a FrameAnchors feature rather than per-family bookkeeping.
+- **Found by:** P5.3 (2026-11-11).
