@@ -161,14 +161,15 @@ namespace DCLF::Features::Water
 	 * @brief What a view's client is made for: the inputs that are published graph textures, declared by its pass so the graph orders
 	 * their writes before the water's reads. The headers' are read at each batch's start. The material slots' are the engine targets a
 	 * draw samples that a graph pass writes (with the ImageSpace port and engine targets on: the refraction copy, the SSR targets), seen
-	 * by the view's probes and kept: a slot's id stays in the shape once seen, so a target sampled on some frames only does not change
-	 * it. A header or slot bound to a D3D11 view or nothing is read by heap index instead, resolved per batch, and is no part of the shape.
+	 * by the view's probes and kept: an id stays in the shape once seen, so a target sampled on some frames only, or a slot alternating
+	 * between two, does not change it. A header or slot bound to a D3D11 view or nothing is read by heap index instead, resolved per
+	 * batch, and is no part of the shape.
 	 */
 	struct Shape
 	{
 		View view = View::Surface;
 		std::array<std::string, kHeaderRegisters.size()> headerIds;
-		std::array<std::string, kMaterialSlots> materialIds;
+		Family::PublishedIds materialIds;
 		bool operator==(const Shape&) const = default;
 	};
 

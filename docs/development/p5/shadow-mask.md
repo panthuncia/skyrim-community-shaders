@@ -66,8 +66,8 @@ The pieces are the water's and the screen blood's (water.md, "The family").
   epoch writes at its run from what D3D11 would read then (`frameBufferCached`). The run follows the batch, so a menu scene's run reads
   the menu camera's per-frame buffer, as the engine's draw would.
 - **Published slots.** A slot holding a published graph texture's export (a depth or an engine target a graph pass writes) is read by
-  the id's whole-resource index (`Family::PublishedSlot`), and the id joins the view's shape: the probes learn it, and the pass declares
-  the read so the graph orders the write first. The water does the same (water.md).
+  the id's whole-resource index (`Family::PublishedSlot`), and the id joins the view's shape (a set of ids, kept once seen): the probes
+  learn it, and the pass declares the read so the graph orders the write first. The water does the same (water.md).
 - **Per-draw latch** (640 bytes, `DrawConstants` / `UtilityOrgShadowMaskDraw`): the rows, the reference, the slots' indices, the
   geometry. The push block (24 bytes): the shared constants and the latch region.
 - **Probes, refusals and the shape** as the water's: a view's batches are the graph's only after a probe found every draw latchable;

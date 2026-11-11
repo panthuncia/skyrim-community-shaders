@@ -1474,8 +1474,9 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   published depends on which ports run and which readers asked for them, and it is only known at the draw.
 - **Who:** the water and shadow mask families (`Family::SlotTexture` answers `Published`); any plugin that re-issues an engine draw
   whose inputs the graph may own.
-- **Where it fits:** `Family::PublishedSlot` gives the id and its whole-resource view index; the family's shape lists the id per slot,
-  learnt by probes before its client is made and kept once seen, and its pass declares the read for its order only. A graph-level
+- **Where it fits:** `Family::PublishedSlot` gives the id and its whole-resource view index; the family's shape holds the ids its draws
+  sampled (`Family::PublishedIds`, a set, so a slot alternating between a target and its swap keeps one shape), learnt by probes
+  before its client is made and kept once seen, and its pass declares the reads for their order only. A graph-level
   "this pass reads whatever published resources its draws name, resolved at execution" would let the shape stay fixed and remove the
   learning window; today a target published after the client is made keeps that view on the engine for the session.
 - **Found by:** the w3 misc lane (2026-11-11, `docs/development/p5/water.md` "Published material slots", `p5/shadow-mask.md`).

@@ -221,6 +221,18 @@ namespace DCLF::Family
 		return !a_id.empty() && PublishedResources::ShaderResourceIndex(a_id, a_index);
 	}
 
+	std::string DescribeChange(const PublishedIds& a_from, const PublishedIds& a_to)
+	{
+		std::string out;
+		for (const auto& id : a_to)
+			if (!a_from.contains(id))
+				out += std::format("{}+{}", out.empty() ? "" : ", ", id);
+		for (const auto& id : a_from)
+			if (!a_to.contains(id))
+				out += std::format("{}-{}", out.empty() ? "" : ", ", id);
+		return out;
+	}
+
 	std::uint32_t SlotSampler(std::uint32_t a_addressMode, std::uint32_t a_filterMode, Owners& a_owners)
 	{
 		auto sampler = GpuTextures::Get().SamplerBinding(a_addressMode, a_filterMode);

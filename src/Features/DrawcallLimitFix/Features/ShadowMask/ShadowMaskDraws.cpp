@@ -90,7 +90,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				// An id stays registered once published, so every graph built since can declare it.
 				std::set<std::string_view> declared;
 				for (const auto& id : client->shape.slotIds)
-					if (!id.empty() && PublishedResources::IsRegistered(id) && declared.insert(id).second)
+					if (PublishedResources::IsRegistered(id) && declared.insert(id).second)
 						static_cast<void>(a_builder.ShaderResource(org::ResourceIdentifier(id)).View());
 				return bindings;
 			}
@@ -165,11 +165,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 		/** @brief What differs between two shapes, in words, for a log. */
 		std::string DescribeChange(const Shape& a_from, const Shape& a_to)
 		{
-			std::string out;
-			for (std::uint32_t t = 0; t < kSlots; ++t)
-				if (a_from.slotIds[t] != a_to.slotIds[t])
-					out += fmt::format("{}t{} {} -> {}", out.empty() ? "" : ", ", t, a_from.slotIds[t].empty() ? "none" : a_from.slotIds[t],
-						a_to.slotIds[t].empty() ? "none" : a_to.slotIds[t]);
+			const auto out = Family::DescribeChange(a_from.slotIds, a_to.slotIds);
 			return out.empty() ? std::string("no input changed") : out;
 		}
 
@@ -227,9 +223,8 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				return nullptr;
 			}
 			std::string published;
-			for (std::uint32_t t = 0; t < kSlots; ++t)
-				if (!a_shape.slotIds[t].empty())
-					published += fmt::format("{}t{} {}", published.empty() ? "" : ", ", t, a_shape.slotIds[t]);
+			for (const auto& id : a_shape.slotIds)
+				published += fmt::format("{}{}", published.empty() ? "" : ", ", id);
 			logger::info("[DCLF] shadow mask: the {} client registered (published inputs: {})", client->id, published.empty() ? "none" : published);
 			return client;
 		}

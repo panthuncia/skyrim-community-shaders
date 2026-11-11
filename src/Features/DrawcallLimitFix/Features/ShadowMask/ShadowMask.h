@@ -95,13 +95,13 @@ namespace DCLF::Features::ShadowMask
 
 	/**
 	 * @brief What a view's client is made for: the slots' published graph textures (an engine target a graph pass writes, a depth the
-	 * graph publishes), declared by its pass so the graph orders their writes before the masks. Seen by the view's probes and kept: a
-	 * slot's id stays once seen. A slot bound to a D3D11 view or nothing is read by heap index, resolved per batch, and is no part of it.
+	 * graph publishes), declared by its pass so the graph orders their writes before the masks. Seen by the view's probes and kept: an
+	 * id stays once seen. A slot bound to a D3D11 view or nothing is read by heap index, resolved per batch, and is no part of it.
 	 */
 	struct Shape
 	{
 		View view = View::World;
-		std::array<std::string, kSlots> slotIds;
+		Family::PublishedIds slotIds;
 		bool operator==(const Shape&) const = default;
 	};
 

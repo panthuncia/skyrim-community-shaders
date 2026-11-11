@@ -135,9 +135,10 @@ stayed the engine's in every p5-all run: the residue census's `RT kRAW_WATER DS 
 (`1111-072658-p35-p5-all-census-w3`).
 
 Now (`org-port/w3-misc`) such a slot is read by its id (`Family::PublishedSlot`: the id's whole-resource view index in the draw's
-latch), and the id is part of the view's shape (`Shape::materialIds`): the client's pass declares it, so the graph orders the target's
-write before the water. The ids are learnt by probes: a view's batches before its client exists are probes now (they also ask for the
-programs), and a slot keeps its id once seen, so a target sampled on some frames only does not change the shape. A withheld batch whose
+latch), and the id is part of the view's shape (`Shape::materialIds`, a set of ids, `Family::PublishedIds`): the client's pass declares
+it, so the graph orders the target's write before the water. The ids are learnt by probes: a view's batches before its client exists
+are probes now (they also ask for the programs), and an id stays in the set once seen, so a target sampled on some frames only, or a
+slot that alternates between a target and its swap by frame, does not change the shape. A withheld batch whose
 draw samples a published target its client was not made for falls back as any other refusal. A `published inputs changed since its
 client registered` line now names what changed (`t1 none -> Engine::kMAIN_COPY, ...`): in that census both views logged it once with
 no detail, so its cause is still to read from the next run.

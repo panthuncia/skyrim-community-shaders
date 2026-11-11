@@ -38,8 +38,8 @@ namespace DCLF::Features::Water
 			if (a_old != a_new)
 				out += fmt::format("{}t{} {} -> {}", out.empty() ? "" : ", ", a_register, a_old.empty() ? "none" : a_old, a_new.empty() ? "none" : a_new);
 		};
-		for (std::uint32_t t = 0; t < kMaterialSlots; ++t)
-			note(t, a_from.materialIds[t], a_to.materialIds[t]);
+		if (const auto materials = Family::DescribeChange(a_from.materialIds, a_to.materialIds); !materials.empty())
+			out += fmt::format("material slots {}", materials);
 		for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h)
 			note(kHeaderRegisters[h], a_from.headerIds[h], a_to.headerIds[h]);
 		return out.empty() ? std::string("no input changed") : out;
@@ -133,7 +133,7 @@ namespace DCLF::Features::Water::WaterDraws
 				// each id once. An id stays registered once published, so every graph built since can declare it.
 				std::set<std::string_view> declared(c.shape.headerIds.begin(), c.shape.headerIds.end());
 				for (const auto& id : c.shape.materialIds)
-					if (!id.empty() && PublishedResources::IsRegistered(id) && declared.insert(id).second)
+					if (PublishedResources::IsRegistered(id) && declared.insert(id).second)
 						static_cast<void>(a_builder.ShaderResource(org::ResourceIdentifier(id)).View());
 				return bindings;
 			}
@@ -298,9 +298,8 @@ namespace DCLF::Features::Water::WaterDraws
 			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h)
 				if (!a_shape.headerIds[h].empty())
 					published += fmt::format("{}t{} {}", published.empty() ? "" : ", ", kHeaderRegisters[h], a_shape.headerIds[h]);
-			for (std::uint32_t t = 0; t < kMaterialSlots; ++t)
-				if (!a_shape.materialIds[t].empty())
-					published += fmt::format("{}t{} {}", published.empty() ? "" : ", ", t, a_shape.materialIds[t]);
+			for (const auto& id : a_shape.materialIds)
+				published += fmt::format("{}a material slot's {}", published.empty() ? "" : ", ", id);
 			logger::info("[DCLF] water: the {} client registered (published inputs: {})", client->id, published.empty() ? "none" : published);
 			return client;
 		}

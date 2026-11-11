@@ -59,11 +59,11 @@ namespace DCLF::Features::ShadowMask
 			std::array<bool, kViews> clean{};
 			std::array<std::optional<Shape>, kViews> settling;
 			std::array<std::uint32_t, kViews> settled{};
-			// The published graph textures each view's draws were seen sampling, per slot (Shape::slotIds).
-			std::array<std::array<std::string, kSlots>, kViews> knownSlots;
+			// The published graph textures each view's draws were seen sampling (Shape::slotIds).
+			std::array<Family::PublishedIds, kViews> knownSlots;
 			View view = View::World;
 			Shape shape;                               // the batch's: what its view's client must have been made for
-			std::array<std::string, kSlots> observed;  // the published ids the batch's draws sampled
+			Family::PublishedIds observed;             // the published ids the batch's draws sampled
 			std::shared_ptr<Run> run;
 			Family::Passes passes;
 		};
@@ -162,13 +162,9 @@ namespace DCLF::Features::ShadowMask
 					std::string id;
 					if (!Family::PublishedSlot(view, id, constants.textures[t]))
 						return "a slot holds a published graph texture without a shader resource view";
-					auto& seen = a_capture.observed[t];
-					if (seen.empty())
-						seen = id;
-					else if (seen != id)
-						return "a slot holds two published graph textures in one batch";
-					if (!a_capture.probe && a_capture.shape.slotIds[t] != id)
+					if (!a_capture.probe && !a_capture.shape.slotIds.contains(id))
 						return "a slot holds a published graph texture its client was not made for";
+					a_capture.observed.insert(std::move(id));
 				} else if (slot != Family::SlotResult::Ok) {
 					Refusals().Report(std::format("a {} draw's texture t{} could not be imported", NameOf(a_capture.view), t), GpuTextures::DescribeFailure(view, t, failure));
 					return "a texture it samples could not be imported";
@@ -253,10 +249,8 @@ namespace DCLF::Features::ShadowMask
 					Refusals().Report(capture.passes.Describe(std::format("{} shadow mask", NameOf(kView))));
 					Refuse(capture, "a pass of the batch drew through another draw function than DrawTriShape");
 				}
-				// The published ids the batch sampled join the view's (a slot keeps its id once seen); a new one is the next batch's shape.
-				for (std::uint32_t t = 0; t < kSlots; ++t)
-					if (!capture.observed[t].empty())
-						known[t] = capture.observed[t];
+				// The published ids the batch sampled join the view's (an id stays once seen); a new one is the next batch's shape.
+				known.insert(capture.observed.begin(), capture.observed.end());
 				if (probe) {
 					clean = ready && !capture.failed;
 					if (clean)

@@ -63,11 +63,11 @@ namespace DCLF::Features::Water
 			std::array<bool, static_cast<std::size_t>(View::Count)> clean{};                   // the view's last probe latched every draw
 			std::array<std::optional<Shape>, static_cast<std::size_t>(View::Count)> settling;  // the shape a view waits on (kSettleBatches)
 			std::array<std::uint32_t, static_cast<std::size_t>(View::Count)> settled{};
-			// The published graph textures each view's draws were seen sampling, per material slot (Shape::materialIds).
-			std::array<std::array<std::string, kMaterialSlots>, static_cast<std::size_t>(View::Count)> knownMaterials;
+			// The published graph textures each view's draws were seen sampling at their material slots (Shape::materialIds).
+			std::array<Family::PublishedIds, static_cast<std::size_t>(View::Count)> knownMaterials;
 			View view = View::Surface;
 			Shape shape;                                       // the batch's: what its view's client must have been made for
-			std::array<std::string, kMaterialSlots> observed;  // the published ids the batch's draws sampled
+			Family::PublishedIds observed;                     // the published ids the batch's draws sampled
 			std::shared_ptr<Run> run;
 			std::uint32_t depthFormat = 0;
 			std::uint64_t fallbacks = 0;      // draws the engine drew during a latched batch
@@ -272,13 +272,9 @@ namespace DCLF::Features::Water
 					std::string id;
 					if (!Family::PublishedSlot(view, id, constants.textures[t]))
 						return "a texture slot holds a published graph texture without a shader resource view";
-					auto& seen = a_capture.observed[t];
-					if (seen.empty())
-						seen = id;
-					else if (seen != id)
-						return "a texture slot holds two published graph textures in one batch";
-					if (!a_capture.probe && a_capture.shape.materialIds[t] != id)
+					if (!a_capture.probe && !a_capture.shape.materialIds.contains(id))
 						return "a texture slot holds a published graph texture its client was not made for";
+					a_capture.observed.insert(std::move(id));
 				} else if (slot != Family::SlotResult::Ok) {
 					Refusals().Report(std::format("a {} draw's texture t{} could not be imported", NameOf(a_capture.view), t), GpuTextures::DescribeFailure(view, t, failure));
 					return "a texture it samples could not be imported";
@@ -387,10 +383,8 @@ namespace DCLF::Features::Water
 					Refusals().Report(capture.passes.Describe(std::format("{} water", NameOf(kView))));
 					Refuse(capture, "a pass of the batch drew through another draw function than DrawTriShape", capture.lastTechnique);
 				}
-				// The published ids the batch sampled join the view's (a slot keeps its id once seen); a new one is the next batch's shape.
-				for (std::uint32_t t = 0; t < kMaterialSlots; ++t)
-					if (!capture.observed[t].empty() && known[t] != capture.observed[t])
-						known[t] = capture.observed[t];
+				// The published ids the batch sampled join the view's (an id stays once seen); a new one is the next batch's shape.
+				known.insert(capture.observed.begin(), capture.observed.end());
 				if (!ready) {
 					clean = false;
 					WaterDraws::Keep(std::move(run->owners));
