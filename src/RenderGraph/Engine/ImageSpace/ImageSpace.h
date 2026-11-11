@@ -25,8 +25,8 @@
  * entry (RunGate::OpenDispatch).
  *
  * Scopes: the HDR effect, the pre-tonemap composites, RenderSSAO and the reflection pass, and each call of an own-scope effect made
- * outside them (the end-of-frame effects, the depth-of-field blur, the snow copy). A batch runs at its scope's end at the latest
- * (CS code between these calls uses D3D11 and runs other anchors). Each kind of scope has its own share of the anchor's 13 runs a
+ * outside them (the end-of-frame effects, the depth-of-field blur, the snow copy, the water blend, the LDR downsample). A batch runs at its scope's end at the latest
+ * (CS code between these calls uses D3D11 and runs other anchors). Each kind of scope has its own share of the anchor's 15 runs a
  * frame, so the early scopes never use up the later ones' runs.
  *
  * The pass set is fixed for the session at Setup (docs/development/p5/imagespace.md, "The primary path"): every shape (effect,

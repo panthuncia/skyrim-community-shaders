@@ -16,6 +16,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/Engine/Constants/EngineConstants.h"
+#	include "RenderGraph/Engine/Flush/Flush.h"
 #	include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #	include "RenderGraph/Engine/Pipeline/StateConversion.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -58,6 +59,8 @@ namespace RenderGraph::Engine::ImageSpace
 		using FrameAnchors::Anchor;
 		namespace Constants = RenderGraph::Engine::Constants;
 		namespace Pipeline = RenderGraph::Engine::Pipeline;
+		// The flush latch's allowed engine draws (Flush.h). Named Latch here: Flush is this file's batch run.
+		namespace Latch = ::RenderGraph::Engine::Flush;
 		using Effects = RE::ImageSpaceManager;
 
 		constexpr const char* kClientId = "cs.engine.imagespace";
@@ -349,6 +352,10 @@ namespace RenderGraph::Engine::ImageSpace
 			std::vector<std::shared_ptr<const org::LatchBlock>> keepAlive;  // the batch's constant chunks, until its run
 			std::uint32_t lastEntry = 0;
 			bool executed = false;
+			// The engine's ImageSpace calls in progress (Render, the explicit-target Render, DispatchComputeShader): a draw or dispatch
+			// inside one that is not taken is the engine's on purpose, under declined (set by the refusal) or NotPortedReason.
+			std::uint32_t engineCalls = 0;
+			const Latch::Reason* declined = nullptr;
 			// Counters.
 			std::uint64_t taken = 0, engineDrawn = 0, batches = 0, lost = 0;
 			// Why each effect's draws stayed with the engine, logged once per reason and effect: refusals (cases the port does not
@@ -361,6 +368,37 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static ImageSpaceState state;
 			return state;
+		}
+
+		/**
+		 * @brief Why ImageSpace leaves a draw or dispatch to the engine on purpose, for the flush latch (Latch::EngineDraws around the
+		 * engine's call): an effect the port does not cover or did not select, a shape it refused (an inherent refusal), a shape this
+		 * session did not register, a failure on the graph's side, and the volumetric lighting compute (AE 107023 / SE 100309).
+		 */
+		const Latch::Reason& NotPortedReason()
+		{
+			static const Latch::Reason reason{ "imagespace: effect not on the graph" };
+			return reason;
+		}
+		const Latch::Reason& RefusedReason()
+		{
+			static const Latch::Reason reason{ "imagespace: shape refused" };
+			return reason;
+		}
+		const Latch::Reason& UnregisteredReason()
+		{
+			static const Latch::Reason reason{ "imagespace: shape not in the manifest" };
+			return reason;
+		}
+		const Latch::Reason& FailedReason()
+		{
+			static const Latch::Reason reason{ "imagespace: failed on the graph" };
+			return reason;
+		}
+		const Latch::Reason& VolumetricReason()
+		{
+			static const Latch::Reason reason{ "imagespace: volumetric lighting compute" };
+			return reason;
 		}
 
 		/** @brief The effects' raster programs, by value key. Queued at Setup; a pass made at a graph build takes its own with GetNow. */
@@ -382,6 +420,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			auto& state = IS();
 			++state.engineDrawn;
+			state.declined = &RefusedReason();
 			if (auto& log = state.fallbacks[a_effect])
 				log->Report(a_reason, a_detail);
 		}
@@ -391,6 +430,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			auto& state = IS();
 			++state.engineDrawn;
+			state.declined = &FailedReason();
 			if (auto& log = state.failures[a_effect])
 				log->Report(a_reason);
 		}
@@ -1504,6 +1544,7 @@ namespace RenderGraph::Engine::ImageSpace
 			if (!spec) {
 				Flush();
 				Refuse("a shape this session did not register; the manifest has it from the next session", a_effect);
+				state.declined = &UnregisteredReason();
 				return nullptr;
 			}
 			// A batch runs in its passes' order: a pass at or before the last one taken (the engine's order differs from the manifest's,
@@ -1794,6 +1835,37 @@ namespace RenderGraph::Engine::ImageSpace
 			return true;
 		}
 
+		/**
+		 * @brief a_call (the engine's ImageSpace function) counted as an engine ImageSpace call: a draw or dispatch inside it that the
+		 * port does not take is the engine's on purpose (DrawTriShape and DispatchCSShader open the latch's scope for it).
+		 */
+		template <class Call>
+		void EngineCall(Call&& a_call)
+		{
+			auto& state = IS();
+			++state.engineCalls;
+			a_call();
+			--state.engineCalls;
+		}
+
+		/**
+		 * @brief The engine's draw or dispatch, which ImageSpace leaves to it: inside an engine ImageSpace call, in the flush latch's
+		 * EngineDraws scope under the reason it was declined for (an effect not on the graph when nothing declined it).
+		 */
+		template <class Call>
+		void EngineDraw(Call&& a_call)
+		{
+			auto& state = IS();
+			if (state.engineCalls == 0) {
+				a_call();
+				return;
+			}
+			const auto* reason = state.current && state.current->eligible && state.declined ? state.declined : &NotPortedReason();
+			state.declined = nullptr;
+			Latch::EngineDraws scope(*reason);
+			a_call();
+		}
+
 		/** @brief BSImagespaceShader::Render (100950 / 107732): every raster ImageSpace shader's draw, through DrawTriShape. */
 		struct ShaderRender
 		{
@@ -1807,11 +1879,13 @@ namespace RenderGraph::Engine::ImageSpace
 				const auto* effect = static_cast<const RE::ImageSpaceEffect*>(a_effect);
 				const auto* shader = static_cast<const RE::BSImagespaceShader*>(effect);
 				const bool covered = EffectOf(shader) >= 0;
-				const bool scoped = InScope(shader, [&] {
-					WithEffect(shader, false, covered ? Ineligible() : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
+				EngineCall([&] {
+					const bool scoped = InScope(shader, [&] {
+						WithEffect(shader, false, covered ? Ineligible() : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
+					});
+					if (!scoped)
+						func(a_effect, a_quad, a_param);
 				});
-				if (!scoped)
-					func(a_effect, a_quad, a_param);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -1830,11 +1904,13 @@ namespace RenderGraph::Engine::ImageSpace
 					return;
 				}
 				const bool covered = EffectOf(a_shader) >= 0;
-				const bool scoped = InScope(a_shader, [&] {
-					WithEffect(a_shader, false, covered ? IneligibleExplicit(a_geometry) : std::string_view{}, [&] { func(a_shader, a_geometry); });
+				EngineCall([&] {
+					const bool scoped = InScope(a_shader, [&] {
+						WithEffect(a_shader, false, covered ? IneligibleExplicit(a_geometry) : std::string_view{}, [&] { func(a_shader, a_geometry); });
+					});
+					if (!scoped)
+						func(a_shader, a_geometry);
 				});
-				if (!scoped)
-					func(a_shader, a_geometry);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -1851,9 +1927,11 @@ namespace RenderGraph::Engine::ImageSpace
 					func(a_shader, a_x, a_y, a_z);
 					return;
 				}
-				const bool scoped = InScope(a_shader, [&] { WithEffect(a_shader, true, IneligibleDispatch(), [&] { func(a_shader, a_x, a_y, a_z); }); });
-				if (!scoped)
-					func(a_shader, a_x, a_y, a_z);
+				EngineCall([&] {
+					const bool scoped = InScope(a_shader, [&] { WithEffect(a_shader, true, IneligibleDispatch(), [&] { func(a_shader, a_x, a_y, a_z); }); });
+					if (!scoped)
+						func(a_shader, a_x, a_y, a_z);
+				});
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -1925,11 +2003,24 @@ namespace RenderGraph::Engine::ImageSpace
 							return;
 					} else
 						Flush();
+					EngineDraw([&] { func(a_renderer, a_shape, a_start, a_triangles); });
+					return;
 				}
 				func(a_renderer, a_shape, a_start, a_triangles);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+
+		/**
+		 * @brief Whether a return address is in the volumetric lighting's render function (SE 100309, AE 107023; its dispatches are at
+		 * AE +0x31C and +0x48B): within its first 0x800 bytes.
+		 */
+		bool FromVolumetricLighting(const void* a_return)
+		{
+			static const std::uintptr_t start = REL::RelocationID(100309, 107023).address();
+			const auto at = reinterpret_cast<std::uintptr_t>(a_return);
+			return at > start && at - start < 0x800;
+		}
 
 		/**
 		 * @brief BSGraphics::Renderer::DispatchCSShader (75532 / 77329): the current compute effect's dispatch is taken; any other
@@ -1946,6 +2037,16 @@ namespace RenderGraph::Engine::ImageSpace
 							return;
 					} else
 						Flush();
+					// The volumetric lighting's own dispatches (AE 107023 +0x31C and +0x48B, SE 100309: the generate and raymarch compute
+					// with CS's ISVolumetricLighting* replacements) call DispatchCSShader directly, outside every ImageSpace call. They stay
+					// the engine's (imagespace.md, "What stays the engine's").
+					if (FromVolumetricLighting(_ReturnAddress())) {
+						Latch::EngineDraws scope(VolumetricReason());
+						func(a_renderer, a_shader, a_x, a_y, a_z);
+						return;
+					}
+					EngineDraw([&] { func(a_renderer, a_shader, a_x, a_y, a_z); });
+					return;
 				}
 				func(a_renderer, a_shader, a_x, a_y, a_z);
 			}
