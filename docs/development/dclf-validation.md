@@ -248,7 +248,7 @@ switches file too (`Util::SwitchFile`).
 | `CS_NO_PASS_PREFETCH` | `Hooks.cpp`, env | `1`: no next-pass prefetch detour on `BSBatchRenderer::RenderPassImmediately` (an A/B escape hatch). |
 | `CS_PASS_SKIP`, `CS_PASS_ROUNDS` | `GpuEventTimers.cpp`, env | Cost attribution by dropping events' draws ([Cost attribution](#cost-attribution-cutting-pieces-out)); `CS_PASS_ROUNDS` is how many times the list is cycled (default 2). |
 | `CS_PASS_SAMPLE` | `GpuEventTimers.cpp`, env | Set: a sampler thread profiles the main thread during `CS_PASS_SKIP` runs and logs each thread's share of wall time (`[PassSkip] thread ...`). |
-| `CS_GPU_EVENT_STATS` | `GpuEventTimers.cpp`, env | `<event>|<event>...`: D3D11 pipeline statistics for those engine events, logged every `CS_GPU_EVENT_TIMERS` frames (`[GpuStats]`). |
+| `CS_GPU_EVENT_STATS` | `GpuEventTimers.cpp`, env | `<event>\|<event>...`: D3D11 pipeline statistics for those engine events, logged every `CS_GPU_EVENT_TIMERS` frames (`[GpuStats]`). |
 | `CS_GPU_OP_PROBE` | `GpuEventTimers.cpp`, env | Set: each D3D11 call is an event of its own, unless it sits inside a native batch. |
 | `CS_GPU_IDLE_MIN_GAP_US` | `GpuIdleTrace.cpp`, env | The shortest GPU idle gap `CS_GPU_IDLE_TRACE` counts, in microseconds (default 50). |
 | `CS_SHADER_DXC` | `Utils/DxcShaderStore.cpp`, env | A regex over `<path>:<target>` choosing the game shaders built with DXC; unset: the image-space blurs only; empty: none ([dxc-game-shaders.md](./dxc-game-shaders.md)). |
