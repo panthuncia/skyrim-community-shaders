@@ -208,7 +208,9 @@ always takes the engine's path; it shows only that the hooks pass it through (no
 To trigger a Bink on the main thread in a test, use the harness command `dclf:bink=BGS_Logo.bik` in
 `CS_DCLF_TEST_COMMANDS`. The console's `PlayBink` does nothing there (the harness runs console commands as a compiled
 script), so `dclf:bink` calls `MoviePlayer::PlayMovie` (SE 87918, AE 90291) on the BGSMoviePlayer singleton (SE 525733, AE
-412214) with the console's defaults, from an SKSE task on the main thread. It blocks the main thread for the movie's 7 seconds; the test harness's frame count does not move
+412214) with the console's defaults, on the main thread at its next frame-job wait (SE 34554, AE 35409, hooked by
+`Bink::RequestPlay`; SKSE tasks run on job threads in this setup). It logs `[ORG] Bink: playing <file> on thread <id> (main
+thread: true)`. It blocks the main thread for the movie's 7 seconds; the test harness's frame count does not move
 meanwhile.
 
 Scenarios (`tools/cs-ab/scenarios/`):
