@@ -286,6 +286,11 @@ Each anchor's rule:
   after the present hooks (the deferred composite), after other mods' Present hooks and frame generation's hudless capture.
   Before the real present. It runs only on frames HDR composites (HDR on, the window usable), and only when
   `CS_ORG_HDR_DISPLAY=1`: HDRDisplay calls it. The UI texture is complete here, and the back buffer is not yet presented.
+- **Interface.** At each Scaleform display's `EndDisplay` that the graph draws (`RenderGraph/Engine/Scaleform`, P5.10), on the
+  main thread, inside `UI::DrawInterface`: after FrameGeneration's hudless capture, before Present. It runs once per display
+  (the HUD, each menu, the cursor), so several times a frame, and only with `CS_ORG_SCALEFORM=1`. Its passes draw onto the
+  target the display began on (render target 0, the framebuffer or HDR's UI texture) with kMAIN's depth-stencil for masks.
+  A late anchor: frame generation or the present may follow it.
 
 Keys used so far:
 
@@ -312,6 +317,7 @@ Keys used so far:
   EarlyPrepass.
 - Grass Collision (`CS_ORG_GRASS_COLLISION`): 200 (copy the colliders) and 201 (update the texture) at EarlyPrepass.
 - CS's ImGui (`CS_ORG_IMGUI`): 1000 at Overlay, last.
+- Scaleform (`CS_ORG_SCALEFORM`): 100 upward at Interface, one pass per surface (target and depth pair); one draws per run.
 - The Screenshot feature (`CS_ORG_SCREENSHOT`): 100 (the readback copy) at Capture.
 - HDR Display (`CS_ORG_HDR_DISPLAY`): 100 (the output composite), 101 (the copy into the back buffer, not in the owned frame)
   and 102 (the UI texture's clear) at HDROutput.
@@ -1142,3 +1148,22 @@ Keys used so far:
   layouts need their strides at pipeline creation, so the key carries the geometry's strides unless the pipeline takes
   dynamic strides.
 - **Found by:** P4.6 (2026-11-10).
+
+### Drawing a UI library's batches on the graph
+
+- **Need:** a 2D renderer (Scaleform, another UI library, a plugin's HUD) draws many small batches per frame, each with its
+  own blend mode, stencil mask state, scissor and textures, interleaved with D3D11 work, and wants them on the graph without a
+  pipeline per batch made at record time.
+- **Who:** the engine's Scaleform (P5.10); HUD plugins that draw through Scaleform's renderer or their own D3D11 code.
+- **Where it fits:** the Interface anchor and the pattern P5.10 uses: a CPU capture of the batches, one staging buffer per
+  display holding the geometry and a constants record per draw (read by `SV_VertexID`), and a `RasterProgram` per (shader
+  pair, blend, stencil, formats) made on first use. What would make it cheaper:
+  - **Topology in `RasterProgram`.** Its pipelines are triangle lists only, so Scaleform's line strips stay on D3D11.
+  - **Pipelines keyed at record time** for raster programs (P0.6 has them for ORG's own pipelines): a blend or stencil state
+    per batch without a program object each.
+  - **Several runs of an anchor a frame are slots.** Each display is an epoch, and each uses a frame slot. A per-frame batch
+    (one epoch at the end of `UI::DrawInterface`) needs the D3D11 work between displays (menu 3D, Bink, other mods) on the
+    graph first.
+  - **Render ownership on another thread** (the loading screen, P5.12): anchors run on the main thread only, so a UI drawn
+    from the loading-screen thread stays on D3D11.
+- **Found by:** P5.10 (2026-11-10).
