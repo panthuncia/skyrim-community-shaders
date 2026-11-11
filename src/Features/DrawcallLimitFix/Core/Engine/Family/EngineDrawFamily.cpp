@@ -7,6 +7,8 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/ConstantMirror.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
 
 #include "Globals.h"
@@ -14,6 +16,8 @@
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "Utils/Logging.h"
+
+#include <Render/PassBuilders.h>
 
 #include <algorithm>
 #include <cstring>
@@ -215,22 +219,103 @@ namespace DCLF::Family
 		return SlotResult::Ok;
 	}
 
-	bool PublishedSlot(const ID3D11ShaderResourceView* a_view, std::string& a_id, std::uint32_t& a_index)
+	std::string EngineTargetId(RE::RENDER_TARGET a_target)
 	{
-		a_id = PublishedResources::ExportedId(a_view);
-		return !a_id.empty() && PublishedResources::ShaderResourceIndex(a_id, a_index);
+		return std::format("Engine::{}", magic_enum::enum_name(a_target));
 	}
 
-	std::string DescribeChange(const PublishedIds& a_from, const PublishedIds& a_to)
+	std::string EngineTargetId(RE::RENDER_TARGET_DEPTHSTENCIL a_target)
+	{
+		return std::format("Engine::Depth::{}", magic_enum::enum_name(a_target));
+	}
+
+	std::string EngineTargetId(RE::RENDER_TARGET_CUBEMAP a_target)
+	{
+		return std::format("Engine::Cubemap::{}", magic_enum::enum_name(a_target));
+	}
+
+	std::vector<std::string> RegisteredIdsAt(std::span<const std::uint32_t> a_registers)
+	{
+		std::vector<std::string> ids;
+		const auto add = [&](std::string_view a_id) {
+			if (!a_id.empty() && std::ranges::find(ids, a_id) == ids.end())
+				ids.emplace_back(a_id);
+		};
+		for (const auto& texture : Extensions::RegisteredFrameTextures())
+			if (std::ranges::find(a_registers, texture.textureRegister) != a_registers.end())
+				for (const auto id : texture.graphResources)
+					add(id);
+		for (const auto& buffers : Extensions::RegisteredFrameGraphBuffers())
+			for (std::uint32_t i = 0; i < buffers.count; ++i)
+				if (std::ranges::find(a_registers, buffers.firstRegister + i) != a_registers.end())
+					add(buffers.resources[i]);
+		return ids;
+	}
+
+	const char* ReasonOf(InputResult a_result)
+	{
+		switch (a_result) {
+		case InputResult::NotListed:
+			return "it is not among the view's published inputs";
+		case InputResult::NotDeclared:
+			return "no build of its client's graph has declared it yet";
+		case InputResult::NoView:
+			return "it has no whole-resource shader resource view";
+		default:
+			return "none";
+		}
+	}
+
+	void PublishedInputs::Add(std::string_view a_id)
+	{
+		if (!a_id.empty() && std::ranges::find(ids, a_id) == ids.end())
+			ids.emplace_back(a_id);
+	}
+
+	void PublishedInputs::Add(std::span<const std::string> a_ids)
+	{
+		for (const auto& id : a_ids)
+			Add(id);
+	}
+
+	void PublishedInputs::Declare(org::RenderPassBuilder& a_builder)
+	{
+		const std::span<const org::SrvView> noViews{};
+		const auto known = declared.load(std::memory_order_acquire);
+		std::vector<std::string_view> added;
+		for (const auto& id : ids) {
+			// Only ids every graph registers: declaring another would fail the build.
+			if (!PublishedResources::IsRegistered(id))
+				continue;
+			a_builder.ShaderResource(org::ResourceIdentifier(id), noViews);
+			if (!known || !known->contains(id))
+				added.push_back(id);
+		}
+		if (added.empty())
+			return;
+		auto next = known ? std::make_shared<PublishedIds>(*known) : std::make_shared<PublishedIds>();
+		for (const auto id : added)
+			next->emplace(id);
+		declared.store(std::move(next), std::memory_order_release);
+	}
+
+	InputResult PublishedInputs::Resolve(std::string_view a_id, std::uint32_t& a_index) const
+	{
+		if (a_id.empty() || std::ranges::find(ids, a_id) == ids.end())
+			return InputResult::NotListed;
+		// The declared check comes first: an undeclared id must never be read.
+		const auto known = declared.load(std::memory_order_acquire);
+		if (!known || !known->contains(a_id))
+			return InputResult::NotDeclared;
+		return PublishedResources::ShaderResourceIndex(a_id, a_index) ? InputResult::Graph : InputResult::NoView;
+	}
+
+	std::string PublishedInputs::Describe() const
 	{
 		std::string out;
-		for (const auto& id : a_to)
-			if (!a_from.contains(id))
-				out += std::format("{}+{}", out.empty() ? "" : ", ", id);
-		for (const auto& id : a_from)
-			if (!a_to.contains(id))
-				out += std::format("{}-{}", out.empty() ? "" : ", ", id);
-		return out;
+		for (const auto& id : ids)
+			out += std::format("{}{}", out.empty() ? "" : ", ", id);
+		return out.empty() ? std::string("none") : out;
 	}
 
 	std::uint32_t SlotSampler(std::uint32_t a_addressMode, std::uint32_t a_filterMode, Owners& a_owners)

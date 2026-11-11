@@ -8,7 +8,6 @@
 
 #include "Globals.h"
 #include "RenderGraph/FrameAnchors.h"
-#include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
@@ -21,9 +20,9 @@
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
 #include <Resources/ExternalTextureResource.h>
 
+#include <array>
 #include <atomic>
 #include <cstring>
-#include <set>
 #include <string_view>
 
 namespace DCLF::Features::ShadowMask::ShadowMaskDraws
@@ -54,10 +53,11 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			// the anchor that another client keeps draws nothing of this client's older run.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
 			std::shared_ptr<org::ExternalTextureResource> target;  // kSHADOW_MASK, as imported at the registration
+			// Every published id the view's draws can read, fixed here (ListInputs). Each build declares the registered ones.
+			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.
 			std::shared_ptr<const Run> run;
 			bool pending = false;
-			bool shapeLogged = false;
 			bool targetLogged = false;
 			std::atomic<std::uint64_t> executed{ 0 };  // runs submitted with this client's pass (its executed callback)
 		};
@@ -86,12 +86,9 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				Bindings bindings{};
 				bindings.shared = SharedConstants::Declare(a_builder);
 				bindings.target = a_builder.RenderTarget(client->target).View();
-				// The slots' published textures: declared for their order only (the draws' latches carry their indices), each id once.
-				// An id stays registered once published, so every graph built since can declare it.
-				std::set<std::string_view> declared;
-				for (const auto& id : client->shape.slotIds)
-					if (PublishedResources::IsRegistered(id) && declared.insert(id).second)
-						static_cast<void>(a_builder.ShaderResource(org::ResourceIdentifier(id)).View());
+				// The published inputs, declared for their order only: the draws' latches carry their indices. Every registered one is
+				// declared, read this frame or not, so a new Publish needs no new client.
+				client->inputs.Declare(a_builder);
 				return bindings;
 			}
 
@@ -162,11 +159,20 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 					FrameAnchors::Unregister(client->id);
 		}
 
-		/** @brief What differs between two shapes, in words, for a log. */
-		std::string DescribeChange(const Shape& a_from, const Shape& a_to)
+		/**
+		 * @brief Every published id a view's draws can read, listed when its client is made: the engine depths the slots hold
+		 * (shadow-mask.md, "The shader": the scene depth at t2, the light's shadow maps at t3 and t4, the focus shadow maps at t6) and
+		 * what the ported features publish as the scene depth (DCLF's registry at t17: Terrain Blending's blended depth). An export of an
+		 * id not listed here keeps its batch on the engine, logged once with the id: add the id here.
+		 */
+		void ListInputs(Family::PublishedInputs& a_inputs)
 		{
-			const auto out = Family::DescribeChange(a_from.slotIds, a_to.slotIds);
-			return out.empty() ? std::string("no input changed") : out;
+			using Depth = RE::RENDER_TARGET_DEPTHSTENCIL;
+			for (const auto depth : { Depth::kMAIN, Depth::kMAIN_COPY, Depth::kPOST_ZPREPASS_COPY, Depth::kSHADOWMAPS, Depth::kSHADOWMAPS_ESRAM,
+					 Depth::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM, Depth::kFOCUS_NEO })
+				a_inputs.Add(Family::EngineTargetId(depth));
+			constexpr std::array<std::uint32_t, 1> kSceneDepthRegister{ 17 };
+			a_inputs.Add(Family::RegisteredIdsAt(kSceneDepthRegister));
 		}
 
 		/** @brief The client of a_shape's view, registered with the anchor for a_shape. Null, logged, when the target cannot be imported. */
@@ -189,6 +195,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				logger::warn("[DCLF] shadow mask: kSHADOW_MASK cannot be imported; the {} stays the engine's", client->id);
 				return nullptr;
 			}
+			ListInputs(client->inputs);
 
 			FrameAnchors::ClientDesc desc{};
 			desc.id = client->id;
@@ -222,10 +229,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				logger::warn("[DCLF] shadow mask: the {} client could not be registered; those shadow masks stay the engine's", client->id);
 				return nullptr;
 			}
-			std::string published;
-			for (const auto& id : a_shape.slotIds)
-				published += fmt::format("{}{}", published.empty() ? "" : ", ", id);
-			logger::info("[DCLF] shadow mask: the {} client registered (published inputs: {})", client->id, published.empty() ? "none" : published);
+			logger::info("[DCLF] shadow mask: the {} client registered (published inputs it may read: {})", client->id, client->inputs.Describe());
 			return client;
 		}
 
@@ -270,13 +274,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 		const auto index = static_cast<std::size_t>(a_shape.view);
 		auto& client = state.clients[index];
 		if (client) {
-			if (client->shape != a_shape) {
-				// No client is registered again during play (a rebuild on the frame's path): the batch stays the engine's.
-				if (!std::exchange(client->shapeLogged, true))
-					logger::warn("[DCLF] shadow mask: the {} batch's published inputs changed since its client registered ({}); those batches stay the engine's",
-						client->id, DescribeChange(client->shape, a_shape));
-				return false;
-			}
+			// A client is made once for its view: its published inputs are a fixed list, so no later batch needs another.
 			// kSHADOW_MASK made again (a resolution change) is another import: those batches stay the engine's until the next start.
 			if (FrameAnchors::EngineTarget(kShadowMaskTarget) != client->target) {
 				if (!std::exchange(client->targetLogged, true))
@@ -290,6 +288,14 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 		client = MakeClient(a_shape);
 		state.refused[index] = !client;
 		return false;
+	}
+
+	Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index)
+	{
+		if (a_view >= View::Count)
+			return Family::InputResult::NotListed;
+		const auto& client = GetState().clients[static_cast<std::size_t>(a_view)];
+		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
 	}
 
 	bool CanRun(View a_view)

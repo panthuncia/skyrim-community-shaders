@@ -148,13 +148,20 @@ namespace DCLF::Features::Sky
 			return -1;
 		}
 
+		/** @brief The published ids a batch's headers and t17 export (empty: none), read once the view's client is ready. */
+		struct PublishedInputIds
+		{
+			std::array<std::string, kHeaderRegisters.size()> headers;
+			std::string sceneDepth;
+		};
+
 		/**
 		 * @brief The batch's view, targets and inputs from the shadow state and CS's bindings (what its draws would bind): a water reflection
-		 * face, or the main camera's GBuffer pass. The published inputs go into a_shape, the others' heap indices into a_run. False for
-		 * anything else (another accumulator, a cubemap of another kind, the forward pass, an input that cannot be read), which stays the
-		 * engine's.
+		 * face, or the main camera's GBuffer pass. The targets go into a_shape, the inputs' heap indices into a_run, and the ids of the
+		 * inputs that are published exports into a_published (ReadInputs reads them once the client is ready). False for anything else
+		 * (another accumulator, a cubemap of another kind, the forward pass, an input that cannot be read), which stays the engine's.
 		 */
-		bool CurrentShape(const void* a_accumulator, Shape& a_shape, Run& a_run, Capture& a_capture)
+		bool CurrentShape(const void* a_accumulator, Shape& a_shape, Run& a_run, PublishedInputIds& a_published, Capture& a_capture)
 		{
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 			auto* renderer = globals::game::renderer;
@@ -178,7 +185,7 @@ namespace DCLF::Features::Sky
 						result == Family::HeaderResult::Buffer ? "a D3D11 buffer" : GpuTextures::DescribeFailure(view, kHeaderRegisters[h], failure));
 					return false;
 				}
-				a_shape.headerIds[h] = header.publishedId;
+				a_published.headers[h] = std::move(header.publishedId);
 				a_run.headerIndices[h] = header.index;
 			}
 			a_shape.depth = static_cast<std::int32_t>(rss.depthStencil);
@@ -212,18 +219,22 @@ namespace DCLF::Features::Sky
 				if (!a_capture.colourFormats[i])
 					return false;
 			}
-			// t17: the scene depth CS binds, a published graph texture's export (Terrain Blending's ORG path) or an engine depth target.
-			// When it is the depth target itself, kMAIN's depth (the same depth, VanillaBinding::BindSkyResources' choice).
+			// t17: the scene depth CS binds, an engine depth target or a published graph texture's export (Terrain Blending's ORG path).
+			// An engine depth is checked first: the client imports it as a target, and that import publishes it, so a later batch would
+			// see it as an export. When it is the depth target itself, kMAIN's depth (the same depth, VanillaBinding::BindSkyResources'
+			// choice).
 			auto* sceneDepth = Util::GetCurrentSceneDepthSRV(true);
-			a_shape.sceneDepthId = sceneDepth ? PublishedResources::ExportedId(sceneDepth) : std::string();
-			a_shape.sceneDepth = a_shape.sceneDepthId.empty() ? DepthOfView(sceneDepth) : -1;
-			if (a_shape.sceneDepth == a_shape.depth) {
+			const auto engineDepth = DepthOfView(sceneDepth);
+			a_shape.sceneDepth = engineDepth;
+			if (a_shape.sceneDepth >= 0 && a_shape.sceneDepth == a_shape.depth) {
 				const auto main = static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
 				a_shape.sceneDepth = main != a_shape.depth ? main : -1;
 			}
+			if (sceneDepth && engineDepth < 0)
+				a_published.sceneDepth = PublishedResources::ExportedId(sceneDepth);
 			// Neither (Terrain Blending's D3D11 depth): the view itself, read by heap index. Without it the sun's depth test read zero and
 			// hid it.
-			if (sceneDepth && a_shape.sceneDepthId.empty() && DepthOfView(sceneDepth) < 0) {
+			if (sceneDepth && engineDepth < 0 && a_published.sceneDepth.empty()) {
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
 				auto binding = GpuTextures::Get().ResolveBinding(sceneDepth, GpuTextures::Tag(GpuTextures::Source::FrameSlot, 17), &failure);
 				if (binding.index == GpuTextures::kInvalid) {
@@ -234,6 +245,27 @@ namespace DCLF::Features::Sky
 				a_run.owners.push_back(std::move(binding.owner));
 			}
 			return a_capture.depthFormat != 0;
+		}
+
+		/**
+		 * @brief The published inputs of a batch whose view's client is ready: each read by its id's index (SkyDraws::ReadPublished).
+		 * False, logged once per id and reason, when the client cannot read one yet: the batch is the engine's.
+		 */
+		bool ReadInputs(View a_view, const PublishedInputIds& a_published, Run& a_run)
+		{
+			const auto read = [&](std::uint32_t a_register, const std::string& a_id, std::uint32_t& a_index) {
+				if (a_id.empty())
+					return true;
+				const auto result = SkyDraws::ReadPublished(a_view, a_id, a_index);
+				if (result == Family::InputResult::Graph)
+					return true;
+				Refusals().Report(std::format("a {} batch whose t{} holds '{}'", NameOf(a_view), a_register, a_id), Family::ReasonOf(result));
+				return false;
+			};
+			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h)
+				if (!read(kHeaderRegisters[h], a_published.headers[h], a_run.headerIndices[h]))
+					return false;
+			return read(17, a_published.sceneDepth, a_run.sceneDepthIndex);
 		}
 
 		/** @brief Which of t0-t2 a technique (BSSkyShader's raw index, ShaderCache::SkyShaderTechniques) samples. */
@@ -567,7 +599,8 @@ namespace DCLF::Features::Sky
 				Family::BeginBatch();
 				Shape shape;
 				auto run = std::make_shared<Run>();
-				if (!CurrentShape(a_accumulator, shape, *run, capture)) {
+				PublishedInputIds published;
+				if (!CurrentShape(a_accumulator, shape, *run, published, capture)) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
@@ -577,6 +610,12 @@ namespace DCLF::Features::Sky
 					// The view's client is joining the graph, or was made for another shape: the engine draws this batch, and the view
 					// probes again once it is ready (the new targets may need other programs).
 					capture.clean[index] = false;
+					SkyDraws::Keep(std::move(run->owners));
+					func(a_accumulator, a_first, a_last, a_flags, a_group);
+					return;
+				}
+				// A published input the client cannot read yet (its first Publish's rebuild has not come): the engine draws the batch.
+				if (!ReadInputs(shape.view, published, *run)) {
 					SkyDraws::Keep(std::move(run->owners));
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;

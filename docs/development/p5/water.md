@@ -113,8 +113,9 @@ header resolver, the async programs, the kept leases and the run step.
   lights, t98) and 18 header handles.
 - **The headers.** Water.hlsl's pixel stage includes Skylighting, the fog, Cloud Shadows, Dynamic Cubemaps, Light Limit Fix, IBL,
   Terrain and Volumetric Shadows, Wetness Effects and the shadow sampling header. Each resource is an `EXTERN` entry. What CS binds there
-  at the batch decides how it is read: a **published** graph resource is declared by the client's pass (its writes are ordered before the
-  water); a D3D11 texture is read by heap index (GpuTextures, resolved per batch, no graph declaration); nothing reads a null
+  at the batch decides how it is read: a **published** graph resource is read by its id's index, which the client's pass declares
+  (its writes are ordered before the water; "Published inputs" below); a D3D11 texture is read by heap index (GpuTextures, resolved
+  per batch, no graph declaration); nothing reads a null
   view of the header's declared kind (`GpuTextures::NullOf`: 2D, 2D array, 3D, cube or a buffer); a **D3D11 buffer** (Light Limit Fix's D3D11 local shadows) cannot be read, so the batch stays the engine's (logged once:
   turn on its feature's ORG path). The checks built every technique with every feature define (below), so no header resource is left
   register-bound.
@@ -124,9 +125,14 @@ header resolver, the async programs, the kept leases and the run step.
 - **Refusals** are logged once per reason, technique and view (`[DCLF] water: the engine draws: a surface draw of technique N: <reason>`,
   `Util::ReasonLog`; a texture that cannot be imported says why, `GpuTextures::DescribeFailure`):
   geometry, too many draws (64), not BSWaterShader, topology, a colour target the client does not import, constants not mirrored yet,
-  state objects, the program, buffer or texture imports, a published texture in a material slot, samplers, another draw path.
+  state objects, the program, buffer or texture imports, a published input the client cannot read, samplers, another draw path.
+- **What the mask reads.** The mask's pixel stage (the Stencil technique) samples no material slot and no header: it writes the normal
+  mask from its positions' derivatives and the motion vectors. So its slots and headers are latched as null views, whatever the engine
+  or CS left bound (`SlotRead`, `HeadersRead`). Before, a probe imported those stale bindings: streamed textures without their full
+  window refused the mask, and published targets (`kHDR_DOWNSAMPLE4`, `kHDR_DOWNSAMPLE6`) changed its shape. The surface never samples
+  t0 (ReflectionTex), which is latched the same way.
 
-### Published material slots
+### Published material slots (history)
 
 With the ImageSpace port and the engine targets on (every p5-all run), the refraction copy and the SSR targets the water samples at
 its material slots are engine targets a graph pass writes, and EngineTargets publishes a target once a graph reader asks for it. A slot
@@ -134,26 +140,54 @@ holding a published export was refused (`a texture slot holds a published graph 
 stayed the engine's in every p5-all run: the residue census's `RT kRAW_WATER DS kMAIN` and Water classes, 3-8 draws a frame
 (`1111-072658-p35-p5-all-census-w3`).
 
-Now (`org-port/w3-misc`) such a slot is read by its id (`Family::PublishedSlot`: the id's whole-resource view index in the draw's
-latch), and the id is part of the view's shape (`Shape::materialIds`, a set of ids, `Family::PublishedIds`): the client's pass declares
-it, so the graph orders the target's write before the water. The ids are learnt by probes: a view's batches before its client exists
-are probes now (they also ask for the programs), and an id stays in the set once seen, so a target sampled on some frames only, or a
-slot that alternates between a target and its swap by frame, does not change the shape. A withheld batch whose
-draw samples a published target its client was not made for falls back as any other refusal. A `published inputs changed since its
-client registered` line now names what changed (`t1 none -> Engine::kMAIN_COPY, ...`): in that census both views logged it once with
-no detail, so its cause is still to read from the next run.
+Then (`org-port/w3-misc`) such a slot was read by its id (the id's whole-resource view index in the draw's latch), and the id was part of the view's shape, learnt by the probes before the client was made. That broke in the p5-all tour
+(2026-11-11): both clients registered at 11:01:31, and the engine targets the surface samples were published after that, when
+ImageSpace's port and the first SSR and cubemap uses asked for them (11:01:34 on). The next batches' shapes differed, and the surface
+stayed the engine's for the session (`published inputs changed since its client registered (material slots +Engine::Cubemap::kREFLECTIONS,
++Engine::Depth::kPOST_ZPREPASS_COPY, +Engine::kSSR, +Engine::kSSR_RAW)`), as did the mask (`+Engine::kHDR_DOWNSAMPLE4,
++Engine::kHDR_DOWNSAMPLE6`, stale bindings it never samples).
+
+### Published inputs
+
+A client's published inputs no longer depend on what is published when its first batch comes. They are fixed when the client is made
+(`Family::PublishedInputs`, `ListInputs` in `WaterDraws.cpp`): every id the view's draws can read.
+
+- **The surface:** the ids DCLF's registry lists at the headers' registers (the ported features' frame textures and frame graph
+  buffers: Light Limit Fix's lights and local shadows, the fog's volumes, Cloud Shadows, Dynamic Cubemaps, Skylighting, Terrain
+  Shadows, IBL, Volumetric Shadows' copy, Terrain Blending's depth at t17), the engine depths CS binds at a header
+  (`Engine::Depth::kPOST_ZPREPASS_COPY`, `kMAIN_COPY`, `kPRECIPITATION_OCCLUSION_MAP` at t70), and the engine targets the material
+  slots hold (`Engine::kMAIN_COPY`, `kREFRACTION_NORMALS`, `kWATER_DISPLACEMENT` and its swap, `kWATER_FLOW`, `kSSR`, `kSSR_RAW`,
+  `kSSR_BLURRED0`, `Engine::Cubemap::kREFLECTIONS`).
+- **The mask:** none (it reads no slot and no header).
+
+At each build of the EngineDraws graph the client's pass declares a read, for order only, of every listed id that every graph
+registers (`PublishedResources::IsRegistered`), and records it as declared. An id stays registered once published, so the set only
+grows, and it grows on an id's first Publish, which rebuilds every graph anyway: the client is never registered again for it. This is
+the rule DCLF's frame textures follow (`Extensions::DeclareGraphTextures`, the commit 59a80e32 "one rule for graph textures").
+
+A batch then chooses per run. A header or slot bound to a published export is read by its id's index
+(`PublishedResources::ShaderResourceIndex`, in the run's header indices or the draw's latch) once a build declared the id; the record
+re-records when a header's index changes (the run's revision). Until then, and for an id not listed, the batch stays the engine's,
+logged once per id (`[DCLF] water: the engine draws: a surface batch whose t70 holds '<id>', ...` or `a surface draw's t3 holds
+'<id>', ...`, with `no build of its client's graph has declared it yet` or `it is not among the view's published inputs`). A new id
+in that log belongs in `ListInputs`. Before the client is in the built graph, probes accept any export: they only ask for programs
+and constant copies.
+
+The shape is now the view alone, so `Ready` no longer compares inputs and no `published inputs changed` line exists.
 
 **Not the water's:** the census's Utility draws into `kREFRACTION_NORMALS` (vs `0x61b`) are Lighting objects' refraction pass, DCLF's
 refraction class (flush.md, "DCLF's share").
 
 ### Graph rebuilds
 
-- **A client is made once per view**, after its shape (the headers' published ids) held for 30 batches, so the ported features'
-  first-frame publications have settled. That registration is the family's only graph build; with DCLF it happens at DCLF's build point.
-- **Nothing registers again during play.** A batch whose published headers or material slots differ from its client's stays the engine's (logged once, with what changed), a
-  D3D11 header input changes only a heap index in the recording (re-recorded, not rebuilt), and the targets are imported once (the
-  mask's alternating normals target is two imports, chosen per draw).
-- Toggling a ported feature's ORG path mid-session therefore leaves the water on the engine until the next start.
+- **A client is made once per view**, after 30 probe batches (its programs and constant copies are asked for first). That
+  registration is the family's only graph build of its own; with DCLF it happens at DCLF's build point.
+- **Nothing registers again during play.** The published inputs are a fixed list (above): a newly published one joins the declared
+  reads at the rebuild its first Publish causes for every graph, not through a new client. A header's input changes only a heap index
+  in the recording (re-recorded, not rebuilt), and the targets are imported once (the mask's alternating normals target is two
+  imports, chosen per draw).
+- Toggling a ported feature's ORG path mid-session: a withdrawn id stays registered and declared, its export no longer matches the
+  bound view, and the batch reads the D3D11 view by heap index.
 
 ### Accepted differences
 
@@ -188,8 +222,8 @@ LIGHT_LIMIT_FIX reads nothing (no push block). Sky's ORG build still passes (its
 1. Build, then `water-org0.env` and `water-org1.env` (`tools/cs-ab/scenarios/`): Riverwood at 13:00, the river by the mill from its south
    bank (clear, then rain with `fw c821f`, SkyrimOvercastRain in Skyrim.esm), a shot under the river (z -420; the water plane is at -250
    there), then Dragonsreach. Both set `CS_ORG_LIGHT_LIMIT_FIX_SHADOWS=1` (the water reads t102 only as a published buffer).
-2. Log: `[DCLF] water: on (CS_ORG_WATER=1)`, `hooks installed`, `the cs.water.mask client registered (published inputs: ...)` and
-   `cs.water.surface`, `[DCLF] water: built the program for descriptor ...`, `every mask water draw can be drawn by the graph` (and
+2. Log: `[DCLF] water: on (CS_ORG_WATER=1)`, `hooks installed`, `the cs.water.mask client registered (published inputs it may read:
+   none)` and `cs.water.surface` (with its list), no `published inputs changed`, `[DCLF] water: built the program for descriptor ...`, `every mask water draw can be drawn by the graph` (and
    `surface`), `the first cs.water.surface run drawn by the graph`. No `back to the engine's draws`, no `a withheld batch was not
    drawn this frame`, no `the engine draws` after the first frames, no `SPIR-V build of Water.hlsl` errors, no `[E]` lines but the known EFFECTS11 one.
 3. Shots against water-org0's: the river's colour, reflections (sky and banks), refraction and depth fade, the flow, rain ripples

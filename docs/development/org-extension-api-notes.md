@@ -1485,12 +1485,13 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   published depends on which ports run and which readers asked for them, and it is only known at the draw.
 - **Who:** the water and shadow mask families (`Family::SlotTexture` answers `Published`); any plugin that re-issues an engine draw
   whose inputs the graph may own.
-- **Where it fits:** `Family::PublishedSlot` gives the id and its whole-resource view index; the family's shape holds the ids its draws
-  sampled (`Family::PublishedIds`, a set, so a slot alternating between a target and its swap keeps one shape), learnt by probes
-  before its client is made and kept once seen, and its pass declares the reads for their order only. A graph-level
-  "this pass reads whatever published resources its draws name, resolved at execution" would let the shape stay fixed and remove the
-  learning window; today a target published after the client is made keeps that view on the engine for the session.
-- **Found by:** the w3 misc lane (2026-11-11, `docs/development/p5/water.md` "Published material slots", `p5/shadow-mask.md`).
+- **Where it fits:** `Family::PublishedInputs`: each family lists, when its client is made, every id its draws can read (DCLF's
+  registry at its header registers, and the engine targets its slots hold). Its pass declares every listed id that is registered at
+  each build, for order only, and a batch reads an export by its id's index once a build declared it. An id's first Publish rebuilds
+  every graph, so a target published after the client is made joins at that rebuild, with no new client. The list is the gap: an
+  export of an id not on it keeps its batch on the engine (logged once with the id). A graph-level "this pass reads whatever published
+  resources its draws name, resolved at execution" would remove the list.
+- **Found by:** the w3 misc lane (2026-11-11, `docs/development/p5/water.md` "Published inputs", `p5/shadow-mask.md`).
 
 ### An engine pass whose deferred clear its draw function would have issued
 

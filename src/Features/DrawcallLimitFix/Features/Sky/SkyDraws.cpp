@@ -22,9 +22,11 @@
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
 #include <Resources/ExternalTextureResource.h>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstring>
+#include <string_view>
 
 namespace DCLF::Features::Sky::SkyDraws
 {
@@ -78,6 +80,8 @@ namespace DCLF::Features::Sky::SkyDraws
 			// Null views of the dimensions the push block's handles declare, for an input the batch does not have.
 			std::uint32_t null2D = GpuTextures::kInvalid, nullCube = GpuTextures::kInvalid;
 			Family::Owners nullOwners;
+			// Every published id the view's draws can read, fixed here (ListInputs). Each build declares the registered ones.
+			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.
 			std::shared_ptr<const Run> run;
 			bool pending = false;
@@ -92,9 +96,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			std::array<org::DeclaredViewToken, kFaces> faces{};
 			std::array<std::array<org::DeclaredViewToken, kFaces>, kCloudLayers> layers{};
 			org::DeclaredViewToken depth{}, sceneDepth{}, cloudShadows{};
-			std::array<org::DeclaredViewToken, kHeaderRegisters.size()> headers{};
 			bool hasDepth = false, hasSceneDepth = false, hasCloudShadows = false, hasLayers = false;
-			std::array<bool, kHeaderRegisters.size()> hasHeaders{};
 		};
 
 		struct Frame
@@ -134,18 +136,14 @@ namespace DCLF::Features::Sky::SkyDraws
 				} else {
 					bindings.depth = a_builder.DepthReadWrite(c.depth).View();
 					bindings.hasDepth = true;
-					if (part == Part::Main && (c.sceneDepth || !c.shape.sceneDepthId.empty())) {
-						bindings.sceneDepth = c.sceneDepth ? a_builder.ShaderResource(c.sceneDepth).View() :
-						                                     a_builder.ShaderResource(org::ResourceIdentifier(c.shape.sceneDepthId)).View();
+					if (part == Part::Main && c.sceneDepth) {
+						bindings.sceneDepth = a_builder.ShaderResource(c.sceneDepth).View();
 						bindings.hasSceneDepth = true;
 					}
 				}
-				for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
-					if (c.shape.headerIds[h].empty())
-						continue;
-					bindings.headers[h] = a_builder.ShaderResource(org::ResourceIdentifier(c.shape.headerIds[h])).View();
-					bindings.hasHeaders[h] = true;
-				}
+				// The published inputs, declared for their order only: the run carries their indices. Every registered one is declared,
+				// read this frame or not, so a new Publish needs no new client.
+				client->inputs.Declare(a_builder);
 				if (c.shape.cloudShadows) {
 					bindings.cloudShadows = a_builder.ShaderResource(org::ResourceIdentifier(std::string(ORGCloudShadows::kOcclusionId))).View();
 					bindings.hasCloudShadows = true;
@@ -178,8 +176,7 @@ namespace DCLF::Features::Sky::SkyDraws
 				                                                             c.null2D;
 				block.sharedDepth = block.depth;
 				block.cloudShadows = a_bindings.hasCloudShadows ? a_recording.Index(a_bindings.cloudShadows) : c.nullCube;
-				for (std::size_t h = 0; h < block.headers.size(); ++h)
-					block.headers[h] = a_bindings.hasHeaders[h] ? a_recording.Index(a_bindings.headers[h]) : run.headerIndices[h];
+				block.headers = run.headerIndices;
 				const std::uint32_t face = run.face < kFaces ? run.face : 0;
 				const std::uint32_t slot = a_recording.FrameSlot();
 
@@ -251,6 +248,19 @@ namespace DCLF::Features::Sky::SkyDraws
 			Family::KeptOwners kept;
 		};
 
+		/**
+		 * @brief Every published id a view's draws can read, listed when its client is made: what the ported features publish at the
+		 * headers' registers and at t17 (DCLF's registry: IBL's, Dynamic Cubemaps' and Terrain Blending's ids). Cloud Shadows'
+		 * occlusion is declared on its own (Shape::cloudShadows), and an engine depth at t17 is imported as a target. An export of an id
+		 * not listed here keeps its batch on the engine, logged once with the id: add the id here.
+		 */
+		void ListInputs(Family::PublishedInputs& a_inputs)
+		{
+			constexpr std::array<std::uint32_t, kHeaderRegisters.size() + 1> kRegisters{ kHeaderRegisters[0], kHeaderRegisters[1], kHeaderRegisters[2],
+				kHeaderRegisters[3], 17 };
+			a_inputs.Add(Family::RegisteredIdsAt(kRegisters));
+		}
+
 		DrawsState& GetState()
 		{
 			static DrawsState state;
@@ -318,6 +328,7 @@ namespace DCLF::Features::Sky::SkyDraws
 					return nullptr;
 				}
 			}
+			ListInputs(client->inputs);
 			client->depth = a_shape.depth >= 0 ? FrameAnchors::EngineDepth(static_cast<std::uint32_t>(a_shape.depth)) : nullptr;
 			if (!client->depth) {
 				logger::warn("[DCLF] sky: the depth target {} cannot be imported; the sky stays the engine's", a_shape.depth);
@@ -376,13 +387,9 @@ namespace DCLF::Features::Sky::SkyDraws
 				logger::warn("[DCLF] sky: the {} client could not be registered; the sky stays the engine's", client->id);
 				return nullptr;
 			}
-			std::string published;
-			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h)
-				if (!a_shape.headerIds[h].empty())
-					published += fmt::format(", t{} {}", kHeaderRegisters[h], a_shape.headerIds[h]);
-			logger::info("[DCLF] sky: the {} client registered (depth {}, scene depth {}{}, cloud shadows {}, cloud layers {}{})", client->id, a_shape.depth,
-				a_shape.sceneDepth, a_shape.sceneDepthId.empty() ? "" : " " + a_shape.sceneDepthId, a_shape.cloudShadows ? "on" : "off",
-				a_shape.clouds ? "the graph's" : "the engine's", published);
+			logger::info("[DCLF] sky: the {} client registered (depth {}, scene depth {}, cloud shadows {}, cloud layers {}, published inputs it may read: {})",
+				client->id, a_shape.depth, a_shape.sceneDepth, a_shape.cloudShadows ? "on" : "off", a_shape.clouds ? "the graph's" : "the engine's",
+				client->inputs.Describe());
 			return client;
 		}
 
@@ -435,10 +442,10 @@ namespace DCLF::Features::Sky::SkyDraws
 		if (client) {
 			if (client->shape == a_shape)
 				return FrameAnchors::RequestJoin(client->id, client->anchor);
-			// No client is registered again during play (a graph rebuild on the frame's path): the batch stays the engine's.
+			// No client is registered again during play (a graph rebuild on the frame's path): the batch stays the engine's. Only its
+			// targets can differ: its published inputs are a fixed list.
 			if (!std::exchange(client->shapeLogged, true))
-				logger::warn("[DCLF] sky: the {} batch's targets or published inputs changed since its client registered; those batches stay the engine's",
-					client->id);
+				logger::warn("[DCLF] sky: the {} batch's targets changed since its client registered; those batches stay the engine's", client->id);
 			return false;
 		}
 		if (state.refused[index])
@@ -446,6 +453,14 @@ namespace DCLF::Features::Sky::SkyDraws
 		client = MakeClient(a_shape);
 		state.refused[index] = !client;
 		return false;
+	}
+
+	Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index)
+	{
+		if (a_view >= View::Count)
+			return Family::InputResult::NotListed;
+		const auto& client = GetState().clients[static_cast<std::size_t>(a_view)];
+		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
 	}
 
 	bool CanRun(View a_view)

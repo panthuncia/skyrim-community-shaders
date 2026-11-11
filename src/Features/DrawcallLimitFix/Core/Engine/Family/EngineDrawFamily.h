@@ -13,6 +13,7 @@
 #include "RenderGraph/FrameAnchors.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -26,6 +27,11 @@
 
 struct ID3D11Buffer;
 struct ID3D11ShaderResourceView;
+
+namespace org
+{
+	class RenderPassBuilder;
+}
 
 namespace DCLF::Family
 {
@@ -201,22 +207,72 @@ namespace DCLF::Family
 	SlotResult SlotTexture(ID3D11ShaderResourceView* a_view, GpuTextures::ViewKind a_kind, std::uint32_t a_tag, std::uint32_t& a_index, Owners& a_owners,
 		GpuTextures::ResolveFailure* a_failure = nullptr);
 
-	/**
-	 * @brief A slot SlotTexture answered Published for: the id whose twin exports a_view, and the bindless index of the id's
-	 * whole-resource view (PublishedResources::ShaderResourceIndex). The family's client declares a read of the id (its shape lists
-	 * it), so the graph orders the producer's writes before the draw; the draw's latch carries the index. False when a_view is no
-	 * published export, or its id has no such view.
-	 */
-	bool PublishedSlot(const ID3D11ShaderResourceView* a_view, std::string& a_id, std::uint32_t& a_index);
-
-	/**
-	 * @brief The published ids a family's draws sample at their slots (PublishedSlot), as a view's shape holds them: a set, not a slot
-	 * each, so a slot that alternates between targets frame by frame (a swap pair) keeps one shape.
-	 */
+	/** @brief A set of published ids. */
 	using PublishedIds = std::set<std::string, std::less<>>;
 
-	/** @brief What differs between two id sets, in words ("+Engine::kMAIN_COPY, -..."), for a log; empty when nothing does. */
-	std::string DescribeChange(const PublishedIds& a_from, const PublishedIds& a_to);
+	/** @brief The id EngineTargets publishes an engine target under: "Engine::" and the enum's name ("Engine::kSSR"). */
+	std::string EngineTargetId(RE::RENDER_TARGET a_target);
+	/** @brief An engine depth target's id: "Engine::Depth::" and the enum's name. */
+	std::string EngineTargetId(RE::RENDER_TARGET_DEPTHSTENCIL a_target);
+	/** @brief An engine cubemap target's id: "Engine::Cubemap::" and the enum's name. */
+	std::string EngineTargetId(RE::RENDER_TARGET_CUBEMAP a_target);
+
+	/**
+	 * @brief The published ids Drawcall Limit Fix's registry lists at a_registers: its frame textures' graph ids
+	 * (Api::FrameTexture::graphResources) and its frame graph buffers' (Api::FrameGraphBuffers). The ported features publish what CS
+	 * binds at those registers under these ids. Any thread, after DCLF's install.
+	 */
+	std::vector<std::string> RegisteredIdsAt(std::span<const std::uint32_t> a_registers);
+
+	/** @brief How a client reads a published export bound at a slot or a header (PublishedInputs::Resolve). */
+	enum class InputResult : std::uint8_t
+	{
+		Graph,        // by the id's bindless index: a build of the client's graph declared the id
+		NotListed,    // the id is not among the client's inputs: the batch is the engine's (the family's list should name it)
+		NotDeclared,  // listed, but no build has declared it yet: the rebuild its first Publish asked for will
+		NoView,       // the id has no whole-resource view (PublishedResources::ShaderResourceIndex)
+	};
+
+	/** @brief InputResult in words, for a log. */
+	const char* ReasonOf(InputResult a_result);
+
+	/**
+	 * @brief The published ids a family client's draws can read, fixed when the client is made. They do not depend on which ids are
+	 * published when its first batch comes.
+	 *
+	 * At each build of its anchor's graph, the client's pass declares a read of every listed id that every graph registers
+	 * (PublishedResources::IsRegistered), for order only, and records it as declared. An id stays registered once published, so the
+	 * set only grows. It grows on an id's first Publish, which rebuilds every graph anyway, so the client is never registered again
+	 * for it. A batch reads a published export by its id's index once a build declared the id, and stays the engine's until then.
+	 * DCLF's frame textures follow the same rule (Extensions::DeclareGraphTextures, GraphTextureIndex).
+	 *
+	 * Filled before the client registers, then shared with the client's passes.
+	 */
+	class PublishedInputs
+	{
+	public:
+		/** @brief Lists a_id (once; an empty id is ignored). Before the client registers. */
+		void Add(std::string_view a_id);
+		/** @brief Lists each of a_ids. */
+		void Add(std::span<const std::string> a_ids);
+
+		/** @brief Graph build: declares a read, through no view, of each listed id every graph registers, and records it as declared. */
+		void Declare(org::RenderPassBuilder& a_builder);
+
+		/**
+		 * @brief Render thread (a batch): how the client reads a_id, the id a bound view exports (PublishedResources::ExportedId). On
+		 * Graph, a_index receives the bindless index of the id's whole-resource view (PublishedResources::ShaderResourceIndex).
+		 */
+		InputResult Resolve(std::string_view a_id, std::uint32_t& a_index) const;
+
+		/** @brief The listed ids, comma separated, for the registration's log line. */
+		std::string Describe() const;
+
+	private:
+		std::vector<std::string> ids;
+		// The ids a build declared. Replaced whole, and it only grows. Atomic because a graph may be built on the host's owner thread.
+		std::atomic<std::shared_ptr<const PublishedIds>> declared;
+	};
 
 	/** @brief The engine sampler for a slot's address and filter modes. kInvalid when the graph has none. */
 	std::uint32_t SlotSampler(std::uint32_t a_addressMode, std::uint32_t a_filterMode, Owners& a_owners);
@@ -224,7 +280,7 @@ namespace DCLF::Family
 	/** @brief What a header register (a resource CS binds for its features' includes) holds for a batch. */
 	struct Header
 	{
-		std::string publishedId;                  // a published graph texture or buffer: declared by the pass, part of the client's shape
+		std::string publishedId;                  // a published graph texture or buffer: read by its index (PublishedInputs::Resolve)
 		std::uint32_t index = GpuTextures::kInvalid;  // otherwise its heap index: a D3D11 view's import, or the kind's null view
 	};
 

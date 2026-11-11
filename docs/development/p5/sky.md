@@ -175,19 +175,29 @@ families").
   makes the rest of that batch the engine's and the view probes again. A probe keeps its imports (`SkyDraws::Keep`).
 - **Refusals.** A draw the family cannot take is logged once per reason, technique and view (`[DCLF] sky: the engine draws: a main draw
   of technique N: <reason>`, `Util::ReasonLog`). Every pass of a batch must draw through `DrawTriShape` (`Family::Passes`).
-- **Inputs.** t17, the headers (t76, t77, t30, t31) and t25 resolve through `Family::ResolveHeader`: a published graph texture is
-  declared by the client's pass and is part of the client's shape; a D3D11 view (Terrain Blending's D3D11 depth, a header CS binds as a
-  D3D11 view) is read by heap index, resolved per batch; an empty register reads a null view of its declared kind
-  (`GpuTextures::NullOf`: a cube for t25, t30 and t31). A 2D null read as a cube is undefined on the GPU; AMD loses the device on it.
-- **Fallbacks.** No client is registered again during play: a batch whose targets or published inputs differ from its client's
-  shape stays the engine's (logged once). A draw that cannot be latched is drawn by the engine where it was. A failed graph returns
-  every batch to the engine.
+- **Inputs.** The headers (t76, t77, t30, t31) resolve through `Family::ResolveHeader`. t17 is first matched against the engine's
+  depth targets: an engine depth is part of the shape and imported once as a target (`FrameAnchors::EngineDepth`). That import
+  publishes it, so it must be matched first: a later batch would otherwise see it as an export and differ from the shape. A published
+  graph texture (a header, or Terrain Blending's blended depth at t17) is read by its id's index once the client's graph declares the
+  id (below). A D3D11 view (Terrain Blending's D3D11 depth, a header CS binds as a D3D11 view) is read by heap index, resolved per
+  batch; an empty register reads a null view of its declared kind (`GpuTextures::NullOf`: a cube for t25, t30 and t31). A 2D null
+  read as a cube is undefined on the GPU; AMD loses the device on it. t25 is Cloud Shadows' occlusion, declared by id while the
+  feature is loaded (part of the shape).
+- **Published inputs.** As the water's (water.md, "Published inputs"): fixed when the client is made (`Family::PublishedInputs`,
+  `ListInputs` in `SkyDraws.cpp`: the ids DCLF's registry lists at t76, t77, t30, t31 and t17), declared at each build while
+  registered, and read by index once declared. A batch whose header or t17 holds an id not declared yet, or not listed, stays the
+  engine's, logged once per id (`[DCLF] sky: the engine draws: a main batch whose t30 holds '<id>', ...`). The shape keeps only the
+  targets, so a newly published input never refuses the view.
+- **Fallbacks.** No client is registered again during play: a batch whose targets differ from its client's stays the engine's
+  (logged once: `the cs.sky.main batch's targets changed since its client registered`). A draw that cannot be latched is drawn by
+  the engine where it was. A failed graph returns every batch to the engine.
 
 ### What can trigger a graph rebuild
 
 The two clients' first registrations (one per view, at the first batch of each). Nothing in play registers, refreshes or imports
-again: the shape holds only published ids, D3D11 inputs are heap indices in the latch or the run, and the layer imports are made once
-with the faces' client.
+again: the shape holds only targets, the published inputs are a fixed list whose newly published ids join the declared reads at the
+rebuild their first Publish causes for every graph, D3D11 inputs are heap indices in the latch or the run, and the layer imports are
+made once with the faces' client.
 
 ### Accepted differences
 

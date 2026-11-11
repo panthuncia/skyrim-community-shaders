@@ -16,9 +16,9 @@
 // The water displacement simulation (ImageSpaceEffectWaterDisplacement) stays the engine's: it runs earlier in the frame, and the
 // water's draws read its output (kWATER_DISPLACEMENT, t2) as the engine binds it.
 //
-// Anything the family cannot draw stays the engine's: a draw it cannot latch makes the rest of its batch the engine's, and a batch whose
-// targets or published inputs the view's client was not made for is drawn by the engine. A client is made once per view; nothing the
-// family does registers one again during play.
+// Anything the family cannot draw stays the engine's: a draw it cannot latch makes the rest of its batch the engine's, and so does a
+// published input its view's client does not declare. A client is made once per view, with every published input its draws can read
+// (WaterDraws.cpp, ListInputs); nothing the family does registers one again during play.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace DCLF::Features::Water
@@ -99,6 +100,17 @@ namespace DCLF::Features::Water
 
 	/** @brief The material slots' declared dimension (Water.hlsl's t0-t11): the cubemap at t3, 2D textures elsewhere. */
 	constexpr Kind MaterialKind(std::uint32_t a_slot) { return a_slot == 3 ? Kind::Cube : Kind::Texture2D; }
+
+	/**
+	 * @brief Whether a_view's pixel stage samples material slot a_slot. The mask (the Stencil technique) samples none: it writes the
+	 * normal mask and motion vectors from its positions. The surface never samples t0 (ReflectionTex). A slot not sampled is latched
+	 * as a null view, whatever the engine left bound there.
+	 */
+	constexpr bool SlotRead(View a_view, std::uint32_t a_slot) { return a_view == View::Surface && a_slot != 0; }
+
+	/** @brief Whether a_view's pixel stage reads the headers (kHeaderRegisters). The mask reads none: they are latched as null views. */
+	constexpr bool HeadersRead(View a_view) { return a_view == View::Surface; }
+
 	/** @brief The headers before the directional shadow record in the push block. */
 	inline constexpr std::size_t kHeadersBeforeShadow = 16;
 	/** @brief Deferred's directional shadow record (ShadowSampling.hlsli), which the CPU writes: copied into each draw's latch. */
@@ -158,30 +170,23 @@ namespace DCLF::Features::Water
 	};
 
 	/**
-	 * @brief What a view's client is made for: the inputs that are published graph textures, declared by its pass so the graph orders
-	 * their writes before the water's reads. The headers' are read at each batch's start. The material slots' are the engine targets a
-	 * draw samples that a graph pass writes (with the ImageSpace port and engine targets on: the refraction copy, the SSR targets), seen
-	 * by the view's probes and kept: an id stays in the shape once seen, so a target sampled on some frames only, or a slot alternating
-	 * between two, does not change it. A header or slot bound to a D3D11 view or nothing is read by heap index instead, resolved per
-	 * batch, and is no part of the shape.
+	 * @brief What a view's client is made for: its view. The targets are the view's fixed list (kMaskTargets, kSurfaceTargets), and
+	 * the published inputs its pass declares are fixed when the client is made (WaterDraws.cpp, ListInputs), so neither is part of
+	 * it. Every header and slot is read by heap index, resolved per batch: a D3D11 view's import, a null view, or a published input's
+	 * index once the client's graph declares it (WaterDraws::ReadPublished).
 	 */
 	struct Shape
 	{
 		View view = View::Surface;
-		std::array<std::string, kHeaderRegisters.size()> headerIds;
-		Family::PublishedIds materialIds;
 		bool operator==(const Shape&) const = default;
 	};
-
-	/** @brief What differs between two shapes, in words ("t1 kMAIN_COPY -> none, ..."), for a log. */
-	std::string DescribeChange(const Shape& a_from, const Shape& a_to);
 
 	/** @brief A batch's draws, as the anchor's pass records them. */
 	struct Run
 	{
 		View view = View::Surface;
 		std::vector<Draw> draws;
-		std::array<std::uint32_t, kHeaderRegisters.size()> headerIndices{};  // the unpublished headers' heap indices
+		std::array<std::uint32_t, kHeaderRegisters.size()> headerIndices{};  // every header's heap index (an import, a published id's, a null view)
 		std::uint64_t revision = 0;                                          // what the recording depends on (WaterDraws.cpp, RevisionOf)
 		Family::Owners owners;                                               // the textures' imports and the buffers' leases
 	};
@@ -210,11 +215,15 @@ namespace DCLF::Features::Water
 		/** @brief Reserves the EngineDraws anchor (the feature's install, before the render graph initializes). */
 		void Reserve();
 		/**
-		 * @brief Whether a_shape's view may withhold this batch: its client was made for a_shape and is in the anchor's built graph
-		 * (FrameAnchors::RequestJoin). A view without a client gets one made for a_shape (false while it joins). A client made for another
-		 * shape is kept: the batch stays the engine's (logged once), and no client is registered again during play.
+		 * @brief Whether a_shape's view may withhold this batch: its client is in the anchor's built graph (FrameAnchors::RequestJoin).
+		 * A view without a client gets one (false while it joins). No client is registered again during play.
 		 */
 		bool Ready(const Shape& a_shape);
+		/**
+		 * @brief How a_view's client reads a_id, the published id a bound header or slot exports (Family::PublishedInputs::Resolve).
+		 * NotListed when the view has no client yet.
+		 */
+		Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index);
 		/** @brief Whether a run of the anchor now would draw a_view's work (FrameAnchors::CanRun): checked before a batch is withheld. */
 		bool CanRun(View a_view);
 		/** @brief The program for a key, built off the render thread; null while it builds or when it cannot be (a_state says which). */

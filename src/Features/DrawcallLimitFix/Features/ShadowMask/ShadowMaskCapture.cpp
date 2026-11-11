@@ -16,13 +16,14 @@
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/PublishedResources.h"
 #include "State.h"
 #include "Utils/Logging.h"
 
 #include <rhi_helpers.h>
 
+#include <algorithm>
 #include <format>
-#include <optional>
 
 namespace DCLF::Features::ShadowMask
 {
@@ -34,8 +35,7 @@ namespace DCLF::Features::ShadowMask
 		// The most draws one batch latches (ShadowMaskDraws' latch has room for this many): one per shadow-casting light, which the
 		// engine caps far below this.
 		constexpr std::size_t kMaxLatched = 32;
-		// Batches a view's shape must stay the same before its client is made: the ported features publish their resources in the first
-		// frames, and a client is made once (Ready), so it waits for them to settle.
+		// Batches a view's probes run before its client is made: its programs and ConstantMirror's copies are asked for first.
 		constexpr std::uint32_t kSettleBatches = 30;
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
 
@@ -56,14 +56,10 @@ namespace DCLF::Features::ShadowMask
 			bool active = false;
 			bool probe = false;
 			bool failed = false;
+			bool ready = false;  // the view's client is in the built graph: its published inputs are read
 			std::array<bool, kViews> clean{};
-			std::array<std::optional<Shape>, kViews> settling;
 			std::array<std::uint32_t, kViews> settled{};
-			// The published graph textures each view's draws were seen sampling (Shape::slotIds).
-			std::array<Family::PublishedIds, kViews> knownSlots;
 			View view = View::World;
-			Shape shape;                               // the batch's: what its view's client must have been made for
-			Family::PublishedIds observed;             // the published ids the batch's draws sampled
 			std::shared_ptr<Run> run;
 			Family::Passes passes;
 		};
@@ -151,25 +147,28 @@ namespace DCLF::Features::ShadowMask
 			draw.indexCount = geometry.indexCount;
 
 			// The eight slots as the shadow state holds them (the scene depth, the light's shadow maps, the focus shadows' stencil and maps;
-			// an empty slot reads a null view of its declared kind) and every slot's sampler.
+			// an empty slot reads a null view of its declared kind) and every slot's sampler. A slot the shader never samples reads a null
+			// view and the first sampler (SlotRead).
 			for (std::uint32_t t = 0; t < kSlots; ++t) {
-				auto* view = Unwrap(rss.PSTexture[t]);
+				const bool read = SlotRead(t);
+				auto* view = read ? Unwrap(rss.PSTexture[t]) : nullptr;
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
 				const auto slot = Family::SlotTexture(view, SlotKind(t), GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), constants.textures[t], owners, &failure);
 				if (slot == Family::SlotResult::Published) {
 					// A depth or target a graph pass writes: read by its id, which the view's client declares, so the graph orders the write
-					// before the masks. The id joins the view's shape (MaskBatch).
-					std::string id;
-					if (!Family::PublishedSlot(view, id, constants.textures[t]))
-						return "a slot holds a published graph texture without a shader resource view";
-					if (!a_capture.probe && !a_capture.shape.slotIds.contains(id))
-						return "a slot holds a published graph texture its client was not made for";
-					a_capture.observed.insert(std::move(id));
+					// before the masks. Before the client is ready, a probe only learns programs.
+					const auto id = PublishedResources::ExportedId(view);
+					const auto result = ShadowMaskDraws::ReadPublished(a_capture.view, id, constants.textures[t]);
+					if (result != Family::InputResult::Graph && a_capture.ready) {
+						Refusals().Report(std::format("a {} draw's t{} holds '{}'", NameOf(a_capture.view), t, id), Family::ReasonOf(result));
+						return "a slot holds a published graph texture its client cannot read";
+					}
 				} else if (slot != Family::SlotResult::Ok) {
 					Refusals().Report(std::format("a {} draw's texture t{} could not be imported", NameOf(a_capture.view), t), GpuTextures::DescribeFailure(view, t, failure));
 					return "a texture it samples could not be imported";
 				}
-				constants.samplers[t] = Family::SlotSampler(rss.PSTextureAddressMode[t].underlying(), rss.PSTextureFilterMode[t].underlying(), owners);
+				constants.samplers[t] = read ? Family::SlotSampler(rss.PSTextureAddressMode[t].underlying(), rss.PSTextureFilterMode[t].underlying(), owners) :
+				                               Family::SlotSampler(0, 0, owners);
 				if (constants.samplers[t] == GpuTextures::kInvalid)
 					return "its sampler modes have no graph sampler";
 			}
@@ -210,21 +209,15 @@ namespace DCLF::Features::ShadowMask
 				}
 				Family::BeginBatch();
 				const auto index = static_cast<std::size_t>(kView);
-				auto& known = capture.knownSlots[index];
 				Shape shape;
 				shape.view = kView;
-				shape.slotIds = known;
 				auto& clean = capture.clean[index];
-				// A view's client is made once, for a shape that held for kSettleBatches batches.
-				auto& settling = capture.settling[index];
-				if (!settling || *settling != shape) {
-					settling = shape;
-					capture.settled[index] = 0;
-				}
-				const bool settled = ++capture.settled[index] >= kSettleBatches;
-				// Until the view's client is made and in the built graph, the engine draws its batches as probes: they learn the published
-				// textures the draws sample (the shape) and ask for the programs.
-				const bool ready = settled && ShadowMaskDraws::Ready(shape);
+				// A view's client is made once, after kSettleBatches batches.
+				auto& settled = capture.settled[index];
+				settled = (std::min)(settled + 1, kSettleBatches);
+				// Until the view's client is made and in the built graph, the engine draws its batches as probes: they ask for the programs
+				// and ConstantMirror's copies.
+				const bool ready = settled >= kSettleBatches && ShadowMaskDraws::Ready(shape);
 				const bool probe = !ready || !clean;
 				// Draws are withheld only when the anchor's run will draw them (a probe withholds nothing).
 				if (!probe && !ShadowMaskDraws::CanRun(kView)) {
@@ -236,8 +229,7 @@ namespace DCLF::Features::ShadowMask
 				run->view = kView;
 				capture.view = kView;
 				capture.run = run;
-				capture.shape = shape;
-				capture.observed = {};
+				capture.ready = ready;
 				capture.probe = probe;
 				capture.failed = false;
 				capture.passes.Begin();
@@ -249,8 +241,6 @@ namespace DCLF::Features::ShadowMask
 					Refusals().Report(capture.passes.Describe(std::format("{} shadow mask", NameOf(kView))));
 					Refuse(capture, "a pass of the batch drew through another draw function than DrawTriShape");
 				}
-				// The published ids the batch sampled join the view's (an id stays once seen); a new one is the next batch's shape.
-				known.insert(capture.observed.begin(), capture.observed.end());
 				if (probe) {
 					clean = ready && !capture.failed;
 					if (clean)

@@ -9,7 +9,6 @@
 
 #include "Globals.h"
 #include "RenderGraph/FrameAnchors.h"
-#include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
@@ -26,25 +25,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstring>
-#include <set>
 #include <string_view>
-
-namespace DCLF::Features::Water
-{
-	std::string DescribeChange(const Shape& a_from, const Shape& a_to)
-	{
-		std::string out;
-		const auto note = [&](std::uint32_t a_register, const std::string& a_old, const std::string& a_new) {
-			if (a_old != a_new)
-				out += fmt::format("{}t{} {} -> {}", out.empty() ? "" : ", ", a_register, a_old.empty() ? "none" : a_old, a_new.empty() ? "none" : a_new);
-		};
-		if (const auto materials = Family::DescribeChange(a_from.materialIds, a_to.materialIds); !materials.empty())
-			out += fmt::format("material slots {}", materials);
-		for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h)
-			note(kHeaderRegisters[h], a_from.headerIds[h], a_to.headerIds[h]);
-		return out.empty() ? std::string("no input changed") : out;
-	}
-}
 
 namespace DCLF::Features::Water::WaterDraws
 {
@@ -81,10 +62,11 @@ namespace DCLF::Features::Water::WaterDraws
 			// The targets as imported at the registration (FrameAnchors keeps each while the engine's texture stays the same).
 			std::array<std::shared_ptr<org::ExternalTextureResource>, 3> colours;
 			std::shared_ptr<org::ExternalTextureResource> depth;
+			// Every published id the view's draws can read, fixed here (ListInputs). Each build declares the registered ones.
+			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.
 			std::shared_ptr<const Run> run;
 			bool pending = false;
-			bool shapeLogged = false;
 			std::atomic<std::uint64_t> executed{ 0 };  // runs submitted with this client's pass (its executed callback)
 		};
 
@@ -94,8 +76,6 @@ namespace DCLF::Features::Water::WaterDraws
 			std::array<org::DeclaredViewToken, 3> colours{};
 			std::array<bool, 3> hasColours{};
 			org::DeclaredViewToken depth{};
-			std::array<org::DeclaredViewToken, kHeaderRegisters.size()> headers{};
-			std::array<bool, kHeaderRegisters.size()> hasHeaders{};
 		};
 
 		struct Frame
@@ -123,22 +103,13 @@ namespace DCLF::Features::Water::WaterDraws
 					bindings.hasColours[i] = true;
 				}
 				bindings.depth = a_builder.DepthReadWrite(c.depth).View();
-				for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
-					if (c.shape.headerIds[h].empty())
-						continue;
-					bindings.headers[h] = a_builder.ShaderResource(org::ResourceIdentifier(c.shape.headerIds[h])).View();
-					bindings.hasHeaders[h] = true;
-				}
-				// The material slots' published engine targets: declared for their order only (the draws' latches carry their indices),
-				// each id once. An id stays registered once published, so every graph built since can declare it.
-				std::set<std::string_view> declared(c.shape.headerIds.begin(), c.shape.headerIds.end());
-				for (const auto& id : c.shape.materialIds)
-					if (PublishedResources::IsRegistered(id) && declared.insert(id).second)
-						static_cast<void>(a_builder.ShaderResource(org::ResourceIdentifier(id)).View());
+				// The published inputs, declared for their order only: the run's header indices and the draws' latches carry their
+				// indices. Every registered one is declared, read this frame or not, so a new Publish needs no new client.
+				client->inputs.Declare(a_builder);
 				return bindings;
 			}
 
-			// The run's draws (their programs, targets, stencil references, counts and viewports) and the unpublished headers' indices.
+			// The run's draws (their programs, targets, stencil references, counts and viewports) and the headers' indices.
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
 				const auto run = std::atomic_load(&client->run);
@@ -154,9 +125,7 @@ namespace DCLF::Features::Water::WaterDraws
 				const auto& run = *a_frame.run;
 				const auto& c = *a_frame.client;
 				const auto shared = SharedConstants::Index(a_recording, a_bindings.shared);
-				std::array<ShaderBindings::Handle, kHeaderRegisters.size()> headers{};
-				for (std::size_t h = 0; h < headers.size(); ++h)
-					headers[h] = a_bindings.hasHeaders[h] ? a_recording.Index(a_bindings.headers[h]) : run.headerIndices[h];
+				const auto& headers = run.headerIndices;
 				const std::uint32_t slot = a_recording.FrameSlot();
 				for (std::uint32_t i = 0; i < run.draws.size(); ++i) {
 					const auto& draw = run.draws[i];
@@ -213,6 +182,29 @@ namespace DCLF::Features::Water::WaterDraws
 			Family::KeptOwners kept;
 		};
 
+		/**
+		 * @brief Every published id a_view's draws can read, listed when its client is made. That is what the ported features publish
+		 * at the headers' registers (DCLF's registry), the engine depths CS binds at a header (the scene depth at t17, Wetness Effects'
+		 * precipitation occlusion at t70), and the engine targets the surface's material slots hold (water.md, "The shader": the
+		 * refraction copy at t1, the displacement at t2, the reflection cubemap at t3, the depth copy at t7, the flow at t8, the SSR
+		 * targets at t10 and t11). The mask reads no header and no slot (HeadersRead, SlotRead). An export of an id not listed here
+		 * keeps its batch on the engine, logged once with the id: add the id here.
+		 */
+		void ListInputs(View a_view, Family::PublishedInputs& a_inputs)
+		{
+			if (!HeadersRead(a_view))
+				return;
+			using Colour = RE::RENDER_TARGET;
+			using Depth = RE::RENDER_TARGET_DEPTHSTENCIL;
+			a_inputs.Add(Family::RegisteredIdsAt(kHeaderRegisters));
+			for (const auto depth : { Depth::kPOST_ZPREPASS_COPY, Depth::kMAIN_COPY, Depth::kPRECIPITATION_OCCLUSION_MAP })
+				a_inputs.Add(Family::EngineTargetId(depth));
+			for (const auto colour : { Colour::kMAIN_COPY, Colour::kREFRACTION_NORMALS, Colour::kWATER_DISPLACEMENT, Colour::kWATER_DISPLACEMENT_SWAP,
+					 Colour::kWATER_FLOW, Colour::kSSR, Colour::kSSR_RAW, Colour::kSSR_BLURRED0 })
+				a_inputs.Add(Family::EngineTargetId(colour));
+			a_inputs.Add(Family::EngineTargetId(RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS));
+		}
+
 		DrawsState& GetState()
 		{
 			static DrawsState state;
@@ -261,6 +253,7 @@ namespace DCLF::Features::Water::WaterDraws
 				logger::warn("[DCLF] water: the main depth cannot be imported; the {} stays the engine's", client->id);
 				return nullptr;
 			}
+			ListInputs(a_shape.view, client->inputs);
 
 			FrameAnchors::ClientDesc desc{};
 			desc.id = client->id;
@@ -294,17 +287,11 @@ namespace DCLF::Features::Water::WaterDraws
 				logger::warn("[DCLF] water: the {} client could not be registered; the water stays the engine's", client->id);
 				return nullptr;
 			}
-			std::string published;
-			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h)
-				if (!a_shape.headerIds[h].empty())
-					published += fmt::format("{}t{} {}", published.empty() ? "" : ", ", kHeaderRegisters[h], a_shape.headerIds[h]);
-			for (const auto& id : a_shape.materialIds)
-				published += fmt::format("{}a material slot's {}", published.empty() ? "" : ", ", id);
-			logger::info("[DCLF] water: the {} client registered (published inputs: {})", client->id, published.empty() ? "none" : published);
+			logger::info("[DCLF] water: the {} client registered (published inputs it may read: {})", client->id, client->inputs.Describe());
 			return client;
 		}
 
-		/** @brief What a run's recording depends on: everything of its draws but the latched values and counts, and the unpublished headers. */
+		/** @brief What a run's recording depends on: everything of its draws but the latched values and counts, and the headers' indices. */
 		std::uint64_t RevisionOf(const Run& a_run)
 		{
 			std::uint64_t hash = 1469598103934665603ull;
@@ -348,20 +335,22 @@ namespace DCLF::Features::Water::WaterDraws
 			return false;
 		const auto index = static_cast<std::size_t>(a_shape.view);
 		auto& client = state.clients[index];
-		if (client) {
-			if (client->shape == a_shape)
-				return FrameAnchors::RequestJoin(client->id, FrameAnchors::Anchor::EngineDraws);
-			// No client is registered again during play (a rebuild on the frame's path): the batch stays the engine's.
-			if (!std::exchange(client->shapeLogged, true))
-				logger::warn("[DCLF] water: the {} batch's published inputs changed since its client registered ({}); those batches stay the engine's", client->id,
-					DescribeChange(client->shape, a_shape));
-			return false;
-		}
+		// A client is made once for its view. Its targets and published inputs are fixed lists, so no later batch needs another.
+		if (client)
+			return FrameAnchors::RequestJoin(client->id, FrameAnchors::Anchor::EngineDraws);
 		if (state.refused[index])
 			return false;
 		client = MakeClient(a_shape);
 		state.refused[index] = !client;
 		return false;
+	}
+
+	Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index)
+	{
+		if (a_view >= View::Count)
+			return Family::InputResult::NotListed;
+		const auto& client = GetState().clients[static_cast<std::size_t>(a_view)];
+		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
 	}
 
 	bool CanRun(View a_view)
