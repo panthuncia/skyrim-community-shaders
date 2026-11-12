@@ -1530,13 +1530,9 @@ namespace DCLF::Direct
 		slot.colourGate.store(2, std::memory_order_relaxed);
 		s.signalQueuedFor = nullptr;
 		s.current = &slot;
-		// The commits write their latch regions at this slot: no GPU work reads it now (Retire).
-		host->BeginExternalFrameSlot(slot.index);
-		// The host's own executions this frame (Light Limit Fix's epoch between the depth and colour sites) wait for their submissions
-		// alone: what this frame staged and retired is released after its own signal.
-		host->NoteExternalSlotUse(slot.index, s.timeline, s.signalled + 1);
-		if (slot.colourSlot != slot.index)
-			host->NoteExternalSlotUse(slot.colourSlot, s.timeline, s.signalled + 1);
+		// The commits write their latch regions in an external run of the host's: a lease of its own, retired after this frame's
+		// signal. What this frame staged and retired is released after that signal too.
+		(void)host->BeginExternalRun(s.timeline, s.signalled + 1);
 		// Then, in this order before FrameValues::Kick: the movers' live spheres into this set, and the CPU frame state armed with it.
 		FrameValues::Get().SetViewBatches(a_set);
 		KickCpuFrameState(std::move(a_set));
@@ -1611,7 +1607,7 @@ namespace DCLF::Direct
 		if (slot->set)
 			Draws::BindViewBatches(*slot->set, SubmittedRetirementPoint());
 		if (auto* host = RenderGraphRuntime::Get().Host())
-			host->EndExternalFrameSlot();
+			host->EndExternalRun();
 		++s.window.frames;
 	}
 
@@ -1628,9 +1624,9 @@ namespace DCLF::Direct
 		// The site's GPU time in Tracy: its commits' uploads, its passes and draws, which the frame's other zones leave out.
 		const auto siteZoneName = fmt::format("DCLF site {}", static_cast<std::uint32_t>(a_segment));
 		TracyD3D11ZoneTransientS(globals::state->tracyCtx, siteZone, siteZoneName.c_str(), 0, globals::state->tracyCtx != nullptr);
-		// The colour commit writes the main latch at the slot's second region, the depth commit's kept for the depth site's readers.
+		// The colour commit writes the main latch in a run of its own, the depth commit's kept for the depth site's readers.
 		if (a_segment == RenderGraphRuntime::Segment::MainOpaque)
-			host->BeginExternalFrameSlot(s.current->colourSlot);
+			(void)host->BeginExternalRun(S().timeline, S().signalled + 1);
 		std::shared_ptr<org::ExternalEpochExecution> execution;
 		bool executed = true;
 		if (Draws::CpuPipelineSegmentRecords(a_segment)) {

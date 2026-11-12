@@ -1038,9 +1038,10 @@ struct RenderGraphRuntime::Impl
 			logger::info("[ORG] Async epochs: {} submitted, {} waited for their ticket, {} prepared again after the feature's inputs changed, {} carried uploads ({} lists recorded ahead by their producers; "
 						 "{} copies recorded on the queue that first uses them, {} other-queue batches spared the graphics uploads' wait); "
 						 "{} completions left to the host's next GPU wake-up instead of a signal; {} tickets stale only by a new version; {} epoch graphs built again; "
-						 "recordings: {} made ({} kept), {} tickets took a kept one, {} stale tickets adopted one, {} held ({} packets); admissions: {} predicted, {} planned",
+						 "recordings: {} made, {} revision copies recorded, {} revision submissions ({} waited for a sealed copy, {} skipped with every copy busy); admissions: {} predicted, {} planned",
 				async.submitted, async.waited, async.stale, async.uploads, async.recordedUploadLists, async.queueUploadCopies, async.sparedUploadWaits,
-				async.wakesSkipped, async.staleBacking, async.rebuilds, async.recorded, async.kept, async.reused, async.adopted, async.held, async.heldPackets, async.predicted, async.planned);
+				async.wakesSkipped, async.staleBacking, async.rebuilds, async.recorded, async.revisionCopiesRecorded, async.revisionSubmissions, async.copyWaits,
+				async.copiesBusy, async.predicted, async.planned);
 		}
 		FrameAnchors::LogRunStats();
 		epochCount = 0;
@@ -1757,9 +1758,6 @@ bool RenderGraphRuntime::Initialize()
 		// shape instead of being prepared again (a render-thread wait). Kept recordings carry no Tracy GPU zones: turn it off
 		// to profile the epochs' passes on the GPU with Tracy.
 		desc.reuseRecordings = !Switches::Equals("CS_ORG_REUSE_RECORDINGS", "0");
-		// CS_ORG_KEEP_LIVE_RECORDINGS=0: no live epoch (the anchors, light culling) keeps its recordings; each run records fresh.
-		// Revision-driven epochs and the async host are unaffected, unlike CS_ORG_REUSE_RECORDINGS=0, which loses both.
-		desc.keepLiveRecordings = !Switches::Equals("CS_ORG_KEEP_LIVE_RECORDINGS", "0");
 		// CS_ORG_QUEUE_UPLOADS (default on, =0 off): an async epoch's staged uploads whose destination it first uses on the compute
 		// queue are recorded there, just ahead of its first compute batch, and a compute batch waits for the graphics queue's
 		// uploads only when it uses what they write. Off: every upload on the graphics queue and every compute batch waits for them.
@@ -1780,21 +1778,9 @@ bool RenderGraphRuntime::Initialize()
 		FrameAnchors::FitSlotBudget(desc.epochOrder, desc.framesInFlight, kMaxFrameSlots);
 		// The frame anchors' reserved epochs, where the frame reaches them (FrameAnchors.h).
 		FrameAnchors::AddToFrame(desc.epochOrder);
-		// The anchors that run several times a frame (the engine skeleton's clears, the reflections prepass): each anchor is an epoch
-		// of its own in DXVK's stream, which DXVK submits at Present, so a run must never wait for one of the same frame. Their rings
-		// grow up to kGameFramesInFlight times their runs instead (GraphHost::Desc::epochRuns). Present seals each frame
-		// (SealPresented), which is what the rings count frames by.
-		for (const auto& [epoch, runs] : FrameAnchors::RunsPerFrame())
-			if (std::ranges::find(desc.epochOrder, epoch) != desc.epochOrder.end())
-				desc.epochRuns.push_back({ .epoch = epoch, .runsPerFrame = runs });
-		// FitSlotBudget kept the total within the host's limit; a throw here is a real error, and the graph does not start.
-		const std::uint32_t frameSlots = org::GraphHost::FrameSlotsFor(desc);
-		if (!desc.epochRuns.empty()) {
-			std::string runs;
-			for (const auto& entry : desc.epochRuns)
-				runs += fmt::format("{}{}:{}", runs.empty() ? "" : ",", entry.epoch, entry.runsPerFrame);
-			logger::info("[ORG] {} frame slots; epochs that run several times a frame (epoch:runs): {}", frameSlots, runs);
-		}
+		// Every run takes a run lease of the host's, whichever anchor or epoch it is, so an anchor that runs several times a frame
+		// never waits for a run of the same frame. The runtime's first run capacity: its services grow past it.
+		const std::uint32_t frameSlots = 256;
 		if (!desc.epochOrder.empty())
 			logger::info("[ORG] epoch order: {}", fmt::join(desc.epochOrder, ","));
 		// Diagnostic: CS_ORG_ALIAS_LOG=1 logs every alias plan's placements, ranks and exclusions.
@@ -2497,16 +2483,16 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		impl->submittedSegments |= std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment);
 		impl->failedEpochsLogged &= ~(std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment));
 		return EpochResult::Submitted;
-	} catch (const org::GraphHost::EpochRingFullError& e) {
-		// The anchor ran more times since the last Present than its ring of slots holds (FrameAnchors' runsPerFrame): nothing was
-		// submitted and nothing failed. The caller falls back for this run; the next frame's runs go on.
+	} catch (const org::GraphHost::EpochCopiesBusyError& e) {
+		// A revision-driven epoch ran more times since the last Present than it has published copies: nothing was submitted and
+		// nothing failed. The caller falls back for this run; the next frame's runs go on.
 		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
 		if (impl->batching)
 			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
 		if (const std::uint64_t bit = std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment); !(impl->ringFullLogged & bit)) {
 			impl->ringFullLogged |= bit;
-			logger::info("[ORG] {} ran more than its {} frame slots in one frame; runs past them fall back until the next Present", Impl::SegmentLabel(a_segment),
-				e.capacity);
+			logger::info("[ORG] {} ran more than its {} published copies in one frame; runs past them fall back until the next Present", Impl::SegmentLabel(a_segment),
+				e.copies);
 		}
 		return EpochResult::RingFull;
 	} catch (const org::GraphHost::EpochFailedError& e) {
