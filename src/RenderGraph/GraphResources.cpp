@@ -93,10 +93,13 @@ namespace GraphResources
 		}
 
 		/** @brief A graph-only texture: aliasable (placed by the graph) when transient, materialized now otherwise. */
-		std::shared_ptr<org::Resource> CreateGraphTexture(const Shape& a_shape, const std::string& a_name, bool a_aliasable)
+		std::shared_ptr<org::Resource> CreateGraphTexture(const Shape& a_shape, const std::string& a_name, bool a_aliasable,
+			std::optional<std::uint64_t> a_pool = std::nullopt)
 		{
 			auto desc = Describe(a_shape, false);
 			desc.allowAlias = a_aliasable;
+			if (a_aliasable)
+				desc.aliasingPoolID = a_pool;
 			auto texture = a_aliasable ? org::PixelBuffer::CreateSharedUnmaterialized(desc) : org::PixelBuffer::CreateShared(desc);
 			texture->SetName(a_name);
 			return texture;
@@ -136,7 +139,7 @@ namespace GraphResources
 			}
 			try {
 				if (a_options.d3d11 == Export::None)
-					return { CreateGraphTexture(a_shape, a_name, a_options.lifetime == Lifetime::Transient), nullptr };
+					return { CreateGraphTexture(a_shape, a_name, a_options.lifetime == Lifetime::Transient, a_options.aliasPool), nullptr };
 				return CreateExportedTexture(a_shape, a_name);
 			} catch (const std::exception& e) {
 				logger::error("[ORG] {}: not created: {}", a_name, e.what());

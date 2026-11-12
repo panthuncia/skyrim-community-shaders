@@ -26,6 +26,7 @@
 #	include <array>
 #	include <format>
 #	include <map>
+#	include <string_view>
 #	include <vector>
 
 namespace
@@ -94,12 +95,26 @@ namespace
 		NoTemporal,    // 7: the temporal denoiser is off, whatever the setting
 		FullRes,       // 8: full resolution, whatever the setting (no upsample)
 		MainDepth,     // 9: the depth input is the engine's kMAIN, not the final depth copy
+		// 10-15: one transient kept out of the alias pool, the others aliased as usual.
+		KeepWorkingDepth,
+		KeepRadianceTemp,
+		KeepNormal,
+		KeepRadiance,
+		KeepAccumScratch,
+		KeepBlurInputs,  // IlYBlurInput and IlCoCgBlurInput
+		KeepSssDiffuse,  // 16: SSS::DiffuseNoAlbedo kept out of the pool (ORGSubsurfaceScattering.cpp reads the switch)
+		PrivatePool,     // 17: SSGI's transients aliased only with each other, in a pool no other graph places into
 		Count
 	};
 
 	constexpr std::array<const char*, static_cast<std::size_t>(Debug::Count)> kDebugNames{ "off", "no aliasing", "no outputs to the composite",
 		"no dispatches, outputs cleared", "CoCg output cleared", "history cleared each run", "blur off", "temporal denoiser off",
-		"full resolution", "depth from kMAIN" };
+		"full resolution", "depth from kMAIN", "WorkingDepth not aliased", "RadianceTemp not aliased", "Normal not aliased",
+		"Radiance not aliased", "AccumFramesScratch not aliased", "blur inputs not aliased", "SSS::DiffuseNoAlbedo not aliased",
+		"SSGI's own alias pool" };
+
+	// Mode 17's manual pool id: any value no other resource names.
+	constexpr std::uint64_t kPrivatePool = 0x5591'0000'0000'0017ull;
 
 	Debug DebugMode()
 	{
@@ -108,6 +123,29 @@ namespace
 			return value < static_cast<std::uint64_t>(Debug::Count) ? static_cast<Debug>(value) : Debug::Off;
 		}();
 		return mode;
+	}
+
+	/** @brief Whether a debug mode keeps this texture (by name) out of the alias pool. */
+	bool KeptApart(std::string_view a_name)
+	{
+		switch (DebugMode()) {
+		case Debug::NoAliasing:
+			return true;
+		case Debug::KeepWorkingDepth:
+			return a_name == "SSGI::WorkingDepth";
+		case Debug::KeepRadianceTemp:
+			return a_name == "SSGI::RadianceTemp";
+		case Debug::KeepNormal:
+			return a_name == "SSGI::Normal";
+		case Debug::KeepRadiance:
+			return a_name == "SSGI::Radiance";
+		case Debug::KeepAccumScratch:
+			return a_name == "SSGI::AccumFramesScratch";
+		case Debug::KeepBlurInputs:
+			return a_name == "SSGI::IlYBlurInput" || a_name == "SSGI::IlCoCgBlurInput";
+		default:
+			return false;
+		}
 	}
 
 	/** @brief The settings the programs and the textures are made from: a change makes them again. */
@@ -341,7 +379,7 @@ struct ORGScreenSpaceGI::Impl
 	/** @brief A texture of the chain, the size of the main target. */
 	Texture MakeTexture(DXGI_FORMAT a_format, UINT a_mips, const char* a_name, GraphResources::Lifetime a_lifetime, bool a_exported) const
 	{
-		if (DebugMode() == Debug::NoAliasing && a_lifetime == GraphResources::Lifetime::Transient)
+		if (a_lifetime == GraphResources::Lifetime::Transient && KeptApart(a_name))
 			a_lifetime = GraphResources::Lifetime::History;
 		D3D11_TEXTURE2D_DESC desc{
 			.Width = main.Width,
@@ -355,8 +393,10 @@ struct ORGScreenSpaceGI::Impl
 			.CPUAccessFlags = 0,
 			.MiscFlags = 0
 		};
-		return std::make_unique<GraphResources::Texture2D>(desc, a_name,
-			GraphResources::Options{ .lifetime = a_lifetime, .d3d11 = a_exported ? GraphResources::Export::SRV : GraphResources::Export::None });
+		GraphResources::Options options{ .lifetime = a_lifetime, .d3d11 = a_exported ? GraphResources::Export::SRV : GraphResources::Export::None };
+		if (DebugMode() == Debug::PrivatePool)
+			options.aliasPool = kPrivatePool;
+		return std::make_unique<GraphResources::Texture2D>(desc, a_name, options);
 	}
 
 	/** @brief Queues every configuration's programs on the program build thread, except those already built. */
