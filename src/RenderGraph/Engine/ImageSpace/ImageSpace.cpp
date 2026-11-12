@@ -367,8 +367,10 @@ namespace RenderGraph::Engine::ImageSpace
 		 * main frame's, the menus' and the end-of-frame chain's), and there the blur composites' and the get-hit effect's draws. The
 		 * water's flow copies have a share of their own (one run per copy: a cell load queues a few). The water's displacement update
 		 * has two (a second for a batch cut short by a ripple, which the graph does not take).
+		 * Run leases give an anchor as many runs as it makes, so these are bounds against a runaway frame, not budgets: each is
+		 * several times what a frame uses (the blur composites, bright pass and adaptation chain take several runs in one scope).
 		 */
-		constexpr std::array<std::uint32_t, static_cast<std::size_t>(ScopeKind::Count)> kScopeRuns{ 2, 2, 2, 2, 24, 4, 2 };
+		constexpr std::array<std::uint32_t, static_cast<std::size_t>(ScopeKind::Count)> kScopeRuns{ 16, 16, 16, 16, 64, 16, 8 };
 
 		constexpr std::uint32_t ScopeRunsTotal()
 		{
