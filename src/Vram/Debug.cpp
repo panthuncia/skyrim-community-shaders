@@ -77,15 +77,27 @@ namespace Vram::Debug
 			return a_module == "dxvk_d3d11.dll" || a_module == "dxvk_dxgi.dll";
 		}
 
-		// The first frame outside DXVK names the creator; the two after it give the context.
-		CallSite Describe(const void* const* a_frames, std::size_t a_count, bool a_skipDxvk)
+		/** @brief A frame inside BasicRHI, ORG or the standard library: an allocation's mechanics, not who asked for it. */
+		bool InLibraries(const std::string& a_text)
+		{
+			return a_text.find("!rhi::") != std::string::npos || a_text.find("!org::") != std::string::npos ||
+			       a_text.find("!std::") != std::string::npos;
+		}
+
+		// The first frame outside DXVK (or, for the device memory ledger, outside BasicRHI, ORG and std) names the creator; the two
+		// after it give the context.
+		CallSite Describe(const void* const* a_frames, std::size_t a_count, bool a_skipDxvk, bool a_skipLibraries = false)
 		{
 			std::lock_guard lock(g_symbolMutex);
 			CallSite site;
 			int described = 0;
-			for (std::size_t i = 0; i < a_count && described < 3; ++i) {
+			// The ledger keeps eight frames: without the PDB the library frames cannot be skipped by name, and eight reach the caller.
+			const int depth = a_skipLibraries ? 8 : 3;
+			for (std::size_t i = 0; i < a_count && described < depth; ++i) {
 				const auto& [module, text] = DescribeFrame(a_frames[i]);
 				if (a_skipDxvk && described == 0 && InDxvk(module))
+					continue;
+				if (a_skipLibraries && described == 0 && InLibraries(text))
 					continue;
 				if (described == 0)
 					site.module = module;
@@ -347,7 +359,7 @@ namespace Vram::Debug
 				const auto heap = g_memoryProperties.memoryTypes[entry.memoryType].heapIndex;
 				allocation.deviceLocal = g_memoryProperties.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
 			}
-			allocation.site = Describe(entry.stack.data(), entry.stack.size(), false).text;
+			allocation.site = Describe(entry.stack.data(), entry.stack.size(), false, true).text;
 			out.push_back(std::move(allocation));
 		}
 		return out;
