@@ -20,7 +20,6 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/Engine/Constants/EngineConstants.h"
-#	include "RenderGraph/Engine/Flush/Flush.h"
 #	include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #	include "RenderGraph/Engine/Pipeline/StateConversion.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -66,8 +65,6 @@ namespace RenderGraph::Engine::ImageSpace
 		using FrameAnchors::Anchor;
 		namespace Constants = RenderGraph::Engine::Constants;
 		namespace Pipeline = RenderGraph::Engine::Pipeline;
-		// The flush latch's allowed engine draws (Flush.h). Named Latch here: Flush is this file's batch run.
-		namespace Latch = ::RenderGraph::Engine::Flush;
 		using Effects = RE::ImageSpaceManager;
 
 		constexpr const char* kClientId = "cs.engine.imagespace";
@@ -429,9 +426,9 @@ namespace RenderGraph::Engine::ImageSpace
 			std::vector<std::shared_ptr<const org::LatchBlock>> keepAlive;  // the batch's constant chunks, until its run
 			std::uint32_t lastEntry = 0;
 			bool executed = false;
-			// The engine's ImageSpace calls in progress (Render, the explicit-target Render, DispatchComputeShader). A draw or dispatch
-			// inside one of an effect the port does not cover is vouched for (NotPortedReason). A covered effect's draw the engine still
-			// makes (a refusal or a failure) is not: the flush latch skips it and the census counts it.
+			// The engine's ImageSpace calls in progress (Render, the explicit-target Render, DispatchComputeShader). No draw or dispatch
+			// inside one is vouched for: one the port leaves to the engine (an effect it does not cover, a refusal, a failure) is skipped
+			// by the flush latch and counted by the census. Those of effects it does not cover are named once in a while (LogNotCovered).
 			std::uint32_t engineCalls = 0;
 			// The shaders of the engine calls in progress, innermost last: the effect a draw left to the engine belongs to.
 			std::vector<const RE::BSImagespaceShader*> callShaders;
@@ -451,18 +448,6 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static ImageSpaceState state;
 			return state;
-		}
-
-		/**
-		 * @brief Why ImageSpace leaves a draw or dispatch to the engine on purpose, for the flush latch (Latch::EngineDraws around the
-		 * engine's call): an effect the port does not cover or did not select. A covered effect's refused or failed draw has no
-		 * reason: it reaches D3D11 unvouched, so the census counts it. The volumetric lighting's render, apply and blur are
-		 * Features/VolumetricLighting/ORGVolumetricLighting's (CS_ORG_VOLUMETRIC_LIGHTING).
-		 */
-		const Latch::Reason& NotPortedReason()
-		{
-			static const Latch::Reason reason{ "imagespace: effect not on the graph" };
-			return reason;
 		}
 
 		/** @brief The effects' raster programs, by value key. Queued at Setup; a pass made at a graph build takes its own with GetNow. */
@@ -2276,8 +2261,8 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief a_call (the engine's ImageSpace function) counted as an engine ImageSpace call: a draw or dispatch inside it that the
-		 * port does not take is the engine's on purpose (DrawTriShape and DispatchCSShader open the latch's scope for it).
+		 * @brief a_call (the engine's ImageSpace function) counted as an engine ImageSpace call, with its shader: a draw or dispatch
+		 * inside it that the port does not take is named by that shader (NoteNotCovered).
 		 */
 		template <class Call>
 		void EngineCall(const RE::BSImagespaceShader* a_shader, Call&& a_call)
@@ -2291,20 +2276,16 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief The engine's draw or dispatch, which ImageSpace leaves to it. Inside an engine ImageSpace call of an effect the port
-		 * does not cover, in the flush latch's EngineDraws scope (NotPortedReason). A covered effect's draw (refused or failed, logged
-		 * once per reason) runs unvouched: no reason covers it.
+		 * @brief The engine's draw or dispatch, which ImageSpace leaves to it, unvouched: the flush latch skips it and the census
+		 * counts it. Inside an engine ImageSpace call of an effect the port does not cover it is named (NoteNotCovered); a covered
+		 * effect's (refused or failed) has its reason logged once.
 		 */
 		template <class Call>
 		void EngineDraw(bool a_compute, Call&& a_call)
 		{
 			auto& state = IS();
-			if (state.engineCalls == 0 || (state.current && state.current->covered)) {
-				a_call();
-				return;
-			}
-			NoteNotCovered(a_compute);
-			Latch::EngineDraws scope(NotPortedReason());
+			if (state.engineCalls > 0 && !(state.current && state.current->covered))
+				NoteNotCovered(a_compute);
 			a_call();
 		}
 

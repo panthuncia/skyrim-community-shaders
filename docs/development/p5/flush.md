@@ -184,7 +184,6 @@ What the other lanes call, at each place they leave a draw to the engine:
 | Sky (P5.3) | the cloud layers while `CS_ORG_SKY_CLOUDS` is off, a refused batch | `EngineDraws` around the engine's batch, or `VouchPass` at the persistent pass list |
 | Water, blood, shadow masks | a refused or handed-back batch; a water view `CS_ORG_WATER_PARTS` leaves out | `EngineDraws` around the engine's batch |
 | Menu views (DCLF) | every menu scene: the menu 3D models (loading screen included) and the local map | `EngineDraws` around `UI3DSceneManager::Render` / `LocalMapRenderer::Render` |
-| ImageSpace (P5.6) | each effect left to the engine (the rows imagespace.md marks Next, the VL dispatches) | `EngineDraws` around `BSImagespaceShader::Render` / the dispatch |
 | Bink, Scaleform, menus 3D | a movie on another thread, an engine `DrawBitmaps` path, the menu scene's own views | `EngineDraws` around the engine's call |
 
 ### Readers of the D3D11 state
