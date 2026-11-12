@@ -20,6 +20,8 @@
 //   white).
 // With a still camera also: vanished (the frame before had an object here, and this frame has none of it here or beside) and
 // appeared (the reverse); a moving camera covers and uncovers, so these count edges then.
+#include "Common/DeviceAddress.hlsli"
+
 cbuffer FoliageParityConstants : register(b0)
 {
 	uint4 Ids;          // both frames' pairs, by the epoch's parity
@@ -60,7 +62,7 @@ uint ObjectAt(uint2 a_buffer, int2 a_pixel, uint a_tag)
 {
 	if (a_pixel.x < 0 || a_pixel.y < 0 || uint(a_pixel.x) >= Width || uint(a_pixel.y) >= Height)
 		return 0;
-	const uint word = vk::RawBufferLoad<uint>(Address(a_buffer) + (uint64_t(a_pixel.y) * Width + uint(a_pixel.x)) * 4, 4);
+	const uint word = DeviceLoad(uint, Address(a_buffer) + (uint64_t(a_pixel.y) * Width + uint(a_pixel.x)) * 4, 4);
 	return (word >> 24) == a_tag ? (word & 0x00FFFFFFu) : 0;
 }
 
@@ -103,7 +105,7 @@ void Sample(RWByteAddressBuffer a_results, uint a_counter, uint a_base, uint a_c
 	const uint position = uint(pixel.x) | (uint(pixel.y) << 16);
 	RWByteAddressBuffer results = ResourceDescriptorHeap[ResultsIndex];
 	{
-		const uint4 frameWords = vk::RawBufferLoad<uint4>(Address(FrameBlock) + 16, 4);  // width, height, tag, owners
+		const uint4 frameWords = DeviceLoad(uint4, Address(FrameBlock) + 16, 4);  // width, height, tag, owners
 		Frame = frameWords.z;
 		const bool odd = (Frame & 1) != 0;
 		CurrentIds = odd ? Ids.zw : Ids.xy;
@@ -117,7 +119,7 @@ void Sample(RWByteAddressBuffer a_results, uint a_counter, uint a_base, uint a_c
 	const uint object = ObjectAt(CurrentIds, pixel, tag);
 	const uint previous = ObjectAt(PreviousIds, pixel, previousTag);
 	const uint64_t index = uint64_t(pixel.y) * Width + uint(pixel.x);
-	const uint4 colours = object != 0 ? vk::RawBufferLoad<uint4>(Address(CurrentColours) + index * kColourWords * 4, 4) : uint4(0, 0, 0, 0);
+	const uint4 colours = object != 0 ? DeviceLoad(uint4, Address(CurrentColours) + index * kColourWords * 4, 4) : uint4(0, 0, 0, 0);
 
 	// Within the frame: the owner of the pixel's depth, if an alpha-tested Z-prepass draw has it.
 	RWStructuredBuffer<uint64_t> owners = ResourceDescriptorHeap[OwnersIndex];
@@ -187,7 +189,7 @@ void Sample(RWByteAddressBuffer a_results, uint a_counter, uint a_base, uint a_c
 				const int2 at = then + int2(x, y);
 				if (ObjectAt(PreviousIds, at, previousTag) != object)
 					continue;
-				const uint4 earlier = vk::RawBufferLoad<uint4>(Address(PreviousColours) + (uint64_t(at.y) * Width + uint(at.x)) * kColourWords * 4, 4);
+				const uint4 earlier = DeviceLoad(uint4, Address(PreviousColours) + (uint64_t(at.y) * Width + uint(at.x)) * kColourWords * 4, 4);
 				const float3 albedoStep = abs(Unpack(colours.x).rgb - Unpack(earlier.x).rgb);
 				const float3 diffuseStep = abs(Unpack(colours.y).rgb - Unpack(earlier.y).rgb);
 				const float3 specularStep = abs(Unpack(colours.z).rgb - Unpack(earlier.z).rgb);

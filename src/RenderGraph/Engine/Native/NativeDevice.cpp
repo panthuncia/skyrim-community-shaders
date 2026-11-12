@@ -1264,7 +1264,8 @@ namespace RenderGraph::Engine::Native
 					if (!resource)
 						return false;
 					a_record.vkBuffer = reinterpret_cast<VkBuffer>(resource);
-					a_record.address = static_cast<VkDeviceAddress>(D3D12AddressOf(resource));
+					// Through BasicRHI, so the buffer joins its device address table and shaders can load through the address.
+					a_record.address = static_cast<VkDeviceAddress>(g_device ? g_device->Rhi().GetBufferDeviceAddress({ a_buffer.GetHandle(), 0 }) : D3D12AddressOf(resource));
 					a_record.usage = 0;
 					return true;
 				}

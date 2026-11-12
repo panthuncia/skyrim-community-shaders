@@ -11,6 +11,8 @@
 // backing the pool handed it.
 
 // Must match TextureTransformsPass.cpp's Constants.
+#include "Common/DeviceAddress.hlsli"
+
 cbuffer TextureTransformsConstants : register(b0)
 {
 	uint LatchIndex;   // ByteAddressBuffer: the depth segment's BuildDrawsLatch block
@@ -65,7 +67,7 @@ static const uint kThreads = 64 * 32;
 			if (installed == kNoAnimatedRow)
 				continue;  // a free row: no header names it
 			const uint at = (w % kWords) * 16;
-			vk::RawBufferStore<uint4>(copyBase + uint64_t(k) * kMaterialRowBytes + at, vk::RawBufferLoad<uint4>(base + installed + at, 16), 16);
+			DeviceStore(uint4, copyBase + uint64_t(k) * kMaterialRowBytes + at, DeviceLoad(uint4, base + installed + at, 16), 16);
 		}
 		return;
 	}
@@ -73,7 +75,7 @@ static const uint kThreads = 64 * 32;
 		const TextureTransformRow row = transforms[i + 1];
 		// The entry's row's copy (its installed header names it); a row with none is not listed (MainRows::AnimatedRows::Animated).
 		const uint rowBase = row.RowOffset / kMaterialRowBytes * kMaterialRowBytes;
-		const uint k = vk::RawBufferLoad<uint>(base + rowBase + kMaterialRowHeader, 4);
+		const uint k = DeviceLoad(uint, base + rowBase + kMaterialRowHeader, 4);
 		// kNoAnimatedRow is past every count. One unsigned compare, no equality test: AMD's RDNA2 Windows compiler took
 		// `k == kNoAnimatedRow || k >= animated` as k == kNoAnimatedRow on the path past it, and stored every entry ~4 TB past the copy.
 		if (k >= animated)
@@ -81,6 +83,6 @@ static const uint kThreads = 64 * 32;
 		const uint64_t at = copyBase + uint64_t(k) * kMaterialRowBytes + (row.RowOffset - rowBase);
 		[unroll] for (uint c = 0; c < 4; ++c)
 			if ((row.Mask >> c) & 1)
-				vk::RawBufferStore<uint>(at + c * 4, asuint(row.Values[c]), 4);
+				DeviceStore(uint, at + c * 4, asuint(row.Values[c]), 4);
 	}
 }

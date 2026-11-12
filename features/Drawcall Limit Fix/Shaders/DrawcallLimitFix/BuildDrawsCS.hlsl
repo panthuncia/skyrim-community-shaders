@@ -1,6 +1,8 @@
 // Drawcall Limit Fix: culls this frame's draw inputs and writes their indirect draw sequences (DrawSequence, Records.h) from the
 // inputs and the geometry table. Compiled to SPIR-V at runtime (ComputeProgram) with BasicRHI's descriptor-heap ABI.
 
+#include "Common/DeviceAddress.hlsli"
+
 #include "DrawcallLimitFix/CullEye.hlsli"
 #include "DrawcallLimitFix/HzbTest.hlsli"
 #include "DrawcallLimitFix/ParabolicPrograms.hlsli"
@@ -863,7 +865,7 @@ uint2 MaterialRowAddress(uint a_materialSlot)
 	const uint2 copyRows = latch.Load2(LatchOffset + 348);
 	if ((copyRows.x | copyRows.y) == 0)
 		return installed;
-	const uint animatedRow = vk::RawBufferLoad<uint>(((uint64_t(installed.y) << 32) | uint64_t(installed.x)) + 768, 4);
+	const uint animatedRow = DeviceLoad(uint, ((uint64_t(installed.y) << 32) | uint64_t(installed.x)) + 768, 4);
 	if (animatedRow == 0xFFFFFFFFu)
 		return installed;
 	return AddressOf(copyRows.x, copyRows.y, animatedRow * 1024);  // kMaterialRowBytes

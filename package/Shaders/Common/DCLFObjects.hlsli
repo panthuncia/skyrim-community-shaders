@@ -1,6 +1,8 @@
 #ifndef __DCLF_OBJECTS_DEPENDENCY_HLSL__
 #define __DCLF_OBJECTS_DEPENDENCY_HLSL__
 
+#include "Common/DeviceAddress.hlsli"
+
 // Drawcall Limit Fix draws its permutations indirectly, and the handful of values that differ between the
 // objects sharing one pipeline come from a GPU-resident table indexed by the draw's own object index
 // rather than from per-draw constant buffers. That is what lets the PerGeometry buffer become
@@ -159,7 +161,7 @@ static uint DCLFDrawRecordWord;
 uint64_t DCLFDrawSequence(uint a_instance)
 {
 	if ((DCLFDirectFlags & 4u) != 0) {
-		const uint2 record = vk::RawBufferLoad<uint2>(DCLFAddress(DCLFDrawRecords) + uint64_t(a_instance) * 28 + 20, 4);
+		const uint2 record = DeviceLoad(uint2, DCLFAddress(DCLFDrawRecords) + uint64_t(a_instance) * 28 + 20, 4);
 		DCLFDrawRecordWord = record.y;
 		return DCLFAddress(DCLFSequencesAddress) + uint64_t(record.x) * kDCLFSequenceStride;
 	}
@@ -171,7 +173,7 @@ uint DCLFSequenceObjectWord(uint64_t a_sequence)
 {
 	if ((DCLFDirectFlags & 4u) != 0)
 		return DCLFDrawRecordWord;
-	return (DCLFDirectFlags & 1u) != 0 ? DCLFObjectWordOverride : vk::RawBufferLoad<uint>(a_sequence + 20);
+	return (DCLFDirectFlags & 1u) != 0 ? DCLFObjectWordOverride : DeviceLoad(uint, a_sequence + 20);
 }
 
 uint2 DCLFAddressWords(uint64_t a_address) { return uint2(uint(a_address), uint(a_address >> 32)); }
@@ -181,14 +183,14 @@ uint2 DCLFAddressWords(uint64_t a_address) { return uint2(uint(a_address), uint(
 // then outlive the payload's row versions (Snapshot/SceneLists). The GPU path's draws push 0 and hold addresses.
 uint4 DCLFSequenceRows(uint64_t a_sequence)
 {
-	uint4 rows = vk::RawBufferLoad<uint4>(a_sequence + 4);
+	uint4 rows = DeviceLoad(uint4, a_sequence + 4);
 	if ((DCLFDirectFlags & 2u) != 0) {
 		rows.xy = DCLFAddressWords(DCLFAddress(rows.xy) + DCLFAddress(DCLFRowBases.xy));
 		rows.zw = DCLFAddressWords(DCLFAddress(rows.zw) + DCLFAddress(DCLFRowBases.zw));
 		// A row a frame patch writes (its header's animatedRow, MaterialRowHeader word 0 at byte 768) is drawn from its row of the
 		// frame's copy, as BuildDrawsCS's MaterialRowAddress points the GPU path's draws (kMaterialRowBytes 1024 a row).
 		if ((DCLFAnimatedRows.x | DCLFAnimatedRows.y) != 0) {
-			const uint animatedRow = vk::RawBufferLoad<uint>(DCLFAddress(rows.zw) + 768, 4);
+			const uint animatedRow = DeviceLoad(uint, DCLFAddress(rows.zw) + 768, 4);
 			if (animatedRow != 0xFFFFFFFFu)
 				rows.zw = DCLFAddressWords(DCLFAddress(DCLFAnimatedRows) + uint64_t(animatedRow) * 1024);
 		}
@@ -198,7 +200,7 @@ uint4 DCLFSequenceRows(uint64_t a_sequence)
 // A shadow sequence's: its key slot's vertex layout (no address), then its material row's (relative as DCLFSequenceRows').
 uint4 DCLFSequenceShadowRows(uint64_t a_sequence)
 {
-	uint4 rows = vk::RawBufferLoad<uint4>(a_sequence + 4);
+	uint4 rows = DeviceLoad(uint4, a_sequence + 4);
 	if ((DCLFDirectFlags & 2u) != 0)
 		rows.zw = DCLFAddressWords(DCLFAddress(rows.zw) + DCLFAddress(DCLFRowBases.zw));
 	return rows;
@@ -208,7 +210,7 @@ uint4 DCLFSequenceShadowRows(uint64_t a_sequence)
 #		if defined(DCLF_PULLED_VERTICES)
 // The draw's vertex layout, from its pipeline row (DrawPipelines.h, PipelineRowHeader::vertexLayout, at kPipelineRowHeader + 56;
 // DCLFPipelineVertexLayout's read in a pulled build), whose address is the draw's push data's.
-uint2 DCLFPushedVertexLayout() { return vk::RawBufferLoad<uint2>(DCLFAddress(DCLFPipelineRowAddress) + 1536 + 56, 8); }
+uint2 DCLFPushedVertexLayout() { return DeviceLoad(uint2, DCLFAddress(DCLFPipelineRowAddress) + 1536 + 56, 8); }
 #		endif
 #	endif  // DCLF_PULLED || DCLF_PULLED_VERTICES
 
@@ -236,21 +238,21 @@ uint DCLFMaterialTextureIndex(uint a_register)
 {
 	// MaterialRowHeader: four words (the animated row, reserved), textures[16], samplers[16], features (t71, t74, then TruePBR's t80-t91: kFeatureMaterialRegisters).
 	const uint slot = a_register == 71 ? 32 : a_register == 74 ? 33 : a_register >= 80 ? 34 + (a_register - 80) : a_register;
-	return vk::RawBufferLoad<uint>(DCLFMaterialRowAddress + kDCLFMaterialRowHeader + 16 + 4 * slot, 4);
+	return DeviceLoad(uint, DCLFMaterialRowAddress + kDCLFMaterialRowHeader + 16 + 4 * slot, 4);
 }
 uint DCLFMaterialSamplerIndex(uint a_register)
 {
-	return vk::RawBufferLoad<uint>(DCLFMaterialRowAddress + kDCLFMaterialRowHeader + 80 + 4 * a_register, 4);
+	return DeviceLoad(uint, DCLFMaterialRowAddress + kDCLFMaterialRowHeader + 80 + 4 * a_register, 4);
 }
 // PipelineRowHeader: six reserved addresses, the shadow mask's texture and sampler, the vertex layout.
-uint DCLFPipelineTextureIndex() { return vk::RawBufferLoad<uint>(DCLFPipelineRowAddress + kDCLFPipelineRowHeader + 48, 4); }
-uint DCLFPipelineSamplerIndex() { return vk::RawBufferLoad<uint>(DCLFPipelineRowAddress + kDCLFPipelineRowHeader + 52, 4); }
-uint2 DCLFPipelineVertexLayout() { return vk::RawBufferLoad<uint2>(DCLFPipelineRowAddress + kDCLFPipelineRowHeader + 56, 8); }
-float4 DCLFRowFloat4(uint64_t a_row, uint a_offset) { return asfloat(vk::RawBufferLoad<uint4>(a_row + a_offset, 4)); }
-float3 DCLFRowFloat3(uint64_t a_row, uint a_offset) { return asfloat(vk::RawBufferLoad<uint3>(a_row + a_offset, 4)); }
-float2 DCLFRowFloat2(uint64_t a_row, uint a_offset) { return asfloat(vk::RawBufferLoad<uint2>(a_row + a_offset, 4)); }
-float DCLFRowFloat(uint64_t a_row, uint a_offset) { return asfloat(vk::RawBufferLoad<uint>(a_row + a_offset, 4)); }
-uint DCLFRowUint(uint64_t a_row, uint a_offset) { return vk::RawBufferLoad<uint>(a_row + a_offset, 4); }
+uint DCLFPipelineTextureIndex() { return DeviceLoad(uint, DCLFPipelineRowAddress + kDCLFPipelineRowHeader + 48, 4); }
+uint DCLFPipelineSamplerIndex() { return DeviceLoad(uint, DCLFPipelineRowAddress + kDCLFPipelineRowHeader + 52, 4); }
+uint2 DCLFPipelineVertexLayout() { return DeviceLoad(uint2, DCLFPipelineRowAddress + kDCLFPipelineRowHeader + 56, 8); }
+float4 DCLFRowFloat4(uint64_t a_row, uint a_offset) { return asfloat(DeviceLoad(uint4, a_row + a_offset, 4)); }
+float3 DCLFRowFloat3(uint64_t a_row, uint a_offset) { return asfloat(DeviceLoad(uint3, a_row + a_offset, 4)); }
+float2 DCLFRowFloat2(uint64_t a_row, uint a_offset) { return asfloat(DeviceLoad(uint2, a_row + a_offset, 4)); }
+float DCLFRowFloat(uint64_t a_row, uint a_offset) { return asfloat(DeviceLoad(uint, a_row + a_offset, 4)); }
+uint DCLFRowUint(uint64_t a_row, uint a_offset) { return DeviceLoad(uint, a_row + a_offset, 4); }
 // A row_major matrix: a register per row.
 float3x4 DCLFRowFloat3x4(uint64_t a_row, uint a_offset)
 {

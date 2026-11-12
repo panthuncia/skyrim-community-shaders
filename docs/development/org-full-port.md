@@ -907,6 +907,11 @@ the code, with the work for each piece. The pieces build on each other in this o
 6. **Texture imports** (`GpuTextures`: `rhi::vulkan::import_buffer` of buffer-backed views) use
    `rhi::dx12::import_resource` on the ID3D12Resource that native mode's descriptions already carry.
 
+**Item 1, first slice (2026-11-12):** BasicRHI's D3D12 backend keeps the device address table (`Dx12AddressTable`, the ABI in
+`rhi_shader_abi.h`), and `Common/DeviceAddress.hlsli` defines `DeviceLoad`/`DeviceStore`. `DCLFObjects.hlsli` and the five compute
+shaders below use them; their SPIR-V is byte-identical to before (checked with the Vulkan SDK's DXC), and they build to DXIL.
+`CS_ORG_D3D12_SELFTEST=1` checks the table end to end (`RenderGraph/D3D12DeviceAddressTest.hlsl`). DCLF itself stays off.
+
 The first piece that can be built and run alone is item 1 on DCLF's compute shaders (BuildDraws, IndexPool, PixelRows,
 TextureTransforms, FoliageParity). Their layouts are CS's own, so the GPU cull and draw building could be checked on D3D12
 before any colour draw.
