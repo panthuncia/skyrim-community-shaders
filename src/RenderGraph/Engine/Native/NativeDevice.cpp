@@ -282,6 +282,20 @@ namespace RenderGraph::Engine::Native
 			registry.live.erase(this);
 		}
 
+		/** @brief A debug label on a BasicRHI list: its crash markers then name the work (labels are no-ops where unsupported). */
+		void BeginLabel(rhi::CommandList& a_list, const std::string& a_label)
+		{
+			static constexpr float kColor[4] = { 0.4f, 0.7f, 1.0f, 1.0f };
+			if (a_list.SupportsDebugLabels())
+				a_list.vt->beginDebugLabel(&a_list, kColor, a_label.c_str());
+		}
+
+		void EndLabel(rhi::CommandList& a_list)
+		{
+			if (a_list.SupportsDebugLabels())
+				a_list.vt->endDebugLabel(&a_list);
+		}
+
 		/** @brief One-shot command lists on the graphics queue for creation-time work (initial layout, initial data), waited for. */
 		class OneShot
 		{
@@ -290,19 +304,24 @@ namespace RenderGraph::Engine::Native
 			{
 				device = a_device;
 				queue = device.GetQueue(rhi::QueueKind::Graphics);
-				return device.CreateCommandAllocator(rhi::QueueKind::Graphics, allocator) == rhi::Result::Ok && allocator &&
-				       device.CreateCommandList(rhi::QueueKind::Graphics, allocator.Get(), list) == rhi::Result::Ok && list &&
-				       device.CreateTimeline(timeline, 0, "CS native one-shot") == rhi::Result::Ok && timeline;
+				const bool ok = device.CreateCommandAllocator(rhi::QueueKind::Graphics, allocator) == rhi::Result::Ok && allocator &&
+				                device.CreateCommandList(rhi::QueueKind::Graphics, allocator.Get(), list) == rhi::Result::Ok && list &&
+				                device.CreateTimeline(timeline, 0, "CS native one-shot") == rhi::Result::Ok && timeline;
+				if (ok)
+					list->SetName("CS native creation");
+				return ok;
 			}
 
-			/** @brief Records a_record, submits it and waits for the GPU. Any thread (one at a time). */
+			/** @brief Records a_record, submits it and waits for the GPU. Any thread (one at a time). a_label names it in crash markers. */
 			template <class F>
-			bool Run(F&& a_record)
+			bool Run(const std::string& a_label, F&& a_record)
 			{
 				std::lock_guard guard(lock);
 				allocator->Recycle();
 				list->Recycle(allocator.Get());
+				BeginLabel(list.Get(), a_label);
 				a_record(list.Get());
+				EndLabel(list.Get());
 				list->End();
 				rhi::CommandList lists[] = { list.Get() };
 				const rhi::TimelinePoint signal{ timeline->GetHandle(), ++value };
@@ -365,9 +384,12 @@ namespace RenderGraph::Engine::Native
 				          resolve(vk.copyBufferToImage, "vkCmdCopyBufferToImage") && resolve(vk.copyImageToBuffer, "vkCmdCopyImageToBuffer") &&
 				          resolve(vk.blitImage, "vkCmdBlitImage") && resolve(vk.clearColorImage, "vkCmdClearColorImage") &&
 				          resolve(vk.clearDepthStencilImage, "vkCmdClearDepthStencilImage") && resolve(vk.fillBuffer, "vkCmdFillBuffer");
-				for (auto& slot : slots) {
+				for (uint32_t i = 0; i < kSlots; ++i) {
+					auto& slot = slots[i];
 					ok = ok && device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator) == rhi::Result::Ok && slot.allocator &&
 					     device.CreateCommandList(rhi::QueueKind::Graphics, slot.allocator.Get(), slot.list) == rhi::Result::Ok && slot.list;
+					if (ok)
+						slot.list->SetName(fmt::format("CS native immediate {}", i).c_str());
 				}
 				return ok && device.CreateTimeline(timeline, 0, "CS native immediate context") == rhi::Result::Ok && timeline;
 			}
@@ -376,8 +398,8 @@ namespace RenderGraph::Engine::Native
 			 * @brief Records a_record and submits it. a_keep lives until the work is done; each of a_used gets the work's value as its
 			 * last use. Returns that value, 0 when the submission failed (logged). Any thread, one at a time.
 			 */
-			uint64_t Run(const std::function<void(const Vulkan&, VkCommandBuffer)>& a_record, std::vector<std::shared_ptr<const void>> a_keep,
-				std::initializer_list<NativeResource*> a_used)
+			uint64_t Run(const std::string& a_label, const std::function<void(const Vulkan&, VkCommandBuffer)>& a_record,
+				std::vector<std::shared_ptr<const void>> a_keep, std::initializer_list<NativeResource*> a_used)
 			{
 				std::lock_guard guard(lock);
 				auto& slot = slots[next++ % kSlots];
@@ -387,9 +409,12 @@ namespace RenderGraph::Engine::Native
 				slot.allocator->Recycle();
 				slot.list->Recycle(slot.allocator.Get());
 				const VkCommandBuffer commands = rhi::vulkan::get_cmd_list(slot.list.Get());
+				// The operation's name and its resource, so a device fault's crash markers name the work that ran.
+				BeginLabel(slot.list.Get(), a_label);
 				FullBarrier(commands);
 				a_record(vk, commands);
 				FullBarrier(commands);
+				EndLabel(slot.list.Get());
 				slot.list->End();
 				rhi::CommandList lists[] = { slot.list.Get() };
 				const rhi::TimelinePoint signal{ timeline->GetHandle(), value + 1 };
@@ -875,7 +900,7 @@ namespace RenderGraph::Engine::Native
 					upload->Unmap(0, desc.buffer.sizeBytes);
 				}
 
-				return oneShot.Run([&](rhi::CommandList a_list) {
+				return oneShot.Run((copies.empty() ? "initial layout " : "initial contents ") + a_request.name, [&](rhi::CommandList a_list) {
 					rhi::TextureBarrier toCopy{};
 					toCopy.texture = texture;
 					toCopy.range = all;
@@ -959,6 +984,7 @@ namespace RenderGraph::Engine::Native
 					if (Rhi().CreateCommandAllocator(rhi::QueueKind::Graphics, allocators[i]) != rhi::Result::Ok || !allocators[i] ||
 						Rhi().CreateCommandList(rhi::QueueKind::Graphics, allocators[i].Get(), lists[i]) != rhi::Result::Ok || !lists[i])
 						return false;
+					lists[i]->SetName(fmt::format("CS native present {}", i).c_str());
 				}
 				return Rhi().CreateTimeline(presentTimeline, 0, "CS native present") == rhi::Result::Ok && presentTimeline;
 			}
@@ -1616,7 +1642,7 @@ namespace RenderGraph::Engine::Native
 			if (record->kind == NativeResource::Kind::Image && record->upload && a_subresource < record->shape.Subresources()) {
 				const auto image = record;
 				const auto upload = record->upload;
-				g_device->immediate.Run(
+				g_device->immediate.Run("unmap (dynamic upload) " + image->name,
 					[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 						(void)RecordCopy(a_vk, a_commands, *image, a_subresource, {}, *upload, a_subresource, nullptr);
 					},
@@ -1658,7 +1684,7 @@ namespace RenderGraph::Engine::Native
 					return;
 				std::memcpy(data, a_data, size);
 				upload->resource->Unmap(0, size);
-				g_device->immediate.Run(
+				g_device->immediate.Run("update buffer " + record->name,
 					[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 						const VkBufferCopy copy{ 0, from, size };
 						a_vk.copyBuffer(a_commands, upload->vkBuffer, record->vkBuffer, 1, &copy);
@@ -1713,7 +1739,7 @@ namespace RenderGraph::Engine::Native
 				return;
 			writeRows(static_cast<std::byte*>(data));
 			upload->resource->Unmap(0, upload->size);
-			g_device->immediate.Run(
+			g_device->immediate.Run("update texture " + record->name,
 				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 					VkBufferImageCopy copy{};
 					copy.bufferRowLength = rowPitch / shape.blockBytes * shape.BlockSize();
@@ -1737,7 +1763,7 @@ namespace RenderGraph::Engine::Native
 				return;
 			}
 			bool recorded = false;
-			g_device->immediate.Run(
+			g_device->immediate.Run("copy region " + source->name + " to " + destination->name,
 				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 					recorded = RecordCopy(a_vk, a_commands, *destination, a_destinationSub,
 						{ static_cast<int32_t>(a_x), static_cast<int32_t>(a_y), static_cast<int32_t>(a_z) }, *source, a_sourceSub, a_box);
@@ -1760,7 +1786,7 @@ namespace RenderGraph::Engine::Native
 				return;
 			}
 			bool recorded = true;
-			g_device->immediate.Run(
+			g_device->immediate.Run("copy " + source->name + " to " + destination->name,
 				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 					if (destination->kind == NativeResource::Kind::Buffer || source->kind == NativeResource::Kind::Buffer) {
 						recorded = RecordCopy(a_vk, a_commands, *destination, 0, {}, *source, 0, nullptr);
@@ -1789,7 +1815,7 @@ namespace RenderGraph::Engine::Native
 			const Shape& shape = record->shape;
 			if (shape.mips < 2 || shape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
 				return;
-			g_device->immediate.Run(
+			g_device->immediate.Run("generate mips " + record->name,
 				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 					// Each mip from the one above it, linearly filtered; a barrier between, since each level reads the last one written.
 					for (uint32_t mip = 1; mip < shape.mips; ++mip) {
@@ -1851,7 +1877,7 @@ namespace RenderGraph::Engine::Native
 
 		void ClearColor(const std::shared_ptr<NativeResource>& a_record, const VkImageSubresourceRange& a_range, const VkClearColorValue& a_value)
 		{
-			g_device->immediate.Run(
+			g_device->immediate.Run("clear " + a_record->name,
 				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 					a_vk.clearColorImage(a_commands, a_record->image.image, VK_IMAGE_LAYOUT_GENERAL, &a_value, 1, &a_range);
 				},
@@ -1909,7 +1935,7 @@ namespace RenderGraph::Engine::Native
 			VkDeviceSize offset = 0, size = 0;
 			if (record->kind != NativeResource::Kind::Buffer || !UavBytes(*record, desc, offset, size))
 				return;
-			g_device->immediate.Run(
+			g_device->immediate.Run("fill " + record->name,
 				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) { a_vk.fillBuffer(a_commands, record->vkBuffer, offset, size, a_word); },
 				{ record }, { record.get() });
 		}
@@ -1954,7 +1980,7 @@ namespace RenderGraph::Engine::Native
 			a_view->GetDesc(&desc);
 			const VkImageSubresourceRange range = ViewRange(desc, record->shape, aspects);
 			const VkClearDepthStencilValue value{ a_depth, a_stencil };
-			g_device->immediate.Run(
+			g_device->immediate.Run("clear depth " + record->name,
 				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 					a_vk.clearDepthStencilImage(a_commands, record->image.image, VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
 				},
@@ -2240,9 +2266,11 @@ namespace RenderGraph::Engine::Native
 			LogOnce(loggedInitialize, request.name, "the image to wrap could not be moved into GENERAL or given its contents");
 			return nullptr;
 		}
-		if (!a_data) {
+		// vkCmdClearColorImage cannot write a block-compressed image (DynamicCubemaps' BC6H cubemaps): those are left as made, which
+		// their owners write before reading.
+		if (!a_data && !record->shape.blocks) {
 			const VkImageSubresourceRange all{ record->shape.aspects, 0, request.mipLevels, 0, layers };
-			g_device->immediate.Run(
+			g_device->immediate.Run("zero " + record->name,
 				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 					if (record->shape.aspects == VK_IMAGE_ASPECT_COLOR_BIT) {
 						const VkClearColorValue zero{};
