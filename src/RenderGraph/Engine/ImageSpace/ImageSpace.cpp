@@ -2490,6 +2490,16 @@ namespace RenderGraph::Engine::ImageSpace
 					};
 					const bool quad = a_shape && (a_shape == rendererDataOf(0x48) || a_shape == rendererDataOf(0x50));
 					if (quad && state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->compute && !state.current->drew) {
+						// TakeDraw applies the engine's state (SetDirtyStates) before the engine's DrawTriShape would have: give the
+						// shadow state this shape's vertex description first, as DrawTriShape does. Otherwise the input layout is
+						// built from the previous draw's description and the effect's vertex shader.
+						// BSGraphics::TriShape: vertex buffer, index buffer, then the VertexDesc at +0x10.
+						const auto shapeDesc = *reinterpret_cast<const std::uint64_t*>(static_cast<const std::byte*>(a_shape) + 0x10);
+						auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+						if (shadow.vertexDesc != shapeDesc) {
+							shadow.vertexDesc = shapeDesc;
+							shadow.stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_VERTEX_DESC);
+						}
 						if (TakeDraw())
 							return;
 					} else
