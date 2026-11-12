@@ -8,6 +8,7 @@
 #	include "RenderGraph/RenderGraphRuntime.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
+#	include <OpenRenderGraph/Runtime.h>
 #	include <Render/Runtime/DescriptorServiceAccess.h>
 #	include <Render/Runtime/IDescriptorService.h>
 
@@ -20,14 +21,22 @@ namespace ShaderBindings
 {
 	namespace
 	{
-		/** @brief The active service inside a graph callback, else the host graph's (setup, on the render thread); null without one. */
+		/**
+		 * @brief The active service inside a graph callback, else the runtime's (setup, on the render thread); null without a host.
+		 * The runtime's is the one every graph uses. It exists from the host's start, before any graph is built: with synchronous
+		 * epochs no graph is built yet when the ports set up, and the first epoch's graph may be built last.
+		 */
 		org::runtime::IDescriptorService* Service(std::shared_ptr<org::runtime::IDescriptorService>& a_retained)
 		{
 			if (auto* service = org::runtime::GetActiveDescriptorService())
 				return service;
 			auto* host = RenderGraphRuntime::Get().Host();
-			if (host && host->Graph())
+			if (!host)
+				return nullptr;
+			if (host->Graph())
 				a_retained = host->Graph()->RetainDescriptorService();
+			if (!a_retained)
+				a_retained = host->GetRuntime().Descriptors();
 			return a_retained.get();
 		}
 	}
@@ -98,7 +107,7 @@ namespace ShaderBindings
 		std::shared_ptr<org::runtime::IDescriptorService> retained;
 		auto* service = Service(retained);
 		if (!service) {
-			logger::warn("[ORG] A sampler was asked for without a descriptor service");
+			logger::warn("[ORG] A sampler was asked for without a descriptor service (no graph host)");
 			return {};
 		}
 		try {
@@ -117,7 +126,7 @@ namespace ShaderBindings
 		std::shared_ptr<org::runtime::IDescriptorService> retained;
 		auto* service = Service(retained);
 		if (!service) {
-			logger::warn("[ORG] A shader resource view was asked for without a descriptor service");
+			logger::warn("[ORG] A shader resource view was asked for without a descriptor service (no graph host)");
 			return {};
 		}
 		try {

@@ -914,7 +914,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			state.samplers[i] = ShaderBindings::CreateSamplerFromD3D11(desc);
 			if (!state.samplers[i]) {
 				state.failed = true;
-				logger::error("[ORG] Scaleform: the samplers could not be made; the D3D11 renderer draws");
+				logger::error("[ORG] Scaleform: the samplers could not be made (no descriptor service); the D3D11 renderer draws");
 				return;
 			}
 		}

@@ -464,8 +464,14 @@ namespace RenderGraph::Engine::Bink::Graph
 		sampler.MinLOD = 0.0f;
 		sampler.MaxLOD = D3D11_FLOAT32_MAX;
 		state.sampler = ShaderBindings::CreateSamplerFromD3D11(sampler);
-		if (!*state.atlas || !state.staging || !state.sampler || !UpdateTarget(state)) {
-			Fail(state, "its movie texture, staging, sampler, framebuffer or tile program could not be made");
+		// Each part named: a sampler needs the runtime's descriptor service, the framebuffer the engine's targets.
+		const char* missing = !*state.atlas ? "its movie texture could not be made" :
+		                      !state.staging ? "its staging pool could not be made" :
+		                      !state.sampler ? "its sampler could not be made (no descriptor service)" :
+		                      !UpdateTarget(state) ? "the framebuffer cannot be imported, or its tile program cannot be built" :
+		                                             nullptr;
+		if (missing) {
+			Fail(state, missing);
 			return;
 		}
 		// One client for the session: every movie draws through it, so a movie never rebuilds the graph.
