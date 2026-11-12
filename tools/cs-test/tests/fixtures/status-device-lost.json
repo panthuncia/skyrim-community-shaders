@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "run_id": "R1",
+  "pid": 12345,
+  "updated": "2026-11-12T15:18:58.335",
+  "phase": "world",
+  "frame": 355,
+  "fps": 12.0,
+  "milestones": {
+    "plugin": { "t": 0.0, "frame": 0 },
+    "data-loaded": { "t": 6.1, "frame": 0 },
+    "shaders-ready": { "t": 9.8, "frame": 31 },
+    "main-menu": { "t": 10.2, "frame": 40 },
+    "load-start": { "t": 12.0, "frame": 95 },
+    "loading-screen": { "t": 12.1, "frame": 96 },
+    "world-ready": { "t": 31.5, "frame": 352 }
+  },
+  "config": { "applied": 4, "features_off": ["Upscaling"], "unknown": [] },
+  "step": { "index": 0, "do": "shot", "state": "waiting" },
+  "compile": { "done": 1560, "total": 1560 },
+  "holds": [],
+  "last_error": "[E] Vulkan device fault: invalid read at 0x1f0380000",
+  "outcome": "device-lost",
+  "reason": "VK_ERROR_DEVICE_LOST in vkQueueSubmit",
+  "fault": { "address": "0x1f0380000", "markers": "cs.dclf.colour" },
+  "shots": []
+}
