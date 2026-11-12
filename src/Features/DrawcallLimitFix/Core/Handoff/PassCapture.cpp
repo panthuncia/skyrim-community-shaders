@@ -611,6 +611,14 @@ namespace DCLF
 		return samples;
 	}
 
+	std::vector<const void*> PassCapture::TakeUncoveredAccumulators()
+	{
+		std::scoped_lock lock(keptLock);
+		std::vector<const void*> out(uncoveredAccumulators.begin(), uncoveredAccumulators.end());
+		uncoveredAccumulators.clear();
+		return out;
+	}
+
 	void PassCapture::KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass) const
 	{
 		namespace Flush = RenderGraph::Engine::Flush;
@@ -631,6 +639,8 @@ namespace DCLF
 				               t_shadowRegistration                                       ? std::string("a shadow view DCLF does not cover") :
 				               IsMainRenderer(a_batch) || MainRendererNow(a_batch)        ? std::string("the main views") :
 				                                                                            std::string("another view");
+				if (t_shadowRegistration && t_registrationAccumulator && !ShadowModeOfBatch(a_batch, mode) && uncoveredAccumulators.size() < kKeptSamples)
+					uncoveredAccumulators.insert(t_registrationAccumulator);
 				// Another view: an OwnRenderers view's renderer (its name, and whether it withholds now), else one DCLF knows nothing of.
 				if (sample.where == "another view") {
 					const auto& views = Extensions::Views();

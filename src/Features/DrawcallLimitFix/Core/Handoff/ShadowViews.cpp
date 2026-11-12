@@ -419,6 +419,48 @@ namespace DCLF
 		}
 	}
 
+	std::string ShadowViews::DescribeAccumulator(const void* a_accumulator) const
+	{
+		std::string listed = "not in this frame's list";
+		for (std::size_t i = 0; i < views.size(); ++i)
+			if (views[i].accumulator == a_accumulator) {
+				const auto& view = views[i];
+				listed = fmt::format("in this frame's list as view {} ({}{} descriptor {}, render mode {:#x}, {})", i, KindName(view.kind), view.focus ? " focus" : "",
+					view.descriptor, view.renderMode, view.covered ? "covered" : "not covered");
+				break;
+			}
+		std::string owner;
+		const auto check = [&](const RE::BSShadowLight* a_light, const char* a_list) {
+			if (!a_light || !owner.empty())
+				return;
+			auto* light = const_cast<RE::BSShadowLight*>(a_light);
+			auto& data = light->GetRuntimeData();
+			const char* kind = light->GetIsDirectionalLight() ? "directional" : light->GetIsFrustumLight() ? "spot" : light->GetIsParabolicLight() ? "point" : "other";
+			for (std::uint32_t d = 0; d < data.shadowmapDescriptors.size(); ++d)
+				if (data.shadowmapDescriptors[d].shaderAccumulator.get() == a_accumulator) {
+					owner = fmt::format("{} {} light {} descriptor {}", a_list, kind, static_cast<const void*>(light), d);
+					return;
+				}
+			for (std::uint32_t d = 0; d < std::size(data.focusShadowmapDescriptors); ++d)
+				if (data.focusShadowmapDescriptors[d].shaderAccumulator.get() == a_accumulator) {
+					owner = fmt::format("{} {} light {} focus descriptor {} (drawFocusShadows {})", a_list, kind, static_cast<const void*>(light), d,
+						data.drawFocusShadows);
+					return;
+				}
+		};
+		if (const auto* node = Engine::Global<RE::ShadowSceneNode*>(Engine::Address::kShadowSceneNode)) {
+			const auto& scene = node->GetRuntimeData();
+			check(scene.sunShadowDirLight, "the sun's");
+			for (const auto& light : scene.activeShadowLights)
+				check(light.get(), "an active");
+			for (const auto* light : scene.shadowLightsAccum)
+				check(light, "an accumulated");
+		}
+		return fmt::format("{}: {}; {}; the frame's list has {} views, the focus target count is {}", a_accumulator,
+			owner.empty() ? std::string("no shadow light of the scene node holds it") : owner, listed, views.size(),
+			Engine::Global<std::uint32_t>(Engine::Address::kFocusTargetCount));
+	}
+
 	void ShadowViews::SetDrawable(bool a_drawable)
 	{
 		// Decided at BeginCasters, before any light is in: the views AddCaster and Rebuild list from here are covered by it.
