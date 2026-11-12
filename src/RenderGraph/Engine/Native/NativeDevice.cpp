@@ -712,7 +712,8 @@ namespace RenderGraph::Engine::Native
 			}
 
 		private:
-			static constexpr uint32_t kSlots = 32;
+			// In-stream epochs submit a segment each, dozens a frame: enough buffers that a reuse never waits for recent work.
+			static constexpr uint32_t kSlots = 512;
 
 			void FullBarrier(VkCommandBuffer a_commands) const
 			{

@@ -2326,7 +2326,9 @@ bool RenderGraphRuntime::Initialize()
 			logger::info("[ORG] async epochs: {}; revision-driven: {}", fmt::join(epochs, ","), fmt::join(revisionEpochs, ","));
 			// In DXVK's own command stream unless CS_ORG_IN_STREAM=0 (or DXVK takes no external commands); a list of epochs (3,1) puts only
 			// those there.
-			if (state->emitExternalCommands && !Switches::Equals("CS_ORG_IN_STREAM", "0")) {
+			// Native mode runs them too: EmitExternalCommands puts each segment on the graphics queue in the call's order (the
+			// stream's order on DXVK), so DCLF's direct forward and first-person families have their in-stream epochs.
+			if ((state->emitExternalCommands || state->native) && !Switches::Equals("CS_ORG_IN_STREAM", "0")) {
 				state->inStreamEpochs = epochs;
 				const auto list = Switches::Value("CS_ORG_IN_STREAM");
 				if (list.find(',') != std::string::npos) {
