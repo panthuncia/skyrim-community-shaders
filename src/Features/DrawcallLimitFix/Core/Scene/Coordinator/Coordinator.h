@@ -1143,6 +1143,12 @@ namespace DCLF
 		std::int32_t NearestFadeNodeBsx(const SceneCapture::LeafView& a_leaf) const;
 		Ineligible ClassifyFrame(const Tracked& a_tracked) const;
 		/**
+		 * @brief Whether a geometry refused as hidden is a focus-only caster (kObjectFocusOnly): a part of an actor (a referenced actor node
+		 * on its chain to its category node) whose property casts, while Features/Actors admits actors. The engine's focus shadows register
+		 * the target's subtree whole, hidden parts included; no other view of the engine draws a hidden node.
+		 */
+		bool HiddenFocusCaster(const Tracked& a_tracked, Ineligible a_reason, const SceneCapture::LeafView& a_leaf) const;
+		/**
 		 * @brief The face mode (0-5) of the one NiBillboardNode above a Billboard-parented leaf when DCLF turns it on the GPU (its parent
 		 * contribution's toggle on: Api::ParentLeaves::TurnedEffectShapes; Billboards.h: a skinless BSEffectShaderProperty BSTriShape, a
 		 * known mode); else -1 (it stays Ineligible::Billboard).

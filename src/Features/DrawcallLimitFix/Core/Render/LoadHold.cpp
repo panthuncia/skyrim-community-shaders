@@ -240,9 +240,12 @@ namespace DCLF::LoadHold
 			// The geometries behind the passes handed to the engine, most first: what DCLF does not draw of its classes, and where.
 			for (const auto& sample : PassCapture::Get().TakeKeptSamples(after.kept ? 12 : 0))
 				logger::info(
-					"[DCLF] handed to the engine: '{}' ({}{}{}), {} passes into {}, shader {}; set phases {:#x}, waiting phases {:#x}", sample.name,
+					"[DCLF] handed to the engine: '{}' ({}{}{}), {} passes into {} ({}), shader {}; set phases {:#x}, waiting phases {:#x}", sample.name,
 					sample.owner.empty() ? "no reference" : sample.owner, sample.hidden ? ", hidden" : "", sample.skinned ? ", skinned" : "", sample.passes,
-					sample.where, sample.shader, sample.phases, sample.pending);
+					sample.where,
+					sample.renderMode != ~0u ? fmt::format("accumulator render mode {:#x}", sample.renderMode) :
+					                           std::string("render mode unknown: not the shadow modes' registration"),
+					sample.shader, sample.phases, sample.pending);
 			after = {};
 			after.logged = any;
 			after.since = std::chrono::steady_clock::now();

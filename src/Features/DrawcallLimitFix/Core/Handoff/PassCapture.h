@@ -202,6 +202,7 @@ namespace DCLF
 			std::string owner;       // the nearest ancestor with a reference: its form ID and base object's name
 			std::string where;       // the view the pass went to
 			std::string shader;      // the pass's shader type and technique
+			std::uint32_t renderMode = ~0u;  // the registering accumulator's render mode, where known (the shadow modes' registration)
 			std::uint32_t passes = 0;
 			std::uint8_t phases = 0;   // its member phases in the frame's set
 			std::uint8_t pending = 0;  // its waiting phases
@@ -233,6 +234,13 @@ namespace DCLF
 		void SetShadowBatchRenderers(std::shared_ptr<const ShadowRendererMap> a_renderers);
 		/** @brief The covered focus views' renderers, by focus descriptor (for the focus membership observer). */
 		void SetFocusBatchRenderers(std::shared_ptr<const ShadowRendererMap> a_renderers);
+		/**
+		 * @brief The covered shadow views' accumulators, each with its view's render mode index. A pass the shadow modes' registration
+		 * hands to a batch renderer of none of the published sets (a geometry group's renderer the engine made during this registration)
+		 * belongs to the view whose accumulator registers it.
+		 */
+		using ShadowAccumulatorMap = ankerl::unordered_dense::map<const void*, std::uint8_t>;
+		void SetShadowAccumulators(std::shared_ptr<const ShadowAccumulatorMap> a_accumulators);
 		/** @brief Whether a_batch is a shadow view's renderer this frame, with its mode index. */
 		bool ShadowModeOfBatch(const RE::BSBatchRenderer* a_batch, std::uint32_t& a_mode) const;
 		/**
@@ -282,6 +290,7 @@ namespace DCLF
 		std::span<const Entry> lastDrain;
 		std::shared_ptr<const ShadowRendererMap> shadowRenderers;
 		std::shared_ptr<const ShadowRendererMap> focusRenderers;
+		std::shared_ptr<const ShadowAccumulatorMap> shadowAccumulators;
 		std::array<std::atomic<std::uint32_t>, kShadowModes> shadowWithheld{};
 		std::atomic<std::uint32_t> volumetricWithheld{ 0 };
 		std::atomic<std::uint32_t> directWithheld{ 0 };

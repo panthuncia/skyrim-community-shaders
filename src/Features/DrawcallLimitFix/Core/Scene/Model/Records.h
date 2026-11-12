@@ -117,6 +117,15 @@ namespace DCLF
 	inline constexpr std::uint32_t kExtraRowProjectedParams = 4;
 	inline constexpr std::uint32_t kNoExtraRows = ~0u;
 
+	/**
+	 * @brief A focus-only caster: a shadow-only record (kObjectShadowOnly) that also carries kObjectDecal, which no other shadow-only
+	 * record does. An actor's hidden part (the player's third-person body in first person): the engine draws it only into the focus
+	 * shadows, whose accumulation registers the focus target's subtree whole, hidden parts too. So only focus views draw it
+	 * (BuildDrawsLatch::focusRoot set); every other shadow view drops it, as the engine's culls skip a hidden node.
+	 */
+	inline constexpr std::uint32_t kObjectFocusOnly = kObjectShadowOnly | kObjectDecal;
+	inline constexpr bool ObjectFocusOnly(std::uint32_t a_flags) { return (a_flags & kObjectFocusOnly) == kObjectFocusOnly; }
+
 	/** @brief ObjectFlags -> decal group (0 for anything that is not a decal). */
 	inline constexpr std::uint32_t ObjectDecalGroup(std::uint32_t a_flags) { return (a_flags & kObjectDecal) ? (a_flags >> kObjectDecalGroupShift) & 3u : 0u; }
 	/** @brief ObjectFlags -> terrain group (0 for a decal, or anything Terrain Blending does not hold). */

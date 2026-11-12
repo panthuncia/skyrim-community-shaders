@@ -319,6 +319,11 @@ namespace DCLF
 		// Published whole; the hook runs on the engine's registration threads.
 		auto renderers = std::make_shared<PassCapture::ShadowRendererMap>();
 		auto focus = std::make_shared<PassCapture::ShadowRendererMap>();  // the covered focus views' renderers, by focus descriptor (the focus membership observer's)
+		// The covered views' accumulators, for a geometry group's renderer the engine makes during a registration (in no set yet).
+		auto accumulators = std::make_shared<PassCapture::ShadowAccumulatorMap>();
+		for (const auto& view : views)
+			if (view.covered && view.accumulator && view.renderMode >= PassCapture::kFirstShadowMode)
+				accumulators->emplace(view.accumulator, static_cast<std::uint8_t>(view.renderMode - PassCapture::kFirstShadowMode));
 		for (const auto& [batch, id] : batchToView) {
 			const auto& view = views[id];
 			if (!view.covered)
@@ -329,6 +334,7 @@ namespace DCLF
 		}
 		PassCapture::Get().SetShadowBatchRenderers(std::move(renderers));
 		PassCapture::Get().SetFocusBatchRenderers(std::move(focus));
+		PassCapture::Get().SetShadowAccumulators(std::move(accumulators));
 	}
 
 	void ShadowViews::PredictTargets()

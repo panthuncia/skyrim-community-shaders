@@ -2638,6 +2638,17 @@ the parities.
     focus targets, for whichever light hosts them. The casters are the members whose fade root is the target's
     (`BuildDrawsLatch::focusRoot`). A view is drawn over the whole slice with the sub-rectangle's viewport transform folded into the
     matrices (`FocusToSlice`).
+    -   **Hidden actor parts are focus-only casters.** The focus accumulation registers the target's subtree whole, hidden parts
+        too: in first person the player's hidden third-person body casts only into the focus shadow. Such a part (`Ineligible::Hidden`
+        under a referenced actor node, while Features/Actors admits actors, and a caster: `Coordinator::HiddenFocusCaster`) gets a
+        shadow-only record marked focus-only (`kObjectFocusOnly`: `kObjectShadowOnly` with `kObjectDecal`, which no other shadow-only
+        record carries). The shadow input keeps the marker (`ShadowEntry`); the CPU path's lane flag (`kLaneFocusOnly`) and
+        BuildDrawsCS drop it in every view without a focus root, so cascades and local lights do not draw it, as the engine's culls
+        skip a hidden node. The set claims it in the caster phases, so the registration hooks withhold its engine passes. A camera
+        switch stores `kHidden` on both roots, and the hidden events reclassify the parts.
+    -   **A geometry group's renderer made during a shadow registration** (in no published set yet) belongs to the registering
+        accumulator's view: the registration detour notes the accumulator on its thread, and `PassCapture::ShadowModeOfBatch` looks
+        it up among the covered views' accumulators (`SetShadowAccumulators`), as `MainRendererNow` does for the main views.
 -   **When the list is decided**: inside `CalculateAndDrawShadowCasterLights` (`Features/Shadows/Engine/ShadowCasterPoints.cpp`), at
     three points: `FrameDriver::BeforeShadowCasters` begins the views and decides coverage (`IndirectDraws::DecideShadowCoverage`),
     `ShadowCasterKept` runs at each kept light's slot write (`ShadowViews::AddCaster`), and `ShadowCastersSelected` lists them

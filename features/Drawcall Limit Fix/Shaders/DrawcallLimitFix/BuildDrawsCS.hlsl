@@ -520,6 +520,9 @@ static const uint kObjectVolumetricOnly = 1u << 23;
 // segment tests them once against this frame's final HZB and writes fixed slots (the decal sub-ranges past DecalBase), so overlapping
 // decals draw in the engine's order.
 static const uint kObjectDecal = 1u << 7;
+// Records.h kObjectShadowOnly, and with kObjectDecal kObjectFocusOnly (shadow inputs only: no other shadow input carries kObjectDecal).
+static const uint kObjectShadowOnlyBit = 1u << 24;
+static const uint kObjectFocusOnly = kObjectShadowOnlyBit | kObjectDecal;
 static const uint kObjectDecalGroupShift = 20;
 // The same bits without kObjectDecal are a terrain group (ObjectTerrainGroup): 1 Terrain Blending's terrain, 2 the meshes it
 // redraws after. The colour segment appends each group to its own range (in phase 2's range, unused there: kTerrainGroups),
@@ -1159,6 +1162,9 @@ void BuildInput(uint draw, DrawInputWords a_words)
 	const uint4 input = a_words.words[0];  // pipeline index, record index, geometry index, flags
 	// A focus view's casters: its target's members (the engine registers the target's subtree whole).
 	if (FocusRoot != 0 && a_words.words[3].x != FocusRoot - 1)
+		return;
+	// A focus-only caster (Records.h kObjectFocusOnly: kObjectShadowOnly with kObjectDecal, a hidden actor part): the focus views' alone.
+	if (FocusRoot == 0 && (input.w & kObjectFocusOnly) == kObjectFocusOnly)
 		return;
 	const uint objectIndex = a_words.words[2].x;
 	// The view's key and rows words (KeyWord): a shadow view's are its family's key and the shadow row.

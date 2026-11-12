@@ -278,6 +278,7 @@ namespace DCLF::Draws::detail
 		out |= ObjectDecalGroup(f) ? Direct::kLaneDecal : 0u;
 		out |= (f & kObjectVolumetricOnly) ? Direct::kLaneVolumetricOnly : 0u;
 		out |= (f & kObjectLandscapeLights) ? Direct::kLaneLandscapeLights : 0u;
+		out |= ObjectFocusOnly(f) ? Direct::kLaneFocusOnly : 0u;
 		const std::uint32_t terrain = ObjectTerrainGroup(f);
 		out |= terrain == 1 ? Direct::kLaneTerrainGroup1 : terrain == 2 ? Direct::kLaneTerrainGroup2 : 0u;
 		return out;
