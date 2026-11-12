@@ -80,9 +80,10 @@ namespace FrameAnchors
 			// Runs a frame: one per Scaleform segment drawn on the graph (a display, and one more per D3D11 part); 6 was not passed in a menu tour
 			{ "Interface", { "CS anchor: interface", "CS anchor: interface inputs", "FrameAnchors::Interface / ", "cs.anchor.interface" }, true },
 			// Runs a frame: one per batch of ImageSpace draws and dispatches, the sum of ImageSpace.cpp's kScopeRuns: RenderSSAO's, the
-			// reflection pass's and the HDR effect's (two each: a batch cut short by a draw the graph does not take), the pre-tonemap
-			// composites' (one), and one per end-of-frame effect call (depth of field or the distant blur, its two compute blurs,
-			// refraction, the radial blur, the snow copy, the water blend, the LDR downsample: eight), and one per water flow copy (four).
+			// reflection pass's, the HDR effect's and the pre-tonemap composites' (two each: a batch cut short by a draw the graph does
+			// not take), one per effect call outside them (depth of field or the distant blur, its two compute blurs, refraction, the
+			// radial blur, the snow copy, the water blend, the LDR downsample, the copies, the blurs and the get-hit draw there:
+			// twenty-four), and one per water flow copy (four).
 			// Late: the TAA or the upscaler can follow a batch inside the chain.
 			{ "ImageSpace", { "CS anchor: image space", "CS anchor: image space inputs", "FrameAnchors::ImageSpace / ", "cs.anchor.image-space" }, true },
 			// Runs a frame: the world's shadow masks, the water mask, the water, a menu scene's shadow masks and the screen blood.
