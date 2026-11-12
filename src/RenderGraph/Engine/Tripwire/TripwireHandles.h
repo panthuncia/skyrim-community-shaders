@@ -83,6 +83,8 @@ namespace RenderGraph::Engine::Tripwire
 		 * set again, as D3D11 holds them. AttachGraphResource's tag and the pipeline descriptions' tokens live here in native mode.
 		 */
 		std::vector<std::pair<GUID, winrt::com_ptr<IUnknown>>> privateInterfaces;
+		/** @brief A native handle's private data bytes (SetPrivateData of any GUID but the debug name). */
+		std::vector<std::pair<GUID, std::vector<std::uint8_t>>> privateData;
 		std::mutex privateLock;
 
 	private:

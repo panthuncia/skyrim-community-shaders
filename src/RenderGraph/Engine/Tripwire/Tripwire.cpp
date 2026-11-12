@@ -720,6 +720,16 @@ namespace RenderGraph::Engine::Tripwire
 					OnWrapped(a_core, forward);
 				return S_OK;
 			}
+			// A native handle keeps the bytes, as D3D11 does (the icon loader's and Landscape Seams Fix's tags): replaced by a later set
+			// of the GUID, removed by a set of no data.
+			if (!a_core.wrapped && NativeServicesInstalled()) {
+				std::lock_guard guard(a_core.privateLock);
+				auto& entries = a_core.privateData;
+				std::erase_if(entries, [&](const auto& a_entry) { return a_entry.first == a_guid; });
+				if (a_data && a_size)
+					entries.emplace_back(a_guid, std::vector<std::uint8_t>(static_cast<const std::uint8_t*>(a_data), static_cast<const std::uint8_t*>(a_data) + a_size));
+				return S_OK;
+			}
 			if (a_core.Enter(a_slot, "SetPrivateData", a_caller))
 				return OnWrapped(a_core, forward);
 			return E_FAIL;
@@ -767,6 +777,22 @@ namespace RenderGraph::Engine::Tripwire
 					}
 					found->second.copy_to(static_cast<IUnknown**>(a_data));
 					*a_size = sizeof(IUnknown*);
+					return S_OK;
+				}
+				// Bytes SetPrivateData kept.
+				const auto& data = a_core.privateData;
+				if (const auto bytes = std::find_if(data.begin(), data.end(), [&](const auto& a_entry) { return a_entry.first == a_guid; }); bytes != data.end()) {
+					const auto size = static_cast<UINT>(bytes->second.size());
+					if (!a_data) {
+						*a_size = size;
+						return S_OK;
+					}
+					if (*a_size < size) {
+						*a_size = size;
+						return DXGI_ERROR_MORE_DATA;
+					}
+					std::memcpy(a_data, bytes->second.data(), size);
+					*a_size = size;
 					return S_OK;
 				}
 				// Not set: in native mode an answer, not a tripwire (GraphResourceOf and the descriptions ask every object).
