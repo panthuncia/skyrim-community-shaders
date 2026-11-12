@@ -17,6 +17,7 @@
 
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
 #		include "RenderGraph/ProgramBuild.h"
+#		include "RenderGraph/ShaderTarget.h"
 
 #		include <ORGModuleServices/PipelineRegistry.h>
 #		include <ORGModuleServices/ShaderCompiler.h>
@@ -153,11 +154,11 @@ namespace
 			(void)compiler->CompileAsync(StageRequest(vertexPath, *vertexSource, a_stages.vertexEntry, L"vs_6_6", a_stages),
 				[compiler, a_program, a_device, a_state, a_stages, a_request, a_done, pixelPath, pixelSource](const org::services::ShaderArtifact& a_vertex) {
 					if (!a_vertex)
-						return a_done({ .error = fmt::format("SPIR-V build of {}'s vertex stage failed:\n{}", a_stages.label, a_vertex.diagnostics.substr(0, 2000)) });
+						return a_done({ .error = fmt::format("{} build of {}'s vertex stage failed:\n{}", RenderGraph::ShaderTarget::FormatName(), a_stages.label, a_vertex.diagnostics.substr(0, 2000)) });
 					(void)compiler->CompileAsync(StageRequest(pixelPath, *pixelSource, a_stages.pixelEntry, L"ps_6_6", a_stages),
 						[a_program, a_device, a_state, a_stages, a_request, a_done, vertex = a_vertex.binary](const org::services::ShaderArtifact& a_pixel) {
 							if (!a_pixel)
-								return a_done({ .error = fmt::format("SPIR-V build of {}'s pixel stage failed:\n{}", a_stages.label, a_pixel.diagnostics.substr(0, 2000)) });
+								return a_done({ .error = fmt::format("{} build of {}'s pixel stage failed:\n{}", RenderGraph::ShaderTarget::FormatName(), a_stages.label, a_pixel.diagnostics.substr(0, 2000)) });
 							const std::uint64_t fingerprint = Fingerprint(vertex, a_pixel.binary);
 							if (fingerprint == a_request.fingerprint && !a_request.force)
 								return a_done({ .fingerprint = fingerprint });
@@ -186,7 +187,7 @@ namespace
 		}
 		const auto artifact = a_compiler.Compile(StageRequest(path, bytes, a_entry, a_target, a_stages));
 		if (!artifact) {
-			spdlog::log(a_level, "[ORG] SPIR-V build of {} ({}) failed:\n{}", a_source, Util::WStringToString(a_entry), artifact.diagnostics.substr(0, 2000));
+			spdlog::log(a_level, "[ORG] {} build of {} ({}) failed:\n{}", RenderGraph::ShaderTarget::FormatName(), a_source, Util::WStringToString(a_entry), artifact.diagnostics.substr(0, 2000));
 			return {};
 		}
 		return artifact.binary;

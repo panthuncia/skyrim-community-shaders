@@ -31,7 +31,7 @@ namespace RenderGraph::Engine
 		 * @brief The Agility SDK's device factory when CS_ORG_D3D12_SDK names a version, else null (the system runtime).
 		 * a_reason is set when the SDK was asked for and could not be loaded. That is an error, not a fallback.
 		 */
-		winrt::com_ptr<IUnknown> AgilityFactory(std::string& a_reason)
+		winrt::com_ptr<::IUnknown> AgilityFactory(std::string& a_reason)
 		{
 			if (!Switches::IsSet("CS_ORG_D3D12_SDK"))
 				return nullptr;
@@ -65,7 +65,7 @@ namespace RenderGraph::Engine
 			}
 			// The path ends in a separator, as D3D12SDKPath does.
 			const std::string path = directory.string() + "\\";
-			winrt::com_ptr<IUnknown> factory;
+			winrt::com_ptr<::IUnknown> factory;
 			hr = configuration->CreateDeviceFactory(version, path.c_str(), kIidDeviceFactory, factory.put_void());
 			if (FAILED(hr) || !factory) {
 				a_reason = fmt::format("the Agility SDK {} in {} could not be loaded (hr {:#010x}). Its D3D12Core.dll must be that version.", version,
@@ -76,30 +76,30 @@ namespace RenderGraph::Engine
 			return factory;
 		}
 
-		const char* ShaderModelName(rhi::ShaderModel a_model)
+		const char* ShaderModelName(::ShaderModel a_model)
 		{
 			switch (a_model) {
-			case rhi::ShaderModel::SM_6_0:
+			case ::ShaderModel::SM_6_0:
 				return "6.0";
-			case rhi::ShaderModel::SM_6_1:
+			case ::ShaderModel::SM_6_1:
 				return "6.1";
-			case rhi::ShaderModel::SM_6_2:
+			case ::ShaderModel::SM_6_2:
 				return "6.2";
-			case rhi::ShaderModel::SM_6_3:
+			case ::ShaderModel::SM_6_3:
 				return "6.3";
-			case rhi::ShaderModel::SM_6_4:
+			case ::ShaderModel::SM_6_4:
 				return "6.4";
-			case rhi::ShaderModel::SM_6_5:
+			case ::ShaderModel::SM_6_5:
 				return "6.5";
-			case rhi::ShaderModel::SM_6_6:
+			case ::ShaderModel::SM_6_6:
 				return "6.6";
-			case rhi::ShaderModel::SM_6_7:
+			case ::ShaderModel::SM_6_7:
 				return "6.7";
-			case rhi::ShaderModel::SM_6_8:
+			case ::ShaderModel::SM_6_8:
 				return "6.8";
-			case rhi::ShaderModel::SM_6_9:
+			case ::ShaderModel::SM_6_9:
 				return "6.9";
-			case rhi::ShaderModel::SM_6_10:
+			case ::ShaderModel::SM_6_10:
 				return "6.10";
 			default:
 				return "unknown";
@@ -109,9 +109,9 @@ namespace RenderGraph::Engine
 		/** @brief What the device lacks that CS needs; empty when it has everything. */
 		std::string MissingFeatures(rhi::Device& a_device)
 		{
-			rhi::AdapterFeatureInfo adapter{};
-			rhi::ShaderFeatureInfo shader{};
-			rhi::EnhancedBarriersFeatureInfo barriers{};
+			::AdapterFeatureInfo adapter{};
+			::ShaderFeatureInfo shader{};
+			::EnhancedBarriersFeatureInfo barriers{};
 			adapter.header.pNext = &shader.header;
 			shader.header.pNext = &barriers.header;
 			if (a_device.QueryFeatureInfo(&adapter.header) != rhi::Result::Ok)
@@ -122,7 +122,7 @@ namespace RenderGraph::Engine
 				shader.unboundedDescriptorTables ? "yes" : "no", barriers.enhancedBarriers ? "yes" : "no", shader.maxShaderVisibleResourceDescriptors,
 				shader.maxShaderVisibleSamplerDescriptors);
 			// CS's shaders index ResourceDescriptorHeap and SamplerDescriptorHeap directly.
-			if (shader.maxShaderModel < rhi::ShaderModel::SM_6_6)
+			if (shader.maxShaderModel < ::ShaderModel::SM_6_6)
 				return fmt::format("the device has Shader Model {}, and CS's shaders need 6.6 (ResourceDescriptorHeap)", ShaderModelName(shader.maxShaderModel));
 			if (!shader.unboundedDescriptorTables)
 				return "the device is below resource binding tier 3, which Shader Model 6.6's descriptor heap indexing needs";

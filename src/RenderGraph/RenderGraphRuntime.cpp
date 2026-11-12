@@ -10,6 +10,7 @@
 #include "Features/Upscaling/DXVKInteropInterfaces.h"
 #include "Globals.h"
 #include "Profiler.h"
+#include "RenderGraph/Backend.h"
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/FrameAnchorSelfTest.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -1567,6 +1568,11 @@ bool RenderGraphRuntime::Initialize()
 		return disable("CS_ORG=0");
 	if (EnvFeaturesOnly())
 		return disable("CS_ORG=features (device features requested, graph not created)");
+	// CS_ORG_BACKEND=d3d12 without what it needs (the native mode, a build with the D3D12 backend) is named, never run on Vulkan instead.
+	if (auto backendError = RenderGraph::Backend::RequestError(); !backendError.empty()) {
+		logger::critical("[ORG] {}", backendError);
+		return disable(std::move(backendError));
+	}
 	if (!DxvkLoader::IsLoaded())
 		return disable("DXVK is not loaded (native D3D11)");
 
@@ -1822,7 +1828,7 @@ bool RenderGraphRuntime::Initialize()
 #endif
 		// The runtime's first run capacity (kRunCapacity): its upload page lists and statistics ranges are indexed by run lease and grow
 		// past it.
-		state->orgRuntime = org::Runtime::Create({ .device = state->device->Get(), .backend = rhi::Backend::Vulkan, .slots = kRunCapacity });
+		state->orgRuntime = org::Runtime::Create({ .device = state->device->Get(), .backend = RenderGraph::Backend::Active(), .slots = kRunCapacity });
 		desc.runtime = state->orgRuntime;
 		state->host = std::make_unique<org::GraphHost>(std::move(desc));
 		// The frame-wait timeline, before anything builds the graph (its packets bind it when prepared): only with a queue of the

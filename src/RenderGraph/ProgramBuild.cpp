@@ -6,6 +6,7 @@
 #	include "RenderGraph/ProgramBuild.h"
 
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/ShaderTarget.h"
 #	include "Utils/D3D.h"
 
 #	include <algorithm>
@@ -81,15 +82,17 @@ namespace RenderGraph::ProgramBuild
 		request.source = a_source;
 		request.entryPoint = a_entry;
 		request.target = a_target;
-		request.format = org::services::ShaderBinaryFormat::Spirv;
+		// SPIR-V on Vulkan, DXIL on D3D12. The HLSL is the same: its bindless declarations index the descriptor heaps.
+		ShaderTarget::Apply(request);
 		request.warningsAsErrors = false;  // as the build-time compilation these replaced
 		// Source-level debug info for Nsight and RenderDoc; drivers ignore it, and optimization is unchanged.
 		request.debugInfo = true;
 		request.includeDirectories = { RenderGraphRuntime::kShaderDirectory };
 		// Storage images take the format of the view they are bound through, as in D3D11 (and the DXC game shaders, DxcShaderStore).
 		// Without it DXC types every float4 RWTexture as Rgba32f, which a view of another format (RGBA16F) must not be written through.
-		request.arguments.emplace_back(L"-fspv-use-unknown-image-format");
-		request.defines.push_back({ L"BASICRHI_SHADER_API_VULKAN", L"1" });
+		// D3D12 always works this way.
+		ShaderTarget::AddSpirvArgument(request, L"-fspv-use-unknown-image-format");
+		request.defines.push_back({ ShaderTarget::ApiDefine(), L"1" });
 		// Dual-target shaders (Common/OrgResources.hlsli) take their bindless declarations.
 		request.defines.push_back({ L"CS_ORG_BINDLESS", L"1" });
 		// The vendor, for workarounds of its shader compiler (CS_GPU_AMD: PortalPrograms.hlsli's interpreter).

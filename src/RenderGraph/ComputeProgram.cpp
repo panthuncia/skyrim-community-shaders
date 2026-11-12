@@ -13,6 +13,7 @@
 
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
 #		include "RenderGraph/ProgramBuild.h"
+#		include "RenderGraph/ShaderTarget.h"
 
 #		include <ORGModuleServices/PipelineRegistry.h>
 #		include <ORGModuleServices/ShaderCompiler.h>
@@ -68,7 +69,7 @@ namespace
 				[a_program, a_device, a_request, a_done = std::move(a_done), entry = Util::WStringToString(a_desc.entry), source = std::filesystem::path(a_desc.source)](
 					const org::services::ShaderArtifact& a_artifact) {
 					if (!a_artifact)
-						return a_done({ .error = fmt::format("SPIR-V build ({}) failed:\n{}", entry, a_artifact.diagnostics.substr(0, 2000)) });
+						return a_done({ .error = fmt::format("{} build ({}) failed:\n{}", RenderGraph::ShaderTarget::FormatName(), entry, a_artifact.diagnostics.substr(0, 2000)) });
 					const std::uint64_t fingerprint = HashBinary(a_artifact.binary);
 					if (fingerprint == a_request.fingerprint && !a_request.force)
 						return a_done({ .fingerprint = fingerprint });
@@ -153,7 +154,7 @@ std::shared_ptr<const ComputeProgram> ComputeProgram::Load(rhi::Device a_device,
 	const std::string entry = Util::WStringToString(desc.entry);
 	const auto artifact = compiler->Compile(MakeRequest(desc, path, bytes));
 	if (!artifact) {
-		logger::error("[ORG] SPIR-V build of {} ({}) failed:\n{}", desc.source, entry, artifact.diagnostics.substr(0, 2000));
+		logger::error("[ORG] {} build of {} ({}) failed:\n{}", RenderGraph::ShaderTarget::FormatName(), desc.source, entry, artifact.diagnostics.substr(0, 2000));
 		return {};
 	}
 

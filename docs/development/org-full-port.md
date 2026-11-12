@@ -824,6 +824,43 @@ cold-cache run reaches the world without a DCLF watchdog failure.
 | P7.4 | HDR (`SetColorSpace1`), latency (waitable object), DRED.                                                                                                                                                                                                                                                                                         |
 | P7.5 | Parity gate: the P6.4 tour on D3D12 matches Vulkan in screenshots, and both match the DXVK build. Multi-RHI peer work stays deferred.                                                                                                                                                                                                            |
 
+## Phase 7 status (2026-11-12, branch `org-port/dx12`)
+
+D3D12 runs only in the native mode (`CS_ORG_NATIVE=1`, Phase 6): DXVK translates the game's D3D11 into Vulkan, so there is
+no D3D12 device to share with it. Select it with `CS_ORG_BACKEND=d3d12`.
+
+- **P7.1:** `CS_ORG_D3D12` (default on) builds BasicRHI's D3D12 backend, with the DirectX-Headers 1.722 overlay port
+  (`cmake/ports/directx-headers`, as BasicRHI pins). `RenderGraph::Backend` (`src/RenderGraph/Backend.h`) reads
+  `CS_ORG_BACKEND` and records the active backend. `RenderGraph::Engine::CreateD3D12Device`
+  (`src/RenderGraph/Engine/D3D12Device.h`) is what the native mode's device creation calls for D3D12. It creates the
+  graphics, compute and copy queues and shader-visible heaps of 1,000,000 resources and 2048 samplers. It loads an Agility
+  SDK through `ID3D12SDKConfiguration1::CreateDeviceFactory` when `CS_ORG_D3D12_SDK` names one, since only an executable
+  can export `D3D12SDKVersion` (BasicRHI `DeviceCreateInfo::d3d12DeviceFactory`). A device without Shader Model 6.6,
+  resource binding tier 3 or enhanced barriers is refused by name.
+- **P7.2:** `RenderGraph::ShaderTarget` (`src/RenderGraph/ShaderTarget.h`) picks DXIL on D3D12 for ProgramBuild
+  (ComputeProgram, RasterProgram) and for Drawcall Limit Fix's stages. The HLSL is unchanged: its bindless
+  declarations index `ResourceDescriptorHeap`/`SamplerDescriptorHeap`, and the `OrgBindings` push block at `b0` is root
+  constants on D3D12 (BasicRHI maps a push range's `set`/`binding` to the register space and register). SPIR-V-only DXC
+  arguments are left out. `Util::ReflectShader` reads DXIL containers through DXC's `IDxcUtils::CreateReflection`. The
+  DXC game shaders (`CS_SHADER_DXC`) are SPIR-V for DXVK and stay off on D3D12.
+- **P7.3:** CS's `sl.fsr`, `sl.fsr_g` and `sl.xess` plugins turn themselves off on a non-Vulkan device and log why
+  (Streamline `org-port/dx12`). CS's Streamline integration is off on D3D12 by name: it hands Streamline DXVK's device
+  and Vulkan resources. DLSS, DLSS-G and Reflex on D3D12 need `slSetD3DDevice` on the native device and D3D12 tags.
+- **P7.4:** BasicRHI's D3D12 swap chain already has HDR colour spaces (`SetColorSpace1`), frame latency and its waitable
+  object. `Engine::ConfigureSwapchain` applies them on either backend. DRED is on with the debug layer or with crash
+  markers (BasicRHI `enableCrashMarkers` on D3D12, set from hang mode as on Vulkan).
+
+Named off on D3D12 until ported:
+
+- Drawcall Limit Fix's draw pipelines: their layouts bind through `VK_EXT_descriptor_heap` record mappings
+  (`LayoutRangeSource::IndirectIndex`/`IndirectAddress`/`PushAddress`), which BasicRHI's D3D12 backend refuses, and they
+  reflect SPIR-V (`SpirvReflection`). A D3D12 port reads the record indices in the shader and reflects DXIL.
+- Drawcall Limit Fix's direct sites (secondary lists with viewports): D3D12 bundles cannot set viewports or scissors
+  (`FixedFunctionFeatureInfo::secondaryViewportScissor` is false).
+- Everything that talks to DXVK or raw Vulkan: the adoption path in `RenderGraphRuntime::Initialize`, the owned frame,
+  `DXVKInterop`, Nsight Perf's and GPA's Vulkan backends, `VkDriverTrace`, VRAM attribution's Vulkan hooks.
+- Debug labels: BasicRHI's D3D12 lists have none (`SupportsDebugLabels` is false), so passes are unlabelled in PIX.
+
 ---
 
 ## Phase 8: cleanup and docs

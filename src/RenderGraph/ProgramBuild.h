@@ -39,8 +39,8 @@ namespace RenderGraph::ProgramBuild
 	Defines WithCommonDefines(const Defines& a_own, const wchar_t* a_target);
 
 	/**
-	 * @brief The DXC request for one stage: SPIR-V for a_target ("cs_6_6", "vs_6_6", "ps_6_6"), with debug info, Data/Shaders as
-	 * the include directory, BASICRHI_SHADER_API_VULKAN, CS_ORG_BINDLESS (Common/OrgResources.hlsli), CS_GPU_AMD on AMD, then a_defines. a_source must outlive the request.
+	 * @brief The DXC request for one stage: SPIR-V on Vulkan and DXIL on D3D12 (ShaderTarget) for a_target ("cs_6_6", "vs_6_6",
+	 * "ps_6_6"), with debug info, Data/Shaders as the include directory, BASICRHI_SHADER_API_VULKAN or _D3D12, CS_ORG_BINDLESS (Common/OrgResources.hlsli), CS_GPU_AMD on AMD, then a_defines. a_source must outlive the request.
 	 */
 	org::services::ShaderCompileRequest MakeRequest(const std::filesystem::path& a_path, std::span<const std::byte> a_source, const std::wstring& a_entry,
 		const wchar_t* a_target, const Defines& a_defines);
