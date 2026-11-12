@@ -2,6 +2,7 @@
 // (view.*, which Passes/CorePasses.cpp registers) and graph extension.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ScheduleExecutor.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
@@ -223,9 +224,8 @@ namespace DCLF
 					const auto mode = a_prepared.mode;
 					auto& commands = a_recording.Commands();
 					commands.SetDescriptorHeaps(frame.resourceHeap, frame.samplerHeap);
-					auto device = RenderGraphRuntime::Get().Host()->Device();
 					const auto sequences = a_recording.Resolve(a_bindings.sequences).GetHandle();
-					const std::uint64_t sequencesAddress = device.GetBufferDeviceAddress({ sequences, 0 });
+					const std::uint64_t sequencesAddress = DCLF::Draws::RecordingBufferAddress(sequences);
 					const rhi::IndexBufferView pool{ a_recording.Resolve(a_bindings.pool).GetHandle(), 0, 0, rhi::Format::R16_UInt };
 					const auto& families = Extensions::DrawFamilies();
 					static const std::shared_ptr<const void> kNothing;  // a face's draw has no prepared state: its pipeline is the shape's

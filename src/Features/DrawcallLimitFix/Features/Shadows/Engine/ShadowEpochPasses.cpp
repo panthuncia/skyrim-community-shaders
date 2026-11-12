@@ -369,8 +369,7 @@ namespace DCLF::Draws
 			// Per view: a plain indexed indirect draw per bucket over its range of the slot's draw arguments, counted by its count word.
 			// A plain draw cannot bind its own vertex buffer, so the vertex stage fetches through its first instance's caster row, laid out
 			// as a DrawSequence (Utility.hlsl, DCLF_PULLED).
-			auto device = RenderGraphRuntime::Get().Host()->Device();
-			const std::uint64_t casterRowsAddress = device.GetBufferDeviceAddress({ a_recording.Resolve(a_bindings.casterRows).GetHandle(), 0 });
+			const std::uint64_t casterRowsAddress = DCLF::Draws::RecordingBufferAddress(a_recording.Resolve(a_bindings.casterRows).GetHandle());
 			auto split = [](std::uint32_t* a_words, std::uint64_t a_value) {
 				a_words[0] = static_cast<std::uint32_t>(a_value);
 				a_words[1] = static_cast<std::uint32_t>(a_value >> 32);

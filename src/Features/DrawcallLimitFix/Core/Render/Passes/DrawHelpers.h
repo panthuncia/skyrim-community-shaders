@@ -28,6 +28,12 @@
 
 namespace DCLF::Draws
 {
+	/**
+	 * @brief A buffer's device address, for a pass that records one into its push data. 0 once the render graph has stopped (device
+	 * lost, or turned off): a worker may still be recording then, and what it records is never submitted.
+	 */
+	std::uint64_t RecordingBufferAddress(rhi::ResourceHandle a_buffer);
+
 	struct ShadowResources;
 
 	// Records one BuildDrawsCS dispatch whose values and group count are the slot's latch at a_latchOffset.

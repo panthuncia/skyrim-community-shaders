@@ -84,9 +84,8 @@ namespace DCLF::Draws
 			commands.SetIndexBuffer(rhi::IndexBufferView{ a_recording.Resolve(a_bindings.pool).GetHandle(), 0, 0, rhi::Format::R16_UInt });
 			if (stats)
 				stats->Begin(commands, statsSlot, depthKind);
-			auto device = RenderGraphRuntime::Get().Host()->Device();
 			const auto counts = a_recording.Resolve(a_bindings.bucketCounts).GetHandle();
-			const std::uint64_t sequencesAddress = device.GetBufferDeviceAddress({ sequences, 0 });
+			const std::uint64_t sequencesAddress = DCLF::Draws::RecordingBufferAddress(sequences);
 			const std::uint64_t phaseBase = a_prepared.phaseTwo ? std::uint64_t(frame.sequenceDraws) : 0;
 			auto drawCall = [&](const PassFrame::ZCall& a_call, bool a_offsetDepth) {
 				RecordBucketDraw(commands, frame.indirect.zDrawSignature, sequences, sequencesAddress, phaseBase + a_call.first, a_call.pipeline, counts, a_call.bucket,
@@ -282,8 +281,7 @@ namespace DCLF::Draws
 				commands.BindLayout(frame.indirect.zLayout);
 				commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kFramePushBinding, 0, kFramePushWords, a_prepared.framePushWords.data());
 				commands.SetIndexBuffer(rhi::IndexBufferView{ a_recording.Resolve(a_bindings.pool).GetHandle(), 0, 0, rhi::Format::R16_UInt });
-				auto device = RenderGraphRuntime::Get().Host()->Device();
-				const std::uint64_t sequencesAddress = device.GetBufferDeviceAddress({ sequences, 0 });
+				const std::uint64_t sequencesAddress = DCLF::Draws::RecordingBufferAddress(sequences);
 				const auto counts = a_recording.Resolve(a_bindings.classCounts).GetHandle();
 				a_buckets([&](std::uint32_t a_first, rhi::PipelineHandle a_pipeline, std::uint32_t a_countWord, std::uint32_t a_capacity) {
 					RecordBucketDraw(commands, frame.indirect.zDrawSignature, sequences, sequencesAddress, a_first, a_pipeline, counts, a_countWord, a_capacity);

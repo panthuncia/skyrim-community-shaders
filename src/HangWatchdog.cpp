@@ -1,6 +1,10 @@
 #include "HangWatchdog.h"
 
 #include "CrashDump.h"
+#ifdef CS_HAS_RENDER_GRAPH
+#	include "RenderGraph/RenderGraphRuntime.h"
+#	include <OpenRenderGraph/GraphHost.h>
+#endif
 
 #include <ctime>
 #include <thread>
@@ -148,6 +152,11 @@ namespace HangWatchdog
 			logger::critical("[HANG] the render thread (thread {}) has not presented for {:.1f} s; writing every thread's stack to {}", thread,
 				a_stalledMs / 1000.0, text.filename().string());
 			LogFreedViews(thread);
+#ifdef CS_HAS_RENDER_GRAPH
+			// The render graph host's runs in flight and what each waits for (read racily): a stall waiting on the GPU names its points.
+			if (auto* host = RenderGraphRuntime::Get().Host())
+				logger::critical("[HANG] render graph host state: {}", host->DescribeAsyncState());
+#endif
 			spdlog::default_logger()->flush();
 			PruneReports(*dir);
 			const auto begin = GetTickCount64();

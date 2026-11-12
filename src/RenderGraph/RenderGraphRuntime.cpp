@@ -368,11 +368,14 @@ struct RenderGraphRuntime::Impl
 	{
 		static const auto counterValue = deviceProcAddr ? reinterpret_cast<PFN_vkGetSemaphoreCounterValue>(deviceProcAddr(adoptedDevice, "vkGetSemaphoreCounterValue")) : nullptr;
 		std::vector<std::pair<VkSemaphore, std::uint64_t>> sealed;
+		std::vector<std::uint32_t> sealedIndex;  // each sealed timeline's BasicRHI index: t<index> in GraphHost::DescribeAsyncState
 		if (host)
 			for (const auto& [timeline, value] : host->SealedPoint().points) {
 				rhi::VulkanTimelineInfo info{};
-				if (timeline && *timeline && rhi::QueryNativeTimeline(timeline->Get(), rhi::RHI_IID_VK_TIMELINE, &info, sizeof(info)))
+				if (timeline && *timeline && rhi::QueryNativeTimeline(timeline->Get(), rhi::RHI_IID_VK_TIMELINE, &info, sizeof(info))) {
 					sealed.emplace_back(static_cast<VkSemaphore>(info.timeline), value);
+					sealedIndex.push_back((*timeline)->GetHandle().index);
+				}
 			}
 		std::string out;
 		for (std::size_t i = 0; i < a_semaphores.size(); ++i) {
@@ -383,8 +386,11 @@ struct RenderGraphRuntime::Impl
 				continue;
 			const auto known = std::ranges::find(sealed, a_semaphores[i], &std::pair<VkSemaphore, std::uint64_t>::first);
 			const char* state = known == sealed.end() ? "not in the seal" : a_values[i] > known->second ? "newer than the seal: a cycle if the frame waits for this queue" : "sealed";
-			const char* name = a_semaphores[i] == streamPoint ? " streamPoint" : a_semaphores[i] == computeExit ? " computeExit" : a_semaphores[i] == copyExit ? " copyExit" : "";
-			out += fmt::format("{}{}{} wants {}, at {} ({})", out.empty() ? "" : "; ", static_cast<const void*>(a_semaphores[i]), name, a_values[i], reached, state);
+			std::string name = a_semaphores[i] == streamPoint ? " streamPoint" : a_semaphores[i] == computeExit ? " computeExit" : a_semaphores[i] == copyExit ? " copyExit" : "";
+			if (known != sealed.end())
+				name += fmt::format(" t{}", sealedIndex[static_cast<std::size_t>(known - sealed.begin())]);
+			out += fmt::format("{}{}{} wants {}, at {} ({}; sealed at {})", out.empty() ? "" : "; ", static_cast<const void*>(a_semaphores[i]), name, a_values[i], reached, state,
+				known == sealed.end() ? 0 : known->second);
 		}
 		return out;
 	}
@@ -412,10 +418,19 @@ struct RenderGraphRuntime::Impl
 		// only once the frame presents, while the render thread waits for what this queue holds behind it. The first few are named.
 		if (waitSemaphores(vkDevice, &wait, 500'000'000ull) == VK_SUCCESS)
 			return;
-		if (static std::atomic<std::uint32_t> warned = 0; warned.fetch_add(1, std::memory_order_relaxed) < 4)
+		static std::atomic<std::uint32_t> warned = 0;
+		const bool named = warned.fetch_add(1, std::memory_order_relaxed) < 4;
+		if (named) {
 			logger::error("[ORG] A shared copy queue submission has waited 0.5 s for {}", DescribeUnsealed(semaphores, values));
-		if (waitSemaphores(vkDevice, &wait, 9'500'000'000ull) != VK_SUCCESS)
+			// What the host had submitted and what each run waits for: the stall's other side (copy-queue-sealed-stall).
+			if (host)
+				logger::error("[ORG] host state at the copy queue's wait: {}", host->DescribeAsyncState());
+		}
+		if (waitSemaphores(vkDevice, &wait, 9'500'000'000ull) != VK_SUCCESS) {
 			logger::warn("[ORG] A shared copy queue submission went ahead after 10 s without its waits: {}", DescribeUnsealed(semaphores, values));
+			if (named && host)
+				logger::warn("[ORG] host state after 10 s: {}", host->DescribeAsyncState());
+		}
 	}
 
 	/**

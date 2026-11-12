@@ -2,6 +2,7 @@
 // the latched copies pass, frame buffer declaration and the preprocessed indirect draw.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/SceneResources.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
@@ -12,6 +13,12 @@
 
 namespace DCLF::Draws
 {
+	std::uint64_t RecordingBufferAddress(rhi::ResourceHandle a_buffer)
+	{
+		auto* host = RenderGraphRuntime::Get().Host();
+		return host ? host->Device().GetBufferDeviceAddress({ a_buffer, 0 }) : 0;
+	}
+
 	void FoldEyeIntoViewProj(const std::array<float, 16>& a_viewProj, const RE::NiPoint3& a_eye, float (&a_out)[16])
 	{
 		const float eye[3]{ a_eye.x, a_eye.y, a_eye.z };
