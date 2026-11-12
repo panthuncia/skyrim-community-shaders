@@ -4,6 +4,7 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "RenderGraph/Backend.h"
 #include "RenderGraph/DxvkImageImport.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
@@ -633,7 +634,16 @@ namespace DCLF
 				if (info.kind != (structured ? DXVK_ORG_INTEROP_RESOURCE_BUFFER : DXVK_ORG_INTEROP_RESOURCE_IMAGE))
 					return Reject::NotImage;
 			}
-			if (structured) {
+			if (structured && ::RenderGraph::Backend::IsD3D12()) {
+				// D3D12 (native mode): the description carries the ID3D12Resource in the VkBuffer's place.
+				const auto& buffer = info.buffer;
+				if (buffer.offset % 4)
+					return Reject::Import;
+				a_entry.image = RenderGraph::ImportD3D12Resource(a_context.device, reinterpret_cast<void*>(buffer.buffer), "DCLF imported structured buffer");
+				if (!a_entry.image)
+					return Reject::Import;
+				srv.buffer.firstElement += buffer.offset / 4;
+			} else if (structured) {
 				const auto& buffer = info.buffer;
 				if (buffer.offset % 4 || !(buffer.usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT))
 					return Reject::Import;

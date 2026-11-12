@@ -73,6 +73,16 @@ namespace RenderGraph
 		return resource;
 	}
 
+	rhi::ResourcePtr ImportD3D12Resource(rhi::Device a_device, void* a_resource, const char* a_name)
+	{
+		rhi::ResourcePtr resource;
+		if (!a_resource || rhi::dx12::import_resource(a_device, static_cast<ID3D12Resource*>(a_resource), resource) != rhi::Result::Ok || !resource)
+			return {};
+		if (a_name)
+			resource->SetName(a_name);
+		return resource;
+	}
+
 	std::shared_ptr<org::ExternalTextureResource> ImportDxvkTexture(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image,
 		org::TextureDescription a_desc, const char* a_name)
 	{

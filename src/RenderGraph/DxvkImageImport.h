@@ -30,6 +30,12 @@ namespace RenderGraph
 	rhi::ResourcePtr ImportDxvkImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, const char* a_name);
 
 	/**
+	 * @brief D3D12 (native mode): a BasicRHI resource over the ID3D12Resource a description carries where the VkImage or VkBuffer
+	 * goes (Native::DescribeResource). Null on failure.
+	 */
+	rhi::ResourcePtr ImportD3D12Resource(rhi::Device a_device, void* a_resource, const char* a_name);
+
+	/**
 	 * @brief Imports a DXVK image as a graph texture whose home state is the layout it rests in.
 	 *
 	 * Sets a_desc.initialLayout from the image. A texture resting in GENERAL is Common-only; any other uses the layouts its passes
