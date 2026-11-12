@@ -259,10 +259,14 @@ own binds always reach the driver. Details: "Hazard: bindings the driver keeps a
 
 - ORG's alias planner sized a texture with an authored mip chain as one mip, so placements overlapped (SSGI's working
   depth ran into its radiance). Placement now sizes textures from the description the backing creates them with.
-- Green streaks on near geometry (Whiterun bridge railings at noon) come from the SSGI graph path alone: with
-  `CS_ORG_SCREEN_SPACE_GI=1` off they are gone, every other port on. Not pinned statically. Green there is chroma
-  without luma: GI fades Y by depth but not CoCg, so wrong depth or a lost Y gives green. `CS_ORG_SSGI_DEBUG=<n>`
-  (render-graph.md, "Switches") isolates the part with one run per mode.
+- Green streaks on near geometry (Whiterun bridge railings at noon) came from the SSGI graph path at half resolution.
+  `CS_ORG_SSGI_DEBUG=<n>` (render-graph.md, "Switches") isolated them: gone with no aliasing (1) or full resolution
+  (8), or with the CoCg output cleared (4), so aliased memory gave chroma without luma. The cause was in ORG and
+  BasicRHI: an aliased texture's first use entered from Undefined with sync None. Vulkan then got a discard barrier
+  from TOP_OF_PIPE, which waits for nothing, and placement orderings only order recording. A pass whose only new
+  barrier was that one could run alongside the previous occupant of its memory. Prefilter normals is such a pass: it
+  reads an engine target and writes only its own aliased chain. The exact pair is not yet confirmed from a log.
+  The entry now names sync All, and a Vulkan discard with a before sync waits for it.
 - ORG's descriptor manager made 2D views of 3D textures, so Skylighting's probe update wrote almost nothing readers saw.
   3D textures now get Texture3D views.
 - A texture array's default view is its first slice: ports that read `Texture2DArray` (Skylighting's cascades, LLF's
