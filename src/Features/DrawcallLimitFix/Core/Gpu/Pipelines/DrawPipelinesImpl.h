@@ -167,7 +167,10 @@ namespace DCLF
 				bool mapped = binding.set == 0;
 				switch (binding.kind) {
 				case Kind::ConstantBuffer:
-					mapped = mapped && (InRange(binding.binding, kBindingShiftB, kConstantBufferRegisters) || binding.binding == kRecordAddressBinding);
+					// The two push blocks: the draw's (b190) and the pass's (b191, DCLFFramePush: the frame record's ref, which the stages that
+					// read rows by device address need: Common/DCLFFrameRecord.hlsli).
+					mapped = mapped && (InRange(binding.binding, kBindingShiftB, kConstantBufferRegisters) || binding.binding == kRecordAddressBinding ||
+										   binding.binding == kFramePushBinding);
 					break;
 				case Kind::Texture:
 				case Kind::StorageBuffer:
@@ -235,7 +238,7 @@ namespace DCLF
 			for (const auto& binding : a_module.bindings) {
 				if (binding.binding >= kDescriptorHeapBindings)
 					continue;
-				if (binding.binding == kRecordAddressBinding)
+				if (binding.binding == kRecordAddressBinding || binding.binding == kFramePushBinding)
 					continue;  // push data, not a DrawBindings entry (and 1u << 190 is not a shift)
 				switch (binding.kind) {
 				case Kind::ConstantBuffer:

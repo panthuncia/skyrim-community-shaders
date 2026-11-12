@@ -132,10 +132,10 @@ namespace DCLF::Diagnostics
 			auto describe = [&](const DrawSequence& a_gpu, const DrawSequence& a_cpu) {
 				const auto pipelineRow = [&](const DrawSequence& a) { return rowOf(a.pipelineRowAddress, parity->pipelineRowsBase, kPipelineRowBytes); };
 				const auto materialRow = [&](const DrawSequence& a) { return rowOf(a.materialRowAddress, parity->materialRowsBase, kMaterialRowBytes); };
-				return fmt::format("GPU vs CPU: pipeline {} vs {}, pipeline row {} vs {}, material row {} vs {}, vertices {:#x}/{} vs {:#x}/{}, indices {:#x}/{} vs {:#x}/{}, "
+				return fmt::format("GPU vs CPU: pipeline {} vs {}, pipeline row {} vs {}, material row {} vs {}, vertices {}+{:#x}/{} vs {}+{:#x}/{}, indices {:#x}/{} vs {:#x}/{}, "
 								   "index count {} vs {}, first index {} vs {}",
-					a_gpu.pipelineIndex, a_cpu.pipelineIndex, pipelineRow(a_gpu), pipelineRow(a_cpu), materialRow(a_gpu), materialRow(a_cpu), a_gpu.vertexBufferAddress,
-					a_gpu.vertexBufferSize, a_cpu.vertexBufferAddress, a_cpu.vertexBufferSize, a_gpu.indexBufferAddress, a_gpu.indexBufferSize, a_cpu.indexBufferAddress,
+					a_gpu.pipelineIndex, a_cpu.pipelineIndex, pipelineRow(a_gpu), pipelineRow(a_cpu), materialRow(a_gpu), materialRow(a_cpu), a_gpu.vertexBufferRef.viewSlot,
+					a_gpu.vertexBufferRef.byteOffset, a_gpu.vertexBufferSize, a_cpu.vertexBufferRef.viewSlot, a_cpu.vertexBufferRef.byteOffset, a_cpu.vertexBufferSize, a_gpu.indexBufferAddress, a_gpu.indexBufferSize, a_cpu.indexBufferAddress,
 					a_cpu.indexBufferSize, a_gpu.indexCount, a_cpu.indexCount, a_gpu.firstIndex, a_cpu.firstIndex);
 			};
 			// The local shadow lights BuildDraws selected, from each object word, against the CPU's selection; then out of the word,
@@ -311,7 +311,7 @@ namespace DCLF::Diagnostics
 		// stores as its index in its state class (the shape's set version's class map).
 		// An animated row's draws read its row of the frame's copy (BuildDrawsCS's MaterialRowAddress: the header's animatedRow, the latch's
 		// animatedRows, as this frame's latches name it).
-		const std::uint64_t animatedRows = Draws::PassAnimatedRows();
+		const std::uint64_t animatedRows = Draws::PassAnimatedRows().address;
 		auto place = [&](DrawSequence& a_sequence) {
 			a_sequence.pipelineRowAddress += readback.pipelineRowsBase;
 			const auto* row = animatedRows ? a_payload.body->materialRows.At(a_sequence.materialRowAddress / kMaterialRowBytes) : nullptr;

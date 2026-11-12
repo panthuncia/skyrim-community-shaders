@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // Tree LOD's scene resources (Api::SceneResources): the TreeInstances family's tables (its layout, TreeInstancesLayout.h), its cull
 // program and counts' readbacks, held with the scene's tables, and what the depth commit's uploads keep. Included by the feature's
 // sources that use them.
@@ -56,24 +58,24 @@ namespace DCLF::Features::TreeLod
 
 	/**
 	 * @brief Tree LOD's tables (dclf-architecture.md, "Tree LOD: the draws"; Api::SceneResources' state, render thread but for the handles, made once at setup): shape
-	 * rows, instance records (75 per shape slot), mesh rows, draw row and visible list, read by address in the vertex stage (the draw
+	 * rows, instance records (75 per shape slot), mesh rows, draw row and visible list, read by buffer view ref in the vertex stage (the draw
 	 * row's names the adopted set's versions). TreeLodCullPass fills the list in the depth epoch. ready: the row names its slots.
 	 *
-	 * Without the cull program, or without the tables' device addresses, there is none (setup gives null): tree LOD stays the engine's.
+	 * Without the cull program, or without the tables' buffer view refs, there is none (setup gives null): tree LOD stays the engine's.
 	 */
 	struct TreeLodTables
 	{
 		Draws::Versioned shapes, instances, meshes, visible;
 		std::array<org::services::FilledVersion, 3> filled;  // shapes, instances, meshes
 		std::shared_ptr<org::Buffer> draw;
-		std::uint64_t drawAddress = 0;
+		RenderGraph::BufferRef drawRef;
 		std::shared_ptr<const ComputeProgram> cull;
 		std::atomic<bool> ready{ false };
 		std::uint64_t uploads = 0, slotsSent = 0;  // since the last report
 		std::shared_ptr<TreeLodCounts> counts;
-		// CS_DCLF_TREE_LOD_STAGES' stamps (null without it) and their device address.
+		// CS_DCLF_TREE_LOD_STAGES' stamps (null without it) and their buffer view ref.
 		std::shared_ptr<org::Buffer> stages;
-		std::uint64_t stagesAddress = 0;
+		RenderGraph::BufferRef stagesRef;
 		// The last depth commit's draw row; a trees view's faces reuse the tables with their own lists.
 		TreeInstances::DrawRow row{};
 	};

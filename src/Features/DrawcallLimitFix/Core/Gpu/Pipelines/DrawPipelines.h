@@ -22,6 +22,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Records.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
 #include "Features/DrawcallLimitFix/Api/Views.h"
+#include "RenderGraph/BufferRef.h"
 
 namespace DCLF
 {
@@ -39,9 +40,11 @@ namespace DCLF
 	// The draw's push range: each draw's words under device-generated commands; once per call for the shadow views' and the
 	// Z-prepass's plain draws (ShadowViewPass, MainOpaquePass).
 	inline constexpr std::uint32_t kDrawPushBinding = 190;
-	// The frame record's address (every register a draw's rows do not give), then the registers' addresses.
+	// The frame record's address (every register a draw's rows do not give: the layout reads it), its buffer view ref (the stages that read
+	// the record themselves: Common/DCLFFrameRecord.hlsli), then the registers' addresses.
 	inline constexpr std::uint32_t kFramePushRecord = 0;
-	inline constexpr std::uint32_t kFramePushRegisters = 2;
+	inline constexpr std::uint32_t kFramePushRecordRef = 2;
+	inline constexpr std::uint32_t kFramePushRegisters = 4;
 	inline constexpr std::uint32_t kFramePushWords = kFramePushRegisters + 2 * (std::popcount(kFramePushVS) + std::popcount(kFramePushPS));
 	// The pass-wide blocks, in the frame push words' order (VS registers ascending, then PS). The main layout reads each as a uniform
 	// buffer descriptor whose heap index is in the frame record (DrawBindings::frameBlocks, FrameBlockViews), not as a pushed address:
@@ -49,7 +52,7 @@ namespace DCLF
 	// about 40 registers on NVIDIA against a descriptor's (tools/shader-compare).
 	inline constexpr std::uint32_t kFrameBlocks = std::popcount(kFramePushVS) + std::popcount(kFramePushPS);
 	// A draw's push data (DrawSequence's Constant argument: its bytes 4-99): pipeline row address (VS b0), material row address (VS
-	// b1), object word, the geometry's two vertex buffer views (address, size, stride each), which the vertex stage pulls its attributes
+	// b1), object word, the geometry's two vertex buffer views (buffer view ref, size, stride each), which the vertex stage pulls its attributes
 	// through (DCLF_PULLED_VERTICES; DCLFObjects.hlsli, DCLFPushData, whose packoffsets are these words), a pad (word 13), then the
 	// rows' other blocks' addresses (PS b0, VS b2, PS b2, b4, PS b1: the layout maps each as a pushed address, MainLayoutRanges).
 	// BasicRHI requires a pushed address 8-byte aligned in the push data, hence the pad: every address is at an even word. The words
@@ -63,8 +66,8 @@ namespace DCLF
 				  kDrawPushGeometryPS % 2 == 0 && kDrawPushPermutation % 2 == 0 && kDrawPushMaterialPS % 2 == 0);
 	// Push word w is the sequence's byte 4 + 4w, and the argument ends where the index buffer view starts.
 	static_assert(offsetof(DrawSequence, pipelineRowAddress) == 4 + 4 * kDrawPushPipelineRow && offsetof(DrawSequence, materialRowAddress) == 4 + 4 * kDrawPushMaterialRow &&
-				  offsetof(DrawSequence, objectIndex) == 4 + 4 * kDrawPushObject && offsetof(DrawSequence, vertexBufferAddress) == 4 + 4 * kDrawPushVertexBuffer &&
-				  offsetof(DrawSequence, streamBufferAddress) == 4 + 4 * kDrawPushStreamBuffer &&
+				  offsetof(DrawSequence, objectIndex) == 4 + 4 * kDrawPushObject && offsetof(DrawSequence, vertexBufferRef) == 4 + 4 * kDrawPushVertexBuffer &&
+				  offsetof(DrawSequence, streamBufferRef) == 4 + 4 * kDrawPushStreamBuffer &&
 				  offsetof(DrawSequence, psTechniqueAddress) == 4 + 4 * kDrawPushTechniquePS && offsetof(DrawSequence, vsGeometryAddress) == 4 + 4 * kDrawPushGeometryVS &&
 				  offsetof(DrawSequence, psGeometryAddress) == 4 + 4 * kDrawPushGeometryPS && offsetof(DrawSequence, permutationAddress) == 4 + 4 * kDrawPushPermutation &&
 				  offsetof(DrawSequence, psMaterialAddress) == 4 + 4 * kDrawPushMaterialPS &&
@@ -73,14 +76,14 @@ namespace DCLF
 	// DCLFInstanceWord), as D3D12's SV_InstanceID does not count the first instance. Read from the sequence's word before its arguments.
 	inline constexpr std::uint32_t kDrawPushInstance = 23;
 	static_assert(kDrawPushInstance < kDrawPushWords);
-	// Z-prepass plain draws' push word, per call: the first sequence's address. A call draws every pipeline slot sharing its depth
+	// Z-prepass plain draws' push word, per call: the first sequence's buffer view ref. A call draws every pipeline slot sharing its depth
 	// pipeline (ZPipelineKey), so rows and vertex layout are read per draw through its sequence (Lighting.hlsl, DCLF_PULLED).
 	inline constexpr std::uint32_t kZDrawPushSequences = 0;
 	// Terrain Blending's depth offset (Utility.hlsl, OFFSET_DEPTH), in the shadow views' vertex layout word: 1 for a terrain group 1
 	// twin bucket's call (MainOpaquePass); the pulled Lighting vertex stage adds it to clip z.
 	inline constexpr std::uint32_t kZDrawPushOffsetDepth = 4;
-	// A shadow view's plain draw's push words: the first sequence's address (indexed by instance; Utility.hlsl, DCLF_PULLED), the
-	// material rows' table (for the layout's b1/t0 ranges; the stages read the draw's row themselves), the vertex layout.
+	// A shadow view's plain draw's push words: the first sequence's buffer view ref (indexed by instance; Utility.hlsl, DCLF_PULLED), the
+	// material rows' table's device address (the layout's b1/t0 ranges read it; the stages read the draw's row themselves), the vertex layout.
 	inline constexpr std::uint32_t kShadowDrawPushSequences = 0, kShadowDrawPushMaterialRows = 2, kShadowDrawPushVertexLayout = 4;
 	// The CPU-driven pipeline's direct draws (Direct/Recorder.cpp: one plain draw a resident sequence, in either layout above): the
 	// draw's object word, whose per-frame bits (local shadow mask, cross-fade copy, sun miss) the resident sequence does not hold, and
@@ -89,19 +92,19 @@ namespace DCLF
 	inline constexpr std::uint32_t kDirectDrawPushObjectWord = 6, kDirectDrawPushFlags = 7;
 	inline constexpr std::uint32_t kDirectFlagObjectWord = 1;
 	// kDirectFlagRelativeRows: the draw's sequence holds its rows as offsets from the bases at kDirectDrawPushRowBases (pushed once per
-	// list: the pipeline rows' base, then the material rows' or the shadow rows'), so the CPU pipeline's resident sequences do not embed
+	// list, as buffer view refs: the pipeline rows' base, then the material rows' or the shadow rows'), so the CPU pipeline's resident sequences do not embed
 	// a payload's row versions (DCLFObjects.hlsli, DCLFSequenceRows).
 	inline constexpr std::uint32_t kDirectFlagRelativeRows = 2;
 	inline constexpr std::uint32_t kDirectDrawPushRowBases = 8;
 	static_assert(kDirectDrawPushObjectWord > kZDrawPushOffsetDepth && kDirectDrawPushObjectWord >= kShadowDrawPushVertexLayout + 2 && kDirectDrawPushFlags < kDrawPushWords);
 	static_assert(kDirectDrawPushRowBases > kDirectDrawPushFlags && kDirectDrawPushRowBases + 4 <= kDrawPushWords);
-	// The frame's copy of the animated material rows (Api::PassDef::animatedRows, the latch's animatedRows; 0: none), pushed once per
+	// The frame's copy of the animated material rows' buffer view ref (Api::PassDef::animatedRows; null: none), pushed once per
 	// list of a main-rows pass after the row bases: a relative row whose header names an animated row is drawn from its copy, as
 	// BuildDrawsCS's MaterialRowAddress resolves it (DCLFObjects.hlsli, DCLFSequenceRows).
 	inline constexpr std::uint32_t kDirectDrawPushAnimatedRows = kDirectDrawPushRowBases + 4;
 	static_assert(kDirectDrawPushAnimatedRows + 2 <= kDrawPushWords);
 	// kDirectFlagDrawRecords: the draw is one of an indirect run's (Direct/Recorder.h, IndirectDraw). Its instance names its record in the
-	// frame slot's draw buffer, at this address (pushed once per list), which holds its sequence's index and its object word.
+	// frame slot's draw buffer, by this buffer view ref (pushed once per list), which holds its sequence's index and its object word.
 	inline constexpr std::uint32_t kDirectFlagDrawRecords = 4;
 	inline constexpr std::uint32_t kDirectDrawPushDrawRecords = kDirectDrawPushAnimatedRows + 2;
 	static_assert(kDirectDrawPushDrawRecords + 2 <= kDrawPushWords && kDirectDrawPushDrawRecords % 2 == 0);
@@ -113,10 +116,12 @@ namespace DCLF
 	 * diffuse t0) and the object word; the rest is pushed once per view (six addresses below). The frame record gives every other
 	 * texture and sampler. The rows are one table for every view (256-byte blocks); a view's blocks are never copied into them.
 	 */
-	inline constexpr std::uint32_t kShadowPushWords = 12;
-	// Addresses of the frame record, PerTechnique (b0), VS_PerFrame (b12), the zero block, SharedData (b5), FeatureData (b6).
-	inline constexpr std::uint32_t kShadowPushFrameRecord = 0, kShadowPushViewBlock = 2, kShadowPushPerFrame = 4, kShadowPushZeros = 6,
-								   kShadowPushSharedData = 8, kShadowPushFeatureData = 10;
+	inline constexpr std::uint32_t kShadowPushWords = 14;
+	// The frame record's address, its buffer view ref (as the frame push's: kFramePushRecordRef), then the addresses of PerTechnique (b0),
+	// VS_PerFrame (b12), the zero block, SharedData (b5), FeatureData (b6). The layout reads every address.
+	inline constexpr std::uint32_t kShadowPushFrameRecord = 0, kShadowPushFrameRecordRef = 2, kShadowPushViewBlock = 4, kShadowPushPerFrame = 6, kShadowPushZeros = 8,
+								   kShadowPushSharedData = 10, kShadowPushFeatureData = 12;
+	static_assert(kShadowPushFrameRecordRef == kFramePushRecordRef, "Common/DCLFFrameRecord.hlsli reads both at one word");
 	inline constexpr std::uint32_t kPerFrameVertexRegister = 12;  // VS_PerFrame (Lighting.hlsl, Utility.hlsl): ViewProj at c8
 	inline constexpr std::uint32_t kSharedDataRegister = 5;       // SharedData (SharedData.hlsli), bound by Community Shaders
 	inline constexpr std::uint32_t kFeatureDataRegister = 6;      // FeatureData, likewise
@@ -142,9 +147,9 @@ namespace DCLF
 		// The material's index among its version's animated rows (Texture Transforms: the frame's copy BuildDrawsCS's MaterialRowAddress
 		// resolves the row to), ~0u: none. The pulled stages read the indices below at fixed offsets.
 		std::uint32_t animatedRow = ~0u;
-		// Texture streaming's feedback (Lighting.hlsl, DCLF_TEX_FEEDBACK): the material's slot, and the buffer's device address (0: none).
+		// Texture streaming's feedback (Lighting.hlsl, DCLF_TEX_FEEDBACK): the material's slot, and the buffer's view ref (null: none).
 		std::uint32_t feedbackSlot = 0;
-		std::uint32_t feedbackAddress[2]{};
+		RenderGraph::BufferRef feedbackRef;
 		std::uint32_t textures[kPixelTextureSlots]{};
 		std::uint32_t samplers[16]{};
 		std::uint32_t features[Extensions::kFeatureTextureSlots]{};
@@ -241,6 +246,29 @@ namespace DCLF
 	 * @brief A binding record in GPU memory, one entry per Lighting register, mapped by the layout (VK_EXT_descriptor_heap indirect
 	 * mappings, LayoutRangeSource). The frame record is one. Undeclared registers are never read.
 	 */
+	/**
+	 * @brief A buffer some device address a layout reads points into (DrawBindings::backings): its buffer view ref, its device address and
+	 * its bytes. A stage that reads through such an address turns it into a ref (Common/DCLFFrameRecord.hlsli, DCLFRefFromBacking).
+	 */
+	struct RecordBacking
+	{
+		RenderGraph::BufferRef ref;
+		std::uint64_t address = 0;
+		std::uint32_t bytes = 0;
+		std::uint32_t pad[3]{};
+	};
+	static_assert(sizeof(RecordBacking) == 32);
+	/** @brief DrawBindings::backings' entries (Common/DCLFFrameRecord.hlsli's kDCLFBacking*). */
+	enum RecordBackingIndex : std::uint32_t
+	{
+		kBackingFrameConstants,  // the frame constants: the frame record, its blocks, LodFadeFrame
+		kBackingPipelineRows,    // the installed payload's pipeline rows: a sequence's pipeline row
+		kBackingMaterialRows,    // its material rows: a sequence's material row
+		kBackingAnimatedRows,    // the frame's copy of the animated material rows: a sequence's material row too
+		kBackingShadowRows,      // its shadow rows: a shadow sequence's material row
+		kRecordBackings
+	};
+
 	struct DrawBindings
 	{
 		std::uint64_t vertexConstants[kConstantBufferRegisters];  // device addresses of the constant buffers
@@ -249,8 +277,11 @@ namespace DCLF
 		std::uint32_t samplers[kSamplerRegisters];  // sampler descriptor heap indices
 		std::uint32_t frameBlocks[kFrameBlocks];    // the pass-wide blocks' uniform buffer descriptors' heap indices (FrameBlockViews)
 		std::uint32_t pad = 0;
+		// The buffers the record's, the push data's and the sequences' device addresses point into, by RecordBackingIndex: no layout
+		// reads them.
+		RecordBacking backings[kRecordBackings];
 	};
-	static_assert(sizeof(DrawBindings) == 864);
+	static_assert(offsetof(DrawBindings, backings) == 864 && sizeof(DrawBindings) == 864 + 32 * kRecordBackings);
 
 	/** @brief The registers a pipeline's shaders declare, which a draw's DrawBindings must supply. */
 	struct RegisterUsage

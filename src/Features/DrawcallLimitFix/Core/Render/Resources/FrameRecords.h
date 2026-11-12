@@ -7,6 +7,7 @@
 
 // volk must precede every Vulkan header in this translation unit (Main/Resources.h first).
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
+#include "RenderGraph/BufferRef.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Uploads.h"
@@ -48,11 +49,20 @@ namespace DCLF::Draws
 	/**
 	 * @brief A frame record: the frame slots of a_frameConstants for the registers a_vsMask and a_psMask supply, PS b3 the shared light
 	 * block and PS b13 the lighting slot, the pass-wide blocks' views (a_blocks: a_frameConstants'), a_frameTextures at their registers
-	 * (kInvalidIndex: a_nullIndex), then WriteRecordBuffers.
+	 * (kInvalidIndex: a_nullIndex), then WriteRecordBuffers, and the backings the stages turn the record's, the push data's and the
+	 * sequences' device addresses into refs with (DrawBindings::backings: a_frameConstantsRef's buffer, a_parts' rows, the frame's animated rows).
 	 */
-	DrawBindings FrameRecordOf(std::uint64_t a_frameConstants, const FrameBlockViews& a_blocks, std::uint32_t a_vsMask, std::uint32_t a_psMask, std::span<const std::uint32_t, kTextureRegisters> a_frameTextures,
+	DrawBindings FrameRecordOf(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef, const FrameBlockViews& a_blocks, std::uint32_t a_vsMask, std::uint32_t a_psMask, std::span<const std::uint32_t, kTextureRegisters> a_frameTextures,
 		std::uint32_t a_nullIndex, const PayloadVersions& a_parts, const FrameValueIndices& a_values, const NamedVersions& a_adopted, const SceneBuffers& a_scene,
 		std::uint32_t a_frame);
+
+	/**
+	 * @brief A record's backings (DrawBindings::backings), which the stages turn its, the push data's and the sequences' device addresses into
+	 * refs with: the buffer its blocks are in (a_constantsRef, a_constants, a_constantsBytes: the frame constants, or the shadow views'
+	 * constants), a_parts' rows and the frame's animated rows.
+	 */
+	void WriteRecordBackings(DrawBindings& a_record, RenderGraph::BufferRef a_constantsRef, std::uint64_t a_constants, std::uint64_t a_constantsBytes,
+		const PayloadVersions& a_parts);
 
 	/**
 	 * @brief The zero block, and the zeroed light block every bindless draw's PS b3 reads while Light Limit Fix is loaded, staged into

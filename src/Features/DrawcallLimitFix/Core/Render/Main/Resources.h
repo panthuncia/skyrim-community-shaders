@@ -6,6 +6,7 @@
 
 // volk must precede every Vulkan header in this translation unit (FrameLayout.h first, in its own include block).
 #include "Features/DrawcallLimitFix/Core/Render/Main/FrameLayout.h"
+#include "RenderGraph/BufferRef.h"
 
 #include "Features/DrawcallLimitFix/Api/Views.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
@@ -125,9 +126,9 @@ namespace DCLF::Draws
 		struct FoliageRecord
 		{
 			std::array<std::shared_ptr<org::Buffer>, 2> ids, colours;
-			std::array<std::uint64_t, 2> idsAddress{}, coloursAddress{};
+			std::array<RenderGraph::BufferRef, 2> idsRef{}, coloursRef{};  // what the Lighting stages and the compare pass read through
 			std::shared_ptr<org::Buffer> results;
-			std::uint64_t resultsAddress = 0;
+			RenderGraph::BufferRef resultsRef;
 			// The Z-prepass's alpha-tested fragment owner per pixel (GpuLayouts.h, kFoliageOwned) and its UAV index.
 			std::shared_ptr<org::Buffer> owners;
 			std::uint32_t ownersIndex = 0;
@@ -145,6 +146,7 @@ namespace DCLF::Draws
 		// Targets declared for the latched copies (LatchedCopiesPass); anything else is staged.
 		std::atomic<std::shared_ptr<const std::vector<const void*>>> latchedTargets;  // LatchedTarget::key
 		std::uint64_t frameConstantsAddress = 0;
+		RenderGraph::BufferRef frameConstantsRef;  // the stages that read the frame record themselves read it through this
 		// Its pass-wide blocks' uniform buffer views, which its frame record names (FrameRecordOf).
 		std::shared_ptr<const FrameBlockViews> frameBlocks;
 		// The zeroed StrictLightData every bindless draw's b3 reads: constant, staged once by the first commit.
@@ -219,7 +221,7 @@ namespace DCLF::Draws
 		org::ResourceBindingToken classCounts;                                             // the colour and forward calls' counts (Resources::classCounts)
 		org::ResourceBindingToken pool, bucketCounts;                                      // the depth segment's plain draws
 		std::array<org::ResourceBindingToken, Extensions::kDrawFamilies> familyArguments;  // each draw family's arguments (DrawFamilyDeclare)
-		std::array<std::uint64_t, Extensions::kDrawFamilies> familyRows{};                 // and its draw row's address (DrawFamilyDeclare::row)
+		std::array<RenderGraph::BufferRef, Extensions::kDrawFamilies> familyRows{};        // and its draw row's ref (DrawFamilyDeclare::row)
 	};
 
 	/*
@@ -454,13 +456,13 @@ namespace DCLF::Draws
 	};
 
 	// Frame push: the pass-wide constant buffers' addresses, as the layout's push address ranges read them.
-	inline std::array<std::uint32_t, kFramePushWords> FramePushWords(std::uint64_t a_frameConstants);
+	inline std::array<std::uint32_t, kFramePushWords> FramePushWords(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef);
 
-	/** @brief What a main pass execution draws a draw family with (its slot's pipelines while it is set up: null for nothing) and its row's address. */
+	/** @brief What a main pass execution draws a draw family with (its slot's pipelines while it is set up: null for nothing) and its row's ref. */
 	struct FamilyPrepared
 	{
 		std::shared_ptr<const void> drawn;
-		std::uint64_t row = 0;
+		RenderGraph::BufferRef row;
 	};
 
 	struct PreparedDraws

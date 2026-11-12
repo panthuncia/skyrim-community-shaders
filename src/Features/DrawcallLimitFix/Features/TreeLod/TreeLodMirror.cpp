@@ -232,8 +232,8 @@ namespace DCLF::Features::TreeLod
 				auto index = vertex ? gpu.Acquire(mesh.source.indexBuffer.get()) : std::nullopt;
 				if (vertex && index) {
 					const std::uint64_t desc = mesh.source.vertexDesc;
-					mesh.row.vertexAddress = vertex->buffer.address;
-					mesh.row.indexAddress = index->buffer.address;
+					mesh.row.vertexRef = vertex->buffer.ref;
+					mesh.row.indexRef = index->buffer.ref;
 					mesh.row.vertexStride = static_cast<std::uint32_t>(desc & 0xF) * 4;
 					mesh.row.texcoordOffset = static_cast<std::uint32_t>((desc >> 8) & 0xF) * 4;
 					mesh.row.indexCount = mesh.source.indexCount;

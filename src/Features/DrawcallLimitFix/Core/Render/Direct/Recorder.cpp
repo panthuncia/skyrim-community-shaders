@@ -36,6 +36,11 @@ namespace DCLF::Direct
 			a_words[0] = static_cast<std::uint32_t>(a_value);
 			a_words[1] = static_cast<std::uint32_t>(a_value >> 32);
 		}
+		void Split(std::uint32_t* a_words, RenderGraph::BufferRef a_ref)
+		{
+			a_words[0] = a_ref.viewSlot;
+			a_words[1] = a_ref.byteOffset;
+		}
 
 		/**
 		 * @brief Binds the list's layout and the push data its draws keep: the frame (or view) words, then for every layout but the main
@@ -65,16 +70,16 @@ namespace DCLF::Direct
 			std::uint32_t bases[4]{};
 			const auto& set = a_context.set;
 			if (a_context.pass == RecordPass::Shadow) {
-				Split(bases + 2, set.shadowRowsBase);
+				Split(bases + 2, set.shadowRowsRef);
 			} else {
-				Split(bases, set.pipelineRowsBase);
-				Split(bases + 2, set.materialRowsBase);
+				Split(bases, set.pipelineRowsRef);
+				Split(bases + 2, set.materialRowsRef);
 			}
 			list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, kDirectDrawPushRowBases, 4, bases);
 			// The main rows' animated rows read from the frame's copy (the texture transforms' TexcoordOffset).
-			if (a_context.pass != RecordPass::Shadow && bindings.animatedRows) {
+			if (a_context.pass != RecordPass::Shadow && bindings.animatedRowsRef) {
 				std::uint32_t animated[2]{};
-				Split(animated, bindings.animatedRows);
+				Split(animated, bindings.animatedRowsRef);
 				list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, kDirectDrawPushAnimatedRows, 2, animated);
 			}
 		}
@@ -212,7 +217,7 @@ namespace DCLF::Direct
 			}
 			a_context.runWordsPushed = false;
 			std::uint32_t words[kDirectDrawWords]{};
-			Split(words + kZDrawPushSequences, set.sequencesAddress + std::uint64_t(a_sequence) * sizeof(DrawSequence));
+			Split(words + kZDrawPushSequences, set.sequencesRef + std::uint64_t(a_sequence) * sizeof(DrawSequence));
 			switch (a_context.pass) {
 			case RecordPass::Shadow:
 				// The layout's rows word 0, as ShadowViewPass's (each draw's row is its sequence's); its bucket's vertex layout.
@@ -346,7 +351,7 @@ namespace DCLF::Direct
 				// A direct draw's words, a shadow pipeline's layout, or the list's first run: the run's words.
 				if (bind || !a_context.runWordsPushed) {
 					std::uint32_t words[kDirectDrawWords]{};
-					Split(words + kZDrawPushSequences, a_context.set.sequencesAddress);
+					Split(words + kZDrawPushSequences, a_context.set.sequencesRef);
 					if (a_context.pass == RecordPass::Shadow)
 						Split(words + kShadowDrawPushVertexLayout, run.vertexLayout);
 					else
@@ -419,7 +424,7 @@ namespace DCLF::Direct
 		a_context.runWordsPushed = false;
 		if (a_context.indirect) {
 			std::uint32_t records[2]{};
-			Split(records, a_context.indirect->address);
+			Split(records, a_context.indirect->ref);
 			list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, kDirectDrawPushDrawRecords, 2, records);
 		}
 		list.SetIndexBuffer(rhi::IndexBufferView{ bindings.indexPool, 0, 0, rhi::Format::R16_UInt });  // the whole buffer

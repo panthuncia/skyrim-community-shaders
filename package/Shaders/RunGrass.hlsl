@@ -5,7 +5,7 @@
 // Drawcall Limit Fix's grass draws (dclf-architecture.md, "Grass: the draws"; Features/Grass/GrassLayout.h): per pass, a multi-draw
 // whose count and arguments the cull wrote, one non-indexed instanced draw a bucket's tier, whose instances (firstInstance on) are the
 // visible list's entries. The vertex stage fetches its instance, its shape's row, its bucket's, its mesh's index and vertex and the
-// cull's InstanceFrame (wind, fade, tier) through the device addresses in the draw row; the pixel stages take the bucket's textures,
+// cull's InstanceFrame (wind, fade, tier) through the buffer view refs in the draw row; the pixel stages take the bucket's textures,
 // samplers and alpha reference, and the frame's shadow mask, from the rows and the descriptor heap. It binds nothing a draw would
 // vary: the engine's per-pass PerGeometry, PerMaterial, alpha reference and permutation blocks become statics set from the rows
 // (DCLFGrassStatics), Grass Collision's texture and block come from the draw row (GRASS_COLLISION_EXTERNAL), and Grass
@@ -17,7 +17,7 @@
 // No object rows: a family's push data is its own (below), not DCLFObjects.hlsli's, which Light Limit Fix's header would include.
 #	undef DCLF_BINDLESS
 #	undef DCLF_BINDLESS_DRAW
-// The draw's push data (DrawPipelines.h, kDrawPushBinding): the draw row's address, the pass's phase and the colour program (0 base,
+// The draw's push data (DrawPipelines.h, kDrawPushBinding): the draw row's buffer view ref, the pass's phase and the colour program (0 base,
 // 1 TruePBR). The phase needs no reading: a phase-two draw's firstInstance already starts past phase one's instances.
 cbuffer DCLFGrassPush : register(b190)
 {
@@ -27,11 +27,11 @@ cbuffer DCLFGrassPush : register(b190)
 	uint2 DCLFGrassUnused : packoffset(c1.x);
 };
 #	include "Common/DCLFVertexPull.hlsli"
-uint64_t DCLFGrassDraw() { return DCLFAddress(DCLFGrassDrawAddress); }
-// GrassInstances::DrawRow: the tables' addresses, then the frame's values.
-uint64_t DCLFGrassTable(uint a_offset) { return DCLFAddress(DeviceLoad(uint2, DCLFGrassDraw() + a_offset, 8)); }
-uint DCLFGrassDrawUint(uint a_offset) { return DeviceLoad(uint, DCLFGrassDraw() + a_offset, 4); }
-float4 DCLFGrassDrawFloat4(uint a_offset) { return asfloat(DeviceLoad(uint4, DCLFGrassDraw() + a_offset, 4)); }
+DeviceRef DCLFGrassDraw() { return DCLFGrassDrawAddress; }
+// GrassInstances::DrawRow: the tables' refs, then the frame's values.
+DeviceRef DCLFGrassTable(uint a_offset) { return DeviceLoad(uint2, DeviceRefAdd(DCLFGrassDraw(), a_offset), 8); }
+uint DCLFGrassDrawUint(uint a_offset) { return DeviceLoad(uint, DeviceRefAdd(DCLFGrassDraw(), a_offset), 4); }
+float4 DCLFGrassDrawFloat4(uint a_offset) { return asfloat(DeviceLoad(uint4, DeviceRefAdd(DCLFGrassDraw(), a_offset), 4)); }
 static const uint kDCLFGrassInstances = 0, kDCLFGrassShapes = 8, kDCLFGrassBuckets = 16, kDCLFGrassMeshes = 24, kDCLFGrassOwners = 32,
 				  kDCLFGrassFrame = 40, kDCLFGrassVisible = 48;
 static const uint kDCLFGrassWindVector = 64, kDCLFGrassTimeBase = 80, kDCLFGrassDirLightDirection = 96, kDCLFGrassDirLightColor = 112,
@@ -152,14 +152,14 @@ static float3 ScaleMask;
 static float ShadowClampValue;
 
 // The bucket's row (GrassInstances::BucketRow), set by DCLFGrassStatics.
-static uint64_t DCLFGrassBucketRow;
+static DeviceRef DCLFGrassBucketRow;
 
 void DCLFGrassStatics(uint a_bucket)
 {
-	DCLFGrassBucketRow = DCLFGrassTable(kDCLFGrassBuckets) + uint64_t(a_bucket) * kDCLFGrassBucketStride;
-	WindVector = float3(asfloat(DeviceLoad(uint2, DCLFGrassBucketRow + kDCLFGrassBucketWindDirection, 4)), DCLFGrassDrawFloat4(kDCLFGrassWindVector).z);
-	const float2 timeBase = asfloat(DeviceLoad(uint2, DCLFGrassDraw() + kDCLFGrassTimeBase, 4));  // timeBase, prevTimeBase
-	const float wavePeriod = asfloat(DeviceLoad(uint, DCLFGrassBucketRow + kDCLFGrassBucketWavePeriod, 4));
+	DCLFGrassBucketRow = DeviceRefAdd(DCLFGrassTable(kDCLFGrassBuckets), a_bucket * kDCLFGrassBucketStride);
+	WindVector = float3(asfloat(DeviceLoad(uint2, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketWindDirection), 4)), DCLFGrassDrawFloat4(kDCLFGrassWindVector).z);
+	const float2 timeBase = asfloat(DeviceLoad(uint2, DeviceRefAdd(DCLFGrassDraw(), kDCLFGrassTimeBase), 4));  // timeBase, prevTimeBase
+	const float wavePeriod = asfloat(DeviceLoad(uint, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketWavePeriod), 4));
 	WindTimer = timeBase.x * wavePeriod;
 	PreviousWindTimer = timeBase.y * wavePeriod;
 	const float4 dirLightDirection = DCLFGrassDrawFloat4(kDCLFGrassDirLightDirection);  // w ShadowClampValue
@@ -169,12 +169,12 @@ void DCLFGrassStatics(uint a_bucket)
 	DirLightColor = dirLightColor.xyz;
 	FogNearColor = float4(0, 0, 0, dirLightColor.w);
 	AmbientColor = DCLFGrassDrawFloat4(kDCLFGrassAmbientColor).xyz;
-	const float2 alphaParams = asfloat(DeviceLoad(uint2, DCLFGrassDraw() + kDCLFGrassAlphaParams, 4));
+	const float2 alphaParams = asfloat(DeviceLoad(uint2, DeviceRefAdd(DCLFGrassDraw(), kDCLFGrassAlphaParams), 4));
 	AlphaParam1 = alphaParams.x;
 	AlphaParam2 = alphaParams.y;
-	ScaleMask = asfloat(DeviceLoad(uint3, DCLFGrassBucketRow + kDCLFGrassBucketScaleMask, 4));
+	ScaleMask = asfloat(DeviceLoad(uint3, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketScaleMask), 4));
 	// What CS's SetupGeometry hook puts in the permutation block for a sphere-normal property (Hooks.cpp, GrassSphereNormal).
-	const uint flags = DeviceLoad(uint, DCLFGrassBucketRow + kDCLFGrassBucketFlags, 4);
+	const uint flags = DeviceLoad(uint, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketFlags), 4);
 	Permutation::ExtraShaderDescriptor = (flags & kDCLFGrassBucketSphereNormal) ? Permutation::ExtraFlags::GrassSphereNormal : 0;
 }
 #else
@@ -214,15 +214,15 @@ Texture2D<float4> GrassCollisionTexture()
 // Grass Collision's GrassCollisionPerFrame block (b5), copied into the draw row at kDCLFGrassCollisionPerFrame in its layout.
 void DCLFGrassCollisionStatics()
 {
-	const uint64_t block = DCLFGrassDraw() + kDCLFGrassCollisionPerFrame;
+	const DeviceRef block = DeviceRefAdd(DCLFGrassDraw(), kDCLFGrassCollisionPerFrame);
 	const uint4 first = DeviceLoad(uint4, block, 4);
-	const uint4 second = DeviceLoad(uint4, block + 16, 4);
+	const uint4 second = DeviceLoad(uint4, DeviceRefAdd(block, 16), 4);
 	GrassCollision::PosOffset = asfloat(first.xy);
 	GrassCollision::ArrayOrigin = first.zw;
 	GrassCollision::ValidMargin = asint(second.xy);
 	GrassCollision::TimeDelta = asfloat(second.z);
 	GrassCollision::BoundingBoxCount = second.w;
-	GrassCollision::CameraHeightDelta = asfloat(DeviceLoad(uint, block + 32, 4));
+	GrassCollision::CameraHeightDelta = asfloat(DeviceLoad(uint, DeviceRefAdd(block, 32), 4));
 }
 #		endif
 #	endif  // GRASS_COLLISION
@@ -450,7 +450,7 @@ VS_OUTPUT DCLFGrassVertex(VS_INPUT input, float3 a_origin, uint4 a_frame, uint a
 #			ifdef GRASS_LIGHTING
 	float3x3 world3x3 = float3x3(input.InstanceData2.xyz, input.InstanceData3.xyz, float3(input.InstanceData4.x, input.InstanceData2.w, input.InstanceData3.w));
 	vsout.VertexNormal.xyz = mul(world3x3, input.Normal.xyz * 2.0 - 1.0);
-	const float canopyHeight = asfloat(DeviceLoad(uint, DCLFGrassBucketRow + kDCLFGrassBucketCanopyHeight + 4 * (a_frame.w & kDCLFGrassTierMask), 4));
+	const float canopyHeight = asfloat(DeviceLoad(uint, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketCanopyHeight + 4 * (a_frame.w & kDCLFGrassTierMask)), 4));
 	vsout.VertexNormal.w = GetCanopyHeight(input, canopyHeight);
 	vsout.ClumpNormal = GetClumpNormal(input, world3x3, canopyHeight);
 #			endif
@@ -464,27 +464,27 @@ VS_OUTPUT DCLFGrassVertex(VS_INPUT input, float3 a_origin, uint4 a_frame, uint a
 // indices, attributes as the engine's input layout for the mesh's vertex layout has them (one stream).
 VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
 {
-	const uint index = DeviceLoad(uint, DCLFGrassTable(kDCLFGrassVisible) + 4 * uint64_t(a_instance), 4);
-	const uint shapeSlot = DeviceLoad(uint, DCLFGrassTable(kDCLFGrassOwners) + 4 * uint64_t(index), 4);
-	const uint64_t shape = DCLFGrassTable(kDCLFGrassShapes) + 32 * uint64_t(shapeSlot);
+	const uint index = DeviceLoad(uint, DeviceRefAdd(DCLFGrassTable(kDCLFGrassVisible), 4 * a_instance), 4);
+	const uint shapeSlot = DeviceLoad(uint, DeviceRefAdd(DCLFGrassTable(kDCLFGrassOwners), 4 * index), 4);
+	const DeviceRef shape = DeviceRefAdd(DCLFGrassTable(kDCLFGrassShapes), 32 * shapeSlot);
 	const float3 origin = asfloat(DeviceLoad(uint3, shape, 4));
-	const uint bucket = DeviceLoad(uint, shape + 12, 4);
+	const uint bucket = DeviceLoad(uint, DeviceRefAdd(shape, 12), 4);
 	DCLFGrassStatics(bucket);
-	const uint2 packedFrame = DeviceLoad(uint2, DCLFGrassTable(kDCLFGrassFrame) + kDCLFGrassFrameStride * uint64_t(index), 8);
+	const uint2 packedFrame = DeviceLoad(uint2, DeviceRefAdd(DCLFGrassTable(kDCLFGrassFrame), kDCLFGrassFrameStride * index), 8);
 	const uint4 frame = uint4(asuint(f16tof32(packedFrame.x)), asuint(f16tof32(packedFrame.x >> 16)), asuint(float(packedFrame.y & 0xFFFFu) / 65535.0), packedFrame.y >> 16);
-	const uint meshSlot = DeviceLoad(uint, DCLFGrassBucketRow + 4 * (frame.w & kDCLFGrassTierMask), 4);
+	const uint meshSlot = DeviceLoad(uint, DeviceRefAdd(DCLFGrassBucketRow, 4 * (frame.w & kDCLFGrassTierMask)), 4);
 	if (meshSlot == kDCLFGrassNone)
 		return (VS_OUTPUT)0;
-	// GrassInstances::MeshRow: vertex address, index address, vertex layout, index count, vertex stride.
-	const uint64_t mesh = DCLFGrassTable(kDCLFGrassMeshes) + 32 * uint64_t(meshSlot);
+	// GrassInstances::MeshRow: vertex ref, index ref, vertex layout, index count, vertex stride.
+	const DeviceRef mesh = DeviceRefAdd(DCLFGrassTable(kDCLFGrassMeshes), 32 * meshSlot);
 	const uint4 meshAddresses = DeviceLoad(uint4, mesh, 8);
-	DCLFDrawVertexLayout = DeviceLoad(uint2, mesh + 16, 8);
-	const uint indexWord = DeviceLoad(uint, DCLFAddress(meshAddresses.zw) + 4 * uint64_t(a_vertex / 2), 4);
+	DCLFDrawVertexLayout = DeviceLoad(uint2, DeviceRefAdd(mesh, 16), 8);
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(meshAddresses.zw, 4 * (a_vertex / 2)), 4);
 	const uint vertexIndex = (a_vertex & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	DCLFStream first, second;
-	first.address = DCLFAddress(meshAddresses.xy);
-	first.stride = DeviceLoad(uint, mesh + 28, 4);
-	second.address = 0;
+	first.address = meshAddresses.xy;
+	first.stride = DeviceLoad(uint, DeviceRefAdd(mesh, 28), 4);
+	second.address = DeviceRef(0, 0);
 	second.stride = 0;
 	DCLFStreamsAt(vertexIndex, first, second);
 
@@ -494,9 +494,9 @@ VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
 	input.Normal = DCLFPullUnorm4(3, 0, first, second);
 	input.Color = DCLFPullUnorm4(5, 0, first, second);
 	// The engine's instance record (TEXCOORD4-7, R16G16B16A16_FLOAT each).
-	const uint64_t record = DCLFGrassTable(kDCLFGrassInstances) + 32 * uint64_t(index);
+	const DeviceRef record = DeviceRefAdd(DCLFGrassTable(kDCLFGrassInstances), 32 * index);
 	const uint4 low = DeviceLoad(uint4, record, 16);
-	const uint4 high = DeviceLoad(uint4, record + 16, 16);
+	const uint4 high = DeviceLoad(uint4, DeviceRefAdd(record, 16), 16);
 	input.InstanceData1 = float4(DCLFHalf2(low.x), DCLFHalf2(low.y));
 	input.InstanceData2 = float4(DCLFHalf2(low.z), DCLFHalf2(low.w));
 	input.InstanceData3 = float4(DCLFHalf2(high.x), DCLFHalf2(high.y));
@@ -671,7 +671,7 @@ static uint DCLFGrassNormal, DCLFGrassRmaos, DCLFGrassFeatures, DCLFGrassFuzz, D
 void DCLFGrassPixelStatics(uint a_bucket)
 {
 	DCLFGrassStatics(a_bucket);
-	const uint4 textures = DeviceLoad(uint4, DCLFGrassBucketRow + kDCLFGrassBucketTextures, 4);  // diffuse, samplers, alpha ref
+	const uint4 textures = DeviceLoad(uint4, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketTextures), 4);  // diffuse, samplers, alpha ref
 	DCLFGrassDiffuse = textures.x;
 #		if defined(RENDER_DEPTH)
 	DCLFGrassSampler = textures.y;
@@ -682,17 +682,17 @@ void DCLFGrassPixelStatics(uint a_bucket)
 	AlphaTestRefRS = asfloat(textures.w);
 	DCLFGrassShadowMask = DCLFGrassDrawUint(kDCLFGrassShadowMaskIndex);
 #		if defined(GRASS_LIGHTING) && defined(TRUE_PBR)
-	PBRFlags = DeviceLoad(uint, DCLFGrassBucketRow + kDCLFGrassBucketPbrFlags, 4);
-	const uint4 pbrTextures = DeviceLoad(uint4, DCLFGrassBucketRow + kDCLFGrassBucketPbrTextures, 4);
+	PBRFlags = DeviceLoad(uint, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrFlags), 4);
+	const uint4 pbrTextures = DeviceLoad(uint4, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrTextures), 4);
 	DCLFGrassNormal = pbrTextures.x;
 	DCLFGrassRmaos = pbrTextures.y;
 	DCLFGrassFeatures = pbrTextures.z;
 	DCLFGrassPbrSampler = pbrTextures.w;
-	PBRParams1 = asfloat(DeviceLoad(uint3, DCLFGrassBucketRow + kDCLFGrassBucketPbrParams1, 4));
-	PBRParams2 = asfloat(DeviceLoad(uint4, DCLFGrassBucketRow + kDCLFGrassBucketPbrParams2, 4));
-	PBRParams3 = asfloat(DeviceLoad(uint4, DCLFGrassBucketRow + kDCLFGrassBucketPbrParams3, 4));
-	PBRParams4 = asfloat(DeviceLoad(uint4, DCLFGrassBucketRow + kDCLFGrassBucketPbrParams4, 4));
-	const uint2 fuzzEmissive = DeviceLoad(uint2, DCLFGrassBucketRow + kDCLFGrassBucketFuzzEmissive, 4);
+	PBRParams1 = asfloat(DeviceLoad(uint3, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrParams1), 4));
+	PBRParams2 = asfloat(DeviceLoad(uint4, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrParams2), 4));
+	PBRParams3 = asfloat(DeviceLoad(uint4, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrParams3), 4));
+	PBRParams4 = asfloat(DeviceLoad(uint4, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrParams4), 4));
+	const uint2 fuzzEmissive = DeviceLoad(uint2, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketFuzzEmissive), 4);
 	DCLFGrassFuzz = fuzzEmissive.x;
 	DCLFGrassEmissive = fuzzEmissive.y;
 #		endif

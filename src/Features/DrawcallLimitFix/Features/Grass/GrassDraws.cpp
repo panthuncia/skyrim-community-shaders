@@ -124,14 +124,14 @@ namespace DCLF::Features::Grass
 						  (kProgram.descriptors.colour & static_cast<std::uint32_t>(SIE::ShaderCache::GrassShaderFlags::AlphaTest)) == 0,
 			"grass's descriptors are not the engine's (RenderDepth, TruePbr; the colour program without AlphaTest)");
 
-		// The draws' push data (RunGrass.hlsl's DCLFGrassPush, b190): the draw row's address, the pass's phase and colour program.
-		void Push(rhi::CommandList& a_commands, std::uint64_t a_draw, std::uint32_t a_phase, std::uint32_t a_program)
+		// The draws' push data (RunGrass.hlsl's DCLFGrassPush, b190): the draw row's buffer view ref, the pass's phase and colour program.
+		void Push(rhi::CommandList& a_commands, RenderGraph::BufferRef a_draw, std::uint32_t a_phase, std::uint32_t a_program)
 		{
-			std::uint32_t words[kDrawPushWords]{ static_cast<std::uint32_t>(a_draw), static_cast<std::uint32_t>(a_draw >> 32), a_phase, a_program };
+			std::uint32_t words[kDrawPushWords]{ a_draw.viewSlot, a_draw.byteOffset, a_phase, a_program };
 			a_commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, 0, kDrawPushWords, words);
 		}
 
-		// The main passes: the draws buffer (its arrays and their counts), the draw row's address (in its push data), the tables its
+		// The main passes: the draws buffer (its arrays and their counts), the draw row's ref (in its push data), the tables its
 		// vertex and pixel stages read by address, and Grass Collision's texture once it was ever published (its ORG path: the vertex
 		// stages read it by the graph's descriptor, ordered after the update at the EarlyPrepass anchor).
 		void MainDeclare(Api::DrawFamilyDeclare& a_declare)
@@ -142,7 +142,7 @@ namespace DCLF::Features::Grass
 			const std::span<const org::SrvView> noViews{};  // Device-address reads need ordering, not a descriptor.
 			auto& builder = a_declare.builder;
 			a_declare.arguments[0] = builder.IndirectArguments(tables->draws);
-			a_declare.row = tables->drawAddress;
+			a_declare.row = tables->drawRef;
 			for (const auto& table : { tables->instances, tables->owners, tables->frame, tables->visible, tables->shapes, tables->buckets, tables->meshes })
 				builder.ShaderResource(*table, noViews);
 			builder.ShaderResource(tables->draw, noViews);
@@ -151,13 +151,13 @@ namespace DCLF::Features::Grass
 		}
 
 		// The CPU pipeline's main draw (main.direct): MainDeclare's draws buffer (a plain buffer, fixed with the tables) and
-		// draw row's address.
+		// draw row's ref.
 		bool MainDirect(Api::DrawFamilyDirect& a_draw)
 		{
 			const auto* tables = TablesOf(a_draw.scene);
-			if (!tables || !tables->draws || !tables->drawAddress)
+			if (!tables || !tables->draws || !tables->drawRef)
 				return false;
-			a_draw.row = tables->drawAddress;
+			a_draw.row = tables->drawRef;
 			a_draw.arguments = tables->draws;
 			return true;
 		}

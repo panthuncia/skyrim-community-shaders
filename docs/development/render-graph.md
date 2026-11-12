@@ -1213,8 +1213,9 @@ shaders build to DXIL. The rest of native mode is the same code, except:
     counted draws only. Its layouts are root constants alone; a pulled build reads the pass's frame record itself (preprocessed,
     then `FrameSource::Rewrite`), and its stages are reflected from DXIL (`DxilStages`). Stage 1 sets the switches of what has no
     D3D12 port yet (the CPU pipeline, the shadow views, the forward epoch, the families, ...; `[ORG native] D3D12: Drawcall Limit
-    Fix switches set`). Shaders that read buffer device addresses go through `DeviceLoad` (`Common/DeviceAddress.hlsli`), so they
-    build to DXIL. [org-full-port.md](./org-full-port.md), "DCLF on D3D12".
+    Fix switches set`). Shaders read DCLF's buffers through buffer view refs (`DeviceLoad`, `Common/DeviceRef.hlsli`: a raw view's
+    heap slot and a byte offset, BasicRHI's `Device::GetBufferViewRef`), the same code on SPIR-V and DXIL.
+    [org-full-port.md](./org-full-port.md), "DCLF on D3D12".
 
 Scenarios: `tools/cs-ab/scenarios/native-d3d12.env`, and `native-d3d12-validation.env` with the debug layer and GPU-based
 validation.

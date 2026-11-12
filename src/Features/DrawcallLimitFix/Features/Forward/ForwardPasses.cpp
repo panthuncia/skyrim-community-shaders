@@ -76,7 +76,7 @@ namespace DCLF::Draws
 			if (!frame || !frame->forwardCapacity || !frame->indirect.valid || !resources->forwardSort || !resources->preprocessForward)
 				return prepared;
 			prepared.preprocess = resources->preprocessForward.get();
-			prepared.framePushWords = MainFramePushWords(resources->frameConstantsAddress);
+			prepared.framePushWords = MainFramePushWords(resources->frameConstantsAddress, resources->frameConstantsRef);
 			prepared.frame = std::move(frame);
 			prepared.targetCount = resources->targetCount;
 			return prepared;
@@ -114,10 +114,10 @@ namespace DCLF::Draws
 				commands.BindLayout(frame.indirect.zLayout);
 				commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kFramePushBinding, 0, kFramePushWords, a_prepared.framePushWords.data());
 				commands.SetIndexBuffer(rhi::IndexBufferView{ a_recording.Resolve(a_bindings.pool).GetHandle(), 0, 0, rhi::Format::R16_UInt });
-				const std::uint64_t sequencesAddress = DCLF::Draws::RecordingBufferAddress(sequences);
+				const RenderGraph::BufferRef sequencesRef = DCLF::Draws::RecordingBufferRef(sequences);
 				for (std::size_t b = 0; b < plan.forward.size(); ++b) {
 					const auto& bucket = plan.forward[b];
-					RecordBucketDraw(commands, frame.indirect.zDrawSignature, sequences, sequencesAddress, std::uint64_t(bucket.first) + bucket.capacity,
+					RecordBucketDraw(commands, frame.indirect.zDrawSignature, sequences, sequencesRef, std::uint64_t(bucket.first) + bucket.capacity,
 						frame.indirect.plainColour[bucket.set], classCounts, plan.ForwardCountWord(b), bucket.capacity);
 				}
 				commands.EndPass();
@@ -173,6 +173,7 @@ namespace DCLF::Draws
 	{
 		std::shared_ptr<const PassFrame> frame;
 		std::uint64_t frameConstants = 0;
+		RenderGraph::BufferRef frameConstantsRef;
 	};
 
 	class RefractionDrawPass final : public org::TypedRenderGraphPass<RefractionDrawPass, RefractionPrepared, RefractionBindings>
@@ -214,6 +215,7 @@ namespace DCLF::Draws
 				return prepared;
 			prepared.frame = std::move(frame);
 			prepared.frameConstants = resources->frameConstantsAddress;
+			prepared.frameConstantsRef = resources->frameConstantsRef;
 			return prepared;
 		}
 
@@ -249,14 +251,16 @@ namespace DCLF::Draws
 			// shared light block as the zero block.
 			const std::uint64_t constants = a_prepared.frameConstants;
 			std::uint32_t pass[kShadowPushWords]{};
-			MainShadowLayoutPush(constants, pass);
+			MainShadowLayoutPush(constants, a_prepared.frameConstantsRef, pass);
 			const auto sequences = a_recording.Resolve(a_bindings.sequences).GetHandle();
 			const auto count = a_recording.Resolve(a_bindings.count).GetHandle();
 			const std::uint64_t first = RefractionSlot(frame) * sizeof(DrawSequence);
 			// Call words: the range's first sequence, and the frame's LodFadeFrame (after FrameLighting in the lighting slot) in the
 			// material rows' words, which the refraction stage reads instead.
 			std::uint32_t words[kDrawPushWords]{};
-			split(words + kShadowDrawPushSequences, DCLF::Draws::RecordingBufferAddress(sequences) + first);
+			const RenderGraph::BufferRef sequence = DCLF::Draws::RecordingBufferRef(sequences) + first;
+			words[kShadowDrawPushSequences] = sequence.viewSlot;
+			words[kShadowDrawPushSequences + 1] = sequence.byteOffset;
 			split(words + kShadowDrawPushMaterialRows, LodFadeFrameAddress(constants));
 			commands.BeginPass(begin);
 			commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);

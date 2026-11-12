@@ -85,10 +85,10 @@ namespace DCLF::Draws
 			if (stats)
 				stats->Begin(commands, statsSlot, depthKind);
 			const auto counts = a_recording.Resolve(a_bindings.bucketCounts).GetHandle();
-			const std::uint64_t sequencesAddress = DCLF::Draws::RecordingBufferAddress(sequences);
+			const RenderGraph::BufferRef sequencesRef = DCLF::Draws::RecordingBufferRef(sequences);
 			const std::uint64_t phaseBase = a_prepared.phaseTwo ? std::uint64_t(frame.sequenceDraws) : 0;
 			auto drawCall = [&](const PassFrame::ZCall& a_call, bool a_offsetDepth) {
-				RecordBucketDraw(commands, frame.indirect.zDrawSignature, sequences, sequencesAddress, phaseBase + a_call.first, a_call.pipeline, counts, a_call.bucket,
+				RecordBucketDraw(commands, frame.indirect.zDrawSignature, sequences, sequencesRef, phaseBase + a_call.first, a_call.pipeline, counts, a_call.bucket,
 					a_call.capacity, a_offsetDepth);
 			};
 			// A terrain group 1 twin (near blocks) draws into the main depth with Terrain Blending's offset, as its depth hook
@@ -281,10 +281,10 @@ namespace DCLF::Draws
 				commands.BindLayout(frame.indirect.zLayout);
 				commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kFramePushBinding, 0, kFramePushWords, a_prepared.framePushWords.data());
 				commands.SetIndexBuffer(rhi::IndexBufferView{ a_recording.Resolve(a_bindings.pool).GetHandle(), 0, 0, rhi::Format::R16_UInt });
-				const std::uint64_t sequencesAddress = DCLF::Draws::RecordingBufferAddress(sequences);
+				const RenderGraph::BufferRef sequencesRef = DCLF::Draws::RecordingBufferRef(sequences);
 				const auto counts = a_recording.Resolve(a_bindings.classCounts).GetHandle();
 				a_buckets([&](std::uint32_t a_first, rhi::PipelineHandle a_pipeline, std::uint32_t a_countWord, std::uint32_t a_capacity) {
-					RecordBucketDraw(commands, frame.indirect.zDrawSignature, sequences, sequencesAddress, a_first, a_pipeline, counts, a_countWord, a_capacity);
+					RecordBucketDraw(commands, frame.indirect.zDrawSignature, sequences, sequencesRef, a_first, a_pipeline, counts, a_countWord, a_capacity);
 				});
 			};
 			// After plain draws in a pass of device-generated calls: their layout and frame push data again.
@@ -526,7 +526,7 @@ namespace DCLF::Draws
 			prepared.stats = resources->passStats.get();
 			if (!prepared.zPrepass)
 				prepared.preprocess = resources->preprocessMain.get();
-			prepared.framePushWords = MainFramePushWords(resources->frameConstantsAddress);
+			prepared.framePushWords = MainFramePushWords(resources->frameConstantsAddress, resources->frameConstantsRef);
 			// The draw families set up: their pipelines as the revision's shape has them (PassFrame::families; null: not drawn) and draw rows.
 			for (std::size_t f = 0; f < Extensions::kDrawFamilies; ++f)
 				if (const auto family = static_cast<Api::DrawFamily>(f); FamilySetUp(*resources->scene, family))

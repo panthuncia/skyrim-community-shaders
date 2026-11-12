@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // Sky (CS_ORG_SKY, docs/development/p5/sky.md): the engine's BSSkyShader draws (the sky dome, the stars and moon masks, the sun and
 // moons, the cloud layers) drawn by the render graph in the engine's place, in the main pass and in the water reflection's faces.
 //
@@ -92,8 +94,8 @@ namespace DCLF::Features::Sky
 		float alphaTestRef;
 		std::uint32_t extraShaderDescriptor;
 		std::uint32_t padding[2];
-		std::uint32_t vertexAddress[2];
-		std::uint32_t indexAddress[2];
+		RenderGraph::BufferRef vertexRef;  // the vertex buffer view ref the vertex stage pulls through
+		RenderGraph::BufferRef indexRef;   // the index buffer's
 		std::uint32_t vertexLayout[2];
 		std::uint32_t vertexStride;
 		std::uint32_t firstIndex;
@@ -101,7 +103,7 @@ namespace DCLF::Features::Sky
 		std::uint32_t samplers[4];  // s0-s2
 	};
 	static_assert(sizeof(DrawConstants) == 352, "SkyOrgDraw's layout");
-	static_assert(offsetof(DrawConstants, vertexAddress) == 288 && offsetof(DrawConstants, textures) == 320, "SkyOrgDraw's rows");
+	static_assert(offsetof(DrawConstants, vertexRef) == 288 && offsetof(DrawConstants, textures) == 320, "SkyOrgDraw's rows");
 
 	/** @brief The bytes of the vertex stage's PerGeometry the latch takes (c0 to c16.xy). */
 	inline constexpr std::size_t kVertexConstantBytes = 264;

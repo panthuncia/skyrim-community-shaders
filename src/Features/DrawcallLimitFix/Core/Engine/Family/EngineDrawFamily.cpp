@@ -283,7 +283,7 @@ namespace DCLF::Family
 		auto& buffers = GpuResources::Frame();
 		auto vertices = buffers.Acquire(a_shape->vertexBuffer);
 		auto indices = buffers.Acquire(a_shape->indexBuffer);
-		if (!vertices || !indices || !vertices->buffer.address || !indices->buffer.address)
+		if (!vertices || !indices || !vertices->buffer.ref || !indices->buffer.ref)
 			return GeometryResult::Buffers;
 		// The draw's 16-bit indices must lie in the index buffer, and a vertex must hold at least the position the stage pulls. The index
 		// stage loads the 4-byte word holding each index, so an odd range's last word reaches 2 bytes past the buffer's end: inside its
@@ -299,8 +299,8 @@ namespace DCLF::Family
 					stride ? vertices->buffer.size / stride : 0);
 			return GeometryResult::Bounds;
 		}
-		a_out.vertexAddress = vertices->buffer.address;
-		a_out.indexAddress = indices->buffer.address;
+		a_out.vertexRef = vertices->buffer.ref;
+		a_out.indexRef = indices->buffer.ref;
 		a_out.layout = a_shaderVertexDesc & a_shape->vertexDesc;
 		a_out.stride = stride;
 		a_out.firstIndex = a_start;
@@ -335,7 +335,7 @@ namespace DCLF::Family
 		std::optional<GpuResources::LeasedBuffer> vertices;
 		if (stride && a_data->vertexBuffer)
 			vertices = buffers.Acquire(a_data->vertexBuffer);
-		if (!indices || !stream || !indices->buffer.address || !stream->buffer.address || (stride && a_data->vertexBuffer && (!vertices || !vertices->buffer.address)))
+		if (!indices || !stream || !indices->buffer.ref || !stream->buffer.ref || (stride && a_data->vertexBuffer && (!vertices || !vertices->buffer.ref)))
 			return GeometryResult::Buffers;
 		// The index range as LatchGeometry checks it; the position (four floats) must fit in a stream-1 vertex at the offset.
 		const std::uint64_t endIndexByte = (std::uint64_t(a_start) + std::uint64_t(a_triangles) * 3) * 2;
@@ -347,15 +347,15 @@ namespace DCLF::Family
 					a_data->vertexDesc);
 			return GeometryResult::Bounds;
 		}
-		a_out.vertexAddress = vertices ? vertices->buffer.address : 0;
-		a_out.indexAddress = indices->buffer.address;
+		a_out.vertexRef = vertices ? vertices->buffer.ref : RenderGraph::BufferRef{};
+		a_out.indexRef = indices->buffer.ref;
 		// The attributes stream 1 holds (VertexDesc bits 54 and up: DCLFAttribute's second stream) are kept whatever the shader's mask.
 		constexpr std::uint64_t kStreamOneBits = ~((std::uint64_t{ 1 } << 54) - 1);
 		a_out.layout = (a_shaderVertexDesc & a_data->vertexDesc) | (a_data->vertexDesc & kStreamOneBits);
 		a_out.stride = vertices ? stride : 0;
 		a_out.firstIndex = a_start;
 		a_out.indexCount = a_triangles * 3;
-		a_out.streamAddress = stream->buffer.address + a_data->streamOffset;
+		a_out.streamRef = stream->buffer.ref + a_data->streamOffset;
 		a_out.streamStride = streamStride;
 		if (vertices)
 			a_owners.push_back(std::move(vertices->owner));

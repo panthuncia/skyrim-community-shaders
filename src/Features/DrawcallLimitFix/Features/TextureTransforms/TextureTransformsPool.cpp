@@ -189,10 +189,13 @@ namespace DCLF::Features::TextureTransforms
 		return Extensions::FrameValuePoolIndex(pool);
 	}
 
-	std::uint64_t AnimatedRowsAddress()
+	Api::FrameRows AnimatedRowsAddress()
 	{
 		// Without a producer the frame has neither backing: the pass stores nothing, and the draws read the installed rows.
-		return copyAvailable && RowsIndex() ? FrameValues::Get().PoolAddress(copyPool) : 0u;
+		if (!copyAvailable || !RowsIndex())
+			return {};
+		const auto& values = FrameValues::Get();
+		return { values.PoolAddress(copyPool), values.PoolRef(copyPool), static_cast<std::uint32_t>(values.PoolBytes(copyPool) / kMaterialRowBytes) };
 	}
 
 	void SetCopyAvailable(bool a_available)

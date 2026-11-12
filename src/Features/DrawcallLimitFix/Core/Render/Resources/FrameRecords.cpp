@@ -74,7 +74,7 @@ namespace DCLF::Draws
 		Extensions::WriteFrameBindings(bindings, a_record.textures);
 	}
 
-	DrawBindings FrameRecordOf(std::uint64_t a_frameConstants, const FrameBlockViews& a_blocks, std::uint32_t a_vsMask, std::uint32_t a_psMask, std::span<const std::uint32_t, kTextureRegisters> a_frameTextures,
+	DrawBindings FrameRecordOf(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef, const FrameBlockViews& a_blocks, std::uint32_t a_vsMask, std::uint32_t a_psMask, std::span<const std::uint32_t, kTextureRegisters> a_frameTextures,
 		std::uint32_t a_nullIndex, const PayloadVersions& a_parts, const FrameValueIndices& a_values, const NamedVersions& a_adopted, const SceneBuffers& a_scene,
 		std::uint32_t a_frame)
 	{
@@ -89,7 +89,28 @@ namespace DCLF::Draws
 		for (std::uint32_t t = 0; t < kTextureRegisters; ++t)
 			record.textures[t] = a_frameTextures[t] == kInvalidIndex ? a_nullIndex : a_frameTextures[t];
 		WriteRecordBuffers(record, a_parts, a_values, a_adopted, a_scene, a_frame);
+		WriteRecordBackings(record, a_frameConstantsRef, a_frameConstants, kFrameConstantBytes, a_parts);
 		return record;
+	}
+
+	void WriteRecordBackings(DrawBindings& a_record, RenderGraph::BufferRef a_constantsRef, std::uint64_t a_constants, std::uint64_t a_constantsBytes,
+		const PayloadVersions& a_parts)
+	{
+		auto backing = [&](RecordBackingIndex a_index, RenderGraph::BufferRef a_ref, std::uint64_t a_address, std::uint64_t a_bytes) {
+			auto& entry = a_record.backings[a_index];
+			entry.ref = a_ref;
+			entry.address = a_ref ? a_address : 0;
+			entry.bytes = a_ref ? static_cast<std::uint32_t>(std::min<std::uint64_t>(a_bytes, UINT32_MAX)) : 0u;
+		};
+		backing(kBackingFrameConstants, a_constantsRef, a_constants, a_constantsBytes);
+		const auto& pipelineRows = a_parts[PayloadPart::PipelineRows];
+		const auto& materialRows = a_parts[PayloadPart::MaterialRows];
+		const auto& shadowRows = a_parts[PayloadPart::ShadowRows];
+		backing(kBackingPipelineRows, pipelineRows.ref, pipelineRows.address, pipelineRows.units * kPipelineRowBytes);
+		backing(kBackingMaterialRows, materialRows.ref, materialRows.address, materialRows.units * kMaterialRowBytes);
+		const auto animatedRows = PassAnimatedRows();
+		backing(kBackingAnimatedRows, animatedRows.ref, animatedRows.address, std::uint64_t(animatedRows.count) * kMaterialRowBytes);
+		backing(kBackingShadowRows, shadowRows.ref, shadowRows.address, shadowRows.units * sizeof(ShadowMaterialRow));
 	}
 
 	void ZeroSharedLightOnce(CommitUploads& a_uploads, const std::shared_ptr<org::Buffer>& a_target, bool& a_zeroed)

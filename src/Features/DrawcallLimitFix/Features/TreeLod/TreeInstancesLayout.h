@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // The TreeInstances draw family's GPU layout (Api::DrawFamily::TreeInstances; dclf-architecture.md, "Tree LOD: the draws"): the records, rows and list header its draws
 // read - TreeLodCullCS.hlsl (the depth segment's cull and a trees view's per-face cull), DistantTree.hlsl's DCLF_PULLED path, a trees view's
 // faces' rows and lists (sized for Core by the family's faces data: rowBytes, headerBytes, unitWords) - and its engine shapes. The shaders
@@ -35,10 +37,10 @@ namespace DCLF::TreeInstances
 	static_assert(sizeof(Instance) == 32);
 
 	/*
-	 * The GPU's tables (TreeLodCullCS.hlsl, DistantTree.hlsl's DCLF_PULLED path), all read through device addresses:
+	 * The GPU's tables (TreeLodCullCS.hlsl, DistantTree.hlsl's DCLF_PULLED path), the vertex stage's read through buffer view refs:
 	 * - a shape row per shape slot, and kMaxGroupInstances instance records per shape slot (slot * 75 + i);
 	 * - a mesh row per mesh slot;
-	 * - the draw row, one, every depth commit's: the tables' addresses and the frame's texture, sampler and alpha reference;
+	 * - the draw row, one, every depth commit's: the tables' refs and the frame's texture, sampler and alpha reference;
 	 * - the visible list (VisibleHeader): the draws' arguments and the retest count, then the visible instances' indices, which
 	 *   the cull appends and the draws' vertex stage reads by its instance, then the retest list (phase 1's occluded instances,
 	 *   which phase 2 tests again against the rebuilt HZB), each a word per instance record the tables hold.
@@ -55,8 +57,8 @@ namespace DCLF::TreeInstances
 
 	struct MeshRow
 	{
-		std::uint64_t vertexAddress = 0;
-		std::uint64_t indexAddress = 0;  // R16 indices
+		RenderGraph::BufferRef vertexRef;
+		RenderGraph::BufferRef indexRef;  // R16 indices
 		std::uint32_t vertexStride = 0;
 		std::uint32_t indexCount = 0;
 		std::uint32_t texcoordOffset = 0;  // TEXCOORD0's, a half2; the position is a float4 at 0 (VertexInput.cpp)
@@ -66,13 +68,14 @@ namespace DCLF::TreeInstances
 
 	struct DrawRow
 	{
-		std::uint64_t instances = 0, shapes = 0, meshes = 0, visible = 0;  // visible: the list's indices (past the arguments)
+		RenderGraph::BufferRef instances, shapes, meshes, visible;  // visible: the list's indices (past the arguments)
 		DescriptorIndex textureIndex, samplerIndex;  // OwnedRow's (TreeLodTextureBinding)
 		float alphaRef = 0.0f;
 		std::uint32_t shapeSlots = 0;
 		std::uint32_t maxIndices = 0;
-		// CS_DCLF_TREE_LOD_STAGES: the stage stamps' buffer (0: none; DistantTree.hlsl's DCLFTreeStamp) and the depth commit's frame.
-		std::uint32_t statsLow = 0, statsHigh = 0, frame = 0;
+		// CS_DCLF_TREE_LOD_STAGES: the stage stamps' buffer view ref (null: none; DistantTree.hlsl's DCLFTreeStamp) and the depth commit's frame.
+		RenderGraph::BufferRef stats;
+		std::uint32_t frame = 0;
 	};
 	static_assert(sizeof(DrawRow) == 64);
 	/**

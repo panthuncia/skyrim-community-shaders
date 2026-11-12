@@ -7,6 +7,7 @@
 
 // volk must precede every Vulkan header in this translation unit (Main/Resources.h first).
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
+#include "RenderGraph/BufferRef.h"
 #include "Features/DrawcallLimitFix/Api/Passes.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Latched.h"
@@ -34,6 +35,8 @@ namespace DCLF::Draws
 	 * lost, or turned off): a worker may still be recording then, and what it records is never submitted.
 	 */
 	std::uint64_t RecordingBufferAddress(rhi::ResourceHandle a_buffer);
+	/** @brief A recording's buffer's view ref (the graph host's device; null without one): what a pulled stage's push words name. */
+	RenderGraph::BufferRef RecordingBufferRef(rhi::ResourceHandle a_buffer);
 
 	struct ShadowResources;
 
@@ -115,13 +118,13 @@ namespace DCLF::Draws
 
 	// The frame slots' layout (Resources/FrameSlots.h) is IndirectDraws' implementation: a draw pass outside it pushes their addresses
 	// through these (Passes/Forward.cpp).
-	/** @brief FramePushWords(a_frameConstants): the frame push words of the main frame constants at a_frameConstants. */
-	std::array<std::uint32_t, kFramePushWords> MainFramePushWords(std::uint64_t a_frameConstants);
+	/** @brief FramePushWords(a_frameConstants, a_frameConstantsRef): the frame push words of the main frame constants at a_frameConstants. */
+	std::array<std::uint32_t, kFramePushWords> MainFramePushWords(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef);
 	/**
 	 * @brief The frame push block in the shadow views' layout (kShadowPush*) for the main camera: the colour epoch's frame record and
 	 * slots at a_frameConstants, and the zeroed shared light block as the zero block.
 	 */
-	void MainShadowLayoutPush(std::uint64_t a_frameConstants, std::uint32_t (&a_out)[kShadowPushWords]);
+	void MainShadowLayoutPush(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef, std::uint32_t (&a_out)[kShadowPushWords]);
 	/** @brief The address of the frame's LodFadeFrame (after FrameLighting in the lighting slot) in the main frame constants at a_frameConstants. */
 	std::uint64_t LodFadeFrameAddress(std::uint64_t a_frameConstants);
 
@@ -137,13 +140,14 @@ namespace DCLF::Draws
 	 */
 	inline std::uint64_t PlainDrawArgumentsOffset() { return ::RenderGraph::Backend::IsD3D12() ? kSequenceDrawOffset - 4 : kSequenceDrawOffset; }
 
-	inline void RecordBucketDraw(rhi::CommandList& a_commands, rhi::CommandSignatureHandle a_signature, rhi::ResourceHandle a_sequences, std::uint64_t a_sequencesAddress,
+	inline void RecordBucketDraw(rhi::CommandList& a_commands, rhi::CommandSignatureHandle a_signature, rhi::ResourceHandle a_sequences, RenderGraph::BufferRef a_sequencesRef,
 		std::uint64_t a_first, rhi::PipelineHandle a_pipeline, rhi::ResourceHandle a_counts, std::uint32_t a_bucket, std::uint32_t a_capacity, bool a_offsetDepth = false)
 	{
 		const std::uint64_t first = a_first * sizeof(DrawSequence);
 		std::uint32_t words[kDrawPushWords]{};
-		words[kZDrawPushSequences] = static_cast<std::uint32_t>(a_sequencesAddress + first);
-		words[kZDrawPushSequences + 1] = static_cast<std::uint32_t>((a_sequencesAddress + first) >> 32);
+		const RenderGraph::BufferRef sequence = a_sequencesRef + first;
+		words[kZDrawPushSequences] = sequence.viewSlot;
+		words[kZDrawPushSequences + 1] = sequence.byteOffset;
 		words[kZDrawPushOffsetDepth] = a_offsetDepth ? 1u : 0u;
 		a_commands.BindPipeline(a_pipeline);
 		a_commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, 0, kDrawPushWords, words);

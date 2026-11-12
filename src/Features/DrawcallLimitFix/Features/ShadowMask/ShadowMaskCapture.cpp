@@ -149,10 +149,8 @@ namespace DCLF::Features::ShadowMask
 			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
 				result != Family::GeometryResult::Ok)
 				return Family::ReasonOf(result);
-			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
-			constants.vertexAddress[1] = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
-			constants.indexAddress[0] = static_cast<std::uint32_t>(geometry.indexAddress);
-			constants.indexAddress[1] = static_cast<std::uint32_t>(geometry.indexAddress >> 32);
+			constants.vertexRef = geometry.vertexRef;
+			constants.indexRef = geometry.indexRef;
 			constants.vertexLayout[0] = static_cast<std::uint32_t>(geometry.layout);
 			constants.vertexLayout[1] = static_cast<std::uint32_t>(geometry.layout >> 32);
 			constants.vertexStride = geometry.stride;

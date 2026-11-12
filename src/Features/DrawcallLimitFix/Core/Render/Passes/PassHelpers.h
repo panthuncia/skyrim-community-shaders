@@ -133,15 +133,16 @@ namespace DCLF::Draws
 		a_latch.materialRowsHi = static_cast<std::uint32_t>(materialRows >> 32);
 		a_latch.pipelineRowsLo = static_cast<std::uint32_t>(pipelineRows);
 		a_latch.pipelineRowsHi = static_cast<std::uint32_t>(pipelineRows >> 32);
+		a_latch.materialRowsRef = a_payload[PayloadPart::MaterialRows].ref;
 		// The frame's copy of the rows that animate (Api::PassDef::animatedRows), which their draws read in place of the installed rows.
-		const std::uint64_t animatedRows = PassAnimatedRows();
-		a_latch.animatedRowsLo = static_cast<std::uint32_t>(animatedRows);
-		a_latch.animatedRowsHi = static_cast<std::uint32_t>(animatedRows >> 32);
+		const auto animatedRows = PassAnimatedRows();
+		a_latch.animatedRowsLo = static_cast<std::uint32_t>(animatedRows.address);
+		a_latch.animatedRowsHi = static_cast<std::uint32_t>(animatedRows.address >> 32);
+		a_latch.animatedRowsRef = animatedRows.ref;
 		// The frame's per-object rows (Api::PassDef::frameRows), which their pass writes from this latch.
 		const auto frameRows = PassFrameRows();
-		a_latch.frameRowsLo = static_cast<std::uint32_t>(frameRows.address);
-		a_latch.frameRowsHi = static_cast<std::uint32_t>(frameRows.address >> 32);
-		a_latch.frameRowsCount = frameRows.address ? frameRows.count : 0u;
+		a_latch.frameRowsRef = frameRows.ref;
+		a_latch.frameRowsCount = frameRows.ref ? frameRows.count : 0u;
 	}
 	/** @brief The installed payload's shadow parts into a shadow or occlusion view's latch: the scene list, the geometry table, the shadow rows. */
 	inline void ShadowPayloadLatch(const PayloadVersions& a_payload, BuildDrawsLatch& a_latch)
@@ -151,6 +152,7 @@ namespace DCLF::Draws
 		a_latch.geometriesIndex = a_payload[PayloadPart::Geometries].srvIndex;
 		a_latch.materialRowsLo = static_cast<std::uint32_t>(shadowRows);
 		a_latch.materialRowsHi = static_cast<std::uint32_t>(shadowRows >> 32);
+		a_latch.materialRowsRef = a_payload[PayloadPart::ShadowRows].ref;
 		a_latch.pipelineRowsLo = a_latch.pipelineRowsHi = 0;
 	}
 	/**

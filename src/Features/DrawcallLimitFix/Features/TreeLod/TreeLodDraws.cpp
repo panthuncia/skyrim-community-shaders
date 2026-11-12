@@ -77,14 +77,14 @@ namespace DCLF::Features::TreeLod
 			"tree LOD's descriptors are not the engine's (Deferred | AlphaTest, Depth | AlphaTest, AlphaTest)");
 
 		/**
-		 * @brief Records tree LOD's draw (dclf-architecture.md, "Tree LOD: the draws"): push data is the draw row's address and whether this is phase 2's depth draw;
+		 * @brief Records tree LOD's draw (dclf-architecture.md, "Tree LOD: the draws"): push data is the draw row's buffer view ref and whether this is phase 2's depth draw;
 		 * arguments come from the list's header (TreeInstances::VisibleHeader).
 		 */
-		void RecordTreeLodDraw(rhi::CommandList& a_commands, const FamilyPipelines& a_pipelines, bool a_colour, bool a_phaseTwo, std::uint64_t a_draw,
+		void RecordTreeLodDraw(rhi::CommandList& a_commands, const FamilyPipelines& a_pipelines, bool a_colour, bool a_phaseTwo, RenderGraph::BufferRef a_draw,
 			rhi::ResourceHandle a_visible)
 		{
 			using TreeInstances::VisibleHeader;
-			std::uint32_t words[kDrawPushWords]{ static_cast<std::uint32_t>(a_draw), static_cast<std::uint32_t>(a_draw >> 32), a_phaseTwo ? 1u : 0u,
+			std::uint32_t words[kDrawPushWords]{ a_draw.viewSlot, a_draw.byteOffset, a_phaseTwo ? 1u : 0u,
 				a_colour && debugTint ? 1u : 0u };
 			const std::uint64_t arguments = a_colour ? offsetof(VisibleHeader, colour) : a_phaseTwo ? offsetof(VisibleHeader, phaseTwo) : offsetof(VisibleHeader, phaseOne);
 			a_commands.BindPipeline(a_colour ? a_pipelines.colour : a_pipelines.depth);
@@ -92,7 +92,7 @@ namespace DCLF::Features::TreeLod
 			a_commands.ExecuteIndirect(a_pipelines.drawSignature, a_visible, arguments, {}, 0, 1);
 		}
 
-		// The main passes: its arguments, the draw row's address (in its push data) and the tables its vertex stage reads by address.
+		// The main passes: its arguments, the draw row's ref (in its push data) and the tables its vertex stage reads by ref.
 		void MainDeclare(Api::DrawFamilyDeclare& a_declare)
 		{
 			const auto* tables = TablesOf(a_declare.scene);
@@ -101,23 +101,23 @@ namespace DCLF::Features::TreeLod
 			const std::span<const org::SrvView> noViews{};  // Device-address reads need ordering, not a descriptor.
 			auto& builder = a_declare.builder;
 			a_declare.arguments[0] = builder.IndirectArguments(*tables->visible).Resource();
-			a_declare.row = tables->drawAddress;
+			a_declare.row = tables->drawRef;
 			for (const auto& table : { tables->shapes, tables->instances, tables->meshes })
 				builder.ShaderResource(*table, noViews);
 			builder.ShaderResource(tables->draw, noViews);
 		}
 
 		// The CPU pipeline's main draw (main.direct): MainDeclare's arguments, the visible list's version the frame adopted
-		// (its header the depth commit latched, its counts the depth site's single-phase cull wrote), and the draw row's address.
+		// (its header the depth commit latched, its counts the depth site's single-phase cull wrote), and the draw row's ref.
 		bool MainDirect(Api::DrawFamilyDirect& a_draw)
 		{
 			const auto* tables = TablesOf(a_draw.scene);
-			if (!tables || !tables->visible || !tables->drawAddress || !a_draw.adopted.Names(*tables->visible))
+			if (!tables || !tables->visible || !tables->drawRef || !a_draw.adopted.Names(*tables->visible))
 				return false;
 			const auto& version = a_draw.adopted.Of(*tables->visible).version;
 			if (!version || !version->buffer)
 				return false;
-			a_draw.row = tables->drawAddress;
+			a_draw.row = tables->drawRef;
 			a_draw.arguments = version->buffer;
 			return true;
 		}

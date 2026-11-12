@@ -1,15 +1,15 @@
 // Drawcall Limit Fix: the shadow views' index pool (IndirectDraws: IndexPool). The shadow commit lists the index buffers
-// it gave a range of the pool this frame; a group copies one, word by word, from the buffer's device address into its range.
+// it gave a range of the pool this frame; a group copies one, word by word, from the buffer (by its buffer view ref) into its range.
 // The shadow views' plain indexed draws then bind the pool alone (ShadowViewPass).
 
 // Must match IndexPoolConstants (Draws/IndirectDraws/Core/GpuLayouts.h).
-#include "Common/DeviceAddress.hlsli"
+#include "Common/DeviceRef.hlsli"
 
 cbuffer IndexPoolConstants : register(b0)
 {
 	uint LatchIndex;   // ByteAddressBuffer: the shadow latch block
 	uint LatchOffset;  // the copies' dispatch in it (ShadowLatchLayout::PoolOffset): groups x, y, z, then the copy count
-	uint CopiesIndex;  // StructuredBuffer<uint4>: per copy, the source's address (low, high), the range's first index, its words
+	uint CopiesIndex;  // StructuredBuffer<uint4>: per copy, the source's buffer view ref, the range's first index, its words
 	uint PoolIndex;    // RWByteAddressBuffer: the pool's 16-bit indices
 }
 
@@ -24,9 +24,9 @@ static const uint kGroupsX = 65535;  // the dispatch's x limit: a copy past it i
 	StructuredBuffer<uint4> copies = ResourceDescriptorHeap[CopiesIndex];
 	RWByteAddressBuffer pool = ResourceDescriptorHeap[PoolIndex];
 	const uint4 job = copies[copy];
-	const uint64_t source = (uint64_t(job.y) << 32) | uint64_t(job.x);
+	const DeviceRef source = job.xy;
 	// A range starts at an even index (4-byte aligned); the source's last word may hold two bytes past its indices, which
 	// land in the range's own padding.
 	[loop] for (uint word = thread; word < job.w; word += 64)
-		pool.Store(job.z * 2 + word * 4, DeviceLoad(uint, source + uint64_t(word) * 4));
+		pool.Store(job.z * 2 + word * 4, DeviceLoad(uint, DeviceRefAdd(source, word * 4)));
 }

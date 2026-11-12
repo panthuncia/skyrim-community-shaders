@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 #include <cstdint>
 #include <optional>
 
@@ -36,6 +38,7 @@ namespace RenderGraph::Engine::Buffers
 		std::uint64_t vkBuffer = 0;  // VkBuffer
 		std::uint64_t size = 0;
 		std::uint64_t address = 0;   // device address of the first byte; 0 without a graph host
+		BufferRef ref;               // the buffer view ref of the first byte, which shaders read through; null without a graph host
 	};
 
 	/**

@@ -1,6 +1,7 @@
 // The scene payload's parts' versions (PayloadPools, D5): per part a backing pool and a chain of versions built from each other on DCLF's
 // state graph, the snapshot's payload naming them, and the frame's payload read from the installed one (PayloadVersions.h).
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "RenderGraph/BufferRefs.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
 
@@ -581,7 +582,9 @@ namespace DCLF::Draws
 				if (!version)
 					continue;
 				const auto& backing = version->lease;
-				a_out.parts[k] = { backing->srvIndex, kPools[k].deviceAddress ? backing->address : 0, payload.units[k] };
+				// The row parts' refs too: the shaders read rows through them, the layouts through the addresses.
+				a_out.parts[k] = { backing->srvIndex, kPools[k].deviceAddress ? backing->address : 0,
+					kPools[k].deviceAddress && backing->buffer ? RenderGraph::BufferRefOf(*backing->buffer) : RenderGraph::BufferRef{}, payload.units[k] };
 				a_out.backings[k] = backing.Get();
 				if (!a_out.parts[k].srvIndex)
 					return false;

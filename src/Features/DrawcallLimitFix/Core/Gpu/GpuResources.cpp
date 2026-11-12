@@ -9,9 +9,12 @@
 
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
+#include "RenderGraph/DxvkImageImport.h"
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+
+#include <OpenRenderGraph/GraphHost.h>
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
 namespace DCLF
@@ -117,7 +120,7 @@ namespace DCLF
 			}
 			winrt::com_ptr<ID3D11Buffer> reference;
 			reference.copy_from(a_buffer);
-			return Insert(a_buffer, std::move(reference), Buffer{ direct->vkBuffer, 0, direct->size, direct->address }, nullptr);
+			return Insert(a_buffer, std::move(reference), Buffer{ direct->vkBuffer, 0, direct->size, direct->address, direct->ref }, nullptr);
 		}
 
 		// Resolved by this pass's Prefetch (or the pass before's), under its reference: the description is still this buffer's.
@@ -195,6 +198,10 @@ namespace DCLF
 		auto* held = new Held;
 		held->reference = std::move(a_reference);
 		held->tracked = a_tracked != nullptr;
+		// A described buffer's ref: a view of its BasicRHI import, which the lease's owner holds (an ORG buffer has its own).
+		if (!entry.buffer.ref)
+			if (auto* host = RenderGraphRuntime::Get().Host())
+				entry.buffer.ref = RenderGraph::ImportBufferRef(host->Device(), entry.buffer.vkBuffer, entry.buffer.offset, entry.buffer.size, held->refKeep);
 		std::shared_ptr<Held> owner(held, [released = released, key = a_buffer](Held* a_held) {
 			delete a_held;
 			released->Push(key);

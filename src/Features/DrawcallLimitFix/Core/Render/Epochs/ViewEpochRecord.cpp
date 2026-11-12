@@ -127,7 +127,7 @@ namespace DCLF
 				std::shared_ptr<const ViewFrame> frame;
 				DrawMode mode = DrawMode::Faces;
 				std::uint32_t faces = 0;
-				std::array<std::array<std::uint64_t, kMaxViewFaces>, Extensions::kDrawFamilies> faceRows{};  // by draw family
+				std::array<std::array<RenderGraph::BufferRef, kMaxViewFaces>, Extensions::kDrawFamilies> faceRows{};  // by draw family
 			};
 
 			/**
@@ -210,7 +210,7 @@ namespace DCLF
 					for (std::size_t d = 0; d < Extensions::kDrawFamilies; ++d)
 						if (Extensions::DrawFamilyHasFaces(static_cast<Api::DrawFamily>(d)))
 							for (std::uint32_t f = 0; f < prepared.faces; ++f)
-								prepared.faceRows[d][f] = resources->faceRowsAddress[d][f];
+								prepared.faceRows[d][f] = resources->faceRowsRef[d][f];
 					prepared.frame = std::move(frame);
 					prepared.mode = mode;
 					return prepared;
@@ -225,7 +225,7 @@ namespace DCLF
 					auto& commands = a_recording.Commands();
 					commands.SetDescriptorHeaps(frame.resourceHeap, frame.samplerHeap);
 					const auto sequences = a_recording.Resolve(a_bindings.sequences).GetHandle();
-					const std::uint64_t sequencesAddress = DCLF::Draws::RecordingBufferAddress(sequences);
+					const RenderGraph::BufferRef sequencesRef = DCLF::Draws::RecordingBufferRef(sequences);
 					const rhi::IndexBufferView pool{ a_recording.Resolve(a_bindings.pool).GetHandle(), 0, 0, rhi::Format::R16_UInt };
 					const auto& families = Extensions::DrawFamilies();
 					static const std::shared_ptr<const void> kNothing;  // a face's draw has no prepared state: its pipeline is the shape's
@@ -274,7 +274,7 @@ namespace DCLF
 							const auto& bucket = frame.buckets[b];
 							if (!bucket.capacity)
 								continue;
-							RecordBucketDraw(commands, frame.indirect.zDrawSignature, sequences, sequencesAddress, std::uint64_t(f) * frame.sequenceDraws + bucket.first,
+							RecordBucketDraw(commands, frame.indirect.zDrawSignature, sequences, sequencesRef, std::uint64_t(f) * frame.sequenceDraws + bucket.first,
 								mode == DrawMode::Depth ? bucket.depth : bucket.colour, counts, b, bucket.capacity);
 						}
 						// The faces' draw families (tree LOD: one instanced draw of the face's list, its row the face's), with the shape's pipeline for each.

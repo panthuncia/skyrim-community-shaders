@@ -473,6 +473,7 @@ namespace DCLF
 					DrawBindings record = payload.frameRecord;
 					WriteRecordBuffers(record, parts, { in.addresses.placementsIndex, in.addresses.palettesIndex, in.addresses.shadingIndex }, a_commit.adopted,
 						*resources.scene, a_commit.frameNumber);
+					WriteRecordBackings(record, resources.constantsRef, resources.constantsAddress, resources.constants->GetBufferSize(), parts);
 					constexpr std::size_t recordEnd = kShadowFrameRecordOffset + sizeof(DrawBindings);
 					static_assert(recordEnd <= kShadowArenaBlocksOffset, "the frame record overlaps the arena's blocks");
 					if (bytes.size() < recordEnd)

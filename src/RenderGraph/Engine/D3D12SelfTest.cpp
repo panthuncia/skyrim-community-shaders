@@ -185,11 +185,11 @@ namespace RenderGraph::Engine::D3D12SelfTest
 		}
 
 		/**
-		 * @brief Step 3: emulated device addresses (BasicRHI's device address table, Common/DeviceAddress.hlsli). A dispatch reads each
-		 * word of a source buffer through its device address and writes word * 7 + 1 through the destination's; the readback must
-		 * match. The heap has the device's full capacity, so it holds the table's region.
+		 * @brief Step 3: buffer view refs (BasicRHI's Device::GetBufferViewRef, Common/DeviceRef.hlsli). A dispatch reads each word of a
+		 * source buffer through its ref and writes word * 7 + 1 through the destination's; the readback must match. The heap has the
+		 * device's full capacity, so it holds the refs' region.
 		 */
-		bool DeviceAddresses(rhi::DevicePtr& a_device, const std::vector<std::byte>& a_dxil, std::string& a_failure)
+		bool DeviceRefs(rhi::DevicePtr& a_device, const std::vector<std::byte>& a_dxil, std::string& a_failure)
 		{
 			constexpr std::uint32_t kWords = 256;
 			constexpr std::uint32_t kAddressPushWords = 8;
@@ -208,7 +208,7 @@ namespace RenderGraph::Engine::D3D12SelfTest
 				return false;
 			const rhi::SubobjLayout subobjLayout{ layout->GetHandle() };
 			const rhi::PipelineStreamItem items[] = { rhi::Make(subobjLayout), rhi::Make(shader) };
-			if (!Ok(device.CreatePipeline(items, 2, pipeline), "CreatePipeline (device address test)", a_failure))
+			if (!Ok(device.CreatePipeline(items, 2, pipeline), "CreatePipeline (view ref test)", a_failure))
 				return false;
 
 			rhi::ResourcePtr source, destination, readback;
@@ -232,28 +232,32 @@ namespace RenderGraph::Engine::D3D12SelfTest
 				static_cast<std::uint32_t*>(mapped)[i] = 0x1000u + i * 3u;
 			source->Unmap(0, kBytes);
 
-			// The addresses join the device address table here (GetBufferDeviceAddress).
-			const std::uint64_t from = device.GetBufferDeviceAddress({ source->GetHandle(), 0 });
-			const std::uint64_t to = device.GetBufferDeviceAddress({ destination->GetHandle(), 0 });
-			if (!from || !to) {
-				a_failure = "GetBufferDeviceAddress gave no address";
+			// The device's full capacity (rhi_shader_abi.h): only such a heap holds the refs' region. Made first: a pair made before
+			// it is copied in when it is made, so either order works.
+			::ShaderFeatureInfo shaderFeatures{};
+			if (!Ok(device.QueryFeatureInfo(&shaderFeatures.header), "QueryFeatureInfo", a_failure))
 				return false;
-			}
-
-			// The device's full capacity (rhi_shader_abi.h): only such a heap holds the table's region.
 			rhi::DescriptorHeapPtr heap;
-			if (!Ok(device.CreateDescriptorHeap(rhi::DescriptorHeapDesc{ rhi::DescriptorHeapType::CbvSrvUav, rhi::D3D12_DEVICE_ADDRESS_TABLE_SLOT, true,
+			if (!Ok(device.CreateDescriptorHeap(rhi::DescriptorHeapDesc{ rhi::DescriptorHeapType::CbvSrvUav, shaderFeatures.maxShaderVisibleResourceDescriptors, true,
 											   "CS D3D12 self-test full heap" },
 						heap),
 					"CreateDescriptorHeap (full capacity)", a_failure))
 				return false;
+
+			// Each buffer gets its raw view pair here.
+			const rhi::BufferViewRef from = device.GetBufferViewRef({ source->GetHandle(), 0 });
+			const rhi::BufferViewRef to = device.GetBufferViewRef({ destination->GetHandle(), 0 });
+			if (!from || !to) {
+				a_failure = "GetBufferViewRef gave no ref";
+				return false;
+			}
 
 			rhi::CommandAllocatorPtr allocator;
 			rhi::CommandListPtr list;
 			rhi::TimelinePtr timeline;
 			if (!Ok(device.CreateCommandAllocator(rhi::QueueKind::Graphics, allocator), "CreateCommandAllocator", a_failure) ||
 				!Ok(device.CreateCommandList(rhi::QueueKind::Graphics, allocator.Get(), list), "CreateCommandList", a_failure) ||
-				!Ok(device.CreateTimeline(timeline, 0, "CS D3D12 self-test addresses"), "CreateTimeline", a_failure))
+				!Ok(device.CreateTimeline(timeline, 0, "CS D3D12 self-test view refs"), "CreateTimeline", a_failure))
 				return false;
 			list->SetDescriptorHeaps(heap->GetHandle(), std::nullopt);
 			rhi::BufferBarrier toWrite{};
@@ -265,8 +269,7 @@ namespace RenderGraph::Engine::D3D12SelfTest
 			list->Barriers(rhi::BarrierBatch{ .buffers = { &toWrite, 1 } });
 			list->BindLayout(layout->GetHandle());
 			list->BindPipeline(pipeline->GetHandle());
-			const std::uint32_t words[kAddressPushWords] = { static_cast<std::uint32_t>(from), static_cast<std::uint32_t>(from >> 32), static_cast<std::uint32_t>(to),
-				static_cast<std::uint32_t>(to >> 32), kWords, 0, 0, 0 };
+			const std::uint32_t words[kAddressPushWords] = { from.viewSlot, from.byteOffset, to.viewSlot, to.byteOffset, kWords, 0, 0, 0 };
 			list->PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kAddressPushWords, words);
 			list->Dispatch(kWords / 64, 1, 1);
 			rhi::BufferBarrier toCopy = toWrite;
@@ -297,12 +300,12 @@ namespace RenderGraph::Engine::D3D12SelfTest
 			for (std::uint32_t i = 0; i < kWords; ++i) {
 				const std::uint32_t expected = (0x1000u + i * 3u) * 7u + 1u;
 				if (values[i] != expected) {
-					a_failure = fmt::format("word {} read {:#x} through the device address table, expected {:#x} (source {:#x}, destination {:#x})", i, values[i],
-						expected, from, to);
+					a_failure = fmt::format("word {} read {:#x} through buffer view refs, expected {:#x} (source slot {}, destination slot {})", i, values[i],
+						expected, from.viewSlot, to.viewSlot);
 					return false;
 				}
 			}
-			logger::info("[ORG] D3D12 self-test: {} words loaded and stored through emulated device addresses ({:#x} -> {:#x})", kWords, from, to);
+			logger::info("[ORG] D3D12 self-test: {} words loaded and stored through buffer view refs (slot {} -> slot {})", kWords, from.viewSlot, to.viewSlot);
 			return true;
 		}
 
@@ -466,12 +469,12 @@ namespace RenderGraph::Engine::D3D12SelfTest
 				step = "dispatch";
 				if (!Dispatch(*device, dxil, failure))
 					break;
-				step = "device address build";
-				const auto addressDxil = CompileDxil(failure, "RenderGraph/D3D12DeviceAddressTest.hlsl");
+				step = "view ref build";
+				const auto addressDxil = CompileDxil(failure, "RenderGraph/D3D12DeviceRefTest.hlsl");
 				if (addressDxil.empty())
 					break;
-				step = "device addresses";
-				if (!DeviceAddresses(*device, addressDxil, failure))
+				step = "view refs";
+				if (!DeviceRefs(*device, addressDxil, failure))
 					break;
 				step = "present";
 				if (!Present(*device, failure))
@@ -479,7 +482,7 @@ namespace RenderGraph::Engine::D3D12SelfTest
 				passed = true;
 			} while (false);
 			if (passed)
-				logger::info("[ORG] D3D12 self-test: passed (device, DXIL build, dispatch, device addresses, present)");
+				logger::info("[ORG] D3D12 self-test: passed (device, DXIL build, dispatch, view refs, present)");
 			else
 				logger::error("[ORG] D3D12 self-test: FAILED at the {} step: {}", step, failure);
 		}

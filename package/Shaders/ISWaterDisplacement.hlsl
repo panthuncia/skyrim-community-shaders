@@ -13,6 +13,7 @@
 #	if !defined(RIPPLE_MAKER_WADING) && !defined(RIPPLE_MAKER_RAIN)
 #		define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
 #	endif
+#	include "Common/DeviceRef.hlsli"
 #	include "Common/OrgEngineConstants.hlsli"
 #	include "Common/OrgResources.hlsli"
 #	if defined(BLEND_HEIGHTMAPS)
@@ -56,19 +57,19 @@ static float4 TranslationMatrix1 = OrgEngineRow(PerGeometryAt, 2);
 #	endif
 
 #	if defined(__spirv__)
-// The ripple's geometry (ImageSpace.cpp, TakeDraw): FrameSrv and FrameOffset the vertex buffer's address, FrameSize and Source the
+// The ripple's geometry (ImageSpace.cpp, TakeDraw): FrameSrv and FrameOffset the vertex buffer's view ref, FrameSize and Source the
 // 16-bit index buffer's, Padding the vertex stride (low 16 bits) and the first index (high 16 bits). The position is the vertex's
 // first attribute, four floats.
 VS_INPUT PullRippleVertex(uint a_vertexID)
 {
-	const uint64_t vertices = (uint64_t(PerGeometryAt.FrameOffset) << 32) | uint64_t(PerGeometryAt.FrameSrv);
-	const uint64_t indices = (uint64_t(PerGeometryAt.Source) << 32) | uint64_t(PerGeometryAt.FrameSize);
+	const DeviceRef vertices = DeviceRef(PerGeometryAt.FrameSrv, PerGeometryAt.FrameOffset);
+	const DeviceRef indices = DeviceRef(PerGeometryAt.FrameSize, PerGeometryAt.Source);
 	const uint stride = PerGeometryAt.Padding & 0xFFFF;
 	const uint indexNumber = (PerGeometryAt.Padding >> 16) + a_vertexID;
-	const uint indexWord = vk::RawBufferLoad<uint>(indices + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(indices, (indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	VS_INPUT input;
-	input.Position = asfloat(vk::RawBufferLoad<uint4>(vertices + uint64_t(index * stride)));
+	input.Position = asfloat(DeviceLoad(uint4, DeviceRefAdd(vertices, index * stride)));
 	input.TexCoord = 0.0.xx;
 	return input;
 }

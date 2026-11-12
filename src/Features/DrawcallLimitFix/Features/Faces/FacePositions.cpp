@@ -3,6 +3,7 @@
 // of the face shapes' rows into it.
 
 #include "Features/DrawcallLimitFix/Features/Faces/Faces.h"
+#include "RenderGraph/BufferRefs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/SceneResources.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/VertexStreams.h"
@@ -43,7 +44,7 @@ namespace DCLF::Features::Faces
 			FaceUploads uploaded;
 		};
 
-		/** @brief A device-local buffer the shaders read by device address. */
+		/** @brief A device-local buffer the shaders read by buffer view ref. */
 		std::shared_ptr<org::Buffer> DeviceBuffer(std::uint64_t a_bytes, const char* a_name)
 		{
 			auto created = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, a_bytes, false);
@@ -51,20 +52,15 @@ namespace DCLF::Features::Faces
 			return created;
 		}
 
-		std::uint64_t AddressOf(rhi::Device a_device, org::Buffer& a_buffer)
-		{
-			return a_device.GetBufferDeviceAddress({ a_buffer.GetAPIResource().GetHandle(), 0 });
-		}
-
 		// The scene's tables are made (the first frame with a device), the vertex stream's first. Face positions are a vertex buffer; its
-		// address and capacity are the sealed set's. Without its device address there is none, and the scene's tables are not made.
+		// ref and capacity are the sealed set's. Without a buffer view ref there is none, and the scene's tables are not made.
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
 		{
 			auto state = std::make_shared<FacePositions>();
 			state->positions = Draws::MakeVersioned(DeviceBuffer(std::uint64_t(a_setup.smallStart ? 1024u : kInitialFaceVertices) * Draws::kStreamVertexBytes,
 														"cs.dclf.face-positions"),
 				{ .extent = { 0, Draws::kStreamVertexBytes, 0 } });
-			if (!AddressOf(a_setup.device, *state->positions->Get()))
+			if (!RenderGraph::BufferRefOf(a_setup.device, state->positions->Get()->GetAPIResource().GetHandle()))
 				return nullptr;
 			return state;
 		}

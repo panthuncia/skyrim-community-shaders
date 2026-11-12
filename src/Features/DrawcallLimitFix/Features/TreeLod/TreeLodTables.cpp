@@ -3,6 +3,7 @@
 
 // Helpers.h first: volk must precede every Vulkan header of the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodTables.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodMirror.h"
@@ -55,9 +56,10 @@ namespace DCLF::Features::TreeLod
 		std::uint32_t MeshWords(std::uint32_t a_slots) { return a_slots * static_cast<std::uint32_t>(sizeof(MeshRow) / 4); }
 		std::uint32_t VisibleWords(std::uint32_t a_slots) { return kVisibleHeaderWords + 2 * a_slots * kMaxGroupInstances; }
 
-		std::uint64_t AddressOf(rhi::Device a_device, org::Buffer& a_buffer)
+		// The vertex stage reads every table through its buffer view ref (DistantTree.hlsl).
+		RenderGraph::BufferRef RefOf(rhi::Device a_device, org::Buffer& a_buffer)
 		{
-			return a_device.GetBufferDeviceAddress({ a_buffer.GetAPIResource().GetHandle(), 0 });
+			return RenderGraph::BufferRefOf(a_device, a_buffer.GetAPIResource().GetHandle());
 		}
 
 		// The scene's tables are made (the first frame with a device): the cull program, then the tables, after the face positions.
@@ -81,15 +83,15 @@ namespace DCLF::Features::TreeLod
 			tables->visible = Draws::MakeVersioned(Draws::CreateWords(VisibleWords(shapes), true, "cs.dclf.tree-lod-visible"),
 				{ .extent = { kVisibleHeaderWords * 4, 2 * kMaxGroupInstances * 4, 4 } });
 			const auto device = a_setup.device;
-			tables->drawAddress = AddressOf(device, *tables->draw);
-			if (!AddressOf(device, *tables->shapes->Get()) || !AddressOf(device, *tables->instances->Get()) || !AddressOf(device, *tables->meshes->Get()) ||
-				!tables->drawAddress || !AddressOf(device, *tables->visible->Get())) {
-				logger::warn("[DCLF] Tree LOD's tables have no device address; tree LOD stays native");
+			tables->drawRef = RefOf(device, *tables->draw);
+			if (!RefOf(device, *tables->shapes->Get()) || !RefOf(device, *tables->instances->Get()) || !RefOf(device, *tables->meshes->Get()) ||
+				!tables->drawRef || !RefOf(device, *tables->visible->Get())) {
+				logger::warn("[DCLF] Tree LOD's tables have no buffer view ref; tree LOD stays native");
 				return nullptr;
 			}
 			if (debugStages) {
 				tables->stages = Draws::CreateWords(kStageSlots * kStageWords, false, "cs.dclf.tree-lod-stages");
-				tables->stagesAddress = AddressOf(device, *tables->stages);
+				tables->stagesRef = RefOf(device, *tables->stages);
 			}
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
 				auto counts = std::make_shared<TreeLodCounts>();
@@ -141,7 +143,7 @@ namespace DCLF::Features::TreeLod
 
 		/**
 		 * @brief The depth commit's tree LOD uploads, into the versions a_sealed (the adopted set) names: their capacities and the draw
-		 * row's addresses are theirs. Retired mesh leases go to the execution (a_owners); the row's descriptors go with the row (OwnedRow).
+		 * row's refs are theirs. Retired mesh leases go to the execution (a_owners); the row's descriptors go with the row (OwnedRow).
 		 */
 		void UploadTreeLod(const Draws::NamedVersions& a_sealed, Mirror& a_mirror, TreeLodTables& a_tables, Draws::LatchedUploads& a_uploads,
 			std::vector<std::shared_ptr<const void>>& a_owners, bool a_draw, std::uint32_t a_frame)
@@ -188,14 +190,13 @@ namespace DCLF::Features::TreeLod
 			// The cull appends only while the row names shape slots, so both passes skip tree LOD together.
 			OwnedRow<DrawRow> owned;
 			auto& row = owned.Plain();
-			row.instances = records.deviceAddress;
-			row.shapes = shapes.deviceAddress;
-			row.meshes = meshRows.deviceAddress;
-			row.visible = visible.deviceAddress + kVisibleHeaderWords * sizeof(std::uint32_t);
+			row.instances = DCLF::RefOf(records);
+			row.shapes = DCLF::RefOf(shapes);
+			row.meshes = DCLF::RefOf(meshRows);
+			row.visible = DCLF::RefOf(visible) + kVisibleHeaderWords * sizeof(std::uint32_t);
 			row.alphaRef = 128.0f / 255.0f;
 			row.maxIndices = std::max(a_mirror.MaxIndices(), 1u);
-			row.statsLow = static_cast<std::uint32_t>(a_tables.stagesAddress);
-			row.statsHigh = static_cast<std::uint32_t>(a_tables.stagesAddress >> 32);
+			row.stats = a_tables.stagesRef;
 			row.frame = a_frame;
 			// The engine's tree LOD draws use the worldspace's atlas and alpha reference 128/255 (dclf-architecture.md, "Tree LOD: the draws").
 			if (a_draw && a_mirror.MaxIndices() && TreeLodTextureBinding(owned))

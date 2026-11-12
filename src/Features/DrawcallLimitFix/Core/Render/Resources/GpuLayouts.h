@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // IndirectDraws' capacities and the layouts the GPU reads, which must match the HLSL (BuildDrawsCS, Lighting.hlsl's DCLF paths).
 // Self-contained (features include it); Internal.h includes it in its order.
 
@@ -341,10 +343,10 @@ namespace DCLF::Draws
 #pragma pack(push, 4)
 	struct GeometryDraw
 	{
-		std::uint64_t vertexBufferAddress;
+		RenderGraph::BufferRef vertexBufferRef;  // what the vertex stages pull through (Common/DeviceRef.hlsli)
 		std::uint32_t vertexBufferSize;
 		std::uint32_t vertexStride;
-		std::uint64_t indexBufferAddress;
+		std::uint64_t indexBufferAddress;  // a draw's index buffer view: a device address
 		std::uint32_t indexBufferSize;
 		std::uint32_t indexCount;
 		std::uint32_t firstIndex;
@@ -495,12 +497,17 @@ namespace DCLF::Draws
 		// of the installed payload's animated material rows (Api::PassDef::animatedRows: Features/TextureTransforms' pool), which BuildDraws
 		// points a row whose header names one at (MaterialRowHeader::animatedRow). 0: none (every draw reads the installed rows).
 		std::uint32_t animatedRowsLo, animatedRowsHi;
-		// The latches of the main rows: the device address and rows of the frame's per-object rows (Api::PassDef::frameRows: Features/Fades'
-		// object rows), which that pass writes from the latch (0: none this frame).
-		std::uint32_t frameRowsLo, frameRowsHi, frameRowsCount;
+		// The latches of the main rows: the buffer view ref and rows of the frame's per-object rows (Api::PassDef::frameRows: Features/Fades'
+		// object rows), which that pass writes from the latch (null: none this frame).
+		RenderGraph::BufferRef frameRowsRef;
+		std::uint32_t frameRowsCount;
 		// The eye viewProj is relative to: this view's own, where fadeEye is the main camera's in every view. In w, the radius margin for
 		// tests on absolute positions and planes (CullPlaneMargin). The shaders read it by byte offset (CullEye.hlsli).
 		float cullEye[4];
+		// The buffer view refs of the material rows (materialRowsLo/Hi's buffer: BuildDraws reads an installed row's header through it,
+		// TextureTransformsCS copies the animated rows from it) and of the frame's copy of the animated rows (animatedRowsLo/Hi's).
+		RenderGraph::BufferRef materialRowsRef;
+		RenderGraph::BufferRef animatedRowsRef;
 	};
 	// BuildDrawsLatch::focusRoot for a target that is no listed root: no input's root word is its - 1.
 	constexpr std::uint32_t kFocusRootNone = 0xFFFFFFFFu;
@@ -508,7 +515,8 @@ namespace DCLF::Draws
 	constexpr std::uint32_t kLatchPortalProgramsOffset = 320;
 	// BuildDrawsLatch::cullEye's byte offset (CullEye.hlsli's kLatchCullEye).
 	constexpr std::uint32_t kLatchCullEyeOffset = 368;
-	static_assert(sizeof(BuildDrawsLatch) == 384 && offsetof(BuildDrawsLatch, cullEye) == kLatchCullEyeOffset && offsetof(BuildDrawsLatch, animatedRowsLo) == 348 && offsetof(BuildDrawsLatch, frameRowsLo) == 356 && offsetof(BuildDrawsLatch, spare) == 344 && offsetof(BuildDrawsLatch, slotLayoutsOffset) == 336 && offsetof(BuildDrawsLatch, minCasterRadius) == 340 && offsetof(BuildDrawsLatch, portalProgramsIndex) == kLatchPortalProgramsOffset &&
+	static_assert(sizeof(BuildDrawsLatch) == 400 && offsetof(BuildDrawsLatch, materialRowsRef) == 384 && offsetof(BuildDrawsLatch, animatedRowsRef) == 392 &&
+				  offsetof(BuildDrawsLatch, cullEye) == kLatchCullEyeOffset && offsetof(BuildDrawsLatch, animatedRowsLo) == 348 && offsetof(BuildDrawsLatch, frameRowsRef) == 356 && offsetof(BuildDrawsLatch, spare) == 344 && offsetof(BuildDrawsLatch, slotLayoutsOffset) == 336 && offsetof(BuildDrawsLatch, minCasterRadius) == 340 && offsetof(BuildDrawsLatch, portalProgramsIndex) == kLatchPortalProgramsOffset &&
 				  offsetof(BuildDrawsLatch, lightContextsIndex) == 324 && offsetof(BuildDrawsLatch, strictContext) == 332 && offsetof(BuildDrawsLatch, terrainNear) == 304 && offsetof(BuildDrawsLatch, classTableOffset) == 292 &&
 				  offsetof(BuildDrawsLatch, classMapOffset) == 296 && offsetof(BuildDrawsLatch, focusRoot) == 268 && offsetof(BuildDrawsLatch, fadeSeedsIndex) == 288 && offsetof(BuildDrawsLatch, inputsIndex) == 256 &&
 				  offsetof(BuildDrawsLatch, viewBits) == 264 && offsetof(BuildDrawsLatch, materialRowsLo) == 272 &&

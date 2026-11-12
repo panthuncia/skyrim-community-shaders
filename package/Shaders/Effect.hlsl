@@ -711,11 +711,11 @@ void DCLFPermutationStatics()
 // (DCLFFrameFog).
 VS_OUTPUT DCLFPulledVertex(uint index, uint a_instance)
 {
-	const uint64_t sequence = DCLFDrawSequence(a_instance);
-	const uint4 rows = DCLFSequenceRows(sequence);  // the pipeline row's address, the material row's
+	const DeviceRef sequence = DCLFDrawSequence(a_instance);
+	const uint4 rows = DCLFSequenceRows(sequence);  // the pipeline row's ref, the material row's
 	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
-	DCLFPipelineRowAddress = DCLFAddress(rows.xy);
-	DCLFMaterialRowAddress = DCLFAddress(rows.zw);
+	DCLFPipelineRowAddress = rows.xy;
+	DCLFMaterialRowAddress = rows.zw;
 	DCLFPerMaterialStatics();
 	DCLFPerGeometryStatics();
 	DCLFPermutationStatics();
@@ -724,12 +724,12 @@ VS_OUTPUT DCLFPulledVertex(uint index, uint a_instance)
 	VS_OUTPUT vsout = DCLFShade(DCLFParticleInput(index));
 #			else
 	DCLFDrawVertexLayout = DCLFPipelineVertexLayout();
-	const uint4 vertexBuffer = DeviceLoad(uint4, sequence + 24);  // address, size, stride
-	const uint4 streamBuffer = DeviceLoad(uint4, sequence + 40);
+	const uint4 vertexBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 24));  // ref, size, stride
+	const uint4 streamBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 40));
 	DCLFStream first, second;
-	first.address = DCLFAddress(vertexBuffer.xy);
+	first.address = vertexBuffer.xy;
 	first.stride = vertexBuffer.w;
-	second.address = DCLFAddress(streamBuffer.xy);
+	second.address = streamBuffer.xy;
 	second.stride = streamBuffer.w;
 	VS_OUTPUT vsout = DCLFShade(DCLFPulledInput(index, first, second));
 #			endif
@@ -759,10 +759,10 @@ VS_OUTPUT main(uint a_vertexID : SV_VertexID)
 {
 	DCLFDrawVertexLayout = EffectDraw.VertexLayout;
 	const uint indexNumber = EffectDraw.FirstIndex + a_vertexID;
-	const uint indexWord = DeviceLoad(uint, DCLFAddress(EffectDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(EffectDraw.IndexAddress, (indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
-	DCLFStream first = { DCLFAddress(EffectDraw.VertexAddress), EffectDraw.VertexStride };
-	DCLFStream second = { DCLFAddress(EffectDraw.StreamAddress), EffectDraw.StreamStride };
+	DCLFStream first = { EffectDraw.VertexAddress, EffectDraw.VertexStride };
+	DCLFStream second = { EffectDraw.StreamAddress, EffectDraw.StreamStride };
 	const VS_INPUT input = DCLFPulledInput(index, first, second);
 #				if defined(TEXCOORD_INDEX)
 #					if defined(NORMALS)
@@ -788,9 +788,9 @@ VS_OUTPUT main(uint index : SV_VertexID)
 {
 	DCLFDrawVertexLayout = DCLFPushedVertexLayout();
 	DCLFStream first, second;
-	first.address = DCLFAddress(DCLFVertexBuffer.xy);
+	first.address = DCLFVertexBuffer.xy;
 	first.stride = DCLFVertexStride;
-	second.address = DCLFAddress(DCLFStreamBuffer.xy);
+	second.address = DCLFStreamBuffer.xy;
 	second.stride = DCLFStreamStride;
 	return DCLFShade(DCLFPulledInput(index, first, second));
 }
@@ -1559,11 +1559,11 @@ void DCLFPermutationStatics()
 // main), and so the rows' blocks and the object's values, assigned before anything reads them.
 PS_OUTPUT DCLFPulledPixel(PS_INPUT input, uint a_instance)
 {
-	const uint64_t sequence = DCLFDrawSequence(a_instance);
-	const uint4 rows = DCLFSequenceRows(sequence);  // the pipeline row's address, the material row's
+	const DeviceRef sequence = DCLFDrawSequence(a_instance);
+	const uint4 rows = DCLFSequenceRows(sequence);  // the pipeline row's ref, the material row's
 	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
-	DCLFPipelineRowAddress = DCLFAddress(rows.xy);
-	DCLFMaterialRowAddress = DCLFAddress(rows.zw);
+	DCLFPipelineRowAddress = rows.xy;
+	DCLFMaterialRowAddress = rows.zw;
 	DCLFPerMaterialStatics();
 	DCLFPerGeometryStatics();
 	DCLFPermutationStatics();

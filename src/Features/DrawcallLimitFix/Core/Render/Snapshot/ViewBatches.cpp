@@ -68,10 +68,16 @@ namespace DCLF::Draws
 		rows.pipelineRows = RowBases::AddressOf(*a_in.payload, PayloadPart::PipelineRows);
 		rows.materialRows = RowBases::AddressOf(*a_in.payload, PayloadPart::MaterialRows);
 		rows.shadowRows = RowBases::AddressOf(*a_in.payload, PayloadPart::ShadowRows);
+		rows.pipelineRowsRef = RowBases::RefOf(*a_in.payload, PayloadPart::PipelineRows);
+		rows.materialRowsRef = RowBases::RefOf(*a_in.payload, PayloadPart::MaterialRows);
+		rows.shadowRowsRef = RowBases::RefOf(*a_in.payload, PayloadPart::ShadowRows);
 		rows.slotKeys = a_in.lookups ? &a_in.lookups->shadowSlotKeys : nullptr;
 		set->pipelineRowsBase = rows.pipelineRows;
 		set->materialRowsBase = rows.materialRows;
 		set->shadowRowsBase = rows.shadowRows;
+		set->pipelineRowsRef = rows.pipelineRowsRef;
+		set->materialRowsRef = rows.materialRowsRef;
+		set->shadowRowsRef = rows.shadowRowsRef;
 		FillAnimatedRows(*set, a_in);
 		auto& scratch = BuilderScratch();
 		for (auto& lanes : scratch.lanes)
@@ -336,6 +342,7 @@ namespace DCLF::Draws
 		}
 		building->sequencesVersion = done->version;
 		building->sequencesAddress = done->version->lease->address;
+		building->sequencesRef = done->version->lease->buffer ? RenderGraph::BufferRefOf(*done->version->lease->buffer) : RenderGraph::BufferRef{};
 		set = std::move(building);
 		return true;
 	}

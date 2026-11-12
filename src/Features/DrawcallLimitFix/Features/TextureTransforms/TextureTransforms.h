@@ -95,10 +95,11 @@ namespace DCLF::Features::TextureTransforms
 	/** @brief Render thread: the pool's backing the current frame reads (0 before the first frame): the depth segment's stage word. */
 	std::uint32_t RowsIndex();
 	/**
-	 * @brief Render thread: the device address of the frame's copy of the animated material rows (the animated-material-rows pool's
-	 * backing, kMaterialRowBytes a row; 0 without a producer or without the pass's program): every main-rows latch's animatedRows.
+	 * @brief Render thread: the device address, buffer view ref and rows of the frame's copy of the animated material rows (the
+	 * animated-material-rows pool's backing, kMaterialRowBytes a row; none without a producer or without the pass's program): every
+	 * main-rows latch's animatedRows.
 	 */
-	std::uint64_t AnimatedRowsAddress();
+	Api::FrameRows AnimatedRowsAddress();
 	/** @brief Render thread, the pass's setup: whether its program was made (without it nothing writes the copy, and no draw is pointed at it). */
 	void SetCopyAvailable(bool a_available);
 	// TextureTransformsList.cpp: the payload product.

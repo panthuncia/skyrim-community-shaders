@@ -278,7 +278,7 @@ namespace DCLF
 				const auto& version = adopted.Of(list).version;
 				if (!version || !version->buffer)
 					continue;
-				families.push_back({ static_cast<std::uint32_t>(d), face.viewIndex, view.faceRowsAddress[d][face.viewIndex], version->buffer->GetAPIResource().GetHandle(),
+				families.push_back({ static_cast<std::uint32_t>(d), face.viewIndex, view.faceRowsRef[d][face.viewIndex], version->buffer->GetAPIResource().GetHandle(),
 					drawn.pipeline, drawn.signature });
 				keep->push_back(version);
 			}

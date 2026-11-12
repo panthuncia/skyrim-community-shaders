@@ -181,6 +181,7 @@ namespace DCLF::Draws
 		// The view slots' blocks (kShadowViewSlotBytes a row: b0, b12), written by each epoch's commit.
 		GrowableRows viewBlocks;
 		std::uint64_t constantsAddress = 0;
+		RenderGraph::BufferRef constantsRef;  // the stages that read the views' frame record themselves read it through this
 		// BuildDrawsCS's ShadowViews entry: every view of an epoch in one dispatch (ShadowBuildDrawsPass), dispatched through
 		// dispatchSignature.
 		std::shared_ptr<const ComputeProgram> buildDraws;

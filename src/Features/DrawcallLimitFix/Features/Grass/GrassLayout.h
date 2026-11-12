@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // The Grass draw family's GPU layout (Api::DrawFamily::Grass; dclf-architecture.md, "Grass: the draws"): the records, rows and
 // argument arrays its passes and draws read - GrassCullCS.hlsl and GrassArgsCS.hlsl (the depth segment's cull and the draws' arguments,
 // in the feature's shader folder) and RunGrass.hlsl's DCLF_PULLED path (package/Shaders) - and its engine shapes. The shaders mirror
@@ -46,11 +48,11 @@ namespace DCLF::GrassInstances
 	};
 	static_assert(sizeof(ShapeRow) == 32);
 
-	/** @brief A mesh slot's row: the vertex and index buffers' device addresses (R16 indices, read as words), its layout. */
+	/** @brief A mesh slot's row: the vertex and index buffers' view refs (R16 indices, read as words), its layout. */
 	struct MeshRow
 	{
-		std::uint64_t vertexAddress = 0;
-		std::uint64_t indexAddress = 0;
+		RenderGraph::BufferRef vertexRef;
+		RenderGraph::BufferRef indexRef;
 		std::uint64_t vertexDesc = 0;  // the engine's vertex descriptor (the pulled vertex stage's layout)
 		std::uint32_t indexCount = 0;
 		std::uint32_t vertexStride = 0;
@@ -147,13 +149,13 @@ namespace DCLF::GrassInstances
 
 	/**
 	 * @brief The draw row: one, written by every depth commit (and latched by it), read by the cull, the arguments' pass and the
-	 * pulled vertex and pixel stages (its address is their push data's). The tables' addresses (the adopted versions'), the slots the
+	 * pulled vertex and pixel stages (its buffer view ref is their push data's). The tables' refs (the adopted versions'), the slots the
 	 * cull walks (0: grass draws nothing this frame), the engine's per-frame grass constants (BSGrassShader::SetupGeometry's b2),
 	 * the shadow mask's and collision texture's descriptors, Grass Collision's PerFrame, the eye and the cull's values.
 	 */
 	struct DrawRow
 	{
-		std::uint64_t instances = 0, shapes = 0, buckets = 0, meshes = 0, owners = 0, frame = 0, visible = 0;
+		RenderGraph::BufferRef instances, shapes, buckets, meshes, owners, frame, visible;
 		std::uint32_t instanceSlots = 0, shapeSlots = 0;
 		float windVector[4]{};  // z the strength (xy are the bucket's windDirection)
 		float timeBase = 0.0f, prevTimeBase = 0.0f, fadeNow = 0.0f, fadeInTimeRcp = 0.0f;

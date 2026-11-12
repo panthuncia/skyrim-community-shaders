@@ -57,7 +57,7 @@ namespace DCLF::Draws
 	{
 		std::shared_ptr<const ComputeProgram> program;
 		std::shared_ptr<const org::LatchBlock> latch;
-		std::uint64_t frameConstants = 0;  // Resources::frameConstantsAddress
+		RenderGraph::BufferRef frameConstants;  // Resources::frameConstantsRef
 		// The full barriers before and after: an external epoch's execution (GraphConditions::cpuPipeline) has its own at its entry
 		// and exit, and no pass of it reads the rows.
 		bool outerBarriers = true;
@@ -95,7 +95,7 @@ namespace DCLF::Draws
 			const auto frame = CurrentFrame(a_preparation, segment);
 			if (!program || !frame || !frame->latch || !BuildsDraws(a_preparation, *resources, segment))
 				return {};
-			return { program, frame->latch, resources->frameConstantsAddress, outerBarriers };
+			return { program, frame->latch, resources->frameConstantsRef, outerBarriers };
 		}
 
 		static void Record(const PixelRowsBindings&, const PixelRowsPrepared& a_frame, org::PassRecordContext& a_recording)
@@ -108,14 +108,15 @@ namespace DCLF::Draws
 		{
 			if (!a_frame.program || !a_frame.latch || !a_frame.frameConstants)
 				return;
-			const std::uint64_t textures = a_frame.frameConstants + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes + offsetof(DrawBindings, textures);
-			const std::uint64_t lodFadeFrame = LodFadeFrameAddress(a_frame.frameConstants);
+			// The record's texture registers and LodFadeFrame, by buffer view ref: only this pass's shader reads these words.
+			const RenderGraph::BufferRef textures = a_frame.frameConstants + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes + offsetof(DrawBindings, textures);
+			const RenderGraph::BufferRef lodFadeFrame = a_frame.frameConstants + LodFadeFrameAddress(0);  // its offset in the frame constants
 			PixelRowsConstants constants{};
 			SetLatchWords(constants, *a_frame.latch, a_run);
-			constants.recordTexturesLo = static_cast<std::uint32_t>(textures);
-			constants.recordTexturesHi = static_cast<std::uint32_t>(textures >> 32);
-			constants.lodFadeFrameLo = static_cast<std::uint32_t>(lodFadeFrame);
-			constants.lodFadeFrameHi = static_cast<std::uint32_t>(lodFadeFrame >> 32);
+			constants.recordTexturesLo = textures.viewSlot;
+			constants.recordTexturesHi = textures.byteOffset;
+			constants.lodFadeFrameLo = lodFadeFrame.viewSlot;
+			constants.lodFadeFrameHi = lodFadeFrame.byteOffset;
 			const rhi::GlobalBarrier global = rhi::FullMemoryBarrier();
 			const rhi::BarrierBatch batch{ {}, {}, { &global, 1 } };
 			if (!a_frame.outerBarriers) {
@@ -163,8 +164,10 @@ namespace DCLF::Features::Fades
 		// The latches' frame rows (Api::PassDef::frameRows): the frame's backing (none before the program: the pass writes nothing).
 		Api::FrameRows PixelFrameRows()
 		{
-			const std::uint64_t address = FrameValues::Get().PoolAddress(pixelRowsPool);
-			return { address, address ? kickedRows : 0u };
+			const auto& values = FrameValues::Get();
+			const std::uint64_t address = values.PoolAddress(pixelRowsPool);
+			const RenderGraph::BufferRef ref = values.PoolRef(pixelRowsPool);
+			return { address, ref, ref ? kickedRows : 0u };
 		}
 
 		std::shared_ptr<const void> PixelRowsSetup(const Api::PassSetup& a_setup)

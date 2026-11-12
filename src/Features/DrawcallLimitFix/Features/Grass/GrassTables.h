@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // Grass's scene resources (Api::SceneResources): the Grass family's tables (its layout, GrassLayout.h), its cull and arguments
 // programs and counts' readbacks, held with the scene's tables, and what the depth commit's uploads keep. Included by the feature's
 // sources that use them.
@@ -73,14 +75,14 @@ namespace DCLF::Features::Grass
 	 * family's indirect-argument resource). GrassCullPass and GrassArgsPass fill the list and the arrays in the depth epoch. ready: the
 	 * row names its slots.
 	 *
-	 * Without the programs, or without the tables' device addresses, there is none (setup gives null): grass stays native.
+	 * Without the programs, or without the tables' buffer view refs, there is none (setup gives null): grass stays native.
 	 */
 	struct GrassTables
 	{
 		Draws::Versioned instances, owners, frame, visible, shapes, buckets, meshes;
 		std::array<org::services::FilledVersion, 5> filled;  // instances, owners, shapes, buckets, meshes
 		std::shared_ptr<org::Buffer> draw, draws;
-		std::uint64_t drawAddress = 0;
+		RenderGraph::BufferRef drawRef;
 		std::shared_ptr<const ComputeProgram> cull, args;
 		std::atomic<bool> ready{ false };
 		std::shared_ptr<GrassCounts> counts;

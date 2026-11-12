@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // Blood splatter (CS_ORG_BLOOD_SPLATTER, docs/development/p5/blood-splatter.md): the engine's screen blood (BSBloodSplatterShader's
 // splatter and flare passes, drawn into the back buffer after the ImageSpace chain) drawn by the render graph in the engine's place.
 //
@@ -44,8 +46,8 @@ namespace DCLF::Features::BloodSplatter
 		float alpha[4];             // PS b2 c0
 		std::uint32_t textures[4];  // t0-t3
 		std::uint32_t samplers[4];  // s0-s3
-		std::uint32_t vertexAddress[2];
-		std::uint32_t indexAddress[2];
+		RenderGraph::BufferRef vertexRef;  // the vertex buffer view ref the vertex stage pulls through
+		RenderGraph::BufferRef indexRef;   // the index buffer's
 		std::uint32_t vertexLayout[2];
 		std::uint32_t vertexStride;
 		std::uint32_t firstIndex;

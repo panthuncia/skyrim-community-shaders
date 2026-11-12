@@ -12,6 +12,7 @@
 #include <winrt/base.h>
 
 #include "Features/DrawcallLimitFix/Core/Gpu/ImportRelocations.h"
+#include "RenderGraph/BufferRef.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
 
 struct DxvkOrgInteropTrackedResource;
@@ -56,6 +57,7 @@ namespace DCLF
 			std::uint64_t offset = 0;    // of the D3D11 buffer within vkBuffer
 			std::uint64_t size = 0;
 			std::uint64_t address = 0;   // device address of the first byte
+			RenderGraph::BufferRef ref;  // the buffer view ref of the first byte, which shaders read through (null: none)
 		};
 		struct LeasedBuffer
 		{
@@ -133,6 +135,7 @@ namespace DCLF
 		{
 			winrt::com_ptr<ID3D11Buffer> reference;
 			bool tracked = false;
+			std::shared_ptr<const void> refKeep;  // the BasicRHI import the buffer's ref is a view of (RenderGraph::ImportBufferRef)
 			std::mutex mutex;  // storages: the owner's thread appends, the last release clears
 			std::vector<std::shared_ptr<const void>> storages;
 			~Held();

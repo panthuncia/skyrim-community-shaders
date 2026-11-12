@@ -13,7 +13,7 @@ namespace DCLF::Draws
 	{
 		// The payload's tables (records, rows, extras) are none of these: the epochs take them from the installed payload.
 		std::uint64_t constants = 0, frameConstants = 0;
-		std::uint64_t streamBuffer = 0;  // the vertex stream's buffer (SceneBuffers::vertexStream) while its entry class is taken
+		RenderGraph::BufferRef streamBuffer;  // the vertex stream's buffer view ref (SceneBuffers::vertexStream) while its entry class is taken
 		std::uint32_t placementsIndex = 0;  // the frame's placement rows (FrameValues::PlacementsIndex)
 		std::uint32_t palettesIndex = 0;    // the frame's palettes (FrameValues::PalettesIndex)
 		std::uint32_t shadingIndex = 0;     // the frame's shading rows (FrameValues::ShadingIndex)

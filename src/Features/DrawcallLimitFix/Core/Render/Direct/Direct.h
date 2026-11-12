@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // The CPU-driven pipeline (an experiment beside the GPU one; dclf-architecture.md, "The CPU-driven pipeline"): the scene's
 // per-view lists as fixed-size SoA batches made with each snapshot, culled on the CPU per frame or once per snapshot, and drawn
 // with direct draws recorded into DXVK's own command buffer. This header is the contract its parts build against: the batches
@@ -262,10 +264,13 @@ namespace DCLF::Direct
 		// version of their own (the payload's publication rules; append-only). The per-frame bits of the object word (sun miss,
 		// local shadow mask, cross-fade copy) are not in them: the recorder pushes the word per draw.
 		std::uint64_t sequencesAddress = 0;
+		RenderGraph::BufferRef sequencesRef;  // what the pulled stages read the sequences through (the push data's)
 		std::uint32_t sequenceCount = 0;
 		// The sequences' rows are offsets from these (kDirectFlagRelativeRows): the payload's row parts' versions the set was made for
 		// (held by `keep`), pushed once per list by the recorder (main lists: pipeline and material rows; shadow lists: the shadow rows).
 		std::uint64_t pipelineRowsBase = 0, materialRowsBase = 0, shadowRowsBase = 0;
+		// Their buffer view refs: what the recorder pushes (kDirectDrawPushRowBases), which the pulled stages add the offsets to.
+		RenderGraph::BufferRef pipelineRowsRef, materialRowsRef, shadowRowsRef;
 		// By resident sequence: its draw arguments (the recorder's DrawIndexed; the GPU copy's are the same, without the pool's first):
 		// the first persistentSequences in persistentArgs (the incremental lists'), then sequenceArgs (the set's own: every sequence of a
 		// full build). Read through Args.
