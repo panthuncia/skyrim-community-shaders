@@ -183,6 +183,12 @@ namespace DCLF::Features::MenuViews::Scenes
 	};
 	static_assert(sizeof(EffectSceneConstants) == 752 && sizeof(EffectSceneConstants) % 16 == 0, "EffectOrgDraw's layout");
 
+	/** @brief FrameBuffer (b12) as a draw had it bound, c0-c44 (OrgSceneFrameRows in the ORG builds), latched with the draw. */
+	inline constexpr std::uint32_t kFrameRows = 45;
+	inline constexpr std::uint32_t kFrameBytes = kFrameRows * 16;
+	/** @brief Its matrices (c0-c39), stored transposed: the builds load the rows raw, which reads a matrix column by column. */
+	inline constexpr std::uint32_t kFrameMatrices = 10;
+
 	/** @brief A skinned draw's palettes as Common/Skinned.hlsli's ORG_LATCHED_BONES reads them: the previous frame's (VS b9), then this one's (b10). */
 	inline constexpr std::uint32_t kPaletteRows = 240;
 	inline constexpr std::uint32_t kBonesBytes = 2 * kPaletteRows * 16;
@@ -209,6 +215,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		std::uint32_t colourCount = 0;
 		std::uint32_t latchOffset = 0;  // its constants in the run's latch
 		std::uint32_t bonesOffset = 0;  // its palettes in the run's latch (a skinned draw's; 0 otherwise, never read)
+		std::uint32_t frameOffset = 0;  // its FrameBuffer rows in the run's latch
 		std::uint32_t stencilRef = 0;
 		std::uint32_t indexCount = 0;
 		Family::Viewport viewport;
