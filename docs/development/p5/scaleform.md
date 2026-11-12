@@ -325,18 +325,68 @@ The filters' blend array (SE 0x1417c2588) is the first one with source colour fa
 | 6 darken | SrcAlpha, One, Min | One, One, Min |
 | 7 none | no colour write | the same |
 
-### The blur family (not on the graph yet)
+### The blur family (RE done 2026-11-12; not on the graph yet)
 
-`DrawBlurRect` (SE 0x140f5db10) runs `passes` passes (params +0xC, doubled when the box is larger than a threshold; flag 0x20000
-skips to the last). Each pass but the last pushes a temp target (`PushTempRenderTarget(frame, w, h, false)`, vtable +0x50),
-draws the previous pass's texture through PS-B 21/22 (one- or two-dimensional blur), pops it and releases the previous texture;
-the last pass draws onto the current target with the current matrix and the filter's own pixel shader (inner/outer shadow,
-highlight, knockout, shadow only, chosen from the flags at +0 bits 1, 2, 6, 8, 10; +2 for Multiply and Darken), reading the
-original source as `srctex` (t1). Its constants come from a per-shader offset table at SE 0x141e0ac70 (the reflection's offsets
-of cxadd, cxmul, fsize, offset, scolor, scolor2, srctexscale, texscale, and the sampler slot). Putting it on the graph needs
-GFx's temp targets as graph resources that one display's passes write and read in turn (render passes on ORG images with
-barriers between them inside the Interface pass, or a pass per filter pass), and that table transcribed. Until then the census
-shows how often it runs.
+`DrawBlurRect(source, srcRect, destRect, params)` is SE 82836 (0x140f5db10), slot 44. Read in Ghidra (SE; the AE slot is the
+same function). Still a D3D11 part.
+
+**Params** (`BlurFilterParams`, 17 dwords): +0x00 mode flags, +0x04 BlurX, +0x08 BlurY (floats), +0x0C passes, +0x10/+0x14
+offset x/y (floats), +0x18 colour (bytes B, G, R, A), +0x1C colour 2 (same order), +0x20 strength (unused here), +0x24..+0x40 the
+colour transform (rMul, rAdd, gMul, gAdd, bMul, bAdd, aMul, aAdd).
+
+**Shaders (PS-B slots).** Passes before the last use 22 (two-dimensional blur), the last one 22 too, or 24 for Multiply and
+Darken. With flag 0x2 (a shadow filter) the last one is: without 0x400, `(~(flags >> 6) & 8) | 1` (9 outer, 1 inner with 0x40),
++4 for knockout (0x100), +1 for highlight (0x4); with 0x400 (shadow only), 17, 18 with highlight; +2 for Multiply and Darken.
+When `BlurX * BlurY > 32.0` the pass count doubles, every pass blurs one axis (pass 0: BlurY = 1; pass 1 and the last: BlurX = 1),
+the blur slots become 21 (one-pass blur; 23 for Multiply and Darken), and the shadow slots stay. Pass `i` uses the parameters
+of pass 2 when it is the last, else of pass `i & 1`. Flag 0x20000 starts at the last pass. PS-B slot to `FilterPS.hlsl`'s
+`FILTER`: 1→1, 2→2, 3→4, 4→5, 5→3, 6→2, 7→6, 8→5, 9→7, 10→8, 11→11, 12→12, 13→10, 14→9, 15→14, 16→13, 17→15, 18→15, 19→17,
+20→17, 21→19, 22→21, 23→20, 24→22, 25→23, 26→24.
+
+**Targets.** Each pass but the last calls `PushTempRenderTarget({-1,-1,1,1}, ceil(srcRect width), ceil(srcRect height), false)`
+(slot 10, SE 82888 0x140f61c70): a pooled target whose texture is at least that size (a new one is the next power of two each
+way), its viewport the size asked for, the whole texture cleared (`PushRenderTarget`, SE 82887 0x140f61830). The pass draws with the
+identity matrix (0x141e09d00) onto `{-1,-1,1,1}`, then `PopRenderTarget` and the previous pass's texture released; the target's
+texture is the next pass's source. The last pass draws onto the current target with `ApplyMatrix(current matrix)` and
+`destRect`.
+
+**Draw.** VS-B 1 (the input layout of format 5), a strip of four vertices `(x, y, u, v)`: (x0, y0, u0, v0), (x1, y0, u1, v0),
+(x0, y1, u0, v1), (x1, y1, u1, v1), with `u = srcRect.x / source width`, `v = srcRect.y / source height` (+0x38/+0x3C of the
+pass's source texture; srcRect itself is the same every pass). The pass's source is bound with `Bind(table[8], clamp, linear)`,
+the original source, for the shaders that read it, with `Bind(table[6], clamp, linear)`. Blend: passes before the last the
+filters' array's normal state (+0x420), the last one the filters' array for the blend mode (+0x418 + 8 · table[mode]), neither
+while a mask is drawn (the mask's no-colour state stays); after the filter the first array's state for the mode (+0x3D8 + 8 ·
+table[mode]).
+
+**The offset table** (SE 0x141e0ac70, a pointer per PS-B slot to ten ints, -1 for none): the float index in `PSConstants` of
+cxadd, cxmul, fsize, offset, scolor, scolor2, then `srctex`'s stage, srctexscale's index, `tex`'s stage, texscale's index.
+
+| PS-B slots | cxadd | cxmul | fsize | offset | scolor | scolor2 | srctex | srctexscale | tex | texscale |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1-16 | 0 | 4 | 8 | 12 | 16 | 20 | t0 | 24 | t1 | 26 |
+| 17-20 | 0 | 4 | 8 | 12 | 16 | - | - | - (see below) | t0 | 20 |
+| 21-24 | 0 | 4 | 8 | - | - | - | - | - | t0 | 12 |
+| 25-26 | 0 | 4 | - | - | - | - | - | - | t0 | - |
+
+They match `FilterPS.hlsl`'s constant blocks A to D in cbuffer packing.
+
+**Constants** (128 bytes, written in this order):
+
+- cxmul and cxadd: the last pass `(rMul·aMul, gMul·aMul, bMul·aMul, aMul)` and `(rAdd·aMul, gAdd·aMul, bAdd·aMul, aAdd)` over 255;
+  the others `(1, 1, 1, 1)` and 0.
+- fsize: `sx = float(uint(BlurX - 1)) · 0.5`, `sy` the same from BlurY, `w = 1 / ((2 sy + 1)(2 sx + 1))`. For slots 21 and 23,
+  `(BlurX > 1 ? sx : sy, 0, 0, w)` and texscale `(BlurX > 1 ? 1 / width : 0, BlurY > 1 ? 1 / height : 0)`; otherwise `(sx, sy, 0,
+  w)` and texscale `(1 / width, 1 / height)`, of the pass's source.
+- offset (when the slot has one): `(-offset x, -offset y)`; then srctexscale `(source width / original width, source height /
+  original height)` at the srctexscale index. For slots 17-20 that index is -1, so the game writes the width ratio before the
+  buffer and the height ratio over cxadd.r: shadow-only filters get `cxadd.r` = that ratio. A port must do the same.
+- scolor: `(R, G, B, A) / 255` from colour; scolor2 the same from colour 2.
+
+**On the graph** this needs, inside a display's Interface pass: scratch colour textures of the surface's size (cleared whole when
+pushed, as GFx clears its pooled targets), each declared as a shader resource and moved to a render target and back by the pass
+around the commands that draw into it (as Bink's pass does with its movie texture), and render passes split at each push and
+pop. GFx's own `PushRenderTarget` targets (render to a texture) need the same, plus a mapping from the GFx texture to its scratch
+image for the draws that read it later. In the runs so far no display used either; the census counts them.
 
 The background rectangle `BeginDisplay` draws is one of the display's draws.
 
