@@ -2189,6 +2189,14 @@ Lighting geometry with `kRefraction` or `kTempRefraction` (heat haze, streams, i
     material row's `TexcoordOffset` and t0 (the refraction normal map), skins with the record's palette, computes the refraction LOD
     fade from the frame's `LodFadeFrame` and emits nothing past its end; `RefractionPower` is folded into `TexCoord0.w`. The pixel
     stage is the engine's; it discards a one-sided object's back faces.
+-   **Under a billboard node** (heat haze cards over fires and forges: `L2_warp`, `Plane05` under an `NiBillboardNode`; the census's
+    `lighting: billboard` class before): a skinless BSTriShape refraction leaf under exactly one billboard node is admitted with the
+    billboards' turned shapes (`Extensions::BillboardTurnedRefraction`, `Coordinator::BillboardModeOf`). Its placement row is the
+    billboard row (`BillboardRow.h`: the unturned world, the base and pivot, and the face mode in `PreviousWorld[1].w`, since the
+    refraction record has no bits left for it). The key's spare bits hold the mode + 1 (`kRasterRefractionBillboardShift`: the
+    Lighting key bits mean nothing for a key whose Lighting pipeline is never drawn), which sets `kRecordRefractionBillboard` (bit 8,
+    free on a refraction record: no refraction object is a decal). The vertex stage then turns the world to `CameraView`'s axes about
+    the pivot (`DCLFBillboardWorldOfMode`), as Effect.hlsl turns an effect billboard.
 
 ### The Effect shader in the forward epoch
 

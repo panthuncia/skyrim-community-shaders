@@ -28,7 +28,7 @@ namespace DCLF
 	 *
 	 * The row (SampleBillboardRow): World = the unturned world (a world transform, so a pass that does not turn the leaf draws it where the node
 	 * stands; the vertex stage turns it about the pivot by (R0 * M) * R0^T); PreviousWorld's rotation part = R0, its w column the leaf's world bound radius (Effect.hlsl's
-	 * EffectRadius) and two zeros; Bound = the pivot, and a radius covering the leaf in every orientation (the distance of its bound's
+	 * EffectRadius), the node's face mode (as a float; the refraction stage reads it there) and a zero; Bound = the pivot, and a radius covering the leaf in every orientation (the distance of its bound's
 	 * centre from the pivot plus its radius): the GPU cull's sphere, and the forward sort's centre.
 	 *
 	 * The row and the mode are Core's, not generalised into a feature contribution: an item has one class (a particle under an
@@ -46,8 +46,9 @@ namespace DCLF
 		std::uint32_t BillboardFaceMode(const void* a_node);
 
 		/**
-		 * @brief a_geometry's billboard row (above) into a_out's world, previousWorld and bound, when it is a BSEffectShaderProperty leaf
-		 * with an NiBillboardNode above it (the nearest); false, and a_out untouched, otherwise. Inside the engine-read window (the parents'
+		 * @brief a_geometry's billboard row (above) into a_out's world, previousWorld and bound, when it is a BSEffectShaderProperty leaf,
+		 * or a BSLightingShaderProperty refraction leaf (kRefraction or kTempRefraction), with an NiBillboardNode above it (the nearest);
+		 * false, and a_out untouched, otherwise. Inside the engine-read window (the parents'
 		 * worlds and the locals are the update's; nothing a cull writes is read).
 		 */
 		bool SampleBillboardRow(const RE::BSGeometry& a_geometry, BindlessPlacement& a_out);

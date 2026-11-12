@@ -412,18 +412,24 @@ float3x3 DCLFBillboardRotation(float3x3 a_base, float3 a_pivot, uint a_mode, flo
 // A billboard's world for a camera: its unturned world (World: the node's base times the leaf's transform relative to it) turned about the
 // pivot by G = the node's turned rotation (DCLFBillboardRotation) times R0's transpose (the base rotation undone); relative to a_eye.
 // The translation takes both differences first, so it never holds an absolute position. Precise here, as precise does not reach into a
-// called function.
-float3x4 DCLFBillboardWorld(uint a_object, float3 a_forward, float3 a_up, float3 a_right, float3 a_eye)
+// called function. a_mode is the node's face mode.
+float3x4 DCLFBillboardWorldOfMode(uint a_object, uint a_mode, float3 a_forward, float3 a_up, float3 a_right, float3 a_eye)
 {
 	const DCLFPlacement placement = DCLFPlacements[a_object];
 	const float3x3 base = float3x3(placement.PreviousWorld[0].xyz, placement.PreviousWorld[1].xyz, placement.PreviousWorld[2].xyz);
 	const float3 pivot = placement.Bound.xyz;
-	const uint mode = (DCLFObjects[a_object].DCLFRecordFlags >> 5) & 7u;
+	const uint mode = a_mode;
 	precise float3x3 g = mul(DCLFBillboardRotation(base, pivot, mode, a_forward, a_up, a_right, a_eye), transpose(base));
 	const float3x4 unturned = float3x4(placement.World[0], placement.World[1], placement.World[2]);
 	precise float3x3 rotation = mul(g, (float3x3)unturned);
 	precise float3 translation = mul(g, float3(unturned[0].w, unturned[1].w, unturned[2].w) - pivot) + (pivot - a_eye);
 	return float3x4(float4(rotation[0], translation.x), float4(rotation[1], translation.y), float4(rotation[2], translation.z));
+}
+
+// An effect billboard's world: the mode is its record's (bits 5-7).
+float3x4 DCLFBillboardWorld(uint a_object, float3 a_forward, float3 a_up, float3 a_right, float3 a_eye)
+{
+	return DCLFBillboardWorldOfMode(a_object, (DCLFObjects[a_object].DCLFRecordFlags >> 5) & 7u, a_forward, a_up, a_right, a_eye);
 }
 
 // The world bound radius of an object (Community Shaders' EffectRadius: the geometry's world bound radius): a billboard's Bound covers it
