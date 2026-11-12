@@ -1072,7 +1072,7 @@ namespace DCLF::Direct::detail
 			if (execution && index < execution->segments.size()) {
 				const auto& segment = execution->segments[index];
 				if (segment.split && index)
-					globals::d3d::context->Flush();
+					RenderGraphRuntime::Get().SplitStream();
 				for (const auto& point : segment.waits)
 					if (const auto converted = RenderGraphRuntime::NativeTimelinePoint(point); converted.semaphore)
 						waits.push_back(converted);
@@ -1088,7 +1088,7 @@ namespace DCLF::Direct::detail
 			// Not queued: what the rest of the execution's signals would have completed, completed without its work (the graph waits for
 			// them).
 			if (execution && host)
-				host->SignalExternalExecutionUnexecuted(*execution, index);
+				RenderGraphRuntime::Get().SignalExecutionUnexecuted(*execution, index, kLabels[static_cast<std::size_t>(a_run.site)]);
 			++s.window.notQueued;
 			if (!std::exchange(s.loggedNoCallback, true))
 				logger::error("[DCLF] CPU pipeline: DXVK took no external commands (dxvkEmitExternalCommands missing): its sites draw nothing");
@@ -1645,13 +1645,19 @@ namespace DCLF::Direct
 		// What the execution reads, held as ORG would hold it until it retires.
 		s.current->holds.push_back(std::move(a_owner));
 		if (auto* run = std::exchange(s.pending, nullptr)) {
+			const bool hasExecution = execution != nullptr;
 			run->execution = std::move(execution);
 			// Without its epoch's passes (it failed), its draws read nothing current: its queues are drained, nothing drawn.
 			run->valid = run->valid && executed;
-			return Emit(*run);
+			// The stream's wait for the epoch's compute work goes in after its segments, and after a flush when that work waits for
+			// one of them. Left to the next epoch, it landed in the command list holding those segments: the GPU waited for itself.
+			const bool emitted = Emit(*run);
+			RenderGraphRuntime::Get().CloseExternalEpoch(emitted && hasExecution);
+			return emitted;
 		}
 		if (execution)
-			host->SignalExternalExecutionUnexecuted(*execution);
+			RenderGraphRuntime::Get().SignalExecutionUnexecuted(*execution, execution->ExecutedSegments(), "DCLF site epoch without a run");
+		RenderGraphRuntime::Get().CloseExternalEpoch(false);
 		return executed;
 	}
 

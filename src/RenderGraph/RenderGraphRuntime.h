@@ -253,6 +253,28 @@ public:
 	 */
 	std::shared_ptr<org::ExternalEpochExecution> ExecuteExternalEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare,
 		std::shared_ptr<const void> a_resourceOwner = {});
+	/**
+	 * @brief Render thread: ends the epoch ExecuteExternalEpoch submitted, after the caller emitted its execution (or signalled it
+	 * unexecuted). The stream then waits for the epoch's compute and copy work, as ExecuteEpoch does at an epoch's end.
+	 * @param a_emitted Every segment went into DXVK's stream as external commands. The wait then joins DXVK's command list, after
+	 * a flush when the execution's exitSplit asks for one. Otherwise the wait is a submission of its own, which ends the list first.
+	 * Without this call the next epoch adds the wait, after a flush. Before, the wait could land in the command list that holds
+	 * the segments the compute work waits for, and the GPU waited for itself (seen at the map menu, 2026-11-12).
+	 */
+	void CloseExternalEpoch(bool a_emitted);
+	/**
+	 * @brief Render thread: signals the segments of a_execution from a_first on without running them
+	 * (org::GraphHost::SignalExternalExecutionUnexecuted), and notes them in the stream-order telemetry (DescribeStreamOrder).
+	 */
+	void SignalExecutionUnexecuted(const org::ExternalEpochExecution& a_execution, std::size_t a_first, const char* a_label);
+	/** @brief Render thread: ends DXVK's command list (a D3D11 Flush), for a segment that must start a submission of its own. */
+	void SplitStream();
+	/**
+	 * @brief Any thread, for a stall report: the latest compute and copy queue submissions, external commands, stream entry points,
+	 * exit waits and flushes, with each semaphore's name and the value it has reached. Also the values DXVK's stream signalled,
+	 * and how often the stream-order guard flushed or found a wait it could not order. Read racily: a message, never a decision.
+	 */
+	std::string DescribeStreamOrder(std::size_t a_events = 96) const;
 
 	/**
 	 * @brief The render thread's ExecuteEpoch time since startup, every segment's, split three ways. Render thread. A feature
