@@ -223,15 +223,9 @@ namespace DCLF::Features::MenuViews::Scenes
 			// The geometry, read by device address while its leases are held (the run keeps them until the GPU is done).
 			Family::Owners owners;
 			Family::Geometry geometry;
-			// A DrawData copy's draw (the particles) pulls its position from stream 1, the dynamic ring.
-			const auto result = a_capture.dynamic ?
-			                        Family::LatchDynamicGeometry(a_capture.dynamic, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail) :
-			                        Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
-			if (result != Family::GeometryResult::Ok)
+			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
+				result != Family::GeometryResult::Ok)
 				return Family::ReasonOf(result);
-			constants.streamAddress[0] = static_cast<std::uint32_t>(geometry.streamAddress);
-			constants.streamAddress[1] = static_cast<std::uint32_t>(geometry.streamAddress >> 32);
-			constants.streamStride = geometry.streamStride;
 			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
 			constants.vertexAddress[1] = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
 			constants.indexAddress[0] = static_cast<std::uint32_t>(geometry.indexAddress);
@@ -452,9 +446,15 @@ namespace DCLF::Features::MenuViews::Scenes
 
 			Family::Owners owners;
 			Family::Geometry geometry;
-			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
-				result != Family::GeometryResult::Ok)
-				return Family::ReasonOf(result);
+			// A DrawData copy's draw (the particles) pulls its position from stream 1, the dynamic ring.
+			const auto latched = a_capture.dynamic ?
+			                         Family::LatchDynamicGeometry(a_capture.dynamic, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail) :
+			                         Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
+			if (latched != Family::GeometryResult::Ok)
+				return Family::ReasonOf(latched);
+			constants.streamAddress[0] = static_cast<std::uint32_t>(geometry.streamAddress);
+			constants.streamAddress[1] = static_cast<std::uint32_t>(geometry.streamAddress >> 32);
+			constants.streamStride = geometry.streamStride;
 			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
 			constants.vertexAddress[1] = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
 			constants.indexAddress[0] = static_cast<std::uint32_t>(geometry.indexAddress);
