@@ -579,6 +579,33 @@ namespace RenderGraph::Engine::Native
 			}
 		}
 
+		/**
+		 * @brief A BasicRHI SRV swizzle (D3D12's shader component mapping encoding: three bits a channel, 0-3 a source channel, 4
+		 * zero, 5 one; 0 for none) as Vulkan components.
+		 */
+		VkComponentMapping ComponentsOf(rhi::ComponentMapping a_mapping)
+		{
+			if (!a_mapping)
+				return { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+			const auto channel = [&](uint32_t a_index) {
+				switch ((a_mapping >> (a_index * 3)) & 7u) {
+				case 0:
+					return VK_COMPONENT_SWIZZLE_R;
+				case 1:
+					return VK_COMPONENT_SWIZZLE_G;
+				case 2:
+					return VK_COMPONENT_SWIZZLE_B;
+				case 3:
+					return VK_COMPONENT_SWIZZLE_A;
+				case 4:
+					return VK_COMPONENT_SWIZZLE_ZERO;
+				default:
+					return VK_COMPONENT_SWIZZLE_ONE;
+				}
+			};
+			return { channel(0), channel(1), channel(2), channel(3) };
+		}
+
 		uint32_t FullMipCount(uint32_t a_width, uint32_t a_height, uint32_t a_depth)
 		{
 			uint32_t size = (std::max)({ a_width, a_height, a_depth, 1u });
@@ -850,7 +877,7 @@ namespace RenderGraph::Engine::Native
 					return E_OUTOFMEMORY;
 				}
 
-				if (!FillImage(*record, record->resource.Get(), a_request, dxgiFormat, format, mips, layers, depth)) {
+				if (!FillImage(*record, record->resource.Get(), a_request, dxgiFormat, format, support, mips, layers, depth)) {
 					LogOnce(loggedCreate, a_request.name, "BasicRHI did not describe the image it made");
 					return E_FAIL;
 				}
@@ -873,7 +900,7 @@ namespace RenderGraph::Engine::Native
 
 			/** @brief An image record's description as the graph imports it (DescribeResource): GENERAL, the graph's Common home state. */
 			static bool FillImage(NativeResource& a_record, const rhi::Resource& a_resource, const TextureRequest& a_request, DXGI_FORMAT a_dxgiFormat, rhi::Format a_format,
-				uint32_t mips, uint32_t layers, uint32_t depth)
+				const rhi::FormatSupport& a_support, uint32_t mips, uint32_t layers, uint32_t depth)
 			{
 				rhi::VulkanResourceInfo info{};
 				if (!rhi::vulkan::get_resource_info(a_resource, info) || !info.resource)
@@ -897,7 +924,9 @@ namespace RenderGraph::Engine::Native
 				                 image.type == VK_IMAGE_TYPE_1D ? (layers > 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : VK_IMAGE_VIEW_TYPE_1D) :
 				                                                  (layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D);
 				image.viewFormat = image.format;
-				image.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+				// A format BasicRHI stores as another (A8 as R8, the 16-bit packed formats, ...) is read through the swizzle its views add,
+				// as DXVK describes its own images: the graph's imports and DCLF's views then read the channels the format names.
+				image.components = ComponentsOf(a_support.srvSwizzle);
 				const bool depthFormat = (a_request.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
 				image.subresourceRange = { static_cast<VkImageAspectFlags>(depthFormat ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, mips, 0, layers };
 				a_record.kind = NativeResource::Kind::Image;
@@ -2510,7 +2539,9 @@ namespace RenderGraph::Engine::Native
 		const uint32_t layers = dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? 1 : request.depthOrArraySize;
 		auto record = MakeWrapRecord(a_name);
 		static std::atomic<bool> loggedDescribe = false, loggedInitialize = false;
-		if (!NativeState::FillImage(*record, a_image, request, dxgiFormat, format, request.mipLevels, layers, depth)) {
+		rhi::FormatSupport support{};
+		(void)g_device->Rhi().QueryFormatSupport(format, support);
+		if (!NativeState::FillImage(*record, a_image, request, dxgiFormat, format, support, request.mipLevels, layers, depth)) {
 			LogOnce(loggedDescribe, request.name, "BasicRHI did not describe the image to wrap");
 			return nullptr;
 		}
