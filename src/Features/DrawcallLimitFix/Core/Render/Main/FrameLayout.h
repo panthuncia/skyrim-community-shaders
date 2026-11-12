@@ -289,9 +289,21 @@ namespace DCLF::Draws
 		{
 			auto states = std::make_shared<PreprocessStates>();
 			states->slots.resize(std::max<std::uint32_t>(a_frameSlots, 1u));
+			// One allocator for the site's lists: a command pool costs the driver about 2 MB, a list in a shared pool next to
+			// nothing. A site records on one thread at a time, so its pool is never used from two threads at once.
+			if (rhi::Failed(a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, states->allocator)) || !states->allocator) {
+				logger::error("[DCLF] DGC preprocess: no state allocator for {}; its draws cannot execute", a_site);
+				return nullptr;
+			}
+			// D3D12 cannot hold several open lists on one allocator: each slot keeps its own there.
+			const bool shared = states->allocator->SupportsSharedLists();
 			for (auto& slot : states->slots) {
-				if (rhi::Failed(a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator)) || !slot.allocator ||
-					rhi::Failed(a_device.CreateCommandList(rhi::QueueKind::Graphics, slot.allocator.Get(), slot.list)) || !slot.list) {
+				if (!shared && (rhi::Failed(a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator)) || !slot.allocator)) {
+					logger::error("[DCLF] DGC preprocess: no state allocator for {}; its draws cannot execute", a_site);
+					return nullptr;
+				}
+				auto& allocator = shared ? states->allocator : slot.allocator;
+				if (rhi::Failed(a_device.CreateCommandList(rhi::QueueKind::Graphics, allocator.Get(), slot.list)) || !slot.list) {
 					logger::error("[DCLF] DGC preprocess: no state list for {}; its draws cannot execute", a_site);
 					return nullptr;
 				}
@@ -304,16 +316,18 @@ namespace DCLF::Draws
 		{
 			DCLF_ZONE("CS.DCLF.Record.RecyclePreprocessState");
 			auto& slot = slots[a_frameSlot % slots.size()];
-			slot.list->Recycle(slot.allocator.Get());
+			slot.list->Recycle(slot.allocator ? slot.allocator.Get() : allocator.Get());
 			return slot.list.Get();
 		}
 
 	private:
 		struct Slot
 		{
-			rhi::CommandAllocatorPtr allocator;
+			rhi::CommandAllocatorPtr allocator;  // D3D12 only: its own (SupportsSharedLists)
 			rhi::CommandListPtr list;
 		};
+		// Shared by the lists where the backend allows it. Declared before them, so it outlives them.
+		rhi::CommandAllocatorPtr allocator;
 		std::vector<Slot> slots;
 	};
 
