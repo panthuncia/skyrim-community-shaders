@@ -202,9 +202,11 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			// Lighting's programs are not precompiled per descriptor (CS loads thousands): a key is built at its first draw, then
 			// prebuilt from the manifest in the next session.
 			Family::EngineDrawPrograms lighting{ "menu scenes (Lighting)", { .source = "Lighting.hlsl",
+																			   .languageVersion = L"2018",  // FXC's semantics, as DCLF compiles it
 																			   .constantWords = ShaderBindings::Words<UtilityBlock>(),
 																			   .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Lighting) } };
 			Family::EngineDrawPrograms effect{ "menu scenes (Effect)", { .source = "Effect.hlsl",
+																		   .languageVersion = L"2018",
 																		   .constantWords = ShaderBindings::Words<UtilityBlock>(),
 																		   .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Effect) } };
 			bool reserved = false;
