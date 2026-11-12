@@ -1464,10 +1464,14 @@ namespace RenderGraph::Engine::Native
 			std::shared_ptr<NativeResource> record;
 			if (const HRESULT hr = g_device->MakeTexture(a_request, record); FAILED(hr))
 				return hr;
+			// GetDesc answers the mips made, as D3D11 does: a description asking for 0 (the whole chain) names the count (ImageSpace
+			// checks a mip target's mip against it).
+			Desc desc = a_desc;
+			desc.MipLevels = record->shape.mips;
 			Tripwire::Options options;
 			options.name = a_request.name;
 			options.owner = std::move(record);
-			*a_out = a_factory(a_desc, std::move(options), nullptr).detach();
+			*a_out = a_factory(desc, std::move(options), nullptr).detach();
 			return S_OK;
 		}
 
