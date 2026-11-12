@@ -4,8 +4,17 @@ Plan tasks P5.8 (menu 3D) and P5.9 (map menu) ([org-full-port.md](../org-full-po
 SE 1.5.97 and AE 1.6.1170 (2026-11-10). IDs are Address Library IDs. The code is `src/Features/DrawcallLimitFix/Features/MenuViews/` and
 the switches are `CS_ORG_MENU3D=1` and `CS_ORG_MAP=1` (default off).
 
-**State:** the RE is done, the design is below, and the first stage, the probe, is written. The probe reads what each menu scene's view
-needs and logs it; it withholds nothing and registers no graph client. The views themselves are not written yet (see "Not done").
+**State (2026-11-12, Phase 5.5.7):** the menu scenes are an engine draw family, as the water and the shadow masks are
+(Core/Engine/Family), not DCLF views. The local map's Utility passes are drawn on the graph with `CS_ORG_MAP=1` (MenuScenes*.cpp,
+below). Menu 3D is still the engine's under its vouch: it needs Lighting and Effect programs (and Utility's depth and shadow map
+techniques) that no family has yet. The probe (stage 1) stays as a diagnostic.
+
+**Why not DCLF views.** Every census draw under the menu 3D vouch is the loading-screen and main-menu model (scheme 4). It renders on
+the serving thread during a load and at the main menu, where the probe logs `DCLF's scene has no publication`: DCLF's tables are frozen
+in a load, so a DCLF view has no members there. A menu model is a handful of draws, so latching the engine's draws costs little. The
+`ID 84959`/`84961` draws the census shows in the same windows are not menu 3D: they are Scaleform (`GFxMovieRoot::Display`, AE 83789,
+from the shared menu PostDisplay, AE 53317, which calls `uiMovie->Display()` before `UI3DSceneManager::Render`), outside the vouch's
+scope and Scaleform's (5.5.8, a movie into kMAIN).
 
 ## RE
 
@@ -79,19 +88,22 @@ writing stencil bit 0 for the TAA mask fill that follows.
 
 ### LocalMapRenderer::Render (SE 16094 `0x1401f5b10`, AE 16335 `0x140242e00`)
 
-1. `BSShaderManager::State+0x219 = 1` (the local map mode: Lighting's `GetRenderPasses` registers BSUtilityShader local-map passes,
-   `LOCALMAP_FOGOFWAR` in CS's Utility.hlsl), the accumulator's shader state (+0x148), `BSTreeManager` LOD on (`FUN_1403de280`),
-   clear colour 0.
+1. `BSShaderManager::State+0x219 = 1`: the local map mode. In it a Lighting property's `GetRenderPasses_LocalMap` (vfunc 0x2C, SE
+   `0x1412c7cd0`) makes one BSUtilityShader pass with the Utility technique bits `| 0x2000000` (RENDER_BASE_TEXTURE), and the alpha
+   test bit when the alpha property tests. Exceptions: a kLandscape property (flag bit 14) gets its plain `GetRenderPasses` (Lighting's
+   land passes), and a skinned or multi-texture property (`flags & 0x8002`), an object under its fade, or one with a hidden alpha gets
+   none. In render mode 0x13 the pass is BSUtilityShader's `| 0x10000000` (LOCALMAP_FOGOFWAR).
+   Then the accumulator's shader state (+0x148), `BSTreeManager` LOD on (`FUN_1403de280`), clear colour 0.
 2. Culls (`BSCullingProcess::Process` on +0x301F8) the cells' nodes, then the LOD roots (BSShaderManager::State+0x118's +0x48 and +0x40)
    with the local map camera (+0x302B8, orthographic).
-3. Depth kMAIN CLEAR, `RT0 = kLOCAL_MAP_SWAP (0x11)` CLEAR, **`SubmitAccumulator(cam, acc (+0x302C8), 0)`** (SE +0x340, AE +0x342).
-4. If `DAT_141db3ec8`: render mode 0x13, the water roots culled, depth mode 0, `RT0 = 0x11` RESTORE, **`SubmitAccumulator` again**
-   (SE +0x430, AE +0x433) with depth mode 8 (water), then depth mode 3.
+3. Depth kMAIN CLEAR, `RT0 = kLOCAL_MAP_SWAP (0x11)` CLEAR, **`SubmitAccumulator(cam, acc (+0x302C8), 0)`** (SE +0x340, AE +0x342): the
+   land and objects.
+4. If `DAT_141db3ec8`: render mode 0x13, the **fog-of-war root** (+0x30358, not the water) culled, depth mode 8, `RT0 = 0x11` RESTORE,
+   **`SubmitAccumulator` again** (SE +0x430, AE +0x433), then depth mode 3. The probe names this batch `local map water`; it is the fog.
 5. Unbinds depth, sets the fog-of-war parameters (+0x302D0, `FUN_1412d66f0`), **ImageSpace effect 0x62 (`BSImagespaceShaderLocalMap`)
-   from 0x11 into kLOCAL_MAP (0x10)**, restores the state.
+   from 0x11 into kLOCAL_MAP (0x10)**, restores the state. ISLocalMap reads the colour's luminance and edges and the alpha's fog.
 
-No stencil. The members are world objects DCLF already tracks (the loaded cells' objects, LOD land, objects and trees), drawn with
-another camera and another program family (the Utility shader's local map technique).
+No stencil.
 
 ## Design, scene by scene
 
@@ -111,40 +123,37 @@ both runtimes (`Render` reads both there).
 Expected first results: menu 3D's geometry is not tracked (no view names the menu roots as category roots yet), and the inventory may
 have no DCLF frame (if it freezes the world).
 
-### The menu 3D view (stage 2, not written)
+### The local map as an engine draw family (written)
 
-A third bucketed view on Core's view contract (`Api/Views.h`), like first person:
-- `Api::EngineView::Menu3D`, its `kViewSlots` row (key group, extension id `cs.dclf.menu3d`), its epoch `menu3d` (trigger
-  `menu3d.render`, the Submit thunk; passes `view.build-draws`, `view.colour`, `view.forward`, `view.direct`) and its
-  `RenderGraphRuntime::Segment`. The set phase is the last free bit (`1u << 7`), the view bit `1u << 12`, a forward key bit of its own.
-  Core's places that branch on the two views today (Direct's `ViewType`, `ViewSites.cpp`, `ViewEngine.cpp`'s type choice,
-  `ViewBatchesInternal.h`, `Cull.cpp`'s main family) need the third case.
-- Membership `CategoryRoot`: the root is the current scheme's `menuObjects[scheme]` (parentless, as the first-person root is). A scheme
-  change is a category signature change: the scene lane re-files at its next pass and the next publication carries it, with no graph
-  rebuild. Better: capture all eight roots once (a root list in `ViewRootCapture`), so a menu change is only a hidden-bit change.
-- Withholding `InMainRenderers` with `accumulators` = mgr+0x10 and +0x18. Covered only when the probe's verdict is clean for the
-  current root: every geometry a member, the epoch's client in the built graph (`FrameAnchors::InBuiltGraph`), and a DCLF frame this frame.
-- Targets: kMAIN's depth imported once (`DepthTarget`), cleared by the pass (depth 1, stencil 0) since the engine's clear runs at the
-  withheld draws' `ApplyState`; RT0 both kMAIN and the framebuffer imported at install with two colour passes in the shape, one chosen per
-  frame by a latch (both recorded; no rebuild); RT1 kMOTION_VECTOR. Its pipelines write stencil bit 0 (ALWAYS REPLACE, ref 0xFF, write
-  mask 1: the view's key bit selects it), so the engine's TAA mask fill (step 11, stays the engine's) reads the same stencil.
-- Lighting: the view's own frame constants from the menu's `SetPerFrameBuffers` (as the reflection's `LatchFrameBuffer`), the menu
-  scheme's directional and ambient light in place of the main rows', no Light Limit Fix clusters (null t35-t37) and the scheme's point
-  lights as the view's own list. This is the largest new piece (a shading contribution per view).
-- **Freeze-frame menus:** without a world frame DCLF adopts nothing. The view needs a menu frame: at UI::Render, adopt the newest
-  publication and run `host->BuildIfRequested()` between frames, as Bink does. Until then the view covers only menus with a world frame.
+`Features/MenuViews/MenuScenes.h`, `MenuScenesCapture.cpp`, `MenuScenesDraws.cpp`, on with `CS_ORG_MAP=1`:
+- Thunks on the two SubmitAccumulator calls (step 3 and 4) open a batch (views `local-map` and `local-map-fog`). DrawTriShape (the
+  families' one detour) latches each BSUtilityShader draw of the base texture or fog technique, not skinned: the engine constants
+  (VS b0, b1, b2; PS b1, b2), the alpha reference, t0 and t7 with their samplers, the geometry by device address, the engine's
+  blend, depth-stencil and raster states, the viewport. Then `Engine::ApplyPendingState`, so the render's clears land before the run.
+- After the batch the EngineDraws anchor runs the client of its view (`cs.menu-scenes.local-map`, `cs.menu-scenes.local-map-fog`,
+  made at setup, orders 5 and 6): one draw a latched draw into kLOCAL_MAP_SWAP with kMAIN's depth, in the engine's order, with
+  Utility.hlsl's `UTILITY_ORG_SCENE` build (vertex pulled; programs keyed by the vertex descriptor, as the water's).
+- A pass of a shader with no program (watched SetupGeometry of Lighting, Effect and DistantTree: the landscape's Lighting passes, tree
+  LOD), a non-TriShape pass, or a refused draw ends the latched part: it runs, and the rest is handed back to the engine unvouched, as every
+  family's is (the census names it). So until a Lighting program exists the land and what follows it stay D3D11.
+- The ImageSpace effect (step 5) is the ImageSpace port's.
 
-### The local map view (stage 3, not written)
+### Menu 3D as an engine draw family (not written)
 
-A view of the one scene like the reflection's faces: members are the main set's objects and LOD (`LodTechniques`-like membership over the
-main set, the cells the local map culls), `OwnRenderers` = the accumulator at +0x302C8 while `LocalMapRenderer::Render` runs. One face,
-orthographic, its own depth, into kLOCAL_MAP_SWAP (0x11) imported once. The program family is new: the Utility shader's local map
-technique (`LOCALMAP_FOGOFWAR`), not the Lighting colour pipelines. The water pass (mode 0x13) stays the engine's (the p5-water lane).
-The local map renders only when the tab opens or pans: the epoch runs on those frames, its shape fixed, so nothing rebuilds.
-
-**Boundary with p5-imagespace:** effect 0x62 (`BSImagespaceShaderLocalMap`, 0x11 -> 0x10) is theirs. The view writes 0x11 through the
-engine target's graph resource (`FrameAnchors::EngineTarget(kLOCAL_MAP_SWAP)`), the same resource their pass reads, so the graph orders
-it; nothing here touches 0x10.
+The same pattern at `UI3DSceneManager::Render`: batches at its SubmitAccumulator calls (the depth pre-pass with keepDepth, the colour
+submit at step 9), and its menu lights' shadow maps (`BSShadowLight::RenderShadowmap` inside it). Its shadow masks are already the
+shadow mask family's (`menu` view). What it needs that no family has:
+- **Lighting.hlsl built for ORG** (the menu models' colour draws, skinned or not; also the local map's land). The work: the cbuffers
+  (VS b0-b2, VS_PerFrame b12, PS b0-b2, b11) as latch statics by their packoffsets, t0-t15 and s0-s15 by heap index, the Permutation
+  block per draw (as Water's `DCLF_PULLED_ROWS`), the bones (Skinned.hlsli's cbuffer) latched for skinned draws, the vertex pulled
+  (Lighting's DCLF pulled stage reads the same attributes), and every header resource its includes read moved to `ORG_HEADER_SRV`
+  (44 register-bound declarations in feature headers are not yet), or the world features undefined in the menu build. Its targets: RT0
+  (kMAIN for scheme 4, else what UI::Render bound: kMAIN or the framebuffer) and kMOTION_VECTOR, kMAIN's depth with the stencil write
+  (mode 2, ref 0xFF) the engine's depth-stencil state describes.
+- **Effect.hlsl built for ORG** (enchantment glow, the main menu's mist).
+- **Utility's RENDER_DEPTH and RENDER_SHADOWMAP techniques** in the ORG build (the depth pass and the menu lights' shadow maps).
+- The TAA mask fill (step 11) and the HDR chain (step 12) are ImageSpace's.
+Until then `menu views: menu 3D left to the engine` stays: removing it alone would drop the loading-screen model under the latch.
 
 ### World map and race menu (no view needed)
 
@@ -159,9 +168,9 @@ renders off the main thread (counted as such); the loading model is the p5-loadi
 ## What can trigger a graph rebuild
 
 - The probe: nothing (no client, no import).
-- The planned views: registered at install with fixed shapes; their targets imported once; a scheme or menu change only changes the
-  scene lane's filing (a publication, not a graph build); RT0's two cases are two passes chosen by a latch. A target resize (a resolution
-  change) re-imports, as every engine target does.
+- The local map family: two clients registered at setup with every input fixed, joined at the setup's build point; a target made
+  again (a resolution change) leaves the batches to the engine until the next start, as the shadow mask family does. Nothing
+  registers during play.
 
 ## Test plan
 
@@ -172,6 +181,9 @@ renders off the main thread (counted as such); the loading model is the p5-loadi
    the targets (RT0 1 or 0), the stencil mode (2, ref 0xff), the geometry counts and the verdict. The local map needs its tab opened by
    hand (no test command), then `[DCLF] menu views: local map ...` (orthographic, RT0 17, depth 0).
 3. The census (both): with the world map and the race menu open, no Lighting member drawn by the engine.
+4. The local map (org1, tab opened by hand): `[DCLF] menu scenes: the first cs.menu-scenes.local-map run drawn by the graph` and the
+   same for `local-map-fog`; the map's shot against org0's. A `[DCLF] menu scenes: the engine draws ...` line names each refusal (the
+   land's Lighting passes until a Lighting program exists).
 
 ## The menu scene's shadow masks
 
@@ -183,7 +195,6 @@ the menu 3D view below. The model's own Lighting draws, step 9, stay the engine'
 
 ## Not done
 
-- The menu 3D and local map views (stage 2 and 3 above): a third and fourth engine view through Core's view machinery, the menu
-  lighting, the stencil key, the menu frame for freeze-frame menus. Not started because each changes Core's two-view code paths in many
-  places that cannot be checked without a build; the probe's first run decides the order (freeze frames, tracking).
-- No item is selected in the inventory scenario (no test command selects one): the inventory's scheme may log an empty root.
+- Menu 3D's family (above): the Lighting, Effect and Utility depth/shadow map programs first, then the batches.
+- The local map's land: Lighting's land technique in that program.
+- No item is selected in the inventory scenario (no test command selects one), and the local map tab needs opening by hand.
