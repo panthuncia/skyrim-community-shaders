@@ -229,12 +229,9 @@ namespace DCLF::Features::MenuViews::Scenes
 			                        Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
 			if (result != Family::GeometryResult::Ok)
 				return Family::ReasonOf(result);
-			// Only the Effect constants carry a second stream; Utility's pull one stream.
-			if constexpr (requires { constants.streamStride; }) {
-				constants.streamAddress[0] = static_cast<std::uint32_t>(geometry.streamAddress);
-				constants.streamAddress[1] = static_cast<std::uint32_t>(geometry.streamAddress >> 32);
-				constants.streamStride = geometry.streamStride;
-			}
+			constants.streamAddress[0] = static_cast<std::uint32_t>(geometry.streamAddress);
+			constants.streamAddress[1] = static_cast<std::uint32_t>(geometry.streamAddress >> 32);
+			constants.streamStride = geometry.streamStride;
 			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
 			constants.vertexAddress[1] = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
 			constants.indexAddress[0] = static_cast<std::uint32_t>(geometry.indexAddress);
