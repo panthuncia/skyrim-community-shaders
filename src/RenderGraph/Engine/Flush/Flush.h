@@ -35,6 +35,8 @@ namespace RE
  *   first, with the latched shaders, so CS's D3D11 readers still see the engine's current state. CS code that asks D3D11 what the
  *   engine bound at any other point (PSGetShaderResources, OMGetRenderTargets, RSGetViewports) reads stale state: flush.md lists it.
  *   CS_ORG_ENGINE_FLUSH_LATCH_KEEP=<method>,... names binds that still reach D3D11 inside the four functions, to bisect those readers.
+ *   CS_ORG_ENGINE_FLUSH_LATCH_UNBIND=1: a latched flush that consumed the target bit unbinds DXVK's targets, so DXVK holds no stale
+ *   target whose views CS binds would then be dropped (InstallStateTrace). The next real flush binds the engine's targets as owed.
  *
  * Allowed engine draws: code that declines a draw on purpose (DCLF's objects not yet claimed, a port's inherent refusals) says so,
  * and the latch lets that draw through with the owed state applied, as for a flush CS asks for. Two forms:
@@ -113,6 +115,22 @@ namespace RenderGraph::Engine::Flush
 	 */
 	void BeginEngineRest(const Reason& a_reason);
 	void EndEngineRest();
+
+	/**
+	 * @brief globals::InstallD3DHooks, on DXVK's immediate context: the state readers' trace (StateTrace.cpp), with the census
+	 * (CS_ORG_RESIDUE_CENSUS=1, CS_ORG_TRIPWIRE_GUEST=1) only. DXVK drops a shader resource bind whose resource is bound as an output,
+	 * and a target bind unbinds the shader resources of its resource. With the latch on, DXVK keeps the targets the last real flush
+	 * bound, so CS binds of views of those targets can be dropped. The trace logs each dropped bind and unbinding once per site, with
+	 * what holds the resource and whether the engine's shadow state has moved off it.
+	 */
+	void InstallStateTrace(ID3D11DeviceContext* a_context);
+
+	/**
+	 * @brief A CS reader of DXVK's PS bindings (DCLF's captures, the families' headers, the frame buffers): a_view is what it read at
+	 * a_register. A null read where the trace saw the last bind dropped or unbound is logged once per reader and register, with how
+	 * it was lost. Nothing without the trace.
+	 */
+	void NoteRead(const char* a_reader, std::uint32_t a_register, ID3D11ShaderResourceView* a_view);
 
 	/** @brief Whether VouchPass records anything (the latch is on). Test it before work that only feeds VouchPass. Any thread. */
 	bool Vouching();

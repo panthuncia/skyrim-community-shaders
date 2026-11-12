@@ -1,6 +1,7 @@
 #include "Globals.h"
 #include "GpuEventTimers.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
@@ -873,6 +874,8 @@ namespace globals
 		stl::detour_vfunc<48, ID3D11DeviceContext_UpdateSubresource>(a_context);
 		// CS_ORG_ENGINE_CONSTANTS=1: the constant-buffer binds behind the per-use capture.
 		RenderGraph::Engine::Constants::InstallD3DHooks(a_context);
+		// CS_ORG_RESIDUE_CENSUS=1: the state readers' trace (binds DXVK drops, the readers that read them).
+		RenderGraph::Engine::Flush::InstallStateTrace(a_context);
 		// CS_DCLF_DRAW_TRACE / CS_DCLF_DEPTH_TRACE (Drawcall Limit Fix's diagnostics).
 		const bool depthTrace = Util::SwitchFile::Enabled("CS_DCLF_DEPTH_TRACE");
 		if (Util::SwitchFile::Enabled("CS_DCLF_DRAW_TRACE") && !depthTrace)
