@@ -293,7 +293,8 @@ namespace DCLF::LoadHold
 		 * @brief Render thread, at a frame's start: the map menu opening is a camera cut. The engine's map registers the LOD land, objects
 		 * and clouds under TES::lodLandRoot in its first frames only, and DCLF's set, culled with the world camera, does not hold them yet.
 		 * So the frame is held as a re-entry (BeginReentry): DCLF's classes are withheld from the engine and the last frame stays on screen
-		 * until the set made with the map camera is installed and settled; DCLF then draws them. CS_DCLF_MAP_HOLD=0 turns the hold off.
+		 * until the set made with the map camera is installed and settled; DCLF then draws them. Closing the map is the cut back, held the
+		 * same way. CS_DCLF_MAP_HOLD=0 turns both holds off.
 		 * The map census starts here too (PassCapture::SetMapCensus).
 		 */
 		void WatchMapStart()
@@ -303,14 +304,18 @@ namespace DCLF::LoadHold
 			if (now == mapOpen)
 				return;
 			mapOpen = now;
-			mapFrames = 0;
+			static const bool mapHold = Util::SwitchFile::Value("CS_DCLF_MAP_HOLD") != "0";
 			if (!now) {
 				PassCapture::Get().SetMapCensus(false);
 				LogMapCensus(mapFrames, "the map closed");
+				mapFrames = 0;
+				// Closing it is the cut back: the world's objects are not in the set culled with the map camera.
+				if (mapHold)
+					BeginReentry("the map menu closed (a camera cut back: the world is not in the set culled with the map camera)");
 				return;
 			}
+			mapFrames = 0;
 			PassCapture::Get().SetMapCensus(true);
-			static const bool mapHold = Util::SwitchFile::Value("CS_DCLF_MAP_HOLD") != "0";
 			if (mapHold)
 				BeginReentry("the map menu opened (a camera cut: the map's LOD is not in the set culled with the world camera)");
 		}
