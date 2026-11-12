@@ -24,7 +24,9 @@ namespace DCLF
 	 * @brief The registration hooks at every point where the engine hands a pass to a batch renderer. A member of the frame's DCLF
 	 * set (SceneSet.h) has its passes withheld from the main views (Z-prepass and main accumulators), an InMainRenderers view's
 	 * accumulators (the first person's), an OwnRenderers view's renderers (the reflection faces') and the occlusion maps while DCLF draws
-	 * them; shadow views withhold the casters DCLF draws. Runs on whatever thread the engine registers on.
+	 * them; shadow views withhold the casters DCLF draws. An object waiting to join (SetSnapshot::pending) is withheld the same way, and
+	 * during a load's hold (Core/Render/LoadHold.h) every pass of DCLF's classes into those views is. Runs on whatever thread the engine
+	 * registers on.
 	 *
 	 * Lighting passes are also recorded, for observers only (FrameView::DrainCapture): DCLF draws nothing from registrations.
 	 * `BSBatchRenderer::RegisterPass` (vfunc 0x02), not GetRenderPasses, because `technique` (the caller's `techniqueID`, which
@@ -61,6 +63,7 @@ namespace DCLF
 			std::uint32_t directWithheld = 0;      // shadow passes of hints 11, 7 and 3, which bypass RegisterPass too
 			std::uint32_t mainWithheld = 0;
 			std::uint32_t occlusionWithheld = 0;
+			std::uint32_t holdWithheld = 0;  // passes of DCLF's classes a load's hold withheld (HeldByLoad)
 			// By draw family: its engine shapes' passes into the main views while DCLF draws the family (tree LOD's).
 			std::array<std::uint32_t, static_cast<std::size_t>(Api::DrawFamily::Count)> familyWithheld{};
 			// By view, an OwnRenderers view's (the water reflection's faces): its members' passes, and by draw family its engine shapes'
@@ -70,11 +73,10 @@ namespace DCLF
 		};
 
 		/**
-		 * @brief Render thread, before the main cull (IndirectDraws::DecideDrawFamilies): whether DCLF draws a draw family this frame (then
-		 * the engine's main-view passes its draws replace are withheld: TreeInstances', tree LOD's shapes).
+		 * @brief Render thread, before the main cull (IndirectDraws::DecideDrawFamilies): whether the engine's main-view passes a draw family's
+		 * draws replace are withheld this frame (TreeInstances', tree LOD's shapes): DCLF draws the family, or waits to (its pipelines).
 		 */
-		void SetFamilyOwned(Api::DrawFamily a_family, bool a_owned) { familyOwned[static_cast<std::size_t>(a_family)].store(a_owned, std::memory_order_release); }
-		bool FamilyOwned(Api::DrawFamily a_family) const { return familyOwned[static_cast<std::size_t>(a_family)].load(std::memory_order_acquire); }
+		void SetFamilyWithheld(Api::DrawFamily a_family, bool a_withheld) { familyHeld[static_cast<std::size_t>(a_family)].store(a_withheld, std::memory_order_release); }
 
 		/**
 		 * @brief Render thread, BeginSceneFrame: whether a view's epochs draw its members (its coverage; before the first, its
@@ -163,6 +165,19 @@ namespace DCLF
 		/** @brief The slot and the shadow registration's insertions Install writes (HookSites): the engine's own, as the hooks do not chain. */
 		static void Preflight();
 		bool Installed() const { return installed; }
+		/**
+		 * @brief A menu scene's render on this thread (UI3DSceneManager::Render, LocalMapRenderer::Render: Features/MenuViews): its
+		 * registrations go to no view DCLF draws, so a load's hold withholds none of them (the loading menu's model and its shadows).
+		 */
+		class MenuSceneScope
+		{
+		public:
+			MenuSceneScope();
+			~MenuSceneScope();
+			MenuSceneScope(const MenuSceneScope&) = delete;
+			MenuSceneScope& operator=(const MenuSceneScope&) = delete;
+		};
+
 		/** @brief The hook is a plain pass-through while set (DCLF off). */
 		void SetBypassed(bool a_bypassed) { bypassed.store(a_bypassed, std::memory_order_release); }
 		bool Bypassed() const { return bypassed.load(std::memory_order_acquire); }
@@ -198,12 +213,6 @@ namespace DCLF
 		void SetFocusBatchRenderers(std::shared_ptr<const ShadowRendererMap> a_renderers);
 		/** @brief Whether a_batch is a shadow view's renderer this frame, with its mode index. */
 		bool ShadowModeOfBatch(const RE::BSBatchRenderer* a_batch, std::uint32_t& a_mode) const;
-		/**
-		 * @brief Render thread, with the flush latch on (RenderGraph::Engine::Flush::Vouching): the batch renderers of every shadow light the
-		 * engine keeps this frame (ShadowViews::AddCaster), covered by DCLF or not. Their passes DCLF does not withhold are the engine's to
-		 * draw (KeepForEngine). Null drops them (BeginCasters).
-		 */
-		void SetEngineShadowRenderers(std::shared_ptr<const ankerl::unordered_dense::set<const RE::BSBatchRenderer*>> a_renderers);
 		/**
 		 * @brief The set Withhold tests a pass into a_batch against: the frame's when a_batch is a shadow view's and DCLF draws the shadow
 		 * views this frame, else null. The Sun source's accumulation uses the same test.
@@ -251,13 +260,12 @@ namespace DCLF
 		std::span<const Entry> lastDrain;
 		std::shared_ptr<const ShadowRendererMap> shadowRenderers;
 		std::shared_ptr<const ShadowRendererMap> focusRenderers;
-		std::shared_ptr<const ankerl::unordered_dense::set<const RE::BSBatchRenderer*>> engineShadowRenderers;
 		std::array<std::atomic<std::uint32_t>, kShadowModes> shadowWithheld{};
 		std::atomic<std::uint32_t> volumetricWithheld{ 0 };
 		std::atomic<std::uint32_t> directWithheld{ 0 };
-		std::atomic<std::uint32_t> mainWithheld{ 0 }, occlusionWithheld{ 0 };
+		std::atomic<std::uint32_t> mainWithheld{ 0 }, occlusionWithheld{ 0 }, holdWithheld{ 0 };
 		std::array<std::atomic<std::uint32_t>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyWithheld{};
-		std::array<std::atomic<bool>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyOwned{};
+		std::array<std::atomic<bool>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyHeld{};
 		static_assert(static_cast<std::size_t>(Api::DrawFamily::Count) <= 32, "ViewRenderers::familyOwned is a 32-bit mask by family");
 		/**
 		 * @brief The OwnRenderers views' test at every main-mode insertion point, after WithholdMain: a member's pass of the view's phase
@@ -296,10 +304,16 @@ namespace DCLF
 		std::array<ViewRenderers, Extensions::kEngineViews> viewRenderers;
 		static void NoteViewResidue(ViewRenderers& a_view, const RE::BSRenderPass* a_pass, bool a_treeLod);
 		/**
-		 * @brief The main-view test at every insertion point: a member's pass into a main view (all of them: DCLF draws its fades and LOD
-		 * cross-fade copy), or tree LOD's or an InMainRenderers view's member's (the first person's) while DCLF draws those.
+		 * @brief The main-view test at every insertion point: a member's or waiting object's pass into a main view (all of them: DCLF draws
+		 * its fades and LOD cross-fade copy), or tree LOD's or an InMainRenderers view's member's (the first person's) while DCLF draws
+		 * those; every pass of DCLF's classes during a load's hold. A main view's group renderer made this frame counts (MainRendererNow).
 		 */
 		bool WithholdMain(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass);
+		/**
+		 * @brief The load's hold's test, once the caller knows a_pass goes to a view DCLF draws: true (counted) while a hold is in effect
+		 * (LoadHold::Active) and a_pass is of DCLF's classes (a Lighting, Effect or DistantTree property's).
+		 */
+		bool HeldByLoad(const RE::BSRenderPass* a_pass);
 		template <std::uint32_t Group>
 		struct MainGroupHook;
 		template <std::uint32_t Group>
@@ -322,18 +336,15 @@ namespace DCLF
 		void NoteKept(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint8_t a_site, std::uint8_t a_occlusionPhase = 0) const;
 		bool Withhold(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass);
 		/**
-		 * @brief A pass handed on to the engine (not withheld): with the flush latch on (P5.13, p5/flush.md "Allowed engine draws"),
-		 * one DCLF leaves to the engine on purpose is vouched for (RenderGraph::Engine::Flush::VouchPass), so the engine still draws
-		 * it: a Lighting, Effect or DistantTree property's pass into a renderer DCLF withholds from (the main views and the first
-		 * person's, the shadow views (any shadow-map caster pass the shadow registration builds), the reflection faces, the occlusion
-		 * maps with a_occlusion), and the sky's precipitation, which
-		 * nothing ports. Nothing else, and nothing while bypassed or with the latch off.
+		 * @brief A pass handed on to the engine (not withheld): with the flush latch on (P5.13, p5/flush.md "Allowed engine draws"), the
+		 * sky's precipitation, which nothing ports, is vouched for (RenderGraph::Engine::Flush::VouchPass), so the engine still draws it.
+		 * DCLF vouches for nothing of its own classes: what it does not draw yet is withheld. Nothing while bypassed or with the latch off.
 		 */
-		void KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, bool a_occlusion = false) const;
+		void KeepForEngine(const RE::BSRenderPass* a_pass) const;
 		/**
-		 * @brief KeepForEngine's test when the published sets do not hold a_batch: whether it is one of the main views' batch renderers now
+		 * @brief WithholdMain's test when the published sets do not hold a_batch: whether it is one of the main views' batch renderers now
 		 * (the accumulators' geometry and alpha groups read live). The engine makes a group's renderer at the group's first pass, during
-		 * the registrations, after the render thread made the sets (RefreshMainRenderers): its passes that frame are the engine's too.
+		 * the registrations, after the render thread made the sets (RefreshMainRenderers): its passes that frame are withheld as any.
 		 */
 		bool MainRendererNow(const RE::BSBatchRenderer* a_batch) const;
 	};

@@ -101,9 +101,15 @@ namespace DCLF::Scene
 		bool TakeSwitchChanges(std::vector<const RE::NiAVObject*>& a_out);
 		/**
 		 * @brief Whether a load screen is up (the scene graph is being rebuilt). Nothing may walk the scene graph while it holds, and
-		 * run-comparable frame counters should not advance across it.
+		 * run-comparable frame counters should not advance across it. The loading menu a load's hold keeps open (LoadHold::MenuHeld)
+		 * is not: the load is done, and the world's frames under it build the tables.
 		 */
 		static bool IsLoadingScreenUp();
+		/**
+		 * @brief Whether a load shows on screen: a load screen is up, a load's hold keeps the world's frames off the screen
+		 * (LoadHold::Active), or the menu it kept is still open (fading out). Run-comparable frame counters do not advance across them.
+		 */
+		static bool LoadShown();
 		/**
 		 * @brief Latches the main camera's accumulator. Call where `globals::game::currentAccumulator` is set: it is a *currently
 		 * rendering* pointer, null before the main pass although the accumulator is built before the shadow maps. Earlier readers
@@ -152,6 +158,8 @@ namespace DCLF::Scene
 		 */
 		std::shared_ptr<const SetSnapshot> FrameClaims() const { return std::atomic_load(&frameClaims); }
 		bool HasInstalled() const { return installed != nullptr; }
+		/** @brief Render thread: the installed publication (null before the first), for what its pass left waiting (LoadHold). */
+		const ScenePublication* InstalledPublication() const { return installed.get(); }
 		/**
 		 * @brief Render thread: no claims were installed yet - every frame before DCLF's first covered one (its tables, resources and first
 		 * revision being made), whose epochs draw nothing. The only claims-less state besides a load screen: once installed, the claims

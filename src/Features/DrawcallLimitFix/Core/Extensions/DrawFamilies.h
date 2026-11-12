@@ -53,11 +53,14 @@ namespace DCLF::Api
 		std::uint32_t frame = 0;
 		Draws::SceneBuffers* scene = nullptr;
 		DrawFamily family = DrawFamily::Count;
+		// Set by Pipelines: the family has something it can draw and waits for it (its pipelines, their recording); none failed.
+		bool* waits = nullptr;
 
 		/**
 		 * @brief decide's: Core's pipeline lane for the family's slot - posts its program source (frame.programSource) and asks for its
 		 * pipelines, counting the frame's wait for them; true once the frame's catalog has them and a_drawable (what else its draws need,
-		 * the feature's), and then they are the slot's for the passes (published: Draws::FamilyPipelinesOf).
+		 * the feature's), and then they are the slot's for the passes (published: Draws::FamilyPipelinesOf). A drawable family that is not
+		 * ready yet sets *waits: its passes are withheld from the engine until it is.
 		 */
 		bool Pipelines(bool a_drawable) const;
 	};

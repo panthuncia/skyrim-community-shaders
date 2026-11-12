@@ -673,7 +673,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	// and clears the map. Otherwise, or on a frame DCLF did not draw it, the engine does.
 	auto& dclf = globals::features::drawcallLimitFix;
 	const bool reference = a_dclf && dclf.OcclusionReferenceFrame(DrawcallLimitFix::kSkyOcclusion);
-	// Held by Drawcall Limit Fix's startup hold: rendered here without the engine's cull, as DCLF's own variant is.
+	// Held by a Drawcall Limit Fix load hold: rendered here without the engine's cull, as DCLF's own variant is.
 	const bool held = !a_dclf && dclf.OcclusionHeld(DrawcallLimitFix::kSkyOcclusion);
 	const bool engine = (!a_dclf && !held) || reference;
 	{

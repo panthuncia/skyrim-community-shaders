@@ -311,11 +311,13 @@ namespace DCLF
 		 * @brief Render thread, the frame's first DCLF point, before the main camera's cull (FrameDriver): each taken draw family's decide
 		 * (Api/DrawFamilies.h: while it is set up, on and the frame's claims installed; tree LOD's, with its pipelines from its program
 		 * source on the lane, DrawFamilyFrame::Pipelines), published: DrawFamilyOwned, and PassCapture withholds the engine's passes the
-		 * family's draws replace (SetFamilyOwned).
+		 * family's draws replace (SetFamilyWithheld), also while the family waits for its pipelines: the engine never draws it meanwhile.
 		 */
 		void DecideDrawFamilies(std::uint32_t a_frame);
 		/** @brief Render thread: whether a_family's draws are DCLF's this frame (DecideDrawFamilies; false before the implementation). */
 		bool DrawFamilyOwned(Api::DrawFamily a_family) const;
+		/** @brief Render thread: the draw families whose decision this frame waited for what they draw with (LoadHold waits for none). */
+		std::uint32_t DrawFamiliesWaiting() const;
 		/**
 		 * @brief Render thread, after the frame's coverage (DecideCoverage): a_family's pipelines as the adopted snapshot's revision draws it
 		 * (its depth shape's PassFrame::families; null: the revision does not draw it, or nothing is adopted). A frame owns a family only

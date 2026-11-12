@@ -274,7 +274,7 @@ namespace DCLF
 
 			void OnFrame()
 			{
-				if (DCLF::Scene::FrameView::IsLoadingScreenUp())
+				if (DCLF::Scene::FrameView::LoadShown())
 					return;
 				const std::uint32_t a_frame = ++frame;
 				if (wait) {
@@ -1066,7 +1066,7 @@ namespace DCLF
 
 			void OnFrame(const std::string& a_feature)
 			{
-				if (frames.empty() || DCLF::Scene::FrameView::IsLoadingScreenUp())
+				if (frames.empty() || DCLF::Scene::FrameView::LoadShown())
 					return;
 				++frame;
 				for (std::size_t i = 0; i < frames.size(); ++i) {
@@ -1099,7 +1099,7 @@ namespace DCLF
 
 			void OnFrame()
 			{
-				if ((ranges.empty() && moves.empty()) || DCLF::Scene::FrameView::IsLoadingScreenUp())
+				if ((ranges.empty() && moves.empty()) || DCLF::Scene::FrameView::LoadShown())
 					return;
 				++frame;
 				// CS_DCLF_TEST_MOVE: the player carried forward along its heading, that many units a frame, so that
@@ -1310,7 +1310,7 @@ namespace DCLF
 		static TestCommands testCommands;
 		static const std::uint32_t exitFrame = static_cast<std::uint32_t>(std::strtoul(DCLF::SwitchValue(DCLF::Switch::TestExit).c_str(), nullptr, 10));
 		static std::uint32_t exitCount = 0;
-		if (exitFrame && !DCLF::Scene::FrameView::IsLoadingScreenUp() && ++exitCount >= exitFrame + testCommands.HeldFrames()) {
+		if (exitFrame && !DCLF::Scene::FrameView::LoadShown() && ++exitCount >= exitFrame + testCommands.HeldFrames()) {
 			logger::info("[DCLF] test exit at frame {}", exitCount);
 			const auto moves = DCLF::Extensions::TransformMoveStats();
 			logger::info("[DCLF] transform moves at exit: {} spilled (allocated past the queue), {} dropped while no build drained", moves.spilled, moves.dropped);

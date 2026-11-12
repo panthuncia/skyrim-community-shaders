@@ -4,7 +4,7 @@
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/SunAccumulation.h"
 #include "Features/DrawcallLimitFix/Core/Scene/EngineCasters.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/EngineOnlyCull.h"
-#include "Features/DrawcallLimitFix/Core/Render/StartupHold.h"
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/LocalLightCull.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -244,13 +244,13 @@ namespace DCLF::Features::Shadows::Sun
 			covered = covered && view.covered && PassCapture::Get().CastersForBatch(view.batch);
 		}
 		if (!covered || cascades < a_light->GetRuntimeData().shadowmapDescriptors.size()) {
-			// The session's first frames (Core/Render/StartupHold.h): held black, the whole skip kept rather than the engine's whole cull.
-			// Not a parity frame's (ExcludeSun).
-			if (!StartupHold::Active() || !ExcludeSun(Scene::FrameView::Get().GetFrame())) {
+			// A load's hold (Core/Render/LoadHold.h): off the screen, the whole skip kept rather than the engine's whole cull. Not a parity
+			// frame's (ExcludeSun).
+			if (!LoadHold::Active() || !ExcludeSun(Scene::FrameView::Get().GetFrame())) {
 				++stats.wholeDeclined;
 				return false;
 			}
-			StartupHold::NoteHeld(StartupHold::View::Sun);
+			LoadHold::NoteHeld(LoadHold::View::Sun);
 			++stats.wholeHeld;
 		}
 		// A caster that stays the engine's (a skin DCLF refuses, a buffer it cannot import) has only the engine's cull to draw its shadow:
