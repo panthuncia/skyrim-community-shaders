@@ -267,7 +267,7 @@ namespace GraphResources
 			graphDesc.dsvFormat = imageFormat;
 			graphDesc.initialLayout = *home;
 			std::shared_ptr<org::ExternalTextureResource> texture;
-			if (*home == rhi::ResourceLayout::Common && !Backend::IsD3D12()) {
+			if (*home == rhi::ResourceLayout::Common && !RenderGraph::Backend::IsD3D12()) {
 				// Resting in GENERAL (native mode): the graph reads and renders it in GENERAL alone. That takes an import with
 				// simultaneous access, since BasicRHI renders its own images in the attachment layouts. The import does not own the
 				// image, so the graph texture keeps it: the import goes first, then the image.
