@@ -1,6 +1,6 @@
 // The menu scenes family's render graph side: a client per batch at the EngineDraws anchor, made once at setup, whose pass draws a
 // batch's latched draws into the view's imported targets with kMAIN's depth, in the engine's order, with CS's shaders built for ORG
-// (Utility.hlsl's UTILITY_ORG_SCENE, Lighting.hlsl's LIGHTING_ORG).
+// (Utility.hlsl's UTILITY_ORG_SCENE, Lighting.hlsl's LIGHTING_ORG, Effect.hlsl's EFFECT_ORG).
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -204,6 +204,9 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			Family::EngineDrawPrograms lighting{ "menu scenes (Lighting)", { .source = "Lighting.hlsl",
 																			   .constantWords = ShaderBindings::Words<UtilityBlock>(),
 																			   .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Lighting) } };
+			Family::EngineDrawPrograms effect{ "menu scenes (Effect)", { .source = "Effect.hlsl",
+																		   .constantWords = ShaderBindings::Words<UtilityBlock>(),
+																		   .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Effect) } };
 			bool reserved = false;
 			bool setUp = false;
 			bool failed = false;
@@ -255,6 +258,9 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		void ListInputs(Family::PublishedInputs& a_inputs)
 		{
 			a_inputs.AddEngine(RE::RENDER_TARGET::kSHADOW_MASK);
+			// An Effect draw's soft depth (t3): the depth copy, or kMAIN's.
+			a_inputs.AddEngine(RE::RENDER_TARGET_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
+			a_inputs.AddEngine(RE::RENDER_TARGET_DEPTHSTENCIL::kMAIN_COPY);
 		}
 
 		/** @brief The client of a_view, registered with the anchor. Null, logged, when a target cannot be imported. */
@@ -384,6 +390,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		Family::StartStagePrecompile();
 		state.utility.Prebuild();
 		state.lighting.Prebuild();
+		state.effect.Prebuild();
 		if (!::RenderGraph::Engine::Constants::Requested()) {
 			logger::warn("[DCLF] menu scenes: needs the engine constants capture (CS_ORG_ENGINE_CONSTANTS=1); the menu scenes stay the engine's");
 			return true;
@@ -436,6 +443,11 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		return GetState().lighting.Get(a_key, a_shader);
 	}
 
+	std::shared_ptr<const void> EffectProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
+	{
+		return GetState().effect.Get(a_key, a_shader);
+	}
+
 	std::uint32_t ColourFormat(View a_view, std::uint32_t a_index)
 	{
 		const auto client = ClientOf(a_view);
@@ -480,7 +492,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		for (const auto& client : state.clients)
 			if (client)
 				executed += client->executed.load(std::memory_order_relaxed);
-		return fmt::format("{} runs ({} drawn), {} draws, {} Utility and {} Lighting programs", state.runs, executed, state.draws, state.utility.Built(),
-			state.lighting.Built());
+		return fmt::format("{} runs ({} drawn), {} draws, {} Utility, {} Lighting and {} Effect programs", state.runs, executed, state.draws, state.utility.Built(),
+			state.lighting.Built(), state.effect.Built());
 	}
 }

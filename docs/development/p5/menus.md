@@ -5,9 +5,8 @@ SE 1.5.97 and AE 1.6.1170 (2026-11-10). IDs are Address Library IDs. The code is
 the switches are `CS_ORG_MENU3D=1` and `CS_ORG_MAP=1` (default off).
 
 **State (2026-11-12, Phase 5.5.7):** the menu scenes are an engine draw family, as the water and the shadow masks are
-(Core/Engine/Family), not DCLF views. The local map's Utility passes are drawn on the graph with `CS_ORG_MAP=1` (MenuScenes*.cpp,
-below). Menu 3D is still the engine's under its vouch: it needs Lighting and Effect programs (and Utility's depth and shadow map
-techniques) that no family has yet. The probe (stage 1) stays as a diagnostic.
+(Core/Engine/Family), not DCLF views: the local map's batches with `CS_ORG_MAP=1`, a menu model's depth and colour batches with
+`CS_ORG_MENU3D=1` (MenuScenes*.cpp, below). Neither scene is vouched for any more. The probe (stage 1) stays as a diagnostic.
 
 **Why not DCLF views.** Every census draw under the menu 3D vouch is the loading-screen and main-menu model (scheme 4). It renders on
 the serving thread during a load and at the main menu, where the probe logs `DCLF's scene has no publication`: DCLF's tables are frozen
@@ -127,33 +126,38 @@ have no DCLF frame (if it freezes the world).
 
 `Features/MenuViews/MenuScenes.h`, `MenuScenesCapture.cpp`, `MenuScenesDraws.cpp`, on with `CS_ORG_MAP=1`:
 - Thunks on the two SubmitAccumulator calls (step 3 and 4) open a batch (views `local-map` and `local-map-fog`). DrawTriShape (the
-  families' one detour) latches each BSUtilityShader draw of the base texture or fog technique, not skinned: the engine constants
-  (VS b0, b1, b2; PS b1, b2), the alpha reference, t0 and t7 with their samplers, the geometry by device address, the engine's
-  blend, depth-stencil and raster states, the viewport. Then `Engine::ApplyPendingState`, so the render's clears land before the run.
+  families' one detour) latches each BSUtilityShader draw of the base texture or fog technique, and the land's Lighting draws (the
+  Lighting program, below): the engine constants, the alpha reference, the slots with their samplers, the geometry by device address,
+  the engine's blend, depth-stencil and raster states, the viewport. Then `Engine::ApplyPendingState`, so the render's clears land before the run.
 - After the batch the EngineDraws anchor runs the client of its view (`cs.menu-scenes.local-map`, `cs.menu-scenes.local-map-fog`,
-  made at setup, orders 5 and 6): one draw a latched draw into kLOCAL_MAP_SWAP with kMAIN's depth, in the engine's order, with
-  Utility.hlsl's `UTILITY_ORG_SCENE` build (vertex pulled; programs keyed by the vertex descriptor, as the water's).
-- A pass of a shader with no program (watched SetupGeometry of Lighting, Effect and DistantTree: the landscape's Lighting passes, tree
-  LOD), a non-TriShape pass, or a refused draw ends the latched part: it runs, and the rest is handed back to the engine unvouched, as every
-  family's is (the census names it). So until a Lighting program exists the land and what follows it stay D3D11.
+  made at setup, orders 5 and 6): one draw a latched draw into kLOCAL_MAP_SWAP with kMAIN's depth, in the engine's order.
+- A pass of a shader with no program (watched SetupGeometry of DistantTree: tree LOD), a non-TriShape pass, or a refused draw ends
+  the latched part: it runs, and the rest is handed back to the engine unvouched, as every family's is (the census names it).
 - The ImageSpace effect (step 5) is the ImageSpace port's.
 
-### Menu 3D as an engine draw family (not written)
+### Menu 3D as an engine draw family (written)
 
-The same pattern at `UI3DSceneManager::Render`: batches at its SubmitAccumulator calls (the depth pre-pass with keepDepth, the colour
-submit at step 9), and its menu lights' shadow maps (`BSShadowLight::RenderShadowmap` inside it). Its shadow masks are already the
-shadow mask family's (`menu` view). What it needs that no family has:
-- **Lighting.hlsl built for ORG** (the menu models' colour draws, skinned or not; also the local map's land). The work: the cbuffers
-  (VS b0-b2, VS_PerFrame b12, PS b0-b2, b11) as latch statics by their packoffsets, t0-t15 and s0-s15 by heap index, the Permutation
-  block per draw (as Water's `DCLF_PULLED_ROWS`), the bones (Skinned.hlsli's cbuffer) latched for skinned draws, the vertex pulled
-  (Lighting's DCLF pulled stage reads the same attributes), and every header resource its includes read moved to `ORG_HEADER_SRV`
-  (44 register-bound declarations in feature headers are not yet), or the world features undefined in the menu build. Its targets: RT0
-  (kMAIN for scheme 4, else what UI::Render bound: kMAIN or the framebuffer) and kMOTION_VECTOR, kMAIN's depth with the stencil write
-  (mode 2, ref 0xFF) the engine's depth-stencil state describes.
-- **Effect.hlsl built for ORG** (enchantment glow, the main menu's mist).
-- **Utility's RENDER_DEPTH and RENDER_SHADOWMAP techniques** in the ORG build (the depth pass and the menu lights' shadow maps).
-- The TAA mask fill (step 11) and the HDR chain (step 12) are ImageSpace's.
-Until then `menu views: menu 3D left to the engine` stays: removing it alone would drop the loading-screen model under the latch.
+The same family at `UI3DSceneManager::Render`, on with `CS_ORG_MENU3D=1`: two batches, each one engine call.
+- `menu-depth`: the depth pass with keepDepth, `StartAccumulating(camera, depth accumulator +0x18, flags | 0x20)` (SE 51855 +0x43A, AE
+  52727 +0x435): Utility RENDER_DEPTH into kMAIN's depth.
+- `menu-colour`: the colour pass, `SubmitAccumulator(camera, colour accumulator +0x10, flags | 0x200)` (SE +0x658, AE +0x659): Lighting
+  and Effect, into RT0-RT2 as UI::Render and step 8 bound them, with kMAIN's depth and the stencil write (mode 2, ref 0xFF) the
+  engine's depth-stencil state describes. The clients import kMAIN, kMOTION_VECTOR and the TAA masks (4, 5); a draw whose RT0 is the
+  framebuffer (the inventory's and the other in-game menus') is refused until the framebuffer is an import.
+- Between them the shadow masks (AE 52728, at +0x461) are the shadow mask family's batch.
+- Programs, all keyed by a descriptor whose defines serve both stages:
+  - Utility.hlsl's `UTILITY_ORG_SCENE` (the vertex descriptor): RENDER_DEPTH and the shadow maps besides the local map's techniques.
+  - Lighting.hlsl's `LIGHTING_ORG` and Effect.hlsl's `EFFECT_ORG` (the pixel descriptor, which holds the vertex one's bits): the
+    constants are latch statics by their packoffsets, VS_PerFrame is the shared FrameBuffer, CS's permutation block is latched per
+    draw (Permutation.hlsli's `ORG_LATCHED_PERMUTATION`), the slots come from the heap (the register declarations stay for DCLF's
+    source rewrite, `PulledSource.cpp`; the ORG copies sit under their own `#if`), and the vertex is pulled.
+  - A skinned draw's palettes (VS b9, b10) are latched with it and read by row (Skinned.hlsli's `ORG_LATCHED_BONES`).
+  - The world's CS features are off in the Lighting and Effect builds: a menu scene has none of their frame inputs. So a menu model
+    shades as the vanilla shader with CS's material path, which may differ from the D3D11 path where a feature still applies.
+  - Lighting and Effect programs are not precompiled per descriptor (CS loads thousands): a key is built at its first draw on the render
+    thread, then prebuilt from the manifest in the next session.
+- An Effect draw with indexed texture coordinates (b11) is refused. The TAA mask fill (step 11) and the HDR chain (step 12) are
+  ImageSpace's.
 
 ### World map and race menu (no view needed)
 
@@ -182,8 +186,10 @@ renders off the main thread (counted as such); the loading model is the p5-loadi
    hand (no test command), then `[DCLF] menu views: local map ...` (orthographic, RT0 17, depth 0).
 3. The census (both): with the world map and the race menu open, no Lighting member drawn by the engine.
 4. The local map (org1, tab opened by hand): `[DCLF] menu scenes: the first cs.menu-scenes.local-map run drawn by the graph` and the
-   same for `local-map-fog`; the map's shot against org0's. A `[DCLF] menu scenes: the engine draws ...` line names each refusal (the
-   land's Lighting passes until a Lighting program exists).
+   same for `local-map-fog`; the map's shot against org0's. A `[DCLF] menu scenes: the engine draws ...` line names each refusal.
+5. Menu 3D (org1 with `CS_ORG_MENU3D=1`): `the first cs.menu-scenes.menu-depth run` and `menu-colour run drawn by the graph` at the main
+   menu and the loading screens; their shots against org0's (the world's CS features are off on the menu models). The census's load
+   windows should show no Lighting, Effect or Utility depth draw under `UI3DSceneManager::Render`.
 
 ## The menu scene's shadow masks
 
@@ -195,6 +201,7 @@ the menu 3D view below. The model's own Lighting draws, step 9, stay the engine'
 
 ## Not done
 
-- Menu 3D's family (above): the Lighting, Effect and Utility depth/shadow map programs first, then the batches.
-- The local map's land: Lighting's land technique in that program.
+- The framebuffer as an import, so the in-game menus' models (RT0 the framebuffer) are taken too.
+- The menu lights' shadow maps, if a menu scene draws them into kSHADOWMAPS inside a batch: a draw whose depth is not kMAIN's is refused.
+- The local map's land and tree LOD: the land's Lighting passes are taken with the Lighting program; tree LOD (DistantTree) ends the batch.
 - No item is selected in the inventory scenario (no test command selects one), and the local map tab needs opening by hand.

@@ -170,11 +170,9 @@ other ports' to vouch for, at their refusal points, with `EngineDraws`. Passes t
 hook (the reflection cube's render mode 0x19, `FUN_1414b2b90`; `RenderPersistentPassList`'s persistent passes, the cloud layers) are
 not vouched by DCLF.
 
-**Menu views** (`Features/MenuViews/MenuViewsFeature.cpp`): with the latch requested, the detour of `UI3DSceneManager::Render` (SE 51855,
-AE 52727) runs in an `EngineDraws` scope (`menu views: menu 3D left to the engine`), whatever `CS_ORG_MENU3D` says: no family takes a
-menu model yet (p5/menus.md). The local map's two batches are the menu scenes family's: drawn on the graph with `CS_ORG_MAP=1`, the
-rest of a refused batch (or the whole batch without the switch) is handed back unvouched, as every family's is. The menu 3D scope covers
-the loading screen's and the main menu's model (scheme 4, on the serving thread too), with its depth, shadow maps and particles.
+**Menu views** (`Features/MenuViews/`): no vouch. A menu model's depth and colour batches and the local map's two are the menu scenes
+family's (p5/menus.md), drawn on the graph with `CS_ORG_MENU3D=1` and `CS_ORG_MAP=1`; a refused batch's rest, like every family's, is
+handed back unvouched, so the census names it.
 
 What the other lanes call, at each place they leave a draw to the engine:
 
@@ -183,7 +181,6 @@ What the other lanes call, at each place they leave a draw to the engine:
 | Engine draw families (`EngineDrawFamily.cpp`) | the `DrawTriShape` detour when no taker takes the draw; a batch handed back | `EngineDraws` around the original `DrawTriShape` / the batch, one reason per family and refusal kind |
 | Sky (P5.3) | the cloud layers while `CS_ORG_SKY_CLOUDS` is off, a refused batch | `EngineDraws` around the engine's batch, or `VouchPass` at the persistent pass list |
 | Water, blood, shadow masks | a refused or handed-back batch; a water view `CS_ORG_WATER_PARTS` leaves out | `EngineDraws` around the engine's batch |
-| Menu views (DCLF) | the menu 3D models (loading screen included) | `EngineDraws` around `UI3DSceneManager::Render`; the local map's batches are the menu scenes family's, which hands back unvouched |
 | Bink, Scaleform, menus 3D | a movie on another thread, an engine `DrawBitmaps` path, the menu scene's own views | `EngineDraws` around the engine's call |
 
 ### Readers of the D3D11 state
