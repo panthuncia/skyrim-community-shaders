@@ -164,6 +164,14 @@ namespace RenderGraph::Engine::Skeleton
 
 			ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return { spec }; }
 
+			// Recorded at execution (FrameAnchors::PassDesc::atExecution): a view none of whose clears the run's commit opened is not
+			// recorded.
+			static bool SkipsAtExecution(const ClearBindings&, const ClearFrame& a_frame, const org::PassRecordContext& a_recording)
+			{
+				const auto& clear = *a_frame.spec;
+				return std::ranges::none_of(clear.draws, [&](const ClearDraw& a_draw) { return clear.gate->IsOpen(a_recording.Run(), a_draw.entry); });
+			}
+
 			static void Record(const ClearBindings& a_bindings, const ClearFrame& a_frame, org::PassRecordContext& a_recording)
 			{
 				const auto& clear = *a_frame.spec;
@@ -622,7 +630,9 @@ namespace RenderGraph::Engine::Skeleton
 					.anchor = kGroupAnchors[index],
 					.order = static_cast<std::int32_t>(spec->draws.front().entry),
 					.kind = FrameAnchors::PassKind::Render,
-					.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); } });
+					.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
+					// A run clears a few of the group's views: recorded after the commit, the others record nothing.
+					.atExecution = true });
 				group.specs.emplace(spec->target, std::move(pass));
 			}
 			client.active = [a_group] { return !GroupOf(a_group).pending.empty(); };

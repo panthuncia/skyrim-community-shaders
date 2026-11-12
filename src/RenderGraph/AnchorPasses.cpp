@@ -166,6 +166,14 @@ namespace RenderGraph::AnchorPasses
 
 			SpecFrame<Draw> Prepare(const DrawBindings&, const org::PassPrepareContext&) const { return { spec }; }
 
+			// Recorded at execution (FrameAnchors::PassDesc::atExecution): a gated draw whose entry the run's commit left closed does
+			// nothing, so it is not recorded. A clear of its target is work of its own, so a draw that clears is always recorded.
+			static bool SkipsAtExecution(const DrawBindings&, const SpecFrame<Draw>& a_frame, const org::PassRecordContext& a_recording)
+			{
+				const auto& spec = *a_frame.spec;
+				return spec.step.gate && spec.gate && spec.step.load != rhi::LoadOp::Clear && !spec.gate->IsOpen(a_recording.Run(), *spec.step.gate);
+			}
+
 			static void Record(const DrawBindings& a_bindings, const SpecFrame<Draw>& a_frame, org::PassRecordContext& a_recording)
 			{
 				const auto& spec = *a_frame.spec;
@@ -209,6 +217,14 @@ namespace RenderGraph::AnchorPasses
 			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(spec.get())); }
 
 			SpecFrame<Dispatch> Prepare(const DispatchBindings&, const org::PassPrepareContext&) const { return { spec }; }
+
+			// Recorded at execution (FrameAnchors::PassDesc::atExecution): a gated dispatch whose entry the run's commit left closed is
+			// not recorded.
+			static bool SkipsAtExecution(const DispatchBindings&, const SpecFrame<Dispatch>& a_frame, const org::PassRecordContext& a_recording)
+			{
+				const auto& spec = *a_frame.spec;
+				return spec.step.gate && spec.gate && !spec.gate->IsOpen(a_recording.Run(), *spec.step.gate);
+			}
 
 			static void Record(const DispatchBindings& a_bindings, const SpecFrame<Dispatch>& a_frame, org::PassRecordContext& a_recording)
 			{

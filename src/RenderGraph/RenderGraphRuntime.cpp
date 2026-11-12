@@ -1915,6 +1915,7 @@ bool RenderGraphRuntime::Initialize()
 					fmt::join(state->inStreamEpochs, ","));
 			}
 			state->host->SetExternalEpochs(state->inStreamEpochs);
+			FrameAnchors::SetTicketsAhead(*state->host);
 			state->host->SetAsyncEpochs(std::move(epochs), std::move(revisionEpochs));
 			logger::info("[ORG] Async epochs: each epoch is prepared and recorded ahead on the graph host's thread; the render thread submits (DCLF's from its scene revisions)");
 		} catch (const std::exception& e) {

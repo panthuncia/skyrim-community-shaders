@@ -490,6 +490,10 @@ Keys used so far:
 - **Answered in CS (Phase 3.5):** run gates (`RenderGraph::RunGate`, `ClientDesc::gates`). Every run of an anchor closes the
   gates of each client in its graph before any commit, so an inactive client's gated dispatches and draws are empty
   indirect work, never an older slot's values. A plugin API would expose the same gate.
+  - A gated pass still costs its recording each run. A client with many gated passes of which a run opens a few (ImageSpace,
+    the skeleton's clears) sets `PassDesc::atExecution`: in an in-stream epoch its passes are recorded in DXVK's stream after
+    the commit (ORG's late batch), and a pass whose gate entry is closed records only its barriers (`RunGate::IsOpen`, ORG's
+    `SkipsAtExecution`).
 - **Found by:** P3 W2 Subsurface Scattering, P3 GrassCollision, P3 Skylighting, P3 W3 Post Processing (2026-11-09).
 
 ### Work spread over frames by a CPU state machine

@@ -3,6 +3,7 @@
 #if defined(CS_HAS_RENDER_GRAPH)
 
 #	include <array>
+#	include <atomic>
 #	include <cstdint>
 #	include <memory>
 #	include <span>
@@ -12,6 +13,7 @@ namespace org
 {
 	class LatchBlock;
 	class RecordingContext;
+	struct RunRef;
 }
 
 struct ComputeProgram;
@@ -34,7 +36,7 @@ namespace RenderGraph
 	 * its passes.
 	 *
 	 * Threads: Open and Close on the render thread, inside the anchor's epoch (the client's commit). The record helpers on the
-	 * graph host's thread.
+	 * graph host's thread. IsOpen on the thread that records a pass at execution (DXVK's), after the run's commit.
 	 */
 	class RunGate
 	{
@@ -59,6 +61,13 @@ namespace RenderGraph
 		/** @brief Commit: a_entry draws a_vertices vertices (the fullscreen triangle by default) a_instances times this run. */
 		void OpenDraw(std::uint32_t a_entry, std::uint32_t a_vertices = 3, std::uint32_t a_instances = 1) const;
 
+		/**
+		 * @brief Record, at execution only (a pass recorded after the run's commit: ExternalPassDesc::RecordAtExecution): whether the
+		 * commit opened a_entry for a_run with work to do. Read from the gate's own copy of what Close and the Open calls wrote this
+		 * run, not from the latch. True when the gate cannot tell, so a caller that skips on false never drops work.
+		 */
+		bool IsOpen(const org::RunRef& a_run, std::uint32_t a_entry) const;
+
 		/** @brief Record: a_program's dispatch through a_entry, with a_constants pushed (ComputeProgram::DispatchIndirect). */
 		void Dispatch(org::RecordingContext& a_recording, const ComputeProgram& a_program, std::span<const std::uint32_t> a_constants, std::uint32_t a_entry) const;
 
@@ -66,14 +75,18 @@ namespace RenderGraph
 		const org::LatchBlock& Latch() const { return *latch; }
 		std::uint32_t Offset(std::uint32_t a_entry) const { return a_entry * kEntryBytes; }
 
-		RunGate(std::shared_ptr<org::LatchBlock> a_latch, std::uint32_t a_entries) :
-			latch(std::move(a_latch)), entries(a_entries) {}
+		RunGate(std::shared_ptr<org::LatchBlock> a_latch, std::uint32_t a_entries);
 
 	private:
-		void Write(std::uint32_t a_entry, const std::array<std::uint32_t, 4>& a_words) const;
+		/** @brief a_entry's words for the current run; a_work: they make the dispatch or draw do something. */
+		void Write(std::uint32_t a_entry, const std::array<std::uint32_t, 4>& a_words, bool a_work) const;
 
 		std::shared_ptr<org::LatchBlock> latch;
 		std::uint32_t entries = 0;
+		// Which entries the current run's commit opened with work, a bit per entry, a row of words per lease index (IsOpen). A row
+		// is cleared by Close at the start of each run, and its run is over before the lease index is opened again.
+		std::uint32_t words = 0;
+		std::unique_ptr<std::atomic<std::uint64_t>[]> open;
 	};
 }
 
