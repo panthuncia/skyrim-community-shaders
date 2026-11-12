@@ -243,6 +243,12 @@ namespace DCLF
 		 */
 		using ShadowAccumulatorMap = ankerl::unordered_dense::map<const void*, std::uint8_t>;
 		void SetShadowAccumulators(std::shared_ptr<const ShadowAccumulatorMap> a_accumulators);
+		/**
+		 * @brief Render thread, around the engine's focus accumulation (Draws::ShadowFocusAccumulating): while set, a shadow registration into
+		 * an accumulator no published set names (a focus descriptor's, made on first use inside it) is the covered focus view's, by its render
+		 * mode.
+		 */
+		static void SetFocusAccumulation(bool a_covered);
 		/** @brief Whether a_batch is a shadow view's renderer this frame, with its mode index. */
 		bool ShadowModeOfBatch(const RE::BSBatchRenderer* a_batch, std::uint32_t& a_mode) const;
 		/**

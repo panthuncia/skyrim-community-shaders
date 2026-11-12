@@ -382,6 +382,13 @@ namespace DCLF
 		AddShadowViewsTime(start);
 	}
 
+	void FrameDriver::ShadowFocusAccumulating(const RE::BSShadowLight* a_light, bool a_begin)
+	{
+		const auto start = std::chrono::steady_clock::now();
+		Draws::ShadowFocusAccumulating(a_light, a_begin);
+		AddShadowViewsTime(start);
+	}
+
 	void FrameDriver::ShadowCastersSelected()
 	{
 		const auto start = std::chrono::steady_clock::now();

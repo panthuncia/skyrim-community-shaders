@@ -56,6 +56,8 @@ namespace DCLF
 		// The accumulator the shadow modes' registration on this thread registers into, and its render mode (~0u: none).
 		thread_local const void* t_registrationAccumulator = nullptr;
 		thread_local std::uint32_t t_registrationMode = ~0u;
+		// Inside the engine's focus accumulation of a host whose focus views DCLF covers (SetFocusAccumulation).
+		thread_local bool t_focusAccumulationCovered = false;
 		// The menu scenes' renders this thread is inside (MenuSceneScope).
 		thread_local std::uint32_t t_menuScenes = 0;
 
@@ -451,6 +453,8 @@ namespace DCLF
 		std::atomic_store(&shadowAccumulators, std::move(a_accumulators));
 	}
 
+	void PassCapture::SetFocusAccumulation(bool a_covered) { t_focusAccumulationCovered = a_covered; }
+
 	bool PassCapture::ShadowModeOfBatch(const RE::BSBatchRenderer* a_batch, std::uint32_t& a_mode) const
 	{
 		const auto renderers = std::atomic_load(&shadowRenderers);
@@ -468,10 +472,16 @@ namespace DCLF
 			return false;
 		const auto accumulators = std::atomic_load(&shadowAccumulators);
 		const auto it = accumulators ? accumulators->find(t_registrationAccumulator) : ShadowAccumulatorMap::const_iterator{};
-		if (!accumulators || it == accumulators->end() || it->second >= kShadowModes)
-			return false;
-		a_mode = it->second;
-		return true;
+		if (accumulators && it != accumulators->end() && it->second < kShadowModes) {
+			a_mode = it->second;
+			return true;
+		}
+		// Inside a covered host's focus accumulation: its focus view's, even through an accumulator made inside it.
+		if (t_focusAccumulationCovered && t_registrationMode >= kFirstShadowMode && t_registrationMode < kFirstShadowMode + kShadowModes) {
+			a_mode = t_registrationMode - kFirstShadowMode;
+			return true;
+		}
+		return false;
 	}
 
 	bool PassCapture::CastersWithheld(std::uint8_t a_phase) const

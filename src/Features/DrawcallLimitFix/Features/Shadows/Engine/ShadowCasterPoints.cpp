@@ -45,6 +45,24 @@ namespace DCLF::Features::Shadows::Engine
 		 * engine kept it - its UpdateCamera run and its focus flag set - and right before its Accumulate. Site 0 is the sun's (AE 0x1414cbc66,
 		 * its cascades' slots), site 1 each kept light's (AE 0x1414cc7e1, one slot).
 		 */
+		/**
+		 * @brief The focus accumulation (Address::kFocusAccumulation): the host's focus views listed and covered before it registers into
+		 * them, which for a spot light host is before the light is kept (KeepLight).
+		 */
+		struct FocusAccumulation
+		{
+			static void thunk(RE::BSShadowLight* a_light)
+			{
+				const bool running = castersRunning;
+				if (running)
+					FrameDriver::Get().ShadowFocusAccumulating(a_light, true);
+				func(a_light);
+				if (running)
+					FrameDriver::Get().ShadowFocusAccumulating(a_light, false);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		template <std::uint32_t Site>
 		struct KeepLight
 		{
@@ -73,7 +91,13 @@ namespace DCLF::Features::Shadows::Engine
 		stl::write_thunk_call<CalculateAndDrawShadowCasterLights>(base + Address::kCastersCallSite);
 		stl::write_thunk_call<KeepLight<0>>(base + Address::kKeepSunCallSite);
 		stl::write_thunk_call<KeepLight<1>>(base + Address::kKeepLightCallSite);
-		logger::info("[DCLF] shadow casters: the shadow lights' selection hooked (its call, and each light kept)");
+		if (Address::kFocusAccumulation.Known()) {
+			stl::detour_thunk<FocusAccumulation>(REL::Offset(Address::kFocusAccumulation.Get()).address());
+			HookSites::NoteDetour("the focus accumulation detour", FocusAccumulation::func.address());
+		} else {
+			logger::warn("[DCLF] shadow casters: the focus accumulation is not known for this runtime; a spot light's focus views reach the engine");
+		}
+		logger::info("[DCLF] shadow casters: the shadow lights' selection hooked (its call, each light kept, the focus accumulation)");
 	}
 
 	void PreflightCasterHooks()
