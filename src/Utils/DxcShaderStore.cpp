@@ -5,6 +5,13 @@
 
 #include <ORGModuleServices/ShaderCompiler.h>
 
+#if defined(CS_HAS_RENDER_GRAPH)
+#	include "RenderGraph/Backend.h"
+#endif
+
+#include <d3d12shader.h>
+#include <dxcapi.h>
+
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -255,10 +262,64 @@ namespace Util
 			}
 			return true;
 		}
+
+		/**
+		 * @brief Reflects a DXIL container through DXC's IDxcUtils, from the dxcompiler.dll the runtime compiler loaded. False when no
+		 * DXC is loaded or it cannot read the container.
+		 */
+		bool ReflectDxil(ID3DBlob& a_blob, ShaderReflection& a_reflection)
+		{
+			// CLSID_DxcUtils, spelled out so no GUID definition is needed.
+			static constexpr GUID kClsidDxcUtils = { 0x6245d6af, 0x66e0, 0x48fd, { 0x80, 0xb4, 0x4d, 0x27, 0x17, 0x96, 0x74, 0x8c } };
+			const HMODULE dxc = ::GetModuleHandleW(L"dxcompiler.dll");
+			const auto create = dxc ? reinterpret_cast<DxcCreateInstanceProc>(::GetProcAddress(dxc, "DxcCreateInstance")) : nullptr;
+			if (!create)
+				return false;
+			winrt::com_ptr<IDxcUtils> utils;
+			if (FAILED(create(kClsidDxcUtils, __uuidof(IDxcUtils), utils.put_void())) || !utils)
+				return false;
+			const DxcBuffer buffer{ a_blob.GetBufferPointer(), a_blob.GetBufferSize(), 0 };
+			winrt::com_ptr<ID3D12ShaderReflection> reflector;
+			if (FAILED(utils->CreateReflection(&buffer, __uuidof(ID3D12ShaderReflection), reflector.put_void())) || !reflector)
+				return false;
+			D3D12_SHADER_DESC desc{};
+			if (FAILED(reflector->GetDesc(&desc)))
+				return false;
+			for (UINT i = 0; i < desc.InputParameters; ++i) {
+				D3D12_SIGNATURE_PARAMETER_DESC input{};
+				if (SUCCEEDED(reflector->GetInputParameterDesc(i, &input)))
+					a_reflection.inputs.push_back({ input.SemanticName, input.SemanticIndex });
+			}
+			for (UINT b = 0; b < desc.ConstantBuffers; ++b) {
+				auto* buffer12 = reflector->GetConstantBufferByIndex(b);
+				D3D12_SHADER_BUFFER_DESC bufferDesc{};
+				if (!buffer12 || FAILED(buffer12->GetDesc(&bufferDesc)))
+					continue;
+				auto& reflected = a_reflection.buffers.emplace_back();
+				reflected.name = bufferDesc.Name;
+				reflected.size = bufferDesc.Size;
+				for (UINT v = 0; v < bufferDesc.Variables; ++v) {
+					auto* variable = buffer12->GetVariableByIndex(v);
+					D3D12_SHADER_VARIABLE_DESC variableDesc{};
+					if (!variable || FAILED(variable->GetDesc(&variableDesc)))
+						continue;
+					D3D12_SHADER_TYPE_DESC typeDesc{};
+					if (auto* type = variable->GetType())
+						type->GetDesc(&typeDesc);
+					reflected.variables.push_back({ variableDesc.Name, variableDesc.StartOffset, variableDesc.Size, typeDesc.Elements });
+				}
+			}
+			return true;
+		}
 	}
 
 	bool UseDxc(const std::filesystem::path& a_root, std::string_view a_target, uint32_t a_descriptor)
 	{
+#if defined(CS_HAS_RENDER_GRAPH)
+		// The containers built here carry SPIR-V for DXVK. On D3D12 there is no DXVK to take them, so every game shader builds with FXC.
+		if (::RenderGraph::Backend::IsD3D12())
+			return false;
+#endif
 		static const std::optional<std::regex> pattern = []() -> std::optional<std::regex> {
 			// Without CS_SHADER_DXC, only the shaders measured faster through DXC on DXVK build with it: the image-space blurs.
 			// An empty CS_SHADER_DXC builds everything with FXC.
@@ -375,6 +436,9 @@ namespace Util
 
 	bool ReflectShader(ID3DBlob& a_blob, ShaderReflection& a_reflection)
 	{
+		// DXC's DXIL container (the D3D12 backend's binaries): D3DReflect cannot read it.
+		if (!FindChunk(a_blob, Tag("DXIL")).empty())
+			return ReflectDxil(a_blob, a_reflection);
 		const auto code = FindChunk(a_blob, Tag("SPRV"));
 		if (code.empty())
 			return ReflectDxbc(a_blob, a_reflection);

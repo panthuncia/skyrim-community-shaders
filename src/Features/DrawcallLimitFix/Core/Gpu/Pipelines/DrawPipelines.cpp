@@ -21,6 +21,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
+#include "RenderGraph/Backend.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/SpirvReflection.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
@@ -130,6 +131,15 @@ namespace DCLF
 			return false;
 		attempted = true;
 		device = RenderGraphRuntime::Get().Host()->Device();
+		// The draw layouts bind through record-addressed ranges (VK_EXT_descriptor_heap mappings), and the pipelines read their stages'
+		// SPIR-V reflection (SpirvReflection). Neither exists on D3D12 yet, so the indirect pipelines are off there, by name.
+		if (const auto reason = ::RenderGraph::Backend::UnsupportedReason("Drawcall Limit Fix's draw pipelines",
+				"their layouts bind through VK_EXT_descriptor_heap record mappings and they reflect SPIR-V stages; neither has a D3D12 port yet");
+			!reason.empty()) {
+			supported = false;
+			logger::error("[DCLF] {}", reason);
+			return false;
+		}
 
 		// No vertex buffer arguments: the vertex stages pull their attributes through the buffers' views in the draw's push data
 		// (kDrawPushWords).

@@ -3,8 +3,18 @@
 
 #include "RenderGraph/DxvkImageImport.h"
 
+#include "RenderGraph/Backend.h"
+
 #include <Resources/ExternalTextureResource.h>
 #include <Resources/TextureDescription.h>
+
+// BasicRHI's D3D12 import (rhi_interop_dx12.h), declared here: that header brings DirectX-Headers' d3d12.h, which this translation
+// unit's Windows SDK headers would meet.
+struct ID3D12Resource;
+namespace rhi::dx12
+{
+	Result import_resource(rhi::Device device, ID3D12Resource* resource, rhi::ResourcePtr& out) noexcept;
+}
 
 namespace RenderGraph
 {
@@ -30,6 +40,15 @@ namespace RenderGraph
 	{
 		if (!HomeLayoutOf(a_image.layout))
 			return {};
+		// D3D12 (native mode): the description carries the ID3D12Resource where the VkImage goes (Native::DescribeResource).
+		if (Backend::IsD3D12()) {
+			rhi::ResourcePtr resource;
+			if (rhi::dx12::import_resource(a_device, reinterpret_cast<ID3D12Resource*>(a_image.image), resource) != rhi::Result::Ok)
+				return {};
+			if (a_name)
+				resource->SetName(a_name);
+			return resource;
+		}
 		rhi::vulkan::ImportedImageDesc import{};
 		import.image = a_image.image;
 		import.createInfo.flags = a_image.flags;
@@ -65,7 +84,11 @@ namespace RenderGraph
 			return nullptr;
 		// The home state: the graph finds the image in it and gives it back in it (external home states).
 		a_desc.initialLayout = *home;
-		auto result = org::ExternalTextureResource::CreateShared(std::move(resource), a_desc, *home == rhi::ResourceLayout::Common);
+		// Common-only (simultaneous access, every pass in GENERAL) exists on Vulkan alone. D3D12's COMMON layout cannot be a render
+		// target, depth or UAV, so there an image resting in Common is used exclusively: the graph moves it into each pass's layout
+		// and gives it back in Common.
+		const bool commonOnly = *home == rhi::ResourceLayout::Common && !Backend::IsD3D12();
+		auto result = org::ExternalTextureResource::CreateShared(std::move(resource), a_desc, commonOnly);
 		if (result)
 			result->SetName(a_name);
 		return result;

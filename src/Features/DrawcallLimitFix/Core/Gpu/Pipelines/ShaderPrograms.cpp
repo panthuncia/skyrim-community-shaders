@@ -29,6 +29,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/ShaderTarget.h"
 #include "ShaderCache.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
@@ -500,7 +501,8 @@ namespace DCLF
 			request.source = a_source;
 			request.entryPoint = L"main";
 			request.target = a_pixel ? L"ps_6_6" : L"vs_6_6";
-			request.format = org::services::ShaderBinaryFormat::Spirv;
+			// SPIR-V on Vulkan, DXIL on D3D12.
+			::RenderGraph::ShaderTarget::Apply(request);
 			request.warningsAsErrors = false;
 			request.debugInfo = ShaderDebug();
 			request.languageVersion = L"2018";  // CS's shaders are written for FXC's semantics
@@ -560,16 +562,19 @@ namespace DCLF
 				std::string text;
 				for (const auto& define : request.defines)
 					text += fmt::format(" -D {}{}{}", Util::WStringToString(define.name), define.value.empty() ? "" : "=", Util::WStringToString(define.value));
-				logger::info("[DCLF] SPIR-V build of {} {}{} {:08X} defines:{}", SourceLogName(a_sourceName), a_pixel ? (a_depthOnly ? "PS (depth)" : "PS") : "VS",
+				logger::info("[DCLF] {} build of {} {}{} {:08X} defines:{}", ::RenderGraph::ShaderTarget::FormatName(), SourceLogName(a_sourceName), a_pixel ? (a_depthOnly ? "PS (depth)" : "PS") : "VS",
 					a_pulled ? " (pulled)" : "", a_descriptor, text);
 			}
 			const auto shift = [&](const wchar_t* a_flag, std::uint32_t a_value) {
 				request.arguments.insert(request.arguments.end(), { a_flag, std::to_wstring(a_value), L"0" });
 			};
-			shift(L"-fvk-b-shift", kBindingShiftB);
-			shift(L"-fvk-t-shift", kBindingShiftT);
-			shift(L"-fvk-s-shift", kBindingShiftS);
-			shift(L"-fvk-u-shift", kBindingShiftU);
+			// SPIR-V only. On D3D12 a stage keeps its HLSL registers.
+			if (::RenderGraph::ShaderTarget::IsSpirv()) {
+				shift(L"-fvk-b-shift", kBindingShiftB);
+				shift(L"-fvk-t-shift", kBindingShiftT);
+				shift(L"-fvk-s-shift", kBindingShiftS);
+				shift(L"-fvk-u-shift", kBindingShiftU);
+			}
 			if (!SwitchValue(Switch::StageDump).empty()) {
 				std::string arguments = "[";
 				for (std::size_t i = 0; i < request.arguments.size(); ++i)

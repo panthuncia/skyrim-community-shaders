@@ -2,7 +2,8 @@
 #
 # BasicRHI adopts the VkDevice DXVK creates for the game, and OpenRenderGraph runs its
 # passes on it in persistent execution. The libraries are built from source with the
-# Vulkan backend only, from the extern/ submodules (BasicRHI, BasicTelemetry,
+# Vulkan backend, and the D3D12 one with CS_ORG_D3D12 (the native mode's
+# CS_ORG_BACKEND=d3d12), from the extern/ submodules (BasicRHI, BasicTelemetry,
 # OpenRenderGraph, volk). To build against local changes to those libraries, point
 # CS_ORG_ROOT at another directory with the same side-by-side layout.
 #
@@ -10,6 +11,9 @@
 # keeps its D3D11 path.
 
 option(CS_RENDER_GRAPH "Build the OpenRenderGraph runtime that adopts DXVK's Vulkan device" ON)
+# BasicRHI's D3D12 backend too, for the native mode's CS_ORG_BACKEND=d3d12 (src/RenderGraph/Engine/D3D12Device.cpp).
+# Off builds the Vulkan backend alone; CS_ORG_BACKEND=d3d12 then fails at startup with that reason.
+option(CS_ORG_D3D12 "Build BasicRHI's D3D12 backend for CS_ORG_BACKEND=d3d12" ON)
 set(CS_ORG_ROOT "${CMAKE_SOURCE_DIR}/extern" CACHE PATH
     "Directory holding BasicRHI, BasicTelemetry, OpenRenderGraph and volk side by side")
 
@@ -29,9 +33,9 @@ if(CS_RENDER_GRAPH)
     if(_cs_org_missing)
         message(WARNING "CS_RENDER_GRAPH: ${_cs_org_missing} not found under CS_ORG_ROOT=${CS_ORG_ROOT}; building without the render graph")
     else()
-        # Vulkan backend only: CS reaches the GPU through DXVK, never through D3D12.
-        # Streamline, PIX and Tracy GPU zones belong to the host (CS owns Streamline).
-        set(BASICRHI_ENABLE_D3D12 OFF CACHE BOOL "" FORCE)
+        # The Vulkan backend always: CS reaches the GPU through DXVK by default. The D3D12 backend with CS_ORG_D3D12, for the
+        # native mode's CS_ORG_BACKEND=d3d12. Streamline, PIX and Tracy GPU zones belong to the host (CS owns Streamline).
+        set(BASICRHI_ENABLE_D3D12 ${CS_ORG_D3D12} CACHE BOOL "" FORCE)
         set(BASICRHI_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
         set(BASICRHI_ENABLE_STREAMLINE OFF CACHE BOOL "" FORCE)
         set(BASICRHI_ENABLE_PIX OFF CACHE BOOL "" FORCE)
@@ -99,6 +103,11 @@ if(CS_RENDER_GRAPH)
         endif()
         target_link_libraries(${PROJECT_NAME} PRIVATE TBB::tbb)
         target_compile_definitions(${PROJECT_NAME} PRIVATE CS_HAS_RENDER_GRAPH=1)
+        if(CS_ORG_D3D12)
+            # d3d12.h and the DXGI headers of the DirectX-Headers package come with BasicRHI (Microsoft::DirectX-Headers).
+            target_compile_definitions(${PROJECT_NAME} PRIVATE CS_ORG_HAS_D3D12=1)
+            target_link_libraries(${PROJECT_NAME} PRIVATE d3d12 dxgi)
+        endif()
         # Debug info in the render-graph libraries, so hang and crash dumps name their frames and locals (they build without it).
         if(MSVC)
             foreach(_org_target IN ITEMS OpenRenderGraph BasicRHI)
