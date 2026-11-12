@@ -261,7 +261,7 @@ VS_INPUT SkyPullVertex(uint a_vertexID)
 {
 	DCLFDrawVertexLayout = SkyGeometry.VertexLayout;
 	const uint indexNumber = SkyGeometry.FirstIndex + a_vertexID;
-	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(SkyGeometry.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DCLFAddress(SkyGeometry.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	DCLFStream first = { DCLFAddress(SkyGeometry.VertexAddress), SkyGeometry.VertexStride };
 	DCLFStream second = { uint64_t(0), 0u };

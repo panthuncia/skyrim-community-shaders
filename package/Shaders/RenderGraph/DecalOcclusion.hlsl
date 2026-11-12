@@ -33,7 +33,7 @@ float4 VSMain(uint a_vertexID : SV_VertexID) : SV_Position
 	// The draw's 16-bit index, then its position, as the input assembler reads them.
 	DCLFDrawVertexLayout = Draw.VertexLayout;
 	const uint indexNumber = Draw.FirstIndex + a_vertexID;
-	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(Draw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DCLFAddress(Draw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	DCLFStream first = { DCLFAddress(Draw.VertexAddress), Draw.VertexStride };
 	DCLFStream second = { uint64_t(0), 0u };

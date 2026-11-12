@@ -500,11 +500,11 @@ VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 	DCLFDrawVertexLayout = any(rows.xy != 0) ? rows.xy : DCLFVertexLayout;
 	// The draw's caster technique (bit 31: present; BuildDrawsCS's slot table), which decides what the canonical build's SKINNED and
 	// VC take per draw; absent, the build's defines.
-	const uint drawTechnique = vk::RawBufferLoad<uint>(sequence);
+	const uint drawTechnique = DeviceLoad(uint, sequence);
 	const bool known = (drawTechnique & 0x80000000u) != 0;
 	DCLFDrawSkinned = !known || (drawTechnique & 0x4u) != 0;
-	const uint4 vertexBuffer = vk::RawBufferLoad<uint4>(sequence + 24);  // address, size, stride
-	const uint4 streamBuffer = vk::RawBufferLoad<uint4>(sequence + 40);
+	const uint4 vertexBuffer = DeviceLoad(uint4, sequence + 24);  // address, size, stride
+	const uint4 streamBuffer = DeviceLoad(uint4, sequence + 40);
 	const uint64_t materialRow = DCLFAddress(rows.zw);
 
 	DCLFStream first, second;
@@ -516,32 +516,32 @@ VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 
 	VS_INPUT input;
 #		if defined(STENCIL_ABOVE_WATER)
-	input.PositionMS = asfloat(vk::RawBufferLoad<uint4>(DCLFAttribute(0, first, second)));
+	input.PositionMS = asfloat(DeviceLoad(uint4, DCLFAttribute(0, first, second)));
 #		else
 	// Only xyz is read (DCLFShade makes w 1).
-	input.PositionMS = float4(asfloat(vk::RawBufferLoad<uint3>(DCLFAttribute(0, first, second))), 1);
+	input.PositionMS = float4(asfloat(DeviceLoad(uint3, DCLFAttribute(0, first, second))), 1);
 #		endif
 #		if defined(TEXTURE)
-	input.TexCoord = DCLFHalf2(vk::RawBufferLoad<uint>(DCLFAttribute(1, first, second)));
+	input.TexCoord = DCLFHalf2(DeviceLoad(uint, DCLFAttribute(1, first, second)));
 #		endif
 #		if defined(NORMALS)
-	input.Normal = DCLFUnorm4(vk::RawBufferLoad<uint>(DCLFAttribute(3, first, second)));
-	input.Bitangent = DCLFUnorm4(vk::RawBufferLoad<uint>(DCLFAttribute(4, first, second)));
+	input.Normal = DCLFUnorm4(DeviceLoad(uint, DCLFAttribute(3, first, second)));
+	input.Bitangent = DCLFUnorm4(DeviceLoad(uint, DCLFAttribute(4, first, second)));
 #		endif
 #		if defined(VC)
 	// A draw without vertex colours: alpha 1, which the alpha test's multiply leaves as it is.
 	input.Color = float4(1, 1, 1, 1);
 	[branch] if (!known || (drawTechnique & 0x1u) != 0)
-		input.Color = DCLFUnorm4(vk::RawBufferLoad<uint>(DCLFAttribute(5, first, second)));
+		input.Color = DCLFUnorm4(DeviceLoad(uint, DCLFAttribute(5, first, second)));
 #		endif
 #		if defined(SKINNED)
 	input.BoneWeights = 0;
 	input.BoneIndices = 0;
 	[branch] if (DCLFDrawSkinned) {
 		const uint64_t skinning = DCLFAttribute(6, first, second);
-		const uint2 weights = vk::RawBufferLoad<uint2>(skinning);
+		const uint2 weights = DeviceLoad(uint2, skinning);
 		input.BoneWeights = float4(DCLFHalf2(weights.x), DCLFHalf2(weights.y));
-		input.BoneIndices = DCLFUnorm4(vk::RawBufferLoad<uint>(skinning + 8));
+		input.BoneIndices = DCLFUnorm4(DeviceLoad(uint, skinning + 8));
 	}
 #		endif
 
@@ -552,7 +552,7 @@ VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 		DCLFPlacements[DCLFObjectIndex].World[2] - float4(0, 0, 0, FrameBuffer::CameraPosAdjust.z),
 		float4(0, 0, 0, 1));
 	TreeParams = DCLFTreeParamsOf(DCLFObjectIndex);
-	TexcoordOffset = asfloat(vk::RawBufferLoad<uint4>(materialRow));
+	TexcoordOffset = asfloat(DeviceLoad(uint4, materialRow));
 
 	VS_OUTPUT vsout = DCLFShade(input);
 	// The viewport's depth transform, here: z' = min * w + z * (max - min) under a [0, 1] viewport is the window depth the view's
@@ -570,7 +570,7 @@ VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 #		if defined(DCLF_EMPTY_PIXEL)
 	vsout.DCLFDraw = uint2(0, 0);
 #		else
-	vsout.DCLFDraw = uint2(vk::RawBufferLoad<uint>(materialRow + 16), DCLFObjectWord);
+	vsout.DCLFDraw = uint2(DeviceLoad(uint, materialRow + 16), DCLFObjectWord);
 #			if defined(DCLF_SHADOW_ALPHA)
 	vsout.DCLFAlphaRef = DCLFObjects[DCLFObjectIndex].AlphaTestRef;
 #			endif
@@ -604,7 +604,7 @@ VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 // camera as the Lighting draws compute their envmap fade (Lighting.hlsl, DCLFLodMetric); with RENDER_NORMAL_FALLOFF, EyePos.xyz is the
 // camera in the geometry's model space (BSUtilityShader::SetupGeometry: its world transform inverted). RefractionPower, a pixel
 // constant multiplying TexCoord0.w, is folded into TexCoord0.w here.
-float DCLFRefractionFloat(uint64_t a_frame, uint a_float) { return asfloat(vk::RawBufferLoad<uint>(a_frame + 4u * a_float, 4)); }
+float DCLFRefractionFloat(uint64_t a_frame, uint a_float) { return asfloat(DeviceLoad(uint, a_frame + 4u * a_float, 4)); }
 
 VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 {
@@ -614,8 +614,8 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 	DCLFPipelineRowAddress = DCLFAddress(rows.xy);
 	DCLFMaterialRowAddress = DCLFAddress(rows.zw);
 	DCLFDrawVertexLayout = DCLFPipelineVertexLayout();  // the draw's slot's (one pipeline draws every layout)
-	const uint4 vertexBuffer = vk::RawBufferLoad<uint4>(sequence + 24);  // address, size, stride
-	const uint4 streamBuffer = vk::RawBufferLoad<uint4>(sequence + 40);
+	const uint4 vertexBuffer = DeviceLoad(uint4, sequence + 24);  // address, size, stride
+	const uint4 streamBuffer = DeviceLoad(uint4, sequence + 40);
 	DCLFStream first, second;
 	first.address = DCLFAddress(vertexBuffer.xy);
 	first.stride = vertexBuffer.w;
@@ -650,13 +650,13 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 		fade = metric <= start ? 1 : saturate((metric - end) / (start - end));
 	}
 
-	precise float4 positionMS = float4(asfloat(vk::RawBufferLoad<uint3>(DCLFAttribute(0, first, second))), 1.0);
-	const float2 texCoord = DCLFHalf2(vk::RawBufferLoad<uint>(DCLFAttribute(1, first, second)));
+	precise float4 positionMS = float4(asfloat(DeviceLoad(uint3, DCLFAttribute(0, first, second))), 1.0);
+	const float2 texCoord = DCLFHalf2(DeviceLoad(uint, DCLFAttribute(1, first, second)));
 	// Normals unless model-space normals (the technique's Normals | BinormalTangent), whose stage reads (1, 1, 1).
 	float3 normalMS = float3(1, 1, 1);
 	if ((flags & kDCLFRefractionNoNormals) == 0)
-		normalMS = DCLFUnorm4(vk::RawBufferLoad<uint>(DCLFAttribute(3, first, second))).xyz * 2 - 1;
-	const float vertexAlpha = (flags & kDCLFRefractionVertexColors) != 0 ? DCLFUnorm4(vk::RawBufferLoad<uint>(DCLFAttribute(5, first, second))).w : 1;
+		normalMS = DCLFUnorm4(DeviceLoad(uint, DCLFAttribute(3, first, second))).xyz * 2 - 1;
+	const float vertexAlpha = (flags & kDCLFRefractionVertexColors) != 0 ? DCLFUnorm4(DeviceLoad(uint, DCLFAttribute(5, first, second))).w : 1;
 
 	World = float4x4(
 		DCLFPlacements[object].World[0] - float4(0, 0, 0, FrameBuffer::CameraPosAdjust.x),
@@ -681,9 +681,9 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 	float falloff = 1;
 	if (DCLFObjects[object].DCLFBoneRows != 0) {
 		const uint64_t skinning = DCLFAttribute(6, first, second);
-		const uint2 weightWords = vk::RawBufferLoad<uint2>(skinning);
+		const uint2 weightWords = DeviceLoad(uint2, skinning);
 		const float4 boneWeights = float4(DCLFHalf2(weightWords.x), DCLFHalf2(weightWords.y));
-		precise int4 boneIndices = 765.01.xxxx * DCLFUnorm4(vk::RawBufferLoad<uint>(skinning + 8));
+		precise int4 boneIndices = 765.01.xxxx * DCLFUnorm4(DeviceLoad(uint, skinning + 8));
 		const uint boneOffset = DCLFObjects[object].DCLFBoneOffset;
 		// The rows are absolute: the pivot is the camera's posAdjust.
 		float3x4 worldMatrix = Skinned::GetBoneTransformMatrixBindless(boneOffset, boneIndices, FrameBuffer::CameraPosAdjust.xyz, boneWeights);
@@ -741,7 +741,7 @@ VS_OUTPUT main(uint a_vertexID: SV_VertexID)
 {
 	DCLFDrawVertexLayout = SceneDraw.VertexLayout;
 	const uint indexNumber = SceneDraw.FirstIndex + a_vertexID;
-	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(SceneDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DCLFAddress(SceneDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	DCLFStream first = { DCLFAddress(SceneDraw.VertexAddress), SceneDraw.VertexStride };
 	DCLFStream second = { uint64_t(0), 0u };
@@ -785,7 +785,7 @@ VS_OUTPUT main(uint a_vertexID: SV_VertexID)
 {
 	DCLFDrawVertexLayout = ShadowMaskDraw.VertexLayout;
 	const uint indexNumber = ShadowMaskDraw.FirstIndex + a_vertexID;
-	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(ShadowMaskDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DCLFAddress(ShadowMaskDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	DCLFStream first = { DCLFAddress(ShadowMaskDraw.VertexAddress), ShadowMaskDraw.VertexStride };
 	DCLFStream second = { uint64_t(0), 0u };

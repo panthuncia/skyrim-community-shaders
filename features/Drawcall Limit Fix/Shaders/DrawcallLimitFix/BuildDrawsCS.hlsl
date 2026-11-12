@@ -803,6 +803,11 @@ void StoreShadowSequence(RWByteAddressBuffer sequences, uint slot, uint instance
 	const bool pooled = a_poolFirst != 0xFFFFFFFFu;
 	sequences.Store4(slot * kSequenceStride + kSequenceDrawOffset, uint4(pooled ? indexCount : 0, 1, pooled ? a_poolFirst + firstIndex : 0, 0));
 	sequences.Store(slot * kSequenceStride + kSequenceFirstInstance, instance);
+#if !defined(__spirv__)
+	// D3D12: SV_InstanceID does not count the first instance, so the plain draws' command signature also writes this word, the one
+	// before the draw's arguments (the index buffer view's format, which no D3D12 draw reads), into the draw's push data.
+	sequences.Store(slot * kSequenceStride + kSequenceDrawOffset - 4, instance);
+#endif
 }
 
 // ---- A shadow view's draw: its arguments in the view's own buffer, and all that is the object's in one caster row, whichever views draw

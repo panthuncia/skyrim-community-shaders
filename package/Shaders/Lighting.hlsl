@@ -348,7 +348,13 @@ cbuffer PerGeometry : register(b2)
 	float4 WorldMapOverlayParameters : packoffset(c14);
 };
 
+#	if defined(__hlsl_dx_compiler) && !defined(__spirv__)
+// DXIL refuses two blocks at one register, and FrameBuffer's PerFrame is b12 too (SPIR-V lets both read the frame's VS b12). Space 1
+// keeps it apart; DCLF's D3D12 builds read both as VS b12 (DrawcallLimitFix FrameSource, DxilReflection).
+cbuffer VS_PerFrame : register(b12, space1)
+#	else
 cbuffer VS_PerFrame : register(b12)
+#	endif
 {
 	row_major float3x3 ScreenProj : packoffset(c0);
 	row_major float4x4 ViewProj : packoffset(c8);
@@ -683,8 +689,8 @@ VS_OUTPUT DCLFPulledVertex(uint index, uint a_instance)
 	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
 	DCLFRowStatics(DCLFSequenceRows(sequence));  // the pipeline row's address, the material row's
 	DCLFDrawVertexLayout = DCLFPipelineVertexLayout();
-	const uint4 vertexBuffer = vk::RawBufferLoad<uint4>(sequence + 24);  // address, size, stride
-	const uint4 streamBuffer = vk::RawBufferLoad<uint4>(sequence + 40);
+	const uint4 vertexBuffer = DeviceLoad(uint4, sequence + 24);  // address, size, stride
+	const uint4 streamBuffer = DeviceLoad(uint4, sequence + 40);
 	DCLFStream first, second;
 	first.address = DCLFAddress(vertexBuffer.xy);
 	first.stride = vertexBuffer.w;
@@ -751,7 +757,7 @@ VS_OUTPUT main(uint a_vertexID : SV_VertexID)
 {
 	DCLFDrawVertexLayout = LightingDraw.VertexLayout;
 	const uint indexNumber = LightingDraw.FirstIndex + a_vertexID;
-	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(LightingDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DCLFAddress(LightingDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	DCLFStream first = { DCLFAddress(LightingDraw.VertexAddress), LightingDraw.VertexStride };
 	DCLFStream second = { uint64_t(0), 0u };
@@ -1860,17 +1866,17 @@ void DCLFTextureFeedback(float2 a_uv, uint2 a_pixel)
 #		else
 	const uint64_t row = (uint64_t(DCLFMaterialRowAddress.y) << 32) | uint64_t(DCLFMaterialRowAddress.x);
 #		endif
-	const uint3 feedback = vk::RawBufferLoad<uint3>(row + 768 + 4, 4);
+	const uint3 feedback = DeviceLoad(uint3, row + 768 + 4, 4);
 	const uint64_t buffer = (uint64_t(feedback.z) << 32) | uint64_t(feedback.y);
-	if (buffer == 0 || vk::RawBufferLoad<uint>(buffer, 4) == 0)
+	if (buffer == 0 || DeviceLoad(uint, buffer, 4) == 0)
 		return;
 	const float major = max(dot(dx, dx), dot(dy, dy)), minor = min(dot(dx, dx), dot(dy, dy));
 	// Anisotropic filtering reads the mip of the minor axis, within its ratio (16).
 	const float footprint = 0.5 * log2(max(max(minor, major / 256.0), 1e-16)) + SharedData::MipBias;
 	const uint value = uint(max(footprint + 32.0, 0.0) * 256.0);
 	const uint64_t word = buffer + 4 * (uint64_t(feedback.x) + 1);
-	if (value < vk::RawBufferLoad<uint>(word, 4))
-		vk::RawBufferStore<uint>(word, value, 4);
+	if (value < DeviceLoad(uint, word, 4))
+		DeviceStore(uint, word, value, 4);
 }
 #	endif
 
@@ -4378,7 +4384,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			const uint4 albedo = uint4(round(saturate(psout.Diffuse) * 255.0));
 #			endif
 			const uint4 diffuse = uint4(round(saturate(psout.Diffuse) * 255.0));
-			vk::RawBufferStore<uint>(ids + uint64_t(index) * 4, (DCLFFoliageParityFrame.z << 24) | ((DCLFObjectIndex + 1) & 0x00FFFFFFu));
+			DeviceStore(uint, ids + uint64_t(index) * 4, (DCLFFoliageParityFrame.z << 24) | ((DCLFObjectIndex + 1) & 0x00FFFFFFu));
 			// The motion vector against a static object's: the same point where the camera saw it the frame before (its absolute
 			// position, from this frame's eye, made relative to the frame before's). In pixels, with the motion vector itself.
 			float2 motionError = 0;
@@ -4395,7 +4401,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #			else
 			const uint4 specular = 0;
 #			endif
-			vk::RawBufferStore<uint4>(colours + uint64_t(index) * 16,
+			DeviceStore(uint4, colours + uint64_t(index) * 16,
 				uint4(albedo.x | (albedo.y << 8) | (albedo.z << 16) | (error << 24), diffuse.x | (diffuse.y << 8) | (diffuse.z << 16) | (diffuse.w << 24),
 					specular.x | (specular.y << 8) | (specular.z << 16) | (specular.w << 24), f32tof16(motion.x) | (f32tof16(motion.y) << 16)));
 		}
