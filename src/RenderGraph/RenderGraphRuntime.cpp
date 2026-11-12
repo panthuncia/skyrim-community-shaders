@@ -777,9 +777,10 @@ struct RenderGraphRuntime::Impl
 
 	/**
 	 * Waits on the CPU until every point has been reached (see copyQueue). Bounded: a device that stops making progress is left to
-	 * the submission that follows to report.
+	 * the submission that follows to report. a_rhiLocked: called inside a BasicRHI submission, which holds the device's timeline
+	 * lock, so the telemetry must not read timelines through the RHI.
 	 */
-	void WaitForPoints(const VkSemaphoreSubmitInfo* a_points, std::uint32_t a_count)
+	void WaitForPoints(const VkSemaphoreSubmitInfo* a_points, std::uint32_t a_count, bool a_rhiLocked = false)
 	{
 		if (a_count == 0)
 			return;
@@ -806,13 +807,13 @@ struct RenderGraphRuntime::Impl
 			logger::error("[ORG] DXVK stream at the copy queue's wait: {} graph submissions enqueued, {} submitted", streamEnqueued.load(std::memory_order_acquire),
 				streamSubmitted.load(std::memory_order_acquire));
 			if (host)
-				logger::error("[ORG] host state at the copy queue's wait: {}", host->DescribeAsyncState());
+				logger::error("[ORG] host state at the copy queue's wait: {}", host->DescribeAsyncState(!a_rhiLocked));
 			logger::error("[ORG] stream order at the copy queue's wait: {}", DescribeStreamOrder(64));
 		}
 		if (waitSemaphores(vkDevice, &wait, 9'500'000'000ull) != VK_SUCCESS) {
 			logger::warn("[ORG] A shared copy queue submission went ahead after 10 s without its waits: {}", DescribeUnsealed(semaphores, values));
 			if (named && host)
-				logger::warn("[ORG] host state after 10 s: {}", host->DescribeAsyncState());
+				logger::warn("[ORG] host state after 10 s: {}", host->DescribeAsyncState(!a_rhiLocked));
 		}
 	}
 
@@ -1859,7 +1860,7 @@ struct RenderGraphRuntime::Impl
 		}
 		if (a_queue == self->uploadQueue) {
 			if (a_queue == self->copyQueue)
-				self->WaitForPoints(a_submit.pWaitSemaphoreInfos, a_submit.waitSemaphoreInfoCount);
+				self->WaitForPoints(a_submit.pWaitSemaphoreInfos, a_submit.waitSemaphoreInfoCount, true);
 			{
 				// DXVK's submission lock covers every queue of its device: a long hold by DXVK shows here, on the upload thread only.
 				ZoneScopedN("CS.ORG.UploadQueue.LockSubmissionQueue");
