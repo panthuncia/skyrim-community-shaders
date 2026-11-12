@@ -45,9 +45,96 @@ namespace Testing
 		}
 	}
 
+	namespace
+	{
+		// The game setup before the steps (game.save, game.cell). Render thread only.
+		bool saveHandled = false;
+		bool cellHandled = false;
+
+		// Frames after the main menu before a named save is loaded: the menu is up and taking messages by then.
+		constexpr std::uint32_t kMenuSettleFrames = 60;
+
+		/** @brief The save's file: <Documents>\My Games\Skyrim Special Edition\<sLocalSavePath>\<name>.ess. */
+		std::filesystem::path SaveFile(const std::string& a_name)
+		{
+			std::string folder = "Saves\\";
+			if (auto* setting = RE::GetINISetting("sLocalSavePath:General"); setting && setting->GetType() == RE::Setting::Type::kString && setting->data.s && *setting->data.s)
+				folder = setting->data.s;
+			auto file = Util::SwitchFile::Directory().parent_path() / folder / a_name;
+			if (file.extension() != ".ess")
+				file += ".ess";
+			return file;
+		}
+
+		/**
+		 * @brief game.save and game.cell, before the steps. A named save is loaded from the main menu; a cell is a coc once the save's
+		 * world is ready. Each counts as a step boundary, so a step at world-ready waits for the world after it. False until done.
+		 */
+		bool RunSetup(std::uint32_t a_frame)
+		{
+			auto& run = Run();
+			std::string save, cell;
+			std::optional<std::uint32_t> menuFrame;
+			bool shadersReady = false;
+			{
+				std::scoped_lock lock(run.mutex);
+				save = run.config.save;
+				cell = run.config.cell;
+				if (const auto* menu = FindMilestone("main-menu"))
+					menuFrame = menu->frame;
+				shadersReady = FindMilestone("shaders-ready") != nullptr;
+			}
+			if (!saveHandled) {
+				if (save.empty() || save == "autoload") {
+					saveHandled = true;
+				} else {
+					if (!menuFrame || !shadersReady || a_frame < *menuFrame + kMenuSettleFrames) {
+						SetStepState(fmt::format("waiting to load save '{}'", save));
+						return false;
+					}
+					std::error_code error;
+					const auto file = SaveFile(save);
+					auto* manager = RE::BGSSaveLoadManager::GetSingleton();
+					if (!manager || !std::filesystem::exists(file, error)) {
+						Finish("failed", fmt::format("save '{}' not found ({})", save, file.string()), 0u);
+						return false;
+					}
+					logger::info("[TEST] loading save '{}' at frame {}", save, a_frame);
+					manager->Load(file.stem().string().c_str());
+					saveHandled = true;
+					lastRunFrame = a_frame;
+				}
+			}
+			if (!cellHandled) {
+				if (cell.empty()) {
+					cellHandled = true;
+				} else {
+					const Step worldReady{ .at = "world-ready" };
+					if (!Anchor(worldReady)) {
+						SetStepState(fmt::format("waiting for world-ready to coc {}", cell));
+						return false;
+					}
+					logger::info("[TEST] coc {} at frame {}", cell, a_frame);
+					std::string error;
+					if (!RunCommand("console", "coc " + cell, error)) {
+						Finish("failed", fmt::format("coc {}: {}", cell, error), 0u);
+						return false;
+					}
+					cellHandled = true;
+					lastRunFrame = a_frame;
+					// The steps start from the next frame: the coc's world-ready comes after it.
+					return false;
+				}
+			}
+			return true;
+		}
+	}
+
 	void RunSteps(std::uint32_t a_frame)
 	{
 		auto& run = Run();
+		if (!Configured() || !RunSetup(a_frame))
+			return;
 		for (;;) {
 			Step step;
 			std::size_t index = 0;

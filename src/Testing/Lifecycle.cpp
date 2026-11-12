@@ -100,7 +100,7 @@ namespace Testing
 		case SKSE::MessagingInterface::kNewGame:
 			{
 				std::scoped_lock lock(run.mutex);
-				if (!run.configured)
+				if (!run.configured || !FindMilestone("main-menu"))
 					return;
 				BeginLoad(run.frame);
 				UpdatePhase(run);
@@ -146,7 +146,8 @@ namespace Testing
 			if (!inLoad)
 				loadTimerStart = now;
 		}
-		if (loading) {
+		// The game's own loading screen at startup comes before the main menu: it is not a load.
+		if (loading && FindMilestone("main-menu")) {
 			BeginLoad(a_frame);
 			if (!loadingScreenSeen) {
 				loadingScreenSeen = true;

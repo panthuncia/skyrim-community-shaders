@@ -32,6 +32,7 @@ shader_cache = "warm"         # "warm" keeps the variant's cache; "cold" clears 
 
 [game]
 save = "autoload"             # "autoload" (the save the autoload mod picks) or a save's name
+autoload_mod = "Start On Save"   # the MO2 mod that loads a save at the main menu; turned off when save names one
 cell = ""                     # if set, a coc to this cell once the save is loaded
 mods_off = ["Skyrim Engine Telemetry"]
 
@@ -100,6 +101,7 @@ The harness writes this file. All keys are present; empty means none.
 - **`features_disabled`** joins `CS_DISABLE_FEATURES`.
 - **`dclf_ini`** values are served by `Util::SwitchFile` as though they were in `CommunityShaders-DCLF.ini`.
 - **`steps[].wait`** (optional) holds the step until a condition is true: `"settled"`, `"shaders"`, `"reload"`, `"signal:<n>"`. **`steps[].wait_s`** overrides `timeouts.step_wait`. A wait that times out fails the run.
+- **`game.save`**, when it names a save, is loaded from the main menu once the shaders are ready; a missing file fails the run ("save '<name>' not found"). **`game.cell`** is a coc once that save's world is ready. Both count as step boundaries, so a step at `world-ready` waits for the world after them. Load milestones count only after `main-menu`: the startup loading screen is not a load.
 - **Shots** are written to `<run_dir>\shots\<arg>.png`.
 - **A malformed configuration or an unknown name** ends the game at once with `config-error`, after the status file is written.
 - **`at`** anchors a step at the first time its milestone is reached at or after the previous step ran. So a step after a `load` waits for that load's `world-ready`. `"previous"` is the frame the previous step ran at.
