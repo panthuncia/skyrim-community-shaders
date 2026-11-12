@@ -781,6 +781,9 @@ namespace RenderGraph::Engine::Native
 			std::atomic<bool> lost = false;
 			std::mutex presentLock;
 
+			// CS_ORG_NATIVE_VALIDATION=1: BasicRHI queues the validation layer's messages; each present drains them into the log.
+			bool validation = false;
+
 			winrt::com_ptr<IDXGIAdapter> adapter;
 			ID3D11Device* deviceHandle = nullptr;  // the engine holds it for the process
 			winrt::com_ptr<IDXGIDevice1> dxgiDevice;
@@ -1305,6 +1308,9 @@ namespace RenderGraph::Engine::Native
 				const rhi::Result presented = swapchain->Present(a_syncInterval > 0, sync);
 				if (presents == 1)
 					Stage("first present", fmt::format("{}x{}, result {}", width, height, static_cast<int>(presented)));
+				// BasicRHI only queues the validation layer's messages (its messenger callback); they reach the log when drained.
+				if (validation)
+					Rhi().CheckDebugMessages();
 				if (presented == rhi::Result::ModeChanged) {
 					resizeRequested = true;
 				} else if (presented != rhi::Result::Ok) {
@@ -2338,6 +2344,10 @@ namespace RenderGraph::Engine::Native
 		std::string reason;
 		if (!CreateBasicRhiDevice(a_adapter, state->device, reason))
 			Fail("the native device", reason);
+		state->validation = Switches::On("CS_ORG_NATIVE_VALIDATION");
+		if (state->validation)
+			logger::info("[ORG native] validation: VK_LAYER_KHRONOS_validation requested (BasicRHI warns above when the layer is missing); its warnings and "
+						 "errors are logged as \"Vulkan validation: ...\" lines, drained at every present");
 		state->graphics = state->Rhi().GetQueue(rhi::QueueKind::Graphics);
 		// BasicRHI's queue accesses take the lock External takes around its own submissions.
 		if (rhi::vulkan::ShareVulkanDevice(state->Rhi(), rhi::vulkan::QueueSubmissionHooks{ nullptr, &LockQueue, &UnlockQueue, nullptr }) != rhi::Result::Ok)
