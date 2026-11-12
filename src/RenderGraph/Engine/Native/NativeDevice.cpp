@@ -1,4 +1,7 @@
 #include "RenderGraph/Engine/Native/Native.h"
+// The native state's records name members like the D3D11 descriptions they mirror (format, width, height); locals that copy
+// them keep those names.
+#pragma warning(disable: 4458)
 
 #if defined(CS_HAS_RENDER_GRAPH)
 
