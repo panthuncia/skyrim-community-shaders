@@ -286,7 +286,10 @@ namespace GraphResources
 				auto kept = std::make_shared<Kept>(Kept{ std::move(image), std::move(imported) });
 				texture = std::shared_ptr<org::ExternalTextureResource>(kept, kept->texture.get());
 			} else {
-				texture = org::ExternalTextureResource::CreateShared(std::move(image), graphDesc, *home == rhi::ResourceLayout::Common);
+				// Common-only (every pass in GENERAL) is Vulkan's. D3D12's Common layout cannot be a render target, depth or UAV, so
+				// there the graph moves the texture into each pass's layout and back.
+				texture = org::ExternalTextureResource::CreateShared(std::move(image), graphDesc,
+					*home == rhi::ResourceLayout::Common && !RenderGraph::Backend::IsD3D12());
 				texture->SetName(a_name);
 			}
 			exported.graph = std::move(texture);
