@@ -310,8 +310,8 @@ namespace DCLF::LoadHold
 				return;
 			}
 			PassCapture::Get().SetMapCensus(true);
-			static const bool hold = Util::SwitchFile::Value("CS_DCLF_MAP_HOLD") != "0";
-			if (hold)
+			static const bool mapHold = Util::SwitchFile::Value("CS_DCLF_MAP_HOLD") != "0";
+			if (mapHold)
 				BeginReentry("the map menu opened (a camera cut: the map's LOD is not in the set culled with the world camera)");
 		}
 
