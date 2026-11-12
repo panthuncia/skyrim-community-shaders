@@ -121,6 +121,10 @@ namespace DCLF
 		std::uint32_t occlusionWanted = 0;  // the maps OcclusionReady took for the frame's shadow epoch, until AfterShadowMaps
 		std::uint32_t occlusionDrawn = 0;   // the maps the frame's shadow epoch drew (OcclusionNeedsEngine's answer)
 		std::uint32_t occlusionEverDrawn = 0;  // the maps a shadow epoch drew this session: one the engine would draw again is a re-entry
+		// Per map: the frames in a row the engine would have drawn it whole (reset when a shadow epoch draws it). A map DCLF never drew is
+		// a re-entry only for kOcclusionReentryFrames of them (the first load's), so a map it cannot draw at all is not held forever.
+		std::array<std::uint32_t, 32> occlusionNeedStreak{};
+		static constexpr std::uint32_t kOcclusionReentryFrames = 300;
 		std::uint32_t captureFrame = ~0u;   // the frame whose main-pass bindings have been captured (Api::PrimaryViewContribution::beforeOpaque)
 	};
 }
