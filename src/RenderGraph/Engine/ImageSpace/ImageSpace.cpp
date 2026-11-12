@@ -2480,9 +2480,15 @@ namespace RenderGraph::Engine::ImageSpace
 				if (state.on && !state.flushing && FrameAnchors::IsRenderOwner()) {
 					// Only the manager's quad is an effect's draw. An effect may draw other shapes inside its scope (a batch's passes
 					// through RenderPassImmediately): those go to the engine, and must not reach SetDirtyStates through TakeDraw first.
+					// DrawTriShape gets the geometry's renderer data, not the geometry the manager holds (+0x48, +0x50 for dynamic
+					// resolution): compare with theirs.
 					const auto* manager = RE::ImageSpaceManager::GetSingleton();
 					const auto* base = reinterpret_cast<const std::byte*>(manager);
-					const bool quad = manager && (a_shape == *reinterpret_cast<void* const*>(base + 0x48) || a_shape == *reinterpret_cast<void* const*>(base + 0x50));
+					const auto rendererDataOf = [&](std::size_t a_offset) -> const void* {
+						auto* geometry = manager ? *reinterpret_cast<RE::BSGeometry* const*>(base + a_offset) : nullptr;
+						return geometry ? geometry->GetGeometryRuntimeData().rendererData : nullptr;
+					};
+					const bool quad = a_shape && (a_shape == rendererDataOf(0x48) || a_shape == rendererDataOf(0x50));
 					if (quad && state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->compute && !state.current->drew) {
 						if (TakeDraw())
 							return;
