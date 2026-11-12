@@ -6,6 +6,9 @@
 //   "Loading Menu", kHide). The hold keeps that message. The menu stays open and keeps presenting, and it pauses the game. The world's
 //   frames run under it, and DCLF builds its tables from them: the load is done, so FrameView::IsLoadingScreenUp is false for them.
 // - A load with no loading menu (the coordinator showed none) holds the presents instead: the frame before the load stays on screen.
+// - So does a re-entry (BeginReentry): a frame outside a load whose shadow views DCLF would draw but cannot yet (a graph rebuild for
+//   re-imported shadow maps, the shadow epoch not recorded yet), as after a coc or a closed map. The engine would draw their casters
+//   otherwise. A re-entry that ended at a stall or the cap is not started again until a frame without its condition.
 // - While it holds, the registration hooks withhold every pass of DCLF's classes from the views DCLF draws (PassCapture::HeldByLoad), and
 //   the engine's culls of the views DCLF does not cover yet are skipped rather than handed over whole (the sun's cascades, the occlusion
 //   maps: NoteHeld).
@@ -38,10 +41,17 @@ namespace DCLF::LoadHold
 	enum class View : std::uint8_t
 	{
 		Sun,
-		Occlusion
+		Occlusion,
+		Shadow  // every shadow view: DCLF cannot draw them this frame (BeginReentry's condition)
 	};
 	/** @brief Render thread: a view this frame was held (its engine cull skipped) because DCLF does not cover it yet. */
 	void NoteHeld(View a_view);
+
+	/**
+	 * @brief Render thread, before the shadow lights register: DCLF would draw the frame's shadow views but cannot (a_why). Starts a hold
+	 * with the presents held when none is in effect and DCLF has drawn before; notes the view held either way (NoteHeld(View::Shadow)).
+	 */
+	void BeginReentry(const char* a_why);
 
 	/** @brief Render thread, the frame's start (FrameDriver::BeginFrame): the world's first frame under a held menu starts the hold. */
 	void OnFrameStart(bool a_running);

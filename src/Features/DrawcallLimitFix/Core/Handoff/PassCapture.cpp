@@ -141,6 +141,9 @@ namespace DCLF
 		}
 		stats.occlusionWithheld = occlusionWithheld.exchange(0, std::memory_order_relaxed);
 		stats.holdWithheld = holdWithheld.exchange(0, std::memory_order_relaxed);
+		stats.pendingWithheld = pendingWithheld.exchange(0, std::memory_order_relaxed);
+		stats.baseMipsWithheld = baseMipsWithheld.exchange(0, std::memory_order_relaxed);
+		stats.dclfKept = dclfKept.exchange(0, std::memory_order_relaxed);
 		lastDrain = { entries.data(), count };
 		return lastDrain;
 	}
@@ -232,6 +235,20 @@ namespace DCLF
 		return true;
 	}
 
+	void PassCapture::NotePending(const SetSnapshot& a_set, const RE::BSGeometry* a_geometry, std::uint8_t a_phases)
+	{
+		if (!a_set.pending.empty() && !(a_set.PhasesOf(a_geometry) & a_phases))
+			pendingWithheld.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	bool PassCapture::HeldPhase(const SetSnapshot& a_set, const RE::BSGeometry* a_geometry, std::uint8_t a_phase)
+	{
+		if (!(a_set.WithheldPhasesOf(a_geometry) & a_phase))
+			return false;
+		NotePending(a_set, a_geometry, a_phase);
+		return true;
+	}
+
 	bool PassCapture::WithholdMain(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass)
 	{
 		if (!a_pass || !a_pass->geometry || !Policy::WithholdFromEngine())
@@ -270,6 +287,7 @@ namespace DCLF
 			auto& view = viewRenderers[v];
 			if (ViewCovered(views.mainRendererViews[i]) && (set->drawn & phase)) {
 				view.withheld.fetch_add(1, std::memory_order_relaxed);
+				NotePending(*set, a_pass->geometry, phase);
 				return true;
 			}
 			view.memberKept.fetch_add(1, std::memory_order_relaxed);
@@ -280,6 +298,7 @@ namespace DCLF
 		// Every pass of a member, a fade's and a LOD cross-fade's hint-10 copy of the old level included: DCLF draws them (the
 		// draw's alpha takes its root's FadeStateCS fade, and BuildDraws adds the copy partitions while the root crosses).
 		mainWithheld.fetch_add(1, std::memory_order_relaxed);
+		NotePending(*set, a_pass->geometry, kSetMain);
 		return true;
 	}
 
@@ -355,7 +374,7 @@ namespace DCLF
 			}
 			const auto set = std::atomic_load(&frameSet);
 			const std::uint8_t phase = views.views[v].phase;
-			if (!set || !(set->drawn & phase) || !(set->WithheldPhasesOf(a_pass->geometry) & phase)) {
+			if (!set || !(set->drawn & phase) || !HeldPhase(*set, a_pass->geometry, phase)) {
 				// The residue watch: a draw family's engine shape under its faces' root, anything else but the sky under the view root
 				// contributions' roots (the LOD land and objects').
 				if (const auto watch = view.residueWatch.load(std::memory_order_acquire); watch & (treeLod ? FacesRootBit(family) : views.rootBits))
@@ -469,7 +488,7 @@ namespace DCLF
 		if ((t_shadowRegistration || ShadowModeOfBatch(a_batch, mode)) && HeldByLoad(a_pass))
 			return true;
 		std::uint8_t phase = 0;
-		if (const auto set = CastersForBatch(a_batch, &phase); set && ShadowModeOfBatch(a_batch, mode) && (set->WithheldPhasesOf(a_pass->geometry) & phase)) {
+		if (const auto set = CastersForBatch(a_batch, &phase); set && ShadowModeOfBatch(a_batch, mode) && HeldPhase(*set, a_pass->geometry, phase)) {
 			shadowWithheld[mode].fetch_add(1, std::memory_order_relaxed);
 			return true;
 		}
@@ -529,6 +548,9 @@ namespace DCLF
 	void PassCapture::KeepForEngine(const RE::BSRenderPass* a_pass) const
 	{
 		namespace Flush = RenderGraph::Engine::Flush;
+		// Counted for the log after a load's hold (LoadHold.h): what DCLF still hands the engine of its classes.
+		if (a_pass && a_pass->geometry && !t_menuScenes && !bypassed.load(std::memory_order_acquire) && DclfClass(a_pass))
+			dclfKept.fetch_add(1, std::memory_order_relaxed);
 		if (!Flush::Vouching() || !a_pass || !a_pass->geometry || !a_pass->shaderProperty || bypassed.load(std::memory_order_acquire))
 			return;
 		// DCLF's classes never reach the engine from here on purpose: members and waiting objects are withheld (WithholdMain, WithholdOwn,
@@ -595,7 +617,11 @@ namespace DCLF
 			}
 			// Withholding is the whole of ownership: the pass is built, lit and shadowed as the engine would - only the batch
 			// renderer never receives it, so the native loop has nothing to draw. Record notes it for the observers.
-			const bool withheld = capture.WithholdMain(a_this, a_pass) || capture.WithholdOwn(a_this, a_pass) || capture.Withhold(a_this, a_pass) || WaitsForBaseMips(a_pass);
+			bool withheld = capture.WithholdMain(a_this, a_pass) || capture.WithholdOwn(a_this, a_pass) || capture.Withhold(a_this, a_pass);
+			if (!withheld && WaitsForBaseMips(a_pass)) {
+				capture.baseMipsWithheld.fetch_add(1, std::memory_order_relaxed);
+				withheld = true;
+			}
 			capture.Record(a_this, a_pass, a_techniqueID, withheld);
 			Diagnostics::Notify(Diagnostics::PointLightPass{ a_this, a_pass, withheld, 0 });
 			if (withheld)
@@ -623,7 +649,7 @@ namespace DCLF
 			return true;
 		std::uint8_t phase = 0;
 		const auto set = CastersForBatch(a_batch, &phase);
-		const bool member = set && (set->WithheldPhasesOf(a_pass->geometry) & phase);
+		const bool member = set && HeldPhase(*set, a_pass->geometry, phase);
 		if (member)
 			a_counter.fetch_add(1, std::memory_order_relaxed);
 		return member;
@@ -740,7 +766,7 @@ namespace DCLF
 			if (live && capture.HeldByLoad(a_pass))
 				return;
 			if (phase && live && !!Policy::WithholdFromEngine())
-				if (const auto set = std::atomic_load(&capture.frameSet); set && (set->drawn & phase) && (set->WithheldPhasesOf(a_pass->geometry) & phase)) {
+				if (const auto set = std::atomic_load(&capture.frameSet); set && (set->drawn & phase) && capture.HeldPhase(*set, a_pass->geometry, phase)) {
 					capture.occlusionWithheld.fetch_add(1, std::memory_order_relaxed);
 					return;
 				}

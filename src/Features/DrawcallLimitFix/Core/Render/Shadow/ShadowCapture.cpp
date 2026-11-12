@@ -2,6 +2,7 @@
 // viewport, camera and constants, DCLF's own where it has them; the views' coverage and the occlusion maps' predicted layout.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEpochs.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
@@ -247,9 +248,14 @@ namespace DCLF
 				if (renderer->GetDepthStencilData().depthStencils[target].texture)
 					(void)engine.ImportShadowDepth(index, target);
 		}
-		// None while the built graph lacks a new import, or the frame has no claims.
-		if (auto* host = RenderGraphRuntime::Get().Host(); !host || host->RebuildRequested() || Scene::FrameView::Get().NotDrawingYet())
+		// None while the built graph lacks a new import, or the frame has no claims. A rebuild after DCLF drew holds the frame (LoadHold's
+		// re-entry): the engine would draw every caster otherwise.
+		if (Scene::FrameView::Get().NotDrawingYet())
 			return 0;
+		if (auto* host = RenderGraphRuntime::Get().Host(); !host || host->RebuildRequested()) {
+			LoadHold::BeginReentry(host ? "a graph rebuild (re-imported shadow maps or other resources)" : "no graph host");
+			return 0;
+		}
 		// Every view: each draws at its placement's slot.
 		return UINT32_MAX;
 	}
@@ -263,8 +269,13 @@ namespace DCLF
 			return;
 		// The views are DCLF's once the selected revision has the shadow epoch's recording (shaped for all placements) on the built
 		// graph and the installed publication has a shadow payload; until then (startup, a toggle) the engine's. Both are trusted.
-		if (!impl->EpochCovered(EpochOfShape(ShapeKind::Shadow, kShadowShape)) || !impl->installedDraws || !impl->installedDraws->shadow)
+		if (!impl->EpochCovered(EpochOfShape(ShapeKind::Shadow, kShadowShape)) || !impl->installedDraws || !impl->installedDraws->shadow) {
 			ShadowViews::Get().SetDrawable(false);
+			// DCLF draws shadows (the toggle on) but not yet: the frame is held (LoadHold's re-entry), not handed to the engine.
+			// A missing payload alone is not: a scene with no caster has none.
+			if (ActiveToggles().shadows && !impl->EpochCovered(EpochOfShape(ShapeKind::Shadow, kShadowShape)))
+				LoadHold::BeginReentry("the shadow epoch not recorded yet");
+		}
 	}
 
 	void IndirectDraws::BeginShadowFrame()

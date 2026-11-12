@@ -25,5 +25,16 @@ namespace DCLF::Scene
 		std::shared_ptr<const PipelineCatalog> publishedCatalog;
 		std::array<std::uint64_t, 6> publishedLookupsKey{};
 		std::uint64_t lookupsChunkCopies = 0;
+		// A load's texture imports, asked for from the attach records while the load is up (Coordinator::PrewarmLoadTextures), so the
+		// bindings the tables make after it are answered from the import registry. The imports are kept until the load's hold ends.
+		struct LoadPrewarm
+		{
+			GpuTextures::Replies replies;
+			ankerl::unordered_dense::set<const void*> asked;
+			std::vector<std::shared_ptr<const void>> held;
+			std::uint64_t cookie = 1;
+			std::uint64_t requested = 0, imported = 0, rejected = 0;
+		};
+		LoadPrewarm loadPrewarm;
 	};
 }

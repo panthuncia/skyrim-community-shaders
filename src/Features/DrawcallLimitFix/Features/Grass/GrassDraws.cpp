@@ -12,6 +12,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
 #include "Features/DrawcallLimitFix/Core/Render/DrawFamilies/FamilySlots.h"
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 
 #include "GrassShared/GrassCapture.h"
 #include "GrassShared/GrassFrame.h"
@@ -72,8 +73,11 @@ namespace DCLF::Features::Grass
 		 */
 		void Owned(bool a_owned)
 		{
-			GrassShared::SetDclfOwned(a_owned);
-			if (!a_owned)
+			// During a load's hold every grass pass is withheld (PassCapture::HeldByLoad) whether or not DCLF owns the family yet: the
+			// features inside the engine's grass passes stand down then too, and do their frame's work from here.
+			const bool standDown = a_owned || LoadHold::Active();
+			GrassShared::SetDclfOwned(standDown);
+			if (!standDown)
 				return;
 			// The main view's eye, as the draw row's (SampleCull): the renderer's posAdjust is the last pass's here, not the main view's.
 			auto* camera = RE::Main::WorldRootCamera();

@@ -85,6 +85,9 @@ namespace DCLF
 		// what a load's hold reads (Core/Render/LoadHold.h).
 		std::array<std::uint32_t, kSetWaitReasons> waiting{};
 		bool built = false;
+		// The coordinator's readiness signal for a load's hold: its pass built the scene and no slot waits on a transient reason. The render
+		// thread adds what only it sees (the draw families, the views' coverage, the claims installed and unchanged).
+		bool settled = false;
 
 		/** @brief The waiting slots whose reason is transient (kSetTransientWaits). */
 		std::uint32_t TransientWaiting() const
