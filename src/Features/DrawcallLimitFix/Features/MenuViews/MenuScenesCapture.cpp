@@ -40,13 +40,6 @@ namespace DCLF::Features::MenuViews::Scenes
 			return log;
 		}
 
-		/** @brief What the family leaves to the engine on purpose (Flush::EngineDraws): a batch or its rest. */
-		const Family::Flush::Reason& EngineReason()
-		{
-			static const Family::Flush::Reason reason{ "local map: left to the engine" };
-			return reason;
-		}
-
 		/** @brief The batch being latched (render thread). */
 		struct Capture
 		{
@@ -55,7 +48,6 @@ namespace DCLF::Features::MenuViews::Scenes
 			View view = View::LocalMap;
 			std::shared_ptr<Run> run;
 			Family::Passes passes;
-			Family::EngineRest engineRest;  // the rest of a refused batch, vouched for until the batch returns
 		};
 
 		Capture& GetCapture()
@@ -94,8 +86,6 @@ namespace DCLF::Features::MenuViews::Scenes
 			a_capture.failed = true;
 			Refusals().Report(std::format("a {} draw: {}", NameOf(a_capture.view), a_reason), a_detail);
 			FlushLatched(a_capture);
-			if (!a_capture.engineRest)
-				a_capture.engineRest.emplace(EngineReason());
 		}
 
 		/**
@@ -222,7 +212,6 @@ namespace DCLF::Features::MenuViews::Scenes
 					return;
 				}
 				if (!Enabled() || !ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SceneDraws::Available() || !SceneDraws::CanTake(kView)) {
-					Family::Flush::EngineDraws scope(EngineReason());
 					func(a_camera, a_accumulator, a_flags);
 					return;
 				}
@@ -238,7 +227,6 @@ namespace DCLF::Features::MenuViews::Scenes
 				if (!capture.passes.End())
 					Refusals().Report(capture.passes.Describe(std::format("{} batch", NameOf(kView))));
 				FlushLatched(capture);
-				capture.engineRest.reset();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};

@@ -53,6 +53,9 @@ namespace DCLF::Features::Water
 		}
 
 		/** @brief The batch being latched (render thread). */
+		// The shadow record's alignment pads the struct, as intended.
+#pragma warning(push)
+#pragma warning(disable: 4324)
 		struct Capture
 		{
 			bool active = false;
@@ -67,6 +70,7 @@ namespace DCLF::Features::Water
 			// Deferred's directional shadow record as last uploaded: the frames with no sun shadow light keep it, as t98 keeps its buffer.
 			Deferred::DirectionalShadowLightData directionalShadow{};
 		};
+#pragma warning(pop)
 
 		Capture& GetCapture()
 		{
