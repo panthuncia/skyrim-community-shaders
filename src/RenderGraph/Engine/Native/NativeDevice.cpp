@@ -25,6 +25,7 @@
 #	include <atomic>
 #	include <cstring>
 #	include <mutex>
+#	include <span>
 #	include <unordered_map>
 #	include <unordered_set>
 #	include <vector>
@@ -86,10 +87,14 @@ namespace RenderGraph::Engine::Native
 
 				// What the device supports.
 				VkPhysicalDeviceRobustness2FeaturesEXT robustness{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT };
+				VkPhysicalDeviceVulkan13Features vk13{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+				vk13.pNext = has(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME) ? &robustness : nullptr;
 				VkPhysicalDeviceVulkan12Features vk12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
-				vk12.pNext = has(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME) ? &robustness : nullptr;
+				vk12.pNext = &vk13;
+				VkPhysicalDeviceVulkan11Features vk11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
+				vk11.pNext = &vk12;
 				VkPhysicalDeviceFeatures2 supported{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
-				supported.pNext = &vk12;
+				supported.pNext = &vk11;
 				getFeatures2(physical, &supported);
 
 				// Core features: into the chain's VkPhysicalDeviceFeatures2 when there is one, else pEnabledFeatures.
@@ -113,19 +118,28 @@ namespace RenderGraph::Engine::Native
 					info->pEnabledFeatures = &self->core;
 				}
 
-				// Vulkan 1.2: the features RenderGraphRuntime asks DXVK for, into BasicRHI's Vulkan 1.2 struct. None is added when
-				// BasicRHI has none: the chain may hold the single-feature structs instead, and both together are invalid.
+				// Vulkan 1.1, 1.2 and 1.3: every supported feature, as DXVK enables them (DCLF's counted indirect draws need
+				// drawIndirectCount, the graph the memory model's device scope), into BasicRHI's structs of those versions. None is added
+				// where BasicRHI has none: the chain may hold the single-feature structs instead, and both together are invalid.
+				const auto orAll = [](void* a_into, const void* a_from, size_t a_size) {
+					auto* into = reinterpret_cast<VkBool32*>(static_cast<std::byte*>(a_into) + sizeof(VkBaseOutStructure));
+					const auto* from = reinterpret_cast<const VkBool32*>(static_cast<const std::byte*>(a_from) + sizeof(VkBaseOutStructure));
+					for (size_t i = 0; i < (a_size - sizeof(VkBaseOutStructure)) / sizeof(VkBool32); ++i)
+						into[i] |= from[i];
+				};
 				auto* chain12 = reinterpret_cast<VkPhysicalDeviceVulkan12Features*>(FindStruct(info->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES));
-				if (chain12) {
-					chain12->vulkanMemoryModel |= vk12.vulkanMemoryModel;
-					chain12->vulkanMemoryModelDeviceScope |= vk12.vulkanMemoryModelDeviceScope;
-					chain12->separateDepthStencilLayouts |= vk12.separateDepthStencilLayouts;
-					chain12->descriptorBindingVariableDescriptorCount |= vk12.descriptorBindingVariableDescriptorCount;
-				}
+				if (chain12)
+					orAll(chain12, &vk12, sizeof(vk12));
+				// Protected memory changes how queues and memory are made, and nothing uses it.
+				vk11.protectedMemory = VK_FALSE;
+				if (auto* chain11 = FindStruct(info->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES))
+					orAll(chain11, &vk11, sizeof(vk11));
+				if (auto* chain13 = FindStruct(info->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES))
+					orAll(chain13, &vk13, sizeof(vk13));
 
 				// Null descriptors (DXVK enables them, and BasicRHI reads the flag from the create info).
 				bool nullDescriptor = false;
-				if (vk12.pNext && robustness.nullDescriptor) {
+				if (vk13.pNext && robustness.nullDescriptor) {
 					auto* chainRobustness =
 						reinterpret_cast<VkPhysicalDeviceRobustness2FeaturesEXT*>(FindStruct(info->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT));
 					if (!chainRobustness) {
@@ -141,8 +155,9 @@ namespace RenderGraph::Engine::Native
 					info->ppEnabledExtensionNames = self->extensions.data();
 					nullDescriptor = true;
 				}
-				self->summary = chain12 ? fmt::format("every supported core feature, null descriptors {}, memory model device scope {}, separate depth/stencil layouts {}",
-											  nullDescriptor, static_cast<bool>(chain12->vulkanMemoryModelDeviceScope), static_cast<bool>(chain12->separateDepthStencilLayouts)) :
+				self->summary = chain12 ? fmt::format("every supported core and Vulkan 1.1-1.3 feature, null descriptors {}, memory model device scope {}, separate depth/stencil layouts {}, indirect count {}",
+											  nullDescriptor, static_cast<bool>(chain12->vulkanMemoryModelDeviceScope), static_cast<bool>(chain12->separateDepthStencilLayouts),
+											  static_cast<bool>(chain12->drawIndirectCount)) :
 				                          fmt::format("every supported core feature, null descriptors {}; BasicRHI's chain has no Vulkan 1.2 struct, so its own 1.2 features", nullDescriptor);
 				return true;
 			}
@@ -558,6 +573,148 @@ namespace RenderGraph::Engine::Native
 			std::string name;
 		};
 
+		// ---- Queue access and external commands -------------------------------------------------------------------------------
+
+		/**
+		 * @brief The lock around every access to the device's queues: BasicRHI takes it through its sharing hooks
+		 * (rhi::vulkan::ShareVulkanDevice), and External takes it around its own vkQueueSubmit2, so the two never use a queue at once.
+		 */
+		std::mutex g_queueLock;
+
+		void LockQueue(void*, VkQueue) { g_queueLock.lock(); }
+		void UnlockQueue(void*, VkQueue) { g_queueLock.unlock(); }
+
+		/**
+		 * @brief RenderGraphRuntime::EmitExternalCommands in native mode: what DXVK's dxvkEmitExternalCommands does in its stream.
+		 * A client's recording (DCLF's sites, its frame signal) goes into a command buffer of its own on the graphics queue,
+		 * submitted at the call with the client's waits and signals, between full memory barriers. It lands after everything
+		 * submitted before it and before everything after, as DXVK's stream order would put it. Images rest in GENERAL, as the
+		 * recording expects.
+		 */
+		class External
+		{
+		public:
+			bool Init(rhi::Device a_device)
+			{
+				device = rhi::vulkan::get_device(a_device);
+				const auto graphics = a_device.GetQueue(rhi::QueueKind::Graphics);
+				queue = rhi::vulkan::get_queue(graphics);
+				const auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(LoaderProc()(rhi::vulkan::get_instance(a_device), "vkGetDeviceProcAddr"));
+				if (!getDeviceProcAddr)
+					return false;
+				const auto resolve = [&](auto& a_into, const char* a_name) {
+					a_into = reinterpret_cast<std::remove_reference_t<decltype(a_into)>>(getDeviceProcAddr(device, a_name));
+					return a_into != nullptr;
+				};
+				PFN_vkCreateCommandPool createPool = nullptr;
+				PFN_vkAllocateCommandBuffers allocate = nullptr;
+				PFN_vkCreateSemaphore createSemaphore = nullptr;
+				if (!resolve(createPool, "vkCreateCommandPool") || !resolve(allocate, "vkAllocateCommandBuffers") || !resolve(createSemaphore, "vkCreateSemaphore") ||
+					!resolve(reset, "vkResetCommandBuffer") || !resolve(begin, "vkBeginCommandBuffer") || !resolve(end, "vkEndCommandBuffer") ||
+					!resolve(submit, "vkQueueSubmit2") || !resolve(barrier, "vkCmdPipelineBarrier2") || !resolve(wait, "vkWaitSemaphores"))
+					return false;
+				VkCommandPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+				poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+				poolInfo.queueFamilyIndex = rhi::vulkan::get_queue_family_index(graphics);
+				if (createPool(device, &poolInfo, nullptr, &pool) != VK_SUCCESS)
+					return false;
+				VkCommandBufferAllocateInfo allocateInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+				allocateInfo.commandPool = pool;
+				allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+				allocateInfo.commandBufferCount = kSlots;
+				if (allocate(device, &allocateInfo, commands.data()) != VK_SUCCESS)
+					return false;
+				VkSemaphoreTypeCreateInfo type{ VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
+				type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+				VkSemaphoreCreateInfo semaphoreInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+				semaphoreInfo.pNext = &type;
+				return createSemaphore(device, &semaphoreInfo, nullptr, &timeline) == VK_SUCCESS;
+			}
+
+			bool Run(void (*a_record)(void*, VkCommandBuffer), void* a_user, std::span<const VkSemaphoreSubmitInfo> a_waits,
+				std::span<const VkSemaphoreSubmitInfo> a_signals)
+			{
+				std::lock_guard guard(lock);
+				const uint32_t slot = static_cast<uint32_t>(next++ % kSlots);
+				if (values[slot]) {
+					VkSemaphoreWaitInfo waitInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+					waitInfo.semaphoreCount = 1;
+					waitInfo.pSemaphores = &timeline;
+					waitInfo.pValues = &values[slot];
+					if (wait(device, &waitInfo, 5'000'000'000ull) != VK_SUCCESS)
+						return false;
+				}
+				const VkCommandBuffer commandBuffer = commands[slot];
+				reset(commandBuffer, 0);
+				VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+				beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+				begin(commandBuffer, &beginInfo);
+				FullBarrier(commandBuffer);
+				if (a_record)
+					a_record(a_user, commandBuffer);
+				FullBarrier(commandBuffer);
+				end(commandBuffer);
+
+				thread_local std::vector<VkSemaphoreSubmitInfo> signals;
+				signals.assign(a_signals.begin(), a_signals.end());
+				signals.push_back({ VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, timeline, value + 1, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0 });
+				VkCommandBufferSubmitInfo commandInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO };
+				commandInfo.commandBuffer = commandBuffer;
+				VkSubmitInfo2 submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO_2 };
+				submitInfo.waitSemaphoreInfoCount = static_cast<uint32_t>(a_waits.size());
+				submitInfo.pWaitSemaphoreInfos = a_waits.data();
+				submitInfo.commandBufferInfoCount = 1;
+				submitInfo.pCommandBufferInfos = &commandInfo;
+				submitInfo.signalSemaphoreInfoCount = static_cast<uint32_t>(signals.size());
+				submitInfo.pSignalSemaphoreInfos = signals.data();
+				VkResult result;
+				{
+					std::lock_guard queueGuard(g_queueLock);
+					result = submit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+				}
+				if (result != VK_SUCCESS) {
+					static std::atomic_flag logged;
+					if (!logged.test_and_set())
+						logger::error("[ORG native] external commands could not be submitted ({}); such work is lost", static_cast<int>(result));
+					return false;
+				}
+				values[slot] = ++value;
+				return true;
+			}
+
+		private:
+			static constexpr uint32_t kSlots = 32;
+
+			void FullBarrier(VkCommandBuffer a_commands) const
+			{
+				VkMemoryBarrier2 memory{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+				memory.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+				memory.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+				memory.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+				memory.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+				VkDependencyInfo dependency{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+				dependency.memoryBarrierCount = 1;
+				dependency.pMemoryBarriers = &memory;
+				barrier(a_commands, &dependency);
+			}
+
+			std::mutex lock;
+			VkDevice device = VK_NULL_HANDLE;
+			VkQueue queue = VK_NULL_HANDLE;
+			VkCommandPool pool = VK_NULL_HANDLE;
+			std::array<VkCommandBuffer, kSlots> commands{};
+			std::array<uint64_t, kSlots> values{};
+			VkSemaphore timeline = VK_NULL_HANDLE;
+			uint64_t value = 0;
+			uint64_t next = 0;
+			PFN_vkResetCommandBuffer reset = nullptr;
+			PFN_vkBeginCommandBuffer begin = nullptr;
+			PFN_vkEndCommandBuffer end = nullptr;
+			PFN_vkQueueSubmit2 submit = nullptr;
+			PFN_vkCmdPipelineBarrier2 barrier = nullptr;
+			PFN_vkWaitSemaphores wait = nullptr;
+		};
+
 		struct NativeState;
 		NativeState* g_device = nullptr;
 
@@ -570,6 +727,7 @@ namespace RenderGraph::Engine::Native
 			rhi::Queue graphics;
 			OneShot oneShot;
 			Immediate immediate;
+			External external;
 
 			// The swap chain on the game's window, and the back buffer the engine draws into (through the graph's passes).
 			rhi::SwapchainPtr swapchain;
@@ -2147,6 +2305,11 @@ namespace RenderGraph::Engine::Native
 		if (!CreateBasicRhiDevice(a_adapter, state->device, reason))
 			Fail("the native device", reason);
 		state->graphics = state->Rhi().GetQueue(rhi::QueueKind::Graphics);
+		// BasicRHI's queue accesses take the lock External takes around its own submissions.
+		if (rhi::vulkan::ShareVulkanDevice(state->Rhi(), rhi::vulkan::QueueSubmissionHooks{ nullptr, &LockQueue, &UnlockQueue, nullptr }) != rhi::Result::Ok)
+			Fail("the native device", "BasicRHI could not take the queue lock hooks external commands share with it");
+		if (!state->external.Init(state->Rhi()))
+			Fail("the native device", "the external commands' command pool, timeline or Vulkan entry points could not be made");
 		if (!state->oneShot.Init(state->Rhi()))
 			Fail("the native device", "its command lists or timeline for resource creation could not be made");
 		if (!state->immediate.Init(state->Rhi()))
@@ -2280,6 +2443,14 @@ namespace RenderGraph::Engine::Native
 		return g_device ? g_device->Present(a_syncInterval, a_flags) : E_FAIL;
 	}
 
+	bool EmitExternalCommands(void (*a_record)(void*, VkCommandBuffer_T*), void* a_user, const VkSemaphoreSubmitInfo* a_waits, std::uint32_t a_waitCount,
+		const VkSemaphoreSubmitInfo* a_signals, std::uint32_t a_signalCount)
+	{
+		if (!g_device)
+			return false;
+		return g_device->external.Run(a_record, a_user, { a_waits, a_waitCount }, { a_signals, a_signalCount });
+	}
+
 	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, DxvkOrgInteropResourceInfo& a_info,
 		const char* a_name, const D3D11_SUBRESOURCE_DATA* a_data)
 	{
@@ -2401,6 +2572,10 @@ namespace RenderGraph::Engine::Native
 	}
 	bool DescribeResource(const IUnknown*, DxvkOrgInteropResourceInfo&) { return false; }
 	HRESULT Present(UINT, UINT) { return E_FAIL; }
+	bool EmitExternalCommands(void (*)(void*, VkCommandBuffer_T*), void*, const VkSemaphoreSubmitInfo*, std::uint32_t, const VkSemaphoreSubmitInfo*, std::uint32_t)
+	{
+		return false;
+	}
 	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource&, const DxvkOrgInteropTextureWrap&, DxvkOrgInteropResourceInfo&, const char*, const D3D11_SUBRESOURCE_DATA*)
 	{
 		return nullptr;

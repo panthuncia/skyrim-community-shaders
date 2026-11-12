@@ -1124,6 +1124,13 @@ A native device handle answers through the native services instead of failing:
     BasicRHI image or buffer (the image moved into GENERAL, uploaded or zeroed), so `GraphResources::ExportTexture`, the
     engine targets, textures, buffers and texture streaming work as they do on DXVK. A port's handle that wraps a native
     handle reaches the same record.
+-   **External commands**: `RenderGraphRuntime::EmitExternalCommands` (DCLF's CPU pipeline sites and its frame signal) records
+    the client's commands into a command buffer of native mode's own and submits it on the graphics queue at the call, with
+    the client's waits and signals, between full memory barriers. BasicRHI's queue accesses share one lock with it
+    (`ShareVulkanDevice` hooks). Without it DCLF's external runs waited for a frame signal nothing sent, and the host's runs
+    in flight grew until none were left.
+-   **Device features**: every supported core and Vulkan 1.1-1.3 feature (but robustBufferAccess, sparse binding and
+    protected memory) is enabled, as DXVK enables them; DCLF's counted indirect draws need `drawIndirectCount`.
 -   **Binds**: the native context stores what D3D11 code binds (shaders, shader resources, constant buffers, samplers, compute
     UAVs, render targets and depth, blend, depth-stencil and rasterizer states, viewports, scissors, input layout, topology,
     vertex and index buffers) and its getters answer it, so readers such as DCLF's main-pass capture (`OMGetRenderTargets`)

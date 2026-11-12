@@ -3360,7 +3360,7 @@ bool RenderGraphRuntime::EmitExternalCommands(void (*a_record)(void* a_user, VkC
 	std::span<const ExternalCommandsWait> a_waits, std::span<const ExternalCommandsWait> a_signals, bool a_bindsState, const char* a_label,
 	bool a_fullBarrier)
 {
-	if (!impl || !impl->emitExternalCommands || !a_record)
+	if (!impl || !a_record || (!impl->native && !impl->emitExternalCommands))
 		return false;
 	// DXVK copies the semaphores at the call: one scratch per calling thread (the render thread), reused.
 	thread_local std::vector<VkSemaphoreSubmitInfo> semaphores;
@@ -3384,6 +3384,10 @@ bool RenderGraphRuntime::EmitExternalCommands(void (*a_record)(void* a_user, VkC
 	commands.signalCount = static_cast<std::uint32_t>(a_signals.size());
 	commands.signals = semaphores.data() + a_waits.size();
 	commands.label = a_label;
+	// Native mode: the commands go to the graphics queue at once, in the order of the calls, as DXVK's stream would order them.
+	if (impl->native)
+		return RenderGraph::Engine::Native::EmitExternalCommands(a_record, a_user, semaphores.data(), static_cast<std::uint32_t>(a_waits.size()),
+			semaphores.data() + a_waits.size(), static_cast<std::uint32_t>(a_signals.size()));
 	// The guard may flush, which DXVK's worker sees before these commands: the scratch above stays as it is.
 	impl->GuardStreamWaits(a_waits, a_label);
 	if (FAILED(impl->emitExternalCommands(globals::d3d::device, &commands)))
