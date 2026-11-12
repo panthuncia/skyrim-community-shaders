@@ -409,9 +409,10 @@ namespace DCLF::Direct
 		list.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
 		// A colour list binds the main layout at its first bucket with a colour pipeline (BindBucket). The pushed pipelines are the main
 		// set's, built for the main pass's formats: the reflection's faces draw into the cube's (R16G16B16A16 against the main target's
-		// R11G11B10), so they keep their own view pipelines (VUID-vkCmdDrawIndexed-dynamicRenderingUnusedAttachments-08911).
+		// R11G11B10), so they keep their own view pipelines (VUID-vkCmdDrawIndexed-dynamicRenderingUnusedAttachments-08911), as does a
+		// rendering without every main target (RecordContext::mainTargets).
 		a_context.pushedColour = !a_context.indirect && bindings.main && bindings.main->layout.valid() &&
-		                         ((a_context.pass == RecordPass::Colour && a_context.view != ViewType::Reflection && ExperimentOn(kExpPushedColour) &&
+		                         ((a_context.pass == RecordPass::Colour && a_context.view != ViewType::Reflection && a_context.mainTargets && ExperimentOn(kExpPushedColour) &&
 		                              !bindings.main->colour.empty()) ||
 		                          (a_context.pass == RecordPass::Depth && ExperimentOn(kExpPushedDepth) && !bindings.offsetDepth && !bindings.main->depth.empty()));
 		BindListLayout(a_context, false);
@@ -743,6 +744,7 @@ namespace DCLF::Direct
 		if (a_secondary.BeginSecondary(a_inheritance) != rhi::Result::Ok)
 			return false;
 		RecordContext context{ a_secondary, a_context.set, a_context.view, a_context.viewIndex, a_context.site, a_context.depthPass, a_context.bindings, a_context.counters };
+		context.mainTargets = a_context.mainTargets;
 		const bool begun = BeginList(context);
 		if (begun)
 			RecordBatch(context, a_batch);

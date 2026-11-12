@@ -484,6 +484,7 @@ namespace DCLF::Direct::detail
 		if (slot.ownsEpochs) {
 			list.BeginPass(begin);
 			RecordContext colour{ list, *slot.set, ViewType::FirstPerson, 0, Site::FirstPerson, false, run->colour, &slot.counters };
+			colour.mainTargets = false;  // kMAIN and the motion vectors alone
 			if (BeginList(colour))
 				for (const auto* batch : batches)
 					if (batch->count)
