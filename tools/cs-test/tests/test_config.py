@@ -191,3 +191,13 @@ def test_shipped_ports_preset_matches_the_old_block():
     contract, _ = resolve("latch-census-short", (), schema=schema)
     org_lines = [k for k in contract["env"] if k.startswith("CS_ORG_")]
     assert len(org_lines) == 48
+
+
+def test_named_save_turns_the_autoload_mod_off(configs):
+    sets = ['game.autoload_mod="Start On Save"']
+    _, harness = r("base", configs, sets)
+    assert harness["mods_off"] == ["Telemetry"] and harness["autoload_off"] == ""
+    contract, harness = r("base", configs, sets + ["game.save=MySave"])
+    assert contract["game"]["save"] == "MySave"
+    assert harness["mods_off"] == ["Telemetry", "Start On Save"]
+    assert harness["autoload_off"] == "Start On Save"

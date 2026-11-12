@@ -50,7 +50,7 @@ The shipped configs:
 
 | Config | What |
 |---|---|
-| `base` | what every run shares: autoload save, Telemetry off, `DXVK_DEBUG=hang`, Nsight layer off |
+| `base` | what every run shares: autoload save (`game.autoload_mod`, turned off when `game.save` names a save), Telemetry off, `DXVK_DEBUG=hang`, Nsight layer off |
 | `guest`, `native-vulkan`, `native-d3d12` | the three modes |
 | `quick` | a shot 60 frames after world-ready, then exit; compose it, `native-vulkan+quick` |
 | `guest-quick`, `native-quick`, `native-d3d12-quick` | the old quick scenarios |

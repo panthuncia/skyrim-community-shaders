@@ -10,6 +10,7 @@ shader_cache = "warm"
 
 [game]
 save = "autoload"
+autoload_mod = "Start On Save"   # the MO2 mod that loads a save at the main menu; turned off when save names one
 mods_off = ["Skyrim Engine Telemetry"]
 
 [dxvk]

@@ -43,7 +43,9 @@ def format_diff(differences):
         return ["  (same as base)"]
     lines = []
     for path, a, b in differences:
-        if path == "steps":
+        if path == "harness.autoload_off":
+            lines.append(f"  {path}: {json.dumps(a)} -> {json.dumps(b)} (game.save names a save, so the autoload mod is turned off)" if b else f"  {path}: {json.dumps(a)} -> {json.dumps(b)}")
+        elif path == "steps":
             lines.append(f"  steps: {len(a or [])} -> {len(b or [])}: " + "; ".join(f"{s['at']}+{s['frames']} {s['do']} {s['arg']}".strip() for s in (b or [])))
         else:
             lines.append(f"  {path}: {json.dumps(a)} -> {json.dumps(b)}")
