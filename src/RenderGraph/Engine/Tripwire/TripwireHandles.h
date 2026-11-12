@@ -9,8 +9,11 @@
 #include <atomic>
 #include <cstring>
 #include <intrin.h>
+#include <mutex>
 #include <shared_mutex>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace RenderGraph::Engine::Tripwire
 {
@@ -44,7 +47,10 @@ namespace RenderGraph::Engine::Tripwire
 		bool Enter(std::uint16_t a_slot, const char* a_method, void* a_caller)
 		{
 			if (kind == Kind::DeviceContext) {
-				if (const auto filter = Detail::contextFilter.load(std::memory_order_relaxed); filter && wrapped && !filter(a_slot, a_caller))
+				// The guest context's calls, and in native mode the native context's: there the filter decides which calls are the
+				// latch's to drop (silently) and which the census counts.
+				if (const auto filter = Detail::contextFilter.load(std::memory_order_relaxed);
+					filter && (wrapped || Detail::nativeServices.load(std::memory_order_relaxed)) && !filter(a_slot, a_caller))
 					return false;
 			}
 			const bool forward = wrapped != nullptr;
@@ -71,6 +77,13 @@ namespace RenderGraph::Engine::Tripwire
 		WatchSet watch;
 		std::shared_ptr<org::Resource> graph;
 		std::shared_ptr<const void> owner;
+
+		/**
+		 * @brief A native handle's private-data interfaces (SetPrivateDataInterface): each held until the handle goes or the GUID is
+		 * set again, as D3D11 holds them. AttachGraphResource's tag and the pipeline descriptions' tokens live here in native mode.
+		 */
+		std::vector<std::pair<GUID, winrt::com_ptr<IUnknown>>> privateInterfaces;
+		std::mutex privateLock;
 
 	private:
 		mutable std::shared_mutex nameLock;
@@ -276,6 +289,7 @@ namespace RenderGraph::Engine::Tripwire
 
 		HRESULT QueryInterface(HandleCore& a_core, IUnknown* a_self, std::span<const IID> a_iids, REFIID a_riid, void** a_out, void* a_caller);
 		HRESULT SetPrivateData(HandleCore& a_core, std::uint16_t a_slot, REFGUID a_guid, UINT a_size, const void* a_data, void* a_caller);
+		HRESULT SetPrivateDataInterface(HandleCore& a_core, std::uint16_t a_slot, REFGUID a_guid, const IUnknown* a_data, void* a_caller);
 		HRESULT GetPrivateData(HandleCore& a_core, std::uint16_t a_slot, REFGUID a_guid, UINT* a_size, void* a_data, void* a_caller);
 	}
 
@@ -310,6 +324,10 @@ namespace RenderGraph::Engine::Tripwire
 		HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID a_guid, UINT* a_size, void* a_data) override
 		{
 			return Detail::GetPrivateData(this->core, static_cast<std::uint16_t>(Slot::GetPrivateData), a_guid, a_size, a_data, _ReturnAddress());
+		}
+		HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID a_guid, const IUnknown* a_data) override
+		{
+			return Detail::SetPrivateDataInterface(this->core, static_cast<std::uint16_t>(Slot::SetPrivateDataInterface), a_guid, a_data, _ReturnAddress());
 		}
 
 		/** @brief For Detail::RegisterHandleClass: the core of an object of this class, from any of its interface pointers. */
@@ -496,6 +514,9 @@ namespace RenderGraph::Engine::Tripwire
 		void STDMETHODCALLTYPE ClearUnorderedAccessViewUint(ID3D11UnorderedAccessView* a_view, const UINT a_values[4]) override;
 		void STDMETHODCALLTYPE ClearUnorderedAccessViewFloat(ID3D11UnorderedAccessView* a_view, const FLOAT a_values[4]) override;
 		void STDMETHODCALLTYPE ClearDepthStencilView(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil) override;
+		void STDMETHODCALLTYPE Begin(ID3D11Asynchronous* a_query) override;
+		void STDMETHODCALLTYPE End(ID3D11Asynchronous* a_query) override;
+		HRESULT STDMETHODCALLTYPE GetData(ID3D11Asynchronous* a_query, void* a_data, UINT a_size, UINT a_flags) override;
 		/** @brief Native mode: nothing to send on (every native operation is submitted when it is made), so it succeeds silently. */
 		void STDMETHODCALLTYPE Flush() override;
 		/** @} */

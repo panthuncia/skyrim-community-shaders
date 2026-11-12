@@ -7,11 +7,15 @@
 #include <memory>
 #include <string_view>
 
+#include <winrt/base.h>
+
 struct DxvkOrgInteropResourceInfo;
+struct DxvkOrgInteropTextureWrap;
 
 namespace rhi
 {
 	class DevicePtr;
+	class Resource;
 }
 
 /**
@@ -85,6 +89,18 @@ namespace RenderGraph::Engine::Native
 	 * swap chain image on the graphics queue, after the frame's graph work, and presents it.
 	 */
 	HRESULT Present(UINT a_syncInterval, UINT a_flags);
+
+	/**
+	 * @brief RenderGraphRuntime::WrapTexture in native mode: a native texture handle over an image a port made with BasicRHI, so its
+	 * D3D11 readers (the engine's fields, the context's copies and clears) and the graph's import reach the same image. The image is
+	 * moved into GENERAL, its contents uploaded (a_data) or zeroed, as DXVK's wrap does. a_info answers as dxvkCreateTextureFromVkImage
+	 * would. Null on failure (logged).
+	 */
+	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, DxvkOrgInteropResourceInfo& a_info,
+		const char* a_name, const D3D11_SUBRESOURCE_DATA* a_data);
+
+	/** @brief RenderGraphRuntime::WrapBuffer in native mode: a native buffer handle over a port's BasicRHI buffer. Null on failure. */
+	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc, const char* a_name);
 
 	/** @brief Teardown, at the game window's close: waits for the last present and destroys the swap chain and the back buffer. */
 	void Shutdown();
