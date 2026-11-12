@@ -236,6 +236,8 @@ namespace RenderGraph::Engine::Native
 			std::string name;
 			// Buffers and staging textures: the Vulkan buffer, its size, and whether the CPU can map it (upload or readback memory).
 			VkBuffer vkBuffer = VK_NULL_HANDLE;
+			VkDeviceAddress address = 0;  // a buffer's device address, which DCLF's imports read (0 when the buffer has none)
+			VkBufferUsageFlags usage = 0;
 			uint64_t size = 0;
 			bool hostVisible = false;
 			bool readback = false;
@@ -817,6 +819,8 @@ namespace RenderGraph::Engine::Native
 					return false;
 				}
 				a_record.vkBuffer = rhi::vulkan::from_native_void<VkBuffer>(info.resource);
+				a_record.address = static_cast<VkDeviceAddress>(info.deviceAddress);
+				a_record.usage = static_cast<VkBufferUsageFlags>(info.usage);
 				a_record.size = a_size;
 				a_record.hostVisible = a_heap != rhi::HeapType::DeviceLocal;
 				return true;
@@ -2228,12 +2232,46 @@ namespace RenderGraph::Engine::Native
 	bool DescribeResource(const IUnknown* a_object, DxvkOrgInteropResourceInfo& a_info)
 	{
 		const auto record = Resolve(a_object);
-		if (!record || record->kind != NativeResource::Kind::Image)
+		if (!record)
 			return false;
 		a_info = {};
 		a_info.version = DXVK_ORG_INTEROP_VERSION;
+		if (record->kind == NativeResource::Kind::Buffer) {
+			// As DXVK describes a buffer: its range of the Vulkan buffer, with the device address DCLF draws from.
+			a_info.kind = DXVK_ORG_INTEROP_RESOURCE_BUFFER;
+			a_info.buffer = { record->vkBuffer, 0, record->size, record->address, record->usage };
+			return true;
+		}
+		if (record->kind != NativeResource::Kind::Image)
+			return false;
 		a_info.kind = DXVK_ORG_INTEROP_RESOURCE_IMAGE;
 		a_info.image = record->image;
+		// A shader resource view is described as DXVK describes one: its mips and slices, and the depth aspect alone for a depth image.
+		const auto described = Tripwire::Describe(a_object);
+		if (described.kind == Tripwire::Kind::ShaderResourceView) {
+			D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+			static_cast<ID3D11ShaderResourceView*>(const_cast<IUnknown*>(a_object))->GetDesc(&view);
+			auto& range = a_info.image.subresourceRange;
+			range.aspectMask = record->shape.copyAspect;
+			switch (view.ViewDimension) {
+			case D3D11_SRV_DIMENSION_TEXTURE2D:
+				range.baseMipLevel = view.Texture2D.MostDetailedMip;
+				range.levelCount = view.Texture2D.MipLevels == UINT(-1) ? record->shape.mips - range.baseMipLevel : view.Texture2D.MipLevels;
+				range.baseArrayLayer = 0;
+				range.layerCount = 1;
+				a_info.image.viewType = VK_IMAGE_VIEW_TYPE_2D;
+				break;
+			case D3D11_SRV_DIMENSION_TEXTURE2DARRAY:
+				range.baseMipLevel = view.Texture2DArray.MostDetailedMip;
+				range.levelCount = view.Texture2DArray.MipLevels == UINT(-1) ? record->shape.mips - range.baseMipLevel : view.Texture2DArray.MipLevels;
+				range.baseArrayLayer = view.Texture2DArray.FirstArraySlice;
+				range.layerCount = view.Texture2DArray.ArraySize;
+				a_info.image.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+				break;
+			default:
+				break;  // cubes, 3D and 1D views: the whole image, as made
+			}
+		}
 		return true;
 	}
 
@@ -2329,6 +2367,8 @@ namespace RenderGraph::Engine::Native
 		auto record = MakeWrapRecord(a_name);
 		record->kind = NativeResource::Kind::Buffer;
 		record->vkBuffer = rhi::vulkan::from_native_void<VkBuffer>(info.resource);
+		record->address = static_cast<VkDeviceAddress>(info.deviceAddress);
+		record->usage = static_cast<VkBufferUsageFlags>(info.usage);
 		record->size = a_desc.ByteWidth;
 		record->bufferDesc = a_desc;
 		Tripwire::Options options;
