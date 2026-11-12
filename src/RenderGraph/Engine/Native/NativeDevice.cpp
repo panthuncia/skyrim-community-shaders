@@ -63,6 +63,7 @@ namespace RenderGraph::Engine::Native
 		{
 			VkPhysicalDeviceFeatures core{};
 			VkPhysicalDeviceRobustness2FeaturesEXT robustness2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT };
+			VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT generatedCommands{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT };
 			std::vector<const char*> extensions;
 			std::string summary;
 
@@ -137,6 +138,15 @@ namespace RenderGraph::Engine::Native
 				if (auto* chain13 = FindStruct(info->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES))
 					orAll(chain13, &vk13, sizeof(vk13));
 
+				// Extensions added here: the create info's list copied once, then pointed at.
+				self->extensions.assign(info->ppEnabledExtensionNames, info->ppEnabledExtensionNames + info->enabledExtensionCount);
+				const auto addExtension = [&](const char* a_name) {
+					if (std::ranges::none_of(self->extensions, [&](const char* e) { return std::strcmp(e, a_name) == 0; }))
+						self->extensions.push_back(a_name);
+					info->enabledExtensionCount = static_cast<uint32_t>(self->extensions.size());
+					info->ppEnabledExtensionNames = self->extensions.data();
+				};
+
 				// Null descriptors (DXVK enables them, and BasicRHI reads the flag from the create info).
 				bool nullDescriptor = false;
 				if (vk13.pNext && robustness.nullDescriptor) {
@@ -148,15 +158,34 @@ namespace RenderGraph::Engine::Native
 						chainRobustness = &self->robustness2;
 					}
 					chainRobustness->nullDescriptor = VK_TRUE;
-					self->extensions.assign(info->ppEnabledExtensionNames, info->ppEnabledExtensionNames + info->enabledExtensionCount);
-					if (std::ranges::none_of(self->extensions, [](const char* e) { return std::strcmp(e, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME) == 0; }))
-						self->extensions.push_back(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
-					info->enabledExtensionCount = static_cast<uint32_t>(self->extensions.size());
-					info->ppEnabledExtensionNames = self->extensions.data();
+					addExtension(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
 					nullDescriptor = true;
 				}
-				self->summary = chain12 ? fmt::format("every supported core and Vulkan 1.1-1.3 feature, null descriptors {}, memory model device scope {}, separate depth/stencil layouts {}, indirect count {}",
-											  nullDescriptor, static_cast<bool>(chain12->vulkanMemoryModelDeviceScope), static_cast<bool>(chain12->separateDepthStencilLayouts),
+
+				// Device-generated commands, which RenderGraphRuntime asks DXVK for (kRequestedFeatures): DCLF's GPU-driven draws and its
+				// first-person epochs use them. BasicRHI reads the extension and the feature from the create info.
+				bool generated = false;
+				if (has(VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME)) {
+					VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT supportedGenerated{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT };
+					VkPhysicalDeviceFeatures2 query{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+					query.pNext = &supportedGenerated;
+					getFeatures2(physical, &query);
+					if (supportedGenerated.deviceGeneratedCommands) {
+						auto* chainGenerated = reinterpret_cast<VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT*>(
+							FindStruct(info->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT));
+						if (!chainGenerated) {
+							self->generatedCommands.pNext = const_cast<void*>(info->pNext);
+							info->pNext = &self->generatedCommands;
+							chainGenerated = &self->generatedCommands;
+						}
+						chainGenerated->deviceGeneratedCommands = VK_TRUE;
+						chainGenerated->dynamicGeneratedPipelineLayout |= supportedGenerated.dynamicGeneratedPipelineLayout;
+						addExtension(VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME);
+						generated = true;
+					}
+				}
+				self->summary = chain12 ? fmt::format("every supported core and Vulkan 1.1-1.3 feature, null descriptors {}, device-generated commands {}, memory model device scope {}, separate depth/stencil layouts {}, indirect count {}",
+											  nullDescriptor, generated, static_cast<bool>(chain12->vulkanMemoryModelDeviceScope), static_cast<bool>(chain12->separateDepthStencilLayouts),
 											  static_cast<bool>(chain12->drawIndirectCount)) :
 				                          fmt::format("every supported core feature, null descriptors {}; BasicRHI's chain has no Vulkan 1.2 struct, so its own 1.2 features", nullDescriptor);
 				return true;
