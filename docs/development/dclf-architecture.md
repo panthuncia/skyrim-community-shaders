@@ -279,6 +279,28 @@ objects, so the engine draws none of them and nothing pops in. No frame is black
     load stays on screen, the frame's work flushed as a present would send it (`DrawcallLimitFix::LoadHoldsPresents`, `Hooks.cpp`);
     not with frame generation or the owned frame. A loading screen that starts during a hold ends it
     (`SetLoadingScreenActive(true)`, +0x11A): the new load posts its own close.
+-   **A re-entry** holds the presents the same way (`LoadHold::BeginReentry`): a frame outside a load whose shadow views DCLF would
+    draw but cannot yet, because the graph has a rebuild requested (re-imported shadow maps, as after a `coc` into an interior or a
+    closed map: `IndirectDraws::ShadowViewCapacity`) or the shadow epoch is not recorded yet (`DecideShadowCoverage`). The engine
+    would draw every caster otherwise. It ends as a load's hold does, the frame with no such condition counting as covered; one
+    that ended at a stall or the cap is not started again until a frame without its condition. With the owned frame the guest
+    frame ends and nothing is queued (`OwnedFrame::EndGuestFrame`); frame generation is not held.
+-   **The settled signal** is the coordinator's (`ScenePublication::settled`: its pass built the scene and no slot waits on a
+    transient reason); the render thread adds the draw families, the views' coverage and the claims.
+-   **Grass stands down** during a hold (`GrassShared::SetDclfOwned`, from the family's `Owned` callback), whether or not DCLF
+    owns the family yet: Grass Optimizations and Grass Collision do not run inside withheld passes.
+-   **Shortening it:** while the load is up, each batch's records' diffuse views (`PropertyRecord::diffuseHeld`, a reference the
+    capture holds) are asked for early: their base mips (`TextureStreaming::RequestBase`) and their imports
+    (`Coordinator::PrewarmLoadTextures`). The imports are kept until the hold ends, so the bindings the tables make after the load
+    are answered from the import registry. Pipeline keys are not: they come from the joins, and the lane keeps every key it was
+    asked for the session.
+-   Lines: `[DCLF] load hold: started (...)`; `the world's first frame under the kept loading menu, T ms after the load's end`;
+    one at the end, `[DCLF] load hold: N frames, T ms (the loading menu kept open), settled; ...; waited for: the load's
+    publication N frames, waiting objects N frames (at most: pipeline N, ...), claims changing N frames, draw families N
+    frames, a view not covered N frames`; `[DCLF] load prewarm: N diffuse textures asked for during the load, ...`. Outside
+    loads, at most every 10 s while anything is: `[DCLF] not ready, withheld: N passes of waiting objects (...), N passes
+    waiting for base mips, N of M frames with a draw family waiting; handed to the engine: N passes of DCLF's classes
+    (refused, or not bound yet)`.
 -   One line a load: `[DCLF] load hold: N frames, T ms (the loading menu kept open), settled; ...`. The test harness's frame counts
     skip the hold (`FrameView::LoadShown`), so a run and its `CS_DCLF=0` baseline stay in step.
 
