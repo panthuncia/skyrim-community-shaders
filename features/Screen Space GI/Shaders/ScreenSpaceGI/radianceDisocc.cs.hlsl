@@ -107,6 +107,11 @@ void readHistory(
 		outAccumFrames[pixCoord] = 1.0 / 255.0;
 		outRemappedIlY[pixCoord] = half4(0, 0, 0, 0);
 		outRemappedIlCoCg[pixCoord] = half2(0, 0);
+#ifdef TEMPORAL_DENOISER
+		// GI's history clamp reads these as neighbours. On the graph path they can be aliased memory, so write them too.
+		outRemappedAo[pixCoord] = 0;
+		outRemappedPrevGISpecular[pixCoord] = half4(0, 0, 0, 0);
+#endif
 		return;
 	}
 
