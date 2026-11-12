@@ -11,6 +11,7 @@
 #include "Menu.h"
 #include "Menu/ThemeManager.h"
 #include "NativeMenu/NativeMenu.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "ShaderCache.h"
@@ -104,6 +105,8 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	CrashDump::Start();
 	logger::info("Loaded {} {} (build {})", Plugin::NAME, Plugin::VERSION.string(), Plugin::BUILD_DESCRIBE);
 	ApplyDevEnvironmentFile();
+	// CS_ORG_NATIVE=1: the port switches native mode needs, before anything reads them.
+	RenderGraph::Engine::Native::ApplySwitches();
 	SKSE::Init(a_skse);
 	// SKSE::Init replaced the log with CommonLib's; its sinks go behind the fan-out sink, so a diagnostic capture can copy the lines
 	// it logs (Utils/LogTee.h).
