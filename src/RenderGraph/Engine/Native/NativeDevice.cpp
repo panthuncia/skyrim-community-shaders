@@ -30,6 +30,7 @@
 #	include <array>
 #	include <atomic>
 #	include <cstring>
+#	include <chrono>
 #	include <mutex>
 #	include <span>
 #	include <unordered_map>
@@ -987,6 +988,15 @@ namespace RenderGraph::Engine::Native
 			uint64_t presentValue = 0;
 			uint64_t presents = 0;
 			bool resizeRequested = false;
+			// CS_ORG_NATIVE_PRESENT_PROBE=1: about once a second a present also copies the back buffer into a readback buffer, and a
+			// later present logs its mean colour, so "nothing was drawn" and "the capture is broken" can be told apart.
+			struct Probe
+			{
+				rhi::ResourcePtr readback;
+				rhi::CopyableFootprint footprint{};
+				uint64_t value = 0;  // the present timeline value its copy signals, 0 when none is pending
+				std::chrono::steady_clock::time_point last{};
+			} probe;
 			std::atomic<bool> lost = false;
 			std::mutex presentLock;
 
@@ -1505,6 +1515,9 @@ namespace RenderGraph::Engine::Native
 					(void)Resize(0, width, height, DXGI_FORMAT_UNKNOWN);
 				if (!backBuffer)
 					return S_OK;
+				static const bool probeEnabled = Switches::On("CS_ORG_NATIVE_PRESENT_PROBE");
+				if (probeEnabled)
+					ReadProbe();
 
 				const uint32_t slot = static_cast<uint32_t>(presents % kPresentSlots);
 				if (slotValues[slot] && presentTimeline->HostWait(slotValues[slot]) != rhi::Result::Ok) {
@@ -1556,6 +1569,8 @@ namespace RenderGraph::Engine::Native
 				from.width = width;
 				from.height = height;
 				list->CopyTextureRegion(to, from);
+				if (probeEnabled)
+					RecordProbe(list.Get());
 				std::array<rhi::TextureBarrier, 2> after = before;
 				after[0].beforeSync = rhi::ResourceSyncState::Copy;
 				after[0].afterSync = rhi::ResourceSyncState::All;
@@ -1607,6 +1622,100 @@ namespace RenderGraph::Engine::Native
 						resizeRequested = true;
 				}
 				return S_OK;
+			}
+
+			/** @brief With the back buffer in CopySource: copies it into the probe's readback buffer, about once a second. */
+			void RecordProbe(rhi::CommandList& a_list)
+			{
+				const auto now = std::chrono::steady_clock::now();
+				if (probe.value || now - probe.last < std::chrono::seconds(1))
+					return;
+				probe.last = now;
+				rhi::FootprintRangeDesc range{};
+				range.texture = backBufferImage;
+				rhi::CopyableFootprint footprint{};
+				const auto placed = Rhi().GetCopyableFootprints(range, &footprint, 1);
+				if (placed.count != 1)
+					return;
+				if (!probe.readback || probe.footprint.rowPitch != footprint.rowPitch || probe.footprint.height != footprint.height) {
+					probe.readback = {};
+					rhi::ResourceDesc desc{};
+					desc.type = rhi::ResourceType::Buffer;
+					desc.heapType = rhi::HeapType::Readback;
+					desc.debugName = "CS native present probe";
+					desc.buffer.sizeBytes = (std::max)(placed.totalBytes, uint64_t(4));
+					if (Rhi().CreateCommittedResource(desc, probe.readback) != rhi::Result::Ok || !probe.readback) {
+						logger::warn("[ORG native] present probe: its readback buffer could not be made");
+						return;
+					}
+				}
+				probe.footprint = footprint;
+				rhi::BufferBarrier toCopy{};
+				toCopy.buffer = probe.readback->GetHandle();
+				toCopy.beforeSync = rhi::ResourceSyncState::All;
+				toCopy.afterSync = rhi::ResourceSyncState::Copy;
+				toCopy.beforeAccess = rhi::ResourceAccessType::Common;
+				toCopy.afterAccess = rhi::ResourceAccessType::CopyDest;
+				a_list.Barriers({ {}, { &toCopy, 1 }, {} });
+				rhi::BufferTextureCopyFootprint copy{};
+				copy.texture = backBufferImage;
+				copy.buffer = probe.readback->GetHandle();
+				copy.mip = 0;
+				copy.arraySlice = 0;
+				copy.footprint = footprint;
+				a_list.CopyTextureToBuffer(copy);
+				rhi::BufferBarrier toHost = toCopy;
+				toHost.beforeSync = rhi::ResourceSyncState::Copy;
+				toHost.afterSync = rhi::ResourceSyncState::All;
+				toHost.beforeAccess = rhi::ResourceAccessType::CopyDest;
+				toHost.afterAccess = rhi::ResourceAccessType::Common;
+				a_list.Barriers({ {}, { &toHost, 1 }, {} });
+				probe.value = presentValue + 1;  // this present's signal
+			}
+
+			/** @brief Once the probe's copy is done on the GPU: logs the back buffer's mean colour and how much of it is not black. */
+			void ReadProbe()
+			{
+				if (!probe.value || presentTimeline->GetCompletedValue() < probe.value || !probe.readback)
+					return;
+				probe.value = 0;
+				void* mapped = nullptr;
+				probe.readback->Map(&mapped);
+				if (!mapped)
+					return;
+				const auto* bytes = static_cast<const uint8_t*>(mapped) + probe.footprint.offset;
+				const bool packed10 = format == DXGI_FORMAT_R10G10B10A2_UNORM;
+				const bool bgra = format == DXGI_FORMAT_B8G8R8A8_UNORM;
+				double sum[3]{};
+				uint64_t lit = 0, pixels = 0;
+				for (uint32_t y = 0; y < probe.footprint.height; y += 2) {
+					const auto* row = reinterpret_cast<const uint32_t*>(bytes + uint64_t(y) * probe.footprint.rowPitch);
+					for (uint32_t x = 0; x < probe.footprint.width; x += 2) {
+						const uint32_t texel = row[x];
+						double r, g, b;
+						if (packed10) {
+							r = (texel & 0x3FF) / 1023.0;
+							g = ((texel >> 10) & 0x3FF) / 1023.0;
+							b = ((texel >> 20) & 0x3FF) / 1023.0;
+						} else {
+							const double c0 = (texel & 0xFF) / 255.0, c2 = ((texel >> 16) & 0xFF) / 255.0;
+							r = bgra ? c2 : c0;
+							g = ((texel >> 8) & 0xFF) / 255.0;
+							b = bgra ? c0 : c2;
+						}
+						sum[0] += r;
+						sum[1] += g;
+						sum[2] += b;
+						lit += (r + g + b) > 0.0 ? 1 : 0;
+						++pixels;
+					}
+				}
+				probe.readback->Unmap(0, 0);
+				if (!pixels)
+					return;
+				logger::info("[ORG native] present probe after {} presents: back buffer {}x{} (DXGI format {}), mean RGB {:.4f} {:.4f} {:.4f}, {:.1f}% of pixels not black",
+					presents, probe.footprint.width, probe.footprint.height, static_cast<int>(format), sum[0] / pixels, sum[1] / pixels, sum[2] / pixels,
+					100.0 * double(lit) / double(pixels));
 			}
 
 			void FillDesc(DXGI_SWAP_CHAIN_DESC& a_out) const
