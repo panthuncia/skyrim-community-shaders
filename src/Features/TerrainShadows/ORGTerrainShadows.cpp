@@ -90,7 +90,7 @@ struct ORGTerrainShadows::Impl
 	std::shared_ptr<org::LatchBlock> latch;
 	std::shared_ptr<RenderGraph::RunGate> gate;
 	std::shared_ptr<const Textures> textures;
-	// The upload each run's copy pass records, per host frame slot.
+	// The upload each run's copy pass records, by run.
 	std::shared_ptr<const RenderGraph::RunSlots<HeightUpload>> uploads;
 	std::function<void()> onFailed;
 
@@ -121,7 +121,7 @@ namespace
 
 	/**
 	 * @brief The heightmap's bytes copied into the heightmap texture's corner, on the run whose commit stored them. Recorded every
-	 * run (no Revision): the slot decides, and a run with no new heightmap records nothing (Bink's upload pass does the same).
+	 * run (no Revision): the run decides, and a run with no new heightmap records nothing (Bink's upload pass does the same).
 	 */
 	class HeightUploadPass final : public org::TypedRenderGraphPass<HeightUploadPass, UploadFrame, UploadBindings>
 	{
@@ -139,7 +139,7 @@ namespace
 
 		static void Record(const UploadBindings& a_bindings, const UploadFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			const auto upload = a_frame.uploads->Take(a_recording.FrameSlot());
+			const auto upload = a_frame.uploads->Take(a_recording.Run());
 			if (!upload || !upload->staging)
 				return;
 			// The upload buffer stays until this recording's GPU work retires.
@@ -200,7 +200,7 @@ namespace
 		static void Record(const UpdateBindings& a_bindings, const UpdateFrame& a_frame, org::PassRecordContext& a_recording)
 		{
 			const auto& spec = *a_frame.spec;
-			const std::uint32_t slot = a_recording.FrameSlot();
+			const org::RunRef run = a_recording.Run();
 			for (std::uint32_t i = 0; i < spec.textures->maxDispatches; ++i) {
 				// Each stripe reads the one before it.
 				if (i) {
@@ -208,7 +208,7 @@ namespace
 					a_recording.Commands().Barriers(rhi::BarrierBatch{ {}, {}, { &global, 1 } });
 				}
 				const ShadowUpdateBlock block{ a_recording.Index(a_bindings.heightMap), a_recording.Index(a_bindings.shadowHeights),
-					ShaderBindings::LatchOf(*spec.latch, slot, i * static_cast<std::uint32_t>(sizeof(Constants))) };
+					ShaderBindings::LatchOf(*spec.latch, run, i * static_cast<std::uint32_t>(sizeof(Constants))) };
 				spec.gate->Dispatch(a_recording, *spec.program, ShaderBindings::Data(block), i);
 			}
 		}
@@ -276,19 +276,19 @@ namespace
 	}
 
 	/**
-	 * @brief The client's commit: a heightmap not yet copied goes to the copy pass at this frame slot; this frame's constants at the
-	 * frame slot, and a gate entry for each stripe.
+	 * @brief The client's commit: a heightmap not yet copied goes to this run's copy pass; this frame's constants into the run's
+	 * latch region, and a gate entry for each stripe.
 	 */
 	void Commit(Impl& a_impl)
 	{
-		const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
+		const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
 		if (a_impl.upload) {
-			a_impl.uploads->Store(slot, a_impl.upload);
+			a_impl.uploads->Store(run, a_impl.upload);
 			a_impl.storedSerial = a_impl.upload->serial;
 		}
 		if (a_impl.pending.empty())
 			return;
-		a_impl.latch->Write(slot, 0, std::as_bytes(std::span(a_impl.pending)));
+		a_impl.latch->Write(run, 0, std::as_bytes(std::span(a_impl.pending)));
 		for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(a_impl.pending.size()); ++i)
 			a_impl.gate->OpenDispatch(i, a_impl.pendingGroups);
 		a_impl.pending.clear();
@@ -331,8 +331,7 @@ bool ORGTerrainShadows::Setup(std::uint32_t a_maxWidth, std::uint32_t a_maxHeigh
 		return false;
 	}
 	try {
-		next->latch = std::make_shared<org::LatchBlock>("TerrainShadows::UpdateLatch", textures->maxDispatches * static_cast<std::uint32_t>(sizeof(Constants)),
-			host->FrameSlots());
+		next->latch = std::make_shared<org::LatchBlock>("TerrainShadows::UpdateLatch", textures->maxDispatches * static_cast<std::uint32_t>(sizeof(Constants)));
 	} catch (const std::exception& e) {
 		logger::error("[ORG] Terrain Shadows: its latch block could not be created ({}); it stays on D3D11", e.what());
 		return false;
@@ -365,7 +364,7 @@ bool ORGTerrainShadows::Setup(std::uint32_t a_maxWidth, std::uint32_t a_maxHeigh
 		return false;
 	}
 	next->textures = textures;
-	next->uploads = std::make_shared<const RenderGraph::RunSlots<HeightUpload>>(host->FrameSlots());
+	next->uploads = std::make_shared<const RenderGraph::RunSlots<HeightUpload>>();
 	next->pending.reserve(textures->maxDispatches);
 	next->onFailed = std::move(a_onFailed);
 

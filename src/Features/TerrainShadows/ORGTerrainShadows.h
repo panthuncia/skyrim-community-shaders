@@ -31,7 +31,7 @@ namespace DirectX
  *   for the engine's pixel shaders until those draws are ported. It is published once (PublishedResources): Drawcall Limit Fix's
  *   colour passes read it through the graph.
  * - The per-dispatch constants: one LATCH region a dispatch, and the dispatches' group counts in a run gate, both written by the
- *   client's commit at the frame slot. A run without an update does no work.
+ *   client's commit in the run's latch region. A run without an update does no work.
  *
  * Setup at SetupResources makes the program, the latch, the gate and the textures, registers the client and publishes the shadow
  * height map. On any failure (a shader that does not compile, a texture that cannot be made, the graph stopping) the ORG path

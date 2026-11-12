@@ -88,10 +88,13 @@ namespace DCLF::Draws
 		rhi::CommandSignatureHandle a_signature, std::uint32_t a_latchOffset, org::PassRecordContext& a_recording)
 	{
 		auto& commands = a_recording.Commands();
-		const std::uint64_t offset = a_latch.Offset(a_recording.FrameSlot()) + a_latchOffset;
+		// The run's region of the latch: its arena chunk, and its offset there.
+		const auto region = a_latch.At(a_recording.Run());
+		const std::uint64_t offset = region.offset + a_latchOffset;
+		a_constants.latchIndex = region.srvIndex;
 		a_constants.latchOffset = static_cast<std::uint32_t>(offset);
 		commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kBuildDrawsConstantWords, reinterpret_cast<const std::uint32_t*>(&a_constants));
-		commands.ExecuteIndirect(a_signature, a_latch.Resource()->GetAPIResource().GetHandle(), offset, {}, 0, 1);
+		commands.ExecuteIndirect(a_signature, region.buffer->GetAPIResource().GetHandle(), offset, {}, 0, 1);
 	}
 
 	// Writes this frame's draw sequences and their count from the draw inputs (BuildDrawsCS.hlsl).
@@ -190,7 +193,6 @@ namespace DCLF::Draws
 			prepared.signature = resources->dispatchSignature->GetHandle();
 			auto& constants = prepared.constants;
 			auto& views = prepared.views;
-			constants.latchIndex = frame->latch->SrvIndex();
 			if (queries) {
 				if (!a_bindings.memberQueries.layout || !a_bindings.memberClaims.layout)
 					return {};
@@ -288,7 +290,7 @@ namespace DCLF::Draws
 			const auto viewed = a_frame.views.Apply(a_frame.constants, a_recording);
 			if (a_frame.clearQueries) {
 				auto constants = viewed;
-				constants.latchOffset = static_cast<std::uint32_t>(a_frame.latch->Offset(a_recording.FrameSlot()));
+				SetLatchWords(constants, *a_frame.latch, a_recording.Run());
 				commands.BindLayout(a_frame.clearQueries->layout->GetHandle());
 				commands.BindPipeline(a_frame.clearQueries->Pipeline());
 				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kBuildDrawsConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
@@ -302,7 +304,7 @@ namespace DCLF::Draws
 			if (a_frame.retestIndirect) {
 				// Phase 2: the latch's values, the retest list's groups.
 				auto constants = viewed;
-				constants.latchOffset = static_cast<std::uint32_t>(a_frame.latch->Offset(a_recording.FrameSlot()));
+				SetLatchWords(constants, *a_frame.latch, a_recording.Run());
 				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kBuildDrawsConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 				commands.ExecuteIndirect(a_frame.signature, a_recording.Resolve(a_bindings.retestArguments).GetHandle(), 0, {}, 0, 1);
 				return;

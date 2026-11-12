@@ -41,14 +41,15 @@ light culling is the first feature that does this. Its D3D11 path stays in place
     D3D11 immediate context (LLF calls it from `UpdateLights`). CPU data for a frame, such as the light
     list, is uploaded by the graph's own `BUFFER_UPLOAD` path inside the epoch.
 -   **Frames in flight.** `GraphHost::Desc::framesInFlight` is game frames: whole frames of the epoch order
-    (4, `kGameFramesInFlight`). The host's frame slots are that many frames of every epoch (`FrameSlots`, 24 with six
-    segments), one ring that every execution takes the next slot of. A slot's next execution waits for its last one's GPU
-    work: the "ticket wait" in `CS_ORG_EPOCH_STATS`, on the host's thread, which the render thread sees only when the ring
-    is shorter than the CPU's lead over the GPU. The ring used to be a fixed 16 slots: the reflection faces' sixth epoch
-    shortened it to 2.7 frames, and every few frames the render thread waited 2-7 ms on whichever epoch came round
-    (p99 frame time 25 ms instead of 12). Sized by the epochs, a new segment needs no change here. With async epochs each
-    epoch has a ring of its own; an anchor that runs several times a frame has a ring that grows (below, "Frames in flight"
-    under the frame anchors).
+    (4, `kGameFramesInFlight`). Each run of an epoch (a submission) takes a run lease of the host's
+    (`org::RunRef`, ORG's persistent-epochs.md, "Run leases"). The lease holds what the run uses beyond its recording:
+    its upload lists, its frame arena regions (every `LatchBlock`), its statistics range and its upload pages. It retires
+    once the run's GPU work is done, and lease indices are reused, so memory follows the runs in flight. Nothing waits
+    for a run of the same frame. The only waits are frame pacing (the synchronous path's run of `framesInFlight` frames
+    back) and a revision-driven epoch's published copy (DCLF's epochs: `framesInFlight` copies of each recording, a
+    submission waiting only for a copy whose last run a Present sealed). `CS_ORG_EPOCH_STATS=1` logs `[ORG] Run memory:`
+    every window: leases in flight and their peak, lease indices made, the frame arena's chunks and live bytes, the
+    statistics ranges and the device's command memory (`rhi::Device::CommandMemoryStats`).
 
 ## Ordering against D3D11
 
@@ -316,8 +317,8 @@ stream order, on its own command buffer, outside any render pass. DCLF's CPU-dri
 -   **Lifetime.** DXVK tracks nothing the callback uses: every D3D11 object, view and buffer it reads or writes is held until its
     signal completes. ORG's staged uploads a callback depends on are recorded on the render thread into a secondary
     (`RenderGraph::RecordPendingUploads`) and executed at the callback's start, so DXVK's list is not ended for them. ORG's latch
-    regions a callback's work reads are written at an external frame slot (`GraphHost::BeginExternalFrameSlot`), reused only
-    after its last frame's signal.
+    regions a callback's work reads are an external run's (`GraphHost::BeginExternalRun`), whose lease retires only after its
+    frame's signal.
 -   Once the path has been used, DXVK no longer reorders transfers or layout transitions on interop images, or on buffers with a
     stable address, ahead of the command buffer.
 -   **One descriptor model.** BasicRHI and DXVK always run on descriptor buffers together (Runtime shape, "Descriptor buffers,
@@ -529,7 +530,7 @@ of adding a `Segment` and editing the epoch order. Each anchor is one of CS's ho
 | `EngineDepthCopy` | the engine skeleton's `kPOST_ZPREPASS_COPY` copies: `Main::RenderDepth`, FinishAccumulating, `Deferred::DeferredPasses` |
 | `Interface` | each Scaleform `EndDisplay` the graph draws (`RenderGraph/Engine/Scaleform`, `CS_ORG_SCALEFORM`), inside `UI::DrawInterface`, several times a frame |
 | `ImageSpace` | a batch of the engine's ImageSpace draws the graph draws in the engine's place (`RenderGraph/Engine/ImageSpace`, `CS_ORG_IMAGESPACE`): at the end of the HDR effect's or the pre-tonemap composites' render, or before the first engine draw that is not the graph's; up to 4 times a frame (`p5/imagespace.md`) |
-| `EngineDraws` | DCLF's engine draw families drawn at their own call, up to five runs a frame: the world's shadow masks (Main::RenderShadowMasks) and a menu scene's (UI3DSceneManager::Render) with `CS_ORG_SHADOW_MASK=1`, the water mask (FinishAccumulating's Stencil batch) and the water (FinishAccumulatingPostResolveDepth's water batch) with `CS_ORG_WATER=1`, the screen blood (FinishAccumulatingScreenSplatter) with `CS_ORG_BLOOD_SPLATTER=1`. Five runs need the frame slot budget of 512. It is the 32nd segment, the most `TakeSubmittedSegments`' mask holds |
+| `EngineDraws` | DCLF's engine draw families drawn at their own call, up to five runs a frame: the world's shadow masks (Main::RenderShadowMasks) and a menu scene's (UI3DSceneManager::Render) with `CS_ORG_SHADOW_MASK=1`, the water mask (FinishAccumulating's Stencil batch) and the water (FinishAccumulatingPostResolveDepth's water batch) with `CS_ORG_WATER=1`, the screen blood (FinishAccumulatingScreenSplatter) with `CS_ORG_BLOOD_SPLATTER=1`. It is the 32nd segment, the most `TakeSubmittedSegments`' mask holds |
 | `EngineQueries` | the engine's occlusion queries the graph answers (`CS_ORG_OCCLUSION_QUERIES`): the sun's occlusion draw at `Sun::SubmitOcclusionQuery`'s call, up to three runs a frame (two seen). A client of its own (`cs.sky.sun`), so every run's queries are that client's |
 | `VolumetricLighting` | the engine's VL blur call in RenderWorldPostProcess (SE 100486, AE 107206), detoured by `Features/VolumetricLighting/ORGVolumetricLighting` (`CS_ORG_VOLUMETRIC_LIGHTING`): once a frame, the generate, raymarch, apply, blurs and the depth copy (docs/development/p5/volumetric-lighting.md) |
 
@@ -590,38 +591,18 @@ FrameAnchors::Register({ .id = "cs.myfeature",
     clients' resources. Other epochs' graphs get nothing from it.
 -   A client change rebuilds only its anchors' epochs (`GraphHost::RequestRebuild(epoch)`). DCLF's condition changes no longer
     rebuild them (`RenderGraphRuntime::IsDclfSegment`).
--   **Cost.** An anchor nobody reserved has no epoch: no graph, no frame slots, and its hook is one load. A reserved anchor whose
+-   **Cost.** An anchor nobody reserved has no epoch: no graph, no run leases, and its hook is one load. A reserved anchor whose
     clients are all inactive (`active`) submits nothing at its hook; its ticket waits, prepared, for the next run.
--   **Frames in flight.** The host's frame slots are frames in flight times the epochs' runs a frame, so every reserved anchor
-    adds `kGameFramesInFlight` slots, times its `runsPerFrame` (the anchor table `kInfo` in `FrameAnchors.cpp`;
-    `FrameAnchors::RunsPerFrame(anchor)` reads it, never copy the number). Size `LatchBlock`s from `GraphHost::FrameSlots()`
-    after the runtime is up, as LLF does: it is fixed once the host exists.
-    -   **The slot budget.** CS allows 512 slots (`RenderGraphRuntime::kMaxFrameSlots`); ORG allows up to
-        `org::Runtime::kMaxSlots` (4096). Slot indices are 32-bit in ORG, so neither is a type limit (ORG's was 8-bit until
-        `org-port/frame-slots`, hence the old 255). The budget is a memory bound: every `LatchBlock`, `RunSlots`, Drawcall Limit
-        Fix's per-slot preprocess lists and readbacks are sized from `GraphHost::FrameSlots()`, and ORG's statistics pools hold
-        two timestamps per pass per slot, so each slot costs a region in every one of them. A run of an anchor cannot share
-        another run's slot: it is a submission of its own, with its own latch region, its own kept recording (a list cannot be
-        pending twice) and its own slot wait. So a run a frame costs `kGameFramesInFlight` slots whichever anchor it belongs to.
-        At startup `FrameAnchors::FitSlotBudget` logs the total (`[ORG] frame slot budget: N of 512 (4 frames x (E other epochs +
-        anchors' runs a frame: ...))`; 288 with every switch on). Over it, the anchors reserved last lose their reservation, each
-        with an error line
-        (`frame anchor X: reservation dropped ...`), and their clients stay on D3D11. No anchor is ever given a smaller ring than
-        its `kInfo` entry says. Size `kInfo` from measurements: every run past the sizing logs `X ran N times in one frame, above
-        the M it is sized for`, and `CS_ORG_EPOCH_STATS=1` logs every anchor's peak (`peak runs in one frame / sized for`,
-        `FrameAnchors::PeakRunsPerFrame`).
-    -   **Anchors that run several times a frame** (`ReflectionsPrepass` at each cubemap render, the engine skeleton's clears
-        and depth copy) are listed with their runs a frame (`GraphHost::Desc::epochRuns`, from `FrameAnchors::RunsPerFrame`).
-        Each run takes a slot of the anchor's ring, and the host's thread waits for a slot's last run before it prepares the
-        slot again. A run's work is in DXVK's stream until Present, so waiting for a run of the same frame deadlocks: the
-        host's thread waits for work DXVK has not submitted while the render thread waits for the host's thread. A listed
-        anchor's ring grows instead (up to `kGameFramesInFlight` times its runs), and waits only for runs at least three
-        Presents old (`SealPresented` counts them). A frame with more runs than the whole ring is skipped for the rest:
-        `FrameAnchors::Run` counts each anchor's runs since the last seal and returns `RunStatus::RingFull` before it would
-        reach the host (logged once per anchor), and the host's own `EpochRingFullError` gives the same status
-        (`RenderGraphRuntime::TryExecuteEpoch`). The callers keep the engine's path for those runs. Nothing hangs. An anchor
-        sized for one run a frame gets the same check, since its host ring would wait for a run of the same frame.
-    -   This issue exists only because, in the guest phase, each anchor is a separate host epoch spliced into DXVK's stream, which DXVK submits at Present. Once ORG owns the frame (the Phase 6 cutover), these clears and the other per-call engine work are passes inside one frame graph, and the slot-per-run ring no longer applies.
+-   **Runs a frame.** An anchor may run any number of times a frame (`ReflectionsPrepass` at each cubemap render, the engine
+    skeleton's clears and depth copy, `ImageSpace`'s batches). Each run takes a run lease of its own and waits for nothing: a run's
+    work is in DXVK's stream until Present, so a wait for a run of the same frame would deadlock (the host's thread waiting for
+    work DXVK has not submitted while the render thread waits for the host's thread), and leases never make one. A run costs a
+    pooled upload list, the arena bytes its latches take and a statistics range while it is in flight. `CS_ORG_EPOCH_STATS=1`
+    logs every anchor's peak runs in one frame (`FrameAnchors::PeakRunsPerFrame`).
+    -   This used to be a ring of frame slots per anchor, sized by a runs-a-frame table and a slot budget of 512 (a run past the
+        ring was skipped, `RunStatus::RingFull`). Run leases replaced both.
+    -   Per-run CPU data handed from a commit to its pass goes through `RenderGraph::RunSlots<T>` (Store at
+        `GraphHost::CurrentRun`, Take at `RecordingContext::Run`).
 -   **The render owner only.** A loading screen presents from a job thread (SE 38085) while the main thread loads, and the
     startup logo from the MoviePlayer thread. Anchors run only on the render owner (`FrameAnchors::IsRenderOwner`, a pure
     query that never moves ownership). By default that is the main thread (latched in `SKSEPlugin_Load`): at a loading
@@ -737,11 +718,10 @@ Scaleform):
     which builds (`BuildIfRequested`) only when a client waits to join and nothing built during the frame (logged as
     `graphs built at the frame's end for clients joining them`). A joining client no longer runs its anchor's epoch just to
     trigger a build. A registration that changes every frame therefore rebuilds every frame: register once, gate per run.
-2.  **Check before withholding** with `FrameAnchors::CanRun(id, anchor)`: the caller owns rendering, the runtime is active, the
-    registration is in the built graph, and the anchor's ring has room for one more run this frame. False: leave this batch to
-    the engine.
+2.  **Check before withholding** with `FrameAnchors::CanRun(id, anchor)`: the caller owns rendering, the runtime is active, and
+    the registration is in the built graph. False: leave this batch to the engine.
 3.  **Run** with `FrameAnchors::Run(point)`, which returns a `RunResult`: `RunStatus::Ran` (submitted), `Idle` (nothing active,
-    or no epoch), `Refused` (not the render owner, or no runtime), `RingFull` (skipped) or `Failed` (the epoch failed; its clients
+    or no epoch), `Refused` (not the render owner, or no runtime) or `Failed` (the epoch failed; its clients
     are dropped at the next poll). It converts to true only for `Ran`. Anything else after withholding: draw the withheld work
     through the engine now.
 4.  **Count it done** in the client's `executed` callback, which runs only for a run that was submitted with this registration's
@@ -846,7 +826,7 @@ builder with the anchor, the pass-name prefix and the order keys as parameters:
 is kept; per-frame values reach it only through the latch and the gate. Programs add the D3D11 defines themselves ("Raster
 programs", Defines); `AnchorPasses::Defines` widens a port's own list.
 
-`ComputeProgram` owns its dispatch command signature (`DispatchIndirect`, from a buffer or a latch region of the frame slot),
+`ComputeProgram` owns its dispatch command signature (`DispatchIndirect`, from a buffer or a latch region of the run),
 and `RasterProgram` its draw signature (`DrawDesc::indirect`). `ShaderBindings::SamplerFromD3D11` (and `CreateSampler` of a
 `D3D11_SAMPLER_DESC`) is the one D3D11-to-rhi sampler converter.
 
@@ -861,11 +841,12 @@ lanes; new code uses them from the start.
     defines are resolved there: they read State) and queues the build. A failed key is logged once
     (`[ORG] <name> programs: <label> could not be built`) and stays `Failed` until `ClearFailed`. Never load a program
     synchronously on the render thread per batch. `RenderGraphRuntime::Shutdown` stops the builds before the device goes.
--   **Per-run CPU data: `RenderGraph::FrameStaging`** (`src/RenderGraph/FrameStaging.h`). One-slot `LatchBlock`s of at least the
-    size asked for, reused once the recording that retained them is done; the pool keeps `kGameFramesInFlight` times the
-    client's runs a frame (plus one), so a steady frame makes none. `maxBlocks` caps large pools (decoded movie frames).
-    `RenderGraph::RunSlots<T>` hands one immutable frame object per host frame slot from the commit (`Store` at
-    `CurrentFrameSlot`) to `Record` (`Take` at `FrameSlot`), which retains it.
+-   **Per-run CPU data: `RenderGraph::FrameStaging`** (`src/RenderGraph/FrameStaging.h`). Dedicated `LatchBlock`s
+    (`LatchBlock::CreateDedicated`) of at least the size asked for, reused once the recording that retained them is done; the
+    pool keeps `kGameFramesInFlight` times the client's runs a frame (plus one), so a steady frame makes none. `maxBlocks` caps
+    large pools (decoded movie frames). `RenderGraph::RunSlots<T>` hands one immutable frame object per run from the commit
+    (`Store` at `GraphHost::CurrentRun`) to `Record` (`Take` at `RecordingContext::Run`), which retains it. A pass without a
+    revision is prepared again after the commit, for the same run, so its Take finds the object.
 -   **Main-thread tick: `RenderGraph::Engine::MainTick::Add(name, callback)`** (`src/RenderGraph/Engine/MainTick.h`). Runs on the
     main thread after Main::Update's frame-job wait (SE 34554, AE 35409), the frame's jobs done. One detour for every user;
     SKSE tasks run on job threads, so this is the main-thread point.
@@ -939,7 +920,7 @@ With `CS_ORG_IMGUI=1`, CS's ImGui frames are drawn by a render-graph pass instea
       pixels `IconLoader` keeps (`IconLoader::OrgBinding`; one view per mip, as `ViewForSize` picks). Any other view (a preset
       screenshot, a feature's debug view) is DXVK's image imported by `DCLF::GpuTextures::ResolveBinding`.
 -   **Per frame.** The client's commit copies the vertices, indices and texture rows into one host-visible staging buffer, a
-    `LatchBlock` from a small pool. It stores the frame in the host frame slot. The pass takes its slot's frame at record time
+    `LatchBlock` from a small pool. It stores the frame for the host's current run. The pass takes its run's frame at record time
     and keeps it, with its textures and descriptors, until the recording's GPU work retires (`RecordingContext::Retain`). The
     staging buffer then goes back to the pool. The vertex stage reads the geometry by index (`RenderGraph/ImGui.hlsl`). Each
     command gets its own scissor (`SetScissors`) and push block.

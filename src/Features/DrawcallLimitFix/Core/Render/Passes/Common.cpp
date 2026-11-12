@@ -56,12 +56,12 @@ namespace DCLF::Draws
 	{
 		/**
 		 * @brief The latched copies a_source names, as LatchedCopiesPass records them: the epoch's own lists, then each hosted shape's
-		 * (none in a recording without that view's work), each copy from frame slot a_frameSlot's latch region (a fixed list's one) to
+		 * (none in a recording without that view's work), each copy from a_run's latch region (a fixed list's one region) to
 		 * the buffer a_target resolves its target to (a null handle: a target not declared, skipped). a_withZeros false: the fixed lists
 		 * (the zeroed draw and bucket counts) are left out.
 		 */
 		template <class TargetOf>
-		void CopyLatchedLists(rhi::CommandList& a_commands, const LatchedSource& a_source, std::uint32_t a_frameSlot, const TargetOf& a_target,
+		void CopyLatchedLists(rhi::CommandList& a_commands, const LatchedSource& a_source, const org::RunRef& a_run, const TargetOf& a_target,
 			bool a_withZeros = true)
 		{
 			// A copy continuing the one before it (the same latch and target, both ranges adjacent) joins it: the copies are one command.
@@ -81,8 +81,10 @@ namespace DCLF::Draws
 				for (const auto& list : a_lists) {
 					if (!list.latch || (list.fixed && !a_withZeros))
 						continue;
-					const auto latch = list.latch->Resource()->GetAPIResource().GetHandle();
-					const std::uint64_t region = list.fixed ? 0 : list.latch->Offset(a_frameSlot);
+					// The run's region: its arena chunk and its offset there (a fixed list's dedicated block has one region).
+					const auto at = list.latch->At(a_run);
+					const auto latch = at.buffer->GetAPIResource().GetHandle();
+					const std::uint64_t region = at.offset;
 					for (const auto& copy : list.copies) {
 						const auto target = a_target(copy.target);
 						if (!target.valid())
@@ -143,7 +145,7 @@ namespace DCLF::Draws
 			{
 				if (LatchedRecordCut())
 					return;
-				CopyLatchedLists(a_recording.Commands(), a_prepared, a_recording.FrameSlot(), [&](const void* a_key) {
+				CopyLatchedLists(a_recording.Commands(), a_prepared, a_recording.Run(), [&](const void* a_key) {
 					const auto target = std::find_if(a_bindings.targets.begin(), a_bindings.targets.end(), [&](const auto& a_target) { return a_target.first == a_key; });
 					return target != a_bindings.targets.end() ? a_recording.Resolve(target->second).GetHandle() : rhi::ResourceHandle{};
 				}, a_prepared.zeros);
@@ -196,7 +198,7 @@ namespace DCLF::Draws
 		if (std::ranges::none_of(a_calls, CallDrawable))
 			return;
 		// Every call preprocessed before the pass, with the execution's exact state (as MainOpaquePass), then executed in order.
-		auto& state = a_preprocess.Begin(a_recording.FrameSlot());
+		auto& state = a_preprocess.Begin(a_recording.Run());
 		beginDrawPass(state);
 		const bool preprocessRange = nvCommands && a_preprocessRange && GpuCounters::PushCommandBufferRange(nvCommands, a_preprocessRange);
 		for (const auto& call : a_calls) {

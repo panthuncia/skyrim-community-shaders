@@ -10,6 +10,8 @@
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ScheduleExecutor.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
 
+#include <Render/RunRef.h>
+
 namespace DCLF::Draws
 {
 	/**
@@ -58,12 +60,12 @@ namespace DCLF::Draws
 
 	/**
 	 * @brief Brings the index pool up to the tables in the versions a_sealed (the adopted set) names (ShadowIndexPool.cpp): whichever
-	 * commit draws from it first in a frame gives the ranges out and writes their copies' dispatch at a_poolOffset of its latch slot;
+	 * commit draws from it first in a frame gives the ranges out and writes their copies' dispatch at a_poolOffset of its run's latch region;
 	 * a later commit finds nothing to copy. Returns the copies (the dispatch's count): with none, the depth commit submits its
 	 * recording without the dispatch (RevisionShapes::depthWithoutIndexPool).
 	 */
 	std::uint32_t UpdateIndexPool(const NamedVersions& a_sealed, IndexPool& a_pool, const SceneTables& a_tables, std::uint32_t a_generation, const org::LatchBlock& a_latch,
-		std::uint32_t a_latchSlot, std::uint32_t a_poolOffset, CommitUploads& a_uploads);
+		const org::RunRef& a_latchRun, std::uint32_t a_poolOffset, CommitUploads& a_uploads);
 
 	// The graph extensions that add DCLF's passes (Passes/MainExtension.cpp, Passes/Shadow.cpp).
 	std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeMainOpaqueExtension(std::shared_ptr<Resources> a_resources);
@@ -152,18 +154,18 @@ namespace DCLF::Draws
 		a_latch.pipelineRowsLo = a_latch.pipelineRowsHi = 0;
 	}
 	/**
-	 * @brief A bucket map into a latch slot at a_offset: a_map, then kNoBucket for the pipeline slots past it up to a_slots (gained since
-	 * the map was made: none of their draws is the frame's).
+	 * @brief A bucket map into a run's latch region at a_offset: a_map, then kNoBucket for the pipeline slots past it up to a_slots
+	 * (gained since the map was made: none of their draws is the frame's).
 	 */
-	inline void WriteBucketMap(const org::LatchBlock& a_latch, std::string_view a_what, std::uint32_t a_slot, std::uint32_t a_offset, std::span<const std::uint32_t> a_map,
+	inline void WriteBucketMap(const org::LatchBlock& a_latch, std::string_view a_what, const org::RunRef& a_run, std::uint32_t a_offset, std::span<const std::uint32_t> a_map,
 		std::uint32_t a_slots)
 	{
 		if (!a_map.empty())
-			LatchWrite(a_latch, a_what, a_slot, a_offset, std::as_bytes(a_map));
+			LatchWrite(a_latch, a_what, a_run, a_offset, std::as_bytes(a_map));
 		if (a_slots <= a_map.size())
 			return;
 		static thread_local std::vector<std::uint32_t> none;
 		none.assign(a_slots - a_map.size(), kNoBucket);
-		LatchWrite(a_latch, a_what, a_slot, a_offset + static_cast<std::uint32_t>(a_map.size() * sizeof(std::uint32_t)), std::as_bytes(std::span(none)));
+		LatchWrite(a_latch, a_what, a_run, a_offset + static_cast<std::uint32_t>(a_map.size() * sizeof(std::uint32_t)), std::as_bytes(std::span(none)));
 	}
 }

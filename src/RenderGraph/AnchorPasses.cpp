@@ -105,7 +105,7 @@ namespace RenderGraph::AnchorPasses
 				case Bind::Kind::Latch:
 					{
 						// Builder::Check refuses a Latch entry without a latch.
-						const auto latch = ShaderBindings::LatchOf(*a_latch, a_recording.FrameSlot(), bind.value);
+						const auto latch = ShaderBindings::LatchOf(*a_latch, a_recording.Run(), bind.value);
 						words.data[words.count++] = latch.handle;
 						words.data[words.count++] = latch.offset;
 						break;

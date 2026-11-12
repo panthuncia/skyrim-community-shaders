@@ -57,7 +57,8 @@ namespace DCLF::Draws
 			const rhi::PassBeginInfo& begin;  // depth attached, no colours
 			const rhi::DepthAttachment& depth;
 			PassStats* stats;
-			std::uint32_t statsSlot;
+			std::uint32_t statsSlot;  // the run's statistics range (PassStats::RangeOf)
+			org::RunRef run;          // the run being recorded: its preprocess state list
 		};
 
 		/**
@@ -245,8 +246,8 @@ namespace DCLF::Draws
 			const auto& frame = a_pass.frame;
 			auto& commands = a_pass.commands;
 			const auto sequences = a_pass.sequences;
-			// The frame slot's preprocess state list.
-			auto& state = a_prepared.preprocess->Begin(a_pass.statsSlot);
+			// The run's preprocess state list.
+			auto& state = a_prepared.preprocess->Begin(a_pass.run);
 			state.SetDescriptorHeaps(frame.resourceHeap, frame.samplerHeap);
 			if (a_passes.anyDecalDepth) {
 				BeginDrawPass(state, a_passes.decalDepthBegin, frame, a_prepared);
@@ -564,7 +565,9 @@ namespace DCLF::Draws
 			auto depth = LoadedDepth(a_recording, a_bindings.depth);
 			begin.depth = &depth;
 			begin.debugName = "DCLF depth";
-			const MainRecording pass{ frame, commands, sequences, count, classCounts, begin, depth, a_prepared.stats, a_recording.FrameSlot() };
+			const auto run = a_recording.Run();
+			const MainRecording pass{ frame, commands, sequences, count, classCounts, begin, depth, a_prepared.stats,
+				a_prepared.stats ? a_prepared.stats->RangeOf(run) : UINT32_MAX, run };
 			if (zPrepass) {
 				RecordDepthDraws(a_bindings, a_prepared, a_recording, pass);
 				return;

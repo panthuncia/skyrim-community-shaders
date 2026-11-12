@@ -100,19 +100,18 @@ namespace DCLF::Draws
 
 		static void Record(const PixelRowsBindings&, const PixelRowsPrepared& a_frame, org::PassRecordContext& a_recording)
 		{
-			RecordRows(a_recording.Commands(), a_frame, a_recording.FrameSlot());
+			RecordRows(a_recording.Commands(), a_frame, a_recording.Run());
 		}
 
-		// The barriers and the dispatch, from the latch's region of a_frameSlot.
-		static void RecordRows(rhi::CommandList& a_commands, const PixelRowsPrepared& a_frame, std::uint32_t a_frameSlot)
+		// The barriers and the dispatch, from the latch's region of a_run.
+		static void RecordRows(rhi::CommandList& a_commands, const PixelRowsPrepared& a_frame, const org::RunRef& a_run)
 		{
 			if (!a_frame.program || !a_frame.latch || !a_frame.frameConstants)
 				return;
 			const std::uint64_t textures = a_frame.frameConstants + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes + offsetof(DrawBindings, textures);
 			const std::uint64_t lodFadeFrame = LodFadeFrameAddress(a_frame.frameConstants);
 			PixelRowsConstants constants{};
-			constants.latchIndex = a_frame.latch->SrvIndex();
-			constants.latchOffset = static_cast<std::uint32_t>(a_frame.latch->Offset(a_frameSlot));
+			SetLatchWords(constants, *a_frame.latch, a_run);
 			constants.recordTexturesLo = static_cast<std::uint32_t>(textures);
 			constants.recordTexturesHi = static_cast<std::uint32_t>(textures >> 32);
 			constants.lodFadeFrameLo = static_cast<std::uint32_t>(lodFadeFrame);

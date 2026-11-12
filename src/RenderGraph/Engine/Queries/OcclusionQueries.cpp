@@ -11,6 +11,7 @@
 #include <atomic>
 #include <format>
 #include <mutex>
+#include <utility>
 
 #if defined(CS_HAS_RENDER_GRAPH)
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -46,9 +47,10 @@ namespace RenderGraph::Engine::OcclusionQueries
 			bool ready = false;  // value answers GetQueryData
 			std::uint32_t value = 0;
 			std::uint32_t last = 0;  // the last count it answered or was given
-			// The run that counts it, once committed: the ring, its frame slot and that commit's generation, and the query index.
+			// The run that counts it, once committed: the ring, its range (the run's lease index) and that commit's generation, and
+			// the query index.
 			std::shared_ptr<Ring> ring;
-			std::uint32_t frameSlot = 0;
+			std::uint32_t range = 0;
 			std::uint64_t generation = 0;
 			std::uint32_t query = 0;
 			// The log's summary since its last line.
@@ -145,10 +147,11 @@ namespace RenderGraph::Engine::OcclusionQueries
 
 #if defined(CS_HAS_RENDER_GRAPH)
 		/**
-		 * @brief Reads a_ring's frame slot's counts into the slots its run still counts, once its work is done (mutex held): a_retired
-		 * when the host has waited for the frame slot (its next commit), else when the run's GPU point is reached. False when not yet.
+		 * @brief Reads the counts of a_ring's range (a lease index) into the slots its run still counts, once its work is done (mutex
+		 * held): a_retired at the next commit of the lease index (its last run retired), else when the run's GPU point is reached. False
+		 * when not yet.
 		 */
-		bool Harvest(Globals& a_globals, Ring& a_ring, std::uint32_t a_frameSlot, bool a_retired);
+		bool Harvest(Globals& a_globals, Ring& a_ring, std::uint32_t a_range, bool a_retired);
 #endif
 	}
 
@@ -156,7 +159,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 	/** @brief A QueryRing's pool, readback and runs. */
 	struct QueryRing::State
 	{
-		/** @brief A frame slot's last run. */
+		/** @brief A range's last run. */
 		struct Run
 		{
 			std::vector<std::int32_t> slots;  // the engine slot each query counts, kNoSlot for none
@@ -166,29 +169,71 @@ namespace RenderGraph::Engine::OcclusionQueries
 			std::uint64_t seals = 0;          // GraphHost::Seals at its submission
 		};
 
+		/** @brief The ranges of kRunsPerChunk lease indices: a query pool and its readback. */
+		struct Chunk
+		{
+			rhi::QueryPoolPtr pool;
+			std::shared_ptr<org::Buffer> readback;
+		};
+
 		std::string name;
+		rhi::Device device;
 		std::uint32_t perRun = 0;
-		std::uint32_t frameSlots = 0;
 		std::uint64_t stride = 8;
-		rhi::QueryPoolPtr pool;
-		std::shared_ptr<org::Buffer> readback;
-		std::vector<Run> runs;  // by frame slot
+		// Grown by record time (any thread) and read by the render thread: guarded by chunkMutex. A chunk never moves.
+		mutable std::mutex chunkMutex;
+		mutable std::vector<std::unique_ptr<Chunk>> chunks;
+		mutable bool chunkFailed = false;
+		std::vector<Run> runs;  // by range (lease index), grown at commit; guarded by the globals' mutex
 		std::uint32_t lastCommitted = ~0u;
 		std::uint64_t generations = 0;
+
+		/** @brief The chunk of a range, made on first use. Null, logged once, when its pool or readback cannot be made. */
+		Chunk* ChunkOf(std::uint32_t a_range) const
+		{
+			const std::uint32_t index = a_range / QueryRing::kRunsPerChunk;
+			const std::scoped_lock lock(chunkMutex);
+			if (chunks.size() <= index)
+				chunks.resize(static_cast<std::size_t>(index) + 1);
+			auto& chunk = chunks[index];
+			if (chunk)
+				return chunk.get();
+			auto made = std::make_unique<Chunk>();
+			rhi::QueryPoolDesc desc{};
+			desc.type = rhi::QueryType::Occlusion;
+			desc.count = QueryRing::kRunsPerChunk * perRun;
+			if (device.CreateQueryPool(desc, made->pool) == rhi::Result::Ok && made->pool) {
+				made->pool->SetName(std::format("{}.pool{}", name, index).c_str());
+				made->readback = org::Buffer::CreateShared(rhi::HeapType::Readback, stride * desc.count);
+				if (made->readback)
+					made->readback->SetName(std::format("{}.readback{}", name, index));
+			}
+			if (!made->pool || !made->readback) {
+				if (!std::exchange(chunkFailed, true))
+					logger::warn("[ORG] occlusion queries: {}: no query pool or readback for lease indices from {}", name, index * QueryRing::kRunsPerChunk);
+				return nullptr;
+			}
+			chunk = std::move(made);
+			return chunk.get();
+		}
+		/** @brief A range's first query in its chunk's pool. */
+		std::uint32_t First(std::uint32_t a_range) const { return (a_range % QueryRing::kRunsPerChunk) * perRun; }
 	};
 
 	namespace
 	{
-		bool Harvest(Globals& a_globals, Ring& a_ring, std::uint32_t a_frameSlot, bool a_retired)
+		bool Harvest(Globals& a_globals, Ring& a_ring, std::uint32_t a_range, bool a_retired)
 		{
-			auto& run = a_ring.runs[a_frameSlot];
+			if (a_range >= a_ring.runs.size())
+				return true;
+			auto& run = a_ring.runs[a_range];
 			if (!run.committed || run.harvested)
 				return true;
 			const auto bound = [&](std::int32_t a_index) -> Slot* {
 				if (a_index < 0 || a_index >= static_cast<std::int32_t>(kRingSlots))
 					return nullptr;
 				auto& slot = a_globals.slots[a_index];
-				return slot.ring.get() == &a_ring && slot.frameSlot == a_frameSlot && slot.generation == run.generation ? &slot : nullptr;
+				return slot.ring.get() == &a_ring && slot.range == a_range && slot.generation == run.generation ? &slot : nullptr;
 			};
 			if (!run.submitted) {
 				// Committed but never submitted (the run failed after its commit): nothing counted it.
@@ -198,25 +243,26 @@ namespace RenderGraph::Engine::OcclusionQueries
 				run.harvested = true;
 				return true;
 			}
-			// At the frame slot's next commit the host has waited for the slot's last execution, which holds the run: its point may also
-			// name later work on other queues, so it is not asked then.
+			// At the next commit of the run's lease index the lease has retired, which holds the run: its point may also name later
+			// work on other queues, so it is not asked then.
 			if (!a_retired && !run.point.Reached())
 				return false;
-			auto resource = a_ring.readback->GetAPIResource();
+			auto* chunk = a_ring.ChunkOf(a_range);
 			void* mapped = nullptr;
-			resource.Map(&mapped);
+			if (chunk)
+				chunk->readback->GetAPIResource().Map(&mapped);
 			const auto* counts = static_cast<const std::uint64_t*>(mapped);
 			for (std::uint32_t i = 0; i < run.slots.size(); ++i) {
 				auto* slot = bound(run.slots[i]);
 				if (!slot)
 					continue;
 				if (counts)
-					Deliver(*slot, Answer(counts[(std::uint64_t(a_frameSlot) * a_ring.perRun + i) * a_ring.stride / sizeof(std::uint64_t)]));
+					Deliver(*slot, Answer(counts[(std::uint64_t(a_ring.First(a_range)) + i) * a_ring.stride / sizeof(std::uint64_t)]));
 				else
 					SkipSlot(a_globals, *slot, "its readback could not be mapped");
 			}
 			if (mapped)
-				resource.Unmap(0, 0);
+				chunk->readback->GetAPIResource().Unmap(0, 0);
 			run.harvested = true;
 			return true;
 		}
@@ -229,62 +275,72 @@ namespace RenderGraph::Engine::OcclusionQueries
 			return nullptr;
 		auto state = std::make_shared<State>();
 		state->name = std::string(a_name);
+		state->device = host->Device();
 		state->perRun = a_perRun;
-		state->frameSlots = host->FrameSlots();
-		rhi::QueryPoolDesc desc{};
-		desc.type = rhi::QueryType::Occlusion;
-		desc.count = state->frameSlots * a_perRun;
-		if (host->Device().CreateQueryPool(desc, state->pool) != rhi::Result::Ok || !state->pool) {
-			logger::warn("[ORG] occlusion queries: {}: no occlusion query pool of {}", state->name, desc.count);
-			return nullptr;
+		// The first chunk now: a pool that cannot be made at all fails the client's setup, as before.
+		{
+			rhi::QueryPoolDesc desc{};
+			desc.type = rhi::QueryType::Occlusion;
+			desc.count = kRunsPerChunk * a_perRun;
+			rhi::QueryPoolPtr probe;
+			if (state->device.CreateQueryPool(desc, probe) != rhi::Result::Ok || !probe) {
+				logger::warn("[ORG] occlusion queries: {}: no occlusion query pool of {}", state->name, desc.count);
+				return nullptr;
+			}
+			state->stride = (std::max)(probe->GetQueryResultInfo().elementSize, 8u);
 		}
-		state->pool->SetName((state->name + ".pool").c_str());
-		state->stride = (std::max)(state->pool->GetQueryResultInfo().elementSize, 8u);
-		state->readback = org::Buffer::CreateShared(rhi::HeapType::Readback, state->stride * desc.count);
-		if (!state->readback) {
-			logger::warn("[ORG] occlusion queries: {}: no readback buffer", state->name);
+		if (!state->ChunkOf(0))
 			return nullptr;
-		}
-		state->readback->SetName(state->name + ".readback");
-		state->runs.resize(state->frameSlots);
-		logger::info("[ORG] occlusion queries: {}: {} queries a run over {} frame slots", state->name, a_perRun, state->frameSlots);
+		logger::info("[ORG] occlusion queries: {}: {} queries a run, in pools of {} runs made as the host's runs in flight need them", state->name,
+			a_perRun, kRunsPerChunk);
 		return std::make_shared<QueryRing>(std::move(state));
 	}
 
 	std::uint32_t QueryRing::PerRun() const { return state->perRun; }
 
-	rhi::QueryPoolHandle QueryRing::Pool() const { return state->pool->GetHandle(); }
-
-	std::uint32_t QueryRing::Index(std::uint32_t a_frameSlot, std::uint32_t a_query) const
+	rhi::QueryPoolHandle QueryRing::Pool(const org::RunRef& a_run) const
 	{
-		return (a_frameSlot % state->frameSlots) * state->perRun + (std::min)(a_query, state->perRun - 1);
+		const auto* chunk = state->ChunkOf(a_run.lease);
+		return chunk ? chunk->pool->GetHandle() : rhi::QueryPoolHandle{};
 	}
 
-	void QueryRing::Reset(rhi::CommandList& a_commands, std::uint32_t a_frameSlot) const
+	std::uint32_t QueryRing::Index(const org::RunRef& a_run, std::uint32_t a_query) const
 	{
-		a_commands.ResetQueries(Pool(), Index(a_frameSlot, 0), state->perRun);
+		return state->First(a_run.lease) + (std::min)(a_query, state->perRun - 1);
 	}
 
-	void QueryRing::Resolve(rhi::CommandList& a_commands, std::uint32_t a_frameSlot, std::uint32_t a_begun) const
+	void QueryRing::Reset(rhi::CommandList& a_commands, const org::RunRef& a_run) const
 	{
-		const auto first = Index(a_frameSlot, 0);
+		if (const auto pool = Pool(a_run); pool.valid())
+			a_commands.ResetQueries(pool, Index(a_run, 0), state->perRun);
+	}
+
+	void QueryRing::Resolve(rhi::CommandList& a_commands, const org::RunRef& a_run, std::uint32_t a_begun) const
+	{
+		const auto* chunk = state->ChunkOf(a_run.lease);
+		if (!chunk)
+			return;
+		const auto pool = chunk->pool->GetHandle();
+		const auto first = Index(a_run, 0);
 		for (std::uint32_t i = 0; i < state->perRun; ++i) {
 			if (a_begun & (1u << i))
 				continue;
-			a_commands.BeginQuery(Pool(), first + i);
-			a_commands.EndQuery(Pool(), first + i);
+			a_commands.BeginQuery(pool, first + i);
+			a_commands.EndQuery(pool, first + i);
 		}
-		a_commands.ResolveQueryData(Pool(), first, state->perRun, state->readback->GetAPIResource().GetHandle(), std::uint64_t(first) * state->stride);
+		a_commands.ResolveQueryData(pool, first, state->perRun, chunk->readback->GetAPIResource().GetHandle(), std::uint64_t(first) * state->stride);
 	}
 
-	void QueryRing::Commit(std::uint32_t a_frameSlot, std::span<const std::int32_t> a_slots)
+	void QueryRing::Commit(const org::RunRef& a_run, std::span<const std::int32_t> a_slots)
 	{
 		auto& globals = Get();
 		const std::scoped_lock lock(globals.mutex);
-		const std::uint32_t frameSlot = a_frameSlot % state->frameSlots;
-		// The host has waited for this frame slot's last work: its counts are there.
-		Harvest(globals, *state, frameSlot, true);
-		auto& run = state->runs[frameSlot];
+		const std::uint32_t range = a_run.lease;
+		if (state->runs.size() <= range)
+			state->runs.resize(static_cast<std::size_t>(range) + 1);
+		// The lease index's last run retired before the index was opened again: its counts are there.
+		Harvest(globals, *state, range, true);
+		auto& run = state->runs[range];
 		run = {};
 		run.generation = ++state->generations;
 		run.committed = true;
@@ -297,11 +353,11 @@ namespace RenderGraph::Engine::OcclusionQueries
 			if (!slot.graph)
 				continue;
 			slot.ring = state;
-			slot.frameSlot = frameSlot;
+			slot.range = range;
 			slot.generation = run.generation;
 			slot.query = i;
 		}
-		state->lastCommitted = frameSlot;
+		state->lastCommitted = range;
 	}
 
 	void QueryRing::Executed()
@@ -421,15 +477,15 @@ namespace RenderGraph::Engine::OcclusionQueries
 					return kNotReady;
 #if defined(CS_HAS_RENDER_GRAPH)
 				auto ring = a_slot.ring;
-				const auto frameSlot = a_slot.frameSlot;
-				if (Harvest(a_globals, *ring, frameSlot, false))
+				const auto range = a_slot.range;
+				if (Harvest(a_globals, *ring, range, false))
 					return a_slot.ready ? a_slot.value : kNotReady;
 				if (!a_wait)
 					return kNotReady;
 				// The blocking form: wait for the run's GPU work, but only once the host sealed it (it is on the device then). Before that it
 				// may still sit in DXVK's stream behind this very frame, and a wait here would never end.
 				auto* host = RenderGraphRuntime::Get().Host();
-				const auto& run = ring->runs[frameSlot];
+				const auto& run = ring->runs[range];
 				if (!host || host->Seals() <= run.seals) {
 					Skips().Report("a blocking read of a query its frame has not sealed yet was answered not-ready");
 					return kNotReady;
@@ -440,8 +496,8 @@ namespace RenderGraph::Engine::OcclusionQueries
 				a_lock.unlock();
 				const bool waited = point.Wait();
 				a_lock.lock();
-				if (ring->runs[frameSlot].generation == generation && waited)
-					Harvest(a_globals, *ring, frameSlot, false);
+				if (ring->runs[range].generation == generation && waited)
+					Harvest(a_globals, *ring, range, false);
 				return a_slot.ready ? a_slot.value : kNotReady;
 #else
 				return kNotReady;
@@ -492,7 +548,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 		bool submitted = false;
 #if defined(CS_HAS_RENDER_GRAPH)
 		if (entry.ring) {
-			const auto& run = entry.ring->runs[entry.frameSlot];
+			const auto& run = entry.ring->runs[entry.range];
 			submitted = run.generation == entry.generation && run.submitted;
 		}
 #endif

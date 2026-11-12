@@ -112,7 +112,7 @@ namespace GpuCounters::detail
 				g_getInstanceProcAddr = a_info.getInstanceProcAddr;
 				openInfo.get_instance_proc_addr = &GetInstanceProcAddrForGpa;
 				openInfo.get_device_proc_addr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(a_info.getInstanceProcAddr(a_info.instance, "vkGetDeviceProcAddr"));
-				lead = a_host.FrameSlots() + 1;
+				lead = a_host.FramesInFlight() + 1;
 				host = &a_host;
 
 				g_backend = this;

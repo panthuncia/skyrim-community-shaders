@@ -24,8 +24,8 @@ namespace RenderGraph
 	 *
 	 * A pass that runs on some runs of its anchor only (a chain that is on this frame, a copy for the frame the upscaler ran)
 	 * records an indirect dispatch or draw through its gate entry instead of reading a flag in Prepare. Nothing about the run goes
-	 * into the pass's revision, so the recording kept for its frame slot is submitted again whatever the gate says: no
-	 * preparation, no mismatch counter.
+	 * into the pass's revision, so the recording prepared ahead stays current whatever the gate says: no preparation again, no
+	 * mismatch counter.
 	 *
 	 * The frame anchors close every gate of a client (ClientDesc::gates) at the start of each run, before any commit: a run does
 	 * work only through the entries its client's commit opened. A client that is inactive for a run, or whose commit opens
@@ -43,8 +43,8 @@ namespace RenderGraph
 		static constexpr std::uint32_t kEntryBytes = 16;
 
 		/**
-		 * @brief A gate with a_entries entries, closed. Render thread, with the runtime active (the latch has the host's frame
-		 * slots). Null, logged, without a host.
+		 * @brief A gate with a_entries entries, closed. Render thread, with the runtime active (its latch is in the runtime's frame
+		 * arena). Null, logged, without a host.
 		 */
 		static std::shared_ptr<RunGate> Create(std::string_view a_name, std::uint32_t a_entries = 1);
 

@@ -23,11 +23,8 @@ namespace RenderGraph
 			logger::warn("[ORG] run gate {}: not made (no render graph host, or no entries)", a_name);
 			return nullptr;
 		}
-		auto latch = org::LatchBlock::Create(std::string(a_name), a_entries * kEntryBytes, host->FrameSlots());
-		// Closed in every slot until a commit opens an entry.
-		const std::vector<std::byte> zeros(a_entries * kEntryBytes);
-		for (std::uint32_t slot = 0; slot < latch->Slots(); ++slot)
-			latch->Write(slot, 0, zeros);
+		// Closed in every run until a commit opens an entry: a run's region is zeroed when it is allocated.
+		auto latch = org::LatchBlock::Create(std::string(a_name), a_entries * kEntryBytes);
 		return std::make_shared<RunGate>(std::move(latch), a_entries);
 	}
 
@@ -35,14 +32,13 @@ namespace RenderGraph
 	{
 		if (a_entry >= entries)
 			return;
-		const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
-		latch->Write(slot, Offset(a_entry), std::as_bytes(std::span(a_words)));
+		latch->Write(RenderGraphRuntime::Get().Host()->CurrentRun(), Offset(a_entry), std::as_bytes(std::span(a_words)));
 	}
 
 	void RunGate::Close() const
 	{
-		const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
-		std::memset(latch->Slot(slot).data(), 0, static_cast<std::size_t>(entries) * kEntryBytes);
+		const auto bytes = latch->Bytes(RenderGraphRuntime::Get().Host()->CurrentRun());
+		std::memset(bytes.data(), 0, static_cast<std::size_t>(entries) * kEntryBytes);
 	}
 
 	void RunGate::OpenDispatch(std::uint32_t a_entry, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z) const

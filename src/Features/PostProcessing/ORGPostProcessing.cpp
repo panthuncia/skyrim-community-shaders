@@ -350,7 +350,7 @@ namespace ORGPostChain
 
 	void CommitContext::WriteBytes(std::uint32_t a_offset, const void* a_data, std::size_t a_size) const
 	{
-		latch.Write(slot, a_offset, std::span<const std::byte>(static_cast<const std::byte*>(a_data), a_size));
+		latch.Write(run, a_offset, std::span<const std::byte>(static_cast<const std::byte*>(a_data), a_size));
 	}
 
 	void CommitContext::Open(GateEntry a_entry, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z) const { gate.OpenDispatch(a_entry.index, a_x, a_y, a_z); }
@@ -502,7 +502,7 @@ struct ORGPostProcessing::Impl
 			return false;
 		}
 		auto next = std::make_shared<ORGPostChain::BuildState>();
-		next->latch = std::make_shared<org::LatchBlock>("cs.pp.latch", ORGPostChain::kLatchBytes, host->FrameSlots());
+		next->latch = std::make_shared<org::LatchBlock>("cs.pp.latch", ORGPostChain::kLatchBytes);
 		next->gate = RenderGraph::RunGate::Create("cs.pp.gate", ORGPostChain::kGateEntries);
 		if (!next->gate) {
 			a_failure = "the chain's run gate could not be made";
@@ -604,7 +604,7 @@ struct ORGPostProcessing::Impl
 			return;
 		auto& pp = globals::features::postProcessing;
 		const auto& gate = *build->gate;
-		const ORGPostChain::CommitContext commit(*build->latch, RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), gate);
+		const ORGPostChain::CommitContext commit(*build->latch, RenderGraphRuntime::Get().Host()->CurrentRun(), gate);
 		gate.OpenDraw(ORGPostChain::kDrawEntry);
 		for (const auto& [groups, entry] : build->fixed)
 			gate.OpenDispatch(entry, groups[0], groups[1], groups[2]);

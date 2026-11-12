@@ -121,7 +121,7 @@ namespace DCLF::Draws
 		rhi::CommandSignaturePtr portalQuerySignature;
 		winrt::com_ptr<ID3D11Buffer> countD3D11;  // the culling counters' readback
 		// The foliage record (Policy::RecordFoliagePixels): per frame parity, each pixel's object and colours, and the compare
-		// pass's results (Diagnostics/Draws/Foliage.cpp), read back per frame slot.
+		// pass's results (Diagnostics/Draws/Foliage.cpp), read back per run lease index (a range each, given on first use).
 		struct FoliageRecord
 		{
 			std::array<std::shared_ptr<org::Buffer>, 2> ids, colours;
@@ -133,8 +133,10 @@ namespace DCLF::Draws
 			std::uint32_t ownersIndex = 0;
 			std::uint32_t epoch = 0;  // colour commits so far: buffer parity and tag (the scene frame can repeat or skip)
 			std::shared_ptr<const ComputeProgram> program;
-			std::vector<std::shared_ptr<org::Buffer>> readback;
-			std::vector<std::uint32_t> readbackFrame;  // 1 where the slot's copy holds a frame's results
+			std::vector<std::shared_ptr<org::Buffer>> readback;  // per range
+			std::vector<std::uint32_t> readbackFrame;  // 1 where the range's copy holds a frame's results
+			std::vector<std::uint32_t> rangeOf;        // by lease index: its range, or UINT32_MAX
+			std::uint32_t ranges = 0;                  // ranges given out
 			std::uint32_t width = 0, height = 0;
 		};
 		std::shared_ptr<FoliageRecord> foliage;
@@ -358,10 +360,12 @@ namespace DCLF::Draws
 	std::shared_ptr<PassFrame> MakeMainShape(const MainShapeInputs& a_in);
 
 	/**
-	 * @brief CS_DCLF_PASS_STATS=1: the main draw passes' pipeline statistics per frame slot, read back when the slot comes round.
+	 * @brief CS_DCLF_PASS_STATS=1: the main draw passes' pipeline statistics per run lease index, read back when the index records
+	 * again. The indices the passes record at (a revision-driven epoch's published copies) get a range each, up to kRanges.
 	 */
 	struct PassStats
 	{
+		static constexpr std::uint32_t kRanges = 64;
 		enum Kind : std::uint32_t
 		{
 			kDepth,
@@ -372,8 +376,10 @@ namespace DCLF::Draws
 		};
 		static constexpr std::uint32_t kFields = 4;  // IA vertices, IA primitives, VS invocations, PS invocations
 		rhi::QueryPoolPtr pool;
-		std::vector<std::shared_ptr<org::Buffer>> readback;  // per frame slot, kKinds results
+		std::vector<std::shared_ptr<org::Buffer>> readback;  // per range, kKinds results
 		std::vector<std::array<bool, kKinds>> written;
+		std::vector<std::uint32_t> rangeOf;  // by lease index: its range, or UINT32_MAX
+		std::uint32_t ranges = 0;            // ranges given out
 		std::mutex mutex;
 		std::array<std::array<std::uint64_t, kFields>, kKinds> totals{};
 		std::array<std::uint32_t, kKinds> samples{};
@@ -383,7 +389,24 @@ namespace DCLF::Draws
 			return Diagnostics::Observe().passStats;
 		}
 
-		/** @brief The slot's results from its last use, then its query reset; before the pass begins. */
+		/**
+		 * @brief The run's range: one per lease index of a stable run (a published copy's), given on its first use. A leased run, or one
+		 * past kRanges, gets UINT32_MAX: it is not counted.
+		 */
+		std::uint32_t RangeOf(const org::RunRef& a_run)
+		{
+			if (!a_run.Stable())
+				return UINT32_MAX;
+			const std::lock_guard lock(mutex);
+			if (rangeOf.size() <= a_run.lease)
+				rangeOf.resize(std::size_t(a_run.lease) + 1, UINT32_MAX);
+			auto& range = rangeOf[a_run.lease];
+			if (range == UINT32_MAX && ranges < readback.size())
+				range = ranges++;
+			return range;
+		}
+
+		/** @brief The range's results from its last use, then its query reset; before the pass begins. */
 		void Start(rhi::CommandList& a_commands, std::uint32_t a_slot, Kind a_kind)
 		{
 			if (a_slot >= readback.size())
@@ -443,7 +466,7 @@ namespace DCLF::Draws
 	struct PreparedDraws
 	{
 		PassStats* stats = nullptr;              // CS_DCLF_PASS_STATS
-		PreprocessStates* preprocess = nullptr;  // the frame slot's explicit DGC preprocess state list
+		PreprocessStates* preprocess = nullptr;  // the explicit DGC preprocess state lists (a list per run lease index)
 		std::array<std::uint32_t, kFramePushWords> framePushWords{};
 		std::shared_ptr<const PassFrame> frame;
 		bool terrainDepth = false;  // Terrain Blending's terrain depth (the Z-prepass's) is drawn

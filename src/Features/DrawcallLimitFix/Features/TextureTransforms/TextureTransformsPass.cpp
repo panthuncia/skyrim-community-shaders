@@ -96,18 +96,17 @@ namespace DCLF::Draws
 
 		static void Record(const TextureTransformsBindings&, const TextureTransformsPrepared& a_frame, org::PassRecordContext& a_recording)
 		{
-			RecordApply(a_recording.Commands(), a_frame, a_recording.FrameSlot());
+			RecordApply(a_recording.Commands(), a_frame, a_recording.Run());
 		}
 
-		// The barriers and both dispatches, from the latch's region of a_frameSlot.
-		static void RecordApply(rhi::CommandList& a_commands, const TextureTransformsPrepared& a_frame, std::uint32_t a_frameSlot)
+		// The barriers and both dispatches, from the latch's region of a_run.
+		static void RecordApply(rhi::CommandList& a_commands, const TextureTransformsPrepared& a_frame, const org::RunRef& a_run)
 		{
 			if (!a_frame.program || !a_frame.latch)
 				return;
 			Constants constants{};
-			constants.latchIndex = a_frame.latch->SrvIndex();
-			// The depth segment's BuildDrawsLatch in this frame slot.
-			constants.latchOffset = static_cast<std::uint32_t>(a_frame.latch->Offset(a_frameSlot));
+			// The depth segment's BuildDrawsLatch in this run's region.
+			SetLatchWords(constants, *a_frame.latch, a_run);
 			auto& commands = a_commands;
 			const rhi::GlobalBarrier global = rhi::FullMemoryBarrier();
 			const rhi::BarrierBatch batch{ {}, {}, { &global, 1 } };

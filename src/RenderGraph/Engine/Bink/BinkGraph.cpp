@@ -166,7 +166,7 @@ namespace RenderGraph::Engine::Bink::Graph
 			bool failed = false;
 			std::unique_ptr<GraphResources::Texture2D> atlas;
 			std::shared_ptr<FrameStaging> staging;
-			// The frame each pass records, per host frame slot: the upload's and the draw's.
+			// The frame each pass records, by run: the upload's and the draw's.
 			std::shared_ptr<const RunSlots<Frame>> uploads, draws;
 			std::shared_ptr<org::ExternalTextureResource> target;  // the framebuffer the pass draws (FrameAnchors::EngineTarget)
 			std::uint32_t width = 0, height = 0;
@@ -262,7 +262,7 @@ namespace RenderGraph::Engine::Bink::Graph
 
 			static void Record(const UploadBindings& a_bindings, const PassFrame& a_pass, org::PassRecordContext& a_recording)
 			{
-				const auto frame = a_pass.slots->Take(a_recording.FrameSlot());
+				const auto frame = a_pass.slots->Take(a_recording.Run());
 				if (!frame || !frame->staging || !frame->movie)
 					return;
 				// The staging buffer stays until this recording's GPU work retires.
@@ -298,7 +298,7 @@ namespace RenderGraph::Engine::Bink::Graph
 
 			static void Record(const DrawBindings& a_bindings, const PassFrame& a_pass, org::PassRecordContext& a_recording)
 			{
-				const auto frame = a_pass.slots->Take(a_recording.FrameSlot());
+				const auto frame = a_pass.slots->Take(a_recording.Run());
 				if (!frame || !frame->program || !frame->movie)
 					return;
 				a_recording.Retain(frame);
@@ -378,9 +378,9 @@ namespace RenderGraph::Engine::Bink::Graph
 				frame->height = current.height;
 				if (frame->staging)
 					current.uploaded = pending.movie.get();
-				const std::uint32_t slot = host->CurrentFrameSlot();
-				current.uploads->Store(slot, frame);
-				current.draws->Store(slot, std::move(frame));
+				const org::RunRef run = host->CurrentRun();
+				current.uploads->Store(run, frame);
+				current.draws->Store(run, std::move(frame));
 				current.committed = current.queued;
 			};
 			client.active = [] { return Get().pending.has_value(); };
@@ -449,10 +449,11 @@ namespace RenderGraph::Engine::Bink::Graph
 		state.atlas = std::make_unique<GraphResources::Texture2D>(atlas, "Bink::Movie", GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
 		state.staging = FrameStaging::Create({ .name = "cs.bink.staging",
 			.minimumBytes = 1u << 20,
-			.runsPerFrame = FrameAnchors::RunsPerFrame(FrameAnchors::Anchor::Present),
+			// The Present anchor runs once a frame.
+			.runsPerFrame = 1,
 			.maxBlocks = kMaxStaging });
-		state.uploads = std::make_shared<const RunSlots<Frame>>(host->FrameSlots());
-		state.draws = std::make_shared<const RunSlots<Frame>>(host->FrameSlots());
+		state.uploads = std::make_shared<const RunSlots<Frame>>();
+		state.draws = std::make_shared<const RunSlots<Frame>>();
 		// The engine's PS sampler for this draw: address mode 0, filter mode 2 (CreateSamplerStates, SE 75831): trilinear, clamped, no
 		// bias, every LOD.
 		D3D11_SAMPLER_DESC sampler{};
@@ -545,7 +546,7 @@ namespace RenderGraph::Engine::Bink::Graph
 		if (!a_movie.decoding)
 			return nullptr;
 		const auto& tile = a_movie.tiles[a_tile];
-		std::byte* const data = a_movie.decoding->Slot(0).data() + tile.offset;
+		std::byte* const data = a_movie.decoding->Bytes().data() + tile.offset;
 		// The decoder writes the video's part of an edge tile; the rest is drawn as the engine's zero-filled texels.
 		if (tile.edge)
 			std::memset(data, 0, std::size_t(tile.rowPitch) * tile.desc.height);

@@ -82,7 +82,6 @@ namespace DCLF::Draws
 			prepared.program = tables->cull;
 			prepared.latch = frame->latch;
 			auto& constants = prepared.constants;
-			constants.latchIndex = frame->latch->SrvIndex();
 			constants.phase = phase;
 			const std::uint64_t records = shapes * TreeInstances::kMaxGroupInstances;
 			constants.retestOffset = static_cast<std::uint32_t>(sizeof(TreeInstances::VisibleHeader) + records * sizeof(std::uint32_t));
@@ -96,7 +95,7 @@ namespace DCLF::Draws
 			return prepared;
 		}
 
-		// The dispatch, from the latch's region of the frame slot.
+		// The dispatch, from the latch's region of the run.
 		static void Record(const TreeLodCullBindings& a_bindings, const TreeLodCullPrepared& a_frame, org::PassRecordContext& a_recording)
 		{
 			if (!a_frame.program || !a_frame.groups || !a_frame.latch)
@@ -109,7 +108,7 @@ namespace DCLF::Draws
 			if (a_frame.occlusion)
 				constants.hzbIndex = a_recording.Index(a_bindings.hzb);
 			// The depth segment's BuildDrawsLatch in this frame slot.
-			constants.latchOffset = static_cast<std::uint32_t>(a_frame.latch->Offset(a_recording.FrameSlot()));
+			SetLatchWords(constants, *a_frame.latch, a_recording.Run());
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_frame.program->layout->GetHandle());
 			commands.BindPipeline(a_frame.program->Pipeline());
@@ -218,7 +217,8 @@ namespace DCLF::Draws
 			if (!a_frame.counts)
 				return;
 			auto& counts = *a_frame.counts;
-			const std::uint32_t slot = a_recording.FrameSlot();
+			// The run's range: a published copy's (its lease retired before it recorded again, so the range's last copy is done).
+			const std::uint32_t slot = counts.ranges.Of(a_recording.Run());
 			if (slot >= counts.readback.size())
 				return;
 			if (counts.filled[slot]) {

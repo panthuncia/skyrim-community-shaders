@@ -533,7 +533,7 @@ struct RenderGraphRuntime::Impl
 	std::atomic<bool> faulted = false;
 	// Render thread: the segments whose failed epoch ExecuteEpoch has logged, one bit each. A segment's bit clears when it submits again.
 	std::uint64_t failedEpochsLogged = 0;
-	std::uint64_t ringFullLogged = 0;  // segments whose ring was full once (EpochRingFullError), logged once each
+	std::uint64_t copiesBusyLogged = 0;  // segments whose published copies were all busy once (EpochCopiesBusyError), logged once each
 
 	// The thread that drives the D3D11 immediate context (the one running epochs).
 	// Its submissions go into DXVK's command stream; other threads submit directly.
@@ -749,11 +749,10 @@ struct RenderGraphRuntime::Impl
 	// ORG's pass timestamps, per segment. An epoch is one host frame; the segment it ran is remembered by
 	// frame number until its timestamps come back, framesInFlight frames later.
 	static constexpr std::size_t kSegments = static_cast<std::size_t>(Segment::Count);
-	// Past the host's frame slots (at most kMaxFrameSlots: kGameFramesInFlight frames of every segment's runs,
-	// GraphHost::FrameSlotsFor) and a ticket prepared ahead per segment: a frame's segment outlives its slot's reuse.
+	// Indexed by host frame number (one per run). A run's entry is read when the run retires, a few frames of runs later: the ring
+	// holds far more runs than are ever in flight (a few hundred), with a ticket prepared ahead per segment.
 	static constexpr std::size_t kSegmentRing = 2048;
-	static_assert(kSegmentRing >= 2 * (RenderGraphRuntime::kMaxFrameSlots + kSegments));
-	static_assert(RenderGraphRuntime::kMaxFrameSlots <= org::Runtime::kMaxSlots, "CS's frame slot budget is within ORG's limit");
+	static_assert(kSegmentRing >= 4 * (RenderGraphRuntime::kRunCapacity + kSegments));
 	struct PassTime
 	{
 		double inclusiveMs = 0.0;
@@ -858,7 +857,7 @@ struct RenderGraphRuntime::Impl
 		const auto segmentIndex = static_cast<std::size_t>(frameSegments[a_frameNumber % kSegmentRing].load(std::memory_order_acquire));
 		a_out.segment = segmentIndex;
 		a_out.timestampFrame = frameTimestampFrames[a_frameNumber % kSegmentRing].exchange(0, std::memory_order_acq_rel);
-		// Every timestamp pair the frame slot's completion read: the graph's per-frame passes (the shared pool, graphics queue)
+		// Every timestamp pair the run's completion read: the graph's per-frame passes (the shared pool, graphics queue)
 		// and the recordings kept across frames (their own queries, every queue, and their barrier batches).
 		const auto& timestamps = a_stats.GetCompletedTimestamps();
 		const double toMs = a_stats.GetGpuTicksToMilliseconds();
@@ -1042,6 +1041,21 @@ struct RenderGraphRuntime::Impl
 				async.submitted, async.waited, async.stale, async.uploads, async.recordedUploadLists, async.queueUploadCopies, async.sparedUploadWaits,
 				async.wakesSkipped, async.staleBacking, async.rebuilds, async.recorded, async.revisionCopiesRecorded, async.revisionSubmissions, async.copyWaits,
 				async.copiesBusy, async.predicted, async.planned);
+		}
+		{
+			// What the runs in flight hold (run leases, the frame arena, statistics ranges) and the device's command memory.
+			const auto runs = host->TakeRunMemoryStats();
+			const auto commands = host->Device().CommandMemoryStats();
+			constexpr double kKiB = 1.0 / 1024.0;
+			logger::info("[ORG] Run memory: {} leases in flight (peak {}; {} lease indices made, {} external runs, {} published copies' leases); {} statistics "
+						 "ranges; frame arena {} chunks ({:.0f} KiB, {} pinned), {:.1f} KiB live (peak {:.1f} KiB, {:.1f} KiB pinned) in {} regions of {} runs, {} chunks "
+						 "trimmed; command memory: {} pools, {} lists, root-constant scratch {} pages held ({:.0f} KiB) and {} pooled ({:.0f} KiB), DGC preprocess {} held "
+						 "({:.0f} KiB) and {} pooled ({:.0f} KiB)",
+				runs.leasesInFlight, runs.leasesPeak, runs.leaseIndices, runs.externalRuns, runs.copyLeases, runs.statisticsRanges, runs.arena.chunks,
+				runs.arena.chunkBytes * kKiB, runs.arena.pinnedChunks, runs.arena.liveBytes * kKiB, runs.arena.peakLiveBytes * kKiB, runs.arena.pinnedBytes * kKiB,
+				runs.arena.liveRegions, runs.arena.runs, runs.arena.trimmed, commands.commandPools, commands.commandLists, commands.scratchPagesHeld,
+				commands.scratchBytesHeld * kKiB, commands.scratchPagesPooled, commands.scratchBytesPooled * kKiB, commands.dgcPagesHeld, commands.dgcBytesHeld * kKiB,
+				commands.dgcPagesPooled, commands.dgcBytesPooled * kKiB);
 		}
 		FrameAnchors::LogRunStats();
 		epochCount = 0;
@@ -1742,9 +1756,8 @@ bool RenderGraphRuntime::Initialize()
 		// Everything DXVK submitted before an epoch and everything it submits after
 		// is ordered against the graph by these barriers (same queue, submission order).
 		desc.queueBoundary = { .entry = true, .exit = true };
-		// Game frames in flight: the host's frame slots are this many frames of every epoch in the order (FrameSlots), so a new
-		// segment keeps the same lead over the GPU, and a slot's wait is backpressure from that many frames back. An anchor that runs
-		// several times a frame has this many frames of its runs (Desc::epochRuns, below).
+		// Game frames in flight: what the host's frame pacing and a revision-driven epoch's published copies follow. Every run takes a
+		// run lease of its own, whichever epoch or anchor it is.
 		desc.framesInFlight = kGameFramesInFlight;
 		// CS_ORG_CLOSED (default off, =1 on): each epoch leaves every resource in its home state and starts with a full barrier, so
 		// its admission is independent of the epochs before it. An interop fallback: the epochs' resources otherwise flow between them
@@ -1753,10 +1766,9 @@ bool RenderGraphRuntime::Initialize()
 		// CS_ORG_EXTERNAL_HOME (default on, =0 off): each epoch gives DXVK's images (the imports) back in their home state on the
 		// graphics queue, where DXVK uses them between the epochs (GENERAL, the external-commands contract).
 		desc.externalHomeStates = !Switches::Equals("CS_ORG_EXTERNAL_HOME", "0");
-		// CS_ORG_REUSE_RECORDINGS (default on, =0 off): each epoch's recordings are kept per frame slot and submitted again
-		// while what they were recorded for holds; a ticket an epoch's commit made stale takes the kept recording of its new
-		// shape instead of being prepared again (a render-thread wait). Kept recordings carry no Tracy GPU zones: turn it off
-		// to profile the epochs' passes on the GPU with Tracy.
+		// CS_ORG_REUSE_RECORDINGS (default on, =0 off): tickets record replayable recordings, which the revision-driven epochs need
+		// (their published copies are submitted again). A live epoch's recording is used once. Replayable recordings carry no Tracy GPU
+		// zones: turn it off to profile the epochs' passes on the GPU with Tracy (the revision-driven epochs then run synchronously).
 		desc.reuseRecordings = !Switches::Equals("CS_ORG_REUSE_RECORDINGS", "0");
 		// CS_ORG_QUEUE_UPLOADS (default on, =0 off): an async epoch's staged uploads whose destination it first uses on the compute
 		// queue are recorded there, just ahead of its first compute batch, and a compute batch waits for the graphics queue's
@@ -1774,13 +1786,8 @@ bool RenderGraphRuntime::Initialize()
 		// The self-tests reserve their anchors as any client does, before the reservations freeze.
 		FrameAnchors::SelfTest::Reserve();
 		GraphResources::SelfTest::Reserve();
-		// The frame slot budget (kMaxFrameSlots, under ORG's org::Runtime::kMaxSlots): anchors that do not fit lose their reservation, logged.
-		FrameAnchors::FitSlotBudget(desc.epochOrder, desc.framesInFlight, kMaxFrameSlots);
 		// The frame anchors' reserved epochs, where the frame reaches them (FrameAnchors.h).
 		FrameAnchors::AddToFrame(desc.epochOrder);
-		// Every run takes a run lease of the host's, whichever anchor or epoch it is, so an anchor that runs several times a frame
-		// never waits for a run of the same frame. The runtime's first run capacity: its services grow past it.
-		const std::uint32_t frameSlots = 256;
 		if (!desc.epochOrder.empty())
 			logger::info("[ORG] epoch order: {}", fmt::join(desc.epochOrder, ","));
 		// Diagnostic: CS_ORG_ALIAS_LOG=1 logs every alias plan's placements, ranks and exclusions.
@@ -1796,9 +1803,9 @@ bool RenderGraphRuntime::Initialize()
 		settings.collectPipelineStatistics = false;
 		org::runtime::SetOpenRenderGraphSettings(settings);
 #endif
-		// The runtime's slots: the host's frame slots (frames in flight times the epochs' runs a frame), which its upload pages and
-		// statistics follow.
-		state->orgRuntime = org::Runtime::Create({ .device = state->device->Get(), .backend = rhi::Backend::Vulkan, .slots = frameSlots });
+		// The runtime's first run capacity (kRunCapacity): its upload page lists and statistics ranges are indexed by run lease and grow
+		// past it.
+		state->orgRuntime = org::Runtime::Create({ .device = state->device->Get(), .backend = rhi::Backend::Vulkan, .slots = kRunCapacity });
 		desc.runtime = state->orgRuntime;
 		state->host = std::make_unique<org::GraphHost>(std::move(desc));
 		// The frame-wait timeline, before anything builds the graph (its packets bind it when prepared): only with a queue of the
@@ -2489,12 +2496,12 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
 		if (impl->batching)
 			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
-		if (const std::uint64_t bit = std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment); !(impl->ringFullLogged & bit)) {
-			impl->ringFullLogged |= bit;
+		if (const std::uint64_t bit = std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment); !(impl->copiesBusyLogged & bit)) {
+			impl->copiesBusyLogged |= bit;
 			logger::info("[ORG] {} ran more than its {} published copies in one frame; runs past them fall back until the next Present", Impl::SegmentLabel(a_segment),
 				e.copies);
 		}
-		return EpochResult::RingFull;
+		return EpochResult::Skipped;
 	} catch (const org::GraphHost::EpochFailedError& e) {
 		// Only this epoch's graph failed, and nothing of it was submitted. The graph stays up for the other epochs. The epoch's owner
 		// hears of it at the next PollEpochFailures (OnEpochFailed); until then the caller falls back for this run.

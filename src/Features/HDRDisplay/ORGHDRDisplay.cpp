@@ -168,7 +168,7 @@ bool ORGHDRDisplay::Setup(std::function<void()> a_onFailed)
 	}
 	auto state = std::make_unique<Impl>();
 	state->program = std::move(program);
-	state->latch = std::make_shared<org::LatchBlock>("cs.hdr.latch", static_cast<std::uint32_t>(sizeof(HDRDisplay::HDRDataCB)), host->FrameSlots());
+	state->latch = std::make_shared<org::LatchBlock>("cs.hdr.latch", static_cast<std::uint32_t>(sizeof(HDRDisplay::HDRDataCB)));
 	state->onFailed = std::move(a_onFailed);
 	impl = std::move(state);
 	return true;
@@ -275,7 +275,7 @@ ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB& a_co
 		client.commit = [](const FrameAnchors::Point&) {
 			auto& self = Get();
 			if (self.impl)
-				self.impl->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, self.impl->constants);
+				self.impl->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, self.impl->constants);
 		};
 		// Run unregisters the clients before this; Compose stops the path once Run returns.
 		client.onFailed = [] { Get().graphFailed = true; };

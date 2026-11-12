@@ -5,6 +5,7 @@
 // sources that use them.
 
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
+#include "Features/DrawcallLimitFix/Core/Render/Readback/RunRanges.h"
 #include "Features/DrawcallLimitFix/Features/Grass/GrassLayout.h"
 #include "Features/DrawcallLimitFix/Features/Grass/Grass.h"
 
@@ -53,12 +54,14 @@ namespace DCLF::Features::Grass
 	static_assert(kGrassArgsConstantWords == 8);
 
 	/**
-	 * @brief Grass's cull counts (GrassReadbackPass: the draws buffer's header), read back per frame slot on the graph host's thread.
+	 * @brief Grass's cull counts (GrassReadbackPass: the draws buffer's header), read back per run range (Draws::RunRanges) on the graph
+	 * host's thread.
 	 */
 	struct GrassCounts
 	{
-		std::vector<std::shared_ptr<org::Buffer>> readback;
-		std::vector<std::uint8_t> filled;
+		Draws::RunRanges ranges{ Draws::kReadbackRanges };
+		std::vector<std::shared_ptr<org::Buffer>> readback;  // by range
+		std::vector<std::uint8_t> filled;                    // by range: its copy holds a frame's counts
 		std::atomic<std::uint64_t> frames{ 0 }, live{ 0 }, beyond{ 0 }, outside{ 0 }, thinned{ 0 }, faded{ 0 }, tested{ 0 }, phaseOne{ 0 }, retests{ 0 }, phaseTwo{ 0 };
 		std::atomic<std::uint64_t> phaseOneDraws{ 0 }, phaseTwoDraws{ 0 }, colourDraws{ 0 }, pbrDraws{ 0 };
 	};

@@ -860,22 +860,25 @@ namespace DCLF
 		// The blocks' handles in the scene's set, once: the seals make the blocks (off the host's world, on the producer's thread).
 		if (!handles) {
 			auto& buffers = SceneBufferSet::Get();
-			const std::uint32_t slots = host->FrameSlots();
+			// A region per run: a published copy's is pinned to its lease index, an external run's goes with its lease. The zeros'
+			// one region is every run's.
+			const auto perRun = SceneBufferSet::LatchRegions::kPerRun;
+			const auto shared = SceneBufferSet::LatchRegions::kShared;
 			// The latched copies' blocks grow with headroom past what a layout lists (a commit's frame blocks change size).
 			const auto latched = org::services::GrowthPolicy::Headroom(100, 4096);
-			handles.main = buffers.RegisterLatch("cs.dclf.latch", slots);
+			handles.main = buffers.RegisterLatch("cs.dclf.latch", perRun);
 			for (auto& block : handles.mainLatched)
-				block = buffers.RegisterLatch("cs.dclf.latched-copies", slots, latched);
-			handles.shadow = buffers.RegisterLatch("cs.dclf.shadow.latch", slots);
-			handles.shadowZeros = buffers.RegisterLatch("cs.dclf.shadow.zeros", 1);
-			handles.shadowLatched = buffers.RegisterLatch("cs.dclf.latched-copies", slots, latched);
+				block = buffers.RegisterLatch("cs.dclf.latched-copies", perRun, latched);
+			handles.shadow = buffers.RegisterLatch("cs.dclf.shadow.latch", perRun);
+			handles.shadowZeros = buffers.RegisterLatch("cs.dclf.shadow.zeros", shared);
+			handles.shadowLatched = buffers.RegisterLatch("cs.dclf.latched-copies", perRun, latched);
 			// A latch for each view a feature took (one none took draws nothing).
 			for (const auto& slot : kViewSlots) {
 				if (!Extensions::ViewRegistered(slot.view))
 					continue;
 				const std::size_t v = ViewIndex(slot.view);
-				handles.views[v] = buffers.RegisterLatch(fmt::format("{}.latch", TraitsOf(slot.view).prefix), slots);
-				handles.viewZeros[v] = buffers.RegisterLatch(fmt::format("{}.zeros", TraitsOf(slot.view).prefix), 1);
+				handles.views[v] = buffers.RegisterLatch(fmt::format("{}.latch", TraitsOf(slot.view).prefix), perRun);
+				handles.viewZeros[v] = buffers.RegisterLatch(fmt::format("{}.zeros", TraitsOf(slot.view).prefix), shared);
 			}
 		}
 		const bool smallTables = SwitchValue(Switch::TableStart) == "small";

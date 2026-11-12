@@ -96,15 +96,17 @@ namespace DCLF::Draws
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_prepared.program->layout->GetHandle());
 			commands.BindPipeline(a_prepared.program->Pipeline());
-			const std::uint64_t region = a_prepared.latch->Offset(a_recording.FrameSlot());
+			// The run's region of the latch: its arena chunk, and its offset there.
+			const auto at = a_prepared.latch->At(a_recording.Run());
+			const std::uint64_t region = at.offset;
 			BuildDrawsConstants constants{};
-			constants.latchIndex = a_prepared.latch->SrvIndex();
+			constants.latchIndex = at.srvIndex;
 			constants.latchOffset = static_cast<std::uint32_t>(region + a_prepared.listOffset);
 			constants.sequencesIndex = a_recording.Index(a_bindings.firsts);
 			constants.countIndex = a_recording.Index(a_bindings.used);
 			constants.visibilityIndex = a_recording.Index(a_bindings.rows);
 			commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kBuildDrawsConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
-			commands.ExecuteIndirect(a_prepared.signature, a_prepared.latch->Resource()->GetAPIResource().GetHandle(), region + a_prepared.dispatchOffset, {}, 0, 1);
+			commands.ExecuteIndirect(a_prepared.signature, at.buffer->GetAPIResource().GetHandle(), region + a_prepared.dispatchOffset, {}, 0, 1);
 		}
 
 	private:
@@ -207,7 +209,6 @@ namespace DCLF::Draws
 			prepared.dispatchOffset = frame->latchLayout.BuildDispatchOffset();
 			prepared.views = static_cast<std::uint32_t>(rows.size());
 			auto& constants = prepared.constants;
-			constants.latchIndex = frame->latch->SrvIndex();
 			// Published again only when its bytes change (another view set, or a slot's descriptors); the packet keeps the one it names.
 			constants.sequencesIndex = viewTable.Publish(a_preparation, std::span<const ShadowBuildView>(rows));
 			constants.countIndex = prepared.views;
@@ -226,10 +227,12 @@ namespace DCLF::Draws
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_prepared.program->layout->GetHandle());
 			commands.BindPipeline(a_prepared.program->Pipeline());
-			// The shader finds each view's latch from the frame slot's region; the groups are the epoch's in the same region (x the list's,
+			// The shader finds each view's latch from the run's region; the groups are the epoch's in the same region (x the list's,
 			// y the views the commit counted: ShadowBuildRows), the shader bounding y by the table's rows.
-			const std::uint64_t region = a_prepared.latch->Offset(a_recording.FrameSlot());
+			const auto at = a_prepared.latch->At(a_recording.Run());
+			const std::uint64_t region = at.offset;
 			auto constants = a_prepared.constants;
+			constants.latchIndex = at.srvIndex;
 			constants.latchOffset = static_cast<std::uint32_t>(region);
 			constants.poolFirstsIndex = a_recording.Index(a_bindings.poolFirsts);
 			// Every view writes the visibility words; nothing reads them here.
@@ -237,7 +240,7 @@ namespace DCLF::Draws
 			constants.fadeRootsIndex = a_prepared.fadeRoots ? a_recording.Index(a_bindings.fadeRoots) : 0u;
 			constants.objectGatesIndex = a_bindings.objectGates.layout ? a_recording.Index(a_bindings.objectGates) : 0u;
 			commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kBuildDrawsConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
-			commands.ExecuteIndirect(a_prepared.signature, a_prepared.latch->Resource()->GetAPIResource().GetHandle(), region + a_prepared.dispatchOffset, {}, 0, 1);
+			commands.ExecuteIndirect(a_prepared.signature, at.buffer->GetAPIResource().GetHandle(), region + a_prepared.dispatchOffset, {}, 0, 1);
 		}
 
 	private:

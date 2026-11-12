@@ -96,7 +96,7 @@ namespace DCLF::Draws
 	inline bool OwnsFrameConstants(const ViewTraits& a_traits) { return !a_traits.depthPass; }
 
 	/**
-	 * @brief A view's latch block's region per frame slot: each face's BuildDrawsLatch, the slots' map, each face's bucket table
+	 * @brief A view's latch block's region per run: each face's BuildDrawsLatch, the slots' map, each face's bucket table
 	 * (first, capacity), the state classes' map (a view with a forward part: its forward range's entries are per class), then each face's
 	 * values its latched copies take (its block, and in a trees view each draw family's row and list header with faces:
 	 * Extensions::DrawFamilyFaceLayout, at DrawFamilyFaceBytes a face), then a view with frame constants of its own its frame values

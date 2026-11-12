@@ -15,12 +15,15 @@
 // Lifetime: everything a frame's sites made (the culled batches' arenas, the secondaries and their allocators, the adopted list's
 // wrapper, the executions' owners, the pre-work, the batch set and the cull frame) is its frame slot's, kept until the frame's signal on
 // DCLF's CPU-frame timeline (signalled after the frame's last callback, EndFrame) completes: the slot's next frame waits for it at its
-// start (one host wait, the slots' depth ahead) before it resets them. The ORG latch regions the commits write are the same slot's
-// (GraphHost::BeginExternalFrameSlot), so they are not rewritten while the GPU reads them either.
+// start (one host wait, the slots' depth ahead) before it resets them. The ORG latch regions the commits write are an external run's of
+// the host's (GraphHost::BeginExternalRun), whose lease retires after the same signal, so they are not rewritten while the GPU reads
+// them either.
 
 #include "Features/DrawcallLimitFix/Api/Passes.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+
+#include <Render/RunRef.h>
 
 #include <array>
 #include <cstdint>
@@ -59,8 +62,9 @@ namespace DCLF::Direct
 	/**
 	 * @brief Render thread, at the frame's start once its snapshot is adopted, before its coverage (IndirectDraws::DecideCoverage) and
 	 * before FrameValues::Kick: a_set (the adopted snapshot's view batches; null: none) is the frame's. In CPU mode: the frame's slot is
-	 * taken (waiting for its last frame's signal when the GPU has not passed it yet), its last frame's state released, the ORG latch
-	 * regions the commits write set to it (BeginExternalFrameSlot), and the frame's CPU state kicked (KickCpuFrameState). Frames after
+	 * taken (waiting for its last frame's signal when the GPU has not passed it yet), its last frame's state released, an external run
+	 * opened for the ORG latch regions the commits write (GraphHost::BeginExternalRun), and the frame's CPU state kicked
+	 * (KickCpuFrameState). Frames after
 	 * CPU frames that are not ones release the CPU frames' slots as their signals complete, never waiting for them.
 	 */
 	void FrameStart(std::shared_ptr<const ViewBatchSet> a_set);
@@ -116,7 +120,7 @@ namespace DCLF::Direct
 		const Draws::BuildDrawsLatch* latch = nullptr;  // the segment's BuildDraws latch as written (the views' cull inputs)
 		std::span<const Draws::GpuCascade> cascades;     // the colour commit's: the sun's cascades it latched
 		std::span<const Draws::GpuShadowVolume> volumes;  // ... and the local shadow volumes (clamped)
-		std::uint32_t latchSlot = 0;   // the latch regions it wrote (the external frame slot)
+		org::RunRef latchRun{};   // the run whose latch regions it wrote (a published copy's, or the external run)
 		std::uint32_t poolCopies = 0;  // the depth commit's index pool copies (0: its pre-work skips the dispatch)
 	};
 

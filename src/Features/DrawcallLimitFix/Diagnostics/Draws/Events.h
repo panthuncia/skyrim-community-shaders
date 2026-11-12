@@ -117,7 +117,7 @@ namespace DCLF::Diagnostics
 	{
 		Draws::Resources::FoliageRecord& record;
 		rhi::Device device;
-		std::uint32_t slots;  // the host's frame slots
+		std::uint32_t slots;  // the readback ranges to make (run lease indices it can report for)
 		bool& ready;
 	};
 

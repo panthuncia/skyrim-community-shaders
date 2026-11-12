@@ -112,14 +112,14 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 					return;
 				const auto& c = *a_frame.client;
 				const auto shared = SharedConstants::Index(a_recording, a_bindings.shared);
-				const std::uint32_t slot = a_recording.FrameSlot();
+				const org::RunRef latchRun = a_recording.Run();
 				const RasterProgram::Colour colour{ .view = &a_bindings.target };
 				for (std::uint32_t i = 0; i < a_frame.run->draws.size(); ++i) {
 					const auto& draw = a_frame.run->draws[i];
 					if (!draw.program)
 						continue;
 					const auto& program = *static_cast<const RasterProgram*>(draw.program.get());
-					const ShadowMaskBlock block{ shared, ShaderBindings::LatchOf(*c.latch, slot, i * kDrawStride) };
+					const ShadowMaskBlock block{ shared, ShaderBindings::LatchOf(*c.latch, latchRun, i * kDrawStride) };
 					program.Draw(a_recording, { .colours = std::span<const RasterProgram::Colour>(&colour, 1),
 												  .viewport = { .x = draw.viewport.rect[0], .y = draw.viewport.rect[1], .width = draw.viewport.rect[2], .height = draw.viewport.rect[3], .minDepth = draw.viewport.depthRange[0], .maxDepth = draw.viewport.depthRange[1] },
 												  .constants = ShaderBindings::Data(block),
@@ -210,7 +210,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			auto client = std::make_shared<Client>();
 			client->shape = a_shape;
 			client->id = std::string("cs.shadow-mask.") + NameOf(a_shape.view);
-			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kMaxDraws * kDrawStride, host->FrameSlots());
+			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kMaxDraws * kDrawStride);
 			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kMaxDraws);
 			if (!client->gate) {
 				logger::warn("[DCLF] shadow mask: the {} run gate could not be made; those shadow masks stay the engine's", client->id);
@@ -237,10 +237,10 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				auto* host = RenderGraphRuntime::Get().Host();
 				if (!run || !host)
 					return;
-				const std::uint32_t slot = host->CurrentFrameSlot();
+				const org::RunRef latchRun = host->CurrentRun();
 				for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
 					const auto& draw = run->draws[i];
-					client->latch->WriteValue(slot, i * kDrawStride, draw.constants);
+					client->latch->WriteValue(latchRun, i * kDrawStride, draw.constants);
 					if (draw.program)
 						client->gate->OpenDraw(i, draw.indexCount, 1);
 				}

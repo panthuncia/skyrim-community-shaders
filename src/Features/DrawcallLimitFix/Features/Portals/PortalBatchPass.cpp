@@ -81,7 +81,6 @@ namespace DCLF::Features::Portals
 				prepared.evaluate = evaluate;
 				const auto& b = *prepared.batch;
 				auto& c = prepared.constants;
-				c.latchIndex = frame->latch->SrvIndex();
 				if (b.trace)
 					c.traceFrame = Scene::FrameView::Get().GetFrame();
 				c.queryCount = static_cast<std::uint32_t>(Draws::NamedUnitsOf(a_preparation, b.queries));
@@ -106,7 +105,7 @@ namespace DCLF::Features::Portals
 				c.indices = index(a_bindings.indices);
 				c.tasks = index(a_bindings.tasks);
 				c.dispatch = index(a_bindings.dispatch);
-				c.latchOffset = static_cast<std::uint32_t>(a_prepared.latch->Offset(a_recording.FrameSlot()));
+				SetLatchWords(c, *a_prepared.latch, a_recording.Run());
 				const auto bind = [&](std::size_t stage) {
 					const auto& program = *batch.programs[stage];
 					commands.BindLayout(program.layout->GetHandle());

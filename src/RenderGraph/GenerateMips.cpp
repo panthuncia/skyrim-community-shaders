@@ -113,7 +113,7 @@ namespace
 						(step.destinationHeight + kGroupSize - 1) / kGroupSize, a_bindings.slices);
 					continue;
 				}
-				// The gate's group counts for this step, in the execution's frame slot.
+				// The gate's group counts for this step, in the run's region.
 				const auto offset = static_cast<std::uint32_t>(a_frame.offset + i * sizeof(GraphPasses::DispatchGroups));
 				compute.DispatchIndirect(a_recording, constants, *a_frame.latch, offset);
 			}

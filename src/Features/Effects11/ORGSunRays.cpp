@@ -301,7 +301,7 @@ namespace
 			block.shared = SharedConstants::Index(a_recording, a_bindings.shared);
 			block.scattering = a_recording.Index(a_bindings.scattering);
 			block.raymarchDepth = a_recording.Index(a_bindings.raymarchDepth);
-			block.vl = ShaderBindings::LatchOf(*s.latch, a_recording.FrameSlot(), kVLOffset);
+			block.vl = ShaderBindings::LatchOf(*s.latch, a_recording.Run(), kVLOffset);
 			block.depth = a_recording.Index(a_bindings.depth);
 			const RasterProgram::Colour colour{ .view = &a_bindings.main, .load = rhi::LoadOp::Load };
 			const auto& sizes = s.shape.sizes;
@@ -377,7 +377,7 @@ namespace
 			block.shared = SharedConstants::Index(a_recording, a_bindings.shared);
 			block.sampler = s.linearSampler;
 			block.rays = a_bindings.hasRays ? a_recording.Index(a_bindings.rays) : 0;
-			block.data = ShaderBindings::LatchOf(*s.latch, a_recording.FrameSlot(), SunOffset(pass));
+			block.data = ShaderBindings::LatchOf(*s.latch, a_recording.Run(), SunOffset(pass));
 			block.depth = a_recording.Index(a_bindings.depth);
 			block.cloudShadows = a_bindings.hasCloudShadows ? a_recording.Index(a_bindings.cloudShadows) : 0;
 			// The half-res passes write every texel of the area; the composite adds to kMAIN.
@@ -649,7 +649,7 @@ struct ORGSunRays::Impl
 		// In the epoch: the run's values, and the gate entries of the effects the frame gave the graph.
 		client.commit = [this, shared](const FrameAnchors::Point&) {
 			if (committed) {
-				latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, *committed);
+				latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, *committed);
 				if (committedVolumetric) {
 					const auto h = BlurGroups(shared->shape.sizes, true);
 					const auto v = BlurGroups(shared->shape.sizes, false);
@@ -713,7 +713,7 @@ bool ORGSunRays::Setup(std::function<void()> a_onFailed)
 		return false;
 	}
 	auto state = std::make_unique<Impl>();
-	state->latch = std::make_shared<org::LatchBlock>("cs.e11-rays.latch", static_cast<std::uint32_t>(sizeof(LatchData)), runtime.Host()->FrameSlots());
+	state->latch = std::make_shared<org::LatchBlock>("cs.e11-rays.latch", static_cast<std::uint32_t>(sizeof(LatchData)));
 	state->gate = RenderGraph::RunGate::Create("cs.e11-rays.gate", kGateEntries);
 	// As Deferred::linearSampler: linear, clamped.
 	state->linearSampler = ShaderBindings::CreateSampler({});

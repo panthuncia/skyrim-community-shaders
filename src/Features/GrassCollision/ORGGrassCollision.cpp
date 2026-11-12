@@ -122,8 +122,10 @@ namespace
 			if (!a_frame.latch)
 				return;
 			auto& commands = a_recording.Commands();
-			const auto source = a_frame.latch->Resource()->GetAPIResource().GetHandle();
-			const auto base = a_frame.latch->Offset(a_recording.FrameSlot());
+			// The run's latch region: its arena chunk and its offset there.
+			const auto region = a_frame.latch->At(a_recording.Run());
+			const auto source = region.buffer->GetAPIResource().GetHandle();
+			const auto base = region.offset;
 			commands.CopyBufferRegion(a_recording.Resolve(a_bindings.boxes).GetHandle(), 0, source, base + a_frame.layout.boxesOffset, a_frame.layout.boxesBytes);
 			commands.CopyBufferRegion(a_recording.Resolve(a_bindings.instances).GetHandle(), 0, source, base + a_frame.layout.instancesOffset,
 				a_frame.layout.instancesBytes);
@@ -178,7 +180,7 @@ namespace
 			if (!a_frame.program || !a_frame.latch || !a_frame.gate)
 				return;
 			const CollisionUpdateBlock block{ a_recording.Index(a_bindings.boxes), a_recording.Index(a_bindings.instances),
-				a_recording.Index(a_bindings.collision), ShaderBindings::LatchOf(*a_frame.latch, a_recording.FrameSlot()) };
+				a_recording.Index(a_bindings.collision), ShaderBindings::LatchOf(*a_frame.latch, a_recording.Run()) };
 			a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), 0);
 		}
 
@@ -246,7 +248,7 @@ bool ORGGrassCollision::Setup(const Limits& a_limits, std::function<void()> a_on
 	resources->height = a_limits.texture.Height;
 	resources->program = ComputeProgram::Load(host->Device(), { .source = kShader, .constantWords = ShaderBindings::Words<CollisionUpdateBlock>() });
 	try {
-		resources->latch = std::make_shared<org::LatchBlock>("GrassCollision::Latch", layout.slotBytes, host->FrameSlots());
+		resources->latch = std::make_shared<org::LatchBlock>("GrassCollision::Latch", layout.slotBytes);
 	} catch (const std::exception& e) {
 		logger::error("[ORG] Grass Collision: the latch block could not be made ({})", e.what());
 	}
@@ -300,13 +302,13 @@ bool ORGGrassCollision::Setup(const Limits& a_limits, std::function<void()> a_on
 			return;
 		const auto& latch = *current->resources->latch;
 		const auto& slotLayout = current->resources->layout;
-		const std::uint32_t slot = graphHost->CurrentFrameSlot();
+		const org::RunRef run = graphHost->CurrentRun();
 		const std::span<const std::byte> staged(current->staged);
-		latch.Write(slot, 0, staged.subspan(0, current->perFrameBytes));
+		latch.Write(run, 0, staged.subspan(0, current->perFrameBytes));
 		if (current->boxesBytes)
-			latch.Write(slot, slotLayout.boxesOffset, staged.subspan(slotLayout.boxesOffset, current->boxesBytes));
+			latch.Write(run, slotLayout.boxesOffset, staged.subspan(slotLayout.boxesOffset, current->boxesBytes));
 		if (current->instancesBytes)
-			latch.Write(slot, slotLayout.instancesOffset, staged.subspan(slotLayout.instancesOffset, current->instancesBytes));
+			latch.Write(run, slotLayout.instancesOffset, staged.subspan(slotLayout.instancesOffset, current->instancesBytes));
 		const auto& resources = *current->resources;
 		resources.gate->OpenDispatch(0, resources.width / kGroupSize, resources.height / kGroupSize, 1);
 	};
@@ -331,7 +333,7 @@ bool ORGGrassCollision::Setup(const Limits& a_limits, std::function<void()> a_on
 		impl.reset();
 		return false;
 	}
-	logger::info("[ORG] Grass Collision: the collision update runs on the render graph (EarlyPrepass anchor, {}x{}, {} latch bytes a slot)",
+	logger::info("[ORG] Grass Collision: the collision update runs on the render graph (EarlyPrepass anchor, {}x{}, {} latch bytes a run)",
 		resources->width, resources->height, layout.slotBytes);
 	return true;
 }

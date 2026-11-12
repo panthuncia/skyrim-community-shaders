@@ -275,47 +275,47 @@ namespace DCLF::Draws
 	struct PassStats;
 
 	/**
-	 * @brief The state lists of one recording site's explicit DGC preprocesses (DrawPipelines.h), one per frame slot:
-	 * graphics lists that are never submitted. vkCmdPreprocessGeneratedCommandsEXT is recorded outside any pass but
-	 * generates for the state of another list, render pass included, which the execution must then match exactly; so
-	 * a site begins each of its passes on its slot's list and sets it up as the execution will (heaps, layout, topology,
-	 * push data) before preprocessing that pass's calls against it. A site of its own for every pass that can record at
-	 * the same time as another.
+	 * @brief The state lists of one recording site's explicit DGC preprocesses (DrawPipelines.h), one per run lease index: graphics
+	 * lists that are never submitted. vkCmdPreprocessGeneratedCommandsEXT is recorded outside any pass but generates for the state of
+	 * another list, render pass included, which the execution must then match exactly; so a site begins each of its passes on its run's
+	 * list and sets it up as the execution will (heaps, layout, topology, push data) before preprocessing that pass's calls against it.
+	 * A site of its own for every pass that can record at the same time as another. A run's list is made the first time its lease index
+	 * records here: a revision-driven epoch's published copies keep their own indices, so a site holds a list per copy.
 	 */
 	class PreprocessStates
 	{
 	public:
-		static std::shared_ptr<PreprocessStates> Create(rhi::Device a_device, std::uint32_t a_frameSlots, const char* a_site)
+		static std::shared_ptr<PreprocessStates> Create(rhi::Device a_device, const char* a_site)
 		{
 			auto states = std::make_shared<PreprocessStates>();
-			states->slots.resize(std::max<std::uint32_t>(a_frameSlots, 1u));
+			states->device = a_device;
+			states->site = a_site ? a_site : "a site";
 			// One allocator for the site's lists: a command pool costs the driver about 2 MB, a list in a shared pool next to
 			// nothing. A site records on one thread at a time, so its pool is never used from two threads at once.
 			if (rhi::Failed(a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, states->allocator)) || !states->allocator) {
-				logger::error("[DCLF] DGC preprocess: no state allocator for {}; its draws cannot execute", a_site);
+				logger::error("[DCLF] DGC preprocess: no state allocator for {}; its draws cannot execute", states->site);
 				return nullptr;
 			}
-			// D3D12 cannot hold several open lists on one allocator: each slot keeps its own there.
-			const bool shared = states->allocator->SupportsSharedLists();
-			for (auto& slot : states->slots) {
-				if (!shared && (rhi::Failed(a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator)) || !slot.allocator)) {
-					logger::error("[DCLF] DGC preprocess: no state allocator for {}; its draws cannot execute", a_site);
-					return nullptr;
-				}
-				auto& allocator = shared ? states->allocator : slot.allocator;
-				if (rhi::Failed(a_device.CreateCommandList(rhi::QueueKind::Graphics, allocator.Get(), slot.list)) || !slot.list) {
-					logger::error("[DCLF] DGC preprocess: no state list for {}; its draws cannot execute", a_site);
-					return nullptr;
-				}
-			}
+			// D3D12 cannot hold several open lists on one allocator: each list keeps its own there.
+			states->shared = states->allocator->SupportsSharedLists();
 			return states;
 		}
 
-		// The frame slot's list, reset and recording.
-		rhi::CommandList& Begin(std::uint32_t a_frameSlot)
+		// The run's list, made on its lease index's first use, reset and recording. Throws when it cannot be made (the recording
+		// fails, and with it the epoch).
+		rhi::CommandList& Begin(const org::RunRef& a_run)
 		{
 			DCLF_ZONE("CS.DCLF.Record.RecyclePreprocessState");
-			auto& slot = slots[a_frameSlot % slots.size()];
+			if (slots.size() <= a_run.lease)
+				slots.resize(static_cast<std::size_t>(a_run.lease) + 1);
+			auto& slot = slots[a_run.lease];
+			if (!slot.list) {
+				if (!shared && (rhi::Failed(device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator)) || !slot.allocator))
+					throw std::runtime_error(fmt::format("DGC preprocess: no state allocator for {}", site));
+				auto& owner = shared ? allocator : slot.allocator;
+				if (rhi::Failed(device.CreateCommandList(rhi::QueueKind::Graphics, owner.Get(), slot.list)) || !slot.list)
+					throw std::runtime_error(fmt::format("DGC preprocess: no state list for {}", site));
+			}
 			slot.list->Recycle(slot.allocator ? slot.allocator.Get() : allocator.Get());
 			return slot.list.Get();
 		}
@@ -326,9 +326,12 @@ namespace DCLF::Draws
 			rhi::CommandAllocatorPtr allocator;  // D3D12 only: its own (SupportsSharedLists)
 			rhi::CommandListPtr list;
 		};
+		rhi::Device device;
+		std::string site;
+		bool shared = true;
 		// Shared by the lists where the backend allows it. Declared before them, so it outlives them.
 		rhi::CommandAllocatorPtr allocator;
-		std::vector<Slot> slots;
+		std::vector<Slot> slots;  // by lease index
 	};
 
 	struct IndexPool;

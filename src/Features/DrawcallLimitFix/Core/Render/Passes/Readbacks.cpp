@@ -37,11 +37,11 @@ namespace DCLF::Draws
 
 		static void Record(const EventReadbackBindings& a_bindings, const EventReadbackPrepared& a_prepared, org::PassRecordContext& a_recording)
 		{
-			const std::uint32_t frameSlot = a_recording.FrameSlot();
-			if (!a_prepared.set || frameSlot >= a_prepared.set->buffers.size())
+			const std::uint32_t range = a_prepared.ring ? a_prepared.ring->ranges.Of(a_recording.Run()) : RunRanges::kNone;
+			if (!a_prepared.set || range >= a_prepared.set->buffers.size())
 				return;
 			// The header and the list's full capacity.
-			a_recording.Commands().CopyBufferRegion(a_prepared.set->buffers[frameSlot]->GetAPIResource().GetHandle(), 0, a_recording.Resolve(a_bindings.events).GetHandle(), 0,
+			a_recording.Commands().CopyBufferRegion(a_prepared.set->buffers[range]->GetAPIResource().GetHandle(), 0, a_recording.Resolve(a_bindings.events).GetHandle(), 0,
 				a_prepared.ring->bytesFor(a_prepared.set->events));
 		}
 
@@ -78,8 +78,8 @@ namespace DCLF::Draws
 	};
 
 	/**
-	 * @brief Copies each drawn source's count words and its culling latch's stamp into the frame slot's host buffer (CounterReadback):
-	 * a fixed copy, so the recording depends on the shape and the slot alone. The epochs harvest it (CullCounters.cpp, the colour
+	 * @brief Copies each drawn source's count words and its culling latch's stamp into the host buffer of the run's range
+	 * (CounterReadback): a fixed copy, so the recording depends on the shape and the run alone. The epochs harvest it (CullCounters.cpp, the colour
 	 * commit; ShadowEngine::ReadShadowCullCounters).
 	 */
 	class CounterReadbackPass final : public org::TypedRenderGraphPass<CounterReadbackPass, CounterReadbackPrepared, CounterReadbackBindings>
@@ -88,8 +88,7 @@ namespace DCLF::Draws
 		CounterReadbackPass(CullCounterView a_view, std::vector<std::shared_ptr<org::Buffer>> a_counts, std::function<CounterSource(const org::PassPrepareContext&)> a_source) :
 			view(a_view), counts(std::move(a_counts)), source(std::move(a_source))
 		{
-			auto* host = RenderGraphRuntime::Get().Host();
-			readback = std::make_shared<CounterReadback>(host ? host->FrameSlots() : 1u, static_cast<std::uint32_t>(counts.size()));
+			readback = std::make_shared<CounterReadback>(static_cast<std::uint32_t>(counts.size()));
 		}
 
 		CounterReadbackBindings Declare(org::PassBuilder& a_builder)
@@ -116,13 +115,16 @@ namespace DCLF::Draws
 		{
 			const auto& readback = a_prepared.readback;
 			const auto& latch = a_prepared.source.latch;
-			const std::uint32_t frameSlot = a_recording.FrameSlot();
-			if (!readback || !latch || frameSlot >= readback->buffers.size())
+			const auto run = a_recording.Run();
+			const std::uint32_t range = readback ? readback->ranges.Of(run) : RunRanges::kNone;
+			if (!readback || !latch || range >= readback->buffers.size())
 				return;
 			auto& commands = a_recording.Commands();
-			const auto host = readback->buffers[frameSlot]->GetAPIResource().GetHandle();
-			const auto latchBuffer = latch->Resource()->GetAPIResource().GetHandle();
-			const std::uint64_t region = latch->Offset(frameSlot);
+			const auto host = readback->buffers[range]->GetAPIResource().GetHandle();
+			// The run's region of the culling latch: its arena chunk and its offset there.
+			const auto at = latch->At(run);
+			const auto latchBuffer = at.buffer->GetAPIResource().GetHandle();
+			const std::uint64_t region = at.offset;
 			constexpr std::uint64_t kWordBytes = sizeof(std::uint32_t);
 			for (const auto& copy : a_prepared.source.copies) {
 				const std::uint64_t at = std::uint64_t(copy.source) * CounterReadback::kSourceWords * kWordBytes;

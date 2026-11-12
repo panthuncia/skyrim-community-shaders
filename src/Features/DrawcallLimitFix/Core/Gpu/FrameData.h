@@ -8,6 +8,8 @@
 #include <string>
 #include <string_view>
 
+#include <Render/RunRef.h>
+
 namespace org
 {
 	class LatchBlock;
@@ -48,11 +50,11 @@ namespace DCLF
 		Taken Take();
 	}
 
-	/** @brief org::LatchBlock::Write, counted under "latch: a_what" (FrameData). */
-	void LatchWrite(const org::LatchBlock& a_block, std::string_view a_what, std::uint32_t a_slot, std::uint32_t a_offset, std::span<const std::byte> a_bytes);
+	/** @brief org::LatchBlock::Write at a_run's region, counted under "latch: a_what" (FrameData). */
+	void LatchWrite(const org::LatchBlock& a_block, std::string_view a_what, const org::RunRef& a_run, std::uint32_t a_offset, std::span<const std::byte> a_bytes);
 	template <class T>
-	void LatchWriteValue(const org::LatchBlock& a_block, std::string_view a_what, std::uint32_t a_slot, std::uint32_t a_offset, const T& a_value)
+	void LatchWriteValue(const org::LatchBlock& a_block, std::string_view a_what, const org::RunRef& a_run, std::uint32_t a_offset, const T& a_value)
 	{
-		LatchWrite(a_block, a_what, a_slot, a_offset, std::as_bytes(std::span<const T, 1>(&a_value, 1)));
+		LatchWrite(a_block, a_what, a_run, a_offset, std::as_bytes(std::span<const T, 1>(&a_value, 1)));
 	}
 }

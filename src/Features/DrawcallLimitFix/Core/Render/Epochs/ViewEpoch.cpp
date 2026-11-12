@@ -83,16 +83,16 @@ namespace DCLF
 			 * table entry, and the index its sequence stores) from its set index through this map, the shape's set version's. False (no map:
 			 * every forward draw dropped, counted) without a forward range, or past what the latch holds (never: the revision reserved it).
 			 */
-			bool WriteViewClassMap(const ViewFrame& a_shape, std::string_view a_what, std::uint32_t a_latchSlot)
+			bool WriteViewClassMap(const ViewFrame& a_shape, std::string_view a_what, const org::RunRef& a_latchRun)
 			{
 				const auto& classOf = a_shape.indirect.classOf;
 				const auto& layout = a_shape.latchLayout;
 				if (a_shape.forwardRanges.empty() || classOf.size() > layout.classMapWords)
 					return false;
 				const std::uint32_t header[kClassHeaderWords] = { static_cast<std::uint32_t>(classOf.size()), 0, 0, 0 };
-				LatchWrite(*a_shape.latch, a_what, a_latchSlot, layout.ClassMapOffset(), std::as_bytes(std::span(header)));
+				LatchWrite(*a_shape.latch, a_what, a_latchRun, layout.ClassMapOffset(), std::as_bytes(std::span(header)));
 				if (!classOf.empty())
-					LatchWrite(*a_shape.latch, a_what, a_latchSlot, layout.ClassMapOffset() + kClassHeaderWords * 4, std::as_bytes(std::span(classOf)));
+					LatchWrite(*a_shape.latch, a_what, a_latchRun, layout.ClassMapOffset() + kClassHeaderWords * 4, std::as_bytes(std::span(classOf)));
 				return true;
 			}
 		}
@@ -345,16 +345,16 @@ namespace DCLF
 	{
 		const auto& traits = TraitsOf(a_shape.kind);
 		const auto& labels = traits.labels;
-		const std::uint32_t latchSlot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
+		const org::RunRef latchRun = RenderGraphRuntime::Get().Host()->CurrentRun();
 		const auto& latchBlock = *a_shape.latch;
 		const auto& layout = a_shape.latchLayout;
 		const auto& map = *a_shape.map;
-		const auto region = static_cast<std::uint32_t>(latchBlock.Offset(latchSlot));
+		const auto region = static_cast<std::uint32_t>(latchBlock.Offset(latchRun));
 		// Every pipeline slot the installed publication's members can draw with, as many as the latch holds: a slot the tables have
 		// gained since the map was made has no bucket (none of its draws is the frame's).
 		const std::uint32_t slots = std::min(std::max(static_cast<std::uint32_t>(map.size()), InstalledPipelineSlots()), layout.slots);
-		WriteBucketMap(latchBlock, labels.map, latchSlot, layout.MapOffset(), map, slots);
-		const bool classMap = WriteViewClassMap(a_shape, labels.map, latchSlot);
+		WriteBucketMap(latchBlock, labels.map, latchRun, layout.MapOffset(), map, slots);
+		const bool classMap = WriteViewClassMap(a_shape, labels.map, latchRun);
 		const std::uint32_t frameNumber = Scene::FrameView::Get().GetFrame();
 		auto& state = View(a_shape.kind);
 		const auto* view = state.resources.get();
@@ -373,7 +373,7 @@ namespace DCLF
 				table.push_back(range.capacity);
 			}
 			if (!table.empty())
-				LatchWrite(latchBlock, labels.tables, latchSlot, layout.TableOffset(f), std::as_bytes(std::span(table)));
+				LatchWrite(latchBlock, labels.tables, latchRun, layout.TableOffset(f), std::as_bytes(std::span(table)));
 			const std::uint32_t inputs = face.drawn ? a_inputs : 0u;
 			BuildDrawsLatch latch{};
 			latch.dispatch[0] = (inputs + 63) / 64;
@@ -392,9 +392,9 @@ namespace DCLF
 			latch.bucketMapOffset = region + layout.MapOffset();
 			latch.bucketTableOffset = region + layout.TableOffset(f);
 			latch.classMapOffset = classMap ? region + layout.ClassMapOffset() : 0u;
-			LatchWriteValue(latchBlock, labels.latches, latchSlot, f * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), latch);
+			LatchWriteValue(latchBlock, labels.latches, latchRun, f * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), latch);
 			if (!face.block.empty())
-				LatchWrite(latchBlock, labels.blocks, latchSlot, layout.FaceOffset(f), face.block);
+				LatchWrite(latchBlock, labels.blocks, latchRun, layout.FaceOffset(f), face.block);
 			for (std::size_t d = 0; a_rows && view && d < Extensions::kDrawFamilies; ++d) {
 				if ((*a_rows)[d].empty() || !a_shape.faces[d].pipeline.valid())
 					continue;
@@ -406,8 +406,8 @@ namespace DCLF
 				written.faceHeader.resize(entry.contribution.faces.headerBytes);
 				Api::DrawFamilyFaceWrite write{ (*a_rows)[d], Adopted().Of(view->faceLists[d][f]).deviceAddress, face.drawn, written.faceRow, written.faceHeader };
 				entry.contribution.faces.face(write);
-				LatchWrite(latchBlock, labels.trees, latchSlot, layout.FaceOffset(f) + entry.faceLayout.rowInFace, write.row);
-				LatchWrite(latchBlock, labels.trees, latchSlot, layout.FaceOffset(f) + entry.faceLayout.headerInFace, write.header);
+				LatchWrite(latchBlock, labels.trees, latchRun, layout.FaceOffset(f) + entry.faceLayout.rowInFace, write.row);
+				LatchWrite(latchBlock, labels.trees, latchRun, layout.FaceOffset(f) + entry.faceLayout.headerInFace, write.header);
 			}
 			drawn += face.drawn ? 1u : 0u;
 		}
@@ -418,7 +418,7 @@ namespace DCLF
 			// read no other frame slot (VS and PS b12 are each face's block).
 			const auto& adopted = Adopted();
 			CommitUploads uploads(commitStagedPool, adopted);
-			LatchedUploads frame(a_shape.latched[ViewFrame::kFrameList], uploads, latchSlot);
+			LatchedUploads frame(a_shape.latched[ViewFrame::kFrameList], uploads, latchRun);
 			// Its copies of the main frame buffers (Deferred's sun cascades at t98, written at EarlyPrepasses and again before the cube's faces),
 			// each from the buffer bound at its register now and that buffer's CPU mirror: this frame's contents, named at the register.
 			// Unfillable (nothing bound there, or the mirror holds less): the copy reads zero and the register a null buffer (structured).

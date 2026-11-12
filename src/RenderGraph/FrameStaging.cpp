@@ -59,7 +59,7 @@ namespace RenderGraph
 			if (size > 0xFFFFFFFFull)
 				return nullptr;
 			try {
-				block = org::LatchBlock::Create(desc.name, static_cast<std::uint32_t>(size), 1);
+				block = org::LatchBlock::CreateDedicated(desc.name, static_cast<std::uint32_t>(size));
 			} catch (const std::exception& e) {
 				logger::error("[ORG] {}: a staging buffer of {} bytes could not be made: {}", desc.name, size, e.what());
 				return nullptr;

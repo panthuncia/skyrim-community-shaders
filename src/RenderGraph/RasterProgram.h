@@ -147,7 +147,7 @@ struct RasterProgram
 		// The stencil test's and REPLACE's reference (OMSetDepthStencilState's), for a program whose depth state enables stencil.
 		std::uint32_t stencilReference = 0;
 		// When set, the draw's four uints (vertex count, instance count, first vertex, first instance) are read from this latch
-		// block, indirectOffset bytes into the region of the recording's frame slot, instead of vertexCount and instanceCount. A
+		// block, indirectOffset bytes into the region of the recording's run, instead of vertexCount and instanceCount. A
 		// vertex count of zero there draws nothing, so a kept recording can do no work on a frame by its data alone.
 		const org::LatchBlock* indirect = nullptr;
 		std::uint32_t indirectOffset = 0;

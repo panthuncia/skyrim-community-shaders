@@ -77,7 +77,7 @@ namespace DCLF::Diagnostics
 
 	void TraceColourCounts(const Draws::CounterReadback& a_readback, std::uint32_t a_slot)
 	{
-		// The slot's last colour execution's words (the host has waited for it), its first source's: whatever execution they are of,
+		// The range's last colour execution's words (its lease retired), its first source's: whatever execution they are of,
 		// named by the stamp they carry.
 		if (a_slot >= a_readback.buffers.size())
 			return;
@@ -87,7 +87,7 @@ namespace DCLF::Diagnostics
 		if (!mapped)
 			return;
 		const auto* w = static_cast<const std::uint32_t*>(mapped);
-		logger::info("[DCLF] frame trace: colour exec stamp {} (slot {}): drawn {} rejected {} tested {} occluded {} phase2 drawn {} rescued {}; terrain groups {} {}; fade tested {} hidden {}; class unplanned {}",
+		logger::info("[DCLF] frame trace: colour exec stamp {} (range {}): drawn {} rejected {} tested {} occluded {} phase2 drawn {} rescued {}; terrain groups {} {}; fade tested {} hidden {}; class unplanned {}",
 			w[Draws::kCountWords], a_slot, w[0], w[1], w[2], w[6], w[17], w[18], w[Draws::kCountTerrainGroupWord], w[Draws::kCountTerrainGroupWord + 1],
 			w[Draws::kCountFadeTestedWord], w[Draws::kCountFadeHiddenWord], w[Draws::kCountClassUnplannedWord]);
 		resource.Unmap(0, 0);

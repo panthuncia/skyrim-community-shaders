@@ -2,11 +2,14 @@
 
 #if defined(CS_HAS_RENDER_GRAPH)
 
+#	include <Render/RunRef.h>
+
 #	include <atomic>
 #	include <cstdint>
 #	include <memory>
 #	include <mutex>
 #	include <string>
+#	include <utility>
 #	include <vector>
 
 namespace org
@@ -20,12 +23,12 @@ namespace RenderGraph
 	 * @brief Host-visible staging buffers for a client's per-run CPU data (vertices, indices, constants, decoded pixels) that its pass
 	 * copies from or reads, reused instead of made and freed every run.
 	 *
-	 * Acquire hands out a one-slot LatchBlock of at least the size asked for. It comes back to the pool when its last holder lets it
-	 * go, and the holder that lets it go last is the recording that used it (PassRecordContext::Retain, or a frame object the
-	 * recording retains): so it returns once the GPU is done with it, never earlier. The pool keeps up to kGameFramesInFlight times
-	 * runsPerFrame spare blocks (plus one being filled), which is how many are in flight when the anchor runs that often: a steady
-	 * frame makes no block. A pool that had to make more than it keeps logs it once (raise runsPerFrame, or use the anchor's
-	 * FrameAnchors::RunsPerFrame).
+	 * Acquire hands out a dedicated LatchBlock (a buffer of its own, LatchBlock::CreateDedicated) of at least the size asked for. It
+	 * comes back to the pool when its last holder lets it go, and the holder that lets it go last is the recording that used it
+	 * (PassRecordContext::Retain, or a frame object the recording retains): so it returns once the GPU is done with it, never
+	 * earlier. The pool keeps up to kGameFramesInFlight times runsPerFrame spare blocks (plus one being filled), which is how many
+	 * are in flight when the anchor runs that often: a steady frame makes no block. A pool that had to make more than it keeps logs
+	 * it once (raise runsPerFrame; CS_ORG_EPOCH_STATS=1 logs each anchor's peak runs a frame).
 	 *
 	 * Sizes: a new block is the next power of two at or above max(bytes asked, minimumBytes); Acquire takes the smallest spare
 	 * block that fits. With maxBlocks set, Acquire returns null once that many exist and none is spare: the caller keeps the
@@ -35,7 +38,7 @@ namespace RenderGraph
 	 * out: they are then released when their holders let them go.
 	 *
 	 * Usage: `auto staging = RenderGraph::FrameStaging::Create({ .name = "cs.scaleform.staging", .minimumBytes = 256u << 10,
-	 * .runsPerFrame = FrameAnchors::RunsPerFrame(FrameAnchors::Anchor::Interface) });` then, in the commit,
+	 * .runsPerFrame = 6 });` then, in the commit,
 	 * `frame->staging = staging->Acquire(bytes);` and in Record `a_recording.Retain(frame);`.
 	 */
 	class FrameStaging : public std::enable_shared_from_this<FrameStaging>
@@ -75,33 +78,46 @@ namespace RenderGraph
 	};
 
 	/**
-	 * @brief One value per host frame slot, handed from a client's commit to the pass that records that slot: the commit Stores at
-	 * the host's CurrentFrameSlot, the pass Takes at its PassRecordContext::FrameSlot. A slot left unread is replaced by the next
-	 * Store there; Clear empties every slot (a pass of an older build that still holds this object then records nothing).
-	 * Thread-safe (each slot is an atomic shared_ptr).
+	 * @brief One value per run, handed from a client's commit to the pass that records that run: the commit Stores at the host's
+	 * CurrentRun, the pass Takes at its PassRecordContext::Run. A pass without a revision is never current, so its ticket is prepared
+	 * again after the commit, for the same run: that preparation's Take finds the value. A value is found only by its own run (lease
+	 * and generation): a later run of the same lease index takes nothing. A run left unread is replaced by the next Store at its lease
+	 * index; Clear empties every entry (a pass of an older build that still holds this object then records nothing).
+	 * Thread-safe. The entries grow with the host's lease indices (the most runs in flight).
 	 */
 	template <class T>
 	class RunSlots
 	{
 	public:
-		explicit RunSlots(std::uint32_t a_count) :
-			values(std::make_unique<std::atomic<std::shared_ptr<const T>>[]>(a_count ? a_count : 1)), count(a_count ? a_count : 1) {}
-
-		void Store(std::uint32_t a_slot, std::shared_ptr<const T> a_value) const { values[a_slot % count].store(std::move(a_value), std::memory_order_release); }
-		std::shared_ptr<const T> Take(std::uint32_t a_slot) const { return values[a_slot % count].exchange(nullptr, std::memory_order_acq_rel); }
+		void Store(const org::RunRef& a_run, std::shared_ptr<const T> a_value) const
+		{
+			std::scoped_lock lock(mutex);
+			if (entries.size() <= a_run.lease)
+				entries.resize(static_cast<std::size_t>(a_run.lease) + 1);
+			entries[a_run.lease] = { a_run, std::move(a_value) };
+		}
+		std::shared_ptr<const T> Take(const org::RunRef& a_run) const
+		{
+			std::scoped_lock lock(mutex);
+			if (a_run.lease >= entries.size() || !(entries[a_run.lease].run == a_run))
+				return nullptr;
+			return std::exchange(entries[a_run.lease].value, nullptr);
+		}
 
 		void Clear() const
 		{
-			for (std::uint32_t i = 0; i < count; ++i)
-				values[i].store(nullptr, std::memory_order_release);
+			std::scoped_lock lock(mutex);
+			entries.clear();
 		}
 
-		/** @brief The slots it holds: the host's FrameSlots when it was made. */
-		std::uint32_t Count() const { return count; }
-
 	private:
-		std::unique_ptr<std::atomic<std::shared_ptr<const T>>[]> values;
-		std::uint32_t count;
+		struct Entry
+		{
+			org::RunRef run{};
+			std::shared_ptr<const T> value;
+		};
+		mutable std::mutex mutex;
+		mutable std::vector<Entry> entries;  // by lease index
 	};
 }
 

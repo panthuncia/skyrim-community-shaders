@@ -43,8 +43,8 @@ namespace
 		uint32_t lightIndexCounterIndex;
 		uint32_t lightIndexListIndex;
 		uint32_t lightGridIndex;
-		uint32_t latchIndex;
-		uint32_t latchOffset;   // set at record time from the frame slot
+		uint32_t latchIndex;    // set at record time from the run's latch region
+		uint32_t latchOffset;   // the same
 		uint32_t matrixOffset;  // offsetof(LLFLatch, cameraProjInverse) or offsetof(LLFLatch, cameraView)
 	};
 	static_assert(sizeof(OrgClusterConstants) == 48);
@@ -113,13 +113,12 @@ namespace
 		std::shared_ptr<const ComputeProgram> program;
 		OrgClusterConstants constants{};
 		uint32_t groups[3]{};
-		uint32_t latchStride = 0;  // LatchBlock::Offset(slot) = slot * stride
-		uint32_t latchSlots = 0;
+		std::shared_ptr<const org::LatchBlock> latch;  // the constants' block: its run's region is found at record time
 	};
 
 	bool Dispatches(const DispatchFrame& a_frame)
 	{
-		return a_frame.program && a_frame.groups[0] && a_frame.groups[1] && a_frame.groups[2];
+		return a_frame.program && a_frame.latch && a_frame.groups[0] && a_frame.groups[1] && a_frame.groups[2];
 	}
 
 	// a_constants: the frame's, with the pass's view indices.
@@ -129,7 +128,10 @@ namespace
 		commands.BindLayout(a_frame.program->layout->GetHandle());
 		commands.BindPipeline(a_frame.program->Pipeline());
 		auto constants = a_constants;
-		constants.latchOffset = (a_recording.FrameSlot() % a_frame.latchSlots) * a_frame.latchStride;
+		// The run's latch region: its arena chunk's view and its offset there.
+		const auto region = a_frame.latch->At(a_recording.Run());
+		constants.latchIndex = region.srvIndex;
+		constants.latchOffset = static_cast<uint32_t>(region.offset);
 		commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kConstantWords, reinterpret_cast<const uint32_t*>(&constants));
 		commands.Dispatch(a_frame.groups[0], a_frame.groups[1], a_frame.groups[2]);
 	}
@@ -140,13 +142,12 @@ namespace
 		a_out.push_back(reinterpret_cast<uintptr_t>(a_program));
 	}
 
-	OrgClusterConstants BaseConstants(const Resources& a_resources, const Shape& a_shape, uint32_t a_matrixOffset)
+	OrgClusterConstants BaseConstants(const Shape& a_shape, uint32_t a_matrixOffset)
 	{
 		OrgClusterConstants constants{};
 		constants.clusterSize[0] = a_shape.clusterSize[0];
 		constants.clusterSize[1] = a_shape.clusterSize[1];
 		constants.clusterSize[2] = a_shape.clusterSize[2];
-		constants.latchIndex = a_resources.latch->SrvIndex();
 		constants.matrixOffset = a_matrixOffset;
 		return constants;
 	}
@@ -193,8 +194,9 @@ namespace
 		{
 			if (!a_frame.latch || !a_frame.bytes)
 				return;
+			const auto region = a_frame.latch->At(a_recording.Run());
 			a_recording.Commands().CopyBufferRegion(a_recording.Resolve(a_bindings.lights).GetHandle(), 0,
-				a_frame.latch->Resource()->GetAPIResource().GetHandle(), a_frame.latch->Offset(a_recording.FrameSlot()) + kLatchLightsOffset, a_frame.bytes);
+				region.buffer->GetAPIResource().GetHandle(), region.offset + kLatchLightsOffset, a_frame.bytes);
 		}
 
 	private:
@@ -232,13 +234,12 @@ namespace
 			if (!shape)
 				return frame;
 			frame.program = resources->build;
-			frame.constants = BaseConstants(*resources, *shape, offsetof(LLFLatch, cameraProjInverse));
+			frame.constants = BaseConstants(*shape, offsetof(LLFLatch, cameraProjInverse));
 			// ClusterBuildingCS runs 64 clusters a group, along one line.
 			frame.groups[0] = (shape->clusterSize[0] * shape->clusterSize[1] * shape->clusterSize[2] + 63) / 64;
 			frame.groups[1] = 1;
 			frame.groups[2] = 1;
-			frame.latchStride = resources->latch->Stride();
-			frame.latchSlots = resources->latch->Slots();
+			frame.latch = resources->latch;
 			return frame;
 		}
 
@@ -292,9 +293,8 @@ namespace
 			if (!shape)
 				return frame;
 			frame.program = resources->cull;
-			frame.constants = BaseConstants(*resources, *shape, offsetof(LLFLatch, cameraView));
-			frame.latchStride = resources->latch->Stride();
-			frame.latchSlots = resources->latch->Slots();
+			frame.constants = BaseConstants(*shape, offsetof(LLFLatch, cameraView));
+			frame.latch = resources->latch;
 			frame.groups[0] = (shape->clusterSize[0] + kCullGroupX - 1) / kCullGroupX;
 			frame.groups[1] = (shape->clusterSize[1] + kCullGroupY - 1) / kCullGroupY;
 			frame.groups[2] = (shape->clusterSize[2] + kCullGroupZ - 1) / kCullGroupZ;
@@ -438,7 +438,7 @@ bool ORGLightCulling::Setup(uint32_t a_clusterCount, uint32_t a_maxLights, uint3
 		const uint32_t indexCount = a_clusterCount * a_maxLightsPerCluster;
 		resources->clusterCount = a_clusterCount;
 		resources->lights = CreateStructured(a_maxLights, a_lightStride, false, true, kLightsId);
-		resources->latch = std::make_shared<org::LatchBlock>("cs.llf.latch", kLatchLightsOffset + a_maxLights * a_lightStride, host->FrameSlots());
+		resources->latch = std::make_shared<org::LatchBlock>("cs.llf.latch", kLatchLightsOffset + a_maxLights * a_lightStride);
 		resources->clusters = CreateStructured(a_clusterCount, sizeof(float) * 8, true, false, kClustersName);
 		resources->lightIndexCounter = CreateStructured(1, sizeof(uint32_t), true, false, kLightIndexCounterName);
 		resources->lightIndexList = CreateStructured(indexCount, sizeof(uint32_t), true, true, kLightIndexListId);
@@ -497,17 +497,17 @@ bool ORGLightCulling::Execute(const FrameInputs& a_inputs)
 			resources->shape.store(std::make_shared<const Shape>(shape), std::memory_order_release);
 	}
 	const bool ok = RenderGraphRuntime::Get().ExecuteEpoch(RenderGraphRuntime::Segment::LightCulling, [&](org::RenderGraph&) {
-		// The slot this execution records against is free from here (the host waited for it).
-		const uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
+		// This run's latch region, which nothing else reads.
+		const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
 		LLFLatch latch{};
 		std::memcpy(latch.cameraProjInverse, a_inputs.cameraProjInverse.data(), sizeof(latch.cameraProjInverse));
 		std::memcpy(latch.cameraView, a_inputs.cameraView.data(), sizeof(latch.cameraView));
 		latch.lightsNear = a_inputs.lightsNear;
 		latch.lightsFar = a_inputs.lightsFar;
 		latch.lightCount = lightCount;
-		resources->latch->WriteValue(slot, 0, latch);
+		resources->latch->WriteValue(run, 0, latch);
 		if (bytes)
-			resources->latch->Write(slot, kLatchLightsOffset, { reinterpret_cast<const std::byte*>(a_inputs.lights), bytes });
+			resources->latch->Write(run, kLatchLightsOffset, { reinterpret_cast<const std::byte*>(a_inputs.lights), bytes });
 	});
 	if (!ok) {
 		// The graph faulted: LLF returns to its D3D11 dispatches, and the buffers' readers to D3D11's.

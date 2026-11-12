@@ -176,6 +176,9 @@ Keys used so far:
   DXVK's stream, which DXVK submits at Present. Once ORG owns the frame (the Phase 6 cutover), these clears and the other
   per-call engine work are passes inside one frame graph, and the slot-per-run ring no longer applies.
 - **Found by:** P5.1, the first skeleton-org1 run (2026-11-10).
+- **Superseded (`org-port/frame-contexts`, 2026-11-12):** run leases replaced the rings, `Desc::epochRuns`, `EpochRingFullError` and
+  the anchor table's `runsPerFrame`. Each run opens a lease of its own and waits for nothing; the lease retires once its GPU work is
+  done (ORG's persistent-epochs.md, "Run leases"). An anchor may run any number of times a frame.
 
 ### More runs of one anchor than the frame slot budget holds
 
@@ -199,10 +202,11 @@ Keys used so far:
   its own latch region, its own kept recording (a list cannot be pending twice) and its own slot wait; sub-allocating those per
   run inside a slot is the slot ring again, one level down, and every latch user would have to learn a run index. ImageSpace
   now has 13 runs a frame (288 of 512 slots with every switch on).
-- **Still open:** per-slot tables are sized from the host's whole slot count (`GraphHost::FrameSlots()`), while each epoch only
-  uses its own ring. A latch of one epoch could be sized to its ring's capacity (`LatchBlock::Offset` takes the slot modulo the
-  block's slots, which is distinct within any ring), if the host exposed each epoch's ring range. That would make a run a frame
-  cost memory only in its own clients' tables.
+- **Closed (`org-port/frame-contexts`, 2026-11-12):** the slot budget and the per-slot tables are gone. A run costs what it holds
+  while it is in flight: a pooled upload list, its latches' bytes in the frame arena (`LatchBlock` is a view into it, a region
+  per run), a statistics range, and its clients' per-run payloads (`RunSlots<T>`, keyed by `org::RunRef`). DCLF's per-slot
+  tables (preprocess lists, readbacks, the write-back) follow the published copies' lease indices instead. `kMaxFrameSlots` and
+  `FrameAnchors::FitSlotBudget` are deleted, and ImageSpace's runs are bounded only by its own scopes' `kScopeRuns`.
 
 ### A once-a-frame pass at an anchor that runs several times a frame
 

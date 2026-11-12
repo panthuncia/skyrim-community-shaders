@@ -321,9 +321,9 @@ namespace
 			const auto& s = *a_frame.state;
 			const auto& v = *a_frame.volume;
 			const auto& fixed = *s.fixed;
-			const std::uint32_t slot = a_recording.FrameSlot();
+			const org::RunRef run = a_recording.Run();
 			const auto shared = SharedConstants::Index(a_recording, a_bindings.shared);
-			const auto fog = ShaderBindings::LatchOf(*fixed.latch, slot, static_cast<std::uint32_t>(offsetof(LatchData, fog)));
+			const auto fog = ShaderBindings::LatchOf(*fixed.latch, run, static_cast<std::uint32_t>(offsetof(LatchData, fog)));
 			const auto input = [&](Input a_input) -> Handle { return a_bindings.hasInput[a_input] ? a_recording.Index(a_bindings.inputs[a_input]) : 0; };
 			const std::uint32_t entry = GateEntry(a_frame.isFar, a_frame.step);
 			switch (a_frame.step) {
@@ -364,7 +364,7 @@ namespace
 					block.localShadows = input(kLocalShadows);
 					block.localShadowMaps = input(kLocalShadowMaps);
 					block.engineShadowMaps = input(kEngineShadowMaps);
-					block.engineShadows = ShaderBindings::LatchOf(*fixed.latch, slot, static_cast<std::uint32_t>(offsetof(LatchData, engineShadows)));
+					block.engineShadows = ShaderBindings::LatchOf(*fixed.latch, run, static_cast<std::uint32_t>(offsetof(LatchData, engineShadows)));
 					fixed.gate->Dispatch(a_recording, *v.scatteringProgram, ShaderBindings::Data(block), entry);
 					break;
 				}
@@ -386,7 +386,7 @@ namespace
 	};
 
 	// The directional shadow light, from the latch into its buffer, as Deferred::CopyShadowLightData maps it on D3D11. It runs on
-	// every run: on a run without the fog's frame it copies the slot's older values, which no dispatch reads.
+	// every run: on a run without the fog's frame it copies zeros (a run's region starts zeroed), which no dispatch reads.
 	struct UploadBindings
 	{
 		org::ResourceBindingToken buffer;
@@ -415,9 +415,10 @@ namespace
 
 		static void Record(const UploadBindings& a_bindings, const UploadFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			const auto& latch = *a_frame.state->fixed->latch;
+			// The run's latch region: its arena chunk and its offset there.
+			const auto region = a_frame.state->fixed->latch->At(a_recording.Run());
 			a_recording.Commands().CopyBufferRegion(a_recording.Resolve(a_bindings.buffer).GetHandle(), 0,
-				latch.Resource()->GetAPIResource().GetHandle(), latch.Offset(a_recording.FrameSlot()) + offsetof(LatchData, directionalShadow),
+				region.buffer->GetAPIResource().GetHandle(), region.offset + offsetof(LatchData, directionalShadow),
 				sizeof(Deferred::DirectionalShadowLightData));
 		}
 
@@ -699,7 +700,7 @@ struct ORGExponentialHeightFog::Impl
 		if (!pending)
 			return;
 		const auto& shape = *a_state.fixed;
-		shape.latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, *pending);
+		shape.latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, *pending);
 		pending.reset();
 		const auto open = [&](const Volume& a_volume, bool a_far) {
 			for (std::uint32_t step = 0; step < static_cast<std::uint32_t>(Step::Count); ++step) {
@@ -828,7 +829,7 @@ bool ORGExponentialHeightFog::Setup(std::function<void()> a_onFailed)
 	// The D3D11 path's samplers: linear clamp, and the comparison sampler for the directional shadow map.
 	fixed->linearSampler = ShaderBindings::CreateSamplerFromD3D11(ExponentialHeightFog::SamplerDesc(false));
 	fixed->shadowSampler = ShaderBindings::CreateSamplerFromD3D11(ExponentialHeightFog::SamplerDesc(true));
-	fixed->latch = std::make_shared<org::LatchBlock>("cs.exp-height-fog.latch", static_cast<std::uint32_t>(sizeof(LatchData)), runtime.Host()->FrameSlots());
+	fixed->latch = std::make_shared<org::LatchBlock>("cs.exp-height-fog.latch", static_cast<std::uint32_t>(sizeof(LatchData)));
 	fixed->gate = RenderGraph::RunGate::Create("cs.exp-height-fog.gate", 2 * static_cast<std::uint32_t>(Step::Count));
 	if (!fixed->linearSampler || !fixed->shadowSampler || !fixed->gate) {
 		logger::error("[ORG] Exponential Height Fog: a sampler or the run gate could not be made; the fog stays on D3D11");

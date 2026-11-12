@@ -485,9 +485,6 @@ namespace DCLF::Family
 		case FrameAnchors::RunStatus::Refused:
 			why = "the anchor refused the run (not the render owner, or no runtime)";
 			break;
-		case FrameAnchors::RunStatus::RingFull:
-			why = "the anchor's ring was full";
-			break;
 		case FrameAnchors::RunStatus::Failed:
 			why = "the anchor's epoch failed";
 			break;

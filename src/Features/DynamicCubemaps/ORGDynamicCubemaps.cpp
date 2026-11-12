@@ -290,7 +290,7 @@ namespace
 			const auto* current = a_frame.plan.get();
 			if (!current || !current->latch)
 				return;
-			const std::uint32_t slot = a_recording.FrameSlot();
+			const org::RunRef run = a_recording.Run();
 			const auto shared = current->shared ? SharedConstants::Index(a_recording, a_bindings.shared) : SharedConstants::Handles{};
 			std::array<std::uint32_t, ShaderBindings::kMaxPushWords> words{};
 			for (const auto& dispatch : current->dispatches) {
@@ -316,7 +316,7 @@ namespace
 						break;
 					case Word::Kind::Latch:
 						{
-							const auto latch = ShaderBindings::LatchOf(*current->latch, slot, word.value);
+							const auto latch = ShaderBindings::LatchOf(*current->latch, run, word.value);
 							push(latch.handle);
 							push(latch.offset);
 							break;
@@ -690,7 +690,7 @@ struct ORGDynamicCubemaps::Impl
 		for (std::uint32_t i = 0; i < 2; ++i)
 			if (encoded[i] && copying[i])
 				feature.cubemapValid[i] = true;
-		latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, data);
+		latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, data);
 	}
 };
 
@@ -769,7 +769,7 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 		stateDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
 		stateDesc.StructureByteStride = sizeof(DynamicCubemaps::CaptureLightingState);
 		state->lightingState = std::make_unique<GraphResources::StructuredBuffer>(stateDesc, 1, "DynamicCubemaps::CaptureLightingState", history);
-		state->latch = std::make_shared<org::LatchBlock>("cs.dyncubemaps.latch", static_cast<std::uint32_t>(sizeof(FrameLatch)), host->FrameSlots());
+		state->latch = std::make_shared<org::LatchBlock>("cs.dyncubemaps.latch", static_cast<std::uint32_t>(sizeof(FrameLatch)));
 		if (!state->programs || !state->sampler || !state->Complete()) {
 			logger::warn("[ORG] Dynamic Cubemaps: its programs, sampler or textures could not be made; the cubemaps stay on D3D11");
 			return false;

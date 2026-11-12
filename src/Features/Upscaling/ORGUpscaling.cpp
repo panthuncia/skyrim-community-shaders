@@ -282,7 +282,7 @@ namespace
 		{
 			const auto& spec = *a_frame.spec;
 			const DepthBlock block{ SharedConstants::Index(a_recording, a_bindings.shared), a_recording.Index(a_bindings.refractionCopy),
-				a_recording.Index(a_bindings.depthCopy), spec.sampler, ShaderBindings::LatchOf(*spec.latch, a_recording.FrameSlot()) };
+				a_recording.Index(a_bindings.depthCopy), spec.sampler, ShaderBindings::LatchOf(*spec.latch, a_recording.Run()) };
 			const std::array<RasterProgram::Colour, 2> colours{ { { .view = &a_bindings.refraction }, { .view = &a_bindings.saoCameraZ } } };
 			const RasterProgram::Depth depth{ .view = &a_bindings.depth, .readOnly = false };
 			spec.program->Draw(a_recording, { .colours = colours,
@@ -390,7 +390,7 @@ namespace
 			const auto impl = weak.lock();
 			if (!impl)
 				return;
-			impl->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, impl->jitter);
+			impl->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, impl->jitter);
 			if (impl->queued & kCopyToMain)
 				impl->upscaleGate->OpenDraw(kCopyEntry);
 			if (impl->queued & kDepthUpscale)
@@ -507,7 +507,7 @@ bool ORGUpscaling::Setup()
 		auto next = std::make_shared<Impl>();
 		// The D3D11 path's Deferred::LinearSampler: linear, clamped.
 		next->linearSampler = ShaderBindings::CreateSampler({});
-		next->latch = std::make_shared<org::LatchBlock>("cs.upscaling.jitter", static_cast<std::uint32_t>(sizeof(Upscaling::JitterCB)), host->FrameSlots());
+		next->latch = std::make_shared<org::LatchBlock>("cs.upscaling.jitter", static_cast<std::uint32_t>(sizeof(Upscaling::JitterCB)));
 		next->upscaleGate = RenderGraph::RunGate::Create("cs.upscaling.gate", kUpscaleEntries);
 		next->hudlessGate = RenderGraph::RunGate::Create("cs.upscaling.hudless.gate");
 		CurrentDepthInputs(next->inputs, next->formats);

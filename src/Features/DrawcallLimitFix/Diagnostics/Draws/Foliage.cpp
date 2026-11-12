@@ -293,8 +293,8 @@ namespace DCLF::Diagnostics
 	};
 
 	/**
-	 * @brief The compare pass's results, copied to the frame slot's host buffer; what that buffer held from the slot's last
-	 * frame (finished by now: the slot is the host's) is read first and reported (FoliageParityReport).
+	 * @brief The compare pass's results, copied to the run's host buffer (a range per lease index); what that buffer held from the
+	 * index's last run (finished by now: the lease retired before it was opened again) is read first and reported (FoliageParityReport).
 	 */
 	class FoliageReadbackPass final : public org::TypedRenderGraphPass<FoliageReadbackPass, FoliageReadbackPrepared, FoliageReadbackBindings>
 	{
@@ -328,7 +328,16 @@ namespace DCLF::Diagnostics
 			if (!a_frame.foliage)
 				return;
 			auto& foliage = *a_frame.foliage;
-			const std::uint32_t slot = a_recording.FrameSlot();
+			// The run's range: one per lease index of a stable run (a published copy's), given on its first use (one recording thread
+			// at a time records this pass). A leased run is not reported.
+			if (!a_recording.Run().Stable())
+				return;
+			const auto lease = a_recording.Run().lease;
+			if (foliage.rangeOf.size() <= lease)
+				foliage.rangeOf.resize(std::size_t(lease) + 1, UINT32_MAX);
+			if (foliage.rangeOf[lease] == UINT32_MAX && foliage.ranges < foliage.readback.size())
+				foliage.rangeOf[lease] = foliage.ranges++;
+			const std::uint32_t slot = foliage.rangeOf[lease];
 			if (slot >= foliage.readback.size())
 				return;
 			auto resource = foliage.readback[slot]->GetAPIResource();
@@ -352,7 +361,7 @@ namespace DCLF::Diagnostics
 
 	void MakeFoliageCompare(const FoliageRecordMade& a_made)
 	{
-		// The compare pass's program and a host copy of its results per frame slot; the record stands only with them.
+		// The compare pass's program and a host copy of its results per range; the record stands only with them.
 		auto& foliage = a_made.record;
 		foliage.program = ComputeProgram::Load(a_made.device, { .source = kFoliageParityShader, .constantWords = kFoliageParityConstantWords });
 		for (std::uint32_t i = 0; i < a_made.slots; ++i) {
@@ -365,7 +374,7 @@ namespace DCLF::Diagnostics
 			logger::warn("[DCLF] foliage parity: its program or buffers could not be created; off");
 			a_made.ready = false;
 		} else {
-			logger::info("[DCLF] foliage parity on: {}x{}, {} frame slots, tree wind {}", foliage.width, foliage.height, a_made.slots,
+			logger::info("[DCLF] foliage parity on: {}x{}, {} run ranges, tree wind {}", foliage.width, foliage.height, a_made.slots,
 				Observe().foliageFrozen ? "frozen" : "running");
 			a_made.ready = true;
 		}

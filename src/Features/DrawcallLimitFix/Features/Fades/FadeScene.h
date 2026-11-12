@@ -53,7 +53,7 @@ namespace DCLF::Features::Fades
 			std::uint32_t frame = 0;  // the scene frame whose FadeStateCS appended them (the list's header)
 			Batch* next = nullptr;
 		};
-		// Render thread: each frame slot's last arm.
+		// Render thread: each readback range's last arm.
 		struct Armed
 		{
 			bool armed = false;

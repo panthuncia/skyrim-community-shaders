@@ -93,7 +93,7 @@ namespace
 
 	using Float4 = std::array<float, 4>;
 
-	// One run's values, in its frame slot of the latch block: each shader's LATCH entry.
+	// One run's values, in its region of the latch block: each shader's LATCH entry.
 	struct LatchData
 	{
 		Float4 noise;                                    // ISPerlinNoiseCS's PerlinNoiseConstants: the noise volume's size
@@ -779,7 +779,7 @@ struct ORGVolumetricLighting::Impl
 		if (!run)
 			return;
 		const auto& gate = *fixed->gate;
-		fixed->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, run->data);
+		fixed->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, run->data);
 		const auto& size = run->size;
 		if (run->noise) {
 			const auto& noise = fixed->noiseSize;
@@ -935,7 +935,7 @@ bool ORGVolumetricLighting::Setup()
 		if (!fixed->noise || !fixed->generate || !fixed->raymarch || !fixed->blurH || !fixed->blurV || !fixed->apply)
 			return off("a program could not be built (logged above)");
 
-		fixed->latch = std::make_shared<org::LatchBlock>("cs.volumetric-lighting.latch", static_cast<std::uint32_t>(sizeof(LatchData)), host->FrameSlots());
+		fixed->latch = std::make_shared<org::LatchBlock>("cs.volumetric-lighting.latch", static_cast<std::uint32_t>(sizeof(LatchData)));
 		fixed->gate = RenderGraph::RunGate::Create("cs.volumetric-lighting.gate", kGateEntries);
 		if (!fixed->gate)
 			return off("its run gate could not be made");

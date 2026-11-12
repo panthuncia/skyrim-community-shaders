@@ -79,7 +79,7 @@ struct ComputeProgram
 		std::uint64_t a_offset) const;
 
 	/**
-	 * @brief DispatchIndirect with the group counts in a latch block: a_offset bytes into the region of the recording's frame slot,
+	 * @brief DispatchIndirect with the group counts in a latch block: a_offset bytes into the region of the recording's run,
 	 * which the client's commit writes each run.
 	 */
 	void DispatchIndirect(org::RecordingContext& a_recording, std::span<const std::uint32_t> a_constants, const org::LatchBlock& a_latch,

@@ -22,14 +22,14 @@ namespace org
  * descriptor-heap index.
  *
  * Each frame, inside the epoch that runs the pass (its client's commit), Commit copies the draw data's vertices and indices, and
- * the texture uploads, into one host-visible staging buffer, and stores what the pass needs in the execution's frame slot. The
+ * the texture uploads, into one host-visible staging buffer, and stores what the pass needs for the execution's run. The
  * pass (MakePass) then records the uploads (copies with their barriers; the graph does not track these textures) and one draw per
  * ImDrawCmd onto its target, each with its scissor, with ImGui's blending. The vertex stage pulls the vertices from the staging
  * buffer (package/Shaders/RenderGraph/ImGui.hlsl). The recording keeps the frame's staging buffer, textures and descriptors alive
  * until its GPU work retires.
  *
  * Threads: Init, Shutdown, InvalidateTextures and Commit on the render thread (Commit inside the epoch). The pass's Prepare and
- * Record run where the graph runs them, and read only the frame slot Commit wrote.
+ * Record run where the graph runs them, and read only the frame Commit stored for their run.
  *
  * Draw callbacks (ImDrawList::AddCallback) are D3D11 code in CS: they are skipped (logged once), except
  * ImDrawCallback_ResetRenderState, which needs nothing here.
@@ -94,15 +94,15 @@ namespace ImGuiBasicRHI
 	bool Prepare(std::uint32_t a_format);
 
 	/**
-	 * @brief The frame: ImGui's texture requests answered, the geometry and uploads staged, the draws stored in the host's current
-	 * frame slot for the pass. Inside the pass's epoch (its commit). False, logged, when the frame cannot be drawn (no pipeline, no
+	 * @brief The frame: ImGui's texture requests answered, the geometry and uploads staged, the draws stored for the host's current
+	 * run (GraphHost::CurrentRun) for the pass. Inside the pass's epoch (its commit). False, logged, when the frame cannot be drawn (no pipeline, no
 	 * staging buffer): the caller's fallback.
 	 */
 	bool Commit(ImDrawData* a_drawData, const Target& a_target, const Resolver& a_resolve);
 
 	/**
 	 * @brief A new instance of the pass, drawing onto a_target (declared as its render target), for a graph build. It records what
-	 * Commit stored for its frame slot, and nothing in an execution Commit did not run for.
+	 * Commit stored for its run, and nothing in an execution Commit did not run for.
 	 */
 	std::shared_ptr<org::RenderPass> MakePass(std::shared_ptr<org::ExternalTextureResource> a_target);
 }

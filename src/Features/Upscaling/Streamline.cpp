@@ -1435,9 +1435,10 @@ namespace InCbReadback
 	static void Drain()
 	{
 		auto& s = Get();
-		// Read once the frame's work is surely done, without waiting: the graph's frame slot ring waits for a slot's last GPU work
-		// before reusing it, so kGameFramesInFlight frames later the frame that recorded the copies (and everything queued before
-		// them) has completed. A device-wide idle wait here, mid-frame on the render thread, can deadlock: queued work may wait on a
+		// Read once the frame's work is surely done, without waiting: the render thread runs at most kGameFramesInFlight frames ahead
+		// of the GPU (DXVK's frame latency, and the graph host's waits for a revision-driven epoch's published copy of that many frames
+		// back), so kGameFramesInFlight frames later the frame that recorded the copies (and everything queued before them) has
+		// completed. A diagnostic dump (CS_DCLF_TARGET_DUMP). A device-wide idle wait here, mid-frame on the render thread, can deadlock: queued work may wait on a
 		// timeline this thread signals only once it moves on.
 		if (!s.pending || ++s.framesWaited <= RenderGraphRuntime::kGameFramesInFlight)
 			return;

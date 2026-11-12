@@ -9,6 +9,8 @@
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
 
+#include <Render/RunRef.h>
+
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -43,7 +45,7 @@ namespace DCLF::Direct
 		const org::services::NamedVersions* adopted = nullptr;  // the frame's adopted set (held by the execution's owner)
 		std::span<const ShadowSiteView> views;
 		std::span<const Draws::SunEntryProcess> sunEntry;  // the sun's full-frustum processes the commit latched (clamped)
-		std::uint32_t latchSlot = 0;                       // the latch regions it wrote (the external frame slot)
+		org::RunRef latchRun{};                       // the run whose latch regions it wrote (a published copy's, or the external run)
 	};
 
 	/**

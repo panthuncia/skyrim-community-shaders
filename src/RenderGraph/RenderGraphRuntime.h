@@ -119,23 +119,18 @@ public:
 	static RenderGraphRuntime& Get();
 
 	/**
-	 * @brief Game frames the graph's work may run behind the render thread (GraphHost::Desc::framesInFlight). The host
-	 * sizes its frame slot ring from it, a slot per epoch of every frame (FrameSlots; an anchor that runs several times a frame
-	 * has a slot per run, FrameAnchors::RunsPerFrame), and each epoch's next slot waits for that
-	 * slot's last GPU work: fewer frames than the CPU runs ahead of the GPU (DXVK's frame latency) would stall the render thread
-	 * every few frames.
+	 * @brief Game frames the graph's work may run behind the render thread (GraphHost::Desc::framesInFlight). Each run of an epoch
+	 * takes a run lease of the host's, retired once its GPU work is done, so an epoch or anchor that runs several times a frame never
+	 * waits for a run of the same frame. A revision-driven epoch publishes this many copies of each recording. Fewer frames than the
+	 * CPU runs ahead of the GPU (DXVK's frame latency) would stall the render thread every few frames on those copies.
 	 */
 	static constexpr std::uint32_t kGameFramesInFlight = 4;
 
 	/**
-	 * @brief CS's frame slot budget: kGameFramesInFlight times every epoch's runs a frame must stay within it
-	 * (FrameAnchors::FitSlotBudget). ORG allows up to org::Runtime::kMaxSlots (4096; slot indices are 32-bit). This budget is
-	 * lower because each slot costs memory in every per-slot table: every LatchBlock and RunSlots, Drawcall Limit Fix's
-	 * per-slot preprocess lists and readbacks are sized from GraphHost::FrameSlots, and ORG's statistics query pools hold two
-	 * timestamps per pass per slot. A run of an anchor needs a slot of its own (its own latch region, kept recording and
-	 * slot wait), so the cost grows with the runs a frame, not with the anchors.
+	 * @brief The runtime's first capacity of run-indexed services (org::Runtime::Desc::slots): ORG's statistics query ranges and
+	 * upload page lists by lease index, which grow past it when more runs are in flight, and each graph's admission depth.
 	 */
-	static constexpr std::uint32_t kMaxFrameSlots = 512;
+	static constexpr std::uint32_t kRunCapacity = 256;
 
 	/**
 	 * @brief CS_ORG_EPOCHS (default on, =0 off): each segment is an ORG host epoch. The graph compiles once
@@ -210,12 +205,12 @@ public:
 	enum class EpochResult : std::uint8_t
 	{
 		Submitted,    // the epoch was submitted
-		RingFull,     // skipped: it ran more times since the last Present than its ring of frame slots holds; nothing failed
+		Skipped,      // skipped: a revision-driven epoch ran more times since the last Present than it has published copies; nothing failed
 		EpochFailed,  // only this epoch's graph failed (org::GraphHost::EpochFailedError); the graph runs on for the other epochs
 		Stopped,      // inactive, or the graph failed and stopped
 	};
 
-	/** @brief ExecuteEpoch, telling a skipped run (RingFull) from a failure (FrameAnchors::Run's status). */
+	/** @brief ExecuteEpoch, telling a skipped run (Skipped) from a failure (FrameAnchors::Run's status). */
 	EpochResult TryExecuteEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare = {},
 		std::shared_ptr<const void> a_resourceOwner = {});
 

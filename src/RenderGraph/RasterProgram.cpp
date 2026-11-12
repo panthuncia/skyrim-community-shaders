@@ -367,10 +367,11 @@ bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 	const bool counted = a_draw.occlusionPool.valid();
 	if (counted)
 		commands.BeginQuery(a_draw.occlusionPool, a_draw.occlusionIndex);
-	if (a_draw.indirect && drawSignature)
-		commands.ExecuteIndirect(drawSignature->GetHandle(), a_draw.indirect->Resource()->GetAPIResource().GetHandle(),
-			a_draw.indirect->Offset(a_recording.FrameSlot()) + a_draw.indirectOffset, {}, 0, 1);
-	else
+	if (a_draw.indirect && drawSignature) {
+		// The run's region of the latch: its arena chunk and its offset there.
+		const auto region = a_draw.indirect->At(a_recording.Run());
+		commands.ExecuteIndirect(drawSignature->GetHandle(), region.buffer->GetAPIResource().GetHandle(), region.offset + a_draw.indirectOffset, {}, 0, 1);
+	} else
 		commands.Draw(a_draw.vertexCount, a_draw.instanceCount, 0, 0);
 	if (counted)
 		commands.EndQuery(a_draw.occlusionPool, a_draw.occlusionIndex);

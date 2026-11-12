@@ -99,7 +99,7 @@ namespace DCLF::Diagnostics
 		/** @brief Render thread. Never destroyed: nothing in it is let go of at exit. */
 		struct CullCounterState
 		{
-			// The colour commit's frame slot and culling stamp (NoteCullLatch), for the epoch's arm after it.
+			// The colour commit's readback range and culling stamp (NoteCullLatch), for the epoch's arm after it.
 			std::uint32_t colourSlot = 0, colourStamp = 0;
 			bool colourNoted = false;
 			std::optional<ColourSample> sample;
@@ -140,25 +140,25 @@ namespace DCLF::Diagnostics
 			return;
 		}
 		state.sunUpload = a_written.latch;
-		// Inside the colour commit: the host has waited for the slot's last execution and not yet submitted this one. A sample
-		// armed in this slot is read now (its stamp names the execution the words are of).
+		// Inside the colour commit: the run's lease retired before it was opened again, so its range's last execution is done, and
+		// this one is not submitted yet. A sample armed in this range is read now (its stamp names the execution the words are of).
 		auto& counters = State();
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host)
 			return;
-		counters.colourSlot = host->CurrentFrameSlot();
+		const auto readback = Draws::CullCounterReadback(Draws::CullCounterView::kColour);
+		counters.colourSlot = readback ? readback->ranges.Of(host->CurrentRun()) : Draws::RunRanges::kNone;
 		counters.colourStamp = a_written.latch.visibilityStamp;
 		counters.colourNoted = true;
-		const auto readback = Draws::CullCounterReadback(Draws::CullCounterView::kColour);
 		// CS_DCLF_FRAME_TRACE: the slot's last colour execution's counts, every frame.
 		if (Diagnostics::Observe().frameTrace && readback)
 			TraceColourCounts(*readback, counters.colourSlot);
 		auto& sample = counters.sample;
-		if (!readback || !readback->armed.armed || readback->armed.frameSlot != counters.colourSlot || !sample || sample->read || sample->on.lock() != readback)
+		if (!readback || !readback->armed.armed || readback->armed.range != counters.colourSlot || !sample || sample->read || sample->on.lock() != readback)
 			return;
 		auto& armed = readback->armed;
 		armed.armed = false;
-		sample->read = readback->Read(armed.frameSlot, armed.source, armed.stamp, [&](const std::uint32_t* a_words) { std::copy_n(a_words, Draws::kCountWords, sample->words.begin()); });
+		sample->read = readback->Read(armed.range, armed.source, armed.stamp, [&](const std::uint32_t* a_words) { std::copy_n(a_words, Draws::kCountWords, sample->words.begin()); });
 		++(sample->read ? readback->harvested : readback->missed);
 		if (!sample->read)
 			sample.reset();
@@ -246,9 +246,9 @@ namespace DCLF::Diagnostics
 			sample.reset();
 			return;
 		}
-		if ((counters.epochs++ % 120) != 0 || !readback || !noted)
+		if ((counters.epochs++ % 120) != 0 || !readback || !noted || counters.colourSlot == Draws::RunRanges::kNone)
 			return;
-		// Armed on this execution's slot and stamp; its copy is part of every colour execution.
+		// Armed on this execution's range and stamp; its copy is part of every colour execution.
 		readback->armed = { true, counters.colourSlot, 0, counters.colourStamp, 0, 0, {} };
 		auto& sample = counters.sample.emplace();
 		sample.on = readback;

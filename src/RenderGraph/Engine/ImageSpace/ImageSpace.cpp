@@ -360,7 +360,8 @@ namespace RenderGraph::Engine::ImageSpace
 			std::shared_ptr<org::LatchBlock> latch;
 			std::map<std::pair<std::uint32_t, std::uint32_t>, org::OwnedDescriptorBinding> samplers;  // (address, filter)
 			org::OwnedDescriptorBinding defaultSampler;  // D3D11's default sampler: the SAO composite's s9 (FeatureBinds)
-			// By frame slot: the sources a run's latched draws read by heap index (Pending::source), held until that slot is written again.
+			// By run lease index: the sources a run's latched draws read by heap index (Pending::source), held until the next run of
+			// the index commits (the lease's last run retired before the index was opened again). Grown with the host's lease indices.
 			std::vector<std::vector<std::shared_ptr<const void>>> heldSources;
 			// The registration: every pass, by entry and by shape, and the engine objects its imports were made from (a resize check).
 			std::vector<std::shared_ptr<const Spec>> specs;
@@ -1510,14 +1511,17 @@ namespace RenderGraph::Engine::ImageSpace
 			client.active = [] { return !IS().batch.empty(); };
 			client.commit = [](const FrameAnchors::Point&) {
 				auto& current = IS();
-				const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
-				// The sources this slot's last run read by heap index are retired now (the latch's slot is written again only then).
-				auto& held = current.heldSources[slot % current.heldSources.size()];
+				const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
+				// The sources this lease index's last run read by heap index are retired now: that run retired before the index was
+				// opened again.
+				if (current.heldSources.size() <= run.lease)
+					current.heldSources.resize(static_cast<std::size_t>(run.lease) + 1);
+				auto& held = current.heldSources[run.lease];
 				held.clear();
 				for (const auto& pending : current.batch) {
 					if (pending.source)
 						held.push_back(pending.source);
-					current.latch->WriteValue(slot, pending.entry * static_cast<std::uint32_t>(sizeof(ConstantsAt)), pending.at);
+					current.latch->WriteValue(run, pending.entry * static_cast<std::uint32_t>(sizeof(ConstantsAt)), pending.at);
 					if (pending.compute)
 						current.gate->OpenDispatch(pending.entry, pending.groups[0], pending.groups[1], pending.groups[2]);
 					else
@@ -1881,20 +1885,16 @@ namespace RenderGraph::Engine::ImageSpace
 			// or the same pass again) starts a new batch.
 			if (!state.batch.empty() && spec->entry <= state.lastEntry)
 				Flush();
-			// A new batch is a new run: withheld only when the run can draw it now (owner, built graph, ring room), only for the runs a
-			// frame the anchor is sized for, and only as often as its kind of scope may start one this frame (kScopeRuns).
+			// A new batch is a new run: withheld only when the run can draw it now (owner, built graph), and only as often as its kind of
+			// scope may start one this frame (kScopeRuns).
 			if (state.batch.empty()) {
 				if (state.scopeRuns[state.scope] >= kScopeRuns[state.scope]) {
 					Refuse("its scope used its runs this frame", a_effect);
 					return nullptr;
 				}
-				if (state.runsThisFrame >= FrameAnchors::RunsPerFrame(Anchor::ImageSpace)) {
-					Refuse("the ImageSpace anchor ran as often as it is sized for this frame", a_effect);
-					return nullptr;
-				}
 				if (!FrameAnchors::CanRun(kClientId, Anchor::ImageSpace)) {
-					// Before the first build after Setup or after a resize's registration (one build point), or a full ring.
-					Refuse("the ImageSpace anchor's graph does not hold this registration yet, or its ring is full", a_effect);
+					// Before the first build after Setup or after a resize's registration (one build point).
+					Refuse("the ImageSpace anchor's graph does not hold this registration yet", a_effect);
 					return nullptr;
 				}
 			}
@@ -2433,8 +2433,8 @@ namespace RenderGraph::Engine::ImageSpace
 		if (std::error_code error; !std::filesystem::exists(std::filesystem::path(RenderGraphRuntime::kShaderDirectory) / "Common/OrgEngineConstants.hlsli", error))
 			return off("Data/Shaders has no Common/OrgEngineConstants.hlsli: the staged shaders predate the ORG builds of ISHDR, ISBlur and the VL composite");
 		state.gate = RunGate::Create("ImageSpace", kGateEntries);
-		state.latch = org::LatchBlock::Create("ImageSpace::ConstantsAt", kGateEntries * static_cast<std::uint32_t>(sizeof(ConstantsAt)), host->FrameSlots());
-		state.heldSources.assign((std::max)(host->FrameSlots(), 1u), {});
+		state.latch = org::LatchBlock::Create("ImageSpace::ConstantsAt", kGateEntries * static_cast<std::uint32_t>(sizeof(ConstantsAt)));
+		state.heldSources.clear();
 		if (!state.gate || !state.latch)
 			return off("its run gate or latch could not be made");
 		SelectEffects();
@@ -2444,11 +2444,6 @@ namespace RenderGraph::Engine::ImageSpace
 				spdlog::level::err);
 		}
 		state.logShapes = Switches::On("CS_ORG_IMAGESPACE_LOG");
-		if (const auto sized = FrameAnchors::RunsPerFrame(Anchor::ImageSpace); sized < ScopeRunsTotal())
-			logger::warn(
-				"[ORG] ImageSpace: the ImageSpace anchor is sized for {} runs a frame, fewer than the {} its scopes may start; the draws of the "
-				"scopes that come last stay with the engine when the runs are used up",
-				sized, ScopeRunsTotal());
 		state.on = true;
 		std::string selected;
 		for (std::size_t i = 0; i < kEffects.size(); ++i)

@@ -352,7 +352,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		};
 
 		/**
-		 * @brief One pass of a surface: the display a commit stored for this frame slot, as one render pass.
+		 * @brief One pass of a surface: the display a commit stored for this run, as one render pass.
 		 *
 		 * Each draw reads its vertex count from its command's entry of the client's run gate, which the anchors close at the start of
 		 * every run and only this client's commit opens: a run without that commit (a frame left in a slot by a run that failed, a run
@@ -381,8 +381,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			{
 				if (!a_pass.slots || !a_pass.gate)
 					return;
-				const std::uint32_t frameSlot = a_recording.FrameSlot();
-				const auto frame = a_pass.slots->Take(frameSlot);
+				const org::RunRef run = a_recording.Run();
+				const auto frame = a_pass.slots->Take(run);
 				if (!frame || !frame->staging || frame->commands.empty())
 					return;
 				a_recording.Retain(frame);
@@ -414,9 +414,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
 				commands.SetViewports({ &frame->viewport, 1 });
 				commands.SetScissors({ &frame->scissor, 1 });
-				const auto& latch = a_pass.gate->Latch();
-				const auto latchBuffer = latch.Resource()->GetAPIResource().GetHandle();
-				const std::uint64_t latchOffset = latch.Offset(frameSlot);
+				// The run's gate region: its arena chunk and its offset there.
+				const auto region = a_pass.gate->Latch().At(run);
+				const auto latchBuffer = region.buffer->GetAPIResource().GetHandle();
+				const std::uint64_t latchOffset = region.offset;
 				const RasterProgram* bound = nullptr;
 				std::uint32_t reference = 0;
 				for (std::uint32_t i = 0; i < frame->commands.size(); ++i) {
@@ -453,8 +454,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		};
 
 		/**
-		 * @brief Inside the epoch: the pending display's frame, stored in the slot of the pass that draws it, with its draws' gate
-		 * entries opened. Every other pass's slot for this frame slot is emptied first, so nothing older is left there.
+		 * @brief Inside the epoch: the pending display's frame, stored for this run in the slots of the pass that draws it, with its
+		 * draws' gate entries opened. Every other pass's entry for this run is emptied first, so nothing older is left there.
 		 */
 		void Commit()
 		{
@@ -462,12 +463,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			auto* host = RenderGraphRuntime::Get().Host();
 			if (!host)
 				return;
-			const std::uint32_t slot = host->CurrentFrameSlot();
+			const org::RunRef run = host->CurrentRun();
 			for (const auto& surface : state.surfaces) {
 				if (surface->colourSlots)
-					surface->colourSlots->Store(slot, nullptr);
+					surface->colourSlots->Store(run, nullptr);
 				if (surface->depthSlots)
-					surface->depthSlots->Store(slot, nullptr);
+					surface->depthSlots->Store(run, nullptr);
 			}
 			if (!state.pending || !state.pendingSurface)
 				return;
@@ -500,7 +501,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				state.commitReason = "no staging buffer";
 				return;
 			}
-			std::memcpy(frame->staging->Slot(0).data(), display.staging.data(), display.staging.size());
+			std::memcpy(frame->staging->Bytes().data(), display.staging.data(), display.staging.size());
 
 			frame->commands.reserve(display.commands.size());
 			for (std::size_t i = 0; i < display.commands.size(); ++i) {
@@ -553,7 +554,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			frame->scissor = { static_cast<std::int32_t>(std::floor(left)), static_cast<std::int32_t>(std::floor(top)),
 				static_cast<std::uint32_t>(std::ceil(right) - std::floor(left)), static_cast<std::uint32_t>(std::ceil(bottom) - std::floor(top)) };
 
-			slots->Store(slot, std::move(frame));
+			slots->Store(run, std::move(frame));
 			for (std::uint32_t i = 0; i < display.commands.size(); ++i)
 				if (display.commands[i].kind == Command::Kind::Draw)
 					state.gate->OpenDraw(i, display.commands[i].vertexCount);
@@ -745,10 +746,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				surface->ownId.empty() ? "an engine target" : surface->ownId, colourDesc.Width, colourDesc.Height, static_cast<int>(a_format),
 				surface->depth ? "an engine depth-stencil" : (a_depth ? "not importable" : "none"));
 			if (surface->colour && surface->colourFormat != rhi::Format::Unknown) {
-				const std::uint32_t slots = RenderGraphRuntime::Get().Host()->FrameSlots();
-				surface->colourSlots = std::make_shared<const Slots>(slots);
+				surface->colourSlots = std::make_shared<const Slots>();
 				if (surface->depth)
-					surface->depthSlots = std::make_shared<const Slots>(slots);
+					surface->depthSlots = std::make_shared<const Slots>();
 			}
 			return surface;
 		}
@@ -876,8 +876,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				return "the Interface epoch did not run (idle)";
 			case FrameAnchors::RunStatus::Refused:
 				return "the Interface epoch refused the run";
-			case FrameAnchors::RunStatus::RingFull:
-				return "the Interface anchor's ring is full this frame";
 			default:
 				return "the Interface epoch failed";
 			}
@@ -923,7 +921,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		state.gate = RunGate::Create("cs.scaleform.gate", kGateEntries);
 		state.staging = FrameStaging::Create({ .name = "cs.scaleform.staging",
 			.minimumBytes = kMinimumStaging,
-			.runsPerFrame = FrameAnchors::RunsPerFrame(Anchor::Interface) });
+			// About the Interface anchor's runs a frame: a display, and one more per D3D11 part.
+			.runsPerFrame = 6 });
 		if (!state.gate || !state.staging) {
 			state.failed = true;
 			logger::error("[ORG] Scaleform: the run gate or the staging pool could not be made; the D3D11 renderer draws");

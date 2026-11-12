@@ -4,6 +4,7 @@
 #	include <rhi_interop_vulkan.h>
 
 #	include "RenderGraph/ImGuiBasicRHI.h"
+#	include "RenderGraph/FrameStaging.h"
 
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -112,18 +113,8 @@ namespace ImGuiBasicRHI
 			std::vector<std::shared_ptr<const void>> owners;  // the textures and descriptors the draws read
 		};
 
-		/** @brief The frames Commit stored, one per host frame slot; Record takes its slot's. */
-		struct Slots
-		{
-			explicit Slots(std::uint32_t a_count) :
-				frames(std::make_unique<std::atomic<std::shared_ptr<const Frame>>[]>(a_count)), count(a_count) {}
-
-			std::shared_ptr<const Frame> Take(std::uint32_t a_slot) const { return frames[a_slot % count].exchange(nullptr, std::memory_order_acq_rel); }
-			void Store(std::uint32_t a_slot, std::shared_ptr<const Frame> a_frame) const { frames[a_slot % count].store(std::move(a_frame), std::memory_order_release); }
-
-			std::unique_ptr<std::atomic<std::shared_ptr<const Frame>>[]> frames;
-			std::uint32_t count;
-		};
+		/** @brief The frames Commit stored, one per run; Record takes its run's. */
+		using Slots = ::RenderGraph::RunSlots<Frame>;
 
 		/** @brief Host-visible staging buffers, reused once the frame that used one retired (its last owner gave it back). */
 		struct StagingPool
@@ -188,7 +179,7 @@ namespace ImGuiBasicRHI
 				if (size > 0xFFFFFFFFull)
 					return nullptr;
 				try {
-					block = org::LatchBlock::Create("cs.imgui.staging", static_cast<std::uint32_t>(size), 1);
+					block = org::LatchBlock::CreateDedicated("cs.imgui.staging", static_cast<std::uint32_t>(size));
 				} catch (const std::exception& e) {
 					logger::error("[ORG] ImGui: a staging buffer of {} bytes could not be made: {}", size, e.what());
 					return nullptr;
@@ -399,7 +390,7 @@ namespace ImGuiBasicRHI
 			{
 				if (!a_pass.slots)
 					return;
-				const auto frame = a_pass.slots->Take(a_recording.FrameSlot());
+				const auto frame = a_pass.slots->Take(a_recording.Run());
 				if (!frame || !frame->program || !frame->staging)
 					return;
 				// The staging buffer, textures and descriptors stay until this recording's GPU work retires.
@@ -529,8 +520,8 @@ namespace ImGuiBasicRHI
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!state.installed || !host || !a_drawData)
 			return false;
-		if (!state.slots || state.slots->count != host->FrameSlots())
-			state.slots = std::make_shared<Slots>(host->FrameSlots());
+		if (!state.slots)
+			state.slots = std::make_shared<Slots>();
 		const RasterProgram* program = ProgramFor(state, a_target.format);
 		if (!program)
 			return false;
@@ -590,7 +581,7 @@ namespace ImGuiBasicRHI
 		frame->staging = AcquireStaging(state.pool, std::max<std::uint64_t>(bytes, 4));
 		if (!frame->staging)
 			return false;
-		const auto span = frame->staging->Slot(0);
+		const auto span = frame->staging->Bytes();
 		std::byte* const base = span.data();
 		for (auto& upload : pending) {
 			Upload staged{ upload.texture, !upload.texture->staged };
@@ -657,7 +648,7 @@ namespace ImGuiBasicRHI
 			globalVertex += static_cast<std::uint32_t>(list->VtxBuffer.Size);
 			globalIndex += static_cast<std::uint32_t>(list->IdxBuffer.Size);
 		}
-		state.slots->Store(host->CurrentFrameSlot(), std::move(frame));
+		state.slots->Store(host->CurrentRun(), std::move(frame));
 		return true;
 	}
 
@@ -667,8 +658,8 @@ namespace ImGuiBasicRHI
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!a_target || !host)
 			return nullptr;
-		if (!state.slots || state.slots->count != host->FrameSlots())
-			state.slots = std::make_shared<Slots>(host->FrameSlots());
+		if (!state.slots)
+			state.slots = std::make_shared<Slots>();
 		return std::make_shared<OverlayPass>(std::move(a_target), state.slots);
 	}
 }

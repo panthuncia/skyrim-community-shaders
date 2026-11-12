@@ -180,7 +180,7 @@ namespace RenderGraph::Engine::Skeleton
 					} else {
 						const RasterProgram::Colour colour{ .view = &a_bindings.view, .load = rhi::LoadOp::Load };
 						draw.colours = { &colour, 1 };
-						const ClearBlock block{ ShaderBindings::LatchOf(*clear.colours, a_recording.FrameSlot(), variant.entry * RunGate::kEntryBytes) };
+						const ClearBlock block{ ShaderBindings::LatchOf(*clear.colours, a_recording.Run(), variant.entry * RunGate::kEntryBytes) };
 						draw.constants = ShaderBindings::Data(block);
 						variant.program->Draw(a_recording, draw);
 					}
@@ -600,7 +600,7 @@ namespace RenderGraph::Engine::Skeleton
 			}
 			group.gate = RunGate::Create(kGroupIds[index], entries);
 			auto* host = RenderGraphRuntime::Get().Host();
-			group.colours = host ? org::LatchBlock::Create(fmt::format("{}.colours", kGroupIds[index]), entries * RunGate::kEntryBytes, host->FrameSlots()) : nullptr;
+			group.colours = host ? org::LatchBlock::Create(fmt::format("{}.colours", kGroupIds[index]), entries * RunGate::kEntryBytes) : nullptr;
 			if (!group.gate || !group.colours) {
 				group.failed = true;
 				logger::warn("[ORG] engine skeleton: the {} clears' run gate could not be made; they stay on D3D11", kGroupNames[index]);
@@ -628,10 +628,10 @@ namespace RenderGraph::Engine::Skeleton
 			client.active = [a_group] { return !GroupOf(a_group).pending.empty(); };
 			client.commit = [a_group](const FrameAnchors::Point&) {
 				const auto& state = GroupOf(a_group);
-				const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
+				const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
 				for (const auto& pending : state.pending) {
 					if (!pending.depth)
-						state.colours->WriteValue(slot, pending.gateEntry * RunGate::kEntryBytes, pending.colour);
+						state.colours->WriteValue(run, pending.gateEntry * RunGate::kEntryBytes, pending.colour);
 					state.gate->OpenDraw(pending.gateEntry);
 				}
 			};

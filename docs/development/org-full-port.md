@@ -52,6 +52,7 @@ pinned submodule commits exist only locally, so a fresh clone cannot fetch them.
 | P5.13 (the flush and the shader binds as tripwires)                                                              | Census and latch built (`CS_ORG_RESIDUE_CENSUS`, `CS_ORG_ENGINE_FLUSH_LATCH`); not flipped | CS `org-port/p5`                                         |
 | P5 primary path: ports precompile at load, pipelines before use, no readiness fallback; latch allowed draws         | Merged and run (2026-11-11); census 40/frame settled; latch shots match with it off  | CS `org-port/p5`, ORG `org-port/fix-retire-2` (b6fb82a)  |
 | Phase 5.5 (no engine fall-through): the gate before Phase 6                                                        | Started 2026-11-11; 5.5.0's compile-stall fixes merged                              | CS `org-port/p5`                                         |
+| Guest frames without slots: shared command pools, run leases, one frame arena, only published recordings kept    | Shared pools merged (4.30 GB settled, from 9.75); leases and the arena built, not run yet | CS `org-port/frame-contexts`, ORG and BasicRHI `org-port/frame-contexts` |
 
 **Root cause worth knowing:** a BasicRHI-created Vulkan device failed on AMD because the driver rejects acceleration
 structures in a mutable descriptor list at any count. DXVK never enables acceleration structures, so the adopted device
@@ -213,8 +214,9 @@ geometry group 10 batch (AE 106584 +0x143) is vouched, not taken.
 
 - In the guest phase each anchor is its own epoch in DXVK's stream, with a fixed ring of frame slots. An anchor run more
   than the ring holds in one frame (the skeleton's shadow clears) waited on work DXVK had not submitted: a deadlock. ORG's
-  host now grows a listed epoch's ring (`GraphHost::Desc::epochRuns`, sized per anchor in FrameAnchors). This goes away once
-  ORG owns the frame and these are passes in one graph.
+  host first grew a listed epoch's ring (`GraphHost::Desc::epochRuns`); run leases (`org-port/frame-contexts`) replaced the
+  rings: each run holds a lease of its own and waits for nothing. This goes away once ORG owns the frame and these are passes
+  in one graph.
 - A client registered while its anchor has no active client never joined the graph: the host builds a graph only when
   it is submitted, and Drawcall Limit Fix makes builds explicit at its per-world-frame build point. A joining client now
   runs the epoch, `FrameAnchors::InBuiltGraph` tells a client when it is in, and a blocking movie builds between frames.

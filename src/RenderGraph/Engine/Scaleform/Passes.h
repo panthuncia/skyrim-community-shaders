@@ -9,7 +9,7 @@ namespace RenderGraph::Engine::Scaleform
  * @brief The render-graph side of Scaleform's ORG path (docs/development/p5/scaleform.md, "The ORG pass"): the Interface anchor's
  * client, its surfaces (each target and depth pair the displays draw onto, with a pass for displays without masks and one with
  * the depth-stencil), the pipelines (a ProgramCache filled at setup), and the per-display commit. Render thread throughout; the passes' Record
- * runs where the graph runs it, reads only the frame a commit stored for its frame slot (RunSlots), and draws through the
+ * runs where the graph runs it, reads only the frame a commit stored for its run (RunSlots), and draws through the
  * client's run gate.
  */
 namespace RenderGraph::Engine::Scaleform::Passes

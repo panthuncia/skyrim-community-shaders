@@ -34,7 +34,7 @@ namespace RenderGraph
  * what it reads and writes as any graph pass does), each with an anchor and an order key. At the hook, Run executes the anchor's
  * epoch: every registered pass of that anchor, in order-key order, at that point of the D3D11 stream.
  *
- * Cost: an anchor nobody reserved has no epoch at all (no graph, no frame slots, nothing at the hook but one load). A reserved
+ * Cost: an anchor nobody reserved has no epoch at all (no graph, no run leases, nothing at the hook but one load). A reserved
  * anchor whose clients are all inactive this frame (or that has none) submits nothing at its hook.
  *
  * Mapping onto the runtime: each anchor is a RenderGraphRuntime::Segment of its own (Segment::Anchor*), an async live epoch of the
@@ -152,7 +152,7 @@ namespace FrameAnchors
 	 * - registerResources: at each build of a graph, before its passes are made: register the client's graph resources by name
 	 *   (RenderGraph::RegisterResource), as an extension's PrepareForBuild does.
 	 * - commit: inside the epoch, before its submission (RenderGraphRuntime::ExecuteEpoch's beforePrepare): write this execution's
-	 *   values into the client's LatchBlock at the host's current frame slot, or queue uploads. Called for each of the client's
+	 *   values into the client's LatchBlock at the host's current run (GraphHost::CurrentRun), or queue uploads. Called for each of the client's
 	 *   anchors that runs, once per run.
 	 * - active: at the hook, before the epoch: whether the client has work this frame. When no client of an anchor is active, the
 	 *   anchor submits nothing. Null: always active. An inactive client's passes still run when another client keeps the epoch,
@@ -234,7 +234,7 @@ namespace FrameAnchors
 
 	/**
 	 * @brief Whether a run of a_anchor now would draw a_id's work: the caller owns rendering, the runtime is active, this
-	 * registration is in the anchor's built graph (InBuiltGraph), and the anchor's ring has room for another run this frame. Call
+	 * registration is in the anchor's built graph (InBuiltGraph). An anchor may run any number of times a frame. Call
 	 * it before withholding the engine's work for the anchor; when false, leave the work to the engine. Render thread. Run can
 	 * still fail afterwards (RunStatus::Failed): the client's executed callback is how it knows the work was submitted.
 	 */
@@ -257,7 +257,6 @@ namespace FrameAnchors
 		Ran,       // the epoch was submitted; the executed callbacks of the clients in the built graph ran
 		Idle,      // nothing to run: no client active and no one-shot pass pending, or the anchor has no epoch
 		Refused,   // the caller does not own rendering (IsRenderOwner), or the runtime is not active
-		RingFull,  // skipped: the anchor ran as many times since the last Present as its ring of frame slots holds
 		Failed,    // the epoch failed (its clients are dropped at the next poll), or the graph stopped
 	};
 
@@ -274,17 +273,14 @@ namespace FrameAnchors
 	/**
 	 * @brief The hook: runs the anchor's epoch at this point of the D3D11 stream when it has an active client or a pending one-shot
 	 * pass. After the late anchors it runs the late-epoch hook (SetLateEpochHook). Render owner only, checked under the anchors'
-	 * mutex. A run past the anchor's ring (kGameFramesInFlight times RunsPerFrame since the last Present) is skipped (RingFull).
+	 * mutex. Each run takes a run lease of the host's, so a run never waits for another run of the same frame.
 	 */
 	RunResult Run(const Point& a_point);
 
 	/** @brief Run for a hook without engine targets. */
 	inline RunResult Run(Anchor a_anchor) { return Run(Point{ .anchor = a_anchor }); }
 
-	/** @brief The most runs a frame the anchor's epoch is sized for (kInfo); its ring holds kGameFramesInFlight times that. Any thread. */
-	std::uint32_t RunsPerFrame(Anchor a_anchor);
-
-	/** @brief The most runs the anchor submitted between two Presents so far this session, to size RunsPerFrame from. Any thread. */
+	/** @brief The most runs the anchor submitted between two Presents so far this session (LogRunStats). Any thread. */
 	std::uint32_t PeakRunsPerFrame(Anchor a_anchor);
 
 	/**
@@ -373,15 +369,6 @@ namespace FrameAnchors
 	const SegmentNames* NamesOf(std::uint32_t a_segment);
 
 	/**
-	 * @brief Initialize, before AddToFrame: the frame slot budget. The host's frame slots are a_framesInFlight times every epoch's
-	 * runs a frame (each epoch of a_epochs that is not an anchor's runs once, each reserved anchor its RunsPerFrame), at most
-	 * a_maxSlots. Logs the total and each anchor's share. Over the budget, the anchors reserved last lose their reservation, each
-	 * with an error line, until it fits: their clients then fail to register and stay on D3D11. No anchor is ever sized for fewer
-	 * runs than its kInfo entry says.
-	 */
-	void FitSlotBudget(const std::vector<std::uint32_t>& a_epochs, std::uint32_t a_framesInFlight, std::uint32_t a_maxSlots);
-
-	/**
 	 * @brief The frame's end, on the thread that presents (RenderGraphRuntime::SealPresented, after the host's seal). On the render
 	 * owner, when a client waits to join a graph (RequestJoin, Register, Refresh) and no build point ran during the frame (no
 	 * RenderGraphRuntime::BuildIfRequested since the last frame end), builds the graphs that were asked for: the build point of the
@@ -397,7 +384,7 @@ namespace FrameAnchors
 	 */
 	bool BuildPending(std::string_view a_caller);
 
-	/** @brief Logs each reserved anchor's peak runs a frame against its sizing (CS_ORG_EPOCH_STATS's report). Render thread. */
+	/** @brief Logs each reserved anchor's peak runs a frame (CS_ORG_EPOCH_STATS's report). Render thread. */
 	void LogRunStats();
 
 	/**
@@ -406,14 +393,6 @@ namespace FrameAnchors
 	 * reservations.
 	 */
 	void AddToFrame(std::vector<std::uint32_t>& a_epochs);
-
-	/**
-	 * @brief Initialize, after AddToFrame: the reserved anchors that may run more than once a frame, each as its epoch and the most
-	 * runs a frame its epoch is sized for (GraphHost::Desc::epochRuns). Each such epoch's ring of frame slots grows up to
-	 * kGameFramesInFlight times its runs, so the host never waits for a run of the same frame (one DXVK has not submitted yet). A
-	 * frame with more runs than the ring holds skips the rest (ExecuteEpoch returns false) instead of hanging.
-	 */
-	std::vector<std::pair<std::uint32_t, std::uint32_t>> RunsPerFrame();
 
 	/**
 	 * @brief Render thread (RenderGraphRuntime::PollEpochFailures): an anchor's epoch failed to build or prepare. Every client with

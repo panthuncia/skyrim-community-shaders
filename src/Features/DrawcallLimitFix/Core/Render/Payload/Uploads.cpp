@@ -495,14 +495,14 @@ namespace DCLF
 	// The depth segment's plain draws: the index pool brought up to the tables, the bucket map and each phase's table in the
 	// latch, their count words zeroed. A slot without a published pipeline maps to none: BuildDraws drops its draws. Returns the
 	// index pool's copies.
-	std::uint32_t IndirectDraws::Impl::WriteDepthBuckets(const MainCommit& a_commit, std::uint32_t a_latchSlot, BuildDrawsLatch& a_latch)
+	std::uint32_t IndirectDraws::Impl::WriteDepthBuckets(const MainCommit& a_commit, const org::RunRef& a_latchRun, BuildDrawsLatch& a_latch)
 	{
 		const auto& epochResources = a_commit.resources;
 		const auto& writePlan = a_commit.writePlan;
 		const auto& latchBlock = a_commit.latchBlock;
 		const auto& layout = a_commit.latchLayout;
 		const std::uint32_t poolCopies = UpdateIndexPool(a_commit.adopted, *epochResources->pool, Scene::FrameView::Get().GetTables(),
-			Scene::FrameView::Get().GetTablesGeneration(), latchBlock, a_latchSlot, layout.PoolOffset(), a_commit.uploads);
+			Scene::FrameView::Get().GetTablesGeneration(), latchBlock, a_latchRun, layout.PoolOffset(), a_commit.uploads);
 		// The plan's slots, and none for any other slot the installed members can use (new since the plan).
 		const auto planned = static_cast<std::uint32_t>(writePlan.map.size());
 		auto slots = std::max(planned, InstalledPipelineSlots());
@@ -511,13 +511,13 @@ namespace DCLF
 		const std::uint32_t buckets = writePlan.Buckets();
 		// The map and the tables are the snapshot's (its revision's plan and latch, the installed publication's pipeline slots):
 		// written into this frame slot's region only when it holds another snapshot's.
-		auto& held = mainBucketRegions.Of(a_latchSlot, a_commit.shape.latch, a_commit.revisionShape, slots);
+		auto& held = mainBucketRegions.Of(a_latchRun, a_commit.shape.latch, a_commit.revisionShape, slots);
 		if (!Draws::LatchRegionsHeld::Hold(held, 0)) {
-			WriteBucketMap(latchBlock, "main bucket map", a_latchSlot, layout.BucketMapOffset(), writePlan.map, slots);
+			WriteBucketMap(latchBlock, "main bucket map", a_latchRun, layout.BucketMapOffset(), writePlan.map, slots);
 			if (buckets) {
 				const std::size_t words = std::size_t(buckets) * 2;
-				LatchWrite(latchBlock, "main bucket tables", a_latchSlot, layout.BucketTableOffset(), std::as_bytes(std::span(writePlan.table.data(), words)));
-				LatchWrite(latchBlock, "main bucket tables", a_latchSlot, layout.PhaseTwoBucketTableOffset(), std::as_bytes(std::span(writePlan.table.data() + words, words)));
+				LatchWrite(latchBlock, "main bucket tables", a_latchRun, layout.BucketTableOffset(), std::as_bytes(std::span(writePlan.table.data(), words)));
+				LatchWrite(latchBlock, "main bucket tables", a_latchRun, layout.PhaseTwoBucketTableOffset(), std::as_bytes(std::span(writePlan.table.data() + words, words)));
 			}
 		}
 		if (buckets) {
@@ -525,7 +525,7 @@ namespace DCLF
 			for (const auto& counts : epochResources->zBucketCounts)
 				a_commit.latched(counts, zBucketZeros.data(), std::size_t(buckets) * sizeof(std::uint32_t), 0);
 		}
-		const auto region = static_cast<std::uint32_t>(latchBlock.Offset(a_latchSlot));
+		const auto region = static_cast<std::uint32_t>(latchBlock.Offset(a_latchRun));
 		a_latch.bucketTableOffset = region + layout.BucketTableOffset();
 		a_latch.phaseTwoBucketTableOffset = region + layout.PhaseTwoBucketTableOffset();
 		a_latch.bucketMapOffset = region + layout.BucketMapOffset();
@@ -533,41 +533,41 @@ namespace DCLF
 	}
 
 	// The colour segment's sun cascades and local shadow volumes in the latch, and the latch's sun test.
-	void IndirectDraws::Impl::WriteShadowLatch(const MainCommit& a_commit, std::uint32_t a_latchSlot, BuildDrawsLatch& a_latch)
+	void IndirectDraws::Impl::WriteShadowLatch(const MainCommit& a_commit, const org::RunRef& a_latchRun, BuildDrawsLatch& a_latch)
 	{
 		const auto& latchBlock = a_commit.latchBlock;
 		const auto& layout = a_commit.latchLayout;
 		const std::uint32_t header[4] = { static_cast<std::uint32_t>(sunCascades.size()), 0, 0, 0 };
-		LatchWrite(latchBlock, "main sun cascades", a_latchSlot, MainLatchLayout::CascadeOffset(), std::as_bytes(std::span(header)));
+		LatchWrite(latchBlock, "main sun cascades", a_latchRun, MainLatchLayout::CascadeOffset(), std::as_bytes(std::span(header)));
 		if (!sunCascades.empty())
-			LatchWrite(latchBlock, "main sun cascades", a_latchSlot, MainLatchLayout::CascadeOffset() + kSunRegionHeader, std::as_bytes(std::span(sunCascades)));
+			LatchWrite(latchBlock, "main sun cascades", a_latchRun, MainLatchLayout::CascadeOffset() + kSunRegionHeader, std::as_bytes(std::span(sunCascades)));
 		const std::uint32_t volumeHeader[4] = { shadowVolumesLatched, 0, 0, 0 };
-		LatchWrite(latchBlock, "main shadow volumes", a_latchSlot, layout.ShadowVolumeOffset(), std::as_bytes(std::span(volumeHeader)));
+		LatchWrite(latchBlock, "main shadow volumes", a_latchRun, layout.ShadowVolumeOffset(), std::as_bytes(std::span(volumeHeader)));
 		if (shadowVolumesLatched)
-			LatchWrite(latchBlock, "main shadow volumes", a_latchSlot, layout.ShadowVolumeOffset() + kSunRegionHeader,
+			LatchWrite(latchBlock, "main shadow volumes", a_latchRun, layout.ShadowVolumeOffset() + kSunRegionHeader,
 				std::as_bytes(std::span(shadowVolumes).first(shadowVolumesLatched)));
 		a_latch.sunState = kSunTestOn;
-		a_latch.sunCascadeOffset = static_cast<std::uint32_t>(latchBlock.Offset(a_latchSlot)) + MainLatchLayout::CascadeOffset();
-		a_latch.localShadowOffset = static_cast<std::uint32_t>(latchBlock.Offset(a_latchSlot)) + layout.ShadowVolumeOffset();
+		a_latch.sunCascadeOffset = static_cast<std::uint32_t>(latchBlock.Offset(a_latchRun)) + MainLatchLayout::CascadeOffset();
+		a_latch.localShadowOffset = static_cast<std::uint32_t>(latchBlock.Offset(a_latchRun)) + layout.ShadowVolumeOffset();
 		Diagnostics::Notify(Diagnostics::CullLatchWritten{ a_latch, false });
 	}
 
 	// The colour segment's state class table and class map (the revision shape's class plan) in the latch: what BuildDraws routes every
 	// colour draw by, its set index to its class and index there, and its slot to that class's sub-range. Written into this frame slot's
 	// region only when it holds another revision shape's; none without a plan (every colour draw dropped, counted).
-	void IndirectDraws::Impl::WriteClassRegion(const MainCommit& a_commit, std::uint32_t a_latchSlot, BuildDrawsLatch& a_latch)
+	void IndirectDraws::Impl::WriteClassRegion(const MainCommit& a_commit, const org::RunRef& a_latchRun, BuildDrawsLatch& a_latch)
 	{
 		const auto& latchBlock = a_commit.latchBlock;
 		const auto& layout = a_commit.latchLayout;
 		const auto& plan = a_commit.shape.classPlan;
 		if (!plan || plan->classes.size() > layout.classes || plan->map.size() > kClassHeaderWords + layout.classMapWords)
 			return;  // never: the revision reserved its layout for its plan (RequireMainClasses)
-		auto& held = mainClassRegions.Of(a_latchSlot, a_commit.shape.latch, a_commit.revisionShape, 0);
+		auto& held = mainClassRegions.Of(a_latchRun, a_commit.shape.latch, a_commit.revisionShape, 0);
 		if (!Draws::LatchRegionsHeld::Hold(held, 0)) {
-			LatchWrite(latchBlock, "main class table", a_latchSlot, layout.ClassTableOffset(), std::as_bytes(std::span(plan->table)));
-			LatchWrite(latchBlock, "main class map", a_latchSlot, layout.ClassMapOffset(), std::as_bytes(std::span(plan->map)));
+			LatchWrite(latchBlock, "main class table", a_latchRun, layout.ClassTableOffset(), std::as_bytes(std::span(plan->table)));
+			LatchWrite(latchBlock, "main class map", a_latchRun, layout.ClassMapOffset(), std::as_bytes(std::span(plan->map)));
 		}
-		const auto region = static_cast<std::uint32_t>(latchBlock.Offset(a_latchSlot));
+		const auto region = static_cast<std::uint32_t>(latchBlock.Offset(a_latchRun));
 		a_latch.classTableOffset = region + layout.ClassTableOffset();
 		a_latch.classMapOffset = region + layout.ClassMapOffset();
 	}
@@ -620,7 +620,7 @@ namespace DCLF
 		const org::LatchBlock& latchBlock = *shape.latch;
 		const MainLatchLayout& latchLayout = shape.latchLayout;
 		// Per-frame values go through the latch; the epoch's first pass copies them.
-		auto latched = LatchedUploads(shape.latched, uploads, RenderGraphRuntime::Get().Host()->CurrentFrameSlot());
+		auto latched = LatchedUploads(shape.latched, uploads, RenderGraphRuntime::Get().Host()->CurrentRun());
 		auto lap = [&, last = std::chrono::steady_clock::now()](std::size_t a_part) mutable {
 			const auto now = std::chrono::steady_clock::now();
 			a_stats.commitUs[a_part] += std::chrono::duration<double, std::micro>(now - last).count();
@@ -673,15 +673,15 @@ namespace DCLF
 		// The segment's BuildDraws latch, in its frame slot (the host waited for the slot).
 		BuildDrawsLatch latch{};
 		FillCullLatch(commit, cull, latch);
-		const std::uint32_t latchSlot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
+		const org::RunRef latchRun = RenderGraphRuntime::Get().Host()->CurrentRun();
 		std::uint32_t poolCopies = 0;
 		if (depthOnly && a_resources->pool)
-			poolCopies = WriteDepthBuckets(commit, latchSlot, latch);
+			poolCopies = WriteDepthBuckets(commit, latchRun, latch);
 		if (!depthOnly) {
-			WriteShadowLatch(commit, latchSlot, latch);
-			WriteClassRegion(commit, latchSlot, latch);
+			WriteShadowLatch(commit, latchRun, latch);
+			WriteClassRegion(commit, latchRun, latch);
 		}
-		LatchWriteValue(latchBlock, "main culling latch", latchSlot, 0, latch);
+		LatchWriteValue(latchBlock, "main culling latch", latchRun, 0, latch);
 		// What a view drawing this frame's depth commit checks it against (TakeViewInputs): its frame and adopted set.
 		if (depthOnly)
 			a_resources->depthCommitted = { frameNumber, cull.inputCount, adopted.Serial() };
@@ -715,7 +715,7 @@ namespace DCLF
 				const std::size_t variant = depthOnly && !poolCopies && recordings.Variants() > 1 ? 1 : 0;
 				SubmitRevisionRecording(revisionEpoch, recordings, recordings.IndexOf(variant, hostedDrawn));
 			}
-			const Direct::MainCommitInputs site{ revisionShape, a_resources, &adopted, &latch, sunCascades, std::span(shadowVolumes.data(), shadowVolumesLatched), latchSlot,
+			const Direct::MainCommitInputs site{ revisionShape, a_resources, &adopted, &latch, sunCascades, std::span(shadowVolumes.data(), shadowVolumesLatched), latchRun,
 				poolCopies };
 			if (depthOnly)
 				Direct::DepthCommitted(site);
@@ -726,9 +726,9 @@ namespace DCLF
 		}
 		// The GPU-driven graph's forward family, the CPU's: its views and culls, from these commits (GraphConditions::forwardDirect).
 		if (!depthOnly && CurrentGraphConditions().forwardDirect)
-			Direct::ColourCommitted({ revisionShape, a_resources, &adopted, &latch, sunCascades, std::span(shadowVolumes.data(), shadowVolumesLatched), latchSlot, poolCopies });
+			Direct::ColourCommitted({ revisionShape, a_resources, &adopted, &latch, sunCascades, std::span(shadowVolumes.data(), shadowVolumesLatched), latchRun, poolCopies });
 		if (depthOnly && CurrentGraphConditions().firstPersonForwardDirect)
-			Direct::DepthCommitted({ revisionShape, a_resources, &adopted, &latch, sunCascades, std::span(shadowVolumes.data(), shadowVolumesLatched), latchSlot, poolCopies });
+			Direct::DepthCommitted({ revisionShape, a_resources, &adopted, &latch, sunCascades, std::span(shadowVolumes.data(), shadowVolumesLatched), latchRun, poolCopies });
 		const auto& recordings = *a_revision.recordings;
 		const std::size_t variant = depthOnly && !poolCopies && recordings.Variants() > 1 ? 1 : 0;
 		SubmitRevisionRecording(revisionEpoch, recordings, recordings.IndexOf(variant, hostedDrawn));

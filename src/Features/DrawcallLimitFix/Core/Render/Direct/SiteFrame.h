@@ -163,11 +163,8 @@ namespace DCLF::Direct::detail
 	/** @brief A frame slot: everything a CPU frame's sites made, kept until the frame's signal completes. */
 	struct FrameSlot
 	{
+		// Its index among the CPU frames' slots (then the forward slots'): what the sites' per-slot tables are indexed by.
 		std::uint32_t index = 0;
-		// The host frame slot the colour commit writes its latch regions at; the frame's other commits write at index. The depth and colour
-		// commits share the main latch block, whose region the GPU reads when the site's work runs, after both commits: one region would
-		// hand the depth site's readers the colour latch (the GPU path's epochs take a slot each).
-		std::uint32_t colourSlot = 0;
 		std::uint64_t signal = 0;  // the CPU-frame timeline's value of the frame that used it last (0: none)
 		bool used = false;         // a frame used it since its last Release
 		// Whether its frame is the CPU pipeline's, and owns the frame's epochs: the host's latch regions, every site, the frame's signal.

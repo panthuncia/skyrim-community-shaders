@@ -211,7 +211,7 @@ namespace
 			for (std::size_t i = 0; i < kVolumes; ++i)
 				block.volumes[i] = a_recording.Index(a_bindings.volumes[i]);
 			block.comparisonSampler = a_frame.sampler;
-			block.shadows = ShaderBindings::LatchOf(*a_frame.latch, a_recording.FrameSlot());
+			block.shadows = ShaderBindings::LatchOf(*a_frame.latch, a_recording.Run());
 			a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), 0);
 		}
 
@@ -322,7 +322,7 @@ struct ORGSkylighting::Impl
 		client.commit = [state = state, resources = resources](const FrameAnchors::Point&) {
 			if (!state->pending)
 				return;
-			resources->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, *state->pending);
+			resources->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, *state->pending);
 			resources->gate->OpenDispatch(0, resources->groups[0], resources->groups[1], resources->groups[2]);
 			state->pending.reset();
 		};
@@ -372,7 +372,7 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature, std::function<void()> a
 	resources->groups[2] = dims[2];
 	resources->program = ComputeProgram::Load(host->Device(), { .source = kShader, .constantWords = ShaderBindings::Words<UpdateProbesBlock>() });
 	resources->sampler = ShaderBindings::CreateSampler({ .compareEnable = true, .compareOp = rhi::CompareOp::LessEqual, .reduction = rhi::ReductionMode::Comparison });
-	resources->latch = std::make_shared<org::LatchBlock>("cs.skylighting.latch", static_cast<std::uint32_t>(sizeof(Shadows)), host->FrameSlots());
+	resources->latch = std::make_shared<org::LatchBlock>("cs.skylighting.latch", static_cast<std::uint32_t>(sizeof(Shadows)));
 	resources->gate = RenderGraph::RunGate::Create("cs.skylighting.gate");
 	if (!resources->program || !resources->sampler || !resources->gate) {
 		logger::warn("[ORG] Skylighting: the probe update's program, sampler or gate could not be made; it stays on D3D11");

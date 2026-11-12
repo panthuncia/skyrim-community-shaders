@@ -86,9 +86,9 @@ namespace DCLF
 		return taken;
 	}
 
-	void LatchWrite(const org::LatchBlock& a_block, std::string_view a_what, std::uint32_t a_slot, std::uint32_t a_offset, std::span<const std::byte> a_bytes)
+	void LatchWrite(const org::LatchBlock& a_block, std::string_view a_what, const org::RunRef& a_run, std::uint32_t a_offset, std::span<const std::byte> a_bytes)
 	{
-		a_block.Write(a_slot, a_offset, a_bytes);
+		a_block.Write(a_run, a_offset, a_bytes);
 		Count(a_what, true, a_bytes.size());
 	}
 }

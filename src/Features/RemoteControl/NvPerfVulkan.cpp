@@ -121,7 +121,7 @@ namespace GpuCounters::detail
 					getProperties(a_info.physicalDevice, &properties);
 					deviceName = properties.deviceName;
 				}
-				lead = a_host.FrameSlots() + 1;
+				lead = a_host.FramesInFlight() + 1;
 				host = &a_host;
 
 				g_backend = this;

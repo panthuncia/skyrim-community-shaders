@@ -38,13 +38,21 @@ namespace DCLF::Draws
 		/** @brief Any thread: a_first as the first version of a buffer of the set, grown as a_spec says. */
 		Versioned Make(std::shared_ptr<org::Buffer> a_first, GrowableSpec a_spec);
 
-		/**
-		 * @brief Any thread: a latch block of the set, a_slots frame slots, made by the seals that require it (another layout: a new
-		 * block; the same one outgrown: grown by a_policy).
-		 */
-		LatchHandle RegisterLatch(std::string a_name, std::uint32_t a_slots, org::services::GrowthPolicy a_policy = org::services::GrowthPolicy::Headroom(0))
+		/** @brief What a latch block of the set holds: a region per run, or one region every run reads (a block of zeros). */
+		enum class LatchRegions : std::uint8_t
 		{
-			return set.Register(org::services::LatchRegistration{ std::move(a_name), a_slots, a_policy });
+			kPerRun,
+			kShared,
+		};
+		/**
+		 * @brief Any thread: a latch block of the set, made by the seals that require it (another layout: a new block; the same one
+		 * outgrown: grown by a_policy). The registration's count is org::LatchBlock::Create's: 1 makes a dedicated block, whose one
+		 * region every run reads; any other count a block of the runtime's frame arena, whose regions follow the runs.
+		 */
+		LatchHandle RegisterLatch(std::string a_name, LatchRegions a_regions, org::services::GrowthPolicy a_policy = org::services::GrowthPolicy::Headroom(0))
+		{
+			const std::uint32_t count = a_regions == LatchRegions::kShared ? 1u : 2u;
+			return set.Register(org::services::LatchRegistration{ std::move(a_name), count, a_policy });
 		}
 
 		/** @brief Producer: the uploader a growth's fills go through (the frame's, as posted: RevisionInputs::uploads). */

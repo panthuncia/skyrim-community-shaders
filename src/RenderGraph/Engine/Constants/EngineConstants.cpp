@@ -266,7 +266,7 @@ namespace RenderGraph::Engine::Constants
 			{
 				if (a_slot.chunk >= frameChunks.size())
 					return {};
-				return { frameChunks[a_slot.chunk]->Slot(0).data() + a_slot.offset, a_slot.size };
+				return { frameChunks[a_slot.chunk]->Bytes().data() + a_slot.offset, a_slot.size };
 			}
 
 			Location Where(const SlotConstants& a_slot) const
@@ -468,7 +468,7 @@ namespace RenderGraph::Engine::Constants
 						return std::nullopt;
 					at = 0;
 				}
-				std::memcpy(frameChunks.back()->Slot(0).data() + at, a_data, a_size);
+				std::memcpy(frameChunks.back()->Bytes().data() + at, a_data, a_size);
 				offset = at + a_size;
 				return std::pair{ static_cast<std::uint16_t>(frameChunks.size() - 1), at };
 			}
@@ -487,7 +487,7 @@ namespace RenderGraph::Engine::Constants
 				}
 				if (!chunk) {
 					try {
-						chunk = org::LatchBlock::Create("Engine::Constants", kChunkBytes, 1);
+						chunk = org::LatchBlock::CreateDedicated("Engine::Constants", kChunkBytes);
 					} catch (const std::exception& e) {
 						return Fail(fmt::format("a ring chunk could not be made ({})", e.what()));
 					}

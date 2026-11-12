@@ -124,7 +124,8 @@ void ComputeProgram::DispatchIndirect(org::RecordingContext& a_recording, std::s
 void ComputeProgram::DispatchIndirect(org::RecordingContext& a_recording, std::span<const std::uint32_t> a_constants, const org::LatchBlock& a_latch,
 	std::uint32_t a_offset) const
 {
-	DispatchIndirect(a_recording, a_constants, a_latch.Resource()->GetAPIResource().GetHandle(), a_latch.Offset(a_recording.FrameSlot()) + a_offset);
+	const auto region = a_latch.At(a_recording.Run());
+	DispatchIndirect(a_recording, a_constants, region.buffer->GetAPIResource().GetHandle(), region.offset + a_offset);
 }
 
 std::shared_ptr<const ComputeProgram> ComputeProgram::Load(rhi::Device a_device, const Desc& a_desc)

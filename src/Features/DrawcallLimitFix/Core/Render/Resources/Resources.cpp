@@ -207,11 +207,11 @@ namespace DCLF::Draws
 			}
 		}
 
-		/** @brief The pipeline statistics query pool and its per-slot readbacks (PassStats::Enabled); none without the pool. */
-		void CreatePassStats(Resources& a_state, org::GraphHost& a_host, rhi::Device a_device)
+		/** @brief The pipeline statistics query pool and its per-range readbacks (PassStats::Enabled); none without the pool. */
+		void CreatePassStats(Resources& a_state, rhi::Device a_device)
 		{
 			auto passStats = std::make_shared<PassStats>();
-			const std::uint32_t slots = a_host.FrameSlots();
+			const std::uint32_t slots = PassStats::kRanges;
 			rhi::QueryPoolDesc desc{};
 			desc.type = rhi::QueryType::PipelineStatistics;
 			desc.count = slots * PassStats::kKinds;
@@ -227,7 +227,7 @@ namespace DCLF::Draws
 				}
 				passStats->written.resize(slots);
 				a_state.passStats = std::move(passStats);
-				logger::info("[DCLF] pass statistics on: {} frame slots", slots);
+				logger::info("[DCLF] pass statistics on: {} run ranges", slots);
 			}
 		}
 
@@ -250,7 +250,8 @@ namespace DCLF::Draws
 			foliage->resultsAddress = AddressOf(a_device, *foliage->results);
 			// The record stands only with the observers' compare pass.
 			bool ready = false;
-			Diagnostics::Notify(Diagnostics::FoliageRecordMade{ *foliage, a_device, a_host.FrameSlots(), ready });
+			// A readback range per run lease index the colour epoch records at: its published copies.
+			Diagnostics::Notify(Diagnostics::FoliageRecordMade{ *foliage, a_device, 16u, ready });
 			if (ready)
 				a_state.foliage = std::move(foliage);
 		}
@@ -436,10 +437,10 @@ namespace DCLF
 			a_state.writers = MakeVersioned(CreateWords(objects * 8, true, "cs.dclf.writers"), { .extent = { 0, 32, 4 } });
 		a_state.retestDispatch = CreateWords(4, true, "cs.dclf.retest-dispatch");
 		if (PassStats::Enabled())
-			CreatePassStats(a_state, a_host, a_device);
-		a_state.preprocessMain = PreprocessStates::Create(a_device, a_host.FrameSlots(), "the main segment");
-		// The forward epoch records in its own epoch, so it needs its own state list.
-		a_state.preprocessForward = PreprocessStates::Create(a_device, a_host.FrameSlots(), "the forward epoch");
+			CreatePassStats(a_state, a_device);
+		a_state.preprocessMain = PreprocessStates::Create(a_device, "the main segment");
+		// The forward epoch records in its own epoch, so it needs its own state lists.
+		a_state.preprocessForward = PreprocessStates::Create(a_device, "the forward epoch");
 		a_state.buildDraws = ComputeProgram::Load(a_device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords });
 		if (!a_state.buildDraws)
 			return NotReady(7, "the BuildDraws program could not be created");
@@ -653,8 +654,7 @@ namespace DCLF
 					buffers->visibilityObjectReported = MakeVersioned(StructuredBuffer(objects, sizeof(std::uint32_t), "cs.dclf.visibility-object-reported", unused, true),
 						{ .extent = { 0, 4, 4 }, .contents = GrowableContents::Zero });
 					auto readback = std::make_shared<VisibilityReadback>();
-					readback->frameSlots = host->FrameSlots();
-					readback->armed.resize(readback->frameSlots);
+					readback->armed.resize(readback->ranges.Count());
 					readback->AddSet(events);
 					buffers->visibilityReadback = std::move(readback);
 				} else {
@@ -893,7 +893,7 @@ namespace DCLF
 		}
 		// The forward part draws through the main set's state classes' colour signatures with an explicit preprocess, as ForwardDrawPass.
 		if (traits.forwardPart)
-			state->preprocessForward = PreprocessStates::Create(device, host->FrameSlots(), fmt::format("the {} forward part", traits.name).c_str());
+			state->preprocessForward = PreprocessStates::Create(device, fmt::format("the {} forward part", traits.name).c_str());
 		resources->views[ViewIndex(a_kind)] = state;
 		v.resources = std::move(state);
 		logger::info("[DCLF] {} graph resources created", traits.name);

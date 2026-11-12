@@ -1260,7 +1260,7 @@ namespace DCLF::Direct::detail
 
 		/**
 		 * @brief Render thread: a slot for a GPU-driven frame's forward family: one released, else a new one, never a wait. They are as many as
-		 * frames in flight. Their indices are past the host's frame slots, which a CPU frame's index names.
+		 * frames in flight. Their indices are past the CPU frames' slots (FrameStart's, the host's frames in flight).
 		 */
 		FrameSlot& TakeForwardSlot(const org::GraphHost& a_host)
 		{
@@ -1268,7 +1268,7 @@ namespace DCLF::Direct::detail
 			for (auto& slot : s.forwardSlots)
 				if (!slot->used)
 					return *slot;
-			auto slot = NewSlot(std::max(1u, a_host.FrameSlots()) + static_cast<std::uint32_t>(s.forwardSlots.size()));
+			auto slot = NewSlot(a_host.FramesInFlight() + static_cast<std::uint32_t>(s.forwardSlots.size()));
 			slot->ownsEpochs = false;
 			s.forwardSlots.push_back(std::move(slot));
 			return *s.forwardSlots.back();
@@ -1512,15 +1512,11 @@ namespace DCLF::Direct
 		// What this frame binds from here on (its commits, FrameValues' versions, the payload's) retires after its own signal, the one
 		// EndFrame queues behind its sites; a frame whose signal was not queued leaves the value to the next.
 		NoteCpuFrameOpened(s.signalled + 1);
-		// The slots: one per two host frame slots (the commits' latch regions: the colour commit's at the second), each with a worker state
-		// per pool thread.
-		const std::uint32_t hostSlots = std::max(1u, host->FrameSlots());
-		const std::uint32_t slots = std::max(1u, hostSlots / 2);
-		while (s.slots.size() < slots) {
-			auto slot = NewSlot(static_cast<std::uint32_t>(s.slots.size()));
-			slot->colourSlot = hostSlots >= 2 ? slot->index + slots : slot->index;
-			s.slots.push_back(std::move(slot));
-		}
+		// The slots: one per frame in flight, each with a worker state per pool thread. A slot's reuse waits for its last frame's signal,
+		// as far back as the host's frame pacing. The commits' latch regions are an external run's of the host's (below), not the slot's.
+		const std::uint32_t slots = host->FramesInFlight();
+		while (s.slots.size() < slots)
+			s.slots.push_back(NewSlot(static_cast<std::uint32_t>(s.slots.size())));
 		auto& slot = *s.slots[s.frames++ % slots];
 		Retire(slot);
 		EnsureDrawBuffer(slot);
@@ -1624,13 +1620,13 @@ namespace DCLF::Direct
 		// The site's GPU time in Tracy: its commits' uploads, its passes and draws, which the frame's other zones leave out.
 		const auto siteZoneName = fmt::format("DCLF site {}", static_cast<std::uint32_t>(a_segment));
 		TracyD3D11ZoneTransientS(globals::state->tracyCtx, siteZone, siteZoneName.c_str(), 0, globals::state->tracyCtx != nullptr);
-		// The colour commit writes the main latch in a run of its own, the depth commit's kept for the depth site's readers.
+		// The colour commit writes the main latch in an external run of its own, the depth commit's kept for the depth site's readers.
 		if (a_segment == RenderGraphRuntime::Segment::MainOpaque)
 			(void)host->BeginExternalRun(S().timeline, S().signalled + 1);
 		std::shared_ptr<org::ExternalEpochExecution> execution;
 		bool executed = true;
 		if (Draws::CpuPipelineSegmentRecords(a_segment)) {
-			// An external epoch (GraphConditions::cpuPipeline): its ticket submitted with the body as its commit (the ticket's frame slot,
+			// An external epoch (GraphConditions::cpuPipeline): its ticket submitted with the body as its commit (the ticket's run,
 			// the graph's services active), which chooses its revision's recording (SubmitRevisionRecording); the host hands the execution
 			// back, which the site's callback runs in DXVK's buffer ahead of its draws.
 			try {

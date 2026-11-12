@@ -154,8 +154,8 @@ namespace DCLF::Draws
 	class LatchedUploads
 	{
 	public:
-		LatchedUploads(const LatchedList& a_layout, CommitUploads& a_fallback, std::uint32_t a_slot) :
-			fallback(a_fallback), slot(a_slot), layout(a_layout), written(a_layout.copies.size(), 0)
+		LatchedUploads(const LatchedList& a_layout, CommitUploads& a_fallback, const org::RunRef& a_run) :
+			fallback(a_fallback), run(a_run), layout(a_layout), written(a_layout.copies.size(), 0)
 		{}
 		/** @brief Values the layout had no copy for (staged instead). */
 		std::uint32_t Misses() const { return misses; }
@@ -206,7 +206,7 @@ namespace DCLF::Draws
 				const auto& copy = listed[i];
 				if (copy.target != a_key || copy.dstOffset != a_offset || a_bytes > copy.bytes || !layout.latch)
 					continue;
-				auto region = layout.latch->Slot(slot).subspan(copy.latchOffset, copy.bytes);
+				auto region = layout.latch->Bytes(run).subspan(copy.latchOffset, copy.bytes);
 				std::memcpy(region.data(), a_data, a_bytes);
 				std::memset(region.data() + a_bytes, 0, copy.bytes - a_bytes);
 				written[i] = 1;
@@ -221,11 +221,11 @@ namespace DCLF::Draws
 		/** @brief The frame's list: the layout's, every copy no value was written to this commit zeroed. */
 		LatchedList Finish()
 		{
-			// A copy no value was written to this commit copies zeros, never what an older frame left in the slot.
+			// A copy no value was written to this commit copies zeros, never what an older run left in a published copy's region.
 			for (std::size_t i = 0; i < written.size(); ++i)
 				if (!written[i] && layout.latch) {
 					const auto& copy = layout.copies[i];
-					auto region = layout.latch->Slot(slot).subspan(copy.latchOffset, copy.bytes);
+					auto region = layout.latch->Bytes(run).subspan(copy.latchOffset, copy.bytes);
 					std::memset(region.data(), 0, region.size());
 				}
 			return layout;
@@ -233,7 +233,7 @@ namespace DCLF::Draws
 
 	private:
 		CommitUploads& fallback;
-		std::uint32_t slot = 0;
+		org::RunRef run{};
 		const LatchedList& layout;
 		std::vector<std::uint8_t> written;
 		std::uint32_t misses = 0;

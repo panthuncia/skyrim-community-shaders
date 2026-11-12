@@ -191,11 +191,11 @@ namespace
 		{
 			if (!a_frame.program || !a_frame.latch || !a_frame.gate)
 				return;
-			const std::uint32_t slot = a_recording.FrameSlot();
+			const org::RunRef run = a_recording.Run();
 			RaymarchBlock block{ a_recording.Index(a_bindings.depth), a_recording.Index(a_bindings.output), a_frame.sampler, {} };
 			// Bend's dispatches write separate pixels, so they need no barrier between them (as on D3D11).
 			for (std::uint32_t i = 0; i < kMaxDispatches; ++i) {
-				block.perFrame = ShaderBindings::LatchOf(*a_frame.latch, slot,
+				block.perFrame = ShaderBindings::LatchOf(*a_frame.latch, run,
 					static_cast<std::uint32_t>(offsetof(RaymarchLatchData, constants) + i * sizeof(ScreenSpaceShadows::RaymarchCB)));
 				a_frame.gate->Dispatch(a_recording, *a_frame.program->compute, ShaderBindings::Data(block), i);
 			}
@@ -291,7 +291,7 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::funct
 		// Written in full every frame, but the engine's draws read it through D3D11: exported, so never aliased.
 		state->output = std::make_unique<GraphResources::Texture2D>(a_desc, std::string(kTextureName),
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient, .d3d11 = GraphResources::Export::SRV });
-		state->latch = std::make_shared<org::LatchBlock>("cs.screen-space-shadows.latch", static_cast<std::uint32_t>(sizeof(RaymarchLatchData)), host->FrameSlots());
+		state->latch = std::make_shared<org::LatchBlock>("cs.screen-space-shadows.latch", static_cast<std::uint32_t>(sizeof(RaymarchLatchData)));
 		// One entry per dispatch of Bend's list: the commit opens those this frame uses.
 		state->gate = RenderGraph::RunGate::Create("cs.screen-space-shadows.dispatches", kMaxDispatches);
 		state->depth = CurrentDepth();
@@ -325,7 +325,7 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::funct
 			RaymarchLatchData data{};
 			for (std::uint32_t i = 0; i < dispatches.count; ++i)
 				data.constants[i] = dispatches.constants[i];
-			state->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, data);
+			state->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, data);
 			for (std::uint32_t i = 0; i < dispatches.count; ++i)
 				state->gate->OpenDispatch(i, dispatches.groups[i][0], dispatches.groups[i][1], dispatches.groups[i][2]);
 		};

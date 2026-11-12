@@ -278,11 +278,11 @@ namespace DCLF::Features::Grass
 			}
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
 				auto counts = std::make_shared<GrassCounts>();
-				for (std::uint32_t i = 0; i < host->FrameSlots(); ++i) {
+				for (std::uint32_t i = 0; i < counts->ranges.Count(); ++i) {
 					counts->readback.push_back(org::Buffer::CreateShared(rhi::HeapType::Readback, sizeof(DrawsHeader)));
 					counts->readback.back()->SetName("cs.dclf.grass-counts-readback");
 				}
-				counts->filled.assign(host->FrameSlots(), 0u);
+				counts->filled.assign(counts->ranges.Count(), 0u);
 				tables->counts = std::move(counts);
 			}
 			return tables;

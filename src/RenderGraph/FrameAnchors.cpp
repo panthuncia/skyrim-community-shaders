@@ -47,58 +47,54 @@ namespace FrameAnchors
 			const char* name;
 			SegmentNames names;
 			bool late;  // may be the last graph work before an upscaler, frame generation or the present
-			// The most runs a frame the anchor's epoch is sized for (GraphHost::Desc::epochRuns): its ring of frame slots grows up to
-			// kGameFramesInFlight times this instead of the host waiting for a run of the same frame, which DXVK has not submitted yet.
-			// 1: an anchor that runs once a frame.
-			std::uint32_t runsPerFrame = 1;
 		};
 
 		constexpr std::array<AnchorInfo, kAnchors> kInfo{ {
 			// Runs a frame: one per cubemap the engine renders (BSCubeMapCamera::RenderCubemap)
-			{ "ReflectionsPrepass", { "CS anchor: reflections prepass", "CS anchor: reflections prepass inputs", "FrameAnchors::ReflectionsPrepass / ", "cs.anchor.reflections-prepass" }, false, 2 },
+			{ "ReflectionsPrepass", { "CS anchor: reflections prepass", "CS anchor: reflections prepass inputs", "FrameAnchors::ReflectionsPrepass / ", "cs.anchor.reflections-prepass" }, false },
 			// Runs a frame: one per reflection face whose sky is drawn
-			{ "SkyReflections", { "CS anchor: reflection sky", "CS anchor: reflection sky inputs", "FrameAnchors::SkyReflections / ", "cs.anchor.sky-reflections" }, false, 6 },
-			{ "EarlyPrepass", { "CS anchor: early prepass", "CS anchor: early prepass inputs", "FrameAnchors::EarlyPrepass / ", "cs.anchor.early-prepass" }, false, 1 },
-			{ "DepthDone", { "CS anchor: depth done", "CS anchor: depth done inputs", "FrameAnchors::DepthDone / ", "cs.anchor.depth-done" }, false, 1 },
-			{ "Prepass", { "CS anchor: prepass", "CS anchor: prepass inputs", "FrameAnchors::Prepass / ", "cs.anchor.prepass" }, false, 1 },
-			{ "Sky", { "CS anchor: sky", "CS anchor: sky inputs", "FrameAnchors::Sky / ", "cs.anchor.sky" }, false, 1 },
-			{ "DeferredPasses", { "CS anchor: deferred passes", "CS anchor: deferred passes inputs", "FrameAnchors::DeferredPasses / ", "cs.anchor.deferred-passes" }, false, 1 },
-			{ "DeferredComposite", { "CS anchor: deferred composite", "CS anchor: deferred composite inputs", "FrameAnchors::DeferredComposite / ", "cs.anchor.deferred-composite" }, false, 1 },
-			{ "PostComposite", { "CS anchor: post-composite", "CS anchor: post-composite inputs", "FrameAnchors::PostComposite / ", "cs.anchor.post-composite" }, false, 1 },
-			{ "PostProcessing", { "CS anchor: post-processing", "CS anchor: post-processing inputs", "FrameAnchors::PostProcessing / ", "cs.anchor.post-processing" }, true, 1 },
-			{ "Upscale", { "CS anchor: upscale", "CS anchor: upscale inputs", "FrameAnchors::Upscale / ", "cs.anchor.upscale" }, true, 1 },
-			{ "Tonemap", { "CS anchor: tonemap", "CS anchor: tonemap inputs", "FrameAnchors::Tonemap / ", "cs.anchor.tonemap" }, true, 1 },
-			{ "FrameGeneration", { "CS anchor: frame generation", "CS anchor: frame generation inputs", "FrameAnchors::FrameGeneration / ", "cs.anchor.frame-generation" }, true, 1 },
-			{ "Present", { "CS anchor: present", "CS anchor: present inputs", "FrameAnchors::Present / ", "cs.anchor.present" }, true, 1 },
-			{ "Overlay", { "CS anchor: overlay", "CS anchor: overlay inputs", "FrameAnchors::Overlay / ", "cs.anchor.overlay" }, true, 1 },
-			{ "HDROutput", { "CS anchor: HDR output", "CS anchor: HDR output inputs", "FrameAnchors::HDROutput / ", "cs.anchor.hdr-output" }, true, 1 },
-			{ "Capture", { "CS anchor: capture", "CS anchor: capture inputs", "FrameAnchors::Capture / ", "cs.anchor.capture" }, true, 1 },
+			{ "SkyReflections", { "CS anchor: reflection sky", "CS anchor: reflection sky inputs", "FrameAnchors::SkyReflections / ", "cs.anchor.sky-reflections" }, false },
+			{ "EarlyPrepass", { "CS anchor: early prepass", "CS anchor: early prepass inputs", "FrameAnchors::EarlyPrepass / ", "cs.anchor.early-prepass" }, false },
+			{ "DepthDone", { "CS anchor: depth done", "CS anchor: depth done inputs", "FrameAnchors::DepthDone / ", "cs.anchor.depth-done" }, false },
+			{ "Prepass", { "CS anchor: prepass", "CS anchor: prepass inputs", "FrameAnchors::Prepass / ", "cs.anchor.prepass" }, false },
+			{ "Sky", { "CS anchor: sky", "CS anchor: sky inputs", "FrameAnchors::Sky / ", "cs.anchor.sky" }, false },
+			{ "DeferredPasses", { "CS anchor: deferred passes", "CS anchor: deferred passes inputs", "FrameAnchors::DeferredPasses / ", "cs.anchor.deferred-passes" }, false },
+			{ "DeferredComposite", { "CS anchor: deferred composite", "CS anchor: deferred composite inputs", "FrameAnchors::DeferredComposite / ", "cs.anchor.deferred-composite" }, false },
+			{ "PostComposite", { "CS anchor: post-composite", "CS anchor: post-composite inputs", "FrameAnchors::PostComposite / ", "cs.anchor.post-composite" }, false },
+			{ "PostProcessing", { "CS anchor: post-processing", "CS anchor: post-processing inputs", "FrameAnchors::PostProcessing / ", "cs.anchor.post-processing" }, true },
+			{ "Upscale", { "CS anchor: upscale", "CS anchor: upscale inputs", "FrameAnchors::Upscale / ", "cs.anchor.upscale" }, true },
+			{ "Tonemap", { "CS anchor: tonemap", "CS anchor: tonemap inputs", "FrameAnchors::Tonemap / ", "cs.anchor.tonemap" }, true },
+			{ "FrameGeneration", { "CS anchor: frame generation", "CS anchor: frame generation inputs", "FrameAnchors::FrameGeneration / ", "cs.anchor.frame-generation" }, true },
+			{ "Present", { "CS anchor: present", "CS anchor: present inputs", "FrameAnchors::Present / ", "cs.anchor.present" }, true },
+			{ "Overlay", { "CS anchor: overlay", "CS anchor: overlay inputs", "FrameAnchors::Overlay / ", "cs.anchor.overlay" }, true },
+			{ "HDROutput", { "CS anchor: HDR output", "CS anchor: HDR output inputs", "FrameAnchors::HDROutput / ", "cs.anchor.hdr-output" }, true },
+			{ "Capture", { "CS anchor: capture", "CS anchor: capture inputs", "FrameAnchors::Capture / ", "cs.anchor.capture" }, true },
 			// Runs a frame: one per shadow map slice cleared
-			{ "EngineShadowClear", { "CS anchor: engine shadow clear", "CS anchor: engine shadow clear inputs", "FrameAnchors::EngineShadowClear / ", "cs.anchor.engine-shadow-clear" }, false, 8 },
+			{ "EngineShadowClear", { "CS anchor: engine shadow clear", "CS anchor: engine shadow clear inputs", "FrameAnchors::EngineShadowClear / ", "cs.anchor.engine-shadow-clear" }, false },
 			// Runs a frame: one per reflection face batch
-			{ "EngineCubeClear", { "CS anchor: engine cube clear", "CS anchor: engine cube clear inputs", "FrameAnchors::EngineCubeClear / ", "cs.anchor.engine-cube-clear" }, false, 4 },
+			{ "EngineCubeClear", { "CS anchor: engine cube clear", "CS anchor: engine cube clear inputs", "FrameAnchors::EngineCubeClear / ", "cs.anchor.engine-cube-clear" }, false },
 			// Runs a frame: one per batch of the other engine clears
-			{ "EngineFrameClear", { "CS anchor: engine frame clear", "CS anchor: engine frame clear inputs", "FrameAnchors::EngineFrameClear / ", "cs.anchor.engine-frame-clear" }, false, 8 },
+			{ "EngineFrameClear", { "CS anchor: engine frame clear", "CS anchor: engine frame clear inputs", "FrameAnchors::EngineFrameClear / ", "cs.anchor.engine-frame-clear" }, false },
 			// Runs a frame: Main::RenderDepth, FinishAccumulating and DeferredPasses
-			{ "EngineDepthCopy", { "CS anchor: engine depth copy", "CS anchor: engine depth copy inputs", "FrameAnchors::EngineDepthCopy / ", "cs.anchor.engine-depth-copy" }, false, 3 },
+			{ "EngineDepthCopy", { "CS anchor: engine depth copy", "CS anchor: engine depth copy inputs", "FrameAnchors::EngineDepthCopy / ", "cs.anchor.engine-depth-copy" }, false },
 			// Runs a frame: one per Scaleform segment drawn on the graph (a display, and one more per D3D11 part); 6 was not passed in a menu tour
-			{ "Interface", { "CS anchor: interface", "CS anchor: interface inputs", "FrameAnchors::Interface / ", "cs.anchor.interface" }, true, 6 },
+			{ "Interface", { "CS anchor: interface", "CS anchor: interface inputs", "FrameAnchors::Interface / ", "cs.anchor.interface" }, true },
 			// Runs a frame: one per batch of ImageSpace draws and dispatches, the sum of ImageSpace.cpp's kScopeRuns: RenderSSAO's, the
 			// reflection pass's and the HDR effect's (two each: a batch cut short by a draw the graph does not take), the pre-tonemap
 			// composites' (one), and one per end-of-frame effect call (depth of field or the distant blur, its two compute blurs,
 			// refraction, the radial blur, the snow copy, the water blend, the LDR downsample: eight), and one per water flow copy (four).
 			// Late: the TAA or the upscaler can follow a batch inside the chain.
-			{ "ImageSpace", { "CS anchor: image space", "CS anchor: image space inputs", "FrameAnchors::ImageSpace / ", "cs.anchor.image-space" }, true, 19 },
+			{ "ImageSpace", { "CS anchor: image space", "CS anchor: image space inputs", "FrameAnchors::ImageSpace / ", "cs.anchor.image-space" }, true },
 			// Runs a frame: the world's shadow masks, the water mask, the water, a menu scene's shadow masks and the screen blood.
-			{ "EngineDraws", { "CS anchor: engine draws", "CS anchor: engine draws inputs", "FrameAnchors::EngineDraws / ", "cs.anchor.engine-draws" }, true, 5 },
+			{ "EngineDraws", { "CS anchor: engine draws", "CS anchor: engine draws inputs", "FrameAnchors::EngineDraws / ", "cs.anchor.engine-draws" }, true },
 			// Runs a frame: one per sun occlusion query the engine submits (Sun::SubmitOcclusionQuery's indices 0 to 2; two seen a frame).
-			{ "EngineQueries", { "CS anchor: engine queries", "CS anchor: engine queries inputs", "FrameAnchors::EngineQueries / ", "cs.anchor.engine-queries" }, false, 3 },
+			{ "EngineQueries", { "CS anchor: engine queries", "CS anchor: engine queries inputs", "FrameAnchors::EngineQueries / ", "cs.anchor.engine-queries" }, false },
 			// Runs a frame: one, at the VL blur's call in RenderWorldPostProcess (the generate, the raymarch, the apply and the blurs)
-			{ "VolumetricLighting", { "CS anchor: volumetric lighting", "CS anchor: volumetric lighting inputs", "FrameAnchors::VolumetricLighting / ", "cs.anchor.volumetric-lighting" }, false, 1 },
+			{ "VolumetricLighting", { "CS anchor: volumetric lighting", "CS anchor: volumetric lighting inputs", "FrameAnchors::VolumetricLighting / ", "cs.anchor.volumetric-lighting" }, false },
 		} };
 
 		// Where each segment runs in a frame: AddToFrame puts an anchor before the first epoch of the order that runs after it. A
-		// segment's place only has to be right against the anchors next to it; the order sizes the frame slots and names the frame,
+		// segment's place only has to be right against the anchors next to it; the order names the frame,
 		// while the ledgers order the work whatever runs.
 		constexpr std::array<Segment, static_cast<std::size_t>(Segment::Count)> kTimeline{
 			Segment::AnchorEngineShadowClear,  // each shadow map slice's clear, before its draws (nominally here)
@@ -201,7 +197,6 @@ namespace FrameAnchors
 		struct State
 		{
 			std::array<bool, kAnchors> reserved{};
-			std::vector<Anchor> reserveOrder;  // Reserve's order: FitSlotBudget drops the last ones first
 			bool frozen = false;  // AddToFrame ran: the reservations are the frame's epochs
 			org::GraphHost* host = nullptr;
 			std::vector<Client> clients;
@@ -210,7 +205,8 @@ namespace FrameAnchors
 			std::uint64_t resizeGeneration = 0;                        // GraphResources' last seen
 			std::function<void()> lateHook;
 			std::vector<RetiredGates> retired;
-			// Per anchor: its submitted runs since the host's seal runsSeal (the last Present), and the most it ever had in one frame.
+			// Per anchor: its submitted runs since the host's seal runsSeal (the last Present), and the most it ever had in one frame
+			// (diagnostics: LogRunStats).
 			std::array<std::uint32_t, kAnchors> runsThisFrame{};
 			std::array<std::uint64_t, kAnchors> runsSeal{};
 			std::array<std::atomic<std::uint32_t>, kAnchors> peakRuns{};
@@ -364,12 +360,6 @@ namespace FrameAnchors
 						return false;
 				return true;
 			});
-		}
-
-		/** @brief The anchor epoch's ring of frame slots: kGameFramesInFlight times its runs a frame (GraphHost::Desc::epochRuns). */
-		std::uint32_t RingCapacity(std::uint32_t a_index)
-		{
-			return RenderGraphRuntime::kGameFramesInFlight * kInfo[a_index].runsPerFrame;
 		}
 
 		/** @brief The anchor's submitted runs since the host's last seal (SealPresented): the count starts again at each seal. */
@@ -619,7 +609,6 @@ namespace FrameAnchors
 			return false;
 		}
 		state.reserved[IndexOf(a_anchor)] = true;
-		state.reserveOrder.push_back(a_anchor);
 		return true;
 	}
 
@@ -893,18 +882,9 @@ namespace FrameAnchors
 		}
 		if (!work)
 			return { RunStatus::Idle };
-		// Past the ring: the host would throw EpochRingFullError (an epoch it sizes for several runs) or wait for a run of this frame,
-		// which DXVK has not submitted (one it sizes for one). Skipped instead, and logged once per anchor.
+		// Every run takes a run lease of the host's: an anchor may run any number of times a frame without waiting for one of its
+		// runs of the same frame, which DXVK has not submitted yet. The runs are counted for the report alone (LogRunStats).
 		auto& runs = RunsSinceSeal(state, index);
-		if (runs >= RingCapacity(index)) {
-			static std::array<std::atomic_flag, kAnchors> logged;
-			if (!logged[index].test_and_set())
-				logger::warn(
-					"[ORG] frame anchors: {} ran {} times since the last Present, all its ring holds ({} runs a frame x {} frames); "
-					"later runs this frame are skipped and their callers keep the engine's path",
-					Name(a_point.anchor), runs, kInfo[index].runsPerFrame, RenderGraphRuntime::kGameFramesInFlight);
-			return { RunStatus::RingFull };
-		}
 		const auto segment = static_cast<Segment>(SegmentOf(a_point.anchor));
 		// The graph holds the upload whenever a registered client reads the shared constants, active or not.
 		std::vector<std::shared_ptr<const ClientDesc>> descs;
@@ -935,9 +915,10 @@ namespace FrameAnchors
 						client.desc->commit(a_point);
 			});
 		}
-		if (result == RenderGraphRuntime::EpochResult::RingFull) {
-			// The host's own count of unsealed runs was reached first (ExecuteEpoch logged it): nothing ran, nothing is dropped.
-			return { RunStatus::RingFull };
+		if (result == RenderGraphRuntime::EpochResult::Skipped) {
+			// Only a revision-driven epoch is skipped (its published copies were all busy), never an anchor's live one: nothing ran,
+			// nothing is dropped.
+			return { RunStatus::Refused };
 		}
 		if (result == RenderGraphRuntime::EpochResult::EpochFailed) {
 			// Only this anchor's epoch failed (ExecuteEpoch logged why). Its clients are dropped at the next poll (OnEpochFailed); the
@@ -956,14 +937,10 @@ namespace FrameAnchors
 					client.desc->onFailed();
 			return { RunStatus::Failed };
 		}
-		// The run counts against the ring, and the peak is what RunsPerFrame should be sized from (LogRunStats).
+		// The run is counted, and the peak reported (LogRunStats).
 		++runs;
-		if (runs > state.peakRuns[index].load(std::memory_order_relaxed)) {
+		if (runs > state.peakRuns[index].load(std::memory_order_relaxed))
 			state.peakRuns[index].store(runs, std::memory_order_relaxed);
-			if (runs > kInfo[index].runsPerFrame)
-				logger::info("[ORG] frame anchors: {} ran {} times in one frame, above the {} it is sized for (its ring holds {})", Name(a_point.anchor),
-					runs, kInfo[index].runsPerFrame, RingCapacity(index));
-		}
 		// An epoch must not be the last GPU work before a third-party Vulkan consumer (render-graph.md, "Hazard: external Vulkan
 		// work directly after a graph epoch"). After the late anchors an upscaler, frame generation or the present may follow.
 		if (kInfo[index].late && state.lateHook)
@@ -1016,12 +993,7 @@ namespace FrameAnchors
 		const auto* client = FindClient(state, a_id);
 		if (!client || !InGraphs(*client->desc) || client->serial > state.built[index].load(std::memory_order_acquire))
 			return false;
-		return RunsSinceSeal(state, index) < RingCapacity(index);
-	}
-
-	std::uint32_t RunsPerFrame(Anchor a_anchor)
-	{
-		return IndexOf(a_anchor) < kAnchors ? kInfo[IndexOf(a_anchor)].runsPerFrame : 0;
+		return true;
 	}
 
 	std::uint32_t PeakRunsPerFrame(Anchor a_anchor)
@@ -1082,50 +1054,9 @@ namespace FrameAnchors
 		std::string runs;
 		for (std::uint32_t i = 0; i < kAnchors; ++i)
 			if (state.reserved[i] && state.frozen)
-				runs += fmt::format("{}{} {}/{}", runs.empty() ? "" : ", ", kInfo[i].name, state.peakRuns[i].load(std::memory_order_relaxed), kInfo[i].runsPerFrame);
+				runs += fmt::format("{}{} {}", runs.empty() ? "" : ", ", kInfo[i].name, state.peakRuns[i].load(std::memory_order_relaxed));
 		if (!runs.empty())
-			logger::info("[ORG] frame anchors, peak runs in one frame / sized for: {}", runs);
-	}
-
-	void FitSlotBudget(const std::vector<std::uint32_t>& a_epochs, std::uint32_t a_framesInFlight, std::uint32_t a_maxSlots)
-	{
-		auto& state = Anchors();
-		if (!RenderGraphRuntime::EpochsEnabled())
-			return;
-		// Every epoch of the order that is not a reserved anchor's runs once a frame.
-		std::uint64_t others = 0;
-		for (const auto epoch : a_epochs) {
-			const Anchor anchor = AnchorOfEpoch(epoch);
-			if (anchor == Anchor::Count || !state.reserved[IndexOf(anchor)])
-				++others;
-		}
-		const std::uint64_t frames = (std::max)(a_framesInFlight, 1u);
-		const auto total = [&] {
-			std::uint64_t runs = others;
-			for (std::uint32_t i = 0; i < kAnchors; ++i)
-				if (state.reserved[i])
-					runs += kInfo[i].runsPerFrame;
-			return runs * frames;
-		};
-		// Over the budget, the anchors reserved last lose their reservation: loud, and never a smaller ring than kInfo says.
-		for (auto it = state.reserveOrder.rbegin(); it != state.reserveOrder.rend() && total() > a_maxSlots; ++it) {
-			const std::uint32_t index = IndexOf(*it);
-			if (!state.reserved[index])
-				continue;
-			const std::uint64_t over = total();
-			state.reserved[index] = false;
-			logger::error(
-				"[ORG] frame anchor {}: reservation dropped. The frame slots ({} frames in flight x every epoch's runs a frame) would be {}, "
-				"more than the budget of {} (RenderGraphRuntime::kMaxFrameSlots); its clients stay on D3D11. Lower an anchor's runs a frame in FrameAnchors.cpp (kInfo; "
-				"CS_ORG_EPOCH_STATS=1 logs the peaks) or merge anchors",
-				kInfo[index].name, frames, over, a_maxSlots);
-		}
-		std::string anchors;
-		for (std::uint32_t i = 0; i < kAnchors; ++i)
-			if (state.reserved[i])
-				anchors += fmt::format("{}{}:{}", anchors.empty() ? "" : ", ", kInfo[i].name, kInfo[i].runsPerFrame);
-		logger::info("[ORG] frame slot budget: {} of {} ({} frames x ({} other epochs + anchors' runs a frame: {}))", total(), a_maxSlots, frames, others,
-			anchors.empty() ? "none" : anchors);
+			logger::info("[ORG] frame anchors, peak runs in one frame: {}", runs);
 	}
 
 	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t a_target)
@@ -1270,18 +1201,6 @@ namespace FrameAnchors
 		}
 	}
 
-	std::vector<std::pair<std::uint32_t, std::uint32_t>> RunsPerFrame()
-	{
-		const auto& state = Anchors();
-		std::vector<std::pair<std::uint32_t, std::uint32_t>> runs;
-		if (!RenderGraphRuntime::EpochsEnabled())
-			return runs;
-		for (std::uint32_t i = 0; i < kAnchors; ++i)
-			if (state.reserved[i] && kInfo[i].runsPerFrame > 1)
-				runs.emplace_back(RenderGraphRuntime::EpochOf(static_cast<Segment>(SegmentOf(static_cast<Anchor>(i)))), kInfo[i].runsPerFrame);
-		return runs;
-	}
-
 	void Attach(org::GraphHost& a_host)
 	{
 		auto& state = Anchors();
@@ -1320,9 +1239,7 @@ namespace FrameAnchors
 	void ClaimRenderOwnership() {}
 	bool RequestJoin(std::string_view, Anchor) { return false; }
 	bool CanRun(std::string_view, Anchor) { return false; }
-	std::uint32_t RunsPerFrame(Anchor) { return 0; }
 	std::uint32_t PeakRunsPerFrame(Anchor) { return 0; }
-	void FitSlotBudget(const std::vector<std::uint32_t>&, std::uint32_t, std::uint32_t) {}
 	void OnFrameEnd() {}
 	bool BuildPending(std::string_view) { return false; }
 	void LogRunStats() {}
@@ -1341,7 +1258,6 @@ namespace FrameAnchors
 	const SegmentNames* NamesOf(std::uint32_t) { return nullptr; }
 	void OnEpochFailed(std::uint32_t, const std::string&, bool) {}
 	void AddToFrame(std::vector<std::uint32_t>&) {}
-	std::vector<std::pair<std::uint32_t, std::uint32_t>> RunsPerFrame() { return {}; }
 	void Attach(org::GraphHost&) {}
 }
 

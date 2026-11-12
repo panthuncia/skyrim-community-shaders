@@ -130,7 +130,7 @@ namespace
 			CopyBlock block{ a_recording.Index(a_bindings.source), a_recording.Index(a_bindings.cache), {} };
 			// A copy the frame did not stage has zero groups in its gate entry, so it does no work.
 			for (std::uint32_t copy = 0; copy < ORGLocalShadows::kMaxCopies; ++copy) {
-				block.copy = ShaderBindings::LatchOf(*a_frame.latch, a_recording.FrameSlot(), copy * sizeof(CopyConstants));
+				block.copy = ShaderBindings::LatchOf(*a_frame.latch, a_recording.Run(), copy * sizeof(CopyConstants));
 				a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), copy);
 			}
 		}
@@ -179,8 +179,9 @@ namespace
 		{
 			if (!a_frame.latch || !a_frame.bytes)
 				return;
+			const auto region = a_frame.latch->At(a_recording.Run());
 			a_recording.Commands().CopyBufferRegion(a_recording.Resolve(a_bindings.data).GetHandle(), 0,
-				a_frame.latch->Resource()->GetAPIResource().GetHandle(), a_frame.latch->Offset(a_recording.FrameSlot()) + kDataOffset, a_frame.bytes);
+				region.buffer->GetAPIResource().GetHandle(), region.offset + kDataOffset, a_frame.bytes);
 		}
 
 	private:
@@ -292,7 +293,7 @@ bool ORGLocalShadows::Setup(const Desc& a_desc, std::function<void()> a_onFailed
 		return false;
 	}
 	try {
-		resources->latch = org::LatchBlock::Create("LightLimitFix::LocalShadowLatch", kDataOffset + a_desc.slots * a_desc.dataStride, host->FrameSlots());
+		resources->latch = org::LatchBlock::Create("LightLimitFix::LocalShadowLatch", kDataOffset + a_desc.slots * a_desc.dataStride);
 	} catch (const std::exception& e) {
 		logger::warn("[ORG] LLF local shadows stay on D3D11: the latch could not be created: {}", e.what());
 		return false;
@@ -333,15 +334,15 @@ bool ORGLocalShadows::Setup(const Desc& a_desc, std::function<void()> a_onFailed
 		auto* graphHost = RenderGraphRuntime::Get().Host();
 		if (!graphHost)
 			return;
-		const std::uint32_t slot = graphHost->CurrentFrameSlot();
+		const org::RunRef run = graphHost->CurrentRun();
 		// A frame that staged nothing opens no copy (the run closed the gate): the engine's slices are not this frame's. The
 		// data stays as last staged.
 		if (std::exchange(resources->staged, false)) {
-			resources->latch->Write(slot, 0, std::as_bytes(std::span(resources->copies)));
+			resources->latch->Write(run, 0, std::as_bytes(std::span(resources->copies)));
 			for (std::uint32_t copy = 0; copy < resources->copyCount; ++copy)
 				resources->gate->OpenDispatch(copy, resources->groups, resources->groups);
 		}
-		resources->latch->Write(slot, kDataOffset, resources->slotData);
+		resources->latch->Write(run, kDataOffset, resources->slotData);
 	};
 	client.gates = { resources->gate };
 	client.onFailed = [onFailed = std::move(a_onFailed)] {

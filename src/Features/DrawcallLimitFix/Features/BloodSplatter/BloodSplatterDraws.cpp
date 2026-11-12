@@ -86,13 +86,13 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 				if (!a_frame.run || !a_frame.client)
 					return;
 				const auto& c = *a_frame.client;
-				const std::uint32_t slot = a_recording.FrameSlot();
+				const org::RunRef latchRun = a_recording.Run();
 				for (std::uint32_t i = 0; i < a_frame.run->draws.size(); ++i) {
 					const auto& draw = a_frame.run->draws[i];
 					if (!draw.program)
 						continue;
 					const auto& program = *static_cast<const RasterProgram*>(draw.program.get());
-					const BloodBlock block{ ShaderBindings::LatchOf(*c.latch, slot, i * kDrawStride) };
+					const BloodBlock block{ ShaderBindings::LatchOf(*c.latch, latchRun, i * kDrawStride) };
 					const RasterProgram::Colour colour{ .view = &a_bindings.target };
 					program.Draw(a_recording, { .colours = std::span<const RasterProgram::Colour>(&colour, 1),
 												  .viewport = { .x = draw.viewport.rect[0], .y = draw.viewport.rect[1], .width = draw.viewport.rect[2], .height = draw.viewport.rect[3] },
@@ -188,7 +188,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			return true;
 		}
 		auto client = std::make_shared<Client>();
-		client->latch = std::make_shared<org::LatchBlock>(std::string(kClientId) + ".latch", kMaxDraws * kDrawStride, host->FrameSlots());
+		client->latch = std::make_shared<org::LatchBlock>(std::string(kClientId) + ".latch", kMaxDraws * kDrawStride);
 		client->gate = ::RenderGraph::RunGate::Create(std::string(kClientId) + ".gate", kMaxDraws);
 		if (!client->gate) {
 			logger::warn("[DCLF] blood splatter: the run gate could not be made; the screen blood stays the engine's");
@@ -212,10 +212,10 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			auto* host = RenderGraphRuntime::Get().Host();
 			if (!run || !host)
 				return;
-			const std::uint32_t slot = host->CurrentFrameSlot();
+			const org::RunRef latchRun = host->CurrentRun();
 			for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
 				const auto& draw = run->draws[i];
-				client->latch->WriteValue(slot, i * kDrawStride, draw.constants);
+				client->latch->WriteValue(latchRun, i * kDrawStride, draw.constants);
 				if (draw.program)
 					client->gate->OpenDraw(i, draw.indexCount, 1);
 			}

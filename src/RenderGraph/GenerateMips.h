@@ -52,7 +52,7 @@ namespace GraphPasses
 
 	/**
 	 * @brief Makes the mip chain's dispatches conditional for a client that builds the mips only on some frames, while its recording is
-	 * kept: step i (mip i + 1) reads its group counts from a_latch's region of the execution's frame slot, at a_offset + i * 16 bytes
+	 * kept: step i (mip i + 1) reads its group counts from a_latch's region of the run being recorded, at a_offset + i * 16 bytes
 	 * (DispatchGroups). The client's commit writes GenerateMipsGroups there, or zeros to skip the chain.
 	 */
 	struct GenerateMipsGate

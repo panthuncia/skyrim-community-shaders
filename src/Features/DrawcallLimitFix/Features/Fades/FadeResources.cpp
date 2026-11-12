@@ -64,7 +64,7 @@ namespace DCLF::Features::Fades
 			scene->fadeRootPrograms = Draws::MakeVersioned(a_setup.StructuredBuffer(roots, sizeof(std::uint32_t), "cs.dclf.fade-root-programs"), { .extent = { 0, 4, 4 } });
 			scene->fadeAnimated = Draws::MakeVersioned(a_setup.StructuredBuffer(roots, sizeof(std::uint32_t), "cs.dclf.fade-animated"), { .extent = { 0, 4, 4 } });
 			scene->fadeLog = a_setup.StructuredBuffer(kFadeLogEntries, sizeof(FadeLogEntry), "cs.dclf.fade-log", true);
-			// The fade write-back: events, the roots' reported milestones, and a staging set (a host buffer per frame slot).
+			// The fade write-back: events, the roots' reported milestones, and a staging set (a host buffer per readback range).
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
 				const std::uint32_t events = a_setup.smallStart ? 4u : kInitialFadeEvents;
 				scene->fadeEvents = Draws::MakeVersioned(Draws::CreateWords(FadeWriteBack::BytesFor(events) / 4, true, "cs.dclf.fade-events"),
@@ -72,8 +72,7 @@ namespace DCLF::Features::Fades
 				scene->fadeReported = Draws::MakeVersioned(a_setup.StructuredBuffer(roots, 2 * sizeof(std::uint32_t), "cs.dclf.fade-reported", true),
 					{ .extent = { 0, 8, 8 }, .contents = GrowableContents::Zero });
 				auto writeBack = std::make_shared<FadeWriteBack>();
-				writeBack->frameSlots = host->FrameSlots();
-				writeBack->armed.resize(writeBack->frameSlots);
+				writeBack->armed.resize(writeBack->ranges.Count());
 				writeBack->AddSet(events);
 				postedWriteBack = writeBack;
 				scene->fadeWriteBack = std::move(writeBack);

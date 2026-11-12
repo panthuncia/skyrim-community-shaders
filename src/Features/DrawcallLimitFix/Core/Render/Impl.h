@@ -22,6 +22,8 @@ namespace DCLF
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEngine.h"
 #include "Features/DrawcallLimitFix/Api/LightVolumes.h"
 
+#include <Render/RunRef.h>
+
 namespace DCLF
 {
 	namespace Draws
@@ -154,7 +156,7 @@ namespace DCLF
 		void WaitAhead();
 		/**
 		 * @brief The depth commit, after the commit hooks (the root states' producer arms its write-back there: Features/Fades' hook):
-		 * harvests the frame slot's last visibility events for the decode task, resets the list, arms the slot (the reported words zeroed
+		 * harvests its run's readback range's last visibility events for the decode task, resets the list, arms the range (the reported words zeroed
 		 * once per backing).
 		 */
 		void ArmVisibilityReadback(SceneBuffers& a_scene, CommitUploads& a_uploads);
@@ -205,7 +207,7 @@ namespace DCLF
 		 * @brief A hosted view epoch a_epoch's commit (IndirectDraws::SubmitViewEpoch of the reflection's faces, first person's depth), into its host's commit
 		 * (hostedCommit: only from inside it, the depth commit running the view's work), against the selected revision's shape of the epoch,
 		 * which the host's recordings carry: a_listed's payloads, its frame textures and its draw families' rows held with the host's
-		 * execution, its latch written in the host's frame slot, and the epoch marked committed (the host submits its recording with its
+		 * execution, its latch written in the host's current run, and the epoch marked committed (the host submits its recording with its
 		 * passes' work). NoRevision outside its host's commit or uncovered.
 		 */
 		IndirectDraws::ViewSubmit CommitHostedView(ViewKind a_view, std::uint32_t a_epoch, const IndirectDraws::ViewListed& a_listed, std::span<const ViewFace> a_faces,
@@ -283,9 +285,9 @@ namespace DCLF
 		void ResolveFrameTextures(const MainCommit& a_commit, std::array<std::uint32_t, kTextureRegisters>& a_frameTextures);
 		void UploadSceneStreams(const MainCommit& a_commit);
 		void ZeroCommitCounts(const MainCommit& a_commit);
-		std::uint32_t WriteDepthBuckets(const MainCommit& a_commit, std::uint32_t a_latchSlot, BuildDrawsLatch& a_latch);  // the index pool's copies
-		void WriteShadowLatch(const MainCommit& a_commit, std::uint32_t a_latchSlot, BuildDrawsLatch& a_latch);
-		void WriteClassRegion(const MainCommit& a_commit, std::uint32_t a_latchSlot, BuildDrawsLatch& a_latch);
+		std::uint32_t WriteDepthBuckets(const MainCommit& a_commit, const org::RunRef& a_latchRun, BuildDrawsLatch& a_latch);  // the index pool's copies
+		void WriteShadowLatch(const MainCommit& a_commit, const org::RunRef& a_latchRun, BuildDrawsLatch& a_latch);
+		void WriteClassRegion(const MainCommit& a_commit, const org::RunRef& a_latchRun, BuildDrawsLatch& a_latch);
 
 		// The vertex-stage inputs the Z-prepass wrote its depth with: the colour pass tests EQUAL against it, and the engine rewrites
 		// the per-frame constants between the depth pass and the composite, so the colour pass reuses these bytes.

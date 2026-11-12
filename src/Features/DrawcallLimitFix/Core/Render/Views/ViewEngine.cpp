@@ -229,7 +229,7 @@ namespace DCLF
 		const bool trees = TraitsOf(a_view).trees;
 		if (trees)
 			rows = ViewFaceRows(a_view, *shape, owners);
-		// Its latch in the host's frame slot (the host's execution's, CurrentFrameSlot), which the host's latched copies and its passes read.
+		// Its latch in the host's current run (the host's execution's, CurrentRun), which the host's latched copies and its passes read.
 		const std::uint32_t drawn = CommitView(*shape, a_faces, a_listed.inputs, trees ? &rows : nullptr);
 		commit.drawn |= 1u << a_epoch;
 		if (a_drawn)

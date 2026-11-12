@@ -129,7 +129,7 @@ namespace DCLF::Features::Water::WaterDraws
 				const auto& c = *a_frame.client;
 				const auto shared = SharedConstants::Index(a_recording, a_bindings.shared);
 				const auto& headers = run.headerIndices;
-				const std::uint32_t slot = a_recording.FrameSlot();
+				const org::RunRef latchRun = a_recording.Run();
 				for (std::uint32_t i = 0; i < run.draws.size(); ++i) {
 					const auto& draw = run.draws[i];
 					if (!draw.program)
@@ -138,9 +138,9 @@ namespace DCLF::Features::Water::WaterDraws
 					const std::uint32_t offset = i * kDrawStride;
 					WaterBlock block{};
 					block.shared = shared;
-					block.draw = ShaderBindings::LatchOf(*c.latch, slot, offset);
-					block.strictLights = ShaderBindings::LatchOf(*c.latch, slot, offset + static_cast<std::uint32_t>(offsetof(DrawLatch, strictLights)));
-					block.directionalShadow = ShaderBindings::LatchOf(*c.latch, slot, offset + static_cast<std::uint32_t>(offsetof(DrawLatch, directionalShadow)));
+					block.draw = ShaderBindings::LatchOf(*c.latch, latchRun, offset);
+					block.strictLights = ShaderBindings::LatchOf(*c.latch, latchRun, offset + static_cast<std::uint32_t>(offsetof(DrawLatch, strictLights)));
+					block.directionalShadow = ShaderBindings::LatchOf(*c.latch, latchRun, offset + static_cast<std::uint32_t>(offsetof(DrawLatch, directionalShadow)));
 					std::copy_n(headers.begin(), kHeadersBeforeShadow, block.headers.begin());
 					std::copy(headers.begin() + kHeadersBeforeShadow, headers.end(), block.lateHeaders.begin());
 
@@ -248,7 +248,7 @@ namespace DCLF::Features::Water::WaterDraws
 			auto client = std::make_shared<Client>();
 			client->shape = a_shape;
 			client->id = a_shape.view == View::Mask ? "cs.water.mask" : "cs.water.surface";
-			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kMaxDraws * kDrawStride, host->FrameSlots());
+			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kMaxDraws * kDrawStride);
 			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kMaxDraws);
 			if (!client->gate) {
 				logger::warn("[DCLF] water: the {} run gate could not be made; the water stays the engine's", client->id);
@@ -285,10 +285,10 @@ namespace DCLF::Features::Water::WaterDraws
 				auto* host = RenderGraphRuntime::Get().Host();
 				if (!run || !host)
 					return;
-				const std::uint32_t slot = host->CurrentFrameSlot();
+				const org::RunRef latchRun = host->CurrentRun();
 				for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
 					const auto& draw = run->draws[i];
-					client->latch->WriteValue(slot, i * kDrawStride, draw.latch);
+					client->latch->WriteValue(latchRun, i * kDrawStride, draw.latch);
 					if (draw.program)
 						client->gate->OpenDraw(i, draw.indexCount, 1);
 				}

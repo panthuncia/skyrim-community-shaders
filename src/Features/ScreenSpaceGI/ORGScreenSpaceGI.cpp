@@ -486,7 +486,7 @@ struct ORGScreenSpaceGI::Impl
 			return;
 		auto& feature = globals::features::screenSpaceGI;
 		const auto constants = feature.BuildConstants({ static_cast<float>(state->ao->Desc().Width), static_cast<float>(state->ao->Desc().Height) });
-		latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentFrameSlot(), 0, constants);
+		latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, constants);
 		const auto sizes = feature.GetDispatchSizes();
 		const auto open = [&](Step a_step, const std::array<uint, 2>& a_size, uint a_tile) {
 			if (state->programs[a_step])
@@ -561,8 +561,7 @@ bool ORGScreenSpaceGI::Setup(const D3D11_TEXTURE2D_DESC& a_main, std::function<v
 			.magFilter = rhi::Filter::Nearest,
 			.mipFilter = rhi::MipFilter::Nearest });
 		next->linearSampler = ShaderBindings::CreateSampler({});
-		next->latch = std::make_shared<org::LatchBlock>("cs.ssgi.latch", static_cast<std::uint32_t>(sizeof(ScreenSpaceGI::SSGICB)),
-			runtime.Host()->FrameSlots());
+		next->latch = std::make_shared<org::LatchBlock>("cs.ssgi.latch", static_cast<std::uint32_t>(sizeof(ScreenSpaceGI::SSGICB)));
 		next->gate = RenderGraph::RunGate::Create("cs.ssgi.gate", kSteps);
 		next->state = next->Build(Config::Current(), true);
 		// The other configurations' programs, off the render thread: a settings change then makes no compile.

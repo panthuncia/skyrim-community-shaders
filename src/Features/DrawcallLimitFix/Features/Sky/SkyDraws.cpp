@@ -212,12 +212,12 @@ namespace DCLF::Features::Sky::SkyDraws
 				block.cloudShadows = a_bindings.hasCloudShadows ? a_recording.Index(a_bindings.cloudShadows) : c.nullCube;
 				block.headers = run.headerIndices;
 				const std::uint32_t face = run.face < kFaces ? run.face : 0;
-				const std::uint32_t slot = a_recording.FrameSlot();
+				const org::RunRef latchRun = a_recording.Run();
 
 				const auto draw = [&](const RasterProgram& a_program, std::uint32_t a_index, std::span<const RasterProgram::Colour> a_colours,
 									  rhi::QueryPoolHandle a_queries = {}, std::uint32_t a_query = 0) {
 					const auto& latched = run.draws[a_index];
-					block.draw = ShaderBindings::LatchOf(*c.latch, slot, a_index * kDrawStride);
+					block.draw = ShaderBindings::LatchOf(*c.latch, latchRun, a_index * kDrawStride);
 					const RasterProgram::Depth depth{ .view = &a_bindings.depth, .readOnly = false };
 					return a_program.Draw(a_recording, { .colours = a_colours,
 													.depth = a_bindings.hasDepth ? &depth : nullptr,
@@ -239,18 +239,18 @@ namespace DCLF::Features::Sky::SkyDraws
 					block.sharedDepth = block.depth;
 					block.cloudShadows = c.nullCube;
 					block.headers = { c.null2D, c.null2D, c.nullCube, c.nullCube };
-					// Each draw counted by its own query of the frame slot's range: reset first, resolved after (every query available).
+					// Each draw counted by its own query of the run's range: reset first, resolved after (every query available).
 					const auto& queries = *c.queries;
 					auto& commands = a_recording.Commands();
-					queries.Reset(commands, slot);
+					queries.Reset(commands, latchRun);
 					std::uint32_t begun = 0;
 					const RasterProgram::Colour colour{ .view = &a_bindings.colours[0] };
 					for (std::uint32_t i = 0; i < run.draws.size() && i < queries.PerRun(); ++i) {
 						const auto& latched = run.draws[i];
-						if (latched.program && draw(*static_cast<const RasterProgram*>(latched.program.get()), i, { &colour, 1 }, queries.Pool(), queries.Index(slot, i)))
+						if (latched.program && draw(*static_cast<const RasterProgram*>(latched.program.get()), i, { &colour, 1 }, queries.Pool(latchRun), queries.Index(latchRun, i)))
 							begun |= 1u << i;
 					}
-					queries.Resolve(commands, slot, begun);
+					queries.Resolve(commands, latchRun, begun);
 					return;
 				}
 
@@ -379,7 +379,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			client->anchor = a_shape.view == View::Main ? FrameAnchors::Anchor::Sky :
 			                 a_shape.view == View::Face ? FrameAnchors::Anchor::SkyReflections :
 			                                              FrameAnchors::Anchor::EngineQueries;
-			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kMaxDraws * kDrawStride, host->FrameSlots());
+			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kMaxDraws * kDrawStride);
 			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kMaxDraws);
 			if (!client->gate) {
 				logger::warn("[DCLF] sky: the {} run gate could not be made; the sky stays the engine's", client->id);
@@ -470,16 +470,16 @@ namespace DCLF::Features::Sky::SkyDraws
 				auto* host = RenderGraphRuntime::Get().Host();
 				if (!run || !host)
 					return;
-				const std::uint32_t slot = host->CurrentFrameSlot();
+				const org::RunRef latchRun = host->CurrentRun();
 				for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
 					const auto& draw = run->draws[i];
-					client->latch->WriteValue(slot, i * kDrawStride, draw.constants);
+					client->latch->WriteValue(latchRun, i * kDrawStride, draw.constants);
 					if (draw.program)
 						client->gate->OpenDraw(i, draw.indexCount, 1);
 				}
 				// The engine ring slot the run's draw counts.
 				if (client->queries)
-					client->queries->Commit(slot, std::span<const std::int32_t>(&run->query, 1));
+					client->queries->Commit(latchRun, std::span<const std::int32_t>(&run->query, 1));
 			};
 			desc.executed = [client](const FrameAnchors::Point&) {
 				if (client->queries)

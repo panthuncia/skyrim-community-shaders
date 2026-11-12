@@ -200,7 +200,7 @@ namespace
 				return;
 			const ExtractionBlock block{ SharedConstants::Index(a_recording, a_bindings.shared), a_recording.Index(a_bindings.output),
 				a_recording.Index(a_bindings.color), a_recording.Index(a_bindings.mask), a_recording.Index(a_bindings.albedo),
-				ShaderBindings::LatchOf(*a_frame.latch, a_recording.FrameSlot(), 0) };
+				ShaderBindings::LatchOf(*a_frame.latch, a_recording.Run(), 0) };
 			a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), kGateEntry);
 		}
 
@@ -265,7 +265,7 @@ namespace
 			const BlurBlock block{ SharedConstants::Index(a_recording, a_bindings.shared), a_recording.Index(a_bindings.output),
 				a_recording.Index(a_bindings.color), a_recording.Index(a_bindings.depth), a_recording.Index(a_bindings.mask),
 				a_recording.Index(a_bindings.albedo), a_recording.Index(a_bindings.normal), a_frame.pointSampler,
-				ShaderBindings::LatchOf(*a_frame.latch, a_recording.FrameSlot(), 0) };
+				ShaderBindings::LatchOf(*a_frame.latch, a_recording.Run(), 0) };
 			a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), kGateEntry);
 		}
 
@@ -343,8 +343,7 @@ struct ORGSubsurfaceScattering::Impl
 			if (!state->targets)
 				return;
 			auto& feature = globals::features::subsurfaceScattering;
-			const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
-			state->latch->WriteValue(slot, 0, feature.BuildBlurConstants(state->mode));
+			state->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, feature.BuildBlurConstants(state->mode));
 			// Only when the frame drew skin, as DrawSSS's check. Otherwise the gate stays closed and the passes do no work.
 			if (feature.validMaterials) {
 				const auto groups = Util::GetScreenDispatchCount();
@@ -397,7 +396,7 @@ struct ORGSubsurfaceScattering::Impl
 		next->blurTemp = std::make_unique<GraphResources::Texture2D>(a_desc, "SSS::BlurHorizontalTemp");
 		if (!*next->blurTemp)
 			fail("its blur texture");
-		next->latch = std::make_shared<org::LatchBlock>("cs.subsurface.latch", static_cast<std::uint32_t>(sizeof(LatchData)), host->FrameSlots());
+		next->latch = std::make_shared<org::LatchBlock>("cs.subsurface.latch", static_cast<std::uint32_t>(sizeof(LatchData)));
 		next->gate = RenderGraph::RunGate::Create("cs.subsurface.dispatch");
 		if (!next->gate)
 			fail("its run gate");

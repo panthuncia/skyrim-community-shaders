@@ -28,8 +28,8 @@
  * Samplers are not graph resources: create one per program with CreateSampler at setup and keep the binding while the program lives.
  *
  * Values that change every frame go in a LATCH entry: the client's commit writes them into its org::LatchBlock at the host's current
- * frame slot, and Record names the region with LatchOf(block, a_recording.FrameSlot()). The recording then stays the same from frame to
- * frame, so it can be prepared ahead and reused.
+ * run (GraphHost::CurrentRun), and Record names the run's region with LatchOf(block, a_recording.Run()). The recording does not depend
+ * on the values, so it can be prepared ahead.
  */
 namespace ShaderBindings
 {
@@ -60,12 +60,13 @@ namespace ShaderBindings
 	};
 
 	/**
-	 * @brief A LATCH entry for a latch block's region of a frame slot (Record: a_recording.FrameSlot()), a_offset bytes into it. The
-	 * offset must be a multiple of 4.
+	 * @brief A LATCH entry for a latch block's region of a run (Record: a_recording.Run()), a_offset bytes into it: the view of the
+	 * arena chunk the region is in, and the region's offset there. The offset must be a multiple of 4.
 	 */
-	inline Latch LatchOf(const org::LatchBlock& a_block, std::uint32_t a_slot, std::uint32_t a_offset = 0)
+	inline Latch LatchOf(const org::LatchBlock& a_block, const org::RunRef& a_run, std::uint32_t a_offset = 0)
 	{
-		return { a_block.SrvIndex(), static_cast<std::uint32_t>(a_block.Offset(a_slot)) + a_offset };
+		const auto region = a_block.At(a_run);
+		return { region.srvIndex, static_cast<std::uint32_t>(region.offset) + a_offset };
 	}
 
 	/** @brief A push block as the words ComputeProgram::Dispatch and RasterProgram::DrawDesc::constants take. */

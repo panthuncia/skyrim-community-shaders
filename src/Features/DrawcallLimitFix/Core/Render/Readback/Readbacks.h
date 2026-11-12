@@ -6,6 +6,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Extensions/RootStates.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
+#include "Features/DrawcallLimitFix/Core/Render/Readback/RunRanges.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
 
 #include <OpenRenderGraph/GraphHost.h>
@@ -38,20 +39,20 @@ namespace DCLF::Draws
 
 	/**
 	 * @brief An event list the depth epoch appends to, read back without a stall. Its revision-driven readback pass records a fixed
-	 * copy of the list into its frame slot's host buffer. The depth commit first harvests the slot's last execution (the host has
-	 * waited for it, not yet submitted the next: DCLF waits for nothing), then arms it. Header: count, then the armed frame.
+	 * copy of the list into its run's range's host buffer (RunRanges). The depth commit first harvests the range's last run (its lease
+	 * retired before the host opened it again: DCLF waits for nothing), then arms it. Header: count, then the armed frame.
 	 */
 	struct HostEventRing
 	{
 		/**
-		 * @brief The host buffers of one list capacity, one per frame slot. Append-only (one per capacity a sealed set names, added
+		 * @brief The host buffers of one list capacity, one per range. Append-only (one per capacity a sealed set names, added
 		 * from its named units before any shape of that set: Impl::MakeRevision), kept until the ring goes: a kept recording may name
 		 * any of them.
 		 */
 		struct StagingSet
 		{
 			std::uint32_t events = 0;
-			std::vector<std::shared_ptr<org::Buffer>> buffers;  // by frame slot
+			std::vector<std::shared_ptr<org::Buffer>> buffers;  // by range
 			StagingSet* next = nullptr;
 		};
 		explicit HostEventRing(std::uint64_t (*a_bytesFor)(std::uint32_t)) :
@@ -65,7 +66,7 @@ namespace DCLF::Draws
 			}
 		}
 		std::uint64_t (*bytesFor)(std::uint32_t);  // a list of so many events, header included
-		std::uint32_t frameSlots = 0;
+		RunRanges ranges{ kReadbackRanges };
 		std::atomic<StagingSet*> sets{ nullptr };
 		// The largest count a harvest read past its list: the list grows to it (what was left out appends again).
 		std::atomic<std::uint32_t> wanted{ 0 };
@@ -87,7 +88,7 @@ namespace DCLF::Draws
 				return;
 			auto* set = new StagingSet();
 			set->events = a_events;
-			for (std::uint32_t i = 0; i < frameSlots; ++i) {
+			for (std::uint32_t i = 0; i < ranges.Count(); ++i) {
 				set->buffers.push_back(org::Buffer::CreateShared(rhi::HeapType::Readback, bytesFor(a_events)));
 				set->buffers.back()->SetName("cs.dclf.event-ring-readback");
 			}
@@ -96,14 +97,16 @@ namespace DCLF::Draws
 			setsAdded.fetch_add(1, std::memory_order_relaxed);
 		}
 		/**
-		 * @brief a_take(header words, count, capacity) on whichever set's buffer holds the slot's execution armed for a_frame (a
+		 * @brief a_take(header words, count, capacity) on whichever set's buffer holds the range's run armed for a_frame (a
 		 * growth's revisions copy into the new set); an overflow is asked for. False, counted missed, when none holds it.
 		 */
 		template <class Take>
-		bool Harvest(std::uint32_t a_frameSlot, std::uint32_t a_frame, Take&& a_take)
+		bool Harvest(std::uint32_t a_range, std::uint32_t a_frame, Take&& a_take)
 		{
 			for (const auto* set = sets.load(std::memory_order_acquire); set; set = set->next) {
-				auto resource = set->buffers[a_frameSlot]->GetAPIResource();
+				if (a_range >= set->buffers.size())
+					continue;
+				auto resource = set->buffers[a_range]->GetAPIResource();
 				void* mapped = nullptr;
 				resource.Map(&mapped);
 				if (!mapped)
@@ -128,7 +131,7 @@ namespace DCLF::Draws
 		}
 	};
 
-	/** @brief An event ring's copy to the host (Passes/Readbacks.cpp): a_events into a_ring's frame slot's staging buffer. */
+	/** @brief An event ring's copy to the host (Passes/Readbacks.cpp): a_events into a_ring's staging buffer of the run's range. */
 	std::shared_ptr<org::RenderPass> MakeEventReadbackPass(std::shared_ptr<SceneBuffers> a_scene, Versioned a_events, std::shared_ptr<HostEventRing> a_ring);
 
 	/**
@@ -226,7 +229,7 @@ namespace DCLF::Draws
 			std::vector<std::pair<std::uint8_t, const void*>> firsts;  // (category, node), named while `tables` holds the node
 			Batch* next = nullptr;
 		};
-		/** @brief What a frame slot's last arm was for (render thread). */
+		/** @brief What a range's last arm was for (render thread). */
 		struct Armed
 		{
 			bool armed = false;
@@ -238,7 +241,7 @@ namespace DCLF::Draws
 			std::shared_ptr<const EntrySpace> candidates;
 		};
 
-		// Render thread: each frame slot's arm, and harvested batches not yet handed to a task, in frame order.
+		// Render thread: each range's arm, and harvested batches not yet handed to a task, in frame order.
 		std::vector<Armed> armed;
 		std::vector<Batch*> pending;
 		bool carryReset = false;  // a reset arm whose frame was missed: the next harvested batch restarts the decoder
@@ -332,45 +335,47 @@ namespace DCLF::Draws
 	/**
 	 * @brief The culling's counters read back without a stall: each execution of its epoch, a fixed copy (CounterReadbackPass) of
 	 * each drawn source's count words and of the stamp its culling latch carried (BuildDrawsLatch::visibilityStamp, the frame) into
-	 * the frame slot's host buffer. The render thread arms one source after an execution and reads it once that slot's copy is the
-	 * armed execution's and done (the host has waited, or the execution's GPU point is reached and no later one took the slot);
+	 * the host buffer of the run's range (RunRanges). The render thread arms one source after an execution and reads it once that
+	 * range's copy is the armed execution's and done (its lease was opened again, or the execution's GPU point is reached and no later
+	 * one took the range);
 	 * the stamp names the frame the words are of. Made by the pass at its graph build, held by the pass; the epochs find it by
 	 * CullCounterReadback.
 	 */
 	struct CounterReadback
 	{
 		static constexpr std::uint32_t kSourceWords = kCountWords + 1;  // the count words, then the latch's stamp
-		CounterReadback(std::uint32_t a_frameSlots, std::uint32_t a_sources) :
+		explicit CounterReadback(std::uint32_t a_sources) :
 			sources(a_sources)
 		{
-			for (std::uint32_t i = 0; i < a_frameSlots; ++i) {
+			for (std::uint32_t i = 0; i < ranges.Count(); ++i) {
 				buffers.push_back(org::Buffer::CreateShared(rhi::HeapType::Readback, std::uint64_t(std::max(a_sources, 1u)) * kSourceWords * sizeof(std::uint32_t)));
 				buffers.back()->SetName("cs.dclf.cull-counter-readback");
 			}
 		}
 		static constexpr std::uint32_t StampOf(std::uint32_t a_frame) { return a_frame & 0x0FFFFFFFu; }  // as the commits write it
 		std::uint32_t sources = 0;
-		std::vector<std::shared_ptr<org::Buffer>> buffers;  // by frame slot: sources x kSourceWords words
-		/** @brief Render thread: the armed sample (the slot and source its words land in, the stamp they must carry). */
+		RunRanges ranges{ kReadbackRanges };
+		std::vector<std::shared_ptr<org::Buffer>> buffers;  // by range: sources x kSourceWords words
+		/** @brief Render thread: the armed sample (the range and source its words land in, the stamp they must carry). */
 		struct Armed
 		{
 			bool armed = false;
-			std::uint32_t frameSlot = 0, source = 0, stamp = 0;
+			std::uint32_t range = 0, source = 0, stamp = 0;
 			std::uint32_t view = 0, mode = 0;              // a shadow view's labels, for the report
-			org::GraphHost::GpuPoint done;       // when the slot is not read inside its next commit: the execution's end
+			org::GraphHost::GpuPoint done;       // when the range is not read inside its next commit: the execution's end
 		} armed;
 		std::uint64_t harvested = 0, missed = 0;  // render thread, since the readback was made
 
 		/**
-		 * @brief a_take(the source's kCountWords words) when the slot's host buffer holds the source as of a_stamp; false otherwise.
-		 * The caller knows the slot's copy is done and no later execution writes it.
+		 * @brief a_take(the source's kCountWords words) when the range's host buffer holds the source as of a_stamp; false otherwise.
+		 * The caller knows the range's copy is done and no later execution writes it.
 		 */
 		template <class Take>
-		bool Read(std::uint32_t a_frameSlot, std::uint32_t a_source, std::uint32_t a_stamp, Take&& a_take) const
+		bool Read(std::uint32_t a_range, std::uint32_t a_source, std::uint32_t a_stamp, Take&& a_take) const
 		{
-			if (a_frameSlot >= buffers.size() || a_source >= sources)
+			if (a_range >= buffers.size() || a_source >= sources)
 				return false;
-			auto resource = buffers[a_frameSlot]->GetAPIResource();
+			auto resource = buffers[a_range]->GetAPIResource();
 			void* mapped = nullptr;
 			resource.Map(&mapped);
 			if (!mapped)
@@ -384,7 +389,7 @@ namespace DCLF::Draws
 		}
 	};
 
-	/** @brief What a counter readback copies in an execution: per drawn source (its count buffer), its culling latch's offset in the slot's region. */
+	/** @brief What a counter readback copies in an execution: per drawn source (its count buffer), its culling latch's offset in the run's region. */
 	struct CounterSource
 	{
 		std::shared_ptr<const org::LatchBlock> latch;

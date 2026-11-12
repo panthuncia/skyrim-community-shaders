@@ -1238,7 +1238,8 @@ namespace DCLF
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host)
 			return;
-		const std::uint32_t frameSlot = host->CurrentFrameSlot();
+		// The run's range: what the readback pass of this run's published copy last copied there is done (the lease retired).
+		const std::uint32_t frameSlot = readback.ranges.Of(host->CurrentRun());
 		if (frameSlot >= readback.armed.size())
 			return;
 		const std::size_t harvested = readback.pending.size();

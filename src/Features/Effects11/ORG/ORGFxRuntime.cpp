@@ -258,7 +258,7 @@ namespace
 			Literal,      // value
 			Input,        // the heap index of the pass's input number value
 			LatchHandle,  // the latch block's raw view
-			LatchOffset,  // the frame slot's region plus value
+			LatchOffset,  // the run's region's offset plus value
 		};
 		Kind kind = Kind::Literal;
 		std::uint32_t value = 0;
@@ -397,7 +397,8 @@ namespace
 			const auto& draw = *a_frame.spec;
 			std::array<std::uint32_t, ShaderBindings::kMaxPushWords> words{};
 			const std::uint32_t count = (std::min)(static_cast<std::uint32_t>(draw.push.size()), ShaderBindings::kMaxPushWords);
-			const std::uint32_t slot = a_recording.FrameSlot();
+			// The run's latch region: its arena chunk's view and its offset there.
+			const auto region = a_frame.latch->At(a_recording.Run());
 			for (std::uint32_t i = 0; i < count; ++i) {
 				const auto& word = draw.push[i];
 				switch (word.kind) {
@@ -408,10 +409,10 @@ namespace
 					words[i] = a_recording.Index(a_bindings.inputs[word.value]);
 					break;
 				case PushWord::Kind::LatchHandle:
-					words[i] = a_frame.latch->SrvIndex();
+					words[i] = region.srvIndex;
 					break;
 				case PushWord::Kind::LatchOffset:
-					words[i] = static_cast<std::uint32_t>(a_frame.latch->Offset(slot)) + word.value;
+					words[i] = static_cast<std::uint32_t>(region.offset) + word.value;
 					break;
 				}
 			}
@@ -1167,7 +1168,7 @@ struct ORGFxRuntime::Impl
 			}
 			frame->steps.insert(frame->steps.begin(), std::make_move_iterator(clears.begin()), std::make_move_iterator(clears.end()));
 			frame->stepNames.insert(frame->stepNames.begin(), std::make_move_iterator(clearNames.begin()), std::make_move_iterator(clearNames.end()));
-			frame->latch = std::make_shared<org::LatchBlock>("cs.effects11.latch", (std::max)(frame->latchBytes, kRegionAlignment), host->FrameSlots());
+			frame->latch = std::make_shared<org::LatchBlock>("cs.effects11.latch", (std::max)(frame->latchBytes, kRegionAlignment));
 			return frame;
 		}
 
@@ -1347,7 +1348,7 @@ struct ORGFxRuntime::Impl
 			ranFrame = UINT32_MAX;
 	}
 
-	/** @brief a_shape's values into its latch at this run's slot. FX11's variables hold them (EffectManager::UpdateEffectValues). */
+	/** @brief a_shape's values into its latch region of this run. FX11's variables hold them (EffectManager::UpdateEffectValues). */
 	bool Write(const Frame& a_shape)
 	{
 		auto& manager = EffectManager::GetSingleton();
@@ -1373,7 +1374,7 @@ struct ORGFxRuntime::Impl
 			for (const auto& value : e.values)
 				value.variable->GetRawValue(image.data() + value.offset, 0, value.size);
 		}
-		const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
+		const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
 		const auto& latch = *a_shape.latch;
 		const std::uint32_t frameCount = manager.frameCount;
 		for (const auto& write : a_shape.writes) {
@@ -1385,25 +1386,25 @@ struct ORGFxRuntime::Impl
 					const auto& e = a_shape.effects[index];
 					if (e.screenSize >= 0 && static_cast<std::size_t>(e.screenSize) + e.screenSizeBytes <= image.size())
 						std::memcpy(image.data() + e.screenSize, write.screenSize, e.screenSizeBytes);
-					latch.Write(slot, write.offset, std::as_bytes(std::span<const std::uint8_t>(image)));
+					latch.Write(run, write.offset, std::as_bytes(std::span<const std::uint8_t>(image)));
 					break;
 				}
 			case RegionWrite::Kind::ColorCorrection:
 				{
 					auto& settings = SettingManager::GetSingleton();
 					const ColorCorrectionConstants constants{ settings.GetValue<float>(manager.ids.brightness), settings.GetValue<float>(manager.ids.gammaCurve), frameCount, 0 };
-					latch.WriteValue(slot, write.offset, constants);
+					latch.WriteValue(run, write.offset, constants);
 					break;
 				}
 			case RegionWrite::Kind::SunMask:
 				{
 					ENBAdaptation::SunMaskCB constants{};
 					manager.enbAdaptation.SunMaskConstants(constants);
-					latch.WriteValue(slot, write.offset, constants);
+					latch.WriteValue(run, write.offset, constants);
 					break;
 				}
 			case RegionWrite::Kind::Dither:
-				latch.WriteValue(slot, write.offset, DitherConstants{ frameCount, write.amplitude, { 0, 0 } });
+				latch.WriteValue(run, write.offset, DitherConstants{ frameCount, write.amplitude, { 0, 0 } });
 				break;
 			}
 		}

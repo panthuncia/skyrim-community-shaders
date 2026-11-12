@@ -207,7 +207,7 @@ namespace DCLF::Features::Fades
 			}
 		}
 
-		/** @brief The depth commit: harvests the frame slot's last fade events for the write-back task, resets the list, arms the slot. */
+		/** @brief The depth commit: harvests its run's range's last fade events for the write-back task, resets the list, arms the range. */
 		void ArmFadeReadback(FadeScene& a_scene, Draws::CommitUploads& a_uploads)
 		{
 			if (!a_scene.fadeWriteBack || !a_scene.fadeEvents)
@@ -216,10 +216,10 @@ namespace DCLF::Features::Fades
 			auto* host = RenderGraphRuntime::Get().Host();
 			if (!host)
 				return;
-			const std::uint32_t frameSlot = host->CurrentFrameSlot();
+			const std::uint32_t frameSlot = writeBack.ranges.Of(host->CurrentRun());
 			if (frameSlot >= writeBack.armed.size())
 				return;
-			// Harvests the slot's last execution (the host waited for it) if its buffer holds the frame that armed it. If the epoch did
+			// Harvests the range's last execution (its lease retired) if its buffer holds the frame that armed it. If the epoch did
 			// not run for that frame, FadeStateCS did not report either: the next execution reports those changes. Roots past the
 			// list's end report again next frame while the list grows (RequireSceneTables).
 			if (auto& armed = writeBack.armed[frameSlot]; armed.armed) {

@@ -80,6 +80,8 @@
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/RasterProgram.h"
 
+#	include <Render/RunRef.h>
+
 #	include <array>
 #	include <cstdint>
 #	include <functional>
@@ -110,7 +112,7 @@ namespace RenderGraph
 
 namespace ORGPostChain
 {
-	/** @brief The latch bytes one build may reserve for every effect together, per frame slot. */
+	/** @brief The latch bytes one build may reserve for every effect together, per run. */
 	inline constexpr std::uint32_t kLatchBytes = 16384;
 
 	/** @brief An Image or Bind that covers every mip of its texture (the texture's default view). */
@@ -307,7 +309,7 @@ namespace ORGPostChain
 			return { Reserve(static_cast<std::uint32_t>(sizeof(T))) };
 		}
 
-		/** @brief The build's latch block, for a custom pass (Add); the regions are slot-relative offsets into it. */
+		/** @brief The build's latch block, for a custom pass (Add); the regions are offsets into a run's region of it. */
 		std::shared_ptr<const org::LatchBlock> LatchBlock() const;
 
 		/**
@@ -356,12 +358,12 @@ namespace ORGPostChain
 		std::string effect;
 	};
 
-	/** @brief What Commit writes through: the build's latch at this execution's frame slot, and its run gate. */
+	/** @brief What Commit writes through: the build's latch region of this run, and its run gate. */
 	class CommitContext
 	{
 	public:
-		CommitContext(const org::LatchBlock& a_latch, std::uint32_t a_slot, const RenderGraph::RunGate& a_gate) :
-			latch(a_latch), slot(a_slot), gate(a_gate) {}
+		CommitContext(const org::LatchBlock& a_latch, const org::RunRef& a_run, const RenderGraph::RunGate& a_gate) :
+			latch(a_latch), run(a_run), gate(a_gate) {}
 
 		template <class T>
 		void Write(const LatchRegion<T>& a_region, const T& a_value) const
@@ -376,7 +378,7 @@ namespace ORGPostChain
 		void WriteBytes(std::uint32_t a_offset, const void* a_data, std::size_t a_size) const;
 
 		const org::LatchBlock& latch;
-		std::uint32_t slot;
+		org::RunRef run;
 		const RenderGraph::RunGate& gate;
 	};
 

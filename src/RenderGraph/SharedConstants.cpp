@@ -120,12 +120,12 @@ namespace SharedConstants
 			{
 				if (!a_frame.buffers)
 					return;
-				const auto& latch = *a_frame.buffers->latch;
-				const auto source = latch.Resource()->GetAPIResource().GetHandle();
-				const auto region = latch.Offset(a_recording.FrameSlot());
+				// The run's region of the latch: its arena chunk and its offset there.
+				const auto region = a_frame.buffers->latch->At(a_recording.Run());
+				const auto source = region.buffer->GetAPIResource().GetHandle();
 				for (std::uint32_t i = 0; i < kBlocks; ++i)
 					a_recording.Commands().CopyBufferRegion(a_recording.Resolve(a_bindings.targets[i]).GetHandle(), 0, source,
-						region + a_frame.buffers->offsets[i], a_frame.buffers->bytes[i]);
+						region.offset + a_frame.buffers->offsets[i], a_frame.buffers->bytes[i]);
 			}
 
 		private:
@@ -213,7 +213,7 @@ namespace SharedConstants
 				buffer->Materialize();
 				buffers->buffers[i] = std::move(buffer);
 			}
-			buffers->latch = std::make_shared<org::LatchBlock>("cs.shared.latch", regionBytes, host->FrameSlots());
+			buffers->latch = std::make_shared<org::LatchBlock>("cs.shared.latch", regionBytes);
 			state.buffers = std::move(buffers);
 			logger::info("[ORG] Shared constants for graph passes: FrameBuffer {} B, SharedData {} B, FeatureData {} B, Permutation {} B",
 				state.buffers->bytes[kFrameBuffer], state.buffers->bytes[kSharedData], state.buffers->bytes[kFeatureData],
@@ -259,14 +259,14 @@ namespace SharedConstants
 		if (!state.buffers)
 			return;
 		const auto& buffers = *state.buffers;
-		// The slot this execution records against is free from here (the host waited for it).
-		const std::uint32_t slot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
+		// This run's region: its own, which nothing else reads.
+		const auto run = RenderGraphRuntime::Get().Host()->CurrentRun();
 		const auto sources = Sources();
 		for (std::uint32_t i = 0; i < kBlocks; ++i) {
 			// A block CS has not uploaded yet stays as it was; one that grew is cut to the buffer.
 			const auto bytes = sources[i].first((std::min)(sources[i].size(), std::size_t{ buffers.bytes[i] }));
 			if (!bytes.empty())
-				buffers.latch->Write(slot, buffers.offsets[i], bytes);
+				buffers.latch->Write(run, buffers.offsets[i], bytes);
 			if (CheckRequested())
 				state.committed[i].assign(bytes.begin(), bytes.end());
 		}

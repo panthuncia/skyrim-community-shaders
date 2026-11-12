@@ -5,6 +5,7 @@
 // sources that use them.
 
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
+#include "Features/DrawcallLimitFix/Core/Render/Readback/RunRanges.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeInstancesLayout.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
 
@@ -39,12 +40,13 @@ namespace DCLF::Features::TreeLod
 	inline constexpr std::uint32_t kTreeLodCullConstantWords = sizeof(TreeLodCullConstants) / 4;
 
 	/**
-	 * @brief Tree LOD cull counts (TreeLodReadbackPass), read back per frame slot on the graph host's thread.
+	 * @brief Tree LOD cull counts (TreeLodReadbackPass), read back per run range (Draws::RunRanges) on the graph host's thread.
 	 */
 	struct TreeLodCounts
 	{
-		std::vector<std::shared_ptr<org::Buffer>> readback;
-		std::vector<std::uint8_t> filled;
+		Draws::RunRanges ranges{ Draws::kReadbackRanges };
+		std::vector<std::shared_ptr<org::Buffer>> readback;  // by range
+		std::vector<std::uint8_t> filled;                    // by range: its copy holds a frame's counts
 		std::atomic<std::uint64_t> frames{ 0 }, phaseOne{ 0 }, retests{ 0 }, phaseTwo{ 0 };
 		// CS_DCLF_TREE_LOD_STAGES: the newest frame judged, frames judged and those a stage missed.
 		std::uint32_t stagesJudged = 0;

@@ -74,7 +74,6 @@ namespace DCLF
 					prepared.signature = resources->dispatchSignature->GetHandle();
 					prepared.faces = resources->traits->faces;
 					auto& constants = prepared.constants;
-					constants.latchIndex = frame->latch->SrvIndex();
 					SetRowStrides(constants);
 					constants.phaseBits = 0;  // the single phase: frustum only (the latch's mode), nothing published
 					// The bucket path's draws are bounded by their buckets (the latch's tables); this bounds the other, which none takes.

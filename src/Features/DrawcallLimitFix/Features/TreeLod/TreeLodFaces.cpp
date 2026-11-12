@@ -97,13 +97,12 @@ namespace DCLF::Draws
 				prepared.groups = frame->faces[kFamily].groups;
 				prepared.faces = resources->traits->faces;
 				auto& constants = prepared.constants;
-				constants.latchIndex = frame->latch->SrvIndex();
 				constants.phase = 1;
 				constants.retestOffset = static_cast<std::uint32_t>(sizeof(TreeInstances::VisibleHeader));  // never written: no occlusion test
 				return prepared;
 			}
 
-			// A dispatch per face, from the latch's region of the frame slot.
+			// A dispatch per face, from the latch's region of the run.
 			static void Record(const TreeBindings& a_bindings, const TreePrepared& a_prepared, org::PassRecordContext& a_recording)
 			{
 				if (!a_prepared.program || !a_prepared.groups || !a_prepared.latch)
@@ -114,9 +113,12 @@ namespace DCLF::Draws
 				auto& commands = a_recording.Commands();
 				commands.BindLayout(a_prepared.program->layout->GetHandle());
 				commands.BindPipeline(a_prepared.program->Pipeline());
-				const auto region = static_cast<std::uint32_t>(a_prepared.latch->Offset(a_recording.FrameSlot()));
+				// The run's region of the latch: its arena chunk's view, and its offset there.
+				const auto at = a_prepared.latch->At(a_recording.Run());
+				const auto region = static_cast<std::uint32_t>(at.offset);
 				for (std::uint32_t f = 0; f < a_prepared.faces; ++f) {
 					auto constants = viewed;
+					constants.latchIndex = at.srvIndex;
 					constants.latchOffset = region + f * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch));
 					constants.drawIndex = a_recording.Index(a_bindings.rows[f]);
 					constants.visibleIndex = a_recording.Index(a_bindings.visible[f]);

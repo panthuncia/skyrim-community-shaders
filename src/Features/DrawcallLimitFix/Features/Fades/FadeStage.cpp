@@ -101,7 +101,6 @@ namespace DCLF::Draws
 				prepared.events = true;
 				constants.eventCapacity = events;
 			}
-			constants.latchIndex = frame->latch->SrvIndex();
 			// Full capacity; the shader stops at the count.
 			prepared.groups = static_cast<std::uint32_t>((roots + kFadeStateGroup - 1) / kFadeStateGroup);
 			return prepared;
@@ -129,7 +128,7 @@ namespace DCLF::Draws
 				constants.reportedIndex = a_recording.Index(a_bindings.reported);
 			}
 			// The depth segment's BuildDrawsLatch in this frame slot.
-			constants.latchOffset = static_cast<std::uint32_t>(a_frame.latch->Offset(a_recording.FrameSlot()));
+			SetLatchWords(constants, *a_frame.latch, a_recording.Run());
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_frame.program->layout->GetHandle());
 			commands.BindPipeline(a_frame.program->Pipeline());
