@@ -156,6 +156,9 @@ namespace HangWatchdog
 			// The render graph host's runs in flight and what each waits for (read racily): a stall waiting on the GPU names its points.
 			if (auto* host = RenderGraphRuntime::Get().Host())
 				logger::critical("[HANG] render graph host state: {}", host->DescribeAsyncState());
+			// The order of the graph's work in DXVK's stream and on the compute and copy queues: a GPU wait cycle shows here.
+			if (RenderGraphRuntime::Get().Host())
+				logger::critical("[HANG] render graph stream order: {}", RenderGraphRuntime::Get().DescribeStreamOrder());
 #endif
 			spdlog::default_logger()->flush();
 			PruneReports(*dir);

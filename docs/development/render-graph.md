@@ -91,7 +91,22 @@ A pass that touches a resource only DXVK's families may use (an exclusive import
 -   **Entry.** Before an epoch's first submission to either, DXVK's stream signals `streamPoint` where it stands (one
     enqueued submission). Each queue's first submission of the epoch waits for it.
 -   **Exit.** Every submission also signals its queue's exit timeline (`computeExit`, `copyExit`). The stream waits for both
-    at the epoch's end.
+    at the epoch's end. An epoch that `ExecuteExternalEpoch` submits (DCLF's sites) ends at `CloseExternalEpoch`, after the
+    caller emitted its execution. Before 2026-11-12 nothing closed those epochs. The next epoch then added their exit wait to
+    DXVK's command list without a flush. When the compute work waited for a segment in that list, the list waited for itself
+    and the GPU stopped (the map menu in latch-census-short, t5 stuck one value below the run that carried t6).
+-   **Stream-order guard.** DXVK puts an external command's waits at the start of the submission that holds it, and its signals
+    at the end. Before the stream waits for compute or copy work (a segment's wait or an exit wait), the runtime checks what
+    that work waits for. When it waits for a value DXVK's current command list signals, the runtime flushes first
+    (`[ORG] stream order: flushed DXVK's command list before ...`). When it waits for a value the stream has not signalled at
+    all, nothing can order it: `[ORG] stream order: ... waits for off-stream submission #n ...` names it. Both log the stream
+    order (below), at most eight times a session.
+-   **Stream-order telemetry.** `RenderGraphRuntime::DescribeStreamOrder` lists the stream's signalled values (open, closed,
+    reached), the compute and copy submissions not done with what they and the earlier ones on their queue wait for, and a
+    ring of the last events: off-stream submissions, external commands, enqueued submissions, flushes and segments signalled
+    unexecuted. Each semaphore is named (`streamPoint`, `computeExit`, `copyExit`, `frameWait`, `t<index>` for the host's
+    timelines) and marked `PENDING` while not reached. The hang watchdog logs it (`[HANG] render graph stream order:`), and so
+    does a shared copy queue's 0.5 s wait (`[ORG] stream order at the copy queue's wait:`).
 -   **Submission.** Each queue's submissions go through one thread of its own (`ComputeSubmitter`), under DXVK's submission
     lock.
 -   **Sharing the uploader's queue.** Nothing on a shared queue may block it:
