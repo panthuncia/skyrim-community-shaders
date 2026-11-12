@@ -864,6 +864,53 @@ render-graph.md, "Native mode on D3D12". `CS_ORG_D3D12_SELFTEST=1` (optionally `
 `CS_ORG_D3D12_SELFTEST_HDR=1`) still runs device creation, the DXIL build, a dispatch and 120 presents on a D3D12 device
 beside a DXVK game (`src/RenderGraph/Engine/D3D12SelfTest.cpp`).
 
+### DCLF on D3D12: the port's plan (2026-11-12)
+
+DCLF is forced off on D3D12, so the world's geometry is not drawn there. Here is what stands in the way, from a survey of
+the code, with the work for each piece. The pieces build on each other in this order.
+
+1. **Buffer addresses in shaders (the foundation).** 17 shaders and headers read DCLF's buffers through 64-bit device
+   addresses: 132 `vk::RawBufferLoad`/`Store` calls, through `DCLFAddress`, in `Common/DCLFObjects.hlsli`,
+   `DCLFVertexPull.hlsli`, Lighting, Effect, Utility, Sky, Water, Particle, DistantTree, RunGrass, BloodSplatter,
+   DecalOcclusion and five DCLF compute shaders. The CPU side forms about 200 such addresses. DXIL has no buffer pointers.
+   The plan is to emulate them, not to change DCLF's data model:
+   - D3D12 buffers have GPU virtual addresses, so the CPU side stays as it is (`GetBufferDeviceAddress` gives the GPU VA).
+   - A new `Common/DeviceAddress.hlsli` defines `DeviceLoad<T>(address)` and `DeviceStore<T>(address, value)`. On SPIR-V
+     they are `vk::RawBufferLoad` and `vk::RawBufferStore`, so the Vulkan build compiles to the same code. On DXIL they look
+     the address up in a table of buffer ranges (base, size, raw SRV and UAV heap indices; a binary search) and load from
+     that `ByteAddressBuffer` at `address - base`.
+   - Every buffer whose address is taken gets an entry. The cleanest owner is BasicRHI's D3D12 backend: it already knows
+     each buffer's GPU VA and heap. It would keep the table on the GPU and give its heap index, which every DCLF D3D12 layout
+     passes in one more root constant.
+2. **Bindings through records (`LayoutRangeSource::IndirectIndex`, `IndirectAddress`, `PushAddress`).** DCLF's colour draws
+   use the engine's shaders with register bindings. On Vulkan, `VK_EXT_descriptor_heap` maps each register per draw to:
+   - a heap slot named in the frame, pipeline or material row (textures t0-t15 and samplers from the material row);
+   - a block at an address in a record, or pushed per draw (b0/b1/b2/b4 from the pipeline, material and geometry rows).
+   D3D12 has no such mapping. ExecuteIndirect can change root constants and root CBVs per draw, but not a texture's
+   descriptor table. So the D3D12 build reads its rows itself, as the Z-prepass's pulled builds already do (`DCLF_PULLED`,
+   `DCLF_PULLED_ROWS`): the textures from `ResourceDescriptorHeap` by the material row's indices, and the blocks through
+   item 1's loads. That means "pulled" colour builds of Lighting, Effect and the other families. Today a pulled build
+   compiles away everything after the alpha test, so this is the largest shader piece: every PerTechnique, PerMaterial,
+   PerGeometry and frame-block member a colour stage reads must come from its row (the constant tables, `ConstantTableOf`).
+3. **Reflection.** `SpirvReflection` checks each stage's bindings and builds the constant tables from its blocks' members.
+   The D3D12 build reflects DXIL instead (`ID3D12ShaderReflection` through `IDxcUtils::CreateReflection`, as
+   `Util::ReflectShader` now does), which gives the same block members and register bindings.
+4. **Draw submission.** Device-generated commands with pipeline sets do not exist on D3D12 (BasicRHI reports
+   `pipelineSets` false). DCLF already has the path without them: one counted ExecuteIndirect per pipeline bucket, with the
+   draw's words as root-constant arguments. BasicRHI's D3D12 command signatures take these (constant and index-buffer
+   arguments, counted draws). It needs the layouts of items 1 and 2, nothing more.
+5. **CPU pipeline sites** (the forward family, decals, first person on the CPU path): they record Vulkan command buffers
+   through `EmitExternalCommands`, in secondary lists that set viewports (D3D12 bundles cannot). On D3D12 they would record
+   into BasicRHI primary lists submitted in order (the native External would take a BasicRHI list instead of a
+   `VkCommandBuffer`). `SiteStats`' raw Vulkan queries become BasicRHI query pools. Until then the forward family needs the
+   GPU path.
+6. **Texture imports** (`GpuTextures`: `rhi::vulkan::import_buffer` of buffer-backed views) use
+   `rhi::dx12::import_resource` on the ID3D12Resource that native mode's descriptions already carry.
+
+The first piece that can be built and run alone is item 1 on DCLF's compute shaders (BuildDraws, IndexPool, PixelRows,
+TextureTransforms, FoliageParity). Their layouts are CS's own, so the GPU cull and draw building could be checked on D3D12
+before any colour draw.
+
 Named off on D3D12 until ported:
 
 - Drawcall Limit Fix as a whole (`DrawcallLimitFix::SetupResources` forces it off). Its draw pipelines' layouts bind through `VK_EXT_descriptor_heap` record mappings
