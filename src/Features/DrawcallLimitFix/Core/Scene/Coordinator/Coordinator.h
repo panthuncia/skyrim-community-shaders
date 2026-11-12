@@ -931,6 +931,12 @@ namespace DCLF
 		void ApplyAttachDetach(const BatchIndex& a_index);
 		void ApplyDetaches(const std::vector<RE::BSGeometry*>& a_detached);
 		void HoldLeafProperties(const BatchIndex& a_index);
+		/**
+		 * @brief While a load is up: the diffuse textures the batch's records hold a reference on (PropertyRecord::diffuseHeld) asked for
+		 * early, their base mips (TextureStreaming::RequestBase) and their imports (GpuTextures::Request), so the hold after the load
+		 * waits less. Reads no engine memory but those references. The imports are let go once the hold ended.
+		 */
+		void PrewarmLoadTextures(const BatchIndex& a_index);
 
 		// The shading events: State/Shading.h (CoordinatorShading).
 		/** @brief A slot's ShadingItem into shadingNamed (none for a free, unbound or propertyless slot). */

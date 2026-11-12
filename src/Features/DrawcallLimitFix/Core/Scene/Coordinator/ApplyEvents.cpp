@@ -9,6 +9,10 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialWrites.h"
+#include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
+
+#include "TextureStreaming/Streamer.h"
 
 namespace DCLF::Scene
 {
@@ -322,6 +326,7 @@ namespace DCLF::Scene
 		// Tracked geometries the captures and leaf updates named (ApplyMirrorEvents indexed them): hold their current properties from
 		// the pins.
 		HoldLeafProperties(index);
+		PrewarmLoadTextures(index);
 		// For the event-to-publication latency.
 		if (batch->oldestNs && (!unpublishedNs || batch->oldestNs < unpublishedNs)) {
 			unpublishedNs = batch->oldestNs;
@@ -464,6 +469,48 @@ namespace DCLF::Scene
 				}
 		}
 		attachStats.leafMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - leafStart).count();
+	}
+
+	void Coordinator::PrewarmLoadTextures(const BatchIndex& a_index)
+	{
+		DCLF_ZONE("CS.DCLF.Scene.LoadPrewarm");
+		auto& w = loadPrewarm;
+		// The answers: each import kept while the load and its hold last, so the registry still has it when the bindings ask.
+		w.replies.Drain([&](GpuTextures::Reply&& a_reply) {
+			if (a_reply.cookie != w.cookie)
+				return;
+			if (a_reply.binding.owner) {
+				w.held.push_back(std::move(a_reply.binding.owner));
+				++w.imported;
+			} else {
+				++w.rejected;
+			}
+		});
+		if (!channels.loadingSeen.load(std::memory_order_acquire)) {
+			// The load is over: kept through its hold, then let go (the bindings hold what they use).
+			if ((!w.held.empty() || !w.asked.empty()) && !LoadHold::Active() && !LoadHold::MenuHeld()) {
+				logger::info("[DCLF] load prewarm: {} diffuse textures asked for during the load, {} imported, {} rejected; let go after the hold",
+					w.requested, w.imported, w.rejected);
+				w.held.clear();
+				w.asked.clear();
+				w.requested = w.imported = w.rejected = 0;
+				++w.cookie;
+			}
+			return;
+		}
+		// Only while DCLF runs: its frames publish the import context the requests are answered with.
+		if (!ShellState::Running())
+			return;
+		for (const auto* records : a_index.leaves)
+			for (const auto& property : records->properties) {
+				auto* view = property.diffuseHeld.get();
+				if (!view || !w.asked.insert(view).second)
+					continue;
+				// The record holds a reference on the view, so it is alive here; the request takes its own.
+				TextureStreaming::RequestBase(view);
+				GpuTextures::Get().Request(view, GpuTextures::Tag(GpuTextures::Source::Material), w.replies, w.cookie);
+				++w.requested;
+			}
 	}
 
 	void Coordinator::PrepareMirrorCaptures(const std::vector<const SceneCapture::Records*>& a_captures, std::size_t a_records)
