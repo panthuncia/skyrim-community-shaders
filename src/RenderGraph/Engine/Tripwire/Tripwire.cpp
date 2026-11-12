@@ -3,6 +3,7 @@
 #include "RenderGraph/Engine/Tripwire/TripwireSelfTest.h"
 #include "RenderGraph/Switches.h"
 #include "Utils/D3D.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #if defined(CS_HAS_RENDER_GRAPH)
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -1390,6 +1391,9 @@ namespace RenderGraph::Engine::Tripwire
 		if (!core)
 			return a_object;
 		if (!core->wrapped) {
+			// Native mode has no D3D11 below the handles: the handle is the object every caller talks to.
+			if (Native::Active())
+				return a_object;
 			// A native handle handed to D3D11: D3D11 gets null rather than an object it would cast to its own class.
 			static std::array<std::atomic<bool>, kKinds> warned{};
 			if (!warned[static_cast<std::size_t>(core->kind)].exchange(true))
