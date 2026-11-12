@@ -638,6 +638,19 @@ namespace DCLF
 			entry.dclf = DclfClass(a_pass);
 		}
 		++(main ? (a_withheld ? entry.withheld : entry.kept) : (a_withheld ? entry.otherWithheld : entry.otherKept));
+		if (a_withheld || !entry.dclf)
+			return;
+		const auto set = std::atomic_load(&frameSet);
+		const std::uint8_t phases = set ? set->PhasesOf(a_pass->geometry) : std::uint8_t{ 0 };
+		++(!set ? entry.noSet : !phases ? entry.notMember : !(phases & kSetMain) ? entry.notMain : entry.mainNotDrawn);
+		const auto* tes = RE::TES::GetSingleton();
+		const RE::NiAVObject* root = tes ? tes->lodLandRoot : nullptr;
+		std::uint32_t depth = 0;
+		for (const RE::NiAVObject* node = a_pass->geometry; root && node && depth < 64; node = node->parent, ++depth)
+			if (node == root) {
+				++entry.underLodRoot;
+				break;
+			}
 	}
 
 	std::vector<PassCapture::MapClass> PassCapture::TakeMapCensus()
