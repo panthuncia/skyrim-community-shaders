@@ -1,6 +1,7 @@
 // FrameDriver: the render thread's DCLF work at each engine point of the frame (see the header).
 
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/EngineOnlyCull.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -164,7 +165,15 @@ namespace DCLF
 			// (a load screen's frames aside: their claims are none anyway). A toggle withdraws nothing: the installed publication's toggles
 			// are the frame's.
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
-			if (draws.DecideCoverage() && view.HasInstalled())
+			const bool covered = draws.DecideCoverage();
+			// Native mode, while it is brought up: why the claims are not installed, once every 300 such frames.
+			if (!(covered && view.HasInstalled()) && RenderGraph::Engine::Native::Active()) {
+				static std::uint32_t s_uncovered = 0;
+				if (s_uncovered++ % 300 == 0)
+					logger::info("[DCLF] native: frame {} has no claims (covered {}, a publication installed {}, loading {}): {}", view.GetFrame(), covered,
+						view.HasInstalled(), loading, draws.CoverageState());
+			}
+			if (covered && view.HasInstalled())
 				view.InstallClaims();
 			else if (!view.NotDrawingYet() && !loading) {
 				// The graph itself stopped (its host's thread failed, or a submission threw): no snapshot can cover a frame any more, and the
@@ -379,6 +388,13 @@ namespace DCLF
 	{
 		const auto start = std::chrono::steady_clock::now();
 		Draws::ShadowLightKept(a_light, a_firstSlot, a_slots);
+		AddShadowViewsTime(start);
+	}
+
+	void FrameDriver::ShadowFocusAccumulating(const RE::BSShadowLight* a_light, bool a_begin)
+	{
+		const auto start = std::chrono::steady_clock::now();
+		Draws::ShadowFocusAccumulating(a_light, a_begin);
 		AddShadowViewsTime(start);
 	}
 

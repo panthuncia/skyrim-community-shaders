@@ -32,6 +32,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "RenderGraph/ShaderBindings.h"
 #	include "ShaderCache.h"
 #	include "State.h"
+#	include "Utils/D3D.h"
 #	include "Utils/Logging.h"
 #	include "Utils/SharedShaderStore.h"
 
@@ -273,6 +274,12 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
+		 * @brief The description of a packed engine blend state: read from the engine's table when it has the entry (and kept), else
+		 * the one kept from an earlier read this session or from the manifest. False when neither has it.
+		 */
+		bool BlendDescOf(std::uint32_t a_blend, D3D11_BLEND_DESC& a_out);
+
+		/**
 		 * @brief What one pass is made for, by value (the shape manifest stores it): the effect, its outputs and inputs, its samplers,
 		 * its blend state and its viewport. A compute shape's output is the render target behind its UAV (u0); it has no blend state and
 		 * no viewport.
@@ -403,6 +410,13 @@ namespace RenderGraph::Engine::ImageSpace
 			std::shared_ptr<org::LatchBlock> latch;
 			std::map<std::pair<std::uint32_t, std::uint32_t>, org::OwnedDescriptorBinding> samplers;  // (address, filter)
 			org::OwnedDescriptorBinding defaultSampler;  // D3D11's default sampler: the SAO composite's s9 (FeatureBinds)
+			// A 1x1x1 volume of (0, 0, 0, 1), no in-scatter and full transmittance, by heap index: what the SAO composite reads for Exponential
+			// Height Fog's volumes before the fog publishes them (D3D11 binds none then, and the header's sample of a null volume gives the
+			// same). Made at the first build that needs it.
+			winrt::com_ptr<ID3D11ShaderResourceView> noFogView;
+			std::uint32_t noFogIndex = UINT32_MAX;
+			std::shared_ptr<const void> noFogOwner;
+			bool noFogTried = false;
 			// By run lease index: the sources a run's latched draws read by heap index (Pending::source), held until the next run of
 			// the index commits (the lease's last run retired before the index was opened again). Grown with the host's lease indices.
 			std::vector<std::vector<std::shared_ptr<const void>>> heldSources;
@@ -452,6 +466,9 @@ namespace RenderGraph::Engine::ImageSpace
 			std::uint32_t engineDrawsSince = 0;
 			// The last reason a covered effect's draw was refused or failed: the summary's why for that draw.
 			std::string lastRefusal;
+			// Each packed engine blend state's description, as last read from the engine's table (BlendDescOf) or the manifest: a pass
+			// made at a build when the table entry is empty takes it from here.
+			std::map<std::uint32_t, D3D11_BLEND_DESC> blendDescs;
 			// Counters.
 			std::uint64_t taken = 0, engineDrawn = 0, batches = 0, lost = 0;
 			// Why each effect's draws stayed with the engine, logged once per reason and effect: refusals (cases the port does not
@@ -567,7 +584,9 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			auto* manager = RE::ImageSpaceManager::GetSingleton();
 			const std::uint32_t index = RE::ImageSpaceManager::GetCurrentIndex(kEffects[a_effect].id);
-			if (!manager || index >= manager->effects.size())
+			// NiTArray::size() counts the non-null entries; free_idx() is one past the highest set index (the engine's setter, AE
+			// 0x141481a30). With the empty slots below it, size() cut off the last effects (ISWaterBlend at 155).
+			if (!manager || index >= manager->effects.free_idx() || index >= manager->effects.capacity())
 				return nullptr;
 			return static_cast<const RE::BSImagespaceShader*>(manager->effects[static_cast<decltype(manager->effects)::size_type>(index)]);
 		}
@@ -575,13 +594,19 @@ namespace RenderGraph::Engine::ImageSpace
 		std::int32_t EffectOf(const RE::BSImagespaceShader* a_shader)
 		{
 			auto& state = IS();
-			// Filled until the manager has made every covered effect.
-			if (state.effectOf.size() < kEffects.size())
-				for (std::size_t i = 0; i < kEffects.size(); ++i)
-					if (const auto* shader = ShaderOf(i))
-						state.effectOf.emplace(shader, static_cast<std::int32_t>(i));
-			const auto it = state.effectOf.find(a_shader);
-			return it != state.effectOf.end() ? it->second : -1;
+			// An entry is checked against the manager's effects now, and a miss scans them: the manager makes some effects after the
+			// first lookups.
+			if (const auto it = state.effectOf.find(a_shader); it != state.effectOf.end()) {
+				if (ShaderOf(static_cast<std::size_t>(it->second)) == a_shader)
+					return it->second;
+				state.effectOf.erase(it);
+			}
+			for (std::size_t i = 0; i < kEffects.size(); ++i)
+				if (ShaderOf(i) == a_shader) {
+					state.effectOf.emplace(a_shader, static_cast<std::int32_t>(i));
+					return static_cast<std::int32_t>(i);
+				}
+			return -1;
 		}
 
 		/** @brief A kEffects index by its name (the manifest's), or -1. */
@@ -1062,7 +1087,7 @@ namespace RenderGraph::Engine::ImageSpace
 				return false;
 			const auto draw = Pipeline::EngineDrawState::Latch();
 			a_out.blend = PackBlend(draw.blendMode, draw.alphaToCoverage, draw.writeMode, draw.blendExtra);
-			if (!BlendStateOf(a_out.blend)) {
+			if (D3D11_BLEND_DESC desc{}; !BlendDescOf(a_out.blend, desc)) {
 				a_refusal = "a blend state outside the engine's table";
 				return false;
 			}
@@ -1086,16 +1111,71 @@ namespace RenderGraph::Engine::ImageSpace
 			return binding ? binding.Index() : UINT32_MAX;
 		}
 
+		bool BlendDescOf(std::uint32_t a_blend, D3D11_BLEND_DESC& a_out)
+		{
+			auto& state = IS();
+			if (auto* object = BlendStateOf(a_blend)) {
+				object->GetDesc(&a_out);
+				state.blendDescs[a_blend] = a_out;
+				return true;
+			}
+			const auto kept = state.blendDescs.find(a_blend);
+			if (kept == state.blendDescs.end())
+				return false;
+			a_out = kept->second;
+			return true;
+		}
+
+		/** @brief A blend description as the manifest keeps it: the two flags, then each target's eight fields. */
+		json BlendToJson(const D3D11_BLEND_DESC& a_desc)
+		{
+			json out = json::array({ static_cast<std::int64_t>(a_desc.AlphaToCoverageEnable), static_cast<std::int64_t>(a_desc.IndependentBlendEnable) });
+			for (const auto& target : a_desc.RenderTarget) {
+				out.push_back(static_cast<std::int64_t>(target.BlendEnable));
+				out.push_back(static_cast<std::int64_t>(target.SrcBlend));
+				out.push_back(static_cast<std::int64_t>(target.DestBlend));
+				out.push_back(static_cast<std::int64_t>(target.BlendOp));
+				out.push_back(static_cast<std::int64_t>(target.SrcBlendAlpha));
+				out.push_back(static_cast<std::int64_t>(target.DestBlendAlpha));
+				out.push_back(static_cast<std::int64_t>(target.BlendOpAlpha));
+				out.push_back(static_cast<std::int64_t>(target.RenderTargetWriteMask));
+			}
+			return out;
+		}
+
+		/** @brief The manifest's form of a blend description read back; false for a malformed one. */
+		bool BlendFromJson(const json& a_item, D3D11_BLEND_DESC& a_out)
+		{
+			if (!a_item.is_array() || a_item.size() != 2 + 8 * std::size(a_out.RenderTarget))
+				return false;
+			try {
+				a_out.AlphaToCoverageEnable = a_item[0].get<std::int64_t>() != 0;
+				a_out.IndependentBlendEnable = a_item[1].get<std::int64_t>() != 0;
+				std::size_t at = 2;
+				for (auto& target : a_out.RenderTarget) {
+					target.BlendEnable = a_item[at++].get<std::int64_t>() != 0;
+					target.SrcBlend = static_cast<D3D11_BLEND>(a_item[at++].get<std::int64_t>());
+					target.DestBlend = static_cast<D3D11_BLEND>(a_item[at++].get<std::int64_t>());
+					target.BlendOp = static_cast<D3D11_BLEND_OP>(a_item[at++].get<std::int64_t>());
+					target.SrcBlendAlpha = static_cast<D3D11_BLEND>(a_item[at++].get<std::int64_t>());
+					target.DestBlendAlpha = static_cast<D3D11_BLEND>(a_item[at++].get<std::int64_t>());
+					target.BlendOpAlpha = static_cast<D3D11_BLEND_OP>(a_item[at++].get<std::int64_t>());
+					target.RenderTargetWriteMask = static_cast<UINT8>(a_item[at++].get<std::int64_t>());
+				}
+			} catch (const std::exception&) {
+				return false;
+			}
+			return true;
+		}
+
 		/** @brief The ORG form of a packed engine blend state for a_targets attachments: false with a reason when it has none. */
 		bool BlendFor(std::uint32_t a_blend, std::uint32_t a_targets, std::array<rhi::BlendAttachment, 2>& a_out, std::string& a_error)
 		{
-			auto* object = BlendStateOf(a_blend);
-			if (!object) {
+			D3D11_BLEND_DESC desc{};
+			if (!BlendDescOf(a_blend, desc)) {
 				a_error = "no engine blend state";
 				return false;
 			}
-			D3D11_BLEND_DESC desc{};
-			object->GetDesc(&desc);
 			rhi::BlendState blend{};
 			if (!Pipeline::BlendFromD3D11(desc, blend, a_error) || Pipeline::ReadsBlendFactor(desc) || Pipeline::UsesDualSource(desc)) {
 				if (a_error.empty())
@@ -1145,6 +1225,46 @@ namespace RenderGraph::Engine::ImageSpace
 		std::vector<std::pair<std::wstring, std::wstring>> DefinesOf(std::size_t a_effect) { return AnchorPasses::Defines(NarrowDefinesOf(a_effect)); }
 
 		/**
+		 * @brief The heap index of the no-fog volume (ImageSpaceState::noFogView), made on first use; UINT32_MAX when it could not be
+		 * made. Render thread, at a graph build.
+		 */
+		std::uint32_t NoFogVolume()
+		{
+			auto& state = IS();
+			if (state.noFogTried)
+				return state.noFogIndex;
+			state.noFogTried = true;
+			auto* device = globals::d3d::device;
+			if (!device)
+				return UINT32_MAX;
+			D3D11_TEXTURE3D_DESC desc{};
+			desc.Width = desc.Height = desc.Depth = 1;
+			desc.MipLevels = 1;
+			desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+			desc.Usage = D3D11_USAGE_IMMUTABLE;
+			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			const std::array<float, 4> texel{ 0.0f, 0.0f, 0.0f, 1.0f };
+			D3D11_SUBRESOURCE_DATA data{ .pSysMem = texel.data(), .SysMemPitch = sizeof(texel), .SysMemSlicePitch = sizeof(texel) };
+			winrt::com_ptr<ID3D11Texture3D> texture;
+			if (FAILED(device->CreateTexture3D(&desc, &data, texture.put())) ||
+				FAILED(device->CreateShaderResourceView(texture.get(), nullptr, state.noFogView.put()))) {
+				logger::warn("[ORG] ImageSpace: the no-fog volume could not be made");
+				return UINT32_MAX;
+			}
+			Util::SetResourceName(texture.get(), "ImageSpace::NoFogVolume");
+			Util::SetResourceName(state.noFogView.get(), "ImageSpace::NoFogVolume SRV");
+			constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::FrameSlot, 0);
+			auto binding = DCLF::GpuTextures::Get().ResolveBinding(state.noFogView.get(), kSourceTag);
+			if (binding.index == DCLF::GpuTextures::kInvalid) {
+				logger::warn("[ORG] ImageSpace: the no-fog volume has no heap index");
+				return UINT32_MAX;
+			}
+			state.noFogIndex = binding.index;
+			state.noFogOwner = std::move(binding.owner);
+			return state.noFogIndex;
+		}
+
+		/**
 		 * @brief The feature handles of an effect that reads CS's feature headers (EffectInfo::features), in its resource list's order
 		 * after its samplers: s9, IBL's environment and sky SH, Exponential Height Fog's near and far volumes, Dynamic Cubemaps'
 		 * environment. A header the program's defines do not include is unread (handle 0). An included one reads its feature's
@@ -1170,20 +1290,29 @@ namespace RenderGraph::Engine::ImageSpace
 				state.defaultSampler = ShaderBindings::CreateSamplerFromD3D11(desc);
 			}
 			a_out.push_back(fog && state.defaultSampler ? AnchorPasses::Bind::Handle(state.defaultSampler.Index()) : AnchorPasses::Bind::Unused());
-			const auto read = [&](bool a_included, std::string_view a_id) {
+			const auto read = [&](bool a_included, std::string_view a_id, bool a_fogVolume) {
 				if (!a_included) {
 					a_out.push_back(AnchorPasses::Bind::Unused());
 					return true;
 				}
-				if (!PublishedResources::IsDeclarable(a_id)) {
-					a_missing = std::string(a_id);
-					return false;
+				// IsDeclarable notes an id it says no to: the id's publish builds every graph again, and this pass then reads it.
+				if (PublishedResources::IsDeclarable(a_id)) {
+					a_out.push_back(AnchorPasses::Bind::Published(a_id));
+					return true;
 				}
-				a_out.push_back(AnchorPasses::Bind::Published(a_id));
-				return true;
+				// The fog publishes its volumes at its first graph frame, and never while its volumetric fog is off: until then the pass
+				// reads the no-fog volume, as D3D11 reads a null view.
+				if (a_fogVolume) {
+					if (const auto index = NoFogVolume(); index != UINT32_MAX) {
+						a_out.push_back(AnchorPasses::Bind::Handle(index));
+						return true;
+					}
+				}
+				a_missing = std::string(a_id);
+				return false;
 			};
-			return read(has("IBL"), ORGIBL::kEnvId) && read(has("IBL"), ORGIBL::kSkyId) && read(fog, ORGExponentialHeightFog::kNearIntegratedId) &&
-			       read(fog, ORGExponentialHeightFog::kFarIntegratedId) && read(fog && has("DYNAMIC_CUBEMAPS"), ORGDynamicCubemaps::kEnvBC6HId);
+			return read(has("IBL"), ORGIBL::kEnvId, false) && read(has("IBL"), ORGIBL::kSkyId, false) && read(fog, ORGExponentialHeightFog::kNearIntegratedId, true) &&
+			       read(fog, ORGExponentialHeightFog::kFarIntegratedId, true) && read(fog && has("DYNAMIC_CUBEMAPS"), ORGDynamicCubemaps::kEnvBC6HId, false);
 		}
 
 		/** @brief The raster program's description for a key (the blend was checked by BlendFor). Needs the engine's effect object. */
@@ -1269,7 +1398,7 @@ namespace RenderGraph::Engine::ImageSpace
 				std::array<rhi::BlendAttachment, 2> blend{};
 				std::string error;
 				if (!BlendFor(spec.key.blend, effect.targets, blend, error)) {
-					if (!BlendStateOf(spec.key.blend))
+					if (D3D11_BLEND_DESC desc{}; !BlendDescOf(spec.key.blend, desc))
 						state.retryBuild = true;
 					logger::info("[ORG] ImageSpace: {}: its blend state has no ORG form at the graph's build ({}); its pass is left out", spec.name, error);
 					return nullptr;
@@ -1311,7 +1440,7 @@ namespace RenderGraph::Engine::ImageSpace
 			if (effect.features) {
 				std::string missing;
 				if (!FeatureBinds(spec.key.effect, bindings, missing)) {
-					logger::info("[ORG] ImageSpace: {}: {} is not on the graph (its feature's ORG switch is off); its pass is left out", spec.name, missing);
+					logger::info("[ORG] ImageSpace: {}: {} is not published (its feature's ORG path is off or has not run yet); its pass is left out until it is", spec.name, missing);
 					return nullptr;
 				}
 			}
@@ -1692,6 +1821,14 @@ namespace RenderGraph::Engine::ImageSpace
 					}
 					state.manifest.insert_or_assign(shape->first, shape->second);
 				}
+				for (const auto& [key, item] : root.value("blends", json::object()).items()) {
+					D3D11_BLEND_DESC desc{};
+					try {
+						if (BlendFromJson(item, desc))
+							state.blendDescs.emplace(static_cast<std::uint32_t>(std::stoul(key)), desc);
+					} catch (const std::exception&) {
+					}
+				}
 				for (const auto& [name, defines] : root.value("defines", json::object()).items()) {
 					const auto effect = EffectNamed(name);
 					if (effect >= 0 && defines.is_array())
@@ -1729,7 +1866,13 @@ namespace RenderGraph::Engine::ImageSpace
 			json defines = json::object();
 			for (const auto& [effect, list] : state.savedDefines)
 				defines[std::string(kEffects[effect].effectName)] = list;
-			const json root{ { "version", kManifestVersion }, { "session", state.session }, { "shapes", std::move(items) }, { "defines", std::move(defines) } };
+			// The blend descriptions the shapes use, so a build before the engine fills its blend table makes their passes.
+			json blends = json::object();
+			for (const auto& [key, entry] : shapes)
+				if (const auto kept = state.blendDescs.find(key.blend); !key.compute && kept != state.blendDescs.end())
+					blends[std::to_string(key.blend)] = BlendToJson(kept->second);
+			const json root{ { "version", kManifestVersion }, { "session", state.session }, { "shapes", std::move(items) }, { "defines", std::move(defines) },
+				{ "blends", std::move(blends) } };
 			std::error_code error;
 			const auto path = ManifestPath();
 			std::filesystem::create_directories(path.parent_path(), error);
@@ -1855,7 +1998,7 @@ namespace RenderGraph::Engine::ImageSpace
 				return;
 			}
 			for (const auto& spec : state.specs) {
-				if (!spec->key.compute && !BlendStateOf(spec->key.blend))
+				if (D3D11_BLEND_DESC desc{}; !spec->key.compute && !BlendDescOf(spec->key.blend, desc))
 					return;
 				const auto& effect = kEffects[spec->key.effect];
 				for (std::uint32_t slot = 0; slot < effect.samplers; ++slot)
@@ -2066,30 +2209,33 @@ namespace RenderGraph::Engine::ImageSpace
 			const auto use = Constants::Capture(Constants::kDrawStages);
 			const auto* slot = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 2) : nullptr;
 			// The ImageSpace setups write PerGeometry into the PS b2 size-class pool (PSGeometry); a custom mapper's ring is accepted too.
-			if (!slot || (slot->group != Constants::Group::PSGeometry && slot->group != Constants::Group::Custom)) {
+			// None bound is a shader without PerGeometry constants (ISCopy's): D3D11 reads 0 there, and so does the latch's empty window.
+			if (slot && slot->group != Constants::Group::PSGeometry && slot->group != Constants::Group::Custom) {
 				Flush();
-				Failure("the capture holds no PerGeometry constants for its draw", scope.effect);
+				Failure("the capture holds PerGeometry constants outside the geometry and custom pools for its draw", scope.effect);
 				return false;
 			}
 			// FrameBuffer as the draw had it bound (PS b12, the engine's per-frame buffer), not CS's shared snapshot.
-			const auto* frameSlot = Constants::Find(use, Constants::Stage::Pixel, 12);
+			const auto* frameSlot = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 12) : nullptr;
 			if (!frameSlot) {
 				Flush();
 				Failure("the capture holds no PerFrame constants for its draw", scope.effect);
 				return false;
 			}
-			const auto at = Constants::Where(*slot);
 			const auto frameAt = Constants::Where(*frameSlot);
+			// No PerGeometry: an empty window into the PerFrame chunk, so the row reads stay in a valid buffer and read 0.
+			const auto at = slot ? Constants::Where(*slot) : frameAt;
+			const std::uint32_t size = slot ? at.size : 0u;
 			if (!at.block || !frameAt.block) {
 				Flush();
 				Failure("its captured constants have no ring chunk", scope.effect);
 				return false;
 			}
 			const std::array blocks{ at.block, frameAt.block };
-			AddToBatch(*spec, { .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = at.size, .frameSize = frameAt.size } }, blocks);
+			AddToBatch(*spec, { .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = size, .frameSize = frameAt.size } }, blocks);
 			if (state.logShapes && state.loggedConstants.insert(key).second)
-				logger::info("[ORG] ImageSpace: {} into {} taken with {} bytes of PerGeometry ({}) and {} of PerFrame", effect.effectName, NameForLog(key.output), at.size,
-					slot->group == Constants::Group::PSGeometry ? "PS geometry pool" : "custom", frameAt.size);
+				logger::info("[ORG] ImageSpace: {} into {} taken with {} bytes of PerGeometry ({}) and {} of PerFrame", effect.effectName, NameForLog(key.output), size,
+					!slot ? "none bound" : slot->group == Constants::Group::PSGeometry ? "PS geometry pool" : "custom", frameAt.size);
 			return true;
 		}
 

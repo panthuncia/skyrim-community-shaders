@@ -23,6 +23,7 @@
 #include "Features/DrawcallLimitFix/Features/OcclusionMaps/OcclusionMaps.h"
 #include "Features/DrawcallLimitFix/Features/Particles/Particles.h"
 #include "Features/DrawcallLimitFix/Features/Portals/Portals.h"
+#include "Features/DrawcallLimitFix/Features/Precipitation/Precipitation.h"
 #include "Features/DrawcallLimitFix/Features/Reflection/Reflection.h"
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuViews.h"
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
@@ -59,7 +60,8 @@ namespace DCLF::Features
 		// - Sky registers nothing with Core (its hooks and its anchors' clients are its own), so its place sets no order; it is before Fades.
 		//   Decal occlusion is the same kind, listed after it.
 		// - Menu views registers only report lines (its probe's hooks are its own), so its place sets no order either; it is before Fades.
-		// - Water, Blood splatter and Shadow mask are the same kind (the EngineDraws anchor's clients); they are listed after Menu views.
+		// - Water, Blood splatter, Precipitation and Shadow mask are the same kind (the EngineDraws anchor's clients); they are listed after
+		//   Menu views.
 		// - Fades is last. Its pool, scene resources, commit hook, pass setups, coordinator component and stand-in observer run after every
 		//   other feature's. Its channels are the last BeforeStructural ones.
 		//
@@ -97,6 +99,7 @@ namespace DCLF::Features
 			MenuViews::Feature(),
 			Water::Feature(),
 			BloodSplatter::Feature(),
+			Precipitation::Feature(),
 			ShadowMask::Feature(),
 			Fades::Feature(),
 		};

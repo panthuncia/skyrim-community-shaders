@@ -53,6 +53,7 @@ pinned submodule commits exist only locally, so a fresh clone cannot fetch them.
 | P5 primary path: ports precompile at load, pipelines before use, no readiness fallback; latch allowed draws         | Merged and run (2026-11-11); census 40/frame settled; latch shots match with it off  | CS `org-port/p5`, ORG `org-port/fix-retire-2` (b6fb82a)  |
 | Phase 5.5 (no engine fall-through): the gate before Phase 6                                                        | Started 2026-11-11; 5.5.0's compile-stall fixes merged                              | CS `org-port/p5`                                         |
 | Guest frames without slots: shared command pools, run leases, one frame arena, only published recordings kept    | Shared pools merged (4.30 GB settled, from 9.75); leases and the arena built, not run yet | CS `org-port/frame-contexts`, ORG and BasicRHI `org-port/frame-contexts` |
+| P6.0-P6.3: native mode (`CS_ORG_NATIVE=1`): BasicRHI device, native handles, native host, ORG present, startup errors | Built, not run (render-graph.md, "Native mode"; `native.env`) | CS `org-port/native-vk` |
 
 **Root cause worth knowing:** a BasicRHI-created Vulkan device failed on AMD because the driver rejects acceleration
 structures in a mutable descriptor list at any count. DXVK never enables acceleration structures, so the adopted device
@@ -258,6 +259,13 @@ own binds always reach the driver. Details: "Hazard: bindings the driver keeps a
 
 - ORG's alias planner sized a texture with an authored mip chain as one mip, so placements overlapped (SSGI's working
   depth ran into its radiance). Placement now sizes textures from the description the backing creates them with.
+- Green streaks on near geometry (Whiterun bridge railings at noon) came from transients of different epochs sharing
+  alias memory. `CS_ORG_SSGI_DEBUG=<n>` (render-graph.md, "Switches") narrowed it down: gone with no aliasing (1), at
+  full resolution (8), and with SSGI in a pool of its own (17). Every epoch's graph packed its transients from offset 0
+  of one shared arena, and Volumetric Lighting's volume (epoch 34) covered SSGI's working depth, radiance and normals
+  (epoch 15). Nothing orders two epochs' GPU work against each other: the alias ledger adds no wait on the same queue.
+  Each epoch now has pools of its own (ORG). Also fixed on the way: an aliased texture's first-use barrier waited for
+  nothing (TOP_OF_PIPE; now sync All, and a Vulkan discard keeps a before sync).
 - ORG's descriptor manager made 2D views of 3D textures, so Skylighting's probe update wrote almost nothing readers saw.
   3D textures now get Texture3D views.
 - A texture array's default view is its first slice: ports that read `Texture2DArray` (Skylighting's cascades, LLF's
@@ -759,7 +767,7 @@ reasons are deleted as their items land, and no new ones are added.
 | 5.5.7 | Menus (P5.8/P5.9, `p5/menus.md`) | The menu scenes as an engine draw family, not DCLF views (a load has no DCLF members for the loading-screen model): the local map's two batches (`CS_ORG_MAP=1`) and a menu model's depth and colour batches (`CS_ORG_MENU3D=1`), drawn with ORG builds of Utility (base texture, fog of war, depth, shadow maps), Lighting and Effect, the world's CS features off in the last two. Written 2026-11-12. | `menu views: local map left to the engine`, `menu views: menu 3D left to the engine` |
 | 5.5.8 | Scaleform remainder | GFx render targets as graph resources; the blur filter family (offset table transcribed); 3D draws, line strips, 32-bit indices, XY32f, gouraud 4-5, YUV textures. `CS_ORG_SCALEFORM_D3D11_PARTS` removed. | `scaleform: display not taken`, `D3D11 part`, `segment replayed` |
 | 5.5.9 | Bink remainder | Mode-2 movies at the `DrawTiles` point; HDR output into HDR Display's UI texture; movies over 2048x1152; ticks between a resize and the next build; the logo's frame 1. | `bink: tick not taken` |
-| 5.5.10 | D3D11 state readers | `EngineDrawFamily.cpp` `ResolveHeader` reads `RSS.PSTexture[]`; diagnostics read the latch or are listed as DXVK-only. | |
+| 5.5.10 | D3D11 state readers | `EngineDrawFamily.cpp` `ResolveHeader` reads `RSS.PSTexture[]`; diagnostics read the latch or are listed as DXVK-only. Done on `org-port/state-readers` (p5/flush.md "Readers of the D3D11 state" and "DXVK's hazard rules under the latch"): every `Get*` reader classified; `ResolveHeader` reads only CS's registers (t16 and up), Water, ImageSpace and Scaleform read the shadow state, the diagnostics are DXVK-only. Under the latch DXVK keeps stale targets and drops CS's binds of their views (its hazard rules): traced with the census (`[ORG] state readers:`), and `CS_ORG_ENGINE_FLUSH_LATCH_UNBIND=1` unbinds DXVK's targets at a latched flush that changes them. A likely cause of the green streaks on near geometry with the latch on; `latch-census-short-unbind.env` against `latch-census-short.env` decides. | |
 | 5.5.11 | On by default | Every port switch the census tours use becomes the default, and the latch is on by default in ORG builds, so the gate runs on the shipping configuration. | |
 
 **Order:** 5.5.0, then 5.5.1 (the largest, and structural), then 5.5.2-5.5.6, then 5.5.7-5.5.9, then 5.5.10-5.5.11.

@@ -4,7 +4,9 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
+#include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Publication.h"
@@ -61,6 +63,7 @@ namespace DCLF::LoadHold
 			// What the hold waited for: the world frames each condition was not met in, and the most objects that waited by reason.
 			std::uint32_t waitedPublication = 0, waitedObjects = 0, waitedClaims = 0, waitedFamilies = 0, waitedViews = 0;
 			std::array<std::uint32_t, kSetWaitReasons> peakWaiting{};
+			std::uint64_t builds = 0;  // the pipeline lane's finished builds (ready or failed), main and shadow: a build is progress
 		};
 		Hold hold;
 
@@ -237,6 +240,9 @@ namespace DCLF::LoadHold
 					"frames with a draw family waiting; handed to the engine: {} passes of DCLF's classes (refused, or not bound yet); last {:.0f} ms",
 					after.pending, peaks.empty() ? "none" : peaks, after.baseMips, after.familyFrames, after.frames, after.kept, ms);
 			}
+			// The shadow views DCLF does not cover that passes went to: whose they are.
+			for (const void* accumulator : PassCapture::Get().TakeUncoveredAccumulators())
+				logger::info("[DCLF] handed to the engine: a shadow view DCLF does not cover, accumulator {}", ShadowViews::Get().DescribeAccumulator(accumulator));
 			// The geometries behind the passes handed to the engine, most first: what DCLF does not draw of its classes, and where.
 			for (const auto& sample : PassCapture::Get().TakeKeptSamples(after.kept ? 12 : 0))
 				logger::info(
@@ -341,6 +347,11 @@ namespace DCLF::LoadHold
 		hold.withheld += PassCapture::Get().GetStats().holdWithheld;
 		std::uint32_t waits = 0;
 		hold.settled = Settled(waits) ? hold.settled + 1 : 0;
+		// A cold shader cache builds for many seconds while the counts stand still: every finished build counts as progress.
+		const auto pipelines = DrawPipelines::Get().GetStats();
+		const std::uint64_t builds = std::uint64_t(pipelines.ready) + pipelines.failed + pipelines.shadowReady + pipelines.shadowFailed;
+		if (builds != std::exchange(hold.builds, builds))
+			hold.progress = std::chrono::steady_clock::now();
 		if (waits == ~0u || waits < hold.best) {
 			hold.best = waits == ~0u ? hold.best : waits;
 			hold.progress = std::chrono::steady_clock::now();

@@ -42,13 +42,19 @@ struct UtilityOrgSceneDraw
 	uint2 Padding2;
 };
 
+// The draw's FrameBuffer rows (b12, c0-c44), its matrices transposed (OrgSceneFrame, below).
+struct OrgSceneFrameRows
+{
+	float4 Rows[45];
+};
+
 // The draw's palettes (Common/Skinned.hlsli): previous frame's 240 rows, then this frame's. Read by row, never loaded whole.
 struct UtilityOrgBones
 {
 	float4 Rows[480];
 };
 
-#		define UTILITY_ORG_RESOURCES(X)                  			X(SHARED, ConstantBuffer, Shared, 0)          			X(LATCH, UtilityOrgSceneDraw, SceneDraw, 2) 			X(EXTERN_LATCH, UtilityOrgBones, Bones, 9)
+#		define UTILITY_ORG_RESOURCES(X)                  			X(SHARED, ConstantBuffer, Shared, 0)          			X(LATCH, UtilityOrgSceneDraw, SceneDraw, 2) 			X(EXTERN_LATCH, UtilityOrgBones, Bones, 9) X(EXTERN_LATCH, OrgSceneFrameRows, Frame, 12)
 #	else
 // A shadow mask draw's latched values (DrawConstants in Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h). The engine's
 // rows as its constant buffers hold them: a matrix is its column registers (column_major packing), rebuilt below.
@@ -72,6 +78,18 @@ struct UtilityOrgShadowMaskDraw
 #	endif
 ORG_PUSH_BLOCK(UTILITY_ORG_RESOURCES(ORG_HANDLE))
 UTILITY_ORG_RESOURCES(ORG_RESOURCE)
+#	if defined(UTILITY_ORG_SCENE)
+// FrameBuffer (the engine's VS_PerFrame, b12) as the draw had it bound, latched with it, its matrices stored transposed: the shared
+// FrameBuffer's ConstantBuffer view, read in this build's vertex stage, made DXC emit invalid SPIR-V (a Function-storage
+// ConstantBuffer). Common/NamespacedCBuffer.hlsli loads it raw from here instead (ORG_SHARED_FRAMEBUFFER_AT).
+struct OrgSceneFrameAt
+{
+	uint FrameSrv;
+	uint FrameOffset;
+};
+static OrgSceneFrameAt OrgSceneFrame = { OrgHandle_Frame, OrgOffset_Frame };
+#	define ORG_SHARED_FRAMEBUFFER_AT OrgSceneFrame
+#	endif
 #	if defined(UTILITY_ORG_SCENE)
 static ByteAddressBuffer OrgBonesBuffer = ResourceDescriptorHeap[OrgHandle_Bones];
 /** @brief Row a_row of palette a_palette (0 previous, 1 current) of the draw's latched bones. */

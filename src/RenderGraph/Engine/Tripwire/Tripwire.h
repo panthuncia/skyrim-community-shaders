@@ -283,6 +283,74 @@ namespace RenderGraph::Engine::Tripwire
 	 */
 	bool GameFunction(const void* a_address, std::uint64_t& a_id, std::uint64_t& a_within);
 
+	/** @brief The owner a handle keeps (Options::owner), or null when a_object is not a handle or has none. Any thread. */
+	std::shared_ptr<const void> OwnerOf(const void* a_object);
+
+	/**
+	 * @brief Native mode (CS_ORG_NATIVE=1, RenderGraph/Engine/Native): what native device and swap chain handles answer instead of
+	 * failing. Without DXVK there is nothing to forward to, so these make the objects the engine asks for. A null entry leaves its
+	 * method a tripwire.
+	 *
+	 * Once services are installed, a native device handle also makes views, shaders, input layouts, state objects and queries
+	 * itself: each is a native handle that keeps its description (and its resource, for a view), which is all the ports read.
+	 * Wrapping (guest) handles never use the services.
+	 */
+	struct NativeServices
+	{
+		/** @name Resources: each returns S_OK with one reference in the last argument, or a failure with it null. */
+		/** @{ */
+		HRESULT (*createTexture1D)(const D3D11_TEXTURE1D_DESC& a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture1D** a_out) = nullptr;
+		HRESULT (*createTexture2D)(const D3D11_TEXTURE2D_DESC& a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture2D** a_out) = nullptr;
+		HRESULT (*createTexture3D)(const D3D11_TEXTURE3D_DESC& a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture3D** a_out) = nullptr;
+		HRESULT (*createBuffer)(const D3D11_BUFFER_DESC& a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Buffer** a_out) = nullptr;
+		/** @} */
+		/** @brief The device's QueryInterface for IDXGIDevice and IDXGIDevice1 (the engine sets its frame latency through it). */
+		HRESULT (*queryDxgiDevice)(REFIID a_riid, void** a_out) = nullptr;
+		/** @name The swap chain. */
+		/** @{ */
+		HRESULT (*present)(UINT a_syncInterval, UINT a_flags) = nullptr;
+		HRESULT (*getBuffer)(UINT a_buffer, REFIID a_riid, void** a_out) = nullptr;
+		HRESULT (*resizeBuffers)(UINT a_count, UINT a_width, UINT a_height, DXGI_FORMAT a_format, UINT a_flags) = nullptr;
+		HRESULT (*getDesc)(DXGI_SWAP_CHAIN_DESC* a_out) = nullptr;
+		HRESULT (*getContainingOutput)(IDXGIOutput** a_out) = nullptr;
+		/** @} */
+		/** @name The device's queries. */
+		/** @{ */
+		HRESULT (*checkFeatureSupport)(D3D11_FEATURE a_feature, void* a_data, UINT a_size) = nullptr;
+		HRESULT (*checkFormatSupport)(DXGI_FORMAT a_format, UINT* a_support) = nullptr;
+		/** @} */
+		/**
+		 * @name The immediate context: the work D3D11 code does on resources outside draws. Each runs as its own command work on the
+		 * graphics queue, in the order the calls are made, between the graph's epochs. A resource the native device did not make is
+		 * logged and left alone.
+		 */
+		/** @{ */
+		HRESULT (*map)(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT a_flags, D3D11_MAPPED_SUBRESOURCE* a_out) = nullptr;
+		void (*unmap)(ID3D11Resource* a_resource, UINT a_subresource) = nullptr;
+		void (*updateSubresource)(ID3D11Resource* a_resource, UINT a_subresource, const D3D11_BOX* a_box, const void* a_data, UINT a_rowPitch,
+			UINT a_depthPitch) = nullptr;
+		void (*copyResource)(ID3D11Resource* a_destination, ID3D11Resource* a_source) = nullptr;
+		void (*copySubresourceRegion)(ID3D11Resource* a_destination, UINT a_destinationSubresource, UINT a_x, UINT a_y, UINT a_z, ID3D11Resource* a_source,
+			UINT a_sourceSubresource, const D3D11_BOX* a_box) = nullptr;
+		void (*generateMips)(ID3D11ShaderResourceView* a_view) = nullptr;
+		void (*clearRenderTargetView)(ID3D11RenderTargetView* a_view, const FLOAT a_color[4]) = nullptr;
+		void (*clearUnorderedAccessViewUint)(ID3D11UnorderedAccessView* a_view, const UINT a_values[4]) = nullptr;
+		void (*clearUnorderedAccessViewFloat)(ID3D11UnorderedAccessView* a_view, const FLOAT a_values[4]) = nullptr;
+		void (*clearDepthStencilView)(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil) = nullptr;
+		/** @brief Queries: End marks the context's work so far; GetData answers once it is done. Begin needs nothing. */
+		void (*end)(ID3D11Asynchronous* a_query) = nullptr;
+		HRESULT (*getData)(ID3D11Asynchronous* a_query, void* a_data, UINT a_size, UINT a_flags) = nullptr;
+		/** @brief The context's QueryInterface for ID3DUserDefinedAnnotation. */
+		HRESULT (*queryContext)(REFIID a_riid, void** a_out) = nullptr;
+		/** @} */
+	};
+
+	/** @brief Installs the native services (copied), once, before the native handles are handed to the engine. */
+	void SetNativeServices(const NativeServices& a_services);
+
+	/** @brief Whether native services are installed (native mode). Any thread. */
+	bool NativeServicesInstalled();
+
 	/**
 	 * @brief Asked before the guest context forwards any call: a_slot is the method's vtable slot (SlotNames(Kind::DeviceContext)),
 	 * a_caller the code that called it. True forwards the call as usual; false drops it, as a native handle fails it (outputs zeroed,

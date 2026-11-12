@@ -91,7 +91,22 @@ A pass that touches a resource only DXVK's families may use (an exclusive import
 -   **Entry.** Before an epoch's first submission to either, DXVK's stream signals `streamPoint` where it stands (one
     enqueued submission). Each queue's first submission of the epoch waits for it.
 -   **Exit.** Every submission also signals its queue's exit timeline (`computeExit`, `copyExit`). The stream waits for both
-    at the epoch's end.
+    at the epoch's end. An epoch that `ExecuteExternalEpoch` submits (DCLF's sites) ends at `CloseExternalEpoch`, after the
+    caller emitted its execution. Before 2026-11-12 nothing closed those epochs. The next epoch then added their exit wait to
+    DXVK's command list without a flush. When the compute work waited for a segment in that list, the list waited for itself
+    and the GPU stopped (the map menu in latch-census-short, t5 stuck one value below the run that carried t6).
+-   **Stream-order guard.** DXVK puts an external command's waits at the start of the submission that holds it, and its signals
+    at the end. Before the stream waits for compute or copy work (a segment's wait or an exit wait), the runtime checks what
+    that work waits for. When it waits for a value DXVK's current command list signals, the runtime flushes first
+    (`[ORG] stream order: flushed DXVK's command list before ...`). When it waits for a value the stream has not signalled at
+    all, nothing can order it: `[ORG] stream order: ... waits for off-stream submission #n ...` names it. Both log the stream
+    order (below), at most eight times a session.
+-   **Stream-order telemetry.** `RenderGraphRuntime::DescribeStreamOrder` lists the stream's signalled values (open, closed,
+    reached), the compute and copy submissions not done with what they and the earlier ones on their queue wait for, and a
+    ring of the last events: off-stream submissions, external commands, enqueued submissions, flushes and segments signalled
+    unexecuted. Each semaphore is named (`streamPoint`, `computeExit`, `copyExit`, `frameWait`, `t<index>` for the host's
+    timelines) and marked `PENDING` while not reached. The hang watchdog logs it (`[HANG] render graph stream order:`), and so
+    does a shared copy queue's 0.5 s wait (`[ORG] stream order at the copy queue's wait:`).
 -   **Submission.** Each queue's submissions go through one thread of its own (`ComputeSubmitter`), under DXVK's submission
     lock.
 -   **Sharing the uploader's queue.** Nothing on a shared queue may block it:
@@ -1057,6 +1072,133 @@ for now. As later phases move work out of DXVK:
 -   **The binding model negotiation** (`dxvkSetBindingModelCallback`) and `dxvkRequestDeviceFeatures` are already unused in the owned
     frame: the host decides.
 
+## Native mode
+
+`CS_ORG_NATIVE=1` runs without DXVK ([org-full-port.md](./org-full-port.md), Phase 6). CS creates a BasicRHI Vulkan device
+itself, the engine's device, immediate context and swap chain are tripwire handles over it, the graph host runs natively,
+and ORG presents. A development option: the DXVK build stays the default. The code is in `src/RenderGraph/Engine/Native/`.
+
+### Startup
+
+Each stage logs one `[ORG native] stage <n>: <name>: ...` line, so a start that stops shows how far it got:
+
+1.  **switches** (`SKSEPlugin_Load`, right after `CommunityShaders.env`): every port switch native mode needs is turned on
+    in the process environment (the set of `latch-census-short.env`, without its diagnostics, and the flush latch). A port
+    switch set to `0`, or a conflicting one (`CS_NATIVE_D3D11=1`, `CS_ORG_OWNED_FRAME=1`, `CS_ORG=0`, `CS_ORG=features`,
+    `CS_ORG_SCALEFORM_D3D11_PARTS=1`), is a startup error. So is a switch something read before this point.
+2.  **checks** (`Hooks::InstallEarlyHooks`): DXVK is not loaded (`DxvkLoader::Load` skips it), no DXVK DLL is in the
+    process, and the RenderDoc and Upscaling features are off (Upscaling's upscalers and frame generation take DXVK's
+    images; add it to `CS_DISABLE_FEATURES`).
+3.  **device** (the game's `D3D11CreateDeviceAndSwapChain`, SE 75589 / AE 77396, through CS's hook): `rhi::CreateVulkanDevice`
+    on the adapter the game enumerated (its LUID), on descriptor buffers, with every supported core feature but
+    robustBufferAccess and sparse binding, robustness2's null descriptors, and the Vulkan 1.2 features the graph asks
+    DXVK for (memory model device scope, separate depth/stencil layouts, variable descriptor counts). This is the one place
+    a D3D12 device would be made (`CreateBasicRhiDevice`).
+4.  **swap chain**: a BasicRHI swap chain on the game's window, borderless only, and the back buffer.
+5.  **handles**: the native services are installed (`Tripwire::SetNativeServices`) and the engine gets a device, a context
+    and a swap chain handle. The engine writes them into `RendererData` +0x38/+0x40, window 0's swap chain (+0x60 from
+    `RendererData`'s window table) and the device and context globals (SE 524729 / 524771, AE 411348 / 411391) itself.
+6.  **engine init** (CS's InitD3D hook): those fields are checked to hold the handles.
+7.  **render graph** (`State::Setup`, `RenderGraphRuntime::Initialize`): the host runs on BasicRHI's device.
+8.  **first present**.
+
+### What the handles do
+
+A native device handle answers through the native services instead of failing:
+
+-   **Textures** (1D, 2D, 3D): a BasicRHI image, its initial data uploaded through a one-shot copy on the graphics queue, and
+    left in GENERAL (the graph's Common home state). Typeless formats are made in the format their binding implies. A
+    STAGING texture is a buffer in readback or upload memory, each subresource at a 512-byte offset with 256-byte rows. A
+    DYNAMIC texture is an image plus such an upload buffer, which Map hands out and Unmap copies in. Multisampled textures
+    are not built (logged once, `E_NOTIMPL`).
+-   **Buffers**: a BasicRHI buffer, in readback memory with CPU read access, in upload memory when it has contents or other
+    CPU access, else device-local.
+-   **The context's resource work**: `Map`/`Unmap` (buffers and staging textures in host memory; a read or a write waits only
+    for the context's own GPU work that last used the memory, `DO_NOT_WAIT` returns `DXGI_ERROR_WAS_STILL_DRAWING`,
+    `WRITE_NO_OVERWRITE` never waits), `UpdateSubresource`, `CopyResource`, `CopySubresourceRegion`, `GenerateMips` (a blit
+    chain), `ClearRenderTargetView`, `ClearDepthStencilView` and both UAV clears (an image clear, or `vkCmdFillBuffer` with
+    the first value on a buffer). Each is its own command list on the graphics queue, submitted when the call is made, with a
+    full memory barrier before and after: it lands between the graph epochs submitted before and after it, in the order D3D11
+    code calls them. Nothing waits for the GPU unless Map needs the memory. `Flush` does nothing.
+-   **Wrapped port resources**: `RenderGraphRuntime::WrapTexture` and `WrapBuffer` make native handles over the port's own
+    BasicRHI image or buffer (the image moved into GENERAL, uploaded or zeroed), so `GraphResources::ExportTexture`, the
+    engine targets, textures, buffers and texture streaming work as they do on DXVK. A port's handle that wraps a native
+    handle reaches the same record.
+-   **External commands**: `RenderGraphRuntime::EmitExternalCommands` (DCLF's CPU pipeline sites and its frame signal) records
+    the client's commands into a command buffer of native mode's own and submits it on the graphics queue at the call, with
+    the client's waits and signals, between full memory barriers. BasicRHI's queue accesses share one lock with it
+    (`ShareVulkanDevice` hooks). Without it DCLF's external runs waited for a frame signal nothing sent, and the host's runs
+    in flight grew until none were left.
+-   **Device features**: every supported core and Vulkan 1.1-1.3 feature (but robustBufferAccess, sparse binding and
+    protected memory) is enabled, as DXVK enables them; DCLF's counted indirect draws need `drawIndirectCount`.
+-   **Binds**: the native context stores what D3D11 code binds (shaders, shader resources, constant buffers, samplers, compute
+    UAVs, render targets and depth, blend, depth-stencil and rasterizer states, viewports, scissors, input layout, topology,
+    vertex and index buffers) and its getters answer it, so readers such as DCLF's main-pass capture (`OMGetRenderTargets`)
+    work. A bind the flush latch drops is not stored, as it never reaches DXVK in guest mode. `ClearState` clears them.
+-   **State descriptions** are stored as D3D11 and DXVK store them: blend targets copied from the first without independent
+    blending and given the default factors when blending is off, depth and stencil defaults when those are off, valid sampler
+    addresses and anisotropy. GetDesc then answers what the pipeline conversions expect.
+-   **Buffers in imports**: `DescribeResource` describes a native buffer as DXVK would (its Vulkan buffer, size and device
+    address), and a shader resource view of a native image with its own mips, slices and depth aspect.
+-   **Private data**: a native handle keeps `SetPrivateDataInterface` objects and answers `GetPrivateData` for them, so
+    `AttachGraphResource` and the pipeline descriptions' tokens work; other GUIDs answer `DXGI_ERROR_NOT_FOUND`.
+-   **Context queries**: `End` marks the context's work submitted so far, and `GetData` answers `S_FALSE` until it is done on
+    the GPU. Nothing is measured: events are done, occlusion counts 0 samples, timestamps are 0 and disjoint.
+-   **The flush latch and the residue census** run without the guest: the context filter sees the native context's calls,
+    so latched binds and skipped engine draws are dropped silently and counted as on the guest.
+-   **Queries**: `CheckFormatSupport` and `CheckFeatureSupport` (threading, doubles, format support 1 and 2, the D3D10.x,
+    D3D11 and D3D9 options, architecture, min precision) answer from BasicRHI's format support. The context answers
+    `ID3DUserDefinedAnnotation` with an object that reports no capture tool. The later device, context and swap chain
+    interfaces (`ID3D11DeviceContext1`, `IDXGISwapChain3`, ...) are refused without a tripwire line; CS's callers check.
+-   **Views, shaders, input layouts, states, queries**: native handles that keep their description (and resource), which is
+    what the ports read. A null view description gets D3D11's default for a 2D texture.
+-   **`IDXGIDevice1`**: `SetMaximumFrameLatency` goes to the swap chain; `GetAdapter` and `GetParent` answer the adapter
+    the game chose.
+-   **The swap chain**: `GetBuffer(0)` is the back buffer (a native texture); `ResizeBuffers` resizes the swap chain and
+    makes a new back buffer; `GetFullscreenState` says windowed, and `SetFullscreenState` and `ResizeTarget` change nothing.
+    `GetContainingOutput` is the game adapter's output on the window's monitor.
+
+Everything else on the device, and every context method, is a tripwire: logged once per call site, failed. A call from
+another plugin is an `[ORG native] <module> calls ...` error line ("Calling D3D11 in the DXVK-free build" in
+[org-extension-api-notes.md](./org-extension-api-notes.md)). `globals::d3d::device` and `context` are the native handles,
+so CS's own remaining D3D11 calls show up the same way, with CS's module offset.
+
+The graph imports a native texture as it imports a DXVK image: `RenderGraphRuntime::DescribeResource` answers from native
+mode's records (`Native::DescribeResource`), and `FrameAnchors`' engine imports do not unwrap native handles.
+
+### Present
+
+`Native::Present`, on the swap chain handle's Present (the end of CS's Present chain), on the presenting thread under the
+engine's lock: wait until the slot's last copy is done, record a copy of the back buffer into the acquired swap chain image
+(Common to CopySource and back, Undefined to CopyDest to Present), submit it on the graphics queue with a timeline signal,
+and `rhi::Swapchain::Present` on that point. The graph gives the back buffer back in Common on the graphics queue, so the
+copy is ordered after the frame's last write by submission order. No DXVK queue is involved: there is no queue callback
+and no submission thread, so the owned frame's lost wake (P6.0) cannot happen here.
+
+### The host
+
+In native mode `RenderGraphRuntime::Initialize` takes `Native::Device()` and resolves no DXVK export. The host has no queue
+boundaries, no in-stream or external epochs and no stream points, and its submissions go to BasicRHI's queues directly
+(BasicRHI's queue lock orders them against the present's). `ReleaseAfterD3D11` keeps an owner until the graph's
+submissions made before its release have retired (the host's retired callback). DXC loads from CS's runtime directory
+(`Native::RuntimeDirectory`, `CommunityShaders/bin`). `WrapTexture` and `WrapBuffer` make nothing, so the ports that wrap
+ORG resources for D3D11 take their failure paths. At the window's close presents stop; the device and the graph are
+left to the process exit (no DXVK teardown callback).
+
+### Known gaps
+
+-   **The ports' D3D11 sides.** Every P4 port makes DXVK objects of ORG resources (`WrapTexture`, `WrapBuffer`,
+    `GraphResources::ExportTexture`) and installs tripwire handles that wrap them. In native mode those calls fail, so the
+    engine's targets, file textures and geometry buffers are native textures and buffers instead (the native services),
+    which the graph imports by their records. What reads them through the context (Map, UpdateSubresource, CopyResource,
+    the binds the latch keeps) gets nothing.
+-   **Context work.** Draws, dispatches and binds still in the census do nothing. A DYNAMIC buffer is not renamed on
+    `WRITE_DISCARD`, because no native GPU work reads a buffer except the context's own copies; the graph does not import
+    native buffers yet. Copies of a depth-stencil image through staging memory carry the depth aspect only.
+-   **HDR**: HDR Display's output is not shown through the swap chain (no `SetFrameSource` in native mode), and the colour
+    space is not switched.
+-   **Upscaling and frame generation**: off (stage 2).
+
 ## Tripwire handles
 
 Phase 4 of [org-full-port.md](./org-full-port.md) puts these in the engine's `ID3D11*` and `IDXGISwapChain` fields once ORG
@@ -1115,6 +1257,8 @@ commas) is read with `Switches::List`: each item trimmed, empty items left out, 
 | --- | --- |
 | `CS_ORG=0` | No feature request and no graph: every feature stays on D3D11. |
 | `CS_ORG_OWNED_FRAME=1` | BasicRHI creates the device, DXVK runs as its guest, ORG presents ("Owned frame"). Frame generation is unavailable. |
+| `CS_ORG_NATIVE=1` | No DXVK: CS creates a BasicRHI Vulkan device, the engine's device, context and swap chain are tripwire handles over it, the graph runs natively and ORG presents ("Native mode"). Turns on every port switch it needs; a conflicting switch or a feature that needs DXVK stops the start with a message that names it. Logs `[ORG native] stage <n>: ...` per startup stage. |
+| `CS_ORG_NATIVE_VALIDATION=1` | With `CS_ORG_NATIVE=1`, BasicRHI creates the device with Vulkan validation (P6.4). |
 | `CS_ORG_BACKEND=d3d12` | The render graph's backend: `vulkan` (default) or `d3d12`. D3D12 needs `CS_ORG_NATIVE=1` and a build with `CS_ORG_D3D12` (default on); without either the graph is off with that reason. See org-full-port.md, "Phase 7 status". |
 | `CS_ORG_D3D12_SELFTEST=1` | Beside the game, on a D3D12 device of its own: builds `RenderGraph/D3D12SelfTest.hlsl` to DXIL, runs one dispatch through the descriptor heap and root constants and checks the readback, then presents 120 frames to a small window. Logs `[ORG] D3D12 self-test: passed` or the step that failed. `CS_ORG_D3D12_SELFTEST_HDR=1` asks the window for HDR10. Needs no native mode. |
 | `CS_ORG_D3D12_DEBUG=1` | The D3D12 debug layer on the self-test's device (and DRED with it). |
@@ -1141,10 +1285,12 @@ commas) is read with `Switches::List`: each item trimmed, empty items left out, 
 | `CS_ORG_SHADOW_MASK_VIEWS=world,menu` | With `CS_ORG_SHADOW_MASK=1`: the views the graph takes, comma separated (`Switches::List`); the others stay the engine's. Default both. |
 | `CS_ORG_OCCLUSION_QUERIES=1` | The engine's sun occlusion queries on the graph (`RenderGraph/Engine/Queries`, docs/development/p5/occlusion-queries.md): the engine's `BeginQuery`, `EndQuery` and `GetQueryData` are detoured; the sky family (`CS_ORG_SKY=1`) brackets the sun's occlusion draw, latches it and draws it at the `EngineQueries` anchor counted by an ORG occlusion query, and `GetQueryData` answers from that count once the run's work is done. The decal occlusion test is bracketed the same way by DCLF's decal occlusion family (`Features/DrawcallLimitFix/Features/DecalOcclusion`), drawn at the `DecalQueries` anchor; queries no port brackets stay on D3D11. `CS_ORG_OCCLUSION_QUERY_LOG=1` alone logs D3D11's answers. Logs `[ORG] occlusion queries: on`, `ring slot N read M samples`. |
 | `CS_ORG_BLOOD_SPLATTER=1` | Drawcall Limit Fix's screen blood family (`Features/DrawcallLimitFix/Features/BloodSplatter`, docs/development/p5/blood-splatter.md): BSBloodSplatterShader's splatter and flare latched at the screen splatter batch and drawn into the back buffer at the `EngineDraws` anchor with `BloodSplatter.hlsl` built for ORG. Its client is made at the first main-thread tick the graph runs (`MainTick`). Logs `[DCLF] blood splatter: on`, `the cs.blood-splatter client registered`. |
+| `CS_ORG_PRECIPITATION=1` | Drawcall Limit Fix's precipitation family (`Features/DrawcallLimitFix/Features/Precipitation`): BSParticleShader's ENVCUBE draws (rain, snow, Blackreach's spores) latched at DrawTriShape in the grouped alphas (AE 107673) and each drawn at once at the `EngineDraws` anchor with `Particle.hlsl` built for ORG (Rain Refraction's blend state for its refractive rain). Main view only. Logs `[DCLF] precipitation: on`, `the cs.precipitation client registered`; a draw it cannot take is the engine's, logged once per reason. |
 | `CS_ORG_CLOUD_SHADOWS=1` | Cloud Shadows' occlusion copy at the ReflectionsPrepass anchor (`CloudShadows/ORGCloudShadows.cpp`): `OcclusionCopyCS` copies each face of the last cloud layer into the occlusion cubemap, one dispatch per face and mip, through a run gate opened on the frame's first reflections prepass only. The cubemap is a History graph texture exported to t25 and t26 and published (`CloudShadows::Occlusion`); the layers stay D3D11 textures, imported once each with their views (`ORGCloudShadows::ImportLayer`), which the sky family's face clouds write on the graph. Logs `[ORG] Cloud Shadows: the occlusion copy runs on the render graph`; on any failure the D3D11 copy is made, filled and bound. |
 | `CS_ORG_GRASS_COLLISION=1` | Grass Collision's update at the EarlyPrepass anchor (`GrassCollision/ORGGrassCollision.cpp`): a copy of the latched colliders, then `CollisionUpdateCS` through a run gate opened on frames that staged one. The collision texture is a History graph texture exported to the engine's VS t100 and published (`GrassCollision::Collision`). Logs `[ORG] Grass Collision: the collision update runs on the render graph`; falls back to D3D11 on any failure. |
 | `CS_GRASS_COLLISION_STATS=1` | Every 120 frames, log the frame's collider and collision-shape counts and the path that ran them (`[GRASS COLLISION] frame N (ORG or D3D11): ...`). |
 | `CS_ORG_SCREEN_SPACE_GI=1` | Screen Space GI's chain at the DeferredPasses anchor (`ScreenSpaceGI/ORGScreenSpaceGI.cpp`): prefilter depths, radiance and disocclusion, prefilter radiance and normals, GI, blur and upsample through a run gate, with SSGICB in the latch and the shared constants. The history clears are one-shot passes of `cs.ssgi.reset`, armed again on a history reset. The composite's inputs are graph textures exported to D3D11 (t10-t13). Logs `[ORG] Screen Space GI runs on the render graph (...)`; on any failure `[ORG] Screen Space GI returns to D3D11: ...`. |
+| `CS_ORG_SSGI_DEBUG=<n>` | A diagnostic of the SSGI graph path: one change per run, to find the part that goes wrong. 1: nothing aliased (transients made history textures); 2: the composite gets null SSGI inputs, the chain still runs; 3: no dispatch, the outputs cleared each run; 4: the CoCg output cleared each run (luma only); 5: every history texture cleared each run; 6: blur off; 7: temporal denoiser off; 8: full resolution; 9: depth from kMAIN, not the final depth copy; 10-15: one transient kept out of the alias pool (10 WorkingDepth, 11 RadianceTemp, 12 Normal, 13 Radiance, 14 AccumFramesScratch, 15 both blur inputs); 16: `SSS::DiffuseNoAlbedo` kept out of the pool; 17: SSGI's transients in a pool of their own, aliased only with each other (`GraphResources::Options::aliasPool`). Logs `[ORG] Screen Space GI debug: ...` at setup. |
 | `CS_ORG_SUBSURFACE_SCATTERING=1` | Subsurface Scattering at the DeferredPasses anchor (`SubsurfaceScattering/ORGSubsurfaceScattering.cpp`): the diffuse extraction and the separable or Burley blur through a run gate opened on frames with skin, reading the shared constants; the intermediate textures are transient graph textures. Logs `[ORG] Subsurface Scattering runs on the render graph`; falls back to D3D11 on any failure. |
 | `CS_ORG_TERRAIN_BLENDING=1` | Terrain Blending's depth blend runs at the DepthDone anchor (`ORGTerrainBlending.cpp`): `DepthBlend` writes the blended depths and the terrain mask (t55) as graph textures exported to D3D11 and published (`TerrainBlending::BlendedDepth`, `BlendedDepth16`, `Mask`); DCLF's t55 reads the mask by name. The terrain depth stays a D3D11 texture (org-extension-api-notes.md, "Depth targets a D3D11 draw still writes"). Logs `[ORG] Terrain Blending: the depth blend runs on the render graph`; falls back to D3D11 on any failure. A frame whose anchor submitted nothing blends on D3D11, and every view Terrain Blending hands out names the D3D11 textures for that frame (`ORGTerrainBlending::Holds`). |
 | `CS_ORG_ANCHOR_SELFTEST=1` | Reserve every frame anchor and run a test client at each: a raster pass writes a texture, a compute pass reads it and one texel of kMAIN into a buffer, and a copy reads that back. Each anchor logs `[ORG] anchor self-test: <anchor> OK` once, then `every anchor OK`. |
@@ -1193,7 +1339,7 @@ commas) is read with `Switches::List`: each item trimmed, empty items left out, 
 | `CS_ORG_PINNED_IMPORTS=1` | Imported DXVK images are pinned instead of tracked (`dxvkTrackInteropResources` unused). |
 | `CS_ORG_RESTING_LAYOUTS=0` | DXVK keeps imported images in GENERAL instead of its own layouts (DxvkImageImport). |
 | `CS_ORG_DETAILED_CHECKPOINTS=1` | BasicRHI's crash checkpoints per command instead of per pass. |
-| `CS_ORG_ALIAS_LOG=1` | Log every alias plan's placements, ranks and exclusions (ORG's `autoAliasEnableLogging`). |
+| `CS_ORG_ALIAS_LOG=1` | Log every alias plan's placements, ranks and exclusions (ORG's `autoAliasEnableLogging`), and each pair of one graph's transients that share memory (`Persistent alias overlap: ...`). Each plan line names its epoch and whether it runs in DXVK's stream (`inHostStream`); `Persistent alias epoch N: ... queue slots=...` lists the queues its batches use. Each epoch has alias pools of its own, so transients of different epochs never share memory; ORG's `ORG_PERSISTENT_ALIAS_SHARE_EPOCHS=1` shares them again, for VRAM comparisons only (the layout that gave SSGI's green streaks). |
 | `CS_ORG_SHARED_CONSTANTS_CHECK=1` | After each epoch that uploads CS's shared constants, read the D3D11 buffers back and log whether the bytes match (stalls). |
 | `CS_ORG_COMPOSITE=1` | The deferred composite runs on the graph at the DeferredComposite anchor (`src/ORGDeferredComposite.cpp`). |
 | `CS_ORG_TEST_CONTRIBUTOR=<dll>` | Load ORG's sample contributor into `CS_ORG_TEST_CONTRIBUTOR_EPOCH` (default `cs.light-culling`) for `CS_ORG_TEST_CONTRIBUTOR_FRAMES` frames (default 600). |

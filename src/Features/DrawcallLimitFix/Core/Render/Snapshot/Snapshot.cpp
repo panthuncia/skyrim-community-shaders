@@ -4,6 +4,7 @@
 // (FitsScene) are the coordinator's.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
 #include "Features/DrawcallLimitFix/Core/Render/Snapshot/ViewBatches.h"
@@ -742,6 +743,22 @@ namespace DCLF
 		snapshot->drawsComplete = complete && snapshot->revision != nullptr;
 		if (!snapshot->drawsComplete)
 			snapshotsWithoutDraws.fetch_add(1, std::memory_order_relaxed);
+		// Native mode, while it is brought up: the first snapshot without draws says which part was missing.
+		if (!snapshot->drawsComplete && RenderGraph::Engine::Native::Active()) {
+			static std::atomic_flag logged;
+			if (!logged.test_and_set()) {
+				const auto payloadState = [&](std::size_t a_index) -> std::string {
+					if (!b.draws)
+						return "no draws";
+					const auto& payload = b.draws->payloads[a_index];
+					if (!payload)
+						return "none";
+					return payload->inputs.addresses.identity == inputs.main.get() ? "built" : "built for other main resources";
+				};
+				logger::warn("[DCLF] native: snapshot {} has no complete draws: draws {}, main resources {}, revision {}, Z-prepass payload {}, colour payload {}",
+					snapshot->serial, b.draws != nullptr, inputs.main != nullptr, snapshot->revision != nullptr, payloadState(kAsyncZPrepass), payloadState(kAsyncColour));
+			}
+		}
 		// The generations it was built for (its last make's inputs), which the adoption compares.
 		snapshot->buildGeneration = inputs.buildGeneration;
 		snapshot->mainGeneration = inputs.mainGeneration;

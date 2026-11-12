@@ -1,8 +1,12 @@
 #include "RenderGraph/Engine/Tripwire/TripwireHandles.h"
 
+#include <d3d11_4.h>
+#include <dxgi1_6.h>
+
 #include "RenderGraph/Engine/Tripwire/TripwireSelfTest.h"
 #include "RenderGraph/Switches.h"
 #include "Utils/D3D.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #if defined(CS_HAS_RENDER_GRAPH)
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -449,14 +453,46 @@ namespace RenderGraph::Engine::Tripwire
 		return set;
 	}
 
+	namespace
+	{
+		/**
+		 * @brief Later versions of the device, context and swap chain interfaces. A native handle implements only the first version,
+		 * and every caller CS has checks for a refusal (GrassOptimizations, EngineConstants, HDRDisplay), so native mode refuses them
+		 * without a tripwire line.
+		 */
+		bool IsNativeUpgradeIid(REFIID a_riid)
+		{
+			static const IID kIids[] = { __uuidof(ID3D11Device1), __uuidof(ID3D11Device2), __uuidof(ID3D11Device3), __uuidof(ID3D11Device4),
+				__uuidof(ID3D11Device5), __uuidof(ID3D11DeviceContext1), __uuidof(ID3D11DeviceContext2), __uuidof(ID3D11DeviceContext3),
+				__uuidof(ID3D11DeviceContext4), __uuidof(IDXGISwapChain1), __uuidof(IDXGISwapChain2), __uuidof(IDXGISwapChain3), __uuidof(IDXGISwapChain4) };
+			return std::find(std::begin(kIids), std::end(kIids), a_riid) != std::end(kIids);
+		}
+	}
+
 	namespace Detail
 	{
 		std::atomic<ContextFilter> contextFilter{ nullptr };
+		std::atomic<const NativeServices*> nativeServices{ nullptr };
 	}
 
 	void SetContextFilter(ContextFilter a_filter)
 	{
 		Detail::contextFilter.store(a_filter, std::memory_order_release);
+	}
+
+	void SetNativeServices(const NativeServices& a_services)
+	{
+		// Kept for the process: handles read it from any thread without a lock.
+		static NativeServices s_services;
+		if (Detail::nativeServices.load(std::memory_order_acquire))
+			return;
+		s_services = a_services;
+		Detail::nativeServices.store(&s_services, std::memory_order_release);
+	}
+
+	bool NativeServicesInstalled()
+	{
+		return Detail::nativeServices.load(std::memory_order_acquire) != nullptr;
 	}
 
 	bool IsOwnCode(const void* a_address)
@@ -562,6 +598,15 @@ namespace RenderGraph::Engine::Tripwire
 				logger::info("{}", message);
 			else
 				logger::warn("{}", message);
+			// Native mode (P6.3): another plugin's D3D11 call has nothing behind it. Named as an error, with the module, once per call
+			// site. CS's own calls and the game's are the census's business; the warning above names them.
+			if (!a_forwarded && !sites.selfTest && NativeServicesInstalled() && !IsOwnCode(a_caller) && !IsGameCode(a_caller)) {
+				const HMODULE module = ModuleAt(a_caller);
+				logger::error("[ORG native] {} calls {}::{} ({}): native mode (CS_ORG_NATIVE=1) has no D3D11, so the call failed and this "
+							  "plugin's rendering does not work. Disable the plugin for native runs, or run on DXVK. Recorded in "
+							  "docs/development/org-extension-api-notes.md.",
+					module ? ModuleName(module) : std::string("code outside any module"), InterfaceName(a_core.kind), a_method, entry->second.where);
+			}
 		}
 	}
 
@@ -640,7 +685,7 @@ namespace RenderGraph::Engine::Tripwire
 			}
 			// Another D3D11 object interface: the real object refuses it too, so this is no tripwire. (The engine's texture save
 			// helper asks GetType first, then for the matching texture interface.)
-			if (IsOtherObjectIid(a_riid)) {
+			if (IsOtherObjectIid(a_riid) || (!a_core.wrapped && NativeServicesInstalled() && IsNativeUpgradeIid(a_riid))) {
 				*a_out = nullptr;
 				return E_NOINTERFACE;
 			}
@@ -680,8 +725,56 @@ namespace RenderGraph::Engine::Tripwire
 			return E_FAIL;
 		}
 
+		HRESULT SetPrivateDataInterface(HandleCore& a_core, std::uint16_t a_slot, REFGUID a_guid, const IUnknown* a_data, void* a_caller)
+		{
+			if (a_core.wrapped || !NativeServicesInstalled()) {
+				if (a_core.Enter(a_slot, "SetPrivateDataInterface", a_caller))
+					return OnWrapped(a_core, [&](auto* a_object) { return a_object->SetPrivateDataInterface(a_guid, a_data); });
+				return E_FAIL;
+			}
+			// A native handle keeps it, as D3D11 does: replaced by a later set of the GUID, released with the handle.
+			winrt::com_ptr<IUnknown> held;
+			held.copy_from(const_cast<IUnknown*>(a_data));
+			std::lock_guard guard(a_core.privateLock);
+			auto& entries = a_core.privateInterfaces;
+			const auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& a_entry) { return a_entry.first == a_guid; });
+			if (found != entries.end()) {
+				if (held)
+					found->second = std::move(held);
+				else
+					entries.erase(found);
+			} else if (held) {
+				entries.emplace_back(a_guid, std::move(held));
+			}
+			return S_OK;
+		}
+
 		HRESULT GetPrivateData(HandleCore& a_core, std::uint16_t a_slot, REFGUID a_guid, UINT* a_size, void* a_data, void* a_caller)
 		{
+			if (!a_core.wrapped && a_size && NativeServicesInstalled()) {
+				// A native handle's private-data interface: the pointer, with a reference for the caller.
+				std::lock_guard guard(a_core.privateLock);
+				const auto& entries = a_core.privateInterfaces;
+				const auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& a_entry) { return a_entry.first == a_guid; });
+				if (found != entries.end()) {
+					if (!a_data) {
+						*a_size = sizeof(IUnknown*);
+						return S_OK;
+					}
+					if (*a_size < sizeof(IUnknown*)) {
+						*a_size = sizeof(IUnknown*);
+						return DXGI_ERROR_MORE_DATA;
+					}
+					found->second.copy_to(static_cast<IUnknown**>(a_data));
+					*a_size = sizeof(IUnknown*);
+					return S_OK;
+				}
+				// Not set: in native mode an answer, not a tripwire (GraphResourceOf and the descriptions ask every object).
+				if (!IsDebugName(a_guid)) {
+					*a_size = 0;
+					return DXGI_ERROR_NOT_FOUND;
+				}
+			}
 			if (IsDebugName(a_guid)) {
 				if (!a_size)
 					return E_INVALIDARG;
@@ -747,6 +840,21 @@ namespace RenderGraph::Engine::Tripwire
 		return info;
 	}
 
+	namespace
+	{
+		/** @brief The native services for a native handle (nothing wrapped), null for a guest handle or before native mode set them. */
+		const NativeServices* NativeOf(const HandleCore& a_core)
+		{
+			return a_core.wrapped ? nullptr : Detail::nativeServices.load(std::memory_order_acquire);
+		}
+	}
+
+	std::shared_ptr<const void> OwnerOf(const void* a_object)
+	{
+		const auto* core = Detail::CoreOf(a_object);
+		return core ? core->owner : nullptr;
+	}
+
 	DeviceHandle::~DeviceHandle()
 	{
 		// The context may outlive this device: it must not answer GetDevice with it any more.
@@ -791,11 +899,1478 @@ namespace RenderGraph::Engine::Tripwire
 			if (hook(*a_desc, a_data, a_out))
 				return S_OK;
 		}
+		if (const auto* native = NativeOf(core); native && native->createTexture2D && a_desc && a_out)
+			return native->createTexture2D(*a_desc, a_data, a_out);
 		if (core.Enter(static_cast<std::uint16_t>(Slot::CreateTexture2D), "CreateTexture2D", _ReturnAddress()))
 			return static_cast<ID3D11Device*>(core.wrapped)->CreateTexture2D(a_desc, a_data, a_out);
 		Detail::Zero(a_out);
 		return Detail::Failure<HRESULT>();
 	}
+
+	namespace
+	{
+		/** @brief What a null view description defaults from: the texture's dimension, format, mips, array size and depth. */
+		struct ViewSource
+		{
+			D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+			UINT mips = 1, arraySize = 1, depth = 1, samples = 1;
+			bool cube = false;
+		};
+
+		/** @brief The texture behind a_resource as a ViewSource, false for a buffer or an unknown resource. */
+		bool ViewSourceOf(ID3D11Resource* a_resource, ViewSource& a_out)
+		{
+			a_resource->GetType(&a_out.dimension);
+			switch (a_out.dimension) {
+			case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+				{
+					D3D11_TEXTURE1D_DESC desc{};
+					static_cast<ID3D11Texture1D*>(a_resource)->GetDesc(&desc);
+					a_out.format = desc.Format;
+					a_out.mips = desc.MipLevels ? desc.MipLevels : UINT(-1);  // 0 made the whole chain; -1 views all of it
+					a_out.arraySize = desc.ArraySize;
+					return true;
+				}
+			case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
+				{
+					D3D11_TEXTURE2D_DESC desc{};
+					static_cast<ID3D11Texture2D*>(a_resource)->GetDesc(&desc);
+					a_out.format = desc.Format;
+					a_out.mips = desc.MipLevels ? desc.MipLevels : UINT(-1);  // 0 made the whole chain; -1 views all of it
+					a_out.arraySize = desc.ArraySize;
+					a_out.samples = desc.SampleDesc.Count;
+					a_out.cube = (desc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
+					return true;
+				}
+			case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+				{
+					D3D11_TEXTURE3D_DESC desc{};
+					static_cast<ID3D11Texture3D*>(a_resource)->GetDesc(&desc);
+					a_out.format = desc.Format;
+					a_out.mips = desc.MipLevels ? desc.MipLevels : UINT(-1);  // 0 made the whole chain; -1 views all of it
+					a_out.depth = desc.Depth;
+					return true;
+				}
+			default:
+				return false;
+			}
+		}
+
+		/** @name A view of a_resource with a null description: the whole texture in its own format, as D3D11 makes it. */
+		/** @{ */
+		bool DefaultViewDesc(ID3D11Resource* a_resource, D3D11_SHADER_RESOURCE_VIEW_DESC& a_out)
+		{
+			ViewSource source;
+			if (!ViewSourceOf(a_resource, source))
+				return false;
+			a_out = {};
+			a_out.Format = source.format;
+			const bool multisampled = source.samples > 1;
+			switch (source.dimension) {
+			case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+				if (source.arraySize > 1) {
+					a_out.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE1DARRAY;
+					a_out.Texture1DArray = { 0, source.mips, 0, source.arraySize };
+				} else {
+					a_out.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE1D;
+					a_out.Texture1D = { 0, source.mips };
+				}
+				return true;
+			case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+				a_out.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
+				a_out.Texture3D = { 0, source.mips };
+				return true;
+			default:
+				break;
+			}
+			if (source.cube) {
+				a_out.ViewDimension = source.arraySize > 6 ? D3D11_SRV_DIMENSION_TEXTURECUBEARRAY : D3D11_SRV_DIMENSION_TEXTURECUBE;
+				a_out.TextureCubeArray = { 0, source.mips, 0, source.arraySize / 6 };
+			} else if (source.arraySize > 1) {
+				a_out.ViewDimension = multisampled ? D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY : D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+				if (multisampled)
+					a_out.Texture2DMSArray = { 0, source.arraySize };
+				else
+					a_out.Texture2DArray = { 0, source.mips, 0, source.arraySize };
+			} else {
+				a_out.ViewDimension = multisampled ? D3D11_SRV_DIMENSION_TEXTURE2DMS : D3D11_SRV_DIMENSION_TEXTURE2D;
+				a_out.Texture2D = { 0, source.mips };
+			}
+			return true;
+		}
+
+		bool DefaultViewDesc(ID3D11Resource* a_resource, D3D11_RENDER_TARGET_VIEW_DESC& a_out)
+		{
+			ViewSource source;
+			if (!ViewSourceOf(a_resource, source))
+				return false;
+			a_out = {};
+			a_out.Format = source.format;
+			const bool multisampled = source.samples > 1;
+			switch (source.dimension) {
+			case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+				if (source.arraySize > 1) {
+					a_out.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE1DARRAY;
+					a_out.Texture1DArray = { 0, 0, source.arraySize };
+				} else {
+					a_out.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE1D;
+				}
+				return true;
+			case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+				a_out.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE3D;
+				a_out.Texture3D = { 0, 0, source.depth };
+				return true;
+			default:
+				break;
+			}
+			if (source.arraySize > 1) {
+				a_out.ViewDimension = multisampled ? D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY : D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+				if (multisampled)
+					a_out.Texture2DMSArray = { 0, source.arraySize };
+				else
+					a_out.Texture2DArray = { 0, 0, source.arraySize };
+			} else {
+				a_out.ViewDimension = multisampled ? D3D11_RTV_DIMENSION_TEXTURE2DMS : D3D11_RTV_DIMENSION_TEXTURE2D;
+			}
+			return true;
+		}
+
+		bool DefaultViewDesc(ID3D11Resource* a_resource, D3D11_DEPTH_STENCIL_VIEW_DESC& a_out)
+		{
+			ViewSource source;
+			if (!ViewSourceOf(a_resource, source) || source.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D)
+				return false;
+			a_out = {};
+			a_out.Format = source.format;
+			const bool multisampled = source.samples > 1;
+			if (source.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE1D) {
+				if (source.arraySize > 1) {
+					a_out.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE1DARRAY;
+					a_out.Texture1DArray = { 0, 0, source.arraySize };
+				} else {
+					a_out.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE1D;
+				}
+				return true;
+			}
+			if (source.arraySize > 1) {
+				a_out.ViewDimension = multisampled ? D3D11_DSV_DIMENSION_TEXTURE2DMSARRAY : D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+				if (multisampled)
+					a_out.Texture2DMSArray = { 0, source.arraySize };
+				else
+					a_out.Texture2DArray = { 0, 0, source.arraySize };
+			} else {
+				a_out.ViewDimension = multisampled ? D3D11_DSV_DIMENSION_TEXTURE2DMS : D3D11_DSV_DIMENSION_TEXTURE2D;
+			}
+			return true;
+		}
+
+		bool DefaultViewDesc(ID3D11Resource* a_resource, D3D11_UNORDERED_ACCESS_VIEW_DESC& a_out)
+		{
+			ViewSource source;
+			if (!ViewSourceOf(a_resource, source) || source.samples > 1)
+				return false;
+			a_out = {};
+			a_out.Format = source.format;
+			switch (source.dimension) {
+			case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+				if (source.arraySize > 1) {
+					a_out.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE1DARRAY;
+					a_out.Texture1DArray = { 0, 0, source.arraySize };
+				} else {
+					a_out.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE1D;
+				}
+				return true;
+			case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+				a_out.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE3D;
+				a_out.Texture3D = { 0, 0, source.depth };
+				return true;
+			default:
+				break;
+			}
+			if (source.arraySize > 1) {
+				a_out.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
+				a_out.Texture2DArray = { 0, 0, source.arraySize };
+			} else {
+				a_out.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+			}
+			return true;
+		}
+		/** @} */
+
+		/** @brief What a native view is made with: its resource's ORG resource and owner, so lookups through the view find them. */
+		Options NativeViewOptions(const char* a_kind, ID3D11Resource* a_resource)
+		{
+			Options options;
+			const auto* resource = Detail::CoreOf(a_resource);
+			options.name = resource ? fmt::format("{} {}", resource->Name(), a_kind) : fmt::format("Native::{}", a_kind);
+			options.graph = GraphResourceOf(a_resource);
+			options.owner = OwnerOf(a_resource);
+			return options;
+		}
+
+		/**
+		 * @brief A native view: a_make with the description given, or D3D11's default for the resource. E_INVALIDARG for a null
+		 * resource, or a null description on a resource that has no default here (a buffer, a 1D or 3D texture).
+		 */
+		template <class ViewDesc, class View, class Make>
+		HRESULT MakeNativeView(ID3D11Resource* a_resource, const ViewDesc* a_desc, View** a_out, const char* a_kind, Make&& a_make)
+		{
+			if (!a_out || !a_resource)
+				return E_INVALIDARG;
+			*a_out = nullptr;
+			ViewDesc desc{};
+			if (a_desc)
+				desc = *a_desc;
+			else if (!DefaultViewDesc(a_resource, desc))
+				return E_INVALIDARG;
+			*a_out = a_make(a_resource, desc, NativeViewOptions(a_kind, a_resource)).detach();
+			return S_OK;
+		}
+
+		/** @brief The options of a native object other than a view: a name, which the engine's debug name replaces later. */
+		Options NativeOptions(const char* a_kind)
+		{
+			Options options;
+			options.name = fmt::format("Native::{}", a_kind);
+			return options;
+		}
+
+		/**
+		 * @name State descriptions as D3D11 (and DXVK) store them. GetDesc then answers what a D3D11 device would: the readers
+		 * (the pipeline descriptions, DCLF's program builds) convert every target and face, so the parts D3D11 ignores must hold
+		 * the defaults, not the zeros the engine leaves there.
+		 */
+		/** @{ */
+		D3D11_BLEND_DESC NormalizedBlend(D3D11_BLEND_DESC a_desc)
+		{
+			for (UINT i = 0; i < 8; ++i) {
+				auto& target = a_desc.RenderTarget[i];
+				// Without independent blending every target is the first one's.
+				if (!a_desc.IndependentBlendEnable && i > 0)
+					target = a_desc.RenderTarget[0];
+				if (!target.BlendEnable) {
+					target.SrcBlend = target.SrcBlendAlpha = D3D11_BLEND_ONE;
+					target.DestBlend = target.DestBlendAlpha = D3D11_BLEND_ZERO;
+					target.BlendOp = target.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+				}
+				target.RenderTargetWriteMask &= D3D11_COLOR_WRITE_ENABLE_ALL;
+			}
+			return a_desc;
+		}
+
+		D3D11_DEPTH_STENCIL_DESC NormalizedDepthStencil(D3D11_DEPTH_STENCIL_DESC a_desc)
+		{
+			if (!a_desc.DepthEnable) {
+				a_desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+				a_desc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+			}
+			if (!a_desc.StencilEnable) {
+				a_desc.StencilReadMask = D3D11_DEFAULT_STENCIL_READ_MASK;
+				a_desc.StencilWriteMask = D3D11_DEFAULT_STENCIL_WRITE_MASK;
+				for (auto* face : { &a_desc.FrontFace, &a_desc.BackFace })
+					*face = { D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_COMPARISON_ALWAYS };
+			}
+			return a_desc;
+		}
+
+		D3D11_RASTERIZER_DESC NormalizedRasterizer(D3D11_RASTERIZER_DESC a_desc)
+		{
+			if (!a_desc.FillMode)
+				a_desc.FillMode = D3D11_FILL_SOLID;
+			if (!a_desc.CullMode)
+				a_desc.CullMode = D3D11_CULL_BACK;
+			return a_desc;
+		}
+
+		D3D11_SAMPLER_DESC NormalizedSampler(D3D11_SAMPLER_DESC a_desc)
+		{
+			for (auto* address : { &a_desc.AddressU, &a_desc.AddressV, &a_desc.AddressW })
+				if (!*address)
+					*address = D3D11_TEXTURE_ADDRESS_CLAMP;
+			if (!a_desc.ComparisonFunc)
+				a_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+			a_desc.MaxAnisotropy = (std::clamp)(a_desc.MaxAnisotropy, 1u, 16u);
+			return a_desc;
+		}
+		/** @} */
+
+		std::span<const std::uint8_t> Bytes(const void* a_data, SIZE_T a_length)
+		{
+			return { static_cast<const std::uint8_t*>(a_data), a_data ? static_cast<std::size_t>(a_length) : 0 };
+		}
+	}
+
+	// The device's creation methods in both modes. TW_DEVICE_SITE starts one: the caller, the call site a guest handle unwraps its
+	// arguments at, and the native services (null for a guest handle). TW_FORWARD_OR_FAIL ends one: a guest handle forwards the
+	// call, and a native handle without a service records it at its caller and fails it, as every tripwire does.
+#define TW_DEVICE_SITE(Name)                                                                                                     \
+	void* const twCaller = _ReturnAddress();                                                                                     \
+	[[maybe_unused]] const Detail::CallSite twSite{ &core, static_cast<std::uint16_t>(Slot::Name), #Name, twCaller };           \
+	const NativeServices* const twNative = NativeOf(core)
+#define TW_FORWARD_OR_FAIL(Name, Out, ...)                                         \
+	if (core.Enter(static_cast<std::uint16_t>(Slot::Name), #Name, twCaller))      \
+		return static_cast<ID3D11Device*>(core.wrapped)->Name(__VA_ARGS__);        \
+	Detail::Zero(Out);                                                             \
+	return E_FAIL
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::QueryInterface(REFIID a_riid, void** a_out)
+	{
+		if (const auto* native = NativeOf(core); native && native->queryDxgiDevice && a_out &&
+												 (a_riid == __uuidof(IDXGIDevice) || a_riid == __uuidof(IDXGIDevice1)))
+			return native->queryDxgiDevice(a_riid, a_out);
+		return Detail::QueryInterface(core, static_cast<ID3D11Device*>(this), kIids, a_riid, a_out, _ReturnAddress());
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateBuffer(const D3D11_BUFFER_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Buffer** a_out)
+	{
+		TW_DEVICE_SITE(CreateBuffer);
+		if (twNative && twNative->createBuffer && a_desc && a_out)
+			return twNative->createBuffer(*a_desc, a_data, a_out);
+		TW_FORWARD_OR_FAIL(CreateBuffer, a_out, a_desc, a_data, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateTexture1D(const D3D11_TEXTURE1D_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture1D** a_out)
+	{
+		TW_DEVICE_SITE(CreateTexture1D);
+		if (twNative && twNative->createTexture1D && a_desc && a_out)
+			return twNative->createTexture1D(*a_desc, a_data, a_out);
+		TW_FORWARD_OR_FAIL(CreateTexture1D, a_out, a_desc, a_data, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateTexture3D(const D3D11_TEXTURE3D_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture3D** a_out)
+	{
+		TW_DEVICE_SITE(CreateTexture3D);
+		if (twNative && twNative->createTexture3D && a_desc && a_out)
+			return twNative->createTexture3D(*a_desc, a_data, a_out);
+		TW_FORWARD_OR_FAIL(CreateTexture3D, a_out, a_desc, a_data, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateShaderResourceView(ID3D11Resource* a_resource, const D3D11_SHADER_RESOURCE_VIEW_DESC* a_desc,
+		ID3D11ShaderResourceView** a_out)
+	{
+		TW_DEVICE_SITE(CreateShaderResourceView);
+		if (twNative && IsHandle(a_resource))
+			return MakeNativeView(a_resource, a_desc, a_out, "SRV", [](ID3D11Resource* r, const D3D11_SHADER_RESOURCE_VIEW_DESC& d, Options&& o) {
+				return ::RenderGraph::Engine::Tripwire::CreateShaderResourceView(r, d, std::move(o));
+			});
+		TW_FORWARD_OR_FAIL(CreateShaderResourceView, a_out, Detail::UnwrapAt(a_resource, twSite), a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateUnorderedAccessView(ID3D11Resource* a_resource, const D3D11_UNORDERED_ACCESS_VIEW_DESC* a_desc,
+		ID3D11UnorderedAccessView** a_out)
+	{
+		TW_DEVICE_SITE(CreateUnorderedAccessView);
+		if (twNative && IsHandle(a_resource))
+			return MakeNativeView(a_resource, a_desc, a_out, "UAV", [](ID3D11Resource* r, const D3D11_UNORDERED_ACCESS_VIEW_DESC& d, Options&& o) {
+				return ::RenderGraph::Engine::Tripwire::CreateUnorderedAccessView(r, d, std::move(o));
+			});
+		TW_FORWARD_OR_FAIL(CreateUnorderedAccessView, a_out, Detail::UnwrapAt(a_resource, twSite), a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateRenderTargetView(ID3D11Resource* a_resource, const D3D11_RENDER_TARGET_VIEW_DESC* a_desc,
+		ID3D11RenderTargetView** a_out)
+	{
+		TW_DEVICE_SITE(CreateRenderTargetView);
+		if (twNative && IsHandle(a_resource))
+			return MakeNativeView(a_resource, a_desc, a_out, "RTV", [](ID3D11Resource* r, const D3D11_RENDER_TARGET_VIEW_DESC& d, Options&& o) {
+				return ::RenderGraph::Engine::Tripwire::CreateRenderTargetView(r, d, std::move(o));
+			});
+		TW_FORWARD_OR_FAIL(CreateRenderTargetView, a_out, Detail::UnwrapAt(a_resource, twSite), a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateDepthStencilView(ID3D11Resource* a_resource, const D3D11_DEPTH_STENCIL_VIEW_DESC* a_desc,
+		ID3D11DepthStencilView** a_out)
+	{
+		TW_DEVICE_SITE(CreateDepthStencilView);
+		if (twNative && IsHandle(a_resource))
+			return MakeNativeView(a_resource, a_desc, a_out, "DSV", [](ID3D11Resource* r, const D3D11_DEPTH_STENCIL_VIEW_DESC& d, Options&& o) {
+				return ::RenderGraph::Engine::Tripwire::CreateDepthStencilView(r, d, std::move(o));
+			});
+		TW_FORWARD_OR_FAIL(CreateDepthStencilView, a_out, Detail::UnwrapAt(a_resource, twSite), a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateInputLayout(const D3D11_INPUT_ELEMENT_DESC* a_elements, UINT a_count, const void* a_bytecode,
+		SIZE_T a_length, ID3D11InputLayout** a_out)
+	{
+		TW_DEVICE_SITE(CreateInputLayout);
+		if (twNative && a_out && (a_elements || !a_count)) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateInputLayout(std::span<const D3D11_INPUT_ELEMENT_DESC>(a_elements, a_count), Bytes(a_bytecode, a_length),
+				NativeOptions("InputLayout"))
+			             .detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateInputLayout, a_out, a_elements, a_count, a_bytecode, a_length, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateVertexShader(const void* a_bytecode, SIZE_T a_length, ID3D11ClassLinkage* a_linkage, ID3D11VertexShader** a_out)
+	{
+		TW_DEVICE_SITE(CreateVertexShader);
+		if (twNative && a_out && a_bytecode) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateVertexShader(Bytes(a_bytecode, a_length), NativeOptions("VertexShader")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateVertexShader, a_out, a_bytecode, a_length, Detail::UnwrapAt(a_linkage, twSite), a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreatePixelShader(const void* a_bytecode, SIZE_T a_length, ID3D11ClassLinkage* a_linkage, ID3D11PixelShader** a_out)
+	{
+		TW_DEVICE_SITE(CreatePixelShader);
+		if (twNative && a_out && a_bytecode) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreatePixelShader(Bytes(a_bytecode, a_length), NativeOptions("PixelShader")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreatePixelShader, a_out, a_bytecode, a_length, Detail::UnwrapAt(a_linkage, twSite), a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateComputeShader(const void* a_bytecode, SIZE_T a_length, ID3D11ClassLinkage* a_linkage, ID3D11ComputeShader** a_out)
+	{
+		TW_DEVICE_SITE(CreateComputeShader);
+		if (twNative && a_out && a_bytecode) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateComputeShader(Bytes(a_bytecode, a_length), NativeOptions("ComputeShader")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateComputeShader, a_out, a_bytecode, a_length, Detail::UnwrapAt(a_linkage, twSite), a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateBlendState(const D3D11_BLEND_DESC* a_desc, ID3D11BlendState** a_out)
+	{
+		TW_DEVICE_SITE(CreateBlendState);
+		if (twNative && a_out && a_desc) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateBlendState(NormalizedBlend(*a_desc), NativeOptions("BlendState")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateBlendState, a_out, a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateDepthStencilState(const D3D11_DEPTH_STENCIL_DESC* a_desc, ID3D11DepthStencilState** a_out)
+	{
+		TW_DEVICE_SITE(CreateDepthStencilState);
+		if (twNative && a_out && a_desc) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateDepthStencilState(NormalizedDepthStencil(*a_desc), NativeOptions("DepthStencilState")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateDepthStencilState, a_out, a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateRasterizerState(const D3D11_RASTERIZER_DESC* a_desc, ID3D11RasterizerState** a_out)
+	{
+		TW_DEVICE_SITE(CreateRasterizerState);
+		if (twNative && a_out && a_desc) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateRasterizerState(NormalizedRasterizer(*a_desc), NativeOptions("RasterizerState")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateRasterizerState, a_out, a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateSamplerState(const D3D11_SAMPLER_DESC* a_desc, ID3D11SamplerState** a_out)
+	{
+		TW_DEVICE_SITE(CreateSamplerState);
+		if (twNative && a_out && a_desc) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateSamplerState(NormalizedSampler(*a_desc), NativeOptions("SamplerState")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateSamplerState, a_out, a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateQuery(const D3D11_QUERY_DESC* a_desc, ID3D11Query** a_out)
+	{
+		TW_DEVICE_SITE(CreateQuery);
+		if (twNative && a_out && a_desc) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateQuery(*a_desc, NativeOptions("Query")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateQuery, a_out, a_desc, a_out);
+	}
+
+#undef TW_FORWARD_OR_FAIL
+
+	D3D_FEATURE_LEVEL STDMETHODCALLTYPE DeviceHandle::GetFeatureLevel()
+	{
+		TW_DEVICE_SITE(GetFeatureLevel);
+		// The level native mode's device creation reported.
+		if (twNative)
+			return D3D_FEATURE_LEVEL_11_1;
+		if (core.Enter(static_cast<std::uint16_t>(Slot::GetFeatureLevel), "GetFeatureLevel", twCaller))
+			return static_cast<ID3D11Device*>(core.wrapped)->GetFeatureLevel();
+		return D3D_FEATURE_LEVEL{};
+	}
+
+	UINT STDMETHODCALLTYPE DeviceHandle::GetCreationFlags()
+	{
+		TW_DEVICE_SITE(GetCreationFlags);
+		if (twNative)
+			return 0;
+		if (core.Enter(static_cast<std::uint16_t>(Slot::GetCreationFlags), "GetCreationFlags", twCaller))
+			return static_cast<ID3D11Device*>(core.wrapped)->GetCreationFlags();
+		return 0;
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::GetDeviceRemovedReason()
+	{
+		TW_DEVICE_SITE(GetDeviceRemovedReason);
+		// A lost Vulkan device shows in BasicRHI's device-loss report and the graph's stop, not here.
+		if (twNative)
+			return S_OK;
+		if (core.Enter(static_cast<std::uint16_t>(Slot::GetDeviceRemovedReason), "GetDeviceRemovedReason", twCaller))
+			return static_cast<ID3D11Device*>(core.wrapped)->GetDeviceRemovedReason();
+		return E_FAIL;
+	}
+
+#undef TW_DEVICE_SITE
+
+	// The swap chain: native mode's services, else a tripwire (the forwarding branch serves a wrapping swap chain handle).
+#define TW_SWAP_CHAIN_SITE(Name)                       \
+	void* const twCaller = _ReturnAddress();           \
+	const NativeServices* const twNative = NativeOf(core); \
+	constexpr auto twSlot = static_cast<std::uint16_t>(Slot::Name)
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::GetDesc(DXGI_SWAP_CHAIN_DESC* a_out)
+	{
+		if (!a_out)
+			return E_INVALIDARG;
+		// After a resize the native swap chain's size and format are the current ones.
+		if (const auto* native = NativeOf(core); native && native->getDesc)
+			return native->getDesc(a_out);
+		*a_out = desc;
+		return S_OK;
+	}
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::Present(UINT a_syncInterval, UINT a_flags)
+	{
+		TW_SWAP_CHAIN_SITE(Present);
+		if (twNative && twNative->present)
+			return twNative->present(a_syncInterval, a_flags);
+		if (core.Enter(twSlot, "Present", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->Present(a_syncInterval, a_flags);
+		return E_FAIL;
+	}
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::GetBuffer(UINT a_buffer, REFIID a_riid, void** a_out)
+	{
+		TW_SWAP_CHAIN_SITE(GetBuffer);
+		if (twNative && twNative->getBuffer)
+			return twNative->getBuffer(a_buffer, a_riid, a_out);
+		if (core.Enter(twSlot, "GetBuffer", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->GetBuffer(a_buffer, a_riid, a_out);
+		Detail::Zero(a_out);
+		return E_FAIL;
+	}
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::ResizeBuffers(UINT a_count, UINT a_width, UINT a_height, DXGI_FORMAT a_format, UINT a_flags)
+	{
+		TW_SWAP_CHAIN_SITE(ResizeBuffers);
+		if (twNative && twNative->resizeBuffers)
+			return twNative->resizeBuffers(a_count, a_width, a_height, a_format, a_flags);
+		if (core.Enter(twSlot, "ResizeBuffers", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->ResizeBuffers(a_count, a_width, a_height, a_format, a_flags);
+		return E_FAIL;
+	}
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::GetFullscreenState(BOOL* a_fullscreen, IDXGIOutput** a_target)
+	{
+		TW_SWAP_CHAIN_SITE(GetFullscreenState);
+		// Native mode presents to a borderless window only. Never exclusive fullscreen, so the engine does not try to enter it.
+		if (twNative) {
+			if (a_fullscreen)
+				*a_fullscreen = FALSE;
+			Detail::Zero(a_target);
+			return S_OK;
+		}
+		if (core.Enter(twSlot, "GetFullscreenState", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->GetFullscreenState(a_fullscreen, a_target);
+		Detail::Zero(a_fullscreen);
+		Detail::Zero(a_target);
+		return E_FAIL;
+	}
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::SetFullscreenState(BOOL a_fullscreen, IDXGIOutput* a_target)
+	{
+		TW_SWAP_CHAIN_SITE(SetFullscreenState);
+		if (twNative) {
+			if (a_fullscreen) {
+				static std::atomic_flag logged;
+				if (!logged.test_and_set())
+					logger::info("[ORG native] the engine asked for exclusive fullscreen; native mode stays in the borderless window");
+			}
+			return S_OK;
+		}
+		if (core.Enter(twSlot, "SetFullscreenState", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->SetFullscreenState(a_fullscreen, Unwrap(a_target));
+		return E_FAIL;
+	}
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::ResizeTarget(const DXGI_MODE_DESC* a_parameters)
+	{
+		TW_SWAP_CHAIN_SITE(ResizeTarget);
+		// The window keeps its size. The engine's next resize follows the window (WM_WINDOWPOSCHANGED), as with fake fullscreen.
+		if (twNative)
+			return S_OK;
+		if (core.Enter(twSlot, "ResizeTarget", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->ResizeTarget(a_parameters);
+		return E_FAIL;
+	}
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::GetContainingOutput(IDXGIOutput** a_out)
+	{
+		TW_SWAP_CHAIN_SITE(GetContainingOutput);
+		if (twNative && twNative->getContainingOutput)
+			return twNative->getContainingOutput(a_out);
+		if (core.Enter(twSlot, "GetContainingOutput", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->GetContainingOutput(a_out);
+		Detail::Zero(a_out);
+		return E_FAIL;
+	}
+
+#undef TW_SWAP_CHAIN_SITE
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CheckFeatureSupport(D3D11_FEATURE a_feature, void* a_data, UINT a_size)
+	{
+		void* const twCaller = _ReturnAddress();
+		if (const auto* native = NativeOf(core); native && native->checkFeatureSupport)
+			return native->checkFeatureSupport(a_feature, a_data, a_size);
+		if (core.Enter(static_cast<std::uint16_t>(Slot::CheckFeatureSupport), "CheckFeatureSupport", twCaller))
+			return static_cast<ID3D11Device*>(core.wrapped)->CheckFeatureSupport(a_feature, a_data, a_size);
+		Detail::ZeroBytes(a_data, a_size);
+		return E_FAIL;
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CheckFormatSupport(DXGI_FORMAT a_format, UINT* a_support)
+	{
+		void* const twCaller = _ReturnAddress();
+		if (const auto* native = NativeOf(core); native && native->checkFormatSupport)
+			return native->checkFormatSupport(a_format, a_support);
+		if (core.Enter(static_cast<std::uint16_t>(Slot::CheckFormatSupport), "CheckFormatSupport", twCaller))
+			return static_cast<ID3D11Device*>(core.wrapped)->CheckFormatSupport(a_format, a_support);
+		Detail::Zero(a_support);
+		return E_FAIL;
+	}
+
+	// The context's resource methods in both modes. TW_CONTEXT_SITE starts one like TW_DEVICE_SITE. A guest handle forwards
+	// through Enter, so its filter sees the real caller as with every generated method.
+#define TW_CONTEXT_SITE(Name)                                                                                                    \
+	void* const twCaller = _ReturnAddress();                                                                                     \
+	[[maybe_unused]] const Detail::CallSite twSite{ &core, static_cast<std::uint16_t>(Slot::Name), #Name, twCaller };           \
+	const NativeServices* const twNative = NativeOf(core)
+#define TW_CONTEXT_FORWARD(Name, ...)                                                    \
+	if (core.Enter(static_cast<std::uint16_t>(Slot::Name), #Name, twCaller))            \
+		return static_cast<ID3D11DeviceContext*>(core.wrapped)->Name(__VA_ARGS__)
+
+	HRESULT STDMETHODCALLTYPE DeviceContextHandle::QueryInterface(REFIID a_riid, void** a_out)
+	{
+		if (const auto* native = NativeOf(core); native && native->queryContext && a_out && a_riid == __uuidof(ID3DUserDefinedAnnotation))
+			return native->queryContext(a_riid, a_out);
+		return Detail::QueryInterface(core, static_cast<ID3D11DeviceContext*>(this), kIids, a_riid, a_out, _ReturnAddress());
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceContextHandle::Map(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT a_flags,
+		D3D11_MAPPED_SUBRESOURCE* a_out)
+	{
+		TW_CONTEXT_SITE(Map);
+		if (twNative && twNative->map)
+			return twNative->map(a_resource, a_subresource, a_type, a_flags, a_out);
+		TW_CONTEXT_FORWARD(Map, Detail::UnwrapAt(a_resource, twSite), a_subresource, a_type, a_flags, a_out);
+		Detail::Zero(a_out);
+		return E_FAIL;
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::Unmap(ID3D11Resource* a_resource, UINT a_subresource)
+	{
+		TW_CONTEXT_SITE(Unmap);
+		if (twNative && twNative->unmap)
+			return twNative->unmap(a_resource, a_subresource);
+		TW_CONTEXT_FORWARD(Unmap, Detail::UnwrapAt(a_resource, twSite), a_subresource);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::UpdateSubresource(ID3D11Resource* a_resource, UINT a_subresource, const D3D11_BOX* a_box, const void* a_data,
+		UINT a_rowPitch, UINT a_depthPitch)
+	{
+		TW_CONTEXT_SITE(UpdateSubresource);
+		if (twNative && twNative->updateSubresource)
+			return twNative->updateSubresource(a_resource, a_subresource, a_box, a_data, a_rowPitch, a_depthPitch);
+		TW_CONTEXT_FORWARD(UpdateSubresource, Detail::UnwrapAt(a_resource, twSite), a_subresource, a_box, a_data, a_rowPitch, a_depthPitch);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CopyResource(ID3D11Resource* a_destination, ID3D11Resource* a_source)
+	{
+		TW_CONTEXT_SITE(CopyResource);
+		if (twNative && twNative->copyResource)
+			return twNative->copyResource(a_destination, a_source);
+		TW_CONTEXT_FORWARD(CopyResource, Detail::UnwrapAt(a_destination, twSite), Detail::UnwrapAt(a_source, twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CopySubresourceRegion(ID3D11Resource* a_destination, UINT a_destinationSubresource, UINT a_x, UINT a_y, UINT a_z,
+		ID3D11Resource* a_source, UINT a_sourceSubresource, const D3D11_BOX* a_box)
+	{
+		TW_CONTEXT_SITE(CopySubresourceRegion);
+		if (twNative && twNative->copySubresourceRegion)
+			return twNative->copySubresourceRegion(a_destination, a_destinationSubresource, a_x, a_y, a_z, a_source, a_sourceSubresource, a_box);
+		TW_CONTEXT_FORWARD(CopySubresourceRegion, Detail::UnwrapAt(a_destination, twSite), a_destinationSubresource, a_x, a_y, a_z,
+			Detail::UnwrapAt(a_source, twSite), a_sourceSubresource, a_box);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::GenerateMips(ID3D11ShaderResourceView* a_view)
+	{
+		TW_CONTEXT_SITE(GenerateMips);
+		if (twNative && twNative->generateMips)
+			return twNative->generateMips(a_view);
+		TW_CONTEXT_FORWARD(GenerateMips, Detail::UnwrapAt(a_view, twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::ClearRenderTargetView(ID3D11RenderTargetView* a_view, const FLOAT a_color[4])
+	{
+		TW_CONTEXT_SITE(ClearRenderTargetView);
+		if (twNative && twNative->clearRenderTargetView)
+			return twNative->clearRenderTargetView(a_view, a_color);
+		TW_CONTEXT_FORWARD(ClearRenderTargetView, Detail::UnwrapAt(a_view, twSite), a_color);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::ClearUnorderedAccessViewUint(ID3D11UnorderedAccessView* a_view, const UINT a_values[4])
+	{
+		TW_CONTEXT_SITE(ClearUnorderedAccessViewUint);
+		if (twNative && twNative->clearUnorderedAccessViewUint)
+			return twNative->clearUnorderedAccessViewUint(a_view, a_values);
+		TW_CONTEXT_FORWARD(ClearUnorderedAccessViewUint, Detail::UnwrapAt(a_view, twSite), a_values);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::ClearUnorderedAccessViewFloat(ID3D11UnorderedAccessView* a_view, const FLOAT a_values[4])
+	{
+		TW_CONTEXT_SITE(ClearUnorderedAccessViewFloat);
+		if (twNative && twNative->clearUnorderedAccessViewFloat)
+			return twNative->clearUnorderedAccessViewFloat(a_view, a_values);
+		TW_CONTEXT_FORWARD(ClearUnorderedAccessViewFloat, Detail::UnwrapAt(a_view, twSite), a_values);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::ClearDepthStencilView(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
+	{
+		TW_CONTEXT_SITE(ClearDepthStencilView);
+		if (twNative && twNative->clearDepthStencilView)
+			return twNative->clearDepthStencilView(a_view, a_flags, a_depth, a_stencil);
+		TW_CONTEXT_FORWARD(ClearDepthStencilView, Detail::UnwrapAt(a_view, twSite), a_flags, a_depth, a_stencil);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::Begin(ID3D11Asynchronous* a_query)
+	{
+		TW_CONTEXT_SITE(Begin);
+		// Native mode: a query's interval is not measured, so Begin has nothing to record.
+		if (twNative && twNative->end)
+			return;
+		TW_CONTEXT_FORWARD(Begin, Detail::UnwrapAt(a_query, twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::End(ID3D11Asynchronous* a_query)
+	{
+		TW_CONTEXT_SITE(End);
+		if (twNative && twNative->end)
+			return twNative->end(a_query);
+		TW_CONTEXT_FORWARD(End, Detail::UnwrapAt(a_query, twSite));
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceContextHandle::GetData(ID3D11Asynchronous* a_query, void* a_data, UINT a_size, UINT a_flags)
+	{
+		TW_CONTEXT_SITE(GetData);
+		if (twNative && twNative->getData)
+			return twNative->getData(a_query, a_data, a_size, a_flags);
+		TW_CONTEXT_FORWARD(GetData, Detail::UnwrapAt(a_query, twSite), a_data, a_size, a_flags);
+		Detail::ZeroBytes(a_data, a_size);
+		return E_FAIL;
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::VSSetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView* const* a_items)
+	{
+		TW_CONTEXT_SITE(VSSetShaderResources);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::VSSetShaderResources), twCaller))
+				Store(bindings.vs.srvs, a_start, a_count, a_items);
+			return;
+		}
+		TW_CONTEXT_FORWARD(VSSetShaderResources, a_start, a_count, Detail::UnwrapArray(a_items, a_count, &twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::VSGetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView** a_out)
+	{
+		TW_CONTEXT_SITE(VSGetShaderResources);
+		if (twNative)
+			return Load(bindings.vs.srvs, a_start, a_count, a_out);
+		TW_CONTEXT_FORWARD(VSGetShaderResources, a_start, a_count, a_out);
+		Detail::ZeroN(a_out, a_count);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::PSSetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView* const* a_items)
+	{
+		TW_CONTEXT_SITE(PSSetShaderResources);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::PSSetShaderResources), twCaller))
+				Store(bindings.ps.srvs, a_start, a_count, a_items);
+			return;
+		}
+		TW_CONTEXT_FORWARD(PSSetShaderResources, a_start, a_count, Detail::UnwrapArray(a_items, a_count, &twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::PSGetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView** a_out)
+	{
+		TW_CONTEXT_SITE(PSGetShaderResources);
+		if (twNative)
+			return Load(bindings.ps.srvs, a_start, a_count, a_out);
+		TW_CONTEXT_FORWARD(PSGetShaderResources, a_start, a_count, a_out);
+		Detail::ZeroN(a_out, a_count);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CSSetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView* const* a_items)
+	{
+		TW_CONTEXT_SITE(CSSetShaderResources);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::CSSetShaderResources), twCaller))
+				Store(bindings.cs.srvs, a_start, a_count, a_items);
+			return;
+		}
+		TW_CONTEXT_FORWARD(CSSetShaderResources, a_start, a_count, Detail::UnwrapArray(a_items, a_count, &twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CSGetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView** a_out)
+	{
+		TW_CONTEXT_SITE(CSGetShaderResources);
+		if (twNative)
+			return Load(bindings.cs.srvs, a_start, a_count, a_out);
+		TW_CONTEXT_FORWARD(CSGetShaderResources, a_start, a_count, a_out);
+		Detail::ZeroN(a_out, a_count);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::VSSetConstantBuffers(UINT a_start, UINT a_count, ID3D11Buffer* const* a_items)
+	{
+		TW_CONTEXT_SITE(VSSetConstantBuffers);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::VSSetConstantBuffers), twCaller))
+				Store(bindings.vs.cbs, a_start, a_count, a_items);
+			return;
+		}
+		TW_CONTEXT_FORWARD(VSSetConstantBuffers, a_start, a_count, Detail::UnwrapArray(a_items, a_count, &twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::VSGetConstantBuffers(UINT a_start, UINT a_count, ID3D11Buffer** a_out)
+	{
+		TW_CONTEXT_SITE(VSGetConstantBuffers);
+		if (twNative)
+			return Load(bindings.vs.cbs, a_start, a_count, a_out);
+		TW_CONTEXT_FORWARD(VSGetConstantBuffers, a_start, a_count, a_out);
+		Detail::ZeroN(a_out, a_count);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::PSSetConstantBuffers(UINT a_start, UINT a_count, ID3D11Buffer* const* a_items)
+	{
+		TW_CONTEXT_SITE(PSSetConstantBuffers);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::PSSetConstantBuffers), twCaller))
+				Store(bindings.ps.cbs, a_start, a_count, a_items);
+			return;
+		}
+		TW_CONTEXT_FORWARD(PSSetConstantBuffers, a_start, a_count, Detail::UnwrapArray(a_items, a_count, &twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::PSGetConstantBuffers(UINT a_start, UINT a_count, ID3D11Buffer** a_out)
+	{
+		TW_CONTEXT_SITE(PSGetConstantBuffers);
+		if (twNative)
+			return Load(bindings.ps.cbs, a_start, a_count, a_out);
+		TW_CONTEXT_FORWARD(PSGetConstantBuffers, a_start, a_count, a_out);
+		Detail::ZeroN(a_out, a_count);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CSSetConstantBuffers(UINT a_start, UINT a_count, ID3D11Buffer* const* a_items)
+	{
+		TW_CONTEXT_SITE(CSSetConstantBuffers);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::CSSetConstantBuffers), twCaller))
+				Store(bindings.cs.cbs, a_start, a_count, a_items);
+			return;
+		}
+		TW_CONTEXT_FORWARD(CSSetConstantBuffers, a_start, a_count, Detail::UnwrapArray(a_items, a_count, &twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CSGetConstantBuffers(UINT a_start, UINT a_count, ID3D11Buffer** a_out)
+	{
+		TW_CONTEXT_SITE(CSGetConstantBuffers);
+		if (twNative)
+			return Load(bindings.cs.cbs, a_start, a_count, a_out);
+		TW_CONTEXT_FORWARD(CSGetConstantBuffers, a_start, a_count, a_out);
+		Detail::ZeroN(a_out, a_count);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::VSSetSamplers(UINT a_start, UINT a_count, ID3D11SamplerState* const* a_items)
+	{
+		TW_CONTEXT_SITE(VSSetSamplers);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::VSSetSamplers), twCaller))
+				Store(bindings.vs.samplers, a_start, a_count, a_items);
+			return;
+		}
+		TW_CONTEXT_FORWARD(VSSetSamplers, a_start, a_count, Detail::UnwrapArray(a_items, a_count, &twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::VSGetSamplers(UINT a_start, UINT a_count, ID3D11SamplerState** a_out)
+	{
+		TW_CONTEXT_SITE(VSGetSamplers);
+		if (twNative)
+			return Load(bindings.vs.samplers, a_start, a_count, a_out);
+		TW_CONTEXT_FORWARD(VSGetSamplers, a_start, a_count, a_out);
+		Detail::ZeroN(a_out, a_count);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::PSSetSamplers(UINT a_start, UINT a_count, ID3D11SamplerState* const* a_items)
+	{
+		TW_CONTEXT_SITE(PSSetSamplers);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::PSSetSamplers), twCaller))
+				Store(bindings.ps.samplers, a_start, a_count, a_items);
+			return;
+		}
+		TW_CONTEXT_FORWARD(PSSetSamplers, a_start, a_count, Detail::UnwrapArray(a_items, a_count, &twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::PSGetSamplers(UINT a_start, UINT a_count, ID3D11SamplerState** a_out)
+	{
+		TW_CONTEXT_SITE(PSGetSamplers);
+		if (twNative)
+			return Load(bindings.ps.samplers, a_start, a_count, a_out);
+		TW_CONTEXT_FORWARD(PSGetSamplers, a_start, a_count, a_out);
+		Detail::ZeroN(a_out, a_count);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CSSetSamplers(UINT a_start, UINT a_count, ID3D11SamplerState* const* a_items)
+	{
+		TW_CONTEXT_SITE(CSSetSamplers);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::CSSetSamplers), twCaller))
+				Store(bindings.cs.samplers, a_start, a_count, a_items);
+			return;
+		}
+		TW_CONTEXT_FORWARD(CSSetSamplers, a_start, a_count, Detail::UnwrapArray(a_items, a_count, &twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CSGetSamplers(UINT a_start, UINT a_count, ID3D11SamplerState** a_out)
+	{
+		TW_CONTEXT_SITE(CSGetSamplers);
+		if (twNative)
+			return Load(bindings.cs.samplers, a_start, a_count, a_out);
+		TW_CONTEXT_FORWARD(CSGetSamplers, a_start, a_count, a_out);
+		Detail::ZeroN(a_out, a_count);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::VSSetShader(ID3D11VertexShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount)
+	{
+		TW_CONTEXT_SITE(VSSetShader);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::VSSetShader), twCaller)) {
+				std::lock_guard guard(bindings.lock);
+				bindings.vsShader.copy_from(a_shader);
+			}
+			return;
+		}
+		TW_CONTEXT_FORWARD(VSSetShader, Detail::UnwrapAt(a_shader, twSite), Detail::UnwrapArray(a_instances, a_instanceCount, &twSite), a_instanceCount);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::VSGetShader(ID3D11VertexShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount)
+	{
+		TW_CONTEXT_SITE(VSGetShader);
+		if (twNative) {
+			// Native mode has no class linkage: no instances.
+			if (a_instances && a_instanceCount)
+				Detail::ZeroN(a_instances, *a_instanceCount);
+			Detail::Zero(a_instanceCount);
+			std::lock_guard guard(bindings.lock);
+			if (a_out)
+				*a_out = nullptr;
+			if (a_out && bindings.vsShader)
+				bindings.vsShader.copy_to(a_out);
+			return;
+		}
+		TW_CONTEXT_FORWARD(VSGetShader, a_out, a_instances, a_instanceCount);
+		Detail::ZeroAt(a_instances, a_instanceCount);
+		Detail::Zero(a_out);
+		Detail::Zero(a_instanceCount);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::PSSetShader(ID3D11PixelShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount)
+	{
+		TW_CONTEXT_SITE(PSSetShader);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::PSSetShader), twCaller)) {
+				std::lock_guard guard(bindings.lock);
+				bindings.psShader.copy_from(a_shader);
+			}
+			return;
+		}
+		TW_CONTEXT_FORWARD(PSSetShader, Detail::UnwrapAt(a_shader, twSite), Detail::UnwrapArray(a_instances, a_instanceCount, &twSite), a_instanceCount);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::PSGetShader(ID3D11PixelShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount)
+	{
+		TW_CONTEXT_SITE(PSGetShader);
+		if (twNative) {
+			// Native mode has no class linkage: no instances.
+			if (a_instances && a_instanceCount)
+				Detail::ZeroN(a_instances, *a_instanceCount);
+			Detail::Zero(a_instanceCount);
+			std::lock_guard guard(bindings.lock);
+			if (a_out)
+				*a_out = nullptr;
+			if (a_out && bindings.psShader)
+				bindings.psShader.copy_to(a_out);
+			return;
+		}
+		TW_CONTEXT_FORWARD(PSGetShader, a_out, a_instances, a_instanceCount);
+		Detail::ZeroAt(a_instances, a_instanceCount);
+		Detail::Zero(a_out);
+		Detail::Zero(a_instanceCount);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CSSetShader(ID3D11ComputeShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount)
+	{
+		TW_CONTEXT_SITE(CSSetShader);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::CSSetShader), twCaller)) {
+				std::lock_guard guard(bindings.lock);
+				bindings.csShader.copy_from(a_shader);
+			}
+			return;
+		}
+		TW_CONTEXT_FORWARD(CSSetShader, Detail::UnwrapAt(a_shader, twSite), Detail::UnwrapArray(a_instances, a_instanceCount, &twSite), a_instanceCount);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CSGetShader(ID3D11ComputeShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount)
+	{
+		TW_CONTEXT_SITE(CSGetShader);
+		if (twNative) {
+			// Native mode has no class linkage: no instances.
+			if (a_instances && a_instanceCount)
+				Detail::ZeroN(a_instances, *a_instanceCount);
+			Detail::Zero(a_instanceCount);
+			std::lock_guard guard(bindings.lock);
+			if (a_out)
+				*a_out = nullptr;
+			if (a_out && bindings.csShader)
+				bindings.csShader.copy_to(a_out);
+			return;
+		}
+		TW_CONTEXT_FORWARD(CSGetShader, a_out, a_instances, a_instanceCount);
+		Detail::ZeroAt(a_instances, a_instanceCount);
+		Detail::Zero(a_out);
+		Detail::Zero(a_instanceCount);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CSSetUnorderedAccessViews(UINT a_start, UINT a_count, ID3D11UnorderedAccessView* const* a_views,
+		const UINT* a_initialCounts)
+	{
+		TW_CONTEXT_SITE(CSSetUnorderedAccessViews);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::CSSetUnorderedAccessViews), twCaller))
+				Store(bindings.csUavs, a_start, a_count, a_views);
+			return;
+		}
+		TW_CONTEXT_FORWARD(CSSetUnorderedAccessViews, a_start, a_count, Detail::UnwrapArray(a_views, a_count, &twSite), a_initialCounts);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CSGetUnorderedAccessViews(UINT a_start, UINT a_count, ID3D11UnorderedAccessView** a_out)
+	{
+		TW_CONTEXT_SITE(CSGetUnorderedAccessViews);
+		if (twNative)
+			return Load(bindings.csUavs, a_start, a_count, a_out);
+		TW_CONTEXT_FORWARD(CSGetUnorderedAccessViews, a_start, a_count, a_out);
+		Detail::ZeroN(a_out, a_count);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::OMSetRenderTargets(UINT a_count, ID3D11RenderTargetView* const* a_views, ID3D11DepthStencilView* a_depth)
+	{
+		TW_CONTEXT_SITE(OMSetRenderTargets);
+		if (twNative) {
+			if (!NativeBindAllowed(static_cast<std::uint16_t>(Slot::OMSetRenderTargets), twCaller))
+				return;
+			// D3D11 unbinds every target past a_count.
+			std::lock_guard guard(bindings.lock);
+			for (UINT i = 0; i < bindings.rtvs.size(); ++i)
+				bindings.rtvs[i].copy_from(a_views && i < a_count ? a_views[i] : nullptr);
+			bindings.dsv.copy_from(a_depth);
+			return;
+		}
+		TW_CONTEXT_FORWARD(OMSetRenderTargets, a_count, Detail::UnwrapArray(a_views, a_count, &twSite), Detail::UnwrapAt(a_depth, twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::OMGetRenderTargets(UINT a_count, ID3D11RenderTargetView** a_views, ID3D11DepthStencilView** a_depth)
+	{
+		TW_CONTEXT_SITE(OMGetRenderTargets);
+		if (twNative) {
+			Load(bindings.rtvs, 0, a_count, a_views);
+			std::lock_guard guard(bindings.lock);
+			if (a_depth) {
+				*a_depth = nullptr;
+				if (bindings.dsv)
+					bindings.dsv.copy_to(a_depth);
+			}
+			return;
+		}
+		TW_CONTEXT_FORWARD(OMGetRenderTargets, a_count, a_views, a_depth);
+		Detail::ZeroN(a_views, a_count);
+		Detail::Zero(a_depth);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::OMSetBlendState(ID3D11BlendState* a_state, const FLOAT a_factor[4], UINT a_sampleMask)
+	{
+		TW_CONTEXT_SITE(OMSetBlendState);
+		if (twNative) {
+			if (!NativeBindAllowed(static_cast<std::uint16_t>(Slot::OMSetBlendState), twCaller))
+				return;
+			std::lock_guard guard(bindings.lock);
+			bindings.blend.copy_from(a_state);
+			for (int i = 0; i < 4; ++i)
+				bindings.blendFactor[i] = a_factor ? a_factor[i] : 1.0f;
+			bindings.sampleMask = a_sampleMask;
+			return;
+		}
+		TW_CONTEXT_FORWARD(OMSetBlendState, Detail::UnwrapAt(a_state, twSite), a_factor, a_sampleMask);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::OMGetBlendState(ID3D11BlendState** a_state, FLOAT a_factor[4], UINT* a_sampleMask)
+	{
+		TW_CONTEXT_SITE(OMGetBlendState);
+		if (twNative) {
+			std::lock_guard guard(bindings.lock);
+			if (a_state) {
+				*a_state = nullptr;
+				if (bindings.blend)
+					bindings.blend.copy_to(a_state);
+			}
+			if (a_factor)
+				for (int i = 0; i < 4; ++i)
+					a_factor[i] = bindings.blendFactor[i];
+			if (a_sampleMask)
+				*a_sampleMask = bindings.sampleMask;
+			return;
+		}
+		TW_CONTEXT_FORWARD(OMGetBlendState, a_state, a_factor, a_sampleMask);
+		Detail::ZeroN(a_factor, 4);
+		Detail::Zero(a_state);
+		Detail::Zero(a_sampleMask);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::OMSetDepthStencilState(ID3D11DepthStencilState* a_state, UINT a_stencilRef)
+	{
+		TW_CONTEXT_SITE(OMSetDepthStencilState);
+		if (twNative) {
+			if (!NativeBindAllowed(static_cast<std::uint16_t>(Slot::OMSetDepthStencilState), twCaller))
+				return;
+			std::lock_guard guard(bindings.lock);
+			bindings.depthStencil.copy_from(a_state);
+			bindings.stencilRef = a_stencilRef;
+			return;
+		}
+		TW_CONTEXT_FORWARD(OMSetDepthStencilState, Detail::UnwrapAt(a_state, twSite), a_stencilRef);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::OMGetDepthStencilState(ID3D11DepthStencilState** a_state, UINT* a_stencilRef)
+	{
+		TW_CONTEXT_SITE(OMGetDepthStencilState);
+		if (twNative) {
+			std::lock_guard guard(bindings.lock);
+			if (a_state) {
+				*a_state = nullptr;
+				if (bindings.depthStencil)
+					bindings.depthStencil.copy_to(a_state);
+			}
+			if (a_stencilRef)
+				*a_stencilRef = bindings.stencilRef;
+			return;
+		}
+		TW_CONTEXT_FORWARD(OMGetDepthStencilState, a_state, a_stencilRef);
+		Detail::Zero(a_state);
+		Detail::Zero(a_stencilRef);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::RSSetState(ID3D11RasterizerState* a_state)
+	{
+		TW_CONTEXT_SITE(RSSetState);
+		if (twNative) {
+			if (!NativeBindAllowed(static_cast<std::uint16_t>(Slot::RSSetState), twCaller))
+				return;
+			std::lock_guard guard(bindings.lock);
+			bindings.rasterizer.copy_from(a_state);
+			return;
+		}
+		TW_CONTEXT_FORWARD(RSSetState, Detail::UnwrapAt(a_state, twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::RSGetState(ID3D11RasterizerState** a_state)
+	{
+		TW_CONTEXT_SITE(RSGetState);
+		if (twNative) {
+			std::lock_guard guard(bindings.lock);
+			if (a_state) {
+				*a_state = nullptr;
+				if (bindings.rasterizer)
+					bindings.rasterizer.copy_to(a_state);
+			}
+			return;
+		}
+		TW_CONTEXT_FORWARD(RSGetState, a_state);
+		Detail::Zero(a_state);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::RSSetViewports(UINT a_count, const D3D11_VIEWPORT* a_viewports)
+	{
+		TW_CONTEXT_SITE(RSSetViewports);
+		if (twNative) {
+			if (!NativeBindAllowed(static_cast<std::uint16_t>(Slot::RSSetViewports), twCaller))
+				return;
+			std::lock_guard guard(bindings.lock);
+			bindings.viewportCount = a_viewports ? (std::min)(a_count, static_cast<UINT>(bindings.viewports.size())) : 0;
+			for (UINT i = 0; i < bindings.viewportCount; ++i)
+				bindings.viewports[i] = a_viewports[i];
+			return;
+		}
+		TW_CONTEXT_FORWARD(RSSetViewports, a_count, a_viewports);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::RSGetViewports(UINT* a_count, D3D11_VIEWPORT* a_viewports)
+	{
+		TW_CONTEXT_SITE(RSGetViewports);
+		if (twNative) {
+			std::lock_guard guard(bindings.lock);
+			if (!a_count)
+				return;
+			if (!a_viewports) {
+				*a_count = bindings.viewportCount;
+				return;
+			}
+			for (UINT i = 0; i < *a_count; ++i)
+				a_viewports[i] = i < bindings.viewportCount ? bindings.viewports[i] : D3D11_VIEWPORT{};
+			*a_count = (std::min)(*a_count, bindings.viewportCount);
+			return;
+		}
+		TW_CONTEXT_FORWARD(RSGetViewports, a_count, a_viewports);
+		Detail::ZeroAt(a_viewports, a_count);
+		Detail::Zero(a_count);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::RSSetScissorRects(UINT a_count, const D3D11_RECT* a_rects)
+	{
+		TW_CONTEXT_SITE(RSSetScissorRects);
+		if (twNative) {
+			if (!NativeBindAllowed(static_cast<std::uint16_t>(Slot::RSSetScissorRects), twCaller))
+				return;
+			std::lock_guard guard(bindings.lock);
+			bindings.scissorCount = a_rects ? (std::min)(a_count, static_cast<UINT>(bindings.scissors.size())) : 0;
+			for (UINT i = 0; i < bindings.scissorCount; ++i)
+				bindings.scissors[i] = a_rects[i];
+			return;
+		}
+		TW_CONTEXT_FORWARD(RSSetScissorRects, a_count, a_rects);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::RSGetScissorRects(UINT* a_count, D3D11_RECT* a_rects)
+	{
+		TW_CONTEXT_SITE(RSGetScissorRects);
+		if (twNative) {
+			std::lock_guard guard(bindings.lock);
+			if (!a_count)
+				return;
+			if (!a_rects) {
+				*a_count = bindings.scissorCount;
+				return;
+			}
+			for (UINT i = 0; i < *a_count; ++i)
+				a_rects[i] = i < bindings.scissorCount ? bindings.scissors[i] : D3D11_RECT{};
+			*a_count = (std::min)(*a_count, bindings.scissorCount);
+			return;
+		}
+		TW_CONTEXT_FORWARD(RSGetScissorRects, a_count, a_rects);
+		Detail::ZeroAt(a_rects, a_count);
+		Detail::Zero(a_count);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::IASetInputLayout(ID3D11InputLayout* a_layout)
+	{
+		TW_CONTEXT_SITE(IASetInputLayout);
+		if (twNative) {
+			if (!NativeBindAllowed(static_cast<std::uint16_t>(Slot::IASetInputLayout), twCaller))
+				return;
+			std::lock_guard guard(bindings.lock);
+			bindings.inputLayout.copy_from(a_layout);
+			return;
+		}
+		TW_CONTEXT_FORWARD(IASetInputLayout, Detail::UnwrapAt(a_layout, twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::IAGetInputLayout(ID3D11InputLayout** a_layout)
+	{
+		TW_CONTEXT_SITE(IAGetInputLayout);
+		if (twNative) {
+			std::lock_guard guard(bindings.lock);
+			if (a_layout) {
+				*a_layout = nullptr;
+				if (bindings.inputLayout)
+					bindings.inputLayout.copy_to(a_layout);
+			}
+			return;
+		}
+		TW_CONTEXT_FORWARD(IAGetInputLayout, a_layout);
+		Detail::Zero(a_layout);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY a_topology)
+	{
+		TW_CONTEXT_SITE(IASetPrimitiveTopology);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::IASetPrimitiveTopology), twCaller))
+				bindings.topology = a_topology;
+			return;
+		}
+		TW_CONTEXT_FORWARD(IASetPrimitiveTopology, a_topology);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::IAGetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY* a_topology)
+	{
+		TW_CONTEXT_SITE(IAGetPrimitiveTopology);
+		if (twNative) {
+			if (a_topology)
+				*a_topology = bindings.topology;
+			return;
+		}
+		TW_CONTEXT_FORWARD(IAGetPrimitiveTopology, a_topology);
+		Detail::Zero(a_topology);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::IASetVertexBuffers(UINT a_start, UINT a_count, ID3D11Buffer* const* a_buffers, const UINT* a_strides,
+		const UINT* a_offsets)
+	{
+		TW_CONTEXT_SITE(IASetVertexBuffers);
+		if (twNative) {
+			if (!NativeBindAllowed(static_cast<std::uint16_t>(Slot::IASetVertexBuffers), twCaller))
+				return;
+			std::lock_guard guard(bindings.lock);
+			for (UINT i = 0; i < a_count && a_start + i < bindings.vertexBuffers.size(); ++i) {
+				bindings.vertexBuffers[a_start + i].copy_from(a_buffers ? a_buffers[i] : nullptr);
+				bindings.strides[a_start + i] = a_strides ? a_strides[i] : 0;
+				bindings.offsets[a_start + i] = a_offsets ? a_offsets[i] : 0;
+			}
+			return;
+		}
+		TW_CONTEXT_FORWARD(IASetVertexBuffers, a_start, a_count, Detail::UnwrapArray(a_buffers, a_count, &twSite), a_strides, a_offsets);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::IAGetVertexBuffers(UINT a_start, UINT a_count, ID3D11Buffer** a_buffers, UINT* a_strides, UINT* a_offsets)
+	{
+		TW_CONTEXT_SITE(IAGetVertexBuffers);
+		if (twNative) {
+			Load(bindings.vertexBuffers, a_start, a_count, a_buffers);
+			std::lock_guard guard(bindings.lock);
+			for (UINT i = 0; i < a_count; ++i) {
+				const bool bound = a_start + i < bindings.vertexBuffers.size();
+				if (a_strides)
+					a_strides[i] = bound ? bindings.strides[a_start + i] : 0;
+				if (a_offsets)
+					a_offsets[i] = bound ? bindings.offsets[a_start + i] : 0;
+			}
+			return;
+		}
+		TW_CONTEXT_FORWARD(IAGetVertexBuffers, a_start, a_count, a_buffers, a_strides, a_offsets);
+		Detail::ZeroN(a_buffers, a_count);
+		Detail::ZeroN(a_strides, a_count);
+		Detail::ZeroN(a_offsets, a_count);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::IASetIndexBuffer(ID3D11Buffer* a_buffer, DXGI_FORMAT a_format, UINT a_offset)
+	{
+		TW_CONTEXT_SITE(IASetIndexBuffer);
+		if (twNative) {
+			if (!NativeBindAllowed(static_cast<std::uint16_t>(Slot::IASetIndexBuffer), twCaller))
+				return;
+			std::lock_guard guard(bindings.lock);
+			bindings.indexBuffer.copy_from(a_buffer);
+			bindings.indexFormat = a_format;
+			bindings.indexOffset = a_offset;
+			return;
+		}
+		TW_CONTEXT_FORWARD(IASetIndexBuffer, Detail::UnwrapAt(a_buffer, twSite), a_format, a_offset);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::IAGetIndexBuffer(ID3D11Buffer** a_buffer, DXGI_FORMAT* a_format, UINT* a_offset)
+	{
+		TW_CONTEXT_SITE(IAGetIndexBuffer);
+		if (twNative) {
+			std::lock_guard guard(bindings.lock);
+			if (a_buffer) {
+				*a_buffer = nullptr;
+				if (bindings.indexBuffer)
+					bindings.indexBuffer.copy_to(a_buffer);
+			}
+			if (a_format)
+				*a_format = bindings.indexFormat;
+			if (a_offset)
+				*a_offset = bindings.indexOffset;
+			return;
+		}
+		TW_CONTEXT_FORWARD(IAGetIndexBuffer, a_buffer, a_format, a_offset);
+		Detail::Zero(a_buffer);
+		Detail::Zero(a_format);
+		Detail::Zero(a_offset);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::ClearState()
+	{
+		TW_CONTEXT_SITE(ClearState);
+		if (twNative) {
+			bindings.Reset();
+			return;
+		}
+		TW_CONTEXT_FORWARD(ClearState);
+	}
+
+	void DeviceContextHandle::NativeBindings::Reset()
+	{
+		std::lock_guard guard(lock);
+		for (auto* stage : { &vs, &ps, &cs }) {
+			for (auto& view : stage->srvs)
+				view = nullptr;
+			for (auto& buffer : stage->cbs)
+				buffer = nullptr;
+			for (auto& sampler : stage->samplers)
+				sampler = nullptr;
+		}
+		vsShader = nullptr;
+		psShader = nullptr;
+		csShader = nullptr;
+		for (auto& view : csUavs)
+			view = nullptr;
+		for (auto& view : rtvs)
+			view = nullptr;
+		dsv = nullptr;
+		blend = nullptr;
+		blendFactor = { 1.0f, 1.0f, 1.0f, 1.0f };
+		sampleMask = 0xffffffffu;
+		depthStencil = nullptr;
+		stencilRef = 0;
+		rasterizer = nullptr;
+		viewportCount = scissorCount = 0;
+		inputLayout = nullptr;
+		topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+		for (auto& buffer : vertexBuffers)
+			buffer = nullptr;
+		strides = {};
+		offsets = {};
+		indexBuffer = nullptr;
+		indexFormat = DXGI_FORMAT_UNKNOWN;
+		indexOffset = 0;
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::Flush()
+	{
+		TW_CONTEXT_SITE(Flush);
+		if (twNative)
+			return;
+		TW_CONTEXT_FORWARD(Flush);
+	}
+
+#undef TW_CONTEXT_FORWARD
+#undef TW_CONTEXT_SITE
 
 	void STDMETHODCALLTYPE DeviceContextHandle::GetDevice(ID3D11Device** a_out)
 	{
@@ -828,7 +2403,8 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		if (!a_object)
 			return {};
-		if (const auto* core = Detail::CoreOf(a_object))
+		// A native handle without its own resource may carry one AttachGraphResource tied to it (its private data, below).
+		if (const auto* core = Detail::CoreOf(a_object); core && (core->graph || core->wrapped || !NativeServicesInstalled()))
 			return core->graph;
 		const auto child = AsDeviceChild(a_object);
 		if (!child)
@@ -896,6 +2472,9 @@ namespace RenderGraph::Engine::Tripwire
 		if (!core)
 			return a_object;
 		if (!core->wrapped) {
+			// Native mode has no D3D11 below the handles: the handle is the object every caller talks to.
+			if (Native::Active())
+				return a_object;
 			// A native handle handed to D3D11: D3D11 gets null rather than an object it would cast to its own class.
 			static std::array<std::atomic<bool>, kKinds> warned{};
 			if (!warned[static_cast<std::size_t>(core->kind)].exchange(true))

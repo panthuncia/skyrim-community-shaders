@@ -7,6 +7,7 @@
 
 #	include "Globals.h"
 #	include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Targets/EngineTargets.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/DxvkImageImport.h"
@@ -528,8 +529,10 @@ namespace FrameAnchors
 			// image again would make a second resource whose uses the graph does not order with the owner's.
 			if (auto owned = RenderGraph::Engine::Targets::Find(a_texture))
 				return owned;
-			// Anything else is imported as DXVK's own texture, never as a tripwire handle.
-			a_texture = RenderGraph::Engine::Tripwire::Unwrap(a_texture);
+			// Anything else is imported as DXVK's own texture, never as a tripwire handle. Native mode has no DXVK texture under its
+			// handles: its own records describe the handle itself.
+			if (!RenderGraph::Engine::Native::Active())
+				a_texture = RenderGraph::Engine::Tripwire::Unwrap(a_texture);
 			const auto previous = state.imports.find(a_id);
 			if (previous != state.imports.end() && previous->second.texture.get() == a_texture)
 				return previous->second.resource;

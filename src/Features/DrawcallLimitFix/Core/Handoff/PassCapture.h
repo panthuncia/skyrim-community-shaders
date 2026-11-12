@@ -211,6 +211,8 @@ namespace DCLF
 		};
 		/** @brief Render thread: the geometries of DCLF's classes handed to the engine since the last call, most passes first. */
 		std::vector<KeptSample> TakeKeptSamples(std::size_t a_max);
+		/** @brief Render thread: the accumulators of shadow views DCLF does not cover that kept passes went to, since the last call. */
+		std::vector<const void*> TakeUncoveredAccumulators();
 		/**
 		 * @brief The main views' batch renderers: the Z-prepass accumulator (render mode 0xC, *0x14338c828) and the main one
 		 * (*0x14338c830), with their geometry groups'. Render thread, before registrations; rebuilt only when an accumulator changes.
@@ -241,6 +243,12 @@ namespace DCLF
 		 */
 		using ShadowAccumulatorMap = ankerl::unordered_dense::map<const void*, std::uint8_t>;
 		void SetShadowAccumulators(std::shared_ptr<const ShadowAccumulatorMap> a_accumulators);
+		/**
+		 * @brief Render thread, around the engine's focus accumulation (Draws::ShadowFocusAccumulating): while set, a shadow registration into
+		 * an accumulator no published set names (a focus descriptor's, made on first use inside it) is the covered focus view's, by its render
+		 * mode.
+		 */
+		static void SetFocusAccumulation(bool a_covered);
 		/** @brief Whether a_batch is a shadow view's renderer this frame, with its mode index. */
 		bool ShadowModeOfBatch(const RE::BSBatchRenderer* a_batch, std::uint32_t& a_mode) const;
 		/**
@@ -301,6 +309,7 @@ namespace DCLF
 		static constexpr std::size_t kKeptSamples = 256;
 		mutable std::mutex keptLock;
 		mutable ankerl::unordered_dense::map<const RE::BSGeometry*, KeptSample> keptSamples;
+		mutable ankerl::unordered_dense::set<const void*> uncoveredAccumulators;  // under keptLock, at most kKeptSamples
 		std::array<std::atomic<std::uint32_t>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyWithheld{};
 		std::array<std::atomic<bool>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyHeld{};
 		static_assert(static_cast<std::size_t>(Api::DrawFamily::Count) <= 32, "ViewRenderers::familyOwned is a 32-bit mask by family");
@@ -380,9 +389,8 @@ namespace DCLF
 		void NoteKept(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint8_t a_site, std::uint8_t a_occlusionPhase = 0) const;
 		bool Withhold(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass);
 		/**
-		 * @brief A pass handed on to the engine (not withheld): with the flush latch on (P5.13, p5/flush.md "Allowed engine draws"), the
-		 * sky's precipitation, which nothing ports, is vouched for (RenderGraph::Engine::Flush::VouchPass), so the engine still draws it.
-		 * DCLF vouches for nothing of its own classes: what it does not draw yet is withheld. Nothing while bypassed or with the latch off.
+		 * @brief A pass handed on to the engine (not withheld): counted for the log outside loads, with a sample by geometry. Nothing is
+		 * vouched for under the flush latch: DCLF withholds what it does not draw yet, and the precipitation is Features/Precipitation's.
 		 */
 		void KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass) const;
 		/**

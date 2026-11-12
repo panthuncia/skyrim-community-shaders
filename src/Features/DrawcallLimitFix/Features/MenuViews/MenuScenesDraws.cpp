@@ -52,8 +52,9 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			SharedConstants::Handles shared;
 			ShaderBindings::Latch draw;
 			ShaderBindings::Latch bones;
+			ShaderBindings::Latch frame;  // the draw's FrameBuffer rows (ORG_SHARED_FRAMEBUFFER_AT)
 		};
-		static_assert(sizeof(UtilityBlock) == 32, "Utility.hlsl's scene push block is 32 bytes");
+		static_assert(sizeof(UtilityBlock) == 40, "the scene builds' push block is 40 bytes");
 
 		/** @brief A client's state, which its pass shares. */
 		struct Client
@@ -154,7 +155,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 					}
 					if (!targetsOk)
 						continue;
-					const UtilityBlock block{ shared, ShaderBindings::LatchOf(*c.latch, latchRun, draw.latchOffset), ShaderBindings::LatchOf(*c.latch, latchRun, draw.bonesOffset) };
+					const UtilityBlock block{ shared, ShaderBindings::LatchOf(*c.latch, latchRun, draw.latchOffset), ShaderBindings::LatchOf(*c.latch, latchRun, draw.bonesOffset),
+						ShaderBindings::LatchOf(*c.latch, latchRun, draw.frameOffset) };
 					program.Draw(a_recording, { .colours = std::span<const RasterProgram::Colour>(colours.data(), draw.colourCount),
 												  .depth = &depth,
 												  .viewport = { .x = draw.viewport.rect[0], .y = draw.viewport.rect[1], .width = draw.viewport.rect[2], .height = draw.viewport.rect[3],
@@ -181,8 +183,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		{
 			using Flags = SIE::ShaderCache::UtilityShaderFlags;
 			constexpr auto kScene = static_cast<std::uint32_t>(Flags::RenderBaseTexture) | static_cast<std::uint32_t>(Flags::LocalMapFogOfWar) |
-			                        static_cast<std::uint32_t>(Flags::RenderDepth) | static_cast<std::uint32_t>(Flags::RenderShadowmap) |
-			                        static_cast<std::uint32_t>(Flags::RenderShadowmapPb);
+			                        static_cast<std::uint32_t>(Flags::RenderDepth) | static_cast<std::uint32_t>(Flags::RenderShadowmap);
 			constexpr auto kNot = static_cast<std::uint32_t>(Flags::RenderShadowmask) | static_cast<std::uint32_t>(Flags::RenderShadowmaskSpot) |
 			                      static_cast<std::uint32_t>(Flags::RenderShadowmaskPb) | static_cast<std::uint32_t>(Flags::RenderShadowmaskDpb) |
 			                      static_cast<std::uint32_t>(Flags::RenderNormal) | static_cast<std::uint32_t>(Flags::RenderNormalClear) |
@@ -349,6 +350,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				mix(reinterpret_cast<std::uintptr_t>(draw.program.get()));
 				mix(draw.stencilRef);
 				mix((std::uint64_t(draw.latchOffset) << 32) | draw.bonesOffset);
+				mix(draw.frameOffset);
 				mix(draw.colourCount);
 				for (std::uint32_t k = 0; k < draw.colourCount; ++k)
 					mix(draw.colours[k]);

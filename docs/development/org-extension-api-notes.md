@@ -1642,6 +1642,32 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   with its count. Each module found that way gets its own entry here with the calls it made, and maps to one of the
   other needs (overlay pass, texture upload, render to texture, named targets).
 - **Found by:** P4.1 (2026-11-09).
+- **Done (P6.3, 2026-11-12):** with `CS_ORG_NATIVE=1` such a call is also an error line that names the module:
+  `[ORG native] <Module.dll> calls <Interface>::<Method> (<Module>+0x<offset> ...): native mode (CS_ORG_NATIVE=1) has no
+  D3D11, so the call failed and this plugin's rendering does not work`. Only calls from outside CS and the game get it,
+  once per call site, and only when the handle has nothing behind it. A native device handle makes the objects the
+  engine asks for itself (views, shaders, input layouts, states, queries, BasicRHI textures and buffers), so a plugin's
+  creation calls succeed, and so do its Map, copies and clears on the context; its draws and binds fail. Plugins found in
+  native runs: Improved Camera SE (below).
+- **Known without a run:** `zz_SkyrimEngineTelemetry` only passes the engine's calls through, so it adds no D3D11 use of
+  its own; it stays disabled in census and native tours, so that the logged sites are the engine's own. Plugins that
+  find the swap chain's Present by making a dummy device with the system `d3d11.dll` (most ImGui menu plugins) hook the
+  system DXGI vtable, which native mode never calls: they get no tripwire line and silently draw nothing. They need the
+  overlay pass ("An overlay pass after the UI").
+
+### Improved Camera SE (incompatible with native mode)
+
+- **Need:** draw the player's body in first person with the game's own shaders, through D3D11 on the game's immediate context.
+- **Who:** `ImprovedCameraSE.dll` (MO2 mod `ImprovedCameraSE`). On its own render path it saves and restores the context's
+  state (`RSGetViewports`, `RSGetState`, `OMGetBlendState`, `OMGetDepthStencilState`, `PSGetShaderResources`, `PSGetSamplers`,
+  `PSGetShader`, `VSGetShader`, `VSGetConstantBuffers`, `IAGet*`), then binds and draws itself (`VSSetShader`, `PSSetShader`,
+  `IASetInputLayout`, `IASetVertexBuffers`, `IASetIndexBuffer`, `IASetPrimitiveTopology`, `RSSetViewports`, `RSSetState`,
+  `RSSetScissorRects`, `OMSetDepthStencilState`, `PSSetShaderResources`, `PSSetSamplers`, the GS/HS/DS/CS shader unbinds).
+  Its first calls come from a worker thread during startup (native3 run, 2026-11-12).
+- **Where it fits:** an engine draw family a plugin adds geometry to (DCLF's first-person family would draw it), or "Render
+  to texture" plus an overlay pass. Until then it is **incompatible with native mode**: its calls fail, and nothing it draws
+  appears. `native.env` disables the mod. With DXVK it keeps working.
+- **Found by:** P6.3, the first native runs (the `[ORG native] ImprovedCameraSE.dll calls ...` error lines).
 
 ### Passing engine resources to a plugin's own D3D11 code
 

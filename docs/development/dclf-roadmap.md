@@ -151,9 +151,9 @@ is in the window after a load. Scenarios: `p5-all-census-dclf.env`, `-take.env`,
 -   **Goal.** DCLF draws grass, water and the sky, each as an object class with its own view bits.
 -   **Why.** They are most of the engine's remaining main passes (about 75 a frame with the particle effects), and each
     keeps an engine walk.
--   **State.** Not started. Precipitation is in the same position: the `BSParticleShader` techniques (rain, snow, Blackreach's
-    spores; residue census `Particle` vs `0x4`, about 10 a frame in Blackreach) are drawn by the engine through the grouped
-    alphas (AE 107673); DCLF draws only the precipitation occlusion mask.
+-   **State.** Not started. Precipitation is done apart from this: the `BSParticleShader` ENVCUBE techniques (rain, snow,
+    Blackreach's spores; residue census `Particle` vs `0x4`) drawn through the grouped alphas (AE 107673) are the precipitation
+    family's (`CS_ORG_PRECIPITATION=1`, Features/Precipitation), each draw latched at DrawTriShape and drawn at once on the graph.
 -   **Design.** Take them class by class in measured cost order. Grass interacts with Grass Collision and
     `GrassOptimizations`; water with the water reflection (1.2) and its shaders; the sky also fills the reflection faces.
 -   **Needs.** A census of each class's cost before choosing the first.

@@ -1,5 +1,6 @@
 #include "ORGSunRays.h"
 
+#include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/Switches.h"
 
 bool ORGSunRays::Requested()
@@ -442,6 +443,7 @@ namespace
 	{
 		winrt::com_ptr<ID3D11ShaderResourceView> view;
 		globals::d3d::context->PSGetShaderResources(a_slot, 1, view.put());
+		RenderGraph::Engine::Flush::NoteRead("Effects11 sun rays", a_slot, view.get());
 		return view;
 	}
 

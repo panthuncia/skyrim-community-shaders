@@ -31,7 +31,14 @@ namespace RenderGraph::Engine::Tripwire
 	 */
 	void InstallGuestDevice();
 
-	/** @brief Whether the engine's device and context pointers hold the guest handles. Ports gate their handle installs on it. */
+	/**
+	 * @brief Native mode: the engine's device and context are native handles (the native device creation returned them, so the
+	 * engine stored them itself). From then on GuestContextInstalled is true, GuestDeviceHandle and GuestContextHandle answer them,
+	 * and the ports install their handles as with the guest. Once.
+	 */
+	void InstallNativeDevice(ID3D11Device* a_device, ID3D11DeviceContext* a_context);
+
+	/** @brief Whether the engine's device and context pointers hold the guest handles (or native mode's). Ports gate their handle installs on it. */
 	bool GuestContextInstalled();
 
 	/** @brief The guest device handle (no reference added), null before InstallGuestDevice. */

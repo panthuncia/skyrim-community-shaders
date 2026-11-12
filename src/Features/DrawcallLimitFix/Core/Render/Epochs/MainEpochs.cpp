@@ -59,7 +59,10 @@ namespace DCLF
 		}
 		// The Z-prepass writes into the depth the native pass just finished, which has to be the one the
 		// main pass then tests against; otherwise DCLF's objects would be written somewhere nothing reads.
-		if (!capture.depth || (impl->mainPassDepth && capture.depth.get() != impl->mainPassDepth.get())) {
+		// Compared as the objects underneath: in native mode the main pass's capture can hold a port's handle around the native texture
+		// the field's handle unwraps to (Tripwire::Unwrap is the identity for anything else).
+		if (!capture.depth ||
+			(impl->mainPassDepth && RenderGraph::Engine::Tripwire::Unwrap(capture.depth.get()) != RenderGraph::Engine::Tripwire::Unwrap(impl->mainPassDepth.get()))) {
 			if (!impl->loggedDepthMismatch) {
 				impl->loggedDepthMismatch = true;
 				logger::warn("[DCLF] The depth pass and the main pass bind different depth textures; the Z-prepass stays with the main pass");

@@ -77,6 +77,8 @@ namespace DCLF
 		 */
 		void BeforeShadowCasters();
 		void ShadowCasterKept(const RE::BSShadowLight* a_light, std::uint32_t a_firstSlot, std::uint32_t a_slots);
+		/** @brief Render thread, around the engine's focus accumulation of a_light (a_begin: before it): Draws::ShadowFocusAccumulating. */
+		void ShadowFocusAccumulating(const RE::BSShadowLight* a_light, bool a_begin);
 		void ShadowCastersSelected();
 		void BeforeShadowMaps();
 		void AfterShadowMaps();

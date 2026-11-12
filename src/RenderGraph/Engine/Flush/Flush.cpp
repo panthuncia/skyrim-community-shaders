@@ -1,7 +1,9 @@
 #include "RenderGraph/Engine/Flush/Flush.h"
+#include "RenderGraph/Engine/Flush/StateTrace.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/MainTick.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Switches.h"
@@ -40,6 +42,7 @@ namespace RenderGraph::Engine::Flush
 		{
 			bool census = false;
 			bool latch = false;
+			bool unbind = false;  // CS_ORG_ENGINE_FLUSH_LATCH_UNBIND=1
 			bool installed = false;
 			std::uint64_t frames = 600;
 			std::size_t top = 25;
@@ -185,6 +188,7 @@ namespace RenderGraph::Engine::Flush
 			std::atomic<std::uint64_t> latchedBinds{ 0 };
 			std::atomic<std::uint64_t> dropped{ 0 };
 			std::atomic<std::uint64_t> skipped{ 0 };
+			std::atomic<std::uint64_t> unbinds{ 0 };  // CS_ORG_ENGINE_FLUSH_LATCH_UNBIND's target unbinds
 			std::uint64_t frames = 0;
 		};
 
@@ -637,6 +641,7 @@ namespace RenderGraph::Engine::Flush
 					const auto totalZero = census.totalZeroFrames;
 					guard.unlock();
 					Report(closed, totalDraws, totalFrames, totalZero);
+					StateTrace::Report(static_cast<double>(closed.frames));
 				}
 			}
 			if (config.latch) {
@@ -662,10 +667,12 @@ namespace RenderGraph::Engine::Flush
 					logger::info(
 						"[ORG] flush latch: {:.0f} frames: {:.1f} flushes and {:.1f} shader binds a frame latched, {:.1f} D3D11 binds a frame dropped, "
 						"{:.1f} flushes a frame from CS code applied the owed state, {:.1f} flushes a frame of allowed engine draws applied it; "
-						"allowed engine draws a frame: {}; {} engine draws and dispatches skipped",
+						"allowed engine draws a frame: {}; {} engine draws and dispatches skipped{}",
 						frames, static_cast<double>(latch.latchedFlushes.exchange(0)) / frames, static_cast<double>(latch.latchedBinds.exchange(0)) / frames,
 						static_cast<double>(latch.dropped.exchange(0)) / frames, static_cast<double>(latch.realFlushes.exchange(0)) / frames,
-						static_cast<double>(latch.allowedFlushes.exchange(0)) / frames, allowed.empty() ? "none" : allowed, latch.skipped.exchange(0));
+						static_cast<double>(latch.allowedFlushes.exchange(0)) / frames, allowed.empty() ? "none" : allowed, latch.skipped.exchange(0),
+						config.unbind ? fmt::format("; {:.1f} target unbinds a frame (CS_ORG_ENGINE_FLUSH_LATCH_UNBIND)", static_cast<double>(latch.unbinds.exchange(0)) / frames) :
+						                std::string());
 				}
 			}
 		}
@@ -762,11 +769,15 @@ namespace RenderGraph::Engine::Flush
 					NoteFlush(caller, NonEmpty(words, a_isCompute), fromCs);
 				if (!words || !Latched()) {
 					func(a_isCompute);
+					if (!a_isCompute && StateTrace::On())
+						StateTrace::CheckApplied(caller);
 					return;
 				}
 				if ((fromCs || InEngineDraws()) && t_latchScope == 0) {
 					PayOwed(words);
 					func(a_isCompute);
+					if (!a_isCompute && StateTrace::On())
+						StateTrace::CheckApplied(caller);
 					return;
 				}
 				std::array<std::uint32_t, kWords> before{};
@@ -779,6 +790,14 @@ namespace RenderGraph::Engine::Flush
 				for (std::size_t i = 0; i < kWords; ++i)
 					owed.words[i] |= before[i] & ~words[i];
 				GetLatch().latchedFlushes.fetch_add(1, std::memory_order_relaxed);
+				// The engine moved to other targets (or CS's code after the flush bound its own and asked the engine to rebind): DXVK would
+				// keep the old ones, and drop CS's binds of their views. Nothing is drawn here before the next real flush binds the owed ones.
+				if (GetConfig().unbind && !a_isCompute && ((before[0] | words[0]) & RE::BSGraphics::DIRTY_RENDERTARGET)) {
+					if (auto* context = globals::d3d::context) {
+						context->OMSetRenderTargets(0, nullptr, nullptr);
+						GetLatch().unbinds.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -913,7 +932,8 @@ namespace RenderGraph::Engine::Flush
 		config.latch = LatchRequested();
 		if (!config.census && !config.latch)
 			return;
-		if (!Tripwire::GuestRequested()) {
+		// Native mode sees the engine's calls on the native context, whose calls the filter gets too.
+		if (!Tripwire::GuestRequested() && !Native::Requested()) {
 			logger::error(
 				"[ORG] engine flush: CS_ORG_RESIDUE_CENSUS and CS_ORG_ENGINE_FLUSH_LATCH need CS_ORG_TRIPWIRE_GUEST=1 (the guest context sees "
 				"the engine's D3D11 calls); both stay off");
@@ -946,6 +966,9 @@ namespace RenderGraph::Engine::Flush
 		}
 		if (config.latch && !kept.empty())
 			logger::info("[ORG] engine flush: the latch still forwards {} to D3D11 (CS_ORG_ENGINE_FLUSH_LATCH_KEEP)", kept);
+		config.unbind = config.latch && Switches::On("CS_ORG_ENGINE_FLUSH_LATCH_UNBIND");
+		if (config.unbind)
+			logger::info("[ORG] engine flush: a latched flush that changes the targets unbinds DXVK's (CS_ORG_ENGINE_FLUSH_LATCH_UNBIND)");
 
 		// SetDirtyStates after Hooks.cpp's detour (outside it); DispatchCSShader before ImageSpace's and Hooks.cpp's (inside them).
 		stl::detour_thunk<SetDirtyStates>(REL::RelocationID(75580, 77386));

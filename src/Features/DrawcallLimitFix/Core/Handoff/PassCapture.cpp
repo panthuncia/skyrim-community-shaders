@@ -56,6 +56,8 @@ namespace DCLF
 		// The accumulator the shadow modes' registration on this thread registers into, and its render mode (~0u: none).
 		thread_local const void* t_registrationAccumulator = nullptr;
 		thread_local std::uint32_t t_registrationMode = ~0u;
+		// Inside the engine's focus accumulation of a host whose focus views DCLF covers (SetFocusAccumulation).
+		thread_local bool t_focusAccumulationCovered = false;
 		// The menu scenes' renders this thread is inside (MenuSceneScope).
 		thread_local std::uint32_t t_menuScenes = 0;
 
@@ -451,6 +453,8 @@ namespace DCLF
 		std::atomic_store(&shadowAccumulators, std::move(a_accumulators));
 	}
 
+	void PassCapture::SetFocusAccumulation(bool a_covered) { t_focusAccumulationCovered = a_covered; }
+
 	bool PassCapture::ShadowModeOfBatch(const RE::BSBatchRenderer* a_batch, std::uint32_t& a_mode) const
 	{
 		const auto renderers = std::atomic_load(&shadowRenderers);
@@ -468,10 +472,16 @@ namespace DCLF
 			return false;
 		const auto accumulators = std::atomic_load(&shadowAccumulators);
 		const auto it = accumulators ? accumulators->find(t_registrationAccumulator) : ShadowAccumulatorMap::const_iterator{};
-		if (!accumulators || it == accumulators->end() || it->second >= kShadowModes)
-			return false;
-		a_mode = it->second;
-		return true;
+		if (accumulators && it != accumulators->end() && it->second < kShadowModes) {
+			a_mode = it->second;
+			return true;
+		}
+		// Inside a covered host's focus accumulation: its focus view's, even through an accumulator made inside it.
+		if (t_focusAccumulationCovered && t_registrationMode >= kFirstShadowMode && t_registrationMode < kFirstShadowMode + kShadowModes) {
+			a_mode = t_registrationMode - kFirstShadowMode;
+			return true;
+		}
+		return false;
 	}
 
 	bool PassCapture::CastersWithheld(std::uint8_t a_phase) const
@@ -611,9 +621,16 @@ namespace DCLF
 		return samples;
 	}
 
+	std::vector<const void*> PassCapture::TakeUncoveredAccumulators()
+	{
+		std::scoped_lock lock(keptLock);
+		std::vector<const void*> out(uncoveredAccumulators.begin(), uncoveredAccumulators.end());
+		uncoveredAccumulators.clear();
+		return out;
+	}
+
 	void PassCapture::KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass) const
 	{
-		namespace Flush = RenderGraph::Engine::Flush;
 		// Counted for the log outside loads (LoadHold.h): what DCLF still hands the engine of its classes, with a sample by geometry: its
 		// view, its owner and whether it is hidden or skinned, read while the engine registers it.
 		if (a_pass && a_pass->geometry && !t_menuScenes && !bypassed.load(std::memory_order_acquire) && DclfClass(a_pass)) {
@@ -631,6 +648,8 @@ namespace DCLF
 				               t_shadowRegistration                                       ? std::string("a shadow view DCLF does not cover") :
 				               IsMainRenderer(a_batch) || MainRendererNow(a_batch)        ? std::string("the main views") :
 				                                                                            std::string("another view");
+				if (t_shadowRegistration && t_registrationAccumulator && !ShadowModeOfBatch(a_batch, mode) && uncoveredAccumulators.size() < kKeptSamples)
+					uncoveredAccumulators.insert(t_registrationAccumulator);
 				// Another view: an OwnRenderers view's renderer (its name, and whether it withholds now), else one DCLF knows nothing of.
 				if (sample.where == "another view") {
 					const auto& views = Extensions::Views();
@@ -662,18 +681,8 @@ namespace DCLF
 			if (it != keptSamples.end())
 				++it->second.passes;
 		}
-		if (!Flush::Vouching() || !a_pass || !a_pass->geometry || !a_pass->shaderProperty || bypassed.load(std::memory_order_acquire))
-			return;
-		// DCLF's classes never reach the engine from here on purpose: members and waiting objects are withheld (WithholdMain, WithholdOwn,
-		// Withhold, the occlusion maps'), and so is everything of them during a load's hold. The sky's precipitation (a particle shader on the
-		// sky's geometry) has no port: the engine draws it, whatever view culls it. Water, other particles and the rest are other ports'.
-		if (!netimmerse_cast<const RE::BSParticleShaderProperty*>(a_pass->shaderProperty))
-			return;
-		static const Flush::Reason kPrecipitation{ "precipitation: no port" };
-		const auto* sky = RE::Sky::GetSingleton();
-		const auto* precipitation = sky ? sky->precip : nullptr;
-		if (precipitation && (a_pass->geometry == precipitation->currentPrecip.get() || a_pass->geometry == precipitation->lastPrecip.get()))
-			Flush::VouchPass(a_pass, kPrecipitation);
+		// Nothing is vouched for here: members and waiting objects are withheld (WithholdMain, WithholdOwn, Withhold, the occlusion maps'),
+		// and so is everything of them during a load's hold. The sky's precipitation is Features/Precipitation's (CS_ORG_PRECIPITATION).
 	}
 
 	namespace

@@ -225,6 +225,14 @@ void RainRefraction::ModifyParticle()
 	context->PSSetShaderResources(80, 1, &srv);
 }
 
+ID3D11BlendState* RainRefraction::RefractiveRainBlendState()
+{
+	auto state = globals::state;
+	if (!state->currentShader || state->currentShader->shaderType.get() != RE::BSShader::Type::Particle || !IsRefractiveRainPass())
+		return nullptr;
+	return alphaBlendState.get();
+}
+
 void RainRefraction::ParticleShaderHacks()
 {
 	auto state = globals::state;
