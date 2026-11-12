@@ -2251,8 +2251,9 @@ bool RenderGraphRuntime::Initialize()
 		desc.runtime = state->orgRuntime;
 		state->host = std::make_unique<org::GraphHost>(std::move(desc));
 		// The frame-wait timeline, before anything builds the graph (its packets bind it when prepared): only with a queue of the
-		// uploader's own to signal it from.
-		if (state->uploadQueue) {
+		// uploader's own to signal it from. In native mode that queue is the one BasicRHI's device gives ORG's uploader (the copy
+		// family's second queue), so the timeline is made there too; DCLF's frame values need it (FrameValues::Available).
+		if (state->uploadQueue || state->native) {
 			auto timeline = std::make_shared<rhi::TimelinePtr>();
 			if ((*state->device)->CreateTimeline(*timeline, 0, "CS frame values") == rhi::Result::Ok && *timeline) {
 				state->frameWaitTimeline = timeline;
@@ -2683,6 +2684,12 @@ void RenderGraphRuntime::SealPresented()
 	// Native mode, while it is brought up: the host's runs in flight every 600 presents, so a run that never retires shows early.
 	if (impl && impl->native && impl->host) {
 		static std::uint64_t s_presents = 0;
+		// Once: what DCLF's frame values need (FrameValues::Available), the frame-wait timeline and a streaming queue of the uploader's own.
+		if (s_presents == 0) {
+			const auto uploads = impl->host->RetainUploads();
+			logger::info("[ORG native] frame values: frame-wait timeline {}, the uploader's own streaming queue {}", impl->frameWaitTimeline != nullptr,
+				uploads && uploads->HasDedicatedStreamingQueue());
+		}
 		if (++s_presents % 600 == 0)
 			logger::info("[ORG native] host state after {} presents: {}", s_presents, impl->host->DescribeAsyncState());
 	}
